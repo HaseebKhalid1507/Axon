@@ -2,5 +2,18 @@
 name = "axon"
 version = "0.1.0"
 edition = "2024"
+authors = ["Haseeb Khalid <haseebkhalid1507@gmail.com>"]
+description = "The arc reactor for inference"
+repository = "https://github.com/HaseebKhalid1507/Axon"
+license = "MIT"
+readme = "README.md"
+keywords = ["inference", "llm", "machine-learning", "quantization"]
+categories = ["science", "mathematics"]
 
 [dependencies]
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
