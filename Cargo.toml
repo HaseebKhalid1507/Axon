@@ -11,6 +11,7 @@ keywords = ["inference", "llm", "machine-learning", "quantization"]
 categories = ["science", "mathematics"]
 
 [dependencies]
+memmap2 = "0.9"
 
 [profile.release]
 opt-level = 3
