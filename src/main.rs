@@ -137,12 +137,12 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     }
 
     // Greedy decoding: always pick the highest-scoring token.
-    let argmax = |l: &[f32]| (0..l.len()).max_by(|&a, &b| l[a].total_cmp(&l[b])).unwrap() as u32;
     let mut out = std::io::stdout();
     print!("{prompt}");
     out.flush()?;
     let mut gen_ids: Vec<u32> = Vec::new();
-    let mut printed = 0usize; // bytes of decoded text already printed
+    // Characters can be split across tokens; the stream holds them back until whole.
+    let mut text = tokenizer::Utf8Stream::default();
     let mut decode_steps = 0usize;
     let t1 = Instant::now();
     for step in 0..n_gen {
@@ -151,12 +151,10 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             break;
         }
         gen_ids.push(next);
-        // Decode the whole tail so multi-byte characters split across tokens come out whole.
-        let text = tok.decode(&gen_ids);
-        if !text.ends_with('\u{FFFD}') && text.len() > printed && text.is_char_boundary(printed) {
-            print!("{}", &text[printed..]);
+        let done = text.push(&tok.decode_bytes(&[next]));
+        if !done.is_empty() {
+            print!("{done}");
             out.flush()?;
-            printed = text.len();
         }
         if step + 1 < n_gen {
             logits = net.forward(next, ids.len() + step, &mut cache);
@@ -164,10 +162,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         }
     }
     let decode_secs = t1.elapsed().as_secs_f64();
-    let text = tok.decode(&gen_ids);
-    if text.len() > printed && text.is_char_boundary(printed) {
-        print!("{}", &text[printed..]);
-    }
+    print!("{}", text.finish());
     println!();
     eprintln!(
         "prompt eval: {} tok in {:.2}s ({:.2} tok/s)",
@@ -189,6 +184,38 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Index of the largest logit, the last one on ties (as `Iterator::max_by`
+/// returns). Two passes that each vectorize: a lane-wise max, then a scan
+/// back from the end, 8 at a time, for the last logit equal to it. A vocab is
+/// ~152k logits, every token. Unlike a `total_cmp` max, NaN logits are never
+/// picked (unless all are NaN) and -0.0 ties with +0.0.
+fn argmax(l: &[f32]) -> u32 {
+    assert!(!l.is_empty(), "argmax of no logits");
+    let (chunks, tail) = l.as_chunks::<8>();
+    let mut lanes = [f32::NEG_INFINITY; 8];
+    for ch in chunks {
+        for i in 0..8 {
+            // Not f32::max: its NaN rule costs extra instructions per lane on
+            // x86. A plain compare is one maxps, and skips NaN all the same.
+            lanes[i] = if ch[i] > lanes[i] { ch[i] } else { lanes[i] };
+        }
+    }
+    let m = tail
+        .iter()
+        .chain(&lanes)
+        .fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+    let base = chunks.len() * 8;
+    if let Some(j) = tail.iter().rposition(|&v| v == m) {
+        return (base + j) as u32;
+    }
+    for (c, ch) in chunks.iter().enumerate().rev() {
+        if ch.iter().fold(false, |hit, &v| hit | (v == m)) {
+            return (c * 8 + ch.iter().rposition(|&v| v == m).unwrap()) as u32;
+        }
+    }
+    (l.len() - 1) as u32 // all NaN
+}
+
 fn human_bytes(b: u64) -> String {
     if b >= 1 << 30 {
         format!("{:.2} GB", b as f64 / (1u64 << 30) as f64)
@@ -196,5 +223,57 @@ fn human_bytes(b: u64) -> String {
         format!("{:.1} MB", b as f64 / (1u64 << 20) as f64)
     } else {
         format!("{b} B")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::argmax;
+
+    fn reference(l: &[f32]) -> u32 {
+        (0..l.len()).max_by(|&a, &b| l[a].total_cmp(&l[b])).unwrap() as u32
+    }
+
+    #[test]
+    fn argmax_matches_max_by_including_ties() {
+        let mut rng = 0x1357_9bdfu32;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            rng
+        };
+        for len in [1usize, 2, 7, 8, 9, 15, 16, 17, 100, 1000, 151_936] {
+            for _ in 0..20 {
+                // Few distinct values, so ties are common, all within one lane or across.
+                let l: Vec<f32> = (0..len).map(|_| (next() % 9) as f32 - 4.0).collect();
+                assert_eq!(argmax(&l), reference(&l), "len {len}");
+                let l: Vec<f32> = (0..len).map(|_| next() as f32 / 1e7 - 200.0).collect();
+                assert_eq!(argmax(&l), reference(&l), "len {len}");
+            }
+        }
+        assert_eq!(argmax(&[f32::NEG_INFINITY; 5]), 4);
+    }
+
+    #[test]
+    #[ignore = "timing, run with --ignored --nocapture"]
+    fn argmax_speed() {
+        let l: Vec<f32> = (0..151_936)
+            .map(|i| ((i * 7919) % 10007) as f32 * 0.01)
+            .collect();
+        for (name, f) in [
+            ("max_by", reference as fn(&[f32]) -> u32),
+            ("argmax", argmax),
+        ] {
+            let t = std::time::Instant::now();
+            let mut s = 0u64;
+            for _ in 0..200 {
+                s += f(std::hint::black_box(&l)) as u64;
+            }
+            eprintln!(
+                "{name}: {:.1} us ({s})",
+                t.elapsed().as_secs_f64() * 1e6 / 200.0
+            );
+        }
     }
 }
