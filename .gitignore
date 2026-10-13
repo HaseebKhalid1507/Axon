@@ -10,3 +10,4 @@
 *.bin
 *.gguf
 /models/
+__pycache__/

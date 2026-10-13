@@ -2,6 +2,8 @@
 name = "axon"
 version = "0.1.0"
 edition = "2024"
+# let-chains and <[T]>::as_chunks need 1.88; the avxvnni target feature, 1.89.
+rust-version = "1.89"
 authors = ["Haseeb Khalid <haseebkhalid1507@gmail.com>"]
 description = "The arc reactor for inference"
 repository = "https://github.com/HaseebKhalid1507/Axon"
