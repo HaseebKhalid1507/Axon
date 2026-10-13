@@ -9,6 +9,7 @@ mod spec;
 mod testutil;
 mod tokenizer;
 mod viz;
+mod vmath;
 
 use std::env;
 
