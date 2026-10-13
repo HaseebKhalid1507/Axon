@@ -70,15 +70,22 @@ unsafe impl KvElem for f32 {
     }
 }
 
+/// Largest finite f16.
+const HALF_MAX: f32 = 65504.0;
+
 // SAFETY: Half is a u16, align 2.
 unsafe impl KvElem for Half {
     #[inline(always)]
     fn to_f32(self) -> f32 {
         crate::quant::f16_to_f32(self.0)
     }
+    /// Saturating: |x| beyond f16's largest finite value (65504, inf
+    /// included) stores +-65504, since one inf key or value would turn that
+    /// head's attention into NaN for every later token. NaN stays NaN.
     #[inline(always)]
     fn from_f32(x: f32) -> Half {
-        Half(crate::quant::f32_to_f16(x))
+        // f32::clamp passes NaN through.
+        Half(crate::quant::f32_to_f16(x.clamp(-HALF_MAX, HALF_MAX)))
     }
     #[cfg(all(target_arch = "x86_64", target_feature = "f16c"))]
     fn store(dst: &mut [Half], src: &[f32]) {
@@ -88,9 +95,14 @@ unsafe impl KvElem for Half {
         for (d, s) in dc.iter_mut().zip(sc) {
             // SAFETY: F16C is enabled at compile time; 8 floats read, 8
             // halves (16 bytes) written, both whole chunks.
+            // Saturate as `from_f32`: max/min return their second operand
+            // when either is NaN, so x goes second and NaN passes through.
             unsafe {
                 use std::arch::x86_64::*;
-                let h = _mm256_cvtps_ph::<_MM_FROUND_TO_NEAREST_INT>(_mm256_loadu_ps(s.as_ptr()));
+                let x = _mm256_loadu_ps(s.as_ptr());
+                let x = _mm256_max_ps(_mm256_set1_ps(-HALF_MAX), x);
+                let x = _mm256_min_ps(_mm256_set1_ps(HALF_MAX), x);
+                let h = _mm256_cvtps_ph::<_MM_FROUND_TO_NEAREST_INT>(x);
                 _mm_storeu_si128(d.as_mut_ptr().cast(), h);
             }
         }
@@ -204,24 +216,27 @@ pub enum KvData {
     F32(Layers<f32>),
 }
 
+/// AXON_KV parsed: Ok(true) for f32, Ok(false) for f16 (also unset or
+/// empty), else a message for the user. `main` checks it at startup.
+pub fn kv_f32_setting() -> Result<bool, String> {
+    match std::env::var("AXON_KV").ok().as_deref() {
+        None | Some("") | Some("f16") => Ok(false),
+        Some("f32") => Ok(true),
+        Some(other) => Err(format!("AXON_KV must be f16 or f32, got '{other}'")),
+    }
+}
+
 /// Whether new caches store f32 (AXON_KV=f32) rather than f16 (default,
-/// or AXON_KV=f16). Read once.
+/// or AXON_KV=f16). Read once; the CLI has already rejected bad values.
 pub fn use_f32() -> bool {
     static F32: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *F32.get_or_init(|| match std::env::var("AXON_KV").ok().as_deref() {
-        None | Some("") | Some("f16") => false,
-        Some("f32") => true,
-        Some(other) => panic!("AXON_KV={other}: expected f16 or f32"),
-    })
+    *F32.get_or_init(|| kv_f32_setting().unwrap_or_else(|e| panic!("{e}")))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Scalar rounding == F16C's `vcvtps2ph` (when the build has it) over a
-    /// spread of every f32 class (stride sample of all 2^32 bit patterns plus
-    /// every half-way case near each f16 exponent), and widening is exact.
     /// Buffers start on a cache line and read back zero.
     #[test]
     fn kvbuf_aligned_zeroed() {
@@ -235,6 +250,10 @@ mod tests {
         }
     }
 
+    /// Saturating scalar rounding == the saturating F16C `vcvtps2ph` path
+    /// (when the build has it) over a spread of every f32 class (stride
+    /// sample of all 2^32 bit patterns, every half-way case near each f16
+    /// exponent, values past +-65504, infinities, NaNs); widening is exact.
     #[test]
     #[allow(clippy::neg_cmp_op_on_partial_ord)] // up may be NaN past +inf: !(a < b) is intended
     fn half_store_matches_scalar() {
@@ -260,6 +279,17 @@ mod tests {
             65520.0,
             65519.99,
         ]);
+        // Beyond f16's range (saturate to +-65504) and NaNs of both signs,
+        // quiet and signalling (stay NaN).
+        for m in [65505.0f32, 65519.0, 65520.0, 65536.0, 1e5, 1e10, f32::MAX] {
+            xs.extend([m, -m]);
+        }
+        xs.extend([
+            f32::NAN,
+            -f32::NAN,
+            f32::from_bits(0x7f80_0001),
+            f32::from_bits(0xffc1_2345),
+        ]);
         xs.truncate(xs.len() / 8 * 8);
         let mut v = vec![Half(0); xs.len()];
         Half::store(&mut v, &xs);
@@ -268,7 +298,9 @@ mod tests {
             assert_eq!(h.0, s.0, "{x:e} ({:08x})", x.to_bits());
             let back = h.to_f32();
             if x.is_nan() {
-                assert!(back.is_nan());
+                assert!(back.is_nan(), "{:08x} -> {:04x}", x.to_bits(), h.0);
+            } else if x.abs() > HALF_MAX {
+                assert_eq!(back, HALF_MAX.copysign(*x), "{x:e} not saturated");
             } else {
                 assert_eq!(Half::from_f32(back).0, h.0, "{x:e}");
                 // nearest: no other half is closer

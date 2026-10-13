@@ -2643,17 +2643,18 @@ pub(crate) mod tests {
                 got[i], want[i]
             );
         }
-        // Decode, every tiling, V split for 1, 5, 18 and 64 threads.
-        for (i, tile) in tiles.into_iter().enumerate() {
-            let threads = [1, 5, 18, 64][i % 4];
-            let mut got = vec![f32::NAN; nq];
-            attend(q, kc, vc, kv_dim, hd, np, tile, threads, buf, &mut got);
-            if let Some(i) = (0..nq).find(|&i| got[i].to_bits() != want[i].to_bits()) {
-                panic!(
-                    "{ty} hd={hd} group={group} n_kv={n_kv} np={np} tile={tile:?} \
-                     threads={threads}: elem {i} {} vs {}",
-                    got[i], want[i]
-                );
+        // Decode: every tiling x the V split for 1, 5, 18 and 64 threads.
+        for tile in tiles {
+            for threads in [1, 5, 18, 64] {
+                let mut got = vec![f32::NAN; nq];
+                attend(q, kc, vc, kv_dim, hd, np, tile, threads, buf, &mut got);
+                if let Some(i) = (0..nq).find(|&i| got[i].to_bits() != want[i].to_bits()) {
+                    panic!(
+                        "{ty} hd={hd} group={group} n_kv={n_kv} np={np} tile={tile:?} \
+                         threads={threads}: elem {i} {} vs {}",
+                        got[i], want[i]
+                    );
+                }
             }
         }
     }

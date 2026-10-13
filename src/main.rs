@@ -189,6 +189,11 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             .unwrap_or_else(|_| fail(&format!("AXON_DRAFT needs a whole number, got '{v}'"))),
         Err(_) => DEFAULT_DRAFT,
     };
+    // KV cache type (kv.rs): checked here so a typo is a usage error, not a
+    // panic in the first new_cache.
+    if let Err(e) = kv::kv_f32_setting() {
+        fail(&e);
+    }
     let mut i = 4;
     while i < args.len() {
         let val = args.get(i + 1).and_then(|s| s.parse::<usize>().ok());
