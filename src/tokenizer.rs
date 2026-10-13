@@ -32,7 +32,8 @@ fn bytes_to_unicode() -> [char; 256] {
     let mut table = ['\0'; 256];
     let mut n = 0u32;
     for b in 0..256u32 {
-        let printable = (33..=126).contains(&b) || (161..=172).contains(&b) || (174..=255).contains(&b);
+        let printable =
+            (33..=126).contains(&b) || (161..=172).contains(&b) || (174..=255).contains(&b);
         table[b as usize] = if printable {
             char::from_u32(b).unwrap()
         } else {
@@ -50,10 +51,14 @@ fn meta<'a>(m: &'a Model, key: &str) -> Option<&'a Val> {
 
 fn val_i64(v: &Val) -> i64 {
     match v {
-        Val::U8(x) => *x as i64, Val::I8(x) => *x as i64,
-        Val::U16(x) => *x as i64, Val::I16(x) => *x as i64,
-        Val::U32(x) => *x as i64, Val::I32(x) => *x as i64,
-        Val::U64(x) => *x as i64, Val::I64(x) => *x,
+        Val::U8(x) => *x as i64,
+        Val::I8(x) => *x as i64,
+        Val::U16(x) => *x as i64,
+        Val::I16(x) => *x as i64,
+        Val::U32(x) => *x as i64,
+        Val::I32(x) => *x as i64,
+        Val::U64(x) => *x as i64,
+        Val::I64(x) => *x,
         Val::Bool(x) => *x as i64,
         _ => 0,
     }
@@ -62,7 +67,13 @@ fn val_i64(v: &Val) -> i64 {
 impl Tokenizer {
     pub fn from_gguf(m: &Model) -> Tokenizer {
         let tokens: Vec<String> = match meta(m, "tokenizer.ggml.tokens") {
-            Some(Val::Arr(a)) => a.iter().map(|v| match v { Val::Str(s) => s.clone(), _ => String::new() }).collect(),
+            Some(Val::Arr(a)) => a
+                .iter()
+                .map(|v| match v {
+                    Val::Str(s) => s.clone(),
+                    _ => String::new(),
+                })
+                .collect(),
             _ => panic!("tokenizer.ggml.tokens missing"),
         };
         let token_type: Vec<i32> = match meta(m, "tokenizer.ggml.token_type") {
@@ -81,12 +92,18 @@ impl Tokenizer {
             let mut buf = String::new();
             for (rank, v) in a.iter().enumerate() {
                 let Val::Str(s) = v else { continue };
-                let Some((l, r)) = s.split_once(' ') else { continue };
-                let (Some(&li), Some(&ri)) = (token_to_id.get(l), token_to_id.get(r)) else { continue };
+                let Some((l, r)) = s.split_once(' ') else {
+                    continue;
+                };
+                let (Some(&li), Some(&ri)) = (token_to_id.get(l), token_to_id.get(r)) else {
+                    continue;
+                };
                 buf.clear();
                 buf.push_str(l);
                 buf.push_str(r);
-                let Some(&mi) = token_to_id.get(buf.as_str()) else { continue };
+                let Some(&mi) = token_to_id.get(buf.as_str()) else {
+                    continue;
+                };
                 merges.entry((li, ri)).or_insert((rank as u32, mi));
             }
         }
@@ -111,7 +128,9 @@ impl Tokenizer {
             .collect();
         specials.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.1.cmp(&b.1)));
 
-        let eos = meta(m, "tokenizer.ggml.eos_token_id").map(|v| val_i64(v) as u32).unwrap_or(151645);
+        let eos = meta(m, "tokenizer.ggml.eos_token_id")
+            .map(|v| val_i64(v) as u32)
+            .unwrap_or(151645);
 
         Tokenizer {
             tokens,
@@ -196,14 +215,17 @@ impl Tokenizer {
 
     /// Byte-level BPE on one pre-token: repeatedly merge the lowest-rank adjacent pair (leftmost on ties).
     fn bpe_word(&self, word: &str, out: &mut Vec<u32>) {
-        let mut syms: Vec<u32> = word.bytes().filter_map(|b| self.byte_id[b as usize]).collect();
+        let mut syms: Vec<u32> = word
+            .bytes()
+            .filter_map(|b| self.byte_id[b as usize])
+            .collect();
         loop {
             let mut best: Option<(u32, usize, u32)> = None; // (rank, pos, merged id)
             for i in 0..syms.len().saturating_sub(1) {
-                if let Some(&(rank, mid)) = self.merges.get(&(syms[i], syms[i + 1])) {
-                    if best.map_or(true, |(r, _, _)| rank < r) {
-                        best = Some((rank, i, mid));
-                    }
+                if let Some(&(rank, mid)) = self.merges.get(&(syms[i], syms[i + 1]))
+                    && best.is_none_or(|(r, _, _)| rank < r)
+                {
+                    best = Some((rank, i, mid));
                 }
             }
             let Some((_, i, mid)) = best else { break };
@@ -216,7 +238,9 @@ impl Tokenizer {
     pub fn decode(&self, ids: &[u32]) -> String {
         let mut bytes = Vec::new();
         for &id in ids {
-            let Some(t) = self.tokens.get(id as usize) else { continue };
+            let Some(t) = self.tokens.get(id as usize) else {
+                continue;
+            };
             let ty = self.token_type.get(id as usize).copied().unwrap_or(1);
             if ty == TYPE_CONTROL || ty == TYPE_USER_DEFINED {
                 bytes.extend_from_slice(t.as_bytes());
@@ -295,7 +319,12 @@ mod tests {
         let Some(t) = tok() else { return };
         for c in cases {
             let text = c["text"].as_str().expect("text");
-            let want: Vec<u32> = c["ids"].as_array().expect("ids").iter().map(|v| v.as_u64().unwrap() as u32).collect();
+            let want: Vec<u32> = c["ids"]
+                .as_array()
+                .expect("ids")
+                .iter()
+                .map(|v| v.as_u64().unwrap() as u32)
+                .collect();
             assert_eq!(t.encode(text), want, "text {text:?}");
         }
     }

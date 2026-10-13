@@ -69,7 +69,12 @@ pub fn f16_to_f32(h: u16) -> f32 {
 
 pub fn row_bytes(qtype_id: u32, n: usize) -> usize {
     let (bs, bb) = block_info(qtype_id);
-    assert!(n % bs == 0, "row_bytes: n={} not a multiple of block size {}", n, bs);
+    assert!(
+        n.is_multiple_of(bs),
+        "row_bytes: n={} not a multiple of block size {}",
+        n,
+        bs
+    );
     n / bs * bb
 }
 
@@ -162,7 +167,12 @@ fn dequant_q6_k_block(b: &[u8], y: &mut [f32]) {
 pub fn dequant(qtype_id: u32, bytes: &[u8], out: &mut [f32]) {
     let n = out.len();
     let (bs, bb) = block_info(qtype_id);
-    assert!(n % bs == 0, "dequant: n={} not a multiple of block size {}", n, bs);
+    assert!(
+        n.is_multiple_of(bs),
+        "dequant: n={} not a multiple of block size {}",
+        n,
+        bs
+    );
     let nb = n / bs;
     assert!(
         bytes.len() >= nb * bb,
@@ -200,7 +210,12 @@ pub fn dequant(qtype_id: u32, bytes: &[u8], out: &mut [f32]) {
 pub fn dot_row(qtype_id: u32, row: &[u8], x: &[f32]) -> f32 {
     let n = x.len();
     let (bs, bb) = block_info(qtype_id);
-    assert!(n % bs == 0, "dot_row: len {} not a multiple of block size {}", n, bs);
+    assert!(
+        n.is_multiple_of(bs),
+        "dot_row: len {} not a multiple of block size {}",
+        n,
+        bs
+    );
     // decode in chunks of up to 256 values (one K-block, or several small blocks)
     let chunk = QK_K; // multiple of every supported block size
     let mut buf = [0f32; QK_K];
@@ -312,6 +327,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::needless_range_loop)] // `e` picks the expected value too
     fn q6_k_block() {
         let mut b = vec![0u8; Q6_K_BYTES];
         let (ql, qh, sc) = (0usize, 128usize, 192usize);
@@ -359,7 +375,9 @@ mod tests {
         assert!((dot_row(Q8_0, &b, &x) - naive).abs() < 1e-4);
 
         let n = 300;
-        let fb: Vec<u8> = (0..n).flat_map(|i| (i as f32 * 0.5).to_le_bytes()).collect();
+        let fb: Vec<u8> = (0..n)
+            .flat_map(|i| (i as f32 * 0.5).to_le_bytes())
+            .collect();
         let x: Vec<f32> = (0..n).map(|i| 1.0 / (1 + i) as f32).collect();
         let naive: f32 = (0..n).map(|i| i as f32 * 0.5 * x[i]).sum();
         assert!((dot_row(F32, &fb, &x) - naive).abs() < 1e-3);
@@ -394,15 +412,24 @@ mod tests {
             }
 
             // dot_row must agree with dequant + a plain dot product.
-            let x: Vec<f32> = (0..row_len).map(|i| ((i * 37 % 101) as f32 - 50.0) / 50.0).collect();
+            let x: Vec<f32> = (0..row_len)
+                .map(|i| ((i * 37 % 101) as f32 - 50.0) / 50.0)
+                .collect();
             let naive: f32 = got.iter().zip(&x).map(|(a, b)| a * b).sum();
             let mag: f32 = got.iter().zip(&x).map(|(a, b)| (a * b).abs()).sum();
             let d = dot_row(qt, &bytes, &x);
-            assert!((d - naive).abs() <= 1e-5 * mag + 1e-6, "{stem}: dot_row {d} vs naive {naive}");
+            assert!(
+                (d - naive).abs() <= 1e-5 * mag + 1e-6,
+                "{stem}: dot_row {d} vs naive {naive}"
+            );
             covered.insert(meta["qtype_name"].as_str().expect("qtype_name").to_string());
         }
-        let want: std::collections::BTreeSet<String> =
-            ["F32", "Q4_K", "Q5_0", "Q6_K", "Q8_0"].map(String::from).into();
-        assert_eq!(covered, want, "golden fixtures should cover every quant type in the model");
+        let want: std::collections::BTreeSet<String> = ["F32", "Q4_K", "Q5_0", "Q6_K", "Q8_0"]
+            .map(String::from)
+            .into();
+        assert_eq!(
+            covered, want,
+            "golden fixtures should cover every quant type in the model"
+        );
     }
 }

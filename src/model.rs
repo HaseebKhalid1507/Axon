@@ -46,19 +46,24 @@ pub struct KvCache {
 }
 
 fn meta_num(m: &Model, key: &str) -> Option<f64> {
-    m.metadata.iter().find(|(k, _)| k == key).and_then(|(_, v)| match v {
-        Val::U32(n) => Some(*n as f64),
-        Val::I32(n) => Some(*n as f64),
-        Val::U64(n) => Some(*n as f64),
-        Val::I64(n) => Some(*n as f64),
-        Val::F32(n) => Some(*n as f64),
-        Val::F64(n) => Some(*n),
-        _ => None,
-    })
+    m.metadata
+        .iter()
+        .find(|(k, _)| k == key)
+        .and_then(|(_, v)| match v {
+            Val::U32(n) => Some(*n as f64),
+            Val::I32(n) => Some(*n as f64),
+            Val::U64(n) => Some(*n as f64),
+            Val::I64(n) => Some(*n as f64),
+            Val::F32(n) => Some(*n as f64),
+            Val::F64(n) => Some(*n),
+            _ => None,
+        })
 }
 
 fn find<'a>(m: &'a Model, name: &str) -> &'a Tensor {
-    m.tensors.iter().find(|t| t.name == name)
+    m.tensors
+        .iter()
+        .find(|t| t.name == name)
         .unwrap_or_else(|| panic!("missing tensor {name}"))
 }
 
@@ -77,7 +82,8 @@ impl<'a> Qwen2<'a> {
     pub fn new(m: &'a Model) -> Qwen2<'a> {
         let a = &m.arch;
         let key = |k: &str| format!("{a}.{k}");
-        let need = |k: &str| meta_num(m, &key(k)).unwrap_or_else(|| panic!("missing metadata {}", key(k)));
+        let need =
+            |k: &str| meta_num(m, &key(k)).unwrap_or_else(|| panic!("missing metadata {}", key(k)));
 
         let n_layers = need("block_count") as usize;
         let dim = need("embedding_length") as usize;
@@ -94,34 +100,53 @@ impl<'a> Qwen2<'a> {
         let output = find_opt(m, "output.weight").unwrap_or(token_embd);
         let output_norm = load_vec(m, find(m, "output_norm.weight"));
 
-        let layers = (0..n_layers).map(|i| {
-            let t = |s: &str| find(m, &format!("blk.{i}.{s}"));
-            let bias = |s: &str| find_opt(m, &format!("blk.{i}.{s}")).map(|t| load_vec(m, t));
-            Layer {
-                attn_norm: load_vec(m, t("attn_norm.weight")),
-                wq: t("attn_q.weight"),
-                wk: t("attn_k.weight"),
-                wv: t("attn_v.weight"),
-                bq: bias("attn_q.bias"),
-                bk: bias("attn_k.bias"),
-                bv: bias("attn_v.bias"),
-                wo: t("attn_output.weight"),
-                ffn_norm: load_vec(m, t("ffn_norm.weight")),
-                w_gate: t("ffn_gate.weight"),
-                w_up: t("ffn_up.weight"),
-                w_down: t("ffn_down.weight"),
-            }
-        }).collect();
+        let layers = (0..n_layers)
+            .map(|i| {
+                let t = |s: &str| find(m, &format!("blk.{i}.{s}"));
+                let bias = |s: &str| find_opt(m, &format!("blk.{i}.{s}")).map(|t| load_vec(m, t));
+                Layer {
+                    attn_norm: load_vec(m, t("attn_norm.weight")),
+                    wq: t("attn_q.weight"),
+                    wk: t("attn_k.weight"),
+                    wv: t("attn_v.weight"),
+                    bq: bias("attn_q.bias"),
+                    bk: bias("attn_k.bias"),
+                    bv: bias("attn_v.bias"),
+                    wo: t("attn_output.weight"),
+                    ffn_norm: load_vec(m, t("ffn_norm.weight")),
+                    w_gate: t("ffn_gate.weight"),
+                    w_up: t("ffn_up.weight"),
+                    w_down: t("ffn_down.weight"),
+                }
+            })
+            .collect();
 
-        Qwen2 { m, n_layers, dim, n_heads, n_kv_heads, head_dim, vocab,
-                eps, rope_base, token_embd, output_norm, output, layers }
+        Qwen2 {
+            m,
+            n_layers,
+            dim,
+            n_heads,
+            n_kv_heads,
+            head_dim,
+            vocab,
+            eps,
+            rope_base,
+            token_embd,
+            output_norm,
+            output,
+            layers,
+        }
     }
 
     pub fn new_cache(&self, max_ctx: usize) -> KvCache {
         let kv_dim = self.n_kv_heads * self.head_dim;
         KvCache {
-            k: (0..self.n_layers).map(|_| vec![0.0; max_ctx * kv_dim]).collect(),
-            v: (0..self.n_layers).map(|_| vec![0.0; max_ctx * kv_dim]).collect(),
+            k: (0..self.n_layers)
+                .map(|_| vec![0.0; max_ctx * kv_dim])
+                .collect(),
+            v: (0..self.n_layers)
+                .map(|_| vec![0.0; max_ctx * kv_dim])
+                .collect(),
             kv_dim,
             max_ctx,
         }
@@ -133,7 +158,9 @@ impl<'a> Qwen2<'a> {
         assert_eq!(x.len(), n_in, "matvec {}: input len", w.name);
         let rb = row_bytes(w.qtype.id, n_in);
         let data = self.m.tensor_data(w);
-        (0..n_out).map(|o| dot_row(w.qtype.id, &data[o * rb..(o + 1) * rb], x)).collect()
+        (0..n_out)
+            .map(|o| dot_row(w.qtype.id, &data[o * rb..(o + 1) * rb], x))
+            .collect()
     }
 
     /// RMSNorm: scale x so its root-mean-square is 1, then multiply by a learned weight.
@@ -160,7 +187,11 @@ impl<'a> Qwen2<'a> {
 
     /// Run one token at position `pos` and return logits (len vocab).
     pub fn forward(&self, token: u32, pos: usize, cache: &mut KvCache) -> Vec<f32> {
-        assert!(pos < cache.max_ctx, "position {pos} exceeds cache size {}", cache.max_ctx);
+        assert!(
+            pos < cache.max_ctx,
+            "position {pos} exceeds cache size {}",
+            cache.max_ctx
+        );
         let (dim, hd) = (self.dim, self.head_dim);
         let kv_dim = cache.kv_dim;
         let group = self.n_heads / self.n_kv_heads; // q heads that share one kv head
@@ -169,7 +200,11 @@ impl<'a> Qwen2<'a> {
         let mut x = vec![0.0f32; dim];
         let rb = row_bytes(self.token_embd.qtype.id, dim);
         let t = token as usize;
-        dequant(self.token_embd.qtype.id, &self.m.tensor_data(self.token_embd)[t * rb..(t + 1) * rb], &mut x);
+        dequant(
+            self.token_embd.qtype.id,
+            &self.m.tensor_data(self.token_embd)[t * rb..(t + 1) * rb],
+            &mut x,
+        );
 
         for (l, layer) in self.layers.iter().enumerate() {
             // ---- Attention sub-block ----
@@ -178,13 +213,23 @@ impl<'a> Qwen2<'a> {
             let mut q = self.matvec(layer.wq, &h);
             let mut k = self.matvec(layer.wk, &h);
             let mut v = self.matvec(layer.wv, &h);
-            if let Some(b) = &layer.bq { q.iter_mut().zip(b).for_each(|(a, b)| *a += b); }
-            if let Some(b) = &layer.bk { k.iter_mut().zip(b).for_each(|(a, b)| *a += b); }
-            if let Some(b) = &layer.bv { v.iter_mut().zip(b).for_each(|(a, b)| *a += b); }
+            if let Some(b) = &layer.bq {
+                q.iter_mut().zip(b).for_each(|(a, b)| *a += b);
+            }
+            if let Some(b) = &layer.bk {
+                k.iter_mut().zip(b).for_each(|(a, b)| *a += b);
+            }
+            if let Some(b) = &layer.bv {
+                v.iter_mut().zip(b).for_each(|(a, b)| *a += b);
+            }
 
             // 3. Rotate q and k by position (RoPE), one head at a time.
-            for head in q.chunks_mut(hd) { self.rope(head, pos); }
-            for head in k.chunks_mut(hd) { self.rope(head, pos); }
+            for head in q.chunks_mut(hd) {
+                self.rope(head, pos);
+            }
+            for head in k.chunks_mut(hd) {
+                self.rope(head, pos);
+            }
 
             // 4. Store this position's k and v in the cache so later tokens can see them.
             cache.k[l][pos * kv_dim..(pos + 1) * kv_dim].copy_from_slice(&k);
@@ -207,32 +252,45 @@ impl<'a> Qwen2<'a> {
                 // Softmax turns scores into weights summing to 1 (subtract max for stability).
                 let max = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
                 let mut sum = 0.0f32;
-                for s in scores.iter_mut() { *s = (*s - max).exp(); sum += *s; }
-                for s in scores.iter_mut() { *s /= sum; }
+                for s in scores.iter_mut() {
+                    *s = (*s - max).exp();
+                    sum += *s;
+                }
+                for s in scores.iter_mut() {
+                    *s /= sum;
+                }
                 // Output = weighted sum of the value vectors.
                 let out = &mut att_out[qh * hd..(qh + 1) * hd];
                 for t in 0..=pos {
                     let vv = &vc[t * kv_dim + kvh * hd..t * kv_dim + (kvh + 1) * hd];
                     let w = scores[t];
-                    for d in 0..hd { out[d] += w * vv[d]; }
+                    for d in 0..hd {
+                        out[d] += w * vv[d];
+                    }
                 }
             }
 
             // 6. Mix the heads back together and add to the residual stream.
             let o = self.matvec(layer.wo, &att_out);
-            for i in 0..dim { x[i] += o[i]; }
+            for i in 0..dim {
+                x[i] += o[i];
+            }
 
             // ---- Feed-forward sub-block (SwiGLU) ----
             // 7. Normalize, then gate * up: silu(gate(h)) decides how much of up(h) passes.
             let h = self.rmsnorm(&x, &layer.ffn_norm);
             let gate = self.matvec(layer.w_gate, &h);
             let up = self.matvec(layer.w_up, &h);
-            let act: Vec<f32> = gate.iter().zip(&up)
+            let act: Vec<f32> = gate
+                .iter()
+                .zip(&up)
                 .map(|(g, u)| (g / (1.0 + (-g).exp())) * u)
                 .collect();
             // 8. Project back down to model width and add to the residual stream.
             let d = self.matvec(layer.w_down, &act);
-            for i in 0..dim { x[i] += d[i]; }
+            for i in 0..dim {
+                x[i] += d[i];
+            }
         }
 
         // 9. Final norm, then the output head scores every vocab entry.
@@ -259,7 +317,9 @@ mod tests {
             .collect();
         names.sort();
         assert!(!names.is_empty(), "no gen fixtures in {}", dir.display());
-        let Some(m) = crate::testutil::model() else { return };
+        let Some(m) = crate::testutil::model() else {
+            return;
+        };
         let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
         let net = Qwen2::new(&m);
 
@@ -284,8 +344,15 @@ mod tests {
                 let ctx = format!("{name} step {i} ({:?})", s["token"].as_str().unwrap_or("?"));
                 assert!(d <= MAX_DLOGPROB, "{ctx}: logprob off by {d:.3}");
                 if !s["near_tie"].as_bool().unwrap_or(false) {
-                    let argmax = (0..logits.len()).max_by(|&a, &b| logits[a].total_cmp(&logits[b])).unwrap();
-                    assert_eq!(argmax, want, "{ctx}: axon picked {:?}", tok.decode(&[argmax as u32]));
+                    let argmax = (0..logits.len())
+                        .max_by(|&a, &b| logits[a].total_cmp(&logits[b]))
+                        .unwrap();
+                    assert_eq!(
+                        argmax,
+                        want,
+                        "{ctx}: axon picked {:?}",
+                        tok.decode(&[argmax as u32])
+                    );
                 }
                 logits = net.forward(want as u32, ids.len() + i, &mut cache);
             }
