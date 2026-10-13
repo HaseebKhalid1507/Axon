@@ -737,25 +737,52 @@ fn dot_group(q: &[f32], k: &[f32], out: &mut [f32]) {
 /// `dot` of G query vectors (contiguous in q) with one k. Each result uses
 /// `dot`'s exact lanes, tail and final sum, so it's identical to `dot`; the
 /// G accumulator chains run side by side and k is loaded once.
+///
+/// Written with AVX intrinsics: the plain-Rust version (an `[[f32; 8]; G]`
+/// accumulator indexed through per-head slices) didn't vectorize and ran as
+/// scalar loads/adds through the stack, ~40% of prefill at 2k tokens.
+/// `_mm256_add_ps(acc, _mm256_mul_ps(x, y))` is `dot`'s `acc[i] += x[i] * y[i]`
+/// lane for lane (Rust never contracts to FMA), so results are unchanged.
+#[cfg(all(target_arch = "x86_64", target_feature = "avx"))]
+#[inline]
+fn dot_multi<const G: usize>(q: &[f32], k: &[f32], out: &mut [f32]) {
+    use std::arch::x86_64::*;
+    let n = k.len();
+    assert!(q.len() >= G * n && out.len() >= G, "dot_multi: short q/out");
+    let (kc, kr) = k.as_chunks::<8>();
+    let nc = kc.len();
+    let qp = q.as_ptr();
+    // SAFETY: AVX is enabled at compile time (cfg above). Every load reads
+    // q[g * n + 8 * j .. + 8] with g < G and 8 * j + 8 <= n, inside q
+    // (asserted above), or a whole 8-float chunk of k.
+    let acc = unsafe {
+        let mut acc = [_mm256_setzero_ps(); G];
+        for (j, y) in kc.iter().enumerate() {
+            let y = _mm256_loadu_ps(y.as_ptr());
+            for (g, a) in acc.iter_mut().enumerate() {
+                let x = _mm256_loadu_ps(qp.add(g * n + 8 * j));
+                *a = _mm256_add_ps(*a, _mm256_mul_ps(x, y));
+            }
+        }
+        acc
+    };
+    for (g, a) in acc.iter().enumerate() {
+        let mut lanes = [0.0f32; 8];
+        // SAFETY: storing 8 floats into an 8-float array; AVX as above.
+        unsafe { _mm256_storeu_ps(lanes.as_mut_ptr(), *a) };
+        let ar = &q[g * n + 8 * nc..(g + 1) * n];
+        let tail: f32 = ar.iter().zip(kr).map(|(x, y)| x * y).sum();
+        out[g] = lanes.iter().sum::<f32>() + tail;
+    }
+}
+
+/// Portable `dot_multi` (same arithmetic) for builds without AVX.
+#[cfg(not(all(target_arch = "x86_64", target_feature = "avx")))]
 #[inline]
 fn dot_multi<const G: usize>(q: &[f32], k: &[f32], out: &mut [f32]) {
     let n = k.len();
-    let qv: [&[f32]; G] = std::array::from_fn(|g| &q[g * n..(g + 1) * n]);
-    let qc = qv.map(|x| x.as_chunks::<8>().0);
-    let (kc, kr) = k.as_chunks::<8>();
-    let mut acc = [[0.0f32; 8]; G];
-    for (j, y) in kc.iter().enumerate() {
-        for g in 0..G {
-            let x = &qc[g][j];
-            for i in 0..8 {
-                acc[g][i] += x[i] * y[i];
-            }
-        }
-    }
-    for g in 0..G {
-        let ar = qv[g].as_chunks::<8>().1;
-        let tail: f32 = ar.iter().zip(kr).map(|(x, y)| x * y).sum();
-        out[g] = acc[g].iter().sum::<f32>() + tail;
+    for (g, o) in out[..G].iter_mut().enumerate() {
+        *o = dot(&q[g * n..(g + 1) * n], k);
     }
 }
 
