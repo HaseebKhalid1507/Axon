@@ -4,7 +4,7 @@
 
 use crate::gguf::{Model, Tensor, Val};
 use crate::pool::{self, Pool};
-use crate::quant::{QuantizedAct, dequant, dot_row_q8, row_bytes};
+use crate::quant::{QuantizedAct, dequant, dot_row_q8, dot_row_q8_multi, row_bytes};
 
 /// The weights of one transformer block, borrowed from the mmap.
 struct Layer<'a> {
@@ -275,6 +275,7 @@ impl<'a> Qwen2<'a> {
             let qt = w.qtype.id;
             (qt, row_bytes(qt, n_in), self.m.tensor_data(w))
         });
+        let xr: Vec<&QuantizedAct> = xq.iter().collect();
         let mut out = vec![0f32; total * nb];
         let rows = Self::rows_per_chunk(total);
         pool::for_each_chunk_mut(&mut out, rows * nb, |c, ys| {
@@ -284,9 +285,7 @@ impl<'a> Qwen2<'a> {
                 let (qt, rb, data) = info[t];
                 let o = g - starts[t];
                 let row = &data[o * rb..(o + 1) * rb];
-                for (y, xq) in yr.iter_mut().zip(&xq) {
-                    *y = dot_row_q8(qt, row, xq);
-                }
+                dot_row_q8_multi(qt, row, &xr, yr);
             }
         });
         std::array::from_fn(|i| {
@@ -321,16 +320,20 @@ impl<'a> Qwen2<'a> {
             let qt = w.qtype.id;
             (qt, row_bytes(qt, n_in), self.m.tensor_data(w))
         });
+        let xr: Vec<&QuantizedAct> = xq.iter().collect();
         let mut out = vec![0f32; n * nb];
         let rows = Self::rows_per_chunk(n);
         pool::for_each_chunk_mut(&mut out, rows * nb, |c, ys| {
+            let mut uv = vec![0f32; nb];
             for (j, yr) in ys.chunks_mut(nb).enumerate() {
                 let r = c * rows + j;
                 let gr = &g.2[r * g.1..(r + 1) * g.1];
                 let ur = &u.2[r * u.1..(r + 1) * u.1];
-                for (y, xq) in yr.iter_mut().zip(&xq) {
-                    let gv = dot_row_q8(g.0, gr, xq);
-                    *y = (gv / (1.0 + (-gv).exp())) * dot_row_q8(u.0, ur, xq);
+                dot_row_q8_multi(g.0, gr, &xr, yr);
+                dot_row_q8_multi(u.0, ur, &xr, &mut uv);
+                for (y, &uv) in yr.iter_mut().zip(&uv) {
+                    let gv = *y;
+                    *y = (gv / (1.0 + (-gv).exp())) * uv;
                 }
             }
         });
