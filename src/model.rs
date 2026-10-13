@@ -4,7 +4,9 @@
 
 use crate::gguf::{Model, Tensor, Val};
 use crate::pool::{self, Pool};
-use crate::quant::{QuantizedAct, dequant, dot_row_q8, dot_row_q8_multi, row_bytes};
+use crate::quant::{
+    QuantizedAct, dequant, dot_row_q8, dot_row_q8_multi, dot_rows_q8_multi, row_bytes,
+};
 
 /// The weights of one transformer block, borrowed from the mmap.
 struct Layer<'a> {
@@ -278,13 +280,28 @@ impl<'a> Qwen2<'a> {
         let xr: Vec<&QuantizedAct> = xq.iter().collect();
         let mut out = vec![0f32; total * nb];
         let rows = Self::rows_per_chunk(total);
+        let row_of = |g: usize| {
+            let t = starts.iter().rposition(|&s| s <= g).unwrap();
+            let (qt, rb, data) = info[t];
+            let o = g - starts[t];
+            (qt, &data[o * rb..(o + 1) * rb])
+        };
         pool::for_each_chunk_mut(&mut out, rows * nb, |c, ys| {
-            for (j, yr) in ys.chunks_mut(nb).enumerate() {
-                let g = c * rows + j;
-                let t = starts.iter().rposition(|&s| s <= g).unwrap();
-                let (qt, rb, data) = info[t];
-                let o = g - starts[t];
-                let row = &data[o * rb..(o + 1) * rb];
+            // Rows two at a time (possibly from different matrices): the pair
+            // shares each token's activation loads. An odd last row goes alone.
+            let first = c * rows;
+            let n_rows = ys.len() / nb;
+            let mut pairs = ys.chunks_exact_mut(2 * nb);
+            for (j, yp) in pairs.by_ref().enumerate() {
+                let g = first + 2 * j;
+                let (q0, r0) = row_of(g);
+                let (q1, r1) = row_of(g + 1);
+                let (y0, y1) = yp.split_at_mut(nb);
+                dot_rows_q8_multi([q0, q1], [r0, r1], &xr, [y0, y1]);
+            }
+            let yr = pairs.into_remainder();
+            if !yr.is_empty() {
+                let (qt, row) = row_of(first + n_rows - 1);
                 dot_row_q8_multi(qt, row, &xr, yr);
             }
         });
@@ -329,8 +346,7 @@ impl<'a> Qwen2<'a> {
                 let r = c * rows + j;
                 let gr = &g.2[r * g.1..(r + 1) * g.1];
                 let ur = &u.2[r * u.1..(r + 1) * u.1];
-                dot_row_q8_multi(g.0, gr, &xr, yr);
-                dot_row_q8_multi(u.0, ur, &xr, &mut uv);
+                dot_rows_q8_multi([g.0, u.0], [gr, ur], &xr, [&mut *yr, &mut uv[..]]);
                 for (y, &uv) in yr.iter_mut().zip(&uv) {
                     let gv = *y;
                     *y = (gv / (1.0 + (-gv).exp())) * uv;

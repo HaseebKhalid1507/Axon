@@ -982,6 +982,99 @@ mod x86 {
         mul_sum_us8_vnni
     );
 
+    // ---- 2-row x 4-token tiles: per 32-weight block, unpack 2 rows' weights
+    // once and load each token's activations once, for 8 (row, token) dots.
+    // Per (row, token) the float ops are exactly the single-token kernel's, so
+    // results are bit-identical. Both rows have the same type.
+
+    macro_rules! small_block_kernels_2x4 {
+        ($feat:literal, $name:ident, $bytes:ident, $weights:ident, $mul:ident) => {
+            /// 2-row x 4-token version of the single-token kernel of the same
+            /// type. `rows` must have the same number of blocks.
+            ///
+            /// # Safety
+            /// The CPU must support the enabled target features.
+            #[allow(clippy::needless_range_loop)] // t indexes several arrays
+            #[target_feature(enable = $feat)]
+            pub unsafe fn $name(
+                rows: [&[u8]; 2],
+                dx: [&[f32]; 4],
+                qx: [&[[i8; 32]]; 4],
+            ) -> [[f32; 4]; 2] {
+                let b0 = rows[0].as_chunks::<$bytes>().0;
+                let n = b0.len();
+                let b1 = &rows[1].as_chunks::<$bytes>().0[..n];
+                // Written out, not `.map(..)`: see small_block_kernels_x4.
+                let dx = [&dx[0][..n], &dx[1][..n], &dx[2][..n], &dx[3][..n]];
+                let qx = [&qx[0][..n], &qx[1][..n], &qx[2][..n], &qx[3][..n]];
+                let mut acc0 = [_mm256_setzero_ps(); 4];
+                let mut acc1 = [_mm256_setzero_ps(); 4];
+                for i in 0..n {
+                    let (w0, w1) = (&b0[i], &b1[i]);
+                    let hw0 = h2f([w0[0], w0[1]]);
+                    let hw1 = h2f([w1[0], w1[1]]);
+                    let qw0 = $weights(w0);
+                    let qw1 = $weights(w1);
+                    let ax0 = _mm256_sign_epi8(qw0, qw0);
+                    let ax1 = _mm256_sign_epi8(qw1, qw1);
+                    for t in 0..4 {
+                        let dxt = dx[t][i];
+                        let qy = load_i8x32(&qx[t][i]);
+                        let d0 = _mm256_set1_ps(hw0 * dxt);
+                        let sy0 = _mm256_sign_epi8(qy, qw0);
+                        acc0[t] = _mm256_fmadd_ps(d0, $mul(ax0, sy0), acc0[t]);
+                        let d1 = _mm256_set1_ps(hw1 * dxt);
+                        let sy1 = _mm256_sign_epi8(qy, qw1);
+                        acc1[t] = _mm256_fmadd_ps(d1, $mul(ax1, sy1), acc1[t]);
+                    }
+                }
+                [
+                    [
+                        hsum_f32x8(acc0[0]),
+                        hsum_f32x8(acc0[1]),
+                        hsum_f32x8(acc0[2]),
+                        hsum_f32x8(acc0[3]),
+                    ],
+                    [
+                        hsum_f32x8(acc1[0]),
+                        hsum_f32x8(acc1[1]),
+                        hsum_f32x8(acc1[2]),
+                        hsum_f32x8(acc1[3]),
+                    ],
+                ]
+            }
+        };
+    }
+
+    small_block_kernels_2x4!(
+        "avx2,fma,f16c",
+        q8_0_avx2_2x4,
+        Q8_0_BYTES,
+        q8_0_weights,
+        mul_sum_us8_avx2
+    );
+    small_block_kernels_2x4!(
+        "avx2,fma,f16c",
+        q5_0_avx2_2x4,
+        Q5_0_BYTES,
+        q5_0_weights,
+        mul_sum_us8_avx2
+    );
+    small_block_kernels_2x4!(
+        "avx2,fma,f16c,avxvnni",
+        q8_0_vnni_2x4,
+        Q8_0_BYTES,
+        q8_0_weights,
+        mul_sum_us8_vnni
+    );
+    small_block_kernels_2x4!(
+        "avx2,fma,f16c,avxvnni",
+        q5_0_vnni_2x4,
+        Q5_0_BYTES,
+        q5_0_weights,
+        mul_sum_us8_vnni
+    );
+
     /// 4-token `q4_k_avx2`.
     ///
     /// # Safety
@@ -1316,6 +1409,97 @@ unsafe fn dot_row_q8_x4(
         }
         _ => None,
     }
+}
+
+/// Two rows at once: `out[k][b] = dot_row_q8(qtypes[k], rows[k], xs[b])`, bit
+/// for bit. When both rows have the same small-block type (Q5_0/Q8_0) on a
+/// SIMD path, tokens go 4 at a time through a 2-row x 4-token kernel; the rest
+/// (other types, mixed pairs, < 4 leftover tokens) goes per row through
+/// `dot_row_q8_multi`.
+pub fn dot_rows_q8_multi(
+    qtypes: [u32; 2],
+    rows: [&[u8]; 2],
+    xs: &[&QuantizedAct],
+    out: [&mut [f32]; 2],
+) {
+    // SAFETY: simd() only returns Avx2/Vnni after detecting their features.
+    unsafe { dot_rows_q8_multi_with(simd(), qtypes, rows, xs, out) }
+}
+
+/// dot_rows_q8_multi on an explicit kernel path.
+///
+/// # Safety
+/// As for `dot_row_q8_with`.
+unsafe fn dot_rows_q8_multi_with(
+    simd: Simd,
+    qtypes: [u32; 2],
+    rows: [&[u8]; 2],
+    xs: &[&QuantizedAct],
+    out: [&mut [f32]; 2],
+) {
+    let [o0, o1] = out;
+    assert!(
+        o0.len() == xs.len() && o1.len() == xs.len(),
+        "dot_rows_q8_multi: xs/out lengths differ"
+    );
+    #[allow(unused_mut)]
+    let mut done = 0;
+    #[cfg(target_arch = "x86_64")]
+    if qtypes[0] == qtypes[1] {
+        for g in xs.chunks_exact(4) {
+            let g: [&QuantizedAct; 4] = g.try_into().unwrap();
+            // SAFETY: guaranteed by our caller.
+            match unsafe { dot_rows_q8_2x4(simd, qtypes[0], rows, g) } {
+                Some([r0, r1]) => {
+                    o0[done..done + 4].copy_from_slice(&r0);
+                    o1[done..done + 4].copy_from_slice(&r1);
+                }
+                None => break,
+            }
+            done += 4;
+        }
+    }
+    // SAFETY: guaranteed by our caller.
+    unsafe {
+        dot_row_q8_multi_with(simd, qtypes[0], rows[0], &xs[done..], &mut o0[done..]);
+        dot_row_q8_multi_with(simd, qtypes[1], rows[1], &xs[done..], &mut o1[done..]);
+    }
+}
+
+/// 2 rows of type `qtype_id` x 4 tokens through a 2x4 SIMD kernel, or None if
+/// there is none for this path/type (or a view is missing).
+///
+/// # Safety
+/// As for `dot_row_q8_with`.
+#[cfg(target_arch = "x86_64")]
+#[allow(clippy::needless_range_loop)] // t indexes xs and the view arrays
+unsafe fn dot_rows_q8_2x4(
+    simd: Simd,
+    qtype_id: u32,
+    rows: [&[u8]; 2],
+    xs: [&QuantizedAct; 4],
+) -> Option<[[f32; 4]; 2]> {
+    if !matches!(qtype_id, Q5_0 | Q8_0) || simd == Simd::Scalar {
+        return None;
+    }
+    let n = xs[0].len();
+    let mut dx: [&[f32]; 4] = [&[]; 4];
+    let mut qx: [&[[i8; 32]]; 4] = [&[]; 4];
+    for t in 0..4 {
+        let (d, q) = xs[t].b32.as_ref()?;
+        dx[t] = d.as_slice();
+        qx[t] = q.as_slice();
+    }
+    let rb = row_bytes(qtype_id, n);
+    let rows = [&rows[0][..rb], &rows[1][..rb]];
+    // SAFETY (unsafe calls below): guaranteed by our caller.
+    Some(match (qtype_id, simd) {
+        (Q8_0, Simd::Avx2) => unsafe { x86::q8_0_avx2_2x4(rows, dx, qx) },
+        (Q8_0, Simd::Vnni) => unsafe { x86::q8_0_vnni_2x4(rows, dx, qx) },
+        (_, Simd::Avx2) => unsafe { x86::q5_0_avx2_2x4(rows, dx, qx) },
+        (_, Simd::Vnni) => unsafe { x86::q5_0_vnni_2x4(rows, dx, qx) },
+        (_, Simd::Scalar) => return None,
+    })
 }
 
 #[cfg(test)]
@@ -1977,6 +2161,49 @@ mod tests {
                             want.to_bits(),
                             "qt {qt} n {n} B {nb} token {b} {p:?}: multi {got} vs single {want}"
                         );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dot_rows_q8_multi_matches_single() {
+        let mut paths = vec![Simd::Scalar];
+        paths.extend(simd_paths());
+        let mut rng = Lcg(0x2a4);
+        let n = 896;
+        for &qts in &[[Q5_0, Q5_0], [Q8_0, Q8_0], [Q5_0, Q8_0], [Q8_0, Q5_0]] {
+            for nb in [1usize, 3, 4, 5, 8, 13] {
+                let r0 = synthetic_row(qts[0], n, &mut rng);
+                let r1 = synthetic_row(qts[1], n, &mut rng);
+                let qas: Vec<QuantizedAct> = (0..nb)
+                    .map(|_| QuantizedAct::new(&synthetic_x(n, &mut rng)))
+                    .collect();
+                let xs: Vec<&QuantizedAct> = qas.iter().collect();
+                for &p in &paths {
+                    let mut o0 = vec![f32::NAN; nb];
+                    let mut o1 = vec![f32::NAN; nb];
+                    // SAFETY: Scalar, or a path listed by simd_paths().
+                    unsafe {
+                        dot_rows_q8_multi_with(
+                            p,
+                            qts,
+                            [&r0[..], &r1[..]],
+                            &xs,
+                            [&mut o0[..], &mut o1[..]],
+                        )
+                    };
+                    for (k, (row, out)) in [(&r0, &o0), (&r1, &o1)].into_iter().enumerate() {
+                        for (b, (&got, qa)) in out.iter().zip(&qas).enumerate() {
+                            // SAFETY: as above.
+                            let want = unsafe { dot_row_q8_with(p, qts[k], row, qa) };
+                            assert_eq!(
+                                got.to_bits(),
+                                want.to_bits(),
+                                "qts {qts:?} row {k} B {nb} token {b} {p:?}: rows {got} vs single {want}"
+                            );
+                        }
                     }
                 }
             }
