@@ -27,6 +27,8 @@ pub const Q8_0: u32 = 8;
 pub const Q4_K: u32 = 12;
 pub const Q6_K: u32 = 14;
 
+pub mod r8;
+
 /// (values per block, bytes per block)
 fn block_info(qtype_id: u32) -> (usize, usize) {
     match qtype_id {
@@ -4165,5 +4167,213 @@ mod tests {
     #[should_panic(expected = "expected scalar, avx2 or vnni")]
     fn simd_choice_rejects_unknown() {
         choose_simd(Some("sse9"));
+    }
+
+    // ---- r8 (8-row interleaved K-quant) kernels ----
+
+    /// `rows` rows of `qt`, width n: random, and K-quant extremes per block.
+    fn r8_matrix(qt: u32, rows: usize, n: usize, extreme: bool, rng: &mut Lcg) -> Vec<u8> {
+        (0..rows)
+            .flat_map(|r| {
+                if extreme {
+                    kquant_extreme_row(qt, n, r * 7, rng)
+                } else {
+                    synthetic_row(qt, n, rng)
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn r8_repack_roundtrip() {
+        let mut rng = Lcg(0x7238);
+        for qt in [Q4_K, Q6_K] {
+            for n in [256usize, 1024] {
+                for extreme in [false, true] {
+                    let rows = 16;
+                    let m = r8_matrix(qt, rows, n, extreme, &mut rng);
+                    let p = r8::repack(qt, &m, rows, n);
+                    let gb = r8::group_bytes(qt, n);
+                    assert_eq!(p.len(), rows / 8 * gb);
+                    // Q6_K keeps its size; Q4_K grows 144 -> 148 bytes per row block.
+                    let per_row_block = if qt == Q4_K { 148 } else { 210 };
+                    assert_eq!(p.len(), rows * (n / QK_K) * per_row_block);
+                    let rb = row_bytes(qt, n);
+                    for r in 0..rows {
+                        let mut want = vec![0f32; n];
+                        dequant(qt, &m[r * rb..(r + 1) * rb], &mut want);
+                        let mut got = vec![0f32; n];
+                        r8::dequant_row(qt, &p[r / 8 * gb..(r / 8 + 1) * gb], r % 8, &mut got);
+                        for k in 0..n {
+                            assert_eq!(
+                                got[k].to_bits(),
+                                want[k].to_bits(),
+                                "qt {qt} n {n} extreme {extreme} row {r} k {k}: {} vs {}",
+                                got[k],
+                                want[k]
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Scalar GEMV per token is the reference; every path's GEMV and GEMM
+    /// (every batch size) must equal it bit for bit.
+    #[test]
+    fn r8_paths_and_gemm_match_scalar_gemv() {
+        let mut paths = vec![Simd::Scalar];
+        paths.extend(simd_paths());
+        let mut rng = Lcg(0x8888);
+        let counts: Vec<usize> = (1..=9).chain([64, 67]).collect();
+        for qt in [Q4_K, Q6_K] {
+            for (n, extreme) in [(256usize, false), (256, true), (1024, false), (4864, true)] {
+                let rows = 16;
+                let m = r8_matrix(qt, rows, n, extreme, &mut rng);
+                let p = r8::repack(qt, &m, rows, n);
+                for &nt in &counts {
+                    if n == 4864 && !matches!(nt, 1 | 5 | 67) {
+                        continue;
+                    }
+                    let qas: Vec<QuantizedAct> = (0..nt)
+                        .map(|t| {
+                            let x = if extreme || t % 2 == 1 {
+                                extreme_x(n, &mut rng)
+                            } else {
+                                synthetic_x(n, &mut rng)
+                            };
+                            QuantizedAct::for_types(&x, &[qt])
+                        })
+                        .collect();
+                    let xs: Vec<&QuantizedAct> = qas.iter().collect();
+                    let want: Vec<Vec<f32>> = qas
+                        .iter()
+                        .map(|qa| {
+                            let mut o = vec![f32::NAN; rows];
+                            // SAFETY: Scalar is always valid.
+                            unsafe { r8::gemv_with(Simd::Scalar, qt, &p, qa, &mut o, 0) };
+                            o
+                        })
+                        .collect();
+                    for &path in &paths {
+                        for pf in [0usize, 64, 8192] {
+                            for (t, qa) in qas.iter().enumerate() {
+                                let mut o = vec![f32::NAN; rows];
+                                // SAFETY: Scalar, or a path listed by simd_paths().
+                                unsafe { r8::gemv_with(path, qt, &p, qa, &mut o, pf) };
+                                for r in 0..rows {
+                                    assert_eq!(
+                                        o[r].to_bits(),
+                                        want[t][r].to_bits(),
+                                        "gemv qt {qt} n {n} {path:?} pf {pf} token {t} row {r}: {} vs {}",
+                                        o[r],
+                                        want[t][r]
+                                    );
+                                }
+                            }
+                        }
+                        // Slot layout wider than the batch: padding slots untouched.
+                        let st = nt + 3;
+                        let mut w = vec![f32::NAN; rows * st];
+                        // SAFETY: as above.
+                        unsafe { r8::gemm_with(path, qt, &p, &xs, &mut w, st) };
+                        for r in 0..rows {
+                            for t in 0..st {
+                                let (got, want) = (w[r * st + t], want.get(t).map(|v| v[r]));
+                                match want {
+                                    Some(v) => assert_eq!(got.to_bits(), v.to_bits()),
+                                    None => assert!(got.is_nan(), "padding slot written"),
+                                }
+                            }
+                        }
+                        let mut o = vec![f32::NAN; rows * nt];
+                        // SAFETY: as above.
+                        unsafe { r8::gemm_with(path, qt, &p, &xs, &mut o, nt) };
+                        for r in 0..rows {
+                            for t in 0..nt {
+                                assert_eq!(
+                                    o[r * nt + t].to_bits(),
+                                    want[t][r].to_bits(),
+                                    "gemm qt {qt} n {n} {path:?} B {nt} token {t} row {r}: {} vs {}",
+                                    o[r * nt + t],
+                                    want[t][r]
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Distance in ulps between two finite f32s (sign-aware).
+    fn ulps(a: f32, b: f32) -> u64 {
+        let key = |v: f32| {
+            let i = v.to_bits() as i32;
+            if i < 0 {
+                i32::MIN as i64 - i as i64
+            } else {
+                i as i64
+            }
+        };
+        (key(a) - key(b)).unsigned_abs()
+    }
+
+    /// The new scheme against an f64 dot of the dequantized weights and
+    /// activations (relative to Σ|w x|), and against today's kernel. Prints
+    /// the deltas; asserts only the f64 bound.
+    #[test]
+    fn r8_accuracy() {
+        let mut rng = Lcg(0xacc0);
+        for qt in [Q4_K, Q6_K] {
+            for n in [256, 4864, 18944] {
+                let rows = 64;
+                let m = r8_matrix(qt, rows, n, false, &mut rng);
+                let p = r8::repack(qt, &m, rows, n);
+                let rb = row_bytes(qt, n);
+                let (mut new_rel, mut old_rel, mut max_ulp, mut sum_ulp, mut cnt) =
+                    (0f64, 0f64, 0u64, 0u64, 0u64);
+                for _ in 0..4 {
+                    let x = synthetic_x(n, &mut rng);
+                    let qa = QuantizedAct::for_types(&x, &[qt]);
+                    let xq = dequant_act(qt, &qa);
+                    let mut o = vec![0f32; rows];
+                    r8::gemv(qt, &p, &qa, &mut o, 8192);
+                    for r in 0..rows {
+                        let row = &m[r * rb..(r + 1) * rb];
+                        let mut w = vec![0f32; n];
+                        dequant(qt, row, &mut w);
+                        let exact: f64 =
+                            w.iter().zip(&xq).map(|(a, b)| *a as f64 * *b as f64).sum();
+                        let mag: f64 = w
+                            .iter()
+                            .zip(&xq)
+                            .map(|(a, b)| (*a as f64 * *b as f64).abs())
+                            .sum::<f64>()
+                            .max(f64::MIN_POSITIVE);
+                        let old = dot_row_q8(qt, row, &qa);
+                        let e_new = (o[r] as f64 - exact).abs() / mag;
+                        let e_old = (old as f64 - exact).abs() / mag;
+                        assert!(
+                            e_new <= 1e-5,
+                            "qt {qt} n {n} row {r}: r8 {} vs exact {exact} (rel {e_new:e})",
+                            o[r]
+                        );
+                        new_rel = new_rel.max(e_new);
+                        old_rel = old_rel.max(e_old);
+                        let u = ulps(o[r], old);
+                        max_ulp = max_ulp.max(u);
+                        sum_ulp += u;
+                        cnt += 1;
+                    }
+                }
+                println!(
+                    "r8 accuracy qt {qt} n {n}: max rel err vs f64 r8 {new_rel:.2e} old {old_rel:.2e}; \
+                     r8 vs old max {max_ulp} ulp, mean {:.1} ulp",
+                    sum_ulp as f64 / cnt as f64
+                );
+            }
+        }
     }
 }

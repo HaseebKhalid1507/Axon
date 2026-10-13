@@ -316,13 +316,74 @@ pub struct Model {
     pub tensors: Vec<Tensor>,
     pub data: memmap2::Mmap,
     pub data_offset: u64,
+    /// `data` maps the file (true) or is the anonymous copy (false).
+    file_backed: bool,
+    /// Byte ranges of `data` handed back by `release` on the anonymous copy
+    /// (zeroed there); `tensor_data` refuses tensors that overlap one.
+    released: std::sync::Mutex<Vec<std::ops::Range<usize>>>,
+    any_released: std::sync::atomic::AtomicBool,
 }
+
+/// `release` only drops whole aligned blocks of this size inside a tensor:
+/// a multiple of every page size Linux uses (4/16/64 KB), so the neighbours'
+/// bytes are never touched.
+const RELEASE_ALIGN: usize = 64 << 10;
 
 impl Model {
     /// In bounds for every tensor of a loaded model: `parse` checks the ranges.
-    pub fn tensor_data(&self, t: &Tensor) -> &[u8] {
+    fn tensor_range(&self, t: &Tensor) -> std::ops::Range<usize> {
         let s = (self.data_offset + t.offset) as usize;
-        &self.data[s..s + t.n_bytes as usize]
+        s..s + t.n_bytes as usize
+    }
+
+    /// The tensor's bytes. Panics if they were `release`d from the anonymous
+    /// copy (they'd read as zeros).
+    pub fn tensor_data(&self, t: &Tensor) -> &[u8] {
+        let r = self.tensor_range(t);
+        if self.any_released.load(std::sync::atomic::Ordering::Acquire) {
+            let rel = self.released.lock().unwrap();
+            assert!(
+                !rel.iter().any(|x| x.start < r.end && r.start < x.end),
+                "tensor {} was released after repacking; load the model again to read it",
+                t.name
+            );
+        }
+        &self.data[r]
+    }
+
+    /// Whether `data` maps the file (vs the anonymous copy, see `map_weights`).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn file_backed(&self) -> bool {
+        self.file_backed
+    }
+
+    /// Hand back the memory of a tensor that was copied elsewhere and won't be
+    /// read from here again (MADV_DONTNEED, whole aligned blocks inside the
+    /// tensor only). On a file mapping the pages just leave this mapping and a
+    /// later read faults them back in from the file. On the anonymous copy they
+    /// come back as zeros, so the range is recorded and `tensor_data` panics
+    /// on it from then on.
+    pub fn release(&self, t: &Tensor) {
+        let r = self.tensor_range(t);
+        let base = self.data.as_ptr() as usize;
+        let start = (base + r.start).next_multiple_of(RELEASE_ALIGN) - base;
+        let end = (base + r.end) / RELEASE_ALIGN * RELEASE_ALIGN - base;
+        if start >= end {
+            return;
+        }
+        if !self.file_backed {
+            self.released.lock().unwrap().push(r);
+            self.any_released
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        // SAFETY: [start, end) is inside `data` and inside tensor t, whose
+        // bytes nothing reads again (on the anonymous copy `tensor_data`
+        // enforces that; the slices handed out before were all consumed by
+        // the repack). On a file mapping the bytes don't change at all.
+        let _ = unsafe {
+            self.data
+                .unchecked_advise_range(memmap2::UncheckedAdvice::DontNeed, start, end - start)
+        };
     }
     pub fn meta_u32(&self, key: &str) -> Option<u32> {
         self.metadata
@@ -385,12 +446,16 @@ impl Model {
 ///
 /// Assumes Linux >= 6.7 for 2 MB-aligned anonymous mappings; on older kernels the
 /// first and last partial 2 MB of the copy use 4 KB pages, which costs nothing much.
-fn map_weights(file: &File) -> io::Result<memmap2::Mmap> {
+/// Returns the mapping and whether it maps the file. `copy` overrides the
+/// choice (Some(true): copy, Some(false): map the file).
+fn map_weights(file: &File, copy: Option<bool>) -> io::Result<(memmap2::Mmap, bool)> {
     let len = file.metadata()?.len() as usize;
-    let copy = match std::env::var("AXON_MMAP").as_deref() {
-        Ok("0") => true,
-        Ok(_) => false,
-        Err(_) => match mem_available() {
+    let env = std::env::var("AXON_MMAP");
+    let copy = match (copy, env.as_deref()) {
+        (Some(c), _) => c,
+        (None, Ok("0")) => true,
+        (None, Ok(_)) => false,
+        (None, Err(_)) => match mem_available() {
             Some(avail) if len as u64 > avail / 10 * 6 => {
                 eprintln!(
                     "note: model is {} MB, {} MB available; mapping the file instead of \
@@ -405,7 +470,7 @@ fn map_weights(file: &File) -> io::Result<memmap2::Mmap> {
     };
     if !copy {
         // SAFETY: the file is opened read-only and not modified while mapped.
-        return unsafe { memmap2::Mmap::map(file) };
+        return Ok((unsafe { memmap2::Mmap::map(file)? }, true));
     }
     let mut anon = memmap2::MmapMut::map_anon(len.max(1))?;
     #[cfg(target_os = "linux")]
@@ -424,7 +489,7 @@ fn map_weights(file: &File) -> io::Result<memmap2::Mmap> {
             e
         }
     })?;
-    anon.make_read_only()
+    Ok((anon.make_read_only()?, false))
 }
 
 /// `MemAvailable` from /proc/meminfo, in bytes.
@@ -436,9 +501,14 @@ fn mem_available() -> Option<u64> {
 }
 
 pub fn load(path: &str) -> io::Result<Model> {
+    load_with(path, None)
+}
+
+/// `load`, with the copy-vs-map choice forced (`copy`: see `map_weights`).
+pub fn load_with(path: &str, copy: Option<bool>) -> io::Result<Model> {
     let file = File::open(path)?;
     let len = file.metadata()?.len() as usize;
-    let data = map_weights(&file)?;
+    let (data, file_backed) = map_weights(&file, copy)?;
     let h = parse(&data[..len.min(data.len())])?;
     Ok(Model {
         arch: h.arch,
@@ -446,6 +516,9 @@ pub fn load(path: &str) -> io::Result<Model> {
         tensors: h.tensors,
         data,
         data_offset: h.data_offset,
+        file_backed,
+        released: Default::default(),
+        any_released: Default::default(),
     })
 }
 
@@ -674,6 +747,9 @@ pub fn build_for_test(meta: &[(&str, Val)], tensors: &[(&str, &[u64], u32)]) -> 
         tensors: h.tensors,
         data: data.make_read_only().unwrap(),
         data_offset: h.data_offset,
+        file_backed: false,
+        released: Default::default(),
+        any_released: Default::default(),
     }
 }
 

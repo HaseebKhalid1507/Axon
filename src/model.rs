@@ -6,27 +6,99 @@ use crate::gguf::{Model, Tensor, Val};
 use crate::pool::{self, Pool};
 use crate::quant::{
     DecodeCfg, F16, F32, Q4_K, Q5_0, Q6_K, Q8_0, QuantizedAct, batch_slots, dequant,
-    dot_row_q8_multi, dot_rows_q8, dot_rows_q8_multi, row_bytes,
+    dot_row_q8_multi, dot_rows_q8, dot_rows_q8_multi, r8, row_bytes,
 };
 
-/// The weights of one transformer block, borrowed from the mmap.
+/// A weight matrix: its bytes in the model's mapping, or its 8-row
+/// interleaved repack (quant::r8). A repacked matrix goes through the r8
+/// kernels in every path (decode, prefill, swiglu, the verify head), so all
+/// of them give the same bits; the others use the per-row kernels.
+struct Weight<'a> {
+    t: &'a Tensor,
+    /// The tensor's bytes; None when repacked (they may have been released).
+    data: Option<&'a [u8]>,
+    r8: Option<memmap2::Mmap>,
+}
+
+impl<'a> Weight<'a> {
+    fn qt(&self) -> u32 {
+        self.t.qtype.id
+    }
+
+    fn rows(&self) -> usize {
+        self.t.dims[1] as usize
+    }
+
+    /// Repack a Q4_K/Q6_K matrix with rows % 8 == 0 if `repack`, into
+    /// anonymous memory with transparent huge pages requested (decode walks
+    /// it every token; AXON_R8_THP=0 skips the request). Then, if `release`,
+    /// the original bytes are handed back (`Model::release`) so the weights
+    /// aren't resident twice. Never release a tensor read elsewhere: the
+    /// token embedding (a tied output matrix is the same tensor).
+    fn load(m: &'a Model, t: &'a Tensor, repack: bool, release: bool) -> Weight<'a> {
+        let (qt, rows, n) = (t.qtype.id, t.dims[1] as usize, t.dims[0] as usize);
+        if !repack || !r8::can_repack(qt, rows, n) {
+            return Weight {
+                t,
+                data: Some(m.tensor_data(t)),
+                r8: None,
+            };
+        }
+        let len = r8::repacked_len(qt, rows, n);
+        let mut buf = memmap2::MmapMut::map_anon(len).expect("r8: anonymous mapping");
+        #[cfg(target_os = "linux")]
+        if std::env::var("AXON_R8_THP").map_or(true, |v| v != "0") {
+            // Before the first touch, as in gguf::map_weights. Failure only costs speed.
+            let _ = buf.advise(memmap2::Advice::HugePage);
+        }
+        r8::repack_into(qt, m.tensor_data(t), rows, n, &mut buf);
+        if release {
+            m.release(t);
+        }
+        Weight {
+            t,
+            data: None,
+            r8: Some(buf.make_read_only().expect("r8: mprotect")),
+        }
+    }
+
+    /// The tensor's bytes (not repacked).
+    fn bytes(&self) -> &'a [u8] {
+        self.data.expect("repacked weight has no raw bytes")
+    }
+
+    /// Rows r0..r0 + k of a repacked matrix as whole r8 groups, plus the
+    /// rest of the matrix when `to_end` (prefetch room, see `r8::gemv`).
+    fn groups(&self, n_in: usize, r0: usize, k: usize, to_end: bool) -> &[u8] {
+        let p = self.r8.as_deref().expect("not repacked");
+        assert!(
+            r0.is_multiple_of(8) && k.is_multiple_of(8),
+            "{}: r8 rows not whole groups",
+            self.t.name
+        );
+        let gb = r8::group_bytes(self.qt(), n_in);
+        let end = if to_end { p.len() } else { (r0 + k) / 8 * gb };
+        &p[r0 / 8 * gb..end]
+    }
+}
+
+/// The weights of one transformer block, borrowed from the mapping or repacked.
 struct Layer<'a> {
     attn_norm: Vec<f32>,
-    wq: &'a Tensor,
-    wk: &'a Tensor,
-    wv: &'a Tensor,
+    wq: Weight<'a>,
+    wk: Weight<'a>,
+    wv: Weight<'a>,
     bq: Option<Vec<f32>>,
     bk: Option<Vec<f32>>,
     bv: Option<Vec<f32>>,
-    wo: &'a Tensor,
+    wo: Weight<'a>,
     ffn_norm: Vec<f32>,
-    w_gate: &'a Tensor,
-    w_up: &'a Tensor,
-    w_down: &'a Tensor,
+    w_gate: Weight<'a>,
+    w_up: Weight<'a>,
+    w_down: Weight<'a>,
 }
 
 pub struct Qwen2<'a> {
-    m: &'a Model,
     pub n_layers: usize,
     pub dim: usize,
     pub n_heads: usize,
@@ -36,8 +108,10 @@ pub struct Qwen2<'a> {
     eps: f32,
     rope_base: f64,
     token_embd: &'a Tensor,
+    /// token_embd's bytes (never released: see `Weight::load`)
+    embd: &'a [u8],
     output_norm: Vec<f32>,
-    output: &'a Tensor,
+    output: Weight<'a>,
     layers: Vec<Layer<'a>>,
 }
 
@@ -208,7 +282,19 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
 }
 
 impl<'a> Qwen2<'a> {
+    /// The model, with Q4_K/Q6_K matrices repacked for the r8 kernels unless
+    /// AXON_REPACK=0 (the per-row kernels only: the branch's bits).
     pub fn new(m: &'a Model) -> Qwen2<'a> {
+        Self::new_with(m, std::env::var("AXON_REPACK").map_or(true, |v| v != "0"))
+    }
+
+    pub fn new_with(m: &'a Model, repack: bool) -> Qwen2<'a> {
+        Self::build(m, repack, false)
+    }
+
+    /// `tie`: use the token embedding as the output matrix even if the model
+    /// has its own (tests: the tied-embedding case on any model).
+    fn build(m: &'a Model, repack: bool, tie: bool) -> Qwen2<'a> {
         if let Err(e) = check_supported(m) {
             panic!("{e}");
         }
@@ -229,32 +315,37 @@ impl<'a> Qwen2<'a> {
         // ne1 of the embedding matrix is the vocab size.
         let vocab = token_embd.dims[1] as usize;
         // Some models tie output to the embedding; qwen2.5-0.5b ships a separate one.
-        let output = find_opt(m, "output.weight").unwrap_or(token_embd);
+        let out_t = match find_opt(m, "output.weight") {
+            Some(t) if !tie => t,
+            _ => token_embd,
+        };
+        // A tied output matrix is the embedding, which `embed` keeps reading.
+        let output = Weight::load(m, out_t, repack, !std::ptr::eq(out_t, token_embd));
         let output_norm = load_vec(m, find(m, "output_norm.weight"));
 
-        let layers = (0..n_layers)
-            .map(|i| {
-                let t = |s: &str| find(m, &format!("blk.{i}.{s}"));
-                let bias = |s: &str| find_opt(m, &format!("blk.{i}.{s}")).map(|t| load_vec(m, t));
-                Layer {
-                    attn_norm: load_vec(m, t("attn_norm.weight")),
-                    wq: t("attn_q.weight"),
-                    wk: t("attn_k.weight"),
-                    wv: t("attn_v.weight"),
-                    bq: bias("attn_q.bias"),
-                    bk: bias("attn_k.bias"),
-                    bv: bias("attn_v.bias"),
-                    wo: t("attn_output.weight"),
-                    ffn_norm: load_vec(m, t("ffn_norm.weight")),
-                    w_gate: t("ffn_gate.weight"),
-                    w_up: t("ffn_up.weight"),
-                    w_down: t("ffn_down.weight"),
-                }
-            })
-            .collect();
+        // One pool task per layer (`floats` set so it never runs inline):
+        // repacking is a pass over all the weights.
+        let layers = par_map(n_layers, INLINE_WORK + 1, |i| {
+            let t = |s: &str| find(m, &format!("blk.{i}.{s}"));
+            let w = |s: &str| Weight::load(m, t(s), repack, true);
+            let bias = |s: &str| find_opt(m, &format!("blk.{i}.{s}")).map(|t| load_vec(m, t));
+            Layer {
+                attn_norm: load_vec(m, t("attn_norm.weight")),
+                wq: w("attn_q.weight"),
+                wk: w("attn_k.weight"),
+                wv: w("attn_v.weight"),
+                bq: bias("attn_q.bias"),
+                bk: bias("attn_k.bias"),
+                bv: bias("attn_v.bias"),
+                wo: w("attn_output.weight"),
+                ffn_norm: load_vec(m, t("ffn_norm.weight")),
+                w_gate: w("ffn_gate.weight"),
+                w_up: w("ffn_up.weight"),
+                w_down: w("ffn_down.weight"),
+            }
+        });
 
         Qwen2 {
-            m,
             n_layers,
             dim,
             n_heads,
@@ -264,6 +355,7 @@ impl<'a> Qwen2<'a> {
             eps,
             rope_base,
             token_embd,
+            embd: m.tensor_data(token_embd),
             output_norm,
             output,
             layers,
@@ -292,51 +384,86 @@ impl<'a> Qwen2<'a> {
     }
 
     /// y = W x. W has ne1 rows of ne0 values each; y[o] = row_o · x.
-    fn matvec(&self, w: &Tensor, x: &[f32]) -> Vec<f32> {
+    fn matvec(&self, w: &Weight, x: &[f32]) -> Vec<f32> {
         let [y] = self.matvec_many([w], x);
         y
+    }
+
+    /// Joint row space of `ws` for input width `n_in`: starts[i] is where
+    /// matrix i begins, plus the total and the row granularity pool chunks
+    /// must keep: 8 (whole r8 groups) if any matrix is repacked, every start
+    /// then a multiple of 8; else 1.
+    fn joint_rows<const N: usize>(ws: [&Weight; N], n_in: usize) -> ([usize; N], usize, usize) {
+        let mut starts = [0usize; N];
+        let mut total = 0;
+        for (i, w) in ws.iter().enumerate() {
+            assert_eq!(w.t.dims[0] as usize, n_in, "matmul {}: input len", w.t.name);
+            starts[i] = total;
+            total += w.rows();
+        }
+        let align = if ws.iter().any(|w| w.r8.is_some()) {
+            8
+        } else {
+            1
+        };
+        assert!(
+            starts.iter().all(|s| s % align == 0),
+            "repacked matrices must start at a multiple of 8 rows"
+        );
+        (starts, total, align)
+    }
+
+    /// Decode rows r0..r0 + out.len() of `w` · x. Prefetch stays inside the
+    /// rows the caller owns, or runs to the matrix's end when `own_all`.
+    fn rows_vec(
+        &self,
+        w: &Weight,
+        r0: usize,
+        x: &QuantizedAct,
+        out: &mut [f32],
+        cfg: DecodeCfg,
+        own_all: bool,
+    ) {
+        let k = out.len();
+        if w.r8.is_some() {
+            let groups = w.groups(x.len(), r0, k, own_all);
+            r8::gemv(w.qt(), groups, x, out, cfg.prefetch);
+        } else {
+            let (qt, data) = (w.qt(), w.bytes());
+            let rb = row_bytes(qt, x.len());
+            let lim = if own_all { data.len() } else { (r0 + k) * rb };
+            dot_rows_q8(qt, &data[r0 * rb..lim], x, out, cfg);
+        }
     }
 
     /// Several matrices applied to the same input in one parallel pass:
     /// one fork/join and one quantization of x instead of one per matrix.
     /// Returns one output vector per matrix, in order.
-    fn matvec_many<const N: usize>(&self, ws: [&Tensor; N], x: &[f32]) -> [Vec<f32>; N] {
+    fn matvec_many<const N: usize>(&self, ws: [&Weight; N], x: &[f32]) -> [Vec<f32>; N] {
         // Quantize x to 8 bits once; every row then does integer multiply-adds
         // against its packed weights instead of decoding them to floats.
-        let types = ws.map(|w| w.qtype.id);
+        let types = ws.map(|w| w.qt());
         let xq = QuantizedAct::for_types(x, &types);
         // All matrices' rows form one index space; starts[i] is where matrix i begins.
-        let mut starts = [0usize; N];
-        let mut total = 0;
-        for (i, w) in ws.iter().enumerate() {
-            assert_eq!(w.dims[0] as usize, x.len(), "matvec {}: input len", w.name);
-            starts[i] = total;
-            total += w.dims[1] as usize;
-        }
-        let info = ws.map(|w| {
-            let qt = w.qtype.id;
-            (qt, row_bytes(qt, x.len()), self.m.tensor_data(w))
-        });
+        let (starts, total, align) = Self::joint_rows(ws, x.len());
         // Every output row is an independent dot product, so split rows across
         // cores. About 4 chunks per thread lets the fast and efficiency cores
         // even out; at most 64 rows keeps chunk claiming cheap.
         let mut out = vec![0f32; total];
-        let chunk = (total / (Pool::global().threads() * 4)).clamp(4, 64);
+        let chunk = (total / (Pool::global().threads() * 4))
+            .clamp(4, 64)
+            .next_multiple_of(align);
         let (cfg, own_all) = Self::decode_cfg();
         pool::for_each_chunk_mut(&mut out, chunk, |c, mut ys| {
             // The chunk's rows, one run per matrix it touches, several rows
-            // per kernel call. Prefetch stays inside the rows this chunk owns
-            // (to the matrix's end when one thread does them all).
+            // per kernel call.
             let mut g = c * chunk;
             while !ys.is_empty() {
                 let t = starts.iter().rposition(|&s| s <= g).unwrap();
-                let (qt, rb, data) = info[t];
                 let end = starts.get(t + 1).copied().unwrap_or(total);
                 let k = (end - g).min(ys.len());
                 let (run, rest) = std::mem::take(&mut ys).split_at_mut(k);
-                let o = g - starts[t];
-                let lim = if own_all { data.len() } else { (o + k) * rb };
-                dot_rows_q8(qt, &data[o * rb..lim], &xq, run, cfg);
+                self.rows_vec(ws[t], g - starts[t], &xq, run, cfg, own_all);
                 g += k;
                 ys = rest;
             }
@@ -353,32 +480,25 @@ impl<'a> Qwen2<'a> {
     /// silu(gate x) * (up x), row by row: each task computes row r of both
     /// matrices and combines them, so the exp() runs on every core instead of
     /// in a serial pass after the matvec.
-    fn matvec_swiglu(&self, gate: &Tensor, up: &Tensor, x: &[f32]) -> Vec<f32> {
-        let n = gate.dims[1] as usize;
-        for w in [gate, up] {
-            assert_eq!(w.dims[0] as usize, x.len(), "matvec {}: input len", w.name);
-        }
-        assert_eq!(up.dims[1] as usize, n, "swiglu: gate/up row counts differ");
-        let xq = QuantizedAct::for_types(x, &[gate.qtype.id, up.qtype.id]);
-        let [g, u] = [gate, up].map(|w| {
-            let qt = w.qtype.id;
-            (qt, row_bytes(qt, x.len()), self.m.tensor_data(w))
-        });
+    fn matvec_swiglu(&self, gate: &Weight, up: &Weight, x: &[f32]) -> Vec<f32> {
+        let n = gate.rows();
+        let (_, _, a0) = Self::joint_rows([gate], x.len());
+        let (_, _, a1) = Self::joint_rows([up], x.len());
+        assert_eq!(up.rows(), n, "swiglu: gate/up row counts differ");
+        let xq = QuantizedAct::for_types(x, &[gate.qt(), up.qt()]);
         let mut out = vec![0f32; n];
         // Each row is two dot products, so half the rows per chunk of matvec_many.
         const MAX_CHUNK: usize = 32;
-        let chunk = (n / (Pool::global().threads() * 8)).clamp(4, MAX_CHUNK);
+        let chunk = (n / (Pool::global().threads() * 8))
+            .clamp(4, MAX_CHUNK)
+            .next_multiple_of(a0.max(a1));
         let (cfg, own_all) = Self::decode_cfg();
         pool::for_each_chunk_mut(&mut out, chunk, |c, ys| {
             let (r, k) = (c * chunk, ys.len());
             let mut ub = [0f32; MAX_CHUNK];
             let ub = &mut ub[..k];
-            // prefetch bounds as in matvec_many
-            let lim = |(_, rb, data): (u32, usize, &[u8])| {
-                if own_all { data.len() } else { (r + k) * rb }
-            };
-            dot_rows_q8(g.0, &g.2[r * g.1..lim(g)], &xq, ys, cfg);
-            dot_rows_q8(u.0, &u.2[r * u.1..lim(u)], &xq, ub, cfg);
+            self.rows_vec(gate, r, &xq, ys, cfg, own_all);
+            self.rows_vec(up, r, &xq, ub, cfg, own_all);
             for (y, &uv) in ys.iter_mut().zip(ub.iter()) {
                 let gv = *y;
                 *y = (gv / (1.0 + (-gv).exp())) * uv;
@@ -399,11 +519,45 @@ impl<'a> Qwen2<'a> {
     /// a 0.5B verify pass at 4 per thread left ~21% of pool time waiting, and
     /// drafting (K=7) on low-repetition text went from -5% to -1% vs no
     /// drafting with 16. Chunking never changes results.
-    fn rows_per_chunk(rows: usize, nb: usize) -> usize {
+    /// With repacked matrices (`align` 8) chunks are whole r8 groups.
+    fn rows_per_chunk(rows: usize, nb: usize, align: usize) -> usize {
         let per_thread = if nb <= 9 { 16 } else { (nb / 2).clamp(4, 32) };
         rows.div_ceil(Pool::global().threads() * per_thread)
             .max(1)
-            .next_multiple_of(2)
+            .next_multiple_of(align.max(2))
+    }
+
+    /// Token slots for a batched matmul over `ws`: `quant::batch_slots` of
+    /// the types that go through the per-row kernels (their x4 tiles want
+    /// padding); the r8 GEMM takes any count, so all-repacked needs none.
+    fn slots_for(ws: &[&Weight], n_in: usize, nb: usize) -> usize {
+        let types: Vec<u32> = ws
+            .iter()
+            .filter(|w| w.r8.is_none())
+            .map(|w| w.qt())
+            .collect();
+        if types.is_empty() {
+            nb
+        } else {
+            batch_slots(&types, n_in, nb)
+        }
+    }
+
+    /// Rows r0..r0 + ys.len() / slots of `w` times the batch, into
+    /// ys[r * slots + b]: r8 GEMM over the `nb` real tokens (padding slots
+    /// untouched), or the per-row tile kernels over every slot of `xr`.
+    fn rows_batch(&self, w: &Weight, r0: usize, xr: &[&QuantizedAct], nb: usize, ys: &mut [f32]) {
+        let slots = xr.len();
+        let n_in = xr[0].len();
+        let k = ys.len() / slots;
+        if w.r8.is_some() {
+            r8::gemm(w.qt(), w.groups(n_in, r0, k, false), &xr[..nb], ys, slots);
+        } else {
+            let (qt, data) = (w.qt(), w.bytes());
+            let rb = row_bytes(qt, n_in);
+            let row_of = |g: usize| (qt, &data[g * rb..(g + 1) * rb]);
+            dot_rows_chunk(ys, slots, r0, &row_of, xr);
+        }
     }
 
     /// The batch's activations quantized for `types`, one per token. The
@@ -435,13 +589,13 @@ impl<'a> Qwen2<'a> {
     /// See `matmul_raw`; this transposes its output to per-token vectors.
     fn matmul_many<const N: usize, X: AsRef<[f32]> + Sync>(
         &self,
-        ws: [&Tensor; N],
+        ws: [&Weight; N],
         xs: &[X],
     ) -> [Vec<Vec<f32>>; N] {
         let nb = xs.len();
         let (out, starts, slots) = self.matmul_raw(ws, xs);
         std::array::from_fn(|i| {
-            let n = ws[i].dims[1] as usize;
+            let n = ws[i].rows();
             unbatch(&out[starts[i] * slots..(starts[i] + n) * slots], slots, nb)
         })
     }
@@ -458,46 +612,54 @@ impl<'a> Qwen2<'a> {
     /// as `matvec_many`, so results are bit-identical.
     fn matmul_raw<const N: usize, X: AsRef<[f32]> + Sync>(
         &self,
-        ws: [&Tensor; N],
+        ws: [&Weight; N],
         xs: &[X],
     ) -> (Vec<f32>, [usize; N], usize) {
-        let types = ws.map(|w| w.qtype.id);
+        let types = ws.map(|w| w.qt());
         self.matmul_q(ws, &Self::quantize_batch(xs, &types))
     }
 
     /// `matmul_raw` on inputs already quantized for `ws`' types.
     fn matmul_q<const N: usize>(
         &self,
-        ws: [&Tensor; N],
+        ws: [&Weight; N],
         xq: &[QuantizedAct],
     ) -> (Vec<f32>, [usize; N], usize) {
         let nb = xq.len();
         let n_in = xq[0].len();
-        let types = ws.map(|w| w.qtype.id);
-        let mut starts = [0usize; N];
-        let mut total = 0;
-        for (i, w) in ws.iter().enumerate() {
-            assert_eq!(w.dims[0] as usize, n_in, "matmul {}: input len", w.name);
-            starts[i] = total;
-            total += w.dims[1] as usize;
-        }
-        let info = ws.map(|w| {
-            let qt = w.qtype.id;
-            (qt, row_bytes(qt, n_in), self.m.tensor_data(w))
-        });
-        let slots = batch_slots(&types, n_in, nb);
+        let (starts, total, align) = Self::joint_rows(ws, n_in);
+        let slots = Self::slots_for(&ws, n_in, nb);
         let xr: Vec<&QuantizedAct> = (0..slots).map(|b| &xq[b.min(nb - 1)]).collect();
         let mut out = vec![0f32; total * slots];
-        let rows = Self::rows_per_chunk(total, nb);
-        let row_of = |g: usize| {
-            let t = starts.iter().rposition(|&s| s <= g).unwrap();
-            let (qt, rb, data) = info[t];
-            let o = g - starts[t];
-            (qt, &data[o * rb..(o + 1) * rb])
-        };
-        pool::for_each_chunk_mut(&mut out, rows * slots, |c, ys| {
-            dot_rows_chunk(ys, slots, c * rows, &row_of, &xr)
-        });
+        let rows = Self::rows_per_chunk(total, nb, align);
+        if align == 1 {
+            // Nothing repacked: the per-row tile kernels, rows paired across
+            // matrices as they come.
+            let info = ws.map(|w| (w.qt(), row_bytes(w.qt(), n_in), w.bytes()));
+            let row_of = |g: usize| {
+                let t = starts.iter().rposition(|&s| s <= g).unwrap();
+                let (qt, rb, data) = info[t];
+                let o = g - starts[t];
+                (qt, &data[o * rb..(o + 1) * rb])
+            };
+            pool::for_each_chunk_mut(&mut out, rows * slots, |c, ys| {
+                dot_rows_chunk(ys, slots, c * rows, &row_of, &xr)
+            });
+        } else {
+            // One run per matrix the chunk touches (whole r8 groups).
+            pool::for_each_chunk_mut(&mut out, rows * slots, |c, mut ys| {
+                let mut g = c * rows;
+                while !ys.is_empty() {
+                    let t = starts.iter().rposition(|&s| s <= g).unwrap();
+                    let end = starts.get(t + 1).copied().unwrap_or(total);
+                    let k = (end - g).min(ys.len() / slots);
+                    let (run, rest) = std::mem::take(&mut ys).split_at_mut(k * slots);
+                    self.rows_batch(ws[t], g - starts[t], &xr, nb, run);
+                    g += k;
+                    ys = rest;
+                }
+            });
+        }
         (out, starts, slots)
     }
 
@@ -507,27 +669,23 @@ impl<'a> Qwen2<'a> {
     /// only a `Best` per token; the chunks are then merged in row order. No
     /// vocab-sized logits are allocated or transposed. Each logit is the
     /// same dot as in `matmul_raw` (and so `matvec`), bit for bit.
-    fn matmul_argmax<X: AsRef<[f32]> + Sync>(&self, w: &Tensor, xs: &[X]) -> Vec<u32> {
+    fn matmul_argmax<X: AsRef<[f32]> + Sync>(&self, w: &Weight, xs: &[X]) -> Vec<u32> {
         let nb = xs.len();
-        let qt = w.qtype.id;
+        let qt = w.qt();
         let xq = Self::quantize_batch(xs, &[qt]);
         let n_in = xq[0].len();
-        assert_eq!(w.dims[0] as usize, n_in, "matmul {}: input len", w.name);
-        let total = w.dims[1] as usize;
-        let rb = row_bytes(qt, n_in);
-        let data = self.m.tensor_data(w);
-        let slots = batch_slots(&[qt], n_in, nb);
+        let (_, total, align) = Self::joint_rows([w], n_in);
+        let slots = Self::slots_for(&[w], n_in, nb);
         let xr: Vec<&QuantizedAct> = (0..slots).map(|b| &xq[b.min(nb - 1)]).collect();
-        let rows = Self::rows_per_chunk(total, nb);
+        let rows = Self::rows_per_chunk(total, nb, align);
         let n_chunks = total.div_ceil(rows);
-        let row_of = |g: usize| (qt, &data[g * rb..(g + 1) * rb]);
         // best[c * nb + b]: chunk c's best row for token b.
         let mut best = vec![Best::NONE; n_chunks * nb];
         pool::for_each_chunk_mut(&mut best, nb, |c, bs| {
             let first = c * rows;
             let n_rows = rows.min(total - first);
             with_rows_scratch(n_rows * slots, |ys| {
-                dot_rows_chunk(ys, slots, first, &row_of, &xr);
+                self.rows_batch(w, first, &xr, nb, ys);
                 best_rows(ys, slots, first, bs);
             });
         });
@@ -547,41 +705,57 @@ impl<'a> Qwen2<'a> {
     /// in `matmul_raw`.
     fn matmul_swiglu<X: AsRef<[f32]> + Sync>(
         &self,
-        gate: &Tensor,
-        up: &Tensor,
+        gate: &Weight,
+        up: &Weight,
         xs: &[X],
     ) -> (Vec<f32>, usize) {
         let nb = xs.len();
         let n_in = xs[0].as_ref().len();
-        let n = gate.dims[1] as usize;
-        for w in [gate, up] {
-            assert_eq!(w.dims[0] as usize, n_in, "matmul {}: input len", w.name);
-        }
-        assert_eq!(up.dims[1] as usize, n, "swiglu: gate/up row counts differ");
-        let types = [gate.qtype.id, up.qtype.id];
+        let n = gate.rows();
+        let (_, _, a0) = Self::joint_rows([gate], n_in);
+        let (_, _, a1) = Self::joint_rows([up], n_in);
+        assert_eq!(up.rows(), n, "swiglu: gate/up row counts differ");
+        let types = [gate.qt(), up.qt()];
         let xq = Self::quantize_batch(xs, &types);
-        let [g, u] = [gate, up].map(|w| {
-            let qt = w.qtype.id;
-            (qt, row_bytes(qt, n_in), self.m.tensor_data(w))
-        });
-        let slots = batch_slots(&types, n_in, nb);
+        let slots = Self::slots_for(&[gate, up], n_in, nb);
         let xr: Vec<&QuantizedAct> = (0..slots).map(|b| &xq[b.min(nb - 1)]).collect();
         let mut out = vec![0f32; n * slots];
-        let rows = Self::rows_per_chunk(n, nb);
-        pool::for_each_chunk_mut(&mut out, rows * slots, |c, ys| {
-            with_rows_scratch(slots, |uv| {
-                for (j, yr) in ys.chunks_mut(slots).enumerate() {
-                    let r = c * rows + j;
-                    let gr = &g.2[r * g.1..(r + 1) * g.1];
-                    let ur = &u.2[r * u.1..(r + 1) * u.1];
-                    dot_rows_q8_multi([g.0, u.0], [gr, ur], &xr, [&mut *yr, &mut *uv]);
-                    for (y, &uv) in yr.iter_mut().zip(&*uv) {
-                        let gv = *y;
-                        *y = (gv / (1.0 + (-gv).exp())) * uv;
+        let align = a0.max(a1);
+        let rows = Self::rows_per_chunk(n, nb, align);
+        if align == 1 {
+            // Nothing repacked: each gate row paired with its up row.
+            let [g, u] = [gate, up].map(|w| (w.qt(), row_bytes(w.qt(), n_in), w.bytes()));
+            pool::for_each_chunk_mut(&mut out, rows * slots, |c, ys| {
+                with_rows_scratch(slots, |uv| {
+                    for (j, yr) in ys.chunks_mut(slots).enumerate() {
+                        let r = c * rows + j;
+                        let gr = &g.2[r * g.1..(r + 1) * g.1];
+                        let ur = &u.2[r * u.1..(r + 1) * u.1];
+                        dot_rows_q8_multi([g.0, u.0], [gr, ur], &xr, [&mut *yr, &mut *uv]);
+                        for (y, &uv) in yr.iter_mut().zip(&*uv) {
+                            let gv = *y;
+                            *y = (gv / (1.0 + (-gv).exp())) * uv;
+                        }
                     }
-                }
+                });
             });
-        });
+        } else {
+            // The chunk's gate rows, then its up rows, then combine (real
+            // tokens only: padding slots may be unwritten on r8 rows).
+            pool::for_each_chunk_mut(&mut out, rows * slots, |c, ys| {
+                let r0 = c * rows;
+                with_rows_scratch(ys.len(), |uv| {
+                    self.rows_batch(gate, r0, &xr, nb, ys);
+                    self.rows_batch(up, r0, &xr, nb, uv);
+                    for (yr, ur) in ys.chunks_mut(slots).zip(uv.chunks(slots)) {
+                        for (y, &uv) in yr[..nb].iter_mut().zip(&ur[..nb]) {
+                            let gv = *y;
+                            *y = (gv / (1.0 + (-gv).exp())) * uv;
+                        }
+                    }
+                });
+            });
+        }
         (out, slots)
     }
 
@@ -615,7 +789,7 @@ impl<'a> Qwen2<'a> {
         let x = self.hidden(token, pos, cache);
         // 9. Final norm, then the output head scores every vocab entry.
         let h = self.rmsnorm(&x, &self.output_norm);
-        self.matvec(self.output, &h)
+        self.matvec(&self.output, &h)
     }
 
     /// Run one token at position `pos` for its effect on the cache only. Prompt
@@ -634,7 +808,7 @@ impl<'a> Qwen2<'a> {
         let t = token as usize;
         dequant(
             self.token_embd.qtype.id,
-            &self.m.tensor_data(self.token_embd)[t * rb..(t + 1) * rb],
+            &self.embd[t * rb..(t + 1) * rb],
             &mut x,
         );
         x
@@ -658,7 +832,7 @@ impl<'a> Qwen2<'a> {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn verify_batch(&self, tokens: &[u32], start: usize, cache: &mut KvCache) -> Vec<Vec<f32>> {
         let hs = self.final_norm_batch(tokens, start, cache);
-        let [logits] = self.matmul_many([self.output], &hs);
+        let [logits] = self.matmul_many([&self.output], &hs);
         logits
     }
 
@@ -668,7 +842,7 @@ impl<'a> Qwen2<'a> {
     /// any logits (`matmul_argmax`).
     pub fn verify_argmax(&self, tokens: &[u32], start: usize, cache: &mut KvCache) -> Vec<u32> {
         let hs = self.final_norm_batch(tokens, start, cache);
-        self.matmul_argmax(self.output, &hs)
+        self.matmul_argmax(&self.output, &hs)
     }
 
     /// `hidden_batch` then the final norm, as `forward` does per token.
@@ -710,7 +884,7 @@ impl<'a> Qwen2<'a> {
             per_token(&mut hs, dim, |b, h| {
                 self.rmsnorm_into(&xs[b], &layer.attn_norm, h)
             });
-            let [mut qs, ks, vs] = self.matmul_many([layer.wq, layer.wk, layer.wv], &hs);
+            let [mut qs, ks, vs] = self.matmul_many([&layer.wq, &layer.wk, &layer.wv], &hs);
             {
                 // Bias, RoPE, and k/v into the cache, per token. k and v get
                 // their bias and RoPE in the cache slot itself: same values,
@@ -757,15 +931,15 @@ impl<'a> Qwen2<'a> {
             });
 
             let att_rows: Vec<&[f32]> = att.chunks(dim).collect();
-            let (os, _, slots) = self.matmul_raw([layer.wo], &att_rows);
+            let (os, _, slots) = self.matmul_raw([&layer.wo], &att_rows);
             add_unbatched(&mut xs, &os, slots);
 
             per_token(&mut hs, dim, |b, h| {
                 self.rmsnorm_into(&xs[b], &layer.ffn_norm, h)
             });
-            let (acts, a_slots) = self.matmul_swiglu(layer.w_gate, layer.w_up, &hs);
-            let aq = Self::quantize_cols(&acts, a_slots, nb, &[layer.w_down.qtype.id]);
-            let (ds, _, slots) = self.matmul_q([layer.w_down], &aq);
+            let (acts, a_slots) = self.matmul_swiglu(&layer.w_gate, &layer.w_up, &hs);
+            let aq = Self::quantize_cols(&acts, a_slots, nb, &[layer.w_down.qt()]);
+            let (ds, _, slots) = self.matmul_q([&layer.w_down], &aq);
             add_unbatched(&mut xs, &ds, slots);
         }
         xs
@@ -796,7 +970,7 @@ impl<'a> Qwen2<'a> {
             // ---- Attention sub-block ----
             // 2. Normalize, then project into queries, keys and values (+ bias).
             let h = self.rmsnorm(&x, &layer.attn_norm);
-            let [mut q, mut k, mut v] = self.matvec_many([layer.wq, layer.wk, layer.wv], &h);
+            let [mut q, mut k, mut v] = self.matvec_many([&layer.wq, &layer.wk, &layer.wv], &h);
             if let Some(b) = &layer.bq {
                 add_assign(&mut q, b);
             }
@@ -822,15 +996,15 @@ impl<'a> Qwen2<'a> {
             attend(&q, kc, vc, kv_dim, hd, np, tile, &mut buf, &mut att_out);
 
             // 6. Mix the heads back together and add to the residual stream.
-            let o = self.matvec(layer.wo, &att_out);
+            let o = self.matvec(&layer.wo, &att_out);
             add_assign(&mut x[..dim], &o[..dim]);
 
             // ---- Feed-forward sub-block (SwiGLU) ----
             // 7. Normalize, then gate * up: silu(gate(h)) decides how much of up(h) passes.
             let h = self.rmsnorm(&x, &layer.ffn_norm);
-            let act = self.matvec_swiglu(layer.w_gate, layer.w_up, &h);
+            let act = self.matvec_swiglu(&layer.w_gate, &layer.w_up, &h);
             // 8. Project back down to model width and add to the residual stream.
-            let d = self.matvec(layer.w_down, &act);
+            let d = self.matvec(&layer.w_down, &act);
             add_assign(&mut x[..dim], &d[..dim]);
         }
         DECODE.set((buf, att_out));
@@ -1688,10 +1862,232 @@ pub(crate) mod tests {
     /// the same next-token logits, bit for bit, as feeding one token at a time.
     #[test]
     fn feed_batch_matches_feed() {
+        for repack in [true, false] {
+            // A fresh load each: repacking releases the originals.
+            let Some(m) = crate::testutil::model() else {
+                return;
+            };
+            let net = Qwen2::new_with(&m, repack);
+            let repacked = net.layers.iter().filter(|l| l.w_down.r8.is_some()).count();
+            assert_eq!(
+                repacked > 0,
+                repack,
+                "repack {repack}: {repacked} ffn_down repacked"
+            );
+            feed_batch_matches_feed_on(&net);
+        }
+    }
+
+    /// The r8 kernels against the per-row ones on the real model: same
+    /// prompt, logits compared. Prints the deltas only. This random-token
+    /// prompt is chaotic: today's per-row kernels alone disagree with
+    /// themselves here (AXON_SIMD=scalar argmax 220, avx2/vnni 2090, max
+    /// |dlogprob| ~0.3), so r8's delta of the same size proves nothing either
+    /// way. The bound is only a gross-bug tripwire; accuracy is asserted per
+    /// row against f64 (`repack_rows_match_exact_on_model`, quant r8 tests)
+    /// and on real text by `matches_ollama`.
+    #[test]
+    fn repack_logit_deltas() {
+        if crate::testutil::model_path().is_none() {
+            return;
+        }
+        let ids: Vec<u32> = (0..40u64)
+            .map(|i| (i * 2_654_435_761 % 150_000) as u32)
+            .collect();
+        let run = |repack: bool| {
+            let m = crate::testutil::model().unwrap();
+            let net = Qwen2::new_with(&m, repack);
+            let mut c = net.new_cache(ids.len() + 1);
+            net.feed_batch(&ids[..ids.len() - 1], 0, &mut c);
+            net.forward(ids[ids.len() - 1], ids.len() - 1, &mut c)
+        };
+        let (a, b) = (run(true), run(false));
+        let lse = |l: &[f32]| {
+            let mx = l.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            mx + l.iter().map(|v| (v - mx).exp()).sum::<f32>().ln()
+        };
+        let (la, lb) = (lse(&a), lse(&b));
+        let mut dl = 0f32;
+        let mut dlp = 0f32;
+        for (x, y) in a.iter().zip(&b) {
+            dl = dl.max((x - y).abs());
+            dlp = dlp.max(((x - la) - (y - lb)).abs());
+        }
+        let argmax = |l: &[f32]| (0..l.len()).max_by(|&i, &j| l[i].total_cmp(&l[j])).unwrap();
+        let spread = a.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+            - a.iter().copied().fold(f32::INFINITY, f32::min);
+        println!(
+            "repack vs per-row: max |dlogit| {dl:.2e} (logit range {spread:.1}), \
+             max |dlogprob| {dlp:.2e}, argmax {} vs {}",
+            argmax(&a),
+            argmax(&b)
+        );
+        let hash = |l: &[f32]| {
+            l.iter()
+                .fold(0u64, |h, v| h.rotate_left(5) ^ v.to_bits() as u64)
+        };
+        println!(
+            "logit hashes: r8 {:016x} per-row {:016x}; per-row argmax {} top {:.4}",
+            hash(&a),
+            hash(&b),
+            argmax(&b),
+            b[argmax(&b)]
+        );
+        assert!(dlp < 1.0, "r8 moved a logprob by {dlp}");
+    }
+
+    /// Every repacked matrix of the real model: r8 rows vs the per-row
+    /// kernel vs an f64 dot of the dequantized row and quantized input, on a
+    /// real activation (the layer's own input for one token).
+    #[test]
+    fn repack_rows_match_exact_on_model() {
         let Some(m) = crate::testutil::model() else {
             return;
         };
-        let net = Qwen2::new(&m);
+        let net = Qwen2::new_with(&m, true);
+        // The repack released the originals from `m`: raw bytes from a second load.
+        let raw = crate::testutil::model().unwrap();
+        let mut x = net.embed(9707);
+        let mut worst = (0f64, 0f64);
+        for layer in &net.layers {
+            let h = net.rmsnorm(&x, &layer.ffn_norm);
+            let act = net.matvec_swiglu(&layer.w_gate, &layer.w_up, &h);
+            for (w, inp) in [
+                (&layer.w_down, &act),
+                (&layer.w_gate, &h),
+                (&layer.w_up, &h),
+            ] {
+                let Some(_) = &w.r8 else { continue };
+                let data = raw.tensor_data(w.t);
+                let plain = Weight {
+                    t: w.t,
+                    data: Some(data),
+                    r8: None,
+                };
+                let a = net.matvec(w, inp);
+                let b = net.matvec(&plain, inp);
+                let n = inp.len();
+                let rb = row_bytes(w.qt(), n);
+                // quantized activations, dequantized
+                let mut xq = vec![0f64; n];
+                {
+                    let mut tmp = vec![0f32; n];
+                    for (i, c) in inp.chunks(256).enumerate() {
+                        let mut q = [0i8; 256];
+                        let amax = c.iter().fold(0f32, |m, v| m.max(v.abs()));
+                        let max = *c.iter().find(|v| v.abs() == amax).unwrap();
+                        let is = -127.0 / max;
+                        for (k, v) in c.iter().enumerate() {
+                            q[k] = ((is * v).round_ties_even() as i32).min(127) as i8;
+                        }
+                        for k in 0..256 {
+                            tmp[i * 256 + k] = q[k] as f32 * (1.0 / is);
+                        }
+                    }
+                    for (d, s) in xq.iter_mut().zip(&tmp) {
+                        *d = *s as f64;
+                    }
+                }
+                let mut wr = vec![0f32; n];
+                for r in 0..w.rows() {
+                    dequant(w.qt(), &data[r * rb..(r + 1) * rb], &mut wr);
+                    let exact: f64 = wr.iter().zip(&xq).map(|(p, q)| *p as f64 * q).sum();
+                    let mag: f64 = wr.iter().zip(&xq).map(|(p, q)| (*p as f64 * q).abs()).sum();
+                    let ea = (a[r] as f64 - exact).abs() / mag;
+                    let eb = (b[r] as f64 - exact).abs() / mag;
+                    worst.0 = worst.0.max(ea);
+                    worst.1 = worst.1.max(eb);
+                    assert!(
+                        ea < 1e-5,
+                        "{} row {r}: r8 {} per-row {} exact {exact}",
+                        w.t.name,
+                        a[r],
+                        b[r]
+                    );
+                }
+            }
+            let d = net.matvec(&layer.w_down, &act);
+            for i in 0..x.len() {
+                x[i] += d[i];
+            }
+        }
+        println!(
+            "max rel err vs f64: r8 {:.2e}, per-row {:.2e}",
+            worst.0, worst.1
+        );
+    }
+
+    /// Releasing repacked originals must never hand out zeros, on the
+    /// anonymous copy (where released pages ARE zeros) and on a file mapping.
+    /// The output matrix is forced to the (tied) embedding, so if the
+    /// embedding is a K-quant (1.5B+: AXON_TEST_MODEL) it's repacked as the
+    /// head while `embed` keeps reading its raw rows.
+    #[test]
+    fn release_keeps_embedding_on_copy_and_mmap() {
+        let Some(fresh) = crate::testutil::model_with(Some(false)) else {
+            return;
+        };
+        let ids = [9707u32, 11, 1879, 0, 151642, 77, 5000];
+        let mut logits: Vec<Vec<f32>> = Vec::new();
+        for copy in [true, false] {
+            let m = crate::testutil::model_with(Some(copy)).unwrap();
+            assert_eq!(m.file_backed(), !copy);
+            let net = Qwen2::build(&m, true, true);
+            let repacked: Vec<&Tensor> = net
+                .layers
+                .iter()
+                .flat_map(|l| [&l.w_down, &l.w_gate, &l.wq])
+                .filter(|w| w.r8.is_some())
+                .map(|w| w.t)
+                .collect();
+            assert!(!repacked.is_empty(), "nothing repacked");
+            // The embedding (= the tied head) still reads its real bytes.
+            assert_eq!(
+                m.tensor_data(net.token_embd),
+                fresh.tensor_data(net.token_embd)
+            );
+            for &id in &ids {
+                assert_eq!(net.embed(id), {
+                    let mut x = vec![0f32; net.dim];
+                    let rb = row_bytes(net.token_embd.qtype.id, net.dim);
+                    let t = id as usize;
+                    dequant(
+                        net.token_embd.qtype.id,
+                        &fresh.tensor_data(net.token_embd)[t * rb..(t + 1) * rb],
+                        &mut x,
+                    );
+                    x
+                });
+            }
+            // A released original: the copy refuses it, the file map faults
+            // the same bytes back in.
+            let t = repacked[0];
+            if copy {
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    m.tensor_data(t).len()
+                }));
+                assert!(r.is_err(), "released tensor readable on the anonymous copy");
+            } else {
+                assert_eq!(m.tensor_data(t), fresh.tensor_data(t));
+            }
+            let mut c = net.new_cache(ids.len());
+            net.feed_batch(&ids[..ids.len() - 1], 0, &mut c);
+            logits.push(net.forward(ids[ids.len() - 1], ids.len() - 1, &mut c));
+            println!(
+                "copy {copy}: head repacked {}, {} sampled repacked tensors",
+                net.output.r8.is_some(),
+                repacked.len()
+            );
+        }
+        // Same weights either way: bit-identical logits.
+        let eq = logits[0]
+            .iter()
+            .zip(&logits[1])
+            .all(|(a, b)| a.to_bits() == b.to_bits());
+        assert!(eq, "copy and file map give different logits");
+    }
+
+    fn feed_batch_matches_feed_on(net: &Qwen2) {
         // 150 spread-out ordinary token ids (Qwen2's special tokens start at 151643).
         let ids: Vec<u32> = (0..150u64)
             .map(|i| (i * 2_654_435_761 % 150_000) as u32)
