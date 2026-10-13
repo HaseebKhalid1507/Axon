@@ -926,8 +926,11 @@ mod x86 {
             pub unsafe fn $name(row: &[u8], dx: [&[f32]; 4], qx: [&[[i8; 32]]; 4]) -> [f32; 4] {
                 let blocks = row.as_chunks::<$bytes>().0;
                 let n = blocks.len();
-                let dx = dx.map(|d| &d[..n]);
-                let qx = qx.map(|q| &q[..n]);
+                // Written out, not `.map(..)`: a closure doesn't inherit this
+                // fn's target features, so it compiles out of line and costs a
+                // call per row in the hot path.
+                let dx = [&dx[0][..n], &dx[1][..n], &dx[2][..n], &dx[3][..n]];
+                let qx = [&qx[0][..n], &qx[1][..n], &qx[2][..n], &qx[3][..n]];
                 let mut acc = [_mm256_setzero_ps(); 4];
                 for (i, b) in blocks.iter().enumerate() {
                     let hw = h2f([b[0], b[1]]);
@@ -992,7 +995,8 @@ mod x86 {
         let m4 = _mm256_set1_epi8(0xF);
         let blocks = row.as_chunks::<Q4_K_BYTES>().0;
         let n = blocks.len();
-        let xk = xk.map(|x| &x[..n]);
+        // Written out, not `.map(..)`: see small_block_kernels_x4.
+        let xk = [&xk[0][..n], &xk[1][..n], &xk[2][..n], &xk[3][..n]];
         let mut acc = [_mm256_setzero_ps(); 4];
         let mut acc_m = [_mm_setzero_ps(); 4];
         for (i, b) in blocks.iter().enumerate() {
@@ -1075,7 +1079,8 @@ mod x86 {
         let m15 = _mm256_set1_epi8(15);
         let blocks = row.as_chunks::<Q6_K_BYTES>().0;
         let n = blocks.len();
-        let xk = xk.map(|x| &x[..n]);
+        // Written out, not `.map(..)`: see small_block_kernels_x4.
+        let xk = [&xk[0][..n], &xk[1][..n], &xk[2][..n], &xk[3][..n]];
         let mut acc = [_mm256_setzero_ps(); 4];
         for (i, b) in blocks.iter().enumerate() {
             let hd = h2f([b[208], b[209]]);
@@ -1238,7 +1243,10 @@ unsafe fn dot_row_q8_multi_with(
         "dot_row_q8_multi: xs/out lengths differ"
     );
     let Some(first) = xs.first() else { return };
-    assert!(
+    // Debug only: this runs once per weight row, and a ragged batch can't
+    // cause harm (every view is sliced with bounds checks). matmul callers
+    // check it once per batch.
+    debug_assert!(
         xs.iter().all(|x| x.len() == first.len()),
         "dot_row_q8_multi: ragged inputs"
     );
