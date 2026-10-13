@@ -249,29 +249,41 @@ impl<'a> Qwen2<'a> {
     }
 
     /// `matvec_many` for a batch of inputs: res[i][b] = ws[i] · xs[b].
-    ///
-    /// Rows are split across the pool. A task loads each weight row once and
-    /// dots it with every token's input while it's still in L1 (row outer,
-    /// token inner), so the weights stream from RAM once per batch, not once
-    /// per token. Output is row-major over (row, token), y[r * B + b], so each
-    /// task owns a contiguous slice; it is transposed to per-token vectors at
-    /// the end. Each dot is the same `dot_row_q8` on the same quantized input
-    /// as `matvec_many`, so results are bit-identical.
-    fn matmul_many<const N: usize, X: AsRef<[f32]>>(
+    /// See `matmul_raw`; this transposes its output to per-token vectors.
+    fn matmul_many<const N: usize, X: AsRef<[f32]> + Sync>(
         &self,
         ws: [&Tensor; N],
         xs: &[X],
     ) -> [Vec<Vec<f32>>; N] {
         let nb = xs.len();
+        let (out, starts) = self.matmul_raw(ws, xs);
+        std::array::from_fn(|i| {
+            let n = ws[i].dims[1] as usize;
+            unbatch(&out[starts[i] * nb..(starts[i] + n) * nb], nb)
+        })
+    }
+
+    /// Batched matmul, output left row-major over (row, token): y[r * B + b]
+    /// for the joint row space of all `ws`; starts[i] is matrix i's first row.
+    ///
+    /// Rows are split across the pool. A task loads each weight row once and
+    /// dots it with every token's input while it's still in L1 (row outer,
+    /// token inner), so the weights stream from RAM once per batch, not once
+    /// per token. Each dot is the same `dot_row_q8` on the same quantized input
+    /// as `matvec_many`, so results are bit-identical.
+    fn matmul_raw<const N: usize, X: AsRef<[f32]> + Sync>(
+        &self,
+        ws: [&Tensor; N],
+        xs: &[X],
+    ) -> (Vec<f32>, [usize; N]) {
+        let nb = xs.len();
         let n_in = xs[0].as_ref().len();
         let types = ws.map(|w| w.qtype.id);
-        let xq: Vec<QuantizedAct> = xs
-            .iter()
-            .map(|x| {
-                assert_eq!(x.as_ref().len(), n_in, "matmul: ragged batch");
-                QuantizedAct::for_types(x.as_ref(), &types)
-            })
-            .collect();
+        let xq = par_map(nb, |b| {
+            let x = xs[b].as_ref();
+            assert_eq!(x.len(), n_in, "matmul: ragged batch");
+            QuantizedAct::for_types(x, &types)
+        });
         let mut starts = [0usize; N];
         let mut total = 0;
         for (i, w) in ws.iter().enumerate() {
@@ -311,15 +323,12 @@ impl<'a> Qwen2<'a> {
                 dot_row_q8_multi(qt, row, &xr, yr);
             }
         });
-        std::array::from_fn(|i| {
-            let n = ws[i].dims[1] as usize;
-            unbatch(&out[starts[i] * nb..(starts[i] + n) * nb], nb)
-        })
+        (out, starts)
     }
 
     /// `matvec_swiglu` for a batch: per row r, per token b, the gate and up
-    /// dots combined with the same formula. Layout as in `matmul_many`.
-    fn matmul_swiglu<X: AsRef<[f32]>>(
+    /// dots combined with the same formula. Layout as in `matmul_raw`.
+    fn matmul_swiglu<X: AsRef<[f32]> + Sync>(
         &self,
         gate: &Tensor,
         up: &Tensor,
@@ -332,13 +341,12 @@ impl<'a> Qwen2<'a> {
             assert_eq!(w.dims[0] as usize, n_in, "matmul {}: input len", w.name);
         }
         assert_eq!(up.dims[1] as usize, n, "swiglu: gate/up row counts differ");
-        let xq: Vec<QuantizedAct> = xs
-            .iter()
-            .map(|x| {
-                assert_eq!(x.as_ref().len(), n_in, "matmul: ragged batch");
-                QuantizedAct::for_types(x.as_ref(), &[gate.qtype.id, up.qtype.id])
-            })
-            .collect();
+        let types = [gate.qtype.id, up.qtype.id];
+        let xq = par_map(nb, |b| {
+            let x = xs[b].as_ref();
+            assert_eq!(x.len(), n_in, "matmul: ragged batch");
+            QuantizedAct::for_types(x, &types)
+        });
         let [g, u] = [gate, up].map(|w| {
             let qt = w.qtype.id;
             (qt, row_bytes(qt, n_in), self.m.tensor_data(w))
@@ -364,9 +372,18 @@ impl<'a> Qwen2<'a> {
 
     /// RMSNorm: scale x so its root-mean-square is 1, then multiply by a learned weight.
     fn rmsnorm(&self, x: &[f32], w: &[f32]) -> Vec<f32> {
+        let mut out = vec![0.0f32; x.len().min(w.len())];
+        self.rmsnorm_into(x, w, &mut out);
+        out
+    }
+
+    /// `rmsnorm` into an existing buffer.
+    fn rmsnorm_into(&self, x: &[f32], w: &[f32], out: &mut [f32]) {
         let ms = x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32;
         let inv = 1.0 / (ms + self.eps).sqrt();
-        x.iter().zip(w).map(|(v, g)| v * inv * g).collect()
+        for ((o, v), g) in out.iter_mut().zip(x).zip(w) {
+            *o = v * inv * g;
+        }
     }
 
     /// (sin, cos) of each RoPE pair's angle at `pos`: pair i turns by
@@ -437,85 +454,109 @@ impl<'a> Qwen2<'a> {
         );
         let (dim, hd) = (self.dim, self.head_dim);
         let kv_dim = cache.kv_dim;
-        let n_heads = self.n_heads;
-        let group = n_heads / self.n_kv_heads;
+        let n_kv = self.n_kv_heads;
+        let group = self.n_heads / n_kv;
 
-        let mut xs: Vec<Vec<f32>> = tokens.iter().map(|&t| self.embed(t)).collect();
-        let ropes: Vec<_> = (0..nb).map(|b| self.rope_table(start + b)).collect();
+        // Every per-token step runs over the pool by token (`per_token`): with
+        // a few hundred tokens, a serial pass here leaves every worker idle.
+        let mut xs: Vec<Vec<f32>> = par_map(nb, |b| self.embed(tokens[b]));
+        let ropes: Vec<_> = par_map(nb, |b| self.rope_table(start + b));
+        // Reused across layers; every element is overwritten before it's read.
+        let mut hs: Vec<Vec<f32>> = vec![vec![0.0f32; dim]; nb];
+        let mut att = vec![0.0f32; nb * dim];
         for (l, layer) in self.layers.iter().enumerate() {
             // Steps as in `hidden`, each applied to every token of the batch.
-            let hs: Vec<Vec<f32>> = xs
-                .iter()
-                .map(|x| self.rmsnorm(x, &layer.attn_norm))
-                .collect();
-            let [mut qs, mut ks, mut vs] = self.matmul_many([layer.wq, layer.wk, layer.wv], &hs);
-            for b in 0..nb {
-                let (q, k, v) = (&mut qs[b], &mut ks[b], &mut vs[b]);
-                if let Some(bias) = &layer.bq {
-                    q.iter_mut().zip(bias).for_each(|(a, b)| *a += b);
-                }
-                if let Some(bias) = &layer.bk {
-                    k.iter_mut().zip(bias).for_each(|(a, b)| *a += b);
-                }
-                if let Some(bias) = &layer.bv {
-                    v.iter_mut().zip(bias).for_each(|(a, b)| *a += b);
-                }
-                for head in q.chunks_mut(hd).chain(k.chunks_mut(hd)) {
-                    Self::rope(head, &ropes[b]);
-                }
-                let pos = start + b;
-                cache.k[l][pos * kv_dim..(pos + 1) * kv_dim].copy_from_slice(k);
-                cache.v[l][pos * kv_dim..(pos + 1) * kv_dim].copy_from_slice(v);
+            per_token(&mut hs, |b, h| {
+                self.rmsnorm_into(&xs[b], &layer.attn_norm, h)
+            });
+            let [mut qs, ks, vs] = self.matmul_many([layer.wq, layer.wk, layer.wv], &hs);
+            {
+                // Bias, RoPE, and k/v into the cache, per token. k and v get
+                // their bias and RoPE in the cache slot itself: same values,
+                // same ops as `hidden`, which does them before the copy.
+                let span = start * kv_dim..(start + nb) * kv_dim;
+                let (kl, vl) = (&mut cache.k[l][span.clone()], &mut cache.v[l][span]);
+                let mut jobs: Vec<_> = qs
+                    .iter_mut()
+                    .zip(kl.chunks_mut(kv_dim))
+                    .zip(vl.chunks_mut(kv_dim))
+                    .collect();
+                per_token(&mut jobs, |b, ((q, kd), vd)| {
+                    kd.copy_from_slice(&ks[b]);
+                    vd.copy_from_slice(&vs[b]);
+                    if let Some(bias) = &layer.bq {
+                        q.iter_mut().zip(bias).for_each(|(a, b)| *a += b);
+                    }
+                    if let Some(bias) = &layer.bk {
+                        kd.iter_mut().zip(bias).for_each(|(a, b)| *a += b);
+                    }
+                    if let Some(bias) = &layer.bv {
+                        vd.iter_mut().zip(bias).for_each(|(a, b)| *a += b);
+                    }
+                    for head in q.chunks_mut(hd).chain(kd.chunks_mut(hd)) {
+                        Self::rope(head, &ropes[b]);
+                    }
+                });
             }
             let (kc, vc) = (&cache.k[l], &cache.v[l]);
 
-            // Causal attention, one (token, query head) pair per pool task:
-            // token b sees positions 0..=start + b only. The body is the same
-            // arithmetic as in `hidden`.
+            // Causal attention, one (token, kv head) pair per pool task: all
+            // `group` query heads sharing that kv head together, so each key
+            // row is loaded once and the dots run side by side. Token b sees
+            // positions 0..=start + b only. Per query head the arithmetic is
+            // exactly `hidden`'s: same dot, same softmax order, same `o += w v`
+            // order over t (accumulated locally, then stored).
             let scale = 1.0 / (hd as f32).sqrt();
-            let mut att = vec![0.0f32; nb * dim];
-            pool::for_each_chunk_mut_rev(&mut att, hd, |c, out| {
-                let (b, qh) = (c / n_heads, c % n_heads);
+            pool::for_each_chunk_mut_rev(&mut att, group * hd, |c, out| {
+                let (b, kvh) = (c / n_kv, c % n_kv);
                 let pos = start + b;
-                let kvh = qh / group;
-                let qv = &qs[b][qh * hd..(qh + 1) * hd];
+                let np = pos + 1;
+                let qg = &qs[b][kvh * group * hd..(kvh + 1) * group * hd];
                 let head = |t: usize| t * kv_dim + kvh * hd..t * kv_dim + (kvh + 1) * hd;
-                let mut scores: Vec<f32> =
-                    (0..=pos).map(|t| dot(qv, &kc[head(t)]) * scale).collect();
-                let max = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-                let mut sum = 0.0f32;
-                for s in scores.iter_mut() {
-                    *s = (*s - max).exp();
-                    sum += *s;
+                // scores[t * group + g]: query head g's score at position t.
+                let mut scores = vec![0.0f32; np * group];
+                for (t, st) in scores.chunks_exact_mut(group).enumerate() {
+                    dot_group(qg, &kc[head(t)], st);
+                    for s in st.iter_mut() {
+                        *s *= scale;
+                    }
                 }
-                let inv = 1.0 / sum;
-                for (t, &w) in scores.iter().enumerate() {
-                    let w = w * inv;
-                    for (o, &v) in out.iter_mut().zip(&vc[head(t)]) {
-                        *o += w * v;
+                for (g, o) in out.chunks_exact_mut(hd).enumerate() {
+                    let max = (0..np)
+                        .map(|t| scores[t * group + g])
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    let mut sum = 0.0f32;
+                    for t in 0..np {
+                        let s = &mut scores[t * group + g];
+                        *s = (*s - max).exp();
+                        sum += *s;
+                    }
+                    let inv = 1.0 / sum;
+                    let w = |t: usize| scores[t * group + g] * inv;
+                    if let Ok(o) = <&mut [f32; 64]>::try_from(&mut *o) {
+                        weighted_sum::<64>(np, w, |t| &vc[head(t)], o);
+                    } else {
+                        o.fill(0.0);
+                        for t in 0..np {
+                            let w = w(t);
+                            for (o, &v) in o.iter_mut().zip(&vc[head(t)]) {
+                                *o += w * v;
+                            }
+                        }
                     }
                 }
             });
 
             let att_rows: Vec<&[f32]> = att.chunks(dim).collect();
-            let [os] = self.matmul_many([layer.wo], &att_rows);
-            for (x, o) in xs.iter_mut().zip(&os) {
-                for i in 0..dim {
-                    x[i] += o[i];
-                }
-            }
+            let (os, _) = self.matmul_raw([layer.wo], &att_rows);
+            add_unbatched(&mut xs, &os);
 
-            let hs: Vec<Vec<f32>> = xs
-                .iter()
-                .map(|x| self.rmsnorm(x, &layer.ffn_norm))
-                .collect();
+            per_token(&mut hs, |b, h| {
+                self.rmsnorm_into(&xs[b], &layer.ffn_norm, h)
+            });
             let acts = self.matmul_swiglu(layer.w_gate, layer.w_up, &hs);
-            let [ds] = self.matmul_many([layer.w_down], &acts);
-            for (x, d) in xs.iter_mut().zip(&ds) {
-                for i in 0..dim {
-                    x[i] += d[i];
-                }
-            }
+            let (ds, _) = self.matmul_raw([layer.w_down], &acts);
+            add_unbatched(&mut xs, &ds);
         }
     }
 
@@ -610,13 +651,112 @@ impl<'a> Qwen2<'a> {
     }
 }
 
+/// Call `f(i, &mut data[i])` for every i, spread over the pool in chunks of
+/// consecutive items (~4 chunks per thread).
+fn per_token<T: Send>(data: &mut [T], f: impl Fn(usize, &mut T) + Sync) {
+    if data.is_empty() {
+        return;
+    }
+    let chunk = data.len().div_ceil(Pool::global().threads() * 4).max(1);
+    pool::for_each_chunk_mut(data, chunk, |c, xs| {
+        for (j, x) in xs.iter_mut().enumerate() {
+            f(c * chunk + j, x);
+        }
+    });
+}
+
+/// `(0..n).map(f).collect()`, over the pool.
+fn par_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+    let mut out: Vec<Option<T>> = (0..n).map(|_| None).collect();
+    per_token(&mut out, |i, o| *o = Some(f(i)));
+    out.into_iter().map(|o| o.unwrap()).collect()
+}
+
 /// Transpose a row-major (row, token) buffer, y[r * nb + b], into one vector
 /// per token.
 fn unbatch(y: &[f32], nb: usize) -> Vec<Vec<f32>> {
     let n = y.len() / nb;
-    (0..nb)
-        .map(|b| (0..n).map(|r| y[r * nb + b]).collect())
-        .collect()
+    let mut out: Vec<Vec<f32>> = vec![Vec::new(); nb];
+    per_token(&mut out, |b, x| {
+        *x = (0..n).map(|r| y[r * nb + b]).collect()
+    });
+    out
+}
+
+/// xs[b][i] += y[i * nb + b]: the residual add straight from a row-major
+/// (row, token) buffer, same single add per element as adding `unbatch(y)`.
+fn add_unbatched(xs: &mut [Vec<f32>], y: &[f32]) {
+    let nb = xs.len();
+    per_token(xs, |b, x| {
+        for (i, x) in x.iter_mut().enumerate() {
+            *x += y[i * nb + b];
+        }
+    });
+}
+
+/// o = sum over t in order of w(t) * v(t), starting from 0.0: the same adds,
+/// in the same order, as `o += w * v` per t into a zeroed buffer, but the
+/// running sums stay in registers instead of going through memory.
+#[inline]
+fn weighted_sum<'v, const H: usize>(
+    n: usize,
+    w: impl Fn(usize) -> f32,
+    v: impl Fn(usize) -> &'v [f32],
+    o: &mut [f32; H],
+) {
+    let mut acc = [0.0f32; H];
+    for t in 0..n {
+        let w = w(t);
+        let v: &[f32; H] = v(t).try_into().unwrap();
+        for i in 0..H {
+            acc[i] += w * v[i];
+        }
+    }
+    *o = acc;
+}
+
+/// out[g] = dot(q_g, k) for the query vectors q_g = q[g * k.len()..][..k.len()],
+/// g in 0..out.len(), bit for bit; up to 8 at a time.
+fn dot_group(q: &[f32], k: &[f32], out: &mut [f32]) {
+    let n = k.len();
+    debug_assert_eq!(q.len(), n * out.len());
+    for (qs, os) in q.chunks(8 * n).zip(out.chunks_mut(8)) {
+        match os.len() {
+            8 => dot_multi::<8>(qs, k, os),
+            7 => dot_multi::<7>(qs, k, os),
+            6 => dot_multi::<6>(qs, k, os),
+            5 => dot_multi::<5>(qs, k, os),
+            4 => dot_multi::<4>(qs, k, os),
+            3 => dot_multi::<3>(qs, k, os),
+            2 => dot_multi::<2>(qs, k, os),
+            _ => dot_multi::<1>(qs, k, os),
+        }
+    }
+}
+
+/// `dot` of G query vectors (contiguous in q) with one k. Each result uses
+/// `dot`'s exact lanes, tail and final sum, so it's identical to `dot`; the
+/// G accumulator chains run side by side and k is loaded once.
+#[inline]
+fn dot_multi<const G: usize>(q: &[f32], k: &[f32], out: &mut [f32]) {
+    let n = k.len();
+    let qv: [&[f32]; G] = std::array::from_fn(|g| &q[g * n..(g + 1) * n]);
+    let qc = qv.map(|x| x.as_chunks::<8>().0);
+    let (kc, kr) = k.as_chunks::<8>();
+    let mut acc = [[0.0f32; 8]; G];
+    for (j, y) in kc.iter().enumerate() {
+        for g in 0..G {
+            let x = &qc[g][j];
+            for i in 0..8 {
+                acc[g][i] += x[i] * y[i];
+            }
+        }
+    }
+    for g in 0..G {
+        let ar = qv[g].as_chunks::<8>().1;
+        let tail: f32 = ar.iter().zip(kr).map(|(x, y)| x * y).sum();
+        out[g] = acc[g].iter().sum::<f32>() + tail;
+    }
 }
 
 /// Dot product with 8 independent partial sums. A plain `.sum()` must add in
@@ -686,6 +826,32 @@ mod tests {
         }
         if let Some(i) = first_diff(&la[..], &lb[..]) {
             panic!("logit {i} differs: {} vs {}", la[i], lb[i]);
+        }
+    }
+
+    /// The grouped scorer must equal `dot` per query, bit for bit.
+    #[test]
+    fn dot_group_matches_dot() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed >> 40) as f32 / (1u64 << 23) as f32 * 2.0 - 1.0
+        };
+        for n in [64, 37, 8, 5] {
+            for g in [1, 2, 7, 9, 14] {
+                for _ in 0..20 {
+                    let q: Vec<f32> = (0..g * n).map(|_| rnd()).collect();
+                    let k: Vec<f32> = (0..n).map(|_| rnd()).collect();
+                    let mut out = vec![0.0f32; g];
+                    dot_group(&q, &k, &mut out);
+                    for (i, &o) in out.iter().enumerate() {
+                        let want = dot(&q[i * n..(i + 1) * n], &k);
+                        assert_eq!(o.to_bits(), want.to_bits(), "n={n} g={g} head {i}");
+                    }
+                }
+            }
         }
     }
 
