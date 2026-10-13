@@ -320,9 +320,70 @@ impl Model {
     }
 }
 
+/// The whole file, in memory. By default it's copied into anonymous memory with
+/// transparent huge pages requested: decode walks the whole model per token, and 2 MB
+/// pages cut the TLB misses of 4 KB file pages (llama.cpp's `--no-mmap` effect).
+///
+/// The copy is not shared between processes and can't be dropped under memory
+/// pressure the way page cache can, so it's skipped (file mmap instead) when the file
+/// is over 60% of `MemAvailable`. `AXON_MMAP=1` always maps the file, `AXON_MMAP=0`
+/// always copies.
+///
+/// Assumes Linux >= 6.7 for 2 MB-aligned anonymous mappings; on older kernels the
+/// first and last partial 2 MB of the copy use 4 KB pages, which costs nothing much.
+fn map_weights(file: &File) -> io::Result<memmap2::Mmap> {
+    let len = file.metadata()?.len() as usize;
+    let copy = match std::env::var("AXON_MMAP").as_deref() {
+        Ok("0") => true,
+        Ok(_) => false,
+        Err(_) => match mem_available() {
+            Some(avail) if len as u64 > avail / 10 * 6 => {
+                eprintln!(
+                    "note: model is {} MB, {} MB available; mapping the file instead of \
+                     copying it (AXON_MMAP=0 forces the copy)",
+                    len >> 20,
+                    avail >> 20
+                );
+                false
+            }
+            _ => true,
+        },
+    };
+    if !copy {
+        // SAFETY: the file is opened read-only and not modified while mapped.
+        return unsafe { memmap2::Mmap::map(file) };
+    }
+    let mut anon = memmap2::MmapMut::map_anon(len.max(1))?;
+    #[cfg(target_os = "linux")]
+    {
+        // Advise before touching any page. On THP=madvise (most distro defaults) this is
+        // what turns huge pages on; with defrag=defer+madvise it also opts this region
+        // into direct compaction at fault time, so a fragmented box loads slower but
+        // still gets huge pages up front. Failure only costs speed.
+        let _ = anon.advise(memmap2::Advice::HugePage);
+    }
+    let mut f = file;
+    f.read_exact(&mut anon[..len]).map_err(|e| {
+        if e.kind() == io::ErrorKind::UnexpectedEof {
+            io::Error::new(io::ErrorKind::UnexpectedEof, "file shrank while loading")
+        } else {
+            e
+        }
+    })?;
+    anon.make_read_only()
+}
+
+/// `MemAvailable` from /proc/meminfo, in bytes.
+fn mem_available() -> Option<u64> {
+    let s = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let line = s.lines().find(|l| l.starts_with("MemAvailable:"))?;
+    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb * 1024)
+}
+
 pub fn load(path: &str) -> io::Result<Model> {
     let file = File::open(path)?;
-    let mmap = unsafe { memmap2::Mmap::map(&file)? };
+    let mmap = map_weights(&file)?;
     let f2 = File::open(path)?;
     let mut r = BufReader::new(f2);
 
