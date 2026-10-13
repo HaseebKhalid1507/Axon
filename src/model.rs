@@ -156,24 +156,50 @@ impl<'a> Qwen2<'a> {
 
     /// y = W x. W has ne1 rows of ne0 values each; y[o] = row_o · x.
     fn matvec(&self, w: &Tensor, x: &[f32]) -> Vec<f32> {
-        let (n_in, n_out) = (w.dims[0] as usize, w.dims[1] as usize);
-        assert_eq!(x.len(), n_in, "matvec {}: input len", w.name);
-        let rb = row_bytes(w.qtype.id, n_in);
-        let data = self.m.tensor_data(w);
+        let [y] = self.matvec_many([w], x);
+        y
+    }
+
+    /// Several matrices applied to the same input in one parallel pass:
+    /// one fork/join and one quantization of x instead of one per matrix.
+    /// Returns one output vector per matrix, in order.
+    fn matvec_many<const N: usize>(&self, ws: [&Tensor; N], x: &[f32]) -> [Vec<f32>; N] {
         // Quantize x to 8 bits once; every row then does integer multiply-adds
         // against its packed weights instead of decoding them to floats.
         let xq = QuantizedAct::new(x);
+        // All matrices' rows form one index space; starts[i] is where matrix i begins.
+        let mut starts = [0usize; N];
+        let mut total = 0;
+        for (i, w) in ws.iter().enumerate() {
+            assert_eq!(w.dims[0] as usize, x.len(), "matvec {}: input len", w.name);
+            starts[i] = total;
+            total += w.dims[1] as usize;
+        }
+        let info = ws.map(|w| {
+            let qt = w.qtype.id;
+            (qt, row_bytes(qt, x.len()), self.m.tensor_data(w))
+        });
         // Every output row is an independent dot product, so split rows across
-        // cores. Chunks of 64 rows keep scheduling overhead small, and rayon's
-        // work stealing evens out the fast and efficiency cores.
-        let mut out = vec![0f32; n_out];
-        out.par_chunks_mut(64).enumerate().for_each(|(c, ys)| {
+        // cores. About 4 chunks per thread lets work stealing even out the fast
+        // and efficiency cores; at most 64 rows keeps scheduling overhead small.
+        let mut out = vec![0f32; total];
+        let chunk = (total / (rayon::current_num_threads() * 4)).clamp(4, 64);
+        out.par_chunks_mut(chunk).enumerate().for_each(|(c, ys)| {
             for (j, y) in ys.iter_mut().enumerate() {
-                let o = c * 64 + j;
-                *y = dot_row_q8(w.qtype.id, &data[o * rb..(o + 1) * rb], &xq);
+                let g = c * chunk + j;
+                let t = starts.iter().rposition(|&s| s <= g).unwrap();
+                let (qt, rb, data) = info[t];
+                let o = g - starts[t];
+                *y = dot_row_q8(qt, &data[o * rb..(o + 1) * rb], &xq);
             }
         });
-        out
+        // Split the joint output back into one vector per matrix (no copy when N == 1).
+        let mut res: [Vec<f32>; N] = std::array::from_fn(|_| Vec::new());
+        for i in (1..N).rev() {
+            res[i] = out.split_off(starts[i]);
+        }
+        res[0] = out;
+        res
     }
 
     /// RMSNorm: scale x so its root-mean-square is 1, then multiply by a learned weight.
@@ -223,9 +249,7 @@ impl<'a> Qwen2<'a> {
             // ---- Attention sub-block ----
             // 2. Normalize, then project into queries, keys and values (+ bias).
             let h = self.rmsnorm(&x, &layer.attn_norm);
-            let mut q = self.matvec(layer.wq, &h);
-            let mut k = self.matvec(layer.wk, &h);
-            let mut v = self.matvec(layer.wv, &h);
+            let [mut q, mut k, mut v] = self.matvec_many([layer.wq, layer.wk, layer.wv], &h);
             if let Some(b) = &layer.bq {
                 q.iter_mut().zip(b).for_each(|(a, b)| *a += b);
             }
@@ -292,8 +316,7 @@ impl<'a> Qwen2<'a> {
             // ---- Feed-forward sub-block (SwiGLU) ----
             // 7. Normalize, then gate * up: silu(gate(h)) decides how much of up(h) passes.
             let h = self.rmsnorm(&x, &layer.ffn_norm);
-            let gate = self.matvec(layer.w_gate, &h);
-            let up = self.matvec(layer.w_up, &h);
+            let [gate, up] = self.matvec_many([layer.w_gate, layer.w_up], &h);
             let act: Vec<f32> = gate
                 .iter()
                 .zip(&up)
