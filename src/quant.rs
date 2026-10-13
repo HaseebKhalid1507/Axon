@@ -28,6 +28,7 @@ pub const Q4_K: u32 = 12;
 pub const Q6_K: u32 = 14;
 
 pub mod r8;
+pub mod r8q;
 
 /// (values per block, bytes per block)
 fn block_info(qtype_id: u32) -> (usize, usize) {

@@ -318,15 +318,16 @@ pub struct Model {
     pub data_offset: u64,
     /// `data` maps the file (true) or is the anonymous copy (false).
     file_backed: bool,
-    /// Byte ranges of `data` handed back by `release` on the anonymous copy
-    /// (zeroed there); `tensor_data` refuses tensors that overlap one.
+    /// Byte ranges of the tensors handed back by `release`, sorted. On the
+    /// anonymous copy (zeroed there) `tensor_data` refuses tensors that
+    /// overlap one.
     released: std::sync::Mutex<Vec<std::ops::Range<usize>>>,
     any_released: std::sync::atomic::AtomicBool,
 }
 
-/// `release` only drops whole aligned blocks of this size inside a tensor:
-/// a multiple of every page size Linux uses (4/16/64 KB), so the neighbours'
-/// bytes are never touched.
+/// `release` only drops whole aligned blocks of this size inside released
+/// tensors (and the padding between them): a multiple of every page size
+/// Linux uses (4/16/64 KB), so other tensors' bytes are never touched.
 const RELEASE_ALIGN: usize = 64 << 10;
 
 impl Model {
@@ -340,7 +341,7 @@ impl Model {
     /// copy (they'd read as zeros).
     pub fn tensor_data(&self, t: &Tensor) -> &[u8] {
         let r = self.tensor_range(t);
-        if self.any_released.load(std::sync::atomic::Ordering::Acquire) {
+        if !self.file_backed && self.any_released.load(std::sync::atomic::Ordering::Acquire) {
             let rel = self.released.lock().unwrap();
             assert!(
                 !rel.iter().any(|x| x.start < r.end && r.start < x.end),
@@ -358,33 +359,72 @@ impl Model {
     }
 
     /// Hand back the memory of a tensor that was copied elsewhere and won't be
-    /// read from here again (MADV_DONTNEED, whole aligned blocks inside the
-    /// tensor only). On a file mapping the pages just leave this mapping and a
-    /// later read faults them back in from the file. On the anonymous copy they
-    /// come back as zeros, so the range is recorded and `tensor_data` panics
-    /// on it from then on.
+    /// read from here again (MADV_DONTNEED, whole aligned blocks only). A
+    /// block may span several released tensors and the padding between them
+    /// (bytes no tensor owns), so small tensors next to each other go too;
+    /// it never holds a byte of a tensor that wasn't released. On a file
+    /// mapping the pages just leave this mapping and a later read faults them
+    /// back in from the file. On the anonymous copy they come back as zeros,
+    /// so `tensor_data` panics on a released tensor from then on.
     pub fn release(&self, t: &Tensor) {
         let r = self.tensor_range(t);
-        let base = self.data.as_ptr() as usize;
-        let start = (base + r.start).next_multiple_of(RELEASE_ALIGN) - base;
-        let end = (base + r.end) / RELEASE_ALIGN * RELEASE_ALIGN - base;
-        if start >= end {
+        if r.is_empty() {
             return;
         }
+        let mut rel = self.released.lock().unwrap();
+        let i = rel.partition_point(|x| x.start < r.start);
+        if rel.get(i) == Some(&r) {
+            return;
+        }
+        rel.insert(i, r);
         if !self.file_backed {
-            self.released.lock().unwrap().push(r);
             self.any_released
                 .store(true, std::sync::atomic::Ordering::Release);
         }
-        // SAFETY: [start, end) is inside `data` and inside tensor t, whose
-        // bytes nothing reads again (on the anonymous copy `tensor_data`
-        // enforces that; the slices handed out before were all consumed by
-        // the repack). On a file mapping the bytes don't change at all.
+        // The run of released tensors around this one, joined across gaps
+        // that hold no tensor bytes.
+        let (mut lo, mut hi) = (i, i);
+        while lo > 0 && self.unowned(rel[lo - 1].end, rel[lo].start) {
+            lo -= 1;
+        }
+        while hi + 1 < rel.len() && self.unowned(rel[hi].end, rel[hi + 1].start) {
+            hi += 1;
+        }
+        let base = self.data.as_ptr() as usize;
+        let start = (base + rel[lo].start).next_multiple_of(RELEASE_ALIGN) - base;
+        let end = (base + rel[hi].end) / RELEASE_ALIGN * RELEASE_ALIGN - base;
+        if start >= end {
+            return;
+        }
+        // SAFETY: [start, end) is inside `data` and inside released tensors
+        // or bytes no tensor owns; nothing reads those again (on the
+        // anonymous copy `tensor_data` enforces that; the slices handed out
+        // before were all consumed by their owners before `release`). Blocks
+        // dropped by an earlier call are simply dropped again. On a file
+        // mapping the bytes don't change at all.
         let _ = unsafe {
             self.data
                 .unchecked_advise_range(memmap2::UncheckedAdvice::DontNeed, start, end - start)
         };
     }
+
+    /// Whether `t` was handed back by `release`.
+    #[cfg(test)]
+    pub fn is_released(&self, t: &Tensor) -> bool {
+        let r = self.tensor_range(t);
+        self.released.lock().unwrap().contains(&r)
+    }
+
+    /// Whether bytes a..b of `data` (between two released tensors) belong
+    /// to no tensor.
+    fn unowned(&self, a: usize, b: usize) -> bool {
+        a >= b
+            || !self.tensors.iter().any(|t| {
+                let r = self.tensor_range(t);
+                !r.is_empty() && r.start < b && a < r.end
+            })
+    }
+
     pub fn meta_u32(&self, key: &str) -> Option<u32> {
         self.metadata
             .iter()

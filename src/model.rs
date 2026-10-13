@@ -6,14 +6,15 @@ use crate::gguf::{Model, Tensor, Val};
 use crate::pool::{self, Pool};
 use crate::quant::{
     DecodeCfg, F16, F32, Q4_K, Q5_0, Q6_K, Q8_0, QuantizedAct, batch_slots, dequant,
-    dot_row_q8_multi, dot_rows_q8, dot_rows_q8_multi, r8, row_bytes,
+    dot_row_q8_multi, dot_rows_q8, dot_rows_q8_multi, r8, r8q, row_bytes,
 };
 use crate::vmath::{self, fmadd};
 
 /// A weight matrix: its bytes in the model's mapping, or its 8-row
-/// interleaved repack (quant::r8). A repacked matrix goes through the r8
-/// kernels in every path (decode, prefill, swiglu, the verify head), so all
-/// of them give the same bits; the others use the per-row kernels.
+/// interleaved repack (quant::r8 for Q4_K/Q6_K, quant::r8q for Q5_0/Q8_0).
+/// A repacked matrix goes through those kernels in every path (decode,
+/// prefill, swiglu, the verify head), so all of them give the same bits; the
+/// others use the per-row kernels.
 struct Weight<'a> {
     t: &'a Tensor,
     /// The tensor's bytes; None when repacked (they may have been released).
@@ -30,7 +31,7 @@ impl<'a> Weight<'a> {
         self.t.dims[1] as usize
     }
 
-    /// Repack a Q4_K/Q6_K matrix with rows % 8 == 0 if `repack`, into
+    /// Repack a Q4_K/Q6_K/Q5_0/Q8_0 matrix with rows % 8 == 0 if `repack`, into
     /// anonymous memory with transparent huge pages requested (decode walks
     /// it every token; AXON_R8_THP=0 skips the request). Then, if `release`,
     /// the original bytes are handed back (`Model::release`) so the weights
@@ -38,21 +39,30 @@ impl<'a> Weight<'a> {
     /// token embedding (a tied output matrix is the same tensor).
     fn load(m: &'a Model, t: &'a Tensor, repack: bool, release: bool) -> Weight<'a> {
         let (qt, rows, n) = (t.qtype.id, t.dims[1] as usize, t.dims[0] as usize);
-        if !repack || !r8::can_repack(qt, rows, n) {
+        let q = r8q::can_repack(qt, rows, n);
+        if !repack || !(q || r8::can_repack(qt, rows, n)) {
             return Weight {
                 t,
                 data: Some(m.tensor_data(t)),
                 r8: None,
             };
         }
-        let len = r8::repacked_len(qt, rows, n);
+        let len = if q {
+            r8q::repacked_len(qt, rows, n)
+        } else {
+            r8::repacked_len(qt, rows, n)
+        };
         let mut buf = memmap2::MmapMut::map_anon(len).expect("r8: anonymous mapping");
         #[cfg(target_os = "linux")]
         if std::env::var("AXON_R8_THP").map_or(true, |v| v != "0") {
             // Before the first touch, as in gguf::map_weights. Failure only costs speed.
             let _ = buf.advise(memmap2::Advice::HugePage);
         }
-        r8::repack_into(qt, m.tensor_data(t), rows, n, &mut buf);
+        if q {
+            r8q::repack_into(qt, m.tensor_data(t), rows, n, &mut buf);
+        } else {
+            r8::repack_into(qt, m.tensor_data(t), rows, n, &mut buf);
+        }
         if release {
             m.release(t);
         }
@@ -60,6 +70,29 @@ impl<'a> Weight<'a> {
             t,
             data: None,
             r8: Some(buf.make_read_only().expect("r8: mprotect")),
+        }
+    }
+
+    /// Whether the repack is r8q's (Q5_0/Q8_0) rather than r8's (K-quants).
+    fn is_r8q(&self) -> bool {
+        matches!(self.qt(), Q5_0 | Q8_0)
+    }
+
+    /// Repacked decode: `r8::gemv` or `r8q::gemv` (same contract).
+    fn gemv(&self, groups: &[u8], x: &QuantizedAct, out: &mut [f32], pf: usize) {
+        if self.is_r8q() {
+            r8q::gemv(self.qt(), groups, x, out, pf);
+        } else {
+            r8::gemv(self.qt(), groups, x, out, pf);
+        }
+    }
+
+    /// Repacked batch: `r8::gemm` or `r8q::gemm` (same contract).
+    fn gemm(&self, groups: &[u8], xs: &[&QuantizedAct], out: &mut [f32], stride: usize) {
+        if self.is_r8q() {
+            r8q::gemm(self.qt(), groups, xs, out, stride);
+        } else {
+            r8::gemm(self.qt(), groups, xs, out, stride);
         }
     }
 
@@ -77,7 +110,11 @@ impl<'a> Weight<'a> {
             "{}: r8 rows not whole groups",
             self.t.name
         );
-        let gb = r8::group_bytes(self.qt(), n_in);
+        let gb = if self.is_r8q() {
+            r8q::group_bytes(self.qt(), n_in)
+        } else {
+            r8::group_bytes(self.qt(), n_in)
+        };
         let end = if to_end { p.len() } else { (r0 + k) / 8 * gb };
         &p[r0 / 8 * gb..end]
     }
@@ -283,8 +320,9 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
 }
 
 impl<'a> Qwen2<'a> {
-    /// The model, with Q4_K/Q6_K matrices repacked for the r8 kernels unless
-    /// AXON_REPACK=0 (the per-row kernels only: the branch's bits).
+    /// The model, with Q4_K/Q6_K and Q5_0/Q8_0 matrices repacked for the r8
+    /// and r8q kernels unless AXON_REPACK=0 (the per-row kernels only: the
+    /// branch's bits).
     pub fn new(m: &'a Model) -> Qwen2<'a> {
         Self::new_with(m, std::env::var("AXON_REPACK").map_or(true, |v| v != "0"))
     }
@@ -329,9 +367,19 @@ impl<'a> Qwen2<'a> {
         let layers = par_map(n_layers, INLINE_WORK + 1, |i| {
             let t = |s: &str| find(m, &format!("blk.{i}.{s}"));
             let w = |s: &str| Weight::load(m, t(s), repack, true);
-            let bias = |s: &str| find_opt(m, &format!("blk.{i}.{s}")).map(|t| load_vec(m, t));
+            // Norms and biases are copied out; when repacking, their bytes go
+            // back too, so `Model::release` can drop the blocks they share
+            // with the small repacked matrices around them.
+            let vals = |t: &Tensor| {
+                let v = load_vec(m, t);
+                if repack {
+                    m.release(t);
+                }
+                v
+            };
+            let bias = |s: &str| find_opt(m, &format!("blk.{i}.{s}")).map(vals);
             Layer {
-                attn_norm: load_vec(m, t("attn_norm.weight")),
+                attn_norm: vals(t("attn_norm.weight")),
                 wq: w("attn_q.weight"),
                 wk: w("attn_k.weight"),
                 wv: w("attn_v.weight"),
@@ -339,7 +387,7 @@ impl<'a> Qwen2<'a> {
                 bk: bias("attn_k.bias"),
                 bv: bias("attn_v.bias"),
                 wo: w("attn_output.weight"),
-                ffn_norm: load_vec(m, t("ffn_norm.weight")),
+                ffn_norm: vals(t("ffn_norm.weight")),
                 w_gate: w("ffn_gate.weight"),
                 w_up: w("ffn_up.weight"),
                 w_down: w("ffn_down.weight"),
@@ -428,7 +476,7 @@ impl<'a> Qwen2<'a> {
         let k = out.len();
         if w.r8.is_some() {
             let groups = w.groups(x.len(), r0, k, own_all);
-            r8::gemv(w.qt(), groups, x, out, cfg.prefetch);
+            w.gemv(groups, x, out, cfg.prefetch);
         } else {
             let (qt, data) = (w.qt(), w.bytes());
             let rb = row_bytes(qt, x.len());
@@ -549,7 +597,7 @@ impl<'a> Qwen2<'a> {
         let n_in = xr[0].len();
         let k = ys.len() / slots;
         if w.r8.is_some() {
-            r8::gemm(w.qt(), w.groups(n_in, r0, k, false), &xr[..nb], ys, slots);
+            w.gemm(w.groups(n_in, r0, k, false), &xr[..nb], ys, slots);
         } else {
             let (qt, data) = (w.qt(), w.bytes());
             let rb = row_bytes(qt, n_in);
@@ -1902,8 +1950,78 @@ pub(crate) mod tests {
                 repack,
                 "repack {repack}: {repacked} ffn_down repacked"
             );
+            // Every Q5_0/Q8_0 matrix (0.5B: attention, gate/up, the head)
+            // goes through r8q when repacking, none otherwise.
+            let all = net
+                .layers
+                .iter()
+                .flat_map(|l| [&l.wq, &l.wk, &l.wv, &l.wo, &l.w_gate, &l.w_up, &l.w_down]);
+            for w in all.chain([&net.output]) {
+                if matches!(w.qt(), Q5_0 | Q8_0) {
+                    assert_eq!(w.r8.is_some(), repack, "{}", w.t.name);
+                }
+            }
             feed_batch_matches_feed_on(&net);
         }
+    }
+
+    /// Bit fingerprints of every matmul path on the real model, as
+    /// `Qwen2::new` builds it (AXON_REPACK / AXON_SIMD pick the kernels):
+    /// decode (`forward` token by token), prefill (`feed_batch` then
+    /// `forward`) and verify (`verify_batch`, the batched head). Asserts the
+    /// three agree bit for bit and prints one hash, so runs under different
+    /// settings or builds can be compared (`AXON_REPACK=0` must print the
+    /// same hash before and after a repack change; scalar/avx2/vnni must
+    /// print the same hash when everything is repacked).
+    #[test]
+    fn path_hashes() {
+        let Some(m) = crate::testutil::model() else {
+            return;
+        };
+        let net = Qwen2::new(&m);
+        let ids: Vec<u32> = (0..24u64)
+            .map(|i| (i * 2_654_435_761 % 150_000) as u32)
+            .collect();
+        let hash = |ls: &[Vec<f32>]| {
+            ls.iter()
+                .flatten()
+                .fold(0u64, |h, v| h.rotate_left(5) ^ v.to_bits() as u64)
+        };
+        let split = 15;
+        // decode: every position one token at a time
+        let mut c = net.new_cache(ids.len());
+        let dec: Vec<Vec<f32>> = (0..ids.len())
+            .map(|p| net.forward(ids[p], p, &mut c))
+            .collect();
+        // prefill: a batch, then decode the rest
+        let mut c = net.new_cache(ids.len());
+        net.feed_batch(&ids[..split], 0, &mut c);
+        let pre: Vec<Vec<f32>> = (split..ids.len())
+            .map(|p| net.forward(ids[p], p, &mut c))
+            .collect();
+        // verify: the rest as one batch through the batched head
+        let mut c = net.new_cache(ids.len());
+        net.feed_batch(&ids[..split], 0, &mut c);
+        let ver = net.verify_batch(&ids[split..], split, &mut c);
+        let tail = &dec[split..];
+        let (hd, hp, hv) = (hash(tail), hash(&pre), hash(&ver));
+        let repacked: Vec<&str> = net
+            .layers
+            .iter()
+            .flat_map(|l| [&l.wq, &l.wv, &l.w_gate, &l.w_down])
+            .chain([&net.output])
+            .filter(|w| w.r8.is_some())
+            .map(|w| w.t.qtype.name)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        println!(
+            "path hashes: all decode {:016x} tail decode {hd:016x} prefill {hp:016x} \
+             verify {hv:016x}; repacked types {repacked:?}",
+            hash(&dec)
+        );
+        assert_eq!(hd, hp, "prefill differs from decode");
+        assert_eq!(hd, hv, "verify differs from decode");
     }
 
     /// The r8 kernels against the per-row ones on the real model: same
@@ -1964,9 +2082,10 @@ pub(crate) mod tests {
         assert!(dlp < 1.0, "r8 moved a logprob by {dlp}");
     }
 
-    /// Every repacked matrix of the real model: r8 rows vs the per-row
+    /// Every repacked matrix of the real model: r8/r8q rows vs the per-row
     /// kernel vs an f64 dot of the dequantized row and quantized input, on a
-    /// real activation (the layer's own input for one token).
+    /// real activation (the layer's own input for one token; wo gets the
+    /// attention's input as a stand-in, the head the final norm).
     #[test]
     fn repack_rows_match_exact_on_model() {
         let Some(m) = crate::testutil::model() else {
@@ -1975,81 +2094,99 @@ pub(crate) mod tests {
         let net = Qwen2::new_with(&m, true);
         // The repack released the originals from `m`: raw bytes from a second load.
         let raw = crate::testutil::model().unwrap();
-        let mut x = net.embed(9707);
         let mut worst = (0f64, 0f64);
+        let mut seen = std::collections::BTreeSet::new();
+        let mut check = |w: &Weight, inp: &[f32]| {
+            if w.r8.is_none() {
+                return;
+            }
+            seen.insert(w.qt());
+            let data = raw.tensor_data(w.t);
+            let plain = Weight {
+                t: w.t,
+                data: Some(data),
+                r8: None,
+            };
+            let a = net.matvec(w, inp);
+            let b = net.matvec(&plain, inp);
+            let n = inp.len();
+            let rb = row_bytes(w.qt(), n);
+            let xq = quantized_values(w.qt(), inp);
+            let mut wr = vec![0f32; n];
+            for r in 0..w.rows() {
+                dequant(w.qt(), &data[r * rb..(r + 1) * rb], &mut wr);
+                let exact: f64 = wr.iter().zip(&xq).map(|(p, q)| *p as f64 * q).sum();
+                let mag: f64 = wr.iter().zip(&xq).map(|(p, q)| (*p as f64 * q).abs()).sum();
+                let ea = (a[r] as f64 - exact).abs() / mag.max(f64::MIN_POSITIVE);
+                let eb = (b[r] as f64 - exact).abs() / mag.max(f64::MIN_POSITIVE);
+                worst.0 = worst.0.max(ea);
+                worst.1 = worst.1.max(eb);
+                assert!(
+                    ea < 1e-5,
+                    "{} row {r}: repacked {} per-row {} exact {exact}",
+                    w.t.name,
+                    a[r],
+                    b[r]
+                );
+            }
+        };
+        let mut x = net.embed(9707);
         for layer in &net.layers {
+            let ha = net.rmsnorm(&x, &layer.attn_norm);
+            for w in [&layer.wq, &layer.wk, &layer.wv, &layer.wo] {
+                check(w, &ha);
+            }
             let h = net.rmsnorm(&x, &layer.ffn_norm);
             let act = net.matvec_swiglu(&layer.w_gate, &layer.w_up, &h);
-            for (w, inp) in [
-                (&layer.w_down, &act),
-                (&layer.w_gate, &h),
-                (&layer.w_up, &h),
-            ] {
-                let Some(_) = &w.r8 else { continue };
-                let data = raw.tensor_data(w.t);
-                let plain = Weight {
-                    t: w.t,
-                    data: Some(data),
-                    r8: None,
-                };
-                let a = net.matvec(w, inp);
-                let b = net.matvec(&plain, inp);
-                let n = inp.len();
-                let rb = row_bytes(w.qt(), n);
-                // quantized activations, dequantized
-                let mut xq = vec![0f64; n];
-                {
-                    let mut tmp = vec![0f32; n];
-                    for (i, c) in inp.chunks(256).enumerate() {
-                        let mut q = [0i8; 256];
-                        let amax = c.iter().fold(0f32, |m, v| m.max(v.abs()));
-                        let max = *c.iter().find(|v| v.abs() == amax).unwrap();
-                        let is = -127.0 / max;
-                        for (k, v) in c.iter().enumerate() {
-                            q[k] = ((is * v).round_ties_even() as i32).min(127) as i8;
-                        }
-                        for k in 0..256 {
-                            tmp[i * 256 + k] = q[k] as f32 * (1.0 / is);
-                        }
-                    }
-                    for (d, s) in xq.iter_mut().zip(&tmp) {
-                        *d = *s as f64;
-                    }
-                }
-                let mut wr = vec![0f32; n];
-                for r in 0..w.rows() {
-                    dequant(w.qt(), &data[r * rb..(r + 1) * rb], &mut wr);
-                    let exact: f64 = wr.iter().zip(&xq).map(|(p, q)| *p as f64 * q).sum();
-                    let mag: f64 = wr.iter().zip(&xq).map(|(p, q)| (*p as f64 * q).abs()).sum();
-                    let ea = (a[r] as f64 - exact).abs() / mag;
-                    let eb = (b[r] as f64 - exact).abs() / mag;
-                    worst.0 = worst.0.max(ea);
-                    worst.1 = worst.1.max(eb);
-                    assert!(
-                        ea < 1e-5,
-                        "{} row {r}: r8 {} per-row {} exact {exact}",
-                        w.t.name,
-                        a[r],
-                        b[r]
-                    );
-                }
-            }
+            check(&layer.w_down, &act);
+            check(&layer.w_gate, &h);
+            check(&layer.w_up, &h);
             let d = net.matvec(&layer.w_down, &act);
             for i in 0..x.len() {
                 x[i] += d[i];
             }
         }
+        check(&net.output, &net.rmsnorm(&x, &net.output_norm));
         println!(
-            "max rel err vs f64: r8 {:.2e}, per-row {:.2e}",
+            "max rel err vs f64: repacked {:.2e}, per-row {:.2e}; types {seen:?}",
             worst.0, worst.1
         );
     }
 
+    /// x as the kernels for `qt` see it: quantized (Q8_K 256-blocks for the
+    /// K-quants, Q8_0 32-blocks for Q5_0/Q8_0) and dequantized, in f64.
+    fn quantized_values(qt: u32, inp: &[f32]) -> Vec<f64> {
+        let mut out = Vec::with_capacity(inp.len());
+        if matches!(qt, Q5_0 | Q8_0) {
+            for c in inp.chunks(32) {
+                let amax = c.iter().fold(0f32, |m, v| m.max(v.abs()));
+                let d = crate::quant::f16_to_f32(crate::quant::f32_to_f16(amax / 127.0));
+                let id = if amax != 0.0 { 127.0 / amax } else { 0.0 };
+                for v in c {
+                    let q = ((v * id).round_ties_even() as i32).clamp(-128, 127);
+                    out.push((q as f32 * d) as f64);
+                }
+            }
+            return out;
+        }
+        for c in inp.chunks(256) {
+            let amax = c.iter().fold(0f32, |m, v| m.max(v.abs()));
+            let max = *c.iter().find(|v| v.abs() == amax).unwrap();
+            let is = -127.0 / max;
+            for v in c {
+                let q = ((is * v).round_ties_even() as i32).min(127);
+                out.push((q as f32 * (1.0 / is)) as f64);
+            }
+        }
+        out
+    }
+
     /// Releasing repacked originals must never hand out zeros, on the
     /// anonymous copy (where released pages ARE zeros) and on a file mapping.
-    /// The output matrix is forced to the (tied) embedding, so if the
-    /// embedding is a K-quant (1.5B+: AXON_TEST_MODEL) it's repacked as the
-    /// head while `embed` keeps reading its raw rows.
+    /// The output matrix is forced to the (tied) embedding, so it's repacked
+    /// as the head (0.5B: Q5_0, r8q; 1.5B+: Q4_K, r8) while `embed` keeps
+    /// reading its raw rows, and every tensor not released (blocks join
+    /// across neighbouring released tensors) keeps its bytes.
     #[test]
     fn release_keeps_embedding_on_copy_and_mmap() {
         let Some(fresh) = crate::testutil::model_with(Some(false)) else {
@@ -2069,11 +2206,18 @@ pub(crate) mod tests {
                 .map(|w| w.t)
                 .collect();
             assert!(!repacked.is_empty(), "nothing repacked");
-            // The embedding (= the tied head) still reads its real bytes.
-            assert_eq!(
-                m.tensor_data(net.token_embd),
-                fresh.tensor_data(net.token_embd)
-            );
+            // The embedding (= the tied head) still reads its real bytes,
+            // and so does every other tensor that wasn't released, however
+            // the released blocks around it were joined up.
+            assert!(!m.is_released(net.token_embd));
+            let mut kept = 0;
+            for t in &m.tensors {
+                if !m.is_released(t) {
+                    assert_eq!(m.tensor_data(t), fresh.tensor_data(t), "{}", t.name);
+                    kept += 1;
+                }
+            }
+            assert!(kept > 0 && kept < m.tensors.len(), "kept {kept}");
             for &id in &ids {
                 assert_eq!(net.embed(id), {
                     let mut x = vec![0f32; net.dim];
