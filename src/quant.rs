@@ -6,6 +6,8 @@
 // get_scale_min_k4 in ggml/src/ggml-quants.c. All reads are little-endian
 // from byte slices (no transmutes).
 
+pub mod r8bi;
+
 const QK5_0: usize = 32;
 const QK8_0: usize = 32;
 const QK_K: usize = 256;

@@ -6,7 +6,7 @@ use crate::gguf::{Model, Tensor, Val};
 use crate::pool::{self, Pool};
 use crate::quant::{
     DecodeCfg, F16, F32, Q4_K, Q5_0, Q6_K, Q8_0, QuantizedAct, batch_slots, dequant,
-    dot_row_q8_multi, dot_rows_q8, dot_rows_q8_multi, row_bytes,
+    dot_row_q8_multi, dot_rows_q8, dot_rows_q8_multi, r8bi, row_bytes,
 };
 
 /// The weights of one transformer block, borrowed from the mmap.
@@ -39,6 +39,10 @@ pub struct Qwen2<'a> {
     output_norm: Vec<f32>,
     output: &'a Tensor,
     layers: Vec<Layer<'a>>,
+    /// 8-row interleaved copies of the layers' K-quant matrices for prefill
+    /// (`quant::r8bi`, bit-identical to the per-row kernels); decode keeps
+    /// reading the mmap. Empty with AXON_REPACK=0 or without AVX2.
+    r8: Vec<(&'a Tensor, r8bi::Mat)>,
 }
 
 /// Keys and values of every past position, per layer.
@@ -208,7 +212,19 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
 }
 
 impl<'a> Qwen2<'a> {
+    /// The model, with its K-quant matrices repacked for r8bi unless
+    /// AXON_REPACK=0 (or no AVX2): bit-identical either way.
     pub fn new(m: &'a Model) -> Qwen2<'a> {
+        Self::new_with(m, r8bi::enabled())
+    }
+
+    /// `repack`: put the layers' Q4_K/Q6_K matrices in r8bi form (if the
+    /// CPU has an r8bi kernel) and hand their original bytes back
+    /// (`Model::release`): decode and prefill then read only the repacked
+    /// copy, so the weights aren't resident twice. The model's tensors that
+    /// get released (those matrices, norms, biases) can't be read again, so
+    /// build one `Qwen2` per loaded `Model`.
+    pub fn new_with(m: &'a Model, repack: bool) -> Qwen2<'a> {
         if let Err(e) = check_supported(m) {
             panic!("{e}");
         }
@@ -251,7 +267,46 @@ impl<'a> Qwen2<'a> {
                     w_down: t("ffn_down.weight"),
                 }
             })
+            .collect::<Vec<_>>();
+        // Batched/decode matmuls run several matrices in one row space: with
+        // every row count a multiple of 8, r8bi groups never straddle two.
+        let kv_dim = n_kv_heads * head_dim;
+        let ffn = layers.first().map_or(0, |l| l.w_gate.dims[1] as usize);
+        let repack =
+            repack && r8bi::available() && [dim, kv_dim, ffn].iter().all(|r| r.is_multiple_of(8));
+        let mats: Vec<&Tensor> = layers
+            .iter()
+            .flat_map(|l| [l.wq, l.wk, l.wv, l.wo, l.w_gate, l.w_up, l.w_down])
             .collect();
+        let r8 = if repack {
+            Self::repack(m, &mats)
+        } else {
+            Vec::new()
+        };
+        if !r8.is_empty() {
+            // The originals went back as each was repacked; now the norms and
+            // biases too (copied out above), so released blocks can join
+            // across them.
+            for i in 0..n_layers {
+                for s in [
+                    "attn_norm.weight",
+                    "ffn_norm.weight",
+                    "attn_q.bias",
+                    "attn_k.bias",
+                    "attn_v.bias",
+                ] {
+                    if let Some(t) = find_opt(m, &format!("blk.{i}.{s}")) {
+                        m.release(t);
+                    }
+                }
+            }
+            let bytes: usize = r8.iter().map(|(_, w)| w.bytes()).sum();
+            eprintln!(
+                "repacked {} K-quant matrices to r8bi ({:.1} MiB), originals released",
+                r8.len(),
+                bytes as f64 / (1 << 20) as f64
+            );
+        }
 
         Qwen2 {
             m,
@@ -267,7 +322,105 @@ impl<'a> Qwen2<'a> {
             output_norm,
             output,
             layers,
+            r8,
         }
+    }
+
+    /// Those of `ws` that can be (Q4_K/Q6_K, rows % 8, width % 256) in
+    /// r8bi form, all in one huge-page arena (each at a 64-byte aligned
+    /// offset), each original released right after its repack so the peak
+    /// is one matrix over the model, not two copies. Groups are repacked on
+    /// the pool. Empty (the per-row kernels for everything, one stderr line
+    /// saying why) when:
+    /// - Q4_K/Q6_K are under half of the layers' weight bytes: a partial
+    ///   repack (0.5B: ffn_down only) measured no faster and costs memory;
+    /// - MemAvailable can't cover the arena (on a file mapping released
+    ///   pages stay in page cache, so all of it; on the anonymous copy, the
+    ///   largest matrix) plus 512 MiB;
+    /// - the arena can't be mapped.
+    fn repack(m: &Model, ws: &[&'a Tensor]) -> Vec<(&'a Tensor, r8bi::Mat)> {
+        let mut specs = Vec::new();
+        let (mut total, mut largest, mut all) = (0, 0, 0u64);
+        for &w in ws {
+            all += w.n_bytes;
+            let (qt, n, rows) = (w.qtype.id, w.dims[0] as usize, w.dims[1] as usize);
+            if let Some(len) = r8bi::repacked_len(qt, rows, n) {
+                specs.push((w, qt, rows, n, total));
+                total += len.next_multiple_of(64);
+                largest = largest.max(len);
+            }
+        }
+        let rep: u64 = specs.iter().map(|s| s.0.n_bytes).sum();
+        if specs.is_empty() {
+            return Vec::new();
+        }
+        let skip = |why: String| {
+            eprintln!("r8bi: not repacking ({why}); per-row kernels");
+            Vec::new()
+        };
+        if rep * 2 < all {
+            return skip(format!(
+                "Q4_K/Q6_K are {}% of the layer weights",
+                rep * 100 / all.max(1)
+            ));
+        }
+        let need = if m.file_backed() { total } else { largest } as u64 + (512 << 20);
+        if let Some(avail) = crate::gguf::mem_available()
+            && avail < need
+        {
+            return skip(format!(
+                "needs {} MiB free, {} MiB available",
+                need >> 20,
+                avail >> 20
+            ));
+        }
+        let Some(mut arena) = r8bi::Arena::new(total) else {
+            return skip(format!("can't map {} MiB", total >> 20));
+        };
+        let mut rest = arena.bytes_mut();
+        for &(w, qt, rows, n, _) in &specs {
+            let len = r8bi::repacked_len(qt, rows, n).unwrap();
+            let (cur, r) = std::mem::take(&mut rest).split_at_mut(len.next_multiple_of(64));
+            rest = r;
+            let data = m.tensor_data(w);
+            const GROUPS: usize = 8;
+            let gb = r8bi::group_bytes(qt, n);
+            pool::for_each_chunk_mut(&mut cur[..len], GROUPS * gb, |c, o| {
+                r8bi::repack_groups(qt, data, n, c * GROUPS, o)
+            });
+            m.release(w);
+        }
+        let buf = arena.freeze();
+        specs
+            .into_iter()
+            .map(|(w, qt, rows, n, off)| (w, r8bi::Mat::in_arena(&buf, off, qt, rows, n)))
+            .collect()
+    }
+
+    /// (type, row bytes, data) of `w` for the per-row kernels; data is empty
+    /// when `w` is repacked (its bytes are released: use `r8`).
+    fn raw(&self, w: &Tensor, n_in: usize) -> (u32, usize, &'a [u8]) {
+        let qt = w.qtype.id;
+        let data = if self.r8(w).is_some() {
+            &[][..]
+        } else {
+            self.m.tensor_data(w)
+        };
+        (qt, row_bytes(qt, n_in), data)
+    }
+
+    /// The r8bi copy of `w`, if it was repacked.
+    fn r8(&self, w: &Tensor) -> Option<&r8bi::Mat> {
+        self.r8
+            .iter()
+            .find(|(t, _)| std::ptr::eq(*t, w))
+            .map(|(_, m)| m)
+    }
+
+    /// Resident bytes of the r8bi copies (their originals are released).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn repacked_bytes(&self) -> usize {
+        self.r8.iter().map(|(_, m)| m.bytes()).sum()
     }
 
     pub fn new_cache(&self, max_ctx: usize) -> KvCache {
@@ -313,15 +466,22 @@ impl<'a> Qwen2<'a> {
             starts[i] = total;
             total += w.dims[1] as usize;
         }
-        let info = ws.map(|w| {
-            let qt = w.qtype.id;
-            (qt, row_bytes(qt, x.len()), self.m.tensor_data(w))
-        });
+        let info = ws.map(|w| self.raw(w, x.len()));
+        let r8 = ws.map(|w| self.r8(w));
         // Every output row is an independent dot product, so split rows across
         // cores. About 4 chunks per thread lets the fast and efficiency cores
-        // even out; at most 64 rows keeps chunk claiming cheap.
+        // even out; at most 64 rows keeps chunk claiming cheap. Repacked
+        // matrices go in whole 8-row groups (every start is a multiple of 8
+        // then: `new_with`).
         let mut out = vec![0f32; total];
-        let chunk = (total / (Pool::global().threads() * 4)).clamp(4, 64);
+        let mut chunk = (total / (Pool::global().threads() * 4)).clamp(4, 64);
+        if r8.iter().any(Option::is_some) {
+            assert!(
+                starts.iter().all(|s| s % 8 == 0),
+                "r8bi: unaligned matrix start"
+            );
+            chunk = chunk.next_multiple_of(8);
+        }
         let (cfg, own_all) = Self::decode_cfg();
         pool::for_each_chunk_mut(&mut out, chunk, |c, mut ys| {
             // The chunk's rows, one run per matrix it touches, several rows
@@ -335,8 +495,13 @@ impl<'a> Qwen2<'a> {
                 let k = (end - g).min(ys.len());
                 let (run, rest) = std::mem::take(&mut ys).split_at_mut(k);
                 let o = g - starts[t];
-                let lim = if own_all { data.len() } else { (o + k) * rb };
-                dot_rows_q8(qt, &data[o * rb..lim], &xq, run, cfg);
+                if let Some(m) = r8[t] {
+                    let pf_end = if own_all { m.rows() } else { o + k };
+                    r8bi::gemv(m, o, &xq, run, cfg.prefetch, pf_end);
+                } else {
+                    let lim = if own_all { data.len() } else { (o + k) * rb };
+                    dot_rows_q8(qt, &data[o * rb..lim], &xq, run, cfg);
+                }
                 g += k;
                 ys = rest;
             }
@@ -360,25 +525,31 @@ impl<'a> Qwen2<'a> {
         }
         assert_eq!(up.dims[1] as usize, n, "swiglu: gate/up row counts differ");
         let xq = QuantizedAct::for_types(x, &[gate.qtype.id, up.qtype.id]);
-        let [g, u] = [gate, up].map(|w| {
-            let qt = w.qtype.id;
-            (qt, row_bytes(qt, x.len()), self.m.tensor_data(w))
-        });
+        let [g, u] = [gate, up].map(|w| self.raw(w, x.len()));
+        let [gr8, ur8] = [gate, up].map(|w| self.r8(w));
         let mut out = vec![0f32; n];
         // Each row is two dot products, so half the rows per chunk of matvec_many.
         const MAX_CHUNK: usize = 32;
-        let chunk = (n / (Pool::global().threads() * 8)).clamp(4, MAX_CHUNK);
+        let mut chunk = (n / (Pool::global().threads() * 8)).clamp(4, MAX_CHUNK);
+        if gr8.is_some() || ur8.is_some() {
+            chunk = chunk.next_multiple_of(8);
+        }
         let (cfg, own_all) = Self::decode_cfg();
         pool::for_each_chunk_mut(&mut out, chunk, |c, ys| {
             let (r, k) = (c * chunk, ys.len());
             let mut ub = [0f32; MAX_CHUNK];
             let ub = &mut ub[..k];
             // prefetch bounds as in matvec_many
-            let lim = |(_, rb, data): (u32, usize, &[u8])| {
-                if own_all { data.len() } else { (r + k) * rb }
+            let one = |w: (u32, usize, &[u8]), r8: Option<&r8bi::Mat>, y: &mut [f32]| {
+                if let Some(m) = r8 {
+                    r8bi::gemv(m, r, &xq, y, cfg.prefetch, if own_all { n } else { r + k });
+                } else {
+                    let lim = if own_all { w.2.len() } else { (r + k) * w.1 };
+                    dot_rows_q8(w.0, &w.2[r * w.1..lim], &xq, y, cfg);
+                }
             };
-            dot_rows_q8(g.0, &g.2[r * g.1..lim(g)], &xq, ys, cfg);
-            dot_rows_q8(u.0, &u.2[r * u.1..lim(u)], &xq, ub, cfg);
+            one(g, gr8, ys);
+            one(u, ur8, ub);
             for (y, &uv) in ys.iter_mut().zip(ub.iter()) {
                 let gv = *y;
                 *y = (gv / (1.0 + (-gv).exp())) * uv;
@@ -478,22 +649,45 @@ impl<'a> Qwen2<'a> {
             starts[i] = total;
             total += w.dims[1] as usize;
         }
-        let info = ws.map(|w| {
-            let qt = w.qtype.id;
-            (qt, row_bytes(qt, n_in), self.m.tensor_data(w))
-        });
+        let info = ws.map(|w| self.raw(w, n_in));
         let slots = batch_slots(&types, n_in, nb);
         let xr: Vec<&QuantizedAct> = (0..slots).map(|b| &xq[b.min(nb - 1)]).collect();
         let mut out = vec![0f32; total * slots];
-        let rows = Self::rows_per_chunk(total, nb);
+        let mut rows = Self::rows_per_chunk(total, nb);
         let row_of = |g: usize| {
             let t = starts.iter().rposition(|&s| s <= g).unwrap();
             let (qt, rb, data) = info[t];
             let o = g - starts[t];
             (qt, &data[o * rb..(o + 1) * rb])
         };
-        pool::for_each_chunk_mut(&mut out, rows * slots, |c, ys| {
-            dot_rows_chunk(ys, slots, c * rows, &row_of, &xr)
+        // r8bi matrices go through the 8-row GEMM, so chunks and matrix
+        // starts must be whole groups of 8 rows. Padding slots stay 0.
+        let r8 = ws.map(|w| self.r8(w));
+        if r8.iter().any(Option::is_some) {
+            assert!(
+                starts.iter().all(|s| s % 8 == 0),
+                "r8bi: unaligned matrix start"
+            );
+            rows = rows.next_multiple_of(8);
+        }
+        pool::for_each_chunk_mut(&mut out, rows * slots, |c, mut ys| {
+            if r8.iter().all(Option::is_none) {
+                return dot_rows_chunk(ys, slots, c * rows, &row_of, &xr);
+            }
+            // one run per matrix the chunk touches
+            let mut g = c * rows;
+            while !ys.is_empty() {
+                let t = starts.iter().rposition(|&s| s <= g).unwrap();
+                let end = starts.get(t + 1).copied().unwrap_or(total);
+                let k = (end - g).min(ys.len() / slots);
+                let (run, rest) = std::mem::take(&mut ys).split_at_mut(k * slots);
+                match r8[t] {
+                    Some(m) => r8bi::gemm(m, g - starts[t], &xr[..nb], run, slots),
+                    None => dot_rows_chunk(run, slots, g, &row_of, &xr),
+                }
+                g += k;
+                ys = rest;
+            }
         });
         (out, starts, slots)
     }
@@ -557,14 +751,43 @@ impl<'a> Qwen2<'a> {
         assert_eq!(up.dims[1] as usize, n, "swiglu: gate/up row counts differ");
         let types = [gate.qtype.id, up.qtype.id];
         let xq = Self::quantize_batch(xs, &types);
-        let [g, u] = [gate, up].map(|w| {
-            let qt = w.qtype.id;
-            (qt, row_bytes(qt, n_in), self.m.tensor_data(w))
-        });
+        let [g, u] = [gate, up].map(|w| self.raw(w, n_in));
         let slots = batch_slots(&types, n_in, nb);
         let xr: Vec<&QuantizedAct> = (0..slots).map(|b| &xq[b.min(nb - 1)]).collect();
         let mut out = vec![0f32; n * slots];
         let rows = Self::rows_per_chunk(n, nb);
+        let [gr8, ur8] = [gate, up].map(|w| self.r8(w));
+        if gr8.is_some() || ur8.is_some() {
+            // 8 rows at a time through the r8bi GEMM (a matrix that isn't
+            // repacked: per row); padding slots stay 0 (silu(0) * 0 = 0) and
+            // are ignored as before.
+            let rows = rows.next_multiple_of(8);
+            let eight =
+                |w: (u32, usize, &[u8]), r8: Option<&r8bi::Mat>, r: usize, y: &mut [f32]| {
+                    if let Some(m) = r8 {
+                        r8bi::gemm(m, r, &xr[..nb], y, slots);
+                    } else {
+                        for (j, yr) in y.chunks_mut(slots).enumerate() {
+                            let row = &w.2[(r + j) * w.1..(r + j + 1) * w.1];
+                            dot_row_q8_multi(w.0, row, &xr, yr);
+                        }
+                    }
+                };
+            pool::for_each_chunk_mut(&mut out, rows * slots, |c, ys| {
+                with_rows_scratch(8 * slots, |uv| {
+                    for (j, yr) in ys.chunks_mut(8 * slots).enumerate() {
+                        let r = c * rows + 8 * j;
+                        eight(g, gr8, r, yr);
+                        eight(u, ur8, r, uv);
+                        for (y, &uv) in yr.iter_mut().zip(&*uv) {
+                            let gv = *y;
+                            *y = (gv / (1.0 + (-gv).exp())) * uv;
+                        }
+                    }
+                });
+            });
+            return (out, slots);
+        }
         pool::for_each_chunk_mut(&mut out, rows * slots, |c, ys| {
             with_rows_scratch(slots, |uv| {
                 for (j, yr) in ys.chunks_mut(slots).enumerate() {
@@ -1730,6 +1953,186 @@ pub(crate) mod tests {
         if let Some(i) = first_diff(&la[..], &lb[..]) {
             panic!("logit {i} differs: {} vs {}", la[i], lb[i]);
         }
+    }
+
+    fn model_path(rel: &str) -> Option<String> {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+        if !p.exists() {
+            assert!(
+                std::env::var_os("AXON_SKIP_MODEL_TESTS").is_some(),
+                "{rel} missing"
+            );
+            return None;
+        }
+        Some(p.to_str().unwrap().to_string())
+    }
+
+    const R8BI_MODELS: [&str; 2] = [
+        crate::testutil::MODEL,
+        "models/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+    ];
+
+    fn same_bits(x: &[f32], y: &[f32]) -> bool {
+        x.len() == y.len() && x.iter().zip(y).all(|(a, b)| a.to_bits() == b.to_bits())
+    }
+
+    /// One copy: with r8bi on, decode (`forward`/`feed`, the r8bi GEMV) and
+    /// prefill (`feed_batch`/`verify_batch`, the r8bi GEMM) read only the
+    /// repacked matrices (their originals released), and give bit for bit
+    /// the caches and logits of the per-row kernels (AXON_REPACK=0). On the
+    /// 1.5B every matrix but the embedding and head is K-quant, swiglu too.
+    #[test]
+    fn r8bi_decode_and_prefill_match_per_row_kernels() {
+        for path in R8BI_MODELS {
+            let Some(p) = model_path(path) else { continue };
+            let m0 = crate::gguf::load(&p).unwrap();
+            let m1 = crate::gguf::load(&p).unwrap();
+            let base = Qwen2::new_with(&m0, false);
+            let net = Qwen2::new_with(&m1, true);
+            assert!(base.r8.is_empty());
+            // the 0.5B's K-quants (ffn_down only) are under half its layer
+            // weights: not repacked (`Qwen2::repack`)
+            if path == crate::testutil::MODEL {
+                assert!(net.r8.is_empty(), "{path}: partial repack");
+            } else if r8bi::available() {
+                assert!(!net.r8.is_empty(), "{path}: nothing repacked");
+            }
+            for (t, _) in &net.r8 {
+                assert!(m1.is_released(t), "{}", t.name);
+            }
+            eprintln!(
+                "{path}: {} repacked matrices, {} bytes",
+                net.r8.len(),
+                net.repacked_bytes()
+            );
+            let ids: Vec<u32> = (0..40u64)
+                .map(|i| (i * 2_654_435_761 % 150_000) as u32)
+                .collect();
+            // decode, token by token, logits at every step
+            let mut a = base.new_cache(ids.len() + 1);
+            let mut b = net.new_cache(ids.len() + 1);
+            for (pos, &id) in ids.iter().enumerate().take(12) {
+                let la = base.forward(id, pos, &mut a);
+                let lb = net.forward(id, pos, &mut b);
+                assert!(same_bits(&la, &lb), "{path}: decode logits differ at {pos}");
+            }
+            // prefill in uneven batches vs per-row decode
+            let mut a = base.new_cache(ids.len() + 6);
+            let mut b = net.new_cache(ids.len() + 6);
+            for (pos, &id) in ids.iter().enumerate() {
+                base.feed(id, pos, &mut a);
+            }
+            let mut s = 0;
+            for n in [1, 2, 3, 5, 6, 9, 14] {
+                net.feed_batch(&ids[s..s + n], s, &mut b);
+                s += n;
+            }
+            assert_eq!(s, ids.len());
+            for l in 0..net.n_layers {
+                assert!(same_bits(&a.k[l], &b.k[l]), "{path}: layer {l} k");
+                assert!(same_bits(&a.v[l], &b.v[l]), "{path}: layer {l} v");
+            }
+            let la = base.forward(9707, ids.len(), &mut a);
+            let lb = net.forward(9707, ids.len(), &mut b);
+            assert!(same_bits(&la, &lb), "{path}: next logits");
+            // a verify batch
+            let va = base.verify_batch(&ids[..5], ids.len(), &mut a);
+            let vb = net.verify_batch(&ids[..5], ids.len(), &mut b);
+            for (x, y) in va.iter().zip(&vb) {
+                assert!(same_bits(x, y), "{path}: verify logits");
+            }
+        }
+    }
+
+    /// Releasing repacked originals never hands out zeros, on the anonymous
+    /// copy (where released pages ARE zeros) and on a file mapping: the
+    /// embedding and every tensor that wasn't released keep their bytes
+    /// (released blocks join across neighbouring released tensors), a
+    /// released one panics on the copy, and logits match either way.
+    #[test]
+    fn r8bi_release_keeps_other_tensors_on_copy_and_mmap() {
+        for path in R8BI_MODELS {
+            let Some(p) = model_path(path) else { continue };
+            if !r8bi::available() {
+                return;
+            }
+            let fresh = crate::gguf::load_with(&p, Some(false)).unwrap();
+            let mut logits: Vec<Vec<f32>> = Vec::new();
+            for copy in [true, false] {
+                let m = crate::gguf::load_with(&p, Some(copy)).unwrap();
+                assert_eq!(m.file_backed(), !copy);
+                let net = Qwen2::new_with(&m, true);
+                if net.r8.is_empty() {
+                    // not repacked (0.5B): nothing released
+                    assert!(m.tensors.iter().all(|t| !m.is_released(t)), "{path}");
+                    continue;
+                }
+                assert!(!m.is_released(net.token_embd));
+                assert!(!m.is_released(net.output));
+                let mut kept = 0;
+                for t in &m.tensors {
+                    if !m.is_released(t) {
+                        assert_eq!(m.tensor_data(t), fresh.tensor_data(t), "{}", t.name);
+                        kept += 1;
+                    }
+                }
+                assert!(kept > 0 && kept < m.tensors.len(), "kept {kept}");
+                let t = net.r8[0].0;
+                if copy {
+                    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        m.tensor_data(t).len()
+                    }));
+                    assert!(r.is_err(), "released tensor readable on the anonymous copy");
+                } else {
+                    assert_eq!(m.tensor_data(t), fresh.tensor_data(t));
+                }
+                let ids = [9707u32, 11, 1879, 0, 151642, 77, 5000];
+                let mut c = net.new_cache(ids.len());
+                net.feed_batch(&ids[..ids.len() - 1], 0, &mut c);
+                logits.push(net.forward(ids[ids.len() - 1], ids.len() - 1, &mut c));
+            }
+            if logits.len() == 2 {
+                assert!(same_bits(&logits[0], &logits[1]), "{path}: copy vs mmap");
+            }
+        }
+    }
+
+    /// RSS after loading AXON_RSS_MODEL and building the net (AXON_REPACK
+    /// as set): run alone, one process per setting.
+    #[test]
+    #[ignore = "measurement: AXON_RSS_MODEL=path, one process per run"]
+    fn rss_after_load() {
+        let path = std::env::var("AXON_RSS_MODEL").expect("AXON_RSS_MODEL");
+        let rss = || {
+            let s = std::fs::read_to_string("/proc/self/status").unwrap();
+            let kb = |k: &str| {
+                s.lines()
+                    .find(|l| l.starts_with(k))
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(0)
+            };
+            (
+                kb("VmRSS:") >> 10,
+                kb("RssAnon:") >> 10,
+                kb("RssFile:") >> 10,
+                kb("VmHWM:") >> 10,
+            )
+        };
+        let m = crate::gguf::load(&path).unwrap();
+        let after_load = rss();
+        let net = Qwen2::new(&m);
+        let mut c = net.new_cache(4);
+        net.feed_batch(&[9707, 11, 1879], 0, &mut c);
+        let after = rss();
+        println!(
+            "RSS {path} AXON_REPACK={:?} file_backed={}: after load {:?} MiB, after build+3 tokens {:?} MiB (rss, anon, file, peak); repacked {} MiB",
+            std::env::var("AXON_REPACK").ok(),
+            m.file_backed(),
+            after_load,
+            after,
+            net.repacked_bytes() >> 20
+        );
     }
 
     /// The grouped scorer must equal `dot` per query, bit for bit.
