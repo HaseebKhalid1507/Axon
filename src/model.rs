@@ -235,11 +235,17 @@ impl<'a> Qwen2<'a> {
         out
     }
 
-    /// Rows per pool task for a batched matmul over `rows` weight rows: about
-    /// 4 chunks per thread. Each row already does one dot per token, so there
-    /// is no upper clamp; claiming a chunk is cheap next to its work.
+    /// Rows per pool chunk for batched matmuls: ~32 chunks per thread, an
+    /// even count so the 2-row tile kernels never get a lone row at a chunk
+    /// edge. Much finer than decode's ~4: a prefill chunk is a lot of work
+    /// (every row times every token in the batch), so a few big chunks leave
+    /// threads idle while the last one finishes, and claiming is cheap next
+    /// to it. Sweep on bella (560-token prompt): 4/thread ~611 tok/s, 32 ~646,
+    /// 64+ slower again.
     fn rows_per_chunk(rows: usize) -> usize {
-        rows.div_ceil(Pool::global().threads() * 4).max(1)
+        rows.div_ceil(Pool::global().threads() * 32)
+            .max(1)
+            .next_multiple_of(2)
     }
 
     /// `matvec_many` for a batch of inputs: res[i][b] = ws[i] · xs[b].
@@ -468,7 +474,7 @@ impl<'a> Qwen2<'a> {
             // arithmetic as in `hidden`.
             let scale = 1.0 / (hd as f32).sqrt();
             let mut att = vec![0.0f32; nb * dim];
-            pool::for_each_chunk_mut(&mut att, hd, |c, out| {
+            pool::for_each_chunk_mut_rev(&mut att, hd, |c, out| {
                 let (b, qh) = (c / n_heads, c % n_heads);
                 let pos = start + b;
                 let kvh = qh / group;

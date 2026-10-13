@@ -262,6 +262,29 @@ pub fn for_each_chunk_mut<T: Send>(
     });
 }
 
+/// `for_each_chunk_mut`, but chunks are handed out last first. When later
+/// chunks take longer (causal attention: later tokens see more positions),
+/// starting the longest ones first keeps a long chunk from starting at the
+/// end while every other thread waits.
+pub fn for_each_chunk_mut_rev<T: Send>(
+    data: &mut [T],
+    chunk: usize,
+    f: impl Fn(usize, &mut [T]) + Sync,
+) {
+    assert!(chunk > 0);
+    let len = data.len();
+    let n_chunks = len.div_ceil(chunk);
+    let base = SendPtr(data.as_mut_ptr());
+    Pool::global().run(n_chunks, &|i| {
+        let c = n_chunks - 1 - i;
+        let start = c * chunk;
+        let n = chunk.min(len - start);
+        // SAFETY: as in for_each_chunk_mut; c runs over 0..n_chunks once each.
+        let ys = unsafe { std::slice::from_raw_parts_mut(base.get().add(start), n) };
+        f(c, ys);
+    });
+}
+
 struct SendPtr<T>(*mut T);
 impl<T> SendPtr<T> {
     // A method (not field access) so closures capture the whole Sync wrapper,
