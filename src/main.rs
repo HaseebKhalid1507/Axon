@@ -33,6 +33,8 @@ environment:
   AXON_POOL_DEBUG=1          gen: print thread-pool stats at the end
   AXON_MMAP=0|1              0: copy the model into huge-page memory, 1: map the file
                              (default: copy, unless the file is >60% of free memory)
+  AXON_PREFETCH=N            decode prefetch distance in bytes (default 8192, 0 = off)
+  AXON_DECODE_ROWS=1|2|4     decode rows per kernel call (default 4)
 
 The model must be a qwen2-architecture GGUF (e.g. Qwen2.5-0.5B-Instruct Q4_K_M).";
 

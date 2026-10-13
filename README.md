@@ -60,6 +60,8 @@ text, never as the control token.
 | `AXON_POOL_ADAPT=0` | keep every worker in every job (no adaptive drop-out under load) |
 | `AXON_POOL_DEBUG=1` | `gen`: print thread-pool stats at the end |
 | `AXON_MMAP=0\|1` | `0`: copy the model into huge-page memory; `1`: map the file. Default: copy, unless the file is over 60% of available memory |
+| `AXON_PREFETCH=N` | decode: software prefetch distance in bytes (default 8192, 0 = off, max 1 MiB) |
+| `AXON_DECODE_ROWS=1\|2\|4` | decode: rows per kernel call (default 4; K-quants use at most 2) |
 | `AXON_SKIP_MODEL_TESTS=1` | tests: skip the ones that need the real model |
 
 ## Numbers

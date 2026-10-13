@@ -718,7 +718,7 @@ mod x86 {
     /// 32 Q5_0 weights (nibble | high bit << 4) - 16 as i8.
     #[inline]
     #[target_feature(enable = "avx2")]
-    fn q5_0_weights(b: &[u8; Q5_0_BYTES]) -> __m256i {
+    pub(super) fn q5_0_weights(b: &[u8; Q5_0_BYTES]) -> __m256i {
         let qs = load_u8x16(b[6..22].try_into().unwrap());
         let nib = _mm256_and_si256(
             _mm256_set_m128i(_mm_srli_epi16(qs, 4), qs),
@@ -936,7 +936,7 @@ mod x86 {
     /// 32 Q8_0 weights as i8 (in a u8 vector).
     #[inline]
     #[target_feature(enable = "avx2")]
-    fn q8_0_weights(b: &[u8; Q8_0_BYTES]) -> __m256i {
+    pub(super) fn q8_0_weights(b: &[u8; Q8_0_BYTES]) -> __m256i {
         load_u8x32(b[2..34].try_into().unwrap())
     }
 
@@ -1750,9 +1750,347 @@ mod x86 {
         q6_k_pair_vnni,
         scale_acc_vnni
     );
+
+    // ---- Decode (single-token) kernels over R consecutive rows. Row r is
+    // `rows[r * rb..(r + 1) * rb]`; `rows` may run further (to the end of the
+    // tensor) and is only read there by prefetch hints. Each row keeps its
+    // own fmadd chain, so R chains overlap, and each activation block is
+    // loaded once for all R rows. Per row the float ops are exactly the
+    // single-row kernel's: d = h2f(row d) * x d, fmadd(d, cvt(lanes), acc) in
+    // block order, then the same hsum. Only how the i32 lanes are formed
+    // differs, and every lane is the exact Σ w·a of its 4 products (proved
+    // in the tests), so results are bit-identical.
+
+    /// Hint the line at `rows[off]` into L1; nothing if `off` is past the
+    /// slice (the caller's rows end there; hints beyond would be other
+    /// threads' rows, i.e. extra DRAM traffic).
+    #[inline(always)]
+    fn prefetch(rows: &[u8], off: usize) {
+        if off < rows.len() {
+            // SAFETY: off is in bounds; a prefetch never faults anyway.
+            unsafe { _mm_prefetch::<_MM_HINT_T0>(rows.as_ptr().add(off).cast()) }
+        }
+    }
+
+    /// Q5_0 lanes, unsigned: u = w + 16 in 0..32 via dpbusd from c = -16 Σa.
+    #[inline]
+    #[target_feature(enable = "avx2,avxvnni")]
+    pub fn q5_0_lanes_vnni(b: &[u8; Q5_0_BYTES], qy: __m256i, c: &[i32; 8]) -> __m256i {
+        _mm256_dpbusd_avx_epi32(load_i32x8(c), q5_0_raw(b), qy)
+    }
+
+    /// Q5_0 lanes, unsigned on plain AVX2: maddubs(u, a) pairs are at most
+    /// 2 * 31 * 128 = 7936 in magnitude (no i16 saturation), madd sums them
+    /// exactly, then + c = -16 Σa.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn q5_0_lanes_avx2(b: &[u8; Q5_0_BYTES], qy: __m256i, c: &[i32; 8]) -> __m256i {
+        let p = _mm256_madd_epi16(_mm256_maddubs_epi16(q5_0_raw(b), qy), _mm256_set1_epi16(1));
+        _mm256_add_epi32(p, load_i32x8(c))
+    }
+
+    /// Q8_0 lanes, unsigned: u = w ^ 0x80 = w + 128 via dpbusd from
+    /// c << 3 = -128 Σa.
+    #[inline]
+    #[target_feature(enable = "avx2,avxvnni")]
+    pub fn q8_0_lanes_vnni(b: &[u8; Q8_0_BYTES], qy: __m256i, c: &[i32; 8]) -> __m256i {
+        let c = _mm256_slli_epi32::<3>(load_i32x8(c));
+        _mm256_dpbusd_avx_epi32(c, q8_0_raw(b), qy)
+    }
+
+    /// Q8_0 lanes on plain AVX2: the sign trick, as the single-row kernel
+    /// (maddubs with u = w + 128 could saturate). `c` unused.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    pub fn q8_0_lanes_avx2(b: &[u8; Q8_0_BYTES], qy: __m256i, _c: &[i32; 8]) -> __m256i {
+        let qw = q8_0_weights(b);
+        let dot = _mm256_maddubs_epi16(_mm256_sign_epi8(qw, qw), _mm256_sign_epi8(qy, qw));
+        _mm256_madd_epi16(_mm256_set1_epi16(1), dot)
+    }
+
+    /// The single-row kernels' lanes (sign trick), for the lane-equality tests.
+    #[cfg(test)]
+    #[target_feature(enable = "avx2")]
+    pub fn sign_lanes_avx2(qw: __m256i, qy: __m256i) -> __m256i {
+        let dot = _mm256_maddubs_epi16(_mm256_sign_epi8(qw, qw), _mm256_sign_epi8(qy, qw));
+        _mm256_madd_epi16(_mm256_set1_epi16(1), dot)
+    }
+
+    #[cfg(test)]
+    #[target_feature(enable = "avx2,avxvnni")]
+    pub fn sign_lanes_vnni(qw: __m256i, qy: __m256i) -> __m256i {
+        let (ax, sy) = (_mm256_sign_epi8(qw, qw), _mm256_sign_epi8(qy, qw));
+        _mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), ax, sy)
+    }
+
+    macro_rules! small_block_rows {
+        ($feat:literal, $name:ident, $bytes:ident, $lanes:ident) => {
+            /// R rows of the single-row kernel of the same type and path.
+            ///
+            /// # Safety
+            /// The CPU must support the enabled target features.
+            #[allow(clippy::needless_range_loop)] // r indexes several arrays
+            #[target_feature(enable = $feat)]
+            pub unsafe fn $name<const R: usize>(
+                rows: &[u8],
+                rb: usize,
+                dx: &[f32],
+                qx: &[[i8; 32]],
+                c: &[[i32; 8]],
+                pf: usize,
+            ) -> [f32; R] {
+                let n = rb / $bytes;
+                let (dx, qx, c) = (&dx[..n], &qx[..n], &c[..n]);
+                let mut blk: [&[[u8; $bytes]]; R] = [&[]; R];
+                for r in 0..R {
+                    blk[r] = &rows[r * rb..(r + 1) * rb].as_chunks::<$bytes>().0[..n];
+                }
+                let mut acc = [_mm256_setzero_ps(); R];
+                for i in 0..n {
+                    if pf != 0 {
+                        for r in 0..R {
+                            prefetch(rows, r * rb + i * $bytes + pf);
+                        }
+                    }
+                    let dxb = dx[i];
+                    let qy = load_i8x32(&qx[i]);
+                    for r in 0..R {
+                        let b = &blk[r][i];
+                        let d = _mm256_set1_ps(h2f([b[0], b[1]]) * dxb);
+                        let s = _mm256_cvtepi32_ps($lanes(b, qy, &c[i]));
+                        acc[r] = _mm256_fmadd_ps(d, s, acc[r]);
+                    }
+                }
+                let mut out = [0f32; R];
+                for r in 0..R {
+                    out[r] = hsum_f32x8(acc[r]);
+                }
+                out
+            }
+        };
+    }
+
+    small_block_rows!("avx2,fma,f16c", q5_0_rows_avx2, Q5_0_BYTES, q5_0_lanes_avx2);
+    small_block_rows!("avx2,fma,f16c", q8_0_rows_avx2, Q8_0_BYTES, q8_0_lanes_avx2);
+    small_block_rows!(
+        "avx2,fma,f16c,avxvnni",
+        q5_0_rows_vnni,
+        Q5_0_BYTES,
+        q5_0_lanes_vnni
+    );
+    small_block_rows!(
+        "avx2,fma,f16c,avxvnni",
+        q8_0_rows_vnni,
+        Q8_0_BYTES,
+        q8_0_lanes_vnni
+    );
+
+    /// Q4_K packed 6-bit scales/mins as 16 u16: 8 scales, then 8 mins (as in
+    /// `q4_k_avx2`).
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn q4_k_mins_and_scales(b: &[u8; Q4_K_BYTES]) -> __m256i {
+        const KMASK1: u32 = 0x3f3f3f3f;
+        const KMASK2: u32 = 0x0f0f0f0f;
+        const KMASK3: u32 = 0x03030303;
+        let u0 = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
+        let u1 = u32::from_le_bytes([b[8], b[9], b[10], b[11]]);
+        let u2 = u32::from_le_bytes([b[12], b[13], b[14], b[15]]);
+        let t3 = ((u2 >> 4) & KMASK2) | (((u1 >> 6) & KMASK3) << 4);
+        let t2 = u1 & KMASK1;
+        let t1 = (u2 & KMASK2) | (((u0 >> 6) & KMASK3) << 4);
+        let t0 = u0 & KMASK1;
+        _mm256_cvtepu8_epi16(_mm_set_epi32(t3 as i32, t2 as i32, t1 as i32, t0 as i32))
+    }
+
+    /// R rows of `q4_k_avx2`, bit for bit per row.
+    ///
+    /// # Safety
+    /// The CPU must support avx2, fma and f16c.
+    #[allow(clippy::needless_range_loop)] // j, r index several arrays
+    #[target_feature(enable = "avx2,fma,f16c")]
+    pub unsafe fn q4_k_rows_avx2<const R: usize>(
+        rows: &[u8],
+        rb: usize,
+        xk: &[KBlock],
+        pf: usize,
+    ) -> [f32; R] {
+        let m4 = _mm256_set1_epi8(0xF);
+        let n = rb / Q4_K_BYTES;
+        let xk = &xk[..n];
+        let mut blk: [&[[u8; Q4_K_BYTES]]; R] = [&[]; R];
+        for r in 0..R {
+            blk[r] = &rows[r * rb..(r + 1) * rb].as_chunks::<Q4_K_BYTES>().0[..n];
+        }
+        let mut acc = [_mm256_setzero_ps(); R];
+        let mut acc_m = [_mm_setzero_ps(); R];
+        for i in 0..n {
+            if pf != 0 {
+                for r in 0..R {
+                    // a block spans 3 lines; hint them all
+                    let off = r * rb + i * Q4_K_BYTES + pf;
+                    prefetch(rows, off);
+                    prefetch(rows, off + 64);
+                    prefetch(rows, off + 128);
+                }
+            }
+            let a = &xk[i];
+            let q8sums = load_i16x16(&a.bsums);
+            let q8s = _mm_hadd_epi16(
+                _mm256_extracti128_si256(q8sums, 0),
+                _mm256_extracti128_si256(q8sums, 1),
+            );
+            let q8 = a.qs.as_chunks::<32>().0;
+            let mut d = [0f32; R];
+            let mut scales = [_mm256_setzero_si256(); R];
+            let mut sumi = [_mm256_setzero_si256(); R];
+            for r in 0..R {
+                let b = &blk[r][i];
+                d[r] = a.d * h2f([b[0], b[1]]);
+                let dmin = -a.d * h2f([b[2], b[3]]);
+                let mins_and_scales = q4_k_mins_and_scales(b);
+                let prod = _mm_madd_epi16(_mm256_extracti128_si256(mins_and_scales, 1), q8s);
+                acc_m[r] = _mm_fmadd_ps(_mm_set1_ps(dmin), _mm_cvtepi32_ps(prod), acc_m[r]);
+                let sc128 = _mm256_extracti128_si256(mins_and_scales, 0);
+                scales[r] = _mm256_set_m128i(sc128, sc128);
+            }
+            for j in 0..4 {
+                let yl = load_i8x32(&q8[2 * j]);
+                let yh = load_i8x32(&q8[2 * j + 1]);
+                for r in 0..R {
+                    let scale_l = k4_scale(scales[r], 2 * j as i32);
+                    let scale_h = k4_scale(scales[r], 2 * j as i32 + 1);
+                    let q4bits = load_u8x32(&blk[r][i][16..Q4_K_BYTES].as_chunks::<32>().0[j]);
+                    let q4l = _mm256_and_si256(q4bits, m4);
+                    let q4h = _mm256_and_si256(_mm256_srli_epi16(q4bits, 4), m4);
+                    let p16l = _mm256_madd_epi16(scale_l, _mm256_maddubs_epi16(q4l, yl));
+                    let p16h = _mm256_madd_epi16(scale_h, _mm256_maddubs_epi16(q4h, yh));
+                    sumi[r] = _mm256_add_epi32(sumi[r], _mm256_add_epi32(p16l, p16h));
+                }
+            }
+            for r in 0..R {
+                acc[r] = _mm256_fmadd_ps(_mm256_set1_ps(d[r]), _mm256_cvtepi32_ps(sumi[r]), acc[r]);
+            }
+        }
+        let mut out = [0f32; R];
+        for r in 0..R {
+            let mut m = acc_m[r];
+            m = _mm_add_ps(m, _mm_movehl_ps(m, m));
+            m = _mm_add_ss(m, _mm_movehdup_ps(m));
+            out[r] = hsum_f32x8(acc[r]) + _mm_cvtss_f32(m);
+        }
+        out
+    }
+
+    /// R rows of `q6_k_avx2`, bit for bit per row.
+    ///
+    /// # Safety
+    /// The CPU must support avx2, fma and f16c.
+    #[allow(clippy::needless_range_loop)] // j, r index several arrays
+    #[target_feature(enable = "avx2,fma,f16c")]
+    pub unsafe fn q6_k_rows_avx2<const R: usize>(
+        rows: &[u8],
+        rb: usize,
+        xk: &[KBlock],
+        pf: usize,
+    ) -> [f32; R] {
+        let m3 = _mm256_set1_epi8(3);
+        let m15 = _mm256_set1_epi8(15);
+        let n = rb / Q6_K_BYTES;
+        let xk = &xk[..n];
+        let mut blk: [&[[u8; Q6_K_BYTES]]; R] = [&[]; R];
+        for r in 0..R {
+            blk[r] = &rows[r * rb..(r + 1) * rb].as_chunks::<Q6_K_BYTES>().0[..n];
+        }
+        let mut acc = [_mm256_setzero_ps(); R];
+        for i in 0..n {
+            if pf != 0 {
+                for r in 0..R {
+                    // a block spans 4 lines; hint them all
+                    let off = r * rb + i * Q6_K_BYTES + pf;
+                    prefetch(rows, off);
+                    prefetch(rows, off + 64);
+                    prefetch(rows, off + 128);
+                    prefetch(rows, off + 192);
+                }
+            }
+            let a = &xk[i];
+            let q8 = a.qs.as_chunks::<32>().0;
+            let q8sums = load_i16x16(&a.bsums);
+            let mut d = [0f32; R];
+            let mut scales = [_mm_setzero_si128(); R];
+            let mut sumi = [_mm256_setzero_si256(); R];
+            let mut q8sclsub = [_mm256_setzero_si256(); R];
+            for r in 0..R {
+                let b = &blk[r][i];
+                d[r] = a.d * h2f([b[208], b[209]]);
+                scales[r] = load_u8x16(b[192..208].try_into().unwrap());
+                q8sclsub[r] = _mm256_slli_epi32(
+                    _mm256_madd_epi16(q8sums, _mm256_cvtepi8_epi16(scales[r])),
+                    5,
+                );
+            }
+            for j in 0..2 {
+                let y0 = load_i8x32(&q8[4 * j]);
+                let y1 = load_i8x32(&q8[4 * j + 1]);
+                let y2 = load_i8x32(&q8[4 * j + 2]);
+                let y3 = load_i8x32(&q8[4 * j + 3]);
+                for r in 0..R {
+                    let b = &blk[r][i];
+                    let ql = b[0..128].as_chunks::<32>().0;
+                    let qh = b[128..192].as_chunks::<32>().0;
+                    let q4bits1 = load_u8x32(&ql[2 * j]);
+                    let q4bits2 = load_u8x32(&ql[2 * j + 1]);
+                    let q4bits_h = load_u8x32(&qh[j]);
+
+                    let q4h_0 = _mm256_slli_epi16(_mm256_and_si256(q4bits_h, m3), 4);
+                    let q4h_1 =
+                        _mm256_slli_epi16(_mm256_and_si256(q4bits_h, _mm256_set1_epi8(12)), 2);
+                    let q4h_2 = _mm256_and_si256(q4bits_h, _mm256_set1_epi8(48));
+                    let q4h_3 =
+                        _mm256_srli_epi16(_mm256_and_si256(q4bits_h, _mm256_set1_epi8(-64)), 2);
+
+                    let q4_0 = _mm256_or_si256(_mm256_and_si256(q4bits1, m15), q4h_0);
+                    let q4_1 = _mm256_or_si256(_mm256_and_si256(q4bits2, m15), q4h_1);
+                    let q4_2 = _mm256_or_si256(
+                        _mm256_and_si256(_mm256_srli_epi16(q4bits1, 4), m15),
+                        q4h_2,
+                    );
+                    let q4_3 = _mm256_or_si256(
+                        _mm256_and_si256(_mm256_srli_epi16(q4bits2, 4), m15),
+                        q4h_3,
+                    );
+
+                    let p16_0 = _mm256_maddubs_epi16(q4_0, y0);
+                    let p16_1 = _mm256_maddubs_epi16(q4_1, y1);
+                    let p16_2 = _mm256_maddubs_epi16(q4_2, y2);
+                    let p16_3 = _mm256_maddubs_epi16(q4_3, y3);
+
+                    let p16_0 = _mm256_madd_epi16(q6_scale(scales[r], 4 * j), p16_0);
+                    let p16_1 = _mm256_madd_epi16(q6_scale(scales[r], 4 * j + 1), p16_1);
+                    let p16_2 = _mm256_madd_epi16(q6_scale(scales[r], 4 * j + 2), p16_2);
+                    let p16_3 = _mm256_madd_epi16(q6_scale(scales[r], 4 * j + 3), p16_3);
+
+                    sumi[r] = _mm256_add_epi32(sumi[r], _mm256_add_epi32(p16_0, p16_1));
+                    sumi[r] = _mm256_add_epi32(sumi[r], _mm256_add_epi32(p16_2, p16_3));
+                }
+            }
+            for r in 0..R {
+                let s = _mm256_sub_epi32(sumi[r], q8sclsub[r]);
+                acc[r] = _mm256_fmadd_ps(_mm256_set1_ps(d[r]), _mm256_cvtepi32_ps(s), acc[r]);
+            }
+        }
+        let mut out = [0f32; R];
+        for r in 0..R {
+            out[r] = hsum_f32x8(acc[r]);
+        }
+        out
+    }
 }
 
 /// Same meaning as dot_row(qtype_id, row, x) but with x pre-quantized.
+/// Decode matvecs use `dot_rows_q8`; kept as the single-row reference.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn dot_row_q8(qtype_id: u32, row: &[u8], x: &QuantizedAct) -> f32 {
     // SAFETY: simd() only returns Avx2/Vnni after detecting their features.
     unsafe { dot_row_q8_with(simd(), qtype_id, row, x) }
@@ -1820,6 +2158,181 @@ unsafe fn dot_row_q8_with(simd: Simd, qtype_id: u32, row: &[u8], x: &QuantizedAc
             }
         }
         _ => panic!("dot_row_q8: unsupported qtype {} ({})", qtype_id, name()),
+    }
+}
+
+/// Default decode prefetch distance in bytes (the 1-thread optimum measured
+/// on the 0.5B model: 512 B 42.6 tok/s, 8 KiB 57.6, 32 KiB 53.7).
+const DEFAULT_PREFETCH: usize = 8192;
+
+/// Decode kernel settings, read from the environment once:
+/// `AXON_PREFETCH` = prefetch distance in bytes ahead of the current block
+/// (0 = off, capped at 1 MiB so the address arithmetic can't wrap), `AXON_DECODE_ROWS` = most rows per kernel call (1, 2 or 4).
+#[derive(Clone, Copy, Debug)]
+pub struct DecodeCfg {
+    pub prefetch: usize,
+    pub max_rows: usize,
+}
+
+impl DecodeCfg {
+    pub fn get() -> DecodeCfg {
+        static CFG: std::sync::OnceLock<DecodeCfg> = std::sync::OnceLock::new();
+        *CFG.get_or_init(|| {
+            let var = |k: &str, d: usize| match std::env::var(k) {
+                Ok(s) if !s.trim().is_empty() => s
+                    .trim()
+                    .parse()
+                    .unwrap_or_else(|_| panic!("{k}={s}: expected a number")),
+                _ => d,
+            };
+            let max_rows = var("AXON_DECODE_ROWS", 4);
+            assert!(
+                matches!(max_rows, 1 | 2 | 4),
+                "AXON_DECODE_ROWS={max_rows}: expected 1, 2 or 4"
+            );
+            DecodeCfg {
+                prefetch: var("AXON_PREFETCH", DEFAULT_PREFETCH).min(1 << 20),
+                max_rows,
+            }
+        })
+    }
+}
+
+/// Decode matvec rows: `out[r] = dot_row_q8(qtype_id, &rows[r * rb..(r + 1) * rb], x)`
+/// for every r, bit for bit, with `rb = row_bytes(qtype_id, x.len())`. `rows`
+/// may extend past the last row; the kernels only prefetch from there, and
+/// never outside `rows`, so callers bound it to the rows they own. Q5_0/Q8_0
+/// rows go up to 4 at a time, Q4_K/Q6_K 2 (at most `cfg.max_rows`), each
+/// with its own accumulator chain; the remainder goes in smaller groups.
+pub fn dot_rows_q8(qtype_id: u32, rows: &[u8], x: &QuantizedAct, out: &mut [f32], cfg: DecodeCfg) {
+    // SAFETY: simd() only returns Avx2/Vnni after detecting their features.
+    unsafe { dot_rows_q8_with(simd(), qtype_id, rows, x, out, cfg.prefetch, cfg.max_rows) }
+}
+
+/// dot_rows_q8 on an explicit kernel path and prefetch distance.
+///
+/// # Safety
+/// As for `dot_row_q8_with`.
+unsafe fn dot_rows_q8_with(
+    simd: Simd,
+    qtype_id: u32,
+    rows: &[u8],
+    x: &QuantizedAct,
+    out: &mut [f32],
+    pf: usize,
+    max_rows: usize,
+) {
+    let nr = out.len();
+    if nr == 0 {
+        return;
+    }
+    let n = x.len();
+    let rb = row_bytes(qtype_id, n);
+    assert!(
+        rows.len() >= nr * rb,
+        "dot_rows_q8: {} rows of {rb} bytes need {} bytes, got {}",
+        nr,
+        nr * rb,
+        rows.len()
+    );
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = (pf, max_rows);
+    #[cfg(target_arch = "x86_64")]
+    if simd != Simd::Scalar {
+        let mut done = 0;
+        match qtype_id {
+            Q5_0 | Q8_0 if x.b32.is_some() => {
+                let b = x.b32.as_ref().expect("checked");
+                while max_rows >= 4 && nr - done >= 4 {
+                    let o: &mut [f32; 4] = (&mut out[done..done + 4]).try_into().unwrap();
+                    // SAFETY: guaranteed by our caller.
+                    *o = unsafe { small_rows::<4>(simd, qtype_id, &rows[done * rb..], rb, b, pf) };
+                    done += 4;
+                }
+                while max_rows >= 2 && nr - done >= 2 {
+                    let o: &mut [f32; 2] = (&mut out[done..done + 2]).try_into().unwrap();
+                    // SAFETY: as above.
+                    *o = unsafe { small_rows::<2>(simd, qtype_id, &rows[done * rb..], rb, b, pf) };
+                    done += 2;
+                }
+                while nr - done >= 1 {
+                    // SAFETY: as above.
+                    let [v] =
+                        unsafe { small_rows::<1>(simd, qtype_id, &rows[done * rb..], rb, b, pf) };
+                    out[done] = v;
+                    done += 1;
+                }
+                return;
+            }
+            Q4_K | Q6_K if x.k.is_some() => {
+                let xk = x.k.as_deref().expect("checked");
+                while max_rows >= 2 && nr - done >= 2 {
+                    let o: &mut [f32; 2] = (&mut out[done..done + 2]).try_into().unwrap();
+                    // SAFETY: as above.
+                    *o = unsafe { kquant_rows::<2>(qtype_id, &rows[done * rb..], rb, xk, pf) };
+                    done += 2;
+                }
+                while nr - done >= 1 {
+                    // SAFETY: as above.
+                    let [v] = unsafe { kquant_rows::<1>(qtype_id, &rows[done * rb..], rb, xk, pf) };
+                    out[done] = v;
+                    done += 1;
+                }
+                return;
+            }
+            _ => {}
+        }
+    }
+    // Scalar, float types, or a missing view (dot_row_q8_with reports it).
+    for (r, o) in out.iter_mut().enumerate() {
+        // SAFETY: guaranteed by our caller.
+        *o = unsafe { dot_row_q8_with(simd, qtype_id, &rows[r * rb..(r + 1) * rb], x) };
+    }
+}
+
+/// R Q5_0/Q8_0 rows on the Avx2 or Vnni path.
+///
+/// # Safety
+/// As for `dot_row_q8_with`, and `simd` is not Scalar.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn small_rows<const R: usize>(
+    simd: Simd,
+    qtype_id: u32,
+    rows: &[u8],
+    rb: usize,
+    b: &B32,
+    pf: usize,
+) -> [f32; R] {
+    let (dx, qx, c) = (&b.d[..], &b.q[..], &b.c[..]);
+    // SAFETY (unsafe calls below): guaranteed by our caller.
+    match (qtype_id, simd) {
+        (Q8_0, Simd::Vnni) => unsafe { x86::q8_0_rows_vnni::<R>(rows, rb, dx, qx, c, pf) },
+        (Q8_0, _) => unsafe { x86::q8_0_rows_avx2::<R>(rows, rb, dx, qx, c, pf) },
+        (_, Simd::Vnni) => unsafe { x86::q5_0_rows_vnni::<R>(rows, rb, dx, qx, c, pf) },
+        (_, _) => unsafe { x86::q5_0_rows_avx2::<R>(rows, rb, dx, qx, c, pf) },
+    }
+}
+
+/// R Q4_K/Q6_K rows; both SIMD paths use the AVX2 kernels, as in
+/// `dot_row_q8_with`.
+///
+/// # Safety
+/// The CPU must support avx2, fma and f16c.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+unsafe fn kquant_rows<const R: usize>(
+    qtype_id: u32,
+    rows: &[u8],
+    rb: usize,
+    xk: &[KBlock],
+    pf: usize,
+) -> [f32; R] {
+    // SAFETY (unsafe calls below): guaranteed by our caller.
+    if qtype_id == Q4_K {
+        unsafe { x86::q4_k_rows_avx2::<R>(rows, rb, xk, pf) }
+    } else {
+        unsafe { x86::q6_k_rows_avx2::<R>(rows, rb, xk, pf) }
     }
 }
 
@@ -3092,6 +3605,215 @@ mod tests {
                                 "qt {qt} fill {fill:#x} row {k} token {b} {p:?}: pair {got} vs single {want}"
                             );
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Rows of every kind the decode kernels must get bit-identical: random,
+    /// saturated (Q5_0 all raw 0 / all 31 / every raw value; Q8_0 all -128 /
+    /// all 127 / pinned extremes; K-quant extreme fields), and random rows with
+    /// every block scale at max |d| (±65504). Row r is kind r % kinds.
+    fn decode_rows(qt: u32, n: usize, count: usize, rng: &mut Lcg) -> Vec<u8> {
+        let (bs, bb) = block_info(qt);
+        let mut out = Vec::new();
+        for r in 0..count {
+            let row = match (qt, r % 5) {
+                (_, 0) => synthetic_row(qt, n, rng),
+                (Q5_0, 1) => extreme_row(qt, n, 0x00, rng),
+                (Q5_0, 2) => extreme_row(qt, n, 0xff, rng),
+                (Q5_0, 3) => q5_0_all_raw_row(n, r, rng),
+                (Q8_0, 1) => extreme_row(qt, n, 0x80, rng),
+                (Q8_0, 2) => extreme_row(qt, n, 0x7f, rng),
+                (Q8_0, 3) => q8_0_extreme_row(n, rng),
+                (_, 4) => {
+                    let mut row = synthetic_row(qt, n, rng);
+                    let d_off = if qt == Q6_K { 208 } else { 0 };
+                    for blk in 0..n / bs {
+                        let v = 0x7bffu16 | (((rng.next_u32() & 1) as u16) << 15);
+                        let p = blk * bb + d_off;
+                        row[p..p + 2].copy_from_slice(&v.to_le_bytes());
+                    }
+                    row
+                }
+                (_, k) => kquant_extreme_row(qt, n, k + r, rng),
+            };
+            out.extend_from_slice(&row);
+        }
+        out
+    }
+
+    #[test]
+    fn dot_rows_q8_matches_single_row() {
+        let mut paths = vec![Simd::Scalar];
+        paths.extend(simd_paths());
+        let mut rng = Lcg(0xdec0de);
+        for (qt, widths) in [
+            (Q5_0, [896usize, 4864]),
+            (Q8_0, [896, 4864]),
+            (Q4_K, [256, 4864]),
+            (Q6_K, [256, 4864]),
+        ] {
+            for n in widths {
+                let rb = row_bytes(qt, n);
+                let xs = [
+                    extreme_x(n, &mut rng),
+                    extreme_x(n, &mut rng),
+                    synthetic_x(n, &mut rng),
+                ];
+                for count in 1..=9 {
+                    // one spare row at the end: prefetch may look, compute may not
+                    let rows = decode_rows(qt, n, count + 1, &mut rng);
+                    for x in &xs {
+                        let qa = QuantizedAct::for_types(x, &[qt]);
+                        for &p in &paths {
+                            // SAFETY: Scalar, or a path listed by simd_paths().
+                            let want: Vec<f32> = (0..count)
+                                .map(|r| unsafe {
+                                    dot_row_q8_with(p, qt, &rows[r * rb..(r + 1) * rb], &qa)
+                                })
+                                .collect();
+                            for (pf, mr) in [
+                                (0usize, 4),
+                                (64, 4),
+                                (DEFAULT_PREFETCH, 4),
+                                (1 << 40, 4),
+                                (512, 2),
+                                (512, 1),
+                            ] {
+                                for tail in [count * rb, rows.len()] {
+                                    let mut got = vec![f32::NAN; count];
+                                    // SAFETY: as above.
+                                    unsafe {
+                                        dot_rows_q8_with(
+                                            p,
+                                            qt,
+                                            &rows[..tail],
+                                            &qa,
+                                            &mut got,
+                                            pf,
+                                            mr,
+                                        )
+                                    };
+                                    for (r, (g, w)) in got.iter().zip(&want).enumerate() {
+                                        assert_eq!(
+                                            g.to_bits(),
+                                            w.to_bits(),
+                                            "qt {qt} n {n} rows {count} row {r} {p:?} pf {pf} max_rows {mr}: {g} vs single {w}"
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // the public entry (env-chosen path and prefetch) agrees too
+        let n = 896;
+        let rows = decode_rows(Q5_0, n, 7, &mut rng);
+        let qa = QuantizedAct::for_types(&extreme_x(n, &mut rng), &[Q5_0]);
+        let mut got = vec![0f32; 7];
+        dot_rows_q8(Q5_0, &rows, &qa, &mut got, DecodeCfg::get());
+        let rb = row_bytes(Q5_0, n);
+        for (r, g) in got.iter().enumerate() {
+            let w = dot_row_q8(Q5_0, &rows[r * rb..(r + 1) * rb], &qa);
+            assert_eq!(g.to_bits(), w.to_bits(), "public dot_rows_q8 row {r}");
+        }
+    }
+
+    /// The decode kernels' unsigned lanes equal the single-row kernels'
+    /// sign-trick lanes, and both the exact Σ w·a per 4-value lane, for every
+    /// weight value against every activation value in -127..=127.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    #[allow(clippy::needless_range_loop)] // j indexes several arrays
+    fn decode_unsigned_lanes_match_sign_trick() {
+        use std::arch::x86_64::{__m256i, _mm256_loadu_si256};
+        let (avx2, vnni) = (has_avx2(), has_vnni());
+        if !avx2 {
+            println!("SKIP: CPU lacks avx2/fma/f16c");
+            return;
+        }
+        let lanes = |v: __m256i| -> [i32; 8] {
+            // SAFETY: same size, plain integers.
+            unsafe { std::mem::transmute(v) }
+        };
+        let exact = |w: &[i32; 32], a: &[i8; 32]| -> [i32; 8] {
+            let mut e = [0i32; 8];
+            for j in 0..32 {
+                e[j / 4] += w[j] * a[j] as i32;
+            }
+            e
+        };
+        let acts = |seed: usize| -> [i8; 32] {
+            let mut a = [0i8; 32];
+            for j in 0..32 {
+                a[j] = ((seed + 37 * j) % 255) as i32 as i8 - 127;
+            }
+            a
+        };
+        let mut a_sets: Vec<[i8; 32]> = (0..255).map(acts).collect();
+        a_sets.push([127; 32]);
+        a_sets.push([-127; 32]);
+        // Q5_0: raw (j + shift) % 32, plus all 0 and all 31
+        let mut raws: Vec<[u8; 32]> = (0..32)
+            .map(|s| std::array::from_fn(|j| ((j + s) % 32) as u8))
+            .collect();
+        raws.push([0; 32]);
+        raws.push([31; 32]);
+        for raw in &raws {
+            let mut b = [0u8; Q5_0_BYTES];
+            let mut qh = 0u32;
+            for j in 0..32 {
+                qh |= ((raw[j] >> 4) as u32) << j;
+            }
+            b[2..6].copy_from_slice(&qh.to_le_bytes());
+            for j in 0..16 {
+                b[6 + j] = (raw[j] & 0xf) | ((raw[j + 16] & 0xf) << 4);
+            }
+            let w: [i32; 32] = std::array::from_fn(|j| raw[j] as i32 - 16);
+            for a in &a_sets {
+                let c = neg16_lane_sums(a);
+                let e = exact(&w, a);
+                // SAFETY: avx2 detected above; vnni only when detected.
+                unsafe {
+                    let qy = _mm256_loadu_si256(a.as_ptr().cast());
+                    let qw = x86::q5_0_weights(&b);
+                    assert_eq!(lanes(x86::sign_lanes_avx2(qw, qy)), e, "q5_0 sign avx2");
+                    assert_eq!(lanes(x86::q5_0_lanes_avx2(&b, qy, &c)), e, "q5_0 avx2");
+                    if vnni {
+                        assert_eq!(lanes(x86::sign_lanes_vnni(qw, qy)), e, "q5_0 sign vnni");
+                        assert_eq!(lanes(x86::q5_0_lanes_vnni(&b, qy, &c)), e, "q5_0 vnni");
+                    }
+                }
+            }
+        }
+        // Q8_0: w = (k + 8j) as i8 for every k, plus all -128 and all 127
+        let mut ws: Vec<[u8; 32]> = (0..256)
+            .map(|k| std::array::from_fn(|j| ((k + 8 * j) % 256) as u8))
+            .collect();
+        ws.push([0x80; 32]);
+        ws.push([0x7f; 32]);
+        for wb in &ws {
+            let mut b = [0u8; Q8_0_BYTES];
+            b[2..].copy_from_slice(wb);
+            let w: [i32; 32] = std::array::from_fn(|j| wb[j] as i8 as i32);
+            for a in &a_sets {
+                let c = neg16_lane_sums(a);
+                let e = exact(&w, a);
+                // SAFETY: as above.
+                unsafe {
+                    let qy = _mm256_loadu_si256(a.as_ptr().cast());
+                    let qw = x86::q8_0_weights(&b);
+                    assert_eq!(lanes(x86::sign_lanes_avx2(qw, qy)), e, "q8_0 sign avx2");
+                    assert_eq!(lanes(x86::q8_0_lanes_avx2(&b, qy, &c)), e, "q8_0 avx2");
+                    if vnni {
+                        assert_eq!(lanes(x86::sign_lanes_vnni(qw, qy)), e, "q8_0 sign vnni");
+                        assert_eq!(lanes(x86::q8_0_lanes_vnni(&b, qy, &c)), e, "q8_0 vnni");
+                    } else {
+                        println!("SKIP vnni lanes: CPU lacks avxvnni");
                     }
                 }
             }

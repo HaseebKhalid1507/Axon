@@ -5,8 +5,8 @@
 use crate::gguf::{Model, Tensor, Val};
 use crate::pool::{self, Pool};
 use crate::quant::{
-    F16, F32, Q4_K, Q5_0, Q6_K, Q8_0, QuantizedAct, dequant, dot_row_q8, dot_row_q8_multi,
-    dot_rows_q8_multi, row_bytes,
+    DecodeCfg, F16, F32, Q4_K, Q5_0, Q6_K, Q8_0, QuantizedAct, dequant, dot_row_q8_multi,
+    dot_rows_q8, dot_rows_q8_multi, row_bytes,
 };
 
 /// The weights of one transformer block, borrowed from the mmap.
@@ -284,6 +284,13 @@ impl<'a> Qwen2<'a> {
         }
     }
 
+    /// Decode kernel settings (read once per matvec), and whether one thread
+    /// runs every chunk: then prefetch may run on into the next chunk, which
+    /// is its own work too.
+    fn decode_cfg() -> (DecodeCfg, bool) {
+        (DecodeCfg::get(), Pool::global().threads() == 1)
+    }
+
     /// y = W x. W has ne1 rows of ne0 values each; y[o] = row_o · x.
     fn matvec(&self, w: &Tensor, x: &[f32]) -> Vec<f32> {
         let [y] = self.matvec_many([w], x);
@@ -315,13 +322,23 @@ impl<'a> Qwen2<'a> {
         // even out; at most 64 rows keeps chunk claiming cheap.
         let mut out = vec![0f32; total];
         let chunk = (total / (Pool::global().threads() * 4)).clamp(4, 64);
-        pool::for_each_chunk_mut(&mut out, chunk, |c, ys| {
-            for (j, y) in ys.iter_mut().enumerate() {
-                let g = c * chunk + j;
+        let (cfg, own_all) = Self::decode_cfg();
+        pool::for_each_chunk_mut(&mut out, chunk, |c, mut ys| {
+            // The chunk's rows, one run per matrix it touches, several rows
+            // per kernel call. Prefetch stays inside the rows this chunk owns
+            // (to the matrix's end when one thread does them all).
+            let mut g = c * chunk;
+            while !ys.is_empty() {
                 let t = starts.iter().rposition(|&s| s <= g).unwrap();
                 let (qt, rb, data) = info[t];
+                let end = starts.get(t + 1).copied().unwrap_or(total);
+                let k = (end - g).min(ys.len());
+                let (run, rest) = std::mem::take(&mut ys).split_at_mut(k);
                 let o = g - starts[t];
-                *y = dot_row_q8(qt, &data[o * rb..(o + 1) * rb], &xq);
+                let lim = if own_all { data.len() } else { (o + k) * rb };
+                dot_rows_q8(qt, &data[o * rb..lim], &xq, run, cfg);
+                g += k;
+                ys = rest;
             }
         });
         // Split the joint output back into one vector per matrix (no copy when N == 1).
@@ -347,17 +364,24 @@ impl<'a> Qwen2<'a> {
             let qt = w.qtype.id;
             (qt, row_bytes(qt, x.len()), self.m.tensor_data(w))
         });
-        let row = |(qt, rb, data): (u32, usize, &[u8]), r: usize| {
-            dot_row_q8(qt, &data[r * rb..(r + 1) * rb], &xq)
-        };
         let mut out = vec![0f32; n];
         // Each row is two dot products, so half the rows per chunk of matvec_many.
-        let chunk = (n / (Pool::global().threads() * 8)).clamp(4, 32);
+        const MAX_CHUNK: usize = 32;
+        let chunk = (n / (Pool::global().threads() * 8)).clamp(4, MAX_CHUNK);
+        let (cfg, own_all) = Self::decode_cfg();
         pool::for_each_chunk_mut(&mut out, chunk, |c, ys| {
-            for (j, y) in ys.iter_mut().enumerate() {
-                let r = c * chunk + j;
-                let gv = row(g, r);
-                *y = (gv / (1.0 + (-gv).exp())) * row(u, r);
+            let (r, k) = (c * chunk, ys.len());
+            let mut ub = [0f32; MAX_CHUNK];
+            let ub = &mut ub[..k];
+            // prefetch bounds as in matvec_many
+            let lim = |(_, rb, data): (u32, usize, &[u8])| {
+                if own_all { data.len() } else { (r + k) * rb }
+            };
+            dot_rows_q8(g.0, &g.2[r * g.1..lim(g)], &xq, ys, cfg);
+            dot_rows_q8(u.0, &u.2[r * u.1..lim(u)], &xq, ub, cfg);
+            for (y, &uv) in ys.iter_mut().zip(ub.iter()) {
+                let gv = *y;
+                *y = (gv / (1.0 + (-gv).exp())) * uv;
             }
         });
         out
