@@ -365,97 +365,44 @@ mod tests {
         assert!((dot_row(F32, &fb, &x) - naive).abs() < 1e-3);
     }
 
-    fn json_field<'a>(s: &'a str, key: &str) -> Option<&'a str> {
-        let pat = format!("\"{}\"", key);
-        let i = s.find(&pat)? + pat.len();
-        let rest = s[i..].trim_start().strip_prefix(':')?.trim_start();
-        if let Some(r) = rest.strip_prefix('"') {
-            Some(&r[..r.find('"')?])
-        } else {
-            let end = rest.find(|c: char| c == ',' || c == '}').unwrap_or(rest.len());
-            Some(rest[..end].trim())
-        }
-    }
-
+    /// Every quant type in the model, checked row by row against gguf-py's
+    /// dequantizer. Needs no model: the fixtures carry the raw row bytes.
     #[test]
     fn golden_rows() {
-        let dir = std::path::Path::new("/tmp/axon-oracle");
-        let mut names: Vec<String> = match std::fs::read_dir(dir) {
-            Ok(rd) => rd
-                .filter_map(|e| e.ok())
-                .filter_map(|e| e.file_name().into_string().ok())
-                .filter(|f| f.starts_with("golden_") && f.ends_with(".json"))
-                .map(|f| f["golden_".len()..f.len() - ".json".len()].to_string())
-                .collect(),
-            Err(_) => Vec::new(),
-        };
-        names.sort();
-        if names.is_empty() {
-            println!("golden_rows: no golden files in /tmp/axon-oracle, skipping");
-            return;
-        }
-        let path = "models/qwen2.5-0.5b-q4_k_m.gguf";
-        let m = match crate::gguf::load(path) {
-            Ok(m) => m,
-            Err(e) => {
-                println!("golden_rows: cannot load {}: {}, skipping", path, e);
-                return;
-            }
-        };
-        let mut checked = 0;
-        for name in &names {
-            let bin_path = dir.join(format!("golden_{}.bin", name));
-            let Ok(bin) = std::fs::read(&bin_path) else {
-                println!("golden_rows: missing {:?}, skipping", bin_path);
-                continue;
-            };
-            let js = std::fs::read_to_string(dir.join(format!("golden_{}.json", name))).unwrap();
-            let tname = json_field(&js, "tensor").expect("tensor");
-            let qt: u32 = json_field(&js, "qtype").expect("qtype").parse().unwrap();
-            let row: usize = json_field(&js, "row").expect("row").parse().unwrap();
-            let row_len: usize = json_field(&js, "row_len").expect("row_len").parse().unwrap();
-            let t = m
-                .tensors
-                .iter()
-                .find(|t| t.name == tname)
-                .unwrap_or_else(|| panic!("tensor {} not in model", tname));
-            assert_eq!(t.qtype.id, qt, "{}: qtype mismatch", name);
-            assert_eq!(t.dims[0] as usize, row_len, "{}: row_len vs ne0", name);
-            let rb = row_bytes(qt, row_len);
-            let off = row * rb;
-            if let Some(o) = json_field(&js, "byte_offset") {
-                let o: usize = o.parse().unwrap();
-                let abs = (m.data_offset + t.offset) as usize + off;
-                assert!(o == off || o == abs, "{}: byte_offset {} != {} / {}", name, o, off, abs);
-            }
-            let data = m.tensor_data(t);
-            let bytes = &data[off..off + rb];
+        let dir = crate::testutil::fixtures().join("golden");
+        let mut stems: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter_map(|f| f.strip_suffix(".json").map(str::to_string))
+            .collect();
+        stems.sort();
+        let mut covered = std::collections::BTreeSet::new();
+        for stem in &stems {
+            let meta = crate::testutil::read_json(&format!("golden/{stem}.json"));
+            let qt = meta["qtype"].as_u64().expect("qtype") as u32;
+            let row_len = meta["row_len"].as_u64().expect("row_len") as usize;
+            let bytes = std::fs::read(dir.join(format!("{stem}.raw"))).expect("raw");
+            let want = std::fs::read(dir.join(format!("{stem}.f32"))).expect("f32");
+            assert_eq!(bytes.len(), row_bytes(qt, row_len), "{stem}: raw size");
+            assert_eq!(want.len(), row_len * 4, "{stem}: f32 size");
+
             let mut got = vec![0f32; row_len];
-            dequant(qt, bytes, &mut got);
-            assert_eq!(bin.len(), row_len * 4, "{}: bin size", name);
-            let mut max_err = 0f32;
-            for i in 0..row_len {
-                let p = i * 4;
-                let want = f32::from_le_bytes([bin[p], bin[p + 1], bin[p + 2], bin[p + 3]]);
-                let err = (got[i] - want).abs();
-                assert!(err <= 1e-6, "{}: idx {} got {} want {}", name, i, got[i], want);
-                max_err = max_err.max(err);
+            dequant(qt, &bytes, &mut got);
+            for (i, (g, w)) in got.iter().zip(want.chunks_exact(4)).enumerate() {
+                let w = f32::from_le_bytes(w.try_into().unwrap());
+                assert!((g - w).abs() <= 1e-6, "{stem}: idx {i} got {g} want {w}");
             }
-            // dot_row vs dequant + naive dot
+
+            // dot_row must agree with dequant + a plain dot product.
             let x: Vec<f32> = (0..row_len).map(|i| ((i * 37 % 101) as f32 - 50.0) / 50.0).collect();
             let naive: f32 = got.iter().zip(&x).map(|(a, b)| a * b).sum();
             let mag: f32 = got.iter().zip(&x).map(|(a, b)| (a * b).abs()).sum();
-            let d = dot_row(qt, bytes, &x);
-            assert!(
-                (d - naive).abs() <= 1e-5 * mag + 1e-6,
-                "{}: dot_row {} vs naive {}",
-                name,
-                d,
-                naive
-            );
-            println!("golden {}: ok (max err {:e}, dot {})", name, max_err, d);
-            checked += 1;
+            let d = dot_row(qt, &bytes, &x);
+            assert!((d - naive).abs() <= 1e-5 * mag + 1e-6, "{stem}: dot_row {d} vs naive {naive}");
+            covered.insert(meta["qtype_name"].as_str().expect("qtype_name").to_string());
         }
-        println!("golden_rows: {} checked", checked);
+        let want: std::collections::BTreeSet<String> =
+            ["F32", "Q4_K", "Q5_0", "Q6_K", "Q8_0"].map(String::from).into();
+        assert_eq!(covered, want, "golden fixtures should cover every quant type in the model");
     }
 }

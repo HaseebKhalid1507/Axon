@@ -9,6 +9,8 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  # The 491 MB test model isn't in the repo. Tests that need it skip; the rest still run.
+  AXON_SKIP_MODEL_TESTS: "1"
 
 jobs:
   check:

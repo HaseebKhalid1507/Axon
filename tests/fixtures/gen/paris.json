@@ -1,0 +1,102 @@
+{
+ "prompt": "The capital of France is",
+ "oracle": "ollama 0.35.0 cpu",
+ "steps": [
+  {
+   "token": " Paris",
+   "id": 12095,
+   "logprob": -0.8261635303497314,
+   "near_tie": false
+  },
+  {
+   "token": ".",
+   "id": 13,
+   "logprob": -0.6290738582611084,
+   "near_tie": false
+  },
+  {
+   "token": " It",
+   "id": 1084,
+   "logprob": -1.459000587463379,
+   "near_tie": false
+  },
+  {
+   "token": " is",
+   "id": 374,
+   "logprob": -0.6133570075035095,
+   "near_tie": false
+  },
+  {
+   "token": " the",
+   "id": 279,
+   "logprob": -1.1534004211425781,
+   "near_tie": false
+  },
+  {
+   "token": " largest",
+   "id": 7772,
+   "logprob": -1.1256500482559204,
+   "near_tie": false
+  },
+  {
+   "token": " city",
+   "id": 3283,
+   "logprob": -0.2817528247833252,
+   "near_tie": false
+  },
+  {
+   "token": " in",
+   "id": 304,
+   "logprob": -0.2554154694080353,
+   "near_tie": false
+  },
+  {
+   "token": " Europe",
+   "id": 4505,
+   "logprob": -0.8908360600471497,
+   "near_tie": true
+  },
+  {
+   "token": " and",
+   "id": 323,
+   "logprob": -0.8254900574684143,
+   "near_tie": false
+  },
+  {
+   "token": " the",
+   "id": 279,
+   "logprob": -0.6482417583465576,
+   "near_tie": false
+  },
+  {
+   "token": " second",
+   "id": 2086,
+   "logprob": -1.3086402416229248,
+   "near_tie": true
+  },
+  {
+   "token": " largest",
+   "id": 7772,
+   "logprob": -0.5466941595077515,
+   "near_tie": false
+  },
+  {
+   "token": " in",
+   "id": 304,
+   "logprob": -0.6918018460273743,
+   "near_tie": true
+  },
+  {
+   "token": " the",
+   "id": 279,
+   "logprob": -0.002395994495600462,
+   "near_tie": false
+  },
+  {
+   "token": " world",
+   "id": 1879,
+   "logprob": -0.0054948218166828156,
+   "near_tie": false
+  }
+ ]
+}

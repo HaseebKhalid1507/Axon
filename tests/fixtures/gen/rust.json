@@ -1,0 +1,150 @@
+{
+ "prompt": "// Return the nth Fibonacci number.\nfn fib(n: u64) -> u64 {",
+ "oracle": "ollama 0.35.0 cpu",
+ "steps": [
+  {
+   "token": " \n",
+   "id": 715,
+   "logprob": -0.75687575340271,
+   "near_tie": false
+  },
+  {
+   "token": "   ",
+   "id": 262,
+   "logprob": -0.3003717362880707,
+   "near_tie": false
+  },
+  {
+   "token": " let",
+   "id": 1077,
+   "logprob": -1.0450727939605713,
+   "near_tie": true
+  },
+  {
+   "token": " mut",
+   "id": 5206,
+   "logprob": -0.35948824882507324,
+   "near_tie": false
+  },
+  {
+   "token": " a",
+   "id": 264,
+   "logprob": -0.41234487295150757,
+   "near_tie": false
+  },
+  {
+   "token": " =",
+   "id": 284,
+   "logprob": -0.15895766019821167,
+   "near_tie": false
+  },
+  {
+   "token": " ",
+   "id": 220,
+   "logprob": -0.008838197216391563,
+   "near_tie": false
+  },
+  {
+   "token": "0",
+   "id": 15,
+   "logprob": -0.09651793539524078,
+   "near_tie": false
+  },
+  {
+   "token": ";\n",
+   "id": 280,
+   "logprob": -0.2704888880252838,
+   "near_tie": false
+  },
+  {
+   "token": "   ",
+   "id": 262,
+   "logprob": -0.0015152842970564961,
+   "near_tie": false
+  },
+  {
+   "token": " let",
+   "id": 1077,
+   "logprob": -0.0005353333544917405,
+   "near_tie": false
+  },
+  {
+   "token": " mut",
+   "id": 5206,
+   "logprob": -0.00013256951933726668,
+   "near_tie": false
+  },
+  {
+   "token": " b",
+   "id": 293,
+   "logprob": -0.00047051053843460977,
+   "near_tie": false
+  },
+  {
+   "token": " =",
+   "id": 284,
+   "logprob": -0.0014116590609773993,
+   "near_tie": false
+  },
+  {
+   "token": " ",
+   "id": 220,
+   "logprob": -0.0008647007052786648,
+   "near_tie": false
+  },
+  {
+   "token": "1",
+   "id": 16,
+   "logprob": -0.00373063120059669,
+   "near_tie": false
+  },
+  {
+   "token": ";\n",
+   "id": 280,
+   "logprob": -0.2485514134168625,
+   "near_tie": false
+  },
+  {
+   "token": "   ",
+   "id": 262,
+   "logprob": -0.0764734223484993,
+   "near_tie": false
+  },
+  {
+   "token": " let",
+   "id": 1077,
+   "logprob": -0.9690908789634705,
+   "near_tie": true
+  },
+  {
+   "token": " mut",
+   "id": 5206,
+   "logprob": -0.015298385173082352,
+   "near_tie": false
+  },
+  {
+   "token": " c",
+   "id": 272,
+   "logprob": -0.9545396566390991,
+   "near_tie": false
+  },
+  {
+   "token": " =",
+   "id": 284,
+   "logprob": -0.12420699000358582,
+   "near_tie": false
+  },
+  {
+   "token": " ",
+   "id": 220,
+   "logprob": -0.4619121849536896,
+   "near_tie": false
+  },
+  {
+   "token": "0",
+   "id": 15,
+   "logprob": -0.18291935324668884,
+   "near_tie": false
+  }
+ ]
+}

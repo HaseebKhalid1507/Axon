@@ -240,3 +240,56 @@ impl<'a> Qwen2<'a> {
         self.matvec(self.output, &h)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Run each prompt in tests/fixtures/gen/ and follow Ollama's greedy path token by
+    /// token. At every step axon must give Ollama's token nearly the same logprob, and
+    /// must pick the same token unless Ollama's top two were a near-tie.
+    #[test]
+    fn matches_ollama() {
+        const MAX_DLOGPROB: f32 = 0.15;
+        let dir = crate::testutil::fixtures().join("gen");
+        let mut names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter(|f| f.ends_with(".json"))
+            .collect();
+        names.sort();
+        assert!(!names.is_empty(), "no gen fixtures in {}", dir.display());
+        let Some(m) = crate::testutil::model() else { return };
+        let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
+        let net = Qwen2::new(&m);
+
+        for name in &names {
+            let fx = crate::testutil::read_json(&format!("gen/{name}"));
+            let prompt = fx["prompt"].as_str().expect("prompt");
+            let steps = fx["steps"].as_array().expect("steps");
+            let ids = tok.encode(prompt);
+            let mut cache = net.new_cache(ids.len() + steps.len() + 1);
+            let mut logits = Vec::new();
+            for (pos, &id) in ids.iter().enumerate() {
+                logits = net.forward(id, pos, &mut cache);
+            }
+            let mut worst = 0f32;
+            for (i, s) in steps.iter().enumerate() {
+                let want = s["id"].as_u64().expect("id") as usize;
+                let mx = logits.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let lse = mx + logits.iter().map(|l| (l - mx).exp()).sum::<f32>().ln();
+                let lp = logits[want] - lse;
+                let d = (lp - s["logprob"].as_f64().expect("logprob") as f32).abs();
+                worst = worst.max(d);
+                let ctx = format!("{name} step {i} ({:?})", s["token"].as_str().unwrap_or("?"));
+                assert!(d <= MAX_DLOGPROB, "{ctx}: logprob off by {d:.3}");
+                if !s["near_tie"].as_bool().unwrap_or(false) {
+                    let argmax = (0..logits.len()).max_by(|&a, &b| logits[a].total_cmp(&logits[b])).unwrap();
+                    assert_eq!(argmax, want, "{ctx}: axon picked {:?}", tok.decode(&[argmax as u32]));
+                }
+                logits = net.forward(want as u32, ids.len() + i, &mut cache);
+            }
+            println!("{name}: {} steps, max |dlogprob| {worst:.3}", steps.len());
+        }
+    }
+}

@@ -245,10 +245,8 @@ enum Frag<'t> {
 mod tests {
     use super::*;
 
-    fn tok() -> Tokenizer {
-        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/models/qwen2.5-0.5b-q4_k_m.gguf");
-        let m = crate::gguf::load(path).expect("load model");
-        Tokenizer::from_gguf(&m)
+    fn tok() -> Option<Tokenizer> {
+        crate::testutil::model().map(|m| Tokenizer::from_gguf(&m))
     }
 
     #[test]
@@ -264,7 +262,7 @@ mod tests {
 
     #[test]
     fn roundtrip() {
-        let t = tok();
+        let Some(t) = tok() else { return };
         assert_eq!(t.eos(), 151645);
         for s in [
             "Hello, world!",
@@ -281,18 +279,20 @@ mod tests {
 
     #[test]
     fn specials_single_ids() {
-        let t = tok();
+        let Some(t) = tok() else { return };
         let ids = t.encode("<|im_start|>user\nhi<|im_end|>");
         assert_eq!(ids.first(), Some(&151644));
         assert_eq!(ids.last(), Some(&151645));
         assert_eq!(t.encode("<|endoftext|>"), vec![151643]);
     }
 
+    /// Token ids must match Hugging Face's tokenizer exactly (tests/fixtures/tokens.json).
     #[test]
     fn oracle() {
-        let Ok(s) = std::fs::read_to_string("/tmp/axon-oracle/tokens.json") else { return };
-        let cases: Vec<serde_json::Value> = serde_json::from_str(&s).expect("oracle json");
-        let t = tok();
+        let cases = crate::testutil::read_json("tokens.json");
+        let cases = cases.as_array().expect("array");
+        assert!(!cases.is_empty());
+        let Some(t) = tok() else { return };
         for c in cases {
             let text = c["text"].as_str().expect("text");
             let want: Vec<u32> = c["ids"].as_array().expect("ids").iter().map(|v| v.as_u64().unwrap() as u32).collect();

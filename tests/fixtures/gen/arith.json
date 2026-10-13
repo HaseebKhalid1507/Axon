@@ -1,0 +1,78 @@
+{
+ "prompt": "Question: What is 12 + 30?\nAnswer:",
+ "oracle": "ollama 0.35.0 cpu",
+ "steps": [
+  {
+   "token": " ",
+   "id": 220,
+   "logprob": -0.6179978251457214,
+   "near_tie": false
+  },
+  {
+   "token": "1",
+   "id": 16,
+   "logprob": -0.14937926828861237,
+   "near_tie": false
+  },
+  {
+   "token": "2",
+   "id": 17,
+   "logprob": -0.05063028261065483,
+   "near_tie": false
+  },
+  {
+   "token": " +",
+   "id": 488,
+   "logprob": -0.037120163440704346,
+   "near_tie": false
+  },
+  {
+   "token": " ",
+   "id": 220,
+   "logprob": -0.0039334069006145,
+   "near_tie": false
+  },
+  {
+   "token": "3",
+   "id": 18,
+   "logprob": -0.0012420974671840668,
+   "near_tie": false
+  },
+  {
+   "token": "0",
+   "id": 15,
+   "logprob": -0.0005409392178989947,
+   "near_tie": false
+  },
+  {
+   "token": " =",
+   "id": 284,
+   "logprob": -0.22795617580413818,
+   "near_tie": false
+  },
+  {
+   "token": " ",
+   "id": 220,
+   "logprob": -0.01175997219979763,
+   "near_tie": false
+  },
+  {
+   "token": "4",
+   "id": 19,
+   "logprob": -0.0029943669214844704,
+   "near_tie": false
+  },
+  {
+   "token": "2",
+   "id": 17,
+   "logprob": -0.004510247148573399,
+   "near_tie": false
+  },
+  {
+   "token": "\n",
+   "id": 198,
+   "logprob": -0.42641615867614746,
+   "near_tie": false
+  }
+ ]
+}

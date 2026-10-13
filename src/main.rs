@@ -1,6 +1,8 @@
 mod gguf;
 mod model;
 mod quant;
+#[cfg(test)]
+mod testutil;
 mod tokenizer;
 mod viz;
 

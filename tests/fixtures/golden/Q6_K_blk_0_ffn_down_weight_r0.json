@@ -1,0 +1,1 @@
+{"tensor": "blk.0.ffn_down.weight", "qtype": 14, "qtype_name": "Q6_K", "row": 0, "row_len": 4864}
