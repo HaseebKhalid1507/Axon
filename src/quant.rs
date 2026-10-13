@@ -310,8 +310,23 @@ pub fn f32_to_f16(f: f32) -> u16 {
 
 /// Activation block for Q5_0/Q8_0 weights, exactly as llama.cpp's x86
 /// quantize_row_q8_0: d = amax/127 stored as f16, q = round-half-even(x * 127/amax).
+/// Largest |v| in x, with 8 lane-wise maxima so it vectorizes (max is exact,
+/// so the order doesn't change the result). NaNs are ignored, as f32::max does.
+#[inline]
+fn abs_max(x: &[f32]) -> f32 {
+    let mut lanes = [0f32; 8];
+    let (chunks, tail) = x.as_chunks::<8>();
+    for c in chunks {
+        for i in 0..8 {
+            lanes[i] = lanes[i].max(c[i].abs());
+        }
+    }
+    let m = tail.iter().fold(0f32, |m, v| m.max(v.abs()));
+    lanes.iter().fold(m, |a, &b| a.max(b))
+}
+
 fn quantize_q8_0(x: &[f32], q: &mut [i8]) -> f32 {
-    let amax = x.iter().fold(0f32, |m, v| m.max(v.abs()));
+    let amax = abs_max(x);
     let d = f16_to_f32(f32_to_f16(amax / 127.0));
     let id = if amax != 0.0 { 127.0 / amax } else { 0.0 };
     for (qi, &xi) in q.iter_mut().zip(x) {
@@ -324,17 +339,18 @@ fn quantize_q8_0(x: &[f32], q: &mut [i8]) -> f32 {
 /// quantize_row_q8_K_ref: scale from the signed largest-magnitude value,
 /// q = min(127, round-half-even(x * -127/max)), d = 1/iscale.
 fn quantize_q8_k(x: &[f32], q: &mut [i8]) -> f32 {
-    let (mut max, mut amax) = (0f32, 0f32);
-    for &v in x {
-        if v.abs() > amax {
-            amax = v.abs();
-            max = v;
-        }
-    }
+    // The signed value with the largest magnitude, first one on ties (the
+    // reference loop keeps the first because it only replaces on `>`). Two
+    // passes so both vectorize: the magnitude, then where it first occurs.
+    let amax = abs_max(x);
     if amax == 0.0 {
         q.fill(0);
         return 0.0;
     }
+    let max = *x
+        .iter()
+        .find(|v| v.abs() == amax)
+        .expect("amax comes from x");
     let iscale = -127.0 / max;
     for (qi, &xi) in q.iter_mut().zip(x) {
         *qi = round_even_small(iscale * xi).min(127) as i8;
@@ -961,6 +977,53 @@ unsafe fn dot_row_q8_with(simd: Simd, qtype_id: u32, row: &[u8], x: &QuantizedAc
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn quantize_q8_k_matches_reference_loop() {
+        fn reference(x: &[f32], q: &mut [i8]) -> f32 {
+            let (mut max, mut amax) = (0f32, 0f32);
+            for &v in x {
+                if v.abs() > amax {
+                    amax = v.abs();
+                    max = v;
+                }
+            }
+            if amax == 0.0 {
+                q.fill(0);
+                return 0.0;
+            }
+            let iscale = -127.0 / max;
+            for (qi, &xi) in q.iter_mut().zip(x) {
+                *qi = round_even_small(iscale * xi).min(127) as i8;
+            }
+            1.0 / iscale
+        }
+        let mut rng = 0x9e37_79b9u32;
+        let mut next = || {
+            rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (rng >> 8) as f32 / (1 << 24) as f32 - 0.5
+        };
+        let mut cases: Vec<Vec<f32>> = (0..200)
+            .map(|_| (0..256).map(|_| next() * 8.0).collect())
+            .collect();
+        cases.push(vec![0.0; 256]);
+        // ties between +m and -m: the first one wins, and decides the sign
+        let mut tie = vec![0.25f32; 256];
+        tie[17] = -3.0;
+        tie[200] = 3.0;
+        cases.push(tie.clone());
+        tie[17] = 3.0;
+        tie[200] = -3.0;
+        cases.push(tie);
+        for x in &cases {
+            let (mut a, mut b) = ([0i8; 256], [0i8; 256]);
+            assert_eq!(
+                quantize_q8_k(x, &mut a).to_bits(),
+                reference(x, &mut b).to_bits()
+            );
+            assert_eq!(a, b);
+        }
+    }
 
     #[test]
     fn round_even_small_matches_round_ties_even() {
