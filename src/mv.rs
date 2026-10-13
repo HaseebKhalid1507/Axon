@@ -20,6 +20,15 @@
 //! `tests::argmax_multiversion_identical` check every pair). The one
 //! exception is a NaN's sign/payload, which Rust doesn't specify.
 //!
+//! The `<V3, F>` form (attention, SwiGLU) adds a const `F`: multiply-adds
+//! are fused (`vmath::fma::<true>`, `f32::mul_add`, lowered to `vfmadd` in
+//! `v3`) or not. `v3` always fuses; `portable` fuses iff the CPU has FMA
+//! (`vmath::fused`, a call to libm's `fmaf` there), so on an FMA CPU the two
+//! variants still give the same bits and only a CPU without FMA computes
+//! differently (deterministically: separate multiply and add everywhere).
+//! Never `cfg(target_feature = "fma")`: that is false inside a
+//! `#[target_feature]` fn of a baseline build.
+//!
 //! Closures defined in a `#[target_feature]` fn inherit its features (Rust
 //! 1.86+), but these bodies live in `imp`, which has none of its own, so a
 //! closure there is only vectorized for v3 if LLVM inlines it (small ones
@@ -31,7 +40,8 @@
 /// fn name<V3>(a: A, b: B) -> R { body } }` defines `fn name` (the runtime
 /// dispatcher) and `mod name { fn portable; unsafe fn v3 }` (x86_64 only for
 /// `v3`). Arguments must be plain identifiers; `V3` is a `const bool` usable
-/// in the body (true in `v3`).
+/// in the body (true in `v3`). A second form, `fn name<V3, F, T: Bound>`,
+/// adds the fused-multiply-add switch `F` and type parameters (see below).
 macro_rules! multiversion {
     (
         $(#[$attr:meta])*
@@ -79,6 +89,68 @@ macro_rules! multiversion {
             pub unsafe fn v3($($arg: $ty),*) $(-> $ret)? {
                 // SAFETY: our caller's contract.
                 unsafe { imp::<true>($($arg),*) }
+            }
+        }
+    };
+
+    // `fn name<V3, F, T: Bound, ...>`: also a `const F: bool`, true when
+    // `a * b + c` steps are fused (`vmath::fma`): always in `v3`, and in
+    // `portable` when the CPU has FMA (`vmath::fused`), so both variants give
+    // the same bits on such a CPU. Optional type parameters follow (inferred
+    // from the arguments by the dispatcher).
+    (
+        $(#[$attr:meta])*
+        $vis:vis fn $name:ident<$v3:ident, $f:ident $(, $g:ident: $bound:path)* $(,)?>($($arg:ident: $ty:ty),* $(,)?) $(-> $ret:ty)? $body:block
+    ) => {
+        $(#[$attr])*
+        #[inline]
+        #[allow(clippy::too_many_arguments)]
+        $vis fn $name<$($g: $bound),*>($($arg: $ty),*) $(-> $ret)? {
+            #[cfg(target_arch = "x86_64")]
+            if crate::quant::v3() {
+                // SAFETY: v3() is true only after the x86-64-v3 features were detected.
+                return unsafe { $name::v3($($arg),*) };
+            }
+            $name::portable($($arg),*)
+        }
+
+        $vis mod $name {
+            #[allow(unused_imports)]
+            use super::*;
+
+            /// The shared body; other multiversioned bodies call
+            /// `imp::<V3, F, ..>` directly to stay in their own variant.
+            ///
+            /// # Safety
+            /// With `V3` true, the CPU must have the x86-64-v3 features; with
+            /// `F` true and `V3` false it only runs slower without FMA.
+            #[inline(always)]
+            #[allow(clippy::too_many_arguments)]
+            pub unsafe fn imp<const $v3: bool, const $f: bool $(, $g: $bound)*>($($arg: $ty),*) $(-> $ret)? $body
+
+            /// The baseline x86-64 (or other target) variant: fused iff
+            /// `vmath::fused()`.
+            #[allow(clippy::too_many_arguments)]
+            pub fn portable<$($g: $bound),*>($($arg: $ty),*) $(-> $ret)? {
+                if crate::vmath::fused() {
+                    // SAFETY: V3 false needs nothing.
+                    unsafe { imp::<false, true $(, $g)*>($($arg),*) }
+                } else {
+                    // SAFETY: as above.
+                    unsafe { imp::<false, false $(, $g)*>($($arg),*) }
+                }
+            }
+
+            /// The x86-64-v3 variant (fused).
+            ///
+            /// # Safety
+            /// The CPU must have avx2, bmi1, bmi2, f16c, fma and lzcnt.
+            #[cfg(target_arch = "x86_64")]
+            #[target_feature(enable = "avx2,bmi1,bmi2,f16c,fma,lzcnt")]
+            #[allow(clippy::too_many_arguments)]
+            pub unsafe fn v3<$($g: $bound),*>($($arg: $ty),*) $(-> $ret)? {
+                // SAFETY: our caller's contract.
+                unsafe { imp::<true, true $(, $g)*>($($arg),*) }
             }
         }
     };

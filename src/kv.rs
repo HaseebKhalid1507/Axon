@@ -4,11 +4,7 @@
 //! same bits), and widened exactly on every read, so every attention path
 //! computes on the same f32 values.
 
-#[cfg(all(
-    target_arch = "x86_64",
-    target_feature = "avx2",
-    target_feature = "fma"
-))]
+#[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
 /// IEEE half, as stored in the cache.
@@ -36,12 +32,9 @@ pub unsafe trait KvElem: Copy + Send + Sync + 'static {
     /// The 8 values at p, widened to f32 (exact).
     ///
     /// # Safety
-    /// p..p + 8 must be readable.
-    #[cfg(all(
-        target_arch = "x86_64",
-        target_feature = "avx2",
-        target_feature = "fma"
-    ))]
+    /// p..p + 8 must be readable, and the CPU must have AVX2 and F16C (the
+    /// callers are x86-64-v3 code).
+    #[cfg(target_arch = "x86_64")]
     unsafe fn load8(p: *const Self) -> __m256;
 }
 
@@ -58,12 +51,9 @@ unsafe impl KvElem for f32 {
     fn store(dst: &mut [f32], src: &[f32]) {
         dst.copy_from_slice(src);
     }
-    #[cfg(all(
-        target_arch = "x86_64",
-        target_feature = "avx2",
-        target_feature = "fma"
-    ))]
-    #[inline(always)]
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,f16c")]
+    #[inline]
     unsafe fn load8(p: *const f32) -> __m256 {
         // SAFETY: caller guarantees 8 readable floats.
         unsafe { _mm256_loadu_ps(p) }
@@ -87,47 +77,49 @@ unsafe impl KvElem for Half {
         // f32::clamp passes NaN through.
         Half(crate::quant::f32_to_f16(x.clamp(-HALF_MAX, HALF_MAX)))
     }
-    #[cfg(all(target_arch = "x86_64", target_feature = "f16c"))]
     fn store(dst: &mut [Half], src: &[f32]) {
         assert_eq!(dst.len(), src.len(), "kv store: length");
-        let (sc, sr) = src.as_chunks::<8>();
-        let (dc, dr) = dst.as_chunks_mut::<8>();
-        for (d, s) in dc.iter_mut().zip(sc) {
-            // SAFETY: F16C is enabled at compile time; 8 floats read, 8
-            // halves (16 bytes) written, both whole chunks.
-            // Saturate as `from_f32`: max/min return their second operand
-            // when either is NaN, so x goes second and NaN passes through.
-            unsafe {
-                use std::arch::x86_64::*;
-                let x = _mm256_loadu_ps(s.as_ptr());
-                let x = _mm256_max_ps(_mm256_set1_ps(-HALF_MAX), x);
-                let x = _mm256_min_ps(_mm256_set1_ps(HALF_MAX), x);
-                let h = _mm256_cvtps_ph::<_MM_FROUND_TO_NEAREST_INT>(x);
-                _mm_storeu_si128(d.as_mut_ptr().cast(), h);
-            }
+        #[cfg(target_arch = "x86_64")]
+        if crate::quant::v3() {
+            // SAFETY: v3() implies AVX2 + F16C.
+            return unsafe { store_f16c(dst, src) };
         }
-        for (d, &s) in dr.iter_mut().zip(sr) {
+        for (d, &s) in dst.iter_mut().zip(src) {
             *d = Half::from_f32(s);
         }
     }
-    #[cfg(all(
-        target_arch = "x86_64",
-        target_feature = "avx2",
-        target_feature = "fma"
-    ))]
-    #[inline(always)]
+    #[cfg(target_arch = "x86_64")]
+    #[target_feature(enable = "avx2,f16c")]
+    #[inline]
     unsafe fn load8(p: *const Half) -> __m256 {
-        #[cfg(target_feature = "f16c")]
         // SAFETY: caller guarantees 8 readable halves (16 bytes).
+        unsafe { _mm256_cvtph_ps(_mm_loadu_si128(p.cast())) }
+    }
+}
+
+/// `Half::store` with F16C: the same bits as `from_f32` per element.
+///
+/// # Safety
+/// The CPU must have AVX2 and F16C.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,f16c")]
+unsafe fn store_f16c(dst: &mut [Half], src: &[f32]) {
+    let (sc, sr) = src.as_chunks::<8>();
+    let (dc, dr) = dst.as_chunks_mut::<8>();
+    for (d, s) in dc.iter_mut().zip(sc) {
+        // SAFETY: 8 floats read, 8 halves (16 bytes) written, both whole
+        // chunks. Saturate as `from_f32`: max/min return their second
+        // operand when either is NaN, so x goes second and NaN passes through.
         unsafe {
-            _mm256_cvtph_ps(_mm_loadu_si128(p.cast()))
+            let x = _mm256_loadu_ps(s.as_ptr());
+            let x = _mm256_max_ps(_mm256_set1_ps(-HALF_MAX), x);
+            let x = _mm256_min_ps(_mm256_set1_ps(HALF_MAX), x);
+            let h = _mm256_cvtps_ph::<_MM_FROUND_TO_NEAREST_INT>(x);
+            _mm_storeu_si128(d.as_mut_ptr().cast(), h);
         }
-        #[cfg(not(target_feature = "f16c"))]
-        // SAFETY: as above; the widening is exact either way.
-        unsafe {
-            let w: [f32; 8] = std::array::from_fn(|i| (*p.add(i)).to_f32());
-            _mm256_loadu_ps(w.as_ptr())
-        }
+    }
+    for (d, &s) in dr.iter_mut().zip(sr) {
+        *d = Half::from_f32(s);
     }
 }
 

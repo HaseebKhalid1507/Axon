@@ -9,7 +9,7 @@ use crate::quant::{
     DecodeCfg, F16, F32, Q4_K, Q5_0, Q6_K, Q8_0, QuantizedAct, batch_slots, dequant,
     dot_row_q8_multi, dot_rows_q8, dot_rows_q8_multi, r8, r8q, row_bytes,
 };
-use crate::vmath::{self, fmadd};
+use crate::vmath;
 
 /// A weight matrix: its bytes in the model's mapping, or its 8-row
 /// interleaved repack (quant::r8 for Q4_K/Q6_K, quant::r8q for Q5_0/Q8_0).
@@ -1416,25 +1416,14 @@ fn attend<T: KvElem>(
 
     if tile.is_none() {
         pool::for_each_chunk_mut(wts, np, |qh, s| {
-            let kvh = qh / group;
             let qv = &q[qh * hd..(qh + 1) * hd];
-            for (t, s) in s.iter_mut().enumerate() {
-                let k0 = t * kv_dim + kvh * hd;
-                *s = dot(qv, &kc[k0..k0 + hd]) * scale;
-            }
-            softmax(s);
+            score_softmax(qv, kc, kv_dim, qh / group * hd, scale, s);
         });
     } else {
         pool::for_each_chunk_mut(sc, tc * group, |c, s| {
             let (kvh, t0) = (c / nt, c % nt * tc);
             let qg = &q[kvh * qn..(kvh + 1) * qn];
-            for (t, row) in (t0..np.min(t0 + tc)).zip(s.chunks_exact_mut(group)) {
-                let k0 = t * kv_dim + kvh * hd;
-                dot_group(qg, &kc[k0..k0 + hd], row);
-                for x in row.iter_mut() {
-                    *x *= scale;
-                }
-            }
+            score_tile(qg, kc, kv_dim, hd, kvh * hd, t0..np.min(t0 + tc), scale, s);
         });
         let sc = &*sc;
         pool::for_each_chunk_mut(wts, np, |qh, w| {
@@ -1504,62 +1493,174 @@ fn attend_group<T: KvElem>(
 ) {
     let group = qg.len() / hd;
     let scale = 1.0 / (hd as f32).sqrt();
-    let head = |t: usize| t * kv_dim + kvh * hd..t * kv_dim + (kvh + 1) * hd;
     with_scores((np + 1) * group, |sc| {
-        // sc[g * np + t]: head g's score at t, contiguous per head for the
-        // softmax; `row` holds one position's dots.
+        attend_causal(qg, kc, vc, kv_dim, hd, kvh, np, scale, sc, out)
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Attention, multiversioned (see mv.rs) with the fused-multiply-add switch F:
+// every `a * b + c` step below is `vmath::fma::<F>`, one rounding when the CPU
+// has FMA (both variants), a multiply and an add when it doesn't. The `V3`
+// variants use the hand-written AVX2 + FMA helpers (`*_v3`), the same
+// operations in the same order as the scalar code with F.
+
+multiversion! {
+    /// Decode scores of one query head, then `softmax`: s[t] =
+    /// dot(qv, k_t) * scale with k_t = kc[t * kv_dim + k_off..][..qv.len()].
+    fn score_softmax<V3, F, T: KvElem>(
+        qv: &[f32],
+        kc: &[T],
+        kv_dim: usize,
+        k_off: usize,
+        scale: f32,
+        s: &mut [f32],
+    ) {
+        let hd = qv.len();
+        for (t, s) in s.iter_mut().enumerate() {
+            let k0 = t * kv_dim + k_off;
+            // SAFETY: V3 only in the v3 variant.
+            *s = unsafe { dot::<V3, F, T>(qv, &kc[k0..k0 + hd]) } * scale;
+        }
+        // SAFETY: as above.
+        unsafe { vmath::softmax::<V3, F>(s) };
+    }
+}
+
+multiversion! {
+    /// Decode scores of one kv head's query group qg (heads of hd floats)
+    /// over positions `ts`: s[j * group + g] = dot(q_g, k_t) * scale for the
+    /// j-th t, `dot_group` per position (k_t = kc[t * kv_dim + k_off..][..hd]).
+    fn score_tile<V3, F, T: KvElem>(
+        qg: &[f32],
+        kc: &[T],
+        kv_dim: usize,
+        hd: usize,
+        k_off: usize,
+        ts: std::ops::Range<usize>,
+        scale: f32,
+        s: &mut [f32],
+    ) {
+        let group = qg.len() / hd;
+        for (t, row) in ts.zip(s.chunks_exact_mut(group)) {
+            let k0 = t * kv_dim + k_off;
+            // SAFETY: V3 only in the v3 variant.
+            unsafe { dot_group::<V3, F, T>(qg, &kc[k0..k0 + hd], row) };
+            for x in row.iter_mut() {
+                *x *= scale;
+            }
+        }
+    }
+}
+
+multiversion! {
+    /// `attend_group`'s body: `sc` is scratch of (np + 1) * group floats,
+    /// sc[g * np + t] head g's score at t (contiguous per head for the
+    /// softmax), the rest one position's dots.
+    fn attend_causal<V3, F, T: KvElem>(
+        qg: &[f32],
+        kc: &[T],
+        vc: &[T],
+        kv_dim: usize,
+        hd: usize,
+        kvh: usize,
+        np: usize,
+        scale: f32,
+        sc: &mut [f32],
+        out: &mut [f32],
+    ) {
+        let group = qg.len() / hd;
         let (sc, row) = sc.split_at_mut(np * group);
         for t in 0..np {
-            dot_group(qg, &kc[head(t)], row);
+            let k0 = t * kv_dim + kvh * hd;
+            // SAFETY (every call): V3 only in the v3 variant.
+            unsafe { dot_group::<V3, F, T>(qg, &kc[k0..k0 + hd], row) };
             for (g, &s) in row.iter().enumerate() {
                 sc[g * np + t] = s * scale;
             }
         }
         for s in sc.chunks_exact_mut(np) {
-            softmax(s);
+            unsafe { vmath::softmax::<V3, F>(s) };
         }
-        vsum_rows(sc, np, np, group, &vc[kvh * hd..], kv_dim, out, hd);
-    });
-}
-
-/// `softmax` of the scores src[t * stride], t in 0..dst.len(), written to
-/// dst: gathered, then `softmax` in place, so the same bits as `softmax` on
-/// a copy.
-fn softmax_from(src: &[f32], stride: usize, dst: &mut [f32]) {
-    let n = dst.len();
-    assert!(
-        n == 0 || (n - 1) * stride < src.len(),
-        "softmax_from: short src"
-    );
-    for (t, d) in dst.iter_mut().enumerate() {
-        *d = src[t * stride];
+        let vb = &vc[kvh * hd..];
+        unsafe { vsum_rows::imp::<V3, F, T>(sc, np, np, group, vb, kv_dim, out, hd) };
     }
-    softmax(dst);
 }
 
-/// Scaled scores to attention weights, in place: subtract the max (for
-/// stability), exp (`vmath::exp`), sum in a fixed 8-lane order, then
-/// multiply each by 1 / sum. See `vmath::softmax`.
-fn softmax(s: &mut [f32]) {
-    vmath::softmax(s);
+multiversion! {
+    /// `softmax` of the scores src[t * stride], t in 0..dst.len(), written to
+    /// dst: gathered, then `vmath::softmax` in place, so the same bits as
+    /// `softmax` on a copy.
+    fn softmax_from<V3, F>(src: &[f32], stride: usize, dst: &mut [f32]) {
+        let n = dst.len();
+        assert!(
+            n == 0 || (n - 1) * stride < src.len(),
+            "softmax_from: short src"
+        );
+        for (t, d) in dst.iter_mut().enumerate() {
+            *d = src[t * stride];
+        }
+        // SAFETY: V3 only in the v3 variant.
+        unsafe { vmath::softmax::<V3, F>(dst) };
+    }
 }
 
-/// o[h * os + d] = sum over t in 0..np, in order from 0.0, of
-/// w[h * ws + t] * v_t[d] (each step one fused multiply-add, v widened to
-/// f32), for heads h in 0..nh and d in 0..os, with value rows at a fixed
-/// stride: v_t = vb[t * vs..][..os].
+multiversion! {
+    /// o[h * os + d] = sum over t in 0..np, in order from 0.0, of
+    /// w[h * ws + t] * v_t[d] (each step `fma::<F>`, v widened to f32), for
+    /// heads h in 0..nh and d in 0..os, with value rows at a fixed stride:
+    /// v_t = vb[t * vs..][..os].
+    ///
+    /// V3: blocks of up to 3 heads x 32 dims (12 accumulators) per pass over
+    /// the rows (`vsum_rows_v3`), each row slice loaded once per block. Per
+    /// element that's the scalar `o = fma(w, v, o)` over t, so the blocking
+    /// never changes a bit.
+    fn vsum_rows<V3, F, T: KvElem>(
+        w: &[f32],
+        ws: usize,
+        np: usize,
+        nh: usize,
+        vb: &[T],
+        vs: usize,
+        o: &mut [f32],
+        os: usize,
+    ) {
+        assert!(
+            np <= ws && (nh == 0 || (nh - 1) * ws + np <= w.len()) && nh * os <= o.len(),
+            "vsum_rows: short w/o"
+        );
+        assert!(
+            np == 0 || (np - 1) * vs + os <= vb.len(),
+            "vsum_rows: short v"
+        );
+        let mut d0 = 0;
+        #[cfg(target_arch = "x86_64")]
+        if V3 {
+            // SAFETY: the v3 variant; bounds asserted above.
+            unsafe { vsum_rows_v3(w, ws, np, nh, vb, vs, o, os) };
+            d0 = os / 8 * 8;
+        }
+        for h in 0..nh {
+            for d in d0..os {
+                let mut a = 0.0f32;
+                for t in 0..np {
+                    a = vmath::fma::<F>(w[h * ws + t], vb[t * vs + d].to_f32(), a);
+                }
+                o[h * os + d] = a;
+            }
+        }
+    }
+}
+
+/// The whole 8-dim chunks of `vsum_rows` (d < os / 8 * 8) with AVX2 + FMA.
 ///
-/// AVX2 + FMA: blocks of up to 3 heads x 32 dims (12 accumulators) per pass
-/// over the rows, each row slice loaded once per block; leftover d (os not
-/// a multiple of 8) scalar in the same order. Per element that's the scalar
-/// `o = fmadd(w, v, o)` over t, so the blocking never changes a bit.
+/// # Safety
+/// The CPU must have the x86-64-v3 features; the bounds `vsum_rows` asserts.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,bmi1,bmi2,f16c,fma,lzcnt")]
+#[inline]
 #[allow(clippy::too_many_arguments)]
-#[cfg(all(
-    target_arch = "x86_64",
-    target_feature = "avx2",
-    target_feature = "fma"
-))]
-fn vsum_rows<T: KvElem>(
+unsafe fn vsum_rows_v3<T: KvElem>(
     w: &[f32],
     ws: usize,
     np: usize,
@@ -1569,14 +1670,6 @@ fn vsum_rows<T: KvElem>(
     o: &mut [f32],
     os: usize,
 ) {
-    assert!(
-        np <= ws && (nh == 0 || (nh - 1) * ws + np <= w.len()) && nh * os <= o.len(),
-        "vsum_rows: short w/o"
-    );
-    assert!(
-        np == 0 || (np - 1) * vs + os <= vb.len(),
-        "vsum_rows: short v"
-    );
     let nc = os / 8;
     for h0 in (0..nh).step_by(3) {
         let g = (nh - h0).min(3);
@@ -1590,7 +1683,7 @@ fn vsum_rows<T: KvElem>(
             let (wp, vp) = (w[h0 * ws..].as_ptr(), vb[8 * c0..].as_ptr());
             let op = o[h0 * os + 8 * c0..].as_mut_ptr();
             // SAFETY: heads h0..h0 + g <= nh, chunks c0..c0 + c <= nc, so
-            // every read and write is inside the bounds asserted above.
+            // every read and write is inside the bounds `vsum_rows` asserts.
             unsafe {
                 match (g, c) {
                     (1, 1) => vsum_block::<T, 1, 1>(wp, ws, np, vp, vs, op, os),
@@ -1607,28 +1700,17 @@ fn vsum_rows<T: KvElem>(
             c0 += c;
         }
     }
-    for h in 0..nh {
-        for d in 8 * nc..os {
-            let mut a = 0.0f32;
-            for t in 0..np {
-                a = fmadd(w[h * ws + t], vb[t * vs + d].to_f32(), a);
-            }
-            o[h * os + d] = a;
-        }
-    }
 }
 
 /// G heads x C 8-dim chunks of `vsum_rows`: o[g * os + 8c..+ 8] = the fused
 /// chain over t of w[g * ws + t] * vb[t * vs + 8c..+ 8].
 ///
 /// # Safety
-/// AVX2 + FMA (compile time). w[g * ws + t] (g < G, t < np) readable,
-/// vb[t * vs..+ 8 * C] (t < np) readable, o[g * os..+ 8 * C] writable.
-#[cfg(all(
-    target_arch = "x86_64",
-    target_feature = "avx2",
-    target_feature = "fma"
-))]
+/// The CPU must have the x86-64-v3 features. w[g * ws + t] (g < G, t < np)
+/// readable, vb[t * vs..+ 8 * C] (t < np) readable, o[g * os..+ 8 * C]
+/// writable.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,bmi1,bmi2,f16c,fma,lzcnt")]
 #[inline]
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::needless_range_loop)] // fixed-size register tiles: indexed loops unroll cleanly
@@ -1665,77 +1747,66 @@ unsafe fn vsum_block<T: KvElem, const G: usize, const C: usize>(
     }
 }
 
-/// Portable `vsum_rows` (same per-element order) for builds without AVX2 + FMA.
-#[allow(clippy::too_many_arguments)]
-#[cfg(not(all(
-    target_arch = "x86_64",
-    target_feature = "avx2",
-    target_feature = "fma"
-)))]
-fn vsum_rows<T: KvElem>(
-    w: &[f32],
-    ws: usize,
-    np: usize,
-    nh: usize,
-    vb: &[T],
-    vs: usize,
-    o: &mut [f32],
-    os: usize,
-) {
-    for g in 0..nh {
-        for d in 0..os {
-            let mut a = 0.0f32;
-            for t in 0..np {
-                a = fmadd(w[g * ws + t], vb[t * vs + d].to_f32(), a);
-            }
-            o[g * os + d] = a;
-        }
-    }
-}
-
 /// out[g] = dot(q_g, k) for the query vectors q_g = q[g * k.len()..][..k.len()],
-/// g in 0..out.len(), bit for bit; up to 8 at a time.
-fn dot_group<T: KvElem>(q: &[f32], k: &[T], out: &mut [f32]) {
+/// g in 0..out.len(), bit for bit; up to 8 at a time (`dot_multi_v3` when V3,
+/// else `dot` per vector). Not dispatched on its own: the attention bodies
+/// call it with their own `V3` and `F`.
+///
+/// # Safety
+/// With V3, the CPU must have the x86-64-v3 features.
+#[inline(always)]
+unsafe fn dot_group<const V3: bool, const F: bool, T: KvElem>(q: &[f32], k: &[T], out: &mut [f32]) {
     let n = k.len();
     debug_assert_eq!(q.len(), n * out.len());
-    for (qs, os) in q.chunks(8 * n).zip(out.chunks_mut(8)) {
-        match os.len() {
-            8 => dot_multi::<T, 8>(qs, k, os),
-            7 => dot_multi::<T, 7>(qs, k, os),
-            6 => dot_multi::<T, 6>(qs, k, os),
-            5 => dot_multi::<T, 5>(qs, k, os),
-            4 => dot_multi::<T, 4>(qs, k, os),
-            3 => dot_multi::<T, 3>(qs, k, os),
-            2 => dot_multi::<T, 2>(qs, k, os),
-            _ => dot_multi::<T, 1>(qs, k, os),
+    #[cfg(target_arch = "x86_64")]
+    if V3 {
+        for (qs, os) in q.chunks(8 * n).zip(out.chunks_mut(8)) {
+            // SAFETY (every arm): our caller's contract.
+            unsafe {
+                match os.len() {
+                    8 => dot_multi_v3::<T, 8>(qs, k, os),
+                    7 => dot_multi_v3::<T, 7>(qs, k, os),
+                    6 => dot_multi_v3::<T, 6>(qs, k, os),
+                    5 => dot_multi_v3::<T, 5>(qs, k, os),
+                    4 => dot_multi_v3::<T, 4>(qs, k, os),
+                    3 => dot_multi_v3::<T, 3>(qs, k, os),
+                    2 => dot_multi_v3::<T, 2>(qs, k, os),
+                    _ => dot_multi_v3::<T, 1>(qs, k, os),
+                }
+            }
         }
+        return;
+    }
+    for (g, o) in out.iter_mut().enumerate() {
+        // SAFETY: V3 false here.
+        *o = unsafe { dot::<false, F, T>(&q[g * n..(g + 1) * n], k) };
     }
 }
 
-/// `dot` of G query vectors (contiguous in q) with one k. Each result uses
-/// `dot`'s exact lanes, tail and final sum, so it's identical to `dot`; the
-/// G accumulator chains run side by side and k is loaded (and widened) once.
+/// `dot` of G query vectors (contiguous in q) with one k, with AVX2 + FMA.
+/// Each result uses `dot`'s exact lanes, tail and final sum, so it's
+/// identical to `dot`; the G accumulator chains run side by side and k is
+/// loaded (and widened) once.
 ///
 /// Written with intrinsics: the plain-Rust version (an `[[f32; 8]; G]`
 /// accumulator indexed through per-head slices) didn't vectorize and ran as
 /// scalar loads/adds through the stack, ~40% of prefill at 2k tokens.
-/// `_mm256_fmadd_ps(x, y, acc)` is `dot`'s `acc[i] = fmadd(x[i], y[i], acc[i])`
-/// lane for lane, and `vmath::hsum8` is `vmath::sum8`.
-#[cfg(all(
-    target_arch = "x86_64",
-    target_feature = "avx2",
-    target_feature = "fma"
-))]
+/// `_mm256_fmadd_ps(x, y, acc)` is `dot`'s `acc[i] = fma(x[i], y[i], acc[i])`
+/// lane for lane, and `vmath::x86::hsum8` is `vmath::sum8`.
+///
+/// # Safety
+/// The CPU must have the x86-64-v3 features.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,bmi1,bmi2,f16c,fma,lzcnt")]
 #[inline]
-fn dot_multi<T: KvElem, const G: usize>(q: &[f32], k: &[T], out: &mut [f32]) {
+unsafe fn dot_multi_v3<T: KvElem, const G: usize>(q: &[f32], k: &[T], out: &mut [f32]) {
     use std::arch::x86_64::*;
     let n = k.len();
     assert!(q.len() >= G * n && out.len() >= G, "dot_multi: short q/out");
     let nc = n / 8;
     let (qp, kp) = (q.as_ptr(), k.as_ptr());
-    // SAFETY: AVX2 and FMA are enabled at compile time (cfg above). Every
-    // load reads q[g * n + 8 * j .. + 8] with g < G and 8 * j + 8 <= n,
-    // inside q (asserted above), or k[8 * j..+ 8], inside k.
+    // SAFETY: Every load reads q[g * n + 8 * j .. + 8] with g < G and
+    // 8 * j + 8 <= n, inside q (asserted above), or k[8 * j..+ 8], inside k.
     let acc = unsafe {
         let mut acc = [_mm256_setzero_ps(); G];
         for j in 0..nc {
@@ -1749,68 +1820,45 @@ fn dot_multi<T: KvElem, const G: usize>(q: &[f32], k: &[T], out: &mut [f32]) {
     };
     for (g, a) in acc.iter().enumerate() {
         let ar = &q[g * n + 8 * nc..(g + 1) * n];
-        out[g] = vmath::hsum8(*a) + dot_tail(ar, &k[8 * nc..]);
+        out[g] = vmath::x86::hsum8(*a) + dot_tail::<true, T>(ar, &k[8 * nc..]);
     }
 }
 
-/// Portable `dot_multi` (same arithmetic) for builds without AVX2 + FMA.
-#[cfg(not(all(
-    target_arch = "x86_64",
-    target_feature = "avx2",
-    target_feature = "fma"
-)))]
-#[inline]
-fn dot_multi<T: KvElem, const G: usize>(q: &[f32], k: &[T], out: &mut [f32]) {
-    let n = k.len();
-    for (g, o) in out[..G].iter_mut().enumerate() {
-        *o = dot(&q[g * n..(g + 1) * n], k);
+/// Elements past the last whole 8-chunk: `fma::<F>` in order from 0.0.
+#[inline(always)]
+fn dot_tail<const F: bool, T: KvElem>(a: &[f32], b: &[T]) -> f32 {
+    let mut s = 0.0f32;
+    for (&x, &y) in a.iter().zip(b) {
+        s = vmath::fma::<F>(x, y.to_f32(), s);
     }
+    s
 }
 
-/// Elements past the last whole 8-chunk: fused multiply-adds in order from 0.0.
-#[inline]
-fn dot_tail<T: KvElem>(a: &[f32], b: &[T]) -> f32 {
-    a.iter()
-        .zip(b)
-        .fold(0.0f32, |s, (&x, &y)| fmadd(x, y.to_f32(), s))
-}
-
-/// Dot product with 8 independent partial sums (lane i: fused multiply-adds
-/// over elements i mod 8 of the whole chunks), combined by `vmath::sum8`,
-/// plus the tail. `dot_multi::<1>` under AVX2 + FMA.
-#[cfg(all(
-    target_arch = "x86_64",
-    target_feature = "avx2",
-    target_feature = "fma"
-))]
-#[inline]
-fn dot<T: KvElem>(a: &[f32], b: &[T]) -> f32 {
+/// Dot product with 8 independent partial sums (lane i: `fma::<F>` over
+/// elements i mod 8 of the whole chunks), combined by `vmath::sum8`, plus
+/// the tail. `dot_multi_v3::<1>` when V3. Not dispatched on its own.
+///
+/// # Safety
+/// With V3, the CPU must have the x86-64-v3 features.
+#[inline(always)]
+unsafe fn dot<const V3: bool, const F: bool, T: KvElem>(a: &[f32], b: &[T]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
-    let mut o = [0.0f32];
-    dot_multi::<T, 1>(a, b, &mut o);
-    o[0]
-}
-
-/// Dot product with 8 independent partial sums (lane i: fused multiply-adds
-/// over elements i mod 8 of the whole chunks), combined by `vmath::sum8`,
-/// plus the tail.
-#[cfg(not(all(
-    target_arch = "x86_64",
-    target_feature = "avx2",
-    target_feature = "fma"
-)))]
-#[inline]
-fn dot<T: KvElem>(a: &[f32], b: &[T]) -> f32 {
-    debug_assert_eq!(a.len(), b.len());
+    #[cfg(target_arch = "x86_64")]
+    if V3 {
+        let mut o = [0.0f32];
+        // SAFETY: our caller's contract.
+        unsafe { dot_multi_v3::<T, 1>(a, b, &mut o) };
+        return o[0];
+    }
     let mut acc = [0.0f32; 8];
     let (ac, ar) = a.as_chunks::<8>();
     let (bc, br) = b.as_chunks::<8>();
     for (x, y) in ac.iter().zip(bc) {
         for i in 0..8 {
-            acc[i] = fmadd(x[i], y[i].to_f32(), acc[i]);
+            acc[i] = vmath::fma::<F>(x[i], y[i].to_f32(), acc[i]);
         }
     }
-    vmath::sum8(&acc) + dot_tail(ar, br)
+    vmath::sum8(&acc) + dot_tail::<F, T>(ar, br)
 }
 
 // ---------------------------------------------------------------------------
@@ -1899,6 +1947,31 @@ multiversion! {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::vmath::fmadd;
+
+    /// `dot` on the path the model runs (`quant::v3()`, `vmath::fused()`).
+    pub(crate) fn dot<T: KvElem>(a: &[f32], b: &[T]) -> f32 {
+        // SAFETY: V3 only when v3() detected the features.
+        unsafe {
+            match (crate::quant::v3(), vmath::fused()) {
+                (true, _) => super::dot::<true, true, T>(a, b),
+                (false, true) => super::dot::<false, true, T>(a, b),
+                (false, false) => super::dot::<false, false, T>(a, b),
+            }
+        }
+    }
+
+    /// `dot_group` on the path the model runs.
+    pub(crate) fn dot_group<T: KvElem>(q: &[f32], k: &[T], out: &mut [f32]) {
+        // SAFETY: as in `dot`.
+        unsafe {
+            match (crate::quant::v3(), vmath::fused()) {
+                (true, _) => super::dot_group::<true, true, T>(q, k, out),
+                (false, true) => super::dot_group::<false, true, T>(q, k, out),
+                (false, false) => super::dot_group::<false, false, T>(q, k, out),
+            }
+        }
+    }
     use crate::kv::Half;
 
     /// A tiny well-formed qwen2: dim 64, 2 heads (1 kv), ffn 128, vocab 8, `layers`
@@ -2636,6 +2709,159 @@ pub(crate) mod tests {
                 add_col::portable(&mut a, &y, slots, b);
                 unsafe { add_col::v3(&mut c, &y, slots, b) };
                 assert_eq!(bits(&a), bits(&c), "add_col");
+            }
+        }
+        // softmax over plain scores (no inf/NaN unless edgy)
+        for n in [0usize, 1, 5, 8, 37, 64, 300] {
+            for edgy in [false, true] {
+                for stride in [1, 3] {
+                    let src = mixed(n * stride, next(), 8.0, edgy);
+                    let (mut a, mut b) = (vec![0.0; n], vec![1.0; n]);
+                    softmax_from::portable(&src, stride, &mut a);
+                    unsafe { softmax_from::v3(&src, stride, &mut b) };
+                    assert_eq!(bits(&a), bits(&b), "softmax_from n={n}");
+                }
+            }
+        }
+        // Attention pieces, on the model's shapes and odd ones, f32 and f16
+        // caches. The portable variant fuses like v3 here (the CPU has FMA).
+        assert!(vmath::fused());
+        for (hd, group, n_kv) in [(64, 7, 2), (64, 6, 2), (128, 3, 1), (37, 9, 2), (5, 1, 1)] {
+            let kv_dim = n_kv * hd;
+            for np in [1usize, 2, 7, 33, 300] {
+                let qg = mixed(group * hd, next(), 4.0, false);
+                let kc = mixed((np + 2) * kv_dim, next(), 1.0, false);
+                let vc = mixed((np + 2) * kv_dim, next(), 1.0, false);
+                let kh: Vec<Half> = kc.iter().map(|&x| Half::from_f32(x)).collect();
+                let vh: Vec<Half> = vc.iter().map(|&x| Half::from_f32(x)).collect();
+                let scale = 1.0 / (hd as f32).sqrt();
+                let kvh = n_kv - 1;
+                let off = kvh * hd;
+                let tc = np.div_ceil(3);
+                let t0 = np - np.min(tc);
+                let wts = mixed(group * (np + 1), next(), 1.0, false);
+                let vb = &vc[off..];
+                let vbh = &vh[off..];
+
+                let (mut a, mut b) = (vec![0.0; group], vec![1.0; group]);
+                // SAFETY (every v3 call below): can_v3() above.
+                unsafe { super::dot_group::<false, true, f32>(&qg, &kc[..hd], &mut a) };
+                unsafe { super::dot_group::<true, true, f32>(&qg, &kc[..hd], &mut b) };
+                assert_eq!(bits(&a), bits(&b), "dot_group hd={hd} g={group}");
+
+                let (mut a, mut b) = (vec![0.0; np], vec![1.0; np]);
+                score_softmax::portable(&qg[..hd], &kc, kv_dim, off, scale, &mut a);
+                unsafe { score_softmax::v3(&qg[..hd], &kc, kv_dim, off, scale, &mut b) };
+                assert_eq!(bits(&a), bits(&b), "score_softmax hd={hd} np={np}");
+                score_softmax::portable(&qg[..hd], &kh, kv_dim, off, scale, &mut a);
+                unsafe { score_softmax::v3(&qg[..hd], &kh, kv_dim, off, scale, &mut b) };
+                assert_eq!(bits(&a), bits(&b), "score_softmax f16 hd={hd} np={np}");
+
+                let (mut a, mut b) = (vec![0.0; tc * group], vec![1.0; tc * group]);
+                score_tile::portable(&qg, &kh, kv_dim, hd, off, t0..np, scale, &mut a);
+                unsafe { score_tile::v3(&qg, &kh, kv_dim, hd, off, t0..np, scale, &mut b) };
+                assert_eq!(bits(&a), bits(&b), "score_tile hd={hd} np={np}");
+
+                let (mut a, mut b) = (vec![0.0; group * hd], vec![1.0; group * hd]);
+                vsum_rows::portable(&wts, np + 1, np, group, vb, kv_dim, &mut a, hd);
+                unsafe { vsum_rows::v3(&wts, np + 1, np, group, vb, kv_dim, &mut b, hd) };
+                assert_eq!(bits(&a), bits(&b), "vsum_rows hd={hd} np={np}");
+                vsum_rows::portable(&wts, np + 1, np, group, vbh, kv_dim, &mut a, hd);
+                unsafe { vsum_rows::v3(&wts, np + 1, np, group, vbh, kv_dim, &mut b, hd) };
+                assert_eq!(bits(&a), bits(&b), "vsum_rows f16 hd={hd} np={np}");
+
+                let (mut sa, mut sb) = (vec![0.0; (np + 1) * group], vec![1.0; (np + 1) * group]);
+                let (mut a, mut b) = (vec![0.0; group * hd], vec![1.0; group * hd]);
+                attend_causal::portable(&qg, &kh, &vh, kv_dim, hd, kvh, np, scale, &mut sa, &mut a);
+                unsafe {
+                    attend_causal::v3(&qg, &kh, &vh, kv_dim, hd, kvh, np, scale, &mut sb, &mut b)
+                };
+                assert_eq!(bits(&a), bits(&b), "attend_causal hd={hd} np={np}");
+            }
+        }
+    }
+
+    /// The unfused path (CPUs without FMA) on its own terms: `dot` is 8
+    /// lanes of separate multiply and add + `sum8` + the tail, the V sum the
+    /// same chain per element, softmax `exp_f::<false>`; equal bit for bit to
+    /// plain references, and decode equals prefill attention on it too.
+    #[test]
+    fn unfused_attention_paths() {
+        let mut seed = 0x5151_2626u64;
+        let mut next = || {
+            seed += 0x9e37_79b9;
+            seed
+        };
+        for (hd, group) in [(64, 7), (37, 3), (5, 1)] {
+            for np in [1usize, 9, 40] {
+                let q = mixed(group * hd, next(), 4.0, false);
+                let kc = mixed(np * hd, next(), 1.0, false);
+                let vc = mixed(np * hd, next(), 1.0, false);
+                let scale = 1.0 / (hd as f32).sqrt();
+                let dot_ref = |a: &[f32], b: &[f32]| {
+                    let mut acc = [0.0f32; 8];
+                    let n8 = a.len() / 8 * 8;
+                    for i in 0..n8 {
+                        acc[i % 8] += a[i] * b[i];
+                    }
+                    let mut t = 0.0f32;
+                    for i in n8..a.len() {
+                        t += a[i] * b[i];
+                    }
+                    vmath::sum8(&acc) + t
+                };
+                let mut got = vec![0.0f32; group];
+                // SAFETY: V3 false.
+                unsafe { super::dot_group::<false, false, f32>(&q, &kc[..hd], &mut got) };
+                for g in 0..group {
+                    let want = dot_ref(&q[g * hd..(g + 1) * hd], &kc[..hd]);
+                    assert_eq!(got[g].to_bits(), want.to_bits(), "dot hd={hd} g={g}");
+                }
+                // Prefill body vs the per-head reference.
+                let mut sc = vec![f32::NAN; (np + 1) * group];
+                let mut out = vec![f32::NAN; group * hd];
+                // SAFETY: V3 false.
+                unsafe {
+                    attend_causal::imp::<false, false, f32>(
+                        &q, &kc, &vc, hd, hd, 0, np, scale, &mut sc, &mut out,
+                    )
+                };
+                for g in 0..group {
+                    let qv = &q[g * hd..(g + 1) * hd];
+                    let s: Vec<f32> = (0..np)
+                        .map(|t| dot_ref(qv, &kc[t * hd..(t + 1) * hd]) * scale)
+                        .collect();
+                    let m = s.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let e: Vec<f32> = s.iter().map(|&x| vmath::exp_f::<false>(x - m)).collect();
+                    let (c, r) = e.as_chunks::<8>();
+                    let mut lanes = [0.0f32; 8];
+                    for c in c {
+                        for i in 0..8 {
+                            lanes[i] += c[i];
+                        }
+                    }
+                    let inv = 1.0 / (vmath::sum8(&lanes) + r.iter().fold(0.0f32, |a, &x| a + x));
+                    for d in 0..hd {
+                        let mut o = 0.0f32;
+                        for t in 0..np {
+                            o += e[t] * inv * vc[t * hd + d];
+                        }
+                        assert_eq!(
+                            out[g * hd + d].to_bits(),
+                            o.to_bits(),
+                            "attend hd={hd} np={np}"
+                        );
+                    }
+                    // Decode scoring of the same head: same weights.
+                    let mut w = vec![f32::NAN; np];
+                    // SAFETY: V3 false.
+                    unsafe {
+                        score_softmax::imp::<false, false, f32>(qv, &kc, hd, 0, scale, &mut w)
+                    };
+                    for t in 0..np {
+                        assert_eq!(w[t].to_bits(), (e[t] * inv).to_bits(), "weights t={t}");
+                    }
+                }
             }
         }
     }
