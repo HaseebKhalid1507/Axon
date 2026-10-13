@@ -12,30 +12,96 @@ use std::env;
 /// Prompt tokens per `feed_batch` call.
 const PREFILL_BATCH: usize = 64;
 
-fn main() -> std::io::Result<()> {
+const USAGE: &str = "\
+usage:
+  axon <model.gguf>                         browse the model in a terminal UI
+  axon info <model.gguf>                    print a summary and exit
+  axon gen <model.gguf> \"<prompt>\" [-n N]   greedy generation
+  axon logits <model.gguf> \"<prompt>\" [-k K]
+                                            top-K next-token logits after the prompt
+  axon -h | --help                          this help
+  axon -V | --version                       print the version
+
+flags:
+  -n N   gen: tokens to generate (default 32)
+  -k K   logits: how many logits to print (default 10)
+
+environment:
+  AXON_THREADS=N             worker threads (default: cores minus a quarter)
+  AXON_SIMD=scalar|avx2|vnni force a kernel set (default: the best the CPU has)
+  AXON_POOL_ADAPT=0          keep every worker in every job (no adaptive drop-out)
+  AXON_POOL_DEBUG=1          gen: print thread-pool stats at the end
+  AXON_MMAP=0|1              0: copy the model into huge-page memory, 1: map the file
+                             (default: copy, unless the file is >60% of free memory)
+
+The model must be a qwen2-architecture GGUF (e.g. Qwen2.5-0.5B-Instruct Q4_K_M).";
+
+/// Usage error: one line, a hint, exit code 2.
+fn fail(msg: &str) -> ! {
+    eprintln!("axon: {msg}");
+    eprintln!("try 'axon --help'");
+    std::process::exit(2);
+}
+
+/// Load a GGUF, exiting with code 2 and a one-line message if it can't be read.
+fn open_model(path: &str, lm: bool) -> gguf::Model {
+    let m = gguf::load(path).unwrap_or_else(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => fail(&format!("cannot open '{path}': no such file")),
+        _ => fail(&format!("cannot load '{path}': {e}")),
+    });
+    if lm && let Err(e) = model::check_supported(&m) {
+        fail(&format!("{path}: {e}"));
+    }
+    m
+}
+
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("axon: {e}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> std::io::Result<()> {
     let args: Vec<String> = env::args().collect();
 
-    if args.len() < 2 {
-        eprintln!("usage: axon <model.gguf>        # interactive TUI");
-        eprintln!("       axon info <model.gguf>    # print summary and exit");
-        eprintln!("       axon gen <model.gguf> \"<prompt>\" [-n 32]     # greedy generation");
-        eprintln!(
-            "       axon logits <model.gguf> \"<prompt>\" [-k 10]  # top-k logits at last position"
-        );
-        std::process::exit(1);
+    match args.get(1).map(String::as_str) {
+        None => {
+            eprintln!("axon {}\n\n{USAGE}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(2);
+        }
+        Some("-h" | "--help" | "help") => {
+            println!(
+                "axon {}: CPU inference for Qwen2 GGUF models\n\n{USAGE}",
+                env!("CARGO_PKG_VERSION")
+            );
+            return Ok(());
+        }
+        Some("-V" | "--version") => {
+            println!("axon {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        _ => {}
     }
 
     if args[1] == "gen" || args[1] == "logits" {
         return run_lm(&args);
     }
 
-    let (cmd, path) = if args.len() >= 3 && args[1] == "info" {
-        ("info", &args[2])
-    } else {
-        ("viz", &args[1])
+    let (cmd, path) = match args[1].as_str() {
+        "info" if args.len() == 3 => ("info", &args[2]),
+        "info" => fail("usage: axon info <model.gguf>"),
+        f if f.starts_with('-') => fail(&format!("unknown flag '{f}'")),
+        // A lone argument is a model to browse, unless it can't be one.
+        p if args.len() == 2 && (p.ends_with(".gguf") || std::path::Path::new(p).exists()) => {
+            ("viz", &args[1])
+        }
+        c => fail(&format!(
+            "unknown command '{c}' (commands: gen, logits, info)"
+        )),
     };
 
-    let model = gguf::load(path)?;
+    let model = open_model(path, false);
 
     match cmd {
         "info" => {
@@ -73,11 +139,10 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
 
     let cmd = args[1].as_str();
     if args.len() < 4 {
-        eprintln!(
+        fail(&format!(
             "usage: axon {cmd} <model.gguf> \"<prompt>\" [{}]",
             if cmd == "gen" { "-n 32" } else { "-k 10" }
-        );
-        std::process::exit(1);
+        ));
     }
     let (path, prompt) = (&args[2], &args[3]);
     let mut n_gen = 32usize;
@@ -88,15 +153,17 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         match (args[i].as_str(), val) {
             ("-n", Some(v)) => n_gen = v,
             ("-k", Some(v)) => top_k = v,
-            (f, _) => {
-                eprintln!("bad flag or value: {f}");
-                std::process::exit(1);
-            }
+            (f @ ("-n" | "-k"), None) => fail(&format!(
+                "{f} needs a whole number, got {}",
+                args.get(i + 1)
+                    .map_or("nothing".into(), |v| format!("'{v}'"))
+            )),
+            (f, _) => fail(&format!("unknown argument '{f}' for {cmd}")),
         }
         i += 2;
     }
 
-    let model = gguf::load(path)?;
+    let model = open_model(path, true);
     let tok = tokenizer::Tokenizer::from_gguf(&model);
     let net = model::Qwen2::new(&model);
 

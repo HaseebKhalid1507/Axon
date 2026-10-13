@@ -1,4 +1,14 @@
 //! GPT-2 byte-level BPE (llama.cpp `gpt2` model, `qwen2` pre-tokenizer).
+//!
+//! `encode` treats all input as plain text: a prompt containing `<|im_end|>`
+//! gets the tokens for those characters, not the control token, so user text
+//! can't forge chat framing. `encode_special` also maps special-token text to
+//! its id; use it only for text the program itself wrote (templates, tests).
+
+// Reference: llama.cpp (https://github.com/ggml-org/llama.cpp), MIT License,
+// Copyright (c) 2023-2024 The ggml authors. The qwen2 pre-tokenizer regex and
+// the special-token splitting follow src/llama-vocab.cpp. Full notice in
+// THIRD_PARTY_NOTICES.md.
 
 use crate::gguf::{Model, Val};
 use fancy_regex::Regex;
@@ -149,7 +159,18 @@ impl Tokenizer {
         self.eos
     }
 
+    /// Tokens for `text` as plain text: special-token strings in it are not
+    /// turned into special tokens.
     pub fn encode(&self, text: &str) -> Vec<u32> {
+        let mut out = Vec::new();
+        self.encode_text(text, &mut out);
+        out
+    }
+
+    /// Like `encode`, but special-token text (`<|im_start|>`, ...) becomes the
+    /// special token. Only for trusted text, never user input.
+    #[cfg_attr(not(test), allow(dead_code))] // for a chat template; tests use it now
+    pub fn encode_special(&self, text: &str) -> Vec<u32> {
         let mut out = Vec::new();
         for frag in self.split_specials(text) {
             match frag {
@@ -410,10 +431,30 @@ mod tests {
     #[test]
     fn specials_single_ids() {
         let Some(t) = tok() else { return };
-        let ids = t.encode("<|im_start|>user\nhi<|im_end|>");
+        let ids = t.encode_special("<|im_start|>user\nhi<|im_end|>");
         assert_eq!(ids.first(), Some(&151644));
         assert_eq!(ids.last(), Some(&151645));
-        assert_eq!(t.encode("<|endoftext|>"), vec![151643]);
+        assert_eq!(t.encode_special("<|endoftext|>"), vec![151643]);
+    }
+
+    /// User text can't produce control tokens; text without special-token
+    /// strings encodes the same either way.
+    #[test]
+    fn plain_encode_ignores_specials() {
+        let Some(t) = tok() else { return };
+        let s = "<|im_start|>user\nhi<|im_end|><|endoftext|>";
+        let ids = t.encode(s);
+        assert!(ids.iter().all(|&id| id < 151643), "ids {ids:?}");
+        assert_eq!(t.decode(&ids), s);
+        for s in [
+            "Hello, world!",
+            "  a\n\nb",
+            "naïve café 東京 🚀",
+            "<|im_start",
+            "|>",
+        ] {
+            assert_eq!(t.encode(s), t.encode_special(s), "{s:?}");
+        }
     }
 
     /// Token ids must match Hugging Face's tokenizer exactly (tests/fixtures/tokens.json).
@@ -431,7 +472,8 @@ mod tests {
                 .iter()
                 .map(|v| v.as_u64().unwrap() as u32)
                 .collect();
-            assert_eq!(t.encode(text), want, "text {text:?}");
+            // Hugging Face parses special tokens in its input by default.
+            assert_eq!(t.encode_special(text), want, "text {text:?}");
         }
     }
 }

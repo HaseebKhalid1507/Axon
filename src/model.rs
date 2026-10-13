@@ -5,7 +5,8 @@
 use crate::gguf::{Model, Tensor, Val};
 use crate::pool::{self, Pool};
 use crate::quant::{
-    QuantizedAct, dequant, dot_row_q8, dot_row_q8_multi, dot_rows_q8_multi, row_bytes,
+    F16, F32, Q4_K, Q5_0, Q6_K, Q8_0, QuantizedAct, dequant, dot_row_q8, dot_row_q8_multi,
+    dot_rows_q8_multi, row_bytes,
 };
 
 /// The weights of one transformer block, borrowed from the mmap.
@@ -82,8 +83,135 @@ fn load_vec(m: &Model, t: &Tensor) -> Vec<f32> {
     out
 }
 
+/// Tensor types the kernels run (`quant::dequant` and `dot_row_q8`).
+const SUPPORTED_TYPES: [u32; 6] = [F32, F16, Q5_0, Q8_0, Q4_K, Q6_K];
+
+/// Everything `Qwen2::new` and `Tokenizer::from_gguf` rely on, checked up front
+/// so a bad or unsupported model is an error instead of a panic: the
+/// architecture, the hyperparameters, every tensor's presence, type and shape,
+/// and the vocabulary. Reads metadata only.
+pub fn check_supported(m: &Model) -> std::io::Result<()> {
+    let bad = |msg: String| std::io::Error::new(std::io::ErrorKind::InvalidData, msg);
+    if m.arch != "qwen2" {
+        return Err(bad(format!(
+            "architecture '{}' is not supported (only qwen2 for now)",
+            if m.arch.is_empty() { "<none>" } else { &m.arch }
+        )));
+    }
+    let need = |k: &str| -> std::io::Result<usize> {
+        let key = format!("qwen2.{k}");
+        match meta_num(m, &key) {
+            Some(v) if v.fract() == 0.0 && v >= 1.0 && v <= u32::MAX as f64 => Ok(v as usize),
+            Some(v) => Err(bad(format!(
+                "metadata {key} = {v} is not a positive integer"
+            ))),
+            None => Err(bad(format!("metadata {key} is missing or not a number"))),
+        }
+    };
+    let n_layers = need("block_count")?;
+    let dim = need("embedding_length")?;
+    let n_heads = need("attention.head_count")?;
+    let n_kv_heads = need("attention.head_count_kv")?;
+    if !dim.is_multiple_of(n_heads) || !(dim / n_heads).is_multiple_of(2) {
+        return Err(bad(format!(
+            "embedding_length {dim} doesn't split into {n_heads} heads of even size"
+        )));
+    }
+    if !n_heads.is_multiple_of(n_kv_heads) {
+        return Err(bad(format!(
+            "head_count {n_heads} is not a multiple of head_count_kv {n_kv_heads}"
+        )));
+    }
+    let kv_dim = n_kv_heads * (dim / n_heads);
+
+    // `rows` = None: a vector of `cols` elements; Some(r): a cols x r matrix.
+    let check = |name: &str, cols: usize, rows: Option<usize>| -> std::io::Result<&Tensor> {
+        let t = find_opt(m, name).ok_or_else(|| bad(format!("missing tensor {name}")))?;
+        let q = t.qtype;
+        if !SUPPORTED_TYPES.contains(&q.id) {
+            return Err(bad(format!(
+                "tensor {name}: type {} ({}) is not supported (F32, F16, Q5_0, Q8_0, Q4_K, Q6_K)",
+                q.name, q.id
+            )));
+        }
+        let ok = match rows {
+            None => t.n_elements == cols as u64,
+            Some(r) => {
+                t.dims.len() >= 2
+                    && t.dims[0] == cols as u64
+                    && (if r == 0 {
+                        t.dims[1] > 0
+                    } else {
+                        t.dims[1] == r as u64
+                    })
+                    && t.dims[2..].iter().all(|&d| d == 1)
+            }
+        };
+        if !ok
+            || t.dims
+                .first()
+                .is_some_and(|&d| d % q.block_size as u64 != 0)
+        {
+            return Err(bad(format!(
+                "tensor {name}: shape {:?} doesn't fit the model ({cols} x {})",
+                t.dims,
+                rows.map_or("1".into(), |r| if r == 0 {
+                    "n".into()
+                } else {
+                    r.to_string()
+                })
+            )));
+        }
+        Ok(t)
+    };
+
+    let embd = check("token_embd.weight", dim, Some(0))?;
+    let vocab = embd.dims[1] as usize;
+    if find_opt(m, "output.weight").is_some() {
+        check("output.weight", dim, Some(vocab))?;
+    }
+    check("output_norm.weight", dim, None)?;
+    for i in 0..n_layers {
+        let t = |s: &str, cols, rows| check(&format!("blk.{i}.{s}"), cols, rows);
+        t("attn_norm.weight", dim, None)?;
+        t("attn_q.weight", dim, Some(dim))?;
+        t("attn_k.weight", dim, Some(kv_dim))?;
+        t("attn_v.weight", dim, Some(kv_dim))?;
+        for (b, n) in [
+            ("attn_q.bias", dim),
+            ("attn_k.bias", kv_dim),
+            ("attn_v.bias", kv_dim),
+        ] {
+            if find_opt(m, &format!("blk.{i}.{b}")).is_some() {
+                t(b, n, None)?;
+            }
+        }
+        t("attn_output.weight", dim, Some(dim))?;
+        t("ffn_norm.weight", dim, None)?;
+        let ffn = t("ffn_gate.weight", dim, Some(0))?.dims[1] as usize;
+        t("ffn_up.weight", dim, Some(ffn))?;
+        t("ffn_down.weight", ffn, Some(dim))?;
+    }
+
+    match m
+        .metadata
+        .iter()
+        .find(|(k, _)| k == "tokenizer.ggml.tokens")
+    {
+        Some((_, Val::Arr(a))) if !a.is_empty() && a.len() <= vocab => Ok(()),
+        Some((_, Val::Arr(a))) => Err(bad(format!(
+            "tokenizer has {} tokens for an embedding of {vocab} rows",
+            a.len()
+        ))),
+        _ => Err(bad("tokenizer.ggml.tokens is missing".into())),
+    }
+}
+
 impl<'a> Qwen2<'a> {
     pub fn new(m: &'a Model) -> Qwen2<'a> {
+        if let Err(e) = check_supported(m) {
+            panic!("{e}");
+        }
         let a = &m.arch;
         let key = |k: &str| format!("{a}.{k}");
         let need =
@@ -1138,6 +1266,126 @@ fn dot(a: &[f32], b: &[f32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tiny well-formed qwen2: dim 64, 2 heads (1 kv), ffn 128, vocab 8, `layers`
+    /// layers; `edit` changes the tensor list before the file is built.
+    fn tiny(edit: impl FnOnce(&mut Vec<(String, Vec<u64>, u32)>)) -> std::io::Result<()> {
+        tiny_meta(edit, |_| {})
+    }
+
+    fn tiny_meta(
+        edit: impl FnOnce(&mut Vec<(String, Vec<u64>, u32)>),
+        edit_meta: impl FnOnce(&mut Vec<(&'static str, Val)>),
+    ) -> std::io::Result<()> {
+        let mut ts: Vec<(String, Vec<u64>, u32)> = vec![
+            ("token_embd.weight".into(), vec![64, 8], Q8_0),
+            ("output_norm.weight".into(), vec![64], F32),
+        ];
+        for i in 0..2 {
+            for (n, d, ty) in [
+                ("attn_norm.weight", vec![64], F32),
+                ("attn_q.weight", vec![64, 64], Q8_0),
+                ("attn_k.weight", vec![64, 32], Q8_0),
+                ("attn_v.weight", vec![64, 32], Q8_0),
+                ("attn_q.bias", vec![64], F32),
+                ("attn_output.weight", vec![64, 64], Q8_0),
+                ("ffn_norm.weight", vec![64], F32),
+                ("ffn_gate.weight", vec![64, 128], Q8_0),
+                ("ffn_up.weight", vec![64, 128], Q8_0),
+                ("ffn_down.weight", vec![128, 64], Q8_0),
+            ] {
+                ts.push((format!("blk.{i}.{n}"), d, ty));
+            }
+        }
+        edit(&mut ts);
+        let mut meta = vec![
+            ("general.architecture", Val::Str("qwen2".into())),
+            ("qwen2.block_count", Val::U32(2)),
+            ("qwen2.embedding_length", Val::U32(64)),
+            ("qwen2.attention.head_count", Val::U32(2)),
+            ("qwen2.attention.head_count_kv", Val::U32(1)),
+            (
+                "tokenizer.ggml.tokens",
+                Val::Arr((0..8).map(|i| Val::Str(format!("t{i}"))).collect()),
+            ),
+        ];
+        edit_meta(&mut meta);
+        let ts: Vec<(&str, &[u64], u32)> = ts
+            .iter()
+            .map(|(n, d, t)| (n.as_str(), &d[..], *t))
+            .collect();
+        check_supported(&crate::gguf::build_for_test(&meta, &ts))
+    }
+
+    fn rejects(edit: impl FnOnce(&mut Vec<(String, Vec<u64>, u32)>), want: &str) {
+        let e = tiny(edit).expect_err("malformed model accepted");
+        assert!(e.to_string().contains(want), "{e}");
+    }
+
+    #[test]
+    fn check_supported_accepts_tiny_model() {
+        tiny(|_| {}).expect("tiny model");
+    }
+
+    #[test]
+    fn check_supported_rejects_bad_models() {
+        let set = |name: &'static str, dims: Vec<u64>, ty: u32| {
+            move |ts: &mut Vec<(String, Vec<u64>, u32)>| {
+                let t = ts.iter_mut().find(|t| t.0 == name).unwrap();
+                (t.1, t.2) = (dims, ty);
+            }
+        };
+        rejects(
+            |ts| ts.retain(|t| t.0 != "blk.1.ffn_up.weight"),
+            "missing tensor blk.1.ffn_up.weight",
+        );
+        // Q4_0: a real GGUF type the kernels don't run; 99: unknown.
+        rejects(
+            set("blk.0.attn_q.weight", vec![64, 64], 2),
+            "Q4_0 (2) is not supported",
+        );
+        rejects(
+            set("blk.1.ffn_down.weight", vec![128, 64], 99),
+            "?? (99) is not supported",
+        );
+        rejects(
+            set("blk.0.attn_k.weight", vec![64, 64], Q8_0),
+            "attn_k.weight: shape",
+        );
+        rejects(
+            set("blk.0.ffn_down.weight", vec![64, 64], Q8_0),
+            "ffn_down.weight: shape",
+        );
+        rejects(
+            set("output_norm.weight", vec![32], F32),
+            "output_norm.weight: shape",
+        );
+        // K-quant rows must be whole 256-blocks: 64 isn't.
+        rejects(
+            set("blk.0.attn_q.weight", vec![64, 64], Q4_K),
+            "attn_q.weight: shape",
+        );
+        rejects(set("token_embd.weight", vec![64, 4], Q8_0), "8 tokens");
+        let meta = |edit: fn(&mut Vec<(&'static str, Val)>), want: &str| {
+            let e = tiny_meta(|_| {}, edit).expect_err("malformed metadata accepted");
+            assert!(e.to_string().contains(want), "{e}");
+        };
+        meta(
+            |m| m.retain(|kv| kv.0 != "qwen2.block_count"),
+            "qwen2.block_count is missing",
+        );
+        meta(
+            |m| m[3].1 = Val::Str("2".into()),
+            "head_count is missing or not a number",
+        );
+        meta(|m| m[3].1 = Val::U32(0), "not a positive integer");
+        meta(|m| m[4].1 = Val::U32(3), "not a multiple of head_count_kv");
+        meta(|m| m[1].1 = Val::U32(3), "missing tensor blk.2.");
+        meta(
+            |m| m.retain(|kv| kv.0 != "general.architecture"),
+            "'<none>' is not supported",
+        );
+    }
 
     /// Batched prefill in uneven chunks must leave the same cache, and so give
     /// the same next-token logits, bit for bit, as feeding one token at a time.
