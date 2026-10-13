@@ -56,12 +56,14 @@ import urllib.error
 import urllib.request
 
 SENTENCE = "The quick brown fox jumps over the lazy dog near the river bank."
-PROMPTS = {"pp560": " ".join([SENTENCE] * 40), "pp2100": " ".join([SENTENCE] * 150)}
+PROMPTS = {"pp560": " ".join([SENTENCE] * 40), "pp2100": " ".join([SENTENCE] * 150),
+           "pp8400": " ".join([SENTENCE] * 600)}
 DECODE_PROMPT = "The history of the Roman Empire"
 RATE = re.compile(r"\(([0-9.]+) tok/s\)")
-ALL_METRICS = ["pp560", "pp2100", "tg128", "tg128@1", "tg128@2k"]
-# tg128@2k: decode 128 tokens after the ~2100-token prompt (attention over a long context).
-DEFAULT_SKIP = {"tg128@2k"}
+ALL_METRICS = ["pp560", "pp2100", "tg128", "tg128@1", "tg128@2k", "pp8400", "tg128@8k"]
+# tg128@2k / @8k: decode 128 tokens after the ~2100 / ~8400-token prompt (attention over a
+# long context).
+DEFAULT_SKIP = {"tg128@2k", "pp8400", "tg128@8k"}
 OLLAMA_URL = "http://127.0.0.1:11434/api/generate"
 _SALT = itertools.count(int(time.time() * 1000) % 10**9)
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -77,6 +79,8 @@ def metric_job(metric, threads):
         threads, metric = 1, metric[:-2]
     if metric.endswith("@2k"):
         return PROMPTS["pp2100"], int(metric[2:-3]), "tg", threads
+    if metric.endswith("@8k"):
+        return PROMPTS["pp8400"], int(metric[2:-3]), "tg", threads
     if metric.startswith("pp"):
         return PROMPTS[metric], 2, "pp", threads
     return DECODE_PROMPT, int(metric[2:]), "tg", threads
@@ -134,7 +138,7 @@ class Ollama:
             "model": self.model_name, "prompt": f"Note {salt}. {prompt}", "raw": True,
             "stream": False, "keep_alive": self.keep_alive,
             "options": {"num_predict": n, "num_thread": threads, "num_gpu": 0,
-                        "temperature": 0, "num_ctx": 4096},
+                        "temperature": 0, "num_ctx": 10240},
         }
         if self.dry_run:
             print(f"  POST {OLLAMA_URL} {json.dumps(body)}")
@@ -192,7 +196,7 @@ class LlamaServer:
 
     def argv(self, threads, port):
         return [self.path, "-m", self.model, "-t", str(threads), "-tb", str(threads),
-                "-c", "4096", "-np", "1", "-ngl", "0", "--no-webui",
+                "-c", "10240", "-np", "1", "-ngl", "0", "--no-webui",
                 "--host", "127.0.0.1", "--port", str(port)]
 
     def server(self, threads):
