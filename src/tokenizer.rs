@@ -169,7 +169,6 @@ impl Tokenizer {
 
     /// Like `encode`, but special-token text (`<|im_start|>`, ...) becomes the
     /// special token. Only for trusted text, never user input.
-    #[cfg_attr(not(test), allow(dead_code))] // for a chat template; tests use it now
     pub fn encode_special(&self, text: &str) -> Vec<u32> {
         let mut out = Vec::new();
         for frag in self.split_specials(text) {
