@@ -191,10 +191,15 @@ mod x86 {
 #[cfg(all(
     target_arch = "x86_64",
     target_feature = "avx2",
+    target_feature = "fma",
+    test
+))]
+pub use x86::exp8;
+#[cfg(all(
+    target_arch = "x86_64",
+    target_feature = "avx2",
     target_feature = "fma"
 ))]
-#[cfg(test)]
-pub use x86::exp8;
 pub use x86::hsum8;
 
 /// Largest element (-inf for empty), as `fold(-inf, f32::max)`.
