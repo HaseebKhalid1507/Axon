@@ -8,6 +8,15 @@ machine was doing.
 - `pp560`, `pp2100`: prompt evaluation, tok/s, ~560 / ~2100-token prompt
 - `tg128`: decode tok/s over 128 tokens; `tg128@1`: the same on one thread
 - `--load N`: N busy-loop processes running alongside (a machine that isn't idle)
+- `--warmup N` (default 1): discarded rounds first, so model loads never land in a sample
+- `--ollama NAME`, `--llama-server PATH`: reference columns (llama-server: one
+  server per thread count, `-c 4096 -np 1 -ngl 0`, `/completion` with `cache_prompt: false`)
+- `LABEL=PATH[,ENV=VAL...]` as a binary sets its column label and environment,
+  e.g. `att-t1=target/release/axon,AXON_ATT_TILE=1`
+- `--json PATH` saves raw samples, medians and machine metadata; `--dry-run`
+  prints the commands/requests without running anything
+- `scripts/sweep.py` runs pp560/tg128 for every engine at each of `--threads-list`
+  and reports each engine at its own best thread count
 
 Model: Qwen2.5-0.5B-Instruct Q4_K_M (see CONTRIBUTING.md). Machine "bella":
 Intel Core Ultra 9 275HX (8 P + 16 E cores, AVX2 + AVX-VNNI, no AVX-512), DDR5-5600,
