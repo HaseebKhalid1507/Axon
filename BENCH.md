@@ -39,3 +39,36 @@ With 6 busy-loop processes alongside (`--load 6`):
 
 Decode at 18 threads reads ~392 MB of weights per token; 164 tok/s is ~64 GB/s,
 about the practical DRAM bandwidth measured on this machine (63–69 GB/s).
+
+## 2026-10-13, overnight/2026-10-13 @ aa9be77
+
+Each engine at its own best thread count (`scripts/sweep.py`, threads 6/8/12/18/24,
+2 rounds, quiet machine). Same GGUF file for every engine; ollama models are
+created from it (`ollama create` with `FROM <gguf>`). llama.cpp is master
+4413a19 (Release, `GGML_NATIVE=ON`, OpenMP).
+
+| model | engine | pp560 (threads) | tg128 (threads) |
+|---|---|---|---|
+| 0.5B Q4_K_M | axon | **1345.4** (18) | **192.1** (12) |
+| | ollama 0.35.0 | 1037.2 (18) | 162.6 (18) |
+| | llama.cpp master | 597.0 (24) | 64.6 (8) |
+| 1.5B Q4_K_M | axon | 382.2 (18) | **71.8** (18) |
+| | ollama 0.35.0 | **396.9** (18) | 67.7 (18) |
+| | llama.cpp master | 337.9 (24) | 34.0 (24) |
+
+llama.cpp master's own `llama-bench` agrees (0.5B, 8 threads pinned to the P-cores:
+pp512 581, tg128 85; unpinned: 380 / 75): on this hybrid CPU its OpenMP build
+is well behind ollama's bundled engine.
+
+Fixed 18 threads, 3 rounds (`bench.py`, drafting off), axon / ollama:
+
+| model | pp560 | pp2100 | tg128 | tg128@1 |
+|---|---|---|---|---|
+| 0.5B | 1014 / 729 | 764 / 649 | 164 / 151 | 54.6 / 30.3 |
+| 1.5B | 354 / 387 | 309 / 349 | 72.0 / 66.4 | 23.7 / 12.4 |
+| 3B | 271 / 276 | | 39.8 / 37.3 | 12.8 / 8.1 |
+| 7B | 131 / 90 | | 17.9 / 16.9 | |
+
+Prompt-lookup drafting (`--draft 7`, 0.5B, 8 rounds, decode tok/s, off / on):
+prose 196 / 233, story 194 / 186, code rewrite 176 / 420, summarize 180 / 313,
+random list 192 / 401. It loses on low-repetition text, so it stays off by default.
