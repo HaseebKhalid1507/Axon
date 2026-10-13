@@ -1,10 +1,10 @@
 //! qwen2 forward pass. Matrix-vector products quantize the input to 8 bits and
-//! run integer dot products across all cores (rayon); everything else is plain
-//! f32 loops.
+//! run integer dot products on the worker pool (pool.rs); everything else is
+//! plain f32 loops.
 
 use crate::gguf::{Model, Tensor, Val};
+use crate::pool::{self, Pool};
 use crate::quant::{QuantizedAct, dequant, dot_row_q8, row_bytes};
-use rayon::prelude::*;
 
 /// The weights of one transformer block, borrowed from the mmap.
 struct Layer<'a> {
@@ -180,11 +180,11 @@ impl<'a> Qwen2<'a> {
             (qt, row_bytes(qt, x.len()), self.m.tensor_data(w))
         });
         // Every output row is an independent dot product, so split rows across
-        // cores. About 4 chunks per thread lets work stealing even out the fast
-        // and efficiency cores; at most 64 rows keeps scheduling overhead small.
+        // cores. About 4 chunks per thread lets the fast and efficiency cores
+        // even out; at most 64 rows keeps chunk claiming cheap.
         let mut out = vec![0f32; total];
-        let chunk = (total / (rayon::current_num_threads() * 4)).clamp(4, 64);
-        out.par_chunks_mut(chunk).enumerate().for_each(|(c, ys)| {
+        let chunk = (total / (Pool::global().threads() * 4)).clamp(4, 64);
+        pool::for_each_chunk_mut(&mut out, chunk, |c, ys| {
             for (j, y) in ys.iter_mut().enumerate() {
                 let g = c * chunk + j;
                 let t = starts.iter().rposition(|&s| s <= g).unwrap();

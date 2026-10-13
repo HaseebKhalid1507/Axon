@@ -1,5 +1,6 @@
 mod gguf;
 mod model;
+mod pool;
 mod quant;
 #[cfg(test)]
 mod testutil;
