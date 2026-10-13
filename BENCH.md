@@ -18,6 +18,9 @@ machine was doing.
 - `scripts/sweep.py` runs pp560/tg128 for every engine at each of `--threads-list`
   and reports each engine at its own best thread count
 
+Binaries are the default build: baseline x86-64 with runtime AVX2/VNNI dispatch
+(no `target-cpu`; before the portability change the default was x86-64-v3).
+
 Model: Qwen2.5-0.5B-Instruct Q4_K_M (see CONTRIBUTING.md). Machine "bella":
 Intel Core Ultra 9 275HX (8 P + 16 E cores, AVX2 + AVX-VNNI, no AVX-512), DDR5-5600,
 18 threads unless noted.

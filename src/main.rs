@@ -1,3 +1,5 @@
+#[macro_use]
+mod mv;
 mod gguf;
 mod model;
 mod pool;
@@ -469,36 +471,48 @@ fn generate(
     Ok(st)
 }
 
-/// Index of the largest logit, the last one on ties (as `Iterator::max_by`
-/// returns). Two passes that each vectorize: a lane-wise max, then a scan
-/// back from the end, 8 at a time, for the last logit equal to it. A vocab is
-/// ~152k logits, every token. Unlike a `total_cmp` max, NaN logits are never
-/// picked (unless all are NaN) and -0.0 ties with +0.0.
-fn argmax(l: &[f32]) -> u32 {
-    assert!(!l.is_empty(), "argmax of no logits");
-    let (chunks, tail) = l.as_chunks::<8>();
-    let mut lanes = [f32::NEG_INFINITY; 8];
-    for ch in chunks {
-        for i in 0..8 {
-            // Not f32::max: its NaN rule costs extra instructions per lane on
-            // x86. A plain compare is one maxps, and skips NaN all the same.
-            lanes[i] = if ch[i] > lanes[i] { ch[i] } else { lanes[i] };
+multiversion! {
+    /// Index of the largest logit, the last one on ties (as `Iterator::max_by`
+    /// returns). Two passes that each vectorize: a lane-wise max, then a scan
+    /// back from the end, 8 at a time, for the last logit equal to it. A vocab is
+    /// ~152k logits, every token. Unlike a `total_cmp` max, NaN logits are never
+    /// picked (unless all are NaN) and -0.0 ties with +0.0.
+    fn argmax<V3>(l: &[f32]) -> u32 {
+        assert!(!l.is_empty(), "argmax of no logits");
+        let (chunks, tail) = l.as_chunks::<8>();
+        let mut lanes = [f32::NEG_INFINITY; 8];
+        for ch in chunks {
+            for i in 0..8 {
+                // Not f32::max: its NaN rule costs extra instructions per lane on
+                // x86. A plain compare is one maxps, and skips NaN all the same.
+                lanes[i] = if ch[i] > lanes[i] { ch[i] } else { lanes[i] };
+            }
         }
-    }
-    let m = tail
-        .iter()
-        .chain(&lanes)
-        .fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-    let base = chunks.len() * 8;
-    if let Some(j) = tail.iter().rposition(|&v| v == m) {
-        return (base + j) as u32;
-    }
-    for (c, ch) in chunks.iter().enumerate().rev() {
-        if ch.iter().fold(false, |hit, &v| hit | (v == m)) {
-            return (c * 8 + ch.iter().rposition(|&v| v == m).unwrap()) as u32;
+        let mut m = f32::NEG_INFINITY;
+        for &b in tail.iter().chain(&lanes) {
+            m = m.max(b);
         }
+        let base = chunks.len() * 8;
+        for (j, &v) in tail.iter().enumerate().rev() {
+            if v == m {
+                return (base + j) as u32;
+            }
+        }
+        for (c, ch) in chunks.iter().enumerate().rev() {
+            let mut hit = false;
+            for &v in ch {
+                hit |= v == m;
+            }
+            if hit {
+                for (j, &v) in ch.iter().enumerate().rev() {
+                    if v == m {
+                        return (c * 8 + j) as u32;
+                    }
+                }
+            }
+        }
+        (l.len() - 1) as u32 // all NaN
     }
-    (l.len() - 1) as u32 // all NaN
 }
 
 fn human_bytes(b: u64) -> String {
@@ -540,6 +554,30 @@ mod tests {
             }
         }
         assert_eq!(argmax(&[f32::NEG_INFINITY; 5]), 4);
+    }
+
+    /// argmax's portable and x86-64-v3 variants pick the same index.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn argmax_multiversion_identical() {
+        use crate::model::tests::{can_v3, mixed};
+        if !can_v3() {
+            return;
+        }
+        for n in [1usize, 7, 8, 9, 64, 151_936] {
+            for (k, edgy) in [false, true].into_iter().enumerate() {
+                let mut l = mixed(n, 5 + k as u64, 9.0, edgy);
+                let a = super::argmax::portable(&l);
+                assert_eq!(a, unsafe { super::argmax::v3(&l) }, "n={n}");
+                l.iter_mut().for_each(|v| *v = v.round()); // ties
+                let a = super::argmax::portable(&l);
+                assert_eq!(a, unsafe { super::argmax::v3(&l) }, "ties n={n}");
+            }
+        }
+        let nan = [f32::NAN; 11];
+        assert_eq!(super::argmax::portable(&nan), unsafe {
+            super::argmax::v3(&nan)
+        });
     }
 
     #[test]

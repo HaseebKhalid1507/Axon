@@ -18,8 +18,9 @@ Works today, honestly scoped:
   Instruct Q4_K_M builds. Other architectures are refused with an error.
 - Tensor types: Q4_K, Q5_0, Q6_K, Q8_0, F16, F32 (what Qwen's Q4_K_M files use). Others load for `info` but can't run.
 - Sampling: greedy only. No chat template yet: `gen` continues raw text.
-- CPU: x86-64. The default build targets x86-64-v3 (AVX2/FMA, Haswell 2013+);
-  other CPUs need `RUSTFLAGS="" cargo build --release` (see `.cargo/config.toml`).
+- CPU: any x86-64 (others build too, scalar only). The default build is baseline x86-64 and
+  picks its AVX2 / AVX-VNNI code at runtime, with the same output bits as a `-C target-cpu`
+  build (see `src/mv.rs`).
 - Rust 1.89 or newer.
 
 ## Quickstart

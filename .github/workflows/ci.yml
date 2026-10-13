@@ -8,6 +8,8 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Safe to set: .cargo/config.toml has no rustflags (no target-cpu), so CI
+  # builds the same baseline x86-64 binary as a dev machine.
   RUSTFLAGS: "-D warnings"
   # The 491 MB test model isn't in the repo. Tests that need it skip; the rest still run.
   AXON_SKIP_MODEL_TESTS: "1"
@@ -27,4 +29,31 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets
       - run: cargo test
+      # The SIMD tests skip paths the runner's CPU lacks (GitHub runners usually
+      # have AVX2 but not AVX-VNNI). Rerun them uncaptured so each skip shows
+      # up as a ::warning:: annotation instead of passing silently.
+      - name: SIMD / multiversion tests (skips visible)
+        run: cargo test -- --nocapture simd lanes multiversion
+      # The portable variants and scalar kernels, through the normal dispatch.
+      - name: Tests on the scalar path
+        run: cargo test
+        env:
+          AXON_SIMD: scalar
       - run: cargo build --release
+      # The default build must run on a pre-AVX CPU: no global target-cpu, AVX
+      # only behind runtime detection. Run the unit tests under a Nehalem CPU
+      # model, so the scalar kernels and portable variants actually execute
+      # there (the avx2/vnni/v3 tests skip themselves); any stray AVX
+      # instruction is a SIGILL. No model in CI, so model tests skip.
+      - name: Tests and release binary on a Nehalem CPU (qemu-user)
+        env:
+          AXON_SKIP_MODEL_TESTS: "1"
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user
+          cargo test --release --no-run 2>&1 | tee no-run.log
+          bin=$(grep -oE 'target/release/deps/axon-[0-9a-f]+' no-run.log | head -1)
+          test -x "$bin"
+          qemu-x86_64 -cpu Nehalem "$bin"
+          qemu-x86_64 -cpu Nehalem target/release/axon --help
+          qemu-x86_64 -cpu Nehalem target/release/axon --version

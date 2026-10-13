@@ -265,7 +265,7 @@ struct B32 {
 }
 
 #[allow(clippy::needless_range_loop)] // fixed-size arrays: indexing vectorizes cleanly
-#[inline]
+#[inline(always)]
 fn neg16_lane_sums(q: &[i8; 32]) -> [i32; 8] {
     let mut c = [0i32; 8];
     for l in 0..8 {
@@ -335,7 +335,7 @@ pub fn f32_to_f16(f: f32) -> u16 {
 /// quantize_row_q8_0: d = amax/127 stored as f16, q = round-half-even(x * 127/amax).
 /// Largest |v| in x, with 8 lane-wise maxima so it vectorizes (max is exact,
 /// so the order doesn't change the result). NaNs are ignored, as f32::max does.
-#[inline]
+#[inline(always)]
 fn abs_max(x: &[f32]) -> f32 {
     let mut lanes = [0f32; 8];
     let (chunks, tail) = x.as_chunks::<8>();
@@ -344,10 +344,17 @@ fn abs_max(x: &[f32]) -> f32 {
             lanes[i] = lanes[i].max(c[i].abs());
         }
     }
-    let m = tail.iter().fold(0f32, |m, v| m.max(v.abs()));
-    lanes.iter().fold(m, |a, &b| a.max(b))
+    let mut m = 0f32;
+    for v in tail {
+        m = m.max(v.abs());
+    }
+    for b in lanes {
+        m = m.max(b);
+    }
+    m
 }
 
+#[inline(always)]
 fn quantize_q8_0(x: &[f32], q: &mut [i8]) -> f32 {
     let amax = abs_max(x);
     let d = f16_to_f32(f32_to_f16(amax / 127.0));
@@ -361,6 +368,7 @@ fn quantize_q8_0(x: &[f32], q: &mut [i8]) -> f32 {
 /// Activation block for K-quant weights, exactly as llama.cpp's
 /// quantize_row_q8_K_ref: scale from the signed largest-magnitude value,
 /// q = min(127, round-half-even(x * -127/max)), d = 1/iscale.
+#[inline(always)]
 fn quantize_q8_k(x: &[f32], q: &mut [i8]) -> f32 {
     // The signed value with the largest magnitude, first one on ties (the
     // reference loop keeps the first because it only replaces on `>`). Two
@@ -370,15 +378,57 @@ fn quantize_q8_k(x: &[f32], q: &mut [i8]) -> f32 {
         q.fill(0);
         return 0.0;
     }
-    let max = *x
-        .iter()
-        .find(|v| v.abs() == amax)
-        .expect("amax comes from x");
+    // amax is the |v| of some v in x (NaNs are ignored, and all-NaN gives 0).
+    let mut max = f32::NAN;
+    for &v in x {
+        if v.abs() == amax {
+            max = v;
+            break;
+        }
+    }
+    debug_assert!(!max.is_nan(), "amax comes from x");
     let iscale = -127.0 / max;
     for (qi, &xi) in q.iter_mut().zip(x) {
         *qi = round_even_small(iscale * xi).min(127) as i8;
     }
     1.0 / iscale
+}
+
+multiversion! {
+    /// The "Q8_0" view of x (len a multiple of 32).
+    fn quantize_b32<V3>(x: &[f32]) -> B32 {
+        let nb = x.len() / QK8_0;
+        let mut d = Vec::with_capacity(nb);
+        let mut q = vec![[0i8; 32]; nb];
+        let mut c = Vec::with_capacity(nb);
+        for (xb, qb) in x.as_chunks::<QK8_0>().0.iter().zip(q.iter_mut()) {
+            d.push(quantize_q8_0(xb, qb));
+            c.push(neg16_lane_sums(qb));
+        }
+        B32 { d, q, c }
+    }
+}
+
+multiversion! {
+    /// The "Q8_K" view of x (len a multiple of 256).
+    fn quantize_k<V3>(x: &[f32]) -> Vec<KBlock> {
+        let blocks = x.as_chunks::<QK_K>().0;
+        let mut out = Vec::with_capacity(blocks.len());
+        for xb in blocks {
+            let mut qs = [0i8; QK_K];
+            let d = quantize_q8_k(xb, &mut qs);
+            let mut bsums = [0i16; QK_K / 16];
+            for (s, g) in bsums.iter_mut().zip(qs.as_chunks::<16>().0) {
+                let mut t = 0i16;
+                for &v in g {
+                    t += v as i16;
+                }
+                *s = t;
+            }
+            out.push(KBlock { d, qs, bsums });
+        }
+        out
+    }
 }
 
 impl QuantizedAct {
@@ -393,32 +443,8 @@ impl QuantizedAct {
     pub fn for_types(x: &[f32], qtypes: &[u32]) -> QuantizedAct {
         let n = x.len();
         let wants = |ts: &[u32]| qtypes.iter().any(|t| ts.contains(t));
-        let b32 = (wants(&[Q5_0, Q8_0]) && n.is_multiple_of(QK8_0)).then(|| {
-            let nb = n / QK8_0;
-            let mut d = Vec::with_capacity(nb);
-            let mut q = vec![[0i8; 32]; nb];
-            let mut c = Vec::with_capacity(nb);
-            for (xb, qb) in x.as_chunks::<QK8_0>().0.iter().zip(q.iter_mut()) {
-                d.push(quantize_q8_0(xb, qb));
-                c.push(neg16_lane_sums(qb));
-            }
-            B32 { d, q, c }
-        });
-        let k = (wants(&[Q4_K, Q6_K]) && n.is_multiple_of(QK_K)).then(|| {
-            x.as_chunks::<QK_K>()
-                .0
-                .iter()
-                .map(|xb| {
-                    let mut qs = [0i8; QK_K];
-                    let d = quantize_q8_k(xb, &mut qs);
-                    let mut bsums = [0i16; QK_K / 16];
-                    for (s, g) in bsums.iter_mut().zip(qs.as_chunks::<16>().0) {
-                        *s = g.iter().map(|&v| v as i16).sum();
-                    }
-                    KBlock { d, qs, bsums }
-                })
-                .collect()
-        });
+        let b32 = (wants(&[Q5_0, Q8_0]) && n.is_multiple_of(QK8_0)).then(|| quantize_b32(x));
+        let k = (wants(&[Q4_K, Q6_K]) && n.is_multiple_of(QK_K)).then(|| quantize_k(x));
         let x = if wants(&[F32, F16]) {
             x.to_vec()
         } else {
@@ -583,11 +609,53 @@ fn simd() -> Simd {
     *SIMD.get_or_init(|| choose_simd(std::env::var("AXON_SIMD").ok().as_deref()))
 }
 
+/// What the SIMD kernels need: every `x86` kernel and the `_v3` glue entry
+/// points are compiled with `#[target_feature(enable = "avx2,fma,f16c")]`
+/// (VNNI ones add avxvnni), so the default build runs on any x86-64 CPU and
+/// only these functions use AVX. Unchanged from the target-cpu days, so an
+/// AVX2 CPU without BMI (a VM with a masked CPU model) keeps its kernels.
 #[cfg(target_arch = "x86_64")]
 fn has_avx2() -> bool {
     is_x86_feature_detected!("avx2")
         && is_x86_feature_detected!("fma")
         && is_x86_feature_detected!("f16c")
+}
+
+/// The full x86-64-v3 set the multiversioned non-kernel functions (`mv.rs`)
+/// are compiled for: the kernel set plus bmi1, bmi2 and lzcnt.
+#[cfg(target_arch = "x86_64")]
+fn has_v3() -> bool {
+    has_avx2()
+        && is_x86_feature_detected!("bmi1")
+        && is_x86_feature_detected!("bmi2")
+        && is_x86_feature_detected!("lzcnt")
+}
+
+/// Whether the `_v3` variants of the multiversioned functions run (see
+/// `multiversion!`): on a SIMD kernel path (so `AXON_SIMD=scalar` runs the
+/// portable code everywhere) when the CPU has the full x86-64-v3 set. Both
+/// variants give the same bits, so this only changes speed. Decided once; an
+/// AVX2 CPU that misses bmi1/bmi2/lzcnt says so on stderr.
+#[inline]
+pub fn v3() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        static V3: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *V3.get_or_init(|| {
+            let ok = simd() != Simd::Scalar && has_v3();
+            if simd() != Simd::Scalar && !ok {
+                eprintln!(
+                    "axon: CPU has AVX2 but not bmi1/bmi2/lzcnt: SIMD kernels on, \
+                     other hot loops portable (same results, a little slower)"
+                );
+            }
+            ok
+        })
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        false
+    }
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -629,6 +697,12 @@ fn choose_simd(req: Option<&str>) -> Simd {
                 if avx2 {
                     return Simd::Avx2;
                 }
+                if is_x86_feature_detected!("avx2") {
+                    eprintln!(
+                        "axon: CPU has AVX2 but not fma/f16c: using the scalar kernels \
+                         (much slower; results within tolerance of the SIMD ones)"
+                    );
+                }
             }
             Simd::Scalar
         }
@@ -642,28 +716,28 @@ mod x86 {
     use std::arch::x86_64::*;
 
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     fn load_u8x32(p: &[u8; 32]) -> __m256i {
         // SAFETY: p points to 32 readable bytes; loadu has no alignment requirement.
         unsafe { _mm256_loadu_si256(p.as_ptr().cast()) }
     }
 
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     fn load_i8x32(p: &[i8; 32]) -> __m256i {
         // SAFETY: as above.
         unsafe { _mm256_loadu_si256(p.as_ptr().cast()) }
     }
 
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     fn load_i16x16(p: &[i16; 16]) -> __m256i {
         // SAFETY: as above (32 bytes).
         unsafe { _mm256_loadu_si256(p.as_ptr().cast()) }
     }
 
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     fn load_u8x16(p: &[u8; 16]) -> __m128i {
         // SAFETY: as above (16 bytes).
         unsafe { _mm_loadu_si128(p.as_ptr().cast()) }
@@ -671,14 +745,14 @@ mod x86 {
 
     /// little-endian f16 -> f32 (exact, same value as `rd_f16`)
     #[inline]
-    #[target_feature(enable = "avx2,f16c")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     fn h2f(b: [u8; 2]) -> f32 {
         let h = u16::from_le_bytes(b) as i32;
         _mm_cvtss_f32(_mm_cvtph_ps(_mm_cvtsi32_si128(h)))
     }
 
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     fn hsum_f32x8(x: __m256) -> f32 {
         let mut r = _mm_add_ps(_mm256_extractf128_ps(x, 1), _mm256_castps256_ps128(x));
         r = _mm_add_ps(r, _mm_movehl_ps(r, r));
@@ -688,7 +762,7 @@ mod x86 {
 
     /// Byte i = 0xFF if bit i of x is set, else 0x00 (ggml bytes_from_bits_32).
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     fn bytes_from_bits_32(x: u32) -> __m256i {
         let shuf = _mm256_set_epi64x(
             0x0303030303030303,
@@ -703,21 +777,21 @@ mod x86 {
 
     /// Σ over each 4 consecutive byte products ax(u8)*sy(i8), as 8 f32 lanes.
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     fn mul_sum_us8_avx2(ax: __m256i, sy: __m256i) -> __m256 {
         let dot = _mm256_maddubs_epi16(ax, sy);
         _mm256_cvtepi32_ps(_mm256_madd_epi16(_mm256_set1_epi16(1), dot))
     }
 
     #[inline]
-    #[target_feature(enable = "avx2,avxvnni")]
+    #[target_feature(enable = "avx2,fma,f16c,avxvnni")]
     fn mul_sum_us8_vnni(ax: __m256i, sy: __m256i) -> __m256 {
         _mm256_cvtepi32_ps(_mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), ax, sy))
     }
 
     /// 32 Q5_0 weights (nibble | high bit << 4) - 16 as i8.
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     pub(super) fn q5_0_weights(b: &[u8; Q5_0_BYTES]) -> __m256i {
         let qs = load_u8x16(b[6..22].try_into().unwrap());
         let nib = _mm256_and_si256(
@@ -732,7 +806,7 @@ mod x86 {
 
     /// Broadcast i16 scale `i` of `scales` (8 i16, both lanes) to all 16 lanes.
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     fn k4_scale(scales: __m256i, i: i32) -> __m256i {
         _mm256_shuffle_epi8(
             scales,
@@ -742,7 +816,7 @@ mod x86 {
 
     /// Q6_K i8 scales of 16-groups 2i and 2i+1, each repeated 8 times, as i16.
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     fn q6_scale(scales: __m128i, i: usize) -> __m256i {
         let lo = (2 * i) as i64 * 0x0101010101010101;
         let hi = (2 * i + 1) as i64 * 0x0101010101010101;
@@ -806,7 +880,7 @@ mod x86 {
     /// ggml_vec_dot_q4_K_q8_K (AVX2). Mins via bsums.
     ///
     /// # Safety
-    /// The CPU must support avx2, fma and f16c.
+    /// The CPU must support avx2, fma and f16c (`has_avx2()`).
     #[allow(clippy::needless_range_loop)] // j picks several chunks
     #[target_feature(enable = "avx2,fma,f16c")]
     pub unsafe fn q4_k_avx2(row: &[u8], xk: &[KBlock]) -> f32 {
@@ -872,7 +946,7 @@ mod x86 {
     /// ggml_vec_dot_q6_K_q8_K (AVX2). The -32 offset is applied via bsums.
     ///
     /// # Safety
-    /// The CPU must support avx2, fma and f16c.
+    /// The CPU must support avx2, fma and f16c (`has_avx2()`).
     #[allow(clippy::needless_range_loop)] // j picks several chunks
     #[target_feature(enable = "avx2,fma,f16c")]
     pub unsafe fn q6_k_avx2(row: &[u8], xk: &[KBlock]) -> f32 {
@@ -935,7 +1009,7 @@ mod x86 {
 
     /// 32 Q8_0 weights as i8 (in a u8 vector).
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     pub(super) fn q8_0_weights(b: &[u8; Q8_0_BYTES]) -> __m256i {
         load_u8x32(b[2..34].try_into().unwrap())
     }
@@ -1114,7 +1188,7 @@ mod x86 {
 
     /// 32 Q5_0 raw values nibble | high bit << 4, in 0..32 (= w + 16).
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     fn q5_0_raw(b: &[u8; Q5_0_BYTES]) -> __m256i {
         let qs = load_u8x16(b[6..22].try_into().unwrap());
         let nib = _mm256_and_si256(
@@ -1128,20 +1202,20 @@ mod x86 {
 
     /// 32 Q8_0 weights + 128 as u8.
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     fn q8_0_raw(b: &[u8; Q8_0_BYTES]) -> __m256i {
         _mm256_xor_si256(q8_0_weights(b), _mm256_set1_epi8(0x80u8 as i8))
     }
 
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     fn store_u8x32(p: &mut [u8; 32], v: __m256i) {
         // SAFETY: p points to 32 writable bytes; storeu has no alignment requirement.
         unsafe { _mm256_storeu_si256(p.as_mut_ptr().cast(), v) }
     }
 
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     fn load_i32x8(p: &[i32; 8]) -> __m256i {
         // SAFETY: as load_u8x32 (32 bytes).
         unsafe { _mm256_loadu_si256(p.as_ptr().cast()) }
@@ -1153,7 +1227,7 @@ mod x86 {
             ///
             /// # Safety
             /// The CPU must support avx2 and f16c.
-            #[target_feature(enable = "avx2,f16c")]
+            #[target_feature(enable = "avx2,fma,f16c")]
             pub unsafe fn $name(rows: [&[u8]; 2], out: &mut [Pair32]) {
                 let n = out.len();
                 let b0 = &rows[0].as_chunks::<$bytes>().0[..n];
@@ -1174,9 +1248,9 @@ mod x86 {
     /// over Q5_0's (c as stored).
     ///
     /// # Safety
-    /// The CPU must support avx2, fma and avxvnni.
+    /// The CPU must support avx2, fma, f16c and avxvnni (`has_vnni()`).
     #[allow(clippy::needless_range_loop)] // t indexes several arrays
-    #[target_feature(enable = "avx2,fma,avxvnni")]
+    #[target_feature(enable = "avx2,fma,f16c,avxvnni")]
     pub unsafe fn vnni_pair_x4<const Q8: bool>(
         w: &[Pair32],
         dx: [&[f32]; 4],
@@ -1228,7 +1302,7 @@ mod x86 {
     /// 4-token `q4_k_avx2`.
     ///
     /// # Safety
-    /// The CPU must support avx2, fma and f16c.
+    /// The CPU must support avx2, fma and f16c (`has_avx2()`).
     #[allow(clippy::needless_range_loop)] // j, t pick several chunks
     #[target_feature(enable = "avx2,fma,f16c")]
     pub unsafe fn q4_k_avx2_x4(row: &[u8], xk: [&[KBlock]; 4]) -> [f32; 4] {
@@ -1314,7 +1388,7 @@ mod x86 {
     /// 4-token `q6_k_avx2`.
     ///
     /// # Safety
-    /// The CPU must support avx2, fma and f16c.
+    /// The CPU must support avx2, fma and f16c (`has_avx2()`).
     #[allow(clippy::needless_range_loop)] // j, t pick several chunks
     #[target_feature(enable = "avx2,fma,f16c")]
     pub unsafe fn q6_k_avx2_x4(row: &[u8], xk: [&[KBlock]; 4]) -> [f32; 4] {
@@ -1447,42 +1521,42 @@ mod x86 {
     }
 
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     fn store_i16x16(p: &mut [i16; 16], v: __m256i) {
         // SAFETY: p points to 32 writable bytes; storeu has no alignment requirement.
         unsafe { _mm256_storeu_si256(p.as_mut_ptr().cast(), v) }
     }
 
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     fn load_i16x8(p: &[i16; 8]) -> __m128i {
         // SAFETY: as load_u8x16 (16 bytes).
         unsafe { _mm_loadu_si128(p.as_ptr().cast()) }
     }
 
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     fn load_f32x8(p: &[f32; 8]) -> __m256 {
         // SAFETY: p points to 8 readable f32s; loadu has no alignment requirement.
         unsafe { _mm256_loadu_ps(p.as_ptr()) }
     }
 
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     fn store_f32x8(p: &mut [f32; 8], v: __m256) {
         // SAFETY: p points to 8 writable f32s; storeu has no alignment requirement.
         unsafe { _mm256_storeu_ps(p.as_mut_ptr(), v) }
     }
 
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     fn load_f32x4(p: &[f32; 4]) -> __m128 {
         // SAFETY: as load_f32x8 (4 f32s).
         unsafe { _mm_loadu_ps(p.as_ptr()) }
     }
 
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     fn store_f32x4(p: &mut [f32; 4], v: __m128) {
         // SAFETY: as store_f32x8 (4 f32s).
         unsafe { _mm_storeu_ps(p.as_mut_ptr(), v) }
@@ -1491,7 +1565,7 @@ mod x86 {
     /// Unpack Q4_K super-block `b` as row `r` of `p`.
     #[allow(clippy::needless_range_loop)] // j, k index several arrays
     #[inline]
-    #[target_feature(enable = "avx2,f16c")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     fn unpack_q4_k_block(b: &[u8; Q4_K_BYTES], r: usize, p: &mut KPair) {
         const KMASK1: u32 = 0x3f3f3f3f;
         const KMASK2: u32 = 0x0f0f0f0f;
@@ -1527,7 +1601,7 @@ mod x86 {
     /// Unpack Q6_K super-block `b` as row `r` of `p`.
     #[allow(clippy::needless_range_loop)] // j, k index several arrays
     #[inline]
-    #[target_feature(enable = "avx2,f16c")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     fn unpack_q6_k_block(b: &[u8; Q6_K_BYTES], r: usize, p: &mut KPair) {
         let m3 = _mm256_set1_epi8(3);
         let m15 = _mm256_set1_epi8(15);
@@ -1570,14 +1644,14 @@ mod x86 {
 
     /// sumi + madd(sc, p16), as the AVX2 K-quant kernels do it.
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     fn scale_acc_avx2(sumi: __m256i, sc: __m256i, p16: __m256i) -> __m256i {
         _mm256_add_epi32(sumi, _mm256_madd_epi16(sc, p16))
     }
 
     /// The same i32 lanes in one instruction.
     #[inline]
-    #[target_feature(enable = "avx2,avxvnni")]
+    #[target_feature(enable = "avx2,fma,f16c,avxvnni")]
     fn scale_acc_vnni(sumi: __m256i, sc: __m256i, p16: __m256i) -> __m256i {
         _mm256_dpwssd_avx_epi32(sumi, sc, p16)
     }
@@ -1774,7 +1848,7 @@ mod x86 {
 
     /// Q5_0 lanes, unsigned: u = w + 16 in 0..32 via dpbusd from c = -16 Σa.
     #[inline]
-    #[target_feature(enable = "avx2,avxvnni")]
+    #[target_feature(enable = "avx2,fma,f16c,avxvnni")]
     pub fn q5_0_lanes_vnni(b: &[u8; Q5_0_BYTES], qy: __m256i, c: &[i32; 8]) -> __m256i {
         _mm256_dpbusd_avx_epi32(load_i32x8(c), q5_0_raw(b), qy)
     }
@@ -1783,7 +1857,7 @@ mod x86 {
     /// 2 * 31 * 128 = 7936 in magnitude (no i16 saturation), madd sums them
     /// exactly, then + c = -16 Σa.
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     pub fn q5_0_lanes_avx2(b: &[u8; Q5_0_BYTES], qy: __m256i, c: &[i32; 8]) -> __m256i {
         let p = _mm256_madd_epi16(_mm256_maddubs_epi16(q5_0_raw(b), qy), _mm256_set1_epi16(1));
         _mm256_add_epi32(p, load_i32x8(c))
@@ -1792,7 +1866,7 @@ mod x86 {
     /// Q8_0 lanes, unsigned: u = w ^ 0x80 = w + 128 via dpbusd from
     /// c << 3 = -128 Σa.
     #[inline]
-    #[target_feature(enable = "avx2,avxvnni")]
+    #[target_feature(enable = "avx2,fma,f16c,avxvnni")]
     pub fn q8_0_lanes_vnni(b: &[u8; Q8_0_BYTES], qy: __m256i, c: &[i32; 8]) -> __m256i {
         let c = _mm256_slli_epi32::<3>(load_i32x8(c));
         _mm256_dpbusd_avx_epi32(c, q8_0_raw(b), qy)
@@ -1801,7 +1875,7 @@ mod x86 {
     /// Q8_0 lanes on plain AVX2: the sign trick, as the single-row kernel
     /// (maddubs with u = w + 128 could saturate). `c` unused.
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     pub fn q8_0_lanes_avx2(b: &[u8; Q8_0_BYTES], qy: __m256i, _c: &[i32; 8]) -> __m256i {
         let qw = q8_0_weights(b);
         let dot = _mm256_maddubs_epi16(_mm256_sign_epi8(qw, qw), _mm256_sign_epi8(qy, qw));
@@ -1810,14 +1884,14 @@ mod x86 {
 
     /// The single-row kernels' lanes (sign trick), for the lane-equality tests.
     #[cfg(test)]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     pub fn sign_lanes_avx2(qw: __m256i, qy: __m256i) -> __m256i {
         let dot = _mm256_maddubs_epi16(_mm256_sign_epi8(qw, qw), _mm256_sign_epi8(qy, qw));
         _mm256_madd_epi16(_mm256_set1_epi16(1), dot)
     }
 
     #[cfg(test)]
-    #[target_feature(enable = "avx2,avxvnni")]
+    #[target_feature(enable = "avx2,fma,f16c,avxvnni")]
     pub fn sign_lanes_vnni(qw: __m256i, qy: __m256i) -> __m256i {
         let (ax, sy) = (_mm256_sign_epi8(qw, qw), _mm256_sign_epi8(qy, qw));
         _mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), ax, sy)
@@ -1888,7 +1962,7 @@ mod x86 {
     /// Q4_K packed 6-bit scales/mins as 16 u16: 8 scales, then 8 mins (as in
     /// `q4_k_avx2`).
     #[inline]
-    #[target_feature(enable = "avx2")]
+    #[target_feature(enable = "avx2,fma,f16c")]
     fn q4_k_mins_and_scales(b: &[u8; Q4_K_BYTES]) -> __m256i {
         const KMASK1: u32 = 0x3f3f3f3f;
         const KMASK2: u32 = 0x0f0f0f0f;
@@ -1906,7 +1980,7 @@ mod x86 {
     /// R rows of `q4_k_avx2`, bit for bit per row.
     ///
     /// # Safety
-    /// The CPU must support avx2, fma and f16c.
+    /// The CPU must support avx2, fma and f16c (`has_avx2()`).
     #[allow(clippy::needless_range_loop)] // j, r index several arrays
     #[target_feature(enable = "avx2,fma,f16c")]
     pub unsafe fn q4_k_rows_avx2<const R: usize>(
@@ -1985,7 +2059,7 @@ mod x86 {
     /// R rows of `q6_k_avx2`, bit for bit per row.
     ///
     /// # Safety
-    /// The CPU must support avx2, fma and f16c.
+    /// The CPU must support avx2, fma and f16c (`has_avx2()`).
     #[allow(clippy::needless_range_loop)] // j, r index several arrays
     #[target_feature(enable = "avx2,fma,f16c")]
     pub unsafe fn q6_k_rows_avx2<const R: usize>(
@@ -2205,14 +2279,76 @@ impl DecodeCfg {
 /// rows go up to 4 at a time, Q4_K/Q6_K 2 (at most `cfg.max_rows`), each
 /// with its own accumulator chain; the remainder goes in smaller groups.
 pub fn dot_rows_q8(qtype_id: u32, rows: &[u8], x: &QuantizedAct, out: &mut [f32], cfg: DecodeCfg) {
-    // SAFETY: simd() only returns Avx2/Vnni after detecting their features.
-    unsafe { dot_rows_q8_with(simd(), qtype_id, rows, x, out, cfg.prefetch, cfg.max_rows) }
+    #[cfg(target_arch = "x86_64")]
+    {
+        let (simd, pf, mr) = (simd(), cfg.prefetch, cfg.max_rows);
+        if simd != Simd::Scalar {
+            // SAFETY: simd() only returns Avx2/Vnni after detecting their features.
+            return unsafe { dot_rows_q8_v3(simd, qtype_id, rows, x, out, pf, mr) };
+        }
+    }
+    let _ = cfg;
+    let rb = row_bytes(qtype_id, x.len());
+    assert!(
+        rows.len() >= out.len() * rb,
+        "dot_rows_q8: {} rows of {rb} bytes need {} bytes, got {}",
+        out.len(),
+        out.len() * rb,
+        rows.len()
+    );
+    dot_rows_scalar(qtype_id, rb, rows, x, out);
+}
+
+/// The scalar path of the row loops: `dot_row_q8` per row. The dispatchers
+/// call this instead of the `_with` glue, so the glue (and the SIMD kernels it
+/// calls) is only reached from the `_v3` copies, where the kernels have a
+/// single call site and inline like they did under a global target-cpu.
+fn dot_rows_scalar(qtype_id: u32, rb: usize, rows: &[u8], x: &QuantizedAct, out: &mut [f32]) {
+    for (r, o) in out.iter_mut().enumerate() {
+        // SAFETY: Scalar needs nothing.
+        *o = unsafe { dot_row_q8_with(Simd::Scalar, qtype_id, &rows[r * rb..(r + 1) * rb], x) };
+    }
+}
+
+/// `dot_row_q8_multi` on the scalar path (see `dot_rows_scalar`).
+fn dot_row_multi_scalar(qtype_id: u32, row: &[u8], xs: &[&QuantizedAct], out: &mut [f32]) {
+    assert_eq!(
+        xs.len(),
+        out.len(),
+        "dot_row_q8_multi: xs/out lengths differ"
+    );
+    for (o, x) in out.iter_mut().zip(xs) {
+        // SAFETY: Scalar needs nothing.
+        *o = unsafe { dot_row_q8_with(Simd::Scalar, qtype_id, row, x) };
+    }
+}
+
+/// `dot_rows_q8_with` compiled for the kernels' features, so they inline
+/// into the row loop (the glue functions are `#[inline(always)]` and
+/// closure-free for this).
+///
+/// # Safety
+/// As for `dot_row_q8_with`, and the CPU has avx2, fma and f16c.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn dot_rows_q8_v3(
+    simd: Simd,
+    qtype_id: u32,
+    rows: &[u8],
+    x: &QuantizedAct,
+    out: &mut [f32],
+    pf: usize,
+    max_rows: usize,
+) {
+    // SAFETY: our caller's contract.
+    unsafe { dot_rows_q8_with(simd, qtype_id, rows, x, out, pf, max_rows) }
 }
 
 /// dot_rows_q8 on an explicit kernel path and prefetch distance.
 ///
 /// # Safety
 /// As for `dot_row_q8_with`.
+#[inline(always)]
 unsafe fn dot_rows_q8_with(
     simd: Simd,
     qtype_id: u32,
@@ -2295,7 +2431,7 @@ unsafe fn dot_rows_q8_with(
 /// # Safety
 /// As for `dot_row_q8_with`, and `simd` is not Scalar.
 #[cfg(target_arch = "x86_64")]
-#[inline]
+#[inline(always)]
 unsafe fn small_rows<const R: usize>(
     simd: Simd,
     qtype_id: u32,
@@ -2318,9 +2454,9 @@ unsafe fn small_rows<const R: usize>(
 /// `dot_row_q8_with`.
 ///
 /// # Safety
-/// The CPU must support avx2, fma and f16c.
+/// The CPU must support avx2, fma and f16c (`has_avx2()`).
 #[cfg(target_arch = "x86_64")]
-#[inline]
+#[inline(always)]
 unsafe fn kquant_rows<const R: usize>(
     qtype_id: u32,
     rows: &[u8],
@@ -2363,14 +2499,39 @@ pub fn batch_slots(qtypes: &[u32], n: usize, nb: usize) -> usize {
 /// Tokens go through the SIMD kernels in groups of 4, so each weight block is
 /// unpacked once per group rather than once per token.
 pub fn dot_row_q8_multi(qtype_id: u32, row: &[u8], xs: &[&QuantizedAct], out: &mut [f32]) {
-    // SAFETY: simd() only returns Avx2/Vnni after detecting their features.
-    unsafe { dot_row_q8_multi_with(simd(), qtype_id, row, xs, out) }
+    #[cfg(target_arch = "x86_64")]
+    {
+        let simd = simd();
+        if simd != Simd::Scalar {
+            // SAFETY: simd() only returns Avx2/Vnni after detecting their features.
+            return unsafe { dot_row_q8_multi_v3(simd, qtype_id, row, xs, out) };
+        }
+    }
+    dot_row_multi_scalar(qtype_id, row, xs, out);
+}
+
+/// `dot_row_q8_multi_with` compiled for the kernels' features (see `dot_rows_q8_v3`).
+///
+/// # Safety
+/// As for `dot_row_q8_with`, and the CPU has avx2, fma and f16c.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn dot_row_q8_multi_v3(
+    simd: Simd,
+    qtype_id: u32,
+    row: &[u8],
+    xs: &[&QuantizedAct],
+    out: &mut [f32],
+) {
+    // SAFETY: our caller's contract.
+    unsafe { dot_row_q8_multi_with(simd, qtype_id, row, xs, out) }
 }
 
 /// dot_row_q8_multi on an explicit kernel path.
 ///
 /// # Safety
 /// As for `dot_row_q8_with`.
+#[inline(always)]
 unsafe fn dot_row_q8_multi_with(
     simd: Simd,
     qtype_id: u32,
@@ -2416,6 +2577,7 @@ unsafe fn dot_row_q8_multi_with(
 /// As for `dot_row_q8_with`.
 #[cfg(target_arch = "x86_64")]
 #[allow(clippy::needless_range_loop)] // t indexes xs and the view arrays
+#[inline(always)]
 unsafe fn dot_row_q8_x4(
     simd: Simd,
     qtype_id: u32,
@@ -2472,14 +2634,45 @@ pub fn dot_rows_q8_multi(
     xs: &[&QuantizedAct],
     out: [&mut [f32]; 2],
 ) {
-    // SAFETY: simd() only returns Avx2/Vnni after detecting their features.
-    unsafe { dot_rows_q8_multi_with(simd(), qtypes, rows, xs, out) }
+    #[cfg(target_arch = "x86_64")]
+    {
+        let simd = simd();
+        if simd != Simd::Scalar {
+            // SAFETY: simd() only returns Avx2/Vnni after detecting their features.
+            return unsafe { dot_rows_q8_multi_v3(simd, qtypes, rows, xs, out) };
+        }
+    }
+    let [o0, o1] = out;
+    assert!(
+        o0.len() == xs.len() && o1.len() == xs.len(),
+        "dot_rows_q8_multi: xs/out lengths differ"
+    );
+    dot_row_multi_scalar(qtypes[0], rows[0], xs, o0);
+    dot_row_multi_scalar(qtypes[1], rows[1], xs, o1);
+}
+
+/// `dot_rows_q8_multi_with` compiled for the kernels' features (see `dot_rows_q8_v3`).
+///
+/// # Safety
+/// As for `dot_row_q8_with`, and the CPU has avx2, fma and f16c.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,fma,f16c")]
+unsafe fn dot_rows_q8_multi_v3(
+    simd: Simd,
+    qtypes: [u32; 2],
+    rows: [&[u8]; 2],
+    xs: &[&QuantizedAct],
+    out: [&mut [f32]; 2],
+) {
+    // SAFETY: our caller's contract.
+    unsafe { dot_rows_q8_multi_with(simd, qtypes, rows, xs, out) }
 }
 
 /// dot_rows_q8_multi on an explicit kernel path.
 ///
 /// # Safety
 /// As for `dot_row_q8_with`.
+#[inline(always)]
 unsafe fn dot_rows_q8_multi_with(
     simd: Simd,
     qtypes: [u32; 2],
@@ -2538,6 +2731,7 @@ thread_local! {
 /// The CPU must support the Vnni path (`has_vnni()`).
 #[cfg(target_arch = "x86_64")]
 #[allow(clippy::needless_range_loop)] // t indexes xs and the view arrays
+#[inline(always)]
 unsafe fn dot_rows_q8_vnni(
     qtype_id: u32,
     rows: [&[u8]; 2],
@@ -2545,48 +2739,53 @@ unsafe fn dot_rows_q8_vnni(
     out: [&mut [f32]; 2],
 ) -> usize {
     let groups = xs.len() / 4;
-    if !matches!(qtype_id, Q5_0 | Q8_0)
-        || groups == 0
-        || xs[..groups * 4].iter().any(|x| x.b32.is_none())
-    {
+    if !matches!(qtype_id, Q5_0 | Q8_0) || groups == 0 {
         return 0;
+    }
+    for x in &xs[..groups * 4] {
+        if x.b32.is_none() {
+            return 0;
+        }
     }
     let n = xs[0].len();
     let nb = n / QK8_0;
     let rb = row_bytes(qtype_id, n);
     let rows = [&rows[0][..rb], &rows[1][..rb]];
     let [o0, o1] = out;
-    PAIR_SCRATCH.with_borrow_mut(|scratch| {
-        if scratch.len() < nb {
-            scratch.resize(nb, x86::Pair32::ZERO);
+    // Taken out and put back rather than borrowed in a closure: a closure
+    // wouldn't get the caller's target features, so the kernels wouldn't
+    // inline (see `dot_rows_q8_v3`).
+    let mut scratch = PAIR_SCRATCH.take();
+    if scratch.len() < nb {
+        scratch.resize(nb, x86::Pair32::ZERO);
+    }
+    let w = &mut scratch[..nb];
+    // SAFETY (unsafe calls below): has_vnni() implies avx2, fma and f16c.
+    if qtype_id == Q8_0 {
+        unsafe { x86::unpack_q8_0_pair(rows, w) };
+    } else {
+        unsafe { x86::unpack_q5_0_pair(rows, w) };
+    }
+    let w = &*w;
+    for (g, x4) in xs.chunks_exact(4).enumerate() {
+        let mut dx: [&[f32]; 4] = [&[]; 4];
+        let mut qx: [&[[i8; 32]]; 4] = [&[]; 4];
+        let mut c: [&[[i32; 8]]; 4] = [&[]; 4];
+        for t in 0..4 {
+            let b = x4[t].b32.as_ref().expect("checked above");
+            dx[t] = b.d.as_slice();
+            qx[t] = b.q.as_slice();
+            c[t] = b.c.as_slice();
         }
-        let w = &mut scratch[..nb];
-        // SAFETY (unsafe calls below): has_vnni() implies avx2, fma, f16c.
-        if qtype_id == Q8_0 {
-            unsafe { x86::unpack_q8_0_pair(rows, w) };
+        let [r0, r1] = if qtype_id == Q8_0 {
+            unsafe { x86::vnni_pair_x4::<true>(w, dx, qx, c) }
         } else {
-            unsafe { x86::unpack_q5_0_pair(rows, w) };
-        }
-        let w = &*w;
-        for (g, x4) in xs.chunks_exact(4).enumerate() {
-            let mut dx: [&[f32]; 4] = [&[]; 4];
-            let mut qx: [&[[i8; 32]]; 4] = [&[]; 4];
-            let mut c: [&[[i32; 8]]; 4] = [&[]; 4];
-            for t in 0..4 {
-                let b = x4[t].b32.as_ref().expect("checked above");
-                dx[t] = b.d.as_slice();
-                qx[t] = b.q.as_slice();
-                c[t] = b.c.as_slice();
-            }
-            let [r0, r1] = if qtype_id == Q8_0 {
-                unsafe { x86::vnni_pair_x4::<true>(w, dx, qx, c) }
-            } else {
-                unsafe { x86::vnni_pair_x4::<false>(w, dx, qx, c) }
-            };
-            o0[4 * g..4 * g + 4].copy_from_slice(&r0);
-            o1[4 * g..4 * g + 4].copy_from_slice(&r1);
-        }
-    });
+            unsafe { x86::vnni_pair_x4::<false>(w, dx, qx, c) }
+        };
+        o0[4 * g..4 * g + 4].copy_from_slice(&r0);
+        o1[4 * g..4 * g + 4].copy_from_slice(&r1);
+    }
+    PAIR_SCRATCH.set(scratch);
     groups * 4
 }
 
@@ -2605,6 +2804,7 @@ thread_local! {
 /// # Safety
 /// As for `dot_row_q8_with`.
 #[cfg(target_arch = "x86_64")]
+#[inline(always)]
 unsafe fn dot_rows_kquant(
     simd: Simd,
     qtype_id: u32,
@@ -2616,31 +2816,33 @@ unsafe fn dot_rows_kquant(
     if !matches!(qtype_id, Q4_K | Q6_K) || simd == Simd::Scalar || nt == 0 {
         return 0;
     }
-    let Some(xk) = xs[..nt]
-        .iter()
-        .map(|x| x.k.as_deref())
-        .collect::<Option<Vec<&[KBlock]>>>()
-    else {
-        return 0;
-    };
+    let mut xk: Vec<&[KBlock]> = Vec::with_capacity(nt);
+    for x in &xs[..nt] {
+        match x.k.as_deref() {
+            Some(k) => xk.push(k),
+            None => return 0,
+        }
+    }
     let n = xs[0].len();
     let rb = row_bytes(qtype_id, n);
     let rows = [&rows[0][..rb], &rows[1][..rb]];
     let [o0, o1] = out;
     let out = [&mut o0[..nt], &mut o1[..nt]];
-    KACC_SCRATCH.with_borrow_mut(|acc| {
-        if acc.len() < nt {
-            acc.resize(nt, x86::KAcc::ZERO);
-        }
-        // SAFETY (unsafe calls below): guaranteed by our caller; Avx2 and
-        // Vnni both imply avx2, fma and f16c, Vnni also avxvnni.
-        match (qtype_id, simd) {
-            (Q4_K, Simd::Vnni) => unsafe { x86::q4_k_pair_vnni(rows, &xk, acc, out) },
-            (Q4_K, _) => unsafe { x86::q4_k_pair_avx2(rows, &xk, acc, out) },
-            (_, Simd::Vnni) => unsafe { x86::q6_k_pair_vnni(rows, &xk, acc, out) },
-            (_, _) => unsafe { x86::q6_k_pair_avx2(rows, &xk, acc, out) },
-        }
-    });
+    // Taken out and put back, not borrowed in a closure (see dot_rows_q8_vnni).
+    let mut acc = KACC_SCRATCH.take();
+    if acc.len() < nt {
+        acc.resize(nt, x86::KAcc::ZERO);
+    }
+    let a = &mut acc[..];
+    // SAFETY (unsafe calls below): guaranteed by our caller; Avx2 and
+    // Vnni both imply avx2, fma and f16c (`has_avx2()`), Vnni also avxvnni.
+    match (qtype_id, simd) {
+        (Q4_K, Simd::Vnni) => unsafe { x86::q4_k_pair_vnni(rows, &xk, a, out) },
+        (Q4_K, _) => unsafe { x86::q4_k_pair_avx2(rows, &xk, a, out) },
+        (_, Simd::Vnni) => unsafe { x86::q6_k_pair_vnni(rows, &xk, a, out) },
+        (_, _) => unsafe { x86::q6_k_pair_avx2(rows, &xk, a, out) },
+    }
+    KACC_SCRATCH.set(acc);
     nt
 }
 
@@ -2651,6 +2853,7 @@ unsafe fn dot_rows_kquant(
 /// As for `dot_row_q8_with`.
 #[cfg(target_arch = "x86_64")]
 #[allow(clippy::needless_range_loop)] // t indexes xs and the view arrays
+#[inline(always)]
 unsafe fn dot_rows_q8_2x4(
     simd: Simd,
     qtype_id: u32,
@@ -3223,16 +3426,16 @@ mod tests {
             if has_avx2() {
                 v.push(Simd::Avx2);
             } else {
-                println!("SKIP avx2 path: CPU lacks avx2/fma/f16c");
+                println!("::warning::SIMD test skipped the avx2 path: CPU lacks avx2/fma/f16c");
             }
             if has_vnni() {
                 v.push(Simd::Vnni);
             } else {
-                println!("SKIP vnni path: CPU lacks avxvnni");
+                println!("::warning::SIMD test skipped the vnni path: CPU lacks avxvnni");
             }
         }
         #[cfg(not(target_arch = "x86_64"))]
-        println!("SKIP all SIMD paths: not x86_64");
+        println!("::warning::SIMD test skipped every SIMD path: not x86_64");
         println!("SIMD paths under test: {v:?}");
         v
     }
@@ -3817,8 +4020,11 @@ mod tests {
         use std::arch::x86_64::{__m256i, _mm256_loadu_si256};
         let (avx2, vnni) = (has_avx2(), has_vnni());
         if !avx2 {
-            println!("SKIP: CPU lacks avx2/fma/f16c");
+            println!("::warning::lane test skipped: CPU lacks avx2/fma/f16c");
             return;
+        }
+        if !vnni {
+            println!("::warning::lane test skipped the vnni lanes: CPU lacks avxvnni");
         }
         let lanes = |v: __m256i| -> [i32; 8] {
             // SAFETY: same size, plain integers.
@@ -3896,8 +4102,39 @@ mod tests {
                     if vnni {
                         assert_eq!(lanes(x86::sign_lanes_vnni(qw, qy)), e, "q8_0 sign vnni");
                         assert_eq!(lanes(x86::q8_0_lanes_vnni(&b, qy, &c)), e, "q8_0 vnni");
-                    } else {
-                        println!("SKIP vnni lanes: CPU lacks avxvnni");
+                    }
+                }
+            }
+        }
+    }
+
+    /// The activation quantizers' portable and x86-64-v3 variants give the
+    /// same bits (see `model::tests::multiversion_bit_identical`).
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn multiversion_quantize_bit_identical() {
+        use crate::model::tests::{bits, can_v3, mixed};
+        if !can_v3() {
+            return;
+        }
+        for (i, n) in [0usize, 32, 256, 896, 4864].into_iter().enumerate() {
+            for edgy in [false, true] {
+                for scale in [1.0f32, 1e-30, 3e30] {
+                    let x = mixed(n, 77 + i as u64, scale, edgy);
+                    if n % 32 == 0 {
+                        let a = quantize_b32::portable(&x);
+                        let b = unsafe { quantize_b32::v3(&x) };
+                        assert_eq!(bits(&a.d), bits(&b.d), "b32 d n={n}");
+                        assert_eq!((a.q, a.c), (b.q, b.c), "b32 q/c n={n}");
+                    }
+                    if n % 256 == 0 {
+                        let a = quantize_k::portable(&x);
+                        let b = unsafe { quantize_k::v3(&x) };
+                        assert_eq!(a.len(), b.len());
+                        for (a, b) in a.iter().zip(&b) {
+                            assert_eq!(a.d.to_bits(), b.d.to_bits(), "k d n={n}");
+                            assert_eq!((a.qs, a.bsums), (b.qs, b.bsums), "k qs n={n}");
+                        }
                     }
                 }
             }
