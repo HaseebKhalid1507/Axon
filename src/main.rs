@@ -9,6 +9,9 @@ mod viz;
 
 use std::env;
 
+/// Prompt tokens per `feed_batch` call.
+const PREFILL_BATCH: usize = 64;
+
 fn main() -> std::io::Result<()> {
     let args: Vec<String> = env::args().collect();
 
@@ -105,12 +108,13 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     let extra = if cmd == "gen" { n_gen } else { 0 };
     let mut cache = net.new_cache(ids.len() + extra + 1);
 
-    // Feed the prompt one token at a time. Only the last position's logits
-    // are used, so the others skip the output head.
+    // Feed the prompt in batches of PREFILL_BATCH tokens, so each weight row
+    // is read from RAM once per batch instead of once per token. Only the last
+    // position's logits are used, so the others skip the output head.
     let t0 = Instant::now();
     let (&last, rest) = ids.split_last().expect("checked non-empty above");
-    for (pos, &id) in rest.iter().enumerate() {
-        net.feed(id, pos, &mut cache);
+    for (i, batch) in rest.chunks(PREFILL_BATCH).enumerate() {
+        net.feed_batch(batch, i * PREFILL_BATCH, &mut cache);
     }
     let mut logits = net.forward(last, rest.len(), &mut cache);
     let prompt_secs = t0.elapsed().as_secs_f64();
