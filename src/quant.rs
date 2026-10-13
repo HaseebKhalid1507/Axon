@@ -310,7 +310,14 @@ pub fn f32_to_f16(f: f32) -> u16 {
     let exp = ((x >> 23) & 0xff) as i32;
     let man = x & 0x7f_ffff;
     if exp == 0xff {
-        return sign | 0x7c00 | if man != 0 { 0x200 } else { 0 };
+        // inf, or NaN quieted with its top payload bits kept (as vcvtps2ph)
+        return sign
+            | 0x7c00
+            | if man != 0 {
+                0x200 | (man >> 13) as u16
+            } else {
+                0
+            };
     }
     let e = exp - 127 + 15;
     if e >= 0x1f {

@@ -1,6 +1,7 @@
 #[macro_use]
 mod mv;
 mod gguf;
+mod kv;
 mod model;
 mod pool;
 mod quant;
@@ -63,6 +64,8 @@ environment:
                              (default: copy, unless the file is >60% of free memory)
   AXON_PREFETCH=N            decode prefetch distance in bytes (default 8192, 0 = off)
   AXON_DECODE_ROWS=1|2|4     decode rows per kernel call (default 4)
+  AXON_KV=f16|f32            KV cache element type (default f16: half the memory and
+                             attention bandwidth; f32 for A/B)
 
 The model must be a qwen2-architecture GGUF (e.g. Qwen2.5-0.5B-Instruct Q4_K_M).";
 
