@@ -41,27 +41,31 @@ pub fn sum8(l: &[f32; 8]) -> f32 {
     b[0] + b[1]
 }
 
-// exp(x) = 2^n * exp(r), n = floor(x * log2 e), r = x - n ln 2 in [0, ln 2)
-// (Cody-Waite: ln 2 split in a short high part, exact in n * LN2_HI, and the
-// rest). exp(r) = 1 + r * q(r), q degree 5: a relative minimax fit on
-// [0, ln 2] (max error 2e-9 in f64, 1.3e-8 with the coefficients rounded to
-// f32, ~0.1 ulp). 2^n is built from its exponent bits. x is clamped to
-// [EXP_LO, EXP_HI] first: n = -127 gives 2^n = +0.0 (results below
-// f32::MIN_POSITIVE flush to 0, so exp(-inf) = 0), n = 128 gives +inf.
-// NaN propagates.
-const EXP_LO: f32 = -88.0;
+// exp(x) = 2^n * exp(r), n = x * log2 e rounded to nearest (ties even),
+// r = x - n ln 2 in [-ln 2 / 2, ln 2 / 2] (Cody-Waite: ln 2 split in a short
+// high part, exact in n * LN2_HI, and the rest). exp(r) = 1 + r * q(r), q
+// degree 5: a relative minimax fit on [-ln 2 / 2, ln 2 / 2], coefficients
+// rounded to f32 one at a time with the rest refitted (max error 3.1e-9,
+// ~0.03 ulp). The polynomial is evaluated as 2 exp(r) (coefficients doubled,
+// exact) and scaled by 2^(n - 1) built from its exponent bits, so n = 128
+// still has a normal scale (2^127; results past f32::MAX round to +inf).
+// x is clamped to [EXP_LO, EXP_HI] first, so n is in -126..=128; n = -126
+// gives 2^(n - 1) = +0.0: results below 2^-125.5 (x < -125.5 ln 2 ~ -86.99)
+// flush to 0, never subnormal, and exp(-inf) = 0. NaN propagates.
+const EXP_LO: f32 = -87.3;
 const EXP_HI: f32 = 88.8;
 const LOG2E: f32 = std::f32::consts::LOG2_E;
 const LN2_HI: f32 = 355.0 / 512.0;
 const LN2_LO: f32 = (std::f64::consts::LN_2 - 355.0 / 512.0) as f32;
-const C1: f32 = f32::from_bits(0x3f7f_fffd);
-const C2: f32 = f32::from_bits(0x3f00_0062);
-const C3: f32 = f32::from_bits(0x3e2a_9bd9);
-const C4: f32 = f32::from_bits(0x3d2b_af0f);
-const C5: f32 = f32::from_bits(0x3bff_564b);
-const C6: f32 = f32::from_bits(0x3aff_6dee);
+// 2 * (the fit's c1..c6); exp(r) ~ 1 + c1 r + ... + c6 r^6.
+const D1: f32 = f32::from_bits(0x4000_0000);
+const D2: f32 = f32::from_bits(0x3f7f_fffe);
+const D3: f32 = f32::from_bits(0x3eaa_aa49);
+const D4: f32 = f32::from_bits(0x3daa_ac58);
+const D5: f32 = f32::from_bits(0x3c89_1cd5);
+const D6: f32 = f32::from_bits(0x3b35_280e);
 
-/// exp(x), max error ~1.5 ulp where the result is a normal f32 (see the
+/// exp(x), max error ~1 ulp where the result is at least 2^-125.5 (see the
 /// tests for the measured sweep), 0 below that, +inf past f32::MAX. The same
 /// bits as the AVX2 `exp8` lane for lane.
 #[inline]
@@ -69,18 +73,18 @@ pub fn exp(x: f32) -> f32 {
     // max_ps(LO, x) / min_ps(HI, x): the second operand (x) wins on NaN.
     let x = if EXP_LO > x { EXP_LO } else { x };
     let x = if EXP_HI < x { EXP_HI } else { x };
-    let n = (x * LOG2E).floor();
+    let n = (x * LOG2E).round_ties_even();
     let r = fmadd(n, -LN2_HI, x);
     let r = fmadd(n, -LN2_LO, r);
-    let mut q = C6;
-    q = fmadd(q, r, C5);
-    q = fmadd(q, r, C4);
-    q = fmadd(q, r, C3);
-    q = fmadd(q, r, C2);
-    q = fmadd(q, r, C1);
-    let p = fmadd(q, r, 1.0);
-    // n is an integer in -127..=128 (or NaN, where p is NaN already).
-    p * f32::from_bits(((n as i32 + 127) as u32) << 23)
+    let mut q = D6;
+    q = fmadd(q, r, D5);
+    q = fmadd(q, r, D4);
+    q = fmadd(q, r, D3);
+    q = fmadd(q, r, D2);
+    q = fmadd(q, r, D1);
+    let p = fmadd(q, r, 2.0);
+    // n is an integer in -126..=128 (or NaN, where p is NaN already).
+    p * f32::from_bits(((n as i32 + 126) as u32) << 23)
 }
 
 /// silu(g) * u = g / (1 + exp(-g)) * u, SwiGLU's combine.
@@ -106,17 +110,19 @@ mod x86 {
         unsafe {
             let x = _mm256_max_ps(_mm256_set1_ps(EXP_LO), x);
             let x = _mm256_min_ps(_mm256_set1_ps(EXP_HI), x);
-            let n = _mm256_floor_ps(_mm256_mul_ps(x, _mm256_set1_ps(LOG2E)));
+            let n = _mm256_round_ps::<{ _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC }>(
+                _mm256_mul_ps(x, _mm256_set1_ps(LOG2E)),
+            );
             let r = _mm256_fmadd_ps(n, _mm256_set1_ps(-LN2_HI), x);
             let r = _mm256_fmadd_ps(n, _mm256_set1_ps(-LN2_LO), r);
-            let mut q = _mm256_set1_ps(C6);
-            q = _mm256_fmadd_ps(q, r, _mm256_set1_ps(C5));
-            q = _mm256_fmadd_ps(q, r, _mm256_set1_ps(C4));
-            q = _mm256_fmadd_ps(q, r, _mm256_set1_ps(C3));
-            q = _mm256_fmadd_ps(q, r, _mm256_set1_ps(C2));
-            q = _mm256_fmadd_ps(q, r, _mm256_set1_ps(C1));
-            let p = _mm256_fmadd_ps(q, r, _mm256_set1_ps(1.0));
-            let e = _mm256_add_epi32(_mm256_cvtps_epi32(n), _mm256_set1_epi32(127));
+            let mut q = _mm256_set1_ps(D6);
+            q = _mm256_fmadd_ps(q, r, _mm256_set1_ps(D5));
+            q = _mm256_fmadd_ps(q, r, _mm256_set1_ps(D4));
+            q = _mm256_fmadd_ps(q, r, _mm256_set1_ps(D3));
+            q = _mm256_fmadd_ps(q, r, _mm256_set1_ps(D2));
+            q = _mm256_fmadd_ps(q, r, _mm256_set1_ps(D1));
+            let p = _mm256_fmadd_ps(q, r, _mm256_set1_ps(2.0));
+            let e = _mm256_add_epi32(_mm256_cvtps_epi32(n), _mm256_set1_epi32(126));
             _mm256_mul_ps(p, _mm256_castsi256_ps(_mm256_slli_epi32::<23>(e)))
         }
     }
@@ -305,20 +311,12 @@ mod tests {
         (got as f64 - want).abs() / 2f64.powi(e - 23)
     }
 
-    /// exp over every `step`-th f32 in [EXP_LO, ln f32::MAX] (both signs'
-    /// bit patterns walked) against f64 exp; the max ulp error, where.
-    fn exp_sweep(step: u32) -> (f64, f32) {
-        let (mut worst, mut at) = (0f64, 0f32);
-        let mut check = |x: f32| {
-            let want = (x as f64).exp();
-            if want < f32::MIN_POSITIVE as f64 || want > f32::MAX as f64 {
-                return;
-            }
-            let u = ulps(exp(x), want);
-            if u > worst {
-                (worst, at) = (u, x);
-            }
-        };
+    /// exp over every `step`-th f32 bit pattern with |x| <= 89 (both signs)
+    /// against f64 exp, where the true result is a finite f32 >= 2^-125.4
+    /// (below 2^-125.4 it may also flush to 0; below 2^-126.5 it must).
+    /// Returns the max ulp error and where, overall and on x in [-1, 0].
+    fn exp_sweep(step: u32) -> [(f64, f32); 2] {
+        let mut worst = [(0f64, 0f32); 2];
         for sign in [0u32, 0x8000_0000] {
             let mut b = 0u32;
             loop {
@@ -326,22 +324,48 @@ mod tests {
                 if x.abs() > 89.0 {
                     break;
                 }
-                check(x);
                 b += step;
+                let (want, got) = ((x as f64).exp(), exp(x));
+                if want > f32::MAX as f64 {
+                    assert_eq!(got, f32::INFINITY, "exp({x:e})");
+                    continue;
+                }
+                if want < 2f64.powf(-125.4) {
+                    let flush = want < 2f64.powf(-126.5);
+                    assert!(
+                        got == 0.0 || (!flush && ulps(got, want) <= 2.0),
+                        "exp({x:e}) = {got:e}"
+                    );
+                    continue;
+                }
+                let u = ulps(got, want);
+                for (i, w) in worst.iter_mut().enumerate() {
+                    if u > w.0 && (i == 0 || (-1.0..=0.0).contains(&x)) {
+                        *w = (u, x);
+                    }
+                }
             }
         }
-        (worst, at)
+        worst
     }
 
+    fn exp_accuracy_on(step: u32) {
+        let [(worst, at), (w1, at1)] = exp_sweep(step);
+        println!(
+            "exp, every {step} of the f32s: max {worst:.3} ulp at {at:e}; on [-1, 0] {w1:.3} at {at1:e}"
+        );
+        assert!(worst <= 2.0, "exp: {worst} ulp at {at:e}");
+    }
+
+    /// Every 97th f32; `exp_accuracy_every_float` is the full sweep.
     #[test]
     fn exp_accuracy() {
-        let (worst, at) = exp_sweep(97);
-        println!("exp: max {worst:.3} ulp at {at:e}");
-        assert!(worst <= 2.0, "exp: {worst} ulp at {at:e}");
+        exp_accuracy_on(97);
         assert_eq!(exp(0.0), 1.0);
         assert_eq!(exp(-0.0), 1.0);
         assert_eq!(exp(f32::NEG_INFINITY), 0.0);
-        assert_eq!(exp(-88.5), 0.0, "below f32::MIN_POSITIVE flushes");
+        assert_eq!(exp(-88.5), 0.0, "below 2^-125.5 flushes");
+        assert!(exp(-86.9) > 0.0 && exp(-86.9) >= f32::MIN_POSITIVE);
         assert_eq!(exp(f32::INFINITY), f32::INFINITY);
         assert_eq!(exp(88.8), f32::INFINITY);
         assert!(exp(88.72).is_finite() && exp(88.72) > 3.3e38);
@@ -349,6 +373,13 @@ mod tests {
         // SiLU near its extremes: -0 and g, as with libm's exp.
         assert_eq!(swiglu1(-200.0, 1.0).to_bits(), (-0.0f32).to_bits());
         assert_eq!(swiglu1(200.0, 1.0), 200.0);
+    }
+
+    /// Every f32 with |x| <= 89 (~2.2e9 values; ~20 s optimized).
+    #[test]
+    #[ignore = "slow: full sweep, run with --ignored --nocapture"]
+    fn exp_accuracy_every_float() {
+        exp_accuracy_on(1);
     }
 
     /// The AVX2 lanes against the scalar `exp`, bit for bit, and SiLU /
