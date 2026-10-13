@@ -335,18 +335,20 @@ impl QuantizedAct {
             let nb = n / QK8_0;
             let mut d = Vec::with_capacity(nb);
             let mut q = vec![[0i8; 32]; nb];
-            for (xb, qb) in x.chunks_exact(QK8_0).zip(q.iter_mut()) {
+            for (xb, qb) in x.as_chunks::<QK8_0>().0.iter().zip(q.iter_mut()) {
                 d.push(quantize_q8_0(xb, qb));
             }
             (d, q)
         });
         let k = n.is_multiple_of(QK_K).then(|| {
-            x.chunks_exact(QK_K)
+            x.as_chunks::<QK_K>()
+                .0
+                .iter()
                 .map(|xb| {
                     let mut qs = [0i8; QK_K];
                     let d = quantize_q8_k(xb, &mut qs);
                     let mut bsums = [0i16; QK_K / 16];
-                    for (s, g) in bsums.iter_mut().zip(qs.chunks_exact(16)) {
+                    for (s, g) in bsums.iter_mut().zip(qs.as_chunks::<16>().0) {
                         *s = g.iter().map(|&v| v as i16).sum();
                     }
                     KBlock { d, qs, bsums }
@@ -378,7 +380,12 @@ fn dot_i8_32(a: &[i8; 32], b: &[i8; 32]) -> i32 {
 #[allow(clippy::needless_range_loop)] // fixed-size arrays: indexing vectorizes cleanly
 fn dot_q8_0_q8(row: &[u8], dx: &[f32], qx: &[[i8; 32]]) -> f32 {
     let mut sum = 0f32;
-    for (b, (&dxb, qxb)) in row.chunks_exact(Q8_0_BYTES).zip(dx.iter().zip(qx)) {
+    for (b, (&dxb, qxb)) in row
+        .as_chunks::<Q8_0_BYTES>()
+        .0
+        .iter()
+        .zip(dx.iter().zip(qx))
+    {
         let d = rd_f16(b, 0);
         let qw: &[u8; 32] = b[2..2 + QK8_0].try_into().unwrap();
         let mut s = 0i32;
@@ -393,7 +400,12 @@ fn dot_q8_0_q8(row: &[u8], dx: &[f32], qx: &[[i8; 32]]) -> f32 {
 #[allow(clippy::needless_range_loop)] // fixed-size arrays: indexing vectorizes cleanly
 fn dot_q5_0_q8(row: &[u8], dx: &[f32], qx: &[[i8; 32]]) -> f32 {
     let mut sum = 0f32;
-    for (b, (&dxb, qxb)) in row.chunks_exact(Q5_0_BYTES).zip(dx.iter().zip(qx)) {
+    for (b, (&dxb, qxb)) in row
+        .as_chunks::<Q5_0_BYTES>()
+        .0
+        .iter()
+        .zip(dx.iter().zip(qx))
+    {
         let d = rd_f16(b, 0);
         let qh = u32::from_le_bytes([b[2], b[3], b[4], b[5]]);
         let qs: &[u8; 16] = b[6..6 + QK5_0 / 2].try_into().unwrap();
@@ -413,7 +425,7 @@ fn dot_q5_0_q8(row: &[u8], dx: &[f32], qx: &[[i8; 32]]) -> f32 {
 #[allow(clippy::needless_range_loop)] // fixed-size arrays: indexing vectorizes cleanly
 fn dot_q4_k_q8(row: &[u8], xk: &[KBlock]) -> f32 {
     let mut sum = 0f32;
-    for (b, a) in row.chunks_exact(Q4_K_BYTES).zip(xk) {
+    for (b, a) in row.as_chunks::<Q4_K_BYTES>().0.iter().zip(xk) {
         let d = rd_f16(b, 0);
         let dmin = rd_f16(b, 2);
         let scales: &[u8; K_SCALE_SIZE] = b[4..4 + K_SCALE_SIZE].try_into().unwrap();
@@ -448,7 +460,7 @@ fn dot_q6_k_q8(row: &[u8], xk: &[KBlock]) -> f32 {
     const QH: usize = QL + QK_K / 4;
     const SC: usize = QH + QK_K / 16;
     let mut sum = 0f32;
-    for (b, a) in row.chunks_exact(Q6_K_BYTES).zip(xk) {
+    for (b, a) in row.as_chunks::<Q6_K_BYTES>().0.iter().zip(xk) {
         let ql_all: &[u8; QL] = b[0..QL].try_into().unwrap();
         let qh_all: &[u8; QK_K / 4] = b[QL..QH].try_into().unwrap();
         let sc: &[u8; QK_K / 16] = b[QH..SC].try_into().unwrap();
@@ -467,9 +479,13 @@ fn dot_q6_k_q8(row: &[u8], xk: &[KBlock]) -> f32 {
             }
         }
         let mut sumi = 0i32;
-        for (g, (wg, xg)) in w.chunks_exact(16).zip(a.qs.chunks_exact(16)).enumerate() {
-            let wg: &[i8; 16] = wg.try_into().unwrap();
-            let xg: &[i8; 16] = xg.try_into().unwrap();
+        for (g, (wg, xg)) in w
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .zip(a.qs.as_chunks::<16>().0)
+            .enumerate()
+        {
             let mut s = 0i32;
             for l in 0..16 {
                 s += wg[l] as i32 * xg[l] as i32;
@@ -481,8 +497,384 @@ fn dot_q6_k_q8(row: &[u8], xk: &[KBlock]) -> f32 {
     sum
 }
 
+// ---------------------------------------------------------------------------
+// SIMD kernels, chosen once at runtime. They follow llama.cpp's AVX2 code
+// (ggml/src/ggml-cpu/arch/x86/quants.c) and produce the same integer sums per
+// block as the scalar kernels above; only the f32 accumulation order differs.
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Simd {
+    Scalar,
+    #[cfg(target_arch = "x86_64")]
+    Avx2,
+    #[cfg(target_arch = "x86_64")]
+    Vnni,
+}
+
+/// The kernel set, picked on first use: the best the CPU supports, or
+/// `AXON_SIMD=scalar|avx2|vnni` (panics if the requested path is unavailable).
+fn simd() -> Simd {
+    static SIMD: std::sync::OnceLock<Simd> = std::sync::OnceLock::new();
+    *SIMD.get_or_init(|| choose_simd(std::env::var("AXON_SIMD").ok().as_deref()))
+}
+
+#[cfg(target_arch = "x86_64")]
+fn has_avx2() -> bool {
+    is_x86_feature_detected!("avx2")
+        && is_x86_feature_detected!("fma")
+        && is_x86_feature_detected!("f16c")
+}
+
+#[cfg(target_arch = "x86_64")]
+fn has_vnni() -> bool {
+    has_avx2() && is_x86_feature_detected!("avxvnni")
+}
+
+fn simd_unavailable(p: &str, avx2: bool, vnni: bool) -> ! {
+    panic!("AXON_SIMD={p}: this CPU/target doesn't support it (avx2={avx2}, vnni={vnni})")
+}
+
+fn choose_simd(req: Option<&str>) -> Simd {
+    #[cfg(target_arch = "x86_64")]
+    let (avx2, vnni) = (has_avx2(), has_vnni());
+    #[cfg(not(target_arch = "x86_64"))]
+    let (avx2, vnni) = (false, false);
+    match req {
+        Some("scalar") => Simd::Scalar,
+        Some("avx2") => {
+            #[cfg(target_arch = "x86_64")]
+            if avx2 {
+                return Simd::Avx2;
+            }
+            simd_unavailable("avx2", avx2, vnni)
+        }
+        Some("vnni") => {
+            #[cfg(target_arch = "x86_64")]
+            if vnni {
+                return Simd::Vnni;
+            }
+            simd_unavailable("vnni", avx2, vnni)
+        }
+        None | Some("") => {
+            #[cfg(target_arch = "x86_64")]
+            {
+                if vnni {
+                    return Simd::Vnni;
+                }
+                if avx2 {
+                    return Simd::Avx2;
+                }
+            }
+            Simd::Scalar
+        }
+        Some(other) => panic!("AXON_SIMD={other}: expected scalar, avx2 or vnni"),
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+mod x86 {
+    use super::{KBlock, Q4_K_BYTES, Q5_0_BYTES, Q6_K_BYTES, Q8_0_BYTES};
+    use std::arch::x86_64::*;
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn load_u8x32(p: &[u8; 32]) -> __m256i {
+        // SAFETY: p points to 32 readable bytes; loadu has no alignment requirement.
+        unsafe { _mm256_loadu_si256(p.as_ptr().cast()) }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn load_i8x32(p: &[i8; 32]) -> __m256i {
+        // SAFETY: as above.
+        unsafe { _mm256_loadu_si256(p.as_ptr().cast()) }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn load_i16x16(p: &[i16; 16]) -> __m256i {
+        // SAFETY: as above (32 bytes).
+        unsafe { _mm256_loadu_si256(p.as_ptr().cast()) }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn load_u8x16(p: &[u8; 16]) -> __m128i {
+        // SAFETY: as above (16 bytes).
+        unsafe { _mm_loadu_si128(p.as_ptr().cast()) }
+    }
+
+    /// little-endian f16 -> f32 (exact, same value as `rd_f16`)
+    #[inline]
+    #[target_feature(enable = "avx2,f16c")]
+    fn h2f(b: [u8; 2]) -> f32 {
+        let h = u16::from_le_bytes(b) as i32;
+        _mm_cvtss_f32(_mm_cvtph_ps(_mm_cvtsi32_si128(h)))
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn hsum_f32x8(x: __m256) -> f32 {
+        let mut r = _mm_add_ps(_mm256_extractf128_ps(x, 1), _mm256_castps256_ps128(x));
+        r = _mm_add_ps(r, _mm_movehl_ps(r, r));
+        r = _mm_add_ss(r, _mm_movehdup_ps(r));
+        _mm_cvtss_f32(r)
+    }
+
+    /// Byte i = 0xFF if bit i of x is set, else 0x00 (ggml bytes_from_bits_32).
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn bytes_from_bits_32(x: u32) -> __m256i {
+        let shuf = _mm256_set_epi64x(
+            0x0303030303030303,
+            0x0202020202020202,
+            0x0101010101010101,
+            0,
+        );
+        let bytes = _mm256_shuffle_epi8(_mm256_set1_epi32(x as i32), shuf);
+        let bytes = _mm256_or_si256(bytes, _mm256_set1_epi64x(0x7fbfdfeff7fbfdfe));
+        _mm256_cmpeq_epi8(bytes, _mm256_set1_epi64x(-1))
+    }
+
+    /// Σ over each 4 consecutive byte products ax(u8)*sy(i8), as 8 f32 lanes.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn mul_sum_us8_avx2(ax: __m256i, sy: __m256i) -> __m256 {
+        let dot = _mm256_maddubs_epi16(ax, sy);
+        _mm256_cvtepi32_ps(_mm256_madd_epi16(_mm256_set1_epi16(1), dot))
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2,avxvnni")]
+    fn mul_sum_us8_vnni(ax: __m256i, sy: __m256i) -> __m256 {
+        _mm256_cvtepi32_ps(_mm256_dpbusd_avx_epi32(_mm256_setzero_si256(), ax, sy))
+    }
+
+    /// 32 Q5_0 weights (nibble | high bit << 4) - 16 as i8.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn q5_0_weights(b: &[u8; Q5_0_BYTES]) -> __m256i {
+        let qs = load_u8x16(b[6..22].try_into().unwrap());
+        let nib = _mm256_and_si256(
+            _mm256_set_m128i(_mm_srli_epi16(qs, 4), qs),
+            _mm256_set1_epi8(0x0f),
+        );
+        let qh = u32::from_le_bytes([b[2], b[3], b[4], b[5]]);
+        // 0xF0 (= -16 after the OR) where the high bit is clear
+        let hi = _mm256_andnot_si256(bytes_from_bits_32(qh), _mm256_set1_epi8(0xF0u8 as i8));
+        _mm256_or_si256(nib, hi)
+    }
+
+    /// Broadcast i16 scale `i` of `scales` (8 i16, both lanes) to all 16 lanes.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn k4_scale(scales: __m256i, i: i32) -> __m256i {
+        _mm256_shuffle_epi8(
+            scales,
+            _mm256_set1_epi16(((2 * i) | ((2 * i + 1) << 8)) as i16),
+        )
+    }
+
+    /// Q6_K i8 scales of 16-groups 2i and 2i+1, each repeated 8 times, as i16.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn q6_scale(scales: __m128i, i: usize) -> __m256i {
+        let lo = (2 * i) as i64 * 0x0101010101010101;
+        let hi = (2 * i + 1) as i64 * 0x0101010101010101;
+        _mm256_cvtepi8_epi16(_mm_shuffle_epi8(scales, _mm_set_epi64x(hi, lo)))
+    }
+
+    macro_rules! small_block_kernels {
+        ($feat:literal, $q8:ident, $q5:ident, $mul:ident) => {
+            /// # Safety
+            /// The CPU must support the enabled target features.
+            #[target_feature(enable = $feat)]
+            pub unsafe fn $q8(row: &[u8], dx: &[f32], qx: &[[i8; 32]]) -> f32 {
+                let mut acc = _mm256_setzero_ps();
+                for (b, (&dxb, qxb)) in row
+                    .as_chunks::<Q8_0_BYTES>()
+                    .0
+                    .iter()
+                    .zip(dx.iter().zip(qx))
+                {
+                    let d = _mm256_set1_ps(h2f([b[0], b[1]]) * dxb);
+                    let qw = load_u8x32(b[2..34].try_into().unwrap());
+                    let qy = load_i8x32(qxb);
+                    let ax = _mm256_sign_epi8(qw, qw);
+                    let sy = _mm256_sign_epi8(qy, qw);
+                    acc = _mm256_fmadd_ps(d, $mul(ax, sy), acc);
+                }
+                hsum_f32x8(acc)
+            }
+
+            /// # Safety
+            /// The CPU must support the enabled target features.
+            #[target_feature(enable = $feat)]
+            pub unsafe fn $q5(row: &[u8], dx: &[f32], qx: &[[i8; 32]]) -> f32 {
+                let mut acc = _mm256_setzero_ps();
+                for (b, (&dxb, qxb)) in row
+                    .as_chunks::<Q5_0_BYTES>()
+                    .0
+                    .iter()
+                    .zip(dx.iter().zip(qx))
+                {
+                    let d = _mm256_set1_ps(h2f([b[0], b[1]]) * dxb);
+                    let qw = q5_0_weights(b);
+                    let qy = load_i8x32(qxb);
+                    let ax = _mm256_sign_epi8(qw, qw);
+                    let sy = _mm256_sign_epi8(qy, qw);
+                    acc = _mm256_fmadd_ps(d, $mul(ax, sy), acc);
+                }
+                hsum_f32x8(acc)
+            }
+        };
+    }
+
+    small_block_kernels!("avx2,fma,f16c", q8_0_avx2, q5_0_avx2, mul_sum_us8_avx2);
+    small_block_kernels!(
+        "avx2,fma,f16c,avxvnni",
+        q8_0_vnni,
+        q5_0_vnni,
+        mul_sum_us8_vnni
+    );
+
+    /// ggml_vec_dot_q4_K_q8_K (AVX2). Mins via bsums.
+    ///
+    /// # Safety
+    /// The CPU must support avx2, fma and f16c.
+    #[allow(clippy::needless_range_loop)] // j picks several chunks
+    #[target_feature(enable = "avx2,fma,f16c")]
+    pub unsafe fn q4_k_avx2(row: &[u8], xk: &[KBlock]) -> f32 {
+        const KMASK1: u32 = 0x3f3f3f3f;
+        const KMASK2: u32 = 0x0f0f0f0f;
+        const KMASK3: u32 = 0x03030303;
+        let m4 = _mm256_set1_epi8(0xF);
+        let mut acc = _mm256_setzero_ps();
+        let mut acc_m = _mm_setzero_ps();
+        for (b, a) in row.as_chunks::<Q4_K_BYTES>().0.iter().zip(xk) {
+            let d = a.d * h2f([b[0], b[1]]);
+            let dmin = -a.d * h2f([b[2], b[3]]);
+
+            // unpack the 6-bit scales/mins: utmp[0..2] = 8 scales, utmp[2..4] = 8 mins
+            let u = |i: usize| {
+                u32::from_le_bytes([b[4 + 4 * i], b[5 + 4 * i], b[6 + 4 * i], b[7 + 4 * i]])
+            };
+            let (u0, u1, u2) = (u(0), u(1), u(2));
+            let t3 = ((u2 >> 4) & KMASK2) | (((u1 >> 6) & KMASK3) << 4);
+            let t2 = u1 & KMASK1;
+            let t1 = (u2 & KMASK2) | (((u0 >> 6) & KMASK3) << 4);
+            let t0 = u0 & KMASK1;
+            let mins_and_scales =
+                _mm256_cvtepu8_epi16(_mm_set_epi32(t3 as i32, t2 as i32, t1 as i32, t0 as i32));
+
+            let q8sums = load_i16x16(&a.bsums);
+            let q8s = _mm_hadd_epi16(
+                _mm256_extracti128_si256(q8sums, 0),
+                _mm256_extracti128_si256(q8sums, 1),
+            );
+            let prod = _mm_madd_epi16(_mm256_extracti128_si256(mins_and_scales, 1), q8s);
+            acc_m = _mm_fmadd_ps(_mm_set1_ps(dmin), _mm_cvtepi32_ps(prod), acc_m);
+
+            let sc128 = _mm256_extracti128_si256(mins_and_scales, 0);
+            let scales = _mm256_set_m128i(sc128, sc128);
+
+            let q4 = b[16..Q4_K_BYTES].as_chunks::<32>().0;
+            let q8 = a.qs.as_chunks::<32>().0;
+            let mut sumi = _mm256_setzero_si256();
+            for j in 0..4 {
+                let scale_l = k4_scale(scales, 2 * j as i32);
+                let scale_h = k4_scale(scales, 2 * j as i32 + 1);
+
+                let q4bits = load_u8x32(&q4[j]);
+                let q4l = _mm256_and_si256(q4bits, m4);
+                let q4h = _mm256_and_si256(_mm256_srli_epi16(q4bits, 4), m4);
+
+                let p16l =
+                    _mm256_madd_epi16(scale_l, _mm256_maddubs_epi16(q4l, load_i8x32(&q8[2 * j])));
+                let p16h = _mm256_madd_epi16(
+                    scale_h,
+                    _mm256_maddubs_epi16(q4h, load_i8x32(&q8[2 * j + 1])),
+                );
+                sumi = _mm256_add_epi32(sumi, _mm256_add_epi32(p16l, p16h));
+            }
+            acc = _mm256_fmadd_ps(_mm256_set1_ps(d), _mm256_cvtepi32_ps(sumi), acc);
+        }
+        acc_m = _mm_add_ps(acc_m, _mm_movehl_ps(acc_m, acc_m));
+        acc_m = _mm_add_ss(acc_m, _mm_movehdup_ps(acc_m));
+        hsum_f32x8(acc) + _mm_cvtss_f32(acc_m)
+    }
+
+    /// ggml_vec_dot_q6_K_q8_K (AVX2). The -32 offset is applied via bsums.
+    ///
+    /// # Safety
+    /// The CPU must support avx2, fma and f16c.
+    #[allow(clippy::needless_range_loop)] // j picks several chunks
+    #[target_feature(enable = "avx2,fma,f16c")]
+    pub unsafe fn q6_k_avx2(row: &[u8], xk: &[KBlock]) -> f32 {
+        let m3 = _mm256_set1_epi8(3);
+        let m15 = _mm256_set1_epi8(15);
+        let mut acc = _mm256_setzero_ps();
+        for (b, a) in row.as_chunks::<Q6_K_BYTES>().0.iter().zip(xk) {
+            let d = a.d * h2f([b[208], b[209]]);
+            let ql = b[0..128].as_chunks::<32>().0;
+            let qh = b[128..192].as_chunks::<32>().0;
+            let q8 = a.qs.as_chunks::<32>().0;
+
+            let scales = load_u8x16(b[192..208].try_into().unwrap());
+            let q8sums = load_i16x16(&a.bsums);
+            let q8sclsub =
+                _mm256_slli_epi32(_mm256_madd_epi16(q8sums, _mm256_cvtepi8_epi16(scales)), 5);
+
+            let mut sumi = _mm256_setzero_si256();
+            for j in 0..2 {
+                let q4bits1 = load_u8x32(&ql[2 * j]);
+                let q4bits2 = load_u8x32(&ql[2 * j + 1]);
+                let q4bits_h = load_u8x32(&qh[j]);
+
+                let q4h_0 = _mm256_slli_epi16(_mm256_and_si256(q4bits_h, m3), 4);
+                let q4h_1 = _mm256_slli_epi16(_mm256_and_si256(q4bits_h, _mm256_set1_epi8(12)), 2);
+                let q4h_2 = _mm256_and_si256(q4bits_h, _mm256_set1_epi8(48));
+                let q4h_3 = _mm256_srli_epi16(_mm256_and_si256(q4bits_h, _mm256_set1_epi8(-64)), 2);
+
+                let q4_0 = _mm256_or_si256(_mm256_and_si256(q4bits1, m15), q4h_0);
+                let q4_1 = _mm256_or_si256(_mm256_and_si256(q4bits2, m15), q4h_1);
+                let q4_2 =
+                    _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi16(q4bits1, 4), m15), q4h_2);
+                let q4_3 =
+                    _mm256_or_si256(_mm256_and_si256(_mm256_srli_epi16(q4bits2, 4), m15), q4h_3);
+
+                let p16_0 = _mm256_maddubs_epi16(q4_0, load_i8x32(&q8[4 * j]));
+                let p16_1 = _mm256_maddubs_epi16(q4_1, load_i8x32(&q8[4 * j + 1]));
+                let p16_2 = _mm256_maddubs_epi16(q4_2, load_i8x32(&q8[4 * j + 2]));
+                let p16_3 = _mm256_maddubs_epi16(q4_3, load_i8x32(&q8[4 * j + 3]));
+
+                let p16_0 = _mm256_madd_epi16(q6_scale(scales, 4 * j), p16_0);
+                let p16_1 = _mm256_madd_epi16(q6_scale(scales, 4 * j + 1), p16_1);
+                let p16_2 = _mm256_madd_epi16(q6_scale(scales, 4 * j + 2), p16_2);
+                let p16_3 = _mm256_madd_epi16(q6_scale(scales, 4 * j + 3), p16_3);
+
+                sumi = _mm256_add_epi32(sumi, _mm256_add_epi32(p16_0, p16_1));
+                sumi = _mm256_add_epi32(sumi, _mm256_add_epi32(p16_2, p16_3));
+            }
+            sumi = _mm256_sub_epi32(sumi, q8sclsub);
+            acc = _mm256_fmadd_ps(_mm256_set1_ps(d), _mm256_cvtepi32_ps(sumi), acc);
+        }
+        hsum_f32x8(acc)
+    }
+}
+
 /// Same meaning as dot_row(qtype_id, row, x) but with x pre-quantized.
 pub fn dot_row_q8(qtype_id: u32, row: &[u8], x: &QuantizedAct) -> f32 {
+    // SAFETY: simd() only returns Avx2/Vnni after detecting their features.
+    unsafe { dot_row_q8_with(simd(), qtype_id, row, x) }
+}
+
+/// dot_row_q8 on an explicit kernel path.
+///
+/// # Safety
+/// `simd` must be Scalar or a path whose CPU features were detected
+/// (`has_avx2()` for Avx2, `has_vnni()` for Vnni).
+unsafe fn dot_row_q8_with(simd: Simd, qtype_id: u32, row: &[u8], x: &QuantizedAct) -> f32 {
     let n = x.len();
     let name = || crate::gguf::qtype(qtype_id).name;
     match qtype_id {
@@ -496,10 +888,18 @@ pub fn dot_row_q8(qtype_id: u32, row: &[u8], x: &QuantizedAct) -> f32 {
                 )
             });
             let row = &row[..row_bytes(qtype_id, n)];
-            if qtype_id == Q8_0 {
-                dot_q8_0_q8(row, dx, qx)
-            } else {
-                dot_q5_0_q8(row, dx, qx)
+            // SAFETY (unsafe calls below): guaranteed by our caller.
+            match (qtype_id, simd) {
+                #[cfg(target_arch = "x86_64")]
+                (Q8_0, Simd::Avx2) => unsafe { x86::q8_0_avx2(row, dx, qx) },
+                #[cfg(target_arch = "x86_64")]
+                (Q8_0, Simd::Vnni) => unsafe { x86::q8_0_vnni(row, dx, qx) },
+                #[cfg(target_arch = "x86_64")]
+                (_, Simd::Avx2) => unsafe { x86::q5_0_avx2(row, dx, qx) },
+                #[cfg(target_arch = "x86_64")]
+                (_, Simd::Vnni) => unsafe { x86::q5_0_vnni(row, dx, qx) },
+                (Q8_0, Simd::Scalar) => dot_q8_0_q8(row, dx, qx),
+                (_, Simd::Scalar) => dot_q5_0_q8(row, dx, qx),
             }
         }
         Q4_K | Q6_K => {
@@ -511,10 +911,15 @@ pub fn dot_row_q8(qtype_id: u32, row: &[u8], x: &QuantizedAct) -> f32 {
                 )
             });
             let row = &row[..row_bytes(qtype_id, n)];
-            if qtype_id == Q4_K {
-                dot_q4_k_q8(row, xk)
-            } else {
-                dot_q6_k_q8(row, xk)
+            // AVX-VNNI gains nothing here (the scale multiply needs madd anyway),
+            // so the vnni path uses the AVX2 K-quant kernels.
+            match (qtype_id, simd) {
+                #[cfg(target_arch = "x86_64")]
+                (Q4_K, Simd::Avx2 | Simd::Vnni) => unsafe { x86::q4_k_avx2(row, xk) },
+                #[cfg(target_arch = "x86_64")]
+                (_, Simd::Avx2 | Simd::Vnni) => unsafe { x86::q6_k_avx2(row, xk) },
+                (Q4_K, Simd::Scalar) => dot_q4_k_q8(row, xk),
+                (_, Simd::Scalar) => dot_q6_k_q8(row, xk),
             }
         }
         _ => panic!("dot_row_q8: unsupported qtype {} ({})", qtype_id, name()),
@@ -706,8 +1111,8 @@ mod tests {
 
             let mut got = vec![0f32; row_len];
             dequant(qt, &bytes, &mut got);
-            for (i, (g, w)) in got.iter().zip(want.chunks_exact(4)).enumerate() {
-                let w = f32::from_le_bytes(w.try_into().unwrap());
+            for (i, (g, w)) in got.iter().zip(want.as_chunks::<4>().0).enumerate() {
+                let w = f32::from_le_bytes(*w);
                 assert!((g - w).abs() <= 1e-6, "{stem}: idx {i} got {g} want {w}");
             }
 
@@ -751,7 +1156,7 @@ mod tests {
         /// a sane f16 bit pattern, |v| in [2^-8, 2^-4), random sign
         fn f16_bits(&mut self) -> u16 {
             let r = self.next_u32();
-            (0x1c00 + (r % 0x1000) as u16) | (((r >> 16) & 1) as u16) << 15
+            (0x1c00 + (r % 0x1000) as u16) | ((((r >> 16) & 1) as u16) << 15)
         }
     }
 
@@ -801,7 +1206,7 @@ mod tests {
             Q4_K | Q6_K => {
                 let k = qa.k.as_ref().unwrap();
                 for b in k {
-                    for (g, s) in b.qs.chunks_exact(16).zip(b.bsums) {
+                    for (g, s) in b.qs.as_chunks::<16>().0.iter().zip(b.bsums) {
                         assert_eq!(g.iter().map(|&v| v as i16).sum::<i16>(), s);
                     }
                 }
@@ -862,6 +1267,39 @@ mod tests {
         }
     }
 
+    /// Random scales, every other byte set to `fill`.
+    fn extreme_row(qt: u32, n: usize, fill: u8, rng: &mut Lcg) -> Vec<u8> {
+        let mut row = synthetic_row(qt, n, rng);
+        let (bs, bb) = block_info(qt);
+        // byte range holding the f16 scale(s), left random
+        let keep = match qt {
+            Q5_0 | Q8_0 => 0..2,
+            Q4_K => 0..4,
+            Q6_K => 208..210,
+            _ => unreachable!(),
+        };
+        for blk in 0..n / bs {
+            for i in 0..bb {
+                if !keep.contains(&i) {
+                    row[blk * bb + i] = fill;
+                }
+            }
+        }
+        row
+    }
+
+    fn golden_stems() -> Vec<String> {
+        let dir = crate::testutil::fixtures().join("golden");
+        let mut stems: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
+            .filter_map(|e| e.ok()?.file_name().into_string().ok())
+            .filter_map(|f| f.strip_suffix(".json").map(str::to_string))
+            .collect();
+        stems.sort();
+        assert!(!stems.is_empty());
+        stems
+    }
+
     #[test]
     fn dot_row_q8_extreme_weights() {
         // saturated quants (all bits set / all clear) stress the i32 accumulators
@@ -869,22 +1307,7 @@ mod tests {
         for qt in [Q5_0, Q8_0, Q4_K, Q6_K] {
             for fill in [0x00u8, 0xff, 0x80, 0x7f] {
                 let n = 512;
-                let mut row = synthetic_row(qt, n, &mut rng);
-                let (bs, bb) = block_info(qt);
-                // byte range holding the f16 scale(s), left random
-                let keep = match qt {
-                    Q5_0 | Q8_0 => 0..2,
-                    Q4_K => 0..4,
-                    Q6_K => 208..210,
-                    _ => unreachable!(),
-                };
-                for blk in 0..n / bs {
-                    for i in 0..bb {
-                        if !keep.contains(&i) {
-                            row[blk * bb + i] = fill;
-                        }
-                    }
-                }
+                let row = extreme_row(qt, n, fill, &mut rng);
                 let x: Vec<f32> = (0..n)
                     .map(|i| if i % 2 == 0 { 1.0 } else { 0.999 })
                     .collect();
@@ -896,15 +1319,8 @@ mod tests {
     #[test]
     fn dot_row_q8_golden() {
         let dir = crate::testutil::fixtures().join("golden");
-        let mut stems: Vec<String> = std::fs::read_dir(&dir)
-            .unwrap_or_else(|e| panic!("{}: {e}", dir.display()))
-            .filter_map(|e| e.ok()?.file_name().into_string().ok())
-            .filter_map(|f| f.strip_suffix(".json").map(str::to_string))
-            .collect();
-        stems.sort();
-        assert!(!stems.is_empty());
         let mut rng = Lcg(42);
-        for stem in &stems {
+        for stem in &golden_stems() {
             let meta = crate::testutil::read_json(&format!("golden/{stem}.json"));
             let qt = meta["qtype"].as_u64().expect("qtype") as u32;
             let row_len = meta["row_len"].as_u64().expect("row_len") as usize;
@@ -950,5 +1366,138 @@ mod tests {
     fn dot_row_q8_q6_k_rejects_896() {
         let qa = QuantizedAct::new(&[0.5; 896]);
         dot_row_q8(Q6_K, &[0u8; 4 * Q6_K_BYTES], &qa);
+    }
+
+    // ---- SIMD kernels vs scalar ----
+
+    /// SIMD paths this CPU supports; unsupported ones are reported, not hidden.
+    fn simd_paths() -> Vec<Simd> {
+        #[allow(unused_mut)]
+        let mut v = Vec::new();
+        #[cfg(target_arch = "x86_64")]
+        {
+            if has_avx2() {
+                v.push(Simd::Avx2);
+            } else {
+                println!("SKIP avx2 path: CPU lacks avx2/fma/f16c");
+            }
+            if has_vnni() {
+                v.push(Simd::Vnni);
+            } else {
+                println!("SKIP vnni path: CPU lacks avxvnni");
+            }
+        }
+        #[cfg(not(target_arch = "x86_64"))]
+        println!("SKIP all SIMD paths: not x86_64");
+        println!("SIMD paths under test: {v:?}");
+        v
+    }
+
+    /// Every SIMD path must match the scalar kernel on the same QuantizedAct.
+    fn check_simd(qt: u32, row: &[u8], x: &[f32], paths: &[Simd], label: &str) {
+        let qa = QuantizedAct::new(x);
+        let mut w = vec![0f32; x.len()];
+        dequant(qt, row, &mut w);
+        let xq = dequant_act(qt, &qa);
+        let mag: f32 = w.iter().zip(&xq).map(|(a, b)| (a * b).abs()).sum();
+        // SAFETY: Scalar is always valid.
+        let want = unsafe { dot_row_q8_with(Simd::Scalar, qt, row, &qa) };
+        for &p in paths {
+            // SAFETY: simd_paths() only lists detected paths.
+            let got = unsafe { dot_row_q8_with(p, qt, row, &qa) };
+            assert!(
+                (got - want).abs() <= 1e-5 * mag + 1e-6,
+                "{label} {p:?}: simd {got} vs scalar {want} (mag {mag})"
+            );
+        }
+    }
+
+    #[test]
+    fn simd_matches_scalar_synthetic() {
+        let paths = simd_paths();
+        let mut rng = Lcg(0xb10c);
+        for &(qt, n) in &[
+            (Q8_0, 32),
+            (Q5_0, 32),
+            (Q8_0, 896),
+            (Q5_0, 896),
+            (Q4_K, 256),
+            (Q6_K, 256),
+            (Q4_K, 1280),
+            (Q6_K, 1280),
+            (Q4_K, 4864),
+            (Q6_K, 4864),
+        ] {
+            for rep in 0..8 {
+                let row = synthetic_row(qt, n, &mut rng);
+                let x = synthetic_x(n, &mut rng);
+                check_simd(qt, &row, &x, &paths, &format!("qt {qt} n {n} rep {rep}"));
+            }
+        }
+    }
+
+    #[test]
+    fn simd_matches_scalar_extreme() {
+        let paths = simd_paths();
+        let mut rng = Lcg(0xe7);
+        for qt in [Q5_0, Q8_0, Q4_K, Q6_K] {
+            for fill in [0x00u8, 0xff, 0x80, 0x7f, 0x55, 0xaa] {
+                for n in [256, 1280] {
+                    let row = extreme_row(qt, n, fill, &mut rng);
+                    // full-scale activations of both signs: q = ±127
+                    let alt: Vec<f32> = (0..n)
+                        .map(|i| if i % 3 == 0 { -1.0 } else { 1.0 })
+                        .collect();
+                    let pos: Vec<f32> = (0..n).map(|i| 1.0 - (i % 2) as f32 * 1e-3).collect();
+                    for (xn, x) in [("alt", &alt), ("pos", &pos)] {
+                        let label = format!("qt {qt} fill {fill:#x} n {n} x {xn}");
+                        check_simd(qt, &row, x, &paths, &label);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn simd_matches_scalar_golden() {
+        let paths = simd_paths();
+        let dir = crate::testutil::fixtures().join("golden");
+        let mut rng = Lcg(0x901d);
+        for stem in &golden_stems() {
+            let meta = crate::testutil::read_json(&format!("golden/{stem}.json"));
+            let qt = meta["qtype"].as_u64().expect("qtype") as u32;
+            let row_len = meta["row_len"].as_u64().expect("row_len") as usize;
+            let bytes = std::fs::read(dir.join(format!("{stem}.raw"))).expect("raw");
+            for rep in 0..4 {
+                let x = synthetic_x(row_len, &mut rng);
+                check_simd(qt, &bytes, &x, &paths, &format!("{stem} rep {rep}"));
+            }
+        }
+    }
+
+    #[test]
+    fn simd_choice() {
+        assert_eq!(choose_simd(Some("scalar")), Simd::Scalar);
+        let best = choose_simd(None);
+        assert_eq!(choose_simd(Some("")), best);
+        #[cfg(target_arch = "x86_64")]
+        {
+            if has_vnni() {
+                assert_eq!(best, Simd::Vnni);
+                assert_eq!(choose_simd(Some("vnni")), Simd::Vnni);
+            } else if has_avx2() {
+                assert_eq!(best, Simd::Avx2);
+            }
+            if has_avx2() {
+                assert_eq!(choose_simd(Some("avx2")), Simd::Avx2);
+            }
+        }
+        println!("default SIMD path: {best:?}");
+    }
+
+    #[test]
+    #[should_panic(expected = "expected scalar, avx2 or vnni")]
+    fn simd_choice_rejects_unknown() {
+        choose_simd(Some("sse9"));
     }
 }
