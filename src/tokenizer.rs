@@ -236,6 +236,12 @@ impl Tokenizer {
     }
 
     pub fn decode(&self, ids: &[u32]) -> String {
+        String::from_utf8_lossy(&self.decode_bytes(ids)).into_owned()
+    }
+
+    /// The raw bytes of `ids`. A token can end partway through a UTF-8
+    /// character, so these aren't valid text on their own; see `Utf8Stream`.
+    pub fn decode_bytes(&self, ids: &[u32]) -> Vec<u8> {
         let mut bytes = Vec::new();
         for &id in ids {
             let Some(t) = self.tokens.get(id as usize) else {
@@ -256,7 +262,59 @@ impl Tokenizer {
                 }
             }
         }
-        String::from_utf8_lossy(&bytes).into_owned()
+        bytes
+    }
+}
+
+/// Turns a stream of byte chunks (one per generated token) into text as soon
+/// as it is complete. A character split across tokens waits for its last
+/// byte; invalid bytes become U+FFFD. The text out, put together, equals
+/// `String::from_utf8_lossy` over all the bytes, but each byte is looked at a
+/// constant number of times instead of re-decoding everything per token.
+#[derive(Default)]
+pub struct Utf8Stream {
+    pending: Vec<u8>,
+}
+
+impl Utf8Stream {
+    /// Add bytes; return the text that is now complete.
+    pub fn push(&mut self, bytes: &[u8]) -> String {
+        self.pending.extend_from_slice(bytes);
+        let mut out = String::new();
+        let mut start = 0;
+        loop {
+            match std::str::from_utf8(&self.pending[start..]) {
+                Ok(s) => {
+                    out.push_str(s);
+                    start = self.pending.len();
+                    break;
+                }
+                Err(e) => {
+                    let good = start + e.valid_up_to();
+                    out.push_str(std::str::from_utf8(&self.pending[start..good]).unwrap());
+                    match e.error_len() {
+                        // Incomplete character at the end: wait for more bytes.
+                        None => {
+                            start = good;
+                            break;
+                        }
+                        Some(len) => {
+                            out.push('\u{FFFD}');
+                            start = good + len;
+                        }
+                    }
+                }
+            }
+        }
+        self.pending.drain(..start);
+        out
+    }
+
+    /// End of stream: whatever is left is an unfinished character.
+    pub fn finish(&mut self) -> String {
+        let out = String::from_utf8_lossy(&self.pending).into_owned();
+        self.pending.clear();
+        out
     }
 }
 
@@ -267,6 +325,54 @@ enum Frag<'t> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn utf8_stream_matches_lossy_over_any_split() {
+        use super::Utf8Stream;
+        let mut cases: Vec<Vec<u8>> = vec![
+            "héllo wörld → 日本語 🦀🦀".as_bytes().to_vec(),
+            b"ok\xffbad\xc3\x28 \xe2\x82 end\xf0\x9f".to_vec(),
+            vec![0xf0, 0x9f, 0xa6],
+            vec![],
+        ];
+        let mut rng = 0x2545_f491u32;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            rng
+        };
+        for _ in 0..300 {
+            let n = (next() % 40) as usize;
+            // Mostly valid multi-byte text with some junk bytes mixed in.
+            let mut b = Vec::new();
+            for _ in 0..n {
+                match next() % 6 {
+                    0 => b.push(next() as u8),
+                    1 => b.extend_from_slice("é".as_bytes()),
+                    2 => b.extend_from_slice("日".as_bytes()),
+                    3 => b.extend_from_slice("🦀".as_bytes()),
+                    _ => b.push(b'a' + (next() % 26) as u8),
+                }
+            }
+            cases.push(b);
+        }
+        for bytes in &cases {
+            let want = String::from_utf8_lossy(bytes);
+            for _ in 0..20 {
+                let mut st = Utf8Stream::default();
+                let mut got = String::new();
+                let mut i = 0;
+                while i < bytes.len() {
+                    let j = (i + 1 + (next() % 5) as usize).min(bytes.len());
+                    got += &st.push(&bytes[i..j]);
+                    i = j;
+                }
+                got += &st.finish();
+                assert_eq!(got, want, "bytes {bytes:?}");
+            }
+        }
+    }
+
     use super::*;
 
     fn tok() -> Option<Tokenizer> {
