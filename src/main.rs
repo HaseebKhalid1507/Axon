@@ -3,6 +3,7 @@ mod mv;
 mod chat;
 mod gguf;
 mod kv;
+mod lineedit;
 mod model;
 mod pool;
 mod quant;
@@ -387,8 +388,12 @@ const CHAT_HELP: &str = concat!(
     "  /reset          forget the conversation (the system message stays)\n",
     "  /system TEXT    a new system message (forgets the conversation)\n",
     "  /exit           quit (or Ctrl-D)\n",
-    "  end a line with \\ to go on with the message on the next line; //text sends /text\n",
-    "  Ctrl-C stops a reply",
+    "  end a line with \\ (or press Alt-Enter) to go on with the message on a new line;\n",
+    "  pasted text stays one message, line breaks and all; //text sends /text\n",
+    "keys: Left/Right, Ctrl-Left/Right or Alt-B/F (word), Home/End or Ctrl-A/E,\n",
+    "  Backspace/Delete, Ctrl-W (delete word back), Ctrl-U/Ctrl-K (delete to start/end),\n",
+    "  Ctrl-Y (paste deleted text), Up/Down (history), Ctrl-L (clear screen),\n",
+    "  Ctrl-C (stop a reply; clear the line), Ctrl-D on an empty line (quit)",
 );
 
 /// `chat` subcommand: args = [axon, chat, model, flags...]. Each line of
@@ -458,63 +463,80 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     }
 }
 
+/// One message from piped stdin: a line, or several joined while they end
+/// in a backslash. (text, whether stdin ended).
+fn read_piped_message(input: &mut impl std::io::BufRead) -> std::io::Result<(String, bool)> {
+    let mut msg = String::new();
+    loop {
+        let mut line = String::new();
+        if input.read_line(&mut line)? == 0 {
+            return Ok((msg, true));
+        }
+        let line = line.trim_end_matches(['\n', '\r']);
+        match line.strip_suffix('\\') {
+            Some(head) => {
+                msg.push_str(head);
+                msg.push('\n');
+            }
+            None => {
+                msg.push_str(line);
+                return Ok((msg, false));
+            }
+        }
+    }
+}
+
 /// The `chat` read-reply loop. Output goes through `write!`, not `print!`,
 /// so a closed stdout is an error to return rather than a panic.
+///
+/// On a terminal, messages come from the line editor, and the terminal
+/// stays in raw mode throughout (see lineedit.rs): keys typed while a reply
+/// streams are polled for between tokens, Ctrl-C stopping the reply and the
+/// rest replayed at the next prompt. Raw mode means "\r\n" for each "\n".
+/// Piped, each line of stdin is a message and SIGINT stops a reply.
 fn chat_repl(
     conv: &mut chat::Chat,
     tok: &tokenizer::Tokenizer,
     banner: &str,
 ) -> std::io::Result<()> {
-    use std::io::{BufRead, IsTerminal, Write};
+    use std::io::{IsTerminal, Write};
 
     let stdin = std::io::stdin();
     let mut out = std::io::stdout();
-    // Interactive: prompts and their escapes only when a person is at both ends.
+    // Interactive: the line editor only when a person is at both ends.
     let tty = stdin.is_terminal() && out.is_terminal();
-    let (dim, undim) = if std::io::stderr().is_terminal() {
+    let err_tty = std::io::stderr().is_terminal();
+    let (dim, undim) = if err_tty {
         ("\x1b[2m", "\x1b[0m")
     } else {
         ("", "")
     };
+    // Line ends for stdout, and for stderr notes.
+    let nl = if tty { "\r\n" } else { "\n" };
+    let enl = if tty && err_tty { "\r\n" } else { "\n" };
+    let note = |s: &str| eprint!("{}{enl}", s.replace('\n', enl));
     if tty {
-        eprintln!("{dim}axon chat | {banner} | /help for commands, Ctrl-D quits{undim}");
+        eprintln!("{dim}axon chat | {banner} | /help for commands and keys, Ctrl-D quits{undim}");
     }
+    let _raw = if tty {
+        Some(lineedit::RawMode::enter()?)
+    } else {
+        None
+    };
+    let mut editor = lineedit::LineReader::default();
+    let typeahead = std::cell::RefCell::new(std::collections::VecDeque::new());
     let mut input = stdin.lock();
     loop {
-        if tty {
-            write!(out, "\x1b[1m>\x1b[0m ")?;
-            out.flush()?;
-        }
-        // A message: one line, or several joined while they end in a backslash.
-        let mut msg = String::new();
-        let mut eof = false;
-        loop {
-            let mut line = String::new();
-            if input.read_line(&mut line)? == 0 {
-                eof = true;
-                break;
+        let (msg, eof) = if tty {
+            match editor.read(&mut out, &mut typeahead.borrow_mut())? {
+                Some(m) => (m, false),
+                None => return Ok(()),
             }
-            let line = line.trim_end_matches(['\n', '\r']);
-            match line.strip_suffix('\\') {
-                Some(head) => {
-                    msg.push_str(head);
-                    msg.push('\n');
-                    if tty {
-                        write!(out, "\x1b[1m.\x1b[0m ")?;
-                        out.flush()?;
-                    }
-                }
-                None => {
-                    msg.push_str(line);
-                    break;
-                }
-            }
-        }
+        } else {
+            read_piped_message(&mut input)?
+        };
         let text = msg.trim();
         if eof && text.is_empty() {
-            if tty {
-                writeln!(out)?;
-            }
             return Ok(());
         }
         if text.is_empty() {
@@ -528,15 +550,17 @@ fn chat_repl(
                 "exit" | "quit" | "bye" => return Ok(()),
                 "reset" | "clear" => {
                     conv.reset();
-                    eprintln!("{dim}(conversation cleared){undim}");
+                    note(&format!("{dim}(conversation cleared){undim}"));
                 }
-                "system" if arg.trim().is_empty() => eprintln!("axon: usage: /system TEXT"),
+                "system" if arg.trim().is_empty() => note("axon: usage: /system TEXT"),
                 "system" => match conv.set_system(arg.trim()) {
-                    Ok(()) => eprintln!("{dim}(new system message; conversation cleared){undim}"),
-                    Err(e) => eprintln!("axon: {e}"),
+                    Ok(()) => note(&format!(
+                        "{dim}(new system message; conversation cleared){undim}"
+                    )),
+                    Err(e) => note(&format!("axon: {e}")),
                 },
-                "help" | "?" => eprintln!("{CHAT_HELP}"),
-                _ => eprintln!("axon: unknown command /{name}; /help lists them"),
+                "help" | "?" => note(CHAT_HELP),
+                _ => note(&format!("axon: unknown command /{name}; /help lists them")),
             }
             if eof {
                 return Ok(());
@@ -547,25 +571,45 @@ fn chat_repl(
 
         // Characters can be split across tokens; the stream holds them back until whole.
         let mut stream = tokenizer::Utf8Stream::default();
-        chat::sigint::arm();
-        let res = conv.reply(text, &chat::sigint::hit, &mut |id| {
+        // Polled before every token: one non-blocking poll(2) when no key waits.
+        let stopped = std::cell::Cell::new(false);
+        // Keeps draining after a stop, so a mashed Ctrl-C is spent here, not at the prompt.
+        let poll_keys = || {
+            if lineedit::poll_typeahead(&mut typeahead.borrow_mut()) {
+                stopped.set(true);
+            }
+            stopped.get()
+        };
+        let cancel: &dyn Fn() -> bool = if tty {
+            &poll_keys
+        } else {
+            chat::sigint::arm();
+            &chat::sigint::hit
+        };
+        let res = conv.reply(text, cancel, &mut |id| {
             let s = stream.push(&tok.decode_bytes(&[id]));
             if !s.is_empty() {
-                write!(out, "{s}")?;
+                if tty {
+                    write!(out, "{}", s.replace('\n', "\r\n"))?;
+                } else {
+                    write!(out, "{s}")?;
+                }
                 out.flush()?;
             }
             Ok(())
         });
-        chat::sigint::disarm();
+        if !tty {
+            chat::sigint::disarm();
+        }
         let r = match res {
             Ok(r) => r,
             Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Err(e),
             Err(e) => {
-                eprintln!("axon: {e}");
+                note(&format!("axon: {e}"));
                 continue;
             }
         };
-        writeln!(out, "{}", stream.finish())?;
+        write!(out, "{}{nl}", stream.finish().replace('\n', nl))?;
         out.flush()?;
         let rate = |n: usize, s: f64| if s > 0.0 { n as f64 / s } else { 0.0 };
         let (used, size) = conv.used();
@@ -585,15 +629,15 @@ fn chat_repl(
                 if r.dropped == 1 { "" } else { "s" }
             ));
         }
-        eprintln!(
+        note(&format!(
             "{dim}[{} tok, {:.1} tok/s | prompt {} tok, {:.0} tok/s | ctx {used}/{size}{notes}]{undim}",
             r.ids.len(),
             rate(r.decided, r.decode_secs),
             r.prompt_tokens,
             rate(r.prompt_tokens, r.prompt_secs),
-        );
+        ));
         if tty {
-            writeln!(out)?;
+            write!(out, "{nl}")?;
         }
         if eof {
             return Ok(());
