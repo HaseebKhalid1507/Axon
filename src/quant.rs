@@ -3834,7 +3834,7 @@ mod tests {
         let acts = |seed: usize| -> [i8; 32] {
             let mut a = [0i8; 32];
             for j in 0..32 {
-                a[j] = ((seed + 37 * j) % 255) as i32 as i8 - 127;
+                a[j] = (((seed + 37 * j) % 255) as i32 - 127) as i8;
             }
             a
         };
