@@ -187,6 +187,16 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             0.0
         }
     );
+    if env::var_os("AXON_POOL_DEBUG").is_some() {
+        let pool = pool::Pool::global();
+        eprintln!(
+            "pool:        {} threads, {} active now, {} at least; {}",
+            pool.threads(),
+            pool.active(),
+            pool.min_active(),
+            pool.stats()
+        );
+    }
     Ok(())
 }
 
