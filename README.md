@@ -20,7 +20,11 @@ Works today, honestly scoped:
 - Sampling: greedy only. No chat template yet: `gen` continues raw text.
 - CPU: any x86-64 (others build too, scalar only). The default build is baseline x86-64 and
   picks its AVX2 / AVX-VNNI code at runtime, with the same output bits as a `-C target-cpu`
-  build (see `src/mv.rs`).
+  build (see `src/mv.rs`). Attention and SwiGLU use fused multiply-adds when the CPU has
+  FMA and a separate multiply and add when it doesn't (`src/vmath.rs`), so logits depend on
+  that one CPU property (on x86: whether the CPU has FMA; other targets fuse only when
+  built with `fma` enabled), and are identical across paths (`AXON_SIMD`), batch sizes and
+  thread counts for a given answer to it.
 - Rust 1.89 or newer.
 
 ## Quickstart

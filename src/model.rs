@@ -3,30 +3,174 @@
 //! plain f32 loops.
 
 use crate::gguf::{Model, Tensor, Val};
+use crate::kv::{KvData, KvElem, Layers};
 use crate::pool::{self, Pool};
 use crate::quant::{
     DecodeCfg, F16, F32, Q4_K, Q5_0, Q6_K, Q8_0, QuantizedAct, batch_slots, dequant,
-    dot_row_q8_multi, dot_rows_q8, dot_rows_q8_multi, row_bytes,
+    dot_row_q8_multi, dot_rows_q8, dot_rows_q8_multi, r8, r8q, row_bytes,
 };
+use crate::vmath;
 
-/// The weights of one transformer block, borrowed from the mmap.
+/// A weight matrix: its bytes in the model's mapping, or its 8-row
+/// interleaved repack (quant::r8 for Q4_K/Q6_K, quant::r8q for Q5_0/Q8_0).
+/// A repacked matrix goes through those kernels in every path (decode,
+/// prefill, swiglu, the verify head), so all of them give the same bits; the
+/// others use the per-row kernels.
+struct Weight<'a> {
+    t: &'a Tensor,
+    /// The tensor's bytes; None when repacked (they may have been released).
+    data: Option<&'a [u8]>,
+    r8: Option<R8>,
+}
+
+/// A repacked matrix: bytes off..off + len of the shared arena.
+struct R8 {
+    map: std::sync::Arc<memmap2::Mmap>,
+    off: usize,
+    len: usize,
+}
+
+impl std::ops::Deref for R8 {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.map[self.off..self.off + self.len]
+    }
+}
+
+/// Bytes of the r8/r8q form of `t`, if it has one.
+fn repacked_len(t: &Tensor) -> Option<usize> {
+    let (qt, rows, n) = (t.qtype.id, t.dims[1] as usize, t.dims[0] as usize);
+    if r8q::can_repack(qt, rows, n) {
+        Some(r8q::repacked_len(qt, rows, n))
+    } else if r8::can_repack(qt, rows, n) {
+        Some(r8::repacked_len(qt, rows, n))
+    } else {
+        None
+    }
+}
+
+/// One anonymous mapping for every repacked matrix, in whole 2 MB pages
+/// with transparent huge pages requested before the first touch (decode
+/// walks all of it every token; on 4 KB pages the dTLB misses cost more than
+/// the arithmetic. AXON_R8_THP=0 skips the request). One mapping, not one
+/// per matrix: the kernel only 2 MB-aligns mappings whose length is a whole
+/// number of 2 MB pages, and a huge page per small matrix (attn_k) would
+/// waste most of it.
+fn r8_arena(len: usize) -> memmap2::MmapMut {
+    const HUGE: usize = 2 << 20;
+    let map = memmap2::MmapMut::map_anon(len.max(1).next_multiple_of(HUGE))
+        .expect("r8: anonymous mapping");
+    #[cfg(target_os = "linux")]
+    if std::env::var("AXON_R8_THP").map_or(true, |v| v != "0") {
+        // Failure only costs speed.
+        let _ = map.advise(memmap2::Advice::HugePage);
+    }
+    map
+}
+
+impl<'a> Weight<'a> {
+    fn qt(&self) -> u32 {
+        self.t.qtype.id
+    }
+
+    fn rows(&self) -> usize {
+        self.t.dims[1] as usize
+    }
+
+    /// With `dst` (`repacked_len(t)` bytes of the arena), repack the matrix
+    /// into it; `r8` is attached once the arena is read-only (`build`).
+    /// Then, if `release`, the original bytes are handed back
+    /// (`Model::release`) so the weights aren't resident twice. Never
+    /// release a tensor read elsewhere: the token embedding (a tied output
+    /// matrix is the same tensor).
+    fn load(m: &'a Model, t: &'a Tensor, dst: Option<&mut [u8]>, release: bool) -> Weight<'a> {
+        let Some(buf) = dst else {
+            return Weight {
+                t,
+                data: Some(m.tensor_data(t)),
+                r8: None,
+            };
+        };
+        let (qt, rows, n) = (t.qtype.id, t.dims[1] as usize, t.dims[0] as usize);
+        if r8q::can_repack(qt, rows, n) {
+            r8q::repack_into(qt, m.tensor_data(t), rows, n, buf);
+        } else {
+            r8::repack_into(qt, m.tensor_data(t), rows, n, buf);
+        }
+        if release {
+            m.release(t);
+        }
+        Weight {
+            t,
+            data: None,
+            r8: None,
+        }
+    }
+
+    /// Whether the repack is r8q's (Q5_0/Q8_0) rather than r8's (K-quants).
+    fn is_r8q(&self) -> bool {
+        matches!(self.qt(), Q5_0 | Q8_0)
+    }
+
+    /// Repacked decode: `r8::gemv` or `r8q::gemv` (same contract).
+    fn gemv(&self, groups: &[u8], x: &QuantizedAct, out: &mut [f32], pf: usize) {
+        if self.is_r8q() {
+            r8q::gemv(self.qt(), groups, x, out, pf);
+        } else {
+            r8::gemv(self.qt(), groups, x, out, pf);
+        }
+    }
+
+    /// Repacked batch: `r8::gemm` or `r8q::gemm` (same contract).
+    fn gemm(&self, groups: &[u8], xs: &[&QuantizedAct], out: &mut [f32], stride: usize) {
+        if self.is_r8q() {
+            r8q::gemm(self.qt(), groups, xs, out, stride);
+        } else {
+            r8::gemm(self.qt(), groups, xs, out, stride);
+        }
+    }
+
+    /// The tensor's bytes (not repacked).
+    fn bytes(&self) -> &'a [u8] {
+        self.data.expect("repacked weight has no raw bytes")
+    }
+
+    /// Rows r0..r0 + k of a repacked matrix as whole r8 groups, plus the
+    /// rest of the matrix when `to_end` (prefetch room, see `r8::gemv`).
+    fn groups(&self, n_in: usize, r0: usize, k: usize, to_end: bool) -> &[u8] {
+        let p: &[u8] = self.r8.as_deref().expect("not repacked");
+        assert!(
+            r0.is_multiple_of(8) && k.is_multiple_of(8),
+            "{}: r8 rows not whole groups",
+            self.t.name
+        );
+        let gb = if self.is_r8q() {
+            r8q::group_bytes(self.qt(), n_in)
+        } else {
+            r8::group_bytes(self.qt(), n_in)
+        };
+        let end = if to_end { p.len() } else { (r0 + k) / 8 * gb };
+        &p[r0 / 8 * gb..end]
+    }
+}
+
+/// The weights of one transformer block, borrowed from the mapping or repacked.
 struct Layer<'a> {
     attn_norm: Vec<f32>,
-    wq: &'a Tensor,
-    wk: &'a Tensor,
-    wv: &'a Tensor,
+    wq: Weight<'a>,
+    wk: Weight<'a>,
+    wv: Weight<'a>,
     bq: Option<Vec<f32>>,
     bk: Option<Vec<f32>>,
     bv: Option<Vec<f32>>,
-    wo: &'a Tensor,
+    wo: Weight<'a>,
     ffn_norm: Vec<f32>,
-    w_gate: &'a Tensor,
-    w_up: &'a Tensor,
-    w_down: &'a Tensor,
+    w_gate: Weight<'a>,
+    w_up: Weight<'a>,
+    w_down: Weight<'a>,
 }
 
 pub struct Qwen2<'a> {
-    m: &'a Model,
     pub n_layers: usize,
     pub dim: usize,
     pub n_heads: usize,
@@ -36,18 +180,37 @@ pub struct Qwen2<'a> {
     eps: f32,
     rope_base: f64,
     token_embd: &'a Tensor,
+    /// token_embd's bytes (never released: see `Weight::load`)
+    embd: &'a [u8],
     output_norm: Vec<f32>,
-    output: &'a Tensor,
+    output: Weight<'a>,
     layers: Vec<Layer<'a>>,
 }
 
 /// Keys and values of every past position, per layer.
 /// k[layer] is laid out as [ctx][n_kv_heads * head_dim], same for v.
 pub struct KvCache {
-    k: Vec<Vec<f32>>,
-    v: Vec<Vec<f32>>,
+    /// Per layer, [t][kv_dim] keys and values: f16 unless AXON_KV=f32.
+    data: KvData,
     kv_dim: usize,
     max_ctx: usize,
+}
+
+/// Run `$body` with `$k`, `$v` bound to layer `$l`'s K and V cache slices
+/// (`&mut [T]`, T the cache's element type).
+macro_rules! with_kv_layer {
+    ($cache:expr, $l:expr, |$k:ident, $v:ident| $body:block) => {
+        match &mut $cache.data {
+            KvData::F16(c) => {
+                let ($k, $v) = (&mut c.k[$l][..], &mut c.v[$l][..]);
+                $body
+            }
+            KvData::F32(c) => {
+                let ($k, $v) = (&mut c.k[$l][..], &mut c.v[$l][..]);
+                $body
+            }
+        }
+    };
 }
 
 fn meta_num(m: &Model, key: &str) -> Option<f64> {
@@ -208,7 +371,20 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
 }
 
 impl<'a> Qwen2<'a> {
+    /// The model, with Q4_K/Q6_K and Q5_0/Q8_0 matrices repacked for the r8
+    /// and r8q kernels unless AXON_REPACK=0 (the per-row kernels only: the
+    /// branch's bits).
     pub fn new(m: &'a Model) -> Qwen2<'a> {
+        Self::new_with(m, std::env::var("AXON_REPACK").map_or(true, |v| v != "0"))
+    }
+
+    pub fn new_with(m: &'a Model, repack: bool) -> Qwen2<'a> {
+        Self::build(m, repack, false)
+    }
+
+    /// `tie`: use the token embedding as the output matrix even if the model
+    /// has its own (tests: the tied-embedding case on any model).
+    fn build(m: &'a Model, repack: bool, tie: bool) -> Qwen2<'a> {
         if let Err(e) = check_supported(m) {
             panic!("{e}");
         }
@@ -229,32 +405,115 @@ impl<'a> Qwen2<'a> {
         // ne1 of the embedding matrix is the vocab size.
         let vocab = token_embd.dims[1] as usize;
         // Some models tie output to the embedding; qwen2.5-0.5b ships a separate one.
-        let output = find_opt(m, "output.weight").unwrap_or(token_embd);
+        let out_t = match find_opt(m, "output.weight") {
+            Some(t) if !tie => t,
+            _ => token_embd,
+        };
+        // Every repacked matrix in one arena, in this order: output, then
+        // per layer MATS (64-byte aligned offsets).
+        const MATS: [&str; 7] = [
+            "attn_q.weight",
+            "attn_k.weight",
+            "attn_v.weight",
+            "attn_output.weight",
+            "ffn_gate.weight",
+            "ffn_up.weight",
+            "ffn_down.weight",
+        ];
+        let lt = |i: usize, s: &str| find(m, &format!("blk.{i}.{s}"));
+        let mut plan: Vec<Option<(usize, usize)>> = Vec::new();
+        let mut total = 0;
+        for t in std::iter::once(out_t).chain((0..n_layers).flat_map(|i| MATS.map(|s| lt(i, s)))) {
+            let len = if repack { repacked_len(t) } else { None };
+            plan.push(len.map(|len| (total, len)));
+            total += len.map_or(0, |l| l.next_multiple_of(64));
+        }
+        let mut arena = (total > 0).then(|| r8_arena(total));
+        // Disjoint slices of the arena, in plan order.
+        let mut slots: Vec<Option<&mut [u8]>> = Vec::with_capacity(plan.len());
+        {
+            let mut rest: &mut [u8] = arena.as_deref_mut().unwrap_or(&mut []);
+            let mut at = 0;
+            for p in &plan {
+                slots.push(p.map(|(off, len)| {
+                    let (_, r) = std::mem::take(&mut rest).split_at_mut(off - at);
+                    let (d, r) = r.split_at_mut(len);
+                    rest = r;
+                    at = off + len;
+                    d
+                }));
+            }
+        }
+        let mut slots = slots.into_iter();
+        // A tied output matrix is the embedding, which `embed` keeps reading.
+        let mut output = Weight::load(
+            m,
+            out_t,
+            slots.next().unwrap(),
+            !std::ptr::eq(out_t, token_embd),
+        );
         let output_norm = load_vec(m, find(m, "output_norm.weight"));
-
-        let layers = (0..n_layers)
-            .map(|i| {
-                let t = |s: &str| find(m, &format!("blk.{i}.{s}"));
-                let bias = |s: &str| find_opt(m, &format!("blk.{i}.{s}")).map(|t| load_vec(m, t));
-                Layer {
-                    attn_norm: load_vec(m, t("attn_norm.weight")),
-                    wq: t("attn_q.weight"),
-                    wk: t("attn_k.weight"),
-                    wv: t("attn_v.weight"),
-                    bq: bias("attn_q.bias"),
-                    bk: bias("attn_k.bias"),
-                    bv: bias("attn_v.bias"),
-                    wo: t("attn_output.weight"),
-                    ffn_norm: load_vec(m, t("ffn_norm.weight")),
-                    w_gate: t("ffn_gate.weight"),
-                    w_up: t("ffn_up.weight"),
-                    w_down: t("ffn_down.weight"),
-                }
-            })
+        let layer_slots: Vec<std::sync::Mutex<Vec<Option<&mut [u8]>>>> = (0..n_layers)
+            .map(|_| std::sync::Mutex::new(slots.by_ref().take(MATS.len()).collect()))
             .collect();
 
+        // One pool task per layer (`floats` set so it never runs inline):
+        // repacking is a pass over all the weights.
+        let mut layers = par_map(n_layers, INLINE_WORK + 1, |i| {
+            let t = |s: &str| lt(i, s);
+            let mut dst = std::mem::take(&mut *layer_slots[i].lock().unwrap()).into_iter();
+            let mut w = |s: &str| Weight::load(m, t(s), dst.next().unwrap(), true);
+            // Norms and biases are copied out; when repacking, their bytes go
+            // back too, so `Model::release` can drop the blocks they share
+            // with the small repacked matrices around them.
+            let vals = |t: &Tensor| {
+                let v = load_vec(m, t);
+                if repack {
+                    m.release(t);
+                }
+                v
+            };
+            let bias = |s: &str| find_opt(m, &format!("blk.{i}.{s}")).map(vals);
+            Layer {
+                attn_norm: vals(t("attn_norm.weight")),
+                wq: w(MATS[0]),
+                wk: w(MATS[1]),
+                wv: w(MATS[2]),
+                bq: bias("attn_q.bias"),
+                bk: bias("attn_k.bias"),
+                bv: bias("attn_v.bias"),
+                wo: w(MATS[3]),
+                ffn_norm: vals(t("ffn_norm.weight")),
+                w_gate: w(MATS[4]),
+                w_up: w(MATS[5]),
+                w_down: w(MATS[6]),
+            }
+        });
+        drop(layer_slots);
+        drop(slots);
+        if let Some(a) = arena.take() {
+            let map = std::sync::Arc::new(a.make_read_only().expect("r8: mprotect"));
+            let ws = std::iter::once(&mut output).chain(layers.iter_mut().flat_map(|l| {
+                [
+                    &mut l.wq,
+                    &mut l.wk,
+                    &mut l.wv,
+                    &mut l.wo,
+                    &mut l.w_gate,
+                    &mut l.w_up,
+                    &mut l.w_down,
+                ]
+            }));
+            for (w, p) in ws.zip(&plan) {
+                w.r8 = p.map(|(off, len)| R8 {
+                    map: map.clone(),
+                    off,
+                    len,
+                });
+            }
+        }
+
         Qwen2 {
-            m,
             n_layers,
             dim,
             n_heads,
@@ -264,6 +523,7 @@ impl<'a> Qwen2<'a> {
             eps,
             rope_base,
             token_embd,
+            embd: m.tensor_data(token_embd),
             output_norm,
             output,
             layers,
@@ -272,13 +532,13 @@ impl<'a> Qwen2<'a> {
 
     pub fn new_cache(&self, max_ctx: usize) -> KvCache {
         let kv_dim = self.n_kv_heads * self.head_dim;
+        let len = max_ctx * kv_dim;
         KvCache {
-            k: (0..self.n_layers)
-                .map(|_| vec![0.0; max_ctx * kv_dim])
-                .collect(),
-            v: (0..self.n_layers)
-                .map(|_| vec![0.0; max_ctx * kv_dim])
-                .collect(),
+            data: if crate::kv::use_f32() {
+                KvData::F32(Layers::new(self.n_layers, len))
+            } else {
+                KvData::F16(Layers::new(self.n_layers, len))
+            },
             kv_dim,
             max_ctx,
         }
@@ -292,51 +552,86 @@ impl<'a> Qwen2<'a> {
     }
 
     /// y = W x. W has ne1 rows of ne0 values each; y[o] = row_o · x.
-    fn matvec(&self, w: &Tensor, x: &[f32]) -> Vec<f32> {
+    fn matvec(&self, w: &Weight, x: &[f32]) -> Vec<f32> {
         let [y] = self.matvec_many([w], x);
         y
+    }
+
+    /// Joint row space of `ws` for input width `n_in`: starts[i] is where
+    /// matrix i begins, plus the total and the row granularity pool chunks
+    /// must keep: 8 (whole r8 groups) if any matrix is repacked, every start
+    /// then a multiple of 8; else 1.
+    fn joint_rows<const N: usize>(ws: [&Weight; N], n_in: usize) -> ([usize; N], usize, usize) {
+        let mut starts = [0usize; N];
+        let mut total = 0;
+        for (i, w) in ws.iter().enumerate() {
+            assert_eq!(w.t.dims[0] as usize, n_in, "matmul {}: input len", w.t.name);
+            starts[i] = total;
+            total += w.rows();
+        }
+        let align = if ws.iter().any(|w| w.r8.is_some()) {
+            8
+        } else {
+            1
+        };
+        assert!(
+            starts.iter().all(|s| s % align == 0),
+            "repacked matrices must start at a multiple of 8 rows"
+        );
+        (starts, total, align)
+    }
+
+    /// Decode rows r0..r0 + out.len() of `w` · x. Prefetch stays inside the
+    /// rows the caller owns, or runs to the matrix's end when `own_all`.
+    fn rows_vec(
+        &self,
+        w: &Weight,
+        r0: usize,
+        x: &QuantizedAct,
+        out: &mut [f32],
+        cfg: DecodeCfg,
+        own_all: bool,
+    ) {
+        let k = out.len();
+        if w.r8.is_some() {
+            let groups = w.groups(x.len(), r0, k, own_all);
+            w.gemv(groups, x, out, cfg.prefetch);
+        } else {
+            let (qt, data) = (w.qt(), w.bytes());
+            let rb = row_bytes(qt, x.len());
+            let lim = if own_all { data.len() } else { (r0 + k) * rb };
+            dot_rows_q8(qt, &data[r0 * rb..lim], x, out, cfg);
+        }
     }
 
     /// Several matrices applied to the same input in one parallel pass:
     /// one fork/join and one quantization of x instead of one per matrix.
     /// Returns one output vector per matrix, in order.
-    fn matvec_many<const N: usize>(&self, ws: [&Tensor; N], x: &[f32]) -> [Vec<f32>; N] {
+    fn matvec_many<const N: usize>(&self, ws: [&Weight; N], x: &[f32]) -> [Vec<f32>; N] {
         // Quantize x to 8 bits once; every row then does integer multiply-adds
         // against its packed weights instead of decoding them to floats.
-        let types = ws.map(|w| w.qtype.id);
+        let types = ws.map(|w| w.qt());
         let xq = QuantizedAct::for_types(x, &types);
         // All matrices' rows form one index space; starts[i] is where matrix i begins.
-        let mut starts = [0usize; N];
-        let mut total = 0;
-        for (i, w) in ws.iter().enumerate() {
-            assert_eq!(w.dims[0] as usize, x.len(), "matvec {}: input len", w.name);
-            starts[i] = total;
-            total += w.dims[1] as usize;
-        }
-        let info = ws.map(|w| {
-            let qt = w.qtype.id;
-            (qt, row_bytes(qt, x.len()), self.m.tensor_data(w))
-        });
+        let (starts, total, align) = Self::joint_rows(ws, x.len());
         // Every output row is an independent dot product, so split rows across
         // cores. About 4 chunks per thread lets the fast and efficiency cores
         // even out; at most 64 rows keeps chunk claiming cheap.
         let mut out = vec![0f32; total];
-        let chunk = (total / (Pool::global().threads() * 4)).clamp(4, 64);
+        let chunk = (total / (Pool::global().threads() * 4))
+            .clamp(4, 64)
+            .next_multiple_of(align);
         let (cfg, own_all) = Self::decode_cfg();
         pool::for_each_chunk_mut(&mut out, chunk, |c, mut ys| {
             // The chunk's rows, one run per matrix it touches, several rows
-            // per kernel call. Prefetch stays inside the rows this chunk owns
-            // (to the matrix's end when one thread does them all).
+            // per kernel call.
             let mut g = c * chunk;
             while !ys.is_empty() {
                 let t = starts.iter().rposition(|&s| s <= g).unwrap();
-                let (qt, rb, data) = info[t];
                 let end = starts.get(t + 1).copied().unwrap_or(total);
                 let k = (end - g).min(ys.len());
                 let (run, rest) = std::mem::take(&mut ys).split_at_mut(k);
-                let o = g - starts[t];
-                let lim = if own_all { data.len() } else { (o + k) * rb };
-                dot_rows_q8(qt, &data[o * rb..lim], &xq, run, cfg);
+                self.rows_vec(ws[t], g - starts[t], &xq, run, cfg, own_all);
                 g += k;
                 ys = rest;
             }
@@ -353,36 +648,26 @@ impl<'a> Qwen2<'a> {
     /// silu(gate x) * (up x), row by row: each task computes row r of both
     /// matrices and combines them, so the exp() runs on every core instead of
     /// in a serial pass after the matvec.
-    fn matvec_swiglu(&self, gate: &Tensor, up: &Tensor, x: &[f32]) -> Vec<f32> {
-        let n = gate.dims[1] as usize;
-        for w in [gate, up] {
-            assert_eq!(w.dims[0] as usize, x.len(), "matvec {}: input len", w.name);
-        }
-        assert_eq!(up.dims[1] as usize, n, "swiglu: gate/up row counts differ");
-        let xq = QuantizedAct::for_types(x, &[gate.qtype.id, up.qtype.id]);
-        let [g, u] = [gate, up].map(|w| {
-            let qt = w.qtype.id;
-            (qt, row_bytes(qt, x.len()), self.m.tensor_data(w))
-        });
+    fn matvec_swiglu(&self, gate: &Weight, up: &Weight, x: &[f32]) -> Vec<f32> {
+        let n = gate.rows();
+        let (_, _, a0) = Self::joint_rows([gate], x.len());
+        let (_, _, a1) = Self::joint_rows([up], x.len());
+        assert_eq!(up.rows(), n, "swiglu: gate/up row counts differ");
+        let xq = QuantizedAct::for_types(x, &[gate.qt(), up.qt()]);
         let mut out = vec![0f32; n];
         // Each row is two dot products, so half the rows per chunk of matvec_many.
         const MAX_CHUNK: usize = 32;
-        let chunk = (n / (Pool::global().threads() * 8)).clamp(4, MAX_CHUNK);
+        let chunk = (n / (Pool::global().threads() * 8))
+            .clamp(4, MAX_CHUNK)
+            .next_multiple_of(a0.max(a1));
         let (cfg, own_all) = Self::decode_cfg();
         pool::for_each_chunk_mut(&mut out, chunk, |c, ys| {
             let (r, k) = (c * chunk, ys.len());
             let mut ub = [0f32; MAX_CHUNK];
             let ub = &mut ub[..k];
-            // prefetch bounds as in matvec_many
-            let lim = |(_, rb, data): (u32, usize, &[u8])| {
-                if own_all { data.len() } else { (r + k) * rb }
-            };
-            dot_rows_q8(g.0, &g.2[r * g.1..lim(g)], &xq, ys, cfg);
-            dot_rows_q8(u.0, &u.2[r * u.1..lim(u)], &xq, ub, cfg);
-            for (y, &uv) in ys.iter_mut().zip(ub.iter()) {
-                let gv = *y;
-                *y = (gv / (1.0 + (-gv).exp())) * uv;
-            }
+            self.rows_vec(gate, r, &xq, ys, cfg, own_all);
+            self.rows_vec(up, r, &xq, ub, cfg, own_all);
+            vmath::swiglu(ys, ub);
         });
         out
     }
@@ -399,11 +684,45 @@ impl<'a> Qwen2<'a> {
     /// a 0.5B verify pass at 4 per thread left ~21% of pool time waiting, and
     /// drafting (K=7) on low-repetition text went from -5% to -1% vs no
     /// drafting with 16. Chunking never changes results.
-    fn rows_per_chunk(rows: usize, nb: usize) -> usize {
+    /// With repacked matrices (`align` 8) chunks are whole r8 groups.
+    fn rows_per_chunk(rows: usize, nb: usize, align: usize) -> usize {
         let per_thread = if nb <= 9 { 16 } else { (nb / 2).clamp(4, 32) };
         rows.div_ceil(Pool::global().threads() * per_thread)
             .max(1)
-            .next_multiple_of(2)
+            .next_multiple_of(align.max(2))
+    }
+
+    /// Token slots for a batched matmul over `ws`: `quant::batch_slots` of
+    /// the types that go through the per-row kernels (their x4 tiles want
+    /// padding); the r8 GEMM takes any count, so all-repacked needs none.
+    fn slots_for(ws: &[&Weight], n_in: usize, nb: usize) -> usize {
+        let types: Vec<u32> = ws
+            .iter()
+            .filter(|w| w.r8.is_none())
+            .map(|w| w.qt())
+            .collect();
+        if types.is_empty() {
+            nb
+        } else {
+            batch_slots(&types, n_in, nb)
+        }
+    }
+
+    /// Rows r0..r0 + ys.len() / slots of `w` times the batch, into
+    /// ys[r * slots + b]: r8 GEMM over the `nb` real tokens (padding slots
+    /// untouched), or the per-row tile kernels over every slot of `xr`.
+    fn rows_batch(&self, w: &Weight, r0: usize, xr: &[&QuantizedAct], nb: usize, ys: &mut [f32]) {
+        let slots = xr.len();
+        let n_in = xr[0].len();
+        let k = ys.len() / slots;
+        if w.r8.is_some() {
+            w.gemm(w.groups(n_in, r0, k, false), &xr[..nb], ys, slots);
+        } else {
+            let (qt, data) = (w.qt(), w.bytes());
+            let rb = row_bytes(qt, n_in);
+            let row_of = |g: usize| (qt, &data[g * rb..(g + 1) * rb]);
+            dot_rows_chunk(ys, slots, r0, &row_of, xr);
+        }
     }
 
     /// The batch's activations quantized for `types`, one per token. The
@@ -435,13 +754,13 @@ impl<'a> Qwen2<'a> {
     /// See `matmul_raw`; this transposes its output to per-token vectors.
     fn matmul_many<const N: usize, X: AsRef<[f32]> + Sync>(
         &self,
-        ws: [&Tensor; N],
+        ws: [&Weight; N],
         xs: &[X],
     ) -> [Vec<Vec<f32>>; N] {
         let nb = xs.len();
         let (out, starts, slots) = self.matmul_raw(ws, xs);
         std::array::from_fn(|i| {
-            let n = ws[i].dims[1] as usize;
+            let n = ws[i].rows();
             unbatch(&out[starts[i] * slots..(starts[i] + n) * slots], slots, nb)
         })
     }
@@ -458,46 +777,54 @@ impl<'a> Qwen2<'a> {
     /// as `matvec_many`, so results are bit-identical.
     fn matmul_raw<const N: usize, X: AsRef<[f32]> + Sync>(
         &self,
-        ws: [&Tensor; N],
+        ws: [&Weight; N],
         xs: &[X],
     ) -> (Vec<f32>, [usize; N], usize) {
-        let types = ws.map(|w| w.qtype.id);
+        let types = ws.map(|w| w.qt());
         self.matmul_q(ws, &Self::quantize_batch(xs, &types))
     }
 
     /// `matmul_raw` on inputs already quantized for `ws`' types.
     fn matmul_q<const N: usize>(
         &self,
-        ws: [&Tensor; N],
+        ws: [&Weight; N],
         xq: &[QuantizedAct],
     ) -> (Vec<f32>, [usize; N], usize) {
         let nb = xq.len();
         let n_in = xq[0].len();
-        let types = ws.map(|w| w.qtype.id);
-        let mut starts = [0usize; N];
-        let mut total = 0;
-        for (i, w) in ws.iter().enumerate() {
-            assert_eq!(w.dims[0] as usize, n_in, "matmul {}: input len", w.name);
-            starts[i] = total;
-            total += w.dims[1] as usize;
-        }
-        let info = ws.map(|w| {
-            let qt = w.qtype.id;
-            (qt, row_bytes(qt, n_in), self.m.tensor_data(w))
-        });
-        let slots = batch_slots(&types, n_in, nb);
+        let (starts, total, align) = Self::joint_rows(ws, n_in);
+        let slots = Self::slots_for(&ws, n_in, nb);
         let xr: Vec<&QuantizedAct> = (0..slots).map(|b| &xq[b.min(nb - 1)]).collect();
         let mut out = vec![0f32; total * slots];
-        let rows = Self::rows_per_chunk(total, nb);
-        let row_of = |g: usize| {
-            let t = starts.iter().rposition(|&s| s <= g).unwrap();
-            let (qt, rb, data) = info[t];
-            let o = g - starts[t];
-            (qt, &data[o * rb..(o + 1) * rb])
-        };
-        pool::for_each_chunk_mut(&mut out, rows * slots, |c, ys| {
-            dot_rows_chunk(ys, slots, c * rows, &row_of, &xr)
-        });
+        let rows = Self::rows_per_chunk(total, nb, align);
+        if align == 1 {
+            // Nothing repacked: the per-row tile kernels, rows paired across
+            // matrices as they come.
+            let info = ws.map(|w| (w.qt(), row_bytes(w.qt(), n_in), w.bytes()));
+            let row_of = |g: usize| {
+                let t = starts.iter().rposition(|&s| s <= g).unwrap();
+                let (qt, rb, data) = info[t];
+                let o = g - starts[t];
+                (qt, &data[o * rb..(o + 1) * rb])
+            };
+            pool::for_each_chunk_mut(&mut out, rows * slots, |c, ys| {
+                dot_rows_chunk(ys, slots, c * rows, &row_of, &xr)
+            });
+        } else {
+            // One run per matrix the chunk touches (whole r8 groups).
+            pool::for_each_chunk_mut(&mut out, rows * slots, |c, mut ys| {
+                let mut g = c * rows;
+                while !ys.is_empty() {
+                    let t = starts.iter().rposition(|&s| s <= g).unwrap();
+                    let end = starts.get(t + 1).copied().unwrap_or(total);
+                    let k = (end - g).min(ys.len() / slots);
+                    let (run, rest) = std::mem::take(&mut ys).split_at_mut(k * slots);
+                    self.rows_batch(ws[t], g - starts[t], &xr, nb, run);
+                    g += k;
+                    ys = rest;
+                }
+            });
+        }
         (out, starts, slots)
     }
 
@@ -507,27 +834,23 @@ impl<'a> Qwen2<'a> {
     /// only a `Best` per token; the chunks are then merged in row order. No
     /// vocab-sized logits are allocated or transposed. Each logit is the
     /// same dot as in `matmul_raw` (and so `matvec`), bit for bit.
-    fn matmul_argmax<X: AsRef<[f32]> + Sync>(&self, w: &Tensor, xs: &[X]) -> Vec<u32> {
+    fn matmul_argmax<X: AsRef<[f32]> + Sync>(&self, w: &Weight, xs: &[X]) -> Vec<u32> {
         let nb = xs.len();
-        let qt = w.qtype.id;
+        let qt = w.qt();
         let xq = Self::quantize_batch(xs, &[qt]);
         let n_in = xq[0].len();
-        assert_eq!(w.dims[0] as usize, n_in, "matmul {}: input len", w.name);
-        let total = w.dims[1] as usize;
-        let rb = row_bytes(qt, n_in);
-        let data = self.m.tensor_data(w);
-        let slots = batch_slots(&[qt], n_in, nb);
+        let (_, total, align) = Self::joint_rows([w], n_in);
+        let slots = Self::slots_for(&[w], n_in, nb);
         let xr: Vec<&QuantizedAct> = (0..slots).map(|b| &xq[b.min(nb - 1)]).collect();
-        let rows = Self::rows_per_chunk(total, nb);
+        let rows = Self::rows_per_chunk(total, nb, align);
         let n_chunks = total.div_ceil(rows);
-        let row_of = |g: usize| (qt, &data[g * rb..(g + 1) * rb]);
         // best[c * nb + b]: chunk c's best row for token b.
         let mut best = vec![Best::NONE; n_chunks * nb];
         pool::for_each_chunk_mut(&mut best, nb, |c, bs| {
             let first = c * rows;
             let n_rows = rows.min(total - first);
             with_rows_scratch(n_rows * slots, |ys| {
-                dot_rows_chunk(ys, slots, first, &row_of, &xr);
+                self.rows_batch(w, first, &xr, nb, ys);
                 best_rows(ys, slots, first, bs);
             });
         });
@@ -547,41 +870,51 @@ impl<'a> Qwen2<'a> {
     /// in `matmul_raw`.
     fn matmul_swiglu<X: AsRef<[f32]> + Sync>(
         &self,
-        gate: &Tensor,
-        up: &Tensor,
+        gate: &Weight,
+        up: &Weight,
         xs: &[X],
     ) -> (Vec<f32>, usize) {
         let nb = xs.len();
         let n_in = xs[0].as_ref().len();
-        let n = gate.dims[1] as usize;
-        for w in [gate, up] {
-            assert_eq!(w.dims[0] as usize, n_in, "matmul {}: input len", w.name);
-        }
-        assert_eq!(up.dims[1] as usize, n, "swiglu: gate/up row counts differ");
-        let types = [gate.qtype.id, up.qtype.id];
+        let n = gate.rows();
+        let (_, _, a0) = Self::joint_rows([gate], n_in);
+        let (_, _, a1) = Self::joint_rows([up], n_in);
+        assert_eq!(up.rows(), n, "swiglu: gate/up row counts differ");
+        let types = [gate.qt(), up.qt()];
         let xq = Self::quantize_batch(xs, &types);
-        let [g, u] = [gate, up].map(|w| {
-            let qt = w.qtype.id;
-            (qt, row_bytes(qt, n_in), self.m.tensor_data(w))
-        });
-        let slots = batch_slots(&types, n_in, nb);
+        let slots = Self::slots_for(&[gate, up], n_in, nb);
         let xr: Vec<&QuantizedAct> = (0..slots).map(|b| &xq[b.min(nb - 1)]).collect();
         let mut out = vec![0f32; n * slots];
-        let rows = Self::rows_per_chunk(n, nb);
-        pool::for_each_chunk_mut(&mut out, rows * slots, |c, ys| {
-            with_rows_scratch(slots, |uv| {
-                for (j, yr) in ys.chunks_mut(slots).enumerate() {
-                    let r = c * rows + j;
-                    let gr = &g.2[r * g.1..(r + 1) * g.1];
-                    let ur = &u.2[r * u.1..(r + 1) * u.1];
-                    dot_rows_q8_multi([g.0, u.0], [gr, ur], &xr, [&mut *yr, &mut *uv]);
-                    for (y, &uv) in yr.iter_mut().zip(&*uv) {
-                        let gv = *y;
-                        *y = (gv / (1.0 + (-gv).exp())) * uv;
+        let align = a0.max(a1);
+        let rows = Self::rows_per_chunk(n, nb, align);
+        if align == 1 {
+            // Nothing repacked: each gate row paired with its up row.
+            let [g, u] = [gate, up].map(|w| (w.qt(), row_bytes(w.qt(), n_in), w.bytes()));
+            pool::for_each_chunk_mut(&mut out, rows * slots, |c, ys| {
+                with_rows_scratch(slots, |uv| {
+                    for (j, yr) in ys.chunks_mut(slots).enumerate() {
+                        let r = c * rows + j;
+                        let gr = &g.2[r * g.1..(r + 1) * g.1];
+                        let ur = &u.2[r * u.1..(r + 1) * u.1];
+                        dot_rows_q8_multi([g.0, u.0], [gr, ur], &xr, [&mut *yr, &mut *uv]);
+                        vmath::swiglu(yr, uv);
                     }
-                }
+                });
             });
-        });
+        } else {
+            // The chunk's gate rows, then its up rows, then combine (real
+            // tokens only: padding slots may be unwritten on r8 rows).
+            pool::for_each_chunk_mut(&mut out, rows * slots, |c, ys| {
+                let r0 = c * rows;
+                with_rows_scratch(ys.len(), |uv| {
+                    self.rows_batch(gate, r0, &xr, nb, ys);
+                    self.rows_batch(up, r0, &xr, nb, uv);
+                    for (yr, ur) in ys.chunks_mut(slots).zip(uv.chunks(slots)) {
+                        vmath::swiglu(&mut yr[..nb], &ur[..nb]);
+                    }
+                });
+            });
+        }
         (out, slots)
     }
 
@@ -615,7 +948,7 @@ impl<'a> Qwen2<'a> {
         let x = self.hidden(token, pos, cache);
         // 9. Final norm, then the output head scores every vocab entry.
         let h = self.rmsnorm(&x, &self.output_norm);
-        self.matvec(self.output, &h)
+        self.matvec(&self.output, &h)
     }
 
     /// Run one token at position `pos` for its effect on the cache only. Prompt
@@ -634,7 +967,7 @@ impl<'a> Qwen2<'a> {
         let t = token as usize;
         dequant(
             self.token_embd.qtype.id,
-            &self.m.tensor_data(self.token_embd)[t * rb..(t + 1) * rb],
+            &self.embd[t * rb..(t + 1) * rb],
             &mut x,
         );
         x
@@ -658,7 +991,7 @@ impl<'a> Qwen2<'a> {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn verify_batch(&self, tokens: &[u32], start: usize, cache: &mut KvCache) -> Vec<Vec<f32>> {
         let hs = self.final_norm_batch(tokens, start, cache);
-        let [logits] = self.matmul_many([self.output], &hs);
+        let [logits] = self.matmul_many([&self.output], &hs);
         logits
     }
 
@@ -668,7 +1001,7 @@ impl<'a> Qwen2<'a> {
     /// any logits (`matmul_argmax`).
     pub fn verify_argmax(&self, tokens: &[u32], start: usize, cache: &mut KvCache) -> Vec<u32> {
         let hs = self.final_norm_batch(tokens, start, cache);
-        self.matmul_argmax(self.output, &hs)
+        self.matmul_argmax(&self.output, &hs)
     }
 
     /// `hidden_batch` then the final norm, as `forward` does per token.
@@ -710,62 +1043,58 @@ impl<'a> Qwen2<'a> {
             per_token(&mut hs, dim, |b, h| {
                 self.rmsnorm_into(&xs[b], &layer.attn_norm, h)
             });
-            let [mut qs, ks, vs] = self.matmul_many([layer.wq, layer.wk, layer.wv], &hs);
-            {
-                // Bias, RoPE, and k/v into the cache, per token. k and v get
-                // their bias and RoPE in the cache slot itself: same values,
-                // same ops as `hidden`, which does them before the copy.
+            let [mut qs, mut ks, mut vs] = self.matmul_many([&layer.wq, &layer.wk, &layer.wv], &hs);
+            with_kv_layer!(cache, l, |kc, vc| {
+                // Bias, RoPE, and k/v into the cache, per token: same values,
+                // same ops as `hidden`, then the same rounding to the cache type.
                 let span = start * kv_dim..(start + nb) * kv_dim;
-                let (kl, vl) = (&mut cache.k[l][span.clone()], &mut cache.v[l][span]);
+                let (kl, vl) = (&mut kc[span.clone()], &mut vc[span]);
                 let mut jobs: Vec<_> = qs
                     .iter_mut()
-                    .zip(kl.chunks_mut(kv_dim))
-                    .zip(vl.chunks_mut(kv_dim))
+                    .zip(ks.iter_mut().zip(vs.iter_mut()))
+                    .zip(kl.chunks_mut(kv_dim).zip(vl.chunks_mut(kv_dim)))
                     .collect();
-                per_token(&mut jobs, dim + 2 * kv_dim, |b, ((q, kd), vd)| {
-                    kd.copy_from_slice(&ks[b]);
-                    vd.copy_from_slice(&vs[b]);
+                per_token(&mut jobs, dim + 2 * kv_dim, |b, ((q, (k, v)), (kd, vd))| {
                     if let Some(bias) = &layer.bq {
                         add_assign(q, bias);
                     }
                     if let Some(bias) = &layer.bk {
-                        add_assign(kd, bias);
+                        add_assign(k, bias);
                     }
                     if let Some(bias) = &layer.bv {
-                        add_assign(vd, bias);
+                        add_assign(v, bias);
                     }
                     rope_heads(q, hd, &ropes[b]);
-                    rope_heads(kd, hd, &ropes[b]);
+                    rope_heads(k, hd, &ropes[b]);
+                    KvElem::store(kd, k);
+                    KvElem::store(vd, v);
                 });
-            }
-            let (kc, vc) = (&cache.k[l], &cache.v[l]);
+                let (kc, vc) = (&*kc, &*vc);
 
-            // Causal attention, one (token, kv head) pair per pool task,
-            // longest first: all `group` query heads sharing that kv head
-            // together, so each key and value row is loaded once for all of
-            // them. Token b sees positions 0..=start + b only. Per query head
-            // the arithmetic is exactly `hidden`'s: same dot, same softmax
-            // order, same `o += w v` order over t.
-            let scale = 1.0 / (hd as f32).sqrt();
-            pool::for_each_chunk_mut_rev(&mut att, qn, |c, out| {
-                let (b, kvh) = (c / n_kv, c % n_kv);
-                let np = start + b + 1;
-                let qg = &qs[b][kvh * qn..(kvh + 1) * qn];
-                with_scores((np + 1) * group, |sc| {
-                    attend_causal(qg, kc, vc, kv_dim, hd, kvh, np, scale, sc, out)
+                // Causal attention, one (token, kv head) pair per pool task,
+                // longest first: all `group` query heads sharing that kv head
+                // together, so each key and value row is loaded once for all of
+                // them. Token b sees positions 0..=start + b only. Per query head
+                // the arithmetic is exactly `hidden`'s: same dot, same softmax
+                // order, same fused `o += w v` order over t (`attend_group`).
+                pool::for_each_chunk_mut_rev(&mut att, qn, |c, out| {
+                    let (b, kvh) = (c / n_kv, c % n_kv);
+                    let np = start + b + 1;
+                    let qg = &qs[b][kvh * qn..(kvh + 1) * qn];
+                    attend_group(qg, kc, vc, kv_dim, hd, kvh, np, out);
                 });
             });
 
             let att_rows: Vec<&[f32]> = att.chunks(dim).collect();
-            let (os, _, slots) = self.matmul_raw([layer.wo], &att_rows);
+            let (os, _, slots) = self.matmul_raw([&layer.wo], &att_rows);
             add_unbatched(&mut xs, &os, slots);
 
             per_token(&mut hs, dim, |b, h| {
                 self.rmsnorm_into(&xs[b], &layer.ffn_norm, h)
             });
-            let (acts, a_slots) = self.matmul_swiglu(layer.w_gate, layer.w_up, &hs);
-            let aq = Self::quantize_cols(&acts, a_slots, nb, &[layer.w_down.qtype.id]);
-            let (ds, _, slots) = self.matmul_q([layer.w_down], &aq);
+            let (acts, a_slots) = self.matmul_swiglu(&layer.w_gate, &layer.w_up, &hs);
+            let aq = Self::quantize_cols(&acts, a_slots, nb, &[layer.w_down.qt()]);
+            let (ds, _, slots) = self.matmul_q([&layer.w_down], &aq);
             add_unbatched(&mut xs, &ds, slots);
         }
         xs
@@ -790,13 +1119,14 @@ impl<'a> Qwen2<'a> {
         // decode attention allocates nothing once warm.
         let np = pos + 1;
         let tile = decode_tile(np, self.n_kv_heads);
+        let threads = Pool::global().threads();
         let (mut buf, mut att_out) = DECODE.take();
         att_out.resize(dim, 0.0);
         for (l, layer) in self.layers.iter().enumerate() {
             // ---- Attention sub-block ----
             // 2. Normalize, then project into queries, keys and values (+ bias).
             let h = self.rmsnorm(&x, &layer.attn_norm);
-            let [mut q, mut k, mut v] = self.matvec_many([layer.wq, layer.wk, layer.wv], &h);
+            let [mut q, mut k, mut v] = self.matvec_many([&layer.wq, &layer.wk, &layer.wv], &h);
             if let Some(b) = &layer.bq {
                 add_assign(&mut q, b);
             }
@@ -812,25 +1142,39 @@ impl<'a> Qwen2<'a> {
             rope_heads(&mut k, hd, &rope);
 
             // 4. Store this position's k and v in the cache so later tokens can see them.
-            cache.k[l][pos * kv_dim..(pos + 1) * kv_dim].copy_from_slice(&k);
-            cache.v[l][pos * kv_dim..(pos + 1) * kv_dim].copy_from_slice(&v);
-            let (kc, vc) = (&cache.k[l], &cache.v[l]);
+            //    (rounded to the cache's type: f16 unless AXON_KV=f32).
+            with_kv_layer!(cache, l, |kc, vc| {
+                let row = pos * kv_dim..(pos + 1) * kv_dim;
+                KvElem::store(&mut kc[row.clone()], &k);
+                KvElem::store(&mut vc[row], &v);
 
-            // 5. Each query head attends over all positions 0..=pos (the work
-            //    grows with context, so it can't stay serial). GQA: query head
-            //    qh reads kv head qh / group. See `attend`.
-            attend(&q, kc, vc, kv_dim, hd, np, tile, &mut buf, &mut att_out);
+                // 5. Each query head attends over all positions 0..=pos (the work
+                //    grows with context, so it can't stay serial). GQA: query head
+                //    qh reads kv head qh / group. See `attend`.
+                attend(
+                    &q,
+                    kc,
+                    vc,
+                    kv_dim,
+                    hd,
+                    np,
+                    tile,
+                    threads,
+                    &mut buf,
+                    &mut att_out,
+                );
+            });
 
             // 6. Mix the heads back together and add to the residual stream.
-            let o = self.matvec(layer.wo, &att_out);
+            let o = self.matvec(&layer.wo, &att_out);
             add_assign(&mut x[..dim], &o[..dim]);
 
             // ---- Feed-forward sub-block (SwiGLU) ----
             // 7. Normalize, then gate * up: silu(gate(h)) decides how much of up(h) passes.
             let h = self.rmsnorm(&x, &layer.ffn_norm);
-            let act = self.matvec_swiglu(layer.w_gate, layer.w_up, &h);
+            let act = self.matvec_swiglu(&layer.w_gate, &layer.w_up, &h);
             // 8. Project back down to model width and add to the residual stream.
-            let d = self.matvec(layer.w_down, &act);
+            let d = self.matvec(&layer.w_down, &act);
             add_assign(&mut x[..dim], &d[..dim]);
         }
         DECODE.set((buf, att_out));
@@ -1015,8 +1359,9 @@ fn decode_tile(np: usize, n_kv: usize) -> Option<usize> {
 
 /// Decode attention of one token over cache positions 0..np: out[qh * hd..]
 /// = sum over t of softmax_t(q_qh · k_t / sqrt(hd)) * v_t, with q head qh on
-/// kv head qh / group. kc and vc are [t][kv_dim] (kv_dim = n_kv * hd); `buf`
-/// is reusable scratch, grown as needed.
+/// kv head qh / group. kc and vc are [t][kv_dim] (kv_dim = n_kv * hd) of the
+/// cache's element type, widened to f32 exactly on load; `buf` is reusable
+/// scratch, grown as needed.
 ///
 /// Scores, `tile` None: one pool task per query head, `dot` per position.
 /// `tile` Some(tc): one task per (kv head, tc positions), each K row loaded
@@ -1025,31 +1370,43 @@ fn decode_tile(np: usize, n_kv: usize) -> Option<usize> {
 /// strided scores into wts. Either way wts[qh][t] gets the same dot, the same
 /// `* scale` and the same softmax ops in the same order.
 ///
-/// Values: one task per (kv head, 8 floats of hd), all of its heads in one
-/// pass over the V rows (`vsum_rows`), then copied into place.
+/// Values: one task per (kv head, column of one 64-byte line of each V row
+/// (`line_dims`), subset of the group's heads), the subsets just enough that
+/// there are at least `threads` tasks (`vsum_split`); each task one pass over
+/// its column (`vsum_rows`), then copied into place. Every output element is
+/// the same fused-multiply-add chain over t however it's split.
 #[allow(clippy::too_many_arguments)]
-fn attend(
+fn attend<T: KvElem>(
     q: &[f32],
-    kc: &[f32],
-    vc: &[f32],
+    kc: &[T],
+    vc: &[T],
     kv_dim: usize,
     hd: usize,
     np: usize,
     tile: Option<usize>,
+    threads: usize,
     buf: &mut Vec<f32>,
     out: &mut [f32],
 ) {
     let n_heads = q.len() / hd;
     let n_kv = kv_dim / hd;
     let group = n_heads / n_kv;
-    let (qn, nd) = (group * hd, hd.div_ceil(8));
+    let qn = group * hd;
     debug_assert_eq!(n_kv * qn, q.len(), "attend: heads * head_dim != q len");
     assert!(np * kv_dim <= kc.len().min(vc.len()) && out.len() >= q.len());
     let scale = 1.0 / (hd as f32).sqrt();
     // Per kv head, `nt` t-ranges of `tc` rows; the last may be short and
     // its tail of sc is left unused, so chunks never straddle kv heads.
     let (tc, nt) = tile.map_or((0, 0), |tc| (tc, np.div_ceil(tc)));
-    let (nw, ns, nv) = (n_heads * np, n_kv * nt * tc * group, n_kv * nd * group * 8);
+    let cw = line_dims::<T>();
+    let ncol = hd.div_ceil(cw);
+    let nsub = vsum_split(threads, n_kv * ncol, group);
+    let hmax = group.div_ceil(nsub);
+    let (nw, ns, nv) = (
+        n_heads * np,
+        n_kv * nt * tc * group,
+        n_kv * ncol * nsub * hmax * cw,
+    );
     if buf.len() < nw + ns + nv {
         buf.resize(nw + ns + nv, 0.0);
     }
@@ -1075,24 +1432,433 @@ fn attend(
         });
     }
 
-    // vparts[c]: task c = (kvh, dc), its heads' sums for d in dc * 8..+ width,
-    // as [head][width].
+    // vparts[c]: task c = (kvh, col, sub), heads g0..g1 of the group, dims
+    // col * cw..+ width, as [head][width].
     let wts = &*wts;
-    pool::for_each_chunk_mut(vparts, group * 8, |c, o| {
-        let (kvh, d0) = (c / nd, c % nd * 8);
-        let width = 8.min(hd - d0);
-        let w = &wts[kvh * group * np..];
+    let task = |c: usize| {
+        let (kvh, col, j) = (c / (ncol * nsub), c / nsub % ncol, c % nsub);
+        let (g0, g1) = (j * group / nsub, (j + 1) * group / nsub);
+        let d0 = col * cw;
+        (kvh, g0, g1, d0, cw.min(hd - d0))
+    };
+    pool::for_each_chunk_mut(vparts, hmax * cw, |c, o| {
+        let (kvh, g0, g1, d0, width) = task(c);
+        let w = &wts[(kvh * group + g0) * np..];
         let vb = &vc[kvh * hd + d0..];
-        vsum_rows(w, np, np, group, vb, kv_dim, &mut o[..group * width], width);
+        vsum_rows(
+            w,
+            np,
+            np,
+            g1 - g0,
+            vb,
+            kv_dim,
+            &mut o[..(g1 - g0) * width],
+            width,
+        );
     });
-    for (c, part) in vparts.chunks_exact(group * 8).enumerate() {
-        let (kvh, d0) = (c / nd, c % nd * 8);
-        let width = 8.min(hd - d0);
-        for (g, p) in part[..group * width].chunks_exact(width).enumerate() {
+    for (c, part) in vparts.chunks_exact(hmax * cw).enumerate() {
+        let (kvh, g0, g1, d0, width) = task(c);
+        for (g, p) in (g0..g1).zip(part.chunks_exact(width)) {
             let o0 = (kvh * group + g) * hd + d0;
             out[o0..o0 + width].copy_from_slice(p);
         }
     }
+}
+
+/// Elements of T per 64-byte cache line: 32 halves or 16 floats.
+fn line_dims<T>() -> usize {
+    64 / std::mem::size_of::<T>()
+}
+
+/// Head subsets per (kv head, column) V-sum task: enough that `cols`
+/// columns give at least `threads` tasks, but no more than `group` (one head
+/// per task).
+fn vsum_split(threads: usize, cols: usize, group: usize) -> usize {
+    threads.div_ceil(cols.max(1)).clamp(1, group.max(1))
+}
+
+/// Prefill attention of one token's `group` query heads qg (contiguous) on
+/// kv head kvh over cache positions 0..np, into out ([head][hd]): the same
+/// dot, `* scale`, softmax and V-sum order per head as `attend`.
+#[allow(clippy::too_many_arguments)]
+fn attend_group<T: KvElem>(
+    qg: &[f32],
+    kc: &[T],
+    vc: &[T],
+    kv_dim: usize,
+    hd: usize,
+    kvh: usize,
+    np: usize,
+    out: &mut [f32],
+) {
+    let group = qg.len() / hd;
+    let scale = 1.0 / (hd as f32).sqrt();
+    with_scores((np + 1) * group, |sc| {
+        attend_causal(qg, kc, vc, kv_dim, hd, kvh, np, scale, sc, out)
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Attention, multiversioned (see mv.rs) with the fused-multiply-add switch F:
+// every `a * b + c` step below is `vmath::fma::<F>`, one rounding when the CPU
+// has FMA (both variants), a multiply and an add when it doesn't. The `V3`
+// variants use the hand-written AVX2 + FMA helpers (`*_v3`), the same
+// operations in the same order as the scalar code with F.
+
+multiversion! {
+    /// Decode scores of one query head, then `softmax`: s[t] =
+    /// dot(qv, k_t) * scale with k_t = kc[t * kv_dim + k_off..][..qv.len()].
+    fn score_softmax<V3, F, T: KvElem>(
+        qv: &[f32],
+        kc: &[T],
+        kv_dim: usize,
+        k_off: usize,
+        scale: f32,
+        s: &mut [f32],
+    ) {
+        let hd = qv.len();
+        for (t, s) in s.iter_mut().enumerate() {
+            let k0 = t * kv_dim + k_off;
+            // SAFETY: V3 only in the v3 variant.
+            *s = unsafe { dot::<V3, F, T>(qv, &kc[k0..k0 + hd]) } * scale;
+        }
+        // SAFETY: as above.
+        unsafe { vmath::softmax::<V3, F>(s) };
+    }
+}
+
+multiversion! {
+    /// Decode scores of one kv head's query group qg (heads of hd floats)
+    /// over positions `ts`: s[j * group + g] = dot(q_g, k_t) * scale for the
+    /// j-th t, `dot_group` per position (k_t = kc[t * kv_dim + k_off..][..hd]).
+    fn score_tile<V3, F, T: KvElem>(
+        qg: &[f32],
+        kc: &[T],
+        kv_dim: usize,
+        hd: usize,
+        k_off: usize,
+        ts: std::ops::Range<usize>,
+        scale: f32,
+        s: &mut [f32],
+    ) {
+        let group = qg.len() / hd;
+        for (t, row) in ts.zip(s.chunks_exact_mut(group)) {
+            let k0 = t * kv_dim + k_off;
+            // SAFETY: V3 only in the v3 variant.
+            unsafe { dot_group::<V3, F, T>(qg, &kc[k0..k0 + hd], row) };
+            for x in row.iter_mut() {
+                *x *= scale;
+            }
+        }
+    }
+}
+
+multiversion! {
+    /// `attend_group`'s body: `sc` is scratch of (np + 1) * group floats,
+    /// sc[g * np + t] head g's score at t (contiguous per head for the
+    /// softmax), the rest one position's dots.
+    fn attend_causal<V3, F, T: KvElem>(
+        qg: &[f32],
+        kc: &[T],
+        vc: &[T],
+        kv_dim: usize,
+        hd: usize,
+        kvh: usize,
+        np: usize,
+        scale: f32,
+        sc: &mut [f32],
+        out: &mut [f32],
+    ) {
+        let group = qg.len() / hd;
+        let (sc, row) = sc.split_at_mut(np * group);
+        for t in 0..np {
+            let k0 = t * kv_dim + kvh * hd;
+            // SAFETY (every call): V3 only in the v3 variant.
+            unsafe { dot_group::<V3, F, T>(qg, &kc[k0..k0 + hd], row) };
+            for (g, &s) in row.iter().enumerate() {
+                sc[g * np + t] = s * scale;
+            }
+        }
+        for s in sc.chunks_exact_mut(np) {
+            unsafe { vmath::softmax::<V3, F>(s) };
+        }
+        let vb = &vc[kvh * hd..];
+        unsafe { vsum_rows::imp::<V3, F, T>(sc, np, np, group, vb, kv_dim, out, hd) };
+    }
+}
+
+multiversion! {
+    /// `softmax` of the scores src[t * stride], t in 0..dst.len(), written to
+    /// dst: gathered, then `vmath::softmax` in place, so the same bits as
+    /// `softmax` on a copy.
+    fn softmax_from<V3, F>(src: &[f32], stride: usize, dst: &mut [f32]) {
+        let n = dst.len();
+        assert!(
+            n == 0 || (n - 1) * stride < src.len(),
+            "softmax_from: short src"
+        );
+        for (t, d) in dst.iter_mut().enumerate() {
+            *d = src[t * stride];
+        }
+        // SAFETY: V3 only in the v3 variant.
+        unsafe { vmath::softmax::<V3, F>(dst) };
+    }
+}
+
+multiversion! {
+    /// o[h * os + d] = sum over t in 0..np, in order from 0.0, of
+    /// w[h * ws + t] * v_t[d] (each step `fma::<F>`, v widened to f32), for
+    /// heads h in 0..nh and d in 0..os, with value rows at a fixed stride:
+    /// v_t = vb[t * vs..][..os].
+    ///
+    /// V3: blocks of up to 3 heads x 32 dims (12 accumulators) per pass over
+    /// the rows (`vsum_rows_v3`), each row slice loaded once per block. Per
+    /// element that's the scalar `o = fma(w, v, o)` over t, so the blocking
+    /// never changes a bit.
+    fn vsum_rows<V3, F, T: KvElem>(
+        w: &[f32],
+        ws: usize,
+        np: usize,
+        nh: usize,
+        vb: &[T],
+        vs: usize,
+        o: &mut [f32],
+        os: usize,
+    ) {
+        assert!(
+            np <= ws && (nh == 0 || (nh - 1) * ws + np <= w.len()) && nh * os <= o.len(),
+            "vsum_rows: short w/o"
+        );
+        assert!(
+            np == 0 || (np - 1) * vs + os <= vb.len(),
+            "vsum_rows: short v"
+        );
+        let mut d0 = 0;
+        #[cfg(target_arch = "x86_64")]
+        if V3 {
+            // SAFETY: the v3 variant; bounds asserted above.
+            unsafe { vsum_rows_v3(w, ws, np, nh, vb, vs, o, os) };
+            d0 = os / 8 * 8;
+        }
+        for h in 0..nh {
+            for d in d0..os {
+                let mut a = 0.0f32;
+                for t in 0..np {
+                    a = vmath::fma::<F>(w[h * ws + t], vb[t * vs + d].to_f32(), a);
+                }
+                o[h * os + d] = a;
+            }
+        }
+    }
+}
+
+/// The whole 8-dim chunks of `vsum_rows` (d < os / 8 * 8) with AVX2 + FMA.
+///
+/// # Safety
+/// The CPU must have the x86-64-v3 features; the bounds `vsum_rows` asserts.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,bmi1,bmi2,f16c,fma,lzcnt")]
+#[inline]
+#[allow(clippy::too_many_arguments)]
+unsafe fn vsum_rows_v3<T: KvElem>(
+    w: &[f32],
+    ws: usize,
+    np: usize,
+    nh: usize,
+    vb: &[T],
+    vs: usize,
+    o: &mut [f32],
+    os: usize,
+) {
+    let nc = os / 8;
+    for h0 in (0..nh).step_by(3) {
+        let g = (nh - h0).min(3);
+        let mut c0 = 0;
+        while c0 < nc {
+            let c = match nc - c0 {
+                1 => 1,
+                2 | 3 => 2,
+                _ => 4,
+            };
+            let (wp, vp) = (w[h0 * ws..].as_ptr(), vb[8 * c0..].as_ptr());
+            let op = o[h0 * os + 8 * c0..].as_mut_ptr();
+            // SAFETY: heads h0..h0 + g <= nh, chunks c0..c0 + c <= nc, so
+            // every read and write is inside the bounds `vsum_rows` asserts.
+            unsafe {
+                match (g, c) {
+                    (1, 1) => vsum_block::<T, 1, 1>(wp, ws, np, vp, vs, op, os),
+                    (1, 2) => vsum_block::<T, 1, 2>(wp, ws, np, vp, vs, op, os),
+                    (1, _) => vsum_block::<T, 1, 4>(wp, ws, np, vp, vs, op, os),
+                    (2, 1) => vsum_block::<T, 2, 1>(wp, ws, np, vp, vs, op, os),
+                    (2, 2) => vsum_block::<T, 2, 2>(wp, ws, np, vp, vs, op, os),
+                    (2, _) => vsum_block::<T, 2, 4>(wp, ws, np, vp, vs, op, os),
+                    (_, 1) => vsum_block::<T, 3, 1>(wp, ws, np, vp, vs, op, os),
+                    (_, 2) => vsum_block::<T, 3, 2>(wp, ws, np, vp, vs, op, os),
+                    (_, _) => vsum_block::<T, 3, 4>(wp, ws, np, vp, vs, op, os),
+                }
+            }
+            c0 += c;
+        }
+    }
+}
+
+/// G heads x C 8-dim chunks of `vsum_rows`: o[g * os + 8c..+ 8] = the fused
+/// chain over t of w[g * ws + t] * vb[t * vs + 8c..+ 8].
+///
+/// # Safety
+/// The CPU must have the x86-64-v3 features. w[g * ws + t] (g < G, t < np)
+/// readable, vb[t * vs..+ 8 * C] (t < np) readable, o[g * os..+ 8 * C]
+/// writable.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,bmi1,bmi2,f16c,fma,lzcnt")]
+#[inline]
+#[allow(clippy::too_many_arguments)]
+#[allow(clippy::needless_range_loop)] // fixed-size register tiles: indexed loops unroll cleanly
+unsafe fn vsum_block<T: KvElem, const G: usize, const C: usize>(
+    w: *const f32,
+    ws: usize,
+    np: usize,
+    vb: *const T,
+    vs: usize,
+    o: *mut f32,
+    os: usize,
+) {
+    use std::arch::x86_64::*;
+    // SAFETY: the caller's contract; the row pointer only advances with
+    // wrapping_add and is dereferenced for t < np.
+    unsafe {
+        let mut acc = [[_mm256_setzero_ps(); C]; G];
+        let mut vp = vb;
+        for t in 0..np {
+            for c in 0..C {
+                let y = T::load8(vp.add(8 * c));
+                for g in 0..G {
+                    let x = _mm256_set1_ps(*w.add(g * ws + t));
+                    acc[g][c] = _mm256_fmadd_ps(x, y, acc[g][c]);
+                }
+            }
+            vp = vp.wrapping_add(vs);
+        }
+        for g in 0..G {
+            for c in 0..C {
+                _mm256_storeu_ps(o.add(g * os + 8 * c), acc[g][c]);
+            }
+        }
+    }
+}
+
+/// out[g] = dot(q_g, k) for the query vectors q_g = q[g * k.len()..][..k.len()],
+/// g in 0..out.len(), bit for bit; up to 8 at a time (`dot_multi_v3` when V3,
+/// else `dot` per vector). Not dispatched on its own: the attention bodies
+/// call it with their own `V3` and `F`.
+///
+/// # Safety
+/// With V3, the CPU must have the x86-64-v3 features.
+#[inline(always)]
+unsafe fn dot_group<const V3: bool, const F: bool, T: KvElem>(q: &[f32], k: &[T], out: &mut [f32]) {
+    let n = k.len();
+    debug_assert_eq!(q.len(), n * out.len());
+    #[cfg(target_arch = "x86_64")]
+    if V3 {
+        for (qs, os) in q.chunks(8 * n).zip(out.chunks_mut(8)) {
+            // SAFETY (every arm): our caller's contract.
+            unsafe {
+                match os.len() {
+                    8 => dot_multi_v3::<T, 8>(qs, k, os),
+                    7 => dot_multi_v3::<T, 7>(qs, k, os),
+                    6 => dot_multi_v3::<T, 6>(qs, k, os),
+                    5 => dot_multi_v3::<T, 5>(qs, k, os),
+                    4 => dot_multi_v3::<T, 4>(qs, k, os),
+                    3 => dot_multi_v3::<T, 3>(qs, k, os),
+                    2 => dot_multi_v3::<T, 2>(qs, k, os),
+                    _ => dot_multi_v3::<T, 1>(qs, k, os),
+                }
+            }
+        }
+        return;
+    }
+    for (g, o) in out.iter_mut().enumerate() {
+        // SAFETY: V3 false here.
+        *o = unsafe { dot::<false, F, T>(&q[g * n..(g + 1) * n], k) };
+    }
+}
+
+/// `dot` of G query vectors (contiguous in q) with one k, with AVX2 + FMA.
+/// Each result uses `dot`'s exact lanes, tail and final sum, so it's
+/// identical to `dot`; the G accumulator chains run side by side and k is
+/// loaded (and widened) once.
+///
+/// Written with intrinsics: the plain-Rust version (an `[[f32; 8]; G]`
+/// accumulator indexed through per-head slices) didn't vectorize and ran as
+/// scalar loads/adds through the stack, ~40% of prefill at 2k tokens.
+/// `_mm256_fmadd_ps(x, y, acc)` is `dot`'s `acc[i] = fma(x[i], y[i], acc[i])`
+/// lane for lane, and `vmath::x86::hsum8` is `vmath::sum8`.
+///
+/// # Safety
+/// The CPU must have the x86-64-v3 features.
+#[cfg(target_arch = "x86_64")]
+#[target_feature(enable = "avx2,bmi1,bmi2,f16c,fma,lzcnt")]
+#[inline]
+unsafe fn dot_multi_v3<T: KvElem, const G: usize>(q: &[f32], k: &[T], out: &mut [f32]) {
+    use std::arch::x86_64::*;
+    let n = k.len();
+    assert!(q.len() >= G * n && out.len() >= G, "dot_multi: short q/out");
+    let nc = n / 8;
+    let (qp, kp) = (q.as_ptr(), k.as_ptr());
+    // SAFETY: Every load reads q[g * n + 8 * j .. + 8] with g < G and
+    // 8 * j + 8 <= n, inside q (asserted above), or k[8 * j..+ 8], inside k.
+    let acc = unsafe {
+        let mut acc = [_mm256_setzero_ps(); G];
+        for j in 0..nc {
+            let y = T::load8(kp.add(8 * j));
+            for (g, a) in acc.iter_mut().enumerate() {
+                let x = _mm256_loadu_ps(qp.add(g * n + 8 * j));
+                *a = _mm256_fmadd_ps(x, y, *a);
+            }
+        }
+        acc
+    };
+    for (g, a) in acc.iter().enumerate() {
+        let ar = &q[g * n + 8 * nc..(g + 1) * n];
+        out[g] = vmath::x86::hsum8(*a) + dot_tail::<true, T>(ar, &k[8 * nc..]);
+    }
+}
+
+/// Elements past the last whole 8-chunk: `fma::<F>` in order from 0.0.
+#[inline(always)]
+fn dot_tail<const F: bool, T: KvElem>(a: &[f32], b: &[T]) -> f32 {
+    let mut s = 0.0f32;
+    for (&x, &y) in a.iter().zip(b) {
+        s = vmath::fma::<F>(x, y.to_f32(), s);
+    }
+    s
+}
+
+/// Dot product with 8 independent partial sums (lane i: `fma::<F>` over
+/// elements i mod 8 of the whole chunks), combined by `vmath::sum8`, plus
+/// the tail. `dot_multi_v3::<1>` when V3. Not dispatched on its own.
+///
+/// # Safety
+/// With V3, the CPU must have the x86-64-v3 features.
+#[inline(always)]
+unsafe fn dot<const V3: bool, const F: bool, T: KvElem>(a: &[f32], b: &[T]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    #[cfg(target_arch = "x86_64")]
+    if V3 {
+        let mut o = [0.0f32];
+        // SAFETY: our caller's contract.
+        unsafe { dot_multi_v3::<T, 1>(a, b, &mut o) };
+        return o[0];
+    }
+    let mut acc = [0.0f32; 8];
+    let (ac, ar) = a.as_chunks::<8>();
+    let (bc, br) = b.as_chunks::<8>();
+    for (x, y) in ac.iter().zip(bc) {
+        for i in 0..8 {
+            acc[i] = vmath::fma::<F>(x[i], y[i].to_f32(), acc[i]);
+        }
+    }
+    vmath::sum8(&acc) + dot_tail::<F, T>(ar, br)
 }
 
 // ---------------------------------------------------------------------------
@@ -1178,391 +1944,35 @@ multiversion! {
     }
 }
 
-multiversion! {
-    /// Decode scores of one query head, then `softmax`: s[t] =
-    /// dot(qv, k_t) * scale with k_t = kc[t * kv_dim + k_off..][..qv.len()].
-    fn score_softmax<V3>(
-        qv: &[f32],
-        kc: &[f32],
-        kv_dim: usize,
-        k_off: usize,
-        scale: f32,
-        s: &mut [f32],
-    ) {
-        let hd = qv.len();
-        for (t, s) in s.iter_mut().enumerate() {
-            let k0 = t * kv_dim + k_off;
-            *s = dot(qv, &kc[k0..k0 + hd]) * scale;
-        }
-        softmax(s);
-    }
-}
-
-multiversion! {
-    /// Decode scores of one kv head's query group qg (heads of hd floats)
-    /// over positions `ts`: s[j * group + g] = dot(q_g, k_t) * scale for the
-    /// j-th t, `dot_group` per position (k_t = kc[t * kv_dim + k_off..][..hd]).
-    fn score_tile<V3>(
-        qg: &[f32],
-        kc: &[f32],
-        kv_dim: usize,
-        hd: usize,
-        k_off: usize,
-        ts: std::ops::Range<usize>,
-        scale: f32,
-        s: &mut [f32],
-    ) {
-        let group = qg.len() / hd;
-        for (t, row) in ts.zip(s.chunks_exact_mut(group)) {
-            let k0 = t * kv_dim + k_off;
-            // SAFETY: V3 only in the v3 variant.
-            unsafe { dot_group::<V3>(qg, &kc[k0..k0 + hd], row) };
-            for x in row.iter_mut() {
-                *x *= scale;
-            }
-        }
-    }
-}
-
-multiversion! {
-    /// One (token, kv head) task of `hidden_batch`'s causal attention over
-    /// positions 0..np: per query head the arithmetic is exactly `hidden`'s
-    /// (same dot, same softmax order, same `o += w v` order over t). `sc` is
-    /// scratch of (np + 1) * group floats: sc[g * np + t] holds head g's score
-    /// at t (contiguous per head for the softmax), the rest one position's dots.
-    fn attend_causal<V3>(
-        qg: &[f32],
-        kc: &[f32],
-        vc: &[f32],
-        kv_dim: usize,
-        hd: usize,
-        kvh: usize,
-        np: usize,
-        scale: f32,
-        sc: &mut [f32],
-        out: &mut [f32],
-    ) {
-        let group = qg.len() / hd;
-        let (sc, row) = sc.split_at_mut(np * group);
-        for t in 0..np {
-            let k0 = t * kv_dim + kvh * hd;
-            // SAFETY (both calls): V3 only in the v3 variant.
-            unsafe { dot_group::<V3>(qg, &kc[k0..k0 + hd], row) };
-            for (g, &s) in row.iter().enumerate() {
-                sc[g * np + t] = s * scale;
-            }
-        }
-        for s in sc.chunks_exact_mut(np) {
-            softmax(s);
-        }
-        let vb = &vc[kvh * hd..];
-        unsafe { vsum_rows::imp::<V3>(sc, np, np, group, vb, kv_dim, out, hd) };
-    }
-}
-
-multiversion! {
-    /// `softmax` of the scores src[t * stride], t in 0..dst.len(), written to
-    /// dst: the same ops in the same order as `softmax` on a copy.
-    fn softmax_from<V3>(src: &[f32], stride: usize, dst: &mut [f32]) {
-        let n = dst.len();
-        assert!(
-            n == 0 || (n - 1) * stride < src.len(),
-            "softmax_from: short src"
-        );
-        let mut max = f32::NEG_INFINITY;
-        for t in 0..n {
-            max = max.max(src[t * stride]);
-        }
-        let mut sum = 0.0f32;
-        for (t, e) in dst.iter_mut().enumerate() {
-            *e = (src[t * stride] - max).exp();
-            sum += *e;
-        }
-        let inv = 1.0 / sum;
-        for e in dst.iter_mut() {
-            *e *= inv;
-        }
-    }
-}
-
-/// Scaled scores to attention weights, in place: subtract the max (for
-/// stability), exp, sum in t order, then multiply each by 1 / sum.
-#[inline(always)]
-fn softmax(s: &mut [f32]) {
-    let mut max = f32::NEG_INFINITY;
-    for &v in s.iter() {
-        max = max.max(v);
-    }
-    let mut sum = 0.0f32;
-    for e in s.iter_mut() {
-        *e = (*e - max).exp();
-        sum += *e;
-    }
-    let inv = 1.0 / sum;
-    for e in s.iter_mut() {
-        *e *= inv;
-    }
-}
-
-multiversion! {
-    /// o[h * os + d] = sum over t in 0..np, in order from 0.0, of
-    /// w[h * ws + t] * vb[t * vs + d], for heads h in 0..nh and d in 0..os:
-    /// every head sharing one pass over the value rows (each `os` long, at
-    /// stride vs). Up to 8 heads per pass.
-    fn vsum_rows<V3>(
-        w: &[f32],
-        ws: usize,
-        np: usize,
-        nh: usize,
-        vb: &[f32],
-        vs: usize,
-        o: &mut [f32],
-        os: usize,
-    ) {
-        for h0 in (0..nh).step_by(8) {
-            let (w, o) = (&w[h0 * ws..], &mut o[h0 * os..]);
-            // SAFETY (every arm): V3 only in the v3 variant.
-            unsafe {
-                match nh - h0 {
-                    1 => vsum_rows_group::<V3, 1>(w, ws, np, vb, vs, o, os),
-                    2 => vsum_rows_group::<V3, 2>(w, ws, np, vb, vs, o, os),
-                    3 => vsum_rows_group::<V3, 3>(w, ws, np, vb, vs, o, os),
-                    4 => vsum_rows_group::<V3, 4>(w, ws, np, vb, vs, o, os),
-                    5 => vsum_rows_group::<V3, 5>(w, ws, np, vb, vs, o, os),
-                    6 => vsum_rows_group::<V3, 6>(w, ws, np, vb, vs, o, os),
-                    7 => vsum_rows_group::<V3, 7>(w, ws, np, vb, vs, o, os),
-                    _ => vsum_rows_group::<V3, 8>(w, ws, np, vb, vs, o, os),
-                }
-            }
-        }
-    }
-}
-
-/// `vsum_rows` for G heads: `vsum_rows_group_v3` when V3, else the scalar
-/// loop. Both do the scalar `o[d] += w * v[d]` over t, per element.
-///
-/// # Safety
-/// With V3, the CPU must have the x86-64-v3 features.
-#[inline(always)]
-unsafe fn vsum_rows_group<const V3: bool, const G: usize>(
-    w: &[f32],
-    ws: usize,
-    np: usize,
-    vb: &[f32],
-    vs: usize,
-    o: &mut [f32],
-    os: usize,
-) {
-    #[cfg(target_arch = "x86_64")]
-    if V3 {
-        // SAFETY: our caller's contract.
-        return unsafe { vsum_rows_group_v3::<G>(w, ws, np, vb, vs, o, os) };
-    }
-    for g in 0..G {
-        for d in 0..os {
-            let mut a = 0.0f32;
-            for t in 0..np {
-                a += w[g * ws + t] * vb[t * vs + d];
-            }
-            o[g * os + d] = a;
-        }
-    }
-}
-
-/// `vsum_rows` for G heads with AVX. Per 8-float slice of d: G accumulators
-/// start at 0.0, and for t ascending the v slice is loaded once and each head
-/// does acc = acc + w * v (a separate multiply and add; Rust never contracts
-/// to FMA). That's the scalar `o[d] += w * v[d]` over t, per element, so the
-/// result is bit-identical to one head at a time. Registers: G accumulators,
-/// the v slice and one broadcast weight, so 10 of 16 at G = 8. Leftover d (os
-/// not a multiple of 8) runs scalar in the same order. Bounds are checked
-/// once up front instead of per row.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,bmi1,bmi2,f16c,fma,lzcnt")]
-#[inline]
-fn vsum_rows_group_v3<const G: usize>(
-    w: &[f32],
-    ws: usize,
-    np: usize,
-    vb: &[f32],
-    vs: usize,
-    o: &mut [f32],
-    os: usize,
-) {
-    use std::arch::x86_64::*;
-    assert!(
-        np <= ws && (G - 1) * ws + np <= w.len() && G * os <= o.len(),
-        "vsum_rows: short w/o"
-    );
-    assert!(
-        np == 0 || (np - 1) * vs + os <= vb.len(),
-        "vsum_rows: short v"
-    );
-    let op = o.as_mut_ptr();
-    let mut wr = [w.as_ptr(); G];
-    for (g, p) in wr.iter_mut().enumerate() {
-        *p = w.as_ptr().wrapping_add(g * ws);
-    }
-    let nc = os / 8;
-    for c in 0..nc {
-        // SAFETY: AVX is enabled (target_feature above). Weight reads
-        // wr[g] + t = w[g * ws + t] with t < np <= ws are inside w; v loads
-        // read vb[t * vs + 8 * c..+ 8] with t < np and 8 * c + 8 <= os, inside
-        // vb; stores o[g * os + 8 * c..+ 8] are inside o (all asserted above).
-        // The pointers only advance with wrapping_add and are dereferenced
-        // for t < np.
-        unsafe {
-            let mut acc = [_mm256_setzero_ps(); G];
-            let mut vp = vb.as_ptr().wrapping_add(8 * c);
-            for t in 0..np {
-                let y = _mm256_loadu_ps(vp);
-                for (a, wg) in acc.iter_mut().zip(&wr) {
-                    let x = _mm256_set1_ps(*wg.add(t));
-                    *a = _mm256_add_ps(*a, _mm256_mul_ps(x, y));
-                }
-                vp = vp.wrapping_add(vs);
-            }
-            for (g, a) in acc.iter().enumerate() {
-                _mm256_storeu_ps(op.add(g * os + 8 * c), *a);
-            }
-        }
-    }
-    for d in 8 * nc..os {
-        for g in 0..G {
-            let mut a = 0.0f32;
-            for t in 0..np {
-                a += w[g * ws + t] * vb[t * vs + d];
-            }
-            o[g * os + d] = a;
-        }
-    }
-}
-
-/// out[g] = dot(q_g, k) for the query vectors q_g = q[g * k.len()..][..k.len()],
-/// g in 0..out.len(), bit for bit; up to 8 at a time. Not dispatched on its
-/// own: the attention bodies call it with their own `V3`.
-///
-/// # Safety
-/// With V3, the CPU must have the x86-64-v3 features.
-#[inline(always)]
-unsafe fn dot_group<const V3: bool>(q: &[f32], k: &[f32], out: &mut [f32]) {
-    let n = k.len();
-    debug_assert_eq!(q.len(), n * out.len());
-    for (qs, os) in q.chunks(8 * n).zip(out.chunks_mut(8)) {
-        // SAFETY (every arm): our caller's contract.
-        unsafe {
-            match os.len() {
-                8 => dot_multi::<V3, 8>(qs, k, os),
-                7 => dot_multi::<V3, 7>(qs, k, os),
-                6 => dot_multi::<V3, 6>(qs, k, os),
-                5 => dot_multi::<V3, 5>(qs, k, os),
-                4 => dot_multi::<V3, 4>(qs, k, os),
-                3 => dot_multi::<V3, 3>(qs, k, os),
-                2 => dot_multi::<V3, 2>(qs, k, os),
-                _ => dot_multi::<V3, 1>(qs, k, os),
-            }
-        }
-    }
-}
-
-/// `dot` of G query vectors (contiguous in q) with one k: `dot_multi_v3`
-/// when V3, else `dot` per vector (the same bits).
-///
-/// # Safety
-/// With V3, the CPU must have the x86-64-v3 features.
-#[inline(always)]
-unsafe fn dot_multi<const V3: bool, const G: usize>(q: &[f32], k: &[f32], out: &mut [f32]) {
-    #[cfg(target_arch = "x86_64")]
-    if V3 {
-        // SAFETY: our caller's contract.
-        return unsafe { dot_multi_v3::<G>(q, k, out) };
-    }
-    let n = k.len();
-    for (g, o) in out[..G].iter_mut().enumerate() {
-        *o = dot(&q[g * n..(g + 1) * n], k);
-    }
-}
-
-/// `dot` of G query vectors with one k, with AVX. Each result uses `dot`'s
-/// exact lanes, tail and final sum, so it's identical to `dot`; the G
-/// accumulator chains run side by side and k is loaded once.
-///
-/// Written with intrinsics: the plain-Rust version (an `[[f32; 8]; G]`
-/// accumulator indexed through per-head slices) didn't vectorize and ran as
-/// scalar loads/adds through the stack, ~40% of prefill at 2k tokens.
-/// `_mm256_add_ps(acc, _mm256_mul_ps(x, y))` is `dot`'s `acc[i] += x[i] * y[i]`
-/// lane for lane (Rust never contracts to FMA), so results are unchanged.
-#[cfg(target_arch = "x86_64")]
-#[target_feature(enable = "avx2,bmi1,bmi2,f16c,fma,lzcnt")]
-#[inline]
-fn dot_multi_v3<const G: usize>(q: &[f32], k: &[f32], out: &mut [f32]) {
-    use std::arch::x86_64::*;
-    let n = k.len();
-    assert!(q.len() >= G * n && out.len() >= G, "dot_multi: short q/out");
-    let (kc, kr) = k.as_chunks::<8>();
-    let nc = kc.len();
-    let qp = q.as_ptr();
-    // SAFETY: AVX is enabled (target_feature above). Every load reads
-    // q[g * n + 8 * j .. + 8] with g < G and 8 * j + 8 <= n, inside q
-    // (asserted above), or a whole 8-float chunk of k.
-    let acc = unsafe {
-        let mut acc = [_mm256_setzero_ps(); G];
-        for (j, y) in kc.iter().enumerate() {
-            let y = _mm256_loadu_ps(y.as_ptr());
-            for (g, a) in acc.iter_mut().enumerate() {
-                let x = _mm256_loadu_ps(qp.add(g * n + 8 * j));
-                *a = _mm256_add_ps(*a, _mm256_mul_ps(x, y));
-            }
-        }
-        acc
-    };
-    for (g, a) in acc.iter().enumerate() {
-        let mut lanes = [0.0f32; 8];
-        // SAFETY: storing 8 floats into an 8-float array; AVX as above.
-        unsafe { _mm256_storeu_ps(lanes.as_mut_ptr(), *a) };
-        out[g] = sum_lanes(&lanes) + dot_tail(&q[g * n + 8 * nc..(g + 1) * n], kr);
-    }
-}
-
-/// `lanes.iter().sum()`: in order from -0.0.
-#[inline(always)]
-fn sum_lanes(lanes: &[f32; 8]) -> f32 {
-    let mut s = -0.0f32;
-    for &v in lanes {
-        s += v;
-    }
-    s
-}
-
-/// The products a[i] * b[i] summed in order from -0.0 (as `sum` does).
-#[inline(always)]
-fn dot_tail(a: &[f32], b: &[f32]) -> f32 {
-    let mut s = -0.0f32;
-    for (x, y) in a.iter().zip(b) {
-        s += x * y;
-    }
-    s
-}
-
-/// Dot product with 8 independent partial sums. A plain `.sum()` must add in
-/// order, so it can't use SIMD lanes; splitting it lets the compiler vectorize.
-#[inline(always)]
-fn dot(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len());
-    let mut acc = [0.0f32; 8];
-    let (ac, ar) = a.as_chunks::<8>();
-    let (bc, br) = b.as_chunks::<8>();
-    for (x, y) in ac.iter().zip(bc) {
-        for i in 0..8 {
-            acc[i] += x[i] * y[i];
-        }
-    }
-    sum_lanes(&acc) + dot_tail(ar, br)
-}
-
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::vmath::fmadd;
+
+    /// `dot` on the path the model runs (`quant::v3()`, `vmath::fused()`).
+    pub(crate) fn dot<T: KvElem>(a: &[f32], b: &[T]) -> f32 {
+        // SAFETY: V3 only when v3() detected the features.
+        unsafe {
+            match (crate::quant::v3(), vmath::fused()) {
+                (true, _) => super::dot::<true, true, T>(a, b),
+                (false, true) => super::dot::<false, true, T>(a, b),
+                (false, false) => super::dot::<false, false, T>(a, b),
+            }
+        }
+    }
+
+    /// `dot_group` on the path the model runs.
+    pub(crate) fn dot_group<T: KvElem>(q: &[f32], k: &[T], out: &mut [f32]) {
+        // SAFETY: as in `dot`.
+        unsafe {
+            match (crate::quant::v3(), vmath::fused()) {
+                (true, _) => super::dot_group::<true, true, T>(q, k, out),
+                (false, true) => super::dot_group::<false, true, T>(q, k, out),
+                (false, false) => super::dot_group::<false, false, T>(q, k, out),
+            }
+        }
+    }
+    use crate::kv::Half;
 
     /// A tiny well-formed qwen2: dim 64, 2 heads (1 kv), ffn 128, vocab 8, `layers`
     /// layers; `edit` changes the tensor list before the file is built.
@@ -1688,10 +2098,328 @@ pub(crate) mod tests {
     /// the same next-token logits, bit for bit, as feeding one token at a time.
     #[test]
     fn feed_batch_matches_feed() {
+        for repack in [true, false] {
+            // A fresh load each: repacking releases the originals.
+            let Some(m) = crate::testutil::model() else {
+                return;
+            };
+            let net = Qwen2::new_with(&m, repack);
+            let repacked = net.layers.iter().filter(|l| l.w_down.r8.is_some()).count();
+            assert_eq!(
+                repacked > 0,
+                repack,
+                "repack {repack}: {repacked} ffn_down repacked"
+            );
+            // Every Q5_0/Q8_0 matrix (0.5B: attention, gate/up, the head)
+            // goes through r8q when repacking, none otherwise.
+            let all = net
+                .layers
+                .iter()
+                .flat_map(|l| [&l.wq, &l.wk, &l.wv, &l.wo, &l.w_gate, &l.w_up, &l.w_down]);
+            for w in all.chain([&net.output]) {
+                if matches!(w.qt(), Q5_0 | Q8_0) {
+                    assert_eq!(w.r8.is_some(), repack, "{}", w.t.name);
+                }
+            }
+            feed_batch_matches_feed_on(&net);
+        }
+    }
+
+    /// Bit fingerprints of every matmul path on the real model, as
+    /// `Qwen2::new` builds it (AXON_REPACK / AXON_SIMD pick the kernels):
+    /// decode (`forward` token by token), prefill (`feed_batch` then
+    /// `forward`) and verify (`verify_batch`, the batched head). Asserts the
+    /// three agree bit for bit and prints one hash, so runs under different
+    /// settings or builds can be compared (`AXON_REPACK=0` must print the
+    /// same hash before and after a repack change; scalar/avx2/vnni must
+    /// print the same hash when everything is repacked).
+    #[test]
+    fn path_hashes() {
         let Some(m) = crate::testutil::model() else {
             return;
         };
         let net = Qwen2::new(&m);
+        let ids: Vec<u32> = (0..24u64)
+            .map(|i| (i * 2_654_435_761 % 150_000) as u32)
+            .collect();
+        let hash = |ls: &[Vec<f32>]| {
+            ls.iter()
+                .flatten()
+                .fold(0u64, |h, v| h.rotate_left(5) ^ v.to_bits() as u64)
+        };
+        let split = 15;
+        // decode: every position one token at a time
+        let mut c = net.new_cache(ids.len());
+        let dec: Vec<Vec<f32>> = (0..ids.len())
+            .map(|p| net.forward(ids[p], p, &mut c))
+            .collect();
+        // prefill: a batch, then decode the rest
+        let mut c = net.new_cache(ids.len());
+        net.feed_batch(&ids[..split], 0, &mut c);
+        let pre: Vec<Vec<f32>> = (split..ids.len())
+            .map(|p| net.forward(ids[p], p, &mut c))
+            .collect();
+        // verify: the rest as one batch through the batched head
+        let mut c = net.new_cache(ids.len());
+        net.feed_batch(&ids[..split], 0, &mut c);
+        let ver = net.verify_batch(&ids[split..], split, &mut c);
+        let tail = &dec[split..];
+        let (hd, hp, hv) = (hash(tail), hash(&pre), hash(&ver));
+        let repacked: Vec<&str> = net
+            .layers
+            .iter()
+            .flat_map(|l| [&l.wq, &l.wv, &l.w_gate, &l.w_down])
+            .chain([&net.output])
+            .filter(|w| w.r8.is_some())
+            .map(|w| w.t.qtype.name)
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect();
+        println!(
+            "path hashes: all decode {:016x} tail decode {hd:016x} prefill {hp:016x} \
+             verify {hv:016x}; repacked types {repacked:?}",
+            hash(&dec)
+        );
+        assert_eq!(hd, hp, "prefill differs from decode");
+        assert_eq!(hd, hv, "verify differs from decode");
+    }
+
+    /// The r8 kernels against the per-row ones on the real model: same
+    /// prompt, logits compared. Prints the deltas only. This random-token
+    /// prompt is chaotic: today's per-row kernels alone disagree with
+    /// themselves here (AXON_SIMD=scalar argmax 220, avx2/vnni 2090, max
+    /// |dlogprob| ~0.3), so r8's delta of the same size proves nothing either
+    /// way. The bound is only a gross-bug tripwire; accuracy is asserted per
+    /// row against f64 (`repack_rows_match_exact_on_model`, quant r8 tests)
+    /// and on real text by `matches_ollama`.
+    #[test]
+    fn repack_logit_deltas() {
+        if crate::testutil::model_path().is_none() {
+            return;
+        }
+        let ids: Vec<u32> = (0..40u64)
+            .map(|i| (i * 2_654_435_761 % 150_000) as u32)
+            .collect();
+        let run = |repack: bool| {
+            let m = crate::testutil::model().unwrap();
+            let net = Qwen2::new_with(&m, repack);
+            let mut c = net.new_cache(ids.len() + 1);
+            net.feed_batch(&ids[..ids.len() - 1], 0, &mut c);
+            net.forward(ids[ids.len() - 1], ids.len() - 1, &mut c)
+        };
+        let (a, b) = (run(true), run(false));
+        let lse = |l: &[f32]| {
+            let mx = l.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            mx + l.iter().map(|v| (v - mx).exp()).sum::<f32>().ln()
+        };
+        let (la, lb) = (lse(&a), lse(&b));
+        let mut dl = 0f32;
+        let mut dlp = 0f32;
+        for (x, y) in a.iter().zip(&b) {
+            dl = dl.max((x - y).abs());
+            dlp = dlp.max(((x - la) - (y - lb)).abs());
+        }
+        let argmax = |l: &[f32]| (0..l.len()).max_by(|&i, &j| l[i].total_cmp(&l[j])).unwrap();
+        let spread = a.iter().copied().fold(f32::NEG_INFINITY, f32::max)
+            - a.iter().copied().fold(f32::INFINITY, f32::min);
+        println!(
+            "repack vs per-row: max |dlogit| {dl:.2e} (logit range {spread:.1}), \
+             max |dlogprob| {dlp:.2e}, argmax {} vs {}",
+            argmax(&a),
+            argmax(&b)
+        );
+        let hash = |l: &[f32]| {
+            l.iter()
+                .fold(0u64, |h, v| h.rotate_left(5) ^ v.to_bits() as u64)
+        };
+        println!(
+            "logit hashes: r8 {:016x} per-row {:016x}; per-row argmax {} top {:.4}",
+            hash(&a),
+            hash(&b),
+            argmax(&b),
+            b[argmax(&b)]
+        );
+        assert!(dlp < 1.0, "r8 moved a logprob by {dlp}");
+    }
+
+    /// Every repacked matrix of the real model: r8/r8q rows vs the per-row
+    /// kernel vs an f64 dot of the dequantized row and quantized input, on a
+    /// real activation (the layer's own input for one token; wo gets the
+    /// attention's input as a stand-in, the head the final norm).
+    #[test]
+    fn repack_rows_match_exact_on_model() {
+        let Some(m) = crate::testutil::model() else {
+            return;
+        };
+        let net = Qwen2::new_with(&m, true);
+        // The repack released the originals from `m`: raw bytes from a second load.
+        let raw = crate::testutil::model().unwrap();
+        let mut worst = (0f64, 0f64);
+        let mut seen = std::collections::BTreeSet::new();
+        let mut check = |w: &Weight, inp: &[f32]| {
+            if w.r8.is_none() {
+                return;
+            }
+            seen.insert(w.qt());
+            let data = raw.tensor_data(w.t);
+            let plain = Weight {
+                t: w.t,
+                data: Some(data),
+                r8: None,
+            };
+            let a = net.matvec(w, inp);
+            let b = net.matvec(&plain, inp);
+            let n = inp.len();
+            let rb = row_bytes(w.qt(), n);
+            let xq = quantized_values(w.qt(), inp);
+            let mut wr = vec![0f32; n];
+            for r in 0..w.rows() {
+                dequant(w.qt(), &data[r * rb..(r + 1) * rb], &mut wr);
+                let exact: f64 = wr.iter().zip(&xq).map(|(p, q)| *p as f64 * q).sum();
+                let mag: f64 = wr.iter().zip(&xq).map(|(p, q)| (*p as f64 * q).abs()).sum();
+                let ea = (a[r] as f64 - exact).abs() / mag.max(f64::MIN_POSITIVE);
+                let eb = (b[r] as f64 - exact).abs() / mag.max(f64::MIN_POSITIVE);
+                worst.0 = worst.0.max(ea);
+                worst.1 = worst.1.max(eb);
+                assert!(
+                    ea < 1e-5,
+                    "{} row {r}: repacked {} per-row {} exact {exact}",
+                    w.t.name,
+                    a[r],
+                    b[r]
+                );
+            }
+        };
+        let mut x = net.embed(9707);
+        for layer in &net.layers {
+            let ha = net.rmsnorm(&x, &layer.attn_norm);
+            for w in [&layer.wq, &layer.wk, &layer.wv, &layer.wo] {
+                check(w, &ha);
+            }
+            let h = net.rmsnorm(&x, &layer.ffn_norm);
+            let act = net.matvec_swiglu(&layer.w_gate, &layer.w_up, &h);
+            check(&layer.w_down, &act);
+            check(&layer.w_gate, &h);
+            check(&layer.w_up, &h);
+            let d = net.matvec(&layer.w_down, &act);
+            for i in 0..x.len() {
+                x[i] += d[i];
+            }
+        }
+        check(&net.output, &net.rmsnorm(&x, &net.output_norm));
+        println!(
+            "max rel err vs f64: repacked {:.2e}, per-row {:.2e}; types {seen:?}",
+            worst.0, worst.1
+        );
+    }
+
+    /// x as the kernels for `qt` see it: quantized (Q8_K 256-blocks for the
+    /// K-quants, Q8_0 32-blocks for Q5_0/Q8_0) and dequantized, in f64.
+    fn quantized_values(qt: u32, inp: &[f32]) -> Vec<f64> {
+        let mut out = Vec::with_capacity(inp.len());
+        if matches!(qt, Q5_0 | Q8_0) {
+            for c in inp.chunks(32) {
+                let amax = c.iter().fold(0f32, |m, v| m.max(v.abs()));
+                let d = crate::quant::f16_to_f32(crate::quant::f32_to_f16(amax / 127.0));
+                let id = if amax != 0.0 { 127.0 / amax } else { 0.0 };
+                for v in c {
+                    let q = ((v * id).round_ties_even() as i32).clamp(-128, 127);
+                    out.push((q as f32 * d) as f64);
+                }
+            }
+            return out;
+        }
+        for c in inp.chunks(256) {
+            let amax = c.iter().fold(0f32, |m, v| m.max(v.abs()));
+            let max = *c.iter().find(|v| v.abs() == amax).unwrap();
+            let is = -127.0 / max;
+            for v in c {
+                let q = ((is * v).round_ties_even() as i32).min(127);
+                out.push((q as f32 * (1.0 / is)) as f64);
+            }
+        }
+        out
+    }
+
+    /// Releasing repacked originals must never hand out zeros, on the
+    /// anonymous copy (where released pages ARE zeros) and on a file mapping.
+    /// The output matrix is forced to the (tied) embedding, so it's repacked
+    /// as the head (0.5B: Q5_0, r8q; 1.5B+: Q4_K, r8) while `embed` keeps
+    /// reading its raw rows, and every tensor not released (blocks join
+    /// across neighbouring released tensors) keeps its bytes.
+    #[test]
+    fn release_keeps_embedding_on_copy_and_mmap() {
+        let Some(fresh) = crate::testutil::model_with(Some(false)) else {
+            return;
+        };
+        let ids = [9707u32, 11, 1879, 0, 151642, 77, 5000];
+        let mut logits: Vec<Vec<f32>> = Vec::new();
+        for copy in [true, false] {
+            let m = crate::testutil::model_with(Some(copy)).unwrap();
+            assert_eq!(m.file_backed(), !copy);
+            let net = Qwen2::build(&m, true, true);
+            let repacked: Vec<&Tensor> = net
+                .layers
+                .iter()
+                .flat_map(|l| [&l.w_down, &l.w_gate, &l.wq])
+                .filter(|w| w.r8.is_some())
+                .map(|w| w.t)
+                .collect();
+            assert!(!repacked.is_empty(), "nothing repacked");
+            // The embedding (= the tied head) still reads its real bytes,
+            // and so does every other tensor that wasn't released, however
+            // the released blocks around it were joined up.
+            assert!(!m.is_released(net.token_embd));
+            let mut kept = 0;
+            for t in &m.tensors {
+                if !m.is_released(t) {
+                    assert_eq!(m.tensor_data(t), fresh.tensor_data(t), "{}", t.name);
+                    kept += 1;
+                }
+            }
+            assert!(kept > 0 && kept < m.tensors.len(), "kept {kept}");
+            for &id in &ids {
+                assert_eq!(net.embed(id), {
+                    let mut x = vec![0f32; net.dim];
+                    let rb = row_bytes(net.token_embd.qtype.id, net.dim);
+                    let t = id as usize;
+                    dequant(
+                        net.token_embd.qtype.id,
+                        &fresh.tensor_data(net.token_embd)[t * rb..(t + 1) * rb],
+                        &mut x,
+                    );
+                    x
+                });
+            }
+            // A released original: the copy refuses it, the file map faults
+            // the same bytes back in.
+            let t = repacked[0];
+            if copy {
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    m.tensor_data(t).len()
+                }));
+                assert!(r.is_err(), "released tensor readable on the anonymous copy");
+            } else {
+                assert_eq!(m.tensor_data(t), fresh.tensor_data(t));
+            }
+            let mut c = net.new_cache(ids.len());
+            net.feed_batch(&ids[..ids.len() - 1], 0, &mut c);
+            logits.push(net.forward(ids[ids.len() - 1], ids.len() - 1, &mut c));
+            println!(
+                "copy {copy}: head repacked {}, {} sampled repacked tensors",
+                net.output.r8.is_some(),
+                repacked.len()
+            );
+        }
+        // Same weights either way: bit-identical logits.
+        let eq = logits[0]
+            .iter()
+            .zip(&logits[1])
+            .all(|(a, b)| a.to_bits() == b.to_bits());
+        assert!(eq, "copy and file map give different logits");
+    }
+
+    fn feed_batch_matches_feed_on(net: &Qwen2) {
         // 150 spread-out ordinary token ids (Qwen2's special tokens start at 151643).
         let ids: Vec<u32> = (0..150u64)
             .map(|i| (i * 2_654_435_761 % 150_000) as u32)
@@ -1718,7 +2446,10 @@ pub(crate) mod tests {
             (0..x.len()).find(|&i| x[i].to_bits() != y[i].to_bits())
         };
         for l in 0..net.n_layers {
-            for (what, x, y) in [("k", &a.k[l], &b.k[l]), ("v", &a.v[l], &b.v[l])] {
+            for (what, x, y) in [
+                ("k", kv_f32(&a, l, true), kv_f32(&b, l, true)),
+                ("v", kv_f32(&a, l, false), kv_f32(&b, l, false)),
+            ] {
                 if let Some(i) = first_diff(&x[..], &y[..]) {
                     panic!(
                         "layer {l} {what} differs at pos {} elem {}: {} vs {}",
@@ -1732,6 +2463,18 @@ pub(crate) mod tests {
         }
         if let Some(i) = first_diff(&la[..], &lb[..]) {
             panic!("logit {i} differs: {} vs {}", la[i], lb[i]);
+        }
+    }
+
+    /// Layer l's K (or V) cache, widened to f32 (exact).
+    fn kv_f32(c: &KvCache, l: usize, k: bool) -> Vec<f32> {
+        fn get<T: KvElem>(c: &Layers<T>, l: usize, k: bool) -> Vec<f32> {
+            let x = if k { &c.k[l] } else { &c.v[l] };
+            x.iter().map(|v| v.to_f32()).collect()
+        }
+        match &c.data {
+            KvData::F16(c) => get(c, l, k),
+            KvData::F32(c) => get(c, l, k),
         }
     }
 
@@ -1750,20 +2493,27 @@ pub(crate) mod tests {
                 for _ in 0..20 {
                     let q: Vec<f32> = (0..g * n).map(|_| rnd()).collect();
                     let k: Vec<f32> = (0..n).map(|_| rnd()).collect();
+                    let kh: Vec<Half> = k.iter().map(|&x| Half::from_f32(x)).collect();
+                    let kw: Vec<f32> = kh.iter().map(|x| x.to_f32()).collect();
                     let mut out = vec![0.0f32; g];
-                    // SAFETY: V3 false needs nothing.
-                    unsafe { dot_group::<false>(&q, &k, &mut out) };
-                    for (i, &o) in out.iter().enumerate() {
-                        let want = dot(&q[i * n..(i + 1) * n], &k);
+                    let mut outh = vec![0.0f32; g];
+                    dot_group(&q, &k, &mut out);
+                    dot_group(&q, &kh, &mut outh);
+                    for (i, (&o, &oh)) in out.iter().zip(&outh).enumerate() {
+                        let qi = &q[i * n..(i + 1) * n];
+                        let want = dot(qi, &k);
                         assert_eq!(o.to_bits(), want.to_bits(), "n={n} g={g} head {i}");
+                        // f16 keys: the same as f32 keys holding the widened values
+                        assert_eq!(oh.to_bits(), dot(qi, &kw).to_bits(), "f16 n={n} g={g}");
+                        assert_eq!(dot(qi, &kh).to_bits(), oh.to_bits(), "f16 n={n} g={g}");
                     }
                 }
             }
         }
     }
 
-    /// The shared-pass V sum must equal summing one head at a time (today's
-    /// per-head order: `o += w * v` over t from 0.0, as `weighted_sum`), bit
+    /// The shared-pass V sum must equal summing one head at a time (the
+    /// per-head order: `o = fmadd(w, v, o)` over t from 0.0, as `weighted_sum`), bit
     /// for bit, for value rows strided inside a bigger buffer.
     #[test]
     fn vsum_matches_per_head() {
@@ -1778,7 +2528,7 @@ pub(crate) mod tests {
                 let w = w(t);
                 let v: &[f32; H] = v(t).try_into().unwrap();
                 for i in 0..H {
-                    acc[i] += w * v[i];
+                    acc[i] = fmadd(w, v[i], acc[i]);
                 }
             }
             *o = acc;
@@ -1794,17 +2544,28 @@ pub(crate) mod tests {
             for nh in (1..=9).chain([14]) {
                 for np in [1, 2, 7, 64, 300] {
                     let (stride, ws) = (hd + 3, np + 2);
-                    let vb: Vec<f32> = (0..np * stride + 1).map(|_| rnd()).collect();
+                    let vb: Vec<f32> = (0..np * stride + 1)
+                        .map(|_| Half::from_f32(rnd()).to_f32())
+                        .collect();
+                    let vh: Vec<Half> = vb.iter().map(|&x| Half::from_f32(x)).collect();
                     let w: Vec<f32> = (0..nh * ws).map(|_| rnd()).collect();
                     let v = |t: usize| &vb[t * stride + 1..t * stride + 1 + hd];
                     let mut got = vec![f32::NAN; nh * hd];
                     vsum_rows(&w, ws, np, nh, &vb[1..], stride, &mut got, hd);
+                    let mut goth = vec![f32::NAN; nh * hd];
+                    vsum_rows(&w, ws, np, nh, &vh[1..], stride, &mut goth, hd);
+                    assert!(
+                        got.iter()
+                            .zip(&goth)
+                            .all(|(a, b)| a.to_bits() == b.to_bits()),
+                        "f16 rows differ: hd={hd} nh={nh} np={np}"
+                    );
                     for h in 0..nh {
                         let mut want = vec![0.0f32; hd];
                         for t in 0..np {
                             let wt = w[h * ws + t];
                             for (o, &x) in want.iter_mut().zip(v(t)) {
-                                *o += wt * x;
+                                *o = fmadd(wt, x, *o);
                             }
                         }
                         if hd == 64 {
@@ -1910,15 +2671,6 @@ pub(crate) mod tests {
                 unsafe { add_assign::v3(&mut b, &w) };
                 assert_eq!(bits(&a), bits(&b), "add_assign n={n}");
 
-                // softmax over plain scores (no inf/NaN unless edgy)
-                for stride in [1, 3] {
-                    let src = mixed(n * stride, next(), 8.0, edgy);
-                    let (mut a, mut b) = (vec![0.0; n], vec![1.0; n]);
-                    softmax_from::portable(&src, stride, &mut a);
-                    unsafe { softmax_from::v3(&src, stride, &mut b) };
-                    assert_eq!(bits(&a), bits(&b), "softmax_from n={n}");
-                }
-
                 let mut best = |slots: usize| {
                     let ys = mixed(n * slots, next(), 2.0, edgy);
                     let mut a = vec![Best::NONE; slots];
@@ -1959,70 +2711,180 @@ pub(crate) mod tests {
                 assert_eq!(bits(&a), bits(&c), "add_col");
             }
         }
-        // Attention pieces, on the model's shapes and odd ones.
+        // softmax over plain scores (no inf/NaN unless edgy)
+        for n in [0usize, 1, 5, 8, 37, 64, 300] {
+            for edgy in [false, true] {
+                for stride in [1, 3] {
+                    let src = mixed(n * stride, next(), 8.0, edgy);
+                    let (mut a, mut b) = (vec![0.0; n], vec![1.0; n]);
+                    softmax_from::portable(&src, stride, &mut a);
+                    unsafe { softmax_from::v3(&src, stride, &mut b) };
+                    assert_eq!(bits(&a), bits(&b), "softmax_from n={n}");
+                    unsafe { softmax_from::fma(&src, stride, &mut b) };
+                    assert_eq!(bits(&a), bits(&b), "softmax_from fma n={n}");
+                }
+            }
+        }
+        // Attention pieces, on the model's shapes and odd ones, f32 and f16
+        // caches. The portable variant fuses like v3 here (the CPU has FMA).
+        assert!(vmath::fused());
         for (hd, group, n_kv) in [(64, 7, 2), (64, 6, 2), (128, 3, 1), (37, 9, 2), (5, 1, 1)] {
             let kv_dim = n_kv * hd;
             for np in [1usize, 2, 7, 33, 300] {
                 let qg = mixed(group * hd, next(), 4.0, false);
                 let kc = mixed((np + 2) * kv_dim, next(), 1.0, false);
                 let vc = mixed((np + 2) * kv_dim, next(), 1.0, false);
+                let kh: Vec<Half> = kc.iter().map(|&x| Half::from_f32(x)).collect();
+                let vh: Vec<Half> = vc.iter().map(|&x| Half::from_f32(x)).collect();
                 let scale = 1.0 / (hd as f32).sqrt();
                 let kvh = n_kv - 1;
+                let off = kvh * hd;
+                let tc = np.div_ceil(3);
+                let t0 = np - np.min(tc);
+                let wts = mixed(group * (np + 1), next(), 1.0, false);
+                let vb = &vc[off..];
+                let vbh = &vh[off..];
 
                 let (mut a, mut b) = (vec![0.0; group], vec![1.0; group]);
-                // SAFETY: can_v3() above.
-                unsafe { dot_group::<false>(&qg, &kc[..hd], &mut a) };
-                unsafe { dot_group::<true>(&qg, &kc[..hd], &mut b) };
+                // SAFETY (every v3 call below): can_v3() above.
+                unsafe { super::dot_group::<false, true, f32>(&qg, &kc[..hd], &mut a) };
+                unsafe { super::dot_group::<true, true, f32>(&qg, &kc[..hd], &mut b) };
                 assert_eq!(bits(&a), bits(&b), "dot_group hd={hd} g={group}");
 
                 let (mut a, mut b) = (vec![0.0; np], vec![1.0; np]);
-                score_softmax::portable(&qg[..hd], &kc, kv_dim, kvh * hd, scale, &mut a);
-                unsafe { score_softmax::v3(&qg[..hd], &kc, kv_dim, kvh * hd, scale, &mut b) };
+                score_softmax::portable(&qg[..hd], &kc, kv_dim, off, scale, &mut a);
+                unsafe { score_softmax::v3(&qg[..hd], &kc, kv_dim, off, scale, &mut b) };
                 assert_eq!(bits(&a), bits(&b), "score_softmax hd={hd} np={np}");
+                score_softmax::portable(&qg[..hd], &kh, kv_dim, off, scale, &mut a);
+                unsafe { score_softmax::v3(&qg[..hd], &kh, kv_dim, off, scale, &mut b) };
+                assert_eq!(bits(&a), bits(&b), "score_softmax f16 hd={hd} np={np}");
+                unsafe { score_softmax::fma(&qg[..hd], &kh, kv_dim, off, scale, &mut b) };
+                assert_eq!(bits(&a), bits(&b), "score_softmax fma hd={hd} np={np}");
 
-                let tc = np.div_ceil(3);
-                let t0 = np - np.min(tc);
                 let (mut a, mut b) = (vec![0.0; tc * group], vec![1.0; tc * group]);
-                let off = kvh * hd;
-                score_tile::portable(&qg, &kc, kv_dim, hd, off, t0..np, scale, &mut a);
-                unsafe { score_tile::v3(&qg, &kc, kv_dim, hd, off, t0..np, scale, &mut b) };
+                score_tile::portable(&qg, &kh, kv_dim, hd, off, t0..np, scale, &mut a);
+                unsafe { score_tile::v3(&qg, &kh, kv_dim, hd, off, t0..np, scale, &mut b) };
                 assert_eq!(bits(&a), bits(&b), "score_tile hd={hd} np={np}");
+                unsafe { score_tile::fma(&qg, &kh, kv_dim, hd, off, t0..np, scale, &mut b) };
+                assert_eq!(bits(&a), bits(&b), "score_tile fma hd={hd} np={np}");
 
-                let wts = mixed(group * (np + 1), next(), 1.0, false);
                 let (mut a, mut b) = (vec![0.0; group * hd], vec![1.0; group * hd]);
-                let vb = &vc[kvh * hd..];
                 vsum_rows::portable(&wts, np + 1, np, group, vb, kv_dim, &mut a, hd);
                 unsafe { vsum_rows::v3(&wts, np + 1, np, group, vb, kv_dim, &mut b, hd) };
                 assert_eq!(bits(&a), bits(&b), "vsum_rows hd={hd} np={np}");
+                vsum_rows::portable(&wts, np + 1, np, group, vbh, kv_dim, &mut a, hd);
+                unsafe { vsum_rows::v3(&wts, np + 1, np, group, vbh, kv_dim, &mut b, hd) };
+                assert_eq!(bits(&a), bits(&b), "vsum_rows f16 hd={hd} np={np}");
+                unsafe { vsum_rows::fma(&wts, np + 1, np, group, vbh, kv_dim, &mut b, hd) };
+                assert_eq!(bits(&a), bits(&b), "vsum_rows fma hd={hd} np={np}");
 
                 let (mut sa, mut sb) = (vec![0.0; (np + 1) * group], vec![1.0; (np + 1) * group]);
                 let (mut a, mut b) = (vec![0.0; group * hd], vec![1.0; group * hd]);
-                attend_causal::portable(&qg, &kc, &vc, kv_dim, hd, kvh, np, scale, &mut sa, &mut a);
+                attend_causal::portable(&qg, &kh, &vh, kv_dim, hd, kvh, np, scale, &mut sa, &mut a);
                 unsafe {
-                    attend_causal::v3(&qg, &kc, &vc, kv_dim, hd, kvh, np, scale, &mut sb, &mut b)
+                    attend_causal::v3(&qg, &kh, &vh, kv_dim, hd, kvh, np, scale, &mut sb, &mut b)
                 };
                 assert_eq!(bits(&a), bits(&b), "attend_causal hd={hd} np={np}");
-
-                // and the prefill task equals decode `attend` for the same heads
-                let mut q = vec![0.0f32; n_kv * group * hd];
-                q[kvh * group * hd..].copy_from_slice(&qg);
-                let mut got = vec![0.0f32; q.len()];
-                let mut buf = Vec::new();
-                attend(&q, &kc, &vc, kv_dim, hd, np, None, &mut buf, &mut got);
-                assert_eq!(
-                    bits(&got[kvh * group * hd..]),
-                    bits(&a),
-                    "attend_causal vs attend"
-                );
+                unsafe {
+                    attend_causal::fma(&qg, &kh, &vh, kv_dim, hd, kvh, np, scale, &mut sb, &mut b)
+                };
+                assert_eq!(bits(&a), bits(&b), "attend_causal fma hd={hd} np={np}");
             }
         }
     }
 
-    /// Decode attention, per-head and every tiling, must equal a plain
+    /// The unfused path (CPUs without FMA) on its own terms: `dot` is 8
+    /// lanes of separate multiply and add + `sum8` + the tail, the V sum the
+    /// same chain per element, softmax `exp_f::<false>`; equal bit for bit to
+    /// plain references, and decode equals prefill attention on it too.
+    #[test]
+    fn unfused_attention_paths() {
+        let mut seed = 0x5151_2626u64;
+        let mut next = || {
+            seed += 0x9e37_79b9;
+            seed
+        };
+        for (hd, group) in [(64, 7), (37, 3), (5, 1)] {
+            for np in [1usize, 9, 40] {
+                let q = mixed(group * hd, next(), 4.0, false);
+                let kc = mixed(np * hd, next(), 1.0, false);
+                let vc = mixed(np * hd, next(), 1.0, false);
+                let scale = 1.0 / (hd as f32).sqrt();
+                let dot_ref = |a: &[f32], b: &[f32]| {
+                    let mut acc = [0.0f32; 8];
+                    let n8 = a.len() / 8 * 8;
+                    for i in 0..n8 {
+                        acc[i % 8] += a[i] * b[i];
+                    }
+                    let mut t = 0.0f32;
+                    for i in n8..a.len() {
+                        t += a[i] * b[i];
+                    }
+                    vmath::sum8(&acc) + t
+                };
+                let mut got = vec![0.0f32; group];
+                // SAFETY: V3 false.
+                unsafe { super::dot_group::<false, false, f32>(&q, &kc[..hd], &mut got) };
+                for g in 0..group {
+                    let want = dot_ref(&q[g * hd..(g + 1) * hd], &kc[..hd]);
+                    assert_eq!(got[g].to_bits(), want.to_bits(), "dot hd={hd} g={g}");
+                }
+                // Prefill body vs the per-head reference.
+                let mut sc = vec![f32::NAN; (np + 1) * group];
+                let mut out = vec![f32::NAN; group * hd];
+                // SAFETY: V3 false.
+                unsafe {
+                    attend_causal::imp::<false, false, f32>(
+                        &q, &kc, &vc, hd, hd, 0, np, scale, &mut sc, &mut out,
+                    )
+                };
+                for g in 0..group {
+                    let qv = &q[g * hd..(g + 1) * hd];
+                    let s: Vec<f32> = (0..np)
+                        .map(|t| dot_ref(qv, &kc[t * hd..(t + 1) * hd]) * scale)
+                        .collect();
+                    let m = s.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                    let e: Vec<f32> = s.iter().map(|&x| vmath::exp_f::<false>(x - m)).collect();
+                    let (c, r) = e.as_chunks::<8>();
+                    let mut lanes = [0.0f32; 8];
+                    for c in c {
+                        for i in 0..8 {
+                            lanes[i] += c[i];
+                        }
+                    }
+                    let inv = 1.0 / (vmath::sum8(&lanes) + r.iter().fold(0.0f32, |a, &x| a + x));
+                    for d in 0..hd {
+                        let mut o = 0.0f32;
+                        for t in 0..np {
+                            o += e[t] * inv * vc[t * hd + d];
+                        }
+                        assert_eq!(
+                            out[g * hd + d].to_bits(),
+                            o.to_bits(),
+                            "attend hd={hd} np={np}"
+                        );
+                    }
+                    // Decode scoring of the same head: same weights.
+                    let mut w = vec![f32::NAN; np];
+                    // SAFETY: V3 false.
+                    unsafe {
+                        score_softmax::imp::<false, false, f32>(qv, &kc, hd, 0, scale, &mut w)
+                    };
+                    for t in 0..np {
+                        assert_eq!(w[t].to_bits(), (e[t] * inv).to_bits(), "weights t={t}");
+                    }
+                }
+            }
+        }
+    }
+
+    /// Decode attention, per-head and every tiling and V split, and
+    /// prefill's `attend_group` must equal a plain scalar
     /// one-head-at-a-time reference bit for bit: `dot` * scale, softmax (max,
-    /// exp + sum in t order, * 1/sum), then o += w * v over t from 0.0. The
-    /// cache has extra rows past np that must not be read, and the scratch is
-    /// reused across calls with stale contents.
+    /// `vmath::exp`, sum in 8 lanes by t mod 8 + `sum8` + the tail in order,
+    /// times 1/sum), then o = fmadd(w, v, o) over t from 0.0, on f32 and f16
+    /// caches (v widened). The cache has extra rows past np that must not be
+    /// read, and the scratch is reused across calls with stale contents.
     #[test]
     fn attend_matches_per_head() {
         let mut seed = 0x6a09_e667_f3bc_c909u64;
@@ -2036,61 +2898,101 @@ pub(crate) mod tests {
         for hd in [64, 128] {
             for group in [6, 7] {
                 for n_kv in [2, 4] {
-                    let (kv_dim, nq) = (n_kv * hd, n_kv * group * hd);
+                    let kv_dim = n_kv * hd;
                     let nps = (1..300).chain([1000, 2047, 3001]);
                     for np in nps {
-                        let q: Vec<f32> = (0..nq).map(|_| rnd() * 4.0).collect();
+                        let q: Vec<f32> = (0..n_kv * group * hd).map(|_| rnd() * 4.0).collect();
                         let kc: Vec<f32> = (0..(np + 3) * kv_dim).map(|_| rnd()).collect();
                         let vc: Vec<f32> = (0..(np + 3) * kv_dim).map(|_| rnd()).collect();
-                        let scale = 1.0 / (hd as f32).sqrt();
-                        let mut want = vec![0.0f32; nq];
-                        for qh in 0..n_kv * group {
-                            let kvh = qh / group;
-                            let qv = &q[qh * hd..(qh + 1) * hd];
-                            let mut w: Vec<f32> = (0..np)
-                                .map(|t| {
-                                    let k0 = t * kv_dim + kvh * hd;
-                                    dot(qv, &kc[k0..k0 + hd]) * scale
-                                })
-                                .collect();
-                            let max = w.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                            let mut sum = 0.0f32;
-                            for e in w.iter_mut() {
-                                *e = (*e - max).exp();
-                                sum += *e;
-                            }
-                            let inv = 1.0 / sum;
-                            w.iter_mut().for_each(|e| *e *= inv);
-                            let o = &mut want[qh * hd..(qh + 1) * hd];
-                            for (t, &wt) in w.iter().enumerate() {
-                                let v0 = t * kv_dim + kvh * hd;
-                                for (o, &v) in o.iter_mut().zip(&vc[v0..v0 + hd]) {
-                                    *o += wt * v;
-                                }
-                            }
-                        }
-                        let tiles = [
-                            None,
-                            Some(1),
-                            Some(7),
-                            Some(64),
-                            Some(np.div_ceil(5)),
-                            decode_tile(np.max(TILE_MIN_NP), n_kv),
-                        ];
-                        for tile in tiles {
-                            let mut got = vec![f32::NAN; nq];
-                            attend(&q, &kc, &vc, kv_dim, hd, np, tile, &mut buf, &mut got);
-                            if let Some(i) =
-                                (0..nq).find(|&i| got[i].to_bits() != want[i].to_bits())
-                            {
-                                panic!(
-                                    "hd={hd} group={group} n_kv={n_kv} np={np} tile={tile:?}: \
-                                     elem {i} {} vs {}",
-                                    got[i], want[i]
-                                );
-                            }
-                        }
+                        attend_check(&q, &kc, &vc, kv_dim, hd, np, &mut buf);
+                        let half = |x: &Vec<f32>| -> Vec<Half> {
+                            let mut h = vec![Half(0); x.len()];
+                            Half::store(&mut h, x);
+                            h
+                        };
+                        attend_check(&q, &half(&kc), &half(&vc), kv_dim, hd, np, &mut buf);
                     }
+                }
+            }
+        }
+    }
+
+    fn attend_check<T: KvElem>(
+        q: &[f32],
+        kc: &[T],
+        vc: &[T],
+        kv_dim: usize,
+        hd: usize,
+        np: usize,
+        buf: &mut Vec<f32>,
+    ) {
+        let nq = q.len();
+        let n_kv = kv_dim / hd;
+        let group = nq / hd / n_kv;
+        let ty = std::any::type_name::<T>();
+        let scale = 1.0 / (hd as f32).sqrt();
+        let mut want = vec![0.0f32; nq];
+        for qh in 0..n_kv * group {
+            let kvh = qh / group;
+            let qv = &q[qh * hd..(qh + 1) * hd];
+            let mut w: Vec<f32> = (0..np)
+                .map(|t| {
+                    let k0 = t * kv_dim + kvh * hd;
+                    dot(qv, &kc[k0..k0 + hd]) * scale
+                })
+                .collect();
+            let max = w.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+            let (mut lanes, mut tail) = ([0.0f32; 8], 0.0f32);
+            let whole = np / 8 * 8;
+            for (t, e) in w.iter_mut().enumerate() {
+                *e = vmath::exp(*e - max);
+                if t < whole {
+                    lanes[t % 8] += *e;
+                } else {
+                    tail += *e;
+                }
+            }
+            let inv = 1.0 / (vmath::sum8(&lanes) + tail);
+            w.iter_mut().for_each(|e| *e *= inv);
+            let o = &mut want[qh * hd..(qh + 1) * hd];
+            for (t, &wt) in w.iter().enumerate() {
+                let v0 = t * kv_dim + kvh * hd;
+                for (o, &v) in o.iter_mut().zip(&vc[v0..v0 + hd]) {
+                    *o = fmadd(wt, v.to_f32(), *o);
+                }
+            }
+        }
+        let tiles = [
+            None,
+            Some(1),
+            Some(7),
+            Some(64),
+            Some(np.div_ceil(5)),
+            decode_tile(np.max(TILE_MIN_NP), n_kv),
+        ];
+        // Prefill's per-(token, kv head) attention.
+        let mut got = vec![f32::NAN; nq];
+        for (kvh, o) in got.chunks_exact_mut(group * hd).enumerate() {
+            let qg = &q[kvh * group * hd..(kvh + 1) * group * hd];
+            attend_group(qg, kc, vc, kv_dim, hd, kvh, np, o);
+        }
+        if let Some(i) = (0..nq).find(|&i| got[i].to_bits() != want[i].to_bits()) {
+            panic!(
+                "{ty} prefill hd={hd} group={group} n_kv={n_kv} np={np}: elem {i} {} vs {}",
+                got[i], want[i]
+            );
+        }
+        // Decode: every tiling x the V split for 1, 5, 18 and 64 threads.
+        for tile in tiles {
+            for threads in [1, 5, 18, 64] {
+                let mut got = vec![f32::NAN; nq];
+                attend(q, kc, vc, kv_dim, hd, np, tile, threads, buf, &mut got);
+                if let Some(i) = (0..nq).find(|&i| got[i].to_bits() != want[i].to_bits()) {
+                    panic!(
+                        "{ty} hd={hd} group={group} n_kv={n_kv} np={np} tile={tile:?} \
+                         threads={threads}: elem {i} {} vs {}",
+                        got[i], want[i]
+                    );
                 }
             }
         }

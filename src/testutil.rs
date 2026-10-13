@@ -10,12 +10,16 @@ pub fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
-/// The real model, for tests that need it.
+/// Path of the test model (`AXON_TEST_MODEL` overrides MODEL; fixture-based
+/// tests like matches_ollama only make sense for MODEL), or None to skip.
 ///
 /// A missing model is a test failure, not a silent pass. CI doesn't have the
 /// 470 MB file, so it opts out explicitly with `AXON_SKIP_MODEL_TESTS=1`.
-pub fn model() -> Option<Model> {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(MODEL);
+pub fn model_path() -> Option<PathBuf> {
+    let path = match std::env::var_os("AXON_TEST_MODEL") {
+        Some(p) => PathBuf::from(p),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).join(MODEL),
+    };
     if !path.exists() {
         if std::env::var_os("AXON_SKIP_MODEL_TESTS").is_some() {
             eprintln!("skipping: {MODEL} not present and AXON_SKIP_MODEL_TESTS is set");
@@ -26,7 +30,19 @@ pub fn model() -> Option<Model> {
              AXON_SKIP_MODEL_TESTS=1 to skip the tests that need it."
         );
     }
-    Some(gguf::load(path.to_str().expect("utf-8 path")).expect("load model"))
+    Some(path)
+}
+
+/// The real model, for tests that need it.
+pub fn model() -> Option<Model> {
+    model_with(None)
+}
+
+/// `model`, copied into anonymous memory (Some(true)) or file-mapped
+/// (Some(false)); None picks as `gguf::load` does.
+pub fn model_with(copy: Option<bool>) -> Option<Model> {
+    let path = model_path()?;
+    Some(gguf::load_with(path.to_str().expect("utf-8 path"), copy).expect("load model"))
 }
 
 pub fn read_json(rel: &str) -> serde_json::Value {
