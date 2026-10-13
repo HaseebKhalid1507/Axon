@@ -1,0 +1,10 @@
+# Build for x86-64-v3 (AVX2, FMA, F16C, BMI2: Intel Haswell 2013+, AMD
+# Excavator 2015+). The hand-written kernels in quant.rs pick their SIMD path
+# at runtime either way; this lets the compiler vectorize everything else
+# (attention, norms, quantizing activations) with 8-wide AVX. On bella:
+# prefill ~+10%, decode ~+5%, logits unchanged.
+#
+# For an older x86 CPU, build with: RUSTFLAGS="" cargo build --release
+# (RUSTFLAGS, even empty, replaces these flags).
+[target.'cfg(target_arch = "x86_64")']
+rustflags = ["-C", "target-cpu=x86-64-v3"]
