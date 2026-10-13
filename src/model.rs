@@ -266,6 +266,22 @@ impl<'a> Qwen2<'a> {
 
     /// Run one token at position `pos` and return logits (len vocab).
     pub fn forward(&self, token: u32, pos: usize, cache: &mut KvCache) -> Vec<f32> {
+        let x = self.hidden(token, pos, cache);
+        // 9. Final norm, then the output head scores every vocab entry.
+        let h = self.rmsnorm(&x, &self.output_norm);
+        self.matvec(self.output, &h)
+    }
+
+    /// Run one token at position `pos` for its effect on the cache only. Prompt
+    /// tokens before the last need no logits, and the output head is the
+    /// biggest matrix in the model (37% of a token's weight reads here).
+    pub fn feed(&self, token: u32, pos: usize, cache: &mut KvCache) {
+        self.hidden(token, pos, cache);
+    }
+
+    /// Every layer for one token: store its keys and values in the cache and
+    /// return the final hidden state (before the output norm).
+    fn hidden(&self, token: u32, pos: usize, cache: &mut KvCache) -> Vec<f32> {
         assert!(
             pos < cache.max_ctx,
             "position {pos} exceeds cache size {}",
@@ -357,9 +373,7 @@ impl<'a> Qwen2<'a> {
             }
         }
 
-        // 9. Final norm, then the output head scores every vocab entry.
-        let h = self.rmsnorm(&x, &self.output_norm);
-        self.matvec(self.output, &h)
+        x
     }
 }
 
@@ -410,10 +424,11 @@ mod tests {
             let steps = fx["steps"].as_array().expect("steps");
             let ids = tok.encode(prompt);
             let mut cache = net.new_cache(ids.len() + steps.len() + 1);
-            let mut logits = Vec::new();
-            for (pos, &id) in ids.iter().enumerate() {
-                logits = net.forward(id, pos, &mut cache);
+            let (&last, rest) = ids.split_last().expect("prompt has tokens");
+            for (pos, &id) in rest.iter().enumerate() {
+                net.feed(id, pos, &mut cache);
             }
+            let mut logits = net.forward(last, rest.len(), &mut cache);
             let mut worst = 0f32;
             for (i, s) in steps.iter().enumerate() {
                 let want = s["id"].as_u64().expect("id") as usize;
