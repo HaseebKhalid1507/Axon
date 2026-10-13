@@ -1,8 +1,9 @@
-//! qwen2 forward pass, M1: plain loops, f32 activations, single thread.
-//! The goal is correctness, not speed.
+//! qwen2 forward pass. Matrix-vector products run across all cores (rayon);
+//! everything else is plain loops with f32 activations.
 
 use crate::gguf::{Model, Tensor, Val};
 use crate::quant::{dequant, dot_row, row_bytes};
+use rayon::prelude::*;
 
 /// The weights of one transformer block, borrowed from the mmap.
 struct Layer<'a> {
@@ -158,9 +159,17 @@ impl<'a> Qwen2<'a> {
         assert_eq!(x.len(), n_in, "matvec {}: input len", w.name);
         let rb = row_bytes(w.qtype.id, n_in);
         let data = self.m.tensor_data(w);
-        (0..n_out)
-            .map(|o| dot_row(w.qtype.id, &data[o * rb..(o + 1) * rb], x))
-            .collect()
+        // Every output row is an independent dot product, so split rows across
+        // cores. Chunks of 64 rows keep scheduling overhead small, and rayon's
+        // work stealing evens out the fast and efficiency cores.
+        let mut out = vec![0f32; n_out];
+        out.par_chunks_mut(64).enumerate().for_each(|(c, ys)| {
+            for (j, y) in ys.iter_mut().enumerate() {
+                let o = c * 64 + j;
+                *y = dot_row(w.qtype.id, &data[o * rb..(o + 1) * rb], x);
+            }
+        });
+        out
     }
 
     /// RMSNorm: scale x so its root-mean-square is 1, then multiply by a learned weight.
