@@ -251,14 +251,28 @@ struct KBlock {
     bsums: [i16; QK_K / 16],
 }
 
-/// x quantized once per matvec, in every layout a weight type may need.
+/// x quantized once per matvec, in the layouts its weight types need.
 pub struct QuantizedAct {
-    /// original values, for the F32/F16 float fallback
+    n: usize,
+    /// original values, for the F32/F16 float fallback; empty unless built
     x: Vec<f32>,
     /// "Q8_0" view (32-blocks): per-block scale and i8 values; None if len % 32 != 0
+    /// or not built
     b32: Option<(Vec<f32>, Vec<[i8; 32]>)>,
-    /// "Q8_K" view (256-blocks); None if len % 256 != 0
+    /// "Q8_K" view (256-blocks); None if len % 256 != 0 or not built
     k: Option<Vec<KBlock>>,
+}
+
+/// Round to nearest, ties to even, for |v| < 2^22: the same result as
+/// `f32::round_ties_even`, but plain arithmetic. Adding 1.5 * 2^23 leaves no
+/// fraction bits, so the FPU's own ties-to-even rounding does the work (the
+/// trick llama.cpp's `nearest_int` uses). Without SSE4.1 at compile time,
+/// `round_ties_even` is a libm call per element: 63 us to quantize one
+/// 4864-wide activation, half the time of the matvec that uses it.
+#[inline(always)]
+fn round_even_small(v: f32) -> i32 {
+    const MAGIC: f32 = 12_582_912.0; // 1.5 * 2^23
+    (v + MAGIC).to_bits() as i32 - MAGIC.to_bits() as i32
 }
 
 /// Symmetric 8-bit quantization of one block: d = amax/127, q = round(x/d).
@@ -301,7 +315,7 @@ fn quantize_q8_0(x: &[f32], q: &mut [i8]) -> f32 {
     let d = f16_to_f32(f32_to_f16(amax / 127.0));
     let id = if amax != 0.0 { 127.0 / amax } else { 0.0 };
     for (qi, &xi) in q.iter_mut().zip(x) {
-        *qi = (xi * id).round_ties_even() as i8;
+        *qi = round_even_small(xi * id).clamp(-128, 127) as i8;
     }
     d
 }
@@ -323,15 +337,24 @@ fn quantize_q8_k(x: &[f32], q: &mut [i8]) -> f32 {
     }
     let iscale = -127.0 / max;
     for (qi, &xi) in q.iter_mut().zip(x) {
-        *qi = ((iscale * xi).round_ties_even() as i32).min(127) as i8;
+        *qi = round_even_small(iscale * xi).min(127) as i8;
     }
     1.0 / iscale
 }
 
 impl QuantizedAct {
+    /// Every layout x's length allows.
+    #[cfg(test)]
     pub fn new(x: &[f32]) -> QuantizedAct {
+        Self::for_types(x, &[F32, Q8_0, Q4_K])
+    }
+
+    /// Only the layouts the given weight types read, so a matvec doesn't pay
+    /// to quantize views it never uses.
+    pub fn for_types(x: &[f32], qtypes: &[u32]) -> QuantizedAct {
         let n = x.len();
-        let b32 = n.is_multiple_of(QK8_0).then(|| {
+        let wants = |ts: &[u32]| qtypes.iter().any(|t| ts.contains(t));
+        let b32 = (wants(&[Q5_0, Q8_0]) && n.is_multiple_of(QK8_0)).then(|| {
             let nb = n / QK8_0;
             let mut d = Vec::with_capacity(nb);
             let mut q = vec![[0i8; 32]; nb];
@@ -340,7 +363,7 @@ impl QuantizedAct {
             }
             (d, q)
         });
-        let k = n.is_multiple_of(QK_K).then(|| {
+        let k = (wants(&[Q4_K, Q6_K]) && n.is_multiple_of(QK_K)).then(|| {
             x.as_chunks::<QK_K>()
                 .0
                 .iter()
@@ -355,15 +378,16 @@ impl QuantizedAct {
                 })
                 .collect()
         });
-        QuantizedAct {
-            x: x.to_vec(),
-            b32,
-            k,
-        }
+        let x = if wants(&[F32, F16]) {
+            x.to_vec()
+        } else {
+            Vec::new()
+        };
+        QuantizedAct { n, x, b32, k }
     }
 
     pub fn len(&self) -> usize {
-        self.x.len()
+        self.n
     }
 }
 
@@ -878,11 +902,19 @@ unsafe fn dot_row_q8_with(simd: Simd, qtype_id: u32, row: &[u8], x: &QuantizedAc
     let n = x.len();
     let name = || crate::gguf::qtype(qtype_id).name;
     match qtype_id {
-        F32 | F16 => dot_row(qtype_id, row, &x.x),
+        F32 | F16 => {
+            assert_eq!(
+                x.x.len(),
+                n,
+                "dot_row_q8: {} input wasn't built for float weights",
+                name()
+            );
+            dot_row(qtype_id, row, &x.x)
+        }
         Q5_0 | Q8_0 => {
             let (dx, qx) = x.b32.as_ref().unwrap_or_else(|| {
                 panic!(
-                    "dot_row_q8: {} needs input len multiple of 32, got {}",
+                    "dot_row_q8: {} needs input len multiple of 32, got {} (or the 32-block view wasn't built)",
                     name(),
                     n
                 )
@@ -905,7 +937,7 @@ unsafe fn dot_row_q8_with(simd: Simd, qtype_id: u32, row: &[u8], x: &QuantizedAc
         Q4_K | Q6_K => {
             let xk = x.k.as_deref().unwrap_or_else(|| {
                 panic!(
-                    "dot_row_q8: {} needs input len multiple of 256, got {}",
+                    "dot_row_q8: {} needs input len multiple of 256, got {} (or the 256-block view wasn't built)",
                     name(),
                     n
                 )
@@ -929,6 +961,45 @@ unsafe fn dot_row_q8_with(simd: Simd, qtype_id: u32, row: &[u8], x: &QuantizedAc
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn round_even_small_matches_round_ties_even() {
+        let mut v = -200.0f32;
+        while v <= 200.0 {
+            for x in [v, v + 0.5, v + 0.25, v - 0.5, v * 1.000_001] {
+                assert_eq!(round_even_small(x), x.round_ties_even() as i32, "x={x}");
+            }
+            v += 0.125;
+        }
+        let mut rng = 0x1234_5678u32;
+        for _ in 0..200_000 {
+            rng = rng.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let x = (rng as f32 / u32::MAX as f32 - 0.5) * 300.0;
+            assert_eq!(round_even_small(x), x.round_ties_even() as i32, "x={x}");
+        }
+    }
+
+    #[test]
+    fn for_types_builds_only_needed_views() {
+        let x: Vec<f32> = (0..512).map(|i| (i as f32 * 0.37).sin()).collect();
+        let k_only = QuantizedAct::for_types(&x, &[Q6_K]);
+        assert!(k_only.k.is_some() && k_only.b32.is_none() && k_only.x.is_empty());
+        let b_only = QuantizedAct::for_types(&x, &[Q5_0, Q8_0]);
+        assert!(b_only.b32.is_some() && b_only.k.is_none() && b_only.x.is_empty());
+        // Same numbers as the all-views constructor.
+        let all = QuantizedAct::new(&x);
+        let mut row = vec![0u8; row_bytes(Q8_0, 512)];
+        for (i, b) in row.iter_mut().enumerate() {
+            *b = (i * 7) as u8;
+        }
+        for blk in row.chunks_mut(Q8_0_BYTES) {
+            blk[..2].copy_from_slice(&0x2c00u16.to_le_bytes());
+        }
+        assert_eq!(
+            dot_row_q8(Q8_0, &row, &b_only),
+            dot_row_q8(Q8_0, &row, &all)
+        );
+    }
 
     #[test]
     fn f32_to_f16_roundtrip_and_rounding() {

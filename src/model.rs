@@ -166,7 +166,8 @@ impl<'a> Qwen2<'a> {
     fn matvec_many<const N: usize>(&self, ws: [&Tensor; N], x: &[f32]) -> [Vec<f32>; N] {
         // Quantize x to 8 bits once; every row then does integer multiply-adds
         // against its packed weights instead of decoding them to floats.
-        let xq = QuantizedAct::new(x);
+        let types = ws.map(|w| w.qtype.id);
+        let xq = QuantizedAct::for_types(x, &types);
         // All matrices' rows form one index space; starts[i] is where matrix i begins.
         let mut starts = [0usize; N];
         let mut total = 0;
