@@ -203,6 +203,36 @@ impl<'a> Qwen2<'a> {
         res
     }
 
+    /// silu(gate x) * (up x), row by row: each task computes row r of both
+    /// matrices and combines them, so the exp() runs on every core instead of
+    /// in a serial pass after the matvec.
+    fn matvec_swiglu(&self, gate: &Tensor, up: &Tensor, x: &[f32]) -> Vec<f32> {
+        let n = gate.dims[1] as usize;
+        for w in [gate, up] {
+            assert_eq!(w.dims[0] as usize, x.len(), "matvec {}: input len", w.name);
+        }
+        assert_eq!(up.dims[1] as usize, n, "swiglu: gate/up row counts differ");
+        let xq = QuantizedAct::for_types(x, &[gate.qtype.id, up.qtype.id]);
+        let [g, u] = [gate, up].map(|w| {
+            let qt = w.qtype.id;
+            (qt, row_bytes(qt, x.len()), self.m.tensor_data(w))
+        });
+        let row = |(qt, rb, data): (u32, usize, &[u8]), r: usize| {
+            dot_row_q8(qt, &data[r * rb..(r + 1) * rb], &xq)
+        };
+        let mut out = vec![0f32; n];
+        // Each row is two dot products, so half the rows per chunk of matvec_many.
+        let chunk = (n / (Pool::global().threads() * 8)).clamp(4, 32);
+        pool::for_each_chunk_mut(&mut out, chunk, |c, ys| {
+            for (j, y) in ys.iter_mut().enumerate() {
+                let r = c * chunk + j;
+                let gv = row(g, r);
+                *y = (gv / (1.0 + (-gv).exp())) * row(u, r);
+            }
+        });
+        out
+    }
+
     /// RMSNorm: scale x so its root-mean-square is 1, then multiply by a learned weight.
     fn rmsnorm(&self, x: &[f32], w: &[f32]) -> Vec<f32> {
         let ms = x.iter().map(|v| v * v).sum::<f32>() / x.len() as f32;
@@ -210,15 +240,24 @@ impl<'a> Qwen2<'a> {
         x.iter().zip(w).map(|(v, g)| v * inv * g).collect()
     }
 
-    /// NEOX-style RoPE on one head vector (len head_dim) in place.
-    /// Dim i is paired with dim i + head_dim/2, and the pair is rotated by
-    /// angle pos * base^(-2i/head_dim). Low i spins fast, high i spins slowly.
-    fn rope(&self, v: &mut [f32], pos: usize) {
-        let half = self.head_dim / 2;
-        for i in 0..half {
-            let freq = self.rope_base.powf(-2.0 * i as f64 / self.head_dim as f64);
-            let angle = pos as f64 * freq;
-            let (sin, cos) = (angle.sin() as f32, angle.cos() as f32);
+    /// (sin, cos) of each RoPE pair's angle at `pos`: pair i turns by
+    /// pos * base^(-2i/head_dim). Low i spins fast, high i spins slowly.
+    /// Every head in every layer uses the same angles, so this runs once a token.
+    fn rope_table(&self, pos: usize) -> Vec<(f32, f32)> {
+        (0..self.head_dim / 2)
+            .map(|i| {
+                let freq = self.rope_base.powf(-2.0 * i as f64 / self.head_dim as f64);
+                let angle = pos as f64 * freq;
+                (angle.sin() as f32, angle.cos() as f32)
+            })
+            .collect()
+    }
+
+    /// NEOX-style RoPE on one head vector (len head_dim) in place: dim i is
+    /// paired with dim i + head_dim/2 and the pair rotated by `table[i]`.
+    fn rope(v: &mut [f32], table: &[(f32, f32)]) {
+        let half = table.len();
+        for (i, &(sin, cos)) in table.iter().enumerate() {
             let (a, b) = (v[i], v[i + half]);
             v[i] = a * cos - b * sin;
             v[i + half] = a * sin + b * cos;
@@ -246,6 +285,7 @@ impl<'a> Qwen2<'a> {
             &mut x,
         );
 
+        let rope = self.rope_table(pos);
         for (l, layer) in self.layers.iter().enumerate() {
             // ---- Attention sub-block ----
             // 2. Normalize, then project into queries, keys and values (+ bias).
@@ -262,11 +302,8 @@ impl<'a> Qwen2<'a> {
             }
 
             // 3. Rotate q and k by position (RoPE), one head at a time.
-            for head in q.chunks_mut(hd) {
-                self.rope(head, pos);
-            }
-            for head in k.chunks_mut(hd) {
-                self.rope(head, pos);
+            for head in q.chunks_mut(hd).chain(k.chunks_mut(hd)) {
+                Self::rope(head, &rope);
             }
 
             // 4. Store this position's k and v in the cache so later tokens can see them.
@@ -312,12 +349,7 @@ impl<'a> Qwen2<'a> {
             // ---- Feed-forward sub-block (SwiGLU) ----
             // 7. Normalize, then gate * up: silu(gate(h)) decides how much of up(h) passes.
             let h = self.rmsnorm(&x, &layer.ffn_norm);
-            let [gate, up] = self.matvec_many([layer.w_gate, layer.w_up], &h);
-            let act: Vec<f32> = gate
-                .iter()
-                .zip(&up)
-                .map(|(g, u)| (g / (1.0 + (-g).exp())) * u)
-                .collect();
+            let act = self.matvec_swiglu(layer.w_gate, layer.w_up, &h);
             // 8. Project back down to model width and add to the residual stream.
             let d = self.matvec(layer.w_down, &act);
             for i in 0..dim {
