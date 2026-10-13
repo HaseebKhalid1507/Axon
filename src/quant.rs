@@ -2336,6 +2336,29 @@ unsafe fn kquant_rows<const R: usize>(
     }
 }
 
+/// How many token slots to give `dot_row_q8_multi` / `dot_rows_q8_multi`
+/// for `nb` tokens of length `n` against weights of types `qtypes`: `nb`
+/// rounded up to a multiple of 4 when every type has a 4-token SIMD kernel,
+/// else `nb`. The batched kernels take tokens 4 at a time and run any
+/// leftover ones through the single-token kernel, a whole extra pass over
+/// the row per leftover token (for 2 or 3 tokens, no batching at all).
+/// Callers fill the extra slots by repeating a token's `QuantizedAct` (a
+/// reference, no copy) and ignore their outputs: every token's result is
+/// computed on its own lanes, so the real ones are unchanged, bit for bit.
+/// A lone token isn't padded: 4x the arithmetic for the same one row read.
+pub fn batch_slots(qtypes: &[u32], n: usize, nb: usize) -> usize {
+    let grouped = qtypes.iter().all(|&qt| match qt {
+        Q5_0 | Q8_0 => n.is_multiple_of(QK8_0),
+        Q4_K | Q6_K => n.is_multiple_of(QK_K),
+        _ => false,
+    });
+    if nb >= 2 && grouped && simd() != Simd::Scalar {
+        nb.next_multiple_of(4)
+    } else {
+        nb
+    }
+}
+
 /// `out[b] = dot_row_q8(qtype_id, row, xs[b])`, bit for bit, for every b.
 /// Tokens go through the SIMD kernels in groups of 4, so each weight block is
 /// unpacked once per group rather than once per token.
@@ -3302,7 +3325,7 @@ mod tests {
         paths.extend(simd_paths());
         let mut rng = Lcg(0x4a11);
         for &(qt, n) in &[(Q5_0, 896), (Q8_0, 896), (Q4_K, 4864), (Q6_K, 4864)] {
-            for nb in [1usize, 3, 4, 5, 8, 13] {
+            for nb in [1usize, 2, 3, 4, 5, 6, 7, 8, 9, 13] {
                 let row = synthetic_row(qt, n, &mut rng);
                 let qas: Vec<QuantizedAct> = (0..nb)
                     .map(|_| QuantizedAct::new(&synthetic_x(n, &mut rng)))
@@ -3326,6 +3349,67 @@ mod tests {
         }
     }
 
+    /// The `batch_slots` padding: real tokens followed by repeats of the last
+    /// one must give each real token exactly its single-token result.
+    #[test]
+    fn padded_batches_match_single() {
+        let mut paths = vec![Simd::Scalar];
+        paths.extend(simd_paths());
+        let mut rng = Lcg(0x9ad);
+        for &(qts, n) in &[
+            ([Q5_0, Q8_0], 896),
+            ([Q8_0, Q8_0], 896),
+            ([Q4_K, Q4_K], 896 * 2 + 256),
+            ([Q6_K, Q6_K], 4864),
+            ([Q4_K, Q6_K], 4864),
+        ] {
+            assert_eq!(batch_slots(&qts, n, 1), 1);
+            assert!(batch_slots(&[F32], n, 3) == 3);
+            for nb in 1usize..=9 {
+                let slots = nb.next_multiple_of(4);
+                let r0 = synthetic_row(qts[0], n, &mut rng);
+                let r1 = synthetic_row(qts[1], n, &mut rng);
+                let qas: Vec<QuantizedAct> = (0..nb)
+                    .map(|_| QuantizedAct::new(&synthetic_x(n, &mut rng)))
+                    .collect();
+                let xs: Vec<&QuantizedAct> = (0..slots).map(|b| &qas[b.min(nb - 1)]).collect();
+                for &p in &paths {
+                    let mut o0 = vec![f32::NAN; slots];
+                    let mut o1 = vec![f32::NAN; slots];
+                    let mut o2 = vec![f32::NAN; slots];
+                    // SAFETY: Scalar, or a path listed by simd_paths().
+                    unsafe {
+                        dot_rows_q8_multi_with(
+                            p,
+                            qts,
+                            [&r0[..], &r1[..]],
+                            &xs,
+                            [&mut o0[..], &mut o1[..]],
+                        );
+                        dot_row_q8_multi_with(p, qts[1], &r1, &xs, &mut o2);
+                    }
+                    for b in 0..nb {
+                        // SAFETY: as above.
+                        let want = unsafe {
+                            [
+                                dot_row_q8_with(p, qts[0], &r0, &qas[b]),
+                                dot_row_q8_with(p, qts[1], &r1, &qas[b]),
+                            ]
+                        };
+                        let got = [o0[b], o1[b], o2[b]];
+                        for (k, g) in got.iter().enumerate() {
+                            assert_eq!(
+                                g.to_bits(),
+                                want[k.min(1)].to_bits(),
+                                "qts {qts:?} n {n} B {nb} token {b} out {k} {p:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn dot_rows_q8_multi_matches_single() {
         let mut paths = vec![Simd::Scalar];
@@ -3342,7 +3426,7 @@ mod tests {
             ([Q4_K, Q4_K], 256),
             ([Q6_K, Q6_K], 256),
         ] {
-            for nb in [1usize, 3, 4, 5, 8, 13] {
+            for nb in [1usize, 2, 3, 4, 5, 6, 7, 8, 9, 13] {
                 let r0 = synthetic_row(qts[0], n, &mut rng);
                 let r1 = synthetic_row(qts[1], n, &mut rng);
                 let qas: Vec<QuantizedAct> = (0..nb)

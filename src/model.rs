@@ -5,8 +5,8 @@
 use crate::gguf::{Model, Tensor, Val};
 use crate::pool::{self, Pool};
 use crate::quant::{
-    DecodeCfg, F16, F32, Q4_K, Q5_0, Q6_K, Q8_0, QuantizedAct, dequant, dot_row_q8_multi,
-    dot_rows_q8, dot_rows_q8_multi, row_bytes,
+    DecodeCfg, F16, F32, Q4_K, Q5_0, Q6_K, Q8_0, QuantizedAct, batch_slots, dequant,
+    dot_row_q8_multi, dot_rows_q8, dot_rows_q8_multi, row_bytes,
 };
 
 /// The weights of one transformer block, borrowed from the mmap.
@@ -387,17 +387,46 @@ impl<'a> Qwen2<'a> {
         out
     }
 
-    /// Rows per pool chunk for batched matmuls: ~32 chunks per thread, an
-    /// even count so the 2-row tile kernels never get a lone row at a chunk
-    /// edge. Much finer than decode's ~4: a prefill chunk is a lot of work
-    /// (every row times every token in the batch), so a few big chunks leave
-    /// threads idle while the last one finishes, and claiming is cheap next
-    /// to it. Sweep on bella (560-token prompt): 4/thread ~611 tok/s, 32 ~646,
-    /// 64+ slower again.
-    fn rows_per_chunk(rows: usize) -> usize {
-        rows.div_ceil(Pool::global().threads() * 32)
+    /// Rows per pool chunk for a batched matmul over `nb` tokens: an even
+    /// count so the 2-row tile kernels never get a lone row at a chunk edge.
+    /// ~32 chunks per thread for prefill-sized batches: a chunk is a lot of
+    /// work (every row times every token), so a few big chunks leave threads
+    /// idle while the last one finishes, and claiming is cheap next to it.
+    /// Sweep on bella (560-token prompt): 4/thread ~611 tok/s, 32 ~646, 64+
+    /// slower again. A small batch (a speculative verify, 2..9 tokens) is
+    /// close to decode, so it goes towards decode's ~4 per thread: nb / 2,
+    /// clamped to 4..=32. Chunking never changes results.
+    fn rows_per_chunk(rows: usize, nb: usize) -> usize {
+        let per_thread = (nb / 2).clamp(4, 32);
+        rows.div_ceil(Pool::global().threads() * per_thread)
             .max(1)
             .next_multiple_of(2)
+    }
+
+    /// The batch's activations quantized for `types`, one per token. The
+    /// matmuls hand the kernels `quant::batch_slots` references to them, the
+    /// extra slots repeating the last token (their outputs are ignored).
+    /// Quantizing is about a nanosecond per float (896 floats ~1 us), the
+    /// same scale as `per_token`'s cost unit, so a verify batch's 896-wide
+    /// inputs quantize inline instead of paying a fork/join.
+    fn quantize_batch<X: AsRef<[f32]> + Sync>(xs: &[X], types: &[u32]) -> Vec<QuantizedAct> {
+        let n_in = xs[0].as_ref().len();
+        par_map(xs.len(), n_in, |b| {
+            let x = xs[b].as_ref();
+            assert_eq!(x.len(), n_in, "matmul: ragged batch");
+            QuantizedAct::for_types(x, types)
+        })
+    }
+
+    /// `quantize_batch` of the first `nb` token columns of a row-major
+    /// (row, token slot) buffer: the transpose and the quantization in one
+    /// pass (one fork/join at most), same input values as `unbatch` gives.
+    fn quantize_cols(y: &[f32], slots: usize, nb: usize, types: &[u32]) -> Vec<QuantizedAct> {
+        let n = y.len() / slots;
+        par_map(nb, n, |b| {
+            let x: Vec<f32> = (0..n).map(|r| y[r * slots + b]).collect();
+            QuantizedAct::for_types(&x, types)
+        })
     }
 
     /// `matvec_many` for a batch of inputs: res[i][b] = ws[i] · xs[b].
@@ -408,15 +437,17 @@ impl<'a> Qwen2<'a> {
         xs: &[X],
     ) -> [Vec<Vec<f32>>; N] {
         let nb = xs.len();
-        let (out, starts) = self.matmul_raw(ws, xs);
+        let (out, starts, slots) = self.matmul_raw(ws, xs);
         std::array::from_fn(|i| {
             let n = ws[i].dims[1] as usize;
-            unbatch(&out[starts[i] * nb..(starts[i] + n) * nb], nb)
+            unbatch(&out[starts[i] * slots..(starts[i] + n) * slots], slots, nb)
         })
     }
 
-    /// Batched matmul, output left row-major over (row, token): y[r * B + b]
-    /// for the joint row space of all `ws`; starts[i] is matrix i's first row.
+    /// Batched matmul, output left row-major over (row, token slot):
+    /// y[r * S + b] for the joint row space of all `ws`, where starts[i] is
+    /// matrix i's first row and S >= B the slot count (`quant::batch_slots`;
+    /// slots past B are padding).
     ///
     /// Rows are split across the pool. A task loads each weight row once and
     /// dots it with every token's input while it's still in L1 (row outer,
@@ -427,15 +458,20 @@ impl<'a> Qwen2<'a> {
         &self,
         ws: [&Tensor; N],
         xs: &[X],
-    ) -> (Vec<f32>, [usize; N]) {
-        let nb = xs.len();
-        let n_in = xs[0].as_ref().len();
+    ) -> (Vec<f32>, [usize; N], usize) {
         let types = ws.map(|w| w.qtype.id);
-        let xq = par_map(nb, |b| {
-            let x = xs[b].as_ref();
-            assert_eq!(x.len(), n_in, "matmul: ragged batch");
-            QuantizedAct::for_types(x, &types)
-        });
+        self.matmul_q(ws, &Self::quantize_batch(xs, &types))
+    }
+
+    /// `matmul_raw` on inputs already quantized for `ws`' types.
+    fn matmul_q<const N: usize>(
+        &self,
+        ws: [&Tensor; N],
+        xq: &[QuantizedAct],
+    ) -> (Vec<f32>, [usize; N], usize) {
+        let nb = xq.len();
+        let n_in = xq[0].len();
+        let types = ws.map(|w| w.qtype.id);
         let mut starts = [0usize; N];
         let mut total = 0;
         for (i, w) in ws.iter().enumerate() {
@@ -447,45 +483,76 @@ impl<'a> Qwen2<'a> {
             let qt = w.qtype.id;
             (qt, row_bytes(qt, n_in), self.m.tensor_data(w))
         });
-        let xr: Vec<&QuantizedAct> = xq.iter().collect();
-        let mut out = vec![0f32; total * nb];
-        let rows = Self::rows_per_chunk(total);
+        let slots = batch_slots(&types, n_in, nb);
+        let xr: Vec<&QuantizedAct> = (0..slots).map(|b| &xq[b.min(nb - 1)]).collect();
+        let mut out = vec![0f32; total * slots];
+        let rows = Self::rows_per_chunk(total, nb);
         let row_of = |g: usize| {
             let t = starts.iter().rposition(|&s| s <= g).unwrap();
             let (qt, rb, data) = info[t];
             let o = g - starts[t];
             (qt, &data[o * rb..(o + 1) * rb])
         };
-        pool::for_each_chunk_mut(&mut out, rows * nb, |c, ys| {
-            // Rows two at a time (possibly from different matrices): the pair
-            // shares each token's activation loads. An odd last row goes alone.
-            let first = c * rows;
-            let n_rows = ys.len() / nb;
-            let mut pairs = ys.chunks_exact_mut(2 * nb);
-            for (j, yp) in pairs.by_ref().enumerate() {
-                let g = first + 2 * j;
-                let (q0, r0) = row_of(g);
-                let (q1, r1) = row_of(g + 1);
-                let (y0, y1) = yp.split_at_mut(nb);
-                dot_rows_q8_multi([q0, q1], [r0, r1], &xr, [y0, y1]);
-            }
-            let yr = pairs.into_remainder();
-            if !yr.is_empty() {
-                let (qt, row) = row_of(first + n_rows - 1);
-                dot_row_q8_multi(qt, row, &xr, yr);
-            }
+        pool::for_each_chunk_mut(&mut out, rows * slots, |c, ys| {
+            dot_rows_chunk(ys, slots, c * rows, &row_of, &xr)
         });
-        (out, starts)
+        (out, starts, slots)
+    }
+
+    /// The output head for a batch, reduced to each token's greedy pick:
+    /// picks[b] == argmax(w · xs[b]) with `argmax`'s rules (see `Best`).
+    /// Each pool chunk computes its rows into thread-local scratch and keeps
+    /// only a `Best` per token; the chunks are then merged in row order. No
+    /// vocab-sized logits are allocated or transposed. Each logit is the
+    /// same dot as in `matmul_raw` (and so `matvec`), bit for bit.
+    fn matmul_argmax<X: AsRef<[f32]> + Sync>(&self, w: &Tensor, xs: &[X]) -> Vec<u32> {
+        let nb = xs.len();
+        let qt = w.qtype.id;
+        let xq = Self::quantize_batch(xs, &[qt]);
+        let n_in = xq[0].len();
+        assert_eq!(w.dims[0] as usize, n_in, "matmul {}: input len", w.name);
+        let total = w.dims[1] as usize;
+        let rb = row_bytes(qt, n_in);
+        let data = self.m.tensor_data(w);
+        let slots = batch_slots(&[qt], n_in, nb);
+        let xr: Vec<&QuantizedAct> = (0..slots).map(|b| &xq[b.min(nb - 1)]).collect();
+        let rows = Self::rows_per_chunk(total, nb);
+        let n_chunks = total.div_ceil(rows);
+        let row_of = |g: usize| (qt, &data[g * rb..(g + 1) * rb]);
+        // best[c * nb + b]: chunk c's best row for token b.
+        let mut best = vec![Best::NONE; n_chunks * nb];
+        pool::for_each_chunk_mut(&mut best, nb, |c, bs| {
+            let first = c * rows;
+            let n_rows = rows.min(total - first);
+            with_rows_scratch(n_rows * slots, |ys| {
+                dot_rows_chunk(ys, slots, first, &row_of, &xr);
+                for (b, best) in bs.iter_mut().enumerate() {
+                    for (r, y) in ys.chunks_exact(slots).enumerate() {
+                        best.push(y[b], (first + r) as u32);
+                    }
+                }
+            });
+        });
+        (0..nb)
+            .map(|b| {
+                let mut acc = Best::NONE;
+                for c in 0..n_chunks {
+                    acc.merge(best[c * nb + b]);
+                }
+                acc.index(total)
+            })
+            .collect()
     }
 
     /// `matvec_swiglu` for a batch: per row r, per token b, the gate and up
-    /// dots combined with the same formula. Layout as in `matmul_raw`.
+    /// dots combined with the same formula. Layout and slot count returned as
+    /// in `matmul_raw`.
     fn matmul_swiglu<X: AsRef<[f32]> + Sync>(
         &self,
         gate: &Tensor,
         up: &Tensor,
         xs: &[X],
-    ) -> Vec<Vec<f32>> {
+    ) -> (Vec<f32>, usize) {
         let nb = xs.len();
         let n_in = xs[0].as_ref().len();
         let n = gate.dims[1] as usize;
@@ -494,32 +561,30 @@ impl<'a> Qwen2<'a> {
         }
         assert_eq!(up.dims[1] as usize, n, "swiglu: gate/up row counts differ");
         let types = [gate.qtype.id, up.qtype.id];
-        let xq = par_map(nb, |b| {
-            let x = xs[b].as_ref();
-            assert_eq!(x.len(), n_in, "matmul: ragged batch");
-            QuantizedAct::for_types(x, &types)
-        });
+        let xq = Self::quantize_batch(xs, &types);
         let [g, u] = [gate, up].map(|w| {
             let qt = w.qtype.id;
             (qt, row_bytes(qt, n_in), self.m.tensor_data(w))
         });
-        let xr: Vec<&QuantizedAct> = xq.iter().collect();
-        let mut out = vec![0f32; n * nb];
-        let rows = Self::rows_per_chunk(n);
-        pool::for_each_chunk_mut(&mut out, rows * nb, |c, ys| {
-            let mut uv = vec![0f32; nb];
-            for (j, yr) in ys.chunks_mut(nb).enumerate() {
-                let r = c * rows + j;
-                let gr = &g.2[r * g.1..(r + 1) * g.1];
-                let ur = &u.2[r * u.1..(r + 1) * u.1];
-                dot_rows_q8_multi([g.0, u.0], [gr, ur], &xr, [&mut *yr, &mut uv[..]]);
-                for (y, &uv) in yr.iter_mut().zip(&uv) {
-                    let gv = *y;
-                    *y = (gv / (1.0 + (-gv).exp())) * uv;
+        let slots = batch_slots(&types, n_in, nb);
+        let xr: Vec<&QuantizedAct> = (0..slots).map(|b| &xq[b.min(nb - 1)]).collect();
+        let mut out = vec![0f32; n * slots];
+        let rows = Self::rows_per_chunk(n, nb);
+        pool::for_each_chunk_mut(&mut out, rows * slots, |c, ys| {
+            with_rows_scratch(slots, |uv| {
+                for (j, yr) in ys.chunks_mut(slots).enumerate() {
+                    let r = c * rows + j;
+                    let gr = &g.2[r * g.1..(r + 1) * g.1];
+                    let ur = &u.2[r * u.1..(r + 1) * u.1];
+                    dot_rows_q8_multi([g.0, u.0], [gr, ur], &xr, [&mut *yr, &mut *uv]);
+                    for (y, &uv) in yr.iter_mut().zip(&*uv) {
+                        let gv = *y;
+                        *y = (gv / (1.0 + (-gv).exp())) * uv;
+                    }
                 }
-            }
+            });
         });
-        unbatch(&out, nb)
+        (out, slots)
     }
 
     /// RMSNorm: scale x so its root-mean-square is 1, then multiply by a learned weight.
@@ -596,6 +661,44 @@ impl<'a> Qwen2<'a> {
     /// Same result, bit for bit, as `feed` on each token in order, but every
     /// weight row is read once per batch instead of once per token.
     pub fn feed_batch(&self, tokens: &[u32], start: usize, cache: &mut KvCache) {
+        self.hidden_batch(tokens, start, cache);
+    }
+
+    /// Logits after each of `tokens[b]` at position `start + b`: row b is,
+    /// bit for bit, what `forward(tokens[b], start + b, ..)` returns after
+    /// the earlier tokens went in. The speculative-decoding verify pass: the
+    /// whole model, output head included, reads each weight row once for the
+    /// batch. Same final norm as `forward`; the head goes through
+    /// `matmul_many`, whose per-row dots equal `matvec`'s. Cache slots
+    /// `start..start + len` are overwritten; slots past the accepted prefix
+    /// are simply rewritten by the next call (attention reads only 0..=pos).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub fn verify_batch(&self, tokens: &[u32], start: usize, cache: &mut KvCache) -> Vec<Vec<f32>> {
+        let hs = self.final_norm_batch(tokens, start, cache);
+        let [logits] = self.matmul_many([self.output], &hs);
+        logits
+    }
+
+    /// `verify_batch` reduced to what greedy decoding uses: picks[b] ==
+    /// argmax(verify_batch(..)[b]), same index on ties (the last of equal
+    /// maxima, never a NaN unless all are: `Best`), without materializing
+    /// any logits (`matmul_argmax`).
+    pub fn verify_argmax(&self, tokens: &[u32], start: usize, cache: &mut KvCache) -> Vec<u32> {
+        let hs = self.final_norm_batch(tokens, start, cache);
+        self.matmul_argmax(self.output, &hs)
+    }
+
+    /// `hidden_batch` then the final norm, as `forward` does per token.
+    fn final_norm_batch(&self, tokens: &[u32], start: usize, cache: &mut KvCache) -> Vec<Vec<f32>> {
+        let xs = self.hidden_batch(tokens, start, cache);
+        par_map(xs.len(), self.dim, |b| {
+            self.rmsnorm(&xs[b], &self.output_norm)
+        })
+    }
+
+    /// `hidden` for a batch: `feed_batch`'s work, returning every token's
+    /// final hidden state (before the output norm).
+    fn hidden_batch(&self, tokens: &[u32], start: usize, cache: &mut KvCache) -> Vec<Vec<f32>> {
         let nb = tokens.len();
         assert!(nb > 0, "feed_batch: empty batch");
         assert!(
@@ -611,8 +714,9 @@ impl<'a> Qwen2<'a> {
 
         // Every per-token step runs over the pool by token (`per_token`): with
         // a few hundred tokens, a serial pass here leaves every worker idle.
-        let mut xs: Vec<Vec<f32>> = par_map(nb, |b| self.embed(tokens[b]));
-        let ropes: Vec<_> = par_map(nb, |b| self.rope_table(start + b));
+        // A few tokens' worth (a speculative verify) runs inline instead.
+        let mut xs: Vec<Vec<f32>> = par_map(nb, dim, |b| self.embed(tokens[b]));
+        let ropes: Vec<_> = par_map(nb, hd * 16, |b| self.rope_table(start + b));
         // Reused across layers; every element is overwritten before it's read.
         let mut hs: Vec<Vec<f32>> = vec![vec![0.0f32; dim]; nb];
         let mut att = vec![0.0f32; nb * dim];
@@ -620,7 +724,7 @@ impl<'a> Qwen2<'a> {
         debug_assert_eq!(dim, n_kv * qn, "feed_batch: dim != heads * head_dim");
         for (l, layer) in self.layers.iter().enumerate() {
             // Steps as in `hidden`, each applied to every token of the batch.
-            per_token(&mut hs, |b, h| {
+            per_token(&mut hs, dim, |b, h| {
                 self.rmsnorm_into(&xs[b], &layer.attn_norm, h)
             });
             let [mut qs, ks, vs] = self.matmul_many([layer.wq, layer.wk, layer.wv], &hs);
@@ -635,7 +739,7 @@ impl<'a> Qwen2<'a> {
                     .zip(kl.chunks_mut(kv_dim))
                     .zip(vl.chunks_mut(kv_dim))
                     .collect();
-                per_token(&mut jobs, |b, ((q, kd), vd)| {
+                per_token(&mut jobs, dim + 2 * kv_dim, |b, ((q, kd), vd)| {
                     kd.copy_from_slice(&ks[b]);
                     vd.copy_from_slice(&vs[b]);
                     if let Some(bias) = &layer.bq {
@@ -684,16 +788,18 @@ impl<'a> Qwen2<'a> {
             });
 
             let att_rows: Vec<&[f32]> = att.chunks(dim).collect();
-            let (os, _) = self.matmul_raw([layer.wo], &att_rows);
-            add_unbatched(&mut xs, &os);
+            let (os, _, slots) = self.matmul_raw([layer.wo], &att_rows);
+            add_unbatched(&mut xs, &os, slots);
 
-            per_token(&mut hs, |b, h| {
+            per_token(&mut hs, dim, |b, h| {
                 self.rmsnorm_into(&xs[b], &layer.ffn_norm, h)
             });
-            let acts = self.matmul_swiglu(layer.w_gate, layer.w_up, &hs);
-            let (ds, _) = self.matmul_raw([layer.w_down], &acts);
-            add_unbatched(&mut xs, &ds);
+            let (acts, a_slots) = self.matmul_swiglu(layer.w_gate, layer.w_up, &hs);
+            let aq = Self::quantize_cols(&acts, a_slots, nb, &[layer.w_down.qtype.id]);
+            let (ds, _, slots) = self.matmul_q([layer.w_down], &aq);
+            add_unbatched(&mut xs, &ds, slots);
         }
+        xs
     }
 
     /// Every layer for one token: store its keys and values in the cache and
@@ -769,10 +875,18 @@ impl<'a> Qwen2<'a> {
     }
 }
 
-/// Call `f(i, &mut data[i])` for every i, spread over the pool in chunks of
-/// consecutive items (~4 chunks per thread).
-fn per_token<T: Send>(data: &mut [T], f: impl Fn(usize, &mut T) + Sync) {
-    if data.is_empty() {
+/// Below this much work (items x floats touched per item) a per-token step
+/// runs inline on the caller: a pool fork/join costs more than, say, an
+/// rmsnorm of a few tokens. A verify batch's elementwise steps stay inline;
+/// prefill batches, the output-head transpose and quantization go wide.
+const INLINE_WORK: usize = 16 * 1024;
+
+/// Call `f(i, &mut data[i])` for every i, each item touching about
+/// `floats` floats: inline if that's little work in total, else spread over
+/// the pool in chunks of consecutive items (~4 chunks per thread).
+fn per_token<T: Send>(data: &mut [T], floats: usize, f: impl Fn(usize, &mut T) + Sync) {
+    if data.len() <= 1 || data.len() * floats <= INLINE_WORK {
+        data.iter_mut().enumerate().for_each(|(i, x)| f(i, x));
         return;
     }
     let chunk = data.len().div_ceil(Pool::global().threads() * 4).max(1);
@@ -783,33 +897,123 @@ fn per_token<T: Send>(data: &mut [T], f: impl Fn(usize, &mut T) + Sync) {
     });
 }
 
-/// `(0..n).map(f).collect()`, over the pool.
-fn par_map<T: Send>(n: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
+/// `(0..n).map(f).collect()`, through `per_token` (same `floats` meaning).
+fn par_map<T: Send>(n: usize, floats: usize, f: impl Fn(usize) -> T + Sync) -> Vec<T> {
     let mut out: Vec<Option<T>> = (0..n).map(|_| None).collect();
-    per_token(&mut out, |i, o| *o = Some(f(i)));
+    per_token(&mut out, floats, |i, o| *o = Some(f(i)));
     out.into_iter().map(|o| o.unwrap()).collect()
 }
 
-/// Transpose a row-major (row, token) buffer, y[r * nb + b], into one vector
-/// per token.
-fn unbatch(y: &[f32], nb: usize) -> Vec<Vec<f32>> {
-    let n = y.len() / nb;
+/// Transpose a row-major (row, token slot) buffer, y[r * slots + b], into
+/// one vector per token for the first `nb` slots.
+fn unbatch(y: &[f32], slots: usize, nb: usize) -> Vec<Vec<f32>> {
+    let n = y.len() / slots;
     let mut out: Vec<Vec<f32>> = vec![Vec::new(); nb];
-    per_token(&mut out, |b, x| {
-        *x = (0..n).map(|r| y[r * nb + b]).collect()
+    per_token(&mut out, n, |b, x| {
+        *x = (0..n).map(|r| y[r * slots + b]).collect()
     });
     out
 }
 
-/// xs[b][i] += y[i * nb + b]: the residual add straight from a row-major
-/// (row, token) buffer, same single add per element as adding `unbatch(y)`.
-fn add_unbatched(xs: &mut [Vec<f32>], y: &[f32]) {
-    let nb = xs.len();
-    per_token(xs, |b, x| {
+/// xs[b][i] += y[i * slots + b]: the residual add straight from a row-major
+/// (row, token slot) buffer, same single add per element as adding
+/// `unbatch(y)`.
+fn add_unbatched(xs: &mut [Vec<f32>], y: &[f32], slots: usize) {
+    let n = xs.first().map_or(0, |x| x.len());
+    per_token(xs, n, |b, x| {
         for (i, x) in x.iter_mut().enumerate() {
-            *x += y[i * nb + b];
+            *x += y[i * slots + b];
         }
     });
+}
+
+/// One pool chunk of a batched matmul: rows `first..first + ys.len() / slots`
+/// (`row_of(g)` = (qtype, packed row g)) times every token slot of `xr`, into
+/// ys[r * slots + b]. Rows two at a time (possibly from different matrices):
+/// the pair shares each token's activation loads. An odd last row goes alone.
+fn dot_rows_chunk<'w>(
+    ys: &mut [f32],
+    slots: usize,
+    first: usize,
+    row_of: &impl Fn(usize) -> (u32, &'w [u8]),
+    xr: &[&QuantizedAct],
+) {
+    let n_rows = ys.len() / slots;
+    let mut pairs = ys.chunks_exact_mut(2 * slots);
+    for (j, yp) in pairs.by_ref().enumerate() {
+        let g = first + 2 * j;
+        let (q0, r0) = row_of(g);
+        let (q1, r1) = row_of(g + 1);
+        let (y0, y1) = yp.split_at_mut(slots);
+        dot_rows_q8_multi([q0, q1], [r0, r1], xr, [y0, y1]);
+    }
+    let yr = pairs.into_remainder();
+    if !yr.is_empty() {
+        let (qt, row) = row_of(first + n_rows - 1);
+        dot_row_q8_multi(qt, row, xr, yr);
+    }
+}
+
+/// Running argmax with main.rs `argmax`'s exact rules: the largest value
+/// by `>`/`==` (so NaN is never picked and -0.0 ties +0.0), and of equal
+/// maxima the LAST index. Pushing values in index order, or merging the
+/// `Best`s of consecutive index ranges in order, gives that index: a later
+/// value/range replaces the current one iff it is greater or equal.
+/// `index(n)` is n - 1 when nothing qualified (all NaN), as `argmax` does.
+#[derive(Clone, Copy, Debug)]
+pub struct Best {
+    v: f32,
+    i: Option<u32>,
+}
+
+impl Best {
+    pub const NONE: Best = Best {
+        v: f32::NEG_INFINITY,
+        i: None,
+    };
+
+    #[inline]
+    pub fn push(&mut self, v: f32, i: u32) {
+        // `>=` is false when either side is NaN, so NaN is skipped.
+        if v >= self.v {
+            *self = Best { v, i: Some(i) };
+        }
+    }
+
+    pub fn merge(&mut self, later: Best) {
+        if let Some(i) = later.i {
+            self.push(later.v, i);
+        }
+    }
+
+    pub fn index(self, n: usize) -> u32 {
+        self.i.unwrap_or(n as u32 - 1)
+    }
+}
+
+thread_local! {
+    /// Per-task matmul scratch (head rows of `matmul_argmax`, swiglu's up
+    /// values); grows to the largest seen and is reused across passes.
+    static ROWS: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Run `f` on this thread's matmul scratch, exactly `n` long. Contents are
+/// stale; `f` must write before reading.
+///
+/// Not re-entrant: `f` must not call `with_rows_scratch` again, directly or
+/// through anything it runs (`dot_rows_chunk` and the quant kernels don't).
+/// A nested call would borrow the RefCell twice; it panics with a message
+/// saying so rather than aliasing the buffer.
+fn with_rows_scratch<R>(n: usize, f: impl FnOnce(&mut [f32]) -> R) -> R {
+    ROWS.with(|cell| {
+        let mut s = cell
+            .try_borrow_mut()
+            .expect("with_rows_scratch re-entered: one scratch per thread");
+        if s.len() < n {
+            s.resize(n, 0.0);
+        }
+        f(&mut s[..n])
+    })
 }
 
 thread_local! {
@@ -1419,8 +1623,8 @@ mod tests {
             return;
         };
         let net = Qwen2::new(&m);
-        // 100 spread-out ordinary token ids (Qwen2's special tokens start at 151643).
-        let ids: Vec<u32> = (0..100u64)
+        // 150 spread-out ordinary token ids (Qwen2's special tokens start at 151643).
+        let ids: Vec<u32> = (0..150u64)
             .map(|i| (i * 2_654_435_761 % 150_000) as u32)
             .collect();
         let next = 9707;
@@ -1430,7 +1634,9 @@ mod tests {
             net.feed(id, pos, &mut a);
         }
         let mut s = 0;
-        for n in [1, 7, 64, ids.len() - 72] {
+        // Every verify-sized batch (1..=9, so every padding remainder), an
+        // odd one, a full prefill batch and the rest.
+        for n in [1, 2, 3, 4, 5, 6, 7, 8, 9, 13, 64, ids.len() - 122] {
             net.feed_batch(&ids[s..s + n], s, &mut b);
             s += n;
         }
