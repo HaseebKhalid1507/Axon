@@ -80,8 +80,8 @@ unsafe impl KvElem for Half {
     fn store(dst: &mut [Half], src: &[f32]) {
         assert_eq!(dst.len(), src.len(), "kv store: length");
         #[cfg(target_arch = "x86_64")]
-        if crate::quant::v3() {
-            // SAFETY: v3() implies AVX2 + F16C.
+        if is_x86_feature_detected!("avx2") && is_x86_feature_detected!("f16c") {
+            // SAFETY: AVX2 + F16C detected. Same bits as the scalar loop.
             return unsafe { store_f16c(dst, src) };
         }
         for (d, &s) in dst.iter_mut().zip(src) {

@@ -16,7 +16,14 @@
 //! is made once per call, not per element.
 
 /// Whether attention and SwiGLU fuse their multiply-adds: the CPU has FMA
-/// (any build), or the build targets it.
+/// (any build), or the build targets it. (Detected on x86 only: elsewhere,
+/// aarch64 included, only a build that enables `fma` fuses.)
+///
+/// Fused code is inline `vfmadd` in the `v3` and `fma` variants. The one
+/// remaining `f32::mul_add` lowered to libm `fmaf` is `portable` with F on
+/// a CPU that has FMA but not sse4.1 (none known), or called directly (the
+/// tests); its bits are only right with a correctly rounded `fmaf`, which
+/// glibc's and musl's are.
 #[inline]
 pub fn fused() -> bool {
     #[cfg(target_arch = "x86_64")]
@@ -27,6 +34,14 @@ pub fn fused() -> bool {
     {
         cfg!(target_feature = "fma")
     }
+}
+
+/// The CPU can run `multiversion!`'s `fma` variants (fma and sse4.1;
+/// every FMA CPU has both). Decided once by std's feature cache.
+#[cfg(target_arch = "x86_64")]
+#[inline]
+pub fn fast_fma() -> bool {
+    is_x86_feature_detected!("fma") && is_x86_feature_detected!("sse4.1")
 }
 
 /// a * b + c, fused (one rounding) when F, else a multiply and an add.
@@ -511,6 +526,13 @@ mod tests {
                 unsafe { softmax::<false, true>(&mut a) };
                 unsafe { swiglu::imp::<false, true>(&mut g, &u) };
                 check(true, &a, &g, "fused scalar");
+            }
+            #[cfg(target_arch = "x86_64")]
+            if fast_fma() {
+                let (mut a, mut g) = (s.clone(), g0.clone());
+                unsafe { softmax::<false, true>(&mut a) };
+                unsafe { swiglu::fma(&mut g, &u) };
+                check(true, &a, &g, "fma variant");
             }
             if avx {
                 let (mut a, mut g) = (s.clone(), g0.clone());

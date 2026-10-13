@@ -656,7 +656,7 @@ pub fn v3() -> bool {
             if simd() != Simd::Scalar && !ok {
                 eprintln!(
                     "axon: CPU has AVX2 but not bmi1/bmi2/lzcnt: SIMD kernels on, \
-                     other hot loops portable (same results, a little slower)"
+                     other hot loops portable or scalar FMA (same results, slower)"
                 );
             }
             ok

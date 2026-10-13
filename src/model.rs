@@ -2720,6 +2720,8 @@ pub(crate) mod tests {
                     softmax_from::portable(&src, stride, &mut a);
                     unsafe { softmax_from::v3(&src, stride, &mut b) };
                     assert_eq!(bits(&a), bits(&b), "softmax_from n={n}");
+                    unsafe { softmax_from::fma(&src, stride, &mut b) };
+                    assert_eq!(bits(&a), bits(&b), "softmax_from fma n={n}");
                 }
             }
         }
@@ -2756,11 +2758,15 @@ pub(crate) mod tests {
                 score_softmax::portable(&qg[..hd], &kh, kv_dim, off, scale, &mut a);
                 unsafe { score_softmax::v3(&qg[..hd], &kh, kv_dim, off, scale, &mut b) };
                 assert_eq!(bits(&a), bits(&b), "score_softmax f16 hd={hd} np={np}");
+                unsafe { score_softmax::fma(&qg[..hd], &kh, kv_dim, off, scale, &mut b) };
+                assert_eq!(bits(&a), bits(&b), "score_softmax fma hd={hd} np={np}");
 
                 let (mut a, mut b) = (vec![0.0; tc * group], vec![1.0; tc * group]);
                 score_tile::portable(&qg, &kh, kv_dim, hd, off, t0..np, scale, &mut a);
                 unsafe { score_tile::v3(&qg, &kh, kv_dim, hd, off, t0..np, scale, &mut b) };
                 assert_eq!(bits(&a), bits(&b), "score_tile hd={hd} np={np}");
+                unsafe { score_tile::fma(&qg, &kh, kv_dim, hd, off, t0..np, scale, &mut b) };
+                assert_eq!(bits(&a), bits(&b), "score_tile fma hd={hd} np={np}");
 
                 let (mut a, mut b) = (vec![0.0; group * hd], vec![1.0; group * hd]);
                 vsum_rows::portable(&wts, np + 1, np, group, vb, kv_dim, &mut a, hd);
@@ -2769,6 +2775,8 @@ pub(crate) mod tests {
                 vsum_rows::portable(&wts, np + 1, np, group, vbh, kv_dim, &mut a, hd);
                 unsafe { vsum_rows::v3(&wts, np + 1, np, group, vbh, kv_dim, &mut b, hd) };
                 assert_eq!(bits(&a), bits(&b), "vsum_rows f16 hd={hd} np={np}");
+                unsafe { vsum_rows::fma(&wts, np + 1, np, group, vbh, kv_dim, &mut b, hd) };
+                assert_eq!(bits(&a), bits(&b), "vsum_rows fma hd={hd} np={np}");
 
                 let (mut sa, mut sb) = (vec![0.0; (np + 1) * group], vec![1.0; (np + 1) * group]);
                 let (mut a, mut b) = (vec![0.0; group * hd], vec![1.0; group * hd]);
@@ -2777,6 +2785,10 @@ pub(crate) mod tests {
                     attend_causal::v3(&qg, &kh, &vh, kv_dim, hd, kvh, np, scale, &mut sb, &mut b)
                 };
                 assert_eq!(bits(&a), bits(&b), "attend_causal hd={hd} np={np}");
+                unsafe {
+                    attend_causal::fma(&qg, &kh, &vh, kv_dim, hd, kvh, np, scale, &mut sb, &mut b)
+                };
+                assert_eq!(bits(&a), bits(&b), "attend_causal fma hd={hd} np={np}");
             }
         }
     }

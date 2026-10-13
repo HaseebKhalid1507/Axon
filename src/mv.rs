@@ -22,9 +22,11 @@
 //!
 //! The `<V3, F>` form (attention, SwiGLU) adds a const `F`: multiply-adds
 //! are fused (`vmath::fma::<true>`, `f32::mul_add`, lowered to `vfmadd` in
-//! `v3`) or not. `v3` always fuses; `portable` fuses iff the CPU has FMA
-//! (`vmath::fused`, a call to libm's `fmaf` there), so on an FMA CPU the two
-//! variants still give the same bits and only a CPU without FMA computes
+//! `v3`) or not. `v3` always fuses; on an FMA CPU off the v3 path the
+//! dispatcher runs a third variant, `fma` (`#[target_feature(enable =
+//! "fma,sse4.1")]`: inline `vfmadd`/`roundss`); `portable` fuses iff
+//! `vmath::fused()` (via libm's `fmaf`, see `vmath::fused`). So on an FMA CPU
+//! all variants give the same bits, and only a CPU without FMA computes
 //! differently (deterministically: separate multiply and add everywhere).
 //! Never `cfg(target_feature = "fma")`: that is false inside a
 //! `#[target_feature]` fn of a baseline build.
@@ -111,6 +113,11 @@ macro_rules! multiversion {
                 // SAFETY: v3() is true only after the x86-64-v3 features were detected.
                 return unsafe { $name::v3($($arg),*) };
             }
+            #[cfg(target_arch = "x86_64")]
+            if crate::vmath::fast_fma() {
+                // SAFETY: fast_fma() detected fma and sse4.1.
+                return unsafe { $name::fma($($arg),*) };
+            }
             $name::portable($($arg),*)
         }
 
@@ -139,6 +146,21 @@ macro_rules! multiversion {
                     // SAFETY: as above.
                     unsafe { imp::<false, false $(, $g)*>($($arg),*) }
                 }
+            }
+
+            /// The fused scalar variant for an FMA CPU off the v3 path
+            /// (`AXON_SIMD=scalar`, or no bmi1/bmi2/lzcnt): `mul_add` is one
+            /// `vfmadd`, `round_ties_even` one `roundss`, instead of libm
+            /// calls. Same bits as `portable` and `v3` on such a CPU.
+            ///
+            /// # Safety
+            /// The CPU must have fma and sse4.1 (`vmath::fast_fma`).
+            #[cfg(target_arch = "x86_64")]
+            #[target_feature(enable = "fma,sse4.1")]
+            #[allow(clippy::too_many_arguments)]
+            pub unsafe fn fma<$($g: $bound),*>($($arg: $ty),*) $(-> $ret)? {
+                // SAFETY: V3 false; F true is plain fused arithmetic here.
+                unsafe { imp::<false, true $(, $g)*>($($arg),*) }
             }
 
             /// The x86-64-v3 variant (fused).
