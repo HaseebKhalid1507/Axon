@@ -1,8 +1,9 @@
-//! qwen2 forward pass. Matrix-vector products run across all cores (rayon);
-//! everything else is plain loops with f32 activations.
+//! qwen2 forward pass. Matrix-vector products quantize the input to 8 bits and
+//! run integer dot products across all cores (rayon); everything else is plain
+//! f32 loops.
 
 use crate::gguf::{Model, Tensor, Val};
-use crate::quant::{dequant, dot_row, row_bytes};
+use crate::quant::{QuantizedAct, dequant, dot_row_q8, row_bytes};
 use rayon::prelude::*;
 
 /// The weights of one transformer block, borrowed from the mmap.
@@ -159,6 +160,9 @@ impl<'a> Qwen2<'a> {
         assert_eq!(x.len(), n_in, "matvec {}: input len", w.name);
         let rb = row_bytes(w.qtype.id, n_in);
         let data = self.m.tensor_data(w);
+        // Quantize x to 8 bits once; every row then does integer multiply-adds
+        // against its packed weights instead of decoding them to floats.
+        let xq = QuantizedAct::new(x);
         // Every output row is an independent dot product, so split rows across
         // cores. Chunks of 64 rows keep scheduling overhead small, and rayon's
         // work stealing evens out the fast and efficiency cores.
@@ -166,7 +170,7 @@ impl<'a> Qwen2<'a> {
         out.par_chunks_mut(64).enumerate().for_each(|(c, ys)| {
             for (j, y) in ys.iter_mut().enumerate() {
                 let o = c * 64 + j;
-                *y = dot_row(w.qtype.id, &data[o * rb..(o + 1) * rb], x);
+                *y = dot_row_q8(w.qtype.id, &data[o * rb..(o + 1) * rb], &xq);
             }
         });
         out
