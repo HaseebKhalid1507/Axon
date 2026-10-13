@@ -251,14 +251,37 @@ struct KBlock {
     bsums: [i16; QK_K / 16],
 }
 
+/// 32-block ("Q8_0") activations, block i = 32 values.
+struct B32 {
+    /// per-block scale
+    d: Vec<f32>,
+    /// per-block i8 values
+    q: Vec<[i8; 32]>,
+    /// per block, lane l (bytes 4l..4l+4 of q, one i32 lane of a 256-bit
+    /// vector): -16 * (sum of those 4 values). The VNNI kernels feed unsigned
+    /// weights u to dpbusd and start the accumulator here to undo the offset:
+    /// Q5_0 u = w + 16 uses it as is, Q8_0 u = w + 128 uses it << 3.
+    c: Vec<[i32; 8]>,
+}
+
+#[allow(clippy::needless_range_loop)] // fixed-size arrays: indexing vectorizes cleanly
+#[inline]
+fn neg16_lane_sums(q: &[i8; 32]) -> [i32; 8] {
+    let mut c = [0i32; 8];
+    for l in 0..8 {
+        let s = q[4 * l] as i32 + q[4 * l + 1] as i32 + q[4 * l + 2] as i32 + q[4 * l + 3] as i32;
+        c[l] = -16 * s;
+    }
+    c
+}
+
 /// x quantized once per matvec, in the layouts its weight types need.
 pub struct QuantizedAct {
     n: usize,
     /// original values, for the F32/F16 float fallback; empty unless built
     x: Vec<f32>,
-    /// "Q8_0" view (32-blocks): per-block scale and i8 values; None if len % 32 != 0
-    /// or not built
-    b32: Option<(Vec<f32>, Vec<[i8; 32]>)>,
+    /// "Q8_0" view (32-blocks); None if len % 32 != 0 or not built
+    b32: Option<B32>,
     /// "Q8_K" view (256-blocks); None if len % 256 != 0 or not built
     k: Option<Vec<KBlock>>,
 }
@@ -374,10 +397,12 @@ impl QuantizedAct {
             let nb = n / QK8_0;
             let mut d = Vec::with_capacity(nb);
             let mut q = vec![[0i8; 32]; nb];
+            let mut c = Vec::with_capacity(nb);
             for (xb, qb) in x.as_chunks::<QK8_0>().0.iter().zip(q.iter_mut()) {
                 d.push(quantize_q8_0(xb, qb));
+                c.push(neg16_lane_sums(qb));
             }
-            (d, q)
+            B32 { d, q, c }
         });
         let k = (wants(&[Q4_K, Q6_K]) && n.is_multiple_of(QK_K)).then(|| {
             x.as_chunks::<QK_K>()
@@ -985,7 +1010,8 @@ mod x86 {
     // ---- 2-row x 4-token tiles: per 32-weight block, unpack 2 rows' weights
     // once and load each token's activations once, for 8 (row, token) dots.
     // Per (row, token) the float ops are exactly the single-token kernel's, so
-    // results are bit-identical. Both rows have the same type.
+    // results are bit-identical. Both rows have the same type. (AVX2 path;
+    // VNNI uses the unpack-once kernels below.)
 
     macro_rules! small_block_kernels_2x4 {
         ($feat:literal, $name:ident, $bytes:ident, $weights:ident, $mul:ident) => {
@@ -1060,20 +1086,144 @@ mod x86 {
         q5_0_weights,
         mul_sum_us8_avx2
     );
-    small_block_kernels_2x4!(
-        "avx2,fma,f16c,avxvnni",
-        q8_0_vnni_2x4,
-        Q8_0_BYTES,
-        q8_0_weights,
-        mul_sum_us8_vnni
-    );
-    small_block_kernels_2x4!(
-        "avx2,fma,f16c,avxvnni",
-        q5_0_vnni_2x4,
-        Q5_0_BYTES,
-        q5_0_weights,
-        mul_sum_us8_vnni
-    );
+
+    // ---- VNNI 2-row x many-token: unpack a row pair once, then run every
+    // 4-token group over the unpacked blocks. Weights go to dpbusd unsigned
+    // (u = w + 16 for Q5_0, w + 128 for Q8_0) with the accumulator started at
+    // -offset * (lane sum of the activations) (`B32::c`), which gives the same
+    // i32 per lane as the single-token kernel's dpbusd(0, |w|, sign(a, w)):
+    // both are the exact Σ w·a (|a| <= 127, no overflow, dpbusd doesn't
+    // saturate). The scale product row_d * token_d is a vector mul of the
+    // same two f32s, and the fmadd chain is unchanged, so results are
+    // bit-identical to the single-token kernel.
+
+    /// One block of a row pair, unpacked: unsigned weights and f32 scales.
+    #[derive(Clone, Copy)]
+    #[repr(C)]
+    pub struct Pair32 {
+        u: [[u8; 32]; 2],
+        d: [f32; 2],
+    }
+
+    impl Pair32 {
+        pub const ZERO: Pair32 = Pair32 {
+            u: [[0; 32]; 2],
+            d: [0.0; 2],
+        };
+    }
+
+    /// 32 Q5_0 raw values nibble | high bit << 4, in 0..32 (= w + 16).
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn q5_0_raw(b: &[u8; Q5_0_BYTES]) -> __m256i {
+        let qs = load_u8x16(b[6..22].try_into().unwrap());
+        let nib = _mm256_and_si256(
+            _mm256_set_m128i(_mm_srli_epi16(qs, 4), qs),
+            _mm256_set1_epi8(0x0f),
+        );
+        let qh = u32::from_le_bytes([b[2], b[3], b[4], b[5]]);
+        let hi = _mm256_and_si256(bytes_from_bits_32(qh), _mm256_set1_epi8(0x10));
+        _mm256_or_si256(nib, hi)
+    }
+
+    /// 32 Q8_0 weights + 128 as u8.
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn q8_0_raw(b: &[u8; Q8_0_BYTES]) -> __m256i {
+        _mm256_xor_si256(q8_0_weights(b), _mm256_set1_epi8(0x80u8 as i8))
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn store_u8x32(p: &mut [u8; 32], v: __m256i) {
+        // SAFETY: p points to 32 writable bytes; storeu has no alignment requirement.
+        unsafe { _mm256_storeu_si256(p.as_mut_ptr().cast(), v) }
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2")]
+    fn load_i32x8(p: &[i32; 8]) -> __m256i {
+        // SAFETY: as load_u8x32 (32 bytes).
+        unsafe { _mm256_loadu_si256(p.as_ptr().cast()) }
+    }
+
+    macro_rules! unpack_pair {
+        ($name:ident, $bytes:ident, $raw:ident) => {
+            /// Unpack `out.len()` blocks of both rows into `out`.
+            ///
+            /// # Safety
+            /// The CPU must support avx2 and f16c.
+            #[target_feature(enable = "avx2,f16c")]
+            pub unsafe fn $name(rows: [&[u8]; 2], out: &mut [Pair32]) {
+                let n = out.len();
+                let b0 = &rows[0].as_chunks::<$bytes>().0[..n];
+                let b1 = &rows[1].as_chunks::<$bytes>().0[..n];
+                for (p, (w0, w1)) in out.iter_mut().zip(b0.iter().zip(b1)) {
+                    store_u8x32(&mut p.u[0], $raw(w0));
+                    store_u8x32(&mut p.u[1], $raw(w1));
+                    p.d = [h2f([w0[0], w0[1]]), h2f([w1[0], w1[1]])];
+                }
+            }
+        };
+    }
+
+    unpack_pair!(unpack_q5_0_pair, Q5_0_BYTES, q5_0_raw);
+    unpack_pair!(unpack_q8_0_pair, Q8_0_BYTES, q8_0_raw);
+
+    /// 2 unpacked rows x 4 tokens. `Q8` picks the Q8_0 offset (c << 3)
+    /// over Q5_0's (c as stored).
+    ///
+    /// # Safety
+    /// The CPU must support avx2, fma and avxvnni.
+    #[allow(clippy::needless_range_loop)] // t indexes several arrays
+    #[target_feature(enable = "avx2,fma,avxvnni")]
+    pub unsafe fn vnni_pair_x4<const Q8: bool>(
+        w: &[Pair32],
+        dx: [&[f32]; 4],
+        qx: [&[[i8; 32]]; 4],
+        c: [&[[i32; 8]]; 4],
+    ) -> [[f32; 4]; 2] {
+        let n = w.len();
+        // Written out, not `.map(..)`: see small_block_kernels_x4.
+        let dx = [&dx[0][..n], &dx[1][..n], &dx[2][..n], &dx[3][..n]];
+        let qx = [&qx[0][..n], &qx[1][..n], &qx[2][..n], &qx[3][..n]];
+        let c = [&c[0][..n], &c[1][..n], &c[2][..n], &c[3][..n]];
+        let mut acc0 = [_mm256_setzero_ps(); 4];
+        let mut acc1 = [_mm256_setzero_ps(); 4];
+        for i in 0..n {
+            let p = &w[i];
+            let u0 = load_u8x32(&p.u[0]);
+            let u1 = load_u8x32(&p.u[1]);
+            let d0 = _mm256_set1_ps(p.d[0]);
+            let d1 = _mm256_set1_ps(p.d[1]);
+            for t in 0..4 {
+                let qy = load_i8x32(&qx[t][i]);
+                let mut ct = load_i32x8(&c[t][i]);
+                if Q8 {
+                    ct = _mm256_slli_epi32::<3>(ct);
+                }
+                let dt = _mm256_set1_ps(dx[t][i]);
+                let s0 = _mm256_cvtepi32_ps(_mm256_dpbusd_avx_epi32(ct, u0, qy));
+                acc0[t] = _mm256_fmadd_ps(_mm256_mul_ps(d0, dt), s0, acc0[t]);
+                let s1 = _mm256_cvtepi32_ps(_mm256_dpbusd_avx_epi32(ct, u1, qy));
+                acc1[t] = _mm256_fmadd_ps(_mm256_mul_ps(d1, dt), s1, acc1[t]);
+            }
+        }
+        [
+            [
+                hsum_f32x8(acc0[0]),
+                hsum_f32x8(acc0[1]),
+                hsum_f32x8(acc0[2]),
+                hsum_f32x8(acc0[3]),
+            ],
+            [
+                hsum_f32x8(acc1[0]),
+                hsum_f32x8(acc1[1]),
+                hsum_f32x8(acc1[2]),
+                hsum_f32x8(acc1[3]),
+            ],
+        ]
+    }
 
     /// 4-token `q4_k_avx2`.
     ///
@@ -1265,7 +1415,7 @@ unsafe fn dot_row_q8_with(simd: Simd, qtype_id: u32, row: &[u8], x: &QuantizedAc
             dot_row(qtype_id, row, &x.x)
         }
         Q5_0 | Q8_0 => {
-            let (dx, qx) = x.b32.as_ref().unwrap_or_else(|| {
+            let B32 { d: dx, q: qx, .. } = x.b32.as_ref().unwrap_or_else(|| {
                 panic!(
                     "dot_row_q8: {} needs input len multiple of 32, got {} (or the 32-block view wasn't built)",
                     name(),
@@ -1380,9 +1530,9 @@ unsafe fn dot_row_q8_x4(
             let mut dx: [&[f32]; 4] = [&[]; 4];
             let mut qx: [&[[i8; 32]]; 4] = [&[]; 4];
             for t in 0..4 {
-                let (d, q) = xs[t].b32.as_ref()?;
-                dx[t] = d.as_slice();
-                qx[t] = q.as_slice();
+                let b = xs[t].b32.as_ref()?;
+                dx[t] = b.d.as_slice();
+                qx[t] = b.q.as_slice();
             }
             let row = &row[..row_bytes(qtype_id, n)];
             // SAFETY (unsafe calls below): guaranteed by our caller.
@@ -1413,7 +1563,8 @@ unsafe fn dot_row_q8_x4(
 
 /// Two rows at once: `out[k][b] = dot_row_q8(qtypes[k], rows[k], xs[b])`, bit
 /// for bit. When both rows have the same small-block type (Q5_0/Q8_0) on a
-/// SIMD path, tokens go 4 at a time through a 2-row x 4-token kernel; the rest
+/// SIMD path, tokens go 4 at a time through a 2-row x 4-token kernel (on Vnni
+/// the pair is unpacked once for all groups: `dot_rows_q8_vnni`); the rest
 /// (other types, mixed pairs, < 4 leftover tokens) goes per row through
 /// `dot_row_q8_multi`.
 pub fn dot_rows_q8_multi(
@@ -1445,7 +1596,10 @@ unsafe fn dot_rows_q8_multi_with(
     #[allow(unused_mut)]
     let mut done = 0;
     #[cfg(target_arch = "x86_64")]
-    if qtypes[0] == qtypes[1] {
+    if qtypes[0] == qtypes[1] && simd == Simd::Vnni {
+        // SAFETY: guaranteed by our caller.
+        done = unsafe { dot_rows_q8_vnni(qtypes[0], rows, xs, [&mut *o0, &mut *o1]) };
+    } else if qtypes[0] == qtypes[1] {
         for g in xs.chunks_exact(4) {
             let g: [&QuantizedAct; 4] = g.try_into().unwrap();
             // SAFETY: guaranteed by our caller.
@@ -1464,6 +1618,74 @@ unsafe fn dot_rows_q8_multi_with(
         dot_row_q8_multi_with(simd, qtypes[0], rows[0], &xs[done..], &mut o0[done..]);
         dot_row_q8_multi_with(simd, qtypes[1], rows[1], &xs[done..], &mut o1[done..]);
     }
+}
+
+#[cfg(target_arch = "x86_64")]
+thread_local! {
+    /// Unpacked row pair for dot_rows_q8_vnni; grows to the widest row seen.
+    static PAIR_SCRATCH: std::cell::RefCell<Vec<x86::Pair32>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The VNNI part of dot_rows_q8_multi for two rows of type `qtype_id`:
+/// unpack the pair once, then every whole group of 4 tokens. Returns how many
+/// leading tokens it did (a multiple of 4; 0 if the type isn't Q5_0/Q8_0 or
+/// a 32-block view is missing).
+///
+/// # Safety
+/// The CPU must support the Vnni path (`has_vnni()`).
+#[cfg(target_arch = "x86_64")]
+#[allow(clippy::needless_range_loop)] // t indexes xs and the view arrays
+unsafe fn dot_rows_q8_vnni(
+    qtype_id: u32,
+    rows: [&[u8]; 2],
+    xs: &[&QuantizedAct],
+    out: [&mut [f32]; 2],
+) -> usize {
+    let groups = xs.len() / 4;
+    if !matches!(qtype_id, Q5_0 | Q8_0)
+        || groups == 0
+        || xs[..groups * 4].iter().any(|x| x.b32.is_none())
+    {
+        return 0;
+    }
+    let n = xs[0].len();
+    let nb = n / QK8_0;
+    let rb = row_bytes(qtype_id, n);
+    let rows = [&rows[0][..rb], &rows[1][..rb]];
+    let [o0, o1] = out;
+    PAIR_SCRATCH.with_borrow_mut(|scratch| {
+        if scratch.len() < nb {
+            scratch.resize(nb, x86::Pair32::ZERO);
+        }
+        let w = &mut scratch[..nb];
+        // SAFETY (unsafe calls below): has_vnni() implies avx2, fma, f16c.
+        if qtype_id == Q8_0 {
+            unsafe { x86::unpack_q8_0_pair(rows, w) };
+        } else {
+            unsafe { x86::unpack_q5_0_pair(rows, w) };
+        }
+        let w = &*w;
+        for (g, x4) in xs.chunks_exact(4).enumerate() {
+            let mut dx: [&[f32]; 4] = [&[]; 4];
+            let mut qx: [&[[i8; 32]]; 4] = [&[]; 4];
+            let mut c: [&[[i32; 8]]; 4] = [&[]; 4];
+            for t in 0..4 {
+                let b = x4[t].b32.as_ref().expect("checked above");
+                dx[t] = b.d.as_slice();
+                qx[t] = b.q.as_slice();
+                c[t] = b.c.as_slice();
+            }
+            let [r0, r1] = if qtype_id == Q8_0 {
+                unsafe { x86::vnni_pair_x4::<true>(w, dx, qx, c) }
+            } else {
+                unsafe { x86::vnni_pair_x4::<false>(w, dx, qx, c) }
+            };
+            o0[4 * g..4 * g + 4].copy_from_slice(&r0);
+            o1[4 * g..4 * g + 4].copy_from_slice(&r1);
+        }
+    });
+    groups * 4
 }
 
 /// 2 rows of type `qtype_id` x 4 tokens through a 2x4 SIMD kernel, or None if
@@ -1486,19 +1708,18 @@ unsafe fn dot_rows_q8_2x4(
     let mut dx: [&[f32]; 4] = [&[]; 4];
     let mut qx: [&[[i8; 32]]; 4] = [&[]; 4];
     for t in 0..4 {
-        let (d, q) = xs[t].b32.as_ref()?;
-        dx[t] = d.as_slice();
-        qx[t] = q.as_slice();
+        let b = xs[t].b32.as_ref()?;
+        dx[t] = b.d.as_slice();
+        qx[t] = b.q.as_slice();
     }
     let rb = row_bytes(qtype_id, n);
     let rows = [&rows[0][..rb], &rows[1][..rb]];
     // SAFETY (unsafe calls below): guaranteed by our caller.
     Some(match (qtype_id, simd) {
         (Q8_0, Simd::Avx2) => unsafe { x86::q8_0_avx2_2x4(rows, dx, qx) },
-        (Q8_0, Simd::Vnni) => unsafe { x86::q8_0_vnni_2x4(rows, dx, qx) },
         (_, Simd::Avx2) => unsafe { x86::q5_0_avx2_2x4(rows, dx, qx) },
-        (_, Simd::Vnni) => unsafe { x86::q5_0_vnni_2x4(rows, dx, qx) },
-        (_, Simd::Scalar) => return None,
+        // Vnni has its own unpack-once path (dot_rows_q8_vnni).
+        (_, Simd::Vnni | Simd::Scalar) => return None,
     })
 }
 
@@ -1859,7 +2080,12 @@ mod tests {
     fn dequant_act(qt: u32, qa: &QuantizedAct) -> Vec<f32> {
         match qt {
             Q5_0 | Q8_0 => {
-                let (d, q) = qa.b32.as_ref().unwrap();
+                let B32 { d, q, c } = qa.b32.as_ref().unwrap();
+                for (q, c) in q.iter().zip(c) {
+                    for (lane, &cl) in q.as_chunks::<4>().0.iter().zip(c) {
+                        assert_eq!(cl, -16 * lane.iter().map(|&v| v as i32).sum::<i32>());
+                    }
+                }
                 d.iter()
                     .zip(q)
                     .flat_map(|(&d, q)| q.map(|v| d * v as f32))
@@ -2203,6 +2429,104 @@ mod tests {
                                 want.to_bits(),
                                 "qts {qts:?} row {k} B {nb} token {b} {p:?}: rows {got} vs single {want}"
                             );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Q5_0 row whose element j of block b has raw value (j + 7b + seed) % 32,
+    /// so every raw value 0..31 shows up in every block.
+    #[allow(clippy::needless_range_loop)] // j indexes both qh bits and qs bytes
+    fn q5_0_all_raw_row(n: usize, seed: usize, rng: &mut Lcg) -> Vec<u8> {
+        let mut row = synthetic_row(Q5_0, n, rng);
+        for (b, blk) in row.chunks_exact_mut(Q5_0_BYTES).enumerate() {
+            let r = |j: usize| ((j + 7 * b + seed) % 32) as u8;
+            let mut qh = 0u32;
+            for j in 0..32 {
+                qh |= ((r(j) >> 4) as u32) << j;
+            }
+            blk[2..6].copy_from_slice(&qh.to_le_bytes());
+            for j in 0..16 {
+                blk[6 + j] = (r(j) & 0xf) | ((r(j + 16) & 0xf) << 4);
+            }
+        }
+        row
+    }
+
+    /// Q8_0 row with -128, 127, -127, 0, ±1 in every block, the rest random.
+    fn q8_0_extreme_row(n: usize, rng: &mut Lcg) -> Vec<u8> {
+        let mut row = synthetic_row(Q8_0, n, rng);
+        let pins = [-128i8, 127, -127, 0, 1, -1, -128, 127];
+        for (b, blk) in row.chunks_exact_mut(Q8_0_BYTES).enumerate() {
+            for (k, &v) in pins.iter().enumerate() {
+                blk[2 + (k * 4 + b) % 32] = v as u8;
+            }
+        }
+        row
+    }
+
+    /// Activations hitting q = ±127 often, including whole lanes of ±127.
+    fn extreme_x(n: usize, rng: &mut Lcg) -> Vec<f32> {
+        let mode = rng.next_u32() % 4;
+        (0..n)
+            .map(|i| match mode {
+                0 => 1.0,
+                1 => -1.0,
+                _ => match i % 5 {
+                    0 => 1.0,
+                    1 => -1.0,
+                    _ if (i / 32) % 3 == 0 => -(((i / 4) % 2) as f32 * 2.0 - 1.0),
+                    _ => rng.f(),
+                },
+            })
+            .collect()
+    }
+
+    #[test]
+    fn dot_rows_q8_multi_extreme_matches_single() {
+        let mut paths = vec![Simd::Scalar];
+        paths.extend(simd_paths());
+        let mut rng = Lcg(0xe8e8);
+        for n in [32usize, 896] {
+            for qt in [Q5_0, Q8_0] {
+                let (r0, r1) = if qt == Q5_0 {
+                    (
+                        q5_0_all_raw_row(n, 0, &mut rng),
+                        q5_0_all_raw_row(n, 13, &mut rng),
+                    )
+                } else {
+                    (q8_0_extreme_row(n, &mut rng), q8_0_extreme_row(n, &mut rng))
+                };
+                for nb in [1usize, 3, 5, 64, 67] {
+                    let qas: Vec<QuantizedAct> = (0..nb)
+                        .map(|_| QuantizedAct::for_types(&extreme_x(n, &mut rng), &[qt]))
+                        .collect();
+                    let xs: Vec<&QuantizedAct> = qas.iter().collect();
+                    for &p in &paths {
+                        let mut o0 = vec![f32::NAN; nb];
+                        let mut o1 = vec![f32::NAN; nb];
+                        // SAFETY: Scalar, or a path listed by simd_paths().
+                        unsafe {
+                            dot_rows_q8_multi_with(
+                                p,
+                                [qt, qt],
+                                [&r0[..], &r1[..]],
+                                &xs,
+                                [&mut o0[..], &mut o1[..]],
+                            )
+                        };
+                        for (k, (row, out)) in [(&r0, &o0), (&r1, &o1)].into_iter().enumerate() {
+                            for (b, (&got, qa)) in out.iter().zip(&qas).enumerate() {
+                                // SAFETY: as above.
+                                let want = unsafe { dot_row_q8_with(p, qt, row, qa) };
+                                assert_eq!(
+                                    got.to_bits(),
+                                    want.to_bits(),
+                                    "qt {qt} n {n} row {k} B {nb} token {b} {p:?}: rows {got} vs single {want}"
+                                );
+                            }
                         }
                     }
                 }
