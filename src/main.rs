@@ -1,5 +1,6 @@
 #[macro_use]
 mod mv;
+mod chat;
 mod gguf;
 mod kv;
 mod model;
@@ -45,14 +46,19 @@ usage:
                                             greedy generation
   axon logits <model.gguf> \"<prompt>\" [-k K]
                                             top-K next-token logits after the prompt
+  axon chat <model.gguf> [--system TEXT] [--ctx N] [-n N] [--draft K]
+                                            talk to an instruct model
   axon -h | --help                          this help
   axon -V | --version                       print the version
 
 flags:
-  -n N        gen: tokens to generate (default 32)
-  --draft K   gen: draft up to K tokens per step by prompt lookup (default 0 = off; try 7);
+  -n N        gen: tokens to generate (default 32); chat: most tokens per reply (default: no limit)
+  --draft K   gen, chat: draft up to K tokens per step by prompt lookup (default 0 = off; try 7);
               lossless: the output is the plain greedy output either way
   -k K        logits: how many logits to print (default 10)
+  --system T  chat: the system message (default: Qwen2.5's)
+  --ctx N     chat: context size in tokens (default: the model's, at most 8192); when the
+              conversation outgrows it, the oldest exchanges are forgotten
 
 environment:
   AXON_THREADS=N             worker threads (default: cores minus a quarter)
@@ -120,6 +126,9 @@ fn run() -> std::io::Result<()> {
     if args[1] == "gen" || args[1] == "logits" {
         return run_lm(&args);
     }
+    if args[1] == "chat" {
+        return run_chat(&args);
+    }
 
     let (cmd, path) = match args[1].as_str() {
         "info" if args.len() == 3 => ("info", &args[2]),
@@ -130,7 +139,7 @@ fn run() -> std::io::Result<()> {
             ("viz", &args[1])
         }
         c => fail(&format!(
-            "unknown command '{c}' (commands: gen, logits, info)"
+            "unknown command '{c}' (commands: gen, logits, chat, info)"
         )),
     };
 
@@ -165,6 +174,26 @@ fn run() -> std::io::Result<()> {
     Ok(())
 }
 
+/// Speculative decoding: draft up to K tokens per step by prompt lookup
+/// (spec.rs); output is the same either way. Off by default (DEFAULT_DRAFT);
+/// --draft K or AXON_DRAFT=K turns it on, see round_draft. This is AXON_DRAFT.
+fn draft_env() -> usize {
+    match env::var("AXON_DRAFT") {
+        Ok(v) => v
+            .parse::<usize>()
+            .unwrap_or_else(|_| fail(&format!("AXON_DRAFT needs a whole number, got '{v}'"))),
+        Err(_) => DEFAULT_DRAFT,
+    }
+}
+
+/// KV cache type (kv.rs): checked up front so a typo is a usage error, not a
+/// panic in the first new_cache.
+fn kv_env() {
+    if let Err(e) = kv::kv_f32_setting() {
+        fail(&e);
+    }
+}
+
 /// `gen` and `logits` subcommands: args = [axon, cmd, model, prompt, flags...]
 fn run_lm(args: &[String]) -> std::io::Result<()> {
     use std::io::Write;
@@ -180,20 +209,8 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     let (path, prompt) = (&args[2], &args[3]);
     let mut n_gen = 32usize;
     let mut top_k = 10usize;
-    // Speculative decoding: draft up to K tokens per step by prompt lookup
-    // (spec.rs); output is the same either way. Off by default
-    // (DEFAULT_DRAFT); --draft K or AXON_DRAFT=K turns it on, see round_draft.
-    let mut max_draft = match env::var("AXON_DRAFT") {
-        Ok(v) => v
-            .parse::<usize>()
-            .unwrap_or_else(|_| fail(&format!("AXON_DRAFT needs a whole number, got '{v}'"))),
-        Err(_) => DEFAULT_DRAFT,
-    };
-    // KV cache type (kv.rs): checked here so a typo is a usage error, not a
-    // panic in the first new_cache.
-    if let Err(e) = kv::kv_f32_setting() {
-        fail(&e);
-    }
+    let mut max_draft = draft_env();
+    kv_env();
     let mut i = 4;
     while i < args.len() {
         let val = args.get(i + 1).and_then(|s| s.parse::<usize>().ok());
@@ -273,7 +290,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         logits,
         GenOpts {
             n_gen,
-            eos: tok.eos(),
+            stop: &[tok.eos()],
             max_draft,
         },
         &mut |h, max| {
@@ -361,6 +378,229 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Context size `axon chat` uses unless --ctx says otherwise (if the model was
+/// trained on at least this much). The cache is allocated lazily, page by
+/// page as the conversation grows, so a big one costs nothing up front.
+const DEFAULT_CHAT_CTX: usize = 8192;
+
+const CHAT_HELP: &str = concat!(
+    "  /reset          forget the conversation (the system message stays)\n",
+    "  /system TEXT    a new system message (forgets the conversation)\n",
+    "  /exit           quit (or Ctrl-D)\n",
+    "  end a line with \\ to go on with the message on the next line; //text sends /text\n",
+    "  Ctrl-C stops a reply",
+);
+
+/// `chat` subcommand: args = [axon, chat, model, flags...]. Each line of
+/// stdin is a message; on a terminal it's an interactive session.
+fn run_chat(args: &[String]) -> std::io::Result<()> {
+    const CHAT_USAGE: &str =
+        "usage: axon chat <model.gguf> [--system TEXT] [--ctx N] [-n N] [--draft K]";
+    let Some(path) = args.get(2).filter(|p| !p.starts_with('-')) else {
+        fail(CHAT_USAGE);
+    };
+    let mut system = chat::DEFAULT_SYSTEM.to_string();
+    let mut ctx = None;
+    let mut max_reply = usize::MAX;
+    let mut max_draft = draft_env();
+    kv_env();
+    let mut i = 3;
+    while i < args.len() {
+        let f = args[i].as_str();
+        if !matches!(f, "--system" | "--ctx" | "-n" | "--draft") {
+            fail(&format!("unknown argument '{f}' for chat"));
+        }
+        let Some(v) = args.get(i + 1) else {
+            fail(&format!("{f} needs a value"));
+        };
+        if f == "--system" {
+            system = v.clone();
+        } else {
+            let n = v
+                .parse::<usize>()
+                .ok()
+                .filter(|&n| n > 0 || f == "--draft")
+                .unwrap_or_else(|| fail(&format!("{f} needs a positive whole number, got '{v}'")));
+            match f {
+                "--ctx" => ctx = Some(n),
+                "-n" => max_reply = n,
+                _ => max_draft = n,
+            }
+        }
+        i += 2;
+    }
+
+    let model = open_model(path, true);
+    // RoPE past the trained length gives garbage; 0 = the GGUF doesn't say.
+    let trained = model.ctx_len() as usize;
+    let ctx = match ctx {
+        Some(n) if trained > 0 && n > trained => fail(&format!(
+            "--ctx {n} is past the {trained} tokens {path} was trained on"
+        )),
+        Some(n) => n,
+        None if trained > 0 => trained.min(DEFAULT_CHAT_CTX),
+        None => DEFAULT_CHAT_CTX,
+    };
+    let tok = tokenizer::Tokenizer::from_gguf(&model);
+    let net = model::Qwen2::new(&model);
+    let mut conv =
+        chat::Chat::new(&net, &tok, &system, ctx).unwrap_or_else(|e| fail(&format!("{path}: {e}")));
+    conv.max_reply = max_reply;
+    conv.max_draft = round_draft(max_draft);
+
+    let name = std::path::Path::new(path)
+        .file_name()
+        .map_or(path.as_str().into(), |n| n.to_string_lossy());
+    match chat_repl(&mut conv, &tok, &format!("{name} | ctx {ctx}")) {
+        // stdout went away (a closed pipe): nobody is listening.
+        Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        r => r,
+    }
+}
+
+/// The `chat` read-reply loop. Output goes through `write!`, not `print!`,
+/// so a closed stdout is an error to return rather than a panic.
+fn chat_repl(
+    conv: &mut chat::Chat,
+    tok: &tokenizer::Tokenizer,
+    banner: &str,
+) -> std::io::Result<()> {
+    use std::io::{BufRead, IsTerminal, Write};
+
+    let stdin = std::io::stdin();
+    let mut out = std::io::stdout();
+    // Interactive: prompts and their escapes only when a person is at both ends.
+    let tty = stdin.is_terminal() && out.is_terminal();
+    let (dim, undim) = if std::io::stderr().is_terminal() {
+        ("\x1b[2m", "\x1b[0m")
+    } else {
+        ("", "")
+    };
+    if tty {
+        eprintln!("{dim}axon chat | {banner} | /help for commands, Ctrl-D quits{undim}");
+    }
+    let mut input = stdin.lock();
+    loop {
+        if tty {
+            write!(out, "\x1b[1m>\x1b[0m ")?;
+            out.flush()?;
+        }
+        // A message: one line, or several joined while they end in a backslash.
+        let mut msg = String::new();
+        let mut eof = false;
+        loop {
+            let mut line = String::new();
+            if input.read_line(&mut line)? == 0 {
+                eof = true;
+                break;
+            }
+            let line = line.trim_end_matches(['\n', '\r']);
+            match line.strip_suffix('\\') {
+                Some(head) => {
+                    msg.push_str(head);
+                    msg.push('\n');
+                    if tty {
+                        write!(out, "\x1b[1m.\x1b[0m ")?;
+                        out.flush()?;
+                    }
+                }
+                None => {
+                    msg.push_str(line);
+                    break;
+                }
+            }
+        }
+        let text = msg.trim();
+        if eof && text.is_empty() {
+            if tty {
+                writeln!(out)?;
+            }
+            return Ok(());
+        }
+        if text.is_empty() {
+            continue;
+        }
+        if let Some(cmd) = text.strip_prefix('/')
+            && !cmd.starts_with('/')
+        {
+            let (name, arg) = cmd.split_once(char::is_whitespace).unwrap_or((cmd, ""));
+            match name {
+                "exit" | "quit" | "bye" => return Ok(()),
+                "reset" | "clear" => {
+                    conv.reset();
+                    eprintln!("{dim}(conversation cleared){undim}");
+                }
+                "system" if arg.trim().is_empty() => eprintln!("axon: usage: /system TEXT"),
+                "system" => match conv.set_system(arg.trim()) {
+                    Ok(()) => eprintln!("{dim}(new system message; conversation cleared){undim}"),
+                    Err(e) => eprintln!("axon: {e}"),
+                },
+                "help" | "?" => eprintln!("{CHAT_HELP}"),
+                _ => eprintln!("axon: unknown command /{name}; /help lists them"),
+            }
+            if eof {
+                return Ok(());
+            }
+            continue;
+        }
+        let text = text.strip_prefix('/').unwrap_or(text); // "//x" sends "/x"
+
+        // Characters can be split across tokens; the stream holds them back until whole.
+        let mut stream = tokenizer::Utf8Stream::default();
+        chat::sigint::arm();
+        let res = conv.reply(text, &chat::sigint::hit, &mut |id| {
+            let s = stream.push(&tok.decode_bytes(&[id]));
+            if !s.is_empty() {
+                write!(out, "{s}")?;
+                out.flush()?;
+            }
+            Ok(())
+        });
+        chat::sigint::disarm();
+        let r = match res {
+            Ok(r) => r,
+            Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => return Err(e),
+            Err(e) => {
+                eprintln!("axon: {e}");
+                continue;
+            }
+        };
+        writeln!(out, "{}", stream.finish())?;
+        out.flush()?;
+        let rate = |n: usize, s: f64| if s > 0.0 { n as f64 / s } else { 0.0 };
+        let (used, size) = conv.used();
+        let mut notes = String::new();
+        if r.drafted > 0 {
+            notes.push_str(&format!(" | drafts {}/{} kept", r.accepted, r.drafted));
+        }
+        if r.interrupted {
+            notes.push_str(" | stopped");
+        } else if r.cut {
+            notes.push_str(&format!(" | cut at {} tokens", r.ids.len()));
+        }
+        if r.dropped > 0 {
+            notes.push_str(&format!(
+                " | forgot the oldest {} exchange{} to fit",
+                r.dropped,
+                if r.dropped == 1 { "" } else { "s" }
+            ));
+        }
+        eprintln!(
+            "{dim}[{} tok, {:.1} tok/s | prompt {} tok, {:.0} tok/s | ctx {used}/{size}{notes}]{undim}",
+            r.ids.len(),
+            rate(r.decided, r.decode_secs),
+            r.prompt_tokens,
+            rate(r.prompt_tokens, r.prompt_secs),
+        );
+        if tty {
+            writeln!(out)?;
+        }
+        if eof {
+            return Ok(());
+        }
+    }
+}
+
 /// What `generate` did.
 #[derive(Default)]
 struct GenStats {
@@ -380,16 +620,16 @@ struct GenStats {
 }
 
 /// `generate`'s settings.
-struct GenOpts {
+struct GenOpts<'a> {
     /// Stop after this many tokens.
     n_gen: usize,
-    /// Stop before this token.
-    eos: u32,
+    /// Stop before any of these tokens.
+    stop: &'a [u32],
     /// Draft up to this many tokens per pass; 0 = plain greedy.
     max_draft: usize,
 }
 
-/// Greedy decoding of up to `o.n_gen` tokens, stopping before `o.eos`. `logits`
+/// Greedy decoding of up to `o.n_gen` tokens, stopping before any of `o.stop`. `logits`
 /// is the prediction after `prompt`, whose tokens fill cache positions
 /// 0..prompt.len(). Every token goes to `emit` as it's picked.
 ///
@@ -411,7 +651,7 @@ fn generate(
     cache: &mut model::KvCache,
     prompt: &[u32],
     logits: Vec<f32>,
-    o: GenOpts,
+    o: GenOpts<'_>,
     draft: &mut dyn FnMut(&[u32], usize) -> Vec<u32>,
     emit: &mut dyn FnMut(u32) -> std::io::Result<()>,
 ) -> std::io::Result<GenStats> {
@@ -421,7 +661,7 @@ fn generate(
     let mut queue = std::collections::VecDeque::new();
     let GenOpts {
         n_gen,
-        eos,
+        stop,
         max_draft,
     } = o;
     let mut pick = argmax(&logits[..]);
@@ -429,7 +669,7 @@ fn generate(
     while st.ids.len() < n_gen {
         let next = pick;
         picks += 1;
-        if next == eos {
+        if stop.contains(&next) {
             break;
         }
         st.ids.push(next);
@@ -831,7 +1071,7 @@ mod tests {
                             logits,
                             GenOpts {
                                 n_gen: n,
-                                eos,
+                                stop: &[eos],
                                 max_draft: k,
                             },
                             &mut draft,

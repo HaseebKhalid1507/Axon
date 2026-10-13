@@ -17,7 +17,8 @@ Works today, honestly scoped:
 - Architecture: `qwen2`. Tested with Qwen2.5-0.5B-Instruct; also runs the 1.5B, 3B and 7B
   Instruct Q4_K_M builds. Other architectures are refused with an error.
 - Tensor types: Q4_K, Q5_0, Q6_K, Q8_0, F16, F32 (what Qwen's Q4_K_M files use). Others load for `info` but can't run.
-- Sampling: greedy only. No chat template yet: `gen` continues raw text.
+- Sampling: greedy only. `gen` continues raw text; `chat` talks to an Instruct model
+  through its ChatML template.
 - CPU: any x86-64 (others build too, scalar only). The default build is baseline x86-64 and
   picks its AVX2 / AVX-VNNI code at runtime, with the same output bits as a `-C target-cpu`
   build (see `src/mv.rs`). Attention and SwiGLU use fused multiply-adds when the CPU has
@@ -39,9 +40,11 @@ curl -L -o models/qwen2.5-0.5b-q4_k_m.gguf \
   https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf
 
 ./target/release/axon gen models/qwen2.5-0.5b-q4_k_m.gguf "The capital of France is" -n 32
+./target/release/axon chat models/qwen2.5-0.5b-q4_k_m.gguf
 ```
 
 `gen` streams the text to stdout and prints prompt/decode speed to stderr.
+`chat` is a conversation: type a message, get a reply, keep going.
 
 ## Usage
 
@@ -50,11 +53,20 @@ axon <model.gguf>                         browse the model in a terminal UI
 axon info <model.gguf>                    print a summary and exit
 axon gen <model.gguf> "<prompt>" [-n N]   greedy generation (default 32 tokens)
 axon logits <model.gguf> "<prompt>" [-k K]  top-K next-token logits (default 10)
+axon chat <model.gguf> [--system TEXT] [--ctx N] [-n N] [--draft K]
+                                          talk to an Instruct model
 axon --help | --version
 ```
 
 Special-token text in a prompt (`<|im_end|>` and the like) is encoded as plain
 text, never as the control token.
+
+`chat` keeps the whole conversation in one KV cache, so each turn only runs the
+model over the new message, not the history. On a terminal: `/reset` forgets the
+conversation, `/system TEXT` sets a new system message, a line ending in `\`
+continues on the next, Ctrl-C stops a reply, Ctrl-D quits. Piped, each line of
+stdin is a message and each reply one block of stdout. When the conversation
+outgrows `--ctx` (default 8192), the oldest exchanges are forgotten.
 
 ### Environment
 
