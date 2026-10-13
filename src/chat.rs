@@ -20,7 +20,7 @@
 //! `<|im_end|>` can't forge a turn. Replies stay in the history as the tokens
 //! the model picked, not re-encoded from their text.
 
-use crate::model::{KvCache, Qwen2};
+use crate::lm::Lm;
 use crate::spec::PromptLookup;
 use crate::tokenizer::Tokenizer;
 use crate::{GenOpts, PREFILL_BATCH, generate};
@@ -53,10 +53,10 @@ pub struct Reply {
     pub interrupted: bool,
 }
 
-pub struct Chat<'a> {
-    net: &'a Qwen2<'a>,
+pub struct Chat<'a, M: Lm> {
+    net: &'a M,
     tok: &'a Tokenizer,
-    cache: KvCache,
+    cache: M::Cache,
     ctx: usize,
     /// Every token of the conversation, in cache order: the system block,
     /// then one block per exchange (user message, reply, end marker).
@@ -86,16 +86,16 @@ fn special(tok: &Tokenizer, s: &str) -> Option<u32> {
     }
 }
 
-impl<'a> Chat<'a> {
+impl<'a, M: Lm> Chat<'a, M> {
     /// A conversation with `system` as the system message, in a cache of
     /// `ctx` positions. Err if the vocabulary has no ChatML markers. The net
     /// and tokenizer are borrowed: conversations can share them.
     pub fn new(
-        net: &'a Qwen2<'a>,
+        net: &'a M,
         tok: &'a Tokenizer,
         system: &str,
         ctx: usize,
-    ) -> Result<Chat<'a>, String> {
+    ) -> Result<Chat<'a, M>, String> {
         let (Some(im_start), Some(im_end)) =
             (special(tok, "<|im_start|>"), special(tok, "<|im_end|>"))
         else {
@@ -258,7 +258,7 @@ impl<'a> Chat<'a> {
         let mut cancelled = false;
         let t1 = Instant::now();
         let res = generate(
-            net,
+            *net,
             cache,
             hist,
             logits,
@@ -525,7 +525,7 @@ mod tests {
     }
 
     /// The reply to the last message, from scratch: see `fresh`.
-    fn check_last(chat: &Chat, r: &super::Reply, n: usize) {
+    fn check_last(chat: &Chat<Qwen2>, r: &super::Reply, n: usize) {
         let prompt = &chat.hist[..chat.hist.len() - r.ids.len() - 2];
         assert_eq!(r.ids, fresh(chat.net, prompt, n, &chat.stop));
     }

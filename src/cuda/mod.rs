@@ -1,0 +1,879 @@
+//! CUDA backend plumbing: the driver API and NVRTC loaded at run time
+//! (ffi.rs), a device with its context and stream (`Gpu`), device buffers
+//! (`DevBuf`), kernels compiled by NVRTC for the device and cached on disk
+//! (`Module`), and the kernels in kernels.cu (`Kernels`).
+//!
+//! No link-time CUDA dependency: without an NVIDIA driver `Gpu::open`
+//! returns Err and everything else in axon works as before.
+//!
+//! One context per device (the primary one, shared by every `Gpu` on it),
+//! made current on the calling thread by each operation, so a `Gpu` works
+//! from whichever thread holds it. It is !Send for now: one thread at a time
+//! by construction.
+
+// Until G2's GPU model, the binary only uses `summary` (axon info); the
+// rest is exercised by the tests.
+#![cfg_attr(not(test), allow(dead_code))]
+
+mod ffi;
+
+use ffi::{CUcontext, CUdevice, CUdeviceptr, CUfunction, CUmodule, CUstream, Driver, check};
+use std::ffi::{CString, OsString, c_int, c_void};
+use std::path::{Path, PathBuf};
+
+/// Why `Gpu::open` fails off Linux.
+pub const LINUX_ONLY: &str = "CUDA support is Linux-only for now";
+
+/// kernels.cu, compiled at run time.
+const KERNELS: &str = include_str!("kernels.cu");
+
+/// A CUDA device: its retained primary context and a stream to run on.
+/// Dropping it destroys the stream and releases the context; `DevBuf`s and
+/// `Module`s borrow it, so they're gone first.
+pub struct Gpu {
+    d: &'static Driver,
+    dev: CUdevice,
+    ctx: CUcontext,
+    stream: CUstream,
+}
+
+/// What `Gpu::info` reports.
+#[derive(Debug, Clone)]
+pub struct DeviceInfo {
+    pub name: String,
+    /// Compute capability (major, minor): sm_{major}{minor}.
+    pub cc: (u32, u32),
+    pub sms: u32,
+    pub total_bytes: u64,
+    pub free_bytes: u64,
+    pub bus_bits: u32,
+    /// Peak memory clock in kHz (0 if the driver doesn't say).
+    pub mem_clock_khz: u32,
+}
+
+impl DeviceInfo {
+    /// The NVRTC architecture name, e.g. "sm_120".
+    pub fn arch(&self) -> String {
+        format!("sm_{}{}", self.cc.0, self.cc.1)
+    }
+
+    /// Theoretical memory bandwidth in GB/s: two transfers per clock (DDR)
+    /// over the whole bus. None if the driver reports no clock or width.
+    pub fn bandwidth_gbs(&self) -> Option<f64> {
+        (self.mem_clock_khz > 0 && self.bus_bits > 0)
+            .then(|| 2.0 * self.mem_clock_khz as f64 * 1e3 * (self.bus_bits / 8) as f64 / 1e9)
+    }
+}
+
+impl Gpu {
+    /// Device 0.
+    pub fn open() -> Result<Gpu, String> {
+        Self::open_device(0)
+    }
+
+    /// Device `ordinal`: Err with the reason if there's no driver, no such
+    /// device, or its context can't be had.
+    pub fn open_device(ordinal: usize) -> Result<Gpu, String> {
+        if !cfg!(target_os = "linux") {
+            return Err(LINUX_ONLY.into());
+        }
+        let d = ffi::driver()?;
+        let mut count: c_int = 0;
+        // SAFETY: writes the device count to a valid c_int.
+        let r = unsafe { (d.cuDeviceGetCount)(&mut count) };
+        check(d, r, "cuDeviceGetCount")?;
+        if count <= 0 {
+            return Err("no CUDA device".into());
+        }
+        if ordinal >= count as usize {
+            return Err(format!("no CUDA device {ordinal}: there are {count}"));
+        }
+        let mut dev: CUdevice = 0;
+        // SAFETY: ordinal < count; writes a device handle to a valid CUdevice.
+        let r = unsafe { (d.cuDeviceGet)(&mut dev, ordinal as c_int) };
+        check(d, r, "cuDeviceGet")?;
+        let mut ctx: CUcontext = std::ptr::null_mut();
+        // SAFETY: dev is a valid device; writes the context handle.
+        let r = unsafe { (d.cuDevicePrimaryCtxRetain)(&mut ctx, dev) };
+        check(d, r, "cuDevicePrimaryCtxRetain")?;
+        // From here on Drop undoes what's been done; stream is set below.
+        let mut gpu = Gpu {
+            d,
+            dev,
+            ctx,
+            stream: std::ptr::null_mut(),
+        };
+        gpu.bind()?;
+        let mut stream: CUstream = std::ptr::null_mut();
+        // A blocking stream: ordered with the legacy default stream, where
+        // the synchronous cuMemcpyHtoD/DtoH and cuMemsetD8 behind
+        // DevBuf::write/read/zero run. That ordering is what makes them see
+        // (and be seen by) the kernels launched here; a non-blocking stream
+        // or per-thread default streams (--default-stream per-thread,
+        // the _ptds entry points) would break it.
+        // SAFETY: the context is current; writes the stream handle.
+        let r = unsafe { (d.cuStreamCreate)(&mut stream, ffi::CU_STREAM_DEFAULT) };
+        check(d, r, "cuStreamCreate")?;
+        gpu.stream = stream;
+        Ok(gpu)
+    }
+
+    /// Make this device's context current on the calling thread.
+    fn bind(&self) -> Result<(), String> {
+        // SAFETY: ctx is the retained primary context, live until Drop.
+        let r = unsafe { (self.d.cuCtxSetCurrent)(self.ctx) };
+        check(self.d, r, "cuCtxSetCurrent")
+    }
+
+    pub fn info(&self) -> Result<DeviceInfo, String> {
+        let d = self.d;
+        let attr = |a: c_int, what: &str| -> Result<u32, String> {
+            let mut v: c_int = 0;
+            // SAFETY: dev is valid; writes one c_int.
+            let r = unsafe { (d.cuDeviceGetAttribute)(&mut v, a, self.dev) };
+            check(d, r, what)?;
+            Ok(v.max(0) as u32)
+        };
+        let mut name = [0u8; 256];
+        // SAFETY: writes at most name.len() bytes, NUL-terminated.
+        let r =
+            unsafe { (d.cuDeviceGetName)(name.as_mut_ptr().cast(), name.len() as c_int, self.dev) };
+        check(d, r, "cuDeviceGetName")?;
+        let end = name.iter().position(|&b| b == 0).unwrap_or(name.len());
+        let mut total = 0usize;
+        // SAFETY: writes one size_t.
+        let r = unsafe { (d.cuDeviceTotalMem_v2)(&mut total, self.dev) };
+        check(d, r, "cuDeviceTotalMem_v2")?;
+        self.bind()?;
+        let (mut free, mut ctx_total) = (0usize, 0usize);
+        // SAFETY: our context is current; writes two size_t.
+        let r = unsafe { (d.cuMemGetInfo_v2)(&mut free, &mut ctx_total) };
+        check(d, r, "cuMemGetInfo_v2")?;
+        Ok(DeviceInfo {
+            name: String::from_utf8_lossy(&name[..end]).into_owned(),
+            cc: (
+                attr(ffi::ATTR_CC_MAJOR, "cuDeviceGetAttribute(cc major)")?,
+                attr(ffi::ATTR_CC_MINOR, "cuDeviceGetAttribute(cc minor)")?,
+            ),
+            sms: attr(ffi::ATTR_SM_COUNT, "cuDeviceGetAttribute(SM count)")?,
+            total_bytes: total as u64,
+            free_bytes: free as u64,
+            bus_bits: attr(ffi::ATTR_MEMORY_BUS_BITS, "cuDeviceGetAttribute(bus width)")?,
+            mem_clock_khz: attr(
+                ffi::ATTR_MEMORY_CLOCK_KHZ,
+                "cuDeviceGetAttribute(memory clock)",
+            )?,
+        })
+    }
+
+    /// `len` bytes of uninitialized device memory.
+    pub fn alloc(&self, len: usize) -> Result<DevBuf<'_>, String> {
+        let mut ptr: CUdeviceptr = 0;
+        if len > 0 {
+            self.bind()?;
+            // SAFETY: context current; writes the device address.
+            let r = unsafe { (self.d.cuMemAlloc_v2)(&mut ptr, len) };
+            check(self.d, r, "cuMemAlloc_v2")?;
+        }
+        Ok(DevBuf {
+            gpu: self,
+            ptr,
+            len,
+        })
+    }
+
+    /// A device copy of `data`.
+    pub fn upload<T: Pod>(&self, data: &[T]) -> Result<DevBuf<'_>, String> {
+        let b = self.alloc(size_of_val(data))?;
+        b.write(data)?;
+        Ok(b)
+    }
+
+    /// Wait for everything launched on the stream; Err if a kernel failed.
+    pub fn sync(&self) -> Result<(), String> {
+        self.bind()?;
+        // SAFETY: stream is live until Drop.
+        let r = unsafe { (self.d.cuStreamSynchronize)(self.stream) };
+        check(self.d, r, "cuStreamSynchronize")
+    }
+
+    /// Launch `f` on the stream with a grid of `grid` blocks of `block`
+    /// threads and `shared` bytes of dynamic shared memory. Asynchronous:
+    /// faults show up at the next `sync` or copy.
+    ///
+    /// Err if `f` belongs to another `Gpu`'s module. (Its module is loaded:
+    /// `f` borrows it.)
+    ///
+    /// # Safety
+    /// `args` match the kernel's parameter list in number and type; every
+    /// buffer the kernel touches is live until the launch completes and
+    /// large enough for what it accesses with these arguments.
+    pub unsafe fn launch(
+        &self,
+        f: &Func,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+        shared: u32,
+        args: &[Arg],
+    ) -> Result<(), String> {
+        if !std::ptr::eq(f.module.gpu, self) {
+            return Err(format!(
+                "launch of {}: its module is on another Gpu",
+                f.name
+            ));
+        }
+        self.bind()?;
+        // cuLaunchKernel copies each parameter from these addresses before returning.
+        let mut ptrs: Vec<*mut c_void> = args.iter().map(Arg::addr).collect();
+        // SAFETY: f's module is loaded on this context (f borrows it, checked
+        // above) and args match its signature (caller);
+        // ptrs points to args' live values; stream is ours.
+        let r = unsafe {
+            (self.d.cuLaunchKernel)(
+                f.f,
+                grid.0,
+                grid.1,
+                grid.2,
+                block.0,
+                block.1,
+                block.2,
+                shared,
+                self.stream,
+                ptrs.as_mut_ptr(),
+                std::ptr::null_mut(),
+            )
+        };
+        check(self.d, r, &format!("cuLaunchKernel {}", f.name))
+    }
+}
+
+impl Drop for Gpu {
+    fn drop(&mut self) {
+        // Nothing to do about an error here; the context goes away anyway.
+        let _ = self.bind();
+        if !self.stream.is_null() {
+            // SAFETY: our stream, destroyed once; pending work completes first.
+            unsafe { (self.d.cuStreamDestroy_v2)(self.stream) };
+        }
+        // SAFETY: balances the retain in open_device.
+        unsafe { (self.d.cuDevicePrimaryCtxRelease_v2)(self.dev) };
+        // Leave no context current on this thread: the released one may be
+        // destroyed (last reference), and a dangling current context would
+        // be used by any later CUDA call here.
+        // SAFETY: a null context is valid: it unbinds.
+        unsafe { (self.d.cuCtxSetCurrent)(std::ptr::null_mut()) };
+    }
+}
+
+/// Plain-old-data element types for copies to and from the device: any bit
+/// pattern is a valid value, no padding.
+///
+/// # Safety
+/// Only for types where every byte pattern of `size_of::<T>()` is a valid T.
+pub unsafe trait Pod: Copy + Default {}
+// SAFETY: primitive integers and floats: every bit pattern is valid.
+unsafe impl Pod for u8 {}
+// SAFETY: as above.
+unsafe impl Pod for u16 {}
+// SAFETY: as above.
+unsafe impl Pod for u32 {}
+// SAFETY: as above.
+unsafe impl Pod for i32 {}
+// SAFETY: as above.
+unsafe impl Pod for u64 {}
+// SAFETY: as above.
+unsafe impl Pod for f32 {}
+
+/// `len` bytes of device memory, freed on drop.
+pub struct DevBuf<'g> {
+    gpu: &'g Gpu,
+    ptr: CUdeviceptr,
+    len: usize,
+}
+
+impl DevBuf<'_> {
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// A kernel argument: the device address.
+    pub fn arg(&self) -> Arg {
+        Arg::Ptr(self.ptr)
+    }
+
+    /// Copy `data` to the start of the buffer. Synchronous, and ordered after
+    /// the work already launched on the stream (it's a blocking stream).
+    pub fn write<T: Pod>(&self, data: &[T]) -> Result<(), String> {
+        let n = size_of_val(data);
+        if n > self.len {
+            return Err(format!(
+                "upload of {n} bytes into a {}-byte buffer",
+                self.len
+            ));
+        }
+        if n == 0 {
+            return Ok(());
+        }
+        self.gpu.bind()?;
+        // SAFETY: n <= len bytes into our allocation from data's n bytes.
+        let r = unsafe { (self.gpu.d.cuMemcpyHtoD_v2)(self.ptr, data.as_ptr().cast(), n) };
+        check(self.gpu.d, r, "cuMemcpyHtoD_v2")
+    }
+
+    /// The whole buffer as Ts (its length must be a multiple of T's size),
+    /// after the work launched so far finishes.
+    pub fn read<T: Pod>(&self) -> Result<Vec<T>, String> {
+        let sz = size_of::<T>();
+        if !self.len.is_multiple_of(sz) {
+            return Err(format!(
+                "{}-byte buffer read as {sz}-byte elements",
+                self.len
+            ));
+        }
+        let mut out = vec![T::default(); self.len / sz];
+        if self.len > 0 {
+            self.gpu.bind()?;
+            // SAFETY: len bytes from our allocation into out's len bytes, T
+            // is Pod so any bytes are valid Ts.
+            let r = unsafe {
+                (self.gpu.d.cuMemcpyDtoH_v2)(out.as_mut_ptr().cast(), self.ptr, self.len)
+            };
+            check(self.gpu.d, r, "cuMemcpyDtoH_v2")?;
+        }
+        Ok(out)
+    }
+
+    /// Set every byte to zero.
+    pub fn zero(&self) -> Result<(), String> {
+        if self.len == 0 {
+            return Ok(());
+        }
+        self.gpu.bind()?;
+        // SAFETY: len bytes of our allocation.
+        let r = unsafe { (self.gpu.d.cuMemsetD8_v2)(self.ptr, 0, self.len) };
+        check(self.gpu.d, r, "cuMemsetD8_v2")
+    }
+}
+
+impl Drop for DevBuf<'_> {
+    fn drop(&mut self) {
+        if self.ptr != 0 && self.gpu.bind().is_ok() {
+            // SAFETY: our allocation, freed once. cuMemFree waits for work
+            // using it to finish.
+            unsafe { (self.gpu.d.cuMemFree_v2)(self.ptr) };
+        }
+    }
+}
+
+/// A kernel argument, passed by value.
+#[derive(Clone, Copy, Debug)]
+pub enum Arg {
+    /// A device address (`T*` in the kernel).
+    Ptr(u64),
+    U64(u64),
+    U32(u32),
+    I32(i32),
+    F32(f32),
+}
+
+impl Arg {
+    /// Address of the value, as cuLaunchKernel's parameter array wants it.
+    fn addr(&self) -> *mut c_void {
+        match self {
+            Arg::Ptr(v) | Arg::U64(v) => v as *const u64 as *mut c_void,
+            Arg::U32(v) => v as *const u32 as *mut c_void,
+            Arg::I32(v) => v as *const i32 as *mut c_void,
+            Arg::F32(v) => v as *const f32 as *mut c_void,
+        }
+    }
+}
+
+/// A kernel of a loaded `Module`, which it borrows (so it can't outlive it),
+/// and its name for error messages.
+pub struct Func<'m> {
+    f: CUfunction,
+    name: String,
+    module: &'m Module<'m>,
+}
+
+/// How `Module::load` got its code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheStatus {
+    /// From the cache.
+    Hit,
+    /// Compiled: no cache entry yet.
+    Miss,
+    /// Compiled: the entry was unreadable, damaged or wouldn't load (it was replaced).
+    Corrupt,
+    /// Compiled: no cache directory (no absolute $XDG_CACHE_HOME or $HOME).
+    Off,
+}
+
+/// Compiled CUDA code loaded on a `Gpu`; unloaded on drop.
+pub struct Module<'g> {
+    gpu: &'g Gpu,
+    m: CUmodule,
+}
+
+/// $XDG_CACHE_HOME/axon/cuda, else ~/.cache/axon/cuda.
+pub fn cache_dir() -> Option<PathBuf> {
+    cache_dir_from(std::env::var_os("XDG_CACHE_HOME"), std::env::var_os("HOME"))
+}
+
+/// `cache_dir` from those variables' values. Relative paths (and empty
+/// ones) are ignored, as the XDG Base Directory spec says.
+fn cache_dir_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathBuf> {
+    let abs = |v: Option<OsString>| v.map(PathBuf::from).filter(|p| p.is_absolute());
+    let base = match abs(xdg) {
+        Some(x) => x,
+        None => abs(home)?.join(".cache"),
+    };
+    Some(base.join("axon").join("cuda"))
+}
+
+/// FNV-1a, 128-bit: a stable hash (unlike std's, which may change between
+/// Rust releases) for cache keys and the entries' checksums.
+fn fnv128(parts: &[&[u8]]) -> u128 {
+    let mut h: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+    for p in parts {
+        // Length first, so ("ab", "c") and ("a", "bc") differ.
+        for &b in (p.len() as u64).to_le_bytes().iter().chain(p.iter()) {
+            h ^= b as u128;
+            h = h.wrapping_mul(0x0000_0000_0100_0000_0000_0000_0000_013b);
+        }
+    }
+    h
+}
+
+/// A cache entry: this magic, the payload's fnv128, the cubin.
+const MAGIC: &[u8; 10] = b"AXONCUBIN\x01";
+
+fn encode_entry(cubin: &[u8]) -> Vec<u8> {
+    let mut v = MAGIC.to_vec();
+    v.extend_from_slice(&fnv128(&[cubin]).to_le_bytes());
+    v.extend_from_slice(cubin);
+    v
+}
+
+/// The cubin of a well-formed entry, None if it's damaged.
+fn decode_entry(bytes: &[u8]) -> Option<&[u8]> {
+    let rest = bytes.strip_prefix(MAGIC.as_slice())?;
+    let (sum, cubin) = rest.split_at_checked(16)?;
+    (!cubin.is_empty() && sum == fnv128(&[cubin]).to_le_bytes()).then_some(cubin)
+}
+
+/// Temp files older than this in the cache dir are leftovers of a process
+/// that died between write and rename.
+const STALE_TMP: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// Write `bytes` to `path` atomically: a temp file in the same directory,
+/// then a rename, so a reader never sees half an entry. Temp names are
+/// unique per process (pid) and per call (a counter). Creates the directory
+/// private (0700: what's in it gets loaded as code) and sweeps stale temp
+/// files. Best effort: a cache that can't be written only costs a compile
+/// next time.
+fn store(path: &Path, bytes: &[u8]) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQ: AtomicU64 = AtomicU64::new(0);
+    let Some(dir) = path.parent() else { return };
+    if create_private_dir(dir).is_err() {
+        return;
+    }
+    sweep_stale_tmp(dir, STALE_TMP);
+    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+    let tmp = dir.join(format!(".tmp.{}.{seq}", std::process::id()));
+    let ok = std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, path).is_ok();
+    if !ok {
+        let _ = std::fs::remove_file(&tmp);
+    }
+}
+
+/// `dir` and its missing parents, created with mode 0700 on Unix.
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    let mut b = std::fs::DirBuilder::new();
+    b.recursive(true);
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut b, 0o700);
+    b.create(dir)
+}
+
+/// Remove `.tmp.*` files in `dir` last modified more than `age` ago.
+fn sweep_stale_tmp(dir: &Path, age: std::time::Duration) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let old = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|el| el > age);
+        if old && e.file_name().to_string_lossy().starts_with(".tmp.") {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// What NVRTC compiles kernels to for a device: architectures as
+/// 10 * major + minor (sm_120 = 120).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Target {
+    /// Machine code for sm_XY: runs on that major with an equal or higher minor.
+    Cubin(i32),
+    /// PTX for compute_XY, which the driver compiles for any newer device.
+    Ptx(i32),
+}
+
+impl std::fmt::Display for Target {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            Target::Cubin(a) => write!(f, "sm_{a}"),
+            Target::Ptx(a) => write!(f, "compute_{a}"),
+        }
+    }
+}
+
+/// The best `Target` for a device of architecture `cc` given the ones NVRTC
+/// supports (`archs`): its own cubin; else a cubin of the newest older minor
+/// of its major (binary compatible); else PTX of the newest older
+/// architecture, for the driver to compile (a GPU newer than NVRTC). Err if
+/// the GPU is older than everything NVRTC still supports.
+fn pick_target(cc: i32, archs: &[i32], nvrtc: (i32, i32)) -> Result<Target, String> {
+    if archs.contains(&cc) {
+        return Ok(Target::Cubin(cc));
+    }
+    let older = || archs.iter().copied().filter(|&a| a < cc);
+    if let Some(a) = older().filter(|&a| a / 10 == cc / 10).max() {
+        return Ok(Target::Cubin(a));
+    }
+    if let Some(a) = older().max() {
+        return Ok(Target::Ptx(a));
+    }
+    Err(format!(
+        "NVRTC {}.{} can't compile for sm_{cc}: the oldest it supports is sm_{}; \
+         use an older CUDA toolkit for this GPU",
+        nvrtc.0,
+        nvrtc.1,
+        archs.iter().min().map_or("?".into(), |a| a.to_string())
+    ))
+}
+
+/// Err if NVRTC is from a newer CUDA major than the driver supports: what it
+/// builds may not load there.
+fn check_versions(driver: (i32, i32), nvrtc: (i32, i32)) -> Result<(), String> {
+    if nvrtc.0 > driver.0 {
+        return Err(format!(
+            "NVRTC {}.{} needs a CUDA {} driver, have {}.{}; update the NVIDIA driver \
+             or point CUDA_PATH at a CUDA {} toolkit",
+            nvrtc.0, nvrtc.1, nvrtc.0, driver.0, driver.1, driver.0
+        ));
+    }
+    Ok(())
+}
+
+/// Compile CUDA C++ `src` with NVRTC (`opts` include the architecture) to
+/// a cubin, or for a `Ptx` target NUL-terminated PTX (as cuModuleLoadData
+/// takes it). Err carries the compile log.
+fn compile(src: &str, opts: &[String], target: Target) -> Result<Vec<u8>, String> {
+    let n = ffi::nvrtc()?;
+    let csrc = CString::new(src).map_err(|_| "kernel source has a NUL byte")?;
+    let copts: Vec<CString> = opts
+        .iter()
+        .map(|o| CString::new(o.as_str()).map_err(|_| "NVRTC option has a NUL byte"))
+        .collect::<Result<_, _>>()?;
+    let optp: Vec<*const std::ffi::c_char> = copts.iter().map(|c| c.as_ptr()).collect();
+    let mut prog: ffi::NvrtcProgram = std::ptr::null_mut();
+    // SAFETY: csrc and the name are NUL-terminated; no headers.
+    let r = unsafe {
+        (n.nvrtcCreateProgram)(
+            &mut prog,
+            csrc.as_ptr(),
+            c"axon.cu".as_ptr(),
+            0,
+            std::ptr::null(),
+            std::ptr::null(),
+        )
+    };
+    ffi::check_nvrtc(n, r, "nvrtcCreateProgram")?;
+    /// Destroys the program on every path out.
+    struct Prog<'a>(&'a ffi::Nvrtc, ffi::NvrtcProgram);
+    impl Drop for Prog<'_> {
+        fn drop(&mut self) {
+            // SAFETY: a program nvrtcCreateProgram made, destroyed once.
+            unsafe { (self.0.nvrtcDestroyProgram)(&mut self.1) };
+        }
+    }
+    let p = Prog(n, prog);
+    // SAFETY: optp holds optp.len() NUL-terminated strings alive in copts.
+    let r = unsafe { (n.nvrtcCompileProgram)(p.1, optp.len() as c_int, optp.as_ptr()) };
+    if r != ffi::NVRTC_SUCCESS {
+        let mut len = 0usize;
+        // SAFETY: writes one size_t.
+        let mut log = if unsafe { (n.nvrtcGetProgramLogSize)(p.1, &mut len) } == 0 && len > 0 {
+            let mut buf = vec![0u8; len];
+            // SAFETY: buf has the len bytes the log needs (NUL included).
+            let r = unsafe { (n.nvrtcGetProgramLog)(p.1, buf.as_mut_ptr().cast()) };
+            match r {
+                ffi::NVRTC_SUCCESS => String::from_utf8_lossy(&buf[..len - 1]).into_owned(),
+                _ => String::new(), // the compile error itself still goes out
+            }
+        } else {
+            String::new()
+        };
+        if log.trim().is_empty() {
+            log = "(no log)".into();
+        }
+        let e = ffi::check_nvrtc(n, r, "nvrtcCompileProgram").unwrap_err();
+        return Err(format!("{e} [{}]:\n{}", opts.join(" "), log.trim_end()));
+    }
+    let ptx = matches!(target, Target::Ptx(_));
+    let (size_fn, get_fn, what) = if ptx {
+        (n.nvrtcGetPTXSize, n.nvrtcGetPTX, "nvrtcGetPTX")
+    } else {
+        (n.nvrtcGetCUBINSize, n.nvrtcGetCUBIN, "nvrtcGetCUBIN")
+    };
+    let mut len = 0usize;
+    // SAFETY: writes one size_t.
+    let r = unsafe { size_fn(p.1, &mut len) };
+    ffi::check_nvrtc(n, r, what)?;
+    let mut image = vec![0u8; len];
+    // SAFETY: image has the len bytes the size call asked for (for PTX,
+    // its terminating NUL included).
+    let r = unsafe { get_fn(p.1, image.as_mut_ptr().cast()) };
+    ffi::check_nvrtc(n, r, what)?;
+    if image.is_empty() || (ptx && image.last() != Some(&0)) {
+        return Err(format!("NVRTC produced no code for {target}"));
+    }
+    Ok(image)
+}
+
+impl<'g> Module<'g> {
+    /// `src` compiled for this GPU with `opts` (beyond the architecture),
+    /// through the kernel cache at `cache_dir()`.
+    pub fn load(
+        gpu: &'g Gpu,
+        src: &str,
+        opts: &[&str],
+    ) -> Result<(Module<'g>, CacheStatus), String> {
+        Self::load_in(gpu, src, opts, cache_dir().as_deref())
+    }
+
+    /// `load` with the cache in `dir` (None: no cache). Checks that NVRTC
+    /// isn't newer than the driver and picks the target (`pick_target`).
+    pub fn load_in(
+        gpu: &'g Gpu,
+        src: &str,
+        opts: &[&str],
+        dir: Option<&Path>,
+    ) -> Result<(Module<'g>, CacheStatus), String> {
+        let n = ffi::nvrtc()?;
+        let nv = ffi::nvrtc_version(n)?;
+        check_versions(ffi::driver_version(gpu.d)?, nv)?;
+        let cc = gpu.info()?.cc;
+        let target = pick_target((cc.0 * 10 + cc.1) as i32, &ffi::nvrtc_archs(n)?, nv)?;
+        Self::load_for(gpu, src, opts, dir, target)
+    }
+
+    /// `load_in` for `target`. Entries are keyed by a hash of the source,
+    /// options, target and NVRTC version. One that can't be read, fails its
+    /// checksum or won't load is compiled again and replaced, never an
+    /// error. Fresh code is stored only once it has loaded, so code the
+    /// driver rejects is never cached.
+    fn load_for(
+        gpu: &'g Gpu,
+        src: &str,
+        opts: &[&str],
+        dir: Option<&Path>,
+        target: Target,
+    ) -> Result<(Module<'g>, CacheStatus), String> {
+        let n = ffi::nvrtc()?;
+        let nv = ffi::nvrtc_version(n)?;
+        let mut all = vec![format!("--gpu-architecture={target}")];
+        all.extend(opts.iter().map(|s| s.to_string()));
+        let (joined, ver) = (all.join("\n"), format!("nvrtc {}.{}", nv.0, nv.1));
+        let tname = target.to_string();
+        let key = fnv128(&[
+            src.as_bytes(),
+            joined.as_bytes(),
+            tname.as_bytes(),
+            ver.as_bytes(),
+        ]);
+        let fresh = || -> Result<(Module<'g>, Vec<u8>), String> {
+            let image = compile(src, &all, target)?;
+            let m = Self::from_image(gpu, &image).map_err(|e| {
+                let d = ffi::driver_version(gpu.d).unwrap_or((0, 0));
+                format!(
+                    "{e}; NVRTC {}.{} built it for {target}, the driver is CUDA {}.{}",
+                    nv.0, nv.1, d.0, d.1
+                )
+            })?;
+            Ok((m, image))
+        };
+        let Some(dir) = dir else {
+            return Ok((fresh()?.0, CacheStatus::Off));
+        };
+        let path = dir.join(format!("{key:032x}.cubin"));
+        let status = match std::fs::read(&path) {
+            Ok(bytes) => match decode_entry(&bytes) {
+                Some(image) => match Self::from_image(gpu, image) {
+                    Ok(m) => return Ok((m, CacheStatus::Hit)),
+                    Err(_) => CacheStatus::Corrupt,
+                },
+                None => CacheStatus::Corrupt,
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => CacheStatus::Miss,
+            Err(_) => CacheStatus::Corrupt,
+        };
+        let (m, image) = fresh()?;
+        store(&path, &encode_entry(&image));
+        Ok((m, status))
+    }
+
+    /// Load a cubin, or NUL-terminated PTX (compiled by the driver).
+    fn from_image(gpu: &'g Gpu, image: &[u8]) -> Result<Module<'g>, String> {
+        gpu.bind()?;
+        let mut m: CUmodule = std::ptr::null_mut();
+        // SAFETY: context current; image is an in-memory cubin the driver
+        // parses (and rejects if malformed) before returning, or PTX text
+        // (cache entries pass a checksum; PTX from `compile` ends in a NUL).
+        let r = unsafe { (gpu.d.cuModuleLoadData)(&mut m, image.as_ptr().cast()) };
+        check(gpu.d, r, "cuModuleLoadData")?;
+        Ok(Module { gpu, m })
+    }
+
+    /// The `extern "C"` kernel `name`.
+    pub fn function(&self, name: &str) -> Result<Func<'_>, String> {
+        let c = CString::new(name).map_err(|_| "kernel name has a NUL byte")?;
+        let mut f: CUfunction = std::ptr::null_mut();
+        self.gpu.bind()?;
+        // SAFETY: the module is loaded; c is NUL-terminated.
+        let r = unsafe { (self.gpu.d.cuModuleGetFunction)(&mut f, self.m, c.as_ptr()) };
+        check(self.gpu.d, r, &format!("cuModuleGetFunction {name}"))?;
+        Ok(Func {
+            f,
+            name: name.into(),
+            module: self,
+        })
+    }
+}
+
+impl Drop for Module<'_> {
+    fn drop(&mut self) {
+        if self.gpu.bind().is_ok() {
+            // SAFETY: our module, unloaded once; no Func of it is left (they
+            // borrow it), so nothing launches its kernels after this.
+            unsafe { (self.gpu.d.cuModuleUnload)(self.m) };
+        }
+    }
+}
+
+/// The kernels of kernels.cu, from a `Module` made by `Kernels::module`.
+pub struct Kernels<'m> {
+    gpu: &'m Gpu,
+    dequant_rows: Func<'m>,
+}
+
+/// NVRTC options for kernels.cu beyond the architecture. Denormals kept,
+/// as on the CPU (the defaults, spelled out: they are part of the cache key).
+const KERNEL_OPTS: [&str; 2] = ["--std=c++17", "--ftz=false"];
+
+impl<'m> Kernels<'m> {
+    /// kernels.cu compiled for `gpu` (or from the cache).
+    pub fn module(gpu: &Gpu) -> Result<Module<'_>, String> {
+        Ok(Module::load(gpu, KERNELS, &KERNEL_OPTS)?.0)
+    }
+
+    /// The kernels of `m`, which must be `Kernels::module`'s.
+    pub fn new(m: &'m Module<'_>) -> Result<Kernels<'m>, String> {
+        Ok(Kernels {
+            gpu: m.gpu,
+            dequant_rows: m.function("dequant_rows")?,
+        })
+    }
+
+    /// Rows `rows` of a matrix of type `qt` with `n` values per row, whose
+    /// bytes are `w`, dequantized to f32: bit for bit `quant::dequant` of
+    /// each row, concatenated.
+    pub fn dequant_rows(
+        &self,
+        qt: u32,
+        w: &DevBuf,
+        n: usize,
+        rows: &[u32],
+    ) -> Result<Vec<f32>, String> {
+        use crate::quant::{F16, F32, Q4_K, Q5_0, Q6_K, Q8_0};
+        let q = crate::gguf::qtype(qt);
+        if ![F32, F16, Q5_0, Q8_0, Q4_K, Q6_K].contains(&qt) {
+            return Err(format!("dequant_rows: unsupported type {}", q.name));
+        }
+        if n == 0 || !n.is_multiple_of(q.block_size) || n > 65_535 * 256 {
+            return Err(format!("dequant_rows: bad row length {n} for {}", q.name));
+        }
+        // One block per row in grid x, at most 2^31 - 1.
+        if rows.len() > i32::MAX as usize {
+            return Err(format!(
+                "dequant_rows: {} rows, at most 2^31 - 1",
+                rows.len()
+            ));
+        }
+        let rb = crate::quant::row_bytes(qt, n);
+        if let Some(&r) = rows.iter().find(|&&r| (r as usize + 1) * rb > w.len()) {
+            return Err(format!(
+                "dequant_rows: row {r} is past the {}-byte matrix",
+                w.len()
+            ));
+        }
+        if rows.is_empty() {
+            return Ok(Vec::new());
+        }
+        let idx = self.gpu.upload(rows)?;
+        let out = self.gpu.alloc(rows.len() * n * 4)?;
+        const BLOCK: u32 = 256;
+        // SAFETY: the args match dequant_rows' signature; every row read is
+        // inside w (checked above) and out holds rows.len() * n floats.
+        unsafe {
+            self.gpu.launch(
+                &self.dequant_rows,
+                (rows.len() as u32, (n as u32).div_ceil(BLOCK), 1),
+                (BLOCK, 1, 1),
+                0,
+                &[
+                    Arg::I32(qt as i32),
+                    w.arg(),
+                    Arg::U64(rb as u64),
+                    Arg::I32(n as i32),
+                    idx.arg(),
+                    out.arg(),
+                ],
+            )?;
+        }
+        out.read()
+    }
+}
+
+/// One line about the GPU for `axon info`: name, architecture, memory and
+/// theoretical bandwidth, or why there's none.
+pub fn summary() -> String {
+    match Gpu::open().and_then(|g| g.info()) {
+        Ok(i) => {
+            const GIB: f64 = (1u64 << 30) as f64;
+            let mut s = format!(
+                "gpu: {} | {}, {} SMs | {:.1} GiB ({:.1} free)",
+                i.name,
+                i.arch(),
+                i.sms,
+                i.total_bytes as f64 / GIB,
+                i.free_bytes as f64 / GIB
+            );
+            if let Some(bw) = i.bandwidth_gbs() {
+                s.push_str(&format!(" | ~{bw:.0} GB/s"));
+            }
+            s
+        }
+        Err(e) => format!("gpu: none ({e})"),
+    }
+}
+
+#[cfg(test)]
+mod tests;

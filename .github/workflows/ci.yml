@@ -13,6 +13,8 @@ env:
   RUSTFLAGS: "-D warnings"
   # The 491 MB test model isn't in the repo. Tests that need it skip; the rest still run.
   AXON_SKIP_MODEL_TESTS: "1"
+  # No GPU either: the CUDA tests skip (visibly); the rest still run.
+  AXON_SKIP_GPU_TESTS: "1"
 
 jobs:
   check:
@@ -48,6 +50,7 @@ jobs:
       - name: Tests and release binary on a Nehalem CPU (qemu-user)
         env:
           AXON_SKIP_MODEL_TESTS: "1"
+          AXON_SKIP_GPU_TESTS: "1"
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq qemu-user

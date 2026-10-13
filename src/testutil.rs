@@ -50,3 +50,21 @@ pub fn read_json(rel: &str) -> serde_json::Value {
     let s = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     serde_json::from_str(&s).unwrap_or_else(|e| panic!("{}: {e}", path.display()))
 }
+
+/// The GPU, for tests that need one, or None to skip.
+///
+/// Like `model_path`: no usable GPU (no driver, no device, or it won't
+/// open) is a test failure, not a silent pass. Machines without one (CI)
+/// opt out explicitly with `AXON_SKIP_GPU_TESTS=1`.
+pub fn gpu() -> Option<crate::cuda::Gpu> {
+    match crate::cuda::Gpu::open() {
+        Ok(g) => Some(g),
+        Err(e) if std::env::var_os("AXON_SKIP_GPU_TESTS").is_some() => {
+            eprintln!("skipping: no usable GPU ({e}) and AXON_SKIP_GPU_TESTS is set");
+            None
+        }
+        Err(e) => {
+            panic!("no usable GPU: {e}. Set AXON_SKIP_GPU_TESTS=1 to skip the tests that need one.")
+        }
+    }
+}

@@ -25,6 +25,18 @@ sha256sum models/qwen2.5-0.5b-q4_k_m.gguf
 Without it those tests fail on purpose, so a missing model can't pass for a
 working one. To skip them, set `AXON_SKIP_MODEL_TESTS=1`. CI does this.
 
+## The GPU tests
+
+The CUDA tests (`src/cuda/`) need an NVIDIA GPU with its driver
+(`libcuda.so.1`) and NVRTC from the CUDA toolkit (`libnvrtc.so`, found on the
+library path, in `$CUDA_PATH/lib64`, `/opt/cuda/lib64` or
+`/usr/local/cuda/lib64`). Nothing CUDA is linked: axon builds and runs
+without them. Like a missing model, a missing GPU makes those tests fail; to
+skip them, set `AXON_SKIP_GPU_TESTS=1`. CI does this.
+
+Kernels are compiled for the GPU on first use and cached in
+`$XDG_CACHE_HOME/axon/cuda` (else `~/.cache/axon/cuda`); deleting it is safe.
+
 The tests compare axon against reference data in `tests/fixtures/`: gguf-py's
 dequantizer, Hugging Face's tokenizer, and Ollama's greedy output on CPU.
 `scripts/oracle/make_fixtures.py` regenerates it (setup in its header).
