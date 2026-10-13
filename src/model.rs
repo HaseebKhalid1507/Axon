@@ -274,19 +274,18 @@ impl<'a> Qwen2<'a> {
             cache.v[l][pos * kv_dim..(pos + 1) * kv_dim].copy_from_slice(&v);
             let (kc, vc) = (&cache.k[l], &cache.v[l]);
 
-            // 5. Each query head attends over all positions 0..=pos.
+            // 5. Each query head attends over all positions 0..=pos, one head per
+            //    pool task (the work grows with context, so it can't stay serial).
             //    GQA: query head qh reads kv head qh / group.
             let scale = 1.0 / (hd as f32).sqrt();
             let mut att_out = vec![0.0f32; dim];
-            let mut scores = vec![0.0f32; pos + 1];
-            for qh in 0..self.n_heads {
+            pool::for_each_chunk_mut(&mut att_out, hd, |qh, out| {
                 let kvh = qh / group;
                 let qv = &q[qh * hd..(qh + 1) * hd];
+                let head = |t: usize| t * kv_dim + kvh * hd..t * kv_dim + (kvh + 1) * hd;
                 // Score = (q · k_t) / sqrt(head_dim) for every past position t.
-                for t in 0..=pos {
-                    let kv = &kc[t * kv_dim + kvh * hd..t * kv_dim + (kvh + 1) * hd];
-                    scores[t] = qv.iter().zip(kv).map(|(a, b)| a * b).sum::<f32>() * scale;
-                }
+                let mut scores: Vec<f32> =
+                    (0..=pos).map(|t| dot(qv, &kc[head(t)]) * scale).collect();
                 // Softmax turns scores into weights summing to 1 (subtract max for stability).
                 let max = scores.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
                 let mut sum = 0.0f32;
@@ -294,19 +293,15 @@ impl<'a> Qwen2<'a> {
                     *s = (*s - max).exp();
                     sum += *s;
                 }
-                for s in scores.iter_mut() {
-                    *s /= sum;
-                }
+                let inv = 1.0 / sum;
                 // Output = weighted sum of the value vectors.
-                let out = &mut att_out[qh * hd..(qh + 1) * hd];
-                for t in 0..=pos {
-                    let vv = &vc[t * kv_dim + kvh * hd..t * kv_dim + (kvh + 1) * hd];
-                    let w = scores[t];
-                    for d in 0..hd {
-                        out[d] += w * vv[d];
+                for (t, &w) in scores.iter().enumerate() {
+                    let w = w * inv;
+                    for (o, &v) in out.iter_mut().zip(&vc[head(t)]) {
+                        *o += w * v;
                     }
                 }
-            }
+            });
 
             // 6. Mix the heads back together and add to the residual stream.
             let o = self.matvec(layer.wo, &att_out);
@@ -334,6 +329,23 @@ impl<'a> Qwen2<'a> {
         let h = self.rmsnorm(&x, &self.output_norm);
         self.matvec(self.output, &h)
     }
+}
+
+/// Dot product with 8 independent partial sums. A plain `.sum()` must add in
+/// order, so it can't use SIMD lanes; splitting it lets the compiler vectorize.
+#[inline]
+fn dot(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    let mut acc = [0.0f32; 8];
+    let (ac, ar) = a.as_chunks::<8>();
+    let (bc, br) = b.as_chunks::<8>();
+    for (x, y) in ac.iter().zip(bc) {
+        for i in 0..8 {
+            acc[i] += x[i] * y[i];
+        }
+    }
+    let tail: f32 = ar.iter().zip(br).map(|(x, y)| x * y).sum();
+    acc.iter().sum::<f32>() + tail
 }
 
 #[cfg(test)]
