@@ -178,6 +178,9 @@ impl Pool {
         let s = self.shared;
         let active = adapt.active;
         if active == 0 {
+            // No workers (AXON_THREADS=1). Release the lock first: a nested
+            // `run` from `f` would otherwise deadlock on it.
+            drop(adapt);
             (0..n_chunks).for_each(f);
             return;
         }
@@ -623,6 +626,20 @@ mod tests {
         let count = AtomicUsize::new(0);
         Pool::global().run(8, &|_| {
             Pool::global().run(5, &|_| {
+                count.fetch_add(1, Relaxed);
+            });
+        });
+        assert_eq!(count.load(Relaxed), 40);
+    }
+
+    #[test]
+    fn nested_run_without_workers() {
+        // One thread, no workers: the serial path must not hold the lock
+        // while it runs `f` (this hung under AXON_THREADS=1).
+        let pool = Pool::new(1);
+        let count = AtomicUsize::new(0);
+        pool.run(8, &|_| {
+            pool.run(5, &|_| {
                 count.fetch_add(1, Relaxed);
             });
         });
