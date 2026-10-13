@@ -54,6 +54,9 @@ jobs:
           cargo test --release --no-run 2>&1 | tee no-run.log
           bin=$(grep -oE 'target/release/deps/axon-[0-9a-f]+' no-run.log | head -1)
           test -x "$bin"
-          qemu-x86_64 -cpu Nehalem "$bin"
+          # attend_matches_per_head sweeps ~300 context lengths x 16 shapes: 40 s on
+          # the scalar path natively (the "scalar path" step above runs it), ~18 min
+          # under qemu. The other attention tests still run the same code here.
+          qemu-x86_64 -cpu Nehalem "$bin" --skip model::tests::attend_matches_per_head
           qemu-x86_64 -cpu Nehalem target/release/axon --help
           qemu-x86_64 -cpu Nehalem target/release/axon --version
