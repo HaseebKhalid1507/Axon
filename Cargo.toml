@@ -14,6 +14,10 @@ categories = ["science", "mathematics"]
 memmap2 = "0.9"
 ratatui = "0.29"
 crossterm = "0.28"
+fancy-regex = "0.16"
+
+[dev-dependencies]
+serde_json = "1"
 
 [profile.release]
 opt-level = 3
