@@ -615,7 +615,10 @@ mod x86 {
         ]
     }
 
-    /// Prefetch [off, off + len) of `all`, clamped to its end (64-byte lines).
+    /// Hint [off, off + len) of `all` into L2, clamped to its end (64-byte
+    /// lines). L2, not L1 (T1, not T0): a burst of T0 hints ties up the L1
+    /// fill buffers the demand loads need (as r8bi measured); callers also
+    /// spread a block's hints across its loop instead of one burst.
     #[inline]
     #[target_feature(enable = "avx2")]
     fn prefetch(all: &[u8], off: usize, len: usize) {
@@ -623,7 +626,7 @@ mod x86 {
         let mut p = off;
         while p < end {
             // SAFETY: p < all.len(); prefetch never faults anyway.
-            unsafe { _mm_prefetch::<_MM_HINT_T0>(all.as_ptr().add(p).cast()) };
+            unsafe { _mm_prefetch::<_MM_HINT_T1>(all.as_ptr().add(p).cast()) };
             p += 64;
         }
     }
@@ -723,11 +726,14 @@ mod x86 {
                         let blocks = groups[base..base + gb].as_chunks::<R8_Q4_K>().0;
                         let mut acc = _mm256_setzero_ps();
                         for (sb, (b, a)) in blocks.iter().zip(xk).enumerate() {
-                            if pf > 0 {
-                                prefetch(groups, base + sb * R8_Q4_K + pf, R8_Q4_K);
-                            }
+                            // the block `pf` bytes ahead, a quarter per c
+                            let ahead = base + sb * R8_Q4_K + pf;
                             let mut sumi = z;
                             for c in 0..4 {
+                                if pf > 0 {
+                                    let part = R8_Q4_K / 4;
+                                    prefetch(groups, ahead + c * part, part);
+                                }
                                 // even/odd g in separate chains
                                 let (mut s0, mut s1, mut t0, mut t1) = (z, z, z, z);
                                 for g in (0..8).step_by(2) {
@@ -780,12 +786,15 @@ mod x86 {
                         let blocks = groups[base..base + gb].as_chunks::<R8_Q6_K>().0;
                         let mut acc = _mm256_setzero_ps();
                         for (sb, (b, a)) in blocks.iter().zip(xk).enumerate() {
-                            if pf > 0 {
-                                prefetch(groups, base + sb * R8_Q6_K + pf, R8_Q6_K);
-                            }
+                            // the block `pf` bytes ahead, a quarter per (h, half)
+                            let ahead = base + sb * R8_Q6_K + pf;
                             let mut isum = _mm256_setzero_si256();
                             for h in 0..2 {
                                 for half in 0..2 {
+                                    if pf > 0 {
+                                        let part = R8_Q6_K / 4;
+                                        prefetch(groups, ahead + (2 * h + half) * part, part);
+                                    }
                                     // sub-blocks j = 8h + 2q + half, q = 0..4
                                     let mut s = [_mm256_setzero_si256(); 4];
                                     for q in 0..4 {

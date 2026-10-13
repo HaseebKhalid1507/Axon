@@ -327,8 +327,12 @@ pub struct Model {
 
 /// `release` only drops whole aligned blocks of this size inside released
 /// tensors (and the padding between them): a multiple of every page size
-/// Linux uses (4/16/64 KB), so other tensors' bytes are never touched.
+/// Linux uses (4/16/64 KB), so other tensors' bytes are never touched. On
+/// the anonymous copy it's 2 MB instead: that copy asks for huge pages, and
+/// dropping part of one splits it, so the tensors still read from the rest
+/// of it would go back to 4 KB pages (dTLB misses on every decode token).
 const RELEASE_ALIGN: usize = 64 << 10;
+const RELEASE_ALIGN_HUGE: usize = 2 << 20;
 
 impl Model {
     /// In bounds for every tensor of a loaded model: `parse` checks the ranges.
@@ -391,8 +395,13 @@ impl Model {
             hi += 1;
         }
         let base = self.data.as_ptr() as usize;
-        let start = (base + rel[lo].start).next_multiple_of(RELEASE_ALIGN) - base;
-        let end = (base + rel[hi].end) / RELEASE_ALIGN * RELEASE_ALIGN - base;
+        let align = if self.file_backed {
+            RELEASE_ALIGN
+        } else {
+            RELEASE_ALIGN_HUGE
+        };
+        let start = (base + rel[lo].start).next_multiple_of(align) - base;
+        let end = (base + rel[hi].end) / align * align - base;
         if start >= end {
             return;
         }

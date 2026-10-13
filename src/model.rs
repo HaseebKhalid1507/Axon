@@ -20,7 +20,52 @@ struct Weight<'a> {
     t: &'a Tensor,
     /// The tensor's bytes; None when repacked (they may have been released).
     data: Option<&'a [u8]>,
-    r8: Option<memmap2::Mmap>,
+    r8: Option<R8>,
+}
+
+/// A repacked matrix: bytes off..off + len of the shared arena.
+struct R8 {
+    map: std::sync::Arc<memmap2::Mmap>,
+    off: usize,
+    len: usize,
+}
+
+impl std::ops::Deref for R8 {
+    type Target = [u8];
+    fn deref(&self) -> &[u8] {
+        &self.map[self.off..self.off + self.len]
+    }
+}
+
+/// Bytes of the r8/r8q form of `t`, if it has one.
+fn repacked_len(t: &Tensor) -> Option<usize> {
+    let (qt, rows, n) = (t.qtype.id, t.dims[1] as usize, t.dims[0] as usize);
+    if r8q::can_repack(qt, rows, n) {
+        Some(r8q::repacked_len(qt, rows, n))
+    } else if r8::can_repack(qt, rows, n) {
+        Some(r8::repacked_len(qt, rows, n))
+    } else {
+        None
+    }
+}
+
+/// One anonymous mapping for every repacked matrix, in whole 2 MB pages
+/// with transparent huge pages requested before the first touch (decode
+/// walks all of it every token; on 4 KB pages the dTLB misses cost more than
+/// the arithmetic. AXON_R8_THP=0 skips the request). One mapping, not one
+/// per matrix: the kernel only 2 MB-aligns mappings whose length is a whole
+/// number of 2 MB pages, and a huge page per small matrix (attn_k) would
+/// waste most of it.
+fn r8_arena(len: usize) -> memmap2::MmapMut {
+    const HUGE: usize = 2 << 20;
+    let map = memmap2::MmapMut::map_anon(len.max(1).next_multiple_of(HUGE))
+        .expect("r8: anonymous mapping");
+    #[cfg(target_os = "linux")]
+    if std::env::var("AXON_R8_THP").map_or(true, |v| v != "0") {
+        // Failure only costs speed.
+        let _ = map.advise(memmap2::Advice::HugePage);
+    }
+    map
 }
 
 impl<'a> Weight<'a> {
@@ -32,37 +77,25 @@ impl<'a> Weight<'a> {
         self.t.dims[1] as usize
     }
 
-    /// Repack a Q4_K/Q6_K/Q5_0/Q8_0 matrix with rows % 8 == 0 if `repack`, into
-    /// anonymous memory with transparent huge pages requested (decode walks
-    /// it every token; AXON_R8_THP=0 skips the request). Then, if `release`,
-    /// the original bytes are handed back (`Model::release`) so the weights
-    /// aren't resident twice. Never release a tensor read elsewhere: the
-    /// token embedding (a tied output matrix is the same tensor).
-    fn load(m: &'a Model, t: &'a Tensor, repack: bool, release: bool) -> Weight<'a> {
-        let (qt, rows, n) = (t.qtype.id, t.dims[1] as usize, t.dims[0] as usize);
-        let q = r8q::can_repack(qt, rows, n);
-        if !repack || !(q || r8::can_repack(qt, rows, n)) {
+    /// With `dst` (`repacked_len(t)` bytes of the arena), repack the matrix
+    /// into it; `r8` is attached once the arena is read-only (`build`).
+    /// Then, if `release`, the original bytes are handed back
+    /// (`Model::release`) so the weights aren't resident twice. Never
+    /// release a tensor read elsewhere: the token embedding (a tied output
+    /// matrix is the same tensor).
+    fn load(m: &'a Model, t: &'a Tensor, dst: Option<&mut [u8]>, release: bool) -> Weight<'a> {
+        let Some(buf) = dst else {
             return Weight {
                 t,
                 data: Some(m.tensor_data(t)),
                 r8: None,
             };
-        }
-        let len = if q {
-            r8q::repacked_len(qt, rows, n)
-        } else {
-            r8::repacked_len(qt, rows, n)
         };
-        let mut buf = memmap2::MmapMut::map_anon(len).expect("r8: anonymous mapping");
-        #[cfg(target_os = "linux")]
-        if std::env::var("AXON_R8_THP").map_or(true, |v| v != "0") {
-            // Before the first touch, as in gguf::map_weights. Failure only costs speed.
-            let _ = buf.advise(memmap2::Advice::HugePage);
-        }
-        if q {
-            r8q::repack_into(qt, m.tensor_data(t), rows, n, &mut buf);
+        let (qt, rows, n) = (t.qtype.id, t.dims[1] as usize, t.dims[0] as usize);
+        if r8q::can_repack(qt, rows, n) {
+            r8q::repack_into(qt, m.tensor_data(t), rows, n, buf);
         } else {
-            r8::repack_into(qt, m.tensor_data(t), rows, n, &mut buf);
+            r8::repack_into(qt, m.tensor_data(t), rows, n, buf);
         }
         if release {
             m.release(t);
@@ -70,7 +103,7 @@ impl<'a> Weight<'a> {
         Weight {
             t,
             data: None,
-            r8: Some(buf.make_read_only().expect("r8: mprotect")),
+            r8: None,
         }
     }
 
@@ -105,7 +138,7 @@ impl<'a> Weight<'a> {
     /// Rows r0..r0 + k of a repacked matrix as whole r8 groups, plus the
     /// rest of the matrix when `to_end` (prefetch room, see `r8::gemv`).
     fn groups(&self, n_in: usize, r0: usize, k: usize, to_end: bool) -> &[u8] {
-        let p = self.r8.as_deref().expect("not repacked");
+        let p: &[u8] = self.r8.as_deref().expect("not repacked");
         assert!(
             r0.is_multiple_of(8) && k.is_multiple_of(8),
             "{}: r8 rows not whole groups",
@@ -376,15 +409,60 @@ impl<'a> Qwen2<'a> {
             Some(t) if !tie => t,
             _ => token_embd,
         };
+        // Every repacked matrix in one arena, in this order: output, then
+        // per layer MATS (64-byte aligned offsets).
+        const MATS: [&str; 7] = [
+            "attn_q.weight",
+            "attn_k.weight",
+            "attn_v.weight",
+            "attn_output.weight",
+            "ffn_gate.weight",
+            "ffn_up.weight",
+            "ffn_down.weight",
+        ];
+        let lt = |i: usize, s: &str| find(m, &format!("blk.{i}.{s}"));
+        let mut plan: Vec<Option<(usize, usize)>> = Vec::new();
+        let mut total = 0;
+        for t in std::iter::once(out_t).chain((0..n_layers).flat_map(|i| MATS.map(|s| lt(i, s)))) {
+            let len = if repack { repacked_len(t) } else { None };
+            plan.push(len.map(|len| (total, len)));
+            total += len.map_or(0, |l| l.next_multiple_of(64));
+        }
+        let mut arena = (total > 0).then(|| r8_arena(total));
+        // Disjoint slices of the arena, in plan order.
+        let mut slots: Vec<Option<&mut [u8]>> = Vec::with_capacity(plan.len());
+        {
+            let mut rest: &mut [u8] = arena.as_deref_mut().unwrap_or(&mut []);
+            let mut at = 0;
+            for p in &plan {
+                slots.push(p.map(|(off, len)| {
+                    let (_, r) = std::mem::take(&mut rest).split_at_mut(off - at);
+                    let (d, r) = r.split_at_mut(len);
+                    rest = r;
+                    at = off + len;
+                    d
+                }));
+            }
+        }
+        let mut slots = slots.into_iter();
         // A tied output matrix is the embedding, which `embed` keeps reading.
-        let output = Weight::load(m, out_t, repack, !std::ptr::eq(out_t, token_embd));
+        let mut output = Weight::load(
+            m,
+            out_t,
+            slots.next().unwrap(),
+            !std::ptr::eq(out_t, token_embd),
+        );
         let output_norm = load_vec(m, find(m, "output_norm.weight"));
+        let layer_slots: Vec<std::sync::Mutex<Vec<Option<&mut [u8]>>>> = (0..n_layers)
+            .map(|_| std::sync::Mutex::new(slots.by_ref().take(MATS.len()).collect()))
+            .collect();
 
         // One pool task per layer (`floats` set so it never runs inline):
         // repacking is a pass over all the weights.
-        let layers = par_map(n_layers, INLINE_WORK + 1, |i| {
-            let t = |s: &str| find(m, &format!("blk.{i}.{s}"));
-            let w = |s: &str| Weight::load(m, t(s), repack, true);
+        let mut layers = par_map(n_layers, INLINE_WORK + 1, |i| {
+            let t = |s: &str| lt(i, s);
+            let mut dst = std::mem::take(&mut *layer_slots[i].lock().unwrap()).into_iter();
+            let mut w = |s: &str| Weight::load(m, t(s), dst.next().unwrap(), true);
             // Norms and biases are copied out; when repacking, their bytes go
             // back too, so `Model::release` can drop the blocks they share
             // with the small repacked matrices around them.
@@ -398,19 +476,42 @@ impl<'a> Qwen2<'a> {
             let bias = |s: &str| find_opt(m, &format!("blk.{i}.{s}")).map(vals);
             Layer {
                 attn_norm: vals(t("attn_norm.weight")),
-                wq: w("attn_q.weight"),
-                wk: w("attn_k.weight"),
-                wv: w("attn_v.weight"),
+                wq: w(MATS[0]),
+                wk: w(MATS[1]),
+                wv: w(MATS[2]),
                 bq: bias("attn_q.bias"),
                 bk: bias("attn_k.bias"),
                 bv: bias("attn_v.bias"),
-                wo: w("attn_output.weight"),
+                wo: w(MATS[3]),
                 ffn_norm: vals(t("ffn_norm.weight")),
-                w_gate: w("ffn_gate.weight"),
-                w_up: w("ffn_up.weight"),
-                w_down: w("ffn_down.weight"),
+                w_gate: w(MATS[4]),
+                w_up: w(MATS[5]),
+                w_down: w(MATS[6]),
             }
         });
+        drop(layer_slots);
+        drop(slots);
+        if let Some(a) = arena.take() {
+            let map = std::sync::Arc::new(a.make_read_only().expect("r8: mprotect"));
+            let ws = std::iter::once(&mut output).chain(layers.iter_mut().flat_map(|l| {
+                [
+                    &mut l.wq,
+                    &mut l.wk,
+                    &mut l.wv,
+                    &mut l.wo,
+                    &mut l.w_gate,
+                    &mut l.w_up,
+                    &mut l.w_down,
+                ]
+            }));
+            for (w, p) in ws.zip(&plan) {
+                w.r8 = p.map(|(off, len)| R8 {
+                    map: map.clone(),
+                    off,
+                    len,
+                });
+            }
+        }
 
         Qwen2 {
             n_layers,

@@ -387,7 +387,10 @@ mod x86 {
         ]))
     }
 
-    /// Prefetch [off, off + len) of `all`, clamped to its end (64-byte lines).
+    /// Hint [off, off + len) of `all` into L2, clamped to its end (64-byte
+    /// lines). L2, not L1 (T1, not T0): a burst of T0 hints ties up the L1
+    /// fill buffers the demand loads need (as r8bi measured); callers also
+    /// spread a block's hints across its loop instead of one burst.
     #[inline]
     #[target_feature(enable = "avx2")]
     fn prefetch(all: &[u8], off: usize, len: usize) {
@@ -395,7 +398,7 @@ mod x86 {
         let mut p = off;
         while p < end {
             // SAFETY: p < all.len(); prefetch never faults anyway.
-            unsafe { _mm_prefetch::<_MM_HINT_T0>(all.as_ptr().add(p).cast()) };
+            unsafe { _mm_prefetch::<_MM_HINT_T1>(all.as_ptr().add(p).cast()) };
             p += 64;
         }
     }
@@ -496,14 +499,27 @@ mod x86 {
                     }
                     let mut acc = [_mm256_setzero_ps(); T];
                     for (i, b) in blocks.iter().enumerate() {
-                        if pf > 0 {
-                            prefetch(all, base + i * R8Q8 + pf, R8Q8);
-                        }
                         let mut s = [_mm256_setzero_si256(); T];
                         for t in 0..T {
                             s[t] = _mm256_set1_epi32(s0[t][i]);
                         }
-                        for v in 0..8 {
+                        // the block `pf` bytes ahead, half before each
+                        // half of the vectors (two loops: a branch inside
+                        // one stops it being unrolled)
+                        let ahead = base + i * R8Q8 + pf;
+                        if pf > 0 {
+                            prefetch(all, ahead, R8Q8 / 2);
+                        }
+                        for v in 0..4 {
+                            let u = ld32(b, QV + 32 * v);
+                            for t in 0..T {
+                                s[t] = $dp::<SGN>(s[t], u, bc(&q[t][i], v));
+                            }
+                        }
+                        if pf > 0 {
+                            prefetch(all, ahead + R8Q8 / 2, R8Q8 / 2);
+                        }
+                        for v in 4..8 {
                             let u = ld32(b, QV + 32 * v);
                             for t in 0..T {
                                 s[t] = $dp::<SGN>(s[t], u, bc(&q[t][i], v));
@@ -558,12 +574,20 @@ mod x86 {
                         let (d, q, s0) = (&x.d[..nb], &x.q[..nb], &x.s0[..nb]);
                         let mut acc = _mm256_setzero_ps();
                         for (i, b) in blocks.iter().enumerate() {
-                            if pf > 0 {
-                                prefetch(groups, base + i * R8Q5 + pf, R8Q5);
-                            }
                             let h = ld32(b, Q5_H);
                             let mut s = _mm256_set1_epi32(s0[i]);
-                            for v in 0..8 {
+                            // as in `tile`
+                            let ahead = base + i * R8Q5 + pf;
+                            if pf > 0 {
+                                prefetch(groups, ahead, R8Q5 / 2);
+                            }
+                            for v in 0..4 {
+                                s = $dp::<false>(s, q5_vec(b, h, v), bc(&q[i], v));
+                            }
+                            if pf > 0 {
+                                prefetch(groups, ahead + R8Q5 / 2, R8Q5 / 2);
+                            }
+                            for v in 4..8 {
                                 s = $dp::<false>(s, q5_vec(b, h, v), bc(&q[i], v));
                             }
                             let dd = _mm256_mul_ps(_mm256_cvtph_ps(ld16(b)), _mm256_set1_ps(d[i]));
