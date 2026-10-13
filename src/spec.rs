@@ -58,25 +58,29 @@ impl PromptLookup {
         }
     }
 
+    /// The longest (MIN_N..=MAX_N) suffix seen before: its length n and up
+    /// to `max` tokens that followed its most recent earlier occurrence
+    /// (fewer if the history ends first). None if no suffix matches.
+    pub fn lookup(&self, max: usize) -> Option<(usize, &[u32])> {
+        let len = self.hist.len();
+        (MIN_N..=MAX_N.min(len)).rev().find_map(|n| {
+            let &e = self.index.get(&Self::key(&self.hist[len - n..]))?;
+            Some((n, &self.hist[e..len.min(e + max)]))
+        })
+    }
+
     /// Up to `max` tokens that followed the most recent earlier occurrence of
     /// the longest (MIN_N..=MAX_N) suffix seen before, at most
     /// SHORT_MATCH_MAX if that suffix is shorter than MAX_N. Empty if none.
     pub fn draft(&self, max: usize) -> Vec<u32> {
-        let len = self.hist.len();
         if max == 0 {
             return Vec::new();
         }
-        for n in (MIN_N..=MAX_N.min(len)).rev() {
-            if let Some(&e) = self.index.get(&Self::key(&self.hist[len - n..])) {
-                let max = if n < MAX_N {
-                    max.min(SHORT_MATCH_MAX)
-                } else {
-                    max
-                };
-                return self.hist[e..len.min(e + max)].to_vec();
-            }
+        match self.lookup(max) {
+            Some((n, c)) if n < MAX_N => c[..c.len().min(SHORT_MATCH_MAX)].to_vec(),
+            Some((_, c)) => c.to_vec(),
+            None => Vec::new(),
         }
-        Vec::new()
     }
 }
 
@@ -138,6 +142,15 @@ mod tests {
         // A 3-gram match drafts the full K.
         let d = lookup(&[9, 4, 5, 1, 2, 3, 6, 7, 0, 9, 4, 5]);
         assert_eq!(d.draft(7), vec![1, 2, 3, 6, 7, 0, 9]);
+    }
+
+    #[test]
+    fn lookup_reports_match_length_uncapped() {
+        let d = lookup(&[4, 5, 1, 2, 3, 6, 7, 0, 4, 5]);
+        assert_eq!(d.lookup(7), Some((2, &[1, 2, 3, 6, 7, 0, 4][..])));
+        let d = lookup(&[9, 4, 5, 1, 2, 9, 4, 5]);
+        assert_eq!(d.lookup(7), Some((3, &[1, 2, 9, 4, 5][..])));
+        assert_eq!(lookup(&[1, 2, 3]).lookup(4), None);
     }
 
     #[test]

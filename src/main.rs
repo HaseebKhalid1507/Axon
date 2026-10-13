@@ -14,12 +14,9 @@ use std::env;
 const PREFILL_BATCH: usize = 64;
 
 /// Draft tokens per speculative step unless --draft / AXON_DRAFT say
-/// otherwise. Off for now: on low-acceptance text (a 14%-acceptance story
-/// prompt) drafting still loses ~5%, and the gate that fixes that is being
-/// tuned. K = 7 is the value to try: a verify pass of K + 1 tokens fills
-/// K + 1 token slots of the batched kernels, which come in fours
-/// (`quant::batch_slots`).
-const DEFAULT_DRAFT: usize = 0;
+/// otherwise. A verify pass of K + 1 tokens fills K + 1 token slots of the
+/// batched kernels, which come in fours (`quant::batch_slots`), so K = 7.
+const DEFAULT_DRAFT: usize = 7;
 
 /// K adjusted so K + 1 fills whole groups of 4 slots. Down for K >= 3
 /// (4 -> 3, 8 -> 7, 12 -> 11): the guesses past the last full group would
@@ -34,15 +31,6 @@ fn round_draft(k: usize) -> usize {
     }
 }
 
-/// Low-acceptance gate for drafting: after MISS_LIMIT verify passes in a row
-/// with nothing accepted, the next `backoff` passes are plain forwards
-/// (no drafting). backoff starts at BACKOFF_BASE, doubles each time the
-/// gate trips again up to BACKOFF_MAX, and drops back to BACKOFF_BASE on
-/// any accepted guess. After a backoff one failed probe trips it again.
-const MISS_LIMIT: usize = 2;
-const BACKOFF_BASE: usize = 4;
-const BACKOFF_MAX: usize = 32;
-
 const USAGE: &str = "\
 usage:
   axon <model.gguf>                         browse the model in a terminal UI
@@ -56,7 +44,7 @@ usage:
 
 flags:
   -n N        gen: tokens to generate (default 32)
-  --draft K   gen: draft up to K tokens per step by prompt lookup (default 0 = off; try 7);
+  --draft K   gen: draft up to K tokens per step by prompt lookup (default 7, 0 = off);
               lossless: the output is the plain greedy output either way
   -k K        logits: how many logits to print (default 10)
 
@@ -185,8 +173,8 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     let mut n_gen = 32usize;
     let mut top_k = 10usize;
     // Speculative decoding: draft up to K tokens per step by prompt lookup
-    // (spec.rs); output is the same either way. Default K = DEFAULT_DRAFT;
-    // --draft K or AXON_DRAFT=K (0 = off), see round_draft.
+    // (spec.rs); output is the same either way. On by default with
+    // K = DEFAULT_DRAFT; --draft K or AXON_DRAFT=K (0 = off), see round_draft.
     let mut max_draft = match env::var("AXON_DRAFT") {
         Ok(v) => v
             .parse::<usize>()
@@ -335,7 +323,6 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             .collect();
         eprintln!(
             "draft:       K={}, {} drafted, {} accepted ({:.1}%), {:.2} tok/pass, \
-             {} passes gated (low acceptance) \
              (decode tok/s = decided tok incl. EOS / s); forward {}; verify {}",
             max_draft,
             st.drafted,
@@ -350,7 +337,6 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             } else {
                 0.0
             },
-            st.skipped,
             ms(st.forward),
             if verify.is_empty() {
                 "none".to_string()
@@ -378,8 +364,6 @@ struct GenStats {
     /// size: verify[nb] for nb = 1 + guesses tokens.
     forward: (usize, f64),
     verify: Vec<(usize, f64)>,
-    /// Passes run as plain forwards because the low-acceptance gate was shut.
-    skipped: usize,
 }
 
 /// `generate`'s settings.
@@ -404,8 +388,11 @@ struct GenOpts {
 /// right one exactly when guesses 0..i were the tokens emitted. So the output is the plain greedy output, whatever the drafts;
 /// they only change how many tokens one weight pass yields. A rejected
 /// guess's cache slot is rewritten by the next pass before anything reads it.
-/// Where drafting doesn't pay, the MISS_LIMIT/BACKOFF gate turns it off for
-/// a while; that only picks forward vs verify, never the tokens.
+///
+/// No low-acceptance gate: replaying the 5 bench prompts' exact greedy streams
+/// through this loop and the real drafter (r5 policy sim) showed every gate
+/// tried (backoff, n-gram EMA, expected-value) losing more on prose than it
+/// saves on story; drafting there costs < 1% by the measured pass costs.
 fn generate(
     net: &model::Qwen2,
     cache: &mut model::KvCache,
@@ -426,11 +413,6 @@ fn generate(
     } = o;
     let mut pick = argmax(&logits[..]);
     let mut picks = 0usize;
-    // Gate state: guesses accepted from the last verify pass (None if the
-    // last pass was a forward), verify passes in a row with none accepted,
-    // forwards left to run before drafting again, and the next backoff.
-    let mut last_accepted: Option<usize> = None;
-    let (mut misses, mut skip, mut backoff) = (0usize, 0usize, BACKOFF_BASE);
     while st.ids.len() < n_gen {
         let next = pick;
         picks += 1;
@@ -448,34 +430,14 @@ fn generate(
             Some((guess, p)) if guess == next => {
                 pick = p;
                 st.accepted += 1;
-                if let Some(a) = &mut last_accepted {
-                    *a += 1;
-                }
                 continue;
             }
             _ => queue.clear(),
         }
-        match last_accepted.take() {
-            Some(0) => {
-                misses += 1;
-                if misses >= MISS_LIMIT {
-                    skip = backoff;
-                    backoff = (backoff * 2).min(BACKOFF_MAX);
-                    misses = MISS_LIMIT - 1; // a failed probe after it trips again
-                }
-            }
-            Some(_) => (misses, backoff) = (0, BACKOFF_BASE),
-            None => {}
-        }
         // Guesses past the token after the last one needing logits are useless:
         // at most left - 1, so no pass goes beyond plain greedy's positions.
         let max = max_draft.min(left - 1);
-        let gated = max > 0 && skip > 0;
-        if gated {
-            skip -= 1;
-            st.skipped += 1;
-        }
-        let mut guesses = if max > 0 && !gated {
+        let mut guesses = if max > 0 {
             draft(&hist, max)
         } else {
             Vec::new()
@@ -494,7 +456,6 @@ fn generate(
             let mut ps = net.verify_argmax(&toks, pos, cache).into_iter();
             pick = ps.next().expect("verify_argmax: one pick per token");
             queue.extend(guesses.into_iter().zip(ps));
-            last_accepted = Some(0);
             if st.verify.len() <= toks.len() {
                 st.verify.resize(toks.len() + 1, (0, 0.0));
             }
@@ -840,15 +801,6 @@ mod tests {
                         }
                         if mode == "wrong" {
                             assert_eq!(st.accepted, 0, "{ctx}");
-                            if k > 0 && want.len() == N {
-                                // Gate: 2 misses, 4 forwards, 1 probe, 8...
-                                let verifies: usize = st.verify.iter().map(|v| v.0).sum();
-                                assert!(st.skipped > 0, "{ctx}: gate never shut");
-                                assert!(verifies <= 5, "{ctx}: {verifies} verify passes");
-                            }
-                        }
-                        if mode == "right" {
-                            assert_eq!(st.skipped, 0, "{ctx}: gated with no misses");
                         }
                         if mode == "right" && k > 0 && n == N && eos != eos_mid {
                             assert!(st.passes < n - 1, "{ctx}: {} passes", st.passes);
