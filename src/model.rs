@@ -394,10 +394,13 @@ impl<'a> Qwen2<'a> {
     /// idle while the last one finishes, and claiming is cheap next to it.
     /// Sweep on bella (560-token prompt): 4/thread ~611 tok/s, 32 ~646, 64+
     /// slower again. A small batch (a speculative verify, 2..9 tokens) is
-    /// close to decode, so it goes towards decode's ~4 per thread: nb / 2,
-    /// clamped to 4..=32. Chunking never changes results.
+    /// compute-bound on the E-cores (half-width SIMD) while the P-cores
+    /// finish early, so it gets 16 small chunks per thread to balance them:
+    /// a 0.5B verify pass at 4 per thread left ~21% of pool time waiting, and
+    /// drafting (K=7) on low-repetition text went from -5% to -1% vs no
+    /// drafting with 16. Chunking never changes results.
     fn rows_per_chunk(rows: usize, nb: usize) -> usize {
-        let per_thread = (nb / 2).clamp(4, 32);
+        let per_thread = if nb <= 9 { 16 } else { (nb / 2).clamp(4, 32) };
         rows.div_ceil(Pool::global().threads() * per_thread)
             .max(1)
             .next_multiple_of(2)

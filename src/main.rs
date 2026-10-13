@@ -16,9 +16,11 @@ use std::env;
 const PREFILL_BATCH: usize = 64;
 
 /// Draft tokens per speculative step unless --draft / AXON_DRAFT say
-/// otherwise. A verify pass of K + 1 tokens fills K + 1 token slots of the
-/// batched kernels, which come in fours (`quant::batch_slots`), so K = 7.
-const DEFAULT_DRAFT: usize = 7;
+/// otherwise: 0, off. Drafting is lossless and K = 7 (a verify pass of K + 1
+/// tokens fills whole groups of 4 slots, `quant::batch_slots`) is 1.2-4x
+/// faster on repetitive text, but on low-repetition text it runs ~1-2%
+/// slower than plain decode (BENCH.md), so it stays opt-in.
+const DEFAULT_DRAFT: usize = 0;
 
 /// K adjusted so K + 1 fills whole groups of 4 slots. Down for K >= 3
 /// (4 -> 3, 8 -> 7, 12 -> 11): the guesses past the last full group would
@@ -46,7 +48,7 @@ usage:
 
 flags:
   -n N        gen: tokens to generate (default 32)
-  --draft K   gen: draft up to K tokens per step by prompt lookup (default 7, 0 = off);
+  --draft K   gen: draft up to K tokens per step by prompt lookup (default 0 = off; try 7);
               lossless: the output is the plain greedy output either way
   -k K        logits: how many logits to print (default 10)
 
@@ -175,8 +177,8 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     let mut n_gen = 32usize;
     let mut top_k = 10usize;
     // Speculative decoding: draft up to K tokens per step by prompt lookup
-    // (spec.rs); output is the same either way. On by default with
-    // K = DEFAULT_DRAFT; --draft K or AXON_DRAFT=K (0 = off), see round_draft.
+    // (spec.rs); output is the same either way. Off by default
+    // (DEFAULT_DRAFT); --draft K or AXON_DRAFT=K turns it on, see round_draft.
     let mut max_draft = match env::var("AXON_DRAFT") {
         Ok(v) => v
             .parse::<usize>()

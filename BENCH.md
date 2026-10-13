@@ -75,3 +75,18 @@ Fixed 18 threads, 3 rounds (`bench.py`, drafting off), axon / ollama:
 Prompt-lookup drafting (`--draft 7`, 0.5B, 8 rounds, decode tok/s, off / on):
 prose 196 / 233, story 194 / 186, code rewrite 176 / 420, summarize 180 / 313,
 random list 192 / 401. It loses on low-repetition text, so it stays off by default.
+
+Small verify batches (2-9 tokens) are compute-bound on the E-cores while the
+P-cores wait, so they now use 16 pool chunks per thread instead of 4 (output
+unchanged). Decode tok/s, 18 threads, no drafting / `--draft 7` before / after:
+
+| prompt | 0.5B (5 rounds) | 1.5B (4 rounds) |
+|---|---|---|
+| prose | 183 / 216 / 226 | 71.2 / 73.9 / 75.6 |
+| story | 182 / 173 / 180 | 67.8 / 65.6 / 66.7 |
+| code rewrite | 168 / 418 / 403 | 64.9 / 219 / 229 |
+| summarize | 169 / 319 / 332 | 65.3 / 71.5 / 75.0 |
+| random list | 180 / 389 / 386 | 67.4 / 272 / 285 |
+
+The worst case (story: -1.1% on 0.5B, -1.6% on 1.5B) is still a small loss, so
+drafting stays opt-in (`--draft 7` / `AXON_DRAFT=7`).
