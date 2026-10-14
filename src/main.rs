@@ -13,7 +13,6 @@ mod spec;
 #[cfg(test)]
 mod testutil;
 mod tokenizer;
-mod viz;
 mod vmath;
 
 use lm::{Backend, Device, Lm};
@@ -44,7 +43,7 @@ fn round_draft(k: usize) -> usize {
 
 const USAGE: &str = "\
 usage:
-  axon <model.gguf>                         browse the model in a terminal UI
+  axon <model.gguf>                         same as axon info
   axon info <model.gguf>                    print a summary and exit
   axon gen <model.gguf> \"<prompt>\" [-n N] [--draft K] [--device D]
                                             greedy generation
@@ -148,13 +147,14 @@ fn run() -> std::io::Result<()> {
         return run_chat(&args);
     }
 
-    let (cmd, path) = match args[1].as_str() {
-        "info" if args.len() == 3 => ("info", &args[2]),
+    // `axon info <model>`, or just `axon <model>`.
+    let path = match args[1].as_str() {
+        "info" if args.len() == 3 => &args[2],
         "info" => fail("usage: axon info <model.gguf>"),
         f if f.starts_with('-') => fail(&format!("unknown flag '{f}'")),
-        // A lone argument is a model to browse, unless it can't be one.
+        // A lone argument is a model to summarize, unless it can't be one.
         p if args.len() == 2 && (p.ends_with(".gguf") || std::path::Path::new(p).exists()) => {
-            ("viz", &args[1])
+            &args[1]
         }
         c => fail(&format!(
             "unknown command '{c}' (commands: gen, logits, chat, info)"
@@ -162,34 +162,24 @@ fn run() -> std::io::Result<()> {
     };
 
     let model = open_model(path, false);
-
-    match cmd {
-        "info" => {
-            let a = &model.arch;
-            println!("axon v{}", env!("CARGO_PKG_VERSION"));
-            println!();
-            println!(
-                "{} | {}L / {}d / {}h (kv {}) | ctx {}",
-                a,
-                model.n_layers(),
-                model.embed_dim(),
-                model.n_heads(),
-                model.n_kv_heads(),
-                model.ctx_len()
-            );
-            println!(
-                "{} tensors | {:.2}B params | {}",
-                model.tensors.len(),
-                model.total_params() as f64 / 1e9,
-                human_bytes(model.total_bytes())
-            );
-            println!("{}", cuda::summary());
-        }
-        _ => {
-            viz::run(&model)?;
-        }
-    }
-
+    println!("axon v{}", env!("CARGO_PKG_VERSION"));
+    println!();
+    println!(
+        "{} | {}L / {}d / {}h (kv {}) | ctx {}",
+        model.arch,
+        model.n_layers(),
+        model.embed_dim(),
+        model.n_heads(),
+        model.n_kv_heads(),
+        model.ctx_len()
+    );
+    println!(
+        "{} tensors | {:.2}B params | {}",
+        model.tensors.len(),
+        model.total_params() as f64 / 1e9,
+        human_bytes(model.total_bytes())
+    );
+    println!("{}", cuda::summary());
     Ok(())
 }
 
