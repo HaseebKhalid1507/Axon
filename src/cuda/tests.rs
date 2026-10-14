@@ -1,6 +1,6 @@
 use super::{
     Arg, CacheStatus, DevBuf, Gpu, Kernels, Module, Target, cache_dir, cache_dir_from,
-    check_versions, encode_entry, ffi, pick_target,
+    check_versions, encode_entry, ffi, pdl_ok, pick_target,
 };
 use crate::gguf::Model;
 use crate::quant::{self, F16, F32, Q4_K, Q5_0, Q6_K, Q8_0};
@@ -491,4 +491,73 @@ fn gpu_launch_checks_owner_and_drop_unbinds() {
     let r = unsafe { (d.cuCtxGetCurrent)(&mut ctx) };
     ffi::check(d, r, "cuCtxGetCurrent").unwrap();
     assert!(ctx.is_null(), "a context is still current after Drop");
+}
+
+/// Programmatic dependent launch only for code compiled for sm_90+ (decode.cu
+/// emits its waits only there), on an sm_90+ device, with a 12.3+ driver
+/// (capture keeps PDL edges from 12.3 on), unless AXON_CUDA_PDL=0.
+#[test]
+fn gpu_pdl_gating() {
+    assert!(pdl_ok(120, 120, (13, 0), None));
+    assert!(pdl_ok(90, 120, (12, 3), Some("1")));
+    // A PTX fallback for an older arch: no griddepcontrol.wait in it.
+    assert!(!pdl_ok(89, 120, (13, 0), None));
+    assert!(!pdl_ok(86, 86, (13, 0), None));
+    // Drivers before 12.3 fail captures with programmatic launches.
+    assert!(!pdl_ok(120, 120, (12, 2), None));
+    assert!(!pdl_ok(90, 90, (12, 0), None));
+    assert!(!pdl_ok(120, 120, (13, 0), Some("0")));
+    // This machine's module agrees with its target.
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let m = Kernels::module(&g).unwrap();
+    let cc = g.info().unwrap().cc;
+    let d = ffi::driver_version(ffi::driver().unwrap()).unwrap();
+    let cc = (cc.0 * 10 + cc.1) as i32;
+    let off = std::env::var("AXON_CUDA_PDL").ok();
+    let want = cc >= 90 && d >= (12, 3) && off.as_deref() != Some("0");
+    assert_eq!(m.pdl(), want);
+    // A module compiled as PTX for an older arch never overlaps.
+    let n = ffi::nvrtc().unwrap();
+    let archs = ffi::nvrtc_archs(n).unwrap();
+    if let Some(&old) = archs.iter().filter(|&&a| a < 90).max() {
+        let (m, _) = Module::load_for(&g, IOTA, &[], None, Target::Ptx(old)).unwrap();
+        assert!(!m.pdl());
+    }
+}
+
+/// A capture whose body panics or fails is ended, so the stream works again.
+#[test]
+fn gpu_capture_unwinds_cleanly() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let (m, _) = Module::load_in(&g, IOTA, &[], None).unwrap();
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _ = g.capture(|| panic!("boom"));
+    }));
+    assert!(r.is_err());
+    run_iota(&g, &m);
+    assert!(g.capture(|| Err("nope".into())).is_err());
+    run_iota(&g, &m);
+    // And a good capture still replays.
+    let out = g.alloc(32 * 4).unwrap();
+    let f = m.function("iota").unwrap();
+    // SAFETY: iota writes out[0..32]; out outlives the graph.
+    let graph = g
+        .capture(|| unsafe {
+            g.launch(
+                &f,
+                (1, 1, 1),
+                (32, 1, 1),
+                0,
+                &[out.arg(), Arg::F32(3.0), Arg::U32(32)],
+            )
+        })
+        .unwrap();
+    // SAFETY: out is live.
+    unsafe { graph.launch().unwrap() };
+    let v: Vec<f32> = out.read().unwrap();
+    assert_eq!(v[31], 93.0);
 }

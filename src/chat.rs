@@ -395,7 +395,7 @@ mod tests {
 
     /// Plain greedy from scratch over `ids`: what a reply after that history
     /// must be, by an independent path (fresh cache, one prefill, `forward`).
-    fn fresh(net: &Qwen2, ids: &[u32], n: usize, stop: &[u32]) -> Vec<u32> {
+    fn fresh<M: crate::lm::Lm>(net: &M, ids: &[u32], n: usize, stop: &[u32]) -> Vec<u32> {
         let mut cache = net.new_cache(ids.len() + n + 1);
         let (&last, rest) = ids.split_last().unwrap();
         for (i, b) in rest.chunks(crate::PREFILL_BATCH).enumerate() {
@@ -495,6 +495,32 @@ mod tests {
             }
             // Accepted drafts were fed by verify passes, not `forward`: covered.
             assert_eq!(accepted > 0, k > 0, "max_reply {max_reply} k {k}");
+        }
+    }
+
+    /// `turns_match_fresh_prefill` on the GPU (`axon chat --device cuda`):
+    /// the cache carried across turns, drafts verified by `verify_argmax`.
+    #[test]
+    fn turns_match_fresh_prefill_cuda() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let Some(m) = crate::testutil::model() else {
+            return;
+        };
+        let km = crate::cuda::Kernels::module(&g).unwrap();
+        let tok = Tokenizer::from_gguf(&m);
+        let net = crate::cuda::qwen2::CudaQwen2::new(&g, &km, &m, 2048).unwrap();
+        for (max_reply, k) in [(12, 7), (64, 0)] {
+            let mut chat = Chat::new(&net, &tok, DEFAULT_SYSTEM, 2048).unwrap();
+            chat.max_reply = max_reply;
+            chat.max_draft = round_draft(k);
+            for msg in MSGS {
+                let r = chat.reply(msg, &|| false, &mut |_| Ok(())).unwrap();
+                let prompt = &chat.hist[..chat.hist.len() - r.ids.len() - 2];
+                let want = fresh(chat.net, prompt, max_reply, &chat.stop);
+                assert_eq!(r.ids, want, "{msg:?} max_reply {max_reply} k {k}");
+            }
         }
     }
 
