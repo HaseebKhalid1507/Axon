@@ -211,13 +211,17 @@ fn kv_env() -> kv::KvType {
     kv::kv_setting().unwrap_or_else(|e| fail(&e))
 }
 
-/// --kv's value: f16 or q8. (f32 stays AXON_KV's alone: the CPU reads it
-/// where its caches are made, so --kv mustn't contradict it.)
-fn kv_flag(v: &str, env: kv::KvType) -> kv::KvType {
+/// --kv's value (None: the flag was last, without one): f16 or q8. f32
+/// (CPU only) is AXON_KV's alone; --kv f16 over AXON_KV=f32 means f16.
+fn kv_flag(v: Option<&str>) -> kv::KvType {
+    let v = v.unwrap_or_else(|| fail("--kv needs a value (f16 or q8)"));
     match kv::KvType::parse(v) {
         Ok(kv::KvType::F32) | Err(_) => fail(&format!("--kv takes f16 or q8, got '{v}'")),
-        Ok(_) if env == kv::KvType::F32 => fail(&format!("--kv {v} contradicts AXON_KV=f32")),
-        Ok(t) => t,
+        Ok(t) => {
+            // The CPU reads its f16/f32 choice where it makes caches.
+            kv::set_f32(false);
+            t
+        }
     }
 }
 
@@ -290,8 +294,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     let mut max_draft = draft_env();
     let mut device = device_env();
     let mut gpu_layers = None;
-    let env_kv = kv_env();
-    let mut kv = env_kv;
+    let mut kv = kv_env();
     let mut i = 4;
     while i < args.len() {
         let val = args.get(i + 1).and_then(|s| s.parse::<usize>().ok());
@@ -300,7 +303,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
                 let v = args.get(i + 1).map_or("", String::as_str);
                 device = Device::parse(v).unwrap_or_else(|e| fail(&e));
             }
-            ("--kv", _) => kv = kv_flag(args.get(i + 1).map_or("", String::as_str), env_kv),
+            ("--kv", _) => kv = kv_flag(args.get(i + 1).map(String::as_str)),
             ("-n", Some(v)) => n_gen = v,
             ("-k", Some(v)) => top_k = v,
             ("--draft", Some(v)) => max_draft = v,
@@ -516,8 +519,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     let mut max_draft = draft_env();
     let mut device = device_env();
     let mut gpu_layers = None;
-    let env_kv = kv_env();
-    let mut kv = env_kv;
+    let mut kv = kv_env();
     let mut i = 3;
     while i < args.len() {
         let f = args[i].as_str();
@@ -535,7 +537,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         } else if f == "--device" {
             device = Device::parse(v).unwrap_or_else(|e| fail(&e));
         } else if f == "--kv" {
-            kv = kv_flag(v, env_kv);
+            kv = kv_flag(Some(v));
         } else {
             let n = v
                 .parse::<usize>()

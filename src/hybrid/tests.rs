@@ -1,6 +1,7 @@
 use super::*;
 use crate::cuda::Kernels;
-use crate::cuda::qwen2::tests::{Agree, PROMPTS, assert_graded, compare, report};
+use crate::cuda::qwen2::CacheKv;
+use crate::cuda::qwen2::tests::{Agree, PROMPTS, assert_graded, compare, kv_compare, report};
 use std::path::PathBuf;
 
 /// A model file under models/, mapped (not copied): several models are
@@ -58,14 +59,7 @@ fn hybrid_ends_are_the_backends_bits() {
     let n = block_count(&m).unwrap();
     let want = trace(&CudaQwen2::new(&g, &km, &m, 128).unwrap(), &m, 16);
     let got = trace(
-        &HybridQwen2::new(
-            Some((&g, &km)),
-            &m,
-            128,
-            n,
-            crate::cuda::qwen2::CacheKv::F16,
-        )
-        .unwrap(),
+        &HybridQwen2::new(Some((&g, &km)), &m, 128, n, CacheKv::F16).unwrap(),
         &m,
         16,
     );
@@ -75,14 +69,7 @@ fn hybrid_ends_are_the_backends_bits() {
     );
     // More than n is all of them too.
     let got = trace(
-        &HybridQwen2::new(
-            Some((&g, &km)),
-            &m,
-            128,
-            n + 5,
-            crate::cuda::qwen2::CacheKv::F16,
-        )
-        .unwrap(),
+        &HybridQwen2::new(Some((&g, &km)), &m, 128, n + 5, CacheKv::F16).unwrap(),
         &m,
         2,
     );
@@ -93,7 +80,7 @@ fn hybrid_ends_are_the_backends_bits() {
     );
 
     let want = trace(&Qwen2::new(&m), &m, 16);
-    let h = HybridQwen2::new(None, &m, 128, 0, crate::cuda::qwen2::CacheKv::F16).unwrap();
+    let h = HybridQwen2::new(None, &m, 128, 0, CacheKv::F16).unwrap();
     assert!(h.gpu.is_none() && h.cpu.as_ref().unwrap().n_layers == n);
     let got = trace(&h, &m, 16);
     assert!(
@@ -128,14 +115,7 @@ fn mixed_graded(rel: &str, name: &str) {
     drop(rows);
     report(&format!("{name} cpu rows vs cpu"), &ac);
     for k in [1, n / 2, n - 1] {
-        let h = HybridQwen2::new(
-            Some((&g, &km)),
-            &m,
-            256,
-            n - k,
-            crate::cuda::qwen2::CacheKv::F16,
-        )
-        .unwrap();
+        let h = HybridQwen2::new(Some((&g, &km)), &m, 256, n - k, CacheKv::F16).unwrap();
         let mut ag = Agree::default();
         for p in PROMPTS {
             compare(&cpu, &h, &tok.encode(p), 32, &mut ag);
@@ -196,8 +176,10 @@ fn prefill_with(h: &HybridQwen2, ids: &[u32], sizes: &[usize]) -> (Vec<u32>, Vec
 
 /// The hybrid's prefill contract: whatever the batching (per token, 1, 7,
 /// the CPU's 64, past the GPU's 512, ragged, mixed with decode steps), both
-/// halves' KV caches and the next token's logits are bit-identical.
-fn prefill_bits(rel: &str, name: &str) {
+/// halves' KV caches and the next token's logits are bit-identical, with
+/// the GPU half's cache of type `kv` (q8: its batched store and attention
+/// are q8 decode's bits).
+fn prefill_bits(rel: &str, name: &str, kv: CacheKv) {
     let Some(g) = crate::testutil::gpu() else {
         return;
     };
@@ -207,14 +189,7 @@ fn prefill_bits(rel: &str, name: &str) {
     let km = Kernels::module(&g).unwrap();
     let n = block_count(&m).unwrap();
     let ids = long_ids(&m, 700);
-    let h = HybridQwen2::new(
-        Some((&g, &km)),
-        &m,
-        ids.len() + 1,
-        n - n / 2,
-        crate::cuda::qwen2::CacheKv::F16,
-    )
-    .unwrap();
+    let h = HybridQwen2::new(Some((&g, &km)), &m, ids.len() + 1, n - n / 2, kv).unwrap();
     let gpu_max = h.gpu.as_ref().unwrap().prefill_batch();
     assert!(ids.len() > gpu_max, "covers the GPU's chunking");
     let (c0, g0, l0) = prefill_with(&h, &ids, &[0]);
@@ -232,7 +207,7 @@ fn prefill_bits(rel: &str, name: &str) {
         assert_eq!(bits(&l), bits(&l0), "{name} {sizes:?}: logits");
     }
     eprintln!(
-        "{name} k={}: prefill bit-identical over 6 batchings of {} tokens",
+        "{name} k={} {kv:?}: prefill bit-identical over 6 batchings of {} tokens",
         n / 2,
         ids.len()
     );
@@ -240,12 +215,22 @@ fn prefill_bits(rel: &str, name: &str) {
 
 #[test]
 fn hybrid_prefill_batchings_bit_identical_0_5b() {
-    prefill_bits(M05, "0.5B");
+    prefill_bits(M05, "0.5B", CacheKv::F16);
 }
 
 #[test]
 fn hybrid_prefill_batchings_bit_identical_1_5b() {
-    prefill_bits(M15, "1.5B");
+    prefill_bits(M15, "1.5B", CacheKv::F16);
+}
+
+#[test]
+fn hybrid_prefill_batchings_bit_identical_q8_0_5b() {
+    prefill_bits(M05, "0.5B", CacheKv::Q8 { group: 0 });
+}
+
+#[test]
+fn hybrid_prefill_batchings_bit_identical_q8_1_5b() {
+    prefill_bits(M15, "1.5B", CacheKv::Q8 { group: 0 });
 }
 
 /// verify_argmax's picks equal forward_argmax per token (and leave the
@@ -253,6 +238,15 @@ fn hybrid_prefill_batchings_bit_identical_1_5b() {
 /// past the GPU's max batch; with k = 1 and n - 1 too.
 #[test]
 fn hybrid_verify_matches_forward_argmax() {
+    verify_bits(CacheKv::F16);
+}
+
+#[test]
+fn hybrid_verify_matches_forward_argmax_q8() {
+    verify_bits(CacheKv::Q8 { group: 0 });
+}
+
+fn verify_bits(kv: CacheKv) {
     let Some(g) = crate::testutil::gpu() else {
         return;
     };
@@ -264,14 +258,7 @@ fn hybrid_verify_matches_forward_argmax() {
     let prompt = long_ids(&m, 90);
     let (&last, rest) = prompt.split_last().unwrap();
     for k in [1, n / 2, n - 1] {
-        let h = HybridQwen2::new(
-            Some((&g, &km)),
-            &m,
-            1400,
-            n - k,
-            crate::cuda::qwen2::CacheKv::F16,
-        )
-        .unwrap();
+        let h = HybridQwen2::new(Some((&g, &km)), &m, 1400, n - k, kv).unwrap();
         let mut right = Vec::new();
         {
             let mut c = h.new_cache(prompt.len() + 20);
@@ -328,7 +315,7 @@ fn hybrid_verify_matches_forward_argmax() {
             );
         }
         eprintln!(
-            "0.5B k={k}: {} verify passes == per-token picks",
+            "0.5B k={k} {kv:?}: {} verify passes == per-token picks",
             cases.len()
         );
     }
@@ -374,14 +361,7 @@ fn hybrid_halves_own_their_weights() {
         }
     }
     let m = crate::testutil::model_with(Some(true)).unwrap();
-    let h = HybridQwen2::new(
-        Some((&g, &km)),
-        &m,
-        64,
-        n - k,
-        crate::cuda::qwen2::CacheKv::F16,
-    )
-    .unwrap();
+    let h = HybridQwen2::new(Some((&g, &km)), &m, 64, n - k, CacheKv::F16).unwrap();
     for t in &m.tensors {
         let kept = t.name == "token_embd.weight";
         assert_eq!(released(&m, t), !kept, "{}", t.name);
@@ -411,7 +391,7 @@ fn hybrid_auto_split_is_the_most_that_fit() {
     let km = Kernels::module(&g).unwrap();
     let n = block_count(&m).unwrap();
     let need = |first: usize, ctx: usize| {
-        CudaQwen2::vram_need(&g, &km, &m, ctx, first, crate::cuda::qwen2::CacheKv::F16).unwrap()
+        CudaQwen2::vram_need(&g, &km, &m, ctx, first, CacheKv::F16).unwrap()
     };
     for f in 1..n {
         assert!(need(f, 4096) < need(f - 1, 4096), "plan at first {f}");
@@ -421,7 +401,7 @@ fn hybrid_auto_split_is_the_most_that_fit() {
     // layers' KV would take 1.5x the free VRAM, so about half fit.
     let per_tok = (need(0, 2048) - need(0, 1024)) / 1024;
     let ctx = (free * 3 / 2 / per_tok) as usize;
-    let auto = auto_gpu_layers(&g, &km, &m, ctx, crate::cuda::qwen2::CacheKv::F16, free).unwrap();
+    let auto = auto_gpu_layers(&g, &km, &m, ctx, CacheKv::F16, free).unwrap();
     eprintln!(
         "1.5B ctx {ctx}: auto split {auto}/{n} of {:.2} GiB free",
         free as f64 / GIB
@@ -435,17 +415,125 @@ fn hybrid_auto_split_is_the_most_that_fit() {
     assert!(auto > 0 && auto < n, "a split, not all or nothing");
     // An explicit count that doesn't fit (all: 1.5x free in KV alone) says
     // which and what to do.
-    let e = HybridQwen2::new(
-        Some((&g, &km)),
-        &m,
-        ctx,
-        n,
-        crate::cuda::qwen2::CacheKv::F16,
-    )
-    .err()
-    .expect("all layers can't fit");
+    let e = HybridQwen2::new(Some((&g, &km)), &m, ctx, n, CacheKv::F16)
+        .err()
+        .expect("all layers can't fit");
     assert!(
         e.contains(&format!("{n}/{n} layers")) && e.contains("or fewer --gpu-layers"),
         "{e}"
     );
+}
+
+/// A split's GPU half with a q8 cache: all layers on the GPU is the q8 GPU
+/// model, bit for bit.
+#[test]
+fn hybrid_q8_all_on_gpu_is_the_q8_model() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = mapped(M05) else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let n = block_count(&m).unwrap();
+    let q8 = CacheKv::Q8 { group: 0 };
+    let want = trace(
+        &CudaQwen2::with_kv(&g, &km, &m, 128, q8, false).unwrap(),
+        &m,
+        16,
+    );
+    let h = HybridQwen2::new(Some((&g, &km)), &m, 128, n, q8).unwrap();
+    assert_eq!(h.kv_name(), "q8");
+    let got = trace(&h, &m, 16);
+    assert!(
+        got.iter().zip(&want).all(|(a, b)| bits(a) == bits(b)),
+        "all on GPU, q8"
+    );
+}
+
+/// Mixed splits with a q8 GPU half vs the same split with f16, graded with
+/// the q8 cache's own bounds (`cuda::qwen2::tests::q8_accuracy`: text mean
+/// KL <= 1.5e-2 and top-1 >= 90%, prompts mean KL <= 3e-2, any position
+/// KL < 4): PROMPTS with 32 greedy steps, natural text 0..300 and
+/// 1024..1152 teacher-forced. (Against the CPU, 0.5B's q8 is 2-5x the CPU's
+/// own noise, so `assert_graded` would measure q8, not the split.)
+fn q8_split_graded(rel: &str, name: &str) {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = mapped(rel) else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let n = block_count(&m).unwrap();
+    for k in [1, n / 2] {
+        let f16 = HybridQwen2::new(Some((&g, &km)), &m, 1200, n - k, CacheKv::F16).unwrap();
+        let q8 =
+            HybridQwen2::new(Some((&g, &km)), &m, 1200, n - k, CacheKv::Q8 { group: 0 }).unwrap();
+        let a = kv_compare(&f16, &q8, &m, 300, 1024, 128);
+        for (w, what) in a.iter().zip(["prompts", "text 0..300", "text 1024+128"]) {
+            report(&format!("{name} k={k} hybrid q8 vs f16 {what}"), w);
+            assert!(w.max_kl < 4.0, "{name} k={k} {what}: max KL {}", w.max_kl);
+        }
+        assert!(
+            a[0].sum_kl <= 3e-2 * a[0].positions as f64,
+            "{name} k={k} prompts: mean KL"
+        );
+        for w in &a[1..] {
+            assert!(
+                w.sum_kl <= 1.5e-2 * w.positions as f64,
+                "{name} k={k} text: mean KL"
+            );
+            assert!(
+                w.top1 * 100 >= 90 * w.positions,
+                "{name} k={k} text: top-1 {}",
+                w.top1
+            );
+        }
+    }
+}
+
+#[test]
+fn hybrid_q8_close_to_f16_0_5b() {
+    q8_split_graded(M05, "0.5B");
+}
+
+#[test]
+fn hybrid_q8_close_to_f16_1_5b() {
+    q8_split_graded(M15, "1.5B");
+}
+
+/// Placement counts the q8 cache's bytes: every split's plan is smaller
+/// than f16's, and at a context where the KV dominates, the automatic
+/// split puts more layers on the GPU (the point of q8 on a split).
+#[test]
+fn hybrid_auto_split_q8_fits_more_layers() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = mapped(M15) else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let n = block_count(&m).unwrap();
+    let q8 = CacheKv::Q8 { group: 0 };
+    let need = |first: usize, ctx: usize, kv: CacheKv| {
+        CudaQwen2::vram_need(&g, &km, &m, ctx, first, kv).unwrap()
+    };
+    for f in 0..n {
+        assert!(
+            need(f, 4096, q8) < need(f, 4096, CacheKv::F16),
+            "plan at first {f}"
+        );
+    }
+    let free = g.info().unwrap().free_bytes;
+    let per_tok = (need(0, 2048, CacheKv::F16) - need(0, 1024, CacheKv::F16)) / 1024;
+    let ctx = (free * 3 / 2 / per_tok) as usize;
+    let a16 = auto_gpu_layers(&g, &km, &m, ctx, CacheKv::F16, free).unwrap();
+    let a8 = auto_gpu_layers(&g, &km, &m, ctx, q8, free).unwrap();
+    eprintln!("1.5B ctx {ctx}: auto split f16 {a16}/{n}, q8 {a8}/{n}");
+    let fits = |gl: usize| need(n - gl, ctx, q8) + DESKTOP_MARGIN <= free;
+    assert!(a8 == 0 || fits(a8), "chosen q8 split doesn't fit");
+    assert!(a8 == n || !fits(a8 + 1), "one more q8 layer would have fit");
+    assert!(a8 > a16, "q8 fits more layers ({a8} vs {a16})");
 }

@@ -136,11 +136,11 @@ struct LayerW {
 pub enum CacheKv {
     /// IEEE half, rounded to nearest even (saturating): the default.
     F16,
-    /// int8 with an f32 scale per `group` values (head_dim, written 0 for
-    /// short: one per position and kv head; or 32), decode.cu's q8 rule: half the bytes
-    /// (plus 4 / group per value), so twice the context in the same memory
-    /// and half the attention reads. Results differ from f16's (measured in
-    /// the tests); the batching contract holds within the mode.
+    /// int8 by decode.cu's q8 rule, with an f32 scale per `group` values:
+    /// head_dim (one per position and kv head; 0 means head_dim) or 32.
+    /// Half the bytes (plus 4 / group per value), so twice the context in
+    /// the same memory. Results differ from f16's (measured in the tests);
+    /// the batching contract holds within the mode.
     Q8 { group: usize },
 }
 

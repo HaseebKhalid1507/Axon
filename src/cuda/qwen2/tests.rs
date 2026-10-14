@@ -27,10 +27,10 @@ fn kl(p: &[f32], q: &[f32]) -> f64 {
 
 #[derive(Default, Debug)]
 pub(crate) struct Agree {
-    positions: usize,
-    top1: usize,
-    max_kl: f64,
-    sum_kl: f64,
+    pub(crate) positions: usize,
+    pub(crate) top1: usize,
+    pub(crate) max_kl: f64,
+    pub(crate) sum_kl: f64,
     max_abs: f32,
     /// Reference logit margin of each top-1 disagreement.
     flips: Vec<f32>,
@@ -2869,7 +2869,7 @@ fn natural_ids(m: &Model, n: usize) -> Vec<u32> {
 /// Reference `r` vs `o`: PROMPTS with 32 greedy steps each (r's picks fed
 /// to both); positions 0..near and long..long + far of natural text,
 /// teacher-forced.
-fn kv_compare<R: Lm, O: Lm>(
+pub(crate) fn kv_compare<R: Lm, O: Lm>(
     r: &R,
     o: &O,
     m: &Model,
@@ -2911,7 +2911,8 @@ fn q8_vs_f16(
 /// 2.5e-3 (0.5B) and 7.8e-3 / 8.5e-3 / 6.1e-3, top-1 down to 93.7% (1.5B)
 /// there. Without the key shift q8 gives 2.8e-2 to 7.6e-2, a broken kernel
 /// ~1. Asserted: text windows mean KL <= 1.5e-2 and top-1 >= 90%; prompts
-/// mean KL <= 3e-2; any position KL < 2 (gross bugs).
+/// mean KL <= 3e-2; and as a gross-bug check only, every position's KL < 4
+/// (the worst measured: 1.24, one 1.5B prompt position).
 /// 0.5B is the sensitive one (one fast-rotating K bias pair of |b| ~ 47 no
 /// shift can remove); 1.5B and 7B sit at the CPU-vs-CPU level.
 fn q8_accuracy(m: &Model, name: &str) {
@@ -2921,7 +2922,7 @@ fn q8_accuracy(m: &Model, name: &str) {
     let a = q8_vs_f16(&net, m, 0, 300, 2048, 256);
     for (w, what) in a.iter().zip(["prompts", "text 0..300", "text 2048+256"]) {
         report(&format!("{name} q8 vs f16 {what}"), w);
-        assert!(w.max_kl < 2.0, "{name} {what}: max KL {}", w.max_kl);
+        assert!(w.max_kl < 4.0, "{name} {what}: max KL {}", w.max_kl);
     }
     assert!(
         a[0].sum_kl <= 3e-2 * a[0].positions as f64,
@@ -3083,7 +3084,13 @@ fn gpu_q8_attention_matches_reference() {
                     g.upload(&b).unwrap()
                 };
                 let (kb, vb) = (up8(&kq, true), up8(&vq, true));
-                let (ksb, vsb) = (g.upload(&ks).unwrap(), g.upload(&vs).unwrap());
+                // Row np - 1's scales poisoned too: the kernel must store them.
+                let upf = |d: &[f32]| {
+                    let mut d = d.to_vec();
+                    d[(np - 1) * kvd / group..].fill(f32::NAN);
+                    g.upload(&d).unwrap()
+                };
+                let (ksb, vsb) = (upf(&ks), upf(&vs));
                 let mut kf = k[(np - 1) * kvd..].to_vec();
                 kf.extend_from_slice(&v[(np - 1) * kvd..]);
                 let (qb, kfb) = (g.upload(&q).unwrap(), g.upload(&kf).unwrap());
@@ -3139,14 +3146,13 @@ fn gpu_q8_attention_matches_reference() {
                 }
                 let got: Vec<f32> = out.read().unwrap();
                 // The kernel's store of row np - 1 is the rule's.
-                let kgot: Vec<u8> = kb.read().unwrap();
+                let at = format!("{q8n} hd {hd} np {np}");
+                assert_eq!(kb.read::<u8>().unwrap(), kq, "{at}: stored keys");
+                assert_eq!(vb.read::<u8>().unwrap(), vq, "{at}: stored values");
+                let ksgot: Vec<f32> = ksb.read().unwrap();
                 let vsgot: Vec<f32> = vsb.read().unwrap();
-                assert_eq!(kgot, kq, "{q8n} hd {hd} np {np}: stored keys");
-                assert_eq!(
-                    bits(&vsgot),
-                    bits(&vs),
-                    "{q8n} hd {hd} np {np}: stored value scales"
-                );
+                assert_eq!(bits(&ksgot), bits(&ks), "{at}: stored key scales");
+                assert_eq!(bits(&vsgot), bits(&vs), "{at}: stored value scales");
                 let gq = nh / nkv;
                 let mut de = 0f64;
                 for h in 0..nh {

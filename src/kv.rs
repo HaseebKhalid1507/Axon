@@ -245,11 +245,19 @@ pub fn kv_f32_setting() -> Result<bool, String> {
     kv_setting().map(|k| k == KvType::F32)
 }
 
+static USE_F32: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
 /// Whether new caches store f32 (AXON_KV=f32) rather than f16 (default,
-/// or AXON_KV=f16). Read once; the CLI has already rejected bad values.
+/// or AXON_KV=f16), unless `set_f32` said first. Read once; the CLI has
+/// already rejected bad values.
 pub fn use_f32() -> bool {
-    static F32: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *F32.get_or_init(|| kv_f32_setting().unwrap_or_else(|e| panic!("{e}")))
+    *USE_F32.get_or_init(|| kv_f32_setting().unwrap_or_else(|e| panic!("{e}")))
+}
+
+/// Fix `use_f32`'s answer (the CLI's --kv, which overrides AXON_KV), before
+/// any cache is made; false if it was already decided.
+pub fn set_f32(f32: bool) -> bool {
+    USE_F32.set(f32).is_ok()
 }
 
 #[cfg(test)]
