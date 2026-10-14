@@ -385,11 +385,11 @@ impl Model {
         } else {
             RELEASE_ALIGN_HUGE
         };
-        let start = (base + rel[lo].start).next_multiple_of(align) - base;
-        let end = (base + rel[hi].end) / align * align - base;
-        if start >= end {
+        let Some(std::ops::Range { start, end }) =
+            release_span(base, rel[lo].start..rel[hi].end, align)
+        else {
             return;
-        }
+        };
         // SAFETY: [start, end) is inside `data` and inside released tensors
         // or bytes no tensor owns; nothing reads those again (on the
         // anonymous copy `tensor_data` enforces that; the slices handed out
@@ -466,6 +466,21 @@ impl Model {
 /// first and last partial 2 MB of the copy use 4 KB pages, which costs nothing much.
 /// Returns the mapping and whether it maps the file. `copy` overrides the
 /// choice (Some(true): copy, Some(false): map the file).
+/// The whole `align` blocks (in absolute addresses) inside bytes `r` of a
+/// buffer at address `base`, as offsets into it, or None if there are none.
+/// Aligned first, then made relative: `base` need not be aligned, and a run
+/// ending inside base's own block has no block to give back (subtracting
+/// base from its rounded-down end would underflow).
+fn release_span(
+    base: usize,
+    r: std::ops::Range<usize>,
+    align: usize,
+) -> Option<std::ops::Range<usize>> {
+    let s = (base + r.start).next_multiple_of(align);
+    let e = (base + r.end) / align * align;
+    (s < e).then(|| s - base..e - base)
+}
+
 fn map_weights(file: &File, copy: Option<bool>) -> io::Result<(memmap2::Mmap, bool)> {
     let len = file.metadata()?.len() as usize;
     let env = std::env::var("AXON_MMAP");
@@ -847,6 +862,58 @@ mod tests {
             .str("qwen2")
             .tensor("blk.0.attn_norm.weight", 8, 0)
             .tensor("output_norm.weight", 8, 32)
+    }
+
+    /// `release`'s block arithmetic on unaligned bases: runs ending inside
+    /// the base's own block (which underflowed before), runs with no whole
+    /// block, aligned and unaligned bases, and the span always inside the run.
+    #[test]
+    fn release_span_unaligned_base() {
+        const A: usize = 2 << 20;
+        // Base 4 KiB past a 2 MiB boundary: a run ending before the next
+        // boundary has no whole block.
+        let base = 7 * A + 4096;
+        assert_eq!(release_span(base, 0..1000, A), None);
+        assert_eq!(release_span(base, 100..A - 4096 - 1, A), None);
+        // Exactly up to the next boundary: still no whole block.
+        assert_eq!(release_span(base, 0..A - 4096, A), None);
+        // One whole block.
+        assert_eq!(
+            release_span(base, 0..2 * A - 4096, A),
+            Some(A - 4096..2 * A - 4096)
+        );
+        // Aligned base.
+        assert_eq!(release_span(8 * A, 0..A, A), Some(0..A));
+        assert_eq!(release_span(8 * A, 1..A, A), None);
+        assert_eq!(release_span(8 * A, 5..3 * A + 7, A), Some(A..3 * A));
+        // Empty run.
+        assert_eq!(release_span(base, 50..50, A), None);
+        for base in [0, 4096, A - 4096, A + 123, 3 * A] {
+            for (s, e) in [(0, 10), (0, A), (A / 2, 5 * A / 2), (17, 4 * A + 3)] {
+                if let Some(r) = release_span(base, s..e, A) {
+                    assert!(s <= r.start && r.end <= e && r.start < r.end);
+                    assert_eq!((base + r.start) % A, 0);
+                    assert_eq!((base + r.end) % A, 0);
+                }
+            }
+        }
+    }
+
+    /// `release` on an in-memory model (anonymous, base not 2 MiB-aligned
+    /// in general) of small tensors: no panic under overflow checks, and
+    /// the released tensors are recorded.
+    #[test]
+    fn release_small_anonymous_model() {
+        let names: Vec<String> = (0..6).map(|i| format!("t{i}")).collect();
+        let ts: Vec<(&str, &[u64], u32)> = names
+            .iter()
+            .map(|n| (n.as_str(), &[64u64][..], 0))
+            .collect();
+        let m = build_for_test(&[("general.architecture", Val::Str("x".into()))], &ts);
+        for t in &m.tensors {
+            m.release(t);
+            assert!(m.is_released(t));
+        }
     }
 
     #[test]
