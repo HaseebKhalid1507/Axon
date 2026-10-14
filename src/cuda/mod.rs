@@ -31,7 +31,11 @@ use std::path::{Path, PathBuf};
 pub const LINUX_ONLY: &str = "CUDA support is Linux-only for now";
 
 /// kernels.cu and decode.cu, compiled at run time as one module.
-const KERNELS: &str = concat!(include_str!("kernels.cu"), include_str!("decode.cu"));
+const KERNELS: &str = concat!(
+    include_str!("kernels.cu"),
+    include_str!("decode.cu"),
+    include_str!("prefill.cu")
+);
 
 /// A CUDA device: its retained primary context and a stream to run on.
 /// Dropping it destroys the stream and releases the context; `DevBuf`s and
@@ -698,6 +702,42 @@ pub struct Func<'m> {
     module: &'m Module<'m>,
 }
 
+impl Func<'_> {
+    /// Allow up to `bytes` of dynamic shared memory per block (over the
+    /// default 48 KiB needs this opt-in).
+    pub fn set_max_shared(&self, bytes: usize) -> Result<(), String> {
+        let g = self.module.gpu;
+        g.bind()?;
+        // SAFETY: a function of a loaded module; a plain attribute write.
+        let r = unsafe {
+            (g.d.cuFuncSetAttribute)(
+                self.f,
+                ffi::FUNC_ATTR_MAX_DYNAMIC_SHARED_SIZE_BYTES,
+                bytes as c_int,
+            )
+        };
+        check(g.d, r, &format!("cuFuncSetAttribute {}", self.name))
+    }
+
+    /// (registers per thread, local memory bytes per thread): spills show
+    /// up as local memory.
+    #[cfg_attr(not(test), allow(dead_code))] // tuning tests
+    pub fn regs_local(&self) -> Result<(i32, i32), String> {
+        let g = self.module.gpu;
+        g.bind()?;
+        let (mut regs, mut local) = (0, 0);
+        // SAFETY: a function of a loaded module; writes one int each.
+        let r = unsafe { (g.d.cuFuncGetAttribute)(&mut regs, ffi::FUNC_ATTR_NUM_REGS, self.f) };
+        check(g.d, r, "cuFuncGetAttribute")?;
+        // SAFETY: as above.
+        let r = unsafe {
+            (g.d.cuFuncGetAttribute)(&mut local, ffi::FUNC_ATTR_LOCAL_SIZE_BYTES, self.f)
+        };
+        check(g.d, r, "cuFuncGetAttribute")?;
+        Ok((regs, local))
+    }
+}
+
 /// How `Module::load` got its code.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CacheStatus {
@@ -718,6 +758,9 @@ pub struct Module<'g> {
     /// Its kernels may be launched overlapping their predecessor
     /// (`Gpu::launch_with`): see `pdl_ok`.
     pdl: bool,
+    /// The architecture its code was compiled for (10 * major + minor; 0
+    /// if unknown): int8 tensor cores (mma.sync) need 80.
+    arch: i32,
 }
 
 /// Whether programmatic dependent launch is safe and works for code
@@ -1013,6 +1056,7 @@ impl<'g> Module<'g> {
         };
         let cc = gpu.info()?.cc;
         let env = std::env::var("AXON_CUDA_PDL").ok();
+        m.arch = arch;
         m.pdl = pdl_ok(
             arch,
             (cc.0 * 10 + cc.1) as i32,
@@ -1080,6 +1124,11 @@ impl<'g> Module<'g> {
         self.pdl
     }
 
+    /// Whether its code has the int8 tensor-core kernels (built for sm_80+).
+    pub fn mma(&self) -> bool {
+        self.arch >= 80
+    }
+
     /// Turn programmatic dependent launch off for this module (tests: PDL
     /// on vs off).
     #[cfg(test)]
@@ -1096,7 +1145,12 @@ impl<'g> Module<'g> {
         // (cache entries pass a checksum; PTX from `compile` ends in a NUL).
         let r = unsafe { (gpu.d.cuModuleLoadData)(&mut m, image.as_ptr().cast()) };
         check(gpu.d, r, "cuModuleLoadData")?;
-        Ok(Module { gpu, m, pdl: false })
+        Ok(Module {
+            gpu,
+            m,
+            pdl: false,
+            arch: 0,
+        })
     }
 
     /// The `extern "C"` kernel `name`.

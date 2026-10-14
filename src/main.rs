@@ -271,13 +271,15 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     let net = backend(&model, device, ids.len() + extra + 1);
     let mut cache = net.new_cache(ids.len() + extra + 1);
 
-    // Feed the prompt in batches of PREFILL_BATCH tokens, so each weight row
-    // is read from RAM once per batch instead of once per token. Only the last
-    // position's logits are used, so the others skip the output head.
+    // Feed the prompt in batches (the backend's size: PREFILL_BATCH on the
+    // CPU), so each weight row is read once per batch instead of once per
+    // token. Only the last position's logits are used, so the others skip
+    // the output head.
     let t0 = Instant::now();
     let (&last, rest) = ids.split_last().expect("checked non-empty above");
-    for (i, batch) in rest.chunks(PREFILL_BATCH).enumerate() {
-        net.feed_batch(batch, i * PREFILL_BATCH, &mut cache);
+    let pb = net.prefill_batch();
+    for (i, batch) in rest.chunks(pb).enumerate() {
+        net.feed_batch(batch, i * pb, &mut cache);
     }
     let logits = net.forward(last, rest.len(), &mut cache);
     let prompt_secs = t0.elapsed().as_secs_f64();
@@ -863,7 +865,7 @@ fn human_bytes(b: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::{GenOpts, argmax, generate};
-    use crate::model::{KvCache, Qwen2};
+    use crate::model::Qwen2;
     use crate::spec::PromptLookup;
 
     fn reference(l: &[f32]) -> u32 {
@@ -1036,11 +1038,12 @@ mod tests {
     }
 
     /// Cache holding `ids` and the logits after them, as `run_lm` does it.
-    fn prefill(net: &Qwen2, ids: &[u32], cap: usize) -> (KvCache, Vec<f32>) {
+    fn prefill<M: crate::Lm>(net: &M, ids: &[u32], cap: usize) -> (M::Cache, Vec<f32>) {
         let mut cache = net.new_cache(cap);
         let (&last, rest) = ids.split_last().unwrap();
-        for (i, batch) in rest.chunks(super::PREFILL_BATCH).enumerate() {
-            net.feed_batch(batch, i * super::PREFILL_BATCH, &mut cache);
+        let pb = net.prefill_batch();
+        for (i, batch) in rest.chunks(pb).enumerate() {
+            net.feed_batch(batch, i * pb, &mut cache);
         }
         let logits = net.forward(last, rest.len(), &mut cache);
         (cache, logits)
@@ -1185,14 +1188,31 @@ mod tests {
         let Some(m) = crate::testutil::model() else {
             return;
         };
-        let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
-        let net = Qwen2::new(&m);
+        drafting_matches_greedy_on(&Qwen2::new(&m), &m);
+    }
+
+    /// `drafting_matches_greedy` on the GPU: its batched verify pass.
+    #[test]
+    fn drafting_matches_greedy_cuda() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let Some(m) = crate::testutil::model() else {
+            return;
+        };
+        let km = crate::cuda::Kernels::module(&g).unwrap();
+        let net = crate::cuda::qwen2::CudaQwen2::new(&g, &km, &m, 256).unwrap();
+        drafting_matches_greedy_on(&net, &m);
+    }
+
+    fn drafting_matches_greedy_on<M: crate::Lm>(net: &M, m: &crate::gguf::Model) {
+        let tok = crate::tokenizer::Tokenizer::from_gguf(m);
         const N: usize = 24;
         for prompt in PROMPTS {
             let ids = tok.encode(prompt);
             let cap = ids.len() + N + 1;
             // Plain greedy reference: every pick, as the original loop does it.
-            let (mut cache, mut logits) = prefill(&net, &ids, cap);
+            let (mut cache, mut logits) = prefill(net, &ids, cap);
             let mut greedy = Vec::new();
             for step in 0..N {
                 greedy.push(argmax(&logits));
@@ -1244,10 +1264,10 @@ mod tests {
                                 }
                             }
                         };
-                        let (mut cache, logits) = prefill(&net, &ids, cap);
+                        let (mut cache, logits) = prefill(net, &ids, cap);
                         let mut emitted = Vec::new();
                         let st = generate(
-                            &net,
+                            net,
                             &mut cache,
                             &ids,
                             logits,
