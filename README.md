@@ -63,10 +63,17 @@ text, never as the control token.
 
 `chat` keeps the whole conversation in one KV cache, so each turn only runs the
 model over the new message, not the history. On a terminal: `/reset` forgets the
-conversation, `/system TEXT` sets a new system message, a line ending in `\`
-continues on the next, Ctrl-C stops a reply, Ctrl-D quits. Piped, each line of
-stdin is a message and each reply one block of stdout. When the conversation
-outgrows `--ctx` (default 8192), the oldest exchanges are forgotten.
+conversation, `/system TEXT` sets a new system message, `/help` lists commands and
+keys. The prompt is a line editor: arrows, Ctrl-Left/Right or Alt-B/F by word,
+Home/End or Ctrl-A/E, Ctrl-W/U/K to delete a word back or to the start/end, Ctrl-Y
+to put it back, Up/Down for this session's history, Ctrl-L to clear the screen. A
+line ending in `\` (or Alt-Enter) goes on to a new line of the same message, and
+pasted text stays one message, line breaks and all. Ctrl-C stops a reply or clears
+the line, never quits; Ctrl-D on an empty line (or `/exit`) quits. Keys typed while
+a reply streams wait for the next prompt instead of mixing into the reply. The
+terminal is in raw mode while chat runs, so Ctrl-Z and Ctrl-\ do nothing. Piped,
+each line of stdin is a message and each reply one block of stdout. When the
+conversation outgrows `--ctx` (default 8192), the oldest exchanges are forgotten.
 
 ### Environment
 
