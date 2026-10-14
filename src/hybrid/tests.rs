@@ -58,7 +58,14 @@ fn hybrid_ends_are_the_backends_bits() {
     let n = block_count(&m).unwrap();
     let want = trace(&CudaQwen2::new(&g, &km, &m, 128).unwrap(), &m, 16);
     let got = trace(
-        &HybridQwen2::new(Some((&g, &km)), &m, 128, n).unwrap(),
+        &HybridQwen2::new(
+            Some((&g, &km)),
+            &m,
+            128,
+            n,
+            crate::cuda::qwen2::CacheKv::F16,
+        )
+        .unwrap(),
         &m,
         16,
     );
@@ -68,7 +75,14 @@ fn hybrid_ends_are_the_backends_bits() {
     );
     // More than n is all of them too.
     let got = trace(
-        &HybridQwen2::new(Some((&g, &km)), &m, 128, n + 5).unwrap(),
+        &HybridQwen2::new(
+            Some((&g, &km)),
+            &m,
+            128,
+            n + 5,
+            crate::cuda::qwen2::CacheKv::F16,
+        )
+        .unwrap(),
         &m,
         2,
     );
@@ -79,7 +93,7 @@ fn hybrid_ends_are_the_backends_bits() {
     );
 
     let want = trace(&Qwen2::new(&m), &m, 16);
-    let h = HybridQwen2::new(None, &m, 128, 0).unwrap();
+    let h = HybridQwen2::new(None, &m, 128, 0, crate::cuda::qwen2::CacheKv::F16).unwrap();
     assert!(h.gpu.is_none() && h.cpu.as_ref().unwrap().n_layers == n);
     let got = trace(&h, &m, 16);
     assert!(
@@ -114,7 +128,14 @@ fn mixed_graded(rel: &str, name: &str) {
     drop(rows);
     report(&format!("{name} cpu rows vs cpu"), &ac);
     for k in [1, n / 2, n - 1] {
-        let h = HybridQwen2::new(Some((&g, &km)), &m, 256, n - k).unwrap();
+        let h = HybridQwen2::new(
+            Some((&g, &km)),
+            &m,
+            256,
+            n - k,
+            crate::cuda::qwen2::CacheKv::F16,
+        )
+        .unwrap();
         let mut ag = Agree::default();
         for p in PROMPTS {
             compare(&cpu, &h, &tok.encode(p), 32, &mut ag);
@@ -186,7 +207,14 @@ fn prefill_bits(rel: &str, name: &str) {
     let km = Kernels::module(&g).unwrap();
     let n = block_count(&m).unwrap();
     let ids = long_ids(&m, 700);
-    let h = HybridQwen2::new(Some((&g, &km)), &m, ids.len() + 1, n - n / 2).unwrap();
+    let h = HybridQwen2::new(
+        Some((&g, &km)),
+        &m,
+        ids.len() + 1,
+        n - n / 2,
+        crate::cuda::qwen2::CacheKv::F16,
+    )
+    .unwrap();
     let gpu_max = h.gpu.as_ref().unwrap().prefill_batch();
     assert!(ids.len() > gpu_max, "covers the GPU's chunking");
     let (c0, g0, l0) = prefill_with(&h, &ids, &[0]);
@@ -236,7 +264,14 @@ fn hybrid_verify_matches_forward_argmax() {
     let prompt = long_ids(&m, 90);
     let (&last, rest) = prompt.split_last().unwrap();
     for k in [1, n / 2, n - 1] {
-        let h = HybridQwen2::new(Some((&g, &km)), &m, 1400, n - k).unwrap();
+        let h = HybridQwen2::new(
+            Some((&g, &km)),
+            &m,
+            1400,
+            n - k,
+            crate::cuda::qwen2::CacheKv::F16,
+        )
+        .unwrap();
         let mut right = Vec::new();
         {
             let mut c = h.new_cache(prompt.len() + 20);
@@ -339,7 +374,14 @@ fn hybrid_halves_own_their_weights() {
         }
     }
     let m = crate::testutil::model_with(Some(true)).unwrap();
-    let h = HybridQwen2::new(Some((&g, &km)), &m, 64, n - k).unwrap();
+    let h = HybridQwen2::new(
+        Some((&g, &km)),
+        &m,
+        64,
+        n - k,
+        crate::cuda::qwen2::CacheKv::F16,
+    )
+    .unwrap();
     for t in &m.tensors {
         let kept = t.name == "token_embd.weight";
         assert_eq!(released(&m, t), !kept, "{}", t.name);
@@ -368,7 +410,9 @@ fn hybrid_auto_split_is_the_most_that_fit() {
     };
     let km = Kernels::module(&g).unwrap();
     let n = block_count(&m).unwrap();
-    let need = |first: usize, ctx: usize| CudaQwen2::vram_need(&g, &km, &m, ctx, first).unwrap();
+    let need = |first: usize, ctx: usize| {
+        CudaQwen2::vram_need(&g, &km, &m, ctx, first, crate::cuda::qwen2::CacheKv::F16).unwrap()
+    };
     for f in 1..n {
         assert!(need(f, 4096) < need(f - 1, 4096), "plan at first {f}");
     }
@@ -377,7 +421,7 @@ fn hybrid_auto_split_is_the_most_that_fit() {
     // layers' KV would take 1.5x the free VRAM, so about half fit.
     let per_tok = (need(0, 2048) - need(0, 1024)) / 1024;
     let ctx = (free * 3 / 2 / per_tok) as usize;
-    let auto = auto_gpu_layers(&g, &km, &m, ctx, free).unwrap();
+    let auto = auto_gpu_layers(&g, &km, &m, ctx, crate::cuda::qwen2::CacheKv::F16, free).unwrap();
     eprintln!(
         "1.5B ctx {ctx}: auto split {auto}/{n} of {:.2} GiB free",
         free as f64 / GIB
@@ -391,9 +435,15 @@ fn hybrid_auto_split_is_the_most_that_fit() {
     assert!(auto > 0 && auto < n, "a split, not all or nothing");
     // An explicit count that doesn't fit (all: 1.5x free in KV alone) says
     // which and what to do.
-    let e = HybridQwen2::new(Some((&g, &km)), &m, ctx, n)
-        .err()
-        .expect("all layers can't fit");
+    let e = HybridQwen2::new(
+        Some((&g, &km)),
+        &m,
+        ctx,
+        n,
+        crate::cuda::qwen2::CacheKv::F16,
+    )
+    .err()
+    .expect("all layers can't fit");
     assert!(
         e.contains(&format!("{n}/{n} layers")) && e.contains("or fewer --gpu-layers"),
         "{e}"

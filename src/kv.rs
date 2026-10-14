@@ -208,14 +208,41 @@ pub enum KvData {
     F32(Layers<f32>),
 }
 
-/// AXON_KV parsed: Ok(true) for f32, Ok(false) for f16 (also unset or
-/// empty), else a message for the user. `main` checks it at startup.
-pub fn kv_f32_setting() -> Result<bool, String> {
-    match std::env::var("AXON_KV").ok().as_deref() {
-        None | Some("") | Some("f16") => Ok(false),
-        Some("f32") => Ok(true),
-        Some(other) => Err(format!("AXON_KV must be f16 or f32, got '{other}'")),
+/// A KV cache element type, as AXON_KV or `--kv` names it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KvType {
+    F16,
+    F32,
+    /// int8 with a scale per (position, kv head): the GPU only
+    /// (cuda/decode.cu has the rule); the CPU has no q8 cache.
+    Q8,
+}
+
+impl KvType {
+    /// "f16", "f32" or "q8" ("" is the default, f16).
+    pub fn parse(s: &str) -> Result<KvType, String> {
+        match s {
+            "" | "f16" => Ok(KvType::F16),
+            "f32" => Ok(KvType::F32),
+            "q8" => Ok(KvType::Q8),
+            _ => Err(format!("unknown KV cache type '{s}' (f16, f32 or q8)")),
+        }
     }
+}
+
+/// AXON_KV parsed (unset: f16), else a message for the user. `main` checks
+/// it at startup.
+pub fn kv_setting() -> Result<KvType, String> {
+    match std::env::var("AXON_KV") {
+        Ok(v) => KvType::parse(&v).map_err(|e| format!("AXON_KV: {e}")),
+        Err(_) => Ok(KvType::F16),
+    }
+}
+
+/// Whether AXON_KV asks for f32 (the CPU cache's choice; q8 is the GPU's,
+/// and the CLI rejects it for the CPU).
+pub fn kv_f32_setting() -> Result<bool, String> {
+    kv_setting().map(|k| k == KvType::F32)
 }
 
 /// Whether new caches store f32 (AXON_KV=f32) rather than f16 (default,

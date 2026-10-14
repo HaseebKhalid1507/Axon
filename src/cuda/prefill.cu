@@ -64,6 +64,7 @@ extern "C" __global__ void swiglu_quant_b(const float* __restrict__ gate,
 // RoPE and the cache store of qkv_rope, on the products (biases added) in
 // qkv: row z = [nq queries | nk keys | nk values]. Items per token: nq / 2
 // query pairs, nk / 2 key pairs, nk values. Grid (ceil(items / 128), nb).
+// With a null kc (the q8 cache: kv_q8_b stores keys and values), queries only.
 extern "C" __global__ void rope_kv_b(const float* __restrict__ qkv, int nq, int nk, int hd,
                                      int start, const float2* __restrict__ rope,
                                      float* __restrict__ q, unsigned short* __restrict__ kc,
@@ -72,7 +73,7 @@ extern "C" __global__ void rope_kv_b(const float* __restrict__ qkv, int nq, int 
     int half = hd >> 1, npq = nq >> 1, npk = nk >> 1;
     const float* y = qkv + (u64)z * (nq + 2 * nk);
     u64 pos = (u64)(start + z);
-    if (item >= npq + npk + nk) return;
+    if (item >= npq + npk + nk || (!kc && item >= npq)) return;
     if (item >= npq + npk) {
         int r = item - npq - npk;
         vc[pos * nk + r] = kv_half(y[nq + nk + r]);
@@ -96,20 +97,54 @@ extern "C" __global__ void rope_kv_b(const float* __restrict__ qkv, int nq, int 
     }
 }
 
+// The q8 cache store for token z (position start + z), kv head blockIdx.x:
+// its keys rotated as rope_kv_b does (the same ops), its values, quantized
+// by kv_q8_store (decode.cu's rule and code). Grid (n_kv, nb) x 128.
+template <int HD, int KG>
+__device__ __forceinline__ void kv_q8_bt(const float* __restrict__ qkv, int nq, int nk, int start,
+                                         const float2* __restrict__ rope, Q8Kv c) {
+    __shared__ float xs[2 * HD];
+    int kvh = blockIdx.x, z = blockIdx.y, tid = threadIdx.x, half = HD / 2;
+    const float* y = qkv + (u64)z * (nq + 2 * nk) + nq + kvh * HD;
+    if (tid < half) {
+        float y0 = y[tid], y1 = y[tid + half];
+        float2 sc = rope[(u64)z * half + tid];
+        float sn = sc.x, cs = sc.y;
+        xs[tid] = __fsub_rn(__fmul_rn(y0, cs), __fmul_rn(y1, sn));
+        xs[tid + half] = __fadd_rn(__fmul_rn(y0, sn), __fmul_rn(y1, cs));
+    }
+    for (int i = tid; i < HD; i += blockDim.x) xs[HD + i] = y[nk + i];
+    __syncthreads();
+    kv_q8_store<HD, KG>(xs, c, (u64)(start + z) * nk + kvh * HD, c.ksh ? c.ksh + kvh * HD : nullptr);
+}
+
+#define KV_Q8_B(NAME, HD, KG)                                                                      \
+    extern "C" __global__ void __launch_bounds__(128)                                              \
+        NAME(const float* __restrict__ qkv, int nq, int nk, int start,                             \
+             const float2* __restrict__ rope, signed char* __restrict__ kq,                        \
+             signed char* __restrict__ vq, float* __restrict__ ks, float* __restrict__ vs,         \
+             const float* __restrict__ ksh) {                                                      \
+        kv_q8_bt<HD, KG>(qkv, nq, nk, start, rope, Q8Kv{kq, vq, ks, vs, nullptr, ksh});            \
+    }
+KV_Q8_B(kv_q8_b_64, 64, 64)
+KV_Q8_B(kv_q8_b_128, 128, 128)
+KV_Q8_B(kv_q8g32_b_64, 64, 32)
+KV_Q8_B(kv_q8g32_b_128, 128, 32)
+
 // Decode attention for query tokens z0 + blockIdx.z (position start + z),
 // all of whose keys and values are in the cache: the decode schedule and
 // code per query (same splits, tiles and sums). q: [token][n_heads * hd];
 // part_*: per query of this launch, as attn_split's.
-template <int HD>
+template <int HD, int KG = 0>
 __device__ __forceinline__ void attn_split_bt(const float* q, const unsigned short* kc,
                                               const unsigned short* vc, int start, int z0,
                                               int n_heads, int n_kv, float scale, int max_split,
-                                              float* part_o, float* part_ml) {
+                                              float* part_o, float* part_ml, Q8Kv q8 = Q8Kv{}) {
     int zl = blockIdx.z, z = z0 + zl;
     u64 nh = n_heads;
-    attn_split_t<HD>(q + (u64)z * nh * HD, kc, vc, start + z + 1, blockIdx.x, blockIdx.y, n_heads,
-                     n_kv, scale, max_split, part_o + (u64)zl * nh * max_split * HD,
-                     part_ml + (u64)zl * nh * max_split * 2);
+    attn_split_t<HD, KG>(q + (u64)z * nh * HD, kc, vc, start + z + 1, blockIdx.x, blockIdx.y,
+                         n_heads, n_kv, scale, max_split, part_o + (u64)zl * nh * max_split * HD,
+                         part_ml + (u64)zl * nh * max_split * 2, q8);
 }
 
 extern "C" __global__ void __launch_bounds__(ATT_TILE)
@@ -128,6 +163,21 @@ attn_split_b_128(const float* __restrict__ q, const unsigned short* __restrict__
     attn_split_bt<128>(q, kc, vc, start, z0, n_heads, n_kv, scale, max_split, part_o, part_ml);
 }
 
+// attn_split_b on the q8 cache (written by kv_q8_b; nothing to store here).
+#define ATTN_SPLIT_B_Q8(NAME, HD, KG)                                                              \
+    extern "C" __global__ void __launch_bounds__(ATT_TILE)                                         \
+        NAME(const float* __restrict__ q, const signed char* __restrict__ kq,                      \
+             const signed char* __restrict__ vq, const float* __restrict__ ks,                     \
+             const float* __restrict__ vs, int start, int z0, int n_heads, int n_kv, float scale,  \
+             int max_split, float* __restrict__ part_o, float* __restrict__ part_ml) {             \
+        attn_split_bt<HD, KG>(q, nullptr, nullptr, start, z0, n_heads, n_kv, scale, max_split,     \
+                              part_o, part_ml, Q8Kv{kq, vq, ks, vs, nullptr, nullptr});            \
+    }
+ATTN_SPLIT_B_Q8(attn_split_b_q8_64, 64, 64)
+ATTN_SPLIT_B_Q8(attn_split_b_q8_128, 128, 128)
+ATTN_SPLIT_B_Q8(attn_split_b_q8g32_64, 64, 32)
+ATTN_SPLIT_B_Q8(attn_split_b_q8g32_128, 128, 32)
+
 // attn_split_b for queries whose every split has at most 32 positions (np <=
 // 32 max_split: att_split's chunk <= ATT_MIN): one warp per split, 4 splits
 // of one (query, kv head) per block, instead of a 128-thread block per split
@@ -137,13 +187,15 @@ attn_split_b_128(const float* __restrict__ q, const unsigned short* __restrict__
 // then the three padding entries of its column, exp(-inf - m)); warp_sum;
 // value sums per row slot (rows rs, rs + nrs, ...) in order, slots merged in
 // order. Grid (n_kv, ceil(max_split / 4), nz) x 128.
-template <int HD>
+// KG > 0: the q8 cache (attn_split_t's q8 ops: per group a score chain,
+// then d times it; value terms (p d) v_q).
+template <int HD, int KG = 0>
 __device__ __forceinline__ void attn_warp_bt(const float* __restrict__ q,
                                              const unsigned short* __restrict__ kc,
                                              const unsigned short* __restrict__ vc, int start,
                                              int z0, int n_heads, int n_kv, float scale,
                                              int max_split, float* __restrict__ part_o,
-                                             float* __restrict__ part_ml) {
+                                             float* __restrict__ part_ml, Q8Kv q8 = Q8Kv{}) {
     __shared__ float qs[MAX_GROUP * HD];
     __shared__ float ps[4][MAX_GROUP][32];
     int kvh = blockIdx.x, zl = blockIdx.z, z = z0 + zl, tid = threadIdx.x;
@@ -173,7 +225,39 @@ __device__ __forceinline__ void attn_warp_bt(const float* __restrict__ q,
     float sc[MAX_GROUP];
 #pragma unroll
     for (int g = 0; g < MAX_GROUP; g++) sc[g] = 0.0f;
-    {
+    if constexpr (KG > 0) {
+        // As below: every lane scores a valid row. The whole row (HD bytes)
+        // loaded at once.
+        u64 e = (u64)(tbeg + min(lane, tn - 1)) * kv_dim + kvh * HD;
+        const uint4* kr = (const uint4*)(q8.k + e);
+        uint4 kk[HD / 16];
+#pragma unroll
+        for (int u = 0; u < HD / 16; u++) kk[u] = kr[u];
+        const float* sr = q8.ks + e / KG;
+#pragma unroll
+        for (int j = 0; j < HD / KG; j++) {
+            float a[MAX_GROUP];
+#pragma unroll
+            for (int g = 0; g < MAX_GROUP; g++) a[g] = 0.0f;
+#pragma unroll
+            for (int d16 = j * KG / 16; d16 < (j + 1) * KG / 16; d16++) {
+                float k[16];
+                i8x16(kk[d16], k);
+#pragma unroll
+                for (int g = 0; g < MAX_GROUP; g++) {
+                    if (g < group) {
+                        const float* qq = qs + g * HD + d16 * 16;
+#pragma unroll
+                        for (int i = 0; i < 16; i++) a[g] = __fmaf_rn(qq[i], k[i], a[g]);
+                    }
+                }
+            }
+            float d = sr[j];
+#pragma unroll
+            for (int g = 0; g < MAX_GROUP; g++)
+                if (g < group) sc[g] = __fmaf_rn(d, a[g], sc[g]);
+        }
+    } else {
         // Every lane (no divergence before the shuffles below): lanes past
         // the split score a valid row, and their scores are dropped.
         const uint4* kr =
@@ -233,13 +317,19 @@ __device__ __forceinline__ void attn_warp_bt(const float* __restrict__ q,
         lrun[g] = __fadd_rn(__fmul_rn(0.0f, 0.0f), ls[g]); // alpha = 0: the first tile
     __syncwarp();
     // Values of all (<= 32) rows loaded at once: one wait, not one per row.
-    const unsigned short* vb = vc + (u64)tbeg * kv_dim + kvh * HD;
+    u64 eb = (u64)tbeg * kv_dim + kvh * HD;
+    const unsigned short* vb = vc + eb;
     u32 vv[32][KP];
 #pragma unroll
     for (int i = 0; i < 32; i++)
 #pragma unroll
-        for (int k = 0; k < KP; k++)
-            vv[i][k] = i < tn ? *(const u32*)(vb + (u64)i * kv_dim + 2 * (lane + 32 * k)) : 0;
+        for (int k = 0; k < KP; k++) {
+            u64 e = (u64)i * kv_dim + 2 * (lane + 32 * k);
+            if constexpr (KG > 0)
+                vv[i][k] = i < tn ? *(const unsigned short*)(q8.v + eb + e) : 0;
+            else
+                vv[i][k] = i < tn ? *(const u32*)(vb + e) : 0;
+        }
     // Values: lane owns dim pairs dp = lane + 32 k (k < HD / 64) of every row
     // slot rs < nrs; rows rs, rs + nrs, ... in order.
     float o0[MAX_GROUP][KP][nrs], o1[MAX_GROUP][KP][nrs];
@@ -257,7 +347,27 @@ __device__ __forceinline__ void attn_warp_bt(const float* __restrict__ q,
 #pragma unroll
         for (int r = 0; r < nrs; r++) {
             int i = i0 + r;
-            if (i < tn) {
+            if (KG > 0 && i < tn) {
+                float v0[KP], v1[KP], d[KP];
+#pragma unroll
+                for (int k = 0; k < KP; k++) {
+                    v0[k] = (float)(int)(signed char)(vv[i][k] & 0xff);
+                    v1[k] = (float)(int)(signed char)(vv[i][k] >> 8);
+                    d[k] = q8.vs[(eb + (u64)i * kv_dim + 2 * (lane + 32 * k)) / (KG > 0 ? KG : 1)];
+                }
+#pragma unroll
+                for (int g = 0; g < MAX_GROUP; g++) {
+                    if (g < group) {
+                        float p = ps[warp][g][i];
+#pragma unroll
+                        for (int k = 0; k < KP; k++) {
+                            float pk = __fmul_rn(p, d[k]);
+                            o0[g][k][r] = __fmaf_rn(pk, v0[k], o0[g][k][r]);
+                            o1[g][k][r] = __fmaf_rn(pk, v1[k], o1[g][k][r]);
+                        }
+                    }
+                }
+            } else if (KG == 0 && i < tn) {
                 float v0[KP], v1[KP];
 #pragma unroll
                 for (int k = 0; k < KP; k++) v0[k] = h2f(vv[i][k] & 0xffff), v1[k] = h2f(vv[i][k] >> 16);
@@ -314,6 +424,20 @@ attn_warp_b_128(const float* __restrict__ q, const unsigned short* __restrict__ 
                 float* __restrict__ part_ml) {
     attn_warp_bt<128>(q, kc, vc, start, z0, n_heads, n_kv, scale, max_split, part_o, part_ml);
 }
+
+#define ATTN_WARP_B_Q8(NAME, HD, KG)                                                               \
+    extern "C" __global__ void __launch_bounds__(128, 4)                                           \
+        NAME(const float* __restrict__ q, const signed char* __restrict__ kq,                      \
+             const signed char* __restrict__ vq, const float* __restrict__ ks,                     \
+             const float* __restrict__ vs, int start, int z0, int n_heads, int n_kv, float scale,  \
+             int max_split, float* __restrict__ part_o, float* __restrict__ part_ml) {             \
+        attn_warp_bt<HD, KG>(q, nullptr, nullptr, start, z0, n_heads, n_kv, scale, max_split,      \
+                             part_o, part_ml, Q8Kv{kq, vq, ks, vs, nullptr, nullptr});             \
+    }
+ATTN_WARP_B_Q8(attn_warp_b_q8_64, 64, 64)
+ATTN_WARP_B_Q8(attn_warp_b_q8_128, 128, 128)
+ATTN_WARP_B_Q8(attn_warp_b_q8g32_64, 64, 32)
+ATTN_WARP_B_Q8(attn_warp_b_q8g32_128, 128, 32)
 
 // attn_combine for the queries of an attn_split_b launch, into act[z]: its
 // ops in its order (attn_combine_dev), the split sums' loads batched 16 at

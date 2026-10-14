@@ -801,6 +801,17 @@ fn greedy<M: Lm>(net: &M, ids: &[u32], n: usize, keep: bool) -> (Vec<u32>, Vec<V
 /// graphs, through `forward` and `forward_argmax` alike.
 #[test]
 fn gpu_deterministic_graph_or_not() {
+    deterministic(CacheKv::F16);
+}
+
+/// `gpu_deterministic_graph_or_not` with the q8 cache (both scale groups).
+#[test]
+fn gpu_deterministic_graph_or_not_q8() {
+    deterministic(CacheKv::Q8 { group: 0 });
+    deterministic(CacheKv::Q8 { group: 32 });
+}
+
+fn deterministic(kv: CacheKv) {
     let Some(g) = crate::testutil::gpu() else {
         return;
     };
@@ -810,6 +821,7 @@ fn gpu_deterministic_graph_or_not() {
     let km = Kernels::module(&g).unwrap();
     let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
     let mut net = CudaQwen2::new(&g, &km, &m, 512).unwrap();
+    net.kv = kv;
     for p in [PROMPTS[0], PROMPTS[2]] {
         let ids = tok.encode(p);
         net.graphs = true;
@@ -840,6 +852,17 @@ fn continuations<R: Lm, O: Lm>(
     tok: &crate::tokenizer::Tokenizer,
     name: &str,
 ) -> (usize, usize) {
+    continuations_with(r, o, tok, name, 0.5)
+}
+
+/// `continuations`, divergences asserted to have a margin below `tie`.
+fn continuations_with<R: Lm, O: Lm>(
+    r: &R,
+    o: &O,
+    tok: &crate::tokenizer::Tokenizer,
+    name: &str,
+    tie: f32,
+) -> (usize, usize) {
     let (mut same, mut matched) = (0, 0);
     for p in PROMPTS {
         let ids = tok.encode(p);
@@ -859,7 +882,7 @@ fn continuations<R: Lm, O: Lm>(
                     tok.decode(&[tr[i]]),
                     tok.decode(&[to[i]])
                 );
-                assert!(margin < 0.5, "not a near-tie: margin {margin}");
+                assert!(margin < tie, "not a near-tie: margin {margin}");
             }
         }
     }
@@ -2011,9 +2034,13 @@ fn long_ids(m: &Model, n: usize) -> Vec<u32> {
     ids
 }
 
-/// KV cache bytes, positions 0..n of every layer.
+/// KV cache bytes, positions 0..n of every layer (q8: the whole cache,
+/// int8 rows and scales; positions past n are zero in both when compared).
 fn kv_bytes(net: &CudaQwen2, c: &CudaCache, n: usize) -> Vec<u16> {
     let all: Vec<u16> = c.kv.read().unwrap();
+    if c.mode != CacheKv::F16 {
+        return all;
+    }
     let row = net.kv_dim();
     let mut out = Vec::new();
     for l in 0..2 * net.n_layers {
@@ -2050,11 +2077,12 @@ fn prefill_with(net: &CudaQwen2, ids: &[u32], sizes: &[usize]) -> (Vec<u16>, Vec
 /// The batched prefill's contract: whatever the batching (1, 7, 64, the
 /// max, ragged, per-token decode steps), the KV cache bytes and the next
 /// token's logit bits are identical.
-fn prefill_bits(m: &Model, name: &str) {
+fn prefill_bits(m: &Model, name: &str, kv: CacheKv) {
     let g = crate::testutil::gpu().unwrap();
     let km = Kernels::module(&g).unwrap();
     let ids = long_ids(m, 700);
     let mut net = CudaQwen2::new(&g, &km, m, ids.len() + 1).unwrap();
+    net.kv = kv;
     let max = net.prefill_batch();
     assert!(ids.len() > max, "covers chunking past the max batch");
     // The GPU's own attention splits (every split <= 32 positions here:
@@ -2085,7 +2113,7 @@ fn prefill_bits(m: &Model, name: &str) {
         }
     }
     eprintln!(
-        "{name}: prefill bit-identical over 7 batchings of {} tokens, 2 split counts",
+        "{name} {kv:?}: prefill bit-identical over 7 batchings of {} tokens, 2 split counts",
         ids.len()
     );
 }
@@ -2098,7 +2126,7 @@ fn gpu_prefill_batchings_bit_identical_0_5b() {
     let Some(m) = crate::testutil::model() else {
         return;
     };
-    prefill_bits(&m, "0.5B");
+    prefill_bits(&m, "0.5B", CacheKv::F16);
 }
 
 #[test]
@@ -2109,17 +2137,18 @@ fn gpu_prefill_batchings_bit_identical_1_5b() {
     let Some(m) = model_at("models/qwen2.5-1.5b-instruct-q4_k_m.gguf") else {
         return;
     };
-    prefill_bits(&m, "1.5B");
+    prefill_bits(&m, "1.5B", CacheKv::F16);
 }
 
 /// verify_argmax's picks equal forward_argmax per token for drafts that
 /// are right, wrong and random, small (gemvn) and large (GEMM, chunked past
 /// the max batch) passes.
-fn verify_bits(m: &Model, name: &str) {
+fn verify_bits(m: &Model, name: &str, kv: CacheKv) {
     let g = crate::testutil::gpu().unwrap();
     let km = Kernels::module(&g).unwrap();
     let prompt = long_ids(m, 90);
-    let net = CudaQwen2::new(&g, &km, m, 1400).unwrap();
+    let mut net = CudaQwen2::new(&g, &km, m, 1400).unwrap();
+    net.kv = kv;
     let (right, _) = greedy(&net, &prompt, 20, false);
     let mut rng = Rng(77);
     let mut cases: Vec<Vec<u32>> = Vec::new();
@@ -2187,7 +2216,7 @@ fn verify_bits(m: &Model, name: &str) {
         );
     }
     eprintln!(
-        "{name}: {} verify passes == per-token picks (logit bits up to 64)",
+        "{name} {kv:?}: {} verify passes == per-token picks (logit bits up to 64)",
         cases.len()
     );
 }
@@ -2200,7 +2229,7 @@ fn gpu_verify_matches_forward_argmax_0_5b() {
     let Some(m) = crate::testutil::model() else {
         return;
     };
-    verify_bits(&m, "0.5B");
+    verify_bits(&m, "0.5B", CacheKv::F16);
 }
 
 #[test]
@@ -2211,7 +2240,7 @@ fn gpu_verify_matches_forward_argmax_1_5b() {
     let Some(m) = model_at("models/qwen2.5-1.5b-instruct-q4_k_m.gguf") else {
         return;
     };
-    verify_bits(&m, "1.5B");
+    verify_bits(&m, "1.5B", CacheKv::F16);
 }
 
 /// Where a batched prefill pass spends its time, per kernel kind (events
@@ -2563,6 +2592,591 @@ fn gpu_batched_attention_matches_decode_bits() {
                     let ab = act_bytes(dim);
                     assert!(bact[z * ast..z * ast + ab] == wact[..], "{ctxs}: output");
                 }
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The q8 KV cache (CacheKv::Q8).
+
+#[test]
+fn gpu_prefill_batchings_bit_identical_q8_0_5b() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = crate::testutil::model() else {
+        return;
+    };
+    prefill_bits(&m, "0.5B", CacheKv::Q8 { group: 64 });
+    prefill_bits(&m, "0.5B", CacheKv::Q8 { group: 32 });
+}
+
+#[test]
+fn gpu_prefill_batchings_bit_identical_q8_1_5b() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = model_at("models/qwen2.5-1.5b-instruct-q4_k_m.gguf") else {
+        return;
+    };
+    prefill_bits(&m, "1.5B", CacheKv::Q8 { group: 128 });
+    prefill_bits(&m, "1.5B", CacheKv::Q8 { group: 32 });
+}
+
+#[test]
+fn gpu_verify_matches_forward_argmax_q8_0_5b() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = crate::testutil::model() else {
+        return;
+    };
+    verify_bits(&m, "0.5B", CacheKv::Q8 { group: 64 });
+}
+
+#[test]
+fn gpu_verify_matches_forward_argmax_q8_1_5b() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = model_at("models/qwen2.5-1.5b-instruct-q4_k_m.gguf") else {
+        return;
+    };
+    verify_bits(&m, "1.5B", CacheKv::Q8 { group: 128 });
+}
+
+/// decode.cu's q8 rule on one group of values: (int8 values, scale).
+fn q8_ref(x: &[f32]) -> (Vec<i8>, f32) {
+    // Saturate as the f16 cache (f32::clamp passes NaN through).
+    let sat = |v: f32| v.clamp(-65504.0, 65504.0);
+    let amax = x
+        .iter()
+        .map(|&v| sat(v).abs())
+        .fold(0f32, |m, a| if a > m { a } else { m });
+    let d = if x.iter().any(|v| v.is_nan()) {
+        f32::NAN
+    } else {
+        amax / 127.0
+    };
+    let id = if amax != 0.0 { 127.0 / amax } else { 0.0 };
+    let q = x
+        .iter()
+        .map(|&v| {
+            let y = sat(v) * id;
+            if y.is_nan() {
+                0
+            } else {
+                (y.round_ties_even() as i32).clamp(-127, 127) as i8
+            }
+        })
+        .collect();
+    (q, d)
+}
+
+/// The batched q8 store (kv_q8*_b, the code the decode step's attn_split_q8
+/// runs too: the batchings tests show the two agree) == `q8_ref` bit for
+/// bit, for both head sizes and scale groups, without and with a key shift
+/// (keys - shift, then the rule): random rows, exact ties (amax 127, so x *
+/// 127 / amax = x: k + 0.5 rounds to even), values past f16's range
+/// (saturated), an all-zero row, a NaN (its group's scale NaN, the value
+/// 0). RoPE at angle 0 (sin 0, cos 1) leaves the keys as given.
+#[test]
+fn gpu_q8_store_matches_rule() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let mut rng = Rng(4242);
+    for (hd, shifted) in [(64usize, false), (128, false), (64, true), (128, true)] {
+        for group in [hd, 32] {
+            let name = if group == hd {
+                format!("kv_q8_b_{hd}")
+            } else {
+                format!("kv_q8g32_b_{hd}")
+            };
+            let f = km.function(&name).unwrap();
+            let (nkv, nb, start) = (2usize, 4usize, 3usize);
+            let nk = nkv * hd;
+            // Token rows [nq = 0 | keys | values].
+            let mut rows: Vec<Vec<f32>> = (0..nb).map(|_| rng.vec(2 * nk, 3.0)).collect();
+            for (i, v) in rows[1].iter_mut().enumerate() {
+                *v = [127.0, -127.0, 2.5, -2.5, 3.5, 0.5, -0.5, 1.5, 126.5, -126.5][i % 10];
+            }
+            rows[2][5] = 1e6;
+            rows[2][nk + 7] = -7e4;
+            rows[2][nk + hd + 1] = 65504.5;
+            for v in &mut rows[3][hd..nk] {
+                *v = 0.0;
+            }
+            rows[3][nk + 3] = f32::NAN;
+            // A shift of zeros but for a few big entries (as the slow RoPE
+            // pairs' key bias), the tie row's left alone.
+            let shift: Vec<f32> = (0..nk)
+                .map(|i| {
+                    if shifted && i % 13 == 5 {
+                        100.0 + i as f32
+                    } else {
+                        0.0
+                    }
+                })
+                .collect();
+            for (i, v) in rows[1][..nk].iter_mut().enumerate() {
+                *v += shift[i];
+            }
+            let qkv: Vec<f32> = rows.concat();
+            let shift_b = g.upload(&shift).unwrap();
+            let rope: Vec<f32> = (0..nb * hd / 2).flat_map(|_| [0.0f32, 1.0]).collect();
+            let qkv_b = g.upload(&qkv).unwrap();
+            let rope_b = g.upload(&rope).unwrap();
+            let n = (start + nb) * nk;
+            let (kq, vq) = (g.alloc(n).unwrap(), g.alloc(n).unwrap());
+            let (ks, vs) = (
+                g.alloc(n / group * 4).unwrap(),
+                g.alloc(n / group * 4).unwrap(),
+            );
+            // SAFETY: prefill.cu kv_q8_b's signature; qkv holds nb rows of
+            // 2 nk floats, rope nb x hd / 2 pairs, the caches start + nb rows.
+            unsafe {
+                g.launch(
+                    &f,
+                    (nkv as u32, nb as u32, 1),
+                    (128, 1, 1),
+                    0,
+                    &[
+                        qkv_b.arg(),
+                        Arg::I32(0),
+                        Arg::I32(nk as i32),
+                        Arg::I32(start as i32),
+                        rope_b.arg(),
+                        kq.arg(),
+                        vq.arg(),
+                        ks.arg(),
+                        vs.arg(),
+                        if shifted { shift_b.arg() } else { Arg::Ptr(0) },
+                    ],
+                )
+                .unwrap();
+            }
+            g.sync().unwrap();
+            let i8s = |b: &DevBuf| -> Vec<i8> {
+                b.read::<u8>().unwrap().iter().map(|&x| x as i8).collect()
+            };
+            let (kq, vq) = (i8s(&kq), i8s(&vq));
+            let (ks, vs): (Vec<f32>, Vec<f32>) = (ks.read().unwrap(), vs.read().unwrap());
+            for (z, row) in rows.iter().enumerate() {
+                let pos = start + z;
+                for (half, (q, s)) in [(&kq, &ks), (&vq, &vs)].into_iter().enumerate() {
+                    let x: Vec<f32> = row[half * nk..(half + 1) * nk]
+                        .iter()
+                        .zip(&shift)
+                        .map(|(&x, &c)| if half == 0 { x - c } else { x })
+                        .collect();
+                    for g0 in (0..nk).step_by(group) {
+                        let (wq, wd) = q8_ref(&x[g0..g0 + group]);
+                        let e = pos * nk + g0;
+                        let at = format!("{name} shift {shifted} token {z} kv {half} @{g0}");
+                        assert_eq!(&q[e..e + group], &wq[..], "{at}");
+                        let d = s[e / group];
+                        assert!(
+                            d.to_bits() == wd.to_bits() || d.is_nan() && wd.is_nan(),
+                            "{at}: {d} vs {wd}"
+                        );
+                    }
+                }
+            }
+            // The rule's edge cases came out as meant.
+            assert_eq!(kq[(start + 1) * nk + 2], 2); // 2.5 -> 2
+            assert_eq!(kq[(start + 1) * nk + 4], 4); // 3.5 -> 4
+            assert!(vs[((start + 3) * nk + 3) / group].is_nan());
+            if !shifted {
+                assert_eq!(ks[((start + 3) * nk + hd) / group], 0.0); // all-zero keys
+            }
+        }
+    }
+}
+
+/// A `CudaQwen2` whose caches are of type `kv` (comparisons of cache types
+/// over one upload of the weights).
+struct KvNet<'a, 'g>(&'a CudaQwen2<'g>, CacheKv);
+
+impl<'g> Lm for KvNet<'_, 'g> {
+    type Cache = CudaCache<'g>;
+    fn vocab(&self) -> usize {
+        self.0.vocab
+    }
+    fn new_cache(&self, max_ctx: usize) -> CudaCache<'g> {
+        self.0.try_cache_kv(max_ctx, self.1).unwrap()
+    }
+    fn forward(&self, token: u32, pos: usize, c: &mut CudaCache<'g>) -> Vec<f32> {
+        Lm::forward(self.0, token, pos, c)
+    }
+    fn forward_argmax(&self, token: u32, pos: usize, c: &mut CudaCache<'g>) -> u32 {
+        self.0.forward_argmax(token, pos, c)
+    }
+    fn feed_batch(&self, tokens: &[u32], start: usize, c: &mut CudaCache<'g>) {
+        Lm::feed_batch(self.0, tokens, start, c)
+    }
+    fn verify_argmax(&self, tokens: &[u32], start: usize, c: &mut CudaCache<'g>) -> Vec<u32> {
+        Lm::verify_argmax(self.0, tokens, start, c)
+    }
+    fn prefill_batch(&self) -> usize {
+        self.0.prefill_batch()
+    }
+}
+
+/// `r` vs `o` logits at positions from..ids.len(), both fed ids (teacher
+/// forcing: every position sees the same text), ids[..from] by feed_batch.
+fn compare_forced<R: Lm, O: Lm>(r: &R, o: &O, ids: &[u32], from: usize, a: &mut Agree) {
+    let mut rc = r.new_cache(ids.len());
+    let mut oc = o.new_cache(ids.len());
+    for (i, ch) in ids[..from].chunks(512).enumerate().filter(|_| from > 0) {
+        r.feed_batch(ch, i * 512, &mut rc);
+        o.feed_batch(ch, i * 512, &mut oc);
+    }
+    for (pos, &t) in ids.iter().enumerate().skip(from) {
+        let lr = r.forward(t, pos, &mut rc);
+        let lo = o.forward(t, pos, &mut oc);
+        let (ar, ao) = (crate::argmax(&lr), crate::argmax(&lo));
+        a.positions += 1;
+        a.top1 += (ar == ao) as usize;
+        let k = kl(&lr, &lo);
+        a.max_kl = a.max_kl.max(k);
+        a.sum_kl += k;
+        for (x, y) in lr.iter().zip(&lo) {
+            a.max_abs = a.max_abs.max((x - y).abs());
+        }
+        if ar != ao {
+            a.flips.push(lr[ar as usize] - lr[ao as usize]);
+        }
+    }
+}
+
+/// ~n tokens of natural text, prose and code (README.md, then kv.rs).
+fn natural_ids(m: &Model, n: usize) -> Vec<u32> {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let text = ["README.md", "src/kv.rs", "src/chat.rs"]
+        .iter()
+        .map(|f| std::fs::read_to_string(dir.join(f)).unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut ids = crate::tokenizer::Tokenizer::from_gguf(m).encode(&text);
+    assert!(ids.len() >= n, "{} tokens of text", ids.len());
+    ids.truncate(n);
+    ids
+}
+
+/// Reference `r` vs `o`: PROMPTS with 32 greedy steps each (r's picks fed
+/// to both); positions 0..near and long..long + far of natural text,
+/// teacher-forced.
+fn kv_compare<R: Lm, O: Lm>(
+    r: &R,
+    o: &O,
+    m: &Model,
+    near: usize,
+    long: usize,
+    far: usize,
+) -> [Agree; 3] {
+    let tok = crate::tokenizer::Tokenizer::from_gguf(m);
+    let mut a: [Agree; 3] = Default::default();
+    for p in PROMPTS {
+        compare(r, o, &tok.encode(p), 32, &mut a[0]);
+    }
+    let ids = natural_ids(m, long + far);
+    compare_forced(r, o, &ids[..near], 0, &mut a[1]);
+    compare_forced(r, o, &ids, long, &mut a[2]);
+    a
+}
+
+/// q8 (group 0 = head_dim, or 32) vs f16 caches on one GPU model
+/// (`kv_compare`).
+fn q8_vs_f16(
+    net: &CudaQwen2,
+    m: &Model,
+    group: usize,
+    near: usize,
+    long: usize,
+    far: usize,
+) -> [Agree; 3] {
+    let f16 = KvNet(net, CacheKv::F16);
+    let q8 = KvNet(net, CacheKv::Q8 { group });
+    kv_compare(&f16, &q8, m, near, long, far)
+}
+
+/// The q8 cache (per-row scales, key shift) against the f16 one, both on
+/// the GPU: PROMPTS (32 greedy steps each) and natural text teacher-forced
+/// at positions 0..300 and 2048..2304. Measured (NOTES), mean KL prompts /
+/// text near / text far: 0.5B 1.4e-2 / 1.0e-2 / 6.4e-3, 1.5B 1.3e-2 / 9.8e-3
+/// / 7.2e-3; the CPU's own two kernel sets differ by 2.8e-3 / 3.0e-3 /
+/// 2.5e-3 (0.5B) and 7.8e-3 / 8.5e-3 / 6.1e-3, top-1 down to 93.7% (1.5B)
+/// there. Without the key shift q8 gives 2.8e-2 to 7.6e-2, a broken kernel
+/// ~1. Asserted: text windows mean KL <= 1.5e-2 and top-1 >= 90%; prompts
+/// mean KL <= 3e-2; any position KL < 2 (gross bugs).
+/// 0.5B is the sensitive one (one fast-rotating K bias pair of |b| ~ 47 no
+/// shift can remove); 1.5B and 7B sit at the CPU-vs-CPU level.
+fn q8_accuracy(m: &Model, name: &str) {
+    let g = crate::testutil::gpu().unwrap();
+    let km = Kernels::module(&g).unwrap();
+    let net = CudaQwen2::new(&g, &km, m, 2400).unwrap();
+    let a = q8_vs_f16(&net, m, 0, 300, 2048, 256);
+    for (w, what) in a.iter().zip(["prompts", "text 0..300", "text 2048+256"]) {
+        report(&format!("{name} q8 vs f16 {what}"), w);
+        assert!(w.max_kl < 2.0, "{name} {what}: max KL {}", w.max_kl);
+    }
+    assert!(
+        a[0].sum_kl <= 3e-2 * a[0].positions as f64,
+        "{name} prompts: mean KL"
+    );
+    for w in &a[1..] {
+        assert!(
+            w.sum_kl <= 1.5e-2 * w.positions as f64,
+            "{name} text: mean KL"
+        );
+        assert!(
+            w.top1 * 100 >= 90 * w.positions,
+            "{name} text: top-1 {}",
+            w.top1
+        );
+    }
+    let tok = crate::tokenizer::Tokenizer::from_gguf(m);
+    continuations_with(
+        &KvNet(&net, CacheKv::F16),
+        &KvNet(&net, CacheKv::Q8 { group: 0 }),
+        &tok,
+        &format!("{name} q8 vs f16"),
+        f32::INFINITY,
+    );
+}
+
+#[test]
+fn gpu_q8_kv_close_to_f16_0_5b() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = crate::testutil::model() else {
+        return;
+    };
+    q8_accuracy(&m, "0.5B");
+}
+
+#[test]
+fn gpu_q8_kv_close_to_f16_1_5b() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = model_at("models/qwen2.5-1.5b-instruct-q4_k_m.gguf") else {
+        return;
+    };
+    q8_accuracy(&m, "1.5B");
+}
+
+/// Measurement (not a check; `--ignored`, the model from AXON_TEST_MODEL):
+/// q8 and q8/32 vs f16 (GPU), next to f16 GPU vs CPU and the CPU's per-row
+/// kernels vs its default ones (its own noise; AXON_Q8_CPU=0 skips the CPU),
+/// short prompts and at AXON_Q8_LONG (default 2048) tokens of text.
+#[test]
+#[ignore]
+fn cuda_kv_q8_accuracy() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = crate::testutil::model_with(Some(false)) else {
+        return;
+    };
+    let long: usize = std::env::var("AXON_Q8_LONG").map_or(2048, |v| v.parse().unwrap());
+    let km = Kernels::module(&g).unwrap();
+    let net = CudaQwen2::new(&g, &km, &m, long + 300).unwrap();
+    let name = crate::testutil::model_path().unwrap();
+    let name = name.file_name().unwrap().to_string_lossy();
+    let rep3 = |what: &str, a: &[Agree; 3]| {
+        report(&format!("{name} {what} prompts"), &a[0]);
+        report(&format!("{name} {what} text 0..300"), &a[1]);
+        report(&format!("{name} {what} text {long}+256"), &a[2]);
+    };
+    for group in [0, 32] {
+        rep3(
+            &format!("q8/{group} vs f16"),
+            &q8_vs_f16(&net, &m, group, 300, long, 256),
+        );
+    }
+    let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
+    for group in [0, 32] {
+        continuations_with(
+            &KvNet(&net, CacheKv::F16),
+            &KvNet(&net, CacheKv::Q8 { group }),
+            &tok,
+            &format!("{name} q8/{group} vs f16"),
+            f32::INFINITY,
+        );
+    }
+    if std::env::var("AXON_Q8_CPU").is_ok_and(|v| v == "0") {
+        return;
+    }
+    let rows = Qwen2::new_with(&m, false);
+    let cpu = Qwen2::new(&m);
+    continuations_with(
+        &cpu,
+        &rows,
+        &tok,
+        &format!("{name} cpu rows vs cpu"),
+        f32::INFINITY,
+    );
+    rep3(
+        "cpu rows vs cpu",
+        &kv_compare(&cpu, &rows, &m, 300, long, 256),
+    );
+    if std::env::var("AXON_Q8_CPU").is_ok_and(|v| v == "rows") {
+        return;
+    }
+    rep3(
+        "gpu f16 vs cpu",
+        &kv_compare(&cpu, &KvNet(&net, CacheKv::F16), &m, 300, long, 256),
+    );
+}
+
+/// The q8 decode attention (attn_split_q8*, + attn_combine) == an f64
+/// reference on the dequantized cache (d * q per value), the new token's
+/// row stored by the kernel itself from f32 (kf) by `q8_ref`'s rule: both
+/// head sizes and scale groups, single and many tiles and splits.
+#[test]
+fn gpu_q8_attention_matches_reference() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let fc = km.function("attn_combine").unwrap();
+    let mut rng = Rng(777);
+    for (nh, nkv, hd) in [(14, 2, 64), (28, 4, 128), (40, 8, 128)] {
+        let (dim, kvd) = (nh * hd, nkv * hd);
+        for group in [hd, 32] {
+            let q8n = if group == hd { "q8" } else { "q8g32" };
+            let fs = km.function(&format!("attn_split_{q8n}_{hd}")).unwrap();
+            for (np, max_split) in [(1, 23), (7, 46), (129, 23), (1000, 4), (4099, 46)] {
+                let q = rng.vec(dim, 1.0);
+                // Keys with a few large channels (as Qwen's), values O(1).
+                let mut k = rng.vec(np * kvd, 2.0);
+                for (i, x) in k.iter_mut().enumerate() {
+                    if i % hd == 3 || i % hd == hd / 2 + 3 {
+                        *x *= 20.0;
+                    }
+                }
+                let v = rng.vec(np * kvd, 1.0);
+                // Rows 0..np - 1 quantized here; row np - 1 by the kernel.
+                let quant = |x: &[f32]| {
+                    let (mut qs, mut ds) = (Vec::new(), Vec::new());
+                    for c in x.chunks(group) {
+                        let (qq, d) = q8_ref(c);
+                        qs.extend(qq.iter().map(|&b| b as u8));
+                        ds.push(d);
+                    }
+                    (qs, ds)
+                };
+                let (kq, ks) = quant(&k);
+                let (vq, vs) = quant(&v);
+                let deq =
+                    |qs: &[u8], ds: &[f32], i: usize| ds[i / group] as f64 * qs[i] as i8 as f64;
+                let up8 = |b: &[u8], new: bool| {
+                    let mut b = b.to_vec();
+                    if new {
+                        b[(np - 1) * kvd..].fill(0x55); // the kernel writes these
+                    }
+                    g.upload(&b).unwrap()
+                };
+                let (kb, vb) = (up8(&kq, true), up8(&vq, true));
+                let (ksb, vsb) = (g.upload(&ks).unwrap(), g.upload(&vs).unwrap());
+                let mut kf = k[(np - 1) * kvd..].to_vec();
+                kf.extend_from_slice(&v[(np - 1) * kvd..]);
+                let (qb, kfb) = (g.upload(&q).unwrap(), g.upload(&kf).unwrap());
+                let params = g.upload(&[0u32, (np - 1) as u32, 0, 0]).unwrap();
+                let po = g.alloc(nh * max_split * hd * 4).unwrap();
+                let pml = g.alloc(nh * max_split * 2 * 4).unwrap();
+                let act = g.alloc(act_bytes(dim)).unwrap();
+                let out = g.alloc(dim * 4).unwrap();
+                // SAFETY: decode.cu's signatures; the cache holds np rows
+                // (int8) and their scales, kf 2 kv_dim floats.
+                unsafe {
+                    g.launch(
+                        &fs,
+                        (nkv as u32, max_split as u32, 1),
+                        (ATT_TILE as u32, 1, 1),
+                        0,
+                        &[
+                            qb.arg(),
+                            kb.arg(),
+                            vb.arg(),
+                            ksb.arg(),
+                            vsb.arg(),
+                            kfb.arg(),
+                            params.arg(),
+                            Arg::I32(nh as i32),
+                            Arg::I32(nkv as i32),
+                            Arg::F32(1.0 / (hd as f32).sqrt()),
+                            Arg::I32(max_split as i32),
+                            po.arg(),
+                            pml.arg(),
+                            Arg::Ptr(0),
+                        ],
+                    )
+                    .unwrap();
+                    g.launch(
+                        &fc,
+                        (dim.div_ceil(256) as u32, 1, 1),
+                        (256, 1, 1),
+                        0,
+                        &[
+                            po.arg(),
+                            pml.arg(),
+                            params.arg(),
+                            Arg::I32(dim as i32),
+                            Arg::I32(hd as i32),
+                            Arg::I32(max_split as i32),
+                            Arg::I32(dim.is_multiple_of(256) as i32),
+                            act.arg(),
+                            out.arg(),
+                        ],
+                    )
+                    .unwrap();
+                }
+                let got: Vec<f32> = out.read().unwrap();
+                // The kernel's store of row np - 1 is the rule's.
+                let kgot: Vec<u8> = kb.read().unwrap();
+                let vsgot: Vec<f32> = vsb.read().unwrap();
+                assert_eq!(kgot, kq, "{q8n} hd {hd} np {np}: stored keys");
+                assert_eq!(
+                    bits(&vsgot),
+                    bits(&vs),
+                    "{q8n} hd {hd} np {np}: stored value scales"
+                );
+                let gq = nh / nkv;
+                let mut de = 0f64;
+                for h in 0..nh {
+                    let kvh = h / gq;
+                    let s: Vec<f64> = (0..np)
+                        .map(|t| {
+                            (0..hd)
+                                .map(|d| {
+                                    q[h * hd + d] as f64 * deq(&kq, &ks, t * kvd + kvh * hd + d)
+                                })
+                                .sum::<f64>()
+                                / (hd as f64).sqrt()
+                        })
+                        .collect();
+                    let m = s.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                    let p: Vec<f64> = s.iter().map(|x| (x - m).exp()).collect();
+                    let l: f64 = p.iter().sum();
+                    for d in 0..hd {
+                        let e: f64 = (0..np)
+                            .map(|t| p[t] * deq(&vq, &vs, t * kvd + kvh * hd + d))
+                            .sum::<f64>()
+                            / l;
+                        de = de.max((got[h * hd + d] as f64 - e).abs());
+                    }
+                }
+                // As gpu_attention_matches_cpu: outputs O(1), f32 sums.
+                assert!(
+                    de < 2e-5,
+                    "{q8n} heads {nh}/{nkv} hd {hd} np {np}: vs f64 {de:e}"
+                );
             }
         }
     }

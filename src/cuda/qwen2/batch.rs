@@ -312,8 +312,8 @@ impl<'g> CudaQwen2<'g> {
     ) -> Result<(), String> {
         let nb = input.len(self.dim);
         let (dim, hd, kvd, ffn) = (self.dim, self.head_dim, self.kv_dim(), self.ffn);
-        let mc = c.max_ctx;
-        let kv_off = |l: usize, v: bool| (2 * l + v as usize) * mc * kvd * 2;
+        let kvas: Vec<Vec<Arg>> = (0..self.layers.len()).map(|l| self.kv_args(c, l)).collect();
+        let mode = c.mode;
         let b = c.b.as_mut().expect("a cache with batch scratch");
         assert!(nb > 0 && nb <= b.max);
         match input {
@@ -418,7 +418,12 @@ impl<'g> CudaQwen2<'g> {
                     qkvw,
                 )?;
                 on("qkv")?;
-                let items = dim / 2 + kvd / 2 + kvd;
+                let kva = &kvas[li];
+                // q8: rope_kv_b does the queries alone (null cache), kv_q8_b
+                // the keys and values.
+                let q8 = matches!(mode, CacheKv::Q8 { .. });
+                let items = if q8 { dim / 2 } else { dim / 2 + kvd / 2 + kvd };
+                let (kc, vc) = if q8 { (null, null) } else { (kva[0], kva[1]) };
                 g.launch(
                     &bf.rope_kv,
                     (items.div_ceil(128) as u32, nbu, 1),
@@ -432,39 +437,66 @@ impl<'g> CudaQwen2<'g> {
                         Arg::I32(start as i32),
                         b.rope.arg(),
                         b.q.arg(),
-                        c.kv.arg_at(kv_off(li, false)),
-                        c.kv.arg_at(kv_off(li, true)),
+                        kc,
+                        vc,
                     ],
                 )?;
+                if q8 {
+                    let mut args = vec![
+                        b.qkv.arg(),
+                        Arg::I32(dim as i32),
+                        Arg::I32(kvd as i32),
+                        Arg::I32(start as i32),
+                        b.rope.arg(),
+                    ];
+                    args.extend_from_slice(kva);
+                    args.push(bias(l.ksh));
+                    g.launch(
+                        &self.q8_fns(mode).store_b,
+                        (self.n_kv_heads as u32, nbu, 1),
+                        (128, 1, 1),
+                        0,
+                        &args,
+                    )?;
+                }
                 on("rope_kv")?;
                 for z0 in (0..nb).step_by(ATT_SUB) {
                     let nz = (nb - z0).min(ATT_SUB) as u32;
                     // Splits of at most 32 positions for every query here:
                     // a warp each (same bits, prefill.cu attn_warp_bt).
                     let short = start + z0 + nz as usize <= 32 * self.max_split;
-                    let (f, grid, block) = if short {
-                        (&bf.attn_warp, self.max_split.div_ceil(4) as u32, 128)
-                    } else {
-                        (&bf.attn_split, self.max_split as u32, ATT_TILE as u32)
+                    let (f, grid, block) = match (short, q8) {
+                        (true, false) => (&bf.attn_warp, self.max_split.div_ceil(4) as u32, 128),
+                        (false, false) => (&bf.attn_split, self.max_split as u32, ATT_TILE as u32),
+                        (true, true) => (
+                            &self.q8_fns(mode).attn_warp_b,
+                            self.max_split.div_ceil(4) as u32,
+                            128,
+                        ),
+                        (false, true) => (
+                            &self.q8_fns(mode).attn_split_b,
+                            self.max_split as u32,
+                            ATT_TILE as u32,
+                        ),
                     };
+                    let mut args = vec![b.q.arg()];
+                    args.extend_from_slice(kva);
+                    args.extend_from_slice(&[
+                        Arg::I32(start as i32),
+                        Arg::I32(z0 as i32),
+                        Arg::I32(self.n_heads as i32),
+                        Arg::I32(self.n_kv_heads as i32),
+                        Arg::F32(1.0 / (hd as f32).sqrt()),
+                        Arg::I32(self.max_split as i32),
+                        b.part_o.arg(),
+                        b.part_ml.arg(),
+                    ]);
                     g.launch(
                         f,
                         (self.n_kv_heads as u32, grid, nz),
                         (block, 1, 1),
                         0,
-                        &[
-                            b.q.arg(),
-                            c.kv.arg_at(kv_off(li, false)),
-                            c.kv.arg_at(kv_off(li, true)),
-                            Arg::I32(start as i32),
-                            Arg::I32(z0 as i32),
-                            Arg::I32(self.n_heads as i32),
-                            Arg::I32(self.n_kv_heads as i32),
-                            Arg::F32(1.0 / (hd as f32).sqrt()),
-                            Arg::I32(self.max_split as i32),
-                            b.part_o.arg(),
-                            b.part_ml.arg(),
-                        ],
+                        &args,
                     )?;
                     on("attn")?;
                     g.launch(

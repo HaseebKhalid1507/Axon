@@ -24,7 +24,7 @@
 //! runs; waking them costs ~50 us once per token. Overlapping the halves is
 //! left for later (PR A streams the CPU layers' weights instead).
 
-use crate::cuda::qwen2::{CudaCache, CudaQwen2};
+use crate::cuda::qwen2::{CacheKv, CudaCache, CudaQwen2};
 use crate::cuda::{Gpu, Module};
 use crate::gguf::{Model, Tensor};
 use crate::lm::Lm;
@@ -68,7 +68,8 @@ fn block_count(m: &Model) -> Result<usize, String> {
 }
 
 /// Most layers the GPU can take (the last ones, plus the head) with room
-/// for a `max_ctx`-token cache and `DESKTOP_MARGIN` to spare out of `free`
+/// for a `max_ctx`-token cache of type `kv` (q8's smaller cache leaves room
+/// for more layers) and `DESKTOP_MARGIN` to spare out of `free`
 /// bytes of VRAM (the caller's `gpu.info()?.free_bytes`): 0 if not even
 /// one fits. The VRAM a split needs only shrinks as layers move to the CPU,
 /// so a binary search over `CudaQwen2::vram_need` finds it.
@@ -77,11 +78,12 @@ pub fn auto_gpu_layers(
     module: &Module,
     m: &Model,
     max_ctx: usize,
+    kv: CacheKv,
     free: u64,
 ) -> Result<usize, String> {
     let n = block_count(m)?;
     let fits = |g: usize| -> Result<bool, String> {
-        let need = CudaQwen2::vram_need(gpu, module, m, max_ctx, n - g)?;
+        let need = CudaQwen2::vram_need(gpu, module, m, max_ctx, n - g, kv)?;
         Ok(need + DESKTOP_MARGIN <= free)
     };
     let (mut lo, mut hi) = (0, n); // fits(lo) (no GPU layers); find the largest
@@ -100,7 +102,8 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
     /// The model with its last `gpu_layers` layers (clamped to n) and head
     /// on the GPU (`dev`, needed unless gpu_layers is 0), the rest on the
     /// CPU (repacked unless AXON_REPACK=0, as `Qwen2::new`), with room for
-    /// a `max_ctx`-token cache. Each half loads only its own weights, and
+    /// a `max_ctx`-token cache (the GPU half's of type `kv`; the CPU half's
+    /// is f16 or f32 as AXON_KV says). Each half loads only its own weights, and
     /// the GPU's are handed back to `m` once uploaded (`Model::release`;
     /// on a copy of the file they can't be read again).
     pub fn new(
@@ -108,6 +111,7 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
         m: &'m Model,
         max_ctx: usize,
         gpu_layers: usize,
+        kv: CacheKv,
     ) -> Result<HybridQwen2<'m, 'g>, String> {
         let n = block_count(m)?;
         let g = gpu_layers.min(n);
@@ -125,7 +129,7 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
                         m.release(t);
                     }
                 };
-                let net = CudaQwen2::new_layers(gpu, module, m, max_ctx, k, &mut uploaded)
+                let net = CudaQwen2::new_layers(gpu, module, m, max_ctx, k, kv, &mut uploaded)
                     .map_err(|e| {
                         format!("{g}/{n} layers on the GPU: {e}, or fewer --gpu-layers")
                     })?;
@@ -168,6 +172,12 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
             self.n_layers,
             self.vram_bytes(max_ctx) as f64 / GIB
         )
+    }
+
+    /// The GPU layers' cache type (`CudaQwen2::kv_name`; the CPU layers'
+    /// is f16 or f32 as AXON_KV says).
+    pub fn kv_name(&self) -> &'static str {
+        self.gpu.as_ref().map_or("f16", |g| g.kv_name())
     }
 
     /// Both halves, each with its cache.

@@ -7,10 +7,11 @@
 //! inside (one match per token; the CPU's results are the same bits as
 //! calling it directly).
 
-use crate::cuda::qwen2::{CudaCache, CudaQwen2};
+use crate::cuda::qwen2::{CacheKv, CudaCache, CudaQwen2};
 use crate::cuda::{Gpu, Kernels, Module};
 use crate::gguf::Model;
 use crate::hybrid::{HybridCache, HybridQwen2};
+use crate::kv::KvType;
 use crate::model::{KvCache, Qwen2};
 
 /// A causal language model with a KV cache of its own type. Positions are
@@ -121,20 +122,29 @@ pub enum BackendCache {
 
 impl<'a> Backend<'a> {
     /// The model of `m` on `device`, with room for a `max_ctx`-token cache
-    /// (checked up front on the GPU). On CUDA, `gpu_layers` Some(g) splits
-    /// the model, the last g layers on the GPU (`HybridQwen2`); None puts
-    /// it all on the GPU if it fits, else as many of the last layers as fit
-    /// (`hybrid::auto_gpu_layers`, told on stderr). Err says why CUDA
-    /// can't be used. Some(0) is not a split: the CLI maps it to
-    /// `Device::Cpu` before loading (a CPU model copies the file, a GPU one
-    /// maps it).
+    /// of type `kv` (checked up front on the GPU). On CUDA, `gpu_layers`
+    /// Some(g) splits the model, the last g layers on the GPU
+    /// (`HybridQwen2`, its GPU half's cache of type `kv`, the CPU half's
+    /// f16/f32 as AXON_KV says); None puts it all on the GPU if it fits
+    /// (with `fit`, a cache may get less than max_ctx there: `ctx`), else
+    /// as many of the last layers as fit with a max_ctx cache of type `kv`
+    /// (`hybrid::auto_gpu_layers`, told on stderr). Err says why CUDA can't
+    /// be used, or that the CPU has no q8 cache. Some(0) is not a split: the
+    /// CLI maps it to `Device::Cpu` before loading (a CPU model copies the
+    /// file, a GPU one maps it).
     pub fn new(
         m: &'a Model,
         device: Device,
         max_ctx: usize,
         gpu_layers: Option<usize>,
+        kv: KvType,
+        fit: bool,
     ) -> Result<Backend<'a>, String> {
         if device == Device::Cpu {
+            // The CPU's f16/f32 choice is AXON_KV's (kv::use_f32).
+            if kv == KvType::Q8 {
+                return Err("the q8 KV cache is cuda-only (--device cuda)".into());
+            }
             return Ok(Backend::Cpu(Qwen2::new(m)));
         }
         if gpu_layers == Some(0) {
@@ -142,13 +152,18 @@ impl<'a> Backend<'a> {
         }
         let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open()?));
         let module: &'static Module<'static> = Box::leak(Box::new(Kernels::module(gpu)?));
+        // f32 isn't offered on the GPU: f16 there (as always).
+        let ckv = match kv {
+            KvType::Q8 => CacheKv::Q8 { group: 0 },
+            _ => CacheKv::F16,
+        };
         let g = match gpu_layers {
             Some(g) => g,
-            None => match CudaQwen2::new(gpu, module, m, max_ctx) {
+            None => match CudaQwen2::with_kv(gpu, module, m, max_ctx, ckv, fit) {
                 Ok(n) => return Ok(Backend::Cuda(Box::new(n))),
                 Err(e) => {
                     let free = gpu.info()?.free_bytes;
-                    let g = crate::hybrid::auto_gpu_layers(gpu, module, m, max_ctx, free)?;
+                    let g = crate::hybrid::auto_gpu_layers(gpu, module, m, max_ctx, ckv, free)?;
                     if g == 0 {
                         return Err(format!("{e}; not even one layer fits"));
                     }
@@ -156,9 +171,18 @@ impl<'a> Backend<'a> {
                 }
             },
         };
-        let h = HybridQwen2::new(Some((gpu, module)), m, max_ctx, g)?;
+        let h = HybridQwen2::new(Some((gpu, module)), m, max_ctx, g, ckv)?;
         eprintln!("split:       {}", h.describe(max_ctx));
         Ok(Backend::Hybrid(Box::new(h)))
+    }
+
+    /// The context the cache was planned for: max_ctx, or less on the GPU
+    /// with `fit` (never for a split: it has the whole max_ctx).
+    pub fn ctx(&self, max_ctx: usize) -> usize {
+        match self {
+            Backend::Cpu(_) | Backend::Hybrid(_) => max_ctx,
+            Backend::Cuda(n) => n.ctx,
+        }
     }
 }
 
