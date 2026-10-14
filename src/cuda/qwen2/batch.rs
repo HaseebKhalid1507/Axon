@@ -7,12 +7,11 @@
 //! the batch size or the token's place in it; prefill.cu's header says how.
 //! So chat's cache reuse equals a fresh prefill, and drafting is lossless.
 //!
-//! Products of more than `SMALL` tokens run on int8 tensor cores (gemm_*,
+//! Products of more than `SMALL` tokens run on int8 tensor cores (gemm2_*,
 //! sm_80+); smaller ones (the verify pass of a draft) too, by gemvm_*, which
 //! reads the weights once for the batch like a decode step. On GPUs without
 //! int8 mma (sm < 80) gemvn, the decode GEMV with a token loop (dp4a), does
-//! every batch, 16 tokens per pass over the weights: correct, not fast (as
-//! for the rare rows too wide for the GEMMs).
+//! every batch, 16 tokens per pass over the weights: correct, not fast.
 
 use super::*;
 
@@ -46,39 +45,35 @@ pub(super) struct BatchFns<'m> {
     gemvn16: Func<'m>,
     /// gemvm8_*, gemvm16_* per type (as `gemm`); None without tensor cores.
     gemvm: Option<[[Func<'m>; 4]; 2]>,
-    /// Per type (Q4_K, Q6_K, Q8_0, Q5_0): the GEMM for rows of up to 16
-    /// blocks (gemms*: K-quants without running sums) and for wider ones;
-    /// None without int8 tensor cores.
-    gemm: Option<[GemmFns<'m>; 4]>,
+    /// Per type (Q4_K, Q6_K, Q8_0, Q5_0): gemm2_* (128 tokens per block)
+    /// and gemm2s_* (64); None without int8 tensor cores.
+    gemm: Option<[[Func<'m>; 2]; 4]>,
+    /// SMs of the GPU (the GEMM tile choice).
+    sms: usize,
 }
 
 impl<'m> BatchFns<'m> {
-    pub(super) fn new(module: &'m Module<'m>, head_dim: usize) -> Result<BatchFns<'m>, String> {
-        // Measured best (cuda_gemm_bench, 7B and 0.5B shapes): 32 tokens per
-        // block (two blocks per SM) except Q4_K's wide rows (64).
+    pub(super) fn new(
+        module: &'m Module<'m>,
+        head_dim: usize,
+        sms: usize,
+    ) -> Result<BatchFns<'m>, String> {
         let gemm = if module.mma() {
-            let f = |n: &str| -> Result<(Func<'m>, usize, usize), String> {
-                let f = module.function(n)?;
-                let (bn, sm) = if n.starts_with("gemm_") {
-                    (GM_BN, GEMM_SMEM)
-                } else {
-                    (GM1_BN, GEMM1_SMEM)
-                };
-                f.set_max_shared(sm)?;
-                Ok((f, bn, sm))
-            };
-            let t = |short: &str, wide: &str| -> Result<GemmFns<'m>, String> {
-                Ok(GemmFns {
-                    short: f(short)?,
-                    wide: f(wide)?,
-                })
-            };
-            Some([
-                t("gemms1_q4_k", "gemm_q4_k")?,
-                t("gemms1_q6_k", "gemm1_q6_k")?,
-                t("gemm1_q8_0", "gemm1_q8_0")?,
-                t("gemm1_q5_0", "gemm1_q5_0")?,
-            ])
+            let mut fs = Vec::new();
+            for (qt, tn) in [
+                (Q4_K, "q4_k"),
+                (Q6_K, "q6_k"),
+                (Q8_0, "q8_0"),
+                (Q5_0, "q5_0"),
+            ] {
+                let big = module.function(&format!("gemm2_{tn}"))?;
+                big.set_max_shared(gemm2_smem(qt, 128, 2))?;
+                let small = module.function(&format!("gemm2s_{tn}"))?;
+                small.set_max_shared(gemm2_smem(qt, 64, 3))?;
+                fs.push([big, small]);
+            }
+            let f: [[Func<'m>; 2]; 4] = fs.try_into().map_err(|_| "gemm2 kernels")?;
+            Some(f)
         } else {
             None
         };
@@ -113,14 +108,9 @@ impl<'m> BatchFns<'m> {
             gemvn16: module.function("gemvn_2x16")?,
             gemvm,
             gemm,
+            sms,
         })
     }
-}
-
-/// The two GEMMs of a type, with their tokens per block and shared memory.
-pub(super) struct GemmFns<'m> {
-    short: (Func<'m>, usize, usize),
-    wide: (Func<'m>, usize, usize),
 }
 
 /// A cache's scratch for batched passes of up to `max` tokens.
@@ -229,23 +219,22 @@ impl<'g> CudaQwen2<'g> {
             Q8_0 => 2,
             _ => 3,
         };
-        // The GEMMs' block sequence table holds 1024 blocks (prefill.cu
-        // GM_MAXSEQ): wider 32-value-block rows (K > 32768) take gemvm for
-        // nb <= SMALL as usual, and gemvn (dp4a, slow) for bigger batches.
-        let fits = mt.cols / if ti < 2 { 256 } else { 32 } <= 1024;
         // SAFETY: the caller's contract; the matrix is whole in the arena.
         unsafe {
             match (&bf.gemm, &bf.gemvm) {
-                (Some(fs), _) if nb > SMALL && fits => {
-                    // K-quant rows of <= 16 blocks: each GEMV lane group has
-                    // at most one block (prefill.cu gemms*).
-                    let short = mt.cols <= 16 * 256;
-                    let (f, bn, sm) = if short { &fs[ti].short } else { &fs[ti].wide };
+                (Some(fs), _) if nb > SMALL => {
+                    // Measured (cuda_gemm_bench): Q4_K is fastest in 64 x 64
+                    // tiles (three stages, one barrier each) at every size;
+                    // the register-staged types in 64 x 128, given at least
+                    // ~1.5 blocks per SM.
+                    let ctas = nb.div_ceil(128) * mt.rows.div_ceil(G2_BM);
+                    let big = mt.qt != Q4_K && 2 * ctas >= 3 * bf.sms;
+                    let (bn, st) = if big { (128, 2) } else { (64, 3) };
                     self.gpu.launch(
-                        f,
-                        (nb.div_ceil(*bn) as u32, mt.rows.div_ceil(GM_BM) as u32, 1),
+                        &fs[ti][!big as usize],
+                        (nb.div_ceil(bn) as u32, mt.rows.div_ceil(G2_BM) as u32, 1),
                         (256, 1, 1),
-                        *sm as u32,
+                        gemm2_smem(mt.qt, bn, st) as u32,
                         &common,
                     )
                 }

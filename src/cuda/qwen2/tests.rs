@@ -1537,29 +1537,60 @@ fn gpu_batched(
     ];
     // SAFETY: prefill.cu's signatures; act holds nb tokens of cols inputs,
     // out rows * nb floats.
+    unsafe { launch_product(g, &f, kernel, qt, rows, nb, &common) };
+    g.sync().unwrap();
+    out.read().unwrap()
+}
+
+/// Launch product kernel `kernel` (gemv_ref, gemvn_*, gemvm*, gemm*) with
+/// its grid and shared memory; `common` its arguments after the type.
+///
+/// # Safety
+/// `common` matches prefill.cu's signature for the kernel and the buffers
+/// it points to hold what the kernel reads and writes.
+unsafe fn launch_product(
+    g: &Gpu,
+    f: &Func,
+    kernel: &str,
+    qt: u32,
+    rows: usize,
+    nb: usize,
+    common: &[Arg],
+) {
+    let with_qt = || {
+        let mut args = vec![Arg::I32(qt as i32)];
+        args.extend_from_slice(common);
+        args
+    };
+    // SAFETY: the caller's.
     unsafe {
-        if kernel.starts_with("gemvm") {
+        if kernel == "gemv_ref" {
+            let args = with_qt();
             g.launch(
-                &f,
-                (rows.div_ceil(16) as u32, 1, 1),
+                f,
+                (rows.div_ceil(128) as u32, nb as u32, 1),
                 (128, 1, 1),
                 0,
-                &common,
+                &args,
             )
             .unwrap();
-        } else if kernel.starts_with("gemm") {
-            let (bn, sm) = if kernel.starts_with("gemm1") || kernel.starts_with("gemms1") {
-                (GM1_BN, GEMM1_SMEM)
+        } else if kernel.starts_with("gemvm") {
+            g.launch(f, (rows.div_ceil(16) as u32, 1, 1), (128, 1, 1), 0, common)
+                .unwrap();
+        } else if kernel.starts_with("gemm2") {
+            let (bn, st) = if kernel.starts_with("gemm2s") {
+                (64, 3)
             } else {
-                (GM_BN, GEMM_SMEM)
+                (128, 2)
             };
+            let sm = gemm2_smem(qt, bn, st);
             f.set_max_shared(sm).unwrap();
             g.launch(
-                &f,
-                (nb.div_ceil(bn) as u32, rows.div_ceil(GM_BM) as u32, 1),
+                f,
+                (nb.div_ceil(bn) as u32, rows.div_ceil(G2_BM) as u32, 1),
                 (256, 1, 1),
                 sm as u32,
-                &common,
+                common,
             )
             .unwrap();
         } else {
@@ -1568,10 +1599,9 @@ fn gpu_batched(
             } else {
                 (2, 16)
             };
-            let mut args = vec![Arg::I32(qt as i32)];
-            args.extend_from_slice(&common);
+            let args = with_qt();
             g.launch(
-                &f,
+                f,
                 (rows.div_ceil(r) as u32, nb.div_ceil(t) as u32, 1),
                 (GEMV_THREADS, 1, 1),
                 0,
@@ -1580,8 +1610,6 @@ fn gpu_batched(
             .unwrap();
         }
     }
-    g.sync().unwrap();
-    out.read().unwrap()
 }
 
 /// prefill.cu's name for a type.
@@ -1591,16 +1619,6 @@ fn type_name(qt: u32) -> &'static str {
         Q6_K => "q6_k",
         Q8_0 => "q8_0",
         _ => "q5_0",
-    }
-}
-
-/// The GEMMs batch.rs uses for a type: (wide rows, K-quant rows of <= 16 blocks).
-fn gemm_names(qt: u32) -> (String, Option<String>) {
-    let tn = type_name(qt);
-    match qt {
-        Q4_K => ("gemm_q4_k".into(), Some("gemms1_q4_k".into())),
-        Q6_K => ("gemm1_q6_k".into(), Some("gemms1_q6_k".into())),
-        _ => (format!("gemm1_{tn}"), None),
     }
 }
 
@@ -1649,15 +1667,14 @@ fn gpu_batched_products_match_gemv_bits() {
         "blk.0.ffn_gate.weight",
         "output.weight", // Q8_0
         // Synthetic: K-quant rows of fewer blocks than the GEMV's 16 lane
-        // groups (empty groups), and other widths.
+        // groups, and other widths.
         "synth Q4_K 768",
         "synth Q4_K 1536",
         "synth Q6_K 1536",
         "synth Q6_K 2304",
         "synth Q8_0 3584",
         "synth Q5_0 1536",
-        // The 7B's shapes: 14 blocks (no running sums), 74 (groups of 4-5
-        // blocks: running sums carried over several stages).
+        // The 7B's shapes: 14 blocks, 74.
         "synth Q4_K 3584",
         "synth Q4_K 18944",
         "synth Q6_K 3584",
@@ -1683,7 +1700,7 @@ fn gpu_batched_products_match_gemv_bits() {
             (qt, cols, rows, &m.tensor_data(t)[..rows * rb])
         };
         let w = g.upload(wd).unwrap();
-        for nb in [1usize, 6, 7, 8, 13, 64, 66, 77] {
+        for nb in [1usize, 6, 7, 8, 13, 64, 66, 77, 129] {
             let xs: Vec<Vec<f32>> = (0..nb)
                 .map(|i| rng.vec(cols, [1.0f32, 1e-3, 40.0][i % 3]))
                 .collect();
@@ -1711,11 +1728,7 @@ fn gpu_batched_products_match_gemv_bits() {
             let act = quantize_batch(&g, &km, &xs, cols);
             let mut kernels: Vec<String> = vec!["gemvn_2x8".into(), "gemvn_2x16".into()];
             if km.mma() {
-                let (wide, short) = gemm_names(qt);
-                kernels.push(wide);
-                if let Some(sh) = short.filter(|_| cols <= 16 * 256) {
-                    kernels.push(sh);
-                }
+                kernels.extend(gemm2_names(qt));
                 let tn = type_name(qt);
                 if nb <= 8 {
                     kernels.push(format!("gemvm8_{tn}"));
@@ -1749,6 +1762,101 @@ fn gpu_batched_products_match_gemv_bits() {
     }
 }
 
+/// Every product kernel against gemv_ref, the canonical order written out
+/// one thread per output: the decode GEMV (per token), gemvn, gemvm and
+/// the GEMMs, bit for bit, every weight type, random widths up to the 7B's
+/// 18944, odd row counts, batches around the tiles' sizes, all epilogues.
+#[test]
+fn gpu_products_match_reference_bits() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let mut rng = Rng(0x0dd5_eed5_2026_1014);
+    let mut cases: Vec<(u32, usize, usize)> = Vec::new();
+    for qt in [Q4_K, Q6_K, Q8_0, Q5_0] {
+        let vb = if qt == Q4_K || qt == Q6_K { 256 } else { 32 };
+        let mut widths = vec![256, 18944];
+        if vb == 32 {
+            widths.push(896);
+        }
+        for _ in 0..2 {
+            widths.push(vb * (1 + (rng.next() % (18944 / vb) as u64) as usize));
+        }
+        for (i, &cols) in widths.iter().enumerate() {
+            let rows = [333, 77, 129, 1001, 65][i % 5];
+            cases.push((qt, cols, rows));
+        }
+    }
+    for &(qt, cols, rows) in &cases {
+        let wd = synth_matrix(&mut rng, qt, rows, cols);
+        let w = g.upload(&wd).unwrap();
+        let tn = type_name(qt);
+        for nb in [1usize, 7, 16, 17, 100, 128, 129, 512] {
+            let xs: Vec<Vec<f32>> = (0..nb)
+                .map(|i| rng.vec(cols, [1.0f32, 1e-3, 40.0][i % 3]))
+                .collect();
+            let epi = match nb % 4 {
+                0 => Epi::default(),
+                1 => Epi {
+                    bias: Some(rng.vec(rows, 3.0)),
+                    init: None,
+                },
+                2 => Epi {
+                    bias: None,
+                    init: Some(rng.vec(rows, 5.0)),
+                },
+                _ => Epi {
+                    bias: Some(rng.vec(rows, 3.0)),
+                    init: Some(rng.vec(rows, 5.0)),
+                },
+            };
+            let act = quantize_batch(&g, &km, &xs, cols);
+            let want = gpu_batched(&g, &km, "gemv_ref", qt, &w, rows, cols, &act, nb, &epi);
+            let check = |k: &str, z: usize, got: &[f32]| {
+                if let Some(r) =
+                    (0..rows).find(|&r| got[r].to_bits() != want[z * rows + r].to_bits())
+                {
+                    panic!(
+                        "{tn} {cols}x{rows} {k} nb {nb} token {z} row {r}: {} vs ref {}",
+                        got[r],
+                        want[z * rows + r]
+                    );
+                }
+            };
+            // The decode GEMV, a few tokens.
+            for z in [0, nb / 2, nb - 1] {
+                for k in ["gemv", "gemv1"] {
+                    check(k, z, &gpu_gemv_epi(&g, &km, k, qt, &wd, cols, &xs[z], &epi));
+                }
+            }
+            let mut kernels: Vec<String> = vec!["gemvn_2x8".into(), "gemvn_2x16".into()];
+            if km.mma() {
+                if nb <= 8 {
+                    kernels.push(format!("gemvm8_{tn}"));
+                }
+                if nb <= 16 {
+                    kernels.push(format!("gemvm16_{tn}"));
+                }
+                kernels.extend(gemm2_names(qt));
+            }
+            for k in &kernels {
+                let got = gpu_batched(&g, &km, k, qt, &w, rows, cols, &act, nb, &epi);
+                for z in 0..nb {
+                    check(k, z, &got[z * rows..(z + 1) * rows]);
+                }
+            }
+        }
+        eprintln!("{tn} {cols} x {rows}: every kernel == gemv_ref");
+    }
+}
+
+/// The tensor-core GEMMs of a type (prefill.cu gemm2_*).
+fn gemm2_names(qt: u32) -> Vec<String> {
+    let tn = type_name(qt);
+    vec![format!("gemm2_{tn}"), format!("gemm2s_{tn}")]
+}
+
 /// Batched products' speed (best of N, events): tensor-core GEMM for
 /// prefill batches, gemvn for verify-sized ones, vs the GEMV's per-token
 /// time. `AXON_SKIP_GPU_TESTS` aside, run with --ignored.
@@ -1759,56 +1867,78 @@ fn cuda_gemm_bench() {
         return;
     };
     let km = Kernels::module(&g).unwrap();
-    for k in [
-        "gemm_q4_k",
-        "gemms1_q4_k",
-        "gemm1_q6_k",
-        "gemms1_q6_k",
-        "gemm1_q8_0",
-        "gemm1_q5_0",
+    let info = g.info().unwrap();
+    eprintln!(
+        "{} sm_{}{} {} SMs",
+        info.name, info.cc.0, info.cc.1, info.sms
+    );
+    let kernels_all = [
+        "gemm2_q4_k",
+        "gemm2s_q4_k",
+        "gemm2_q6_k",
+        "gemm2s_q6_k",
+        "gemm2_q8_0",
+        "gemm2_q5_0",
+        "gemm2s_q8_0",
+        "gemm2s_q5_0",
         "gemvn_2x8",
         "gemvm8_q4_k",
         "gemvm8_q6_k",
         "gemvm16_q4_k",
         "gemvm16_q6_k",
-    ] {
+    ];
+    for k in kernels_all {
+        if let Ok(f) = km.function(k) {
+            eprintln!("{k}: regs, local bytes {:?}", f.regs_local().unwrap());
+        }
+    }
+    // The int8 mma.sync ceiling: independent m16n8k32s, 4 blocks of 8 warps per SM.
+    if km.mma() {
+        let f = km.function("mma_peak").unwrap();
+        let o = g.alloc(4 * 4096).unwrap();
+        let (blocks, iters) = (4 * info.sms as usize, 4096usize);
+        let mut best = f64::INFINITY;
+        for _ in 0..5 {
+            let e0 = g.record().unwrap();
+            // SAFETY: mma_peak's signature; o has a slot per block.
+            unsafe {
+                g.launch(
+                    &f,
+                    (blocks as u32, 1, 1),
+                    (256, 1, 1),
+                    0,
+                    &[Arg::I32(iters as i32), o.arg()],
+                )
+                .unwrap();
+            }
+            let e1 = g.record().unwrap();
+            best = best.min(e0.ms_to(&e1).unwrap() as f64);
+        }
+        let macs = (blocks * 8 * iters * 8 * 16 * 8 * 32) as f64;
         eprintln!(
-            "{k}: regs, local bytes {:?}",
-            km.function(k).unwrap().regs_local().unwrap()
+            "mma_peak: {:.1} TMAC/s int8 (m16n8k32, {:.1} ms)",
+            macs / (best * 1e-3) / 1e12,
+            best
         );
     }
     let mut rng = Rng(7);
     let only = std::env::var("AXON_BENCH_ONLY").ok();
     for (what, qt, cols, rows) in [
         ("q/wo  Q4_K", Q4_K, 3584, 3584),
+        ("kv    Q4_K", Q4_K, 3584, 512),
         ("gate  Q4_K", Q4_K, 3584, 18944),
         ("down  Q4_K", Q4_K, 18944, 3584),
         ("down  Q6_K", Q6_K, 18944, 3584),
         ("0.5B ffn Q5_0", Q5_0, 896, 4864),
         ("0.5B q Q8_0", Q8_0, 896, 4864),
+        ("0.5B down Q4_K", Q4_K, 4864, 896),
+        ("1.5B gate Q4_K", Q4_K, 1536, 8960),
     ] {
         if only.as_deref().is_some_and(|o| !what.contains(o)) {
             continue;
         }
         let rb = quant::row_bytes(qt, cols);
-        let mut w = vec![0u8; rb * rows];
-        for x in w.iter_mut() {
-            *x = rng.next() as u8;
-        }
-        // Sane scales: f16 1/1024 in every block's d (and dmin).
-        let (bb, vb) = match qt {
-            Q4_K => (144, 256),
-            Q6_K => (210, 256),
-            Q8_0 => (34, 32),
-            _ => (22, 32),
-        };
-        for b in 0..rows * cols / vb {
-            let o = b * bb + if qt == Q6_K { 208 } else { 0 };
-            w[o..o + 2].copy_from_slice(&0x1400u16.to_le_bytes());
-            if qt == Q4_K {
-                w[o + 2..o + 4].copy_from_slice(&0x1400u16.to_le_bytes());
-            }
-        }
+        let w = synth_matrix(&mut rng, qt, rows, cols);
         let wb = g.upload(&w).unwrap();
         for nb in [8usize, 16, 128, 512] {
             let xs: Vec<Vec<f32>> = (0..nb).map(|_| rng.vec(cols, 1.0)).collect();
@@ -1820,90 +1950,39 @@ fn cuda_gemm_bench() {
                 kernels.push(if nb <= 8 { "gemvn_2x8" } else { "gemvn_2x16" }.into());
                 kernels.push(format!("gemvm{}_{tn}", if nb <= 8 { 8 } else { 16 }));
             }
-            let (wide, short) = gemm_names(qt);
-            kernels.push(wide);
-            if let Some(sh) = short.filter(|_| cols <= 16 * 256) {
-                kernels.push(sh);
-            }
-            if qt == Q4_K {
-                kernels.push("gemmf_q4_k".into()); // the non-exact fast form, for comparison
-            }
+            kernels.extend(gemm2_names(qt));
             // Rounds over all kernels (interleaved: clocks drift as the GPU
             // heats up), best time of each.
             let mut best = vec![f64::INFINITY; kernels.len()];
+            let st = act_stride_t(cols) as u64;
+            let args = [
+                wb.arg(),
+                Arg::U64(rb as u64),
+                Arg::I32(rows as i32),
+                Arg::I32(cols as i32),
+                act.arg(),
+                Arg::U64(st),
+                Arg::I32(nb as i32),
+                Arg::Ptr(0),
+                Arg::I32(0),
+                out.arg(),
+                Arg::U64(rows as u64),
+            ];
             for _round in 0..8 {
                 for (ki, k) in kernels.iter().enumerate() {
-                    let k: &str = k;
                     let f = km.function(k).unwrap();
-                    let st = act_stride_t(cols) as u64;
-                    let args = [
-                        wb.arg(),
-                        Arg::U64(rb as u64),
-                        Arg::I32(rows as i32),
-                        Arg::I32(cols as i32),
-                        act.arg(),
-                        Arg::U64(st),
-                        Arg::I32(nb as i32),
-                        Arg::Ptr(0),
-                        Arg::I32(0),
-                        out.arg(),
-                        Arg::U64(rows as u64),
-                    ];
-                    {
-                        let e0 = g.record().unwrap();
-                        // SAFETY: as in gpu_batched.
-                        unsafe {
-                            if k.starts_with("gemvm") {
-                                g.launch(
-                                    &f,
-                                    (rows.div_ceil(16) as u32, 1, 1),
-                                    (128, 1, 1),
-                                    0,
-                                    &args,
-                                )
-                                .unwrap();
-                            } else if k.starts_with("gemm") {
-                                let (bn, sm) = if k.starts_with("gemm1")
-                                    || k.starts_with("gemms1")
-                                    || k.starts_with("gemmf")
-                                {
-                                    (GM1_BN, GEMM1_SMEM)
-                                } else {
-                                    (GM_BN, GEMM_SMEM)
-                                };
-                                f.set_max_shared(sm).unwrap();
-                                g.launch(
-                                    &f,
-                                    (nb.div_ceil(bn) as u32, rows.div_ceil(GM_BM) as u32, 1),
-                                    (256, 1, 1),
-                                    sm as u32,
-                                    &args,
-                                )
-                                .unwrap();
-                            } else {
-                                let (t, r) = (if k.ends_with("x16") { 16 } else { 8 }, 2);
-                                let mut a = vec![Arg::I32(qt as i32)];
-                                a.extend_from_slice(&args);
-                                g.launch(
-                                    &f,
-                                    (rows.div_ceil(r) as u32, nb.div_ceil(t) as u32, 1),
-                                    (GEMV_THREADS, 1, 1),
-                                    0,
-                                    &a,
-                                )
-                                .unwrap();
-                            }
-                        }
-                        let e1 = g.record().unwrap();
-                        best[ki] = best[ki].min(e0.ms_to(&e1).unwrap() as f64);
-                    }
+                    let e0 = g.record().unwrap();
+                    // SAFETY: as in gpu_batched.
+                    unsafe { launch_product(&g, &f, k, qt, rows, nb, &args) };
+                    let e1 = g.record().unwrap();
+                    best[ki] = best[ki].min(e0.ms_to(&e1).unwrap() as f64);
                 }
             }
             for (ki, k) in kernels.iter().enumerate() {
                 let best = best[ki];
                 let macs = (rows * cols * nb) as f64;
                 eprintln!(
-                    "{what:<14} nb {nb:>3} {k:<10} {:>8.1} us {:>6.1} TMAC/s {:>5.0} GB/s weights",
+                    "{what:<14} nb {nb:>3} {k:<12} {:>8.1} us {:>6.1} TMAC/s {:>5.0} GB/s weights",
                     best * 1e3,
                     macs / (best * 1e-3) / 1e12,
                     (rb * rows) as f64 / (best * 1e-3) / 1e9
@@ -2187,8 +2266,8 @@ fn cuda_prefill_profile() {
     }
 }
 
-/// The GEMMs' hardware f16 -> f32 conversion of block scales is exact for
-/// how they use it (`h2f_mul_check`): no half, NaNs included, multiplies
+/// The products' hardware f16 -> f32 conversion of block scales is exact
+/// for how they use it (`h2f_mul_check`): no half, NaNs included, multiplies
 /// to different bits than with quant::f16_to_f32's exact conversion.
 #[test]
 fn gpu_hw_f16_scales_exact_in_products() {
