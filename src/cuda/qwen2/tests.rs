@@ -1233,7 +1233,7 @@ fn gpu_logits_match_cpu_long_context() {
 }
 
 /// `gpu_logits_match_cpu_long_context` at ~2000 tokens, the prompt fed by
-/// the batched prefill in the GPU's own batch size (four passes, the last
+/// the batched prefill in the GPU's own batch size (two passes, the last
 /// ragged), as `axon gen` does it: graded the same way.
 #[test]
 fn gpu_logits_match_cpu_2000_tokens() {
@@ -1651,8 +1651,10 @@ fn type_name(qt: u32) -> &'static str {
     }
 }
 
-/// A random matrix of type qt (rows x cols) with sane f16 scales (1/1024)
-/// in every block, so products stay finite.
+/// A random matrix of type qt (rows x cols) with sane f16 scales in every
+/// block: d (and Q4_K's dmin, drawn independently) of either sign and
+/// magnitude 2^-11..2^-10, different per block, so a scale applied to the
+/// wrong row, block or term changes the bits; products stay finite.
 fn synth_matrix(rng: &mut Rng, qt: u32, rows: usize, cols: usize) -> Vec<u8> {
     let rb = quant::row_bytes(qt, cols);
     let mut w: Vec<u8> = (0..rb * rows).map(|_| rng.next() as u8).collect();
@@ -1664,9 +1666,12 @@ fn synth_matrix(rng: &mut Rng, qt: u32, rows: usize, cols: usize) -> Vec<u8> {
     };
     for b in 0..rows * cols / vb {
         let o = b * bb + if qt == Q6_K { 208 } else { 0 };
-        w[o..o + 2].copy_from_slice(&0x1400u16.to_le_bytes());
+        let mut scale = || (0x1000u16 + (rng.next() & 0x7ff) as u16) | (rng.next() as u16 & 0x8000);
+        let d = scale();
+        w[o..o + 2].copy_from_slice(&d.to_le_bytes());
         if qt == Q4_K {
-            w[o + 2..o + 4].copy_from_slice(&0x1400u16.to_le_bytes());
+            let dmin = scale();
+            w[o + 2..o + 4].copy_from_slice(&dmin.to_le_bytes());
         }
     }
     w
@@ -2080,13 +2085,13 @@ fn prefill_with(net: &CudaQwen2, ids: &[u32], sizes: &[usize]) -> (Vec<u16>, Vec
 fn prefill_bits(m: &Model, name: &str, kv: CacheKv) {
     let g = crate::testutil::gpu().unwrap();
     let km = Kernels::module(&g).unwrap();
-    let ids = long_ids(m, 700);
+    let ids = long_ids(m, 1100);
     let mut net = CudaQwen2::new(&g, &km, m, ids.len() + 1).unwrap();
     net.kv = kv;
     let max = net.prefill_batch();
     assert!(ids.len() > max, "covers chunking past the max batch");
     // The GPU's own attention splits (every split <= 32 positions here:
-    // attn_warp_b), then few splits, so that queries past 32 * 8 positions
+    // attn_scores_b + attn_warpv_b), then few splits, so that queries past 32 * 8 positions
     // take attn_split_b, and batches straddle the two.
     for max_split in [net.max_split, 8] {
         net.max_split = max_split;
@@ -2337,10 +2342,18 @@ fn cuda_attn_bench() {
         return;
     };
     let km = Kernels::module(&g).unwrap();
-    let (nh, nkv, hd, nz) = (28usize, 4usize, 128usize, 64usize);
+    // AXON_ATT_SHAPE: n_heads,n_kv,hd (default the 7B's).
+    let shape: Vec<usize> = std::env::var("AXON_ATT_SHAPE")
+        .unwrap_or("28,4,128".into())
+        .split(',')
+        .map(|v| v.parse().unwrap())
+        .collect();
+    let (nh, nkv, hd) = (shape[0], shape[1], shape[2]);
+    let nz: usize = std::env::var("AXON_ATT_NZ").map_or(64, |v| v.parse().unwrap());
     let start: usize = std::env::var("AXON_PROF_START").map_or(1536, |v| v.parse().unwrap());
     let ctx = start + nz;
     let max_split = (8 * g.info().unwrap().sms as usize / nkv).clamp(1, MAX_SPLIT);
+    let sst = (32 * max_split).next_multiple_of(4);
     let mut rng = Rng(3);
     let kvh: Vec<u16> = (0..ctx * nkv * hd)
         .map(|_| quant::f32_to_f16(rng.f() * 0.5))
@@ -2350,47 +2363,118 @@ fn cuda_attn_bench() {
     let q = g.upload(&rng.vec(nz * nh * hd, 1.0)).unwrap();
     let po = g.alloc(nz * nh * max_split * hd * 4).unwrap();
     let pm = g.alloc(nz * nh * max_split * 2 * 4).unwrap();
+    let sb = g.alloc(nz * nh * sst * 4).unwrap();
     let act = g.alloc(nz * act_stride_t(nh * hd)).unwrap();
-    let names = ["attn_warp_b_128", "attn_split_b_128", "attn_combine_b"];
+    let names = [
+        format!("attn_warp_b_{hd}"),
+        format!("attn_split_b_{hd}"),
+        format!("attn_scores_b_{hd}"),
+        format!("attn_warps_b_{hd}"),
+        "attn_combine_b".to_string(),
+        format!("attn_warpv_b_{hd}"),
+    ];
     let fs: Vec<Func> = names.iter().map(|n| km.function(n).unwrap()).collect();
     for (n, f) in names.iter().zip(&fs) {
         eprintln!("{n}: regs, local {:?}", f.regs_local().unwrap());
     }
-    let mut best = [f64::INFINITY; 3];
+    let nsplit = max_split.min(ctx.div_ceil(32));
+    let scale = Arg::F32(1.0 / (hd as f32).sqrt());
+    let mut best = [f64::INFINITY; 6];
     for _ in 0..6 {
         for (k, f) in fs.iter().enumerate() {
             let e0 = g.record().unwrap();
             // SAFETY: prefill.cu's signatures; buffers sized for nz queries
             // over ctx positions.
             unsafe {
-                if k < 2 {
-                    let (gy, bx) = if k == 0 {
-                        (max_split.div_ceil(4), 128)
-                    } else {
-                        (max_split, ATT_TILE)
-                    };
-                    g.launch(
+                let attn = [
+                    q.arg(),
+                    kc.arg(),
+                    vc.arg(),
+                    Arg::I32(start as i32),
+                    Arg::I32(0),
+                    Arg::I32(nh as i32),
+                    Arg::I32(nkv as i32),
+                    scale,
+                    Arg::I32(max_split as i32),
+                    po.arg(),
+                    pm.arg(),
+                ];
+                match k {
+                    0 | 1 => g.launch(
                         f,
-                        (nkv as u32, gy as u32, nz as u32),
-                        (bx as u32, 1, 1),
+                        (
+                            nkv as u32,
+                            if k == 0 {
+                                nsplit.div_ceil(4)
+                            } else {
+                                max_split
+                            } as u32,
+                            nz as u32,
+                        ),
+                        (if k == 0 { 128 } else { ATT_TILE as u32 }, 1, 1),
+                        0,
+                        &attn,
+                    ),
+                    2 => g.launch(
+                        f,
+                        (
+                            ctx.div_ceil(64) as u32,
+                            (nz * nh / nkv).div_ceil(64) as u32,
+                            nkv as u32,
+                        ),
+                        (256, 1, 1),
                         0,
                         &[
                             q.arg(),
                             kc.arg(),
+                            Arg::I32(start as i32),
+                            Arg::I32(0),
+                            Arg::I32(nz as i32),
+                            Arg::I32(nh as i32),
+                            Arg::I32(nkv as i32),
+                            scale,
+                            Arg::I32(sst as i32),
+                            sb.arg(),
+                        ],
+                    ),
+                    3 => g.launch(
+                        f,
+                        (nkv as u32, nsplit.div_ceil(4) as u32, nz as u32),
+                        (128, 1, 1),
+                        0,
+                        &[
                             vc.arg(),
                             Arg::I32(start as i32),
                             Arg::I32(0),
                             Arg::I32(nh as i32),
                             Arg::I32(nkv as i32),
-                            Arg::F32(1.0 / (hd as f32).sqrt()),
                             Arg::I32(max_split as i32),
                             po.arg(),
                             pm.arg(),
+                            sb.arg(),
+                            Arg::I32(sst as i32),
                         ],
-                    )
-                    .unwrap();
-                } else {
-                    g.launch(
+                    ),
+                    5 => g.launch(
+                        f,
+                        (nkv as u32, nz.div_ceil(8) as u32, ctx.div_ceil(64) as u32),
+                        (256, 1, 1),
+                        0,
+                        &[
+                            vc.arg(),
+                            Arg::I32(start as i32),
+                            Arg::I32(0),
+                            Arg::I32(nz as i32),
+                            Arg::I32(nh as i32),
+                            Arg::I32(nkv as i32),
+                            Arg::I32(max_split as i32),
+                            po.arg(),
+                            pm.arg(),
+                            sb.arg(),
+                            Arg::I32(sst as i32),
+                        ],
+                    ),
+                    _ => g.launch(
                         f,
                         ((nh * hd / 256) as u32, nz as u32, 1),
                         (256, 1, 1),
@@ -2407,16 +2491,19 @@ fn cuda_attn_bench() {
                             act.arg(),
                             Arg::U64(act_stride_t(nh * hd) as u64),
                         ],
-                    )
-                    .unwrap();
+                    ),
                 }
+                .unwrap();
             }
             let e1 = g.record().unwrap();
             best[k] = best[k].min(e0.ms_to(&e1).unwrap() as f64);
         }
     }
     for (n, b) in names.iter().zip(best) {
-        eprintln!("{n:<18} {nz} queries at {start}: {:>8.1} us", b * 1e3);
+        eprintln!(
+            "{nh}/{nkv}x{hd} {n:<18} {nz} queries at {start}: {:>8.1} us",
+            b * 1e3
+        );
     }
 }
 
@@ -2424,7 +2511,9 @@ fn cuda_attn_bench() {
 /// query the decode kernels' bits: split partials (m, l, sums) and the
 /// quantized output, for every layout here (GQA groups 6, 7, 8; heads of 64
 /// and 128) and queries whose splits are short (warp path), long (one and
-/// several tiles), and on both sides of the warp path's limit.
+/// several tiles), and on both sides of the warp path's limit; launches at
+/// z0 = 0 and past it (a later ATT_SUB launch of a pass: queries z0 + zl),
+/// and past 1024 positions.
 #[test]
 fn gpu_batched_attention_matches_decode_bits() {
     let Some(g) = crate::testutil::gpu() else {
@@ -2442,13 +2531,26 @@ fn gpu_batched_attention_matches_decode_bits() {
         let fs = km.function(&format!("attn_split_{hd}")).unwrap();
         let fsb = km.function(&format!("attn_split_b_{hd}")).unwrap();
         let fw = km.function(&format!("attn_warp_b_{hd}")).unwrap();
-        // (start, queries, max_split)
-        for (start, nz, ms) in [(0, 40, 23), (200, 70, 8), (1000, 12, 46), (3000, 6, 23)] {
-            let ctx = start + nz;
+        let fsc = km.function(&format!("attn_scores_b_{hd}")).unwrap();
+        let fws = km.function(&format!("attn_warps_b_{hd}")).unwrap();
+        let fwv = km.function(&format!("attn_warpv_b_{hd}")).unwrap();
+        // (start, z0, queries, max_split): query zl of a launch is token z0
+        // + zl of the pass, at position start + z0 + zl.
+        for (start, z0, nz, ms) in [
+            (0, 0, 40, 23),
+            (200, 0, 70, 8),
+            (1000, 0, 12, 46),
+            (3000, 0, 6, 23),
+            (100, 16, 64, 23),
+            (1100, 16, 64, 46),
+            (1400, 40, 64, 46),
+            (3000, 24, 8, 23),
+        ] {
+            let ctx = start + z0 + nz;
             let to_h = |v: Vec<f32>| -> Vec<u16> { v.into_iter().map(quant::f32_to_f16).collect() };
             let kb = g.upload(&to_h(rng.vec(ctx * kvd, 4.0))).unwrap();
             let vb = g.upload(&to_h(rng.vec(ctx * kvd, 1.0))).unwrap();
-            let q = rng.vec(nz * dim, 1.0);
+            let q = rng.vec((z0 + nz) * dim, 1.0);
             let qb = g.upload(&q).unwrap();
             let (po_n, pm_n) = (nh * ms * hd, nh * ms * 2);
             let ast = act_stride_t(dim);
@@ -2456,44 +2558,104 @@ fn gpu_batched_attention_matches_decode_bits() {
             // Batched: the split kernel for all queries, the warp kernel for
             // those within its limit (np <= 32 ms), each into its own buffers.
             let nsplit = |np: usize| ms.min(np.div_ceil(32));
-            let warp_n = (0..nz).filter(|&z| start + z < 32 * ms).count();
+            let warp_n = (0..nz).filter(|&z| start + z0 + z < 32 * ms).count();
             let mut batched = Vec::new();
-            for (f, n) in [(&fsb, nz), (&fw, warp_n)] {
+            // (The third and fourth: attn_scores_b then attn_warps_b or
+            // attn_warpv_b, batch.rs's path.)
+            for (kind, (f, n)) in [(&fsb, nz), (&fw, warp_n), (&fws, warp_n), (&fwv, warp_n)]
+                .into_iter()
+                .enumerate()
+            {
                 if n == 0 {
                     continue;
                 }
                 let po = g.alloc(n * po_n * 4).unwrap();
                 let pm = g.alloc(n * pm_n * 4).unwrap();
-                let act = g.alloc(n * ast).unwrap();
+                let act = g.alloc((z0 + n) * ast).unwrap();
                 act.zero().unwrap(); // parts no kernel writes (n % 256 != 0) compare equal
-                let warp = std::ptr::eq(f, &fw);
+                let warp = kind > 0;
+                let sst = (32 * ms).next_multiple_of(4);
+                let sbuf = g.alloc(n * nh * sst * 4).unwrap();
                 // SAFETY: prefill.cu's signatures; buffers for n queries over
                 // ctx positions, K/V of ctx rows.
                 unsafe {
-                    g.launch(
-                        f,
-                        (
-                            nkv as u32,
-                            if warp { ms.div_ceil(4) } else { ms } as u32,
-                            n as u32,
-                        ),
-                        (if warp { 128 } else { ATT_TILE as u32 }, 1, 1),
-                        0,
-                        &[
-                            qb.arg(),
-                            kb.arg(),
-                            vb.arg(),
-                            Arg::I32(start as i32),
-                            Arg::I32(0),
+                    if kind >= 2 {
+                        let group = nh / nkv;
+                        g.launch(
+                            &fsc,
+                            (
+                                (start + z0 + n).div_ceil(64) as u32,
+                                (n * group).div_ceil(64) as u32,
+                                nkv as u32,
+                            ),
+                            (256, 1, 1),
+                            0,
+                            &[
+                                qb.arg(),
+                                kb.arg(),
+                                Arg::I32(start as i32),
+                                Arg::I32(z0 as i32),
+                                Arg::I32(n as i32),
+                                Arg::I32(nh as i32),
+                                Arg::I32(nkv as i32),
+                                scale,
+                                Arg::I32(sst as i32),
+                                sbuf.arg(),
+                            ],
+                        )
+                        .unwrap();
+                        let mut a = vec![vb.arg(), Arg::I32(start as i32), Arg::I32(z0 as i32)];
+                        if kind == 3 {
+                            a.push(Arg::I32(n as i32));
+                        }
+                        a.extend_from_slice(&[
                             Arg::I32(nh as i32),
                             Arg::I32(nkv as i32),
-                            scale,
                             Arg::I32(ms as i32),
                             po.arg(),
                             pm.arg(),
-                        ],
-                    )
-                    .unwrap();
+                            sbuf.arg(),
+                            Arg::I32(sst as i32),
+                        ]);
+                        let (grid, block) = if kind == 3 {
+                            (
+                                (
+                                    nkv as u32,
+                                    n.div_ceil(8) as u32,
+                                    (start + z0 + n).div_ceil(64) as u32,
+                                ),
+                                256,
+                            )
+                        } else {
+                            ((nkv as u32, ms.div_ceil(4) as u32, n as u32), 128)
+                        };
+                        g.launch(f, grid, (block, 1, 1), 0, &a).unwrap();
+                    } else {
+                        g.launch(
+                            f,
+                            (
+                                nkv as u32,
+                                if warp { ms.div_ceil(4) } else { ms } as u32,
+                                n as u32,
+                            ),
+                            (if warp { 128 } else { ATT_TILE as u32 }, 1, 1),
+                            0,
+                            &[
+                                qb.arg(),
+                                kb.arg(),
+                                vb.arg(),
+                                Arg::I32(start as i32),
+                                Arg::I32(z0 as i32),
+                                Arg::I32(nh as i32),
+                                Arg::I32(nkv as i32),
+                                scale,
+                                Arg::I32(ms as i32),
+                                po.arg(),
+                                pm.arg(),
+                            ],
+                        )
+                        .unwrap();
+                    }
                     g.launch(
                         &fcb,
                         ((dim / 256) as u32, n as u32, 1),
@@ -2503,7 +2665,7 @@ fn gpu_batched_attention_matches_decode_bits() {
                             po.arg(),
                             pm.arg(),
                             Arg::I32(start as i32),
-                            Arg::I32(0),
+                            Arg::I32(z0 as i32),
                             Arg::I32(dim as i32),
                             Arg::I32(hd as i32),
                             Arg::I32(ms as i32),
@@ -2516,11 +2678,11 @@ fn gpu_batched_attention_matches_decode_bits() {
                 }
                 let (po, pm, act): (Vec<f32>, Vec<f32>, Vec<u8>) =
                     (po.read().unwrap(), pm.read().unwrap(), act.read().unwrap());
-                batched.push((warp, n, po, pm, act));
+                batched.push((kind, n, po, pm, act));
             }
             for z in 0..nz {
-                let np = start + z + 1;
-                let qz = g.upload(&q[z * dim..(z + 1) * dim]).unwrap();
+                let np = start + z0 + z + 1;
+                let qz = g.upload(&q[(z0 + z) * dim..(z0 + z + 1) * dim]).unwrap();
                 let params = g.upload(&[0u32, (np - 1) as u32, 0, 0]).unwrap();
                 let po = g.alloc(po_n * 4).unwrap();
                 let pm = g.alloc(pm_n * 4).unwrap();
@@ -2568,11 +2730,11 @@ fn gpu_batched_attention_matches_decode_bits() {
                 }
                 let (wpo, wpm, wact): (Vec<f32>, Vec<f32>, Vec<u8>) =
                     (po.read().unwrap(), pm.read().unwrap(), act.read().unwrap());
-                for (warp, n, bpo, bpm, bact) in &batched {
+                for (kind, n, bpo, bpm, bact) in &batched {
                     if z >= *n {
                         continue;
                     }
-                    let ctxs = format!("{nh}/{nkv}x{hd} np {np} splits {ms} warp {warp}");
+                    let ctxs = format!("{nh}/{nkv}x{hd} np {np} z0 {z0} splits {ms} kernel {kind}");
                     for h in 0..nh {
                         for s in 0..nsplit(np) {
                             let o = (h * ms + s) * hd;
@@ -2590,7 +2752,8 @@ fn gpu_batched_attention_matches_decode_bits() {
                         }
                     }
                     let ab = act_bytes(dim);
-                    assert!(bact[z * ast..z * ast + ab] == wact[..], "{ctxs}: output");
+                    let za = (z0 + z) * ast;
+                    assert!(bact[za..za + ab] == wact[..], "{ctxs}: output");
                 }
             }
         }

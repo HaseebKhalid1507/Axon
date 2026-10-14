@@ -64,8 +64,10 @@ pub(super) struct BatchFns<'m> {
     swiglu_quant: Func<'m>,
     rope_kv: Func<'m>,
     attn_split: Func<'m>,
-    /// attn_split_b for queries at most 32 * max_split positions in.
-    attn_warp: Func<'m>,
+    /// attn_split_b for queries at most 32 * max_split positions in: the
+    /// scores of all of them by attn_scores_b, then attn_warpv_b.
+    attn_scores: Func<'m>,
+    attn_warps: Func<'m>,
     attn_combine: Func<'m>,
     argmax: Func<'m>,
     gemvn8: Func<'m>,
@@ -124,10 +126,15 @@ impl<'m> BatchFns<'m> {
             } else {
                 "attn_split_b_128"
             })?,
-            attn_warp: module.function(if head_dim == 64 {
-                "attn_warp_b_64"
+            attn_scores: module.function(if head_dim == 64 {
+                "attn_scores_b_64"
             } else {
-                "attn_warp_b_128"
+                "attn_scores_b_128"
+            })?,
+            attn_warps: module.function(if head_dim == 64 {
+                "attn_warpv_b_64"
+            } else {
+                "attn_warpv_b_128"
             })?,
             attn_combine: module.function("attn_combine_b")?,
             argmax: module.function("argmax_b")?,
@@ -160,6 +167,8 @@ pub(super) struct BatchBufs<'g> {
     rope: DevBuf<'g>,
     part_o: DevBuf<'g>,
     part_ml: DevBuf<'g>,
+    /// Attention scores of ATT_SUB queries, [query][head][score_stride].
+    scores: DevBuf<'g>,
     /// HEAD_SUB rows, reused per head launch; with `logits_rows` (tests:
     /// `keep_logits`) one row per token of the pass instead.
     pub(super) logits: DevBuf<'g>,
@@ -174,11 +183,18 @@ impl<'g> CudaQwen2<'g> {
         self.batch.min(max_ctx).max(1)
     }
 
+    /// Scores per query head kept for attn_warps_b: every position a query
+    /// in its range (np <= 32 max_split) can have, rounded to 4.
+    pub(super) fn score_stride(&self) -> usize {
+        (32 * self.max_split).next_multiple_of(4)
+    }
+
     /// VRAM of the batch scratch for `max` tokens.
     pub(super) fn batch_bytes(&self, max: usize) -> usize {
         let (f, kvd) = (4, self.kv_dim());
         let att = max.min(ATT_SUB);
-        let parts = att * self.n_heads * self.max_split * (self.head_dim + 2) * f;
+        let parts =
+            att * self.n_heads * (self.max_split * (self.head_dim + 2) + self.score_stride()) * f;
         let per_tok = (3 * self.dim + 2 * kvd + 2 * self.ffn + self.head_dim) * f
             + act_stride(self.dim.max(self.ffn))
             + 8
@@ -206,6 +222,7 @@ impl<'g> CudaQwen2<'g> {
             rope: g.alloc(max * self.head_dim / 2 * 8)?,
             part_o: g.alloc(att * self.n_heads * self.max_split * self.head_dim * f)?,
             part_ml: g.alloc(att * self.n_heads * self.max_split * 2 * f)?,
+            scores: g.alloc(att * self.n_heads * self.score_stride() * f)?,
             logits: g.alloc(max.min(HEAD_SUB) * self.vocab * f)?,
             logits_rows: false,
             best: g.alloc(max * 4)?,
@@ -462,42 +479,101 @@ impl<'g> CudaQwen2<'g> {
                 on("rope_kv")?;
                 for z0 in (0..nb).step_by(ATT_SUB) {
                     let nz = (nb - z0).min(ATT_SUB) as u32;
-                    // Splits of at most 32 positions for every query here:
-                    // a warp each (same bits, prefill.cu attn_warp_bt).
+                    // Splits of at most 32 positions for every query here
+                    // (f16): their scores as one product, then a warp per split,
+                    // value rows shared by 8 queries (same bits, prefill.cu
+                    // attn_warpv_bt).
                     let short = start + z0 + nz as usize <= 32 * self.max_split;
-                    let (f, grid, block) = match (short, q8) {
-                        (true, false) => (&bf.attn_warp, self.max_split.div_ceil(4) as u32, 128),
-                        (false, false) => (&bf.attn_split, self.max_split as u32, ATT_TILE as u32),
-                        (true, true) => (
-                            &self.q8_fns(mode).attn_warp_b,
-                            self.max_split.div_ceil(4) as u32,
-                            128,
-                        ),
-                        (false, true) => (
-                            &self.q8_fns(mode).attn_split_b,
-                            self.max_split as u32,
-                            ATT_TILE as u32,
-                        ),
-                    };
-                    let mut args = vec![b.q.arg()];
-                    args.extend_from_slice(kva);
-                    args.extend_from_slice(&[
-                        Arg::I32(start as i32),
-                        Arg::I32(z0 as i32),
-                        Arg::I32(self.n_heads as i32),
-                        Arg::I32(self.n_kv_heads as i32),
-                        Arg::F32(1.0 / (hd as f32).sqrt()),
-                        Arg::I32(self.max_split as i32),
-                        b.part_o.arg(),
-                        b.part_ml.arg(),
-                    ]);
-                    g.launch(
-                        f,
-                        (self.n_kv_heads as u32, grid, nz),
-                        (block, 1, 1),
-                        0,
-                        &args,
-                    )?;
+                    // Positions of the launch's last query.
+                    let np = start + z0 + nz as usize;
+                    if short && !q8 {
+                        let group = self.n_heads / self.n_kv_heads;
+                        let sst = Arg::I32(self.score_stride() as i32);
+                        g.launch(
+                            &bf.attn_scores,
+                            (
+                                np.div_ceil(64) as u32,
+                                (nz as usize * group).div_ceil(64) as u32,
+                                self.n_kv_heads as u32,
+                            ),
+                            (256, 1, 1),
+                            0,
+                            &[
+                                b.q.arg(),
+                                kva[0],
+                                Arg::I32(start as i32),
+                                Arg::I32(z0 as i32),
+                                Arg::I32(nz as i32),
+                                Arg::I32(self.n_heads as i32),
+                                Arg::I32(self.n_kv_heads as i32),
+                                Arg::F32(1.0 / (hd as f32).sqrt()),
+                                sst,
+                                b.scores.arg(),
+                            ],
+                        )?;
+                        g.launch(
+                            &bf.attn_warps,
+                            (
+                                self.n_kv_heads as u32,
+                                nz.div_ceil(8),
+                                np.div_ceil(64) as u32,
+                            ),
+                            (256, 1, 1),
+                            0,
+                            &[
+                                kva[1],
+                                Arg::I32(start as i32),
+                                Arg::I32(z0 as i32),
+                                Arg::I32(nz as i32),
+                                Arg::I32(self.n_heads as i32),
+                                Arg::I32(self.n_kv_heads as i32),
+                                Arg::I32(self.max_split as i32),
+                                b.part_o.arg(),
+                                b.part_ml.arg(),
+                                b.scores.arg(),
+                                sst,
+                            ],
+                        )?;
+                    } else {
+                        // The q8 cache keeps #11's kernels: a warp per
+                        // split (short) or decode's blocks, both reading
+                        // int8 rows and their scales.
+                        let (f, grid, block) = match (short, q8) {
+                            (false, false) => {
+                                (&bf.attn_split, self.max_split as u32, ATT_TILE as u32)
+                            }
+                            (true, true) => (
+                                &self.q8_fns(mode).attn_warp_b,
+                                self.max_split.div_ceil(4) as u32,
+                                128,
+                            ),
+                            (false, true) => (
+                                &self.q8_fns(mode).attn_split_b,
+                                self.max_split as u32,
+                                ATT_TILE as u32,
+                            ),
+                            (true, false) => unreachable!("the shared-score path above"),
+                        };
+                        let mut args = vec![b.q.arg()];
+                        args.extend_from_slice(kva);
+                        args.extend_from_slice(&[
+                            Arg::I32(start as i32),
+                            Arg::I32(z0 as i32),
+                            Arg::I32(self.n_heads as i32),
+                            Arg::I32(self.n_kv_heads as i32),
+                            Arg::F32(1.0 / (hd as f32).sqrt()),
+                            Arg::I32(self.max_split as i32),
+                            b.part_o.arg(),
+                            b.part_ml.arg(),
+                        ]);
+                        g.launch(
+                            f,
+                            (self.n_kv_heads as u32, grid, nz),
+                            (block, 1, 1),
+                            0,
+                            &args,
+                        )?;
+                    }
                     on("attn")?;
                     g.launch(
                         &bf.attn_combine,

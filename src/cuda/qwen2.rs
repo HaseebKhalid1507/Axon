@@ -70,13 +70,13 @@ fn gemm2_smem(qt: u32, bn: usize, st: usize) -> usize {
 }
 /// Most tokens per batched pass on the GPU (`Lm::prefill_batch`): big
 /// batches keep the tensor cores busy and read the weights fewer times.
-const PREFILL_BATCH: usize = 512;
+const PREFILL_BATCH: usize = 1024;
 /// `PREFILL_BATCH` for the GPU half of a split (first > 0, `crate::hybrid`):
 /// the CPU half's batched pass sets the pace, so the hybrid feeds at most
 /// `crate::PREFILL_BATCH` tokens per call, and a speculative verify pass
 /// takes K + 1 (8 at --draft 7; bigger ones are chunked, same bits). The
-/// scratch for 512 would cost 160 MiB more on 32B (99 MiB on 14B) that the
-/// split's placement (`vram_need`) counts against layers. Raise it (the
+/// scratch for 512 tokens would cost 160 MiB more on 32B (99 MiB on 14B),
+/// for `PREFILL_BATCH` (1024) about twice that, which the split's placement (`vram_need`) counts against layers. Raise it (the
 /// field `batch`, set from this in `plan`) if the GPU half is ever fed
 /// bigger chunks, e.g. a prefill whose CPU layers are streamed to the GPU.
 /// Placement stays monotone: first == 0 (the whole model) gets the bigger
@@ -829,8 +829,9 @@ impl<'g> CudaQwen2<'g> {
             );
         }
         // `new` budgets one cache; each cache brings its own KV and batch
-        // scratch (up to ~200 MiB on the 7B), so every one is checked
-        // against what is free now, before any of it is allocated.
+        // scratch (batch_bytes: ~350 MiB on the 7B at 1024 tokens with 46
+        // SMs, ~530 MiB where max_split reaches 256), so every one is
+        // checked against what is free now, before any of it is allocated.
         let want = self.cache_bytes_kv(mode, max_ctx) as u64 + CACHE_HEADROOM;
         let free = g.info()?.free_bytes;
         if want > free {
