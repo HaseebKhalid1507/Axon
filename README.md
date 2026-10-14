@@ -1,6 +1,6 @@
 # Axon
 
-CPU-only LLM inference for Qwen2 GGUF models, written from scratch in Rust.
+CPU-only LLM inference for Qwen2 and Qwen3 GGUF models, written from scratch in Rust.
 
 No ggml, no BLAS, no bindings: a GGUF reader, quantized integer dot-product
 kernels (scalar, AVX2, AVX-VNNI), a spinning worker pool and a transformer
@@ -14,8 +14,9 @@ does. The tests check this, and check against three independent oracles
 
 Works today, honestly scoped:
 
-- Architecture: `qwen2`. Tested with Qwen2.5-0.5B-Instruct; also runs the 1.5B, 3B and 7B
-  Instruct Q4_K_M builds. Other architectures are refused with an error.
+- Architectures: `qwen2` and `qwen3` (dense). Tested with Qwen2.5-0.5B-Instruct; also runs the
+  1.5B, 3B and 7B Instruct Q4_K_M builds, and Qwen3 0.6B (Q8_0), 1.7B, 4B and 8B (Q4_K_M).
+  Other architectures are refused with an error.
 - Tensor types: Q4_K, Q5_0, Q6_K, Q8_0, F16, F32 (what Qwen's Q4_K_M files use). Others load for `info` but can't run.
 - Sampling: greedy, or temperature / top-k / top-p / min-p / repeat penalty with a seed
   (llama.cpp's order, ollama's defaults). `gen` continues raw text, greedy unless `--temp`
@@ -57,7 +58,7 @@ axon <model.gguf>                         same as axon info
 axon info <model.gguf>                    print a summary and exit
 axon gen <model.gguf> "<prompt>" [-n N]   generation (default 32 tokens; greedy unless --temp)
 axon logits <model.gguf> "<prompt>" [-k K]  top-K next-token logits (default 10)
-axon chat <model.gguf> [--system TEXT] [--ctx N] [-n N] [--draft K]
+axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K]
                                           talk to an Instruct model
 sampling (gen, chat): --temp T --top-k K --top-p P --min-p P
           --repeat-penalty P --repeat-last-n N --seed S   (axon --help)
@@ -80,6 +81,13 @@ a reply streams wait for the next prompt instead of mixing into the reply. The
 terminal is in raw mode while chat runs, so Ctrl-Z and Ctrl-\ do nothing. Piped,
 each line of stdin is a message and each reply one block of stdout. When the
 conversation outgrows `--ctx` (default 8192), the oldest exchanges are forgotten.
+
+Qwen3 follows its own template: no system message unless `--system` gives one, and
+the model reasons first (`<think>...</think>`, shown as it streams; Ollama's default
+too). `--no-think` opens each reply with an empty reasoning block instead (the
+template's `enable_thinking=false`). Earlier replies stay in the conversation
+without their reasoning, as the template renders them. Qwen recommends sampling
+for thinking mode; axon is greedy, which can loop on long reasoning.
 
 ### Environment
 

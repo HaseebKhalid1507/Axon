@@ -282,7 +282,12 @@ pub fn stream_reserve(m: &Model, max_ctx: usize) -> Result<u64, String> {
             .ok_or_else(|| format!("missing metadata {key}"))
     };
     let dim = meta("embedding_length")?;
-    let kvd = meta("attention.head_count_kv")? * dim / meta("attention.head_count")?;
+    // head_dim from the GGUF when it says (qwen3), else dim / heads.
+    let hd = match meta("attention.key_length") {
+        Ok(hd) => hd,
+        Err(_) => dim / meta("attention.head_count")?,
+    };
+    let kvd = meta("attention.head_count_kv")? * hd;
     const MATS: [&str; 7] = [
         "attn_q",
         "attn_k",
@@ -308,8 +313,9 @@ pub fn stream_reserve(m: &Model, max_ctx: usize) -> Result<u64, String> {
         let biggest = sizes.iter().max().copied().unwrap_or(0);
         ring = ring.max(sizes.iter().sum::<usize>() + biggest);
     }
-    // Staging (2 x 16 MiB), norms and biases (a few floats per layer).
-    let rest = (32 << 20) + k * (3 * dim + 2 * kvd + 256) * 4;
+    // Staging (2 x 16 MiB), norms and biases (a few floats per layer;
+    // qwen3's q/k norms 2 head_dim more, each padded to 64).
+    let rest = (32 << 20) + k * (3 * dim + 2 * kvd + 2 * hd + 512) * 4;
     let slots = 2 * 2 * max_ctx * kvd * 2;
     Ok((ring + rest + slots + STREAM_HEADROOM) as u64)
 }

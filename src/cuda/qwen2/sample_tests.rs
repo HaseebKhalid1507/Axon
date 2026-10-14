@@ -479,3 +479,20 @@ fn real_model_sampling_cuda_q8() {
     let net = CudaQwen2::with_kv(&g, &km, &m, 256, CacheKv::Q8 { group: 0 }, false).unwrap();
     crate::sample::tests::real_model_sampling_on(&net, &m);
 }
+
+/// qwen3 (samp_topk at the end of its decode graph and in batched verify;
+/// q_dim != dim): `real_model_sampling_cuda` with f16 and q8 caches.
+#[test]
+fn real_model_sampling_cuda_qwen3() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = crate::testutil::qwen3_model() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    for kv in [CacheKv::F16, CacheKv::Q8 { group: 0 }] {
+        let net = CudaQwen2::with_kv(&g, &km, &m, 256, kv, false).unwrap();
+        crate::sample::tests::real_model_sampling_on(&net, &m);
+    }
+}

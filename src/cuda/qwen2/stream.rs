@@ -52,6 +52,9 @@ pub(crate) struct HostLayer<'s> {
     pub bq: Option<&'s [f32]>,
     pub bk: Option<&'s [f32]>,
     pub bv: Option<&'s [f32]>,
+    /// qwen3's per-head q and k RMSNorm weights.
+    pub qn: Option<&'s [f32]>,
+    pub kn: Option<&'s [f32]>,
 }
 
 /// Step group (the ring's unit of reuse) of each matrix, in `mats` order.
@@ -192,7 +195,7 @@ impl<'g> CudaQwen2<'g> {
                 let v = |s: &[f32]| s.len().next_multiple_of(64);
                 v(l.attn_norm)
                     + v(l.ffn_norm)
-                    + [l.bq, l.bk, l.bv]
+                    + [l.bq, l.bk, l.bv, l.qn, l.kn]
                         .iter()
                         .flatten()
                         .map(|b| v(b))
@@ -291,7 +294,11 @@ impl<'g> CudaQwen2<'g> {
                 cols: m.cols,
             };
             let [q, k, v, o, gate, up, down] = &l.mats;
-            if gate.rows != self.ffn || q.cols != self.dim || k.rows != self.kv_dim() {
+            if gate.rows != self.ffn
+                || q.cols != self.dim
+                || q.rows != self.q_dim
+                || k.rows != self.kv_dim()
+            {
                 return Err(format!("layer {i}: shapes differ from the GPU's layers"));
             }
             layers.push(LayerW {
@@ -302,6 +309,8 @@ impl<'g> CudaQwen2<'g> {
                 bq: l.bq.map(&mut push),
                 bk: l.bk.map(&mut push),
                 bv: l.bv.map(&mut push),
+                qn: l.qn.map(&mut push),
+                kn: l.kn.map(&mut push),
                 ffn_norm: push(l.ffn_norm),
                 q: mat(q),
                 k: mat(k),

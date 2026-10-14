@@ -646,6 +646,31 @@ gemv1(int qt, const u8* __restrict__ w, u64 row_bytes, int rows, int n, const u8
     }
 }
 
+// One head's RMSNorm (model.rs rmsnorm_heads: x * inv * g) then RoPE, by
+// one warp, for qwen3's q/k norms: lane l holds pairs j = l + 32 i (i <
+// hd / 64, a = x[j], b = x[j + hd/2]) in a[i], b[i] and gets them back
+// normalized and rotated (NEOX, rope[j]). The sum of squares is fixed: per
+// lane a*a + b*b over its pairs in order (from 0), then warp_sum. Shared by
+// the decode attention (attn_split_t's prologue) and rope_kv_norm_b
+// (prefill.cu), so both give the same bits.
+__device__ __forceinline__ void warp_norm_rope(float* a, float* b, int hd,
+                                               const float* __restrict__ g, float eps,
+                                               const float2* __restrict__ rope) {
+    int half = hd >> 1, np = half >> 5, lane = threadIdx.x & 31;
+    float ss = 0.0f;
+    for (int i = 0; i < np; i++) ss = __fadd_rn(ss, __fadd_rn(__fmul_rn(a[i], a[i]), __fmul_rn(b[i], b[i])));
+    ss = warp_sum(ss);
+    float inv = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(__fdiv_rn(ss, (float)hd), eps)));
+    for (int i = 0; i < np; i++) {
+        int j = lane + 32 * i;
+        float y0 = __fmul_rn(__fmul_rn(a[i], inv), g[j]);
+        float y1 = __fmul_rn(__fmul_rn(b[i], inv), g[j + half]);
+        float2 sc = rope[j];
+        a[i] = __fsub_rn(__fmul_rn(y0, sc.y), __fmul_rn(y1, sc.x));
+        b[i] = __fadd_rn(__fmul_rn(y0, sc.x), __fmul_rn(y1, sc.y));
+    }
+}
+
 // Queries, keys and values for one token, with biases, RoPE and the cache
 // store fused. Work items, one per block: nq/2 query row pairs, nk/2 key
 // row pairs, nk/2 value row pairs (nk even). A query or key pair is rows
@@ -657,13 +682,19 @@ gemv1(int qt, const u8* __restrict__ w, u64 row_bytes, int rows, int n, const u8
 // F32 (the q8 cache's qkv_rope_f32): keys and values go to kf / vf (nk
 // floats each, this token only) unrounded instead; attn_split_q8 quantizes
 // them into the cache.
+//
+// With per-head q/k norms (kraw non-null: qwen3) a head's RoPE needs all its
+// rows first, so this stores the raw products instead (q in q, keys in
+// kraw, f32: the q8 kernel passes kf; values as usual); the decode
+// attention then normalizes and rotates them as it loads them
+// (attn_split_t's QkNorm): no extra launch, no handshake between blocks.
 template <bool F32>
 __device__ __forceinline__ void
 qkv_rope_t(int qtq, const u8* __restrict__ wq, u64 rbq, int qtk, const u8* __restrict__ wk, u64 rbk,
            int qtv, const u8* __restrict__ wv, u64 rbv, const float* __restrict__ bq,
            const float* __restrict__ bk, const float* __restrict__ bv, int nq, int nk, int hd, int n,
            const u8* __restrict__ act, const float2* __restrict__ rope, const u32* __restrict__ P,
-           float* __restrict__ q, void* __restrict__ kc, void* __restrict__ vc) {
+           float* __restrict__ q, void* __restrict__ kc, void* __restrict__ vc, float* kraw) {
     int item = blockIdx.x;
     int half = hd >> 1, npq = nq >> 1, npk = nk >> 1;
     if (item >= npq + npk) {
@@ -705,6 +736,12 @@ qkv_rope_t(int qtq, const u8* __restrict__ wq, u64 rbq, int qtk, const u8* __res
         y0 = __fadd_rn(y0, bias[r0]);
         y1 = __fadd_rn(y1, bias[r1]);
     }
+    if (kraw) {
+        float* raw = isq ? q : kraw;
+        raw[r0] = y0;
+        raw[r1] = y1;
+        return;
+    }
     float2 sc = rope[it % half];
     float sn = sc.x, cs = sc.y;
     float o0 = __fsub_rn(__fmul_rn(y0, cs), __fmul_rn(y1, sn));
@@ -730,13 +767,14 @@ qkv_rope_t(int qtq, const u8* __restrict__ wq, u64 rbq, int qtk, const u8* __res
 #define QKV_ROPE_PASS qtq, wq, rbq, qtk, wk, rbk, qtv, wv, rbv, bq, bk, bv, nq, nk, hd, n, act, rope, P, q
 
 extern "C" __global__ void __launch_bounds__(GEMV_THREADS, GEMV_MIN_BLOCKS)
-qkv_rope(QKV_ROPE_ARGS, unsigned short* __restrict__ kc, unsigned short* __restrict__ vc) {
-    qkv_rope_t<false>(QKV_ROPE_PASS, kc, vc);
+qkv_rope(QKV_ROPE_ARGS, unsigned short* __restrict__ kc, unsigned short* __restrict__ vc,
+         float* __restrict__ kraw) {
+    qkv_rope_t<false>(QKV_ROPE_PASS, kc, vc, kraw);
 }
 
 extern "C" __global__ void __launch_bounds__(GEMV_THREADS, GEMV_MIN_BLOCKS)
-qkv_rope_f32(QKV_ROPE_ARGS, float* __restrict__ kf, float* __restrict__ vf) {
-    qkv_rope_t<true>(QKV_ROPE_PASS, kf, vf);
+qkv_rope_f32(QKV_ROPE_ARGS, float* kf, float* __restrict__ vf, float* kraw) {
+    qkv_rope_t<true>(QKV_ROPE_PASS, kf, vf, kraw);
 }
 
 // out[r] = silu(gate_r . x) * (up_r . x) (vmath swiglu1's ops, expf for
@@ -866,23 +904,39 @@ __device__ __forceinline__ void att_split(int np, int max_split, int* nsplit, in
     *chunk = (np + *nsplit - 1) / *nsplit;
 }
 
+// qwen3's q/k norms in the decode attention (qn null: none). q holds the
+// raw queries and kraw the raw keys of position np - 1 (qkv_rope's norm
+// path); kc_out is the K cache (kc) that position's keys are stored in.
+struct QkNorm {
+    const float* kraw;
+    const float* qn;
+    const float* kn;
+    float eps;
+    const float2* rope;
+    unsigned short* kc_out;
+};
+
 // part_o: [head][split][hd]; part_ml: [head][split][2] (m, l). Head size
 // HD 64 or 128, group <= MAX_GROUP (the host checks).
 // Block (kvh, s) of a query whose position is np - 1; shared with the
 // batched attn_split_b (prefill.cu), which runs it per query token.
 // KG = 0: the f16 cache kc / vc; else the q8 cache q8 with KG values per
-// scale (kc, vc unused).
+// scale (kc, vc unused). nm: qwen3's q/k norms (see QkNorm), either cache.
+// kc's __restrict__ holds with nm too: the row the block writes through
+// nm.kc_out (position np - 1) is never read through kc (it's scored from
+// kh), and no other block reads it in this launch.
 template <int HD, int KG = 0>
 __device__ void attn_split_t(const float* __restrict__ q, const unsigned short* __restrict__ kc,
                              const unsigned short* __restrict__ vc, int np, int kvh, int s,
                              int n_heads, int n_kv, float scale, int max_split,
                              float* __restrict__ part_o, float* __restrict__ part_ml,
-                             Q8Kv q8 = Q8Kv{}) {
+                             Q8Kv q8 = Q8Kv{}, QkNorm nm = QkNorm{}) {
     const int hd = HD;
     __shared__ float qs[MAX_GROUP * 128];
     __shared__ float ps[MAX_GROUP][ATT_TILE];
     __shared__ float osum[MAX_GROUP * ATT_TILE * 2];
     __shared__ float mrun[MAX_GROUP], lrun[MAX_GROUP], alpha[MAX_GROUP];
+    __shared__ __align__(16) unsigned short kh[HD];
     int tid = threadIdx.x;
     int nsplit, chunk;
     att_split(np, max_split, &nsplit, &chunk);
@@ -906,11 +960,61 @@ __device__ void attn_split_t(const float* __restrict__ q, const unsigned short* 
             for (int i = tid; i < 2 * HD; i += ATT_TILE)
                 xs[i] = q8.knew[(i < HD ? 0 : kv_dim - HD) + kvh * HD + i];
             __syncthreads();
+            if (nm.qn) {
+                // qwen3: knew holds the raw keys; normalize and rotate them
+                // (as the f16 path below) before quantizing.
+                if (tid < 32) {
+                    float a[2], b[2];
+                    for (int i = 0; i < (HD >> 6); i++) {
+                        a[i] = xs[tid + 32 * i];
+                        b[i] = xs[tid + 32 * i + HD / 2];
+                    }
+                    warp_norm_rope(a, b, HD, nm.kn, nm.eps, nm.rope);
+                    for (int i = 0; i < (HD >> 6); i++) {
+                        xs[tid + 32 * i] = a[i];
+                        xs[tid + 32 * i + HD / 2] = b[i];
+                    }
+                }
+                __syncthreads();
+            }
             kv_q8_store<HD, KG>(xs, q8, (u64)(np - 1) * kv_dim + kvh * HD,
                                 q8.ksh ? q8.ksh + kvh * HD : nullptr);
         }
     }
-    for (int i = tid; i < group * hd; i += ATT_TILE) qs[i] = q[kvh * group * hd + i];
+    // With q/k norms (decode, qwen3): a warp per query head normalizes and
+    // rotates it into qs, and on the f16 cache the split holding position
+    // np - 1 does its keys too, into the cache and kh; that row is scored
+    // from kh (the cache's copy isn't read back by the kernel that wrote it).
+    bool kpos = KG == 0 && nm.qn && tbeg <= np - 1 && np - 1 < tend;
+    if (nm.qn) {
+        int lane = tid & 31, w = tid >> 5, half = hd >> 1;
+        for (int g = w; g < group + kpos; g += ATT_TILE / 32) {
+            bool isk = g == group;
+            const float* x = isk ? nm.kraw + kvh * hd : q + (kvh * group + g) * hd;
+            float a[2], b[2];
+            for (int i = 0; i < (half >> 5); i++) {
+                a[i] = x[lane + 32 * i];
+                b[i] = x[lane + 32 * i + half];
+            }
+            warp_norm_rope(a, b, hd, isk ? nm.kn : nm.qn, nm.eps, nm.rope);
+            for (int i = 0; i < (half >> 5); i++) {
+                int j = lane + 32 * i;
+                if (isk) {
+                    unsigned short h0 = kv_half(a[i]), h1 = kv_half(b[i]);
+                    kh[j] = h0;
+                    kh[j + half] = h1;
+                    unsigned short* kr = nm.kc_out + (u64)(np - 1) * kv_dim + kvh * hd;
+                    kr[j] = h0;
+                    kr[j + half] = h1;
+                } else {
+                    qs[g * hd + j] = a[i];
+                    qs[g * hd + j + half] = b[i];
+                }
+            }
+        }
+    } else {
+        for (int i = tid; i < group * hd; i += ATT_TILE) qs[i] = q[kvh * group * hd + i];
+    }
     if (tid < group) mrun[tid] = -INFINITY, lrun[tid] = 0.0f;
     // Value sums: thread = (row slot rs, dim pair dp), rows i = rs mod nrs.
     int pairs = hd >> 1, nrs = ATT_TILE / pairs, rs = tid / pairs, dp = tid % pairs;
@@ -951,7 +1055,9 @@ __device__ void attn_split_t(const float* __restrict__ q, const unsigned short* 
                     if (g < group) sc[g] = __fmaf_rn(d, a[g], sc[g]);
             }
         } else if (KG == 0 && t < tend) {
-            const uint4* kr = (const uint4*)(kc + (u64)t * kv_dim + kvh * hd);
+            const uint4* kr = kpos && t == np - 1
+                                  ? (const uint4*)kh
+                                  : (const uint4*)(kc + (u64)t * kv_dim + kvh * hd);
 #pragma unroll
             for (int d8 = 0; d8 < HD / 8; d8++) {
                 uint4 kv = kr[d8];
@@ -1057,40 +1163,54 @@ __device__ void attn_split_t(const float* __restrict__ q, const unsigned short* 
     }
 }
 
+// The decode attention on the f16 cache. kc isn't __restrict__: with qwen3's
+// norms (QkNorm) the block holding the new position writes its K row
+// through kc_out (the same buffer), and scores that row from shared memory.
 extern "C" __global__ void __launch_bounds__(ATT_TILE)
-attn_split_64(const float* __restrict__ q, const unsigned short* __restrict__ kc,
+attn_split_64(const float* __restrict__ q, const unsigned short* kc,
               const unsigned short* __restrict__ vc, const u32* __restrict__ P, int n_heads,
               int n_kv, float scale, int max_split, float* __restrict__ part_o,
-              float* __restrict__ part_ml) {
+              float* __restrict__ part_ml,
+              const float* __restrict__ kraw, const float* __restrict__ qn,
+              const float* __restrict__ kn, float eps, const float2* __restrict__ rope,
+              unsigned short* kc_out) {
     PDL_START();
     attn_split_t<64>(q, kc, vc, (int)P[P_POS] + 1, blockIdx.x, blockIdx.y, n_heads, n_kv, scale,
-                      max_split, part_o, part_ml);
+                      max_split, part_o, part_ml, Q8Kv{},
+                      QkNorm{kraw, qn, kn, eps, rope, kc_out});
 }
 
 extern "C" __global__ void __launch_bounds__(ATT_TILE)
-attn_split_128(const float* __restrict__ q, const unsigned short* __restrict__ kc,
+attn_split_128(const float* __restrict__ q, const unsigned short* kc,
                const unsigned short* __restrict__ vc, const u32* __restrict__ P, int n_heads,
                int n_kv, float scale, int max_split, float* __restrict__ part_o,
-               float* __restrict__ part_ml) {
+               float* __restrict__ part_ml,
+               const float* __restrict__ kraw, const float* __restrict__ qn,
+               const float* __restrict__ kn, float eps, const float2* __restrict__ rope,
+               unsigned short* kc_out) {
     PDL_START();
     attn_split_t<128>(q, kc, vc, (int)P[P_POS] + 1, blockIdx.x, blockIdx.y, n_heads, n_kv, scale,
-                      max_split, part_o, part_ml);
+                      max_split, part_o, part_ml, Q8Kv{},
+                      QkNorm{kraw, qn, kn, eps, rope, kc_out});
 }
 
 // attn_split on the q8 cache (KG values per scale), quantizing this
 // token's keys and values (kf: [2][kv_dim] f32, from qkv_rope_f32) first.
 // The cache pointers aren't __restrict__: the kernel writes what it reads.
+// qn non-null (qwen3): q and kf's keys are raw; normalized and rotated here.
 #define ATTN_SPLIT_Q8(NAME, HD, KG)                                                                \
     extern "C" __global__ void __launch_bounds__(ATT_TILE)                                         \
         NAME(const float* __restrict__ q, const signed char* kq, const signed char* vq,            \
              const float* ks, const float* vs, const float* __restrict__ kf,                       \
              const u32* __restrict__ P, int n_heads, int n_kv, float scale, int max_split,         \
              float* __restrict__ part_o, float* __restrict__ part_ml,                              \
-             const float* __restrict__ ksh) {                                                      \
+             const float* __restrict__ ksh, const float* __restrict__ qn,                          \
+             const float* __restrict__ kn, float eps, const float2* __restrict__ rope) {           \
         PDL_START();                                                                               \
         attn_split_t<HD, KG>(q, nullptr, nullptr, (int)P[P_POS] + 1, blockIdx.x, blockIdx.y,       \
                              n_heads, n_kv, scale, max_split, part_o, part_ml,                     \
-                             Q8Kv{kq, vq, ks, vs, kf, ksh});                                       \
+                             Q8Kv{kq, vq, ks, vs, kf, ksh},                                        \
+                             QkNorm{nullptr, qn, kn, eps, rope, nullptr});                         \
     }
 ATTN_SPLIT_Q8(attn_split_q8_64, 64, 64)
 ATTN_SPLIT_Q8(attn_split_q8_128, 128, 128)

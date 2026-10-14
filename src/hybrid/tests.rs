@@ -17,6 +17,8 @@ fn mapped(rel: &str) -> Option<Model> {
 
 const M05: &str = crate::testutil::MODEL;
 const M15: &str = "models/qwen2.5-1.5b-instruct-q4_k_m.gguf";
+/// Qwen3-0.6B: q/k norms, q_dim (2048) != dim (1024).
+const Q3: &str = crate::testutil::QWEN3_MODEL;
 
 fn bits(v: &[f32]) -> Vec<u32> {
     v.iter().map(|x| x.to_bits()).collect()
@@ -231,6 +233,19 @@ fn hybrid_prefill_batchings_bit_identical_q8_0_5b() {
 #[test]
 fn hybrid_prefill_batchings_bit_identical_q8_1_5b() {
     prefill_bits(M15, "1.5B", CacheKv::Q8 { group: 0 });
+}
+
+/// qwen3 split: CPU layers by the CPU's qwen3, the GPU half from hidden
+/// states, f16 and q8 GPU caches.
+#[test]
+fn hybrid_prefill_batchings_bit_identical_qwen3() {
+    prefill_bits(Q3, "qwen3 0.6B", CacheKv::F16);
+    prefill_bits(Q3, "qwen3 0.6B", CacheKv::Q8 { group: 0 });
+}
+
+#[test]
+fn hybrid_logits_match_cpu_qwen3() {
+    mixed_graded(Q3, "qwen3 0.6B");
 }
 
 /// verify_argmax's picks equal forward_argmax per token (and leave the
@@ -712,6 +727,19 @@ fn stream_prefill_is_gpu_bits_0_5b() {
 #[test]
 fn stream_prefill_is_gpu_bits_1_5b() {
     stream_prefill_bits(M15, "1.5B");
+}
+
+/// qwen3 streamed prefill: the streamed layers' q/k norms ride with their
+/// vectors (`streamer`), so the CPU half's KV is the all-GPU model's bits.
+#[test]
+fn stream_prefill_is_gpu_bits_qwen3() {
+    stream_prefill_bits(Q3, "qwen3 0.6B");
+    stream_q8_bits(Q3, "qwen3 0.6B");
+}
+
+#[test]
+fn stream_logits_match_cpu_qwen3() {
+    stream_graded(Q3, "qwen3 0.6B");
 }
 
 /// Streamed prefill, then decode with the CPU computing its layers: graded
@@ -1246,15 +1274,21 @@ fn hybrid_real_model_sampling() {
     let Some(g) = crate::testutil::gpu() else {
         return;
     };
-    let Some(m) = mapped(M05) else {
+    for rel in [M05, Q3] {
+        real_model_sampling_split(&g, rel);
+    }
+}
+
+fn real_model_sampling_split(g: &crate::cuda::Gpu, rel: &str) {
+    let Some(m) = mapped(rel) else {
         return;
     };
-    let km = Kernels::module(&g).unwrap();
+    let km = Kernels::module(g).unwrap();
     let n = block_count(&m).unwrap();
     for kv in [CacheKv::F16, CacheKv::Q8 { group: 0 }] {
-        let h = HybridQwen2::new(Some((&g, &km)), &m, 256, n / 2, kv).unwrap();
+        let h = HybridQwen2::new(Some((g, &km)), &m, 256, n / 2, kv).unwrap();
         crate::sample::tests::real_model_sampling_on(&h, &m);
-        let h = streamed_kv(&g, &km, &m, 256, n / 2, 1, kv);
+        let h = streamed_kv(g, &km, &m, 256, n / 2, 1, kv);
         crate::sample::tests::real_model_sampling_on(&h, &m);
         assert!(h.streamed_chunks() > 0, "{kv:?}: prefills streamed");
     }

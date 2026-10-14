@@ -1256,6 +1256,16 @@ pub(crate) mod tests {
         real_model_sampling_on(&net, &m);
     }
 
+    /// `real_model_sampling_cpu` on qwen3.
+    #[test]
+    fn real_model_sampling_cpu_qwen3() {
+        let Some(m) = crate::testutil::qwen3_model() else {
+            return;
+        };
+        let net = crate::model::Qwen2::new(&m);
+        real_model_sampling_on(&net, &m);
+    }
+
     pub(crate) fn real_model_sampling_on<M: Lm>(net: &M, m: &crate::gguf::Model) {
         let tok = crate::tokenizer::Tokenizer::from_gguf(m);
         let prompts = [

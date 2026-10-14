@@ -506,6 +506,13 @@ fn gpu_attention_matches_cpu() {
                         Arg::I32(max_split as i32),
                         po.arg(),
                         pml.arg(),
+                        // No q/k norms (QkNorm: kraw, qn, kn, eps, rope, kc_out).
+                        Arg::Ptr(0),
+                        Arg::Ptr(0),
+                        Arg::Ptr(0),
+                        Arg::F32(0.0),
+                        Arg::Ptr(0),
+                        Arg::Ptr(0),
                     ],
                 )
                 .unwrap();
@@ -624,26 +631,37 @@ fn gpu_argmax_matches_cpu_rule() {
 /// qkv_rope on real layers: queries (rotated), keys (rotated, f16) and
 /// values (f16) at several positions vs the CPU's row dots + bias + the
 /// NEOX rotation with rope_table's f64 angles, f32 ops in rope_head's order.
+/// On qwen3 (q/k norms) the kernel leaves q and k raw, in q and kraw (the
+/// attention normalizes and rotates them; logits_match, prefill_bits and
+/// the oracle runs cover that): checked against the CPU's plain row dots.
 #[test]
 fn gpu_qkv_rope_matches_cpu() {
-    use crate::kv::{Half, KvElem};
     let Some(g) = crate::testutil::gpu() else {
         return;
     };
-    let Some(m) = crate::testutil::model() else {
-        return;
-    };
-    let km = Kernels::module(&g).unwrap();
+    if let Some(m) = crate::testutil::model() {
+        qkv_rope_check(&g, &m);
+    }
+    if let Some(m) = crate::testutil::qwen3_model() {
+        qkv_rope_check(&g, &m);
+    }
+}
+
+fn qkv_rope_check(g: &Gpu, m: &Model) {
+    use crate::kv::{Half, KvElem};
+    let km = Kernels::module(g).unwrap();
     let f = km.function("qkv_rope").unwrap();
     let fq = km.function("quantize").unwrap();
-    let meta = |k: &str| meta(&m, k).unwrap();
+    let meta_or = |k: &str| meta(m, k);
+    let meta = |k: &str| meta(m, k).unwrap();
     let (dim, nh, nkv) = (
         meta("embedding_length") as usize,
         meta("attention.head_count") as usize,
         meta("attention.head_count_kv") as usize,
     );
-    let hd = dim / nh;
-    let kvd = nkv * hd;
+    let hd = meta_or("attention.key_length").map_or(dim / nh, |v| v as usize);
+    let (qd, kvd) = (nh * hd, nkv * hd);
+    let kraw = g.alloc(kvd * 4).unwrap();
     let base = meta("rope.freq_base");
     let freq: Vec<f64> = (0..hd / 2)
         .map(|i| base.powf(-2.0 * i as f64 / hd as f64))
@@ -653,30 +671,36 @@ fn gpu_qkv_rope_matches_cpu() {
     let fr = km.function("rope_table").unwrap();
     let mut rng = Rng(31337);
     for layer in [0, 1] {
-        let t = |s: &str| tensor(&m, &format!("blk.{layer}.{s}")).unwrap();
+        let t = |s: &str| tensor(m, &format!("blk.{layer}.{s}")).unwrap();
+        let t_opt = |s: &str| tensor_opt(m, &format!("blk.{layer}.{s}"));
         let (tq, tk, tv) = (t("attn_q.weight"), t("attn_k.weight"), t("attn_v.weight"));
-        let bias: Vec<Vec<f32>> = ["attn_q.bias", "attn_k.bias", "attn_v.bias"]
+        // Absent biases: null on the GPU, zeros (an exact no-op) on the CPU.
+        let bias: Vec<Option<Vec<f32>>> = ["attn_q.bias", "attn_k.bias", "attn_v.bias"]
             .iter()
-            .map(|s| vec_f32(&m, t(s)))
+            .map(|s| t_opt(s).map(|t| vec_f32(m, t)))
             .collect();
+        let norm = t_opt("attn_q_norm.weight").is_some();
         let wb: Vec<DevBuf> = [tq, tk, tv]
             .iter()
             .map(|t| g.upload(m.tensor_data(t)).unwrap())
             .collect();
-        let bb: Vec<DevBuf> = bias.iter().map(|b| g.upload(b).unwrap()).collect();
+        let up = |v: &Option<Vec<f32>>| v.as_ref().map(|v| g.upload(v).unwrap());
+        let bb: Vec<Option<DevBuf>> = bias.iter().map(up).collect();
+        let arg = |b: &Option<DevBuf>| b.as_ref().map_or(Arg::Ptr(0), |b| b.arg());
         for pos in [0usize, 3, 4097, 32767] {
             let x = rng.vec(dim, 1.0);
             let xb = g.upload(&x).unwrap();
             let act = g.alloc(act_bytes(dim)).unwrap();
             let params = g.upload(&[0u32, pos as u32, 0, 0]).unwrap();
-            let q = g.alloc(dim * 4).unwrap();
+            let q = g.alloc(qd * 4).unwrap();
             let rope = g.alloc(hd / 2 * 8).unwrap();
             let kc = g.alloc((pos + 1) * kvd * 2).unwrap();
             let vc = g.alloc((pos + 1) * kvd * 2).unwrap();
             let rb = |t: &Tensor| Arg::U64(quant::row_bytes(t.qtype.id, dim) as u64);
-            let items = dim / 2 + kvd;
-            // SAFETY: decode.cu's signatures; q holds dim floats, the
-            // caches pos + 1 rows; matrices dim wide.
+            let items = qd / 2 + kvd;
+            // SAFETY: decode.cu's signatures; q holds qd floats, the
+            // caches pos + 1 rows, kraw kvd floats;
+            // matrices dim wide.
             unsafe {
                 g.launch(
                     &fq,
@@ -719,10 +743,10 @@ fn gpu_qkv_rope_matches_cpu() {
                         Arg::I32(tv.qtype.id as i32),
                         wb[2].arg(),
                         rb(tv),
-                        bb[0].arg(),
-                        bb[1].arg(),
-                        bb[2].arg(),
-                        Arg::I32(dim as i32),
+                        arg(&bb[0]),
+                        arg(&bb[1]),
+                        arg(&bb[2]),
+                        Arg::I32(qd as i32),
                         Arg::I32(kvd as i32),
                         Arg::I32(hd as i32),
                         Arg::I32(dim as i32),
@@ -732,6 +756,7 @@ fn gpu_qkv_rope_matches_cpu() {
                         q.arg(),
                         kc.arg(),
                         vc.arg(),
+                        if norm { kraw.arg() } else { Arg::Ptr(0) },
                     ],
                 )
                 .unwrap();
@@ -740,12 +765,15 @@ fn gpu_qkv_rope_matches_cpu() {
             let gk: Vec<u16> = kc.read().unwrap();
             let gv: Vec<u16> = vc.read().unwrap();
             // CPU reference.
-            let proj = |t: &Tensor, b: &[f32]| -> Vec<f32> {
+            let proj = |t: &Tensor, b: &Option<Vec<f32>>| -> Vec<f32> {
                 let xq = quant::QuantizedAct::for_types(&x, &[t.qtype.id]);
                 let rb = quant::row_bytes(t.qtype.id, dim);
                 let d = m.tensor_data(t);
-                (0..b.len())
-                    .map(|r| quant::dot_row_q8(t.qtype.id, &d[r * rb..(r + 1) * rb], &xq) + b[r])
+                (0..t.dims[1] as usize)
+                    .map(|r| {
+                        quant::dot_row_q8(t.qtype.id, &d[r * rb..(r + 1) * rb], &xq)
+                            + b.as_ref().map_or(0.0, |b| b[r])
+                    })
                     .collect()
             };
             let rope = |v: &mut [f32]| {
@@ -760,10 +788,12 @@ fn gpu_qkv_rope_matches_cpu() {
                 }
             };
             let (mut cq, mut ck, cv) = (proj(tq, &bias[0]), proj(tk, &bias[1]), proj(tv, &bias[2]));
-            rope(&mut cq);
-            rope(&mut ck);
+            if !norm {
+                rope(&mut cq);
+                rope(&mut ck);
+            }
             let scale = cq.iter().fold(0f32, |a, v| a.max(v.abs()));
-            for i in 0..dim {
+            for i in 0..qd {
                 assert!(
                     (gq[i] - cq[i]).abs() <= 1e-5 * scale,
                     "layer {layer} pos {pos} q[{i}]: {} vs {}",
@@ -772,7 +802,25 @@ fn gpu_qkv_rope_matches_cpu() {
                 );
             }
             let row = pos * kvd;
-            for (what, got, want) in [("k", &gk, &ck), ("v", &gv, &cv)] {
+            if norm {
+                // Raw keys, f32, as the queries.
+                let gr: Vec<f32> = kraw.read().unwrap();
+                let ks = ck.iter().fold(0f32, |a, v| a.max(v.abs()));
+                for i in 0..kvd {
+                    assert!(
+                        (gr[i] - ck[i]).abs() <= 1e-5 * ks,
+                        "layer {layer} pos {pos} raw k[{i}]: {} vs {}",
+                        gr[i],
+                        ck[i]
+                    );
+                }
+            }
+            let kv: &[(&str, &Vec<u16>, &Vec<f32>)] = if norm {
+                &[("v", &gv, &cv)]
+            } else {
+                &[("k", &gk, &ck), ("v", &gv, &cv)]
+            };
+            for &(what, got, want) in kv {
                 for i in 0..kvd {
                     let (a, b) = (
                         Half(got[row + i]).to_f32(),
@@ -831,12 +879,20 @@ fn deterministic(kv: CacheKv) {
     let Some(g) = crate::testutil::gpu() else {
         return;
     };
-    let Some(m) = crate::testutil::model() else {
-        return;
-    };
-    let km = Kernels::module(&g).unwrap();
-    let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
-    let mut net = CudaQwen2::new(&g, &km, &m, 512).unwrap();
+    // qwen3 too: graphs replay its norm prologue (the attention writes the
+    // new K row itself, so a replay must leave the same bits).
+    for m in [crate::testutil::model(), crate::testutil::qwen3_model()]
+        .into_iter()
+        .flatten()
+    {
+        deterministic_on(&g, &m, kv);
+    }
+}
+
+fn deterministic_on(g: &Gpu, m: &Model, kv: CacheKv) {
+    let km = Kernels::module(g).unwrap();
+    let tok = crate::tokenizer::Tokenizer::from_gguf(m);
+    let mut net = CudaQwen2::new(g, &km, m, 512).unwrap();
     net.kv = kv;
     for p in [PROMPTS[0], PROMPTS[2]] {
         let ids = tok.encode(p);
@@ -941,6 +997,121 @@ fn gpu_continuations_match_cpu_0_5b() {
         return;
     };
     continuations_match(&m, "0.5B");
+}
+
+/// Qwen3-0.6B, mapped (as the 0.5B: the per-row CPU model reads the file
+/// after the default one releases what it repacks).
+fn qwen3_mapped() -> Option<Model> {
+    model_at(crate::testutil::QWEN3_MODEL)
+}
+
+#[test]
+fn gpu_logits_match_cpu_qwen3_0_6b() {
+    if crate::testutil::gpu().is_none() {
+        return;
+    }
+    let Some(m) = qwen3_mapped() else {
+        return;
+    };
+    logits_match(&m, "qwen3 0.6B");
+}
+
+#[test]
+fn gpu_continuations_match_cpu_qwen3_0_6b() {
+    if crate::testutil::gpu().is_none() {
+        return;
+    }
+    let Some(m) = qwen3_mapped() else {
+        return;
+    };
+    continuations_match(&m, "qwen3 0.6B");
+}
+
+#[test]
+fn gpu_prefill_batchings_bit_identical_qwen3() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = qwen3_mapped() else {
+        return;
+    };
+    prefill_bits(&m, "qwen3 0.6B", CacheKv::F16);
+}
+
+#[test]
+fn gpu_verify_matches_forward_argmax_qwen3() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = qwen3_mapped() else {
+        return;
+    };
+    verify_bits(&m, "qwen3 0.6B", CacheKv::F16);
+}
+
+/// The GPU's qwen3 (decode with and without graphs, batched prefill; f16
+/// and q8 caches) against model.rs's independent `qwen3_ref` on the Q8_0
+/// fixture, within QWEN3_Q8_TOL (8-bit activations, as the CPU there;
+/// measured ~0.2). model.rs's qwen3_matches_reference_forward checks that
+/// every NormBug moves the reference by more than 5x that bound, so a norm
+/// bug in the decode prologue or rope_kv_norm_b / kv_q8_b fails here even
+/// if the CPU shared it.
+#[test]
+fn gpu_qwen3_matches_reference_forward() {
+    use crate::model::tests::{NormBug, QWEN3_Q8_TOL, max_diff, qwen3_fixture, qwen3_ref};
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let ids = [3u32, 17, 42, 9];
+    let m = qwen3_fixture(Q8_0);
+    let want = qwen3_ref(&m, &ids, NormBug::None);
+    for kv in [CacheKv::F16, CacheKv::Q8 { group: 0 }] {
+        let mut net = CudaQwen2::with_kv(&g, &km, &m, 16, kv, false).unwrap();
+        for graphs in [true, false] {
+            net.graphs = graphs;
+            let mut c = net.new_cache(ids.len());
+            let dec: Vec<Vec<f32>> = (0..ids.len())
+                .map(|p| net.forward(ids[p], p, &mut c))
+                .collect();
+            let mut c = net.new_cache(ids.len());
+            net.feed_batch(&ids[..3], 0, &mut c);
+            let pre = net.forward(ids[3], 3, &mut c);
+            let (d, dp) = (max_diff(&dec, &want), max_diff(&[pre], &want[3..]));
+            eprintln!(
+                "gpu {kv:?} graphs {graphs} vs reference: max |dlogit| {d:.4}, after prefill {dp:.4}"
+            );
+            assert!(
+                d <= QWEN3_Q8_TOL && dp <= QWEN3_Q8_TOL,
+                "gpu {kv:?}: {d} / {dp}"
+            );
+        }
+    }
+}
+
+/// Qwen3-4B Q4_K_M (Q4_K/Q6_K, q_dim 4096 != dim 2560, GQA 4), if present.
+const QWEN3_4B: &str = "models/Qwen3-4B-Q4_K_M.gguf";
+
+#[test]
+fn gpu_prefill_batchings_bit_identical_qwen3_4b() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = model_at(QWEN3_4B) else {
+        return;
+    };
+    prefill_bits(&m, "qwen3 4B", CacheKv::F16);
+}
+
+#[test]
+fn gpu_verify_matches_forward_argmax_qwen3_4b() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = model_at(QWEN3_4B) else {
+        return;
+    };
+    verify_bits(&m, "qwen3 4B", CacheKv::F16);
 }
 
 #[test]
@@ -1289,18 +1460,24 @@ fn gpu_pdl_on_off_identical() {
     let Some(g) = crate::testutil::gpu() else {
         return;
     };
-    let Some(m) = crate::testutil::model() else {
-        return;
-    };
-    let km_on = Kernels::module(&g).unwrap();
-    let mut km_off = Kernels::module(&g).unwrap();
+    for m in [crate::testutil::model(), crate::testutil::qwen3_model()]
+        .into_iter()
+        .flatten()
+    {
+        pdl_on_off(&g, &m);
+    }
+}
+
+fn pdl_on_off(g: &Gpu, m: &Model) {
+    let km_on = Kernels::module(g).unwrap();
+    let mut km_off = Kernels::module(g).unwrap();
     km_off.disable_pdl();
     if !km_on.pdl() {
         eprintln!("PDL unavailable here: comparing off with off");
     }
-    let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
-    let on = CudaQwen2::new(&g, &km_on, &m, 256).unwrap();
-    let off = CudaQwen2::new(&g, &km_off, &m, 256).unwrap();
+    let tok = crate::tokenizer::Tokenizer::from_gguf(m);
+    let on = CudaQwen2::new(g, &km_on, m, 256).unwrap();
+    let off = CudaQwen2::new(g, &km_off, m, 256).unwrap();
     for p in [PROMPTS[0], PROMPTS[3]] {
         let ids = tok.encode(p);
         let (ta, la) = greedy(&on, &ids, 24, true);
@@ -2722,6 +2899,13 @@ fn gpu_batched_attention_matches_decode_bits() {
                             Arg::I32(ms as i32),
                             po.arg(),
                             pm.arg(),
+                            // No q/k norms (QkNorm: kraw, qn, kn, eps, rope, kc_out).
+                            Arg::Ptr(0),
+                            Arg::Ptr(0),
+                            Arg::Ptr(0),
+                            Arg::F32(0.0),
+                            Arg::Ptr(0),
+                            Arg::Ptr(0),
                         ],
                     )
                     .unwrap();
@@ -2933,6 +3117,8 @@ fn gpu_q8_store_matches_rule() {
                         ks.arg(),
                         vs.arg(),
                         if shifted { shift_b.arg() } else { Arg::Ptr(0) },
+                        Arg::Ptr(0), // no qwen3 k norm
+                        Arg::F32(0.0),
                     ],
                 )
                 .unwrap();
@@ -3095,6 +3281,12 @@ fn q8_vs_f16(
 /// 0.5B is the sensitive one (one fast-rotating K bias pair of |b| ~ 47 no
 /// shift can remove); 1.5B and 7B sit at the CPU-vs-CPU level.
 fn q8_accuracy(m: &Model, name: &str) {
+    q8_accuracy_within(m, name, 3e-2, 1.5e-2, 90);
+}
+
+/// `q8_accuracy` with its bounds: prompts' and text windows' mean KL, and
+/// the text windows' top-1 in percent.
+fn q8_accuracy_within(m: &Model, name: &str, prompts_kl: f64, text_kl: f64, top1_pct: usize) {
     let g = crate::testutil::gpu().unwrap();
     let km = Kernels::module(&g).unwrap();
     let net = CudaQwen2::new(&g, &km, m, 2400).unwrap();
@@ -3104,16 +3296,16 @@ fn q8_accuracy(m: &Model, name: &str) {
         assert!(w.max_kl < 4.0, "{name} {what}: max KL {}", w.max_kl);
     }
     assert!(
-        a[0].sum_kl <= 3e-2 * a[0].positions as f64,
+        a[0].sum_kl <= prompts_kl * a[0].positions as f64,
         "{name} prompts: mean KL"
     );
     for w in &a[1..] {
         assert!(
-            w.sum_kl <= 1.5e-2 * w.positions as f64,
+            w.sum_kl <= text_kl * w.positions as f64,
             "{name} text: mean KL"
         );
         assert!(
-            w.top1 * 100 >= 90 * w.positions,
+            w.top1 * 100 >= top1_pct * w.positions,
             "{name} text: top-1 {}",
             w.top1
         );
@@ -3148,6 +3340,46 @@ fn gpu_q8_kv_close_to_f16_1_5b() {
         return;
     };
     q8_accuracy(&m, "1.5B");
+}
+
+/// qwen3 on the q8 cache: the decode q8 attention normalizes and rotates
+/// the raw keys before quantizing them (attn_split_t), batched passes in
+/// kv_q8_b, the same warp_norm_rope: batchings and verify keep the bits,
+/// both scale groups.
+///
+/// Accuracy: 0.6B's k_norm gains have large outlier channels (max / median
+/// 6.5x in the median layer, up to 42x; 4B 2.7x / 23x), which set each
+/// row's q8 scale, so per-row q8 is coarse there. Measured q8 vs f16 mean
+/// KL prompts / text near / text far: 3.8e-2 / 5.0e-2 / 3.3e-2, top-1 down
+/// to 86.7% (q8/32: 1.4e-2 / 2.9e-2 / 1.4e-2); the model's own floor (CPU
+/// kernel sets, GPU f16 vs CPU) 1.0e-3 to 1.9e-3. A wrong norm (gain, order)
+/// gives KL ~1, so the bounds here, 2x the measured q8, still catch one; 4B
+/// meets qwen2's bounds.
+#[test]
+fn gpu_q8_qwen3() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = qwen3_mapped() else {
+        return;
+    };
+    prefill_bits(&m, "qwen3 0.6B", CacheKv::Q8 { group: 128 });
+    prefill_bits(&m, "qwen3 0.6B", CacheKv::Q8 { group: 32 });
+    verify_bits(&m, "qwen3 0.6B", CacheKv::Q8 { group: 128 });
+    q8_accuracy_within(&m, "qwen3 0.6B", 8e-2, 1e-1, 80);
+}
+
+#[test]
+fn gpu_q8_qwen3_4b() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = model_at(QWEN3_4B) else {
+        return;
+    };
+    prefill_bits(&m, "qwen3 4B", CacheKv::Q8 { group: 128 });
+    verify_bits(&m, "qwen3 4B", CacheKv::Q8 { group: 128 });
+    q8_accuracy(&m, "qwen3 4B");
 }
 
 /// Measurement (not a check; `--ignored`, the model from AXON_TEST_MODEL):
@@ -3300,6 +3532,11 @@ fn gpu_q8_attention_matches_reference() {
                             Arg::I32(max_split as i32),
                             po.arg(),
                             pml.arg(),
+                            Arg::Ptr(0),
+                            // No qwen3 norms (qn, kn, eps, rope).
+                            Arg::Ptr(0),
+                            Arg::Ptr(0),
+                            Arg::F32(0.0),
                             Arg::Ptr(0),
                         ],
                     )

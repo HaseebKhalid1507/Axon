@@ -51,7 +51,7 @@ usage:
             [--kv T] [sampling flags]       generation (greedy unless --temp > 0)
   axon logits <model.gguf> \"<prompt>\" [-k K]
                                             top-K next-token logits after the prompt
-  axon chat <model.gguf> [--system TEXT] [--ctx N] [-n N] [--draft K] [--device D]
+  axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K] [--device D]
             [--gpu-layers N] [--kv T] [sampling flags]
                                             talk to an instruct model (sampled; --temp 0: greedy)
   axon -h | --help                          this help
@@ -71,7 +71,8 @@ flags:
   --kv T      gen, chat: KV cache type, f16 (default) or q8 (cuda only: int8 with a scale per
               position and head, half the memory; slightly different results; on a split, the
               GPU layers' cache, so more layers fit); as AXON_KV
-  --system T  chat: the system message (default: Qwen2.5's)
+  --system T  chat: the system message (default: Qwen2.5's for qwen2 models, none for qwen3)
+  --no-think  chat: qwen3: answer without reasoning first (by default it thinks, as ollama does)
   --ctx N     chat: context size in tokens (default: the model's, at most 8192; on cuda, if the
               whole model doesn't fit with it, less if at least half (or 4096) fits, else a
               split); when the conversation outgrows it, the oldest exchanges are forgotten
@@ -113,7 +114,7 @@ environment:
   AXON_CUDA_GRAPHS=0         cuda: launch each token's kernels one by one instead of
                              replaying a captured CUDA graph (same results, slower)
 
-The model must be a qwen2-architecture GGUF (e.g. Qwen2.5-0.5B-Instruct Q4_K_M).";
+The model must be a qwen2 or qwen3 GGUF (e.g. Qwen2.5-0.5B-Instruct or Qwen3-4B, Q4_K_M).";
 
 /// AXON_STREAM_DECODE=1 with drafting: refused (drafting's picks come
 /// from verify passes, which never stream, so they could differ from the
@@ -170,7 +171,7 @@ fn run() -> std::io::Result<()> {
         }
         Some("-h" | "--help" | "help") => {
             println!(
-                "axon {}: CPU inference for Qwen2 GGUF models\n\n{USAGE}",
+                "axon {}: CPU inference for Qwen2/Qwen3 GGUF models\n\n{USAGE}",
                 env!("CARGO_PKG_VERSION")
             );
             return Ok(());
@@ -561,12 +562,13 @@ const CHAT_HELP: &str = concat!(
 /// `chat` subcommand: args = [axon, chat, model, flags...]. Each line of
 /// stdin is a message; on a terminal it's an interactive session.
 fn run_chat(args: &[String]) -> std::io::Result<()> {
-    const CHAT_USAGE: &str = "usage: axon chat <model.gguf> [--system TEXT] [--ctx N] [-n N] [--draft K] [--device D] \
-         [--gpu-layers N] [--kv T]";
+    const CHAT_USAGE: &str = "usage: axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K] \
+         [--device D] [--gpu-layers N] [--kv T]";
     let Some(path) = args.get(2).filter(|p| !p.starts_with('-')) else {
         fail(CHAT_USAGE);
     };
-    let mut system = chat::DEFAULT_SYSTEM.to_string();
+    let mut system = None;
+    let mut no_think = false;
     let mut ctx = None;
     let mut max_reply = usize::MAX;
     let mut max_draft = draft_env();
@@ -577,6 +579,11 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     let mut i = 3;
     while i < args.len() {
         let f = args[i].as_str();
+        if f == "--no-think" {
+            no_think = true;
+            i += 1;
+            continue;
+        }
         if sample::SampleArgs::is_flag(f) {
             sargs
                 .set(f, args.get(i + 1).map(String::as_str))
@@ -594,7 +601,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
             fail(&format!("{f} needs a value"));
         };
         if f == "--system" {
-            system = v.clone();
+            system = Some(v.clone());
         } else if f == "--device" {
             device = Device::parse(v).unwrap_or_else(|e| fail(&e));
         } else if f == "--kv" {
@@ -644,8 +651,16 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
             }
         );
     }
-    let mut conv =
-        chat::Chat::new(&net, &tok, &system, ctx).unwrap_or_else(|e| fail(&format!("{path}: {e}")));
+    // Qwen2.5's template brings a default system message, Qwen3's none.
+    let system = system.or_else(|| (model.arch == "qwen2").then(|| chat::DEFAULT_SYSTEM.into()));
+    let mut conv = chat::Chat::new(&net, &tok, system.as_deref(), ctx)
+        .unwrap_or_else(|e| fail(&format!("{path}: {e}")));
+    if no_think && !conv.thinks() {
+        fail(&format!(
+            "--no-think: {path} has no <think> token (not a thinking model)"
+        ));
+    }
+    conv.no_think = no_think;
     conv.max_reply = max_reply;
     conv.max_draft = round_draft(max_draft);
     check_stream_decode(conv.max_draft);
@@ -763,7 +778,7 @@ fn chat_repl<M: Lm>(
                     note(&format!("{dim}(conversation cleared){undim}"));
                 }
                 "system" if arg.trim().is_empty() => note("axon: usage: /system TEXT"),
-                "system" => match conv.set_system(arg.trim()) {
+                "system" => match conv.set_system(Some(arg.trim())) {
                     Ok(()) => note(&format!(
                         "{dim}(new system message; conversation cleared){undim}"
                     )),

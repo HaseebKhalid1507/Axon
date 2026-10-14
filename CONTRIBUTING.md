@@ -22,7 +22,18 @@ sha256sum models/qwen2.5-0.5b-q4_k_m.gguf
 # 74a4da8c9fdbcd15bd1f6d01d621410d31c6fc00986f5eb687824e7b93d7a9db
 ```
 
-Without it those tests fail on purpose, so a missing model can't pass for a
+The qwen3 tests also need Qwen3-0.6B (Qwen's Q8_0 build, 639 MB) at
+`models/Qwen3-0.6B-Q8_0.gguf` (`AXON_TEST_QWEN3` points them at another qwen3
+file); the GPU tests use `models/Qwen3-4B-Q4_K_M.gguf` too if it's there:
+
+```bash
+curl -L -o models/Qwen3-0.6B-Q8_0.gguf \
+  https://huggingface.co/Qwen/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q8_0.gguf
+sha256sum models/Qwen3-0.6B-Q8_0.gguf
+# 9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031
+```
+
+Without them those tests fail on purpose, so a missing model can't pass for a
 working one. To skip them, set `AXON_SKIP_MODEL_TESTS=1`. CI does this.
 
 ## The GPU tests

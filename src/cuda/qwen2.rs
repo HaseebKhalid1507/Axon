@@ -135,6 +135,9 @@ struct LayerW {
     bq: Option<usize>,
     bk: Option<usize>,
     bv: Option<usize>,
+    /// Per-head q/k RMSNorm weights (qwen3), head_dim floats each.
+    qn: Option<usize>,
+    kn: Option<usize>,
     ffn_norm: usize,
     q: Mat,
     k: Mat,
@@ -251,6 +254,8 @@ pub struct CudaQwen2<'g> {
     pub n_heads: usize,
     pub n_kv_heads: usize,
     pub head_dim: usize,
+    /// n_heads * head_dim: queries and attention output (qwen3: != dim).
+    pub q_dim: usize,
     pub ffn: usize,
     pub vocab: usize,
     eps: f32,
@@ -311,6 +316,9 @@ pub struct CudaCache<'g> {
     act: DevBuf<'g>,
     part_o: DevBuf<'g>,
     part_ml: DevBuf<'g>,
+    /// qwen3's q/k norms: this token's raw keys (kv_dim floats), from
+    /// qkv_rope to the attention, which normalizes them.
+    kraw: DevBuf<'g>,
     logits: DevBuf<'g>,
     best: DevBuf<'g>,
     /// This token's RoPE (sin, cos) per frequency.
@@ -590,7 +598,8 @@ impl<'g> CudaQwen2<'g> {
         let dim = need("embedding_length")?;
         let n_heads = need("attention.head_count")?;
         let n_kv_heads = need("attention.head_count_kv")?;
-        let head_dim = dim / n_heads;
+        let head_dim = meta(m, "attention.key_length").map_or(dim / n_heads, |v| v as usize);
+        let q_dim = n_heads * head_dim;
         let eps = meta(m, "attention.layer_norm_rms_epsilon").unwrap_or(1e-6) as f32;
         let rope_base = meta(m, "rope.freq_base").unwrap_or(10000.0);
         let trained = meta(m, "context_length").unwrap_or(32768.0);
@@ -664,6 +673,12 @@ impl<'g> CudaQwen2<'g> {
             );
             let mut opt = |s: &str| tensor_opt(m, &name(s)).map(|t| push_vec(vec_f32(m, t)));
             let (bq, bk, bv) = (opt("attn_q.bias"), opt("attn_k.bias"), opt("attn_v.bias"));
+            let (qn, kn) = (opt("attn_q_norm.weight"), opt("attn_k_norm.weight"));
+            if qn.is_some() != kn.is_some() {
+                return Err(format!(
+                    "blk.{i}: a q norm without a k norm (or the reverse)"
+                ));
+            }
             // The q8 cache stores keys minus the key bias b of the RoPE
             // pairs slow enough that the rotated bias R_t b stays within |b|
             // of b at every trained position t (angle theta t <= pi / 3):
@@ -691,6 +706,8 @@ impl<'g> CudaQwen2<'g> {
                 bq,
                 bk,
                 bv,
+                qn,
+                kn,
                 ffn_norm: push_vec(vec_f32(m, tensor(m, &name("ffn_norm.weight"))?)),
                 q,
                 k,
@@ -747,6 +764,7 @@ impl<'g> CudaQwen2<'g> {
             n_heads,
             n_kv_heads,
             head_dim,
+            q_dim,
             ffn,
             vocab,
             eps,
@@ -854,6 +872,12 @@ impl<'g> CudaQwen2<'g> {
         c.b.as_ref().map_or(1, |b| b.max)
     }
 
+    /// Longest vector quantized into an activation buffer: the model width,
+    /// the attention output (q_dim) or the FFN's hidden width.
+    fn act_len(&self) -> usize {
+        self.dim.max(self.q_dim).max(self.ffn)
+    }
+
     /// Weight bytes in VRAM.
     pub fn weight_bytes(&self) -> usize {
         self.weights.len()
@@ -894,9 +918,9 @@ impl<'g> CudaQwen2<'g> {
         };
         let kv = self.kv_cache_bytes(kv, max_ctx) + kvf;
         let host_x = if self.first > 0 { self.dim * f } else { 0 };
-        let act = act_bytes(self.dim.max(self.ffn));
+        let act = act_bytes(self.act_len());
         let parts = self.n_heads * self.max_split * (self.head_dim + 2) * f;
-        kv + (3 * self.dim + self.ffn + self.vocab + self.head_dim) * f
+        kv + (self.dim + 2 * self.q_dim + self.kv_dim() + self.ffn + self.vocab + self.head_dim) * f
             + act
             + parts
             + 64
@@ -955,12 +979,13 @@ impl<'g> CudaQwen2<'g> {
             kv,
             kvf: g.alloc(if q8 { 2 * self.kv_dim() * f } else { 0 })?,
             x: g.alloc(self.dim * f)?,
-            q: g.alloc(self.dim * f)?,
-            att: g.alloc(self.dim * f)?,
+            q: g.alloc(self.q_dim * f)?,
+            att: g.alloc(self.q_dim * f)?,
             hid: g.alloc(self.ffn * f)?,
-            act: g.alloc(act_bytes(self.dim.max(self.ffn)))?,
+            act: g.alloc(act_bytes(self.act_len()))?,
             part_o: g.alloc(self.n_heads * self.max_split * self.head_dim * f)?,
             part_ml: g.alloc(self.n_heads * self.max_split * 2 * f)?,
+            kraw: g.alloc(self.kv_dim() * f)?,
             logits: g.alloc(self.vocab * f)?,
             best: g.alloc(4)?,
             rope: g.alloc(self.head_dim / 2 * 8)?,
@@ -1006,10 +1031,10 @@ impl<'g> CudaQwen2<'g> {
         let gemv_block = (GEMV_THREADS, 1, 1);
         // SAFETY (every launch below): arguments match decode.cu's kernel
         // signatures, and every buffer is sized for what the kernel reads
-        // and writes with them: x/q/att hold dim floats, hid ffn, act
-        // act_bytes(max(dim, ffn)), the KV cache max_ctx rows per layer
-        // (P[pos] < max_ctx: `step` checks; q8: int8 rows and their scales,
-        // kvf 2 kv_dim floats), part_* n_heads * max_split
+        // and writes with them: x holds dim floats, q/att q_dim, hid ffn,
+        // act act_bytes(act_len()), kraw kv_dim, the KV cache max_ctx rows
+        // per layer (P[pos] < max_ctx: `step` checks; q8: int8 rows and
+        // their scales, kvf 2 kv_dim floats), part_* n_heads * max_split
         // splits, logits vocab; matrices are whole in the arena.
         unsafe {
             // Without the embedding, x was copied in before the step and
@@ -1066,13 +1091,19 @@ impl<'g> CudaQwen2<'g> {
                 norm(l.attn_norm)?;
                 on_launch("rmsnorm", 0)?;
                 // Row pairs: query and key RoPE pairs, value rows two by two.
-                let items = dim / 2 + kvd / 2 + kvd / 2;
+                let qd = self.q_dim;
+                let qk_norm = l.qn.is_some();
+                let items = qd / 2 + kvd / 2 + kvd / 2;
                 let bias = |b: Option<usize>| b.map_or(null, vec);
                 let kva = self.kv_args(c, li);
                 // q8: keys and values to kvf, which attn_split_q8 stores.
-                let (qkv_f, kout) = match c.mode {
-                    CacheKv::F16 => (&f.qkv_rope, [kva[0], kva[1]]),
-                    CacheKv::Q8 { .. } => (&f.qkv_rope_f32, [c.kvf.arg(), c.kvf.arg_at(kvd * 4)]),
+                let (qkv_f, kout, kraw) = match c.mode {
+                    CacheKv::F16 => (&f.qkv_rope, [kva[0], kva[1]], c.kraw.arg()),
+                    CacheKv::Q8 { .. } => (
+                        &f.qkv_rope_f32,
+                        [c.kvf.arg(), c.kvf.arg_at(kvd * 4)],
+                        c.kvf.arg(),
+                    ),
                 };
                 self.run(
                     qkv_f,
@@ -1092,7 +1123,7 @@ impl<'g> CudaQwen2<'g> {
                         bias(l.bq),
                         bias(l.bk),
                         bias(l.bv),
-                        Arg::I32(dim as i32),
+                        Arg::I32(qd as i32),
                         Arg::I32(kvd as i32),
                         Arg::I32(hd as i32),
                         Arg::I32(dim as i32),
@@ -1102,6 +1133,9 @@ impl<'g> CudaQwen2<'g> {
                         c.q.arg(),
                         kout[0],
                         kout[1],
+                        // Raw q and k for the attention's norms (qwen3):
+                        // kraw, or kvf's keys on the q8 cache.
+                        if qk_norm { kraw } else { null },
                     ],
                 )?;
                 on_launch("qkv", l.q.bytes() + l.k.bytes() + l.v.bytes())?;
@@ -1123,8 +1157,14 @@ impl<'g> CudaQwen2<'g> {
                     c.part_o.arg(),
                     c.part_ml.arg(),
                 ]);
-                if c.mode != CacheKv::F16 {
+                if c.mode == CacheKv::F16 {
+                    // qwen3's norms (attn_split_t's QkNorm), kc_out = K.
+                    args.extend_from_slice(&[c.kraw.arg(), bias(l.qn)]);
+                    args.extend_from_slice(&[bias(l.kn), Arg::F32(self.eps), c.rope.arg(), kva[0]]);
+                } else {
                     args.push(bias(l.ksh));
+                    args.extend_from_slice(&[bias(l.qn), bias(l.kn)]);
+                    args.extend_from_slice(&[Arg::F32(self.eps), c.rope.arg()]);
                 }
                 self.run(
                     attn,
@@ -1136,17 +1176,17 @@ impl<'g> CudaQwen2<'g> {
                 on_launch("attn", 0)?;
                 self.run(
                     &f.attn_combine,
-                    blocks(dim, 256),
+                    blocks(qd, 256),
                     (256, 1, 1),
                     0,
                     &[
                         c.part_o.arg(),
                         c.part_ml.arg(),
                         params,
-                        Arg::I32(dim as i32),
+                        Arg::I32(qd as i32),
                         Arg::I32(hd as i32),
                         Arg::I32(self.max_split as i32),
-                        want_k(dim),
+                        want_k(qd),
                         c.act.arg(),
                         c.att.arg(),
                     ],
