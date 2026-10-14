@@ -860,16 +860,21 @@ mod tests {
         let pool = Pool::with(4, true);
         for i in 0..40 {
             if i % 2 == 0 {
-                // Workers sit on their chunk for 2 ms while the caller drains
-                // the rest in microseconds: a stall every time.
-                let count = AtomicUsize::new(0);
-                pool.run(64, &|_| {
-                    if worker_index().is_some() {
-                        std::thread::sleep(Duration::from_millis(2));
-                    }
-                    count.fetch_add(1, Relaxed);
-                });
-                assert_eq!(count.load(Relaxed), 64);
+                // Workers sit on their chunk for 10 ms while the caller drains
+                // the rest in microseconds: a stall every time, even when the
+                // caller is starved too (qemu, tests sharing 2 vCPUs). Twice:
+                // after a slow unwind the workers have parked, and a run that
+                // wakes them isn't judged; the second finds them spinning.
+                for _ in 0..2 {
+                    let count = AtomicUsize::new(0);
+                    pool.run(64, &|_| {
+                        if worker_index().is_some() {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                        count.fetch_add(1, Relaxed);
+                    });
+                    assert_eq!(count.load(Relaxed), 64);
+                }
             } else {
                 let r = catch_unwind(AssertUnwindSafe(|| {
                     pool.run(64, &|c| {
@@ -889,7 +894,7 @@ mod tests {
         // Loss is the tail beyond the caller's own work; on a starved CPU (tests
         // in parallel on few cores) the caller's work stretches too, so only
         // check that some loss was recorded.
-        assert!(st.stall_us > 0, "2 ms stalls: {st}");
+        assert!(st.stall_us > 0, "10 ms stalls: {st}");
         assert_eq!(st.step_downs as usize, pool.threads() - pool.active());
         let count = AtomicUsize::new(0);
         pool.run(100, &|_| {
