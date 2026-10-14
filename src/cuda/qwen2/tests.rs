@@ -203,12 +203,40 @@ fn gpu_gemv(
     cols: usize,
     x: &[f32],
 ) -> Vec<f32> {
+    gpu_gemv_epi(g, km, kernel, qt, w, cols, x, &Epi::default())
+}
+
+/// The products' epilogue: bias (or none), and with `init` the residual
+/// add (mode 1: out = init + (W x + bias)).
+#[derive(Default)]
+struct Epi {
+    bias: Option<Vec<f32>>,
+    init: Option<Vec<f32>>,
+}
+
+/// `gpu_gemv` with an epilogue.
+#[allow(clippy::too_many_arguments)]
+fn gpu_gemv_epi(
+    g: &Gpu,
+    km: &Module,
+    kernel: &str,
+    qt: u32,
+    w: &[u8],
+    cols: usize,
+    x: &[f32],
+    epi: &Epi,
+) -> Vec<f32> {
     let per = if kernel == "gemv" { 2 } else { 1 };
     let rows = w.len() / quant::row_bytes(qt, cols);
     let wb = g.upload(w).unwrap();
     let xb = g.upload(x).unwrap();
     let act = g.alloc(act_bytes(cols)).unwrap();
-    let out = g.alloc(rows * 4).unwrap();
+    let out = match &epi.init {
+        Some(v) => g.upload(v).unwrap(),
+        None => g.alloc(rows * 4).unwrap(),
+    };
+    let bias = epi.bias.as_ref().map(|b| g.upload(b).unwrap());
+    let bias_arg = bias.as_ref().map_or(Arg::Ptr(0), |b| b.arg());
     let (fq, fg) = (
         km.function("quantize").unwrap(),
         km.function(kernel).unwrap(),
@@ -240,8 +268,8 @@ fn gpu_gemv(
                 Arg::I32(rows as i32),
                 Arg::I32(cols as i32),
                 act.arg(),
-                Arg::Ptr(0),
-                Arg::I32(0),
+                bias_arg,
+                Arg::I32(epi.init.is_some() as i32),
                 out.arg(),
             ],
         )
@@ -1117,6 +1145,12 @@ fn gpu_too_big_is_an_error() {
         let net = CudaQwen2::new(&g, &km, &m, 1024).unwrap();
         let _c = net.new_cache(1024);
         assert!(g.info().unwrap().free_bytes < free0);
+        // Every cache is checked against what is free when it is made (new
+        // budgets one): one too big is an Err before allocating, and a
+        // second normal one still fits.
+        let e = net.try_cache(50_000_000).err().unwrap();
+        assert!(e.contains("GiB is free") && e.contains("--ctx"), "{e}");
+        let _c2 = net.try_cache(1024).unwrap();
     }
     // Others (the desktop) allocate too: allow some slack.
     let free1 = g.info().unwrap().free_bytes;
@@ -1408,6 +1442,15 @@ fn gpu_batch_and_cache_contract() {
     assert!(e.contains("empty batch"), "{e}");
     let e = panics(&|| a.feed_batch(&[1; 5], 4, &mut cell.borrow_mut()));
     assert!(e.contains("exceed cache size 8"), "{e}");
+    // A token past the vocabulary, anywhere in a batch, before any work
+    // (embed_b would read past the embedding).
+    let v = a.vocab as u32;
+    let e = panics(&|| a.feed_batch(&[1, v, 2], 0, &mut cell.borrow_mut()));
+    assert!(e.contains(&format!("token {v} out of range")), "{e}");
+    let e = panics(&|| {
+        a.verify_argmax(&[3, 4, u32::MAX], 0, &mut cell.borrow_mut());
+    });
+    assert!(e.contains("out of range"), "{e}");
     let e = panics(&|| {
         b.forward_argmax(1, 0, &mut cell.borrow_mut());
     });
@@ -1464,9 +1507,18 @@ fn gpu_batched(
     cols: usize,
     act: &DevBuf,
     nb: usize,
+    epi: &Epi,
 ) -> Vec<f32> {
-    let out = g.alloc(rows * nb * 4).unwrap();
-    out.zero().unwrap();
+    let out = match &epi.init {
+        // The same residual rows for every token.
+        Some(v) => g.upload(&v.repeat(nb)).unwrap(),
+        None => {
+            let o = g.alloc(rows * nb * 4).unwrap();
+            o.zero().unwrap();
+            o
+        }
+    };
+    let bias = epi.bias.as_ref().map(|b| g.upload(b).unwrap());
     let f = km.function(kernel).unwrap();
     let st = act_stride_t(cols) as u64;
     let rb = quant::row_bytes(qt, cols) as u64;
@@ -1478,8 +1530,8 @@ fn gpu_batched(
         act.arg(),
         Arg::U64(st),
         Arg::I32(nb as i32),
-        Arg::Ptr(0),
-        Arg::I32(0),
+        bias.as_ref().map_or(Arg::Ptr(0), |b| b.arg()),
+        Arg::I32(epi.init.is_some() as i32),
         out.arg(),
         Arg::U64(rows as u64),
     ];
@@ -1604,6 +1656,12 @@ fn gpu_batched_products_match_gemv_bits() {
         "synth Q6_K 2304",
         "synth Q8_0 3584",
         "synth Q5_0 1536",
+        // The 7B's shapes: 14 blocks (no running sums), 74 (groups of 4-5
+        // blocks: running sums carried over several stages).
+        "synth Q4_K 3584",
+        "synth Q4_K 18944",
+        "synth Q6_K 3584",
+        "synth Q6_K 18944",
     ] {
         let synth: Vec<u8>;
         let (qt, cols, rows, wd): (u32, usize, usize, &[u8]) = if name.starts_with("synth") {
@@ -1625,13 +1683,30 @@ fn gpu_batched_products_match_gemv_bits() {
             (qt, cols, rows, &m.tensor_data(t)[..rows * rb])
         };
         let w = g.upload(wd).unwrap();
-        for nb in [1usize, 7, 8, 13, 64, 77] {
+        for nb in [1usize, 6, 7, 8, 13, 64, 66, 77] {
             let xs: Vec<Vec<f32>> = (0..nb)
                 .map(|i| rng.vec(cols, [1.0f32, 1e-3, 40.0][i % 3]))
                 .collect();
+            // Epilogues by batch: plain, bias, residual add, both (the
+            // qkv biases and the wo / down residual of a pass).
+            let epi = match nb % 4 {
+                0 => Epi::default(),
+                1 => Epi {
+                    bias: Some(rng.vec(rows, 3.0)),
+                    init: None,
+                },
+                2 => Epi {
+                    bias: None,
+                    init: Some(rng.vec(rows, 5.0)),
+                },
+                _ => Epi {
+                    bias: Some(rng.vec(rows, 3.0)),
+                    init: Some(rng.vec(rows, 5.0)),
+                },
+            };
             let want: Vec<Vec<f32>> = xs
                 .iter()
-                .map(|x| gpu_gemv(&g, &km, "gemv", qt, wd, cols, x))
+                .map(|x| gpu_gemv_epi(&g, &km, "gemv", qt, wd, cols, x, &epi))
                 .collect();
             let act = quantize_batch(&g, &km, &xs, cols);
             let mut kernels: Vec<String> = vec!["gemvn_2x8".into(), "gemvn_2x16".into()];
@@ -1650,7 +1725,7 @@ fn gpu_batched_products_match_gemv_bits() {
                 }
             }
             for k in &kernels {
-                let got = gpu_batched(&g, &km, k, qt, &w, rows, cols, &act, nb);
+                let got = gpu_batched(&g, &km, k, qt, &w, rows, cols, &act, nb, &epi);
                 for z in 0..nb {
                     let gz = &got[z * rows..(z + 1) * rows];
                     if bits(gz) != bits(&want[z]) {
@@ -1989,13 +2064,36 @@ fn verify_bits(m: &Model, name: &str) {
         // Stale slots: a different pass over the same positions first.
         let junk: Vec<u32> = toks.iter().map(|t| (t + 1) % 1000).collect();
         net.verify_argmax(&junk, start, &mut a);
+        // Passes of up to 64 tokens (one pass: the cache's max batch is
+        // larger) keep every row's logits, compared bit for bit below.
+        let rows = toks.len() <= 64;
+        if rows {
+            let bb = a.b.as_mut().unwrap();
+            bb.logits = g.alloc(64 * net.vocab * 4).unwrap();
+            bb.logits_rows = true;
+        }
         let got = net.verify_argmax(toks, start, &mut a);
-        let want: Vec<u32> = toks
-            .iter()
-            .enumerate()
-            .map(|(i, &t)| net.forward_argmax(t, start + i, &mut b))
-            .collect();
-        assert_eq!(got, want, "{name}: verify of {} tokens", toks.len());
+        if rows {
+            let all: Vec<f32> = a.b.as_ref().unwrap().logits.read().unwrap();
+            for (i, &t) in toks.iter().enumerate() {
+                let want = net.forward(t, start + i, &mut b);
+                let gr = &all[i * net.vocab..(i + 1) * net.vocab];
+                assert_eq!(
+                    bits(gr),
+                    bits(&want),
+                    "{name}: logits of verify row {i}/{}",
+                    toks.len()
+                );
+                assert_eq!(got[i], crate::argmax(&want), "{name}: pick {i}");
+            }
+        } else {
+            let want: Vec<u32> = toks
+                .iter()
+                .enumerate()
+                .map(|(i, &t)| net.forward_argmax(t, start + i, &mut b))
+                .collect();
+            assert_eq!(got, want, "{name}: verify of {} tokens", toks.len());
+        }
         assert_eq!(
             kv_bytes(&net, &a, start + toks.len()),
             kv_bytes(&net, &b, start + toks.len()),
@@ -2003,7 +2101,10 @@ fn verify_bits(m: &Model, name: &str) {
             toks.len()
         );
     }
-    eprintln!("{name}: {} verify passes == per-token picks", cases.len());
+    eprintln!(
+        "{name}: {} verify passes == per-token picks (logit bits up to 64)",
+        cases.len()
+    );
 }
 
 #[test]
@@ -2196,5 +2297,182 @@ fn cuda_attn_bench() {
     }
     for (n, b) in names.iter().zip(best) {
         eprintln!("{n:<18} {nz} queries at {start}: {:>8.1} us", b * 1e3);
+    }
+}
+
+/// Batched attention (attn_split_b, attn_warp_b, attn_combine_b) gives each
+/// query the decode kernels' bits: split partials (m, l, sums) and the
+/// quantized output, for every layout here (GQA groups 6, 7, 8; heads of 64
+/// and 128) and queries whose splits are short (warp path), long (one and
+/// several tiles), and on both sides of the warp path's limit.
+#[test]
+fn gpu_batched_attention_matches_decode_bits() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let (fc, fcb) = (
+        km.function("attn_combine").unwrap(),
+        km.function("attn_combine_b").unwrap(),
+    );
+    let mut rng = Rng(9191);
+    // (n_heads, n_kv, hd): 0.5B, 1.5B, 3B (group 8), 7B.
+    for (nh, nkv, hd) in [(14, 2, 64), (12, 2, 128), (16, 2, 128), (28, 4, 128)] {
+        let (dim, kvd) = (nh * hd, nkv * hd);
+        let fs = km.function(&format!("attn_split_{hd}")).unwrap();
+        let fsb = km.function(&format!("attn_split_b_{hd}")).unwrap();
+        let fw = km.function(&format!("attn_warp_b_{hd}")).unwrap();
+        // (start, queries, max_split)
+        for (start, nz, ms) in [(0, 40, 23), (200, 70, 8), (1000, 12, 46), (3000, 6, 23)] {
+            let ctx = start + nz;
+            let to_h = |v: Vec<f32>| -> Vec<u16> { v.into_iter().map(quant::f32_to_f16).collect() };
+            let kb = g.upload(&to_h(rng.vec(ctx * kvd, 4.0))).unwrap();
+            let vb = g.upload(&to_h(rng.vec(ctx * kvd, 1.0))).unwrap();
+            let q = rng.vec(nz * dim, 1.0);
+            let qb = g.upload(&q).unwrap();
+            let (po_n, pm_n) = (nh * ms * hd, nh * ms * 2);
+            let ast = act_stride_t(dim);
+            let scale = Arg::F32(1.0 / (hd as f32).sqrt());
+            // Batched: the split kernel for all queries, the warp kernel for
+            // those within its limit (np <= 32 ms), each into its own buffers.
+            let nsplit = |np: usize| ms.min(np.div_ceil(32));
+            let warp_n = (0..nz).filter(|&z| start + z < 32 * ms).count();
+            let mut batched = Vec::new();
+            for (f, n) in [(&fsb, nz), (&fw, warp_n)] {
+                if n == 0 {
+                    continue;
+                }
+                let po = g.alloc(n * po_n * 4).unwrap();
+                let pm = g.alloc(n * pm_n * 4).unwrap();
+                let act = g.alloc(n * ast).unwrap();
+                act.zero().unwrap(); // parts no kernel writes (n % 256 != 0) compare equal
+                let warp = std::ptr::eq(f, &fw);
+                // SAFETY: prefill.cu's signatures; buffers for n queries over
+                // ctx positions, K/V of ctx rows.
+                unsafe {
+                    g.launch(
+                        f,
+                        (
+                            nkv as u32,
+                            if warp { ms.div_ceil(4) } else { ms } as u32,
+                            n as u32,
+                        ),
+                        (if warp { 128 } else { ATT_TILE as u32 }, 1, 1),
+                        0,
+                        &[
+                            qb.arg(),
+                            kb.arg(),
+                            vb.arg(),
+                            Arg::I32(start as i32),
+                            Arg::I32(0),
+                            Arg::I32(nh as i32),
+                            Arg::I32(nkv as i32),
+                            scale,
+                            Arg::I32(ms as i32),
+                            po.arg(),
+                            pm.arg(),
+                        ],
+                    )
+                    .unwrap();
+                    g.launch(
+                        &fcb,
+                        ((dim / 256) as u32, n as u32, 1),
+                        (256, 1, 1),
+                        0,
+                        &[
+                            po.arg(),
+                            pm.arg(),
+                            Arg::I32(start as i32),
+                            Arg::I32(0),
+                            Arg::I32(dim as i32),
+                            Arg::I32(hd as i32),
+                            Arg::I32(ms as i32),
+                            Arg::I32(dim.is_multiple_of(256) as i32),
+                            act.arg(),
+                            Arg::U64(ast as u64),
+                        ],
+                    )
+                    .unwrap();
+                }
+                let (po, pm, act): (Vec<f32>, Vec<f32>, Vec<u8>) =
+                    (po.read().unwrap(), pm.read().unwrap(), act.read().unwrap());
+                batched.push((warp, n, po, pm, act));
+            }
+            for z in 0..nz {
+                let np = start + z + 1;
+                let qz = g.upload(&q[z * dim..(z + 1) * dim]).unwrap();
+                let params = g.upload(&[0u32, (np - 1) as u32, 0, 0]).unwrap();
+                let po = g.alloc(po_n * 4).unwrap();
+                let pm = g.alloc(pm_n * 4).unwrap();
+                let act = g.alloc(act_bytes(dim)).unwrap();
+                act.zero().unwrap();
+                // SAFETY: decode.cu's signatures, as gpu_attention_matches_cpu.
+                unsafe {
+                    g.launch(
+                        &fs,
+                        (nkv as u32, ms as u32, 1),
+                        (ATT_TILE as u32, 1, 1),
+                        0,
+                        &[
+                            qz.arg(),
+                            kb.arg(),
+                            vb.arg(),
+                            params.arg(),
+                            Arg::I32(nh as i32),
+                            Arg::I32(nkv as i32),
+                            scale,
+                            Arg::I32(ms as i32),
+                            po.arg(),
+                            pm.arg(),
+                        ],
+                    )
+                    .unwrap();
+                    g.launch(
+                        &fc,
+                        ((dim / 256) as u32, 1, 1),
+                        (256, 1, 1),
+                        0,
+                        &[
+                            po.arg(),
+                            pm.arg(),
+                            params.arg(),
+                            Arg::I32(dim as i32),
+                            Arg::I32(hd as i32),
+                            Arg::I32(ms as i32),
+                            Arg::I32(dim.is_multiple_of(256) as i32),
+                            act.arg(),
+                            Arg::Ptr(0),
+                        ],
+                    )
+                    .unwrap();
+                }
+                let (wpo, wpm, wact): (Vec<f32>, Vec<f32>, Vec<u8>) =
+                    (po.read().unwrap(), pm.read().unwrap(), act.read().unwrap());
+                for (warp, n, bpo, bpm, bact) in &batched {
+                    if z >= *n {
+                        continue;
+                    }
+                    let ctxs = format!("{nh}/{nkv}x{hd} np {np} splits {ms} warp {warp}");
+                    for h in 0..nh {
+                        for s in 0..nsplit(np) {
+                            let o = (h * ms + s) * hd;
+                            assert_eq!(
+                                bits(&bpo[z * po_n + o..z * po_n + o + hd]),
+                                bits(&wpo[o..o + hd]),
+                                "{ctxs}: sums head {h} split {s}"
+                            );
+                            let m = (h * ms + s) * 2;
+                            assert_eq!(
+                                bits(&bpm[z * pm_n + m..z * pm_n + m + 2]),
+                                bits(&wpm[m..m + 2]),
+                                "{ctxs}: m, l head {h} split {s}"
+                            );
+                        }
+                    }
+                    let ab = act_bytes(dim);
+                    assert!(bact[z * ast..z * ast + ab] == wact[..], "{ctxs}: output");
+                }
+            }
+        }
     }
 }

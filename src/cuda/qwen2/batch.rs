@@ -141,7 +141,10 @@ pub(super) struct BatchBufs<'g> {
     rope: DevBuf<'g>,
     part_o: DevBuf<'g>,
     part_ml: DevBuf<'g>,
-    logits: DevBuf<'g>,
+    /// HEAD_SUB rows, reused per head launch; with `logits_rows` (tests:
+    /// `keep_logits`) one row per token of the pass instead.
+    pub(super) logits: DevBuf<'g>,
+    pub(super) logits_rows: bool,
     best: DevBuf<'g>,
     host_best: HostBuf<'g>,
 }
@@ -180,6 +183,7 @@ impl<'g> CudaQwen2<'g> {
             part_o: g.alloc(att * self.n_heads * self.max_split * self.head_dim * f)?,
             part_ml: g.alloc(att * self.n_heads * self.max_split * 2 * f)?,
             logits: g.alloc(max.min(HEAD_SUB) * self.vocab * f)?,
+            logits_rows: false,
             best: g.alloc(max * 4)?,
             host_best: g.host_alloc(max * 4)?,
         })
@@ -226,7 +230,8 @@ impl<'g> CudaQwen2<'g> {
             _ => 3,
         };
         // The GEMMs' block sequence table holds 1024 blocks (prefill.cu
-        // GM_MAXSEQ): wider 32-value-block rows (K > 32768) take gemvm.
+        // GM_MAXSEQ): wider 32-value-block rows (K > 32768) take gemvm for
+        // nb <= SMALL as usual, and gemvn (dp4a, slow) for bigger batches.
         let fits = mt.cols / if ti < 2 { 256 } else { 32 } <= 1024;
         // SAFETY: the caller's contract; the matrix is whole in the arena.
         unsafe {
@@ -470,6 +475,7 @@ impl<'g> CudaQwen2<'g> {
                 let v = self.vocab;
                 for z0 in (0..nb).step_by(HEAD_SUB) {
                     let nz = (nb - z0).min(HEAD_SUB);
+                    let lg = b.logits.arg_at(if b.logits_rows { z0 * v * 4 } else { 0 });
                     self.bgemm(
                         &self.output,
                         b.act.arg_at(z0 * ast),
@@ -477,7 +483,7 @@ impl<'g> CudaQwen2<'g> {
                         nz,
                         null,
                         0,
-                        b.logits.arg(),
+                        lg,
                         v,
                     )?;
                     g.launch(
@@ -485,7 +491,7 @@ impl<'g> CudaQwen2<'g> {
                         (nz as u32, 1, 1),
                         (1024, 1, 1),
                         0,
-                        &[b.logits.arg(), Arg::I32(v as i32), b.best.arg_at(z0 * 4)],
+                        &[lg, Arg::I32(v as i32), b.best.arg_at(z0 * 4)],
                     )?;
                     on("head")?;
                 }

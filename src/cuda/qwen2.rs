@@ -59,6 +59,11 @@ const PREFILL_BATCH: usize = 512;
 /// graphs, the kernel module.
 const HEADROOM: u64 = 256 << 20;
 
+/// VRAM a new cache leaves free beyond its own size (graphs it captures,
+/// allocation granularity): less than `HEADROOM`, which `new` already keeps
+/// for the first cache.
+const CACHE_HEADROOM: u64 = 64 << 20;
+
 /// Bytes after the last matrix in the weight arena (see `new`).
 const ARENA_PAD: usize = 16;
 
@@ -448,6 +453,19 @@ impl<'g> CudaQwen2<'g> {
     pub fn try_cache(&self, max_ctx: usize) -> Result<CudaCache<'g>, String> {
         let g = self.gpu;
         let f = 4;
+        // `new` budgets one cache; each cache brings its own KV and batch
+        // scratch (up to ~200 MiB on the 7B), so every one is checked
+        // against what is free now, before any of it is allocated.
+        let want = self.cache_bytes(max_ctx) as u64 + CACHE_HEADROOM;
+        let free = g.info()?.free_bytes;
+        if want > free {
+            return Err(format!(
+                "a {max_ctx}-token cache needs {:.2} GiB of GPU memory (KV cache and scratch), \
+                 {:.2} GiB is free; try a smaller --ctx (or -n) or the CPU",
+                want as f64 / GIB,
+                free as f64 / GIB
+            ));
+        }
         let kv = g
             .alloc(2 * self.n_layers * max_ctx * self.kv_dim() * 2)
             .map_err(|e| {
@@ -799,8 +817,14 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// model.rs `hidden_batch`'s checks, with its messages.
-    fn check_batch(nb: usize, start: usize, c: &CudaCache) {
+    /// Also every token in range (as `step`): embed_b reads row
+    /// tokens[z] of the embedding unchecked.
+    fn check_batch(&self, tokens: &[u32], start: usize, c: &CudaCache) {
+        let nb = tokens.len();
         assert!(nb > 0, "feed_batch: empty batch");
+        if let Some(&t) = tokens.iter().find(|&&t| t as usize >= self.vocab) {
+            panic!("token {t} out of range");
+        }
         assert!(
             start + nb <= c.max_ctx,
             "positions {start}..{} exceed cache size {}",
@@ -919,7 +943,7 @@ impl<'g> Lm for CudaQwen2<'g> {
     /// Batched passes (batch.rs): the same cache bits as `feed` per token.
     /// Checked up front as the CPU's: a non-empty batch that fits in the cache.
     fn feed_batch(&self, tokens: &[u32], start: usize, cache: &mut CudaCache<'g>) {
-        Self::check_batch(tokens.len(), start, cache);
+        self.check_batch(tokens, start, cache);
         assert_eq!(
             cache.net, self.id,
             "a CudaCache used with another CudaQwen2"
@@ -935,7 +959,7 @@ impl<'g> Lm for CudaQwen2<'g> {
     /// Batched passes with the output head: the picks `forward_argmax`
     /// gives per token, in order (same logit bits, same tie rule).
     fn verify_argmax(&self, tokens: &[u32], start: usize, cache: &mut CudaCache<'g>) -> Vec<u32> {
-        Self::check_batch(tokens.len(), start, cache);
+        self.check_batch(tokens, start, cache);
         assert_eq!(
             cache.net, self.id,
             "a CudaCache used with another CudaQwen2"

@@ -1078,8 +1078,13 @@ __device__ __forceinline__ void gm_compute(const GmStage<GM_BN(NF)>* st, int nbl
 #pragma unroll
         for (int h = 0; h < 2; h++) {
             uint4 hd = st->w[h ? rbw : ra][0];
-            // The hardware conversion: as exact as f16_to_f32 in the
-            // products it feeds (gpu_hw_f16_scales_exact_in_products).
+            // The hardware conversion (cvt.f32.f16). For every non-NaN
+            // half it is f16_to_f32's value exactly (f16 values are a
+            // subset of f32's: no rounding), which is the guarantee. A NaN
+            // scale (only in a corrupt file) differs: cvt gives the canonical
+            // NaN, f16_to_f32 keeps the payload; both scales only feed
+            // fmul, whose NaN result is canonical either way on sm_120
+            // (gpu_hw_f16_scales_exact_in_products checks all 65536 halves).
             d[h] = h2f(hd.x & 0xffff);
             dmin[h] = h2f(hd.x >> 16);
             dm0[h] = __fmul_rn(dmin[h], 0.0f);
@@ -1634,7 +1639,10 @@ GEMVM(gemvm16_q5_0, QT_Q5_0, 2)
 
 // Test: for every half h and a few x, fmul(h2f(h), x) == fmul(f16_to_f32(h),
 // x) bit for bit (the GEMMs convert block scales with the hardware cvt, and
-// only ever multiply them; the two conversions differ in NaN payloads only).
+// only ever multiply them). The conversions agree on every non-NaN half (f16
+// is a subset of f32); on NaN, h2f gives the canonical NaN while f16_to_f32
+// keeps the payload, which the products then lose (fmul returns the
+// canonical NaN): what this checks, on the GPU at hand.
 // out[0] = mismatches. Grid 256 x 256.
 extern "C" __global__ void h2f_mul_check(u32* out) {
     u32 h = blockIdx.x * 256 + threadIdx.x;
