@@ -195,10 +195,11 @@ __device__ float block_sum(float v, float* sh) {
 
 // out = rmsnorm(x) * g (model.rs rmsnorm_into's ops), quantized into act;
 // also stored as f32 in y if y is non-null. One block of 1024 threads.
-extern "C" __global__ void rmsnorm_quant(const float* __restrict__ x, const float* __restrict__ g,
-                                         float eps, int n, int want_k, u8* __restrict__ act,
-                                         float* __restrict__ y) {
-    PDL_START();
+// The body of rmsnorm_quant, shared with the batched rmsnorm_quant_b
+// (prefill.cu): one block per vector.
+__device__ void rmsnorm_quant_dev(const float* __restrict__ x, const float* __restrict__ g,
+                                  float eps, int n, int want_k, u8* __restrict__ act,
+                                  float* __restrict__ y) {
     __shared__ float sh[32];
     float ss = 0.0f;
     for (int i = threadIdx.x; i < n; i += blockDim.x) ss = __fadd_rn(ss, __fmul_rn(x[i], x[i]));
@@ -216,6 +217,13 @@ extern "C" __global__ void rmsnorm_quant(const float* __restrict__ x, const floa
         }
         quant_warp(v, n, blk, act, want_k);
     }
+}
+
+extern "C" __global__ void rmsnorm_quant(const float* __restrict__ x, const float* __restrict__ g,
+                                         float eps, int n, int want_k, u8* __restrict__ act,
+                                         float* __restrict__ y) {
+    PDL_START();
+    rmsnorm_quant_dev(x, g, eps, n, want_k, act, y);
 }
 
 // x (n values) quantized into act. Grid: ceil(n / 256) blocks of 32 threads.
@@ -663,19 +671,20 @@ __device__ __forceinline__ void att_split(int np, int max_split, int* nsplit, in
 
 // part_o: [head][split][hd]; part_ml: [head][split][2] (m, l). Head size
 // HD 64 or 128, group <= MAX_GROUP (the host checks).
+// Block (kvh, s) of a query whose position is np - 1; shared with the
+// batched attn_split_b (prefill.cu), which runs it per query token.
 template <int HD>
 __device__ void attn_split_t(const float* __restrict__ q, const unsigned short* __restrict__ kc,
-                             const unsigned short* __restrict__ vc, const u32* __restrict__ P,
+                             const unsigned short* __restrict__ vc, int np, int kvh, int s,
                              int n_heads, int n_kv, float scale, int max_split,
                              float* __restrict__ part_o, float* __restrict__ part_ml) {
     const int hd = HD;
-    PDL_START();
     __shared__ float qs[MAX_GROUP * 128];
     __shared__ float ps[MAX_GROUP][ATT_TILE];
     __shared__ float osum[MAX_GROUP * ATT_TILE * 2];
     __shared__ float mrun[MAX_GROUP], lrun[MAX_GROUP], alpha[MAX_GROUP];
-    int kvh = blockIdx.x, s = blockIdx.y, tid = threadIdx.x;
-    int np = (int)P[P_POS] + 1, nsplit, chunk;
+    int tid = threadIdx.x;
+    int nsplit, chunk;
     att_split(np, max_split, &nsplit, &chunk);
     if (s >= nsplit) return;
     int tbeg = s * chunk, tend = min(np, tbeg + chunk);
@@ -796,7 +805,9 @@ attn_split_64(const float* __restrict__ q, const unsigned short* __restrict__ kc
               const unsigned short* __restrict__ vc, const u32* __restrict__ P, int n_heads,
               int n_kv, float scale, int max_split, float* __restrict__ part_o,
               float* __restrict__ part_ml) {
-    attn_split_t<64>(q, kc, vc, P, n_heads, n_kv, scale, max_split, part_o, part_ml);
+    PDL_START();
+    attn_split_t<64>(q, kc, vc, (int)P[P_POS] + 1, blockIdx.x, blockIdx.y, n_heads, n_kv, scale,
+                      max_split, part_o, part_ml);
 }
 
 extern "C" __global__ void __launch_bounds__(ATT_TILE)
@@ -804,7 +815,9 @@ attn_split_128(const float* __restrict__ q, const unsigned short* __restrict__ k
                const unsigned short* __restrict__ vc, const u32* __restrict__ P, int n_heads,
                int n_kv, float scale, int max_split, float* __restrict__ part_o,
                float* __restrict__ part_ml) {
-    attn_split_t<128>(q, kc, vc, P, n_heads, n_kv, scale, max_split, part_o, part_ml);
+    PDL_START();
+    attn_split_t<128>(q, kc, vc, (int)P[P_POS] + 1, blockIdx.x, blockIdx.y, n_heads, n_kv, scale,
+                      max_split, part_o, part_ml);
 }
 
 // Most splits attn_combine merges (the host keeps max_split below).
@@ -816,18 +829,19 @@ attn_split_128(const float* __restrict__ q, const unsigned short* __restrict__ k
 // a block has 256 / hd whole heads). Warp j works out head j's weights
 // (sums in a fixed shuffle order), then every thread sums its element over
 // the splits in order.
-extern "C" __global__ void attn_combine(const float* __restrict__ part_o,
-                                        const float* __restrict__ part_ml,
-                                        const u32* __restrict__ P, int n, int hd, int max_split,
-                                        int want_k, u8* __restrict__ act, float* __restrict__ y) {
-    PDL_START();
+// Block blk of the combine for a query at position np - 1 (shared with
+// attn_combine_b, prefill.cu).
+__device__ void attn_combine_dev(const float* __restrict__ part_o,
+                                 const float* __restrict__ part_ml, int np, int blk, int n,
+                                 int hd, int max_split, int want_k, u8* __restrict__ act,
+                                 float* __restrict__ y) {
     __shared__ float vals[256];
     __shared__ float ws[256 / 64][MAX_SPLIT];
     __shared__ float linv[256 / 64];
-    int e = blockIdx.x * 256 + threadIdx.x, lane = threadIdx.x & 31, wid = threadIdx.x >> 5;
-    int np = (int)P[P_POS] + 1, nsplit, chunk;
+    int e = blk * 256 + threadIdx.x, lane = threadIdx.x & 31, wid = threadIdx.x >> 5;
+    int nsplit, chunk;
     att_split(np, max_split, &nsplit, &chunk);
-    int h0 = blockIdx.x * 256 / hd, nh = min(256 / hd, n / hd - h0);
+    int h0 = blk * 256 / hd, nh = min(256 / hd, n / hd - h0);
     if (wid < nh) {
         const float* ml = part_ml + (u64)(h0 + wid) * max_split * 2;
         float M = -INFINITY;
@@ -858,8 +872,17 @@ extern "C" __global__ void attn_combine(const float* __restrict__ part_o,
     if (threadIdx.x < 32) {
         float v[8];
         for (int i = 0; i < 8; i++) v[i] = vals[threadIdx.x * 8 + i];
-        quant_warp(v, n, blockIdx.x, act, want_k);
+        quant_warp(v, n, blk, act, want_k);
     }
+}
+
+extern "C" __global__ void attn_combine(const float* __restrict__ part_o,
+                                        const float* __restrict__ part_ml,
+                                        const u32* __restrict__ P, int n, int hd, int max_split,
+                                        int want_k, u8* __restrict__ act, float* __restrict__ y) {
+    PDL_START();
+    attn_combine_dev(part_o, part_ml, (int)P[P_POS] + 1, blockIdx.x, n, hd, max_split, want_k, act,
+                     y);
 }
 
 // Index of the largest of x[0..n): the last of equal maxima, NaN never

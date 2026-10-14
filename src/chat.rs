@@ -23,7 +23,7 @@
 use crate::lm::Lm;
 use crate::spec::PromptLookup;
 use crate::tokenizer::Tokenizer;
-use crate::{GenOpts, PREFILL_BATCH, generate};
+use crate::{GenOpts, generate};
 use std::io;
 use std::time::Instant;
 
@@ -232,14 +232,15 @@ impl<'a, M: Lm> Chat<'a, M> {
         // Feed what the cache doesn't have yet; the last token for its logits.
         let t0 = Instant::now();
         let last = self.hist.len() - 1;
-        for (i, batch) in self.hist[self.fed..last].chunks(PREFILL_BATCH).enumerate() {
+        let pb = self.net.prefill_batch();
+        for (i, batch) in self.hist[self.fed..last].chunks(pb).enumerate() {
             if cancel() {
                 self.hist.truncate(start);
                 r.interrupted = true;
                 return Ok(r);
             }
             self.net
-                .feed_batch(batch, self.fed + i * PREFILL_BATCH, &mut self.cache);
+                .feed_batch(batch, self.fed + i * pb, &mut self.cache);
         }
         let logits = self.net.forward(self.hist[last], last, &mut self.cache);
         self.fed = self.hist.len();

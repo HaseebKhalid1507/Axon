@@ -56,6 +56,11 @@ pub struct LaunchConfig {
     pub n_attrs: c_uint,
 }
 
+/// `CUfunction_attribute` values (cuda.h).
+pub const FUNC_ATTR_NUM_REGS: c_int = 4;
+pub const FUNC_ATTR_LOCAL_SIZE_BYTES: c_int = 3;
+pub const FUNC_ATTR_MAX_DYNAMIC_SHARED_SIZE_BYTES: c_int = 8;
+
 /// `CUdevice_attribute` values used for `DeviceInfo` (cuda.h).
 pub const ATTR_SM_COUNT: c_int = 16;
 pub const ATTR_MEMORY_CLOCK_KHZ: c_int = 36;
@@ -124,6 +129,9 @@ api! {
         fn cuModuleLoadData(*mut CUmodule, *const c_void) -> CUresult;
         fn cuModuleUnload(CUmodule) -> CUresult;
         fn cuModuleGetFunction(*mut CUfunction, CUmodule, *const c_char) -> CUresult;
+        // Kernel attributes: the GEMMs' dynamic shared memory over 48 KiB.
+        fn cuFuncSetAttribute(CUfunction, c_int, c_int) -> CUresult;
+        fn cuFuncGetAttribute(*mut c_int, c_int, CUfunction) -> CUresult;
         fn cuLaunchKernelEx(
             *const LaunchConfig,
             CUfunction,

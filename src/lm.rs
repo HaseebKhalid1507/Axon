@@ -41,6 +41,12 @@ pub trait Lm {
     /// The greedy pick after each `tokens[b]` at `start + b`, as
     /// `forward_argmax` on each in order would give (speculative verify).
     fn verify_argmax(&self, tokens: &[u32], start: usize, cache: &mut Self::Cache) -> Vec<u32>;
+
+    /// Prompt tokens per `feed_batch` call that suit this backend (callers
+    /// may pass any size: results don't depend on the batching).
+    fn prefill_batch(&self) -> usize {
+        crate::PREFILL_BATCH
+    }
 }
 
 impl Lm for Qwen2<'_> {
@@ -169,5 +175,12 @@ impl Lm for Backend<'_> {
 
     fn verify_argmax(&self, tokens: &[u32], start: usize, cache: &mut BackendCache) -> Vec<u32> {
         dispatch!(self, cache, |n, c| Lm::verify_argmax(n, tokens, start, c))
+    }
+
+    fn prefill_batch(&self) -> usize {
+        match self {
+            Backend::Cpu(n) => n.prefill_batch(),
+            Backend::Cuda(n) => n.prefill_batch(),
+        }
     }
 }

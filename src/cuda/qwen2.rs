@@ -1,10 +1,13 @@
-//! Qwen2 decode on the GPU: `CudaQwen2`, an `Lm` whose weights, KV cache and
-//! scratch all live in VRAM, running decode.cu's kernels one token at a time.
+//! Qwen2 on the GPU: `CudaQwen2`, an `Lm` whose weights, KV cache and
+//! scratch all live in VRAM, running decode.cu's kernels one token at a time
+//! (`forward`), and prefill.cu's for batches (`feed_batch`, `verify_argmax`:
+//! batch.rs), which give every token the same bits as the one-token step.
 //!
 //! Weights are uploaded once, in their GGUF block formats (no repacking),
 //! into one arena. Everything a token needs is allocated by `new` (weights)
-//! and `new_cache` (KV cache, activations, logits), so a forward never
-//! allocates; `new` checks that both fit in the free VRAM first.
+//! and `new_cache` (KV cache, activations, logits, scratch for batches of up
+//! to `PREFILL_BATCH` tokens), so a forward never allocates; `new` checks
+//! that both fit in the free VRAM first.
 //!
 //! One token is a fixed sequence of 9 kernels per layer (`enqueue`) whose
 //! only per-token inputs, the token id and position, are read from a device
@@ -40,6 +43,18 @@ const MAX_GROUP: usize = 8;
 const MAX_SPLIT: usize = 256;
 /// Threads per GEMV block (decode.cu GEMV_THREADS).
 const GEMV_THREADS: u32 = 128;
+/// Rows and tokens per block of the tensor-core GEMMs (prefill.cu GM_BM,
+/// GM_BN), and their dynamic shared memory: two GmStage buffers (the kernel
+/// traps if given less).
+const GM_BM: usize = 32;
+const GM_BN: usize = 64;
+const GEMM_SMEM: usize = 2 * 31744 + 4 * 1024;
+/// The same for gemm1_* (32 tokens per block).
+const GM1_BN: usize = 32;
+const GEMM1_SMEM: usize = 2 * 20992 + 4 * 1024;
+/// Most tokens per batched pass on the GPU (`Lm::prefill_batch`): big
+/// batches keep the tensor cores busy and read the weights fewer times.
+const PREFILL_BATCH: usize = 512;
 /// VRAM kept free beyond what `new` plans for: the context's own growth,
 /// graphs, the kernel module.
 const HEADROOM: u64 = 256 << 20;
@@ -124,6 +139,10 @@ pub struct CudaQwen2<'g> {
     max_split: usize,
     /// Replay a captured graph per token (else launch kernel by kernel).
     pub graphs: bool,
+    bf: batch::BatchFns<'g>,
+    /// Most tokens per batched pass (`Lm::prefill_batch`); caches get
+    /// scratch for that many (or their size, if smaller).
+    batch: usize,
 }
 
 /// What `CudaQwen2` keeps per sequence: the KV cache, activations, logits,
@@ -152,6 +171,8 @@ pub struct CudaCache<'g> {
     host_out: HostBuf<'g>,
     /// Captured steps: [without the output head, with it].
     graph: [Option<Graph<'g>>; 2],
+    /// Scratch for batched passes (prefill, verify).
+    b: Option<batch::BatchBufs<'g>>,
 }
 
 /// Bytes of a quantized-activation buffer for n values (decode.cu Act).
@@ -354,6 +375,8 @@ impl<'g> CudaQwen2<'g> {
             layers,
             max_split,
             graphs: std::env::var("AXON_CUDA_GRAPHS").map_or(true, |v| v != "0"),
+            bf: batch::BatchFns::new(module, head_dim)?,
+            batch: PREFILL_BATCH,
         };
 
         // Check the whole plan fits before allocating any of it.
@@ -414,7 +437,11 @@ impl<'g> CudaQwen2<'g> {
         let kv = 2 * self.n_layers * max_ctx * self.kv_dim() * 2;
         let act = act_bytes(self.dim.max(self.ffn));
         let parts = self.n_heads * self.max_split * (self.head_dim + 2) * f;
-        kv + (3 * self.dim + self.ffn + self.vocab + self.head_dim) * f + act + parts + 64
+        kv + (3 * self.dim + self.ffn + self.vocab + self.head_dim) * f
+            + act
+            + parts
+            + 64
+            + self.batch_bytes(self.batch_for(max_ctx))
     }
 
     /// A cache for positions 0..max_ctx, or why there's no room for it.
@@ -446,6 +473,7 @@ impl<'g> CudaQwen2<'g> {
             host_params: g.host_alloc(16)?,
             host_out: g.host_alloc(self.vocab * f)?,
             graph: [None, None],
+            b: Some(self.batch_bufs(self.batch_for(max_ctx))?),
         };
         // Stale KV rows are never read (attention stops at pos), but zeroed
         // memory keeps a bug from reading NaNs.
@@ -803,6 +831,8 @@ impl<'g> CudaQwen2<'g> {
         Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
     }
 
+    /// `token` into the cache at `pos` by the one-token step (the batched
+    /// passes' reference in the tests; feed_batch of one token uses it too).
     fn feed(&self, c: &mut CudaCache<'g>, token: u32, pos: usize) -> Result<(), String> {
         self.step(c, token, pos, false)?;
         self.gpu.sync()
@@ -886,26 +916,39 @@ impl<'g> Lm for CudaQwen2<'g> {
             .unwrap_or_else(|e| Self::die(e))
     }
 
-    /// One token at a time (G2): the batched prefill is G3's. Checked up
-    /// front as the CPU's: a non-empty batch that fits in the cache.
+    /// Batched passes (batch.rs): the same cache bits as `feed` per token.
+    /// Checked up front as the CPU's: a non-empty batch that fits in the cache.
     fn feed_batch(&self, tokens: &[u32], start: usize, cache: &mut CudaCache<'g>) {
         Self::check_batch(tokens.len(), start, cache);
-        for (i, &t) in tokens.iter().enumerate() {
-            self.feed(cache, t, start + i)
-                .unwrap_or_else(|e| Self::die(e));
-        }
+        assert_eq!(
+            cache.net, self.id,
+            "a CudaCache used with another CudaQwen2"
+        );
+        let r = if tokens.len() == 1 {
+            self.feed(cache, tokens[0], start) // the step's graph: fewer launches
+        } else {
+            self.feed_tokens(cache, tokens, start)
+        };
+        r.unwrap_or_else(|e| Self::die(e));
     }
 
-    /// `forward_argmax` per token, in order (G2; a batched verify is G3's).
+    /// Batched passes with the output head: the picks `forward_argmax`
+    /// gives per token, in order (same logit bits, same tie rule).
     fn verify_argmax(&self, tokens: &[u32], start: usize, cache: &mut CudaCache<'g>) -> Vec<u32> {
         Self::check_batch(tokens.len(), start, cache);
-        tokens
-            .iter()
-            .enumerate()
-            .map(|(i, &t)| self.forward_argmax(t, start + i, cache))
-            .collect()
+        assert_eq!(
+            cache.net, self.id,
+            "a CudaCache used with another CudaQwen2"
+        );
+        self.verify_tokens(cache, tokens, start)
+            .unwrap_or_else(|e| Self::die(e))
+    }
+
+    fn prefill_batch(&self) -> usize {
+        self.batch
     }
 }
 
+mod batch;
 #[cfg(test)]
 mod tests;
