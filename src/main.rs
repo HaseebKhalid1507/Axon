@@ -63,7 +63,9 @@ flags:
   --device D  gen, chat: cpu (default) or cuda (an NVIDIA GPU; a model too big for its memory
               is split: the last layers that fit on the GPU, the first ones on the CPU)
   --gpu-layers N  gen, chat: with --device cuda, run the last N layers (and the output head) on
-              the GPU and the rest on the CPU (0 = all on the CPU; default: all if they fit)
+              the GPU and the rest on the CPU (0 = all on the CPU, as --device cpu; default: all
+              if they fit with 256 MiB to spare, else as many as fit with another 640 MiB left
+              for the desktop; an explicit N only needs the 256 MiB)
   --system T  chat: the system message (default: Qwen2.5's)
   --ctx N     chat: context size in tokens (default: the model's, at most 8192); when the
               conversation outgrows it, the oldest exchanges are forgotten
@@ -222,19 +224,30 @@ fn gpu_layers_env() -> Option<usize> {
     )
 }
 
+/// --device and --gpu-layers (else $AXON_GPU_LAYERS on CUDA) as the
+/// backend to load: a usage error if --gpu-layers came without CUDA, and
+/// 0 GPU layers is the plain CPU backend (loaded as --device cpu loads it:
+/// a copy of the file, not a map). Before `open_model_with`.
+fn placement(device: Device, gpu_layers: Option<usize>) -> (Device, Option<usize>) {
+    if device == Device::Cpu && gpu_layers.is_some() {
+        fail("--gpu-layers needs --device cuda");
+    }
+    let gpu_layers = gpu_layers.or_else(|| (device == Device::Cuda).then(gpu_layers_env)?);
+    match gpu_layers {
+        Some(0) => (Device::Cpu, None),
+        g => (device, g),
+    }
+}
+
 /// The model on `device` with room for `ctx` tokens, split as `gpu_layers`
-/// says (see `Backend::new`); a usage error if the GPU can't be used (no
-/// driver or device, too little memory, ...) or --gpu-layers came without it.
+/// says (`placement`'s; see `Backend::new`); a usage error if the GPU can't
+/// be used (no driver or device, too little memory, ...).
 fn backend<'a>(
     model: &'a gguf::Model,
     device: Device,
     ctx: usize,
     gpu_layers: Option<usize>,
 ) -> Backend<'a> {
-    if device == Device::Cpu && gpu_layers.is_some() {
-        fail("--gpu-layers needs --device cuda");
-    }
-    let gpu_layers = gpu_layers.or_else(|| (device == Device::Cuda).then(gpu_layers_env)?);
     Backend::new(model, device, ctx, gpu_layers)
         .unwrap_or_else(|e| fail(&format!("--device cuda: {e}")))
 }
@@ -286,6 +299,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     }
     let max_draft = round_draft(max_draft);
 
+    let (device, gpu_layers) = placement(device, gpu_layers);
     let model = open_model_with(path, true, copy_for(device));
     let tok = tokenizer::Tokenizer::from_gguf(&model);
 
@@ -515,6 +529,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         i += 2;
     }
 
+    let (device, gpu_layers) = placement(device, gpu_layers);
     let model = open_model_with(path, true, copy_for(device));
     // RoPE past the trained length gives garbage; 0 = the GGUF doesn't say.
     let trained = model.ctx_len() as usize;
@@ -906,12 +921,22 @@ fn human_bytes(b: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{GenOpts, argmax, generate};
+    use super::{GenOpts, argmax, generate, placement};
+    use crate::lm::Device;
     use crate::model::Qwen2;
     use crate::spec::PromptLookup;
 
     fn reference(l: &[f32]) -> u32 {
         (0..l.len()).max_by(|&a, &b| l[a].total_cmp(&l[b])).unwrap() as u32
+    }
+
+    /// --gpu-layers 0 is the CPU backend, decided before the model loads
+    /// (so it's copied, as --device cpu, not mapped); other counts stay.
+    #[test]
+    fn gpu_layers_zero_is_the_cpu() {
+        assert_eq!(placement(Device::Cuda, Some(0)), (Device::Cpu, None));
+        assert_eq!(placement(Device::Cuda, Some(7)), (Device::Cuda, Some(7)));
+        assert_eq!(placement(Device::Cpu, None), (Device::Cpu, None));
     }
 
     #[test]

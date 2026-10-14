@@ -71,6 +71,17 @@ fn gemm2_smem(qt: u32, bn: usize, st: usize) -> usize {
 /// Most tokens per batched pass on the GPU (`Lm::prefill_batch`): big
 /// batches keep the tensor cores busy and read the weights fewer times.
 const PREFILL_BATCH: usize = 512;
+/// `PREFILL_BATCH` for the GPU half of a split (first > 0, `crate::hybrid`):
+/// the CPU half's batched pass sets the pace, so the hybrid feeds at most
+/// `crate::PREFILL_BATCH` tokens per call, and a speculative verify pass
+/// takes K + 1 (8 at --draft 7; bigger ones are chunked, same bits). The
+/// scratch for 512 would cost 160 MiB more on 32B (99 MiB on 14B) that the
+/// split's placement (`vram_need`) counts against layers. Raise it (the
+/// field `batch`, set from this in `plan`) if the GPU half is ever fed
+/// bigger chunks, e.g. a prefill whose CPU layers are streamed to the GPU.
+/// Placement stays monotone: first == 0 (the whole model) gets the bigger
+/// `PREFILL_BATCH` scratch on top of one more layer.
+pub const SPLIT_BATCH: usize = crate::PREFILL_BATCH;
 /// VRAM kept free beyond what `new` plans for: the context's own growth,
 /// graphs, the kernel module.
 const HEADROOM: u64 = 256 << 20;
@@ -169,7 +180,8 @@ pub struct CudaQwen2<'g> {
     pub graphs: bool,
     bf: batch::BatchFns<'g>,
     /// Most tokens per batched pass (`Lm::prefill_batch`); caches get
-    /// scratch for that many (or their size, if smaller).
+    /// scratch for that many (or their size, if smaller), and `vram_need`
+    /// counts it. `PREFILL_BATCH`, or `SPLIT_BATCH` for a split's GPU half.
     batch: usize,
 }
 
@@ -279,7 +291,7 @@ impl<'g> CudaQwen2<'g> {
         m: &Model,
         max_ctx: usize,
     ) -> Result<CudaQwen2<'g>, String> {
-        Self::new_layers(gpu, module, m, max_ctx, 0)
+        Self::new_layers(gpu, module, m, max_ctx, 0, &mut |_| {})
     }
 
     /// `new` with layers first..n_layers only, plus the output norm and
@@ -287,13 +299,16 @@ impl<'g> CudaQwen2<'g> {
     /// split across devices (`hybrid`). The other layers' weights are never
     /// read or uploaded. With first > 0 every call takes the hidden state
     /// after layer first - 1 (`forward_hidden` & co.), not tokens, and the
-    /// cache holds n_layers - first layers.
-    pub fn new_layers(
+    /// cache holds n_layers - first layers. `uploaded` sees each matrix
+    /// right after its bytes are on the GPU (the hybrid hands its pages
+    /// back to `m` there, so the GPU half never sits in RAM all at once).
+    pub fn new_layers<'m>(
         gpu: &'g Gpu,
         module: &'g Module<'g>,
-        m: &Model,
+        m: &'m Model,
         max_ctx: usize,
         first: usize,
+        uploaded: &mut dyn FnMut(&'m Tensor),
     ) -> Result<CudaQwen2<'g>, String> {
         let (mut net, plan) = Self::plan(gpu, module, m, first)?;
         let want = net.vram_want(&plan, max_ctx);
@@ -312,7 +327,8 @@ impl<'g> CudaQwen2<'g> {
         // to 2 bytes past a Q8_0/Q5_0 block, which may be the arena's last.
         net.weights = gpu.alloc(plan.total + ARENA_PAD)?;
         for (t, off) in plan.uploads {
-            net.weights.write_at(off, m.tensor_data(t))?;
+            net.weights.write_at(off, m.tensor_data(t))?; // synchronous
+            uploaded(t);
         }
         net.vecs = gpu.upload(&plan.vecs)?;
         net.freq = gpu.alloc(plan.freq.len() * 8)?;
@@ -499,7 +515,11 @@ impl<'g> CudaQwen2<'g> {
             max_split,
             graphs: std::env::var("AXON_CUDA_GRAPHS").map_or(true, |v| v != "0"),
             bf: batch::BatchFns::new(module, head_dim, sms)?,
-            batch: PREFILL_BATCH,
+            batch: if first > 0 {
+                SPLIT_BATCH
+            } else {
+                PREFILL_BATCH
+            },
         };
         let plan = Plan {
             uploads,
@@ -541,7 +561,12 @@ impl<'g> CudaQwen2<'g> {
         l + if head { self.output.bytes() } else { 0 }
     }
 
-    /// VRAM a cache for `max_ctx` positions takes.
+    /// VRAM a cache for `max_ctx` positions takes. On a split's GPU half
+    /// (first > 0) it also counts the pinned host buffers for incoming
+    /// hidden states (`host_x` here and per batch token in `batch_bytes`),
+    /// which live in RAM, not VRAM: a harmless overcount of
+    /// (batch + 1) * dim * 4 bytes (~1.3 MB on 32B), kept so `vram_need`
+    /// stays one formula.
     pub fn cache_bytes(&self, max_ctx: usize) -> usize {
         let f = 4;
         let kv = 2 * self.layers.len() * max_ctx * self.kv_dim() * 2;

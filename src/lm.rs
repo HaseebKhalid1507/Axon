@@ -125,7 +125,9 @@ impl<'a> Backend<'a> {
     /// the model, the last g layers on the GPU (`HybridQwen2`); None puts
     /// it all on the GPU if it fits, else as many of the last layers as fit
     /// (`hybrid::auto_gpu_layers`, told on stderr). Err says why CUDA
-    /// can't be used.
+    /// can't be used. Some(0) is not a split: the CLI maps it to
+    /// `Device::Cpu` before loading (a CPU model copies the file, a GPU one
+    /// maps it).
     pub fn new(
         m: &'a Model,
         device: Device,
@@ -136,10 +138,7 @@ impl<'a> Backend<'a> {
             return Ok(Backend::Cpu(Qwen2::new(m)));
         }
         if gpu_layers == Some(0) {
-            // All on the CPU: no GPU context to open.
-            let h = HybridQwen2::new(None, m, max_ctx, 0)?;
-            eprintln!("split:       {}", h.describe(max_ctx));
-            return Ok(Backend::Hybrid(Box::new(h)));
+            return Err("--gpu-layers 0 is --device cpu".into());
         }
         let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open()?));
         let module: &'static Module<'static> = Box::leak(Box::new(Kernels::module(gpu)?));
@@ -148,7 +147,8 @@ impl<'a> Backend<'a> {
             None => match CudaQwen2::new(gpu, module, m, max_ctx) {
                 Ok(n) => return Ok(Backend::Cuda(Box::new(n))),
                 Err(e) => {
-                    let g = crate::hybrid::auto_gpu_layers(gpu, module, m, max_ctx)?;
+                    let free = gpu.info()?.free_bytes;
+                    let g = crate::hybrid::auto_gpu_layers(gpu, module, m, max_ctx, free)?;
                     if g == 0 {
                         return Err(format!("{e}; not even one layer fits"));
                     }

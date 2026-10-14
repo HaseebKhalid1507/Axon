@@ -344,6 +344,11 @@ fn hybrid_halves_own_their_weights() {
         let kept = t.name == "token_embd.weight";
         assert_eq!(released(&m, t), !kept, "{}", t.name);
     }
+    // The GPU half's batch scratch is the split's, not a whole model's.
+    assert_eq!(
+        h.gpu.as_ref().unwrap().prefill_batch(),
+        crate::cuda::qwen2::SPLIT_BATCH
+    );
     // And it runs (no released bytes read).
     let mut c = h.new_cache(8);
     h.feed_batch(&[1, 2, 3], 0, &mut c);
@@ -372,7 +377,7 @@ fn hybrid_auto_split_is_the_most_that_fit() {
     // layers' KV would take 1.5x the free VRAM, so about half fit.
     let per_tok = (need(0, 2048) - need(0, 1024)) / 1024;
     let ctx = (free * 3 / 2 / per_tok) as usize;
-    let auto = auto_gpu_layers(&g, &km, &m, ctx).unwrap();
+    let auto = auto_gpu_layers(&g, &km, &m, ctx, free).unwrap();
     eprintln!(
         "1.5B ctx {ctx}: auto split {auto}/{n} of {:.2} GiB free",
         free as f64 / GIB
@@ -384,4 +389,13 @@ fn hybrid_auto_split_is_the_most_that_fit() {
         "one more layer would have fit"
     );
     assert!(auto > 0 && auto < n, "a split, not all or nothing");
+    // An explicit count that doesn't fit (all: 1.5x free in KV alone) says
+    // which and what to do.
+    let e = HybridQwen2::new(Some((&g, &km)), &m, ctx, n)
+        .err()
+        .expect("all layers can't fit");
+    assert!(
+        e.contains(&format!("{n}/{n} layers")) && e.contains("or fewer --gpu-layers"),
+        "{e}"
+    );
 }

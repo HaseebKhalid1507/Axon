@@ -26,13 +26,20 @@
 
 use crate::cuda::qwen2::{CudaCache, CudaQwen2};
 use crate::cuda::{Gpu, Module};
-use crate::gguf::Model;
+use crate::gguf::{Model, Tensor};
 use crate::lm::Lm;
 use crate::model::{KvCache, Qwen2};
 
 /// VRAM the automatic split leaves free beyond what `CudaQwen2` plans for
 /// (which keeps 256 MiB for the context's own growth): the desktop's
 /// compositor and other programs share the GPU.
+///
+/// Asymmetric on purpose: the all-GPU plan (`CudaQwen2::new`, tried first)
+/// needs only its `HEADROOM`, as it always has; a split, which only happens
+/// when the GPU is already full, keeps `DESKTOP_MARGIN` on top so the
+/// desktop isn't starved. So a model that just misses the all-GPU plan
+/// gets ~2 layers (32B) fewer than `HEADROOM` alone would allow. An
+/// explicit --gpu-layers is checked against `HEADROOM` only.
 pub const DESKTOP_MARGIN: u64 = 640 << 20;
 
 const GIB: f64 = (1u64 << 30) as f64;
@@ -61,7 +68,8 @@ fn block_count(m: &Model) -> Result<usize, String> {
 }
 
 /// Most layers the GPU can take (the last ones, plus the head) with room
-/// for a `max_ctx`-token cache and `DESKTOP_MARGIN` to spare: 0 if not even
+/// for a `max_ctx`-token cache and `DESKTOP_MARGIN` to spare out of `free`
+/// bytes of VRAM (the caller's `gpu.info()?.free_bytes`): 0 if not even
 /// one fits. The VRAM a split needs only shrinks as layers move to the CPU,
 /// so a binary search over `CudaQwen2::vram_need` finds it.
 pub fn auto_gpu_layers(
@@ -69,9 +77,9 @@ pub fn auto_gpu_layers(
     module: &Module,
     m: &Model,
     max_ctx: usize,
+    free: u64,
 ) -> Result<usize, String> {
     let n = block_count(m)?;
-    let free = gpu.info()?.free_bytes;
     let fits = |g: usize| -> Result<bool, String> {
         let need = CudaQwen2::vram_need(gpu, module, m, max_ctx, n - g)?;
         Ok(need + DESKTOP_MARGIN <= free)
@@ -105,10 +113,24 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
         let g = gpu_layers.min(n);
         let k = n - g;
         // The GPU first: a VRAM shortfall fails before the CPU's repack.
+        // Each matrix's pages go back right after its upload, so the GPU
+        // half (~9 GB on 32B) never sits in the page cache all at once; the
+        // norms and biases (read into `plan`) after.
         let gpu = match (g, dev) {
             (0, _) => None,
             (_, None) => return Err("GPU layers without a GPU".into()),
-            (_, Some((gpu, module))) => Some(CudaQwen2::new_layers(gpu, module, m, max_ctx, k)?),
+            (_, Some((gpu, module))) => {
+                let mut uploaded = |t: &Tensor| {
+                    if gpu_part(&t.name, k, n) {
+                        m.release(t);
+                    }
+                };
+                let net = CudaQwen2::new_layers(gpu, module, m, max_ctx, k, &mut uploaded)
+                    .map_err(|e| {
+                        format!("{g}/{n} layers on the GPU: {e}, or fewer --gpu-layers")
+                    })?;
+                Some(net)
+            }
         };
         if g > 0 {
             release_gpu_part(m, k, n);
@@ -172,22 +194,27 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
 
 type Half<'a, 'm> = Option<(&'a Qwen2<'m>, &'a mut KvCache)>;
 
-/// Hand back what the GPU half uploaded: layers k..n, the output norm and
-/// head, and the embedding if the CPU doesn't read it (k == 0).
+/// Whether tensor `name` is the GPU half's alone (with layers k..n): its
+/// layers, the output norm and head, and the embedding if the CPU doesn't
+/// read it (k == 0; a tied head uploaded from it when k > 0 stays).
+fn gpu_part(name: &str, k: usize, n: usize) -> bool {
+    if let Some(rest) = name.strip_prefix("blk.") {
+        let l: usize = rest
+            .split('.')
+            .next()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        l >= k && l < n
+    } else {
+        name.starts_with("output") || (k == 0 && name == "token_embd.weight")
+    }
+}
+
+/// Hand back what the GPU half uploaded (`gpu_part`); the matrices were
+/// already released one by one as they went up, so this is the norms and
+/// biases (releasing twice is a no-op).
 fn release_gpu_part(m: &Model, k: usize, n: usize) {
-    let mine = |name: &str| {
-        if let Some(rest) = name.strip_prefix("blk.") {
-            let l: usize = rest
-                .split('.')
-                .next()
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0);
-            l >= k && l < n
-        } else {
-            name.starts_with("output") || (k == 0 && name == "token_embd.weight")
-        }
-    };
-    for t in m.tensors.iter().filter(|t| mine(&t.name)) {
+    for t in m.tensors.iter().filter(|t| gpu_part(&t.name, k, n)) {
         m.release(t);
     }
 }
@@ -264,7 +291,8 @@ impl<'g> Lm for HybridQwen2<'_, 'g> {
     }
 
     /// The CPU half's batch whenever it has layers: its batched pass sets
-    /// the pace, and the GPU half chunks any size into its own passes.
+    /// the pace, and the GPU half chunks any size into its own passes
+    /// (its scratch is sized for this: `cuda::qwen2::SPLIT_BATCH`).
     fn prefill_batch(&self) -> usize {
         match (&self.cpu, &self.gpu) {
             (None, Some(g)) => g.prefill_batch(),
