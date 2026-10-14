@@ -4,7 +4,10 @@
 //! batch.rs), which give every token the same bits as the one-token step.
 //!
 //! Weights are uploaded once, in their GGUF block formats (no repacking),
-//! into one arena. Everything a token needs is allocated by `new` (weights)
+//! into one arena: all of them, or for a model split across devices
+//! (`new_layers`, `crate::hybrid`) the last layers and the head only, which
+//! then start from the hidden state the CPU's layers left (one copy in).
+//! Everything a token needs is allocated by `new` (weights)
 //! and `new_cache` (KV cache, activations, logits, scratch for batches of up
 //! to `PREFILL_BATCH` tokens), so a forward never allocates; `new` checks
 //! that both fit in the free VRAM first.
@@ -68,6 +71,17 @@ fn gemm2_smem(qt: u32, bn: usize, st: usize) -> usize {
 /// Most tokens per batched pass on the GPU (`Lm::prefill_batch`): big
 /// batches keep the tensor cores busy and read the weights fewer times.
 const PREFILL_BATCH: usize = 512;
+/// `PREFILL_BATCH` for the GPU half of a split (first > 0, `crate::hybrid`):
+/// the CPU half's batched pass sets the pace, so the hybrid feeds at most
+/// `crate::PREFILL_BATCH` tokens per call, and a speculative verify pass
+/// takes K + 1 (8 at --draft 7; bigger ones are chunked, same bits). The
+/// scratch for 512 would cost 160 MiB more on 32B (99 MiB on 14B) that the
+/// split's placement (`vram_need`) counts against layers. Raise it (the
+/// field `batch`, set from this in `plan`) if the GPU half is ever fed
+/// bigger chunks, e.g. a prefill whose CPU layers are streamed to the GPU.
+/// Placement stays monotone: first == 0 (the whole model) gets the bigger
+/// `PREFILL_BATCH` scratch on top of one more layer.
+pub const SPLIT_BATCH: usize = crate::PREFILL_BATCH;
 /// VRAM kept free beyond what `new` plans for: the context's own growth,
 /// graphs, the kernel module.
 const HEADROOM: u64 = 256 << 20;
@@ -143,15 +157,22 @@ pub struct CudaQwen2<'g> {
     pub ffn: usize,
     pub vocab: usize,
     eps: f32,
-    /// Quantized matrices, embedding included.
+    /// Index of the first layer here: 0, or the first after those another
+    /// backend runs (`new_layers`), whose hidden state comes in instead of
+    /// a token (`Input::Hidden`).
+    pub first: usize,
+    /// Quantized matrices, embedding included (if first == 0).
     weights: DevBuf<'g>,
     /// Norm weights and biases, f32.
     vecs: DevBuf<'g>,
     /// RoPE frequencies, f64 (base^(-2i/hd), as model.rs rope_table).
     freq: DevBuf<'g>,
-    embd: Mat,
+    /// None when first > 0: tokens are embedded by the backend that runs
+    /// the first layers.
+    embd: Option<Mat>,
     output: Mat,
     output_norm: usize,
+    /// Layers first..n_layers (index i is layer first + i).
     layers: Vec<LayerW>,
     /// Attention splits (grid y of attn_split).
     max_split: usize,
@@ -159,7 +180,8 @@ pub struct CudaQwen2<'g> {
     pub graphs: bool,
     bf: batch::BatchFns<'g>,
     /// Most tokens per batched pass (`Lm::prefill_batch`); caches get
-    /// scratch for that many (or their size, if smaller).
+    /// scratch for that many (or their size, if smaller), and `vram_need`
+    /// counts it. `PREFILL_BATCH`, or `SPLIT_BATCH` for a split's GPU half.
     batch: usize,
 }
 
@@ -187,6 +209,8 @@ pub struct CudaCache<'g> {
     params: DevBuf<'g>,
     host_params: HostBuf<'g>,
     host_out: HostBuf<'g>,
+    /// The incoming hidden state (dim floats) when the model's first > 0.
+    host_x: Option<HostBuf<'g>>,
     /// Captured steps: [without the output head, with it].
     graph: [Option<Graph<'g>>; 2],
     /// Scratch for batched passes (prefill, verify).
@@ -197,6 +221,23 @@ pub struct CudaCache<'g> {
 fn act_bytes(n: usize) -> usize {
     let np = n.next_multiple_of(256);
     2 * np + np / 64 + np / 8 + np / 8
+}
+
+/// What `CudaQwen2::new_layers` uploads: each matrix's (tensor, arena
+/// offset), the arena's size, norms and biases, RoPE frequencies.
+struct Plan<'m> {
+    uploads: Vec<(&'m Tensor, usize)>,
+    total: usize,
+    vecs: Vec<f32>,
+    freq: Vec<f64>,
+}
+
+/// What a step starts from: a token (embedded here, first == 0) or the
+/// hidden state another backend's layers 0..first left (dim floats).
+#[derive(Clone, Copy)]
+pub(crate) enum Input<'x> {
+    Token(u32),
+    Hidden(&'x [f32]),
 }
 
 /// `t` placed in the weight arena after the last of `uploads` (256-byte
@@ -250,6 +291,78 @@ impl<'g> CudaQwen2<'g> {
         m: &Model,
         max_ctx: usize,
     ) -> Result<CudaQwen2<'g>, String> {
+        Self::new_layers(gpu, module, m, max_ctx, 0, &mut |_| {})
+    }
+
+    /// `new` with layers first..n_layers only, plus the output norm and
+    /// head (and the embedding if first == 0): the GPU half of a model
+    /// split across devices (`hybrid`). The other layers' weights are never
+    /// read or uploaded. With first > 0 every call takes the hidden state
+    /// after layer first - 1 (`forward_hidden` & co.), not tokens, and the
+    /// cache holds n_layers - first layers. `uploaded` sees each matrix
+    /// right after its bytes are on the GPU (the hybrid hands its pages
+    /// back to `m` there, so the GPU half never sits in RAM all at once).
+    pub fn new_layers<'m>(
+        gpu: &'g Gpu,
+        module: &'g Module<'g>,
+        m: &'m Model,
+        max_ctx: usize,
+        first: usize,
+        uploaded: &mut dyn FnMut(&'m Tensor),
+    ) -> Result<CudaQwen2<'g>, String> {
+        let (mut net, plan) = Self::plan(gpu, module, m, first)?;
+        let want = net.vram_want(&plan, max_ctx);
+        let free = gpu.info()?.free_bytes;
+        if want > free {
+            return Err(format!(
+                "the model needs {:.2} GiB of GPU memory ({:.2} GiB weights, {:.2} GiB KV cache \
+                 and scratch for {max_ctx} tokens), {:.2} GiB is free; try a smaller --ctx (or -n) or the CPU",
+                want as f64 / GIB,
+                plan.total as f64 / GIB,
+                net.cache_bytes(max_ctx) as f64 / GIB,
+                free as f64 / GIB
+            ));
+        }
+        // 16 bytes of slack: the 2-byte-aligned block loads (ld8_a2) read up
+        // to 2 bytes past a Q8_0/Q5_0 block, which may be the arena's last.
+        net.weights = gpu.alloc(plan.total + ARENA_PAD)?;
+        for (t, off) in plan.uploads {
+            net.weights.write_at(off, m.tensor_data(t))?; // synchronous
+            uploaded(t);
+        }
+        net.vecs = gpu.upload(&plan.vecs)?;
+        net.freq = gpu.alloc(plan.freq.len() * 8)?;
+        let fb: Vec<u64> = plan.freq.iter().map(|f| f.to_bits()).collect();
+        net.freq.write(&fb)?;
+        Ok(net)
+    }
+
+    /// VRAM `new_layers(.., max_ctx, first)` checks it has, without
+    /// allocating anything: the split's placement (`hybrid::gpu_layers`).
+    pub fn vram_need(
+        gpu: &'g Gpu,
+        module: &'g Module<'g>,
+        m: &Model,
+        max_ctx: usize,
+        first: usize,
+    ) -> Result<u64, String> {
+        let (net, plan) = Self::plan(gpu, module, m, first)?;
+        Ok(net.vram_want(&plan, max_ctx))
+    }
+
+    /// Weights, small vectors, cache for `max_ctx` and `HEADROOM`, in bytes.
+    fn vram_want(&self, plan: &Plan, max_ctx: usize) -> u64 {
+        let small = plan.vecs.len() * 4 + plan.freq.len() * 8;
+        (plan.total + ARENA_PAD + small + self.cache_bytes(max_ctx)) as u64 + HEADROOM
+    }
+
+    /// The model with nothing allocated yet, and what to upload.
+    fn plan<'m>(
+        gpu: &'g Gpu,
+        module: &'g Module<'g>,
+        m: &'m Model,
+        first: usize,
+    ) -> Result<(CudaQwen2<'g>, Plan<'m>), String> {
         crate::model::check_supported(m).map_err(|e| e.to_string())?;
         let need = |k: &str| {
             meta(m, k)
@@ -274,6 +387,11 @@ impl<'g> CudaQwen2<'g> {
                 "{group} query heads per kv head isn't supported on the GPU (at most {MAX_GROUP})"
             ));
         }
+        if first >= n_layers {
+            return Err(format!(
+                "layers {first}.. of {n_layers}: the GPU needs at least one"
+            ));
+        }
 
         // Every matrix's (tensor, arena offset), uploaded once all fit.
         let mut uploads: Vec<(&Tensor, usize)> = Vec::new();
@@ -289,12 +407,14 @@ impl<'g> CudaQwen2<'g> {
             }
         };
         let embd_t = tensor(m, "token_embd.weight")?;
-        let embd = place(embd_t, &mut uploads);
-        let vocab = embd.rows;
-        let output = match tensor_opt(m, "output.weight") {
-            Some(t) => place(t, &mut uploads),
-            None => embd,
+        let embd = (first == 0).then(|| place(embd_t, &mut uploads));
+        let output = match (tensor_opt(m, "output.weight"), embd) {
+            (Some(t), _) => place(t, &mut uploads),
+            (None, Some(e)) => e,
+            // Tied, and the embedding isn't here: upload it as the head.
+            (None, None) => place(embd_t, &mut uploads),
         };
+        let vocab = output.rows;
         gemv_type(&output, "output.weight")?;
 
         let mut vecs: Vec<f32> = Vec::new();
@@ -305,8 +425,8 @@ impl<'g> CudaQwen2<'g> {
             off
         };
         let output_norm = push_vec(vec_f32(m, tensor(m, "output_norm.weight")?));
-        let mut layers = Vec::with_capacity(n_layers);
-        for i in 0..n_layers {
+        let mut layers = Vec::with_capacity(n_layers - first);
+        for i in first..n_layers {
             let name = |s: &str| format!("blk.{i}.{s}");
             let mut mat = |s: &str| -> Result<Mat, String> {
                 let mt = place(tensor(m, &name(s))?, &mut uploads);
@@ -356,7 +476,7 @@ impl<'g> CudaQwen2<'g> {
         // Up to ~8 attention blocks per SM at long contexts.
         let max_split = (8 * sms / n_kv_heads).clamp(1, MAX_SPLIT);
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let mut net = CudaQwen2 {
+        let net = CudaQwen2 {
             gpu,
             id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             f: Fns {
@@ -384,6 +504,7 @@ impl<'g> CudaQwen2<'g> {
             ffn,
             vocab,
             eps,
+            first,
             weights: gpu.alloc(0)?,
             vecs: gpu.alloc(0)?,
             freq: gpu.alloc(0)?,
@@ -394,34 +515,25 @@ impl<'g> CudaQwen2<'g> {
             max_split,
             graphs: std::env::var("AXON_CUDA_GRAPHS").map_or(true, |v| v != "0"),
             bf: batch::BatchFns::new(module, head_dim, sms)?,
-            batch: PREFILL_BATCH,
+            batch: if first > 0 {
+                SPLIT_BATCH
+            } else {
+                PREFILL_BATCH
+            },
         };
+        let plan = Plan {
+            uploads,
+            vecs,
+            freq,
+            total,
+        };
+        Ok((net, plan))
+    }
 
-        // Check the whole plan fits before allocating any of it.
-        let small = vecs.len() * 4 + freq.len() * 8;
-        let want = (total + ARENA_PAD + small + net.cache_bytes(max_ctx)) as u64 + HEADROOM;
-        let free = gpu.info()?.free_bytes;
-        if want > free {
-            return Err(format!(
-                "the model needs {:.2} GiB of GPU memory ({:.2} GiB weights, {:.2} GiB KV cache \
-                 and scratch for {max_ctx} tokens), {:.2} GiB is free; try a smaller --ctx (or -n) or the CPU",
-                want as f64 / GIB,
-                total as f64 / GIB,
-                net.cache_bytes(max_ctx) as f64 / GIB,
-                free as f64 / GIB
-            ));
-        }
-        // 16 bytes of slack: the 2-byte-aligned block loads (ld8_a2) read up
-        // to 2 bytes past a Q8_0/Q5_0 block, which may be the arena's last.
-        net.weights = gpu.alloc(total + ARENA_PAD)?;
-        for (t, off) in uploads {
-            net.weights.write_at(off, m.tensor_data(t))?;
-        }
-        net.vecs = gpu.upload(&vecs)?;
-        net.freq = gpu.alloc(freq.len() * 8)?;
-        let fb: Vec<u64> = freq.iter().map(|f| f.to_bits()).collect();
-        net.freq.write(&fb)?;
-        Ok(net)
+    /// The whole KV cache's bytes (f16 bits), every layer here (tests).
+    #[cfg(test)]
+    pub(crate) fn kv_bits(c: &CudaCache) -> Vec<u16> {
+        c.kv.read().unwrap()
     }
 
     fn kv_dim(&self) -> usize {
@@ -449,16 +561,23 @@ impl<'g> CudaQwen2<'g> {
         l + if head { self.output.bytes() } else { 0 }
     }
 
-    /// VRAM a cache for `max_ctx` positions takes.
+    /// VRAM a cache for `max_ctx` positions takes. On a split's GPU half
+    /// (first > 0) it also counts the pinned host buffers for incoming
+    /// hidden states (`host_x` here and per batch token in `batch_bytes`),
+    /// which live in RAM, not VRAM: a harmless overcount of
+    /// (batch + 1) * dim * 4 bytes (~1.3 MB on 32B), kept so `vram_need`
+    /// stays one formula.
     pub fn cache_bytes(&self, max_ctx: usize) -> usize {
         let f = 4;
-        let kv = 2 * self.n_layers * max_ctx * self.kv_dim() * 2;
+        let kv = 2 * self.layers.len() * max_ctx * self.kv_dim() * 2;
+        let host_x = if self.first > 0 { self.dim * f } else { 0 };
         let act = act_bytes(self.dim.max(self.ffn));
         let parts = self.n_heads * self.max_split * (self.head_dim + 2) * f;
         kv + (3 * self.dim + self.ffn + self.vocab + self.head_dim) * f
             + act
             + parts
             + 64
+            + host_x
             + self.batch_bytes(self.batch_for(max_ctx))
     }
 
@@ -480,7 +599,7 @@ impl<'g> CudaQwen2<'g> {
             ));
         }
         let kv = g
-            .alloc(2 * self.n_layers * max_ctx * self.kv_dim() * 2)
+            .alloc(2 * self.layers.len() * max_ctx * self.kv_dim() * 2)
             .map_err(|e| {
                 format!(
                     "no room for a {max_ctx}-token KV cache on the GPU ({e}); try a smaller --ctx"
@@ -503,6 +622,10 @@ impl<'g> CudaQwen2<'g> {
             params: g.alloc(16)?,
             host_params: g.host_alloc(16)?,
             host_out: g.host_alloc(self.vocab * f)?,
+            host_x: match self.first {
+                0 => None,
+                _ => Some(g.host_alloc(self.dim * f)?),
+            },
             graph: [None, None],
             b: Some(self.batch_bufs(self.batch_for(max_ctx))?),
         };
@@ -542,22 +665,26 @@ impl<'g> CudaQwen2<'g> {
         // (P[pos] < max_ctx: `step` checks), part_* n_heads * max_split
         // splits, logits vocab; matrices are whole in the arena.
         unsafe {
-            g.launch(
-                &f.embed,
-                blocks(dim, 256),
-                (256, 1, 1),
-                0,
-                &[
-                    Arg::I32(self.embd.qt as i32),
-                    w(&self.embd),
-                    Arg::U64(self.embd.rb as u64),
-                    Arg::I32(dim as i32),
-                    c.params.arg(),
-                    c.x.arg(),
-                ],
-            )?;
-            on_launch("embed", self.embd.rb)?;
-            self.run(
+            // Without the embedding, x was copied in before the step and
+            // rope_table is the first kernel: no PDL overlap to ask for.
+            if let Some(embd) = &self.embd {
+                g.launch(
+                    &f.embed,
+                    blocks(dim, 256),
+                    (256, 1, 1),
+                    0,
+                    &[
+                        Arg::I32(embd.qt as i32),
+                        w(embd),
+                        Arg::U64(embd.rb as u64),
+                        Arg::I32(dim as i32),
+                        c.params.arg(),
+                        c.x.arg(),
+                    ],
+                )?;
+                on_launch("embed", embd.rb)?;
+            }
+            g.launch_with(
                 &f.rope_table,
                 (1, 1, 1),
                 ((hd / 2) as u32, 1, 1),
@@ -568,6 +695,7 @@ impl<'g> CudaQwen2<'g> {
                     c.params.arg(),
                     c.rope.arg(),
                 ],
+                self.embd.is_some(),
             )?;
             on_launch("rope", 0)?;
             for (li, l) in self.layers.iter().enumerate() {
@@ -793,12 +921,12 @@ impl<'g> CudaQwen2<'g> {
         }
     }
 
-    /// Run `token` at `pos` (logits and argmax too with `head`), up to the
+    /// Run `input` at `pos` (logits and argmax too with `head`), up to the
     /// point of reading results: enqueued, not waited for.
     fn step(
         &self,
         c: &mut CudaCache<'g>,
-        token: u32,
+        input: Input,
         pos: usize,
         head: bool,
     ) -> Result<(), String> {
@@ -808,6 +936,27 @@ impl<'g> CudaQwen2<'g> {
             "position {pos} exceeds cache size {}",
             c.max_ctx
         );
+        let token = match input {
+            Input::Token(t) => {
+                assert!(
+                    self.first == 0,
+                    "layers {}..: takes hidden states",
+                    self.first
+                );
+                t
+            }
+            Input::Hidden(x) => {
+                assert!(self.first > 0, "takes tokens");
+                assert_eq!(x.len(), self.dim, "hidden state size");
+                // Ordered before the step on the stream (the graph reads c.x).
+                let hx = c.host_x.as_mut().expect("first > 0: host_x");
+                for (d, v) in hx.bytes_mut()?.chunks_exact_mut(4).zip(x) {
+                    d.copy_from_slice(&v.to_le_bytes());
+                }
+                hx.copy_to(&c.x, 0, self.dim * 4)?;
+                0
+            }
+        };
         assert!((token as usize) < self.vocab, "token {token} out of range");
         let p = c.host_params.bytes_mut()?;
         p[0..4].copy_from_slice(&token.to_le_bytes());
@@ -833,11 +982,16 @@ impl<'g> CudaQwen2<'g> {
     /// Also every token in range (as `step`): embed_b reads row
     /// tokens[z] of the embedding unchecked.
     fn check_batch(&self, tokens: &[u32], start: usize, c: &CudaCache) {
-        let nb = tokens.len();
-        assert!(nb > 0, "feed_batch: empty batch");
         if let Some(&t) = tokens.iter().find(|&&t| t as usize >= self.vocab) {
             panic!("token {t} out of range");
         }
+        Self::check_positions(tokens.len(), start, c);
+    }
+
+    /// `check_batch` without tokens (hidden-state input: the CPU half
+    /// that made it checked them).
+    fn check_positions(nb: usize, start: usize, c: &CudaCache) {
+        assert!(nb > 0, "feed_batch: empty batch");
         assert!(
             start + nb <= c.max_ctx,
             "positions {start}..{} exceed cache size {}",
@@ -850,9 +1004,9 @@ impl<'g> CudaQwen2<'g> {
         panic!("CUDA: {e}")
     }
 
-    /// Logits after `token` at `pos`.
-    fn logits(&self, c: &mut CudaCache<'g>, token: u32, pos: usize) -> Result<Vec<f32>, String> {
-        self.step(c, token, pos, true)?;
+    /// Logits after `input` at `pos`.
+    fn logits(&self, c: &mut CudaCache<'g>, input: Input, pos: usize) -> Result<Vec<f32>, String> {
+        self.step(c, input, pos, true)?;
         let n = self.vocab * 4;
         c.host_out.copy_from(&c.logits, 0, n)?;
         let b = &c.host_out.bytes_mut()?[..n]; // waits for the step and copy
@@ -861,8 +1015,8 @@ impl<'g> CudaQwen2<'g> {
             .collect())
     }
 
-    fn pick(&self, c: &mut CudaCache<'g>, token: u32, pos: usize) -> Result<u32, String> {
-        self.step(c, token, pos, true)?;
+    fn pick(&self, c: &mut CudaCache<'g>, input: Input, pos: usize) -> Result<u32, String> {
+        self.step(c, input, pos, true)?;
         c.host_out.copy_from(&c.best, 0, 4)?;
         let b = &c.host_out.bytes_mut()?[..4]; // waits for the step and copy
         Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
@@ -871,8 +1025,44 @@ impl<'g> CudaQwen2<'g> {
     /// `token` into the cache at `pos` by the one-token step (the batched
     /// passes' reference in the tests; feed_batch of one token uses it too).
     fn feed(&self, c: &mut CudaCache<'g>, token: u32, pos: usize) -> Result<(), String> {
-        self.step(c, token, pos, false)?;
+        self.step(c, Input::Token(token), pos, false)?;
         self.gpu.sync()
+    }
+
+    /// `Lm::forward` from the hidden state after layer first - 1 (first > 0).
+    pub fn forward_hidden(&self, c: &mut CudaCache<'g>, x: &[f32], pos: usize) -> Vec<f32> {
+        self.logits(c, Input::Hidden(x), pos)
+            .unwrap_or_else(|e| Self::die(e))
+    }
+
+    /// `Lm::forward_argmax` from a hidden state (first > 0).
+    pub fn argmax_hidden(&self, c: &mut CudaCache<'g>, x: &[f32], pos: usize) -> u32 {
+        self.pick(c, Input::Hidden(x), pos)
+            .unwrap_or_else(|e| Self::die(e))
+    }
+
+    /// `Lm::feed_batch` from hidden states, xs[b * dim..][..dim] at
+    /// start + b (first > 0); one state goes through the step's graph.
+    pub fn feed_hidden(&self, c: &mut CudaCache<'g>, xs: &[f32], start: usize) {
+        let nb = xs.len() / self.dim;
+        Self::check_positions(nb, start, c);
+        assert_eq!(xs.len(), nb * self.dim, "hidden states: whole rows");
+        let r = if nb == 1 {
+            self.step(c, Input::Hidden(xs), start, false)
+                .and_then(|_| self.gpu.sync())
+        } else {
+            self.feed_tokens(c, batch::BatchIn::Hidden(xs), start)
+        };
+        r.unwrap_or_else(|e| Self::die(e));
+    }
+
+    /// `Lm::verify_argmax` from hidden states, laid out as `feed_hidden`'s.
+    pub fn verify_hidden(&self, c: &mut CudaCache<'g>, xs: &[f32], start: usize) -> Vec<u32> {
+        let nb = xs.len() / self.dim;
+        Self::check_positions(nb, start, c);
+        assert_eq!(xs.len(), nb * self.dim, "hidden states: whole rows");
+        self.verify_tokens(c, batch::BatchIn::Hidden(xs), start)
+            .unwrap_or_else(|e| Self::die(e))
     }
 
     /// Per-kernel GPU time of one step (no graph), in first-launch order,
@@ -944,12 +1134,12 @@ impl<'g> Lm for CudaQwen2<'g> {
     }
 
     fn forward(&self, token: u32, pos: usize, cache: &mut CudaCache<'g>) -> Vec<f32> {
-        self.logits(cache, token, pos)
+        self.logits(cache, Input::Token(token), pos)
             .unwrap_or_else(|e| Self::die(e))
     }
 
     fn forward_argmax(&self, token: u32, pos: usize, cache: &mut CudaCache<'g>) -> u32 {
-        self.pick(cache, token, pos)
+        self.pick(cache, Input::Token(token), pos)
             .unwrap_or_else(|e| Self::die(e))
     }
 
@@ -964,7 +1154,7 @@ impl<'g> Lm for CudaQwen2<'g> {
         let r = if tokens.len() == 1 {
             self.feed(cache, tokens[0], start) // the step's graph: fewer launches
         } else {
-            self.feed_tokens(cache, tokens, start)
+            self.feed_tokens(cache, batch::BatchIn::Tokens(tokens), start)
         };
         r.unwrap_or_else(|e| Self::die(e));
     }
@@ -977,7 +1167,7 @@ impl<'g> Lm for CudaQwen2<'g> {
             cache.net, self.id,
             "a CudaCache used with another CudaQwen2"
         );
-        self.verify_tokens(cache, tokens, start)
+        self.verify_tokens(cache, batch::BatchIn::Tokens(tokens), start)
             .unwrap_or_else(|e| Self::die(e))
     }
 
@@ -988,4 +1178,4 @@ impl<'g> Lm for CudaQwen2<'g> {
 
 mod batch;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

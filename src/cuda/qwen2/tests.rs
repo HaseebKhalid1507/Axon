@@ -26,7 +26,7 @@ fn kl(p: &[f32], q: &[f32]) -> f64 {
 }
 
 #[derive(Default, Debug)]
-struct Agree {
+pub(crate) struct Agree {
     positions: usize,
     top1: usize,
     max_kl: f64,
@@ -38,7 +38,7 @@ struct Agree {
 
 /// Reference `r` vs `o` logits after the prompt `ids` and after each of
 /// `steps` greedy tokens of `r`, fed to both.
-fn compare<R: Lm, O: Lm>(r: &R, o: &O, ids: &[u32], steps: usize, a: &mut Agree) {
+pub(crate) fn compare<R: Lm, O: Lm>(r: &R, o: &O, ids: &[u32], steps: usize, a: &mut Agree) {
     let mut rc = r.new_cache(ids.len() + steps + 1);
     let mut oc = o.new_cache(ids.len() + steps + 1);
     let (&last, rest) = ids.split_last().unwrap();
@@ -66,7 +66,7 @@ fn compare<R: Lm, O: Lm>(r: &R, o: &O, ids: &[u32], steps: usize, a: &mut Agree)
     }
 }
 
-const PROMPTS: [&str; 6] = [
+pub(crate) const PROMPTS: [&str; 6] = [
     "The capital of France is",
     "fn add(a: i32, b: i32) -> i32 { a + b }\nfn sub(a: i32, b: i32) -> i32 {",
     "Once upon a time, in a small village by the sea, there lived",
@@ -95,7 +95,7 @@ fn agreement(m: &Model, steps: usize) -> (Agree, Agree) {
     (ag, ac)
 }
 
-fn report(name: &str, a: &Agree) {
+pub(crate) fn report(name: &str, a: &Agree) {
     eprintln!(
         "{name}: top-1 {}/{} ({:.1}%), KL mean {:.2e} max {:.2e}, max |dlogit| {:.3}, \
          flip margins {:?}",
@@ -133,6 +133,12 @@ fn logits_match(m: &Model, name: &str) {
     let (ag, ac) = agreement(m, 32);
     report(&format!("{name} gpu vs cpu"), &ag);
     report(&format!("{name} cpu rows vs cpu"), &ac);
+    assert_graded(&ag, &ac);
+}
+
+/// `logits_match`'s bounds: `ag` (a backend vs the CPU) against `ac` (the
+/// CPU's per-row kernels vs its default ones), over the same positions.
+pub(crate) fn assert_graded(ag: &Agree, ac: &Agree) {
     let n = ag.positions;
     // Top-1: at most 2% of positions behind the CPU's self-agreement.
     assert!(
@@ -941,7 +947,7 @@ fn cuda_profile() {
         let mut gt: Vec<f64> = (0..20)
             .map(|_| {
                 let e0 = g.record().unwrap();
-                net.step(&mut c, 100, pos, true).unwrap();
+                net.step(&mut c, Input::Token(100), pos, true).unwrap();
                 let e1 = g.record().unwrap();
                 e0.ms_to(&e1).unwrap() as f64
             })
@@ -956,7 +962,7 @@ fn cuda_profile() {
         let (mut tl, mut ts) = (0f64, 0f64);
         for i in 0..20 {
             let t0 = std::time::Instant::now();
-            net.step(&mut c, 100, pos + i, true).unwrap();
+            net.step(&mut c, Input::Token(100), pos + i, true).unwrap();
             let t1 = std::time::Instant::now();
             g.sync().unwrap();
             tl += (t1 - t0).as_secs_f64();
@@ -2232,10 +2238,16 @@ fn cuda_prefill_profile() {
     }
     for round in 0..3 {
         let mut evs = vec![("start", g.record().unwrap())];
-        net.pass(&mut c, &ids[start..], start, nb <= 16, &mut |name| {
-            evs.push((name, g.record()?));
-            Ok(())
-        })
+        net.pass(
+            &mut c,
+            batch::BatchIn::Tokens(&ids[start..]),
+            start,
+            nb <= 16,
+            &mut |name| {
+                evs.push((name, g.record()?));
+                Ok(())
+            },
+        )
         .unwrap();
         g.sync().unwrap();
         if round < 2 {

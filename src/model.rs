@@ -182,8 +182,11 @@ pub struct Qwen2<'a> {
     token_embd: &'a Tensor,
     /// token_embd's bytes (never released: see `Weight::load`)
     embd: &'a [u8],
+    /// Empty, and `output` None, in a model of the first layers only
+    /// (`new_layers`): the output head is another backend's.
     output_norm: Vec<f32>,
-    output: Weight<'a>,
+    output: Option<Weight<'a>>,
+    /// Layers 0..layers.len() (all n_layers unless `new_layers`).
     layers: Vec<Layer<'a>>,
 }
 
@@ -194,6 +197,25 @@ pub struct KvCache {
     data: KvData,
     kv_dim: usize,
     max_ctx: usize,
+}
+
+impl KvCache {
+    /// Every layer's K then V, all positions, as f32 bits (tests: exact,
+    /// the f16 cache widens losslessly).
+    #[cfg(test)]
+    pub(crate) fn bits(&self) -> Vec<u32> {
+        fn all<T: KvElem>(c: &Layers<T>) -> Vec<u32> {
+            let kv =
+                c.k.iter()
+                    .zip(&c.v)
+                    .flat_map(|(k, v)| k.iter().chain(v.iter()));
+            kv.map(|x| x.to_f32().to_bits()).collect()
+        }
+        match &self.data {
+            KvData::F16(c) => all(c),
+            KvData::F32(c) => all(c),
+        }
+    }
 }
 
 /// Run `$body` with `$k`, `$v` bound to layer `$l`'s K and V cache slices
@@ -379,12 +401,22 @@ impl<'a> Qwen2<'a> {
     }
 
     pub fn new_with(m: &'a Model, repack: bool) -> Qwen2<'a> {
-        Self::build(m, repack, false)
+        Self::build(m, repack, false, usize::MAX)
+    }
+
+    /// The embedding and layers 0..k only (all of them, and the output head,
+    /// if k >= n_layers): the CPU half of a model split across devices
+    /// (`hybrid`). Only these weights are read, repacked and released; the
+    /// rest of the mapping is never touched. Without the head it runs
+    /// `hidden` / `hidden_batch` only; its cache holds k layers.
+    pub fn new_layers(m: &'a Model, repack: bool, k: usize) -> Qwen2<'a> {
+        Self::build(m, repack, false, k)
     }
 
     /// `tie`: use the token embedding as the output matrix even if the model
-    /// has its own (tests: the tied-embedding case on any model).
-    fn build(m: &'a Model, repack: bool, tie: bool) -> Qwen2<'a> {
+    /// has its own (tests: the tied-embedding case on any model). `keep`:
+    /// layers 0..keep only, the output head only if that's all of them.
+    fn build(m: &'a Model, repack: bool, tie: bool, keep: usize) -> Qwen2<'a> {
         if let Err(e) = check_supported(m) {
             panic!("{e}");
         }
@@ -394,6 +426,7 @@ impl<'a> Qwen2<'a> {
             |k: &str| meta_num(m, &key(k)).unwrap_or_else(|| panic!("missing metadata {}", key(k)));
 
         let n_layers = need("block_count") as usize;
+        let (k, head) = (keep.min(n_layers), keep >= n_layers);
         let dim = need("embedding_length") as usize;
         let n_heads = need("attention.head_count") as usize;
         let n_kv_heads = need("attention.head_count_kv") as usize;
@@ -423,7 +456,11 @@ impl<'a> Qwen2<'a> {
         let lt = |i: usize, s: &str| find(m, &format!("blk.{i}.{s}"));
         let mut plan: Vec<Option<(usize, usize)>> = Vec::new();
         let mut total = 0;
-        for t in std::iter::once(out_t).chain((0..n_layers).flat_map(|i| MATS.map(|s| lt(i, s)))) {
+        let out_ts = head.then_some(out_t);
+        for t in out_ts
+            .into_iter()
+            .chain((0..k).flat_map(|i| MATS.map(|s| lt(i, s))))
+        {
             let len = if repack { repacked_len(t) } else { None };
             plan.push(len.map(|len| (total, len)));
             total += len.map_or(0, |l| l.next_multiple_of(64));
@@ -446,20 +483,19 @@ impl<'a> Qwen2<'a> {
         }
         let mut slots = slots.into_iter();
         // A tied output matrix is the embedding, which `embed` keeps reading.
-        let mut output = Weight::load(
-            m,
-            out_t,
-            slots.next().unwrap(),
-            !std::ptr::eq(out_t, token_embd),
-        );
-        let output_norm = load_vec(m, find(m, "output_norm.weight"));
-        let layer_slots: Vec<std::sync::Mutex<Vec<Option<&mut [u8]>>>> = (0..n_layers)
+        let mut output =
+            out_ts.map(|t| Weight::load(m, t, slots.next().unwrap(), !std::ptr::eq(t, token_embd)));
+        let output_norm = match head {
+            true => load_vec(m, find(m, "output_norm.weight")),
+            false => Vec::new(),
+        };
+        let layer_slots: Vec<std::sync::Mutex<Vec<Option<&mut [u8]>>>> = (0..k)
             .map(|_| std::sync::Mutex::new(slots.by_ref().take(MATS.len()).collect()))
             .collect();
 
         // One pool task per layer (`floats` set so it never runs inline):
         // repacking is a pass over all the weights.
-        let mut layers = par_map(n_layers, INLINE_WORK + 1, |i| {
+        let mut layers = par_map(k, INLINE_WORK + 1, |i| {
             let t = |s: &str| lt(i, s);
             let mut dst = std::mem::take(&mut *layer_slots[i].lock().unwrap()).into_iter();
             let mut w = |s: &str| Weight::load(m, t(s), dst.next().unwrap(), true);
@@ -493,7 +529,7 @@ impl<'a> Qwen2<'a> {
         drop(slots);
         if let Some(a) = arena.take() {
             let map = std::sync::Arc::new(a.make_read_only().expect("r8: mprotect"));
-            let ws = std::iter::once(&mut output).chain(layers.iter_mut().flat_map(|l| {
+            let ws = output.iter_mut().chain(layers.iter_mut().flat_map(|l| {
                 [
                     &mut l.wq,
                     &mut l.wk,
@@ -535,9 +571,9 @@ impl<'a> Qwen2<'a> {
         let len = max_ctx * kv_dim;
         KvCache {
             data: if crate::kv::use_f32() {
-                KvData::F32(Layers::new(self.n_layers, len))
+                KvData::F32(Layers::new(self.layers.len(), len))
             } else {
-                KvData::F16(Layers::new(self.n_layers, len))
+                KvData::F16(Layers::new(self.layers.len(), len))
             },
             kv_dim,
             max_ctx,
@@ -948,7 +984,7 @@ impl<'a> Qwen2<'a> {
         let x = self.hidden(token, pos, cache);
         // 9. Final norm, then the output head scores every vocab entry.
         let h = self.rmsnorm(&x, &self.output_norm);
-        self.matvec(&self.output, &h)
+        self.matvec(self.head(), &h)
     }
 
     /// Run one token at position `pos` for its effect on the cache only. Prompt
@@ -991,7 +1027,7 @@ impl<'a> Qwen2<'a> {
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn verify_batch(&self, tokens: &[u32], start: usize, cache: &mut KvCache) -> Vec<Vec<f32>> {
         let hs = self.final_norm_batch(tokens, start, cache);
-        let [logits] = self.matmul_many([&self.output], &hs);
+        let [logits] = self.matmul_many([self.head()], &hs);
         logits
     }
 
@@ -1001,7 +1037,14 @@ impl<'a> Qwen2<'a> {
     /// any logits (`matmul_argmax`).
     pub fn verify_argmax(&self, tokens: &[u32], start: usize, cache: &mut KvCache) -> Vec<u32> {
         let hs = self.final_norm_batch(tokens, start, cache);
-        self.matmul_argmax(&self.output, &hs)
+        self.matmul_argmax(self.head(), &hs)
+    }
+
+    /// The output matrix (absent in a model of the first layers only).
+    fn head(&self) -> &Weight<'a> {
+        self.output
+            .as_ref()
+            .expect("a model of the first layers only has no output head")
     }
 
     /// `hidden_batch` then the final norm, as `forward` does per token.
@@ -1014,7 +1057,12 @@ impl<'a> Qwen2<'a> {
 
     /// `hidden` for a batch: `feed_batch`'s work, returning every token's
     /// final hidden state (before the output norm).
-    fn hidden_batch(&self, tokens: &[u32], start: usize, cache: &mut KvCache) -> Vec<Vec<f32>> {
+    pub(crate) fn hidden_batch(
+        &self,
+        tokens: &[u32],
+        start: usize,
+        cache: &mut KvCache,
+    ) -> Vec<Vec<f32>> {
         let nb = tokens.len();
         assert!(nb > 0, "feed_batch: empty batch");
         assert!(
@@ -1102,7 +1150,7 @@ impl<'a> Qwen2<'a> {
 
     /// Every layer for one token: store its keys and values in the cache and
     /// return the final hidden state (before the output norm).
-    fn hidden(&self, token: u32, pos: usize, cache: &mut KvCache) -> Vec<f32> {
+    pub(crate) fn hidden(&self, token: u32, pos: usize, cache: &mut KvCache) -> Vec<f32> {
         assert!(
             pos < cache.max_ctx,
             "position {pos} exceeds cache size {}",
@@ -2141,7 +2189,7 @@ pub(crate) mod tests {
                 .layers
                 .iter()
                 .flat_map(|l| [&l.wq, &l.wk, &l.wv, &l.wo, &l.w_gate, &l.w_up, &l.w_down]);
-            for w in all.chain([&net.output]) {
+            for w in all.chain([net.head()]) {
                 if matches!(w.qt(), Q5_0 | Q8_0) {
                     assert_eq!(w.r8.is_some(), repack, "{}", w.t.name);
                 }
@@ -2194,7 +2242,7 @@ pub(crate) mod tests {
             .layers
             .iter()
             .flat_map(|l| [&l.wq, &l.wv, &l.w_gate, &l.w_down])
-            .chain([&net.output])
+            .chain([net.head()])
             .filter(|w| w.r8.is_some())
             .map(|w| w.t.qtype.name)
             .collect::<std::collections::BTreeSet<_>>()
@@ -2331,7 +2379,7 @@ pub(crate) mod tests {
                 x[i] += d[i];
             }
         }
-        check(&net.output, &net.rmsnorm(&x, &net.output_norm));
+        check(net.head(), &net.rmsnorm(&x, &net.output_norm));
         println!(
             "max rel err vs f64: repacked {:.2e}, per-row {:.2e}; types {seen:?}",
             worst.0, worst.1
@@ -2382,7 +2430,7 @@ pub(crate) mod tests {
         for copy in [true, false] {
             let m = crate::testutil::model_with(Some(copy)).unwrap();
             assert_eq!(m.file_backed(), !copy);
-            let net = Qwen2::build(&m, true, true);
+            let net = Qwen2::build(&m, true, true, usize::MAX);
             let repacked: Vec<&Tensor> = net
                 .layers
                 .iter()
@@ -2432,7 +2480,7 @@ pub(crate) mod tests {
             logits.push(net.forward(ids[ids.len() - 1], ids.len() - 1, &mut c));
             println!(
                 "copy {copy}: head repacked {}, {} sampled repacked tensors",
-                net.output.r8.is_some(),
+                net.head().r8.is_some(),
                 repacked.len()
             );
         }
