@@ -957,11 +957,16 @@ impl<'g> CudaQwen2<'g> {
     /// Also every token in range (as `step`): embed_b reads row
     /// tokens[z] of the embedding unchecked.
     fn check_batch(&self, tokens: &[u32], start: usize, c: &CudaCache) {
-        let nb = tokens.len();
-        assert!(nb > 0, "feed_batch: empty batch");
         if let Some(&t) = tokens.iter().find(|&&t| t as usize >= self.vocab) {
             panic!("token {t} out of range");
         }
+        Self::check_positions(tokens.len(), start, c);
+    }
+
+    /// `check_batch` without tokens (hidden-state input: the CPU half
+    /// that made it checked them).
+    fn check_positions(nb: usize, start: usize, c: &CudaCache) {
+        assert!(nb > 0, "feed_batch: empty batch");
         assert!(
             start + nb <= c.max_ctx,
             "positions {start}..{} exceed cache size {}",
@@ -1015,7 +1020,7 @@ impl<'g> CudaQwen2<'g> {
     /// start + b (first > 0); one state goes through the step's graph.
     pub fn feed_hidden(&self, c: &mut CudaCache<'g>, xs: &[f32], start: usize) {
         let nb = xs.len() / self.dim;
-        Self::check_batch(nb, start, c);
+        Self::check_positions(nb, start, c);
         assert_eq!(xs.len(), nb * self.dim, "hidden states: whole rows");
         let r = if nb == 1 {
             self.step(c, Input::Hidden(xs), start, false)
@@ -1029,7 +1034,7 @@ impl<'g> CudaQwen2<'g> {
     /// `Lm::verify_argmax` from hidden states, laid out as `feed_hidden`'s.
     pub fn verify_hidden(&self, c: &mut CudaCache<'g>, xs: &[f32], start: usize) -> Vec<u32> {
         let nb = xs.len() / self.dim;
-        Self::check_batch(nb, start, c);
+        Self::check_positions(nb, start, c);
         assert_eq!(xs.len(), nb * self.dim, "hidden states: whole rows");
         self.verify_tokens(c, batch::BatchIn::Hidden(xs), start)
             .unwrap_or_else(|e| Self::die(e))
