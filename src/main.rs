@@ -1,9 +1,11 @@
 #[macro_use]
 mod mv;
 mod chat;
+mod cuda;
 mod gguf;
 mod kv;
 mod lineedit;
+mod lm;
 mod model;
 mod pool;
 mod quant;
@@ -14,6 +16,7 @@ mod tokenizer;
 mod viz;
 mod vmath;
 
+use lm::Lm;
 use std::env;
 
 /// Prompt tokens per `feed_batch` call.
@@ -166,6 +169,7 @@ fn run() -> std::io::Result<()> {
                 model.total_params() as f64 / 1e9,
                 human_bytes(model.total_bytes())
             );
+            println!("{}", cuda::summary());
         }
         _ => {
             viz::run(&model)?;
@@ -260,7 +264,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         let lse = mx + logits.iter().map(|l| (l - mx).exp()).sum::<f32>().ln();
         println!(
             "top-{top_k} of {} at last position (id, logit, logprob, text):",
-            net.vocab
+            net.vocab()
         );
         let mut order: Vec<usize> = (0..logits.len()).collect();
         order.sort_by(|&a, &b| logits[b].total_cmp(&logits[a]));
@@ -494,8 +498,8 @@ fn read_piped_message(input: &mut impl std::io::BufRead) -> std::io::Result<(Str
 /// streams are polled for between tokens, Ctrl-C stopping the reply and the
 /// rest replayed at the next prompt. Raw mode means "\r\n" for each "\n".
 /// Piped, each line of stdin is a message and SIGINT stops a reply.
-fn chat_repl(
-    conv: &mut chat::Chat,
+fn chat_repl<M: Lm>(
+    conv: &mut chat::Chat<'_, M>,
     tok: &tokenizer::Tokenizer,
     banner: &str,
 ) -> std::io::Result<()> {
@@ -690,9 +694,9 @@ struct GenOpts<'a> {
 /// through this loop and the real drafter (r5 policy sim) showed every gate
 /// tried (backoff, n-gram EMA, expected-value) losing more on prose than it
 /// saves on story; drafting there costs < 1% by the measured pass costs.
-fn generate(
-    net: &model::Qwen2,
-    cache: &mut model::KvCache,
+fn generate<M: Lm>(
+    net: &M,
+    cache: &mut M::Cache,
     prompt: &[u32],
     logits: Vec<f32>,
     o: GenOpts<'_>,
@@ -743,7 +747,7 @@ fn generate(
         let pos = hist.len() - 1;
         let t = std::time::Instant::now();
         if guesses.is_empty() {
-            pick = argmax(&net.forward(next, pos, cache));
+            pick = net.forward_argmax(next, pos, cache);
             st.forward.0 += 1;
             st.forward.1 += t.elapsed().as_secs_f64();
         } else {
@@ -894,6 +898,104 @@ mod tests {
                 "{name}: {:.1} us ({s})",
                 t.elapsed().as_secs_f64() * 1e6 / 200.0
             );
+        }
+    }
+
+    /// A weightless `Lm`: the pick after token t at position p is a hash of
+    /// t, p and the token cached at p - 1 (so a misused cache shows), and
+    /// its logits peak there. Counts the calls `generate` makes.
+    #[derive(Default)]
+    struct Toy {
+        forwards: std::cell::Cell<usize>,
+        argmaxes: std::cell::Cell<usize>,
+        verifies: std::cell::Cell<usize>,
+    }
+
+    impl Toy {
+        fn pick(t: u32, pos: usize, c: &mut [u32]) -> u32 {
+            c[pos] = t;
+            let prev = if pos > 0 { c[pos - 1] } else { 5 };
+            (t * 31 + pos as u32 * 7 + prev * 3) % 97
+        }
+    }
+
+    impl crate::Lm for Toy {
+        type Cache = Vec<u32>;
+        fn vocab(&self) -> usize {
+            97
+        }
+        fn new_cache(&self, max_ctx: usize) -> Vec<u32> {
+            vec![u32::MAX; max_ctx]
+        }
+        fn forward(&self, t: u32, pos: usize, c: &mut Vec<u32>) -> Vec<f32> {
+            self.forwards.set(self.forwards.get() + 1);
+            let mut l = vec![0.0; 97];
+            l[Toy::pick(t, pos, c) as usize] = 1.0;
+            l
+        }
+        fn forward_argmax(&self, t: u32, pos: usize, c: &mut Vec<u32>) -> u32 {
+            self.argmaxes.set(self.argmaxes.get() + 1);
+            Toy::pick(t, pos, c)
+        }
+        fn feed_batch(&self, ts: &[u32], start: usize, c: &mut Vec<u32>) {
+            c[start..start + ts.len()].copy_from_slice(ts);
+        }
+        fn verify_argmax(&self, ts: &[u32], start: usize, c: &mut Vec<u32>) -> Vec<u32> {
+            self.verifies.set(self.verifies.get() + 1);
+            (0..ts.len())
+                .map(|b| Toy::pick(ts[b], start + b, c))
+                .collect()
+        }
+    }
+
+    /// `generate` through the `Lm` seam on a backend that isn't Qwen2:
+    /// plain decode takes `forward_argmax` (never `forward`'s logits),
+    /// drafting `verify_argmax`, and both give the reference greedy output.
+    #[test]
+    fn generate_uses_the_lm_seam() {
+        use crate::Lm;
+        const N: usize = 20;
+        let prompt = [1u32, 2, 3];
+        let net = Toy::default();
+        let mut c = net.new_cache(prompt.len() + N + 1);
+        net.feed_batch(&prompt[..2], 0, &mut c);
+        let first = net.forward(3, 2, &mut c);
+        let mut want = vec![argmax(&first)];
+        while want.len() < N {
+            let pos = prompt.len() + want.len() - 1;
+            want.push(Toy::pick(*want.last().unwrap(), pos, &mut c));
+        }
+        for k in [0, 3] {
+            let net = Toy::default();
+            let mut cache = net.new_cache(prompt.len() + N + 1);
+            net.feed_batch(&prompt[..2], 0, &mut cache);
+            let logits = net.forward(3, 2, &mut cache);
+            let st = generate(
+                &net,
+                &mut cache,
+                &prompt,
+                logits,
+                GenOpts {
+                    n_gen: N,
+                    stop: &[],
+                    max_draft: k,
+                },
+                &mut |h, max| {
+                    let at = h.len() - prompt.len();
+                    want[at..].iter().take(max).copied().collect()
+                },
+                &mut |_| Ok(()),
+            )
+            .unwrap();
+            assert_eq!(st.ids, want, "k {k}");
+            assert_eq!(net.forwards.get(), 1, "k {k}: only the prompt's forward");
+            if k == 0 {
+                assert_eq!((net.argmaxes.get(), net.verifies.get()), (N - 1, 0));
+            } else {
+                assert_eq!(net.argmaxes.get(), 0);
+                assert_eq!(net.verifies.get(), st.passes);
+                assert!(st.passes < N - 1);
+            }
         }
     }
 
