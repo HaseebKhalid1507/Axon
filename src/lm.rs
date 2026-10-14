@@ -10,7 +10,7 @@
 use crate::cuda::qwen2::{CacheKv, CudaCache, CudaQwen2};
 use crate::cuda::{Gpu, Kernels, Module};
 use crate::gguf::Model;
-use crate::hybrid::{HybridCache, HybridQwen2};
+use crate::hybrid::{HybridCache, HybridQwen2, Placement};
 use crate::kv::KvType;
 use crate::model::{KvCache, Qwen2};
 
@@ -125,10 +125,12 @@ impl<'a> Backend<'a> {
     /// of type `kv` (checked up front on the GPU). On CUDA, `gpu_layers`
     /// Some(g) splits the model, the last g layers on the GPU
     /// (`HybridQwen2`, its GPU half's cache of type `kv`, the CPU half's
-    /// f16/f32 as AXON_KV says); None puts it all on the GPU if it fits
-    /// (with `fit`, a cache may get less than max_ctx there: `ctx`), else
-    /// as many of the last layers as fit with a max_ctx cache of type `kv`
-    /// (`hybrid::auto_gpu_layers`, told on stderr). Err says why CUDA can't
+    /// f16/f32 as AXON_KV says), or with g >= n_layers is the GPU model;
+    /// None puts it all on the GPU if it fits, else as many of the last
+    /// layers as fit with a max_ctx cache of type `kv`
+    /// (`hybrid::auto_gpu_layers`, told on stderr), but with `fit` a
+    /// shorter all-GPU context (`ctx`) may win over the split
+    /// (`hybrid::choose_placement` says when). Err says why CUDA can't
     /// be used, or that the CPU has no q8 cache. Some(0) is not a split: the
     /// CLI maps it to `Device::Cpu` before loading (a CPU model copies the
     /// file, a GPU one maps it).
@@ -157,19 +159,53 @@ impl<'a> Backend<'a> {
             KvType::Q8 => CacheKv::Q8 { group: 0 },
             _ => CacheKv::F16,
         };
+        let whole_gpu = |ctx: usize, fit: bool| {
+            CudaQwen2::with_kv(gpu, module, m, ctx, ckv, fit).map(|n| Backend::Cuda(Box::new(n)))
+        };
         let g = match gpu_layers {
-            Some(g) => g,
-            None => match CudaQwen2::with_kv(gpu, module, m, max_ctx, ckv, fit) {
-                Ok(n) => return Ok(Backend::Cuda(Box::new(n))),
-                Err(e) => {
-                    let free = gpu.info()?.free_bytes;
-                    let g = crate::hybrid::auto_gpu_layers(gpu, module, m, max_ctx, ckv, free)?;
-                    if g == 0 {
-                        return Err(format!("{e}; not even one layer fits"));
-                    }
-                    g
+            // Every layer: the GPU model (same weights, cache and VRAM as a
+            // split with no CPU half, and its own sampling paths).
+            Some(g) => {
+                let n = crate::hybrid::block_count(m)?;
+                if g >= n {
+                    return whole_gpu(max_ctx, false).map_err(|e| {
+                        format!("{g}/{n} layers on the GPU: {e}, or fewer --gpu-layers")
+                    });
                 }
-            },
+                g
+            }
+            None => {
+                let free = gpu.info()?.free_bytes;
+                let whole = CudaQwen2::vram_curve(gpu, module, m, ckv)?;
+                let split = || crate::hybrid::auto_gpu_layers(gpu, module, m, max_ctx, ckv, free);
+                match crate::hybrid::choose_placement(free, max_ctx, fit, whole, split)? {
+                    Placement::Gpu { ctx } => return whole_gpu(ctx, false),
+                    Placement::Split {
+                        gpu_layers,
+                        gpu_ctx,
+                    } => {
+                        if let Some(c) = gpu_ctx {
+                            eprintln!(
+                                "axon: the whole model fits in GPU memory only with a {c}-token \
+                                 context; splitting it to keep {max_ctx} (--ctx {c} for all of it \
+                                 on the GPU, faster; --gpu-layers N to choose the split{})",
+                                if ckv == CacheKv::F16 {
+                                    "; --kv q8 halves the KV cache"
+                                } else {
+                                    ""
+                                }
+                            );
+                        }
+                        gpu_layers
+                    }
+                    // with_kv's error says what it needs (or, if memory
+                    // was freed meanwhile, it fits).
+                    Placement::Nowhere => {
+                        return whole_gpu(max_ctx, fit)
+                            .map_err(|e| format!("{e}; not even one layer fits"));
+                    }
+                }
+            }
         };
         let h = HybridQwen2::new(Some((gpu, module)), m, max_ctx, g, ckv)?;
         eprintln!("split:       {}", h.describe(max_ctx));

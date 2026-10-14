@@ -70,8 +70,9 @@ flags:
               position and head, half the memory; slightly different results; on a split, the
               GPU layers' cache, so more layers fit); as AXON_KV
   --system T  chat: the system message (default: Qwen2.5's)
-  --ctx N     chat: context size in tokens (default: the model's, at most 8192, or on cuda
-              what fits); when the conversation outgrows it, the oldest exchanges are forgotten
+  --ctx N     chat: context size in tokens (default: the model's, at most 8192; on cuda, if the
+              whole model doesn't fit with it, less if at least half (or 4096) fits, else a
+              split); when the conversation outgrows it, the oldest exchanges are forgotten
 
 environment:
   AXON_THREADS=N             worker threads (default: cores minus a quarter)
@@ -568,16 +569,18 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         None => DEFAULT_CHAT_CTX,
     };
     let tok = tokenizer::Tokenizer::from_gguf(&model);
-    // The default context shrinks to what the GPU has room for.
+    // The default context may shrink to keep the model on the GPU (Backend::new).
     let net = backend(&model, device, ctx, gpu_layers, kv, fit);
     let (want, ctx) = (ctx, net.ctx(ctx));
     if ctx < want {
         eprintln!(
-            "axon: a {want}-token context doesn't fit in GPU memory{}; using {ctx} (--ctx to choose)",
+            "axon: a {want}-token context doesn't fit in GPU memory with the whole model; using \
+             {ctx} (--ctx {want} splits it across the CPU and GPU instead, slower; --gpu-layers N \
+             to choose the split{})",
             if kv == kv::KvType::Q8 {
                 ""
             } else {
-                " (--kv q8 halves the KV cache)"
+                "; --kv q8 halves the KV cache"
             }
         );
     }

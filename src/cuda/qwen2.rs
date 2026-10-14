@@ -287,6 +287,14 @@ struct Plan<'m> {
     freq: Vec<f64>,
 }
 
+impl Plan<'_> {
+    /// The VRAM bytes that don't depend on the context: the weight arena
+    /// (padded) and the small vectors.
+    fn fixed(&self) -> usize {
+        self.total + ARENA_PAD + self.vecs.len() * 4 + self.freq.len() * 8
+    }
+}
+
 /// What a step starts from: a token (embedded here, first == 0) or the
 /// hidden state another backend's layers 0..first left (dim floats).
 #[derive(Clone, Copy)]
@@ -401,13 +409,9 @@ impl<'g> CudaQwen2<'g> {
         // Check the whole plan fits before allocating any of it.
         let free = gpu.info()?.free_bytes;
         let mut ctx = max_ctx;
-        if fit && net.vram_want(&plan, max_ctx) > free {
+        if fit {
             // cache_bytes grows with the context: the largest that fits.
-            let mut c = max_ctx / 256 * 256;
-            while c >= 256 && net.vram_want(&plan, c) > free {
-                c -= 256;
-            }
-            if c >= 256 {
+            if let Some(c) = crate::hybrid::fit_ctx(max_ctx, free, |c| net.vram_want(&plan, c)) {
                 ctx = c;
             }
         }
@@ -458,10 +462,27 @@ impl<'g> CudaQwen2<'g> {
         Ok(net.vram_want(&plan, max_ctx))
     }
 
+    /// `vram_need` of the whole model (first 0) as a function of max_ctx,
+    /// planned once: what `Backend::new`'s placement weighs.
+    pub fn vram_curve(
+        gpu: &'g Gpu,
+        module: &'g Module<'g>,
+        m: &Model,
+        kv: CacheKv,
+    ) -> Result<impl Fn(usize) -> u64 + use<'g>, String> {
+        let (net, plan) = Self::plan(gpu, module, m, 0, kv)?;
+        let fixed = plan.fixed();
+        Ok(move |ctx| net.vram_want_fixed(fixed, ctx))
+    }
+
     /// Weights, small vectors, cache for `max_ctx` and `HEADROOM`, in bytes.
     fn vram_want(&self, plan: &Plan, max_ctx: usize) -> u64 {
-        let small = plan.vecs.len() * 4 + plan.freq.len() * 8;
-        (plan.total + ARENA_PAD + small + self.cache_bytes(max_ctx)) as u64 + HEADROOM
+        self.vram_want_fixed(plan.fixed(), max_ctx)
+    }
+
+    /// `vram_want` given the plan's `fixed()`.
+    fn vram_want_fixed(&self, fixed: usize, max_ctx: usize) -> u64 {
+        (fixed + self.cache_bytes(max_ctx)) as u64 + HEADROOM
     }
 
     /// The model with nothing allocated yet (caches of type `kv`), and what

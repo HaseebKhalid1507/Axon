@@ -61,7 +61,7 @@ pub struct HybridCache<'g> {
 }
 
 /// The model's layer count.
-fn block_count(m: &Model) -> Result<usize, String> {
+pub fn block_count(m: &Model) -> Result<usize, String> {
     crate::model::meta_num(m, &format!("{}.block_count", m.arch))
         .map(|v| v as usize)
         .ok_or_else(|| "missing metadata block_count".to_string())
@@ -82,20 +82,114 @@ pub fn auto_gpu_layers(
     free: u64,
 ) -> Result<usize, String> {
     let n = block_count(m)?;
-    let fits = |g: usize| -> Result<bool, String> {
-        let need = CudaQwen2::vram_need(gpu, module, m, max_ctx, n - g, kv)?;
-        Ok(need + DESKTOP_MARGIN <= free)
-    };
+    most_gpu_layers(n, free, |g| {
+        CudaQwen2::vram_need(gpu, module, m, max_ctx, n - g, kv)
+    })
+}
+
+/// `auto_gpu_layers`' search, given `need(g)`, the VRAM a split with g of
+/// the n layers on the GPU needs (it shrinks as g does): the largest g in
+/// 0..=n with need(g) plus `DESKTOP_MARGIN` within `free`, 0 if none.
+pub fn most_gpu_layers(
+    n: usize,
+    free: u64,
+    mut need: impl FnMut(usize) -> Result<u64, String>,
+) -> Result<usize, String> {
     let (mut lo, mut hi) = (0, n); // fits(lo) (no GPU layers); find the largest
     while lo < hi {
         let mid = (lo + hi).div_ceil(2);
-        if fits(mid)? {
+        if need(mid)? + DESKTOP_MARGIN <= free {
             lo = mid;
         } else {
             hi = mid - 1;
         }
     }
     Ok(lo)
+}
+
+/// The largest context `fit` gives the whole model on the GPU, given
+/// `need(ctx)`, the VRAM it needs with a ctx-token cache (growing with
+/// ctx): max_ctx if that fits in `free`, else the largest multiple of 256
+/// below it that does, None if not even 256 does.
+pub fn fit_ctx(max_ctx: usize, free: u64, need: impl Fn(usize) -> u64) -> Option<usize> {
+    if need(max_ctx) <= free {
+        return Some(max_ctx);
+    }
+    let mut c = max_ctx / 256 * 256;
+    while c >= 256 && need(c) > free {
+        c -= 256;
+    }
+    (c >= 256).then_some(c)
+}
+
+/// The shortest context `choose_placement` takes over a split for the
+/// whole model on the GPU: half of max_ctx, but never more than
+/// `KEEP_CTX_FLOOR`.
+pub fn keep_ctx(max_ctx: usize) -> usize {
+    (max_ctx / 2).min(KEEP_CTX_FLOOR)
+}
+
+/// A context this long is enough for a chat whatever max_ctx is: with a
+/// longer default (a 32k model, a raised `DEFAULT_CHAT_CTX`), a 4096-token
+/// all-GPU chat still beats a split. Below both it and half of max_ctx,
+/// the conversation forgets its start too soon, and the split (slower per
+/// token, as its CPU layers run at RAM speed) is the better default.
+pub const KEEP_CTX_FLOOR: usize = 4096;
+
+/// Where `Backend::new` puts a model when no --gpu-layers says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// All of it on the GPU, with a cache for `ctx` tokens (max_ctx, or
+    /// less with `fit`).
+    Gpu { ctx: usize },
+    /// The last `gpu_layers` layers on the GPU, a max_ctx-token cache.
+    /// `gpu_ctx`: the shorter context the whole model would have had on
+    /// the GPU (with `fit`), for the note saying why it's split.
+    Split {
+        gpu_layers: usize,
+        gpu_ctx: Option<usize>,
+    },
+    /// Not even one layer fits, nor the whole model at 256 tokens.
+    Nowhere,
+}
+
+/// The placement policy, a pure function of the free VRAM, the model's
+/// needs (counting the cache type: q8 makes both smaller) and max_ctx.
+/// `whole(ctx)`: the VRAM for all of it on the GPU with a ctx-token cache;
+/// `split()`: the most GPU layers a max_ctx split fits (`auto_gpu_layers`,
+/// only called if the whole model doesn't fit at max_ctx).
+///
+/// The whole model at max_ctx if it fits. Else, with `fit` (chat's default
+/// context), a shorter all-GPU context if it's at least `keep_ctx(max_ctx)`
+/// (all-GPU speed for a still-long chat); else the split at max_ctx if it
+/// has a GPU layer; else any all-GPU context `fit` finds (>= 256 tokens).
+pub fn choose_placement(
+    free: u64,
+    max_ctx: usize,
+    fit: bool,
+    whole: impl Fn(usize) -> u64,
+    split: impl FnOnce() -> Result<usize, String>,
+) -> Result<Placement, String> {
+    if whole(max_ctx) <= free {
+        return Ok(Placement::Gpu { ctx: max_ctx });
+    }
+    let shrunk = if fit {
+        fit_ctx(max_ctx, free, &whole)
+    } else {
+        None
+    };
+    match shrunk {
+        Some(c) if c >= keep_ctx(max_ctx) => return Ok(Placement::Gpu { ctx: c }),
+        _ => {}
+    }
+    Ok(match (split()?, shrunk) {
+        (0, Some(c)) => Placement::Gpu { ctx: c },
+        (0, None) => Placement::Nowhere,
+        (g, gpu_ctx) => Placement::Split {
+            gpu_layers: g,
+            gpu_ctx,
+        },
+    })
 }
 
 impl<'m, 'g> HybridQwen2<'m, 'g> {

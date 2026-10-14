@@ -537,3 +537,203 @@ fn hybrid_auto_split_q8_fits_more_layers() {
     assert!(a8 == n || !fits(a8 + 1), "one more q8 layer would have fit");
     assert!(a8 > a16, "q8 fits more layers ({a8} vs {a16})");
 }
+
+/// A 32B-shaped model's VRAM needs without a GPU: 64 layers of 280 MiB,
+/// a 600 MiB head, 256 MiB headroom; the KV per token and layer is 4 KiB
+/// in f16 (8 kv heads x 128, keys and values), about half in q8.
+struct Toy {
+    q8: bool,
+}
+
+const MIB: u64 = 1 << 20;
+const TOY_N: usize = 64;
+
+impl Toy {
+    fn kv_tok_layer(&self) -> u64 {
+        if self.q8 {
+            2 * 8 * 128 + 2 * 8 * 4
+        } else {
+            2 * 8 * 128 * 2
+        }
+    }
+    /// g of the layers (and the head) on the GPU, a ctx-token cache.
+    fn need(&self, g: usize, ctx: usize) -> u64 {
+        256 * MIB + 600 * MIB + g as u64 * (280 * MIB + self.kv_tok_layer() * ctx as u64)
+    }
+    fn place(&self, free: u64, max_ctx: usize, fit: bool) -> Placement {
+        choose_placement(
+            free,
+            max_ctx,
+            fit,
+            |c| self.need(TOY_N, c),
+            || most_gpu_layers(TOY_N, free, |g| Ok(self.need(g, max_ctx))),
+        )
+        .unwrap()
+    }
+}
+
+const F16: Toy = Toy { q8: false };
+const Q8: Toy = Toy { q8: true };
+
+/// A split is the most layers that fit at max_ctx with the margin.
+fn assert_most(t: &Toy, p: Placement, free: u64, max_ctx: usize) -> usize {
+    let Placement::Split { gpu_layers: g, .. } = p else {
+        panic!("{p:?}: not a split");
+    };
+    assert!(g > 0 && g < TOY_N, "{p:?}");
+    assert!(
+        t.need(g, max_ctx) + DESKTOP_MARGIN <= free,
+        "{p:?} doesn't fit"
+    );
+    assert!(
+        t.need(g + 1, max_ctx) + DESKTOP_MARGIN > free,
+        "{p:?}: one more fits"
+    );
+    g
+}
+
+#[test]
+fn placement_weights_dont_fit_splits() {
+    let free = 12 << 30;
+    for t in [&F16, &Q8] {
+        for fit in [false, true] {
+            let p = t.place(free, 8192, fit);
+            assert!(matches!(p, Placement::Split { gpu_ctx: None, .. }), "{p:?}");
+            assert_most(t, p, free, 8192);
+        }
+    }
+    // Nothing fits at all.
+    assert_eq!(F16.place(MIB, 8192, true), Placement::Nowhere);
+}
+
+#[test]
+fn placement_full_ctx_fits_whole_gpu() {
+    let free = F16.need(TOY_N, 8192);
+    for fit in [false, true] {
+        assert_eq!(F16.place(free, 8192, fit), Placement::Gpu { ctx: 8192 });
+        assert_eq!(Q8.place(free, 8192, fit), Placement::Gpu { ctx: 8192 });
+    }
+}
+
+/// Room for the whole model with only a short context: the split at the
+/// full context wins, and says what the all-GPU context would have been.
+#[test]
+fn placement_tiny_ctx_splits_at_full_ctx() {
+    for ctx in [256, 1024, 2048, 4095] {
+        let free = F16.need(TOY_N, ctx);
+        let p = F16.place(free, 8192, true);
+        let want = ctx / 256 * 256;
+        assert!(
+            matches!(p, Placement::Split { gpu_ctx: Some(c), .. } if c == want),
+            "room for {ctx}: {p:?}"
+        );
+        assert_most(&F16, p, free, 8192);
+        // Without fit (an explicit --ctx) the same split, no note.
+        let q = F16.place(free, 8192, false);
+        assert!(matches!(q, Placement::Split { gpu_ctx: None, .. }), "{q:?}");
+    }
+}
+
+/// Room for at least half the context (or 4096): the whole model on the
+/// GPU with the shorter context.
+#[test]
+fn placement_long_enough_ctx_stays_on_gpu() {
+    assert_eq!(keep_ctx(8192), 4096);
+    assert_eq!(keep_ctx(4096), 2048);
+    assert_eq!(keep_ctx(32768), 4096);
+    for (max_ctx, ctx) in [
+        (8192, 4096),
+        (8192, 6000),
+        (8192, 8191),
+        (4096, 2048),
+        (32768, 4096),
+    ] {
+        let free = F16.need(TOY_N, ctx);
+        assert_eq!(
+            F16.place(free, max_ctx, true),
+            Placement::Gpu {
+                ctx: ctx / 256 * 256
+            },
+            "room for {ctx} of {max_ctx}"
+        );
+        // An explicit --ctx max_ctx: the split.
+        assert!(matches!(
+            F16.place(free, max_ctx, false),
+            Placement::Split { gpu_ctx: None, .. }
+        ));
+    }
+    // Just under the threshold of a 4096 model: split.
+    let free = F16.need(TOY_N, 2047);
+    assert!(matches!(
+        F16.place(free, 4096, true),
+        Placement::Split {
+            gpu_ctx: Some(1792),
+            ..
+        }
+    ));
+}
+
+/// q8's smaller cache changes the decision where it should: the same VRAM
+/// that gives f16 a short context (a split) gives q8 twice the tokens
+/// (all on the GPU), and q8 fits the full context where f16 must shrink.
+#[test]
+fn placement_q8_changes_the_decision() {
+    let free = F16.need(TOY_N, 2560);
+    assert!(matches!(
+        F16.place(free, 8192, true),
+        Placement::Split {
+            gpu_ctx: Some(2560),
+            ..
+        }
+    ));
+    let p = Q8.place(free, 8192, true);
+    assert!(matches!(p, Placement::Gpu { ctx } if ctx >= 4096), "{p:?}");
+
+    let free = Q8.need(TOY_N, 8192);
+    assert_eq!(Q8.place(free, 8192, true), Placement::Gpu { ctx: 8192 });
+    let p = F16.place(free, 8192, true);
+    assert!(
+        matches!(p, Placement::Gpu { ctx } if (4096..8192).contains(&ctx)),
+        "{p:?}"
+    );
+
+    // Weights alone don't fit: both split, q8 with more GPU layers.
+    let free = 16 << 30;
+    let g16 = assert_most(&F16, F16.place(free, 8192, true), free, 8192);
+    let g8 = assert_most(&Q8, Q8.place(free, 8192, true), free, 8192);
+    assert!(g8 > g16, "q8 {g8} vs f16 {g16}");
+}
+
+/// --gpu-layers n (or more) is the plain GPU model, not a split with no
+/// CPU half: same bits.
+#[test]
+fn all_gpu_layers_is_the_cuda_backend() {
+    use crate::lm::{Backend, Device};
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = mapped(M05) else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let n = block_count(&m).unwrap();
+    let want = trace(&CudaQwen2::new(&g, &km, &m, 128).unwrap(), &m, 8);
+    for gl in [n, n + 3] {
+        let b = Backend::new(
+            &m,
+            Device::Cuda,
+            128,
+            Some(gl),
+            crate::kv::KvType::F16,
+            false,
+        )
+        .unwrap();
+        assert!(matches!(b, Backend::Cuda(_)), "--gpu-layers {gl}");
+        assert_eq!(b.ctx(128), 128);
+        let got = trace(&b, &m, 8);
+        assert!(
+            want.iter().zip(&got).all(|(a, b)| bits(a) == bits(b)),
+            "--gpu-layers {gl}: not the GPU model's bits"
+        );
+    }
+}
