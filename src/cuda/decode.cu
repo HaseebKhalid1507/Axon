@@ -82,10 +82,10 @@ __device__ __forceinline__ float h2f(unsigned short h) {
 
 // KvElem for Half::from_f32: saturate to +-65504 (NaN passes: comparisons
 // with NaN are false), then round to f16.
-__device__ __forceinline__ unsigned short kv_half(float x) {
-    x = x > 65504.0f ? 65504.0f : (x < -65504.0f ? -65504.0f : x);
-    return f2h(x);
+__device__ __forceinline__ float kv_sat(float x) {
+    return x > 65504.0f ? 65504.0f : (x < -65504.0f ? -65504.0f : x);
 }
+__device__ __forceinline__ unsigned short kv_half(float x) { return f2h(kv_sat(x)); }
 
 // ---------------------------------------------------------------------------
 // Quantized activations. For n values (np = n rounded up to 256), one buffer:
@@ -653,12 +653,17 @@ gemv1(int qt, const u8* __restrict__ w, u64 row_bytes, int rows, int n, const u8
 // (model.rs rope_head, NEOX style), with (sin, cos) of P[pos] * freq[i]
 // from the rope_table kernel. Rotated queries go to q (f32); keys
 // and values, rounded to f16, to the caches' row P[pos] (nk halves a row).
-extern "C" __global__ void __launch_bounds__(GEMV_THREADS, GEMV_MIN_BLOCKS)
-qkv_rope(int qtq, const u8* __restrict__ wq, u64 rbq, int qtk, const u8* __restrict__ wk, u64 rbk,
-         int qtv, const u8* __restrict__ wv, u64 rbv, const float* __restrict__ bq,
-         const float* __restrict__ bk, const float* __restrict__ bv, int nq, int nk, int hd, int n,
-         const u8* __restrict__ act, const float2* __restrict__ rope, const u32* __restrict__ P,
-         float* __restrict__ q, unsigned short* __restrict__ kc, unsigned short* __restrict__ vc) {
+//
+// F32 (the q8 cache's qkv_rope_f32): keys and values go to kf / vf (nk
+// floats each, this token only) unrounded instead; attn_split_q8 quantizes
+// them into the cache.
+template <bool F32>
+__device__ __forceinline__ void
+qkv_rope_t(int qtq, const u8* __restrict__ wq, u64 rbq, int qtk, const u8* __restrict__ wk, u64 rbk,
+           int qtv, const u8* __restrict__ wv, u64 rbv, const float* __restrict__ bq,
+           const float* __restrict__ bk, const float* __restrict__ bv, int nq, int nk, int hd, int n,
+           const u8* __restrict__ act, const float2* __restrict__ rope, const u32* __restrict__ P,
+           float* __restrict__ q, void* __restrict__ kc, void* __restrict__ vc) {
     int item = blockIdx.x;
     int half = hd >> 1, npq = nq >> 1, npk = nk >> 1;
     if (item >= npq + npk) {
@@ -681,7 +686,10 @@ qkv_rope(int qtq, const u8* __restrict__ wq, u64 rbq, int qtk, const u8* __restr
         if (threadIdx.x == 0) {
             for (int i = 0; i < 2; i++) {
                 float v = bv ? __fadd_rn(y[i], bv[r0 + i]) : y[i];
-                vc[(u64)pos * nk + r0 + i] = kv_half(v);
+                if (F32)
+                    ((float*)vc)[r0 + i] = v;
+                else
+                    ((unsigned short*)vc)[(u64)pos * nk + r0 + i] = kv_half(v);
             }
         }
         return;
@@ -704,10 +712,31 @@ qkv_rope(int qtq, const u8* __restrict__ wq, u64 rbq, int qtk, const u8* __restr
     if (isq) {
         q[r0] = o0;
         q[r1] = o1;
+    } else if (F32) {
+        ((float*)kc)[r0] = o0;
+        ((float*)kc)[r1] = o1;
     } else {
-        kc[(u64)pos * nk + r0] = kv_half(o0);
-        kc[(u64)pos * nk + r1] = kv_half(o1);
+        ((unsigned short*)kc)[(u64)pos * nk + r0] = kv_half(o0);
+        ((unsigned short*)kc)[(u64)pos * nk + r1] = kv_half(o1);
     }
+}
+
+#define QKV_ROPE_ARGS                                                                              \
+    int qtq, const u8 *__restrict__ wq, u64 rbq, int qtk, const u8 *__restrict__ wk, u64 rbk,     \
+        int qtv, const u8 *__restrict__ wv, u64 rbv, const float *__restrict__ bq,                 \
+        const float *__restrict__ bk, const float *__restrict__ bv, int nq, int nk, int hd, int n, \
+        const u8 *__restrict__ act, const float2 *__restrict__ rope, const u32 *__restrict__ P,    \
+        float *__restrict__ q
+#define QKV_ROPE_PASS qtq, wq, rbq, qtk, wk, rbk, qtv, wv, rbv, bq, bk, bv, nq, nk, hd, n, act, rope, P, q
+
+extern "C" __global__ void __launch_bounds__(GEMV_THREADS, GEMV_MIN_BLOCKS)
+qkv_rope(QKV_ROPE_ARGS, unsigned short* __restrict__ kc, unsigned short* __restrict__ vc) {
+    qkv_rope_t<false>(QKV_ROPE_PASS, kc, vc);
+}
+
+extern "C" __global__ void __launch_bounds__(GEMV_THREADS, GEMV_MIN_BLOCKS)
+qkv_rope_f32(QKV_ROPE_ARGS, float* __restrict__ kf, float* __restrict__ vf) {
+    qkv_rope_t<true>(QKV_ROPE_PASS, kf, vf);
 }
 
 // out[r] = silu(gate_r . x) * (up_r . x) (vmath swiglu1's ops, expf for
@@ -735,6 +764,90 @@ gate_up(int qtg, const u8* __restrict__ wg, u64 rbg, int qtu, const u8* __restri
 }
 
 // ---------------------------------------------------------------------------
+// 8-bit KV cache (AXON_KV=q8, `--kv q8`). A layer's keys are kept as int8
+// [pos][kv_dim] with one f32 scale per KG consecutive values (a "group":
+// KG = head_dim, one scale per (position, kv head), or 32), at [pos][kv_dim
+// / KG]; values likewise. The rule, per group x[0..KG) of a token's rotated
+// keys minus the layer's key shift (qwen2.rs: the key bias of the slowest
+// RoPE pairs, else 0), or of its values, each value first saturated to
+// +-65504 as the f16 cache does:
+//   amax = max |x_i|,  d = amax / 127,  q_i = clamp(rne(x_i * (127 / amax)),
+//   -127, 127)   (all q_i = 0 if amax = 0; d = NaN if any x_i is NaN),
+// f32 ops correctly rounded. Attention reads them as d * q_i, folded in:
+// a score is sum over groups of d * (q . k_q) (the group's dot product an fma
+// chain over its values in order), a value term (p d) * v_q. The shift is
+// never added back: it moves all of a query's scores by the same q . shift,
+// which softmax cancels; without it Qwen2's few huge, near-constant key
+// channels (|k| up to ~200, the rest ~1-5) set every row's scale, and their
+// rounding error (q8: ~0.4% of 200, f16 ~0.05%) times the queries' equally
+// large components there moves scores by whole units.
+struct Q8Kv {
+    const signed char* k;
+    const signed char* v;
+    const float* ks;
+    const float* vs;
+    // decode only: this token's keys and values, f32 [2][kv_dim] (qkv_rope_f32),
+    // which the block holding its position quantizes into the cache first.
+    const float* knew;
+    // The layer's key shift [kv_dim] (null: none).
+    const float* ksh;
+};
+
+// Store one kv head's key and value rows, xs = 2 * HD floats (shared:
+// keys, then values), into the cache at element e0 (= pos * kv_dim + kvh *
+// HD) by the rule above. Called by every thread of the block (a multiple of
+// 32); xs must be complete (synced) on entry; ends with a barrier, so the
+// block can read the rows back.
+template <int HD, int KG>
+__device__ void kv_q8_store(float* xs, const Q8Kv& c, u64 e0, const float* ksh) {
+    __shared__ float dsh[2 * HD / KG], ish[2 * HD / KG];
+    int tid = threadIdx.x, lane = tid & 31, w = tid >> 5, nw = blockDim.x >> 5;
+    if (ksh) {
+        for (int i = tid; i < HD; i += blockDim.x) xs[i] = __fsub_rn(xs[i], ksh[i]);
+        __syncthreads();
+    }
+    for (int gi = w; gi < 2 * HD / KG; gi += nw) {
+        float m = 0.0f;
+        bool nan = false;
+        for (int i = lane; i < KG; i += 32) {
+            float x = kv_sat(xs[gi * KG + i]);
+            m = fmaxf(m, fabsf(x)); // fmaxf drops NaN
+            nan |= x != x;
+        }
+        m = warp_max(m);
+        nan = __any_sync(0xffffffffu, nan);
+        if (lane == 0) {
+            dsh[gi] = nan ? NAN_F : __fdiv_rn(m, 127.0f);
+            ish[gi] = m != 0.0f ? __fdiv_rn(127.0f, m) : 0.0f;
+        }
+    }
+    __syncthreads();
+    signed char* kq = (signed char*)c.k + e0;
+    signed char* vq = (signed char*)c.v + e0;
+    for (int i = tid; i < 2 * HD; i += blockDim.x) {
+        // NaN * id -> cvt gives 0 (its group's d is NaN).
+        int q = __float2int_rn(__fmul_rn(kv_sat(xs[i]), ish[i / KG]));
+        q = q < -127 ? -127 : (q > 127 ? 127 : q);
+        if (i < HD)
+            kq[i] = (signed char)q;
+        else
+            vq[i - HD] = (signed char)q;
+    }
+    if (tid < 2 * HD / KG) {
+        float* s = (float*)(tid < HD / KG ? c.ks : c.vs);
+        s[e0 / KG + tid % (HD / KG)] = dsh[tid];
+    }
+    __syncthreads();
+}
+
+// The 16 int8 of w as floats (exact).
+__device__ __forceinline__ void i8x16(uint4 w, float k[16]) {
+    u32 a[4] = {w.x, w.y, w.z, w.w};
+#pragma unroll
+    for (int i = 0; i < 16; i++) k[i] = (float)(int)(signed char)(a[i >> 2] >> (8 * (i & 3)));
+}
+
+// ---------------------------------------------------------------------------
 // Decode attention, split over positions (flash-decoding). np = P[pos] + 1
 // positions in nsplit = min(max_split, ceil(np / ATT_MIN)) splits of
 // `chunk` = ceil(np / nsplit) positions. Block (kv head, split) scores all
@@ -757,11 +870,14 @@ __device__ __forceinline__ void att_split(int np, int max_split, int* nsplit, in
 // HD 64 or 128, group <= MAX_GROUP (the host checks).
 // Block (kvh, s) of a query whose position is np - 1; shared with the
 // batched attn_split_b (prefill.cu), which runs it per query token.
-template <int HD>
+// KG = 0: the f16 cache kc / vc; else the q8 cache q8 with KG values per
+// scale (kc, vc unused).
+template <int HD, int KG = 0>
 __device__ void attn_split_t(const float* __restrict__ q, const unsigned short* __restrict__ kc,
                              const unsigned short* __restrict__ vc, int np, int kvh, int s,
                              int n_heads, int n_kv, float scale, int max_split,
-                             float* __restrict__ part_o, float* __restrict__ part_ml) {
+                             float* __restrict__ part_o, float* __restrict__ part_ml,
+                             Q8Kv q8 = Q8Kv{}) {
     const int hd = HD;
     __shared__ float qs[MAX_GROUP * 128];
     __shared__ float ps[MAX_GROUP][ATT_TILE];
@@ -782,6 +898,18 @@ __device__ void attn_split_t(const float* __restrict__ q, const unsigned short* 
         }
         return;
     }
+    if constexpr (KG > 0) {
+        // Decode: the new token's rows, quantized here (block-uniform test),
+        // by the block whose split holds them, before anyone reads them.
+        if (q8.knew && np - 1 >= tbeg && np - 1 < tend) {
+            __shared__ float xs[2 * HD];
+            for (int i = tid; i < 2 * HD; i += ATT_TILE)
+                xs[i] = q8.knew[(i < HD ? 0 : kv_dim - HD) + kvh * HD + i];
+            __syncthreads();
+            kv_q8_store<HD, KG>(xs, q8, (u64)(np - 1) * kv_dim + kvh * HD,
+                                q8.ksh ? q8.ksh + kvh * HD : nullptr);
+        }
+    }
     for (int i = tid; i < group * hd; i += ATT_TILE) qs[i] = q[kvh * group * hd + i];
     if (tid < group) mrun[tid] = -INFINITY, lrun[tid] = 0.0f;
     // Value sums: thread = (row slot rs, dim pair dp), rows i = rs mod nrs.
@@ -795,7 +923,34 @@ __device__ void attn_split_t(const float* __restrict__ q, const unsigned short* 
         // Scores, thread per position: q_g . k_t * scale for every head g.
         float sc[MAX_GROUP];
         for (int g = 0; g < MAX_GROUP; g++) sc[g] = 0.0f;
-        if (t < tend) {
+        if (KG > 0 && t < tend) {
+            u64 e = (u64)t * kv_dim + kvh * HD;
+            const uint4* kr = (const uint4*)(q8.k + e);
+            const float* sr = q8.ks + e / (KG > 0 ? KG : 1);
+#pragma unroll
+            for (int j = 0; j < (KG > 0 ? HD / KG : 0); j++) {
+                float a[MAX_GROUP];
+#pragma unroll
+                for (int g = 0; g < MAX_GROUP; g++) a[g] = 0.0f;
+#pragma unroll
+                for (int d16 = j * KG / 16; d16 < (j + 1) * KG / 16; d16++) {
+                    float k[16];
+                    i8x16(kr[d16], k);
+#pragma unroll
+                    for (int g = 0; g < MAX_GROUP; g++) {
+                        if (g < group) {
+                            const float* qq = qs + g * HD + d16 * 16;
+#pragma unroll
+                            for (int i = 0; i < 16; i++) a[g] = __fmaf_rn(qq[i], k[i], a[g]);
+                        }
+                    }
+                }
+                float d = sr[j];
+#pragma unroll
+                for (int g = 0; g < MAX_GROUP; g++)
+                    if (g < group) sc[g] = __fmaf_rn(d, a[g], sc[g]);
+            }
+        } else if (KG == 0 && t < tend) {
             const uint4* kr = (const uint4*)(kc + (u64)t * kv_dim + kvh * hd);
 #pragma unroll
             for (int d8 = 0; d8 < HD / 8; d8++) {
@@ -846,6 +1001,24 @@ __device__ void attn_split_t(const float* __restrict__ q, const unsigned short* 
             o0[g] = __fmul_rn(o0[g], alpha[g < group ? g : 0]);
             o1[g] = __fmul_rn(o1[g], alpha[g < group ? g : 0]);
         }
+        if constexpr (KG > 0) {
+#pragma unroll 4
+            for (int i = rs; i < tn; i += nrs) {
+                u64 e = (u64)(t0 + i) * kv_dim + kvh * HD + 2 * dp;
+                u32 vv = *(const unsigned short*)(q8.v + e);
+                float d = q8.vs[e / KG];
+                float v0 = (float)(int)(signed char)(vv & 0xff);
+                float v1 = (float)(int)(signed char)(vv >> 8);
+#pragma unroll
+                for (int g = 0; g < MAX_GROUP; g++) {
+                    if (g < group) {
+                        float p = __fmul_rn(ps[g][i], d);
+                        o0[g] = __fmaf_rn(p, v0, o0[g]);
+                        o1[g] = __fmaf_rn(p, v1, o1[g]);
+                    }
+                }
+            }
+        } else
 #pragma unroll 4
         for (int i = rs; i < tn; i += nrs) {
             u32 vv = *(const u32*)(vc + (u64)(t0 + i) * kv_dim + kvh * hd + 2 * dp);
@@ -903,6 +1076,26 @@ attn_split_128(const float* __restrict__ q, const unsigned short* __restrict__ k
     attn_split_t<128>(q, kc, vc, (int)P[P_POS] + 1, blockIdx.x, blockIdx.y, n_heads, n_kv, scale,
                       max_split, part_o, part_ml);
 }
+
+// attn_split on the q8 cache (KG values per scale), quantizing this
+// token's keys and values (kf: [2][kv_dim] f32, from qkv_rope_f32) first.
+// The cache pointers aren't __restrict__: the kernel writes what it reads.
+#define ATTN_SPLIT_Q8(NAME, HD, KG)                                                                \
+    extern "C" __global__ void __launch_bounds__(ATT_TILE)                                         \
+        NAME(const float* __restrict__ q, const signed char* kq, const signed char* vq,            \
+             const float* ks, const float* vs, const float* __restrict__ kf,                       \
+             const u32* __restrict__ P, int n_heads, int n_kv, float scale, int max_split,         \
+             float* __restrict__ part_o, float* __restrict__ part_ml,                              \
+             const float* __restrict__ ksh) {                                                      \
+        PDL_START();                                                                               \
+        attn_split_t<HD, KG>(q, nullptr, nullptr, (int)P[P_POS] + 1, blockIdx.x, blockIdx.y,       \
+                             n_heads, n_kv, scale, max_split, part_o, part_ml,                     \
+                             Q8Kv{kq, vq, ks, vs, kf, ksh});                                       \
+    }
+ATTN_SPLIT_Q8(attn_split_q8_64, 64, 64)
+ATTN_SPLIT_Q8(attn_split_q8_128, 128, 128)
+ATTN_SPLIT_Q8(attn_split_q8g32_64, 64, 32)
+ATTN_SPLIT_Q8(attn_split_q8g32_128, 128, 32)
 
 // Most splits attn_combine merges (the host keeps max_split below).
 #define MAX_SPLIT 256

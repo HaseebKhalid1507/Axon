@@ -7,10 +7,11 @@
 //! inside (one match per token; the CPU's results are the same bits as
 //! calling it directly).
 
-use crate::cuda::qwen2::{CudaCache, CudaQwen2};
+use crate::cuda::qwen2::{CacheKv, CudaCache, CudaQwen2};
 use crate::cuda::{Gpu, Kernels, Module};
 use crate::gguf::Model;
-use crate::hybrid::{HybridCache, HybridQwen2};
+use crate::hybrid::{HybridCache, HybridQwen2, Placement};
+use crate::kv::KvType;
 use crate::model::{KvCache, Qwen2};
 
 /// A causal language model with a KV cache of its own type. Positions are
@@ -121,20 +122,31 @@ pub enum BackendCache {
 
 impl<'a> Backend<'a> {
     /// The model of `m` on `device`, with room for a `max_ctx`-token cache
-    /// (checked up front on the GPU). On CUDA, `gpu_layers` Some(g) splits
-    /// the model, the last g layers on the GPU (`HybridQwen2`); None puts
-    /// it all on the GPU if it fits, else as many of the last layers as fit
-    /// (`hybrid::auto_gpu_layers`, told on stderr). Err says why CUDA
-    /// can't be used. Some(0) is not a split: the CLI maps it to
-    /// `Device::Cpu` before loading (a CPU model copies the file, a GPU one
-    /// maps it).
+    /// of type `kv` (checked up front on the GPU). On CUDA, `gpu_layers`
+    /// Some(g) splits the model, the last g layers on the GPU
+    /// (`HybridQwen2`, its GPU half's cache of type `kv`, the CPU half's
+    /// f16/f32 as AXON_KV says), or with g >= n_layers is the GPU model;
+    /// None puts it all on the GPU if it fits, else as many of the last
+    /// layers as fit with a max_ctx cache of type `kv`
+    /// (`hybrid::auto_gpu_layers`, told on stderr), but with `fit` a
+    /// shorter all-GPU context (`ctx`) may win over the split
+    /// (`hybrid::choose_placement` says when). Err says why CUDA can't
+    /// be used, or that the CPU has no q8 cache. Some(0) is not a split: the
+    /// CLI maps it to `Device::Cpu` before loading (a CPU model copies the
+    /// file, a GPU one maps it).
     pub fn new(
         m: &'a Model,
         device: Device,
         max_ctx: usize,
         gpu_layers: Option<usize>,
+        kv: KvType,
+        fit: bool,
     ) -> Result<Backend<'a>, String> {
         if device == Device::Cpu {
+            // The CPU's f16/f32 choice is AXON_KV's (kv::use_f32).
+            if kv == KvType::Q8 {
+                return Err("the q8 KV cache is cuda-only (--device cuda)".into());
+            }
             return Ok(Backend::Cpu(Qwen2::new(m)));
         }
         if gpu_layers == Some(0) {
@@ -142,23 +154,71 @@ impl<'a> Backend<'a> {
         }
         let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open()?));
         let module: &'static Module<'static> = Box::leak(Box::new(Kernels::module(gpu)?));
-        let g = match gpu_layers {
-            Some(g) => g,
-            None => match CudaQwen2::new(gpu, module, m, max_ctx) {
-                Ok(n) => return Ok(Backend::Cuda(Box::new(n))),
-                Err(e) => {
-                    let free = gpu.info()?.free_bytes;
-                    let g = crate::hybrid::auto_gpu_layers(gpu, module, m, max_ctx, free)?;
-                    if g == 0 {
-                        return Err(format!("{e}; not even one layer fits"));
-                    }
-                    g
-                }
-            },
+        // f32 isn't offered on the GPU: f16 there (as always).
+        let ckv = match kv {
+            KvType::Q8 => CacheKv::Q8 { group: 0 },
+            _ => CacheKv::F16,
         };
-        let h = HybridQwen2::new(Some((gpu, module)), m, max_ctx, g)?;
+        let whole_gpu = |ctx: usize, fit: bool| {
+            CudaQwen2::with_kv(gpu, module, m, ctx, ckv, fit).map(|n| Backend::Cuda(Box::new(n)))
+        };
+        let g = match gpu_layers {
+            // Every layer: the GPU model (same weights, cache and VRAM as a
+            // split with no CPU half, and its own sampling paths).
+            Some(g) => {
+                let n = crate::hybrid::block_count(m)?;
+                if g >= n {
+                    return whole_gpu(max_ctx, false).map_err(|e| {
+                        format!("{g}/{n} layers on the GPU: {e}, or fewer --gpu-layers")
+                    });
+                }
+                g
+            }
+            None => {
+                let free = gpu.info()?.free_bytes;
+                let whole = CudaQwen2::vram_curve(gpu, module, m, ckv)?;
+                let split = || crate::hybrid::auto_gpu_layers(gpu, module, m, max_ctx, ckv, free);
+                match crate::hybrid::choose_placement(free, max_ctx, fit, whole, split)? {
+                    Placement::Gpu { ctx } => return whole_gpu(ctx, false),
+                    Placement::Split {
+                        gpu_layers,
+                        gpu_ctx,
+                    } => {
+                        if let Some(c) = gpu_ctx {
+                            eprintln!(
+                                "axon: the whole model fits in GPU memory only with a {c}-token \
+                                 context; splitting it to keep {max_ctx} (--ctx {c} for all of it \
+                                 on the GPU, faster; --gpu-layers N to choose the split{})",
+                                if ckv == CacheKv::F16 {
+                                    "; --kv q8 halves the KV cache"
+                                } else {
+                                    ""
+                                }
+                            );
+                        }
+                        gpu_layers
+                    }
+                    // with_kv's error says what it needs (or, if memory
+                    // was freed meanwhile, it fits).
+                    Placement::Nowhere => {
+                        return whole_gpu(max_ctx, fit)
+                            .map_err(|e| format!("{e}; not even one layer fits"));
+                    }
+                }
+            }
+        };
+        let h = HybridQwen2::new(Some((gpu, module)), m, max_ctx, g, ckv)?;
         eprintln!("split:       {}", h.describe(max_ctx));
         Ok(Backend::Hybrid(Box::new(h)))
+    }
+
+    /// The context the cache was planned for: max_ctx, or less on the GPU
+    /// with `fit` (never for a split: it has the whole max_ctx).
+    pub fn ctx(&self, max_ctx: usize) -> usize {
+        match self {
+            Backend::Cpu(_) | Backend::Hybrid(_) => max_ctx,
+            Backend::Cuda(n) => n.ctx,
+        }
     }
 }
 

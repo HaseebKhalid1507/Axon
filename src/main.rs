@@ -47,11 +47,11 @@ usage:
   axon <model.gguf>                         same as axon info
   axon info <model.gguf>                    print a summary and exit
   axon gen <model.gguf> \"<prompt>\" [-n N] [--draft K] [--device D] [--gpu-layers N]
-                                            greedy generation
+            [--kv T]                        greedy generation
   axon logits <model.gguf> \"<prompt>\" [-k K]
                                             top-K next-token logits after the prompt
   axon chat <model.gguf> [--system TEXT] [--ctx N] [-n N] [--draft K] [--device D]
-            [--gpu-layers N]                talk to an instruct model
+            [--gpu-layers N] [--kv T]       talk to an instruct model
   axon -h | --help                          this help
   axon -V | --version                       print the version
 
@@ -66,9 +66,13 @@ flags:
               the GPU and the rest on the CPU (0 = all on the CPU, as --device cpu; default: all
               if they fit with 256 MiB to spare, else as many as fit with another 640 MiB left
               for the desktop; an explicit N only needs the 256 MiB)
+  --kv T      gen, chat: KV cache type, f16 (default) or q8 (cuda only: int8 with a scale per
+              position and head, half the memory; slightly different results; on a split, the
+              GPU layers' cache, so more layers fit); as AXON_KV
   --system T  chat: the system message (default: Qwen2.5's)
-  --ctx N     chat: context size in tokens (default: the model's, at most 8192); when the
-              conversation outgrows it, the oldest exchanges are forgotten
+  --ctx N     chat: context size in tokens (default: the model's, at most 8192; on cuda, if the
+              whole model doesn't fit with it, less if at least half (or 4096) fits, else a
+              split); when the conversation outgrows it, the oldest exchanges are forgotten
 
 environment:
   AXON_THREADS=N             worker threads (default: cores minus a quarter)
@@ -80,8 +84,8 @@ environment:
                              (default: copy, unless the file is >60% of free memory)
   AXON_PREFETCH=N            decode prefetch distance in bytes (default 8192, 0 = off)
   AXON_DECODE_ROWS=1|2|4     decode rows per kernel call (default 4)
-  AXON_KV=f16|f32            KV cache element type (default f16: half the memory and
-                             attention bandwidth; f32 for A/B; the GPU's is always f16)
+  AXON_KV=f16|f32|q8         KV cache element type (default f16: half the memory and
+                             attention bandwidth; f32 for A/B, CPU only; q8 cuda only)
   AXON_DEVICE=cpu|cuda       same as --device
   AXON_GPU_LAYERS=N          same as --gpu-layers N
   AXON_CUDA_GRAPHS=0         cuda: launch each token's kernels one by one instead of
@@ -203,10 +207,22 @@ fn draft_env() -> usize {
 }
 
 /// KV cache type (kv.rs): checked up front so a typo is a usage error, not a
-/// panic in the first new_cache.
-fn kv_env() {
-    if let Err(e) = kv::kv_f32_setting() {
-        fail(&e);
+/// panic in the first new_cache. --kv overrides it.
+fn kv_env() -> kv::KvType {
+    kv::kv_setting().unwrap_or_else(|e| fail(&e))
+}
+
+/// --kv's value (None: the flag was last, without one): f16 or q8. f32
+/// (CPU only) is AXON_KV's alone; --kv f16 over AXON_KV=f32 means f16.
+fn kv_flag(v: Option<&str>) -> kv::KvType {
+    let v = v.unwrap_or_else(|| fail("--kv needs a value (f16 or q8)"));
+    match kv::KvType::parse(v) {
+        Ok(kv::KvType::F32) | Err(_) => fail(&format!("--kv takes f16 or q8, got '{v}'")),
+        Ok(t) => {
+            // The CPU reads its f16/f32 choice where it makes caches.
+            kv::set_f32(false);
+            t
+        }
     }
 }
 
@@ -247,9 +263,13 @@ fn backend<'a>(
     device: Device,
     ctx: usize,
     gpu_layers: Option<usize>,
+    kv: kv::KvType,
+    fit: bool,
 ) -> Backend<'a> {
-    Backend::new(model, device, ctx, gpu_layers)
-        .unwrap_or_else(|e| fail(&format!("--device cuda: {e}")))
+    Backend::new(model, device, ctx, gpu_layers, kv, fit).unwrap_or_else(|e| match device {
+        Device::Cuda => fail(&format!("--device cuda: {e}")),
+        Device::Cpu => fail(&e),
+    })
 }
 
 /// The copy-vs-map choice for loading a model for `device`.
@@ -275,7 +295,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     let mut max_draft = draft_env();
     let mut device = device_env();
     let mut gpu_layers = None;
-    kv_env();
+    let mut kv = kv_env();
     let mut i = 4;
     while i < args.len() {
         let val = args.get(i + 1).and_then(|s| s.parse::<usize>().ok());
@@ -284,6 +304,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
                 let v = args.get(i + 1).map_or("", String::as_str);
                 device = Device::parse(v).unwrap_or_else(|e| fail(&e));
             }
+            ("--kv", _) => kv = kv_flag(args.get(i + 1).map(String::as_str)),
             ("-n", Some(v)) => n_gen = v,
             ("-k", Some(v)) => top_k = v,
             ("--draft", Some(v)) => max_draft = v,
@@ -309,7 +330,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         std::process::exit(1);
     }
     let extra = if cmd == "gen" { n_gen } else { 0 };
-    let net = backend(&model, device, ids.len() + extra + 1, gpu_layers);
+    let net = backend(&model, device, ids.len() + extra + 1, gpu_layers, kv, false);
     let mut cache = net.new_cache(ids.len() + extra + 1);
 
     // Feed the prompt in batches (the backend's size: PREFILL_BATCH on the
@@ -403,9 +424,12 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     );
     if let Backend::Cuda(n) = &net {
         eprintln!(
-            "device:      cuda, {} of weights in VRAM ({} read per token), CUDA graphs {}",
+            "device:      cuda, {} of weights in VRAM ({} read per token), KV cache {} {}, \
+             CUDA graphs {}",
             human_bytes(n.weight_bytes() as u64),
             human_bytes(n.bytes_per_token(true) as u64),
+            n.kv_name(),
+            human_bytes(n.kv_cache_bytes(n.kv, ids.len() + extra + 1) as u64),
             if n.graphs { "on" } else { "off" }
         );
     }
@@ -486,7 +510,7 @@ const CHAT_HELP: &str = concat!(
 /// stdin is a message; on a terminal it's an interactive session.
 fn run_chat(args: &[String]) -> std::io::Result<()> {
     const CHAT_USAGE: &str = "usage: axon chat <model.gguf> [--system TEXT] [--ctx N] [-n N] [--draft K] [--device D] \
-         [--gpu-layers N]";
+         [--gpu-layers N] [--kv T]";
     let Some(path) = args.get(2).filter(|p| !p.starts_with('-')) else {
         fail(CHAT_USAGE);
     };
@@ -496,13 +520,13 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     let mut max_draft = draft_env();
     let mut device = device_env();
     let mut gpu_layers = None;
-    kv_env();
+    let mut kv = kv_env();
     let mut i = 3;
     while i < args.len() {
         let f = args[i].as_str();
         if !matches!(
             f,
-            "--system" | "--ctx" | "-n" | "--draft" | "--device" | "--gpu-layers"
+            "--system" | "--ctx" | "-n" | "--draft" | "--device" | "--gpu-layers" | "--kv"
         ) {
             fail(&format!("unknown argument '{f}' for chat"));
         }
@@ -513,6 +537,8 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
             system = v.clone();
         } else if f == "--device" {
             device = Device::parse(v).unwrap_or_else(|e| fail(&e));
+        } else if f == "--kv" {
+            kv = kv_flag(Some(v));
         } else {
             let n = v
                 .parse::<usize>()
@@ -533,6 +559,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     let model = open_model_with(path, true, copy_for(device));
     // RoPE past the trained length gives garbage; 0 = the GGUF doesn't say.
     let trained = model.ctx_len() as usize;
+    let fit = ctx.is_none();
     let ctx = match ctx {
         Some(n) if trained > 0 && n > trained => fail(&format!(
             "--ctx {n} is past the {trained} tokens {path} was trained on"
@@ -542,7 +569,21 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         None => DEFAULT_CHAT_CTX,
     };
     let tok = tokenizer::Tokenizer::from_gguf(&model);
-    let net = backend(&model, device, ctx, gpu_layers);
+    // The default context may shrink to keep the model on the GPU (Backend::new).
+    let net = backend(&model, device, ctx, gpu_layers, kv, fit);
+    let (want, ctx) = (ctx, net.ctx(ctx));
+    if ctx < want {
+        eprintln!(
+            "axon: a {want}-token context doesn't fit in GPU memory with the whole model; using \
+             {ctx} (--ctx {want} splits it across the CPU and GPU instead, slower; --gpu-layers N \
+             to choose the split{})",
+            if kv == kv::KvType::Q8 {
+                ""
+            } else {
+                "; --kv q8 halves the KV cache"
+            }
+        );
+    }
     let mut conv =
         chat::Chat::new(&net, &tok, &system, ctx).unwrap_or_else(|e| fail(&format!("{path}: {e}")));
     conv.max_reply = max_reply;
@@ -551,11 +592,12 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     let name = std::path::Path::new(path)
         .file_name()
         .map_or(path.as_str().into(), |n| n.to_string_lossy());
-    let split = match &net {
-        Backend::Hybrid(n) => format!(" | {}", n.describe(ctx)),
-        _ => String::new(),
+    let kvs = match &net {
+        Backend::Cuda(n) => format!(" | kv {}", n.kv_name()),
+        Backend::Hybrid(n) => format!(" | {} | kv {}", n.describe(ctx), n.kv_name()),
+        Backend::Cpu(_) => String::new(),
     };
-    match chat_repl(&mut conv, &tok, &format!("{name} | ctx {ctx}{split}")) {
+    match chat_repl(&mut conv, &tok, &format!("{name} | ctx {ctx}{kvs}")) {
         // stdout went away (a closed pipe): nobody is listening.
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         r => r,
@@ -1283,7 +1325,14 @@ mod tests {
             return;
         };
         let km = crate::cuda::Kernels::module(&g).unwrap();
-        let net = crate::hybrid::HybridQwen2::new(Some((&g, &km)), &m, 256, 12).unwrap();
+        let net = crate::hybrid::HybridQwen2::new(
+            Some((&g, &km)),
+            &m,
+            256,
+            12,
+            crate::cuda::qwen2::CacheKv::F16,
+        )
+        .unwrap();
         drafting_matches_greedy_on(&net, &m);
     }
 

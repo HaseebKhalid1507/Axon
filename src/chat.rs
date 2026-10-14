@@ -537,7 +537,14 @@ mod tests {
         };
         let km = crate::cuda::Kernels::module(&g).unwrap();
         let tok = Tokenizer::from_gguf(&m);
-        let net = crate::hybrid::HybridQwen2::new(Some((&g, &km)), &m, 2048, 12).unwrap();
+        let net = crate::hybrid::HybridQwen2::new(
+            Some((&g, &km)),
+            &m,
+            2048,
+            12,
+            crate::cuda::qwen2::CacheKv::F16,
+        )
+        .unwrap();
         for (max_reply, k) in [(12, 7), (64, 0)] {
             let mut chat = Chat::new(&net, &tok, DEFAULT_SYSTEM, 2048).unwrap();
             chat.max_reply = max_reply;

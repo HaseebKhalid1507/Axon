@@ -116,6 +116,8 @@ impl Mat {
 /// One layer: matrices, and offsets (in floats) into the vector buffer.
 struct LayerW {
     attn_norm: usize,
+    /// The q8 cache's key shift (decode.cu kv_q8_store), [kv_dim] floats.
+    ksh: Option<usize>,
     bq: Option<usize>,
     bk: Option<usize>,
     bv: Option<usize>,
@@ -127,6 +129,42 @@ struct LayerW {
     gate: Mat,
     up: Mat,
     down: Mat,
+}
+
+/// How a cache stores keys and values (`CudaQwen2::kv`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CacheKv {
+    /// IEEE half, rounded to nearest even (saturating): the default.
+    F16,
+    /// int8 by decode.cu's q8 rule, with an f32 scale per `group` values:
+    /// head_dim (one per position and kv head; 0 means head_dim) or 32.
+    /// Half the bytes (plus 4 / group per value), so twice the context in
+    /// the same memory. Results differ from f16's (measured in the tests);
+    /// the batching contract holds within the mode.
+    Q8 { group: usize },
+}
+
+/// The q8 kernels for one scale group size (`CacheKv::Q8`).
+struct Q8Fns<'m> {
+    attn_split: Func<'m>,
+    /// prefill.cu's: the batched store, attn_split_b, attn_warp_b.
+    store_b: Func<'m>,
+    attn_split_b: Func<'m>,
+    attn_warp_b: Func<'m>,
+}
+
+impl<'m> Q8Fns<'m> {
+    /// group: values per scale, head_dim or 32.
+    fn new(module: &'m Module<'m>, head_dim: usize, group: usize) -> Result<Q8Fns<'m>, String> {
+        let q = if group == head_dim { "q8" } else { "q8g32" };
+        let f = |s: &str| module.function(&format!("{s}_{q}_{head_dim}"));
+        Ok(Q8Fns {
+            attn_split: f("attn_split")?,
+            store_b: module.function(&format!("kv_{q}_b_{head_dim}"))?,
+            attn_split_b: f("attn_split_b")?,
+            attn_warp_b: f("attn_warp_b")?,
+        })
+    }
 }
 
 /// The decode kernels of a module.
@@ -142,6 +180,10 @@ struct Fns<'m> {
     attn_split: Func<'m>,
     attn_combine: Func<'m>,
     argmax: Func<'m>,
+    /// The q8 cache's: qkv_rope with f32 keys and values out, and per scale
+    /// group (head_dim, 32) the attention kernels.
+    qkv_rope_f32: Func<'m>,
+    q8: [Q8Fns<'m>; 2],
 }
 
 pub struct CudaQwen2<'g> {
@@ -183,6 +225,12 @@ pub struct CudaQwen2<'g> {
     /// scratch for that many (or their size, if smaller), and `vram_need`
     /// counts it. `PREFILL_BATCH`, or `SPLIT_BATCH` for a split's GPU half.
     batch: usize,
+    /// How `new_cache` stores keys and values (set by `with_kv`; a test may
+    /// change it between caches: each cache keeps its own).
+    pub kv: CacheKv,
+    /// The context `with_kv` planned memory for: its max_ctx, or less with
+    /// `fit` (what's free then held).
+    pub ctx: usize,
 }
 
 /// What `CudaQwen2` keeps per sequence: the KV cache, activations, logits,
@@ -192,8 +240,15 @@ pub struct CudaCache<'g> {
     /// model's weight addresses, so it only runs with that model.
     net: u64,
     max_ctx: usize,
-    /// Per layer, K then V, each [max_ctx][kv_dim] f16.
+    /// How kv stores keys and values.
+    mode: CacheKv,
+    /// F16: per layer, K then V, each [max_ctx][kv_dim] f16. Q8: per layer
+    /// K then V int8 [max_ctx][kv_dim], then per layer K then V scales f32
+    /// [max_ctx][kv_dim / group] (`kv_args`).
     kv: DevBuf<'g>,
+    /// Q8: this token's keys and values, f32 [2][kv_dim], on their way into
+    /// the cache (qkv_rope_f32 to attn_split_q8). Empty for F16.
+    kvf: DevBuf<'g>,
     x: DevBuf<'g>,
     q: DevBuf<'g>,
     att: DevBuf<'g>,
@@ -230,6 +285,14 @@ struct Plan<'m> {
     total: usize,
     vecs: Vec<f32>,
     freq: Vec<f64>,
+}
+
+impl Plan<'_> {
+    /// The VRAM bytes that don't depend on the context: the weight arena
+    /// (padded) and the small vectors.
+    fn fixed(&self) -> usize {
+        self.total + ARENA_PAD + self.vecs.len() * 4 + self.freq.len() * 8
+    }
 }
 
 /// What a step starts from: a token (embedded here, first == 0) or the
@@ -282,47 +345,95 @@ fn vec_f32(m: &Model, t: &Tensor) -> Vec<f32> {
 
 impl<'g> CudaQwen2<'g> {
     /// The model's weights on `gpu`, with decode.cu's kernels from `module`
-    /// (`super::Kernels::module`). Err if the model isn't supported here or
-    /// if the weights plus a cache for `max_ctx` positions don't fit in the
-    /// free VRAM.
+    /// (`super::Kernels::module`), f16 caches. Err if the model isn't
+    /// supported here or if the weights plus a cache for `max_ctx` positions
+    /// don't fit in the free VRAM.
+    #[cfg_attr(not(test), allow(dead_code))] // the tests'
     pub fn new(
         gpu: &'g Gpu,
         module: &'g Module<'g>,
         m: &Model,
         max_ctx: usize,
     ) -> Result<CudaQwen2<'g>, String> {
-        Self::new_layers(gpu, module, m, max_ctx, 0, &mut |_| {})
+        Self::with_kv(gpu, module, m, max_ctx, CacheKv::F16, false)
     }
 
-    /// `new` with layers first..n_layers only, plus the output norm and
-    /// head (and the embedding if first == 0): the GPU half of a model
-    /// split across devices (`hybrid`). The other layers' weights are never
-    /// read or uploaded. With first > 0 every call takes the hidden state
-    /// after layer first - 1 (`forward_hidden` & co.), not tokens, and the
-    /// cache holds n_layers - first layers. `uploaded` sees each matrix
-    /// right after its bytes are on the GPU (the hybrid hands its pages
-    /// back to `m` there, so the GPU half never sits in RAM all at once).
+    /// `new` with caches of type `kv`. With `fit`, a cache for max_ctx
+    /// positions that doesn't fit isn't an error: `ctx` becomes the most
+    /// (a multiple of 256) that does, if that's at least 256.
+    pub fn with_kv(
+        gpu: &'g Gpu,
+        module: &'g Module<'g>,
+        m: &Model,
+        max_ctx: usize,
+        kv: CacheKv,
+        fit: bool,
+    ) -> Result<CudaQwen2<'g>, String> {
+        Self::build(gpu, module, m, max_ctx, 0, kv, fit, &mut |_| {})
+    }
+
+    /// `with_kv` (no `fit`) with layers first..n_layers only, plus the
+    /// output norm and head (and the embedding if first == 0): the GPU half
+    /// of a model split across devices (`hybrid`). The other layers'
+    /// weights are never read or uploaded. With first > 0 every call takes
+    /// the hidden state after layer first - 1 (`forward_hidden` & co.), not
+    /// tokens, and the cache holds n_layers - first layers. `uploaded` sees
+    /// each matrix right after its bytes are on the GPU (the hybrid hands
+    /// its pages back to `m` there, so the GPU half never sits in RAM all
+    /// at once).
     pub fn new_layers<'m>(
         gpu: &'g Gpu,
         module: &'g Module<'g>,
         m: &'m Model,
         max_ctx: usize,
         first: usize,
+        kv: CacheKv,
         uploaded: &mut dyn FnMut(&'m Tensor),
     ) -> Result<CudaQwen2<'g>, String> {
-        let (mut net, plan) = Self::plan(gpu, module, m, first)?;
-        let want = net.vram_want(&plan, max_ctx);
+        Self::build(gpu, module, m, max_ctx, first, kv, false, uploaded)
+    }
+
+    /// `new_layers` with `with_kv`'s `fit`.
+    #[allow(clippy::too_many_arguments)]
+    fn build<'m>(
+        gpu: &'g Gpu,
+        module: &'g Module<'g>,
+        m: &'m Model,
+        max_ctx: usize,
+        first: usize,
+        kv: CacheKv,
+        fit: bool,
+        uploaded: &mut dyn FnMut(&'m Tensor),
+    ) -> Result<CudaQwen2<'g>, String> {
+        let (mut net, plan) = Self::plan(gpu, module, m, first, kv)?;
+        // Check the whole plan fits before allocating any of it.
         let free = gpu.info()?.free_bytes;
+        let mut ctx = max_ctx;
+        if fit {
+            // cache_bytes grows with the context: the largest that fits.
+            if let Some(c) = crate::hybrid::fit_ctx(max_ctx, free, |c| net.vram_want(&plan, c)) {
+                ctx = c;
+            }
+        }
+        let want = net.vram_want(&plan, ctx);
         if want > free {
+            let q8 = if matches!(kv, CacheKv::F16) {
+                ", --kv q8 (half the KV memory)"
+            } else {
+                ""
+            };
             return Err(format!(
                 "the model needs {:.2} GiB of GPU memory ({:.2} GiB weights, {:.2} GiB KV cache \
-                 and scratch for {max_ctx} tokens), {:.2} GiB is free; try a smaller --ctx (or -n) or the CPU",
+                 ({}) and scratch for {ctx} tokens), {:.2} GiB is free; try a smaller --ctx \
+                 (or -n){q8} or the CPU",
                 want as f64 / GIB,
                 plan.total as f64 / GIB,
-                net.cache_bytes(max_ctx) as f64 / GIB,
+                net.cache_bytes(ctx) as f64 / GIB,
+                net.kv_name(),
                 free as f64 / GIB
             ));
         }
+        net.ctx = ctx;
         // 16 bytes of slack: the 2-byte-aligned block loads (ld8_a2) read up
         // to 2 bytes past a Q8_0/Q5_0 block, which may be the arena's last.
         net.weights = gpu.alloc(plan.total + ARENA_PAD)?;
@@ -337,7 +448,7 @@ impl<'g> CudaQwen2<'g> {
         Ok(net)
     }
 
-    /// VRAM `new_layers(.., max_ctx, first)` checks it has, without
+    /// VRAM `new_layers(.., max_ctx, first, kv, ..)` checks it has, without
     /// allocating anything: the split's placement (`hybrid::gpu_layers`).
     pub fn vram_need(
         gpu: &'g Gpu,
@@ -345,23 +456,43 @@ impl<'g> CudaQwen2<'g> {
         m: &Model,
         max_ctx: usize,
         first: usize,
+        kv: CacheKv,
     ) -> Result<u64, String> {
-        let (net, plan) = Self::plan(gpu, module, m, first)?;
+        let (net, plan) = Self::plan(gpu, module, m, first, kv)?;
         Ok(net.vram_want(&plan, max_ctx))
+    }
+
+    /// `vram_need` of the whole model (first 0) as a function of max_ctx,
+    /// planned once: what `Backend::new`'s placement weighs.
+    pub fn vram_curve(
+        gpu: &'g Gpu,
+        module: &'g Module<'g>,
+        m: &Model,
+        kv: CacheKv,
+    ) -> Result<impl Fn(usize) -> u64 + use<'g>, String> {
+        let (net, plan) = Self::plan(gpu, module, m, 0, kv)?;
+        let fixed = plan.fixed();
+        Ok(move |ctx| net.vram_want_fixed(fixed, ctx))
     }
 
     /// Weights, small vectors, cache for `max_ctx` and `HEADROOM`, in bytes.
     fn vram_want(&self, plan: &Plan, max_ctx: usize) -> u64 {
-        let small = plan.vecs.len() * 4 + plan.freq.len() * 8;
-        (plan.total + ARENA_PAD + small + self.cache_bytes(max_ctx)) as u64 + HEADROOM
+        self.vram_want_fixed(plan.fixed(), max_ctx)
     }
 
-    /// The model with nothing allocated yet, and what to upload.
+    /// `vram_want` given the plan's `fixed()`.
+    fn vram_want_fixed(&self, fixed: usize, max_ctx: usize) -> u64 {
+        (fixed + self.cache_bytes(max_ctx)) as u64 + HEADROOM
+    }
+
+    /// The model with nothing allocated yet (caches of type `kv`), and what
+    /// to upload.
     fn plan<'m>(
         gpu: &'g Gpu,
         module: &'g Module<'g>,
         m: &'m Model,
         first: usize,
+        kv: CacheKv,
     ) -> Result<(CudaQwen2<'g>, Plan<'m>), String> {
         crate::model::check_supported(m).map_err(|e| e.to_string())?;
         let need = |k: &str| {
@@ -376,6 +507,7 @@ impl<'g> CudaQwen2<'g> {
         let head_dim = dim / n_heads;
         let eps = meta(m, "attention.layer_norm_rms_epsilon").unwrap_or(1e-6) as f32;
         let rope_base = meta(m, "rope.freq_base").unwrap_or(10000.0);
+        let trained = meta(m, "context_length").unwrap_or(32768.0);
         let group = n_heads / n_kv_heads;
         if head_dim != 64 && head_dim != 128 {
             return Err(format!(
@@ -446,7 +578,29 @@ impl<'g> CudaQwen2<'g> {
             );
             let mut opt = |s: &str| tensor_opt(m, &name(s)).map(|t| push_vec(vec_f32(m, t)));
             let (bq, bk, bv) = (opt("attn_q.bias"), opt("attn_k.bias"), opt("attn_v.bias"));
+            // The q8 cache stores keys minus the key bias b of the RoPE
+            // pairs slow enough that the rotated bias R_t b stays within |b|
+            // of b at every trained position t (angle theta t <= pi / 3):
+            // Qwen2's huge key channels (|b| up to ~200, at least 10x the
+            // rest) are such pairs. 0 for the others. A shift the same at
+            // every position adds the same to all of a query's scores, so
+            // softmax doesn't see it; quantizing the small remainder does.
+            let ksh = tensor_opt(m, &name("attn_k.bias")).map(|t| {
+                let b = vec_f32(m, t);
+                let slow = |r: usize| {
+                    let i = r % head_dim % (head_dim / 2);
+                    let theta = rope_base.powf(-2.0 * i as f64 / head_dim as f64);
+                    theta * trained <= std::f64::consts::FRAC_PI_3
+                };
+                push_vec(
+                    b.iter()
+                        .enumerate()
+                        .map(|(r, &x)| if slow(r) { x } else { 0.0 })
+                        .collect(),
+                )
+            });
             layers.push(LayerW {
+                ksh,
                 attn_norm: push_vec(vec_f32(m, tensor(m, &name("attn_norm.weight"))?)),
                 bq,
                 bk,
@@ -476,7 +630,7 @@ impl<'g> CudaQwen2<'g> {
         // Up to ~8 attention blocks per SM at long contexts.
         let max_split = (8 * sms / n_kv_heads).clamp(1, MAX_SPLIT);
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let net = CudaQwen2 {
+        let mut net = CudaQwen2 {
             gpu,
             id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             f: Fns {
@@ -495,6 +649,11 @@ impl<'g> CudaQwen2<'g> {
                 })?,
                 attn_combine: module.function("attn_combine")?,
                 argmax: module.function("argmax")?,
+                qkv_rope_f32: module.function("qkv_rope_f32")?,
+                q8: [
+                    Q8Fns::new(module, head_dim, head_dim)?,
+                    Q8Fns::new(module, head_dim, 32)?,
+                ],
             },
             n_layers,
             dim,
@@ -520,7 +679,18 @@ impl<'g> CudaQwen2<'g> {
             } else {
                 PREFILL_BATCH
             },
+            kv,
+            ctx: 0,
         };
+        if let CacheKv::Q8 { group } = kv {
+            if group == 0 {
+                net.kv = CacheKv::Q8 { group: head_dim };
+            } else if group != head_dim && group != 32 {
+                return Err(format!(
+                    "q8 KV scale groups of {group} values (head_dim or 32)"
+                ));
+            }
+        }
         let plan = Plan {
             uploads,
             vecs,
@@ -538,6 +708,53 @@ impl<'g> CudaQwen2<'g> {
 
     fn kv_dim(&self) -> usize {
         self.n_kv_heads * self.head_dim
+    }
+
+    /// "f16", "q8" (a scale per kv head row) or "q8/32" (per 32 values):
+    /// what `new_cache` makes.
+    pub fn kv_name(&self) -> &'static str {
+        match self.kv {
+            CacheKv::F16 => "f16",
+            CacheKv::Q8 { group } if group == self.head_dim => "q8",
+            CacheKv::Q8 { .. } => "q8/32",
+        }
+    }
+
+    /// Bytes of the keys and values of a `kv` cache for max_ctx positions.
+    pub fn kv_cache_bytes(&self, kv: CacheKv, max_ctx: usize) -> usize {
+        let n = 2 * self.layers.len() * max_ctx * self.kv_dim();
+        match kv {
+            CacheKv::F16 => 2 * n,
+            // group 0: one scale per kv head (`try_cache_kv`).
+            CacheKv::Q8 { group } => n + n / if group == 0 { self.head_dim } else { group } * 4,
+        }
+    }
+
+    /// Layer l's cache as kernel arguments: F16 [K, V]; Q8 [K, V, K scales,
+    /// V scales] (layout at `CudaCache::kv`).
+    fn kv_args(&self, c: &CudaCache, l: usize) -> Vec<Arg> {
+        let n = c.max_ctx * self.kv_dim();
+        match c.mode {
+            CacheKv::F16 => vec![c.kv.arg_at(2 * l * n * 2), c.kv.arg_at((2 * l + 1) * n * 2)],
+            CacheKv::Q8 { group } => {
+                let s0 = 2 * self.layers.len() * n;
+                let sn = n / group * 4;
+                vec![
+                    c.kv.arg_at(2 * l * n),
+                    c.kv.arg_at((2 * l + 1) * n),
+                    c.kv.arg_at(s0 + 2 * l * sn),
+                    c.kv.arg_at(s0 + (2 * l + 1) * sn),
+                ]
+            }
+        }
+    }
+
+    /// The q8 kernels for a cache of `mode` (Q8).
+    fn q8_fns(&self, mode: CacheKv) -> &Q8Fns<'g> {
+        match mode {
+            CacheKv::Q8 { group } => &self.f.q8[(group != self.head_dim) as usize],
+            CacheKv::F16 => unreachable!("q8 kernels for an f16 cache"),
+        }
     }
 
     /// Weight bytes in VRAM.
@@ -568,8 +785,17 @@ impl<'g> CudaQwen2<'g> {
     /// (batch + 1) * dim * 4 bytes (~1.3 MB on 32B), kept so `vram_need`
     /// stays one formula.
     pub fn cache_bytes(&self, max_ctx: usize) -> usize {
+        self.cache_bytes_kv(self.kv, max_ctx)
+    }
+
+    /// `cache_bytes` for a cache of type `kv`.
+    fn cache_bytes_kv(&self, kv: CacheKv, max_ctx: usize) -> usize {
         let f = 4;
-        let kv = 2 * self.layers.len() * max_ctx * self.kv_dim() * 2;
+        let kvf = match kv {
+            CacheKv::F16 => 0,
+            CacheKv::Q8 { .. } => 2 * self.kv_dim() * f,
+        };
+        let kv = self.kv_cache_bytes(kv, max_ctx) + kvf;
         let host_x = if self.first > 0 { self.dim * f } else { 0 };
         let act = act_bytes(self.dim.max(self.ffn));
         let parts = self.n_heads * self.max_split * (self.head_dim + 2) * f;
@@ -583,32 +809,53 @@ impl<'g> CudaQwen2<'g> {
 
     /// A cache for positions 0..max_ctx, or why there's no room for it.
     pub fn try_cache(&self, max_ctx: usize) -> Result<CudaCache<'g>, String> {
+        self.try_cache_kv(max_ctx, self.kv)
+    }
+
+    /// `try_cache` of type `mode` (rather than `kv`'s).
+    pub fn try_cache_kv(&self, max_ctx: usize, mode: CacheKv) -> Result<CudaCache<'g>, String> {
         let g = self.gpu;
         let f = 4;
+        let mode = match mode {
+            CacheKv::Q8 { group: 0 } => CacheKv::Q8 {
+                group: self.head_dim,
+            },
+            m => m,
+        };
+        if let CacheKv::Q8 { group } = mode {
+            assert!(
+                group == self.head_dim || group == 32,
+                "q8 group {group} (head_dim or 32)"
+            );
+        }
         // `new` budgets one cache; each cache brings its own KV and batch
         // scratch (up to ~200 MiB on the 7B), so every one is checked
         // against what is free now, before any of it is allocated.
-        let want = self.cache_bytes(max_ctx) as u64 + CACHE_HEADROOM;
+        let want = self.cache_bytes_kv(mode, max_ctx) as u64 + CACHE_HEADROOM;
         let free = g.info()?.free_bytes;
         if want > free {
             return Err(format!(
                 "a {max_ctx}-token cache needs {:.2} GiB of GPU memory (KV cache and scratch), \
-                 {:.2} GiB is free; try a smaller --ctx (or -n) or the CPU",
+                 {:.2} GiB is free; try a smaller --ctx (or -n){} or the CPU",
                 want as f64 / GIB,
-                free as f64 / GIB
+                free as f64 / GIB,
+                if mode == CacheKv::F16 {
+                    ", --kv q8"
+                } else {
+                    ""
+                }
             ));
         }
-        let kv = g
-            .alloc(2 * self.layers.len() * max_ctx * self.kv_dim() * 2)
-            .map_err(|e| {
-                format!(
-                    "no room for a {max_ctx}-token KV cache on the GPU ({e}); try a smaller --ctx"
-                )
-            })?;
+        let kv = g.alloc(self.kv_cache_bytes(mode, max_ctx)).map_err(|e| {
+            format!("no room for a {max_ctx}-token KV cache on the GPU ({e}); try a smaller --ctx")
+        })?;
+        let q8 = matches!(mode, CacheKv::Q8 { .. });
         let c = CudaCache {
             net: self.id,
             max_ctx,
+            mode,
             kv,
+            kvf: g.alloc(if q8 { 2 * self.kv_dim() * f } else { 0 })?,
             x: g.alloc(self.dim * f)?,
             q: g.alloc(self.dim * f)?,
             att: g.alloc(self.dim * f)?,
@@ -635,11 +882,6 @@ impl<'g> CudaQwen2<'g> {
         Ok(c)
     }
 
-    /// K (`v` false) or V cache of layer l: byte offset in `kv`.
-    fn kv_off(&self, c: &CudaCache, l: usize, v: bool) -> usize {
-        (2 * l + v as usize) * c.max_ctx * self.kv_dim() * 2
-    }
-
     /// Launch every kernel of one step on the stream (no sync): the layers,
     /// and with `head` the output norm, head and argmax. `on_launch(name,
     /// bytes)` runs after each launch (profiling).
@@ -662,7 +904,8 @@ impl<'g> CudaQwen2<'g> {
         // signatures, and every buffer is sized for what the kernel reads
         // and writes with them: x/q/att hold dim floats, hid ffn, act
         // act_bytes(max(dim, ffn)), the KV cache max_ctx rows per layer
-        // (P[pos] < max_ctx: `step` checks), part_* n_heads * max_split
+        // (P[pos] < max_ctx: `step` checks; q8: int8 rows and their scales,
+        // kvf 2 kv_dim floats), part_* n_heads * max_split
         // splits, logits vocab; matrices are whole in the arena.
         unsafe {
             // Without the embedding, x was copied in before the step and
@@ -721,8 +964,14 @@ impl<'g> CudaQwen2<'g> {
                 // Row pairs: query and key RoPE pairs, value rows two by two.
                 let items = dim / 2 + kvd / 2 + kvd / 2;
                 let bias = |b: Option<usize>| b.map_or(null, vec);
+                let kva = self.kv_args(c, li);
+                // q8: keys and values to kvf, which attn_split_q8 stores.
+                let (qkv_f, kout) = match c.mode {
+                    CacheKv::F16 => (&f.qkv_rope, [kva[0], kva[1]]),
+                    CacheKv::Q8 { .. } => (&f.qkv_rope_f32, [c.kvf.arg(), c.kvf.arg_at(kvd * 4)]),
+                };
                 self.run(
-                    &f.qkv_rope,
+                    qkv_f,
                     (items as u32, 1, 1),
                     gemv_block,
                     0,
@@ -747,28 +996,38 @@ impl<'g> CudaQwen2<'g> {
                         c.rope.arg(),
                         c.params.arg(),
                         c.q.arg(),
-                        c.kv.arg_at(self.kv_off(c, li, false)),
-                        c.kv.arg_at(self.kv_off(c, li, true)),
+                        kout[0],
+                        kout[1],
                     ],
                 )?;
                 on_launch("qkv", l.q.bytes() + l.k.bytes() + l.v.bytes())?;
+                let mut args = vec![c.q.arg()];
+                args.extend_from_slice(&kva);
+                let attn = match c.mode {
+                    CacheKv::F16 => &f.attn_split,
+                    CacheKv::Q8 { .. } => {
+                        args.push(c.kvf.arg());
+                        &self.q8_fns(c.mode).attn_split
+                    }
+                };
+                args.extend_from_slice(&[
+                    c.params.arg(),
+                    Arg::I32(self.n_heads as i32),
+                    Arg::I32(self.n_kv_heads as i32),
+                    Arg::F32(1.0 / (hd as f32).sqrt()),
+                    Arg::I32(self.max_split as i32),
+                    c.part_o.arg(),
+                    c.part_ml.arg(),
+                ]);
+                if c.mode != CacheKv::F16 {
+                    args.push(bias(l.ksh));
+                }
                 self.run(
-                    &f.attn_split,
+                    attn,
                     (self.n_kv_heads as u32, self.max_split as u32, 1),
                     (ATT_TILE as u32, 1, 1),
                     0,
-                    &[
-                        c.q.arg(),
-                        c.kv.arg_at(self.kv_off(c, li, false)),
-                        c.kv.arg_at(self.kv_off(c, li, true)),
-                        c.params.arg(),
-                        Arg::I32(self.n_heads as i32),
-                        Arg::I32(self.n_kv_heads as i32),
-                        Arg::F32(1.0 / (hd as f32).sqrt()),
-                        Arg::I32(self.max_split as i32),
-                        c.part_o.arg(),
-                        c.part_ml.arg(),
-                    ],
+                    &args,
                 )?;
                 on_launch("attn", 0)?;
                 self.run(
