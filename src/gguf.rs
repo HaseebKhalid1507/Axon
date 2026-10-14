@@ -171,7 +171,6 @@ pub struct QType {
     pub name: &'static str,
     pub block_size: usize,
     pub block_bytes: usize,
-    pub bits: f32,
 }
 
 const QTYPES: &[QType] = &[
@@ -180,105 +179,90 @@ const QTYPES: &[QType] = &[
         name: "F32",
         block_size: 1,
         block_bytes: 4,
-        bits: 32.0,
     },
     QType {
         id: 1,
         name: "F16",
         block_size: 1,
         block_bytes: 2,
-        bits: 16.0,
     },
     QType {
         id: 2,
         name: "Q4_0",
         block_size: 32,
         block_bytes: 18,
-        bits: 4.5,
     },
     QType {
         id: 3,
         name: "Q4_1",
         block_size: 32,
         block_bytes: 20,
-        bits: 5.0,
     },
     QType {
         id: 6,
         name: "Q5_0",
         block_size: 32,
         block_bytes: 22,
-        bits: 5.5,
     },
     QType {
         id: 7,
         name: "Q5_1",
         block_size: 32,
         block_bytes: 24,
-        bits: 6.0,
     },
     QType {
         id: 8,
         name: "Q8_0",
         block_size: 32,
         block_bytes: 34,
-        bits: 8.5,
     },
     QType {
         id: 9,
         name: "Q8_1",
         block_size: 32,
         block_bytes: 36,
-        bits: 9.0,
     },
     QType {
         id: 10,
         name: "Q2_K",
         block_size: 256,
         block_bytes: 84,
-        bits: 2.6,
     },
     QType {
         id: 11,
         name: "Q3_K",
         block_size: 256,
         block_bytes: 110,
-        bits: 3.4,
     },
     QType {
         id: 12,
         name: "Q4_K",
         block_size: 256,
         block_bytes: 144,
-        bits: 4.5,
     },
     QType {
         id: 13,
         name: "Q5_K",
         block_size: 256,
         block_bytes: 176,
-        bits: 5.5,
     },
     QType {
         id: 14,
         name: "Q6_K",
         block_size: 256,
         block_bytes: 210,
-        bits: 6.6,
     },
     QType {
         id: 15,
         name: "Q8_K",
         block_size: 256,
         block_bytes: 292,
-        bits: 9.1,
     },
     QType {
         id: 30,
         name: "BF16",
         block_size: 1,
         block_bytes: 2,
-        bits: 16.0,
     },
 ];
 
@@ -292,7 +276,6 @@ pub fn qtype(id: u32) -> QType {
             name: "??",
             block_size: 1,
             block_bytes: 1,
-            bits: 0.0,
         })
 }
 
@@ -440,18 +423,6 @@ impl Model {
             .find(|(k, _)| k == key)
             .and_then(|(_, v)| if let Val::U32(n) = v { Some(*n) } else { None })
     }
-    pub fn meta_str(&self, key: &str) -> Option<&str> {
-        self.metadata
-            .iter()
-            .find(|(k, _)| k == key)
-            .and_then(|(_, v)| {
-                if let Val::Str(s) = v {
-                    Some(s.as_str())
-                } else {
-                    None
-                }
-            })
-    }
     pub fn n_layers(&self) -> u32 {
         self.meta_u32(&format!("{}.block_count", self.arch))
             .unwrap_or(0)
@@ -470,10 +441,6 @@ impl Model {
     }
     pub fn ctx_len(&self) -> u32 {
         self.meta_u32(&format!("{}.context_length", self.arch))
-            .unwrap_or(0)
-    }
-    pub fn ffn_dim(&self) -> u32 {
-        self.meta_u32(&format!("{}.feed_forward_length", self.arch))
             .unwrap_or(0)
     }
     pub fn total_params(&self) -> u64 {

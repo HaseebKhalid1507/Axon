@@ -49,7 +49,7 @@ curl -L -o models/qwen2.5-0.5b-q4_k_m.gguf \
 ## Usage
 
 ```
-axon <model.gguf>                         browse the model in a terminal UI
+axon <model.gguf>                         same as axon info
 axon info <model.gguf>                    print a summary and exit
 axon gen <model.gguf> "<prompt>" [-n N]   greedy generation (default 32 tokens)
 axon logits <model.gguf> "<prompt>" [-k K]  top-K next-token logits (default 10)
@@ -120,7 +120,7 @@ Read in this order:
    greedy loop: `forward`, argmax, repeat.
 
 `pool.rs` (the worker pool) and `tokenizer.rs` (byte-level BPE) can be read
-any time; `viz.rs` is the TUI.
+any time.
 
 ## Contributing
 
