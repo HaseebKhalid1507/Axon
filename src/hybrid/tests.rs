@@ -1235,3 +1235,27 @@ fn placement_stream_changes_the_decision() {
         Placement::Gpu { ctx: 8192 }
     );
 }
+
+/// Sampling on a split (`Lm::forward_cands` / `verify_cands` by default
+/// through `forward`: the logits come back, the CPU filters them; verify
+/// is token by token, never streamed): sample.rs's real-model checks
+/// (drafting == plain sampling for the same seed, seeds differ) with f16
+/// and q8 GPU halves, and with streamed prefill (every prompt streams).
+#[test]
+fn hybrid_real_model_sampling() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = mapped(M05) else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let n = block_count(&m).unwrap();
+    for kv in [CacheKv::F16, CacheKv::Q8 { group: 0 }] {
+        let h = HybridQwen2::new(Some((&g, &km)), &m, 256, n / 2, kv).unwrap();
+        crate::sample::tests::real_model_sampling_on(&h, &m);
+        let h = streamed_kv(&g, &km, &m, 256, n / 2, 1, kv);
+        crate::sample::tests::real_model_sampling_on(&h, &m);
+        assert!(h.streamed_chunks() > 0, "{kv:?}: prefills streamed");
+    }
+}

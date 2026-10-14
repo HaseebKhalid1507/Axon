@@ -341,6 +341,20 @@ impl<'g> CudaQwen2<'g> {
         head: bool,
         on: &mut dyn FnMut(&'static str) -> Result<(), String>,
     ) -> Result<(), String> {
+        self.pass_with(c, input, start, head.into(), 0, on)
+    }
+
+    /// `pass` with any `Head`: Sample puts token z's candidates in out row
+    /// z, with penalty row `row0` + z of S (`samp_upload` first).
+    pub(super) fn pass_with(
+        &self,
+        c: &mut CudaCache<'g>,
+        input: BatchIn,
+        start: usize,
+        head: Head,
+        row0: usize,
+        on: &mut dyn FnMut(&'static str) -> Result<(), String>,
+    ) -> Result<(), String> {
         let nb = input.len(self.dim);
         let (dim, ffn) = (self.dim, self.ffn);
         let kvas: Vec<Vec<Arg>> = (0..self.layers.len()).map(|l| self.kv_args(c, l)).collect();
@@ -394,7 +408,7 @@ impl<'g> CudaQwen2<'g> {
                     on,
                 )?;
             }
-            if head {
+            if head != Head::No {
                 self.norm_b(b, &self.vecs, self.output_norm, nb)?;
                 on("rmsnorm")?;
                 let v = self.vocab;
@@ -412,13 +426,18 @@ impl<'g> CudaQwen2<'g> {
                         lg,
                         v,
                     )?;
-                    g.launch(
-                        &bf.argmax,
-                        (nz as u32, 1, 1),
-                        (1024, 1, 1),
-                        0,
-                        &[lg, Arg::I32(v as i32), b.best.arg_at(z0 * 4)],
-                    )?;
+                    if head == Head::Sample {
+                        let s = c.samp.as_ref().expect("samp_upload before a sampling pass");
+                        self.samp_tail(s, lg, v, nz, row0 + z0, z0, false)?;
+                    } else {
+                        g.launch(
+                            &bf.argmax,
+                            (nz as u32, 1, 1),
+                            (1024, 1, 1),
+                            0,
+                            &[lg, Arg::I32(v as i32), b.best.arg_at(z0 * 4)],
+                        )?;
+                    }
                     on("head")?;
                 }
             }
@@ -832,5 +851,35 @@ impl BatchBufs<'_> {
             .chunks_exact(4)
             .map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]))
             .collect())
+    }
+}
+
+impl<'g> CudaQwen2<'g> {
+    /// `verify_cands`: each token's sampling candidates, in passes of up to
+    /// the cache's batch max.
+    pub(super) fn verify_cands_tokens(
+        &self,
+        c: &mut CudaCache<'g>,
+        tokens: &[u32],
+        start: usize,
+        spec: &CandSpec,
+        recent: &[u32],
+    ) -> Result<Vec<Vec<Cand>>, String> {
+        let max = c.b.as_ref().expect("batch scratch").max;
+        self.samp_upload(c, spec, recent, tokens.len(), tokens.len().min(max), None)?;
+        let mut rows = Vec::with_capacity(tokens.len());
+        for (i, ch) in tokens.chunks(max).enumerate() {
+            let input = BatchIn::Tokens(ch);
+            self.pass_with(
+                c,
+                input,
+                start + i * max,
+                Head::Sample,
+                i * max,
+                &mut |_| Ok(()),
+            )?;
+            rows.extend(self.samp_read(c, spec.k, self.vocab, ch.len())?);
+        }
+        Ok(rows)
     }
 }

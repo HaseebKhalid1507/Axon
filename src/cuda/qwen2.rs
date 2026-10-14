@@ -38,6 +38,7 @@ use super::{Arg, DevBuf, Func, Gpu, Graph, HostBuf, Module};
 use crate::gguf::{Model, Tensor};
 use crate::lm::Lm;
 use crate::quant::{self, Q4_K, Q5_0, Q6_K, Q8_0};
+use crate::sample::{self, CAND_MAX, Cand, CandSpec};
 
 /// Positions per attention tile (decode.cu ATT_TILE) and largest GQA group.
 const ATT_TILE: usize = 128;
@@ -197,6 +198,47 @@ struct Fns<'m> {
     /// group (head_dim, 32) the attention kernels.
     qkv_rope_f32: Func<'m>,
     q8: [Q8Fns<'m>; 2],
+    /// sample.cu.
+    samp_topk: Func<'m>,
+}
+
+/// Logits per samp_topk block, and its threads (sample.cu).
+const TK_SLICE: usize = 4096;
+const TK_THREADS: u32 = 512;
+
+/// What a step (or batched pass) does after the layers: nothing (prefill),
+/// the greedy pick, or sampling candidates (sample.cu). The step's graph
+/// slot.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(super) enum Head {
+    No = 0,
+    Argmax = 1,
+    Sample = 2,
+}
+
+impl From<bool> for Head {
+    fn from(head: bool) -> Head {
+        if head { Head::Argmax } else { Head::No }
+    }
+}
+
+/// A cache's scratch for sampling candidates, made on first use (a few
+/// MiB, within CACHE_HEADROOM): the step's {token, pos} (16 bytes, read in
+/// place of `CudaCache::params` by the sampling step) then sample.cu's S,
+/// slice picks and merge counters for up to HEAD_SUB rows a launch, and
+/// `rows` rows of CAND_MAX candidates out.
+pub(super) struct SampBufs<'g> {
+    /// u32s `s` holds (4 of params, then S: header and penalty ids).
+    cap: usize,
+    rows: usize,
+    s: DevBuf<'g>,
+    host_s: HostBuf<'g>,
+    part: DevBuf<'g>,
+    count: DevBuf<'g>,
+    pub(super) out: DevBuf<'g>,
+    pub(super) host_out: HostBuf<'g>,
+    /// The {token, pos} the last upload carried.
+    params: Option<(u32, usize)>,
 }
 
 pub struct CudaQwen2<'g> {
@@ -279,10 +321,13 @@ pub struct CudaCache<'g> {
     host_out: HostBuf<'g>,
     /// The incoming hidden state (dim floats) when the model's first > 0.
     host_x: Option<HostBuf<'g>>,
-    /// Captured steps: [without the output head, with it].
-    graph: [Option<Graph<'g>>; 2],
+    /// Captured steps, by `Head`: without the output head, with the
+    /// argmax, with sampling candidates.
+    graph: [Option<Graph<'g>>; 3],
     /// Scratch for batched passes (prefill, verify).
     b: Option<batch::BatchBufs<'g>>,
+    /// Scratch for sampling candidates (`samp_upload`).
+    samp: Option<SampBufs<'g>>,
 }
 
 /// Bytes of a quantized-activation buffer for n values (decode.cu Act).
@@ -695,6 +740,7 @@ impl<'g> CudaQwen2<'g> {
                     Q8Fns::new(module, head_dim, head_dim)?,
                     Q8Fns::new(module, head_dim, 32)?,
                 ],
+                samp_topk: module.function("samp_topk")?,
             },
             n_layers,
             dim,
@@ -925,8 +971,9 @@ impl<'g> CudaQwen2<'g> {
                 0 => None,
                 _ => Some(g.host_alloc(self.dim * f)?),
             },
-            graph: [None, None],
+            graph: [None, None, None],
             b: Some(self.batch_bufs(self.batch_for(max_ctx))?),
+            samp: None,
         };
         // Stale KV rows are never read (attention stops at pos), but zeroed
         // memory keeps a bug from reading NaNs.
@@ -935,16 +982,21 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// Launch every kernel of one step on the stream (no sync): the layers,
-    /// and with `head` the output norm, head and argmax. `on_launch(name,
-    /// bytes)` runs after each launch (profiling).
+    /// and with a `head` the output norm, head and argmax (or sampling
+    /// candidates). `on_launch(name, bytes)` runs after each launch (profiling).
     fn enqueue(
         &self,
         c: &CudaCache,
-        head: bool,
+        head: Head,
         on_launch: &mut dyn FnMut(&'static str, usize) -> Result<(), String>,
     ) -> Result<(), String> {
         let g = self.gpu;
         let f = &self.f;
+        // {token, pos}: the sampling step's come with its S, in one copy.
+        let params = match head {
+            Head::Sample => c.samp.as_ref().expect("samp_upload first").s.arg(),
+            _ => c.params.arg(),
+        };
         let w = |mt: &Mat| self.weights.arg_at(mt.off);
         let vec = |off: usize| self.vecs.arg_at(off * 4);
         let null = Arg::Ptr(0);
@@ -973,7 +1025,7 @@ impl<'g> CudaQwen2<'g> {
                         w(embd),
                         Arg::U64(embd.rb as u64),
                         Arg::I32(dim as i32),
-                        c.params.arg(),
+                        params,
                         c.x.arg(),
                     ],
                 )?;
@@ -987,7 +1039,7 @@ impl<'g> CudaQwen2<'g> {
                 &[
                     self.freq.arg(),
                     Arg::I32((hd / 2) as i32),
-                    c.params.arg(),
+                    params,
                     c.rope.arg(),
                 ],
                 self.embd.is_some(),
@@ -1046,7 +1098,7 @@ impl<'g> CudaQwen2<'g> {
                         Arg::I32(dim as i32),
                         c.act.arg(),
                         c.rope.arg(),
-                        c.params.arg(),
+                        params,
                         c.q.arg(),
                         kout[0],
                         kout[1],
@@ -1063,7 +1115,7 @@ impl<'g> CudaQwen2<'g> {
                     }
                 };
                 args.extend_from_slice(&[
-                    c.params.arg(),
+                    params,
                     Arg::I32(self.n_heads as i32),
                     Arg::I32(self.n_kv_heads as i32),
                     Arg::F32(1.0 / (hd as f32).sqrt()),
@@ -1090,7 +1142,7 @@ impl<'g> CudaQwen2<'g> {
                     &[
                         c.part_o.arg(),
                         c.part_ml.arg(),
-                        c.params.arg(),
+                        params,
                         Arg::I32(dim as i32),
                         Arg::I32(hd as i32),
                         Arg::I32(self.max_split as i32),
@@ -1139,7 +1191,7 @@ impl<'g> CudaQwen2<'g> {
                 self.gemv(&l.down, &c.act, null, 1, &c.x)?;
                 on_launch("down", l.down.bytes())?;
             }
-            if head {
+            if head != Head::No {
                 self.run(
                     &f.rmsnorm_quant,
                     (1, 1, 1),
@@ -1158,14 +1210,20 @@ impl<'g> CudaQwen2<'g> {
                 on_launch("rmsnorm", 0)?;
                 self.gemv(&self.output, &c.act, null, 0, &c.logits)?;
                 on_launch("head", self.output.bytes())?;
-                self.run(
-                    &f.argmax,
-                    (1, 1, 1),
-                    (1024, 1, 1),
-                    0,
-                    &[c.logits.arg(), Arg::I32(self.vocab as i32), c.best.arg()],
-                )?;
-                on_launch("argmax", 0)?;
+                if head == Head::Sample {
+                    let s = c.samp.as_ref().expect("samp_upload before a sampling step");
+                    self.samp_tail(s, c.logits.arg(), self.vocab, 1, 0, 0, true)?;
+                    on_launch("sample", 0)?;
+                } else {
+                    self.run(
+                        &f.argmax,
+                        (1, 1, 1),
+                        (1024, 1, 1),
+                        0,
+                        &[c.logits.arg(), Arg::I32(self.vocab as i32), c.best.arg()],
+                    )?;
+                    on_launch("argmax", 0)?;
+                }
             }
         }
         Ok(())
@@ -1241,6 +1299,17 @@ impl<'g> CudaQwen2<'g> {
         pos: usize,
         head: bool,
     ) -> Result<(), String> {
+        self.step_with(c, input, pos, head.into())
+    }
+
+    /// `step` with any `Head` (Sample: after `samp_upload`).
+    fn step_with(
+        &self,
+        c: &mut CudaCache<'g>,
+        input: Input,
+        pos: usize,
+        head: Head,
+    ) -> Result<(), String> {
         assert_eq!(c.net, self.id, "a CudaCache used with another CudaQwen2");
         assert!(
             pos < c.max_ctx,
@@ -1269,10 +1338,16 @@ impl<'g> CudaQwen2<'g> {
             }
         };
         assert!((token as usize) < self.vocab, "token {token} out of range");
-        let p = c.host_params.bytes_mut()?;
-        p[0..4].copy_from_slice(&token.to_le_bytes());
-        p[4..8].copy_from_slice(&(pos as u32).to_le_bytes());
-        c.host_params.copy_to(&c.params, 0, 8)?;
+        if head == Head::Sample {
+            // samp_upload wrote and copied them, with S.
+            let s = c.samp.as_ref().expect("samp_upload first");
+            assert_eq!(s.params, Some((token, pos)), "samp_upload for another step");
+        } else {
+            let p = c.host_params.bytes_mut()?;
+            p[0..4].copy_from_slice(&token.to_le_bytes());
+            p[4..8].copy_from_slice(&(pos as u32).to_le_bytes());
+            c.host_params.copy_to(&c.params, 0, 8)?;
+        }
         if !self.graphs {
             return self.enqueue(c, head, &mut |_, _| Ok(()));
         }
@@ -1331,6 +1406,178 @@ impl<'g> CudaQwen2<'g> {
         c.host_out.copy_from(&c.best, 0, 4)?;
         let b = &c.host_out.bytes_mut()?[..4]; // waits for the step and copy
         Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    /// Candidates after `token` at `pos` (`Lm::forward_cands`).
+    fn cands(
+        &self,
+        c: &mut CudaCache<'g>,
+        token: u32,
+        pos: usize,
+        spec: &CandSpec,
+        recent: &[u32],
+    ) -> Result<Vec<Cand>, String> {
+        self.samp_upload(c, spec, recent, 1, 1, Some((token, pos)))?;
+        self.step_with(c, Input::Token(token), pos, Head::Sample)?;
+        Ok(self
+            .samp_read(c, spec.k, self.vocab, 1)?
+            .pop()
+            .expect("one row"))
+    }
+
+    /// Get sampling scratch for `rows` rows of candidates (at least) and
+    /// write S for `nb` rows whose tokens end `recent` (row b's penalty ids:
+    /// the distinct tokens among the last `spec.last_n` up to its token,
+    /// as `sample::cands` takes them), after `params` {token, pos} for a
+    /// sampling step: one copy to the device on the stream.
+    pub(super) fn samp_upload(
+        &self,
+        c: &mut CudaCache<'g>,
+        spec: &CandSpec,
+        recent: &[u32],
+        nb: usize,
+        rows: usize,
+        params: Option<(u32, usize)>,
+    ) -> Result<(), String> {
+        assert!(
+            spec.k >= 1 && spec.k <= CAND_MAX,
+            "candidates per row: 1..={CAND_MAX}"
+        );
+        assert!(recent.len() >= nb, "recent must end with the rows' tokens");
+        let penalize = spec.penalty != 1.0 && spec.last_n > 0;
+        let n = recent.len();
+        let ids: Vec<Vec<u32>> = (0..nb)
+            .map(|b| {
+                if penalize {
+                    sample::penalty_ids(&recent[..n - nb + b + 1], spec.last_n)
+                } else {
+                    Vec::new()
+                }
+            })
+            .collect();
+        let need = 4 + 4 + nb + ids.iter().map(Vec::len).sum::<usize>();
+        let fits = c
+            .samp
+            .as_ref()
+            .is_some_and(|s| s.cap >= need && s.rows >= rows);
+        if !fits {
+            // New buffers: the sampling graph holds the old ones' addresses.
+            c.graph[Head::Sample as usize] = None;
+            let old = c.samp.take();
+            let cap = need.max(4 + 5 + 256).max(old.as_ref().map_or(0, |s| s.cap));
+            let rows = rows.max(old.as_ref().map_or(1, |s| s.rows));
+            let g = self.gpu;
+            let slices = self.vocab.div_ceil(TK_SLICE);
+            let count = g.alloc(batch::HEAD_SUB * 4)?;
+            count.zero()?;
+            c.samp = Some(SampBufs {
+                cap,
+                rows,
+                s: g.alloc(cap * 4)?,
+                host_s: g.host_alloc(cap * 4)?,
+                part: g.alloc(batch::HEAD_SUB * slices * CAND_MAX * 8)?,
+                count,
+                params: None,
+                out: g.alloc(rows * CAND_MAX * 8)?,
+                host_out: g.host_alloc(rows * CAND_MAX * 8)?,
+            });
+        }
+        let s = c.samp.as_mut().unwrap();
+        let hb = s.host_s.bytes_mut()?;
+        let mut put = |i: usize, v: u32| hb[4 * i..4 * i + 4].copy_from_slice(&v.to_le_bytes());
+        s.params = params;
+        let (token, pos) = params.unwrap_or((0, 0));
+        put(0, token);
+        put(1, pos as u32);
+        // S, from u32 4 on.
+        put(4, spec.k as u32);
+        put(5, spec.penalty.to_bits());
+        put(6, nb as u32);
+        let mut off = 0;
+        put(7, 0);
+        let base = 8 + nb;
+        for (b, w) in ids.iter().enumerate() {
+            for (j, &id) in w.iter().enumerate() {
+                assert!((id as usize) < self.vocab, "token {id} out of range");
+                put(base + off + j, id);
+            }
+            off += w.len();
+            put(8 + b, off as u32);
+        }
+        s.host_s.copy_to(&s.s, 0, need * 4)
+    }
+
+    /// Enqueue sample.cu on `rows` rows of `n` logits at `logits` (`n`
+    /// floats apart; not modified): penalty row `row0` + z, candidates to
+    /// out row `out_row0` + z. `pdl`: may overlap the previous kernel.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn samp_tail(
+        &self,
+        s: &SampBufs,
+        logits: Arg,
+        n: usize,
+        rows: usize,
+        row0: usize,
+        out_row0: usize,
+        pdl: bool,
+    ) -> Result<(), String> {
+        assert!(n >= 1 && n <= self.vocab, "rows of 1..=vocab logits");
+        assert!(rows <= batch::HEAD_SUB && out_row0 + rows <= s.rows);
+        let slices = n.div_ceil(TK_SLICE) as u32;
+        // SAFETY: logits holds `rows` rows of n floats; S (16 bytes into s)
+        // was written by samp_upload for at least row0 + rows rows; part
+        // has room for HEAD_SUB rows of `slices` x CAND_MAX keys (k <=
+        // CAND_MAX, checked there), count for HEAD_SUB rows (zero between
+        // launches: each launch's last block per row resets it), out for
+        // s.rows rows of CAND_MAX pairs.
+        unsafe {
+            self.gpu.launch_with(
+                &self.f.samp_topk,
+                (slices, rows as u32, 1),
+                (TK_THREADS, 1, 1),
+                0,
+                &[
+                    logits,
+                    Arg::U64(n as u64),
+                    Arg::I32(n as i32),
+                    s.s.arg_at(16),
+                    Arg::I32(row0 as i32),
+                    Arg::I32(out_row0 as i32),
+                    s.part.arg(),
+                    s.count.arg(),
+                    s.out.arg(),
+                ],
+                pdl,
+            )
+        }
+    }
+
+    /// The `k` candidates (fewer if rows had `n` < k logits) of out rows
+    /// 0..rows, after the step or pass that wrote them: waits for the stream.
+    pub(super) fn samp_read(
+        &self,
+        c: &mut CudaCache<'g>,
+        k: usize,
+        n: usize,
+        rows: usize,
+    ) -> Result<Vec<Vec<Cand>>, String> {
+        let s = c.samp.as_mut().expect("samp_upload first");
+        let m = k.min(n);
+        let n = (rows - 1) * k * 8 + m * 8;
+        s.host_out.copy_from(&s.out, 0, n)?;
+        let hb = &s.host_out.bytes_mut()?[..n]; // waits for the step and copy
+        let u =
+            |i: usize| u32::from_le_bytes([hb[4 * i], hb[4 * i + 1], hb[4 * i + 2], hb[4 * i + 3]]);
+        Ok((0..rows)
+            .map(|r| {
+                (0..m)
+                    .map(|j| Cand {
+                        logit: f32::from_bits(u(2 * (r * k + j))),
+                        id: u(2 * (r * k + j) + 1),
+                    })
+                    .collect()
+            })
+            .collect())
     }
 
     /// `token` into the cache at `pos` by the one-token step (the batched
@@ -1393,7 +1640,7 @@ impl<'g> CudaQwen2<'g> {
         p[4..8].copy_from_slice(&(pos as u32).to_le_bytes());
         c.host_params.copy_to(&c.params, 0, 8)?;
         let mut evs = vec![("start", self.gpu.record()?, 0)];
-        self.enqueue(c, true, &mut |name, bytes| {
+        self.enqueue(c, Head::Argmax, &mut |name, bytes| {
             evs.push((name, self.gpu.record()?, bytes));
             Ok(())
         })?;
@@ -1482,12 +1729,55 @@ impl<'g> Lm for CudaQwen2<'g> {
             .unwrap_or_else(|e| Self::die(e))
     }
 
+    /// Selected on the device (sample.cu): k pairs come back, not the logits.
+    fn forward_cands(
+        &self,
+        token: u32,
+        pos: usize,
+        cache: &mut CudaCache<'g>,
+        spec: &CandSpec,
+        recent: &[u32],
+    ) -> Vec<Cand> {
+        assert_eq!(
+            recent.last(),
+            Some(&token),
+            "recent must end with the token"
+        );
+        self.cands(cache, token, pos, spec, recent)
+            .unwrap_or_else(|e| Self::die(e))
+    }
+
+    /// Batched passes with sample.cu on each row's logits.
+    fn verify_cands(
+        &self,
+        tokens: &[u32],
+        start: usize,
+        cache: &mut CudaCache<'g>,
+        spec: &CandSpec,
+        recent: &[u32],
+    ) -> Vec<Vec<Cand>> {
+        self.check_batch(tokens, start, cache);
+        assert_eq!(
+            cache.net, self.id,
+            "a CudaCache used with another CudaQwen2"
+        );
+        let (nb, n) = (tokens.len(), recent.len());
+        assert!(
+            n >= nb && recent[n - nb..] == *tokens,
+            "recent must end with tokens"
+        );
+        self.verify_cands_tokens(cache, tokens, start, spec, recent)
+            .unwrap_or_else(|e| Self::die(e))
+    }
+
     fn prefill_batch(&self) -> usize {
         self.batch
     }
 }
 
 mod batch;
+#[cfg(test)]
+mod sample_tests;
 pub(crate) mod stream;
 #[cfg(test)]
 pub(crate) mod tests;

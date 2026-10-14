@@ -10,6 +10,7 @@ mod lm;
 mod model;
 mod pool;
 mod quant;
+mod sample;
 mod spec;
 #[cfg(test)]
 mod testutil;
@@ -47,18 +48,19 @@ usage:
   axon <model.gguf>                         same as axon info
   axon info <model.gguf>                    print a summary and exit
   axon gen <model.gguf> \"<prompt>\" [-n N] [--draft K] [--device D] [--gpu-layers N]
-            [--kv T]                        greedy generation
+            [--kv T] [sampling flags]       generation (greedy unless --temp > 0)
   axon logits <model.gguf> \"<prompt>\" [-k K]
                                             top-K next-token logits after the prompt
   axon chat <model.gguf> [--system TEXT] [--ctx N] [-n N] [--draft K] [--device D]
-            [--gpu-layers N] [--kv T]       talk to an instruct model
+            [--gpu-layers N] [--kv T] [sampling flags]
+                                            talk to an instruct model (sampled; --temp 0: greedy)
   axon -h | --help                          this help
   axon -V | --version                       print the version
 
 flags:
   -n N        gen: tokens to generate (default 32); chat: most tokens per reply (default: no limit)
   --draft K   gen, chat: draft up to K tokens per step by prompt lookup (default 0 = off; try 7);
-              lossless: the output is the plain greedy output either way
+              lossless: the output is the same either way (greedy, or sampled with the same seed)
   -k K        logits: how many logits to print (default 10)
   --device D  gen, chat: cpu (default) or cuda (an NVIDIA GPU; a model too big for its memory
               is split: the last layers that fit on the GPU, the first ones on the CPU)
@@ -73,6 +75,17 @@ flags:
   --ctx N     chat: context size in tokens (default: the model's, at most 8192; on cuda, if the
               whole model doesn't fit with it, less if at least half (or 4096) fits, else a
               split); when the conversation outgrows it, the oldest exchanges are forgotten
+
+sampling flags (gen, chat; applied in this order, as llama.cpp):
+  --repeat-penalty P  divide (multiply, if negative) the logits of tokens among the last N by P
+                      (default 1.1; 1 = off)
+  --repeat-last-n N   how many tokens back the penalty looks, prompt included (default 64; 0 = off)
+  --top-k K           keep the K most likely tokens (default 40; 0 = off, which keeps 256)
+  --top-p P           then the fewest whose probability adds up to P (default 0.9; 1 = off)
+  --min-p P           then those at least P times as likely as the top one (default 0 = off)
+  --temp T            then divide the logits by T and draw (default: gen 0, chat 0.8);
+                      0 = greedy: the highest logit, no penalty, no other flag applies
+  --seed S            the random seed (default: a new one each run, printed by gen)
 
 environment:
   AXON_THREADS=N             worker threads (default: cores minus a quarter)
@@ -313,10 +326,14 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     let mut device = device_env();
     let mut gpu_layers = None;
     let mut kv = kv_env();
+    let mut sargs = sample::SampleArgs::default();
     let mut i = 4;
     while i < args.len() {
         let val = args.get(i + 1).and_then(|s| s.parse::<usize>().ok());
         match (args[i].as_str(), val) {
+            (f, _) if sample::SampleArgs::is_flag(f) => sargs
+                .set(f, args.get(i + 1).map(String::as_str))
+                .unwrap_or_else(|e| fail(&e)),
             ("--device", _) => {
                 let v = args.get(i + 1).map_or("", String::as_str);
                 device = Device::parse(v).unwrap_or_else(|e| fail(&e));
@@ -337,6 +354,11 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     }
     let max_draft = round_draft(max_draft);
     check_stream_decode(max_draft);
+    // gen is greedy unless --temp says otherwise: reproducible runs and benchmarks.
+    let mut sampler = sargs.resolve(0.0).map(sample::Sampler::new);
+    if sampler.is_none() && cmd == "gen" && sargs.any_besides_temp() {
+        eprintln!("axon: note: gen is greedy without --temp > 0; the sampling flags do nothing");
+    }
 
     let (device, gpu_layers) = placement(device, gpu_layers);
     let model = open_model_with(path, true, copy_for(device));
@@ -404,6 +426,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             n_gen,
             stop: &[tok.eos()],
             max_draft,
+            sample: sampler.as_mut(),
         },
         &mut |h, max| {
             lookup.sync(h);
@@ -453,8 +476,16 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     }
     if let Backend::Hybrid(n) = &net {
         eprintln!(
-            "device:      cuda + cpu, {}",
-            n.describe(ids.len() + extra + 1)
+            "device:      cuda + cpu, {}, kv {}",
+            n.describe(ids.len() + extra + 1),
+            n.kv_name()
+        );
+    }
+    if let Some(s) = &sampler {
+        let c = s.cfg;
+        eprintln!(
+            "sampling:    temp {} top-k {} top-p {} min-p {} repeat-penalty {} repeat-last-n {} seed {}",
+            c.temp, c.top_k, c.top_p, c.min_p, c.repeat_penalty, c.repeat_last_n, c.seed
         );
     }
     if env::var_os("AXON_POOL_DEBUG").is_some() {
@@ -539,9 +570,17 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     let mut device = device_env();
     let mut gpu_layers = None;
     let mut kv = kv_env();
+    let mut sargs = sample::SampleArgs::default();
     let mut i = 3;
     while i < args.len() {
         let f = args[i].as_str();
+        if sample::SampleArgs::is_flag(f) {
+            sargs
+                .set(f, args.get(i + 1).map(String::as_str))
+                .unwrap_or_else(|e| fail(&e));
+            i += 2;
+            continue;
+        }
         if !matches!(
             f,
             "--system" | "--ctx" | "-n" | "--draft" | "--device" | "--gpu-layers" | "--kv"
@@ -607,6 +646,10 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     conv.max_reply = max_reply;
     conv.max_draft = round_draft(max_draft);
     check_stream_decode(conv.max_draft);
+    // chat samples by default (as ollama does): greedy replies loop.
+    conv.sampler = sargs
+        .resolve(sample::DEFAULT_TEMP)
+        .map(sample::Sampler::new);
 
     let name = std::path::Path::new(path)
         .file_name()
@@ -616,7 +659,11 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         Backend::Hybrid(n) => format!(" | {} | kv {}", n.describe(ctx), n.kv_name()),
         Backend::Cpu(_) => String::new(),
     };
-    match chat_repl(&mut conv, &tok, &format!("{name} | ctx {ctx}{kvs}")) {
+    let seed = conv
+        .sampler
+        .as_ref()
+        .map_or(" | greedy".into(), |s| format!(" | seed {}", s.cfg.seed));
+    match chat_repl(&mut conv, &tok, &format!("{name} | ctx {ctx}{kvs}{seed}")) {
         // stdout went away (a closed pipe): nobody is listening.
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         r => r,
@@ -831,6 +878,8 @@ struct GenOpts<'a> {
     stop: &'a [u32],
     /// Draft up to this many tokens per pass; 0 = plain greedy.
     max_draft: usize,
+    /// Sample (sample.rs) instead of picking greedily.
+    sample: Option<&'a mut sample::Sampler>,
 }
 
 /// Greedy decoding of up to `o.n_gen` tokens, stopping before any of `o.stop`. `logits`
@@ -859,6 +908,20 @@ fn generate<M: Lm>(
     draft: &mut dyn FnMut(&[u32], usize) -> Vec<u32>,
     emit: &mut dyn FnMut(u32) -> std::io::Result<()>,
 ) -> std::io::Result<GenStats> {
+    if let Some(s) = o.sample {
+        return sample::generate(
+            net,
+            cache,
+            prompt,
+            logits,
+            o.n_gen,
+            o.stop,
+            o.max_draft,
+            s,
+            draft,
+            emit,
+        );
+    }
     let mut st = GenStats::default();
     let mut hist = prompt.to_vec();
     // (guess, the model's pick after it) from the last verify pass, in order.
@@ -867,6 +930,7 @@ fn generate<M: Lm>(
         n_gen,
         stop,
         max_draft,
+        ..
     } = o;
     let mut pick = argmax(&logits[..]);
     let mut picks = 0usize;
@@ -1145,6 +1209,7 @@ mod tests {
                     n_gen: N,
                     stop: &[],
                     max_draft: k,
+                    sample: None,
                 },
                 &mut |h, max| {
                     let at = h.len() - prompt.len();
@@ -1425,6 +1490,7 @@ mod tests {
                                 n_gen: n,
                                 stop: &[eos],
                                 max_draft: k,
+                                sample: None,
                             },
                             &mut draft,
                             &mut |t| {

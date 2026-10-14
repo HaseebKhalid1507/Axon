@@ -17,8 +17,11 @@ Works today, honestly scoped:
 - Architecture: `qwen2`. Tested with Qwen2.5-0.5B-Instruct; also runs the 1.5B, 3B and 7B
   Instruct Q4_K_M builds. Other architectures are refused with an error.
 - Tensor types: Q4_K, Q5_0, Q6_K, Q8_0, F16, F32 (what Qwen's Q4_K_M files use). Others load for `info` but can't run.
-- Sampling: greedy only. `gen` continues raw text; `chat` talks to an Instruct model
-  through its ChatML template.
+- Sampling: greedy, or temperature / top-k / top-p / min-p / repeat penalty with a seed
+  (llama.cpp's order, ollama's defaults). `gen` continues raw text, greedy unless `--temp`
+  is above 0 (reproducible output and benchmarks); `chat` talks to an Instruct model
+  through its ChatML template and samples by default (`--temp 0` for greedy). On the GPU
+  the penalty and top-k run on the device, so only k candidates come back per token.
 - CPU: any x86-64 (others build too, scalar only). The default build is baseline x86-64 and
   picks its AVX2 / AVX-VNNI code at runtime, with the same output bits as a `-C target-cpu`
   build (see `src/mv.rs`). Attention and SwiGLU use fused multiply-adds when the CPU has
@@ -51,10 +54,12 @@ curl -L -o models/qwen2.5-0.5b-q4_k_m.gguf \
 ```
 axon <model.gguf>                         same as axon info
 axon info <model.gguf>                    print a summary and exit
-axon gen <model.gguf> "<prompt>" [-n N]   greedy generation (default 32 tokens)
+axon gen <model.gguf> "<prompt>" [-n N]   generation (default 32 tokens; greedy unless --temp)
 axon logits <model.gguf> "<prompt>" [-k K]  top-K next-token logits (default 10)
 axon chat <model.gguf> [--system TEXT] [--ctx N] [-n N] [--draft K]
                                           talk to an Instruct model
+sampling (gen, chat): --temp T --top-k K --top-p P --min-p P
+          --repeat-penalty P --repeat-last-n N --seed S   (axon --help)
 axon --help | --version
 ```
 
@@ -86,7 +91,7 @@ conversation outgrows `--ctx` (default 8192), the oldest exchanges are forgotten
 | `AXON_MMAP=0\|1` | `0`: copy the model into huge-page memory; `1`: map the file. Default: copy, unless the file is over 60% of available memory |
 | `AXON_PREFETCH=N` | decode: software prefetch distance in bytes (default 8192, 0 = off, max 1 MiB) |
 | `AXON_DECODE_ROWS=1\|2\|4` | decode: rows per kernel call (default 4; K-quants use at most 2) |
-| `AXON_DRAFT=K` | gen: prompt-lookup speculative decoding, up to K draft tokens per step (default 0 = off; try 7). Lossless: same output as plain greedy |
+| `AXON_DRAFT=K` | gen: prompt-lookup speculative decoding, up to K draft tokens per step (default 0 = off; try 7). Lossless: same output as without it (greedy, or sampled with the same seed) |
 | `AXON_SKIP_MODEL_TESTS=1` | tests: skip the ones that need the real model |
 
 ## Numbers

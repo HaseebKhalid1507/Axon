@@ -13,6 +13,7 @@ use crate::gguf::Model;
 use crate::hybrid::{HybridCache, HybridQwen2, Placement};
 use crate::kv::KvType;
 use crate::model::{KvCache, Qwen2};
+use crate::sample::{self, Cand, CandSpec};
 
 /// A causal language model with a KV cache of its own type. Positions are
 /// absolute: `pos` is the cache slot the token goes in; tokens before it
@@ -50,6 +51,46 @@ pub trait Lm {
     fn prefill_batch(&self) -> usize {
         crate::PREFILL_BATCH
     }
+
+    /// Run `token` at `pos`; the sampling candidates of its logits,
+    /// `sample::cands` (repeat penalty over the tail of `recent`, which ends
+    /// with `token`, then the `spec.k` best, best first). Backends that keep
+    /// logits off the host (a GPU) override it to select on the device; an
+    /// override must give the same candidates for the same logits.
+    fn forward_cands(
+        &self,
+        token: u32,
+        pos: usize,
+        cache: &mut Self::Cache,
+        spec: &CandSpec,
+        recent: &[u32],
+    ) -> Vec<Cand> {
+        let mut l = self.forward(token, pos, cache);
+        sample::cands(&mut l, spec, recent)
+    }
+
+    /// `forward_cands` on each `tokens[b]` at `start + b` in order
+    /// (speculative verify): `recent` ends with `tokens`, and row b's
+    /// penalty window ends at `tokens[b]`.
+    fn verify_cands(
+        &self,
+        tokens: &[u32],
+        start: usize,
+        cache: &mut Self::Cache,
+        spec: &CandSpec,
+        recent: &[u32],
+    ) -> Vec<Vec<Cand>> {
+        let (nb, n) = (tokens.len(), recent.len());
+        assert!(
+            n >= nb && recent[n - nb..] == *tokens,
+            "recent must end with tokens"
+        );
+        (0..nb)
+            .map(|b| {
+                self.forward_cands(tokens[b], start + b, cache, spec, &recent[..n - nb + b + 1])
+            })
+            .collect()
+    }
 }
 
 impl Lm for Qwen2<'_> {
@@ -73,6 +114,27 @@ impl Lm for Qwen2<'_> {
 
     fn verify_argmax(&self, tokens: &[u32], start: usize, cache: &mut KvCache) -> Vec<u32> {
         Qwen2::verify_argmax(self, tokens, start, cache)
+    }
+
+    /// One batched pass (`verify_batch`, the same logits as `forward`).
+    fn verify_cands(
+        &self,
+        tokens: &[u32],
+        start: usize,
+        cache: &mut KvCache,
+        spec: &CandSpec,
+        recent: &[u32],
+    ) -> Vec<Vec<Cand>> {
+        let (nb, n) = (tokens.len(), recent.len());
+        assert!(
+            n >= nb && recent[n - nb..] == *tokens,
+            "recent must end with tokens"
+        );
+        self.verify_batch(tokens, start, cache)
+            .into_iter()
+            .enumerate()
+            .map(|(b, mut l)| sample::cands(&mut l, spec, &recent[..n - nb + b + 1]))
+            .collect()
     }
 }
 
@@ -278,6 +340,30 @@ impl Lm for Backend<'_> {
 
     fn verify_argmax(&self, tokens: &[u32], start: usize, cache: &mut BackendCache) -> Vec<u32> {
         dispatch!(self, cache, |n, c| Lm::verify_argmax(n, tokens, start, c))
+    }
+
+    fn forward_cands(
+        &self,
+        token: u32,
+        pos: usize,
+        cache: &mut BackendCache,
+        spec: &CandSpec,
+        recent: &[u32],
+    ) -> Vec<Cand> {
+        dispatch!(self, cache, |n, c| n
+            .forward_cands(token, pos, c, spec, recent))
+    }
+
+    fn verify_cands(
+        &self,
+        tokens: &[u32],
+        start: usize,
+        cache: &mut BackendCache,
+        spec: &CandSpec,
+        recent: &[u32],
+    ) -> Vec<Vec<Cand>> {
+        dispatch!(self, cache, |n, c| n
+            .verify_cands(tokens, start, c, spec, recent))
     }
 
     fn prefill_batch(&self) -> usize {
