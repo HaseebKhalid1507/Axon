@@ -829,8 +829,9 @@ impl<'g> CudaQwen2<'g> {
             );
         }
         // `new` budgets one cache; each cache brings its own KV and batch
-        // scratch (up to ~200 MiB on the 7B), so every one is checked
-        // against what is free now, before any of it is allocated.
+        // scratch (batch_bytes: ~350 MiB on the 7B at 1024 tokens with 46
+        // SMs, ~530 MiB where max_split reaches 256), so every one is
+        // checked against what is free now, before any of it is allocated.
         let want = self.cache_bytes_kv(mode, max_ctx) as u64 + CACHE_HEADROOM;
         let free = g.info()?.free_bytes;
         if want > free {

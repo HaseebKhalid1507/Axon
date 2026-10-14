@@ -409,7 +409,8 @@ attn_warps_b_128(const unsigned short* __restrict__ vc, int start, int z0, int n
 // window of AW_WIN positions) stages the window's value rows (and the 32
 // after it) in shared memory once, then warp j does every split of query
 // j of the block that starts in the window (attn_warp_split, same bits).
-// Grid (n_kv, ceil(nz / AW_QG), ceil((start + z0 + nz + 32) / AW_WIN)) x 256.
+// Grid (n_kv, ceil(nz / AW_QG), ceil((start + z0 + nz) / AW_WIN)) x 256: every
+// split starts below its query's np, so no later window has work.
 #define AW_QG 8
 #define AW_WIN 64
 template <int HD>

@@ -2457,11 +2457,7 @@ fn cuda_attn_bench() {
                     ),
                     5 => g.launch(
                         f,
-                        (
-                            nkv as u32,
-                            nz.div_ceil(8) as u32,
-                            (ctx + 32).div_ceil(64) as u32,
-                        ),
+                        (nkv as u32, nz.div_ceil(8) as u32, ctx.div_ceil(64) as u32),
                         (256, 1, 1),
                         0,
                         &[
@@ -2515,7 +2511,9 @@ fn cuda_attn_bench() {
 /// query the decode kernels' bits: split partials (m, l, sums) and the
 /// quantized output, for every layout here (GQA groups 6, 7, 8; heads of 64
 /// and 128) and queries whose splits are short (warp path), long (one and
-/// several tiles), and on both sides of the warp path's limit.
+/// several tiles), and on both sides of the warp path's limit; launches at
+/// z0 = 0 and past it (a later ATT_SUB launch of a pass: queries z0 + zl),
+/// and past 1024 positions.
 #[test]
 fn gpu_batched_attention_matches_decode_bits() {
     let Some(g) = crate::testutil::gpu() else {
@@ -2536,13 +2534,23 @@ fn gpu_batched_attention_matches_decode_bits() {
         let fsc = km.function(&format!("attn_scores_b_{hd}")).unwrap();
         let fws = km.function(&format!("attn_warps_b_{hd}")).unwrap();
         let fwv = km.function(&format!("attn_warpv_b_{hd}")).unwrap();
-        // (start, queries, max_split)
-        for (start, nz, ms) in [(0, 40, 23), (200, 70, 8), (1000, 12, 46), (3000, 6, 23)] {
-            let ctx = start + nz;
+        // (start, z0, queries, max_split): query zl of a launch is token z0
+        // + zl of the pass, at position start + z0 + zl.
+        for (start, z0, nz, ms) in [
+            (0, 0, 40, 23),
+            (200, 0, 70, 8),
+            (1000, 0, 12, 46),
+            (3000, 0, 6, 23),
+            (100, 16, 64, 23),
+            (1100, 16, 64, 46),
+            (1400, 40, 64, 46),
+            (3000, 24, 8, 23),
+        ] {
+            let ctx = start + z0 + nz;
             let to_h = |v: Vec<f32>| -> Vec<u16> { v.into_iter().map(quant::f32_to_f16).collect() };
             let kb = g.upload(&to_h(rng.vec(ctx * kvd, 4.0))).unwrap();
             let vb = g.upload(&to_h(rng.vec(ctx * kvd, 1.0))).unwrap();
-            let q = rng.vec(nz * dim, 1.0);
+            let q = rng.vec((z0 + nz) * dim, 1.0);
             let qb = g.upload(&q).unwrap();
             let (po_n, pm_n) = (nh * ms * hd, nh * ms * 2);
             let ast = act_stride_t(dim);
@@ -2550,7 +2558,7 @@ fn gpu_batched_attention_matches_decode_bits() {
             // Batched: the split kernel for all queries, the warp kernel for
             // those within its limit (np <= 32 ms), each into its own buffers.
             let nsplit = |np: usize| ms.min(np.div_ceil(32));
-            let warp_n = (0..nz).filter(|&z| start + z < 32 * ms).count();
+            let warp_n = (0..nz).filter(|&z| start + z0 + z < 32 * ms).count();
             let mut batched = Vec::new();
             // (The third and fourth: attn_scores_b then attn_warps_b or
             // attn_warpv_b, batch.rs's path.)
@@ -2563,7 +2571,7 @@ fn gpu_batched_attention_matches_decode_bits() {
                 }
                 let po = g.alloc(n * po_n * 4).unwrap();
                 let pm = g.alloc(n * pm_n * 4).unwrap();
-                let act = g.alloc(n * ast).unwrap();
+                let act = g.alloc((z0 + n) * ast).unwrap();
                 act.zero().unwrap(); // parts no kernel writes (n % 256 != 0) compare equal
                 let warp = kind > 0;
                 let sst = (32 * ms).next_multiple_of(4);
@@ -2576,7 +2584,7 @@ fn gpu_batched_attention_matches_decode_bits() {
                         g.launch(
                             &fsc,
                             (
-                                (start + n).div_ceil(64) as u32,
+                                (start + z0 + n).div_ceil(64) as u32,
                                 (n * group).div_ceil(64) as u32,
                                 nkv as u32,
                             ),
@@ -2586,7 +2594,7 @@ fn gpu_batched_attention_matches_decode_bits() {
                                 qb.arg(),
                                 kb.arg(),
                                 Arg::I32(start as i32),
-                                Arg::I32(0),
+                                Arg::I32(z0 as i32),
                                 Arg::I32(n as i32),
                                 Arg::I32(nh as i32),
                                 Arg::I32(nkv as i32),
@@ -2596,7 +2604,7 @@ fn gpu_batched_attention_matches_decode_bits() {
                             ],
                         )
                         .unwrap();
-                        let mut a = vec![vb.arg(), Arg::I32(start as i32), Arg::I32(0)];
+                        let mut a = vec![vb.arg(), Arg::I32(start as i32), Arg::I32(z0 as i32)];
                         if kind == 3 {
                             a.push(Arg::I32(n as i32));
                         }
@@ -2614,7 +2622,7 @@ fn gpu_batched_attention_matches_decode_bits() {
                                 (
                                     nkv as u32,
                                     n.div_ceil(8) as u32,
-                                    (start + n + 32).div_ceil(64) as u32,
+                                    (start + z0 + n).div_ceil(64) as u32,
                                 ),
                                 256,
                             )
@@ -2637,7 +2645,7 @@ fn gpu_batched_attention_matches_decode_bits() {
                                 kb.arg(),
                                 vb.arg(),
                                 Arg::I32(start as i32),
-                                Arg::I32(0),
+                                Arg::I32(z0 as i32),
                                 Arg::I32(nh as i32),
                                 Arg::I32(nkv as i32),
                                 scale,
@@ -2657,7 +2665,7 @@ fn gpu_batched_attention_matches_decode_bits() {
                             po.arg(),
                             pm.arg(),
                             Arg::I32(start as i32),
-                            Arg::I32(0),
+                            Arg::I32(z0 as i32),
                             Arg::I32(dim as i32),
                             Arg::I32(hd as i32),
                             Arg::I32(ms as i32),
@@ -2673,8 +2681,8 @@ fn gpu_batched_attention_matches_decode_bits() {
                 batched.push((kind, n, po, pm, act));
             }
             for z in 0..nz {
-                let np = start + z + 1;
-                let qz = g.upload(&q[z * dim..(z + 1) * dim]).unwrap();
+                let np = start + z0 + z + 1;
+                let qz = g.upload(&q[(z0 + z) * dim..(z0 + z + 1) * dim]).unwrap();
                 let params = g.upload(&[0u32, (np - 1) as u32, 0, 0]).unwrap();
                 let po = g.alloc(po_n * 4).unwrap();
                 let pm = g.alloc(pm_n * 4).unwrap();
@@ -2726,7 +2734,7 @@ fn gpu_batched_attention_matches_decode_bits() {
                     if z >= *n {
                         continue;
                     }
-                    let ctxs = format!("{nh}/{nkv}x{hd} np {np} splits {ms} kernel {kind}");
+                    let ctxs = format!("{nh}/{nkv}x{hd} np {np} z0 {z0} splits {ms} kernel {kind}");
                     for h in 0..nh {
                         for s in 0..nsplit(np) {
                             let o = (h * ms + s) * hd;
@@ -2744,7 +2752,8 @@ fn gpu_batched_attention_matches_decode_bits() {
                         }
                     }
                     let ab = act_bytes(dim);
-                    assert!(bact[z * ast..z * ast + ab] == wact[..], "{ctxs}: output");
+                    let za = (z0 + z) * ast;
+                    assert!(bact[za..za + ab] == wact[..], "{ctxs}: output");
                 }
             }
         }

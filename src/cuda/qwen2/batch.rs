@@ -516,7 +516,7 @@ impl<'g> CudaQwen2<'g> {
                             (
                                 self.n_kv_heads as u32,
                                 nz.div_ceil(8),
-                                (np + 32).div_ceil(64) as u32,
+                                np.div_ceil(64) as u32,
                             ),
                             (256, 1, 1),
                             0,
