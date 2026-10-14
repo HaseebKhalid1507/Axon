@@ -30,11 +30,12 @@ use std::path::{Path, PathBuf};
 /// Why `Gpu::open` fails off Linux.
 pub const LINUX_ONLY: &str = "CUDA support is Linux-only for now";
 
-/// kernels.cu and decode.cu, compiled at run time as one module.
+/// kernels.cu, decode.cu, prefill.cu and stream.cu, compiled at run time as one module.
 const KERNELS: &str = concat!(
     include_str!("kernels.cu"),
     include_str!("decode.cu"),
-    include_str!("prefill.cu")
+    include_str!("prefill.cu"),
+    include_str!("stream.cu")
 );
 
 /// A CUDA device: its retained primary context and a stream to run on.
@@ -257,6 +258,42 @@ impl Gpu {
                 f.name
             ));
         }
+        // SAFETY: the caller's contract; our stream.
+        unsafe { self.launch_raw(self.stream, f, grid, block, shared, args, overlap) }
+    }
+
+    /// `launch` on another stream of this `Gpu` (`Gpu::new_stream`).
+    ///
+    /// # Safety
+    /// As `launch`, the buffers live until the work on `s` completes.
+    pub unsafe fn launch_on(
+        &self,
+        s: &Stream,
+        f: &Func,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+        shared: u32,
+        args: &[Arg],
+    ) -> Result<(), String> {
+        if !std::ptr::eq(f.module.gpu, self) || !std::ptr::eq(s.gpu, self) {
+            return Err(format!("launch of {}: another Gpu's", f.name));
+        }
+        // SAFETY: the caller's contract; s is ours and live (borrowed).
+        unsafe { self.launch_raw(s.s, f, grid, block, shared, args, false) }
+    }
+
+    /// `launch_with` on `stream` (ours).
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn launch_raw(
+        &self,
+        stream: CUstream,
+        f: &Func,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+        shared: u32,
+        args: &[Arg],
+        overlap: bool,
+    ) -> Result<(), String> {
         self.bind()?;
         // cuLaunchKernelEx copies each parameter from these addresses before returning.
         let mut ptrs: Vec<*mut c_void> = args.iter().map(Arg::addr).collect();
@@ -270,7 +307,7 @@ impl Gpu {
             grid: [grid.0, grid.1, grid.2],
             block: [block.0, block.1, block.2],
             shared,
-            stream: self.stream,
+            stream,
             attrs: if pdl { &mut attr } else { std::ptr::null_mut() },
             n_attrs: pdl as u32,
         };
@@ -356,7 +393,6 @@ impl Gpu {
     }
 
     /// A timing event recorded on the stream now.
-    #[cfg_attr(not(test), allow(dead_code))] // tests and benchmarks
     pub fn record(&self) -> Result<Event<'_>, String> {
         self.bind()?;
         let mut e: ffi::CUevent = std::ptr::null_mut();
@@ -371,8 +407,207 @@ impl Gpu {
     }
 }
 
+impl Gpu {
+    /// Another non-blocking stream on this device: work on it runs
+    /// concurrently with the main stream's, ordered by `SyncEvent`s only.
+    pub fn new_stream(&self) -> Result<Stream<'_>, String> {
+        self.bind()?;
+        let mut s: CUstream = std::ptr::null_mut();
+        // SAFETY: context current; writes the stream handle.
+        let r = unsafe { (self.d.cuStreamCreate)(&mut s, ffi::CU_STREAM_NON_BLOCKING) };
+        check(self.d, r, "cuStreamCreate")?;
+        Ok(Stream { gpu: self, s })
+    }
+
+    /// An event for ordering streams (no timing).
+    pub fn new_event(&self) -> Result<SyncEvent<'_>, String> {
+        self.bind()?;
+        let mut e: ffi::CUevent = std::ptr::null_mut();
+        // SAFETY: context current; writes the event.
+        let r = unsafe { (self.d.cuEventCreate)(&mut e, ffi::CU_EVENT_DISABLE_TIMING) };
+        check(self.d, r, "cuEventCreate")?;
+        Ok(SyncEvent { gpu: self, e })
+    }
+
+    /// Record `e` on the main stream: it fires once what's enqueued so far ran.
+    pub fn record_main(&self, e: &SyncEvent) -> Result<(), String> {
+        self.bind()?;
+        // SAFETY: our event and stream.
+        let r = unsafe { (self.d.cuEventRecord)(e.e, self.stream) };
+        check(self.d, r, "cuEventRecord")
+    }
+
+    /// Make the main stream's later work wait for `e`'s last record.
+    pub fn wait_main(&self, e: &SyncEvent) -> Result<(), String> {
+        self.bind()?;
+        // SAFETY: our event and stream.
+        let r = unsafe { (self.d.cuStreamWaitEvent)(self.stream, e.e, 0) };
+        check(self.d, r, "cuStreamWaitEvent")
+    }
+
+    /// Page-lock `len` bytes of host memory at `p` for DMA at full speed
+    /// (cuMemHostRegister); unlocked when the `Pinned` drops. `read_only`
+    /// for memory mapped read-only (the GPU only reads it then).
+    ///
+    /// # Safety
+    /// p..p + len is mapped and stays mapped while the `Pinned` lives.
+    pub unsafe fn register(
+        &self,
+        p: *const u8,
+        len: usize,
+        read_only: bool,
+    ) -> Result<Pinned<'_>, String> {
+        self.bind()?;
+        let flags = if read_only {
+            ffi::CU_MEMHOSTREGISTER_READ_ONLY
+        } else {
+            0
+        };
+        // SAFETY: the caller's; no device mapping, this context.
+        let r = unsafe { (self.d.cuMemHostRegister_v2)(p as *mut c_void, len, flags) };
+        check(self.d, r, "cuMemHostRegister")?;
+        Ok(Pinned { gpu: self, p })
+    }
+}
+
+/// Host memory page-locked by `Gpu::register`.
+pub struct Pinned<'g> {
+    gpu: &'g Gpu,
+    p: *const u8,
+}
+
+impl Drop for Pinned<'_> {
+    fn drop(&mut self) {
+        if self.gpu.bind().is_ok() {
+            // A copy on any stream may still use it (e.g. a streamed
+            // prefill's KV write-back, if a panic unwinds past the pass):
+            // wait for the whole context, not just the main stream.
+            // SAFETY: our context is current (bind); a plain wait.
+            unsafe { (self.gpu.d.cuCtxSynchronize)() };
+            // SAFETY: registered by us, unregistered once.
+            unsafe { (self.gpu.d.cuMemHostUnregister)(self.p as *mut c_void) };
+        }
+    }
+}
+
+/// An extra stream (`Gpu::new_stream`), destroyed on drop after its work.
+pub struct Stream<'g> {
+    gpu: &'g Gpu,
+    s: CUstream,
+}
+
+impl Stream<'_> {
+    /// Record `e` here.
+    pub fn record(&self, e: &SyncEvent) -> Result<(), String> {
+        self.gpu.bind()?;
+        // SAFETY: our event and stream.
+        let r = unsafe { (self.gpu.d.cuEventRecord)(e.e, self.s) };
+        check(self.gpu.d, r, "cuEventRecord")
+    }
+
+    /// Make this stream's later work wait for `e`'s last record.
+    pub fn wait(&self, e: &SyncEvent) -> Result<(), String> {
+        self.gpu.bind()?;
+        // SAFETY: our event and stream.
+        let r = unsafe { (self.gpu.d.cuStreamWaitEvent)(self.s, e.e, 0) };
+        check(self.gpu.d, r, "cuStreamWaitEvent")
+    }
+
+    /// Wait for everything enqueued here.
+    pub fn sync(&self) -> Result<(), String> {
+        self.gpu.bind()?;
+        // SAFETY: our stream.
+        let r = unsafe { (self.gpu.d.cuStreamSynchronize)(self.s) };
+        check(self.gpu.d, r, "cuStreamSynchronize")
+    }
+
+    /// Enqueue a copy of `n` host bytes at `src` to `dst` + `off`.
+    ///
+    /// # Safety
+    /// src..src + n stays readable and unchanged until the copy ran (it is
+    /// asynchronous only from page-locked memory; from pageable memory the
+    /// driver stages it before returning).
+    pub unsafe fn h2d(
+        &self,
+        dst: &DevBuf,
+        off: usize,
+        src: *const u8,
+        n: usize,
+    ) -> Result<(), String> {
+        if off.checked_add(n).is_none_or(|e| e > dst.len) {
+            return Err(format!("copy of {n} bytes at {off}: out of bounds"));
+        }
+        self.gpu.bind()?;
+        // SAFETY: in bounds on the device (checked); the host side is the caller's.
+        let r = unsafe {
+            (self.gpu.d.cuMemcpyHtoDAsync_v2)(dst.ptr + off as u64, src.cast(), n, self.s)
+        };
+        check(self.gpu.d, r, "cuMemcpyHtoDAsync_v2")
+    }
+
+    /// Enqueue a copy of `n` bytes from `src` + `off` to host memory at `dst`.
+    ///
+    /// # Safety
+    /// dst..dst + n stays writable and untouched by the host until the copy ran.
+    pub unsafe fn d2h(
+        &self,
+        dst: *mut u8,
+        src: &DevBuf,
+        off: usize,
+        n: usize,
+    ) -> Result<(), String> {
+        if off.checked_add(n).is_none_or(|e| e > src.len) {
+            return Err(format!("copy of {n} bytes at {off}: out of bounds"));
+        }
+        self.gpu.bind()?;
+        // SAFETY: in bounds on the device (checked); the host side is the caller's.
+        let r = unsafe {
+            (self.gpu.d.cuMemcpyDtoHAsync_v2)(dst.cast(), src.ptr + off as u64, n, self.s)
+        };
+        check(self.gpu.d, r, "cuMemcpyDtoHAsync_v2")
+    }
+}
+
+impl Drop for Stream<'_> {
+    fn drop(&mut self) {
+        if self.gpu.bind().is_ok() {
+            // SAFETY: our stream, destroyed once after its work.
+            unsafe {
+                (self.gpu.d.cuStreamSynchronize)(self.s);
+                (self.gpu.d.cuStreamDestroy_v2)(self.s);
+            }
+        }
+    }
+}
+
+/// An event ordering work across streams (`Gpu::new_event`).
+pub struct SyncEvent<'g> {
+    gpu: &'g Gpu,
+    e: ffi::CUevent,
+}
+
+impl SyncEvent<'_> {
+    /// Block the host until the last record fired.
+    #[cfg_attr(not(test), allow(dead_code))] // tests
+    pub fn sync(&self) -> Result<(), String> {
+        self.gpu.bind()?;
+        // SAFETY: our event.
+        let r = unsafe { (self.gpu.d.cuEventSynchronize)(self.e) };
+        check(self.gpu.d, r, "cuEventSynchronize")
+    }
+}
+
+impl Drop for SyncEvent<'_> {
+    fn drop(&mut self) {
+        if self.gpu.bind().is_ok() {
+            // SAFETY: our event, destroyed once (pending records complete
+            // asynchronously: the driver allows destroying a recorded event).
+            unsafe { (self.gpu.d.cuEventDestroy_v2)(self.e) };
+        }
+    }
+}
+
 /// A recorded CUDA event (see `Gpu::record`).
-#[cfg_attr(not(test), allow(dead_code))] // tests and benchmarks
 pub struct Event<'g> {
     gpu: &'g Gpu,
     e: ffi::CUevent,
@@ -380,7 +615,6 @@ pub struct Event<'g> {
 
 impl Event<'_> {
     /// Milliseconds from `self` to `later`, once `later` has happened.
-    #[cfg_attr(not(test), allow(dead_code))] // tests and benchmarks
     pub fn ms_to(&self, later: &Event) -> Result<f32, String> {
         let d = self.gpu.d;
         self.gpu.bind()?;

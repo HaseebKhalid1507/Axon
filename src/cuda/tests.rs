@@ -561,3 +561,71 @@ fn gpu_capture_unwinds_cleanly() {
     let v: Vec<f32> = out.read().unwrap();
     assert_eq!(v[31], 93.0);
 }
+
+/// H2D throughput for streaming weights (PR A): pageable Vec, cuMemHostAlloc,
+/// cuMemHostRegister'd anonymous mapping (like model.rs's r8 arena) and a
+/// registered unaligned heap block (like a KV buffer). Prints GB/s.
+#[test]
+#[ignore = "benchmark: cargo test --release h2d_bench -- --ignored --nocapture"]
+fn h2d_bench() {
+    let Ok(g) = Gpu::open() else { return };
+    let n = 256usize << 20;
+    let dev = g.alloc(n).unwrap();
+    let s = g.new_stream().unwrap();
+    let e = g.new_event().unwrap();
+    let time = |src: *const u8, what: &str| {
+        let mut best = f64::MAX;
+        for _ in 0..4 {
+            let t = std::time::Instant::now();
+            // SAFETY: src has n readable bytes for the duration (synced below).
+            unsafe { s.h2d(&dev, 0, src, n).unwrap() };
+            s.record(&e).unwrap();
+            e.sync().unwrap();
+            best = best.min(t.elapsed().as_secs_f64());
+        }
+        eprintln!("{what}: {:.1} GB/s", n as f64 / best / 1e9);
+    };
+    let v = vec![7u8; n];
+    time(v.as_ptr(), "pageable Vec");
+    let mut h = g.host_alloc(n).unwrap();
+    h.bytes_mut().unwrap().fill(3);
+    let hp = h.bytes_mut().unwrap().as_ptr();
+    time(hp, "cuMemHostAlloc");
+    let mut map = memmap2::MmapMut::map_anon(n).unwrap();
+    let _ = map.advise(memmap2::Advice::HugePage);
+    map.fill(5);
+    time(map.as_ptr(), "anon mmap pageable");
+    let t = std::time::Instant::now();
+    // SAFETY: map lives until after pin drops.
+    let pin = unsafe { g.register(map.as_ptr(), n, false).unwrap() };
+    eprintln!(
+        "register 256 MiB: {:.1} ms",
+        t.elapsed().as_secs_f64() * 1e3
+    );
+    time(map.as_ptr(), "anon mmap registered");
+    drop(pin);
+    let heap = vec![9u8; n + 100];
+    let p = heap[37..].as_ptr();
+    // SAFETY: heap lives until after pin2 drops.
+    match unsafe { g.register(p, n, false) } {
+        Ok(pin2) => {
+            time(p, "unaligned heap registered");
+            drop(pin2);
+        }
+        Err(e) => eprintln!("unaligned register: {e}"),
+    }
+    // D2H into a registered block.
+    let mut back = vec![0u8; n];
+    // SAFETY: back lives until after pin3 drops.
+    let pin3 = unsafe { g.register(back.as_ptr(), n, false).unwrap() };
+    let t = std::time::Instant::now();
+    // SAFETY: back is writable, synced below.
+    unsafe { s.d2h(back.as_mut_ptr(), &dev, 0, n).unwrap() };
+    s.sync().unwrap();
+    eprintln!(
+        "d2h registered: {:.1} GB/s",
+        n as f64 / t.elapsed().as_secs_f64() / 1e9
+    );
+    drop(pin3);
+    assert_eq!(back[12345], 9);
+}

@@ -24,9 +24,11 @@
 //! runs; waking them costs ~50 us once per token. Overlapping the halves is
 //! left for later (PR A streams the CPU layers' weights instead).
 
+use crate::cuda::qwen2::stream::{HostLayer, StreamKv, Streamer};
 use crate::cuda::qwen2::{CacheKv, CudaCache, CudaQwen2};
 use crate::cuda::{Gpu, Module};
 use crate::gguf::{Model, Tensor};
+use crate::kv::Half as F16;
 use crate::lm::Lm;
 use crate::model::{KvCache, Qwen2};
 
@@ -45,6 +47,10 @@ pub const DESKTOP_MARGIN: u64 = 640 << 20;
 const GIB: f64 = (1u64 << 30) as f64;
 
 pub struct HybridQwen2<'m, 'g> {
+    /// Streaming the CPU layers through the GPU for big prefill batches
+    /// (None: off, or no room). First, so it drops (unpinning the CPU's
+    /// weights) before them.
+    stream: Option<Streaming<'g>>,
     /// Embedding and layers 0..k (and the head if k == n); None if k == 0.
     cpu: Option<Qwen2<'m>>,
     /// Layers k..n and the head (and the embedding if k == 0); None if k == n.
@@ -54,8 +60,49 @@ pub struct HybridQwen2<'m, 'g> {
     pub n_layers: usize,
 }
 
+/// PR A's state: the streamer and when to use it.
+struct Streaming<'g> {
+    st: std::cell::RefCell<Streamer<'g>>,
+    /// Smallest prefill batch streamed (AXON_STREAM_MIN): below it the
+    /// CPU computes its layers as without streaming.
+    min: usize,
+    /// AXON_STREAM_DECODE=1 (experiment): stream one-token steps too.
+    decode: bool,
+    /// Chunks streamed so far (tests: that streaming really happened).
+    chunks: std::cell::Cell<usize>,
+}
+
+/// VRAM streaming leaves free beyond what it and the cache take (the
+/// automatic split reserves it and keeps `DESKTOP_MARGIN` besides; with
+/// --gpu-layers this is all that's kept).
+const STREAM_HEADROOM: usize = 256 << 20;
+
+/// Default `Streaming::min`: the break-even batch (NOTES: measured).
+pub const STREAM_MIN: usize = 32;
+
+/// Prompt tokens per `feed_batch` while streaming: the chunks a call
+/// streams are split evenly from it (each up to the GPU's batch max), so a
+/// prompt's tail doesn't make a small chunk that pays a whole stream.
+const STREAM_BATCH: usize = 4096;
+
+/// AXON_STREAM_DECODE=1: the experiment that streams one-token decode
+/// steps too (AirLLM's idea; ~2x slower than the CPU computing its layers
+/// on 32B, NOTES). Not with drafting: verify passes never stream, so the
+/// picks would no longer be the per-token ones (main refuses the pair).
+pub fn stream_decode_setting() -> bool {
+    std::env::var("AXON_STREAM_DECODE").is_ok_and(|v| v == "1")
+}
+
+/// Whether streaming is on: AXON_STREAM unset or anything but "0".
+pub fn stream_setting() -> bool {
+    std::env::var("AXON_STREAM").map_or(true, |v| v != "0")
+}
+
 /// Each half's cache: KV of layers 0..k on the CPU, k..n on the GPU.
 pub struct HybridCache<'g> {
+    /// The streamed layers' VRAM slots, with the CPU cache's buffers
+    /// pinned: dropped first, before `cpu`'s memory goes.
+    skv: Option<StreamKv<'g>>,
     cpu: Option<KvCache>,
     gpu: Option<CudaCache<'g>>,
 }
@@ -71,8 +118,12 @@ pub fn block_count(m: &Model) -> Result<usize, String> {
 /// for a `max_ctx`-token cache of type `kv` (q8's smaller cache leaves room
 /// for more layers) and `DESKTOP_MARGIN` to spare out of `free`
 /// bytes of VRAM (the caller's `gpu.info()?.free_bytes`): 0 if not even
-/// one fits. The VRAM a split needs only shrinks as layers move to the CPU,
-/// so a binary search over `CudaQwen2::vram_need` finds it.
+/// one fits. With `stream` (PR A: prefill streams the CPU's layers), the
+/// GPU half's batch scratch is `split_batch(true)` and `stream_reserve`
+/// is kept besides, as `HybridQwen2::new_with_stream` will allocate. The
+/// VRAM a split needs only shrinks as layers move to the CPU (the reserve
+/// is the same for every split), so a binary search over
+/// `CudaQwen2::vram_need` finds it.
 pub fn auto_gpu_layers(
     gpu: &Gpu,
     module: &Module,
@@ -80,11 +131,36 @@ pub fn auto_gpu_layers(
     max_ctx: usize,
     kv: CacheKv,
     free: u64,
+    stream: bool,
 ) -> Result<usize, String> {
     let n = block_count(m)?;
-    most_gpu_layers(n, free, |g| {
-        CudaQwen2::vram_need(gpu, module, m, max_ctx, n - g, kv)
+    let stream = stream && !crate::kv::use_f32();
+    let reserve = match stream {
+        true => stream_reserve(m, max_ctx)?,
+        false => 0,
+    };
+    split_gpu_layers(n, free, stream, reserve, |g, batch| {
+        CudaQwen2::vram_need(gpu, module, m, max_ctx, n - g, kv, batch)
     })
+}
+
+/// `auto_gpu_layers`' sizing, given `need(g, batch)`, the VRAM of a split
+/// with g of the n layers on the GPU and batch scratch for `batch` tokens:
+/// with `stream`, the GPU half's scratch is `split_batch(true)`
+/// (`STREAM_PASS`) and `reserve` (`stream_reserve`) is kept besides; else
+/// `SPLIT_BATCH` scratch and no reserve. The most layers that fit
+/// (`most_gpu_layers`). Pure: the placement tests drive it with a model
+/// of the needs.
+pub fn split_gpu_layers(
+    n: usize,
+    free: u64,
+    stream: bool,
+    reserve: u64,
+    mut need: impl FnMut(usize, usize) -> Result<u64, String>,
+) -> Result<usize, String> {
+    let batch = crate::cuda::qwen2::split_batch(stream);
+    let extra = if stream { reserve } else { 0 };
+    most_gpu_layers(n, free, |g| Ok(need(g, batch)? + extra))
 }
 
 /// `auto_gpu_layers`' search, given `need(g)`, the VRAM a split with g of
@@ -192,6 +268,52 @@ pub fn choose_placement(
     })
 }
 
+/// VRAM streaming a split's CPU layers takes with the smallest ring, from
+/// the file's tensor sizes (`CudaQwen2::ring_bounds`, `stream_bytes`,
+/// `stream_kv_bytes`), plus STREAM_HEADROOM: what the automatic split
+/// leaves for it. Over every layer, so it's the same for any split (the
+/// placement search stays monotone): at most a few MB more than the CPU
+/// layers alone need.
+pub fn stream_reserve(m: &Model, max_ctx: usize) -> Result<u64, String> {
+    let k = block_count(m)?;
+    let meta = |key: &str| {
+        crate::model::meta_num(m, &format!("{}.{key}", m.arch))
+            .map(|v| v as usize)
+            .ok_or_else(|| format!("missing metadata {key}"))
+    };
+    let dim = meta("embedding_length")?;
+    let kvd = meta("attention.head_count_kv")? * dim / meta("attention.head_count")?;
+    const MATS: [&str; 7] = [
+        "attn_q",
+        "attn_k",
+        "attn_v",
+        "attn_output",
+        "ffn_gate",
+        "ffn_up",
+        "ffn_down",
+    ];
+    let mut ring = 0;
+    for l in 0..k {
+        let sizes: Vec<usize> = MATS
+            .iter()
+            .map(|s| {
+                let name = format!("blk.{l}.{s}.weight");
+                m.tensors
+                    .iter()
+                    .find(|t| t.name == name)
+                    .map(|t| (t.n_bytes as usize).next_multiple_of(256))
+                    .ok_or_else(|| format!("missing tensor {name}"))
+            })
+            .collect::<Result<_, _>>()?;
+        let biggest = sizes.iter().max().copied().unwrap_or(0);
+        ring = ring.max(sizes.iter().sum::<usize>() + biggest);
+    }
+    // Staging (2 x 16 MiB), norms and biases (a few floats per layer).
+    let rest = (32 << 20) + k * (3 * dim + 2 * kvd + 256) * 4;
+    let slots = 2 * 2 * max_ctx * kvd * 2;
+    Ok((ring + rest + slots + STREAM_HEADROOM) as u64)
+}
+
 impl<'m, 'g> HybridQwen2<'m, 'g> {
     /// The model with its last `gpu_layers` layers (clamped to n) and head
     /// on the GPU (`dev`, needed unless gpu_layers is 0), the rest on the
@@ -199,7 +321,9 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
     /// a `max_ctx`-token cache (the GPU half's of type `kv`; the CPU half's
     /// is f16 or f32 as AXON_KV says). Each half loads only its own weights, and
     /// the GPU's are handed back to `m` once uploaded (`Model::release`;
-    /// on a copy of the file they can't be read again).
+    /// on a copy of the file they can't be read again). Streaming off (PR
+    /// B's behavior); the CLI uses `new_with_stream`.
+    #[cfg_attr(not(test), allow(dead_code))] // tests and PR B's exact path
     pub fn new(
         dev: Option<(&'g Gpu, &'g Module<'g>)>,
         m: &'m Model,
@@ -207,9 +331,67 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
         gpu_layers: usize,
         kv: CacheKv,
     ) -> Result<HybridQwen2<'m, 'g>, String> {
+        Self::new_with_stream(dev, m, max_ctx, gpu_layers, kv, false, false)
+    }
+
+    /// `new`, with `stream`: prefill batches of at least `STREAM_MIN`
+    /// tokens (AXON_STREAM_MIN) run the CPU's layers on the GPU, their
+    /// weights streamed over (`cuda::qwen2::stream`), if the CPU's KV cache
+    /// is f16 and the VRAM it takes (a ring of two layers, by default) fits
+    /// next to a `max_ctx` cache; else a note on stderr and no streaming.
+    /// `auto`: the split came from `auto_gpu_layers`, so streaming keeps
+    /// `DESKTOP_MARGIN` free too (an explicit --gpu-layers only keeps
+    /// STREAM_HEADROOM).
+    pub fn new_with_stream(
+        dev: Option<(&'g Gpu, &'g Module<'g>)>,
+        m: &'m Model,
+        max_ctx: usize,
+        gpu_layers: usize,
+        kv: CacheKv,
+        stream: bool,
+        auto: bool,
+    ) -> Result<HybridQwen2<'m, 'g>, String> {
+        let repack = std::env::var("AXON_REPACK").map_or(true, |v| v != "0");
+        let margin = if auto { DESKTOP_MARGIN as usize } else { 0 };
+        Self::build(dev, m, max_ctx, gpu_layers, kv, stream, repack, margin)
+    }
+
+    /// `new_with_stream`, the CPU's layers repacked or not (`repack`).
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        dev: Option<(&'g Gpu, &'g Module<'g>)>,
+        m: &'m Model,
+        max_ctx: usize,
+        gpu_layers: usize,
+        kv: CacheKv,
+        stream: bool,
+        repack: bool,
+        margin: usize,
+    ) -> Result<HybridQwen2<'m, 'g>, String> {
         let n = block_count(m)?;
         let g = gpu_layers.min(n);
         let k = n - g;
+        // Streaming feeds the GPU half whole prompt chunks: its batch
+        // scratch is sized for that, decided up front: if the plan with
+        // the bigger scratch and the stream reserve doesn't fit, no
+        // streaming and SPLIT_BATCH scratch (as without it).
+        let mut wants_stream = stream && k > 0 && g > 0 && !crate::kv::use_f32();
+        if let (true, Some((gpu, module))) = (wants_stream, dev) {
+            let sb = crate::cuda::qwen2::split_batch(true);
+            let need = CudaQwen2::vram_need(gpu, module, m, max_ctx, k, kv, sb)?
+                + stream_reserve(m, max_ctx)?
+                + margin as u64;
+            let free = gpu.info()?.free_bytes;
+            if need > free {
+                eprintln!(
+                    "note: not streaming the CPU layers for prefill: it needs {:.2} GiB of GPU \
+                     memory with this split, {:.2} GiB is free; use fewer --gpu-layers",
+                    need as f64 / GIB,
+                    free as f64 / GIB
+                );
+                wants_stream = false;
+            }
+        }
         // The GPU first: a VRAM shortfall fails before the CPU's repack.
         // Each matrix's pages go back right after its upload, so the GPU
         // half (~9 GB on 32B) never sits in the page cache all at once; the
@@ -223,7 +405,8 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
                         m.release(t);
                     }
                 };
-                let net = CudaQwen2::new_layers(gpu, module, m, max_ctx, k, kv, &mut uploaded)
+                let sb = crate::cuda::qwen2::split_batch(wants_stream);
+                let net = CudaQwen2::new_layers(gpu, module, m, max_ctx, k, kv, sb, &mut uploaded)
                     .map_err(|e| {
                         format!("{g}/{n} layers on the GPU: {e}, or fewer --gpu-layers")
                     })?;
@@ -233,7 +416,6 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
         if g > 0 {
             release_gpu_part(m, k, n);
         }
-        let repack = std::env::var("AXON_REPACK").map_or(true, |v| v != "0");
         let cpu = (k > 0).then(|| Qwen2::new_layers(m, repack, k));
         let halves = [
             cpu.as_ref().map(|c| c.n_layers),
@@ -243,12 +425,120 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
             halves.iter().flatten().all(|&l| l == n),
             "halves of different models"
         );
+        let stream = match (&cpu, &gpu) {
+            (Some(c), Some(g)) if wants_stream => Self::streaming(c, g, max_ctx, margin)
+                .map_err(|e| eprintln!("note: not streaming the CPU layers for prefill: {e}"))
+                .ok(),
+            _ => None,
+        };
         Ok(HybridQwen2 {
+            stream,
             cpu,
             gpu,
             gpu_layers: g,
             n_layers: n,
         })
+    }
+
+    /// The streamer for the CPU's layers, if it fits beside a `max_ctx` cache.
+    /// `margin`: VRAM to leave free besides (DESKTOP_MARGIN for an
+    /// automatic split).
+    fn streaming(
+        cpu: &Qwen2<'m>,
+        gpu: &CudaQwen2<'g>,
+        max_ctx: usize,
+        margin: usize,
+    ) -> Result<Streaming<'g>, String> {
+        if crate::kv::use_f32() {
+            return Err("the CPU's KV cache is f32 (AXON_KV=f32)".into());
+        }
+        let src: Vec<HostLayer> = (0..cpu.layer_count()).map(|l| cpu.host_layer(l)).collect();
+        // Room for the cache `new_layers` planned for, its slots and
+        // STREAM_HEADROOM first; the ring takes what's left, up to two
+        // layers, at least its minimum (AXON_STREAM_RING_MB overrides).
+        let cache = gpu.cache_bytes(max_ctx) + gpu.stream_kv_bytes(max_ctx);
+        let (lo, hi) = CudaQwen2::ring_bounds(&src);
+        let fixed = gpu.stream_bytes(&src, 0) + cache + STREAM_HEADROOM + margin;
+        let free = gpu.free_bytes()? as usize;
+        let room = free.saturating_sub(fixed);
+        let ring = match std::env::var("AXON_STREAM_RING_MB")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+        {
+            Some(mb) => (mb << 20).max(lo),
+            None => room.min(hi),
+        };
+        if ring > room || ring < lo {
+            return Err(format!(
+                "it needs {:.2} GiB of GPU memory beside the cache, {:.2} GiB is free; \
+                 use fewer --gpu-layers",
+                (fixed - cache + ring.max(lo)) as f64 / GIB,
+                free.saturating_sub(cache) as f64 / GIB
+            ));
+        }
+        let st = gpu.streamer(&src, cpu.r8_arena(), ring)?;
+        let env = |k: &str| std::env::var(k).ok();
+        Ok(Streaming {
+            st: std::cell::RefCell::new(st),
+            min: env("AXON_STREAM_MIN")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(STREAM_MIN)
+                .max(1),
+            decode: stream_decode_setting(),
+            chunks: std::cell::Cell::new(0),
+        })
+    }
+
+    /// Prompt chunks streamed so far (tests).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub(crate) fn streamed_chunks(&self) -> usize {
+        self.stream.as_ref().map_or(0, |s| s.chunks.get())
+    }
+
+    /// Stream `tokens` at start.. through every layer if this split and
+    /// cache do and the batch is big enough (`min`); false if not (nothing
+    /// done). With `head`, the picks (one-token decode experiment).
+    fn try_stream(
+        &self,
+        tokens: &[u32],
+        start: usize,
+        c: &mut HybridCache<'g>,
+        min: usize,
+        head: bool,
+    ) -> Option<Vec<u32>> {
+        let s = self.stream.as_ref()?;
+        if tokens.len() < min {
+            return None;
+        }
+        let (cn, gn) = (self.cpu.as_ref()?, self.gpu.as_ref()?);
+        let (skv, cc, gc) = match c {
+            HybridCache {
+                skv: Some(k),
+                cpu: Some(cc),
+                gpu: Some(gc),
+            } => (&*k, cc, gc),
+            _ => return None,
+        };
+        if let Some(&t) = tokens.iter().find(|&&t| t as usize >= cn.vocab) {
+            panic!("token {t} out of range");
+        }
+        let src: Vec<HostLayer> = (0..cn.layer_count()).map(|l| cn.host_layer(l)).collect();
+        // Even chunks of at most the GPU's batch max.
+        let n = tokens.len();
+        let parts = n.div_ceil(CudaQwen2::batch_max(gc));
+        let mut picks = Vec::new();
+        let mut at = 0;
+        for p in 0..parts {
+            let len = n / parts + (p < n % parts) as usize;
+            let chunk = &tokens[at..at + len];
+            let xs = cn.embed_batch(chunk);
+            let mut hkv = cc.f16_layers().expect("streaming needs an f16 CPU cache");
+            let mut st = s.st.borrow_mut();
+            picks.extend(gn.stream_feed(gc, &mut st, skv, &src, &mut hkv, &xs, start + at, head));
+            s.chunks.set(s.chunks.get() + 1);
+            at += len;
+        }
+        Some(picks)
     }
 
     /// VRAM the GPU half holds with a `max_ctx`-token cache (0 if none).
@@ -258,10 +548,15 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
             .map_or(0, |g| g.weight_bytes() + g.cache_bytes(max_ctx))
     }
 
-    /// "gpu layers 30/64, 9.10 GiB on GPU" (with a `max_ctx` cache).
+    /// "gpu layers 30/64, 9.10 GiB on GPU" (with a `max_ctx` cache), and
+    /// whether prefill streams.
     pub fn describe(&self, max_ctx: usize) -> String {
+        let st = match &self.stream {
+            Some(s) => format!(", prefill streams the CPU layers (batches >= {})", s.min),
+            None => String::new(),
+        };
         format!(
-            "gpu layers {}/{}, {:.2} GiB on GPU",
+            "gpu layers {}/{}, {:.2} GiB on GPU{st}",
             self.gpu_layers,
             self.n_layers,
             self.vram_bytes(max_ctx) as f64 / GIB
@@ -340,10 +635,24 @@ impl<'g> Lm for HybridQwen2<'_, 'g> {
     }
 
     fn new_cache(&self, max_ctx: usize) -> HybridCache<'g> {
-        HybridCache {
-            cpu: self.cpu.as_ref().map(|n| n.new_cache(max_ctx)),
-            gpu: self.gpu.as_ref().map(|n| Lm::new_cache(n, max_ctx)),
-        }
+        let mut cpu = self.cpu.as_ref().map(|n| n.new_cache(max_ctx));
+        let gpu = self.gpu.as_ref().map(|n| Lm::new_cache(n, max_ctx));
+        // The slots after the GPU half's cache, which `new` planned for.
+        let skv = match (&self.stream, &self.gpu, &mut cpu) {
+            (Some(_), Some(g), Some(c)) => {
+                let host: Vec<(&[F16], &[F16])> = c
+                    .f16_layers()
+                    .expect("streaming needs an f16 CPU cache")
+                    .into_iter()
+                    .map(|(k, v)| (&*k, &*v))
+                    .collect();
+                g.stream_kv(max_ctx, &host)
+                    .map_err(|e| eprintln!("note: this cache won't stream: {e}"))
+                    .ok()
+            }
+            _ => None,
+        };
+        HybridCache { skv, cpu, gpu }
     }
 
     fn forward(&self, token: u32, pos: usize, c: &mut HybridCache<'g>) -> Vec<f32> {
@@ -359,6 +668,11 @@ impl<'g> Lm for HybridQwen2<'_, 'g> {
     }
 
     fn forward_argmax(&self, token: u32, pos: usize, c: &mut HybridCache<'g>) -> u32 {
+        if self.stream.as_ref().is_some_and(|s| s.decode)
+            && let Some(p) = self.try_stream(&[token], pos, c, 1, true)
+        {
+            return p[0];
+        }
         match self.split(c) {
             (Some((n, c)), None) => crate::argmax(&n.forward(token, pos, c)),
             (None, Some((n, c))) => n.forward_argmax(token, pos, c),
@@ -371,6 +685,18 @@ impl<'g> Lm for HybridQwen2<'_, 'g> {
     }
 
     fn feed_batch(&self, tokens: &[u32], start: usize, c: &mut HybridCache<'g>) {
+        if let Some(s) = &self.stream {
+            if self.try_stream(tokens, start, c, s.min, false).is_some() {
+                return;
+            }
+            if tokens.len() > crate::PREFILL_BATCH {
+                // The CPU's batch size (same bits, any batching).
+                for (i, b) in tokens.chunks(crate::PREFILL_BATCH).enumerate() {
+                    self.feed_batch(b, start + i * crate::PREFILL_BATCH, c);
+                }
+                return;
+            }
+        }
         match self.split(c) {
             (Some((n, c)), None) => n.feed_batch(tokens, start, c),
             (None, Some((n, c))) => Lm::feed_batch(n, tokens, start, c),
@@ -400,6 +726,7 @@ impl<'g> Lm for HybridQwen2<'_, 'g> {
     fn prefill_batch(&self) -> usize {
         match (&self.cpu, &self.gpu) {
             (None, Some(g)) => g.prefill_batch(),
+            _ if self.stream.is_some() => STREAM_BATCH,
             _ => crate::PREFILL_BATCH,
         }
     }

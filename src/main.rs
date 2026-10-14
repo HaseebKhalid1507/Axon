@@ -88,10 +88,27 @@ environment:
                              attention bandwidth; f32 for A/B, CPU only; q8 cuda only)
   AXON_DEVICE=cpu|cuda       same as --device
   AXON_GPU_LAYERS=N          same as --gpu-layers N
+  AXON_STREAM=0              split model: don't stream the CPU's layers through the GPU for
+                             prefill batches (default on: their weights are copied over
+                             once per prompt chunk; results then get the GPU's numerics)
+  AXON_STREAM_MIN=N          split model: smallest prefill batch streamed (default 32);
+                             streaming pins the CPU layers' KV cache in RAM (32B at
+                             --ctx 8192: ~1.2 GB, resident while the cache lives)
+  AXON_STREAM_DECODE=1       experiment: stream one-token decode steps too (slower: ~2x
+                             on 32B; not with --draft)
   AXON_CUDA_GRAPHS=0         cuda: launch each token's kernels one by one instead of
                              replaying a captured CUDA graph (same results, slower)
 
 The model must be a qwen2-architecture GGUF (e.g. Qwen2.5-0.5B-Instruct Q4_K_M).";
+
+/// AXON_STREAM_DECODE=1 with drafting: refused (drafting's picks come
+/// from verify passes, which never stream, so they could differ from the
+/// streamed per-token steps: not lossless).
+fn check_stream_decode(max_draft: usize) {
+    if max_draft > 0 && hybrid::stream_decode_setting() {
+        fail("AXON_STREAM_DECODE=1 can't be combined with --draft / AXON_DRAFT (not lossless)");
+    }
+}
 
 /// Usage error: one line, a hint, exit code 2.
 fn fail(msg: &str) -> ! {
@@ -319,6 +336,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         i += 2;
     }
     let max_draft = round_draft(max_draft);
+    check_stream_decode(max_draft);
 
     let (device, gpu_layers) = placement(device, gpu_layers);
     let model = open_model_with(path, true, copy_for(device));
@@ -588,6 +606,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         chat::Chat::new(&net, &tok, &system, ctx).unwrap_or_else(|e| fail(&format!("{path}: {e}")));
     conv.max_reply = max_reply;
     conv.max_draft = round_draft(max_draft);
+    check_stream_decode(conv.max_draft);
 
     let name = std::path::Path::new(path)
         .file_name()

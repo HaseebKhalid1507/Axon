@@ -391,7 +391,16 @@ fn hybrid_auto_split_is_the_most_that_fit() {
     let km = Kernels::module(&g).unwrap();
     let n = block_count(&m).unwrap();
     let need = |first: usize, ctx: usize| {
-        CudaQwen2::vram_need(&g, &km, &m, ctx, first, CacheKv::F16).unwrap()
+        CudaQwen2::vram_need(
+            &g,
+            &km,
+            &m,
+            ctx,
+            first,
+            CacheKv::F16,
+            crate::cuda::qwen2::SPLIT_BATCH,
+        )
+        .unwrap()
     };
     for f in 1..n {
         assert!(need(f, 4096) < need(f - 1, 4096), "plan at first {f}");
@@ -401,7 +410,7 @@ fn hybrid_auto_split_is_the_most_that_fit() {
     // layers' KV would take 1.5x the free VRAM, so about half fit.
     let per_tok = (need(0, 2048) - need(0, 1024)) / 1024;
     let ctx = (free * 3 / 2 / per_tok) as usize;
-    let auto = auto_gpu_layers(&g, &km, &m, ctx, CacheKv::F16, free).unwrap();
+    let auto = auto_gpu_layers(&g, &km, &m, ctx, CacheKv::F16, free, false).unwrap();
     eprintln!(
         "1.5B ctx {ctx}: auto split {auto}/{n} of {:.2} GiB free",
         free as f64 / GIB
@@ -413,6 +422,24 @@ fn hybrid_auto_split_is_the_most_that_fit() {
         "one more layer would have fit"
     );
     assert!(auto > 0 && auto < n, "a split, not all or nothing");
+    // Streaming (PR A): the GPU half's bigger batch scratch and the stream
+    // reserve, the same search; the plan stays monotone.
+    let sb = crate::cuda::qwen2::split_batch(true);
+    let need_s =
+        |first: usize| CudaQwen2::vram_need(&g, &km, &m, ctx, first, CacheKv::F16, sb).unwrap();
+    for f in 1..n {
+        assert!(need_s(f) < need_s(f - 1), "streaming plan at first {f}");
+    }
+    let reserve = stream_reserve(&m, ctx).unwrap();
+    let auto_s = auto_gpu_layers(&g, &km, &m, ctx, CacheKv::F16, free, true).unwrap();
+    let fits_s = |gl: usize| need_s(n - gl) + reserve + DESKTOP_MARGIN <= free;
+    assert!(auto_s == 0 || fits_s(auto_s), "streaming split doesn't fit");
+    assert!(
+        auto_s == n || !fits_s(auto_s + 1),
+        "streaming: one more would fit"
+    );
+    assert!(auto_s <= auto, "streaming takes more VRAM, not less");
+    eprintln!("1.5B ctx {ctx}: streaming auto split {auto_s}/{n}");
     // An explicit count that doesn't fit (all: 1.5x free in KV alone) says
     // which and what to do.
     let e = HybridQwen2::new(Some((&g, &km)), &m, ctx, n, CacheKv::F16)
@@ -518,7 +545,7 @@ fn hybrid_auto_split_q8_fits_more_layers() {
     let n = block_count(&m).unwrap();
     let q8 = CacheKv::Q8 { group: 0 };
     let need = |first: usize, ctx: usize, kv: CacheKv| {
-        CudaQwen2::vram_need(&g, &km, &m, ctx, first, kv).unwrap()
+        CudaQwen2::vram_need(&g, &km, &m, ctx, first, kv, crate::cuda::qwen2::SPLIT_BATCH).unwrap()
     };
     for f in 0..n {
         assert!(
@@ -529,13 +556,355 @@ fn hybrid_auto_split_q8_fits_more_layers() {
     let free = g.info().unwrap().free_bytes;
     let per_tok = (need(0, 2048, CacheKv::F16) - need(0, 1024, CacheKv::F16)) / 1024;
     let ctx = (free * 3 / 2 / per_tok) as usize;
-    let a16 = auto_gpu_layers(&g, &km, &m, ctx, CacheKv::F16, free).unwrap();
-    let a8 = auto_gpu_layers(&g, &km, &m, ctx, q8, free).unwrap();
+    let a16 = auto_gpu_layers(&g, &km, &m, ctx, CacheKv::F16, free, false).unwrap();
+    let a8 = auto_gpu_layers(&g, &km, &m, ctx, q8, free, false).unwrap();
     eprintln!("1.5B ctx {ctx}: auto split f16 {a16}/{n}, q8 {a8}/{n}");
     let fits = |gl: usize| need(n - gl, ctx, q8) + DESKTOP_MARGIN <= free;
     assert!(a8 == 0 || fits(a8), "chosen q8 split doesn't fit");
     assert!(a8 == n || !fits(a8 + 1), "one more q8 layer would have fit");
     assert!(a8 > a16, "q8 fits more layers ({a8} vs {a16})");
+}
+
+// ---------------------------------------------------------------------------
+// Streaming (PR A): prefill batches run the CPU's layers on the GPU.
+
+/// The split with streaming on for batches of at least `min` tokens.
+fn streamed<'m, 'g>(
+    g: &'g Gpu,
+    km: &'g Module<'g>,
+    m: &'m Model,
+    ctx: usize,
+    gpu_layers: usize,
+    min: usize,
+) -> HybridQwen2<'m, 'g> {
+    streamed_kv(g, km, m, ctx, gpu_layers, min, CacheKv::F16)
+}
+
+/// `streamed` with the GPU half's cache of type `kv`.
+fn streamed_kv<'m, 'g>(
+    g: &'g Gpu,
+    km: &'g Module<'g>,
+    m: &'m Model,
+    ctx: usize,
+    gpu_layers: usize,
+    min: usize,
+    kv: CacheKv,
+) -> HybridQwen2<'m, 'g> {
+    let mut h =
+        HybridQwen2::new_with_stream(Some((g, km)), m, ctx, gpu_layers, kv, true, false).unwrap();
+    h.stream.as_mut().expect("streaming set up").min = min;
+    h
+}
+
+/// Every layer's KV rows as f32 bits, CPU half then GPU half (the CPU
+/// cache's layout: per layer K then V, all positions).
+fn kv_all(c: &HybridCache) -> Vec<u32> {
+    let mut v = c.cpu.as_ref().unwrap().bits();
+    let gk = CudaQwen2::kv_bits(c.gpu.as_ref().unwrap());
+    v.extend(gk.iter().map(|&h| crate::quant::f16_to_f32(h).to_bits()));
+    v
+}
+
+/// Streamed prefill computes every layer with the GPU's kernels from the
+/// same embeddings, so whatever the batching (each batch streamed, history
+/// rows read back from the CPU cache), both halves' KV caches hold the
+/// all-GPU model's bits: the CPU layers' rows written back into the CPU
+/// cache included. Batches under `min` don't stream: PR B's bits.
+fn stream_prefill_bits(rel: &str, name: &str) {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = mapped(rel) else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let n = block_count(&m).unwrap();
+    let ids = long_ids(&m, 700);
+    let ctx = ids.len() + 1;
+    let rest = &ids[..ids.len() - 1];
+    let want = {
+        let gpu = CudaQwen2::new(&g, &km, &m, ctx).unwrap();
+        let mut c = gpu.new_cache(ctx);
+        gpu.feed_batch(rest, 0, &mut c);
+        let k = CudaQwen2::kv_bits(&c);
+        k.iter()
+            .map(|&h| crate::quant::f16_to_f32(h).to_bits())
+            .collect::<Vec<u32>>()
+    };
+    for k in [1, n / 2, n - 1] {
+        let h = streamed(&g, &km, &m, ctx, n - k, 1);
+        assert_eq!(
+            h.gpu.as_ref().unwrap().prefill_batch(),
+            crate::cuda::qwen2::split_batch(true)
+        );
+        for sizes in [vec![rest.len()], vec![5, 100, 3, 17, 260, 1, 33]] {
+            let mut c = h.new_cache(ctx);
+            assert!(c.skv.is_some(), "{name} k={k}: this cache streams");
+            let before = h.streamed_chunks();
+            let mut pos = 0;
+            for &s in sizes.iter().cycle() {
+                if pos == rest.len() {
+                    break;
+                }
+                let e = (pos + s).min(rest.len());
+                h.feed_batch(&rest[pos..e], pos, &mut c);
+                pos = e;
+            }
+            assert!(
+                h.streamed_chunks() >= before + sizes.len().min(7),
+                "streamed"
+            );
+            let got = kv_all(&c);
+            assert_eq!(got.len(), want.len());
+            if let Some(i) = (0..got.len()).find(|&i| got[i] != want[i]) {
+                let gp = h.gpu.as_ref().unwrap();
+                let per_layer = 2 * ctx * gp.n_kv_heads * gp.head_dim;
+                panic!(
+                    "{name} k={k} {sizes:?}: KV differs from the GPU model's at {i} (layer ~{})",
+                    i / per_layer.max(1)
+                );
+            }
+        }
+        // Never streaming (min past every batch): PR B's bits.
+        let off = streamed(&g, &km, &m, ctx, n - k, usize::MAX);
+        let plain = HybridQwen2::new(Some((&g, &km)), &m, ctx, n - k, CacheKv::F16).unwrap();
+        let sizes = [64, 300, 7];
+        let a = prefill_with(&off, &ids, &sizes);
+        let b = prefill_with(&plain, &ids, &sizes);
+        assert!(a.0 == b.0 && a.1 == b.1, "{name} k={k}: below min != PR B");
+        assert_eq!(bits(&a.2), bits(&b.2));
+    }
+    // CPU layers not repacked: their GGUF bytes are copied as they are
+    // (from pageable memory), no un-permute.
+    let mut h = HybridQwen2::build(
+        Some((&g, &km)),
+        &m,
+        ctx,
+        n - n / 2,
+        CacheKv::F16,
+        true,
+        false,
+        0,
+    )
+    .unwrap();
+    h.stream.as_mut().expect("streaming set up").min = 1;
+    let mut c = h.new_cache(ctx);
+    assert!(c.skv.is_some(), "{name}: not repacked: this cache streams");
+    h.feed_batch(&rest[..300], 0, &mut c);
+    assert_eq!(h.streamed_chunks(), 1);
+    h.feed_batch(&rest[300..], 300, &mut c);
+    assert!(
+        kv_all(&c) == want,
+        "{name}: not repacked: KV differs from the GPU model's"
+    );
+    eprintln!(
+        "{name}: streamed prefill KV == all-GPU bits (k = 1, n/2, n-1; 2 batchings of {} tokens; \
+         and not repacked)",
+        rest.len()
+    );
+}
+
+#[test]
+fn stream_prefill_is_gpu_bits_0_5b() {
+    stream_prefill_bits(M05, "0.5B");
+}
+
+#[test]
+fn stream_prefill_is_gpu_bits_1_5b() {
+    stream_prefill_bits(M15, "1.5B");
+}
+
+/// Streamed prefill, then decode with the CPU computing its layers: graded
+/// vs the CPU model like the split without streaming (`mixed_graded`).
+fn stream_graded(rel: &str, name: &str) {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = mapped(rel) else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
+    let n = block_count(&m).unwrap();
+    let rows = Qwen2::new_with(&m, false);
+    let cpu = Qwen2::new(&m);
+    let mut ac = Agree::default();
+    for p in PROMPTS {
+        compare(&cpu, &rows, &tok.encode(p), 32, &mut ac);
+    }
+    drop(rows);
+    report(&format!("{name} cpu rows vs cpu"), &ac);
+    for k in [1, n / 2, n - 1] {
+        // min 2: every prompt here streams.
+        let h = streamed(&g, &km, &m, 256, n - k, 2);
+        let mut ag = Agree::default();
+        for p in PROMPTS {
+            compare(&cpu, &h, &tok.encode(p), 32, &mut ag);
+        }
+        report(&format!("{name} streamed k={k} vs cpu"), &ag);
+        // Every prompt's prefill streamed (each cache had its slots).
+        assert_eq!(h.streamed_chunks(), PROMPTS.len(), "{name} k={k}: streamed");
+        assert_graded(&ag, &ac);
+    }
+}
+
+#[test]
+fn stream_logits_match_cpu_0_5b() {
+    stream_graded(M05, "0.5B");
+}
+
+#[test]
+fn stream_logits_match_cpu_1_5b() {
+    stream_graded(M15, "1.5B");
+}
+
+/// verify_argmax never streams: after a streamed prefill its picks equal
+/// forward_argmax per token and leave the same KV, also for batches far
+/// past the streaming threshold.
+#[test]
+fn stream_verify_matches_forward_argmax() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = mapped(M05) else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let n = block_count(&m).unwrap();
+    let prompt = long_ids(&m, 90);
+    let rest = &prompt[..prompt.len() - 1];
+    let start = rest.len();
+    for k in [1, n / 2] {
+        let h = streamed(&g, &km, &m, 1400, n - k, STREAM_MIN);
+        let mut seed = 99u64 + k as u64;
+        let mut rnd = |n: u64| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n) as u32
+        };
+        let mut cases: Vec<Vec<u32>> = [1, 5, 16, 40]
+            .iter()
+            .map(|&nb| (0..nb).map(|_| rnd(h.vocab() as u64)).collect())
+            .collect();
+        cases.push((0..600).map(|_| rnd(5000)).collect());
+        for toks in &cases {
+            let mut a = h.new_cache(start + toks.len() + 1);
+            let mut b = h.new_cache(start + toks.len() + 1);
+            assert!(a.skv.is_some() && b.skv.is_some(), "k={k}: caches stream");
+            let before = h.streamed_chunks();
+            h.feed_batch(rest, 0, &mut a);
+            h.feed_batch(rest, 0, &mut b);
+            assert_eq!(h.streamed_chunks(), before + 2, "k={k}: prefills streamed");
+            let got = h.verify_argmax(toks, start, &mut a);
+            let want: Vec<u32> = (0..toks.len())
+                .map(|i| h.forward_argmax(toks[i], start + i, &mut b))
+                .collect();
+            assert_eq!(got, want, "k={k}: verify of {} tokens", toks.len());
+            assert!(kv_all(&a) == kv_all(&b), "k={k}: KV after verify");
+        }
+        eprintln!(
+            "0.5B streamed k={k}: {} verify passes == per-token picks",
+            cases.len()
+        );
+    }
+}
+
+/// Streaming with a q8 GPU half (--kv q8 on a split): the streamed (CPU)
+/// layers keep the CPU cache's f16 rows and take the f16 attention
+/// kernels, the GPU's own layers their q8 cache and kernels (`layer`
+/// follows each layer's format). So the CPU half's rows are the all-GPU
+/// f16 model's (its layers 0..k see the same inputs), the GPU half's q8
+/// cache and the next logits are the same whatever the batching (each
+/// batch streamed), and verify (never streamed) == per-token picks.
+fn stream_q8_bits(rel: &str, name: &str) {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = mapped(rel) else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let n = block_count(&m).unwrap();
+    let ids = long_ids(&m, 700);
+    let ctx = ids.len() + 8;
+    let (&last, rest) = ids.split_last().unwrap();
+    let f16_rows = {
+        let gpu = CudaQwen2::new(&g, &km, &m, ctx).unwrap();
+        let mut c = gpu.new_cache(ctx);
+        gpu.feed_batch(rest, 0, &mut c);
+        CudaQwen2::kv_bits(&c)
+    };
+    let q8 = CacheKv::Q8 { group: 0 };
+    for k in [1, n / 2] {
+        let h = streamed_kv(&g, &km, &m, ctx, n - k, 1, q8);
+        assert_eq!(h.kv_name(), "q8");
+        let run = |sizes: &[usize]| {
+            let mut c = h.new_cache(ctx);
+            assert!(c.skv.is_some(), "{name} k={k}: this cache streams");
+            let before = h.streamed_chunks();
+            let mut pos = 0;
+            for &s in sizes.iter().cycle() {
+                if pos == rest.len() {
+                    break;
+                }
+                let e = (pos + s).min(rest.len());
+                h.feed_batch(&rest[pos..e], pos, &mut c);
+                pos = e;
+            }
+            assert!(h.streamed_chunks() > before, "{name} k={k}: streamed");
+            let l = h.forward(last, rest.len(), &mut c);
+            let cpu = c.cpu.as_ref().unwrap().bits();
+            let gpu = CudaQwen2::kv_bits(c.gpu.as_ref().unwrap());
+            (cpu, gpu, l, c)
+        };
+        let (c0, g0, l0, mut cache) = run(&[rest.len()]);
+        // The CPU half's rows: the f16 GPU model's, layers 0..k, positions
+        // 0..rest.len() (the CPU cache holds f16 bits widened to f32; the
+        // last position came from the CPU's own decode step).
+        let per = ctx * h.gpu.as_ref().unwrap().n_kv_heads * h.gpu.as_ref().unwrap().head_dim;
+        for kv in 0..2 * k {
+            for i in 0..rest.len() * per / ctx {
+                let want = crate::quant::f16_to_f32(f16_rows[kv * per + i]).to_bits();
+                assert_eq!(
+                    c0[kv * per + i],
+                    want,
+                    "{name} k={k}: CPU half row bits (layer {}, {})",
+                    kv / 2,
+                    if kv % 2 == 0 { "K" } else { "V" }
+                );
+            }
+        }
+        for sizes in [vec![5, 100, 3, 17, 260, 1, 33], vec![64, 300]] {
+            let (c, gk, l, _) = run(&sizes);
+            assert!(c == c0, "{name} k={k} {sizes:?}: CPU KV differs");
+            assert!(gk == g0, "{name} k={k} {sizes:?}: GPU q8 KV differs");
+            assert_eq!(bits(&l), bits(&l0), "{name} k={k} {sizes:?}: logits");
+        }
+        // Verify never streams, on top of a streamed q8 prefill.
+        let toks: Vec<u32> = (0..6).map(|i| (i * 977 + 13) % 5000).collect();
+        let mut other = run(&[rest.len()]).3;
+        let start = rest.len() + 1;
+        let got = h.verify_argmax(&toks, start, &mut cache);
+        let want: Vec<u32> = (0..toks.len())
+            .map(|i| h.forward_argmax(toks[i], start + i, &mut other))
+            .collect();
+        assert_eq!(
+            got, want,
+            "{name} k={k}: verify after a streamed q8 prefill"
+        );
+        eprintln!("{name} k={k}: streamed q8 prefill bit contracts hold");
+    }
+}
+
+#[test]
+fn stream_q8_prefill_bits_0_5b() {
+    stream_q8_bits(M05, "0.5B");
+}
+
+#[test]
+fn stream_q8_prefill_bits_1_5b() {
+    stream_q8_bits(M15, "1.5B");
 }
 
 /// A 32B-shaped model's VRAM needs without a GPU: 64 layers of 280 MiB,
@@ -736,4 +1105,133 @@ fn all_gpu_layers_is_the_cuda_backend() {
             "--gpu-layers {gl}: not the GPU model's bits"
         );
     }
+}
+
+/// The toy's batch scratch per token of a split's GPU half (32B-like:
+/// ~160 MiB at 512 tokens).
+const TOY_SCRATCH_TOK: u64 = 320 << 10;
+
+impl Toy {
+    /// `need` of a split's GPU half with batch scratch for `batch` tokens.
+    fn split_need(&self, g: usize, ctx: usize, batch: usize) -> u64 {
+        self.need(g, ctx) + batch as u64 * TOY_SCRATCH_TOK
+    }
+
+    /// `place` with the split option sized as `auto_gpu_layers` sizes it
+    /// (`split_gpu_layers`): streaming or not, `reserve` for the stream.
+    fn place_stream(
+        &self,
+        free: u64,
+        max_ctx: usize,
+        fit: bool,
+        stream: bool,
+        reserve: u64,
+    ) -> Placement {
+        choose_placement(
+            free,
+            max_ctx,
+            fit,
+            |c| self.need(TOY_N, c),
+            || {
+                split_gpu_layers(TOY_N, free, stream, reserve, |g, b| {
+                    Ok(self.split_need(g, max_ctx, b))
+                })
+            },
+        )
+        .unwrap()
+    }
+}
+
+/// The split option with streaming on is sized for the streamed pass
+/// (`STREAM_PASS` scratch) plus the stream reserve; off, `SPLIT_BATCH`
+/// scratch and nothing else. Each is the most layers that fit with that
+/// need, and streaming gets fewer (never more) layers.
+#[test]
+fn placement_split_counts_streaming() {
+    use crate::cuda::qwen2::{SPLIT_BATCH, STREAM_PASS, split_batch};
+    assert_eq!(split_batch(false), SPLIT_BATCH);
+    assert_eq!(split_batch(true), STREAM_PASS);
+    let reserve = 900 * MIB;
+    let free = 12 << 30;
+    for t in [&F16, &Q8] {
+        // The batch the sizing asks for.
+        let mut seen = Vec::new();
+        split_gpu_layers(TOY_N, free, true, reserve, |g, b| {
+            seen.push(b);
+            Ok(t.split_need(g, 8192, b))
+        })
+        .unwrap();
+        assert!(seen.iter().all(|&b| b == STREAM_PASS), "{seen:?}");
+        let mut layers = [0; 2];
+        for (i, stream) in [false, true].into_iter().enumerate() {
+            let p = t.place_stream(free, 8192, true, stream, reserve);
+            let Placement::Split { gpu_layers: g, .. } = p else {
+                panic!("{p:?}: not a split");
+            };
+            let (batch, extra) = if stream {
+                (STREAM_PASS, reserve)
+            } else {
+                (SPLIT_BATCH, 0)
+            };
+            let need = |g: usize| t.split_need(g, 8192, batch) + extra + DESKTOP_MARGIN;
+            assert!(need(g) <= free, "stream {stream}: {g} doesn't fit");
+            assert!(need(g + 1) > free, "stream {stream}: one more fits");
+            layers[i] = g;
+        }
+        assert!(layers[1] < layers[0], "streaming {layers:?}");
+        // A reserve of 0 still sizes the streamed pass's scratch.
+        let g0 =
+            split_gpu_layers(TOY_N, free, true, 0, |g, b| Ok(t.split_need(g, 8192, b))).unwrap();
+        assert!(g0 <= layers[0] && g0 >= layers[1], "{g0} vs {layers:?}");
+        // Off ignores the reserve.
+        let off = split_gpu_layers(TOY_N, free, false, 1 << 40, |g, b| {
+            Ok(t.split_need(g, 8192, b))
+        })
+        .unwrap();
+        assert_eq!(off, layers[0]);
+    }
+}
+
+/// Streaming can change the decision: VRAM for a split with a few GPU
+/// layers when not streaming has none left once the streamed pass and the
+/// reserve are counted, so the placement is Nowhere (the whole model never
+/// fits here), and with room for a short all-GPU context it falls back to
+/// that context rather than a split it can't hold.
+#[test]
+fn placement_stream_changes_the_decision() {
+    let reserve = 900 * MIB;
+    // One GPU layer without streaming, none with it.
+    let free = F16.split_need(1, 8192, crate::cuda::qwen2::SPLIT_BATCH) + DESKTOP_MARGIN;
+    assert!(matches!(
+        F16.place_stream(free, 8192, true, false, reserve),
+        Placement::Split { gpu_layers: 1, .. }
+    ));
+    assert_eq!(
+        F16.place_stream(free, 8192, true, true, reserve),
+        Placement::Nowhere
+    );
+    // A toy whose whole model fits at 1024 tokens (below keep_ctx) and
+    // whose stream reserve leaves no split layer: the shrunk all-GPU
+    // context; without streaming, the split at the full context.
+    let free = F16.need(TOY_N, 1024);
+    let big = free; // a reserve no split can hold beside its layers
+    let p = F16.place_stream(free, 8192, true, true, big);
+    assert_eq!(p, Placement::Gpu { ctx: 1024 });
+    let p = F16.place_stream(free, 8192, true, false, big);
+    assert!(
+        matches!(
+            p,
+            Placement::Split {
+                gpu_ctx: Some(1024),
+                ..
+            }
+        ),
+        "{p:?}"
+    );
+    // The full context fitting whole never asks about a split.
+    let free = F16.need(TOY_N, 8192);
+    assert_eq!(
+        F16.place_stream(free, 8192, true, true, big),
+        Placement::Gpu { ctx: 8192 }
+    );
 }

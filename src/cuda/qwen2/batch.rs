@@ -35,6 +35,10 @@ pub(super) fn act_stride(n: usize) -> usize {
 pub(crate) enum BatchIn<'x> {
     Tokens(&'x [u32]),
     Hidden(&'x [f32]),
+    /// This many states already in the batch scratch's residual stream,
+    /// and the RoPE table of their positions in its `rope` (left there by
+    /// the streamed layers, stream.rs).
+    Resident(usize),
 }
 
 impl BatchIn<'_> {
@@ -42,6 +46,7 @@ impl BatchIn<'_> {
         match self {
             BatchIn::Tokens(t) => t.len(),
             BatchIn::Hidden(x) => x.len() / dim,
+            BatchIn::Resident(n) => *n,
         }
     }
 
@@ -52,6 +57,10 @@ impl BatchIn<'_> {
         match self {
             BatchIn::Tokens(t) => BatchIn::Tokens(&t[r]),
             BatchIn::Hidden(x) => BatchIn::Hidden(&x[r.start * dim..r.end * dim]),
+            BatchIn::Resident(n) => {
+                assert!(i == 0 && *n <= max, "resident states: one pass");
+                BatchIn::Resident(*n)
+            }
         }
     }
 }
@@ -79,6 +88,8 @@ pub(super) struct BatchFns<'m> {
     gemm: Option<[[Func<'m>; 2]; 4]>,
     /// SMs of the GPU (the GEMM tile choice).
     sms: usize,
+    /// stream.cu: r8/r8q blocks back to GGUF rows.
+    pub(super) unpermute: Func<'m>,
 }
 
 impl<'m> BatchFns<'m> {
@@ -143,6 +154,7 @@ impl<'m> BatchFns<'m> {
             gemvm,
             gemm,
             sms,
+            unpermute: module.function("unpermute_r8")?,
         })
     }
 }
@@ -230,17 +242,19 @@ impl<'g> CudaQwen2<'g> {
         })
     }
 
-    /// out[z][r] (row stride ostride floats) = W act[z] (+ bias) for mode 0,
+    /// out[z][r] (row stride ostride floats) = W act[z] (+ bias) for mode 0
+    /// (W at mt.off in `wts`),
     /// += for mode 1, for tokens z < nb: gemvn for small batches (or without
     /// tensor cores), else the type's GEMM. Same bits either way.
     ///
     /// # Safety
     /// act holds nb tokens of mt.cols inputs at astride bytes apart; out has
     /// room for nb rows of ostride floats (mt.rows <= ostride); bias is null
-    /// or has mt.rows floats.
+    /// or has mt.rows floats; the matrix is whole in `wts`.
     #[allow(clippy::too_many_arguments)]
     unsafe fn bgemm(
         &self,
+        wts: &DevBuf,
         mt: &Mat,
         act: Arg,
         astride: usize,
@@ -252,7 +266,7 @@ impl<'g> CudaQwen2<'g> {
     ) -> Result<(), String> {
         let bf = &self.bf;
         let common = [
-            self.weights.arg_at(mt.off),
+            wts.arg_at(mt.off),
             Arg::U64(mt.rb as u64),
             Arg::I32(mt.rows as i32),
             Arg::I32(mt.cols as i32),
@@ -270,7 +284,7 @@ impl<'g> CudaQwen2<'g> {
             Q8_0 => 2,
             _ => 3,
         };
-        // SAFETY: the caller's contract; the matrix is whole in the arena.
+        // SAFETY: the caller's contract; the matrix is whole in `wts`.
         unsafe {
             match (&bf.gemm, &bf.gemvm) {
                 (Some(fs), _) if nb > SMALL => {
@@ -328,43 +342,17 @@ impl<'g> CudaQwen2<'g> {
         on: &mut dyn FnMut(&'static str) -> Result<(), String>,
     ) -> Result<(), String> {
         let nb = input.len(self.dim);
-        let (dim, hd, kvd, ffn) = (self.dim, self.head_dim, self.kv_dim(), self.ffn);
+        let (dim, ffn) = (self.dim, self.ffn);
         let kvas: Vec<Vec<Arg>> = (0..self.layers.len()).map(|l| self.kv_args(c, l)).collect();
         let mode = c.mode;
         let b = c.b.as_mut().expect("a cache with batch scratch");
         assert!(nb > 0 && nb <= b.max);
-        match input {
-            BatchIn::Tokens(tokens) => {
-                assert!(
-                    self.first == 0,
-                    "layers {}..: takes hidden states",
-                    self.first
-                );
-                let hb = b.host_tokens.bytes_mut()?;
-                for (i, t) in tokens.iter().enumerate() {
-                    hb[4 * i..4 * i + 4].copy_from_slice(&t.to_le_bytes());
-                }
-                b.host_tokens.copy_to(&b.tokens, 0, 4 * nb)?;
-            }
-            BatchIn::Hidden(xs) => {
-                // The states go straight into the residual stream b.x
-                // ([max][dim] floats, the embedding's output otherwise).
-                let hx = b.host_x.as_mut().expect("first > 0: host_x");
-                for (d, v) in hx.bytes_mut()?.chunks_exact_mut(4).zip(xs) {
-                    d.copy_from_slice(&v.to_le_bytes());
-                }
-                hx.copy_to(&b.x, 0, xs.len() * 4)?;
-            }
-        }
+        self.load_input(b, input)?;
         let b = &*b;
         let (g, bf) = (self.gpu, &self.bf);
         let w = |mt: &Mat| self.weights.arg_at(mt.off);
-        let vec = |off: usize| self.vecs.arg_at(off * 4);
         let null = Arg::Ptr(0);
-        let want_k = |n: usize| Arg::I32(n.is_multiple_of(256) as i32);
         let ast = act_stride(dim.max(ffn));
-        let nbu = nb as u32;
-        let qkvw = dim + 2 * kvd;
         // SAFETY (every launch): arguments match prefill.cu's signatures;
         // the batch buffers hold b.max >= nb tokens of what each kernel
         // reads and writes (sizes in batch_bufs); positions start..start + nb
@@ -373,7 +361,7 @@ impl<'g> CudaQwen2<'g> {
             if let (Some(embd), BatchIn::Tokens(_)) = (&self.embd, input) {
                 g.launch(
                     &bf.embed,
-                    (dim.div_ceil(256) as u32, nbu, 1),
+                    (dim.div_ceil(256) as u32, nb as u32, 1),
                     (256, 1, 1),
                     0,
                     &[
@@ -387,247 +375,34 @@ impl<'g> CudaQwen2<'g> {
                 )?;
                 on("embed")?;
             }
-            g.launch(
-                &bf.rope_table,
-                (nbu, 1, 1),
-                ((hd / 2) as u32, 1, 1),
-                0,
-                &[
-                    self.freq.arg(),
-                    Arg::I32((hd / 2) as i32),
-                    Arg::I32(start as i32),
-                    b.rope.arg(),
-                ],
-            )?;
-            on("rope")?;
-            let norm = |off: usize| {
-                g.launch(
-                    &bf.rmsnorm_quant,
-                    (nbu, 1, 1),
-                    (1024, 1, 1),
-                    0,
-                    &[
-                        b.x.arg(),
-                        vec(off),
-                        Arg::F32(self.eps),
-                        Arg::I32(dim as i32),
-                        want_k(dim),
-                        b.act.arg(),
-                        Arg::U64(ast as u64),
-                    ],
-                )
-            };
+            // Resident states come with their RoPE table (stream.rs
+            // computed it for the same positions).
+            if !matches!(input, BatchIn::Resident(_)) {
+                self.rope_b(b, nb, start)?;
+                on("rope")?;
+            }
             for (li, l) in self.layers.iter().enumerate() {
-                norm(l.attn_norm)?;
-                on("rmsnorm")?;
-                let bias = |o: Option<usize>| o.map_or(null, vec);
-                let qkv_at = |off: usize| b.qkv.arg_at(off * 4);
-                self.bgemm(&l.q, b.act.arg(), ast, nb, bias(l.bq), 0, qkv_at(0), qkvw)?;
-                self.bgemm(&l.k, b.act.arg(), ast, nb, bias(l.bk), 0, qkv_at(dim), qkvw)?;
-                self.bgemm(
-                    &l.v,
-                    b.act.arg(),
-                    ast,
+                self.layer(
+                    b,
+                    l,
+                    &self.weights,
+                    &self.vecs,
+                    &kvas[li],
+                    mode,
                     nb,
-                    bias(l.bv),
-                    0,
-                    qkv_at(dim + kvd),
-                    qkvw,
+                    start,
+                    on,
                 )?;
-                on("qkv")?;
-                let kva = &kvas[li];
-                // q8: rope_kv_b does the queries alone (null cache), kv_q8_b
-                // the keys and values.
-                let q8 = matches!(mode, CacheKv::Q8 { .. });
-                let items = if q8 { dim / 2 } else { dim / 2 + kvd / 2 + kvd };
-                let (kc, vc) = if q8 { (null, null) } else { (kva[0], kva[1]) };
-                g.launch(
-                    &bf.rope_kv,
-                    (items.div_ceil(128) as u32, nbu, 1),
-                    (128, 1, 1),
-                    0,
-                    &[
-                        b.qkv.arg(),
-                        Arg::I32(dim as i32),
-                        Arg::I32(kvd as i32),
-                        Arg::I32(hd as i32),
-                        Arg::I32(start as i32),
-                        b.rope.arg(),
-                        b.q.arg(),
-                        kc,
-                        vc,
-                    ],
-                )?;
-                if q8 {
-                    let mut args = vec![
-                        b.qkv.arg(),
-                        Arg::I32(dim as i32),
-                        Arg::I32(kvd as i32),
-                        Arg::I32(start as i32),
-                        b.rope.arg(),
-                    ];
-                    args.extend_from_slice(kva);
-                    args.push(bias(l.ksh));
-                    g.launch(
-                        &self.q8_fns(mode).store_b,
-                        (self.n_kv_heads as u32, nbu, 1),
-                        (128, 1, 1),
-                        0,
-                        &args,
-                    )?;
-                }
-                on("rope_kv")?;
-                for z0 in (0..nb).step_by(ATT_SUB) {
-                    let nz = (nb - z0).min(ATT_SUB) as u32;
-                    // Splits of at most 32 positions for every query here
-                    // (f16): their scores as one product, then a warp per split,
-                    // value rows shared by 8 queries (same bits, prefill.cu
-                    // attn_warpv_bt).
-                    let short = start + z0 + nz as usize <= 32 * self.max_split;
-                    // Positions of the launch's last query.
-                    let np = start + z0 + nz as usize;
-                    if short && !q8 {
-                        let group = self.n_heads / self.n_kv_heads;
-                        let sst = Arg::I32(self.score_stride() as i32);
-                        g.launch(
-                            &bf.attn_scores,
-                            (
-                                np.div_ceil(64) as u32,
-                                (nz as usize * group).div_ceil(64) as u32,
-                                self.n_kv_heads as u32,
-                            ),
-                            (256, 1, 1),
-                            0,
-                            &[
-                                b.q.arg(),
-                                kva[0],
-                                Arg::I32(start as i32),
-                                Arg::I32(z0 as i32),
-                                Arg::I32(nz as i32),
-                                Arg::I32(self.n_heads as i32),
-                                Arg::I32(self.n_kv_heads as i32),
-                                Arg::F32(1.0 / (hd as f32).sqrt()),
-                                sst,
-                                b.scores.arg(),
-                            ],
-                        )?;
-                        g.launch(
-                            &bf.attn_warps,
-                            (
-                                self.n_kv_heads as u32,
-                                nz.div_ceil(8),
-                                np.div_ceil(64) as u32,
-                            ),
-                            (256, 1, 1),
-                            0,
-                            &[
-                                kva[1],
-                                Arg::I32(start as i32),
-                                Arg::I32(z0 as i32),
-                                Arg::I32(nz as i32),
-                                Arg::I32(self.n_heads as i32),
-                                Arg::I32(self.n_kv_heads as i32),
-                                Arg::I32(self.max_split as i32),
-                                b.part_o.arg(),
-                                b.part_ml.arg(),
-                                b.scores.arg(),
-                                sst,
-                            ],
-                        )?;
-                    } else {
-                        // The q8 cache keeps #11's kernels: a warp per
-                        // split (short) or decode's blocks, both reading
-                        // int8 rows and their scales.
-                        let (f, grid, block) = match (short, q8) {
-                            (false, false) => {
-                                (&bf.attn_split, self.max_split as u32, ATT_TILE as u32)
-                            }
-                            (true, true) => (
-                                &self.q8_fns(mode).attn_warp_b,
-                                self.max_split.div_ceil(4) as u32,
-                                128,
-                            ),
-                            (false, true) => (
-                                &self.q8_fns(mode).attn_split_b,
-                                self.max_split as u32,
-                                ATT_TILE as u32,
-                            ),
-                            (true, false) => unreachable!("the shared-score path above"),
-                        };
-                        let mut args = vec![b.q.arg()];
-                        args.extend_from_slice(kva);
-                        args.extend_from_slice(&[
-                            Arg::I32(start as i32),
-                            Arg::I32(z0 as i32),
-                            Arg::I32(self.n_heads as i32),
-                            Arg::I32(self.n_kv_heads as i32),
-                            Arg::F32(1.0 / (hd as f32).sqrt()),
-                            Arg::I32(self.max_split as i32),
-                            b.part_o.arg(),
-                            b.part_ml.arg(),
-                        ]);
-                        g.launch(
-                            f,
-                            (self.n_kv_heads as u32, grid, nz),
-                            (block, 1, 1),
-                            0,
-                            &args,
-                        )?;
-                    }
-                    on("attn")?;
-                    g.launch(
-                        &bf.attn_combine,
-                        (dim.div_ceil(256) as u32, nz, 1),
-                        (256, 1, 1),
-                        0,
-                        &[
-                            b.part_o.arg(),
-                            b.part_ml.arg(),
-                            Arg::I32(start as i32),
-                            Arg::I32(z0 as i32),
-                            Arg::I32(dim as i32),
-                            Arg::I32(hd as i32),
-                            Arg::I32(self.max_split as i32),
-                            want_k(dim),
-                            b.act.arg(),
-                            Arg::U64(ast as u64),
-                        ],
-                    )?;
-                    on("combine")?;
-                }
-                self.bgemm(&l.o, b.act.arg(), ast, nb, null, 1, b.x.arg(), dim)?;
-                on("wo")?;
-                norm(l.ffn_norm)?;
-                on("rmsnorm")?;
-                self.bgemm(&l.gate, b.act.arg(), ast, nb, null, 0, b.gate.arg(), ffn)?;
-                self.bgemm(&l.up, b.act.arg(), ast, nb, null, 0, b.up.arg(), ffn)?;
-                on("gate_up")?;
-                g.launch(
-                    &bf.swiglu_quant,
-                    (ffn.div_ceil(256) as u32, nbu, 1),
-                    (32, 1, 1),
-                    0,
-                    &[
-                        b.gate.arg(),
-                        b.up.arg(),
-                        Arg::I32(ffn as i32),
-                        want_k(ffn),
-                        b.act.arg(),
-                        Arg::U64(ast as u64),
-                    ],
-                )?;
-                on("swiglu")?;
-                self.bgemm(&l.down, b.act.arg(), ast, nb, null, 1, b.x.arg(), dim)?;
-                on("down")?;
             }
             if head {
-                norm(self.output_norm)?;
+                self.norm_b(b, &self.vecs, self.output_norm, nb)?;
                 on("rmsnorm")?;
                 let v = self.vocab;
                 for z0 in (0..nb).step_by(HEAD_SUB) {
                     let nz = (nb - z0).min(HEAD_SUB);
                     let lg = b.logits.arg_at(if b.logits_rows { z0 * v * 4 } else { 0 });
                     self.bgemm(
+                        &self.weights,
                         &self.output,
                         b.act.arg_at(z0 * ast),
                         ast,
@@ -647,6 +422,365 @@ impl<'g> CudaQwen2<'g> {
                     on("head")?;
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Enqueue the pass's input: tokens into b.tokens, or hidden states
+    /// straight into the residual stream b.x ([max][dim] floats, the
+    /// embedding's output otherwise); `Resident` states are there already.
+    pub(super) fn load_input(&self, b: &mut BatchBufs<'g>, input: BatchIn) -> Result<(), String> {
+        match input {
+            BatchIn::Tokens(tokens) => {
+                assert!(
+                    self.first == 0,
+                    "layers {}..: takes hidden states",
+                    self.first
+                );
+                let hb = b.host_tokens.bytes_mut()?;
+                for (i, t) in tokens.iter().enumerate() {
+                    hb[4 * i..4 * i + 4].copy_from_slice(&t.to_le_bytes());
+                }
+                b.host_tokens.copy_to(&b.tokens, 0, 4 * tokens.len())?;
+            }
+            BatchIn::Hidden(xs) => {
+                let hx = b.host_x.as_mut().expect("first > 0: host_x");
+                for (d, v) in hx.bytes_mut()?.chunks_exact_mut(4).zip(xs) {
+                    d.copy_from_slice(&v.to_le_bytes());
+                }
+                hx.copy_to(&b.x, 0, xs.len() * 4)?;
+            }
+            BatchIn::Resident(_) => {}
+        }
+        Ok(())
+    }
+
+    /// b.rope = the RoPE table of positions start..start + nb.
+    ///
+    /// # Safety
+    /// nb <= b.max.
+    pub(super) unsafe fn rope_b(
+        &self,
+        b: &BatchBufs,
+        nb: usize,
+        start: usize,
+    ) -> Result<(), String> {
+        let hd = self.head_dim;
+        // SAFETY: rope_table_b's signature; b.rope holds b.max >= nb rows.
+        unsafe {
+            self.gpu.launch(
+                &self.bf.rope_table,
+                (nb as u32, 1, 1),
+                ((hd / 2) as u32, 1, 1),
+                0,
+                &[
+                    self.freq.arg(),
+                    Arg::I32((hd / 2) as i32),
+                    Arg::I32(start as i32),
+                    b.rope.arg(),
+                ],
+            )
+        }
+    }
+
+    /// b.act = rmsnorm_quant of b.x's nb rows with the weights at `off`
+    /// floats into `vecs`.
+    ///
+    /// # Safety
+    /// nb <= b.max; vecs holds dim floats at off.
+    unsafe fn norm_b(
+        &self,
+        b: &BatchBufs,
+        vecs: &DevBuf,
+        off: usize,
+        nb: usize,
+    ) -> Result<(), String> {
+        let (dim, ffn) = (self.dim, self.ffn);
+        let want_k = |n: usize| Arg::I32(n.is_multiple_of(256) as i32);
+        // SAFETY: rmsnorm_quant_b's signature; sizes as `pass`.
+        unsafe {
+            self.gpu.launch(
+                &self.bf.rmsnorm_quant,
+                (nb as u32, 1, 1),
+                (1024, 1, 1),
+                0,
+                &[
+                    b.x.arg(),
+                    vecs.arg_at(off * 4),
+                    Arg::F32(self.eps),
+                    Arg::I32(dim as i32),
+                    want_k(dim),
+                    b.act.arg(),
+                    Arg::U64(act_stride(dim.max(ffn)) as u64),
+                ],
+            )
+        }
+    }
+
+    /// One layer over the nb tokens in b.x at positions start..: matrices
+    /// at their offsets into `wts`, norms and biases at theirs into `vecs`,
+    /// the layer's cache at `kv` (`kv_args`: F16 K and V rows of kv_dim
+    /// halves per position; Q8 int8 K and V rows and their scales) in
+    /// format `mode`, which picks the attention kernels. b.rope holds the
+    /// batch's table. `on` runs after each step, by name.
+    ///
+    /// # Safety
+    /// nb <= b.max; the matrices are whole in `wts`, the vectors in `vecs`;
+    /// the K and V buffers hold positions 0..start + nb, rows before start
+    /// written; all stay live until the work completes.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) unsafe fn layer(
+        &self,
+        b: &BatchBufs,
+        l: &LayerW,
+        wts: &DevBuf,
+        vecs: &DevBuf,
+        kv: &[Arg],
+        mode: CacheKv,
+        nb: usize,
+        start: usize,
+        on: &mut dyn FnMut(&'static str) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let (dim, hd, kvd, ffn) = (self.dim, self.head_dim, self.kv_dim(), self.ffn);
+        let (g, bf) = (self.gpu, &self.bf);
+        let vec = |off: usize| vecs.arg_at(off * 4);
+        let null = Arg::Ptr(0);
+        let want_k = |n: usize| Arg::I32(n.is_multiple_of(256) as i32);
+        let ast = act_stride(dim.max(ffn));
+        let nbu = nb as u32;
+        let qkvw = dim + 2 * kvd;
+        // SAFETY (every launch): as `pass`, with the caller's contract for
+        // the matrices, vectors and cache rows.
+        unsafe {
+            self.norm_b(b, vecs, l.attn_norm, nb)?;
+            on("rmsnorm")?;
+            let bias = |o: Option<usize>| o.map_or(null, vec);
+            let qkv_at = |off: usize| b.qkv.arg_at(off * 4);
+            self.bgemm(
+                wts,
+                &l.q,
+                b.act.arg(),
+                ast,
+                nb,
+                bias(l.bq),
+                0,
+                qkv_at(0),
+                qkvw,
+            )?;
+            self.bgemm(
+                wts,
+                &l.k,
+                b.act.arg(),
+                ast,
+                nb,
+                bias(l.bk),
+                0,
+                qkv_at(dim),
+                qkvw,
+            )?;
+            self.bgemm(
+                wts,
+                &l.v,
+                b.act.arg(),
+                ast,
+                nb,
+                bias(l.bv),
+                0,
+                qkv_at(dim + kvd),
+                qkvw,
+            )?;
+            on("qkv")?;
+            // q8: rope_kv_b does the queries alone (null cache), kv_q8_b
+            // the keys and values.
+            let q8 = matches!(mode, CacheKv::Q8 { .. });
+            let items = if q8 { dim / 2 } else { dim / 2 + kvd / 2 + kvd };
+            let (kc, vc) = if q8 { (null, null) } else { (kv[0], kv[1]) };
+            g.launch(
+                &bf.rope_kv,
+                (items.div_ceil(128) as u32, nbu, 1),
+                (128, 1, 1),
+                0,
+                &[
+                    b.qkv.arg(),
+                    Arg::I32(dim as i32),
+                    Arg::I32(kvd as i32),
+                    Arg::I32(hd as i32),
+                    Arg::I32(start as i32),
+                    b.rope.arg(),
+                    b.q.arg(),
+                    kc,
+                    vc,
+                ],
+            )?;
+            if q8 {
+                let mut args = vec![
+                    b.qkv.arg(),
+                    Arg::I32(dim as i32),
+                    Arg::I32(kvd as i32),
+                    Arg::I32(start as i32),
+                    b.rope.arg(),
+                ];
+                args.extend_from_slice(kv);
+                args.push(bias(l.ksh));
+                g.launch(
+                    &self.q8_fns(mode).store_b,
+                    (self.n_kv_heads as u32, nbu, 1),
+                    (128, 1, 1),
+                    0,
+                    &args,
+                )?;
+            }
+            on("rope_kv")?;
+            for z0 in (0..nb).step_by(ATT_SUB) {
+                let nz = (nb - z0).min(ATT_SUB) as u32;
+                // Splits of at most 32 positions for every query here
+                // (f16): their scores as one product, then a warp per split,
+                // value rows shared by 8 queries (same bits, prefill.cu
+                // attn_warpv_bt).
+                let short = start + z0 + nz as usize <= 32 * self.max_split;
+                // Positions of the launch's last query.
+                let np = start + z0 + nz as usize;
+                if short && !q8 {
+                    let group = self.n_heads / self.n_kv_heads;
+                    let sst = Arg::I32(self.score_stride() as i32);
+                    g.launch(
+                        &bf.attn_scores,
+                        (
+                            np.div_ceil(64) as u32,
+                            (nz as usize * group).div_ceil(64) as u32,
+                            self.n_kv_heads as u32,
+                        ),
+                        (256, 1, 1),
+                        0,
+                        &[
+                            b.q.arg(),
+                            kv[0],
+                            Arg::I32(start as i32),
+                            Arg::I32(z0 as i32),
+                            Arg::I32(nz as i32),
+                            Arg::I32(self.n_heads as i32),
+                            Arg::I32(self.n_kv_heads as i32),
+                            Arg::F32(1.0 / (hd as f32).sqrt()),
+                            sst,
+                            b.scores.arg(),
+                        ],
+                    )?;
+                    g.launch(
+                        &bf.attn_warps,
+                        (
+                            self.n_kv_heads as u32,
+                            nz.div_ceil(8),
+                            np.div_ceil(64) as u32,
+                        ),
+                        (256, 1, 1),
+                        0,
+                        &[
+                            kv[1],
+                            Arg::I32(start as i32),
+                            Arg::I32(z0 as i32),
+                            Arg::I32(nz as i32),
+                            Arg::I32(self.n_heads as i32),
+                            Arg::I32(self.n_kv_heads as i32),
+                            Arg::I32(self.max_split as i32),
+                            b.part_o.arg(),
+                            b.part_ml.arg(),
+                            b.scores.arg(),
+                            sst,
+                        ],
+                    )?;
+                } else {
+                    // The q8 cache keeps #11's kernels: a warp per
+                    // split (short) or decode's blocks, both reading
+                    // int8 rows and their scales.
+                    let (f, grid, block) = match (short, q8) {
+                        (false, false) => (&bf.attn_split, self.max_split as u32, ATT_TILE as u32),
+                        (true, true) => (
+                            &self.q8_fns(mode).attn_warp_b,
+                            self.max_split.div_ceil(4) as u32,
+                            128,
+                        ),
+                        (false, true) => (
+                            &self.q8_fns(mode).attn_split_b,
+                            self.max_split as u32,
+                            ATT_TILE as u32,
+                        ),
+                        (true, false) => unreachable!("the shared-score path above"),
+                    };
+                    let mut args = vec![b.q.arg()];
+                    args.extend_from_slice(kv);
+                    args.extend_from_slice(&[
+                        Arg::I32(start as i32),
+                        Arg::I32(z0 as i32),
+                        Arg::I32(self.n_heads as i32),
+                        Arg::I32(self.n_kv_heads as i32),
+                        Arg::F32(1.0 / (hd as f32).sqrt()),
+                        Arg::I32(self.max_split as i32),
+                        b.part_o.arg(),
+                        b.part_ml.arg(),
+                    ]);
+                    g.launch(
+                        f,
+                        (self.n_kv_heads as u32, grid, nz),
+                        (block, 1, 1),
+                        0,
+                        &args,
+                    )?;
+                }
+                on("attn")?;
+                g.launch(
+                    &bf.attn_combine,
+                    (dim.div_ceil(256) as u32, nz, 1),
+                    (256, 1, 1),
+                    0,
+                    &[
+                        b.part_o.arg(),
+                        b.part_ml.arg(),
+                        Arg::I32(start as i32),
+                        Arg::I32(z0 as i32),
+                        Arg::I32(dim as i32),
+                        Arg::I32(hd as i32),
+                        Arg::I32(self.max_split as i32),
+                        want_k(dim),
+                        b.act.arg(),
+                        Arg::U64(ast as u64),
+                    ],
+                )?;
+                on("combine")?;
+            }
+            self.bgemm(wts, &l.o, b.act.arg(), ast, nb, null, 1, b.x.arg(), dim)?;
+            on("wo")?;
+            self.norm_b(b, vecs, l.ffn_norm, nb)?;
+            on("rmsnorm")?;
+            self.bgemm(
+                wts,
+                &l.gate,
+                b.act.arg(),
+                ast,
+                nb,
+                null,
+                0,
+                b.gate.arg(),
+                ffn,
+            )?;
+            self.bgemm(wts, &l.up, b.act.arg(), ast, nb, null, 0, b.up.arg(), ffn)?;
+            on("gate_up")?;
+            g.launch(
+                &bf.swiglu_quant,
+                (ffn.div_ceil(256) as u32, nbu, 1),
+                (32, 1, 1),
+                0,
+                &[
+                    b.gate.arg(),
+                    b.up.arg(),
+                    Arg::I32(ffn as i32),
+                    want_k(ffn),
+                    b.act.arg(),
+                    Arg::U64(ast as u64),
+                ],
+            )?;
+            on("swiglu")?;
+            self.bgemm(wts, &l.down, b.act.arg(), ast, nb, null, 1, b.x.arg(), dim)?;
+            on("down")?;
         }
         Ok(())
     }
@@ -682,14 +816,21 @@ impl<'g> CudaQwen2<'g> {
             let ch = input.chunk(i, max, self.dim);
             self.pass(c, ch, start + i * max, true, &mut |_| Ok(()))?;
             let b = c.b.as_mut().unwrap();
-            let n = 4 * ch.len(self.dim);
-            b.host_best.copy_from(&b.best, 0, n)?;
-            let hb = &b.host_best.bytes_mut()?[..n]; // waits for the pass
-            picks.extend(
-                hb.chunks_exact(4)
-                    .map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]])),
-            );
+            picks.extend(b.picks(ch.len(self.dim))?);
         }
         Ok(picks)
+    }
+}
+
+impl BatchBufs<'_> {
+    /// The first n greedy picks of the pass enqueued (waits for it).
+    pub(super) fn picks(&mut self, n: usize) -> Result<Vec<u32>, String> {
+        let n = 4 * n;
+        self.host_best.copy_from(&self.best, 0, n)?;
+        let hb = &self.host_best.bytes_mut()?[..n]; // waits for the pass
+        Ok(hb
+            .chunks_exact(4)
+            .map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]]))
+            .collect())
     }
 }
