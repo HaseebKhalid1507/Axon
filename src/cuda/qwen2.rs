@@ -43,15 +43,28 @@ const MAX_GROUP: usize = 8;
 const MAX_SPLIT: usize = 256;
 /// Threads per GEMV block (decode.cu GEMV_THREADS).
 const GEMV_THREADS: u32 = 128;
-/// Rows and tokens per block of the tensor-core GEMMs (prefill.cu GM_BM,
-/// GM_BN), and their dynamic shared memory: two GmStage buffers (the kernel
-/// traps if given less).
-const GM_BM: usize = 32;
-const GM_BN: usize = 64;
-const GEMM_SMEM: usize = 2 * 31744 + 4 * 1024;
-/// The same for gemm1_* (32 tokens per block).
-const GM1_BN: usize = 32;
-const GEMM1_SMEM: usize = 2 * 20992 + 4 * 1024;
+/// Rows per block of the gemm2 GEMMs (prefill.cu G2_BM); tokens per block
+/// and stages are 128 and 2 (gemm2_*) or 64 and 3 (gemm2s_*).
+const G2_BM: usize = 64;
+/// gemm2's dynamic shared memory for type qt, bn tokens per block and st
+/// stages (prefill.cu G2L::SMEM; the kernel traps if given less).
+fn gemm2_smem(qt: u32, bn: usize, st: usize) -> usize {
+    let (raw, kq) = (qt == Q4_K, qt == Q4_K || qt == Q6_K);
+    let w = if raw {
+        G2_BM * 176
+    } else {
+        G2_BM * 256 + G2_BM * if qt == Q6_K { 20 } else { 32 }
+    };
+    let stage = bn * 256 + if raw { bn * 32 } else { 0 } + if kq { bn * 4 } else { bn * 32 };
+    let nwb = if raw {
+        st
+    } else if st >= 3 {
+        2
+    } else {
+        1
+    };
+    nwb * w + st * stage
+}
 /// Most tokens per batched pass on the GPU (`Lm::prefill_batch`): big
 /// batches keep the tensor cores busy and read the weights fewer times.
 const PREFILL_BATCH: usize = 512;
@@ -380,7 +393,7 @@ impl<'g> CudaQwen2<'g> {
             layers,
             max_split,
             graphs: std::env::var("AXON_CUDA_GRAPHS").map_or(true, |v| v != "0"),
-            bf: batch::BatchFns::new(module, head_dim)?,
+            bf: batch::BatchFns::new(module, head_dim, sms)?,
             batch: PREFILL_BATCH,
         };
 

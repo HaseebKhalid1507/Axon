@@ -7,9 +7,10 @@
 // round-half-even, same first-largest-magnitude rule), so the weights meet
 // the same 8-bit activations, in integer dot products (dp4a here, i8
 // multiply-adds there) that are exact. What differs from the CPU is how the
-// float scaling and sums are split: per lane share of a K-quant block (the
-// CPU: per block), per block for Q8_0/Q5_0 (as the CPU), then added up in
-// another order; likewise RMSNorm's sum of squares, scores and value rows.
+// float scaling and sums are split: a K-quant block's sub-block sums are
+// combined in integers and scaled once per block (the CPU: per 32 values),
+// and the blocks are added in a fused chain ("Row dot products" below);
+// likewise RMSNorm's sum of squares, scores and value rows.
 // Every reduction has a fixed order (no atomics), so results are identical
 // run to run.
 //
@@ -267,20 +268,40 @@ extern "C" __global__ void rope_table(const double* __restrict__ freq, int half,
 }
 
 // ---------------------------------------------------------------------------
-// Row dot products. A block of GEMV_THREADS threads computes R rows (1, 2)
-// of one matrix at once: its lane groups (8 lanes per 256-value block, 4 per
-// 32-value block) stride over the rows' blocks, each group loading a block
-// of every row before using any, so a thread has R weight loads in flight.
-// K-quants: each lane scales its integer share of the block (its 32 or 64
-// values) and adds it to its running sum, as llama.cpp's MMVQ does: no
-// shuffles per block. Q8_0/Q5_0: the group's integer sum (exact), scaled by
-// its first lane with the CPU's ops. `acc` gets each thread's running sums;
-// cta_sum adds them up in a fixed order.
+// Row dot products, in the canonical order every GPU product follows
+// (decode GEMV, the batched gemvn / gemvm / gemm2, the gemv_ref reference):
+// per output, per block b of the row, in order b = 0, 1, ..:
+//   Q4_K: S = sum_j sc_j sumi_j, M = sum_j m_j bsum_j (integers, exact:
+//         sumi_j the integer dot of 32-value sub-block j with the Q8_K
+//         values, bsum_j the sum of those 32 values), then
+//         v = d S - dmin M (fmul, fmul, fsub; S and M rounded to f32 by
+//         cvt.rn: |S| < 2^25 may round, M < 2^22 is exact), acc = fma(dk, v, acc)
+//   Q6_K: S = sum_j sc_j sumi_j over the 16 sub-blocks of 16 values,
+//         acc = fma(dk * d, f32(S), acc)
+//   Q8_0, Q5_0 (32-value blocks): s the integer dot,
+//         acc = fma(dw * d0, f32(s), acc)   (|s| < 2^20: exact)
+// with acc starting at 0. The integers are exact however they are summed
+// (dp4a here, mma in the batched kernels), so only the float ops - five or
+// six per block, one fma chain per output - fix the bits. This is not the
+// CPU's order (quant.rs sums 32-value scaled pieces in floats): GPU and CPU
+// agree to f32 rounding, GPU decode and GPU batched passes bit for bit.
+//
+// The GEMV: a block of GEMV_THREADS threads computes R rows (1, 2) of one
+// matrix for T tokens (1 here; the dp4a gemvn of prefill.cu uses more): its
+// lane groups (8 lanes per 256-value block, 4 per 32-value block) stride
+// over the rows' blocks, each group loading a block of every row before
+// using any, so a thread has R weight loads in flight. A group adds its
+// lanes' integer shares by shuffles, and its first lane writes the block's
+// (scale, value) pair to shared memory; then one thread per output runs
+// the fma chain over the blocks in order. Rows of more blocks than the
+// buffer holds go in chunks.
 
 #define GEMV_THREADS 128
 // Blocks per SM the GEMV kernels are compiled for (registers capped so
 // that many fit): more blocks, more weight loads in flight.
 #define GEMV_MIN_BLOCKS 8
+// (scale, value) pairs per chunk, all outputs: 4 KiB of shared memory.
+#define GEMV_PAIRS 512
 
 __device__ __forceinline__ u32 byte_of(uint4 h, int j) {
     // header bytes 4..15 are the 12 scale bytes: scales[j] = byte 4 + j.
@@ -320,14 +341,23 @@ __device__ __forceinline__ u32 spread4(u32 x) {
            ((x << 25) & 0x10000000);
 }
 
-// Q4_K (quant.rs dot_q4_k_q8): lane p of a group takes 16 bytes of qs, 32
-// nibbles: 16 of sub-block 2c and 16 of 2c + 1 (c = p / 2), and adds
-// dk (d sumi - dmin summ) of its share (summ: the min terms of sub-blocks
-// 2c, 2c + 1, taken by the even lane).
-template <int R>
-__device__ void dot_q4_k(const u8* const* rows, int nb, const Act& a, float* acc) {
+// The f32 of an integer, cvt.rn (round to nearest even, as the CPU's `as`).
+__device__ __forceinline__ float i2f_rn(int i) { return __int2float_rn(i); }
+
+// Pair (scale, value) of output (r, j) of block b of a chunk starting at
+// block base: the chain does acc = fma(scale, value, acc).
+#define GV_PAIR(sh, CAP, r, j, T, b, base) (sh)[((r) * (T) + (j)) * (CAP) + (b) - (base)]
+
+// Q4_K (quant.rs dot_q4_k_q8's integers): lane p of a group takes 16 bytes
+// of qs, 32 nibbles: 16 of sub-block 2c and 16 of 2c + 1 (c = p / 2), and
+// the min terms of sub-blocks 2c, 2c + 1 (even lanes). Token j's
+// activations at act + min(j, zmax) * astride.
+template <int R, int T, int CAP>
+__device__ __forceinline__ void blk_q4_k(const u8* const* rows, int base, int end, const u8* act,
+                                         u64 astride, int n, int zmax, float2* sh) {
     int t = threadIdx.x, g = t >> 3, p = t & 7, c = p >> 1, hf = p & 1;
-    for (int b = g; b < nb; b += GEMV_THREADS / 8) {
+    u32 mask = 0xffu << (t & 24);
+    for (int b = base + g; b < end; b += GEMV_THREADS / 8) {
         uint4 h[R], q[R];
 #pragma unroll
         for (int r = 0; r < R; r++) {
@@ -335,96 +365,126 @@ __device__ void dot_q4_k(const u8* const* rows, int nb, const Act& a, float* acc
             h[r] = __ldg((const uint4*)blk);
             q[r] = __ldg((const uint4*)(blk + 16 + 16 * p));
         }
-        const signed char* xb = a.qk + b * 256 + 64 * c + 16 * hf;
-        int4 xl = *(const int4*)xb;
-        int4 xh = *(const int4*)(xb + 32);
-        int bs0 = a.b32[b * 8 + 2 * c], bs1 = a.b32[b * 8 + 2 * c + 1];
-        float dk = a.dk[b];
 #pragma unroll
-        for (int r = 0; r < R; r++) {
-            int s1 = 0, s2 = 0;
-            s1 = __dp4a((int)(q[r].x & 0x0f0f0f0f), xl.x, s1);
-            s1 = __dp4a((int)(q[r].y & 0x0f0f0f0f), xl.y, s1);
-            s1 = __dp4a((int)(q[r].z & 0x0f0f0f0f), xl.z, s1);
-            s1 = __dp4a((int)(q[r].w & 0x0f0f0f0f), xl.w, s1);
-            s2 = __dp4a((int)((q[r].x >> 4) & 0x0f0f0f0f), xh.x, s2);
-            s2 = __dp4a((int)((q[r].y >> 4) & 0x0f0f0f0f), xh.y, s2);
-            s2 = __dp4a((int)((q[r].z >> 4) & 0x0f0f0f0f), xh.z, s2);
-            s2 = __dp4a((int)((q[r].w >> 4) & 0x0f0f0f0f), xh.w, s2);
-            int sc1, m1, sc2, m2;
-            scale_min_h(h[r], 2 * c, &sc1, &m1);
-            scale_min_h(h[r], 2 * c + 1, &sc2, &m2);
-            int sumi = sc1 * s1 + sc2 * s2;
-            int summ = hf ? 0 : m1 * bs0 + m2 * bs1;
-            float d = f16_to_f32(h[r].x & 0xffff), dmin = f16_to_f32(h[r].x >> 16);
-            float v = __fsub_rn(__fmul_rn(d, (float)sumi), __fmul_rn(dmin, (float)summ));
-            acc[r] = __fmaf_rn(dk, v, acc[r]);
+        for (int j = 0; j < T; j++) {
+            Act a = act_view(act + (u64)min(j, zmax) * astride, n);
+            const signed char* xb = a.qk + b * 256 + 64 * c + 16 * hf;
+            int4 xl = *(const int4*)xb;
+            int4 xh = *(const int4*)(xb + 32);
+            int bs0 = a.b32[b * 8 + 2 * c], bs1 = a.b32[b * 8 + 2 * c + 1];
+            float dk = a.dk[b];
+#pragma unroll
+            for (int r = 0; r < R; r++) {
+                int s1 = 0, s2 = 0;
+                s1 = __dp4a((int)(q[r].x & 0x0f0f0f0f), xl.x, s1);
+                s1 = __dp4a((int)(q[r].y & 0x0f0f0f0f), xl.y, s1);
+                s1 = __dp4a((int)(q[r].z & 0x0f0f0f0f), xl.z, s1);
+                s1 = __dp4a((int)(q[r].w & 0x0f0f0f0f), xl.w, s1);
+                s2 = __dp4a((int)((q[r].x >> 4) & 0x0f0f0f0f), xh.x, s2);
+                s2 = __dp4a((int)((q[r].y >> 4) & 0x0f0f0f0f), xh.y, s2);
+                s2 = __dp4a((int)((q[r].z >> 4) & 0x0f0f0f0f), xh.z, s2);
+                s2 = __dp4a((int)((q[r].w >> 4) & 0x0f0f0f0f), xh.w, s2);
+                int sc1, m1, sc2, m2;
+                scale_min_h(h[r], 2 * c, &sc1, &m1);
+                scale_min_h(h[r], 2 * c + 1, &sc2, &m2);
+                int S = sc1 * s1 + sc2 * s2;
+                int M = hf ? 0 : m1 * bs0 + m2 * bs1;
+#pragma unroll
+                for (int o = 1; o < 8; o <<= 1) {
+                    S += __shfl_xor_sync(mask, S, o);
+                    M += __shfl_xor_sync(mask, M, o);
+                }
+                if (p == 0) {
+                    float d = h2f(h[r].x & 0xffff), dmin = h2f(h[r].x >> 16);
+                    float v = __fsub_rn(__fmul_rn(d, i2f_rn(S)), __fmul_rn(dmin, i2f_rn(M)));
+                    GV_PAIR(sh, CAP, r, j, T, b, base) = make_float2(dk, v);
+                }
+            }
         }
     }
 }
 
-// Q6_K (dot_q6_k_q8): lane p of a group takes half hh = p / 4, positions
-// l0..l0+8 (l0 = 8 (p % 4)) of each of that half's 4 quarters, and adds
-// dk d sumi of its share.
-template <int R>
-__device__ void dot_q6_k(const u8* const* rows, int nb, const Act& a, float* acc) {
+// Q6_K (dot_q6_k_q8's integers): lane p of a group takes half hh = p / 4,
+// positions l0..l0+8 (l0 = 8 (p % 4)) of each of that half's 4 quarters.
+template <int R, int T, int CAP>
+__device__ __forceinline__ void blk_q6_k(const u8* const* rows, int base, int end, const u8* act,
+                                         u64 astride, int n, int zmax, float2* sh) {
     int t = threadIdx.x, g = t >> 3, p = t & 7, hh = p >> 2, l0 = (p & 3) * 8;
-    for (int b = g; b < nb; b += GEMV_THREADS / 8) {
+    u32 mask = 0xffu << (t & 24);
+    for (int b = base + g; b < end; b += GEMV_THREADS / 8) {
         uint2 la[R], lb[R], qh[R];
+        float dw[R];
 #pragma unroll
         for (int r = 0; r < R; r++) {
             const u8* blk = rows[r] + (u64)b * 210;
             la[r] = ld8_a2(blk + 64 * hh + l0);      // ql[l]: quarters 0 (low), 2 (high)
             lb[r] = ld8_a2(blk + 64 * hh + 32 + l0); // ql[l + 32]: quarters 1, 3
             qh[r] = ld8_a2(blk + 128 + 32 * hh + l0);
+            dw[r] = h2f(rd_u16(blk + 208));
         }
-        const signed char* xb = a.qk + b * 256 + 128 * hh + l0;
-        uint2 x[4];
 #pragma unroll
-        for (int k = 0; k < 4; k++) x[k] = *(const uint2*)(xb + 32 * k);
-        float dk = a.dk[b];
+        for (int j = 0; j < T; j++) {
+            Act a = act_view(act + (u64)min(j, zmax) * astride, n);
+            const signed char* xb = a.qk + b * 256 + 128 * hh + l0;
+            uint2 x[4];
 #pragma unroll
-        for (int r = 0; r < R; r++) {
-            const u8* blk = rows[r] + (u64)b * 210;
-            const signed char* sc = (const signed char*)(blk + 192 + 8 * hh + (l0 >> 4));
-            int sumi = 0;
+            for (int k = 0; k < 4; k++) x[k] = *(const uint2*)(xb + 32 * k);
+            float dk = a.dk[b];
 #pragma unroll
-            for (int k = 0; k < 4; k++) {
-                uint2 l = (k & 1) ? lb[r] : la[r];
-                u32 lo0 = k < 2 ? (l.x & 0x0f0f0f0f) : ((l.x >> 4) & 0x0f0f0f0f);
-                u32 lo1 = k < 2 ? (l.y & 0x0f0f0f0f) : ((l.y >> 4) & 0x0f0f0f0f);
-                u32 w0 = __vsub4(lo0 | (((qh[r].x >> (2 * k)) & 0x03030303) << 4), 0x20202020);
-                u32 w1 = __vsub4(lo1 | (((qh[r].y >> (2 * k)) & 0x03030303) << 4), 0x20202020);
-                int s = __dp4a((int)w0, (int)x[k].x, 0);
-                s = __dp4a((int)w1, (int)x[k].y, s);
-                sumi += (int)sc[2 * k] * s;
+            for (int r = 0; r < R; r++) {
+                const u8* blk = rows[r] + (u64)b * 210;
+                const signed char* sc = (const signed char*)(blk + 192 + 8 * hh + (l0 >> 4));
+                int S = 0;
+#pragma unroll
+                for (int k = 0; k < 4; k++) {
+                    uint2 l = (k & 1) ? lb[r] : la[r];
+                    u32 lo0 = k < 2 ? (l.x & 0x0f0f0f0f) : ((l.x >> 4) & 0x0f0f0f0f);
+                    u32 lo1 = k < 2 ? (l.y & 0x0f0f0f0f) : ((l.y >> 4) & 0x0f0f0f0f);
+                    u32 w0 = __vsub4(lo0 | (((qh[r].x >> (2 * k)) & 0x03030303) << 4), 0x20202020);
+                    u32 w1 = __vsub4(lo1 | (((qh[r].y >> (2 * k)) & 0x03030303) << 4), 0x20202020);
+                    int s = __dp4a((int)w0, (int)x[k].x, 0);
+                    s = __dp4a((int)w1, (int)x[k].y, s);
+                    S += (int)sc[2 * k] * s;
+                }
+#pragma unroll
+                for (int o = 1; o < 8; o <<= 1) S += __shfl_xor_sync(mask, S, o);
+                if (p == 0)
+                    GV_PAIR(sh, CAP, r, j, T, b, base) =
+                        make_float2(__fmul_rn(dk, dw[r]), i2f_rn(S));
             }
-            float d = rd_f16(blk + 208);
-            acc[r] = __fmaf_rn(__fmul_rn(dk, d), (float)sumi, acc[r]);
         }
     }
 }
 
 // Q8_0 (dot_q8_0_q8): 4 lanes per block, 8 values each.
-template <int R>
-__device__ void dot_q8_0(const u8* const* rows, int nb, const Act& a, float* acc) {
+template <int R, int T, int CAP>
+__device__ __forceinline__ void blk_q8_0(const u8* const* rows, int base, int end, const u8* act,
+                                         u64 astride, int n, int zmax, float2* sh) {
     int t = threadIdx.x, g = t >> 2, p = t & 3;
     u32 mask = 0xfu << (t & 28);
-    for (int b = g; b < nb; b += GEMV_THREADS / 4) {
+    for (int b = base + g; b < end; b += GEMV_THREADS / 4) {
         uint2 q[R];
-#pragma unroll
-        for (int r = 0; r < R; r++) q[r] = ld8_a2(rows[r] + (u64)b * 34 + 2 + 8 * p);
-        uint2 x = *(const uint2*)(a.q0 + b * 32 + 8 * p);
-        float d0 = a.d0[b];
+        float dw[R];
 #pragma unroll
         for (int r = 0; r < R; r++) {
-            int s = __dp4a((int)q[r].x, (int)x.x, 0);
-            s = __dp4a((int)q[r].y, (int)x.y, s);
-            s += __shfl_xor_sync(mask, s, 1);
-            s += __shfl_xor_sync(mask, s, 2);
-            if (p == 0)
-                acc[r] = __fadd_rn(acc[r],
-                                   __fmul_rn(__fmul_rn(rd_f16(rows[r] + (u64)b * 34), d0), (float)s));
+            q[r] = ld8_a2(rows[r] + (u64)b * 34 + 2 + 8 * p);
+            dw[r] = h2f(rd_u16(rows[r] + (u64)b * 34));
+        }
+#pragma unroll
+        for (int j = 0; j < T; j++) {
+            Act a = act_view(act + (u64)min(j, zmax) * astride, n);
+            uint2 x = *(const uint2*)(a.q0 + b * 32 + 8 * p);
+            float d0 = a.d0[b];
+#pragma unroll
+            for (int r = 0; r < R; r++) {
+                int s = __dp4a((int)q[r].x, (int)x.x, 0);
+                s = __dp4a((int)q[r].y, (int)x.y, s);
+                s += __shfl_xor_sync(mask, s, 1);
+                s += __shfl_xor_sync(mask, s, 2);
+                if (p == 0)
+                    GV_PAIR(sh, CAP, r, j, T, b, base) =
+                        make_float2(__fmul_rn(dw[r], d0), i2f_rn(s));
+            }
         }
     }
 }
@@ -432,88 +492,116 @@ __device__ void dot_q8_0(const u8* const* rows, int nb, const Act& a, float* acc
 // Q5_0 (dot_q5_0_q8): 4 lanes per block; lane p has values 8p..8p+8: low
 // nibbles of qs[8p..] for p < 2, high nibbles of qs[8(p-2)..] after, high
 // bits 8p.. of qh.
-template <int R>
-__device__ void dot_q5_0(const u8* const* rows, int nb, const Act& a, float* acc) {
+template <int R, int T, int CAP>
+__device__ __forceinline__ void blk_q5_0(const u8* const* rows, int base, int end, const u8* act,
+                                         u64 astride, int n, int zmax, float2* sh) {
     int t = threadIdx.x, g = t >> 2, p = t & 3;
     u32 mask = 0xfu << (t & 28);
-    for (int b = g; b < nb; b += GEMV_THREADS / 4) {
+    for (int b = base + g; b < end; b += GEMV_THREADS / 4) {
         u32 qh[R];
         uint2 q[R];
+        float dw[R];
 #pragma unroll
         for (int r = 0; r < R; r++) {
             const u8* blk = rows[r] + (u64)b * 22;
             qh[r] = ld4_a2(blk + 2) >> (8 * p);
             q[r] = ld8_a2(blk + 6 + 8 * (p & 1));
+            dw[r] = h2f(rd_u16(blk));
         }
-        uint2 x = *(const uint2*)(a.q0 + b * 32 + 8 * p);
-        float d0 = a.d0[b];
 #pragma unroll
-        for (int r = 0; r < R; r++) {
-            u32 n0 = p < 2 ? (q[r].x & 0x0f0f0f0f) : ((q[r].x >> 4) & 0x0f0f0f0f);
-            u32 n1 = p < 2 ? (q[r].y & 0x0f0f0f0f) : ((q[r].y >> 4) & 0x0f0f0f0f);
-            u32 w0 = __vsub4(n0 | spread4(qh[r] & 0xf), 0x10101010);
-            u32 w1 = __vsub4(n1 | spread4((qh[r] >> 4) & 0xf), 0x10101010);
-            int s = __dp4a((int)w0, (int)x.x, 0);
-            s = __dp4a((int)w1, (int)x.y, s);
-            s += __shfl_xor_sync(mask, s, 1);
-            s += __shfl_xor_sync(mask, s, 2);
-            if (p == 0)
-                acc[r] = __fadd_rn(acc[r],
-                                   __fmul_rn(__fmul_rn(rd_f16(rows[r] + (u64)b * 22), d0), (float)s));
-        }
-    }
-}
-
-// The block's sums of acc[r] (thread order fixed: a shuffle tree in each
-// warp, then the warps in order), returned in thread 0.
-template <int R>
-__device__ void cta_sum(float* acc) {
-    __shared__ float sh[GEMV_THREADS / 32][2];
-    int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
-    __syncthreads(); // sh may still be being read by thread 0 from a last call
+        for (int j = 0; j < T; j++) {
+            Act a = act_view(act + (u64)min(j, zmax) * astride, n);
+            uint2 x = *(const uint2*)(a.q0 + b * 32 + 8 * p);
+            float d0 = a.d0[b];
 #pragma unroll
-    for (int r = 0; r < R; r++) {
-        float v = acc[r];
-        for (int o = 1; o < 32; o <<= 1) v = __fadd_rn(v, __shfl_xor_sync(0xffffffffu, v, o));
-        if (lane == 0) sh[w][r] = v;
-    }
-    __syncthreads();
-    if (threadIdx.x == 0) {
-#pragma unroll
-        for (int r = 0; r < R; r++) {
-            float v = sh[0][r];
-            for (int i = 1; i < GEMV_THREADS / 32; i++) v = __fadd_rn(v, sh[i][r]);
-            acc[r] = v;
+            for (int r = 0; r < R; r++) {
+                u32 n0 = p < 2 ? (q[r].x & 0x0f0f0f0f) : ((q[r].x >> 4) & 0x0f0f0f0f);
+                u32 n1 = p < 2 ? (q[r].y & 0x0f0f0f0f) : ((q[r].y >> 4) & 0x0f0f0f0f);
+                u32 w0 = __vsub4(n0 | spread4(qh[r] & 0xf), 0x10101010);
+                u32 w1 = __vsub4(n1 | spread4((qh[r] >> 4) & 0xf), 0x10101010);
+                int s = __dp4a((int)w0, (int)x.x, 0);
+                s = __dp4a((int)w1, (int)x.y, s);
+                s += __shfl_xor_sync(mask, s, 1);
+                s += __shfl_xor_sync(mask, s, 2);
+                if (p == 0)
+                    GV_PAIR(sh, CAP, r, j, T, b, base) =
+                        make_float2(__fmul_rn(dw[r], d0), i2f_rn(s));
+            }
         }
     }
 }
 
-// rows[0..R) of a matrix of type qt and n columns times act, into thread
-// 0's acc[0..R). Every thread of the block must call it.
-template <int R>
-__device__ __forceinline__ void dot_rows(int qt, const u8* const* rows, int n, const Act& a,
-                                         float* acc) {
-#pragma unroll
-    for (int r = 0; r < R; r++) acc[r] = 0.0f;
-    switch (qt) {
-    case QT_Q4_K: dot_q4_k<R>(rows, n >> 8, a, acc); break;
-    case QT_Q6_K: dot_q6_k<R>(rows, n >> 8, a, acc); break;
-    case QT_Q8_0: dot_q8_0<R>(rows, n >> 5, a, acc); break;
-    default: dot_q5_0<R>(rows, n >> 5, a, acc); break; // QT_Q5_0; the host checks types
+// The (scale, value) pairs of dot_rows_t's chunks (one buffer for every
+// call of a kernel).
+__shared__ float2 gv_pairs[GEMV_PAIRS];
+
+// acc = fma(c[b].x, c[b].y, acc) for b = 0..nb-1, in order (loads ahead).
+__device__ __forceinline__ float gv_chain(const float2* c, int nb, float acc) {
+    int b = 0;
+    for (; b + 4 <= nb; b += 4) {
+        float2 e0 = c[b], e1 = c[b + 1], e2 = c[b + 2], e3 = c[b + 3];
+        acc = __fmaf_rn(e0.x, e0.y, acc);
+        acc = __fmaf_rn(e1.x, e1.y, acc);
+        acc = __fmaf_rn(e2.x, e2.y, acc);
+        acc = __fmaf_rn(e3.x, e3.y, acc);
     }
-    cta_sum<R>(acc);
+    for (; b < nb; b++) acc = __fmaf_rn(c[b].x, c[b].y, acc);
+    return acc;
+}
+
+// rows[0..R) of a matrix of type qt and n columns times T tokens' (token j
+// at act + min(j, zmax) * astride): thread i < R T runs output i's chain
+// (r = i / T, j = i % T) and returns it; with T = 1 (decode) the lanes of
+// warp 0 also get every y[r] (shuffled from lane r). Every thread of the block must call it;
+// `again` if the kernel called it before (whose chains may still be
+// reading the pairs).
+template <int R, int T>
+__device__ __forceinline__ float dot_rows_t(int qt, const u8* const* rows, int n, const u8* act,
+                                            u64 astride, int zmax, float* y, bool again = false) {
+    const int RT = R * T, CAP = GEMV_PAIRS / RT;
+    float2* sh = gv_pairs;
+    bool kq = qt == QT_Q4_K || qt == QT_Q6_K;
+    int nb = kq ? n >> 8 : n >> 5;
+    int i = threadIdx.x;
+    float acc = 0.0f;
+    if (again) __syncthreads();
+    for (int base = 0; base < nb; base += CAP) {
+        if (base > 0) __syncthreads(); // the last chunk's chains are done
+        int end = min(nb, base + CAP);
+        switch (qt) {
+        case QT_Q4_K: blk_q4_k<R, T, CAP>(rows, base, end, act, astride, n, zmax, sh); break;
+        case QT_Q6_K: blk_q6_k<R, T, CAP>(rows, base, end, act, astride, n, zmax, sh); break;
+        case QT_Q8_0: blk_q8_0<R, T, CAP>(rows, base, end, act, astride, n, zmax, sh); break;
+        default: blk_q5_0<R, T, CAP>(rows, base, end, act, astride, n, zmax, sh); break; // QT_Q5_0
+        }
+        __syncthreads();
+        if (i < RT) acc = gv_chain(sh + i * CAP, end - base, acc);
+    }
+    if (T == 1 && y && i < 32) {
+#pragma unroll
+        for (int r = 0; r < R; r++) y[r] = __shfl_sync(0xffffffffu, acc, r);
+    }
+    return acc;
+}
+
+// The one-token form, activations in a: y[0..R) in warp 0 (thread 0 is what
+// the kernels use).
+template <int R>
+__device__ __forceinline__ void dot_rows(int qt, const u8* const* rows, int n, const u8* act,
+                                         float* y, bool again = false) {
+    dot_rows_t<R, 1>(qt, rows, n, act, 0, 0, y, again);
 }
 
 // Rows r0 and r1 of one matrix (r1 may equal r0 - then it's computed once).
 __device__ __forceinline__ void dot_pair(int qt, const u8* w, u64 rb, int r0, int r1, int n,
-                                         const Act& a, float* y) {
+                                         const u8* act, float* y) {
     if (r1 == r0) {
         const u8* rows[1] = {w + (u64)r0 * rb};
-        dot_rows<1>(qt, rows, n, a, y);
+        dot_rows<1>(qt, rows, n, act, y);
         y[1] = y[0];
     } else {
         const u8* rows[2] = {w + (u64)r0 * rb, w + (u64)r1 * rb};
-        dot_rows<2>(qt, rows, n, a, y);
+        dot_rows<2>(qt, rows, n, act, y);
     }
 }
 
@@ -525,9 +613,8 @@ gemv(int qt, const u8* __restrict__ w, u64 row_bytes, int rows, int n, const u8*
     int r0 = 2 * blockIdx.x, r1 = min(r0 + 1, rows - 1);
     prefetch_l2(w + (u64)r0 * row_bytes, (u64)(r1 - r0 + 1) * row_bytes);
     PDL_START();
-    Act a = act_view(act, n);
     float y[2];
-    dot_pair(qt, w, row_bytes, r0, r1, n, a, y);
+    dot_pair(qt, w, row_bytes, r0, r1, n, act, y);
     if (threadIdx.x == 0) {
         for (int i = 0; i < 1 + (r1 != r0); i++) {
             int r = r0 + i;
@@ -549,10 +636,9 @@ gemv1(int qt, const u8* __restrict__ w, u64 row_bytes, int rows, int n, const u8
     int r = blockIdx.x;
     prefetch_l2(w + (u64)r * row_bytes, row_bytes);
     PDL_START();
-    Act a = act_view(act, n);
     float y[1];
     const u8* rr[1] = {w + (u64)r * row_bytes};
-    dot_rows<1>(qt, rr, n, a, y);
+    dot_rows<1>(qt, rr, n, act, y);
     if (threadIdx.x == 0) {
         float v = y[0];
         if (bias) v = __fadd_rn(v, bias[r]);
@@ -587,12 +673,11 @@ qkv_rope(int qtq, const u8* __restrict__ wq, u64 rbq, int qtk, const u8* __restr
         prefetch_l2(w + (u64)(r0 + half) * rb, rb);
     }
     PDL_START();
-    Act a = act_view(act, n);
     u32 pos = P[P_POS];
     float y[2];
     if (item >= npq + npk) {
         int r0 = 2 * (item - npq - npk);
-        dot_pair(qtv, wv, rbv, r0, r0 + 1, n, a, y);
+        dot_pair(qtv, wv, rbv, r0, r0 + 1, n, act, y);
         if (threadIdx.x == 0) {
             for (int i = 0; i < 2; i++) {
                 float v = bv ? __fadd_rn(y[i], bv[r0 + i]) : y[i];
@@ -605,7 +690,7 @@ qkv_rope(int qtq, const u8* __restrict__ wq, u64 rbq, int qtk, const u8* __restr
     int it = isq ? item : item - npq;
     int r0 = (it / half) * hd + it % half, r1 = r0 + half;
     const float* bias = isq ? bq : bk;
-    dot_pair(isq ? qtq : qtk, isq ? wq : wk, isq ? rbq : rbk, r0, r1, n, a, y);
+    dot_pair(isq ? qtq : qtk, isq ? wq : wk, isq ? rbq : rbk, r0, r1, n, act, y);
     if (threadIdx.x != 0) return;
     float y0 = y[0], y1 = y[1];
     if (bias) {
@@ -635,16 +720,15 @@ gate_up(int qtg, const u8* __restrict__ wg, u64 rbg, int qtu, const u8* __restri
     prefetch_l2(wg + (u64)r * rbg, rbg);
     prefetch_l2(wu + (u64)r * rbu, rbu);
     PDL_START();
-    Act a = act_view(act, n);
     float y[2];
     if (qtg == qtu) {
         const u8* rr[2] = {wg + (u64)r * rbg, wu + (u64)r * rbu};
-        dot_rows<2>(qtg, rr, n, a, y);
+        dot_rows<2>(qtg, rr, n, act, y);
     } else {
         const u8* r0[1] = {wg + (u64)r * rbg};
         const u8* r1[1] = {wu + (u64)r * rbu};
-        dot_rows<1>(qtg, r0, n, a, y);
-        dot_rows<1>(qtu, r1, n, a, y + 1);
+        dot_rows<1>(qtg, r0, n, act, y);
+        dot_rows<1>(qtu, r1, n, act, y + 1, true);
     }
     if (threadIdx.x == 0)
         out[r] = __fmul_rn(__fdiv_rn(y[0], __fadd_rn(1.0f, expf(-y[0]))), y[1]);

@@ -6,16 +6,10 @@
 // The contract: every token's KV cache rows and logits are BIT-IDENTICAL to
 // the decode kernels' (one token at a time), whatever the batch size or the
 // token's place in it. The elementwise kernels run decode.cu's code per
-// token. The matrix products reproduce the decode GEMV's arithmetic exactly:
-// the same integer block sums (exact, however they are computed), then the
-// same float ops in the same order. That order is the GEMV's: lane t = 8g + p
-// of its 128-thread block (K-quants; 4g + p for 32-value blocks) keeps a
-// running sum over blocks b = g, g + G, g + 2G, ... (G groups), and cta_sum
-// adds the 128 lane sums by a fixed tree (a perfect binary tree per warp,
-// then the 4 warps in order). A batched product therefore keeps, per output,
-// the running sums of the lanes it is in the middle of, and folds each group
-// into that tree when its last block is done: groups in order, blocks of a
-// group in order.
+// token. The matrix products follow the canonical order of decode.cu's
+// "Row dot products": per output, the exact integer sums of each block
+// (however computed: dp4a, mma), then a few float ops per block into one
+// fma chain over the blocks in order. gemv_ref spells it out.
 //
 // Token-batched buffers: token z's activation (decode.cu Act) at act + z *
 // astride; f32 rows at x + z * stride.
@@ -428,240 +422,13 @@ __device__ __forceinline__ float gm_i2f(int i) {
 }
 
 // ---------------------------------------------------------------------------
-// gemvn: the decode GEMV over T tokens at once (CUDA cores, dp4a). Exactly
-// gemv's lanes and ops, with a token loop inside each lane's block step, so
-// a row's weights are read once for T tokens: the small-batch verify path
-// (weight-bound like a decode step), and the batched products' fallback on
-// GPUs without int8 tensor cores (sm < 80).
-
-template <int R, int T>
-__device__ void dotn_q4_k(const u8* const* rows, int nb, const u8* act, u64 astride, int n,
-                          int zmax, float* acc) {
-    int t = threadIdx.x, g = t >> 3, p = t & 7, c = p >> 1, hf = p & 1;
-    // Software-pipelined: block b + 16's weights load while b's are used.
-    uint4 h[R], q[R], hn[R], qn[R];
-    auto load = [&](int b, uint4* hh, uint4* qq) {
-#pragma unroll
-        for (int r = 0; r < R; r++) {
-            const u8* blk = rows[r] + (u64)b * 144;
-            hh[r] = __ldg((const uint4*)blk);
-            qq[r] = __ldg((const uint4*)(blk + 16 + 16 * p));
-        }
-    };
-    if (g < nb) load(g, hn, qn);
-    for (int b = g; b < nb; b += GEMV_THREADS / 8) {
-#pragma unroll
-        for (int r = 0; r < R; r++) h[r] = hn[r], q[r] = qn[r];
-        if (b + GEMV_THREADS / 8 < nb) load(b + GEMV_THREADS / 8, hn, qn);
-        // What depends on the weights alone, once for the T tokens.
-        u32 wl[R][4], wh[R][4];
-        int sc1[R], m1[R], sc2[R], m2[R];
-        float d[R], dmin[R];
-#pragma unroll
-        for (int r = 0; r < R; r++) {
-            wl[r][0] = q[r].x & 0x0f0f0f0f, wh[r][0] = (q[r].x >> 4) & 0x0f0f0f0f;
-            wl[r][1] = q[r].y & 0x0f0f0f0f, wh[r][1] = (q[r].y >> 4) & 0x0f0f0f0f;
-            wl[r][2] = q[r].z & 0x0f0f0f0f, wh[r][2] = (q[r].z >> 4) & 0x0f0f0f0f;
-            wl[r][3] = q[r].w & 0x0f0f0f0f, wh[r][3] = (q[r].w >> 4) & 0x0f0f0f0f;
-            scale_min_h(h[r], 2 * c, &sc1[r], &m1[r]);
-            scale_min_h(h[r], 2 * c + 1, &sc2[r], &m2[r]);
-            d[r] = f16_to_f32(h[r].x & 0xffff), dmin[r] = f16_to_f32(h[r].x >> 16);
-        }
-#pragma unroll
-        for (int j = 0; j < T; j++) {
-            Act a = act_view(act + (u64)min(j, zmax) * astride, n);
-            const signed char* xb = a.qk + b * 256 + 64 * c + 16 * hf;
-            int4 xl = *(const int4*)xb;
-            int4 xh = *(const int4*)(xb + 32);
-            int bs0 = a.b32[b * 8 + 2 * c], bs1 = a.b32[b * 8 + 2 * c + 1];
-            float dk = a.dk[b];
-#pragma unroll
-            for (int r = 0; r < R; r++) {
-                int s1 = 0, s2 = 0;
-                s1 = __dp4a((int)wl[r][0], xl.x, s1);
-                s1 = __dp4a((int)wl[r][1], xl.y, s1);
-                s1 = __dp4a((int)wl[r][2], xl.z, s1);
-                s1 = __dp4a((int)wl[r][3], xl.w, s1);
-                s2 = __dp4a((int)wh[r][0], xh.x, s2);
-                s2 = __dp4a((int)wh[r][1], xh.y, s2);
-                s2 = __dp4a((int)wh[r][2], xh.z, s2);
-                s2 = __dp4a((int)wh[r][3], xh.w, s2);
-                int sumi = sc1[r] * s1 + sc2[r] * s2;
-                int summ = hf ? 0 : m1[r] * bs0 + m2[r] * bs1;
-                // gm_i2f: exact (|sumi| < 2^22), = (float)sumi.
-                float v = __fsub_rn(__fmul_rn(d[r], gm_i2f(sumi)), __fmul_rn(dmin[r], gm_i2f(summ)));
-                acc[r * T + j] = __fmaf_rn(dk, v, acc[r * T + j]);
-            }
-        }
-    }
-}
-
-template <int R, int T>
-__device__ void dotn_q6_k(const u8* const* rows, int nb, const u8* act, u64 astride, int n,
-                          int zmax, float* acc) {
-    int t = threadIdx.x, g = t >> 3, p = t & 7, hh = p >> 2, l0 = (p & 3) * 8;
-    uint2 la[R], lb[R], qh[R], lan[R], lbn[R], qhn[R];
-    int scn[R];
-    float dn[R];
-    auto load = [&](int b) {
-#pragma unroll
-        for (int r = 0; r < R; r++) {
-            const u8* blk = rows[r] + (u64)b * 210;
-            lan[r] = ld8_a2(blk + 64 * hh + l0);
-            lbn[r] = ld8_a2(blk + 64 * hh + 32 + l0);
-            qhn[r] = ld8_a2(blk + 128 + 32 * hh + l0);
-            // scales 8 hh + (l0 >> 4) + 2k, k = 0..3: bytes 0, 2, 4, 6 of 8.
-            uint2 sc = ld8_a2(blk + 192 + 8 * hh);
-            scn[r] = (l0 >> 4) ? (int)__byte_perm(sc.x, sc.y, 0x7531)
-                               : (int)__byte_perm(sc.x, sc.y, 0x6420);
-            dn[r] = rd_f16(blk + 208);
-        }
-    };
-    if (g < nb) load(g);
-    for (int b = g; b < nb; b += GEMV_THREADS / 8) {
-        int scs[R];
-        float ds[R];
-#pragma unroll
-        for (int r = 0; r < R; r++)
-            la[r] = lan[r], lb[r] = lbn[r], qh[r] = qhn[r], scs[r] = scn[r], ds[r] = dn[r];
-        if (b + GEMV_THREADS / 8 < nb) load(b + GEMV_THREADS / 8);
-#pragma unroll
-        for (int j = 0; j < T; j++) {
-            Act a = act_view(act + (u64)min(j, zmax) * astride, n);
-            const signed char* xb = a.qk + b * 256 + 128 * hh + l0;
-            uint2 x[4];
-#pragma unroll
-            for (int k = 0; k < 4; k++) x[k] = *(const uint2*)(xb + 32 * k);
-            float dk = a.dk[b];
-#pragma unroll
-            for (int r = 0; r < R; r++) {
-                int sumi = 0;
-#pragma unroll
-                for (int k = 0; k < 4; k++) {
-                    uint2 l = (k & 1) ? lb[r] : la[r];
-                    u32 lo0 = k < 2 ? (l.x & 0x0f0f0f0f) : ((l.x >> 4) & 0x0f0f0f0f);
-                    u32 lo1 = k < 2 ? (l.y & 0x0f0f0f0f) : ((l.y >> 4) & 0x0f0f0f0f);
-                    u32 w0 = __vsub4(lo0 | (((qh[r].x >> (2 * k)) & 0x03030303) << 4), 0x20202020);
-                    u32 w1 = __vsub4(lo1 | (((qh[r].y >> (2 * k)) & 0x03030303) << 4), 0x20202020);
-                    int s = __dp4a((int)w0, (int)x[k].x, 0);
-                    s = __dp4a((int)w1, (int)x[k].y, s);
-                    sumi += ((int)(scs[r] << (24 - 8 * k)) >> 24) * s;
-                }
-                acc[r * T + j] = __fmaf_rn(__fmul_rn(dk, ds[r]), (float)sumi, acc[r * T + j]);
-            }
-        }
-    }
-}
-
-template <int R, int T>
-__device__ void dotn_q8_0(const u8* const* rows, int nb, const u8* act, u64 astride, int n,
-                          int zmax, float* acc) {
-    int t = threadIdx.x, g = t >> 2, p = t & 3;
-    u32 mask = 0xfu << (t & 28);
-    uint2 q[R], qn[R];
-    float dw[R], dwn[R];
-    auto load = [&](int b) {
-#pragma unroll
-        for (int r = 0; r < R; r++) {
-            qn[r] = ld8_a2(rows[r] + (u64)b * 34 + 2 + 8 * p);
-            dwn[r] = rd_f16(rows[r] + (u64)b * 34);
-        }
-    };
-    if (g < nb) load(g);
-    for (int b = g; b < nb; b += GEMV_THREADS / 4) {
-#pragma unroll
-        for (int r = 0; r < R; r++) q[r] = qn[r], dw[r] = dwn[r];
-        if (b + GEMV_THREADS / 4 < nb) load(b + GEMV_THREADS / 4);
-#pragma unroll
-        for (int j = 0; j < T; j++) {
-            Act a = act_view(act + (u64)min(j, zmax) * astride, n);
-            uint2 x = *(const uint2*)(a.q0 + b * 32 + 8 * p);
-            float d0 = a.d0[b];
-#pragma unroll
-            for (int r = 0; r < R; r++) {
-                int s = __dp4a((int)q[r].x, (int)x.x, 0);
-                s = __dp4a((int)q[r].y, (int)x.y, s);
-                s += __shfl_xor_sync(mask, s, 1);
-                s += __shfl_xor_sync(mask, s, 2);
-                if (p == 0)
-                    acc[r * T + j] = __fadd_rn(
-                        acc[r * T + j],
-                        __fmul_rn(__fmul_rn(dw[r], d0), gm_i2f(s)));
-            }
-        }
-    }
-}
-
-template <int R, int T>
-__device__ void dotn_q5_0(const u8* const* rows, int nb, const u8* act, u64 astride, int n,
-                          int zmax, float* acc) {
-    int t = threadIdx.x, g = t >> 2, p = t & 3;
-    u32 mask = 0xfu << (t & 28);
-    u32 qh[R], qhn[R];
-    uint2 q[R], qn[R];
-    float dw[R], dwn[R];
-    auto load = [&](int b) {
-#pragma unroll
-        for (int r = 0; r < R; r++) {
-            const u8* blk = rows[r] + (u64)b * 22;
-            qhn[r] = ld4_a2(blk + 2) >> (8 * p);
-            qn[r] = ld8_a2(blk + 6 + 8 * (p & 1));
-            dwn[r] = rd_f16(blk);
-        }
-    };
-    if (g < nb) load(g);
-    for (int b = g; b < nb; b += GEMV_THREADS / 4) {
-#pragma unroll
-        for (int r = 0; r < R; r++) qh[r] = qhn[r], q[r] = qn[r], dw[r] = dwn[r];
-        if (b + GEMV_THREADS / 4 < nb) load(b + GEMV_THREADS / 4);
-#pragma unroll
-        for (int j = 0; j < T; j++) {
-            Act a = act_view(act + (u64)min(j, zmax) * astride, n);
-            uint2 x = *(const uint2*)(a.q0 + b * 32 + 8 * p);
-            float d0 = a.d0[b];
-#pragma unroll
-            for (int r = 0; r < R; r++) {
-                u32 n0 = p < 2 ? (q[r].x & 0x0f0f0f0f) : ((q[r].x >> 4) & 0x0f0f0f0f);
-                u32 n1 = p < 2 ? (q[r].y & 0x0f0f0f0f) : ((q[r].y >> 4) & 0x0f0f0f0f);
-                u32 w0 = __vsub4(n0 | spread4(qh[r] & 0xf), 0x10101010);
-                u32 w1 = __vsub4(n1 | spread4((qh[r] >> 4) & 0xf), 0x10101010);
-                int s = __dp4a((int)w0, (int)x.x, 0);
-                s = __dp4a((int)w1, (int)x.y, s);
-                s += __shfl_xor_sync(mask, s, 1);
-                s += __shfl_xor_sync(mask, s, 2);
-                if (p == 0)
-                    acc[r * T + j] = __fadd_rn(
-                        acc[r * T + j],
-                        __fmul_rn(__fmul_rn(dw[r], d0), gm_i2f(s)));
-            }
-        }
-    }
-}
-
-// cta_sum for N values per thread (same tree per value).
-template <int N>
-__device__ void cta_sum_n(float* acc) {
-    __shared__ float sh[GEMV_THREADS / 32][N];
-    int lane = threadIdx.x & 31, w = threadIdx.x >> 5;
-    __syncthreads();
-#pragma unroll
-    for (int r = 0; r < N; r++) {
-        float v = acc[r];
-        for (int o = 1; o < 32; o <<= 1) v = __fadd_rn(v, __shfl_xor_sync(0xffffffffu, v, o));
-        if (lane == 0) sh[w][r] = v;
-    }
-    __syncthreads();
-    if (threadIdx.x < N) {
-        int r = threadIdx.x;
-        float v = sh[0][r];
-        for (int i = 1; i < GEMV_THREADS / 32; i++) v = __fadd_rn(v, sh[i][r]);
-        acc[0] = v;
-    }
-}
+// gemvn: the decode GEMV over T tokens at once (CUDA cores, dp4a): the same
+// code (decode.cu dot_rows_t) with a token loop inside each lane's block
+// step, so a row's weights are read once for T tokens. The batched
+// products' path on GPUs without int8 tensor cores (sm < 80).
 
 // Rows R * blockIdx.x .. (+R) for tokens T * blockIdx.y .. (+T, < nb):
-// out[z * ostride + r] as gemv's. Thread i < R * T ends with the sum of row
-// i / T, token i % T.
+// out[z * ostride + r] as gemv's.
 template <int R, int T>
 __device__ void gemvn_t(int qt, const u8* w, u64 rb, int rows, int n, const u8* act, u64 astride,
                         int nb, const float* bias, int mode, float* out, u64 ostride) {
@@ -669,22 +436,11 @@ __device__ void gemvn_t(int qt, const u8* w, u64 rb, int rows, int n, const u8* 
     const u8* rr[R];
 #pragma unroll
     for (int r = 0; r < R; r++) rr[r] = w + (u64)min(r0 + r, rows - 1) * rb;
-    const u8* a = act + (u64)z0 * astride;
-    int zmax = nb - 1 - z0;
-    float acc[R * T];
-#pragma unroll
-    for (int i = 0; i < R * T; i++) acc[i] = 0.0f;
-    switch (qt) {
-    case QT_Q4_K: dotn_q4_k<R, T>(rr, n >> 8, a, astride, n, zmax, acc); break;
-    case QT_Q6_K: dotn_q6_k<R, T>(rr, n >> 8, a, astride, n, zmax, acc); break;
-    case QT_Q8_0: dotn_q8_0<R, T>(rr, n >> 5, a, astride, n, zmax, acc); break;
-    default: dotn_q5_0<R, T>(rr, n >> 5, a, astride, n, zmax, acc); break;
-    }
-    cta_sum_n<R * T>(acc);
+    float y = dot_rows_t<R, T>(qt, rr, n, act + (u64)z0 * astride, astride, nb - 1 - z0, nullptr);
     int i = threadIdx.x;
     if (i < R * T) {
         int r = r0 + i / T, z = z0 + i % T;
-        if (r < rows && z < nb) gm_store(acc[0], bias, mode, out + (u64)z * ostride, r);
+        if (r < rows && z < nb) gm_store(y, bias, mode, out + (u64)z * ostride, r);
     }
 }
 
@@ -699,50 +455,80 @@ GEMVN(gemvn_2x8, 2, 8)
 GEMVN(gemvn_2x16, 2, 16)
 
 // ---------------------------------------------------------------------------
-// gemm_*: the batched products on int8 tensor cores (sm_80+, mma.sync).
-//
-// A block computes GM_BM rows x GM_BN tokens over all of K: 8 warps, 2 along
-// rows x 4 along tokens, each 16 rows x 16 tokens (two m16n8 tiles). An mma
-// gives the exact integer sum over one GEMV lane's share of one sub-block:
-// k16 tiles for K-quant lanes (16 values of a 32-value Q4_K sub-block; 8 of
-// a 16-value Q6_K one, with the other 8 in the tile's second row half: A
-// rows g / g + 8 are one matrix row's first / second half-sub-block, zero
-// elsewhere), k32 for Q8_0/Q5_0 blocks. The float epilogue is the GEMV
-// lane's ops on that sum, into that lane's running sum; when a group's last
-// block is done its lanes fold into the cta_sum tree (see the top).
-//
-// A stage is one block of 256 values (K-quants) or 8 blocks of 32, in the
-// lanes' order (g-major, a table in shared memory); two stages are in shared
-// memory, one computed while the next one's copies are in flight. Q4_K
-// weights and all activations are copied as they are (cp.async); Q4_K's
-// nibbles are unpacked when the fragments are built. The other types'
-// blocks (2-byte aligned) go through registers and are unpacked to int8.
-
-#define GM_BM 32
-#define GM_THREADS 256
-// Most blocks per row the sequence table holds (K <= 32768 for Q8_0/Q5_0).
-#define GM_MAXSEQ 1024
-
-template <int BN>
-struct GmStage {
-    // Q4_K: the raw 144-byte blocks (9 chunks); others: int8 values [row][256].
-    // Rows padded to 272 bytes, so a warp's fragment loads (rows g = 0..7,
-    // words t = 0..3: banks 4g + t + 4j) hit 32 different banks.
-    uint4 w[GM_BM][17];
-    uint4 x[BN][17];
-    // Per row: Q6_K d; Q8_0/Q5_0 d of each of the 8 blocks.
-    float wd[GM_BM][8];
-    // Q6_K: the 16 int8 scales.
-    u32 wsc[GM_BM][4];
-    // Per token: Q8_K d (xd[0]) and the 8 sums of 32 (xb); Q8_0 d of each block.
-    float xd[BN][8];
-    int xb[BN][8];
-};
-
-__device__ __forceinline__ uint4* gm_chunk(uint4 (*a)[17], int r, int j) { return &a[r][j]; }
-__device__ __forceinline__ u32 gm_word(const uint4 (*a)[17], int r, int j, int t) {
-    return ((const u32*)&a[r][j])[t];
+// gemv_ref: the canonical order (decode.cu, "Row dot products") written out
+// literally, one thread per output, every integer from the raw block bytes
+// (quant.rs's layouts). Slow; the tests' reference for every product
+// kernel. Grid (ceil(rows / 128), nb) x 128; arguments as gemvn's.
+extern "C" __global__ void gemv_ref(int qt, const u8* __restrict__ w, u64 rb, int rows, int n,
+                                    const u8* __restrict__ act, u64 astride, int nb,
+                                    const float* __restrict__ bias, int mode,
+                                    float* __restrict__ out, u64 ostride) {
+    int r = blockIdx.x * blockDim.x + threadIdx.x, z = blockIdx.y;
+    if (r >= rows || z >= nb) return;
+    Act a = act_view(act + (u64)z * astride, n);
+    const u8* row = w + (u64)r * rb;
+    float acc = 0.0f;
+    if (qt == QT_Q4_K) {
+        for (int b = 0; b < n / 256; b++) {
+            const u8* blk = row + (u64)b * 144;
+            int S = 0, M = 0;
+            for (int j = 0; j < 8; j++) {
+                u32 sc, m;
+                scale_min_k4(j, blk + 4, &sc, &m);
+                int sumi = 0;
+                for (int i = 0; i < 32; i++) {
+                    u32 qb = blk[16 + 32 * (j >> 1) + i];
+                    int q = (j & 1) ? (int)(qb >> 4) : (int)(qb & 15);
+                    sumi += q * (int)a.qk[b * 256 + 32 * j + i];
+                }
+                S += (int)sc * sumi;
+                M += (int)m * a.b32[b * 8 + j];
+            }
+            float d = h2f(rd_u16(blk)), dmin = h2f(rd_u16(blk + 2));
+            float v = __fsub_rn(__fmul_rn(d, i2f_rn(S)), __fmul_rn(dmin, i2f_rn(M)));
+            acc = __fmaf_rn(a.dk[b], v, acc);
+        }
+    } else if (qt == QT_Q6_K) {
+        for (int b = 0; b < n / 256; b++) {
+            const u8* blk = row + (u64)b * 210;
+            int S = 0;
+            for (int j = 0; j < 16; j++) {
+                int sumi = 0;
+                for (int i = 0; i < 16; i++) {
+                    int e = 16 * j + i, hh = e >> 7, k = (e >> 5) & 3, l = e & 31;
+                    u32 ql = blk[64 * hh + l + 32 * (k & 1)];
+                    u32 lo = k < 2 ? (ql & 15) : (ql >> 4);
+                    u32 hi = (blk[128 + 32 * hh + l] >> (2 * k)) & 3;
+                    sumi += ((int)(lo | (hi << 4)) - 32) * (int)a.qk[b * 256 + e];
+                }
+                S += (int)(signed char)blk[192 + j] * sumi;
+            }
+            acc = __fmaf_rn(__fmul_rn(a.dk[b], h2f(rd_u16(blk + 208))), i2f_rn(S), acc);
+        }
+    } else {
+        bool q8 = qt == QT_Q8_0;
+        for (int b = 0; b < n / 32; b++) {
+            const u8* blk = row + (u64)b * (q8 ? 34 : 22);
+            int s = 0;
+            u32 qh = q8 ? 0 : rd_u16(blk + 2) | (rd_u16(blk + 4) << 16);
+            for (int i = 0; i < 32; i++) {
+                int q;
+                if (q8) {
+                    q = (int)(signed char)blk[2 + i];
+                } else {
+                    u32 qs = blk[6 + (i & 15)];
+                    q = (int)(((i < 16 ? qs : qs >> 4) & 15) | (((qh >> i) & 1) << 4)) - 16;
+                }
+                s += q * (int)a.q0[b * 32 + i];
+            }
+            acc = __fmaf_rn(__fmul_rn(h2f(rd_u16(blk)), a.d0[b]), i2f_rn(s), acc);
+        }
+    }
+    gm_store(acc, bias, mode, out + (u64)z * ostride, r);
 }
+
+// ---------------------------------------------------------------------------
+// Tensor-core helpers (sm_80+): async copies and int8 mma.sync.
 
 #if __CUDA_ARCH__ >= 800
 __device__ __forceinline__ void cp16(void* dst, const void* src) {
@@ -760,13 +546,13 @@ __device__ __forceinline__ void cp_wait() {
 }
 
 __device__ __forceinline__ void mma16(int* d, u32 a0, u32 a1, u32 b0) {
-    asm volatile("mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5}, {%6}, "
+    asm("mma.sync.aligned.m16n8k16.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5}, {%6}, "
                  "{%7,%7,%7,%7};"
                  : "=r"(d[0]), "=r"(d[1]), "=r"(d[2]), "=r"(d[3])
                  : "r"(a0), "r"(a1), "r"(b0), "r"(0));
 }
 __device__ __forceinline__ void mma32(int* d, u32 a0, u32 a1, u32 a2, u32 a3, u32 b0, u32 b1) {
-    asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, "
+    asm("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, "
                  "{%4,%5,%6,%7}, {%8,%9}, {%10,%10,%10,%10};"
                  : "=r"(d[0]), "=r"(d[1]), "=r"(d[2]), "=r"(d[3])
                  : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "r"(0));
@@ -791,118 +577,122 @@ __device__ __forceinline__ void ld_a2(const u8* p, u32* out) {
     }
 }
 
-// Step q of the lanes' sequence over nblk blocks in G groups: group g holds
-// blocks g, g + G, ... (nblk / G of them, or one more); groups in order.
-// Packed: block | group << 16 | (last of its group) << 31.
-__device__ __forceinline__ u32 gm_seq(int q, int nblk, int G) {
-    int lmin = nblk / G, rem = nblk % G, g, j, len;
-    if (q < rem * (lmin + 1)) {
-        g = q / (lmin + 1);
-        j = q % (lmin + 1);
-        len = lmin + 1;
-    } else {
-        int q2 = q - rem * (lmin + 1);
-        g = rem + q2 / lmin;
-        j = q2 % lmin;
-        len = lmin;
-    }
-    return (u32)(g + G * j) | ((u32)g << 16) | ((u32)(j == len - 1) << 31);
-}
-__device__ __forceinline__ int sq_blk(u32 e) { return e & 0xffff; }
-__device__ __forceinline__ int sq_grp(u32 e) { return (e >> 16) & 0x7fff; }
-__device__ __forceinline__ bool sq_last(u32 e) { return e >> 31; }
-
-// One output's cta_sum tree so far: groups fold in order. K-quant groups
-// are 8 lanes (4 groups per warp), 32-value ones 4 lanes (8 per warp).
-struct GmTree {
-    float r, s0, s1, s2;
-};
-
-// Fold group g's value (its lanes' subtree) into the tree: 4 (GPW = 4) or 8
-// leaves per warp, a perfect binary tree each, then the warps in order.
-template <int GPW>
-__device__ __forceinline__ void gm_fold(GmTree& t, int g, float v) {
-    int i = g % GPW, wq = g / GPW;
-    float w = 0.0f;
-    bool done = false;
-    if (GPW == 4) {
-        if (i == 0) t.s0 = v;
-        else if (i == 1) t.s0 = __fadd_rn(t.s0, v);
-        else if (i == 2) t.s1 = v;
-        else {
-            w = __fadd_rn(t.s0, __fadd_rn(t.s1, v));
-            done = true;
-        }
-    } else {
-        if (i == 0) t.s0 = v;
-        else if (i == 1) t.s0 = __fadd_rn(t.s0, v);
-        else if (i == 2) t.s1 = v;
-        else if (i == 3) t.s0 = __fadd_rn(t.s0, __fadd_rn(t.s1, v));
-        else if (i == 4) t.s1 = v;
-        else if (i == 5) t.s1 = __fadd_rn(t.s1, v);
-        else if (i == 6) t.s2 = v;
-        else {
-            w = __fadd_rn(t.s0, __fadd_rn(t.s1, __fadd_rn(t.s2, v)));
-            done = true;
-        }
-    }
-    if (done) t.r = wq == 0 ? w : __fadd_rn(t.r, w);
-}
-
-// The 8 lanes of a K-quant group: ((c0 + c1) + (c2 + c3)) + ((c4 + c5) + (c6 + c7)).
-__device__ __forceinline__ float gm_tree8(const float* c) {
-    return __fadd_rn(__fadd_rn(__fadd_rn(c[0], c[1]), __fadd_rn(c[2], c[3])),
-                     __fadd_rn(__fadd_rn(c[4], c[5]), __fadd_rn(c[6], c[7])));
-}
-// The 4 lanes of a 32-value group, only the first with a sum: (c + 0) + (0 + 0).
-__device__ __forceinline__ float gm_tree4(float c) {
-    return __fadd_rn(__fadd_rn(c, 0.0f), __fadd_rn(0.0f, 0.0f));
-}
-
-// NF n8 tiles per warp: GM_BN tokens per block; per thread outputs o =
-// 4f + i of tile f, mma accumulator element i: row g (i < 2) or g + 8,
-// token 2t + (i & 1).
-#define GM_BN(NF) (32 * (NF))
-
+// Per weight type: SB blocks of VB values per 256-value stage, register-
+// staged items per row (gemm2), bytes per block.
 template <int QT>
 struct GmType;
 template <>
 struct GmType<QT_Q4_K> {
-    // G groups, SB blocks per stage of VB values, register-staged items per row.
-    static const int G = 16, SB = 1, VB = 256, ITEMS = 0, BYTES = 144;
+    static const int SB = 1, VB = 256, ITEMS = 0, BYTES = 144;
 };
 template <>
 struct GmType<QT_Q6_K> {
     // 4 x (2 x 16 bytes of ql + 16 of qh), 1 header.
-    static const int G = 16, SB = 1, VB = 256, ITEMS = 5, BYTES = 210;
+    static const int SB = 1, VB = 256, ITEMS = 5, BYTES = 210;
 };
 template <>
 struct GmType<QT_Q8_0> {
-    static const int G = 32, SB = 8, VB = 32, ITEMS = 8, BYTES = 34;
+    static const int SB = 8, VB = 32, ITEMS = 8, BYTES = 34;
 };
 template <>
 struct GmType<QT_Q5_0> {
-    static const int G = 32, SB = 8, VB = 32, ITEMS = 8, BYTES = 22;
+    static const int SB = 8, VB = 32, ITEMS = 8, BYTES = 22;
 };
 
-// Register-staged weight words per item.
-#define GM_WREGS 13
+// Signed byte j of the 16 packed in w[0..4).
+__device__ __forceinline__ int gm_sbyte(const u32* w, int j) {
+    return (int)(w[j >> 2] << (24 - 8 * (j & 3))) >> 24;
+}
+__device__ __forceinline__ int gm_ubyte(u32 w, int j) { return __byte_perm(w, 0, 0x4440 + (j & 3)); }
 
-// Into registers: stage s's weights for the register-staged types.
+// ---------------------------------------------------------------------------
+// gemm2_*: the batched products on int8 tensor cores (sm_80+, mma.sync), in
+// the canonical order (decode.cu, "Row dot products"): per output, the
+// block's integer sums S and Q4_K's M from mma tiles (and integer
+// multiply-adds by the sub-block scales), then the block's few float ops
+// into one running fma chain, blocks in order - what a K loop does anyway.
+//
+// A block computes 64 rows x BN = 32 NT tokens over all of K: 8 warps, 2
+// along rows x 4 along tokens, each 32 rows x 8 NT tokens (two m16 tiles x
+// NT n8 tiles). A stage is 256 values of K (a K-quant block, eight 32-value
+// blocks): mma m16n8k32 per 32-value (sub-)block for Q4_K, Q8_0, Q5_0,
+// m16n8k16 per 16-value Q6_K sub-block, and Q4_K's M = sum_j m_j bsum_j by
+// two m16n8k16 per tile (bsum_j split into int8 halves). Activations are
+// copied as they are (cp.async, ST stages), 16-byte chunks XOR-swizzled by
+// row (chunk c of token z at c ^ (z & 7)) so fragment loads hit 32 banks.
+// Q4_K weights too, raw (rows padded to 176 bytes, again conflict-free),
+// their nibbles unpacked as fragments are built. Q6_K/Q8_0/Q5_0 blocks are
+// only 2-byte aligned: loaded into registers one stage ahead and stored
+// unpacked to int8 (rows swizzled as the activations).
+
+#define G2_BM 64
+#define G2_THREADS 256
+#define G2_Q4K_ROW 176
+
+// Shared memory layout (bytes) of gemm2 for type QT, BN tokens and ST
+// stages: [weight buffers | ST stages of activations]. Q4_K: a weight
+// buffer per stage (copied with it); the register-staged types: one, or
+// two with three or more stages (stored one stage ahead).
+template <int QT, int BN, int ST>
+struct G2L {
+    static const bool RAW = QT == QT_Q4_K, KQ = QT == QT_Q4_K || QT == QT_Q6_K;
+    // Weights: Q4_K raw rows; others int8 [64][256], then Q6_K's scales
+    // [64][16] and d [64], or Q8_0/Q5_0's d [64][8].
+    static const int W = RAW ? G2_BM * G2_Q4K_ROW
+                             : G2_BM * 256 + (QT == QT_Q6_K ? G2_BM * 20 : G2_BM * 32);
+    static const int NWB = RAW ? ST : (ST >= 3 ? 2 : 1);
+    // Activations: values [BN][256]; Q4_K the sums of 32 [BN][8]; scales:
+    // Q8_K d [BN] or Q8_0 d [BN][8].
+    static const int X = BN * 256, XB = RAW ? BN * 32 : 0, XD = KQ ? BN * 4 : BN * 32;
+    static const int STAGE = X + XB + XD;
+    static const int SMEM = NWB * W + ST * STAGE;
+};
+
+// Byte k of w, sign-extended (prmt's sign-replicating selectors; the
+// __byte_perm intrinsic masks them off).
+__device__ __forceinline__ int g2_sbyte(u32 w, int k) {
+    u32 r;
+    asm("prmt.b32 %0, %1, 0, %2;" : "=r"(r) : "r"(w), "r"((0x8880 | k) + 0x1110 * k));
+    return (int)r;
+}
+
+static_assert(G2_THREADS == 4 * G2_BM, "g2_item: a Q6_K value item per thread");
+
+// A thread's k-th register-staged item: row rr, item it. Q6_K: the four
+// value items of a row to four threads, then the scales of row tid to
+// threads < 64 (every thread one big item); others in order.
 template <int QT>
-__device__ __forceinline__ void gm_load_w(const u8* w, u64 rb, int rows, int r0, int nblk, int s,
-                                          const u32* seq, u32 (*reg)[GM_WREGS]) {
-    const int ITEMS = GmType<QT>::ITEMS > 0 ? GmType<QT>::ITEMS : 1, SB = GmType<QT>::SB;
-    const int NI = (GM_BM * GmType<QT>::ITEMS + GM_THREADS - 1) / GM_THREADS;
+__device__ __forceinline__ bool g2_item(int k, int* rr, int* it) {
+    int tid = threadIdx.x;
+    if (QT == QT_Q6_K) {
+        if (k == 0) {
+            *rr = tid >> 2, *it = tid & 3;
+            return true;
+        }
+        *rr = tid, *it = 4;
+        return k == 1 && tid < G2_BM;
+    }
+    int id = tid + k * G2_THREADS;
+    *rr = id / GmType<QT>::ITEMS, *it = id % GmType<QT>::ITEMS;
+    return id < G2_BM * GmType<QT>::ITEMS;
+}
+
+// Into registers: stage s's weights for the register-staged types (rows
+// r0.., clamped).
+#define G2_WREGS 13
+template <int QT>
+__device__ __forceinline__ void g2_load_w(const u8* w, u64 rb, int rows, int r0, int nblk, int s,
+                                          u32 (*reg)[G2_WREGS]) {
+    const int SB = GmType<QT>::SB;
+    const int NI = (G2_BM * GmType<QT>::ITEMS + G2_THREADS - 1) / G2_THREADS;
 #pragma unroll
     for (int k = 0; k < NI; k++) {
-        int id = threadIdx.x + k * GM_THREADS;
-        if (id >= GM_BM * ITEMS) break;
-        int rr = id / ITEMS, it = id % ITEMS;
+        int rr, it;
+        if (!g2_item<QT>(k, &rr, &it)) break;
         const u8* row = w + (u64)min(r0 + rr, rows - 1) * rb;
         u32* o = reg[k];
         if (QT == QT_Q6_K) {
-            const u8* blk = row + (u64)sq_blk(seq[s]) * 210;
+            const u8* blk = row + (u64)s * 210;
             if (it < 4) {
                 int h = it >> 1, l0 = 16 * (it & 1);
                 ld_a2<4>(blk + 64 * h + l0, o);
@@ -915,7 +705,7 @@ __device__ __forceinline__ void gm_load_w(const u8* w, u64 rb, int rows, int r0,
         } else {
             int q = s * SB + it;
             if (q >= nblk) continue;
-            const u8* blk = row + (u64)sq_blk(seq[q]) * GmType<QT>::BYTES;
+            const u8* blk = row + (u64)q * GmType<QT>::BYTES;
             o[0] = rd_u16(blk);
             if (QT == QT_Q8_0) ld_a2<8>(blk + 2, o + 1);
             else ld_a2<5>(blk + 2, o + 1); // qh, qs
@@ -923,16 +713,21 @@ __device__ __forceinline__ void gm_load_w(const u8* w, u64 rb, int rows, int r0,
     }
 }
 
-// The registers of gm_load_w, unpacked into stage st.
-template <int QT, class ST>
-__device__ __forceinline__ void gm_store_w(ST* st, int nblk, int s, u32 (*reg)[GM_WREGS]) {
-    const int ITEMS = GmType<QT>::ITEMS > 0 ? GmType<QT>::ITEMS : 1, SB = GmType<QT>::SB;
-    const int NI = (GM_BM * GmType<QT>::ITEMS + GM_THREADS - 1) / GM_THREADS;
+// Row r's 16-byte chunk c of int8 weights (swizzled).
+__device__ __forceinline__ uint4* g2_w8(u8* wb, int r, int c) {
+    return (uint4*)(wb + r * 256 + 16 * (c ^ (r & 7)));
+}
+
+// The registers of g2_load_w, unpacked into the weight buffer.
+template <int QT>
+__device__ __forceinline__ void g2_store_w(u8* wb, int nblk, int s, u32 (*reg)[G2_WREGS]) {
+    const int SB = GmType<QT>::SB;
+    const int NI = (G2_BM * GmType<QT>::ITEMS + G2_THREADS - 1) / G2_THREADS;
+    u8* meta = wb + G2_BM * 256;
 #pragma unroll
     for (int k = 0; k < NI; k++) {
-        int id = threadIdx.x + k * GM_THREADS;
-        if (id >= GM_BM * ITEMS) break;
-        int rr = id / ITEMS, it = id % ITEMS;
+        int rr, it;
+        if (!g2_item<QT>(k, &rr, &it)) break;
         const u32* o = reg[k];
         if (QT == QT_Q6_K) {
             if (it < 4) {
@@ -948,22 +743,19 @@ __device__ __forceinline__ void gm_store_w(ST* st, int nblk, int s, u32 (*reg)[G
                         v[i] = __vsub4(lo | (((o[8 + i] >> (2 * k)) & 0x03030303) << 4),
                                        0x20202020);
                     }
-                    *gm_chunk(st->w, rr, 8 * h + 2 * k + lh) = make_uint4(v[0], v[1], v[2], v[3]);
+                    *g2_w8(wb, rr, 8 * h + 2 * k + lh) = make_uint4(v[0], v[1], v[2], v[3]);
                 }
             } else {
-                st->wsc[rr][0] = o[0], st->wsc[rr][1] = o[1];
-                st->wsc[rr][2] = o[2], st->wsc[rr][3] = o[3];
-                st->wd[rr][0] = h2f(o[4]);
+                *(uint4*)(meta + 16 * rr) = make_uint4(o[0], o[1], o[2], o[3]);
+                ((float*)(meta + 16 * G2_BM))[rr] = h2f(o[4]);
             }
         } else {
             if (s * SB + it >= nblk) continue;
-            st->wd[rr][it] = h2f(o[0]);
+            ((float*)meta)[rr * 8 + it] = h2f(o[0]);
             if (QT == QT_Q8_0) {
-                *gm_chunk(st->w, rr, 2 * it) = make_uint4(o[1], o[2], o[3], o[4]);
-                *gm_chunk(st->w, rr, 2 * it + 1) = make_uint4(o[5], o[6], o[7], o[8]);
+                *g2_w8(wb, rr, 2 * it) = make_uint4(o[1], o[2], o[3], o[4]);
+                *g2_w8(wb, rr, 2 * it + 1) = make_uint4(o[5], o[6], o[7], o[8]);
             } else {
-                // o[1] = qh; qs = o[2..6): element i < 16 low nibble of qs[i],
-                // i >= 16 high nibble of qs[i - 16]; bit 4 = qh bit i.
                 u32 qh = o[1], v[8];
 #pragma unroll
                 for (int u = 0; u < 4; u++) {
@@ -973,378 +765,432 @@ __device__ __forceinline__ void gm_store_w(ST* st, int nblk, int s, u32 (*reg)[G
                                            spread4((qh >> (16 + 4 * u)) & 0xf),
                                        0x10101010);
                 }
-                *gm_chunk(st->w, rr, 2 * it) = make_uint4(v[0], v[1], v[2], v[3]);
-                *gm_chunk(st->w, rr, 2 * it + 1) = make_uint4(v[4], v[5], v[6], v[7]);
+                *g2_w8(wb, rr, 2 * it) = make_uint4(v[0], v[1], v[2], v[3]);
+                *g2_w8(wb, rr, 2 * it + 1) = make_uint4(v[4], v[5], v[6], v[7]);
             }
         }
     }
 }
 
-// Start the copies of stage s: Q4_K weights, and the activations of tokens
-// z0.. (clamped to nb - 1).
-template <int QT, int NF>
-__device__ __forceinline__ void gm_copy(GmStage<GM_BN(NF)>* st, const u8* w, u64 rb, int rows, int r0,
+// Start the copies of stage s: Q4_K weights (into wb), the activations of
+// tokens z0.. (clamped to nb - 1) into st.
+template <int QT, int BN, int ST>
+__device__ __forceinline__ void g2_copy(u8* wb, u8* st, const u8* w, u64 rb, int rows, int r0,
                                         const u8* act, u64 astride, int n, int nb, int z0,
-                                        int nblk, int s, const u32* seq) {
+                                        int nblk, int s) {
 #if __CUDA_ARCH__ >= 800
+    typedef G2L<QT, BN, ST> L;
     u64 np = act_np(n);
     int tid = threadIdx.x;
-    if (QT == QT_Q4_K || QT == QT_Q6_K) {
-        u64 b = sq_blk(seq[s]);
-        if (QT == QT_Q4_K) {
-            for (int id = tid; id < GM_BM * 9; id += GM_THREADS) {
-                int rr = id / 9, ch = id - 9 * rr;
-                cp16(gm_chunk(st->w, rr, ch),
-                     w + (u64)min(r0 + rr, rows - 1) * rb + b * 144 + 16 * ch);
-            }
+    if (QT == QT_Q4_K) {
+        for (int id = tid; id < G2_BM * 9; id += G2_THREADS) {
+            int rr = id / 9, ch = id - 9 * rr;
+            cp16(wb + rr * G2_Q4K_ROW + 16 * ch,
+                 w + (u64)min(r0 + rr, rows - 1) * rb + (u64)s * 144 + 16 * ch);
         }
-        int c = tid & 15;
+    }
+    u8* xs = st;
+    u8* xb = st + L::X;
+    u8* xd = st + L::X + L::XB;
+    // Values: K-quants the Q8_K view at 0, others the Q8_0 view at np.
+    u64 voff = (L::KQ ? 0 : np) + (u64)s * 256;
+    int c = tid & 15;
+    bool cvalid = L::KQ || s * 8 + (c >> 1) < nblk;
 #pragma unroll
-        for (int k = 0; k < GM_BN(NF) * 16 / GM_THREADS; k++) {
-            int tk = (tid >> 4) + k * (GM_THREADS / 16);
+    for (int k = 0; k < BN * 16 / G2_THREADS; k++) {
+        int tk = (tid >> 4) + k * (G2_THREADS / 16);
+        const u8* a = act + (u64)min(z0 + tk, nb - 1) * astride;
+        if (cvalid) cp16(xs + tk * 256 + 16 * (c ^ (tk & 7)), a + voff + 16 * c);
+    }
+    if (QT == QT_Q4_K) {
+        int j = tid & 7;
+#pragma unroll
+        for (int k = 0; k < BN * 8 / G2_THREADS; k++) {
+            int tk = (tid >> 3) + k * (G2_THREADS / 8);
             const u8* a = act + (u64)min(z0 + tk, nb - 1) * astride;
-            cp16(gm_chunk(st->x, tk, c), a + b * 256 + 16 * c);
+            cp4(xb + tk * 32 + 4 * j, a + 2 * np + np / 64 + 4 * ((u64)s * 8 + j));
         }
-        if (QT == QT_Q4_K) {
-            int j = tid & 7;
-#pragma unroll
-            for (int k = 0; k < GM_BN(NF) * 8 / GM_THREADS; k++) {
-                int tk = (tid >> 3) + k * (GM_THREADS / 8);
-                const u8* a = act + (u64)min(z0 + tk, nb - 1) * astride;
-                cp4(&st->xb[tk][j], a + 2 * np + np / 64 + 4 * (b * 8 + j));
-            }
-        }
-        if (tid < GM_BN(NF)) {
-            const u8* a = act + (u64)min(z0 + tid, nb - 1) * astride;
-            cp4(&st->xd[tid][0], a + 2 * np + 4 * b);
+    }
+    if (L::KQ) {
+        for (int tk = tid; tk < BN; tk += G2_THREADS) {
+            const u8* a = act + (u64)min(z0 + tk, nb - 1) * astride;
+            cp4(xd + 4 * tk, a + 2 * np + 4 * (u64)s);
         }
     } else {
-        int e = (tid >> 1) & 7, h = tid & 1, q = s * 8 + e;
-        if (q < nblk) {
-            u64 b = sq_blk(seq[q]);
+        int e = tid & 7;
+        if (s * 8 + e < nblk) {
 #pragma unroll
-            for (int k = 0; k < GM_BN(NF) * 16 / GM_THREADS; k++) {
-                int tk = (tid >> 4) + k * (GM_THREADS / 16);
+            for (int k = 0; k < BN * 8 / G2_THREADS; k++) {
+                int tk = (tid >> 3) + k * (G2_THREADS / 8);
                 const u8* a = act + (u64)min(z0 + tk, nb - 1) * astride;
-                cp16(gm_chunk(st->x, tk, 2 * e + h), a + np + 32 * b + 16 * h);
-            }
-        }
-        e = tid & 7, q = s * 8 + e;
-        if (q < nblk) {
-            u64 b = sq_blk(seq[q]);
-#pragma unroll
-            for (int k = 0; k < GM_BN(NF) * 8 / GM_THREADS; k++) {
-                int tk = (tid >> 3) + k * (GM_THREADS / 8);
-                const u8* a = act + (u64)min(z0 + tk, nb - 1) * astride;
-                cp4(&st->xd[tk][e], a + 2 * np + np / 64 + np / 8 + 4 * b);
+                cp4(xd + tk * 32 + 4 * e, a + 2 * np + np / 64 + np / 8 + 4 * ((u64)s * 8 + e));
             }
         }
     }
 #endif
 }
 
-// Signed byte j of the 16 packed in w[0..4).
-__device__ __forceinline__ int gm_sbyte(const u32* w, int j) {
-    return (int)(w[j >> 2] << (24 - 8 * (j & 3))) >> 24;
-}
-__device__ __forceinline__ int gm_ubyte(u32 w, int j) { return __byte_perm(w, 0, 0x4440 + (j & 3)); }
+__device__ __forceinline__ u32 g2_ld(const u8* p) { return *(const u32*)p; }
 
-// One stage's products into the lanes' running sums c[lane][output] (and,
-// for 32-value blocks, groups folded as they end). wr / wc: the warp's row /
-// token tile.
-// CH: groups of several blocks (lanes keep running sums c across stages);
-// without, every group is one block (nblk <= G) and its 8 lane values are
-// added up as they come (same tree, gm_tree8's), folded at once.
-template <int QT, int NF, bool CH>
-__device__ __forceinline__ void gm_compute(const GmStage<GM_BN(NF)>* st, int nblk, int s,
-                                           const u32* seq, int wr, int wc, float (*c)[4 * NF],
-                                           GmTree* tree) {
-    const int NO = 4 * NF;
-    float s01[NO], s45[NO], s67[NO]; // !CH: partial gm_tree8 sums
+// One stage's products into the chains acc[mi][f][e] (row 32 wr + 16 mi +
+// g + 8 (e >> 1), token 8 NT wc + 8 f + 2t + (e & 1)).
+template <int QT, int NT, int ST>
+__device__ __forceinline__ void g2_compute(const u8* wb, const u8* st, int nblk, int s, int wr,
+                                           int wc, float (*acc)[NT][4]) {
 #if __CUDA_ARCH__ >= 800
+    typedef G2L<QT, 32 * NT, ST> L;
     int lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
-    int ra = 16 * wr + g, rbw = ra + 8; // the thread's rows (outputs i < 2, i >= 2)
-    int tb[NF]; // B fragment tokens of the n8 tiles
+    const u8* xs = st;
+    const u8* xb = st + L::X;
+    const float* xd = (const float*)(st + L::X + L::XB);
+    // B fragment rows: token tb[f] (tb & 7 == g), word t of a chunk.
+    const u8* xrow[NT];
 #pragma unroll
-    for (int f = 0; f < NF; f++) tb[f] = 8 * NF * wc + 8 * f + g;
-    int tk[NO]; // output tokens
-#pragma unroll
-    for (int o = 0; o < NO; o++) tk[o] = 8 * NF * wc + 8 * (o >> 2) + 2 * t + (o & 1);
+    for (int f = 0; f < NT; f++) xrow[f] = xs + (8 * NT * wc + 8 * f + g) * 256 + 4 * t;
+#define G2_X(f, c) g2_ld(xrow[f] + 16 * ((c) ^ g))
+    // The thread's output tokens (within the block).
+    int tk0 = 8 * NT * wc + 2 * t;
     if constexpr (QT == QT_Q4_K) {
-        // The rows' headers (chunk 0): d, dmin, 6-bit scales and mins (quant.rs
-        // get_scale_min_k4, four at a time).
-        float d[2], dmin[2], dm0[2];
-        u32 scw[2][2], mw[2][2];
+        // Rows ra = 32 wr + 16 mi + 8 h + g: header d, dmin, scales, mins.
+        float d[2][2], dmin[2][2];
+        u32 scw[2][2][2], mw[2][2][2];
+        const u8* wrow[2][2];
 #pragma unroll
-        for (int h = 0; h < 2; h++) {
-            uint4 hd = st->w[h ? rbw : ra][0];
-            // The hardware conversion (cvt.f32.f16). For every non-NaN
-            // half it is f16_to_f32's value exactly (f16 values are a
-            // subset of f32's: no rounding), which is the guarantee. A NaN
-            // scale (only in a corrupt file) differs: cvt gives the canonical
-            // NaN, f16_to_f32 keeps the payload; both scales only feed
-            // fmul, whose NaN result is canonical either way on sm_120
-            // (gpu_hw_f16_scales_exact_in_products checks all 65536 halves).
-            d[h] = h2f(hd.x & 0xffff);
-            dmin[h] = h2f(hd.x >> 16);
-            dm0[h] = __fmul_rn(dmin[h], 0.0f);
-            scw[h][0] = hd.y & 0x3f3f3f3f;
-            scw[h][1] = (hd.w & 0x0f0f0f0f) | ((hd.y >> 2) & 0x30303030);
-            mw[h][0] = hd.z & 0x3f3f3f3f;
-            mw[h][1] = ((hd.w >> 4) & 0x0f0f0f0f) | ((hd.z >> 2) & 0x30303030);
-        }
-        float dk[NO];
-#pragma unroll
-        for (int o = 0; o < NO; o++) dk[o] = st->xd[tk[o]][0];
-#pragma unroll
-        for (int cc = 0; cc < 4; cc++) {
-            int sc1[2], sc2[2], m1[2], m2[2];
+        for (int mi = 0; mi < 2; mi++)
 #pragma unroll
             for (int h = 0; h < 2; h++) {
-                sc1[h] = gm_ubyte(scw[h][cc >> 1], 2 * cc);
-                sc2[h] = gm_ubyte(scw[h][cc >> 1], 2 * cc + 1);
-                m1[h] = gm_ubyte(mw[h][cc >> 1], 2 * cc);
-                m2[h] = gm_ubyte(mw[h][cc >> 1], 2 * cc + 1);
+                wrow[mi][h] = wb + (32 * wr + 16 * mi + 8 * h + g) * G2_Q4K_ROW;
+                uint4 hd = *(const uint4*)wrow[mi][h];
+                d[mi][h] = h2f(hd.x & 0xffff);
+                dmin[mi][h] = h2f(hd.x >> 16);
+                scw[mi][h][0] = hd.y & 0x3f3f3f3f;
+                scw[mi][h][1] = (hd.w & 0x0f0f0f0f) | ((hd.y >> 2) & 0x30303030);
+                mw[mi][h][0] = hd.z & 0x3f3f3f3f;
+                mw[mi][h][1] = ((hd.w >> 4) & 0x0f0f0f0f) | ((hd.z >> 2) & 0x30303030);
             }
-            float dm[NO]; // dmin * summ of sub-blocks 2c, 2c + 1 (lanes with hf = 0)
+        int S[2][NT][4], M[2][NT][4];
 #pragma unroll
-            for (int o = 0; o < NO; o++) {
-                int h = (o & 2) >> 1;
-                int2 bs = *(const int2*)&st->xb[tk[o]][2 * cc];
-                dm[o] = __fmul_rn(dmin[h], gm_i2f(m1[h] * bs.x + m2[h] * bs.y));
-            }
+        for (int mi = 0; mi < 2; mi++)
 #pragma unroll
-            for (int hf = 0; hf < 2; hf++) {
-                // qs bytes 32 c + 16 hf + 4 t.. (chunk 1 + 2c + hf): low nibbles
-                // are sub-block 2c's values 16 hf + 4 t.., high ones 2c + 1's.
-                int p = 2 * cc + hf, k = 1 + 2 * cc + hf;
-                u32 qa = gm_word(st->w, ra, k, t), qb = gm_word(st->w, rbw, k, t);
-                u32 a10 = qa & 0x0f0f0f0f, a11 = qb & 0x0f0f0f0f;
-                u32 a20 = (qa >> 4) & 0x0f0f0f0f, a21 = (qb >> 4) & 0x0f0f0f0f;
-                int j1 = 4 * cc + hf, j2 = j1 + 2; // activation chunks
+            for (int f = 0; f < NT; f++)
 #pragma unroll
-                for (int f = 0; f < NF; f++) {
+                for (int e = 0; e < 4; e++) S[mi][f][e] = 0;
+#pragma unroll
+        for (int c = 0; c < 4; c++) {
+            // B: sub-blocks 2c (chunks 4c, 4c + 1) and 2c + 1 (4c + 2, 4c + 3).
+            u32 bf[NT][4];
+#pragma unroll
+            for (int f = 0; f < NT; f++)
+#pragma unroll
+                for (int i = 0; i < 4; i++) bf[f][i] = G2_X(f, 4 * c + i);
+#pragma unroll
+            for (int mi = 0; mi < 2; mi++) {
+                // qs bytes 32c + 4t.. (chunk 1 + 2c) and 32c + 16 + 4t.. (2 + 2c).
+                u32 q[2][2];
+#pragma unroll
+                for (int h = 0; h < 2; h++) {
+                    q[h][0] = g2_ld(wrow[mi][h] + 16 * (1 + 2 * c) + 4 * t);
+                    q[h][1] = g2_ld(wrow[mi][h] + 16 * (2 + 2 * c) + 4 * t);
+                }
+                int sc1[2], sc2[2];
+#pragma unroll
+                for (int h = 0; h < 2; h++) {
+                    sc1[h] = gm_ubyte(scw[mi][h][c >> 1], 2 * c);
+                    sc2[h] = gm_ubyte(scw[mi][h][c >> 1], 2 * c + 1);
+                }
+                u32 lo0 = q[0][0] & 0x0f0f0f0f, lo1 = q[1][0] & 0x0f0f0f0f;
+                u32 lo2 = q[0][1] & 0x0f0f0f0f, lo3 = q[1][1] & 0x0f0f0f0f;
+                u32 hi0 = (q[0][0] >> 4) & 0x0f0f0f0f, hi1 = (q[1][0] >> 4) & 0x0f0f0f0f;
+                u32 hi2 = (q[0][1] >> 4) & 0x0f0f0f0f, hi3 = (q[1][1] >> 4) & 0x0f0f0f0f;
+#pragma unroll
+                for (int f = 0; f < NT; f++) {
                     int d1[4], d2[4];
-                    mma16(d1, a10, a11, gm_word(st->x, tb[f], j1, t));
-                    mma16(d2, a20, a21, gm_word(st->x, tb[f], j2, t));
+                    mma32(d1, lo0, lo1, lo2, lo3, bf[f][0], bf[f][1]);
+                    mma32(d2, hi0, hi1, hi2, hi3, bf[f][2], bf[f][3]);
 #pragma unroll
-                    for (int i = 0; i < 4; i++) {
-                        int o = 4 * f + i, h = i >> 1;
-                        float si = gm_i2f(sc1[h] * d1[i] + sc2[h] * d2[i]);
-                        float v = __fsub_rn(__fmul_rn(d[h], si), hf ? dm0[h] : dm[o]);
-                        if constexpr (CH) {
-                            c[p][o] = __fmaf_rn(dk[o], v, c[p][o]);
-                        } else {
-                            // ((c0 + c1) + (c2 + c3)) + ((c4 + c5) + (c6 + c7)), in order.
-                            float cp = __fmaf_rn(dk[o], v, 0.0f);
-                            if (p == 0) s01[o] = cp;
-                            else if (p == 1) s01[o] = __fadd_rn(s01[o], cp);
-                            else if (p == 2) s45[o] = cp; // c2 for now
-                            else if (p == 3) s01[o] = __fadd_rn(s01[o], __fadd_rn(s45[o], cp));
-                            else if (p == 4) s45[o] = cp;
-                            else if (p == 5) s45[o] = __fadd_rn(s45[o], cp);
-                            else if (p == 6) s67[o] = cp;
-                            else c[0][o] = __fadd_rn(s01[o], __fadd_rn(s45[o], __fadd_rn(s67[o], cp)));
-                        }
+                    for (int e = 0; e < 4; e++) {
+                        int h = e >> 1;
+                        S[mi][f][e] += sc1[h] * d1[e] + sc2[h] * d2[e];
                     }
                 }
             }
         }
-    } else if constexpr (QT == QT_Q6_K) {
-        float d[2] = {st->wd[ra][0], st->wd[rbw][0]};
-        float dkd[NO];
+        {
+            // M by mma: sum_j m_j bsum_j with bsum_j = lo_j + 64 hi_j (lo in
+            // [0, 64), hi in [-64, 64): int8). B (k16) of token g: k < 8 the
+            // lo_j, k >= 8 the hi_j; A rows: the mins at k < 8 (lo product)
+            // or k >= 8 (hi product), zeros elsewhere.
+            u32 bm[NT];
 #pragma unroll
-        for (int o = 0; o < NO; o++) dkd[o] = __fmul_rn(st->xd[tk[o]][0], d[(o & 2) >> 1]);
-#pragma unroll
-        for (int pp = 0; pp < 4; pp++) {
-            int hh = pp >> 1, qhi = pp & 1, px = 4 * hh + 2 * qhi;
-            int sx[NO], sy[NO];
-#pragma unroll
-            for (int o = 0; o < NO; o++) sx[o] = sy[o] = 0;
-#pragma unroll
-            for (int k = 0; k < 4; k++) {
-                int j = 8 * hh + 2 * k + qhi;
-                int sca = gm_sbyte(st->wsc[ra], j), scb = gm_sbyte(st->wsc[rbw], j);
-                u32 wa = gm_word(st->w, ra, j, t), wb = gm_word(st->w, rbw, j, t);
-                u32 xa0 = t < 2 ? wa : 0, xa1 = t < 2 ? 0 : wa;
-                u32 xb0 = t < 2 ? wb : 0, xb1 = t < 2 ? 0 : wb;
-#pragma unroll
-                for (int f = 0; f < NF; f++) {
-                    u32 bb = gm_word(st->x, tb[f], j, t);
-                    int da[4], db[4];
-                    mma16(da, xa0, xa1, bb);
-                    mma16(db, xb0, xb1, bb);
-                    sx[4 * f + 0] += sca * da[0];
-                    sx[4 * f + 1] += sca * da[1];
-                    sy[4 * f + 0] += sca * da[2];
-                    sy[4 * f + 1] += sca * da[3];
-                    sx[4 * f + 2] += scb * db[0];
-                    sx[4 * f + 3] += scb * db[1];
-                    sy[4 * f + 2] += scb * db[2];
-                    sy[4 * f + 3] += scb * db[3];
-                }
+            for (int f = 0; f < NT; f++) {
+                int4 v = *(const int4*)(xb + (8 * NT * wc + 8 * f + g) * 32 + 16 * (t & 1));
+                int sh = t < 2 ? 0 : 6;
+                u32 p01 = __byte_perm((u32)(v.x >> sh), (u32)(v.y >> sh), 0x0040);
+                u32 p23 = __byte_perm((u32)(v.z >> sh), (u32)(v.w >> sh), 0x0040);
+                bm[f] = __byte_perm(p01, p23, 0x5410) & (t < 2 ? 0x3f3f3f3fu : 0xffffffffu);
             }
 #pragma unroll
-            for (int o = 0; o < NO; o++) {
-                if constexpr (CH) {
-                    c[px][o] = __fmaf_rn(dkd[o], (float)sx[o], c[px][o]);
-                    c[px + 1][o] = __fmaf_rn(dkd[o], (float)sy[o], c[px + 1][o]);
-                } else {
-                    float cx = __fmaf_rn(dkd[o], (float)sx[o], 0.0f);
-                    float cy = __fmaf_rn(dkd[o], (float)sy[o], 0.0f);
-                    float pr = __fadd_rn(cx, cy);
-                    if (pp == 0) s01[o] = pr;
-                    else if (pp == 1) s01[o] = __fadd_rn(s01[o], pr);
-                    else if (pp == 2) s45[o] = pr;
-                    else c[0][o] = __fadd_rn(s01[o], __fadd_rn(s45[o], pr));
+            for (int mi = 0; mi < 2; mi++) {
+                u32 m0 = (t & 1) ? mw[mi][0][1] : mw[mi][0][0];
+                u32 m1 = (t & 1) ? mw[mi][1][1] : mw[mi][1][0];
+                u32 alo0 = t < 2 ? m0 : 0, alo1 = t < 2 ? m1 : 0;
+                u32 ahi0 = t < 2 ? 0 : m0, ahi1 = t < 2 ? 0 : m1;
+#pragma unroll
+                for (int f = 0; f < NT; f++) {
+                    int ml[4], mh[4];
+                    mma16(ml, alo0, alo1, bm[f]);
+                    mma16(mh, ahi0, ahi1, bm[f]);
+#pragma unroll
+                    for (int e = 0; e < 4; e++) M[mi][f][e] = ml[e] + mh[e] * 64;
+                }
+            }
+        }
+        float dk[NT][2];
+#pragma unroll
+        for (int f = 0; f < NT; f++)
+#pragma unroll
+            for (int e = 0; e < 2; e++) dk[f][e] = xd[tk0 + 8 * f + e];
+#pragma unroll
+        for (int mi = 0; mi < 2; mi++)
+#pragma unroll
+            for (int f = 0; f < NT; f++)
+#pragma unroll
+                for (int e = 0; e < 4; e++) {
+                    int h = e >> 1;
+                    float v = __fsub_rn(__fmul_rn(d[mi][h], i2f_rn(S[mi][f][e])),
+                                        __fmul_rn(dmin[mi][h], i2f_rn(M[mi][f][e])));
+                    acc[mi][f][e] = __fmaf_rn(dk[f][e & 1], v, acc[mi][f][e]);
+                }
+    } else if constexpr (QT == QT_Q6_K) {
+        const u8* meta = wb + G2_BM * 256;
+        // Rows 32 wr + 16 mi + 8 h + g.
+        const u8* wrow[2][2];
+        u32 scw[2][2][4];
+        float dw[2][2];
+#pragma unroll
+        for (int mi = 0; mi < 2; mi++)
+#pragma unroll
+            for (int h = 0; h < 2; h++) {
+                int r = 32 * wr + 16 * mi + 8 * h + g;
+                wrow[mi][h] = wb + r * 256 + 4 * t;
+                uint4 sc = *(const uint4*)(meta + 16 * r);
+                scw[mi][h][0] = sc.x, scw[mi][h][1] = sc.y, scw[mi][h][2] = sc.z,
+                scw[mi][h][3] = sc.w;
+                dw[mi][h] = ((const float*)(meta + 16 * G2_BM))[r];
+            }
+        int S[2][NT][4];
+#pragma unroll
+        for (int mi = 0; mi < 2; mi++)
+#pragma unroll
+            for (int f = 0; f < NT; f++)
+#pragma unroll
+                for (int e = 0; e < 4; e++) S[mi][f][e] = 0;
+#pragma unroll
+        for (int j = 0; j < 16; j++) {
+            u32 bf[NT];
+#pragma unroll
+            for (int f = 0; f < NT; f++) bf[f] = G2_X(f, j);
+#pragma unroll
+            for (int mi = 0; mi < 2; mi++) {
+                u32 a0 = g2_ld(wrow[mi][0] + 16 * (j ^ g)), a1 = g2_ld(wrow[mi][1] + 16 * (j ^ g));
+                int sa = (int)g2_sbyte(scw[mi][0][j >> 2], j & 3);
+                int sb = (int)g2_sbyte(scw[mi][1][j >> 2], j & 3);
+#pragma unroll
+                for (int f = 0; f < NT; f++) {
+                    int dd[4];
+                    mma16(dd, a0, a1, bf[f]);
+                    S[mi][f][0] += sa * dd[0];
+                    S[mi][f][1] += sa * dd[1];
+                    S[mi][f][2] += sb * dd[2];
+                    S[mi][f][3] += sb * dd[3];
+                }
+            }
+        }
+        float dk[NT][2];
+#pragma unroll
+        for (int f = 0; f < NT; f++)
+#pragma unroll
+            for (int e = 0; e < 2; e++) dk[f][e] = xd[tk0 + 8 * f + e];
+#pragma unroll
+        for (int mi = 0; mi < 2; mi++)
+#pragma unroll
+            for (int f = 0; f < NT; f++)
+#pragma unroll
+                for (int e = 0; e < 4; e++)
+                    acc[mi][f][e] = __fmaf_rn(__fmul_rn(dk[f][e & 1], dw[mi][e >> 1]),
+                                              i2f_rn(S[mi][f][e]), acc[mi][f][e]);
+    } else {
+        const float* wd = (const float*)(wb + G2_BM * 256);
+        const u8* wrow[2][2];
+#pragma unroll
+        for (int mi = 0; mi < 2; mi++)
+#pragma unroll
+            for (int h = 0; h < 2; h++)
+                wrow[mi][h] = wb + (32 * wr + 16 * mi + 8 * h + g) * 256 + 4 * t;
+#pragma unroll
+        for (int e8 = 0; e8 < 8; e8++) {
+            if (s * 8 + e8 >= nblk) break;
+            u32 bf[NT][2];
+#pragma unroll
+            for (int f = 0; f < NT; f++) {
+                bf[f][0] = G2_X(f, 2 * e8);
+                bf[f][1] = G2_X(f, 2 * e8 + 1);
+            }
+            float d0[NT][2];
+#pragma unroll
+            for (int f = 0; f < NT; f++)
+#pragma unroll
+                for (int e = 0; e < 2; e++) d0[f][e] = xd[(tk0 + 8 * f + e) * 8 + e8];
+#pragma unroll
+            for (int mi = 0; mi < 2; mi++) {
+                u32 a0 = g2_ld(wrow[mi][0] + 16 * ((2 * e8) ^ g));
+                u32 a1 = g2_ld(wrow[mi][1] + 16 * ((2 * e8) ^ g));
+                u32 a2 = g2_ld(wrow[mi][0] + 16 * ((2 * e8 + 1) ^ g));
+                u32 a3 = g2_ld(wrow[mi][1] + 16 * ((2 * e8 + 1) ^ g));
+                float dwr[2];
+#pragma unroll
+                for (int h = 0; h < 2; h++) dwr[h] = wd[(32 * wr + 16 * mi + 8 * h + g) * 8 + e8];
+#pragma unroll
+                for (int f = 0; f < NT; f++) {
+                    int dd[4];
+                    mma32(dd, a0, a1, a2, a3, bf[f][0], bf[f][1]);
+#pragma unroll
+                    for (int e = 0; e < 4; e++)
+                        acc[mi][f][e] = __fmaf_rn(__fmul_rn(dwr[e >> 1], d0[f][e & 1]),
+                                                  gm_i2f(dd[e]), acc[mi][f][e]);
+                }
+            }
+        }
+    }
+#undef G2_X
+#endif
+}
+
+template <int QT, int NT, int ST>
+__device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, const u8* act,
+                                        u64 astride, int nb, const float* bias, int mode,
+                                        float* out, u64 ostride) {
+#if __CUDA_ARCH__ >= 800
+    const int BN = 32 * NT;
+    typedef G2L<QT, BN, ST> L;
+    extern __shared__ uint4 g2_smem[];
+    u8* sm = (u8*)g2_smem;
+    u32 dsz;
+    asm("mov.u32 %0, %%dynamic_smem_size;" : "=r"(dsz));
+    if (dsz < L::SMEM) __trap(); // the host's size out of date
+    u8* wbuf = sm;
+    u8* stg = sm + L::NWB * L::W;
+    int nblk = n / (L::KQ ? 256 : 32), nst = (n + 255) / 256;
+    int r0 = blockIdx.y * G2_BM, z0 = blockIdx.x * BN;
+    int warp = threadIdx.x >> 5, wr = warp & 1, wc = warp >> 1;
+    float acc[2][NT][4];
+#pragma unroll
+    for (int mi = 0; mi < 2; mi++)
+#pragma unroll
+        for (int f = 0; f < NT; f++)
+#pragma unroll
+            for (int e = 0; e < 4; e++) acc[mi][f][e] = 0.0f;
+    const int NI = L::RAW ? 1 : (G2_BM * GmType<QT>::ITEMS + G2_THREADS - 1) / G2_THREADS;
+    u32 reg[NI][G2_WREGS];
+    // Stage s's buffers.
+    auto wsl = [&](int s) { return wbuf + (L::RAW ? s % ST : (L::NWB == 2 ? s & 1 : 0)) * L::W; };
+    auto xsl = [&](int s) { return stg + (s % ST) * L::STAGE; };
+    auto copy = [&](int s) {
+        g2_copy<QT, BN, ST>(wsl(s), xsl(s), w, rb, rows, r0, act, astride, n, nb, z0, nblk, s);
+    };
+    if constexpr (!L::RAW) {
+        g2_load_w<QT>(w, rb, rows, r0, nblk, 0, reg);
+        g2_store_w<QT>(wsl(0), nblk, 0, reg);
+        if (nst > 1) g2_load_w<QT>(w, rb, rows, r0, nblk, 1, reg);
+    }
+    if constexpr (ST == 2) {
+        // Two stages: copy s + 1 while s is computed; two barriers a stage.
+        copy(0);
+        cp_commit();
+        for (int s = 0; s < nst; s++) {
+            if (s + 1 < nst) {
+                copy(s + 1);
+                cp_commit();
+                cp_wait<1>();
+            } else {
+                cp_wait<0>();
+            }
+            __syncthreads();
+            g2_compute<QT, NT, ST>(wsl(s), xsl(s), nblk, s, wr, wc, acc);
+            __syncthreads();
+            if constexpr (!L::RAW) {
+                if (s + 1 < nst) {
+                    g2_store_w<QT>(wsl(s + 1), nblk, s + 1, reg);
+                    if (s + 2 < nst) g2_load_w<QT>(w, rb, rows, r0, nblk, s + 2, reg);
                 }
             }
         }
     } else {
+        // ST stages, ST - 1 copies in flight, one barrier a stage: after it,
+        // every thread is done with stage s - 1, whose buffers (and the
+        // weight buffer s + 1 shares with it) are refilled.
 #pragma unroll
-        for (int e = 0; e < 8; e++) {
-            int q = s * 8 + e;
-            if (q >= nblk) break;
-            u32 sq = seq[q];
-            u32 a0 = gm_word(st->w, ra, 2 * e, t), a1 = gm_word(st->w, rbw, 2 * e, t);
-            u32 a2 = gm_word(st->w, ra, 2 * e + 1, t), a3 = gm_word(st->w, rbw, 2 * e + 1, t);
-            float wd[2] = {st->wd[ra][e], st->wd[rbw][e]};
-#pragma unroll
-            for (int f = 0; f < NF; f++) {
-                int dd[4];
-                mma32(dd, a0, a1, a2, a3, gm_word(st->x, tb[f], 2 * e, t),
-                      gm_word(st->x, tb[f], 2 * e + 1, t));
-#pragma unroll
-                for (int i = 0; i < 4; i++) {
-                    int o = 4 * f + i;
-                    float sd = __fmul_rn(wd[i >> 1], st->xd[tk[o]][e]);
-                    c[0][o] = __fadd_rn(c[0][o], __fmul_rn(sd, gm_i2f(dd[i])));
-                }
-            }
-            if (sq_last(sq)) {
-#pragma unroll
-                for (int o = 0; o < NO; o++) {
-                    gm_fold<8>(tree[o], sq_grp(sq), gm_tree4(c[0][o]));
-                    c[0][o] = 0.0f;
-                }
-            }
-        }
-    }
-#endif
-}
-
-template <int QT, int NF, bool CH>
-__device__ __forceinline__ void gemm_t(const u8* w, u64 rb, int rows, int n, const u8* act,
-                                       u64 astride, int nb, const float* bias, int mode,
-                                       float* out, u64 ostride) {
-#if __CUDA_ARCH__ >= 800
-    const int G = GmType<QT>::G, SB = GmType<QT>::SB, KQ = G == 16;
-    const int NI = (GM_BM * GmType<QT>::ITEMS + GM_THREADS - 1) / GM_THREADS;
-    extern __shared__ uint4 gm_smem[];
-    typedef GmStage<GM_BN(NF)> St;
-    const int NO = 4 * NF;
-    St* st = (St*)gm_smem;
-    u32* seq = (u32*)(st + 2);
-    int nblk = n / GmType<QT>::VB, nsteps = (nblk + SB - 1) / SB;
-    u32 dsz;
-    asm("mov.u32 %0, %%dynamic_smem_size;" : "=r"(dsz));
-    // The host's GEMM_SMEM out of date, or a matrix too wide for the table.
-    if (dsz < 2 * sizeof(St) + 4 * GM_MAXSEQ || nblk > GM_MAXSEQ) __trap();
-    for (int q = threadIdx.x; q < nblk; q += GM_THREADS) seq[q] = gm_seq(q, nblk, G);
-    __syncthreads();
-    int r0 = blockIdx.y * GM_BM, z0 = blockIdx.x * GM_BN(NF);
-    int warp = threadIdx.x >> 5, wr = warp & 1, wc = warp >> 1;
-    u32 reg[NI > 0 ? NI : 1][GM_WREGS];
-    float c[KQ && CH ? 8 : 1][NO];
-    GmTree tree[NO];
-#pragma unroll
-    for (int o = 0; o < NO; o++) {
-        tree[o].r = tree[o].s0 = tree[o].s1 = tree[o].s2 = 0.0f;
-#pragma unroll
-        for (int p = 0; p < (KQ && CH ? 8 : 1); p++) c[p][o] = 0.0f;
-    }
-    if (KQ && !CH && nblk > G) __trap(); // the host picks CH for wider rows
-    if (NI > 0) gm_load_w<QT>(w, rb, rows, r0, nblk, 0, seq, reg);
-    gm_copy<QT, NF>(&st[0], w, rb, rows, r0, act, astride, n, nb, z0, nblk, 0, seq);
-    cp_commit();
-    if (NI > 0) gm_store_w<QT>(&st[0], nblk, 0, reg);
-    for (int s = 0; s < nsteps; s++) {
-        bool more = s + 1 < nsteps;
-        if (more) {
-            if (NI > 0) gm_load_w<QT>(w, rb, rows, r0, nblk, s + 1, seq, reg);
-            gm_copy<QT, NF>(&st[(s + 1) & 1], w, rb, rows, r0, act, astride, n, nb, z0, nblk, s + 1,
-                        seq);
+        for (int p = 0; p < ST - 1; p++) {
+            if (p < nst) copy(p);
             cp_commit();
-            cp_wait<1>();
-        } else {
-            cp_wait<0>();
         }
-        __syncthreads();
-        gm_compute<QT, NF, CH>(&st[s & 1], nblk, s, seq, wr, wc, c, tree);
-        if (KQ && !CH) {
-#pragma unroll
-            for (int o = 0; o < NO; o++) gm_fold<4>(tree[o], s, c[0][o]);
-        } else if (KQ && sq_last(seq[s])) {
-            int gi = sq_grp(seq[s]);
-#pragma unroll
-            for (int o = 0; o < NO; o++) {
-                float cs[8];
-#pragma unroll
-                for (int p = 0; p < 8; p++) {
-                    cs[p] = c[p][o];
-                    c[p][o] = 0.0f;
+        for (int s = 0; s < nst; s++) {
+            cp_wait<ST - 2>();
+            __syncthreads();
+            if (s + ST - 1 < nst) copy(s + ST - 1);
+            cp_commit();
+            if constexpr (!L::RAW) {
+                if (s + 1 < nst) {
+                    g2_store_w<QT>(wsl(s + 1), nblk, s + 1, reg);
+                    if (s + 2 < nst) g2_load_w<QT>(w, rb, rows, r0, nblk, s + 2, reg);
                 }
-                gm_fold<4>(tree[o], gi, gm_tree8(cs));
             }
-        }
-        if (more && NI > 0) gm_store_w<QT>(&st[(s + 1) & 1], nblk, s + 1, reg);
-        __syncthreads();
-    }
-    // Groups without blocks (nblk < G): lanes that summed nothing.
-    for (int gi = nblk; gi < G; gi++) {
-#pragma unroll
-        for (int o = 0; o < NO; o++) {
-            if (KQ) gm_fold<4>(tree[o], gi, 0.0f); // gm_tree8 of 8 zeros
-            else gm_fold<8>(tree[o], gi, gm_tree4(0.0f));
+            g2_compute<QT, NT, ST>(wsl(s), xsl(s), nblk, s, wr, wc, acc);
         }
     }
     int lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
 #pragma unroll
-    for (int o = 0; o < NO; o++) {
-        int r = r0 + 16 * wr + g + ((o & 2) ? 8 : 0);
-        int z = z0 + 8 * NF * wc + 8 * (o >> 2) + 2 * t + (o & 1);
-        if (r < rows && z < nb) gm_store(tree[o].r, bias, mode, out + (u64)z * ostride, r);
-    }
+    for (int mi = 0; mi < 2; mi++)
+#pragma unroll
+        for (int f = 0; f < NT; f++)
+#pragma unroll
+            for (int e = 0; e < 4; e++) {
+                int r = r0 + 32 * wr + 16 * mi + 8 * (e >> 1) + g;
+                int z = z0 + 8 * NT * wc + 8 * f + 2 * t + (e & 1);
+                if (r < rows && z < nb)
+                    gm_store(acc[mi][f][e], bias, mode, out + (u64)z * ostride, r);
+            }
 #else
     __trap();
 #endif
 }
 
-#define GEMM(NAME, QT, NF, CH)                                                                    \
-    extern "C" __global__ void __launch_bounds__(GM_THREADS, NF == 1 ? 2 : 1) NAME(               \
+#define GEMM2(NAME, QT, NT, ST)                                                                   \
+    extern "C" __global__ void __launch_bounds__(G2_THREADS, 1) NAME(                             \
         const u8* __restrict__ w, u64 rb, int rows, int n, const u8* __restrict__ act,           \
         u64 astride, int nb, const float* __restrict__ bias, int mode, float* __restrict__ out,  \
         u64 ostride) {                                                                            \
-        gemm_t<QT, NF, CH>(w, rb, rows, n, act, astride, nb, bias, mode, out, ostride);           \
+        gemm2_t<QT, NT, ST>(w, rb, rows, n, act, astride, nb, bias, mode, out, ostride);          \
     }
-// gemm_*: 64 tokens per block; gemm1_*: 32 (two blocks per SM); gemms1_*:
-// K-quant rows of at most 16 blocks (no running sums kept), 32 tokens. The
-// variants qwen2/batch.rs picks (the fastest measured, cuda_gemm_bench).
-GEMM(gemm_q4_k, QT_Q4_K, 2, true)
-GEMM(gemm1_q6_k, QT_Q6_K, 1, true)
-GEMM(gemm1_q8_0, QT_Q8_0, 1, true)
-GEMM(gemm1_q5_0, QT_Q5_0, 1, true)
-GEMM(gemms1_q4_k, QT_Q4_K, 1, false)
-GEMM(gemms1_q6_k, QT_Q6_K, 1, false)
+// gemm2_*: 64 rows x 128 tokens, two stages; gemm2s_*: 64 x 64, three
+// stages, for matrices too small to fill the GPU with the big tiles
+// (qwen2/batch.rs picks).
+GEMM2(gemm2_q4_k, QT_Q4_K, 4, 2)
+GEMM2(gemm2_q6_k, QT_Q6_K, 4, 2)
+GEMM2(gemm2_q8_0, QT_Q8_0, 4, 2)
+GEMM2(gemm2_q5_0, QT_Q5_0, 4, 2)
+GEMM2(gemm2s_q4_k, QT_Q4_K, 2, 3)
+GEMM2(gemm2s_q6_k, QT_Q6_K, 2, 3)
+GEMM2(gemm2s_q8_0, QT_Q8_0, 2, 3)
+GEMM2(gemm2s_q5_0, QT_Q5_0, 2, 3)
 
 // ---------------------------------------------------------------------------
 // gemvm_*: small batches (nb <= 8 NF) on tensor cores, weight-read-once: the
-// verify pass of a draft. A block is the decode GEMV's block remapped: warp
-// w does what decode warp w's lanes do (groups GPW w .. GPW w + GPW - 1 of
-// every row) for 16 rows x 8 NF tokens, with mma sums per lane share as in
-// gemm_*, weights loaded straight from global memory (the next block's while
-// one is used); then cta_sum's last step, ((W0 + W1) + W2) + W3, through
-// shared memory. 4 warps, rows / 16 blocks.
+// verify pass of a draft. A block: 16 rows x 8 NF tokens, 4 warps splitting
+// K (warp w takes blocks w, w + 4, ...), weights loaded straight from global
+// memory (the next block's while one is used). Each block's value per
+// output (and its row and token scales) goes to shared memory, GVM_CH blocks
+// at a time; then each thread runs the fma chains of its outputs over them.
 
 #define GV_THREADS 128
 
@@ -1424,14 +1270,21 @@ struct GvW<QT_Q8_0> : GvW32<QT_Q8_0> {};
 template <>
 struct GvW<QT_Q5_0> : GvW32<QT_Q5_0> {};
 
+// Blocks per chunk of gemvm's (block, output) values in shared memory.
+#define GVM_CH 8
+
 template <int QT, int NF>
 __device__ __forceinline__ void gemvm_t(const u8* w, u64 rb, int rows, int n, const u8* act,
                                         u64 astride, int nb, const float* bias, int mode,
                                         float* out, u64 ostride) {
 #if __CUDA_ARCH__ >= 800
     const int KQ = QT == QT_Q4_K || QT == QT_Q6_K;
-    const int G = KQ ? 16 : 32, GPW = G / 4, NO = 4 * NF;
-    __shared__ float sh[4][16][16];
+    const int NT = 8 * NF, NO = 4 * NF;
+    // Per chunk (two, alternating): each block's value per output, and its
+    // per-row (Q6_K d, Q8_0/Q5_0 dw) and per-token (dk, d0) scales.
+    __shared__ float vs[2][GVM_CH][16][NT];
+    __shared__ float rs[2][GVM_CH][16];
+    __shared__ float ts[2][GVM_CH][NT];
     int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, g = lane >> 2, t = lane & 3;
     int r0 = blockIdx.x * 16;
     const u8* rws[2] = {w + (u64)min(r0 + g, rows - 1) * rb, w + (u64)min(r0 + g + 8, rows - 1) * rb};
@@ -1445,40 +1298,36 @@ __device__ __forceinline__ void gemvm_t(const u8* w, u64 rb, int rows, int n, co
 #pragma unroll
     for (int o = 0; o < NO; o++)
         xo[o] = act + (u64)min(8 * (o >> 2) + 2 * t + (o & 1), nb - 1) * astride;
-    float c[KQ ? 8 : 1][NO];
-    GmTree tree[NO];
+    const u8* xs = act + (u64)min(lane, nb - 1) * astride; // lane < NT: token lane's scales
+    float acc[NF];
 #pragma unroll
-    for (int o = 0; o < NO; o++) {
-        tree[o].r = tree[o].s0 = tree[o].s1 = tree[o].s2 = 0.0f;
-#pragma unroll
-        for (int p = 0; p < (KQ ? 8 : 1); p++) c[p][o] = 0.0f;
-    }
-    // This warp's blocks in the lanes' order: groups GPW warp.., each b = g + G j.
-    int gi = GPW * warp, b = gi;
+    for (int k = 0; k < NF; k++) acc[k] = 0.0f;
     GvW<QT> cur, nxt;
-    if (b < nblk) nxt.load(rws, b, t);
-    for (int i = 0; i < GPW; i++, gi++) {
-        for (b = gi; b < nblk; b += G) {
+    if (warp < nblk) nxt.load(rws, warp, t);
+    for (int base = 0, it = 0; base < nblk; base += GVM_CH, it++) {
+        int buf = it & 1, end = min(nblk, base + GVM_CH);
+        // Warp w: blocks w, w + 4, ...
+        for (int b = base + warp; b < end; b += 4) {
+            int sl = b - base;
             cur = nxt;
-            int bn = b + G < nblk ? b + G : (i + 1 < GPW && gi + 1 < nblk ? gi + 1 : -1);
-            if (bn >= 0) nxt.load(rws, bn, t);
+            if (b + 4 < nblk) nxt.load(rws, b + 4, t);
+            float v[NO];
             if constexpr (QT == QT_Q4_K) {
-                float d[2], dmin[2], dm0[2];
+                float d[2], dmin[2];
                 u32 scw[2][2], mw[2][2];
 #pragma unroll
                 for (int h = 0; h < 2; h++) {
                     uint4 hd = cur.h[h];
                     d[h] = h2f(hd.x & 0xffff);
                     dmin[h] = h2f(hd.x >> 16);
-                    dm0[h] = __fmul_rn(dmin[h], 0.0f);
                     scw[h][0] = hd.y & 0x3f3f3f3f;
                     scw[h][1] = (hd.w & 0x0f0f0f0f) | ((hd.y >> 2) & 0x30303030);
                     mw[h][0] = hd.z & 0x3f3f3f3f;
                     mw[h][1] = ((hd.w >> 4) & 0x0f0f0f0f) | ((hd.z >> 2) & 0x30303030);
                 }
-                float dk[NO];
+                int S[NO], M[NO];
 #pragma unroll
-                for (int o = 0; o < NO; o++) dk[o] = *(const float*)(xo[o] + 2 * np + 4 * (u64)b);
+                for (int o = 0; o < NO; o++) S[o] = M[o] = 0;
 #pragma unroll
                 for (int cc = 0; cc < 4; cc++) {
                     int sc1[2], sc2[2], m1[2], m2[2];
@@ -1489,52 +1338,50 @@ __device__ __forceinline__ void gemvm_t(const u8* w, u64 rb, int rows, int n, co
                         m1[h] = gm_ubyte(mw[h][cc >> 1], 2 * cc);
                         m2[h] = gm_ubyte(mw[h][cc >> 1], 2 * cc + 1);
                     }
-                    float dm[NO];
 #pragma unroll
                     for (int o = 0; o < NO; o++) {
                         int h = (o & 2) >> 1;
                         // (4-byte aligned only: two loads)
                         const int* bs = (const int*)(xo[o] + 2 * np + np / 64) + (u64)b * 8 + 2 * cc;
-                        dm[o] = __fmul_rn(dmin[h], gm_i2f(m1[h] * bs[0] + m2[h] * bs[1]));
+                        M[o] += m1[h] * bs[0] + m2[h] * bs[1];
                     }
+                    // qs bytes 32 cc + 4t.. and 32 cc + 16 + 4t..: low nibbles
+                    // sub-block 2cc, high ones 2cc + 1.
+                    u32 qa0 = cur.q[0][2 * cc], qa1 = cur.q[0][2 * cc + 1];
+                    u32 qb0 = cur.q[1][2 * cc], qb1 = cur.q[1][2 * cc + 1];
 #pragma unroll
-                    for (int hf = 0; hf < 2; hf++) {
-                        int p = 2 * cc + hf;
-                        u32 qa = cur.q[0][p], qb = cur.q[1][p];
-                        u32 a10 = qa & 0x0f0f0f0f, a11 = qb & 0x0f0f0f0f;
-                        u32 a20 = (qa >> 4) & 0x0f0f0f0f, a21 = (qb >> 4) & 0x0f0f0f0f;
-                        int j1 = 4 * cc + hf, j2 = j1 + 2;
+                    for (int f = 0; f < NF; f++) {
+                        const u8* xb = xa[f] + (u64)b * 256 + 64 * cc + 4 * t;
+                        int d1[4], d2[4];
+                        mma32(d1, qa0 & 0x0f0f0f0f, qb0 & 0x0f0f0f0f, qa1 & 0x0f0f0f0f,
+                              qb1 & 0x0f0f0f0f, *(const u32*)xb, *(const u32*)(xb + 16));
+                        mma32(d2, (qa0 >> 4) & 0x0f0f0f0f, (qb0 >> 4) & 0x0f0f0f0f,
+                              (qa1 >> 4) & 0x0f0f0f0f, (qb1 >> 4) & 0x0f0f0f0f,
+                              *(const u32*)(xb + 32), *(const u32*)(xb + 48));
 #pragma unroll
-                        for (int f = 0; f < NF; f++) {
-                            const u8* xb = xa[f] + (u64)b * 256 + 4 * t;
-                            int d1[4], d2[4];
-                            mma16(d1, a10, a11, *(const u32*)(xb + 16 * j1));
-                            mma16(d2, a20, a21, *(const u32*)(xb + 16 * j2));
-#pragma unroll
-                            for (int e = 0; e < 4; e++) {
-                                int o = 4 * f + e, h = e >> 1;
-                                float si = gm_i2f(sc1[h] * d1[e] + sc2[h] * d2[e]);
-                                float v = __fsub_rn(__fmul_rn(d[h], si), hf ? dm0[h] : dm[o]);
-                                c[p][o] = __fmaf_rn(dk[o], v, c[p][o]);
-                            }
+                        for (int e = 0; e < 4; e++) {
+                            int h = e >> 1;
+                            S[4 * f + e] += sc1[h] * d1[e] + sc2[h] * d2[e];
                         }
                     }
                 }
+#pragma unroll
+                for (int o = 0; o < NO; o++) {
+                    int h = (o & 2) >> 1;
+                    v[o] = __fsub_rn(__fmul_rn(d[h], i2f_rn(S[o])),
+                                     __fmul_rn(dmin[h], i2f_rn(M[o])));
+                }
             } else if constexpr (QT == QT_Q6_K) {
-                float dkd[NO];
+                int S[NO];
 #pragma unroll
-                for (int o = 0; o < NO; o++)
-                    dkd[o] = __fmul_rn(*(const float*)(xo[o] + 2 * np + 4 * (u64)b),
-                                       cur.d[(o & 2) >> 1]);
+                for (int o = 0; o < NO; o++) S[o] = 0;
 #pragma unroll
-                for (int pp = 0; pp < 4; pp++) {
-                    int hh = pp >> 1, qhi = pp & 1, px = 4 * hh + 2 * qhi;
-                    int sx[NO], sy[NO];
-#pragma unroll
-                    for (int o = 0; o < NO; o++) sx[o] = sy[o] = 0;
+                for (int ii = 0; ii < 4; ii++) {
+                    int hh = ii >> 1, qhi = ii & 1;
 #pragma unroll
                     for (int k = 0; k < 4; k++) {
-                        int j = 8 * hh + 2 * k + qhi, ii = 2 * hh + qhi;
+                        // Sub-block j: values 128 hh + 32 k + 16 qhi ..
+                        int j = 8 * hh + 2 * k + qhi;
                         int sca = gm_sbyte(cur.sc[0], j), scb = gm_sbyte(cur.sc[1], j);
                         u32 wv[2];
 #pragma unroll
@@ -1544,30 +1391,21 @@ __device__ __forceinline__ void gemvm_t(const u8* w, u64 rb, int rows, int n, co
                             wv[r] = __vsub4(lo | (((cur.qh[r][ii] >> (2 * k)) & 0x03030303) << 4),
                                             0x20202020);
                         }
-                        u32 xa0 = t < 2 ? wv[0] : 0, xa1 = t < 2 ? 0 : wv[0];
-                        u32 xb0 = t < 2 ? wv[1] : 0, xb1 = t < 2 ? 0 : wv[1];
 #pragma unroll
                         for (int f = 0; f < NF; f++) {
-                            u32 bb = *(const u32*)(xa[f] + (u64)b * 256 + 16 * j + 4 * t);
-                            int da[4], db[4];
-                            mma16(da, xa0, xa1, bb);
-                            mma16(db, xb0, xb1, bb);
-                            sx[4 * f + 0] += sca * da[0];
-                            sx[4 * f + 1] += sca * da[1];
-                            sy[4 * f + 0] += sca * da[2];
-                            sy[4 * f + 1] += sca * da[3];
-                            sx[4 * f + 2] += scb * db[0];
-                            sx[4 * f + 3] += scb * db[1];
-                            sy[4 * f + 2] += scb * db[2];
-                            sy[4 * f + 3] += scb * db[3];
+                            int dd[4];
+                            mma16(dd, wv[0], wv[1],
+                                  *(const u32*)(xa[f] + (u64)b * 256 + 16 * j + 4 * t));
+                            S[4 * f + 0] += sca * dd[0];
+                            S[4 * f + 1] += sca * dd[1];
+                            S[4 * f + 2] += scb * dd[2];
+                            S[4 * f + 3] += scb * dd[3];
                         }
                     }
-#pragma unroll
-                    for (int o = 0; o < NO; o++) {
-                        c[px][o] = __fmaf_rn(dkd[o], (float)sx[o], c[px][o]);
-                        c[px + 1][o] = __fmaf_rn(dkd[o], (float)sy[o], c[px + 1][o]);
-                    }
                 }
+#pragma unroll
+                for (int o = 0; o < NO; o++) v[o] = i2f_rn(S[o]);
+                if (t == 0) rs[buf][sl][g] = cur.d[0], rs[buf][sl][g + 8] = cur.d[1];
             } else {
 #pragma unroll
                 for (int f = 0; f < NF; f++) {
@@ -1576,45 +1414,36 @@ __device__ __forceinline__ void gemvm_t(const u8* w, u64 rb, int rows, int n, co
                     mma32(dd, cur.a[0][0], cur.a[1][0], cur.a[0][1], cur.a[1][1], *(const u32*)xb,
                           *(const u32*)(xb + 16));
 #pragma unroll
-                    for (int e = 0; e < 4; e++) {
-                        int o = 4 * f + e;
-                        float d0 = *(const float*)(xo[o] + 2 * np + np / 64 + np / 8 + 4 * (u64)b);
-                        float sd = __fmul_rn(cur.d[e >> 1], d0);
-                        c[0][o] = __fadd_rn(c[0][o], __fmul_rn(sd, gm_i2f(dd[e])));
-                    }
+                    for (int e = 0; e < 4; e++) v[4 * f + e] = i2f_rn(dd[e]);
                 }
+                if (t == 0) rs[buf][sl][g] = cur.d[0], rs[buf][sl][g + 8] = cur.d[1];
+            }
+#pragma unroll
+            for (int o = 0; o < NO; o++)
+                vs[buf][sl][g + ((o & 2) ? 8 : 0)][8 * (o >> 2) + 2 * t + (o & 1)] = v[o];
+            if (lane < NT)
+                ts[buf][sl][lane] = *(const float*)(xs + 2 * np + (KQ ? 0 : np / 64 + np / 8) +
+                                                    4 * (u64)b);
+        }
+        __syncthreads();
+        // The chains: output q = threadIdx.x + 128 k (row q / NT, token q % NT).
+#pragma unroll
+        for (int k = 0; k < NF; k++) {
+            int q = threadIdx.x + 128 * k, rr = q / NT, zz = q % NT;
+            for (int sl = 0; sl < end - base; sl++) {
+                float sv = vs[buf][sl][rr][zz];
+                if constexpr (QT == QT_Q4_K) acc[k] = __fmaf_rn(ts[buf][sl][zz], sv, acc[k]);
+                else acc[k] = __fmaf_rn(__fmul_rn(ts[buf][sl][zz], rs[buf][sl][rr]), sv, acc[k]);
             }
         }
-        // Group gi is done (or had no blocks): fold its lanes.
-#pragma unroll
-        for (int o = 0; o < NO; o++) {
-            if (KQ) {
-                float cs[8];
-#pragma unroll
-                for (int p = 0; p < 8; p++) {
-                    cs[p] = c[p][o];
-                    c[p][o] = 0.0f;
-                }
-                gm_fold<4>(tree[o], i, gm_tree8(cs));
-            } else {
-                gm_fold<8>(tree[o], i, gm_tree4(c[0][o]));
-                c[0][o] = 0.0f;
-            }
-        }
+        // (No second barrier: the next chunk writes the other buffer, and
+        // this one again only after the next chunk's barrier.)
     }
-    // tree[o].r = this warp's W; cta_sum: ((W0 + W1) + W2) + W3.
 #pragma unroll
-    for (int o = 0; o < NO; o++)
-        sh[warp][g + ((o & 2) ? 8 : 0)][8 * (o >> 2) + 2 * t + (o & 1)] = tree[o].r;
-    __syncthreads();
-    if (warp == 0) {
-#pragma unroll
-        for (int o = 0; o < NO; o++) {
-            int rr = g + ((o & 2) ? 8 : 0), zz = 8 * (o >> 2) + 2 * t + (o & 1);
-            float v = sh[0][rr][zz];
-            for (int k = 1; k < 4; k++) v = __fadd_rn(v, sh[k][rr][zz]);
-            if (r0 + rr < rows && zz < nb) gm_store(v, bias, mode, out + (u64)zz * ostride, r0 + rr);
-        }
+    for (int k = 0; k < NF; k++) {
+        int q = threadIdx.x + 128 * k, rr = q / NT, zz = q % NT;
+        if (r0 + rr < rows && zz < nb)
+            gm_store(acc[k], bias, mode, out + (u64)zz * ostride, r0 + rr);
     }
 #else
     __trap();
@@ -1638,8 +1467,8 @@ GEMVM(gemvm16_q8_0, QT_Q8_0, 2)
 GEMVM(gemvm16_q5_0, QT_Q5_0, 2)
 
 // Test: for every half h and a few x, fmul(h2f(h), x) == fmul(f16_to_f32(h),
-// x) bit for bit (the GEMMs convert block scales with the hardware cvt, and
-// only ever multiply them). The conversions agree on every non-NaN half (f16
+// x) bit for bit (the products convert block scales with the hardware cvt,
+// and only ever multiply them). The conversions agree on every non-NaN half (f16
 // is a subset of f32); on NaN, h2f gives the canonical NaN while f16_to_f32
 // keeps the payload, which the products then lose (fmul returns the
 // canonical NaN): what this checks, on the GPU at hand.
@@ -1653,86 +1482,19 @@ extern "C" __global__ void h2f_mul_check(u32* out) {
             atomicAdd(out, 1u); // a count: order doesn't matter
 }
 
-// ---------------------------------------------------------------------------
-// gemmf_q4_k: NOT bit-identical, for measurement only (cuda_gemm_bench): what
-// the exact epilogue costs. The usual fast form (llama.cpp's MMQ): an mma
-// sum per 32-value sub-block, d sc / dmin m scaled once per sub-block, one
-// running sum per output in another order. Same tiles and copies as
-// gemms1_q4_k (32 rows x 32 tokens).
-extern "C" __global__ void __launch_bounds__(GM_THREADS, 2)
-gemmf_q4_k(const u8* __restrict__ w, u64 rb, int rows, int n, const u8* __restrict__ act,
-           u64 astride, int nb, const float* __restrict__ bias, int mode, float* __restrict__ out,
-           u64 ostride) {
+// Benchmark (cuda_gemm_bench): int8 mma.sync throughput, 8 independent
+// m16n8k32 per step. out[blockIdx.x] keeps the results live.
+extern "C" __global__ void __launch_bounds__(256) mma_peak(int iters, int* out) {
 #if __CUDA_ARCH__ >= 800
-    typedef GmStage<GM_BN(1)> St;
-    extern __shared__ uint4 gm_smem[];
-    St* st = (St*)gm_smem;
-    u32* seq = (u32*)(st + 2);
-    int nblk = n / 256;
-    for (int q = threadIdx.x; q < nblk; q += GM_THREADS) seq[q] = gm_seq(q, nblk, 16);
-    __syncthreads();
-    int r0 = blockIdx.y * GM_BM, z0 = blockIdx.x * GM_BN(1);
-    int warp = threadIdx.x >> 5, wr = warp & 1, wc = warp >> 1;
-    int lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
-    int ra = 16 * wr + g, rbw = ra + 8, tb = 8 * wc + g;
-    int tk[4];
+    int d[8][4];
+    u32 a = threadIdx.x * 0x01010101u, b = blockIdx.x * 0x01030507u;
+    int s = 0;
+    for (int i = 0; i < iters; i++) {
 #pragma unroll
-    for (int o = 0; o < 4; o++) tk[o] = 8 * wc + 2 * t + (o & 1);
-    float acc[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-    gm_copy<QT_Q4_K, 1>(&st[0], w, rb, rows, r0, act, astride, n, nb, z0, nblk, 0, seq);
-    cp_commit();
-    for (int s = 0; s < nblk; s++) {
-        if (s + 1 < nblk) {
-            gm_copy<QT_Q4_K, 1>(&st[(s + 1) & 1], w, rb, rows, r0, act, astride, n, nb, z0, nblk,
-                                s + 1, seq);
-            cp_commit();
-            cp_wait<1>();
-        } else {
-            cp_wait<0>();
-        }
-        __syncthreads();
-        const St* S = &st[s & 1];
-        float dsc[2][8], dmm[2][8];
+        for (int k = 0; k < 8; k++) mma32(d[k], a + k, a ^ i, a + 2, a + 3, b, b + k);
 #pragma unroll
-        for (int h = 0; h < 2; h++) {
-            uint4 hd = S->w[h ? rbw : ra][0];
-            float d = h2f(hd.x & 0xffff), dmin = h2f(hd.x >> 16);
-            u32 sc0 = hd.y & 0x3f3f3f3f, sc1 = (hd.w & 0x0f0f0f0f) | ((hd.y >> 2) & 0x30303030);
-            u32 m0 = hd.z & 0x3f3f3f3f, m1 = ((hd.w >> 4) & 0x0f0f0f0f) | ((hd.z >> 2) & 0x30303030);
-#pragma unroll
-            for (int j = 0; j < 8; j++) {
-                dsc[h][j] = d * (float)gm_ubyte(j < 4 ? sc0 : sc1, j);
-                dmm[h][j] = dmin * (float)gm_ubyte(j < 4 ? m0 : m1, j);
-            }
-        }
-#pragma unroll
-        for (int c = 0; c < 4; c++) {
-            u32 qa0 = gm_word(S->w, ra, 1 + 2 * c, t), qa1 = gm_word(S->w, ra, 2 + 2 * c, t);
-            u32 qb0 = gm_word(S->w, rbw, 1 + 2 * c, t), qb1 = gm_word(S->w, rbw, 2 + 2 * c, t);
-            u32 x0 = gm_word(S->x, tb, 4 * c, t), x1 = gm_word(S->x, tb, 4 * c + 1, t);
-            u32 x2 = gm_word(S->x, tb, 4 * c + 2, t), x3 = gm_word(S->x, tb, 4 * c + 3, t);
-            int lo[4], hi[4];
-            mma32(lo, qa0 & 0x0f0f0f0f, qb0 & 0x0f0f0f0f, qa1 & 0x0f0f0f0f, qb1 & 0x0f0f0f0f, x0, x1);
-            mma32(hi, (qa0 >> 4) & 0x0f0f0f0f, (qb0 >> 4) & 0x0f0f0f0f, (qa1 >> 4) & 0x0f0f0f0f,
-                  (qb1 >> 4) & 0x0f0f0f0f, x2, x3);
-#pragma unroll
-            for (int o = 0; o < 4; o++) {
-                int h = o >> 1;
-                float dk = S->xd[tk[o]][0];
-                float b0 = (float)S->xb[tk[o]][2 * c], b1 = (float)S->xb[tk[o]][2 * c + 1];
-                float v = dsc[h][2 * c] * gm_i2f(lo[o]) - dmm[h][2 * c] * b0 +
-                          dsc[h][2 * c + 1] * gm_i2f(hi[o]) - dmm[h][2 * c + 1] * b1;
-                acc[o] = fmaf(dk, v, acc[o]);
-            }
-        }
-        __syncthreads();
+        for (int k = 0; k < 8; k++) s += d[k][0] ^ d[k][3];
     }
-#pragma unroll
-    for (int o = 0; o < 4; o++) {
-        int r = r0 + 16 * wr + g + ((o & 2) ? 8 : 0), z = z0 + tk[o];
-        if (r < rows && z < nb) gm_store(acc[o], bias, mode, out + (u64)z * ostride, r);
-    }
-#else
-    __trap();
+    if (s == 0x12345678) out[blockIdx.x] = s;
 #endif
 }
