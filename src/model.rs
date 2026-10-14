@@ -1097,7 +1097,6 @@ impl<'a> Qwen2<'a> {
     /// `matmul_many`, whose per-row dots equal `matvec`'s. Cache slots
     /// `start..start + len` are overwritten; slots past the accepted prefix
     /// are simply rewritten by the next call (attention reads only 0..=pos).
-    #[cfg_attr(not(test), allow(dead_code))]
     pub fn verify_batch(&self, tokens: &[u32], start: usize, cache: &mut KvCache) -> Vec<Vec<f32>> {
         let hs = self.final_norm_batch(tokens, start, cache);
         let [logits] = self.matmul_many([self.head()], &hs);

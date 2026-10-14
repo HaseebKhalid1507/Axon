@@ -30,12 +30,14 @@ use std::path::{Path, PathBuf};
 /// Why `Gpu::open` fails off Linux.
 pub const LINUX_ONLY: &str = "CUDA support is Linux-only for now";
 
-/// kernels.cu, decode.cu, prefill.cu and stream.cu, compiled at run time as one module.
+/// kernels.cu, decode.cu, prefill.cu, stream.cu and sample.cu, compiled at run time as one
+/// module.
 const KERNELS: &str = concat!(
     include_str!("kernels.cu"),
     include_str!("decode.cu"),
     include_str!("prefill.cu"),
-    include_str!("stream.cu")
+    include_str!("stream.cu"),
+    include_str!("sample.cu")
 );
 
 /// A CUDA device: its retained primary context and a stream to run on.

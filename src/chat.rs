@@ -21,6 +21,7 @@
 //! the model picked, not re-encoded from their text.
 
 use crate::lm::Lm;
+use crate::sample::Sampler;
 use crate::spec::PromptLookup;
 use crate::tokenizer::Tokenizer;
 use crate::{GenOpts, generate};
@@ -76,6 +77,8 @@ pub struct Chat<'a, M: Lm> {
     pub max_reply: usize,
     /// Draft tokens per pass (`round_draft`ed); 0 = off.
     pub max_draft: usize,
+    /// How replies pick tokens (its RNG runs on across replies); None = greedy.
+    pub sampler: Option<Sampler>,
 }
 
 /// The id of a special token, if the vocabulary has it as one.
@@ -121,6 +124,7 @@ impl<'a, M: Lm> Chat<'a, M> {
             im_end,
             max_reply: usize::MAX,
             max_draft: 0,
+            sampler: None,
         };
         c.set_system(system)?;
         Ok(c)
@@ -254,6 +258,7 @@ impl<'a, M: Lm> Chat<'a, M> {
             lookup,
             stop,
             max_draft,
+            sampler,
             ..
         } = self;
         let mut cancelled = false;
@@ -267,6 +272,7 @@ impl<'a, M: Lm> Chat<'a, M> {
                 n_gen,
                 stop,
                 max_draft: *max_draft,
+                sample: sampler.as_mut(),
             },
             &mut |h, max| {
                 lookup.sync(h);
