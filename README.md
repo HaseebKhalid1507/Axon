@@ -21,7 +21,8 @@ Works today, honestly scoped:
   (llama.cpp's order, ollama's defaults). `gen` continues raw text, greedy unless `--temp`
   is above 0 (reproducible output and benchmarks); `chat` talks to an Instruct model
   through its ChatML template and samples by default (`--temp 0` for greedy). On the GPU
-  the penalty and top-k run on the device, so only k candidates come back per token.
+  the penalty and top-k (up to 256) run on the device, so only k candidates come back per
+  token; with top-k 0 (off: the whole vocab, as llama.cpp) the logits come back instead.
 - CPU: any x86-64 (others build too, scalar only). The default build is baseline x86-64 and
   picks its AVX2 / AVX-VNNI code at runtime, with the same output bits as a `-C target-cpu`
   build (see `src/mv.rs`). Attention and SwiGLU use fused multiply-adds when the CPU has

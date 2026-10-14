@@ -1527,8 +1527,8 @@ impl<'g> CudaQwen2<'g> {
         // SAFETY: logits holds `rows` rows of n floats; S (16 bytes into s)
         // was written by samp_upload for at least row0 + rows rows; part
         // has room for HEAD_SUB rows of `slices` x CAND_MAX keys (k <=
-        // CAND_MAX, checked there), count for HEAD_SUB rows (zero between
-        // launches: each launch's last block per row resets it), out for
+        // CAND_MAX, checked there), count for HEAD_SUB rows (zeroed at
+        // allocation; each launch's last block per row wraps it back to 0), out for
         // s.rows rows of CAND_MAX pairs.
         unsafe {
             self.gpu.launch_with(
@@ -1729,7 +1729,9 @@ impl<'g> Lm for CudaQwen2<'g> {
             .unwrap_or_else(|e| Self::die(e))
     }
 
-    /// Selected on the device (sample.cu): k pairs come back, not the logits.
+    /// Selected on the device (sample.cu): k pairs come back, not the
+    /// logits. Past CAND_MAX (top_k off: the whole vocab) the logits come
+    /// back and the host selects (`sample::cands`).
     fn forward_cands(
         &self,
         token: u32,
@@ -1743,11 +1745,16 @@ impl<'g> Lm for CudaQwen2<'g> {
             Some(&token),
             "recent must end with the token"
         );
+        if spec.k > CAND_MAX {
+            let mut l = Lm::forward(self, token, pos, cache);
+            return sample::cands(&mut l, spec, recent);
+        }
         self.cands(cache, token, pos, spec, recent)
             .unwrap_or_else(|e| Self::die(e))
     }
 
-    /// Batched passes with sample.cu on each row's logits.
+    /// Batched passes with sample.cu on each row's logits (past CAND_MAX:
+    /// `forward_cands` token by token, the same logits bit for bit).
     fn verify_cands(
         &self,
         tokens: &[u32],
@@ -1766,6 +1773,14 @@ impl<'g> Lm for CudaQwen2<'g> {
             n >= nb && recent[n - nb..] == *tokens,
             "recent must end with tokens"
         );
+        if spec.k > CAND_MAX {
+            return (0..nb)
+                .map(|b| {
+                    let r = &recent[..n - nb + b + 1];
+                    self.forward_cands(tokens[b], start + b, cache, spec, r)
+                })
+                .collect();
+        }
         self.verify_cands_tokens(cache, tokens, start, spec, recent)
             .unwrap_or_else(|e| Self::die(e))
     }

@@ -11,15 +11,14 @@
 //!    first candidate is the greedy pick of the penalized logits). On the CPU
 //!    `cands` (one vectorized scan); on the GPU sample.cu, which copies back
 //!    only the k pairs. Both give the same candidates for the same logits.
-//! 2. The draw (`pick`, here, on at most `CAND_MAX` candidates): top-p,
-//!    min-p, temperature, then one uniform number from the RNG.
+//! 2. The draw (`pick`, here): top-p, min-p, temperature, then one uniform
+//!    number from the RNG.
 //!
-//! `k` is top_k, or `CAND_MAX` when top_k is 0 (off) or bigger. So with top_k
-//! off, top-p and min-p see the 256 most likely tokens, not the whole vocab:
-//! top-p's softmax is over those 256 (llama.cpp's is over the vocab), the rest
-//! (a tail of 151k tokens that rarely holds more than a few % of the mass) is
-//! never drawn. With top_k on (the default 40), every step is exactly
-//! llama.cpp's: its top-p and min-p only ever see the top-k candidates.
+//! `k` is top_k; top_k 0 (off) keeps every token, as llama.cpp does: the
+//! candidates are then the whole vocab, sorted (a slower path: a full sort
+//! per token, and on the GPU the logits come back to the host; top_k above
+//! `CAND_MAX` takes it too). Either way each step is exactly llama.cpp's:
+//! its top-p and min-p only ever see the top-k candidates.
 //!
 //! Speculative decoding (`generate`) samples losslessly: for a drafted token x
 //! the position's token is drawn from its distribution p with the position's
@@ -36,8 +35,12 @@ use std::collections::VecDeque;
 use std::io;
 use std::time::Instant;
 
-/// Most candidates a backend selects per position (top_k is capped to it).
+/// Most candidates the GPU selects on the device per position; a bigger
+/// top_k (or 0, off) has the host select from the whole row.
 pub const CAND_MAX: usize = 256;
+
+/// `CandSpec::k` for top_k off: every token.
+pub const ALL: usize = usize::MAX;
 
 /// One sampling candidate: a (penalized) logit and its token id.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -60,7 +63,7 @@ pub struct CandSpec {
 pub struct SampleCfg {
     /// > 0 (0 is greedy decoding, which never builds a `SampleCfg`).
     pub temp: f32,
-    /// 0 = off (then `CAND_MAX`).
+    /// 0 = off (every token).
     pub top_k: usize,
     /// >= 1 = off.
     pub top_p: f32,
@@ -79,8 +82,8 @@ impl SampleCfg {
     pub fn spec(&self) -> CandSpec {
         CandSpec {
             k: match self.top_k {
-                0 => CAND_MAX,
-                k => k.min(CAND_MAX),
+                0 => ALL,
+                k => k,
             },
             penalty: self.repeat_penalty,
             last_n: self.repeat_last_n,
@@ -337,6 +340,9 @@ pub fn top_k(l: &[f32], k: usize) -> Vec<Cand> {
     if k == 0 {
         return Vec::new();
     }
+    if k >= l.len() / 8 {
+        return top_k_ref(l, k); // most of the row: sort it
+    }
     let mut buf = Vec::with_capacity(4 * k + 16);
     top_k_scan(l, k, &mut buf);
     if buf.len() < k {
@@ -390,20 +396,21 @@ fn kept(cfg: &SampleCfg, c: &[Cand]) -> usize {
     if cfg.top_p < 1.0 {
         // llama.cpp: the smallest prefix whose softmax (temperature 1) mass
         // reaches top_p.
-        let mut e = [0f64; CAND_MAX];
-        let mut z = 0.0;
-        for (ei, x) in e.iter_mut().zip(&c[..n]) {
-            *ei = (f64::from(x.logit) - l0).exp();
-            z += *ei;
-        }
-        let mut cum = 0.0;
-        for (i, ei) in e[..n].iter().enumerate() {
-            cum += ei / z;
-            if cum >= f64::from(cfg.top_p) {
-                n = i + 1;
-                break;
+        n = with_scratch(n, |e| {
+            let mut z = 0.0;
+            for (ei, x) in e.iter_mut().zip(c) {
+                *ei = (f64::from(x.logit) - l0).exp();
+                z += *ei;
             }
-        }
+            let mut cum = 0.0;
+            for (i, ei) in e.iter().enumerate() {
+                cum += ei / z;
+                if cum >= f64::from(cfg.top_p) {
+                    return i + 1;
+                }
+            }
+            e.len()
+        });
     }
     if cfg.min_p > 0.0 {
         // p_i >= min_p * p_max, on logits: l_i >= l_0 + ln(min_p).
@@ -445,21 +452,41 @@ pub fn pick(cfg: &SampleCfg, c: &[Cand], u: f64) -> u32 {
     }
     let l0 = f64::from(c[0].logit);
     let t = f64::from(cfg.temp);
-    let mut w = [0f64; CAND_MAX];
-    let mut z = 0.0;
-    for (wi, x) in w.iter_mut().zip(&c[..n]) {
-        *wi = ((f64::from(x.logit) - l0) / t).exp();
-        z += *wi;
-    }
-    let target = u * z;
-    let mut cum = 0.0;
-    for (wi, x) in w.iter().zip(&c[..n - 1]) {
+    with_scratch(n, |w| {
+        for (wi, x) in w.iter_mut().zip(c) {
+            *wi = ((f64::from(x.logit) - l0) / t).exp();
+        }
+        c[draw(w, u)].id
+    })
+}
+
+/// The inverse CDF of weights `w` (w[0] > 0) at `u` in [0, 1): the first i
+/// whose cumulative weight passes u * total. Never a zero-weight index:
+/// the target stays below the total, and past the end (u out of range)
+/// the last positive weight is taken.
+fn draw(w: &[f64], u: f64) -> usize {
+    let z: f64 = w.iter().sum();
+    let target = (u * z).min(z.next_down());
+    let (mut cum, mut last) = (0.0, 0);
+    for (i, &wi) in w.iter().enumerate() {
+        if wi > 0.0 {
+            last = i;
+        }
         cum += wi;
         if target < cum {
-            return x.id;
+            return i;
         }
     }
-    c[n - 1].id
+    last
+}
+
+/// `f` on n f64s of scratch: on the stack for up to CAND_MAX (top_k on).
+fn with_scratch<R>(n: usize, f: impl FnOnce(&mut [f64]) -> R) -> R {
+    if n <= CAND_MAX {
+        f(&mut [0f64; CAND_MAX][..n])
+    } else {
+        f(&mut vec![0f64; n])
+    }
 }
 
 /// `crate::generate` when sampling: the same loop, with each position's
@@ -527,8 +554,11 @@ pub fn generate<M: Lm>(
             st.drafted += guesses.len();
             let mut toks = vec![next];
             toks.extend_from_slice(&guesses);
-            // Each row's penalty window: the history, then the guesses before it.
-            let mut recent = hist[hist.len().saturating_sub(spec.last_n)..].to_vec();
+            // Each row's penalty window: the history, then the guesses before
+            // it. At least `next` (verify_cands wants recent to end with toks,
+            // also when the window is off).
+            let tail = spec.last_n.clamp(1, hist.len());
+            let mut recent = hist[hist.len() - tail..].to_vec();
             recent.extend_from_slice(&guesses);
             let mut rows = net
                 .verify_cands(&toks, pos, cache, &spec, &recent)
@@ -622,7 +652,7 @@ pub(crate) mod tests {
         }
         let c = a.resolve(0.0).unwrap();
         assert_eq!(c.seed, u64::MAX);
-        assert_eq!(c.spec().k, CAND_MAX, "top-k 0 = off = CAND_MAX");
+        assert_eq!(c.spec().k, ALL, "top-k 0 = off = every token");
         for (f, v) in [
             ("--temp", "-1"),
             ("--temp", "nan"),
@@ -641,7 +671,7 @@ pub(crate) mod tests {
             temp: Some(1.0),
             ..Default::default()
         };
-        assert_eq!(big.resolve(0.0).unwrap().spec().k, CAND_MAX);
+        assert_eq!(big.resolve(0.0).unwrap().spec().k, 100_000);
     }
 
     #[test]
@@ -880,6 +910,75 @@ pub(crate) mod tests {
         assert_eq!(pick(&cfg, &cs(&[f32::NAN; 3]), 0.5), 2);
     }
 
+    /// top_k 0 is the whole vocab, as llama.cpp: candidates are every
+    /// token, top-p's softmax and the draw are over all of them.
+    #[test]
+    fn top_k_off_is_whole_vocab() {
+        let mut s = 77u32;
+        let n = 3000;
+        let l: Vec<f32> = (0..n)
+            .map(|_| (xorshift(&mut s) % 400) as f32 / 100.0)
+            .collect();
+        let cfg = SampleCfg {
+            top_k: 0,
+            top_p: 1.0,
+            min_p: 0.0,
+            temp: 1.0,
+            repeat_penalty: 1.0,
+            ..cfg()
+        };
+        let mut l2 = l.clone();
+        let c = cands(&mut l2, &cfg.spec(), &[0]);
+        assert_eq!(bits(&c), bits(&top_k_ref(&l, n)));
+        let d = dist(&cfg, &c);
+        assert_eq!(d.len(), n);
+        let m = l.iter().cloned().fold(f32::MIN, f32::max) as f64;
+        let z: f64 = l.iter().map(|&x| (x as f64 - m).exp()).sum();
+        for &(id, p) in &d {
+            let want = (l[id as usize] as f64 - m).exp() / z;
+            assert!((p - want).abs() < 1e-12, "id {id}");
+        }
+        // top-p over the whole vocab's mass: the kept prefix is the
+        // smallest whose full-softmax mass reaches 0.5.
+        let half = dist(&SampleCfg { top_p: 0.5, ..cfg }, &c).len();
+        let mut cum = 0.0;
+        let want = c
+            .iter()
+            .position(|x| {
+                cum += (x.logit as f64 - m).exp() / z;
+                cum >= 0.5
+            })
+            .unwrap()
+            + 1;
+        assert_eq!(half, want);
+        assert!(
+            half > CAND_MAX,
+            "this row's 50% needs more than {CAND_MAX} tokens"
+        );
+        // top_k past CAND_MAX is exact too.
+        let c1000 = top_k(&l, 1000);
+        assert_eq!(bits(&c1000), bits(&top_k_ref(&l, 1000)));
+    }
+
+    /// `draw` never returns a zero-weight index, even at the edge of [0, 1)
+    /// or past it.
+    #[test]
+    fn draw_skips_zero_weights() {
+        let w = [1.0, 0.7, 0.3, 0.0, 0.0];
+        assert_eq!(draw(&w, 0.0), 0);
+        assert_eq!(draw(&w, 1.0 - f64::EPSILON / 2.0), 2);
+        assert_eq!(draw(&w, 1.0), 2);
+        assert_eq!(draw(&w, 7.0), 2);
+        assert_eq!(draw(&[1.0, 0.0], 1.0), 0);
+        let c = cs(&[3.0, 1.0, f32::NEG_INFINITY]);
+        let cfg = SampleCfg {
+            top_p: 1.0,
+            min_p: 0.0,
+            ..cfg()
+        };
+        assert_ne!(pick(&cfg, &c, 1.0 - f64::EPSILON / 2.0), 2);
+    }
+
     /// Draws follow `dist`: chi-square over 200k draws.
     #[test]
     fn draws_follow_dist() {
@@ -924,11 +1023,13 @@ pub(crate) mod tests {
         assert!((m - 0.5).abs() < 0.01);
     }
 
-    /// The accept/reject rule, enumerated over u: the drafted x is kept for
-    /// a share p(x) of the u's, and the rejected u's give each other y a
-    /// share p(y), i.e. p without x renormalized.
+    /// The inverse-CDF draw over a grid of u: each token takes a share
+    /// p(token) of [0, 1), and so, given the draw isn't x, a share p(y) / (1 -
+    /// p(x)) for each other y. (That's the draw alone; the coupling itself,
+    /// draft vs no draft, is checked by drafting_matches_plain_sampling and
+    /// drafting_distribution_chi_square.)
     #[test]
-    fn accept_reject_enumerated() {
+    fn inverse_cdf_shares() {
         let l = [1.0f32, 0.2, -0.5, 0.9, 0.0];
         let cfg = SampleCfg {
             top_p: 0.95,
@@ -1071,6 +1172,9 @@ pub(crate) mod tests {
                 top_k: [40, 5, 0][seed as usize % 3],
                 min_p: [0.0, 0.05][seed as usize % 2],
                 temp: [0.8, 1.5, 0.3][seed as usize % 3],
+                // Penalty window off, penalty off, a 1-token window, default.
+                repeat_last_n: [0, 64, 1, 64, 0][seed as usize % 5],
+                repeat_penalty: [1.1, 1.0, 1.3, 1.1, 1.0][seed as usize % 5],
                 ..cfg()
             };
             let stop: &[u32] = if seed % 4 == 0 { &[6] } else { &[] };
@@ -1209,6 +1313,13 @@ pub(crate) mod tests {
         time("argmax", &|| argmax(std::hint::black_box(&l)));
         time("top_k 40", &|| top_k(std::hint::black_box(&l), 40)[0].id);
         time("top_k 256", &|| top_k(std::hint::black_box(&l), 256)[0].id);
+        time("full sort (top_k off)", &|| {
+            top_k_ref(std::hint::black_box(&l), l.len())[0].id
+        });
+        time("full exp sum f64", &|| {
+            let m = l.iter().cloned().fold(f32::MIN, f32::max) as f64;
+            l.iter().map(|&x| (x as f64 - m).exp()).sum::<f64>() as u32
+        });
         let spec = cfg().spec();
         let recent: Vec<u32> = (0..64).map(|i| i * 1000).collect();
         time("cands (penalty, k 40, incl. copy)", &|| {

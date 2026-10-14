@@ -132,6 +132,17 @@ fn model_candidates_match() {
             penalty: 1.5,
             last_n: 8,
         },
+        // Past CAND_MAX: the host path.
+        CandSpec {
+            k: 1000,
+            penalty: 1.1,
+            last_n: 64,
+        },
+        CandSpec {
+            k: sample::ALL,
+            penalty: 1.1,
+            last_n: 64,
+        },
     ] {
         let mut a = net.new_cache(256);
         let (&last, rest) = ids.split_last().unwrap();

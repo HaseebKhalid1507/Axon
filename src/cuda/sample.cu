@@ -8,7 +8,8 @@
 //      applies the penalty to the row's penalty ids that fall in it
 //      (l > 0 ? l / p : l * p, as sample::penalize; the logits buffer is
 //      left alone), and selects the slice's k best keys into `part`;
-//   2. the last block of the row to finish (a counter, reset by it) merges
+//   2. the last block of the row to finish (a counter that wraps to 0 on
+//      it: atomicInc) merges
 //      the slices' picks: the k best of them, sorted, to `out`.
 //
 // Order: key = tk_key(logit) << 32 | id, a 64-bit integer that is distinct
@@ -113,7 +114,7 @@ __device__ u64 tk_select(Get get, int n, int nvalid, int k, u32* hist, u32* bc) 
 // x (n logits, row stride `stride`; penalty row row0 + blockIdx.y of S) to
 // out row out_row0 + blockIdx.y: min(k, n) (logit bits, id) pairs, k pairs
 // apart, best first. part: rows x slices x k u64 scratch; count: rows u32,
-// zero before the launch, zero after it.
+// zero when allocated; each launch leaves it zero (atomicInc).
 extern "C" __global__ void __launch_bounds__(TK_THREADS)
     samp_topk(const float* __restrict__ x, u64 stride, int n, const u32* __restrict__ S, int row0,
               int out_row0, u64* __restrict__ part, u32* __restrict__ count, u32* __restrict__ out) {
@@ -164,7 +165,10 @@ extern "C" __global__ void __launch_bounds__(TK_THREADS)
     // The last block of the row to get here merges (threadFenceReduction).
     __threadfence();
     __syncthreads();
-    if (threadIdx.x == 0) is_last = atomicAdd(&count[row], 1u) == (u32)slices - 1;
+    // atomicInc wraps the counter to 0 on the last block: zero again after
+    // every launch, with no reset to forget, whatever `slices` the next
+    // launch on this row has (graph replays included).
+    if (threadIdx.x == 0) is_last = atomicInc(&count[row], (u32)slices - 1) == (u32)slices - 1;
     __syncthreads();
     if (!is_last) return;
     __threadfence();
@@ -190,7 +194,7 @@ extern "C" __global__ void __launch_bounds__(TK_THREADS)
         return true;
     };
     u64 Q = tk_select(merged, n_slots, nvalid, k, hist, bc);
-    if (threadIdx.x == 0) slot = 0, count[row] = 0;
+    if (threadIdx.x == 0) slot = 0;
     __syncthreads();
     for (int i = threadIdx.x; i < n_slots; i += blockDim.x) {
         u64 key;

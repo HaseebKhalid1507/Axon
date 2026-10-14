@@ -80,7 +80,8 @@ sampling flags (gen, chat; applied in this order, as llama.cpp):
   --repeat-penalty P  divide (multiply, if negative) the logits of tokens among the last N by P
                       (default 1.1; 1 = off)
   --repeat-last-n N   how many tokens back the penalty looks, prompt included (default 64; 0 = off)
-  --top-k K           keep the K most likely tokens (default 40; 0 = off, which keeps 256)
+  --top-k K           keep the K most likely tokens (default 40; 0 = off: all of them, slower,
+                      as is K > 256 on the GPU)
   --top-p P           then the fewest whose probability adds up to P (default 0.9; 1 = off)
   --min-p P           then those at least P times as likely as the top one (default 0 = off)
   --temp T            then divide the logits by T and draw (default: gen 0, chat 0.8);
@@ -360,6 +361,15 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         eprintln!("axon: note: gen is greedy without --temp > 0; the sampling flags do nothing");
     }
 
+    if let Some(s) = &sampler {
+        // Before generating: a run that's cut short can still be repeated.
+        let c = s.cfg;
+        eprintln!(
+            "sampling:    temp {} top-k {} top-p {} min-p {} repeat-penalty {} repeat-last-n {} seed {}",
+            c.temp, c.top_k, c.top_p, c.min_p, c.repeat_penalty, c.repeat_last_n, c.seed
+        );
+    }
+
     let (device, gpu_layers) = placement(device, gpu_layers);
     let model = open_model_with(path, true, copy_for(device));
     let tok = tokenizer::Tokenizer::from_gguf(&model);
@@ -479,13 +489,6 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             "device:      cuda + cpu, {}, kv {}",
             n.describe(ids.len() + extra + 1),
             n.kv_name()
-        );
-    }
-    if let Some(s) = &sampler {
-        let c = s.cfg;
-        eprintln!(
-            "sampling:    temp {} top-k {} top-p {} min-p {} repeat-penalty {} repeat-last-n {} seed {}",
-            c.temp, c.top_k, c.top_p, c.min_p, c.repeat_penalty, c.repeat_last_n, c.seed
         );
     }
     if env::var_os("AXON_POOL_DEBUG").is_some() {
