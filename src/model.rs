@@ -163,6 +163,9 @@ struct Layer<'a> {
     bq: Option<Vec<f32>>,
     bk: Option<Vec<f32>>,
     bv: Option<Vec<f32>>,
+    /// Per-head RMSNorm weights (head_dim) for q and k, before RoPE (qwen3).
+    q_norm: Option<Vec<f32>>,
+    k_norm: Option<Vec<f32>>,
     wo: Weight<'a>,
     ffn_norm: Vec<f32>,
     w_gate: Weight<'a>,
@@ -176,6 +179,8 @@ pub struct Qwen2<'a> {
     pub n_heads: usize,
     pub n_kv_heads: usize,
     pub head_dim: usize,
+    /// n_heads * head_dim: the attention width (qwen3 can differ from dim).
+    pub q_dim: usize,
     pub vocab: usize,
     eps: f32,
     rope_base: f64,
@@ -284,6 +289,10 @@ fn load_vec(m: &Model, t: &Tensor) -> Vec<f32> {
     out
 }
 
+/// Architectures `Qwen2` runs: qwen3 is qwen2 without the qkv biases, plus
+/// a per-head RMSNorm on q and k before RoPE and a head size of its own.
+pub const ARCHS: [&str; 2] = ["qwen2", "qwen3"];
+
 /// Tensor types the kernels run (`quant::dequant` and `dot_row_q8`).
 const SUPPORTED_TYPES: [u32; 6] = [F32, F16, Q5_0, Q8_0, Q4_K, Q6_K];
 
@@ -293,14 +302,14 @@ const SUPPORTED_TYPES: [u32; 6] = [F32, F16, Q5_0, Q8_0, Q4_K, Q6_K];
 /// and the vocabulary. Reads metadata only.
 pub fn check_supported(m: &Model) -> std::io::Result<()> {
     let bad = |msg: String| std::io::Error::new(std::io::ErrorKind::InvalidData, msg);
-    if m.arch != "qwen2" {
+    if !ARCHS.contains(&m.arch.as_str()) {
         return Err(bad(format!(
-            "architecture '{}' is not supported (only qwen2 for now)",
+            "architecture '{}' is not supported (qwen2, qwen3)",
             if m.arch.is_empty() { "<none>" } else { &m.arch }
         )));
     }
     let need = |k: &str| -> std::io::Result<usize> {
-        let key = format!("qwen2.{k}");
+        let key = format!("{}.{k}", m.arch);
         match meta_num(m, &key) {
             Some(v) if v.fract() == 0.0 && v >= 1.0 && v <= u32::MAX as f64 => Ok(v as usize),
             Some(v) => Err(bad(format!(
@@ -313,17 +322,32 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
     let dim = need("embedding_length")?;
     let n_heads = need("attention.head_count")?;
     let n_kv_heads = need("attention.head_count_kv")?;
-    if !dim.is_multiple_of(n_heads) || !(dim / n_heads).is_multiple_of(2) {
+    let head_dim = match meta_num(m, &format!("{}.attention.key_length", m.arch)) {
+        Some(_) => need("attention.key_length")?,
+        None if dim.is_multiple_of(n_heads) => dim / n_heads,
+        None => {
+            return Err(bad(format!(
+                "embedding_length {dim} doesn't split into {n_heads} heads"
+            )));
+        }
+    };
+    if meta_num(m, &format!("{}.attention.value_length", m.arch)).is_some()
+        && need("attention.value_length")? != head_dim
+    {
         return Err(bad(format!(
-            "embedding_length {dim} doesn't split into {n_heads} heads of even size"
+            "attention.value_length differs from the head size {head_dim}"
         )));
+    }
+    if !head_dim.is_multiple_of(2) {
+        return Err(bad(format!("head size {head_dim} is odd")));
     }
     if !n_heads.is_multiple_of(n_kv_heads) {
         return Err(bad(format!(
             "head_count {n_heads} is not a multiple of head_count_kv {n_kv_heads}"
         )));
     }
-    let kv_dim = n_kv_heads * (dim / n_heads);
+    let q_dim = n_heads * head_dim;
+    let kv_dim = n_kv_heads * head_dim;
 
     // `rows` = None: a vector of `cols` elements; Some(r): a cols x r matrix.
     let check = |name: &str, cols: usize, rows: Option<usize>| -> std::io::Result<&Tensor> {
@@ -375,11 +399,17 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
     for i in 0..n_layers {
         let t = |s: &str, cols, rows| check(&format!("blk.{i}.{s}"), cols, rows);
         t("attn_norm.weight", dim, None)?;
-        t("attn_q.weight", dim, Some(dim))?;
+        t("attn_q.weight", dim, Some(q_dim))?;
         t("attn_k.weight", dim, Some(kv_dim))?;
         t("attn_v.weight", dim, Some(kv_dim))?;
+        // Per-head q/k RMSNorm before RoPE: qwen3 has it, qwen2 doesn't.
+        for b in ["attn_q_norm.weight", "attn_k_norm.weight"] {
+            if m.arch == "qwen3" || find_opt(m, &format!("blk.{i}.{b}")).is_some() {
+                t(b, head_dim, None)?;
+            }
+        }
         for (b, n) in [
-            ("attn_q.bias", dim),
+            ("attn_q.bias", q_dim),
             ("attn_k.bias", kv_dim),
             ("attn_v.bias", kv_dim),
         ] {
@@ -387,7 +417,7 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
                 t(b, n, None)?;
             }
         }
-        t("attn_output.weight", dim, Some(dim))?;
+        t("attn_output.weight", q_dim, Some(dim))?;
         t("ffn_norm.weight", dim, None)?;
         let ffn = t("ffn_gate.weight", dim, Some(0))?.dims[1] as usize;
         t("ffn_up.weight", dim, Some(ffn))?;
@@ -446,7 +476,8 @@ impl<'a> Qwen2<'a> {
         let dim = need("embedding_length") as usize;
         let n_heads = need("attention.head_count") as usize;
         let n_kv_heads = need("attention.head_count_kv") as usize;
-        let head_dim = dim / n_heads;
+        let head_dim =
+            meta_num(m, &key("attention.key_length")).map_or(dim / n_heads, |v| v as usize);
         let eps = meta_num(m, &key("attention.layer_norm_rms_epsilon")).unwrap_or(1e-6) as f32;
         let rope_base = meta_num(m, &key("rope.freq_base")).unwrap_or(10000.0);
 
@@ -534,6 +565,8 @@ impl<'a> Qwen2<'a> {
                 bq: bias("attn_q.bias"),
                 bk: bias("attn_k.bias"),
                 bv: bias("attn_v.bias"),
+                q_norm: bias("attn_q_norm.weight"),
+                k_norm: bias("attn_k_norm.weight"),
                 wo: w(MATS[3]),
                 ffn_norm: vals(t("ffn_norm.weight")),
                 w_gate: w(MATS[4]),
@@ -571,6 +604,7 @@ impl<'a> Qwen2<'a> {
             n_heads,
             n_kv_heads,
             head_dim,
+            q_dim: n_heads * head_dim,
             vocab,
             eps,
             rope_base,
@@ -614,6 +648,8 @@ impl<'a> Qwen2<'a> {
             bq: ly.bq.as_deref(),
             bk: ly.bk.as_deref(),
             bv: ly.bv.as_deref(),
+            qn: ly.q_norm.as_deref(),
+            kn: ly.k_norm.as_deref(),
         }
     }
 
@@ -1052,6 +1088,22 @@ impl<'a> Qwen2<'a> {
             .collect()
     }
 
+    /// RoPE on q and k (heads of head_dim), each head RMS-normalized first
+    /// when the layer has q/k norms (qwen3). Shared by `hidden` and
+    /// `hidden_batch` so both run the same ops.
+    #[inline]
+    fn qk_rope(&self, layer: &Layer, q: &mut [f32], k: &mut [f32], rope: &[(f32, f32)]) {
+        let hd = self.head_dim;
+        if let Some(w) = &layer.q_norm {
+            rmsnorm_heads(q, hd, w, self.eps);
+        }
+        if let Some(w) = &layer.k_norm {
+            rmsnorm_heads(k, hd, w, self.eps);
+        }
+        rope_heads(q, hd, rope);
+        rope_heads(k, hd, rope);
+    }
+
     /// Run one token at position `pos` and return logits (len vocab).
     pub fn forward(&self, token: u32, pos: usize, cache: &mut KvCache) -> Vec<f32> {
         let x = self.hidden(token, pos, cache);
@@ -1155,9 +1207,10 @@ impl<'a> Qwen2<'a> {
         let ropes: Vec<_> = par_map(nb, hd * 16, |b| self.rope_table(start + b));
         // Reused across layers; every element is overwritten before it's read.
         let mut hs: Vec<Vec<f32>> = vec![vec![0.0f32; dim]; nb];
-        let mut att = vec![0.0f32; nb * dim];
+        let q_dim = self.q_dim;
+        let mut att = vec![0.0f32; nb * q_dim];
         let qn = group * hd; // floats per (token, kv head) of attention output
-        debug_assert_eq!(dim, n_kv * qn, "feed_batch: dim != heads * head_dim");
+        debug_assert_eq!(q_dim, n_kv * qn, "feed_batch: q_dim != heads * head_dim");
         for (l, layer) in self.layers.iter().enumerate() {
             // Steps as in `hidden`, each applied to every token of the batch.
             per_token(&mut hs, dim, |b, h| {
@@ -1174,21 +1227,24 @@ impl<'a> Qwen2<'a> {
                     .zip(ks.iter_mut().zip(vs.iter_mut()))
                     .zip(kl.chunks_mut(kv_dim).zip(vl.chunks_mut(kv_dim)))
                     .collect();
-                per_token(&mut jobs, dim + 2 * kv_dim, |b, ((q, (k, v)), (kd, vd))| {
-                    if let Some(bias) = &layer.bq {
-                        add_assign(q, bias);
-                    }
-                    if let Some(bias) = &layer.bk {
-                        add_assign(k, bias);
-                    }
-                    if let Some(bias) = &layer.bv {
-                        add_assign(v, bias);
-                    }
-                    rope_heads(q, hd, &ropes[b]);
-                    rope_heads(k, hd, &ropes[b]);
-                    KvElem::store(kd, k);
-                    KvElem::store(vd, v);
-                });
+                per_token(
+                    &mut jobs,
+                    q_dim + 2 * kv_dim,
+                    |b, ((q, (k, v)), (kd, vd))| {
+                        if let Some(bias) = &layer.bq {
+                            add_assign(q, bias);
+                        }
+                        if let Some(bias) = &layer.bk {
+                            add_assign(k, bias);
+                        }
+                        if let Some(bias) = &layer.bv {
+                            add_assign(v, bias);
+                        }
+                        self.qk_rope(layer, q, k, &ropes[b]);
+                        KvElem::store(kd, k);
+                        KvElem::store(vd, v);
+                    },
+                );
                 let (kc, vc) = (&*kc, &*vc);
 
                 // Causal attention, one (token, kv head) pair per pool task,
@@ -1205,7 +1261,7 @@ impl<'a> Qwen2<'a> {
                 });
             });
 
-            let att_rows: Vec<&[f32]> = att.chunks(dim).collect();
+            let att_rows: Vec<&[f32]> = att.chunks(q_dim).collect();
             let (os, _, slots) = self.matmul_raw([&layer.wo], &att_rows);
             add_unbatched(&mut xs, &os, slots);
 
@@ -1241,7 +1297,7 @@ impl<'a> Qwen2<'a> {
         let tile = decode_tile(np, self.n_kv_heads);
         let threads = Pool::global().threads();
         let (mut buf, mut att_out) = DECODE.take();
-        att_out.resize(dim, 0.0);
+        att_out.resize(self.q_dim, 0.0);
         for (l, layer) in self.layers.iter().enumerate() {
             // ---- Attention sub-block ----
             // 2. Normalize, then project into queries, keys and values (+ bias).
@@ -1257,9 +1313,9 @@ impl<'a> Qwen2<'a> {
                 add_assign(&mut v, b);
             }
 
-            // 3. Rotate q and k by position (RoPE), one head at a time.
-            rope_heads(&mut q, hd, &rope);
-            rope_heads(&mut k, hd, &rope);
+            // 3. Rotate q and k by position (RoPE), one head at a time, each
+            //    head RMS-normalized first if the model says so (qwen3).
+            self.qk_rope(layer, &mut q, &mut k, &rope);
 
             // 4. Store this position's k and v in the cache so later tokens can see them.
             //    (rounded to the cache's type: f16 unless AXON_KV=f32).
@@ -2001,6 +2057,24 @@ multiversion! {
     }
 }
 
+multiversion! {
+    /// `rmsnorm_into` on every head of v in place (heads of `hd` floats),
+    /// same ops in the same order.
+    fn rmsnorm_heads<V3>(v: &mut [f32], hd: usize, w: &[f32], eps: f32) {
+        for head in v.chunks_mut(hd) {
+            let mut ss = -0.0f32;
+            for x in head.iter() {
+                ss += x * x;
+            }
+            let ms = ss / hd as f32;
+            let inv = 1.0 / (ms + eps).sqrt();
+            for (x, g) in head.iter_mut().zip(w) {
+                *x = *x * inv * g;
+            }
+        }
+    }
+}
+
 /// NEOX-style RoPE on one head vector (len head_dim) in place: dim i is
 /// paired with dim i + head_dim/2 and the pair rotated by `table[i]`.
 #[inline(always)]
@@ -2237,6 +2311,122 @@ pub(crate) mod tests {
             |m| m.retain(|kv| kv.0 != "general.architecture"),
             "'<none>' is not supported",
         );
+    }
+
+    /// The tiny model as qwen3: q_dim (4 heads of 32 = 128) != dim (64), q/k
+    /// norms, no biases.
+    fn tiny3(
+        edit: impl FnOnce(&mut Vec<(String, Vec<u64>, u32)>),
+        edit_meta: impl FnOnce(&mut Vec<(&'static str, Val)>),
+    ) -> std::io::Result<()> {
+        tiny_meta(
+            |ts| {
+                ts.retain(|t| !t.0.ends_with(".bias"));
+                for t in ts.iter_mut() {
+                    if t.0.ends_with("attn_q.weight") {
+                        t.1 = vec![64, 128];
+                    } else if t.0.ends_with("attn_output.weight") {
+                        t.1 = vec![128, 64];
+                    }
+                }
+                for i in 0..2 {
+                    for n in ["attn_q_norm.weight", "attn_k_norm.weight"] {
+                        ts.push((format!("blk.{i}.{n}"), vec![32], F32));
+                    }
+                }
+                edit(ts);
+            },
+            |m| {
+                for kv in m.iter_mut() {
+                    if let Some(k) = kv.0.strip_prefix("qwen2.") {
+                        kv.0 = format!("qwen3.{k}").leak();
+                    }
+                }
+                m[0].1 = Val::Str("qwen3".into());
+                m[3].1 = Val::U32(4);
+                m.push(("qwen3.attention.key_length", Val::U32(32)));
+                m.push(("qwen3.attention.value_length", Val::U32(32)));
+                edit_meta(m);
+            },
+        )
+    }
+
+    #[test]
+    fn check_supported_qwen3() {
+        tiny3(|_| {}, |_| {}).expect("tiny qwen3");
+        let rej = |e: std::io::Result<()>, want: &str| {
+            let e = e.expect_err("malformed qwen3 accepted");
+            assert!(e.to_string().contains(want), "{e}");
+        };
+        // qwen3 needs its q/k norms; they must be head_dim long.
+        rej(
+            tiny3(
+                |ts| ts.retain(|t| t.0 != "blk.1.attn_k_norm.weight"),
+                |_| {},
+            ),
+            "missing tensor blk.1.attn_k_norm.weight",
+        );
+        rej(
+            tiny3(
+                |ts| {
+                    ts.iter_mut().for_each(|t| {
+                        if t.0 == "blk.0.attn_q_norm.weight" {
+                            t.1 = vec![64];
+                        }
+                    })
+                },
+                |_| {},
+            ),
+            "attn_q_norm.weight: shape",
+        );
+        // attn_q is dim x q_dim, attn_output q_dim x dim.
+        rej(
+            tiny3(
+                |ts| {
+                    ts.iter_mut().for_each(|t| {
+                        if t.0 == "blk.0.attn_output.weight" {
+                            t.1 = vec![64, 64];
+                        }
+                    })
+                },
+                |_| {},
+            ),
+            "attn_output.weight: shape",
+        );
+        rej(
+            tiny3(|_| {}, |m| m.retain(|kv| kv.0 != "qwen3.block_count")),
+            "qwen3.block_count is missing",
+        );
+        rej(
+            tiny3(|_| {}, |m| m.last_mut().unwrap().1 = Val::U32(16)),
+            "value_length differs",
+        );
+        rej(
+            tiny3(|_| {}, |m| m[0].1 = Val::Str("llama".into())),
+            "'llama' is not supported",
+        );
+        // Without key_length, head_dim is dim / heads (16): attn_k doesn't fit.
+        rej(
+            tiny3(
+                |_| {},
+                |m| m.retain(|kv| !kv.0.ends_with("_length") || kv.0.contains("embedding")),
+            ),
+            "shape",
+        );
+    }
+
+    /// `feed_batch_matches_feed` on Qwen3-0.6B (q_dim != dim, q/k norms,
+    /// tied Q8_0 embedding).
+    #[test]
+    fn feed_batch_matches_feed_qwen3() {
+        for repack in [true, false] {
+            let Some(m) = crate::testutil::qwen3_model() else {
+                return;
+            };
+            let net = Qwen2::new_with(&m, repack);
+            assert!(net.q_dim != net.dim && net.layers[0].q_norm.is_some());
+            feed_batch_matches_feed_on(&net);
+        }
     }
 
     /// Batched prefill in uneven chunks must leave the same cache, and so give
@@ -2842,6 +3032,19 @@ pub(crate) mod tests {
             rope_heads::portable(&mut a, hd, &table);
             unsafe { rope_heads::v3(&mut b, hd, &table) };
             assert_eq!(bits(&a), bits(&b), "rope hd={hd}");
+            // qwen3's per-head norm: both variants, and `rmsnorm_into` per
+            // head (the same ops) as the reference.
+            let w = mixed(hd, next(), 1.5, false);
+            let v = mixed(5 * hd, next(), 3.0, true);
+            let (mut a, mut b) = (v.clone(), v.clone());
+            rmsnorm_heads::portable(&mut a, hd, &w, 1e-6);
+            unsafe { rmsnorm_heads::v3(&mut b, hd, &w, 1e-6) };
+            assert_eq!(bits(&a), bits(&b), "rmsnorm_heads hd={hd}");
+            let mut r = vec![0f32; v.len()];
+            for (x, o) in v.chunks(hd).zip(r.chunks_mut(hd)) {
+                rmsnorm_into::portable(x, &w, 1e-6, o);
+            }
+            assert_eq!(bits(&a), bits(&r), "rmsnorm_heads vs rmsnorm_into hd={hd}");
         }
         for (rows, slots) in [(896, 4), (37, 12), (8, 1), (0, 4)] {
             let y = mixed(rows * slots, next(), 2.0, true);

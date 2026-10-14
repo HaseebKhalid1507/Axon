@@ -100,13 +100,29 @@ extern "C" __global__ void rope_kv_b(const float* __restrict__ qkv, int nq, int 
 // The q8 cache store for token z (position start + z), kv head blockIdx.x:
 // its keys rotated as rope_kv_b does (the same ops), its values, quantized
 // by kv_q8_store (decode.cu's rule and code). Grid (n_kv, nb) x 128.
+// kn non-null (qwen3): the keys are normalized and rotated by
+// warp_norm_rope instead, as the decode q8 attention does.
 template <int HD, int KG>
 __device__ __forceinline__ void kv_q8_bt(const float* __restrict__ qkv, int nq, int nk, int start,
-                                         const float2* __restrict__ rope, Q8Kv c) {
+                                         const float2* __restrict__ rope, Q8Kv c,
+                                         const float* __restrict__ kn, float eps) {
     __shared__ float xs[2 * HD];
     int kvh = blockIdx.x, z = blockIdx.y, tid = threadIdx.x, half = HD / 2;
     const float* y = qkv + (u64)z * (nq + 2 * nk) + nq + kvh * HD;
-    if (tid < half) {
+    if (kn) {
+        if (tid < 32) {
+            float a[2], b[2];
+            for (int i = 0; i < (HD >> 6); i++) {
+                a[i] = y[tid + 32 * i];
+                b[i] = y[tid + 32 * i + half];
+            }
+            warp_norm_rope(a, b, HD, kn, eps, rope + (u64)z * half);
+            for (int i = 0; i < (HD >> 6); i++) {
+                xs[tid + 32 * i] = a[i];
+                xs[tid + 32 * i + half] = b[i];
+            }
+        }
+    } else if (tid < half) {
         float y0 = y[tid], y1 = y[tid + half];
         float2 sc = rope[(u64)z * half + tid];
         float sn = sc.x, cs = sc.y;
@@ -123,13 +139,56 @@ __device__ __forceinline__ void kv_q8_bt(const float* __restrict__ qkv, int nq, 
         NAME(const float* __restrict__ qkv, int nq, int nk, int start,                             \
              const float2* __restrict__ rope, signed char* __restrict__ kq,                        \
              signed char* __restrict__ vq, float* __restrict__ ks, float* __restrict__ vs,         \
-             const float* __restrict__ ksh) {                                                      \
-        kv_q8_bt<HD, KG>(qkv, nq, nk, start, rope, Q8Kv{kq, vq, ks, vs, nullptr, ksh});            \
+             const float* __restrict__ ksh, const float* __restrict__ kn, float eps) {             \
+        kv_q8_bt<HD, KG>(qkv, nq, nk, start, rope, Q8Kv{kq, vq, ks, vs, nullptr, ksh}, kn, eps);   \
     }
 KV_Q8_B(kv_q8_b_64, 64, 64)
 KV_Q8_B(kv_q8_b_128, 128, 128)
 KV_Q8_B(kv_q8g32_b_64, 64, 32)
 KV_Q8_B(kv_q8g32_b_128, 128, 32)
+
+// rope_kv_b with qwen3's per-head q/k norms (decode: attn_split_t's
+// QkNorm). Grid (ceil(heads / 4), nb) of 128 threads, a warp per head of
+// [nq / hd query | nk / hd key | nk / hd value heads]: queries and keys
+// through warp_norm_rope, values copied to the cache. A null kc (the q8
+// cache: kv_q8_b normalizes, rotates and stores keys and values): queries
+// only.
+extern "C" __global__ void rope_kv_norm_b(const float* __restrict__ qkv, int nq, int nk, int hd,
+                                          int start, const float2* __restrict__ rope,
+                                          const float* __restrict__ qn,
+                                          const float* __restrict__ kn, float eps,
+                                          float* __restrict__ q, unsigned short* __restrict__ kc,
+                                          unsigned short* __restrict__ vc) {
+    int z = blockIdx.y, h = blockIdx.x * 4 + (threadIdx.x >> 5), lane = threadIdx.x & 31;
+    int half = hd >> 1, hq = nq / hd, hk = nk / hd;
+    if (h >= hq + 2 * hk || (!kc && h >= hq)) return;
+    const float* y = qkv + (u64)z * (nq + 2 * nk);
+    u64 pos = (u64)(start + z);
+    if (h >= hq + hk) {
+        for (int e = (h - hq - hk) * hd + lane; e < (h - hq - hk + 1) * hd; e += 32)
+            vc[pos * nk + e] = kv_half(y[nq + nk + e]);
+        return;
+    }
+    bool isq = h < hq;
+    int e0 = (isq ? h : h - hq) * hd;
+    const float* yy = isq ? y : y + nq;
+    float a[2], b[2];
+    for (int i = 0; i < (half >> 5); i++) {
+        a[i] = yy[e0 + lane + 32 * i];
+        b[i] = yy[e0 + lane + 32 * i + half];
+    }
+    warp_norm_rope(a, b, hd, isq ? qn : kn, eps, rope + (u64)z * half);
+    for (int i = 0; i < (half >> 5); i++) {
+        int e = e0 + lane + 32 * i;
+        if (isq) {
+            q[(u64)z * nq + e] = a[i];
+            q[(u64)z * nq + e + half] = b[i];
+        } else {
+            kc[pos * nk + e] = kv_half(a[i]);
+            kc[pos * nk + e + half] = kv_half(b[i]);
+        }
+    }
+}
 
 // Decode attention for query tokens z0 + blockIdx.z (position start + z),
 // all of whose keys and values are in the cache: the decode schedule and

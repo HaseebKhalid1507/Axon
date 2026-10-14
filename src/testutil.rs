@@ -4,6 +4,8 @@ use crate::gguf::{self, Model};
 use std::path::{Path, PathBuf};
 
 pub const MODEL: &str = "models/qwen2.5-0.5b-q4_k_m.gguf";
+/// The qwen3 test model (`AXON_TEST_QWEN3` overrides it).
+pub const QWEN3_MODEL: &str = "models/Qwen3-0.6B-Q8_0.gguf";
 
 /// Reference data made by `scripts/oracle/make_fixtures.py`, committed to the repo.
 pub fn fixtures() -> PathBuf {
@@ -43,6 +45,27 @@ pub fn model() -> Option<Model> {
 pub fn model_with(copy: Option<bool>) -> Option<Model> {
     let path = model_path()?;
     Some(gguf::load_with(path.to_str().expect("utf-8 path"), copy).expect("load model"))
+}
+
+/// The qwen3 test model, or None to skip (`AXON_SKIP_MODEL_TESTS`, as
+/// `model_path`).
+pub fn qwen3_model() -> Option<Model> {
+    let path = match std::env::var_os("AXON_TEST_QWEN3") {
+        Some(p) => PathBuf::from(p),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).join(QWEN3_MODEL),
+    };
+    if !path.exists() {
+        if std::env::var_os("AXON_SKIP_MODEL_TESTS").is_some() {
+            eprintln!("skipping: {QWEN3_MODEL} not present and AXON_SKIP_MODEL_TESTS is set");
+            return None;
+        }
+        panic!(
+            "{} is missing. Download Qwen3-0.6B-Q8_0.gguf (Qwen/Qwen3-0.6B-GGUF), or set \
+             AXON_SKIP_MODEL_TESTS=1 to skip the tests that need it.",
+            path.display()
+        );
+    }
+    Some(gguf::load(path.to_str().expect("utf-8 path")).expect("load qwen3 model"))
 }
 
 pub fn read_json(rel: &str) -> serde_json::Value {

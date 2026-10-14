@@ -72,6 +72,8 @@ pub(super) struct BatchFns<'m> {
     rmsnorm_quant: Func<'m>,
     swiglu_quant: Func<'m>,
     rope_kv: Func<'m>,
+    /// rope_kv with qwen3's per-head q/k norms.
+    rope_kv_norm: Func<'m>,
     attn_split: Func<'m>,
     /// attn_split_b for queries at most 32 * max_split positions in: the
     /// scores of all of them by attn_scores_b, then attn_warpv_b.
@@ -132,6 +134,7 @@ impl<'m> BatchFns<'m> {
             rmsnorm_quant: module.function("rmsnorm_quant_b")?,
             swiglu_quant: module.function("swiglu_quant_b")?,
             rope_kv: module.function("rope_kv_b")?,
+            rope_kv_norm: module.function("rope_kv_norm_b")?,
             attn_split: module.function(if head_dim == 64 {
                 "attn_split_b_64"
             } else {
@@ -168,13 +171,13 @@ pub(super) struct BatchBufs<'g> {
     host_x: Option<HostBuf<'g>>,
     /// Residual stream, [max][dim].
     x: DevBuf<'g>,
-    /// Products of the q, k, v matrices (biases added), [max][dim + 2 kv_dim].
+    /// Products of the q, k, v matrices (biases added), [max][q_dim + 2 kv_dim].
     qkv: DevBuf<'g>,
-    /// Rotated queries, [max][dim].
+    /// Rotated queries, [max][q_dim].
     q: DevBuf<'g>,
     gate: DevBuf<'g>,
     up: DevBuf<'g>,
-    /// Quantized activations, [max][act_stride(max(dim, ffn))].
+    /// Quantized activations, [max][act_stride(act_len())].
     act: DevBuf<'g>,
     rope: DevBuf<'g>,
     part_o: DevBuf<'g>,
@@ -207,8 +210,8 @@ impl<'g> CudaQwen2<'g> {
         let att = max.min(ATT_SUB);
         let parts =
             att * self.n_heads * (self.max_split * (self.head_dim + 2) + self.score_stride()) * f;
-        let per_tok = (3 * self.dim + 2 * kvd + 2 * self.ffn + self.head_dim) * f
-            + act_stride(self.dim.max(self.ffn))
+        let per_tok = (self.dim + 2 * self.q_dim + 2 * kvd + 2 * self.ffn + self.head_dim) * f
+            + act_stride(self.act_len())
             + 8
             + if self.first > 0 { self.dim * f } else { 0 };
         max * per_tok + parts + max.min(HEAD_SUB) * self.vocab * f + 256
@@ -226,11 +229,11 @@ impl<'g> CudaQwen2<'g> {
                 _ => Some(g.host_alloc(max * self.dim * f)?),
             },
             x: g.alloc(max * self.dim * f)?,
-            qkv: g.alloc(max * (self.dim + 2 * kvd) * f)?,
-            q: g.alloc(max * self.dim * f)?,
+            qkv: g.alloc(max * (self.q_dim + 2 * kvd) * f)?,
+            q: g.alloc(max * self.q_dim * f)?,
             gate: g.alloc(max * self.ffn * f)?,
             up: g.alloc(max * self.ffn * f)?,
-            act: g.alloc(max * act_stride(self.dim.max(self.ffn)))?,
+            act: g.alloc(max * act_stride(self.act_len()))?,
             rope: g.alloc(max * self.head_dim / 2 * 8)?,
             part_o: g.alloc(att * self.n_heads * self.max_split * self.head_dim * f)?,
             part_ml: g.alloc(att * self.n_heads * self.max_split * 2 * f)?,
@@ -356,7 +359,7 @@ impl<'g> CudaQwen2<'g> {
         on: &mut dyn FnMut(&'static str) -> Result<(), String>,
     ) -> Result<(), String> {
         let nb = input.len(self.dim);
-        let (dim, ffn) = (self.dim, self.ffn);
+        let dim = self.dim;
         let kvas: Vec<Vec<Arg>> = (0..self.layers.len()).map(|l| self.kv_args(c, l)).collect();
         let mode = c.mode;
         let b = c.b.as_mut().expect("a cache with batch scratch");
@@ -366,7 +369,7 @@ impl<'g> CudaQwen2<'g> {
         let (g, bf) = (self.gpu, &self.bf);
         let w = |mt: &Mat| self.weights.arg_at(mt.off);
         let null = Arg::Ptr(0);
-        let ast = act_stride(dim.max(ffn));
+        let ast = act_stride(self.act_len());
         // SAFETY (every launch): arguments match prefill.cu's signatures;
         // the batch buffers hold b.max >= nb tokens of what each kernel
         // reads and writes (sizes in batch_bufs); positions start..start + nb
@@ -514,7 +517,7 @@ impl<'g> CudaQwen2<'g> {
         off: usize,
         nb: usize,
     ) -> Result<(), String> {
-        let (dim, ffn) = (self.dim, self.ffn);
+        let dim = self.dim;
         let want_k = |n: usize| Arg::I32(n.is_multiple_of(256) as i32);
         // SAFETY: rmsnorm_quant_b's signature; sizes as `pass`.
         unsafe {
@@ -530,7 +533,7 @@ impl<'g> CudaQwen2<'g> {
                     Arg::I32(dim as i32),
                     want_k(dim),
                     b.act.arg(),
-                    Arg::U64(act_stride(dim.max(ffn)) as u64),
+                    Arg::U64(act_stride(self.act_len()) as u64),
                 ],
             )
         }
@@ -561,13 +564,14 @@ impl<'g> CudaQwen2<'g> {
         on: &mut dyn FnMut(&'static str) -> Result<(), String>,
     ) -> Result<(), String> {
         let (dim, hd, kvd, ffn) = (self.dim, self.head_dim, self.kv_dim(), self.ffn);
+        let qd = self.q_dim;
         let (g, bf) = (self.gpu, &self.bf);
         let vec = |off: usize| vecs.arg_at(off * 4);
         let null = Arg::Ptr(0);
         let want_k = |n: usize| Arg::I32(n.is_multiple_of(256) as i32);
-        let ast = act_stride(dim.max(ffn));
+        let ast = act_stride(self.act_len());
         let nbu = nb as u32;
-        let qkvw = dim + 2 * kvd;
+        let qkvw = qd + 2 * kvd;
         // SAFETY (every launch): as `pass`, with the caller's contract for
         // the matrices, vectors and cache rows.
         unsafe {
@@ -594,7 +598,7 @@ impl<'g> CudaQwen2<'g> {
                 nb,
                 bias(l.bk),
                 0,
-                qkv_at(dim),
+                qkv_at(qd),
                 qkvw,
             )?;
             self.bgemm(
@@ -605,42 +609,70 @@ impl<'g> CudaQwen2<'g> {
                 nb,
                 bias(l.bv),
                 0,
-                qkv_at(dim + kvd),
+                qkv_at(qd + kvd),
                 qkvw,
             )?;
             on("qkv")?;
-            // q8: rope_kv_b does the queries alone (null cache), kv_q8_b
-            // the keys and values.
+            // q8: rope_kv_b (rope_kv_norm_b) does the queries alone (null
+            // cache), kv_q8_b the keys and values (normalized first on
+            // qwen3, as decode).
             let q8 = matches!(mode, CacheKv::Q8 { .. });
-            let items = if q8 { dim / 2 } else { dim / 2 + kvd / 2 + kvd };
             let (kc, vc) = if q8 { (null, null) } else { (kv[0], kv[1]) };
-            g.launch(
-                &bf.rope_kv,
-                (items.div_ceil(128) as u32, nbu, 1),
-                (128, 1, 1),
-                0,
-                &[
-                    b.qkv.arg(),
-                    Arg::I32(dim as i32),
-                    Arg::I32(kvd as i32),
-                    Arg::I32(hd as i32),
-                    Arg::I32(start as i32),
-                    b.rope.arg(),
-                    b.q.arg(),
-                    kc,
-                    vc,
-                ],
-            )?;
+            if let (Some(qn), Some(kn)) = (l.qn, l.kn) {
+                // qwen3: a warp per head and token (decode.cu warp_norm_rope).
+                let heads = (qd + 2 * kvd) / hd;
+                g.launch(
+                    &bf.rope_kv_norm,
+                    (heads.div_ceil(4) as u32, nbu, 1),
+                    (128, 1, 1),
+                    0,
+                    &[
+                        b.qkv.arg(),
+                        Arg::I32(qd as i32),
+                        Arg::I32(kvd as i32),
+                        Arg::I32(hd as i32),
+                        Arg::I32(start as i32),
+                        b.rope.arg(),
+                        vec(qn),
+                        vec(kn),
+                        Arg::F32(self.eps),
+                        b.q.arg(),
+                        kc,
+                        vc,
+                    ],
+                )?;
+            } else {
+                let items = if q8 { qd / 2 } else { qd / 2 + kvd / 2 + kvd };
+                g.launch(
+                    &bf.rope_kv,
+                    (items.div_ceil(128) as u32, nbu, 1),
+                    (128, 1, 1),
+                    0,
+                    &[
+                        b.qkv.arg(),
+                        Arg::I32(qd as i32),
+                        Arg::I32(kvd as i32),
+                        Arg::I32(hd as i32),
+                        Arg::I32(start as i32),
+                        b.rope.arg(),
+                        b.q.arg(),
+                        kc,
+                        vc,
+                    ],
+                )?;
+            }
             if q8 {
                 let mut args = vec![
                     b.qkv.arg(),
-                    Arg::I32(dim as i32),
+                    Arg::I32(qd as i32),
                     Arg::I32(kvd as i32),
                     Arg::I32(start as i32),
                     b.rope.arg(),
                 ];
                 args.extend_from_slice(kv);
                 args.push(bias(l.ksh));
+                args.push(bias(l.kn));
+                args.push(Arg::F32(self.eps));
                 g.launch(
                     &self.q8_fns(mode).store_b,
                     (self.n_kv_heads as u32, nbu, 1),
@@ -748,7 +780,7 @@ impl<'g> CudaQwen2<'g> {
                 on("attn")?;
                 g.launch(
                     &bf.attn_combine,
-                    (dim.div_ceil(256) as u32, nz, 1),
+                    (qd.div_ceil(256) as u32, nz, 1),
                     (256, 1, 1),
                     0,
                     &[
@@ -756,10 +788,10 @@ impl<'g> CudaQwen2<'g> {
                         b.part_ml.arg(),
                         Arg::I32(start as i32),
                         Arg::I32(z0 as i32),
-                        Arg::I32(dim as i32),
+                        Arg::I32(qd as i32),
                         Arg::I32(hd as i32),
                         Arg::I32(self.max_split as i32),
-                        want_k(dim),
+                        want_k(qd),
                         b.act.arg(),
                         Arg::U64(ast as u64),
                     ],
