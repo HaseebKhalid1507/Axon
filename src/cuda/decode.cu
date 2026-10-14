@@ -922,6 +922,9 @@ struct QkNorm {
 // batched attn_split_b (prefill.cu), which runs it per query token.
 // KG = 0: the f16 cache kc / vc; else the q8 cache q8 with KG values per
 // scale (kc, vc unused). nm: qwen3's q/k norms (see QkNorm), either cache.
+// kc's __restrict__ holds with nm too: the row the block writes through
+// nm.kc_out (position np - 1) is never read through kc (it's scored from
+// kh), and no other block reads it in this launch.
 template <int HD, int KG = 0>
 __device__ void attn_split_t(const float* __restrict__ q, const unsigned short* __restrict__ kc,
                              const unsigned short* __restrict__ vc, int np, int kvh, int s,
@@ -1160,8 +1163,11 @@ __device__ void attn_split_t(const float* __restrict__ q, const unsigned short* 
     }
 }
 
+// The decode attention on the f16 cache. kc isn't __restrict__: with qwen3's
+// norms (QkNorm) the block holding the new position writes its K row
+// through kc_out (the same buffer), and scores that row from shared memory.
 extern "C" __global__ void __launch_bounds__(ATT_TILE)
-attn_split_64(const float* __restrict__ q, const unsigned short* __restrict__ kc,
+attn_split_64(const float* __restrict__ q, const unsigned short* kc,
               const unsigned short* __restrict__ vc, const u32* __restrict__ P, int n_heads,
               int n_kv, float scale, int max_split, float* __restrict__ part_o,
               float* __restrict__ part_ml,
@@ -1175,7 +1181,7 @@ attn_split_64(const float* __restrict__ q, const unsigned short* __restrict__ kc
 }
 
 extern "C" __global__ void __launch_bounds__(ATT_TILE)
-attn_split_128(const float* __restrict__ q, const unsigned short* __restrict__ kc,
+attn_split_128(const float* __restrict__ q, const unsigned short* kc,
                const unsigned short* __restrict__ vc, const u32* __restrict__ P, int n_heads,
                int n_kv, float scale, int max_split, float* __restrict__ part_o,
                float* __restrict__ part_ml,

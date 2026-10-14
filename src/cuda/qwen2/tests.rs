@@ -879,7 +879,8 @@ fn deterministic(kv: CacheKv) {
     let Some(g) = crate::testutil::gpu() else {
         return;
     };
-    // qwen3 too: its per-head counts (qkv_rope) must reset in a replay.
+    // qwen3 too: graphs replay its norm prologue (the attention writes the
+    // new K row itself, so a replay must leave the same bits).
     for m in [crate::testutil::model(), crate::testutil::qwen3_model()]
         .into_iter()
         .flatten()
@@ -1046,6 +1047,46 @@ fn gpu_verify_matches_forward_argmax_qwen3() {
         return;
     };
     verify_bits(&m, "qwen3 0.6B", CacheKv::F16);
+}
+
+/// The GPU's qwen3 (decode with and without graphs, batched prefill; f16
+/// and q8 caches) against model.rs's independent `qwen3_ref` on the Q8_0
+/// fixture, within QWEN3_Q8_TOL (8-bit activations, as the CPU there;
+/// measured ~0.2). model.rs's qwen3_matches_reference_forward checks that
+/// every NormBug moves the reference by more than 5x that bound, so a norm
+/// bug in the decode prologue or rope_kv_norm_b / kv_q8_b fails here even
+/// if the CPU shared it.
+#[test]
+fn gpu_qwen3_matches_reference_forward() {
+    use crate::model::tests::{NormBug, QWEN3_Q8_TOL, max_diff, qwen3_fixture, qwen3_ref};
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let ids = [3u32, 17, 42, 9];
+    let m = qwen3_fixture(Q8_0);
+    let want = qwen3_ref(&m, &ids, NormBug::None);
+    for kv in [CacheKv::F16, CacheKv::Q8 { group: 0 }] {
+        let mut net = CudaQwen2::with_kv(&g, &km, &m, 16, kv, false).unwrap();
+        for graphs in [true, false] {
+            net.graphs = graphs;
+            let mut c = net.new_cache(ids.len());
+            let dec: Vec<Vec<f32>> = (0..ids.len())
+                .map(|p| net.forward(ids[p], p, &mut c))
+                .collect();
+            let mut c = net.new_cache(ids.len());
+            net.feed_batch(&ids[..3], 0, &mut c);
+            let pre = net.forward(ids[3], 3, &mut c);
+            let (d, dp) = (max_diff(&dec, &want), max_diff(&[pre], &want[3..]));
+            eprintln!(
+                "gpu {kv:?} graphs {graphs} vs reference: max |dlogit| {d:.4}, after prefill {dp:.4}"
+            );
+            assert!(
+                d <= QWEN3_Q8_TOL && dp <= QWEN3_Q8_TOL,
+                "gpu {kv:?}: {d} / {dp}"
+            );
+        }
+    }
 }
 
 /// Qwen3-4B Q4_K_M (Q4_K/Q6_K, q_dim 4096 != dim 2560, GQA 4), if present.

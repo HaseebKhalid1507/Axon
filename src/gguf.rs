@@ -706,6 +706,17 @@ fn parse(buf: &[u8]) -> io::Result<Header> {
 /// zero-filled tensors `(name, dims, type id)`, written as a GGUF and parsed.
 #[cfg(test)]
 pub fn build_for_test(meta: &[(&str, Val)], tensors: &[(&str, &[u64], u32)]) -> Model {
+    build_for_test_with(meta, tensors, &[])
+}
+
+/// `build_for_test` with tensor i's bytes from data[i] (exactly its size;
+/// tensors past data.len() stay zero).
+#[cfg(test)]
+pub fn build_for_test_with(
+    meta: &[(&str, Val)],
+    tensors: &[(&str, &[u64], u32)],
+    data: &[Vec<u8>],
+) -> Model {
     fn str(b: &mut Vec<u8>, s: &str) {
         b.extend_from_slice(&(s.len() as u64).to_le_bytes());
         b.extend_from_slice(s.as_bytes());
@@ -744,6 +755,7 @@ pub fn build_for_test(meta: &[(&str, Val)], tensors: &[(&str, &[u64], u32)]) -> 
         val(&mut b, v);
     }
     let mut offset = 0u64;
+    let mut at = Vec::with_capacity(tensors.len());
     for (name, dims, ty) in tensors {
         str(&mut b, name);
         b.extend_from_slice(&(dims.len() as u32).to_le_bytes());
@@ -753,9 +765,16 @@ pub fn build_for_test(meta: &[(&str, Val)], tensors: &[(&str, &[u64], u32)]) -> 
         b.extend_from_slice(&offset.to_le_bytes());
         let q = qtype(*ty);
         let n: u64 = dims.iter().product();
-        offset += (n / q.block_size as u64 * q.block_bytes as u64).next_multiple_of(32);
+        let bytes = n / q.block_size as u64 * q.block_bytes as u64;
+        at.push((offset as usize, bytes as usize));
+        offset += bytes.next_multiple_of(32);
     }
-    b.resize(b.len().next_multiple_of(32) + offset as usize, 0);
+    let base = b.len().next_multiple_of(32);
+    b.resize(base + offset as usize, 0);
+    for (d, &(off, len)) in data.iter().zip(&at) {
+        assert_eq!(d.len(), len, "build_for_test_with: tensor bytes");
+        b[base + off..base + off + len].copy_from_slice(d);
+    }
     let h = parse(&b).expect("build_for_test: parse");
     let mut data = memmap2::MmapMut::map_anon(b.len()).unwrap();
     data.copy_from_slice(&b);

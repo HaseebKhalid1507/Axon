@@ -2351,6 +2351,358 @@ pub(crate) mod tests {
         )
     }
 
+    /// A small random qwen3 for checking the forward pass against `qwen3_ref`:
+    /// dim 128, 4 query heads and 2 kv heads of 64 (q_dim 256 != dim), ffn
+    /// 256, vocab 64, 2 layers, tied output, eps 0.5 (so a wrong eps moves
+    /// the q/k norms by ~40%: raw q and k have RMS ~0.7), q/k norm gains in
+    /// [0.25, 4) (RoPE commutes with the norm but for the gains: wide gains
+    /// make the order matter). Matrices of type `mt` (F32: the CPU's exact float rows;
+    /// Q8_0 for the GPU), norms F32.
+    pub(crate) fn qwen3_fixture(mt: u32) -> Model {
+        let (dim, nh, nkv, hd, ffn, vocab, nl) = (128usize, 4, 2, 64, 256, 64, 2);
+        let (qd, kvd) = (nh * hd, nkv * hd);
+        let mut st = 0x9e37_79b9_7f4a_7c15u64;
+        let mut uni = move |lo: f32, hi: f32| {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            lo + (hi - lo) * ((st >> 40) as f32 / (1u64 << 24) as f32)
+        };
+        // (name, [cols, rows], f32 values)
+        let mut ts: Vec<(String, Vec<u64>, Vec<f32>)> = Vec::new();
+        let mut mat = |name: String, cols: usize, rows: usize, rms: f32| {
+            let a = rms * (3.0 / cols as f32).sqrt();
+            let v = (0..cols * rows).map(|_| uni(-a, a)).collect();
+            (name, vec![cols as u64, rows as u64], v)
+        };
+        let mut t = vec![mat("token_embd.weight".into(), dim, vocab, 0.0)];
+        for i in 0..nl {
+            let n = |s: &str| format!("blk.{i}.{s}");
+            t.push(mat(n("attn_q.weight"), dim, qd, 0.7));
+            t.push(mat(n("attn_k.weight"), dim, kvd, 0.7));
+            t.push(mat(n("attn_v.weight"), dim, kvd, 1.0));
+            t.push(mat(n("attn_output.weight"), qd, dim, 1.0));
+            t.push(mat(n("ffn_gate.weight"), dim, ffn, 1.0));
+            t.push(mat(n("ffn_up.weight"), dim, ffn, 1.0));
+            t.push(mat(n("ffn_down.weight"), ffn, dim, 1.0));
+        }
+        ts.extend(t);
+        // The embedding (and tied head): uniform in [-1, 1).
+        ts[0].2 = (0..dim * vocab).map(|_| uni(-1.0, 1.0)).collect();
+        let mut vecs = |name: String, n: usize, lo: f32, hi: f32| {
+            ts.push((name, vec![n as u64], (0..n).map(|_| uni(lo, hi)).collect()))
+        };
+        vecs("output_norm.weight".into(), dim, 0.8, 1.2);
+        for i in 0..nl {
+            let n = |s: &str| format!("blk.{i}.{s}");
+            vecs(n("attn_norm.weight"), dim, 0.8, 1.2);
+            vecs(n("ffn_norm.weight"), dim, 0.8, 1.2);
+            vecs(n("attn_q_norm.weight"), hd, 0.25, 4.0);
+            vecs(n("attn_k_norm.weight"), hd, 0.25, 4.0);
+        }
+        let ty = |t: &(String, Vec<u64>, Vec<f32>)| if t.1.len() == 2 { mt } else { F32 };
+        let bytes = |t: &(String, Vec<u64>, Vec<f32>)| -> Vec<u8> {
+            match ty(t) {
+                F32 => t.2.iter().flat_map(|v| v.to_le_bytes()).collect(),
+                Q8_0 => t
+                    .2
+                    .chunks(32)
+                    .flat_map(|b| {
+                        let amax = b.iter().fold(0f32, |m, v| m.max(v.abs()));
+                        let d = crate::quant::f16_to_f32(crate::quant::f32_to_f16(amax / 127.0));
+                        let mut out = crate::quant::f32_to_f16(d).to_le_bytes().to_vec();
+                        out.extend(b.iter().map(|&v| {
+                            (if d == 0.0 { 0.0 } else { (v / d).round() }).clamp(-127.0, 127.0)
+                                as i8 as u8
+                        }));
+                        out
+                    })
+                    .collect(),
+                other => unimplemented!("qwen3_fixture: type {other}"),
+            }
+        };
+        let meta = vec![
+            ("general.architecture", Val::Str("qwen3".into())),
+            ("qwen3.block_count", Val::U32(nl as u32)),
+            ("qwen3.embedding_length", Val::U32(dim as u32)),
+            ("qwen3.feed_forward_length", Val::U32(ffn as u32)),
+            ("qwen3.attention.head_count", Val::U32(nh as u32)),
+            ("qwen3.attention.head_count_kv", Val::U32(nkv as u32)),
+            ("qwen3.attention.key_length", Val::U32(hd as u32)),
+            ("qwen3.attention.value_length", Val::U32(hd as u32)),
+            ("qwen3.attention.layer_norm_rms_epsilon", Val::F32(0.5)),
+            ("qwen3.rope.freq_base", Val::F32(10000.0)),
+            ("qwen3.context_length", Val::U32(64)),
+            (
+                "tokenizer.ggml.tokens",
+                Val::Arr((0..vocab).map(|i| Val::Str(format!("t{i}"))).collect()),
+            ),
+        ];
+        let list: Vec<(&str, &[u64], u32)> =
+            ts.iter().map(|t| (t.0.as_str(), &t.1[..], ty(t))).collect();
+        let data: Vec<Vec<u8>> = ts.iter().map(bytes).collect();
+        crate::gguf::build_for_test_with(&meta, &list, &data)
+    }
+
+    /// Ways to get qwen3's q/k norm wrong, for showing `qwen3_ref` (and so
+    /// the tests built on it) tells them apart from the right one.
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    pub(crate) enum NormBug {
+        None,
+        /// No q/k norm (qwen2's graph).
+        Dropped,
+        /// After RoPE instead of before.
+        AfterRope,
+        /// eps 1e-6 instead of the GGUF's.
+        Eps,
+        /// The gains' halves swapped (g[j + hd/2] on dim j).
+        GainHalves,
+    }
+
+    /// The logits after each of `ids`, by a plain f64 forward pass written
+    /// from the Qwen3 graph (llama.cpp's LLM_ARCH_QWEN3, HF's modeling_qwen3),
+    /// none of the model's code: embed, then per layer rmsnorm, q k v,
+    /// per-head RMSNorm of q and k (the GGUF's eps), NEOX RoPE, causal
+    /// softmax attention (GQA), wo, rmsnorm, SwiGLU; final norm, head (the
+    /// output matrix or the tied embedding). Weights are the file's,
+    /// dequantized; the one rounding mirrored is the KV cache's (f16 unless
+    /// AXON_KV=f32), stored after the rotation.
+    pub(crate) fn qwen3_ref(m: &Model, ids: &[u32], bug: NormBug) -> Vec<Vec<f32>> {
+        let a = &m.arch;
+        let num = |k: &str| meta_num(m, &format!("{a}.{k}")).unwrap();
+        let (dim, nh, nkv) = (
+            num("embedding_length") as usize,
+            num("attention.head_count") as usize,
+            num("attention.head_count_kv") as usize,
+        );
+        let hd = num("attention.key_length") as usize;
+        let eps = num("attention.layer_norm_rms_epsilon");
+        let base = meta_num(m, &format!("{a}.rope.freq_base")).unwrap_or(10000.0);
+        let nl = num("block_count") as usize;
+        let w = |name: &str| -> (Vec<f64>, usize) {
+            let t = m.tensors.iter().find(|t| t.name == name).unwrap();
+            let mut v = vec![0f32; t.n_elements as usize];
+            dequant(t.qtype.id, m.tensor_data(t), &mut v);
+            (v.into_iter().map(f64::from).collect(), t.dims[0] as usize)
+        };
+        let mv = |(wv, cols): &(Vec<f64>, usize), x: &[f64]| -> Vec<f64> {
+            wv.chunks(*cols)
+                .map(|r| r.iter().zip(x).map(|(a, b)| a * b).sum())
+                .collect()
+        };
+        let rms = |x: &[f64], g: &[f64], eps: f64| -> Vec<f64> {
+            let inv = 1.0 / (x.iter().map(|v| v * v).sum::<f64>() / x.len() as f64 + eps).sqrt();
+            x.iter().zip(g).map(|(v, g)| v * inv * g).collect()
+        };
+        let rope = |v: &mut [f64], pos: usize| {
+            for head in v.chunks_mut(hd) {
+                for i in 0..hd / 2 {
+                    let th = pos as f64 * base.powf(-2.0 * i as f64 / hd as f64);
+                    let (s, c) = (th.sin(), th.cos());
+                    let (x0, x1) = (head[i], head[i + hd / 2]);
+                    head[i] = x0 * c - x1 * s;
+                    head[i + hd / 2] = x0 * s + x1 * c;
+                }
+            }
+        };
+        let head_norm = |v: &mut [f64], g: &[f64]| {
+            let g: Vec<f64> = if bug == NormBug::GainHalves {
+                g[hd / 2..].iter().chain(&g[..hd / 2]).copied().collect()
+            } else {
+                g.to_vec()
+            };
+            let e = if bug == NormBug::Eps { 1e-6 } else { eps };
+            for head in v.chunks_mut(hd) {
+                let n = rms(head, &g, e);
+                head.copy_from_slice(&n);
+            }
+        };
+        let cache = |x: f64| -> f64 {
+            if crate::kv::use_f32() {
+                x as f32 as f64
+            } else {
+                Half::from_f32(x as f32).to_f32() as f64
+            }
+        };
+        let (embd, _) = w("token_embd.weight");
+        let out = if m.tensors.iter().any(|t| t.name == "output.weight") {
+            w("output.weight")
+        } else {
+            (embd.clone(), dim)
+        };
+        let lw: Vec<_> = (0..nl)
+            .map(|i| {
+                let n = |s: &str| w(&format!("blk.{i}.{s}"));
+                [
+                    n("attn_norm.weight"),
+                    n("attn_q.weight"),
+                    n("attn_k.weight"),
+                    n("attn_v.weight"),
+                    n("attn_q_norm.weight"),
+                    n("attn_k_norm.weight"),
+                    n("attn_output.weight"),
+                    n("ffn_norm.weight"),
+                    n("ffn_gate.weight"),
+                    n("ffn_up.weight"),
+                    n("ffn_down.weight"),
+                ]
+            })
+            .collect();
+        let (out_norm, _) = w("output_norm.weight");
+        // Per layer, the cached (rounded) keys and values of every position.
+        let mut kc: Vec<Vec<Vec<f64>>> = vec![Vec::new(); nl];
+        let mut vc: Vec<Vec<Vec<f64>>> = vec![Vec::new(); nl];
+        let mut logits = Vec::new();
+        for (pos, &id) in ids.iter().enumerate() {
+            let mut x: Vec<f64> = embd[id as usize * dim..(id as usize + 1) * dim].to_vec();
+            for (l, [an, wq, wk, wv, qn, kn, wo, fnm, wg, wu, wd]) in lw.iter().enumerate() {
+                let h = rms(&x, &an.0, eps);
+                let (mut q, mut k, v) = (mv(wq, &h), mv(wk, &h), mv(wv, &h));
+                match bug {
+                    NormBug::Dropped => {}
+                    NormBug::AfterRope => {
+                        rope(&mut q, pos);
+                        rope(&mut k, pos);
+                    }
+                    _ => {
+                        head_norm(&mut q, &qn.0);
+                        head_norm(&mut k, &kn.0);
+                    }
+                }
+                if bug == NormBug::AfterRope {
+                    head_norm(&mut q, &qn.0);
+                    head_norm(&mut k, &kn.0);
+                } else {
+                    rope(&mut q, pos);
+                    rope(&mut k, pos);
+                }
+                kc[l].push(k.iter().map(|&x| cache(x)).collect());
+                vc[l].push(v.iter().map(|&x| cache(x)).collect());
+                let mut att = vec![0f64; nh * hd];
+                for qh in 0..nh {
+                    let kh = qh / (nh / nkv);
+                    let qv = &q[qh * hd..(qh + 1) * hd];
+                    let sc: Vec<f64> = kc[l]
+                        .iter()
+                        .map(|kr| {
+                            qv.iter()
+                                .zip(&kr[kh * hd..(kh + 1) * hd])
+                                .map(|(a, b)| a * b)
+                                .sum::<f64>()
+                                / (hd as f64).sqrt()
+                        })
+                        .collect();
+                    let mx = sc.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                    let e: Vec<f64> = sc.iter().map(|s| (s - mx).exp()).collect();
+                    let z: f64 = e.iter().sum();
+                    for (t, p) in e.iter().enumerate() {
+                        for d in 0..hd {
+                            att[qh * hd + d] += p / z * vc[l][t][kh * hd + d];
+                        }
+                    }
+                }
+                for (x, o) in x.iter_mut().zip(mv(wo, &att)) {
+                    *x += o;
+                }
+                let h = rms(&x, &fnm.0, eps);
+                let (g, u) = (mv(wg, &h), mv(wu, &h));
+                let act: Vec<f64> = g
+                    .iter()
+                    .zip(&u)
+                    .map(|(g, u)| g / (1.0 + (-g).exp()) * u)
+                    .collect();
+                for (x, d) in x.iter_mut().zip(mv(wd, &act)) {
+                    *x += d;
+                }
+            }
+            let h = rms(&x, &out_norm, eps);
+            logits.push(mv(&out, &h).into_iter().map(|v| v as f32).collect());
+        }
+        logits
+    }
+
+    /// Largest |a - b| over two sets of logit rows.
+    pub(crate) fn max_diff(a: &[Vec<f32>], b: &[Vec<f32>]) -> f32 {
+        a.iter()
+            .flatten()
+            .zip(b.iter().flatten())
+            .fold(0f32, |m, (x, y)| m.max((x - y).abs()))
+    }
+
+    /// Bound on |dlogit| vs `qwen3_ref` for 8-bit activations (the Q8_0
+    /// fixture, CPU and GPU): measured 0.175 (CPU) and ~0.2 (GPU, f16 and q8
+    /// caches); every `NormBug` moves the logits by >= 3.3 there.
+    pub(crate) const QWEN3_Q8_TOL: f32 = 0.5;
+
+    /// The CPU's qwen3 (decode and batched prefill, repacked or not) against
+    /// the independent `qwen3_ref`. On the F32 fixture the CPU's only
+    /// rounding besides f32 arithmetic is the f16 KV cache, which the
+    /// reference mirrors (measured max |dlogit| 4.5e-4: f32 sums, and a key
+    /// now and then rounding to the other neighbouring half); on the Q8_0
+    /// one its 8-bit activations (QWEN3_Q8_TOL). Each `NormBug` moves the
+    /// reference's logits by 3.3 to 10 on either (checked), so a norm bug in
+    /// the model's code, shared by every backend or not, fails here (and in
+    /// cuda's gpu_qwen3_matches_reference_forward).
+    #[test]
+    fn qwen3_matches_reference_forward() {
+        const TOL: f32 = 2e-3;
+        let m = qwen3_fixture(F32);
+        let ids = [3u32, 17, 42, 9];
+        let want = qwen3_ref(&m, &ids, NormBug::None);
+        for bug in [
+            NormBug::Dropped,
+            NormBug::AfterRope,
+            NormBug::Eps,
+            NormBug::GainHalves,
+        ] {
+            let d = max_diff(&qwen3_ref(&m, &ids, bug), &want);
+            eprintln!("reference with {bug:?}: max |dlogit| {d:.4}");
+            assert!(d > 100.0 * TOL, "{bug:?} hardly changes the logits ({d})");
+        }
+        // The Q8_0 fixture (the GPU test's): the CPU's 8-bit activations
+        // against the bugs' size there.
+        {
+            let m = qwen3_fixture(Q8_0);
+            let want = qwen3_ref(&m, &ids, NormBug::None);
+            let mn = qwen3_fixture(Q8_0); // the net's (repacking releases)
+            let net = Qwen2::new(&mn);
+            let mut c = net.new_cache(ids.len());
+            let l: Vec<Vec<f32>> = (0..ids.len())
+                .map(|p| net.forward(ids[p], p, &mut c))
+                .collect();
+            let d = max_diff(&l, &want);
+            eprintln!("Q8_0 fixture: cpu vs reference {d:.4}");
+            assert!(d <= QWEN3_Q8_TOL, "Q8_0 fixture: cpu vs reference {d}");
+            for bug in [
+                NormBug::Dropped,
+                NormBug::AfterRope,
+                NormBug::Eps,
+                NormBug::GainHalves,
+            ] {
+                let d = max_diff(&qwen3_ref(&m, &ids, bug), &want);
+                eprintln!("Q8_0 fixture: reference with {bug:?}: {d:.4}");
+                assert!(d > 5.0 * QWEN3_Q8_TOL, "Q8_0 fixture: {bug:?} only {d}");
+            }
+        }
+        for repack in [true, false] {
+            // A fresh fixture each: repacking releases what it repacks.
+            let m = qwen3_fixture(F32);
+            let net = Qwen2::new_with(&m, repack);
+            let mut c = net.new_cache(ids.len());
+            let dec: Vec<Vec<f32>> = (0..ids.len())
+                .map(|p| net.forward(ids[p], p, &mut c))
+                .collect();
+            let mut c = net.new_cache(ids.len());
+            net.feed_batch(&ids[..3], 0, &mut c);
+            let pre = net.forward(ids[3], 3, &mut c);
+            let (d, dp) = (max_diff(&dec, &want), max_diff(&[pre], &want[3..]));
+            eprintln!(
+                "cpu (repack {repack}) vs reference: max |dlogit| {d:.2e}, after prefill {dp:.2e}"
+            );
+            assert!(d <= TOL && dp <= TOL, "cpu vs reference: {d} / {dp}");
+        }
+    }
+
     #[test]
     fn check_supported_qwen3() {
         tiny3(|_| {}, |_| {}).expect("tiny qwen3");
