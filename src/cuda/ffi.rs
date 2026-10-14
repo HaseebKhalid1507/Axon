@@ -28,6 +28,8 @@ pub const NVRTC_SUCCESS: NvrtcResult = 0;
 /// `CU_STREAM_NON_BLOCKING`: not ordered with the legacy default stream,
 /// which stream capture requires; every copy goes on the stream itself.
 pub const CU_STREAM_NON_BLOCKING: c_uint = 1;
+pub const CU_EVENT_DISABLE_TIMING: c_uint = 2;
+pub const CU_MEMHOSTREGISTER_READ_ONLY: c_uint = 8;
 /// `CU_STREAM_CAPTURE_MODE_THREAD_LOCAL`: capture only fails on unsafe
 /// calls made by this thread.
 pub const CU_STREAM_CAPTURE_MODE_THREAD_LOCAL: c_int = 1;
@@ -116,6 +118,7 @@ api! {
         fn cuDevicePrimaryCtxRetain(*mut CUcontext, CUdevice) -> CUresult;
         fn cuDevicePrimaryCtxRelease_v2(CUdevice) -> CUresult;
         fn cuCtxSetCurrent(CUcontext) -> CUresult;
+        fn cuCtxSynchronize() -> CUresult;
         #[cfg_attr(not(test), allow(dead_code))] // tests: Drop unbinds
         fn cuCtxGetCurrent(*mut CUcontext) -> CUresult;
         fn cuMemGetInfo_v2(*mut usize, *mut usize) -> CUresult;
@@ -126,6 +129,9 @@ api! {
         fn cuMemsetD8Async(CUdeviceptr, u8, usize, CUstream) -> CUresult;
         fn cuMemHostAlloc(*mut *mut c_void, usize, c_uint) -> CUresult;
         fn cuMemFreeHost(*mut c_void) -> CUresult;
+        fn cuMemHostRegister_v2(*mut c_void, usize, c_uint) -> CUresult;
+        fn cuMemHostUnregister(*mut c_void) -> CUresult;
+        fn cuStreamWaitEvent(CUstream, CUevent, c_uint) -> CUresult;
         fn cuModuleLoadData(*mut CUmodule, *const c_void) -> CUresult;
         fn cuModuleUnload(CUmodule) -> CUresult;
         fn cuModuleGetFunction(*mut CUfunction, CUmodule, *const c_char) -> CUresult;
@@ -149,15 +155,12 @@ api! {
         fn cuGraphExecDestroy(CUgraphExec) -> CUresult;
         fn cuGraphDestroy(CUgraph) -> CUresult;
         // Events, to time kernels (tests and benchmarks).
-        #[cfg_attr(not(test), allow(dead_code))]
         fn cuEventCreate(*mut CUevent, c_uint) -> CUresult;
-        #[cfg_attr(not(test), allow(dead_code))]
         fn cuEventRecord(CUevent, CUstream) -> CUresult;
         #[cfg_attr(not(test), allow(dead_code))]
         fn cuEventSynchronize(CUevent) -> CUresult;
         #[cfg_attr(not(test), allow(dead_code))]
         fn cuEventElapsedTime(*mut f32, CUevent, CUevent) -> CUresult;
-        #[cfg_attr(not(test), allow(dead_code))]
         fn cuEventDestroy_v2(CUevent) -> CUresult;
     }
 }

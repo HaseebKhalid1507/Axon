@@ -123,52 +123,37 @@ unsafe fn store_f16c(dst: &mut [Half], src: &[f32]) {
     }
 }
 
-/// A zeroed buffer of `len` T starting on a 64-byte boundary (so cache rows
-/// whose byte length is a multiple of 64 start on a cache line). Allocated
-/// with 16-byte alignment and 64 spare bytes, so `alloc_zeroed` is calloc
-/// (fresh zero pages; an over-aligned layout would memset the whole buffer):
-/// untouched context costs no resident memory.
+/// A zeroed buffer of `len` T in its own anonymous mapping: page-aligned
+/// (so cache rows whose byte length is a multiple of 64 start on a cache
+/// line), whole pages that no other allocation shares (a streamed prefill
+/// page-locks each buffer on its own: `cuda::qwen2::stream`), and fresh
+/// zero pages: untouched context costs no resident memory.
 pub struct KvBuf<T: KvElem> {
-    base: std::ptr::NonNull<u8>,
+    /// Owns the memory `ptr` points into (unmapped on drop).
+    _map: memmap2::MmapMut,
     ptr: std::ptr::NonNull<T>,
     len: usize,
 }
 
-// SAFETY: KvBuf owns its allocation like a Vec<T>.
+// SAFETY: KvBuf owns its mapping like a Vec<T>.
 unsafe impl<T: KvElem> Send for KvBuf<T> {}
 // SAFETY: as above; shared access is read-only.
 unsafe impl<T: KvElem> Sync for KvBuf<T> {}
 
 impl<T: KvElem> KvBuf<T> {
-    fn layout(len: usize) -> std::alloc::Layout {
-        let bytes = len * std::mem::size_of::<T>() + 64;
-        std::alloc::Layout::from_size_align(bytes, 16).expect("kv cache size")
-    }
-
     pub fn zeroed(len: usize) -> KvBuf<T> {
-        let layout = Self::layout(len);
-        // SAFETY: layout has nonzero size.
-        let p = unsafe { std::alloc::alloc_zeroed(layout) };
-        let base =
-            std::ptr::NonNull::new(p).unwrap_or_else(|| std::alloc::handle_alloc_error(layout));
-        // Start at the first 64-byte boundary, within the 64 spare bytes. All
-        // zero bits are a valid T (KvElem); 64-byte alignment satisfies T's.
-        let off = p.align_offset(64);
-        assert!(off < 64, "kv cache alignment");
-        // SAFETY: off < 64, inside the allocation.
-        let ptr = unsafe { base.add(off) };
+        let bytes = len
+            .checked_mul(std::mem::size_of::<T>())
+            .expect("kv cache size");
+        let mut map =
+            memmap2::MmapMut::map_anon(bytes.max(1)).expect("kv cache: anonymous mapping");
+        // All zero bits are a valid T (KvElem); page alignment satisfies T's.
+        let ptr = std::ptr::NonNull::new(map.as_mut_ptr().cast::<T>()).expect("mapping");
         KvBuf {
-            base,
-            ptr: ptr.cast(),
+            _map: map,
+            ptr,
             len,
         }
-    }
-}
-
-impl<T: KvElem> Drop for KvBuf<T> {
-    fn drop(&mut self) {
-        // SAFETY: allocated in `zeroed` with this layout.
-        unsafe { std::alloc::dealloc(self.base.as_ptr(), Self::layout(self.len)) }
     }
 }
 
@@ -269,7 +254,7 @@ mod tests {
     fn kvbuf_aligned_zeroed() {
         for len in [0, 1, 7, 1000, 1 << 20] {
             let mut b = KvBuf::<Half>::zeroed(len);
-            assert_eq!(b.as_ptr() as usize % 64, 0);
+            assert_eq!(b.as_ptr() as usize % 4096, 0);
             assert!(b.iter().all(|h| h.0 == 0));
             if len > 0 {
                 b[len - 1] = Half(1);

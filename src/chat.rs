@@ -558,6 +558,79 @@ mod tests {
         }
     }
 
+    /// `turns_match_fresh_prefill_hybrid` with prefill streaming the CPU's
+    /// layers through the GPU (PR A): graded, not exact. Streamed batches
+    /// (32+ tokens: the system prompt, a fresh prefill's chunks) compute
+    /// layers 0..12 with the GPU's numerics, while the replies the chat
+    /// decoded went through those layers on the CPU (decode and verify never
+    /// stream: drafting stays lossless). So a fresh prefill of the history
+    /// gives the reply positions other (GPU-rounded) KV rows than the chat's
+    /// cache holds, and the two may pick differently at a near-tie: measured
+    /// on this model, the 4th turn's reply diverges after 7 tokens. Checked
+    /// instead: after every turn, the logits after the conversation so far
+    /// and 32 greedy steps from there, chat cache vs fresh streamed prefill,
+    /// within the CPU's own spread on the same histories (`assert_graded`,
+    /// as the GPU is graded), for both settings.
+    #[test]
+    fn turns_stream_graded_vs_fresh_prefill() {
+        use crate::cuda::qwen2::tests::{Agree, assert_graded, compare, compare_from, report};
+        use crate::lm::Lm;
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let Some(m) = crate::testutil::model_with(Some(false)) else {
+            return;
+        };
+        let km = crate::cuda::Kernels::module(&g).unwrap();
+        let tok = Tokenizer::from_gguf(&m);
+        let net = crate::hybrid::HybridQwen2::new_with_stream(
+            Some((&g, &km)),
+            &m,
+            2048,
+            12,
+            crate::cuda::qwen2::CacheKv::F16,
+            true,
+            false,
+        )
+        .unwrap();
+        let (cpu, rows) = (Qwen2::new(&m), Qwen2::new_with(&m, false));
+        let (mut ag, mut ac) = (Agree::default(), Agree::default());
+        for (max_reply, k) in [(12, 7), (64, 0)] {
+            let mut chat = Chat::new(&net, &tok, DEFAULT_SYSTEM, 2048).unwrap();
+            chat.max_reply = max_reply;
+            chat.max_draft = round_draft(k);
+            let mut accepted = 0;
+            for msg in MSGS {
+                accepted += chat
+                    .reply(msg, &|| false, &mut |_| Ok(()))
+                    .unwrap()
+                    .accepted;
+                let hist = chat.hist.clone();
+                let (&last, rest) = hist.split_last().unwrap();
+                // The chat's cache, fed up to the last token as its next
+                // turn would (then it carries on from there: positions past
+                // the history are overwritten by the next turn).
+                if chat.fed < rest.len() {
+                    net.feed_batch(&rest[chat.fed..], chat.fed, &mut chat.cache);
+                }
+                let mut fresh = net.new_cache(2048);
+                let before = net.streamed_chunks();
+                for (i, b) in rest.chunks(crate::PREFILL_BATCH).enumerate() {
+                    net.feed_batch(b, i * crate::PREFILL_BATCH, &mut fresh);
+                }
+                assert!(net.streamed_chunks() > before, "the fresh prefill streamed");
+                let (cache, pos) = (&mut chat.cache, rest.len());
+                compare_from(&net, &mut fresh, &net, cache, last, pos, 32, &mut ag);
+                chat.fed = hist.len();
+                compare(&cpu, &rows, &hist, 32, &mut ac);
+            }
+            assert_eq!(accepted > 0, k > 0);
+        }
+        report("0.5B cpu rows vs cpu (chat histories)", &ac);
+        report("0.5B streamed chat cache vs fresh streamed prefill", &ag);
+        assert_graded(&ag, &ac);
+    }
+
     /// A small context forgets the oldest exchanges and stays exact.
     #[test]
     fn full_context_drops_oldest() {

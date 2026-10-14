@@ -44,11 +44,27 @@ pub(crate) fn compare<R: Lm, O: Lm>(r: &R, o: &O, ids: &[u32], steps: usize, a: 
     let (&last, rest) = ids.split_last().unwrap();
     r.feed_batch(rest, 0, &mut rc);
     o.feed_batch(rest, 0, &mut oc);
+    compare_from(r, &mut rc, o, &mut oc, last, rest.len(), steps, a);
+}
+
+/// `compare` from caches already holding positions 0..pos: `last` at pos,
+/// then `steps` greedy tokens of `r`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compare_from<R: Lm, O: Lm>(
+    r: &R,
+    rc: &mut R::Cache,
+    o: &O,
+    oc: &mut O::Cache,
+    last: u32,
+    pos: usize,
+    steps: usize,
+    a: &mut Agree,
+) {
     let mut tok = last;
     for s in 0..=steps {
-        let pos = rest.len() + s;
-        let lr = r.forward(tok, pos, &mut rc);
-        let lo = o.forward(tok, pos, &mut oc);
+        let pos = pos + s;
+        let lr = r.forward(tok, pos, rc);
+        let lo = o.forward(tok, pos, oc);
         let (ar, ao) = (crate::argmax(&lr), crate::argmax(&lo));
         a.positions += 1;
         a.top1 += (ar == ao) as usize;

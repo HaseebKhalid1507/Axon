@@ -75,13 +75,25 @@ const PREFILL_BATCH: usize = 1024;
 /// the CPU half's batched pass sets the pace, so the hybrid feeds at most
 /// `crate::PREFILL_BATCH` tokens per call, and a speculative verify pass
 /// takes K + 1 (8 at --draft 7; bigger ones are chunked, same bits). The
-/// scratch for 512 tokens would cost 160 MiB more on 32B (99 MiB on 14B),
-/// for `PREFILL_BATCH` (1024) about twice that, which the split's placement (`vram_need`) counts against layers. Raise it (the
-/// field `batch`, set from this in `plan`) if the GPU half is ever fed
-/// bigger chunks, e.g. a prefill whose CPU layers are streamed to the GPU.
+/// scratch for 512 tokens would cost 160 MiB more on 32B (99 MiB on 14B)
+/// that the split's placement (`vram_need`) counts against layers.
 /// Placement stays monotone: first == 0 (the whole model) gets the bigger
-/// `PREFILL_BATCH` scratch on top of one more layer.
+/// `PREFILL_BATCH` scratch on top of one more layer. PR A: a split that
+/// streams its CPU layers for prefill feeds the GPU half whole prompt
+/// chunks, so it gets `STREAM_PASS` (`split_batch(true)`).
 pub const SPLIT_BATCH: usize = crate::PREFILL_BATCH;
+
+/// Most tokens per batched pass of a split that streams its CPU layers
+/// (`split_batch(true)`): the streamed prefill's chunk size. Its own
+/// constant, not `PREFILL_BATCH` (1024 since gemm2 round 2): the scratch
+/// for it is VRAM the streaming ring and the GPU layers don't get.
+pub const STREAM_PASS: usize = PREFILL_BATCH;
+
+/// The GPU half's batch scratch for a split that streams (`stream`) or not.
+pub fn split_batch(stream: bool) -> usize {
+    if stream { STREAM_PASS } else { SPLIT_BATCH }
+}
+
 /// VRAM kept free beyond what `new` plans for: the context's own growth,
 /// graphs, the kernel module.
 const HEADROOM: u64 = 256 << 20;
@@ -114,6 +126,7 @@ impl Mat {
 }
 
 /// One layer: matrices, and offsets (in floats) into the vector buffer.
+#[derive(Clone, Copy)]
 struct LayerW {
     attn_norm: usize,
     /// The q8 cache's key shift (decode.cu kv_q8_store), [kv_dim] floats.
@@ -369,7 +382,17 @@ impl<'g> CudaQwen2<'g> {
         kv: CacheKv,
         fit: bool,
     ) -> Result<CudaQwen2<'g>, String> {
-        Self::build(gpu, module, m, max_ctx, 0, kv, fit, &mut |_| {})
+        Self::build(
+            gpu,
+            module,
+            m,
+            max_ctx,
+            0,
+            kv,
+            SPLIT_BATCH,
+            fit,
+            &mut |_| {},
+        )
     }
 
     /// `with_kv` (no `fit`) with layers first..n_layers only, plus the
@@ -380,7 +403,10 @@ impl<'g> CudaQwen2<'g> {
     /// tokens, and the cache holds n_layers - first layers. `uploaded` sees
     /// each matrix right after its bytes are on the GPU (the hybrid hands
     /// its pages back to `m` there, so the GPU half never sits in RAM all
-    /// at once).
+    /// at once). With first > 0, caches get batch scratch for
+    /// `split_batch` tokens (`split_batch`: `SPLIT_BATCH`, or the streaming
+    /// pass's to stream).
+    #[allow(clippy::too_many_arguments)]
     pub fn new_layers<'m>(
         gpu: &'g Gpu,
         module: &'g Module<'g>,
@@ -388,9 +414,20 @@ impl<'g> CudaQwen2<'g> {
         max_ctx: usize,
         first: usize,
         kv: CacheKv,
+        split_batch: usize,
         uploaded: &mut dyn FnMut(&'m Tensor),
     ) -> Result<CudaQwen2<'g>, String> {
-        Self::build(gpu, module, m, max_ctx, first, kv, false, uploaded)
+        Self::build(
+            gpu,
+            module,
+            m,
+            max_ctx,
+            first,
+            kv,
+            split_batch,
+            false,
+            uploaded,
+        )
     }
 
     /// `new_layers` with `with_kv`'s `fit`.
@@ -402,10 +439,11 @@ impl<'g> CudaQwen2<'g> {
         max_ctx: usize,
         first: usize,
         kv: CacheKv,
+        split_batch: usize,
         fit: bool,
         uploaded: &mut dyn FnMut(&'m Tensor),
     ) -> Result<CudaQwen2<'g>, String> {
-        let (mut net, plan) = Self::plan(gpu, module, m, first, kv)?;
+        let (mut net, plan) = Self::plan(gpu, module, m, first, kv, split_batch)?;
         // Check the whole plan fits before allocating any of it.
         let free = gpu.info()?.free_bytes;
         let mut ctx = max_ctx;
@@ -448,8 +486,9 @@ impl<'g> CudaQwen2<'g> {
         Ok(net)
     }
 
-    /// VRAM `new_layers(.., max_ctx, first, kv, ..)` checks it has, without
-    /// allocating anything: the split's placement (`hybrid::gpu_layers`).
+    /// VRAM `new_layers(.., max_ctx, first, kv, split_batch, _)` checks
+    /// it has, without allocating anything: the split's placement
+    /// (`hybrid::auto_gpu_layers`).
     pub fn vram_need(
         gpu: &'g Gpu,
         module: &'g Module<'g>,
@@ -457,8 +496,9 @@ impl<'g> CudaQwen2<'g> {
         max_ctx: usize,
         first: usize,
         kv: CacheKv,
+        split_batch: usize,
     ) -> Result<u64, String> {
-        let (net, plan) = Self::plan(gpu, module, m, first, kv)?;
+        let (net, plan) = Self::plan(gpu, module, m, first, kv, split_batch)?;
         Ok(net.vram_want(&plan, max_ctx))
     }
 
@@ -470,7 +510,7 @@ impl<'g> CudaQwen2<'g> {
         m: &Model,
         kv: CacheKv,
     ) -> Result<impl Fn(usize) -> u64 + use<'g>, String> {
-        let (net, plan) = Self::plan(gpu, module, m, 0, kv)?;
+        let (net, plan) = Self::plan(gpu, module, m, 0, kv, SPLIT_BATCH)?;
         let fixed = plan.fixed();
         Ok(move |ctx| net.vram_want_fixed(fixed, ctx))
     }
@@ -493,6 +533,7 @@ impl<'g> CudaQwen2<'g> {
         m: &'m Model,
         first: usize,
         kv: CacheKv,
+        split_batch: usize,
     ) -> Result<(CudaQwen2<'g>, Plan<'m>), String> {
         crate::model::check_supported(m).map_err(|e| e.to_string())?;
         let need = |k: &str| {
@@ -675,7 +716,7 @@ impl<'g> CudaQwen2<'g> {
             graphs: std::env::var("AXON_CUDA_GRAPHS").map_or(true, |v| v != "0"),
             bf: batch::BatchFns::new(module, head_dim, sms)?,
             batch: if first > 0 {
-                SPLIT_BATCH
+                split_batch
             } else {
                 PREFILL_BATCH
             },
@@ -755,6 +796,16 @@ impl<'g> CudaQwen2<'g> {
             CacheKv::Q8 { group } => &self.f.q8[(group != self.head_dim) as usize],
             CacheKv::F16 => unreachable!("q8 kernels for an f16 cache"),
         }
+    }
+
+    /// Free VRAM now.
+    pub fn free_bytes(&self) -> Result<u64, String> {
+        Ok(self.gpu.info()?.free_bytes)
+    }
+
+    /// Most tokens per batched pass of cache `c`.
+    pub fn batch_max(c: &CudaCache) -> usize {
+        c.b.as_ref().map_or(1, |b| b.max)
     }
 
     /// Weight bytes in VRAM.
@@ -1437,5 +1488,6 @@ impl<'g> Lm for CudaQwen2<'g> {
 }
 
 mod batch;
+pub(crate) mod stream;
 #[cfg(test)]
 pub(crate) mod tests;

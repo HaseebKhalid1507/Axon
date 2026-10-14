@@ -3,7 +3,7 @@
 //! plain f32 loops.
 
 use crate::gguf::{Model, Tensor, Val};
-use crate::kv::{KvData, KvElem, Layers};
+use crate::kv::{Half, KvData, KvElem, Layers};
 use crate::pool::{self, Pool};
 use crate::quant::{
     DecodeCfg, F16, F32, Q4_K, Q5_0, Q6_K, Q8_0, QuantizedAct, batch_slots, dequant,
@@ -214,6 +214,22 @@ impl KvCache {
         match &self.data {
             KvData::F16(c) => all(c),
             KvData::F32(c) => all(c),
+        }
+    }
+}
+
+impl KvCache {
+    /// Every layer's K and V buffers if the cache is f16 (None for f32):
+    /// what streaming reads and writes in place (`cuda::qwen2::stream`).
+    pub(crate) fn f16_layers(&mut self) -> Option<Vec<(&mut [Half], &mut [Half])>> {
+        match &mut self.data {
+            KvData::F16(c) => Some(
+                c.k.iter_mut()
+                    .zip(c.v.iter_mut())
+                    .map(|(k, v)| (&mut k[..], &mut v[..]))
+                    .collect(),
+            ),
+            KvData::F32(_) => None,
         }
     }
 }
@@ -564,6 +580,63 @@ impl<'a> Qwen2<'a> {
             output,
             layers,
         }
+    }
+
+    /// Layer l's weights as the CPU holds them, for streaming them to the
+    /// GPU (`cuda::qwen2::stream`): repacked bytes or the file's.
+    pub(crate) fn host_layer(&self, l: usize) -> crate::cuda::qwen2::stream::HostLayer<'_> {
+        use crate::cuda::qwen2::stream::{HostLayer, HostMat};
+        fn mat<'s>(w: &'s Weight<'_>) -> HostMat<'s> {
+            HostMat {
+                qt: w.qt(),
+                rows: w.rows(),
+                cols: w.t.dims[0] as usize,
+                bytes: match &w.r8 {
+                    Some(r) => r,
+                    None => w.bytes(),
+                },
+                repacked: w.r8.is_some(),
+            }
+        }
+        let ly = &self.layers[l];
+        HostLayer {
+            mats: [
+                mat(&ly.wq),
+                mat(&ly.wk),
+                mat(&ly.wv),
+                mat(&ly.wo),
+                mat(&ly.w_gate),
+                mat(&ly.w_up),
+                mat(&ly.w_down),
+            ],
+            attn_norm: &ly.attn_norm,
+            ffn_norm: &ly.ffn_norm,
+            bq: ly.bq.as_deref(),
+            bk: ly.bk.as_deref(),
+            bv: ly.bv.as_deref(),
+        }
+    }
+
+    /// The whole mapping the repacked matrices live in (None if none is).
+    pub(crate) fn r8_arena(&self) -> Option<&[u8]> {
+        let w = self
+            .layers
+            .iter()
+            .flat_map(|l| [&l.wq, &l.wk, &l.wv, &l.wo, &l.w_gate, &l.w_up, &l.w_down])
+            .chain(self.output.as_ref())
+            .find_map(|w| w.r8.as_ref())?;
+        Some(&w.map[..])
+    }
+
+    /// Layers here (0..k of the model).
+    pub(crate) fn layer_count(&self) -> usize {
+        self.layers.len()
+    }
+
+    /// The embeddings of `tokens`, token-major (dim floats each).
+    pub(crate) fn embed_batch(&self, tokens: &[u32]) -> Vec<f32> {
+        let rows = par_map(tokens.len(), self.dim, |b| self.embed(tokens[b]));
+        rows.concat()
     }
 
     pub fn new_cache(&self, max_ctx: usize) -> KvCache {

@@ -162,6 +162,8 @@ impl<'a> Backend<'a> {
         let whole_gpu = |ctx: usize, fit: bool| {
             CudaQwen2::with_kv(gpu, module, m, ctx, ckv, fit).map(|n| Backend::Cuda(Box::new(n)))
         };
+        let auto = gpu_layers.is_none();
+        let stream = crate::hybrid::stream_setting();
         let g = match gpu_layers {
             // Every layer: the GPU model (same weights, cache and VRAM as a
             // split with no CPU half, and its own sampling paths).
@@ -177,7 +179,10 @@ impl<'a> Backend<'a> {
             None => {
                 let free = gpu.info()?.free_bytes;
                 let whole = CudaQwen2::vram_curve(gpu, module, m, ckv)?;
-                let split = || crate::hybrid::auto_gpu_layers(gpu, module, m, max_ctx, ckv, free);
+                // A streaming split's VRAM (its bigger batch scratch and the
+                // stream reserve) is what the split option is weighed by.
+                let split =
+                    || crate::hybrid::auto_gpu_layers(gpu, module, m, max_ctx, ckv, free, stream);
                 match crate::hybrid::choose_placement(free, max_ctx, fit, whole, split)? {
                     Placement::Gpu { ctx } => return whole_gpu(ctx, false),
                     Placement::Split {
@@ -207,7 +212,8 @@ impl<'a> Backend<'a> {
                 }
             }
         };
-        let h = HybridQwen2::new(Some((gpu, module)), m, max_ctx, g, ckv)?;
+        let h =
+            HybridQwen2::new_with_stream(Some((gpu, module)), m, max_ctx, g, ckv, stream, auto)?;
         eprintln!("split:       {}", h.describe(max_ctx));
         Ok(Backend::Hybrid(Box::new(h)))
     }
