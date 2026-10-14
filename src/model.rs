@@ -213,7 +213,7 @@ macro_rules! with_kv_layer {
     };
 }
 
-fn meta_num(m: &Model, key: &str) -> Option<f64> {
+pub(crate) fn meta_num(m: &Model, key: &str) -> Option<f64> {
     m.metadata
         .iter()
         .find(|(k, _)| k == key)
@@ -1973,6 +1973,31 @@ pub(crate) mod tests {
         }
     }
     use crate::kv::Half;
+
+    /// The CPU's decode attention (`attend`) of query heads q over f16 keys
+    /// and values [t][kv_dim] at positions 0..np, `tile` as `decode_tile`.
+    pub(crate) fn attend_cpu(
+        q: &[f32],
+        kc: &[Half],
+        vc: &[Half],
+        kv_dim: usize,
+        hd: usize,
+        np: usize,
+        tile: Option<usize>,
+    ) -> Vec<f32> {
+        let mut out = vec![0f32; q.len()];
+        let mut buf = Vec::new();
+        let threads = Pool::global().threads();
+        attend(q, kc, vc, kv_dim, hd, np, tile, threads, &mut buf, &mut out);
+        out
+    }
+
+    /// The CPU's RMSNorm.
+    pub(crate) fn rmsnorm_cpu(x: &[f32], w: &[f32], eps: f32) -> Vec<f32> {
+        let mut out = vec![0f32; x.len()];
+        rmsnorm_into(x, w, eps, &mut out);
+        out
+    }
 
     /// A tiny well-formed qwen2: dim 64, 2 heads (1 kv), ffn 128, vocab 8, `layers`
     /// layers; `edit` changes the tensor list before the file is built.

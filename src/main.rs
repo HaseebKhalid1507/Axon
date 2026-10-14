@@ -16,7 +16,7 @@ mod tokenizer;
 mod viz;
 mod vmath;
 
-use lm::Lm;
+use lm::{Backend, Device, Lm};
 use std::env;
 
 /// Prompt tokens per `feed_batch` call.
@@ -46,11 +46,11 @@ const USAGE: &str = "\
 usage:
   axon <model.gguf>                         browse the model in a terminal UI
   axon info <model.gguf>                    print a summary and exit
-  axon gen <model.gguf> \"<prompt>\" [-n N] [--draft K]
+  axon gen <model.gguf> \"<prompt>\" [-n N] [--draft K] [--device D]
                                             greedy generation
   axon logits <model.gguf> \"<prompt>\" [-k K]
                                             top-K next-token logits after the prompt
-  axon chat <model.gguf> [--system TEXT] [--ctx N] [-n N] [--draft K]
+  axon chat <model.gguf> [--system TEXT] [--ctx N] [-n N] [--draft K] [--device D]
                                             talk to an instruct model
   axon -h | --help                          this help
   axon -V | --version                       print the version
@@ -60,6 +60,7 @@ flags:
   --draft K   gen, chat: draft up to K tokens per step by prompt lookup (default 0 = off; try 7);
               lossless: the output is the plain greedy output either way
   -k K        logits: how many logits to print (default 10)
+  --device D  gen, chat: cpu (default) or cuda (an NVIDIA GPU; the model must fit in its memory)
   --system T  chat: the system message (default: Qwen2.5's)
   --ctx N     chat: context size in tokens (default: the model's, at most 8192); when the
               conversation outgrows it, the oldest exchanges are forgotten
@@ -75,7 +76,10 @@ environment:
   AXON_PREFETCH=N            decode prefetch distance in bytes (default 8192, 0 = off)
   AXON_DECODE_ROWS=1|2|4     decode rows per kernel call (default 4)
   AXON_KV=f16|f32            KV cache element type (default f16: half the memory and
-                             attention bandwidth; f32 for A/B)
+                             attention bandwidth; f32 for A/B; the GPU's is always f16)
+  AXON_DEVICE=cpu|cuda       same as --device
+  AXON_CUDA_GRAPHS=0         cuda: launch each token's kernels one by one instead of
+                             replaying a captured CUDA graph (same results, slower)
 
 The model must be a qwen2-architecture GGUF (e.g. Qwen2.5-0.5B-Instruct Q4_K_M).";
 
@@ -88,7 +92,17 @@ fn fail(msg: &str) -> ! {
 
 /// Load a GGUF, exiting with code 2 and a one-line message if it can't be read.
 fn open_model(path: &str, lm: bool) -> gguf::Model {
-    let m = gguf::load(path).unwrap_or_else(|e| match e.kind() {
+    open_model_with(path, lm, None)
+}
+
+/// `open_model` with `gguf::load_with`'s copy choice (the GPU reads the
+/// weights once, so mapping the file beats copying it).
+fn open_model_with(path: &str, lm: bool, copy: Option<bool>) -> gguf::Model {
+    let m = match copy {
+        None => gguf::load(path),
+        c => gguf::load_with(path, c),
+    };
+    let m = m.unwrap_or_else(|e| match e.kind() {
         std::io::ErrorKind::NotFound => fail(&format!("cannot open '{path}': no such file")),
         _ => fail(&format!("cannot load '{path}': {e}")),
     });
@@ -199,6 +213,22 @@ fn kv_env() {
     }
 }
 
+/// --device's default: $AXON_DEVICE, else the CPU.
+fn device_env() -> Device {
+    Device::from_env().unwrap_or_else(|e| fail(&e))
+}
+
+/// The model on `device` with room for `ctx` tokens; a usage error if the
+/// GPU can't be used (no driver or device, too little memory, ...).
+fn backend<'a>(model: &'a gguf::Model, device: Device, ctx: usize) -> Backend<'a> {
+    Backend::new(model, device, ctx).unwrap_or_else(|e| fail(&format!("--device cuda: {e}")))
+}
+
+/// The copy-vs-map choice for loading a model for `device`.
+fn copy_for(device: Device) -> Option<bool> {
+    (device == Device::Cuda).then_some(false)
+}
+
 /// `gen` and `logits` subcommands: args = [axon, cmd, model, prompt, flags...]
 fn run_lm(args: &[String]) -> std::io::Result<()> {
     use std::io::Write;
@@ -215,11 +245,16 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     let mut n_gen = 32usize;
     let mut top_k = 10usize;
     let mut max_draft = draft_env();
+    let mut device = device_env();
     kv_env();
     let mut i = 4;
     while i < args.len() {
         let val = args.get(i + 1).and_then(|s| s.parse::<usize>().ok());
         match (args[i].as_str(), val) {
+            ("--device", _) => {
+                let v = args.get(i + 1).map_or("", String::as_str);
+                device = Device::parse(v).unwrap_or_else(|e| fail(&e));
+            }
             ("-n", Some(v)) => n_gen = v,
             ("-k", Some(v)) => top_k = v,
             ("--draft", Some(v)) => max_draft = v,
@@ -234,9 +269,8 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     }
     let max_draft = round_draft(max_draft);
 
-    let model = open_model(path, true);
+    let model = open_model_with(path, true, copy_for(device));
     let tok = tokenizer::Tokenizer::from_gguf(&model);
-    let net = model::Qwen2::new(&model);
 
     let ids = tok.encode(prompt);
     if ids.is_empty() {
@@ -244,6 +278,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         std::process::exit(1);
     }
     let extra = if cmd == "gen" { n_gen } else { 0 };
+    let net = backend(&model, device, ids.len() + extra + 1);
     let mut cache = net.new_cache(ids.len() + extra + 1);
 
     // Feed the prompt in batches of PREFILL_BATCH tokens, so each weight row
@@ -333,6 +368,14 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             0.0
         }
     );
+    if let Backend::Cuda(n) = &net {
+        eprintln!(
+            "device:      cuda, {} of weights in VRAM ({} read per token), CUDA graphs {}",
+            human_bytes(n.weight_bytes() as u64),
+            human_bytes(n.bytes_per_token(true) as u64),
+            if n.graphs { "on" } else { "off" }
+        );
+    }
     if env::var_os("AXON_POOL_DEBUG").is_some() {
         let pool = pool::Pool::global();
         eprintln!(
@@ -404,7 +447,7 @@ const CHAT_HELP: &str = concat!(
 /// stdin is a message; on a terminal it's an interactive session.
 fn run_chat(args: &[String]) -> std::io::Result<()> {
     const CHAT_USAGE: &str =
-        "usage: axon chat <model.gguf> [--system TEXT] [--ctx N] [-n N] [--draft K]";
+        "usage: axon chat <model.gguf> [--system TEXT] [--ctx N] [-n N] [--draft K] [--device D]";
     let Some(path) = args.get(2).filter(|p| !p.starts_with('-')) else {
         fail(CHAT_USAGE);
     };
@@ -412,11 +455,12 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     let mut ctx = None;
     let mut max_reply = usize::MAX;
     let mut max_draft = draft_env();
+    let mut device = device_env();
     kv_env();
     let mut i = 3;
     while i < args.len() {
         let f = args[i].as_str();
-        if !matches!(f, "--system" | "--ctx" | "-n" | "--draft") {
+        if !matches!(f, "--system" | "--ctx" | "-n" | "--draft" | "--device") {
             fail(&format!("unknown argument '{f}' for chat"));
         }
         let Some(v) = args.get(i + 1) else {
@@ -424,6 +468,8 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         };
         if f == "--system" {
             system = v.clone();
+        } else if f == "--device" {
+            device = Device::parse(v).unwrap_or_else(|e| fail(&e));
         } else {
             let n = v
                 .parse::<usize>()
@@ -439,7 +485,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         i += 2;
     }
 
-    let model = open_model(path, true);
+    let model = open_model_with(path, true, copy_for(device));
     // RoPE past the trained length gives garbage; 0 = the GGUF doesn't say.
     let trained = model.ctx_len() as usize;
     let ctx = match ctx {
@@ -451,7 +497,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         None => DEFAULT_CHAT_CTX,
     };
     let tok = tokenizer::Tokenizer::from_gguf(&model);
-    let net = model::Qwen2::new(&model);
+    let net = backend(&model, device, ctx);
     let mut conv =
         chat::Chat::new(&net, &tok, &system, ctx).unwrap_or_else(|e| fail(&format!("{path}: {e}")));
     conv.max_reply = max_reply;

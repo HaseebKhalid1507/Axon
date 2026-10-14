@@ -1,21 +1,27 @@
 //! CUDA backend plumbing: the driver API and NVRTC loaded at run time
 //! (ffi.rs), a device with its context and stream (`Gpu`), device buffers
 //! (`DevBuf`), kernels compiled by NVRTC for the device and cached on disk
-//! (`Module`), and the kernels in kernels.cu (`Kernels`).
+//! (`Module`), the kernels in kernels.cu and decode.cu (`Kernels`), and the
+//! Qwen2 decoder running them (qwen2.rs).
 //!
 //! No link-time CUDA dependency: without an NVIDIA driver `Gpu::open`
 //! returns Err and everything else in axon works as before.
 //!
-//! One context per device (the primary one, shared by every `Gpu` on it),
-//! made current on the calling thread by each operation, so a `Gpu` works
-//! from whichever thread holds it. It is !Send for now: one thread at a time
-//! by construction.
-
-// Until G2's GPU model, the binary only uses `summary` (axon info); the
-// rest is exercised by the tests.
-#![cfg_attr(not(test), allow(dead_code))]
+//! Thread model: one context per device (the primary one, shared by every
+//! `Gpu` on it), made current on the calling thread by every operation
+//! (`bind`), and one stream per `Gpu`. `Gpu` holds raw driver handles, so it
+//! is !Send and !Sync, and everything on it (buffers, modules, graphs, the
+//! GPU model) borrows it: all of it stays on the thread that opened it, by
+//! construction. That is the invariant; making `Gpu` Send would be sound
+//! (bind on every entry point already makes no thread-affinity assumption)
+//! but nothing needs it: generation and chat run on one thread.
+//!
+//! Streams: the stream is non-blocking (unordered with the legacy default
+//! stream), as graph capture requires, so every copy and memset is enqueued
+//! on it; the synchronous `DevBuf` calls wait for the stream afterwards.
 
 mod ffi;
+pub mod qwen2;
 
 use ffi::{CUcontext, CUdevice, CUdeviceptr, CUfunction, CUmodule, CUstream, Driver, check};
 use std::ffi::{CString, OsString, c_int, c_void};
@@ -24,8 +30,8 @@ use std::path::{Path, PathBuf};
 /// Why `Gpu::open` fails off Linux.
 pub const LINUX_ONLY: &str = "CUDA support is Linux-only for now";
 
-/// kernels.cu, compiled at run time.
-const KERNELS: &str = include_str!("kernels.cu");
+/// kernels.cu and decode.cu, compiled at run time as one module.
+const KERNELS: &str = concat!(include_str!("kernels.cu"), include_str!("decode.cu"));
 
 /// A CUDA device: its retained primary context and a stream to run on.
 /// Dropping it destroys the stream and releases the context; `DevBuf`s and
@@ -105,14 +111,12 @@ impl Gpu {
         };
         gpu.bind()?;
         let mut stream: CUstream = std::ptr::null_mut();
-        // A blocking stream: ordered with the legacy default stream, where
-        // the synchronous cuMemcpyHtoD/DtoH and cuMemsetD8 behind
-        // DevBuf::write/read/zero run. That ordering is what makes them see
-        // (and be seen by) the kernels launched here; a non-blocking stream
-        // or per-thread default streams (--default-stream per-thread,
-        // the _ptds entry points) would break it.
+        // A non-blocking stream, as graph capture needs: nothing runs on the
+        // legacy default stream. Every copy and memset (DevBuf::write/read/
+        // zero, HostBuf copies) is enqueued on this stream, so it's ordered
+        // with the kernels launched here by stream order alone.
         // SAFETY: the context is current; writes the stream handle.
-        let r = unsafe { (d.cuStreamCreate)(&mut stream, ffi::CU_STREAM_DEFAULT) };
+        let r = unsafe { (d.cuStreamCreate)(&mut stream, ffi::CU_STREAM_NON_BLOCKING) };
         check(d, r, "cuStreamCreate")?;
         gpu.stream = stream;
         Ok(gpu)
@@ -222,28 +226,290 @@ impl Gpu {
                 f.name
             ));
         }
+        // SAFETY: the caller's contract, which is launch_with's.
+        unsafe { self.launch_with(f, grid, block, shared, args, false) }
+    }
+
+    /// `launch`, and with `overlap` allowed to start before the previous
+    /// kernel on the stream finishes: programmatic dependent launch, if
+    /// `f`'s module supports it (`Module::pdl`; otherwise `overlap` is
+    /// ignored). The kernel must then execute `griddepcontrol.wait` (decode.cu
+    /// `pdl_wait`) before touching memory the previous kernel reads or writes.
+    ///
+    /// # Safety
+    /// As `launch`; with `overlap`, the kernel waits as described.
+    pub unsafe fn launch_with(
+        &self,
+        f: &Func,
+        grid: (u32, u32, u32),
+        block: (u32, u32, u32),
+        shared: u32,
+        args: &[Arg],
+        overlap: bool,
+    ) -> Result<(), String> {
+        if !std::ptr::eq(f.module.gpu, self) {
+            return Err(format!(
+                "launch of {}: its module is on another Gpu",
+                f.name
+            ));
+        }
         self.bind()?;
-        // cuLaunchKernel copies each parameter from these addresses before returning.
+        // cuLaunchKernelEx copies each parameter from these addresses before returning.
         let mut ptrs: Vec<*mut c_void> = args.iter().map(Arg::addr).collect();
+        let mut attr = ffi::LaunchAttr {
+            id: ffi::LAUNCH_ATTR_PROGRAMMATIC,
+            pad: 0,
+            value: [1, 0, 0, 0, 0, 0, 0, 0],
+        };
+        let pdl = overlap && f.module.pdl;
+        let cfg = ffi::LaunchConfig {
+            grid: [grid.0, grid.1, grid.2],
+            block: [block.0, block.1, block.2],
+            shared,
+            stream: self.stream,
+            attrs: if pdl { &mut attr } else { std::ptr::null_mut() },
+            n_attrs: pdl as u32,
+        };
         // SAFETY: f's module is loaded on this context (f borrows it, checked
-        // above) and args match its signature (caller);
-        // ptrs points to args' live values; stream is ours.
+        // above) and args match its signature (caller); ptrs points to args'
+        // live values; cfg and attr are live for the call; stream is ours.
         let r = unsafe {
-            (self.d.cuLaunchKernel)(
-                f.f,
-                grid.0,
-                grid.1,
-                grid.2,
-                block.0,
-                block.1,
-                block.2,
-                shared,
-                self.stream,
-                ptrs.as_mut_ptr(),
-                std::ptr::null_mut(),
+            (self.d.cuLaunchKernelEx)(&cfg, f.f, ptrs.as_mut_ptr(), std::ptr::null_mut())
+        };
+        check(self.d, r, &format!("cuLaunchKernelEx {}", f.name))
+    }
+}
+
+impl Gpu {
+    /// `len` bytes of page-locked host memory, for stream-ordered copies.
+    pub fn host_alloc(&self, len: usize) -> Result<HostBuf<'_>, String> {
+        let mut p: *mut c_void = std::ptr::null_mut();
+        if len > 0 {
+            self.bind()?;
+            // SAFETY: context current; writes the host address. Flags 0:
+            // portable to this context only, which is all we use.
+            let r = unsafe { (self.d.cuMemHostAlloc)(&mut p, len, 0) };
+            check(self.d, r, "cuMemHostAlloc")?;
+            // SAFETY: p is a fresh allocation of len bytes.
+            unsafe { std::ptr::write_bytes(p.cast::<u8>(), 0, len) };
+        }
+        Ok(HostBuf {
+            gpu: self,
+            p: p.cast(),
+            len,
+            pending: std::cell::Cell::new(false),
+        })
+    }
+
+    /// Record everything `f` launches on the stream into a graph instead of
+    /// running it. `f` must only launch kernels and make stream-ordered
+    /// async copies (no sync, no alloc/free): those would end the capture
+    /// with an error. The capture is ended on every path out.
+    pub fn capture(&self, f: impl FnOnce() -> Result<(), String>) -> Result<Graph<'_>, String> {
+        /// Ends the capture (and frees its partial graph) if `f` panics or
+        /// returns early, so the stream is usable again.
+        struct Capturing<'a>(&'a Gpu, bool);
+        impl Capturing<'_> {
+            /// End the capture; the graph (null if it was invalidated).
+            fn end(&mut self) -> (ffi::CUresult, ffi::CUgraph) {
+                self.1 = false;
+                let mut g: ffi::CUgraph = std::ptr::null_mut();
+                // SAFETY: ends the capture begun on our stream; writes the graph.
+                let r = unsafe { (self.0.d.cuStreamEndCapture)(self.0.stream, &mut g) };
+                (r, g)
+            }
+        }
+        impl Drop for Capturing<'_> {
+            fn drop(&mut self) {
+                if self.1 && self.0.bind().is_ok() {
+                    let (_, g) = self.end();
+                    if !g.is_null() {
+                        // SAFETY: the partial graph, never instantiated.
+                        unsafe { (self.0.d.cuGraphDestroy)(g) };
+                    }
+                }
+            }
+        }
+        self.bind()?;
+        // SAFETY: our stream, not capturing (captures don't nest here: the
+        // stream is only captured inside this function, and a capture that
+        // didn't finish was ended by `Capturing`).
+        let r = unsafe {
+            (self.d.cuStreamBeginCapture_v2)(self.stream, ffi::CU_STREAM_CAPTURE_MODE_THREAD_LOCAL)
+        };
+        check(self.d, r, "cuStreamBeginCapture")?;
+        let mut cap = Capturing(self, true);
+        f()?; // early return / panic: `cap` ends the capture
+        let (r, g) = cap.end();
+        check(self.d, r, "cuStreamEndCapture")?;
+        let mut exec: ffi::CUgraphExec = std::ptr::null_mut();
+        // SAFETY: g is the captured graph; writes the executable graph.
+        let r = unsafe { (self.d.cuGraphInstantiateWithFlags)(&mut exec, g, 0) };
+        // SAFETY: the graph itself isn't needed once instantiated (or failed).
+        unsafe { (self.d.cuGraphDestroy)(g) };
+        check(self.d, r, "cuGraphInstantiateWithFlags")?;
+        Ok(Graph { gpu: self, exec })
+    }
+
+    /// A timing event recorded on the stream now.
+    #[cfg_attr(not(test), allow(dead_code))] // tests and benchmarks
+    pub fn record(&self) -> Result<Event<'_>, String> {
+        self.bind()?;
+        let mut e: ffi::CUevent = std::ptr::null_mut();
+        // SAFETY: context current; writes the event. Flags 0: timing on.
+        let r = unsafe { (self.d.cuEventCreate)(&mut e, 0) };
+        check(self.d, r, "cuEventCreate")?;
+        let ev = Event { gpu: self, e };
+        // SAFETY: our event and stream.
+        let r = unsafe { (self.d.cuEventRecord)(ev.e, self.stream) };
+        check(self.d, r, "cuEventRecord")?;
+        Ok(ev)
+    }
+}
+
+/// A recorded CUDA event (see `Gpu::record`).
+#[cfg_attr(not(test), allow(dead_code))] // tests and benchmarks
+pub struct Event<'g> {
+    gpu: &'g Gpu,
+    e: ffi::CUevent,
+}
+
+impl Event<'_> {
+    /// Milliseconds from `self` to `later`, once `later` has happened.
+    #[cfg_attr(not(test), allow(dead_code))] // tests and benchmarks
+    pub fn ms_to(&self, later: &Event) -> Result<f32, String> {
+        let d = self.gpu.d;
+        self.gpu.bind()?;
+        // SAFETY: both events are live and recorded.
+        let r = unsafe { (d.cuEventSynchronize)(later.e) };
+        check(d, r, "cuEventSynchronize")?;
+        let mut ms = 0f32;
+        // SAFETY: as above; writes one float.
+        let r = unsafe { (d.cuEventElapsedTime)(&mut ms, self.e, later.e) };
+        check(d, r, "cuEventElapsedTime")?;
+        Ok(ms)
+    }
+}
+
+impl Drop for Event<'_> {
+    fn drop(&mut self) {
+        if self.gpu.bind().is_ok() {
+            // SAFETY: our event, destroyed once.
+            unsafe { (self.gpu.d.cuEventDestroy_v2)(self.e) };
+        }
+    }
+}
+
+/// An instantiated CUDA graph (`Gpu::capture`), destroyed on drop.
+pub struct Graph<'g> {
+    gpu: &'g Gpu,
+    exec: ffi::CUgraphExec,
+}
+
+impl Graph<'_> {
+    /// Replay the graph on the stream (asynchronous).
+    ///
+    /// # Safety
+    /// Every buffer the captured kernels and copies touch is still live.
+    pub unsafe fn launch(&self) -> Result<(), String> {
+        self.gpu.bind()?;
+        // SAFETY: our executable graph and stream; buffers live (caller).
+        let r = unsafe { (self.gpu.d.cuGraphLaunch)(self.exec, self.gpu.stream) };
+        check(self.gpu.d, r, "cuGraphLaunch")
+    }
+}
+
+impl Drop for Graph<'_> {
+    fn drop(&mut self) {
+        if self.gpu.bind().is_ok() {
+            // cuGraphExecDestroy doesn't wait: finish a replay in flight first.
+            let _ = self.gpu.sync();
+            // SAFETY: our executable graph, destroyed once, not running.
+            unsafe { (self.gpu.d.cuGraphExecDestroy)(self.exec) };
+        }
+    }
+}
+
+/// Page-locked host memory (`Gpu::host_alloc`), zeroed, freed on drop, for
+/// asynchronous stream-ordered copies. While a copy may be in flight the
+/// host doesn't touch the bytes: `bytes_mut` waits for the stream first.
+pub struct HostBuf<'g> {
+    gpu: &'g Gpu,
+    p: *mut u8,
+    len: usize,
+    /// A copy was enqueued since the last wait.
+    pending: std::cell::Cell<bool>,
+}
+
+impl HostBuf<'_> {
+    /// The bytes, once no copy to or from them is in flight (waits for the
+    /// stream if one may be).
+    pub fn bytes_mut(&mut self) -> Result<&mut [u8], String> {
+        if self.pending.get() {
+            self.gpu.sync()?;
+            self.pending.set(false);
+        }
+        if self.len == 0 {
+            return Ok(&mut []);
+        }
+        // SAFETY: our allocation of len bytes, borrowed mutably; no copy is
+        // using it (waited for above).
+        Ok(unsafe { std::slice::from_raw_parts_mut(self.p, self.len) })
+    }
+
+    /// Ok if `n` bytes at `off` fit in a `len`-byte device buffer and in us.
+    fn check_range(&self, off: usize, n: usize, len: usize) -> Result<(), String> {
+        if n > self.len || off.checked_add(n).is_none_or(|end| end > len) {
+            return Err(format!("copy of {n} bytes at {off}: out of bounds"));
+        }
+        Ok(())
+    }
+
+    /// Enqueue a copy of our first `n` bytes to `dst` + `off`.
+    pub fn copy_to(&self, dst: &DevBuf, off: usize, n: usize) -> Result<(), String> {
+        self.check_range(off, n, dst.len)?;
+        self.gpu.bind()?;
+        self.pending.set(true);
+        // SAFETY: in bounds of both (checked); pinned memory stays allocated
+        // while self lives, and isn't touched by the host until the stream
+        // has been waited for (`pending`, Drop).
+        let r = unsafe {
+            (self.gpu.d.cuMemcpyHtoDAsync_v2)(
+                dst.ptr + off as u64,
+                self.p.cast(),
+                n,
+                self.gpu.stream,
             )
         };
-        check(self.d, r, &format!("cuLaunchKernel {}", f.name))
+        check(self.gpu.d, r, "cuMemcpyHtoDAsync_v2")
+    }
+
+    /// Enqueue a copy of `n` bytes from `src` + `off` into our first bytes.
+    pub fn copy_from(&mut self, src: &DevBuf, off: usize, n: usize) -> Result<(), String> {
+        self.check_range(off, n, src.len)?;
+        self.gpu.bind()?;
+        self.pending.set(true);
+        // SAFETY: as copy_to.
+        let r = unsafe {
+            (self.gpu.d.cuMemcpyDtoHAsync_v2)(
+                self.p.cast(),
+                src.ptr + off as u64,
+                n,
+                self.gpu.stream,
+            )
+        };
+        check(self.gpu.d, r, "cuMemcpyDtoHAsync_v2")
+    }
+}
+
+impl Drop for HostBuf<'_> {
+    fn drop(&mut self) {
+        if !self.p.is_null() && self.gpu.bind().is_ok() {
+            // Copies in flight may still use it.
+            let _ = self.gpu.sync();
+            // SAFETY: our allocation, freed once.
+            unsafe { (self.gpu.d.cuMemFreeHost)(self.p.cast()) };
+        }
     }
 }
 
@@ -301,13 +567,29 @@ impl DevBuf<'_> {
         Arg::Ptr(self.ptr)
     }
 
-    /// Copy `data` to the start of the buffer. Synchronous, and ordered after
-    /// the work already launched on the stream (it's a blocking stream).
+    /// A kernel argument: the device address `off` bytes in. Panics past the
+    /// end (a launch with it would read out of bounds).
+    pub fn arg_at(&self, off: usize) -> Arg {
+        assert!(
+            off <= self.len,
+            "arg_at({off}) past a {}-byte buffer",
+            self.len
+        );
+        Arg::Ptr(self.ptr + off as u64)
+    }
+
+    /// Copy `data` to the start of the buffer. Synchronous: enqueued on the
+    /// stream after the work already launched there, then waited for.
     pub fn write<T: Pod>(&self, data: &[T]) -> Result<(), String> {
+        self.write_at(0, data)
+    }
+
+    /// `write` at byte offset `off`.
+    pub fn write_at<T: Pod>(&self, off: usize, data: &[T]) -> Result<(), String> {
         let n = size_of_val(data);
-        if n > self.len {
+        if off.checked_add(n).is_none_or(|end| end > self.len) {
             return Err(format!(
-                "upload of {n} bytes into a {}-byte buffer",
+                "upload of {n} bytes at {off} into a {}-byte buffer",
                 self.len
             ));
         }
@@ -315,13 +597,24 @@ impl DevBuf<'_> {
             return Ok(());
         }
         self.gpu.bind()?;
-        // SAFETY: n <= len bytes into our allocation from data's n bytes.
-        let r = unsafe { (self.gpu.d.cuMemcpyHtoD_v2)(self.ptr, data.as_ptr().cast(), n) };
-        check(self.gpu.d, r, "cuMemcpyHtoD_v2")
+        // SAFETY: n bytes into our allocation at off (in bounds, checked)
+        // from data's n bytes, which stay borrowed until the sync below has
+        // seen the copy finish.
+        let r = unsafe {
+            (self.gpu.d.cuMemcpyHtoDAsync_v2)(
+                self.ptr + off as u64,
+                data.as_ptr().cast(),
+                n,
+                self.gpu.stream,
+            )
+        };
+        check(self.gpu.d, r, "cuMemcpyHtoDAsync_v2")?;
+        self.gpu.sync()
     }
 
     /// The whole buffer as Ts (its length must be a multiple of T's size),
     /// after the work launched so far finishes.
+    #[cfg_attr(not(test), allow(dead_code))] // tests and benchmarks
     pub fn read<T: Pod>(&self) -> Result<Vec<T>, String> {
         let sz = size_of::<T>();
         if !self.len.is_multiple_of(sz) {
@@ -333,25 +626,33 @@ impl DevBuf<'_> {
         let mut out = vec![T::default(); self.len / sz];
         if self.len > 0 {
             self.gpu.bind()?;
-            // SAFETY: len bytes from our allocation into out's len bytes, T
-            // is Pod so any bytes are valid Ts.
+            // SAFETY: len bytes from our allocation into out's len bytes
+            // (T is Pod so any bytes are valid Ts), stream-ordered after the
+            // kernels; out isn't touched until the sync has seen it finish.
             let r = unsafe {
-                (self.gpu.d.cuMemcpyDtoH_v2)(out.as_mut_ptr().cast(), self.ptr, self.len)
+                (self.gpu.d.cuMemcpyDtoHAsync_v2)(
+                    out.as_mut_ptr().cast(),
+                    self.ptr,
+                    self.len,
+                    self.gpu.stream,
+                )
             };
-            check(self.gpu.d, r, "cuMemcpyDtoH_v2")?;
+            check(self.gpu.d, r, "cuMemcpyDtoHAsync_v2")?;
+            self.gpu.sync()?;
         }
         Ok(out)
     }
 
-    /// Set every byte to zero.
+    /// Set every byte to zero (synchronous, stream-ordered).
     pub fn zero(&self) -> Result<(), String> {
         if self.len == 0 {
             return Ok(());
         }
         self.gpu.bind()?;
         // SAFETY: len bytes of our allocation.
-        let r = unsafe { (self.gpu.d.cuMemsetD8_v2)(self.ptr, 0, self.len) };
-        check(self.gpu.d, r, "cuMemsetD8_v2")
+        let r = unsafe { (self.gpu.d.cuMemsetD8Async)(self.ptr, 0, self.len, self.gpu.stream) };
+        check(self.gpu.d, r, "cuMemsetD8Async")?;
+        self.gpu.sync()
     }
 }
 
@@ -371,6 +672,7 @@ pub enum Arg {
     /// A device address (`T*` in the kernel).
     Ptr(u64),
     U64(u64),
+    #[cfg_attr(not(test), allow(dead_code))] // tests and benchmarks
     U32(u32),
     I32(i32),
     F32(f32),
@@ -413,6 +715,24 @@ pub enum CacheStatus {
 pub struct Module<'g> {
     gpu: &'g Gpu,
     m: CUmodule,
+    /// Its kernels may be launched overlapping their predecessor
+    /// (`Gpu::launch_with`): see `pdl_ok`.
+    pdl: bool,
+}
+
+/// Whether programmatic dependent launch is safe and works for code
+/// compiled for `arch` (10 * major + minor of the cubin or PTX loaded) on a
+/// device of `cc` with a CUDA `driver`, `env` being $AXON_CUDA_PDL:
+/// - the code was compiled for sm_90+: decode.cu emits its
+///   `griddepcontrol.wait` only then (`__CUDA_ARCH__ >= 900`), and without
+///   the wait an overlapped kernel could read its predecessor's output
+///   early (a PTX fallback for an older arch has none);
+/// - the device is sm_90+ (it was compiled for, but say so);
+/// - the driver is CUDA 12.3+, the first to keep programmatic launches in
+///   stream capture (older ones fail the capture);
+/// - AXON_CUDA_PDL isn't "0".
+fn pdl_ok(arch: i32, cc: i32, driver: (i32, i32), env: Option<&str>) -> bool {
+    arch >= 90 && cc >= 90 && driver >= (12, 3) && env != Some("0")
 }
 
 /// $XDG_CACHE_HOME/axon/cuda, else ~/.cache/axon/cuda.
@@ -687,6 +1007,29 @@ impl<'g> Module<'g> {
         dir: Option<&Path>,
         target: Target,
     ) -> Result<(Module<'g>, CacheStatus), String> {
+        let (mut m, status) = Self::load_cached(gpu, src, opts, dir, target)?;
+        let arch = match target {
+            Target::Cubin(a) | Target::Ptx(a) => a,
+        };
+        let cc = gpu.info()?.cc;
+        let env = std::env::var("AXON_CUDA_PDL").ok();
+        m.pdl = pdl_ok(
+            arch,
+            (cc.0 * 10 + cc.1) as i32,
+            ffi::driver_version(gpu.d)?,
+            env.as_deref(),
+        );
+        Ok((m, status))
+    }
+
+    /// `load_for` without setting `pdl`.
+    fn load_cached(
+        gpu: &'g Gpu,
+        src: &str,
+        opts: &[&str],
+        dir: Option<&Path>,
+        target: Target,
+    ) -> Result<(Module<'g>, CacheStatus), String> {
         let n = ffi::nvrtc()?;
         let nv = ffi::nvrtc_version(n)?;
         let mut all = vec![format!("--gpu-architecture={target}")];
@@ -730,6 +1073,20 @@ impl<'g> Module<'g> {
         Ok((m, status))
     }
 
+    /// Whether this module's kernels may overlap their predecessor
+    /// (`pdl_ok` for the target it was compiled for).
+    #[cfg(test)]
+    pub fn pdl(&self) -> bool {
+        self.pdl
+    }
+
+    /// Turn programmatic dependent launch off for this module (tests: PDL
+    /// on vs off).
+    #[cfg(test)]
+    pub fn disable_pdl(&mut self) {
+        self.pdl = false;
+    }
+
     /// Load a cubin, or NUL-terminated PTX (compiled by the driver).
     fn from_image(gpu: &'g Gpu, image: &[u8]) -> Result<Module<'g>, String> {
         gpu.bind()?;
@@ -739,7 +1096,7 @@ impl<'g> Module<'g> {
         // (cache entries pass a checksum; PTX from `compile` ends in a NUL).
         let r = unsafe { (gpu.d.cuModuleLoadData)(&mut m, image.as_ptr().cast()) };
         check(gpu.d, r, "cuModuleLoadData")?;
-        Ok(Module { gpu, m })
+        Ok(Module { gpu, m, pdl: false })
     }
 
     /// The `extern "C"` kernel `name`.
@@ -768,7 +1125,9 @@ impl Drop for Module<'_> {
     }
 }
 
-/// The kernels of kernels.cu, from a `Module` made by `Kernels::module`.
+/// The dequantization kernel of kernels.cu (G0's bit-exactness checks), from
+/// a `Module` made by `Kernels::module`, which also holds decode.cu's.
+#[cfg_attr(not(test), allow(dead_code))] // tests and benchmarks
 pub struct Kernels<'m> {
     gpu: &'m Gpu,
     dequant_rows: Func<'m>,
@@ -785,6 +1144,7 @@ impl<'m> Kernels<'m> {
     }
 
     /// The kernels of `m`, which must be `Kernels::module`'s.
+    #[cfg_attr(not(test), allow(dead_code))] // tests and benchmarks
     pub fn new(m: &'m Module<'_>) -> Result<Kernels<'m>, String> {
         Ok(Kernels {
             gpu: m.gpu,
@@ -795,6 +1155,7 @@ impl<'m> Kernels<'m> {
     /// Rows `rows` of a matrix of type `qt` with `n` values per row, whose
     /// bytes are `w`, dequantized to f32: bit for bit `quant::dequant` of
     /// each row, concatenated.
+    #[cfg_attr(not(test), allow(dead_code))] // tests and benchmarks
     pub fn dequant_rows(
         &self,
         qt: u32,

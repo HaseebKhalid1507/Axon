@@ -19,15 +19,42 @@ pub type CUfunction = *mut c_void;
 pub type CUstream = *mut c_void;
 pub type CUgraph = *mut c_void;
 pub type CUgraphExec = *mut c_void;
+pub type CUevent = *mut c_void;
 pub type NvrtcResult = c_int;
 pub type NvrtcProgram = *mut c_void;
 
 pub const CUDA_SUCCESS: CUresult = 0;
 pub const NVRTC_SUCCESS: NvrtcResult = 0;
-/// `CU_STREAM_DEFAULT`: a blocking stream, ordered with the legacy default
-/// stream, so the synchronous copies and memset (which run there) are ordered
-/// with the kernels launched on it.
-pub const CU_STREAM_DEFAULT: c_uint = 0;
+/// `CU_STREAM_NON_BLOCKING`: not ordered with the legacy default stream,
+/// which stream capture requires; every copy goes on the stream itself.
+pub const CU_STREAM_NON_BLOCKING: c_uint = 1;
+/// `CU_STREAM_CAPTURE_MODE_THREAD_LOCAL`: capture only fails on unsafe
+/// calls made by this thread.
+pub const CU_STREAM_CAPTURE_MODE_THREAD_LOCAL: c_int = 1;
+
+/// `CUlaunchAttribute` (cuda.h): an id and a 64-byte value union.
+#[repr(C)]
+pub struct LaunchAttr {
+    pub id: c_uint,
+    pub pad: c_uint,
+    pub value: [u64; 8],
+}
+
+/// `CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION`: the kernel may
+/// start before the previous one on the stream ends; it waits for it with
+/// `griddepcontrol.wait` (sm_90+).
+pub const LAUNCH_ATTR_PROGRAMMATIC: c_uint = 6;
+
+/// `CUlaunchConfig` (cuda.h).
+#[repr(C)]
+pub struct LaunchConfig {
+    pub grid: [c_uint; 3],
+    pub block: [c_uint; 3],
+    pub shared: c_uint,
+    pub stream: CUstream,
+    pub attrs: *mut LaunchAttr,
+    pub n_attrs: c_uint,
+}
 
 /// `CUdevice_attribute` values used for `DeviceInfo` (cuda.h).
 pub const ATTR_SM_COUNT: c_int = 16;
@@ -89,43 +116,41 @@ api! {
         fn cuMemGetInfo_v2(*mut usize, *mut usize) -> CUresult;
         fn cuMemAlloc_v2(*mut CUdeviceptr, usize) -> CUresult;
         fn cuMemFree_v2(CUdeviceptr) -> CUresult;
-        fn cuMemcpyHtoD_v2(CUdeviceptr, *const c_void, usize) -> CUresult;
-        fn cuMemcpyDtoH_v2(*mut c_void, CUdeviceptr, usize) -> CUresult;
-        // Stream-ordered copies, for G2's decode loop (pinned host buffers).
-        #[allow(dead_code)]
         fn cuMemcpyHtoDAsync_v2(CUdeviceptr, *const c_void, usize, CUstream) -> CUresult;
-        #[allow(dead_code)]
         fn cuMemcpyDtoHAsync_v2(*mut c_void, CUdeviceptr, usize, CUstream) -> CUresult;
-        fn cuMemsetD8_v2(CUdeviceptr, u8, usize) -> CUresult;
+        fn cuMemsetD8Async(CUdeviceptr, u8, usize, CUstream) -> CUresult;
+        fn cuMemHostAlloc(*mut *mut c_void, usize, c_uint) -> CUresult;
+        fn cuMemFreeHost(*mut c_void) -> CUresult;
         fn cuModuleLoadData(*mut CUmodule, *const c_void) -> CUresult;
         fn cuModuleUnload(CUmodule) -> CUresult;
         fn cuModuleGetFunction(*mut CUfunction, CUmodule, *const c_char) -> CUresult;
-        fn cuLaunchKernel(
+        fn cuLaunchKernelEx(
+            *const LaunchConfig,
             CUfunction,
-            c_uint, c_uint, c_uint,
-            c_uint, c_uint, c_uint,
-            c_uint,
-            CUstream,
             *mut *mut c_void,
             *mut *mut c_void,
         ) -> CUresult;
         fn cuStreamCreate(*mut CUstream, c_uint) -> CUresult;
         fn cuStreamDestroy_v2(CUstream) -> CUresult;
         fn cuStreamSynchronize(CUstream) -> CUresult;
-        // CUDA graphs, for G2's captured decode step: resolved now so a
-        // driver without them fails at open, not mid-generation.
-        #[allow(dead_code)]
+        // CUDA graphs: the captured decode step.
         fn cuStreamBeginCapture_v2(CUstream, c_int) -> CUresult;
-        #[allow(dead_code)]
         fn cuStreamEndCapture(CUstream, *mut CUgraph) -> CUresult;
-        #[allow(dead_code)]
         fn cuGraphInstantiateWithFlags(*mut CUgraphExec, CUgraph, u64) -> CUresult;
-        #[allow(dead_code)]
         fn cuGraphLaunch(CUgraphExec, CUstream) -> CUresult;
-        #[allow(dead_code)]
         fn cuGraphExecDestroy(CUgraphExec) -> CUresult;
-        #[allow(dead_code)]
         fn cuGraphDestroy(CUgraph) -> CUresult;
+        // Events, to time kernels (tests and benchmarks).
+        #[cfg_attr(not(test), allow(dead_code))]
+        fn cuEventCreate(*mut CUevent, c_uint) -> CUresult;
+        #[cfg_attr(not(test), allow(dead_code))]
+        fn cuEventRecord(CUevent, CUstream) -> CUresult;
+        #[cfg_attr(not(test), allow(dead_code))]
+        fn cuEventSynchronize(CUevent) -> CUresult;
+        #[cfg_attr(not(test), allow(dead_code))]
+        fn cuEventElapsedTime(*mut f32, CUevent, CUevent) -> CUresult;
+        #[cfg_attr(not(test), allow(dead_code))]
+        fn cuEventDestroy_v2(CUevent) -> CUresult;
     }
 }
 
