@@ -525,6 +525,32 @@ mod tests {
         }
     }
 
+    /// `turns_match_fresh_prefill` split across devices (`--gpu-layers`):
+    /// layers 0..12 on the CPU, the rest and the head on the GPU.
+    #[test]
+    fn turns_match_fresh_prefill_hybrid() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let Some(m) = crate::testutil::model() else {
+            return;
+        };
+        let km = crate::cuda::Kernels::module(&g).unwrap();
+        let tok = Tokenizer::from_gguf(&m);
+        let net = crate::hybrid::HybridQwen2::new(Some((&g, &km)), &m, 2048, 12).unwrap();
+        for (max_reply, k) in [(12, 7), (64, 0)] {
+            let mut chat = Chat::new(&net, &tok, DEFAULT_SYSTEM, 2048).unwrap();
+            chat.max_reply = max_reply;
+            chat.max_draft = round_draft(k);
+            for msg in MSGS {
+                let r = chat.reply(msg, &|| false, &mut |_| Ok(())).unwrap();
+                let prompt = &chat.hist[..chat.hist.len() - r.ids.len() - 2];
+                let want = fresh(chat.net, prompt, max_reply, &chat.stop);
+                assert_eq!(r.ids, want, "{msg:?} max_reply {max_reply} k {k}");
+            }
+        }
+    }
+
     /// A small context forgets the oldest exchanges and stays exact.
     #[test]
     fn full_context_drops_oldest() {

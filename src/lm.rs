@@ -1,14 +1,16 @@
 //! The backend seam: what generation and chat need from a language model.
 //!
 //! `generate` and `chat::Chat` are generic over `Lm`: the CPU model
-//! (`model::Qwen2`) and the GPU one (`cuda::qwen2::CudaQwen2`) implement the
-//! same five calls. The CLI holds either in a `Backend`, which dispatches
-//! each call to the one inside (one match per token; the CPU's results are
-//! the same bits as calling it directly).
+//! (`model::Qwen2`), the GPU one (`cuda::qwen2::CudaQwen2`) and the two
+//! split across devices (`hybrid::HybridQwen2`) implement the same calls.
+//! The CLI holds one in a `Backend`, which dispatches each call to the one
+//! inside (one match per token; the CPU's results are the same bits as
+//! calling it directly).
 
 use crate::cuda::qwen2::{CudaCache, CudaQwen2};
 use crate::cuda::{Gpu, Kernels, Module};
 use crate::gguf::Model;
+use crate::hybrid::{HybridCache, HybridQwen2};
 use crate::model::{KvCache, Qwen2};
 
 /// A causal language model with a KV cache of its own type. Positions are
@@ -107,27 +109,56 @@ pub enum Backend<'a> {
     /// process, which is as long as the CLI needs them (the weights and
     /// caches are still freed on drop).
     Cuda(Box<CudaQwen2<'static>>),
+    /// Split across the CPU and the GPU (leaked as for `Cuda`).
+    Hybrid(Box<HybridQwen2<'a, 'static>>),
 }
 
 pub enum BackendCache {
     Cpu(KvCache),
     Cuda(Box<CudaCache<'static>>),
+    Hybrid(Box<HybridCache<'static>>),
 }
 
 impl<'a> Backend<'a> {
     /// The model of `m` on `device`, with room for a `max_ctx`-token cache
-    /// (checked up front on the GPU). Err says why CUDA can't be used.
-    pub fn new(m: &'a Model, device: Device, max_ctx: usize) -> Result<Backend<'a>, String> {
-        match device {
-            Device::Cpu => Ok(Backend::Cpu(Qwen2::new(m))),
-            Device::Cuda => {
-                let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open()?));
-                let module: &'static Module<'static> = Box::leak(Box::new(Kernels::module(gpu)?));
-                Ok(Backend::Cuda(Box::new(CudaQwen2::new(
-                    gpu, module, m, max_ctx,
-                )?)))
-            }
+    /// (checked up front on the GPU). On CUDA, `gpu_layers` Some(g) splits
+    /// the model, the last g layers on the GPU (`HybridQwen2`); None puts
+    /// it all on the GPU if it fits, else as many of the last layers as fit
+    /// (`hybrid::auto_gpu_layers`, told on stderr). Err says why CUDA
+    /// can't be used.
+    pub fn new(
+        m: &'a Model,
+        device: Device,
+        max_ctx: usize,
+        gpu_layers: Option<usize>,
+    ) -> Result<Backend<'a>, String> {
+        if device == Device::Cpu {
+            return Ok(Backend::Cpu(Qwen2::new(m)));
         }
+        if gpu_layers == Some(0) {
+            // All on the CPU: no GPU context to open.
+            let h = HybridQwen2::new(None, m, max_ctx, 0)?;
+            eprintln!("split:       {}", h.describe(max_ctx));
+            return Ok(Backend::Hybrid(Box::new(h)));
+        }
+        let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open()?));
+        let module: &'static Module<'static> = Box::leak(Box::new(Kernels::module(gpu)?));
+        let g = match gpu_layers {
+            Some(g) => g,
+            None => match CudaQwen2::new(gpu, module, m, max_ctx) {
+                Ok(n) => return Ok(Backend::Cuda(Box::new(n))),
+                Err(e) => {
+                    let g = crate::hybrid::auto_gpu_layers(gpu, module, m, max_ctx)?;
+                    if g == 0 {
+                        return Err(format!("{e}; not even one layer fits"));
+                    }
+                    g
+                }
+            },
+        };
+        let h = HybridQwen2::new(Some((gpu, module)), m, max_ctx, g)?;
+        eprintln!("split:       {}", h.describe(max_ctx));
+        Ok(Backend::Hybrid(Box::new(h)))
     }
 }
 
@@ -136,6 +167,10 @@ macro_rules! dispatch {
         match ($self, $cache) {
             (Backend::Cpu($n), BackendCache::Cpu($c)) => $body,
             (Backend::Cuda($n), BackendCache::Cuda($c)) => {
+                let ($n, $c) = (&**$n, &mut **$c);
+                $body
+            }
+            (Backend::Hybrid($n), BackendCache::Hybrid($c)) => {
                 let ($n, $c) = (&**$n, &mut **$c);
                 $body
             }
@@ -151,6 +186,7 @@ impl Lm for Backend<'_> {
         match self {
             Backend::Cpu(n) => n.vocab(),
             Backend::Cuda(n) => n.vocab(),
+            Backend::Hybrid(n) => n.vocab(),
         }
     }
 
@@ -158,6 +194,7 @@ impl Lm for Backend<'_> {
         match self {
             Backend::Cpu(n) => BackendCache::Cpu(Lm::new_cache(n, max_ctx)),
             Backend::Cuda(n) => BackendCache::Cuda(Box::new(n.new_cache(max_ctx))),
+            Backend::Hybrid(n) => BackendCache::Hybrid(Box::new(n.new_cache(max_ctx))),
         }
     }
 
@@ -181,6 +218,7 @@ impl Lm for Backend<'_> {
         match self {
             Backend::Cpu(n) => n.prefill_batch(),
             Backend::Cuda(n) => n.prefill_batch(),
+            Backend::Hybrid(n) => n.prefill_batch(),
         }
     }
 }

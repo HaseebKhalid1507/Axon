@@ -329,9 +329,11 @@ impl Model {
     pub fn tensor_data(&self, t: &Tensor) -> &[u8] {
         let r = self.tensor_range(t);
         if !self.file_backed && self.any_released.load(std::sync::atomic::Ordering::Acquire) {
-            let rel = self.released.lock().unwrap();
+            // Unlocked before the panic: a caught one leaves the lock usable.
+            let gone =
+                (self.released.lock().unwrap().iter()).any(|x| x.start < r.end && r.start < x.end);
             assert!(
-                !rel.iter().any(|x| x.start < r.end && r.start < x.end),
+                !gone,
                 "tensor {} was released after repacking; load the model again to read it",
                 t.name
             );

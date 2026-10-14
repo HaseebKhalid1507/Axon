@@ -29,6 +29,33 @@ pub(super) fn act_stride(n: usize) -> usize {
     act_bytes(n).next_multiple_of(256)
 }
 
+/// What a batched pass starts from: tokens (first == 0), or nb hidden
+/// states of dim floats each, token-major (first > 0; see `Input`).
+#[derive(Clone, Copy)]
+pub(crate) enum BatchIn<'x> {
+    Tokens(&'x [u32]),
+    Hidden(&'x [f32]),
+}
+
+impl BatchIn<'_> {
+    fn len(&self, dim: usize) -> usize {
+        match self {
+            BatchIn::Tokens(t) => t.len(),
+            BatchIn::Hidden(x) => x.len() / dim,
+        }
+    }
+
+    /// Tokens i * max.. (at most max of them).
+    fn chunk(&self, i: usize, max: usize, dim: usize) -> Self {
+        let n = self.len(dim);
+        let r = i * max..((i + 1) * max).min(n);
+        match self {
+            BatchIn::Tokens(t) => BatchIn::Tokens(&t[r]),
+            BatchIn::Hidden(x) => BatchIn::Hidden(&x[r.start * dim..r.end * dim]),
+        }
+    }
+}
+
 /// The batched kernels of a module.
 pub(super) struct BatchFns<'m> {
     embed: Func<'m>,
@@ -118,6 +145,8 @@ pub(super) struct BatchBufs<'g> {
     pub(super) max: usize,
     tokens: DevBuf<'g>,
     host_tokens: HostBuf<'g>,
+    /// Incoming hidden states, [max][dim] (first > 0 only).
+    host_x: Option<HostBuf<'g>>,
     /// Residual stream, [max][dim].
     x: DevBuf<'g>,
     /// Products of the q, k, v matrices (biases added), [max][dim + 2 kv_dim].
@@ -152,7 +181,8 @@ impl<'g> CudaQwen2<'g> {
         let parts = att * self.n_heads * self.max_split * (self.head_dim + 2) * f;
         let per_tok = (3 * self.dim + 2 * kvd + 2 * self.ffn + self.head_dim) * f
             + act_stride(self.dim.max(self.ffn))
-            + 8;
+            + 8
+            + if self.first > 0 { self.dim * f } else { 0 };
         max * per_tok + parts + max.min(HEAD_SUB) * self.vocab * f + 256
     }
 
@@ -163,6 +193,10 @@ impl<'g> CudaQwen2<'g> {
             max,
             tokens: g.alloc(max * 4)?,
             host_tokens: g.host_alloc(max * 4)?,
+            host_x: match self.first {
+                0 => None,
+                _ => Some(g.host_alloc(max * self.dim * f)?),
+            },
             x: g.alloc(max * self.dim * f)?,
             qkv: g.alloc(max * (self.dim + 2 * kvd) * f)?,
             q: g.alloc(max * self.dim * f)?,
@@ -271,22 +305,40 @@ impl<'g> CudaQwen2<'g> {
     pub(super) fn pass(
         &self,
         c: &mut CudaCache<'g>,
-        tokens: &[u32],
+        input: BatchIn,
         start: usize,
         head: bool,
         on: &mut dyn FnMut(&'static str) -> Result<(), String>,
     ) -> Result<(), String> {
-        let nb = tokens.len();
+        let nb = input.len(self.dim);
         let (dim, hd, kvd, ffn) = (self.dim, self.head_dim, self.kv_dim(), self.ffn);
         let mc = c.max_ctx;
         let kv_off = |l: usize, v: bool| (2 * l + v as usize) * mc * kvd * 2;
         let b = c.b.as_mut().expect("a cache with batch scratch");
         assert!(nb > 0 && nb <= b.max);
-        let hb = b.host_tokens.bytes_mut()?;
-        for (i, t) in tokens.iter().enumerate() {
-            hb[4 * i..4 * i + 4].copy_from_slice(&t.to_le_bytes());
+        match input {
+            BatchIn::Tokens(tokens) => {
+                assert!(
+                    self.first == 0,
+                    "layers {}..: takes hidden states",
+                    self.first
+                );
+                let hb = b.host_tokens.bytes_mut()?;
+                for (i, t) in tokens.iter().enumerate() {
+                    hb[4 * i..4 * i + 4].copy_from_slice(&t.to_le_bytes());
+                }
+                b.host_tokens.copy_to(&b.tokens, 0, 4 * nb)?;
+            }
+            BatchIn::Hidden(xs) => {
+                // The states go straight into the residual stream b.x
+                // ([max][dim] floats, the embedding's output otherwise).
+                let hx = b.host_x.as_mut().expect("first > 0: host_x");
+                for (d, v) in hx.bytes_mut()?.chunks_exact_mut(4).zip(xs) {
+                    d.copy_from_slice(&v.to_le_bytes());
+                }
+                hx.copy_to(&b.x, 0, xs.len() * 4)?;
+            }
         }
-        b.host_tokens.copy_to(&b.tokens, 0, 4 * nb)?;
         let b = &*b;
         let (g, bf) = (self.gpu, &self.bf);
         let w = |mt: &Mat| self.weights.arg_at(mt.off);
@@ -301,21 +353,23 @@ impl<'g> CudaQwen2<'g> {
         // reads and writes (sizes in batch_bufs); positions start..start + nb
         // are in the cache (the callers check); matrices are whole in the arena.
         unsafe {
-            g.launch(
-                &bf.embed,
-                (dim.div_ceil(256) as u32, nbu, 1),
-                (256, 1, 1),
-                0,
-                &[
-                    Arg::I32(self.embd.qt as i32),
-                    w(&self.embd),
-                    Arg::U64(self.embd.rb as u64),
-                    Arg::I32(dim as i32),
-                    b.tokens.arg(),
-                    b.x.arg(),
-                ],
-            )?;
-            on("embed")?;
+            if let (Some(embd), BatchIn::Tokens(_)) = (&self.embd, input) {
+                g.launch(
+                    &bf.embed,
+                    (dim.div_ceil(256) as u32, nbu, 1),
+                    (256, 1, 1),
+                    0,
+                    &[
+                        Arg::I32(embd.qt as i32),
+                        w(embd),
+                        Arg::U64(embd.rb as u64),
+                        Arg::I32(dim as i32),
+                        b.tokens.arg(),
+                        b.x.arg(),
+                    ],
+                )?;
+                on("embed")?;
+            }
             g.launch(
                 &bf.rope_table,
                 (nbu, 1, 1),
@@ -494,11 +548,13 @@ impl<'g> CudaQwen2<'g> {
     pub(super) fn feed_tokens(
         &self,
         c: &mut CudaCache<'g>,
-        tokens: &[u32],
+        input: BatchIn,
         start: usize,
     ) -> Result<(), String> {
         let max = c.b.as_ref().expect("batch scratch").max;
-        for (i, ch) in tokens.chunks(max).enumerate() {
+        let n = input.len(self.dim);
+        for i in 0..n.div_ceil(max) {
+            let ch = input.chunk(i, max, self.dim);
             self.pass(c, ch, start + i * max, false, &mut |_| Ok(()))?;
         }
         self.gpu.sync()
@@ -508,15 +564,17 @@ impl<'g> CudaQwen2<'g> {
     pub(super) fn verify_tokens(
         &self,
         c: &mut CudaCache<'g>,
-        tokens: &[u32],
+        input: BatchIn,
         start: usize,
     ) -> Result<Vec<u32>, String> {
         let max = c.b.as_ref().expect("batch scratch").max;
-        let mut picks = Vec::with_capacity(tokens.len());
-        for (i, ch) in tokens.chunks(max).enumerate() {
+        let nt = input.len(self.dim);
+        let mut picks = Vec::with_capacity(nt);
+        for i in 0..nt.div_ceil(max) {
+            let ch = input.chunk(i, max, self.dim);
             self.pass(c, ch, start + i * max, true, &mut |_| Ok(()))?;
             let b = c.b.as_mut().unwrap();
-            let n = 4 * ch.len();
+            let n = 4 * ch.len(self.dim);
             b.host_best.copy_from(&b.best, 0, n)?;
             let hb = &b.host_best.bytes_mut()?[..n]; // waits for the pass
             picks.extend(
