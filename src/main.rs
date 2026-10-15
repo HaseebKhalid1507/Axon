@@ -415,14 +415,10 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     // Feed the prompt in batches (the backend's size: PREFILL_BATCH on the
     // CPU), so each weight row is read once per batch instead of once per
     // token. Only the last position's logits are used, so the others skip
-    // the output head.
+    // the output head (the GPU runs the last token in the final batched
+    // pass, the head on its row alone: `Lm::prefill_logits`).
     let t0 = Instant::now();
-    let (&last, rest) = ids.split_last().expect("checked non-empty above");
-    let pb = net.prefill_batch();
-    for (i, batch) in rest.chunks(pb).enumerate() {
-        net.feed_batch(batch, i * pb, &mut cache);
-    }
-    let logits = net.forward(last, rest.len(), &mut cache);
+    let logits = net.prefill_logits(&ids, 0, &mut cache);
     let prompt_secs = t0.elapsed().as_secs_f64();
 
     if cmd == "logits" {
@@ -512,6 +508,12 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             human_bytes(n.kv_cache_bytes(n.kv, ids.len() + extra + 1) as u64),
             if n.graphs { "on" } else { "off" }
         );
+        if n.q6k8_vram() > 0 {
+            eprintln!(
+                "prefill:     Q6_K int8 copy {} (spare VRAM; AXON_Q6K8=0 off)",
+                human_bytes(n.q6k8_vram() as u64)
+            );
+        }
     }
     if let Backend::Hybrid(n) = &net {
         eprintln!(

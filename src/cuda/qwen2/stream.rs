@@ -292,6 +292,7 @@ impl<'g> CudaQwen2<'g> {
                 rb: quant::row_bytes(m.qt, m.cols),
                 rows: m.rows,
                 cols: m.cols,
+                c8: None,
             };
             let [q, k, v, o, gate, up, down] = &l.mats;
             if gate.rows != self.ffn

@@ -85,15 +85,13 @@ impl BatchIn<'_> {
         }
     }
 
-    /// Tokens i * max.. (at most max of them).
-    fn chunk(&self, i: usize, max: usize, dim: usize) -> Self {
-        let n = self.len(dim);
-        let r = i * max..((i + 1) * max).min(n);
+    /// Tokens r.
+    fn range(&self, r: std::ops::Range<usize>, dim: usize) -> Self {
         match self {
             BatchIn::Tokens(t) => BatchIn::Tokens(&t[r]),
             BatchIn::Hidden(x) => BatchIn::Hidden(&x[r.start * dim..r.end * dim]),
             BatchIn::Resident(n) => {
-                assert!(i == 0 && *n <= max, "resident states: one pass");
+                assert!(r == (0..*n), "resident states: one pass");
                 BatchIn::Resident(*n)
             }
         }
@@ -129,6 +127,13 @@ pub(super) struct BatchFns<'m> {
     /// Per type (Q4_K, Q6_K, Q8_0, Q5_0): gemm2_* (128 tokens per block)
     /// and gemm2s_* (64); None without int8 tensor cores.
     gemm: Option<[[Func<'m>; 2]; 4]>,
+    /// gemm2_q6k8 and gemm2s_q6k8 (Q6_K by its prefill copy, `Mat::c8`),
+    /// and q6k_to_i8 which makes it; None without int8 tensor cores.
+    gemm_q6k8: Option<[Func<'m>; 2]>,
+    /// gemm2s_q4_k_gu: gate and up (both Q4_K) in one launch, silu(gate) *
+    /// up out (`CudaQwen2::gate_up_fused`).
+    pub(super) gemm_gu: Option<Func<'m>>,
+    pub(super) q6k_to_i8: Option<Func<'m>>,
     /// SMs of the GPU (the GEMM tile choice).
     sms: usize,
     /// stream.cu: r8/r8q blocks back to GGUF rows.
@@ -163,6 +168,15 @@ impl<'m> BatchFns<'m> {
             }
             let f: [[Func<'m>; 2]; 4] = fs.try_into().map_err(|_| "gemm2 kernels")?;
             Some(f)
+        } else {
+            None
+        };
+        let gemm_q6k8 = if module.mma() {
+            let big = module.function("gemm2_q6k8")?;
+            big.set_max_shared(gemm2_smem(Q6_K, 128, 2))?;
+            let small = module.function("gemm2s_q6k8")?;
+            small.set_max_shared(gemm2_smem(Q6_K, 64, 3))?;
+            Some([big, small])
         } else {
             None
         };
@@ -211,6 +225,19 @@ impl<'m> BatchFns<'m> {
             gemvn16: module.function("gemvn_2x16")?,
             gemvm,
             gemm,
+            gemm_q6k8,
+            gemm_gu: if module.mma() {
+                let f = module.function("gemm2s_q4_k_gu")?;
+                f.set_max_shared(gemm2_smem(Q4_K, 64, 3))?;
+                Some(f)
+            } else {
+                None
+            },
+            q6k_to_i8: if module.mma() {
+                Some(module.function("q6k_to_i8")?)
+            } else {
+                None
+            },
             sms,
             unpermute: module.function("unpermute_r8")?,
         })
@@ -305,14 +332,17 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// out[z][r] (row stride ostride floats) = W act[z] (+ bias) for mode 0
-    /// (W at mt.off in `wts`),
-    /// += for mode 1, for tokens z < nb: gemvn for small batches (or without
-    /// tensor cores), else the type's GEMM. Same bits either way.
+    /// (W at mt.off in `wts`), += for mode 1, silu(bias[z][r]) * W act[z]
+    /// for mode 2 (bias: the gate product, laid out as out; prefill.cu
+    /// gm_store), for tokens z < nb: gemvn for small batches (or without
+    /// tensor cores), else the type's GEMM (Q6_K: by its prefill copy if
+    /// made, `Mat::c8`). Same bits either way.
     ///
     /// # Safety
     /// act holds nb tokens of mt.cols inputs at astride bytes apart; out has
     /// room for nb rows of ostride floats (mt.rows <= ostride); bias is null
-    /// or has mt.rows floats; the matrix is whole in `wts`.
+    /// or has mt.rows floats (mode 2: nb rows of ostride floats); the matrix
+    /// is whole in `wts`.
     #[allow(clippy::too_many_arguments)]
     unsafe fn bgemm(
         &self,
@@ -327,9 +357,18 @@ impl<'g> CudaQwen2<'g> {
         ostride: usize,
     ) -> Result<(), String> {
         let bf = &self.bf;
+        // Q6_K by its prefill copy where made (the same products).
+        let q8c = match (mt.c8, &bf.gemm_q6k8) {
+            (Some(c8), Some(f)) if nb > SMALL => Some((c8, f)),
+            _ => None,
+        };
+        let (wa, rb) = match q8c {
+            Some((c8, _)) => (self.w8.arg_at(c8), mt.cols / 256 * Q6K8_BYTES),
+            None => (wts.arg_at(mt.off), mt.rb),
+        };
         let common = [
-            wts.arg_at(mt.off),
-            Arg::U64(mt.rb as u64),
+            wa,
+            Arg::U64(rb as u64),
             Arg::I32(mt.rows as i32),
             Arg::I32(mt.cols as i32),
             act,
@@ -357,11 +396,15 @@ impl<'g> CudaQwen2<'g> {
                     let ctas = nb.div_ceil(128) * mt.rows.div_ceil(G2_BM);
                     let big = mt.qt != Q4_K && 2 * ctas >= 3 * bf.sms;
                     let (bn, st) = if big { (128, 2) } else { (64, 3) };
+                    let (f, smem) = match q8c {
+                        Some((_, f8)) => (&f8[!big as usize], gemm2_smem(Q6_K, bn, st)),
+                        None => (&fs[ti][!big as usize], gemm2_smem(mt.qt, bn, st)),
+                    };
                     self.gpu.launch(
-                        &fs[ti][!big as usize],
+                        f,
                         (nb.div_ceil(bn) as u32, mt.rows.div_ceil(G2_BM) as u32, 1),
                         (256, 1, 1),
-                        gemm2_smem(mt.qt, bn, st) as u32,
+                        smem as u32,
                         &common,
                     )
                 }
@@ -470,7 +513,25 @@ impl<'g> CudaQwen2<'g> {
                     on,
                 )?;
             }
-            if head != Head::No {
+            if head == Head::Last {
+                // The last row alone: its norm into act row 0, the head
+                // (nb = 1: gemvm, as decode's gemv == gemv_ref) into logits
+                // row 0.
+                self.norm_rows(b, &self.vecs, self.output_norm, nb - 1, 1)?;
+                on("rmsnorm")?;
+                self.bgemm(
+                    &self.weights,
+                    &self.output,
+                    b.act.arg(),
+                    ast,
+                    1,
+                    null,
+                    0,
+                    b.logits.arg(),
+                    self.vocab,
+                )?;
+                on("head")?;
+            } else if head != Head::No {
                 self.norm_b(b, &self.vecs, self.output_norm, nb)?;
                 on("rmsnorm")?;
                 let v = self.vocab;
@@ -576,17 +637,33 @@ impl<'g> CudaQwen2<'g> {
         off: usize,
         nb: usize,
     ) -> Result<(), String> {
+        // SAFETY: the caller's contract.
+        unsafe { self.norm_rows(b, vecs, off, 0, nb) }
+    }
+
+    /// `norm_b` of b.x's rows z0..z0 + n into b.act's rows 0..n.
+    ///
+    /// # Safety
+    /// z0 + n <= b.max; vecs holds dim floats at off.
+    unsafe fn norm_rows(
+        &self,
+        b: &BatchBufs,
+        vecs: &DevBuf,
+        off: usize,
+        z0: usize,
+        n: usize,
+    ) -> Result<(), String> {
         let dim = self.dim;
         let want_k = |n: usize| Arg::I32(n.is_multiple_of(256) as i32);
         // SAFETY: rmsnorm_quant_b's signature; sizes as `pass`.
         unsafe {
             self.gpu.launch(
                 &self.bf.rmsnorm_quant,
-                (nb as u32, 1, 1),
+                (n as u32, 1, 1),
                 (256, 1, 1),
                 0,
                 &[
-                    b.x.arg(),
+                    b.x.arg_at(z0 * dim * 4),
                     vecs.arg_at(off * 4),
                     Arg::F32(self.eps),
                     Arg::I32(dim as i32),
@@ -649,6 +726,7 @@ impl<'g> CudaQwen2<'g> {
                 qkv_at(0),
                 qkvw,
             )?;
+            on("q")?;
             self.bgemm(
                 wts,
                 &l.k,
@@ -660,6 +738,7 @@ impl<'g> CudaQwen2<'g> {
                 qkv_at(qd),
                 qkvw,
             )?;
+            on("k")?;
             self.bgemm(
                 wts,
                 &l.v,
@@ -671,6 +750,9 @@ impl<'g> CudaQwen2<'g> {
                 qkv_at(qd + kvd),
                 qkvw,
             )?;
+            // (Profile segments by type; "qkv", "gate_up", "down" are the
+            // stream's weight-group events, stream.rs.)
+            on(if l.v.qt == Q6_K { "v6" } else { "v4" })?;
             on("qkv")?;
             // q8: rope_kv_b (rope_kv_norm_b) does the queries alone (null
             // cache), kv_q8_b the keys and values (normalized first on
@@ -867,42 +949,121 @@ impl<'g> CudaQwen2<'g> {
             on("wo")?;
             self.norm_b(b, vecs, l.ffn_norm, nb)?;
             on("rmsnorm")?;
-            self.bgemm(
-                wts,
-                &l.gate,
-                b.act.arg(),
-                ast,
-                nb,
-                null,
-                0,
-                b.gate.arg(),
-                ffn,
-            )?;
-            self.bgemm(wts, &l.up, b.act.arg(), ast, nb, null, 0, b.up.arg(), ffn)?;
-            on("gate_up")?;
-            g.launch(
-                &bf.swiglu_quant,
-                (ffn.div_ceil(256) as u32, nbu, 1),
-                (32, 1, 1),
-                0,
-                &[
-                    b.gate.arg(),
-                    b.up.arg(),
-                    Arg::I32(ffn as i32),
-                    want_k(ffn),
+            // Both Q4_K, a tensor-core batch: one launch for gate and up.
+            let fuse = self.gate_up_fused
+                && bf.gemm_gu.is_some()
+                && nb > SMALL
+                && l.gate.qt == Q4_K
+                && l.up.qt == Q4_K
+                && l.gate.cols == dim
+                && l.up.cols == dim;
+            if !fuse {
+                self.bgemm(
+                    wts,
+                    &l.gate,
                     b.act.arg(),
-                    Arg::U64(ast as u64),
-                ],
-            )?;
+                    ast,
+                    nb,
+                    null,
+                    0,
+                    b.gate.arg(),
+                    ffn,
+                )?;
+            }
+            on("gate")?;
+            if let (Some(f), true) = (&bf.gemm_gu, fuse) {
+                // gate and up in one launch, hid = silu(gate) * up out
+                // (the same floats and ops as below), then quantize_b.
+                g.launch(
+                    f,
+                    (nb.div_ceil(64) as u32, ffn.div_ceil(32) as u32, 1),
+                    (256, 1, 1),
+                    gemm2_smem(Q4_K, 64, 3) as u32,
+                    &[
+                        wts.arg_at(l.gate.off),
+                        wts.arg_at(l.up.off),
+                        Arg::U64(l.gate.rb as u64),
+                        Arg::I32(ffn as i32),
+                        Arg::I32(dim as i32),
+                        b.act.arg(),
+                        Arg::U64(ast as u64),
+                        Arg::I32(nb as i32),
+                        b.up.arg(),
+                        Arg::U64(ffn as u64),
+                    ],
+                )?;
+                on("gate_up")?;
+                g.launch(
+                    &bf.quantize,
+                    (ffn.div_ceil(256) as u32, nbu, 1),
+                    (32, 1, 1),
+                    0,
+                    &[
+                        b.up.arg(),
+                        Arg::I32(ffn as i32),
+                        want_k(ffn),
+                        b.act.arg(),
+                        Arg::U64(ast as u64),
+                    ],
+                )?;
+            } else if self.swiglu_epi {
+                // The up product's epilogue (mode 2) makes hid = silu(gate) *
+                // up from the gate product and its own sum (swiglu_quant_b's
+                // ops on the same floats) into b.up, then quantize_b: one
+                // fp32 product less written and read back per layer.
+                self.bgemm(
+                    wts,
+                    &l.up,
+                    b.act.arg(),
+                    ast,
+                    nb,
+                    b.gate.arg(),
+                    2,
+                    b.up.arg(),
+                    ffn,
+                )?;
+                on("gate_up")?;
+                g.launch(
+                    &bf.quantize,
+                    (ffn.div_ceil(256) as u32, nbu, 1),
+                    (32, 1, 1),
+                    0,
+                    &[
+                        b.up.arg(),
+                        Arg::I32(ffn as i32),
+                        want_k(ffn),
+                        b.act.arg(),
+                        Arg::U64(ast as u64),
+                    ],
+                )?;
+            } else {
+                self.bgemm(wts, &l.up, b.act.arg(), ast, nb, null, 0, b.up.arg(), ffn)?;
+                on("gate_up")?;
+                g.launch(
+                    &bf.swiglu_quant,
+                    (ffn.div_ceil(256) as u32, nbu, 1),
+                    (32, 1, 1),
+                    0,
+                    &[
+                        b.gate.arg(),
+                        b.up.arg(),
+                        Arg::I32(ffn as i32),
+                        want_k(ffn),
+                        b.act.arg(),
+                        Arg::U64(ast as u64),
+                    ],
+                )?;
+            }
             on("swiglu")?;
             self.bgemm(wts, &l.down, b.act.arg(), ast, nb, null, 1, b.x.arg(), dim)?;
+            on(if l.down.qt == Q6_K { "down6" } else { "down4" })?;
             on("down")?;
         }
         Ok(())
     }
 
-    /// `feed_batch`: passes of up to the cache's batch max, then a wait (so
-    /// a device fault surfaces here, as with `feed`).
+    /// `feed_batch`: passes of up to the cache's batch max (`passes`), then
+    /// a wait (so a device fault surfaces here, as with `feed`).
     pub(super) fn feed_tokens(
         &self,
         c: &mut CudaCache<'g>,
@@ -910,12 +1071,40 @@ impl<'g> CudaQwen2<'g> {
         start: usize,
     ) -> Result<(), String> {
         let max = c.b.as_ref().expect("batch scratch").max;
-        let n = input.len(self.dim);
-        for i in 0..n.div_ceil(max) {
-            let ch = input.chunk(i, max, self.dim);
-            self.pass(c, ch, start + i * max, false, &mut |_| Ok(()))?;
+        for r in passes(input.len(self.dim), max) {
+            let ch = input.range(r.clone(), self.dim);
+            self.pass(c, ch, start + r.start, false, &mut |_| Ok(()))?;
         }
         self.gpu.sync()
+    }
+
+    /// `prefill_logits` (nb >= 2): the passes of `feed_tokens`, the last
+    /// with `Head::Last`; its logits (waits for the passes).
+    pub(super) fn prefill_tokens(
+        &self,
+        c: &mut CudaCache<'g>,
+        tokens: &[u32],
+        start: usize,
+    ) -> Result<Vec<f32>, String> {
+        let max = c.b.as_ref().expect("batch scratch").max;
+        let ps = passes(tokens.len(), max);
+        for (i, r) in ps.iter().enumerate() {
+            let head = if i + 1 == ps.len() {
+                Head::Last
+            } else {
+                Head::No
+            };
+            let ch = BatchIn::Tokens(&tokens[r.clone()]);
+            self.pass_with(c, ch, start + r.start, head, 0, &mut |_| Ok(()))?;
+        }
+        let n = self.vocab * 4;
+        let b = c.b.as_ref().unwrap();
+        c.host_out.copy_from(&b.logits, 0, n)?;
+        let hb = &c.host_out.bytes_mut()?[..n]; // waits for the passes and copy
+        Ok(hb
+            .chunks_exact(4)
+            .map(|x| f32::from_le_bytes([x[0], x[1], x[2], x[3]]))
+            .collect())
     }
 
     /// `verify_argmax`: each token's greedy pick.
@@ -928,14 +1117,31 @@ impl<'g> CudaQwen2<'g> {
         let max = c.b.as_ref().expect("batch scratch").max;
         let nt = input.len(self.dim);
         let mut picks = Vec::with_capacity(nt);
-        for i in 0..nt.div_ceil(max) {
-            let ch = input.chunk(i, max, self.dim);
-            self.pass(c, ch, start + i * max, true, &mut |_| Ok(()))?;
+        for r in passes(nt, max) {
+            let ch = input.range(r.clone(), self.dim);
+            self.pass(c, ch, start + r.start, true, &mut |_| Ok(()))?;
             let b = c.b.as_mut().unwrap();
             picks.extend(b.picks(ch.len(self.dim))?);
         }
         Ok(picks)
     }
+}
+
+/// The passes of n tokens with at most max per pass: as few as possible,
+/// of equal size (the first ones one token longer), so a prompt just past a
+/// multiple of max doesn't end in a short pass (latency-bound GEMMs: the
+/// weights read once more for a few tokens). Results don't depend on it.
+pub(super) fn passes(n: usize, max: usize) -> Vec<std::ops::Range<usize>> {
+    let np = n.div_ceil(max);
+    let (q, r) = (n / np.max(1), n % np.max(1));
+    let mut v = Vec::with_capacity(np);
+    let mut s = 0;
+    for i in 0..np {
+        let e = s + q + (i < r) as usize;
+        v.push(s..e);
+        s = e;
+    }
+    v
 }
 
 impl BatchBufs<'_> {

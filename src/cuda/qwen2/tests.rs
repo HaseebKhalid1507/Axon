@@ -1997,7 +1997,11 @@ fn gpu_batched(
     let bias = epi.bias.as_ref().map(|b| g.upload(b).unwrap());
     let f = km.function(kernel).unwrap();
     let st = act_stride_t(cols) as u64;
-    let rb = quant::row_bytes(qt, cols) as u64;
+    // The Q6_K prefill copy's kernels take the copy (`q6k8_copy`).
+    let rb = match kernel.ends_with("q6k8") {
+        true => (cols / 256 * Q6K8_BYTES) as u64,
+        false => quant::row_bytes(qt, cols) as u64,
+    };
     let common = [
         w.arg(),
         Arg::U64(rb),
@@ -2016,6 +2020,31 @@ fn gpu_batched(
     unsafe { launch_product(g, &f, kernel, qt, rows, nb, &common) };
     g.sync().unwrap();
     out.read().unwrap()
+}
+
+/// Q6_K matrix `w` (rows x cols) converted to its prefill copy (q6k_to_i8).
+fn q6k8_copy<'g>(g: &'g Gpu, km: &Module, w: &DevBuf, rows: usize, cols: usize) -> DevBuf<'g> {
+    let nblk = cols / 256;
+    let out = g.alloc(rows * nblk * Q6K8_BYTES).unwrap();
+    let f = km.function("q6k_to_i8").unwrap();
+    // SAFETY: q6k_to_i8's signature; w holds rows Q6_K rows, out their copy.
+    unsafe {
+        g.launch(
+            &f,
+            (nblk as u32, rows as u32, 1),
+            (64, 1, 1),
+            0,
+            &[
+                w.arg(),
+                Arg::U64(quant::row_bytes(Q6_K, cols) as u64),
+                Arg::I32(nblk as i32),
+                out.arg(),
+            ],
+        )
+        .unwrap()
+    };
+    g.sync().unwrap();
+    out
 }
 
 /// Launch product kernel `kernel` (gemv_ref, gemvn_*, gemvm*, gemm*) with
@@ -2272,6 +2301,7 @@ fn gpu_products_match_reference_bits() {
     for &(qt, cols, rows) in &cases {
         let wd = synth_matrix(&mut rng, qt, rows, cols);
         let w = g.upload(&wd).unwrap();
+        let w8 = (qt == Q6_K && km.mma()).then(|| q6k8_copy(&g, &km, &w, rows, cols));
         let tn = type_name(qt);
         for nb in [1usize, 7, 16, 17, 100, 128, 129, 512] {
             let xs: Vec<Vec<f32>> = (0..nb)
@@ -2327,8 +2357,115 @@ fn gpu_products_match_reference_bits() {
                     check(k, z, &got[z * rows..(z + 1) * rows]);
                 }
             }
+            if let (Some(w8), true) = (&w8, nb > 16) {
+                for k in ["gemm2_q6k8", "gemm2s_q6k8"] {
+                    let got = gpu_batched(&g, &km, k, qt, w8, rows, cols, &act, nb, &epi);
+                    for z in 0..nb {
+                        check(k, z, &got[z * rows..(z + 1) * rows]);
+                    }
+                }
+            }
         }
         eprintln!("{tn} {cols} x {rows}: every kernel == gemv_ref");
+    }
+}
+
+/// The up product's swiglu epilogue (mode 2: out = silu(gate) * sum) in
+/// every product kernel, and gemm2s_q4_k_gu (gate and up in one launch),
+/// against gemv_ref: gate by gemv_ref (mode 0), then up by gemv_ref in
+/// mode 2 on it.
+#[test]
+fn gpu_swiglu_epilogue_and_gate_up_match_reference() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let mut rng = Rng(0x5eed_9a7e_0042);
+    for (cols, rows) in [(256usize, 333usize), (1536, 129), (3584, 1000)] {
+        let (qt, tn) = (Q4_K, "q4_k");
+        let gd = synth_matrix(&mut rng, qt, rows, cols);
+        let ud = synth_matrix(&mut rng, qt, rows, cols);
+        let (wg, wu) = (g.upload(&gd).unwrap(), g.upload(&ud).unwrap());
+        for nb in [1usize, 9, 16, 17, 64, 100, 129] {
+            let xs: Vec<Vec<f32>> = (0..nb)
+                .map(|i| rng.vec(cols, [1.0f32, 1e-2, 4.0][i % 3]))
+                .collect();
+            let act = quantize_batch(&g, &km, &xs, cols);
+            let st = act_stride_t(cols) as u64;
+            let rb = quant::row_bytes(qt, cols) as u64;
+            let run = |k: &str, w: &DevBuf, bias: Arg, mode: i32| -> DevBuf {
+                let out = g.alloc(rows * nb * 4).unwrap();
+                out.zero().unwrap();
+                let f = km.function(k).unwrap();
+                let common = [
+                    w.arg(),
+                    Arg::U64(rb),
+                    Arg::I32(rows as i32),
+                    Arg::I32(cols as i32),
+                    act.arg(),
+                    Arg::U64(st),
+                    Arg::I32(nb as i32),
+                    bias,
+                    Arg::I32(mode),
+                    out.arg(),
+                    Arg::U64(rows as u64),
+                ];
+                // SAFETY: prefill.cu's signatures; act holds nb tokens,
+                // out (and the mode-2 gate) rows * nb floats.
+                unsafe { launch_product(&g, &f, k, qt, rows, nb, &common) };
+                g.sync().unwrap();
+                out
+            };
+            let gate = run("gemv_ref", &wg, Arg::Ptr(0), 0);
+            let want: Vec<f32> = run("gemv_ref", &wu, gate.arg(), 2).read().unwrap();
+            let mut kernels: Vec<String> = vec!["gemvn_2x8".into(), "gemvn_2x16".into()];
+            if km.mma() {
+                kernels.push(format!("gemvm{}_{tn}", if nb <= 8 { 8 } else { 16 }));
+                kernels.extend(gemm2_names(qt));
+            }
+            for k in &kernels {
+                if k.starts_with("gemvm") && nb > 16 {
+                    continue;
+                }
+                let got: Vec<f32> = run(k, &wu, gate.arg(), 2).read().unwrap();
+                assert_eq!(bits(&got), bits(&want), "mode 2 {k} {cols}x{rows} nb {nb}");
+            }
+            if km.mma() {
+                let out = g.alloc(rows * nb * 4).unwrap();
+                let f = km.function("gemm2s_q4_k_gu").unwrap();
+                f.set_max_shared(gemm2_smem(Q4_K, 64, 3)).unwrap();
+                // SAFETY: gemm2s_q4_k_gu's signature; as above.
+                unsafe {
+                    g.launch(
+                        &f,
+                        (nb.div_ceil(64) as u32, rows.div_ceil(32) as u32, 1),
+                        (256, 1, 1),
+                        gemm2_smem(Q4_K, 64, 3) as u32,
+                        &[
+                            wg.arg(),
+                            wu.arg(),
+                            Arg::U64(rb),
+                            Arg::I32(rows as i32),
+                            Arg::I32(cols as i32),
+                            act.arg(),
+                            Arg::U64(st),
+                            Arg::I32(nb as i32),
+                            out.arg(),
+                            Arg::U64(rows as u64),
+                        ],
+                    )
+                    .unwrap()
+                };
+                g.sync().unwrap();
+                let got: Vec<f32> = out.read().unwrap();
+                assert_eq!(
+                    bits(&got),
+                    bits(&want),
+                    "gemm2s_q4_k_gu {cols}x{rows} nb {nb}"
+                );
+            }
+        }
+        eprintln!("Q4_K {cols} x {rows}: mode 2 and the fused gate+up == gemv_ref");
     }
 }
 
@@ -2443,6 +2580,8 @@ fn cuda_gemm_bench() {
         ("0.5B q Q8_0", Q8_0, 896, 4864),
         ("0.5B down Q4_K", Q4_K, 4864, 896),
         ("1.5B gate Q4_K", Q4_K, 1536, 8960),
+        ("tbo Q4_K 4096x14336", Q4_K, 14336, 4096),
+        ("tbo Q6_K 4096x14336", Q6_K, 14336, 4096),
     ] {
         if only.as_deref().is_some_and(|o| !what.contains(o)) {
             continue;
@@ -2450,7 +2589,10 @@ fn cuda_gemm_bench() {
         let rb = quant::row_bytes(qt, cols);
         let w = synth_matrix(&mut rng, qt, rows, cols);
         let wb = g.upload(&w).unwrap();
-        for nb in [8usize, 16, 128, 512] {
+        let nbs: Vec<usize> = std::env::var("AXON_BENCH_NB")
+            .map(|v| v.split(',').map(|x| x.parse().unwrap()).collect())
+            .unwrap_or(vec![8, 16, 128, 512]);
+        for nb in nbs {
             let xs: Vec<Vec<f32>> = (0..nb).map(|_| rng.vec(cols, 1.0)).collect();
             let act = quantize_batch(&g, &km, &xs, cols);
             let out = g.alloc(rows * nb * 4).unwrap();
@@ -2474,7 +2616,7 @@ fn cuda_gemm_bench() {
                 Arg::U64(st),
                 Arg::I32(nb as i32),
                 Arg::Ptr(0),
-                Arg::I32(0),
+                Arg::I32(std::env::var("AXON_BENCH_MODE").map_or(0, |v| v.parse().unwrap())),
                 out.arg(),
                 Arg::U64(rows as u64),
             ];
@@ -2497,6 +2639,27 @@ fn cuda_gemm_bench() {
                     macs / (best * 1e-3) / 1e12,
                     (rb * rows) as f64 / (best * 1e-3) / 1e9
                 );
+            }
+            // AXON_BENCH_LOOP=n: each kernel n times back to back (sustained
+            // rate under the power cap), average.
+            if let Ok(n) = std::env::var("AXON_BENCH_LOOP") {
+                let n: usize = n.parse().unwrap();
+                for k in kernels.iter() {
+                    let f = km.function(k).unwrap();
+                    let e0 = g.record().unwrap();
+                    for _ in 0..n {
+                        // SAFETY: as above.
+                        unsafe { launch_product(&g, &f, k, qt, rows, nb, &args) };
+                    }
+                    let e1 = g.record().unwrap();
+                    let ms = e0.ms_to(&e1).unwrap() as f64 / n as f64;
+                    let macs = (rows * cols * nb) as f64;
+                    eprintln!(
+                        "{what:<14} nb {nb:>3} {k:<12} {:>8.1} us {:>6.1} TMAC/s SUSTAINED x{n}",
+                        ms * 1e3,
+                        macs / (ms * 1e-3) / 1e12
+                    );
+                }
             }
         }
     }
@@ -2561,7 +2724,7 @@ fn prefill_with(net: &CudaQwen2, ids: &[u32], sizes: &[usize]) -> (Vec<u16>, Vec
 fn prefill_bits(m: &Model, name: &str, kv: CacheKv) {
     let g = crate::testutil::gpu().unwrap();
     let km = Kernels::module(&g).unwrap();
-    let ids = long_ids(m, 1100);
+    let ids = long_ids(m, 1200);
     let mut net = CudaQwen2::new(&g, &km, m, ids.len() + 1).unwrap();
     net.kv = kv;
     let max = net.prefill_batch();
@@ -2598,13 +2761,176 @@ fn prefill_bits(m: &Model, name: &str, kv: CacheKv) {
                 "{name} {sizes:?} tc {tc} split {max_split}: logits"
             );
         }
+        // prefill_logits (the last token in the final pass, Head::Last),
+        // from 0 and after a fed prefix; and swiglu_quant_b in place of the
+        // up product's swiglu epilogue.
+        // Last: without the Q6_K prefill copy (made for these small models
+        // by the VRAM rule, so the passes above used it if they have Q6_K).
+        let copy = net.q6k8_vram() > 0;
+        // (first position, swiglu in the up product's epilogue, gate and up
+        // fused in one launch where both are Q4_K).
+        for (from, epi, fused) in [
+            (0, true, true),
+            (300, true, true),
+            (1000, true, false),
+            (0, false, false),
+            (5, true, true),
+            (7, true, true),
+        ] {
+            net.swiglu_epi = epi;
+            net.gate_up_fused = fused;
+            if from == 5 {
+                net.drop_q6k8().unwrap();
+            }
+            // 7: fused asked for but no gemm2s_q4_k_gu (as without int8
+            // tensor cores): the separate gate and up products must run.
+            let gu = if from == 7 {
+                net.bf.gemm_gu.take()
+            } else {
+                None
+            };
+            let mut c = net.new_cache(ids.len() + 1);
+            if from > 0 {
+                net.feed_batch(&ids[..from], 0, &mut c);
+            }
+            let l = net.prefill_logits(&ids[from..], from, &mut c);
+            let kv = kv_bytes(&net, &c, ids.len());
+            assert!(
+                kv == kv0,
+                "{name} prefill_logits from {from} epi {epi} tc {tc}: KV"
+            );
+            assert_eq!(
+                bits(&l),
+                bits(&l0),
+                "{name} prefill_logits from {from} epi {epi} fused {fused} tc {tc} split \
+                 {max_split}: logits"
+            );
+            if gu.is_some() {
+                net.bf.gemm_gu = gu;
+            }
+        }
+        net.gate_up_fused = true;
+        net.swiglu_epi = true;
+        if copy {
+            eprintln!("{name}: with and without the Q6_K prefill copy");
+            net.make_q6k8(ids.len() + 1).unwrap();
+        }
     }
     eprintln!(
-        "{name} {kv:?}: prefill bit-identical over 7 batchings of {} tokens, {} attention \
-         paths x 2 split counts",
+        "{name} {kv:?}: prefill bit-identical over 7 batchings + 4 prefill_logits of {} \
+         tokens, {} attention paths x 2 split counts",
         ids.len(),
         paths.len()
     );
+}
+
+/// The Q6_K prefill copy only from VRAM nothing else was planned for: the
+/// cache, HEADROOM and Q6K8_MARGIN stay free (forced: the cache).
+#[test]
+fn q6k8_never_costs_context() {
+    let (gib, mib) = (1u64 << 30, 1u64 << 20);
+    let (cache, copy) = (2 * gib, gib);
+    let need = cache + HEADROOM + Q6K8_MARGIN + copy;
+    assert!(q6k8_fits(need, cache, copy, false));
+    assert!(!q6k8_fits(need - 1, cache, copy, false));
+    assert!(!q6k8_fits(cache + copy + 300 * mib, cache, copy, false));
+    assert!(q6k8_fits(cache + copy, cache, copy, true));
+    assert!(!q6k8_fits(cache + copy - 1, cache, copy, true));
+    assert!(!q6k8_fits(100 * gib, cache, 0, false));
+}
+
+#[test]
+fn batch_passes_equal_split() {
+    use super::batch::passes;
+    assert_eq!(passes(2100, 1152), vec![0..1050, 1050..2100]);
+    assert_eq!(passes(559, 1152), vec![0..559]);
+    assert_eq!(passes(1152, 1152), vec![0..1152]);
+    assert_eq!(passes(1153, 1152), vec![0..577, 577..1153]);
+    assert_eq!(passes(7, 3), vec![0..3, 3..5, 5..7]);
+    for n in 1..300 {
+        for max in [1, 2, 7, 16, 64, 100] {
+            let p = passes(n, max);
+            assert_eq!(p.len(), n.div_ceil(max));
+            assert_eq!(p[0].start, 0);
+            assert_eq!(p.last().unwrap().end, n);
+            assert!(p.windows(2).all(|w| w[0].end == w[1].start));
+            let (lo, hi) = (
+                p.iter().map(|r| r.len()).min().unwrap(),
+                p.iter().map(|r| r.len()).max().unwrap(),
+            );
+            assert!(hi <= max && hi - lo <= 1, "{n} {max}: {p:?}");
+        }
+    }
+}
+
+/// `prefill_logits` (the last prompt token inside the final batched pass)
+/// == `feed_batch` + `forward`, bit for bit, on the big models present
+/// (AXON_BIG_MODELS=1: qwen2.5 7B and qwen3 8B, prompts of 2, 17, 559 and
+/// 2100 tokens; else 3B if present).
+#[test]
+fn gpu_prefill_logits_match_forward_big() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let big = std::env::var("AXON_BIG_MODELS").is_ok_and(|v| v == "1");
+    let files: &[&str] = if big {
+        &[
+            "models/Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+            "models/Qwen3-8B-Q4_K_M.gguf",
+        ]
+    } else {
+        &["models/qwen2.5-3b-instruct-q4_k_m.gguf"]
+    };
+    let km = Kernels::module(&g).unwrap();
+    for f in files {
+        let Some(m) = model_at(f) else {
+            continue;
+        };
+        // 1152: one Head::Last pass of exactly the batch max; 1153: two.
+        let lens: &[usize] = if big {
+            &[2, 17, 559, 1152, 1153, 2100]
+        } else {
+            &[2, 17, 600, 1152, 1153]
+        };
+        let all = long_ids(&m, *lens.iter().max().unwrap());
+        let net = CudaQwen2::new(&g, &km, &m, all.len() + 1).unwrap();
+        for &n in lens {
+            let ids = &all[..n];
+            let mut a = net.new_cache(n + 1);
+            let pb = net.prefill_batch();
+            for (i, ch) in ids[..n - 1].chunks(pb).enumerate() {
+                net.feed_batch(ch, i * pb, &mut a);
+            }
+            let want = net.forward(ids[n - 1], n - 1, &mut a);
+            let mut b = net.new_cache(n + 1);
+            let got = net.prefill_logits(ids, 0, &mut b);
+            assert_eq!(bits(&got), bits(&want), "{f} {n} tokens: logits");
+            assert!(
+                kv_bytes(&net, &a, n) == kv_bytes(&net, &b, n),
+                "{f} {n} tokens: KV"
+            );
+            if n == 559 || n == 600 {
+                // The decode reference: every token through the one-token
+                // step (no batched GEMM, fused gate+up or Q6_K copy).
+                let mut d = net.new_cache(n + 1);
+                for (p, &t) in ids[..n - 1].iter().enumerate() {
+                    net.feed(&mut d, t, p).unwrap();
+                }
+                let dec = net.forward(ids[n - 1], n - 1, &mut d);
+                assert_eq!(bits(&got), bits(&dec), "{f} {n} tokens: logits vs decode");
+                assert!(
+                    kv_bytes(&net, &d, n) == kv_bytes(&net, &b, n),
+                    "{f} {n} tokens: KV vs decode"
+                );
+                eprintln!(
+                    "{f}: == per-token decode at {n} tokens (Q6_K copy {} B, fused gate+up {})",
+                    net.q6k8_vram(),
+                    net.gate_up_fused
+                );
+            }
+            eprintln!("{f}: prefill_logits == feed_batch + forward at {n} tokens");
+        }
+    }
 }
 
 #[test]
@@ -2748,11 +3074,40 @@ fn cuda_prefill_profile() {
     let nb: usize = std::env::var("AXON_PROF_NB").map_or(512, |v| v.parse().unwrap());
     let start: usize = std::env::var("AXON_PROF_START").map_or(0, |v| v.parse().unwrap());
     let km = Kernels::module(&g).unwrap();
-    let net = CudaQwen2::new(&g, &km, &m, start + nb + 1).unwrap();
-    let mut c = net.new_cache(start + nb + 1);
+    let net = CudaQwen2::new(&g, &km, &m, start + nb + 8).unwrap();
+    let mut c = net.new_cache(start + nb + 8);
     let ids = long_ids(&m, start + nb);
     if start > 0 {
         net.feed_batch(&ids[..start], 0, &mut c);
+    }
+    // AXON_PROF_LOOP=n: n back-to-back passes (sustained power/clocks: sample
+    // nvidia-smi meanwhile), per-pass wall ms printed.
+    if let Ok(n) = std::env::var("AXON_PROF_LOOP") {
+        let n: usize = n.parse().unwrap();
+        let mut ws = Vec::new();
+        for _ in 0..n {
+            let t = std::time::Instant::now();
+            net.pass(
+                &mut c,
+                batch::BatchIn::Tokens(&ids[start..]),
+                start,
+                false,
+                &mut |_| Ok(()),
+            )
+            .unwrap();
+            g.sync().unwrap();
+            ws.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        let mut s = ws.clone();
+        s.sort_by(f64::total_cmp);
+        eprintln!(
+            "loop {n} passes nb {nb} at {start}: median {:.2} ms = {:.0} tok/s; first {:.2} last {:.2}",
+            s[n / 2],
+            nb as f64 / s[n / 2] * 1e3,
+            ws[0],
+            ws[n - 1]
+        );
+        return;
     }
     for round in 0..3 {
         let mut evs = vec![("start", g.record().unwrap())];
@@ -2784,15 +3139,87 @@ fn cuda_prefill_profile() {
         }
         let total: f64 = agg.iter().map(|a| a.1).sum();
         eprintln!(
-            "{rel} nb {nb} at {start}: {total:.2} ms = {:.0} tok/s",
-            nb as f64 / total * 1e3
+            "{rel} nb {nb} at {start}: {total:.2} ms = {:.0} tok/s ({} segments)",
+            nb as f64 / total * 1e3,
+            evs.len() - 1
         );
+        // MACs per token of each GEMM class (names after the split: q, k,
+        // qkv = v, wo, gate, gate_up = up, down).
+        let l0 = &net.layers[0];
+        let nl = net.layers.len() as f64;
+        let macs = |mt: &Mat| (mt.rows * mt.cols) as f64 * nb as f64 * nl;
         for (n, ms, k) in agg {
+            let m = match n {
+                "q" => macs(&l0.q),
+                "k" => macs(&l0.k),
+                "v4" | "v6" => macs(&l0.v) * k as f64 / nl,
+                "wo" => macs(&l0.o),
+                "gate" => macs(&l0.gate),
+                "gate_up" => macs(&l0.up),
+                "down4" | "down6" => macs(&l0.down) * k as f64 / nl,
+                _ => 0.0,
+            };
+            let shape = match n {
+                "q" => format!("{}x{} {}", l0.q.rows, l0.q.cols, type_name(l0.q.qt)),
+                "k" => format!("{}x{} {}", l0.k.rows, l0.k.cols, type_name(l0.k.qt)),
+                "v4" => format!("v {}x{} q4_k", l0.v.rows, l0.v.cols),
+                "wo" => format!("{}x{} {}", l0.o.rows, l0.o.cols, type_name(l0.o.qt)),
+                "gate" => format!(
+                    "{}x{} {}",
+                    l0.gate.rows,
+                    l0.gate.cols,
+                    type_name(l0.gate.qt)
+                ),
+                "gate_up" => format!("up {}x{} {}", l0.up.rows, l0.up.cols, type_name(l0.up.qt)),
+                "down4" => format!("{}x{} q4_k", l0.down.rows, l0.down.cols),
+                "down6" => format!("{}x{} q6_k", l0.down.rows, l0.down.cols),
+                "v6" => format!("v {}x{} q6_k", l0.v.rows, l0.v.cols),
+                _ => String::new(),
+            };
             eprintln!(
-                "  {n:<8} {ms:>8.3} ms {:>5.1}% ({k} launches)",
-                100.0 * ms / total
+                "  {n:<8} {ms:>8.3} ms {:>5.1}% ({k} launches) {:>6.1} TMAC/s {shape}",
+                100.0 * ms / total,
+                if m > 0.0 { m / (ms * 1e-3) / 1e12 } else { 0.0 }
             );
         }
+        // Wall clock of the same pass without the event callbacks (the
+        // launch gaps the events hide), and of the one-token forward the
+        // `gen` prompt timer also counts.
+        let mut walls = Vec::new();
+        let mut gpus = Vec::new();
+        for _ in 0..3 {
+            let t = std::time::Instant::now();
+            let e0 = g.record().unwrap();
+            net.pass(
+                &mut c,
+                batch::BatchIn::Tokens(&ids[start..]),
+                start,
+                nb <= 16,
+                &mut |_| Ok(()),
+            )
+            .unwrap();
+            let e1 = g.record().unwrap();
+            g.sync().unwrap();
+            walls.push(t.elapsed().as_secs_f64() * 1e3);
+            gpus.push(e0.ms_to(&e1).unwrap() as f64);
+        }
+        eprintln!(
+            "  pass wall {:?} ms, gpu events {:?} ms",
+            walls
+                .iter()
+                .map(|x| (x * 100.0).round() / 100.0)
+                .collect::<Vec<_>>(),
+            gpus.iter()
+                .map(|x| (x * 100.0).round() / 100.0)
+                .collect::<Vec<_>>()
+        );
+        let mut fw = Vec::new();
+        for i in 0..3 {
+            let t = std::time::Instant::now();
+            let _ = net.forward_argmax(ids[0], start + nb - 1 + i, &mut c);
+            fw.push(t.elapsed().as_secs_f64() * 1e3);
+        }
+        eprintln!("  one-token forward (decode step incl. lm head) {fw:?} ms");
     }
 }
 
@@ -4394,4 +4821,127 @@ fn gpu_q8_attention_matches_reference() {
         }
     }
     eprintln!("q8 tc attention: worst |out - f64| {worst:e}");
+}
+
+/// Sustained, interleaved A/B of gemm2 (64 x 128) vs gemm2s (64 x 64) per
+/// shape: AXON_SUS_SHAPES "Q4_K:rowsxcols,Q6_K:rowsxcols,..",
+/// AXON_SUS_NB "559,1050", AXON_SUS_N launches per block (default 50),
+/// AXON_SUS_ROUNDS (default 4): blocks alternate kernel A, B, A, B.. after a
+/// ~1 s warm-up (the GPU at its power cap, as in a prefill); per kernel the
+/// median block's us per launch. The host's choice (bgemm) is printed too.
+#[test]
+#[ignore]
+fn cuda_gemm_sustained() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let shapes = std::env::var("AXON_SUS_SHAPES")
+        .unwrap_or("Q4_K:18944x3584,Q4_K:3584x18944,Q6_K:3584x18944,Q4_K:3584x3584".into());
+    let nbs: Vec<usize> = std::env::var("AXON_SUS_NB")
+        .unwrap_or("559,1050".into())
+        .split(',')
+        .map(|x| x.parse().unwrap())
+        .collect();
+    let n: usize = std::env::var("AXON_SUS_N").map_or(50, |v| v.parse().unwrap());
+    let rounds: usize = std::env::var("AXON_SUS_ROUNDS").map_or(4, |v| v.parse().unwrap());
+    let mut rng = Rng(7);
+    let mut warm = false;
+    for sh in shapes.split(',') {
+        let (tq, rc) = sh.split_once(':').unwrap();
+        let qt = match tq {
+            "Q4_K" => Q4_K,
+            "Q6_K" => Q6_K,
+            "Q8_0" => Q8_0,
+            _ => Q5_0,
+        };
+        let (rows, cols) = rc.split_once('x').unwrap();
+        let (rows, cols): (usize, usize) = (rows.parse().unwrap(), cols.parse().unwrap());
+        let rb = quant::row_bytes(qt, cols);
+        let w = synth_matrix(&mut rng, qt, rows, cols);
+        let wb = g.upload(&w).unwrap();
+        for &nb in &nbs {
+            let xs: Vec<Vec<f32>> = (0..nb).map(|_| rng.vec(cols, 1.0)).collect();
+            let act = quantize_batch(&g, &km, &xs, cols);
+            let out = g.alloc(rows * nb * 4).unwrap();
+            let st = act_stride_t(cols) as u64;
+            let args = [
+                wb.arg(),
+                Arg::U64(rb as u64),
+                Arg::I32(rows as i32),
+                Arg::I32(cols as i32),
+                act.arg(),
+                Arg::U64(st),
+                Arg::I32(nb as i32),
+                Arg::Ptr(0),
+                Arg::I32(0),
+                out.arg(),
+                Arg::U64(rows as u64),
+            ];
+            let mut kernels = gemm2_names(qt);
+            if std::env::var("AXON_SUS_ONLY2").is_ok() {
+                kernels.truncate(2);
+            }
+            // Q6_K: its prefill copy's kernels too (the copy's arguments).
+            let w8 = (qt == Q6_K).then(|| q6k8_copy(&g, &km, &wb, rows, cols));
+            let mut args8 = args;
+            if let Some(w8) = &w8 {
+                kernels.extend(["gemm2_q6k8".to_string(), "gemm2s_q6k8".to_string()]);
+                args8[0] = w8.arg();
+                args8[1] = Arg::U64((cols / 256 * Q6K8_BYTES) as u64);
+            }
+            let fs: Vec<_> = kernels.iter().map(|k| km.function(k).unwrap()).collect();
+            let block = |ki: usize, reps: usize| {
+                let a = if kernels[ki].ends_with("q6k8") {
+                    &args8
+                } else {
+                    &args
+                };
+                let e0 = g.record().unwrap();
+                for _ in 0..reps {
+                    // SAFETY: as in gpu_batched.
+                    unsafe { launch_product(&g, &fs[ki], &kernels[ki], qt, rows, nb, a) };
+                }
+                let e1 = g.record().unwrap();
+                e0.ms_to(&e1).unwrap() as f64 * 1e3 / reps as f64
+            };
+            if !warm {
+                let t = std::time::Instant::now();
+                while t.elapsed().as_secs_f64() < 1.5 {
+                    block(0, 10);
+                }
+                warm = true;
+            }
+            let mut us = vec![Vec::new(); kernels.len()];
+            for r in 0..rounds {
+                for i in 0..kernels.len() {
+                    // A B / B A alternately (neither always goes first).
+                    let ki = if r % 2 == 0 { i } else { kernels.len() - 1 - i };
+                    us[ki].push(block(ki, n));
+                }
+            }
+            let macs = (rows * cols * nb) as f64;
+            let med: Vec<f64> = us
+                .iter_mut()
+                .map(|v| {
+                    v.sort_by(f64::total_cmp);
+                    v[v.len() / 2]
+                })
+                .collect();
+            let line: Vec<String> = kernels
+                .iter()
+                .zip(&med)
+                .map(|(k, u)| format!("{k} {u:8.1} us {:5.1} TMAC/s", macs / (u * 1e-6) / 1e12))
+                .collect();
+            let wi = (0..med.len())
+                .min_by(|&a, &b| med[a].total_cmp(&med[b]))
+                .unwrap();
+            eprintln!(
+                "SUS {tq} {rows}x{cols} nb {nb:>5}: {}  | best {} (gemm2s/gemm2 {:+.1}%)",
+                line.join("  "),
+                kernels[wi],
+                100.0 * (med[1] / med[0] - 1.0)
+            );
+        }
+    }
 }

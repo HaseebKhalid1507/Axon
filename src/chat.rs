@@ -262,20 +262,27 @@ impl<'a, M: Lm> Chat<'a, M> {
         self.hist.extend_from_slice(&user);
         let n_gen = self.max_reply.min(self.ctx - self.hist.len() - close);
 
-        // Feed what the cache doesn't have yet; the last token for its logits.
+        // Feed what the cache doesn't have yet, in batches (cancellable
+        // between them); the last batch with the last token, for its logits
+        // (`Lm::prefill_logits`: on the GPU in the batched pass).
         let t0 = Instant::now();
-        let last = self.hist.len() - 1;
         let pb = self.net.prefill_batch();
-        for (i, batch) in self.hist[self.fed..last].chunks(pb).enumerate() {
+        let chunks: Vec<&[u32]> = self.hist[self.fed..].chunks(pb).collect();
+        assert!(!chunks.is_empty(), "a turn adds tokens");
+        let mut logits = Vec::new();
+        for (i, batch) in chunks.iter().enumerate() {
             if cancel() {
                 self.hist.truncate(start);
                 r.interrupted = true;
                 return Ok(r);
             }
-            self.net
-                .feed_batch(batch, self.fed + i * pb, &mut self.cache);
+            let pos = self.fed + i * pb;
+            if i + 1 < chunks.len() {
+                self.net.feed_batch(batch, pos, &mut self.cache);
+            } else {
+                logits = self.net.prefill_logits(batch, pos, &mut self.cache);
+            }
         }
-        let logits = self.net.forward(self.hist[last], last, &mut self.cache);
         self.fed = self.hist.len();
         r.prompt_tokens = self.hist.len() - turn_fed;
         r.prompt_secs = t0.elapsed().as_secs_f64();
