@@ -123,8 +123,10 @@ use your local model), `--max-conns N` / `--max-queue N` (defaults 256 / 128), `
   The KV cache carries over between requests: a prompt that starts with the previous
   request's tokens (a chat follow-up resending the conversation, a shared system prompt)
   only runs the model over the rest (`usage.prompt_tokens_details.cached_tokens`).
-- Chat prompts are framed as `axon chat` frames them (ChatML; Qwen2.5's default system
-  message when none is given; Qwen3 earlier replies without their reasoning). Qwen3 thinks
+- Chat prompts are framed as `axon chat` frames them (ChatML, or Llama 3's template with its
+  BOS and system block; Qwen2.5's default system message when none is given; Qwen3 earlier
+  replies without their reasoning), and end on the same tokens (Llama 3: `<|eot_id|>` too).
+  `/v1/completions` tokenizes and stops as `gen` does (BOS for Llama 3). Qwen3 thinks
   unless `chat_template_kwargs: {"enable_thinking": false}` (or `--no-think` as the server
   default); the reasoning comes as `reasoning_content`, apart from `content`
   (`--think-inline` leaves the `<think>` block in `content`).

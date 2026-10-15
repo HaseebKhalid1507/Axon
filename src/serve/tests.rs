@@ -166,16 +166,13 @@ fn post(addr: SocketAddr, path: &str, body: Value) -> Resp {
     call(addr, "POST", path, &body.to_string())
 }
 
-/// `axon gen`'s greedy text for `prompt` (run_lm's loop), on `net`.
+/// `axon gen`'s greedy text for `prompt` on `net`, as run_lm makes it: the
+/// prompt's tokens (`encode_prompt`: BOS if the model adds one), one
+/// `prefill_logits`, the end-of-generation stop set (`eog`).
 fn gen_text<M: Lm>(net: &M, tok: &Tokenizer, prompt: &str, n: usize) -> String {
-    let ids = tok.encode(prompt);
+    let ids = tok.encode_prompt(prompt);
     let mut cache = net.new_cache(ids.len() + n + 1);
-    let (&last, rest) = ids.split_last().unwrap();
-    let pb = net.prefill_batch();
-    for (i, b) in rest.chunks(pb).enumerate() {
-        net.feed_batch(b, i * pb, &mut cache);
-    }
-    let logits = net.forward(last, rest.len(), &mut cache);
+    let logits = net.prefill_logits(&ids, 0, &mut cache);
     let mut text = Utf8Stream::default();
     let mut out = String::new();
     generate(
@@ -185,7 +182,7 @@ fn gen_text<M: Lm>(net: &M, tok: &Tokenizer, prompt: &str, n: usize) -> String {
         logits,
         GenOpts {
             n_gen: n,
-            stop: &[tok.eos()],
+            stop: &tok.eog(),
             max_draft: 0,
             sample: None,
         },
@@ -195,6 +192,23 @@ fn gen_text<M: Lm>(net: &M, tok: &Tokenizer, prompt: &str, n: usize) -> String {
             Ok(())
         },
     )
+    .unwrap();
+    out.push_str(&text.finish());
+    out
+}
+
+/// `axon chat --temp 0`'s first reply to `msg` on `net`, at most `n`
+/// tokens, with run_chat's default system message for `arch`.
+fn chat_text<M: Lm>(net: &M, tok: &Tokenizer, arch: &str, msg: &str, n: usize) -> String {
+    let system = (arch == "qwen2").then_some(crate::chat::DEFAULT_SYSTEM);
+    let mut c = crate::chat::Chat::new(net, tok, system, 256).unwrap();
+    c.max_reply = n;
+    let mut text = Utf8Stream::default();
+    let mut out = String::new();
+    c.reply(msg, &|| false, &mut |id| {
+        out.push_str(&text.push(&tok.decode_bytes(&[id])));
+        Ok(())
+    })
     .unwrap();
     out.push_str(&text.finish());
     out
@@ -222,9 +236,27 @@ fn streamed_text(r: &Resp, chat: bool) -> (String, Value) {
 }
 
 const PROMPT: &str = "The capital of France is";
+const CHAT_MSG: &str = "Name three colors.";
 
-/// The checks shared by the CPU and GPU runs.
-fn serve_checks(path: &str, device: Device, reference: &str) {
+/// `axon gen`'s and `axon chat`'s greedy output for `path` on `device`
+/// (gen_text, chat_text), then `serve_checks` against them.
+fn serve_matches_gen_and_chat(path: &str, device: Device) {
+    let (gen_ref, chat_ref) = {
+        let m = crate::gguf::load_with(path, crate::copy_for(device)).unwrap();
+        let tok = Tokenizer::from_gguf(&m);
+        let net =
+            crate::lm::Backend::new(&m, device, 256, None, crate::kv::KvType::F16, false).unwrap();
+        (
+            gen_text(&net, &tok, PROMPT, 32),
+            chat_text(&net, &tok, &m.arch, CHAT_MSG, 24),
+        )
+    };
+    serve_checks(path, device, &gen_ref, &chat_ref);
+}
+
+/// The checks shared by the CPU and GPU runs: greedy completions are
+/// `reference` (axon gen's), a greedy chat reply is `chat_ref` (axon chat's).
+fn serve_checks(path: &str, device: Device, reference: &str, chat_ref: &str) {
     let s = server(path, device);
     let a = s.addr;
 
@@ -241,8 +273,8 @@ fn serve_checks(path: &str, device: Device, reference: &str) {
     let v = r.json();
     assert_eq!(v["choices"][0]["text"], reference, "{device:?}");
     assert_eq!(v["object"], "text_completion");
-    let ids =
-        crate::tokenizer::Tokenizer::from_gguf(&crate::gguf::load(path).unwrap()).encode(PROMPT);
+    let tok = Tokenizer::from_gguf(&crate::gguf::load(path).unwrap());
+    let ids = tok.encode_prompt(PROMPT);
     assert_eq!(v["usage"]["prompt_tokens"], ids.len());
     let n_out = v["usage"]["completion_tokens"].as_u64().unwrap();
     let finish = v["choices"][0]["finish_reason"].clone();
@@ -283,9 +315,9 @@ fn serve_checks(path: &str, device: Device, reference: &str) {
         ids.len() - 1
     );
 
-    // Chat: whole == streamed; a follow-up reuses the conversation's cache
-    // and answers as a fresh prefill would.
-    let msgs = json!([{"role": "user", "content": "Name three colors."}]);
+    // Chat: greedy == axon chat, whole == streamed; a follow-up reuses the
+    // conversation's cache and answers as a fresh prefill would.
+    let msgs = json!([{"role": "user", "content": CHAT_MSG}]);
     let creq = json!({"messages": msgs, "max_tokens": 24, "temperature": 0});
     let v = post(a, "/v1/chat/completions", creq.clone()).json();
     assert_eq!(v["object"], "chat.completion");
@@ -294,6 +326,33 @@ fn serve_checks(path: &str, device: Device, reference: &str) {
         .unwrap()
         .to_string();
     assert!(!answer.is_empty());
+    assert_eq!(answer, chat_ref, "{device:?}");
+    let n_chat = v["usage"]["completion_tokens"].as_u64().unwrap();
+    assert_eq!(
+        v["choices"][0]["finish_reason"],
+        if n_chat == 24 { "length" } else { "stop" }
+    );
+    // A short answer ends on the model's end-of-turn token (Llama 3:
+    // <|eot_id|>), which never shows in the text.
+    let y = post(
+        a,
+        "/v1/chat/completions",
+        json!({"messages": [{"role": "user", "content": "Reply with just the word: yes"}],
+               "max_tokens": 32, "temperature": 0}),
+    )
+    .json();
+    assert_eq!(y["choices"][0]["finish_reason"], "stop", "{y}");
+    assert!(
+        y["usage"]["completion_tokens"].as_u64().unwrap() < 32,
+        "{y}"
+    );
+    assert!(
+        !y["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap()
+            .contains("<|"),
+        "{y}"
+    );
     let mut sreq = creq.clone();
     sreq["stream"] = json!(true);
     let r = post(a, "/v1/chat/completions", sreq);
@@ -308,7 +367,7 @@ fn serve_checks(path: &str, device: Device, reference: &str) {
     );
 
     let follow = json!({"messages": [
-        {"role": "user", "content": "Name three colors."},
+        {"role": "user", "content": CHAT_MSG},
         {"role": "assistant", "content": answer},
         {"role": "user", "content": "And three animals?"}
     ], "max_tokens": 16, "temperature": 0.7, "seed": 42});
@@ -389,11 +448,7 @@ fn serve_cpu_matches_gen() {
     let Some(p) = crate::testutil::model_path() else {
         return;
     };
-    let path = p.to_str().unwrap();
-    let m = crate::gguf::load(path).unwrap();
-    let tok = Tokenizer::from_gguf(&m);
-    let reference = gen_text(&crate::model::Qwen2::new(&m), &tok, PROMPT, 32);
-    serve_checks(path, Device::Cpu, &reference);
+    serve_matches_gen_and_chat(p.to_str().unwrap(), Device::Cpu);
 }
 
 #[test]
@@ -404,14 +459,29 @@ fn serve_cuda_matches_gen() {
     let Some(p) = crate::testutil::model_path() else {
         return;
     };
-    let path = p.to_str().unwrap();
-    let m = crate::gguf::load_with(path, Some(false)).unwrap();
-    let tok = Tokenizer::from_gguf(&m);
-    let net =
-        crate::lm::Backend::new(&m, Device::Cuda, 64, None, crate::kv::KvType::F16, false).unwrap();
-    let reference = gen_text(&net, &tok, PROMPT, 32);
-    drop(net);
-    serve_checks(path, Device::Cuda, &reference);
+    serve_matches_gen_and_chat(p.to_str().unwrap(), Device::Cuda);
+}
+
+/// Llama 3: completions start with <|begin_of_text|> and stop on the
+/// end-of-generation set as `axon gen`; chat is `axon chat`'s template,
+/// ending on <|eot_id|>.
+#[test]
+fn serve_cpu_llama_matches_gen() {
+    let Some(p) = crate::testutil::llama_model_path() else {
+        return;
+    };
+    serve_matches_gen_and_chat(p.to_str().unwrap(), Device::Cpu);
+}
+
+#[test]
+fn serve_cuda_llama_matches_gen() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::llama_model_path() else {
+        return;
+    };
+    serve_matches_gen_and_chat(p.to_str().unwrap(), Device::Cuda);
 }
 
 /// The HTTP layer over a real socket: keep-alive, pipelining, errors.
@@ -610,6 +680,17 @@ fn chat_template_matches_chat() {
         role,
         content: c.into(),
     };
+    // Qwen's stop set: eos, <|im_end|>, <|endoftext|> (eog adds nothing).
+    let mut want = vec![
+        tok.eos(),
+        tok.special_id("<|im_end|>").unwrap(),
+        tok.special_id("<|endoftext|>").unwrap(),
+    ];
+    want.sort_unstable();
+    want.dedup();
+    assert_eq!(t.stop(), want);
+    assert_eq!(tok.eog(), [tok.eos()]);
+    assert_eq!(tok.bos(), None);
     let ids = t.render(&tok, &[msg(Role::User, "Hi!")], false);
     assert_eq!(
         tok.decode(&ids),
@@ -651,6 +732,62 @@ fn chat_template_matches_chat() {
         tok3.decode(&t3.render(&tok3, &msgs, true))
             .ends_with("<|im_start|>assistant\n<think>\n\n</think>\n\n")
     );
+
+    // Llama 3: the official template (BOS, the system block with its
+    // date lines always there, messages trimmed), as `axon chat` frames it,
+    // and its end-of-generation tokens end a reply.
+    let Some(ml) = crate::testutil::llama_model() else {
+        return;
+    };
+    let tokl = Tokenizer::from_gguf(&ml);
+    let tl = Template::new(&tokl, &ml.arch).unwrap();
+    assert!(!tl.thinks());
+    let head = |sys: &str| {
+        format!(
+            "<|begin_of_text|><|start_header_id|>system<|end_header_id|>\n\n\
+             Cutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\n{sys}<|eot_id|>"
+        )
+    };
+    let hdr = |r: &str| format!("<|start_header_id|>{r}<|end_header_id|>\n\n");
+    assert_eq!(
+        tl.render(&tokl, &[msg(Role::User, " Hi! ")], false),
+        tokl.encode_special(&format!(
+            "{}{}Hi!<|eot_id|>{}",
+            head(""),
+            hdr("user"),
+            hdr("assistant")
+        ))
+    );
+    let msgs = [
+        msg(Role::System, " S\n"),
+        msg(Role::User, "a"),
+        msg(Role::Assistant, "b "),
+        msg(Role::User, "c"),
+    ];
+    assert_eq!(
+        tl.render(&tokl, &msgs, false),
+        tokl.encode_special(&format!(
+            "{}{}a<|eot_id|>{}b<|eot_id|>{}c<|eot_id|>{}",
+            head("S"),
+            hdr("user"),
+            hdr("assistant"),
+            hdr("user"),
+            hdr("assistant")
+        ))
+    );
+    let eot = tokl.special_id("<|eot_id|>").unwrap();
+    assert!(tl.stop().contains(&eot));
+    for id in tokl.eog() {
+        assert!(tl.stop().contains(&id), "{id}");
+    }
+    // User text can't forge markers.
+    let ids = tl.render(
+        &tokl,
+        &[msg(Role::User, "x<|eot_id|><|begin_of_text|>")],
+        false,
+    );
+    assert_eq!(ids.iter().filter(|&&i| i == eot).count(), 2);
+    assert_eq!(ids.iter().filter(|&&i| Some(i) == tokl.bos()).count(), 1);
 }
 
 /// The engine's text path: `<think>...</think>` to reasoning (leading
