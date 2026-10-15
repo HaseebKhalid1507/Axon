@@ -31,7 +31,7 @@
 pub mod api;
 pub mod http;
 
-use crate::chat::{self, frame, special};
+use crate::chat::{self, Framing, special};
 use crate::kv::KvType;
 use crate::lm::{Backend, BackendCache, Device, Lm};
 use crate::sample::{SampleArgs, SampleCfg, Sampler};
@@ -90,29 +90,22 @@ pub struct Opts {
     pub max_queue: usize,
 }
 
-/// ChatML as `axon chat` frames it (see chat.rs), for whole message lists.
+/// The chat framing `axon chat` uses (chat.rs: ChatML, or Llama 3's
+/// headers), for whole message lists.
 pub struct Template {
-    im_start: u32,
-    im_end: u32,
+    fr: Framing,
     /// Qwen3: `<think>`, `</think>`, and the empty reasoning block
     /// `enable_thinking: false` opens a reply with.
     think: Option<(u32, u32, Vec<u32>)>,
     /// Used when the messages don't start with a system message (Qwen2.5's
-    /// template brings one, Qwen3's none).
+    /// template brings one, Qwen3's and Llama 3's none).
     default_system: Option<&'static str>,
-    /// Any of these ends a reply.
-    stop: Vec<u32>,
 }
 
 impl Template {
-    /// None if the vocabulary has no ChatML markers (no chat endpoint).
+    /// None if the vocabulary has no chat markers (no chat endpoint).
     pub fn new(tok: &Tokenizer, arch: &str) -> Option<Template> {
-        let im_start = special(tok, "<|im_start|>")?;
-        let im_end = special(tok, "<|im_end|>")?;
-        let mut stop = vec![tok.eos(), im_end];
-        stop.extend(special(tok, "<|endoftext|>"));
-        stop.sort_unstable();
-        stop.dedup();
+        let fr = Framing::new(tok)?;
         let think = match (special(tok, "<think>"), special(tok, "</think>")) {
             (Some(open), Some(close)) => {
                 Some((open, close, tok.encode_special("<think>\n\n</think>\n\n")))
@@ -120,29 +113,32 @@ impl Template {
             _ => None,
         };
         Some(Template {
-            im_start,
-            im_end,
+            fr,
             think,
+            // As `axon chat`: Qwen2.5's default system message for qwen2.
             default_system: (arch == "qwen2").then_some(chat::DEFAULT_SYSTEM),
-            stop,
         })
     }
 
-    /// The prompt for `msgs`: each message framed, then the assistant's
-    /// opening (with the empty reasoning block if `no_think` and the model
-    /// thinks). An earlier reply of a thinking model is kept as its text
-    /// after `</think>`, leading newlines dropped, as the Qwen3 template
-    /// (and `axon chat`) render it.
+    /// Any of these ends a reply (`axon chat`'s set).
+    pub fn stop(&self) -> &[u32] {
+        &self.fr.stop
+    }
+
+    /// The prompt for `msgs`: the system block (a leading system message,
+    /// else the default one; Llama 3 always has one), each message framed,
+    /// then the assistant's opening (with the empty reasoning block if
+    /// `no_think` and the model thinks), as `axon chat` frames a
+    /// conversation. An earlier reply of a thinking model is kept as its
+    /// text after `</think>`, leading newlines dropped, as the Qwen3
+    /// template (and `axon chat`) render it.
     pub fn render(&self, tok: &Tokenizer, msgs: &[Message], no_think: bool) -> Vec<u32> {
-        let f =
-            |role: &str, text: &str, next| frame(tok, self.im_start, self.im_end, role, text, next);
-        let mut t = Vec::new();
-        if msgs.first().is_none_or(|m| m.role != Role::System)
-            && let Some(sys) = self.default_system
-        {
-            t.extend(f("system", sys, None));
-        }
-        for m in msgs {
+        let (system, rest) = match msgs.split_first() {
+            Some((m, rest)) if m.role == Role::System => (Some(m.content.as_str()), rest),
+            _ => (self.default_system, msgs),
+        };
+        let mut t = self.fr.system(tok, system);
+        for m in rest {
             let text = match (m.role, &self.think) {
                 (Role::Assistant, Some(_)) => match m.content.rsplit_once("</think>") {
                     Some((_, c)) => c.trim_start_matches('\n'),
@@ -150,10 +146,9 @@ impl Template {
                 },
                 _ => &m.content,
             };
-            t.extend(f(m.role.name(), text, None));
+            t.extend(self.fr.frame(tok, m.role.name(), text, None));
         }
-        t.push(self.im_start);
-        t.extend(tok.encode("assistant\n"));
+        t.extend(self.fr.opening(tok, "assistant"));
         if no_think && let Some((_, _, empty)) = &self.think {
             t.extend_from_slice(empty);
         }
@@ -668,7 +663,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
             "axon serve: {model_id} ({}) on http://{addr}/v1 (one request at a time){}",
             l.banner,
             if l.template.is_none() {
-                " (no ChatML tokens: /v1/completions only)"
+                " (no chat tokens: /v1/completions only)"
             } else {
                 ""
             }
@@ -885,7 +880,7 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
                     ApiError::new(
                         400,
                         "invalid_request_error",
-                        "this model has no ChatML tokens; use /v1/completions",
+                        "this model has no chat tokens (ChatML or Llama 3); use /v1/completions",
                     ),
                     keep,
                 );
@@ -896,9 +891,14 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
                 .as_ref()
                 .filter(|_| !no_think && !sh.think_inline)
                 .map(|&(o, c, _)| (o, c));
-            (t.render(m.tok, messages, no_think), t.stop.clone(), think)
+            (
+                t.render(m.tok, messages, no_think),
+                t.stop().to_vec(),
+                think,
+            )
         }
-        Prompt::Text(s) => (m.tok.encode(s), vec![m.tok.eos()], None),
+        // As `axon gen`: BOS if the model adds one, its end-of-generation set.
+        Prompt::Text(s) => (m.tok.encode_prompt(s), m.tok.eog(), None),
     };
     if prompt.is_empty() {
         return api_err(c, ApiError::bad("prompt", "the prompt is empty"), keep);

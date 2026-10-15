@@ -74,6 +74,13 @@ pub fn qwen3_model() -> Option<Model> {
 /// The llama test model, or None to skip (`AXON_SKIP_MODEL_TESTS`, as
 /// `model_path`).
 pub fn llama_model() -> Option<Model> {
+    let path = llama_model_path()?;
+    Some(gguf::load(path.to_str().expect("utf-8 path")).expect("load llama model"))
+}
+
+/// Path of the llama test model, or None to skip (`AXON_SKIP_MODEL_TESTS`,
+/// as `model_path`).
+pub fn llama_model_path() -> Option<PathBuf> {
     let path = match std::env::var_os("AXON_TEST_LLAMA") {
         Some(p) => PathBuf::from(p),
         None => Path::new(env!("CARGO_MANIFEST_DIR")).join(LLAMA_MODEL),
@@ -90,7 +97,7 @@ pub fn llama_model() -> Option<Model> {
             path.display()
         );
     }
-    Some(gguf::load(path.to_str().expect("utf-8 path")).expect("load llama model"))
+    Some(path)
 }
 
 pub fn read_json(rel: &str) -> serde_json::Value {

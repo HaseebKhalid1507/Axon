@@ -100,7 +100,8 @@ pub enum Prompt {
         messages: Vec<Message>,
         no_think: Option<bool>,
     },
-    /// /v1/completions: raw text, no template.
+    /// /v1/completions: raw text, no template (tokenized as `axon gen`
+    /// tokenizes its prompt: BOS first if the model adds one).
     Text(String),
 }
 
