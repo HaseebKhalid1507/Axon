@@ -90,3 +90,49 @@ unchanged). Decode tok/s, 18 threads, no drafting / `--draft 7` before / after:
 
 The worst case (story: -1.1% on 0.5B, -1.6% on 1.5B) is still a small loss, so
 drafting stays opt-in (`--draft 7` / `AXON_DRAFT=7`).
+
+## 2026-10-15, GPU, main @ 0851798
+
+Not `scripts/bench.py`: a scoreboard script outside the repo, log
+`sb-main-0851798.txt`. NVIDIA GeForce RTX 5070 Ti Laptop GPU (sm_120, 12 GB), whole
+model on the GPU for every engine, same GGUF files, 3 interleaved rounds, the GPU cooled
+below 75 C before each model (waiting at most 60 s), and each measurement waiting up to
+20 s for the GPU to be under 10% busy (the desktop shares it). Prompts are a repeated sentence (~560 / ~2100 tokens) behind a fresh number each
+run, so no prompt cache hits; tg128 follows a short prompt.
+
+- axon: `axon gen M "<prompt>" -n N --device cuda`, `AXON_THREADS=4`, pinned to 4 cores
+- ollama: `/api/generate`, `raw`, greedy, `num_gpu 99`, `num_ctx 4096`, unloaded after
+  each round (its version was not recorded with this run)
+- llama.cpp 4413a19, CUDA build: `llama-bench -p 560,2100 -n 128 -ngl 99 -r 1` (its own
+  synthetic prompts, from an empty context)
+
+tok/s, median (max) of 3:
+
+| model | engine | pp560 | pp2100 | tg128 |
+|---|---|---|---|---|
+| Qwen2.5 0.5B Q4_K_M | axon 0851798 | 44779.7 (44859) | 44681.0 (45301) | 825.4 (827) |
+| | ollama 0.35.0 | 14288.9 (16249) | 42593.6 (42765) | 583.2 (586) |
+| | llama.cpp | 25333.7 (25552) | 42530.7 (42543) | 692.9 (694) |
+| Qwen2.5 1.5B Q4_K_M | axon 0851798 | 21353.3 (21415) | 20168.4 (20173) | 419.7 (420) |
+| | ollama 0.35.0 | 12157.8 (12329) | 17303.7 (17471) | 370.5 (391) |
+| | llama.cpp | 13025.7 (13345) | 17320.2 (17330) | 405.9 (410) |
+| Qwen2.5 3B Q4_K_M | axon 0851798 | 10800.9 (10815) | 10273.0 (10277) | 255.9 (256) |
+| | ollama 0.35.0 | 7515.5 (7659) | 9415.9 (9419) | 229.4 (231) |
+| | llama.cpp | 7563.1 (7708) | 9302.3 (9348) | 206.1 (206) |
+| Qwen2.5 7B Q4_K_M | axon 0851798 | 5040.2 (5054) | 4898.1 (4898) | 118.0 (118) |
+| | ollama 0.35.0 | 4227.1 (4316) | 4800.2 (4802) | 111.3 (113) |
+| | llama.cpp | 4412.0 (4414) | 4105.1 (4123) | 112.0 (112) |
+| Qwen3 0.6B Q8_0 | axon 0851798 | 35792.7 (35915) | 31853.1 (32695) | 646.0 (650) |
+| | ollama 0.35.0 | 20215.7 (20493) | 30777.8 (31771) | 472.5 (509) |
+| | llama.cpp | 20178.9 (20436) | 30827.2 (30882) | 541.6 (546) |
+| Qwen3 4B Q4_K_M | axon 0851798 | 8206.4 (8217) | 7780.6 (7782) | 204.6 (205) |
+| | ollama 0.35.0 | 6008.5 (6116) | 7213.9 (7223) | 172.6 (174) |
+| | llama.cpp | 6264.7 (6352) | 7091.3 (7099) | 163.4 (164) |
+| Qwen3 8B Q4_K_M | axon 0851798 | 4697.4 (4701) | 4512.1 (4521) | 110.0 (111) |
+| | ollama 0.35.0 | 3806.2 (3850) | 4248.5 (4264) | 104.0 (104) |
+| | llama.cpp | 3919.1 (3937) | 3791.3 (3796) | 105.7 (106) |
+
+Since then main has the round-5 prefill changes (#24, 29c98a7). That commit's own
+end-to-end runs (5 interleaved rounds, against main) put pp2100 at +2.3% to +23.0%
+depending on the model (7B and 1.5B Q4_K_M at the low end, 0.5B at the top), decode
+unchanged; this table hasn't been rerun since.
