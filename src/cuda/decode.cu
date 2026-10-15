@@ -886,7 +886,302 @@ __device__ __forceinline__ void i8x16(uint4 w, float k[16]) {
 }
 
 // ---------------------------------------------------------------------------
-// Decode attention, split over positions (flash-decoding). np = P[pos] + 1
+// Tensor-core attention: the canonical order (sm_80+), shared by the decode
+// kernels below (attn_blk_*, attn_combine_blk) and prefill.cu's attn_fa_b.
+//
+// Positions go in blocks of ATT_BLK = 64. Scores live in the log2 domain:
+// PRE = (1 / sqrt(hd)) * log2(e), an f32 the host computes once. Per row =
+// one (query, head) with np positions (its position + 1):
+//  1. Q: q16[d] = f16(sat(q[d] * PRE)) (fmul_rn, cvt.rn), the A fragments
+//     of a 16-row m16n8k16 tile (rows without a query: zero).
+//  2. Block b's scores (positions 64b ..): S = Q K^T by mma.sync m16n8k16
+//     f16 x f16 -> f32, per n-tile of 8 positions a chain over the dims'
+//     16-wide k-steps in ascending order from +0. K rows: the f16 cache.
+//  3. s[t] = t < np ? S[t] : -inf.
+//  4. m_b = max_t s[t] (fmaxf: order-free on the values it meets).
+//  5. p[t] = ex2.approx.ftz(s[t] - m_b) (fsub_rn; m_b = -inf: s[t] - 0).
+//  6. l_b: each lane of the row's quad adds its 16 p in fragment order
+//     (n-tile 0..7, column 0 then 1) from +0, then shfl_xor 1, then 2
+//     (fadd_rn).
+//  7. P = f16(p) (cvt.rn.f16x2): the score tile's C fragments are the A
+//     fragments of P V.
+//  8. o_b = P V: per n-tile of 8 dims a chain over the 4 k-steps of 16
+//     positions in ascending order from +0. V rows past the cache's valid
+//     ones are zero-filled, never read.
+//  9. Fold, blocks in ascending order, only those with 64b < np, into (M, L,
+//     O) = (-inf, 0, 0) by att_fold_ml / att_fold_o.
+// 10. out[d] = O[d] / L (fdiv_rn), then quant_warp as everywhere.
+// mma.sync computes D[i][j] from row i of A, column j of B and C[i][j]: a
+// row's result doesn't depend on its tile-mates, warp, block or launch, so
+// decode (a warp per block b, the fold in the combine) and prefill (a CTA
+// per 16 * warps rows, the fold in registers) give the same bits. The one
+// asymmetry: prefill's V tile holds real rows at positions np..np_max of a
+// row whose p there is +0; 0 * v is an exact zero, so it can only flip the
+// sign of an exactly zero o_b[d] - which quant_warp erases (|x|-based).
+// Unless v is NaN: 0 * NaN = NaN. A NaN value written by this batch (the
+// f16 cache saturates infinities, but NaN passes; a q8 group with a NaN has
+// scale NaN) then also poisons the batch's earlier queries in prefill,
+// which decode (zeros past np) would not. Either output is garbage then.
+
+#define ATT_BLK 64
+
+#if __CUDA_ARCH__ >= 800
+// {lo, hi} -> f16x2 (lo in the low half), round to nearest even.
+__device__ __forceinline__ u32 att_h2(float lo, float hi) {
+    u32 r;
+    asm("cvt.rn.f16x2.f32 %0, %1, %2;" : "=r"(r) : "f"(hi), "f"(lo));
+    return r;
+}
+__device__ __forceinline__ float att_ex2(float x) {
+    float y;
+    asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x));
+    return y;
+}
+// d += a b (m16n8k16, f16 inputs, f32 accumulators).
+__device__ __forceinline__ void mma_h(float* d, const u32* a, u32 b0, u32 b1) {
+    asm("mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, "
+        "{%8,%9}, {%0,%1,%2,%3};"
+        : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3])
+        : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+}
+__device__ __forceinline__ void ldsm4(u32* r, const void* p) {
+    u32 s = (u32)__cvta_generic_to_shared(p);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];"
+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
+                 : "r"(s));
+}
+__device__ __forceinline__ void ldsm4t(u32* r, const void* p) {
+    u32 s = (u32)__cvta_generic_to_shared(p);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];"
+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
+                 : "r"(s));
+}
+// 16 bytes global -> shared, asynchronously; zero-filled (src not read)
+// unless ok.
+__device__ __forceinline__ void cp16z(void* dst, const void* src, bool ok) {
+    u32 s = (u32)__cvta_generic_to_shared(dst);
+    asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;" ::"r"(s), "l"(src),
+                 "r"(ok ? 16 : 0));
+}
+__device__ __forceinline__ void att_commit() { asm volatile("cp.async.commit_group;"); }
+template <int N>
+__device__ __forceinline__ void att_wait() {
+    asm volatile("cp.async.wait_group %0;" ::"n"(N) : "memory");
+}
+
+// A tile of ATT_BLK rows of HD halves in shared memory, 16-byte chunks
+// XOR-swizzled by row (conflict-free ldmatrix): chunk c of row r.
+template <int HD>
+__device__ __forceinline__ unsigned short* att_chunk(unsigned short* t, int r, int c) {
+    return t + r * HD + ((c ^ (r & 7)) << 3);
+}
+
+// Start copying rows t0 .. t0 + 64 of kv head kvh (kv_dim halves per
+// position) of cache c into tile t; rows at or past lim zero-filled. The
+// block's nthr threads share the chunks.
+template <int HD>
+__device__ __forceinline__ void att_load(unsigned short* t, const unsigned short* c, int t0,
+                                         int lim, int kv_dim, int kvh, int tid, int nthr) {
+    for (int i = tid; i < ATT_BLK * HD / 8; i += nthr) {
+        int r = i / (HD / 8), ch = i % (HD / 8);
+        bool ok = t0 + r < lim;
+        const unsigned short* src = ok ? c + (u64)(t0 + r) * kv_dim + kvh * HD + ch * 8 : c;
+        cp16z(att_chunk<HD>(t, r, ch), src, ok);
+    }
+}
+
+// The q8 cache (Q8Kv) in the same order: its tiles are f16(fmul(q, d))
+// (q the int8 value, d its group's scale; cvt.rn), made in shared memory
+// from the raw rows. att_load_q8 starts copying rows t0 .. t0 + 64 of kv
+// head kvh, int8 values c8 into r8 [64][HD] and scales cs into rs [64][HD /
+// KG], rows at or past lim zero-filled (values and scales: f16(0 * 0) =
+// +0, as the f16 cache's zero fill); att_cvt_q8 makes tile t from them.
+__device__ __forceinline__ void cp4z(void* dst, const void* src, bool ok) {
+    u32 s = (u32)__cvta_generic_to_shared(dst);
+    asm volatile("cp.async.ca.shared.global [%0], [%1], 4, %2;" ::"r"(s), "l"(src),
+                 "r"(ok ? 4 : 0));
+}
+template <int HD, int KG>
+__device__ __forceinline__ void att_load_q8(signed char* r8, float* rs, const signed char* c8,
+                                            const float* cs, int t0, int lim, int kv_dim, int kvh,
+                                            int tid, int nthr) {
+    for (int i = tid; i < ATT_BLK * HD / 16; i += nthr) {
+        int r = i / (HD / 16), ch = i % (HD / 16);
+        bool ok = t0 + r < lim;
+        const signed char* src = ok ? c8 + (u64)(t0 + r) * kv_dim + kvh * HD + ch * 16 : c8;
+        cp16z(r8 + r * HD + ch * 16, src, ok);
+    }
+    for (int i = tid; i < ATT_BLK * (HD / KG); i += nthr) {
+        int r = i / (HD / KG), gi = i % (HD / KG);
+        bool ok = t0 + r < lim;
+        const float* src = ok ? cs + ((u64)(t0 + r) * kv_dim + kvh * HD) / KG + gi : cs;
+        cp4z(rs + i, src, ok);
+    }
+}
+template <int HD, int KG>
+__device__ __forceinline__ void att_cvt_q8(unsigned short* t, const signed char* r8,
+                                           const float* rs, int tid, int nthr) {
+    for (int i = tid; i < ATT_BLK * HD / 8; i += nthr) {
+        int r = i / (HD / 8), ch = i % (HD / 8);
+        uint2 w = *(const uint2*)(r8 + r * HD + ch * 8);
+        float d = rs[r * (HD / KG) + ch * 8 / KG];
+        u32 o[4];
+#pragma unroll
+        for (int j = 0; j < 4; j++) {
+            u32 x = j < 2 ? w.x : w.y;
+            int sh = 16 * (j & 1);
+            float v0 = (float)(int)(signed char)(x >> sh);
+            float v1 = (float)(int)(signed char)(x >> (sh + 8));
+            o[j] = att_h2(__fmul_rn(v0, d), __fmul_rn(v1, d));
+        }
+        *(uint4*)att_chunk<HD>(t, r, ch) = make_uint4(o[0], o[1], o[2], o[3]);
+    }
+}
+
+// Values e, e + 1 of query row r (null: zeros) as step 1's f16 pair.
+__device__ __forceinline__ u32 att_qpair(const float* r, int e, float pre) {
+    return r ? att_h2(kv_sat(__fmul_rn(r[e], pre)), kv_sat(__fmul_rn(r[e + 1], pre))) : 0u;
+}
+
+// Step 1: the A fragments of a 16-row tile; r0 / r1: the lane's rows lane
+// / 4 and lane / 4 + 8 (HD floats each; null: a zero row).
+template <int HD>
+__device__ __forceinline__ void att_qfrag(u32 (*qa)[4], const float* r0, const float* r1,
+                                          float pre) {
+    int c = 2 * (threadIdx.x & 3);
+#pragma unroll
+    for (int kk = 0; kk < HD / 16; kk++) {
+        int d = kk * 16 + c;
+        qa[kk][0] = att_qpair(r0, d, pre);
+        qa[kk][1] = att_qpair(r1, d, pre);
+        qa[kk][2] = att_qpair(r0, d + 8, pre);
+        qa[kk][3] = att_qpair(r1, d + 8, pre);
+    }
+}
+
+// Step 2: s[n][.] = the C fragments of n-tile n of Q K^T, K tile kt.
+template <int HD>
+__device__ __forceinline__ void att_scores(float (*s)[4], const u32 (*qa)[4],
+                                           unsigned short* kt) {
+    int lane = threadIdx.x & 31;
+#pragma unroll
+    for (int n = 0; n < 8; n++) s[n][0] = s[n][1] = s[n][2] = s[n][3] = 0.0f;
+#pragma unroll
+    for (int kk = 0; kk < HD / 16; kk++) {
+#pragma unroll
+        for (int n2 = 0; n2 < 4; n2++) {
+            u32 b[4];
+            ldsm4(b, att_chunk<HD>(kt, 16 * n2 + (lane & 7) + ((lane >> 4) << 3),
+                                   2 * kk + ((lane >> 3) & 1)));
+            mma_h(s[2 * n2], qa[kk], b[0], b[1]);
+            mma_h(s[2 * n2 + 1], qa[kk], b[2], b[3]);
+        }
+    }
+}
+
+// Steps 3-7 for block t0 (its first position): the lane's rows have np0
+// and np1 positions. In: scores s; out: m, l of both rows, P's A fragments.
+// MASK false: every position of the block is below both np (same values).
+template <bool MASK>
+__device__ __forceinline__ void att_softmax(float (*s)[4], int t0, int np0, int np1, float* m,
+                                            float* l, u32 (*pa)[4]) {
+    int c = t0 + 2 * (threadIdx.x & 3);
+    if (MASK) {
+#pragma unroll
+        for (int n = 0; n < 8; n++) {
+#pragma unroll
+            for (int j = 0; j < 4; j++) {
+                int t = c + 8 * n + (j & 1);
+                if (t >= (j < 2 ? np0 : np1)) s[n][j] = -INFINITY;
+            }
+        }
+    }
+    float m0 = -INFINITY, m1 = -INFINITY;
+#pragma unroll
+    for (int n = 0; n < 8; n++) {
+        m0 = fmaxf(m0, fmaxf(s[n][0], s[n][1]));
+        m1 = fmaxf(m1, fmaxf(s[n][2], s[n][3]));
+    }
+#pragma unroll
+    for (int o = 1; o <= 2; o <<= 1) {
+        m0 = fmaxf(m0, __shfl_xor_sync(0xffffffffu, m0, o));
+        m1 = fmaxf(m1, __shfl_xor_sync(0xffffffffu, m1, o));
+    }
+    // A row with nothing to attend (prefill's rows past their np): p = 0,
+    // not NaN (the fold skips the row anyway).
+    float u0 = m0 == -INFINITY ? 0.0f : m0, u1 = m1 == -INFINITY ? 0.0f : m1;
+    float l0 = 0.0f, l1 = 0.0f;
+#pragma unroll
+    for (int n = 0; n < 8; n++) {
+        s[n][0] = att_ex2(__fsub_rn(s[n][0], u0));
+        s[n][1] = att_ex2(__fsub_rn(s[n][1], u0));
+        s[n][2] = att_ex2(__fsub_rn(s[n][2], u1));
+        s[n][3] = att_ex2(__fsub_rn(s[n][3], u1));
+        l0 = __fadd_rn(__fadd_rn(l0, s[n][0]), s[n][1]);
+        l1 = __fadd_rn(__fadd_rn(l1, s[n][2]), s[n][3]);
+    }
+#pragma unroll
+    for (int o = 1; o <= 2; o <<= 1) {
+        l0 = __fadd_rn(l0, __shfl_xor_sync(0xffffffffu, l0, o));
+        l1 = __fadd_rn(l1, __shfl_xor_sync(0xffffffffu, l1, o));
+    }
+    m[0] = m0, m[1] = m1, l[0] = l0, l[1] = l1;
+#pragma unroll
+    for (int kk = 0; kk < 4; kk++) {
+        pa[kk][0] = att_h2(s[2 * kk][0], s[2 * kk][1]);
+        pa[kk][1] = att_h2(s[2 * kk][2], s[2 * kk][3]);
+        pa[kk][2] = att_h2(s[2 * kk + 1][0], s[2 * kk + 1][1]);
+        pa[kk][3] = att_h2(s[2 * kk + 1][2], s[2 * kk + 1][3]);
+    }
+}
+
+// Step 8 for dims D0 .. D0 + ND: o[n][.] = the C fragments of n-tile n of P
+// V, V tile vt.
+template <int HD, int D0, int ND>
+__device__ __forceinline__ void att_pv(float (*o)[4], const u32 (*pa)[4], unsigned short* vt) {
+    int lane = threadIdx.x & 31;
+#pragma unroll
+    for (int n = 0; n < ND / 8; n++) o[n][0] = o[n][1] = o[n][2] = o[n][3] = 0.0f;
+#pragma unroll
+    for (int kk = 0; kk < 4; kk++) {
+#pragma unroll
+        for (int n2 = 0; n2 < ND / 16; n2++) {
+            u32 b[4];
+            ldsm4t(b, att_chunk<HD>(vt, 16 * kk + (lane & 7) + (((lane >> 3) & 1) << 3),
+                                    (D0 + 16 * n2) / 8 + (lane >> 4)));
+            mma_h(o[2 * n2], pa[kk], b[0], b[1]);
+            mma_h(o[2 * n2 + 1], pa[kk], b[2], b[3]);
+        }
+    }
+}
+#endif
+
+// Step 9: block max mb folded into the running max M: the new max mn and
+// the weights alpha (of the state so far) and w (of the block), then L =
+// att_fold_o(L, l_b, alpha, w), O[d] = att_fold_o(O[d], o_b[d], alpha, w).
+// (M = -inf at the start: alpha = ex2(-inf) = +0.) M only enters through
+// differences fed to ex2, so the sign of a zero max doesn't matter: the
+// combine may take its running maxima by a scan.
+__device__ __forceinline__ void att_fold_w(float M, float mb, float* mn, float* alpha, float* w) {
+    *mn = fmaxf(M, mb);
+#if __CUDA_ARCH__ >= 800
+    *alpha = att_ex2(__fsub_rn(M, *mn));
+    *w = att_ex2(__fsub_rn(mb, *mn));
+#else
+    // Never run below sm_80 (the host picks the split attention there);
+    // defined so attn_cmb compiles to something sane for every target.
+    *alpha = exp2f(__fsub_rn(M, *mn));
+    *w = exp2f(__fsub_rn(mb, *mn));
+#endif
+}
+__device__ __forceinline__ float att_fold_o(float O, float ob, float alpha, float w) {
+    return __fmaf_rn(ob, w, __fmul_rn(O, alpha));
+}
+
+
+// ---------------------------------------------------------------------------
+// Decode attention, split over positions (flash-decoding), for GPUs without
+// tensor cores (sm_80+ run attn_blk, the order above). np = P[pos] + 1
 // positions in nsplit = min(max_split, ceil(np / ATT_MIN)) splits of
 // `chunk` = ceil(np / nsplit) positions. Block (kv head, split) scores all
 // `group` query heads of its kv head over its positions, ATT_TILE at a time
@@ -1280,6 +1575,279 @@ extern "C" __global__ void attn_combine(const float* __restrict__ part_o,
     PDL_START();
     attn_combine_dev(part_o, part_ml, (int)P[P_POS] + 1, blockIdx.x, n, hd, max_split, want_k, act,
                      y);
+}
+
+// ---------------------------------------------------------------------------
+// Decode attention on the tensor cores: a warp per block of 64 positions
+// (block b = blockIdx.y + k gridDim.y < ceil(np / 64), kv head blockIdx.x),
+// steps 1-8 for the kv head's `group` query heads (rows of one m16 tile),
+// written as part_o[h][b][d] = o_b[d], part_ml[h][b] = (m_b, l_b) (stride
+// nblk_max blocks); attn_cmb folds them. Shared with the batched
+// attn_blk_b (prefill.cu), which runs it per query. nm: qwen3's q/k norms
+// (QkNorm): the warp normalizes the queries into shared memory, and the
+// one holding position np - 1 its keys too, into the cache (kc_out) and
+// its K tile. KG > 0: the q8 cache q8 (kc, vc unused), tiles made by
+// att_cvt_q8 (K, then V in the same buffer); the warp holding position np
+// - 1 first stores that token's keys and values (q8.knew, normalized on
+// qwen3) by kv_q8_store, and reads them back like any other row.
+template <int HD, int KG = 0>
+__device__ void attn_blk_t(const float* __restrict__ q, const unsigned short* kc,
+                           const unsigned short* __restrict__ vc, int np, int kvh, int n_heads,
+                           int n_kv, float pre, int nblk_max, float* __restrict__ part_o,
+                           float* __restrict__ part_ml, QkNorm nm = QkNorm{}, Q8Kv q8 = Q8Kv{}) {
+#if __CUDA_ARCH__ >= 800
+    constexpr bool Q8 = KG > 0;
+    constexpr int KGs = Q8 ? KG : 1;
+    // f16: K and V tiles. q8: one tile, then the raw rows and scales.
+    __shared__ __align__(16) unsigned short kt[ATT_BLK * HD], vt[Q8 ? 8 : ATT_BLK * HD];
+    __shared__ __align__(16) signed char r8[Q8 ? 2 * ATT_BLK * HD : 16];
+    __shared__ float rs[Q8 ? 2 * ATT_BLK * HD / KGs : 1];
+    __shared__ unsigned short kh[HD];
+    int lane = threadIdx.x, group = n_heads / n_kv, kv_dim = n_kv * HD;
+    int nblk = (np + ATT_BLK - 1) / ATT_BLK, blast = (np - 1) / ATT_BLK;
+    if ((int)blockIdx.y >= nblk) return;
+    bool own = blast % gridDim.y == blockIdx.y;
+    if constexpr (Q8) {
+        if (q8.knew && own) {
+            // This token's rows into the cache (its keys normalized and
+            // rotated first on qwen3, as the batched kv_q8_b does).
+            float* xs = (float*)kt;
+            for (int i = lane; i < 2 * HD; i += 32)
+                xs[i] = q8.knew[(i < HD ? 0 : kv_dim - HD) + kvh * HD + i];
+            __syncwarp();
+            if (nm.qn) {
+                float a[2], b[2];
+                for (int i = 0; i < (HD >> 6); i++) {
+                    a[i] = xs[lane + 32 * i];
+                    b[i] = xs[lane + 32 * i + HD / 2];
+                }
+                warp_norm_rope(a, b, HD, nm.kn, nm.eps, nm.rope);
+                for (int i = 0; i < (HD >> 6); i++) {
+                    xs[lane + 32 * i] = a[i];
+                    xs[lane + 32 * i + HD / 2] = b[i];
+                }
+                __syncwarp();
+            }
+            // kv_q8_store's __syncthreads sits inside `if (own)`, which is
+            // only legal because this block is one warp (blockDim 32): the
+            // whole block takes the branch together.
+            kv_q8_store<HD, KGs>(xs, q8, (u64)(np - 1) * kv_dim + kvh * HD,
+                                 q8.ksh ? q8.ksh + kvh * HD : nullptr);
+        }
+    }
+    bool kpos = !Q8 && nm.qn && own;
+    // The normalized queries (qwen3) live in a tile until it's loaded.
+    float* qs = (float*)(Q8 ? kt : vt);
+    const float* qrow = q + kvh * group * HD;
+    if (nm.qn) {
+        for (int g = 0; g < group + kpos; g++) {
+            bool isk = g == group;
+            const float* x = isk ? nm.kraw + kvh * HD : qrow + g * HD;
+            float a[2], b[2];
+            for (int i = 0; i < (HD >> 6); i++) {
+                a[i] = x[lane + 32 * i];
+                b[i] = x[lane + 32 * i + HD / 2];
+            }
+            warp_norm_rope(a, b, HD, isk ? nm.kn : nm.qn, nm.eps, nm.rope);
+            for (int i = 0; i < (HD >> 6); i++) {
+                int e = lane + 32 * i;
+                if (isk) {
+                    unsigned short h0 = kv_half(a[i]), h1 = kv_half(b[i]);
+                    unsigned short* kr = nm.kc_out + (u64)(np - 1) * kv_dim + kvh * HD;
+                    kh[e] = kr[e] = h0;
+                    kh[e + HD / 2] = kr[e + HD / 2] = h1;
+                } else {
+                    qs[g * HD + e] = a[i];
+                    qs[g * HD + e + HD / 2] = b[i];
+                }
+            }
+        }
+        __syncwarp();
+        qrow = qs;
+    }
+    u32 qa[HD / 16][4];
+    int g0 = lane >> 2;
+    att_qfrag<HD>(qa, g0 < group ? qrow + g0 * HD : nullptr, nullptr, pre);
+    __syncwarp();
+    for (int b = blockIdx.y; b < nblk; b += gridDim.y) {
+        int t0 = b * ATT_BLK;
+        if constexpr (Q8) {
+            att_load_q8<HD, KGs>(r8, rs, q8.k, q8.ks, t0, np, kv_dim, kvh, lane, 32);
+            att_load_q8<HD, KGs>(r8 + ATT_BLK * HD, rs + ATT_BLK * HD / KGs, q8.v, q8.vs, t0, np,
+                                 kv_dim, kvh, lane, 32);
+        } else {
+            att_load<HD>(kt, kc, t0, np, kv_dim, kvh, lane, 32);
+            att_load<HD>(vt, vc, t0, np, kv_dim, kvh, lane, 32);
+        }
+        att_commit();
+        att_wait<0>();
+        __syncwarp();
+        if constexpr (Q8) {
+            if (q8.knew && own && b == blast) {
+                // Row np - 1's scales were stored by this warp just now;
+                // att_load_q8 copies scales by 4-byte cp.async, which only
+                // exists as .ca (through L1). Read them again from L2
+                // (ld.global.cg) so the copy can't be a stale L1 line. Same
+                // values, so the same bits as prefill either way.
+                int r = np - 1 - t0;
+                constexpr int NG = HD / KGs;
+                if (lane < 2 * NG) {
+                    int kv = lane / NG, gi = lane % NG;
+                    const float* src =
+                        (kv ? q8.vs : q8.ks) + ((u64)(np - 1) * kv_dim + kvh * HD) / KGs;
+                    rs[kv * ATT_BLK * NG + r * NG + gi] = __ldcg(src + gi);
+                }
+                __syncwarp();
+            }
+            att_cvt_q8<HD, KGs>(kt, r8, rs, lane, 32);
+        } else if (kpos && b == blast) {
+            // The new row, from kh (not read back from the cache).
+            int r = np - 1 - t0;
+            for (int i = lane; i < HD; i += 32) att_chunk<HD>(kt, r, i >> 3)[i & 7] = kh[i];
+        }
+        __syncwarp();
+        float s[8][4], m[2], l[2];
+        u32 pa[4][4];
+        att_scores<HD>(s, qa, kt);
+        if (t0 + ATT_BLK > np)
+            att_softmax<true>(s, t0, np, np, m, l, pa);
+        else
+            att_softmax<false>(s, t0, np, np, m, l, pa);
+        if constexpr (Q8) {
+            __syncwarp();
+            att_cvt_q8<HD, KGs>(kt, r8 + ATT_BLK * HD, rs + ATT_BLK * HD / KGs, lane, 32);
+            __syncwarp();
+        }
+        float o[HD / 8][4];
+        att_pv<HD, 0, HD>(o, pa, Q8 ? kt : vt);
+        if (g0 < group) {
+            u64 hb = (u64)(kvh * group + g0) * nblk_max + b;
+            float* po = part_o + hb * HD + 2 * (lane & 3);
+#pragma unroll
+            for (int n = 0; n < HD / 8; n++) *(float2*)(po + 8 * n) = make_float2(o[n][0], o[n][1]);
+            if ((lane & 3) == 0) *(float2*)(part_ml + hb * 2) = make_float2(m[0], l[0]);
+        }
+        __syncwarp();
+    }
+#endif
+}
+
+extern "C" __global__ void __launch_bounds__(32)
+attn_blk_64(const float* __restrict__ q, const unsigned short* kc,
+            const unsigned short* __restrict__ vc, const u32* __restrict__ P, int n_heads,
+            int n_kv, float pre, int nblk_max, float* __restrict__ part_o,
+            float* __restrict__ part_ml, const float* __restrict__ kraw,
+            const float* __restrict__ qn, const float* __restrict__ kn, float eps,
+            const float2* __restrict__ rope, unsigned short* kc_out) {
+    PDL_START();
+    attn_blk_t<64>(q, kc, vc, (int)P[P_POS] + 1, blockIdx.x, n_heads, n_kv, pre, nblk_max, part_o,
+                   part_ml, QkNorm{kraw, qn, kn, eps, rope, kc_out});
+}
+
+extern "C" __global__ void __launch_bounds__(32)
+attn_blk_128(const float* __restrict__ q, const unsigned short* kc,
+             const unsigned short* __restrict__ vc, const u32* __restrict__ P, int n_heads,
+             int n_kv, float pre, int nblk_max, float* __restrict__ part_o,
+             float* __restrict__ part_ml, const float* __restrict__ kraw,
+             const float* __restrict__ qn, const float* __restrict__ kn, float eps,
+             const float2* __restrict__ rope, unsigned short* kc_out) {
+    PDL_START();
+    attn_blk_t<128>(q, kc, vc, (int)P[P_POS] + 1, blockIdx.x, n_heads, n_kv, pre, nblk_max,
+                    part_o, part_ml, QkNorm{kraw, qn, kn, eps, rope, kc_out});
+}
+
+// attn_blk on the q8 cache (KG values per scale), storing this token's
+// keys and values (kf: [2][kv_dim] f32, from qkv_rope_f32) first. The
+// cache pointers aren't __restrict__: the kernel writes what it reads. qn
+// non-null (qwen3): q and kf's keys are raw; normalized and rotated here.
+#define ATTN_BLK_Q8(NAME, HD, KG)                                                                  \
+    extern "C" __global__ void __launch_bounds__(32)                                               \
+        NAME(const float* __restrict__ q, const signed char* kq, const signed char* vq,            \
+             const float* ks, const float* vs, const float* __restrict__ kf,                       \
+             const u32* __restrict__ P, int n_heads, int n_kv, float pre, int nblk_max,            \
+             float* __restrict__ part_o, float* __restrict__ part_ml,                              \
+             const float* __restrict__ ksh, const float* __restrict__ qn,                          \
+             const float* __restrict__ kn, float eps, const float2* __restrict__ rope) {           \
+        PDL_START();                                                                               \
+        attn_blk_t<HD, KG>(q, nullptr, nullptr, (int)P[P_POS] + 1, blockIdx.x, n_heads, n_kv, pre, \
+                           nblk_max, part_o, part_ml,                                              \
+                           QkNorm{nullptr, qn, kn, eps, rope, nullptr},                            \
+                           Q8Kv{kq, vq, ks, vs, kf, ksh});                                         \
+    }
+ATTN_BLK_Q8(attn_blk_q8_64, 64, 64)
+ATTN_BLK_Q8(attn_blk_q8_128, 128, 128)
+ATTN_BLK_Q8(attn_blk_q8g32_64, 64, 32)
+ATTN_BLK_Q8(attn_blk_q8g32_128, 128, 32)
+
+// attn_blk's blocks folded (step 9, blocks in order) and finalized (step
+// 10): out[h * hd + d] = O[d] / L, quantized for the output projection
+// (and stored as f32 in y if non-null). Grid n / 256 blocks of 256 threads
+// (256 / hd whole heads each). Per 32 blocks, warp j works out head j's
+// running maxima (a scan: fmaxf is order-free) and the weights alpha, w;
+// then every thread folds its O[d], and its head's L, over them in order.
+// Block blk for a query at position np - 1 (shared with attn_cmb_b).
+__device__ void attn_cmb_dev(const float* __restrict__ part_o, const float* __restrict__ part_ml,
+                             int np, int blk, int n, int hd, int nblk_max, int want_k,
+                             u8* __restrict__ act, float* __restrict__ y) {
+    __shared__ float vals[256];
+    __shared__ float aw[256 / 64][3][32];
+    int e = blk * 256 + threadIdx.x, lane = threadIdx.x & 31, wid = threadIdx.x >> 5;
+    int nblk = (np + ATT_BLK - 1) / ATT_BLK;
+    int h0 = blk * 256 / hd, nh = min(256 / hd, n / hd - h0);
+    int j = threadIdx.x / hd, d = e % hd;
+    const float* po = part_o + (u64)(h0 + j) * nblk_max * hd + d;
+    float O = 0.0f, L = 0.0f, M = -INFINITY;
+    for (int c0 = 0; c0 < nblk; c0 += 32) {
+        if (wid < nh) {
+            const float* ml = part_ml + (u64)(h0 + wid) * nblk_max * 2;
+            int b = c0 + lane;
+            float mb = b < nblk ? ml[2 * b] : -INFINITY, lb = b < nblk ? ml[2 * b + 1] : 0.0f;
+            float v = mb; // inclusive max scan
+#pragma unroll
+            for (int o = 1; o < 32; o <<= 1) {
+                float t = __shfl_up_sync(0xffffffffu, v, o);
+                if (lane >= o) v = fmaxf(v, t);
+            }
+            float prev = __shfl_up_sync(0xffffffffu, v, 1);
+            prev = lane == 0 ? M : fmaxf(M, prev);
+            float mn, alpha, w;
+            att_fold_w(prev, mb, &mn, &alpha, &w);
+            aw[wid][0][lane] = alpha;
+            aw[wid][1][lane] = w;
+            aw[wid][2][lane] = lb;
+            M = __shfl_sync(0xffffffffu, mn, 31);
+        }
+        __syncthreads();
+        if (e < n) {
+            int nc = min(32, nblk - c0);
+            for (int i = 0; i < nc; i++) {
+                float alpha = aw[j][0][i], w = aw[j][1][i];
+                O = att_fold_o(O, po[(u64)(c0 + i) * hd], alpha, w);
+                L = att_fold_o(L, aw[j][2][i], alpha, w);
+            }
+        }
+        __syncthreads();
+    }
+    float out = 0.0f;
+    if (e < n) {
+        out = __fdiv_rn(O, L);
+        if (y) y[e] = out;
+    }
+    vals[threadIdx.x] = out;
+    __syncthreads();
+    if (threadIdx.x < 32) {
+        float v[8];
+        for (int i = 0; i < 8; i++) v[i] = vals[threadIdx.x * 8 + i];
+        quant_warp(v, n, blk, act, want_k);
+    }
+}
+
+extern "C" __global__ void attn_cmb(const float* __restrict__ part_o,
+                                    const float* __restrict__ part_ml, const u32* __restrict__ P,
+                                    int n, int hd, int nblk_max, int want_k,
+                                    u8* __restrict__ act, float* __restrict__ y) {
+    PDL_START();
+    attn_cmb_dev(part_o, part_ml, (int)P[P_POS] + 1, blockIdx.x, n, hd, nblk_max, want_k, act, y);
 }
 
 // Index of the largest of x[0..n): the last of equal maxima, NaN never

@@ -1,6 +1,6 @@
 use super::{
-    Arg, CacheStatus, DevBuf, Gpu, Kernels, Module, Target, cache_dir, cache_dir_from,
-    check_versions, encode_entry, ffi, pdl_ok, pick_target,
+    Arg, CacheStatus, DevBuf, Gpu, KERNEL_OPTS, KERNELS, Kernels, Module, Target, cache_dir,
+    cache_dir_from, check_versions, compile, encode_entry, ffi, pdl_ok, pick_target,
 };
 use crate::gguf::Model;
 use crate::quant::{self, F16, F32, Q4_K, Q5_0, Q6_K, Q8_0};
@@ -350,6 +350,34 @@ fn run_iota(g: &Gpu, m: &Module) {
         v.iter().enumerate().all(|(i, &x)| x == 2.0 * i as f32),
         "{v:?}"
     );
+}
+
+/// The whole kernel module compiles (NVRTC, no GPU needed) for the oldest
+/// architectures NVRTC still supports - sm_70 and sm_75, where it has them -
+/// which take the paths without tensor cores (the split attention, gemvn),
+/// and for sm_80 (the oldest with them). Skipped without NVRTC.
+#[test]
+fn nvrtc_kernels_compile_for_old_archs() {
+    let n = match ffi::nvrtc() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("skipping: {e}");
+            return;
+        }
+    };
+    let archs = ffi::nvrtc_archs(n).unwrap();
+    let want: Vec<i32> = [70, 75, 80]
+        .into_iter()
+        .filter(|a| archs.contains(a))
+        .collect();
+    assert!(want.contains(&80), "NVRTC archs {archs:?}");
+    for a in want {
+        let t = Target::Cubin(a);
+        let mut opts = vec![format!("--gpu-architecture={t}")];
+        opts.extend(KERNEL_OPTS.iter().map(|s| s.to_string()));
+        let image = compile(KERNELS, &opts, t).unwrap_or_else(|e| panic!("sm_{a}: {e}"));
+        eprintln!("sm_{a}: {} bytes of cubin", image.len());
+    }
 }
 
 #[test]
