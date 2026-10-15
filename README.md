@@ -97,7 +97,8 @@ for thinking mode; axon is greedy, which can loop on long reasoning.
 | `AXON_SIMD=scalar\|avx2\|vnni` | force a kernel set (default: the best the CPU has) |
 | `AXON_POOL_ADAPT=0` | keep every worker in every job (no adaptive drop-out under load) |
 | `AXON_POOL_DEBUG=1` | `gen`: print thread-pool stats at the end |
-| `AXON_MMAP=0\|1` | `0`: copy the model into huge-page memory; `1`: map the file. Default: copy, unless the file is over 60% of available memory |
+| `AXON_MMAP=0\|1` | CPU: `0`: copy the model into huge-page memory; `1`: map the file. Default: map it when every weight matrix is repacked (Q4_K/Q6_K/Q5_0/Q8_0 models: the repack holds them in huge pages, so a copy would only be a second pass over the file), else copy unless the file is over 60% of available memory. A mapped model stays mapped while axon runs: overwriting the GGUF in place meanwhile (e.g. `curl -o` onto the same file) can crash it with SIGBUS; use `AXON_MMAP=0`, or write a new file and rename it over the old one. The GPU always maps (it reads the file once) |
+| `AXON_READAHEAD=0` | `gen`/`chat`: don't read a mapped model into the page cache ahead of use on a background thread (on by default unless the file is over half of available memory) |
 | `AXON_PREFETCH=N` | decode: software prefetch distance in bytes (default 8192, 0 = off, max 1 MiB) |
 | `AXON_DECODE_ROWS=1\|2\|4` | decode: rows per kernel call (default 4; K-quants use at most 2) |
 | `AXON_DRAFT=K` | gen: prompt-lookup speculative decoding, up to K draft tokens per step (default 0 = off; try 7). Lossless: same output as without it (greedy, or sampled with the same seed) |

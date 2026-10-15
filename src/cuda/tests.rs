@@ -657,3 +657,68 @@ fn h2d_bench() {
     drop(pin3);
     assert_eq!(back[12345], 9);
 }
+
+/// Host-to-device bandwidth: pageable (`write_at`, the weight upload's
+/// path) vs page-locked (`HostBuf::copy_to`), 1 GB in 32 MB copies, best of
+/// 3. Startup measurement; prints only. Run with --ignored --nocapture.
+#[test]
+#[ignore]
+fn h2d_bandwidth() {
+    let Ok(g) = Gpu::open() else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    const CHUNK: usize = 32 << 20;
+    const TOTAL: usize = 1 << 30;
+    let dst = g.alloc(TOTAL).unwrap();
+    let src = vec![7u8; TOTAL];
+    let mut pinned = g.host_alloc(CHUNK).unwrap();
+    pinned.bytes_mut().unwrap().fill(7);
+    let gbs = |f: &mut dyn FnMut()| {
+        (0..3)
+            .map(|_| {
+                let t = std::time::Instant::now();
+                f();
+                TOTAL as f64 / t.elapsed().as_secs_f64() / 1e9
+            })
+            .fold(0.0, f64::max)
+    };
+    let pageable = gbs(&mut || {
+        for off in (0..TOTAL).step_by(CHUNK) {
+            dst.write_at(off, &src[off..off + CHUNK]).unwrap();
+        }
+    });
+    let pinned_dma = gbs(&mut || {
+        for off in (0..TOTAL).step_by(CHUNK) {
+            pinned.copy_to(&dst, off, CHUNK).unwrap();
+        }
+        g.sync().unwrap();
+    });
+    // The weight upload's real source: a fresh mapping of the model file
+    // (page cache warm after the first round), page faults included, and
+    // with the page tables filled first (MADV_POPULATE_READ, not timed).
+    let path = crate::testutil::model_path().unwrap();
+    let file = std::fs::File::open(path).unwrap();
+    let n = (file.metadata().unwrap().len() as usize).min(TOTAL) / CHUNK * CHUNK;
+    let mapped = |populate: bool| {
+        (0..3)
+            .map(|_| {
+                // SAFETY: read-only map of a file nobody writes.
+                let map = unsafe { memmap2::Mmap::map(&file) }.unwrap();
+                if populate {
+                    let _ = map.advise(memmap2::Advice::PopulateRead);
+                }
+                let t = std::time::Instant::now();
+                for off in (0..n).step_by(CHUNK) {
+                    dst.write_at(off, &map[off..off + CHUNK]).unwrap();
+                }
+                n as f64 / t.elapsed().as_secs_f64() / 1e9
+            })
+            .fold(0.0, f64::max)
+    };
+    let (file_gbs, populated) = (mapped(false), mapped(true));
+    eprintln!(
+        "h2d: pageable {pageable:.1} GB/s, pinned {pinned_dma:.1} GB/s, file mapping \
+         {file_gbs:.1} GB/s, populated file mapping {populated:.1} GB/s ({n} bytes)"
+    );
+}

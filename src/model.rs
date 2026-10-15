@@ -296,6 +296,35 @@ pub const ARCHS: [&str; 2] = ["qwen2", "qwen3"];
 /// Tensor types the kernels run (`quant::dequant` and `dot_row_q8`).
 const SUPPORTED_TYPES: [u32; 6] = [F32, F16, Q5_0, Q8_0, Q4_K, Q6_K];
 
+/// Whether `Qwen2::new` reads any weight matrix in place from the model's
+/// bytes on every token (AXON_REPACK=0, or a matrix with no r8/r8q form),
+/// so that the anonymous huge-page copy of the file pays (`gguf::load_then`).
+/// Otherwise every matrix, the output head included, is repacked into the
+/// r8 arena (huge pages itself) and the file is read once: the embedding
+/// (one row per token) and the norm/bias vectors (copied out) are all
+/// that's left in the mapping.
+pub fn reads_matrices_in_place(m: &Model) -> bool {
+    reads_in_place_with(m, std::env::var("AXON_REPACK").map_or(true, |v| v != "0"))
+}
+
+/// `reads_matrices_in_place` for `Qwen2::new_with(m, repack)`.
+fn reads_in_place_with(m: &Model, repack: bool) -> bool {
+    if !repack {
+        return true;
+    }
+    let tied = find_opt(m, "output.weight").is_none();
+    m.tensors
+        .iter()
+        .filter(|t| {
+            t.dims.len() >= 2
+                && t.dims[1] > 1
+                && (t.name.starts_with("blk.")
+                    || t.name == "output.weight"
+                    || (tied && t.name == "token_embd.weight"))
+        })
+        .any(|t| repacked_len(t).is_none())
+}
+
 /// Everything `Qwen2::new` and `Tokenizer::from_gguf` rely on, checked up front
 /// so a bad or unsupported model is an error instead of a panic: the
 /// architecture, the hyperparameters, every tensor's presence, type and shape,
@@ -2203,6 +2232,14 @@ pub(crate) mod tests {
         edit: impl FnOnce(&mut Vec<(String, Vec<u64>, u32)>),
         edit_meta: impl FnOnce(&mut Vec<(&'static str, Val)>),
     ) -> std::io::Result<()> {
+        check_supported(&tiny_model(edit, edit_meta))
+    }
+
+    /// The file `tiny_meta` checks.
+    fn tiny_model(
+        edit: impl FnOnce(&mut Vec<(String, Vec<u64>, u32)>),
+        edit_meta: impl FnOnce(&mut Vec<(&'static str, Val)>),
+    ) -> Model {
         let mut ts: Vec<(String, Vec<u64>, u32)> = vec![
             ("token_embd.weight".into(), vec![64, 8], Q8_0),
             ("output_norm.weight".into(), vec![64], F32),
@@ -2240,7 +2277,41 @@ pub(crate) mod tests {
             .iter()
             .map(|(n, d, t)| (n.as_str(), &d[..], *t))
             .collect();
-        check_supported(&crate::gguf::build_for_test(&meta, &ts))
+        crate::gguf::build_for_test(&meta, &ts)
+    }
+
+    /// The copy-vs-map choice (`reads_matrices_in_place`): a copy only when
+    /// some matrix the CPU reads per token isn't repacked.
+    #[test]
+    fn reads_in_place_when_a_matrix_isnt_repacked() {
+        type Ts = Vec<(String, Vec<u64>, u32)>;
+        let reads = |edit: &dyn Fn(&mut Ts), repack: bool| {
+            let m = tiny_model(edit, |_| {});
+            reads_in_place_with(&m, repack)
+        };
+        let set = |name: &'static str, dims: Vec<u64>, ty: u32| {
+            move |ts: &mut Ts| {
+                let t = ts.iter_mut().find(|t| t.0 == name).unwrap();
+                (t.1, t.2) = (dims.clone(), ty);
+            }
+        };
+        // All Q8_0, tied output from a repackable embedding (8 rows).
+        assert!(!reads(&|_| {}, true));
+        // AXON_REPACK=0: everything is read in place.
+        assert!(reads(&|_| {}, false));
+        // A 2-D F16 matrix in a block has no r8/r8q form.
+        assert!(reads(&set("blk.1.ffn_up.weight", vec![64, 128], F16), true));
+        // 12 rows: not whole groups of 8.
+        assert!(reads(&set("blk.0.attn_k.weight", vec![64, 12], Q8_0), true));
+        // Tied to an F16 embedding: the head reads it in place.
+        let f16_embd = set("token_embd.weight", vec![64, 8], F16);
+        assert!(reads(&f16_embd, true));
+        // With its own repackable head the F16 embedding is one row a token.
+        let own_head = |ts: &mut Ts| {
+            f16_embd(ts);
+            ts.push(("output.weight".into(), vec![64, 8], Q8_0));
+        };
+        assert!(!reads(&own_head, true));
     }
 
     fn rejects(edit: impl FnOnce(&mut Vec<(String, Vec<u64>, u32)>), want: &str) {
