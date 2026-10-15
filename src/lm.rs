@@ -194,8 +194,8 @@ impl<'a> Backend<'a> {
     /// shorter all-GPU context (`ctx`) may win over the split
     /// (`hybrid::choose_placement` says when). Err says why CUDA can't
     /// be used, or that the CPU has no q8 cache. Some(0) is not a split: the
-    /// CLI maps it to `Device::Cpu` before loading (a CPU model copies the
-    /// file, a GPU one maps it).
+    /// CLI maps it to `Device::Cpu` before loading (a GPU model maps the
+    /// file, a CPU one copies it only if it reads matrices in place).
     pub fn new(
         m: &'a Model,
         device: Device,

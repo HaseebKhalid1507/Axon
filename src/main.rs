@@ -95,8 +95,11 @@ environment:
   AXON_POOL_ADAPT=0          keep every worker in every job (no adaptive drop-out)
   AXON_POOL_DEBUG=1          gen: print thread-pool stats at the end
   AXON_DRAFT=K               same as --draft K
-  AXON_MMAP=0|1              0: copy the model into huge-page memory, 1: map the file
-                             (default: copy, unless the file is >60% of free memory)
+  AXON_MMAP=0|1              cpu: 0: copy the model into huge-page memory, 1: map the
+                             file (default: map if every matrix is repacked, else copy
+                             unless the file is >60% of free memory; a mapped file must
+                             not be overwritten in place while axon runs)
+  AXON_READAHEAD=0           don't read a mapped model ahead on a background thread
   AXON_PREFETCH=N            decode prefetch distance in bytes (default 8192, 0 = off)
   AXON_DECODE_ROWS=1|2|4     decode rows per kernel call (default 4)
   AXON_KV=f16|f32|q8         KV cache element type (default f16: half the memory and
@@ -129,34 +132,51 @@ fn check_stream_decode(max_draft: usize) {
 fn fail(msg: &str) -> ! {
     eprintln!("axon: {msg}");
     eprintln!("try 'axon --help'");
+    cuda::settle();
     std::process::exit(2);
 }
 
 /// Load a GGUF, exiting with code 2 and a one-line message if it can't be read.
+/// Mapped, not copied, nor read ahead: `info` reads the header only.
 fn open_model(path: &str, lm: bool) -> gguf::Model {
-    open_model_with(path, lm, None)
-}
-
-/// `open_model` with `gguf::load_with`'s copy choice (the GPU reads the
-/// weights once, so mapping the file beats copying it).
-fn open_model_with(path: &str, lm: bool, copy: Option<bool>) -> gguf::Model {
-    let m = match copy {
-        None => gguf::load(path),
-        c => gguf::load_with(path, c),
-    };
-    let m = m.unwrap_or_else(|e| match e.kind() {
-        std::io::ErrorKind::NotFound => fail(&format!("cannot open '{path}': no such file")),
-        _ => fail(&format!("cannot load '{path}': {e}")),
-    });
+    let m = gguf::load_with(path, Some(false)).unwrap_or_else(|e| load_failed(path, e));
     if lm && let Err(e) = model::check_supported(&m) {
         fail(&format!("{path}: {e}"));
     }
     m
 }
 
+/// A model to run (`gguf::load_to_run`), checked before it's copied or
+/// read: `copy` forces the copy-vs-map choice, None copies only if the CPU
+/// model reads its matrices in place (`model::reads_matrices_in_place`).
+fn open_model_with(path: &str, copy: Option<bool>) -> gguf::Model {
+    gguf::load_to_run(path, copy, |m| {
+        if let Err(e) = model::check_supported(m) {
+            fail(&format!("{path}: {e}"));
+        }
+        model::reads_matrices_in_place(m)
+    })
+    .unwrap_or_else(|e| load_failed(path, e))
+}
+
+fn load_failed(path: &str, e: std::io::Error) -> ! {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => fail(&format!("cannot open '{path}': no such file")),
+        _ => fail(&format!("cannot load '{path}': {e}")),
+    }
+}
+
 fn main() {
+    // A panic must not exit (libcuda's exit handlers) while a `cuda::preinit`
+    // thread is inside the driver.
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default(info);
+        cuda::settle();
+    }));
     if let Err(e) = run() {
         eprintln!("axon: {e}");
+        cuda::settle();
         std::process::exit(1);
     }
 }
@@ -274,8 +294,8 @@ fn gpu_layers_env() -> Option<usize> {
 
 /// --device and --gpu-layers (else $AXON_GPU_LAYERS on CUDA) as the
 /// backend to load: a usage error if --gpu-layers came without CUDA, and
-/// 0 GPU layers is the plain CPU backend (loaded as --device cpu loads it:
-/// a copy of the file, not a map). Before `open_model_with`.
+/// 0 GPU layers is the plain CPU backend (loaded as --device cpu loads it,
+/// see `copy_for`). Before `open_model_with`.
 fn placement(device: Device, gpu_layers: Option<usize>) -> (Device, Option<usize>) {
     if device == Device::Cpu && gpu_layers.is_some() {
         fail("--gpu-layers needs --device cuda");
@@ -304,7 +324,8 @@ fn backend<'a>(
     })
 }
 
-/// The copy-vs-map choice for loading a model for `device`.
+/// The copy-vs-map choice for loading a model for `device`: the GPU reads
+/// the weights once, so it maps the file; the CPU decides once it's parsed.
 fn copy_for(device: Device) -> Option<bool> {
     (device == Device::Cuda).then_some(false)
 }
@@ -372,12 +393,16 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     }
 
     let (device, gpu_layers) = placement(device, gpu_layers);
-    let model = open_model_with(path, true, copy_for(device));
+    if device == Device::Cuda {
+        cuda::preinit();
+    }
+    let model = open_model_with(path, copy_for(device));
     let tok = tokenizer::Tokenizer::from_gguf(&model);
 
     let ids = tok.encode(prompt);
     if ids.is_empty() {
         eprintln!("prompt encodes to zero tokens");
+        cuda::settle();
         std::process::exit(1);
     }
     let extra = if cmd == "gen" { n_gen } else { 0 };
@@ -539,7 +564,26 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             }
         );
     }
+    if !matches!(net, Backend::Cpu(_)) {
+        // Everything's written: skip tearing the CUDA context down (freeing
+        // each buffer, the driver's exit handlers: ~0.15-0.2 s); the kernel
+        // drops the process's GPU memory with it.
+        out.flush()?;
+        exit_now();
+    }
     Ok(())
+}
+
+/// End the process at once, code 0, without running exit handlers or
+/// destructors (`_exit`). Only once all output has been flushed: stdout's
+/// buffer would be lost (stderr has none).
+fn exit_now() -> ! {
+    unsafe extern "C" {
+        fn _exit(code: i32) -> !;
+    }
+    // SAFETY: _exit takes any status and doesn't return; nothing this
+    // process still has to do is skipped (the caller flushed its output).
+    unsafe { _exit(0) }
 }
 
 /// Context size `axon chat` uses unless --ctx says otherwise (if the model was
@@ -623,7 +667,10 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     }
 
     let (device, gpu_layers) = placement(device, gpu_layers);
-    let model = open_model_with(path, true, copy_for(device));
+    if device == Device::Cuda {
+        cuda::preinit();
+    }
+    let model = open_model_with(path, copy_for(device));
     // RoPE past the trained length gives garbage; 0 = the GGUF doesn't say.
     let trained = model.ctx_len() as usize;
     let fit = ctx.is_none();

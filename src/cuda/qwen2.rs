@@ -558,10 +558,31 @@ impl<'g> CudaQwen2<'g> {
         // 16 bytes of slack: the 2-byte-aligned block loads (ld8_a2) read up
         // to 2 bytes past a Q8_0/Q5_0 block, which may be the arena's last.
         net.weights = gpu.alloc(plan.total + ARENA_PAD)?;
-        for (t, off) in plan.uploads {
-            net.weights.write_at(off, m.tensor_data(t))?; // synchronous
-            uploaded(t);
-        }
+        // A thread fills in the page tables of the matrices ahead of the
+        // copies (`Model::prefault`): out of a file mapping the driver's
+        // pageable copy otherwise stops at a page fault every 64 KB (11.5
+        // vs 14.3 GB/s, cuda::tests::h2d_bandwidth). It skips the ones
+        // already being copied (`uploaded` may release them).
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|sc| {
+            sc.spawn(|| {
+                for (i, &(t, _)) in plan.uploads.iter().enumerate() {
+                    if next.load(std::sync::atomic::Ordering::Relaxed) <= i {
+                        m.prefault(t);
+                    }
+                }
+            });
+            let r = (|| {
+                for (i, &(t, off)) in plan.uploads.iter().enumerate() {
+                    next.store(i + 1, std::sync::atomic::Ordering::Relaxed);
+                    net.weights.write_at(off, m.tensor_data(t))?; // synchronous
+                    uploaded(t);
+                }
+                Ok::<(), String>(())
+            })();
+            next.store(usize::MAX, std::sync::atomic::Ordering::Relaxed);
+            r
+        })?;
         net.vecs = gpu.upload(&plan.vecs)?;
         net.freq = gpu.alloc(plan.freq.len() * 8)?;
         let fb: Vec<u64> = plan.freq.iter().map(|f| f.to_bits()).collect();

@@ -78,6 +78,55 @@ impl DeviceInfo {
     }
 }
 
+/// The threads `preinit` started, joined by `settle`.
+static PREINIT: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Start the driver's init (cuInit, device 0's primary context: ~0.2 s)
+/// and NVRTC's load on background threads, so they overlap what the caller
+/// does before `Gpu::open` (reading the GGUF, building the tokenizer). Best
+/// effort: an error is left for `Gpu::open` to report (`ffi::driver` keeps
+/// it). The context's retain is never released: the process keeps the
+/// primary context it's about to use anyway. Call `settle` before exiting
+/// without opening the GPU (exit mustn't race a thread inside the driver).
+pub fn preinit() {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    let mut ts = PREINIT.lock().unwrap();
+    ts.push(std::thread::spawn(|| {
+        let Ok(d) = ffi::driver() else { return };
+        let mut dev: CUdevice = 0;
+        // SAFETY: writes a device handle to a valid CUdevice.
+        if unsafe { (d.cuDeviceGet)(&mut dev, 0) } != 0 {
+            return;
+        }
+        let mut ctx: CUcontext = std::ptr::null_mut();
+        // SAFETY: dev is a valid device; writes the context handle.
+        let _ = unsafe { (d.cuDevicePrimaryCtxRetain)(&mut ctx, dev) };
+    }));
+    // NVRTC's soname depends on the driver's version: this waits for cuInit
+    // and then loads the library while the context is being made.
+    ts.push(std::thread::spawn(|| {
+        let _ = ffi::nvrtc();
+    }));
+}
+
+/// Wait for `preinit`'s threads (none: returns at once; never for the
+/// calling thread itself).
+pub fn settle() {
+    let ts = match PREINIT.lock() {
+        Ok(mut g) => std::mem::take(&mut *g),
+        Err(_) => return,
+    };
+    let me = std::thread::current().id();
+    for t in ts {
+        if t.thread().id() != me {
+            let _ = t.join();
+        }
+    }
+}
+
 impl Gpu {
     /// Device 0.
     pub fn open() -> Result<Gpu, String> {
@@ -90,6 +139,8 @@ impl Gpu {
         if !cfg!(target_os = "linux") {
             return Err(LINUX_ONLY.into());
         }
+        // The driver would make us wait for `preinit`'s work anyway.
+        settle();
         let d = ffi::driver()?;
         let mut count: c_int = 0;
         // SAFETY: writes the device count to a valid c_int.

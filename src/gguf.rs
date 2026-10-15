@@ -402,6 +402,19 @@ impl Model {
         };
     }
 
+    /// Fill in the page tables for `t`'s bytes on a file mapping
+    /// (MADV_POPULATE_READ: from the page cache, reading the file where it
+    /// isn't there), so a copy out of them doesn't stop at a page fault
+    /// every 64 KB. Nothing on the anonymous copy. Best effort.
+    pub fn prefault(&self, t: &Tensor) {
+        let r = self.tensor_range(t);
+        if self.file_backed && !r.is_empty() {
+            let _ = self
+                .data
+                .advise_range(memmap2::Advice::PopulateRead, r.start, r.len());
+        }
+    }
+
     /// Whether `t` was handed back by `release`.
     #[cfg(test)]
     pub fn is_released(&self, t: &Tensor) -> bool {
@@ -483,11 +496,22 @@ fn release_span(
 
 fn map_weights(file: &File, copy: Option<bool>) -> io::Result<(memmap2::Mmap, bool)> {
     let len = file.metadata()?.len() as usize;
-    let env = std::env::var("AXON_MMAP");
-    let copy = match (copy, env.as_deref()) {
+    if copy_choice(copy, len, true) {
+        Ok((copy_file(file, len)?, false))
+    } else {
+        // SAFETY: the file is opened read-only and not modified while mapped.
+        Ok((unsafe { memmap2::Mmap::map(file)? }, true))
+    }
+}
+
+/// Whether to copy a `len`-byte file (`map_weights`): `copy` if given, else
+/// AXON_MMAP's, else `wanted` unless it's over 60% of `MemAvailable`.
+fn copy_choice(copy: Option<bool>, len: usize, wanted: bool) -> bool {
+    match (copy, std::env::var("AXON_MMAP").as_deref()) {
         (Some(c), _) => c,
         (None, Ok("0")) => true,
         (None, Ok(_)) => false,
+        (None, Err(_)) if !wanted => false,
         (None, Err(_)) => match mem_available() {
             Some(avail) if len as u64 > avail / 10 * 6 => {
                 eprintln!(
@@ -500,11 +524,12 @@ fn map_weights(file: &File, copy: Option<bool>) -> io::Result<(memmap2::Mmap, bo
             }
             _ => true,
         },
-    };
-    if !copy {
-        // SAFETY: the file is opened read-only and not modified while mapped.
-        return Ok((unsafe { memmap2::Mmap::map(file)? }, true));
     }
+}
+
+/// The first `len` bytes of `file` in anonymous memory, transparent huge
+/// pages requested (`map_weights`).
+fn copy_file(file: &File, len: usize) -> io::Result<memmap2::Mmap> {
     let mut anon = memmap2::MmapMut::map_anon(len.max(1))?;
     #[cfg(target_os = "linux")]
     {
@@ -522,7 +547,7 @@ fn map_weights(file: &File, copy: Option<bool>) -> io::Result<(memmap2::Mmap, bo
             e
         }
     })?;
-    Ok((anon.make_read_only()?, false))
+    anon.make_read_only()
 }
 
 /// `MemAvailable` from /proc/meminfo, in bytes.
@@ -533,6 +558,7 @@ fn mem_available() -> Option<u64> {
     Some(kb * 1024)
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn load(path: &str) -> io::Result<Model> {
     load_with(path, None)
 }
@@ -543,16 +569,128 @@ pub fn load_with(path: &str, copy: Option<bool>) -> io::Result<Model> {
     let len = file.metadata()?.len() as usize;
     let (data, file_backed) = map_weights(&file, copy)?;
     let h = parse(&data[..len.min(data.len())])?;
-    Ok(Model {
-        arch: h.arch,
-        metadata: h.metadata,
-        tensors: h.tensors,
-        data,
-        data_offset: h.data_offset,
-        file_backed,
-        released: Default::default(),
-        any_released: Default::default(),
-    })
+    Ok(Model::new(h, data, file_backed))
+}
+
+/// Load a model to run it (`axon gen` / `chat`): the file is mapped and
+/// parsed, `wants_copy` is asked (and may check the model), then the file
+/// is copied into anonymous huge pages (`map_weights`) if `copy` says so,
+/// else (None) if `wants_copy` said the huge pages would pay,
+/// i.e. the weights are read in place per token rather than repacked
+/// elsewhere once (then a copy is a second pass over the file and twice the
+/// memory while loading); AXON_MMAP and the `MemAvailable` guard apply to
+/// that choice as in `load`. A model left mapped is read ahead
+/// (`Model::read_ahead`). It stays mapped for the whole run: rewriting the
+/// file in place meanwhile (not replacing it) can kill the process with
+/// SIGBUS, as with any mapped file; AXON_MMAP=0 copies instead.
+pub fn load_to_run(
+    path: &str,
+    copy: Option<bool>,
+    wants_copy: impl FnOnce(&Model) -> bool,
+) -> io::Result<Model> {
+    let file = File::open(path)?;
+    let len = file.metadata()?.len() as usize;
+    // SAFETY: the file is opened read-only and not modified while mapped.
+    let data = unsafe { memmap2::Mmap::map(&file)? };
+    let h = parse(&data[..len.min(data.len())])?;
+    let mut m = Model::new(h, data, true);
+    // Always asked (the caller may check the model there), used if `copy`
+    // is None.
+    let wanted = wants_copy(&m);
+    let copy = copy.unwrap_or_else(|| copy_choice(None, len, wanted));
+    if copy {
+        // Same bytes (parse checked every tensor range against len).
+        m.data = copy_file(&file, len)?;
+        m.file_backed = false;
+    } else {
+        m.read_ahead(&file);
+    }
+    Ok(m)
+}
+
+/// Bytes per read-ahead request. One MADV_WILLNEED reads at most the
+/// device's read-ahead window (max of read_ahead_kb and the largest I/O;
+/// 1 MB or more on NVMe) and drops the rest silently; on a device with a
+/// smaller window the pages skipped are read when first touched instead.
+const READ_AHEAD_CHUNK: usize = 1 << 20;
+
+impl Model {
+    /// Start reading the file into the page cache on a thread, in the order
+    /// the backends read it: the small tensors (norms, biases: read one by
+    /// one before the matrices), then the embedding and output head, then
+    /// layer by layer. Each request is MADV_WILLNEED on a mapping of its
+    /// own: the kernel queues the reads and returns, so the disk stays busy
+    /// while the caller does other work (CUDA init, parsing, the
+    /// tokenizer), and on a warm page cache it's a lookup per page. With a
+    /// cold page cache the weights otherwise come in one page fault at a
+    /// time. Not when the file is over half of `MemAvailable`: then pages
+    /// read far ahead could be dropped again before they're used (a split
+    /// model hands its uploaded part back as it goes). AXON_READAHEAD=0
+    /// turns it off. Best effort: errors are ignored.
+    fn read_ahead(&self, file: &File) {
+        if std::env::var("AXON_READAHEAD").is_ok_and(|v| v == "0")
+            || mem_available().is_none_or(|a| self.data.len() as u64 > a / 2)
+        {
+            return;
+        }
+        let Ok(file) = file.try_clone() else { return };
+        let base = self.data_offset as usize;
+        let mut spans: Vec<(usize, usize, usize)> = self
+            .tensors
+            .iter()
+            .filter(|t| t.n_bytes > 0)
+            .map(|t| {
+                let rank = if t.n_bytes < (1 << 20) {
+                    0
+                } else if let Some(l) = t.name.strip_prefix("blk.") {
+                    2 + l
+                        .split('.')
+                        .next()
+                        .and_then(|n| n.parse().ok())
+                        .unwrap_or(0)
+                } else {
+                    1
+                };
+                let s = base + t.offset as usize;
+                (rank, s, s + t.n_bytes as usize)
+            })
+            .collect();
+        spans.sort_unstable();
+        let _ = std::thread::Builder::new()
+            .name("axon-readahead".into())
+            .spawn(move || {
+                // SAFETY: read-only, never written through; only advised.
+                let Ok(map) = (unsafe { memmap2::Mmap::map(&file) }) else {
+                    return;
+                };
+                for (_, s, e) in spans {
+                    // advise_range rounds the start down to a page.
+                    let (mut at, e) = (s, e.min(map.len()));
+                    while at < e {
+                        let n = READ_AHEAD_CHUNK.min(e - at);
+                        if map.advise_range(memmap2::Advice::WillNeed, at, n).is_err() {
+                            return;
+                        }
+                        at += n;
+                    }
+                }
+            });
+    }
+}
+
+impl Model {
+    fn new(h: Header, data: memmap2::Mmap, file_backed: bool) -> Model {
+        Model {
+            arch: h.arch,
+            metadata: h.metadata,
+            tensors: h.tensors,
+            data,
+            data_offset: h.data_offset,
+            file_backed,
+            released: Default::default(),
+            any_released: Default::default(),
+        }
+    }
 }
 
 /// Everything in a GGUF file but the tensor data.
