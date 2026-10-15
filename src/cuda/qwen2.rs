@@ -90,7 +90,13 @@ const PREFILL_BATCH: usize = 1024;
 /// `PREFILL_BATCH` scratch on top of one more layer. PR A: a split that
 /// streams its CPU layers for prefill feeds the GPU half whole prompt
 /// chunks, so it gets `STREAM_PASS` (`split_batch(true)`).
-pub const SPLIT_BATCH: usize = crate::PREFILL_BATCH;
+///
+/// Pinned at 64, not `crate::PREFILL_BATCH`: the CPU batch went 64 -> 128
+/// (CPU prefill throughput), but doubling this scratch would cost the GPU
+/// half ~16 MiB on 7B (~23 MiB on 32B) and could push a layer to the CPU near
+/// a placement boundary. The GPU half chunks a 128-token hybrid batch into
+/// passes of 64 (same bits), so placement stays what it was at 64.
+pub const SPLIT_BATCH: usize = 64;
 
 /// Most tokens per batched pass of a split that streams its CPU layers
 /// (`split_batch(true)`): the streamed prefill's chunk size. Its own

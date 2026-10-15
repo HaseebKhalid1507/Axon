@@ -265,6 +265,9 @@ struct B32 {
     /// weights u to dpbusd and start the accumulator here to undo the offset:
     /// Q5_0 u = w + 16 uses it as is, Q8_0 u = w + 128 uses it << 3.
     c: Vec<[i32; 8]>,
+    /// per block: -128 * (sum of its 32 values), the start of the r8q Q8_0
+    /// VNNI chain (r8q.rs), kept here so a GEMM chunk doesn't redo the sums.
+    n128: Vec<i32>,
 }
 
 #[allow(clippy::needless_range_loop)] // fixed-size arrays: indexing vectorizes cleanly
@@ -411,11 +414,15 @@ multiversion! {
         let mut d = Vec::with_capacity(nb);
         let mut q = vec![[0i8; 32]; nb];
         let mut c = Vec::with_capacity(nb);
+        let mut n128 = Vec::with_capacity(nb);
         for (xb, qb) in x.as_chunks::<QK8_0>().0.iter().zip(q.iter_mut()) {
             d.push(quantize_q8_0(xb, qb));
-            c.push(neg16_lane_sums(qb));
+            let cb = neg16_lane_sums(qb);
+            // Σ c = -16 Σ q, exactly (|Σ q| <= 32 * 127)
+            n128.push(8 * cb.iter().sum::<i32>());
+            c.push(cb);
         }
-        B32 { d, q, c }
+        B32 { d, q, c, n128 }
     }
 }
 
@@ -3249,11 +3256,12 @@ mod tests {
     fn dequant_act(qt: u32, qa: &QuantizedAct) -> Vec<f32> {
         match qt {
             Q5_0 | Q8_0 => {
-                let B32 { d, q, c } = qa.b32.as_ref().unwrap();
-                for (q, c) in q.iter().zip(c) {
+                let B32 { d, q, c, n128 } = qa.b32.as_ref().unwrap();
+                for ((q, c), &s) in q.iter().zip(c).zip(n128) {
                     for (lane, &cl) in q.as_chunks::<4>().0.iter().zip(c) {
                         assert_eq!(cl, -16 * lane.iter().map(|&v| v as i32).sum::<i32>());
                     }
+                    assert_eq!(s, -128 * q.iter().map(|&v| v as i32).sum::<i32>());
                 }
                 d.iter()
                     .zip(q)
@@ -4135,7 +4143,7 @@ mod tests {
                         let a = quantize_b32::portable(&x);
                         let b = unsafe { quantize_b32::v3(&x) };
                         assert_eq!(bits(&a.d), bits(&b.d), "b32 d n={n}");
-                        assert_eq!((a.q, a.c), (b.q, b.c), "b32 q/c n={n}");
+                        assert_eq!((a.q, a.c, a.n128), (b.q, b.c, b.n128), "b32 q/c n={n}");
                     }
                     if n % 256 == 0 {
                         let a = quantize_k::portable(&x);
@@ -4178,6 +4186,51 @@ mod tests {
     }
 
     // ---- r8 (8-row interleaved K-quant) kernels ----
+
+    /// Single-thread r8 (Q4_K / Q6_K) GEMM speed, as r8q_gemm_speed (run
+    /// pinned, --ignored --nocapture): per 8-row-group calls vs one call.
+    #[test]
+    #[ignore]
+    fn r8_gemm_speed() {
+        let mut rng = Lcg(0x5eed);
+        for qt in [Q4_K, Q6_K] {
+            for n in [1536usize, 8960] {
+                let (rows, nt) = (128, 64);
+                let p = r8::repack(qt, &r8_matrix(qt, rows, n, false, &mut rng), rows, n);
+                let qas: Vec<QuantizedAct> = (0..nt)
+                    .map(|_| QuantizedAct::for_types(&synthetic_x(n, &mut rng), &[qt]))
+                    .collect();
+                let xs: Vec<&QuantizedAct> = qas.iter().collect();
+                let mut o = vec![0f32; rows * nt];
+                let gb = r8::group_bytes(qt, n);
+                for chunked in [true, false] {
+                    let mut reps = 0usize;
+                    let t = std::time::Instant::now();
+                    while t.elapsed().as_secs_f64() < 0.6 {
+                        if chunked {
+                            for (g, og) in o.chunks_mut(8 * nt).enumerate() {
+                                r8::gemm(qt, &p[g * gb..(g + 1) * gb], &xs, og, nt);
+                            }
+                        } else {
+                            r8::gemm(qt, &p, &xs, &mut o, nt);
+                        }
+                        reps += 1;
+                    }
+                    let s = t.elapsed().as_secs_f64();
+                    let gmac = (reps * rows * n * nt) as f64 / s / 1e9;
+                    println!(
+                        "qt {qt} n {n}: {}: {gmac:.1} GMAC/s ({:.1} us per 8-row group)",
+                        if chunked {
+                            "per-group calls"
+                        } else {
+                            "one call"
+                        },
+                        s / (reps * rows / 8) as f64 * 1e6
+                    );
+                }
+            }
+        }
+    }
 
     /// `rows` rows of `qt`, width n: random, and K-quant extremes per block.
     fn r8_matrix(qt: u32, rows: usize, n: usize, extreme: bool, rng: &mut Lcg) -> Vec<u8> {

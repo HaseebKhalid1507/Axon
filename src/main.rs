@@ -20,8 +20,11 @@ mod vmath;
 use lm::{Backend, Device, Lm};
 use std::env;
 
-/// Prompt tokens per `feed_batch` call.
-const PREFILL_BATCH: usize = 64;
+/// Prompt tokens per `feed_batch` call on the CPU. 128, not 64: each batch
+/// streams every weight from RAM once and pays ~10 pool joins per layer, so
+/// bigger batches amortize both (measured: pp128/pp512 +7-8% at 1.5B, +6% on
+/// qwen3 0.6B Q8_0, over 64; activations of 128 tokens still sit in L2).
+const PREFILL_BATCH: usize = 128;
 
 /// Draft tokens per speculative step unless --draft / AXON_DRAFT say
 /// otherwise: 0, off. Drafting is lossless and K = 7 (a verify pass of K + 1
