@@ -544,11 +544,12 @@ pub fn for_each_chunk_mut_rev<T: Send>(
     });
 }
 
-struct SendPtr<T>(*mut T);
+/// A raw pointer pool chunks share to write disjoint parts of one buffer.
+pub(crate) struct SendPtr<T>(pub(crate) *mut T);
 impl<T> SendPtr<T> {
     // A method (not field access) so closures capture the whole Sync wrapper,
     // not the raw pointer inside it.
-    fn get(&self) -> *mut T {
+    pub(crate) fn get(&self) -> *mut T {
         self.0
     }
 }

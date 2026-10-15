@@ -36,6 +36,8 @@
 //! |Σ u a| <= 32*255*128 = 1.04M; dpbusd doesn't saturate. Then
 //!   acc_r += (d_r * d_a) * f32(isum_r)     (f32, block order, mul/mul/add)
 
+use std::borrow::Cow;
+
 use super::{B32, Q5_0, Q5_0_BYTES, Q8_0, Q8_0_BYTES, QK8_0, QuantizedAct, Simd, f16_to_f32};
 
 pub const R8Q5: usize = 176;
@@ -165,21 +167,26 @@ pub fn dequant_row(qtype_id: u32, group: &[u8], r: usize, out: &mut [f32]) {
 struct Act<'a> {
     d: &'a [f32],
     q: &'a [[i8; 32]],
-    /// per block: -OFF * Σ a (0 for the AVX2 Q8_0 sign path)
-    s0: Vec<i32>,
+    /// per block: -OFF * Σ a (0 for the AVX2 Q8_0 sign path). Borrowed from
+    /// the activation for Q8_0 (the common case: no per-call work, which
+    /// mattered: a prefill chunk is one 8-row group, and summing every
+    /// token's blocks again per chunk cost more than the chunk's GEMM).
+    s0: Cow<'a, [i32]>,
 }
 
 fn act<'a>(x: &'a QuantizedAct, off: i32) -> Act<'a> {
-    let B32 { d, q, .. } = x.b32.as_ref().unwrap_or_else(|| {
+    let B32 { d, q, n128, .. } = x.b32.as_ref().unwrap_or_else(|| {
         panic!(
             "r8q: needs input len multiple of 32, got {} (or the 32-block view wasn't built)",
             x.len()
         )
     });
-    let s0 = q
-        .iter()
-        .map(|b| -off * b.iter().map(|&v| v as i32).sum::<i32>())
-        .collect();
+    // n128 = -128 Σ a: exact multiples of 8, so the shift is exact.
+    let s0 = match off {
+        128 => Cow::Borrowed(&n128[..]),
+        16 => Cow::Owned(n128.iter().map(|&v| v >> 3).collect()),
+        _ => Cow::Owned(n128.iter().map(|&v| off * (v >> 7)).collect()),
+    };
     Act { d, q, s0 }
 }
 
@@ -294,7 +301,17 @@ pub(super) unsafe fn gemm_with(
     }
     let n = xs[0].len();
     assert!(xs.iter().all(|x| x.len() == n), "r8q gemm: ragged batch");
-    let off = chain_offset(simd, qtype_id);
+    // VNNI unpacks Q5_0 with u + 112 = w + 128 (Q8_0's u), so both start
+    // their chains at -128 Σ a, borrowed from the activations (`act`).
+    #[cfg(target_arch = "x86_64")]
+    let vnni_q5 = simd == Simd::Vnni && qtype_id == Q5_0;
+    #[cfg(not(target_arch = "x86_64"))]
+    let vnni_q5 = false;
+    let off = if vnni_q5 {
+        offset(Q8_0)
+    } else {
+        chain_offset(simd, qtype_id)
+    };
     let xa: Vec<Act> = xs.iter().map(|x| act(x, off)).collect();
     let gb = group_bytes(qtype_id, n);
     let ng = out.len() / (8 * stride);
@@ -338,7 +355,7 @@ pub(super) unsafe fn gemm_with(
                 .zip(out.chunks_exact_mut(8 * stride))
             {
                 // SAFETY: Avx2/Vnni imply avx2 (caller).
-                unsafe { x86::unpack_q5_group(g, u) };
+                unsafe { x86::unpack_q5_group(g, u, if vnni_q5 { 112 } else { 0 }) };
                 run(u, ugb, og);
             }
         });
@@ -430,21 +447,24 @@ mod x86 {
         _mm256_or_si256(nib, _mm256_and_si256(hb, _mm256_set1_epi8(0x10)))
     }
 
-    /// A compact Q5_0 group into `out`, Q8_0-shaped (same scales, u vectors).
+    /// A compact Q5_0 group into `out`, Q8_0-shaped (same scales, u vectors),
+    /// `bias` added to every u (0, or 112 for u + 112 = w + 128: Q8_0's u).
     ///
     /// # Safety
     /// The CPU must support avx2.
     #[target_feature(enable = "avx2")]
-    pub unsafe fn unpack_q5_group(group: &[u8], out: &mut [u8]) {
+    pub unsafe fn unpack_q5_group(group: &[u8], out: &mut [u8], bias: u8) {
         let src = group.as_chunks::<R8Q5>().0;
         let dst = out.as_chunks_mut::<R8Q8>().0;
+        let bv = _mm256_set1_epi8(bias as i8);
         for (b, o) in src.iter().zip(dst) {
             o[..QV].copy_from_slice(&b[..QV]);
             let h = ld32(b, Q5_H);
             for v in 0..8 {
                 let p: &mut [u8; 32] = (&mut o[QV + 32 * v..QV + 32 * v + 32]).try_into().unwrap();
+                let u = _mm256_add_epi8(q5_vec(b, h, v), bv);
                 // SAFETY: p is 32 writable bytes; storeu is unaligned.
-                unsafe { _mm256_storeu_si256(p.as_mut_ptr().cast(), q5_vec(b, h, v)) };
+                unsafe { _mm256_storeu_si256(p.as_mut_ptr().cast(), u) };
             }
         }
     }
@@ -800,7 +820,7 @@ mod tests {
                         let mut u = vec![0u8; group_bytes(Q8_0, n)];
                         for g in p.chunks_exact(gb) {
                             // SAFETY: avx2 detected.
-                            unsafe { x86::unpack_q5_group(g, &mut u) };
+                            unsafe { x86::unpack_q5_group(g, &mut u, 0) };
                             for (bc, bu) in g.chunks_exact(R8Q5).zip(u.chunks_exact(R8Q8)) {
                                 assert_eq!(bc[..16], bu[..16]);
                                 for r in 0..8 {
@@ -969,7 +989,7 @@ mod tests {
                 assert!(same(run(&p, &act(&qa, off))), "{path:?} unmutated");
                 // offset: chain start of block 3 off by the offset of one unit of a
                 let mut xa = act(&qa, off);
-                xa.s0[3] += offset(qt);
+                xa.s0.to_mut()[3] += offset(qt);
                 assert!(
                     !same(run(&p, &xa)),
                     "{path:?} qt {qt}: broken offset not caught"
@@ -1084,5 +1104,56 @@ mod tests {
             );
         }
         assert!(!seen.is_empty(), "no Q5_0/Q8_0 tensors in the model");
+    }
+
+    /// Single-thread GEMM speed (run pinned: taskset -c 0 / -c 8, --ignored
+    /// --nocapture). Per-chunk calls (one 8-row group each, as the pool's
+    /// prefill chunks are) and one whole-matrix call, 64 tokens.
+    #[test]
+    #[ignore]
+    fn r8q_gemm_speed() {
+        let mut rng = Lcg(0x5eed);
+        let path = super::super::simd();
+        for qt in [Q8_0, Q5_0] {
+            for n in [1024usize, 3072] {
+                let (rows, nt) = (256, 64);
+                let p = repack(qt, &matrix(qt, rows, n, false, &mut rng), rows, n);
+                let qas: Vec<QuantizedAct> = (0..nt)
+                    .map(|_| QuantizedAct::for_types(&synthetic_x(n, &mut rng), &[qt]))
+                    .collect();
+                let xs: Vec<&QuantizedAct> = qas.iter().collect();
+                let mut o = vec![0f32; rows * nt];
+                let gb = group_bytes(qt, n);
+                for chunked in [true, false] {
+                    let mut reps = 0usize;
+                    let t = std::time::Instant::now();
+                    while t.elapsed().as_secs_f64() < 0.6 {
+                        if chunked {
+                            for (g, og) in o.chunks_mut(8 * nt).enumerate() {
+                                // SAFETY: simd() is a detected path.
+                                unsafe {
+                                    gemm_with(path, qt, &p[g * gb..(g + 1) * gb], &xs, og, nt)
+                                };
+                            }
+                        } else {
+                            // SAFETY: as above.
+                            unsafe { gemm_with(path, qt, &p, &xs, &mut o, nt) };
+                        }
+                        reps += 1;
+                    }
+                    let s = t.elapsed().as_secs_f64();
+                    let gmac = (reps * rows * n * nt) as f64 / s / 1e9;
+                    println!(
+                        "qt {qt} n {n} {path:?} {}: {gmac:.1} GMAC/s ({:.1} us per 8-row group)",
+                        if chunked {
+                            "per-group calls"
+                        } else {
+                            "one call"
+                        },
+                        s / (reps * rows / 8) as f64 * 1e6
+                    );
+                }
+            }
+        }
     }
 }
