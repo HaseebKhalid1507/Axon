@@ -619,16 +619,29 @@ extern "C" __global__ void argmax_b(const float* __restrict__ x, int n, u32* __r
 // (mode 1), as gemv's. Mode 2 (the up product, no bias): `bias` is the gate
 // product (laid out as out) and out = silu(gate) * v, swiglu_quant_b's ops
 // on the same two floats (gate_up's), for quantize_b.
-__device__ __forceinline__ void gm_store(float y, const float* bias, int mode, float* out, u64 zo,
-                                         int r) {
+// gm_put: the store with what mode 1/2 read already in p (out[zo + r] for
+// mode 1, the gate value for mode 2; unused for mode 0), so a caller can
+// issue all its loads before its first store.
+__device__ __forceinline__ void gm_put(float y, float p, const float* bias, int mode, float* out,
+                                       u64 zo, int r) {
     if (mode == 2) {
-        float g = bias[zo + r];
-        out[zo + r] = __fmul_rn(__fdiv_rn(g, __fadd_rn(1.0f, expf(-g))), y);
+        out[zo + r] = __fmul_rn(__fdiv_rn(p, __fadd_rn(1.0f, expf(-p))), y);
         return;
     }
     float v = y;
     if (bias) v = __fadd_rn(v, bias[r]);
-    out[zo + r] = mode == 1 ? __fadd_rn(out[zo + r], v) : v;
+    out[zo + r] = mode == 1 ? __fadd_rn(p, v) : v;
+}
+
+// What gm_put needs read for output (zo, r).
+__device__ __forceinline__ float gm_pre(const float* bias, int mode, const float* out, u64 zo,
+                                        int r) {
+    return mode == 0 ? 0.0f : (mode == 1 ? out : bias)[zo + r];
+}
+
+__device__ __forceinline__ void gm_store(float y, const float* bias, int mode, float* out, u64 zo,
+                                         int r) {
+    gm_put(y, gm_pre(bias, mode, out, zo, r), bias, mode, out, zo, r);
 }
 
 // 0x4B400000 = 1.5 * 2^23: for |i| < 2^22, float(i) = bits(MAGIC + i) - 1.5 * 2^23,
@@ -1581,6 +1594,23 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
         }
         return;
     }
+    // Every load the stores need first (out for mode 1, the gate product
+    // for mode 2), then the stores: the 2 * NT * 4 loads in flight at once,
+    // not one dependent load per store (a one-CTA-per-SM tail hides
+    // nothing). gm_store's ops on the same floats.
+    float pre[2][NT][4];
+#pragma unroll
+    for (int mi = 0; mi < 2; mi++)
+#pragma unroll
+        for (int f = 0; f < NT; f++)
+#pragma unroll
+            for (int e = 0; e < 4; e++) {
+                int r = r0 + 32 * wr + 16 * mi + 8 * (e >> 1) + g;
+                int z = z0 + 8 * NT * wc + 8 * f + 2 * t + (e & 1);
+                pre[mi][f][e] = 0.0f;
+                if (mode != 0 && r < rows && z < nb)
+                    pre[mi][f][e] = gm_pre(bias, mode, out, (u64)z * ostride, r);
+            }
 #pragma unroll
     for (int mi = 0; mi < 2; mi++)
 #pragma unroll
@@ -1590,7 +1620,7 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
                 int r = r0 + 32 * wr + 16 * mi + 8 * (e >> 1) + g;
                 int z = z0 + 8 * NT * wc + 8 * f + 2 * t + (e & 1);
                 if (r < rows && z < nb)
-                    gm_store(acc[mi][f][e], bias, mode, out, (u64)z * ostride, r);
+                    gm_put(acc[mi][f][e], pre[mi][f][e], bias, mode, out, (u64)z * ostride, r);
             }
 #else
     __trap();
