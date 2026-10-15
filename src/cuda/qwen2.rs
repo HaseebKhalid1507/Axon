@@ -45,6 +45,14 @@ const ATT_TILE: usize = 128;
 const MAX_GROUP: usize = 8;
 /// Most attention splits (decode.cu MAX_SPLIT).
 const MAX_SPLIT: usize = 256;
+/// Positions per block of the tensor-core attention (decode.cu ATT_BLK).
+const ATT_BLK: usize = 64;
+
+/// The tensor-core attention's score scale (decode.cu PRE): 1 / sqrt(hd)
+/// times log2(e), in f32, the same for every kernel.
+fn att_pre(head_dim: usize) -> f32 {
+    (1.0 / (head_dim as f32).sqrt()) * std::f32::consts::LOG2_E
+}
 /// Threads per GEMV block (decode.cu GEMV_THREADS).
 const GEMV_THREADS: u32 = 128;
 /// Rows per block of the gemm2 GEMMs (prefill.cu G2_BM); tokens per block
@@ -163,11 +171,17 @@ pub enum CacheKv {
 
 /// The q8 kernels for one scale group size (`CacheKv::Q8`).
 struct Q8Fns<'m> {
+    /// The tensor-core attention (`tc_attn`): decode, and prefill.cu's
+    /// per query (batches of at most `batch::att_per_query`) and flash
+    /// kernels (attn_fa_b, attn_fa_bs: `batch::fa_shape`).
+    attn_blk: Func<'m>,
+    attn_blk_b: Func<'m>,
+    attn_fa: [Func<'m>; 2],
+    /// Without tensor cores: the split attention, decode and per query.
     attn_split: Func<'m>,
-    /// prefill.cu's: the batched store, attn_split_b, attn_warp_b.
-    store_b: Func<'m>,
     attn_split_b: Func<'m>,
-    attn_warp_b: Func<'m>,
+    /// prefill.cu's batched store.
+    store_b: Func<'m>,
 }
 
 impl<'m> Q8Fns<'m> {
@@ -175,11 +189,19 @@ impl<'m> Q8Fns<'m> {
     fn new(module: &'m Module<'m>, head_dim: usize, group: usize) -> Result<Q8Fns<'m>, String> {
         let q = if group == head_dim { "q8" } else { "q8g32" };
         let f = |s: &str| module.function(&format!("{s}_{q}_{head_dim}"));
+        let fa = [f("attn_fa_b")?, f("attn_fa_bs")?];
+        if module.mma() {
+            for (small, fa) in fa.iter().enumerate() {
+                fa.set_max_shared(batch::fa_shape(head_dim, small == 1, group).2)?;
+            }
+        }
         Ok(Q8Fns {
+            attn_blk: f("attn_blk")?,
+            attn_blk_b: f("attn_blk_b")?,
+            attn_fa: fa,
             attn_split: f("attn_split")?,
-            store_b: module.function(&format!("kv_{q}_b_{head_dim}"))?,
             attn_split_b: f("attn_split_b")?,
-            attn_warp_b: f("attn_warp_b")?,
+            store_b: module.function(&format!("kv_{q}_b_{head_dim}"))?,
         })
     }
 }
@@ -196,6 +218,10 @@ struct Fns<'m> {
     gate_up: Func<'m>,
     attn_split: Func<'m>,
     attn_combine: Func<'m>,
+    /// The tensor-core attention (f16 cache, sm_80+; `tc_attn`): a warp
+    /// per 64 positions, then the fold.
+    attn_blk: Func<'m>,
+    attn_cmb: Func<'m>,
     argmax: Func<'m>,
     /// The q8 cache's: qkv_rope with f32 keys and values out, and per scale
     /// group (head_dim, 32) the attention kernels.
@@ -276,8 +302,12 @@ pub struct CudaQwen2<'g> {
     output_norm: usize,
     /// Layers first..n_layers (index i is layer first + i).
     layers: Vec<LayerW>,
-    /// Attention splits (grid y of attn_split).
+    /// Attention splits (grid y of attn_split; the q8 cache and GPUs
+    /// without tensor cores), and the most blocks of an attn_blk launch.
     max_split: usize,
+    /// The attention runs on the tensor cores (decode.cu "Tensor-core
+    /// attention"), decode and batched alike, either cache: sm_80+.
+    tc_attn: bool,
     /// Replay a captured graph per token (else launch kernel by kernel).
     pub graphs: bool,
     bf: batch::BatchFns<'g>,
@@ -751,6 +781,12 @@ impl<'g> CudaQwen2<'g> {
                     "attn_split_128"
                 })?,
                 attn_combine: module.function("attn_combine")?,
+                attn_blk: module.function(if head_dim == 64 {
+                    "attn_blk_64"
+                } else {
+                    "attn_blk_128"
+                })?,
+                attn_cmb: module.function("attn_cmb")?,
                 argmax: module.function("argmax")?,
                 qkv_rope_f32: module.function("qkv_rope_f32")?,
                 q8: [
@@ -777,6 +813,7 @@ impl<'g> CudaQwen2<'g> {
             output_norm,
             layers,
             max_split,
+            tc_attn: module.mma(),
             graphs: std::env::var("AXON_CUDA_GRAPHS").map_or(true, |v| v != "0"),
             bf: batch::BatchFns::new(module, head_dim, sms)?,
             batch: if first > 0 {
@@ -862,6 +899,21 @@ impl<'g> CudaQwen2<'g> {
         }
     }
 
+    /// Blocks of ATT_BLK positions a cache of max_ctx has (the stride of
+    /// attn_blk's partials).
+    fn nblk_max(max_ctx: usize) -> usize {
+        max_ctx.div_ceil(ATT_BLK)
+    }
+
+    /// Partials per head of a decode step's attention: a block's
+    /// (attn_blk), or a split's (attn_split, without tensor cores).
+    fn att_parts(&self, max_ctx: usize) -> usize {
+        match self.tc_attn {
+            true => Self::nblk_max(max_ctx),
+            false => self.max_split,
+        }
+    }
+
     /// Free VRAM now.
     pub fn free_bytes(&self) -> Result<u64, String> {
         Ok(self.gpu.info()?.free_bytes)
@@ -919,13 +971,13 @@ impl<'g> CudaQwen2<'g> {
         let kv = self.kv_cache_bytes(kv, max_ctx) + kvf;
         let host_x = if self.first > 0 { self.dim * f } else { 0 };
         let act = act_bytes(self.act_len());
-        let parts = self.n_heads * self.max_split * (self.head_dim + 2) * f;
+        let parts = self.n_heads * self.att_parts(max_ctx) * (self.head_dim + 2) * f;
         kv + (self.dim + 2 * self.q_dim + self.kv_dim() + self.ffn + self.vocab + self.head_dim) * f
             + act
             + parts
             + 64
             + host_x
-            + self.batch_bytes(self.batch_for(max_ctx))
+            + self.batch_bytes(self.batch_for(max_ctx), max_ctx)
     }
 
     /// A cache for positions 0..max_ctx, or why there's no room for it.
@@ -950,9 +1002,10 @@ impl<'g> CudaQwen2<'g> {
             );
         }
         // `new` budgets one cache; each cache brings its own KV and batch
-        // scratch (batch_bytes: ~350 MiB on the 7B at 1024 tokens with 46
-        // SMs, ~530 MiB where max_split reaches 256), so every one is
-        // checked against what is free now, before any of it is allocated.
+        // scratch (batch_bytes: ~275 MiB on the 7B at 1024 tokens and an 8k
+        // context, ~360 MiB at 32k: the attention partials grow with it),
+        // so every one is checked against what is free now, before any of
+        // it is allocated.
         let want = self.cache_bytes_kv(mode, max_ctx) as u64 + CACHE_HEADROOM;
         let free = g.info()?.free_bytes;
         if want > free {
@@ -983,8 +1036,8 @@ impl<'g> CudaQwen2<'g> {
             att: g.alloc(self.q_dim * f)?,
             hid: g.alloc(self.ffn * f)?,
             act: g.alloc(act_bytes(self.act_len()))?,
-            part_o: g.alloc(self.n_heads * self.max_split * self.head_dim * f)?,
-            part_ml: g.alloc(self.n_heads * self.max_split * 2 * f)?,
+            part_o: g.alloc(self.n_heads * self.att_parts(max_ctx) * self.head_dim * f)?,
+            part_ml: g.alloc(self.n_heads * self.att_parts(max_ctx) * 2 * f)?,
             kraw: g.alloc(self.kv_dim() * f)?,
             logits: g.alloc(self.vocab * f)?,
             best: g.alloc(4)?,
@@ -997,7 +1050,7 @@ impl<'g> CudaQwen2<'g> {
                 _ => Some(g.host_alloc(self.dim * f)?),
             },
             graph: [None, None, None],
-            b: Some(self.batch_bufs(self.batch_for(max_ctx))?),
+            b: Some(self.batch_bufs(self.batch_for(max_ctx), max_ctx)?),
             samp: None,
         };
         // Stale KV rows are never read (attention stops at pos), but zeroed
@@ -1034,7 +1087,7 @@ impl<'g> CudaQwen2<'g> {
         // and writes with them: x holds dim floats, q/att q_dim, hid ffn,
         // act act_bytes(act_len()), kraw kv_dim, the KV cache max_ctx rows
         // per layer (P[pos] < max_ctx: `step` checks; q8: int8 rows and
-        // their scales, kvf 2 kv_dim floats), part_* n_heads * max_split
+        // their scales, kvf 2 kv_dim floats), part_* n_heads * att_parts
         // splits, logits vocab; matrices are whole in the arena.
         unsafe {
             // Without the embedding, x was copied in before the step and
@@ -1139,21 +1192,29 @@ impl<'g> CudaQwen2<'g> {
                     ],
                 )?;
                 on_launch("qkv", l.q.bytes() + l.k.bytes() + l.v.bytes())?;
+                let tc = self.tc_attn;
+                let nblk_max = Self::nblk_max(c.max_ctx);
                 let mut args = vec![c.q.arg()];
                 args.extend_from_slice(&kva);
                 let attn = match c.mode {
+                    CacheKv::F16 if tc => &f.attn_blk,
                     CacheKv::F16 => &f.attn_split,
                     CacheKv::Q8 { .. } => {
                         args.push(c.kvf.arg());
-                        &self.q8_fns(c.mode).attn_split
+                        let q8 = self.q8_fns(c.mode);
+                        if tc { &q8.attn_blk } else { &q8.attn_split }
                     }
                 };
                 args.extend_from_slice(&[
                     params,
                     Arg::I32(self.n_heads as i32),
                     Arg::I32(self.n_kv_heads as i32),
-                    Arg::F32(1.0 / (hd as f32).sqrt()),
-                    Arg::I32(self.max_split as i32),
+                    if tc {
+                        Arg::F32(att_pre(hd))
+                    } else {
+                        Arg::F32(1.0 / (hd as f32).sqrt())
+                    },
+                    Arg::I32(if tc { nblk_max } else { self.max_split } as i32),
                     c.part_o.arg(),
                     c.part_ml.arg(),
                 ]);
@@ -1166,16 +1227,22 @@ impl<'g> CudaQwen2<'g> {
                     args.extend_from_slice(&[bias(l.qn), bias(l.kn)]);
                     args.extend_from_slice(&[Arg::F32(self.eps), c.rope.arg()]);
                 }
+                // attn_blk: at most max_split warps per kv head (each takes
+                // blocks y, y + max_split, ..), whatever the position.
+                let (gy, bx) = match tc {
+                    true => (self.max_split.min(nblk_max), 32),
+                    false => (self.max_split, ATT_TILE as u32),
+                };
                 self.run(
                     attn,
-                    (self.n_kv_heads as u32, self.max_split as u32, 1),
-                    (ATT_TILE as u32, 1, 1),
+                    (self.n_kv_heads as u32, gy as u32, 1),
+                    (bx, 1, 1),
                     0,
                     &args,
                 )?;
                 on_launch("attn", 0)?;
                 self.run(
-                    &f.attn_combine,
+                    if tc { &f.attn_cmb } else { &f.attn_combine },
                     blocks(qd, 256),
                     (256, 1, 1),
                     0,
@@ -1185,7 +1252,7 @@ impl<'g> CudaQwen2<'g> {
                         params,
                         Arg::I32(qd as i32),
                         Arg::I32(hd as i32),
-                        Arg::I32(self.max_split as i32),
+                        Arg::I32(if tc { nblk_max } else { self.max_split } as i32),
                         want_k(qd),
                         c.act.arg(),
                         c.att.arg(),

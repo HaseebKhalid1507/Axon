@@ -30,6 +30,8 @@ pub(crate) struct Agree {
     pub(crate) positions: usize,
     pub(crate) top1: usize,
     pub(crate) max_kl: f64,
+    /// Positions whose KL exceeds 0.5 (`assert_graded`).
+    pub(crate) over_half: usize,
     pub(crate) sum_kl: f64,
     max_abs: f32,
     /// Reference logit margin of each top-1 disagreement.
@@ -70,6 +72,7 @@ pub(crate) fn compare_from<R: Lm, O: Lm>(
         a.top1 += (ar == ao) as usize;
         let k = kl(&lr, &lo);
         a.max_kl = a.max_kl.max(k);
+        a.over_half += (k > 0.5) as usize;
         a.sum_kl += k;
         for (x, y) in lr.iter().zip(&lo) {
             a.max_abs = a.max_abs.max((x - y).abs());
@@ -113,13 +116,14 @@ fn agreement(m: &Model, steps: usize) -> (Agree, Agree) {
 
 pub(crate) fn report(name: &str, a: &Agree) {
     eprintln!(
-        "{name}: top-1 {}/{} ({:.1}%), KL mean {:.2e} max {:.2e}, max |dlogit| {:.3}, \
-         flip margins {:?}",
+        "{name}: top-1 {}/{} ({:.1}%), KL mean {:.2e} max {:.2e} (> 0.5: {}), max |dlogit| \
+         {:.3}, flip margins {:?}",
         a.top1,
         a.positions,
         100.0 * a.top1 as f64 / a.positions as f64,
         a.sum_kl / a.positions as f64,
         a.max_kl,
+        a.over_half,
         a.max_abs,
         a.flips
     );
@@ -143,8 +147,10 @@ pub(crate) fn report(name: &str, a: &Agree) {
 /// Asserted: top-1 within 2 points of the CPU's self-agreement (and >= 94%);
 /// only near-ties (< 0.5) flip; mean KL within 2x the CPU's own. The
 /// extremes are single positions, as heavy-tailed CPU vs CPU as GPU vs CPU,
-/// so they get absolute gross-bug bounds (a wrong kernel gives KL ~1-10 and
-/// logit errors ~10): max KL < 0.5, max |dlogit| < 6.
+/// so they get absolute gross-bug bounds (a wrong kernel gives KL ~1-10 at
+/// many positions and logit errors ~10): KL above 0.5 at no more than 1 %
+/// of positions and above 2 at none (`assert_graded` has the measurements),
+/// max |dlogit| below 6.
 fn logits_match(m: &Model, name: &str) {
     let (ag, ac) = agreement(m, 32);
     report(&format!("{name} gpu vs cpu"), &ag);
@@ -170,7 +176,21 @@ pub(crate) fn assert_graded(ag: &Agree, ac: &Agree) {
         ag.flips
     );
     assert!(ag.sum_kl <= 2.0 * ac.sum_kl, "mean KL");
-    assert!(ag.max_kl < 0.5, "max KL");
+    // Extremes, per position. A wrong kernel moves many positions: a mask
+    // off by one position (tensor-core attention, deliberately injected)
+    // gave 1.5B GPU 48 and hybrid k=1 14 of 198 positions above 0.5, max
+    // 3.3-8.3 (0.5B: 36 / 35, max 4.8-5.1). Correct kernels leave single
+    // chaotic positions: the 1.5B hybrid k=1's one at 1.22 (next 0.107; the
+    // CPU per-row set's own worst 0.34) moves to 0.06 when only the
+    // queries' f16 rounding changes (split hi + lo, an experiment), while
+    // others rise to 0.23; the f32-attention kernels before had 0.134. So:
+    // at most 1 % of positions above 0.5 (here 1), none above 2.
+    assert!(
+        ag.over_half * 100 <= n && ag.max_kl < 2.0,
+        "max KL {} ({} positions above 0.5)",
+        ag.max_kl,
+        ag.over_half
+    );
     assert!(ag.max_abs < 6.0, "max logit difference");
 }
 
@@ -574,6 +594,140 @@ fn gpu_attention_matches_cpu() {
             );
         }
     }
+}
+
+/// The tensor-core decode attention (attn_blk + attn_cmb: f16 queries and
+/// probabilities, f32 accumulation) against an f64 reference on the same
+/// f16 keys and values: within the f16 roundings' reach (|v| < 1, peaky
+/// softmax), at positions on both sides of 64-position blocks, grids
+/// smaller than the block count, and contexts past 8k.
+#[test]
+fn gpu_tc_attention_close_to_f64() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    if !km.mma() {
+        return;
+    }
+    let fc = km.function("attn_cmb").unwrap();
+    let mut rng = Rng(4243);
+    let mut worst = 0f64;
+    for (nh, nkv, hd) in [(14, 2, 64), (12, 2, 128), (16, 2, 128), (28, 4, 128)] {
+        let (dim, kvd, group) = (nh * hd, nkv * hd, nh / nkv);
+        let fs = km.function(&format!("attn_blk_{hd}")).unwrap();
+        for (np, gy) in [
+            (1, 23),
+            (2, 1),
+            (63, 46),
+            (64, 4),
+            (65, 23),
+            (1000, 1),
+            (2000, 184),
+            (4099, 23),
+            (9001, 46),
+        ] {
+            let q = rng.vec(dim, 1.0);
+            let kh: Vec<u16> = rng
+                .vec(np * kvd, 4.0)
+                .into_iter()
+                .map(quant::f32_to_f16)
+                .collect();
+            let vh: Vec<u16> = rng
+                .vec(np * kvd, 1.0)
+                .into_iter()
+                .map(quant::f32_to_f16)
+                .collect();
+            let (qb, kb, vb) = (
+                g.upload(&q).unwrap(),
+                g.upload(&kh).unwrap(),
+                g.upload(&vh).unwrap(),
+            );
+            let params = g.upload(&[0u32, (np - 1) as u32, 0, 0]).unwrap();
+            let nblk_max = np.div_ceil(64);
+            let po = g.alloc(nh * nblk_max * hd * 4).unwrap();
+            let pml = g.alloc(nh * nblk_max * 2 * 4).unwrap();
+            let act = g.alloc(act_bytes(dim)).unwrap();
+            let out = g.alloc(dim * 4).unwrap();
+            // SAFETY: decode.cu's signatures; buffers sized as `try_cache`
+            // sizes them, K/V with np rows.
+            unsafe {
+                g.launch(
+                    &fs,
+                    (nkv as u32, gy.min(nblk_max) as u32, 1),
+                    (32, 1, 1),
+                    0,
+                    &[
+                        qb.arg(),
+                        kb.arg(),
+                        vb.arg(),
+                        params.arg(),
+                        Arg::I32(nh as i32),
+                        Arg::I32(nkv as i32),
+                        Arg::F32(att_pre(hd)),
+                        Arg::I32(nblk_max as i32),
+                        po.arg(),
+                        pml.arg(),
+                        Arg::Ptr(0),
+                        Arg::Ptr(0),
+                        Arg::Ptr(0),
+                        Arg::F32(0.0),
+                        Arg::Ptr(0),
+                        Arg::Ptr(0),
+                    ],
+                )
+                .unwrap();
+                g.launch(
+                    &fc,
+                    (dim.div_ceil(256) as u32, 1, 1),
+                    (256, 1, 1),
+                    0,
+                    &[
+                        po.arg(),
+                        pml.arg(),
+                        params.arg(),
+                        Arg::I32(dim as i32),
+                        Arg::I32(hd as i32),
+                        Arg::I32(nblk_max as i32),
+                        Arg::I32(dim.is_multiple_of(256) as i32),
+                        act.arg(),
+                        out.arg(),
+                    ],
+                )
+                .unwrap();
+            }
+            let got: Vec<f32> = out.read().unwrap();
+            let f = |h: u16| quant::f16_to_f32(h) as f64;
+            let mut de = 0f64;
+            for h in 0..nh {
+                let kvh = h / group;
+                let s: Vec<f64> = (0..np)
+                    .map(|t| {
+                        (0..hd)
+                            .map(|d| q[h * hd + d] as f64 * f(kh[t * kvd + kvh * hd + d]))
+                            .sum::<f64>()
+                            / (hd as f64).sqrt()
+                    })
+                    .collect();
+                let m = s.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let p: Vec<f64> = s.iter().map(|x| (x - m).exp()).collect();
+                let l: f64 = p.iter().sum();
+                for d in 0..hd {
+                    let e: f64 = (0..np)
+                        .map(|t| p[t] * f(vh[t * kvd + kvh * hd + d]))
+                        .sum::<f64>()
+                        / l;
+                    de = de.max((got[h * hd + d] as f64 - e).abs());
+                }
+            }
+            worst = worst.max(de);
+            assert!(
+                de < 1e-2,
+                "heads {nh}/{nkv} hd {hd} np {np} grid {gy}: vs f64 {de:e}"
+            );
+        }
+    }
+    eprintln!("tc attention: worst |out - f64| {worst:e}");
 }
 
 /// argmax: the last of equal maxima, NaN never picked unless all are (then
@@ -2148,6 +2302,35 @@ fn cuda_gemm_bench() {
             best
         );
     }
+    // The f16 x f16 -> f32 ceiling (the tensor-core attention's mma).
+    if km.mma() {
+        let f = km.function("mma_peak_h").unwrap();
+        let o = g.alloc(4 * 4096).unwrap();
+        let (blocks, iters) = (4 * info.sms as usize, 4096usize);
+        let mut best = f64::INFINITY;
+        for _ in 0..5 {
+            let e0 = g.record().unwrap();
+            // SAFETY: mma_peak_h's signature; o has a slot per block.
+            unsafe {
+                g.launch(
+                    &f,
+                    (blocks as u32, 1, 1),
+                    (256, 1, 1),
+                    0,
+                    &[Arg::I32(iters as i32), o.arg()],
+                )
+                .unwrap();
+            }
+            let e1 = g.record().unwrap();
+            best = best.min(e0.ms_to(&e1).unwrap() as f64);
+        }
+        let macs = (blocks * 8 * iters * 8 * 16 * 8 * 16) as f64;
+        eprintln!(
+            "mma_peak_h: {:.1} TMAC/s f16->f32 (m16n8k16, {:.1} ms)",
+            macs / (best * 1e-3) / 1e12,
+            best
+        );
+    }
     let mut rng = Rng(7);
     let only = std::env::var("AXON_BENCH_ONLY").ok();
     for (what, qt, cols, rows) in [
@@ -2283,9 +2466,10 @@ fn prefill_bits(m: &Model, name: &str, kv: CacheKv) {
     net.kv = kv;
     let max = net.prefill_batch();
     assert!(ids.len() > max, "covers chunking past the max batch");
-    // The GPU's own attention splits (every split <= 32 positions here:
-    // attn_scores_b + attn_warpv_b), then few splits, so that queries past 32 * 8 positions
-    // take attn_split_b, and batches straddle the two.
+    // The GPU's own attention splits, then few (q8: queries past 32 * 8
+    // positions take attn_split_b, and batches straddle it and the warp
+    // kernel; f16: decode's attn_blk grids of 8 warps per kv head, each
+    // taking several blocks).
     for max_split in [net.max_split, 8] {
         net.max_split = max_split;
         let (kv0, l0) = prefill_with(&net, &ids, &[0]);
@@ -2525,9 +2709,135 @@ fn gpu_hw_f16_scales_exact_in_products() {
     assert_eq!(n[0], 0, "products differing by conversion");
 }
 
-/// Batched attention speed, 7B shape (28 heads, 4 kv heads, 128 wide), 64
-/// queries at `start`: the warp-per-split kernel vs the decode block per
-/// split, and the combine. Interleaved rounds, best of each.
+/// The load-bearing assumption of the tensor-core attention (decode.cu
+/// "Tensor-core attention"): an f16 mma.sync row result depends only on its
+/// own A row, the B column and its accumulator - not on its m16 tile-mates,
+/// the warp or block size, or how the fragments were loaded (global,
+/// ldmatrix, ldmatrix.trans). Plus: products with A = 0 contribute nothing
+/// whatever B holds there (prefill's V rows past a row's np are real, decode's
+/// zero), up to the sign of an exactly zero result.
+#[test]
+fn gpu_mma_f16_is_deterministic() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    if !km.mma() {
+        return;
+    }
+    let f = km.function("mma_f16_check").unwrap();
+    let mut rng = Rng(4242);
+    for &(k, n) in &[(128usize, 64usize), (64, 64), (32, 48)] {
+        // Wide dynamic range (Qwen2's big key-bias channels), exact zeros.
+        let val = |r: &mut Rng| {
+            let x = r.f();
+            let e = (r.next() % 12) as i32 - 6;
+            if r.next().is_multiple_of(9) {
+                0.0
+            } else {
+                x * 2f32.powi(e)
+            }
+        };
+        let a: Vec<f32> = (0..64 * k).map(|_| val(&mut rng)).collect();
+        let b: Vec<f32> = (0..n * k).map(|_| val(&mut rng)).collect();
+        let h = |v: &[f32]| {
+            v.iter()
+                .map(|&x| quant::f32_to_f16(x))
+                .collect::<Vec<u16>>()
+        };
+        let run = |a: &[f32], b: &[f32], perm: &[i32], am: i32, bm: i32, thr: u32| -> Vec<u32> {
+            let bt: Vec<f32> = (0..k * n).map(|i| b[(i % n) * k + i / n]).collect();
+            let (da, db, dbt) = (
+                g.upload(&h(a)).unwrap(),
+                g.upload(&h(b)).unwrap(),
+                g.upload(&h(&bt)).unwrap(),
+            );
+            let dp = g.upload(perm).unwrap();
+            let d = g.alloc(64 * n * 4).unwrap();
+            // SAFETY: mma_f16_check's signature; buffers of the sizes it reads.
+            unsafe {
+                g.launch(
+                    &f,
+                    (1, 1, 1),
+                    (thr, 1, 1),
+                    0,
+                    &[
+                        da.arg(),
+                        db.arg(),
+                        dbt.arg(),
+                        Arg::I32(k as i32),
+                        Arg::I32(n as i32),
+                        dp.arg(),
+                        Arg::I32(am),
+                        Arg::I32(bm),
+                        d.arg(),
+                    ],
+                )
+                .unwrap();
+            }
+            d.read::<f32>()
+                .unwrap()
+                .iter()
+                .map(|x| x.to_bits())
+                .collect()
+        };
+        let id: Vec<i32> = (0..64).collect();
+        let rev: Vec<i32> = (0..64).rev().collect();
+        let mut shuf = id.clone();
+        for i in (1..64).rev() {
+            shuf.swap(i, (rng.next() % (i as u64 + 1)) as usize);
+        }
+        let want = run(&a, &b, &id, 0, 0, 32);
+        // Sanity: close to the f64 product of the f16 values.
+        for r in 0..64 {
+            for c in 0..n {
+                let t = |i: usize| {
+                    quant::f16_to_f32(quant::f32_to_f16(a[r * k + i])) as f64
+                        * quant::f16_to_f32(quant::f32_to_f16(b[c * k + i])) as f64
+                };
+                let e: f64 = (0..k).map(t).sum();
+                let mag: f64 = (0..k).map(|i| t(i).abs()).sum();
+                let got = f32::from_bits(want[r * n + c]) as f64;
+                assert!((got - e).abs() <= 1e-5 * (1.0 + mag), "{got} vs {e}");
+            }
+        }
+        for (perm, am, bm, thr) in [
+            (&id, 1, 1, 128),
+            (&rev, 0, 2, 64),
+            (&shuf, 1, 0, 96),
+            (&shuf, 0, 1, 32),
+            (&rev, 1, 2, 128),
+        ] {
+            assert!(
+                run(&a, &b, perm, am, bm, thr) == want,
+                "k {k} n {n}: perm, amode {am}, bmode {bm}, {thr} threads differ"
+            );
+        }
+        // Zeros in A from column kz on: B's columns there don't matter.
+        for kz in [1, 17, 37, k - 1] {
+            let az: Vec<f32> = (0..64 * k)
+                .map(|i| if i % k >= kz { 0.0 } else { a[i] })
+                .collect();
+            let bz: Vec<f32> = (0..n * k)
+                .map(|i| if i % k >= kz { 0.0 } else { b[i] })
+                .collect();
+            let x = run(&az, &b, &shuf, 1, 1, 128);
+            let y = run(&az, &bz, &id, 0, 0, 32);
+            for (i, (p, q)) in x.iter().zip(&y).enumerate() {
+                assert!(
+                    p == q || (p | q) == 0x8000_0000,
+                    "k {k} n {n} kz {kz} [{i}]: {p:#x} vs {q:#x}"
+                );
+            }
+        }
+    }
+}
+
+/// Batched attention speed, 7B shape (28 heads, 4 kv heads, 128 wide) by
+/// default, AXON_ATT_NZ (64) queries at AXON_PROF_START (1536): the flash
+/// kernel (attn_fa_b) and its quantize_b, the per-query decode kernels
+/// (attn_blk_b, attn_cmb_b), and one decode step's attn_blk + attn_cmb at
+/// the last query's position. Interleaved rounds, best of each.
 #[test]
 #[ignore]
 fn cuda_attn_bench() {
@@ -2545,144 +2855,159 @@ fn cuda_attn_bench() {
     let nz: usize = std::env::var("AXON_ATT_NZ").map_or(64, |v| v.parse().unwrap());
     let start: usize = std::env::var("AXON_PROF_START").map_or(1536, |v| v.parse().unwrap());
     let ctx = start + nz;
+    let nblk_max = ctx.div_ceil(64);
     let max_split = (8 * g.info().unwrap().sms as usize / nkv).clamp(1, MAX_SPLIT);
-    let sst = (32 * max_split).next_multiple_of(4);
+    let gy = max_split.min(nblk_max) as u32;
     let mut rng = Rng(3);
     let kvh: Vec<u16> = (0..ctx * nkv * hd)
         .map(|_| quant::f32_to_f16(rng.f() * 0.5))
         .collect();
     let kc = g.upload(&kvh).unwrap();
     let vc = g.upload(&kvh).unwrap();
-    let q = g.upload(&rng.vec(nz * nh * hd, 1.0)).unwrap();
-    let po = g.alloc(nz * nh * max_split * hd * 4).unwrap();
-    let pm = g.alloc(nz * nh * max_split * 2 * 4).unwrap();
-    let sb = g.alloc(nz * nh * sst * 4).unwrap();
-    let act = g.alloc(nz * act_stride_t(nh * hd)).unwrap();
+    let dim = nh * hd;
+    let q = g.upload(&rng.vec(nz * dim, 1.0)).unwrap();
+    let po = g.alloc(nz.min(64) * nh * nblk_max * hd * 4).unwrap();
+    let pm = g.alloc(nz.min(64) * nh * nblk_max * 2 * 4).unwrap();
+    let ast = act_stride_t(dim);
+    let act = g.alloc(nz * ast).unwrap();
+    let params = g.upload(&[0u32, (ctx - 1) as u32, 0, 0]).unwrap();
     let names = [
-        format!("attn_warp_b_{hd}"),
-        format!("attn_split_b_{hd}"),
-        format!("attn_scores_b_{hd}"),
-        format!("attn_warps_b_{hd}"),
-        "attn_combine_b".to_string(),
-        format!("attn_warpv_b_{hd}"),
+        format!("attn_fa_b_{hd}"),
+        "quantize_b".to_string(),
+        format!("attn_blk_b_{hd}"),
+        "attn_cmb_b".to_string(),
+        format!("attn_blk_{hd}"),
+        "attn_cmb".to_string(),
+        format!("attn_fa_bs_{hd}"),
     ];
     let fs: Vec<Func> = names.iter().map(|n| km.function(n).unwrap()).collect();
+    fs[0]
+        .set_max_shared(batch::fa_shape(hd, false, 0).2)
+        .unwrap();
+    fs[6]
+        .set_max_shared(batch::fa_shape(hd, true, 0).2)
+        .unwrap();
     for (n, f) in names.iter().zip(&fs) {
         eprintln!("{n}: regs, local {:?}", f.regs_local().unwrap());
     }
-    let nsplit = max_split.min(ctx.div_ceil(32));
-    let scale = Arg::F32(1.0 / (hd as f32).sqrt());
-    let mut best = [f64::INFINITY; 6];
+    // The per-query kernels on at most 64 queries (SMALL sweeps).
+    let nq = nz.min(64);
+    let pre = Arg::F32(att_pre(hd));
+    let mut best = [f64::INFINITY; 7];
     for _ in 0..6 {
         for (k, f) in fs.iter().enumerate() {
             let e0 = g.record().unwrap();
-            // SAFETY: prefill.cu's signatures; buffers sized for nz queries
-            // over ctx positions.
+            // SAFETY: decode.cu / prefill.cu's signatures; buffers sized for
+            // nz queries over ctx positions (part_* for nq).
             unsafe {
-                let attn = [
-                    q.arg(),
-                    kc.arg(),
-                    vc.arg(),
-                    Arg::I32(start as i32),
-                    Arg::I32(0),
-                    Arg::I32(nh as i32),
-                    Arg::I32(nkv as i32),
-                    scale,
-                    Arg::I32(max_split as i32),
-                    po.arg(),
-                    pm.arg(),
-                ];
+                let (fa_rows, fa_thr, fa_smem) = batch::fa_shape(hd, k == 6, 0);
                 match k {
-                    0 | 1 => g.launch(
+                    0 | 6 => g.launch(
                         f,
-                        (
-                            nkv as u32,
-                            if k == 0 {
-                                nsplit.div_ceil(4)
-                            } else {
-                                max_split
-                            } as u32,
-                            nz as u32,
-                        ),
-                        (if k == 0 { 128 } else { ATT_TILE as u32 }, 1, 1),
+                        (nkv as u32, (nz * nh / nkv).div_ceil(fa_rows) as u32, 1),
+                        (fa_thr as u32, 1, 1),
+                        fa_smem as u32,
+                        &[
+                            q.arg(),
+                            kc.arg(),
+                            vc.arg(),
+                            Arg::I32(start as i32),
+                            Arg::I32(nz as i32),
+                            Arg::I32(nh as i32),
+                            Arg::I32(nkv as i32),
+                            pre,
+                            q.arg(),
+                        ],
+                    ),
+                    1 => g.launch(
+                        f,
+                        (dim.div_ceil(256) as u32, nz as u32, 1),
+                        (32, 1, 1),
                         0,
-                        &attn,
+                        &[
+                            q.arg(),
+                            Arg::I32(dim as i32),
+                            Arg::I32(0),
+                            act.arg(),
+                            Arg::U64(ast as u64),
+                        ],
                     ),
                     2 => g.launch(
                         f,
-                        (
-                            ctx.div_ceil(64) as u32,
-                            (nz * nh / nkv).div_ceil(64) as u32,
-                            nkv as u32,
-                        ),
-                        (256, 1, 1),
+                        (nkv as u32, gy, nq as u32),
+                        (32, 1, 1),
                         0,
                         &[
                             q.arg(),
                             kc.arg(),
-                            Arg::I32(start as i32),
+                            vc.arg(),
+                            Arg::I32((ctx - nq) as i32),
                             Arg::I32(0),
-                            Arg::I32(nz as i32),
                             Arg::I32(nh as i32),
                             Arg::I32(nkv as i32),
-                            scale,
-                            Arg::I32(sst as i32),
-                            sb.arg(),
+                            pre,
+                            Arg::I32(nblk_max as i32),
+                            po.arg(),
+                            pm.arg(),
                         ],
                     ),
                     3 => g.launch(
                         f,
-                        (nkv as u32, nsplit.div_ceil(4) as u32, nz as u32),
-                        (128, 1, 1),
-                        0,
-                        &[
-                            vc.arg(),
-                            Arg::I32(start as i32),
-                            Arg::I32(0),
-                            Arg::I32(nh as i32),
-                            Arg::I32(nkv as i32),
-                            Arg::I32(max_split as i32),
-                            po.arg(),
-                            pm.arg(),
-                            sb.arg(),
-                            Arg::I32(sst as i32),
-                        ],
-                    ),
-                    5 => g.launch(
-                        f,
-                        (nkv as u32, nz.div_ceil(8) as u32, ctx.div_ceil(64) as u32),
+                        (dim.div_ceil(256) as u32, nq as u32, 1),
                         (256, 1, 1),
                         0,
                         &[
-                            vc.arg(),
-                            Arg::I32(start as i32),
-                            Arg::I32(0),
-                            Arg::I32(nz as i32),
-                            Arg::I32(nh as i32),
-                            Arg::I32(nkv as i32),
-                            Arg::I32(max_split as i32),
                             po.arg(),
                             pm.arg(),
-                            sb.arg(),
-                            Arg::I32(sst as i32),
+                            Arg::I32((ctx - nq) as i32),
+                            Arg::I32(0),
+                            Arg::I32(dim as i32),
+                            Arg::I32(hd as i32),
+                            Arg::I32(nblk_max as i32),
+                            Arg::I32(0),
+                            act.arg(),
+                            Arg::U64(ast as u64),
+                        ],
+                    ),
+                    4 => g.launch(
+                        f,
+                        (nkv as u32, gy, 1),
+                        (32, 1, 1),
+                        0,
+                        &[
+                            q.arg(),
+                            kc.arg(),
+                            vc.arg(),
+                            params.arg(),
+                            Arg::I32(nh as i32),
+                            Arg::I32(nkv as i32),
+                            pre,
+                            Arg::I32(nblk_max as i32),
+                            po.arg(),
+                            pm.arg(),
+                            Arg::Ptr(0),
+                            Arg::Ptr(0),
+                            Arg::Ptr(0),
+                            Arg::F32(0.0),
+                            Arg::Ptr(0),
+                            Arg::Ptr(0),
                         ],
                     ),
                     _ => g.launch(
                         f,
-                        ((nh * hd / 256) as u32, nz as u32, 1),
+                        (dim.div_ceil(256) as u32, 1, 1),
                         (256, 1, 1),
                         0,
                         &[
                             po.arg(),
                             pm.arg(),
-                            Arg::I32(start as i32),
-                            Arg::I32(0),
-                            Arg::I32((nh * hd) as i32),
+                            params.arg(),
+                            Arg::I32(dim as i32),
                             Arg::I32(hd as i32),
-                            Arg::I32(max_split as i32),
+                            Arg::I32(nblk_max as i32),
                             Arg::I32(0),
                             act.arg(),
-                            Arg::U64(act_stride_t(nh * hd) as u64),
+                            Arg::Ptr(0),
                         ],
                     ),
                 }
@@ -2692,226 +3017,302 @@ fn cuda_attn_bench() {
             best[k] = best[k].min(e0.ms_to(&e1).unwrap() as f64);
         }
     }
-    for (n, b) in names.iter().zip(best) {
+    let flops = |n: usize| -> f64 {
+        (0..n).map(|z| (ctx - n + z + 1) as f64).sum::<f64>() * (nh * hd * 4) as f64
+    };
+    for (k, (n, b)) in names.iter().zip(best).enumerate() {
+        let (qn, tf) = match k {
+            0 | 6 => (nz, flops(nz) / (b * 1e-3) / 1e12),
+            2 => (nq, flops(nq) / (b * 1e-3) / 1e12),
+            4 => (1, flops(1) / (b * 1e-3) / 1e12),
+            _ => (
+                if k == 1 {
+                    nz
+                } else if k == 3 {
+                    nq
+                } else {
+                    1
+                },
+                0.0,
+            ),
+        };
         eprintln!(
-            "{nh}/{nkv}x{hd} {n:<18} {nz} queries at {start}: {:>8.1} us",
+            "{nh}/{nkv}x{hd} {n:<16} {qn:>4} queries up to {ctx}: {:>8.1} us {tf:>6.2} TFLOP/s",
             b * 1e3
         );
     }
 }
 
-/// Batched attention (attn_split_b, attn_warp_b, attn_combine_b) gives each
-/// query the decode kernels' bits: split partials (m, l, sums) and the
-/// quantized output, for every layout here (GQA groups 6, 7, 8; heads of 64
-/// and 128) and queries whose splits are short (warp path), long (one and
-/// several tiles), and on both sides of the warp path's limit; launches at
-/// z0 = 0 and past it (a later ATT_SUB launch of a pass: queries z0 + zl),
-/// and past 1024 positions.
+/// The batched tensor-core attention gives each query the decode kernels'
+/// bits (decode.cu "Tensor-core attention"): attn_fa_b + quantize_b (y up
+/// to the sign of a zero, act exactly) and attn_blk_b + attn_cmb_b (block
+/// partials and act exactly) against attn_blk + attn_cmb run per query, for
+/// every layout here (GQA groups 6, 7, 8; heads of 64 and 128), batches of
+/// 1, 16, 17, 1024 queries at positions from 0 to past 1024 and 2048, np = 0,
+/// 1, 63 mod 64 and blocks of rows straddling block boundaries, attn_blk_b
+/// at query offsets z0 > 0, decode grids smaller than the block count (a
+/// warp taking several blocks). The cache past the last query's position
+/// is NaN (f16 0xffff): the kernels must never read it.
 #[test]
 fn gpu_batched_attention_matches_decode_bits() {
     let Some(g) = crate::testutil::gpu() else {
         return;
     };
     let km = Kernels::module(&g).unwrap();
-    let (fc, fcb) = (
-        km.function("attn_combine").unwrap(),
-        km.function("attn_combine_b").unwrap(),
+    if !km.mma() {
+        return;
+    }
+    let (fc, fcb, fq) = (
+        km.function("attn_cmb").unwrap(),
+        km.function("attn_cmb_b").unwrap(),
+        km.function("quantize_b").unwrap(),
     );
     let mut rng = Rng(9191);
-    // (n_heads, n_kv, hd): 0.5B, 1.5B, 3B (group 8), 7B.
-    for (nh, nkv, hd) in [(14, 2, 64), (12, 2, 128), (16, 2, 128), (28, 4, 128)] {
-        let (dim, kvd) = (nh * hd, nkv * hd);
-        let fs = km.function(&format!("attn_split_{hd}")).unwrap();
-        let fsb = km.function(&format!("attn_split_b_{hd}")).unwrap();
-        let fw = km.function(&format!("attn_warp_b_{hd}")).unwrap();
-        let fsc = km.function(&format!("attn_scores_b_{hd}")).unwrap();
-        let fws = km.function(&format!("attn_warps_b_{hd}")).unwrap();
-        let fwv = km.function(&format!("attn_warpv_b_{hd}")).unwrap();
-        // (start, z0, queries, max_split): query zl of a launch is token z0
-        // + zl of the pass, at position start + z0 + zl.
-        for (start, z0, nz, ms) in [
-            (0, 0, 40, 23),
-            (200, 0, 70, 8),
-            (1000, 0, 12, 46),
-            (3000, 0, 6, 23),
-            (100, 16, 64, 23),
-            (1100, 16, 64, 46),
-            (1400, 40, 64, 46),
-            (3000, 24, 8, 23),
-        ] {
-            let ctx = start + z0 + nz;
+    // (n_heads, n_kv, hd): 0.5B, 1.5B, 3B (group 8), 7B; the f16 cache,
+    // the q8 cache with a scale per head row (kg = hd) or per 32 values.
+    for (nh, nkv, hd, kg) in [
+        (14, 2, 64, 0),
+        (12, 2, 128, 0),
+        (16, 2, 128, 0),
+        (28, 4, 128, 0),
+        (14, 2, 64, 64),
+        (28, 4, 128, 32),
+        (16, 2, 128, 128),
+    ] {
+        let (dim, kvd, group) = (nh * hd, nkv * hd, nh / nkv);
+        let q8n = match kg {
+            0 => String::new(),
+            _ if kg == hd => "q8_".into(),
+            _ => "q8g32_".into(),
+        };
+        let fd = km.function(&format!("attn_blk_{q8n}{hd}")).unwrap();
+        let fb = km.function(&format!("attn_blk_b_{q8n}{hd}")).unwrap();
+        let ffs: Vec<Func> = ["attn_fa_b", "attn_fa_bs"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| {
+                let f = km.function(&format!("{n}_{q8n}{hd}")).unwrap();
+                f.set_max_shared(batch::fa_shape(hd, i == 1, kg).2).unwrap();
+                f
+            })
+            .collect();
+        let pre = Arg::F32(att_pre(hd));
+        // (start, nb, z0 of the attn_blk_b launch, decode grid y).
+        let cases: &[(usize, usize, usize, usize)] = &[
+            (0, 1, 0, 1),
+            (0, 17, 3, 46),
+            (63, 16, 5, 2),
+            (64, 17, 0, 1),
+            (126, 40, 7, 3),
+            (200, 70, 16, 46),
+            (1000, 24, 8, 5),
+            (1023, 1, 0, 46),
+            (1100, 64, 33, 7),
+            (1983, 130, 64, 23),
+            (3000, 17, 1, 46),
+            (0, 1024, 1000, 46),
+        ];
+        for &(start, nb, z0, gy) in cases {
+            if nb == 1024 && (hd == 128 && nh == 12 || kg > 0) {
+                continue; // one 1024-batch per head size is enough
+            }
+            let ctx = start + nb;
+            // Room past the batch (and NaN there).
+            let max_ctx = ctx + 77;
+            let nblk_max = max_ctx.div_ceil(64);
             let to_h = |v: Vec<f32>| -> Vec<u16> { v.into_iter().map(quant::f32_to_f16).collect() };
-            let kb = g.upload(&to_h(rng.vec(ctx * kvd, 4.0))).unwrap();
-            let vb = g.upload(&to_h(rng.vec(ctx * kvd, 1.0))).unwrap();
-            let q = rng.vec((z0 + nz) * dim, 1.0);
-            let qb = g.upload(&q).unwrap();
-            let (po_n, pm_n) = (nh * ms * hd, nh * ms * 2);
+            // The cache's buffers (f16: K, V; q8: K, V, their scales).
+            let mut bufs = Vec::new();
+            if kg == 0 {
+                let mut kh = to_h(rng.vec(ctx * kvd, 4.0));
+                let mut vh = to_h(rng.vec(ctx * kvd, 1.0));
+                kh.resize(max_ctx * kvd, 0xffff);
+                vh.resize(max_ctx * kvd, 0xffff);
+                bufs.push(g.upload(&kh).unwrap());
+                bufs.push(g.upload(&vh).unwrap());
+            } else {
+                // Int8 values (garbage past ctx), scales (NaN past ctx).
+                let mut i8s = || -> Vec<u8> {
+                    (0..max_ctx * kvd)
+                        .map(|_| (rng.next() % 255) as u8)
+                        .collect()
+                };
+                let (k8, v8) = (i8s(), i8s());
+                let mut sc = |scale: f32| -> Vec<f32> {
+                    let mut d: Vec<f32> = (0..ctx * kvd / kg)
+                        .map(|_| (rng.f() + 1.5) * scale / 127.0)
+                        .collect();
+                    d.resize(max_ctx * kvd / kg, f32::NAN);
+                    d
+                };
+                let (ks, vs) = (sc(4.0), sc(1.0));
+                bufs.push(g.upload(&k8).unwrap());
+                bufs.push(g.upload(&v8).unwrap());
+                bufs.push(g.upload(&ks).unwrap());
+                bufs.push(g.upload(&vs).unwrap());
+            }
+            let kva: Vec<Arg> = bufs.iter().map(|b| b.arg()).collect();
+            let q = rng.vec(nb * dim, 1.0);
             let ast = act_stride_t(dim);
-            let scale = Arg::F32(1.0 / (hd as f32).sqrt());
-            // Batched: the split kernel for all queries, the warp kernel for
-            // those within its limit (np <= 32 ms), each into its own buffers.
-            let nsplit = |np: usize| ms.min(np.div_ceil(32));
-            let warp_n = (0..nz).filter(|&z| start + z0 + z < 32 * ms).count();
-            let mut batched = Vec::new();
-            // (The third and fourth: attn_scores_b then attn_warps_b or
-            // attn_warpv_b, batch.rs's path.)
-            for (kind, (f, n)) in [(&fsb, nz), (&fw, warp_n), (&fws, warp_n), (&fwv, warp_n)]
-                .into_iter()
-                .enumerate()
-            {
-                if n == 0 {
-                    continue;
-                }
-                let po = g.alloc(n * po_n * 4).unwrap();
-                let pm = g.alloc(n * pm_n * 4).unwrap();
-                let act = g.alloc((z0 + n) * ast).unwrap();
-                act.zero().unwrap(); // parts no kernel writes (n % 256 != 0) compare equal
-                let warp = kind > 0;
-                let sst = (32 * ms).next_multiple_of(4);
-                let sbuf = g.alloc(n * nh * sst * 4).unwrap();
-                // SAFETY: prefill.cu's signatures; buffers for n queries over
-                // ctx positions, K/V of ctx rows.
-                unsafe {
-                    if kind >= 2 {
-                        let group = nh / nkv;
-                        g.launch(
-                            &fsc,
-                            (
-                                (start + z0 + n).div_ceil(64) as u32,
-                                (n * group).div_ceil(64) as u32,
-                                nkv as u32,
-                            ),
-                            (256, 1, 1),
-                            0,
-                            &[
-                                qb.arg(),
-                                kb.arg(),
-                                Arg::I32(start as i32),
-                                Arg::I32(z0 as i32),
-                                Arg::I32(n as i32),
-                                Arg::I32(nh as i32),
-                                Arg::I32(nkv as i32),
-                                scale,
-                                Arg::I32(sst as i32),
-                                sbuf.arg(),
-                            ],
-                        )
-                        .unwrap();
-                        let mut a = vec![vb.arg(), Arg::I32(start as i32), Arg::I32(z0 as i32)];
-                        if kind == 3 {
-                            a.push(Arg::I32(n as i32));
-                        }
-                        a.extend_from_slice(&[
+            let want_k = Arg::I32(dim.is_multiple_of(256) as i32);
+            // Flash (both block sizes, alternately): all nb queries, y in
+            // place of q, then act.
+            let small = (start + nb) % 2 == 1;
+            let ctxs = |what: &str, z: usize| {
+                format!(
+                    "{nh}/{nkv}x{hd} kg {kg} start {start} nb {nb} z0 {z0} small {small}: {what} query {z} (np {})",
+                    start + z + 1
+                )
+            };
+            let (fa_rows, fa_thr, fa_smem) = batch::fa_shape(hd, small, kg);
+            let qy = g.upload(&q).unwrap();
+            let fact = g.alloc(nb * ast).unwrap();
+            fact.zero().unwrap();
+            // SAFETY: prefill.cu's signatures; q/y nb rows of dim, the cache
+            // max_ctx rows, act nb strides.
+            unsafe {
+                g.launch(
+                    &ffs[small as usize],
+                    (nkv as u32, (nb * group).div_ceil(fa_rows) as u32, 1),
+                    (fa_thr as u32, 1, 1),
+                    fa_smem as u32,
+                    &[
+                        &[qy.arg()][..],
+                        &kva[..],
+                        &[
+                            Arg::I32(start as i32),
+                            Arg::I32(nb as i32),
                             Arg::I32(nh as i32),
                             Arg::I32(nkv as i32),
-                            Arg::I32(ms as i32),
-                            po.arg(),
-                            pm.arg(),
-                            sbuf.arg(),
-                            Arg::I32(sst as i32),
-                        ]);
-                        let (grid, block) = if kind == 3 {
-                            (
-                                (
-                                    nkv as u32,
-                                    n.div_ceil(8) as u32,
-                                    (start + z0 + n).div_ceil(64) as u32,
-                                ),
-                                256,
-                            )
-                        } else {
-                            ((nkv as u32, ms.div_ceil(4) as u32, n as u32), 128)
-                        };
-                        g.launch(f, grid, (block, 1, 1), 0, &a).unwrap();
-                    } else {
-                        g.launch(
-                            f,
-                            (
-                                nkv as u32,
-                                if warp { ms.div_ceil(4) } else { ms } as u32,
-                                n as u32,
-                            ),
-                            (if warp { 128 } else { ATT_TILE as u32 }, 1, 1),
-                            0,
+                            pre,
+                            qy.arg(),
+                        ],
+                    ]
+                    .concat(),
+                )
+                .unwrap();
+                g.launch(
+                    &fq,
+                    (dim.div_ceil(256) as u32, nb as u32, 1),
+                    (32, 1, 1),
+                    0,
+                    &[
+                        qy.arg(),
+                        Arg::I32(dim as i32),
+                        want_k,
+                        fact.arg(),
+                        Arg::U64(ast as u64),
+                    ],
+                )
+                .unwrap();
+            }
+            let (fy, fact): (Vec<f32>, Vec<u8>) = (qy.read().unwrap(), fact.read().unwrap());
+            // Per query: queries z0.. of the batch.
+            let nz = nb - z0;
+            let qb = g.upload(&q).unwrap();
+            let (po_n, pm_n) = (nh * nblk_max * hd, nh * nblk_max * 2);
+            let bpo = g.alloc(nz * po_n * 4).unwrap();
+            let bpm = g.alloc(nz * pm_n * 4).unwrap();
+            let bact = g.alloc(nb * ast).unwrap();
+            bact.zero().unwrap();
+            // SAFETY: as above; part_* for nz queries of nblk_max blocks.
+            unsafe {
+                g.launch(
+                    &fb,
+                    (nkv as u32, gy.min(nblk_max) as u32, nz as u32),
+                    (32, 1, 1),
+                    0,
+                    &[
+                        &[qb.arg()][..],
+                        &kva[..],
+                        &[
+                            Arg::I32(start as i32),
+                            Arg::I32(z0 as i32),
+                            Arg::I32(nh as i32),
+                            Arg::I32(nkv as i32),
+                            pre,
+                            Arg::I32(nblk_max as i32),
+                            bpo.arg(),
+                            bpm.arg(),
+                        ],
+                    ]
+                    .concat(),
+                )
+                .unwrap();
+                g.launch(
+                    &fcb,
+                    (dim.div_ceil(256) as u32, nz as u32, 1),
+                    (256, 1, 1),
+                    0,
+                    &[
+                        bpo.arg(),
+                        bpm.arg(),
+                        Arg::I32(start as i32),
+                        Arg::I32(z0 as i32),
+                        Arg::I32(dim as i32),
+                        Arg::I32(hd as i32),
+                        Arg::I32(nblk_max as i32),
+                        want_k,
+                        bact.arg(),
+                        Arg::U64(ast as u64),
+                    ],
+                )
+                .unwrap();
+            }
+            let (bpo, bpm, bact): (Vec<f32>, Vec<f32>, Vec<u8>) = (
+                bpo.read().unwrap(),
+                bpm.read().unwrap(),
+                bact.read().unwrap(),
+            );
+            // Decode, query by query (all nb, for the flash side).
+            let po = g.alloc(po_n * 4).unwrap();
+            let pm = g.alloc(pm_n * 4).unwrap();
+            let act = g.alloc(act_bytes(dim)).unwrap();
+            let y = g.alloc(dim * 4).unwrap();
+            let ab = act_bytes(dim);
+            for z in 0..nb {
+                let np = start + z + 1;
+                let qz = g.upload(&q[z * dim..(z + 1) * dim]).unwrap();
+                let params = g.upload(&[0u32, (np - 1) as u32, 0, 0]).unwrap();
+                act.zero().unwrap();
+                // SAFETY: decode.cu's signatures; part_* nblk_max blocks.
+                unsafe {
+                    g.launch(
+                        &fd,
+                        (nkv as u32, gy.min(nblk_max) as u32, 1),
+                        (32, 1, 1),
+                        0,
+                        &[
+                            &[qz.arg()][..],
+                            &kva[..],
+                            // q8: no new row to store (kf null).
+                            if kg > 0 { &[Arg::Ptr(0)][..] } else { &[] },
                             &[
-                                qb.arg(),
-                                kb.arg(),
-                                vb.arg(),
-                                Arg::I32(start as i32),
-                                Arg::I32(z0 as i32),
+                                params.arg(),
                                 Arg::I32(nh as i32),
                                 Arg::I32(nkv as i32),
-                                scale,
-                                Arg::I32(ms as i32),
+                                pre,
+                                Arg::I32(nblk_max as i32),
                                 po.arg(),
                                 pm.arg(),
                             ],
-                        )
-                        .unwrap();
-                    }
-                    g.launch(
-                        &fcb,
-                        ((dim / 256) as u32, n as u32, 1),
-                        (256, 1, 1),
-                        0,
-                        &[
-                            po.arg(),
-                            pm.arg(),
-                            Arg::I32(start as i32),
-                            Arg::I32(z0 as i32),
-                            Arg::I32(dim as i32),
-                            Arg::I32(hd as i32),
-                            Arg::I32(ms as i32),
-                            Arg::I32(dim.is_multiple_of(256) as i32),
-                            act.arg(),
-                            Arg::U64(ast as u64),
-                        ],
-                    )
-                    .unwrap();
-                }
-                let (po, pm, act): (Vec<f32>, Vec<f32>, Vec<u8>) =
-                    (po.read().unwrap(), pm.read().unwrap(), act.read().unwrap());
-                batched.push((kind, n, po, pm, act));
-            }
-            for z in 0..nz {
-                let np = start + z0 + z + 1;
-                let qz = g.upload(&q[(z0 + z) * dim..(z0 + z + 1) * dim]).unwrap();
-                let params = g.upload(&[0u32, (np - 1) as u32, 0, 0]).unwrap();
-                let po = g.alloc(po_n * 4).unwrap();
-                let pm = g.alloc(pm_n * 4).unwrap();
-                let act = g.alloc(act_bytes(dim)).unwrap();
-                act.zero().unwrap();
-                // SAFETY: decode.cu's signatures, as gpu_attention_matches_cpu.
-                unsafe {
-                    g.launch(
-                        &fs,
-                        (nkv as u32, ms as u32, 1),
-                        (ATT_TILE as u32, 1, 1),
-                        0,
-                        &[
-                            qz.arg(),
-                            kb.arg(),
-                            vb.arg(),
-                            params.arg(),
-                            Arg::I32(nh as i32),
-                            Arg::I32(nkv as i32),
-                            scale,
-                            Arg::I32(ms as i32),
-                            po.arg(),
-                            pm.arg(),
-                            // No q/k norms (QkNorm: kraw, qn, kn, eps, rope, kc_out).
-                            Arg::Ptr(0),
-                            Arg::Ptr(0),
-                            Arg::Ptr(0),
-                            Arg::F32(0.0),
-                            Arg::Ptr(0),
-                            Arg::Ptr(0),
-                        ],
+                            // No q/k norms (f16: kraw, qn, kn, eps, rope,
+                            // kc_out; q8: ksh, qn, kn, eps, rope).
+                            &[
+                                Arg::Ptr(0),
+                                Arg::Ptr(0),
+                                Arg::Ptr(0),
+                                Arg::F32(0.0),
+                                Arg::Ptr(0),
+                            ],
+                            if kg > 0 { &[] } else { &[Arg::Ptr(0)][..] },
+                        ]
+                        .concat(),
                     )
                     .unwrap();
                     g.launch(
                         &fc,
-                        ((dim / 256) as u32, 1, 1),
+                        (dim.div_ceil(256) as u32, 1, 1),
                         (256, 1, 1),
                         0,
                         &[
@@ -2920,41 +3321,60 @@ fn gpu_batched_attention_matches_decode_bits() {
                             params.arg(),
                             Arg::I32(dim as i32),
                             Arg::I32(hd as i32),
-                            Arg::I32(ms as i32),
-                            Arg::I32(dim.is_multiple_of(256) as i32),
+                            Arg::I32(nblk_max as i32),
+                            want_k,
                             act.arg(),
-                            Arg::Ptr(0),
+                            y.arg(),
                         ],
                     )
                     .unwrap();
                 }
-                let (wpo, wpm, wact): (Vec<f32>, Vec<f32>, Vec<u8>) =
-                    (po.read().unwrap(), pm.read().unwrap(), act.read().unwrap());
-                for (kind, n, bpo, bpm, bact) in &batched {
-                    if z >= *n {
-                        continue;
-                    }
-                    let ctxs = format!("{nh}/{nkv}x{hd} np {np} z0 {z0} splits {ms} kernel {kind}");
-                    for h in 0..nh {
-                        for s in 0..nsplit(np) {
-                            let o = (h * ms + s) * hd;
-                            assert_eq!(
-                                bits(&bpo[z * po_n + o..z * po_n + o + hd]),
-                                bits(&wpo[o..o + hd]),
-                                "{ctxs}: sums head {h} split {s}"
-                            );
-                            let m = (h * ms + s) * 2;
-                            assert_eq!(
-                                bits(&bpm[z * pm_n + m..z * pm_n + m + 2]),
-                                bits(&wpm[m..m + 2]),
-                                "{ctxs}: m, l head {h} split {s}"
-                            );
-                        }
-                    }
-                    let ab = act_bytes(dim);
-                    let za = (z0 + z) * ast;
-                    assert!(bact[za..za + ab] == wact[..], "{ctxs}: output");
+                let (wy, wact): (Vec<f32>, Vec<u8>) = (y.read().unwrap(), act.read().unwrap());
+                assert!(
+                    wy.iter().all(|x| x.is_finite()),
+                    "{}",
+                    ctxs("decode y finite", z)
+                );
+                for (d, (a, b)) in fy[z * dim..(z + 1) * dim].iter().zip(&wy).enumerate() {
+                    assert!(
+                        a.to_bits() == b.to_bits() || (*a == 0.0 && *b == 0.0),
+                        "{}: y[{d}] {a} vs {b}",
+                        ctxs("flash", z)
+                    );
                 }
+                assert!(
+                    fact[z * ast..z * ast + ab] == wact[..],
+                    "{}",
+                    ctxs("flash act", z)
+                );
+                if z < z0 {
+                    continue;
+                }
+                let zl = z - z0;
+                let (wpo, wpm): (Vec<f32>, Vec<f32>) = (po.read().unwrap(), pm.read().unwrap());
+                for h in 0..nh {
+                    for b in 0..np.div_ceil(64) {
+                        let o = (h * nblk_max + b) * hd;
+                        assert_eq!(
+                            bits(&bpo[zl * po_n + o..zl * po_n + o + hd]),
+                            bits(&wpo[o..o + hd]),
+                            "{}: head {h} block {b} sums",
+                            ctxs("attn_blk_b", z)
+                        );
+                        let m = (h * nblk_max + b) * 2;
+                        assert_eq!(
+                            bits(&bpm[zl * pm_n + m..zl * pm_n + m + 2]),
+                            bits(&wpm[m..m + 2]),
+                            "{}: head {h} block {b} m, l",
+                            ctxs("attn_blk_b", z)
+                        );
+                    }
+                }
+                assert!(
+                    bact[z * ast..z * ast + ab] == wact[..],
+                    "{}",
+                    ctxs("attn_blk_b act", z)
+                );
             }
         }
     }
@@ -3207,6 +3627,7 @@ fn compare_forced<R: Lm, O: Lm>(r: &R, o: &O, ids: &[u32], from: usize, a: &mut 
         a.top1 += (ar == ao) as usize;
         let k = kl(&lr, &lo);
         a.max_kl = a.max_kl.max(k);
+        a.over_half += (k > 0.5) as usize;
         a.sum_kl += k;
         for (x, y) in lr.iter().zip(&lo) {
             a.max_abs = a.max_abs.max((x - y).abs());
@@ -3446,160 +3867,191 @@ fn cuda_kv_q8_accuracy() {
     );
 }
 
-/// The q8 decode attention (attn_split_q8*, + attn_combine) == an f64
-/// reference on the dequantized cache (d * q per value), the new token's
-/// row stored by the kernel itself from f32 (kf) by `q8_ref`'s rule: both
-/// head sizes and scale groups, single and many tiles and splits.
+/// The q8 decode attention == an f64 reference on the dequantized cache
+/// (d q per value), the new token's row stored by the kernel itself from
+/// f32 (kf) by `q8_ref`'s rule: both head sizes and scale groups, single and
+/// many tiles and splits; the split kernels (attn_split_q8*, + attn_combine;
+/// GPUs without tensor cores) to f32 rounding, the tensor-core ones
+/// (attn_blk_q8*, + attn_cmb: f16 queries, values and probabilities) to
+/// f16's.
 #[test]
 fn gpu_q8_attention_matches_reference() {
     let Some(g) = crate::testutil::gpu() else {
         return;
     };
     let km = Kernels::module(&g).unwrap();
-    let fc = km.function("attn_combine").unwrap();
     let mut rng = Rng(777);
-    for (nh, nkv, hd) in [(14, 2, 64), (28, 4, 128), (40, 8, 128)] {
-        let (dim, kvd) = (nh * hd, nkv * hd);
-        for group in [hd, 32] {
-            let q8n = if group == hd { "q8" } else { "q8g32" };
-            let fs = km.function(&format!("attn_split_{q8n}_{hd}")).unwrap();
-            for (np, max_split) in [(1, 23), (7, 46), (129, 23), (1000, 4), (4099, 46)] {
-                let q = rng.vec(dim, 1.0);
-                // Keys with a few large channels (as Qwen's), values O(1).
-                let mut k = rng.vec(np * kvd, 2.0);
-                for (i, x) in k.iter_mut().enumerate() {
-                    if i % hd == 3 || i % hd == hd / 2 + 3 {
-                        *x *= 20.0;
+    let mut worst = 0f64;
+    for tc in [false, true] {
+        if tc && !km.mma() {
+            continue;
+        }
+        let fc = km
+            .function(if tc { "attn_cmb" } else { "attn_combine" })
+            .unwrap();
+        for (nh, nkv, hd) in [(14, 2, 64), (28, 4, 128), (40, 8, 128)] {
+            let (dim, kvd) = (nh * hd, nkv * hd);
+            for group in [hd, 32] {
+                let q8n = if group == hd { "q8" } else { "q8g32" };
+                let kn = if tc { "attn_blk" } else { "attn_split" };
+                let fs = km.function(&format!("{kn}_{q8n}_{hd}")).unwrap();
+                for (np, max_split) in
+                    [(1usize, 23usize), (7, 46), (129, 23), (1000, 4), (4099, 46)]
+                {
+                    // The split count, or the tensor-core kernels' grid and
+                    // blocks.
+                    let nblk = np.div_ceil(64);
+                    let (grid, block, parts) = match tc {
+                        true => (max_split.min(nblk), 32, nblk),
+                        false => (max_split, ATT_TILE as u32, max_split),
+                    };
+                    let q = rng.vec(dim, 1.0);
+                    // Keys with a few large channels (as Qwen's), values O(1).
+                    let mut k = rng.vec(np * kvd, 2.0);
+                    for (i, x) in k.iter_mut().enumerate() {
+                        if i % hd == 3 || i % hd == hd / 2 + 3 {
+                            *x *= 20.0;
+                        }
                     }
-                }
-                let v = rng.vec(np * kvd, 1.0);
-                // Rows 0..np - 1 quantized here; row np - 1 by the kernel.
-                let quant = |x: &[f32]| {
-                    let (mut qs, mut ds) = (Vec::new(), Vec::new());
-                    for c in x.chunks(group) {
-                        let (qq, d) = q8_ref(c);
-                        qs.extend(qq.iter().map(|&b| b as u8));
-                        ds.push(d);
+                    let v = rng.vec(np * kvd, 1.0);
+                    // Rows 0..np - 1 quantized here; row np - 1 by the kernel.
+                    let quant = |x: &[f32]| {
+                        let (mut qs, mut ds) = (Vec::new(), Vec::new());
+                        for c in x.chunks(group) {
+                            let (qq, d) = q8_ref(c);
+                            qs.extend(qq.iter().map(|&b| b as u8));
+                            ds.push(d);
+                        }
+                        (qs, ds)
+                    };
+                    let (kq, ks) = quant(&k);
+                    let (vq, vs) = quant(&v);
+                    let deq =
+                        |qs: &[u8], ds: &[f32], i: usize| ds[i / group] as f64 * qs[i] as i8 as f64;
+                    let up8 = |b: &[u8], new: bool| {
+                        let mut b = b.to_vec();
+                        if new {
+                            b[(np - 1) * kvd..].fill(0x55); // the kernel writes these
+                        }
+                        g.upload(&b).unwrap()
+                    };
+                    let (kb, vb) = (up8(&kq, true), up8(&vq, true));
+                    // Row np - 1's scales poisoned too: the kernel must store them.
+                    let upf = |d: &[f32]| {
+                        let mut d = d.to_vec();
+                        d[(np - 1) * kvd / group..].fill(f32::NAN);
+                        g.upload(&d).unwrap()
+                    };
+                    let (ksb, vsb) = (upf(&ks), upf(&vs));
+                    let mut kf = k[(np - 1) * kvd..].to_vec();
+                    kf.extend_from_slice(&v[(np - 1) * kvd..]);
+                    let (qb, kfb) = (g.upload(&q).unwrap(), g.upload(&kf).unwrap());
+                    let params = g.upload(&[0u32, (np - 1) as u32, 0, 0]).unwrap();
+                    let po = g.alloc(nh * parts * hd * 4).unwrap();
+                    let pml = g.alloc(nh * parts * 2 * 4).unwrap();
+                    let act = g.alloc(act_bytes(dim)).unwrap();
+                    let out = g.alloc(dim * 4).unwrap();
+                    // SAFETY: decode.cu's signatures; the cache holds np rows
+                    // (int8) and their scales, kf 2 kv_dim floats.
+                    unsafe {
+                        g.launch(
+                            &fs,
+                            (nkv as u32, grid as u32, 1),
+                            (block, 1, 1),
+                            0,
+                            &[
+                                qb.arg(),
+                                kb.arg(),
+                                vb.arg(),
+                                ksb.arg(),
+                                vsb.arg(),
+                                kfb.arg(),
+                                params.arg(),
+                                Arg::I32(nh as i32),
+                                Arg::I32(nkv as i32),
+                                Arg::F32(if tc {
+                                    att_pre(hd)
+                                } else {
+                                    1.0 / (hd as f32).sqrt()
+                                }),
+                                Arg::I32(parts as i32),
+                                po.arg(),
+                                pml.arg(),
+                                Arg::Ptr(0),
+                                // No qwen3 norms (qn, kn, eps, rope).
+                                Arg::Ptr(0),
+                                Arg::Ptr(0),
+                                Arg::F32(0.0),
+                                Arg::Ptr(0),
+                            ],
+                        )
+                        .unwrap();
+                        g.launch(
+                            &fc,
+                            (dim.div_ceil(256) as u32, 1, 1),
+                            (256, 1, 1),
+                            0,
+                            &[
+                                po.arg(),
+                                pml.arg(),
+                                params.arg(),
+                                Arg::I32(dim as i32),
+                                Arg::I32(hd as i32),
+                                Arg::I32(parts as i32),
+                                Arg::I32(dim.is_multiple_of(256) as i32),
+                                act.arg(),
+                                out.arg(),
+                            ],
+                        )
+                        .unwrap();
                     }
-                    (qs, ds)
-                };
-                let (kq, ks) = quant(&k);
-                let (vq, vs) = quant(&v);
-                let deq =
-                    |qs: &[u8], ds: &[f32], i: usize| ds[i / group] as f64 * qs[i] as i8 as f64;
-                let up8 = |b: &[u8], new: bool| {
-                    let mut b = b.to_vec();
-                    if new {
-                        b[(np - 1) * kvd..].fill(0x55); // the kernel writes these
-                    }
-                    g.upload(&b).unwrap()
-                };
-                let (kb, vb) = (up8(&kq, true), up8(&vq, true));
-                // Row np - 1's scales poisoned too: the kernel must store them.
-                let upf = |d: &[f32]| {
-                    let mut d = d.to_vec();
-                    d[(np - 1) * kvd / group..].fill(f32::NAN);
-                    g.upload(&d).unwrap()
-                };
-                let (ksb, vsb) = (upf(&ks), upf(&vs));
-                let mut kf = k[(np - 1) * kvd..].to_vec();
-                kf.extend_from_slice(&v[(np - 1) * kvd..]);
-                let (qb, kfb) = (g.upload(&q).unwrap(), g.upload(&kf).unwrap());
-                let params = g.upload(&[0u32, (np - 1) as u32, 0, 0]).unwrap();
-                let po = g.alloc(nh * max_split * hd * 4).unwrap();
-                let pml = g.alloc(nh * max_split * 2 * 4).unwrap();
-                let act = g.alloc(act_bytes(dim)).unwrap();
-                let out = g.alloc(dim * 4).unwrap();
-                // SAFETY: decode.cu's signatures; the cache holds np rows
-                // (int8) and their scales, kf 2 kv_dim floats.
-                unsafe {
-                    g.launch(
-                        &fs,
-                        (nkv as u32, max_split as u32, 1),
-                        (ATT_TILE as u32, 1, 1),
-                        0,
-                        &[
-                            qb.arg(),
-                            kb.arg(),
-                            vb.arg(),
-                            ksb.arg(),
-                            vsb.arg(),
-                            kfb.arg(),
-                            params.arg(),
-                            Arg::I32(nh as i32),
-                            Arg::I32(nkv as i32),
-                            Arg::F32(1.0 / (hd as f32).sqrt()),
-                            Arg::I32(max_split as i32),
-                            po.arg(),
-                            pml.arg(),
-                            Arg::Ptr(0),
-                            // No qwen3 norms (qn, kn, eps, rope).
-                            Arg::Ptr(0),
-                            Arg::Ptr(0),
-                            Arg::F32(0.0),
-                            Arg::Ptr(0),
-                        ],
-                    )
-                    .unwrap();
-                    g.launch(
-                        &fc,
-                        (dim.div_ceil(256) as u32, 1, 1),
-                        (256, 1, 1),
-                        0,
-                        &[
-                            po.arg(),
-                            pml.arg(),
-                            params.arg(),
-                            Arg::I32(dim as i32),
-                            Arg::I32(hd as i32),
-                            Arg::I32(max_split as i32),
-                            Arg::I32(dim.is_multiple_of(256) as i32),
-                            act.arg(),
-                            out.arg(),
-                        ],
-                    )
-                    .unwrap();
-                }
-                let got: Vec<f32> = out.read().unwrap();
-                // The kernel's store of row np - 1 is the rule's.
-                let at = format!("{q8n} hd {hd} np {np}");
-                assert_eq!(kb.read::<u8>().unwrap(), kq, "{at}: stored keys");
-                assert_eq!(vb.read::<u8>().unwrap(), vq, "{at}: stored values");
-                let ksgot: Vec<f32> = ksb.read().unwrap();
-                let vsgot: Vec<f32> = vsb.read().unwrap();
-                assert_eq!(bits(&ksgot), bits(&ks), "{at}: stored key scales");
-                assert_eq!(bits(&vsgot), bits(&vs), "{at}: stored value scales");
-                let gq = nh / nkv;
-                let mut de = 0f64;
-                for h in 0..nh {
-                    let kvh = h / gq;
-                    let s: Vec<f64> = (0..np)
-                        .map(|t| {
-                            (0..hd)
-                                .map(|d| {
-                                    q[h * hd + d] as f64 * deq(&kq, &ks, t * kvd + kvh * hd + d)
-                                })
+                    let got: Vec<f32> = out.read().unwrap();
+                    // The kernel's store of row np - 1 is the rule's.
+                    let at = format!("{kn} {q8n} hd {hd} np {np}");
+                    assert_eq!(kb.read::<u8>().unwrap(), kq, "{at}: stored keys");
+                    assert_eq!(vb.read::<u8>().unwrap(), vq, "{at}: stored values");
+                    let ksgot: Vec<f32> = ksb.read().unwrap();
+                    let vsgot: Vec<f32> = vsb.read().unwrap();
+                    assert_eq!(bits(&ksgot), bits(&ks), "{at}: stored key scales");
+                    assert_eq!(bits(&vsgot), bits(&vs), "{at}: stored value scales");
+                    let gq = nh / nkv;
+                    let mut de = 0f64;
+                    for h in 0..nh {
+                        let kvh = h / gq;
+                        let s: Vec<f64> = (0..np)
+                            .map(|t| {
+                                (0..hd)
+                                    .map(|d| {
+                                        q[h * hd + d] as f64 * deq(&kq, &ks, t * kvd + kvh * hd + d)
+                                    })
+                                    .sum::<f64>()
+                                    / (hd as f64).sqrt()
+                            })
+                            .collect();
+                        let m = s.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                        let p: Vec<f64> = s.iter().map(|x| (x - m).exp()).collect();
+                        let l: f64 = p.iter().sum();
+                        for d in 0..hd {
+                            let e: f64 = (0..np)
+                                .map(|t| p[t] * deq(&vq, &vs, t * kvd + kvh * hd + d))
                                 .sum::<f64>()
-                                / (hd as f64).sqrt()
-                        })
-                        .collect();
-                    let m = s.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-                    let p: Vec<f64> = s.iter().map(|x| (x - m).exp()).collect();
-                    let l: f64 = p.iter().sum();
-                    for d in 0..hd {
-                        let e: f64 = (0..np)
-                            .map(|t| p[t] * deq(&vq, &vs, t * kvd + kvh * hd + d))
-                            .sum::<f64>()
-                            / l;
-                        de = de.max((got[h * hd + d] as f64 - e).abs());
+                                / l;
+                            de = de.max((got[h * hd + d] as f64 - e).abs());
+                        }
                     }
+                    // As gpu_attention_matches_cpu: outputs O(1), f32 sums;
+                    // tc: f16 roundings (gpu_tc_attention_close_to_f64).
+                    let bound = if tc { 1e-2 } else { 2e-5 };
+                    if tc {
+                        worst = worst.max(de);
+                    }
+                    assert!(
+                        de < bound,
+                        "{kn} {q8n} heads {nh}/{nkv} hd {hd} np {np}: vs f64 {de:e}"
+                    );
                 }
-                // As gpu_attention_matches_cpu: outputs O(1), f32 sums.
-                assert!(
-                    de < 2e-5,
-                    "{q8n} heads {nh}/{nkv} hd {hd} np {np}: vs f64 {de:e}"
-                );
             }
         }
     }
+    eprintln!("q8 tc attention: worst |out - f64| {worst:e}");
 }

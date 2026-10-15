@@ -12,16 +12,51 @@
 //! reads the weights once for the batch like a decode step. On GPUs without
 //! int8 mma (sm < 80) gemvn, the decode GEMV with a token loop (dp4a), does
 //! every batch, 16 tokens per pass over the weights: correct, not fast.
+//!
+//! The attention of a batch (sm_80+) is the decode kernels' canonical order
+//! (decode.cu "Tensor-core attention"): one flash-attention launch per layer
+//! (attn_fa_b) for the whole pass, or the decode kernel per query
+//! (attn_blk_b) for a few queries (`att_per_query`).
 
 use super::*;
 
 /// Batches of up to this many tokens use gemvn (weight-read-once, CUDA
 /// cores) even where the tensor-core GEMM exists.
 pub(super) const SMALL: usize = 16;
-/// Query tokens per batched attention launch (sizes `part_o`).
+/// Query tokens per batched attention launch without tensor cores (sizes
+/// `part_o`).
 pub(super) const ATT_SUB: usize = 64;
+
+/// Batches of up to this many queries take the decode attention per query
+/// (attn_blk_b) rather than the flash kernel (attn_fa_b), which walks a
+/// block's positions in order and so is latency-bound with few blocks of
+/// rows: the crossover measured by cuda_attn_bench (RTX 5070 Ti Laptop: 64
+/// wide heads ~48-64 queries, 128 wide ~16-24). Either gives the same bits.
+pub(super) fn att_per_query(head_dim: usize) -> usize {
+    if head_dim == 64 { 48 } else { SMALL }
+}
 /// Tokens per output-head launch in `verify_argmax` (sizes the logits).
 pub(super) const HEAD_SUB: usize = 16;
+
+/// attn_fa_b's variants for head size hd and q8 scale group kg (0: the
+/// f16 cache): (rows per block, threads, dynamic shared memory: f16, its
+/// stages of K and V tiles of ATT_BLK rows; q8, one f16 tile and per stage
+/// the raw rows and their scales). `small`: attn_fa_bs (half the rows,
+/// more blocks, for short batches).
+pub(super) fn fa_shape(hd: usize, small: bool, kg: usize) -> (usize, usize, usize) {
+    let (rows, stages) = match (hd, small, kg) {
+        (64, false, _) => (64, 3),
+        (64, true, _) => (32, 2),
+        (_, false, _) => (128, 2),
+        (_, true, 0) => (64, 1),
+        (_, true, _) => (64, 2),
+    };
+    let smem = match kg {
+        0 => stages * 2 * ATT_BLK * hd * 2,
+        _ => ATT_BLK * hd * 2 + stages * 2 * ATT_BLK * (hd + hd / kg * 4),
+    };
+    (rows, rows * 2, smem)
+}
 
 /// Bytes per token of a batched activation buffer: a decode.cu Act, padded
 /// so every token's starts 256-byte aligned (the GEMMs' 16-byte copies).
@@ -74,12 +109,18 @@ pub(super) struct BatchFns<'m> {
     rope_kv: Func<'m>,
     /// rope_kv with qwen3's per-head q/k norms.
     rope_kv_norm: Func<'m>,
+    /// The split decode attention per query (attn_split_t: the q8 cache's
+    /// kernels' f16 twin, for GPUs without tensor cores), and its combine.
     attn_split: Func<'m>,
-    /// attn_split_b for queries at most 32 * max_split positions in: the
-    /// scores of all of them by attn_scores_b, then attn_warpv_b.
-    attn_scores: Func<'m>,
-    attn_warps: Func<'m>,
     attn_combine: Func<'m>,
+    /// The tensor-core attention per query (decode.cu attn_blk_t), and its
+    /// fold: batches of at most att_per_query tokens.
+    attn_blk: Func<'m>,
+    attn_cmb: Func<'m>,
+    /// attn_fa_b and attn_fa_bs (fa_shape) for this head size (larger
+    /// batches), then quantize_b.
+    attn_fa: [Func<'m>; 2],
+    quantize: Func<'m>,
     argmax: Func<'m>,
     gemvn8: Func<'m>,
     gemvn16: Func<'m>,
@@ -140,17 +181,25 @@ impl<'m> BatchFns<'m> {
             } else {
                 "attn_split_b_128"
             })?,
-            attn_scores: module.function(if head_dim == 64 {
-                "attn_scores_b_64"
-            } else {
-                "attn_scores_b_128"
-            })?,
-            attn_warps: module.function(if head_dim == 64 {
-                "attn_warpv_b_64"
-            } else {
-                "attn_warpv_b_128"
-            })?,
             attn_combine: module.function("attn_combine_b")?,
+            attn_blk: module.function(if head_dim == 64 {
+                "attn_blk_b_64"
+            } else {
+                "attn_blk_b_128"
+            })?,
+            attn_cmb: module.function("attn_cmb_b")?,
+            attn_fa: {
+                let (a, b) = (
+                    module.function(&format!("attn_fa_b_{head_dim}"))?,
+                    module.function(&format!("attn_fa_bs_{head_dim}"))?,
+                );
+                if module.mma() {
+                    a.set_max_shared(fa_shape(head_dim, false, 0).2)?;
+                    b.set_max_shared(fa_shape(head_dim, true, 0).2)?;
+                }
+                [a, b]
+            },
+            quantize: module.function("quantize_b")?,
             argmax: module.function("argmax_b")?,
             gemvn8: module.function("gemvn_2x8")?,
             gemvn16: module.function("gemvn_2x16")?,
@@ -165,6 +214,9 @@ impl<'m> BatchFns<'m> {
 /// A cache's scratch for batched passes of up to `max` tokens.
 pub(super) struct BatchBufs<'g> {
     pub(super) max: usize,
+    /// Blocks of ATT_BLK positions of the cache it's for (the stride of
+    /// attn_blk_b's partials).
+    nblk_max: usize,
     tokens: DevBuf<'g>,
     host_tokens: HostBuf<'g>,
     /// Incoming hidden states, [max][dim] (first > 0 only).
@@ -182,8 +234,6 @@ pub(super) struct BatchBufs<'g> {
     rope: DevBuf<'g>,
     part_o: DevBuf<'g>,
     part_ml: DevBuf<'g>,
-    /// Attention scores of ATT_SUB queries, [query][head][score_stride].
-    scores: DevBuf<'g>,
     /// HEAD_SUB rows, reused per head launch; with `logits_rows` (tests:
     /// `keep_logits`) one row per token of the pass instead.
     pub(super) logits: DevBuf<'g>,
@@ -198,18 +248,21 @@ impl<'g> CudaQwen2<'g> {
         self.batch.min(max_ctx).max(1)
     }
 
-    /// Scores per query head kept for attn_warps_b: every position a query
-    /// in its range (np <= 32 max_split) can have, rounded to 4.
-    pub(super) fn score_stride(&self) -> usize {
-        (32 * self.max_split).next_multiple_of(4)
+    /// Partials (per head, hd + 2 floats each) of the batched attention:
+    /// att_per_query queries' blocks of ATT_BLK positions (attn_blk_b), or
+    /// without tensor cores ATT_SUB queries' splits (attn_split_b).
+    fn batch_parts(&self, max: usize, max_ctx: usize) -> usize {
+        match self.tc_attn {
+            true => max.min(att_per_query(self.head_dim)) * Self::nblk_max(max_ctx),
+            false => max.min(ATT_SUB) * self.max_split,
+        }
     }
 
-    /// VRAM of the batch scratch for `max` tokens.
-    pub(super) fn batch_bytes(&self, max: usize) -> usize {
+    /// VRAM of the batch scratch for `max` tokens of a cache of max_ctx
+    /// positions.
+    pub(super) fn batch_bytes(&self, max: usize, max_ctx: usize) -> usize {
         let (f, kvd) = (4, self.kv_dim());
-        let att = max.min(ATT_SUB);
-        let parts =
-            att * self.n_heads * (self.max_split * (self.head_dim + 2) + self.score_stride()) * f;
+        let parts = self.n_heads * self.batch_parts(max, max_ctx) * (self.head_dim + 2) * f;
         let per_tok = (self.dim + 2 * self.q_dim + 2 * kvd + 2 * self.ffn + self.head_dim) * f
             + act_stride(self.act_len())
             + 8
@@ -217,11 +270,12 @@ impl<'g> CudaQwen2<'g> {
         max * per_tok + parts + max.min(HEAD_SUB) * self.vocab * f + 256
     }
 
-    pub(super) fn batch_bufs(&self, max: usize) -> Result<BatchBufs<'g>, String> {
+    pub(super) fn batch_bufs(&self, max: usize, max_ctx: usize) -> Result<BatchBufs<'g>, String> {
         let (g, f, kvd) = (self.gpu, 4, self.kv_dim());
-        let att = max.min(ATT_SUB);
+        let parts = self.n_heads * self.batch_parts(max, max_ctx);
         Ok(BatchBufs {
             max,
+            nblk_max: Self::nblk_max(max_ctx),
             tokens: g.alloc(max * 4)?,
             host_tokens: g.host_alloc(max * 4)?,
             host_x: match self.first {
@@ -235,9 +289,8 @@ impl<'g> CudaQwen2<'g> {
             up: g.alloc(max * self.ffn * f)?,
             act: g.alloc(max * act_stride(self.act_len()))?,
             rope: g.alloc(max * self.head_dim / 2 * 8)?,
-            part_o: g.alloc(att * self.n_heads * self.max_split * self.head_dim * f)?,
-            part_ml: g.alloc(att * self.n_heads * self.max_split * 2 * f)?,
-            scores: g.alloc(att * self.n_heads * self.score_stride() * f)?,
+            part_o: g.alloc(parts * self.head_dim * f)?,
+            part_ml: g.alloc(parts * 2 * f)?,
             logits: g.alloc(max.min(HEAD_SUB) * self.vocab * f)?,
             logits_rows: false,
             best: g.alloc(max * 4)?,
@@ -524,7 +577,7 @@ impl<'g> CudaQwen2<'g> {
             self.gpu.launch(
                 &self.bf.rmsnorm_quant,
                 (nb as u32, 1, 1),
-                (1024, 1, 1),
+                (256, 1, 1),
                 0,
                 &[
                     b.x.arg(),
@@ -682,80 +735,82 @@ impl<'g> CudaQwen2<'g> {
                 )?;
             }
             on("rope_kv")?;
-            for z0 in (0..nb).step_by(ATT_SUB) {
-                let nz = (nb - z0).min(ATT_SUB) as u32;
-                // Splits of at most 32 positions for every query here
-                // (f16): their scores as one product, then a warp per split,
-                // value rows shared by 8 queries (same bits, prefill.cu
-                // attn_warpv_bt).
-                let short = start + z0 + nz as usize <= 32 * self.max_split;
-                // Positions of the launch's last query.
-                let np = start + z0 + nz as usize;
-                if short && !q8 {
-                    let group = self.n_heads / self.n_kv_heads;
-                    let sst = Arg::I32(self.score_stride() as i32);
-                    g.launch(
-                        &bf.attn_scores,
-                        (
-                            np.div_ceil(64) as u32,
-                            (nz as usize * group).div_ceil(64) as u32,
-                            self.n_kv_heads as u32,
-                        ),
-                        (256, 1, 1),
-                        0,
-                        &[
-                            b.q.arg(),
-                            kv[0],
-                            Arg::I32(start as i32),
-                            Arg::I32(z0 as i32),
-                            Arg::I32(nz as i32),
-                            Arg::I32(self.n_heads as i32),
-                            Arg::I32(self.n_kv_heads as i32),
-                            Arg::F32(1.0 / (hd as f32).sqrt()),
-                            sst,
-                            b.scores.arg(),
-                        ],
-                    )?;
-                    g.launch(
-                        &bf.attn_warps,
-                        (
-                            self.n_kv_heads as u32,
-                            nz.div_ceil(8),
-                            np.div_ceil(64) as u32,
-                        ),
-                        (256, 1, 1),
-                        0,
-                        &[
-                            kv[1],
-                            Arg::I32(start as i32),
-                            Arg::I32(z0 as i32),
-                            Arg::I32(nz as i32),
-                            Arg::I32(self.n_heads as i32),
-                            Arg::I32(self.n_kv_heads as i32),
-                            Arg::I32(self.max_split as i32),
-                            b.part_o.arg(),
-                            b.part_ml.arg(),
-                            b.scores.arg(),
-                            sst,
-                        ],
-                    )?;
-                } else {
-                    // The q8 cache keeps #11's kernels: a warp per
-                    // split (short) or decode's blocks, both reading
-                    // int8 rows and their scales.
-                    let (f, grid, block) = match (short, q8) {
-                        (false, false) => (&bf.attn_split, self.max_split as u32, ATT_TILE as u32),
-                        (true, true) => (
-                            &self.q8_fns(mode).attn_warp_b,
-                            self.max_split.div_ceil(4) as u32,
-                            128,
-                        ),
+            let pre = Arg::F32(att_pre(hd));
+            let kg = match mode {
+                CacheKv::F16 => 0,
+                CacheKv::Q8 { group } => group,
+            };
+            assert!(start + nb <= b.nblk_max * ATT_BLK, "batch past its cache");
+            if self.tc_attn && nb > att_per_query(hd) {
+                // Flash attention, every query of the pass in one launch,
+                // y in place of q; then act (the decode kernels' bits,
+                // prefill.cu attn_fa_bt). Half-size blocks when the full
+                // ones don't fill the GPU.
+                let group = self.n_heads / self.n_kv_heads;
+                let full = fa_shape(hd, false, kg).0;
+                let small = self.n_kv_heads * (nb * group).div_ceil(full) < bf.sms;
+                let (rows, threads, smem) = fa_shape(hd, small, kg);
+                let f = match q8 {
+                    false => &bf.attn_fa[small as usize],
+                    true => &self.q8_fns(mode).attn_fa[small as usize],
+                };
+                let mut args = vec![b.q.arg()];
+                args.extend_from_slice(kv);
+                args.extend_from_slice(&[
+                    Arg::I32(start as i32),
+                    Arg::I32(nb as i32),
+                    Arg::I32(self.n_heads as i32),
+                    Arg::I32(self.n_kv_heads as i32),
+                    pre,
+                    b.q.arg(),
+                ]);
+                g.launch(
+                    f,
+                    (
+                        self.n_kv_heads as u32,
+                        (nb * group).div_ceil(rows) as u32,
+                        1,
+                    ),
+                    (threads as u32, 1, 1),
+                    smem as u32,
+                    &args,
+                )?;
+                on("attn")?;
+                g.launch(
+                    &bf.quantize,
+                    (qd.div_ceil(256) as u32, nbu, 1),
+                    (32, 1, 1),
+                    0,
+                    &[
+                        b.q.arg(),
+                        Arg::I32(qd as i32),
+                        want_k(qd),
+                        b.act.arg(),
+                        Arg::U64(ast as u64),
+                    ],
+                )?;
+                on("combine")?;
+            } else {
+                // A few queries (the verify pass), or no tensor cores: the
+                // decode kernels per query (the same code), attn_blk_t, or
+                // attn_split_t ATT_SUB queries per launch.
+                let tc = self.tc_attn;
+                let per = if tc { att_per_query(hd) } else { ATT_SUB };
+                let (gy_blk, ms) = (self.max_split.min(b.nblk_max) as u32, self.max_split as u32);
+                for z0 in (0..nb).step_by(per) {
+                    let nz = (nb - z0).min(per) as u32;
+                    // (kernel, blocks per kv head and query, threads, the
+                    // partials' stride: blocks or splits).
+                    let (f, grid, block, stride) = match (tc, q8) {
+                        (true, false) => (&bf.attn_blk, gy_blk, 32, b.nblk_max),
+                        (true, true) => (&self.q8_fns(mode).attn_blk_b, gy_blk, 32, b.nblk_max),
+                        (false, false) => (&bf.attn_split, ms, ATT_TILE as u32, self.max_split),
                         (false, true) => (
                             &self.q8_fns(mode).attn_split_b,
-                            self.max_split as u32,
+                            ms,
                             ATT_TILE as u32,
+                            self.max_split,
                         ),
-                        (true, false) => unreachable!("the shared-score path above"),
                     };
                     let mut args = vec![b.q.arg()];
                     args.extend_from_slice(kv);
@@ -764,8 +819,12 @@ impl<'g> CudaQwen2<'g> {
                         Arg::I32(z0 as i32),
                         Arg::I32(self.n_heads as i32),
                         Arg::I32(self.n_kv_heads as i32),
-                        Arg::F32(1.0 / (hd as f32).sqrt()),
-                        Arg::I32(self.max_split as i32),
+                        if tc {
+                            pre
+                        } else {
+                            Arg::F32(1.0 / (hd as f32).sqrt())
+                        },
+                        Arg::I32(stride as i32),
                         b.part_o.arg(),
                         b.part_ml.arg(),
                     ]);
@@ -776,27 +835,27 @@ impl<'g> CudaQwen2<'g> {
                         0,
                         &args,
                     )?;
+                    on("attn")?;
+                    g.launch(
+                        if tc { &bf.attn_cmb } else { &bf.attn_combine },
+                        (qd.div_ceil(256) as u32, nz, 1),
+                        (256, 1, 1),
+                        0,
+                        &[
+                            b.part_o.arg(),
+                            b.part_ml.arg(),
+                            Arg::I32(start as i32),
+                            Arg::I32(z0 as i32),
+                            Arg::I32(qd as i32),
+                            Arg::I32(hd as i32),
+                            Arg::I32(stride as i32),
+                            want_k(qd),
+                            b.act.arg(),
+                            Arg::U64(ast as u64),
+                        ],
+                    )?;
+                    on("combine")?;
                 }
-                on("attn")?;
-                g.launch(
-                    &bf.attn_combine,
-                    (qd.div_ceil(256) as u32, nz, 1),
-                    (256, 1, 1),
-                    0,
-                    &[
-                        b.part_o.arg(),
-                        b.part_ml.arg(),
-                        Arg::I32(start as i32),
-                        Arg::I32(z0 as i32),
-                        Arg::I32(qd as i32),
-                        Arg::I32(hd as i32),
-                        Arg::I32(self.max_split as i32),
-                        want_k(qd),
-                        b.act.arg(),
-                        Arg::U64(ast as u64),
-                    ],
-                )?;
-                on("combine")?;
             }
             self.bgemm(wts, &l.o, b.act.arg(), ast, nb, null, 1, b.x.arg(), dim)?;
             on("wo")?;
