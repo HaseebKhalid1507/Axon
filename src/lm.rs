@@ -52,6 +52,20 @@ pub trait Lm {
         crate::PREFILL_BATCH
     }
 
+    /// Run `tokens[b]` at `start + b` (non-empty) into the cache; the logits
+    /// after the last one: `feed_batch` of all but the last (in
+    /// `prefill_batch` chunks) then `forward` of the last, bit for bit.
+    /// Backends override it to run the last token inside the final batched
+    /// pass (the output head on its row alone) instead of a separate step.
+    fn prefill_logits(&self, tokens: &[u32], start: usize, cache: &mut Self::Cache) -> Vec<f32> {
+        let (&last, rest) = tokens.split_last().expect("prefill_logits: no tokens");
+        let pb = self.prefill_batch();
+        for (i, b) in rest.chunks(pb).enumerate() {
+            self.feed_batch(b, start + i * pb, cache);
+        }
+        self.forward(last, start + rest.len(), cache)
+    }
+
     /// Run `token` at `pos`; the sampling candidates of its logits,
     /// `sample::cands` (repeat penalty over the tail of `recent`, which ends
     /// with `token`, then the `spec.k` best, best first). Backends that keep
@@ -215,7 +229,7 @@ impl<'a> Backend<'a> {
             return Err("--gpu-layers 0 is --device cpu".into());
         }
         let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open()?));
-        let module: &'static Module<'static> = Box::leak(Box::new(Kernels::module(gpu)?));
+        let module: &'static Module<'static> = Box::leak(Box::new(Kernels::module_for(gpu, m)?));
         // f32 isn't offered on the GPU: f16 there (as always).
         let ckv = match kv {
             KvType::Q8 => CacheKv::Q8 { group: 0 },
@@ -364,6 +378,10 @@ impl Lm for Backend<'_> {
     ) -> Vec<Vec<Cand>> {
         dispatch!(self, cache, |n, c| n
             .verify_cands(tokens, start, c, spec, recent))
+    }
+
+    fn prefill_logits(&self, tokens: &[u32], start: usize, cache: &mut BackendCache) -> Vec<f32> {
+        dispatch!(self, cache, |n, c| n.prefill_logits(tokens, start, c))
     }
 
     fn prefill_batch(&self) -> usize {

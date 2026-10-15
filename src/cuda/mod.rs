@@ -26,6 +26,30 @@ pub mod qwen2;
 use ffi::{CUcontext, CUdevice, CUdeviceptr, CUfunction, CUmodule, CUstream, Driver, check};
 use std::ffi::{CString, OsString, c_int, c_void};
 use std::path::{Path, PathBuf};
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+/// Orders stream captures against `Pinned`'s drop. Its cuCtxSynchronize
+/// on any thread invalidates a capture in progress on another thread's
+/// stream, THREAD_LOCAL mode or not: the capture's next launch fails with
+/// CUDA_ERROR_STREAM_CAPTURE_INVALIDATED, and the sync itself fails
+/// (CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED), so the memory was unpinned
+/// without waiting for copies from it. Measured on sm_89: 67-76 of 300
+/// captures broken; cuMemHostUnregister alone, cuMemHostRegister,
+/// allocation, module loads and stream syncs elsewhere broke none
+/// (`gpu_capture_survives_pinning_elsewhere`). So a capture holds this
+/// shared and the drop holds it exclusively: it waits for the captures in
+/// flight (each a few hundred launches), and captures wait for it.
+static CAPTURE_GATE: RwLock<()> = RwLock::new(());
+
+/// `CAPTURE_GATE` shared (a capture). Poison is ignored: it guards no data.
+fn capture_gate() -> RwLockReadGuard<'static, ()> {
+    CAPTURE_GATE.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// `CAPTURE_GATE` exclusive (no capture runs on any thread).
+fn no_capture() -> RwLockWriteGuard<'static, ()> {
+    CAPTURE_GATE.write().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Why `Gpu::open` fails off Linux.
 pub const LINUX_ONLY: &str = "CUDA support is Linux-only for now";
@@ -425,6 +449,8 @@ impl Gpu {
             }
         }
         self.bind()?;
+        // Held until the capture has ended (early exits: `cap` drops first).
+        let gate = capture_gate();
         // SAFETY: our stream, not capturing (captures don't nest here: the
         // stream is only captured inside this function, and a capture that
         // didn't finish was ended by `Capturing`).
@@ -435,6 +461,7 @@ impl Gpu {
         let mut cap = Capturing(self, true);
         f()?; // early return / panic: `cap` ends the capture
         let (r, g) = cap.end();
+        drop(gate);
         check(self.d, r, "cuStreamEndCapture")?;
         let mut exec: ffi::CUgraphExec = std::ptr::null_mut();
         // SAFETY: g is the captured graph; writes the executable graph.
@@ -532,6 +559,9 @@ pub struct Pinned<'g> {
 impl Drop for Pinned<'_> {
     fn drop(&mut self) {
         if self.gpu.bind().is_ok() {
+            // Both calls below would break another thread's capture (and
+            // the sync would fail, unpinning under a live copy).
+            let _gate = no_capture();
             // A copy on any stream may still use it (e.g. a streamed
             // prefill's KV write-back, if a panic unwinds past the pass):
             // wait for the whole context, not just the main stream.
@@ -1048,6 +1078,9 @@ pub struct Module<'g> {
     /// The architecture its code was compiled for (10 * major + minor; 0
     /// if unknown): int8 tensor cores (mma.sync) need 80.
     arch: i32,
+    /// Built with AXON_EXT_TYPES (`Kernels::module_ext`): its decode
+    /// kernels run Q4_0, Q4_1, Q5_1 and Q5_K too.
+    ext: bool,
 }
 
 /// Whether programmatic dependent launch is safe and works for code
@@ -1416,6 +1449,11 @@ impl<'g> Module<'g> {
         self.arch >= 80
     }
 
+    /// Whether the decode kernels run the extra types (`Kernels::module_ext`).
+    pub fn ext(&self) -> bool {
+        self.ext
+    }
+
     /// Turn programmatic dependent launch off for this module (tests: PDL
     /// on vs off).
     #[cfg(test)]
@@ -1437,6 +1475,7 @@ impl<'g> Module<'g> {
             m,
             pdl: false,
             arch: 0,
+            ext: false,
         })
     }
 
@@ -1472,16 +1511,49 @@ impl Drop for Module<'_> {
 pub struct Kernels<'m> {
     gpu: &'m Gpu,
     dequant_rows: Func<'m>,
+    /// The module's `ext` (the extra types' dequant compiled in).
+    ext: bool,
 }
 
 /// NVRTC options for kernels.cu beyond the architecture. Denormals kept,
 /// as on the CPU (the defaults, spelled out: they are part of the cache key).
 const KERNEL_OPTS: [&str; 2] = ["--std=c++17", "--ftz=false"];
+/// `KERNEL_OPTS` plus the extra weight types (Q4_0, Q4_1, Q5_1, Q5_K) in the
+/// decode kernels' type switch.
+const KERNEL_OPTS_EXT: [&str; 3] = ["--std=c++17", "--ftz=false", "-DAXON_EXT_TYPES"];
+
+/// Whether `m` has a matrix type only `Kernels::module_ext` runs.
+pub fn needs_ext(m: &crate::gguf::Model) -> bool {
+    use crate::quant::{Q4_0, Q4_1, Q5_1, Q5_K};
+    m.tensors
+        .iter()
+        .any(|t| matches!(t.qtype.id, Q4_0 | Q4_1 | Q5_1 | Q5_K))
+}
 
 impl<'m> Kernels<'m> {
-    /// kernels.cu compiled for `gpu` (or from the cache).
+    /// kernels.cu compiled for `gpu` (or from the cache): main's four
+    /// quant types (Q4_K, Q6_K, Q5_0, Q8_0) in the decode kernels.
     pub fn module(gpu: &Gpu) -> Result<Module<'_>, String> {
         Ok(Module::load(gpu, KERNELS, &KERNEL_OPTS)?.0)
+    }
+
+    /// `module` with every supported quant type in the decode kernels
+    /// (AXON_EXT_TYPES). Same bits for the four (same code per type); a
+    /// separate build so models without the extra types keep the smaller
+    /// kernels.
+    pub fn module_ext(gpu: &Gpu) -> Result<Module<'_>, String> {
+        let mut m = Module::load(gpu, KERNELS, &KERNEL_OPTS_EXT)?.0;
+        m.ext = true;
+        Ok(m)
+    }
+
+    /// The module model `m` needs: `module_ext` if it has an extra type.
+    pub fn module_for<'g>(gpu: &'g Gpu, m: &crate::gguf::Model) -> Result<Module<'g>, String> {
+        if needs_ext(m) {
+            Self::module_ext(gpu)
+        } else {
+            Self::module(gpu)
+        }
     }
 
     /// The kernels of `m`, which must be `Kernels::module`'s.
@@ -1490,6 +1562,7 @@ impl<'m> Kernels<'m> {
         Ok(Kernels {
             gpu: m.gpu,
             dequant_rows: m.function("dequant_rows")?,
+            ext: m.ext,
         })
     }
 
@@ -1504,10 +1577,16 @@ impl<'m> Kernels<'m> {
         n: usize,
         rows: &[u32],
     ) -> Result<Vec<f32>, String> {
-        use crate::quant::{F16, F32, Q4_K, Q5_0, Q6_K, Q8_0};
+        use crate::quant::{F16, F32, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0};
         let q = crate::gguf::qtype(qt);
-        if ![F32, F16, Q5_0, Q8_0, Q4_K, Q6_K].contains(&qt) {
+        if ![F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K].contains(&qt) {
             return Err(format!("dequant_rows: unsupported type {}", q.name));
+        }
+        if [Q4_0, Q4_1, Q5_1, Q5_K].contains(&qt) && !self.ext {
+            return Err(format!(
+                "dequant_rows: type {} needs Kernels::module_ext",
+                q.name
+            ));
         }
         if n == 0 || !n.is_multiple_of(q.block_size) || n > 65_535 * 256 {
             return Err(format!("dequant_rows: bad row length {n} for {}", q.name));

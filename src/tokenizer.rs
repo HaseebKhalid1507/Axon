@@ -1,4 +1,5 @@
-//! GPT-2 byte-level BPE (llama.cpp `gpt2` model, `qwen2` pre-tokenizer).
+//! GPT-2 byte-level BPE (llama.cpp `gpt2` model) with the `qwen2` or the
+//! `llama-bpe` (Llama 3) pre-tokenizer.
 //!
 //! `encode` treats all input as plain text: a prompt containing `<|im_end|>`
 //! gets the tokens for those characters, not the control token, so user text
@@ -6,8 +7,9 @@
 //! its id; use it only for text the program itself wrote (templates, tests).
 
 // Reference: llama.cpp (https://github.com/ggml-org/llama.cpp), MIT License,
-// Copyright (c) 2023-2024 The ggml authors. The qwen2 pre-tokenizer regex and
-// the special-token splitting follow src/llama-vocab.cpp. Full notice in
+// Copyright (c) 2023-2024 The ggml authors. The qwen2 and llama3 pre-tokenizer
+// regexes, ignore_merges and the special-token splitting follow
+// src/llama-vocab.cpp. Full notice in
 // THIRD_PARTY_NOTICES.md.
 
 use crate::gguf::{Model, Val};
@@ -17,13 +19,50 @@ use std::collections::HashMap;
 // llama.cpp's expanded form of `(?i:'s|'t|...)` — avoids Unicode case folding (ſ -> s, K -> k).
 const QWEN2_PATTERN: &str = r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
+// Llama 3's (llama.cpp LLAMA_VOCAB_PRE_TYPE_LLAMA3): numbers in runs of up to 3 digits.
+const LLAMA3_PATTERN: &str = r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+
+/// Pre-tokenizers (`tokenizer.ggml.pre`) this tokenizer implements.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Pre {
+    Qwen2,
+    /// llama.cpp's "llama-bpe" / "llama3" / "llama-v3": its regex, and a
+    /// pre-token that is a whole vocabulary entry is that token (HF's
+    /// ignore_merges); a BOS token starts the text by default.
+    Llama3,
+}
+
+/// The vocabulary's tokenizer model and pre-tokenizer, if supported: a
+/// `gpt2` (byte-level BPE) vocabulary, pre-tokenizer `qwen2` (or none: the
+/// Qwen2 files before llama.cpp wrote the key) or Llama 3's.
+pub fn pre_of(m: &Model) -> Result<Pre, String> {
+    match meta(m, "tokenizer.ggml.model") {
+        None => {}
+        Some(Val::Str(s)) if s == "gpt2" => {}
+        Some(v) => {
+            return Err(format!(
+                "tokenizer model {v} is not supported (gpt2 BPE only)"
+            ));
+        }
+    }
+    match meta(m, "tokenizer.ggml.pre") {
+        None => Ok(Pre::Qwen2),
+        Some(Val::Str(s)) if s == "qwen2" => Ok(Pre::Qwen2),
+        Some(Val::Str(s)) if ["llama-bpe", "llama3", "llama-v3"].contains(&s.as_str()) => {
+            Ok(Pre::Llama3)
+        }
+        Some(v) => Err(format!(
+            "pre-tokenizer {v} is not supported (qwen2, llama-bpe)"
+        )),
+    }
+}
+
 const TYPE_CONTROL: i32 = 3;
 const TYPE_USER_DEFINED: i32 = 4;
 
 pub struct Tokenizer {
     tokens: Vec<String>,
     token_type: Vec<i32>,
-    #[allow(dead_code)]
     token_to_id: HashMap<String, u32>,
     /// (left id, right id) -> (rank, merged id)
     merges: HashMap<(u32, u32), (u32, u32)>,
@@ -34,8 +73,15 @@ pub struct Tokenizer {
     /// (text, id), longest text first
     specials: Vec<(String, u32)>,
     re: Regex,
+    /// A pre-token that is a whole vocabulary entry becomes that token
+    /// without merging (Llama 3).
+    ignore_merges: bool,
     eos: u32,
+    /// The token `encode_prompt` starts a text with, if the model wants one.
+    bos: Option<u32>,
 }
+
+static BYTE_ENC: std::sync::LazyLock<[char; 256]> = std::sync::LazyLock::new(bytes_to_unicode);
 
 /// GPT-2 bytes_to_unicode: printable bytes map to themselves, the rest to U+0100.. in order.
 fn bytes_to_unicode() -> [char; 256] {
@@ -141,6 +187,16 @@ impl Tokenizer {
         let eos = meta(m, "tokenizer.ggml.eos_token_id")
             .map(|v| val_i64(v) as u32)
             .unwrap_or(151645);
+        let pre = pre_of(m).unwrap_or_else(|e| panic!("{e}"));
+        // llama.cpp: add_bos_token if the file says, else on for Llama 3's
+        // pre-tokenizer (off for qwen2's).
+        let add_bos = match meta(m, "tokenizer.ggml.add_bos_token") {
+            Some(v) => val_i64(v) != 0,
+            None => pre == Pre::Llama3,
+        };
+        let bos = meta(m, "tokenizer.ggml.bos_token_id")
+            .map(|v| val_i64(v) as u32)
+            .filter(|&b| add_bos && (b as usize) < tokens.len());
 
         Tokenizer {
             tokens,
@@ -150,13 +206,53 @@ impl Tokenizer {
             byte_id,
             byte_decoder,
             specials,
-            re: Regex::new(QWEN2_PATTERN).expect("qwen2 regex"),
+            re: Regex::new(match pre {
+                Pre::Qwen2 => QWEN2_PATTERN,
+                Pre::Llama3 => LLAMA3_PATTERN,
+            })
+            .expect("pre-tokenizer regex"),
+            ignore_merges: pre == Pre::Llama3,
             eos,
+            bos,
         }
     }
 
     pub fn eos(&self) -> u32 {
         self.eos
+    }
+
+    /// Tokens that end generation: `eos`, and Llama 3's end-of-turn /
+    /// end-of-message / end-of-text tokens when the vocabulary has them (as
+    /// llama.cpp's end-of-generation set; Qwen's stays `eos` alone).
+    pub fn eog(&self) -> Vec<u32> {
+        let mut v = vec![self.eos];
+        for s in ["<|eot_id|>", "<|eom_id|>", "<|end_of_text|>"] {
+            v.extend(self.special_id(s));
+        }
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// The BOS token a prompt starts with, if the model adds one (Llama 3).
+    pub fn bos(&self) -> Option<u32> {
+        self.bos
+    }
+
+    /// Tokens of a whole prompt (plain text): `bos` if any, then `encode`,
+    /// as llama.cpp tokenizes with add_special.
+    pub fn encode_prompt(&self, text: &str) -> Vec<u32> {
+        let mut out: Vec<u32> = self.bos.into_iter().collect();
+        self.encode_text(text, &mut out);
+        out
+    }
+
+    /// The id of a special (control or user-defined) token by its text.
+    pub fn special_id(&self, text: &str) -> Option<u32> {
+        self.specials
+            .iter()
+            .find(|(t, _)| t == text)
+            .map(|&(_, id)| id)
     }
 
     /// Tokens for `text` as plain text: special-token strings in it are not
@@ -235,6 +331,15 @@ impl Tokenizer {
 
     /// Byte-level BPE on one pre-token: repeatedly merge the lowest-rank adjacent pair (leftmost on ties).
     fn bpe_word(&self, word: &str, out: &mut Vec<u32>) {
+        if self.ignore_merges {
+            let mut enc = String::with_capacity(word.len() * 2);
+            let table = &*BYTE_ENC;
+            enc.extend(word.bytes().map(|b| table[b as usize]));
+            if let Some(&id) = self.token_to_id.get(&enc) {
+                out.push(id);
+                return;
+            }
+        }
         let mut syms: Vec<u32> = word
             .bytes()
             .filter_map(|b| self.byte_id[b as usize])
@@ -283,6 +388,15 @@ impl Tokenizer {
             }
         }
         bytes
+    }
+
+    /// The most bytes any one token decodes to.
+    pub fn max_token_bytes(&self) -> usize {
+        (0..self.tokens.len() as u32)
+            .map(|id| self.decode_bytes(&[id]).len())
+            .max()
+            .unwrap_or(1)
+            .max(1)
     }
 }
 
@@ -454,6 +568,79 @@ mod tests {
         ] {
             assert_eq!(t.encode(s), t.encode_special(s), "{s:?}");
         }
+    }
+
+    /// Llama 3's tokenizer (llama-bpe pre-tokenizer, ignore_merges, BOS)
+    /// must match llama.cpp's exactly (tests/fixtures/tokens_llama3.json:
+    /// numbers, contractions, whitespace runs, scripts, emoji sequences,
+    /// special-token text, with and without special parsing, and prompts
+    /// with their BOS).
+    #[test]
+    fn oracle_llama3() {
+        let d = crate::testutil::read_json("tokens_llama3.json");
+        let Some(m) = crate::testutil::llama_model() else {
+            return;
+        };
+        let t = Tokenizer::from_gguf(&m);
+        assert_eq!(t.bos(), Some(128000));
+        assert_eq!(t.eos(), 128009);
+        assert_eq!(t.eog(), vec![128001, 128008, 128009]);
+        let ids = |v: &serde_json::Value| -> Vec<u32> {
+            (v.as_array().expect("ids").iter())
+                .map(|x| x.as_u64().unwrap() as u32)
+                .collect()
+        };
+        let cases = d["cases"].as_array().expect("cases");
+        assert!(cases.len() >= 20);
+        for c in cases {
+            let text = c["text"].as_str().expect("text");
+            assert_eq!(t.encode(text), ids(&c["ids"]), "text {text:?}");
+            assert_eq!(
+                t.encode_special(text),
+                ids(&c["ids_special"]),
+                "special {text:?}"
+            );
+            assert_eq!(t.decode(&t.encode(text)), text);
+        }
+        for c in d["prompts"].as_array().expect("prompts") {
+            let text = c["text"].as_str().expect("text");
+            assert_eq!(t.encode_prompt(text), ids(&c["ids"]), "prompt {text:?}");
+        }
+    }
+
+    /// Some vocabulary words are unreachable by merging (HF's
+    /// ignore_merges): each must still encode as its one token, and the
+    /// fixture holds such words (llama.cpp agreeing on them).
+    #[test]
+    fn llama3_ignore_merges_matters() {
+        let Some(m) = crate::testutil::llama_model() else {
+            return;
+        };
+        let mut t = Tokenizer::from_gguf(&m);
+        let d = crate::testutil::read_json("tokens_llama3.json");
+        let texts: Vec<&str> = (d["cases"].as_array().unwrap().iter())
+            .map(|c| c["text"].as_str().unwrap())
+            .collect();
+        let with: Vec<_> = texts.iter().map(|s| t.encode(s)).collect();
+        // Words (whole pre-tokens) BPE alone doesn't make one token of.
+        let words: Vec<(u32, String)> = (0..t.tokens.len() as u32)
+            .filter(|&id| t.token_type.get(id as usize) == Some(&1))
+            .map(|id| (id, t.decode(&[id])))
+            .filter(|(id, w)| t.encode(w) == [*id])
+            .collect();
+        t.ignore_merges = false;
+        let unreachable: Vec<_> = words
+            .iter()
+            .filter(|(id, w)| t.encode(w) != [*id])
+            .collect();
+        eprintln!(
+            "{} unreachable, e.g. {:?}",
+            unreachable.len(),
+            &unreachable[..unreachable.len().min(12)]
+        );
+        assert!(!unreachable.is_empty());
+        let without: Vec<_> = texts.iter().map(|s| t.encode(s)).collect();
+        assert_ne!(with, without, "no fixture text depends on ignore_merges");
     }
 
     /// Token ids must match Hugging Face's tokenizer exactly (tests/fixtures/tokens.json).

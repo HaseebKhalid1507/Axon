@@ -614,12 +614,21 @@ extern "C" __global__ void argmax_b(const float* __restrict__ x, int n, u32* __r
     }
 }
 
-// The output of a batched product: v = the row's sum (+ bias[r]); out = v
-// (mode 0) or out += v (mode 1), as gemv's.
-__device__ __forceinline__ void gm_store(float y, const float* bias, int mode, float* out, int r) {
+// The output of a batched product, token row z at zo = z * ostride floats
+// into out: v = the row's sum (+ bias[r]); out = v (mode 0) or out += v
+// (mode 1), as gemv's. Mode 2 (the up product, no bias): `bias` is the gate
+// product (laid out as out) and out = silu(gate) * v, swiglu_quant_b's ops
+// on the same two floats (gate_up's), for quantize_b.
+__device__ __forceinline__ void gm_store(float y, const float* bias, int mode, float* out, u64 zo,
+                                         int r) {
+    if (mode == 2) {
+        float g = bias[zo + r];
+        out[zo + r] = __fmul_rn(__fdiv_rn(g, __fadd_rn(1.0f, expf(-g))), y);
+        return;
+    }
     float v = y;
     if (bias) v = __fadd_rn(v, bias[r]);
-    out[r] = mode == 1 ? __fadd_rn(out[r], v) : v;
+    out[zo + r] = mode == 1 ? __fadd_rn(out[zo + r], v) : v;
 }
 
 // 0x4B400000 = 1.5 * 2^23: for |i| < 2^22, float(i) = bits(MAGIC + i) - 1.5 * 2^23,
@@ -650,7 +659,7 @@ __device__ void gemvn_t(int qt, const u8* w, u64 rb, int rows, int n, const u8* 
     int i = threadIdx.x;
     if (i < R * T) {
         int r = r0 + i / T, z = z0 + i % T;
-        if (r < rows && z < nb) gm_store(y, bias, mode, out + (u64)z * ostride, r);
+        if (r < rows && z < nb) gm_store(y, bias, mode, out, (u64)z * ostride, r);
     }
 }
 
@@ -698,6 +707,27 @@ extern "C" __global__ void gemv_ref(int qt, const u8* __restrict__ w, u64 rb, in
             float v = __fsub_rn(__fmul_rn(d, i2f_rn(S)), __fmul_rn(dmin, i2f_rn(M)));
             acc = __fmaf_rn(a.dk[b], v, acc);
         }
+    } else if (qt == QT_Q5_K) {
+        for (int b = 0; b < n / 256; b++) {
+            const u8* blk = row + (u64)b * 176;
+            int S = 0, M = 0;
+            for (int j = 0; j < 8; j++) {
+                u32 sc, m;
+                scale_min_k4(j, blk + 4, &sc, &m);
+                int sumi = 0;
+                for (int i = 0; i < 32; i++) {
+                    u32 qb = blk[48 + 32 * (j >> 1) + i];
+                    int q = (j & 1) ? (int)(qb >> 4) : (int)(qb & 15);
+                    q |= (int)((blk[16 + i] >> j) & 1) << 4;
+                    sumi += q * (int)a.qk[b * 256 + 32 * j + i];
+                }
+                S += (int)sc * sumi;
+                M += (int)m * a.b32[b * 8 + j];
+            }
+            float d = h2f(rd_u16(blk)), dmin = h2f(rd_u16(blk + 2));
+            float v = __fsub_rn(__fmul_rn(d, i2f_rn(S)), __fmul_rn(dmin, i2f_rn(M)));
+            acc = __fmaf_rn(a.dk[b], v, acc);
+        }
     } else if (qt == QT_Q6_K) {
         for (int b = 0; b < n / 256; b++) {
             const u8* blk = row + (u64)b * 210;
@@ -715,16 +745,35 @@ extern "C" __global__ void gemv_ref(int qt, const u8* __restrict__ w, u64 rb, in
             }
             acc = __fmaf_rn(__fmul_rn(a.dk[b], h2f(rd_u16(blk + 208))), i2f_rn(S), acc);
         }
-    } else {
-        bool q8 = qt == QT_Q8_0;
+    } else if (qt == QT_Q4_1 || qt == QT_Q5_1) {
+        bool q5 = qt == QT_Q5_1;
         for (int b = 0; b < n / 32; b++) {
-            const u8* blk = row + (u64)b * (q8 ? 34 : 22);
+            const u8* blk = row + (u64)b * (q5 ? 24 : 20);
+            u32 qh = q5 ? rd_u16(blk + 4) | (rd_u16(blk + 6) << 16) : 0;
+            int s = 0, bs = 0;
+            for (int i = 0; i < 32; i++) {
+                u32 qs = blk[(q5 ? 8 : 4) + (i & 15)];
+                int q = (int)(((i < 16 ? qs : qs >> 4) & 15) | (((qh >> i) & 1) << 4));
+                s += q * (int)a.q0[b * 32 + i];
+                bs += (int)a.q0[b * 32 + i];
+            }
+            float v = __fadd_rn(__fmul_rn(h2f(rd_u16(blk)), i2f_rn(s)),
+                                __fmul_rn(h2f(rd_u16(blk + 2)), i2f_rn(bs)));
+            acc = __fmaf_rn(a.d0[b], v, acc);
+        }
+    } else {
+        bool q8 = qt == QT_Q8_0, q4 = qt == QT_Q4_0;
+        for (int b = 0; b < n / 32; b++) {
+            const u8* blk = row + (u64)b * (q8 ? 34 : q4 ? 18 : 22);
             int s = 0;
-            u32 qh = q8 ? 0 : rd_u16(blk + 2) | (rd_u16(blk + 4) << 16);
+            u32 qh = q8 || q4 ? 0 : rd_u16(blk + 2) | (rd_u16(blk + 4) << 16);
             for (int i = 0; i < 32; i++) {
                 int q;
                 if (q8) {
                     q = (int)(signed char)blk[2 + i];
+                } else if (q4) {
+                    u32 qs = blk[2 + (i & 15)];
+                    q = (int)((i < 16 ? qs : qs >> 4) & 15) - 8;
                 } else {
                     u32 qs = blk[6 + (i & 15)];
                     q = (int)(((i < 16 ? qs : qs >> 4) & 15) | (((qh >> i) & 1) << 4)) - 16;
@@ -734,7 +783,7 @@ extern "C" __global__ void gemv_ref(int qt, const u8* __restrict__ w, u64 rb, in
             acc = __fmaf_rn(__fmul_rn(h2f(rd_u16(blk)), a.d0[b]), i2f_rn(s), acc);
         }
     }
-    gm_store(acc, bias, mode, out + (u64)z * ostride, r);
+    gm_store(acc, bias, mode, out, (u64)z * ostride, r);
 }
 
 // ---------------------------------------------------------------------------
@@ -796,9 +845,26 @@ struct GmType<QT_Q4_K> {
     static const int SB = 1, VB = 256, ITEMS = 0, BYTES = 144;
 };
 template <>
+struct GmType<QT_Q5_K> {
+    static const int SB = 1, VB = 256, ITEMS = 0, BYTES = 176;
+};
+template <>
 struct GmType<QT_Q6_K> {
     // 4 x (2 x 16 bytes of ql + 16 of qh), 1 header.
     static const int SB = 1, VB = 256, ITEMS = 5, BYTES = 210;
+};
+// Q6_K's prefill copy (not a GGUF type; the host makes it at load when
+// VRAM allows, q6k_to_i8): per 256-value block 256 int8 values (q - 32, in
+// order), the 16 int8 scales, d as f32 (h2f of the block's f16), 12 bytes
+// of padding: 288 bytes, 16-byte aligned. Register-staged as Q6_K, but by
+// aligned 16-byte loads with nothing to unpack: the same weight buffer
+// bytes, so g2_compute's Q6_K code (the same bits) does the products.
+#define QT_Q6K8 1014
+#define Q6K8_BYTES 288
+template <>
+struct GmType<QT_Q6K8> {
+    // 4 x 16 chunks of values per row, then 1 header (scales, d).
+    static const int SB = 1, VB = 256, ITEMS = 20, BYTES = Q6K8_BYTES;
 };
 template <>
 struct GmType<QT_Q8_0> {
@@ -807,6 +873,18 @@ struct GmType<QT_Q8_0> {
 template <>
 struct GmType<QT_Q5_0> {
     static const int SB = 8, VB = 32, ITEMS = 8, BYTES = 22;
+};
+template <>
+struct GmType<QT_Q4_0> {
+    static const int SB = 8, VB = 32, ITEMS = 8, BYTES = 18;
+};
+template <>
+struct GmType<QT_Q4_1> {
+    static const int SB = 8, VB = 32, ITEMS = 8, BYTES = 20;
+};
+template <>
+struct GmType<QT_Q5_1> {
+    static const int SB = 8, VB = 32, ITEMS = 8, BYTES = 24;
 };
 
 // Signed byte j of the 16 packed in w[0..4).
@@ -845,11 +923,18 @@ __device__ __forceinline__ int gm_ubyte(u32 w, int j) { return __byte_perm(w, 0,
 // two with three or more stages (stored one stage ahead).
 template <int QT, int BN, int ST>
 struct G2L {
-    static const bool RAW = QT == QT_Q4_K, KQ = QT == QT_Q4_K || QT == QT_Q6_K;
+    static const bool Q6 = QT == QT_Q6_K || QT == QT_Q6K8;
+    // Q5_K's raw 176-byte rows need no padding: the stride is Q4_K's.
+    static const bool RAW = QT == QT_Q4_K || QT == QT_Q5_K,
+                      KQ = QT == QT_Q4_K || QT == QT_Q5_K || Q6;
     // Weights: Q4_K raw rows; others int8 [64][256], then Q6_K's scales
     // [64][16] and d [64], or Q8_0/Q5_0's d [64][8].
+    // Q4_1 / Q5_1: d [64][8], then m [64][8].
+    static const bool MIN1 = QT == QT_Q4_1 || QT == QT_Q5_1;
     static const int W = RAW ? G2_BM * G2_Q4K_ROW
-                             : G2_BM * 256 + (QT == QT_Q6_K ? G2_BM * 20 : G2_BM * 32);
+                             : G2_BM * 256 + (Q6     ? G2_BM * 20
+                                              : MIN1 ? G2_BM * 64
+                                                     : G2_BM * 32);
     static const int NWB = RAW ? ST : (ST >= 3 ? 2 : 1);
     // Activations: values [BN][256]; Q4_K the sums of 32 [BN][8]; scales:
     // Q8_K d [BN] or Q8_0 d [BN][8].
@@ -882,6 +967,16 @@ __device__ __forceinline__ bool g2_item(int k, int* rr, int* it) {
         *rr = tid, *it = 4;
         return k == 1 && tid < G2_BM;
     }
+    if (QT == QT_Q6K8) {
+        // Chunk it (0..16) of row rr for k < 4, then the header of row tid.
+        if (k < 4) {
+            int id = tid + k * G2_THREADS;
+            *rr = id >> 4, *it = id & 15;
+            return true;
+        }
+        *rr = tid, *it = 16;
+        return k == 4 && tid < G2_BM;
+    }
     int id = tid + k * G2_THREADS;
     *rr = id / GmType<QT>::ITEMS, *it = id % GmType<QT>::ITEMS;
     return id < G2_BM * GmType<QT>::ITEMS;
@@ -901,7 +996,12 @@ __device__ __forceinline__ void g2_load_w(const u8* w, u64 rb, int rows, int r0,
         if (!g2_item<QT>(k, &rr, &it)) break;
         const u8* row = w + (u64)min(r0 + rr, rows - 1) * rb;
         u32* o = reg[k];
-        if (QT == QT_Q6_K) {
+        if (QT == QT_Q6K8) {
+            const u8* blk = row + (u64)s * Q6K8_BYTES;
+            uint4 v = __ldg((const uint4*)(blk + (it < 16 ? 16 * it : 256)));
+            o[0] = v.x, o[1] = v.y, o[2] = v.z, o[3] = v.w;
+            if (it == 16) o[4] = __ldg((const u32*)(blk + 272));
+        } else if (QT == QT_Q6_K) {
             const u8* blk = row + (u64)s * 210;
             if (it < 4) {
                 int h = it >> 1, l0 = 16 * (it & 1);
@@ -916,9 +1016,16 @@ __device__ __forceinline__ void g2_load_w(const u8* w, u64 rb, int rows, int r0,
             int q = s * SB + it;
             if (q >= nblk) continue;
             const u8* blk = row + (u64)q * GmType<QT>::BYTES;
+            if (QT == QT_Q4_1 || QT == QT_Q5_1) {
+                o[0] = __ldg((const u32*)blk); // d, m (blocks 4-byte aligned)
+                if (QT == QT_Q4_1) ld_a2<4>(blk + 4, o + 1); // qs
+                else ld_a2<5>(blk + 4, o + 1);               // qh, qs
+                continue;
+            }
             o[0] = rd_u16(blk);
             if (QT == QT_Q8_0) ld_a2<8>(blk + 2, o + 1);
-            else ld_a2<5>(blk + 2, o + 1); // qh, qs
+            else if (QT == QT_Q4_0) ld_a2<4>(blk + 2, o + 1); // qs
+            else ld_a2<5>(blk + 2, o + 1);                    // qh, qs
         }
     }
 }
@@ -939,7 +1046,16 @@ __device__ __forceinline__ void g2_store_w(u8* wb, int nblk, int s, u32 (*reg)[G
         int rr, it;
         if (!g2_item<QT>(k, &rr, &it)) break;
         const u32* o = reg[k];
-        if (QT == QT_Q6_K) {
+        if (QT == QT_Q6K8) {
+            // As Q6_K's below: values chunk it of row rr (swizzled), the
+            // scales, d (f32 bits of the same h2f).
+            if (it < 16) {
+                *g2_w8(wb, rr, it) = make_uint4(o[0], o[1], o[2], o[3]);
+            } else {
+                *(uint4*)(meta + 16 * rr) = make_uint4(o[0], o[1], o[2], o[3]);
+                ((u32*)(meta + 16 * G2_BM))[rr] = o[4];
+            }
+        } else if (QT == QT_Q6_K) {
             if (it < 4) {
                 // Values 128 h + 32 k + l0 .. + 16: chunk 8 h + 2 k + (l0 / 16).
                 int h = it >> 1, lh = it & 1;
@@ -961,10 +1077,32 @@ __device__ __forceinline__ void g2_store_w(u8* wb, int nblk, int s, u32 (*reg)[G
             }
         } else {
             if (s * SB + it >= nblk) continue;
-            ((float*)meta)[rr * 8 + it] = h2f(o[0]);
-            if (QT == QT_Q8_0) {
+            ((float*)meta)[rr * 8 + it] = h2f(o[0] & 0xffff);
+            if (QT == QT_Q4_1 || QT == QT_Q5_1) {
+                ((float*)meta)[G2_BM * 8 + rr * 8 + it] = h2f(o[0] >> 16);
+                // Unsigned values: low nibbles, then high (bit 4 from qh).
+                u32 v[8];
+#pragma unroll
+                for (int u = 0; u < 4; u++) {
+                    const u32 qs = o[(QT == QT_Q5_1 ? 2 : 1) + u];
+                    u32 qh = QT == QT_Q5_1 ? o[1] : 0;
+                    v[u] = (qs & 0x0f0f0f0f) | spread4((qh >> (4 * u)) & 0xf);
+                    v[4 + u] = ((qs >> 4) & 0x0f0f0f0f) | spread4((qh >> (16 + 4 * u)) & 0xf);
+                }
+                *g2_w8(wb, rr, 2 * it) = make_uint4(v[0], v[1], v[2], v[3]);
+                *g2_w8(wb, rr, 2 * it + 1) = make_uint4(v[4], v[5], v[6], v[7]);
+            } else if (QT == QT_Q8_0) {
                 *g2_w8(wb, rr, 2 * it) = make_uint4(o[1], o[2], o[3], o[4]);
                 *g2_w8(wb, rr, 2 * it + 1) = make_uint4(o[5], o[6], o[7], o[8]);
+            } else if (QT == QT_Q4_0) {
+                u32 v[8];
+#pragma unroll
+                for (int u = 0; u < 4; u++) {
+                    v[u] = __vsub4(o[1 + u] & 0x0f0f0f0f, 0x08080808);
+                    v[4 + u] = __vsub4((o[1 + u] >> 4) & 0x0f0f0f0f, 0x08080808);
+                }
+                *g2_w8(wb, rr, 2 * it) = make_uint4(v[0], v[1], v[2], v[3]);
+                *g2_w8(wb, rr, 2 * it + 1) = make_uint4(v[4], v[5], v[6], v[7]);
             } else {
                 u32 qh = o[1], v[8];
 #pragma unroll
@@ -984,19 +1122,24 @@ __device__ __forceinline__ void g2_store_w(u8* wb, int nblk, int s, u32 (*reg)[G
 
 // Start the copies of stage s: Q4_K weights (into wb), the activations of
 // tokens z0.. (clamped to nb - 1) into st.
-template <int QT, int BN, int ST>
+template <int QT, int BN, int ST, int GU = 0>
 __device__ __forceinline__ void g2_copy(u8* wb, u8* st, const u8* w, u64 rb, int rows, int r0,
                                         const u8* act, u64 astride, int n, int nb, int z0,
-                                        int nblk, int s) {
+                                        int nblk, int s, const u8* w2 = nullptr) {
 #if __CUDA_ARCH__ >= 800
     typedef G2L<QT, BN, ST> L;
     u64 np = act_np(n);
     int tid = threadIdx.x;
-    if (QT == QT_Q4_K) {
-        for (int id = tid; id < G2_BM * 9; id += G2_THREADS) {
-            int rr = id / 9, ch = id - 9 * rr;
-            cp16(wb + rr * G2_Q4K_ROW + 16 * ch,
-                 w + (u64)min(r0 + rr, rows - 1) * rb + (u64)s * 144 + 16 * ch);
+    if (L::RAW) {
+        // 16-byte chunks per block: 9 (Q4_K, 144 bytes), 11 (Q5_K, 176).
+        const int CH = GmType<QT>::BYTES / 16;
+        for (int id = tid; id < G2_BM * CH; id += G2_THREADS) {
+            int rr = id / CH, ch = id - CH * rr;
+            // GU: rows 0..32 of the tile from w (gate), 32.. the same rows
+            // of w2 (up).
+            const u8* row = GU ? (rr < 32 ? w : w2) + (u64)min(r0 + (rr & 31), rows - 1) * rb
+                               : w + (u64)min(r0 + rr, rows - 1) * rb;
+            cp16(wb + rr * G2_Q4K_ROW + 16 * ch, row + (u64)s * GmType<QT>::BYTES + 16 * ch);
         }
     }
     u8* xs = st;
@@ -1012,7 +1155,7 @@ __device__ __forceinline__ void g2_copy(u8* wb, u8* st, const u8* w, u64 rb, int
         const u8* a = act + (u64)min(z0 + tk, nb - 1) * astride;
         if (cvalid) cp16(xs + tk * 256 + 16 * (c ^ (tk & 7)), a + voff + 16 * c);
     }
-    if (QT == QT_Q4_K) {
+    if (L::RAW) {
         int j = tid & 7;
 #pragma unroll
         for (int k = 0; k < BN * 8 / G2_THREADS; k++) {
@@ -1060,7 +1203,11 @@ __device__ __forceinline__ void g2_compute(const u8* wb, const u8* st, int nblk,
 #define G2_X(f, c) g2_ld(xrow[f] + 16 * ((c) ^ g))
     // The thread's output tokens (within the block).
     int tk0 = 8 * NT * wc + 2 * t;
-    if constexpr (QT == QT_Q4_K) {
+    if constexpr (QT == QT_Q4_K || QT == QT_Q5_K) {
+        // Q5_K: qs after the 32 qh bytes; qh bytes 4t.. and 16 + 4t.. hold
+        // bit 4 of the values at the qs bytes this thread reads.
+        const bool Q5 = QT == QT_Q5_K;
+        const int QS = Q5 ? 48 : 16;
         // Rows ra = 32 wr + 16 mi + 8 h + g: header d, dmin, scales, mins.
         float d[2][2], dmin[2][2];
         u32 scw[2][2][2], mw[2][2][2];
@@ -1078,6 +1225,14 @@ __device__ __forceinline__ void g2_compute(const u8* wb, const u8* st, int nblk,
                 mw[mi][h][0] = hd.z & 0x3f3f3f3f;
                 mw[mi][h][1] = ((hd.w >> 4) & 0x0f0f0f0f) | ((hd.z >> 2) & 0x30303030);
             }
+        u32 qhw[2][2][2];
+#pragma unroll
+        for (int mi = 0; mi < 2; mi++)
+#pragma unroll
+            for (int h = 0; h < 2; h++)
+#pragma unroll
+                for (int k = 0; k < 2; k++)
+                    qhw[mi][h][k] = Q5 ? g2_ld(wrow[mi][h] + 16 + 16 * k + 4 * t) : 0;
         int S[2][NT][4], M[2][NT][4];
 #pragma unroll
         for (int mi = 0; mi < 2; mi++)
@@ -1099,8 +1254,8 @@ __device__ __forceinline__ void g2_compute(const u8* wb, const u8* st, int nblk,
                 u32 q[2][2];
 #pragma unroll
                 for (int h = 0; h < 2; h++) {
-                    q[h][0] = g2_ld(wrow[mi][h] + 16 * (1 + 2 * c) + 4 * t);
-                    q[h][1] = g2_ld(wrow[mi][h] + 16 * (2 + 2 * c) + 4 * t);
+                    q[h][0] = g2_ld(wrow[mi][h] + QS + 32 * c + 4 * t);
+                    q[h][1] = g2_ld(wrow[mi][h] + QS + 32 * c + 16 + 4 * t);
                 }
                 int sc1[2], sc2[2];
 #pragma unroll
@@ -1112,6 +1267,14 @@ __device__ __forceinline__ void g2_compute(const u8* wb, const u8* st, int nblk,
                 u32 lo2 = q[0][1] & 0x0f0f0f0f, lo3 = q[1][1] & 0x0f0f0f0f;
                 u32 hi0 = (q[0][0] >> 4) & 0x0f0f0f0f, hi1 = (q[1][0] >> 4) & 0x0f0f0f0f;
                 u32 hi2 = (q[0][1] >> 4) & 0x0f0f0f0f, hi3 = (q[1][1] >> 4) & 0x0f0f0f0f;
+                if (Q5) {
+#define G2_H5(w, sh) ((((w) >> (sh)) & 0x01010101) << 4)
+                    lo0 |= G2_H5(qhw[mi][0][0], 2 * c), lo1 |= G2_H5(qhw[mi][1][0], 2 * c);
+                    lo2 |= G2_H5(qhw[mi][0][1], 2 * c), lo3 |= G2_H5(qhw[mi][1][1], 2 * c);
+                    hi0 |= G2_H5(qhw[mi][0][0], 2 * c + 1), hi1 |= G2_H5(qhw[mi][1][0], 2 * c + 1);
+                    hi2 |= G2_H5(qhw[mi][0][1], 2 * c + 1), hi3 |= G2_H5(qhw[mi][1][1], 2 * c + 1);
+#undef G2_H5
+                }
 #pragma unroll
                 for (int f = 0; f < NT; f++) {
                     int d1[4], d2[4];
@@ -1171,7 +1334,7 @@ __device__ __forceinline__ void g2_compute(const u8* wb, const u8* st, int nblk,
                                         __fmul_rn(dmin[mi][h], i2f_rn(M[mi][f][e])));
                     acc[mi][f][e] = __fmaf_rn(dk[f][e & 1], v, acc[mi][f][e]);
                 }
-    } else if constexpr (QT == QT_Q6_K) {
+    } else if constexpr (L::Q6) {
         const u8* meta = wb + G2_BM * 256;
         // Rows 32 wr + 16 mi + 8 h + g.
         const u8* wrow[2][2];
@@ -1252,22 +1415,46 @@ __device__ __forceinline__ void g2_compute(const u8* wb, const u8* st, int nblk,
 #pragma unroll
                 for (int e = 0; e < 2; e++) d0[f][e] = xd[(tk0 + 8 * f + e) * 8 + e8];
 #pragma unroll
+            // Q4_1 / Q5_1: each token's sum of the block's activations
+            // (an all-ones A: the same in every row).
+            int bsum[NT][2];
+            if constexpr (L::MIN1) {
+#pragma unroll
+                for (int f = 0; f < NT; f++) {
+                    int dd[4];
+                    const u32 one = 0x01010101u;
+                    mma32(dd, one, one, one, one, bf[f][0], bf[f][1]);
+                    bsum[f][0] = dd[0], bsum[f][1] = dd[1];
+                }
+            }
+#pragma unroll
             for (int mi = 0; mi < 2; mi++) {
                 u32 a0 = g2_ld(wrow[mi][0] + 16 * ((2 * e8) ^ g));
                 u32 a1 = g2_ld(wrow[mi][1] + 16 * ((2 * e8) ^ g));
                 u32 a2 = g2_ld(wrow[mi][0] + 16 * ((2 * e8 + 1) ^ g));
                 u32 a3 = g2_ld(wrow[mi][1] + 16 * ((2 * e8 + 1) ^ g));
-                float dwr[2];
+                float dwr[2], mwr[2];
 #pragma unroll
-                for (int h = 0; h < 2; h++) dwr[h] = wd[(32 * wr + 16 * mi + 8 * h + g) * 8 + e8];
+                for (int h = 0; h < 2; h++) {
+                    int r = 32 * wr + 16 * mi + 8 * h + g;
+                    dwr[h] = wd[r * 8 + e8];
+                    mwr[h] = L::MIN1 ? wd[G2_BM * 8 + r * 8 + e8] : 0.0f;
+                }
 #pragma unroll
                 for (int f = 0; f < NT; f++) {
                     int dd[4];
                     mma32(dd, a0, a1, a2, a3, bf[f][0], bf[f][1]);
 #pragma unroll
-                    for (int e = 0; e < 4; e++)
-                        acc[mi][f][e] = __fmaf_rn(__fmul_rn(dwr[e >> 1], d0[f][e & 1]),
-                                                  gm_i2f(dd[e]), acc[mi][f][e]);
+                    for (int e = 0; e < 4; e++) {
+                        if constexpr (L::MIN1) {
+                            float v = __fadd_rn(__fmul_rn(dwr[e >> 1], gm_i2f(dd[e])),
+                                                __fmul_rn(mwr[e >> 1], gm_i2f(bsum[f][e & 1])));
+                            acc[mi][f][e] = __fmaf_rn(d0[f][e & 1], v, acc[mi][f][e]);
+                        } else {
+                            acc[mi][f][e] = __fmaf_rn(__fmul_rn(dwr[e >> 1], d0[f][e & 1]),
+                                                      gm_i2f(dd[e]), acc[mi][f][e]);
+                        }
+                    }
                 }
             }
         }
@@ -1276,10 +1463,10 @@ __device__ __forceinline__ void g2_compute(const u8* wb, const u8* st, int nblk,
 #endif
 }
 
-template <int QT, int NT, int ST>
+template <int QT, int NT, int ST, int GU = 0>
 __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, const u8* act,
                                         u64 astride, int nb, const float* bias, int mode,
-                                        float* out, u64 ostride) {
+                                        float* out, u64 ostride, const u8* w2 = nullptr) {
 #if __CUDA_ARCH__ >= 800
     const int BN = 32 * NT;
     typedef G2L<QT, BN, ST> L;
@@ -1291,7 +1478,7 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
     u8* wbuf = sm;
     u8* stg = sm + L::NWB * L::W;
     int nblk = n / (L::KQ ? 256 : 32), nst = (n + 255) / 256;
-    int r0 = blockIdx.y * G2_BM, z0 = blockIdx.x * BN;
+    int r0 = blockIdx.y * (GU ? 32 : G2_BM), z0 = blockIdx.x * BN;
     int warp = threadIdx.x >> 5, wr = warp & 1, wc = warp >> 1;
     float acc[2][NT][4];
 #pragma unroll
@@ -1306,7 +1493,8 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
     auto wsl = [&](int s) { return wbuf + (L::RAW ? s % ST : (L::NWB == 2 ? s & 1 : 0)) * L::W; };
     auto xsl = [&](int s) { return stg + (s % ST) * L::STAGE; };
     auto copy = [&](int s) {
-        g2_copy<QT, BN, ST>(wsl(s), xsl(s), w, rb, rows, r0, act, astride, n, nb, z0, nblk, s);
+        g2_copy<QT, BN, ST, GU>(wsl(s), xsl(s), w, rb, rows, r0, act, astride, n, nb, z0, nblk, s,
+                                w2);
     };
     if constexpr (!L::RAW) {
         g2_load_w<QT>(w, rb, rows, r0, nblk, 0, reg);
@@ -1359,6 +1547,40 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
         }
     }
     int lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
+    if constexpr (GU) {
+        // The gate warps' sums (wr 0) to the up warps holding the same row
+        // and token (wr 1) through shared memory (the stage buffers, free
+        // once every warp is past its last stage); out = silu(gate) * up,
+        // gm_store mode 2's ops on the same two floats.
+        float* xch = (float*)sm;
+        const int ID = (threadIdx.x >> 6) * 32 + lane;
+        __syncthreads();
+        if (wr == 0) {
+#pragma unroll
+            for (int mi = 0; mi < 2; mi++)
+#pragma unroll
+                for (int f = 0; f < NT; f++)
+#pragma unroll
+                    for (int e = 0; e < 4; e++) xch[((mi * NT + f) * 4 + e) * 128 + ID] = acc[mi][f][e];
+        }
+        __syncthreads();
+        if (wr == 1) {
+#pragma unroll
+            for (int mi = 0; mi < 2; mi++)
+#pragma unroll
+                for (int f = 0; f < NT; f++)
+#pragma unroll
+                    for (int e = 0; e < 4; e++) {
+                        int r = r0 + 16 * mi + 8 * (e >> 1) + g;
+                        int z = z0 + 8 * NT * wc + 8 * f + 2 * t + (e & 1);
+                        float gv = xch[((mi * NT + f) * 4 + e) * 128 + ID];
+                        if (r < rows && z < nb)
+                            out[(u64)z * ostride + r] =
+                                __fmul_rn(__fdiv_rn(gv, __fadd_rn(1.0f, expf(-gv))), acc[mi][f][e]);
+                    }
+        }
+        return;
+    }
 #pragma unroll
     for (int mi = 0; mi < 2; mi++)
 #pragma unroll
@@ -1368,7 +1590,7 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
                 int r = r0 + 32 * wr + 16 * mi + 8 * (e >> 1) + g;
                 int z = z0 + 8 * NT * wc + 8 * f + 2 * t + (e & 1);
                 if (r < rows && z < nb)
-                    gm_store(acc[mi][f][e], bias, mode, out + (u64)z * ostride, r);
+                    gm_store(acc[mi][f][e], bias, mode, out, (u64)z * ostride, r);
             }
 #else
     __trap();
@@ -1389,10 +1611,53 @@ GEMM2(gemm2_q4_k, QT_Q4_K, 4, 2)
 GEMM2(gemm2_q6_k, QT_Q6_K, 4, 2)
 GEMM2(gemm2_q8_0, QT_Q8_0, 4, 2)
 GEMM2(gemm2_q5_0, QT_Q5_0, 4, 2)
+GEMM2(gemm2_q5_k, QT_Q5_K, 4, 2)
+GEMM2(gemm2_q4_0, QT_Q4_0, 4, 2)
+GEMM2(gemm2_q4_1, QT_Q4_1, 4, 2)
+GEMM2(gemm2_q5_1, QT_Q5_1, 4, 2)
 GEMM2(gemm2s_q4_k, QT_Q4_K, 2, 3)
 GEMM2(gemm2s_q6_k, QT_Q6_K, 2, 3)
 GEMM2(gemm2s_q8_0, QT_Q8_0, 2, 3)
 GEMM2(gemm2s_q5_0, QT_Q5_0, 2, 3)
+GEMM2(gemm2s_q5_k, QT_Q5_K, 2, 3)
+GEMM2(gemm2s_q4_0, QT_Q4_0, 2, 3)
+GEMM2(gemm2s_q4_1, QT_Q4_1, 2, 3)
+GEMM2(gemm2s_q5_1, QT_Q5_1, 2, 3)
+
+// gemm2s_q4_k_gu: the gate and up products of a layer in one launch and
+// out = silu(gate) * up (gate_up's ops; swiglu_quant_b's floats): a block
+// takes rows 32 y.. of both (gate in its row-warps 0, up in 1), so the
+// gate product never goes to memory. Grid (ceil(nb / 64), ceil(rows / 32)).
+extern "C" __global__ void __launch_bounds__(G2_THREADS, 1)
+    gemm2s_q4_k_gu(const u8* __restrict__ wg, const u8* __restrict__ wu, u64 rb, int rows, int n,
+                   const u8* __restrict__ act, u64 astride, int nb, float* __restrict__ out,
+                   u64 ostride) {
+    gemm2_t<QT_Q4_K, 2, 3, 1>(wg, rb, rows, n, act, astride, nb, nullptr, 0, out, ostride, wu);
+}
+
+GEMM2(gemm2_q6k8, QT_Q6K8, 4, 2)
+GEMM2(gemm2s_q6k8, QT_Q6K8, 2, 3)
+
+// Q6_K rows (rb bytes each, nblk blocks) to their Q6K8 copy (nblk * 288
+// bytes a row): values (q - 32 as int8, gemv_ref's q), scales, d = h2f.
+// Grid (nblk, rows) x 64: four values a thread.
+extern "C" __global__ void q6k_to_i8(const u8* __restrict__ w, u64 rb, int nblk,
+                                     u8* __restrict__ out) {
+    int b = blockIdx.x, r = blockIdx.y, t = threadIdx.x;
+    const u8* blk = w + (u64)r * rb + (u64)b * 210;
+    u8* o = out + ((u64)r * nblk + b) * Q6K8_BYTES;
+#pragma unroll
+    for (int i = 0; i < 4; i++) {
+        int e = 4 * t + i, hh = e >> 7, k = (e >> 5) & 3, l = e & 31;
+        u32 ql = blk[64 * hh + l + 32 * (k & 1)];
+        u32 lo = k < 2 ? (ql & 15) : (ql >> 4);
+        u32 hi = (blk[128 + 32 * hh + l] >> (2 * k)) & 3;
+        o[e] = (u8)((int)(lo | (hi << 4)) - 32);
+    }
+    if (t < 16) o[256 + t] = blk[192 + t];
+    if (t == 0) *(float*)(o + 272) = h2f(rd_u16(blk + 208));
+    if (t >= 16 && t < 28) o[276 + t - 16] = 0;
+}
 
 // ---------------------------------------------------------------------------
 // gemvm_*: small batches (nb <= 8 NF) on tensor cores, weight-read-once: the
@@ -1425,6 +1690,23 @@ struct GvW<QT_Q4_K> {
             h[r] = __ldg((const uint4*)blk);
 #pragma unroll
             for (int p = 0; p < 8; p++) q[r][p] = __ldg((const u32*)(blk + 16 + 16 * p) + t);
+        }
+    }
+};
+template <>
+struct GvW<QT_Q5_K> {
+    uint4 h[2];
+    u32 q[2][8];  // qs word (32 c + 16 hf + 4 t) / 4, piece p = 2c + hf
+    u32 qh[2][2]; // qh words (16 hf + 4 t) / 4: bit 4 of piece (c, hf)'s values in bit 2c / 2c + 1
+    __device__ __forceinline__ void load(const u8* const* rows, int b, int t) {
+#pragma unroll
+        for (int r = 0; r < 2; r++) {
+            const u8* blk = rows[r] + (u64)b * 176;
+            h[r] = __ldg((const uint4*)blk);
+#pragma unroll
+            for (int k = 0; k < 2; k++) qh[r][k] = __ldg((const u32*)(blk + 16 + 16 * k) + t);
+#pragma unroll
+            for (int p = 0; p < 8; p++) q[r][p] = __ldg((const u32*)(blk + 48 + 16 * p) + t);
         }
     }
 };
@@ -1463,6 +1745,13 @@ struct GvW32 {
                 a[r][0] = ldw_a2(blk + 2 + 4 * t);
                 a[r][1] = ldw_a2(blk + 18 + 4 * t);
                 d[r] = h2f(rd_u16(blk));
+            } else if constexpr (QT == QT_Q4_0) {
+                const u8* blk = rows[r] + (u64)b * 18;
+                u32 qs = ldw_a2(blk + 2 + 4 * t);
+                // Values 4t.. (low nibbles) and 16 + 4t.. (high), minus 8.
+                a[r][0] = __vsub4(qs & 0x0f0f0f0f, 0x08080808);
+                a[r][1] = __vsub4((qs >> 4) & 0x0f0f0f0f, 0x08080808);
+                d[r] = h2f(rd_u16(blk));
             } else {
                 const u8* blk = rows[r] + (u64)b * 22;
                 u32 qh = ldw_a2(blk + 2), qs = ldw_a2(blk + 6 + 4 * t);
@@ -1479,6 +1768,8 @@ template <>
 struct GvW<QT_Q8_0> : GvW32<QT_Q8_0> {};
 template <>
 struct GvW<QT_Q5_0> : GvW32<QT_Q5_0> {};
+template <>
+struct GvW<QT_Q4_0> : GvW32<QT_Q4_0> {};
 
 // Blocks per chunk of gemvm's (block, output) values in shared memory.
 #define GVM_CH 8
@@ -1488,7 +1779,8 @@ __device__ __forceinline__ void gemvm_t(const u8* w, u64 rb, int rows, int n, co
                                         u64 astride, int nb, const float* bias, int mode,
                                         float* out, u64 ostride) {
 #if __CUDA_ARCH__ >= 800
-    const int KQ = QT == QT_Q4_K || QT == QT_Q6_K;
+    const int KQ = QT == QT_Q4_K || QT == QT_Q5_K || QT == QT_Q6_K;
+    const bool K45 = QT == QT_Q4_K || QT == QT_Q5_K; // (d, dmin) types
     const int NT = 8 * NF, NO = 4 * NF;
     // Per chunk (two, alternating): each block's value per output, and its
     // per-row (Q6_K d, Q8_0/Q5_0 dw) and per-token (dk, d0) scales.
@@ -1522,7 +1814,7 @@ __device__ __forceinline__ void gemvm_t(const u8* w, u64 rb, int rows, int n, co
             cur = nxt;
             if (b + 4 < nblk) nxt.load(rws, b + 4, t);
             float v[NO];
-            if constexpr (QT == QT_Q4_K) {
+            if constexpr (K45) {
                 float d[2], dmin[2];
                 u32 scw[2][2], mw[2][2];
 #pragma unroll
@@ -1559,14 +1851,25 @@ __device__ __forceinline__ void gemvm_t(const u8* w, u64 rb, int rows, int n, co
                     // sub-block 2cc, high ones 2cc + 1.
                     u32 qa0 = cur.q[0][2 * cc], qa1 = cur.q[0][2 * cc + 1];
                     u32 qb0 = cur.q[1][2 * cc], qb1 = cur.q[1][2 * cc + 1];
+                    // Q5_K: bit 4 of each nibble (low: bit 2cc, high: 2cc + 1).
+                    u32 la0 = 0, la1 = 0, lb0 = 0, lb1 = 0, ha0 = 0, ha1 = 0, hb0 = 0, hb1 = 0;
+                    if constexpr (QT == QT_Q5_K) {
+#define GV_H5(w, sh) ((((w) >> (sh)) & 0x01010101) << 4)
+                        la0 = GV_H5(cur.qh[0][0], 2 * cc), la1 = GV_H5(cur.qh[0][1], 2 * cc);
+                        lb0 = GV_H5(cur.qh[1][0], 2 * cc), lb1 = GV_H5(cur.qh[1][1], 2 * cc);
+                        ha0 = GV_H5(cur.qh[0][0], 2 * cc + 1), ha1 = GV_H5(cur.qh[0][1], 2 * cc + 1);
+                        hb0 = GV_H5(cur.qh[1][0], 2 * cc + 1), hb1 = GV_H5(cur.qh[1][1], 2 * cc + 1);
+#undef GV_H5
+                    }
 #pragma unroll
                     for (int f = 0; f < NF; f++) {
                         const u8* xb = xa[f] + (u64)b * 256 + 64 * cc + 4 * t;
                         int d1[4], d2[4];
-                        mma32(d1, qa0 & 0x0f0f0f0f, qb0 & 0x0f0f0f0f, qa1 & 0x0f0f0f0f,
-                              qb1 & 0x0f0f0f0f, *(const u32*)xb, *(const u32*)(xb + 16));
-                        mma32(d2, (qa0 >> 4) & 0x0f0f0f0f, (qb0 >> 4) & 0x0f0f0f0f,
-                              (qa1 >> 4) & 0x0f0f0f0f, (qb1 >> 4) & 0x0f0f0f0f,
+                        mma32(d1, (qa0 & 0x0f0f0f0f) | la0, (qb0 & 0x0f0f0f0f) | lb0,
+                              (qa1 & 0x0f0f0f0f) | la1, (qb1 & 0x0f0f0f0f) | lb1, *(const u32*)xb,
+                              *(const u32*)(xb + 16));
+                        mma32(d2, ((qa0 >> 4) & 0x0f0f0f0f) | ha0, ((qb0 >> 4) & 0x0f0f0f0f) | hb0,
+                              ((qa1 >> 4) & 0x0f0f0f0f) | ha1, ((qb1 >> 4) & 0x0f0f0f0f) | hb1,
                               *(const u32*)(xb + 32), *(const u32*)(xb + 48));
 #pragma unroll
                         for (int e = 0; e < 4; e++) {
@@ -1642,7 +1945,7 @@ __device__ __forceinline__ void gemvm_t(const u8* w, u64 rb, int rows, int n, co
             int q = threadIdx.x + 128 * k, rr = q / NT, zz = q % NT;
             for (int sl = 0; sl < end - base; sl++) {
                 float sv = vs[buf][sl][rr][zz];
-                if constexpr (QT == QT_Q4_K) acc[k] = __fmaf_rn(ts[buf][sl][zz], sv, acc[k]);
+                if constexpr (K45) acc[k] = __fmaf_rn(ts[buf][sl][zz], sv, acc[k]);
                 else acc[k] = __fmaf_rn(__fmul_rn(ts[buf][sl][zz], rs[buf][sl][rr]), sv, acc[k]);
             }
         }
@@ -1653,7 +1956,7 @@ __device__ __forceinline__ void gemvm_t(const u8* w, u64 rb, int rows, int n, co
     for (int k = 0; k < NF; k++) {
         int q = threadIdx.x + 128 * k, rr = q / NT, zz = q % NT;
         if (r0 + rr < rows && zz < nb)
-            gm_store(acc[k], bias, mode, out + (u64)zz * ostride, r0 + rr);
+            gm_store(acc[k], bias, mode, out, (u64)zz * ostride, r0 + rr);
     }
 #else
     __trap();
@@ -1671,10 +1974,14 @@ GEMVM(gemvm8_q4_k, QT_Q4_K, 1)
 GEMVM(gemvm8_q6_k, QT_Q6_K, 1)
 GEMVM(gemvm8_q8_0, QT_Q8_0, 1)
 GEMVM(gemvm8_q5_0, QT_Q5_0, 1)
+GEMVM(gemvm8_q5_k, QT_Q5_K, 1)
+GEMVM(gemvm8_q4_0, QT_Q4_0, 1)
 GEMVM(gemvm16_q4_k, QT_Q4_K, 2)
 GEMVM(gemvm16_q6_k, QT_Q6_K, 2)
 GEMVM(gemvm16_q8_0, QT_Q8_0, 2)
 GEMVM(gemvm16_q5_0, QT_Q5_0, 2)
+GEMVM(gemvm16_q5_k, QT_Q5_K, 2)
+GEMVM(gemvm16_q4_0, QT_Q4_0, 2)
 
 // Test: for every half h and a few x, fmul(h2f(h), x) == fmul(f16_to_f32(h),
 // x) bit for bit (the products convert block scales with the hardware cvt,

@@ -145,6 +145,21 @@ pub enum Val {
     F64(f64),
 }
 
+impl Val {
+    /// The value of a numeric (32/64-bit integer or float) entry.
+    pub fn as_f64(&self) -> Option<f64> {
+        match self {
+            Val::U32(n) => Some(*n as f64),
+            Val::I32(n) => Some(*n as f64),
+            Val::U64(n) => Some(*n as f64),
+            Val::I64(n) => Some(*n as f64),
+            Val::F32(n) => Some(*n as f64),
+            Val::F64(n) => Some(*n),
+            _ => None,
+        }
+    }
+}
+
 impl std::fmt::Display for Val {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -287,9 +302,7 @@ pub struct Tensor {
     pub offset: u64,
     pub n_elements: u64,
     pub n_bytes: u64,
-    #[allow(dead_code)] // parsed from the name; nothing reads it yet
-    pub layer: i32, // -1 = global, 0..N = layer index
-    #[allow(dead_code)]
+    pub layer: i32,   // -1 = global, 0..N = layer index
     pub kind: String, // "attn_q", "ffn_up", "token_embd", etc.
 }
 
@@ -306,6 +319,23 @@ pub struct Model {
     /// overlap one.
     released: std::sync::Mutex<Vec<std::ops::Range<usize>>>,
     any_released: std::sync::atomic::AtomicBool,
+    /// Tensors `load` rewrote (llama's reordered q/k rows) when `data` maps
+    /// the file: their bytes live here, each in its own anonymous mapping,
+    /// and `tensor_data` reads them from it (the mapping stays the file's,
+    /// shared and read-only). Empty otherwise (the copy is rewritten in place).
+    side: Vec<Side>,
+}
+
+/// A rewritten tensor's bytes outside a file mapping (`Model::side`).
+/// Never dropped while the model lives: a file mapping's released pages
+/// fault back in with the same bytes, so slices taken before a `release`
+/// stay valid there (tests run a per-row model next to a repacking one on
+/// one mapping); dropped side pages would read as zeros through them.
+struct Side {
+    /// The tensor's byte range in `data`.
+    range: std::ops::Range<usize>,
+    /// Anonymous, read-only, range.len() bytes (at least 1).
+    map: memmap2::Mmap,
 }
 
 /// `release` only drops whole aligned blocks of this size inside released
@@ -328,6 +358,9 @@ impl Model {
     /// copy (they'd read as zeros).
     pub fn tensor_data(&self, t: &Tensor) -> &[u8] {
         let r = self.tensor_range(t);
+        if let Some(s) = self.side_of(&r) {
+            return &s.map[..r.len()];
+        }
         if !self.file_backed && self.any_released.load(std::sync::atomic::Ordering::Acquire) {
             // Unlocked before the panic: a caught one leaves the lock usable.
             let gone =
@@ -339,6 +372,14 @@ impl Model {
             );
         }
         &self.data[r]
+    }
+
+    /// The side copy holding bytes `r` of `data`, if any.
+    fn side_of(&self, r: &std::ops::Range<usize>) -> Option<&Side> {
+        if self.side.is_empty() || r.is_empty() {
+            return None;
+        }
+        self.side.iter().find(|s| s.range == *r)
     }
 
     /// Whether `data` maps the file (vs the anonymous copy, see `map_weights`).
@@ -354,7 +395,9 @@ impl Model {
     /// it never holds a byte of a tensor that wasn't released. On a file
     /// mapping the pages just leave this mapping and a later read faults them
     /// back in from the file. On the anonymous copy they come back as zeros,
-    /// so `tensor_data` panics on a released tensor from then on.
+    /// so `tensor_data` panics on a released tensor from then on. A tensor
+    /// with a side copy (`side`) keeps it (see `Side`); only its untouched
+    /// file pages go.
     pub fn release(&self, t: &Tensor) {
         let r = self.tensor_range(t);
         if r.is_empty() {
@@ -569,7 +612,9 @@ pub fn load_with(path: &str, copy: Option<bool>) -> io::Result<Model> {
     let len = file.metadata()?.len() as usize;
     let (data, file_backed) = map_weights(&file, copy)?;
     let h = parse(&data[..len.min(data.len())])?;
-    Ok(Model::new(h, data, file_backed))
+    let mut m = Model::new(h, data, file_backed);
+    m.unpermute_rope()?;
+    Ok(m)
 }
 
 /// Load a model to run it (`axon gen` / `chat`): the file is mapped and
@@ -602,7 +647,12 @@ pub fn load_to_run(
         // Same bytes (parse checked every tensor range against len).
         m.data = copy_file(&file, len)?;
         m.file_backed = false;
-    } else {
+    }
+    // After the copy-vs-map choice (in place on a copy, side copies on the
+    // file mapping) and before the read-ahead (the file pages it hands
+    // back are never read again).
+    m.unpermute_rope()?;
+    if !copy {
         m.read_ahead(&file);
     }
     Ok(m)
@@ -689,6 +739,142 @@ impl Model {
             file_backed,
             released: Default::default(),
             any_released: Default::default(),
+            side: Vec::new(),
+        }
+    }
+
+    /// llama: attn_q / attn_k rows back in rotate-half order
+    /// (`rope_unpermute_plan`). On a file mapping each reordered tensor gets
+    /// its own anonymous copy (`Model::side`, kept for the model's life; the
+    /// mapping stays the file's, shared and read-only) and its file pages,
+    /// never read again, go back right away; on the anonymous copy, in
+    /// place. Nothing to do for other architectures.
+    fn unpermute_rope(&mut self) -> io::Result<()> {
+        let perm = rope_unpermute_plan(&self.arch, &self.metadata, &self.tensors);
+        if perm.is_empty() {
+            return Ok(());
+        }
+        let base = self.data_offset as usize;
+        if self.file_backed {
+            for &(i, heads) in &perm {
+                let t = &self.tensors[i];
+                let s = base + t.offset as usize;
+                let range = s..s + t.n_bytes as usize;
+                let mut m = memmap2::MmapMut::map_anon(range.len().max(1))?;
+                m[..range.len()].copy_from_slice(&self.data[range.clone()]);
+                unpermute_rows(&mut m[..range.len()], t, heads);
+                self.side.push(Side {
+                    range,
+                    map: m.make_read_only()?,
+                });
+            }
+            let rewritten: Vec<usize> = (self.side.iter())
+                .filter_map(|sc| {
+                    (self.tensors.iter()).position(|t| self.tensor_range(t) == sc.range)
+                })
+                .collect();
+            for i in rewritten {
+                self.release(&self.tensors[i]);
+            }
+        } else {
+            let placeholder = memmap2::MmapMut::map_anon(1)?.make_read_only()?;
+            let mut w = std::mem::replace(&mut self.data, placeholder).make_mut()?;
+            apply_rope_unpermute(&mut w, base, &self.tensors, &perm);
+            self.data = w.make_read_only()?;
+        }
+        Ok(())
+    }
+}
+
+/// Tensors whose rows `load` reorders, with their head counts: on a
+/// `llama` GGUF, attn_q and attn_k (weights and any biases). llama.cpp's
+/// converter permutes those rows per head so that its "normal" RoPE, which
+/// turns adjacent pairs (2i, 2i + 1), gives the Hugging Face model's rotate-
+/// half RoPE. Putting the rows back makes the model a NEOX-RoPE one like
+/// qwen2's (pair i is dims i and i + head_dim / 2, same frequency), so every
+/// kernel applies as is. Queries and keys of a head get the same
+/// permutation, which leaves every q.k (and so the whole model) unchanged;
+/// values aren't touched. Empty for other architectures or if the head
+/// counts are missing (`check_supported` reports that).
+fn rope_unpermute_plan(
+    arch: &str,
+    metadata: &[(String, Val)],
+    tensors: &[Tensor],
+) -> Vec<(usize, usize)> {
+    if arch != "llama" {
+        return Vec::new();
+    }
+    let num = |k: &str| {
+        metadata
+            .iter()
+            .find(|(n, _)| n == &format!("llama.{k}"))
+            .and_then(|(_, v)| v.as_f64())
+            .filter(|&v| v >= 1.0 && v.fract() == 0.0)
+            .map(|v| v as usize)
+    };
+    let (Some(nh), Some(nkv)) = (num("attention.head_count"), num("attention.head_count_kv"))
+    else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for (i, t) in tensors.iter().enumerate() {
+        let heads = match t.kind.as_str() {
+            "attn_q.weight" | "attn_q.bias" => nh,
+            "attn_k.weight" | "attn_k.bias" => nkv,
+            _ => continue,
+        };
+        if t.layer >= 0 {
+            out.push((i, heads));
+        }
+    }
+    out
+}
+
+/// Undo the converter's per-head row permutation (see
+/// `rope_unpermute_plan`) on each planned tensor of `data`: within a head of
+/// hd rows, GGUF row 2i + j holds the original row j * hd / 2 + i. Rows are
+/// whole quant blocks (dims[0] values each), so this moves bytes only.
+/// Tensors whose shape doesn't split into heads of an even size are left as
+/// they are (`check_supported` rejects them).
+fn apply_rope_unpermute(data: &mut [u8], base: usize, tensors: &[Tensor], plan: &[(usize, usize)]) {
+    for &(i, heads) in plan {
+        let t = &tensors[i];
+        let s = base + t.offset as usize;
+        unpermute_rows(&mut data[s..s + t.n_bytes as usize], t, heads);
+    }
+}
+
+/// `apply_rope_unpermute` on one tensor's bytes `b`. Left as is (and
+/// rejected by `check_supported`) if its shape doesn't split into whole
+/// rows of whole quant blocks and heads of an even size.
+fn unpermute_rows(b: &mut [u8], t: &Tensor, heads: usize) {
+    let rows = match t.dims.len() {
+        1 => t.dims[0],
+        n if n >= 2 => t.dims[1..].iter().product(),
+        _ => return,
+    } as usize;
+    // A 1-D tensor (a bias) has one value per row.
+    let cols = if t.dims.len() == 1 { 1 } else { t.dims[0] };
+    if t.n_bytes == 0
+        || rows == 0
+        || !rows.is_multiple_of(heads)
+        || (t.dims.len() >= 2 && !cols.is_multiple_of(t.qtype.block_size as u64))
+    {
+        return;
+    }
+    let hd = rows / heads;
+    let rb = t.n_bytes as usize / rows;
+    if !hd.is_multiple_of(2) || rb * rows != t.n_bytes as usize || b.len() != t.n_bytes as usize {
+        return;
+    }
+    let mut tmp = Vec::with_capacity(hd * rb);
+    for head in b.chunks_exact_mut(hd * rb) {
+        tmp.clear();
+        tmp.extend_from_slice(head);
+        for (r, src) in tmp.chunks_exact(rb).enumerate() {
+            let (i, j) = (r / 2, r % 2);
+            let d = j * hd / 2 + i;
+            head[d * rb..(d + 1) * rb].copy_from_slice(src);
         }
     }
 }
@@ -931,6 +1117,8 @@ pub fn build_for_test_with(
     let h = parse(&b).expect("build_for_test: parse");
     let mut data = memmap2::MmapMut::map_anon(b.len()).unwrap();
     data.copy_from_slice(&b);
+    let perm = rope_unpermute_plan(&h.arch, &h.metadata, &h.tensors);
+    apply_rope_unpermute(&mut data, h.data_offset as usize, &h.tensors, &perm);
     Model {
         arch: h.arch,
         metadata: h.metadata,
@@ -940,12 +1128,54 @@ pub fn build_for_test_with(
         file_backed: false,
         released: Default::default(),
         any_released: Default::default(),
+        side: Vec::new(),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The row reordering on its own: head sizes 64 and 128, a quantized
+    /// matrix (Q8_0 rows of 2 blocks) and a 1-D F32 bias, against the
+    /// converter's permutation applied to known rows (HF row j*hd/2 + i is
+    /// stored at 2i + j; undoing it must give the HF order back).
+    #[test]
+    fn unpermute_rows_undoes_the_converter() {
+        for (hd, heads) in [(64usize, 3usize), (128, 2)] {
+            let rows = hd * heads;
+            // HF order: row r's bytes all equal r (mod 251), so the order is visible.
+            for (dims, qt, rb) in [
+                (vec![64u64, rows as u64], qtype(crate::quant::Q8_0), 2 * 34),
+                (vec![rows as u64], qtype(crate::quant::F32), 4),
+            ] {
+                let hf: Vec<u8> = (0..rows).flat_map(|r| vec![(r % 251) as u8; rb]).collect();
+                // The converter's order: GGUF row h*hd + 2i + j <- HF row h*hd + j*hd/2 + i.
+                let mut gguf = vec![0u8; hf.len()];
+                for h in 0..heads {
+                    for i in 0..hd / 2 {
+                        for j in 0..2 {
+                            let (src, dst) = (h * hd + j * hd / 2 + i, h * hd + 2 * i + j);
+                            gguf[dst * rb..(dst + 1) * rb]
+                                .copy_from_slice(&hf[src * rb..(src + 1) * rb]);
+                        }
+                    }
+                }
+                let t = Tensor {
+                    name: "blk.0.attn_q.weight".into(),
+                    n_elements: dims.iter().product(),
+                    n_bytes: hf.len() as u64,
+                    dims,
+                    qtype: qt,
+                    offset: 0,
+                    layer: 0,
+                    kind: "attn_q.weight".into(),
+                };
+                unpermute_rows(&mut gguf, &t, heads);
+                assert_eq!(gguf, hf, "hd {hd} type {}", qt.name);
+            }
+        }
+    }
 
     /// A little-endian GGUF writer for building test files in memory.
     #[derive(Default)]

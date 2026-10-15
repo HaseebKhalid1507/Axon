@@ -37,7 +37,7 @@
 use super::{Arg, DevBuf, Func, Gpu, Graph, HostBuf, Module};
 use crate::gguf::{Model, Tensor};
 use crate::lm::Lm;
-use crate::quant::{self, Q4_K, Q5_0, Q6_K, Q8_0};
+use crate::quant::{self, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0};
 use crate::sample::{self, CAND_MAX, Cand, CandSpec};
 
 /// Positions per attention tile (decode.cu ATT_TILE) and largest GQA group.
@@ -61,11 +61,17 @@ const G2_BM: usize = 64;
 /// gemm2's dynamic shared memory for type qt, bn tokens per block and st
 /// stages (prefill.cu G2L::SMEM; the kernel traps if given less).
 fn gemm2_smem(qt: u32, bn: usize, st: usize) -> usize {
-    let (raw, kq) = (qt == Q4_K, qt == Q4_K || qt == Q6_K);
+    let (raw, kq) = (matches!(qt, Q4_K | Q5_K), matches!(qt, Q4_K | Q5_K | Q6_K));
     let w = if raw {
         G2_BM * 176
     } else {
-        G2_BM * 256 + G2_BM * if qt == Q6_K { 20 } else { 32 }
+        G2_BM * 256
+            + G2_BM
+                * match qt {
+                    Q6_K => 20,
+                    Q4_1 | Q5_1 => 64,
+                    _ => 32,
+                }
     };
     let stage = bn * 256 + if raw { bn * 32 } else { 0 } + if kq { bn * 4 } else { bn * 32 };
     let nwb = if raw {
@@ -79,7 +85,14 @@ fn gemm2_smem(qt: u32, bn: usize, st: usize) -> usize {
 }
 /// Most tokens per batched pass on the GPU (`Lm::prefill_batch`): big
 /// batches keep the tensor cores busy and read the weights fewer times.
-const PREFILL_BATCH: usize = 1024;
+/// 9 x 128 (gemm2's token tiles): with equal-size passes (`batch::passes`)
+/// a 2100-token prompt is two passes of 1050, not 1024 + 1024 + 52 (the
+/// short pass's GEMMs are latency-bound: ~5 % of the prompt's time).
+const PREFILL_BATCH: usize = 1152;
+/// The batch scratch placement and `fit` budget for (main's 1024 before
+/// round 4): `build` takes `PREFILL_BATCH` only when its extra scratch fits
+/// besides, so the bigger passes never cost context or tip a placement.
+const PLAN_BATCH: usize = 1024;
 /// `PREFILL_BATCH` for the GPU half of a split (first > 0, `crate::hybrid`):
 /// the CPU half's batched pass sets the pace, so the hybrid feeds at most
 /// `crate::PREFILL_BATCH` tokens per call, and a speculative verify pass
@@ -100,9 +113,9 @@ pub const SPLIT_BATCH: usize = 64;
 
 /// Most tokens per batched pass of a split that streams its CPU layers
 /// (`split_batch(true)`): the streamed prefill's chunk size. Its own
-/// constant, not `PREFILL_BATCH` (1024 since gemm2 round 2): the scratch
-/// for it is VRAM the streaming ring and the GPU layers don't get.
-pub const STREAM_PASS: usize = PREFILL_BATCH;
+/// constant, not `PREFILL_BATCH` (1152 since round 4): the scratch for it
+/// is VRAM the streaming ring and the GPU layers don't get.
+pub const STREAM_PASS: usize = 1024;
 
 /// The GPU half's batch scratch for a split that streams (`stream`) or not.
 pub fn split_batch(stream: bool) -> usize {
@@ -132,6 +145,9 @@ struct Mat {
     rb: usize,
     rows: usize,
     cols: usize,
+    /// Q6_K: byte offset of its prefill copy (prefill.cu Q6K8, 288 bytes a
+    /// block) in `CudaQwen2::w8`, if made (`make_q6k8`).
+    c8: Option<usize>,
 }
 
 impl Mat {
@@ -243,12 +259,14 @@ const TK_THREADS: u32 = 512;
 
 /// What a step (or batched pass) does after the layers: nothing (prefill),
 /// the greedy pick, or sampling candidates (sample.cu). The step's graph
-/// slot.
+/// slot. `Last` (batched passes only): the logits of the pass's last token
+/// alone, into the batch scratch's logits row 0 (`Lm::prefill_logits`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Head {
     No = 0,
     Argmax = 1,
     Sample = 2,
+    Last = 3,
 }
 
 impl From<bool> for Head {
@@ -297,6 +315,9 @@ pub struct CudaQwen2<'g> {
     pub first: usize,
     /// Quantized matrices, embedding included (if first == 0).
     weights: DevBuf<'g>,
+    /// The Q6_K layer matrices' prefill copy (`make_q6k8`; `Mat::c8`), or
+    /// empty.
+    w8: DevBuf<'g>,
     /// Norm weights and biases, f32.
     vecs: DevBuf<'g>,
     /// RoPE frequencies, f64 (base^(-2i/hd), as model.rs rope_table).
@@ -327,6 +348,14 @@ pub struct CudaQwen2<'g> {
     /// The context `with_kv` planned memory for: its max_ctx, or less with
     /// `fit` (what's free then held).
     pub ctx: usize,
+    /// Batched passes make the FFN's silu(gate) * up in the up product's
+    /// epilogue (bgemm mode 2), else by swiglu_quant_b (tests compare them:
+    /// the same bits).
+    pub(super) swiglu_epi: bool,
+    /// Batched passes run gate and up (both Q4_K) as one launch with the
+    /// swiglu in its epilogue (prefill.cu gemm2s_q4_k_gu; AXON_GATE_UP=0
+    /// turns it off): the same bits as separate products.
+    pub(super) gate_up_fused: bool,
 }
 
 /// What `CudaQwen2` keeps per sequence: the KV cache, activations, logits,
@@ -421,8 +450,27 @@ fn place<'t>(t: &'t Tensor, uploads: &mut Vec<(&'t Tensor, usize)>) -> Mat {
         rb,
         rows,
         cols,
+        c8: None,
     }
 }
+
+/// Bytes per 256-value block of a Q6_K matrix's prefill copy (prefill.cu
+/// Q6K8_BYTES).
+const Q6K8_BYTES: usize = 288;
+
+/// Whether a Q6_K prefill copy of `bytes` is made with `free` VRAM left
+/// after the weights and a cache of `cache` bytes still to come: the cache,
+/// `HEADROOM` and `Q6K8_MARGIN` stay free besides (with `force`, the cache
+/// alone). A copy of 0 bytes (no Q6_K matrices) is never made.
+fn q6k8_fits(free: u64, cache: u64, bytes: u64, force: bool) -> bool {
+    let keep = cache + if force { 0 } else { HEADROOM + Q6K8_MARGIN };
+    bytes > 0 && free >= keep + bytes
+}
+
+/// VRAM the Q6_K prefill copy must leave free beyond the planned cache and
+/// `HEADROOM` (a second cache, the desktop's growth): it is made only from
+/// memory nothing else was going to use.
+const Q6K8_MARGIN: u64 = 512 << 20;
 
 fn meta(m: &Model, key: &str) -> Option<f64> {
     crate::model::meta_num(m, &format!("{}.{key}", m.arch))
@@ -561,8 +609,17 @@ impl<'g> CudaQwen2<'g> {
             ));
         }
         net.ctx = ctx;
-        // 16 bytes of slack: the 2-byte-aligned block loads (ld8_a2) read up
-        // to 2 bytes past a Q8_0/Q5_0 block, which may be the arena's last.
+        if first == 0 {
+            // The bigger passes only from VRAM the plan leaves (HEADROOM
+            // kept); the context and placement were decided at PLAN_BATCH.
+            net.batch = PREFILL_BATCH;
+            if net.vram_want(&plan, ctx) > free {
+                net.batch = PLAN_BATCH;
+            }
+        }
+        // 16 bytes of slack: the 2-byte-aligned block loads (ld8_a2, ldw_a2,
+        // ld_a2) read up to 2 bytes past a Q8_0/Q5_0/Q4_0/Q4_1/Q5_1 block,
+        // which may be the arena's last.
         net.weights = gpu.alloc(plan.total + ARENA_PAD)?;
         // A thread fills in the page tables of the matrices ahead of the
         // copies (`Model::prefault`): out of a file mapping the driver's
@@ -593,7 +650,109 @@ impl<'g> CudaQwen2<'g> {
         net.freq = gpu.alloc(plan.freq.len() * 8)?;
         let fb: Vec<u64> = plan.freq.iter().map(|f| f.to_bits()).collect();
         net.freq.write(&fb)?;
+        if first == 0 {
+            net.make_q6k8(ctx)?;
+        }
         Ok(net)
+    }
+
+    /// Bytes of the Q6_K layer matrices' prefill copy (prefill.cu Q6K8).
+    fn q6k8_bytes(&self) -> usize {
+        self.layers
+            .iter()
+            .flat_map(|l| [l.q, l.k, l.v, l.o, l.gate, l.up, l.down])
+            .filter(|m| m.qt == Q6_K)
+            .map(|m| m.rows * m.cols / 256 * Q6K8_BYTES)
+            .sum()
+    }
+
+    /// The Q6_K layer matrices' prefill copy (int8 values, 16-byte aligned
+    /// blocks: gemm2_q6k8 loads them without unpacking; the same products,
+    /// bit for bit), if the GPU has the int8 tensor cores and VRAM to spare:
+    /// what's free now must hold it, a cache of `ctx` positions,
+    /// `HEADROOM` and `Q6K8_MARGIN` besides, so it never costs context
+    /// (`vram_want` and the split's placement don't count it: it is made
+    /// only from VRAM they leave unused, and never for a split's GPU half).
+    /// AXON_Q6K8=0 never makes it, =1 whenever it fits at all. Decode
+    /// keeps reading the Q6_K bytes.
+    fn make_q6k8(&mut self, ctx: usize) -> Result<(), String> {
+        let Some(conv) = &self.bf.q6k_to_i8 else {
+            return Ok(());
+        };
+        let bytes = self.q6k8_bytes();
+        let force = match std::env::var("AXON_Q6K8").as_deref() {
+            Ok("0") => return Ok(()),
+            Ok("1") => true,
+            _ => false,
+        };
+        let free = self.gpu.info()?.free_bytes;
+        if !q6k8_fits(free, self.cache_bytes(ctx) as u64, bytes as u64, force) {
+            return Ok(());
+        }
+        let w8 = self.gpu.alloc(bytes)?;
+        let mut off = 0;
+        for l in self.layers.iter_mut() {
+            for m in [
+                &mut l.q,
+                &mut l.k,
+                &mut l.v,
+                &mut l.o,
+                &mut l.gate,
+                &mut l.up,
+                &mut l.down,
+            ] {
+                if m.qt != Q6_K {
+                    continue;
+                }
+                let nblk = m.cols / 256;
+                // SAFETY: q6k_to_i8's signature; the matrix is whole in the
+                // arena, its copy (rows * nblk blocks) whole in w8 at off.
+                unsafe {
+                    self.gpu.launch(
+                        conv,
+                        (nblk as u32, m.rows as u32, 1),
+                        (64, 1, 1),
+                        0,
+                        &[
+                            self.weights.arg_at(m.off),
+                            Arg::U64(m.rb as u64),
+                            Arg::I32(nblk as i32),
+                            w8.arg_at(off),
+                        ],
+                    )?;
+                }
+                m.c8 = Some(off);
+                off += m.rows * nblk * Q6K8_BYTES;
+            }
+        }
+        self.gpu.sync()?;
+        self.w8 = w8;
+        Ok(())
+    }
+
+    /// VRAM of the Q6_K prefill copy (0 if not made: `make_q6k8`).
+    pub fn q6k8_vram(&self) -> usize {
+        self.w8.len()
+    }
+
+    /// Drop the Q6_K prefill copy (tests: the same products without it).
+    #[cfg(test)]
+    pub(super) fn drop_q6k8(&mut self) -> Result<(), String> {
+        for l in self.layers.iter_mut() {
+            for m in [
+                &mut l.q,
+                &mut l.k,
+                &mut l.v,
+                &mut l.o,
+                &mut l.gate,
+                &mut l.up,
+                &mut l.down,
+            ] {
+                m.c8 = None;
+            }
+        }
+        self.w8 = self.gpu.alloc(0)?;
+        Ok(())
     }
 
     /// VRAM `new_layers(.., max_ctx, first, kv, split_batch, _)` checks
@@ -646,6 +805,13 @@ impl<'g> CudaQwen2<'g> {
         split_batch: usize,
     ) -> Result<(CudaQwen2<'g>, Plan<'m>), String> {
         crate::model::check_supported(m).map_err(|e| e.to_string())?;
+        if super::needs_ext(m) && !module.ext() {
+            return Err(
+                "the model has Q4_0/Q4_1/Q5_1/Q5_K tensors: it needs the kernels \
+                        built with the extra types (Kernels::module_for / module_ext)"
+                    .into(),
+            );
+        }
         let need = |k: &str| {
             meta(m, k)
                 .map(|v| v as usize)
@@ -658,7 +824,7 @@ impl<'g> CudaQwen2<'g> {
         let head_dim = meta(m, "attention.key_length").map_or(dim / n_heads, |v| v as usize);
         let q_dim = n_heads * head_dim;
         let eps = meta(m, "attention.layer_norm_rms_epsilon").unwrap_or(1e-6) as f32;
-        let rope_base = meta(m, "rope.freq_base").unwrap_or(10000.0);
+        let freq = crate::model::rope_freqs(m, head_dim);
         let trained = meta(m, "context_length").unwrap_or(32768.0);
         let group = n_heads / n_kv_heads;
         if head_dim != 64 && head_dim != 128 {
@@ -680,12 +846,12 @@ impl<'g> CudaQwen2<'g> {
         // Every matrix's (tensor, arena offset), uploaded once all fit.
         let mut uploads: Vec<(&Tensor, usize)> = Vec::new();
         let gemv_type = |mt: &Mat, name: &str| -> Result<(), String> {
-            if [Q4_K, Q6_K, Q5_0, Q8_0].contains(&mt.qt) {
+            if [Q4_K, Q5_K, Q6_K, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0].contains(&mt.qt) {
                 Ok(())
             } else {
                 Err(format!(
                     "tensor {name}: type {} isn't supported by the CUDA backend \
-                     (Q4_K, Q6_K, Q5_0, Q8_0)",
+                     (Q4_K, Q5_K, Q6_K, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0)",
                     crate::gguf::qtype(mt.qt).name
                 ))
             }
@@ -747,8 +913,7 @@ impl<'g> CudaQwen2<'g> {
                 let b = vec_f32(m, t);
                 let slow = |r: usize| {
                     let i = r % head_dim % (head_dim / 2);
-                    let theta = rope_base.powf(-2.0 * i as f64 / head_dim as f64);
-                    theta * trained <= std::f64::consts::FRAC_PI_3
+                    freq[i] * trained <= std::f64::consts::FRAC_PI_3
                 };
                 push_vec(
                     b.iter()
@@ -782,9 +947,6 @@ impl<'g> CudaQwen2<'g> {
         if layers.iter().any(|l| l.gate.rows != ffn) {
             return Err("layers of different FFN sizes aren't supported on the GPU".into());
         }
-        let freq: Vec<f64> = (0..head_dim / 2)
-            .map(|i| rope_base.powf(-2.0 * i as f64 / head_dim as f64))
-            .collect();
 
         let sms = gpu.info()?.sms as usize;
         // Up to ~8 attention blocks per SM at long contexts.
@@ -833,6 +995,7 @@ impl<'g> CudaQwen2<'g> {
             eps,
             first,
             weights: gpu.alloc(0)?,
+            w8: gpu.alloc(0)?,
             vecs: gpu.alloc(0)?,
             freq: gpu.alloc(0)?,
             embd,
@@ -843,13 +1006,11 @@ impl<'g> CudaQwen2<'g> {
             tc_attn: module.mma(),
             graphs: std::env::var("AXON_CUDA_GRAPHS").map_or(true, |v| v != "0"),
             bf: batch::BatchFns::new(module, head_dim, sms)?,
-            batch: if first > 0 {
-                split_batch
-            } else {
-                PREFILL_BATCH
-            },
+            batch: if first > 0 { split_batch } else { PLAN_BATCH },
             kv,
             ctx: 0,
+            swiglu_epi: true,
+            gate_up_fused: std::env::var("AXON_GATE_UP").map_or(true, |v| v != "0"),
         };
         if let CacheKv::Q8 { group } = kv {
             if group == 0 {
@@ -1457,6 +1618,7 @@ impl<'g> CudaQwen2<'g> {
         head: Head,
     ) -> Result<(), String> {
         assert_eq!(c.net, self.id, "a CudaCache used with another CudaQwen2");
+        assert!(head != Head::Last, "Head::Last: batched passes only");
         assert!(
             pos < c.max_ctx,
             "position {pos} exceeds cache size {}",
@@ -1861,6 +2023,22 @@ impl<'g> Lm for CudaQwen2<'g> {
             self.feed_tokens(cache, batch::BatchIn::Tokens(tokens), start)
         };
         r.unwrap_or_else(|e| Self::die(e));
+    }
+
+    /// Batched passes, the last token in the final one with the output head
+    /// on its row alone: the KV cache and logit bits of `feed_batch` +
+    /// `forward` (batch.rs contract), without the extra decode step.
+    fn prefill_logits(&self, tokens: &[u32], start: usize, cache: &mut CudaCache<'g>) -> Vec<f32> {
+        self.check_batch(tokens, start, cache);
+        assert_eq!(
+            cache.net, self.id,
+            "a CudaCache used with another CudaQwen2"
+        );
+        if tokens.len() == 1 {
+            return Lm::forward(self, tokens[0], start, cache);
+        }
+        self.prefill_tokens(cache, tokens, start)
+            .unwrap_or_else(|e| Self::die(e))
     }
 
     /// Batched passes with the output head: the picks `forward_argmax`

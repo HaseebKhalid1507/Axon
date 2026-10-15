@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 pub const MODEL: &str = "models/qwen2.5-0.5b-q4_k_m.gguf";
 /// The qwen3 test model (`AXON_TEST_QWEN3` overrides it).
 pub const QWEN3_MODEL: &str = "models/Qwen3-0.6B-Q8_0.gguf";
+/// The llama test model (`AXON_TEST_LLAMA` overrides it): head_dim 64,
+/// 4 query heads per kv head, tied output, Llama 3 RoPE factors.
+pub const LLAMA_MODEL: &str = "models/Llama-3.2-1B-Instruct-Q4_K_M.gguf";
 
 /// Reference data made by `scripts/oracle/make_fixtures.py`, committed to the repo.
 pub fn fixtures() -> PathBuf {
@@ -66,6 +69,28 @@ pub fn qwen3_model() -> Option<Model> {
         );
     }
     Some(gguf::load(path.to_str().expect("utf-8 path")).expect("load qwen3 model"))
+}
+
+/// The llama test model, or None to skip (`AXON_SKIP_MODEL_TESTS`, as
+/// `model_path`).
+pub fn llama_model() -> Option<Model> {
+    let path = match std::env::var_os("AXON_TEST_LLAMA") {
+        Some(p) => PathBuf::from(p),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).join(LLAMA_MODEL),
+    };
+    if !path.exists() {
+        if std::env::var_os("AXON_SKIP_MODEL_TESTS").is_some() {
+            eprintln!("skipping: {LLAMA_MODEL} not present and AXON_SKIP_MODEL_TESTS is set");
+            return None;
+        }
+        panic!(
+            "{} is missing. Download Llama-3.2-1B-Instruct-Q4_K_M.gguf \
+             (bartowski/Llama-3.2-1B-Instruct-GGUF), or set AXON_SKIP_MODEL_TESTS=1 to skip \
+             the tests that need it.",
+            path.display()
+        );
+    }
+    Some(gguf::load(path.to_str().expect("utf-8 path")).expect("load llama model"))
 }
 
 pub fn read_json(rel: &str) -> serde_json::Value {

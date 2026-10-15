@@ -1,6 +1,6 @@
 # Axon
 
-CPU-only LLM inference for Qwen2 and Qwen3 GGUF models, written from scratch in Rust.
+CPU-only LLM inference for Qwen2, Qwen3 and Llama 3 GGUF models, written from scratch in Rust.
 
 No ggml, no BLAS, no bindings: a GGUF reader, quantized integer dot-product
 kernels (scalar, AVX2, AVX-VNNI), a spinning worker pool and a transformer
@@ -14,14 +14,16 @@ does. The tests check this, and check against three independent oracles
 
 Works today, honestly scoped:
 
-- Architectures: `qwen2` and `qwen3` (dense). Tested with Qwen2.5-0.5B-Instruct; also runs the
-  1.5B, 3B and 7B Instruct Q4_K_M builds, and Qwen3 0.6B (Q8_0), 1.7B, 4B and 8B (Q4_K_M).
+- Architectures: `qwen2`, `qwen3` (dense) and `llama` (Llama 3.x). Tested with Qwen2.5-0.5B-Instruct; also runs the
+  1.5B, 3B and 7B Instruct Q4_K_M builds, Qwen3 0.6B (Q8_0), 1.7B, 4B and 8B (Q4_K_M), and
+  Llama 3.2 1B / 3B and Llama 3.1 8B Instruct (Q4_K_M; Llama 3's RoPE frequency factors, the
+  llama-bpe tokenizer with its BOS token).
   Other architectures are refused with an error.
 - Tensor types: Q4_K, Q5_0, Q6_K, Q8_0, F16, F32 (what Qwen's Q4_K_M files use). Others load for `info` but can't run.
 - Sampling: greedy, or temperature / top-k / top-p / min-p / repeat penalty with a seed
   (llama.cpp's order, ollama's defaults). `gen` continues raw text, greedy unless `--temp`
   is above 0 (reproducible output and benchmarks); `chat` talks to an Instruct model
-  through its ChatML template and samples by default (`--temp 0` for greedy). On the GPU
+  through its chat template (ChatML, or Llama 3's) and samples by default (`--temp 0` for greedy). On the GPU
   the penalty and top-k (up to 256) run on the device, so only k candidates come back per
   token; with top-k 0 (off: the whole vocab, as llama.cpp) the logits come back instead.
 - CPU: any x86-64 (others build too, scalar only). The default build is baseline x86-64 and
@@ -62,6 +64,8 @@ axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K]
                                           talk to an Instruct model
 sampling (gen, chat): --temp T --top-k K --top-p P --min-p P
           --repeat-penalty P --repeat-last-n N --seed S   (axon --help)
+axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--device D] [--kv T] [--draft K]
+                                          OpenAI-compatible HTTP server
 axon --help | --version
 ```
 
@@ -82,12 +86,68 @@ terminal is in raw mode while chat runs, so Ctrl-Z and Ctrl-\ do nothing. Piped,
 each line of stdin is a message and each reply one block of stdout. When the
 conversation outgrows `--ctx` (default 8192), the oldest exchanges are forgotten.
 
+Llama 3 uses the official 3.1/3.2 template (no tools): a system block that always
+opens with the template's "Cutting Knowledge Date: December 2023 / Today Date: 26 Jul
+2024" lines (its default date, so a conversation doesn't depend on the day) and then
+`--system`'s text if any, headers around each message, `<|eot_id|>` ending each turn.
+
 Qwen3 follows its own template: no system message unless `--system` gives one, and
 the model reasons first (`<think>...</think>`, shown as it streams; Ollama's default
 too). `--no-think` opens each reply with an empty reasoning block instead (the
 template's `enable_thinking=false`). Earlier replies stay in the conversation
 without their reasoning, as the template renders them. Qwen recommends sampling
 for thinking mode; axon is greedy, which can loop on long reasoning.
+
+### Serving: `axon serve`
+
+```bash
+axon serve models/qwen2.5-7b-instruct-q4_k_m.gguf --device cuda --port 8080
+curl -N localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"Hi!"}],"stream":true}'
+```
+
+An OpenAI-compatible HTTP/1.1 server (any OpenAI client works with
+`base_url="http://127.0.0.1:8080/v1"`): `GET /v1/models`, `POST /v1/chat/completions`,
+`POST /v1/completions` (raw text, no template, as `gen`), `GET /health`; streamed
+(server-sent events, `data: [DONE]` at the end; `stream_options.include_usage` adds a
+usage chunk) or whole. It takes the device, `--ctx`, `--kv`, `--gpu-layers` and `--draft`
+flags of `chat`, plus `--host` (default 127.0.0.1), `--port` (default 8080), `--alias NAME`
+(another model name to answer to), `--max-tokens N` (a cap on any request's generation;
+default: up to the context), `--cors [ORIGIN]` (answer CORS preflights and allow ORIGIN,
+default `*`, to call the server from web pages; off by default, so an arbitrary page can't
+use your local model), `--max-conns N` / `--max-queue N` (defaults 256 / 128), `--quiet`
+(no per-request line on stderr). `GET /health` is 503 until the model is loaded.
+
+- One request at a time: requests queue and run in arrival order, each exactly as `gen` /
+  `chat` would run it (greedy `/v1/completions` output is byte-identical to `axon gen`'s).
+  The KV cache carries over between requests: a prompt that starts with the previous
+  request's tokens (a chat follow-up resending the conversation, a shared system prompt)
+  only runs the model over the rest (`usage.prompt_tokens_details.cached_tokens`).
+- Chat prompts are framed as `axon chat` frames them (ChatML; Qwen2.5's default system
+  message when none is given; Qwen3 earlier replies without their reasoning). Qwen3 thinks
+  unless `chat_template_kwargs: {"enable_thinking": false}` (or `--no-think` as the server
+  default); the reasoning comes as `reasoning_content`, apart from `content`
+  (`--think-inline` leaves the `<think>` block in `content`).
+- Sampling: `temperature` (0 = greedy), `top_p`, `seed`, and the common extensions `top_k`,
+  `min_p`, `repetition_penalty` (or `repeat_penalty`) and `repeat_last_n`; `max_tokens` (or
+  `max_completion_tokens`), `stop` (up to 16 strings, not included in the output). What a
+  request leaves out comes from the server's sampling flags, else `chat`'s defaults
+  (temperature 0.8, top-k 40, top-p 0.9) but with no repeat penalty (1.0, as OpenAI and
+  llama-server: `chat`'s 1.1 would quietly penalize the punctuation and indentation of code
+  and JSON; `--repeat-penalty` or a request's `repetition_penalty` turns it on). For Qwen3's
+  thinking mode Qwen recommends temperature 0.6, top_p 0.95, top_k 20 (greedy can loop on
+  long reasoning).
+  `presence_penalty` / `frequency_penalty` other than 0, `n` > 1, `logprobs`, `tools`,
+  `logit_bias` and JSON `response_format` are refused with a 400 rather than ignored.
+- `finish_reason` is `stop` (end token or stop string) or `length`; `usage` counts tokens;
+  a `timings` object gives prompt and generation speed (llama-server's field names).
+- A client that disconnects stops its generation within one token.
+- Limits: 16 KiB of request head, 1 MiB of body (`Content-Length` or chunked), 256
+  connections, 128 queued requests (more: 503); keep-alive and pipelining; idle connections
+  close after 30 s. No TLS or HTTP/2: put a reverse proxy in front to expose it beyond
+  localhost.
+- If the engine fails on a request (a CUDA error is sticky: every later request would fail
+  too), the server logs the error and exits with code 70, for a supervisor to restart it.
 
 ### Environment
 

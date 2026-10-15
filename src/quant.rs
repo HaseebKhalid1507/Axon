@@ -6,25 +6,38 @@
 // get_scale_min_k4 in ggml/src/ggml-quants.c. All reads are little-endian
 // from byte slices (no transmutes).
 
+const QK4_0: usize = 32;
 const QK5_0: usize = 32;
 const QK8_0: usize = 32;
 const QK_K: usize = 256;
 const K_SCALE_SIZE: usize = 12;
 
+// block_q4_0 { ggml_half d; uint8_t qs[16]; }
+const Q4_0_BYTES: usize = 2 + QK4_0 / 2; // 18
+// block_q4_1 { ggml_half d; ggml_half m; uint8_t qs[16]; }
+const Q4_1_BYTES: usize = 2 + 2 + QK4_0 / 2; // 20
+// block_q5_1 { ggml_half d; ggml_half m; uint8_t qh[4]; uint8_t qs[16]; }
+const Q5_1_BYTES: usize = 2 + 2 + 4 + QK5_0 / 2; // 24
 // block_q5_0 { ggml_half d; uint8_t qh[4]; uint8_t qs[16]; }
 const Q5_0_BYTES: usize = 2 + 4 + QK5_0 / 2; // 22
 // block_q8_0 { ggml_half d; int8_t qs[32]; }
 const Q8_0_BYTES: usize = 2 + QK8_0; // 34
 // block_q4_K { ggml_half d; ggml_half dmin; uint8_t scales[12]; uint8_t qs[128]; }
 const Q4_K_BYTES: usize = 2 + 2 + K_SCALE_SIZE + QK_K / 2; // 144
+// block_q5_K { ggml_half d; ggml_half dmin; uint8_t scales[12]; uint8_t qh[32]; uint8_t qs[128]; }
+const Q5_K_BYTES: usize = 2 + 2 + K_SCALE_SIZE + QK_K / 8 + QK_K / 2; // 176
 // block_q6_K { uint8_t ql[128]; uint8_t qh[64]; int8_t scales[16]; ggml_half d; }
 const Q6_K_BYTES: usize = QK_K / 2 + QK_K / 4 + QK_K / 16 + 2; // 210
 
 pub const F32: u32 = 0;
 pub const F16: u32 = 1;
+pub const Q4_0: u32 = 2;
+pub const Q4_1: u32 = 3;
 pub const Q5_0: u32 = 6;
+pub const Q5_1: u32 = 7;
 pub const Q8_0: u32 = 8;
 pub const Q4_K: u32 = 12;
+pub const Q5_K: u32 = 13;
 pub const Q6_K: u32 = 14;
 
 pub mod r8;
@@ -35,9 +48,13 @@ fn block_info(qtype_id: u32) -> (usize, usize) {
     match qtype_id {
         F32 => (1, 4),
         F16 => (1, 2),
+        Q4_0 => (QK4_0, Q4_0_BYTES),
+        Q4_1 => (QK4_0, Q4_1_BYTES),
+        Q5_1 => (QK5_0, Q5_1_BYTES),
         Q5_0 => (QK5_0, Q5_0_BYTES),
         Q8_0 => (QK8_0, Q8_0_BYTES),
         Q4_K => (QK_K, Q4_K_BYTES),
+        Q5_K => (QK_K, Q5_K_BYTES),
         Q6_K => (QK_K, Q6_K_BYTES),
         _ => panic!(
             "quant: unsupported qtype {} ({})",
@@ -95,6 +112,40 @@ fn dequant_q5_0_block(b: &[u8], y: &mut [f32]) {
     }
 }
 
+fn dequant_q4_0_block(b: &[u8], y: &mut [f32]) {
+    let d = rd_f16(b, 0);
+    let qs = &b[2..2 + QK4_0 / 2];
+    for j in 0..QK4_0 / 2 {
+        let x0 = (qs[j] & 0x0f) as i32 - 8;
+        let x1 = (qs[j] >> 4) as i32 - 8;
+        y[j] = x0 as f32 * d;
+        y[j + QK4_0 / 2] = x1 as f32 * d;
+    }
+}
+
+fn dequant_q4_1_block(b: &[u8], y: &mut [f32]) {
+    let d = rd_f16(b, 0);
+    let m = rd_f16(b, 2);
+    let qs = &b[4..4 + QK4_0 / 2];
+    for j in 0..QK4_0 / 2 {
+        y[j] = (qs[j] & 0x0f) as f32 * d + m;
+        y[j + QK4_0 / 2] = (qs[j] >> 4) as f32 * d + m;
+    }
+}
+
+fn dequant_q5_1_block(b: &[u8], y: &mut [f32]) {
+    let d = rd_f16(b, 0);
+    let m = rd_f16(b, 2);
+    let qh = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
+    let qs = &b[8..8 + QK5_0 / 2];
+    for j in 0..QK5_0 / 2 {
+        let xh_0 = (((qh >> j) << 4) & 0x10) as u8;
+        let xh_1 = ((qh >> (j + 12)) & 0x10) as u8;
+        y[j] = ((qs[j] & 0x0f) | xh_0) as f32 * d + m;
+        y[j + QK5_0 / 2] = ((qs[j] >> 4) | xh_1) as f32 * d + m;
+    }
+}
+
 fn dequant_q8_0_block(b: &[u8], y: &mut [f32]) {
     let d = rd_f16(b, 0);
     for j in 0..QK8_0 {
@@ -139,6 +190,31 @@ fn dequant_q4_k_block(b: &[u8], y: &mut [f32]) {
         yo += 64;
         qo += 32;
         is += 2;
+    }
+}
+
+fn dequant_q5_k_block(b: &[u8], y: &mut [f32]) {
+    let d = rd_f16(b, 0);
+    let min = rd_f16(b, 2);
+    let scales = &b[4..4 + K_SCALE_SIZE];
+    let qh = &b[16..48];
+    let qs = &b[48..Q5_K_BYTES];
+    for c in 0..QK_K / 64 {
+        let (sc, m) = get_scale_min_k4(2 * c, scales);
+        let d1 = d * sc as f32;
+        let m1 = min * m as f32;
+        let (sc, m) = get_scale_min_k4(2 * c + 1, scales);
+        let d2 = d * sc as f32;
+        let m2 = min * m as f32;
+        let q = &qs[32 * c..32 * c + 32];
+        for l in 0..32 {
+            let h = (qh[l] >> (2 * c)) & 1;
+            y[64 * c + l] = d1 * ((q[l] & 0xf) | (h << 4)) as f32 - m1;
+        }
+        for l in 0..32 {
+            let h = (qh[l] >> (2 * c + 1)) & 1;
+            y[64 * c + 32 + l] = d2 * ((q[l] >> 4) | (h << 4)) as f32 - m2;
+        }
     }
 }
 
@@ -197,9 +273,13 @@ pub fn dequant(qtype_id: u32, bytes: &[u8], out: &mut [f32]) {
         }
         _ => {
             let f: fn(&[u8], &mut [f32]) = match qtype_id {
+                Q4_0 => dequant_q4_0_block,
+                Q4_1 => dequant_q4_1_block,
+                Q5_1 => dequant_q5_1_block,
                 Q5_0 => dequant_q5_0_block,
                 Q8_0 => dequant_q8_0_block,
                 Q4_K => dequant_q4_k_block,
+                Q5_K => dequant_q5_k_block,
                 Q6_K => dequant_q6_k_block,
                 _ => unreachable!(),
             };
@@ -460,8 +540,9 @@ impl QuantizedAct {
     pub fn for_types(x: &[f32], qtypes: &[u32]) -> QuantizedAct {
         let n = x.len();
         let wants = |ts: &[u32]| qtypes.iter().any(|t| ts.contains(t));
-        let b32 = (wants(&[Q5_0, Q8_0]) && n.is_multiple_of(QK8_0)).then(|| quantize_b32(x));
-        let k = (wants(&[Q4_K, Q6_K]) && n.is_multiple_of(QK_K)).then(|| quantize_k(x));
+        let b32 = (wants(&[Q4_0, Q4_1, Q5_0, Q5_1, Q8_0]) && n.is_multiple_of(QK8_0))
+            .then(|| quantize_b32(x));
+        let k = (wants(&[Q4_K, Q5_K, Q6_K]) && n.is_multiple_of(QK_K)).then(|| quantize_k(x));
         let x = if wants(&[F32, F16]) {
             x.to_vec()
         } else {
@@ -526,6 +607,106 @@ fn dot_q5_0_q8(row: &[u8], dx: &[f32], qx: &[[i8; 32]]) -> f32 {
             w[j + 16] = ((qs[j] >> 4) | h1) as i8 - 16;
         }
         sum += d * dxb * dot_i8_32(&w, qxb) as f32;
+    }
+    sum
+}
+
+#[allow(clippy::needless_range_loop)] // fixed-size arrays: indexing vectorizes cleanly
+fn dot_q4_0_q8(row: &[u8], dx: &[f32], qx: &[[i8; 32]]) -> f32 {
+    let mut sum = 0f32;
+    for (b, (&dxb, qxb)) in row
+        .as_chunks::<Q4_0_BYTES>()
+        .0
+        .iter()
+        .zip(dx.iter().zip(qx))
+    {
+        let d = rd_f16(b, 0);
+        let qs: &[u8; 16] = b[2..2 + QK4_0 / 2].try_into().unwrap();
+        // same order as dequant_q4_0_block: low nibbles, then high
+        let mut w = [0i8; 32];
+        for j in 0..16 {
+            w[j] = (qs[j] & 0x0f) as i8 - 8;
+            w[j + 16] = (qs[j] >> 4) as i8 - 8;
+        }
+        sum += d * dxb * dot_i8_32(&w, qxb) as f32;
+    }
+    sum
+}
+
+/// The unsigned 32 weights of a Q4_1 / Q5_1 block (dequant's order) and
+/// its (d, m).
+#[inline(always)]
+fn q_1_block(qtype_id: u32, b: &[u8]) -> ([u8; 32], f32, f32) {
+    let mut w = [0u8; 32];
+    let (qh, qs) = if qtype_id == Q5_1 {
+        (u32::from_le_bytes([b[4], b[5], b[6], b[7]]), &b[8..24])
+    } else {
+        (0, &b[4..20])
+    };
+    for j in 0..16 {
+        w[j] = (qs[j] & 0x0f) | ((((qh >> j) & 1) << 4) as u8);
+        w[j + 16] = (qs[j] >> 4) | ((((qh >> (j + 16)) & 1) << 4) as u8);
+    }
+    (w, rd_f16(b, 0), rd_f16(b, 2))
+}
+
+/// Q4_1 / Q5_1 against Q8_0 activations, per block (the GPU's canonical
+/// order too): dx * (d * Σ w qx + m * Σ qx), the sums exact integers. The
+/// activation sum comes from the view's lane sums (c = -16 Σ, exact).
+/// Every CPU path runs this scalar code (these types have no SIMD kernels
+/// beyond the integer sum), so all of them give the same bits.
+#[allow(clippy::needless_range_loop)] // fixed-size arrays: indexing vectorizes cleanly
+fn dot_q_1_q8(qtype_id: u32, row: &[u8], x: &B32) -> f32 {
+    let bb = if qtype_id == Q5_1 {
+        Q5_1_BYTES
+    } else {
+        Q4_1_BYTES
+    };
+    let mut sum = 0f32;
+    for (i, b) in row.chunks_exact(bb).enumerate() {
+        let (w, d, m) = q_1_block(qtype_id, b);
+        let qx = &x.q[i];
+        let mut s = 0i32;
+        for k in 0..32 {
+            s += w[k] as i32 * qx[k] as i32;
+        }
+        let bs = x.c[i].iter().sum::<i32>() / -16;
+        sum += x.d[i] * (d * s as f32 + m * bs as f32);
+    }
+    sum
+}
+
+#[allow(clippy::needless_range_loop)] // fixed-size arrays: indexing vectorizes cleanly
+fn dot_q5_k_q8(row: &[u8], xk: &[KBlock]) -> f32 {
+    let mut sum = 0f32;
+    for (b, a) in row.as_chunks::<Q5_K_BYTES>().0.iter().zip(xk) {
+        let d = rd_f16(b, 0);
+        let dmin = rd_f16(b, 2);
+        let scales: &[u8; K_SCALE_SIZE] = b[4..4 + K_SCALE_SIZE].try_into().unwrap();
+        let qh: &[u8; 32] = b[16..48].try_into().unwrap();
+        let qs: &[u8; QK_K / 2] = b[48..Q5_K_BYTES].try_into().unwrap();
+        let mut sumi = 0i32; // Σ_j sc_j * Σ q*qx
+        let mut summ = 0i32; // Σ_j m_j * Σ qx
+        for c in 0..4 {
+            let (sc1, m1) = get_scale_min_k4(2 * c, scales);
+            let (sc2, m2) = get_scale_min_k4(2 * c + 1, scales);
+            let q: &[u8; 32] = qs[32 * c..32 * c + 32].try_into().unwrap();
+            let x1: &[i8; 32] = a.qs[64 * c..64 * c + 32].try_into().unwrap();
+            let x2: &[i8; 32] = a.qs[64 * c + 32..64 * c + 64].try_into().unwrap();
+            let mut s1 = 0i32;
+            let mut s2 = 0i32;
+            for l in 0..32 {
+                let w1 = (q[l] & 0x0f) | (((qh[l] >> (2 * c)) & 1) << 4);
+                let w2 = (q[l] >> 4) | (((qh[l] >> (2 * c + 1)) & 1) << 4);
+                s1 += w1 as i32 * x1[l] as i32;
+                s2 += w2 as i32 * x2[l] as i32;
+            }
+            sumi += sc1 as i32 * s1 + sc2 as i32 * s2;
+            let bs = &a.bsums[4 * c..4 * c + 4];
+            summ += m1 as i32 * (bs[0] as i32 + bs[1] as i32)
+                + m2 as i32 * (bs[2] as i32 + bs[3] as i32);
+        }
+        sum += a.d * (d * sumi as f32 - dmin * summ as f32);
     }
     sum
 }
@@ -729,7 +910,10 @@ fn choose_simd(req: Option<&str>) -> Simd {
 
 #[cfg(target_arch = "x86_64")]
 mod x86 {
-    use super::{KBlock, Q4_K_BYTES, Q5_0_BYTES, Q6_K_BYTES, Q8_0_BYTES};
+    use super::{
+        B32, KBlock, Q4_0_BYTES, Q4_1_BYTES, Q4_K_BYTES, Q5_0_BYTES, Q5_1_BYTES, Q5_K_BYTES,
+        Q6_K_BYTES, Q8_0_BYTES,
+    };
     use std::arch::x86_64::*;
 
     #[inline]
@@ -821,6 +1005,52 @@ mod x86 {
         _mm256_or_si256(nib, hi)
     }
 
+    /// 32 Q4_0 weights nibble - 8 as i8 (low nibbles, then high).
+    #[inline]
+    #[target_feature(enable = "avx2,fma,f16c")]
+    fn q4_0_weights(b: &[u8; Q4_0_BYTES]) -> __m256i {
+        let qs = load_u8x16(b[2..18].try_into().unwrap());
+        let nib = _mm256_and_si256(
+            _mm256_set_m128i(_mm_srli_epi16(qs, 4), qs),
+            _mm256_set1_epi8(0x0f),
+        );
+        _mm256_sub_epi8(nib, _mm256_set1_epi8(8))
+    }
+
+    /// `dot_q_1_q8` with the block's integer sum Σ w qx by maddubs (exact:
+    /// |pair| <= 2 * 31 * 128): the same integers and float ops, so the same
+    /// bits as the scalar kernel.
+    ///
+    /// # Safety
+    /// The CPU must support avx2, fma and f16c (`has_avx2()`).
+    #[target_feature(enable = "avx2,fma,f16c")]
+    pub unsafe fn q_1_avx2(q5: bool, row: &[u8], x: &B32) -> f32 {
+        let bb = if q5 { Q5_1_BYTES } else { Q4_1_BYTES };
+        let ones = _mm256_set1_epi16(1);
+        let mut sum = 0f32;
+        for (i, b) in row.chunks_exact(bb).enumerate() {
+            let qs = load_u8x16(b[bb - 16..bb].try_into().unwrap());
+            let mut w = _mm256_and_si256(
+                _mm256_set_m128i(_mm_srli_epi16(qs, 4), qs),
+                _mm256_set1_epi8(0x0f),
+            );
+            if q5 {
+                let qh = u32::from_le_bytes([b[4], b[5], b[6], b[7]]);
+                let hi = _mm256_and_si256(bytes_from_bits_32(qh), _mm256_set1_epi8(0x10));
+                w = _mm256_or_si256(w, hi);
+            }
+            let p = _mm256_madd_epi16(_mm256_maddubs_epi16(w, load_i8x32(&x.q[i])), ones);
+            let s128 = _mm_add_epi32(_mm256_castsi256_si128(p), _mm256_extracti128_si256(p, 1));
+            let s64 = _mm_add_epi32(s128, _mm_shuffle_epi32(s128, 0b01_00_11_10));
+            let s = _mm_cvtsi128_si32(_mm_add_epi32(s64, _mm_shuffle_epi32(s64, 0b10_11_00_01)));
+            let d = h2f([b[0], b[1]]);
+            let m = h2f([b[2], b[3]]);
+            let bs = x.c[i].iter().sum::<i32>() / -16;
+            sum += x.d[i] * (d * s as f32 + m * bs as f32);
+        }
+        sum
+    }
+
     /// Broadcast i16 scale `i` of `scales` (8 i16, both lanes) to all 16 lanes.
     #[inline]
     #[target_feature(enable = "avx2,fma,f16c")]
@@ -841,7 +1071,28 @@ mod x86 {
     }
 
     macro_rules! small_block_kernels {
-        ($feat:literal, $q8:ident, $q5:ident, $mul:ident) => {
+        ($feat:literal, $q8:ident, $q5:ident, $q4:ident, $mul:ident) => {
+            /// # Safety
+            /// The CPU must support the enabled target features.
+            #[target_feature(enable = $feat)]
+            pub unsafe fn $q4(row: &[u8], dx: &[f32], qx: &[[i8; 32]]) -> f32 {
+                let mut acc = _mm256_setzero_ps();
+                for (b, (&dxb, qxb)) in row
+                    .as_chunks::<Q4_0_BYTES>()
+                    .0
+                    .iter()
+                    .zip(dx.iter().zip(qx))
+                {
+                    let d = _mm256_set1_ps(h2f([b[0], b[1]]) * dxb);
+                    let qw = q4_0_weights(b);
+                    let qy = load_i8x32(qxb);
+                    let ax = _mm256_sign_epi8(qw, qw);
+                    let sy = _mm256_sign_epi8(qy, qw);
+                    acc = _mm256_fmadd_ps(d, $mul(ax, sy), acc);
+                }
+                hsum_f32x8(acc)
+            }
+
             /// # Safety
             /// The CPU must support the enabled target features.
             #[target_feature(enable = $feat)]
@@ -886,11 +1137,18 @@ mod x86 {
         };
     }
 
-    small_block_kernels!("avx2,fma,f16c", q8_0_avx2, q5_0_avx2, mul_sum_us8_avx2);
+    small_block_kernels!(
+        "avx2,fma,f16c",
+        q8_0_avx2,
+        q5_0_avx2,
+        q4_0_avx2,
+        mul_sum_us8_avx2
+    );
     small_block_kernels!(
         "avx2,fma,f16c,avxvnni",
         q8_0_vnni,
         q5_0_vnni,
+        q4_0_vnni,
         mul_sum_us8_vnni
     );
 
@@ -944,6 +1202,84 @@ mod x86 {
                 let q4bits = load_u8x32(&q4[j]);
                 let q4l = _mm256_and_si256(q4bits, m4);
                 let q4h = _mm256_and_si256(_mm256_srli_epi16(q4bits, 4), m4);
+
+                let p16l =
+                    _mm256_madd_epi16(scale_l, _mm256_maddubs_epi16(q4l, load_i8x32(&q8[2 * j])));
+                let p16h = _mm256_madd_epi16(
+                    scale_h,
+                    _mm256_maddubs_epi16(q4h, load_i8x32(&q8[2 * j + 1])),
+                );
+                sumi = _mm256_add_epi32(sumi, _mm256_add_epi32(p16l, p16h));
+            }
+            acc = _mm256_fmadd_ps(_mm256_set1_ps(d), _mm256_cvtepi32_ps(sumi), acc);
+        }
+        acc_m = _mm_add_ps(acc_m, _mm_movehl_ps(acc_m, acc_m));
+        acc_m = _mm_add_ss(acc_m, _mm_movehdup_ps(acc_m));
+        hsum_f32x8(acc) + _mm_cvtss_f32(acc_m)
+    }
+
+    /// ggml_vec_dot_q5_K_q8_K (AVX2). Mins via bsums; bit 4 from qh.
+    ///
+    /// # Safety
+    /// The CPU must support avx2, fma and f16c (`has_avx2()`).
+    #[allow(clippy::needless_range_loop)] // j picks several chunks
+    #[target_feature(enable = "avx2,fma,f16c")]
+    pub unsafe fn q5_k_avx2(row: &[u8], xk: &[KBlock]) -> f32 {
+        const KMASK1: u32 = 0x3f3f3f3f;
+        const KMASK2: u32 = 0x0f0f0f0f;
+        const KMASK3: u32 = 0x03030303;
+        let m4 = _mm256_set1_epi8(0xF);
+        let mut acc = _mm256_setzero_ps();
+        let mut acc_m = _mm_setzero_ps();
+        for (b, a) in row.as_chunks::<Q5_K_BYTES>().0.iter().zip(xk) {
+            let d = a.d * h2f([b[0], b[1]]);
+            let dmin = -a.d * h2f([b[2], b[3]]);
+
+            // unpack the 6-bit scales/mins: utmp[0..2] = 8 scales, utmp[2..4] = 8 mins
+            let u = |i: usize| {
+                u32::from_le_bytes([b[4 + 4 * i], b[5 + 4 * i], b[6 + 4 * i], b[7 + 4 * i]])
+            };
+            let (u0, u1, u2) = (u(0), u(1), u(2));
+            let t3 = ((u2 >> 4) & KMASK2) | (((u1 >> 6) & KMASK3) << 4);
+            let t2 = u1 & KMASK1;
+            let t1 = (u2 & KMASK2) | (((u0 >> 6) & KMASK3) << 4);
+            let t0 = u0 & KMASK1;
+            let mins_and_scales =
+                _mm256_cvtepu8_epi16(_mm_set_epi32(t3 as i32, t2 as i32, t1 as i32, t0 as i32));
+
+            let q8sums = load_i16x16(&a.bsums);
+            let q8s = _mm_hadd_epi16(
+                _mm256_extracti128_si256(q8sums, 0),
+                _mm256_extracti128_si256(q8sums, 1),
+            );
+            let prod = _mm_madd_epi16(_mm256_extracti128_si256(mins_and_scales, 1), q8s);
+            acc_m = _mm_fmadd_ps(_mm_set1_ps(dmin), _mm_cvtepi32_ps(prod), acc_m);
+
+            let sc128 = _mm256_extracti128_si256(mins_and_scales, 0);
+            let scales = _mm256_set_m128i(sc128, sc128);
+
+            let q4 = b[48..Q5_K_BYTES].as_chunks::<32>().0;
+            let hbits = load_u8x32(b[16..48].try_into().unwrap());
+            let m1 = _mm256_set1_epi8(1);
+            let q8 = a.qs.as_chunks::<32>().0;
+            let mut sumi = _mm256_setzero_si256();
+            for j in 0..4 {
+                let scale_l = k4_scale(scales, 2 * j as i32);
+                let scale_h = k4_scale(scales, 2 * j as i32 + 1);
+
+                let q4bits = load_u8x32(&q4[j]);
+                // bit 2j (low nibbles) / 2j + 1 (high) of qh, moved to bit 4
+                let hl =
+                    _mm256_and_si256(_mm256_srl_epi16(hbits, _mm_cvtsi32_si128(2 * j as i32)), m1);
+                let hh = _mm256_and_si256(
+                    _mm256_srl_epi16(hbits, _mm_cvtsi32_si128(2 * j as i32 + 1)),
+                    m1,
+                );
+                let q4l = _mm256_or_si256(_mm256_and_si256(q4bits, m4), _mm256_slli_epi16(hl, 4));
+                let q4h = _mm256_or_si256(
+                    _mm256_and_si256(_mm256_srli_epi16(q4bits, 4), m4),
+                    _mm256_slli_epi16(hh, 4),
+                );
 
                 let p16l =
                     _mm256_madd_epi16(scale_l, _mm256_maddubs_epi16(q4l, load_i8x32(&q8[2 * j])));
@@ -1095,6 +1431,20 @@ mod x86 {
         q5_0_vnni_x4,
         Q5_0_BYTES,
         q5_0_weights,
+        mul_sum_us8_vnni
+    );
+    small_block_kernels_x4!(
+        "avx2,fma,f16c",
+        q4_0_avx2_x4,
+        Q4_0_BYTES,
+        q4_0_weights,
+        mul_sum_us8_avx2
+    );
+    small_block_kernels_x4!(
+        "avx2,fma,f16c,avxvnni",
+        q4_0_vnni_x4,
+        Q4_0_BYTES,
+        q4_0_weights,
         mul_sum_us8_vnni
     );
 
@@ -1373,6 +1723,104 @@ mod x86 {
                 let q4bits = load_u8x32(&q4[j]);
                 let q4l = _mm256_and_si256(q4bits, m4);
                 let q4h = _mm256_and_si256(_mm256_srli_epi16(q4bits, 4), m4);
+
+                for t in 0..4 {
+                    let q8 = xk[t][i].qs.as_chunks::<32>().0;
+                    let p16l = _mm256_madd_epi16(
+                        scale_l,
+                        _mm256_maddubs_epi16(q4l, load_i8x32(&q8[2 * j])),
+                    );
+                    let p16h = _mm256_madd_epi16(
+                        scale_h,
+                        _mm256_maddubs_epi16(q4h, load_i8x32(&q8[2 * j + 1])),
+                    );
+                    sumi[t] = _mm256_add_epi32(sumi[t], _mm256_add_epi32(p16l, p16h));
+                }
+            }
+            for t in 0..4 {
+                let d = xk[t][i].d * hd;
+                acc[t] = _mm256_fmadd_ps(_mm256_set1_ps(d), _mm256_cvtepi32_ps(sumi[t]), acc[t]);
+            }
+        }
+        let mut out = [0f32; 4];
+        for t in 0..4 {
+            let mut m = acc_m[t];
+            m = _mm_add_ps(m, _mm_movehl_ps(m, m));
+            m = _mm_add_ss(m, _mm_movehdup_ps(m));
+            out[t] = hsum_f32x8(acc[t]) + _mm_cvtss_f32(m);
+        }
+        out
+    }
+
+    /// 4-token `q5_k_avx2`.
+    ///
+    /// # Safety
+    /// The CPU must support avx2, fma and f16c (`has_avx2()`).
+    #[allow(clippy::needless_range_loop)] // j, t pick several chunks
+    #[target_feature(enable = "avx2,fma,f16c")]
+    pub unsafe fn q5_k_avx2_x4(row: &[u8], xk: [&[KBlock]; 4]) -> [f32; 4] {
+        const KMASK1: u32 = 0x3f3f3f3f;
+        const KMASK2: u32 = 0x0f0f0f0f;
+        const KMASK3: u32 = 0x03030303;
+        let m4 = _mm256_set1_epi8(0xF);
+        let blocks = row.as_chunks::<Q5_K_BYTES>().0;
+        let n = blocks.len();
+        // Written out, not `.map(..)`: see small_block_kernels_x4.
+        let xk = [&xk[0][..n], &xk[1][..n], &xk[2][..n], &xk[3][..n]];
+        let mut acc = [_mm256_setzero_ps(); 4];
+        let mut acc_m = [_mm_setzero_ps(); 4];
+        for (i, b) in blocks.iter().enumerate() {
+            let hd = h2f([b[0], b[1]]);
+            let hmin = h2f([b[2], b[3]]);
+
+            let u = |i: usize| {
+                u32::from_le_bytes([b[4 + 4 * i], b[5 + 4 * i], b[6 + 4 * i], b[7 + 4 * i]])
+            };
+            let (u0, u1, u2) = (u(0), u(1), u(2));
+            let t3 = ((u2 >> 4) & KMASK2) | (((u1 >> 6) & KMASK3) << 4);
+            let t2 = u1 & KMASK1;
+            let t1 = (u2 & KMASK2) | (((u0 >> 6) & KMASK3) << 4);
+            let t0 = u0 & KMASK1;
+            let mins_and_scales =
+                _mm256_cvtepu8_epi16(_mm_set_epi32(t3 as i32, t2 as i32, t1 as i32, t0 as i32));
+            let mins = _mm256_extracti128_si256(mins_and_scales, 1);
+
+            for t in 0..4 {
+                let a = &xk[t][i];
+                let dmin = -a.d * hmin;
+                let q8sums = load_i16x16(&a.bsums);
+                let q8s = _mm_hadd_epi16(
+                    _mm256_extracti128_si256(q8sums, 0),
+                    _mm256_extracti128_si256(q8sums, 1),
+                );
+                let prod = _mm_madd_epi16(mins, q8s);
+                acc_m[t] = _mm_fmadd_ps(_mm_set1_ps(dmin), _mm_cvtepi32_ps(prod), acc_m[t]);
+            }
+
+            let sc128 = _mm256_extracti128_si256(mins_and_scales, 0);
+            let scales = _mm256_set_m128i(sc128, sc128);
+
+            let q4 = b[48..Q5_K_BYTES].as_chunks::<32>().0;
+            let hbits = load_u8x32(b[16..48].try_into().unwrap());
+            let m1 = _mm256_set1_epi8(1);
+            let mut sumi = [_mm256_setzero_si256(); 4];
+            for j in 0..4 {
+                let scale_l = k4_scale(scales, 2 * j as i32);
+                let scale_h = k4_scale(scales, 2 * j as i32 + 1);
+
+                let q4bits = load_u8x32(&q4[j]);
+                // bit 2j (low nibbles) / 2j + 1 (high) of qh, moved to bit 4
+                let hl =
+                    _mm256_and_si256(_mm256_srl_epi16(hbits, _mm_cvtsi32_si128(2 * j as i32)), m1);
+                let hh = _mm256_and_si256(
+                    _mm256_srl_epi16(hbits, _mm_cvtsi32_si128(2 * j as i32 + 1)),
+                    m1,
+                );
+                let q4l = _mm256_or_si256(_mm256_and_si256(q4bits, m4), _mm256_slli_epi16(hl, 4));
+                let q4h = _mm256_or_si256(
+                    _mm256_and_si256(_mm256_srli_epi16(q4bits, 4), m4),
+                    _mm256_slli_epi16(hh, 4),
+                );
 
                 for t in 0..4 {
                     let q8 = xk[t][i].qs.as_chunks::<32>().0;
@@ -2205,7 +2653,7 @@ unsafe fn dot_row_q8_with(simd: Simd, qtype_id: u32, row: &[u8], x: &QuantizedAc
             );
             dot_row(qtype_id, row, &x.x)
         }
-        Q5_0 | Q8_0 => {
+        Q4_0 | Q5_0 | Q8_0 => {
             let B32 { d: dx, q: qx, .. } = x.b32.as_ref().unwrap_or_else(|| {
                 panic!(
                     "dot_row_q8: {} needs input len multiple of 32, got {} (or the 32-block view wasn't built)",
@@ -2217,6 +2665,10 @@ unsafe fn dot_row_q8_with(simd: Simd, qtype_id: u32, row: &[u8], x: &QuantizedAc
             // SAFETY (unsafe calls below): guaranteed by our caller.
             match (qtype_id, simd) {
                 #[cfg(target_arch = "x86_64")]
+                (Q4_0, Simd::Avx2) => unsafe { x86::q4_0_avx2(row, dx, qx) },
+                #[cfg(target_arch = "x86_64")]
+                (Q4_0, Simd::Vnni) => unsafe { x86::q4_0_vnni(row, dx, qx) },
+                #[cfg(target_arch = "x86_64")]
                 (Q8_0, Simd::Avx2) => unsafe { x86::q8_0_avx2(row, dx, qx) },
                 #[cfg(target_arch = "x86_64")]
                 (Q8_0, Simd::Vnni) => unsafe { x86::q8_0_vnni(row, dx, qx) },
@@ -2224,11 +2676,12 @@ unsafe fn dot_row_q8_with(simd: Simd, qtype_id: u32, row: &[u8], x: &QuantizedAc
                 (_, Simd::Avx2) => unsafe { x86::q5_0_avx2(row, dx, qx) },
                 #[cfg(target_arch = "x86_64")]
                 (_, Simd::Vnni) => unsafe { x86::q5_0_vnni(row, dx, qx) },
+                (Q4_0, Simd::Scalar) => dot_q4_0_q8(row, dx, qx),
                 (Q8_0, Simd::Scalar) => dot_q8_0_q8(row, dx, qx),
                 (_, Simd::Scalar) => dot_q5_0_q8(row, dx, qx),
             }
         }
-        Q4_K | Q6_K => {
+        Q4_K | Q5_K | Q6_K => {
             let xk = x.k.as_deref().unwrap_or_else(|| {
                 panic!(
                     "dot_row_q8: {} needs input len multiple of 256, got {} (or the 256-block view wasn't built)",
@@ -2243,9 +2696,28 @@ unsafe fn dot_row_q8_with(simd: Simd, qtype_id: u32, row: &[u8], x: &QuantizedAc
                 #[cfg(target_arch = "x86_64")]
                 (Q4_K, Simd::Avx2 | Simd::Vnni) => unsafe { x86::q4_k_avx2(row, xk) },
                 #[cfg(target_arch = "x86_64")]
+                (Q5_K, Simd::Avx2 | Simd::Vnni) => unsafe { x86::q5_k_avx2(row, xk) },
+                #[cfg(target_arch = "x86_64")]
                 (_, Simd::Avx2 | Simd::Vnni) => unsafe { x86::q6_k_avx2(row, xk) },
                 (Q4_K, Simd::Scalar) => dot_q4_k_q8(row, xk),
+                (Q5_K, Simd::Scalar) => dot_q5_k_q8(row, xk),
                 (_, Simd::Scalar) => dot_q6_k_q8(row, xk),
+            }
+        }
+        Q4_1 | Q5_1 => {
+            let b = x.b32.as_ref().unwrap_or_else(|| {
+                panic!(
+                    "dot_row_q8: {} needs input len multiple of 32, got {} (or the 32-block view wasn't built)",
+                    name(),
+                    n
+                )
+            });
+            let row = &row[..row_bytes(qtype_id, n)];
+            match simd {
+                // SAFETY: guaranteed by our caller.
+                #[cfg(target_arch = "x86_64")]
+                Simd::Avx2 | Simd::Vnni => unsafe { x86::q_1_avx2(qtype_id == Q5_1, row, b) },
+                Simd::Scalar => dot_q_1_q8(qtype_id, row, b),
             }
         }
         _ => panic!("dot_row_q8: unsupported qtype {} ({})", qtype_id, name()),
@@ -2501,8 +2973,8 @@ unsafe fn kquant_rows<const R: usize>(
 /// A lone token isn't padded: 4x the arithmetic for the same one row read.
 pub fn batch_slots(qtypes: &[u32], n: usize, nb: usize) -> usize {
     let grouped = qtypes.iter().all(|&qt| match qt {
-        Q5_0 | Q8_0 => n.is_multiple_of(QK8_0),
-        Q4_K | Q6_K => n.is_multiple_of(QK_K),
+        Q4_0 | Q5_0 | Q8_0 => n.is_multiple_of(QK8_0),
+        Q4_K | Q5_K | Q6_K => n.is_multiple_of(QK_K),
         _ => false,
     });
     if nb >= 2 && grouped && simd() != Simd::Scalar {
@@ -2603,7 +3075,7 @@ unsafe fn dot_row_q8_x4(
 ) -> Option<[f32; 4]> {
     let n = xs[0].len();
     match qtype_id {
-        Q5_0 | Q8_0 => {
+        Q4_0 | Q5_0 | Q8_0 => {
             let mut dx: [&[f32]; 4] = [&[]; 4];
             let mut qx: [&[[i8; 32]]; 4] = [&[]; 4];
             for t in 0..4 {
@@ -2614,6 +3086,8 @@ unsafe fn dot_row_q8_x4(
             let row = &row[..row_bytes(qtype_id, n)];
             // SAFETY (unsafe calls below): guaranteed by our caller.
             Some(match (qtype_id, simd) {
+                (Q4_0, Simd::Avx2) => unsafe { x86::q4_0_avx2_x4(row, dx, qx) },
+                (Q4_0, Simd::Vnni) => unsafe { x86::q4_0_vnni_x4(row, dx, qx) },
                 (Q8_0, Simd::Avx2) => unsafe { x86::q8_0_avx2_x4(row, dx, qx) },
                 (Q8_0, Simd::Vnni) => unsafe { x86::q8_0_vnni_x4(row, dx, qx) },
                 (_, Simd::Avx2) => unsafe { x86::q5_0_avx2_x4(row, dx, qx) },
@@ -2621,7 +3095,7 @@ unsafe fn dot_row_q8_x4(
                 (_, Simd::Scalar) => return None,
             })
         }
-        Q4_K | Q6_K => {
+        Q4_K | Q5_K | Q6_K => {
             let mut xk: [&[KBlock]; 4] = [&[]; 4];
             for t in 0..4 {
                 xk[t] = xs[t].k.as_deref()?;
@@ -2630,6 +3104,7 @@ unsafe fn dot_row_q8_x4(
             // The vnni path uses the AVX2 K-quant kernels, as in dot_row_q8_with.
             Some(match (qtype_id, simd) {
                 (Q4_K, Simd::Avx2 | Simd::Vnni) => unsafe { x86::q4_k_avx2_x4(row, xk) },
+                (Q5_K, Simd::Avx2 | Simd::Vnni) => unsafe { x86::q5_k_avx2_x4(row, xk) },
                 (_, Simd::Avx2 | Simd::Vnni) => unsafe { x86::q6_k_avx2_x4(row, xk) },
                 (_, Simd::Scalar) => return None,
             })
@@ -3122,6 +3597,112 @@ mod tests {
         assert_eq!(out[255], 32.0);
     }
 
+    /// ggml's dequantize_row_* on deterministic random blocks (xorshift64*,
+    /// every f16 scale field an edge value - zero, -0, subnormals, max, inf -
+    /// in the first 22 blocks, then random magnitudes): FNV-1a of the output
+    /// bits (NaNs canonical) against the hashes the C harness got from
+    /// llama.cpp's libggml-base (ggml-quants.c), bit for bit.
+    #[test]
+    fn dequant_matches_ggml_reference_hashes() {
+        const EDGE: [u16; 11] = [
+            0x0000, 0x8000, 0x0001, 0x83ff, 0x0400, 0x3c00, 0x7bff, 0xfbff, 0x7c00, 0xfc00, 0x3555,
+        ];
+        fn hash(qt: u32, seed: u64, bb: usize, bs: usize, offs: &[usize]) -> u64 {
+            const NB: usize = 4096;
+            let mut s = seed;
+            let mut nx = || {
+                s ^= s >> 12;
+                s ^= s << 25;
+                s ^= s >> 27;
+                s.wrapping_mul(0x2545_F491_4F6C_DD1D)
+            };
+            let mut b: Vec<u8> = (0..NB * bb).map(|_| nx() as u8).collect();
+            for i in 0..NB {
+                for (f, &o) in offs.iter().enumerate() {
+                    let v = if i < 22 * offs.len() {
+                        EDGE[(i + f * 3) % 11]
+                    } else {
+                        let r = nx();
+                        ((r & 0x83ff) | ((((r >> 16) % 20) + 1) << 10)) as u16
+                    };
+                    b[i * bb + o..i * bb + o + 2].copy_from_slice(&v.to_le_bytes());
+                }
+            }
+            let mut y = vec![0f32; NB * bs];
+            dequant(qt, &b, &mut y);
+            let mut h = 0xcbf2_9ce4_8422_2325u64;
+            for v in y {
+                let mut bits = v.to_bits();
+                if v.is_nan() {
+                    bits = 0x7fc0_0000;
+                }
+                for k in 0..4 {
+                    h ^= ((bits >> (8 * k)) & 0xff) as u64;
+                    h = h.wrapping_mul(0x100_0000_01b3);
+                }
+            }
+            h
+        }
+        let k = 0xD1B5_4A32_D192_ED03;
+        assert_eq!(
+            hash(Q4_0, 0x9E37_79B9_7F4A_7C15, 18, 32, &[0]),
+            0xd73c_b41a_793f_78a8
+        );
+        assert_eq!(hash(Q5_K, k, 176, 256, &[0, 2]), 0xc348_1e06_2f21_aeac);
+        assert_eq!(
+            hash(Q4_1, 0x243F_6A88_85A3_08D3, 20, 32, &[0, 2]),
+            0xebfa_d763_1936_e044
+        );
+        assert_eq!(
+            hash(Q5_1, 0x1319_8A2E_0370_7344, 24, 32, &[0, 2]),
+            0x5f34_2d15_154a_6849
+        );
+        // The harness's control: an existing type through the same generator.
+        assert_eq!(hash(Q4_K, k, 144, 256, &[0, 2]), 0x3046_51e0_52ca_e34f);
+    }
+
+    #[test]
+    fn q4_0_q5_k_blocks() {
+        // Q4_0: d = 0.5, qs[j] = j | (15 - j) << 4.
+        let mut b = vec![0u8; Q4_0_BYTES];
+        b[0..2].copy_from_slice(&0x3800u16.to_le_bytes());
+        for j in 0..16 {
+            b[2 + j] = (j as u8) | ((15 - j as u8) << 4);
+        }
+        let mut out = [0f32; 32];
+        dequant(Q4_0, &b, &mut out);
+        for j in 0..16 {
+            assert_eq!(out[j], (j as f32 - 8.0) * 0.5);
+            assert_eq!(out[16 + j], (7.0 - j as f32) * 0.5);
+        }
+        // Q5_K: d = 1, dmin = 2, sub-block scale j + 1, min j; qs = 0x5a,
+        // qh bit 2c (low nibbles of chunk c) set for even l only.
+        let mut b = vec![0u8; Q5_K_BYTES];
+        b[0..2].copy_from_slice(&0x3c00u16.to_le_bytes());
+        b[2..4].copy_from_slice(&0x4000u16.to_le_bytes());
+        for j in 0..4 {
+            b[4 + j] = j as u8 + 1; // scales 0..4
+            b[8 + j] = j as u8; // mins 0..4
+            b[12 + j] = ((j as u8 + 5) & 0xf) | (((j as u8 + 4) & 0xf) << 4); // 4..8 low bits
+        }
+        for l in 0..32 {
+            b[16 + l] = if l % 2 == 0 { 0x55 } else { 0 };
+        }
+        b[48..].fill(0x5a);
+        let mut out = [0f32; 256];
+        dequant(Q5_K, &b, &mut out);
+        for j in 0..8 {
+            let (sc, m) = get_scale_min_k4(j, &b[4..16]);
+            assert_eq!((sc, m), (j as u8 + 1, j as u8));
+            for l in 0..32 {
+                let nib = if j % 2 == 0 { 0xa } else { 0x5 };
+                let h = if j % 2 == 0 && l % 2 == 0 { 16 } else { 0 };
+                let want = sc as f32 * (nib + h) as f32 - 2.0 * m as f32;
+                assert_eq!(out[32 * j + l], want, "sub-block {j} l {l}");
+            }
+        }
+    }
+
     #[test]
     fn dot_row_matches_dequant_synthetic() {
         // two Q8_0 blocks + exercise chunking with F32 of odd length
@@ -3226,8 +3807,8 @@ mod tests {
             .collect();
         let (bs, bb) = block_info(qt);
         let d_offs: &[usize] = match qt {
-            Q5_0 | Q8_0 => &[0],
-            Q4_K => &[0, 2],
+            Q4_0 | Q5_0 | Q8_0 => &[0],
+            Q4_K | Q5_K | Q4_1 | Q5_1 => &[0, 2],
             Q6_K => &[208],
             F16 => &[0],
             F32 => {
@@ -3255,7 +3836,7 @@ mod tests {
     /// The activations as dot_row_q8 sees them for weight type `qt`.
     fn dequant_act(qt: u32, qa: &QuantizedAct) -> Vec<f32> {
         match qt {
-            Q5_0 | Q8_0 => {
+            Q4_0 | Q4_1 | Q5_0 | Q5_1 | Q8_0 => {
                 let B32 { d, q, c, n128 } = qa.b32.as_ref().unwrap();
                 for ((q, c), &s) in q.iter().zip(c).zip(n128) {
                     for (lane, &cl) in q.as_chunks::<4>().0.iter().zip(c) {
@@ -3268,7 +3849,7 @@ mod tests {
                     .flat_map(|(&d, q)| q.map(|v| d * v as f32))
                     .collect()
             }
-            Q4_K | Q6_K => {
+            Q4_K | Q5_K | Q6_K => {
                 let k = qa.k.as_ref().unwrap();
                 for b in k {
                     for (g, s) in b.qs.as_chunks::<16>().0.iter().zip(b.bsums) {
@@ -3321,6 +3902,13 @@ mod tests {
             (Q6_K, 1280),
             (Q4_K, 4864),
             (Q6_K, 4864),
+            (Q4_0, 896),
+            (Q4_0, 4864),
+            (Q5_K, 1280),
+            (Q5_K, 4864),
+            (Q4_1, 896),
+            (Q5_1, 896),
+            (Q5_1, 4864),
             (F32, 896),
             (F16, 896),
         ] {
@@ -3338,8 +3926,8 @@ mod tests {
         let (bs, bb) = block_info(qt);
         // byte range holding the f16 scale(s), left random
         let keep = match qt {
-            Q5_0 | Q8_0 => 0..2,
-            Q4_K => 0..4,
+            Q4_0 | Q5_0 | Q8_0 => 0..2,
+            Q4_K | Q5_K | Q4_1 | Q5_1 => 0..4,
             Q6_K => 208..210,
             _ => unreachable!(),
         };
@@ -3369,7 +3957,7 @@ mod tests {
     fn dot_row_q8_extreme_weights() {
         // saturated quants (all bits set / all clear) stress the i32 accumulators
         let mut rng = Lcg(7);
-        for qt in [Q5_0, Q8_0, Q4_K, Q6_K] {
+        for qt in [Q5_0, Q8_0, Q4_K, Q6_K, Q4_0, Q5_K, Q4_1, Q5_1] {
             for fill in [0x00u8, 0xff, 0x80, 0x7f] {
                 let n = 512;
                 let row = extreme_row(qt, n, fill, &mut rng);
@@ -3492,6 +4080,12 @@ mod tests {
             (Q6_K, 1280),
             (Q4_K, 4864),
             (Q6_K, 4864),
+            (Q4_0, 32),
+            (Q4_0, 896),
+            (Q5_K, 256),
+            (Q5_K, 4864),
+            (Q4_1, 896),
+            (Q5_1, 896),
         ] {
             for rep in 0..8 {
                 let row = synthetic_row(qt, n, &mut rng);
@@ -3501,11 +4095,45 @@ mod tests {
         }
     }
 
+    /// Q4_1 / Q5_1: the SIMD kernels only sum the integers differently, so
+    /// every path gives the scalar kernel's bits.
+    #[test]
+    fn q_1_simd_bits_match_scalar() {
+        let mut rng = Lcg(0x0001_0051);
+        for qt in [Q4_1, Q5_1] {
+            for n in [32, 896, 4864] {
+                for rep in 0..6 {
+                    let row = if rep < 3 {
+                        synthetic_row(qt, n, &mut rng)
+                    } else {
+                        extreme_row(qt, n, [0x00, 0xff, 0xa5][rep - 3], &mut rng)
+                    };
+                    let x = if rep % 2 == 0 {
+                        synthetic_x(n, &mut rng)
+                    } else {
+                        extreme_x(n, &mut rng)
+                    };
+                    let qa = QuantizedAct::for_types(&x, &[qt]);
+                    // SAFETY: Scalar, or a path listed by simd_paths().
+                    let want = unsafe { dot_row_q8_with(Simd::Scalar, qt, &row, &qa) };
+                    for p in simd_paths() {
+                        let got = unsafe { dot_row_q8_with(p, qt, &row, &qa) };
+                        assert_eq!(
+                            got.to_bits(),
+                            want.to_bits(),
+                            "qt {qt} n {n} rep {rep} {p:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     #[test]
     fn simd_matches_scalar_extreme() {
         let paths = simd_paths();
         let mut rng = Lcg(0xe7);
-        for qt in [Q5_0, Q8_0, Q4_K, Q6_K] {
+        for qt in [Q5_0, Q8_0, Q4_K, Q6_K, Q4_0, Q5_K, Q4_1, Q5_1] {
             for fill in [0x00u8, 0xff, 0x80, 0x7f, 0x55, 0xaa] {
                 for n in [256, 1280] {
                     let row = extreme_row(qt, n, fill, &mut rng);
@@ -3545,7 +4173,16 @@ mod tests {
         let mut paths = vec![Simd::Scalar];
         paths.extend(simd_paths());
         let mut rng = Lcg(0x4a11);
-        for &(qt, n) in &[(Q5_0, 896), (Q8_0, 896), (Q4_K, 4864), (Q6_K, 4864)] {
+        for &(qt, n) in &[
+            (Q5_0, 896),
+            (Q8_0, 896),
+            (Q4_K, 4864),
+            (Q6_K, 4864),
+            (Q4_0, 896),
+            (Q5_K, 4864),
+            (Q4_1, 896),
+            (Q5_1, 896),
+        ] {
             for nb in [1usize, 2, 3, 4, 5, 6, 7, 8, 9, 13] {
                 let row = synthetic_row(qt, n, &mut rng);
                 let qas: Vec<QuantizedAct> = (0..nb)
@@ -3646,6 +4283,12 @@ mod tests {
             ([Q4_K, Q6_K], 4864),
             ([Q4_K, Q4_K], 256),
             ([Q6_K, Q6_K], 256),
+            ([Q4_0, Q4_0], 896),
+            ([Q5_K, Q5_K], 4864),
+            ([Q5_K, Q4_K], 4864),
+            ([Q4_0, Q5_0], 896),
+            ([Q5_1, Q5_1], 896),
+            ([Q4_1, Q8_0], 896),
         ] {
             for nb in [1usize, 2, 3, 4, 5, 6, 7, 8, 9, 13] {
                 let r0 = synthetic_row(qts[0], n, &mut rng);
@@ -3798,7 +4441,7 @@ mod tests {
             let maxd = |rng: &mut Lcg| -> [u8; 2] {
                 (0x7bffu16 | (((rng.next_u32() & 1) as u16) << 15)).to_le_bytes()
             };
-            if qt == Q4_K {
+            if qt == Q4_K || qt == Q5_K {
                 if k.is_multiple_of(2) {
                     let v = maxd(rng);
                     blk[0..2].copy_from_slice(&v);
@@ -3808,7 +4451,7 @@ mod tests {
                     blk[2..4].copy_from_slice(&v);
                 }
                 fill((k % 3) as u8, &mut blk[4..16], rng);
-                fill(((k / 3) % 3) as u8, &mut blk[16..Q4_K_BYTES], rng);
+                fill(((k / 3) % 3) as u8, &mut blk[16..bb], rng);
             } else {
                 if k.is_multiple_of(2) {
                     let v = maxd(rng);
@@ -3932,6 +4575,12 @@ mod tests {
                 (Q8_0, 1) => extreme_row(qt, n, 0x80, rng),
                 (Q8_0, 2) => extreme_row(qt, n, 0x7f, rng),
                 (Q8_0, 3) => q8_0_extreme_row(n, rng),
+                (Q4_0, 1) => extreme_row(qt, n, 0x00, rng),
+                (Q4_0, 2) => extreme_row(qt, n, 0xff, rng),
+                (Q4_0, 3) => extreme_row(qt, n, 0x0f, rng),
+                (Q4_1 | Q5_1, 1) => extreme_row(qt, n, 0x00, rng),
+                (Q4_1 | Q5_1, 2) => extreme_row(qt, n, 0xff, rng),
+                (Q4_1 | Q5_1, 3) => extreme_row(qt, n, 0xf0, rng),
                 (_, 4) => {
                     let mut row = synthetic_row(qt, n, rng);
                     let d_off = if qt == Q6_K { 208 } else { 0 };
@@ -3959,6 +4608,10 @@ mod tests {
             (Q8_0, [896, 4864]),
             (Q4_K, [256, 4864]),
             (Q6_K, [256, 4864]),
+            (Q4_0, [896, 4864]),
+            (Q5_K, [256, 4864]),
+            (Q4_1, [896, 4864]),
+            (Q5_1, [896, 4864]),
         ] {
             for n in widths {
                 let rb = row_bytes(qt, n);

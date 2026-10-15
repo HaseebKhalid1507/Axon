@@ -496,3 +496,20 @@ fn real_model_sampling_cuda_qwen3() {
         crate::sample::tests::real_model_sampling_on(&net, &m);
     }
 }
+
+/// llama (128K vocabulary, tied Q6_K head): `real_model_sampling_cuda`
+/// with f16 and q8 caches.
+#[test]
+fn real_model_sampling_cuda_llama() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = crate::testutil::llama_model() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    for kv in [CacheKv::F16, CacheKv::Q8 { group: 0 }] {
+        let net = CudaQwen2::with_kv(&g, &km, &m, 256, kv, false).unwrap();
+        crate::sample::tests::real_model_sampling_on(&net, &m);
+    }
+}

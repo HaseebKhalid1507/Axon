@@ -19,9 +19,13 @@ typedef unsigned long long u64;
 // GGML type ids (quant.rs).
 #define QT_F32 0
 #define QT_F16 1
+#define QT_Q4_0 2
+#define QT_Q4_1 3
 #define QT_Q5_0 6
+#define QT_Q5_1 7
 #define QT_Q8_0 8
 #define QT_Q4_K 12
+#define QT_Q5_K 13
 #define QT_Q6_K 14
 
 // Little-endian reads from bytes: blocks are only 2-byte aligned (Q5_0 is 22
@@ -60,6 +64,30 @@ __device__ __forceinline__ float deq_q5_0(const u8* b, int i) {
     return __fmul_rn((float)x, d);
 }
 
+// block_q4_0 { half d; u8 qs[16]; }, 32 values, 18 bytes: low nibbles
+// of qs, then the high ones, minus 8.
+__device__ __forceinline__ float deq_q4_0(const u8* b, int i) {
+    int j = i & 15;
+    int x = (int)(i < 16 ? (b[2 + j] & 0x0f) : (b[2 + j] >> 4)) - 8;
+    return __fmul_rn((float)x, rd_f16(b));
+}
+
+// block_q4_1 { half d; half m; u8 qs[16]; }, 32 values, 20 bytes: q * d + m.
+__device__ __forceinline__ float deq_q4_1(const u8* b, int i) {
+    int j = i & 15;
+    u32 x = i < 16 ? (b[4 + j] & 0x0f) : (b[4 + j] >> 4);
+    return __fadd_rn(__fmul_rn((float)x, rd_f16(b)), rd_f16(b + 2));
+}
+
+// block_q5_1 { half d; half m; u8 qh[4]; u8 qs[16]; }, 32 values, 24 bytes.
+__device__ __forceinline__ float deq_q5_1(const u8* b, int i) {
+    u32 qh = (u32)b[4] | ((u32)b[5] << 8) | ((u32)b[6] << 16) | ((u32)b[7] << 24);
+    int j = i & 15;
+    u32 x = i < 16 ? ((b[8 + j] & 0x0f) | (((qh >> j) << 4) & 0x10))
+                   : ((b[8 + j] >> 4) | ((qh >> (j + 12)) & 0x10));
+    return __fadd_rn(__fmul_rn((float)x, rd_f16(b)), rd_f16(b + 2));
+}
+
 // block_q8_0 { half d; int8 qs[32]; }, 32 values, 34 bytes.
 __device__ __forceinline__ float deq_q8_0(const u8* b, int i) {
     return __fmul_rn((float)(signed char)b[2 + i], rd_f16(b));
@@ -90,6 +118,20 @@ __device__ __forceinline__ float deq_q4_k(const u8* b, int i) {
     return __fsub_rn(__fmul_rn(d1, (float)nib), m1);
 }
 
+// block_q5_K { half d; half dmin; u8 scales[12]; u8 qh[32]; u8 qs[128]; },
+// 256 values, 176 bytes: Q4_K's layout plus bit 4 of value 64c + 32hi + l
+// in bit 2c + hi of qh[l].
+__device__ __forceinline__ float deq_q5_k(const u8* b, int i) {
+    int c = i >> 6, w = i & 63, l = w & 31, hi = w >> 5;
+    u32 sc, m;
+    scale_min_k4(2 * c + hi, b + 4, &sc, &m);
+    float d1 = __fmul_rn(rd_f16(b), (float)sc);
+    float m1 = __fmul_rn(rd_f16(b + 2), (float)m);
+    u8 q = b[48 + 32 * c + l];
+    u32 v = (hi ? q >> 4 : q & 0xf) | (((b[16 + l] >> (2 * c + hi)) & 1) << 4);
+    return __fsub_rn(__fmul_rn(d1, (float)v), m1);
+}
+
 // block_q6_K { u8 ql[128]; u8 qh[64]; int8 scales[16]; half d; }, 256
 // values, 210 bytes. Halves of 128; in each, quarter k of 32 takes the low
 // (k < 2) or high nibbles of ql[l + 32 (k & 1)] and bits 2k..2k+1 of qh[l].
@@ -113,6 +155,16 @@ __device__ __forceinline__ float deq(int qt, const u8* row, int i) {
                                ((u32)row[4 * i + 2] << 16) | ((u32)row[4 * i + 3] << 24));
     case QT_F16:
         return rd_f16(row + 2 * i);
+#ifdef AXON_EXT_TYPES // (decode.cu dot_rows_t)
+    case QT_Q4_0:
+        return deq_q4_0(row + 18 * (i >> 5), i & 31);
+    case QT_Q4_1:
+        return deq_q4_1(row + 20 * (i >> 5), i & 31);
+    case QT_Q5_1:
+        return deq_q5_1(row + 24 * (i >> 5), i & 31);
+    case QT_Q5_K:
+        return deq_q5_k(row + 176 * (i >> 8), i & 255);
+#endif
     case QT_Q5_0:
         return deq_q5_0(row + 22 * (i >> 5), i & 31);
     case QT_Q8_0:
