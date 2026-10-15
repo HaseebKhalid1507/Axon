@@ -123,7 +123,7 @@ pub(crate) const PROMPTS: [&str; 6] = [
 /// with `steps` greedy steps each.
 fn agreement(m: &Model, steps: usize) -> (Agree, Agree) {
     let g = crate::testutil::gpu().unwrap();
-    let km = Kernels::module(&g).unwrap();
+    let km = Kernels::module_for(&g, m).unwrap();
     let tok = crate::tokenizer::Tokenizer::from_gguf(m);
     // GPU and per-row first: the default CPU model releases the bytes it
     // repacks.
@@ -259,6 +259,44 @@ fn gpu_logits_match_cpu_0_5b() {
         return;
     };
     logits_match(&m, "0.5B");
+}
+
+/// `logits_match` on the Q5_K_M / Q4_0 GGUFs (bartowski's; skipped when
+/// absent): Q5_K, Q5_1 (0.5B Q5_K_M), Q4_0 and Q4_1 (Q4_0 files' few
+/// ffn_down) end to end, GPU vs CPU.
+#[test]
+fn gpu_logits_match_cpu_q5_k_m_q4_0() {
+    if crate::testutil::gpu().is_none() {
+        return;
+    }
+    for (f, name) in [
+        ("Qwen2.5-0.5B-Instruct-Q5_K_M.gguf", "0.5B Q5_K_M"),
+        ("Qwen2.5-0.5B-Instruct-Q4_0.gguf", "0.5B Q4_0"),
+        ("Qwen2.5-1.5B-Instruct-Q5_K_M.gguf", "1.5B Q5_K_M"),
+        ("Qwen2.5-1.5B-Instruct-Q4_0.gguf", "1.5B Q4_0"),
+    ] {
+        let Some(m) = model_at(&format!("models/{f}")) else {
+            continue;
+        };
+        let (ag, ac) = agreement(&m, 32);
+        report(&format!("{name} gpu vs cpu"), &ag);
+        report(&format!("{name} cpu rows vs cpu"), &ac);
+        let n = ag.positions as f64;
+        if ac.sum_kl / n > 1e-4 {
+            assert_graded(&ag, &ac);
+        } else {
+            // The CPU's two kernel sets nearly agree here (Q4_0 / Q4_1 have
+            // no repack: only the head differs), so no self-noise to grade
+            // against: absolute bounds, about 2x what these files measure
+            // (GPU vs CPU, 0.5B / 1.5B Q4_0: mean KL 1.5e-3 / 3.0e-3, max
+            // 0.017 / 0.040, max |dlogit| 1.2 / 1.7).
+            let n = ag.positions;
+            assert!(ag.top1 * 100 >= 94 * n, "{name}: top-1 {}/{n}", ag.top1);
+            assert!(ag.flips.iter().all(|&d| d < 0.5), "{name}: {:?}", ag.flips);
+            assert!(ag.sum_kl <= 5e-3 * n as f64, "{name}: mean KL");
+            assert!(ag.max_kl <= 0.2 && ag.max_abs <= 3.0, "{name}: extremes");
+        }
+    }
 }
 
 #[test]
@@ -441,6 +479,93 @@ fn gpu_gemv_matches_cpu_every_type() {
     }
     for qt in [Q4_K, Q6_K, Q5_0, Q8_0] {
         assert!(seen.contains(&qt), "type {qt} not covered");
+    }
+}
+
+/// `gpu_gemv_matches_cpu_every_type` for the types the test model doesn't
+/// have (Q5_K, Q4_0), on synthetic matrices of the models' widths: the
+/// GEMV vs the CPU's dot_row_q8 on the same quantized activation, and the
+/// GPU's element dequant (dequant_rows) vs quant::dequant, bit for bit.
+#[test]
+fn gpu_gemv_matches_cpu_new_types() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module_ext(&g).unwrap();
+    let mut rng = Rng(0x0051_ce0f_4b17);
+    for (qt, cols) in [
+        (Q4_0, 896),
+        (Q4_0, 4864),
+        (Q5_K, 1536),
+        (Q5_K, 8960),
+        (Q4_1, 896),
+        (Q5_1, 4864),
+    ] {
+        let rows = 333;
+        let w = synth_matrix(&mut rng, qt, rows, cols);
+        let rb = quant::row_bytes(qt, cols);
+        let wb = g.upload(&w).unwrap();
+        let idx: Vec<u32> = (0..rows as u32).collect();
+        let deq = Kernels::new(&km)
+            .unwrap()
+            .dequant_rows(qt, &wb, cols, &idx)
+            .unwrap();
+        let mut row = vec![0f32; cols];
+        for r in 0..rows {
+            quant::dequant(qt, &w[r * rb..(r + 1) * rb], &mut row);
+            assert_eq!(
+                bits(&row),
+                bits(&deq[r * cols..(r + 1) * cols]),
+                "dequant row {r}"
+            );
+        }
+        for scale in [1.0f32, 1e-3, 40.0] {
+            let x = rng.vec(cols, scale);
+            let got = gpu_gemv(&g, &km, "gemv", qt, &w, cols, &x);
+            let got1 = gpu_gemv(&g, &km, "gemv1", qt, &w, cols, &x);
+            assert_eq!(bits(&got), bits(&got1), "gemv1 vs gemv");
+            let xq = quant::QuantizedAct::for_types(&x, &[qt]);
+            let mut worst = 0f64;
+            for r in 0..rows {
+                let wr = &w[r * rb..(r + 1) * rb];
+                let cpu = quant::dot_row_q8(qt, wr, &xq) as f64;
+                quant::dequant(qt, wr, &mut row);
+                let mag: f64 = row
+                    .iter()
+                    .zip(&x)
+                    .map(|(&a, &b)| (a as f64 * b as f64).abs())
+                    .sum();
+                worst = worst.max((got[r] as f64 - cpu).abs() / mag.max(1e-30));
+            }
+            let name = crate::gguf::qtype(qt).name;
+            eprintln!("{name} {cols} x{scale}: vs cpu q8 {worst:.2e}");
+            assert!(worst < 1e-6, "{name} {cols}: {worst:e} vs the CPU");
+        }
+    }
+}
+
+/// The two kernel builds (`Kernels::module`, main's four types, and
+/// `module_ext`, every type) give the same decode GEMV bits for the four:
+/// the extra switch cases change register allocation, not the arithmetic.
+#[test]
+fn gpu_ext_module_same_bits_old_types() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let kx = Kernels::module_ext(&g).unwrap();
+    assert!(!km.ext() && kx.ext());
+    let mut rng = Rng(0x0e47_0b17);
+    for (qt, cols) in [(Q4_K, 4864), (Q6_K, 1536), (Q5_0, 896), (Q8_0, 896)] {
+        let w = synth_matrix(&mut rng, qt, 333, cols);
+        for scale in [1.0f32, 40.0] {
+            let x = rng.vec(cols, scale);
+            for k in ["gemv", "gemv1"] {
+                let a = gpu_gemv(&g, &km, k, qt, &w, cols, &x);
+                let b = gpu_gemv(&g, &kx, k, qt, &w, cols, &x);
+                assert_eq!(bits(&a), bits(&b), "{k} type {qt}");
+            }
+        }
     }
 }
 
@@ -2123,6 +2248,10 @@ fn type_name(qt: u32) -> &'static str {
         Q4_K => "q4_k",
         Q6_K => "q6_k",
         Q8_0 => "q8_0",
+        Q5_K => "q5_k",
+        Q4_0 => "q4_0",
+        Q4_1 => "q4_1",
+        Q5_1 => "q5_1",
         _ => "q5_0",
     }
 }
@@ -2136,8 +2265,12 @@ fn synth_matrix(rng: &mut Rng, qt: u32, rows: usize, cols: usize) -> Vec<u8> {
     let mut w: Vec<u8> = (0..rb * rows).map(|_| rng.next() as u8).collect();
     let (bb, vb) = match qt {
         Q4_K => (144, 256),
+        Q5_K => (176, 256),
         Q6_K => (210, 256),
         Q8_0 => (34, 32),
+        Q4_0 => (18, 32),
+        Q4_1 => (20, 32),
+        Q5_1 => (24, 32),
         _ => (22, 32),
     };
     for b in 0..rows * cols / vb {
@@ -2145,7 +2278,7 @@ fn synth_matrix(rng: &mut Rng, qt: u32, rows: usize, cols: usize) -> Vec<u8> {
         let mut scale = || (0x1000u16 + (rng.next() & 0x7ff) as u16) | (rng.next() as u16 & 0x8000);
         let d = scale();
         w[o..o + 2].copy_from_slice(&d.to_le_bytes());
-        if qt == Q4_K {
+        if matches!(qt, Q4_K | Q5_K | Q4_1 | Q5_1) {
             let dmin = scale();
             w[o + 2..o + 4].copy_from_slice(&dmin.to_le_bytes());
         }
@@ -2164,7 +2297,7 @@ fn gpu_batched_products_match_gemv_bits() {
     let Some(m) = crate::testutil::model() else {
         return;
     };
-    let km = Kernels::module(&g).unwrap();
+    let km = Kernels::module_ext(&g).unwrap();
     let mut rng = Rng(0x5eed_1234_abcd_0001);
     let mut seen = Vec::new();
     for name in [
@@ -2189,6 +2322,18 @@ fn gpu_batched_products_match_gemv_bits() {
         "synth Q4_K 18944",
         "synth Q6_K 3584",
         "synth Q6_K 18944",
+        // The new types: the 0.5B's 896 (Q4_0) and K-quant widths.
+        "synth Q4_0 896",
+        "synth Q4_0 4864",
+        "synth Q4_0 18944",
+        "synth Q5_K 768",
+        "synth Q5_K 1536",
+        "synth Q5_K 3584",
+        "synth Q5_K 18944",
+        "synth Q4_1 896",
+        "synth Q4_1 4864",
+        "synth Q5_1 896",
+        "synth Q5_1 4864",
     ] {
         let synth: Vec<u8>;
         let (qt, cols, rows, wd): (u32, usize, usize, &[u8]) = if name.starts_with("synth") {
@@ -2197,6 +2342,10 @@ fn gpu_batched_products_match_gemv_bits() {
                 "Q4_K" => Q4_K,
                 "Q6_K" => Q6_K,
                 "Q8_0" => Q8_0,
+                "Q5_K" => Q5_K,
+                "Q4_0" => Q4_0,
+                "Q4_1" => Q4_1,
+                "Q5_1" => Q5_1,
                 _ => Q5_0,
             };
             let cols: usize = f[2].parse().unwrap();
@@ -2240,10 +2389,11 @@ fn gpu_batched_products_match_gemv_bits() {
             if km.mma() {
                 kernels.extend(gemm2_names(qt));
                 let tn = type_name(qt);
-                if nb <= 8 {
+                // (Q4_1 / Q5_1 have no gemvm: small batches take gemvn.)
+                if nb <= 8 && has_gemvm(qt) {
                     kernels.push(format!("gemvm8_{tn}"));
                 }
-                if nb <= 16 {
+                if nb <= 16 && has_gemvm(qt) {
                     kernels.push(format!("gemvm16_{tn}"));
                 }
             }
@@ -2267,7 +2417,7 @@ fn gpu_batched_products_match_gemv_bits() {
         eprintln!("{name} {}: bit-identical", crate::gguf::qtype(qt).name);
         seen.push(qt);
     }
-    for qt in [Q4_K, Q6_K, Q5_0, Q8_0] {
+    for qt in [Q4_K, Q6_K, Q5_0, Q8_0, Q5_K, Q4_0, Q4_1, Q5_1] {
         assert!(seen.contains(&qt), "type {qt} not covered");
     }
 }
@@ -2281,11 +2431,15 @@ fn gpu_products_match_reference_bits() {
     let Some(g) = crate::testutil::gpu() else {
         return;
     };
-    let km = Kernels::module(&g).unwrap();
+    let km = Kernels::module_ext(&g).unwrap();
     let mut rng = Rng(0x0dd5_eed5_2026_1014);
     let mut cases: Vec<(u32, usize, usize)> = Vec::new();
-    for qt in [Q4_K, Q6_K, Q8_0, Q5_0] {
-        let vb = if qt == Q4_K || qt == Q6_K { 256 } else { 32 };
+    for qt in [Q4_K, Q6_K, Q8_0, Q5_0, Q5_K, Q4_0, Q4_1, Q5_1] {
+        let vb = if matches!(qt, Q4_K | Q5_K | Q6_K) {
+            256
+        } else {
+            32
+        };
         let mut widths = vec![256, 18944];
         if vb == 32 {
             widths.push(896);
@@ -2343,10 +2497,11 @@ fn gpu_products_match_reference_bits() {
             }
             let mut kernels: Vec<String> = vec!["gemvn_2x8".into(), "gemvn_2x16".into()];
             if km.mma() {
-                if nb <= 8 {
+                // (Q4_1 / Q5_1 have no gemvm: small batches take gemvn.)
+                if nb <= 8 && has_gemvm(qt) {
                     kernels.push(format!("gemvm8_{tn}"));
                 }
-                if nb <= 16 {
+                if nb <= 16 && has_gemvm(qt) {
                     kernels.push(format!("gemvm16_{tn}"));
                 }
                 kernels.extend(gemm2_names(qt));
@@ -2470,6 +2625,11 @@ fn gpu_swiglu_epilogue_and_gate_up_match_reference() {
 }
 
 /// The tensor-core GEMMs of a type (prefill.cu gemm2_*).
+/// Whether type qt has gemvm kernels.
+fn has_gemvm(qt: u32) -> bool {
+    !matches!(qt, Q4_1 | Q5_1)
+}
+
 fn gemm2_names(qt: u32) -> Vec<String> {
     let tn = type_name(qt);
     vec![format!("gemm2_{tn}"), format!("gemm2s_{tn}")]
@@ -2484,7 +2644,7 @@ fn cuda_gemm_bench() {
     let Some(g) = crate::testutil::gpu() else {
         return;
     };
-    let km = Kernels::module(&g).unwrap();
+    let km = Kernels::module_ext(&g).unwrap();
     let info = g.info().unwrap();
     eprintln!(
         "{} sm_{}{} {} SMs",
@@ -2582,6 +2742,13 @@ fn cuda_gemm_bench() {
         ("1.5B gate Q4_K", Q4_K, 1536, 8960),
         ("tbo Q4_K 4096x14336", Q4_K, 14336, 4096),
         ("tbo Q6_K 4096x14336", Q6_K, 14336, 4096),
+        ("gate  Q5_K", Q5_K, 3584, 18944),
+        ("down  Q5_K", Q5_K, 18944, 3584),
+        ("1.5B gate Q5_K", Q5_K, 1536, 8960),
+        ("1.5B gate Q4_0", Q4_0, 1536, 8960),
+        ("gate  Q4_0", Q4_0, 3584, 18944),
+        ("0.5B ffn Q5_1", Q5_1, 896, 4864),
+        ("0.5B ffn Q4_0", Q4_0, 896, 4864),
     ] {
         if only.as_deref().is_some_and(|o| !what.contains(o)) {
             continue;
@@ -2600,7 +2767,9 @@ fn cuda_gemm_bench() {
             let mut kernels: Vec<String> = Vec::new();
             if nb <= 16 {
                 kernels.push(if nb <= 8 { "gemvn_2x8" } else { "gemvn_2x16" }.into());
-                kernels.push(format!("gemvm{}_{tn}", if nb <= 8 { 8 } else { 16 }));
+                if has_gemvm(qt) {
+                    kernels.push(format!("gemvm{}_{tn}", if nb <= 8 { 8 } else { 16 }));
+                }
             }
             kernels.extend(gemm2_names(qt));
             // Rounds over all kernels (interleaved: clocks drift as the GPU

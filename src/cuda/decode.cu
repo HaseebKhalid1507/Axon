@@ -404,6 +404,65 @@ __device__ __forceinline__ void blk_q4_k(const u8* const* rows, int base, int en
     }
 }
 
+// Q5_K (dot_q5_k_q8): blk_q5_k's lanes, plus the 16 qh bytes of the same
+// positions l (bit 2c to the low nibble's bit 4, 2c + 1 to the high's).
+template <int R, int T, int CAP>
+__device__ __forceinline__ void blk_q5_k(const u8* const* rows, int base, int end, const u8* act,
+                                         u64 astride, int n, int zmax, float2* sh) {
+    int t = threadIdx.x, g = t >> 3, p = t & 7, c = p >> 1, hf = p & 1;
+    u32 mask = 0xffu << (t & 24);
+    for (int b = base + g; b < end; b += GEMV_THREADS / 8) {
+        uint4 h[R], q[R], qh[R];
+#pragma unroll
+        for (int r = 0; r < R; r++) {
+            const u8* blk = rows[r] + (u64)b * 176;
+            h[r] = __ldg((const uint4*)blk);
+            qh[r] = __ldg((const uint4*)(blk + 16 + 16 * hf));
+            q[r] = __ldg((const uint4*)(blk + 48 + 16 * p));
+        }
+#pragma unroll
+        for (int j = 0; j < T; j++) {
+            Act a = act_view(act + (u64)min(j, zmax) * astride, n);
+            const signed char* xb = a.qk + b * 256 + 64 * c + 16 * hf;
+            int4 xl = *(const int4*)xb;
+            int4 xh = *(const int4*)(xb + 32);
+            int bs0 = a.b32[b * 8 + 2 * c], bs1 = a.b32[b * 8 + 2 * c + 1];
+            float dk = a.dk[b];
+#pragma unroll
+            for (int r = 0; r < R; r++) {
+                int s1 = 0, s2 = 0;
+#define Q5L(f) (int)((q[r].f & 0x0f0f0f0f) | (((qh[r].f >> (2 * c)) & 0x01010101) << 4))
+#define Q5H(f) (int)(((q[r].f >> 4) & 0x0f0f0f0f) | (((qh[r].f >> (2 * c + 1)) & 0x01010101) << 4))
+                s1 = __dp4a(Q5L(x), xl.x, s1);
+                s1 = __dp4a(Q5L(y), xl.y, s1);
+                s1 = __dp4a(Q5L(z), xl.z, s1);
+                s1 = __dp4a(Q5L(w), xl.w, s1);
+                s2 = __dp4a(Q5H(x), xh.x, s2);
+                s2 = __dp4a(Q5H(y), xh.y, s2);
+                s2 = __dp4a(Q5H(z), xh.z, s2);
+                s2 = __dp4a(Q5H(w), xh.w, s2);
+#undef Q5L
+#undef Q5H
+                int sc1, m1, sc2, m2;
+                scale_min_h(h[r], 2 * c, &sc1, &m1);
+                scale_min_h(h[r], 2 * c + 1, &sc2, &m2);
+                int S = sc1 * s1 + sc2 * s2;
+                int M = hf ? 0 : m1 * bs0 + m2 * bs1;
+#pragma unroll
+                for (int o = 1; o < 8; o <<= 1) {
+                    S += __shfl_xor_sync(mask, S, o);
+                    M += __shfl_xor_sync(mask, M, o);
+                }
+                if (p == 0) {
+                    float d = h2f(h[r].x & 0xffff), dmin = h2f(h[r].x >> 16);
+                    float v = __fsub_rn(__fmul_rn(d, i2f_rn(S)), __fmul_rn(dmin, i2f_rn(M)));
+                    GV_PAIR(sh, CAP, r, j, T, b, base) = make_float2(dk, v);
+                }
+            }
+        }
+    }
+}
+
 // Q6_K (dot_q6_k_q8's integers): lane p of a group takes half hh = p / 4,
 // positions l0..l0+8 (l0 = 8 (p % 4)) of each of that half's 4 quarters.
 template <int R, int T, int CAP>
@@ -531,6 +590,93 @@ __device__ __forceinline__ void blk_q5_0(const u8* const* rows, int base, int en
     }
 }
 
+// Q4_0 (dot_q4_0_q8): blk_q4_0's lanes without the high bits.
+template <int R, int T, int CAP>
+__device__ __forceinline__ void blk_q4_0(const u8* const* rows, int base, int end, const u8* act,
+                                         u64 astride, int n, int zmax, float2* sh) {
+    int t = threadIdx.x, g = t >> 2, p = t & 3;
+    u32 mask = 0xfu << (t & 28);
+    for (int b = base + g; b < end; b += GEMV_THREADS / 4) {
+        uint2 q[R];
+        float dw[R];
+#pragma unroll
+        for (int r = 0; r < R; r++) {
+            const u8* blk = rows[r] + (u64)b * 18;
+            q[r] = ld8_a2(blk + 2 + 8 * (p & 1));
+            dw[r] = h2f(rd_u16(blk));
+        }
+#pragma unroll
+        for (int j = 0; j < T; j++) {
+            Act a = act_view(act + (u64)min(j, zmax) * astride, n);
+            uint2 x = *(const uint2*)(a.q0 + b * 32 + 8 * p);
+            float d0 = a.d0[b];
+#pragma unroll
+            for (int r = 0; r < R; r++) {
+                u32 n0 = p < 2 ? (q[r].x & 0x0f0f0f0f) : ((q[r].x >> 4) & 0x0f0f0f0f);
+                u32 n1 = p < 2 ? (q[r].y & 0x0f0f0f0f) : ((q[r].y >> 4) & 0x0f0f0f0f);
+                u32 w0 = __vsub4(n0, 0x08080808);
+                u32 w1 = __vsub4(n1, 0x08080808);
+                int s = __dp4a((int)w0, (int)x.x, 0);
+                s = __dp4a((int)w1, (int)x.y, s);
+                s += __shfl_xor_sync(mask, s, 1);
+                s += __shfl_xor_sync(mask, s, 2);
+                if (p == 0)
+                    GV_PAIR(sh, CAP, r, j, T, b, base) =
+                        make_float2(__fmul_rn(dw[r], d0), i2f_rn(s));
+            }
+        }
+    }
+}
+
+// Q4_1 / Q5_1 (quant.rs dot_q_1_q8): blk_q5_0's lanes, unsigned weights
+// w, the block's min m: pair (d0, d * sum(w x) + m * sum(x)).
+template <int R, int T, int CAP, bool Q5>
+__device__ __forceinline__ void blk_q_1(const u8* const* rows, int base, int end, const u8* act,
+                                        u64 astride, int n, int zmax, float2* sh) {
+    int t = threadIdx.x, g = t >> 2, p = t & 3;
+    u32 mask = 0xfu << (t & 28);
+    const int BB = Q5 ? 24 : 20, QS = Q5 ? 8 : 4;
+    for (int b = base + g; b < end; b += GEMV_THREADS / 4) {
+        u32 qh[R];
+        uint2 q[R];
+        float dw[R], mw[R];
+#pragma unroll
+        for (int r = 0; r < R; r++) {
+            const u8* blk = rows[r] + (u64)b * BB;
+            qh[r] = Q5 ? __ldg((const u32*)(blk + 4)) >> (8 * p) : 0;
+            q[r] = ld8_a2(blk + QS + 8 * (p & 1));
+            dw[r] = h2f(rd_u16(blk));
+            mw[r] = h2f(rd_u16(blk + 2));
+        }
+#pragma unroll
+        for (int j = 0; j < T; j++) {
+            Act a = act_view(act + (u64)min(j, zmax) * astride, n);
+            uint2 x = *(const uint2*)(a.q0 + b * 32 + 8 * p);
+            float d0 = a.d0[b];
+            int bs = __dp4a(0x01010101, (int)x.x, 0);
+            bs = __dp4a(0x01010101, (int)x.y, bs);
+            bs += __shfl_xor_sync(mask, bs, 1);
+            bs += __shfl_xor_sync(mask, bs, 2);
+#pragma unroll
+            for (int r = 0; r < R; r++) {
+                u32 w0 = p < 2 ? (q[r].x & 0x0f0f0f0f) : ((q[r].x >> 4) & 0x0f0f0f0f);
+                u32 w1 = p < 2 ? (q[r].y & 0x0f0f0f0f) : ((q[r].y >> 4) & 0x0f0f0f0f);
+                if (Q5) {
+                    w0 |= spread4(qh[r] & 0xf);
+                    w1 |= spread4((qh[r] >> 4) & 0xf);
+                }
+                int s = __dp4a((int)w0, (int)x.x, 0);
+                s = __dp4a((int)w1, (int)x.y, s);
+                s += __shfl_xor_sync(mask, s, 1);
+                s += __shfl_xor_sync(mask, s, 2);
+                if (p == 0)
+                    GV_PAIR(sh, CAP, r, j, T, b, base) = make_float2(
+                        d0, __fadd_rn(__fmul_rn(dw[r], i2f_rn(s)), __fmul_rn(mw[r], i2f_rn(bs))));
+            }
+        }
+    }
+}
+
 // The (scale, value) pairs of dot_rows_t's chunks (one buffer for every
 // call of a kernel).
 __shared__ float2 gv_pairs[GEMV_PAIRS];
@@ -560,7 +706,15 @@ __device__ __forceinline__ float dot_rows_t(int qt, const u8* const* rows, int n
                                             u64 astride, int zmax, float* y, bool again = false) {
     const int RT = R * T, CAP = GEMV_PAIRS / RT;
     float2* sh = gv_pairs;
+    // AXON_EXT_TYPES (Kernels::module_ext): the types beyond main's four,
+    // compiled in only for models that have them, so the kernels every
+    // other model runs keep their old code (a bigger switch cost decode
+    // ~1% on 7B / 4B: register allocation, a qkv_rope spill).
+#ifdef AXON_EXT_TYPES
+    bool kq = qt == QT_Q4_K || qt == QT_Q5_K || qt == QT_Q6_K;
+#else
     bool kq = qt == QT_Q4_K || qt == QT_Q6_K;
+#endif
     int nb = kq ? n >> 8 : n >> 5;
     int i = threadIdx.x;
     float acc = 0.0f;
@@ -572,6 +726,12 @@ __device__ __forceinline__ float dot_rows_t(int qt, const u8* const* rows, int n
         case QT_Q4_K: blk_q4_k<R, T, CAP>(rows, base, end, act, astride, n, zmax, sh); break;
         case QT_Q6_K: blk_q6_k<R, T, CAP>(rows, base, end, act, astride, n, zmax, sh); break;
         case QT_Q8_0: blk_q8_0<R, T, CAP>(rows, base, end, act, astride, n, zmax, sh); break;
+#ifdef AXON_EXT_TYPES
+        case QT_Q5_K: blk_q5_k<R, T, CAP>(rows, base, end, act, astride, n, zmax, sh); break;
+        case QT_Q4_0: blk_q4_0<R, T, CAP>(rows, base, end, act, astride, n, zmax, sh); break;
+        case QT_Q4_1: blk_q_1<R, T, CAP, false>(rows, base, end, act, astride, n, zmax, sh); break;
+        case QT_Q5_1: blk_q_1<R, T, CAP, true>(rows, base, end, act, astride, n, zmax, sh); break;
+#endif
         default: blk_q5_0<R, T, CAP>(rows, base, end, act, astride, n, zmax, sh); break; // QT_Q5_0
         }
         __syncthreads();

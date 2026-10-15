@@ -98,6 +98,26 @@ impl BatchIn<'_> {
     }
 }
 
+/// Weight types of the tensor-core GEMMs (gemm2), in table order; the
+/// first `NTYPES_VM` have gemvm kernels too (Q4_1 / Q5_1 take gemvn).
+const NTYPES: usize = 8;
+const NTYPES_VM: usize = 6;
+
+/// `qt`'s slot in the per-type kernel tables.
+fn type_index(qt: u32) -> usize {
+    match qt {
+        Q4_K => 0,
+        Q6_K => 1,
+        Q8_0 => 2,
+        Q5_0 => 3,
+        Q5_K => 4,
+        Q4_0 => 5,
+        Q4_1 => 6,
+        Q5_1 => 7,
+        _ => unreachable!("type_index: {qt}"),
+    }
+}
+
 /// The batched kernels of a module.
 pub(super) struct BatchFns<'m> {
     embed: Func<'m>,
@@ -123,10 +143,11 @@ pub(super) struct BatchFns<'m> {
     gemvn8: Func<'m>,
     gemvn16: Func<'m>,
     /// gemvm8_*, gemvm16_* per type (as `gemm`); None without tensor cores.
-    gemvm: Option<[[Func<'m>; 4]; 2]>,
-    /// Per type (Q4_K, Q6_K, Q8_0, Q5_0): gemm2_* (128 tokens per block)
+    gemvm: Option<[[Func<'m>; NTYPES_VM]; 2]>,
+    /// Per type (Q4_K, Q6_K, Q8_0, Q5_0, Q5_K, Q4_0: `NTYPES`, indexed by
+    /// `type_index`): gemm2_* (128 tokens per block)
     /// and gemm2s_* (64); None without int8 tensor cores.
-    gemm: Option<[[Func<'m>; 2]; 4]>,
+    gemm: Option<[[Func<'m>; 2]; NTYPES]>,
     /// gemm2_q6k8 and gemm2s_q6k8 (Q6_K by its prefill copy, `Mat::c8`),
     /// and q6k_to_i8 which makes it; None without int8 tensor cores.
     gemm_q6k8: Option<[Func<'m>; 2]>,
@@ -159,6 +180,10 @@ impl<'m> BatchFns<'m> {
                 (Q6_K, "q6_k"),
                 (Q8_0, "q8_0"),
                 (Q5_0, "q5_0"),
+                (Q5_K, "q5_k"),
+                (Q4_0, "q4_0"),
+                (Q4_1, "q4_1"),
+                (Q5_1, "q5_1"),
             ] {
                 let big = module.function(&format!("gemm2_{tn}"))?;
                 big.set_max_shared(gemm2_smem(qt, 128, 2))?;
@@ -166,7 +191,7 @@ impl<'m> BatchFns<'m> {
                 small.set_max_shared(gemm2_smem(qt, 64, 3))?;
                 fs.push([big, small]);
             }
-            let f: [[Func<'m>; 2]; 4] = fs.try_into().map_err(|_| "gemm2 kernels")?;
+            let f: [[Func<'m>; 2]; NTYPES] = fs.try_into().map_err(|_| "gemm2 kernels")?;
             Some(f)
         } else {
             None
@@ -181,9 +206,16 @@ impl<'m> BatchFns<'m> {
             None
         };
         let gemvm = if module.mma() {
-            let f = |nf: usize| -> Result<[Func<'m>; 4], String> {
+            let f = |nf: usize| -> Result<[Func<'m>; NTYPES_VM], String> {
                 let n = |t: &str| module.function(&format!("gemvm{nf}_{t}"));
-                Ok([n("q4_k")?, n("q6_k")?, n("q8_0")?, n("q5_0")?])
+                Ok([
+                    n("q4_k")?,
+                    n("q6_k")?,
+                    n("q8_0")?,
+                    n("q5_0")?,
+                    n("q5_k")?,
+                    n("q4_0")?,
+                ])
             };
             Some([f(8)?, f(16)?])
         } else {
@@ -379,12 +411,7 @@ impl<'g> CudaQwen2<'g> {
             out,
             Arg::U64(ostride as u64),
         ];
-        let ti = match mt.qt {
-            Q4_K => 0,
-            Q6_K => 1,
-            Q8_0 => 2,
-            _ => 3,
-        };
+        let ti = type_index(mt.qt);
         // SAFETY: the caller's contract; the matrix is whole in `wts`.
         unsafe {
             match (&bf.gemm, &bf.gemvm) {
@@ -394,7 +421,7 @@ impl<'g> CudaQwen2<'g> {
                     // the register-staged types in 64 x 128, given at least
                     // ~1.5 blocks per SM.
                     let ctas = nb.div_ceil(128) * mt.rows.div_ceil(G2_BM);
-                    let big = mt.qt != Q4_K && 2 * ctas >= 3 * bf.sms;
+                    let big = !matches!(mt.qt, Q4_K | Q5_K) && 2 * ctas >= 3 * bf.sms;
                     let (bn, st) = if big { (128, 2) } else { (64, 3) };
                     let (f, smem) = match q8c {
                         Some((_, f8)) => (&f8[!big as usize], gemm2_smem(Q6_K, bn, st)),
@@ -408,7 +435,7 @@ impl<'g> CudaQwen2<'g> {
                         &common,
                     )
                 }
-                (_, Some(fs)) if nb <= SMALL => self.gpu.launch(
+                (_, Some(fs)) if nb <= SMALL && ti < NTYPES_VM => self.gpu.launch(
                     &fs[(nb > 8) as usize][ti],
                     (mt.rows.div_ceil(16) as u32, 1, 1),
                     (128, 1, 1),

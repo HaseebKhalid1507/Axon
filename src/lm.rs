@@ -229,7 +229,7 @@ impl<'a> Backend<'a> {
             return Err("--gpu-layers 0 is --device cpu".into());
         }
         let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open()?));
-        let module: &'static Module<'static> = Box::leak(Box::new(Kernels::module(gpu)?));
+        let module: &'static Module<'static> = Box::leak(Box::new(Kernels::module_for(gpu, m)?));
         // f32 isn't offered on the GPU: f16 there (as always).
         let ckv = match kv {
             KvType::Q8 => CacheKv::Q8 { group: 0 },

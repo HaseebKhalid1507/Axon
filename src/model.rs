@@ -6,8 +6,8 @@ use crate::gguf::{Model, Tensor, Val};
 use crate::kv::{Half, KvData, KvElem, Layers};
 use crate::pool::{self, Pool};
 use crate::quant::{
-    DecodeCfg, F16, F32, Q4_K, Q5_0, Q6_K, Q8_0, QuantizedAct, batch_slots, dequant,
-    dot_row_q8_multi, dot_rows_q8, dot_rows_q8_multi, r8, r8q, row_bytes,
+    DecodeCfg, F16, F32, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0, QuantizedAct, batch_slots,
+    dequant, dot_row_q8_multi, dot_rows_q8, dot_rows_q8_multi, r8, r8q, row_bytes,
 };
 use crate::vmath;
 
@@ -294,7 +294,7 @@ fn load_vec(m: &Model, t: &Tensor) -> Vec<f32> {
 pub const ARCHS: [&str; 2] = ["qwen2", "qwen3"];
 
 /// Tensor types the kernels run (`quant::dequant` and `dot_row_q8`).
-const SUPPORTED_TYPES: [u32; 6] = [F32, F16, Q5_0, Q8_0, Q4_K, Q6_K];
+const SUPPORTED_TYPES: [u32; 10] = [F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K];
 
 /// Whether `Qwen2::new` reads any weight matrix in place from the model's
 /// bytes on every token (AXON_REPACK=0, or a matrix with no r8/r8q form),
@@ -384,7 +384,7 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
         let q = t.qtype;
         if !SUPPORTED_TYPES.contains(&q.id) {
             return Err(bad(format!(
-                "tensor {name}: type {} ({}) is not supported (F32, F16, Q5_0, Q8_0, Q4_K, Q6_K)",
+                "tensor {name}: type {} ({}) is not supported (F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K)",
                 q.name, q.id
             )));
         }
@@ -2574,10 +2574,10 @@ pub(crate) mod tests {
             |ts| ts.retain(|t| t.0 != "blk.1.ffn_up.weight"),
             "missing tensor blk.1.ffn_up.weight",
         );
-        // Q4_0: a real GGUF type the kernels don't run; 99: unknown.
+        // Q8_1: a real GGUF type the kernels don't run; 99: unknown.
         rejects(
-            set("blk.0.attn_q.weight", vec![64, 64], 2),
-            "Q4_0 (2) is not supported",
+            set("blk.0.attn_q.weight", vec![64, 64], 9),
+            "Q8_1 (9) is not supported",
         );
         rejects(
             set("blk.1.ffn_down.weight", vec![128, 64], 99),
@@ -3327,7 +3327,7 @@ pub(crate) mod tests {
     /// K-quants, Q8_0 32-blocks for Q5_0/Q8_0) and dequantized, in f64.
     fn quantized_values(qt: u32, inp: &[f32]) -> Vec<f64> {
         let mut out = Vec::with_capacity(inp.len());
-        if matches!(qt, Q5_0 | Q8_0) {
+        if matches!(qt, Q4_0 | Q4_1 | Q5_0 | Q5_1 | Q8_0) {
             for c in inp.chunks(32) {
                 let amax = c.iter().fold(0f32, |m, v| m.max(v.abs()));
                 let d = crate::quant::f16_to_f32(crate::quant::f32_to_f16(amax / 127.0));

@@ -3,7 +3,7 @@ use super::{
     cache_dir_from, check_versions, compile, encode_entry, ffi, pdl_ok, pick_target,
 };
 use crate::gguf::Model;
-use crate::quant::{self, F16, F32, Q4_K, Q5_0, Q6_K, Q8_0};
+use crate::quant::{self, F16, F32, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0};
 use std::path::PathBuf;
 
 struct Rng(u64);
@@ -56,7 +56,7 @@ fn assert_rows_match(
 /// First, last and 6 random rows of every tensor of `m`; returns (tensors,
 /// rows) checked and the types seen.
 fn check_every_tensor(g: &Gpu, m: &Model) -> (usize, usize, Vec<&'static str>) {
-    let km = Kernels::module(g).unwrap();
+    let km = Kernels::module_ext(g).unwrap();
     let k = Kernels::new(&km).unwrap();
     let mut rng = Rng(0x2545_f491_4f6c_dd1d);
     let (mut rows_checked, mut types) = (0, Vec::new());
@@ -108,6 +108,32 @@ fn gpu_dequant_bitwise_every_tensor_1_5b() {
     eprintln!("1.5B: {tensors} tensors, {rows} rows bit-identical; types {types:?}");
 }
 
+/// The Q5_K_M / Q4_0 GGUFs (whichever are present): every tensor's sampled
+/// rows bit-identical.
+#[test]
+fn gpu_dequant_bitwise_every_tensor_q5k_q4_0() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    for f in [
+        "Qwen2.5-0.5B-Instruct-Q5_K_M.gguf",
+        "Qwen2.5-0.5B-Instruct-Q4_0.gguf",
+        "Qwen2.5-1.5B-Instruct-Q5_K_M.gguf",
+        "Qwen2.5-1.5B-Instruct-Q4_0.gguf",
+    ] {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("models")
+            .join(f);
+        if !path.exists() {
+            eprintln!("skipping: {} not present", path.display());
+            continue;
+        }
+        let m = crate::gguf::load_with(path.to_str().unwrap(), Some(false)).unwrap();
+        let (tensors, rows, types) = check_every_tensor(&g, &m);
+        eprintln!("{f}: {tensors} tensors, {rows} rows bit-identical; types {types:?}");
+    }
+}
+
 /// Every type on random blocks: all 65536 f16 values (NaN payloads,
 /// subnormals, -0), random f32 bits, and quant blocks of random bytes with
 /// finite scales. (NaN/inf scales are left out: x86 and NVIDIA give NaNs
@@ -117,7 +143,7 @@ fn gpu_dequant_bitwise_synthetic() {
     let Some(g) = crate::testutil::gpu() else {
         return;
     };
-    let km = Kernels::module(&g).unwrap();
+    let km = Kernels::module_ext(&g).unwrap();
     let k = Kernels::new(&km).unwrap();
     let mut rng = Rng(0x9e37_79b9_7f4a_7c15);
 
@@ -142,8 +168,16 @@ fn gpu_dequant_bitwise_synthetic() {
     assert_rows_match(&g, &k, "random f32", F32, &f32s, 1024, &[0, 1, 2, 3]);
 
     // (type, offsets of the block's f16 scales)
-    let quants: [(u32, &[usize]); 4] =
-        [(Q5_0, &[0]), (Q8_0, &[0]), (Q4_K, &[0, 2]), (Q6_K, &[208])];
+    let quants: [(u32, &[usize]); 8] = [
+        (Q5_0, &[0]),
+        (Q8_0, &[0]),
+        (Q4_K, &[0, 2]),
+        (Q6_K, &[208]),
+        (Q4_0, &[0]),
+        (Q5_K, &[0, 2]),
+        (Q4_1, &[0, 2]),
+        (Q5_1, &[0, 2]),
+    ];
     for (qt, scales) in quants {
         let q = crate::gguf::qtype(qt);
         let (n, n_rows) = (1024, 64u32);
@@ -177,10 +211,19 @@ fn gpu_dequant_rejects_bad_requests() {
             .contains("past")
     );
     assert!(k.dequant_rows(Q4_K, &w, 100, &[0]).is_err());
+    // Q4_0 only on the module built with the extra types; Q8_1 nowhere.
     assert!(
         k.dequant_rows(2, &w, 32, &[0])
             .unwrap_err()
-            .contains("Q4_0")
+            .contains("module_ext")
+    );
+    let kmx = Kernels::module_ext(&g).unwrap();
+    let kx = Kernels::new(&kmx).unwrap();
+    assert!(kx.dequant_rows(2, &w, 32, &[0]).is_ok());
+    assert!(
+        kx.dequant_rows(9, &w, 32, &[0])
+            .unwrap_err()
+            .contains("Q8_1")
     );
 }
 
