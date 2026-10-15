@@ -202,10 +202,20 @@ pub(crate) fn assert_graded_floor(ag: &Agree, ac: &Agree, floor: usize) {
         ag.top1,
         ac.top1
     );
-    // Only near-ties flip.
+    // Only near-ties flip. Flipping a margin m takes the top two logits
+    // moving m apart, which the reference's own spread (`ac.max_abs`, the
+    // CPU's two kernel sets: 1.26 on 1.5B natural text, 1.9-2.3 on chat
+    // histories) does too: the CPU flipped a 0.86 margin against itself on
+    // a chat history (sm_120), and sm_89's tensor-core attention (its mma
+    // sums f32 in another order than sm_120's) flips 0.73 (1.5B natural)
+    // and 0.92 / 0.82 (0.5B streamed chat) with |dlogit| statistics no
+    // worse than sm_120's. So: every flip below max(0.5, ac.max_abs), and
+    // at most max(2, 1% of positions) of them at 0.5 or more.
+    let tie = ac.max_abs.max(0.5);
+    let wide = ag.flips.iter().filter(|&&d| d >= 0.5).count();
     assert!(
-        ag.flips.iter().all(|&d| d < 0.5),
-        "a top-1 flip with margin >= 0.5: {:?}",
+        ag.flips.iter().all(|&d| d < tie) && wide <= (n / 100).max(2),
+        "a top-1 flip with margin >= {tie} or {wide} >= 0.5: {:?}",
         ag.flips
     );
     assert!(ag.sum_kl <= 2.0 * ac.sum_kl, "mean KL");

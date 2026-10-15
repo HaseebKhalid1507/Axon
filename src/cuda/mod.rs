@@ -26,6 +26,30 @@ pub mod qwen2;
 use ffi::{CUcontext, CUdevice, CUdeviceptr, CUfunction, CUmodule, CUstream, Driver, check};
 use std::ffi::{CString, OsString, c_int, c_void};
 use std::path::{Path, PathBuf};
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+
+/// Orders stream captures against `Pinned`'s drop. Its cuCtxSynchronize
+/// on any thread invalidates a capture in progress on another thread's
+/// stream, THREAD_LOCAL mode or not: the capture's next launch fails with
+/// CUDA_ERROR_STREAM_CAPTURE_INVALIDATED, and the sync itself fails
+/// (CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED), so the memory was unpinned
+/// without waiting for copies from it. Measured on sm_89: 67-76 of 300
+/// captures broken; cuMemHostUnregister alone, cuMemHostRegister,
+/// allocation, module loads and stream syncs elsewhere broke none
+/// (`gpu_capture_survives_pinning_elsewhere`). So a capture holds this
+/// shared and the drop holds it exclusively: it waits for the captures in
+/// flight (each a few hundred launches), and captures wait for it.
+static CAPTURE_GATE: RwLock<()> = RwLock::new(());
+
+/// `CAPTURE_GATE` shared (a capture). Poison is ignored: it guards no data.
+fn capture_gate() -> RwLockReadGuard<'static, ()> {
+    CAPTURE_GATE.read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// `CAPTURE_GATE` exclusive (no capture runs on any thread).
+fn no_capture() -> RwLockWriteGuard<'static, ()> {
+    CAPTURE_GATE.write().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Why `Gpu::open` fails off Linux.
 pub const LINUX_ONLY: &str = "CUDA support is Linux-only for now";
@@ -425,6 +449,8 @@ impl Gpu {
             }
         }
         self.bind()?;
+        // Held until the capture has ended (early exits: `cap` drops first).
+        let gate = capture_gate();
         // SAFETY: our stream, not capturing (captures don't nest here: the
         // stream is only captured inside this function, and a capture that
         // didn't finish was ended by `Capturing`).
@@ -435,6 +461,7 @@ impl Gpu {
         let mut cap = Capturing(self, true);
         f()?; // early return / panic: `cap` ends the capture
         let (r, g) = cap.end();
+        drop(gate);
         check(self.d, r, "cuStreamEndCapture")?;
         let mut exec: ffi::CUgraphExec = std::ptr::null_mut();
         // SAFETY: g is the captured graph; writes the executable graph.
@@ -532,6 +559,9 @@ pub struct Pinned<'g> {
 impl Drop for Pinned<'_> {
     fn drop(&mut self) {
         if self.gpu.bind().is_ok() {
+            // Both calls below would break another thread's capture (and
+            // the sync would fail, unpinning under a live copy).
+            let _gate = no_capture();
             // A copy on any stream may still use it (e.g. a streamed
             // prefill's KV write-back, if a panic unwinds past the pass):
             // wait for the whole context, not just the main stream.

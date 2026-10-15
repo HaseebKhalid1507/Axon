@@ -590,6 +590,54 @@ fn gpu_capture_unwinds_cleanly() {
     assert_eq!(v[31], 93.0);
 }
 
+/// Page-locking and unlocking host memory on another thread (as a hybrid
+/// model's setup and teardown do) never breaks a capture in progress here:
+/// without `CAPTURE_GATE`, `Pinned`'s drop there broke captures here
+/// (CUDA_ERROR_STREAM_CAPTURE_INVALIDATED; sm_89: this test failed within
+/// 0.2 s).
+#[test]
+fn gpu_capture_survives_pinning_elsewhere() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let (m, _) = Module::load(&g, IOTA, &[]).unwrap();
+    let f = m.function("iota").unwrap();
+    let out = g.alloc(32 * 4).unwrap();
+    let (stop, started) = (AtomicBool::new(false), AtomicBool::new(false));
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            let h = Gpu::open().unwrap();
+            let buf = vec![0u8; 1 << 16];
+            while !stop.load(Ordering::Relaxed) {
+                // SAFETY: buf outlives the Pinned, dropped right away.
+                drop(unsafe { h.register(buf.as_ptr(), buf.len(), false) }.unwrap());
+                started.store(true, Ordering::Relaxed);
+            }
+        });
+        while !started.load(Ordering::Relaxed) {
+            std::thread::yield_now();
+        }
+        let r = (0..200).try_for_each(|_| {
+            // SAFETY: iota writes out[0..32]; out outlives the graph.
+            g.capture(|| {
+                (0..50).try_for_each(|_| unsafe {
+                    g.launch(
+                        &f,
+                        (1, 1, 1),
+                        (32, 1, 1),
+                        0,
+                        &[out.arg(), Arg::F32(3.0), Arg::U32(32)],
+                    )
+                })
+            })
+            .map(drop)
+        });
+        stop.store(true, Ordering::Relaxed);
+        r.unwrap();
+    });
+}
+
 /// H2D throughput for streaming weights (PR A): pageable Vec, cuMemHostAlloc,
 /// cuMemHostRegister'd anonymous mapping (like model.rs's r8 arena) and a
 /// registered unaligned heap block (like a KV buffer). Prints GB/s.
