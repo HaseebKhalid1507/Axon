@@ -136,6 +136,12 @@ pub(super) struct BatchFns<'m> {
 }
 
 impl<'m> BatchFns<'m> {
+    /// Whether the module has the tensor-core kernels (sm_80+).
+    #[cfg(test)]
+    pub(super) fn has_mma(&self) -> bool {
+        self.gemm.is_some()
+    }
+
     pub(super) fn new(
         module: &'m Module<'m>,
         head_dim: usize,

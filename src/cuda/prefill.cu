@@ -461,6 +461,13 @@ __device__ __forceinline__ void attn_fa_bt(const float* q, const unsigned short*
              float pre, float* y) {                                                                \
         attn_fa_bt<HD, NW, ST>(q, kc, vc, start, nb, n_heads, n_kv, pre, y);                       \
     }
+// Registers (ptxas, sm_120): the hd-128 variants sit at the cap - attn_fa_b_128
+// 254, attn_fa_bs_128 242, the q8 hd-128 ones 254-255 (CUDA 13.4 nvcc: no
+// spills; cuda_attn_bench prints NVRTC's count of local bytes per variant,
+// where a few bytes of spill have been seen). __launch_bounds__(256, 1) is
+// exactly satisfiable: 256 x 255 = 65280 of the SM's 65536 registers. A
+// smaller m-tile per warp for hd 128 (32 rows per 2 warps, less O and S
+// live per thread) is the follow-up if a toolkit starts spilling here.
 ATTN_FA_B(attn_fa_b_64, 64, 4, 3, 2)
 ATTN_FA_B(attn_fa_b_128, 128, 8, 2, 1)
 // Fewer rows per block, more blocks (short batches: the same bits).

@@ -918,6 +918,10 @@ __device__ __forceinline__ void i8x16(uint4 w, float k[16]) {
 // asymmetry: prefill's V tile holds real rows at positions np..np_max of a
 // row whose p there is +0; 0 * v is an exact zero, so it can only flip the
 // sign of an exactly zero o_b[d] - which quant_warp erases (|x|-based).
+// Unless v is NaN: 0 * NaN = NaN. A NaN value written by this batch (the
+// f16 cache saturates infinities, but NaN passes; a q8 group with a NaN has
+// scale NaN) then also poisons the batch's earlier queries in prefill,
+// which decode (zeros past np) would not. Either output is garbage then.
 
 #define ATT_BLK 64
 
@@ -1159,10 +1163,15 @@ __device__ __forceinline__ void att_pv(float (*o)[4], const u32 (*pa)[4], unsign
 // differences fed to ex2, so the sign of a zero max doesn't matter: the
 // combine may take its running maxima by a scan.
 __device__ __forceinline__ void att_fold_w(float M, float mb, float* mn, float* alpha, float* w) {
-#if __CUDA_ARCH__ >= 800
     *mn = fmaxf(M, mb);
+#if __CUDA_ARCH__ >= 800
     *alpha = att_ex2(__fsub_rn(M, *mn));
     *w = att_ex2(__fsub_rn(mb, *mn));
+#else
+    // Never run below sm_80 (the host picks the split attention there);
+    // defined so attn_cmb compiles to something sane for every target.
+    *alpha = exp2f(__fsub_rn(M, *mn));
+    *w = exp2f(__fsub_rn(mb, *mn));
 #endif
 }
 __device__ __forceinline__ float att_fold_o(float O, float ob, float alpha, float w) {
@@ -1619,6 +1628,9 @@ __device__ void attn_blk_t(const float* __restrict__ q, const unsigned short* kc
                 }
                 __syncwarp();
             }
+            // kv_q8_store's __syncthreads sits inside `if (own)`, which is
+            // only legal because this block is one warp (blockDim 32): the
+            // whole block takes the branch together.
             kv_q8_store<HD, KGs>(xs, q8, (u64)(np - 1) * kv_dim + kvh * HD,
                                  q8.ksh ? q8.ksh + kvh * HD : nullptr);
         }
@@ -1671,6 +1683,22 @@ __device__ void attn_blk_t(const float* __restrict__ q, const unsigned short* kc
         att_wait<0>();
         __syncwarp();
         if constexpr (Q8) {
+            if (q8.knew && own && b == blast) {
+                // Row np - 1's scales were stored by this warp just now;
+                // att_load_q8 copies scales by 4-byte cp.async, which only
+                // exists as .ca (through L1). Read them again from L2
+                // (ld.global.cg) so the copy can't be a stale L1 line. Same
+                // values, so the same bits as prefill either way.
+                int r = np - 1 - t0;
+                constexpr int NG = HD / KGs;
+                if (lane < 2 * NG) {
+                    int kv = lane / NG, gi = lane % NG;
+                    const float* src =
+                        (kv ? q8.vs : q8.ks) + ((u64)(np - 1) * kv_dim + kvh * HD) / KGs;
+                    rs[kv * ATT_BLK * NG + r * NG + gi] = __ldcg(src + gi);
+                }
+                __syncwarp();
+            }
             att_cvt_q8<HD, KGs>(kt, r8, rs, lane, 32);
         } else if (kpos && b == blast) {
             // The new row, from kh (not read back from the cache).

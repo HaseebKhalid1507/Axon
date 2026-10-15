@@ -914,6 +914,18 @@ impl<'g> CudaQwen2<'g> {
         }
     }
 
+    /// Tests: run the attention through the split kernels of GPUs without
+    /// tensor cores (`tc_attn` false) on any GPU, before making caches
+    /// (their scratch is sized for the path). Turning it on needs mma.
+    #[cfg(test)]
+    pub(crate) fn set_tc_attn(&mut self, on: bool) {
+        assert!(
+            !on || self.bf.has_mma(),
+            "tensor-core attention without mma"
+        );
+        self.tc_attn = on;
+    }
+
     /// Free VRAM now.
     pub fn free_bytes(&self) -> Result<u64, String> {
         Ok(self.gpu.info()?.free_bytes)

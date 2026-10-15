@@ -30,8 +30,14 @@ pub(crate) struct Agree {
     pub(crate) positions: usize,
     pub(crate) top1: usize,
     pub(crate) max_kl: f64,
-    /// Positions whose KL exceeds 0.5 (`assert_graded`).
-    pub(crate) over_half: usize,
+    /// Positions whose KL exceeds 0.5 (`assert_graded`): (position index,
+    /// KL, the reference's top-2 logit margin there, the previous
+    /// position's KL).
+    pub(crate) over_half: Vec<(usize, f64, f32, f64)>,
+    /// Indexes of the positions whose top-1 disagrees.
+    pub(crate) flip_at: Vec<usize>,
+    /// The previous position's KL (within one sequence).
+    last_kl: f64,
     pub(crate) sum_kl: f64,
     max_abs: f32,
     /// Reference logit margin of each top-1 disagreement.
@@ -63,6 +69,7 @@ pub(crate) fn compare_from<R: Lm, O: Lm>(
     a: &mut Agree,
 ) {
     let mut tok = last;
+    a.last_kl = 0.0;
     for s in 0..=steps {
         let pos = pos + s;
         let lr = r.forward(tok, pos, rc);
@@ -72,7 +79,11 @@ pub(crate) fn compare_from<R: Lm, O: Lm>(
         a.top1 += (ar == ao) as usize;
         let k = kl(&lr, &lo);
         a.max_kl = a.max_kl.max(k);
-        a.over_half += (k > 0.5) as usize;
+        if k > 0.5 {
+            a.over_half
+                .push((a.positions, k, top2_margin(&lr), a.last_kl));
+        }
+        a.last_kl = k;
         a.sum_kl += k;
         for (x, y) in lr.iter().zip(&lo) {
             a.max_abs = a.max_abs.max((x - y).abs());
@@ -80,9 +91,23 @@ pub(crate) fn compare_from<R: Lm, O: Lm>(
         if ar != ao {
             // How close a call it was, in the reference's logits.
             a.flips.push(lr[ar as usize] - lr[ao as usize]);
+            a.flip_at.push(a.positions);
         }
         tok = ar;
     }
+}
+
+/// The gap between the two largest logits.
+fn top2_margin(l: &[f32]) -> f32 {
+    let (mut a, mut b) = (f32::NEG_INFINITY, f32::NEG_INFINITY);
+    for &x in l {
+        if x > a {
+            (a, b) = (x, a);
+        } else if x > b {
+            b = x;
+        }
+    }
+    a - b
 }
 
 pub(crate) const PROMPTS: [&str; 6] = [
@@ -116,7 +141,7 @@ fn agreement(m: &Model, steps: usize) -> (Agree, Agree) {
 
 pub(crate) fn report(name: &str, a: &Agree) {
     eprintln!(
-        "{name}: top-1 {}/{} ({:.1}%), KL mean {:.2e} max {:.2e} (> 0.5: {}), max |dlogit| \
+        "{name}: top-1 {}/{} ({:.1}%), KL mean {:.2e} max {:.2e} (> 0.5: {:?}), max |dlogit| \
          {:.3}, flip margins {:?}",
         a.top1,
         a.positions,
@@ -148,9 +173,9 @@ pub(crate) fn report(name: &str, a: &Agree) {
 /// only near-ties (< 0.5) flip; mean KL within 2x the CPU's own. The
 /// extremes are single positions, as heavy-tailed CPU vs CPU as GPU vs CPU,
 /// so they get absolute gross-bug bounds (a wrong kernel gives KL ~1-10 at
-/// many positions and logit errors ~10): KL above 0.5 at no more than 1 %
-/// of positions and above 2 at none (`assert_graded` has the measurements),
-/// max |dlogit| below 6.
+/// many positions and logit errors ~10): KL above 0.5 at one position at
+/// most, and only where the CPU's two kernel sets flip too; above 2 at none
+/// (`assert_graded` has the measurements); max |dlogit| below 6.
 fn logits_match(m: &Model, name: &str) {
     let (ag, ac) = agreement(m, 32);
     report(&format!("{name} gpu vs cpu"), &ag);
@@ -159,12 +184,20 @@ fn logits_match(m: &Model, name: &str) {
 }
 
 /// `logits_match`'s bounds: `ag` (a backend vs the CPU) against `ac` (the
-/// CPU's per-row kernels vs its default ones), over the same positions.
+/// CPU's per-row kernels vs its default ones), over the same positions
+/// (index for index: the single-position exemption below looks `ac` up).
 pub(crate) fn assert_graded(ag: &Agree, ac: &Agree) {
+    assert_graded_floor(ag, ac, 94);
+}
+
+/// `assert_graded` with top-1 at least `floor` % (natural text, prose and
+/// code, has more near-ties: the CPU agrees with itself on only 93.8 % of
+/// natural_long's 1.5B positions).
+pub(crate) fn assert_graded_floor(ag: &Agree, ac: &Agree, floor: usize) {
     let n = ag.positions;
     // Top-1: at most 2% of positions behind the CPU's self-agreement.
     assert!(
-        ag.top1 * 100 + 2 * n >= ac.top1 * 100 && ag.top1 * 100 >= 94 * n,
+        ag.top1 * 100 + 2 * n >= ac.top1 * 100 && ag.top1 * 100 >= floor * n,
         "top-1 agreement {}/{n} (cpu vs itself {})",
         ag.top1,
         ac.top1
@@ -177,20 +210,31 @@ pub(crate) fn assert_graded(ag: &Agree, ac: &Agree) {
     );
     assert!(ag.sum_kl <= 2.0 * ac.sum_kl, "mean KL");
     // Extremes, per position. A wrong kernel moves many positions: a mask
-    // off by one position (tensor-core attention, deliberately injected)
-    // gave 1.5B GPU 48 and hybrid k=1 14 of 198 positions above 0.5, max
-    // 3.3-8.3 (0.5B: 36 / 35, max 4.8-5.1). Correct kernels leave single
-    // chaotic positions: the 1.5B hybrid k=1's one at 1.22 (next 0.107; the
-    // CPU per-row set's own worst 0.34) moves to 0.06 when only the
-    // queries' f16 rounding changes (split hi + lo, an experiment), while
-    // others rise to 0.23; the f32-attention kernels before had 0.134. So:
-    // at most 1 % of positions above 0.5 (here 1), none above 2.
+    // off by one position (deliberately injected into the tensor-core
+    // attention) put 48 (1.5B GPU) and 14 (hybrid k=1) of 198 positions
+    // above 0.5, max 3.3-8.3 (0.5B: 36 / 35, max 4.8-5.1). Correct kernels
+    // stay below 0.25 almost everywhere: base and r3 attention, GPU and
+    // hybrid k=1, over three prompt sets (PROMPTS, six others, six windows
+    // of natural text) on 0.5B and 1.5B, never above 0.17. The one
+    // exception seen: the 1.5B hybrid k=1 here, KL 1.22 at a single
+    // position (the one before 3e-4), which disappears (0.06) when only
+    // the queries' f16 rounding changes - and at which the CPU's own
+    // per-row kernels flip top-1 too (margin 0.32): a near-tie the
+    // reference itself doesn't resolve stably. So: at most one position
+    // above 0.5, none above 2, and that one only where `ac` (the CPU vs
+    // its other kernel set) also flips.
     assert!(
-        ag.over_half * 100 <= n && ag.max_kl < 2.0,
-        "max KL {} ({} positions above 0.5)",
+        ag.over_half.len() <= 1 && ag.max_kl < 2.0,
+        "max KL {} (above 0.5 (index, KL, reference margin, previous KL): {:?})",
         ag.max_kl,
         ag.over_half
     );
+    for &(i, k, mg, _) in &ag.over_half {
+        assert!(
+            ac.flip_at.contains(&i),
+            "KL {k} at position {i} (reference margin {mg}), where the CPU's kernel sets agree"
+        );
+    }
     assert!(ag.max_abs < 6.0, "max logit difference");
 }
 
@@ -1607,6 +1651,52 @@ fn gpu_logits_match_cpu_2000_tokens() {
     assert!(ag.max_kl < 0.5 && ag.max_abs < 6.0, "extremes");
 }
 
+/// GPU vs CPU logits on 1600 tokens of real, varied text (natural_ids:
+/// prose and code, nothing repeated): prefilled in 512-token passes (the
+/// last one starting at 1024), then positions 1100..1600 one by one,
+/// teacher-forced, graded like `logits_match` against the CPU's per-row
+/// kernels. Errors that only show past 1024 positions land here.
+fn natural_long(m: &Model, name: &str) {
+    let g = crate::testutil::gpu().unwrap();
+    let km = Kernels::module(&g).unwrap();
+    let gpu = CudaQwen2::new(&g, &km, m, 1600).unwrap();
+    let rows = Qwen2::new_with(m, false);
+    let cpu = Qwen2::new(m);
+    let ids = natural_ids(m, 1600);
+    let (mut ag, mut ac) = (Agree::default(), Agree::default());
+    compare_forced(&cpu, &gpu, &ids, 1100, &mut ag);
+    compare_forced(&cpu, &rows, &ids, 1100, &mut ac);
+    report(&format!("{name} natural 1100..1600 gpu vs cpu"), &ag);
+    report(&format!("{name} natural 1100..1600 cpu rows vs cpu"), &ac);
+    // Measured, GPU / CPU per-row vs CPU (top-1, mean KL, max KL): 0.5B
+    // 95.2 % / 96.2 %, 2.6e-3 / 2.5e-3, 0.021 / 0.012 (f32 attention
+    // before: 96.4 %, 2.8e-3, 0.059); 1.5B 93.6 % / 93.8 %, 7.8e-3 /
+    // 7.3e-3, 0.076 / 0.030 (before: 94.2 %, 7.4e-3, 0.034).
+    assert_graded_floor(&ag, &ac, 90);
+}
+
+#[test]
+fn gpu_logits_match_cpu_natural_long_0_5b() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = crate::testutil::model_with(Some(false)) else {
+        return;
+    };
+    natural_long(&m, "0.5B");
+}
+
+#[test]
+fn gpu_logits_match_cpu_natural_long_1_5b() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = model_at("models/qwen2.5-1.5b-instruct-q4_k_m.gguf") else {
+        return;
+    };
+    natural_long(&m, "1.5B");
+}
+
 /// Programmatic dependent launch changes when kernels start, never what
 /// they compute: tokens and logit bits equal with it on and off.
 #[test]
@@ -2466,11 +2556,16 @@ fn prefill_bits(m: &Model, name: &str, kv: CacheKv) {
     net.kv = kv;
     let max = net.prefill_batch();
     assert!(ids.len() > max, "covers chunking past the max batch");
-    // The GPU's own attention splits, then few (q8: queries past 32 * 8
-    // positions take attn_split_b, and batches straddle it and the warp
-    // kernel; f16: decode's attn_blk grids of 8 warps per kv head, each
-    // taking several blocks).
-    for max_split in [net.max_split, 8] {
+    // Both attention paths: the tensor cores' (attn_fa_b / attn_blk_b,
+    // decode attn_blk), then the split kernels of GPUs without them
+    // (attn_split_b per query, decode attn_split), forced here. Each with
+    // the GPU's own split count, then 8: attn_blk grids of 8 warps per kv
+    // head, each taking several blocks; or splits of more than 32
+    // positions past 256.
+    let paths: &[bool] = if km.mma() { &[true, false] } else { &[false] };
+    let own = net.max_split;
+    for (&tc, max_split) in paths.iter().flat_map(|t| [(t, own), (t, 8)]) {
+        net.set_tc_attn(tc);
         net.max_split = max_split;
         let (kv0, l0) = prefill_with(&net, &ids, &[0]);
         for sizes in [
@@ -2485,18 +2580,20 @@ fn prefill_bits(m: &Model, name: &str, kv: CacheKv) {
             let bad = kv.iter().zip(&kv0).position(|(a, b)| a != b);
             assert!(
                 bad.is_none(),
-                "{name} {sizes:?} split {max_split}: KV differs at {bad:?}"
+                "{name} {sizes:?} tc {tc} split {max_split}: KV differs at {bad:?}"
             );
             assert_eq!(
                 bits(&l),
                 bits(&l0),
-                "{name} {sizes:?} split {max_split}: logits"
+                "{name} {sizes:?} tc {tc} split {max_split}: logits"
             );
         }
     }
     eprintln!(
-        "{name} {kv:?}: prefill bit-identical over 7 batchings of {} tokens, 2 split counts",
-        ids.len()
+        "{name} {kv:?}: prefill bit-identical over 7 batchings of {} tokens, {} attention \
+         paths x 2 split counts",
+        ids.len(),
+        paths.len()
     );
 }
 
@@ -2889,6 +2986,13 @@ fn cuda_attn_bench() {
         .unwrap();
     for (n, f) in names.iter().zip(&fs) {
         eprintln!("{n}: regs, local {:?}", f.regs_local().unwrap());
+    }
+    for q in ["q8", "q8g32"] {
+        for v in ["attn_fa_b", "attn_fa_bs"] {
+            let n = format!("{v}_{q}_{hd}");
+            let f = km.function(&n).unwrap();
+            eprintln!("{n}: regs, local {:?}", f.regs_local().unwrap());
+        }
     }
     // The per-query kernels on at most 64 queries (SMALL sweeps).
     let nq = nz.min(64);
@@ -3380,6 +3484,226 @@ fn gpu_batched_attention_matches_decode_bits() {
     }
 }
 
+/// The split attention of GPUs without tensor cores (forced here on any
+/// GPU): attn_split_b (+ attn_combine_b) per query gives the decode
+/// kernels' (attn_split + attn_combine) bits, split partials and output,
+/// on the f16 cache and the q8 one (scale per head row or per 32 values),
+/// queries at z0 > 0, past 1024 positions, one and several 128-position
+/// tiles per split. The cache past the batch is NaN / garbage.
+#[test]
+fn gpu_split_attention_matches_decode_bits() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let (fc, fcb) = (
+        km.function("attn_combine").unwrap(),
+        km.function("attn_combine_b").unwrap(),
+    );
+    let mut rng = Rng(9192);
+    for (nh, nkv, hd, kg) in [
+        (14, 2, 64, 0),
+        (28, 4, 128, 0),
+        (12, 2, 128, 0),
+        (14, 2, 64, 32),
+        (28, 4, 128, 128),
+    ] {
+        let (dim, kvd) = (nh * hd, nkv * hd);
+        let q8n = match kg {
+            0 => String::new(),
+            _ if kg == hd => "q8_".into(),
+            _ => "q8g32_".into(),
+        };
+        let fd = km.function(&format!("attn_split_{q8n}{hd}")).unwrap();
+        let fb = km.function(&format!("attn_split_b_{q8n}{hd}")).unwrap();
+        // (start, queries, z0, max_split)
+        for (start, nz, z0, ms) in [
+            (0, 40, 0, 23),
+            (200, 30, 9, 8),
+            (1000, 12, 3, 46),
+            (1300, 9, 0, 4),
+        ] {
+            let ctx = start + z0 + nz;
+            let max_ctx = ctx + 50;
+            let mut bufs = Vec::new();
+            if kg == 0 {
+                for sc in [4.0, 1.0] {
+                    let mut h: Vec<u16> = rng
+                        .vec(ctx * kvd, sc)
+                        .into_iter()
+                        .map(quant::f32_to_f16)
+                        .collect();
+                    h.resize(max_ctx * kvd, 0xffff);
+                    bufs.push(g.upload(&h).unwrap());
+                }
+            } else {
+                for _ in 0..2 {
+                    let v: Vec<u8> = (0..max_ctx * kvd)
+                        .map(|_| (rng.next() % 255) as u8)
+                        .collect();
+                    bufs.push(g.upload(&v).unwrap());
+                }
+                // Scales: one per kg values (kg > 0 here).
+                let groups = |pos: usize| pos * (kvd / kg.max(1));
+                for sc in [4.0f32, 1.0] {
+                    let mut d: Vec<f32> = (0..groups(ctx))
+                        .map(|_| (rng.f() + 1.5) * sc / 127.0)
+                        .collect();
+                    d.resize(groups(max_ctx), f32::NAN);
+                    bufs.push(g.upload(&d).unwrap());
+                }
+            }
+            let kva: Vec<Arg> = bufs.iter().map(|b| b.arg()).collect();
+            let q = rng.vec((z0 + nz) * dim, 1.0);
+            let qb = g.upload(&q).unwrap();
+            let (po_n, pm_n) = (nh * ms * hd, nh * ms * 2);
+            let ast = act_stride_t(dim);
+            let scale = Arg::F32(1.0 / (hd as f32).sqrt());
+            let want_k = Arg::I32(dim.is_multiple_of(256) as i32);
+            let bpo = g.alloc(nz * po_n * 4).unwrap();
+            let bpm = g.alloc(nz * pm_n * 4).unwrap();
+            let bact = g.alloc((z0 + nz) * ast).unwrap();
+            bact.zero().unwrap();
+            // SAFETY: prefill.cu's signatures; part_* for nz queries of ms
+            // splits, the cache max_ctx rows.
+            unsafe {
+                let a = [
+                    &[qb.arg()][..],
+                    &kva[..],
+                    &[
+                        Arg::I32(start as i32),
+                        Arg::I32(z0 as i32),
+                        Arg::I32(nh as i32),
+                        Arg::I32(nkv as i32),
+                        scale,
+                        Arg::I32(ms as i32),
+                        bpo.arg(),
+                        bpm.arg(),
+                    ],
+                ]
+                .concat();
+                g.launch(
+                    &fb,
+                    (nkv as u32, ms as u32, nz as u32),
+                    (ATT_TILE as u32, 1, 1),
+                    0,
+                    &a,
+                )
+                .unwrap();
+                g.launch(
+                    &fcb,
+                    (dim.div_ceil(256) as u32, nz as u32, 1),
+                    (256, 1, 1),
+                    0,
+                    &[
+                        bpo.arg(),
+                        bpm.arg(),
+                        Arg::I32(start as i32),
+                        Arg::I32(z0 as i32),
+                        Arg::I32(dim as i32),
+                        Arg::I32(hd as i32),
+                        Arg::I32(ms as i32),
+                        want_k,
+                        bact.arg(),
+                        Arg::U64(ast as u64),
+                    ],
+                )
+                .unwrap();
+            }
+            let (bpo, bpm, bact): (Vec<f32>, Vec<f32>, Vec<u8>) = (
+                bpo.read().unwrap(),
+                bpm.read().unwrap(),
+                bact.read().unwrap(),
+            );
+            let (po, pm) = (g.alloc(po_n * 4).unwrap(), g.alloc(pm_n * 4).unwrap());
+            let act = g.alloc(act_bytes(dim)).unwrap();
+            for zl in 0..nz {
+                let np = start + z0 + zl + 1;
+                let qz = g.upload(&q[(z0 + zl) * dim..(z0 + zl + 1) * dim]).unwrap();
+                let params = g.upload(&[0u32, (np - 1) as u32, 0, 0]).unwrap();
+                act.zero().unwrap();
+                // SAFETY: decode.cu's signatures; part_* of ms splits.
+                unsafe {
+                    let a = [
+                        &[qz.arg()][..],
+                        &kva[..],
+                        // q8: no new row to store (kf null).
+                        if kg > 0 { &[Arg::Ptr(0)][..] } else { &[] },
+                        &[
+                            params.arg(),
+                            Arg::I32(nh as i32),
+                            Arg::I32(nkv as i32),
+                            scale,
+                            Arg::I32(ms as i32),
+                            po.arg(),
+                            pm.arg(),
+                        ],
+                        // No q/k norms (f16: kraw, qn, kn, eps, rope,
+                        // kc_out; q8: ksh, qn, kn, eps, rope).
+                        &[
+                            Arg::Ptr(0),
+                            Arg::Ptr(0),
+                            Arg::Ptr(0),
+                            Arg::F32(0.0),
+                            Arg::Ptr(0),
+                        ],
+                        if kg > 0 { &[] } else { &[Arg::Ptr(0)][..] },
+                    ]
+                    .concat();
+                    g.launch(
+                        &fd,
+                        (nkv as u32, ms as u32, 1),
+                        (ATT_TILE as u32, 1, 1),
+                        0,
+                        &a,
+                    )
+                    .unwrap();
+                    g.launch(
+                        &fc,
+                        (dim.div_ceil(256) as u32, 1, 1),
+                        (256, 1, 1),
+                        0,
+                        &[
+                            po.arg(),
+                            pm.arg(),
+                            params.arg(),
+                            Arg::I32(dim as i32),
+                            Arg::I32(hd as i32),
+                            Arg::I32(ms as i32),
+                            want_k,
+                            act.arg(),
+                            Arg::Ptr(0),
+                        ],
+                    )
+                    .unwrap();
+                }
+                let (wpo, wpm, wact): (Vec<f32>, Vec<f32>, Vec<u8>) =
+                    (po.read().unwrap(), pm.read().unwrap(), act.read().unwrap());
+                let at = format!("{nh}/{nkv}x{hd} kg {kg} np {np} z0 {z0} splits {ms}");
+                let nsplit = ms.min(np.div_ceil(32));
+                for h in 0..nh {
+                    for sp in 0..nsplit {
+                        let o = (h * ms + sp) * hd;
+                        assert_eq!(
+                            bits(&bpo[zl * po_n + o..zl * po_n + o + hd]),
+                            bits(&wpo[o..o + hd]),
+                            "{at}: sums head {h} split {sp}"
+                        );
+                        let mm = (h * ms + sp) * 2;
+                        assert_eq!(
+                            bits(&bpm[zl * pm_n + mm..zl * pm_n + mm + 2]),
+                            bits(&wpm[mm..mm + 2]),
+                            "{at}: m, l head {h} split {sp}"
+                        );
+                    }
+                }
+                let za = (z0 + zl) * ast;
+                assert!(bact[za..za + act_bytes(dim)] == wact[..], "{at}: output");
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The q8 KV cache (CacheKv::Q8).
 
@@ -3619,6 +3943,7 @@ fn compare_forced<R: Lm, O: Lm>(r: &R, o: &O, ids: &[u32], from: usize, a: &mut 
         r.feed_batch(ch, i * 512, &mut rc);
         o.feed_batch(ch, i * 512, &mut oc);
     }
+    a.last_kl = 0.0;
     for (pos, &t) in ids.iter().enumerate().skip(from) {
         let lr = r.forward(t, pos, &mut rc);
         let lo = o.forward(t, pos, &mut oc);
@@ -3627,13 +3952,18 @@ fn compare_forced<R: Lm, O: Lm>(r: &R, o: &O, ids: &[u32], from: usize, a: &mut 
         a.top1 += (ar == ao) as usize;
         let k = kl(&lr, &lo);
         a.max_kl = a.max_kl.max(k);
-        a.over_half += (k > 0.5) as usize;
+        if k > 0.5 {
+            a.over_half
+                .push((a.positions, k, top2_margin(&lr), a.last_kl));
+        }
+        a.last_kl = k;
         a.sum_kl += k;
         for (x, y) in lr.iter().zip(&lo) {
             a.max_abs = a.max_abs.max((x - y).abs());
         }
         if ar != ao {
             a.flips.push(lr[ar as usize] - lr[ao as usize]);
+            a.flip_at.push(a.positions);
         }
     }
 }
