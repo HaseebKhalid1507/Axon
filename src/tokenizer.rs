@@ -284,6 +284,15 @@ impl Tokenizer {
         }
         bytes
     }
+
+    /// The most bytes any one token decodes to.
+    pub fn max_token_bytes(&self) -> usize {
+        (0..self.tokens.len() as u32)
+            .map(|id| self.decode_bytes(&[id]).len())
+            .max()
+            .unwrap_or(1)
+            .max(1)
+    }
 }
 
 /// Turns a stream of byte chunks (one per generated token) into text as soon

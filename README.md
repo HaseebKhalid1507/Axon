@@ -62,6 +62,8 @@ axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K]
                                           talk to an Instruct model
 sampling (gen, chat): --temp T --top-k K --top-p P --min-p P
           --repeat-penalty P --repeat-last-n N --seed S   (axon --help)
+axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--device D] [--kv T] [--draft K]
+                                          OpenAI-compatible HTTP server
 axon --help | --version
 ```
 
@@ -88,6 +90,57 @@ too). `--no-think` opens each reply with an empty reasoning block instead (the
 template's `enable_thinking=false`). Earlier replies stay in the conversation
 without their reasoning, as the template renders them. Qwen recommends sampling
 for thinking mode; axon is greedy, which can loop on long reasoning.
+
+### Serving: `axon serve`
+
+```bash
+axon serve models/qwen2.5-7b-instruct-q4_k_m.gguf --device cuda --port 8080
+curl -N localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"Hi!"}],"stream":true}'
+```
+
+An OpenAI-compatible HTTP/1.1 server (any OpenAI client works with
+`base_url="http://127.0.0.1:8080/v1"`): `GET /v1/models`, `POST /v1/chat/completions`,
+`POST /v1/completions` (raw text, no template, as `gen`), `GET /health`; streamed
+(server-sent events, `data: [DONE]` at the end; `stream_options.include_usage` adds a
+usage chunk) or whole. It takes the device, `--ctx`, `--kv`, `--gpu-layers` and `--draft`
+flags of `chat`, plus `--host` (default 127.0.0.1), `--port` (default 8080), `--alias NAME`
+(another model name to answer to), `--max-tokens N` (a cap on any request's generation;
+default: up to the context), `--cors [ORIGIN]` (answer CORS preflights and allow ORIGIN,
+default `*`, to call the server from web pages; off by default, so an arbitrary page can't
+use your local model), `--max-conns N` / `--max-queue N` (defaults 256 / 128), `--quiet`
+(no per-request line on stderr). `GET /health` is 503 until the model is loaded.
+
+- One request at a time: requests queue and run in arrival order, each exactly as `gen` /
+  `chat` would run it (greedy `/v1/completions` output is byte-identical to `axon gen`'s).
+  The KV cache carries over between requests: a prompt that starts with the previous
+  request's tokens (a chat follow-up resending the conversation, a shared system prompt)
+  only runs the model over the rest (`usage.prompt_tokens_details.cached_tokens`).
+- Chat prompts are framed as `axon chat` frames them (ChatML; Qwen2.5's default system
+  message when none is given; Qwen3 earlier replies without their reasoning). Qwen3 thinks
+  unless `chat_template_kwargs: {"enable_thinking": false}` (or `--no-think` as the server
+  default); the reasoning comes as `reasoning_content`, apart from `content`
+  (`--think-inline` leaves the `<think>` block in `content`).
+- Sampling: `temperature` (0 = greedy), `top_p`, `seed`, and the common extensions `top_k`,
+  `min_p`, `repetition_penalty` (or `repeat_penalty`) and `repeat_last_n`; `max_tokens` (or
+  `max_completion_tokens`), `stop` (up to 16 strings, not included in the output). What a
+  request leaves out comes from the server's sampling flags, else `chat`'s defaults
+  (temperature 0.8, top-k 40, top-p 0.9) but with no repeat penalty (1.0, as OpenAI and
+  llama-server: `chat`'s 1.1 would quietly penalize the punctuation and indentation of code
+  and JSON; `--repeat-penalty` or a request's `repetition_penalty` turns it on). For Qwen3's
+  thinking mode Qwen recommends temperature 0.6, top_p 0.95, top_k 20 (greedy can loop on
+  long reasoning).
+  `presence_penalty` / `frequency_penalty` other than 0, `n` > 1, `logprobs`, `tools`,
+  `logit_bias` and JSON `response_format` are refused with a 400 rather than ignored.
+- `finish_reason` is `stop` (end token or stop string) or `length`; `usage` counts tokens;
+  a `timings` object gives prompt and generation speed (llama-server's field names).
+- A client that disconnects stops its generation within one token.
+- Limits: 16 KiB of request head, 1 MiB of body (`Content-Length` or chunked), 256
+  connections, 128 queued requests (more: 503); keep-alive and pipelining; idle connections
+  close after 30 s. No TLS or HTTP/2: put a reverse proxy in front to expose it beyond
+  localhost.
+- If the engine fails on a request (a CUDA error is sticky: every later request would fail
+  too), the server logs the error and exits with code 70, for a supervisor to restart it.
 
 ### Environment
 

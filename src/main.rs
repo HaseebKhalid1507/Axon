@@ -11,6 +11,7 @@ mod model;
 mod pool;
 mod quant;
 mod sample;
+mod serve;
 mod spec;
 #[cfg(test)]
 mod testutil;
@@ -57,6 +58,13 @@ usage:
   axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K] [--device D]
             [--gpu-layers N] [--kv T] [sampling flags]
                                             talk to an instruct model (sampled; --temp 0: greedy)
+  axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--draft K] [--device D]
+            [--gpu-layers N] [--kv T] [--alias NAME] [--max-tokens N] [--cors [ORIGIN]]
+            [--max-conns N] [--max-queue N] [--no-think] [--think-inline] [--quiet]
+            [sampling flags; the repeat penalty defaults to 1 (off)]
+                                            an OpenAI-compatible HTTP server (/v1/models,
+                                            /v1/chat/completions, /v1/completions; one
+                                            request at a time; README: axon serve)
   axon -h | --help                          this help
   axon -V | --version                       print the version
 
@@ -212,6 +220,9 @@ fn run() -> std::io::Result<()> {
     if args[1] == "chat" {
         return run_chat(&args);
     }
+    if args[1] == "serve" {
+        return serve::run(&args);
+    }
 
     // `axon info <model>`, or just `axon <model>`.
     let path = match args[1].as_str() {
@@ -223,7 +234,7 @@ fn run() -> std::io::Result<()> {
             &args[1]
         }
         c => fail(&format!(
-            "unknown command '{c}' (commands: gen, logits, chat, info)"
+            "unknown command '{c}' (commands: gen, logits, chat, serve, info)"
         )),
     };
 

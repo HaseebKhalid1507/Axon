@@ -93,8 +93,29 @@ pub struct Chat<'a, M: Lm> {
     pub sampler: Option<Sampler>,
 }
 
+/// `<|im_start|>{role}\n{text}<|im_end|>\n`, then `<|im_start|>{next}\n` if
+/// given: the reply's opening. (`axon serve` renders its messages with it too.)
+pub fn frame(
+    tok: &Tokenizer,
+    im_start: u32,
+    im_end: u32,
+    role: &str,
+    text: &str,
+    next: Option<&str>,
+) -> Vec<u32> {
+    let mut t = vec![im_start];
+    t.extend(tok.encode(&format!("{role}\n{text}")));
+    t.push(im_end);
+    t.extend(tok.encode("\n"));
+    if let Some(r) = next {
+        t.push(im_start);
+        t.extend(tok.encode(&format!("{r}\n")));
+    }
+    t
+}
+
 /// The id of a special token, if the vocabulary has it as one.
-fn special(tok: &Tokenizer, s: &str) -> Option<u32> {
+pub fn special(tok: &Tokenizer, s: &str) -> Option<u32> {
     match tok.encode_special(s)[..] {
         [id] if tok.encode(s) != [id] => Some(id),
         _ => None,
@@ -154,18 +175,9 @@ impl<'a, M: Lm> Chat<'a, M> {
         (self.hist.len(), self.ctx)
     }
 
-    /// `<|im_start|>{role}\n{text}<|im_end|>\n`, then `<|im_start|>{next}\n` if
-    /// given: the reply's opening.
+    /// `frame` with this conversation's markers.
     fn frame(&self, role: &str, text: &str, next: Option<&str>) -> Vec<u32> {
-        let mut t = vec![self.im_start];
-        t.extend(self.tok.encode(&format!("{role}\n{text}")));
-        t.push(self.im_end);
-        t.extend(self.tok.encode("\n"));
-        if let Some(r) = next {
-            t.push(self.im_start);
-            t.extend(self.tok.encode(&format!("{r}\n")));
-        }
-        t
+        frame(self.tok, self.im_start, self.im_end, role, text, next)
     }
 
     /// Forget the exchanges, keep the system message (still cached).

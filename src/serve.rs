@@ -1,0 +1,1202 @@
+//! `axon serve`: an OpenAI-compatible HTTP server (stage S1 of
+//! specs/r4-serve.md: one request at a time).
+//!
+//! Threads: the acceptor (the caller of `run`), one per connection (HTTP
+//! parsing, JSON, tokenizing the prompt, writing the response or the SSE
+//! stream), and the engine, which owns the model and its one KV cache (the
+//! GPU handle is `!Send`: everything that touches the backend stays on that
+//! thread). Connections hand the engine a `Job` over a channel and get
+//! `Event`s back on one of their own; the engine runs jobs in arrival order,
+//! each through `generate` exactly as `axon gen` / `axon chat` do.
+//!
+//! The engine detokenizes and matches stop strings itself, so it stops at a
+//! stop string on the token that completes it and counts tokens exactly;
+//! per token that is a few microseconds next to a forward pass.
+//!
+//! Prefix reuse: the engine remembers which tokens the cache holds (`hist`).
+//! A request whose prompt starts with some of them (a chat follow-up resends
+//! the conversation; requests sharing a system prompt) feeds only the rest.
+//! Exact: a token's cache rows depend only on the tokens before it, and the
+//! backends give the same bits however a prompt is split into batches (the
+//! contract `axon chat` relies on).
+//!
+//! Cancelling: a client that goes away (a failed write, or EOF seen while
+//! waiting) sets the job's flag; the engine checks it between prefill
+//! batches and before every token, so generation stops within one step.
+//!
+//! Failure: a panic in the engine (CUDA errors panic, and are sticky) is
+//! logged and the process exits with code 70 for a supervisor to restart
+//! it, instead of answering 500 forever while /health says ok.
+
+pub mod api;
+pub mod http;
+
+use crate::chat::{self, frame, special};
+use crate::kv::KvType;
+use crate::lm::{Backend, BackendCache, Device, Lm};
+use crate::sample::{SampleArgs, SampleCfg, Sampler};
+use crate::spec::PromptLookup;
+use crate::tokenizer::{Tokenizer, Utf8Stream};
+use crate::{GenOpts, generate};
+use api::{ApiError, Message, Prompt, Role, StopMatcher, Usage};
+use http::{Conn, Peer, Request};
+use std::io::{self, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock, mpsc};
+use std::time::{Duration, Instant};
+
+/// Most open connections (default); more are answered 503 and closed.
+pub const MAX_CONNS: usize = 256;
+/// Most requests waiting for the engine (default); more are answered 503.
+pub const MAX_QUEUE: usize = 128;
+/// An idle keep-alive connection is closed after this long, and a request
+/// must arrive within it once started.
+const IDLE: Duration = Duration::from_secs(30);
+/// A client that doesn't take a response's bytes for this long is dropped
+/// (its generation cancelled).
+const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
+/// How often a connection waiting for tokens checks that its client is
+/// still there (a closed socket otherwise shows only at the next write).
+const POLL: Duration = Duration::from_millis(200);
+
+/// `axon serve`'s settings.
+pub struct Opts {
+    pub path: String,
+    pub host: String,
+    pub port: u16,
+    pub device: Device,
+    pub gpu_layers: Option<usize>,
+    pub kv: KvType,
+    pub ctx: Option<usize>,
+    pub max_draft: usize,
+    /// Sampling flags: the default for fields a request leaves out.
+    pub sample: SampleArgs,
+    /// Qwen3: answer without reasoning unless a request asks for it.
+    pub no_think: bool,
+    /// Qwen3: leave `<think>...</think>` in `content` instead of moving it
+    /// to `reasoning_content`.
+    pub think_inline: bool,
+    /// Another name the model answers to.
+    pub alias: Option<String>,
+    /// Print a line per request on stderr.
+    pub log: bool,
+    /// Most tokens a request may generate (None: up to the context).
+    pub max_tokens: Option<usize>,
+    /// `Access-Control-Allow-Origin` for every response, and CORS
+    /// preflights answered (None: no CORS headers).
+    pub cors: Option<String>,
+    pub max_conns: usize,
+    pub max_queue: usize,
+}
+
+/// ChatML as `axon chat` frames it (see chat.rs), for whole message lists.
+pub struct Template {
+    im_start: u32,
+    im_end: u32,
+    /// Qwen3: `<think>`, `</think>`, and the empty reasoning block
+    /// `enable_thinking: false` opens a reply with.
+    think: Option<(u32, u32, Vec<u32>)>,
+    /// Used when the messages don't start with a system message (Qwen2.5's
+    /// template brings one, Qwen3's none).
+    default_system: Option<&'static str>,
+    /// Any of these ends a reply.
+    stop: Vec<u32>,
+}
+
+impl Template {
+    /// None if the vocabulary has no ChatML markers (no chat endpoint).
+    pub fn new(tok: &Tokenizer, arch: &str) -> Option<Template> {
+        let im_start = special(tok, "<|im_start|>")?;
+        let im_end = special(tok, "<|im_end|>")?;
+        let mut stop = vec![tok.eos(), im_end];
+        stop.extend(special(tok, "<|endoftext|>"));
+        stop.sort_unstable();
+        stop.dedup();
+        let think = match (special(tok, "<think>"), special(tok, "</think>")) {
+            (Some(open), Some(close)) => {
+                Some((open, close, tok.encode_special("<think>\n\n</think>\n\n")))
+            }
+            _ => None,
+        };
+        Some(Template {
+            im_start,
+            im_end,
+            think,
+            default_system: (arch == "qwen2").then_some(chat::DEFAULT_SYSTEM),
+            stop,
+        })
+    }
+
+    /// The prompt for `msgs`: each message framed, then the assistant's
+    /// opening (with the empty reasoning block if `no_think` and the model
+    /// thinks). An earlier reply of a thinking model is kept as its text
+    /// after `</think>`, leading newlines dropped, as the Qwen3 template
+    /// (and `axon chat`) render it.
+    pub fn render(&self, tok: &Tokenizer, msgs: &[Message], no_think: bool) -> Vec<u32> {
+        let f =
+            |role: &str, text: &str, next| frame(tok, self.im_start, self.im_end, role, text, next);
+        let mut t = Vec::new();
+        if msgs.first().is_none_or(|m| m.role != Role::System)
+            && let Some(sys) = self.default_system
+        {
+            t.extend(f("system", sys, None));
+        }
+        for m in msgs {
+            let text = match (m.role, &self.think) {
+                (Role::Assistant, Some(_)) => match m.content.rsplit_once("</think>") {
+                    Some((_, c)) => c.trim_start_matches('\n'),
+                    None => &m.content,
+                },
+                _ => &m.content,
+            };
+            t.extend(f(m.role.name(), text, None));
+        }
+        t.push(self.im_start);
+        t.extend(tok.encode("assistant\n"));
+        if no_think && let Some((_, _, empty)) = &self.think {
+            t.extend_from_slice(empty);
+        }
+        t
+    }
+
+    pub fn thinks(&self) -> bool {
+        self.think.is_some()
+    }
+}
+
+/// What a connection asks the engine for.
+struct Job {
+    prompt: Vec<u32>,
+    /// At most this many tokens (the context's room already counted).
+    n_gen: usize,
+    sample: Option<SampleCfg>,
+    stop_ids: Vec<u32>,
+    stops: Vec<String>,
+    /// Route `<think>...</think>` (these ids) to reasoning.
+    think: Option<(u32, u32)>,
+    cancel: Arc<AtomicBool>,
+    tx: mpsc::Sender<Event>,
+    id: u64,
+}
+
+enum Event {
+    Text { content: String, reasoning: String },
+    Done { usage: Usage, finish: &'static str },
+    Error(String),
+}
+
+/// What the connection threads share.
+struct Shared {
+    /// Set once the model is loaded; until then generation and /health
+    /// answer 503.
+    model: OnceLock<Loaded>,
+    model_id: String,
+    alias: Option<String>,
+    no_think: bool,
+    think_inline: bool,
+    sample: SampleArgs,
+    max_tokens: Option<usize>,
+    /// The `extra` header lines of every response (CORS).
+    extra: String,
+    cors: bool,
+    max_conns: usize,
+    /// Server start, for /v1/models.
+    created: u64,
+    /// Bounded: a full queue is a 503, never unbounded memory.
+    jobs: mpsc::SyncSender<Job>,
+    conns: AtomicUsize,
+    next_id: AtomicU64,
+    stop: Arc<AtomicBool>,
+}
+
+/// Decrements the connection count however the connection's thread ends.
+struct ConnGuard<'a>(&'a AtomicUsize);
+
+impl Drop for ConnGuard<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+impl Shared {
+    fn serves(&self, model: &str) -> bool {
+        model == self.model_id || self.alias.as_deref() == Some(model)
+    }
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
+/// The engine's side of the text: detokenizing, the reasoning split, stop
+/// strings.
+struct TextOut<'t> {
+    tok: &'t Tokenizer,
+    utf8: Utf8Stream,
+    think: Option<(u32, u32)>,
+    /// Inside `<think>...</think>`.
+    reasoning: bool,
+    /// Before the first token (a thinking reply opens with `<think>`).
+    first: bool,
+    /// Drop newlines until the next other character.
+    strip_nl: bool,
+    stop: StopMatcher,
+}
+
+impl TextOut<'_> {
+    /// One more token: (content, reasoning, a stop string was hit).
+    fn push(&mut self, id: u32) -> (String, String, bool) {
+        let first = std::mem::replace(&mut self.first, false);
+        if let Some((open, close)) = self.think {
+            if first && id == open {
+                self.reasoning = true;
+                self.strip_nl = true;
+                return Default::default();
+            }
+            if self.reasoning && id == close {
+                self.reasoning = false;
+                self.strip_nl = true;
+                return (String::new(), self.utf8.finish(), false);
+            }
+        }
+        let mut s = self.utf8.push(&self.tok.decode_bytes(&[id]));
+        if self.strip_nl {
+            s = s.trim_start_matches('\n').to_string();
+            self.strip_nl = s.is_empty();
+        }
+        if self.reasoning {
+            return (String::new(), s, false);
+        }
+        let (c, hit) = self.stop.push(&s);
+        (c, String::new(), hit)
+    }
+
+    /// The end of the output: what was held back.
+    fn finish(&mut self) -> (String, String) {
+        let s = self.utf8.finish();
+        if self.reasoning {
+            return (self.stop.finish(), s);
+        }
+        let (mut c, hit) = self.stop.push(&s);
+        if !hit {
+            c.push_str(&self.stop.finish());
+        }
+        (c, String::new())
+    }
+}
+
+/// The engine: the model, its one cache, and what the cache holds.
+struct Engine<'a> {
+    net: &'a Backend<'a>,
+    tok: &'a Tokenizer,
+    cache: BackendCache,
+    /// The tokens whose rows the cache holds, from position 0.
+    hist: Vec<u32>,
+    max_draft: usize,
+    log: bool,
+    /// Tokens generated so far, all requests.
+    generated: Arc<AtomicU64>,
+}
+
+impl Engine<'_> {
+    fn run(&mut self, job: Job) {
+        if job.cancel.load(Ordering::Relaxed) {
+            return;
+        }
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.job(&job)));
+        if let Err(p) = r {
+            // CUDA errors are sticky (every later job would fail too) and
+            // the cache's contents are unknown: exit (code 70, EX_SOFTWARE)
+            // for a supervisor to restart the server, rather than answer
+            // 500 forever while /health says ok.
+            let msg = p
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| p.downcast_ref::<&str>().copied())
+                .unwrap_or("?");
+            eprintln!(
+                "axon serve: the engine failed on request #{}: {msg}; exiting",
+                job.id
+            );
+            std::process::exit(70);
+        }
+    }
+
+    fn job(&mut self, job: &Job) {
+        let cancelled = || job.cancel.load(Ordering::Relaxed);
+        let t0 = Instant::now();
+        let p = &job.prompt;
+        let last = p.len() - 1;
+        // Reuse the cached prefix; the last prompt token is always fed (its logits).
+        let reuse = self
+            .hist
+            .iter()
+            .zip(p)
+            .take_while(|(a, b)| a == b)
+            .count()
+            .min(last);
+        self.hist.truncate(reuse);
+        let pb = self.net.prefill_batch();
+        for batch in p[reuse..last].chunks(pb) {
+            if cancelled() {
+                return;
+            }
+            self.net.feed_batch(batch, self.hist.len(), &mut self.cache);
+            self.hist.extend_from_slice(batch);
+        }
+        if cancelled() {
+            return;
+        }
+        let logits = self.net.forward(p[last], last, &mut self.cache);
+        self.hist.push(p[last]);
+        let prompt_ms = t0.elapsed().as_secs_f64() * 1e3;
+
+        let mut sampler = job.sample.map(Sampler::new);
+        let mut lookup = PromptLookup::new();
+        let mut out = TextOut {
+            tok: self.tok,
+            utf8: Utf8Stream::default(),
+            think: job.think,
+            reasoning: false,
+            first: true,
+            strip_nl: false,
+            stop: StopMatcher::new(job.stops.clone()),
+        };
+        let mut ids = Vec::new();
+        let generated = &self.generated;
+        // Why the emit callback ended generation: a stop string, or the client left.
+        let (mut hit, mut gone) = (false, false);
+        let t1 = Instant::now();
+        let res = generate(
+            self.net,
+            &mut self.cache,
+            p,
+            logits,
+            GenOpts {
+                n_gen: job.n_gen,
+                stop: &job.stop_ids,
+                max_draft: self.max_draft,
+                sample: sampler.as_mut(),
+            },
+            &mut |h, max| {
+                lookup.sync(h);
+                lookup.draft(max)
+            },
+            &mut |id| {
+                if cancelled() {
+                    gone = true;
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+                ids.push(id);
+                generated.fetch_add(1, Ordering::Relaxed);
+                let (content, reasoning, h) = out.push(id);
+                if (!content.is_empty() || !reasoning.is_empty())
+                    && job.tx.send(Event::Text { content, reasoning }).is_err()
+                {
+                    gone = true;
+                }
+                hit = h;
+                if hit || gone {
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+                Ok(())
+            },
+        );
+        let decode_ms = t1.elapsed().as_secs_f64() * 1e3;
+        // Every token but the last went through the model; the last too if
+        // a stop token ended the reply (its pass picked the stop token).
+        let by_stop_id = res.is_ok() && ids.len() < job.n_gen;
+        let fed = ids.len() - usize::from(!by_stop_id && !ids.is_empty());
+        self.hist.extend_from_slice(&ids[..fed]);
+        if let Err(e) = res
+            && !hit
+            && !gone
+        {
+            let _ = job.tx.send(Event::Error(e.to_string()));
+            return;
+        }
+        if gone {
+            if self.log {
+                eprintln!(
+                    "axon serve: #{} cancelled after {} tokens",
+                    job.id,
+                    ids.len()
+                );
+            }
+            return;
+        }
+        let (content, reasoning) = out.finish();
+        if !content.is_empty() || !reasoning.is_empty() {
+            let _ = job.tx.send(Event::Text { content, reasoning });
+        }
+        let finish = if hit || by_stop_id { "stop" } else { "length" };
+        let usage = Usage {
+            prompt_tokens: p.len(),
+            cached_tokens: reuse,
+            completion_tokens: ids.len(),
+            prompt_ms,
+            decode_ms,
+        };
+        if self.log {
+            eprintln!(
+                "axon serve: #{} prompt {} tok ({} cached) in {:.1} ms, {} tok in {:.1} ms ({:.1} tok/s), {finish}",
+                job.id,
+                p.len(),
+                reuse,
+                prompt_ms,
+                ids.len(),
+                decode_ms,
+                if decode_ms > 0.0 {
+                    ids.len() as f64 * 1e3 / decode_ms
+                } else {
+                    0.0
+                }
+            );
+        }
+        let _ = job.tx.send(Event::Done { usage, finish });
+    }
+}
+
+/// What the engine thread reports once the model is loaded.
+struct Loaded {
+    tok: &'static Tokenizer,
+    template: Option<Template>,
+    ctx: usize,
+    /// The longest token's bytes: a prompt of more than `ctx` times this
+    /// many bytes is more than `ctx` tokens, refused before encoding it.
+    max_token_bytes: usize,
+    banner: String,
+}
+
+/// Load the model and serve jobs until every sender is gone. Runs on its
+/// own thread: the backend never leaves it.
+fn engine(
+    o: EngineOpts,
+    ready: mpsc::Sender<Loaded>,
+    jobs: mpsc::Receiver<Job>,
+    stop: Arc<AtomicBool>,
+) {
+    let (device, gpu_layers) = crate::placement(o.device, o.gpu_layers);
+    let model = crate::open_model_with(&o.path, crate::copy_for(device));
+    let trained = model.ctx_len() as usize;
+    let fit = o.ctx.is_none();
+    let ctx = match o.ctx {
+        Some(n) if trained > 0 && n > trained => crate::fail(&format!(
+            "--ctx {n} is past the {trained} tokens {} was trained on",
+            o.path
+        )),
+        Some(n) => n,
+        None if trained > 0 => trained.min(crate::DEFAULT_CHAT_CTX),
+        None => crate::DEFAULT_CHAT_CTX,
+    };
+    let tok: &'static Tokenizer = Box::leak(Box::new(Tokenizer::from_gguf(&model)));
+    let net = crate::backend(&model, device, ctx, gpu_layers, o.kv, fit);
+    let ctx = net.ctx(ctx);
+    let template = Template::new(tok, &model.arch);
+    let kvs = match &net {
+        Backend::Cuda(n) => format!("cuda, kv {}", n.kv_name()),
+        Backend::Hybrid(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
+        Backend::Cpu(_) => "cpu".into(),
+    };
+    let mut e = Engine {
+        net: &net,
+        tok,
+        cache: net.new_cache(ctx),
+        hist: Vec::new(),
+        max_draft: o.max_draft,
+        log: o.log,
+        generated: o.generated,
+    };
+    let banner = format!("{kvs}, ctx {ctx}");
+    if ready
+        .send(Loaded {
+            tok,
+            template,
+            ctx,
+            max_token_bytes: tok.max_token_bytes(),
+            banner,
+        })
+        .is_err()
+    {
+        return;
+    }
+    loop {
+        match jobs.recv_timeout(Duration::from_millis(100)) {
+            Ok(job) => e.run(job),
+            Err(mpsc::RecvTimeoutError::Timeout) if !stop.load(Ordering::Relaxed) => {}
+            Err(_) => return,
+        }
+    }
+}
+
+struct EngineOpts {
+    path: String,
+    device: Device,
+    gpu_layers: Option<usize>,
+    kv: KvType,
+    ctx: Option<usize>,
+    max_draft: usize,
+    log: bool,
+    generated: Arc<AtomicU64>,
+}
+
+/// A running server. Dropping it (or `shutdown`) stops it: the acceptor
+/// and engine threads end (the engine after its current request) and the
+/// model is freed; open connections finish what they are doing.
+pub struct Server {
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub addr: SocketAddr,
+    accept: Option<std::thread::JoinHandle<()>>,
+    engine: Option<std::thread::JoinHandle<()>>,
+    stop: Arc<AtomicBool>,
+    /// Tokens generated so far, all requests (the tests watch it).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub generated: Arc<AtomicU64>,
+}
+
+impl Server {
+    /// Serve until the acceptor ends (never, short of `shutdown` elsewhere).
+    pub fn wait(mut self) -> io::Result<()> {
+        if let Some(a) = self.accept.take() {
+            a.join()
+                .map_err(|_| io::Error::other("the acceptor thread failed"))?;
+        }
+        Ok(())
+    }
+
+    pub fn shutdown(&mut self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(a) = self.accept.take() {
+            // Wake the blocking accept.
+            let _ = TcpStream::connect(self.addr);
+            let _ = a.join();
+        }
+        if let Some(e) = self.engine.take() {
+            let _ = e.join();
+        }
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
+
+/// Bind, start accepting (503 until the model is loaded), load the model
+/// on the engine thread; returns once it is loaded.
+pub fn start(o: Opts) -> io::Result<Server> {
+    let listener = TcpListener::bind((o.host.as_str(), o.port))?;
+    let addr = listener.local_addr()?;
+    let (jobs_tx, jobs_rx) = mpsc::sync_channel(o.max_queue);
+    let (ready_tx, ready_rx) = mpsc::channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let generated = Arc::new(AtomicU64::new(0));
+    let eo = EngineOpts {
+        generated: generated.clone(),
+        path: o.path.clone(),
+        device: o.device,
+        gpu_layers: o.gpu_layers,
+        kv: o.kv,
+        ctx: o.ctx,
+        max_draft: o.max_draft,
+        log: o.log,
+    };
+    let stop2 = stop.clone();
+    let engine = std::thread::Builder::new()
+        .name("axon-engine".into())
+        .spawn(move || engine(eo, ready_tx, jobs_rx, stop2))?;
+    let model_id = std::path::Path::new(&o.path)
+        .file_stem()
+        .map_or(o.path.clone(), |s| s.to_string_lossy().into_owned());
+    // A request's own repetition_penalty, else the server's flag, else 1
+    // (off, as OpenAI and llama-server; `axon chat`'s 1.1 would quietly
+    // penalize the punctuation and indentation of code and JSON).
+    let mut sample = o.sample;
+    sample.repeat_penalty = sample.repeat_penalty.or(Some(1.0));
+    let extra = o.cors.as_ref().map_or(String::new(), |origin| {
+        let vary = if origin == "*" {
+            ""
+        } else {
+            "Vary: Origin\r\n"
+        };
+        format!("Access-Control-Allow-Origin: {origin}\r\n{vary}")
+    });
+    let sh = Arc::new(Shared {
+        model: OnceLock::new(),
+        model_id: model_id.clone(),
+        alias: o.alias,
+        no_think: o.no_think,
+        think_inline: o.think_inline,
+        sample,
+        max_tokens: o.max_tokens,
+        extra,
+        cors: o.cors.is_some(),
+        max_conns: o.max_conns,
+        created: unix_now(),
+        jobs: jobs_tx,
+        conns: AtomicUsize::new(0),
+        next_id: AtomicU64::new(1),
+        stop: stop.clone(),
+    });
+    let sh2 = sh.clone();
+    let accept = std::thread::Builder::new()
+        .name("axon-accept".into())
+        .spawn(move || accept_loop(listener, sh2))?;
+    let mut server = Server {
+        addr,
+        accept: Some(accept),
+        engine: Some(engine),
+        stop,
+        generated,
+    };
+    let Ok(l) = ready_rx.recv() else {
+        server.shutdown();
+        return Err(io::Error::other("the engine failed to start"));
+    };
+    if o.no_think && !l.template.as_ref().is_some_and(Template::thinks) {
+        crate::fail(&format!(
+            "--no-think: {} has no <think> token (not a thinking model)",
+            o.path
+        ));
+    }
+    if o.log {
+        eprintln!(
+            "axon serve: {model_id} ({}) on http://{addr}/v1 (one request at a time){}",
+            l.banner,
+            if l.template.is_none() {
+                " (no ChatML tokens: /v1/completions only)"
+            } else {
+                ""
+            }
+        );
+    }
+    let _ = sh.model.set(l);
+    Ok(server)
+}
+
+fn accept_loop(listener: TcpListener, sh: Arc<Shared>) {
+    for s in listener.incoming() {
+        if sh.stop.load(Ordering::Relaxed) {
+            return;
+        }
+        let Ok(mut s) = s else {
+            // EMFILE and the like: don't spin.
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        };
+        if sh.conns.load(Ordering::Relaxed) >= sh.max_conns {
+            let _ = s.set_write_timeout(Some(Duration::from_secs(1)));
+            let e = ApiError::new(503, "server_error", "too many connections");
+            let mut c = Conn::new(&mut s);
+            c.extra = sh.extra.clone();
+            let _ = c.respond(503, "application/json", e.json().as_bytes(), false, &[]);
+            continue;
+        }
+        sh.conns.fetch_add(1, Ordering::Relaxed);
+        let sh2 = sh.clone();
+        let spawned = std::thread::Builder::new()
+            .name("axon-conn".into())
+            .spawn(move || {
+                let _guard = ConnGuard(&sh2.conns);
+                connection(s, &sh2);
+            });
+        if spawned.is_err() {
+            sh.conns.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+fn connection(s: TcpStream, sh: &Shared) {
+    // SSE chunks are small: send each at once.
+    let _ = s.set_nodelay(true);
+    let _ = s.set_read_timeout(Some(IDLE));
+    let _ = s.set_write_timeout(Some(WRITE_TIMEOUT));
+    let mut c = Conn::new(s);
+    c.head_timeout = IDLE;
+    c.extra = sh.extra.clone();
+    loop {
+        match c.read_request() {
+            Ok(None) => return,
+            Err(e) => {
+                let body = ApiError::new(e.status, "invalid_request_error", e.msg).json();
+                let _ = c.respond(e.status, "application/json", body.as_bytes(), false, &[]);
+                return;
+            }
+            Ok(Some(req)) => {
+                c.head_only = req.method == "HEAD";
+                match route(&mut c, &req, sh) {
+                    Ok(true) if req.keep_alive => {}
+                    _ => return,
+                }
+            }
+        }
+    }
+}
+
+fn json_reply<S: io::Read + Write>(
+    c: &mut Conn<S>,
+    status: u16,
+    body: &str,
+    keep: bool,
+) -> io::Result<bool> {
+    c.respond(status, "application/json", body.as_bytes(), keep, &[])?;
+    Ok(keep)
+}
+
+fn api_err<S: io::Read + Write>(c: &mut Conn<S>, e: ApiError, keep: bool) -> io::Result<bool> {
+    json_reply(c, e.status, &e.json(), keep)
+}
+
+/// Answer one request; Ok(true) if the connection can take another.
+fn route(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared) -> io::Result<bool> {
+    let keep = req.keep_alive;
+    let methods = match req.path.as_str() {
+        "/v1/models" | "/health" => "GET, HEAD, OPTIONS",
+        "/v1/chat/completions" | "/v1/completions" => "POST, OPTIONS",
+        _ => "",
+    };
+    let loading = || {
+        ApiError::new(
+            503,
+            "server_error",
+            "the model is loading; try again shortly",
+        )
+    };
+    match (req.method.as_str(), req.path.as_str()) {
+        (_, _) if methods.is_empty() => api_err(
+            c,
+            ApiError::new(
+                404,
+                "invalid_request_error",
+                format!("no route {}", req.path),
+            ),
+            keep,
+        ),
+        ("OPTIONS", _) => {
+            // A CORS preflight (when --cors is on), or a plain OPTIONS.
+            let mut h = vec![("Allow", methods)];
+            if sh.cors {
+                h.extend([
+                    ("Access-Control-Allow-Methods", methods),
+                    (
+                        "Access-Control-Allow-Headers",
+                        "Content-Type, Authorization",
+                    ),
+                    ("Access-Control-Max-Age", "86400"),
+                ]);
+            }
+            c.respond(204, "", b"", keep, &h)?;
+            Ok(keep)
+        }
+        ("GET" | "HEAD", "/v1/models") => {
+            let Some(m) = sh.model.get() else {
+                return api_err(c, loading(), keep);
+            };
+            let mut data = vec![serde_json::json!({
+                "id": sh.model_id, "object": "model", "created": sh.created, "owned_by": "axon",
+                "meta": {"n_ctx": m.ctx},
+            })];
+            if let Some(a) = &sh.alias {
+                data.push(serde_json::json!({
+                    "id": a, "object": "model", "created": sh.created, "owned_by": "axon",
+                    "meta": {"n_ctx": m.ctx},
+                }));
+            }
+            let body = serde_json::json!({"object": "list", "data": data}).to_string();
+            json_reply(c, 200, &body, keep)
+        }
+        ("GET" | "HEAD", "/health") => match sh.model.get() {
+            Some(_) => json_reply(c, 200, "{\"status\":\"ok\"}", keep),
+            None => json_reply(c, 503, "{\"status\":\"loading\"}", keep),
+        },
+        ("POST", "/v1/chat/completions") => completion(c, req, sh, true),
+        ("POST", "/v1/completions") => completion(c, req, sh, false),
+        (_, _) => {
+            let e = ApiError::new(405, "invalid_request_error", format!("use {methods}"));
+            c.respond(
+                405,
+                "application/json",
+                e.json().as_bytes(),
+                keep,
+                &[("Allow", methods)],
+            )?;
+            Ok(keep)
+        }
+    }
+}
+
+/// /v1/chat/completions (`chat`) and /v1/completions.
+fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -> io::Result<bool> {
+    let keep = req.keep_alive;
+    let Some(m) = sh.model.get() else {
+        return api_err(
+            c,
+            ApiError::new(
+                503,
+                "server_error",
+                "the model is loading; try again shortly",
+            ),
+            keep,
+        );
+    };
+    let created = unix_now();
+    let g = match api::parse(&req.body, chat) {
+        Ok(g) => g,
+        Err(e) => return api_err(c, e, keep),
+    };
+    if let Some(m) = &g.model
+        && !sh.serves(m)
+    {
+        let mut e = ApiError::new(
+            404,
+            "invalid_request_error",
+            format!("model '{m}' not found; this server has '{}'", sh.model_id),
+        );
+        e.param = Some("model");
+        e.code = Some("model_not_found");
+        return api_err(c, e, keep);
+    }
+    // More bytes than the context's worth of the longest token: more
+    // tokens than the context, without spending the time to encode them.
+    let bytes = match &g.prompt {
+        Prompt::Chat { messages, .. } => messages.iter().map(|m| m.content.len()).sum(),
+        Prompt::Text(s) => s.len(),
+    };
+    let too_long = |n: String| {
+        let mut e = ApiError::bad(
+            if chat { "messages" } else { "prompt" },
+            format!("the prompt is {n}; the context is {} tokens (--ctx)", m.ctx),
+        );
+        e.code = Some("context_length_exceeded");
+        e
+    };
+    if bytes > m.ctx.saturating_mul(m.max_token_bytes) {
+        return api_err(c, too_long(format!("{bytes} bytes")), keep);
+    }
+    let (prompt, stop_ids, think) = match &g.prompt {
+        Prompt::Chat { messages, no_think } => {
+            let Some(t) = &m.template else {
+                return api_err(
+                    c,
+                    ApiError::new(
+                        400,
+                        "invalid_request_error",
+                        "this model has no ChatML tokens; use /v1/completions",
+                    ),
+                    keep,
+                );
+            };
+            let no_think = no_think.unwrap_or(sh.no_think) && t.thinks();
+            let think = t
+                .think
+                .as_ref()
+                .filter(|_| !no_think && !sh.think_inline)
+                .map(|&(o, c, _)| (o, c));
+            (t.render(m.tok, messages, no_think), t.stop.clone(), think)
+        }
+        Prompt::Text(s) => (m.tok.encode(s), vec![m.tok.eos()], None),
+    };
+    if prompt.is_empty() {
+        return api_err(c, ApiError::bad("prompt", "the prompt is empty"), keep);
+    }
+    if prompt.len() >= m.ctx {
+        return api_err(c, too_long(format!("{} tokens", prompt.len())), keep);
+    }
+    let n = sh.next_id.fetch_add(1, Ordering::Relaxed);
+    let (tx, rx) = mpsc::channel();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let job = Job {
+        n_gen: g
+            .max_tokens
+            .unwrap_or(usize::MAX)
+            .min(sh.max_tokens.unwrap_or(usize::MAX))
+            .min(m.ctx - prompt.len()),
+        prompt,
+        sample: api::sampling(&g.sample, &sh.sample, crate::sample::DEFAULT_TEMP),
+        stop_ids,
+        stops: g.stop.clone(),
+        think,
+        cancel: cancel.clone(),
+        tx,
+        id: n,
+    };
+    match sh.jobs.try_send(job) {
+        Ok(()) => {}
+        Err(mpsc::TrySendError::Full(_)) => {
+            return api_err(
+                c,
+                ApiError::new(503, "server_error", "too many queued requests"),
+                keep,
+            );
+        }
+        Err(mpsc::TrySendError::Disconnected(_)) => {
+            return api_err(
+                c,
+                ApiError::new(503, "server_error", "the server is shutting down"),
+                false,
+            );
+        }
+    }
+    let id = format!(
+        "{}-{n:x}{:x}",
+        if chat { "chatcmpl" } else { "cmpl" },
+        sh.created
+    );
+    let model = g.model.as_deref().unwrap_or(&sh.model_id);
+    let r = if g.stream {
+        stream(c, req, &g, &rx, chat, &id, model, created)
+    } else {
+        whole(c, keep, &rx, chat, &id, model, created)
+    };
+    if !matches!(r, Ok(true)) {
+        cancel.store(true, Ordering::Relaxed);
+    }
+    r
+}
+
+/// The next event, checking every `POLL` that the client is still there.
+/// None: it isn't (or the engine is gone).
+fn next_event(c: &Conn<TcpStream>, rx: &mpsc::Receiver<Event>) -> Option<Event> {
+    loop {
+        match rx.recv_timeout(POLL) {
+            Ok(e) => return Some(e),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if c.s.closed() {
+                    return None;
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn whole(
+    c: &mut Conn<TcpStream>,
+    keep: bool,
+    rx: &mpsc::Receiver<Event>,
+    chat: bool,
+    id: &str,
+    model: &str,
+    created: u64,
+) -> io::Result<bool> {
+    let (mut content, mut reasoning) = (String::new(), String::new());
+    loop {
+        match next_event(c, rx) {
+            None => return Ok(false),
+            Some(Event::Text {
+                content: t,
+                reasoning: r,
+            }) => {
+                content.push_str(&t);
+                reasoning.push_str(&r);
+            }
+            Some(Event::Error(m)) => {
+                return api_err(c, ApiError::new(500, "server_error", m), keep);
+            }
+            Some(Event::Done { usage, finish }) => {
+                let body = if chat {
+                    let h = api::head(id, "chat.completion", created, model);
+                    api::chat_response(&h, &content, &reasoning, finish, &usage)
+                } else {
+                    let h = api::head(id, "text_completion", created, model);
+                    api::text_response(&h, &content, finish, &usage)
+                };
+                return json_reply(c, 200, &body, keep);
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stream(
+    c: &mut Conn<TcpStream>,
+    req: &Request,
+    g: &api::GenReq,
+    rx: &mpsc::Receiver<Event>,
+    chat: bool,
+    id: &str,
+    model: &str,
+    created: u64,
+) -> io::Result<bool> {
+    let keep = req.keep_alive && req.minor == 1;
+    c.start_stream(200, "text/event-stream", req.minor, keep)?;
+    let h = api::head(
+        id,
+        if chat {
+            "chat.completion.chunk"
+        } else {
+            "text_completion"
+        },
+        created,
+        model,
+    );
+    // With include_usage every chunk has `"usage": null` but the last (OpenAI's shape).
+    let u = |j: String| {
+        if g.include_usage {
+            api::null_usage(j)
+        } else {
+            j
+        }
+    };
+    if chat {
+        c.send(api::sse(&u(api::chat_chunk(&h, true, "", "", None))).as_bytes())?;
+    }
+    let mut buf = String::new();
+    let mut ev = next_event(c, rx);
+    loop {
+        // Everything already there goes out in one write.
+        let mut done = false;
+        while let Some(e) = ev {
+            match e {
+                Event::Text { content, reasoning } => {
+                    let j = if chat {
+                        api::chat_chunk(&h, false, &content, &reasoning, None)
+                    } else {
+                        api::text_chunk(&h, &content, None)
+                    };
+                    buf.push_str(&api::sse(&u(j)));
+                }
+                Event::Error(m) => {
+                    let e = ApiError::new(500, "server_error", m);
+                    buf.push_str(&api::sse(&e.json()));
+                    buf.push_str(api::SSE_DONE);
+                    done = true;
+                }
+                Event::Done { usage, finish } => {
+                    let j = if chat {
+                        api::chat_chunk(&h, false, "", "", Some(finish))
+                    } else {
+                        api::text_chunk(&h, "", Some(finish))
+                    };
+                    buf.push_str(&api::sse(&u(j)));
+                    if g.include_usage {
+                        buf.push_str(&api::sse(&api::usage_chunk(&h, &usage)));
+                    }
+                    buf.push_str(api::SSE_DONE);
+                    done = true;
+                }
+            }
+            if done {
+                break;
+            }
+            ev = rx.try_recv().ok();
+        }
+        c.send(buf.as_bytes())?;
+        buf.clear();
+        if done {
+            c.end_stream()?;
+            return Ok(keep);
+        }
+        ev = next_event(c, rx);
+        if ev.is_none() {
+            return Ok(false);
+        }
+    }
+}
+
+const SERVE_USAGE: &str = "usage: axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--device D] \
+     [--gpu-layers N] [--kv T] [--draft K] [--alias NAME] [--max-tokens N] [--cors [ORIGIN]] \
+     [--max-conns N] [--max-queue N] [--no-think] [--think-inline] [--quiet] [sampling flags]";
+
+/// `serve` subcommand: args = [axon, serve, model, flags...]
+pub fn run(args: &[String]) -> io::Result<()> {
+    let Some(path) = args.get(2).filter(|p| !p.starts_with('-')) else {
+        crate::fail(SERVE_USAGE);
+    };
+    let mut o = Opts {
+        path: path.clone(),
+        host: "127.0.0.1".into(),
+        port: 8080,
+        device: crate::device_env(),
+        gpu_layers: None,
+        kv: crate::kv_env(),
+        ctx: None,
+        max_draft: crate::draft_env(),
+        sample: SampleArgs::default(),
+        no_think: false,
+        think_inline: false,
+        alias: None,
+        log: true,
+        max_tokens: None,
+        cors: None,
+        max_conns: MAX_CONNS,
+        max_queue: MAX_QUEUE,
+    };
+    let mut i = 3;
+    while i < args.len() {
+        let f = args[i].as_str();
+        match f {
+            "--no-think" | "--think-inline" | "--quiet" => {
+                match f {
+                    "--no-think" => o.no_think = true,
+                    "--think-inline" => o.think_inline = true,
+                    _ => o.log = false,
+                }
+                i += 1;
+                continue;
+            }
+            "--cors" => {
+                // The origin is optional: `--cors` alone allows any (*).
+                match args.get(i + 1).filter(|v| !v.starts_with("--")) {
+                    Some(v) => {
+                        o.cors = Some(v.clone());
+                        i += 2;
+                    }
+                    None => {
+                        o.cors = Some("*".into());
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+            _ if SampleArgs::is_flag(f) => {
+                o.sample
+                    .set(f, args.get(i + 1).map(String::as_str))
+                    .unwrap_or_else(|e| crate::fail(&e));
+                i += 2;
+                continue;
+            }
+            "--host" | "--port" | "--ctx" | "--draft" | "--device" | "--gpu-layers" | "--kv"
+            | "--alias" | "--max-tokens" | "--max-conns" | "--max-queue" => {}
+            _ => crate::fail(&format!("unknown argument '{f}' for serve")),
+        }
+        let Some(v) = args.get(i + 1) else {
+            crate::fail(&format!("{f} needs a value"));
+        };
+        let whole = |pos: bool| {
+            v.parse::<usize>()
+                .ok()
+                .filter(|&n| n > 0 || !pos)
+                .unwrap_or_else(|| crate::fail(&format!("{f} needs a whole number, got '{v}'")))
+        };
+        match f {
+            "--host" => o.host = v.clone(),
+            "--alias" => o.alias = Some(v.clone()),
+            "--device" => o.device = Device::parse(v).unwrap_or_else(|e| crate::fail(&e)),
+            "--kv" => o.kv = crate::kv_flag(Some(v)),
+            "--port" => {
+                o.port = v.parse::<u16>().unwrap_or_else(|_| {
+                    crate::fail(&format!("--port needs a port number, got '{v}'"))
+                })
+            }
+            "--ctx" => o.ctx = Some(whole(true)),
+            "--gpu-layers" => o.gpu_layers = Some(whole(false)),
+            "--max-tokens" => o.max_tokens = Some(whole(true)),
+            "--max-conns" => o.max_conns = whole(true),
+            "--max-queue" => o.max_queue = whole(true),
+            _ => o.max_draft = whole(false),
+        }
+        i += 2;
+    }
+    o.max_draft = crate::round_draft(o.max_draft);
+    crate::check_stream_decode(o.max_draft);
+    start(o)?.wait()
+}
+
+#[cfg(test)]
+mod tests;
