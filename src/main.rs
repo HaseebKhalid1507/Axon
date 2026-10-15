@@ -202,7 +202,7 @@ fn run() -> std::io::Result<()> {
         }
         Some("-h" | "--help" | "help") => {
             println!(
-                "axon {}: CPU inference for Qwen2/Qwen3/Llama 3 GGUF models\n\n{USAGE}",
+                "axon {}: CPU and CUDA inference for Qwen2/Qwen3/Llama 3 GGUF models\n\n{USAGE}",
                 env!("CARGO_PKG_VERSION")
             );
             return Ok(());
