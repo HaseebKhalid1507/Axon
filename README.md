@@ -1,6 +1,6 @@
 # Axon
 
-CPU-only LLM inference for Qwen2 and Qwen3 GGUF models, written from scratch in Rust.
+CPU-only LLM inference for Qwen2, Qwen3 and Llama 3 GGUF models, written from scratch in Rust.
 
 No ggml, no BLAS, no bindings: a GGUF reader, quantized integer dot-product
 kernels (scalar, AVX2, AVX-VNNI), a spinning worker pool and a transformer
@@ -14,14 +14,16 @@ does. The tests check this, and check against three independent oracles
 
 Works today, honestly scoped:
 
-- Architectures: `qwen2` and `qwen3` (dense). Tested with Qwen2.5-0.5B-Instruct; also runs the
-  1.5B, 3B and 7B Instruct Q4_K_M builds, and Qwen3 0.6B (Q8_0), 1.7B, 4B and 8B (Q4_K_M).
+- Architectures: `qwen2`, `qwen3` (dense) and `llama` (Llama 3.x). Tested with Qwen2.5-0.5B-Instruct; also runs the
+  1.5B, 3B and 7B Instruct Q4_K_M builds, Qwen3 0.6B (Q8_0), 1.7B, 4B and 8B (Q4_K_M), and
+  Llama 3.2 1B / 3B and Llama 3.1 8B Instruct (Q4_K_M; Llama 3's RoPE frequency factors, the
+  llama-bpe tokenizer with its BOS token).
   Other architectures are refused with an error.
 - Tensor types: Q4_K, Q5_0, Q6_K, Q8_0, F16, F32 (what Qwen's Q4_K_M files use). Others load for `info` but can't run.
 - Sampling: greedy, or temperature / top-k / top-p / min-p / repeat penalty with a seed
   (llama.cpp's order, ollama's defaults). `gen` continues raw text, greedy unless `--temp`
   is above 0 (reproducible output and benchmarks); `chat` talks to an Instruct model
-  through its ChatML template and samples by default (`--temp 0` for greedy). On the GPU
+  through its chat template (ChatML, or Llama 3's) and samples by default (`--temp 0` for greedy). On the GPU
   the penalty and top-k (up to 256) run on the device, so only k candidates come back per
   token; with top-k 0 (off: the whole vocab, as llama.cpp) the logits come back instead.
 - CPU: any x86-64 (others build too, scalar only). The default build is baseline x86-64 and
@@ -83,6 +85,11 @@ a reply streams wait for the next prompt instead of mixing into the reply. The
 terminal is in raw mode while chat runs, so Ctrl-Z and Ctrl-\ do nothing. Piped,
 each line of stdin is a message and each reply one block of stdout. When the
 conversation outgrows `--ctx` (default 8192), the oldest exchanges are forgotten.
+
+Llama 3 uses the official 3.1/3.2 template (no tools): a system block that always
+opens with the template's "Cutting Knowledge Date: December 2023 / Today Date: 26 Jul
+2024" lines (its default date, so a conversation doesn't depend on the day) and then
+`--system`'s text if any, headers around each message, `<|eot_id|>` ending each turn.
 
 Qwen3 follows its own template: no system message unless `--system` gives one, and
 the model reasons first (`<think>...</think>`, shown as it streams; Ollama's default

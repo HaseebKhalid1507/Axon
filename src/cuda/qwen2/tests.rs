@@ -1422,6 +1422,120 @@ fn gpu_qwen3_matches_reference_forward() {
     }
 }
 
+/// Llama-3.2-1B-Instruct, mapped (as `qwen3_mapped`): head_dim 64, GQA 4,
+/// tied Q6_K head, Llama 3 RoPE factors, q/k rows reordered at load.
+fn llama_mapped() -> Option<Model> {
+    crate::testutil::llama_model()?;
+    model_at(crate::testutil::LLAMA_MODEL)
+}
+
+/// Llama-3.2-3B-Instruct Q4_K_M (head_dim 128, GQA 3: 24 query heads on 8),
+/// and Llama-3.1-8B-Instruct (untied Q6_K head, GQA 4), if present.
+const LLAMA_3B: &str = "models/Llama-3.2-3B-Instruct-Q4_K_M.gguf";
+const LLAMA_8B: &str = "models/Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf";
+
+#[test]
+fn gpu_logits_match_cpu_llama_1b() {
+    if crate::testutil::gpu().is_none() {
+        return;
+    }
+    let Some(m) = llama_mapped() else {
+        return;
+    };
+    logits_match(&m, "llama 1B");
+}
+
+#[test]
+fn gpu_continuations_match_cpu_llama_1b() {
+    if crate::testutil::gpu().is_none() {
+        return;
+    }
+    let Some(m) = llama_mapped() else {
+        return;
+    };
+    continuations_match(&m, "llama 1B");
+}
+
+#[test]
+fn gpu_prefill_batchings_bit_identical_llama() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = llama_mapped() else {
+        return;
+    };
+    prefill_bits(&m, "llama 1B", CacheKv::F16);
+    verify_bits(&m, "llama 1B", CacheKv::F16);
+}
+
+/// llama on the q8 cache: batchings and verify keep the bits (both scale
+/// groups), accuracy within qwen2's bounds.
+#[test]
+fn gpu_q8_llama() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = llama_mapped() else {
+        return;
+    };
+    prefill_bits(&m, "llama 1B", CacheKv::Q8 { group: 64 });
+    prefill_bits(&m, "llama 1B", CacheKv::Q8 { group: 32 });
+    verify_bits(&m, "llama 1B", CacheKv::Q8 { group: 64 });
+    q8_accuracy(&m, "llama 1B");
+}
+
+#[test]
+fn gpu_bits_llama_3b_8b() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    for (path, name) in [(LLAMA_3B, "llama 3B"), (LLAMA_8B, "llama 8B")] {
+        let Some(m) = model_at(path) else {
+            continue;
+        };
+        prefill_bits(&m, name, CacheKv::F16);
+        verify_bits(&m, name, CacheKv::F16);
+        prefill_bits(&m, name, CacheKv::Q8 { group: 128 });
+    }
+}
+
+/// The GPU's llama (decode with and without graphs, batched prefill; f16
+/// and q8 caches) against model.rs's independent `llama_ref` on the Q8_0
+/// fixture's raw tensors, within LLAMA_Q8_TOL (model.rs's
+/// llama_matches_reference_forward shows each RopeBug moves the reference
+/// by > 10x that).
+#[test]
+fn gpu_llama_matches_reference_forward() {
+    use crate::model::tests::{LLAMA_Q8_TOL, RopeBug, llama_fixture, llama_ref, max_diff};
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let ids = [3u32, 17, 42, 9, 5, 61, 33, 2, 28, 50, 11, 7];
+    let n = ids.len();
+    let (m, raw) = llama_fixture(Q8_0);
+    let want = llama_ref(&m, &raw, &ids, RopeBug::None);
+    for kv in [CacheKv::F16, CacheKv::Q8 { group: 0 }] {
+        let mut net = CudaQwen2::with_kv(&g, &km, &m, 16, kv, false).unwrap();
+        for graphs in [true, false] {
+            net.graphs = graphs;
+            let mut c = net.new_cache(n);
+            let dec: Vec<Vec<f32>> = (0..n).map(|p| net.forward(ids[p], p, &mut c)).collect();
+            let mut c = net.new_cache(n);
+            net.feed_batch(&ids[..n - 1], 0, &mut c);
+            let pre = net.forward(ids[n - 1], n - 1, &mut c);
+            let (d, dp) = (max_diff(&dec, &want), max_diff(&[pre], &want[n - 1..]));
+            eprintln!(
+                "llama gpu {kv:?} graphs {graphs} vs reference: {d:.4}, after prefill {dp:.4}"
+            );
+            assert!(
+                d <= LLAMA_Q8_TOL && dp <= LLAMA_Q8_TOL,
+                "gpu {kv:?}: {d} / {dp}"
+            );
+        }
+    }
+}
+
 /// Qwen3-4B Q4_K_M (Q4_K/Q6_K, q_dim 4096 != dim 2560, GQA 4), if present.
 const QWEN3_4B: &str = "models/Qwen3-4B-Q4_K_M.gguf";
 
@@ -5113,4 +5227,59 @@ fn cuda_gemm_sustained() {
             );
         }
     }
+}
+
+/// Teacher-forced dump for the llama.cpp oracle (scratch tooling, run by
+/// hand): AXON_TF_MODEL (a GGUF), AXON_TF_IN (JSON: {"gens": [{"prompt_ids",
+/// "tokens"}]}), AXON_TF_DEV (cpu or cuda); writes AXON_TF_OUT: per
+/// sequence, at the prompt's end and after each of its tokens, the top 5
+/// (id, logprob). Prompt prefilled in batches, the rest one token a pass.
+#[test]
+#[ignore]
+fn teacher_forced_dump() {
+    let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k} not set"));
+    let m = crate::gguf::load_with(&var("AXON_TF_MODEL"), Some(false)).unwrap();
+    let inp: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(var("AXON_TF_IN")).unwrap()).unwrap();
+    let ids = |v: &serde_json::Value| -> Vec<u32> {
+        (v.as_array().unwrap().iter())
+            .map(|x| x.as_u64().unwrap() as u32)
+            .collect()
+    };
+    let top = |l: &[f32]| -> Vec<(usize, f64)> {
+        let lp = log_softmax(l);
+        let mut o: Vec<usize> = (0..lp.len()).collect();
+        o.sort_by(|&a, &b| lp[b].total_cmp(&lp[a]));
+        o[..5].iter().map(|&i| (i, lp[i])).collect()
+    };
+    let gpu = var("AXON_TF_DEV") == "cuda";
+    let g = gpu.then(|| crate::testutil::gpu().unwrap());
+    let km = g.as_ref().map(|g| Kernels::module(g).unwrap());
+    let cnet = (!gpu).then(|| Qwen2::new(&m));
+    let gnet = g.as_ref().map(|g| {
+        CudaQwen2::with_kv(g, km.as_ref().unwrap(), &m, 1024, CacheKv::F16, false).unwrap()
+    });
+    let mut out = Vec::new();
+    for gn in inp["gens"].as_array().unwrap() {
+        let (p, t) = (ids(&gn["prompt_ids"]), ids(&gn["tokens"]));
+        let seq: Vec<u32> = p.iter().chain(&t).copied().collect();
+        let n = p.len();
+        let mut rows = Vec::new();
+        if let Some(net) = &cnet {
+            let mut c = net.new_cache(seq.len() + 1);
+            net.feed_batch(&seq[..n - 1], 0, &mut c);
+            for (i, &id) in seq.iter().enumerate().skip(n - 1) {
+                rows.push(top(&net.forward(id, i, &mut c)));
+            }
+        } else {
+            let net = gnet.as_ref().unwrap();
+            let mut c = net.new_cache(seq.len() + 1);
+            net.feed_batch(&seq[..n - 1], 0, &mut c);
+            for (i, &id) in seq.iter().enumerate().skip(n - 1) {
+                rows.push(top(&net.forward(id, i, &mut c)));
+            }
+        }
+        out.push(rows);
+    }
+    std::fs::write(var("AXON_TF_OUT"), serde_json::to_string(&out).unwrap()).unwrap();
 }

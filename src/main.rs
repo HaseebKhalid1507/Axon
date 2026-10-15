@@ -82,7 +82,7 @@ flags:
   --kv T      gen, chat: KV cache type, f16 (default) or q8 (cuda only: int8 with a scale per
               position and head, half the memory; slightly different results; on a split, the
               GPU layers' cache, so more layers fit); as AXON_KV
-  --system T  chat: the system message (default: Qwen2.5's for qwen2 models, none for qwen3)
+  --system T  chat: the system message (default: Qwen2.5's for qwen2 models, none for qwen3/llama)
   --no-think  chat: qwen3: answer without reasoning first (by default it thinks, as ollama does)
   --ctx N     chat: context size in tokens (default: the model's, at most 8192; on cuda, if the
               whole model doesn't fit with it, less if at least half (or 4096) fits, else a
@@ -128,7 +128,7 @@ environment:
   AXON_CUDA_GRAPHS=0         cuda: launch each token's kernels one by one instead of
                              replaying a captured CUDA graph (same results, slower)
 
-The model must be a qwen2 or qwen3 GGUF (e.g. Qwen2.5-0.5B-Instruct or Qwen3-4B, Q4_K_M).";
+The model must be a qwen2, qwen3 or llama GGUF (e.g. Qwen2.5-0.5B-Instruct, Qwen3-4B or Llama-3.2-3B-Instruct, Q4_K_M).";
 
 /// AXON_STREAM_DECODE=1 with drafting: refused (drafting's picks come
 /// from verify passes, which never stream, so they could differ from the
@@ -202,7 +202,7 @@ fn run() -> std::io::Result<()> {
         }
         Some("-h" | "--help" | "help") => {
             println!(
-                "axon {}: CPU inference for Qwen2/Qwen3 GGUF models\n\n{USAGE}",
+                "axon {}: CPU inference for Qwen2/Qwen3/Llama 3 GGUF models\n\n{USAGE}",
                 env!("CARGO_PKG_VERSION")
             );
             return Ok(());
@@ -413,7 +413,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     let model = open_model_with(path, copy_for(device));
     let tok = tokenizer::Tokenizer::from_gguf(&model);
 
-    let ids = tok.encode(prompt);
+    let ids = tok.encode_prompt(prompt);
     if ids.is_empty() {
         eprintln!("prompt encodes to zero tokens");
         cuda::settle();
@@ -470,7 +470,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         logits,
         GenOpts {
             n_gen,
-            stop: &[tok.eos()],
+            stop: &tok.eog(),
             max_draft,
             sample: sampler.as_mut(),
         },

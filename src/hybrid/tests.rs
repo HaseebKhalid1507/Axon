@@ -19,6 +19,7 @@ const M05: &str = crate::testutil::MODEL;
 const M15: &str = "models/qwen2.5-1.5b-instruct-q4_k_m.gguf";
 /// Qwen3-0.6B: q/k norms, q_dim (2048) != dim (1024).
 const Q3: &str = crate::testutil::QWEN3_MODEL;
+const L1: &str = crate::testutil::LLAMA_MODEL;
 
 fn bits(v: &[f32]) -> Vec<u32> {
     v.iter().map(|x| x.to_bits()).collect()
@@ -246,6 +247,19 @@ fn hybrid_prefill_batchings_bit_identical_qwen3() {
 #[test]
 fn hybrid_logits_match_cpu_qwen3() {
     mixed_graded(Q3, "qwen3 0.6B");
+}
+
+/// llama split (q/k rows reordered at load, RoPE factors on both halves):
+/// f16 and q8 GPU caches keep the batchings' bits; logits graded vs CPU.
+#[test]
+fn hybrid_prefill_batchings_bit_identical_llama() {
+    prefill_bits(L1, "llama 1B", CacheKv::F16);
+    prefill_bits(L1, "llama 1B", CacheKv::Q8 { group: 0 });
+}
+
+#[test]
+fn hybrid_logits_match_cpu_llama() {
+    mixed_graded(L1, "llama 1B");
 }
 
 /// verify_argmax's picks equal forward_argmax per token (and leave the
@@ -740,6 +754,19 @@ fn stream_prefill_is_gpu_bits_qwen3() {
 #[test]
 fn stream_logits_match_cpu_qwen3() {
     stream_graded(Q3, "qwen3 0.6B");
+}
+
+/// llama streamed prefill (the streamed layers' reordered q/k rows come
+/// from the CPU's copy): GPU bits, f16 and q8; logits graded vs CPU.
+#[test]
+fn stream_prefill_is_gpu_bits_llama() {
+    stream_prefill_bits(L1, "llama 1B");
+    stream_q8_bits(L1, "llama 1B");
+}
+
+#[test]
+fn stream_logits_match_cpu_llama() {
+    stream_graded(L1, "llama 1B");
 }
 
 /// Streamed prefill, then decode with the CPU computing its layers: graded

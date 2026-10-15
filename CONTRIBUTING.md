@@ -33,6 +33,17 @@ sha256sum models/Qwen3-0.6B-Q8_0.gguf
 # 9465e63a22add5354d9bb4b99e90117043c7124007664907259bd16d043bb031
 ```
 
+The llama tests need Llama-3.2-1B-Instruct (bartowski's Q4_K_M, 808 MB) at
+`models/Llama-3.2-1B-Instruct-Q4_K_M.gguf` (`AXON_TEST_LLAMA` points them at another
+llama file); the GPU tests use the 3B and Llama-3.1-8B Q4_K_M builds too if they're there:
+
+```bash
+curl -L -o models/Llama-3.2-1B-Instruct-Q4_K_M.gguf \
+  https://huggingface.co/bartowski/Llama-3.2-1B-Instruct-GGUF/resolve/main/Llama-3.2-1B-Instruct-Q4_K_M.gguf
+sha256sum models/Llama-3.2-1B-Instruct-Q4_K_M.gguf
+# 6f85a640a97cf2bf5b8e764087b1e83da0fdb51d7c9fab7d0fece9385611df83
+```
+
 Without them those tests fail on purpose, so a missing model can't pass for a
 working one. To skip them, set `AXON_SKIP_MODEL_TESTS=1`. CI does this.
 

@@ -824,7 +824,7 @@ impl<'g> CudaQwen2<'g> {
         let head_dim = meta(m, "attention.key_length").map_or(dim / n_heads, |v| v as usize);
         let q_dim = n_heads * head_dim;
         let eps = meta(m, "attention.layer_norm_rms_epsilon").unwrap_or(1e-6) as f32;
-        let rope_base = meta(m, "rope.freq_base").unwrap_or(10000.0);
+        let freq = crate::model::rope_freqs(m, head_dim);
         let trained = meta(m, "context_length").unwrap_or(32768.0);
         let group = n_heads / n_kv_heads;
         if head_dim != 64 && head_dim != 128 {
@@ -913,8 +913,7 @@ impl<'g> CudaQwen2<'g> {
                 let b = vec_f32(m, t);
                 let slow = |r: usize| {
                     let i = r % head_dim % (head_dim / 2);
-                    let theta = rope_base.powf(-2.0 * i as f64 / head_dim as f64);
-                    theta * trained <= std::f64::consts::FRAC_PI_3
+                    freq[i] * trained <= std::f64::consts::FRAC_PI_3
                 };
                 push_vec(
                     b.iter()
@@ -948,9 +947,6 @@ impl<'g> CudaQwen2<'g> {
         if layers.iter().any(|l| l.gate.rows != ffn) {
             return Err("layers of different FFN sizes aren't supported on the GPU".into());
         }
-        let freq: Vec<f64> = (0..head_dim / 2)
-            .map(|i| rope_base.powf(-2.0 * i as f64 / head_dim as f64))
-            .collect();
 
         let sms = gpu.info()?.sms as usize;
         // Up to ~8 attention blocks per SM at long contexts.

@@ -183,7 +183,8 @@ pub struct Qwen2<'a> {
     pub q_dim: usize,
     pub vocab: usize,
     eps: f32,
-    rope_base: f64,
+    /// RoPE frequency per pair (`rope_freqs`).
+    freqs: Vec<f64>,
     token_embd: &'a Tensor,
     /// token_embd's bytes (never released: see `Weight::load`)
     embd: &'a [u8],
@@ -260,15 +261,7 @@ pub(crate) fn meta_num(m: &Model, key: &str) -> Option<f64> {
     m.metadata
         .iter()
         .find(|(k, _)| k == key)
-        .and_then(|(_, v)| match v {
-            Val::U32(n) => Some(*n as f64),
-            Val::I32(n) => Some(*n as f64),
-            Val::U64(n) => Some(*n as f64),
-            Val::I64(n) => Some(*n as f64),
-            Val::F32(n) => Some(*n as f64),
-            Val::F64(n) => Some(*n),
-            _ => None,
-        })
+        .and_then(|(_, v)| v.as_f64())
 }
 
 fn find<'a>(m: &'a Model, name: &str) -> &'a Tensor {
@@ -291,7 +284,29 @@ fn load_vec(m: &Model, t: &Tensor) -> Vec<f32> {
 
 /// Architectures `Qwen2` runs: qwen3 is qwen2 without the qkv biases, plus
 /// a per-head RMSNorm on q and k before RoPE and a head size of its own.
-pub const ARCHS: [&str; 2] = ["qwen2", "qwen3"];
+/// llama (Llama 2/3.x) is qwen2 without the biases, with its attn_q/attn_k
+/// rows put back in rotate-half order at load (`gguf::rope_unpermute_plan`)
+/// and Llama 3's RoPE frequency factors (`rope_freqs`).
+pub const ARCHS: [&str; 3] = ["qwen2", "qwen3", "llama"];
+
+/// RoPE frequency of each pair i < head_dim / 2: base^(-2i/head_dim),
+/// divided by the model's factor for that pair if it has `rope_freqs.weight`
+/// (Llama 3.1/3.2's long-context scaling, as llama.cpp's freq_factors).
+/// Shared by the CPU and CUDA backends. `check_supported` validates the
+/// factors.
+pub(crate) fn rope_freqs(m: &Model, head_dim: usize) -> Vec<f64> {
+    let base = meta_num(m, &format!("{}.rope.freq_base", m.arch)).unwrap_or(10000.0);
+    let factors = find_opt(m, "rope_freqs.weight").map(|t| load_vec(m, t));
+    (0..head_dim / 2)
+        .map(|i| {
+            let f = base.powf(-2.0 * i as f64 / head_dim as f64);
+            match &factors {
+                Some(v) => f / v[i] as f64,
+                None => f,
+            }
+        })
+        .collect()
+}
 
 /// Tensor types the kernels run (`quant::dequant` and `dot_row_q8`).
 const SUPPORTED_TYPES: [u32; 10] = [F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K];
@@ -333,7 +348,7 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
     let bad = |msg: String| std::io::Error::new(std::io::ErrorKind::InvalidData, msg);
     if !ARCHS.contains(&m.arch.as_str()) {
         return Err(bad(format!(
-            "architecture '{}' is not supported (qwen2, qwen3)",
+            "architecture '{}' is not supported (qwen2, qwen3, llama)",
             if m.arch.is_empty() { "<none>" } else { &m.arch }
         )));
     }
@@ -377,6 +392,54 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
     }
     let q_dim = n_heads * head_dim;
     let kv_dim = n_kv_heads * head_dim;
+    let num = |k: &str| meta_num(m, &format!("{}.{k}", m.arch));
+    if num("rope.dimension_count").is_some_and(|v| v != head_dim as f64) {
+        return Err(bad(format!(
+            "rope.dimension_count differs from the head size {head_dim} (partial RoPE)"
+        )));
+    }
+    if num("expert_count").is_some_and(|v| v != 0.0) {
+        return Err(bad("mixture-of-experts models are not supported".into()));
+    }
+    if num("attention.scale").is_some_and(|v| v != 0.0) {
+        return Err(bad("a custom attention.scale is not supported".into()));
+    }
+    // RoPE scaling: none, or a linear / YaRN entry that changes nothing
+    // (factor 1, no attention factor). A factor without a type is
+    // llama.cpp's linear scaling, so any factor other than 1 is refused.
+    let factor = num("rope.scaling.factor").or(num("rope.scale_linear"));
+    if let Some(f) = factor.filter(|&f| f != 1.0 && f != 0.0) {
+        return Err(bad(format!("RoPE scaling (factor {f}) is not supported")));
+    }
+    if let Some(f) = num("rope.scaling.attn_factor").filter(|&f| f != 1.0) {
+        return Err(bad(format!(
+            "RoPE scaling (attention factor {f}) is not supported"
+        )));
+    }
+    let scaling = m
+        .metadata
+        .iter()
+        .find(|(k, _)| *k == format!("{}.rope.scaling.type", m.arch));
+    match scaling {
+        None => {}
+        Some((_, Val::Str(t))) if ["none", "linear", "yarn"].contains(&t.as_str()) => {}
+        Some((_, v)) => {
+            return Err(bad(format!("RoPE scaling {v} is not supported")));
+        }
+    }
+    if let Some(t) = find_opt(m, "rope_freqs.weight") {
+        if t.qtype.id != F32 || t.n_elements != (head_dim / 2) as u64 {
+            return Err(bad(format!(
+                "rope_freqs.weight: {} {:?} (want {} F32 values)",
+                t.qtype.name,
+                t.dims,
+                head_dim / 2
+            )));
+        }
+        if !load_vec(m, t).iter().all(|&f| f.is_finite() && f > 0.0) {
+            return Err(bad("rope_freqs.weight: factors must be positive".into()));
+        }
+    }
 
     // `rows` = None: a vector of `cols` elements; Some(r): a cols x r matrix.
     let check = |name: &str, cols: usize, rows: Option<usize>| -> std::io::Result<&Tensor> {
@@ -431,10 +494,26 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
         t("attn_q.weight", dim, Some(q_dim))?;
         t("attn_k.weight", dim, Some(kv_dim))?;
         t("attn_v.weight", dim, Some(kv_dim))?;
-        // Per-head q/k RMSNorm before RoPE: qwen3 has it, qwen2 doesn't.
+        // Per-head q/k RMSNorm before RoPE: qwen3 has it, qwen2 doesn't,
+        // llama's graph has none (one in the file would be ignored there).
         for b in ["attn_q_norm.weight", "attn_k_norm.weight"] {
-            if m.arch == "qwen3" || find_opt(m, &format!("blk.{i}.{b}")).is_some() {
+            let has = find_opt(m, &format!("blk.{i}.{b}")).is_some();
+            if m.arch == "llama" && has {
+                return Err(bad(format!("blk.{i}.{b}: llama has no q/k norm")));
+            }
+            if m.arch == "qwen3" || has {
                 t(b, head_dim, None)?;
+            }
+        }
+        // Biases nothing here would add.
+        for b in [
+            "attn_output.bias",
+            "ffn_gate.bias",
+            "ffn_up.bias",
+            "ffn_down.bias",
+        ] {
+            if find_opt(m, &format!("blk.{i}.{b}")).is_some() {
+                return Err(bad(format!("blk.{i}.{b} is not supported")));
             }
         }
         for (b, n) in [
@@ -453,6 +532,7 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
         t("ffn_down.weight", ffn, Some(dim))?;
     }
 
+    crate::tokenizer::pre_of(m).map_err(bad)?;
     match m
         .metadata
         .iter()
@@ -508,7 +588,7 @@ impl<'a> Qwen2<'a> {
         let head_dim =
             meta_num(m, &key("attention.key_length")).map_or(dim / n_heads, |v| v as usize);
         let eps = meta_num(m, &key("attention.layer_norm_rms_epsilon")).unwrap_or(1e-6) as f32;
-        let rope_base = meta_num(m, &key("rope.freq_base")).unwrap_or(10000.0);
+        let freqs = rope_freqs(m, head_dim);
 
         let token_embd = find(m, "token_embd.weight");
         // ne1 of the embedding matrix is the vocab size.
@@ -636,7 +716,7 @@ impl<'a> Qwen2<'a> {
             q_dim: n_heads * head_dim,
             vocab,
             eps,
-            rope_base,
+            freqs,
             token_embd,
             embd: m.tensor_data(token_embd),
             output_norm,
@@ -1146,12 +1226,13 @@ impl<'a> Qwen2<'a> {
     }
 
     /// (sin, cos) of each RoPE pair's angle at `pos`: pair i turns by
-    /// pos * base^(-2i/head_dim). Low i spins fast, high i spins slowly.
-    /// Every head in every layer uses the same angles, so this runs once a token.
+    /// pos * freqs[i] (base^(-2i/head_dim), over Llama 3's factor). Low i
+    /// spins fast, high i spins slowly. Every head in every layer uses the
+    /// same angles, so this runs once a token.
     fn rope_table(&self, pos: usize) -> Vec<(f32, f32)> {
-        (0..self.head_dim / 2)
-            .map(|i| {
-                let freq = self.rope_base.powf(-2.0 * i as f64 / self.head_dim as f64);
+        self.freqs
+            .iter()
+            .map(|&freq| {
                 let angle = pos as f64 * freq;
                 (angle.sin() as f32, angle.cos() as f32)
             })
@@ -2668,6 +2749,27 @@ pub(crate) mod tests {
     /// make the order matter). Matrices of type `mt` (F32: the CPU's exact float rows;
     /// Q8_0 for the GPU), norms F32.
     pub(crate) fn qwen3_fixture(mt: u32) -> Model {
+        dense_fixture("qwen3", mt).0
+    }
+
+    /// The tensors of a fixture as written to its GGUF: (name, dims, type,
+    /// bytes), before `load` touches anything (llama's q/k row order).
+    pub(crate) type RawTensors = Vec<(String, Vec<u64>, u32, Vec<u8>)>;
+
+    /// A small random llama like `qwen3_fixture` (head_dim 64, 2 query heads
+    /// per kv head) without q/k norms, with RoPE factors in [1, 8) per pair
+    /// (`rope_freqs.weight`; base 10000, which turns more pairs than Llama
+    /// 3's 500000 over a short test), and its tensors as
+    /// written. The file's attn_q/attn_k rows are in the GGUF's order (the
+    /// converter's permutation of random rows is random rows): `load`
+    /// reorders them; `llama_ref` reads the raw ones with llama.cpp's
+    /// adjacent-pair RoPE, so the two only agree if the reordering is right.
+    pub(crate) fn llama_fixture(mt: u32) -> (Model, RawTensors) {
+        dense_fixture("llama", mt)
+    }
+
+    /// `qwen3_fixture` / `llama_fixture` (arch "qwen3" or "llama").
+    fn dense_fixture(arch: &str, mt: u32) -> (Model, RawTensors) {
         let (dim, nh, nkv, hd, ffn, vocab, nl) = (128usize, 4, 2, 64, 256, 64, 2);
         let (qd, kvd) = (nh * hd, nkv * hd);
         let mut st = 0x9e37_79b9_7f4a_7c15u64;
@@ -2687,8 +2789,11 @@ pub(crate) mod tests {
         let mut t = vec![mat("token_embd.weight".into(), dim, vocab, 0.0)];
         for i in 0..nl {
             let n = |s: &str| format!("blk.{i}.{s}");
-            t.push(mat(n("attn_q.weight"), dim, qd, 0.7));
-            t.push(mat(n("attn_k.weight"), dim, kvd, 0.7));
+            // llama has no q/k norm to scale them up: larger q and k
+            // instead, so attention is far from uniform and RoPE matters.
+            let qk = if arch == "llama" { 3.0 } else { 0.7 };
+            t.push(mat(n("attn_q.weight"), dim, qd, qk));
+            t.push(mat(n("attn_k.weight"), dim, kvd, qk));
             t.push(mat(n("attn_v.weight"), dim, kvd, 1.0));
             t.push(mat(n("attn_output.weight"), qd, dim, 1.0));
             t.push(mat(n("ffn_gate.weight"), dim, ffn, 1.0));
@@ -2706,8 +2811,13 @@ pub(crate) mod tests {
             let n = |s: &str| format!("blk.{i}.{s}");
             vecs(n("attn_norm.weight"), dim, 0.8, 1.2);
             vecs(n("ffn_norm.weight"), dim, 0.8, 1.2);
-            vecs(n("attn_q_norm.weight"), hd, 0.25, 4.0);
-            vecs(n("attn_k_norm.weight"), hd, 0.25, 4.0);
+            if arch == "qwen3" {
+                vecs(n("attn_q_norm.weight"), hd, 0.25, 4.0);
+                vecs(n("attn_k_norm.weight"), hd, 0.25, 4.0);
+            }
+        }
+        if arch == "llama" {
+            vecs("rope_freqs.weight".into(), hd / 2, 1.0, 8.0);
         }
         let ty = |t: &(String, Vec<u64>, Vec<f32>)| if t.1.len() == 2 { mt } else { F32 };
         let bytes = |t: &(String, Vec<u64>, Vec<f32>)| -> Vec<u8> {
@@ -2727,21 +2837,22 @@ pub(crate) mod tests {
                         out
                     })
                     .collect(),
-                other => unimplemented!("qwen3_fixture: type {other}"),
+                other => unimplemented!("dense_fixture: type {other}"),
             }
         };
+        let k = |s: &str| -> &'static str { format!("{arch}.{s}").leak() };
         let meta = vec![
-            ("general.architecture", Val::Str("qwen3".into())),
-            ("qwen3.block_count", Val::U32(nl as u32)),
-            ("qwen3.embedding_length", Val::U32(dim as u32)),
-            ("qwen3.feed_forward_length", Val::U32(ffn as u32)),
-            ("qwen3.attention.head_count", Val::U32(nh as u32)),
-            ("qwen3.attention.head_count_kv", Val::U32(nkv as u32)),
-            ("qwen3.attention.key_length", Val::U32(hd as u32)),
-            ("qwen3.attention.value_length", Val::U32(hd as u32)),
-            ("qwen3.attention.layer_norm_rms_epsilon", Val::F32(0.5)),
-            ("qwen3.rope.freq_base", Val::F32(10000.0)),
-            ("qwen3.context_length", Val::U32(64)),
+            ("general.architecture", Val::Str(arch.into())),
+            (k("block_count"), Val::U32(nl as u32)),
+            (k("embedding_length"), Val::U32(dim as u32)),
+            (k("feed_forward_length"), Val::U32(ffn as u32)),
+            (k("attention.head_count"), Val::U32(nh as u32)),
+            (k("attention.head_count_kv"), Val::U32(nkv as u32)),
+            (k("attention.key_length"), Val::U32(hd as u32)),
+            (k("attention.value_length"), Val::U32(hd as u32)),
+            (k("attention.layer_norm_rms_epsilon"), Val::F32(0.5)),
+            (k("rope.freq_base"), Val::F32(10000.0)),
+            (k("context_length"), Val::U32(64)),
             (
                 "tokenizer.ggml.tokens",
                 Val::Arr((0..vocab).map(|i| Val::Str(format!("t{i}"))).collect()),
@@ -2750,7 +2861,13 @@ pub(crate) mod tests {
         let list: Vec<(&str, &[u64], u32)> =
             ts.iter().map(|t| (t.0.as_str(), &t.1[..], ty(t))).collect();
         let data: Vec<Vec<u8>> = ts.iter().map(bytes).collect();
-        crate::gguf::build_for_test_with(&meta, &list, &data)
+        let m = crate::gguf::build_for_test_with(&meta, &list, &data);
+        let raw = ts
+            .iter()
+            .zip(data)
+            .map(|(t, d)| (t.0.clone(), t.1.clone(), ty(t), d))
+            .collect();
+        (m, raw)
     }
 
     /// Ways to get qwen3's q/k norm wrong, for showing `qwen3_ref` (and so
@@ -2777,6 +2894,46 @@ pub(crate) mod tests {
     /// dequantized; the one rounding mirrored is the KV cache's (f16 unless
     /// AXON_KV=f32), stored after the rotation.
     pub(crate) fn qwen3_ref(m: &Model, ids: &[u32], bug: NormBug) -> Vec<Vec<f32>> {
+        dense_ref(m, None, ids, bug, RopeBug::None)
+    }
+
+    /// Ways to get llama's RoPE wrong, for showing `llama_ref` tells them
+    /// apart from the right one.
+    #[derive(Clone, Copy, PartialEq, Debug)]
+    pub(crate) enum RopeBug {
+        None,
+        /// The file's q/k rows taken as they are with rotate-half RoPE (no
+        /// reordering at load).
+        Unpermuted,
+        /// Llama 3's frequency factors ignored.
+        NoFactors,
+    }
+
+    /// The logits after each of `ids`, by a plain f64 forward pass written
+    /// from llama.cpp's LLM_ARCH_LLAMA graph on the GGUF's own tensors
+    /// (`raw`, as `llama_fixture` wrote them, not the loaded model's): no
+    /// biases or q/k norms, llama.cpp's "normal" RoPE on adjacent pairs
+    /// (2i, 2i + 1) with frequency base^(-2i/hd) / rope_freqs[i]. Otherwise
+    /// as `qwen3_ref` (f16 cache rounding mirrored).
+    pub(crate) fn llama_ref(
+        m: &Model,
+        raw: &RawTensors,
+        ids: &[u32],
+        bug: RopeBug,
+    ) -> Vec<Vec<f32>> {
+        dense_ref(m, Some(raw), ids, NormBug::Dropped, bug)
+    }
+
+    /// `qwen3_ref` (raw None: the loaded model's tensors, NEOX RoPE, q/k
+    /// norms) or `llama_ref` (raw: the file's tensors, adjacent-pair RoPE
+    /// with the file's frequency factors, no q/k norm: `bug` Dropped).
+    fn dense_ref(
+        m: &Model,
+        raw: Option<&RawTensors>,
+        ids: &[u32],
+        bug: NormBug,
+        rbug: RopeBug,
+    ) -> Vec<Vec<f32>> {
         let a = &m.arch;
         let num = |k: &str| meta_num(m, &format!("{a}.{k}")).unwrap();
         let (dim, nh, nkv) = (
@@ -2789,10 +2946,25 @@ pub(crate) mod tests {
         let base = meta_num(m, &format!("{a}.rope.freq_base")).unwrap_or(10000.0);
         let nl = num("block_count") as usize;
         let w = |name: &str| -> (Vec<f64>, usize) {
-            let t = m.tensors.iter().find(|t| t.name == name).unwrap();
-            let mut v = vec![0f32; t.n_elements as usize];
-            dequant(t.qtype.id, m.tensor_data(t), &mut v);
-            (v.into_iter().map(f64::from).collect(), t.dims[0] as usize)
+            let (qt, dims, bytes): (u32, &[u64], &[u8]) = match raw {
+                Some(r) => {
+                    let t = r.iter().find(|t| t.0 == name).unwrap();
+                    (t.2, &t.1, &t.3)
+                }
+                None => {
+                    let t = m.tensors.iter().find(|t| t.name == name).unwrap();
+                    (t.qtype.id, &t.dims, m.tensor_data(t))
+                }
+            };
+            let mut v = vec![0f32; dims.iter().product::<u64>() as usize];
+            dequant(qt, bytes, &mut v);
+            (v.into_iter().map(f64::from).collect(), dims[0] as usize)
+        };
+        // llama: the pair (2i, 2i + 1) turns at base^(-2i/hd) / factor[i].
+        let llama = raw.is_some();
+        let factors: Vec<f64> = match raw {
+            Some(_) if rbug != RopeBug::NoFactors => w("rope_freqs.weight").0,
+            _ => vec![1.0; hd / 2],
         };
         let mv = |(wv, cols): &(Vec<f64>, usize), x: &[f64]| -> Vec<f64> {
             wv.chunks(*cols)
@@ -2805,12 +2977,17 @@ pub(crate) mod tests {
         };
         let rope = |v: &mut [f64], pos: usize| {
             for head in v.chunks_mut(hd) {
-                for i in 0..hd / 2 {
-                    let th = pos as f64 * base.powf(-2.0 * i as f64 / hd as f64);
+                for (i, f) in factors.iter().enumerate() {
+                    let th = pos as f64 * base.powf(-2.0 * i as f64 / hd as f64) / f;
                     let (s, c) = (th.sin(), th.cos());
-                    let (x0, x1) = (head[i], head[i + hd / 2]);
-                    head[i] = x0 * c - x1 * s;
-                    head[i + hd / 2] = x0 * s + x1 * c;
+                    let (a, b) = if llama && rbug != RopeBug::Unpermuted {
+                        (2 * i, 2 * i + 1)
+                    } else {
+                        (i, i + hd / 2)
+                    };
+                    let (x0, x1) = (head[a], head[b]);
+                    head[a] = x0 * c - x1 * s;
+                    head[b] = x0 * s + x1 * c;
                 }
             }
         };
@@ -2847,8 +3024,16 @@ pub(crate) mod tests {
                     n("attn_q.weight"),
                     n("attn_k.weight"),
                     n("attn_v.weight"),
-                    n("attn_q_norm.weight"),
-                    n("attn_k_norm.weight"),
+                    if llama {
+                        (Vec::new(), 0)
+                    } else {
+                        n("attn_q_norm.weight")
+                    },
+                    if llama {
+                        (Vec::new(), 0)
+                    } else {
+                        n("attn_k_norm.weight")
+                    },
                     n("attn_output.weight"),
                     n("ffn_norm.weight"),
                     n("ffn_gate.weight"),
@@ -2943,6 +3128,14 @@ pub(crate) mod tests {
     /// caches); every `NormBug` moves the logits by >= 3.3 there.
     pub(crate) const QWEN3_Q8_TOL: f32 = 0.5;
 
+    /// `QWEN3_Q8_TOL` for the llama fixture on the GPU, whose larger q and
+    /// k (no norm to scale them) make 8-bit activations and a q8 cache cost
+    /// more: measured GPU f16 cache 0.44, q8 cache 0.54; each `RopeBug`
+    /// moves the logits by >= 10.6 there.
+    pub(crate) const LLAMA_Q8_TOL: f32 = 1.0;
+    /// The CPU's bound there (8-bit activations, f16 cache): measured 0.38.
+    pub(crate) const LLAMA_Q8_TOL_CPU: f32 = 0.6;
+
     /// The CPU's qwen3 (decode and batched prefill, repacked or not) against
     /// the independent `qwen3_ref`. On the F32 fixture the CPU's only
     /// rounding besides f32 arithmetic is the f16 KV cache, which the
@@ -3012,6 +3205,247 @@ pub(crate) mod tests {
         }
     }
 
+    /// The tiny model as llama: no biases, llama.* keys, `edit` /
+    /// `edit_meta` after.
+    fn tiny_llama(
+        edit: impl FnOnce(&mut Vec<(String, Vec<u64>, u32)>),
+        edit_meta: impl FnOnce(&mut Vec<(&'static str, Val)>),
+    ) -> std::io::Result<()> {
+        tiny_meta(
+            |ts| {
+                ts.retain(|t| !t.0.ends_with(".bias"));
+                ts.push(("rope_freqs.weight".into(), vec![16], F32));
+                edit(ts);
+            },
+            |m| {
+                for kv in m.iter_mut() {
+                    if let Some(k) = kv.0.strip_prefix("qwen2.") {
+                        kv.0 = format!("llama.{k}").leak();
+                    }
+                }
+                m[0].1 = Val::Str("llama".into());
+                m.push(("tokenizer.ggml.model", Val::Str("gpt2".into())));
+                m.push(("tokenizer.ggml.pre", Val::Str("llama-bpe".into())));
+                edit_meta(m);
+            },
+        )
+    }
+
+    #[test]
+    fn check_supported_llama() {
+        // rope_freqs is zero-filled in the tiny model: factors must be > 0.
+        let rej = |e: std::io::Result<()>, want: &str| {
+            let e = e.expect_err("malformed llama accepted");
+            assert!(e.to_string().contains(want), "{e}");
+        };
+        rej(tiny_llama(|_| {}, |_| {}), "factors must be positive");
+        tiny_llama(|ts| ts.retain(|t| t.0 != "rope_freqs.weight"), |_| {}).expect("tiny llama");
+        let no_freqs =
+            |ts: &mut Vec<(String, Vec<u64>, u32)>| ts.retain(|t| t.0 != "rope_freqs.weight");
+        rej(
+            tiny_llama(
+                |ts| {
+                    no_freqs(ts);
+                    ts.push(("rope_freqs.weight".into(), vec![32], F32));
+                },
+                |_| {},
+            ),
+            "rope_freqs.weight",
+        );
+        rej(
+            tiny_llama(
+                |ts| {
+                    no_freqs(ts);
+                    ts.push(("blk.0.attn_q_norm.weight".into(), vec![32], F32));
+                },
+                |_| {},
+            ),
+            "no q/k norm",
+        );
+        rej(
+            tiny_llama(
+                |ts| {
+                    no_freqs(ts);
+                    ts.push(("blk.1.ffn_down.bias".into(), vec![64], F32));
+                },
+                |_| {},
+            ),
+            "ffn_down.bias is not supported",
+        );
+        for (k, v, want) in [
+            ("llama.rope.dimension_count", Val::U32(16), "partial RoPE"),
+            ("llama.expert_count", Val::U32(8), "mixture-of-experts"),
+            ("llama.attention.scale", Val::F32(0.5), "attention.scale"),
+            (
+                "llama.rope.scaling.type",
+                Val::Str("linear".into()),
+                "RoPE scaling",
+            ),
+            (
+                "llama.rope.scaling.type",
+                Val::Str("longrope".into()),
+                "RoPE scaling",
+            ),
+            ("llama.rope.scaling.factor", Val::F32(4.0), "factor 4"),
+            ("llama.rope.scale_linear", Val::F32(2.0), "factor 2"),
+            (
+                "llama.rope.scaling.attn_factor",
+                Val::F32(0.5),
+                "attention factor",
+            ),
+            (
+                "tokenizer.ggml.pre",
+                Val::Str("deepseek-llm".into()),
+                "pre-tokenizer",
+            ),
+            (
+                "tokenizer.ggml.model",
+                Val::Str("llama".into()),
+                "tokenizer model",
+            ),
+        ] {
+            let e = tiny_llama(no_freqs, |m| {
+                m.retain(|kv| kv.0 != k);
+                m.push((k, v));
+                if k == "llama.rope.scaling.type" {
+                    m.push(("llama.rope.scaling.factor", Val::F32(8.0)));
+                }
+            });
+            rej(e, want);
+        }
+        // Accepted: the head size as rope.dimension_count, scaling "none",
+        // or linear / yarn with factor 1.
+        tiny_llama(no_freqs, |m| {
+            m.push(("llama.rope.dimension_count", Val::U32(32)));
+            m.push(("llama.rope.scaling.type", Val::Str("none".into())));
+        })
+        .expect("tiny llama with rope keys");
+        for t in ["linear", "yarn"] {
+            tiny_llama(no_freqs, |m| {
+                m.push(("llama.rope.scaling.type", Val::Str(t.into())));
+                m.push(("llama.rope.scaling.factor", Val::F32(1.0)));
+            })
+            .expect("factor-1 scaling");
+        }
+    }
+
+    /// The CPU's llama (decode and batched prefill, repacked or not) against
+    /// the independent `llama_ref` on the GGUF's own tensors: proves the
+    /// q/k row reordering at load plus NEOX RoPE equals llama.cpp's
+    /// adjacent-pair RoPE on the file's rows, and that the RoPE factors are
+    /// applied. Each `RopeBug` moves the reference far beyond the tolerance.
+    #[test]
+    fn llama_matches_reference_forward() {
+        const TOL: f32 = 2e-3;
+        let ids = [3u32, 17, 42, 9, 5, 61, 33, 2, 28, 50, 11, 7];
+        let n = ids.len();
+        let (m, raw) = llama_fixture(F32);
+        let want = llama_ref(&m, &raw, &ids, RopeBug::None);
+        for bug in [RopeBug::Unpermuted, RopeBug::NoFactors] {
+            let d = max_diff(&llama_ref(&m, &raw, &ids, bug), &want);
+            eprintln!("llama reference with {bug:?}: max |dlogit| {d:.4}");
+            assert!(d > 100.0 * TOL, "{bug:?} hardly changes the logits ({d})");
+        }
+        for repack in [true, false] {
+            let (m, _) = llama_fixture(F32);
+            let net = Qwen2::new_with(&m, repack);
+            let mut c = net.new_cache(n);
+            let dec: Vec<Vec<f32>> = (0..n).map(|p| net.forward(ids[p], p, &mut c)).collect();
+            let mut c = net.new_cache(n);
+            net.feed_batch(&ids[..n - 1], 0, &mut c);
+            let pre = net.forward(ids[n - 1], n - 1, &mut c);
+            let (d, dp) = (max_diff(&dec, &want), max_diff(&[pre], &want[n - 1..]));
+            eprintln!("llama cpu (repack {repack}) vs reference: {d:.2e}, after prefill {dp:.2e}");
+            assert!(d <= TOL && dp <= TOL, "cpu vs reference: {d} / {dp}");
+        }
+        let (m, raw) = llama_fixture(Q8_0);
+        let want = llama_ref(&m, &raw, &ids, RopeBug::None);
+        let net = Qwen2::new(&m);
+        let mut c = net.new_cache(n);
+        let l: Vec<Vec<f32>> = (0..n).map(|p| net.forward(ids[p], p, &mut c)).collect();
+        let d = max_diff(&l, &want);
+        eprintln!("llama Q8_0 fixture: cpu vs reference {d:.4}");
+        assert!(d <= LLAMA_Q8_TOL_CPU, "Q8_0 fixture: cpu vs reference {d}");
+        for bug in [RopeBug::Unpermuted, RopeBug::NoFactors] {
+            let d = max_diff(&llama_ref(&m, &raw, &ids, bug), &want);
+            eprintln!("llama Q8_0 fixture: reference with {bug:?}: {d:.4}");
+            assert!(d > 5.0 * LLAMA_Q8_TOL, "Q8_0 fixture: {bug:?} only {d}");
+        }
+    }
+
+    /// The real llama file loads the same copied or mapped (both reorder
+    /// attn_q/attn_k once: the copy in place, the mapping into side copies),
+    /// other tensors untouched, and the reordered rows are the file's rows
+    /// moved.
+    #[test]
+    fn llama_load_paths_agree() {
+        let Some(m0) = crate::testutil::llama_model() else {
+            return;
+        };
+        let path = crate::testutil::LLAMA_MODEL;
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(path);
+        let path = path.to_str().unwrap();
+        let file = std::fs::read(path).unwrap();
+        let (a, b) = (
+            crate::gguf::load_with(path, Some(true)).unwrap(),
+            crate::gguf::load_with(path, Some(false)).unwrap(),
+        );
+        assert!(b.file_backed() && !a.file_backed());
+        let hd = 64;
+        for t in &m0.tensors {
+            let (x, y) = (a.tensor_data(t), b.tensor_data(t));
+            assert_eq!(x, y, "{}", t.name);
+            let s = (m0.data_offset + t.offset) as usize;
+            let f = &file[s..s + t.n_bytes as usize];
+            if t.kind == "attn_q.weight" || t.kind == "attn_k.weight" {
+                let rb = t.n_bytes as usize / t.dims[1] as usize;
+                for r in [0usize, 1, 2, 31, 32, 33, 63, 64, 100] {
+                    let (h, j) = (r / hd, r % hd);
+                    let src = h * hd
+                        + if j < hd / 2 {
+                            2 * j
+                        } else {
+                            2 * (j - hd / 2) + 1
+                        };
+                    assert_eq!(
+                        &x[r * rb..(r + 1) * rb],
+                        &f[src * rb..(src + 1) * rb],
+                        "{} row {r}",
+                        t.name
+                    );
+                }
+                assert_ne!(x, f, "{} not reordered", t.name);
+            } else {
+                assert_eq!(x, f, "{} changed", t.name);
+            }
+        }
+        // The file mapping itself is untouched (shared, read-only): the
+        // reordered rows are a side copy, kept through a release (slices
+        // taken before stay valid, as a file mapping's pages fault back in);
+        // the copy refuses a released tensor, as always.
+        let q = (m0.tensors.iter())
+            .find(|t| t.name == "blk.3.attn_q.weight")
+            .unwrap();
+        let s = (m0.data_offset + q.offset) as usize;
+        let r = s..s + q.n_bytes as usize;
+        assert_eq!(&b.data[r.clone()], &file[r.clone()]);
+        assert_ne!(b.tensor_data(q), &file[r]);
+        let want = a.tensor_data(q).to_vec();
+        let held = b.tensor_data(q);
+        b.release(q);
+        b.release(q);
+        assert_eq!(held, &want[..], "a slice taken before the release");
+        assert_eq!(b.tensor_data(q), &want[..]);
+        a.release(q);
+        let e = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| a.tensor_data(q).len()));
+        assert!(e.is_err(), "the copy read back a released tensor");
+        // Neighbours stay readable.
+        let k = (m0.tensors.iter())
+            .find(|t| t.name == "blk.3.attn_k.weight")
+            .unwrap();
+        assert_eq!(a.tensor_data(k), b.tensor_data(k));
+    }
+
     #[test]
     fn check_supported_qwen3() {
         tiny3(|_| {}, |_| {}).expect("tiny qwen3");
@@ -3063,8 +3497,8 @@ pub(crate) mod tests {
             "value_length differs",
         );
         rej(
-            tiny3(|_| {}, |m| m[0].1 = Val::Str("llama".into())),
-            "'llama' is not supported",
+            tiny3(|_| {}, |m| m[0].1 = Val::Str("gemma".into())),
+            "'gemma' is not supported",
         );
         // Without key_length, head_dim is dim / heads (16): attn_k doesn't fit.
         rej(
@@ -3100,6 +3534,20 @@ pub(crate) mod tests {
         for repack in [true, false] {
             let m = qwen3_fixture(Q8_0);
             let net = Qwen2::new_with(&m, repack);
+            feed_batch_matches_feed_on(&net);
+        }
+    }
+
+    /// `feed_batch_matches_feed` on Llama-3.2-1B (RoPE factors, head_dim
+    /// 64, GQA 4, tied Q6_K head).
+    #[test]
+    fn feed_batch_matches_feed_llama() {
+        for repack in [true, false] {
+            let Some(m) = crate::testutil::llama_model() else {
+                return;
+            };
+            let net = Qwen2::new_with(&m, repack);
+            assert!(net.head_dim == 64 && net.layers[0].bq.is_none());
             feed_batch_matches_feed_on(&net);
         }
     }
@@ -3430,11 +3878,17 @@ pub(crate) mod tests {
     }
 
     fn feed_batch_matches_feed_on(net: &Qwen2) {
-        // 483 spread-out ordinary token ids (Qwen2's special tokens start at 151643).
-        // (Taken mod the vocab: the same ids on a real model.)
+        // 483 spread-out ordinary token ids (Qwen2's special tokens start at
+        // 151643, Llama 3's at 128000). (Taken mod the vocab: the same ids
+        // on a real model.)
         let v = net.vocab as u64;
+        let span = if net.vocab > 150_000 {
+            150_000
+        } else {
+            128_000
+        };
         let ids: Vec<u32> = (0..483u64)
-            .map(|i| (i * 2_654_435_761 % 150_000 % v) as u32)
+            .map(|i| (i * 2_654_435_761 % span % v) as u32)
             .collect();
         let next = (9707 % v) as u32;
         let mut a = net.new_cache(ids.len() + 1);
