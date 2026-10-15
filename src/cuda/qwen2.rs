@@ -350,7 +350,10 @@ pub struct CudaQwen2<'g> {
     pub ctx: usize,
     /// Batched passes make the FFN's silu(gate) * up in the up product's
     /// epilogue (bgemm mode 2), else by swiglu_quant_b (tests compare them:
-    /// the same bits).
+    /// the same bits). Off: the silu in a one-CTA-per-SM GEMM tail costs
+    /// more than swiglu_quant_b's extra read (cuda_gemm_bench, 0.5B ffn
+    /// Q5_0: mode 2 1.27x mode 0 with the batched epilogue loads, 2.3x
+    /// before them).
     pub(super) swiglu_epi: bool,
     /// Batched passes run gate and up (both Q4_K) as one launch with the
     /// swiglu in its epilogue (prefill.cu gemm2s_q4_k_gu; AXON_GATE_UP=0
@@ -1009,7 +1012,7 @@ impl<'g> CudaQwen2<'g> {
             batch: if first > 0 { split_batch } else { PLAN_BATCH },
             kv,
             ctx: 0,
-            swiglu_epi: true,
+            swiglu_epi: false,
             gate_up_fused: std::env::var("AXON_GATE_UP").map_or(true, |v| v != "0"),
         };
         if let CacheKv::Q8 { group } = kv {

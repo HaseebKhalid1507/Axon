@@ -2773,6 +2773,9 @@ fn cuda_gemm_bench() {
         "gemm2_q5_0",
         "gemm2s_q8_0",
         "gemm2s_q5_0",
+        "gemm2_q6k8",
+        "gemm2s_q6k8",
+        "gemm2s_q4_k_gu",
         "gemvn_2x8",
         "gemvm8_q4_k",
         "gemvm8_q6_k",
@@ -3093,7 +3096,7 @@ fn prefill_bits(m: &Model, name: &str, kv: CacheKv) {
             }
         }
         net.gate_up_fused = true;
-        net.swiglu_epi = true;
+        net.swiglu_epi = false;
         if copy {
             eprintln!("{name}: with and without the Q6_K prefill copy");
             net.make_q6k8(ids.len() + 1).unwrap();
