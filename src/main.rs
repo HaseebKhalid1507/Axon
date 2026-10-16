@@ -6,6 +6,8 @@ mod draft;
 mod gguf;
 mod hybrid;
 mod kv;
+mod kvsave;
+mod kvstore;
 mod lineedit;
 mod lm;
 mod model;
@@ -58,7 +60,8 @@ usage:
   axon logits <model.gguf> \"<prompt>\" [-k K]
                                             top-K next-token logits after the prompt
   axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K]
-            [--draft-model PATH] [--device D] [--gpu-layers N] [--gpus L] [--kv T] [sampling flags]
+            [--draft-model PATH] [--device D] [--gpu-layers N] [--gpus L] [--kv T] [--session F]
+            [sampling flags]
                                             talk to an instruct model (sampled; --temp 0: greedy)
   axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--draft K] [--draft-model PATH]
             [--device D] [--gpu-layers N] [--kv T] [--alias NAME] [--max-tokens N] [--cors [ORIGIN]]
@@ -105,6 +108,11 @@ flags:
               on the GPU(s) with it, else the longest that does if at least 4096; on the CPU, as
               much of it as fits in free RAM, at least 8192; a CPU/GPU split, at most 8192; a
               shorter one is said on stderr); an explicit N is never shortened
+  --session F chat: keep the conversation in file F: loaded at start if it exists, saved after
+              every reply (new positions appended). Its KV cache comes back from the file if
+              it was made with this model, KV type, backend and GPU; else it is prefilled again
+              from the saved tokens (slower; on the CPU or GPU the same cache, so replies continue
+              as if never stopped; on a CPU/GPU split a re-prefilled cache is close, not exact)
   --parallel N  serve: requests decoded together on the GPU (default 8; 1: one at a time;
               N slots cost N + 1 KV caches). By default the context comes first: as many
               slots (2 to 8) as fit with the whole context, or with a shorter one down to
@@ -794,6 +802,8 @@ const DEFAULT_CHAT_CTX: usize = 8192;
 const CHAT_HELP: &str = concat!(
     "  /reset          forget the conversation (the system message stays)\n",
     "  /system TEXT    a new system message (forgets the conversation)\n",
+    "  /save [FILE]    save the conversation and its cache (to FILE, then saves go there)\n",
+    "  /load [FILE]    load a saved conversation (the session file if no FILE)\n",
     "  /exit           quit (or Ctrl-D)\n",
     "  end a line with \\ (or press Alt-Enter) to go on with the message on a new line;\n",
     "  pasted text stays one message, line breaks and all; //text sends /text\n",
@@ -807,7 +817,7 @@ const CHAT_HELP: &str = concat!(
 /// stdin is a message; on a terminal it's an interactive session.
 fn run_chat(args: &[String]) -> std::io::Result<()> {
     const CHAT_USAGE: &str = "usage: axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K] \
-         [--draft-model PATH] [--device D] [--gpu-layers N] [--gpus L] [--kv T]";
+         [--draft-model PATH] [--device D] [--gpu-layers N] [--gpus L] [--kv T] [--session FILE]";
     let Some(path) = args.get(2).filter(|p| !p.starts_with('-')) else {
         fail(CHAT_USAGE);
     };
@@ -821,6 +831,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     let mut gpu_layers = None;
     let mut kv = kv_env();
     let mut sargs = sample::SampleArgs::default();
+    let mut session = None;
     let mut i = 3;
     while i < args.len() {
         let f = args[i].as_str();
@@ -847,6 +858,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
                 | "--gpu-layers"
                 | "--kv"
                 | "--gpus"
+                | "--session"
         ) {
             fail(&format!("unknown argument '{f}' for chat"));
         }
@@ -855,6 +867,11 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         };
         if f == "--system" {
             system = Some(v.clone());
+        } else if f == "--session" {
+            if v.is_empty() {
+                fail("--session needs a path");
+            }
+            session = Some(std::path::PathBuf::from(v));
         } else if f == "--draft-model" {
             draft_path = Some(v.clone()).filter(|v| !v.is_empty());
             if draft_path.is_none() {
@@ -965,10 +982,31 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     let drafts = dm.as_ref().map_or(String::new(), |d| {
         format!(" | draft model {} K={max_draft}", d.name())
     });
+    // A session's identity: the model file, hashed once (then remembered).
+    let model_ident = std::cell::OnceCell::new();
+    let head_dim = kvsave::KvIo::kv_shape(&net).2;
+    let mk_session = |p: std::path::PathBuf| -> std::io::Result<kvsave::Session> {
+        let m = match model_ident.get() {
+            Some(m) => m,
+            None => {
+                let m = kvsave::model_ident(&model, std::path::Path::new(path), head_dim)?;
+                model_ident.get_or_init(|| m)
+            }
+        };
+        Ok(kvsave::Session::new(p, m.clone()))
+    };
+    let explicit_seed = sargs.seed;
+    let sess = ChatSession {
+        make: &mk_session,
+        cur: None,
+        start: session,
+        explicit_seed,
+    };
     match chat_repl(
         &mut conv,
         &tok,
         &format!("{name} | ctx {ctx}{kvs}{seed}{drafts}"),
+        sess,
     ) {
         // stdout went away (a closed pipe): nobody is listening.
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
@@ -999,6 +1037,70 @@ fn read_piped_message(input: &mut impl std::io::BufRead) -> std::io::Result<(Str
     }
 }
 
+/// `axon chat`'s session file (--session, /save, /load).
+struct ChatSession<'a> {
+    make: &'a dyn Fn(std::path::PathBuf) -> std::io::Result<kvsave::Session>,
+    cur: Option<kvsave::Session>,
+    /// --session: loaded (if it exists) before the first message.
+    start: Option<std::path::PathBuf>,
+    /// --seed: wins over a loaded session's seed.
+    explicit_seed: Option<u64>,
+}
+
+impl ChatSession<'_> {
+    /// Load `p` into `conv`; a note saying how, or why not.
+    fn load<M: kvsave::KvIo>(
+        &mut self,
+        conv: &mut chat::Chat<'_, M>,
+        p: std::path::PathBuf,
+        new_ok: bool,
+    ) -> String {
+        let mut s = match (self.make)(p.clone()) {
+            Ok(s) => s,
+            Err(e) => return format!("axon: session {}: {e}", p.display()),
+        };
+        let shown = p.display().to_string();
+        match conv.load_session(&mut s) {
+            Ok(None) if new_ok => {
+                self.cur = Some(s);
+                format!("(new session {shown})")
+            }
+            Ok(None) => format!("axon: no session file {shown}"),
+            Ok(Some(r)) => {
+                if let (Some(seed), Some(smp)) = (self.explicit_seed, conv.sampler.as_mut())
+                    && smp.cfg.seed != seed
+                {
+                    *smp = sample::Sampler::new(sample::SampleCfg { seed, ..smp.cfg });
+                }
+                self.cur = Some(s);
+                let how = if r.from_file {
+                    "loaded from the file".to_string()
+                } else {
+                    format!(
+                        "prefilled again ({})",
+                        r.why.as_deref().unwrap_or("no cache in the file")
+                    )
+                };
+                format!(
+                    "(session {shown}: {} positions {how} in {:.0} ms{})",
+                    r.positions,
+                    r.secs * 1e3,
+                    if r.rng { "; sampler continues" } else { "" }
+                )
+            }
+            Err(e) => format!("axon: session {shown}: {e}"),
+        }
+    }
+
+    /// Save to the current file, if any: a note on failure only.
+    fn save<M: kvsave::KvIo>(&mut self, conv: &chat::Chat<'_, M>) -> Option<String> {
+        let s = self.cur.as_mut()?;
+        conv.save_session(s)
+            .err()
+            .map(|e| format!("axon: saving {}: {e}", s.path.display()))
+    }
+}
+
 /// The `chat` read-reply loop. Output goes through `write!`, not `print!`,
 /// so a closed stdout is an error to return rather than a panic.
 ///
@@ -1007,10 +1109,11 @@ fn read_piped_message(input: &mut impl std::io::BufRead) -> std::io::Result<(Str
 /// streams are polled for between tokens, Ctrl-C stopping the reply and the
 /// rest replayed at the next prompt. Raw mode means "\r\n" for each "\n".
 /// Piped, each line of stdin is a message and SIGINT stops a reply.
-fn chat_repl<M: Lm>(
+fn chat_repl<M: kvsave::KvIo>(
     conv: &mut chat::Chat<'_, M>,
     tok: &tokenizer::Tokenizer,
     banner: &str,
+    mut sess: ChatSession,
 ) -> std::io::Result<()> {
     use std::io::{IsTerminal, Write};
 
@@ -1036,6 +1139,15 @@ fn chat_repl<M: Lm>(
     } else {
         None
     };
+    if let Some(p) = sess.start.take() {
+        let n = sess.load(conv, p, true);
+        if n.starts_with("axon:") {
+            // A session that can't be used isn't overwritten: stop here.
+            note(&n);
+            return Err(std::io::Error::other("--session: not loaded"));
+        }
+        note(&format!("{dim}{n}{undim}"));
+    }
     let mut editor = lineedit::LineReader::default();
     let typeahead = std::cell::RefCell::new(std::collections::VecDeque::new());
     let mut input = stdin.lock();
@@ -1064,12 +1176,58 @@ fn chat_repl<M: Lm>(
                 "reset" | "clear" => {
                     conv.reset();
                     note(&format!("{dim}(conversation cleared){undim}"));
+                    if let Some(e) = sess.save(conv) {
+                        note(&e);
+                    }
+                }
+                "save" => {
+                    let arg = arg.trim();
+                    if !arg.is_empty() {
+                        match (sess.make)(arg.into()) {
+                            Ok(s) => sess.cur = Some(s),
+                            Err(e) => note(&format!("axon: {e}")),
+                        }
+                    }
+                    match &sess.cur {
+                        None => note("axon: usage: /save FILE (no session file yet)"),
+                        Some(s) => {
+                            let shown = s.path.display().to_string();
+                            match sess.save(conv) {
+                                Some(e) => note(&e),
+                                None => note(&format!("{dim}(saved {shown}){undim}")),
+                            }
+                        }
+                    }
+                }
+                "load" => {
+                    let arg = arg.trim();
+                    let p = if arg.is_empty() {
+                        sess.cur.as_ref().map(|s| s.path.clone())
+                    } else {
+                        Some(arg.into())
+                    };
+                    match p {
+                        None => note("axon: usage: /load FILE"),
+                        Some(p) => {
+                            let n = sess.load(conv, p, false);
+                            if n.starts_with("axon:") {
+                                note(&n);
+                            } else {
+                                note(&format!("{dim}{n}{undim}"));
+                            }
+                        }
+                    }
                 }
                 "system" if arg.trim().is_empty() => note("axon: usage: /system TEXT"),
                 "system" => match conv.set_system(Some(arg.trim())) {
-                    Ok(()) => note(&format!(
-                        "{dim}(new system message; conversation cleared){undim}"
-                    )),
+                    Ok(()) => {
+                        note(&format!(
+                            "{dim}(new system message; conversation cleared){undim}"
+                        ));
+                        if let Some(e) = sess.save(conv) {
+                            note(&e);
+                        }
+                    }
                     Err(e) => note(&format!("axon: {e}")),
                 },
                 "help" | "?" => note(CHAT_HELP),
@@ -1124,6 +1282,9 @@ fn chat_repl<M: Lm>(
         };
         write!(out, "{}{nl}", stream.finish().replace('\n', nl))?;
         out.flush()?;
+        if let Some(e) = sess.save(conv) {
+            note(&e);
+        }
         let rate = |n: usize, s: f64| if s > 0.0 { n as f64 / s } else { 0.0 };
         let (used, size) = conv.used();
         let mut notes = String::new();

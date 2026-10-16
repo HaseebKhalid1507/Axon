@@ -248,6 +248,19 @@ impl Sampler {
         }
     }
 
+    /// The RNG's state (kvsave: a saved chat's sampler continues its stream).
+    pub fn rng_state(&self) -> [u64; 4] {
+        self.rng.0
+    }
+
+    /// A sampler whose RNG is at `state` (`rng_state`).
+    pub fn with_rng_state(cfg: SampleCfg, state: [u64; 4]) -> Sampler {
+        Sampler {
+            cfg,
+            rng: Rng(state),
+        }
+    }
+
     /// The next token from a position's candidates; takes one number from
     /// the RNG, always.
     pub fn pick(&mut self, c: &[Cand]) -> u32 {

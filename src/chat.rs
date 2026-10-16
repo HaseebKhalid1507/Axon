@@ -72,6 +72,7 @@
 //! <start_of_turn>model\n{reply}<end_of_turn>\n
 //! ```
 
+use crate::kvsave::{self, Hasher, KvIo, SaveInfo, Session};
 use crate::lm::Lm;
 use crate::sample::Sampler;
 use crate::spec::PromptLookup;
@@ -356,6 +357,183 @@ pub struct Chat<'a, M: Lm> {
     pub drafter: Option<Box<dyn crate::draft::Draft + 'a>>,
     /// How replies pick tokens (its RNG runs on across replies); None = greedy.
     pub sampler: Option<Sampler>,
+    /// `vocab_id`, once computed.
+    vocab: std::cell::OnceCell<String>,
+}
+
+/// What `Chat::load_session` did.
+#[derive(Debug)]
+pub struct Restored {
+    /// Positions in the cache after it.
+    pub positions: usize,
+    /// Their rows came from the file (else they were prefilled again, for
+    /// `why`).
+    pub from_file: bool,
+    pub why: Option<String>,
+    /// The sampler continues the saved one's random stream.
+    pub rng: bool,
+    pub secs: f64,
+}
+
+impl<M: KvIo> Chat<'_, M> {
+    /// A hash of the vocabulary: a session's tokens only mean something to
+    /// the tokenizer that made them.
+    fn vocab_id(&self) -> String {
+        self.vocab
+            .get_or_init(|| {
+                let mut h = Hasher::default();
+                for id in 0..self.net.vocab() as u32 {
+                    let b = self.tok.decode_bytes(&[id]);
+                    h.update(&(b.len() as u64).to_le_bytes());
+                    h.update(&b);
+                }
+                format!("{:016x}-{}", h.finish(), self.net.vocab())
+            })
+            .clone()
+    }
+
+    /// The conversation as JSON (a session file's STATE).
+    fn state(&self) -> serde_json::Value {
+        serde_json::json!({
+            "vocab": self.vocab_id(),
+            "hist": self.hist,
+            "fed": self.fed,
+            "sys": self.sys,
+            "turns": self.turns,
+            "system": self.system,
+            "msgs": self.msgs,
+            "sampler": self.sampler.as_ref().map(|s| serde_json::json!({
+                "cfg": format!("{:?}", s.cfg),
+                "seed": s.cfg.seed,
+                "rng": s.rng_state(),
+            })),
+        })
+    }
+
+    /// Save the conversation and its cache to `s`'s file: the positions
+    /// new since the last save are appended, else the file is rewritten.
+    pub fn save_session(&self, s: &mut Session) -> io::Result<SaveInfo> {
+        let ident = kvsave::identity(s.model(), self.net.kv_ident(&self.cache));
+        let (net, cache) = (self.net, &self.cache);
+        s.save(
+            ident.as_ref(),
+            &self.hist[..self.fed],
+            &mut |lo, hi, w| net.kv_save(cache, lo, hi, w),
+            &self.state(),
+        )
+    }
+
+    /// Replace the conversation with `s`'s file's: its cache rows loaded if
+    /// they were made under this identity, else its tokens prefilled again
+    /// (the same rows either way). The sampler continues the saved random
+    /// stream if its settings, seed aside, are the same. Ok(None) if there
+    /// is no file; Err if it can't be used (the conversation is unchanged).
+    pub fn load_session(&mut self, s: &mut Session) -> io::Result<Option<Restored>> {
+        let t0 = Instant::now();
+        let ident = kvsave::identity(s.model(), self.net.kv_ident(&self.cache));
+        let Some(l) = s.read(ident.as_ref())? else {
+            return Ok(None);
+        };
+        let st = &l.state;
+        let bad = |m: &str| io::Error::new(io::ErrorKind::InvalidData, format!("session: {m}"));
+        if st["vocab"].as_str() != Some(&self.vocab_id()) {
+            return Err(bad(
+                "it was made with another vocabulary (another model family)",
+            ));
+        }
+        // Every number is checked before use: a damaged or hostile file is
+        // an error, never a panic or a wrong cache.
+        let us = |v: &serde_json::Value| v.as_u64().and_then(|x| usize::try_from(x).ok());
+        let list = |v: &serde_json::Value| -> Option<Vec<usize>> {
+            v.as_array()?.iter().map(us).collect()
+        };
+        let vocab = self.net.vocab();
+        let hist: Vec<u32> = list(&st["hist"])
+            .filter(|h| h.iter().all(|&t| t < vocab))
+            .ok_or_else(|| bad("no history, or tokens out of the vocabulary"))?
+            .into_iter()
+            .map(|t| t as u32)
+            .collect();
+        let (fed, sys, kv) = (
+            us(&st["fed"]).ok_or_else(|| bad("no fed"))?,
+            us(&st["sys"]).ok_or_else(|| bad("no sys"))?,
+            us(&st["kv"]).ok_or_else(|| bad("no kv"))?,
+        );
+        let turns = list(&st["turns"]).ok_or_else(|| bad("no turns"))?;
+        let msgs: Vec<(String, usize)> =
+            serde_json::from_value(st["msgs"].clone()).map_err(|e| bad(&e.to_string()))?;
+        let system = st["system"].as_str().map(str::to_owned);
+        // Exchange i spans turns[i]..turns[i + 1] (the last: ..hist.len())
+        // and opens with its framed message, msgs[i].1 tokens.
+        let spans_ok = turns.iter().enumerate().all(|(i, &t)| {
+            let end = turns.get(i + 1).copied().unwrap_or(hist.len());
+            t <= end && msgs.get(i).is_some_and(|m| m.1 <= end - t)
+        });
+        if fed > hist.len()
+            || sys > hist.len()
+            || (kv != 0 && kv != fed)
+            || msgs.len() != turns.len()
+            || turns.first().is_some_and(|&t| t != sys)
+            || turns.last().is_some_and(|&t| t > hist.len())
+            || !spans_ok
+        {
+            return Err(bad("an inconsistent conversation"));
+        }
+        if hist.len() >= self.ctx {
+            return Err(bad(&format!(
+                "the conversation is {} tokens; it needs --ctx {} or more",
+                hist.len(),
+                hist.len() + 1
+            )));
+        }
+        let mut rng = false;
+        if let (Some(cur), Some(saved)) = (self.sampler.as_mut(), st["sampler"].as_object()) {
+            let seed = saved["seed"].as_u64().unwrap_or(0);
+            let mut cfg = cur.cfg;
+            cfg.seed = seed;
+            let state: Option<[u64; 4]> = serde_json::from_value(saved["rng"].clone()).ok();
+            if let Some(state) = state
+                && saved["cfg"].as_str() == Some(&format!("{cfg:?}"))
+            {
+                *cur = Sampler::with_rng_state(cfg, state);
+                rng = true;
+            }
+        }
+        self.hist = hist;
+        self.sys = sys;
+        self.turns = turns;
+        self.msgs = msgs;
+        self.system = system;
+        self.lookup = PromptLookup::new();
+        self.fed = 0;
+        let mut why = (kv == 0).then(|| "the file holds no cache".to_string());
+        if why.is_none() {
+            let (net, cache) = (self.net, &mut self.cache);
+            match s.load(&l, &self.hist[..kv], &mut |lo, hi, r| {
+                net.kv_load(cache, lo, hi, r)
+            }) {
+                Ok(()) => self.fed = fed,
+                Err(e) => why = Some(e.to_string()),
+            }
+        }
+        let from_file = why.is_none();
+        if !from_file {
+            // The same rows by prefill (cache == fresh prefill).
+            s.forget();
+            let pb = self.net.prefill_batch();
+            for (i, b) in self.hist[..fed].chunks(pb).enumerate() {
+                self.net.feed_batch(b, i * pb, &mut self.cache);
+            }
+            self.fed = fed;
+        }
+        Ok(Some(Restored {
+            positions: self.fed,
+            from_file,
+            why,
+            rng,
+            secs: t0.elapsed().as_secs_f64(),
+        }))
+    }
 }
 
 /// `<|im_start|>{role}\n{text}<|im_end|>\n`, then `<|im_start|>{next}\n` if
@@ -435,6 +613,7 @@ impl<'a, M: Lm> Chat<'a, M> {
             max_draft: 0,
             drafter: None,
             sampler: None,
+            vocab: std::cell::OnceCell::new(),
         };
         c.set_system(system)?;
         Ok(c)
@@ -1058,6 +1237,284 @@ mod tests {
                 assert_eq!(r.ids, want, "{msg:?} max_reply {max_reply} k {k}");
             }
         }
+    }
+
+    /// A scratch session file path for a test (removed first).
+    fn session_path(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("axon-kvsave-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(format!("{tag}.axkv"));
+        let _ = std::fs::remove_file(&p);
+        p
+    }
+
+    /// kvsave's exactness: a conversation saved after every reply and
+    /// continued each turn by a new `Chat` loaded from the file gives the
+    /// uninterrupted conversation's replies, token for token (sampled too:
+    /// the sampler's stream is saved), with the cache from the file and
+    /// appended to after the first save; and the same when the file's
+    /// identity doesn't match (its tokens prefilled again instead). Then a
+    /// /reset (the file rewritten) and one more turn, loaded again.
+    /// The cache image (`kv_save`) of a chat's positions 0..fed.
+    fn cache_image<M: crate::kvsave::KvIo>(c: &Chat<M>) -> Vec<u8> {
+        let mut v = Vec::new();
+        c.net.kv_save(&c.cache, 0, c.fed, &mut v).unwrap();
+        v
+    }
+
+    fn session_continues<M: crate::kvsave::KvIo>(
+        net: &M,
+        tok: &Tokenizer,
+        model: serde_json::Value,
+        tag: &str,
+    ) {
+        use crate::kvsave::Session;
+        use crate::sample::{SampleArgs, Sampler};
+        for sampled in [false, true] {
+            let mk = || {
+                let mut c = Chat::new(net, tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+                c.max_reply = 24;
+                c.max_draft = round_draft(3);
+                if sampled {
+                    let mut a = SampleArgs::default();
+                    a.set("--seed", Some("7")).unwrap();
+                    c.sampler = a.resolve(0.8).map(Sampler::new);
+                }
+                c
+            };
+            let say =
+                |c: &mut Chat<M>, msg: &str| c.reply(msg, &|| false, &mut |_| Ok(())).unwrap().ids;
+            let mut a = mk();
+            let mut want: Vec<Vec<u32>> = MSGS.iter().map(|m| say(&mut a, m)).collect();
+            a.reset();
+            want.push(say(&mut a, MSGS[0]));
+            for mismatch in [false, true] {
+                let what = format!("{tag} sampled {sampled} mismatch {mismatch}");
+                let path = session_path(&format!("{tag}-{sampled}-{mismatch}"));
+                let mut ident = model.clone();
+                let mut b = mk();
+                let mut s = Session::new(path.clone(), ident.clone());
+                let mut got = vec![say(&mut b, MSGS[0])];
+                assert!(b.save_session(&mut s).unwrap().rewrote);
+                // The saved cache, byte for byte: what a load must give back
+                // (from the file, or by prefilling again).
+                let mut saved = (b.fed, cache_image(&b));
+                drop(b);
+                if mismatch {
+                    // As if another model file (same vocabulary) had made it.
+                    ident["model"] = serde_json::json!("another");
+                }
+                for (i, msg) in MSGS.iter().enumerate().skip(1) {
+                    let mut c = mk();
+                    let mut s = Session::new(path.clone(), ident.clone());
+                    let r = c.load_session(&mut s).unwrap().unwrap();
+                    assert_eq!(r.from_file, !mismatch || i > 1, "{what} turn {i}: {r:?}");
+                    assert_eq!(c.fed, saved.0, "{what} turn {i}");
+                    assert!(
+                        cache_image(&c) == saved.1,
+                        "{what} turn {i}: cache image differs"
+                    );
+                    assert_eq!(r.rng, sampled, "{what}");
+                    if mismatch && i == 1 {
+                        assert!(r.why.as_ref().unwrap().contains("model"), "{what}: {r:?}");
+                    }
+                    got.push(say(&mut c, msg));
+                    let info = c.save_session(&mut s).unwrap();
+                    // After a fallback the file is rewritten under our identity.
+                    assert_eq!(
+                        info.rewrote,
+                        mismatch && i == 1,
+                        "{what} turn {i}: {info:?}"
+                    );
+                    assert!(info.kv_written > 0, "{what}");
+                    saved = (c.fed, cache_image(&c));
+                    if i + 1 == MSGS.len() {
+                        c.reset();
+                        assert!(c.save_session(&mut s).unwrap().rewrote, "{what}");
+                        saved = (c.fed, cache_image(&c));
+                    }
+                }
+                let mut c = mk();
+                let mut s = Session::new(path.clone(), ident.clone());
+                assert!(c.load_session(&mut s).unwrap().unwrap().from_file, "{what}");
+                assert!(
+                    c.fed == saved.0 && cache_image(&c) == saved.1,
+                    "{what}: after reset"
+                );
+                got.push(say(&mut c, MSGS[0]));
+                assert_eq!(got, want, "{what}");
+                let _ = std::fs::remove_file(&path);
+            }
+        }
+    }
+
+    #[test]
+    fn session_continues_cpu() {
+        let Some(m) = crate::testutil::model() else {
+            return;
+        };
+        let tok = Tokenizer::from_gguf(&m);
+        let net = Qwen2::new(&m);
+        let path = crate::testutil::model_path().unwrap();
+        let ident = crate::kvsave::model_ident(&m, &path, net.head_dim).unwrap();
+        session_continues(&net, &tok, ident, "cpu");
+    }
+
+    /// A damaged or hostile STATE is an error, never a panic or a wrong
+    /// cache: each field broken in turn, written as a valid record.
+    #[test]
+    fn session_hostile_state() {
+        use crate::kvsave::{KvIo, Session};
+        use serde_json::json;
+        let Some(m) = crate::testutil::model() else {
+            return;
+        };
+        let tok = Tokenizer::from_gguf(&m);
+        let net = Qwen2::new(&m);
+        let mut c = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), 512).unwrap();
+        c.max_reply = 8;
+        c.reply(MSGS[0], &|| false, &mut |_| Ok(())).unwrap();
+        c.reply(MSGS[1], &|| false, &mut |_| Ok(())).unwrap();
+        let good = c.state();
+        let path = session_path("hostile");
+        let ident = json!({"model": "m"});
+        let id = crate::kvsave::identity(&ident, net.kv_ident(&c.cache));
+        let n = good["hist"].as_array().unwrap().len();
+        let mut cases: Vec<(&str, serde_json::Value, usize)> = Vec::new();
+        let fed = c.fed;
+        let mut set = |what, f: &dyn Fn(&mut serde_json::Value), kv: usize| {
+            let mut v = good.clone();
+            f(&mut v);
+            cases.push((what, v, kv));
+        };
+        set(
+            "token past the vocabulary",
+            &|v| v["hist"][3] = json!(1u64 << 40),
+            fed,
+        );
+        set(
+            "token at the vocabulary",
+            &|v| v["hist"][3] = json!(crate::lm::Lm::vocab(&net)),
+            fed,
+        );
+        set("fed past hist", &|v| v["fed"] = json!(n + 5), fed);
+        set("kv != fed", &|_| {}, fed - 5);
+        set(
+            "msg framing past its exchange",
+            &|v| v["msgs"][0][1] = json!(1_000_000_000u64),
+            fed,
+        );
+        set(
+            "msg framing past the next exchange",
+            &|v| v["msgs"][0][1] = json!(n),
+            fed,
+        );
+        set(
+            "first exchange not after the system block",
+            &|v| v["turns"][0] = json!(1),
+            fed,
+        );
+        set(
+            "turns out of order",
+            &|v| v["turns"] = json!([v["turns"][1].clone(), v["turns"][0].clone()]),
+            fed,
+        );
+        set("msgs/turns count", &|v| v["msgs"] = json!([]), fed);
+        set("sys past hist", &|v| v["sys"] = json!(n + 1), fed);
+        set("not numbers", &|v| v["turns"] = json!(["x"]), fed);
+        set(
+            "too long for the context",
+            &|v| v["hist"] = json!(vec![1u32; 600]),
+            fed,
+        );
+        set("no fed", &|v| v["fed"] = json!(null), fed);
+        for (what, st, kv) in cases {
+            let toks = c.hist[..kv].to_vec();
+            let (net2, cache) = (c.net, &c.cache);
+            Session::new(path.clone(), ident.clone())
+                .save(
+                    id.as_ref(),
+                    &toks,
+                    &mut |lo, hi, w| net2.kv_save(cache, lo, hi, w),
+                    &st,
+                )
+                .unwrap();
+            let mut d = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), 512).unwrap();
+            let r = d.load_session(&mut Session::new(path.clone(), ident.clone()));
+            assert!(
+                r.is_err(),
+                "{what}: {:?}",
+                r.map(|r| r.map(|r| r.positions))
+            );
+            // Unchanged, still usable.
+            assert_eq!(d.hist.len(), d.sys, "{what}");
+            d.max_reply = 4;
+            d.reply(MSGS[2], &|| false, &mut |_| Ok(())).unwrap();
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn session_continues_cuda_f16_q8() {
+        use crate::cuda::qwen2::{CacheKv, CudaQwen2};
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let Some(m) = crate::testutil::model() else {
+            return;
+        };
+        let km = crate::cuda::Kernels::module(&g).unwrap();
+        let tok = Tokenizer::from_gguf(&m);
+        let path = crate::testutil::model_path().unwrap();
+        for (kv, tag) in [
+            (CacheKv::F16, "cuda-f16"),
+            (CacheKv::Q8 { group: 0 }, "cuda-q8"),
+        ] {
+            let net = CudaQwen2::with_kv(&g, &km, &m, 2048, kv, false).unwrap();
+            let ident = crate::kvsave::model_ident(&m, &path, net.head_dim).unwrap();
+            session_continues(&net, &tok, ident, tag);
+        }
+    }
+
+    /// A file made on the CPU isn't loaded as bytes on the GPU (another
+    /// backend: the rows would differ), but its conversation continues.
+    #[test]
+    fn session_cpu_file_on_cuda() {
+        use crate::kvsave::Session;
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let Some(m) = crate::testutil::model() else {
+            return;
+        };
+        // The CPU model repacks (and releases) the tensors of its own copy.
+        let mc = crate::testutil::model().unwrap();
+        let km = crate::cuda::Kernels::module(&g).unwrap();
+        let tok = Tokenizer::from_gguf(&m);
+        let gpu = crate::cuda::qwen2::CudaQwen2::new(&g, &km, &m, 2048).unwrap();
+        let cpu = Qwen2::new(&mc);
+        let path = session_path("cpu-to-cuda");
+        let ident = serde_json::json!({"model": "m"});
+        let mut a = Chat::new(&cpu, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+        a.max_reply = 16;
+        a.reply(MSGS[0], &|| false, &mut |_| Ok(())).unwrap();
+        a.save_session(&mut Session::new(path.clone(), ident.clone()))
+            .unwrap();
+        let mut b = Chat::new(&gpu, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
+        b.max_reply = 16;
+        let r = b
+            .load_session(&mut Session::new(path.clone(), ident))
+            .unwrap()
+            .unwrap();
+        assert!(
+            !r.from_file && r.why.as_ref().unwrap().contains("backend"),
+            "{r:?}"
+        );
+        assert_eq!(b.hist, a.hist);
+        let got = b.reply(MSGS[1], &|| false, &mut |_| Ok(())).unwrap().ids;
+        let prompt = &b.hist[..b.hist.len() - got.len() - 2];
+        assert_eq!(got, fresh(b.net, prompt, 16, &b.fr.stop));
+        let _ = std::fs::remove_file(&path);
     }
 
     /// `turns_match_fresh_prefill` split across devices (`--gpu-layers`):
