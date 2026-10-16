@@ -171,6 +171,13 @@ struct Layer<'a> {
     w_gate: Weight<'a>,
     w_up: Weight<'a>,
     w_down: Weight<'a>,
+    /// gemma3: RMSNorm weights of the attention output and of the FFN
+    /// output, applied before each residual add.
+    post_attn_norm: Option<Vec<f32>>,
+    post_ffn_norm: Option<Vec<f32>>,
+    /// gemma3 local layer: attends to the last `window` positions only
+    /// (`window_start`) and uses the local RoPE table.
+    window: Option<usize>,
 }
 
 pub struct Qwen2<'a> {
@@ -183,8 +190,13 @@ pub struct Qwen2<'a> {
     pub q_dim: usize,
     pub vocab: usize,
     eps: f32,
-    /// RoPE frequency per pair (`rope_freqs`).
+    /// RoPE frequency per pair (`rope_freqs`), head_dim / 2 of them; on
+    /// gemma3 with local layers, then theirs (`rope_freqs_swa`).
     freqs: Vec<f64>,
+    /// gemma3: GELU (tanh form) in `glu`, the embedding times sqrt(dim),
+    /// and `freqs` followed by the local layers' table. (Flags, not data:
+    /// `lm::Backend` holds this struct inline, near clippy's size bound.)
+    gemma: bool,
     token_embd: &'a Tensor,
     /// token_embd's bytes (never released: see `Weight::load`)
     embd: &'a [u8],
@@ -287,7 +299,85 @@ fn load_vec(m: &Model, t: &Tensor) -> Vec<f32> {
 /// llama (Llama 2/3.x) is qwen2 without the biases, with its attn_q/attn_k
 /// rows put back in rotate-half order at load (`gguf::rope_unpermute_plan`)
 /// and Llama 3's RoPE frequency factors (`rope_freqs`).
-pub const ARCHS: [&str; 3] = ["qwen2", "qwen3", "llama"];
+/// gemma3 (Gemma 3 1B/4B/12B, llama.cpp src/models/gemma3.cpp) is qwen3
+/// plus: the embedding times sqrt(dim), an RMSNorm on the attention and on
+/// the FFN output before each residual add (`post_attention_norm`,
+/// `post_ffw_norm`), GELU (tanh form) instead of SiLU in the gated FFN,
+/// and sliding-window layers (`Gemma`). Its norm weights are stored with
+/// HF's `1 + w` already added by llama.cpp's converter, so they are plain
+/// RMSNorm weights here.
+pub const ARCHS: [&str; 4] = ["qwen2", "qwen3", "llama", "gemma3"];
+
+/// Gemma 3's layer layout: local (sliding-window) layers attend to the last
+/// `window` positions only (key t is seen from position p iff p - t <
+/// window, llama.cpp's LLAMA_SWA_TYPE_STANDARD) and turn by their own RoPE
+/// table (base `rope.freq_base_swa`, default 10000, never scaled); the
+/// global layers see everything and use `rope.freq_base` with the model's
+/// linear RoPE scaling (`rope_freqs`).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Swa {
+    pub window: usize,
+    /// Per layer: local (true) or global.
+    pub local: Vec<bool>,
+}
+
+/// The sliding-window layout of a gemma3 model (None: every layer global,
+/// llama.cpp's swa_type NONE when the file has no window), as llama.cpp's
+/// `load_swa_pattern(ml, 6)`: an array `attention.sliding_window_pattern`
+/// gives each layer; a number n (default 6) makes layer il local iff
+/// il % n < n - 1 (every n-th layer global).
+pub(crate) fn gemma_swa(m: &Model, n_layers: usize) -> Option<Swa> {
+    if m.arch != "gemma3" {
+        return None;
+    }
+    let window = meta_num(m, "gemma3.attention.sliding_window").filter(|&w| w > 0.0)? as usize;
+    let key = "gemma3.attention.sliding_window_pattern";
+    let local = match m.metadata.iter().find(|(k, _)| k == key).map(|(_, v)| v) {
+        Some(Val::Arr(a)) => (0..n_layers)
+            .map(|i| a.get(i).and_then(|v| v.as_f64()).is_some_and(|v| v != 0.0))
+            .collect(),
+        Some(v) => {
+            let n = v.as_f64().unwrap_or(6.0) as usize;
+            (0..n_layers).map(|i| n == 0 || i % n < n - 1).collect()
+        }
+        None => (0..n_layers).map(|i| i % 6 < 5).collect(),
+    };
+    Some(Swa { window, local })
+}
+
+/// First cache position a layer attends to from position `pos`: 0, or for
+/// a local layer of window w, pos + 1 - w once that is positive.
+#[inline]
+pub(crate) fn window_start(window: Option<usize>, pos: usize) -> usize {
+    window.map_or(0, |w| (pos + 1).saturating_sub(w))
+}
+
+/// Gemma 3's local-layer RoPE frequencies: base `rope.freq_base_swa`
+/// (llama.cpp's default 10000), no scaling.
+pub(crate) fn rope_freqs_swa(m: &Model, head_dim: usize) -> Vec<f64> {
+    let base = meta_num(m, &format!("{}.rope.freq_base_swa", m.arch)).unwrap_or(10000.0);
+    (0..head_dim / 2)
+        .map(|i| base.powf(-2.0 * i as f64 / head_dim as f64))
+        .collect()
+}
+
+/// gemma3's linear RoPE scale for the global layers: 1 / rope.scaling.factor
+/// (or rope.scale_linear) unless the scaling type is "none" (llama.cpp:
+/// rope_freq_scale_train, and freq scale 1 for type none). 1 elsewhere
+/// (`check_supported` refuses scaling on the other architectures).
+fn rope_linear_scale(m: &Model) -> f64 {
+    if m.arch != "gemma3" {
+        return 1.0;
+    }
+    let num = |k: &str| meta_num(m, &format!("{}.{k}", m.arch));
+    let none = m.metadata.iter().any(|(k, v)| {
+        *k == format!("{}.rope.scaling.type", m.arch) && matches!(v, Val::Str(t) if t == "none")
+    });
+    match num("rope.scaling.factor").or(num("rope.scale_linear")) {
+        Some(f) if f != 0.0 && !none => 1.0 / f,
+        _ => 1.0,
+    }
+}
 
 /// RoPE frequency of each pair i < head_dim / 2: base^(-2i/head_dim),
 /// divided by the model's factor for that pair if it has `rope_freqs.weight`
@@ -297,13 +387,15 @@ pub const ARCHS: [&str; 3] = ["qwen2", "qwen3", "llama"];
 pub(crate) fn rope_freqs(m: &Model, head_dim: usize) -> Vec<f64> {
     let base = meta_num(m, &format!("{}.rope.freq_base", m.arch)).unwrap_or(10000.0);
     let factors = find_opt(m, "rope_freqs.weight").map(|t| load_vec(m, t));
+    let scale = rope_linear_scale(m);
     (0..head_dim / 2)
         .map(|i| {
             let f = base.powf(-2.0 * i as f64 / head_dim as f64);
-            match &factors {
+            let f = match &factors {
                 Some(v) => f / v[i] as f64,
                 None => f,
-            }
+            };
+            if scale == 1.0 { f } else { f * scale }
         })
         .collect()
 }
@@ -348,7 +440,7 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
     let bad = |msg: String| std::io::Error::new(std::io::ErrorKind::InvalidData, msg);
     if !ARCHS.contains(&m.arch.as_str()) {
         return Err(bad(format!(
-            "architecture '{}' is not supported (qwen2, qwen3, llama)",
+            "architecture '{}' is not supported (qwen2, qwen3, llama, gemma3)",
             if m.arch.is_empty() { "<none>" } else { &m.arch }
         )));
     }
@@ -408,8 +500,37 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
     // (factor 1, no attention factor). A factor without a type is
     // llama.cpp's linear scaling, so any factor other than 1 is refused.
     let factor = num("rope.scaling.factor").or(num("rope.scale_linear"));
+    let gemma = m.arch == "gemma3";
     if let Some(f) = factor.filter(|&f| f != 1.0 && f != 0.0) {
-        return Err(bad(format!("RoPE scaling (factor {f}) is not supported")));
+        // gemma3's global layers: linear scaling (`rope_linear_scale`).
+        let linear = !m.metadata.iter().any(|(k, v)| {
+            *k == format!("{}.rope.scaling.type", m.arch)
+                && !matches!(v, Val::Str(t) if t == "linear" || t == "none")
+        });
+        if !(gemma && linear && f > 0.0 && f.is_finite()) {
+            return Err(bad(format!("RoPE scaling (factor {f}) is not supported")));
+        }
+    }
+    if gemma {
+        for k in ["final_logit_softcapping", "attn_logit_softcapping"] {
+            if num(k).is_some_and(|v| v != 0.0) {
+                return Err(bad(format!("gemma3 {k} is not supported")));
+            }
+        }
+        // llama.cpp scales gemma3 27B's queries by 1/sqrt(dim / heads), not
+        // 1/sqrt(head_dim) as the attention here does.
+        if n_layers == 62 && dim / n_heads != head_dim {
+            return Err(bad(
+                "gemma3 27B (attention scale 1/sqrt(dim/heads)) is not supported".into(),
+            ));
+        }
+        if let Some(w) = num("attention.sliding_window").filter(|&w| w > 0.0)
+            && (w.fract() != 0.0 || w > u32::MAX as f64)
+        {
+            return Err(bad(format!(
+                "attention.sliding_window {w} is not an integer"
+            )));
+        }
     }
     if let Some(f) = num("rope.scaling.attn_factor").filter(|&f| f != 1.0) {
         return Err(bad(format!(
@@ -501,8 +622,16 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
             if m.arch == "llama" && has {
                 return Err(bad(format!("blk.{i}.{b}: llama has no q/k norm")));
             }
-            if m.arch == "qwen3" || has {
+            if m.arch == "qwen3" || gemma || has {
                 t(b, head_dim, None)?;
+            }
+        }
+        // gemma3's norms of the attention and FFN outputs ("sandwich").
+        for b in ["post_attention_norm.weight", "post_ffw_norm.weight"] {
+            if gemma {
+                t(b, dim, None)?;
+            } else if find_opt(m, &format!("blk.{i}.{b}")).is_some() {
+                return Err(bad(format!("blk.{i}.{b} is not supported on {}", m.arch)));
             }
         }
         // Biases nothing here would add.
@@ -589,6 +718,12 @@ impl<'a> Qwen2<'a> {
             meta_num(m, &key("attention.key_length")).map_or(dim / n_heads, |v| v as usize);
         let eps = meta_num(m, &key("attention.layer_norm_rms_epsilon")).unwrap_or(1e-6) as f32;
         let freqs = rope_freqs(m, head_dim);
+        let gemma = m.arch == "gemma3";
+        let swa = gemma_swa(m, n_layers);
+        let freqs_swa = match &swa {
+            Some(_) => rope_freqs_swa(m, head_dim),
+            None => Vec::new(),
+        };
 
         let token_embd = find(m, "token_embd.weight");
         // ne1 of the embedding matrix is the vocab size.
@@ -681,6 +816,9 @@ impl<'a> Qwen2<'a> {
                 w_gate: w(MATS[4]),
                 w_up: w(MATS[5]),
                 w_down: w(MATS[6]),
+                post_attn_norm: bias("post_attention_norm.weight"),
+                post_ffn_norm: bias("post_ffw_norm.weight"),
+                window: swa.as_ref().filter(|s| s.local[i]).map(|s| s.window),
             }
         });
         drop(layer_slots);
@@ -716,7 +854,8 @@ impl<'a> Qwen2<'a> {
             q_dim: n_heads * head_dim,
             vocab,
             eps,
-            freqs,
+            freqs: [freqs, freqs_swa].concat(),
+            gemma,
             token_embd,
             embd: m.tensor_data(token_embd),
             output_norm,
@@ -921,7 +1060,7 @@ impl<'a> Qwen2<'a> {
             let ub = &mut ub[..k];
             self.rows_vec(gate, r, &xq, ys, cfg, own_all);
             self.rows_vec(up, r, &xq, ub, cfg, own_all);
-            vmath::swiglu(ys, ub);
+            self.glu(ys, ub);
         });
         out
     }
@@ -1187,7 +1326,7 @@ impl<'a> Qwen2<'a> {
                         let gr = &g.2[r * g.1..(r + 1) * g.1];
                         let ur = &u.2[r * u.1..(r + 1) * u.1];
                         dot_rows_q8_multi([g.0, u.0], [gr, ur], &xr, [&mut *yr, &mut *uv]);
-                        vmath::swiglu(yr, uv);
+                        self.glu(yr, uv);
                     }
                 });
             });
@@ -1205,12 +1344,40 @@ impl<'a> Qwen2<'a> {
                     self.rows_batch(gate, r0, xt, t1 - t0, ys);
                     self.rows_batch(up, r0, xt, t1 - t0, uv);
                     for (yr, ur) in ys.chunks_mut(st).zip(uv.chunks(st)) {
-                        vmath::swiglu(&mut yr[..t1 - t0], &ur[..t1 - t0]);
+                        self.glu(&mut yr[..t1 - t0], &ur[..t1 - t0]);
                     }
                 });
             });
         }
         (out, slots)
+    }
+
+    /// The gated FFN's combine in place: g = act(g) * u, act SiLU, or
+    /// GELU (tanh form) on gemma3.
+    #[inline]
+    fn glu(&self, g: &mut [f32], u: &[f32]) {
+        if self.gemma {
+            vmath::geglu(g, u);
+        } else {
+            vmath::swiglu(g, u);
+        }
+    }
+
+    /// gemma3's post-norm of a matmul output in (row, slot) layout: each
+    /// token b < nb's column replaced by `rmsnorm` of it with `w`, the same
+    /// call as the one-token path's on the same values.
+    fn norm_cols(&self, y: &mut [f32], slots: usize, nb: usize, w: &[f32]) {
+        let dim = self.dim;
+        let cols = par_map(nb, dim, |b| self.rmsnorm(&gather_col(y, slots, b, dim), w));
+        let rows = 64;
+        pool::for_each_chunk_mut(&mut y[..dim * slots], rows * slots, |c, ys| {
+            for (j, yr) in ys.chunks_exact_mut(slots).enumerate() {
+                let r = c * rows + j;
+                for (b, col) in cols.iter().enumerate() {
+                    yr[b] = col[r];
+                }
+            }
+        });
     }
 
     /// RMSNorm: scale x so its root-mean-square is 1, then multiply by a learned weight.
@@ -1230,7 +1397,16 @@ impl<'a> Qwen2<'a> {
     /// spins fast, high i spins slowly. Every head in every layer uses the
     /// same angles, so this runs once a token.
     fn rope_table(&self, pos: usize) -> Vec<(f32, f32)> {
-        self.freqs
+        Self::rope_table_of(&self.freqs[..self.head_dim / 2], pos)
+    }
+
+    /// `rope_table` of gemma3's local layers (`freqs_swa`; empty if none).
+    fn rope_table_swa(&self, pos: usize) -> Vec<(f32, f32)> {
+        Self::rope_table_of(&self.freqs[self.head_dim / 2..], pos)
+    }
+
+    fn rope_table_of(freqs: &[f64], pos: usize) -> Vec<(f32, f32)> {
+        freqs
             .iter()
             .map(|&freq| {
                 let angle = pos as f64 * freq;
@@ -1282,6 +1458,14 @@ impl<'a> Qwen2<'a> {
             &self.embd[t * rb..(t + 1) * rb],
             &mut x,
         );
+        if self.gemma {
+            // llama.cpp's build_inp_embd(tok_embd, sqrtf(n_embd)): an f32
+            // multiply.
+            let sc = (self.dim as f32).sqrt();
+            for v in &mut x {
+                *v *= sc;
+            }
+        }
         x
     }
 
@@ -1360,6 +1544,10 @@ impl<'a> Qwen2<'a> {
         // core. Same ops on the same values as `hidden`, in the same order.
         let mut xs: Vec<Vec<f32>> = par_map(nb, dim, |b| self.embed(tokens[b]));
         let ropes: Vec<_> = par_map(nb, hd * 16, |b| self.rope_table(start + b));
+        let ropes_swa: Vec<_> = match self.freqs.len() > hd / 2 {
+            false => Vec::new(),
+            true => par_map(nb, hd * 16, |b| self.rope_table_swa(start + b)),
+        };
         let q_dim = self.q_dim;
         // Reused across layers; every element is overwritten before it's read.
         let mut qbuf = vec![0.0f32; nb * q_dim];
@@ -1414,7 +1602,11 @@ impl<'a> Qwen2<'a> {
                             if let Some(bias) = &layer.bv {
                                 add_assign(v, bias);
                             }
-                            self.qk_rope(layer, q, k, &ropes[b]);
+                            let rope = match layer.window {
+                                Some(_) => &ropes_swa[b],
+                                None => &ropes[b],
+                            };
+                            self.qk_rope(layer, q, k, rope);
                             KvElem::store(kd, k);
                             KvElem::store(vd, v);
                         }
@@ -1430,19 +1622,26 @@ impl<'a> Qwen2<'a> {
                 // them. Token b sees positions 0..=start + b only. Per query head
                 // the arithmetic is exactly `hidden`'s: same dot, same softmax
                 // order, same fused `o += w v` order over t (`attend_group`).
+                // A gemma3 local layer sees positions s0..=start + b only
+                // (`window_start`), the same slice as `hidden`'s.
                 pool::for_each_chunk_mut_rev(&mut att, qn, |c, out| {
                     let (b, kvh) = (c / n_kv, c % n_kv);
                     let np = start + b + 1;
+                    let s0 = window_start(layer.window, start + b) * kv_dim;
                     let qg = &qs[b * q_dim + kvh * qn..b * q_dim + (kvh + 1) * qn];
-                    attend_group(qg, kc, vc, kv_dim, hd, kvh, np, out);
+                    let (kw, vw) = (&kc[s0..], &vc[s0..]);
+                    attend_group(qg, kw, vw, kv_dim, hd, kvh, np - s0 / kv_dim, out);
                 });
             });
             qkv_buf = qkv;
 
             let att_rows: Vec<&[f32]> = att.chunks(q_dim).collect();
             let aq = Self::quantize_batch(&att_rows, &[layer.wo.qt()]);
-            let (os, _, slots) = self.matmul_q_in([&layer.wo], &aq, std::mem::take(&mut o_buf));
+            let (mut os, _, slots) = self.matmul_q_in([&layer.wo], &aq, std::mem::take(&mut o_buf));
             drop(aq);
+            if let Some(w) = &layer.post_attn_norm {
+                self.norm_cols(&mut os, slots, nb, w);
+            }
 
             let types = [layer.w_gate.qt(), layer.w_up.qt()];
             let res = (os, slots);
@@ -1453,7 +1652,10 @@ impl<'a> Qwen2<'a> {
             drop(hq);
             let aq = Self::quantize_cols(&acts, a_slots, nb, &[layer.w_down.qt()]);
             act_buf = acts;
-            let down = self.matmul_q_in([&layer.w_down], &aq, std::mem::take(&mut down_buf));
+            let mut down = self.matmul_q_in([&layer.w_down], &aq, std::mem::take(&mut down_buf));
+            if let Some(w) = &layer.post_ffn_norm {
+                self.norm_cols(&mut down.0, down.2, nb, w);
+            }
             pending = Some((down.0, down.2));
         }
         if let Some((y, slots)) = pending {
@@ -1506,10 +1708,10 @@ impl<'a> Qwen2<'a> {
         let mut x = self.embed(token);
 
         let rope = self.rope_table(pos);
+        let rope_swa = self.rope_table_swa(pos);
         // Attention scratch (step 5), kept on this thread across tokens so
         // decode attention allocates nothing once warm.
         let np = pos + 1;
-        let tile = decode_tile(np, self.n_kv_heads);
         let threads = Pool::global().threads();
         let (mut buf, mut att_out) = DECODE.take();
         att_out.resize(self.q_dim, 0.0);
@@ -1530,7 +1732,12 @@ impl<'a> Qwen2<'a> {
 
             // 3. Rotate q and k by position (RoPE), one head at a time, each
             //    head RMS-normalized first if the model says so (qwen3).
-            self.qk_rope(layer, &mut q, &mut k, &rope);
+            let table = if layer.window.is_some() {
+                &rope_swa
+            } else {
+                &rope
+            };
+            self.qk_rope(layer, &mut q, &mut k, table);
 
             // 4. Store this position's k and v in the cache so later tokens can see them.
             //    (rounded to the cache's type: f16 unless AXON_KV=f32).
@@ -1541,14 +1748,17 @@ impl<'a> Qwen2<'a> {
 
                 // 5. Each query head attends over all positions 0..=pos (the work
                 //    grows with context, so it can't stay serial). GQA: query head
-                //    qh reads kv head qh / group. See `attend`.
+                //    qh reads kv head qh / group. See `attend`. A gemma3 local
+                //    layer sees positions s0..=pos only (`window_start`).
+                let s0 = window_start(layer.window, pos);
+                let tile = decode_tile(np - s0, self.n_kv_heads);
                 attend(
                     &q,
-                    kc,
-                    vc,
+                    &kc[s0 * kv_dim..],
+                    &vc[s0 * kv_dim..],
                     kv_dim,
                     hd,
-                    np,
+                    np - s0,
                     tile,
                     threads,
                     &mut buf,
@@ -1557,7 +1767,10 @@ impl<'a> Qwen2<'a> {
             });
 
             // 6. Mix the heads back together and add to the residual stream.
-            let o = self.matvec(&layer.wo, &att_out);
+            let mut o = self.matvec(&layer.wo, &att_out);
+            if let Some(w) = &layer.post_attn_norm {
+                o = self.rmsnorm(&o, w);
+            }
             add_assign(&mut x[..dim], &o[..dim]);
 
             // ---- Feed-forward sub-block (SwiGLU) ----
@@ -1565,7 +1778,10 @@ impl<'a> Qwen2<'a> {
             let h = self.rmsnorm(&x, &layer.ffn_norm);
             let act = self.matvec_swiglu(&layer.w_gate, &layer.w_up, &h);
             // 8. Project back down to model width and add to the residual stream.
-            let d = self.matvec(&layer.w_down, &act);
+            let mut d = self.matvec(&layer.w_down, &act);
+            if let Some(w) = &layer.post_ffn_norm {
+                d = self.rmsnorm(&d, w);
+            }
             add_assign(&mut x[..dim], &d[..dim]);
         }
         DECODE.set((buf, att_out));
@@ -2485,6 +2701,10 @@ multiversion! {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "model/gemma3_tests.rs"]
+pub(crate) mod gemma3_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {

@@ -62,6 +62,15 @@
 //!   tokenizes that, adding a `▁` in front of every piece after a control
 //!   token (so `[INST]` + ` msg` gives `▁▁msg`). Older GGUF conversions also
 //!   embed a different template, `[INST] {msg} [/INST]{reply}</s>`.
+//!
+//! Gemma 3 (a vocabulary with `<start_of_turn>`/`<end_of_turn>`): its
+//! GGUF's template, which also puts the system message in the first user
+//! turn, calls the assistant `model` and trims each message:
+//!
+//! ```text
+//! <bos><start_of_turn>user\n{system}\n\n{message}<end_of_turn>\n
+//! <start_of_turn>model\n{reply}<end_of_turn>\n
+//! ```
 
 use crate::lm::Lm;
 use crate::sample::Sampler;
@@ -95,6 +104,11 @@ pub enum Format {
     /// Mistral's `[INST]` turns: `end` is `[/INST]`, the conversation
     /// starts with BOS if the model adds one, a reply ends with EOS.
     Mistral { end: u32, bos: Option<u32> },
+    /// Gemma's turns: ChatML's layout with `<start_of_turn>` and
+    /// `<end_of_turn>`, role `model` for the assistant, messages trimmed,
+    /// BOS first if the model adds one, the system message in the first
+    /// user message.
+    Gemma { bos: Option<u32> },
 }
 
 /// How a vocabulary's conversations are framed: the format, its turn
@@ -126,6 +140,11 @@ impl Framing {
         let (format, im_start, im_end) = if let (Some(start), Some(end), Some(eot)) = llama {
             let bos = tok.bos();
             (Format::Llama3 { start, end, bos }, start, eot)
+        } else if let (Some(sot), Some(eot)) = (
+            special(tok, "<start_of_turn>"),
+            special(tok, "<end_of_turn>"),
+        ) {
+            (Format::Gemma { bos: tok.bos() }, sot, eot)
         } else if let (Some(inst), Some(end)) = (special(tok, "[INST]"), special(tok, "[/INST]")) {
             let bos = tok.bos();
             (Format::Mistral { end, bos }, inst, tok.eos())
@@ -169,6 +188,11 @@ impl Framing {
             t.push(end);
             return t;
         }
+        if let Format::Gemma { .. } = self.format {
+            let next = next.map(gemma_role);
+            let (s, e) = (self.im_start, self.im_end);
+            return frame(tok, s, e, gemma_role(role), text.trim(), next);
+        }
         let Format::Llama3 { start, end, .. } = self.format else {
             return frame(tok, self.im_start, self.im_end, role, text, next);
         };
@@ -194,6 +218,7 @@ impl Framing {
         match self.format {
             Format::Mistral { .. } => unreachable!(),
             Format::ChatMl => t.extend(tok.encode(&format!("{role}\n"))),
+            Format::Gemma { .. } => t.extend(tok.encode(&format!("{}\n", gemma_role(role)))),
             Format::Llama3 { end, .. } => {
                 t.extend(tok.encode(role));
                 t.push(end);
@@ -210,7 +235,7 @@ impl Framing {
     /// message (`first_user`).
     pub fn system(&self, tok: &Tokenizer, system: Option<&str>) -> Vec<u32> {
         match self.format {
-            Format::Mistral { bos, .. } => bos.into_iter().collect(),
+            Format::Mistral { bos, .. } | Format::Gemma { bos } => bos.into_iter().collect(),
             Format::ChatMl => system.map_or(Vec::new(), |s| self.frame(tok, "system", s, None)),
             Format::Llama3 { start, end, bos } => {
                 let mut t: Vec<u32> = bos.into_iter().collect();
@@ -232,14 +257,40 @@ impl Framing {
     pub fn first_user<'t>(&self, system: Option<&str>, msg: &'t str) -> std::borrow::Cow<'t, str> {
         match (self.format, system) {
             (Format::Mistral { .. }, Some(s)) if !s.is_empty() => format!("{s}\n\n{msg}").into(),
+            // Gemma's template: the system text as given, then the message
+            // trimmed (`frame_first` frames it untrimmed).
+            (Format::Gemma { .. }, Some(s)) => format!("{s}\n\n{}", msg.trim()).into(),
             _ => msg.into(),
+        }
+    }
+
+    /// A conversation's first message, `role` (`user`) with the text
+    /// `first_user` gives, framed as `frame` does, then the opening of
+    /// `next`. Gemma: the combined text isn't trimmed again (the template
+    /// trims the message only: `{system}\n\n` stays with an empty one, a
+    /// system text's leading whitespace stays).
+    pub fn frame_first(
+        &self,
+        tok: &Tokenizer,
+        role: &str,
+        system: Option<&str>,
+        msg: &str,
+        next: Option<&str>,
+    ) -> Vec<u32> {
+        let text = self.first_user(system, msg);
+        match (self.format, system) {
+            (Format::Gemma { .. }, Some(_)) => {
+                let (s, e) = (self.im_start, self.im_end);
+                frame(tok, s, e, gemma_role(role), &text, next.map(gemma_role))
+            }
+            _ => self.frame(tok, role, &text, next),
         }
     }
 
     /// What closes a reply: the end marker, and a newline in ChatML.
     pub fn closing(&self, tok: &Tokenizer) -> Vec<u32> {
         let mut t = vec![self.im_end];
-        if self.format == Format::ChatMl {
+        if matches!(self.format, Format::ChatMl | Format::Gemma { .. }) {
             t.extend(tok.encode("\n"));
         }
         t
@@ -328,6 +379,11 @@ pub fn frame(
     t
 }
 
+/// Gemma's name of a role: `model` for the assistant.
+fn gemma_role(role: &str) -> &str {
+    if role == "assistant" { "model" } else { role }
+}
+
 /// The id of a special token, if the vocabulary has it as one.
 pub fn special(tok: &Tokenizer, s: &str) -> Option<u32> {
     match tok.encode_special(s)[..] {
@@ -350,8 +406,8 @@ impl<'a, M: Lm> Chat<'a, M> {
         let Some(fr) = Framing::new(tok) else {
             return Err(
                 "the vocabulary has no ChatML (<|im_start|>/<|im_end|>), Llama 3 \
-                        (<|start_header_id|>/<|eot_id|>) or Mistral ([INST]/[/INST]) chat \
-                        tokens; chat needs an instruct model"
+                        (<|start_header_id|>/<|eot_id|>), Gemma (<start_of_turn>/<end_of_turn>) \
+                        or Mistral ([INST]/[/INST]) chat tokens; chat needs an instruct model"
                     .into(),
             );
         };
@@ -477,7 +533,7 @@ impl<'a, M: Lm> Chat<'a, M> {
 
     /// `frame_user` with the system message given (None: not the first exchange).
     fn frame_user_with(fr: &Framing, tok: &Tokenizer, system: Option<&str>, msg: &str) -> Vec<u32> {
-        fr.frame(tok, "user", &fr.first_user(system, msg), Some("assistant"))
+        fr.frame_first(tok, "user", system, msg, Some("assistant"))
     }
 
     /// Answer `msg`. Each reply token goes to `emit` as it is picked; an
@@ -1223,6 +1279,87 @@ mod tests {
             }
         }
         assert!(refused > 0);
+    }
+
+    /// Gemma 3: the first exchange carries the system message, as the
+    /// template (and `axon serve`, checked against llama.cpp) frames it;
+    /// replies end on <end_of_turn> and equal a fresh greedy run on the
+    /// framed history (with and without drafting); a full context drops the
+    /// oldest exchange and re-frames the next with the system message.
+    #[test]
+    fn gemma3_framing_and_replies() {
+        let Some(m) = crate::testutil::gemma3_model() else {
+            return;
+        };
+        let tok = Tokenizer::from_gguf(&m);
+        let net = Qwen2::new(&m);
+        let (sot, eot, bos) = (105, 106, 2);
+        let chat = Chat::new(&net, &tok, Some("Be brief."), 512).unwrap();
+        assert_eq!((chat.fr.im_start, chat.fr.im_end), (sot, eot));
+        assert!(chat.fr.stop.contains(&eot) && chat.fr.stop.contains(&1));
+        assert_eq!(chat.hist, [bos]);
+        let nl = tok.encode("\n");
+        for msg in MSGS {
+            let mut want = vec![sot];
+            want.extend(tok.encode(&format!("user\nBe brief.\n\n{}", msg.trim())));
+            want.push(eot);
+            want.extend(&nl);
+            want.push(sot);
+            want.extend(tok.encode("model\n"));
+            assert_eq!(chat.frame_user(msg, true), want, "{msg:?}");
+            let mut want = vec![sot];
+            want.extend(tok.encode(&format!("user\n{}", msg.trim())));
+            want.push(eot);
+            want.extend(&nl);
+            want.push(sot);
+            want.extend(tok.encode("model\n"));
+            assert_eq!(chat.frame_user(msg, false), want, "{msg:?}");
+        }
+        assert_eq!(chat.closing(), [eot, nl[0]]);
+        // The template trims the message only: a system text's leading
+        // whitespace stays, and so does `{system}\n\n` before an empty message.
+        let mut want = vec![sot];
+        want.extend(tok.encode("user\n  Sys\n\n"));
+        want.extend([eot]);
+        want.extend(&nl);
+        assert_eq!(
+            chat.fr
+                .frame_first(&tok, "user", Some("  Sys"), " \n", None),
+            want
+        );
+        for draft in [0, 7] {
+            let mut chat = Chat::new(&net, &tok, None, 512).unwrap();
+            chat.max_reply = 16;
+            chat.max_draft = round_draft(draft);
+            for msg in ["What is 2 + 2? Reply with the number.", "And 3 + 3?"] {
+                let before = chat.hist.clone();
+                let user = chat.frame_user(msg, chat.turns.is_empty());
+                let r = chat.reply(msg, &|| false, &mut |_| Ok(())).unwrap();
+                let mut prompt = before;
+                prompt.extend(&user);
+                assert_eq!(
+                    r.ids,
+                    fresh(chat.net, &prompt, 16, &chat.fr.stop),
+                    "{msg:?}"
+                );
+                let mut closed = prompt;
+                closed.extend(&r.ids);
+                closed.extend(chat.closing());
+                assert_eq!(chat.hist, closed);
+            }
+        }
+        let mut chat = Chat::new(&net, &tok, Some("Be brief."), 96).unwrap();
+        chat.max_reply = 8;
+        let mut dropped = 0;
+        for msg in MSGS {
+            let r = chat.reply(msg, &|| false, &mut |_| Ok(())).unwrap();
+            dropped += r.dropped;
+            assert!(chat.hist.len() <= 96);
+            assert_eq!(chat.hist[0], bos);
+            let first = chat.frame_user(&chat.msgs[0].0, true);
+            assert_eq!(chat.hist[1..1 + first.len()], first[..]);
+        }
+        assert!(dropped > 0);
     }
 
     /// The reply to the last message, from scratch: see `fresh`.

@@ -229,6 +229,10 @@ pub struct Tokenizer {
     byte_decoder: HashMap<char, u8>,
     /// (text, id), longest text first
     specials: Vec<(String, u32)>,
+    /// The user-defined ones among `specials`, same order: llama.cpp splits
+    /// these out of plain text too (tokenizer_st_partition with
+    /// parse_special false). Used for SentencePiece vocabularies.
+    user_specials: Vec<(String, u32)>,
     /// The pre-tokenizer (None for SentencePiece).
     re: Option<Regex>,
     /// SentencePiece merge data; None for byte-level BPE.
@@ -420,6 +424,11 @@ impl Tokenizer {
             .map(|(i, t)| (t.clone(), i as u32))
             .collect();
         specials.sort_by(|a, b| b.0.len().cmp(&a.0.len()).then(a.1.cmp(&b.1)));
+        let user_specials: Vec<(String, u32)> = specials
+            .iter()
+            .filter(|(_, id)| token_type.get(*id as usize) == Some(&TYPE_USER_DEFINED))
+            .cloned()
+            .collect();
 
         let eos = meta(m, "tokenizer.ggml.eos_token_id")
             .map(|v| val_i64(v) as u32)
@@ -443,6 +452,7 @@ impl Tokenizer {
             byte_decoder,
             specials,
             re,
+            user_specials,
             spm,
             ignore_merges: pre == Pre::Llama3,
             eos,
@@ -459,7 +469,12 @@ impl Tokenizer {
     /// llama.cpp's end-of-generation set; Qwen's stays `eos` alone).
     pub fn eog(&self) -> Vec<u32> {
         let mut v = vec![self.eos];
-        for s in ["<|eot_id|>", "<|eom_id|>", "<|end_of_text|>"] {
+        for s in [
+            "<|eot_id|>",
+            "<|eom_id|>",
+            "<|end_of_text|>",
+            "<end_of_turn>",
+        ] {
             v.extend(self.special_id(s));
         }
         v.sort_unstable();
@@ -512,8 +527,13 @@ impl Tokenizer {
     /// Split out special tokens the way llama.cpp does: for each special token
     /// (longest first), cut every remaining raw-text fragment at its occurrences.
     fn split_specials<'t>(&self, text: &'t str) -> Vec<Frag<'t>> {
+        Self::split_with(text, &self.specials)
+    }
+
+    /// `split_specials` over the tokens of `specials` (longest first).
+    fn split_with<'t>(text: &'t str, specials: &[(String, u32)]) -> Vec<Frag<'t>> {
         let mut frags = vec![Frag::Text(text)];
-        for (st, id) in &self.specials {
+        for (st, id) in specials {
             if !text.contains(st.as_str()) {
                 continue;
             }
@@ -543,7 +563,17 @@ impl Tokenizer {
 
     fn encode_text(&self, text: &str, out: &mut Vec<u32>) {
         let Some(re) = &self.re else {
-            return self.spm_text(text, out);
+            // SentencePiece: user-defined tokens (Gemma's "\n", "\n\n", space
+            // runs, ...) are split out of plain text first, as llama.cpp
+            // does. (Byte-level BPE vocabularies keep the old whole-text
+            // path: unchanged ids there.)
+            for frag in Self::split_with(text, &self.user_specials) {
+                match frag {
+                    Frag::Special(id) => out.push(id),
+                    Frag::Text(s) => self.spm_text(s, out),
+                }
+            }
+            return;
         };
         let mut last = 0;
         for m in re.find_iter(text) {
@@ -1252,6 +1282,50 @@ mod tests {
         }
         assert_eq!(t.special_id("[INST]"), Some(3));
         assert_eq!(t.special_id("[/INST]"), Some(4));
+    }
+
+    /// Gemma 3's SentencePiece tokenizer (no space prefix, user-defined
+    /// newline and space-run tokens split out of plain text) must match
+    /// llama.cpp's exactly: tests/fixtures/tokens_gemma3.json (llama-server
+    /// /tokenize on the 1B Q8_0 file; the same 262144-token vocabulary as
+    /// 4B), with and without special parsing, and prompts with their BOS.
+    #[test]
+    fn oracle_gemma3() {
+        let d = crate::testutil::read_json("tokens_gemma3.json");
+        let Some(m) = crate::testutil::gemma3_model() else {
+            return;
+        };
+        let t = Tokenizer::from_gguf(&m);
+        assert_eq!(pre_of(&m), Ok(Pre::Spm));
+        assert_eq!((t.bos(), t.eos()), (Some(2), 1));
+        let ids = |v: &serde_json::Value| -> Vec<u32> {
+            (v.as_array().expect("ids").iter())
+                .map(|x| x.as_u64().unwrap() as u32)
+                .collect()
+        };
+        let cases = d["cases"].as_array().expect("cases");
+        assert!(cases.len() >= 40);
+        for c in cases {
+            let text = c["text"].as_str().expect("text");
+            assert_eq!(t.encode(text), ids(&c["ids"]), "text {text:?}");
+            assert_eq!(
+                t.encode_special(text),
+                ids(&c["ids_special"]),
+                "special {text:?}"
+            );
+            // No space prefix: decoding gives the text back (a `▁` typed
+            // in comes back as a space).
+            if !text.contains(SPM_SPACE) {
+                assert_eq!(t.decode(&t.encode(text)), text);
+            }
+        }
+        for c in d["prompts"].as_array().expect("prompts") {
+            let text = c["text"].as_str().expect("text");
+            assert_eq!(t.encode_prompt(text), ids(&c["ids"]), "prompt {text:?}");
+        }
+        assert_eq!(t.special_id("<start_of_turn>"), Some(105));
+        assert_eq!(t.special_id("<end_of_turn>"), Some(106));
+        assert_eq!(t.eog(), vec![1, 106]);
     }
 
     /// llama.cpp's own SentencePiece test vectors (its

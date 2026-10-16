@@ -1,6 +1,6 @@
 # Axon
 
-LLM inference for Qwen2, Qwen3 and Llama 3 GGUF models on the CPU and on NVIDIA
+LLM inference for Qwen2, Qwen3, Llama 3 and Gemma 3 GGUF models on the CPU and on NVIDIA
 GPUs, written from scratch in Rust.
 
 **New here? Start with [docs/START-HERE.md](docs/START-HERE.md).**
@@ -30,9 +30,12 @@ Works today, honestly scoped:
   and Llama 3.1 8B Instruct Q4_K_M builds; Qwen3 1.7B (Q4_K_M) runs too. Llama 3's RoPE
   frequency factors and the llama-bpe tokenizer with its BOS token are handled. `llama`
   models with a SentencePiece tokenizer (Mistral 7B Instruct v0.3, Llama 2, TinyLlama) work
-  too; Mistral's `[INST]` chat format is built in.
-  Other architectures, mixture-of-experts models and RoPE scaling (a factor other than 1)
-  are refused with an error.
+  too; Mistral's `[INST]` chat format is built in. `gemma3` (Gemma 3 1B and 4B instruct;
+  head size 256, sliding-window layers, GeGLU) runs on the CPU and the GPU with its
+  `<start_of_turn>` chat format; on the GPU the whole model must fit (no CPU/GPU split, no
+  `--kv q8` yet), and its local layers keep a full-length KV cache. 27B is refused.
+  Other architectures, mixture-of-experts models and RoPE scaling (a factor other than 1;
+  Gemma 3's linear scaling excepted) are refused with an error.
 - Tensor types: F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K on the CPU. On the
   GPU every weight matrix must be one of the eight quantized types (F16/F32 matrices are
   refused there). Others load for `info` but can't run.

@@ -176,11 +176,10 @@ impl Template {
             // Mistral's first user message carries the system message
             // (llama.cpp's mistral-v3 placement; mistral_common V2/V3 and HF's
             // v0.3 template use the last user message: chat.rs module doc).
-            let text = match (i, m.role) {
-                (0, Role::User) => self.fr.first_user(system, text),
-                _ => text.into(),
-            };
-            t.extend(self.fr.frame(tok, m.role.name(), &text, None));
+            t.extend(match (i, m.role) {
+                (0, Role::User) => self.fr.frame_first(tok, "user", system, text, None),
+                _ => self.fr.frame(tok, m.role.name(), text, None),
+            });
         }
         t.extend(self.fr.opening(tok, "assistant"));
         if no_think && let Some((_, _, empty)) = &self.think {
@@ -1293,7 +1292,8 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
                     ApiError::new(
                         400,
                         "invalid_request_error",
-                        "this model has no chat tokens (ChatML or Llama 3); use /v1/completions",
+                        "this model has no chat tokens (ChatML, Llama 3, Mistral or Gemma); use \
+                         /v1/completions",
                     ),
                     keep,
                 );

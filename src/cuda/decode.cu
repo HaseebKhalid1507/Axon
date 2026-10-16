@@ -1449,7 +1449,8 @@ struct QkNorm {
 };
 
 // part_o: [head][split][hd]; part_ml: [head][split][2] (m, l). Head size
-// HD 64 or 128, group <= MAX_GROUP (the host checks).
+// HD 64 or 128, group <= MAX_GROUP (the host checks); or HD 256 (gemma.cu),
+// group * HD <= MAX_GROUP * 128.
 // Block (kvh, s) of a query whose position is np - 1; shared with the
 // batched attn_split_b (prefill.cu), which runs it per query token.
 // KG = 0: the f16 cache kc / vc; else the q8 cache q8 with KG values per
@@ -1496,7 +1497,7 @@ __device__ void attn_split_t(const float* __restrict__ q, const unsigned short* 
                 // qwen3: knew holds the raw keys; normalize and rotate them
                 // (as the f16 path below) before quantizing.
                 if (tid < 32) {
-                    float a[2], b[2];
+                    float a[HD / 64 > 2 ? HD / 64 : 2], b[HD / 64 > 2 ? HD / 64 : 2];
                     for (int i = 0; i < (HD >> 6); i++) {
                         a[i] = xs[tid + 32 * i];
                         b[i] = xs[tid + 32 * i + HD / 2];
@@ -1523,7 +1524,7 @@ __device__ void attn_split_t(const float* __restrict__ q, const unsigned short* 
         for (int g = w; g < group + kpos; g += ATT_TILE / 32) {
             bool isk = g == group;
             const float* x = isk ? nm.kraw + kvh * hd : q + (kvh * group + g) * hd;
-            float a[2], b[2];
+            float a[HD / 64 > 2 ? HD / 64 : 2], b[HD / 64 > 2 ? HD / 64 : 2];
             for (int i = 0; i < (half >> 5); i++) {
                 a[i] = x[lane + 32 * i];
                 b[i] = x[lane + 32 * i + half];
