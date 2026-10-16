@@ -27,11 +27,11 @@ in 23 of 24 cells on an RTX 4050 laptop ([benchmarks-gpu.md](benchmarks-gpu.md))
 | Speculative decoding | Prompt lookup (`--draft K`) and a draft model (`--draft-model small.gguf`). Both are lossless: same output with or without, greedy or seeded sampling. | `spec.rs`, `draft.rs` |
 | CPU + GPU split | A model too big for VRAM puts its first layers on the CPU and the rest plus the head on the GPU (`--gpu-layers N`). For prompts of ≥ 32 tokens the CPU layers' weights are streamed through the GPU. | `hybrid.rs`, `cuda/qwen2/stream.rs` |
 | KV cache | f16 by default; `--kv q8` (GPU only) halves it with slightly different results. | `kv.rs` |
-| Serving | `axon serve`: `/v1/chat/completions`, `/v1/completions`, `/v1/models`, `/health`, SSE streaming. Runs **one request at a time** (stage S1); the KV cache carries over between requests for shared prefixes. | `serve.rs`, `serve/` |
+| Serving | `axon serve`: `/v1/chat/completions` (with OpenAI tool calling: `tools`, `tool_choice`, `tool_calls`, for Qwen3, Qwen2.5 and Llama 3.1/3.2 templates), `/v1/completions`, `/v1/models`, `/health`, SSE streaming. Runs **one request at a time** (stage S1); the KV cache carries over between requests for shared prefixes. | `serve.rs`, `serve/`, `serve/tools.rs` |
 
-**Not on main:** tool calling. `serve` refuses `tools`, `functions` and messages carrying `tool_calls`
-with a 400 (`serve/api.rs`). Also absent: concurrent request batching, multiple GPUs, Gemma, and
-SentencePiece-tokenizer models (Mistral, Llama 2).
+**Not on main:** concurrent request batching, multiple GPUs, Gemma, and SentencePiece-tokenizer
+models (Mistral, Llama 2). Tool calling has no `/v1/responses` (codex) and no ollama-native API;
+the legacy `functions` field is still a 400.
 
 The full flag and environment reference is in the [README](../README.md#usage).
 

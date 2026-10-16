@@ -1176,3 +1176,116 @@ fn prefill_vs_cache_size() {
         );
     }
 }
+
+/// Tool calling over HTTP on the test models (CPU): `tool_choice:
+/// "required"` makes even a small model call; the streamed deltas add up
+/// to the whole response's calls and content; a call's first delta has its
+/// id and name; the next turn (the result appended) reuses the cache.
+#[test]
+fn serve_tool_calls() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let mut paths = vec![p];
+    if crate::testutil::qwen3_model().is_some() {
+        paths.push(std::env::var_os("AXON_TEST_QWEN3").map_or_else(
+            || std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(crate::testutil::QWEN3_MODEL),
+            std::path::PathBuf::from,
+        ));
+    }
+    for path in paths {
+        let s = server(path.to_str().unwrap(), Device::Cpu);
+        let a = s.addr;
+        let tools = json!([{"type": "function", "function": {"name": "get_weather",
+            "description": "Get the weather in a city",
+            "parameters": {"type": "object", "properties": {"city": {"type": "string"}},
+                           "required": ["city"]}}}]);
+        let user = json!({"role": "user", "content": "What's the weather in Paris?"});
+        let req = json!({"messages": [user], "tools": tools, "tool_choice": "required",
+                         "temperature": 0, "max_tokens": 64,
+                         "chat_template_kwargs": {"enable_thinking": false}});
+        let v = post(a, "/v1/chat/completions", req.clone()).json();
+        let ch = &v["choices"][0];
+        let m = &ch["message"];
+        if ch["finish_reason"] != "tool_calls" {
+            // Not a call (cut off, or not JSON): the block is content, verbatim.
+            assert!(
+                m["content"].as_str().unwrap().contains("<tool_call>"),
+                "{v}"
+            );
+            continue;
+        }
+        let calls = m["tool_calls"].as_array().unwrap();
+        assert!(!calls.is_empty(), "{v}");
+        for c in calls {
+            assert!(c["id"].as_str().unwrap().starts_with("call_"), "{v}");
+            assert_eq!(c["type"], "function");
+            let args = c["function"]["arguments"].as_str().unwrap();
+            serde_json::from_str::<Value>(args).unwrap_or_else(|e| panic!("{e}: {v}"));
+        }
+
+        let mut sreq = req.clone();
+        sreq["stream"] = json!(true);
+        sreq["stream_options"] = json!({"include_usage": true});
+        let r = post(a, "/v1/chat/completions", sreq);
+        let ev = r.events();
+        assert_eq!(ev.last().map(String::as_str), Some("[DONE]"));
+        let (mut content, mut scalls, mut finish) = (String::new(), Vec::<Value>::new(), None);
+        for e in ev.iter().filter(|e| *e != "[DONE]") {
+            let v: Value = serde_json::from_str(e).unwrap();
+            let Some(c) = v["choices"].get(0) else {
+                assert!(v["usage"]["prompt_tokens"].as_u64().unwrap() > 0);
+                continue;
+            };
+            content.push_str(c["delta"]["content"].as_str().unwrap_or(""));
+            if let Some(f) = c["finish_reason"].as_str() {
+                finish = Some(f.to_string());
+                assert!(c["delta"].get("tool_calls").is_none(), "{e}");
+            }
+            for tc in c["delta"]["tool_calls"].as_array().into_iter().flatten() {
+                let i = tc["index"].as_u64().unwrap() as usize;
+                if i == scalls.len() {
+                    // A call's first delta: id, type and name.
+                    assert!(
+                        tc["id"].is_string() && tc["function"]["name"].is_string(),
+                        "{e}"
+                    );
+                    scalls.push(json!({"name": tc["function"]["name"], "arguments": ""}));
+                }
+                let args = format!(
+                    "{}{}",
+                    scalls[i]["arguments"].as_str().unwrap(),
+                    tc["function"]["arguments"].as_str().unwrap_or("")
+                );
+                scalls[i]["arguments"] = json!(args);
+            }
+        }
+        assert_eq!(finish.as_deref(), Some("tool_calls"));
+        assert_eq!(content, m["content"].as_str().unwrap_or(""));
+        let whole: Vec<Value> = calls
+            .iter()
+            .map(
+                |c| json!({"name": c["function"]["name"], "arguments": c["function"]["arguments"]}),
+            )
+            .collect();
+        assert_eq!(scalls, whole);
+
+        // The next turn: the call and its result appended; the cache is reused.
+        let p1 = v["usage"]["prompt_tokens"].as_u64().unwrap();
+        let mut msgs = vec![
+            user.clone(),
+            json!({"role": "assistant", "content": null, "tool_calls": calls}),
+        ];
+        for c in calls {
+            msgs.push(json!({"role": "tool", "tool_call_id": c["id"], "content": "18C, sunny"}));
+        }
+        let req2 = json!({"messages": msgs, "tools": tools, "temperature": 0, "max_tokens": 16,
+                          "chat_template_kwargs": {"enable_thinking": false}});
+        let v2 = post(a, "/v1/chat/completions", req2).json();
+        let cached = v2["usage"]["prompt_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .unwrap();
+        assert!(cached * 10 >= p1 * 9, "reused {cached} of {p1}: {v2}");
+        assert!(v2["usage"]["prompt_tokens"].as_u64().unwrap() > p1);
+    }
+}
