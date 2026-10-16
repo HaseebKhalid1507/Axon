@@ -40,10 +40,13 @@ fn key(m: &Model, k: &str) -> String {
 
 fn scaling_type(m: &Model) -> Option<&str> {
     let k = key(m, "type");
-    m.metadata.iter().find(|(n, _)| *n == k).and_then(|(_, v)| match v {
-        Val::Str(s) => Some(s.as_str()),
-        _ => None,
-    })
+    m.metadata
+        .iter()
+        .find(|(n, _)| *n == k)
+        .and_then(|(_, v)| match v {
+            Val::Str(s) => Some(s.as_str()),
+            _ => None,
+        })
 }
 
 /// The default magnitude scale for `factor`: 0.1 ln(factor) + 1 (1 at or
@@ -93,7 +96,9 @@ impl Yarn {
     /// factor.
     pub fn corr_dims(&self, base: f64, head_dim: usize) -> (f64, f64) {
         let n = head_dim as f64;
-        let dim = |rot: f64| n * (self.orig / (rot * 2.0 * std::f64::consts::PI)).ln() / (2.0 * base.ln());
+        let dim = |rot: f64| {
+            n * (self.orig / (rot * 2.0 * std::f64::consts::PI)).ln() / (2.0 * base.ln())
+        };
         let low = dim(self.beta_fast).floor().max(0.0);
         let high = dim(self.beta_slow).ceil().min(n - 1.0);
         (low, high)
@@ -160,12 +165,18 @@ impl RopeArgs {
         match f {
             "--rope-scaling" => match v {
                 "yarn" | "none" => self.scaling = Some(v.into()),
-                _ => return Err(format!("--rope-scaling: '{v}' isn't supported (yarn or none)")),
+                _ => {
+                    return Err(format!(
+                        "--rope-scaling: '{v}' isn't supported (yarn or none)"
+                    ));
+                }
             },
-            "--rope-scale" => self.factor = Some(pos()?).filter(|&x| x >= 1.0).map_or_else(
-                || Err(format!("--rope-scale needs a number >= 1, got '{v}'")),
-                |x| Ok(Some(x)),
-            )?,
+            "--rope-scale" => {
+                self.factor = Some(pos()?).filter(|&x| x >= 1.0).map_or_else(
+                    || Err(format!("--rope-scale needs a number >= 1, got '{v}'")),
+                    |x| Ok(Some(x)),
+                )?
+            }
             "--yarn-orig-ctx" => {
                 self.orig_ctx = Some(
                     v.parse::<usize>()
@@ -226,7 +237,9 @@ impl RopeArgs {
         let orig = match (self.orig_ctx, file) {
             (Some(n), _) => n as f64,
             (None, Some(y)) => y.orig,
-            (None, None) => trained.ok_or("the model has no context_length: give --yarn-orig-ctx")?,
+            (None, None) => {
+                trained.ok_or("the model has no context_length: give --yarn-orig-ctx")?
+            }
         };
         fn set(m: &mut Model, k: String, v: Val) {
             match m.metadata.iter_mut().find(|(n, _)| *n == k) {
@@ -282,7 +295,9 @@ mod tests {
         let y = y(4.0);
         assert_eq!(y.corr_dims(1e6, 128), (23.0, 40.0));
         assert!((y.mscale - 1.138_629_4).abs() < 1e-6);
-        let base: Vec<f64> = (0..64).map(|i| 1e6f64.powf(-2.0 * i as f64 / 128.0)).collect();
+        let base: Vec<f64> = (0..64)
+            .map(|i| 1e6f64.powf(-2.0 * i as f64 / 128.0))
+            .collect();
         let mut f = base.clone();
         y.apply(&mut f, 1e6, 128);
         for i in 0..=23 {

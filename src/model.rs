@@ -569,7 +569,9 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
     if yarn && let Some(f) = factor.filter(|&f| f != 1.0 && f != 0.0) {
         // YaRN (rope.rs): any factor above 1, not on gemma3.
         if gemma || !(f > 1.0 && f.is_finite()) {
-            return Err(bad(format!("RoPE scaling yarn (factor {f}) is not supported")));
+            return Err(bad(format!(
+                "RoPE scaling yarn (factor {f}) is not supported"
+            )));
         }
         let ok = |k: &str, lo: f64| num(k).is_none_or(|v| v.is_finite() && v >= lo);
         if !ok("rope.scaling.original_context_length", 1.0)
@@ -617,7 +619,9 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
             )));
         }
     }
-    if let Some(f) = num("rope.scaling.attn_factor").filter(|&f| f != 1.0 && crate::rope::yarn(m).is_none()) {
+    if let Some(f) =
+        num("rope.scaling.attn_factor").filter(|&f| f != 1.0 && crate::rope::yarn(m).is_none())
+    {
         return Err(bad(format!(
             "RoPE scaling (attention factor {f}) is not supported"
         )));
@@ -3327,8 +3331,7 @@ pub(crate) mod tests {
             let pf = base.powf(2.0 * i as f64 / hd as f64) * f;
             let Some(y) = yarn else { return 1.0 / pf };
             let corr = |rot: f64| {
-                (hd as f64 * (y.orig / (rot * 2.0 * std::f64::consts::PI)).ln())
-                    / (2.0 * base.ln())
+                (hd as f64 * (y.orig / (rot * 2.0 * std::f64::consts::PI)).ln()) / (2.0 * base.ln())
             };
             let low = corr(y.beta_fast).floor().max(0.0);
             let mut high = corr(y.beta_slow).ceil().min(hd as f64 - 1.0);
@@ -3599,7 +3602,10 @@ pub(crate) mod tests {
         let want = qwen3_ref(&m, &ids, NormBug::None);
         let moved = max_diff(&plain, &want);
         eprintln!("yarn vs plain reference: max |dlogit| {moved:.3}");
-        assert!(moved > 100.0 * TOL, "yarn hardly changes the logits ({moved})");
+        assert!(
+            moved > 100.0 * TOL,
+            "yarn hardly changes the logits ({moved})"
+        );
         let net = Qwen2::new_with(&m, false);
         assert_eq!(net.rope_m, y.mscale);
         let mut c = net.new_cache(n);

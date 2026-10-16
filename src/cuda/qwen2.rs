@@ -2632,3 +2632,5 @@ pub(crate) mod slots;
 pub(crate) mod stream;
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+mod yarn_eval;

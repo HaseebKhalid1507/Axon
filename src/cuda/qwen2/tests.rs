@@ -1486,7 +1486,11 @@ fn gpu_yarn_matches_reference_and_keeps_bits() {
             let d = max_diff(&dec, &want);
             eprintln!("gpu yarn {kv:?} graphs {graphs} vs reference: max |dlogit| {d:.4}");
             assert!(d <= QWEN3_Q8_TOL, "gpu yarn {kv:?}: {d}");
-            assert_eq!(bits(&pre), bits(&dec[n - 1]), "gpu yarn {kv:?}: decode != prefill");
+            assert_eq!(
+                bits(&pre),
+                bits(&dec[n - 1]),
+                "gpu yarn {kv:?}: decode != prefill"
+            );
         }
     }
     let Some(mut m) = model_at(crate::testutil::MODEL) else {
@@ -5408,11 +5412,19 @@ fn cuda_gemm_sustained() {
 /// "tokens"}]}), AXON_TF_DEV (cpu or cuda); writes AXON_TF_OUT: per
 /// sequence, at the prompt's end and after each of its tokens, the top 5
 /// (id, logprob). Prompt prefilled in batches, the rest one token a pass.
+/// AXON_TF_CTX: the GPU context (default 1024); AXON_TF_YARN=F: YaRN
+/// factor F over the file's context (`with_yarn`).
 #[test]
 #[ignore]
 fn teacher_forced_dump() {
     let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k} not set"));
-    let m = crate::gguf::load_with(&var("AXON_TF_MODEL"), Some(false)).unwrap();
+    let mut m = crate::gguf::load_with(&var("AXON_TF_MODEL"), Some(false)).unwrap();
+    // AXON_TF_YARN=F: --rope-scaling yarn --rope-scale F.
+    if let Ok(f) = std::env::var("AXON_TF_YARN") {
+        let orig = m.ctx_len() as usize;
+        with_yarn(&mut m, f.parse().unwrap(), orig);
+    }
+    let max_ctx = std::env::var("AXON_TF_CTX").map_or(1024, |v| v.parse().unwrap());
     let inp: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(var("AXON_TF_IN")).unwrap()).unwrap();
     let ids = |v: &serde_json::Value| -> Vec<u32> {
@@ -5431,7 +5443,7 @@ fn teacher_forced_dump() {
     let km = g.as_ref().map(|g| Kernels::module(g).unwrap());
     let cnet = (!gpu).then(|| Qwen2::new(&m));
     let gnet = g.as_ref().map(|g| {
-        CudaQwen2::with_kv(g, km.as_ref().unwrap(), &m, 1024, CacheKv::F16, false).unwrap()
+        CudaQwen2::with_kv(g, km.as_ref().unwrap(), &m, max_ctx, CacheKv::F16, false).unwrap()
     });
     let mut out = Vec::new();
     for gn in inp["gens"].as_array().unwrap() {
