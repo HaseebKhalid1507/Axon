@@ -4781,15 +4781,16 @@ fn compare_forced<R: Lm, O: Lm>(r: &R, o: &O, ids: &[u32], from: usize, a: &mut 
     }
 }
 
-/// ~n tokens of natural text, prose and code (README.md, then kv.rs).
+/// ~n tokens of natural text, prose and code: tests/fixtures/natural_text.txt,
+/// a frozen copy of README.md, src/kv.rs and src/chat.rs as of 5f96039
+/// (joined by newlines). It used to read the live files, so every docs edit
+/// moved the near-ties these accuracy bounds were measured on: after #28's
+/// README rewrite, natural_long_1_5b (464/500 vs a floor of 466) and
+/// gpu_q8_qwen3 (text top-1 76.3 % vs 80 %) failed on every sm_89 host,
+/// though both pass on this text there (and on sm_80).
 fn natural_ids(m: &Model, n: usize) -> Vec<u32> {
-    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let text = ["README.md", "src/kv.rs", "src/chat.rs"]
-        .iter()
-        .map(|f| std::fs::read_to_string(dir.join(f)).unwrap())
-        .collect::<Vec<_>>()
-        .join("\n");
-    let mut ids = crate::tokenizer::Tokenizer::from_gguf(m).encode(&text);
+    let text = include_str!("../../../tests/fixtures/natural_text.txt");
+    let mut ids = crate::tokenizer::Tokenizer::from_gguf(m).encode(text);
     assert!(ids.len() >= n, "{} tokens of text", ids.len());
     ids.truncate(n);
     ids
