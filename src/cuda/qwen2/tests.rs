@@ -644,8 +644,15 @@ fn gpu_attention_matches_cpu() {
     let km = Kernels::module(&g).unwrap();
     let fc = km.function("attn_combine").unwrap();
     let mut rng = Rng(4242);
-    // (n_heads, n_kv, hd): 0.5B, 1.5B, 3B, 7B.
-    for (nh, nkv, hd) in [(14, 2, 64), (12, 2, 128), (16, 2, 128), (28, 4, 128)] {
+    // (n_heads, n_kv, hd): 0.5B, 1.5B, 3B, 7B; Llama 1B, Qwen3 0.6B.
+    for (nh, nkv, hd) in [
+        (14, 2, 64),
+        (12, 2, 128),
+        (16, 2, 128),
+        (28, 4, 128),
+        (32, 8, 64),
+        (16, 8, 128),
+    ] {
         let (dim, kvd) = (nh * hd, nkv * hd);
         let fs = km.function(&format!("attn_split_{hd}")).unwrap();
         for (np, max_split) in [
@@ -1249,18 +1256,8 @@ fn deterministic_on(g: &Gpu, m: &Model, kv: CacheKv) {
 
 /// How `o`'s 32-token greedy continuations of PROMPTS compare with the
 /// reference `r`'s: (prompts identical, tokens matched before the first
-/// divergence, summed), asserting that every divergence is a near-tie in
-/// r's own logits.
-fn continuations<R: Lm, O: Lm>(
-    r: &R,
-    o: &O,
-    tok: &crate::tokenizer::Tokenizer,
-    name: &str,
-) -> (usize, usize) {
-    continuations_with(r, o, tok, name, 0.5)
-}
-
-/// `continuations`, divergences asserted to have a margin below `tie`.
+/// divergence, summed), asserting that every divergence is a near-tie: a
+/// margin below `tie` in r's logits or in o's.
 fn continuations_with<R: Lm, O: Lm>(
     r: &R,
     o: &O,
@@ -1280,14 +1277,28 @@ fn continuations_with<R: Lm, O: Lm>(
             }
             Some(i) => {
                 matched += i;
-                let l = &lr[i];
-                let margin = l[tr[i] as usize] - l[to[i] as usize];
+                let (a, b) = (tr[i] as usize, to[i] as usize);
+                let margin = lr[i][a] - lr[i][b];
                 eprintln!(
                     "{name}: {p:?} diverges at token {i}: {:?} vs {:?}, reference margin {margin:.3}",
                     tok.decode(&[tr[i]]),
                     tok.decode(&[to[i]])
                 );
-                assert!(margin < tie, "not a near-tie: margin {margin}");
+                if margin >= tie {
+                    // Both sides' logits are rounded: the pair is a near-tie
+                    // if either calls it one (the CPU alone can be off by
+                    // more than the bound: llama 1B, "17 times 23" step 30,
+                    // CPU 0.938, an f64 forward 0.259, the split attention
+                    // 0.122 the other way).
+                    let (t2, lo) = greedy(o, &ids, i + 1, true);
+                    assert_eq!(t2[..], to[..=i], "{name}: forward vs forward_argmax");
+                    let own = lo[i][b] - lo[i][a];
+                    eprintln!("{name}: its own margin {own:.3}");
+                    assert!(
+                        own < tie,
+                        "not a near-tie: margin {margin} (reference), {own} (its own)"
+                    );
+                }
             }
         }
     }
@@ -1305,20 +1316,31 @@ fn continuations_with<R: Lm, O: Lm>(
 /// survives with probability ~0.97^32 ~ 1/3, so "most match" can't hold even
 /// CPU vs CPU; what's asserted is that every divergence is a near-tie and
 /// the GPU stays about as close to the CPU as the CPU is to itself.
+/// On a GPU with tensor cores, through both attention paths: its own, then
+/// the split attention every GPU without them (sm < 80: Pascal, Volta,
+/// Turing) runs.
 fn continuations_match(m: &Model, name: &str) {
+    let tie = 0.5;
     let g = crate::testutil::gpu().unwrap();
     let km = Kernels::module(&g).unwrap();
     let tok = crate::tokenizer::Tokenizer::from_gguf(m);
-    let gpu = CudaQwen2::new(&g, &km, m, 256).unwrap();
+    let mut gpu = CudaQwen2::new(&g, &km, m, 256).unwrap();
     let rows = Qwen2::new_with(m, false);
     let cpu = Qwen2::new(m);
-    let (gs, gm) = continuations(&cpu, &gpu, &tok, &format!("{name} gpu"));
-    let (cs, cm) = continuations(&cpu, &rows, &tok, &format!("{name} cpu rows"));
-    assert!(
-        gs + 2 >= cs,
-        "identical continuations: gpu {gs}, cpu rows {cs}"
-    );
-    assert!(2 * gm + 32 >= cm, "matched tokens: gpu {gm}, cpu rows {cm}");
+    let (cs, cm) = continuations_with(&cpu, &rows, &tok, &format!("{name} cpu rows"), tie);
+    let paths: &[bool] = if km.mma() { &[true, false] } else { &[false] };
+    for &tc in paths {
+        gpu.set_tc_attn(tc); // greedy makes its caches after this
+        let (gs, gm) = continuations_with(&cpu, &gpu, &tok, &format!("{name} gpu tc {tc}"), tie);
+        assert!(
+            gs + 2 >= cs,
+            "tc {tc}: identical continuations: gpu {gs}, cpu rows {cs}"
+        );
+        assert!(
+            2 * gm + 32 >= cm,
+            "tc {tc}: matched tokens: gpu {gm}, cpu rows {cm}"
+        );
+    }
 }
 
 #[test]
