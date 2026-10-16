@@ -21,8 +21,10 @@ that caused it.
 
 ## What the fault depends on (MEASURED, pod5 = RTX 4090, held for this)
 - **It needs concurrency.** axon-node's POISON-RERUN reran every poisoned test of fd69 alone, each in a fresh
-  process: 79/79 passed. The kvsave builder's split (jobs 6ee3, bf82, e581) also passed with one test
-  thread and faulted again with several.
+  process: 79/79 passed. The kvsave builder's split of 72b5's failures behaved the same way, and it is
+  intermittent. gpu_bits_llama_3b_8b alone passed (6ee3). The other 116 together, multi-threaded, faulted
+  again with a different first test (4588). Then the 12 q8 tests with --test-threads=1 passed (bf82), and
+  the remaining 74 at the default 4 threads also passed (e581).
 - **Reproduced on pod5 with the main binary** (6f88bb, the PR #42 test binary). The run was
   `--test-threads 4` of gpu_prefill_batchings_bit_identical_{0_5b,1_5b,llama} + gpu_bits_llama_3b_8b, with other
   CUDA processes on the card, 60 s per round.
