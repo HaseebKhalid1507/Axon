@@ -12,9 +12,12 @@
 //!   already covers them).
 //! - `backend`: cpu, cuda, cuda+cpu (with the layer split), or a pipeline
 //!   (with its cuts): a layer's numerics are its device's.
-//! - `gpu`: per GPU, its architecture and the code loaded for it (cubin
-//!   target and NVRTC version; PTX adds the driver, which compiles it):
-//!   bits across architectures are not audited yet.
+//! - `gpu`: per GPU, its exact architecture (sm_XY). Audited (see
+//!   docs/determinism.md): two sm_89 cards with different NVRTC (12.8,
+//!   13.3) and drivers agree bit for bit, so the toolkit isn't in it; sm_61
+//!   and sm_89 differ from prefill on (split f32 attention below sm_80,
+//!   tensor cores from sm_80); other pairs are unaudited, so each sm_XY is
+//!   its own.
 //! - `cpu`: what decides CPU bits (fused multiply-add or not, r8 repack or
 //!   per-row kernels) when any layer runs on the CPU.
 //! - `kv`: the KV cache type (f16, q8, q8/32; f32 on the CPU).
@@ -161,9 +164,7 @@ pub fn predicted(path: &str, m: &Model) -> io::Result<Vec<(String, Identity)>> {
         "cpu".to_string(),
         Identity::new(&digest, &types, "cpu", None, Some(&cpu()), cpu_kv),
     )];
-    if let Ok(g) = crate::cuda::Gpu::open()
-        && crate::cuda::code_target(&g).is_ok()
-    {
+    if let Ok(g) = crate::cuda::Gpu::open() {
         let gs = gpu(&g);
         for kv in ["f16", "q8"] {
             let id = Identity::new(&digest, &types, "cuda", Some(&gs), None, kv);
@@ -173,16 +174,15 @@ pub fn predicted(path: &str, m: &Model) -> io::Result<Vec<(String, Identity)>> {
     Ok(v)
 }
 
-/// A GPU's part: its architecture and the code built for it.
+/// A GPU's part: its architecture.
 fn gpu(g: &crate::cuda::Gpu) -> String {
-    let arch = g.info().map_or_else(|_| "unknown".into(), |i| i.arch());
-    let code = crate::cuda::code_target(g).unwrap_or_else(|e| format!("unknown ({e})"));
-    format!("{arch} [{code}]")
+    g.info().map_or_else(|_| "unknown".into(), |i| i.arch())
 }
 
 /// The CPU's part: what changes its layers' bits. SIMD and scalar paths
 /// agree bit for bit at any thread count (the `simd_matches_scalar*` and
-/// `multiversion_*` tests), so the SIMD path isn't in it; FMA is (fused or
+/// `multiversion_*` tests; an AVX2 and an AVX-VNNI host agree 20/20, see
+/// docs/determinism.md), so the SIMD path isn't in it; FMA is (fused or
 /// not, `vmath::fused`), and so is AXON_REPACK=0 (per-row kernels round
 /// differently from the r8 repack).
 fn cpu() -> String {
@@ -408,14 +408,7 @@ mod tests {
     }
 
     fn base() -> Identity {
-        Identity::new(
-            "aa",
-            "Q4_K:1",
-            "cuda",
-            Some("sm_120 [sm_120 nvrtc 12.8]"),
-            None,
-            "f16",
-        )
+        Identity::new("aa", "Q4_K:1", "cuda", Some("sm_120"), None, "f16")
     }
 
     /// The fingerprint is a pure function of the tuple: the same every time
@@ -432,29 +425,15 @@ mod tests {
         assert_eq!(
             a.canonical(),
             "axon-identity/1\nnumerics=1\nmodel=aa\ntypes=Q4_K:1\nbackend=cuda\n\
-             gpu=sm_120 [sm_120 nvrtc 12.8]\nkv=f16\n"
+             gpu=sm_120\nkv=f16\n"
         );
-        let g = Some("sm_120 [sm_120 nvrtc 12.8]");
+        let g = Some("sm_120");
         let variants = [
             Identity::new("aa", "Q4_K:1", "cuda", g, None, "q8"),
             Identity::new("ab", "Q4_K:1", "cuda", g, None, "f16"),
             Identity::new("aa", "Q4_K:1", "cpu", None, Some("x86_64 fma, r8"), "f16"),
-            Identity::new(
-                "aa",
-                "Q4_K:1",
-                "cuda",
-                Some("sm_89 [sm_89 nvrtc 12.8]"),
-                None,
-                "f16",
-            ),
-            Identity::new(
-                "aa",
-                "Q4_K:1",
-                "cuda",
-                Some("sm_120 [sm_120 nvrtc 13.0]"),
-                None,
-                "f16",
-            ),
+            Identity::new("aa", "Q4_K:1", "cuda", Some("sm_89"), None, "f16"),
+            Identity::new("aa", "Q4_K:1", "cuda", Some("sm_61"), None, "f16"),
             Identity::new("aa", "Q6_K:1", "cuda", g, None, "f16"),
         ];
         let mut seen = vec![a.fingerprint()];

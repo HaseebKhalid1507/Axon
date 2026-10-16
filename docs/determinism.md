@@ -18,7 +18,7 @@ how the request was run:
 | alone, or in a batch with up to `--parallel` other requests, in any slot, at any position in the batch, joining or leaving mid-generation | yes |
 | again after a restart, on another day, on another machine with the same identity | yes |
 | at temperature > 0 with the same `seed` (and params)              | yes: the sampler is seeded xoshiro256**, one draw per decided token |
-| on the CPU with any thread count, SIMD or scalar paths          | yes (the md5 gate runs the CPU too) |
+| on the CPU with any thread count, SIMD or scalar paths, AVX2 or AVX-VNNI | yes (the md5 gate runs the CPU too; an AVX2 and an AVX-VNNI host agree 20/20) |
 
 How: every matrix product is an exact integer block sum followed by one fixed float chain
 over the blocks in order, the same in every kernel (decode GEMV, batched GEMM, verify);
@@ -38,13 +38,19 @@ and the token's position, never on the batch. The tests that hold this in place:
   logits agree closely), but not the same bits. They are different identities. A
   `--gpu-layers` split runs its CPU layers with CPU numerics: its own identity too.
 - **f16 vs q8 KV cache.** q8 rounds the cache: a different identity.
-- **Across GPU architectures**, until audited. The GEMMs (integer sums, IEEE fma/mul/div)
-  should be architecture-exact, but attention uses `ex2.approx` and f16 `mma.sync`, whose
-  internal accumulation is architecture-specific (Hawkeye, arXiv:2603.20421), and two
-  CPU-vs-GPU tolerance tests that pass on sm_120 fail on every sm_89 host we have, so the
-  architectures do round differently somewhere. So the GPU's
-  architecture and the code built for it (cubin target, NVRTC version) are part of the
-  identity. Two cards of the same architecture with the same toolkit share an identity.
+- **Across GPU architectures.** What was measured (gen md5 and prefill top-20 logits, 4
+  models, 20 cells per cache type, main a591e17):
+  - an RTX 4050 and an RTX 4090 (both sm_89, NVRTC 13.3 vs 12.8, different drivers):
+    identical, 20/20 with f16 and 20/20 with q8. The toolkit and the driver don't change bits.
+  - sm_61 (GTX 1050) vs sm_89: different from the prefill logits on. Below sm_80 attention
+    takes another algorithm (split f32 dots, `exp2f`); from sm_80 it runs on tensor cores
+    (f16 `mma.sync`, `ex2.approx`).
+  - sm_120 vs sm_89, and sm_80/sm_90: not audited yet. The GEMMs (integer sums, IEEE
+    fma/mul/div) should be architecture-exact, but f16 `mma.sync` internal accumulation is
+    architecture-specific (Hawkeye, arXiv:2603.20421).
+
+  So the identity keys on the exact `sm_XY`: the same architecture shares an identity
+  whatever the card, toolkit or driver.
 - **Across numerics versions.** When a change to Axon's kernels or sampler changes bits,
   `NUMERICS_VERSION` goes up and every fingerprint changes with it.
 - **Across models**, obviously, including another quantization of the same weights.
@@ -62,7 +68,7 @@ The identity (`src/identity.rs`) is everything that decides the bits:
 | `model`    | SHA-256 over the GGUF file's length, its whole header (all metadata, tensor names, shapes, quant types) and samples of the tensor data |
 | `types`    | the quant types and their tensor counts (readable; the header hash covers them) |
 | `backend`  | `cpu`, `cuda`, `cuda+cpu` with the layer split, or a pipeline with its cuts |
-| `gpu`      | per GPU: architecture and code (`sm_120 [sm_120 nvrtc 12.8]`; PTX adds the driver, which compiles it) |
+| `gpu`      | per GPU: its exact architecture (`sm_120`); not the card, NVRTC or driver (audited, above) |
 | `cpu`      | when any layer runs on the CPU: arch, FMA or not, r8 repack or per-row (`AXON_REPACK=0` changes the low bits); not the SIMD path, which matches scalar bit for bit |
 | `kv`       | `f16`, `q8`, `q8/32`; `f32` on the CPU with `AXON_KV=f32`             |
 
@@ -72,8 +78,8 @@ length where it fits). Attention covers only the positions filled, in 64-positio
 so a bigger cache lets a request run longer but never changes a token it would have
 produced under the smaller limit; a request that hits the limit just stops (or is refused)
 sooner. Sampling params and the seed belong to the request. The
-fingerprint is conservative: two identities can differ and still give the same bits (two
-GPU architectures may well agree, unaudited); the promise is only that the same identity
+fingerprint is conservative: two identities can differ and still give the same bits
+(sm_120 and sm_89 may well agree; unaudited); the promise is only that the same identity
 gives the same bits.
 
 The fingerprint is `fp_` plus 16 hex digits of the SHA-256 of the tuple's canonical text
@@ -127,5 +133,5 @@ Laptop, sm_120). Where it does cost something is CPU prefill, where a free float
 be faster.
 
 Cross-GPU bit identity is a separate, harder problem (it needs the reduction order to be
-independent of the architecture's float units too) and Axon doesn't claim it yet: hence
-`gpu` in the tuple.
+independent of the architecture's float units too). Axon claims it within one
+architecture (measured on sm_89) and not across: hence `gpu` in the tuple.
