@@ -120,6 +120,14 @@ flags:
               32768 (or the whole one, if less); if not even 2 fit, one request at a time.
               With --ctx N, the slots that fit with N; with --parallel N alone, N slots of
               the longest context that fits them
+  --rope-scaling yarn --rope-scale F [--yarn-orig-ctx N]
+              gen, logits, chat, serve: YaRN RoPE scaling (llama.cpp's flags), off by default:
+              the model's context becomes N x F (N: default the model's trained context), e.g.
+              Qwen2.5 / Qwen3 to 131072 with --rope-scale 4 --yarn-orig-ctx 32768. Changes the
+              output at every length, short prompts too: only for prompts past the trained
+              context (docs/long-context.md). --yarn-beta-fast B (32), --yarn-beta-slow B (1),
+              --yarn-attn-factor M (the q and k scale, default 0.1 ln F + 1);
+              --rope-scaling none drops a GGUF's own rope.scaling keys
 
 sampling flags (gen, chat; applied in this order, as llama.cpp):
   --repeat-penalty P  divide (multiply, if negative) the logits of tokens among the last N by P
