@@ -1220,26 +1220,62 @@ fn serve_whole_response_cancelled_on_disconnect() {
     let Some(p) = crate::testutil::model_path() else {
         return;
     };
-    let s = server(p.to_str().unwrap(), Device::Cpu);
-    let body = json!({"prompt": "Count: 1, 2, 3,", "max_tokens": 1900, "temperature": 0,
-                      "repetition_penalty": 1.0})
-    .to_string();
-    let mut c = TcpStream::connect(s.addr).unwrap();
-    c.write_all(request("POST", "/v1/completions", &body, false).as_bytes())
-        .unwrap();
-    // Wait until it generates, then leave.
-    wait_for("it to start", || s.generated.load(Ordering::Relaxed) >= 5);
-    drop(c);
-    // The next request is served once the engine is free: right after the
-    // cancel, or (before) after all 1900 tokens. No clock involved.
-    let v = post(
-        s.addr,
-        "/v1/completions",
-        json!({"prompt": "Hi", "max_tokens": 1}),
-    );
-    assert_eq!(v.status, 200);
-    let g = s.generated.load(Ordering::Relaxed);
-    assert!(g < 1900, "ran to the end: {g} tokens");
+    let mut devices = vec![Device::Cpu];
+    if crate::testutil::gpu().is_some() {
+        devices.push(Device::Cuda);
+    }
+    for device in devices {
+        let s = server(p.to_str().unwrap(), device);
+        let body = json!({"prompt": "Count: 1, 2, 3,", "max_tokens": 1900, "temperature": 0,
+                          "repetition_penalty": 1.0})
+        .to_string();
+        let mut c = TcpStream::connect(s.addr).unwrap();
+        c.write_all(request("POST", "/v1/completions", &body, false).as_bytes())
+            .unwrap();
+        // Wait until it generates, then leave.
+        wait_for("it to start", || s.generated.load(Ordering::Relaxed) >= 5);
+        // On the GPU, a second request first: the first hands over to the
+        // batch, and the cancel must drop it from there (its slot freed).
+        let other = (device == Device::Cuda).then(|| {
+            let a = s.addr;
+            let g0 = s.generated.load(Ordering::Relaxed);
+            let h = std::thread::spawn(move || {
+                post(
+                    a,
+                    "/v1/completions",
+                    json!({"prompt": "Hello", "max_tokens": 64,
+                                                  "temperature": 0}),
+                )
+            });
+            wait_for("the batch", || {
+                s.generated.load(Ordering::Relaxed) >= g0 + 10
+            });
+            h
+        });
+        drop(c);
+        if let Some(h) = other {
+            assert_eq!(h.join().unwrap().status, 200);
+        }
+        // The next request is served once the engine is free (on the CPU:
+        // right after the cancel, or (before) after all 1900 tokens; on the
+        // GPU it shares the batch). No clock involved.
+        let v = post(
+            s.addr,
+            "/v1/completions",
+            json!({"prompt": "Hi", "max_tokens": 1}),
+        );
+        assert_eq!(v.status, 200);
+        if device == Device::Cuda {
+            // The cancelled request leaves the batch: generation stops.
+            wait_for("the batch to go idle", || {
+                let g = s.generated.load(Ordering::Relaxed);
+                std::thread::sleep(Duration::from_millis(500));
+                s.generated.load(Ordering::Relaxed) == g
+            });
+        }
+        let g = s.generated.load(Ordering::Relaxed);
+        assert!(g < 1900, "{device:?}: ran to the end: {g} tokens");
+    }
 }
 
 /// An error answered before the body is read (413 here) is followed by
