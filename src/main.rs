@@ -330,7 +330,7 @@ fn run() -> std::io::Result<()> {
     // What decides the output bits (docs/determinism.md), per placement.
     match identity::predicted(path, &model) {
         Ok(ids) => {
-            if let Some((_, i)) = ids.first() {
+            if let Some((_, Ok(i))) = ids.first() {
                 let model = &i.fields[1].1;
                 println!(
                     "model digest: {model} (sampled SHA-256, identity numerics {})",
@@ -338,7 +338,10 @@ fn run() -> std::io::Result<()> {
                 );
             }
             for (what, i) in ids {
-                println!("fingerprint {what}: {}", i.line());
+                match i {
+                    Ok(i) => println!("fingerprint {what}: {}", i.line()),
+                    Err(why) => println!("fingerprint {what}: none ({why})"),
+                }
             }
         }
         Err(e) => println!("fingerprint: none ({e})"),
@@ -773,10 +776,10 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             n.kv_name()
         );
     }
-    match identity::of(path, &model, &net) {
-        Ok(id) if verbose => eprint!("identity:    {}\n{}", id.fingerprint(), id.canonical()),
-        Ok(id) => eprintln!("identity:    {}", id.fingerprint()),
-        Err(e) => eprintln!("identity:    unknown ({e})"),
+    let id = identity::of(path, &model, &net);
+    match verbose {
+        true => eprint!("identity:    {}\n{}", id.fingerprint(), id.canonical()),
+        false => eprintln!("identity:    {}", id.fingerprint()),
     }
     if env::var_os("AXON_POOL_DEBUG").is_some() {
         let pool = pool::Pool::global();

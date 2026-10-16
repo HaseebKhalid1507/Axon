@@ -867,8 +867,7 @@ fn engine(
         Some(b) => format!("{kvs}, ctx {served}{drafts}, {} requests at once", b.slots),
         None => format!("{kvs}, ctx {ctx}{drafts}, one request at a time"),
     };
-    let identity = crate::identity::of(&o.path, &model, &net)
-        .unwrap_or_else(|e| crate::fail(&format!("{}: {e}", o.path)));
+    let identity = crate::identity::of(&o.path, &model, &net);
     if ready
         .send(Loaded {
             tok,
@@ -1322,7 +1321,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
         #[cfg(test)]
         sh: sh.clone(),
     };
-    let Ok(l) = ready_rx.recv() else {
+    let Ok(mut l) = ready_rx.recv() else {
         server.shutdown();
         return Err(io::Error::other("the engine failed to start"));
     };
@@ -1332,6 +1331,8 @@ pub fn start(o: Opts) -> io::Result<Server> {
             o.path
         ));
     }
+    let serve = crate::identity::serve_field(o.no_think, o.think_inline, &o.sample);
+    l.identity = l.identity.with_serve(serve);
     if o.log {
         eprintln!(
             "axon serve: {model_id} ({}) on http://{addr}/v1{}",

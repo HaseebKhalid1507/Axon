@@ -584,6 +584,12 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
         self.gpu.as_ref()
     }
 
+    /// With streaming: the smallest prefill batch streamed, and whether
+    /// one-token steps stream too (AXON_STREAM_DECODE).
+    pub fn streams(&self) -> Option<(usize, bool)> {
+        self.stream.as_ref().map(|s| (s.min, s.decode))
+    }
+
     /// The GPU layers' cache type (`CudaQwen2::kv_name`; the CPU layers'
     /// is f16 or f32 as AXON_KV says).
     pub fn kv_name(&self) -> &'static str {

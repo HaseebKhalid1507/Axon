@@ -10,17 +10,22 @@
 //!   metadata key, tensor name, shape and quant type, plus a sample of the
 //!   tensor data), and `types`, the quant types (readable; the header hash
 //!   already covers them).
-//! - `backend`: cpu, cuda, cuda+cpu (with the layer split), or a pipeline
-//!   (with its cuts): a layer's numerics are its device's.
+//! - `backend`: cpu, cuda, cuda+cpu (with the layer split, and whether its
+//!   CPU layers stream through the GPU for prefill: then those batches get
+//!   GPU numerics), or a pipeline (with its cuts).
 //! - `gpu`: per GPU, its exact architecture (sm_XY). Audited (see
 //!   docs/determinism.md): two sm_89 cards with different NVRTC (12.8,
 //!   13.3) and drivers agree bit for bit, so the toolkit isn't in it; sm_61
 //!   and sm_89 differ from prefill on (split f32 attention below sm_80,
 //!   tensor cores from sm_80); other pairs are unaudited, so each sm_XY is
-//!   its own.
+//!   its own. Also the code loaded when it isn't the device's own cubin,
+//!   and without tensor-core attention the split count (`max_split`, from
+//!   the SM count), which orders that path's sums.
 //! - `cpu`: what decides CPU bits (fused multiply-add or not, r8 repack or
 //!   per-row kernels) when any layer runs on the CPU.
 //! - `kv`: the KV cache type (f16, q8, q8/32; f32 on the CPU).
+//! - `serve`: `axon serve`'s settings a request inherits when it leaves
+//!   them out (`serve_field`), only when not the defaults.
 //!
 //! Not in it, because they never change bits: drafting (lossless, prompt
 //! lookup or a draft model), the context size (--ctx or serve's default,
@@ -44,7 +49,10 @@ use std::path::Path;
 /// Axon's numerics version. RULE: bump it in the same commit as any change
 /// that can change an output bit for some model on some backend: a kernel's
 /// arithmetic or reduction order (CPU or CUDA), the attention fold, RoPE,
-/// norms, the sampler's order or RNG, a quant format's dequant. Changes that
+/// norms, the sampler's order or RNG, a quant format's dequant; or what turns
+/// a request into tokens or text: the tokenizer, chat templates and prompt
+/// rendering (serve.rs `Template`, tools.rs), stop tokens and strings, think
+/// handling. Changes that
 /// keep every bit (speed, scheduling, a kernel that matches the old one bit
 /// for bit, proven by the md5 gate) don't bump it. A bump changes every
 /// fingerprint, so a client caching on it knows its old outputs are stale.
@@ -94,8 +102,20 @@ impl Identity {
         s
     }
 
-    /// `fp_` and the first 16 hex digits of the SHA-256 of `canonical`.
+    /// The tuple with the server's `serve_field`, if any, last.
+    pub fn with_serve(mut self, serve: Option<String>) -> Identity {
+        if let Some(s) = serve {
+            self.fields.push(("serve", s));
+        }
+        self
+    }
+
+    /// `fp_` and the first 16 hex digits of the SHA-256 of `canonical`;
+    /// `fp_unknown` if a part couldn't be read (see `of`).
     pub fn fingerprint(&self) -> String {
+        if self.fields.iter().any(|(_, v)| v.contains("unknown")) {
+            return "fp_unknown".into();
+        }
         format!("fp_{}", &hex(&sha256(self.canonical().as_bytes()))[..16])
     }
 
@@ -126,57 +146,166 @@ impl Identity {
     }
 }
 
-/// The identity of `net`, loaded from the GGUF file at `path` (`m`).
-pub fn of(path: &str, m: &Model, net: &Backend) -> io::Result<Identity> {
-    let digest = model_digest(Path::new(path), m)?;
+/// The identity of `net`, loaded from the GGUF file at `path` (`m`). A
+/// part that can't be read (the file, the GPU) is "unknown ...", and then
+/// the fingerprint is `fp_unknown`: no identity is claimed.
+pub fn of(path: &str, m: &Model, net: &Backend) -> Identity {
+    let digest = model_digest(Path::new(path), m).unwrap_or_else(|e| format!("unknown ({e})"));
     let types = quant_types(m);
     let cpu_kv = if crate::kv::use_f32() { "f32" } else { "f16" };
-    let id = match net {
+    match net {
         Backend::Cpu(_) => Identity::new(&digest, &types, "cpu", None, Some(&cpu()), cpu_kv),
         Backend::Cuda(n) => {
-            let g = gpu(n.gpu());
+            let g = gpu(n);
             Identity::new(&digest, &types, "cuda", Some(&g), None, n.kv_name())
         }
         Backend::Hybrid(n) => {
-            let g = n.gpu_net().map(|g| gpu(g.gpu()));
-            let b = format!("cuda+cpu, gpu layers {}/{}", n.gpu_layers, m.n_layers());
+            let g = n.gpu_net().map(gpu);
+            let b = hybrid_backend(n.gpu_layers, n.n_layers, n.streams());
             let kv = format!("{} (cpu layers {cpu_kv})", n.kv_name());
             Identity::new(&digest, &types, &b, g.as_deref(), Some(&cpu()), &kv)
         }
         Backend::Pipeline(n) => {
-            let cuts: Vec<String> = n.cuts.iter().map(|c| c.to_string()).collect();
-            let gs: Vec<String> = n.gpus().into_iter().map(gpu).collect();
-            let b = format!("cuda pipeline, cuts {}", cuts.join(","));
+            let gs: Vec<String> = n.stages().into_iter().map(gpu).collect();
+            let b = pipeline_backend(&n.cuts);
             Identity::new(&digest, &types, &b, Some(&gs.join("; ")), None, n.kv_name())
         }
+    }
+}
+
+/// The backend field of a CPU/GPU split: its layer split and, when the
+/// CPU's layers stream through the GPU for prefill batches of at least
+/// `min` tokens, that: those batches run the CPU layers with GPU numerics
+/// (`cuda::qwen2::stream`), so a streamed split is not prefill == decode
+/// invariant, and whether it streams depends on free VRAM at load.
+pub fn hybrid_backend(
+    gpu_layers: usize,
+    n_layers: usize,
+    streams: Option<(usize, bool)>,
+) -> String {
+    let mut b = format!("cuda+cpu, gpu layers {gpu_layers}/{n_layers}");
+    if let Some((min, decode)) = streams {
+        b.push_str(&format!(", prefill streams >={min}"));
+        if decode {
+            b.push_str(", decode streams");
+        }
+    }
+    b
+}
+
+/// The backend field of a pipeline over GPUs: its layer cuts.
+pub fn pipeline_backend(cuts: &[usize]) -> String {
+    let cuts: Vec<String> = cuts.iter().map(|c| c.to_string()).collect();
+    format!("cuda pipeline, cuts {}", cuts.join(","))
+}
+
+/// A GPU's field: its exact architecture; the code loaded for it when that
+/// isn't the device's own cubin (an older cubin of the major, PTX the driver
+/// compiles, sm_90a); and without tensor-core attention (head size 256, or
+/// below sm_80) that path's split count, which follows the SM count.
+pub fn gpu_field(arch: &str, code: &str, split: Option<usize>) -> String {
+    let mut s = arch.to_string();
+    if code != arch {
+        s.push_str(&format!(" [code {code}]"));
+    }
+    if let Some(k) = split {
+        s.push_str(&format!(", split attention {k}"));
+    }
+    s
+}
+
+/// `gpu_field` of a loaded GPU model.
+fn gpu(n: &crate::cuda::qwen2::CudaQwen2) -> String {
+    let g = n.gpu();
+    let arch = g
+        .info()
+        .map_or_else(|e| format!("unknown ({e})"), |i| i.arch());
+    let code = crate::cuda::code_target(g).map_or_else(|e| format!("unknown ({e})"), |c| c.0);
+    gpu_field(&arch, &code, n.split_attention())
+}
+
+/// The server's settings that change a request's output when it leaves
+/// them out: --no-think (the prompt's rendering), --think-inline (where the
+/// reasoning goes), and its default sampling flags. None when all are the
+/// defaults, so default fingerprints carry no `serve` field. (A request's
+/// own params, seed and `max_tokens` are its own; without `max_tokens` a
+/// reply runs to the context or --max-tokens, which bound its length, not
+/// its tokens.)
+pub fn serve_field(
+    no_think: bool,
+    think_inline: bool,
+    s: &crate::sample::SampleArgs,
+) -> Option<String> {
+    let mut v = Vec::new();
+    if no_think {
+        v.push("no-think".to_string());
+    }
+    if think_inline {
+        v.push("think-inline".to_string());
+    }
+    let mut f = |name: &str, x: Option<String>| {
+        if let Some(x) = x {
+            v.push(format!("{name} {x}"));
+        }
     };
-    Ok(id)
+    f("temp", s.temp.map(|x| x.to_string()));
+    f("top-k", s.top_k.map(|x| x.to_string()));
+    f("top-p", s.top_p.map(|x| x.to_string()));
+    f("min-p", s.min_p.map(|x| x.to_string()));
+    f("repeat-penalty", s.repeat_penalty.map(|x| x.to_string()));
+    f("repeat-last-n", s.repeat_last_n.map(|x| x.to_string()));
+    f("seed", s.seed.map(|x| x.to_string()));
+    (!v.is_empty()).then(|| v.join(", "))
 }
 
 /// The identities `m` (at `path`) would have without loading it (`axon
-/// info`): on the CPU (its cache type as AXON_KV says) and, if a GPU can
-/// run it, on CUDA device 0 with each cache type, as (label, identity).
-pub fn predicted(path: &str, m: &Model) -> io::Result<Vec<(String, Identity)>> {
+/// info`): on the CPU (its cache type as AXON_KV says) and, on CUDA device
+/// 0, with each cache type if the weights fit its free VRAM (else why
+/// not: a split's identity depends on where it's placed), as (label,
+/// identity or why none).
+pub fn predicted(path: &str, m: &Model) -> io::Result<Vec<(String, Result<Identity, String>)>> {
     let digest = model_digest(Path::new(path), m)?;
     let types = quant_types(m);
     let cpu_kv = if crate::kv::use_f32() { "f32" } else { "f16" };
     let mut v = vec![(
         "cpu".to_string(),
-        Identity::new(&digest, &types, "cpu", None, Some(&cpu()), cpu_kv),
+        Ok(Identity::new(
+            &digest,
+            &types,
+            "cpu",
+            None,
+            Some(&cpu()),
+            cpu_kv,
+        )),
     )];
-    if let Ok(g) = crate::cuda::Gpu::open() {
-        let gs = gpu(&g);
-        for kv in ["f16", "q8"] {
-            let id = Identity::new(&digest, &types, "cuda", Some(&gs), None, kv);
-            v.push((format!("cuda --kv {kv}"), id));
-        }
+    let Ok(g) = crate::cuda::Gpu::open() else {
+        return Ok(v);
+    };
+    let (Ok(info), Ok((code, code_arch))) = (g.info(), crate::cuda::code_target(&g)) else {
+        return Ok(v);
+    };
+    if m.total_bytes() >= info.free_bytes {
+        let why = format!(
+            "the weights don't fit {}'s free VRAM: gen would split the model, and a split's \
+             identity depends on its placement (gen --verbose prints it)",
+            info.arch()
+        );
+        v.push(("cuda".to_string(), Err(why)));
+        return Ok(v);
+    }
+    // CudaQwen2's rule: tensor-core attention needs mma (sm_80+ code) and
+    // a head size other than 256.
+    let n_kv = m.n_kv_heads().max(1) as usize;
+    let head = (m.meta_u32(&format!("{}.attention.key_length", m.arch)))
+        .unwrap_or(m.embed_dim() / m.n_heads().max(1));
+    let split = (code_arch < 80 || head == 256)
+        .then(|| crate::cuda::qwen2::max_split(info.sms as usize, n_kv));
+    let gs = gpu_field(&info.arch(), &code, split);
+    for kv in ["f16", "q8"] {
+        let id = Identity::new(&digest, &types, "cuda", Some(&gs), None, kv);
+        v.push((format!("cuda --kv {kv}"), Ok(id)));
     }
     Ok(v)
-}
-
-/// A GPU's part: its architecture.
-fn gpu(g: &crate::cuda::Gpu) -> String {
-    g.info().map_or_else(|_| "unknown".into(), |i| i.arch())
 }
 
 /// The CPU's part: what changes its layers' bits. SIMD and scalar paths
@@ -219,19 +348,55 @@ const TENSOR_EDGE: u64 = 256;
 const WINDOW: u64 = 4096;
 const WINDOWS: u64 = 1024;
 
-/// The model's digest: SHA-256 (hex) over the file length, the whole header
-/// (metadata and tensor table, up to the data), the first and last
-/// `TENSOR_EDGE` bytes of every tensor, and `WINDOWS` windows of `WINDOW`
-/// bytes evenly spaced over the data: a few MB read, ~40 ms warm (7B), against
-/// seconds for every byte of a 5 GB file on every start. Another model, a
-/// requant, a fine-tune or a merge changes the header or (nearly) every
-/// block, so the samples see it; a deliberate edit of bytes between
-/// samples would not (this names a file; it isn't a tamper seal).
+/// The model's digest: SHA-256 (hex) of "axon-model-digest/2\0", the file
+/// length (u64 LE), then the bytes of the union of these ranges, in file
+/// order (overlaps once): the whole header (metadata and tensor table, up
+/// to the data), the first and last `TENSOR_EDGE` bytes of every tensor,
+/// and `WINDOWS` windows of `WINDOW` bytes evenly spaced over the data (all
+/// clamped to the file). A few MB in ~1-2k sorted reads with readahead off
+/// (`fadvise` RANDOM), ~40 ms warm for a 7B, against seconds for every byte
+/// of a 5 GB file on every start. Another model, a requant, a fine-tune or
+/// a merge changes the header or (nearly) every block, so the samples see
+/// it; a deliberate edit of bytes between samples would not (this names a
+/// file; it isn't a tamper seal). It reopens the file by path: a file
+/// replaced after loading is digested as the new one.
 pub fn model_digest(path: &Path, m: &Model) -> io::Result<String> {
     let tensors: Vec<(u64, u64)> = (m.tensors.iter())
         .map(|t| (m.data_offset + t.offset, t.n_bytes))
         .collect();
     digest_file(path, m.data_offset, &tensors)
+}
+
+/// The ranges `digest_file` hashes, for a file of `len` bytes: sorted,
+/// overlapping or touching ones merged, empty ones dropped.
+fn digest_ranges(len: u64, data_offset: u64, tensors: &[(u64, u64)]) -> Vec<(u64, u64)> {
+    let mut r = vec![(0, data_offset)];
+    for &(at, n) in tensors {
+        let e = n.min(TENSOR_EDGE);
+        r.push((at, at + e));
+        r.push((at + n - e, at + n));
+    }
+    let data = len.saturating_sub(data_offset);
+    if data > 0 {
+        let span = data.saturating_sub(WINDOW);
+        for i in 0..WINDOWS {
+            let at = data_offset + span * i / (WINDOWS - 1);
+            r.push((at, at + WINDOW));
+        }
+    }
+    let mut r: Vec<(u64, u64)> = (r.into_iter())
+        .map(|(a, b)| (a.min(len), b.min(len)))
+        .filter(|(a, b)| a < b)
+        .collect();
+    r.sort_unstable();
+    let mut out: Vec<(u64, u64)> = Vec::with_capacity(r.len());
+    for (a, b) in r {
+        match out.last_mut() {
+            Some(l) if a <= l.1 => l.1 = l.1.max(b),
+            _ => out.push((a, b)),
+        }
+    }
+    out
 }
 
 /// `model_digest` for a file whose data starts at `data_offset`, with
@@ -240,31 +405,33 @@ fn digest_file(path: &Path, data_offset: u64, tensors: &[(u64, u64)]) -> io::Res
     use std::os::unix::fs::FileExt;
     let f = std::fs::File::open(path)?;
     let len = f.metadata()?.len();
+    fadvise_random(&f);
     let mut h = Sha256::new();
-    h.update(b"axon-model-digest/1\0");
+    h.update(b"axon-model-digest/2\0");
     h.update(&len.to_le_bytes());
     let mut buf = Vec::new();
-    let mut read = |h: &mut Sha256, at: u64, n: u64| -> io::Result<()> {
-        let n = n.min(len.saturating_sub(at));
-        buf.resize(n as usize, 0);
-        f.read_exact_at(&mut buf, at)?;
+    for (a, b) in digest_ranges(len, data_offset, tensors) {
+        buf.resize((b - a) as usize, 0);
+        f.read_exact_at(&mut buf, a)?;
         h.update(&buf);
-        Ok(())
-    };
-    read(&mut h, 0, data_offset)?;
-    for &(at, n) in tensors {
-        read(&mut h, at, n.min(TENSOR_EDGE))?;
-        let e = n.min(TENSOR_EDGE);
-        read(&mut h, at + n - e, e)?;
-    }
-    let data = len.saturating_sub(data_offset);
-    if data > 0 {
-        let span = data.saturating_sub(WINDOW);
-        for i in 0..WINDOWS {
-            read(&mut h, data_offset + span * i / (WINDOWS - 1), WINDOW)?;
-        }
     }
     Ok(hex(&h.finish()))
+}
+
+/// No readahead on `f` (POSIX_FADV_RANDOM, Linux): the digest's reads are
+/// small and scattered. Best effort.
+fn fadvise_random(f: &std::fs::File) {
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        unsafe extern "C" {
+            fn posix_fadvise(fd: i32, offset: i64, len: i64, advice: i32) -> i32;
+        }
+        // SAFETY: a valid open fd; the call only sets a hint on it.
+        let _ = unsafe { posix_fadvise(f.as_raw_fd(), 0, 0, 1) };
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = f;
 }
 
 fn hex(b: &[u8]) -> String {
@@ -449,6 +616,190 @@ mod tests {
         assert_eq!(j["system_fingerprint"], a.fingerprint());
         assert_eq!(j["numerics"], NUMERICS_VERSION);
         assert_eq!(j["kv"], "f16");
+    }
+
+    /// Test file bytes: a fixed pseudo-random pattern (the golden values
+    /// come from an independent Python/hashlib model of `digest_file`).
+    fn pattern(n: usize) -> Vec<u8> {
+        (0..n as u64)
+            .map(|i| (((i * 2654435761) & 0xffff_ffff) >> 13) as u8)
+            .collect()
+    }
+
+    fn digest_of(name: &str, b: &[u8], off: u64, ts: &[(u64, u64)]) -> String {
+        let dir = std::env::temp_dir().join(format!("axon-golden-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join(name);
+        std::fs::write(&p, b).unwrap();
+        let d = digest_file(&p, off, ts).unwrap();
+        std::fs::remove_file(&p).unwrap();
+        d
+    }
+
+    /// Pinned digests: a change here changes every model's fingerprint
+    /// (bump the "axon-model-digest/N" tag). A file over 4 MiB (sparse
+    /// windows, gaps between them), tensors of 0, 100 and 300 bytes; data
+    /// under 4 KiB; no data at all.
+    #[test]
+    fn model_digest_golden() {
+        let len = 6 * 1024 * 1024 + 123;
+        let big = pattern(len);
+        let l = len as u64;
+        let tb = [
+            (777, 0),
+            (777, 300),
+            (1077, 100),
+            (1177, 5_000_000),
+            (5_001_177, l - 5_001_177),
+        ];
+        let r = digest_ranges(l, 777, &tb);
+        let covered: u64 = r.iter().map(|(a, b)| b - a).sum();
+        assert_eq!(covered, 4_195_462);
+        assert!(r.windows(2).all(|w| w[0].1 < w[1].0), "sorted, merged");
+        let d = digest_of("big", &big, 777, &tb);
+        assert_eq!(
+            d,
+            "1e6f07123ce8b7cba2671873e0febf5e7e346ade633dff6a89499481e28a947c"
+        );
+        // A byte in a gap between windows isn't read; one in a window is.
+        let gap = r[r.len() / 2].1 as usize;
+        let mut b = big.clone();
+        b[gap] ^= 1;
+        assert_eq!(digest_of("big", &b, 777, &tb), d, "gap byte {gap}");
+        let mut b = big.clone();
+        b[gap - 1] ^= 1;
+        assert_ne!(digest_of("big", &b, 777, &tb), d);
+        let tiny = pattern(3000);
+        assert_eq!(
+            digest_of("tiny", &tiny, 100, &[(100, 0), (100, 2900)]),
+            "d333bd1f9f5ce3d645d0d2ae9b88be75c9cbbe9bf39584439299a021f56a2356"
+        );
+        assert_eq!(
+            digest_ranges(3000, 100, &[(100, 0), (100, 2900)]),
+            [(0, 3000)]
+        );
+        assert_eq!(
+            digest_of("nodata", &pattern(50), 50, &[]),
+            "452b8b418068e72260f60eb9b41410324904a2246ed6ec4534a125e365f6f837"
+        );
+    }
+
+    /// The field builders: a split names its streaming (prefill, decode),
+    /// a GPU its code when it isn't the device's own cubin and its split
+    /// count without tensor-core attention, a server its non-default
+    /// settings; an unreadable part gives no fingerprint.
+    #[test]
+    fn fields() {
+        assert_eq!(hybrid_backend(12, 24, None), "cuda+cpu, gpu layers 12/24");
+        assert_eq!(
+            hybrid_backend(12, 24, Some((32, false))),
+            "cuda+cpu, gpu layers 12/24, prefill streams >=32"
+        );
+        assert_eq!(
+            hybrid_backend(12, 24, Some((32, true))),
+            "cuda+cpu, gpu layers 12/24, prefill streams >=32, decode streams"
+        );
+        assert_eq!(
+            pipeline_backend(&[0, 10, 24]),
+            "cuda pipeline, cuts 0,10,24"
+        );
+        assert_eq!(gpu_field("sm_89", "sm_89", None), "sm_89");
+        assert_eq!(gpu_field("sm_90", "sm_90a", None), "sm_90 [code sm_90a]");
+        assert_eq!(
+            gpu_field("sm_120", "compute_90 PTX, driver 12.8", None),
+            "sm_120 [code compute_90 PTX, driver 12.8]"
+        );
+        assert_eq!(
+            gpu_field("sm_89", "sm_89", Some(64)),
+            "sm_89, split attention 64"
+        );
+        let base = |g: &str| Identity::new("aa", "Q4_K:1", "cuda", Some(g), None, "f16");
+        let fps: Vec<String> = [
+            "sm_89",
+            "sm_89, split attention 64",
+            "sm_89, split attention 256",
+        ]
+        .iter()
+        .map(|g| base(g).fingerprint())
+        .collect();
+        assert!(fps[0] != fps[1] && fps[1] != fps[2] && fps[0] != fps[2]);
+        use crate::sample::SampleArgs;
+        assert_eq!(serve_field(false, false, &SampleArgs::default()), None);
+        let s = SampleArgs {
+            temp: Some(0.7),
+            seed: Some(5),
+            ..SampleArgs::default()
+        };
+        assert_eq!(
+            serve_field(true, false, &s).as_deref(),
+            Some("no-think, temp 0.7, seed 5")
+        );
+        let plain = base("sm_89");
+        assert_eq!(plain.clone().with_serve(None), plain);
+        let srv = plain.clone().with_serve(serve_field(true, false, &s));
+        assert_ne!(srv.fingerprint(), plain.fingerprint());
+        assert!(
+            srv.canonical()
+                .ends_with("serve=no-think, temp 0.7, seed 5\n")
+        );
+        let unk = Identity::new("unknown (gone)", "Q4_K:1", "cpu", None, None, "f16");
+        assert_eq!(unk.fingerprint(), "fp_unknown");
+        assert_eq!(base("unknown (no driver)").fingerprint(), "fp_unknown");
+    }
+
+    /// `of` on a real CPU/GPU split and a two-stage pipeline (both stages on
+    /// device 0): the backend and gpu fields as `fields` builds them.
+    #[test]
+    fn of_split_and_pipeline() {
+        let Some(g0) = crate::testutil::gpu() else {
+            return;
+        };
+        drop(g0);
+        let Some(mp) = crate::testutil::model_path() else {
+            return;
+        };
+        let path = mp.to_str().unwrap();
+        let m = crate::gguf::load_with(path, Some(false)).unwrap();
+        let n = crate::hybrid::block_count(&m).unwrap();
+        let kv = crate::kv::KvType::F16;
+        let net = Backend::new(&m, crate::lm::Device::Cuda, 256, Some(n / 2), kv, false).unwrap();
+        let Backend::Hybrid(h) = &net else {
+            panic!("not a split")
+        };
+        let id = of(path, &m, &net);
+        let get = |id: &Identity, k: &str| {
+            (id.fields.iter())
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v.clone())
+        };
+        let b = get(&id, "backend").unwrap();
+        assert_eq!(b, hybrid_backend(n / 2, n, h.streams()), "{id:?}");
+        assert!(b.starts_with(&format!("cuda+cpu, gpu layers {}/{n}", n / 2)));
+        assert!(get(&id, "cpu").is_some() && get(&id, "gpu").unwrap().starts_with("sm_"));
+        assert_ne!(id.fingerprint(), "fp_unknown");
+        drop(net);
+        let gpu: &'static crate::cuda::Gpu =
+            Box::leak(Box::new(crate::cuda::Gpu::open_device(0).unwrap()));
+        let module: &'static crate::cuda::Module<'static> =
+            Box::leak(Box::new(crate::cuda::Kernels::module_for(gpu, &m).unwrap()));
+        let devs = [(gpu, module), (gpu, module)];
+        let cuts = vec![0, n / 2, n];
+        let p = crate::cuda::qwen2::pipeline::PipelineQwen2::new(
+            &devs,
+            &m,
+            256,
+            crate::cuda::qwen2::CacheKv::F16,
+            Some(cuts.clone()),
+        )
+        .unwrap();
+        let net = Backend::Pipeline(Box::new(p));
+        let id = of(path, &m, &net);
+        assert_eq!(get(&id, "backend").unwrap(), pipeline_backend(&cuts));
+        let g = get(&id, "gpu").unwrap();
+        let parts: Vec<&str> = g.split("; ").collect();
+        assert_eq!(parts.len(), 2, "{g}");
+        assert_eq!(parts[0], parts[1]);
+        assert_eq!(get(&id, "kv").unwrap(), "f16");
     }
 
     /// The model digest reads the file: stable, and it sees a change in the
