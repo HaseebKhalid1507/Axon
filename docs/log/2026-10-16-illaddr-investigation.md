@@ -41,7 +41,10 @@ that caused it.
   - With CUDA_ENABLE_COREDUMP_ON_EXCEPTION=1: 0 hits in about 35 rounds, so no GPU core dump was ever
     written. That is not significant either way.
   - With AXON_CUDA_GRAPHS=0 + CUDA_LAUNCH_BLOCKING=1, which would put the kernel's name in the error
-    (`cuLaunchKernelEx <name>`): no hit yet in the rounds run.
+    (`cuLaunchKernelEx <name>`): 0 hits in 29 rounds. Graphs on in the same phase: 1 hit in 27
+    (LAUNCH_BLOCKING) and 2 in 40 (plain). At ~5 % a round that is not significant; graphs-only is
+    possible, not shown.
+  - Pod5 logs, including every hit's full log and the memcheck logs: `~/.cache/axon-illaddr/pod5-logs/` on bella.
 - **Under memcheck, one test thread (the 0.5B prefill test, card shared):** the run died with
   CUDA_ERROR_LAUNCH_FAILED (719) at the same decode-step sync, tests.rs:3086, and memcheck reported no
   invalid access. The fault was not an instrumented kernel load or store. memcheck of gpu_q8_qwen3 and the
