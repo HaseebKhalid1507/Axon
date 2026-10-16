@@ -589,10 +589,12 @@ fn gpu_pdl_gating() {
     let off = std::env::var("AXON_CUDA_PDL").ok();
     let want = cc >= 90 && d >= (12, 3) && off.as_deref() != Some("0");
     assert_eq!(m.pdl(), want);
-    // A module compiled as PTX for an older arch never overlaps.
+    // A module compiled as PTX for an older arch never overlaps. The arch
+    // must also be <= the device's: PTX doesn't JIT down (an sm_80 device
+    // can't load compute_89 PTX).
     let n = ffi::nvrtc().unwrap();
     let archs = ffi::nvrtc_archs(n).unwrap();
-    if let Some(&old) = archs.iter().filter(|&&a| a < 90).max() {
+    if let Some(&old) = archs.iter().filter(|&&a| a < 90 && a <= cc).max() {
         let (m, _) = Module::load_for(&g, IOTA, &[], None, Target::Ptx(old)).unwrap();
         assert!(!m.pdl());
     }
