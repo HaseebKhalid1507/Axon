@@ -74,6 +74,10 @@ pub(crate) enum BatchIn<'x> {
     /// and the RoPE table of their positions in its `rope` (left there by
     /// the streamed layers, stream.rs).
     Resident(usize),
+    /// This many states already in the residual stream (a pipeline's
+    /// previous stage copied them there, `pipeline`); the RoPE table is
+    /// made here, as for `Hidden`.
+    Placed(usize),
 }
 
 impl BatchIn<'_> {
@@ -81,7 +85,7 @@ impl BatchIn<'_> {
         match self {
             BatchIn::Tokens(t) => t.len(),
             BatchIn::Hidden(x) => x.len() / dim,
-            BatchIn::Resident(n) => *n,
+            BatchIn::Resident(n) | BatchIn::Placed(n) => *n,
         }
     }
 
@@ -93,6 +97,10 @@ impl BatchIn<'_> {
             BatchIn::Resident(n) => {
                 assert!(r == (0..*n), "resident states: one pass");
                 BatchIn::Resident(*n)
+            }
+            BatchIn::Placed(n) => {
+                assert!(r == (0..*n), "placed states: one pass");
+                BatchIn::Placed(*n)
             }
         }
     }
@@ -620,6 +628,7 @@ impl<'g> CudaQwen2<'g> {
                 hx.copy_to(&b.x, 0, xs.len() * 4)?;
             }
             BatchIn::Resident(_) => {}
+            BatchIn::Placed(_) => assert!(self.first > 0, "takes tokens"),
         }
         Ok(())
     }
@@ -1171,7 +1180,14 @@ pub(super) fn passes(n: usize, max: usize) -> Vec<std::ops::Range<usize>> {
     v
 }
 
-impl BatchBufs<'_> {
+impl<'g> BatchBufs<'g> {
+    /// The residual stream, [max][dim] floats: a pass's hidden states after
+    /// its last layer (a pipeline stage's output), or its input
+    /// (`BatchIn::Placed`).
+    pub(super) fn x(&self) -> &DevBuf<'g> {
+        &self.x
+    }
+
     /// The first n greedy picks of the pass enqueued (waits for it).
     pub(super) fn picks(&mut self, n: usize) -> Result<Vec<u32>, String> {
         let n = 4 * n;

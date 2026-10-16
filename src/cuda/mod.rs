@@ -550,6 +550,113 @@ impl Gpu {
     }
 }
 
+/// Several devices on one driver thread (pipeline parallel,
+/// `qwen2::pipeline`). Each `Gpu` keeps its own stream; work is ordered
+/// across them with `SyncEvent`s (`record_main` on one, `wait_main` on
+/// another: `cuStreamWaitEvent` takes another context's event).
+impl Gpu {
+    /// The device's ordinal (as `open_device` took it).
+    pub fn ordinal(&self) -> usize {
+        self.dev as usize
+    }
+
+    /// Whether `other` is the same device (`open_device` twice: the same
+    /// primary context, so a copy between them is a device-to-device copy).
+    pub fn same_device(&self, other: &Gpu) -> bool {
+        self.dev == other.dev
+    }
+
+    /// Whether AXON_P2P=1 asks for peer access between devices
+    /// (`enable_peer`). Off by default: the P2P path has not run on hardware
+    /// that has it yet (the 2x4090 test host had none); the host-staged copy
+    /// is the tested one.
+    pub fn p2p_setting() -> bool {
+        std::env::var("AXON_P2P").is_ok_and(|v| v == "1")
+    }
+
+    /// With AXON_P2P=1 (`p2p_setting`), let this device's kernels and copies
+    /// read and write `other`'s memory directly (P2P over PCIe or NVLink).
+    /// True if on (or the same device), false if not asked for, the devices
+    /// can't, or the driver refuses (a note on stderr): copies are then
+    /// staged through host memory by the driver (`copy_peer` works either
+    /// way). Never an Err: a refused peer mapping only costs speed.
+    pub fn enable_peer(&self, other: &Gpu) -> bool {
+        if self.same_device(other) {
+            return true;
+        }
+        if !Self::p2p_setting() {
+            return false;
+        }
+        let (a, b) = (self.ordinal(), other.ordinal());
+        let refused = |what: String| {
+            eprintln!(
+                "axon: note: no P2P from GPU {a} to GPU {b} ({what}); copies go through host memory"
+            );
+            false
+        };
+        let mut can: c_int = 0;
+        // SAFETY: both devices are valid; writes one c_int.
+        let r = unsafe { (self.d.cuDeviceCanAccessPeer)(&mut can, self.dev, other.dev) };
+        if let Err(e) = check(self.d, r, "cuDeviceCanAccessPeer") {
+            return refused(e);
+        }
+        if can == 0 {
+            return refused("the devices can't".into());
+        }
+        if let Err(e) = self.bind() {
+            return refused(e);
+        }
+        // SAFETY: our context is current; other.ctx is a live context.
+        let r = unsafe { (self.d.cuCtxEnablePeerAccess)(other.ctx, 0) };
+        if r == ffi::CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED {
+            return true;
+        }
+        match check(self.d, r, "cuCtxEnablePeerAccess") {
+            Ok(()) => true,
+            Err(e) => refused(e),
+        }
+    }
+
+    /// Copy `n` bytes from `src` at `src_off` (on any device) to `dst` at
+    /// `dst_off` (on any device), enqueued on this `Gpu`'s stream: ordered
+    /// after the work enqueued here, not waited for. The caller orders it
+    /// with the other device's stream (`record_main` / `wait_main`).
+    pub fn copy_peer(
+        &self,
+        dst: &DevBuf,
+        dst_off: usize,
+        src: &DevBuf,
+        src_off: usize,
+        n: usize,
+    ) -> Result<(), String> {
+        let ok = |o: usize, len: usize| o.checked_add(n).is_some_and(|end| end <= len);
+        if !ok(src_off, src.len) || !ok(dst_off, dst.len) {
+            return Err(format!(
+                "peer copy of {n} bytes from {src_off} of {} to {dst_off} of {}",
+                src.len, dst.len
+            ));
+        }
+        if n == 0 {
+            return Ok(());
+        }
+        self.bind()?;
+        // SAFETY: n bytes in bounds of both allocations (checked), each in
+        // its own Gpu's live context; they outlive the stream work
+        // (cuMemFree waits for it).
+        let r = unsafe {
+            (self.d.cuMemcpyPeerAsync)(
+                dst.ptr + dst_off as u64,
+                dst.gpu.ctx,
+                src.ptr + src_off as u64,
+                src.gpu.ctx,
+                n,
+                self.stream,
+            )
+        };
+        check(self.d, r, "cuMemcpyPeerAsync")
+    }
+}
+
 /// Host memory page-locked by `Gpu::register`.
 pub struct Pinned<'g> {
     gpu: &'g Gpu,
