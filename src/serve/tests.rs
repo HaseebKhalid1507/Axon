@@ -1612,7 +1612,7 @@ fn batched_vs_solo(a: SocketAddr, bodies: &[Value], what: &str) {
 
 /// A pool whose slots are shorter than the context (`slot_ctx`, as when
 /// --parallel slots of --ctx don't fit): the context served is a slot's
-/// (/v1/models, 413 past it), and requests without max_tokens (up to that
+/// (/v1/models, context_length_exceeded past it), and requests without max_tokens (up to that
 /// context) batch with the same replies as alone.
 #[test]
 fn serve_shrunk_pool() {
@@ -1636,6 +1636,7 @@ fn serve_shrunk_pool() {
         "/v1/chat/completions",
         json!({"messages": [{"role": "user", "content": long}], "max_tokens": 4}),
     );
-    assert_eq!(r.status, 413, "{}", r.body);
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert_eq!(r.json()["error"]["code"], "context_length_exceeded");
     batched_vs_solo(a, &batch_bodies(false), "shrunk pool, no max_tokens");
 }

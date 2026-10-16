@@ -699,7 +699,7 @@ fn engine(
         },
     };
     // With a pool, the context served is a slot's: every request fits one
-    // (the 413 check and the default max_tokens use it).
+    // (the context_length_exceeded check and the default max_tokens use it).
     let served = batch.as_ref().map_or(ctx, |b| b.ctx.min(ctx));
     if served < ctx && o.log {
         eprintln!(
