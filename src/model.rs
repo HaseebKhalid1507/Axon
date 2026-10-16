@@ -4,7 +4,7 @@
 
 use crate::gguf::{Model, Tensor, Val};
 use crate::kv::{Half, KvData, KvElem, Layers};
-use crate::pool::{self, Pool};
+use crate::pool::{self, Kind, Pool};
 use crate::quant::{
     DecodeCfg, F16, F32, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0, QuantizedAct, batch_slots,
     dequant, dot_row_q8_multi, dot_rows_q8, dot_rows_q8_multi, r8, r8q, row_bytes,
@@ -876,7 +876,7 @@ impl<'a> Qwen2<'a> {
             .clamp(4, 64)
             .next_multiple_of(align);
         let (cfg, own_all) = Self::decode_cfg();
-        pool::for_each_chunk_mut(&mut out, chunk, |c, mut ys| {
+        pool::for_each_chunk_mut_in(Kind::Decode, &mut out, chunk, |c, mut ys| {
             // The chunk's rows, one run per matrix it touches, several rows
             // per kernel call.
             let mut g = c * chunk;
@@ -915,7 +915,7 @@ impl<'a> Qwen2<'a> {
             .clamp(4, MAX_CHUNK)
             .next_multiple_of(a0.max(a1));
         let (cfg, own_all) = Self::decode_cfg();
-        pool::for_each_chunk_mut(&mut out, chunk, |c, ys| {
+        pool::for_each_chunk_mut_in(Kind::Decode, &mut out, chunk, |c, ys| {
             let (r, k) = (c * chunk, ys.len());
             let mut ub = [0f32; MAX_CHUNK];
             let ub = &mut ub[..k];
@@ -1913,18 +1913,18 @@ fn attend<T: KvElem>(
     let vparts = &mut rest[..nv];
 
     if tile.is_none() {
-        pool::for_each_chunk_mut(wts, np, |qh, s| {
+        pool::for_each_chunk_mut_in(Kind::Decode, wts, np, |qh, s| {
             let qv = &q[qh * hd..(qh + 1) * hd];
             score_softmax(qv, kc, kv_dim, qh / group * hd, scale, s);
         });
     } else {
-        pool::for_each_chunk_mut(sc, tc * group, |c, s| {
+        pool::for_each_chunk_mut_in(Kind::Decode, sc, tc * group, |c, s| {
             let (kvh, t0) = (c / nt, c % nt * tc);
             let qg = &q[kvh * qn..(kvh + 1) * qn];
             score_tile(qg, kc, kv_dim, hd, kvh * hd, t0..np.min(t0 + tc), scale, s);
         });
         let sc = &*sc;
-        pool::for_each_chunk_mut(wts, np, |qh, w| {
+        pool::for_each_chunk_mut_in(Kind::Decode, wts, np, |qh, w| {
             let (kvh, g) = (qh / group, qh % group);
             softmax_from(&sc[kvh * nt * tc * group + g..], group, w);
         });
@@ -1939,7 +1939,7 @@ fn attend<T: KvElem>(
         let d0 = col * cw;
         (kvh, g0, g1, d0, cw.min(hd - d0))
     };
-    pool::for_each_chunk_mut(vparts, hmax * cw, |c, o| {
+    pool::for_each_chunk_mut_in(Kind::Decode, vparts, hmax * cw, |c, o| {
         let (kvh, g0, g1, d0, width) = task(c);
         let w = &wts[(kvh * group + g0) * np..];
         let vb = &vc[kvh * hd + d0..];
@@ -3333,7 +3333,7 @@ pub(crate) mod tests {
             ),
             (
                 "tokenizer.ggml.model",
-                Val::Str("llama".into()),
+                Val::Str("t5".into()),
                 "tokenizer model",
             ),
         ] {
@@ -3353,6 +3353,12 @@ pub(crate) mod tests {
             m.push(("llama.rope.scaling.type", Val::Str("none".into())));
         })
         .expect("tiny llama with rope keys");
+        // A SentencePiece vocabulary (Mistral, Llama 2, TinyLlama) is supported.
+        tiny_llama(no_freqs, |m| {
+            m.retain(|kv| kv.0 != "tokenizer.ggml.model" && kv.0 != "tokenizer.ggml.pre");
+            m.push(("tokenizer.ggml.model", Val::Str("llama".into())));
+        })
+        .expect("SentencePiece vocabulary");
         for t in ["linear", "yarn"] {
             tiny_llama(no_freqs, |m| {
                 m.push(("llama.rope.scaling.type", Val::Str(t.into())));
