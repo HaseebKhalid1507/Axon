@@ -1,9 +1,7 @@
 //! `axon serve` end to end: a server on an ephemeral port over the test
 //! model, driven over real sockets.
 
-use super::{
-    MAX_CONNS, MAX_QUEUE, Opts, Server, Template, WaitList, api::Message, api::Role, start,
-};
+use super::{MAX_CONNS, MAX_QUEUE, Opts, Server, Template, api::Message, api::Role, start};
 use crate::lm::{Device, Lm};
 use crate::sample::SampleArgs;
 use crate::tokenizer::{Tokenizer, Utf8Stream};
@@ -1191,7 +1189,7 @@ fn wait_list_take_decides_the_race() {
     );
     let h1 = std::sync::Arc::new(l.accept().unwrap().0);
     let h2 = std::sync::Arc::new(l.accept().unwrap().0);
-    let w = WaitList::default();
+    let w = super::WaitList::default();
     assert!(!w.set(1, Some(&h1)));
     assert!(!w.set(2, Some(&h2)));
     // 1 (the oldest) got its request and took itself off first.
