@@ -59,6 +59,11 @@ drafts gain little: acceptance per guess falls with depth (chat 49 % at K=3, 29 
 serve keeps K=3 (its split path runs one request at a time; not changed here).
 Not split: K = 3 as before (an all-GPU verify costs 1.45× a token at nb 8).
 
+14B at a 32k context on bella (`gen --ctx 32768` placement) splits as well: 28/48 GPU layers
+with no drafter, 23/48 with the 0.5B drafter, whose 32k KV comes out of the GPU's share. Greedy
+tg128, 2 rounds, 18/18 SAME: no draft 13.8–15.4 tok/s; K=7 code 51.9–52.5, chat 27.2–29.1,
+summary 28.4–28.8 (K=4 is equal on chat and summary, K=10 is slower).
+
 ## CPU GEMM prefetch
 
 The CPU's batched r8 GEMM had no software prefetch (decode's GEMV has had it since r8bi). A
