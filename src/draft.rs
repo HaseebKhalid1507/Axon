@@ -176,6 +176,68 @@ pub fn draft_k(k: Option<usize>, with_model: bool) -> usize {
     }
 }
 
+/// Draft tokens per pass with a draft model next to a model split across
+/// the CPU and the GPU, when --draft isn't given. A split's step is bound by
+/// reading the CPU layers' weights from RAM, which a verify pass does once
+/// for all its rows, while a draft step on the GPU costs ~1-2 ms: longer
+/// drafts pay (NOTES: bella 32B sweep).
+pub const SPLIT_MODEL_DRAFT: usize = 7;
+
+/// The K to run with, once the main model is placed: `k` (`draft_k`'s), or
+/// `SPLIT_MODEL_DRAFT` if a draft model runs next to a split model and K
+/// wasn't given (`given`: --draft / AXON_DRAFT), or 0 if a draft model was
+/// asked for (`with_model`) but none runs (`--draft-model auto` found none:
+/// not prompt lookup instead).
+pub fn split_k(
+    given: Option<usize>,
+    k: usize,
+    with_model: bool,
+    drafter: bool,
+    split: bool,
+) -> usize {
+    match (given, with_model, drafter, split) {
+        (_, true, false, _) => 0,
+        (None, true, true, true) => SPLIT_MODEL_DRAFT,
+        _ => k,
+    }
+}
+
+/// `--draft-model auto`: the smallest GGUF next to the main model (`main`,
+/// at `path`) that can draft for it (`check_vocab`) and is at most
+/// `AUTO_MAX_FRACTION` of its size: None if there's none. Opt-in (the
+/// flag): drafting is off unless asked for.
+pub fn auto_path(path: &str, main: &Model, tok: &Tokenizer) -> Option<String> {
+    let p = std::path::Path::new(path);
+    let size = std::fs::metadata(p).ok()?.len();
+    let dir = match p.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => std::path::Path::new("."),
+    };
+    let mut cands: Vec<(u64, String)> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let q = e.path();
+            let len = e.metadata().ok()?.len();
+            let gguf = q
+                .extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("gguf"));
+            (gguf && len > 0 && len <= size / AUTO_MAX_FRACTION && q != p)
+                .then(|| (len, q.to_string_lossy().into_owned()))
+        })
+        .collect();
+    cands.sort();
+    cands.into_iter().map(|(_, c)| c).find(|c| {
+        crate::gguf::load_with(c, Some(false)).is_ok_and(|d| {
+            crate::model::check_supported(&d).is_ok() && check_vocab(&d, main, tok).is_ok()
+        })
+    })
+}
+
+/// `auto_path`'s size limit: a draft model at most 1/AUTO_MAX_FRACTION of
+/// the main model's file (Qwen2.5-0.5B's 0.49 GB Q4_K_M for 7B's 4.7 GB).
+pub const AUTO_MAX_FRACTION: u64 = 8;
+
 /// The token table (`tokenizer.ggml.tokens`) of a GGUF.
 fn tokens(m: &Model) -> Option<&[Val]> {
     m.metadata.iter().find_map(|(k, v)| match v {
@@ -376,13 +438,11 @@ pub fn load_pair<'a>(
     let r = dm.reserve(device, draft_ctx, kv)?;
     let net = target();
     let ctx = net.ctx(want_ctx).min(draft_ctx);
-    if matches!(net, Backend::Hybrid(_)) {
-        eprintln!(
-            "axon: warning: the model is split across the CPU and GPU; a draft model next to a \
-             split model is almost always slower than none (--draft 0, or a smaller --ctx / \
-             --kv q8 to fit the model on the GPU)"
-        );
-    } else if ctx < want_ctx.min(draft_ctx) {
+    // A split model gets no warning: its decode is bound by reading the CPU
+    // layers' weights, which a verify pass does once for all of its tokens,
+    // so drafting pays even though the drafter's VRAM costs the GPU a layer
+    // or two (docs/design/spec-split.md).
+    if !matches!(net, Backend::Hybrid(_)) && ctx < want_ctx.min(draft_ctx) {
         eprintln!(
             "axon: warning: with the draft model's memory set aside, the context shrank from \
              {} to {ctx} tokens (--draft 0 for the whole context)",
@@ -785,6 +845,21 @@ mod tests {
         assert_eq!(draft_k(Some(5), true), 5);
         assert_eq!(draft_k(Some(0), true), 0);
         assert_eq!(draft_k(Some(5), false), crate::round_draft(5));
+    }
+
+    #[test]
+    fn split_k_defaults() {
+        // A draft model next to a split model: the split's K unless given.
+        let d = DEFAULT_MODEL_DRAFT;
+        assert_eq!(split_k(None, d, true, true, true), SPLIT_MODEL_DRAFT);
+        assert_eq!(split_k(Some(3), 3, true, true, true), 3);
+        assert_eq!(split_k(Some(0), 0, true, false, true), 0);
+        // Not split, or prompt lookup: K as draft_k gave it.
+        assert_eq!(split_k(None, d, true, true, false), d);
+        assert_eq!(split_k(None, 7, false, false, true), 7);
+        // A draft model asked for (auto) but none found: off, not lookup.
+        assert_eq!(split_k(None, d, true, false, true), 0);
+        assert_eq!(split_k(Some(5), 5, true, false, false), 0);
     }
 
     fn fake(tokens: &[Val], eos: u32) -> Model {
