@@ -1816,8 +1816,115 @@ extern "C" __global__ void attn_combine(const float* __restrict__ part_o,
 }
 
 // ---------------------------------------------------------------------------
-// Decode attention on the tensor cores: a warp per block of 64 positions
-// (block b = blockIdx.y + k gridDim.y < ceil(np / 64), kv head blockIdx.x),
+// Decode attention on the tensor cores: a block of NW warps per block of
+// 64 positions (block b = blockIdx.y + k gridDim.y < ceil(np / 64), kv
+// head blockIdx.x), steps 1-8 for the kv head's query heads (attn_blk_t).
+#if __CUDA_ARCH__ >= 800
+// Steps 2-7 for n-tiles 2 * n2 and 2 * n2 + 1 of block t0 when NW warps
+// share a block (attn_blk_t, NW > 1): s2 = their scores (each n-tile's
+// chain over the dims as att_scores), masked as att_softmax; the warp's
+// row maxima of those two n-tiles go to mx, its p (= ex2(s - m), m the
+// block's) to ps [8][32][4] in fragment order, after the barrier that
+// publishes mx. Every warp then reads all of ps back (att_blk_l) - the
+// same values att_softmax computes, so the same l and P.
+template <int HD, int NW>
+__device__ __forceinline__ void att_scores_n2(const u32 (*qa)[4], unsigned short* kt, int n2,
+                                              int t0, int np, float* mx, float* ps) {
+    int lane = threadIdx.x & 31, wi = threadIdx.x >> 5;
+    float s[2][4] = {};
+#pragma unroll
+    for (int kk = 0; kk < HD / 16; kk++) {
+        u32 b[4];
+        ldsm4(b, att_chunk<HD>(kt, 16 * n2 + (lane & 7) + ((lane >> 4) << 3),
+                               2 * kk + ((lane >> 3) & 1)));
+        mma_h(s[0], qa[kk], b[0], b[1]);
+        mma_h(s[1], qa[kk], b[2], b[3]);
+    }
+    if (t0 + ATT_BLK > np) {
+        int c = t0 + 2 * (lane & 3);
+#pragma unroll
+        for (int i = 0; i < 2; i++)
+#pragma unroll
+            for (int j = 0; j < 4; j++)
+                if (c + 8 * (2 * n2 + i) + (j & 1) >= np) s[i][j] = -INFINITY;
+    }
+    float m0 = fmaxf(fmaxf(s[0][0], s[0][1]), fmaxf(s[1][0], s[1][1]));
+    float m1 = fmaxf(fmaxf(s[0][2], s[0][3]), fmaxf(s[1][2], s[1][3]));
+#pragma unroll
+    for (int o = 1; o <= 2; o <<= 1) {
+        m0 = fmaxf(m0, __shfl_xor_sync(0xffffffffu, m0, o));
+        m1 = fmaxf(m1, __shfl_xor_sync(0xffffffffu, m1, o));
+    }
+    // n2 = wi + NW * k: the warp's first pair writes mx (all warps take
+    // part in every barrier, so one pair per warp per barrier).
+    mx[(wi * 32 + lane) * 2] = m0;
+    mx[(wi * 32 + lane) * 2 + 1] = m1;
+    __syncthreads();
+    m0 = m1 = -INFINITY;
+#pragma unroll
+    for (int w = 0; w < NW; w++) {
+        m0 = fmaxf(m0, mx[(w * 32 + lane) * 2]);
+        m1 = fmaxf(m1, mx[(w * 32 + lane) * 2 + 1]);
+    }
+    float u0 = m0 == -INFINITY ? 0.0f : m0, u1 = m1 == -INFINITY ? 0.0f : m1;
+#pragma unroll
+    for (int i = 0; i < 2; i++) {
+        float4 p = make_float4(att_ex2(__fsub_rn(s[i][0], u0)), att_ex2(__fsub_rn(s[i][1], u0)),
+                               att_ex2(__fsub_rn(s[i][2], u1)), att_ex2(__fsub_rn(s[i][3], u1)));
+        *(float4*)(ps + ((2 * n2 + i) * 32 + lane) * 4) = p;
+    }
+    // The block's maxima, for the warp storing (m, l).
+    mx[NW * 64 + lane * 2] = m0;
+    mx[NW * 64 + lane * 2 + 1] = m1;
+}
+
+// Step 6-7 from ps (att_scores_n2): l of the lane's two rows, summed as
+// att_softmax does, and P's A fragments.
+__device__ __forceinline__ void att_blk_l(const float* ps, float* l, u32 (*pa)[4]) {
+    int lane = threadIdx.x & 31;
+    float s[8][4];
+#pragma unroll
+    for (int n = 0; n < 8; n++) {
+        float4 p = *(const float4*)(ps + (n * 32 + lane) * 4);
+        s[n][0] = p.x, s[n][1] = p.y, s[n][2] = p.z, s[n][3] = p.w;
+    }
+    float l0 = 0.0f, l1 = 0.0f;
+#pragma unroll
+    for (int n = 0; n < 8; n++) {
+        l0 = __fadd_rn(__fadd_rn(l0, s[n][0]), s[n][1]);
+        l1 = __fadd_rn(__fadd_rn(l1, s[n][2]), s[n][3]);
+    }
+#pragma unroll
+    for (int o = 1; o <= 2; o <<= 1) {
+        l0 = __fadd_rn(l0, __shfl_xor_sync(0xffffffffu, l0, o));
+        l1 = __fadd_rn(l1, __shfl_xor_sync(0xffffffffu, l1, o));
+    }
+    l[0] = l0, l[1] = l1;
+#pragma unroll
+    for (int kk = 0; kk < 4; kk++) {
+        pa[kk][0] = att_h2(s[2 * kk][0], s[2 * kk][1]);
+        pa[kk][1] = att_h2(s[2 * kk][2], s[2 * kk][3]);
+        pa[kk][2] = att_h2(s[2 * kk + 1][0], s[2 * kk + 1][1]);
+        pa[kk][3] = att_h2(s[2 * kk + 1][2], s[2 * kk + 1][3]);
+    }
+}
+
+// Step 8 for warp W's HD / NW dims (all lanes: ldmatrix and mma are
+// warp-wide), stored at po if st.
+template <int HD, int NW, int W>
+__device__ __forceinline__ void att_pv_store(const u32 (*pa)[4], unsigned short* vt, float* po,
+                                             bool st) {
+    constexpr int ND = HD / NW, D0 = W * ND;
+    float o[ND / 8][4];
+    att_pv<HD, D0, ND>(o, pa, vt);
+    if (st) {
+#pragma unroll
+        for (int n = 0; n < ND / 8; n++)
+            *(float2*)(po + D0 + 8 * n) = make_float2(o[n][0], o[n][1]);
+    }
+}
+#endif
+
 // steps 1-8 for the kv head's `group` query heads (rows of one m16 tile),
 // written as part_o[h][b][d] = o_b[d], part_ml[h][b] = (m_b, l_b) (stride
 // nblk_max blocks); attn_cmb folds them. Shared with the batched
@@ -1825,50 +1932,68 @@ extern "C" __global__ void attn_combine(const float* __restrict__ part_o,
 // (QkNorm): the warp normalizes the queries into shared memory, and the
 // one holding position np - 1 its keys too, into the cache (kc_out) and
 // its K tile. KG > 0: the q8 cache q8 (kc, vc unused), tiles made by
-// att_cvt_q8 (K, then V in the same buffer); the warp holding position np
+// att_cvt_q8 (K, then V in the same buffer); the block holding position np
 // - 1 first stores that token's keys and values (q8.knew, normalized on
 // qwen3) by kv_q8_store, and reads them back like any other row.
-template <int HD, int KG = 0>
+// NW warps per block (blockDim 32 * NW): NW = 1, one warp does steps 2-8;
+// NW = 4 (the decode kernels), each warp computes 2 of the 8 n-tiles of
+// scores (att_scores_n2) and HD / 4 dims of P V. Every chain of steps 2
+// and 8 is the same mma sequence and steps 4-7 meet the same values, so a
+// block's partial has the same bits for any NW.
+template <int HD, int KG = 0, int NW = 1>
 __device__ void attn_blk_t(const float* __restrict__ q, const unsigned short* kc,
                            const unsigned short* __restrict__ vc, int np, int kvh, int n_heads,
                            int n_kv, float pre, int nblk_max, float* __restrict__ part_o,
                            float* __restrict__ part_ml, QkNorm nm = QkNorm{}, Q8Kv q8 = Q8Kv{}) {
 #if __CUDA_ARCH__ >= 800
+    static_assert(NW == 1 || NW == 4, "1 or 4 warps");
     constexpr bool Q8 = KG > 0;
     constexpr int KGs = Q8 ? KG : 1;
+    constexpr int NT = 32 * NW;
     // f16: K and V tiles. q8: one tile, then the raw rows and scales.
     __shared__ __align__(16) unsigned short kt[ATT_BLK * HD], vt[Q8 ? 8 : ATT_BLK * HD];
     __shared__ __align__(16) signed char r8[Q8 ? 2 * ATT_BLK * HD : 16];
     __shared__ float rs[Q8 ? 2 * ATT_BLK * HD / KGs : 1];
     __shared__ unsigned short kh[HD];
-    int lane = threadIdx.x, group = n_heads / n_kv, kv_dim = n_kv * HD;
+    // NW > 1: p of the block's 8 n-tiles, the warps' row maxima + the block's.
+    __shared__ __align__(16) float ps[NW > 1 ? 8 * 32 * 4 : 4];
+    __shared__ float mx[NW > 1 ? (NW + 1) * 64 : 1];
+    int tid = threadIdx.x, lane = tid & 31, wi = tid >> 5, group = n_heads / n_kv;
+    int kv_dim = n_kv * HD;
     int nblk = (np + ATT_BLK - 1) / ATT_BLK, blast = (np - 1) / ATT_BLK;
     if ((int)blockIdx.y >= nblk) return;
     bool own = blast % gridDim.y == blockIdx.y;
+    auto bsync = [] {
+        if (NW == 1)
+            __syncwarp();
+        else
+            __syncthreads();
+    };
     if constexpr (Q8) {
         if (q8.knew && own) {
             // This token's rows into the cache (its keys normalized and
             // rotated first on qwen3, as the batched kv_q8_b does).
             float* xs = (float*)kt;
-            for (int i = lane; i < 2 * HD; i += 32)
+            for (int i = tid; i < 2 * HD; i += NT)
                 xs[i] = q8.knew[(i < HD ? 0 : kv_dim - HD) + kvh * HD + i];
-            __syncwarp();
+            bsync();
             if (nm.qn) {
-                float a[2], b[2];
-                for (int i = 0; i < (HD >> 6); i++) {
-                    a[i] = xs[lane + 32 * i];
-                    b[i] = xs[lane + 32 * i + HD / 2];
+                if (wi == 0) {
+                    float a[2], b[2];
+                    for (int i = 0; i < (HD >> 6); i++) {
+                        a[i] = xs[lane + 32 * i];
+                        b[i] = xs[lane + 32 * i + HD / 2];
+                    }
+                    warp_norm_rope(a, b, HD, nm.kn, nm.eps, nm.rope);
+                    for (int i = 0; i < (HD >> 6); i++) {
+                        xs[lane + 32 * i] = a[i];
+                        xs[lane + 32 * i + HD / 2] = b[i];
+                    }
                 }
-                warp_norm_rope(a, b, HD, nm.kn, nm.eps, nm.rope);
-                for (int i = 0; i < (HD >> 6); i++) {
-                    xs[lane + 32 * i] = a[i];
-                    xs[lane + 32 * i + HD / 2] = b[i];
-                }
-                __syncwarp();
+                bsync();
             }
             // kv_q8_store's __syncthreads sits inside `if (own)`, which is
-            // only legal because this block is one warp (blockDim 32): the
-            // whole block takes the branch together.
+            // legal because `own` is the same for the whole block.
             kv_q8_store<HD, KGs>(xs, q8, (u64)(np - 1) * kv_dim + kvh * HD,
                                  q8.ksh ? q8.ksh + kvh * HD : nullptr);
         }
@@ -1878,7 +2003,8 @@ __device__ void attn_blk_t(const float* __restrict__ q, const unsigned short* kc
     float* qs = (float*)(Q8 ? kt : vt);
     const float* qrow = q + kvh * group * HD;
     if (nm.qn) {
-        for (int g = 0; g < group + kpos; g++) {
+        // Row g by warp g % NW (each row by one warp, as with NW = 1).
+        for (int g = wi; g < group + kpos; g += NW) {
             bool isk = g == group;
             const float* x = isk ? nm.kraw + kvh * HD : qrow + g * HD;
             float a[2], b[2];
@@ -1900,106 +2026,135 @@ __device__ void attn_blk_t(const float* __restrict__ q, const unsigned short* kc
                 }
             }
         }
-        __syncwarp();
+        bsync();
         qrow = qs;
     }
     u32 qa[HD / 16][4];
     int g0 = lane >> 2;
     att_qfrag<HD>(qa, g0 < group ? qrow + g0 * HD : nullptr, nullptr, pre);
-    __syncwarp();
+    bsync();
     for (int b = blockIdx.y; b < nblk; b += gridDim.y) {
         int t0 = b * ATT_BLK;
-        if constexpr (Q8) {
-            att_load_q8<HD, KGs>(r8, rs, q8.k, q8.ks, t0, np, kv_dim, kvh, lane, 32);
+        // NW > 1: K and V as two groups, V still landing during steps
+        // 2-7 (waited for before its first use). Not on the q8 block that
+        // rereads row np - 1's scales below: no copy may be in flight to
+        // what that overwrites.
+        if constexpr (Q8)
+            att_load_q8<HD, KGs>(r8, rs, q8.k, q8.ks, t0, np, kv_dim, kvh, tid, NT);
+        else
+            att_load<HD>(kt, kc, t0, np, kv_dim, kvh, tid, NT);
+        if constexpr (NW > 1) att_commit();
+        if constexpr (Q8)
             att_load_q8<HD, KGs>(r8 + ATT_BLK * HD, rs + ATT_BLK * HD / KGs, q8.v, q8.vs, t0, np,
-                                 kv_dim, kvh, lane, 32);
-        } else {
-            att_load<HD>(kt, kc, t0, np, kv_dim, kvh, lane, 32);
-            att_load<HD>(vt, vc, t0, np, kv_dim, kvh, lane, 32);
-        }
+                                 kv_dim, kvh, tid, NT);
+        else
+            att_load<HD>(vt, vc, t0, np, kv_dim, kvh, tid, NT);
         att_commit();
-        att_wait<0>();
-        __syncwarp();
+        if (NW > 1 && !(Q8 && q8.knew && own && b == blast))
+            att_wait<1>();
+        else
+            att_wait<0>();
+        bsync();
         if constexpr (Q8) {
             if (q8.knew && own && b == blast) {
-                // Row np - 1's scales were stored by this warp just now;
+                // Row np - 1's scales were stored by this block just now;
                 // att_load_q8 copies scales by 4-byte cp.async, which only
                 // exists as .ca (through L1). Read them again from L2
                 // (ld.global.cg) so the copy can't be a stale L1 line. Same
                 // values, so the same bits as prefill either way.
                 int r = np - 1 - t0;
                 constexpr int NG = HD / KGs;
-                if (lane < 2 * NG) {
-                    int kv = lane / NG, gi = lane % NG;
+                if (tid < 2 * NG) {
+                    int kv = tid / NG, gi = tid % NG;
                     const float* src =
                         (kv ? q8.vs : q8.ks) + ((u64)(np - 1) * kv_dim + kvh * HD) / KGs;
                     rs[kv * ATT_BLK * NG + r * NG + gi] = __ldcg(src + gi);
                 }
-                __syncwarp();
+                bsync();
             }
-            att_cvt_q8<HD, KGs>(kt, r8, rs, lane, 32);
+            att_cvt_q8<HD, KGs>(kt, r8, rs, tid, NT);
         } else if (kpos && b == blast) {
             // The new row, from kh (not read back from the cache).
             int r = np - 1 - t0;
-            for (int i = lane; i < HD; i += 32) att_chunk<HD>(kt, r, i >> 3)[i & 7] = kh[i];
+            for (int i = tid; i < HD; i += NT) att_chunk<HD>(kt, r, i >> 3)[i & 7] = kh[i];
         }
-        __syncwarp();
-        float s[8][4], m[2], l[2];
+        bsync();
+        float m[2], l[2];
         u32 pa[4][4];
-        att_scores<HD>(s, qa, kt);
-        if (t0 + ATT_BLK > np)
-            att_softmax<true>(s, t0, np, np, m, l, pa);
-        else
-            att_softmax<false>(s, t0, np, np, m, l, pa);
+        if constexpr (NW == 1) {
+            float s[8][4];
+            att_scores<HD>(s, qa, kt);
+            if (t0 + ATT_BLK > np)
+                att_softmax<true>(s, t0, np, np, m, l, pa);
+            else
+                att_softmax<false>(s, t0, np, np, m, l, pa);
+        } else {
+            att_scores_n2<HD, NW>(qa, kt, wi, t0, np, mx, ps);
+        }
+        if constexpr (NW > 1) att_wait<0>(); // V
         if constexpr (Q8) {
-            __syncwarp();
-            att_cvt_q8<HD, KGs>(kt, r8 + ATT_BLK * HD, rs + ATT_BLK * HD / KGs, lane, 32);
+            bsync();
+            att_cvt_q8<HD, KGs>(kt, r8 + ATT_BLK * HD, rs + ATT_BLK * HD / KGs, tid, NT);
+        }
+        if constexpr (NW > 1) {
+            __syncthreads();
+            att_blk_l(ps, l, pa);
+            m[0] = mx[NW * 64 + lane * 2];
+        } else if constexpr (Q8) {
             __syncwarp();
         }
-        float o[HD / 8][4];
-        att_pv<HD, 0, HD>(o, pa, Q8 ? kt : vt);
-        if (g0 < group) {
-            u64 hb = (u64)(kvh * group + g0) * nblk_max + b;
-            float* po = part_o + hb * HD + 2 * (lane & 3);
+        u64 hb = (u64)(kvh * group + g0) * nblk_max + b;
+        float* po = part_o + hb * HD + 2 * (lane & 3);
+        if constexpr (NW == 1) {
+            float o[HD / 8][4];
+            att_pv<HD, 0, HD>(o, pa, Q8 ? kt : vt);
+            if (g0 < group) {
 #pragma unroll
-            for (int n = 0; n < HD / 8; n++) *(float2*)(po + 8 * n) = make_float2(o[n][0], o[n][1]);
-            if ((lane & 3) == 0) *(float2*)(part_ml + hb * 2) = make_float2(m[0], l[0]);
+                for (int n = 0; n < HD / 8; n++)
+                    *(float2*)(po + 8 * n) = make_float2(o[n][0], o[n][1]);
+            }
+        } else {
+            // wi is warp-uniform: each warp takes one case, whole.
+            bool st = g0 < group;
+            switch (wi) {
+            case 0: att_pv_store<HD, NW, 0>(pa, Q8 ? kt : vt, po, st); break;
+            case 1: att_pv_store<HD, NW, 1>(pa, Q8 ? kt : vt, po, st); break;
+            case 2: att_pv_store<HD, NW, 2>(pa, Q8 ? kt : vt, po, st); break;
+            default: att_pv_store<HD, NW, 3>(pa, Q8 ? kt : vt, po, st); break;
+            }
         }
-        __syncwarp();
+        if (g0 < group && wi == 0 && (lane & 3) == 0)
+            *(float2*)(part_ml + hb * 2) = make_float2(m[0], l[0]);
+        bsync();
     }
 #endif
 }
 
-extern "C" __global__ void __launch_bounds__(32)
-attn_blk_64(const float* __restrict__ q, const unsigned short* kc,
-            const unsigned short* __restrict__ vc, const u32* __restrict__ P, int n_heads,
-            int n_kv, float pre, int nblk_max, float* __restrict__ part_o,
-            float* __restrict__ part_ml, const float* __restrict__ kraw,
-            const float* __restrict__ qn, const float* __restrict__ kn, float eps,
-            const float2* __restrict__ rope, unsigned short* kc_out) {
-    PDL_START();
-    attn_blk_t<64>(q, kc, vc, (int)P[P_POS] + 1, blockIdx.x, n_heads, n_kv, pre, nblk_max, part_o,
-                   part_ml, QkNorm{kraw, qn, kn, eps, rope, kc_out});
-}
-
-extern "C" __global__ void __launch_bounds__(32)
-attn_blk_128(const float* __restrict__ q, const unsigned short* kc,
-             const unsigned short* __restrict__ vc, const u32* __restrict__ P, int n_heads,
-             int n_kv, float pre, int nblk_max, float* __restrict__ part_o,
-             float* __restrict__ part_ml, const float* __restrict__ kraw,
-             const float* __restrict__ qn, const float* __restrict__ kn, float eps,
-             const float2* __restrict__ rope, unsigned short* kc_out) {
-    PDL_START();
-    attn_blk_t<128>(q, kc, vc, (int)P[P_POS] + 1, blockIdx.x, n_heads, n_kv, pre, nblk_max,
-                    part_o, part_ml, QkNorm{kraw, qn, kn, eps, rope, kc_out});
-}
+// The decode step's attention: ATT_NW warps per block (attn_blk_t NW),
+// but one for 64-wide heads on the f16 cache (qwen2.rs att_nw).
+#define ATT_NW 4
+#define ATTN_BLK_F16(NAME, HD, NW)                                                                 \
+    extern "C" __global__ void __launch_bounds__(32 * NW)                                          \
+        NAME(const float* __restrict__ q, const unsigned short* kc,                                \
+             const unsigned short* __restrict__ vc, const u32* __restrict__ P, int n_heads,        \
+             int n_kv, float pre, int nblk_max, float* __restrict__ part_o,                        \
+             float* __restrict__ part_ml, const float* __restrict__ kraw,                          \
+             const float* __restrict__ qn, const float* __restrict__ kn, float eps,                \
+             const float2* __restrict__ rope, unsigned short* kc_out) {                            \
+        PDL_START();                                                                               \
+        attn_blk_t<HD, 0, NW>(q, kc, vc, (int)P[P_POS] + 1, blockIdx.x, n_heads, n_kv, pre,        \
+                              nblk_max, part_o, part_ml,                                           \
+                              QkNorm{kraw, qn, kn, eps, rope, kc_out});                            \
+    }
+ATTN_BLK_F16(attn_blk_64, 64, 1)
+ATTN_BLK_F16(attn_blk_128, 128, ATT_NW)
 
 // attn_blk on the q8 cache (KG values per scale), storing this token's
 // keys and values (kf: [2][kv_dim] f32, from qkv_rope_f32) first. The
 // cache pointers aren't __restrict__: the kernel writes what it reads. qn
 // non-null (qwen3): q and kf's keys are raw; normalized and rotated here.
-#define ATTN_BLK_Q8(NAME, HD, KG)                                                                  \
-    extern "C" __global__ void __launch_bounds__(32)                                               \
+#define ATTN_BLK_Q8(NAME, HD, KG, NW)                                                              \
+    extern "C" __global__ void __launch_bounds__(32 * NW)                                          \
         NAME(const float* __restrict__ q, const signed char* kq, const signed char* vq,            \
              const float* ks, const float* vs, const float* __restrict__ kf,                       \
              const u32* __restrict__ P, int n_heads, int n_kv, float pre, int nblk_max,            \
@@ -2007,15 +2162,15 @@ attn_blk_128(const float* __restrict__ q, const unsigned short* kc,
              const float* __restrict__ ksh, const float* __restrict__ qn,                          \
              const float* __restrict__ kn, float eps, const float2* __restrict__ rope) {           \
         PDL_START();                                                                               \
-        attn_blk_t<HD, KG>(q, nullptr, nullptr, (int)P[P_POS] + 1, blockIdx.x, n_heads, n_kv, pre, \
-                           nblk_max, part_o, part_ml,                                              \
-                           QkNorm{nullptr, qn, kn, eps, rope, nullptr},                            \
-                           Q8Kv{kq, vq, ks, vs, kf, ksh});                                         \
+        attn_blk_t<HD, KG, NW>(q, nullptr, nullptr, (int)P[P_POS] + 1, blockIdx.x, n_heads, n_kv,  \
+                               pre, nblk_max, part_o, part_ml,                                     \
+                               QkNorm{nullptr, qn, kn, eps, rope, nullptr},                        \
+                               Q8Kv{kq, vq, ks, vs, kf, ksh});                                     \
     }
-ATTN_BLK_Q8(attn_blk_q8_64, 64, 64)
-ATTN_BLK_Q8(attn_blk_q8_128, 128, 128)
-ATTN_BLK_Q8(attn_blk_q8g32_64, 64, 32)
-ATTN_BLK_Q8(attn_blk_q8g32_128, 128, 32)
+ATTN_BLK_Q8(attn_blk_q8_64, 64, 64, ATT_NW)
+ATTN_BLK_Q8(attn_blk_q8_128, 128, 128, ATT_NW)
+ATTN_BLK_Q8(attn_blk_q8g32_64, 64, 32, ATT_NW)
+ATTN_BLK_Q8(attn_blk_q8g32_128, 128, 32, ATT_NW)
 
 // attn_blk's blocks folded (step 9, blocks in order) and finalized (step
 // 10): out[h * hd + d] = O[d] / L, quantized for the output projection

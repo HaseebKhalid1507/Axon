@@ -43,6 +43,14 @@ use crate::sample::{self, CAND_MAX, Cand, CandSpec};
 /// Positions per attention tile (decode.cu ATT_TILE) and largest GQA group.
 const ATT_TILE: usize = 128;
 const MAX_GROUP: usize = 8;
+/// Warps per block of the decode step's attention kernels (decode.cu
+/// ATT_NW: attn_blk_128 and the q8 cache's; attn_blk_64 has one). Four
+/// warps share a 64-position block's scores and P V: on the 7B at 32k,
+/// the q8 cache's attention goes from 143 to 70 us per layer; 64-wide heads
+/// on the f16 cache keep one (four is slower there at 8k: 13.7 vs 11.9 us).
+pub(crate) fn att_nw(head_dim: usize, q8: bool) -> u32 {
+    if head_dim == 64 && !q8 { 1 } else { 4 }
+}
 /// Decode steps past this many ATT_BLK blocks of positions combine by
 /// attn_cmb (64 outputs per block), others by attn_cmb256 (256: no counter
 /// path, ~2 us cheaper per layer at short positions; MEASURED: the two tie
@@ -1864,7 +1872,7 @@ impl<'g> CudaQwen2<'g> {
                             g => g,
                         }
                         .min(nblk_max),
-                        32,
+                        32 * att_nw(hd, c.mode != CacheKv::F16),
                     ),
                     false => (self.max_split, ATT_TILE as u32),
                 };

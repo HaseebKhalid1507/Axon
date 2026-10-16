@@ -876,7 +876,7 @@ fn gpu_tc_attention_close_to_f64() {
                 g.launch(
                     &fs,
                     (nkv as u32, gy.min(nblk_max) as u32, 1),
-                    (32, 1, 1),
+                    (32 * att_nw(hd, false), 1, 1),
                     0,
                     &[
                         qb.arg(),
@@ -4122,7 +4122,7 @@ fn cuda_attn_bench() {
                     4 => g.launch(
                         f,
                         (nkv as u32, gy, 1),
-                        (32, 1, 1),
+                        (32 * att_nw(hd, false), 1, 1),
                         0,
                         &[
                             q.arg(),
@@ -4434,7 +4434,7 @@ fn gpu_batched_attention_matches_decode_bits() {
                     g.launch(
                         &fd,
                         (nkv as u32, gy.min(nblk_max) as u32, 1),
-                        (32, 1, 1),
+                        (32 * att_nw(hd, kg > 0), 1, 1),
                         0,
                         &[
                             &[qz.arg()][..],
@@ -5269,7 +5269,7 @@ fn gpu_q8_attention_matches_reference() {
                     // blocks.
                     let nblk = np.div_ceil(64);
                     let (grid, block, parts) = match tc {
-                        true => (max_split.min(nblk), 32, nblk),
+                        true => (max_split.min(nblk), 32 * att_nw(hd, true), nblk),
                         false => (max_split, ATT_TILE as u32, max_split),
                     };
                     let q = rng.vec(dim, 1.0);
