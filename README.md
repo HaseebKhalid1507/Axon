@@ -73,12 +73,12 @@ Works today, honestly scoped:
   guesses the next tokens, the model verifies them in one batched pass; equally lossless.
   Default K=3 with a draft model. Greedy tg128 medians in its A/B at K=3: +37% Qwen2.5-7B,
   +44% Qwen3-8B, +63% Llama-3.1-8B; sampled, little or none (below).
-- Serving: `axon serve`, an OpenAI-compatible HTTP server (below), one request at a time.
+- Serving: `axon serve`, an OpenAI-compatible HTTP server (below) with tool calling, one
+  request at a time.
 - Rust 1.89 or newer.
 
-Not on main yet: tool calling (`serve` refuses `tools` with a 400), batching of concurrent
-requests, multiple GPUs, Gemma and SentencePiece-tokenizer models (Mistral, Llama 2). What's in
-flight and why: [docs/roadmap.md](docs/roadmap.md).
+Not on main yet: batching of concurrent requests, multiple GPUs, Gemma and SentencePiece-tokenizer
+models (Mistral, Llama 2). What's in flight and why: [docs/roadmap.md](docs/roadmap.md).
 
 ## Quickstart
 
