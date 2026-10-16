@@ -1982,6 +1982,74 @@ fn pdl_on_off(g: &Gpu, m: &Model) {
     }
 }
 
+/// The decode step's rmsnorm_quant_v2 and gate_up4 against rmsnorm_quant
+/// and gate_up: the same tokens and logit bits, each on and off, graphs
+/// and not. gate_up4 where the rule takes it (the 0.5B's Q5_0 rows, the
+/// 0.5B Q5_K_M's Q5_1 rows through the ext module, the 0.5B Q4_0's, the
+/// 1.5B's Q4_K) and forced on the rest (the 1.5B Q5_K_M's Q5_K, qwen3's
+/// Q8_0, Llama's and the 4B's wider Q4_K rows).
+#[test]
+fn gpu_decode_norm2_gate_up4_identical() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let models = [
+        crate::testutil::model(),
+        model_at("models/Qwen2.5-0.5B-Instruct-Q5_K_M.gguf"),
+        model_at("models/qwen2.5-1.5b-instruct-q4_k_m.gguf"),
+        model_at("models/Qwen2.5-1.5B-Instruct-Q5_K_M.gguf"),
+        model_at("models/Qwen2.5-0.5B-Instruct-Q4_0.gguf"),
+        crate::testutil::qwen3_model(),
+        crate::testutil::llama_model(),
+        model_at("models/Qwen3-4B-Q4_K_M.gguf"),
+    ];
+    for m in models.into_iter().flatten() {
+        let km = Kernels::module_for(&g, &m).unwrap();
+        let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
+        let mut net = CudaQwen2::new(&g, &km, &m, 256).unwrap();
+        let lay = &net.layers[0];
+        assert!(lay.gate.qt == lay.up.qt && net.ffn.is_multiple_of(2));
+        let rule = lay.gate.rb < GATE_UP4_ROW;
+        assert!(net.dim <= NORM2_MAX);
+        let ids = tok.encode(PROMPTS[3]);
+        net.norm2 = false;
+        net.gate_up4_row = 0;
+        let (t0, l0) = greedy(&net, &ids, 16, true);
+        for (norm2, gu4, graphs) in [
+            (true, false, true),
+            (false, true, true),
+            (true, true, true),
+            (true, true, false),
+        ] {
+            net.norm2 = norm2;
+            net.gate_up4_row = if gu4 { usize::MAX } else { 0 };
+            net.graphs = graphs;
+            let (t, l) = greedy(&net, &ids, 16, true);
+            let (ta, _) = greedy(&net, &ids, 16, false);
+            assert_eq!(t, t0, "norm2 {norm2} gate_up4 {gu4} graphs {graphs}");
+            assert_eq!(ta, t0, "forward_argmax: norm2 {norm2} gate_up4 {gu4}");
+            for i in 0..l.len() {
+                assert_eq!(
+                    bits(&l[i]),
+                    bits(&l0[i]),
+                    "norm2 {norm2} gate_up4 {gu4} step {i}"
+                );
+            }
+        }
+        // And as the rule picks (the default), with graphs.
+        net.gate_up4_row = GATE_UP4_ROW;
+        net.graphs = true;
+        let (t, l) = greedy(&net, &ids, 16, true);
+        assert_eq!(t, t0);
+        assert!(l.iter().zip(&l0).all(|(a, b)| bits(a) == bits(b)));
+        eprintln!(
+            "dim {} ffn {} gate {} B/row (gate_up4 by rule: {rule}): rmsnorm_quant_v2 and \
+             gate_up4 bit-identical over 16 steps",
+            net.dim, net.ffn, net.layers[0].gate.rb
+        );
+    }
+}
+
 /// gate_up with gate and up of different types (its two-pass branch) and
 /// of the same type (one pass), vs the CPU's row dots and SwiGLU in f64.
 #[test]

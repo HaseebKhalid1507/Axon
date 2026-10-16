@@ -227,6 +227,58 @@ extern "C" __global__ void rmsnorm_quant(const float* __restrict__ x, const floa
     rmsnorm_quant_dev(x, g, eps, n, want_k, act, y);
 }
 
+// rmsnorm_quant for the decode step, with less on its post-wait chain: the
+// gain of this warp's (at most two) 256-value blocks is loaded before
+// pdl_wait (a weight: nothing to wait for), and x is staged in dynamic
+// shared memory (n floats) by the sum-of-squares pass, so the quantize pass
+// reads no global memory. The same per-thread sums in the same order, the
+// same block_sum (whose barriers publish xs), the same products and
+// quant_warp: the same bits as rmsnorm_quant (and rmsnorm_quant_b). One
+// block of 1024 threads, n <= 12256 (n * 4 bytes of dynamic shared memory
+// plus the 128 bytes of block_sum's static sh[32] within the 48 KiB a launch
+// gets without opting in); the host falls back to rmsnorm_quant beyond.
+#define NORM2_THREADS 1024
+#define NORM2_MAX 12256
+extern "C" __global__ void __launch_bounds__(NORM2_THREADS)
+rmsnorm_quant_v2(const float* __restrict__ x, const float* __restrict__ g, float eps, int n,
+                 int want_k, u8* __restrict__ act, float* __restrict__ y) {
+    extern __shared__ float xs[];
+    __shared__ float sh[32];
+    int w = threadIdx.x >> 5, nw = blockDim.x >> 5, lane = threadIdx.x & 31;
+    // Blocks w and w + 32 cover 16384 >= NORM2_MAX values.
+    float gv[2][8];
+#pragma unroll
+    for (int k = 0; k < 2; k++) {
+        int e0 = (w + k * nw) * 256 + lane * 8;
+#pragma unroll
+        for (int i = 0; i < 8; i++) gv[k][i] = e0 + i < n ? g[e0 + i] : 0.0f;
+    }
+    PDL_START();
+    float ss = 0.0f;
+    for (int i = threadIdx.x; i < n; i += blockDim.x) {
+        float v = x[i];
+        xs[i] = v;
+        ss = __fadd_rn(ss, __fmul_rn(v, v));
+    }
+    ss = block_sum(ss, sh);
+    float ms = __fdiv_rn(ss, (float)n);
+    float inv = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(ms, eps)));
+#pragma unroll
+    for (int k = 0; k < 2; k++) {
+        int blk = w + k * nw;
+        if (blk * 256 >= n) break;
+        float v[8];
+        int e0 = blk * 256 + lane * 8;
+#pragma unroll
+        for (int i = 0; i < 8; i++) {
+            int e = e0 + i;
+            v[i] = e < n ? __fmul_rn(__fmul_rn(xs[e], inv), gv[k][i]) : 0.0f;
+            if (y && e < n) y[e] = v[i];
+        }
+        quant_warp(v, n, blk, act, want_k);
+    }
+}
+
 // x (n values) quantized into act. Grid: ceil(n / 256) blocks of 32 threads.
 extern "C" __global__ void quantize(const float* __restrict__ x, int n, int want_k,
                                     u8* __restrict__ act) {
@@ -286,7 +338,7 @@ extern "C" __global__ void rope_table(const double* __restrict__ freq, int half,
 // CPU's order (quant.rs sums 32-value scaled pieces in floats): GPU and CPU
 // agree to f32 rounding, GPU decode and GPU batched passes bit for bit.
 //
-// The GEMV: a block of GEMV_THREADS threads computes R rows (1, 2) of one
+// The GEMV: a block of GEMV_THREADS threads computes R rows (1, 2, 4) of one
 // matrix for T tokens (1 here; the dp4a gemvn of prefill.cu uses more): its
 // lane groups (8 lanes per 256-value block, 4 per 32-value block) stride
 // over the rows' blocks, each group loading a block of every row before
@@ -959,6 +1011,31 @@ gate_up(int qtg, const u8* __restrict__ wg, u64 rbg, int qtu, const u8* __restri
     }
     if (threadIdx.x == 0)
         out[r] = __fmul_rn(__fdiv_rn(y[0], __fadd_rn(1.0f, expf(-y[0]))), y[1]);
+}
+
+// gate_up with two rows of each matrix per block (gate r, up r, gate r + 1,
+// up r + 1; grid rows / 2, rows even, both matrices of one type), for
+// narrow rows (the host: under 1 KiB): a block of one row pair has
+// too little to load (1.7 KiB on the 1.5B) to hide its fixed per-block
+// work. Compiled for 6 blocks per SM (80 registers: dot_rows<4> spills at
+// GEMV_MIN_BLOCKS' 64). Each output's chain is the same as in gate_up (a
+// row's sums don't depend on its block-mates), the epilogue the same per
+// row: the same bits.
+extern "C" __global__ void __launch_bounds__(GEMV_THREADS, 6)
+gate_up4(int qt, const u8* __restrict__ wg, u64 rbg, const u8* __restrict__ wu, u64 rbu, int n,
+         const u8* __restrict__ act, float* __restrict__ out) {
+    int r = 2 * blockIdx.x;
+    prefetch_l2(wg + (u64)r * rbg, 2 * rbg);
+    prefetch_l2(wu + (u64)r * rbu, 2 * rbu);
+    PDL_START();
+    float y[4];
+    const u8* rr[4] = {wg + (u64)r * rbg, wu + (u64)r * rbu, wg + (u64)(r + 1) * rbg,
+                       wu + (u64)(r + 1) * rbu};
+    dot_rows<4>(qt, rr, n, act, y);
+    if (threadIdx.x == 0) {
+        out[r] = __fmul_rn(__fdiv_rn(y[0], __fadd_rn(1.0f, expf(-y[0]))), y[1]);
+        out[r + 1] = __fmul_rn(__fdiv_rn(y[2], __fadd_rn(1.0f, expf(-y[2]))), y[3]);
+    }
 }
 
 // ---------------------------------------------------------------------------
