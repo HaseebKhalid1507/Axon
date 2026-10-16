@@ -84,12 +84,144 @@ struct Spm {
     space_prefix: bool,
 }
 
+/// FxHash (rustc's): a multiply-rotate hash, several times cheaper than
+/// the default SipHash for the short keys here (token texts, id pairs).
+/// Not DoS-resistant; the keys come from the model file and its prompt.
+#[derive(Default, Clone, Copy)]
+struct Fx(u64);
+
+impl Fx {
+    #[inline]
+    fn add(&mut self, w: u64) {
+        self.0 = (self.0.rotate_left(5) ^ w).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    }
+}
+
+impl std::hash::Hasher for Fx {
+    #[inline]
+    fn write(&mut self, b: &[u8]) {
+        let mut c = b.chunks_exact(8);
+        for w in &mut c {
+            self.add(u64::from_le_bytes(w.try_into().unwrap()));
+        }
+        let r = c.remainder();
+        if !r.is_empty() {
+            let mut w = [0u8; 8];
+            w[..r.len()].copy_from_slice(r);
+            self.add(u64::from_le_bytes(w));
+        }
+    }
+    #[inline]
+    fn write_u8(&mut self, v: u8) {
+        self.add(v as u64);
+    }
+    #[inline]
+    fn write_u32(&mut self, v: u32) {
+        self.add(v as u64);
+    }
+    #[inline]
+    fn write_u64(&mut self, v: u64) {
+        self.add(v);
+    }
+    #[inline]
+    fn write_usize(&mut self, v: usize) {
+        self.add(v as u64);
+    }
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
+type FxMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<Fx>>;
+
+fn fx_str(s: &str) -> u64 {
+    use std::hash::Hasher;
+    let mut h = Fx::default();
+    h.write(s.as_bytes());
+    // Fx's low bits depend on the input's low bits only: multiply once
+    // more and swap halves (the slot comes from the low half, the tag
+    // from the high one).
+    h.0.wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(32)
+}
+
+/// Token text -> id, without a copy of every text: open addressing over
+/// (hash, id) slots, the texts back to back in one string. A text that
+/// occurs twice maps to its last id (as inserting each into a map would).
+struct Vocab {
+    text: String,
+    /// End of token i's text in `text` (start: the previous end).
+    ends: Vec<u32>,
+    /// (high hash bits, id); id u32::MAX is an empty slot.
+    slots: Vec<(u32, u32)>,
+}
+
+impl Vocab {
+    fn new(tokens: &[String]) -> Vocab {
+        let mut text = String::with_capacity(tokens.iter().map(|t| t.len()).sum());
+        let mut ends = Vec::with_capacity(tokens.len());
+        for t in tokens {
+            text.push_str(t);
+            ends.push(text.len() as u32);
+        }
+        let n = (tokens.len() * 2).next_power_of_two().max(16);
+        let mut v = Vocab {
+            text,
+            ends,
+            slots: vec![(0, u32::MAX); n],
+        };
+        // Inserted in the order of their home slots (ties: by id, so a
+        // repeated text ends at its last id): the table fills front to back
+        // instead of one random cache miss per token.
+        let mask = n - 1;
+        let mut order: Vec<(u64, u32)> = (tokens.iter().enumerate())
+            .map(|(i, t)| (fx_str(t), i as u32))
+            .collect();
+        order.sort_unstable_by_key(|&(h, i)| (h as usize & mask, i));
+        for (h, i) in order {
+            let at = v.find_hashed(h, &tokens[i as usize]);
+            v.slots[at] = ((h >> 32) as u32, i);
+        }
+        v
+    }
+
+    fn text_of(&self, id: u32) -> &str {
+        let i = id as usize;
+        let a = if i == 0 { 0 } else { self.ends[i - 1] as usize };
+        &self.text[a..self.ends[i] as usize]
+    }
+
+    /// The slot holding `s`, or the empty one where it would go.
+    fn find(&self, s: &str) -> usize {
+        self.find_hashed(fx_str(s), s)
+    }
+
+    /// `find` with `s`'s hash (`fx_str`).
+    fn find_hashed(&self, h: u64, s: &str) -> usize {
+        let (mask, tag) = (self.slots.len() - 1, (h >> 32) as u32);
+        let mut at = h as usize & mask;
+        loop {
+            let (t, id) = self.slots[at];
+            if id == u32::MAX || (t == tag && self.text_of(id) == s) {
+                return at;
+            }
+            at = (at + 1) & mask;
+        }
+    }
+
+    /// The id of token text `s`.
+    fn get(&self, s: &str) -> Option<&u32> {
+        let (_, id) = &self.slots[self.find(s)];
+        (*id != u32::MAX).then_some(id)
+    }
+}
+
 pub struct Tokenizer {
     tokens: Vec<String>,
     token_type: Vec<i32>,
-    token_to_id: HashMap<String, u32>,
+    token_to_id: Vocab,
     /// (left id, right id) -> (rank, merged id)
-    merges: HashMap<(u32, u32), (u32, u32)>,
+    merges: FxMap<(u32, u32), (u32, u32)>,
     /// raw byte -> id of its single-char byte-encoded token (SentencePiece:
     /// its `<0xXX>` token)
     byte_id: [Option<u32>; 256],
@@ -148,6 +280,57 @@ fn val_i64(v: &Val) -> i64 {
     }
 }
 
+/// The merge table from the GGUF's "left right" strings, rank = position:
+/// (left id, right id) -> (rank, merged id), the first rank of a pair kept.
+/// A merge whose sides or result aren't tokens is skipped. The lookups run
+/// on up to 4 threads (each a slice of the ranks), the inserts in rank
+/// order.
+fn build_merges(vocab: &Vocab, a: &[Val]) -> FxMap<(u32, u32), (u32, u32)> {
+    let resolve = |part: &[Val]| -> Vec<Option<(u32, u32, u32)>> {
+        let mut buf = String::new();
+        (part.iter())
+            .map(|v| {
+                let Val::Str(s) = v else { return None };
+                let (l, r) = s.split_once(' ')?;
+                let (&li, &ri) = (vocab.get(l)?, vocab.get(r)?);
+                buf.clear();
+                buf.push_str(l);
+                buf.push_str(r);
+                Some((li, ri, *vocab.get(&buf)?))
+            })
+            .collect()
+    };
+    let threads = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .clamp(1, 4);
+    let per = a.len().div_ceil(threads).max(4096);
+    let parts: Vec<Vec<Option<(u32, u32, u32)>>> = std::thread::scope(|sc| {
+        // A slice whose thread didn't start is resolved here, in order.
+        let hs: Vec<_> = (a.chunks(per))
+            .map(|c| {
+                (
+                    c,
+                    std::thread::Builder::new().spawn_scoped(sc, move || resolve(c)),
+                )
+            })
+            .collect();
+        (hs.into_iter())
+            .map(|(c, h)| match h {
+                Ok(h) => h.join().expect("merge thread"),
+                Err(_) => resolve(c),
+            })
+            .collect()
+    });
+    let mut merges = FxMap::default();
+    merges.reserve(a.len());
+    for (rank, e) in parts.into_iter().flatten().enumerate() {
+        if let Some((li, ri, mi)) = e {
+            merges.entry((li, ri)).or_insert((rank as u32, mi));
+        }
+    }
+    merges
+}
+
 impl Tokenizer {
     pub fn from_gguf(m: &Model) -> Tokenizer {
         let tokens: Vec<String> = match meta(m, "tokenizer.ggml.tokens") {
@@ -165,34 +348,31 @@ impl Tokenizer {
             _ => vec![1; tokens.len()],
         };
 
-        let mut token_to_id = HashMap::with_capacity(tokens.len());
-        for (i, t) in tokens.iter().enumerate() {
-            token_to_id.insert(t.clone(), i as u32);
-        }
-
-        let mut merges = HashMap::new();
-        if let Some(Val::Arr(a)) = meta(m, "tokenizer.ggml.merges") {
-            merges.reserve(a.len());
-            let mut buf = String::new();
-            for (rank, v) in a.iter().enumerate() {
-                let Val::Str(s) = v else { continue };
-                let Some((l, r)) = s.split_once(' ') else {
-                    continue;
-                };
-                let (Some(&li), Some(&ri)) = (token_to_id.get(l), token_to_id.get(r)) else {
-                    continue;
-                };
-                buf.clear();
-                buf.push_str(l);
-                buf.push_str(r);
-                let Some(&mi) = token_to_id.get(buf.as_str()) else {
-                    continue;
-                };
-                merges.entry((li, ri)).or_insert((rank as u32, mi));
-            }
-        }
-
         let pre = pre_of(m).unwrap_or_else(|e| panic!("{e}"));
+        let (token_to_id, merges, re) = std::thread::scope(|sc| {
+            // The regex compiles (~9 ms) while the tables are built (here
+            // afterwards if no thread starts). SentencePiece has none.
+            let compile = move || {
+                match pre {
+                    Pre::Qwen2 => Some(QWEN2_PATTERN),
+                    Pre::Llama3 => Some(LLAMA3_PATTERN),
+                    Pre::Spm => None,
+                }
+                .map(|p| Regex::new(p).expect("pre-tokenizer regex"))
+            };
+            let re = std::thread::Builder::new().spawn_scoped(sc, compile);
+            let token_to_id = Vocab::new(&tokens);
+            let merges = match meta(m, "tokenizer.ggml.merges") {
+                Some(Val::Arr(a)) => build_merges(&token_to_id, a),
+                _ => FxMap::default(),
+            };
+            let re = match re {
+                Ok(h) => h.join().expect("regex thread"),
+                Err(_) => compile(),
+            };
+            (token_to_id, merges, re)
+        });
+
         let enc = bytes_to_unicode();
         let mut byte_id = [None; 256];
         let mut byte_decoder = HashMap::with_capacity(256);
@@ -203,7 +383,7 @@ impl Tokenizer {
                 // llama.cpp byte_to_token: `<0xXX>`, else the byte as a string.
                 (token_to_id.get(&format!("<0x{b:02X}>")).copied()).or_else(|| {
                     (b < 128)
-                        .then(|| token_to_id.get(&*(b as u8 as char).to_string()))
+                        .then(|| token_to_id.get(&(b as u8 as char).to_string()))
                         .flatten()
                         .copied()
                 })
@@ -262,12 +442,7 @@ impl Tokenizer {
             byte_id,
             byte_decoder,
             specials,
-            re: match pre {
-                Pre::Qwen2 => Some(QWEN2_PATTERN),
-                Pre::Llama3 => Some(LLAMA3_PATTERN),
-                Pre::Spm => None,
-            }
-            .map(|p| Regex::new(p).expect("pre-tokenizer regex")),
+            re,
             spm,
             ignore_merges: pre == Pre::Llama3,
             eos,
@@ -747,6 +922,160 @@ mod tests {
     }
 
     use super::*;
+
+    /// Startup costs: mapping + parsing the GGUF (`gguf::load_with`, mapped)
+    /// and building the tokenizer, medians of 7. Prints only. AXON_TEST_MODEL
+    /// picks the model. Run with --ignored --nocapture.
+    #[test]
+    #[ignore]
+    fn startup_parse_and_build_times() {
+        let Some(path) = crate::testutil::model_path() else {
+            return;
+        };
+        let path = path.to_str().unwrap().to_string();
+        let (mut load, mut build) = (Vec::new(), Vec::new());
+        for _ in 0..7 {
+            let t = std::time::Instant::now();
+            let m = crate::gguf::load_with(&path, Some(false)).unwrap();
+            load.push(t.elapsed().as_secs_f64() * 1e3);
+            let t = std::time::Instant::now();
+            let tk = Tokenizer::from_gguf(&m);
+            build.push(t.elapsed().as_secs_f64() * 1e3);
+            assert!(!tk.encode("hello world").is_empty());
+        }
+        let med = |v: &mut Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        eprintln!(
+            "startup: load+parse {:.1} ms, tokenizer {:.1} ms (medians of 7; {path})",
+            med(&mut load),
+            med(&mut build)
+        );
+    }
+
+    /// `Vocab` and `build_merges` on a made-up vocabulary, no model file:
+    /// repeated texts (last id wins), "", texts that are prefixes of each
+    /// other, long and multi-byte texts, a table big enough to wrap the
+    /// probe sequence; merges with non-string values, no space, unknown
+    /// sides or results, and a pair repeated at a later rank (first kept).
+    #[test]
+    fn vocab_and_merges_match_plain_maps_synthetic() {
+        let mut tokens: Vec<String> = vec!["".into(), "a".into(), "ab".into(), "abc".into()];
+        tokens.extend((0..3000).map(|i| format!("t{i}")));
+        tokens.extend((0..50).map(|i| "é".repeat(i + 1) + &"x".repeat(40)));
+        tokens.push("a".into()); // repeated: the later id wins
+        tokens.push("".into());
+        tokens.extend(["b".into(), "c".into(), "bc".into(), "t1t2".into()]);
+        let vocab = Vocab::new(&tokens);
+        let mut plain = HashMap::new();
+        for (i, t) in tokens.iter().enumerate() {
+            plain.insert(t.clone(), i as u32);
+        }
+        for t in tokens
+            .iter()
+            .map(String::as_str)
+            .chain(["abcd", "zz", "é", "t3000", "t1 "])
+        {
+            assert_eq!(vocab.get(t), plain.get(t), "{t:?}");
+        }
+        let strs = [
+            "a b", "ab c", "b c", "t1 t2", "a b", "nope x", "a nope", "t1 t3", "abc", "", " ",
+        ];
+        let mut ma: Vec<Val> = strs.iter().map(|s| Val::Str(s.to_string())).collect();
+        ma.insert(3, Val::U32(7));
+        ma.insert(6, Val::Arr(vec![]));
+        let mut want = HashMap::new();
+        for (rank, v) in ma.iter().enumerate() {
+            let Val::Str(s) = v else { continue };
+            let Some((l, r)) = s.split_once(' ') else {
+                continue;
+            };
+            let (Some(&li), Some(&ri)) = (plain.get(l), plain.get(r)) else {
+                continue;
+            };
+            let Some(&mi) = plain.get(&format!("{l}{r}")) else {
+                continue;
+            };
+            want.entry((li, ri)).or_insert((rank as u32, mi));
+        }
+        assert!(want.len() >= 4, "the merges exercise something");
+        // Small and big enough for several threads.
+        for reps in [1, 3000] {
+            let big: Vec<Val> = (0..reps).flat_map(|_| ma.iter().cloned()).collect();
+            let got = build_merges(&vocab, &big);
+            assert_eq!(got.len(), want.len());
+            assert!(want.iter().all(|(k, v)| got.get(k) == Some(v)));
+        }
+    }
+
+    /// `Vocab` and `build_merges` give what plain maps built the old way
+    /// (insert every text, last id wins; merges in rank order, first rank
+    /// kept) give, for every token and merge of the test models, plus texts
+    /// that aren't tokens.
+    #[test]
+    fn vocab_and_merges_match_plain_maps() {
+        // Qwen2 (BPE), Llama 3 (BPE), Mistral (SentencePiece: no merges)
+        // when present.
+        let models = [
+            crate::testutil::model_path()
+                .map(|p| crate::gguf::load_with(p.to_str().unwrap(), Some(false)).unwrap()),
+            crate::testutil::llama_model_path()
+                .map(|p| crate::gguf::load_with(p.to_str().unwrap(), Some(false)).unwrap()),
+            crate::testutil::mistral_model(),
+        ];
+        for m in models.into_iter().flatten() {
+            let Some(Val::Arr(a)) = meta(&m, "tokenizer.ggml.tokens") else {
+                panic!()
+            };
+            let mut tokens: Vec<String> = (a.iter())
+                .map(|v| match v {
+                    Val::Str(s) => s.clone(),
+                    _ => String::new(),
+                })
+                .collect();
+            // A repeated text: the map keeps the last id.
+            tokens.push(tokens[1000].clone());
+            let vocab = Vocab::new(&tokens);
+            let mut plain = HashMap::new();
+            for (i, t) in tokens.iter().enumerate() {
+                plain.insert(t.clone(), i as u32);
+            }
+            for t in &tokens {
+                assert_eq!(vocab.get(t), plain.get(t), "{t:?}");
+            }
+            for t in ["", "not a token at all \u{1}", "zzzzzzzzzzzzzzzzzzzzzzzzzz"] {
+                assert_eq!(vocab.get(t), plain.get(t), "{t:?}");
+            }
+            let ma: &[Val] = match meta(&m, "tokenizer.ggml.merges") {
+                Some(Val::Arr(ma)) => ma,
+                _ => &[],
+            };
+            let mut want = HashMap::new();
+            for (rank, v) in ma.iter().enumerate() {
+                let Val::Str(s) = v else { continue };
+                let Some((l, r)) = s.split_once(' ') else {
+                    continue;
+                };
+                let (Some(&li), Some(&ri)) = (plain.get(l), plain.get(r)) else {
+                    continue;
+                };
+                let Some(&mi) = plain.get(&format!("{l}{r}")) else {
+                    continue;
+                };
+                want.entry((li, ri)).or_insert((rank as u32, mi));
+            }
+            let got = build_merges(&vocab, ma);
+            assert_eq!(got.len(), want.len());
+            assert!(want.iter().all(|(k, v)| got.get(k) == Some(v)));
+            eprintln!(
+                "{}: {} tokens, {} merges checked",
+                m.arch,
+                tokens.len(),
+                want.len()
+            );
+        }
+    }
 
     fn tok() -> Option<Tokenizer> {
         crate::testutil::model().map(|m| Tokenizer::from_gguf(&m))
