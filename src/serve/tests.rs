@@ -1,7 +1,9 @@
 //! `axon serve` end to end: a server on an ephemeral port over the test
 //! model, driven over real sockets.
 
-use super::{MAX_CONNS, MAX_QUEUE, Opts, Server, Template, api::Message, api::Role, start};
+use super::{
+    MAX_CONNS, MAX_QUEUE, Opts, Server, Template, WaitList, api::Message, api::Role, start,
+};
 use crate::lm::{Device, Lm};
 use crate::sample::SampleArgs;
 use crate::tokenizer::{Tokenizer, Utf8Stream};
@@ -1173,6 +1175,38 @@ fn serve_evicts_waiting_connections() {
         json!({"prompt": "Hi", "max_tokens": 1}),
     );
     assert_eq!(v.status, 200);
+}
+
+/// The eviction race: taking a connection off the wait list decides it.
+/// A connection that took itself off first (its request arrived) is never
+/// evicted; one whose entry is already gone was evicted, its socket shut
+/// down, and doesn't serve. An empty list is the 503 path.
+#[test]
+fn wait_list_take_decides_the_race() {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let a = l.local_addr().unwrap();
+    let (mut c1, mut c2) = (
+        TcpStream::connect(a).unwrap(),
+        TcpStream::connect(a).unwrap(),
+    );
+    let h1 = std::sync::Arc::new(l.accept().unwrap().0);
+    let h2 = std::sync::Arc::new(l.accept().unwrap().0);
+    let w = WaitList::default();
+    assert!(!w.set(1, Some(&h1)));
+    assert!(!w.set(2, Some(&h2)));
+    // 1 (the oldest) got its request and took itself off first.
+    assert!(w.set(1, None));
+    assert!(w.evict_oldest());
+    assert!(!w.set(2, None), "2 was evicted: it must not serve");
+    assert!(!w.evict_oldest());
+    c2.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    assert_eq!(c2.read(&mut [0u8; 8]).unwrap_or(0), 0, "2 not shut down");
+    // 1 is untouched.
+    (&*h1).write_all(b"ok").unwrap();
+    c1.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut b = [0u8; 2];
+    c1.read_exact(&mut b).unwrap();
+    assert_eq!(&b, b"ok");
 }
 
 /// A client that leaves while its whole (non-streamed) response is being

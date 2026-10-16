@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """HTTP fuzzer for `axon serve` (stdlib only).
 
-    scripts/fuzz_serve.py <axon binary> <model.gguf> [--port P] [--ctx N] [--only SUBSTR] [--slow]
+    scripts/fuzz_serve.py <axon binary> <model.gguf> [--port P] [--ctx N] [--slow] [--log-dir DIR]
 
 Starts `axon serve` (CPU unless AXON_DEVICE says otherwise), throws malformed
 and hostile requests at it over raw sockets, and checks after every case
@@ -19,6 +19,7 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 
@@ -26,9 +27,10 @@ HOST = "127.0.0.1"
 
 
 class Server:
-    def __init__(self, axon, model, port, ctx, extra):
+    def __init__(self, axon, model, port, ctx, extra, log_dir):
         self.port = port
-        self.log = open(f"/home/haseeb/.cache/axon-harden/logs/serve-fuzz-{port}.log", "wb")
+        self.log_path = os.path.join(log_dir, f"serve-fuzz-{port}.log")
+        self.log = open(self.log_path, "wb")
         self.p = subprocess.Popen([axon, "serve", model, "--port", str(port), "--ctx", str(ctx)] + extra,
                                   stdout=self.log, stderr=subprocess.STDOUT,
                                   env=dict(os.environ, AXON_THREADS=os.environ.get("AXON_THREADS", "4")))
@@ -611,9 +613,13 @@ def main():
     ap.add_argument("--port", type=int, default=18181)
     ap.add_argument("--ctx", type=int, default=2048)
     ap.add_argument("--slow", action="store_true")
+    ap.add_argument("--log-dir", help="where the server's log goes (default: a new temporary directory)")
     ap.add_argument("extra", nargs="*")
     a = ap.parse_args()
-    srv = Server(a.axon, a.model, a.port, a.ctx, a.extra)
+    log_dir = a.log_dir or tempfile.mkdtemp(prefix="axon-fuzz-serve-")
+    os.makedirs(log_dir, exist_ok=True)
+    srv = Server(a.axon, a.model, a.port, a.ctx, a.extra, log_dir)
+    print(f"server log: {srv.log_path}", flush=True)
     try:
         cases(srv, a.ctx, a.slow)
     finally:

@@ -65,6 +65,8 @@ const POLL: Duration = Duration::from_millis(200);
 /// `linger`: longest wait, most bytes dropped.
 const LINGER: Duration = Duration::from_secs(2);
 const LINGER_BYTES: usize = 4 << 20;
+/// Most bytes the acceptor drops from a connection it answers 503.
+const ACCEPT_DRAIN: usize = 64 << 10;
 
 /// `axon serve`'s settings.
 pub struct Opts {
@@ -212,14 +214,60 @@ struct Shared {
     next_id: AtomicU64,
     stop: Arc<AtomicBool>,
     /// Connections waiting for (or in the middle of receiving) a request,
-    /// oldest first: (connection id, a handle to shut it down). At the
-    /// connection limit a new connection closes the first one, so idle or
-    /// trickling sockets (slow-loris) can't lock everyone out for the
-    /// `IDLE` timeout.
-    waiting: std::sync::Mutex<Vec<(u64, Arc<TcpStream>)>>,
+    /// or lingering after an error, oldest first: (connection id, a handle
+    /// to shut it down). At the connection limit a new connection closes
+    /// the first one, so idle or trickling sockets (slow-loris) can't lock
+    /// everyone out for the `IDLE` timeout. Taking an entry off the list
+    /// (here, or by its own thread once a request has arrived) is the one
+    /// decision under this lock: a thread that finds its entry already
+    /// gone was evicted and doesn't serve the request it may just have
+    /// read (its client sees the connection closed, as for any idle
+    /// keep-alive connection a server closes; a non-idempotent request
+    /// sent at that instant is lost, which only happens at the limit). A
+    /// request whose thread took its entry first is never evicted. Each
+    /// connection holds a second fd for this handle (2 per connection:
+    /// with --max-conns N, allow ~2N fds in `ulimit -n`).
+    waiting: WaitList,
     next_conn: AtomicU64,
     /// `Server::queued`.
     queued: Arc<AtomicU64>,
+}
+
+/// `Shared::waiting`: (connection id, a handle to shut it down), oldest first.
+#[derive(Default)]
+struct WaitList(std::sync::Mutex<Vec<(u64, Arc<TcpStream>)>>);
+
+impl WaitList {
+    /// Close the connection that has waited longest for a request, if
+    /// any. Its thread sees the end of the stream and exits.
+    fn evict_oldest(&self) -> bool {
+        let mut w = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if w.is_empty() {
+            return false;
+        }
+        let (_, s) = w.remove(0);
+        let _ = s.shutdown(std::net::Shutdown::Both);
+        true
+    }
+
+    /// Register connection `id` as waiting (`Some`) or take it off the
+    /// list (`None`). Returns whether it was on the list: false after a
+    /// `None` means `evict_oldest` took it (and shut it down) first.
+    fn set(&self, id: u64, s: Option<&Arc<TcpStream>>) -> bool {
+        let mut w = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let n = w.len();
+        w.retain(|(i, _)| *i != id);
+        let was = w.len() != n;
+        if let Some(s) = s {
+            w.push((id, s.clone()));
+        }
+        was
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.0.lock().unwrap().len()
+    }
 }
 
 /// Decrements the connection count however the connection's thread ends.
@@ -234,26 +282,6 @@ impl Drop for ConnGuard<'_> {
 impl Shared {
     fn serves(&self, model: &str) -> bool {
         model == self.model_id || self.alias.as_deref() == Some(model)
-    }
-
-    /// Close the connection that has waited longest for a request, if
-    /// any. Its thread sees the end of the stream and exits.
-    fn evict_waiting(&self) -> bool {
-        let mut w = self.waiting.lock().unwrap_or_else(|e| e.into_inner());
-        if w.is_empty() {
-            return false;
-        }
-        let (_, s) = w.remove(0);
-        let _ = s.shutdown(std::net::Shutdown::Both);
-        true
-    }
-
-    fn set_waiting(&self, id: u64, s: Option<&Arc<TcpStream>>) {
-        let mut w = self.waiting.lock().unwrap_or_else(|e| e.into_inner());
-        w.retain(|(i, _)| *i != id);
-        if let Some(s) = s {
-            w.push((id, s.clone()));
-        }
     }
 }
 
@@ -612,7 +640,7 @@ pub struct Server {
 impl Server {
     /// Connections waiting for (or receiving) a request (`Shared::waiting`).
     pub fn waiting(&self) -> usize {
-        self.sh.waiting.lock().unwrap().len()
+        self.sh.waiting.len()
     }
 
     /// Open connections.
@@ -760,7 +788,7 @@ fn accept_loop(listener: TcpListener, sh: Arc<Shared>) {
             std::thread::sleep(Duration::from_millis(10));
             continue;
         };
-        if sh.conns.load(Ordering::Relaxed) >= sh.max_conns && !sh.evict_waiting() {
+        if sh.conns.load(Ordering::Relaxed) >= sh.max_conns && !sh.waiting.evict_oldest() {
             let _ = s.set_write_timeout(Some(Duration::from_secs(1)));
             let e = ApiError::new(503, "server_error", "too many connections");
             {
@@ -771,9 +799,16 @@ fn accept_loop(listener: TcpListener, sh: Arc<Shared>) {
             // What the client already sent, unread at close, would make
             // it a reset that can destroy the 503 before the client reads it.
             let _ = s.shutdown(std::net::Shutdown::Write);
+            // Only what has already arrived, and at most ACCEPT_DRAIN
+            // bytes: this is the one accept thread.
             if s.set_nonblocking(true).is_ok() {
-                let mut b = [0u8; 4096];
-                while matches!(io::Read::read(&mut s, &mut b), Ok(n) if n > 0) {}
+                let (mut b, mut n) = ([0u8; 4096], 0);
+                while n < ACCEPT_DRAIN {
+                    match io::Read::read(&mut s, &mut b) {
+                        Ok(k) if k > 0 => n += k,
+                        _ => break,
+                    }
+                }
             }
             continue;
         }
@@ -802,15 +837,21 @@ fn connection(s: TcpStream, sh: &Shared) {
     c.head_timeout = IDLE;
     c.extra = sh.extra.clone();
     loop {
-        sh.set_waiting(id, handle.as_ref());
+        sh.waiting.set(id, handle.as_ref());
         let r = c.read_request();
-        sh.set_waiting(id, None);
+        if !sh.waiting.set(id, None) && handle.is_some() {
+            // Evicted (`Shared::waiting`): the socket is shut down.
+            return;
+        }
         match r {
             Ok(None) => return,
             Err(e) => {
                 let body = ApiError::new(e.status, "invalid_request_error", e.msg).json();
                 let _ = c.respond(e.status, "application/json", body.as_bytes(), false, &[]);
+                // Evictable while it lingers: it serves nothing more.
+                sh.waiting.set(id, handle.as_ref());
                 linger(&c.s);
+                sh.waiting.set(id, None);
                 return;
             }
             Ok(Some(req)) => {

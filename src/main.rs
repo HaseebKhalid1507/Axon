@@ -537,9 +537,15 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     // past the trained length gives garbage (0: the GGUF doesn't say), and
     // a -n near usize::MAX overflowed the sizes: generation stops at the
     // trained context, as `chat` and `serve` do.
+    // `logits` generates nothing: no budget, as before (its prompt alone
+    // may run past the trained context).
     let want = if cmd == "gen" { n_gen } else { 0 };
-    let extra = gen_budget(ids.len(), want, model.ctx_len() as usize)
-        .unwrap_or_else(|e| fail(&format!("{path}: {e}")));
+    let extra = if cmd == "gen" {
+        gen_budget(ids.len(), want, model.ctx_len() as usize)
+            .unwrap_or_else(|e| fail(&format!("{path}: {e}")))
+    } else {
+        0
+    };
     if extra < want {
         eprintln!(
             "axon: note: -n {want} runs past the {}-token context {path} was trained on; \

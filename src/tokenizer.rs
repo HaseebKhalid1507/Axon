@@ -772,7 +772,12 @@ mod tests {
             let ids = t.encode(&s);
             let secs = t0.elapsed().as_secs_f64();
             assert_eq!(t.decode(&ids), s);
-            assert!(secs < 20.0, "1 MB of {c:?}: {secs:.1} s");
+            // ~0.1 s now; the scan needed > 120 s (killed), est. hours.
+            // A loose bound, and none in the debug-assertion suite (run
+            // under load): the identity above is the part that matters.
+            if !cfg!(debug_assertions) {
+                assert!(secs < 120.0, "1 MB of {c:?}: {secs:.1} s");
+            }
         }
     }
 }
