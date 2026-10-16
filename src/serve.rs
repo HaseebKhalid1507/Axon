@@ -37,6 +37,7 @@ pub mod http;
 pub mod tools;
 
 use crate::chat::{self, Framing, special};
+use crate::cuda::qwen2::CacheKv;
 use crate::kv::KvType;
 use crate::lm::{Backend, BackendCache, BatchLm, Device, Lm};
 use crate::sample::{SampleArgs, SampleCfg, Sampler};
@@ -664,12 +665,27 @@ fn engine(
         None => crate::DEFAULT_CHAT_CTX,
     };
     let split_ctx = if fit { want.min(SPLIT_CTX) } else { want };
+    // The drafter's reserve (`load_pair`): a split's context if
+    // --gpu-layers makes one, else at most AGENT_CTX (a 131072-token
+    // reserve would take the main model's memory); it drafts up to the
+    // context the main model gets, if that is shorter.
+    let split = gpu_layers.is_some_and(|g| crate::hybrid::block_count(&model).is_ok_and(|n| g < n));
+    let draft_ctx = match (fit, split) {
+        (false, _) => want,
+        (true, true) => split_ctx,
+        (true, false) => want.min(AGENT_CTX),
+    };
     let tok: &'static Tokenizer = Box::leak(Box::new(Tokenizer::from_gguf(&model)));
     let dm = o.draft_model.as_ref().filter(|_| o.max_draft > 0).map(|p| {
         crate::draft::DraftModel::open(p, crate::copy_for(device), &model, tok)
             .unwrap_or_else(|e| crate::fail(&format!("--draft-model {e}")))
     });
-    let (net, drafter) = crate::backend_and_drafter(
+    // The Q6_K prefill copy waits for the cache and slots (below).
+    let place = crate::lm::Placing {
+        split_ctx,
+        defer_q6k8: true,
+    };
+    let (mut net, drafter) = crate::backend_and_drafter(
         &model,
         dm.as_ref(),
         device,
@@ -677,13 +693,30 @@ fn engine(
         gpu_layers,
         o.kv,
         fit,
-        split_ctx,
+        place,
+        draft_ctx,
     );
+    let ctx = net.ctx(want);
+    let why = match &net {
+        _ if ctx >= want => None,
+        Backend::Cuda(_) => Some(gpu_fit_note(ctx, want, o.kv, gpu_layers.is_some())),
+        Backend::Pipeline(_) => Some(format!(
+            "{ctx} fit on the GPUs beside the weights, of the {want} the model was trained on \
+             (--ctx N for another{})",
+            if o.kv == KvType::Q8 {
+                ""
+            } else {
+                "; --kv q8 halves the KV cache"
+            }
+        )),
+        Backend::Hybrid(_) => Some(format!(
+            "the default for a CPU/GPU split (automatic or --gpu-layers): a cache for the \
+             {want} tokens the model was trained on would take GPU memory from its layers \
+             (--ctx N for another)"
+        )),
+        Backend::Cpu(_) => None,
+    };
     let (ctx, why) = match &net {
-        Backend::Cuda(_) if gpu_layers.is_none() => {
-            let c = net.ctx(want);
-            (c, (c < want).then(|| gpu_fit_note(c, want, o.kv)))
-        }
         Backend::Cpu(n) if fit => {
             let elem = if crate::kv::use_f32() { 4 } else { 2 };
             let per_pos = (n.n_layers * 2 * n.n_kv_heads * n.head_dim * elem) as u64;
@@ -692,27 +725,9 @@ fn engine(
                 true => std::fs::metadata(&o.path).map_or(0, |m| m.len()),
                 false => 0,
             };
-            match crate::gguf::mem_available() {
-                Some(a) => {
-                    let a = a.saturating_sub(mapped).saturating_sub(RAM_MARGIN);
-                    let c = ram_ctx(want, per_pos, a);
-                    (c, (c < want).then(|| ram_note(want, per_pos, a)))
-                }
-                None => (want, None),
-            }
+            cpu_ctx(want, per_pos, mapped, crate::gguf::mem_available())
         }
-        Backend::Cpu(_) => (want, None),
-        // A split, a pipeline, or --gpu-layers.
-        _ => {
-            let why = (split_ctx < want).then(|| {
-                format!(
-                    "the default with --gpu-layers, a CPU/GPU split or several GPUs: a cache \
-                     for the {want} tokens the model was trained on would take GPU memory \
-                     from its layers (--ctx N for another)"
-                )
-            });
-            (net.ctx(split_ctx), why)
-        }
+        _ => (ctx, why),
     };
     if let Some(why) = why.filter(|_| o.log) {
         eprintln!("axon serve: context {ctx} tokens: {why}");
@@ -739,14 +754,28 @@ fn engine(
         ));
     }
     // The slots and their context (`plan_slots`), measured against the GPU
-    // memory left before the single-request cache is made.
+    // memory left before the single-request cache is made: a pool of N
+    // slots and that cache are N + 1 caches.
     let plan = match &net {
         Backend::Cuda(n) if o.parallel > 1 => match n.free_bytes() {
             Ok(free) => {
                 let free = free as usize;
-                plan_slots(ctx, !fit, o.parallel, o.parallel_set, |s, c| {
-                    n.cache_bytes(c) + n.pool_bytes(s, c) + POOL_SPARE <= free
-                })
+                let fits = |kv, s, c| n.serve_bytes_kv(kv, s, c) + POOL_SPARE <= free;
+                let kv = match o.kv {
+                    KvType::Q8 => CacheKv::Q8 { group: 0 },
+                    _ => CacheKv::F16,
+                };
+                let mut p =
+                    plan_slots(ctx, !fit, o.parallel, o.parallel_set, |s, c| fits(kv, s, c));
+                // The q8 cache's slots at this context, for the note.
+                if p.slots == 1 && kv == CacheKv::F16 && !o.parallel_set {
+                    let q8 = CacheKv::Q8 { group: 0 };
+                    let s8 = (2..=o.parallel).rev().find(|&s| fits(q8, s, ctx));
+                    if let (Some(s8), Some(note)) = (s8, p.note.as_mut()) {
+                        note.push_str(&format!("; --kv q8: {s8} at {ctx}"));
+                    }
+                }
+                p
             }
             Err(e) => SlotPlan::one(ctx, Some(e)),
         },
@@ -758,30 +787,14 @@ fn engine(
     // With a pool, the single-request cache is a slot's length: the
     // context served is a slot's (every request fits one).
     let ctx = plan.ctx;
-    let mut e = Engine {
-        net: &net,
-        tok,
-        cache: net.new_cache(ctx),
-        hist: Vec::new(),
-        max_draft: o.max_draft,
-        drafter,
-        log: o.log,
-        generated: o.generated,
-    };
-    let mut batch = match plan.slots {
+    let cache = net.new_cache(ctx);
+    let pool = match plan.slots {
         0 | 1 => None,
         n => {
             // Tests shrink the slots below the context (`Opts::slot_ctx`).
             let slot_ctx = o.slot_ctx.map_or(ctx, |c| c.min(ctx));
             match net.new_pool(n, slot_ctx) {
-                Ok(pool) => Some(Batch::new(
-                    &net,
-                    pool,
-                    n,
-                    slot_ctx,
-                    o.log,
-                    e.generated.clone(),
-                )),
+                Ok(pool) => Some((pool, n, slot_ctx)),
                 Err(why) => {
                     if o.log {
                         eprintln!("axon serve: one request at a time ({why})");
@@ -791,6 +804,32 @@ fn engine(
             }
         }
     };
+    // The Q6_K prefill copy only out of what the cache and slots leave
+    // (prefill-only: the same products without it, slower).
+    if let Backend::Cuda(n) = &mut net {
+        match n.make_q6k8_spare() {
+            Ok(Some(false)) if o.log => eprintln!(
+                "axon serve: no Q6_K prefill copy ({:.2} GiB free beside the caches; it \
+                 speeds up prefill): a smaller --ctx or --parallel, or --kv q8, makes room",
+                n.free_bytes().unwrap_or(0) as f64 / GIB
+            ),
+            Err(e) => eprintln!("axon serve: no Q6_K prefill copy: {e}"),
+            _ => {}
+        }
+    }
+    let net = net;
+    let mut e = Engine {
+        net: &net,
+        tok,
+        cache,
+        hist: Vec::new(),
+        max_draft: o.max_draft,
+        drafter,
+        log: o.log,
+        generated: o.generated,
+    };
+    let mut batch = pool
+        .map(|(pool, n, slot_ctx)| Batch::new(&net, pool, n, slot_ctx, o.log, e.generated.clone()));
     let served = batch.as_ref().map_or(ctx, |b| b.ctx.min(ctx));
     let banner = match &batch {
         Some(b) => format!("{kvs}, ctx {served}{drafts}, {} requests at once", b.slots),
@@ -906,26 +945,46 @@ const GIB: f64 = (1u64 << 30) as f64;
 
 /// The CPU's default context: `want` if its cache (`per_pos` bytes a
 /// position) fits in `avail` bytes of RAM, else the most positions that do
-/// (a multiple of 1024), at least min(want, 1024).
+/// (a multiple of 1024), but never less than the old default,
+/// min(want, `SPLIT_CTX`) (the cache is mapped lazily: RAM goes as the
+/// context fills).
 fn ram_ctx(want: usize, per_pos: u64, avail: u64) -> usize {
     if (want as u64).saturating_mul(per_pos) <= avail {
         return want;
     }
     let c = (avail / per_pos.max(1)) as usize / 1024 * 1024;
-    c.max(want.min(1024))
+    c.max(want.min(SPLIT_CTX))
 }
 
-/// Why the GPU's default context is `c`, not the trained `want`.
-fn gpu_fit_note(c: usize, want: usize, kv: KvType) -> String {
+/// Why the GPU's default context is `c`, not the trained `want`
+/// (`all_layers`: --gpu-layers put every layer there).
+fn gpu_fit_note(c: usize, want: usize, kv: KvType, all_layers: bool) -> String {
     format!(
         "{c} fit in GPU memory beside the weights, of the {want} the model was trained on \
-         (--ctx N for another: a longer one splits the model across the CPU and GPU, slower{})",
+         (--ctx N for another: {}{})",
+        if all_layers {
+            "a longer one doesn't fit with every layer on the GPU"
+        } else {
+            "a longer one splits the model across the CPU and GPU, slower"
+        },
         if kv == KvType::Q8 {
             ""
         } else {
             "; --kv q8 halves the KV cache"
         }
     )
+}
+
+/// The CPU's default context and why, if shorter than the trained `want`:
+/// `ram_ctx` of `avail` (MemAvailable; None: unknown, want) less the
+/// mapped model's `mapped` bytes and `RAM_MARGIN`.
+fn cpu_ctx(want: usize, per_pos: u64, mapped: u64, avail: Option<u64>) -> (usize, Option<String>) {
+    let Some(a) = avail else {
+        return (want, None);
+    };
+    let a = a.saturating_sub(mapped).saturating_sub(RAM_MARGIN);
+    let c = ram_ctx(want, per_pos, a);
+    (c, (c < want).then(|| ram_note(want, per_pos, a)))
 }
 
 /// Why the CPU's default context is shorter than the trained `want`.
@@ -1052,14 +1111,20 @@ fn plan_slots(
                 )
             }),
         },
-        None => SlotPlan::one(
-            ctx,
-            Some(format!(
-                "one request at a time, to keep the {ctx}-token context: 2 at once fit in GPU \
-                 memory only with less than {floor} (--ctx N or --parallel N to batch with a \
-                 shorter context; --kv q8 halves the KV cache)"
-            )),
-        ),
+        None => {
+            // A pool of N slots is N + 1 caches (the single-request one).
+            let at = match longest_ctx(ctx.min(1024), ctx, |c| fits(2, c)) {
+                Some(c2) => format!("2 at once fit at {c2}: --ctx {c2}"),
+                None => "2 at once don't fit even at 1024".into(),
+            };
+            SlotPlan::one(
+                ctx,
+                Some(format!(
+                    "one request at a time, to keep the {ctx}-token context (2 slots and the \
+                     single-request cache are 3 caches); {at}"
+                )),
+            )
+        }
     }
 }
 

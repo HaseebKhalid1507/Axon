@@ -3194,7 +3194,7 @@ fn prefill_bits(m: &Model, name: &str, kv: CacheKv) {
         net.swiglu_epi = false;
         if copy {
             eprintln!("{name}: with and without the Q6_K prefill copy");
-            net.make_q6k8(ids.len() + 1).unwrap();
+            net.make_q6k8(net.cache_bytes(ids.len() + 1)).unwrap();
         }
     }
     eprintln!(

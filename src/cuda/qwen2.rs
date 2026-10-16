@@ -584,6 +584,21 @@ impl<'g> CudaQwen2<'g> {
         kv: CacheKv,
         fit: bool,
     ) -> Result<CudaQwen2<'g>, String> {
+        Self::with_kv_q6k8(gpu, module, m, max_ctx, kv, fit, true)
+    }
+
+    /// `with_kv`, the Q6_K prefill copy made now (`q6k8`) or left to
+    /// `make_q6k8_spare` (`axon serve`: once its caches and slots are made,
+    /// out of what they leave).
+    pub fn with_kv_q6k8(
+        gpu: &'g Gpu,
+        module: &'g Module<'g>,
+        m: &Model,
+        max_ctx: usize,
+        kv: CacheKv,
+        fit: bool,
+        q6k8: bool,
+    ) -> Result<CudaQwen2<'g>, String> {
         Self::build(
             gpu,
             module,
@@ -594,6 +609,7 @@ impl<'g> CudaQwen2<'g> {
             kv,
             SPLIT_BATCH,
             fit,
+            q6k8,
             &mut |_| {},
         )
     }
@@ -630,6 +646,7 @@ impl<'g> CudaQwen2<'g> {
             kv,
             split_batch,
             false,
+            true,
             uploaded,
         )
     }
@@ -660,6 +677,7 @@ impl<'g> CudaQwen2<'g> {
             kv,
             batch,
             false,
+            true,
             &mut |_| {},
         )
     }
@@ -693,6 +711,7 @@ impl<'g> CudaQwen2<'g> {
         kv: CacheKv,
         split_batch: usize,
         fit: bool,
+        q6k8: bool,
         uploaded: &mut dyn FnMut(&'m Tensor),
     ) -> Result<CudaQwen2<'g>, String> {
         let (mut net, plan) = Self::plan(gpu, module, m, first, last, kv, split_batch)?;
@@ -821,8 +840,8 @@ impl<'g> CudaQwen2<'g> {
             let fb: Vec<u64> = plan.freq_swa.iter().map(|f| f.to_bits()).collect();
             net.freq_swa.write(&fb)?;
         }
-        if first == 0 {
-            net.make_q6k8(ctx)?;
+        if first == 0 && q6k8 {
+            net.make_q6k8(net.cache_bytes(ctx))?;
         }
         Ok(net)
     }
@@ -880,7 +899,7 @@ impl<'g> CudaQwen2<'g> {
     /// only from VRAM they leave unused, and never for a split's GPU half).
     /// AXON_Q6K8=0 never makes it, =1 whenever it fits at all. Decode
     /// keeps reading the Q6_K bytes.
-    fn make_q6k8(&mut self, ctx: usize) -> Result<(), String> {
+    fn make_q6k8(&mut self, cache: usize) -> Result<(), String> {
         let Some(conv) = &self.bf.q6k_to_i8 else {
             return Ok(());
         };
@@ -891,7 +910,7 @@ impl<'g> CudaQwen2<'g> {
             _ => false,
         };
         let free = self.gpu.info()?.free_bytes;
-        if !q6k8_fits(free, self.cache_bytes(ctx) as u64, bytes as u64, force) {
+        if !q6k8_fits(free, cache as u64, bytes as u64, force) {
             return Ok(());
         }
         let w8 = self.gpu.alloc(bytes)?;
@@ -933,6 +952,23 @@ impl<'g> CudaQwen2<'g> {
         self.gpu.sync()?;
         self.w8 = w8;
         Ok(())
+    }
+
+    /// The Q6_K prefill copy (`make_q6k8`) out of the VRAM free now, with
+    /// `HEADROOM` and `Q6K8_MARGIN` left (`axon serve`, after its caches
+    /// and slots: `with_kv_q6k8`); nothing if made already (prefill-only:
+    /// the same products either way).
+    /// None if it never would be (no int8 tensor cores, no Q6_K
+    /// matrices, AXON_Q6K8=0), else whether it is.
+    pub fn make_q6k8_spare(&mut self) -> Result<Option<bool>, String> {
+        let off = std::env::var("AXON_Q6K8").is_ok_and(|v| v == "0");
+        if self.bf.q6k_to_i8.is_none() || self.q6k8_bytes() == 0 || off {
+            return Ok(None);
+        }
+        if self.w8.len() == 0 {
+            self.make_q6k8(0)?;
+        }
+        Ok(Some(self.w8.len() > 0))
     }
 
     /// VRAM of the Q6_K prefill copy (0 if not made: `make_q6k8`).

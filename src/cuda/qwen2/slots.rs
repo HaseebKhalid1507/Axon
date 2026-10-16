@@ -54,9 +54,16 @@ pub struct CudaPool<'g> {
 const MAX_GRAPHS: usize = 64;
 
 impl<'g> CudaQwen2<'g> {
-    /// VRAM a pool of `slots` x `ctx` takes (`pool` checks it is free).
-    pub fn pool_bytes(&self, slots: usize, ctx: usize) -> usize {
-        let kv = self.kv;
+    /// VRAM a pool of `slots` x `ctx` (`pool_bytes_kv`) and the
+    /// single-request cache (`cache_bytes`) take with caches of type `kv`
+    /// (the model's, or serve's `--kv q8` hint).
+    pub fn serve_bytes_kv(&self, kv: CacheKv, slots: usize, ctx: usize) -> usize {
+        self.cache_bytes_kv(kv, ctx) + self.pool_bytes_kv(kv, slots, ctx)
+    }
+
+    /// VRAM a pool of `slots` x `ctx` takes with caches of type `kv`
+    /// (`pool` checks it is free).
+    fn pool_bytes_kv(&self, kv: CacheKv, slots: usize, ctx: usize) -> usize {
         self.cache_bytes_kv(kv, ctx) - self.kv_cache_bytes(kv, ctx)
             + self.kv_cache_bytes(kv, slots * ctx)
             + slots.saturating_sub(HEAD_SUB) * self.vocab * 4

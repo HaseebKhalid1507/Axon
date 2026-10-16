@@ -215,26 +215,34 @@ use your local model), `--max-conns N` / `--max-queue N` (defaults 256 / 128),
 
 - Context (`--ctx N`, per request): by default the model's trained context (32768 for
   Qwen2.5, 40960 for Qwen3, 131072 for Llama 3.1), so agent harnesses' 10k-40k-token prompts
-  work without flags. With the whole model on one GPU, if the weights leave too little GPU
-  memory for it (the KV cache of `--kv`'s type), the longest that fits (a multiple of 256,
-  at least 4096; else the model is split, see `--gpu-layers`). On the CPU, the longest whose
-  KV cache fits in free RAM (a multiple of 1024). With `--gpu-layers`, a CPU/GPU split or
-  several GPUs, at most 8192, as before (a long cache there takes GPU memory from the
-  layers). A shorter context than trained is said once on stderr, with why and the flag to
-  change it. An explicit `--ctx N` is used as given (up to the trained length).
+  work without flags. With the whole model on one GPU (placed automatically, or every layer
+  by `--gpu-layers N`), if the weights leave too little GPU memory for it (the KV cache of
+  `--kv`'s type), the longest that fits (a multiple of 256; placed automatically, at least
+  4096, else the model is split). Over several GPUs (`AXON_GPUS`), the longest the pipeline
+  fits, at least 4096, else 8192. On the CPU, the longest whose KV cache fits in free RAM (a
+  multiple of 1024, at least 8192). A CPU/GPU split (automatic or `--gpu-layers`) keeps 8192,
+  as before: a long cache there takes GPU memory from the layers. A shorter context than
+  trained is said once on stderr, with why and the flag to change it. An explicit `--ctx N`
+  is used as given (up to the trained length). A `--draft-model` is sized for the main
+  model's context (at most 32768 by default; a split's 8192) and drafts up to it.
 - Many requests at once (`--device cuda`, the whole model on the GPU): up to `--parallel`
   requests decode together, one token each per step over the model's weights (continuous
   batching: a request joins as soon as a slot is free, its prompt prefilled as a step of its
-  own, and leaves when done). Each request has a KV slot as long as the context, next to the
-  single-request cache. Without `--ctx` or `--parallel` the context comes first: as many
-  slots (2 to 8) as fit with the whole context; if not even 2 do, 2 or more with the longest
+  own, and leaves when done). Each slot is a KV cache as long as the context, and the
+  request running alone has one more: a pool of N slots costs N + 1 caches (7B at 32768:
+  1.75 GiB each). Without `--ctx` or `--parallel` the context comes first: as many slots
+  (2 to 8) as fit with the whole context; if not even 2 do, 2 or more with the longest
   context they fit with, down to 32768 (or the whole context, if shorter); below that, one
-  request at a time with the whole context (Qwen2.5-7B Q4_K_M on a 12 GB GPU: one at a time
-  with 32768; 0.5B: 8 at once with 32768). `--parallel N` alone: N slots of the longest
+  request at a time with the whole context, and stderr says at which context 2 would fit
+  (and how many `--kv q8` fits). Measured: Qwen2.5-7B Q4_K_M on a 12 GB laptop GPU (10.6
+  GiB free) serves one at a time with 32768 (2 would fit at 30720; `--kv q8`: 4 at 32768),
+  on a 24 GB RTX 4090 8 at once with 32768. `--parallel N` alone: N slots of the longest
   context that fits them (down to 1024 positions). `--ctx N`: never shortened; the slots
   that fit with it (up to `--parallel`), else one at a time. The server says on stderr what
   it chose and why; the context it serves is a slot's (`/v1/models` `meta.n_ctx`; longer
-  prompts get a 400 `context_length_exceeded`).
+  prompts get a 400 `context_length_exceeded`). The Q6_K prefill copy (int8 Q6_K matrices
+  for prefill's tensor cores, same results; 1.02 GiB on 7B Q4_K_M) is made after the
+  caches and slots, only from the memory they leave (`AXON_Q6K8=0` never makes it).
   A request running alone takes the single-stream path (CUDA graphs, `--draft`), and
   moves into the batch when a second one arrives. Every request's output is exactly what it
   gets alone, whatever else runs with it (greedy, and sampled with a `seed`): the batched

@@ -1888,7 +1888,8 @@ fn plan_slots_explicit() {
 }
 
 /// The CPU's default context: the trained one if its cache fits in RAM,
-/// else the most (a multiple of 1024) that does, at least 1024.
+/// else the most (a multiple of 1024) that does, never below the old
+/// default min(trained, 8192).
 #[test]
 fn ram_ctx_fits() {
     use super::ram_ctx;
@@ -1897,6 +1898,85 @@ fn ram_ctx_fits() {
     assert_eq!(ram_ctx(32768, per, u64::MAX), 32768);
     assert_eq!(ram_ctx(32768, per, 32768 * per - 1), 31744);
     assert_eq!(ram_ctx(131072, per, 50000 * per), 49152);
-    assert_eq!(ram_ctx(32768, per, 0), 1024);
+    assert_eq!(ram_ctx(32768, per, 9000 * per), 8192);
+    assert_eq!(ram_ctx(32768, per, 0), 8192);
+    assert_eq!(ram_ctx(4096, per, 0), 4096);
     assert_eq!(ram_ctx(512, per, 0), 512);
+}
+
+/// The CPU arm with MemAvailable injected: less the mapped model and 1 GiB;
+/// unknown (None) keeps the trained context; a note only when shorter.
+#[test]
+fn cpu_ctx_mem_available() {
+    use super::cpu_ctx;
+    const GIB: u64 = 1 << 30;
+    let per = 57344;
+    let model = 4 * GIB;
+    assert_eq!(cpu_ctx(32768, per, model, None), (32768, None));
+    let (c, why) = cpu_ctx(32768, per, model, Some(20 * GIB));
+    assert_eq!((c, why), (32768, None));
+    // 5 GiB + 1 GiB margin + the model: 1 GiB left = 18724 positions.
+    let (c, why) = cpu_ctx(32768, per, model, Some(6 * GIB));
+    assert_eq!(c, 18432);
+    assert!(why.unwrap().contains("32768"));
+    // The mapped model alone is more than what's available: the old default.
+    let (c, why) = cpu_ctx(32768, per, model, Some(3 * GIB));
+    assert_eq!(c, 8192);
+    assert!(why.is_some());
+    // Not mapped (copied): its RAM is already out of MemAvailable.
+    assert_eq!(cpu_ctx(32768, per, 0, Some(3 * GIB)).0, 32768);
+}
+
+/// The one-at-a-time note names the context 2 slots would fit at.
+#[test]
+fn plan_slots_note_names_the_fit() {
+    let p = super::plan_slots(32768, false, PARALLEL, false, |s, c| {
+        (s + 1) * c <= 3 * 25000
+    });
+    assert_eq!((p.slots, p.ctx), (1, 32768));
+    let note = p.note.unwrap();
+    assert!(
+        note.contains("2 at once fit at 24576: --ctx 24576"),
+        "{note}"
+    );
+    let p = super::plan_slots(32768, false, PARALLEL, false, |_, _| false);
+    assert!(p.note.unwrap().contains("even at 1024"));
+}
+
+/// No --ctx: the context served is the model's trained one where it fits
+/// (/v1/models), at least the old default 8192 or what the GPU fits, and
+/// on the GPU a prompt past 8192 tokens is answered.
+#[test]
+fn serve_default_ctx() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let trained = crate::gguf::load(p.to_str().unwrap()).unwrap().ctx_len() as u64;
+    let n_ctx = |a| call(a, "GET", "/v1/models", "").json()["data"][0]["meta"]["n_ctx"].clone();
+    let s = server_with(p.to_str().unwrap(), Device::Cpu, |o| o.ctx = None);
+    let c = n_ctx(s.addr).as_u64().unwrap();
+    assert!(
+        (trained.min(8192)..=trained).contains(&c),
+        "cpu: {c} of {trained}"
+    );
+    drop(s);
+    if crate::testutil::gpu().is_none() {
+        return;
+    }
+    let s = server_with(p.to_str().unwrap(), Device::Cuda, |o| o.ctx = None);
+    let c = n_ctx(s.addr).as_u64().unwrap();
+    assert!((4096..=trained).contains(&c), "cuda: {c} of {trained}");
+    if c < 9500 {
+        eprintln!("serve_default_ctx: {c} positions fit, no long prompt");
+        return;
+    }
+    let long = "word ".repeat(9000);
+    let r = post(
+        s.addr,
+        "/v1/chat/completions",
+        json!({"messages": [{"role": "user", "content": long}], "max_tokens": 2, "temperature": 0}),
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    let used = r.json()["usage"]["prompt_tokens"].as_u64().unwrap();
+    assert!(used > 8192 && used < c, "{used} prompt tokens");
 }
