@@ -1814,6 +1814,12 @@ fn cuda_gemv_bench() {
 
 /// A model and cache that won't fit is an Err saying so, before anything
 /// is allocated; one that fits leaves the memory as it found it on drop.
+///
+/// `free_bytes` is the whole card's: other processes (the desktop, another
+/// suite on a shared test pod) allocate and free between our reads, so one
+/// before/after pair can't tell a leak of ours from their churn. A leak
+/// shows on every attempt and churn doesn't, so the memory checks get a few
+/// attempts and pass on the first clean one.
 #[test]
 fn gpu_too_big_is_an_error() {
     let Some(g) = crate::testutil::gpu() else {
@@ -1823,26 +1829,33 @@ fn gpu_too_big_is_an_error() {
         return;
     };
     let km = Kernels::module(&g).unwrap();
-    let free0 = g.info().unwrap().free_bytes;
-    let e = CudaQwen2::new(&g, &km, &m, 50_000_000).err().unwrap();
-    assert!(e.contains("GiB is free") && e.contains("--ctx"), "{e}");
-    {
-        let net = CudaQwen2::new(&g, &km, &m, 1024).unwrap();
-        let _c = net.new_cache(1024);
-        assert!(g.info().unwrap().free_bytes < free0);
-        // Every cache is checked against what is free when it is made (new
-        // budgets one): one too big is an Err before allocating, and a
-        // second normal one still fits.
-        let e = net.try_cache(50_000_000).err().unwrap();
+    let free = || g.info().unwrap().free_bytes;
+    let mut seen = Vec::new();
+    for _ in 0..8 {
+        let free0 = free();
+        let e = CudaQwen2::new(&g, &km, &m, 50_000_000).err().unwrap();
         assert!(e.contains("GiB is free") && e.contains("--ctx"), "{e}");
-        let _c2 = net.try_cache(1024).unwrap();
+        let held = {
+            let net = CudaQwen2::new(&g, &km, &m, 1024).unwrap();
+            let _c = net.new_cache(1024);
+            let held = free();
+            // Every cache is checked against what is free when it is made (new
+            // budgets one): one too big is an Err before allocating, and a
+            // second normal one still fits.
+            let e = net.try_cache(50_000_000).err().unwrap();
+            assert!(e.contains("GiB is free") && e.contains("--ctx"), "{e}");
+            let _c2 = net.try_cache(1024).unwrap();
+            held
+        };
+        // Allow some slack for small allocations by others.
+        let free1 = free();
+        if held < free0 && free1 + (64 << 20) >= free0 {
+            return;
+        }
+        seen.push((free0, held, free1));
+        std::thread::sleep(std::time::Duration::from_millis(500));
     }
-    // Others (the desktop) allocate too: allow some slack.
-    let free1 = g.info().unwrap().free_bytes;
-    assert!(
-        free1 + (64 << 20) >= free0,
-        "{free0} free before, {free1} after"
-    );
+    panic!("free bytes (before, while held, after) on every attempt: {seen:?}");
 }
 
 /// Logits deep into a long context, through the replayed graph: ~1100
