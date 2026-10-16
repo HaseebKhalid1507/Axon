@@ -13,6 +13,9 @@ Two things will:
 - **fewer full-weight passes per token:** speculation. The draft model is now on main.
 - **more useful rows per weight pass:** batching many requests (S2), and later multiple GPUs.
 
+Speed is not the only bar. Nobody runs Axon in production yet, so hardening against
+hostile files, bad requests and long-running load comes right after batching (item 2).
+
 The exception is the H100, where prefill is issue-bound at 7.6% of its int8 peak. That gap is real
 and has a specific fix ([design/hopper.md](design/hopper.md)).
 
@@ -28,14 +31,15 @@ and has a specific fix ([design/hopper.md](design/hopper.md)).
 | # | item | why | status |
 |---|---|---|---|
 | 1 | **S2: continuous batching in `serve`.** Slot KV cache, per-row positions and sampling, a FIFO scheduler; whole-prompt prefill as its own step. | The largest product gap: ollama and llama-server already serve parallel requests, while `serve` runs one at a time. ESTIMATED aggregate on 7B: ~650 tok/s at 8 clients (5.5× single-stream) and ~1000 at 16. Gate: a batched run is token- and KV-byte-identical to a solo run. | in flight |
-| 2 | **Startup round 2.** Pinned staging for the weight upload, upload/prefill overlap, faster tokenizer and GGUF parsing. | Time to first token. ESTIMATED 7B warm short-prompt TTFT 624 → ~480 ms, from the measured 25.4 GB/s pinned upload. No change to output bits. | in flight |
-| 3 | **Multi-GPU, pipeline parallel (stage 1).** | Models bigger than one card, and KV room for serving. Bit-identical to one GPU by construction. With S2 in place, stage 1b overlaps stages for ~2× aggregate (ESTIMATED). | in progress ([design](design/multi-gpu.md)) |
-| 4 | **Hopper wgmma/TMA prefill.** | H100 prefill trails the 4090 and 5090. ESTIMATED 7B pp2100 12.5k → 22–32k tok/s. Gated on a ~1-hour pod experiment. | design; experiment pending ([design](design/hopper.md)) |
-| 5 | **Gemma 3** (1B/4B/12B). | The most-requested missing family. Medium bit-identity risk: new attention variants (head dim 256, sliding window) must keep decode == batched. Comes after S2, since both change the attention kernels. | in flight |
-| 6 | **Old GPUs (sm_61, Pascal).** | Fixes for Pascal cards, tested on Jaded's GTX 1050. Main has no tested sm_61 path; it refuses a GPU the installed NVRTC can't target. | in flight |
-| 7 | **SentencePiece tokenizer** (Mistral 7B v0.3, Llama 2, TinyLlama) on the existing `llama` path. | Cheap coverage: ESTIMATED 6–10 engineer-hours and no kernel risk. Main accepts only GPT-2-style BPE (`tokenizer.rs`). | planned |
-| 8 | **CPU re-board on main, then what it shows.** | The last full CPU scoreboard predates several merged CPU changes. Remaining items (pool spin, P/E-core tail) are ESTIMATED at a few percent. | planned |
-| 9 | **GPU decode: long-context attention; locked-clock trial.** | ESTIMATED +3% decode at 4k context. A locked SM clock may recover part of the 9% laptop power-cap cost (MEASURED cost; the fix is untested). | planned |
+| 2 | **Real-world hardening.** Fuzz the GGUF reader (truncated files, bad offsets, oversized dims, size overflow) and the HTTP API (malformed JSON, huge bodies, bad UTF-8, invalid params, clients that disconnect mid-stream, many idle connections). Edge prompts: empty, at and over the context limit, odd Unicode. A model-zoo sweep of GGUFs from different converters and quant mixes: each one either matches llama.cpp or is refused with a clear error. Multi-hour soak with many clients, watching RAM/VRAM for leaks. Clean failure on OOM and GPU errors. | Speed is measured; robustness is not. Axon has no users yet and has never served real traffic, while llama.cpp has years of edge cases behind it. Gate: no panic, no out-of-bounds, no hang on any fuzz input; every refusal is a clear error; the server stays up; the soak shows flat memory. Fuzz harness and soak script live in the repo. | planned |
+| 3 | **Startup round 2.** Pinned staging for the weight upload, upload/prefill overlap, faster tokenizer and GGUF parsing. | Time to first token. ESTIMATED 7B warm short-prompt TTFT 624 → ~480 ms, from the measured 25.4 GB/s pinned upload. No change to output bits. | in flight |
+| 4 | **Multi-GPU, pipeline parallel (stage 1).** | Models bigger than one card, and KV room for serving. Bit-identical to one GPU by construction. With S2 in place, stage 1b overlaps stages for ~2× aggregate (ESTIMATED). | in progress ([design](design/multi-gpu.md)) |
+| 5 | **Hopper wgmma/TMA prefill.** | H100 prefill trails the 4090 and 5090. ESTIMATED 7B pp2100 12.5k → 22–32k tok/s. Gated on a ~1-hour pod experiment. | design; experiment pending ([design](design/hopper.md)) |
+| 6 | **Gemma 3** (1B/4B/12B). | The most-requested missing family. Medium bit-identity risk: new attention variants (head dim 256, sliding window) must keep decode == batched. Comes after S2, since both change the attention kernels. | in flight |
+| 7 | **Old GPUs (sm_61, Pascal).** | Fixes for Pascal cards, tested on Jaded's GTX 1050. Main has no tested sm_61 path; it refuses a GPU the installed NVRTC can't target. | in flight |
+| 8 | **SentencePiece tokenizer** (Mistral 7B v0.3, Llama 2, TinyLlama) on the existing `llama` path. | Cheap coverage: ESTIMATED 6–10 engineer-hours and no kernel risk. Main accepts only GPT-2-style BPE (`tokenizer.rs`). | planned |
+| 9 | **CPU re-board on main, then what it shows.** | The last full CPU scoreboard predates several merged CPU changes. Remaining items (pool spin, P/E-core tail) are ESTIMATED at a few percent. | planned |
+| 10 | **GPU decode: long-context attention; locked-clock trial.** | ESTIMATED +3% decode at 4k context. A locked SM clock may recover part of the 9% laptop power-cap cost (MEASURED cost; the fix is untested). | planned |
 
 Also open:
 - **Tool calling in `serve`.** Main refuses `tools` with a 400. A PR is pending.
