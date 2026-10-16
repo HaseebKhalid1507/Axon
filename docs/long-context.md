@@ -72,16 +72,21 @@ Qwen2.5-7B-Instruct Q4_K_M, factor 4, orig 32768.
 
 **Retrieval** (`cuda::qwen2::yarn_eval::yarn_needle`): a five-digit pass key, stated twice
 in one sentence, at a depth of a Sherlock Holmes excerpt (Project Gutenberg), `--kv q8`,
-greedy answer checked for the key. RTX 5090 (40k-100k) and RTX 4090 (64k-128k). MEASURED:
+greedy answer checked for the key. RTX 5090. MEASURED:
 
 | prompt tokens | depth | yarn | no flag |
 |---:|---:|---|---|
 | 40000 | 0.1 / 0.5 / 0.9 | pass / pass / pass | pass / pass / pass |
 | 64000 | 0.1 / 0.5 / 0.9 | pass / pass / pass | pass / **fail** ("25983") / pass |
 | 100000 | 0.1 / 0.5 / 0.9 | pass / pass / pass | **fail** ("5") / pass / pass |
-NEEDLE2
+| 64000 | 0.02 / 0.25 / 0.35 | pass / pass / pass | pass / **fail** ("25987") / pass |
+| 100000 | 0.02 / 0.25 / 0.35 | pass / pass / pass | **fail** ("5") / **fail** ("5") / **fail** ("59") |
+| 128000 | 0.02 / 0.25 / 0.35 | pass / pass / pass | **fail** ("400") / **fail** ("4000") / **fail** ("4000") |
 
-Prefill of the 100k prompt: 23 s on the 5090 (q8 cache). Without the flag the model still
+Total: 18/18 with the flag, 9/18 without; every 100k-128k case with the key more than
+~65k tokens back fails without it.
+
+Prefill: 23 s for 100k tokens, 35-37 s for 128k on the 5090 (q8 cache). Without the flag the model still
 finds a key that sits near the end of the prompt (the distance back to it is under 32k: RoPE
 only sees relative positions) and sometimes one further back; with it every case passes.
 A pass key repeated in one sentence is an easy test (RULER calls single-needle retrieval
