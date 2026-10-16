@@ -331,6 +331,11 @@ impl<'g> PipelineQwen2<'g> {
         )
     }
 
+    /// Each stage's device, in order.
+    pub fn gpus(&self) -> Vec<&'g Gpu> {
+        self.stages.iter().map(|s| s.gpu).collect()
+    }
+
     /// The cache type (`CudaQwen2::kv_name`; every stage's is the same).
     pub fn kv_name(&self) -> &'static str {
         self.stages[0].net.kv_name()

@@ -5,6 +5,7 @@ mod cuda;
 mod draft;
 mod gguf;
 mod hybrid;
+mod identity;
 mod kv;
 mod kvsave;
 mod kvstore;
@@ -56,8 +57,9 @@ usage:
   axon <model.gguf>                         same as axon info
   axon info <model.gguf>                    print a summary and exit
   axon gen <model.gguf> \"<prompt>\" [-n N] [--draft K] [--draft-model PATH] [--device D]
-            [--gpu-layers N] [--gpus L] [--kv T] [sampling flags]
-                                            generation (greedy unless --temp > 0)
+            [--gpu-layers N] [--gpus L] [--kv T] [--verbose] [sampling flags]
+                                            generation (greedy unless --temp > 0;
+                                            --verbose: the full identity tuple)
   axon logits <model.gguf> \"<prompt>\" [-k K]
                                             top-K next-token logits after the prompt
   axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K]
@@ -325,6 +327,22 @@ fn run() -> std::io::Result<()> {
         human_bytes(model.total_bytes())
     );
     println!("{}", cuda::summary());
+    // What decides the output bits (docs/determinism.md), per placement.
+    match identity::predicted(path, &model) {
+        Ok(ids) => {
+            if let Some((_, i)) = ids.first() {
+                let model = &i.fields[1].1;
+                println!(
+                    "model digest: {model} (sampled SHA-256, identity numerics {})",
+                    identity::NUMERICS_VERSION
+                );
+            }
+            for (what, i) in ids {
+                println!("fingerprint {what}: {}", i.line());
+            }
+        }
+        Err(e) => println!("fingerprint: none ({e})"),
+    }
     Ok(())
 }
 
@@ -520,8 +538,14 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     let mut kv = kv_env();
     let mut sargs = sample::SampleArgs::default();
     let mut rargs = rope::RopeArgs::default();
+    let mut verbose = false;
     let mut i = 4;
     while i < args.len() {
+        if args[i] == "--verbose" {
+            verbose = true;
+            i += 1;
+            continue;
+        }
         let val = args.get(i + 1).and_then(|s| s.parse::<usize>().ok());
         match (args[i].as_str(), val) {
             (f, _) if sample::SampleArgs::is_flag(f) => sargs
@@ -748,6 +772,11 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             n.describe(ids.len() + extra + 1),
             n.kv_name()
         );
+    }
+    match identity::of(path, &model, &net) {
+        Ok(id) if verbose => eprint!("identity:    {}\n{}", id.fingerprint(), id.canonical()),
+        Ok(id) => eprintln!("identity:    {}", id.fingerprint()),
+        Err(e) => eprintln!("identity:    unknown ({e})"),
     }
     if env::var_os("AXON_POOL_DEBUG").is_some() {
         let pool = pool::Pool::global();

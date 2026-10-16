@@ -497,6 +497,8 @@ The GPU, after that:
 
 - [docs/START-HERE.md](docs/START-HERE.md): what Axon is, what's on main, the bit-identity
   contract, a map of the source tree
+- [docs/determinism.md](docs/determinism.md): what is bit-identical (and what isn't), the
+  identity tuple behind every response's `system_fingerprint` (`GET /identity` on `axon serve`)
 - [docs/benchmarks-gpu.md](docs/benchmarks-gpu.md): GPU scoreboards with method and caveats
 - [docs/roadmap.md](docs/roadmap.md): what's next, and what isn't planned
 - [docs/methodology.md](docs/methodology.md): how changes are picked, built, reviewed, gated and benchmarked

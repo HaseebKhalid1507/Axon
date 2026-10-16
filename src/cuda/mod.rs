@@ -2051,5 +2051,20 @@ pub fn summary() -> String {
     }
 }
 
+/// The code `Module::load` builds for `gpu`, for the identity tuple
+/// (`crate::identity`): the target (`nvrtc_for`) and the NVRTC version, and
+/// for PTX the driver too (it compiles that for the device).
+pub fn code_target(gpu: &Gpu) -> Result<String, String> {
+    let cc = gpu.info()?.cc;
+    let d = ffi::driver_version(gpu.d)?;
+    let (n, target) = nvrtc_for((cc.0 * 10 + cc.1) as i32, d, hopper_env())?;
+    let nv = ffi::nvrtc_version(n)?;
+    let mut s = format!("{target} nvrtc {}.{}", nv.0, nv.1);
+    if matches!(target, Target::Ptx(_)) {
+        s.push_str(&format!(" driver {}.{}", d.0, d.1));
+    }
+    Ok(s)
+}
+
 #[cfg(test)]
 mod tests;

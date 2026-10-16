@@ -1358,6 +1358,11 @@ impl<'g> CudaQwen2<'g> {
         self.n_kv_heads * self.head_dim
     }
 
+    /// The device it runs on.
+    pub fn gpu(&self) -> &'g Gpu {
+        self.gpu
+    }
+
     /// "f16", "q8" (a scale per kv head row) or "q8/32" (per 32 values):
     /// what `new_cache` makes.
     pub fn kv_name(&self) -> &'static str {
