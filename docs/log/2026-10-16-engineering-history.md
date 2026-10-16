@@ -1,4 +1,4 @@
-# Engineering history docs (docs-only PR)
+# Engineering history docs (PR #47, docs only)
 
 - Date: 2026-10-16. Branch: docs/engineering-log. Base: main a591e17. Status: open
 - Pick / design: Haseeb asked for a record in the repo of what was done, why, how it was measured and what
