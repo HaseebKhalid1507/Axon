@@ -135,6 +135,16 @@ pub enum RowOut {
     Cands(Vec<Cand>),
 }
 
+/// Why a step failed.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StepError {
+    /// The rows were refused before any work ran (nothing changed): the
+    /// requests in them fail, the backend is fine.
+    Input(String),
+    /// The device failed partway (CUDA errors are sticky).
+    Device(String),
+}
+
 /// A backend that runs many sequences at once (`axon serve`'s continuous
 /// batching): a pool of slots, each a sequence's cache of up to `ctx`
 /// positions, and steps of one row per token of any slots. Every row's
@@ -161,7 +171,7 @@ pub trait BatchLm: Lm {
     /// One pass over `rows` (a slot's rows in ascending positions, each with
     /// its slot's earlier positions already in it, or earlier in `rows`):
     /// each row's keys and values into its slot, and its result.
-    fn step(&self, pool: &mut Self::Pool, rows: &[SeqRow]) -> Result<Vec<RowOut>, String>;
+    fn step(&self, pool: &mut Self::Pool, rows: &[SeqRow]) -> Result<Vec<RowOut>, StepError>;
 
     /// Copy positions 0..n of `cache` into slot `slot`.
     fn adopt(
@@ -567,7 +577,7 @@ impl BatchLm for Backend<'_> {
         }
     }
 
-    fn step(&self, pool: &mut Self::Pool, rows: &[SeqRow]) -> Result<Vec<RowOut>, String> {
+    fn step(&self, pool: &mut Self::Pool, rows: &[SeqRow]) -> Result<Vec<RowOut>, StepError> {
         match self {
             Backend::Cuda(n) => n.step_rows(pool, rows),
             _ => unreachable!("a pool is the GPU model's"),

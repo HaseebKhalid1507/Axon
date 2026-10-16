@@ -28,7 +28,7 @@
 
 use super::batch::{BatchIn, HEAD_SUB, Place, RowAt, passes};
 use super::*;
-use crate::lm::{BatchLm, RowHead, RowOut, SeqRow};
+use crate::lm::{BatchLm, RowHead, RowOut, SeqRow, StepError};
 use std::collections::HashMap;
 
 /// sample.cu SP_PER_ROW: S[1] when each row has its own penalty.
@@ -44,13 +44,13 @@ pub struct CudaPool<'g> {
     /// Captured steps by (rows, greedy rows, + device-sampled rows): a
     /// step's kernels and their arguments depend on nothing else (its
     /// tokens, places and S are copied in before the graph runs).
-    graphs: HashMap<(usize, usize, usize), Graph<'g>>,
-    /// The sampling scratch's size the graphs were made with (a bigger S
-    /// moves it: the graphs hold its address).
-    samp_cap: usize,
+    /// Each with the step count of its last use: the least recently used
+    /// one goes when one more is needed past MAX_GRAPHS.
+    graphs: HashMap<(usize, usize, usize), (Graph<'g>, u64)>,
+    steps: u64,
 }
 
-/// Captured steps kept at most (all dropped when one more is needed).
+/// Captured steps kept at most.
 const MAX_GRAPHS: usize = 64;
 
 impl<'g> CudaQwen2<'g> {
@@ -91,16 +91,17 @@ impl<'g> CudaQwen2<'g> {
             b.logits = g.alloc(rows_max * self.vocab * 4)?;
         }
         b.logits_rows = true;
-        // S for every row with up to 255 penalty ids, made up front.
-        self.samp_bufs(&mut c, 8 + rows_max * (2 + 255), rows_max)?;
-        let samp_cap = c.samp.as_ref().map_or(0, |s| s.cap);
+        // S for every row with as many penalty ids as a row can have (the
+        // distinct tokens of a window of at most ctx), made up front: it is
+        // never reallocated (the graphs hold its address).
+        self.samp_bufs(&mut c, 8 + rows_max * (2 + ctx.min(self.vocab)), rows_max)?;
         Ok(CudaPool {
             c,
             slots,
             ctx,
             rows_max,
             graphs: HashMap::new(),
-            samp_cap,
+            steps: 0,
         })
     }
 
@@ -137,30 +138,41 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// `BatchLm::step`.
-    pub fn step_rows(&self, p: &mut CudaPool<'g>, rows: &[SeqRow]) -> Result<Vec<RowOut>, String> {
+    pub fn step_rows(
+        &self,
+        p: &mut CudaPool<'g>,
+        rows: &[SeqRow],
+    ) -> Result<Vec<RowOut>, StepError> {
         let nb = rows.len();
         if nb == 0 {
             return Ok(Vec::new());
         }
+        let bad = |e: String| Err(StepError::Input(e));
         if nb > p.rows_max {
-            return Err(format!("{nb} rows: the pool takes {}", p.rows_max));
+            return bad(format!("{nb} rows: the pool takes {}", p.rows_max));
         }
         for r in rows {
             if r.slot >= p.slots || r.pos >= p.ctx || r.token as usize >= self.vocab {
-                return Err(format!(
+                return bad(format!(
                     "row: token {} at {} of slot {} (pool {} x {})",
                     r.token, r.pos, r.slot, p.slots, p.ctx
                 ));
             }
             if let RowHead::Sample { spec, recent } = r.head {
                 if recent.last() != Some(&r.token) {
-                    return Err("a sampled row's recent must end with its token".into());
+                    return bad("a sampled row's recent must end with its token".into());
                 }
                 if spec.k == 0 {
-                    return Err("a sampled row wants at least one candidate".into());
+                    return bad("a sampled row wants at least one candidate".into());
                 }
             }
         }
+        self.step_checked(p, rows).map_err(StepError::Device)
+    }
+
+    /// `step_rows` after its checks.
+    fn step_checked(&self, p: &mut CudaPool<'g>, rows: &[SeqRow]) -> Result<Vec<RowOut>, String> {
+        let nb = rows.len();
         // Greedy rows first, then the ones sampled on the device, then
         // those selected on the host (the order changes no row's bits).
         let kind = |r: &SeqRow| match r.head {
@@ -190,11 +202,6 @@ impl<'g> CudaQwen2<'g> {
         let kmax = sampled.iter().map(|s| s.0.k).max().unwrap_or(1);
         if !sampled.is_empty() {
             self.samp_upload_rows(&mut p.c, &sampled, kmax)?;
-            let cap = p.c.samp.as_ref().map_or(0, |s| s.cap);
-            if cap != p.samp_cap {
-                p.graphs.clear();
-                p.samp_cap = cap;
-            }
         }
         let b = p.c.b.as_mut().expect("batch scratch");
         self.load_input(b, BatchIn::Tokens(&tokens))?;
@@ -214,17 +221,26 @@ impl<'g> CudaQwen2<'g> {
         };
         if self.graphs {
             let key = (nb, ng, ns);
+            p.steps += 1;
             if !p.graphs.contains_key(&key) {
                 if p.graphs.len() >= MAX_GRAPHS {
-                    p.graphs.clear();
+                    let lru = p
+                        .graphs
+                        .iter()
+                        .min_by_key(|(_, (_, t))| *t)
+                        .map(|(k, _)| *k);
+                    p.graphs.remove(&lru.unwrap());
                 }
                 let g = self.gpu.capture(pass)?;
-                p.graphs.insert(key, g);
+                p.graphs.insert(key, (g, 0));
             }
+            let (g, used) = p.graphs.get_mut(&key).unwrap();
+            *used = p.steps;
             // SAFETY: the graph's buffers are the pool's and the model's,
-            // both borrowed here; the pool owns the graph, and its buffers
-            // it captured are never reallocated while it lives (S: samp_cap).
-            unsafe { p.graphs[&key].launch()? };
+            // both borrowed here; the pool owns the graph, and the buffers
+            // it captured are never reallocated while it lives (S is made
+            // at its largest in `pool`).
+            unsafe { g.launch()? };
         } else {
             pass()?;
         }
@@ -282,8 +298,13 @@ impl<'g> CudaQwen2<'g> {
             })
             .collect();
         let need = 4 + 4 + 2 * nr + ids.iter().map(Vec::len).sum::<usize>();
-        self.samp_bufs(c, need, nr)?;
-        let s = c.samp.as_mut().unwrap();
+        let s = c.samp.as_mut().expect("a pool's sampling scratch");
+        // Never past it: rows <= rows_max, ids per row <= min(ctx, vocab).
+        if need > s.cap || nr > s.rows {
+            return Err(format!(
+                "S of {need} u32s for {nr} rows: past the pool's scratch"
+            ));
+        }
         let hb = s.host_s.bytes_mut()?;
         let mut put = |i: usize, v: u32| hb[4 * i..4 * i + 4].copy_from_slice(&v.to_le_bytes());
         s.params = None;
@@ -373,7 +394,7 @@ impl<'g> BatchLm for CudaQwen2<'g> {
         CudaQwen2::feed_slot(self, pool, slot, tokens, start)
     }
 
-    fn step(&self, pool: &mut CudaPool<'g>, rows: &[SeqRow]) -> Result<Vec<RowOut>, String> {
+    fn step(&self, pool: &mut CudaPool<'g>, rows: &[SeqRow]) -> Result<Vec<RowOut>, StepError> {
         self.step_rows(pool, rows)
     }
 
@@ -743,6 +764,113 @@ mod tests {
                         "{what}: KV bytes"
                     );
                 }
+            }
+        }
+    }
+
+    /// A wide pool on a 128-wide-head model (qwen3 0.6B; Llama 3.2 1B
+    /// too, hd 64): 20 slots of 1152 positions, prompts up to 1100 tokens,
+    /// 20 rows per step (more than att_per_query, so the per-query
+    /// attention runs in several launches, and more than HEAD_SUB, so the
+    /// head's slices split the greedy and the sampled rows, one selected on
+    /// the host): every request's results and tokens == running it alone,
+    /// and the slots' KV bytes == the solo caches'.
+    #[test]
+    fn pool_wide_long_steps_match_solo() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let km = Kernels::module(&g).unwrap();
+        if !km.mma() {
+            return;
+        }
+        let ms: Vec<Model> = [
+            crate::testutil::qwen3_model(),
+            crate::testutil::llama_model(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let (slots, ctx, steps) = (20usize, 1152usize, 3usize);
+        for m in ms {
+            let net = CudaQwen2::with_kv(&g, &km, &m, ctx, CacheKv::F16, false).unwrap();
+            let v = net.vocab;
+            if net.head_dim == 128 {
+                assert!(slots > super::super::batch::att_per_query(128));
+            }
+            assert!(slots > HEAD_SUB);
+            let kinds: Vec<Kind> = (0..slots)
+                .map(|i| match i % 4 {
+                    0 | 2 => Kind::Greedy,
+                    1 => Kind::Sampled(40, 1.1, i as u64),
+                    _ if i == 3 => Kind::Sampled(0, 1.0, 99),
+                    _ => Kind::Sampled(7, 1.3, i as u64),
+                })
+                .collect();
+            let lens: Vec<usize> = (0..slots).map(|i| 1100 - (i * 53) % 1090).collect();
+            let prompts: Vec<Vec<u32>> = (0..slots)
+                .map(|i| ids(lens[i], 7000 + i as u32, v))
+                .collect();
+            let refs: Vec<_> = (0..slots)
+                .map(|i| solo(&net, ctx, &prompts[i], kinds[i], steps))
+                .collect();
+            let mut p = net.pool(slots, ctx).unwrap();
+            // Slot of request i: reversed.
+            let slot_of = |i: usize| slots - 1 - i;
+            for (i, pr) in prompts.iter().enumerate() {
+                net.feed_slot(&mut p, slot_of(i), &pr[..pr.len() - 1], 0)
+                    .unwrap();
+            }
+            let mut hist = prompts.clone();
+            let mut sms: Vec<Option<Sampler>> = kinds
+                .iter()
+                .map(|k| match *k {
+                    Kind::Greedy => None,
+                    Kind::Sampled(k, pen, seed) => Some(sampler(k, pen, seed)),
+                })
+                .collect();
+            for step in 0..steps {
+                let specs: Vec<Option<CandSpec>> = sms
+                    .iter()
+                    .map(|s| s.as_ref().map(|s| s.cfg.spec()))
+                    .collect();
+                let rows: Vec<SeqRow> = (0..slots)
+                    .map(|i| {
+                        let h = &hist[i];
+                        SeqRow {
+                            token: h[h.len() - 1],
+                            pos: h.len() - 1,
+                            slot: slot_of(i),
+                            head: match &specs[i] {
+                                None => RowHead::Argmax,
+                                Some(spec) => RowHead::Sample {
+                                    spec: *spec,
+                                    recent: &h[h.len() - spec.last_n.clamp(1, h.len())..],
+                                },
+                            },
+                        }
+                    })
+                    .collect();
+                let outs = net.step_rows(&mut p, &rows).unwrap();
+                for (i, o) in outs.into_iter().enumerate() {
+                    let what = format!("{} request {i} (len {}) step {step}", m.arch, lens[i]);
+                    assert_eq!(o, refs[i].0[step], "{what}");
+                    let next = match (&o, sms[i].as_mut()) {
+                        (RowOut::Pick(t), None) => *t,
+                        (RowOut::Cands(cs), Some(s)) => s.pick(cs),
+                        _ => panic!("{what}: a result of another head"),
+                    };
+                    hist[i].push(next);
+                }
+            }
+            for i in 0..slots {
+                assert_eq!(hist[i], refs[i].1, "{} request {i}: tokens", m.arch);
+                let n = hist[i].len() - 1;
+                assert!(
+                    slot_bytes(&net, &p.c, slot_of(i) * ctx, n) == refs[i].2,
+                    "{} request {i}: KV bytes",
+                    m.arch
+                );
             }
         }
     }

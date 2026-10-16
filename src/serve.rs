@@ -109,6 +109,9 @@ pub struct Opts {
     /// Most requests decoded together (continuous batching, GPU only);
     /// 1: one at a time.
     pub parallel: usize,
+    /// Positions per slot at most (None: the context; tests shrink the pool
+    /// with it).
+    pub slot_ctx: Option<usize>,
 }
 
 /// The chat framing `axon chat` uses (chat.rs: ChatML, or Llama 3's
@@ -406,6 +409,12 @@ fn text_out<'t>(tok: &'t Tokenizer, job: &Job) -> TextOut<'t> {
     }
 }
 
+/// Whether `j` can run in a slot of `slot_ctx` positions (its prompt and
+/// all it may generate).
+fn fits_slot(j: &Job, slot_ctx: usize) -> bool {
+    j.n_gen > 0 && j.prompt.len() + j.n_gen <= slot_ctx
+}
+
 /// When a request running alone (`Engine::job`) hands over to the batch:
 /// as soon as a newly arrived request could join it.
 struct Handover<'r> {
@@ -413,24 +422,26 @@ struct Handover<'r> {
     waiting: &'r mut VecDeque<Job>,
     /// The batch's positions per slot, if it has a free slot.
     slot_ctx: Option<usize>,
+    /// Most requests to hold off the channel (the batch's slots).
+    room: usize,
 }
 
 impl Handover<'_> {
-    /// Take new requests; whether one of them (the next) could run in a
-    /// slot, and so should not wait for the one running alone.
+    /// Take new requests (while none of those waiting fits a slot, up to
+    /// `room`); whether one of them could run in a slot, and so should not
+    /// wait for the one running alone.
     fn due(&mut self) -> bool {
         let Some(ctx) = self.slot_ctx else {
             return false;
         };
-        if self.waiting.is_empty()
-            && let Ok(j) = self.jobs.try_recv()
-        {
-            self.waiting.push_back(j);
-        }
         self.waiting.retain(|j| !j.cancel.load(Ordering::Relaxed));
-        self.waiting
-            .front()
-            .is_some_and(|j| j.n_gen > 0 && j.prompt.len() + j.n_gen <= ctx)
+        while !self.waiting.iter().any(|j| fits_slot(j, ctx)) && self.waiting.len() < self.room {
+            match self.jobs.try_recv() {
+                Ok(j) => self.waiting.push_back(j),
+                Err(_) => break,
+            }
+        }
+        self.waiting.iter().any(|j| fits_slot(j, ctx))
     }
 }
 
@@ -534,6 +545,9 @@ impl<'a> Engine<'a> {
         if handed {
             // Rows 0..hist.len() - 1 are in the cache: all but the token
             // just picked, the batch's first row for it.
+            // The draft model (if any) is left as it is: the batch doesn't
+            // draft, and its next draft call matches its cached tokens
+            // against that request's history first (draft.rs).
             let mut hist = p.clone();
             hist.extend_from_slice(&ids);
             self.hist = hist[..hist.len() - 1].to_vec();
@@ -667,7 +681,7 @@ fn engine(
     });
     let mut batch = match o.parallel {
         0 | 1 => None,
-        n => match pool_for(&net, n, ctx) {
+        n => match pool_for(&net, n, o.slot_ctx.map_or(ctx, |c| c.min(ctx))) {
             Ok((pool, slots, slot_ctx)) => Some(Batch::new(
                 &net,
                 pool,
@@ -684,18 +698,25 @@ fn engine(
             }
         },
     };
+    // With a pool, the context served is a slot's: every request fits one
+    // (the 413 check and the default max_tokens use it).
+    let served = batch.as_ref().map_or(ctx, |b| b.ctx.min(ctx));
+    if served < ctx && o.log {
+        eprintln!(
+            "axon serve: {} slots of {served} positions fit in GPU memory: the context is {served} \
+             (--parallel 1 for {ctx}, or --kv q8)",
+            batch.as_ref().map_or(0, |b| b.slots)
+        );
+    }
     let banner = match &batch {
-        Some(b) => format!(
-            "{kvs}, ctx {ctx}{drafts}, {} requests at once ({} positions each)",
-            b.slots, b.ctx
-        ),
+        Some(b) => format!("{kvs}, ctx {served}{drafts}, {} requests at once", b.slots),
         None => format!("{kvs}, ctx {ctx}{drafts}, one request at a time"),
     };
     if ready
         .send(Loaded {
             tok,
             template,
-            ctx,
+            ctx: served,
             max_token_bytes: tok.max_token_bytes(),
             banner,
         })
@@ -719,20 +740,28 @@ fn engine(
             continue;
         };
         // Take requests off the channel only as far as slots can start
-        // them: the bounded channel stays the queue (full: a 503).
-        while waiting.len() <= b.free() {
+        // them (and a few that can't, which wait to run alone): the bounded
+        // channel stays the queue (full: a 503).
+        waiting.retain(|j| !j.cancel.load(Ordering::Relaxed));
+        loop {
+            let fit = waiting.iter().filter(|j| fits_slot(j, b.ctx)).count();
+            if fit > b.free() || waiting.len() > b.slots {
+                break;
+            }
             match jobs.try_recv() {
                 Ok(job) => waiting.push_back(job),
                 Err(_) => break,
             }
         }
-        waiting.retain(|j| !j.cancel.load(Ordering::Relaxed));
-        let fits = |j: &Job, b: &Batch| j.n_gen > 0 && b.fits(j.prompt.len(), j.n_gen);
-        // Admit the next request into a slot (its prefill a step of its
-        // own) if others run or wait; a request alone runs the S1 way.
-        let next_fits = waiting.front().is_some_and(|j| fits(j, b));
-        if next_fits && b.has_free() && (!b.idle() || waiting.len() > 1) {
-            let job = waiting.pop_front().unwrap();
+        // Admit the first request that fits a slot (its prefill a step of
+        // its own) if others run or wait; one alone runs the S1 way, as
+        // does one that fits no slot, once the batch is idle.
+        let first_fit = waiting.iter().position(|j| fits_slot(j, b.ctx));
+        if let Some(i) = first_fit
+            && b.has_free()
+            && (!b.idle() || waiting.len() > 1)
+        {
+            let job = waiting.remove(i).unwrap();
             let out = text_out(e.tok, &job);
             let tx = job.tx.clone();
             if let Err(err) = or_exit("a prefill", || b.admit(job, out)) {
@@ -744,6 +773,7 @@ fn engine(
                     jobs: &jobs,
                     waiting: &mut waiting,
                     slot_ctx: Some(b.ctx),
+                    room: b.slots,
                 };
                 if let Some(seq) = e.run(job, Some(ho)) {
                     let tx = seq.job.tx.clone();
@@ -804,6 +834,7 @@ fn pool_for<'a>(
 struct EngineOpts {
     /// Requests decoded together at most (`--parallel`); 1: one at a time.
     parallel: usize,
+    slot_ctx: Option<usize>,
     path: String,
     device: Device,
     gpu_layers: Option<usize>,
@@ -889,6 +920,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
     let queued = Arc::new(AtomicU64::new(0));
     let eo = EngineOpts {
         parallel: o.parallel,
+        slot_ctx: o.slot_ctx,
         generated: generated.clone(),
         path: o.path.clone(),
         device: o.device,
@@ -1567,6 +1599,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         max_conns: MAX_CONNS,
         max_queue: MAX_QUEUE,
         parallel: PARALLEL,
+        slot_ctx: None,
     };
     let mut k = None;
     let mut i = 3;

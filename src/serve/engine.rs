@@ -20,7 +20,7 @@
 
 use super::api::Usage;
 use super::{Event, Job, TextOut};
-use crate::lm::{Backend, BatchLm, RowHead, RowOut, SeqRow};
+use crate::lm::{Backend, BatchLm, RowHead, RowOut, SeqRow, StepError};
 use crate::sample::Sampler;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -99,12 +99,6 @@ impl<'a, 't> Batch<'a, 't> {
     /// Free slots.
     pub fn free(&self) -> usize {
         self.busy.iter().filter(|b| !**b).count()
-    }
-
-    /// Whether a request of `prompt` tokens plus up to `n_gen` more fits a
-    /// slot.
-    pub fn fits(&self, prompt: usize, n_gen: usize) -> bool {
-        prompt + n_gen <= self.ctx
     }
 
     /// A free slot: the one holding the longest prefix of `prompt` (its
@@ -216,7 +210,17 @@ impl<'a, 't> Batch<'a, 't> {
                 }
             })
             .collect();
-        let outs = self.net.step(&mut self.pool, &rows)?;
+        let outs = match self.net.step(&mut self.pool, &rows) {
+            Ok(o) => o,
+            // Refused before any work: those requests fail, the rest of the
+            // server goes on.
+            Err(StepError::Input(e)) => {
+                eprintln!("axon serve: a step was refused: {e}");
+                self.fail_all(&e);
+                return Ok(());
+            }
+            Err(StepError::Device(e)) => return Err(e),
+        };
         let mut done = Vec::new();
         for (i, o) in outs.into_iter().enumerate() {
             let s = &mut self.seqs[i];
@@ -249,9 +253,10 @@ impl<'a, 't> Batch<'a, 't> {
         Ok(())
     }
 
-    /// A device error: every running request gets it.
+    /// Every running request gets error `e` and leaves (its slot freed).
     pub fn fail_all(&mut self, e: &str) {
         for s in self.seqs.drain(..) {
+            self.busy[s.slot] = false;
             let _ = s.job.tx.send(Event::Error(e.to_string()));
         }
     }

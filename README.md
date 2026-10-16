@@ -213,8 +213,8 @@ use your local model), `--max-conns N` / `--max-queue N` (defaults 256 / 128),
   batching: a request joins as soon as a slot is free, its prompt prefilled as a step of its
   own, and leaves when done). Each request has a KV slot of `--ctx` positions; if
   `--parallel` slots don't fit in GPU memory the server takes fewer (at least 2), then shorter
-  ones (down to 1024 positions; a request too long for a slot runs alone), and says so on
-  stderr. A request running alone takes the single-stream path (CUDA graphs, `--draft`), and
+  ones (down to 1024 positions), and then serves a slot's context (longer prompts get a 413;
+  `--parallel 1` keeps the whole `--ctx`); it says so on stderr. A request running alone takes the single-stream path (CUDA graphs, `--draft`), and
   moves into the batch when a second one arrives. Every request's output is exactly what it
   gets alone, whatever else runs with it (greedy, and sampled with a `seed`): the batched
   kernels are bit-identical per row to the one-sequence ones. On the CPU and with
