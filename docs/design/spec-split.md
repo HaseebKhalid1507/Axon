@@ -41,7 +41,7 @@ Bella, Qwen2.5-32B Q4_K_M, greedy, 128 tokens, three chat-template prompts (code
 travel chat, summary). MEASURED, two interleaved rounds (low–high), the same local bench (one load per
 configuration; bella was shared with other builders' CPU work, load average 6–16, so the
 absolute numbers are on the low side). Baseline: no drafter, 27/64 layers on the GPU.
-Every drafted run's output was token-for-token the non-draft output (SAME, 66/66).
+Every drafted run's output was token-for-token the non-draft output (SAME, 48/48).
 
 | prompt | no draft | 0.5B K=3 | K=5 | **K=7** | K=8 | K=10 | 1.5B K=7 | accepted @ K=7 |
 |---|---|---|---|---|---|---|---|---|
