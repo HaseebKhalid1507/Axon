@@ -111,9 +111,18 @@ pub fn read_json(rel: &str) -> serde_json::Value {
 /// Like `model_path`: no usable GPU (no driver, no device, or it won't
 /// open) is a test failure, not a silent pass. Machines without one (CI)
 /// opt out explicitly with `AXON_SKIP_GPU_TESTS=1`.
+///
+/// On cards with less than 8 GiB (a 6 GB laptop 4050), two GPU tests that
+/// load models at once run out of VRAM and fail spuriously, so there the
+/// calling test holds a process-wide lock until its thread ends (libtest
+/// runs each test on its own thread). `AXON_TEST_GPU_SERIAL=0|1` forces it
+/// off/on.
 pub fn gpu() -> Option<crate::cuda::Gpu> {
     match crate::cuda::Gpu::open() {
-        Ok(g) => Some(g),
+        Ok(g) => {
+            serialize_small_gpu(&g);
+            Some(g)
+        }
         Err(e) if std::env::var_os("AXON_SKIP_GPU_TESTS").is_some() => {
             eprintln!("skipping: no usable GPU ({e}) and AXON_SKIP_GPU_TESTS is set");
             None
@@ -122,4 +131,47 @@ pub fn gpu() -> Option<crate::cuda::Gpu> {
             panic!("no usable GPU: {e}. Set AXON_SKIP_GPU_TESTS=1 to skip the tests that need one.")
         }
     }
+}
+
+/// Take the GPU test lock for the rest of this thread if the card is small
+/// (see `gpu`). Re-entrant: a thread already holding it does nothing.
+fn serialize_small_gpu(g: &crate::cuda::Gpu) {
+    use std::cell::RefCell;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
+    static LOCK: Mutex<()> = Mutex::new(());
+    static ON: OnceLock<bool> = OnceLock::new();
+    thread_local!(static HELD: RefCell<Option<MutexGuard<'static, ()>>> = const { RefCell::new(None) });
+    let on = *ON.get_or_init(|| {
+        let total = g.info().map_or(u64::MAX, |i| i.total_bytes);
+        let on = match std::env::var("AXON_TEST_GPU_SERIAL").as_deref() {
+            Ok("0") => false,
+            Ok("1") => true,
+            _ => total < 8 << 30,
+        };
+        if on {
+            // Straight to stderr: libtest captures eprintln! inside tests.
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "testutil: GPU has {:.2} GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)",
+                total as f64 / (1u64 << 30) as f64
+            );
+        }
+        on
+    });
+    if on {
+        HELD.with(|h| {
+            let mut h = h.borrow_mut();
+            if h.is_none() {
+                *h = Some(LOCK.lock().unwrap_or_else(|e| e.into_inner()));
+            }
+        });
+    }
+}
+
+#[test]
+fn gpu_lock_is_reentrant() {
+    let (Some(_a), Some(_b)) = (gpu(), gpu()) else {
+        return;
+    };
 }
