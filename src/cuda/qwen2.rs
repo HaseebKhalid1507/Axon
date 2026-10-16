@@ -1172,17 +1172,28 @@ impl<'g> CudaQwen2<'g> {
     /// Layer l's cache as kernel arguments: F16 [K, V]; Q8 [K, V, K scales,
     /// V scales] (layout at `CudaCache::kv`).
     fn kv_args(&self, c: &CudaCache, l: usize) -> Vec<Arg> {
+        self.kv_args_at(c, l, 0)
+    }
+
+    /// `kv_args` from cache row `row0` on (a pool slot's first row).
+    fn kv_args_at(&self, c: &CudaCache, l: usize, row0: usize) -> Vec<Arg> {
         let n = c.max_ctx * self.kv_dim();
+        let e = row0 * self.kv_dim();
+        assert!(row0 <= c.max_ctx, "row {row0} past the cache");
         match c.mode {
-            CacheKv::F16 => vec![c.kv.arg_at(2 * l * n * 2), c.kv.arg_at((2 * l + 1) * n * 2)],
+            CacheKv::F16 => vec![
+                c.kv.arg_at((2 * l * n + e) * 2),
+                c.kv.arg_at(((2 * l + 1) * n + e) * 2),
+            ],
             CacheKv::Q8 { group } => {
                 let s0 = 2 * self.layers.len() * n;
                 let sn = n / group * 4;
+                let es = e / group * 4;
                 vec![
-                    c.kv.arg_at(2 * l * n),
-                    c.kv.arg_at((2 * l + 1) * n),
-                    c.kv.arg_at(s0 + 2 * l * sn),
-                    c.kv.arg_at(s0 + (2 * l + 1) * sn),
+                    c.kv.arg_at(2 * l * n + e),
+                    c.kv.arg_at((2 * l + 1) * n + e),
+                    c.kv.arg_at(s0 + 2 * l * sn + es),
+                    c.kv.arg_at(s0 + (2 * l + 1) * sn + es),
                 ]
             }
         }
@@ -1296,6 +1307,18 @@ impl<'g> CudaQwen2<'g> {
 
     /// `try_cache` of type `mode` (rather than `kv`'s).
     pub fn try_cache_kv(&self, max_ctx: usize, mode: CacheKv) -> Result<CudaCache<'g>, String> {
+        self.try_cache_at(max_ctx, mode, max_ctx)
+    }
+
+    /// `try_cache_kv` whose sequences have at most `att_ctx` positions
+    /// each (a pool of slots, `slots.rs`: max_ctx = slots x att_ctx), which
+    /// sizes the attention and batch scratch.
+    pub(super) fn try_cache_at(
+        &self,
+        max_ctx: usize,
+        mode: CacheKv,
+        att_ctx: usize,
+    ) -> Result<CudaCache<'g>, String> {
         let g = self.gpu;
         let f = 4;
         let mode = match mode {
@@ -1315,7 +1338,9 @@ impl<'g> CudaQwen2<'g> {
         // context, ~360 MiB at 32k: the attention partials grow with it),
         // so every one is checked against what is free now, before any of
         // it is allocated.
-        let want = self.cache_bytes_kv(mode, max_ctx) as u64 + CACHE_HEADROOM;
+        let want = (self.cache_bytes_kv(mode, att_ctx) - self.kv_cache_bytes(mode, att_ctx)
+            + self.kv_cache_bytes(mode, max_ctx)) as u64
+            + CACHE_HEADROOM;
         let free = g.info()?.free_bytes;
         if want > free {
             return Err(format!(
@@ -1345,8 +1370,8 @@ impl<'g> CudaQwen2<'g> {
             att: g.alloc(self.q_dim * f)?,
             hid: g.alloc(self.ffn * f)?,
             act: g.alloc(act_bytes(self.act_len()))?,
-            part_o: g.alloc(self.n_heads * self.att_parts(max_ctx) * self.head_dim * f)?,
-            part_ml: g.alloc(self.n_heads * self.att_parts(max_ctx) * 2 * f)?,
+            part_o: g.alloc(self.n_heads * self.att_parts(att_ctx) * self.head_dim * f)?,
+            part_ml: g.alloc(self.n_heads * self.att_parts(att_ctx) * 2 * f)?,
             kraw: g.alloc(self.kv_dim() * f)?,
             logits: g.alloc(self.vocab * f)?,
             best: g.alloc(4)?,
@@ -1359,7 +1384,7 @@ impl<'g> CudaQwen2<'g> {
                 _ => Some(g.host_alloc(self.dim * f)?),
             },
             graph: [None, None, None],
-            b: Some(self.batch_bufs(self.batch_for(max_ctx), max_ctx)?),
+            b: Some(self.batch_bufs(self.batch_for(att_ctx), att_ctx)?),
             samp: None,
         };
         // Stale KV rows are never read (attention stops at pos), but zeroed
@@ -1905,6 +1930,40 @@ impl<'g> CudaQwen2<'g> {
             })
             .collect();
         let need = 4 + 4 + nb + ids.iter().map(Vec::len).sum::<usize>();
+        self.samp_bufs(c, need, rows)?;
+        let s = c.samp.as_mut().unwrap();
+        let hb = s.host_s.bytes_mut()?;
+        let mut put = |i: usize, v: u32| hb[4 * i..4 * i + 4].copy_from_slice(&v.to_le_bytes());
+        s.params = params;
+        let (token, pos) = params.unwrap_or((0, 0));
+        put(0, token);
+        put(1, pos as u32);
+        // S, from u32 4 on.
+        put(4, spec.k as u32);
+        put(5, spec.penalty.to_bits());
+        put(6, nb as u32);
+        let mut off = 0;
+        put(7, 0);
+        let base = 8 + nb;
+        for (b, w) in ids.iter().enumerate() {
+            for (j, &id) in w.iter().enumerate() {
+                assert!((id as usize) < self.vocab, "token {id} out of range");
+                put(base + off + j, id);
+            }
+            off += w.len();
+            put(8 + b, off as u32);
+        }
+        s.host_s.copy_to(&s.s, 0, need * 4)
+    }
+
+    /// Make c's sampling scratch hold `need` u32s of params and S and
+    /// `rows` rows of candidates (at least).
+    pub(super) fn samp_bufs(
+        &self,
+        c: &mut CudaCache<'g>,
+        need: usize,
+        rows: usize,
+    ) -> Result<(), String> {
         let fits = c
             .samp
             .as_ref()
@@ -1931,29 +1990,7 @@ impl<'g> CudaQwen2<'g> {
                 host_out: g.host_alloc(rows * CAND_MAX * 8)?,
             });
         }
-        let s = c.samp.as_mut().unwrap();
-        let hb = s.host_s.bytes_mut()?;
-        let mut put = |i: usize, v: u32| hb[4 * i..4 * i + 4].copy_from_slice(&v.to_le_bytes());
-        s.params = params;
-        let (token, pos) = params.unwrap_or((0, 0));
-        put(0, token);
-        put(1, pos as u32);
-        // S, from u32 4 on.
-        put(4, spec.k as u32);
-        put(5, spec.penalty.to_bits());
-        put(6, nb as u32);
-        let mut off = 0;
-        put(7, 0);
-        let base = 8 + nb;
-        for (b, w) in ids.iter().enumerate() {
-            for (j, &id) in w.iter().enumerate() {
-                assert!((id as usize) < self.vocab, "token {id} out of range");
-                put(base + off + j, id);
-            }
-            off += w.len();
-            put(8 + b, off as u32);
-        }
-        s.host_s.copy_to(&s.s, 0, need * 4)
+        Ok(())
     }
 
     /// Enqueue sample.cu on `rows` rows of `n` logits at `logits` (`n`
@@ -2259,6 +2296,7 @@ mod batch;
 pub mod pipeline;
 #[cfg(test)]
 mod sample_tests;
+pub(crate) mod slots;
 pub(crate) mod stream;
 #[cfg(test)]
 pub(crate) mod tests;

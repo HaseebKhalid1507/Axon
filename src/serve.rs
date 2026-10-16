@@ -1,13 +1,16 @@
-//! `axon serve`: an OpenAI-compatible HTTP server (stage S1 of
-//! specs/r4-serve.md: one request at a time).
+//! `axon serve`: an OpenAI-compatible HTTP server (stages S1 and S2-lite
+//! of specs/r4-serve.md: on the GPU, many requests decode together,
+//! `engine.rs`; on the CPU or a split, one request at a time).
 //!
 //! Threads: the acceptor (the caller of `run`), one per connection (HTTP
 //! parsing, JSON, tokenizing the prompt, writing the response or the SSE
 //! stream), and the engine, which owns the model and its one KV cache (the
 //! GPU handle is `!Send`: everything that touches the backend stays on that
 //! thread). Connections hand the engine a `Job` over a channel and get
-//! `Event`s back on one of their own; the engine runs jobs in arrival order,
-//! each through `generate` exactly as `axon gen` / `axon chat` do.
+//! `Event`s back on one of their own; the engine runs jobs in arrival order:
+//! a job alone through `generate` exactly as `axon gen` / `axon chat` do,
+//! several together in batched steps over KV slots (`engine.rs`), each
+//! with the tokens it would get alone.
 //!
 //! The engine detokenizes and matches stop strings itself, so it stops at a
 //! stop string on the token that completes it and counts tokens exactly;
@@ -29,18 +32,21 @@
 //! it, instead of answering 500 forever while /health says ok.
 
 pub mod api;
+mod engine;
 pub mod http;
 pub mod tools;
 
 use crate::chat::{self, Framing, special};
 use crate::kv::KvType;
-use crate::lm::{Backend, BackendCache, Device, Lm};
+use crate::lm::{Backend, BackendCache, BatchLm, Device, Lm};
 use crate::sample::{SampleArgs, SampleCfg, Sampler};
 use crate::spec::PromptLookup;
 use crate::tokenizer::{Tokenizer, Utf8Stream};
 use crate::{GenOpts, generate};
 use api::{ApiError, Message, Prompt, Role, StopMatcher, Usage};
+use engine::{Batch, Seq};
 use http::{Conn, Peer, Request};
+use std::collections::VecDeque;
 use std::io::{self, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
@@ -53,6 +59,8 @@ use std::time::{Duration, Instant};
 pub const MAX_CONNS: usize = 256;
 /// Most requests waiting for the engine (default); more are answered 503.
 pub const MAX_QUEUE: usize = 128;
+/// Most requests decoded together on the GPU (default, `--parallel`).
+pub const PARALLEL: usize = 8;
 /// An idle keep-alive connection is closed after this long, and a request
 /// must arrive within it once started.
 const IDLE: Duration = Duration::from_secs(30);
@@ -98,6 +106,15 @@ pub struct Opts {
     pub cors: Option<String>,
     pub max_conns: usize,
     pub max_queue: usize,
+    /// Most requests decoded together (continuous batching, GPU only);
+    /// 1: one at a time.
+    pub parallel: usize,
+    /// `--parallel` was given (not the default): a backend that can't batch
+    /// is then an error, not a quiet one-at-a-time.
+    pub parallel_set: bool,
+    /// Positions per slot at most (None: the context; tests shrink the pool
+    /// with it).
+    pub slot_ctx: Option<usize>,
 }
 
 /// The chat framing `axon chat` uses (chat.rs: ChatML, or Llama 3's
@@ -370,31 +387,88 @@ struct Engine<'a> {
     generated: Arc<AtomicU64>,
 }
 
-impl Engine<'_> {
-    fn run(&mut self, job: Job) {
-        if job.cancel.load(Ordering::Relaxed) {
-            return;
-        }
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.job(&job)));
-        if let Err(p) = r {
-            // CUDA errors are sticky (every later job would fail too) and
-            // the cache's contents are unknown: exit (code 70, EX_SOFTWARE)
-            // for a supervisor to restart the server, rather than answer
-            // 500 forever while /health says ok.
+/// Run `f`; a panic in it (CUDA errors panic, and are sticky: every later
+/// job would fail too, and the caches' contents are unknown) exits the
+/// process (code 70, EX_SOFTWARE) for a supervisor to restart the server,
+/// rather than answer 500 forever while /health says ok.
+fn or_exit<T>(what: &str, f: impl FnOnce() -> T) -> T {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+        Ok(t) => t,
+        Err(p) => {
             let msg = p
                 .downcast_ref::<String>()
                 .map(String::as_str)
                 .or_else(|| p.downcast_ref::<&str>().copied())
                 .unwrap_or("?");
-            eprintln!(
-                "axon serve: the engine failed on request #{}: {msg}; exiting",
-                job.id
-            );
+            eprintln!("axon serve: the engine failed on {what}: {msg}; exiting");
             std::process::exit(70);
         }
     }
+}
 
-    fn job(&mut self, job: &Job) {
+/// The detokenizer and stop matcher of `job`'s reply.
+fn text_out<'t>(tok: &'t Tokenizer, job: &Job) -> TextOut<'t> {
+    TextOut {
+        tok,
+        utf8: Utf8Stream::default(),
+        think: job.think,
+        reasoning: false,
+        first: true,
+        strip_nl: false,
+        stop: StopMatcher::new(job.stops.clone()),
+    }
+}
+
+/// Whether `j` can run in a slot of `slot_ctx` positions (its prompt and
+/// all it may generate).
+fn fits_slot(j: &Job, slot_ctx: usize) -> bool {
+    j.n_gen > 0 && j.prompt.len() + j.n_gen <= slot_ctx
+}
+
+/// When a request running alone (`Engine::job`) hands over to the batch:
+/// as soon as a newly arrived request could join it.
+struct Handover<'r> {
+    jobs: &'r mpsc::Receiver<Job>,
+    waiting: &'r mut VecDeque<Job>,
+    /// The batch's positions per slot, if it has a free slot.
+    slot_ctx: Option<usize>,
+    /// Most requests to hold off the channel (the batch's slots).
+    room: usize,
+}
+
+impl Handover<'_> {
+    /// Take new requests (while none of those waiting fits a slot, up to
+    /// `room`); whether one of them could run in a slot, and so should not
+    /// wait for the one running alone.
+    fn due(&mut self) -> bool {
+        let Some(ctx) = self.slot_ctx else {
+            return false;
+        };
+        self.waiting.retain(|j| !j.cancel.load(Ordering::Relaxed));
+        while !self.waiting.iter().any(|j| fits_slot(j, ctx)) && self.waiting.len() < self.room {
+            match self.jobs.try_recv() {
+                Ok(j) => self.waiting.push_back(j),
+                Err(_) => break,
+            }
+        }
+        self.waiting.iter().any(|j| fits_slot(j, ctx))
+    }
+}
+
+impl<'a> Engine<'a> {
+    fn run(&mut self, job: Job, ho: Option<Handover>) -> Option<Seq<'a>> {
+        if job.cancel.load(Ordering::Relaxed) {
+            return None;
+        }
+        let id = job.id;
+        or_exit(&format!("request #{id}"), || self.job(job, ho))
+    }
+
+    /// Run `job` alone on the engine's cache (stage S1). With `ho`, it
+    /// hands over (returns its state, the cache holding its rows) when
+    /// another request arrives that could share a step with it.
+    fn job(&mut self, owned: Job, mut ho: Option<Handover>) -> Option<Seq<'a>> {
+        let job = &owned;
         let cancelled = || job.cancel.load(Ordering::Relaxed);
         let t0 = Instant::now();
         let p = &job.prompt;
@@ -411,13 +485,13 @@ impl Engine<'_> {
         let pb = self.net.prefill_batch();
         for batch in p[reuse..last].chunks(pb) {
             if cancelled() {
-                return;
+                return None;
             }
             self.net.feed_batch(batch, self.hist.len(), &mut self.cache);
             self.hist.extend_from_slice(batch);
         }
         if cancelled() {
-            return;
+            return None;
         }
         let logits = self.net.forward(p[last], last, &mut self.cache);
         self.hist.push(p[last]);
@@ -428,19 +502,19 @@ impl Engine<'_> {
             Some(d) => crate::draft::Drafter::Model(d),
             None => crate::draft::Drafter::Lookup(PromptLookup::new()),
         };
-        let mut out = TextOut {
-            tok: self.tok,
-            utf8: Utf8Stream::default(),
-            think: job.think,
-            reasoning: false,
-            first: true,
-            strip_nl: false,
-            stop: StopMatcher::new(job.stops.clone()),
-        };
+        let mut out = text_out(self.tok, job);
         let mut ids = Vec::new();
         let generated = &self.generated;
-        // Why the emit callback ended generation: a stop string, or the client left.
-        let (mut hit, mut gone) = (false, false);
+        // A request that fits a slot may hand over to the batch.
+        if ho
+            .as_ref()
+            .is_some_and(|h| h.slot_ctx.is_none_or(|c| p.len() + job.n_gen > c))
+        {
+            ho = None;
+        }
+        // Why the emit callback ended generation: a stop string, the client
+        // left, or another request came that it hands over for.
+        let (mut hit, mut gone, mut handed) = (false, false, false);
         let t1 = Instant::now();
         let res = generate(
             self.net,
@@ -471,9 +545,34 @@ impl Engine<'_> {
                 if hit || gone {
                     return Err(io::ErrorKind::Interrupted.into());
                 }
+                if ids.len() < job.n_gen && ho.as_mut().is_some_and(Handover::due) {
+                    handed = true;
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
                 Ok(())
             },
         );
+        if handed {
+            // Rows 0..hist.len() - 1 are in the cache: all but the token
+            // just picked, the batch's first row for it.
+            // The draft model (if any) is left as it is: the batch doesn't
+            // draft, and its next draft call matches its cached tokens
+            // against that request's history first (draft.rs).
+            let mut hist = p.clone();
+            hist.extend_from_slice(&ids);
+            self.hist = hist[..hist.len() - 1].to_vec();
+            return Some(Seq {
+                job: owned,
+                slot: 0,
+                hist,
+                ids,
+                sampler,
+                out,
+                cached: reuse,
+                prompt_ms,
+                t1,
+            });
+        }
         let decode_ms = t1.elapsed().as_secs_f64() * 1e3;
         // Every token but the last went through the model; the last too if
         // a stop token ended the reply (its pass picked the stop token).
@@ -485,7 +584,7 @@ impl Engine<'_> {
             && !gone
         {
             let _ = job.tx.send(Event::Error(e.to_string()));
-            return;
+            return None;
         }
         if gone {
             if self.log {
@@ -495,7 +594,7 @@ impl Engine<'_> {
                     ids.len()
                 );
             }
-            return;
+            return None;
         }
         let (content, reasoning) = out.finish();
         if !content.is_empty() || !reasoning.is_empty() {
@@ -526,6 +625,7 @@ impl Engine<'_> {
             );
         }
         let _ = job.tx.send(Event::Done { usage, finish });
+        None
     }
 }
 
@@ -589,12 +689,55 @@ fn engine(
     let drafts = dm.as_ref().map_or(String::new(), |d| {
         format!(", draft model {} K={}", d.name(), o.max_draft)
     });
-    let banner = format!("{kvs}, ctx {ctx}{drafts}");
+    // Continuous batching runs on one GPU holding every layer: the CPU, a
+    // CPU/GPU split and a multi-GPU pipeline (AXON_GPUS) serve one request
+    // at a time, and an explicit --parallel N there is refused.
+    if o.parallel > 1 && o.parallel_set && !matches!(net, Backend::Cuda(_)) {
+        crate::fail(&format!(
+            "--parallel {}: batching many requests needs the whole model on one GPU \
+             (--device cuda; not with --gpu-layers or several AXON_GPUS); this backend \
+             serves one request at a time (--parallel 1)",
+            o.parallel
+        ));
+    }
+    let mut batch = match o.parallel {
+        0 | 1 => None,
+        n => match pool_for(&net, n, o.slot_ctx.map_or(ctx, |c| c.min(ctx))) {
+            Ok((pool, slots, slot_ctx)) => Some(Batch::new(
+                &net,
+                pool,
+                slots,
+                slot_ctx,
+                o.log,
+                e.generated.clone(),
+            )),
+            Err(why) => {
+                if o.log && !matches!(net, Backend::Cpu(_)) {
+                    eprintln!("axon serve: one request at a time ({why})");
+                }
+                None
+            }
+        },
+    };
+    // With a pool, the context served is a slot's: every request fits one
+    // (the context_length_exceeded check and the default max_tokens use it).
+    let served = batch.as_ref().map_or(ctx, |b| b.ctx.min(ctx));
+    if served < ctx && o.log {
+        eprintln!(
+            "axon serve: {} slots of {served} positions fit in GPU memory: the context is {served} \
+             (--parallel 1 for {ctx}, or --kv q8)",
+            batch.as_ref().map_or(0, |b| b.slots)
+        );
+    }
+    let banner = match &batch {
+        Some(b) => format!("{kvs}, ctx {served}{drafts}, {} requests at once", b.slots),
+        None => format!("{kvs}, ctx {ctx}{drafts}, one request at a time"),
+    };
     if ready
         .send(Loaded {
             tok,
             template,
-            ctx,
+            ctx: served,
             max_token_bytes: tok.max_token_bytes(),
             banner,
         })
@@ -602,16 +745,118 @@ fn engine(
     {
         return;
     }
+    let mut waiting: VecDeque<Job> = VecDeque::new();
     loop {
-        match jobs.recv_timeout(Duration::from_millis(100)) {
-            Ok(job) => e.run(job),
-            Err(mpsc::RecvTimeoutError::Timeout) if !stop.load(Ordering::Relaxed) => {}
-            Err(_) => return,
+        if batch.as_ref().is_none_or(Batch::idle) && waiting.is_empty() {
+            match jobs.recv_timeout(Duration::from_millis(100)) {
+                Ok(job) => waiting.push_back(job),
+                Err(mpsc::RecvTimeoutError::Timeout) if !stop.load(Ordering::Relaxed) => continue,
+                Err(_) => return,
+            }
+        }
+        let Some(b) = batch.as_mut() else {
+            if let Some(job) = waiting.pop_front() {
+                e.run(job, None);
+            }
+            continue;
+        };
+        // Take requests off the channel only as far as slots can start
+        // them (and a few that can't, which wait to run alone): the bounded
+        // channel stays the queue (full: a 503).
+        waiting.retain(|j| !j.cancel.load(Ordering::Relaxed));
+        loop {
+            let fit = waiting.iter().filter(|j| fits_slot(j, b.ctx)).count();
+            if fit > b.free() || waiting.len() > b.slots {
+                break;
+            }
+            match jobs.try_recv() {
+                Ok(job) => waiting.push_back(job),
+                Err(_) => break,
+            }
+        }
+        // Admit the first request that fits a slot (its prefill a step of
+        // its own) if others run or wait; one alone runs the S1 way, as
+        // does one that fits no slot, once the batch is idle.
+        let first_fit = waiting.iter().position(|j| fits_slot(j, b.ctx));
+        if let Some(i) = first_fit
+            && b.has_free()
+            && (!b.idle() || waiting.len() > 1)
+        {
+            let job = waiting.remove(i).unwrap();
+            let out = text_out(e.tok, &job);
+            let tx = job.tx.clone();
+            if let Err(err) = or_exit("a prefill", || b.admit(job, out)) {
+                fatal(b, &err, Some(tx));
+            }
+        } else if b.idle() {
+            if let Some(job) = waiting.pop_front() {
+                let ho = Handover {
+                    jobs: &jobs,
+                    waiting: &mut waiting,
+                    slot_ctx: Some(b.ctx),
+                    room: b.slots,
+                };
+                if let Some(seq) = e.run(job, Some(ho)) {
+                    let tx = seq.job.tx.clone();
+                    if let Err(err) = or_exit("a hand-over", || b.adopt(seq, &e.cache)) {
+                        fatal(b, &err, Some(tx));
+                    }
+                }
+            }
+            continue;
+        }
+        if let Err(err) = or_exit("a batched step", || b.step()) {
+            fatal(b, &err, None);
         }
     }
 }
 
+/// A device error in the batch: every request in it (and `tx`'s) gets it,
+/// then the process exits (CUDA errors are sticky; see `or_exit`).
+fn fatal(b: &mut Batch, err: &str, tx: Option<mpsc::Sender<Event>>) -> ! {
+    eprintln!("axon serve: the engine failed: {err}; exiting");
+    b.fail_all(err);
+    if let Some(tx) = tx {
+        let _ = tx.send(Event::Error(err.to_string()));
+    }
+    std::process::exit(70);
+}
+
+/// Slots of continuous batching (`--parallel`) for a `ctx`-token server:
+/// `slots` sequences of up to ctx positions, or as many as fit if fewer (at
+/// least 2), else shorter slots (down to 1024 positions). The pool, its
+/// slots and positions per slot, or why there is none.
+fn pool_for<'a>(
+    net: &Backend<'a>,
+    slots: usize,
+    ctx: usize,
+) -> Result<(<Backend<'a> as BatchLm>::Pool, usize, usize), String> {
+    let Backend::Cuda(n) = net else {
+        return net.new_pool(slots, ctx).map(|p| (p, slots, ctx));
+    };
+    let free = n.free_bytes()? as usize;
+    // Room for the hand-over copy and other transient buffers.
+    let fits = |s: usize, c: usize| n.pool_bytes(s, c) + (256 << 20) <= free;
+    let mut c = ctx;
+    loop {
+        let s = (2..=slots).rev().find(|&s| fits(s, c));
+        if let Some(s) = s {
+            return net.new_pool(s, c).map(|p| (p, s, c));
+        }
+        if c <= 1024 {
+            return Err(format!(
+                "no GPU memory for {slots} KV slots of {c} positions; --parallel 1, a smaller --ctx or --kv q8"
+            ));
+        }
+        c = (c / 2).max(1024);
+    }
+}
+
 struct EngineOpts {
+    /// Requests decoded together at most (`--parallel`); 1: one at a time.
+    parallel: usize,
+    parallel_set: bool,
+    slot_ctx: Option<usize>,
     path: String,
     device: Device,
     gpu_layers: Option<usize>,
@@ -696,6 +941,9 @@ pub fn start(o: Opts) -> io::Result<Server> {
     let generated = Arc::new(AtomicU64::new(0));
     let queued = Arc::new(AtomicU64::new(0));
     let eo = EngineOpts {
+        parallel: o.parallel,
+        parallel_set: o.parallel_set,
+        slot_ctx: o.slot_ctx,
         generated: generated.clone(),
         path: o.path.clone(),
         device: o.device,
@@ -772,7 +1020,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
     }
     if o.log {
         eprintln!(
-            "axon serve: {model_id} ({}) on http://{addr}/v1 (one request at a time){}",
+            "axon serve: {model_id} ({}) on http://{addr}/v1{}",
             l.banner,
             if l.template.is_none() {
                 " (no chat tokens: /v1/completions only)"
@@ -1345,8 +1593,9 @@ fn stream(
 }
 
 const SERVE_USAGE: &str = "usage: axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--device D] \
-     [--gpu-layers N] [--kv T] [--draft K] [--draft-model PATH] [--alias NAME] [--max-tokens N] [--cors [ORIGIN]] \
-     [--max-conns N] [--max-queue N] [--no-think] [--think-inline] [--quiet] [sampling flags]";
+     [--gpu-layers N] [--kv T] [--draft K] [--draft-model PATH] [--alias NAME] [--max-tokens N] \
+     [--cors [ORIGIN]] [--max-conns N] [--max-queue N] [--parallel N] [--no-think] [--think-inline] \
+     [--quiet] [sampling flags]";
 
 /// `serve` subcommand: args = [axon, serve, model, flags...]
 pub fn run(args: &[String]) -> io::Result<()> {
@@ -1372,6 +1621,9 @@ pub fn run(args: &[String]) -> io::Result<()> {
         cors: None,
         max_conns: MAX_CONNS,
         max_queue: MAX_QUEUE,
+        parallel: PARALLEL,
+        parallel_set: false,
+        slot_ctx: None,
     };
     let mut k = None;
     let mut i = 3;
@@ -1410,7 +1662,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
             }
             "--host" | "--port" | "--ctx" | "--draft" | "--draft-model" | "--device"
             | "--gpu-layers" | "--kv" | "--alias" | "--max-tokens" | "--max-conns"
-            | "--max-queue" => {}
+            | "--max-queue" | "--parallel" => {}
             _ => crate::fail(&format!("unknown argument '{f}' for serve")),
         }
         let Some(v) = args.get(i + 1) else {
@@ -1439,6 +1691,10 @@ pub fn run(args: &[String]) -> io::Result<()> {
             "--max-tokens" => o.max_tokens = Some(whole(true)),
             "--max-conns" => o.max_conns = whole(true),
             "--max-queue" => o.max_queue = whole(true),
+            "--parallel" => {
+                o.parallel = whole(true);
+                o.parallel_set = true;
+            }
             _ => k = Some(whole(false)),
         }
         i += 2;

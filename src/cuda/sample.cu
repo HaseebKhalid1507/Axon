@@ -23,11 +23,17 @@
 //   S[0] = k (<= TK_MAX), S[1] = penalty (f32 bits), S[2] = rows,
 //   S[3 .. 3 + rows + 1] = offsets into ids of each row's penalty ids
 //   (distinct, sorted), ids from S[4 + rows].
+// Per-row penalties (the server's multi-sequence step, serve S2):
+//   S[1] = SP_PER_ROW, S[4 + rows .. 4 + 2 rows] = each row's penalty (f32
+//   bits), ids from S[4 + 2 rows]. k stays per launch: the rows of a step
+//   take the largest k, and a row wanting fewer keeps the first ones (the
+//   k best, best first, are a prefix of any larger k's).
 
 #define SP_K 0
 #define SP_PEN 1
 #define SP_ROWS 2
 #define SP_OFF 3
+#define SP_PER_ROW 0xffffffffu
 #define TK_SLICE 4096
 #define TK_THREADS 512
 #define TK_MAX 256
@@ -137,10 +143,11 @@ extern "C" __global__ void __launch_bounds__(TK_THREADS)
     for (int i = threadIdx.x; i < len; i += blockDim.x) sh.f[i] = xr[base + i];
     if (threadIdx.x == 0) slot = 0;
     __syncthreads();
-    const float p = __uint_as_float(S[SP_PEN]);
+    const int r = row0 + row;
+    const bool per_row = S[SP_PEN] == SP_PER_ROW;
+    const float p = __uint_as_float(per_row ? S[SP_OFF + S[SP_ROWS] + 1 + r] : S[SP_PEN]);
     if (p != 1.0f) {
-        const int r = row0 + row;
-        const u32* ids = S + SP_OFF + S[SP_ROWS] + 1;
+        const u32* ids = S + SP_OFF + S[SP_ROWS] + 1 + (per_row ? S[SP_ROWS] : 0);
         for (u32 j = S[SP_OFF + r] + threadIdx.x; j < S[SP_OFF + r + 1]; j += blockDim.x) {
             u32 i = ids[j] - (u32)base; // ids are distinct: one thread per logit
             if (i < (u32)len) {

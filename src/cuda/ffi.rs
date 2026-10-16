@@ -126,6 +126,8 @@ api! {
         fn cuMemFree_v2(CUdeviceptr) -> CUresult;
         fn cuMemcpyHtoDAsync_v2(CUdeviceptr, *const c_void, usize, CUstream) -> CUresult;
         fn cuMemcpyDtoHAsync_v2(*mut c_void, CUdeviceptr, usize, CUstream) -> CUresult;
+        // serve: a sequence's KV rows between caches.
+        fn cuMemcpyDtoDAsync_v2(CUdeviceptr, CUdeviceptr, usize, CUstream) -> CUresult;
         fn cuMemsetD8Async(CUdeviceptr, u8, usize, CUstream) -> CUresult;
         fn cuMemHostAlloc(*mut *mut c_void, usize, c_uint) -> CUresult;
         fn cuMemFreeHost(*mut c_void) -> CUresult;

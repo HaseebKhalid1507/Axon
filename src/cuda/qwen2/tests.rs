@@ -3866,6 +3866,7 @@ fn cuda_attn_bench() {
                             Arg::I32(nblk_max as i32),
                             po.arg(),
                             pm.arg(),
+                            Arg::Ptr(0),
                         ],
                     ),
                     3 => g.launch(
@@ -3884,6 +3885,7 @@ fn cuda_attn_bench() {
                             Arg::I32(0),
                             act.arg(),
                             Arg::U64(ast as u64),
+                            Arg::Ptr(0),
                         ],
                     ),
                     4 => g.launch(
@@ -4151,6 +4153,7 @@ fn gpu_batched_attention_matches_decode_bits() {
                             Arg::I32(nblk_max as i32),
                             bpo.arg(),
                             bpm.arg(),
+                            Arg::Ptr(0),
                         ],
                     ]
                     .concat(),
@@ -4172,6 +4175,7 @@ fn gpu_batched_attention_matches_decode_bits() {
                         want_k,
                         bact.arg(),
                         Arg::U64(ast as u64),
+                        Arg::Ptr(0),
                     ],
                 )
                 .unwrap();
@@ -4392,6 +4396,7 @@ fn gpu_split_attention_matches_decode_bits() {
                         Arg::I32(ms as i32),
                         bpo.arg(),
                         bpm.arg(),
+                        Arg::Ptr(0),
                     ],
                 ]
                 .concat();
@@ -4419,6 +4424,7 @@ fn gpu_split_attention_matches_decode_bits() {
                         want_k,
                         bact.arg(),
                         Arg::U64(ast as u64),
+                        Arg::Ptr(0),
                     ],
                 )
                 .unwrap();
@@ -4676,6 +4682,7 @@ fn gpu_q8_store_matches_rule() {
                         if shifted { shift_b.arg() } else { Arg::Ptr(0) },
                         Arg::Ptr(0), // no qwen3 k norm
                         Arg::F32(0.0),
+                        Arg::Ptr(0), // one sequence
                     ],
                 )
                 .unwrap();

@@ -1,7 +1,9 @@
 //! `axon serve` end to end: a server on an ephemeral port over the test
 //! model, driven over real sockets.
 
-use super::{MAX_CONNS, MAX_QUEUE, Opts, Server, Template, api::Message, api::Role, start};
+use super::{
+    MAX_CONNS, MAX_QUEUE, Opts, PARALLEL, Server, Template, api::Message, api::Role, start,
+};
 use crate::lm::{Device, Lm};
 use crate::sample::SampleArgs;
 use crate::tokenizer::{Tokenizer, Utf8Stream};
@@ -38,6 +40,9 @@ fn server_with(path: &str, device: Device, f: impl FnOnce(&mut Opts)) -> Server 
         cors: Some(ORIGIN.into()),
         max_conns: MAX_CONNS,
         max_queue: MAX_QUEUE,
+        parallel: PARALLEL,
+        parallel_set: false,
+        slot_ctx: None,
     };
     f(&mut o);
     start(o).expect("start the server")
@@ -1215,26 +1220,62 @@ fn serve_whole_response_cancelled_on_disconnect() {
     let Some(p) = crate::testutil::model_path() else {
         return;
     };
-    let s = server(p.to_str().unwrap(), Device::Cpu);
-    let body = json!({"prompt": "Count: 1, 2, 3,", "max_tokens": 1900, "temperature": 0,
-                      "repetition_penalty": 1.0})
-    .to_string();
-    let mut c = TcpStream::connect(s.addr).unwrap();
-    c.write_all(request("POST", "/v1/completions", &body, false).as_bytes())
-        .unwrap();
-    // Wait until it generates, then leave.
-    wait_for("it to start", || s.generated.load(Ordering::Relaxed) >= 5);
-    drop(c);
-    // The next request is served once the engine is free: right after the
-    // cancel, or (before) after all 1900 tokens. No clock involved.
-    let v = post(
-        s.addr,
-        "/v1/completions",
-        json!({"prompt": "Hi", "max_tokens": 1}),
-    );
-    assert_eq!(v.status, 200);
-    let g = s.generated.load(Ordering::Relaxed);
-    assert!(g < 1900, "ran to the end: {g} tokens");
+    let mut devices = vec![Device::Cpu];
+    if crate::testutil::gpu().is_some() {
+        devices.push(Device::Cuda);
+    }
+    for device in devices {
+        let s = server(p.to_str().unwrap(), device);
+        let body = json!({"prompt": "Count: 1, 2, 3,", "max_tokens": 1900, "temperature": 0,
+                          "repetition_penalty": 1.0})
+        .to_string();
+        let mut c = TcpStream::connect(s.addr).unwrap();
+        c.write_all(request("POST", "/v1/completions", &body, false).as_bytes())
+            .unwrap();
+        // Wait until it generates, then leave.
+        wait_for("it to start", || s.generated.load(Ordering::Relaxed) >= 5);
+        // On the GPU, a second request first: the first hands over to the
+        // batch, and the cancel must drop it from there (its slot freed).
+        let other = (device == Device::Cuda).then(|| {
+            let a = s.addr;
+            let g0 = s.generated.load(Ordering::Relaxed);
+            let h = std::thread::spawn(move || {
+                post(
+                    a,
+                    "/v1/completions",
+                    json!({"prompt": "Hello", "max_tokens": 64,
+                                                  "temperature": 0}),
+                )
+            });
+            wait_for("the batch", || {
+                s.generated.load(Ordering::Relaxed) >= g0 + 10
+            });
+            h
+        });
+        drop(c);
+        if let Some(h) = other {
+            assert_eq!(h.join().unwrap().status, 200);
+        }
+        // The next request is served once the engine is free (on the CPU:
+        // right after the cancel, or (before) after all 1900 tokens; on the
+        // GPU it shares the batch). No clock involved.
+        let v = post(
+            s.addr,
+            "/v1/completions",
+            json!({"prompt": "Hi", "max_tokens": 1}),
+        );
+        assert_eq!(v.status, 200);
+        if device == Device::Cuda {
+            // The cancelled request leaves the batch: generation stops.
+            wait_for("the batch to go idle", || {
+                let g = s.generated.load(Ordering::Relaxed);
+                std::thread::sleep(Duration::from_millis(500));
+                s.generated.load(Ordering::Relaxed) == g
+            });
+        }
+        let g = s.generated.load(Ordering::Relaxed);
+        assert!(g < 1900, "{device:?}: ran to the end: {g} tokens");
+    }
 }
 
 /// An error answered before the body is read (413 here) is followed by
@@ -1475,4 +1516,164 @@ fn serve_tool_calls() {
         assert!(cached * 10 >= p1 * 9, "reused {cached} of {p1}: {v2}");
         assert!(v2["usage"]["prompt_tokens"].as_u64().unwrap() > p1);
     }
+}
+
+/// Continuous batching (stage S2, GPU), `parallel` 8: requests sent
+/// together, greedy and seeded sampling mixed (penalties, top_k off: the
+/// host selects), get exactly the reply (content, reasoning, token count)
+/// each gets alone, on the f16 and q8 caches, qwen2.5 and qwen3 (thinking);
+/// also when the first one is already running alone (with drafting) as the
+/// others arrive, so it hands over to the batch partway; and with more
+/// requests than slots (later ones take freed slots).
+#[test]
+fn serve_batched_matches_solo() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let mut paths = vec![p];
+    if crate::testutil::qwen3_model().is_some() {
+        paths.push(std::env::var_os("AXON_TEST_QWEN3").map_or_else(
+            || std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(crate::testutil::QWEN3_MODEL),
+            std::path::PathBuf::from,
+        ));
+    }
+    let bodies = batch_bodies(true);
+    for path in &paths {
+        for kv in [crate::kv::KvType::F16, crate::kv::KvType::Q8] {
+            let s = server_with(path.to_str().unwrap(), Device::Cuda, |o| {
+                o.kv = kv;
+                o.parallel = 8;
+                o.max_draft = 3;
+            });
+            let what = format!("{} {kv:?}", path.display());
+            batched_vs_solo(s.addr, &bodies, &what);
+        }
+    }
+}
+
+/// The batch test's requests: 10 (more than 8 slots), mixed sampling;
+/// `max_tokens` on each (else none: up to the context).
+fn batch_bodies(max_tokens: bool) -> Vec<Value> {
+    [
+        ("Write a story about a fox.", 120, json!({"temperature": 0})),
+        (
+            "Name three colors.",
+            40,
+            json!({"temperature": 0.8, "seed": 1}),
+        ),
+        (
+            "Explain rain.",
+            64,
+            json!({"temperature": 0.9, "seed": 2, "top_k": 0}),
+        ),
+        (
+            "List five animals.",
+            50,
+            json!({"temperature": 0, "repetition_penalty": 1.2}),
+        ),
+        (
+            "Why is grass green?",
+            72,
+            json!({"temperature": 1.1, "seed": 3, "top_k": 20, "repetition_penalty": 1.1}),
+        ),
+        ("Count to twenty.", 90, json!({"temperature": 0})),
+        (
+            "What is 12 times 13?",
+            30,
+            json!({"temperature": 0.6, "seed": 4, "top_p": 0.8}),
+        ),
+        (
+            "Describe the moon.",
+            80,
+            json!({"temperature": 0.7, "seed": 5, "min_p": 0.05}),
+        ),
+        ("Say hello in French.", 20, json!({"temperature": 0})),
+        (
+            "Give a haiku about snow.",
+            48,
+            json!({"temperature": 1.0, "seed": 6, "top_k": 256}),
+        ),
+    ]
+    .into_iter()
+    .map(|(m, n, mut s)| {
+        s["messages"] = json!([{"role": "user", "content": m}]);
+        if max_tokens {
+            s["max_tokens"] = json!(n);
+        }
+        s
+    })
+    .collect()
+}
+
+/// Each of `bodies` alone, then all at once and staggered (the first one
+/// alone for 60 ms first): the same replies.
+fn batched_vs_solo(a: SocketAddr, bodies: &[Value], what: &str) {
+    let reply = |r: &Resp| -> (String, String, Value) {
+        assert_eq!(r.status, 200, "{}", r.body);
+        let v = r.json();
+        let m = &v["choices"][0]["message"];
+        (
+            m["content"].to_string(),
+            m["reasoning_content"].to_string(),
+            v["usage"]["completion_tokens"].clone(),
+        )
+    };
+    let solo: Vec<_> = bodies
+        .iter()
+        .map(|b| reply(&post(a, "/v1/chat/completions", b.clone())))
+        .collect();
+    for stagger in [0u64, 60] {
+        let together: Vec<_> = std::thread::scope(|sc| {
+            let hs: Vec<_> = bodies
+                .iter()
+                .enumerate()
+                .map(|(i, b)| {
+                    sc.spawn(move || {
+                        if i > 0 {
+                            std::thread::sleep(Duration::from_millis(stagger));
+                        }
+                        reply(&post(a, "/v1/chat/completions", b.clone()))
+                    })
+                })
+                .collect();
+            hs.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for (i, (t, s1)) in together.iter().zip(&solo).enumerate() {
+            assert_eq!(t, s1, "{what} stagger {stagger} ms: request {i}");
+        }
+    }
+}
+
+/// A pool whose slots are shorter than the context (`slot_ctx`, as when
+/// --parallel slots of --ctx don't fit): the context served is a slot's
+/// (/v1/models, context_length_exceeded past it), and requests without max_tokens (up to that
+/// context) batch with the same replies as alone.
+#[test]
+fn serve_shrunk_pool() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server_with(p.to_str().unwrap(), Device::Cuda, |o| {
+        o.ctx = Some(2048);
+        o.slot_ctx = Some(384);
+        o.parallel = 8;
+    });
+    let a = s.addr;
+    let v = call(a, "GET", "/v1/models", "").json();
+    assert_eq!(v["data"][0]["meta"]["n_ctx"], 384, "{v}");
+    let long = "word ".repeat(500);
+    let r = post(
+        a,
+        "/v1/chat/completions",
+        json!({"messages": [{"role": "user", "content": long}], "max_tokens": 4}),
+    );
+    assert_eq!(r.status, 400, "{}", r.body);
+    assert_eq!(r.json()["error"]["code"], "context_length_exceeded");
+    batched_vs_solo(a, &batch_bodies(false), "shrunk pool, no max_tokens");
 }

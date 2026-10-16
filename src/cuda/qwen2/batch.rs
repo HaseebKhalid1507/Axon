@@ -101,6 +101,9 @@ pub(crate) enum BatchIn<'x> {
     /// previous stage copied them there, `pipeline`); the RoPE table is
     /// made here, as for `Hidden`.
     Placed(usize),
+    /// This many tokens already in the batch scratch's `tokens` (a captured
+    /// pass, slots.rs: the copy is made before the graph runs).
+    Loaded(usize),
 }
 
 impl BatchIn<'_> {
@@ -108,7 +111,7 @@ impl BatchIn<'_> {
         match self {
             BatchIn::Tokens(t) => t.len(),
             BatchIn::Hidden(x) => x.len() / dim,
-            BatchIn::Resident(n) | BatchIn::Placed(n) => *n,
+            BatchIn::Resident(n) | BatchIn::Placed(n) | BatchIn::Loaded(n) => *n,
         }
     }
 
@@ -125,8 +128,35 @@ impl BatchIn<'_> {
                 assert!(r == (0..*n), "placed states: one pass");
                 BatchIn::Placed(*n)
             }
+            BatchIn::Loaded(n) => {
+                assert!(r == (0..*n), "loaded tokens: one pass");
+                BatchIn::Loaded(*n)
+            }
         }
     }
+}
+
+/// Where a pass's tokens go: one sequence, or (the server's decode step,
+/// serve S2) a row per token of many (prefill.cu "Placement").
+#[derive(Clone, Copy)]
+pub(crate) enum Place {
+    /// Positions start.., in the cache's rows base + start.. (a slot of a
+    /// pool starts at row base; a plain cache at 0).
+    Seq { start: usize, base: usize },
+    /// Token z at position rows[z].pos of the sequence whose rows start at
+    /// rows[z].base, those `RowAt`s in the scratch's `rp` (`upload_rows`
+    /// first: the copy stays out of a captured pass). A sequence's rows of a
+    /// pass in ascending positions; the attention of each row sees its
+    /// sequence's rows up to its own (those of the pass included), so the
+    /// per-query attention runs it.
+    Rows,
+}
+
+/// A token's place in a multi-sequence pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RowAt {
+    pub pos: u32,
+    pub base: u32,
 }
 
 /// Weight types of the tensor-core GEMMs (gemm2), in table order; the
@@ -337,6 +367,9 @@ pub(super) struct BatchBufs<'g> {
     nblk_max: usize,
     tokens: DevBuf<'g>,
     host_tokens: HostBuf<'g>,
+    /// `Place::Rows` of the pass: per token (position, cache row), u32s;
+    /// a pool's scratch only (`slots.rs`).
+    pub(super) rp: Option<(DevBuf<'g>, HostBuf<'g>)>,
     /// Incoming hidden states, [max][dim] (first > 0 only).
     host_x: Option<HostBuf<'g>>,
     /// Residual stream, [max][dim].
@@ -396,6 +429,7 @@ impl<'g> CudaQwen2<'g> {
             nblk_max: Self::nblk_max(max_ctx),
             tokens: g.alloc(max * 4)?,
             host_tokens: g.host_alloc(max * 4)?,
+            rp: None,
             host_x: match self.first {
                 0 => None,
                 _ => Some(g.host_alloc(max * self.dim * f)?),
@@ -582,13 +616,59 @@ impl<'g> CudaQwen2<'g> {
         row0: usize,
         on: &mut dyn FnMut(&'static str) -> Result<(), String>,
     ) -> Result<(), String> {
+        self.pass_at(
+            c,
+            input,
+            Place::Seq { start, base: 0 },
+            head,
+            None,
+            row0,
+            on,
+        )
+    }
+
+    /// `pass_with` at any `Place`. `split` Some((ng, ns)) with
+    /// `Head::Sample`: tokens z < ng take the greedy pick (into b.best, as
+    /// `Head::Argmax`), ng <= z < ns sample (candidates in out row z - ng,
+    /// penalty row `row0` + z - ng), and the rest only get their logits
+    /// (b.logits row z: a `logits_rows` scratch).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn pass_at(
+        &self,
+        c: &mut CudaCache<'g>,
+        input: BatchIn,
+        place: Place,
+        head: Head,
+        split: Option<(usize, usize)>,
+        row0: usize,
+        on: &mut dyn FnMut(&'static str) -> Result<(), String>,
+    ) -> Result<(), String> {
         let nb = input.len(self.dim);
         let dim = self.dim;
-        let kvas: Vec<Vec<Arg>> = (0..self.layers.len()).map(|l| self.kv_args(c, l)).collect();
+        let base = match place {
+            Place::Seq { base, .. } => base,
+            Place::Rows => 0,
+        };
+        let kvas: Vec<Vec<Arg>> = (0..self.layers.len())
+            .map(|l| self.kv_args_at(c, l, base))
+            .collect();
         let mode = c.mode;
         let b = c.b.as_mut().expect("a cache with batch scratch");
         assert!(nb > 0 && nb <= b.max);
+        let (ng, ns) = match (head, split) {
+            (Head::Sample, Some((ng, ns))) => {
+                assert!(ng <= ns && ns <= nb && (ns == nb || b.logits_rows));
+                (ng, ns)
+            }
+            (Head::Sample, None) => (0, nb),
+            (_, None) => (nb, nb),
+            _ => panic!("split rows: a sampling pass"),
+        };
         self.load_input(b, input)?;
+        let (start, rp) = match place {
+            Place::Seq { start, .. } => (start, Arg::Ptr(0)),
+            Place::Rows => (0, b.rp.as_ref().expect("a pool's scratch").0.arg()),
+        };
         let b = &*b;
         let (g, bf) = (self.gpu, &self.bf);
         let w = |mt: &Mat| self.weights.arg_at(mt.off);
@@ -599,7 +679,7 @@ impl<'g> CudaQwen2<'g> {
         // reads and writes (sizes in batch_bufs); positions start..start + nb
         // are in the cache (the callers check); matrices are whole in the arena.
         unsafe {
-            if let (Some(embd), BatchIn::Tokens(_)) = (&self.embd, input) {
+            if let (Some(embd), BatchIn::Tokens(_) | BatchIn::Loaded(_)) = (&self.embd, input) {
                 g.launch(
                     &bf.embed,
                     (dim.div_ceil(256) as u32, nb as u32, 1),
@@ -619,7 +699,7 @@ impl<'g> CudaQwen2<'g> {
             // Resident states come with their RoPE table (stream.rs
             // computed it for the same positions).
             if !matches!(input, BatchIn::Resident(_)) {
-                self.rope_b(b, nb, start)?;
+                self.rope_b(b, nb, start, rp)?;
                 on("rope")?;
             }
             for (li, l) in self.layers.iter().enumerate() {
@@ -632,6 +712,7 @@ impl<'g> CudaQwen2<'g> {
                     mode,
                     nb,
                     start,
+                    rp,
                     on,
                 )?;
             }
@@ -671,17 +752,23 @@ impl<'g> CudaQwen2<'g> {
                         lg,
                         v,
                     )?;
-                    if head == Head::Sample {
-                        let s = c.samp.as_ref().expect("samp_upload before a sampling pass");
-                        self.samp_tail(s, lg, v, nz, row0 + z0, z0, false)?;
-                    } else {
+                    // Rows z0..za greedy, za..zs sampled, zs.. logits only.
+                    let za = ng.clamp(z0, z0 + nz);
+                    let zs = ns.clamp(z0, z0 + nz);
+                    let lo = if b.logits_rows { z0 * v * 4 } else { 0 };
+                    if za > z0 {
                         g.launch(
                             &bf.argmax,
-                            (nz as u32, 1, 1),
+                            ((za - z0) as u32, 1, 1),
                             (1024, 1, 1),
                             0,
                             &[lg, Arg::I32(v as i32), b.best.arg_at(z0 * 4)],
                         )?;
+                    }
+                    if za < zs {
+                        let s = c.samp.as_ref().expect("samp_upload before a sampling pass");
+                        let ls = b.logits.arg_at(lo + (za - z0) * v * 4);
+                        self.samp_tail(s, ls, v, zs - za, row0 + za - ng, za - ng, false)?;
                     }
                     on("head")?;
                 }
@@ -714,21 +801,23 @@ impl<'g> CudaQwen2<'g> {
                 }
                 hx.copy_to(&b.x, 0, xs.len() * 4)?;
             }
-            BatchIn::Resident(_) => {}
+            BatchIn::Resident(_) | BatchIn::Loaded(_) => {}
             BatchIn::Placed(_) => assert!(self.first > 0, "takes tokens"),
         }
         Ok(())
     }
 
-    /// b.rope = the RoPE table of positions start..start + nb.
+    /// b.rope = the RoPE table of positions start..start + nb (rp: a
+    /// `Place::Rows` table's).
     ///
     /// # Safety
-    /// nb <= b.max.
+    /// nb <= b.max; rp null or nb (position, row) pairs.
     pub(super) unsafe fn rope_b(
         &self,
         b: &BatchBufs,
         nb: usize,
         start: usize,
+        rp: Arg,
     ) -> Result<(), String> {
         let hd = self.head_dim;
         // SAFETY: rope_table_b's signature; b.rope holds b.max >= nb rows.
@@ -743,6 +832,7 @@ impl<'g> CudaQwen2<'g> {
                     Arg::I32((hd / 2) as i32),
                     Arg::I32(start as i32),
                     b.rope.arg(),
+                    rp,
                 ],
             )
         }
@@ -803,12 +893,15 @@ impl<'g> CudaQwen2<'g> {
     /// the layer's cache at `kv` (`kv_args`: F16 K and V rows of kv_dim
     /// halves per position; Q8 int8 K and V rows and their scales) in
     /// format `mode`, which picks the attention kernels. b.rope holds the
-    /// batch's table. `on` runs after each step, by name.
+    /// batch's table. rp non-null: the tokens' (position, cache row) pairs
+    /// (`Place::Rows`, start unused), which takes the per-query attention.
+    /// `on` runs after each step, by name.
     ///
     /// # Safety
     /// nb <= b.max; the matrices are whole in `wts`, the vectors in `vecs`;
     /// the K and V buffers hold positions 0..start + nb, rows before start
-    /// written; all stay live until the work completes.
+    /// written (rp: each token's row, and its sequence's rows before it);
+    /// all stay live until the work completes.
     #[allow(clippy::too_many_arguments)]
     pub(super) unsafe fn layer(
         &self,
@@ -820,8 +913,10 @@ impl<'g> CudaQwen2<'g> {
         mode: CacheKv,
         nb: usize,
         start: usize,
+        rp: Arg,
         on: &mut dyn FnMut(&'static str) -> Result<(), String>,
     ) -> Result<(), String> {
+        let rows = !matches!(rp, Arg::Ptr(0));
         let (dim, hd, kvd, ffn) = (self.dim, self.head_dim, self.kv_dim(), self.ffn);
         let qd = self.q_dim;
         let (g, bf) = (self.gpu, &self.bf);
@@ -903,6 +998,7 @@ impl<'g> CudaQwen2<'g> {
                         b.q.arg(),
                         kc,
                         vc,
+                        rp,
                     ],
                 )?;
             } else {
@@ -922,6 +1018,7 @@ impl<'g> CudaQwen2<'g> {
                         b.q.arg(),
                         kc,
                         vc,
+                        rp,
                     ],
                 )?;
             }
@@ -937,6 +1034,7 @@ impl<'g> CudaQwen2<'g> {
                 args.push(bias(l.ksh));
                 args.push(bias(l.kn));
                 args.push(Arg::F32(self.eps));
+                args.push(rp);
                 g.launch(
                     &self.q8_fns(mode).store_b,
                     (self.n_kv_heads as u32, nbu, 1),
@@ -951,8 +1049,11 @@ impl<'g> CudaQwen2<'g> {
                 CacheKv::F16 => 0,
                 CacheKv::Q8 { group } => group,
             };
-            assert!(start + nb <= b.nblk_max * ATT_BLK, "batch past its cache");
-            if self.tc_attn && nb > att_per_query(hd) {
+            assert!(
+                rows || start + nb <= b.nblk_max * ATT_BLK,
+                "batch past its cache"
+            );
+            if self.tc_attn && nb > att_per_query(hd) && !rows {
                 // Flash attention, every query of the pass in one launch,
                 // y in place of q; then act (the decode kernels' bits,
                 // prefill.cu attn_fa_bt). Half-size blocks when the full
@@ -1038,6 +1139,7 @@ impl<'g> CudaQwen2<'g> {
                         Arg::I32(stride as i32),
                         b.part_o.arg(),
                         b.part_ml.arg(),
+                        rp,
                     ]);
                     g.launch(
                         f,
@@ -1063,6 +1165,7 @@ impl<'g> CudaQwen2<'g> {
                             want_k(qd),
                             b.act.arg(),
                             Arg::U64(ast as u64),
+                            rp,
                         ],
                     )?;
                     on("combine")?;
@@ -1325,6 +1428,17 @@ impl<'g> BatchBufs<'g> {
     /// (`BatchIn::Placed`).
     pub(super) fn x(&self) -> &DevBuf<'g> {
         &self.x
+    }
+
+    /// Enqueue the copy of `Place::Rows` into `rp` (a pool's scratch).
+    pub(super) fn upload_rows(&mut self, rows: &[RowAt]) -> Result<(), String> {
+        let (d, h) = self.rp.as_mut().expect("a pool's scratch: Place::Rows");
+        let hb = h.bytes_mut()?;
+        for (i, r) in rows.iter().enumerate() {
+            hb[8 * i..8 * i + 4].copy_from_slice(&r.pos.to_le_bytes());
+            hb[8 * i + 4..8 * i + 8].copy_from_slice(&(r.base + r.pos).to_le_bytes());
+        }
+        h.copy_to(d, 0, 8 * rows.len())
     }
 
     /// The first n greedy picks of the pass enqueued (waits for it).

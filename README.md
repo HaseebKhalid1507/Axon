@@ -118,8 +118,8 @@ axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K]
 sampling (gen, chat): --temp T --top-k K --top-p P --min-p P
           --repeat-penalty P --repeat-last-n N --seed S   (axon --help)
 axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--draft K] [--draft-model PATH]
-          [--device D]
-          [--gpu-layers N] [--kv T] [...]  OpenAI-compatible HTTP server (below)
+          [--device D] [--gpu-layers N] [--kv T] [--parallel N] [...]
+                                          OpenAI-compatible HTTP server (below)
 axon --help | --version
 ```
 
@@ -206,14 +206,28 @@ flags of `chat`, plus `--host` (default 127.0.0.1), `--port` (default 8080), `--
 (another model name to answer to), `--max-tokens N` (a cap on any request's generation;
 default: up to the context), `--cors [ORIGIN]` (answer CORS preflights and allow ORIGIN,
 default `*`, to call the server from web pages; off by default, so an arbitrary page can't
-use your local model), `--max-conns N` / `--max-queue N` (defaults 256 / 128), `--quiet`
+use your local model), `--max-conns N` / `--max-queue N` (defaults 256 / 128),
+`--parallel N` (requests decoded at once on the GPU, default 8; 1: one at a time), `--quiet`
 (no per-request line on stderr). `GET /health` is 503 until the model is loaded.
 
-- One request at a time: requests queue and run in arrival order, each exactly as `gen` /
-  `chat` would run it (greedy `/v1/completions` output is byte-identical to `axon gen`'s).
-  The KV cache carries over between requests: a prompt that starts with the previous
-  request's tokens (a chat follow-up resending the conversation, a shared system prompt)
-  only runs the model over the rest (`usage.prompt_tokens_details.cached_tokens`).
+- Many requests at once (`--device cuda`, the whole model on the GPU): up to `--parallel`
+  requests decode together, one token each per step over the model's weights (continuous
+  batching: a request joins as soon as a slot is free, its prompt prefilled as a step of its
+  own, and leaves when done). Each request has a KV slot of `--ctx` positions; if
+  `--parallel` slots don't fit in GPU memory the server takes fewer (at least 2), then shorter
+  ones (down to 1024 positions), and then serves a slot's context (longer prompts get a 400
+  `context_length_exceeded`; `--parallel 1` keeps the whole `--ctx`); it says so on stderr.
+  A request running alone takes the single-stream path (CUDA graphs, `--draft`), and
+  moves into the batch when a second one arrives. Every request's output is exactly what it
+  gets alone, whatever else runs with it (greedy, and sampled with a `seed`): the batched
+  kernels are bit-identical per row to the one-sequence ones. On the CPU, with
+  `--gpu-layers` (a CPU/GPU split) and with a multi-GPU pipeline (several `AXON_GPUS`) the
+  server runs one request at a time; an explicit `--parallel N` (N > 1) there is an error.
+- Requests run each exactly as `gen` / `chat` would run it (greedy `/v1/completions` output
+  is byte-identical to `axon gen`'s). The KV cache carries over between requests: a prompt
+  that starts with tokens a cache (or a slot) already holds (a chat follow-up resending the
+  conversation, a shared system prompt) only runs the model over the rest
+  (`usage.prompt_tokens_details.cached_tokens`).
 - Chat prompts are framed as `axon chat` frames them (ChatML, or Llama 3's template with its
   BOS and system block; Qwen2.5's default system message when none is given; Qwen3 earlier
   replies without their reasoning), and end on the same tokens (Llama 3: `<|eot_id|>` too).
