@@ -2080,12 +2080,141 @@ __device__ void attn_cmb_dev(const float* __restrict__ part_o, const float* __re
     }
 }
 
-extern "C" __global__ void attn_cmb(const float* __restrict__ part_o,
-                                    const float* __restrict__ part_ml, const u32* __restrict__ P,
-                                    int n, int hd, int nblk_max, int want_k,
-                                    u8* __restrict__ act, float* __restrict__ y) {
+// attn_cmb_dev for the decode step: grid n / 256 blocks of 256 threads.
+extern "C" __global__ void attn_cmb256(const float* __restrict__ part_o,
+                                       const float* __restrict__ part_ml,
+                                       const u32* __restrict__ P, int n, int hd, int nblk_max,
+                                       int want_k, u8* __restrict__ act, float* __restrict__ y) {
     PDL_START();
     attn_cmb_dev(part_o, part_ml, (int)P[P_POS] + 1, blockIdx.x, n, hd, nblk_max, want_k, act, y);
+}
+
+// The decode step's combine: attn_cmb_dev's fold and finalization (same
+// operations in the same order, so the same bits) with 64 outputs per
+// block of 64 threads - one 64-wide head or half a 128-wide one - for 4x
+// the blocks. Per super-chunk of 64 blocks the two warps first scan a
+// 32-block chunk each for the running maxima (inclusive, fmaxf: order-free,
+// so the chunks in parallel, chunk 1's carry being the max of everything
+// before it, give the values of one sequential scan) and work out alpha, w;
+// then every thread folds its O[d], and its head's L, over those blocks in
+// order, a plain chain of att_fold_o. Loads run ahead in registers (they
+// don't depend on the fold): o_b[d] two chunks of 32, (m_b, l_b) one
+// super-chunk. Outputs go to y
+// (f32); the last block of each 256-value group to finish (counter cnt[g],
+// zero on entry, zeroed again) quantizes the group by quant_warp from y, as
+// attn_cmb_dev does from shared memory. Grid n / 64 blocks of 64 threads.
+extern "C" __global__ void __launch_bounds__(64)
+attn_cmb(const float* __restrict__ part_o, const float* __restrict__ part_ml,
+         const u32* __restrict__ P, int n, int hd, int nblk_max, int want_k, u8* __restrict__ act,
+         float* y, unsigned* cnt) {
+    PDL_START();
+    constexpr int CH = 32, SC = 64;
+    __shared__ __align__(16) float aw[3][SC]; // alpha, w, l (in the scan: mb, max, l)
+    __shared__ float cm[2], mc;
+    __shared__ int last;
+    int np = (int)P[P_POS] + 1, nblk = (np + ATT_BLK - 1) / ATT_BLK;
+    int e = blockIdx.x * 64 + threadIdx.x, lane = threadIdx.x & 31, wid = threadIdx.x >> 5;
+    int h = blockIdx.x * 64 / hd;
+    const float* po = part_o + (u64)h * nblk_max * hd + e % hd;
+    const float* ml = part_ml + (u64)h * nblk_max * 2;
+    if (threadIdx.x == 0) mc = -INFINITY;
+    float O = 0.0f, L = 0.0f, pc[CH], pn[CH];
+#pragma unroll
+    for (int i = 0; i < CH; i++) {
+        pc[i] = i < nblk ? po[(u64)i * hd] : 0.0f;
+        pn[i] = CH + i < nblk ? po[(u64)(CH + i) * hd] : 0.0f;
+    }
+    float2 mlb = make_float2(-INFINITY, 0.0f); // this thread's block of the super-chunk
+    if ((int)threadIdx.x < nblk) mlb = *(const float2*)(ml + 2 * threadIdx.x);
+    for (int c0 = 0; c0 < nblk; c0 += CH) {
+        int o = c0 % SC;
+        if (o == 0) {
+            int i = wid * CH + lane, b = c0 + SC + i;
+            __syncthreads(); // the last super-chunk's fold is done with aw; mc
+            float mb = mlb.x, lb = mlb.y;
+            mlb = make_float2(-INFINITY, 0.0f); // the next super-chunk's
+            if (b < nblk) mlb = *(const float2*)(ml + 2 * b);
+            float v = mb; // inclusive max scan
+#pragma unroll
+            for (int k = 1; k < 32; k <<= 1) {
+                float t = __shfl_up_sync(0xffffffffu, v, k);
+                if (lane >= k) v = fmaxf(v, t);
+            }
+            aw[1][i] = v;
+            aw[2][i] = lb;
+            if (lane == 31) cm[wid] = v;
+            __syncthreads();
+            float carry = wid ? fmaxf(mc, cm[0]) : mc;
+            float prev = lane == 0 ? carry : fmaxf(carry, aw[1][i - 1]);
+            __syncwarp();
+            float mn, alpha, w;
+            att_fold_w(prev, mb, &mn, &alpha, &w);
+            aw[0][i] = alpha;
+            aw[1][i] = w;
+            __syncthreads();
+            // The carry into the next super-chunk (read after two more
+            // barriers).
+            if (threadIdx.x == 0) mc = fmaxf(fmaxf(mc, cm[0]), cm[1]);
+        }
+        // The partials two chunks on, then this chunk's fold.
+        float pf[CH];
+#pragma unroll
+        for (int i = 0; i < CH; i++) {
+            int b = c0 + 2 * CH + i;
+            pf[i] = b < nblk ? po[(u64)b * hd] : 0.0f;
+        }
+        int nc = min(CH, nblk - c0);
+        if (nc == CH) {
+#pragma unroll
+            for (int i = 0; i < CH; i += 4) {
+                float4 al = *(const float4*)(&aw[0][o + i]), w = *(const float4*)(&aw[1][o + i]);
+                float4 lb = *(const float4*)(&aw[2][o + i]);
+                O = att_fold_o(O, pc[i], al.x, w.x);
+                L = att_fold_o(L, lb.x, al.x, w.x);
+                O = att_fold_o(O, pc[i + 1], al.y, w.y);
+                L = att_fold_o(L, lb.y, al.y, w.y);
+                O = att_fold_o(O, pc[i + 2], al.z, w.z);
+                L = att_fold_o(L, lb.z, al.z, w.z);
+                O = att_fold_o(O, pc[i + 3], al.w, w.w);
+                L = att_fold_o(L, lb.w, al.w, w.w);
+            }
+        } else {
+#pragma unroll
+            for (int i = 0; i < CH; i++) {
+                if (i < nc) {
+                    float alpha = aw[0][o + i], w = aw[1][o + i];
+                    O = att_fold_o(O, pc[i], alpha, w);
+                    L = att_fold_o(L, aw[2][o + i], alpha, w);
+                }
+            }
+        }
+#pragma unroll
+        for (int i = 0; i < CH; i++) {
+            pc[i] = pn[i];
+            pn[i] = pf[i];
+        }
+    }
+    y[e] = __fdiv_rn(O, L);
+    // The group's last block quantizes it (threadFenceReduction order: the
+    // outputs are visible before the count that makes a block the last).
+    int g = e / 256;
+    __threadfence();
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        unsigned k = (unsigned)min(256, n - g * 256) / 64;
+        last = atomicAdd(cnt + g, 1u) == k - 1;
+    }
+    __syncthreads();
+    if (last && wid == 0) {
+        __threadfence();
+        float v[8];
+        for (int i = 0; i < 8; i++) {
+            int x = g * 256 + lane * 8 + i;
+            v[i] = x < n ? __ldcg(y + x) : 0.0f;
+        }
+        quant_warp(v, n, g, act, want_k);
+        if (lane == 0) cnt[g] = 0;
+    }
 }
 
 // Index of the largest of x[0..n): the last of equal maxima, NaN never

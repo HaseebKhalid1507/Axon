@@ -569,6 +569,39 @@ fn gpu_ext_module_same_bits_old_types() {
     }
 }
 
+/// The decode step's combine (decode.cu attn_cmb): bufs = (part_o,
+/// part_ml, params), dims = (outputs, head size, the partials' stride);
+/// quantized into act (want_k when the outputs are whole 256s), f32 into y.
+fn launch_cmb(g: &Gpu, f: &Func, bufs: [&DevBuf; 3], dims: [usize; 3], act: &DevBuf, y: &DevBuf) {
+    let [dim, hd, stride] = dims;
+    let cnt = g.alloc(dim.div_ceil(256) * 4).unwrap();
+    cnt.zero().unwrap();
+    // SAFETY: decode.cu attn_cmb's signature; the partials hold dim / hd
+    // heads of `stride` blocks, act and y dim outputs.
+    unsafe {
+        g.launch(
+            f,
+            ((dim / 64) as u32, 1, 1),
+            (64, 1, 1),
+            0,
+            &[
+                bufs[0].arg(),
+                bufs[1].arg(),
+                bufs[2].arg(),
+                Arg::I32(dim as i32),
+                Arg::I32(hd as i32),
+                Arg::I32(stride as i32),
+                Arg::I32(dim.is_multiple_of(256) as i32),
+                act.arg(),
+                y.arg(),
+                cnt.arg(),
+            ],
+        )
+        .unwrap();
+    }
+    g.sync().unwrap();
+}
+
 /// Bits of a vector, for exact comparisons.
 fn bits(v: &[f32]) -> Vec<u32> {
     v.iter().map(|x| x.to_bits()).collect()
@@ -797,6 +830,7 @@ fn gpu_tc_attention_close_to_f64() {
         return;
     }
     let fc = km.function("attn_cmb").unwrap();
+    let fc256 = km.function("attn_cmb256").unwrap();
     let mut rng = Rng(4243);
     let mut worst = 0f64;
     for (nh, nkv, hd) in [(14, 2, 64), (12, 2, 128), (16, 2, 128), (28, 4, 128)] {
@@ -834,6 +868,7 @@ fn gpu_tc_attention_close_to_f64() {
             let po = g.alloc(nh * nblk_max * hd * 4).unwrap();
             let pml = g.alloc(nh * nblk_max * 2 * 4).unwrap();
             let act = g.alloc(act_bytes(dim)).unwrap();
+            act.zero().unwrap();
             let out = g.alloc(dim * 4).unwrap();
             // SAFETY: decode.cu's signatures; buffers sized as `try_cache`
             // sizes them, K/V with np rows.
@@ -863,8 +898,24 @@ fn gpu_tc_attention_close_to_f64() {
                     ],
                 )
                 .unwrap();
-                g.launch(
+                launch_cmb(
+                    &g,
                     &fc,
+                    [&po, &pml, &params],
+                    [dim, hd, nblk_max],
+                    &act,
+                    &out,
+                );
+            }
+            // attn_cmb256 (the decode step's combine below 8192 positions)
+            // on the same partials: the same bits, f32 and quantized.
+            let act256 = g.alloc(act.len()).unwrap();
+            act256.zero().unwrap();
+            let out256 = g.alloc(out.len()).unwrap();
+            // SAFETY: decode.cu attn_cmb256's signature, buffers as above.
+            unsafe {
+                g.launch(
+                    &fc256,
                     (dim.div_ceil(256) as u32, 1, 1),
                     (256, 1, 1),
                     0,
@@ -876,13 +927,22 @@ fn gpu_tc_attention_close_to_f64() {
                         Arg::I32(hd as i32),
                         Arg::I32(nblk_max as i32),
                         Arg::I32(dim.is_multiple_of(256) as i32),
-                        act.arg(),
-                        out.arg(),
+                        act256.arg(),
+                        out256.arg(),
                     ],
                 )
                 .unwrap();
             }
             let got: Vec<f32> = out.read().unwrap();
+            assert_eq!(
+                bits(&got),
+                bits(&out256.read::<f32>().unwrap()),
+                "attn_cmb vs attn_cmb256, hd {hd} np {np}"
+            );
+            assert!(
+                act.read::<u8>().unwrap() == act256.read::<u8>().unwrap(),
+                "attn_cmb vs attn_cmb256 quantized, hd {hd} np {np}"
+            );
             let f = |h: u16| quant::f16_to_f32(h) as f64;
             let mut de = 0f64;
             for h in 0..nh {
@@ -1606,9 +1666,23 @@ fn cuda_profile() {
     let path = crate::testutil::model_path().unwrap();
     let m = crate::gguf::load_with(path.to_str().unwrap(), Some(false)).unwrap();
     let km = Kernels::module(&g).unwrap();
-    let net = CudaQwen2::new(&g, &km, &m, 4200).unwrap();
-    let mut c = net.new_cache(4200);
-    for pos in [8usize, 1000, 4100] {
+    // AXON_PROF_CTX: the cache size (default 4200); AXON_PROF_POS: the
+    // positions, comma-separated (default 8,1000,4100).
+    let ctx: usize = std::env::var("AXON_PROF_CTX").map_or(4200, |v| v.parse().unwrap());
+    let poss: Vec<usize> = std::env::var("AXON_PROF_POS").map_or(vec![8, 1000, 4100], |v| {
+        v.split(',').map(|x| x.trim().parse().unwrap()).collect()
+    });
+    let mut net = CudaQwen2::new(&g, &km, &m, ctx).unwrap();
+    // AXON_PROF_KV=q8: the q8 cache.
+    if std::env::var("AXON_PROF_KV").is_ok_and(|v| v == "q8") {
+        net.kv = CacheKv::Q8 { group: 0 };
+    }
+    let mut c = net.new_cache(ctx);
+    for pos in poss {
+        assert!(
+            pos + 40 <= ctx,
+            "AXON_PROF_POS {pos} past AXON_PROF_CTX {ctx}"
+        );
         // Warm up (and fill the cache up to pos, cheaply: positions past
         // what was written read zeros, which is fine for timing).
         let _ = net.profile(&mut c, 100, pos).unwrap();
@@ -3430,6 +3504,142 @@ fn verify_bits(m: &Model, name: &str, kv: CacheKv) {
     );
 }
 
+/// Decode attention at long positions (many ATT_BLK blocks per kv head
+/// and many partials per head in attn_cmb): a 32768 cache filled by
+/// feed_batch with random tokens, then at each position p of `at` the
+/// decode step's logits (`forward`, graph and not) against the batched
+/// pass's (128 tokens ending at p: attn_fa_b, the oracle), bit for bit.
+/// On a GPU without room for 32768 positions, 16384 and the positions
+/// below it; without room for that either, skipped.
+fn decode_attention_long(m: &Model, name: &str, kv: CacheKv, at: &[usize]) {
+    const W: usize = 128;
+    let g = crate::testutil::gpu().unwrap();
+    let km = Kernels::module(&g).unwrap();
+    let made = [32768, 16384].into_iter().find_map(|ctx| {
+        let mut net = CudaQwen2::new(&g, &km, m, ctx).ok()?;
+        net.kv = kv;
+        let c = net.try_cache(ctx).ok()?;
+        Some((net, c, ctx))
+    });
+    let Some((mut net, mut c, ctx)) = made else {
+        eprintln!("skipping {name} {kv:?}: no room for a 16384-position cache");
+        return;
+    };
+    let at: Vec<usize> = at.iter().copied().filter(|&p| p < ctx).collect();
+    if ctx < 32768 {
+        eprintln!("{name} {kv:?}: a {ctx}-position cache (no room for 32768): pos {at:?}");
+    }
+    let last = *at.iter().max().unwrap();
+    let mut rng = Rng(0x5eed_1a7e);
+    let ids: Vec<u32> = (0..=last).map(|_| (rng.next() % 20000) as u32).collect();
+    let pb = net.prefill_batch();
+    for (i, ch) in ids[..last].chunks(pb).enumerate() {
+        net.feed_batch(ch, i * pb, &mut c);
+    }
+    for &p in &at {
+        let lo = p + 1 - W;
+        let want = net.prefill_logits(&ids[lo..=p], lo, &mut c);
+        for graphs in [true, false] {
+            net.graphs = graphs;
+            let got = net.forward(ids[p], p, &mut c);
+            assert_eq!(
+                bits(&got),
+                bits(&want),
+                "{name} {kv:?}: decode logits at pos {p} (graphs {graphs})"
+            );
+        }
+        // attn_blk's grid: any number of warps per kv head, the same bits.
+        net.graphs = false;
+        for gy in [1, 7, 10_000] {
+            net.att_gy = gy;
+            let got = net.forward(ids[p], p, &mut c);
+            assert_eq!(
+                bits(&got),
+                bits(&want),
+                "{name} {kv:?}: pos {p}, grid y {gy}"
+            );
+        }
+        net.att_gy = 0;
+        net.graphs = true;
+        eprintln!("{name} {kv:?}: decode == batched (attn_fa_b) logits at pos {p}");
+    }
+}
+
+/// The decode step's combine depends on the position (attn_cmb past 8192,
+/// attn_cmb256 before), its graphs on the cache: a 32768 cache at short
+/// positions, and caches of 8192 and 8193 positions at 8191, give the logit
+/// bits of a small cache; 8193's step at 8192 (attn_cmb) matches the batched
+/// pass.
+#[test]
+fn gpu_decode_cache_size_same_bits() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = crate::testutil::model() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    // The big cache: 32768 positions, or 16384 on a small GPU.
+    let Some((net, big)) = [32768, 16384].into_iter().find_map(|ctx| {
+        let net = CudaQwen2::new(&g, &km, &m, ctx).ok()?;
+        net.try_cache(ctx).ok()?;
+        Some((net, ctx))
+    }) else {
+        eprintln!("skipping: no room for a 16384-position cache");
+        return;
+    };
+    let mut rng = Rng(0x0c7c_5123);
+    let ids: Vec<u32> = (0..8193).map(|_| (rng.next() % 20000) as u32).collect();
+    // Steps at `at` in a cache of each size (feed_batch up to each).
+    let run = |ctx: usize, at: &[usize]| -> Vec<Vec<u32>> {
+        let mut c = net.new_cache(ctx);
+        let mut pos = 0;
+        let mut out = Vec::new();
+        for &p in at {
+            if p > pos {
+                net.feed_batch(&ids[pos..p], pos, &mut c);
+            }
+            out.push(bits(&net.forward(ids[p], p, &mut c)));
+            pos = p + 1;
+        }
+        out
+    };
+    let short = [8, 100, 4000];
+    assert_eq!(
+        run(big, &short),
+        run(4001, &short),
+        "{big} vs 4001 cache, pos {short:?}"
+    );
+    let a = run(8192, &[8191]);
+    let b = run(8193, &[8191, 8192]);
+    assert_eq!(a[0], b[0], "8192 vs 8193 cache at pos 8191");
+    let mut c = net.new_cache(8193);
+    net.feed_batch(&ids[..8192 - 127], 0, &mut c);
+    let want = net.prefill_logits(&ids[8192 - 127..=8192], 8192 - 127, &mut c);
+    assert_eq!(b[1], bits(&want), "8193 cache at pos 8192 vs batched");
+    eprintln!("decode bits independent of the cache size ({big}/4001/8192/8193)");
+}
+
+#[test]
+fn gpu_decode_attention_long() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    if let Some(m) = crate::testutil::model() {
+        for kv in [CacheKv::F16, CacheKv::Q8 { group: 0 }] {
+            // 8191: the last step by attn_cmb256, 8192 the first by attn_cmb.
+            decode_attention_long(&m, "0.5B", kv, &[8191, 8192, 16383, 32511]);
+        }
+        decode_attention_long(&m, "0.5B", CacheKv::Q8 { group: 32 }, &[32511]);
+    }
+    // qwen3: the q/k norms in the decode attention (kpos, 128-wide heads).
+    if let Some(m) = qwen3_mapped() {
+        for kv in [CacheKv::F16, CacheKv::Q8 { group: 0 }] {
+            decode_attention_long(&m, "qwen3 0.6B", kv, &[8191]);
+        }
+    }
+}
+
 #[test]
 fn gpu_verify_matches_forward_argmax_0_5b() {
     let Some(_) = crate::testutil::gpu() else {
@@ -3799,6 +4009,9 @@ fn cuda_attn_bench() {
     let ast = act_stride_t(dim);
     let act = g.alloc(nz * ast).unwrap();
     let params = g.upload(&[0u32, (ctx - 1) as u32, 0, 0]).unwrap();
+    let ycmb = g.alloc(dim * 4).unwrap();
+    let cnt = g.alloc(dim.div_ceil(256) * 4).unwrap();
+    cnt.zero().unwrap();
     let names = [
         format!("attn_fa_b_{hd}"),
         "quantize_b".to_string(),
@@ -3930,10 +4143,11 @@ fn cuda_attn_bench() {
                             Arg::Ptr(0),
                         ],
                     ),
+                    // attn_cmb: 64 outputs per block, y and the counters.
                     _ => g.launch(
                         f,
-                        (dim.div_ceil(256) as u32, 1, 1),
-                        (256, 1, 1),
+                        ((dim / 64) as u32, 1, 1),
+                        (64, 1, 1),
                         0,
                         &[
                             po.arg(),
@@ -3944,7 +4158,8 @@ fn cuda_attn_bench() {
                             Arg::I32(nblk_max as i32),
                             Arg::I32(0),
                             act.arg(),
-                            Arg::Ptr(0),
+                            ycmb.arg(),
+                            cnt.arg(),
                         ],
                     ),
                 }
@@ -4249,24 +4464,7 @@ fn gpu_batched_attention_matches_decode_bits() {
                         .concat(),
                     )
                     .unwrap();
-                    g.launch(
-                        &fc,
-                        (dim.div_ceil(256) as u32, 1, 1),
-                        (256, 1, 1),
-                        0,
-                        &[
-                            po.arg(),
-                            pm.arg(),
-                            params.arg(),
-                            Arg::I32(dim as i32),
-                            Arg::I32(hd as i32),
-                            Arg::I32(nblk_max as i32),
-                            want_k,
-                            act.arg(),
-                            y.arg(),
-                        ],
-                    )
-                    .unwrap();
+                    launch_cmb(&g, &fc, [&po, &pm, &params], [dim, hd, nblk_max], &act, &y);
                 }
                 let (wy, wact): (Vec<f32>, Vec<u8>) = (y.read().unwrap(), act.read().unwrap());
                 assert!(
@@ -5155,24 +5353,28 @@ fn gpu_q8_attention_matches_reference() {
                             ],
                         )
                         .unwrap();
-                        g.launch(
-                            &fc,
-                            (dim.div_ceil(256) as u32, 1, 1),
-                            (256, 1, 1),
-                            0,
-                            &[
-                                po.arg(),
-                                pml.arg(),
-                                params.arg(),
-                                Arg::I32(dim as i32),
-                                Arg::I32(hd as i32),
-                                Arg::I32(parts as i32),
-                                Arg::I32(dim.is_multiple_of(256) as i32),
-                                act.arg(),
-                                out.arg(),
-                            ],
-                        )
-                        .unwrap();
+                        if tc {
+                            launch_cmb(&g, &fc, [&po, &pml, &params], [dim, hd, parts], &act, &out);
+                        } else {
+                            g.launch(
+                                &fc,
+                                (dim.div_ceil(256) as u32, 1, 1),
+                                (256, 1, 1),
+                                0,
+                                &[
+                                    po.arg(),
+                                    pml.arg(),
+                                    params.arg(),
+                                    Arg::I32(dim as i32),
+                                    Arg::I32(hd as i32),
+                                    Arg::I32(parts as i32),
+                                    Arg::I32(dim.is_multiple_of(256) as i32),
+                                    act.arg(),
+                                    out.arg(),
+                                ],
+                            )
+                            .unwrap();
+                        }
                     }
                     let got: Vec<f32> = out.read().unwrap();
                     // The kernel's store of row np - 1 is the rule's.
@@ -6432,5 +6634,56 @@ fn gpu_gemma3_matches_reference_forward() {
             assert!(d < 1.0, "window {window:?}: {d}");
             assert_eq!(top1(&d64), top1(&want[0]), "window {window:?}: top token");
         }
+    }
+}
+
+/// Decode tok/s of greedy steps (forward_argmax, as `gen`) at short or long
+/// positions in a cache of any size, which `gen` (cache = prompt + n) can't
+/// make. A benchmark: `--ignored`, the model from AXON_TEST_MODEL;
+/// AXON_TG_CTX (32768), AXON_TG_POS (8,500: the first step's position),
+/// AXON_TG_N (128 steps), AXON_TG_KV=q8.
+#[test]
+#[ignore]
+fn cuda_decode_tg() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
+    let ctx: usize = env("AXON_TG_CTX", "32768").parse().unwrap();
+    let n: usize = env("AXON_TG_N", "128").parse().unwrap();
+    let poss: Vec<usize> = env("AXON_TG_POS", "8,500")
+        .split(',')
+        .map(|x| x.trim().parse().unwrap())
+        .collect();
+    let path = crate::testutil::model_path().unwrap();
+    let m = crate::gguf::load_with(path.to_str().unwrap(), Some(false)).unwrap();
+    let km = Kernels::module(&g).unwrap();
+    let mut net = CudaQwen2::new(&g, &km, &m, ctx).unwrap();
+    if env("AXON_TG_KV", "f16") == "q8" {
+        net.kv = CacheKv::Q8 { group: 0 };
+    }
+    let mut c = net.new_cache(ctx);
+    let mut rng = Rng(77);
+    let mut pos = 0;
+    for p in poss {
+        assert!(p >= pos && p + n + 1 < ctx, "AXON_TG_POS {p}");
+        if p > pos {
+            let ids: Vec<u32> = (pos..p).map(|_| (rng.next() % 20000) as u32).collect();
+            net.feed_batch(&ids, pos, &mut c);
+        }
+        // One step outside the timing (graph capture), then n.
+        let mut t = net.forward_argmax(100, p, &mut c);
+        let t0 = std::time::Instant::now();
+        for i in 1..=n {
+            t = net.forward_argmax(t, p + i, &mut c);
+        }
+        let s = t0.elapsed().as_secs_f64();
+        eprintln!(
+            "TG ctx {ctx} pos {p} kv {:?}: {n} steps in {:.4} s ({:.2} tok/s)",
+            net.kv,
+            s,
+            n as f64 / s
+        );
+        pos = p + n + 1;
     }
 }
