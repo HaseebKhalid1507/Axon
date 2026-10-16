@@ -19,7 +19,9 @@
 //! | `max_tokens` / `max_completion_tokens` | the generation limit (default: up to the context) |
 //! | `stop` (string or up to 16 strings) | stop strings, matched on the output text and not returned |
 //! | `n` | 1 only |
-//! | `logprobs`, `tools`, `logit_bias`, `response_format` other than text, `echo`, `suffix`, `best_of` > 1 | refused (400) |
+//! | `tools`, `tool_choice` (chat) | tool calling: tools.rs (`required` and a named function prefill a call) |
+//! | `parallel_tool_calls`, `store`, `reasoning_effort`, `prompt_cache_key`, `user` | accepted and ignored |
+//! | `logprobs`, `functions`, `tools` on /v1/completions, `logit_bias`, `response_format` other than text, `echo`, `suffix`, `best_of` > 1 | refused (400) |
 
 use crate::sample::{SampleArgs, SampleCfg};
 use serde_json::{Map, Value};
@@ -116,6 +118,8 @@ pub struct GenReq {
     /// The request's sampling fields (None: the server's default).
     pub sample: SampleArgs,
     pub stop: Vec<String>,
+    /// Chat with tools or tool turns (None: an ordinary chat, rendered as before).
+    pub tools: Option<super::tools::ToolReq>,
 }
 
 /// Most stop strings per request.
@@ -204,6 +208,7 @@ pub fn parse(body: &[u8], chat: bool) -> Result<GenReq, ApiError> {
     };
     let o = &o;
 
+    let mut tools = None;
     let prompt = if chat {
         let Some(Value::Array(msgs)) = get(o, "messages") else {
             return Err(ApiError::bad("messages", "'messages' must be an array"));
@@ -211,12 +216,15 @@ pub fn parse(body: &[u8], chat: bool) -> Result<GenReq, ApiError> {
         if msgs.is_empty() {
             return Err(ApiError::bad("messages", "'messages' is empty"));
         }
+        tools = super::tools::parse(body)?;
         let mut messages = Vec::with_capacity(msgs.len());
         for m in msgs {
             let role = match m.get("role").and_then(Value::as_str) {
                 Some("system" | "developer") => Role::System,
                 Some("user") => Role::User,
                 Some("assistant") => Role::Assistant,
+                // Tool results (tools.rs renders them; here: for the size check).
+                Some("tool" | "ipython") if tools.is_some() => Role::User,
                 Some(r) => {
                     return Err(ApiError::bad(
                         "messages",
@@ -225,7 +233,7 @@ pub fn parse(body: &[u8], chat: bool) -> Result<GenReq, ApiError> {
                 }
                 None => return Err(ApiError::bad("messages", "a message has no 'role'")),
             };
-            if m.get("tool_calls").is_some_and(|t| !t.is_null()) {
+            if tools.is_none() && m.get("tool_calls").is_some_and(|t| !t.is_null()) {
                 return Err(unsupported("messages", "with tool_calls"));
             }
             messages.push(Message {
@@ -314,6 +322,10 @@ pub fn parse(body: &[u8], chat: bool) -> Result<GenReq, ApiError> {
         Some(_) => return Err(unsupported("logprobs", "")),
     }
     for k in ["tools", "functions"] {
+        if k == "tools" && tools.is_some() {
+            // tools.rs took them (and refused what isn't a tool).
+            continue;
+        }
         if get(o, k).is_some_and(|t| t.as_array().is_none_or(|a| !a.is_empty())) {
             return Err(unsupported(
                 if k == "tools" { "tools" } else { "functions" },
@@ -383,6 +395,7 @@ pub fn parse(body: &[u8], chat: bool) -> Result<GenReq, ApiError> {
         max_tokens,
         sample,
         stop,
+        tools,
     })
 }
 
@@ -699,7 +712,8 @@ mod tests {
         for bad in [
             json!({}),
             json!({"messages": []}),
-            json!({"messages": [{"role": "tool", "content": "x"}]}),
+            // (role "tool" is tool history now: tools.rs.)
+            json!({"messages": [{"role": "function", "content": "x"}]}),
             json!({"messages": [{"content": "x"}]}),
             json!({"messages": [{"role": "user", "content": [{"type": "image_url"}]}]}),
             json!({"messages": [{"role": "user", "content": 3}]}),

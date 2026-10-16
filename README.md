@@ -216,8 +216,10 @@ use your local model), `--max-conns N` / `--max-queue N` (defaults 256 / 128), `
   and JSON; `--repeat-penalty` or a request's `repetition_penalty` turns it on). For Qwen3's
   thinking mode Qwen recommends temperature 0.6, top_p 0.95, top_k 20 (greedy can loop on
   long reasoning).
-  `presence_penalty` / `frequency_penalty` other than 0, `n` > 1, `logprobs`, `tools`,
-  `logit_bias` and JSON `response_format` are refused with a 400 rather than ignored.
+  `presence_penalty` / `frequency_penalty` other than 0, `n` > 1, `logprobs`, legacy
+  `functions`, `logit_bias` and JSON `response_format` are refused with a 400 rather than
+  ignored.
+- Tool calling: see below.
 - `finish_reason` is `stop` (end token or stop string) or `length`; `usage` counts tokens;
   a `timings` object gives prompt and generation speed (llama-server's field names).
 - A client that disconnects stops its generation within one token.
@@ -227,6 +229,50 @@ use your local model), `--max-conns N` / `--max-queue N` (defaults 256 / 128), `
   localhost.
 - If the engine fails on a request (a CUDA error is sticky: every later request would fail
   too), the server logs the error and exits with code 70, for a supervisor to restart it.
+
+#### Tool calling
+
+`tools`, `tool_choice` and tool turns in the history (`role: "tool"` results, assistant
+messages with `tool_calls` and null or absent `content`) work on `/v1/chat/completions`, so
+agent harnesses that talk to a local OpenAI-compatible endpoint can run on axon:
+
+```bash
+axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias qwen3-8b
+```
+
+- The tools are rendered as the model's own chat template does (the GGUF's
+  `tokenizer.chat_template`, checked against transformers' rendering in tests). Qwen3 and
+  Qwen2.5 get the Hermes `# Tools` / `<tools>` block in the system message, call with
+  `<tool_call>{"name": ..., "arguments": ...}</tool_call>`, and see results as
+  `<tool_response>` blocks. Llama 3.1/3.2 get the tools in the first user message, call with
+  a JSON reply (`{"name": ..., "parameters": ...}`) and see results as `ipython` turns (one
+  call per message, as the template requires). Other chat formats answer a tool request
+  with a 400. A request without tools or tool turns is rendered exactly as before.
+- The reply's calls come back as OpenAI `tool_calls`, with `finish_reason: "tool_calls"`.
+  Streamed: a call is sent as soon as its block closes, as two `delta.tool_calls` chunks: the
+  first carries `index`, `id`, `type` and `function.name`, the second `function.arguments`.
+  Text outside the blocks streams as `content`. Nothing of a block reaches `content`
+  while it is still being decided, and blank lines that only separate text from calls are
+  dropped. Not streamed: `message.tool_calls`, with `content` null if there was no text.
+  Call ids are `call_` plus 24 hex digits.
+- A block that isn't a JSON object with a string `"name"` (invalid JSON, or the reply was
+  cut off mid-call) is not a call: it is returned as `content`, tags and all. So
+  `arguments` is always valid JSON. Qwen3's reasoning still comes as `reasoning_content`.
+- `tool_choice`: `auto` (default); `none` (the tools are not shown to the model, and its
+  reply is plain content); `required` or `{"type": "function", "function": {"name": ...}}`.
+  The last two start the reply with the opening of a call (the named one: through its
+  `"arguments": `), so the model must call. Qwen3 then skips its reasoning.
+  `parallel_tool_calls`, `strict`, `store`, `reasoning_effort` and `prompt_cache_key` are
+  accepted and ignored.
+- Context: an agent's system prompt and tool schemas can be 15-25k tokens, past the
+  8192 default, so pass `--ctx` (up to the model's trained length, 40960 for Qwen3).
+  `--kv q8` halves the cache's memory. The prefix cache works across tool turns: the next
+  request resends the history with the results appended, and only the tokens after the
+  previous reply's start are run again. The system prompt and tools are never run again.
+- Harnesses: anything speaking OpenAI Chat Completions, e.g. Synaps (`provider.local.url`),
+  opencode and crush (an OpenAI-compatible provider whose base URL is
+  `http://127.0.0.1:8080/v1`), and pi (an `openai-completions` model in `models.json`).
+  Codex CLI speaks only the Responses API (`/v1/responses`), which axon doesn't serve.
 
 ### Environment
 

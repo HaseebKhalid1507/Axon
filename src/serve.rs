@@ -30,6 +30,7 @@
 
 pub mod api;
 pub mod http;
+pub mod tools;
 
 use crate::chat::{self, Framing, special};
 use crate::kv::KvType;
@@ -875,7 +876,7 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
     let bytes = match &g.prompt {
         Prompt::Chat { messages, .. } => messages.iter().map(|m| m.content.len()).sum(),
         Prompt::Text(s) => s.len(),
-    };
+    } + g.tools.as_ref().map_or(0, tools::ToolReq::extra_bytes);
     let too_long = |n: String| {
         let mut e = ApiError::bad(
             if chat { "messages" } else { "prompt" },
@@ -887,6 +888,7 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
     if bytes > m.ctx.saturating_mul(m.max_token_bytes) {
         return api_err(c, too_long(format!("{bytes} bytes")), keep);
     }
+    let mut parser = None;
     let (prompt, stop_ids, think) = match &g.prompt {
         Prompt::Chat { messages, no_think } => {
             let Some(t) = &m.template else {
@@ -906,11 +908,21 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
                 .as_ref()
                 .filter(|_| !no_think && !sh.think_inline)
                 .map(|&(o, c, _)| (o, c));
-            (
-                t.render(m.tok, messages, no_think),
-                t.stop().to_vec(),
-                think,
-            )
+            match &g.tools {
+                None => (
+                    t.render(m.tok, messages, no_think),
+                    t.stop().to_vec(),
+                    think,
+                ),
+                Some(tr) => match tools::render(t, m.tok, tr, no_think) {
+                    Ok(r) => {
+                        parser = r.parser;
+                        let think = think.filter(|_| !r.no_reasoning);
+                        (r.ids, t.stop().to_vec(), think)
+                    }
+                    Err(e) => return api_err(c, e, keep),
+                },
+            }
         }
         // As `axon gen`: BOS if the model adds one, its end-of-generation set.
         Prompt::Text(s) => (m.tok.encode_prompt(s), m.tok.eog(), None),
@@ -963,9 +975,9 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
     );
     let model = g.model.as_deref().unwrap_or(&sh.model_id);
     let r = if g.stream {
-        stream(c, req, &g, &rx, chat, &id, model, created)
+        stream(c, req, &g, &rx, chat, &id, model, created, parser)
     } else {
-        whole(c, keep, &rx, chat, &id, model, created)
+        whole(c, keep, &rx, chat, &id, model, created, parser)
     };
     if !matches!(r, Ok(true)) {
         cancel.store(true, Ordering::Relaxed);
@@ -998,6 +1010,7 @@ fn whole(
     id: &str,
     model: &str,
     created: u64,
+    parser: Option<tools::Parser>,
 ) -> io::Result<bool> {
     let (mut content, mut reasoning) = (String::new(), String::new());
     loop {
@@ -1014,6 +1027,28 @@ fn whole(
                 return api_err(c, ApiError::new(500, "server_error", m), keep);
             }
             Some(Event::Done { usage, finish }) => {
+                if let Some(mut p) = parser {
+                    // Tools: the reply's text into content and calls.
+                    let (mut text, mut calls) = (String::new(), Vec::new());
+                    for piece in p.push(&content).into_iter().chain(p.finish()) {
+                        match piece {
+                            tools::Piece::Text(t) => text.push_str(&t),
+                            tools::Piece::Call(c) => calls.push(c),
+                        }
+                    }
+                    let h = api::head(id, "chat.completion", created, model);
+                    let body = if calls.is_empty() {
+                        api::chat_response(&h, &text, &reasoning, finish, &usage)
+                    } else {
+                        let finish = if finish == "stop" {
+                            "tool_calls"
+                        } else {
+                            finish
+                        };
+                        tools::chat_response(&h, &text, &reasoning, &calls, finish, &usage)
+                    };
+                    return json_reply(c, 200, &body, keep);
+                }
                 let body = if chat {
                     let h = api::head(id, "chat.completion", created, model);
                     api::chat_response(&h, &content, &reasoning, finish, &usage)
@@ -1037,6 +1072,7 @@ fn stream(
     id: &str,
     model: &str,
     created: u64,
+    mut parser: Option<tools::Parser>,
 ) -> io::Result<bool> {
     let keep = req.keep_alive && req.minor == 1;
     c.start_stream(200, "text/event-stream", req.minor, keep)?;
@@ -1062,12 +1098,38 @@ fn stream(
         c.send(api::sse(&u(api::chat_chunk(&h, true, "", "", None))).as_bytes())?;
     }
     let mut buf = String::new();
+    // Tools: the content and calls the parser has decided, as chunks.
+    let mut ncalls = 0;
+    let mut pieces = |buf: &mut String, ps: Vec<tools::Piece>| {
+        for p in ps {
+            match p {
+                tools::Piece::Text(t) => {
+                    buf.push_str(&api::sse(&u(api::chat_chunk(&h, false, &t, "", None))));
+                }
+                tools::Piece::Call(call) => {
+                    for j in tools::call_chunks(&h, ncalls, &call) {
+                        buf.push_str(&api::sse(&u(j)));
+                    }
+                    ncalls += 1;
+                }
+            }
+        }
+    };
     let mut ev = next_event(c, rx);
     loop {
         // Everything already there goes out in one write.
         let mut done = false;
         while let Some(e) = ev {
             match e {
+                Event::Text { content, reasoning } if parser.is_some() => {
+                    if !reasoning.is_empty() {
+                        let j = api::chat_chunk(&h, false, "", &reasoning, None);
+                        buf.push_str(&api::sse(&u(j)));
+                    }
+                    if let Some(p) = parser.as_mut() {
+                        pieces(&mut buf, p.push(&content));
+                    }
+                }
                 Event::Text { content, reasoning } => {
                     let j = if chat {
                         api::chat_chunk(&h, false, &content, &reasoning, None)
@@ -1082,7 +1144,13 @@ fn stream(
                     buf.push_str(api::SSE_DONE);
                     done = true;
                 }
-                Event::Done { usage, finish } => {
+                Event::Done { usage, mut finish } => {
+                    if let Some(p) = parser.as_mut() {
+                        pieces(&mut buf, p.finish());
+                        if p.calls() > 0 && finish == "stop" {
+                            finish = "tool_calls";
+                        }
+                    }
                     let j = if chat {
                         api::chat_chunk(&h, false, "", "", Some(finish))
                     } else {
