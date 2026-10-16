@@ -252,6 +252,60 @@ impl KvCache {
     }
 }
 
+impl KvCache {
+    /// (element type name, bytes per element): what an image of the cache
+    /// stores (kvsave).
+    pub(crate) fn elem(&self) -> (&'static str, usize) {
+        match &self.data {
+            KvData::F16(_) => ("f16", 2),
+            KvData::F32(_) => ("f32", 4),
+        }
+    }
+
+    pub(crate) fn max_ctx(&self) -> usize {
+        self.max_ctx
+    }
+
+    /// `arrays_mut`, read-only.
+    pub(crate) fn arrays(&self) -> Vec<&[u8]> {
+        fn bytes<T: KvElem>(c: &Layers<T>) -> Vec<&[u8]> {
+            c.k.iter()
+                .zip(c.v.iter())
+                .flat_map(|(k, v)| [&k[..], &v[..]])
+                .map(|a| {
+                    // SAFETY: plain data (KvElem) viewed as its bytes.
+                    unsafe { std::slice::from_raw_parts(a.as_ptr().cast::<u8>(), size_of_val(a)) }
+                })
+                .collect()
+        }
+        match &self.data {
+            KvData::F16(c) => bytes(c),
+            KvData::F32(c) => bytes(c),
+        }
+    }
+
+    /// Every layer's K then V, each `[max_ctx][kv_dim]`, as bytes (kvsave:
+    /// a cache's rows to and from a file).
+    pub(crate) fn arrays_mut(&mut self) -> Vec<&mut [u8]> {
+        fn bytes<T: KvElem>(c: &mut Layers<T>) -> Vec<&mut [u8]> {
+            c.k.iter_mut()
+                .zip(c.v.iter_mut())
+                .flat_map(|(k, v)| [&mut k[..], &mut v[..]])
+                .map(|a| {
+                    let n = size_of_val(a);
+                    // SAFETY: plain data (KvElem) viewed as its bytes, the
+                    // same borrow; any bytes written back are valid Ts.
+                    unsafe { std::slice::from_raw_parts_mut(a.as_mut_ptr().cast::<u8>(), n) }
+                })
+                .collect()
+        }
+        match &mut self.data {
+            KvData::F16(c) => bytes(c),
+            KvData::F32(c) => bytes(c),
+        }
+    }
+}
+
 /// Run `$body` with `$k`, `$v` bound to layer `$l`'s K and V cache slices
 /// (`&mut [T]`, T the cache's element type).
 macro_rules! with_kv_layer {

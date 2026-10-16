@@ -34,6 +34,33 @@ pub const CU_MEMHOSTREGISTER_READ_ONLY: c_uint = 8;
 /// calls made by this thread.
 pub const CU_STREAM_CAPTURE_MODE_THREAD_LOCAL: c_int = 1;
 
+/// `CUmemorytype` values (cuda.h).
+pub const CU_MEMORYTYPE_HOST: c_uint = 1;
+pub const CU_MEMORYTYPE_DEVICE: c_uint = 2;
+
+/// `CUDA_MEMCPY2D` (cuda.h): `height` rows of `width` bytes, each side at
+/// its own pitch.
+#[repr(C)]
+#[derive(Default)]
+pub struct Memcpy2D {
+    pub src_x: usize,
+    pub src_y: usize,
+    pub src_type: c_uint,
+    pub src_host: usize,
+    pub src_dev: CUdeviceptr,
+    pub src_array: usize,
+    pub src_pitch: usize,
+    pub dst_x: usize,
+    pub dst_y: usize,
+    pub dst_type: c_uint,
+    pub dst_host: usize,
+    pub dst_dev: CUdeviceptr,
+    pub dst_array: usize,
+    pub dst_pitch: usize,
+    pub width: usize,
+    pub height: usize,
+}
+
 /// `CUlaunchAttribute` (cuda.h): an id and a 64-byte value union.
 #[repr(C)]
 pub struct LaunchAttr {
@@ -129,6 +156,9 @@ api! {
         // serve: a sequence's KV rows between caches.
         fn cuMemcpyDtoDAsync_v2(CUdeviceptr, CUdeviceptr, usize, CUstream) -> CUresult;
         fn cuMemsetD8Async(CUdeviceptr, u8, usize, CUstream) -> CUresult;
+        // kvsave: a cache's rows to and from host memory, one strided copy
+        // per region.
+        fn cuMemcpy2DAsync_v2(*const Memcpy2D, CUstream) -> CUresult;
         fn cuMemHostAlloc(*mut *mut c_void, usize, c_uint) -> CUresult;
         fn cuMemFreeHost(*mut c_void) -> CUresult;
         fn cuMemHostRegister_v2(*mut c_void, usize, c_uint) -> CUresult;

@@ -990,6 +990,108 @@ impl HostBuf<'_> {
     }
 }
 
+impl HostBuf<'_> {
+    /// Enqueue `height` rows of `width` bytes from `src`, row i at
+    /// `off + i * pitch` there, to row i at `at + i * host_pitch` here (one
+    /// strided copy: a cache's rows of every layer at once).
+    #[allow(clippy::too_many_arguments)]
+    pub fn copy_2d_from(
+        &mut self,
+        at: usize,
+        host_pitch: usize,
+        src: &DevBuf,
+        off: usize,
+        pitch: usize,
+        (width, height): (usize, usize),
+    ) -> Result<(), String> {
+        self.copy_2d(false, at, host_pitch, src, off, pitch, width, height)
+    }
+
+    /// `copy_2d_from` the other way: our rows to `dst`'s.
+    #[allow(clippy::too_many_arguments)]
+    pub fn copy_2d_to(
+        &self,
+        at: usize,
+        host_pitch: usize,
+        dst: &DevBuf,
+        off: usize,
+        pitch: usize,
+        (width, height): (usize, usize),
+    ) -> Result<(), String> {
+        self.copy_2d(true, at, host_pitch, dst, off, pitch, width, height)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn copy_2d(
+        &self,
+        to_dev: bool,
+        at: usize,
+        host_pitch: usize,
+        dev: &DevBuf,
+        off: usize,
+        pitch: usize,
+        width: usize,
+        height: usize,
+    ) -> Result<(), String> {
+        if width == 0 || height == 0 {
+            return Ok(());
+        }
+        // The end of the last row, if every row fits its pitch.
+        let end = |o: usize, p: usize| {
+            (width <= p)
+                .then(|| {
+                    (height - 1)
+                        .checked_mul(p)?
+                        .checked_add(o)?
+                        .checked_add(width)
+                })
+                .flatten()
+        };
+        match (end(at, host_pitch), end(off, pitch)) {
+            (Some(h), Some(d)) if h <= self.len && d <= dev.len => {}
+            _ => {
+                return Err(format!(
+                    "2D copy of {height} x {width} bytes (host {at} pitch {host_pitch} of {}, \
+                     device {off} pitch {pitch} of {}): out of bounds",
+                    self.len, dev.len
+                ));
+            }
+        }
+        self.gpu.bind()?;
+        self.pending.set(true);
+        let (host, devp) = (self.p as usize + at, dev.ptr + off as u64);
+        let c = if to_dev {
+            ffi::Memcpy2D {
+                src_type: ffi::CU_MEMORYTYPE_HOST,
+                src_host: host,
+                src_pitch: host_pitch,
+                dst_type: ffi::CU_MEMORYTYPE_DEVICE,
+                dst_dev: devp,
+                dst_pitch: pitch,
+                width,
+                height,
+                ..Default::default()
+            }
+        } else {
+            ffi::Memcpy2D {
+                src_type: ffi::CU_MEMORYTYPE_DEVICE,
+                src_dev: devp,
+                src_pitch: pitch,
+                dst_type: ffi::CU_MEMORYTYPE_HOST,
+                dst_host: host,
+                dst_pitch: host_pitch,
+                width,
+                height,
+                ..Default::default()
+            }
+        };
+        // SAFETY: every row in bounds of both (checked); pinned memory and
+        // device memory stay allocated while the copy may run (as copy_to).
+        let r = unsafe { (self.gpu.d.cuMemcpy2DAsync_v2)(&c, self.gpu.stream) };
+        check(self.gpu.d, r, "cuMemcpy2DAsync_v2")
+    }
+}
+
 impl Drop for HostBuf<'_> {
     fn drop(&mut self) {
         if !self.p.is_null() && self.gpu.bind().is_ok() {
@@ -1319,6 +1421,22 @@ fn cache_dir_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathB
         None => abs(home)?.join(".cache"),
     };
     Some(base.join("axon").join("cuda"))
+}
+
+/// What decides the bits this device's kernels compute, as a string
+/// (kvsave's identity: a cache image is only loaded where it was made):
+/// the kernel sources and options, the device's architecture, the driver
+/// (which JIT-compiles PTX) and AXON_HOPPER (the sm_90a build).
+pub fn numerics_tag(gpu: &Gpu) -> Result<String, String> {
+    let src = fnv128(&[KERNELS.as_bytes(), KERNEL_OPTS.join("\n").as_bytes()]);
+    let d = ffi::driver_version(gpu.d)?;
+    Ok(format!(
+        "kernels {src:032x} {} driver {}.{} hopper {}",
+        gpu.info()?.arch(),
+        d.0,
+        d.1,
+        hopper_env()
+    ))
 }
 
 /// FNV-1a, 128-bit: a stable hash (unlike std's, which may change between
