@@ -28,7 +28,9 @@ Works today, honestly scoped:
   Qwen2.5-0.5B-Instruct (Q4_K_M), Qwen3 0.6B (Q8_0) and Llama 3.2 1B Instruct, and the
   GPU tests also the Qwen2.5 1.5B, 3B and 7B Instruct, Qwen3 4B and 8B, and Llama 3.2 3B
   and Llama 3.1 8B Instruct Q4_K_M builds; Qwen3 1.7B (Q4_K_M) runs too. Llama 3's RoPE
-  frequency factors and the llama-bpe tokenizer with its BOS token are handled.
+  frequency factors and the llama-bpe tokenizer with its BOS token are handled. `llama`
+  models with a SentencePiece tokenizer (Mistral 7B Instruct v0.3, Llama 2, TinyLlama) work
+  too; Mistral's `[INST]` chat format is built in.
   Other architectures, mixture-of-experts models and RoPE scaling (a factor other than 1)
   are refused with an error.
 - Tensor types: F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K on the CPU. On the
@@ -77,8 +79,8 @@ Works today, honestly scoped:
   request at a time.
 - Rust 1.89 or newer.
 
-Not on main yet: batching of concurrent requests, multiple GPUs, Gemma and SentencePiece-tokenizer
-models (Mistral, Llama 2). What's in flight and why: [docs/roadmap.md](docs/roadmap.md).
+Not on main yet: batching of concurrent requests, multiple GPUs, Gemma. What's in flight and
+why: [docs/roadmap.md](docs/roadmap.md).
 
 ## Quickstart
 
@@ -305,6 +307,7 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
 |---|---|
 | `AXON_THREADS=N` | worker threads (default: cores minus a quarter) |
 | `AXON_SIMD=scalar\|avx2\|vnni` | force a kernel set (default: the best the CPU has) |
+| `AXON_DECODE_THREADS=N` | CPU: at most N threads per decode-step job (default: the P-core count on a hybrid Intel CPU without SMT, else every thread; prefill always uses every thread) |
 | `AXON_POOL_ADAPT=0` | keep every worker in every job (no adaptive drop-out under load) |
 | `AXON_POOL_DEBUG=1` | `gen`: print thread-pool stats at the end |
 | `AXON_MMAP=0\|1` | CPU: `0`: copy the model into huge-page memory; `1`: map the file. Default: map it when every weight matrix is repacked (Q4_K/Q6_K/Q5_0/Q8_0 models: the repack holds them in huge pages, so a copy would only be a second pass over the file), else copy unless the file is over 60% of available memory. A mapped model stays mapped while axon runs: overwriting the GGUF in place meanwhile (e.g. `curl -o` onto the same file) can crash it with SIGBUS; use `AXON_MMAP=0`, or write a new file and rename it over the old one. The GPU always maps (it reads the file once) |

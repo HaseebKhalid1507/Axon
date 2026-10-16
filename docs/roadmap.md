@@ -37,7 +37,7 @@ and has a specific fix ([design/hopper.md](design/hopper.md)).
 | 5 | **Hopper wgmma/TMA prefill.** | H100 prefill trails the 4090 and 5090. ESTIMATED 7B pp2100 12.5k → 22–32k tok/s. Gated on a ~1-hour pod experiment. | design; experiment pending ([design](design/hopper.md)) |
 | 6 | **Gemma 3** (1B/4B/12B). | The most-requested missing family. Medium bit-identity risk: new attention variants (head dim 256, sliding window) must keep decode == batched. Comes after S2, since both change the attention kernels. | in flight |
 | 7 | **Old GPUs (sm_61, Pascal).** | Fixes for Pascal cards, tested on Jaded's GTX 1050. Main has no tested sm_61 path; it refuses a GPU the installed NVRTC can't target. | in flight |
-| 8 | **SentencePiece tokenizer** (Mistral 7B v0.3, Llama 2, TinyLlama) on the existing `llama` path. | Cheap coverage: ESTIMATED 6–10 engineer-hours and no kernel risk. Main accepts only GPT-2-style BPE (`tokenizer.rs`). | planned |
+| 8 | **SentencePiece tokenizer** (Mistral 7B v0.3, Llama 2, TinyLlama) on the existing `llama` path. | Cheap coverage, no kernel risk. A port of llama.cpp's SPM tokenizer, checked token for token against llama-server; Mistral's `[INST]` chat format included. | done |
 | 9 | **CPU re-board on main, then what it shows.** | The last full CPU scoreboard predates several merged CPU changes. Remaining items (pool spin, P/E-core tail) are ESTIMATED at a few percent. | planned |
 | 10 | **GPU decode: long-context attention; locked-clock trial.** | ESTIMATED +3% decode at 4k context. A locked SM clock may recover part of the 9% laptop power-cap cost (MEASURED cost; the fix is untested). | planned |
 

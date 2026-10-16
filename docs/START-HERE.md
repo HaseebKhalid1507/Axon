@@ -18,7 +18,7 @@ in 23 of 24 cells on an RTX 4050 laptop ([benchmarks-gpu.md](benchmarks-gpu.md))
 
 | area | on main | where |
 |---|---|---|
-| Architectures | `qwen2`, `qwen3` (dense), `llama` (Llama 3.x, including RoPE frequency factors). Other architectures, MoE and RoPE scaling are refused with an error. | `model.rs` (`ARCHS`) |
+| Architectures | `qwen2`, `qwen3` (dense), `llama` (Llama 3.x, including RoPE frequency factors; SentencePiece-tokenizer `llama` models such as Mistral 7B v0.3 and Llama 2, with Mistral's `[INST]` chat format). Other architectures, MoE and RoPE scaling are refused with an error. | `model.rs` (`ARCHS`) |
 | Tensor types | CPU: F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K. GPU: every weight matrix must be one of the eight quantized types. | `quant.rs`, `cuda/kernels.cu` |
 | CPU SIMD | One baseline x86-64 binary. It picks scalar, AVX2 or AVX-VNNI kernels at run time with the same output bits as a `target-cpu` build (`AXON_SIMD` forces a set). Q4_K/Q6_K/Q5_0/Q8_0 are repacked into 8-row interleaved layouts. | `quant.rs`, `quant/r8.rs`, `quant/r8q.rs`, `mv.rs`, `vmath.rs` |
 | CUDA | `--device cuda`, Linux. Loads `libcuda.so.1` and NVRTC at run time, compiles the kernels for the GPU on first use and caches them. Int8 tensor-core GEMMs and attention need sm_80+; older GPUs fall back to dp4a decode kernels for batches. A GPU is refused if the installed NVRTC can't target it (`pick_target`). One token is a captured CUDA graph, replayed. | `cuda/mod.rs`, `cuda/ffi.rs`, `cuda/qwen2.rs` |
@@ -29,9 +29,8 @@ in 23 of 24 cells on an RTX 4050 laptop ([benchmarks-gpu.md](benchmarks-gpu.md))
 | KV cache | f16 by default; `--kv q8` (GPU only) halves it with slightly different results. | `kv.rs` |
 | Serving | `axon serve`: `/v1/chat/completions` (with OpenAI tool calling: `tools`, `tool_choice`, `tool_calls`, for Qwen3, Qwen2.5 and Llama 3.1/3.2 templates), `/v1/completions`, `/v1/models`, `/health`, SSE streaming. Runs **one request at a time** (stage S1); the KV cache carries over between requests for shared prefixes. | `serve.rs`, `serve/`, `serve/tools.rs` |
 
-**Not on main:** concurrent request batching, multiple GPUs, Gemma, and SentencePiece-tokenizer
-models (Mistral, Llama 2). Tool calling has no `/v1/responses` (codex) and no ollama-native API;
-the legacy `functions` field is still a 400.
+**Not on main:** concurrent request batching, multiple GPUs and Gemma. Tool calling has no
+`/v1/responses` (codex) and no ollama-native API; the legacy `functions` field is still a 400.
 
 The full flag and environment reference is in the [README](../README.md#usage).
 
