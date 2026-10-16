@@ -1129,6 +1129,39 @@ impl DevBuf<'_> {
         Ok(out)
     }
 
+    /// Copy `n` bytes at `off` to `dst` at `dst_off`, enqueued on the
+    /// stream (ordered after the work launched there, not waited for).
+    pub fn copy_into(
+        &self,
+        off: usize,
+        dst: &DevBuf,
+        dst_off: usize,
+        n: usize,
+    ) -> Result<(), String> {
+        let ok = |o: usize, len: usize| o.checked_add(n).is_some_and(|end| end <= len);
+        if !ok(off, self.len) || !ok(dst_off, dst.len) {
+            return Err(format!(
+                "copy of {n} bytes from {off} of {} to {dst_off} of {}",
+                self.len, dst.len
+            ));
+        }
+        if n == 0 {
+            return Ok(());
+        }
+        self.gpu.bind()?;
+        // SAFETY: n bytes in bounds of both allocations (checked), which
+        // outlive the stream work (cuMemFree waits for it).
+        let r = unsafe {
+            (self.gpu.d.cuMemcpyDtoDAsync_v2)(
+                dst.ptr + dst_off as u64,
+                self.ptr + off as u64,
+                n,
+                self.gpu.stream,
+            )
+        };
+        check(self.gpu.d, r, "cuMemcpyDtoDAsync_v2")
+    }
+
     /// Set every byte to zero (synchronous, stream-ordered).
     pub fn zero(&self) -> Result<(), String> {
         if self.len == 0 {

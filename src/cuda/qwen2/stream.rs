@@ -448,7 +448,7 @@ impl<'g> CudaQwen2<'g> {
         }
         let b = c.b.as_ref().unwrap();
         // SAFETY: nb <= b.max.
-        unsafe { self.rope_b(b, nb, start)? };
+        unsafe { self.rope_b(b, nb, start, Arg::Ptr(0))? };
         let prof = std::env::var("AXON_STREAM_PROFILE").is_ok_and(|v| v == "1");
         let t0 = if prof { Some(g.record()?) } else { None };
         st.ring.head = 0;
@@ -493,6 +493,7 @@ impl<'g> CudaQwen2<'g> {
                         CacheKv::F16,
                         nb,
                         start,
+                        Arg::Ptr(0),
                         &mut on,
                     )?;
                 }

@@ -8,6 +8,7 @@
 //! calling it directly).
 
 use crate::cuda::qwen2::pipeline::{PipelineCache, PipelineQwen2};
+use crate::cuda::qwen2::slots::CudaPool;
 use crate::cuda::qwen2::{CacheKv, CudaCache, CudaQwen2};
 use crate::cuda::{Gpu, Kernels, Module};
 use crate::gguf::Model;
@@ -106,6 +107,70 @@ pub trait Lm {
             })
             .collect()
     }
+}
+
+/// One token of a multi-sequence step (`BatchLm::step`): `token` at
+/// position `pos` of the sequence in pool slot `slot`.
+#[derive(Clone, Copy, Debug)]
+pub struct SeqRow<'a> {
+    pub token: u32,
+    pub pos: usize,
+    pub slot: usize,
+    pub head: RowHead<'a>,
+}
+
+/// What a row of a step returns.
+#[derive(Clone, Copy, Debug)]
+pub enum RowHead<'a> {
+    /// `forward_argmax`'s pick.
+    Argmax,
+    /// `forward_cands`'s candidates; `recent` ends with the row's token.
+    Sample { spec: CandSpec, recent: &'a [u32] },
+}
+
+/// A row's result, per its `RowHead`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RowOut {
+    Pick(u32),
+    Cands(Vec<Cand>),
+}
+
+/// A backend that runs many sequences at once (`axon serve`'s continuous
+/// batching): a pool of slots, each a sequence's cache of up to `ctx`
+/// positions, and steps of one row per token of any slots. Every row's
+/// cache rows and result are bit for bit what the `Lm` calls on one
+/// sequence give (`forward_argmax`, `forward_cands`, `feed_batch`), whatever
+/// else is in the step. Fallible: a server answers an error rather than
+/// panicking.
+pub trait BatchLm: Lm {
+    type Pool;
+
+    /// A pool of `slots` sequences of up to `ctx` positions each, or why
+    /// there is none (no room, or a backend without one).
+    fn new_pool(&self, slots: usize, ctx: usize) -> Result<Self::Pool, String>;
+
+    /// `feed_batch` into slot `slot`: `tokens[b]` at `start + b`.
+    fn feed_slot(
+        &self,
+        pool: &mut Self::Pool,
+        slot: usize,
+        tokens: &[u32],
+        start: usize,
+    ) -> Result<(), String>;
+
+    /// One pass over `rows` (a slot's rows in ascending positions, each with
+    /// its slot's earlier positions already in it, or earlier in `rows`):
+    /// each row's keys and values into its slot, and its result.
+    fn step(&self, pool: &mut Self::Pool, rows: &[SeqRow]) -> Result<Vec<RowOut>, String>;
+
+    /// Copy positions 0..n of `cache` into slot `slot`.
+    fn adopt(
+        &self,
+        pool: &mut Self::Pool,
+        slot: usize,
+        cache: &Self::Cache,
+        n: usize,
+    ) -> Result<(), String>;
 }
 
 impl Lm for Qwen2<'_> {
@@ -473,6 +538,52 @@ impl Lm for Backend<'_> {
             Backend::Cuda(n) => n.prefill_batch(),
             Backend::Hybrid(n) => n.prefill_batch(),
             Backend::Pipeline(n) => n.prefill_batch(),
+        }
+    }
+}
+
+/// Continuous batching runs on the GPU model only: the CPU and a split
+/// serve one request at a time (`new_pool` says so).
+impl BatchLm for Backend<'_> {
+    type Pool = Box<CudaPool<'static>>;
+
+    fn new_pool(&self, slots: usize, ctx: usize) -> Result<Self::Pool, String> {
+        match self {
+            Backend::Cuda(n) => n.pool(slots, ctx).map(Box::new),
+            _ => Err("batching many requests is GPU-only (--device cuda, every layer)".into()),
+        }
+    }
+
+    fn feed_slot(
+        &self,
+        pool: &mut Self::Pool,
+        slot: usize,
+        tokens: &[u32],
+        start: usize,
+    ) -> Result<(), String> {
+        match self {
+            Backend::Cuda(n) => n.feed_slot(pool, slot, tokens, start),
+            _ => unreachable!("a pool is the GPU model's"),
+        }
+    }
+
+    fn step(&self, pool: &mut Self::Pool, rows: &[SeqRow]) -> Result<Vec<RowOut>, String> {
+        match self {
+            Backend::Cuda(n) => n.step_rows(pool, rows),
+            _ => unreachable!("a pool is the GPU model's"),
+        }
+    }
+
+    fn adopt(
+        &self,
+        pool: &mut Self::Pool,
+        slot: usize,
+        cache: &BackendCache,
+        n: usize,
+    ) -> Result<(), String> {
+        match (self, cache) {
+            (Backend::Cuda(m), BackendCache::Cuda(c)) => m.adopt_cache(pool, slot, c, n),
+            _ => Err("adopt: a cache of another backend".into()),
         }
     }
 }

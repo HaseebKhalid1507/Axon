@@ -1,7 +1,9 @@
 //! `axon serve` end to end: a server on an ephemeral port over the test
 //! model, driven over real sockets.
 
-use super::{MAX_CONNS, MAX_QUEUE, Opts, Server, Template, api::Message, api::Role, start};
+use super::{
+    MAX_CONNS, MAX_QUEUE, Opts, PARALLEL, Server, Template, api::Message, api::Role, start,
+};
 use crate::lm::{Device, Lm};
 use crate::sample::SampleArgs;
 use crate::tokenizer::{Tokenizer, Utf8Stream};
@@ -38,6 +40,7 @@ fn server_with(path: &str, device: Device, f: impl FnOnce(&mut Opts)) -> Server 
         cors: Some(ORIGIN.into()),
         max_conns: MAX_CONNS,
         max_queue: MAX_QUEUE,
+        parallel: PARALLEL,
     };
     f(&mut o);
     start(o).expect("start the server")
@@ -1474,5 +1477,92 @@ fn serve_tool_calls() {
             .unwrap();
         assert!(cached * 10 >= p1 * 9, "reused {cached} of {p1}: {v2}");
         assert!(v2["usage"]["prompt_tokens"].as_u64().unwrap() > p1);
+    }
+}
+
+/// Continuous batching (stage S2, GPU): requests sent together, greedy and
+/// seeded sampling mixed (penalties, top_k off: the host selects), get
+/// exactly the reply each gets alone, on the f16 and q8 caches; also when
+/// the first one is already running alone (with drafting) as the others
+/// arrive, so it hands over to the batch partway; and with more requests
+/// than slots (later ones take freed slots).
+#[test]
+fn serve_batched_matches_solo() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let bodies: Vec<Value> = [
+        ("Write a story about a fox.", 120, json!({"temperature": 0})),
+        (
+            "Name three colors.",
+            40,
+            json!({"temperature": 0.8, "seed": 1}),
+        ),
+        (
+            "Explain rain.",
+            64,
+            json!({"temperature": 0.9, "seed": 2, "top_k": 0}),
+        ),
+        (
+            "List five animals.",
+            50,
+            json!({"temperature": 0, "repetition_penalty": 1.2}),
+        ),
+        (
+            "Why is grass green?",
+            72,
+            json!({"temperature": 1.1, "seed": 3, "top_k": 20, "repetition_penalty": 1.1}),
+        ),
+        ("Count to twenty.", 90, json!({"temperature": 0})),
+    ]
+    .into_iter()
+    .map(|(m, n, mut s)| {
+        s["messages"] = json!([{"role": "user", "content": m}]);
+        s["max_tokens"] = json!(n);
+        s
+    })
+    .collect();
+    let reply = |r: &Resp| -> (String, Value) {
+        assert_eq!(r.status, 200, "{}", r.body);
+        let v = r.json();
+        (
+            v["choices"][0]["message"]["content"].to_string(),
+            v["usage"]["completion_tokens"].clone(),
+        )
+    };
+    for kv in [crate::kv::KvType::F16, crate::kv::KvType::Q8] {
+        let s = server_with(p.to_str().unwrap(), Device::Cuda, |o| {
+            o.kv = kv;
+            o.parallel = 4;
+            o.max_draft = 3;
+        });
+        let a = s.addr;
+        let solo: Vec<_> = bodies
+            .iter()
+            .map(|b| reply(&post(a, "/v1/chat/completions", b.clone())))
+            .collect();
+        for stagger in [0u64, 60] {
+            let together: Vec<_> = std::thread::scope(|sc| {
+                let hs: Vec<_> = bodies
+                    .iter()
+                    .enumerate()
+                    .map(|(i, b)| {
+                        sc.spawn(move || {
+                            if i > 0 {
+                                std::thread::sleep(Duration::from_millis(stagger));
+                            }
+                            reply(&post(a, "/v1/chat/completions", b.clone()))
+                        })
+                    })
+                    .collect();
+                hs.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            for (i, (t, s1)) in together.iter().zip(&solo).enumerate() {
+                assert_eq!(t, s1, "{kv:?} stagger {stagger} ms: request {i}");
+            }
+        }
     }
 }
