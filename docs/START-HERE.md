@@ -1,7 +1,13 @@
 # Start here
 
 A short orientation for new collaborators. Everything under "What works on main" was checked against
-the source at main `5f96039`. Anything that isn't on main yet is marked **planned** or **in flight**.
+the source at main `5f96039`; the Architectures, CUDA and Serving rows and the multi-GPU row were updated at
+main `a591e17` from the merged PRs (#33, #34, #35, #38, #42). Anything that isn't on main yet is marked
+**planned** or **in flight**.
+
+How Axon is developed, what was tried (including what failed) and where it stands:
+[methodology.md](methodology.md), [history.md](history.md),
+[experiments-rejected.md](experiments-rejected.md), [results.md](results.md).
 
 ## What Axon is
 
@@ -18,18 +24,20 @@ in 23 of 24 cells on an RTX 4050 laptop ([benchmarks-gpu.md](benchmarks-gpu.md))
 
 | area | on main | where |
 |---|---|---|
-| Architectures | `qwen2`, `qwen3` (dense), `llama` (Llama 3.x, including RoPE frequency factors; SentencePiece-tokenizer `llama` models such as Mistral 7B v0.3 and Llama 2, with Mistral's `[INST]` chat format). Other architectures, MoE and RoPE scaling are refused with an error. | `model.rs` (`ARCHS`) |
+| Architectures | `qwen2`, `qwen3` (dense), `gemma3` (1B, 4B; 27B refused; no q8 KV, split, streaming or multi-GPU for it), `llama` (Llama 3.x, including RoPE frequency factors; SentencePiece-tokenizer `llama` models such as Mistral 7B v0.3 and Llama 2, with Mistral's `[INST]` chat format). Other architectures, MoE and RoPE scaling are refused with an error. | `model.rs` (`ARCHS`) |
 | Tensor types | CPU: F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K. GPU: every weight matrix must be one of the eight quantized types. | `quant.rs`, `cuda/kernels.cu` |
 | CPU SIMD | One baseline x86-64 binary. It picks scalar, AVX2 or AVX-VNNI kernels at run time with the same output bits as a `target-cpu` build (`AXON_SIMD` forces a set). Q4_K/Q6_K/Q5_0/Q8_0 are repacked into 8-row interleaved layouts. | `quant.rs`, `quant/r8.rs`, `quant/r8q.rs`, `mv.rs`, `vmath.rs` |
-| CUDA | `--device cuda`, Linux. Loads `libcuda.so.1` and NVRTC at run time, compiles the kernels for the GPU on first use and caches them. Int8 tensor-core GEMMs and attention need sm_80+; older GPUs fall back to dp4a decode kernels for batches. A GPU is refused if the installed NVRTC can't target it (`pick_target`). One token is a captured CUDA graph, replayed. | `cuda/mod.rs`, `cuda/ffi.rs`, `cuda/qwen2.rs` |
+| CUDA | `--device cuda`, Linux. Loads `libcuda.so.1` and NVRTC at run time, compiles the kernels for the GPU on first use and caches them. Int8 tensor-core GEMMs and attention need sm_80+; older GPUs fall back to dp4a decode kernels for batches. A GPU is refused if no installed NVRTC can target it (older NVRTCs are tried, #39). One token is a captured CUDA graph, replayed. On H100/H200 (sm_90a) the fused gate+up prefill GEMM runs on wgmma + TMA (#33). | `cuda/mod.rs`, `cuda/ffi.rs`, `cuda/qwen2.rs` |
 | Commands | `info`, `gen`, `logits` (top-K next-token logits), `chat` (terminal, chat template, KV reuse across turns), `serve` (OpenAI-compatible HTTP). | `main.rs`, `chat.rs`, `serve.rs` |
 | Sampling | Greedy, or temperature / top-k / top-p / min-p / repeat penalty with a seed (llama.cpp's order). On the GPU the penalty and top-k (k ≤ 256) run on the device. | `sample.rs`, `cuda/sample.cu` |
 | Speculative decoding | Prompt lookup (`--draft K`) and a draft model (`--draft-model small.gguf`). Both are lossless: same output with or without, greedy or seeded sampling. | `spec.rs`, `draft.rs` |
 | CPU + GPU split | A model too big for VRAM puts its first layers on the CPU and the rest plus the head on the GPU (`--gpu-layers N`). For prompts of ≥ 32 tokens the CPU layers' weights are streamed through the GPU. | `hybrid.rs`, `cuda/qwen2/stream.rs` |
 | KV cache | f16 by default; `--kv q8` (GPU only) halves it with slightly different results. | `kv.rs` |
-| Serving | `axon serve`: `/v1/chat/completions` (with OpenAI tool calling: `tools`, `tool_choice`, `tool_calls`, for Qwen3, Qwen2.5 and Llama 3.1/3.2 templates), `/v1/completions`, `/v1/models`, `/health`, SSE streaming. Runs **one request at a time** (stage S1); the KV cache carries over between requests for shared prefixes. | `serve.rs`, `serve/`, `serve/tools.rs` |
+| Serving | `axon serve`: `/v1/chat/completions` (with OpenAI tool calling: `tools`, `tool_choice`, `tool_calls`, for Qwen3, Qwen2.5 and Llama 3.1/3.2 templates), `/v1/completions`, `/v1/models`, `/health`, SSE streaming. On one GPU, decode rows of concurrent requests run in one batched step (`--parallel N`, default 8; #38), each request's output equal to running it alone. On the CPU, a CPU/GPU split or a multi-GPU pipeline, requests run one at a time. The KV cache carries over for shared prefixes. Default context: the model's trained length where it fits (#42). | `serve.rs`, `serve/`, `serve/engine.rs`, `serve/tools.rs` |
+| Multi-GPU | `--gpus 0,1`: pipeline parallel, layers split across GPUs in order, bit-identical to one GPU. P2P is opt-in and untested (`AXON_P2P=1`). No tensor parallel (#34). | `cuda/qwen2/pipeline.rs` |
 
-**Not on main:** concurrent request batching, multiple GPUs and Gemma. Tool calling has no
+**Not on main:** tensor parallel, chunked prefill in the batch engine (#45, open), and the long-context
+decode attention fix (in flight). Tool calling has no
 `/v1/responses` (codex) and no ollama-native API; the legacy `functions` field is still a 400.
 
 The full flag and environment reference is in the [README](../README.md#usage).
@@ -127,17 +135,14 @@ cargo fmt && cargo clippy && cargo test
 
 ## In flight (not on main)
 
-Each item is a branch or design, not merged:
+As of main `a591e17` (2026-10-16). Each item is a branch or an open PR:
 
-- **S2 continuous batching for `serve`.** Many requests share one decode step (slot KV cache, per-row
-  positions, per-row sampling). Aggregate target ESTIMATED at ~5× single-stream on 7B at 8 clients.
-- **Gemma 3.** Head dim 256, sliding-window layers, GeGLU, 262k vocab. Main refuses `gemma` today.
-- **Startup round 2.** Pinned staging for weight upload and overlap of upload with prefill, to cut GPU
-  time-to-first-token.
-- **Multi-GPU, pipeline parallel first.** Stage 1 is in progress ([design/multi-gpu.md](design/multi-gpu.md)).
-- **Hopper wgmma/TMA prefill path for H100.** Design only; the first pod experiment is pending
-  ([design/hopper.md](design/hopper.md)).
-- **Old-GPU (sm_61, Pascal) fixes**, tested on Jaded's GTX 1050. Main has no tested path for sm_61.
+- **#45 chunked prefill in `serve`'s batch engine** (`--prefill-chunk`, default 512): a long prompt no longer
+  freezes the other streams.
+- **Long-context decode attention** (lcdec): axon loses decode at 32k context to llama.cpp on 7B/0.5B
+  ([results.md](results.md#long-context-gpu-bella)); a 4-warp `attn_blk` plus a two-phase combine is in test.
+- **Round 10 tracks** from [research/](research/README.md): speculation on the 32B split, a determinism
+  fingerprint, exact KV save/restore (`chat --session`), and `--rope-scaling yarn`.
 
 ## Other docs
 
@@ -146,5 +151,11 @@ Each item is a branch or design, not merged:
 - [design/multi-gpu.md](design/multi-gpu.md): pipeline parallel, then tensor parallel; bit-identity analysis.
 - [design/hopper.md](design/hopper.md): why the H100 trails on prefill, and the wgmma plan.
 - [roadmap.md](roadmap.md): priorities, and what is not planned.
+- [methodology.md](methodology.md): how work is picked, built, reviewed, gated and benchmarked.
+- [history.md](history.md): every round and PR, with why, how it was verified, and before/after numbers.
+- [experiments-rejected.md](experiments-rejected.md): NO-GOs and regressions, with numbers. Read before starting a round.
+- [results.md](results.md): current standing vs ollama and llama.cpp, with dates, commits and hosts.
+- [research/](research/README.md): the round-10 research reports and scope.
+- [log/](log/README.md): one engineering-log entry per PR or NO-GO, from now on.
 - [../BENCH.md](../BENCH.md): CPU numbers and the Parabellum GPU board; [../README.md](../README.md):
   full usage.

@@ -78,12 +78,14 @@ Works today, honestly scoped:
   guesses the next tokens, the model verifies them in one batched pass; equally lossless.
   Default K=3 with a draft model. Greedy tg128 medians in its A/B at K=3: +37% Qwen2.5-7B,
   +44% Qwen3-8B, +63% Llama-3.1-8B; sampled, little or none (below).
-- Serving: `axon serve`, an OpenAI-compatible HTTP server (below) with tool calling, one
-  request at a time.
+- Serving: `axon serve`, an OpenAI-compatible HTTP server (below) with tool calling. On one GPU it
+  batches the decode steps of concurrent requests (`--parallel N`); elsewhere it runs one request at a time.
 - Rust 1.89 or newer.
 
-Not on main yet: batching of concurrent requests, multiple GPUs, Gemma. What's in flight and
-why: [docs/roadmap.md](docs/roadmap.md).
+Not on main yet: tensor parallel, chunked prefill in `serve` (#45), the long-context decode attention
+fix. What's in flight and why: [docs/roadmap.md](docs/roadmap.md). How Axon is built and measured, and
+what was tried and dropped: [docs/methodology.md](docs/methodology.md),
+[docs/history.md](docs/history.md), [docs/experiments-rejected.md](docs/experiments-rejected.md).
 
 ## Quickstart
 
@@ -480,6 +482,12 @@ The GPU, after that:
   contract, a map of the source tree
 - [docs/benchmarks-gpu.md](docs/benchmarks-gpu.md): GPU scoreboards with method and caveats
 - [docs/roadmap.md](docs/roadmap.md): what's next, and what isn't planned
+- [docs/methodology.md](docs/methodology.md): how changes are picked, built, reviewed, gated and benchmarked
+- [docs/history.md](docs/history.md): the engineering log, round by round, with before/after numbers
+- [docs/experiments-rejected.md](docs/experiments-rejected.md): what was tried and didn't work, with numbers
+- [docs/results.md](docs/results.md): current standing vs ollama and llama.cpp, with dates and commits
+- [docs/research/](docs/research/README.md): research reports behind the roadmap
+- [docs/log/](docs/log/README.md): one entry per PR (the convention for new work)
 - [docs/design/](docs/design/): [multi-GPU](docs/design/multi-gpu.md) and
   [Hopper](docs/design/hopper.md) designs
 
