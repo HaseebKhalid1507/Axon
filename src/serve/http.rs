@@ -344,6 +344,16 @@ impl<S: Read + Write> Conn<S> {
                 if self.buf.len() > MAX_HEAD {
                     return err(431, "request head too large");
                 }
+                // Not HTTP at all (a TLS ClientHello, binary junk): say so
+                // now instead of waiting `head_timeout` for a line end
+                // that may never come. Same status as `parse_head` gives.
+                let m = self.buf.iter().position(|&b| b == b' ');
+                if !self.buf[..m.unwrap_or(self.buf.len())]
+                    .iter()
+                    .all(|&b| is_tchar(b))
+                {
+                    return err(400, "malformed request line");
+                }
             }
             match self.fill(since) {
                 Ok(0) if self.buf.is_empty() => return Ok(None),
@@ -655,6 +665,32 @@ mod tests {
             Err(e) => e.status,
             Ok(Some(_)) => 200,
             Ok(None) => 0,
+        }
+    }
+
+    /// Bytes that can't begin an HTTP request (a TLS ClientHello, junk)
+    /// are a 400 as soon as they arrive, not after `head_timeout` waiting
+    /// for a line end. A valid head arriving slowly is still waited for.
+    #[test]
+    fn non_http_bytes_rejected_at_once() {
+        let hello = [
+            0x16u8, 0x03, 0x01, 0x00, 0xa5, 0x01, 0x00, 0x00, 0xa1, 0x03, 0x03,
+        ];
+        for input in [&hello[..], b"\x00\x01\x02", b"GE\x7fT", b"\tGET / HTTP/1.1"] {
+            for step in [1, 4096] {
+                let e = Conn::new(Mock::new(input, step))
+                    .read_request()
+                    .unwrap_err();
+                assert_eq!(
+                    (e.status, e.msg),
+                    (400, "malformed request line"),
+                    "{input:?}"
+                );
+            }
+        }
+        for input in [&b"POST /v1/completions HTTP/1.1\r\nHo"[..], b"GET", b"G"] {
+            let e = Conn::new(Mock::new(input, 1)).read_request().unwrap_err();
+            assert_eq!(e.msg, "connection closed mid-request", "{input:?}");
         }
     }
 

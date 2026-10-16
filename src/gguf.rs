@@ -15,6 +15,12 @@ const MAX_DIMS: u32 = 4;
 const DEFAULT_ALIGNMENT: u64 = 32;
 /// Arrays of arrays are legal GGUF; nothing real nests deeper than this.
 const MAX_ARRAY_DEPTH: u32 = 4;
+/// Most metadata array elements in a file, all arrays together. Each one
+/// is a `Val` in memory (32 bytes) however small its encoding (a u8 is 1
+/// byte), so the file-size check alone let a 150 MB header ask for 4.8 GB.
+/// Real vocabularies have up to ~262k tokens, in 3-4 arrays; this is 268 MB
+/// of `Val`s at most.
+const MAX_META_ELEMS: u64 = 1 << 23;
 
 fn bad(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
@@ -24,6 +30,8 @@ fn bad(msg: impl Into<String>) -> io::Error {
 struct Reader<'a> {
     buf: &'a [u8],
     pos: usize,
+    /// Metadata array elements still allowed (`MAX_META_ELEMS`).
+    elems_left: u64,
 }
 
 impl<'a> Reader<'a> {
@@ -94,6 +102,12 @@ impl<'a> Reader<'a> {
                 let et = self.u32(W)?;
                 let n = self.u64(W)?;
                 self.check_count(n, val_min_size(et)?, "metadata array")?;
+                if n > self.elems_left {
+                    return Err(bad(format!(
+                        "corrupt file: metadata arrays hold more than {MAX_META_ELEMS} values"
+                    )));
+                }
+                self.elems_left -= n;
                 let mut a = Vec::with_capacity((n as usize).min(4096));
                 for _ in 0..n {
                     a.push(self.val(et, depth + 1)?);
@@ -888,7 +902,11 @@ struct Header {
 }
 
 fn parse(buf: &[u8]) -> io::Result<Header> {
-    let mut r = Reader { buf, pos: 0 };
+    let mut r = Reader {
+        buf,
+        pos: 0,
+        elems_left: MAX_META_ELEMS,
+    };
 
     let magic = r
         .u32("GGUF magic")
@@ -1029,6 +1047,24 @@ fn parse(buf: &[u8]) -> io::Result<Header> {
                 "tensor {}: data at {}+{} ({} bytes) runs past the end of the file \
                  ({file_len} bytes); the file is truncated or corrupt",
                 t.name, data_offset, t.offset, t.n_bytes
+            )));
+        }
+    }
+
+    // No two tensors may share bytes. Writers lay tensors out one after
+    // another; overlapping ranges (a type or size changed in place) broke
+    // `Model::release`'s bookkeeping: a repacked tensor's released bytes
+    // were another tensor's too, and reading that one panicked.
+    let mut spans: Vec<(u64, u64, usize)> = (tensors.iter().enumerate())
+        .filter(|(_, t)| t.n_bytes > 0)
+        .map(|(i, t)| (t.offset, t.offset + t.n_bytes, i))
+        .collect();
+    spans.sort_unstable();
+    for w in spans.windows(2) {
+        if w[1].0 < w[0].1 {
+            return Err(bad(format!(
+                "tensors {} and {} overlap in the file; it is corrupt",
+                tensors[w[0].2].name, tensors[w[1].2].name
             )));
         }
     }
@@ -1341,6 +1377,28 @@ mod tests {
         assert!(err(&w.pad_to(8, 64)).contains("nested"));
     }
 
+    /// Metadata arrays share one element budget (`MAX_META_ELEMS`): a u8
+    /// array is 1 byte per element in the file but a 32-byte `Val` in
+    /// memory, so 150 MB of header aborted on a 4 GB address-space cap.
+    #[test]
+    fn metadata_element_budget() {
+        let u8_array = |w: W, key: &str, n: u64| {
+            let mut w = w.str(key).u32(9).u32(0).u64(n);
+            w.0.resize(w.0.len() + n as usize, 7);
+            w
+        };
+        let one = u8_array(W::header(3, 0, 1), "a", MAX_META_ELEMS + 1).pad_to(8, 0);
+        assert!(err(&one).contains("more than"));
+        // Cumulative: 1000 values, then one array that fits the file but
+        // not what is left of the budget.
+        let w = u8_array(W::header(3, 0, 2), "a", 1000);
+        let two = u8_array(w, "b", MAX_META_ELEMS - 999).pad_to(8, 0);
+        assert!(err(&two).contains("more than"));
+        let w = u8_array(W::header(3, 0, 2), "a", 1000);
+        let ok = u8_array(w, "b", 1000).pad_to(8, 0);
+        assert_eq!(parse(&ok).expect("2000 values").metadata.len(), 2);
+    }
+
     #[test]
     fn bad_tensors() {
         // Data range past the end of the file.
@@ -1392,6 +1450,31 @@ mod tests {
         // "blk" alone is a name, not a crash.
         let buf = W::header(3, 1, 0).tensor("blk", 1, 0).pad_to(32, 32);
         assert_eq!(parse(&buf).unwrap().tensors[0].layer, -1);
+    }
+
+    /// Tensors sharing bytes are refused (a fuzzed tied embedding retyped
+    /// to F16 in place overlapped the matrices after it, which were
+    /// repacked and released; reading the embedding then panicked).
+    /// Touching ranges and zero-size tensors are fine.
+    #[test]
+    fn overlapping_tensors_refused() {
+        let buf = W::header(3, 2, 0)
+            .tensor("a", 16, 0)
+            .tensor("b", 8, 32)
+            .pad_to(32, 96);
+        assert!(err(&buf).contains("tensors a and b overlap"));
+        // b inside a, listed first.
+        let buf = W::header(3, 2, 0)
+            .tensor("b", 8, 32)
+            .tensor("a", 24, 0)
+            .pad_to(32, 96);
+        assert!(err(&buf).contains("overlap"));
+        let buf = W::header(3, 3, 0)
+            .tensor("a", 8, 0)
+            .tensor("b", 8, 32)
+            .tensor("z", 0, 32)
+            .pad_to(32, 64);
+        assert_eq!(parse(&buf).expect("touching").tensors.len(), 3);
     }
 
     #[test]

@@ -2633,6 +2633,39 @@ pub(crate) mod tests {
         assert!(!reads(&own_head, true));
     }
 
+    /// A tied output head over a full-precision (F16 / F32) embedding, as
+    /// F16 GGUFs and llama.cpp's --token-embedding-type f16 make: loads and
+    /// runs with every other matrix repacked and released (on the anonymous
+    /// copy, where reading a released tensor panics), with and without the
+    /// repack. The fuzzer's panic here came from overlapping tensors, now
+    /// refused by `gguf::parse`; real files of this shape (Qwen3-0.6B and
+    /// Llama-3.2-1B with an F16 embedding) load on main too.
+    #[test]
+    fn tied_full_precision_embedding_runs() {
+        for (ty, repack) in [(F16, true), (F16, false), (F32, true), (F32, false)] {
+            // A fresh model each time: a repacked one's released tensors
+            // can't be read again.
+            let m = tiny_model(
+                |ts| {
+                    let t = ts.iter_mut().find(|t| t.0 == "token_embd.weight").unwrap();
+                    t.2 = ty;
+                },
+                |_| {},
+            );
+            assert!(!m.file_backed());
+            assert!(find_opt(&m, "output.weight").is_none());
+            {
+                let net = Qwen2::new_with(&m, repack);
+                let mut c = net.new_cache(4);
+                for p in 0..4 {
+                    let l = net.forward(p as u32, p, &mut c);
+                    assert_eq!(l.len(), 8);
+                    assert!(l.iter().all(|x| x.is_finite()), "type {ty} repack {repack}");
+                }
+            }
+        }
+    }
+
     fn rejects(edit: impl FnOnce(&mut Vec<(String, Vec<u64>, u32)>), want: &str) {
         let e = tiny(edit).expect_err("malformed model accepted");
         assert!(e.to_string().contains(want), "{e}");

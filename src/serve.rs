@@ -47,7 +47,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, mpsc};
 use std::time::{Duration, Instant};
 
-/// Most open connections (default); more are answered 503 and closed.
+/// Most open connections (default). One more closes the connection that
+/// has waited longest for a request (`Shared::waiting`), or if every one is
+/// busy with a request, is answered 503 and closed.
 pub const MAX_CONNS: usize = 256;
 /// Most requests waiting for the engine (default); more are answered 503.
 pub const MAX_QUEUE: usize = 128;
@@ -60,6 +62,11 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 /// How often a connection waiting for tokens checks that its client is
 /// still there (a closed socket otherwise shows only at the next write).
 const POLL: Duration = Duration::from_millis(200);
+/// `linger`: longest wait, most bytes dropped.
+const LINGER: Duration = Duration::from_secs(2);
+const LINGER_BYTES: usize = 4 << 20;
+/// Most bytes the acceptor drops from a connection it answers 503.
+const ACCEPT_DRAIN: usize = 64 << 10;
 
 /// `axon serve`'s settings.
 pub struct Opts {
@@ -206,6 +213,61 @@ struct Shared {
     conns: AtomicUsize,
     next_id: AtomicU64,
     stop: Arc<AtomicBool>,
+    /// Connections waiting for (or in the middle of receiving) a request,
+    /// or lingering after an error, oldest first: (connection id, a handle
+    /// to shut it down). At the connection limit a new connection closes
+    /// the first one, so idle or trickling sockets (slow-loris) can't lock
+    /// everyone out for the `IDLE` timeout. Taking an entry off the list
+    /// (here, or by its own thread once a request has arrived) is the one
+    /// decision under this lock: a thread that finds its entry already
+    /// gone was evicted and doesn't serve the request it may just have
+    /// read (its client sees the connection closed, as for any idle
+    /// keep-alive connection a server closes; a non-idempotent request
+    /// sent at that instant is lost, which only happens at the limit). A
+    /// request whose thread took its entry first is never evicted. Each
+    /// connection holds a second fd for this handle (2 per connection:
+    /// with --max-conns N, allow ~2N fds in `ulimit -n`).
+    waiting: WaitList,
+    next_conn: AtomicU64,
+    /// `Server::queued`.
+    queued: Arc<AtomicU64>,
+}
+
+/// `Shared::waiting`: (connection id, a handle to shut it down), oldest first.
+#[derive(Default)]
+struct WaitList(std::sync::Mutex<Vec<(u64, Arc<TcpStream>)>>);
+
+impl WaitList {
+    /// Close the connection that has waited longest for a request, if
+    /// any. Its thread sees the end of the stream and exits.
+    fn evict_oldest(&self) -> bool {
+        let mut w = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if w.is_empty() {
+            return false;
+        }
+        let (_, s) = w.remove(0);
+        let _ = s.shutdown(std::net::Shutdown::Both);
+        true
+    }
+
+    /// Register connection `id` as waiting (`Some`) or take it off the
+    /// list (`None`). Returns whether it was on the list: false after a
+    /// `None` means `evict_oldest` took it (and shut it down) first.
+    fn set(&self, id: u64, s: Option<&Arc<TcpStream>>) -> bool {
+        let mut w = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let n = w.len();
+        w.retain(|(i, _)| *i != id);
+        let was = w.len() != n;
+        if let Some(s) = s {
+            w.push((id, s.clone()));
+        }
+        was
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.0.lock().unwrap().len()
+    }
 }
 
 /// Decrements the connection count however the connection's thread ends.
@@ -566,6 +628,25 @@ pub struct Server {
     /// Tokens generated so far, all requests (the tests watch it).
     #[cfg_attr(not(test), allow(dead_code))]
     pub generated: Arc<AtomicU64>,
+    /// Completion requests handed to the engine's queue so far (the tests
+    /// wait on it instead of sleeping).
+    #[cfg_attr(not(test), allow(dead_code))]
+    pub queued: Arc<AtomicU64>,
+    #[cfg(test)]
+    sh: Arc<Shared>,
+}
+
+#[cfg(test)]
+impl Server {
+    /// Connections waiting for (or receiving) a request (`Shared::waiting`).
+    pub fn waiting(&self) -> usize {
+        self.sh.waiting.len()
+    }
+
+    /// Open connections.
+    pub fn conns(&self) -> usize {
+        self.sh.conns.load(Ordering::Relaxed)
+    }
 }
 
 impl Server {
@@ -606,6 +687,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
     let (ready_tx, ready_rx) = mpsc::channel();
     let stop = Arc::new(AtomicBool::new(false));
     let generated = Arc::new(AtomicU64::new(0));
+    let queued = Arc::new(AtomicU64::new(0));
     let eo = EngineOpts {
         generated: generated.clone(),
         path: o.path.clone(),
@@ -653,6 +735,9 @@ pub fn start(o: Opts) -> io::Result<Server> {
         conns: AtomicUsize::new(0),
         next_id: AtomicU64::new(1),
         stop: stop.clone(),
+        waiting: Default::default(),
+        next_conn: AtomicU64::new(0),
+        queued: queued.clone(),
     });
     let sh2 = sh.clone();
     let accept = std::thread::Builder::new()
@@ -664,6 +749,9 @@ pub fn start(o: Opts) -> io::Result<Server> {
         engine: Some(engine),
         stop,
         generated,
+        queued,
+        #[cfg(test)]
+        sh: sh.clone(),
     };
     let Ok(l) = ready_rx.recv() else {
         server.shutdown();
@@ -700,12 +788,28 @@ fn accept_loop(listener: TcpListener, sh: Arc<Shared>) {
             std::thread::sleep(Duration::from_millis(10));
             continue;
         };
-        if sh.conns.load(Ordering::Relaxed) >= sh.max_conns {
+        if sh.conns.load(Ordering::Relaxed) >= sh.max_conns && !sh.waiting.evict_oldest() {
             let _ = s.set_write_timeout(Some(Duration::from_secs(1)));
             let e = ApiError::new(503, "server_error", "too many connections");
-            let mut c = Conn::new(&mut s);
-            c.extra = sh.extra.clone();
-            let _ = c.respond(503, "application/json", e.json().as_bytes(), false, &[]);
+            {
+                let mut c = Conn::new(&mut s);
+                c.extra = sh.extra.clone();
+                let _ = c.respond(503, "application/json", e.json().as_bytes(), false, &[]);
+            }
+            // What the client already sent, unread at close, would make
+            // it a reset that can destroy the 503 before the client reads it.
+            let _ = s.shutdown(std::net::Shutdown::Write);
+            // Only what has already arrived, and at most ACCEPT_DRAIN
+            // bytes: this is the one accept thread.
+            if s.set_nonblocking(true).is_ok() {
+                let (mut b, mut n) = ([0u8; 4096], 0);
+                while n < ACCEPT_DRAIN {
+                    match io::Read::read(&mut s, &mut b) {
+                        Ok(k) if k > 0 => n += k,
+                        _ => break,
+                    }
+                }
+            }
             continue;
         }
         sh.conns.fetch_add(1, Ordering::Relaxed);
@@ -727,15 +831,27 @@ fn connection(s: TcpStream, sh: &Shared) {
     let _ = s.set_nodelay(true);
     let _ = s.set_read_timeout(Some(IDLE));
     let _ = s.set_write_timeout(Some(WRITE_TIMEOUT));
+    let id = sh.next_conn.fetch_add(1, Ordering::Relaxed);
+    let handle = s.try_clone().ok().map(Arc::new);
     let mut c = Conn::new(s);
     c.head_timeout = IDLE;
     c.extra = sh.extra.clone();
     loop {
-        match c.read_request() {
+        sh.waiting.set(id, handle.as_ref());
+        let r = c.read_request();
+        if !sh.waiting.set(id, None) && handle.is_some() {
+            // Evicted (`Shared::waiting`): the socket is shut down.
+            return;
+        }
+        match r {
             Ok(None) => return,
             Err(e) => {
                 let body = ApiError::new(e.status, "invalid_request_error", e.msg).json();
                 let _ = c.respond(e.status, "application/json", body.as_bytes(), false, &[]);
+                // Evictable while it lingers: it serves nothing more.
+                sh.waiting.set(id, handle.as_ref());
+                linger(&c.s);
+                sh.waiting.set(id, None);
                 return;
             }
             Ok(Some(req)) => {
@@ -745,6 +861,30 @@ fn connection(s: TcpStream, sh: &Shared) {
                     _ => return,
                 }
             }
+        }
+    }
+}
+
+/// Before closing after an error answered mid-request (413, 431, ...):
+/// stop sending, then read and drop what the client is still sending, for
+/// up to `LINGER` or `LINGER_BYTES`. Closing with its bytes unread would
+/// reset the connection, and a reset can destroy the error response
+/// before the client reads it (it sees ECONNRESET instead of the 413).
+fn linger(s: &TcpStream) {
+    let _ = s.shutdown(std::net::Shutdown::Write);
+    let t = Instant::now();
+    let mut b = [0u8; 16384];
+    let mut n = 0;
+    while t.elapsed() < LINGER && n < LINGER_BYTES {
+        let left = LINGER
+            .saturating_sub(t.elapsed())
+            .max(Duration::from_millis(1));
+        if s.set_read_timeout(Some(left)).is_err() {
+            return;
+        }
+        match io::Read::read(&mut &*s, &mut b) {
+            Ok(0) | Err(_) => return,
+            Ok(k) => n += k,
         }
     }
 }
@@ -953,7 +1093,9 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
         id: n,
     };
     match sh.jobs.try_send(job) {
-        Ok(()) => {}
+        Ok(()) => {
+            sh.queued.fetch_add(1, Ordering::Relaxed);
+        }
         Err(mpsc::TrySendError::Full(_)) => {
             return api_err(
                 c,
@@ -986,17 +1128,27 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
     r
 }
 
-/// The next event, checking every `POLL` that the client is still there.
-/// None: it isn't (or the engine is gone).
-fn next_event(c: &Conn<TcpStream>, rx: &mpsc::Receiver<Event>) -> Option<Event> {
+/// The next event, checking every `POLL` that the client is still there
+/// (`checked`: when it last was), also while events keep coming: a whole
+/// (non-streamed) response writes nothing until the end, so before, a
+/// client that left mid-generation went unnoticed and the engine ran on
+/// to max_tokens or the context's end (minutes at --ctx 32768) while
+/// every later request waited. None: it isn't there (or the engine is gone).
+fn next_event(
+    c: &Conn<TcpStream>,
+    rx: &mpsc::Receiver<Event>,
+    checked: &mut Instant,
+) -> Option<Event> {
     loop {
+        if checked.elapsed() >= POLL {
+            *checked = Instant::now();
+            if c.s.closed() {
+                return None;
+            }
+        }
         match rx.recv_timeout(POLL) {
             Ok(e) => return Some(e),
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if c.s.closed() {
-                    return None;
-                }
-            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => return None,
         }
     }
@@ -1014,8 +1166,9 @@ fn whole(
     parser: Option<tools::Parser>,
 ) -> io::Result<bool> {
     let (mut content, mut reasoning) = (String::new(), String::new());
+    let mut checked = Instant::now();
     loop {
-        match next_event(c, rx) {
+        match next_event(c, rx, &mut checked) {
             None => return Ok(false),
             Some(Event::Text {
                 content: t,
@@ -1116,7 +1269,8 @@ fn stream(
             }
         }
     };
-    let mut ev = next_event(c, rx);
+    let mut checked = Instant::now();
+    let mut ev = next_event(c, rx, &mut checked);
     loop {
         // Everything already there goes out in one write.
         let mut done = false;
@@ -1176,7 +1330,7 @@ fn stream(
             c.end_stream()?;
             return Ok(keep);
         }
-        ev = next_event(c, rx);
+        ev = next_event(c, rx, &mut checked);
         if ev.is_none() {
             return Ok(false);
         }

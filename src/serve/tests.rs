@@ -990,6 +990,18 @@ fn http_overhead() {
     );
 }
 
+/// Wait until `cond` holds: a liveness bound (2 minutes), not a speed one.
+fn wait_for(what: &str, cond: impl Fn() -> bool) {
+    let t = Instant::now();
+    while !cond() {
+        assert!(
+            t.elapsed() < Duration::from_secs(120),
+            "waited 2 min for {what}"
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 /// Limits: a full queue and too many connections are 503s, a client that
 /// stops reading its stream neither blocks the engine nor other clients,
 /// and the server recovers once they are gone.
@@ -1017,6 +1029,15 @@ fn serve_caps_and_slow_reader() {
         .unwrap();
     let mut b = [0u8; 512];
     assert!(ca.read(&mut b).unwrap() > 0);
+    // The steps below wait for the server's state, not for fixed times: on
+    // a loaded machine (a whole suite in parallel, spinning pools on few
+    // cores) a token took over 400 ms and a connection thread over 500 ms
+    // to enqueue its request (MEASURED: 0.5B decode 47 -> 2.5 tok/s with 6
+    // busy loops on 2 cores), and fixed sleeps made "the engine stalled"
+    // out of a slow engine. `wait_for`'s deadline is for liveness only.
+    wait_for("A to start generating", || {
+        s.generated.load(Ordering::Relaxed) > 0
+    });
     // B, C: queued behind it (the queue holds 2).
     let small = json!({"prompt": "Hi", "max_tokens": 1, "temperature": 0}).to_string();
     let mut cb = conn();
@@ -1025,7 +1046,9 @@ fn serve_caps_and_slow_reader() {
         c.write_all(request("POST", "/v1/completions", &small, false).as_bytes())
             .unwrap();
     }
-    std::thread::sleep(Duration::from_millis(500));
+    wait_for("B and C to be queued", || {
+        s.queued.load(Ordering::Relaxed) == 3
+    });
     // D: the queue is full.
     let mut cd = conn();
     cd.write_all(request("POST", "/v1/completions", &small, false).as_bytes())
@@ -1033,30 +1056,29 @@ fn serve_caps_and_slow_reader() {
     let r = read_resp(&mut cd, &mut Vec::new());
     assert_eq!(r.status, 503, "{}", r.body);
     assert!(r.body.contains("queued"));
-    // While A's client reads nothing, the engine goes on and /health answers at once.
+    // While A's client reads nothing, the engine goes on, and /health
+    // answers while A is still generating: it isn't queued behind it (A
+    // runs to ~2000 tokens, the context; B and C haven't run).
     let g0 = s.generated.load(Ordering::Relaxed);
     let mut ce = conn();
-    let t = Instant::now();
     ce.write_all(request("GET", "/health", "", false).as_bytes())
         .unwrap();
     assert_eq!(read_resp(&mut ce, &mut Vec::new()).status, 200);
-    assert!(
-        t.elapsed() < Duration::from_millis(500),
-        "{:?}",
-        t.elapsed()
-    );
-    std::thread::sleep(Duration::from_millis(500));
-    assert!(
-        s.generated.load(Ordering::Relaxed) > g0,
-        "the engine stalled"
-    );
-    // A, B, C, D, E open, F the sixth; G is one too many.
+    let g1 = s.generated.load(Ordering::Relaxed);
+    assert!(g1 < 1000, "/health waited for A's generation ({g1} tokens)");
+    wait_for("the engine to go on with A", || {
+        s.generated.load(Ordering::Relaxed) > g1.max(g0)
+    });
+    // A, B, C, D, E open, F the sixth; G is one too many: it closes D,
+    // the connection that has waited longest for a request (its 503 was
+    // answered first; E and F came later), and is served.
     let _cf = conn();
     std::thread::sleep(Duration::from_millis(100));
     let mut cg = conn();
-    let r = read_resp(&mut cg, &mut Vec::new());
-    assert_eq!(r.status, 503);
-    assert!(r.body.contains("connections"));
+    cg.write_all(request("GET", "/health", "", false).as_bytes())
+        .unwrap();
+    assert_eq!(read_resp(&mut cg, &mut Vec::new()).status, 200);
+    assert_eq!(cd.read(&mut b).unwrap_or(0), 0, "D still open");
     // A leaves; B and C get their answers; everyone leaves; the server recovers.
     drop(ca);
     for c in [&mut cb, &mut cc] {
@@ -1071,6 +1093,171 @@ fn serve_caps_and_slow_reader() {
             json!({"prompt": "Hi", "max_tokens": 1}),
         );
         assert_eq!(v.status, 200);
+    }
+}
+
+/// Slow-loris: idle sockets at the connection limit don't lock clients
+/// out. A new connection closes the one that has waited longest for a
+/// request (idle, or still sending its head); only when every connection
+/// is busy with a request is it a 503.
+#[test]
+fn serve_evicts_waiting_connections() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server_with(p.to_str().unwrap(), Device::Cpu, |o| {
+        o.max_conns = 4;
+        o.max_queue = 8;
+    });
+    let a = s.addr;
+    let conn = || {
+        let c = TcpStream::connect(a).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+        c
+    };
+    let long = json!({"prompt": "Count: 1, 2, 3,", "max_tokens": 3000, "stream": true,
+                      "temperature": 0})
+    .to_string();
+    let mut b = [0u8; 512];
+    // A streams (nobody reads past the first bytes); B and C queue behind it.
+    let mut ca = conn();
+    ca.write_all(request("POST", "/v1/completions", &long, false).as_bytes())
+        .unwrap();
+    assert!(ca.read(&mut b).unwrap() > 0);
+    let mut busy = vec![ca];
+    for _ in 0..2 {
+        let mut c = conn();
+        c.write_all(request("POST", "/v1/completions", &long, false).as_bytes())
+            .unwrap();
+        busy.push(c);
+    }
+    wait_for("A, B, C to be queued", || {
+        s.queued.load(Ordering::Relaxed) == 3
+    });
+    // D: idle (slow-loris), the fourth. E closes it and is served.
+    let mut cd = conn();
+    wait_for("D to wait", || s.waiting() == 1);
+    let mut ce = conn();
+    ce.write_all(request("GET", "/health", "", false).as_bytes())
+        .unwrap();
+    assert_eq!(read_resp(&mut ce, &mut Vec::new()).status, 200);
+    assert_eq!(cd.read(&mut b).unwrap_or(0), 0, "D still open");
+    // E, idle again after its answer, is now the one waiting longest: F
+    // closes it. F's own head trickles in, which counts as waiting too: G
+    // closes F.
+    wait_for("E to wait again", || s.waiting() == 1);
+    let mut cf = conn();
+    cf.write_all(b"POST /v1/completions HTTP/1.1\r\nHost: x\r\n")
+        .unwrap();
+    assert_eq!(
+        ce.read(&mut b).unwrap_or(0),
+        0,
+        "E (oldest waiting) still open"
+    );
+    wait_for("F to wait", || s.waiting() == 1);
+    let mut cg = conn();
+    assert_eq!(cf.read(&mut b).unwrap_or(0), 0, "F still open");
+    // G becomes busy too: A, B, C, G busy, nobody waiting: H is a 503.
+    cg.write_all(request("POST", "/v1/completions", &long, false).as_bytes())
+        .unwrap();
+    wait_for("G to be queued", || s.queued.load(Ordering::Relaxed) == 4);
+    let mut ch = conn();
+    let r = read_resp(&mut ch, &mut Vec::new());
+    assert_eq!(r.status, 503);
+    assert!(r.body.contains("connections"));
+    drop((busy, cg, ch));
+    wait_for("the connections to close", || s.conns() == 0);
+    let v = post(
+        a,
+        "/v1/completions",
+        json!({"prompt": "Hi", "max_tokens": 1}),
+    );
+    assert_eq!(v.status, 200);
+}
+
+/// The eviction race: taking a connection off the wait list decides it.
+/// A connection that took itself off first (its request arrived) is never
+/// evicted; one whose entry is already gone was evicted, its socket shut
+/// down, and doesn't serve. An empty list is the 503 path.
+#[test]
+fn wait_list_take_decides_the_race() {
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let a = l.local_addr().unwrap();
+    let (mut c1, mut c2) = (
+        TcpStream::connect(a).unwrap(),
+        TcpStream::connect(a).unwrap(),
+    );
+    let h1 = std::sync::Arc::new(l.accept().unwrap().0);
+    let h2 = std::sync::Arc::new(l.accept().unwrap().0);
+    let w = super::WaitList::default();
+    assert!(!w.set(1, Some(&h1)));
+    assert!(!w.set(2, Some(&h2)));
+    // 1 (the oldest) got its request and took itself off first.
+    assert!(w.set(1, None));
+    assert!(w.evict_oldest());
+    assert!(!w.set(2, None), "2 was evicted: it must not serve");
+    assert!(!w.evict_oldest());
+    c2.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    assert_eq!(c2.read(&mut [0u8; 8]).unwrap_or(0), 0, "2 not shut down");
+    // 1 is untouched.
+    (&*h1).write_all(b"ok").unwrap();
+    c1.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut b = [0u8; 2];
+    c1.read_exact(&mut b).unwrap();
+    assert_eq!(&b, b"ok");
+}
+
+/// A client that leaves while its whole (non-streamed) response is being
+/// generated cancels it within a few POLLs even though tokens keep coming;
+/// before, the engine ran on to max_tokens while later requests waited.
+#[test]
+fn serve_whole_response_cancelled_on_disconnect() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server(p.to_str().unwrap(), Device::Cpu);
+    let body = json!({"prompt": "Count: 1, 2, 3,", "max_tokens": 1900, "temperature": 0,
+                      "repetition_penalty": 1.0})
+    .to_string();
+    let mut c = TcpStream::connect(s.addr).unwrap();
+    c.write_all(request("POST", "/v1/completions", &body, false).as_bytes())
+        .unwrap();
+    // Wait until it generates, then leave.
+    wait_for("it to start", || s.generated.load(Ordering::Relaxed) >= 5);
+    drop(c);
+    // The next request is served once the engine is free: right after the
+    // cancel, or (before) after all 1900 tokens. No clock involved.
+    let v = post(
+        s.addr,
+        "/v1/completions",
+        json!({"prompt": "Hi", "max_tokens": 1}),
+    );
+    assert_eq!(v.status, 200);
+    let g = s.generated.load(Ordering::Relaxed);
+    assert!(g < 1900, "ran to the end: {g} tokens");
+}
+
+/// An error answered before the body is read (413 here) is followed by
+/// a lingering close: the server reads and drops what the client is still
+/// sending. A client that sends its whole request before reading (most do)
+/// then gets the 413; closing with the body unread reset the connection,
+/// and the client saw a broken pipe / reset instead.
+#[test]
+fn serve_error_mid_upload_is_not_a_reset() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server(p.to_str().unwrap(), Device::Cpu);
+    for _ in 0..3 {
+        let mut c = TcpStream::connect(s.addr).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        let n = 3 << 20;
+        let head =
+            format!("POST /v1/completions HTTP/1.1\r\nHost: x\r\nContent-Length: {n}\r\n\r\n");
+        c.write_all(head.as_bytes()).unwrap();
+        c.write_all(&vec![b'x'; n]).expect("upload");
+        let r = read_resp(&mut c, &mut Vec::new());
+        assert_eq!(r.status, 413, "{}", r.body);
     }
 }
 
