@@ -100,7 +100,17 @@ flags:
   --no-think  chat: qwen3: answer without reasoning first (by default it thinks, as ollama does)
   --ctx N     chat: context size in tokens (default: the model's, at most 8192; on cuda, if the
               whole model doesn't fit with it, less if at least half (or 4096) fits, else a
-              split); when the conversation outgrows it, the oldest exchanges are forgotten
+              split); when the conversation outgrows it, the oldest exchanges are forgotten;
+              serve: per request (default: the model's trained context if the whole model fits
+              on the GPU(s) with it, else the longest that does if at least 4096; on the CPU, as
+              much of it as fits in free RAM, at least 8192; a CPU/GPU split, at most 8192; a
+              shorter one is said on stderr); an explicit N is never shortened
+  --parallel N  serve: requests decoded together on the GPU (default 8; 1: one at a time;
+              N slots cost N + 1 KV caches). By default the context comes first: as many
+              slots (2 to 8) as fit with the whole context, or with a shorter one down to
+              32768 (or the whole one, if less); if not even 2 fit, one request at a time.
+              With --ctx N, the slots that fit with N; with --parallel N alone, N slots of
+              the longest context that fits them
 
 sampling flags (gen, chat; applied in this order, as llama.cpp):
   --repeat-penalty P  divide (multiply, if negative) the logits of tokens among the last N by P
@@ -317,7 +327,8 @@ fn open_draft_model(
 }
 
 /// `backend` with the draft model `dm`'s VRAM held while the main model is
-/// placed (`draft::load_pair`), then the drafter for its context.
+/// placed (`draft::load_pair`: for a `draft_ctx`-token cache), then the
+/// drafter for its context (at most draft_ctx).
 #[allow(clippy::too_many_arguments)]
 fn backend_and_drafter<'a>(
     model: &'a gguf::Model,
@@ -327,9 +338,11 @@ fn backend_and_drafter<'a>(
     gpu_layers: Option<usize>,
     kv: kv::KvType,
     fit: bool,
+    place: lm::Placing,
+    draft_ctx: usize,
 ) -> (Backend<'a>, Option<draft::ModelDrafter<Backend<'static>>>) {
-    draft::load_pair(dm, device, ctx, kv, || {
-        backend(model, device, ctx, gpu_layers, kv, fit)
+    draft::load_pair(dm, device, ctx, draft_ctx, kv, || {
+        backend(model, device, ctx, gpu_layers, kv, fit, place)
     })
     .unwrap_or_else(|e| match device {
         Device::Cuda => fail(&format!("--device cuda: --draft-model: {e}")),
@@ -394,8 +407,8 @@ fn placement(device: Device, gpu_layers: Option<usize>) -> (Device, Option<usize
 }
 
 /// The model on `device` with room for `ctx` tokens, split as `gpu_layers`
-/// says (`placement`'s; see `Backend::new`); a usage error if the GPU can't
-/// be used (no driver or device, too little memory, ...).
+/// says (`placement`'s) and `place` (`Backend::new_capped`); a usage error
+/// if the GPU can't be used (no driver or device, too little memory, ...).
 fn backend<'a>(
     model: &'a gguf::Model,
     device: Device,
@@ -403,8 +416,10 @@ fn backend<'a>(
     gpu_layers: Option<usize>,
     kv: kv::KvType,
     fit: bool,
+    place: lm::Placing,
 ) -> Backend<'a> {
-    Backend::new(model, device, ctx, gpu_layers, kv, fit).unwrap_or_else(|e| match device {
+    let net = Backend::new_capped(model, device, ctx, gpu_layers, kv, fit, place);
+    net.unwrap_or_else(|e| match device {
         Device::Cuda => fail(&format!("--device cuda: {e}")),
         Device::Cpu => fail(&e),
     })
@@ -569,6 +584,8 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         gpu_layers,
         kv,
         false,
+        lm::Placing::of(ids.len() + extra + 1),
+        ids.len() + extra + 1,
     );
     if sampler.is_some() && drafter.is_some() {
         eprintln!("{}", draft::SAMPLED_NOTE);
@@ -887,7 +904,17 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     check_stream_decode(max_draft);
     let dm = open_draft_model(draft_path, max_draft, device, &model, &tok);
     // The default context may shrink to keep the model on the GPU (Backend::new).
-    let (net, drafter) = backend_and_drafter(&model, dm.as_ref(), device, ctx, gpu_layers, kv, fit);
+    let (net, drafter) = backend_and_drafter(
+        &model,
+        dm.as_ref(),
+        device,
+        ctx,
+        gpu_layers,
+        kv,
+        fit,
+        lm::Placing::of(ctx),
+        ctx,
+    );
     let (want, ctx) = (ctx, net.ctx(ctx));
     if ctx < want {
         eprintln!(

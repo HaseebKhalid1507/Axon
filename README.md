@@ -153,9 +153,9 @@ Defaults, as `axon --help` gives them:
   `axon serve` runs a pipeline one request at a time.
 - `--kv T`: `f16`, or `q8` (cuda only; on a split, the GPU layers' cache, so more
   layers fit).
-- `--ctx N` (chat, serve): the model's trained context, at most 8192. On cuda, if the
+- `--ctx N` (chat): the model's trained context, at most 8192. On cuda, if the
   whole model doesn't fit with it, a shorter context if at least half of it (or 4096)
-  fits, else a split.
+  fits, else a split. For `serve`, see below: its default is the whole trained context.
 - `-n N`: gen 32 tokens; chat no limit per reply.
 - Sampling: `--temp` 0 for gen, 0.8 for chat; `--top-k` 40 (0 = off, all tokens),
   `--top-p` 0.9, `--min-p` 0 (off), `--repeat-penalty` 1.1 (serve: 1, off),
@@ -213,13 +213,36 @@ use your local model), `--max-conns N` / `--max-queue N` (defaults 256 / 128),
 `--parallel N` (requests decoded at once on the GPU, default 8; 1: one at a time), `--quiet`
 (no per-request line on stderr). `GET /health` is 503 until the model is loaded.
 
+- Context (`--ctx N`, per request): by default the model's trained context (32768 for
+  Qwen2.5, 40960 for Qwen3, 131072 for Llama 3.1), so agent harnesses' 10k-40k-token prompts
+  work without flags. With the whole model on one GPU (placed automatically, or every layer
+  by `--gpu-layers N`), if the weights leave too little GPU memory for it (the KV cache of
+  `--kv`'s type), the longest that fits (a multiple of 256; placed automatically, at least
+  4096, else the model is split). Over several GPUs (`AXON_GPUS`), the longest the pipeline
+  fits, at least 4096, else 8192. On the CPU, the longest whose KV cache fits in free RAM (a
+  multiple of 1024, at least 8192). A CPU/GPU split (automatic or `--gpu-layers`) keeps 8192,
+  as before: a long cache there takes GPU memory from the layers. A shorter context than
+  trained is said once on stderr, with why and the flag to change it. An explicit `--ctx N`
+  is used as given (up to the trained length). A `--draft-model` is sized for the main
+  model's context (at most 32768 by default; a split's 8192) and drafts up to it.
 - Many requests at once (`--device cuda`, the whole model on the GPU): up to `--parallel`
   requests decode together, one token each per step over the model's weights (continuous
   batching: a request joins as soon as a slot is free, its prompt prefilled as a step of its
-  own, and leaves when done). Each request has a KV slot of `--ctx` positions; if
-  `--parallel` slots don't fit in GPU memory the server takes fewer (at least 2), then shorter
-  ones (down to 1024 positions), and then serves a slot's context (longer prompts get a 400
-  `context_length_exceeded`; `--parallel 1` keeps the whole `--ctx`); it says so on stderr.
+  own, and leaves when done). Each slot is a KV cache as long as the context, and the
+  request running alone has one more: a pool of N slots costs N + 1 caches (7B at 32768:
+  1.75 GiB each). Without `--ctx` or `--parallel` the context comes first: as many slots
+  (2 to 8) as fit with the whole context; if not even 2 do, 2 or more with the longest
+  context they fit with, down to 32768 (or the whole context, if shorter); below that, one
+  request at a time with the whole context, and stderr says at which context 2 would fit
+  (and how many `--kv q8` fits). Measured: Qwen2.5-7B Q4_K_M on a 12 GB laptop GPU (10.6
+  GiB free) serves one at a time with 32768 (2 would fit at 30720; `--kv q8`: 4 at 32768),
+  on a 24 GB RTX 4090 8 at once with 32768. `--parallel N` alone: N slots of the longest
+  context that fits them (down to 1024 positions). `--ctx N`: never shortened; the slots
+  that fit with it (up to `--parallel`), else one at a time. The server says on stderr what
+  it chose and why; the context it serves is a slot's (`/v1/models` `meta.n_ctx`; longer
+  prompts get a 400 `context_length_exceeded`). The Q6_K prefill copy (int8 Q6_K matrices
+  for prefill's tensor cores, same results; 1.02 GiB on 7B Q4_K_M) is made after the
+  caches and slots, only from the memory they leave (`AXON_Q6K8=0` never makes it).
   A request running alone takes the single-stream path (CUDA graphs, `--draft`), and
   moves into the batch when a second one arrives. Every request's output is exactly what it
   gets alone, whatever else runs with it (greedy, and sampled with a `seed`): the batched
@@ -306,9 +329,9 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
   `tools` they are a 400.
   `parallel_tool_calls`, `strict`, `store`, `reasoning_effort` and `prompt_cache_key` are
   accepted and ignored.
-- Context: an agent's system prompt and tool schemas can be 15-25k tokens, past the
-  8192 default, so pass `--ctx` (up to the model's trained length, 40960 for Qwen3).
-  `--kv q8` halves the cache's memory. The prefix cache works across tool turns: the next
+- Context: an agent's system prompt and tool schemas can be 15-25k tokens; the default
+  context is the model's trained length where it fits (above), so no `--ctx` is needed.
+  `--kv q8` halves the cache's memory (more slots, or the whole context on a smaller GPU). The prefix cache works across tool turns: the next
   request resends the history with the results appended, and only the tokens after the
   previous reply's start are run again, as long as no other request evicted the prefix in
   between. There is one KV cache, so a harness's side requests (title generation,

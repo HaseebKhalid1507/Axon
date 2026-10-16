@@ -58,6 +58,8 @@ pub struct HybridQwen2<'m, 'g> {
     /// Layers on the GPU, of `n_layers`.
     pub gpu_layers: usize,
     pub n_layers: usize,
+    /// The context its caches are planned for (`build`'s max_ctx).
+    pub ctx: usize,
 }
 
 /// PR A's state: the streamer and when to use it.
@@ -450,6 +452,7 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
             gpu,
             gpu_layers: g,
             n_layers: n,
+            ctx: max_ctx,
         })
     }
 

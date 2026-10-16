@@ -132,6 +132,16 @@ pub fn pipeline_cuts(
     Ok(best)
 }
 
+/// Each device's free VRAM, shared evenly by the stages listed on it.
+fn free_shares(devs: &[(&Gpu, &Module)]) -> Result<Vec<u64>, String> {
+    let mut free = Vec::with_capacity(devs.len());
+    for &(g, _) in devs {
+        let share = devs.iter().filter(|(o, _)| o.same_device(g)).count();
+        free.push(g.info()?.free_bytes / share as u64);
+    }
+    Ok(free)
+}
+
 /// `cuts` from AXON_PP_CUTS (the inner boundaries, "14" or "10,20"), if set.
 fn cuts_env(n: usize, stages: usize) -> Result<Option<Vec<usize>>, String> {
     match std::env::var("AXON_PP_CUTS") {
@@ -200,11 +210,7 @@ impl<'g> PipelineQwen2<'g> {
             None => match cuts_env(n, ns)? {
                 Some(c) => c,
                 None => {
-                    let mut free = Vec::with_capacity(ns);
-                    for &(g, _) in devs {
-                        let share = devs.iter().filter(|(o, _)| o.same_device(g)).count();
-                        free.push(g.info()?.free_bytes / share as u64);
-                    }
+                    let free = free_shares(devs)?;
                     pipeline_cuts(n, &free, 0, |s, a, b| {
                         let (g, km) = devs[s];
                         CudaQwen2::stage_need(g, km, m, max_ctx, a, b, kv, PLAN_BATCH)
@@ -240,6 +246,52 @@ impl<'g> PipelineQwen2<'g> {
             p2p.push(w[0].gpu.enable_peer(w[1].gpu));
         }
         Ok(PipelineQwen2 { stages, cuts, p2p })
+    }
+
+    /// The context the stages' caches are planned for (`new`'s max_ctx).
+    pub fn ctx(&self) -> usize {
+        self.stages[0].net.ctx
+    }
+
+    /// The longest context `new` (without `cuts`) places on `devs`: max_ctx
+    /// if it fits, else the most (a multiple of 256) down to `min_ctx`;
+    /// None if not even that. The same placement (AXON_PP_CUTS, else
+    /// `pipeline_cuts`) and needs (`stage_need`), nothing allocated.
+    pub fn fit_ctx(
+        devs: &[(&'g Gpu, &'g Module<'g>)],
+        m: &Model,
+        max_ctx: usize,
+        min_ctx: usize,
+        kv: CacheKv,
+    ) -> Result<Option<usize>, String> {
+        let (ns, n) = (devs.len(), crate::hybrid::block_count(m)?);
+        let (free, env) = (free_shares(devs)?, cuts_env(n, ns)?);
+        let fits = |c: usize| {
+            let need = |s: usize, a, b| {
+                CudaQwen2::stage_need(devs[s].0, devs[s].1, m, c, a, b, kv, PLAN_BATCH)
+            };
+            match &env {
+                Some(k) => (0..ns).all(|s| need(s, k[s], k[s + 1]).is_ok_and(|v| v <= free[s])),
+                None => pipeline_cuts(n, &free, 0, need).is_ok(),
+            }
+        };
+        if fits(max_ctx) {
+            return Ok(Some(max_ctx));
+        }
+        // fits(k * 256) for k in lo..=hi only gets harder as k grows.
+        let (mut lo, mut hi) = (min_ctx.div_ceil(256), (max_ctx - 1) / 256);
+        if lo > hi || !fits(lo * 256) {
+            return Ok(None);
+        }
+        while lo < hi {
+            let mid = (lo + hi).div_ceil(2);
+            if fits(mid * 256) {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        Ok(Some(lo * 256))
     }
 
     /// "pipeline 2 GPUs: layers 0..33 on 0 (11.20 GiB), 33..64 on 1 (...)"

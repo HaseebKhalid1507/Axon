@@ -315,6 +315,27 @@ pub enum BackendCache {
     Pipeline(Box<PipelineCache<'static>>),
 }
 
+/// How `Backend::new_capped` places a model beyond `new`'s arguments.
+#[derive(Clone, Copy, Debug)]
+pub struct Placing {
+    /// The context of a CPU/GPU split (and, without `fit`, of everything
+    /// but the automatic whole-GPU model): see `new_capped`.
+    pub split_ctx: usize,
+    /// Leave the GPU model's Q6_K prefill copy to the caller
+    /// (`CudaQwen2::make_q6k8_spare`, once serve's caches are made).
+    pub defer_q6k8: bool,
+}
+
+impl Placing {
+    /// `new`'s: max_ctx everywhere, the Q6_K copy made with the model.
+    pub fn of(max_ctx: usize) -> Placing {
+        Placing {
+            split_ctx: max_ctx,
+            defer_q6k8: false,
+        }
+    }
+}
+
 impl<'a> Backend<'a> {
     /// The model of `m` on `device`, with room for a `max_ctx`-token cache
     /// of type `kv` (checked up front on the GPU). On CUDA, `gpu_layers`
@@ -337,6 +358,34 @@ impl<'a> Backend<'a> {
         kv: KvType,
         fit: bool,
     ) -> Result<Backend<'a>, String> {
+        Self::new_capped(
+            m,
+            device,
+            max_ctx,
+            gpu_layers,
+            kv,
+            fit,
+            Placing::of(max_ctx),
+        )
+    }
+
+    /// `new`, as `p` says (`axon serve`'s default: `Placing`). With
+    /// p.split_ctx < max_ctx and `fit`, the whole model on the GPU (placed
+    /// automatically, every layer by --gpu-layers, or a multi-GPU
+    /// pipeline) gets the longest context up to max_ctx that fits (a
+    /// pipeline at least `KEEP_CTX_FLOOR`, else split_ctx); a CPU/GPU split
+    /// (automatic or --gpu-layers) gets split_ctx.
+    pub fn new_capped(
+        m: &'a Model,
+        device: Device,
+        max_ctx: usize,
+        gpu_layers: Option<usize>,
+        kv: KvType,
+        fit: bool,
+        p: Placing,
+    ) -> Result<Backend<'a>, String> {
+        let split_ctx = p.split_ctx;
+        let long = fit && split_ctx < max_ctx;
         if device == Device::Cpu {
             // The CPU's f16/f32 choice is AXON_KV's (kv::use_f32).
             if kv == KvType::Q8 {
@@ -361,13 +410,20 @@ impl<'a> Backend<'a> {
                         .into(),
                 );
             }
-            return Self::pipeline(m, list, max_ctx, ckv);
+            return Self::pipeline(
+                m,
+                list,
+                if long { max_ctx } else { split_ctx },
+                split_ctx,
+                ckv,
+            );
         }
         let ordinal = gpus.map_or(0, |l| l[0]);
         let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open_device(ordinal)?));
         let module: &'static Module<'static> = Box::leak(Box::new(Kernels::module_for(gpu, m)?));
         let whole_gpu = |ctx: usize, fit: bool| {
-            CudaQwen2::with_kv(gpu, module, m, ctx, ckv, fit).map(|n| Backend::Cuda(Box::new(n)))
+            CudaQwen2::with_kv_q6k8(gpu, module, m, ctx, ckv, fit, !p.defer_q6k8)
+                .map(|n| Backend::Cuda(Box::new(n)))
         };
         let auto = gpu_layers.is_none();
         let stream = crate::hybrid::stream_setting();
@@ -377,7 +433,13 @@ impl<'a> Backend<'a> {
             Some(g) => {
                 let n = crate::hybrid::block_count(m)?;
                 if g >= n {
-                    return whole_gpu(max_ctx, false).map_err(|e| {
+                    // As all of it placed automatically (-ngl 999).
+                    let (c, f) = if long {
+                        (max_ctx, true)
+                    } else {
+                        (split_ctx, false)
+                    };
+                    return whole_gpu(c, f).map_err(|e| {
                         format!("{g}/{n} layers on the GPU: {e}, or fewer --gpu-layers")
                     });
                 }
@@ -389,7 +451,7 @@ impl<'a> Backend<'a> {
                 // A streaming split's VRAM (its bigger batch scratch and the
                 // stream reserve) is what the split option is weighed by.
                 let split =
-                    || crate::hybrid::auto_gpu_layers(gpu, module, m, max_ctx, ckv, free, stream);
+                    || crate::hybrid::auto_gpu_layers(gpu, module, m, split_ctx, ckv, free, stream);
                 match crate::hybrid::choose_placement(free, max_ctx, fit, whole, split)? {
                     Placement::Gpu { ctx } => return whole_gpu(ctx, false),
                     Placement::Split {
@@ -399,7 +461,7 @@ impl<'a> Backend<'a> {
                         if let Some(c) = gpu_ctx {
                             eprintln!(
                                 "axon: the whole model fits in GPU memory only with a {c}-token \
-                                 context; splitting it to keep {max_ctx} (--ctx {c} for all of it \
+                                 context; splitting it to keep {split_ctx} (--ctx {c} for all of it \
                                  on the GPU, faster; --gpu-layers N to choose the split{})",
                                 if ckv == CacheKv::F16 {
                                     "; --kv q8 halves the KV cache"
@@ -420,18 +482,22 @@ impl<'a> Backend<'a> {
             }
         };
         let h =
-            HybridQwen2::new_with_stream(Some((gpu, module)), m, max_ctx, g, ckv, stream, auto)?;
-        eprintln!("split:       {}", h.describe(max_ctx));
+            HybridQwen2::new_with_stream(Some((gpu, module)), m, split_ctx, g, ckv, stream, auto)?;
+        eprintln!("split:       {}", h.describe(split_ctx));
         Ok(Backend::Hybrid(Box::new(h)))
     }
 
     /// The model's layers over the GPUs `ordinals` (in order), a
     /// `max_ctx`-token cache of type `kv` (`PipelineQwen2::new`: an even
-    /// split if it fits; AXON_PP_CUTS sets it), told on stderr.
+    /// split if it fits; AXON_PP_CUTS sets it), told on stderr. With
+    /// max_ctx > split_ctx, the longest context up to max_ctx that fits,
+    /// if at least `KEEP_CTX_FLOOR` (`PipelineQwen2::fit_ctx`), else
+    /// split_ctx.
     fn pipeline(
         m: &Model,
         ordinals: &[usize],
         max_ctx: usize,
+        split_ctx: usize,
         kv: CacheKv,
     ) -> Result<Backend<'a>, String> {
         let mut devs = Vec::with_capacity(ordinals.len());
@@ -441,17 +507,25 @@ impl<'a> Backend<'a> {
                 Box::leak(Box::new(Kernels::module_for(gpu, m)?));
             devs.push((gpu, module));
         }
-        let p = PipelineQwen2::new(&devs, m, max_ctx, kv, None)?;
-        eprintln!("pipeline:    {}", p.describe(max_ctx));
+        let floor = crate::hybrid::KEEP_CTX_FLOOR.min(max_ctx);
+        let ctx = match max_ctx > split_ctx {
+            true => PipelineQwen2::fit_ctx(&devs, m, max_ctx, floor, kv)?.unwrap_or(split_ctx),
+            false => max_ctx,
+        };
+        let p = PipelineQwen2::new(&devs, m, ctx, kv, None)?;
+        eprintln!("pipeline:    {}", p.describe(ctx));
         Ok(Backend::Pipeline(Box::new(p)))
     }
 
-    /// The context the cache was planned for: max_ctx, or less on the GPU
-    /// with `fit` (never for a split: it has the whole max_ctx).
+    /// The context the cache was planned for: the GPU's, the split's or
+    /// the pipeline's own (max_ctx, or less with `fit`, or `Placing`'s
+    /// split_ctx); the CPU's is max_ctx (it plans nothing).
     pub fn ctx(&self, max_ctx: usize) -> usize {
         match self {
-            Backend::Cpu(_) | Backend::Hybrid(_) | Backend::Pipeline(_) => max_ctx,
+            Backend::Cpu(_) => max_ctx,
             Backend::Cuda(n) => n.ctx,
+            Backend::Hybrid(n) => n.ctx,
+            Backend::Pipeline(n) => n.ctx(),
         }
     }
 }

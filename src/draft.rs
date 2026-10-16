@@ -355,33 +355,38 @@ fn cache_kv(kv: KvType) -> CacheKv {
     }
 }
 
-/// The main model and its drafter, if `dm`: the drafter's VRAM is held
-/// while `target` places the main model (so a 7B + 0.5B pair is sized
-/// together), then the drafter is loaded with the main model's context
-/// (`ctx` = what `Backend::ctx` gives for the requested one).
+/// The main model and its drafter, if `dm`: the drafter's VRAM for a
+/// `draft_ctx`-token cache is held while `target` places the main model
+/// (so a 7B + 0.5B pair is sized together), then the drafter is loaded
+/// with the main model's context (`ctx` = what `Backend::ctx` gives for
+/// the requested `want_ctx`), at most draft_ctx (it doesn't draft past
+/// its context). gen and chat: draft_ctx = want_ctx; serve sizes the
+/// drafter for less than a long trained context.
 pub fn load_pair<'a>(
     dm: Option<&DraftModel>,
     device: Device,
     want_ctx: usize,
+    draft_ctx: usize,
     kv: KvType,
     target: impl FnOnce() -> Backend<'a>,
 ) -> Result<(Backend<'a>, Option<ModelDrafter<Backend<'static>>>), String> {
     let Some(dm) = dm else {
         return Ok((target(), None));
     };
-    let r = dm.reserve(device, want_ctx, kv)?;
+    let r = dm.reserve(device, draft_ctx, kv)?;
     let net = target();
-    let ctx = net.ctx(want_ctx);
+    let ctx = net.ctx(want_ctx).min(draft_ctx);
     if matches!(net, Backend::Hybrid(_)) {
         eprintln!(
             "axon: warning: the model is split across the CPU and GPU; a draft model next to a \
              split model is almost always slower than none (--draft 0, or a smaller --ctx / \
              --kv q8 to fit the model on the GPU)"
         );
-    } else if ctx < want_ctx {
+    } else if ctx < want_ctx.min(draft_ctx) {
         eprintln!(
             "axon: warning: with the draft model's memory set aside, the context shrank from \
-             {want_ctx} to {ctx} tokens (--draft 0 for the whole context)"
+             {} to {ctx} tokens (--draft 0 for the whole context)",
+            want_ctx.min(draft_ctx)
         );
     }
     // The main model's cache (a split's GPU half's too) is made after the

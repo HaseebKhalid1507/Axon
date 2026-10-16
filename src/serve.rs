@@ -37,6 +37,7 @@ pub mod http;
 pub mod tools;
 
 use crate::chat::{self, Framing, special};
+use crate::cuda::qwen2::CacheKv;
 use crate::kv::KvType;
 use crate::lm::{Backend, BackendCache, BatchLm, Device, Lm};
 use crate::sample::{SampleArgs, SampleCfg, Sampler};
@@ -651,39 +652,92 @@ fn engine(
     let model = crate::open_model_with(&o.path, crate::copy_for(device));
     let trained = model.ctx_len() as usize;
     let fit = o.ctx.is_none();
-    let ctx = match o.ctx {
+    // The default: the trained context (the whole model on one GPU: as
+    // much of it as fits, `Backend::new`'s fit); a split, a pipeline or
+    // --gpu-layers keep the old cap (`SPLIT_CTX`).
+    let want = match o.ctx {
         Some(n) if trained > 0 && n > trained => crate::fail(&format!(
             "--ctx {n} is past the {trained} tokens {} was trained on",
             o.path
         )),
         Some(n) => n,
-        None if trained > 0 => trained.min(crate::DEFAULT_CHAT_CTX),
+        None if trained > 0 => trained,
         None => crate::DEFAULT_CHAT_CTX,
+    };
+    let split_ctx = if fit { want.min(SPLIT_CTX) } else { want };
+    // The drafter's reserve (`load_pair`): a split's context if
+    // --gpu-layers makes one, else at most AGENT_CTX (a 131072-token
+    // reserve would take the main model's memory); it drafts up to the
+    // context the main model gets, if that is shorter.
+    let split = gpu_layers.is_some_and(|g| crate::hybrid::block_count(&model).is_ok_and(|n| g < n));
+    let draft_ctx = match (fit, split) {
+        (false, _) => want,
+        (true, true) => split_ctx,
+        (true, false) => want.min(AGENT_CTX),
     };
     let tok: &'static Tokenizer = Box::leak(Box::new(Tokenizer::from_gguf(&model)));
     let dm = o.draft_model.as_ref().filter(|_| o.max_draft > 0).map(|p| {
         crate::draft::DraftModel::open(p, crate::copy_for(device), &model, tok)
             .unwrap_or_else(|e| crate::fail(&format!("--draft-model {e}")))
     });
-    let (net, drafter) =
-        crate::backend_and_drafter(&model, dm.as_ref(), device, ctx, gpu_layers, o.kv, fit);
-    let ctx = net.ctx(ctx);
+    // The Q6_K prefill copy waits for the cache and slots (below).
+    let place = crate::lm::Placing {
+        split_ctx,
+        defer_q6k8: true,
+    };
+    let (mut net, drafter) = crate::backend_and_drafter(
+        &model,
+        dm.as_ref(),
+        device,
+        want,
+        gpu_layers,
+        o.kv,
+        fit,
+        place,
+        draft_ctx,
+    );
+    let ctx = net.ctx(want);
+    let why = match &net {
+        _ if ctx >= want => None,
+        Backend::Cuda(_) => Some(gpu_fit_note(ctx, want, o.kv, gpu_layers.is_some())),
+        Backend::Pipeline(_) => Some(format!(
+            "{ctx} fit on the GPUs beside the weights, of the {want} the model was trained on \
+             (--ctx N for another{})",
+            if o.kv == KvType::Q8 {
+                ""
+            } else {
+                "; --kv q8 halves the KV cache"
+            }
+        )),
+        Backend::Hybrid(_) => Some(format!(
+            "the default for a CPU/GPU split (automatic or --gpu-layers): a cache for the \
+             {want} tokens the model was trained on would take GPU memory from its layers \
+             (--ctx N for another)"
+        )),
+        Backend::Cpu(_) => None,
+    };
+    let (ctx, why) = match &net {
+        Backend::Cpu(n) if fit => {
+            let elem = if crate::kv::use_f32() { 4 } else { 2 };
+            let per_pos = (n.n_layers * 2 * n.n_kv_heads * n.head_dim * elem) as u64;
+            // A mapped model's pages must stay in memory too.
+            let mapped = match model.file_backed() {
+                true => std::fs::metadata(&o.path).map_or(0, |m| m.len()),
+                false => 0,
+            };
+            cpu_ctx(want, per_pos, mapped, crate::gguf::mem_available())
+        }
+        _ => (ctx, why),
+    };
+    if let Some(why) = why.filter(|_| o.log) {
+        eprintln!("axon serve: context {ctx} tokens: {why}");
+    }
     let template = Template::new(tok, &model.arch);
     let kvs = match &net {
         Backend::Cuda(n) => format!("cuda, kv {}", n.kv_name()),
         Backend::Hybrid(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
         Backend::Pipeline(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
         Backend::Cpu(_) => "cpu".into(),
-    };
-    let mut e = Engine {
-        net: &net,
-        tok,
-        cache: net.new_cache(ctx),
-        hist: Vec::new(),
-        max_draft: o.max_draft,
-        drafter,
-        log: o.log,
-        generated: o.generated,
     };
     let drafts = dm.as_ref().map_or(String::new(), |d| {
         format!(", draft model {} K={}", d.name(), o.max_draft)
@@ -699,35 +753,84 @@ fn engine(
             o.parallel
         ));
     }
-    let mut batch = match o.parallel {
-        0 | 1 => None,
-        n => match pool_for(&net, n, o.slot_ctx.map_or(ctx, |c| c.min(ctx))) {
-            Ok((pool, slots, slot_ctx)) => Some(Batch::new(
-                &net,
-                pool,
-                slots,
-                slot_ctx,
-                o.log,
-                e.generated.clone(),
-            )),
-            Err(why) => {
-                if o.log && !matches!(net, Backend::Cpu(_)) {
-                    eprintln!("axon serve: one request at a time ({why})");
+    // The slots and their context (`plan_slots`), measured against the GPU
+    // memory left before the single-request cache is made: a pool of N
+    // slots and that cache are N + 1 caches.
+    let plan = match &net {
+        Backend::Cuda(n) if o.parallel > 1 => match n.free_bytes() {
+            Ok(free) => {
+                let free = free as usize;
+                let fits = |kv, s, c| n.serve_bytes_kv(kv, s, c) + POOL_SPARE <= free;
+                let kv = match o.kv {
+                    KvType::Q8 => CacheKv::Q8 { group: 0 },
+                    _ => CacheKv::F16,
+                };
+                let mut p =
+                    plan_slots(ctx, !fit, o.parallel, o.parallel_set, |s, c| fits(kv, s, c));
+                // The q8 cache's slots at this context, for the note.
+                if p.slots == 1 && kv == CacheKv::F16 && !o.parallel_set {
+                    let q8 = CacheKv::Q8 { group: 0 };
+                    let s8 = (2..=o.parallel).rev().find(|&s| fits(q8, s, ctx));
+                    if let (Some(s8), Some(note)) = (s8, p.note.as_mut()) {
+                        note.push_str(&format!("; --kv q8: {s8} at {ctx}"));
+                    }
                 }
-                None
+                p
             }
+            Err(e) => SlotPlan::one(ctx, Some(e)),
         },
+        _ => SlotPlan::one(ctx, None),
     };
-    // With a pool, the context served is a slot's: every request fits one
-    // (the context_length_exceeded check and the default max_tokens use it).
-    let served = batch.as_ref().map_or(ctx, |b| b.ctx.min(ctx));
-    if served < ctx && o.log {
-        eprintln!(
-            "axon serve: {} slots of {served} positions fit in GPU memory: the context is {served} \
-             (--parallel 1 for {ctx}, or --kv q8)",
-            batch.as_ref().map_or(0, |b| b.slots)
-        );
+    if let Some(note) = plan.note.as_ref().filter(|_| o.log) {
+        eprintln!("axon serve: {note}");
     }
+    // With a pool, the single-request cache is a slot's length: the
+    // context served is a slot's (every request fits one).
+    let ctx = plan.ctx;
+    let cache = net.new_cache(ctx);
+    let pool = match plan.slots {
+        0 | 1 => None,
+        n => {
+            // Tests shrink the slots below the context (`Opts::slot_ctx`).
+            let slot_ctx = o.slot_ctx.map_or(ctx, |c| c.min(ctx));
+            match net.new_pool(n, slot_ctx) {
+                Ok(pool) => Some((pool, n, slot_ctx)),
+                Err(why) => {
+                    if o.log {
+                        eprintln!("axon serve: one request at a time ({why})");
+                    }
+                    None
+                }
+            }
+        }
+    };
+    // The Q6_K prefill copy only out of what the cache and slots leave
+    // (prefill-only: the same products without it, slower).
+    if let Backend::Cuda(n) = &mut net {
+        match n.make_q6k8_spare() {
+            Ok(Some(false)) if o.log => eprintln!(
+                "axon serve: no Q6_K prefill copy ({:.2} GiB free beside the caches; it \
+                 speeds up prefill): a smaller --ctx or --parallel, or --kv q8, makes room",
+                n.free_bytes().unwrap_or(0) as f64 / GIB
+            ),
+            Err(e) => eprintln!("axon serve: no Q6_K prefill copy: {e}"),
+            _ => {}
+        }
+    }
+    let net = net;
+    let mut e = Engine {
+        net: &net,
+        tok,
+        cache,
+        hist: Vec::new(),
+        max_draft: o.max_draft,
+        drafter,
+        log: o.log,
+        generated: o.generated,
+    };
+    let mut batch = pool
+        .map(|(pool, n, slot_ctx)| Batch::new(&net, pool, n, slot_ctx, o.log, e.generated.clone()));
+    let served = batch.as_ref().map_or(ctx, |b| b.ctx.min(ctx));
     let banner = match &batch {
         Some(b) => format!("{kvs}, ctx {served}{drafts}, {} requests at once", b.slots),
         None => format!("{kvs}, ctx {ctx}{drafts}, one request at a time"),
@@ -821,33 +924,207 @@ fn fatal(b: &mut Batch, err: &str, tx: Option<mpsc::Sender<Event>>) -> ! {
     std::process::exit(70);
 }
 
-/// Slots of continuous batching (`--parallel`) for a `ctx`-token server:
-/// `slots` sequences of up to ctx positions, or as many as fit if fewer (at
-/// least 2), else shorter slots (down to 1024 positions). The pool, its
-/// slots and positions per slot, or why there is none.
-fn pool_for<'a>(
-    net: &Backend<'a>,
+/// The default context where the trained one isn't served: a CPU/GPU
+/// split, a multi-GPU pipeline, --gpu-layers (a long cache there costs GPU
+/// layers or the fit; `Backend::new_capped`).
+const SPLIT_CTX: usize = crate::DEFAULT_CHAT_CTX;
+
+/// The shortest slot the default trades context for: agent harnesses send
+/// 10k-40k-token prompts, so below min(context, this) one request at a
+/// time with the whole context wins over batching (`plan_slots`).
+pub const AGENT_CTX: usize = 32768;
+
+/// VRAM a pool leaves free beyond itself and the single-request cache (the
+/// hand-over copy and other transient buffers).
+const POOL_SPARE: usize = 256 << 20;
+
+/// RAM a CPU server's default context leaves free beyond its KV cache.
+const RAM_MARGIN: u64 = 1 << 30;
+
+const GIB: f64 = (1u64 << 30) as f64;
+
+/// The CPU's default context: `want` if its cache (`per_pos` bytes a
+/// position) fits in `avail` bytes of RAM, else the most positions that do
+/// (a multiple of 1024), but never less than the old default,
+/// min(want, `SPLIT_CTX`) (the cache is mapped lazily: RAM goes as the
+/// context fills).
+fn ram_ctx(want: usize, per_pos: u64, avail: u64) -> usize {
+    if (want as u64).saturating_mul(per_pos) <= avail {
+        return want;
+    }
+    let c = (avail / per_pos.max(1)) as usize / 1024 * 1024;
+    c.max(want.min(SPLIT_CTX))
+}
+
+/// Why the GPU's default context is `c`, not the trained `want`
+/// (`all_layers`: --gpu-layers put every layer there).
+fn gpu_fit_note(c: usize, want: usize, kv: KvType, all_layers: bool) -> String {
+    format!(
+        "{c} fit in GPU memory beside the weights, of the {want} the model was trained on \
+         (--ctx N for another: {}{})",
+        if all_layers {
+            "a longer one doesn't fit with every layer on the GPU"
+        } else {
+            "a longer one splits the model across the CPU and GPU, slower"
+        },
+        if kv == KvType::Q8 {
+            ""
+        } else {
+            "; --kv q8 halves the KV cache"
+        }
+    )
+}
+
+/// The CPU's default context and why, if shorter than the trained `want`:
+/// `ram_ctx` of `avail` (MemAvailable; None: unknown, want) less the
+/// mapped model's `mapped` bytes and `RAM_MARGIN`.
+fn cpu_ctx(want: usize, per_pos: u64, mapped: u64, avail: Option<u64>) -> (usize, Option<String>) {
+    let Some(a) = avail else {
+        return (want, None);
+    };
+    let a = a.saturating_sub(mapped).saturating_sub(RAM_MARGIN);
+    let c = ram_ctx(want, per_pos, a);
+    (c, (c < want).then(|| ram_note(want, per_pos, a)))
+}
+
+/// Why the CPU's default context is shorter than the trained `want`.
+fn ram_note(want: usize, per_pos: u64, avail: u64) -> String {
+    format!(
+        "a KV cache of the {want} tokens the model was trained on takes {:.1} GiB, {:.1} GiB \
+         of RAM is free beside the model (--ctx N for another)",
+        (want as u64 * per_pos) as f64 / GIB,
+        avail as f64 / GIB
+    )
+}
+
+/// Continuous batching's shape: `slots` requests at once (1: no pool) of
+/// `ctx` positions each, and why, if it isn't what was asked for.
+#[derive(Debug, PartialEq, Eq)]
+struct SlotPlan {
     slots: usize,
     ctx: usize,
-) -> Result<(<Backend<'a> as BatchLm>::Pool, usize, usize), String> {
-    let Backend::Cuda(n) = net else {
-        return net.new_pool(slots, ctx).map(|p| (p, slots, ctx));
-    };
-    let free = n.free_bytes()? as usize;
-    // Room for the hand-over copy and other transient buffers.
-    let fits = |s: usize, c: usize| n.pool_bytes(s, c) + (256 << 20) <= free;
-    let mut c = ctx;
-    loop {
-        let s = (2..=slots).rev().find(|&s| fits(s, c));
-        if let Some(s) = s {
-            return net.new_pool(s, c).map(|p| (p, s, c));
+    note: Option<String>,
+}
+
+impl SlotPlan {
+    fn one(ctx: usize, note: Option<String>) -> SlotPlan {
+        SlotPlan {
+            slots: 1,
+            ctx,
+            note,
         }
-        if c <= 1024 {
-            return Err(format!(
-                "no GPU memory for {slots} KV slots of {c} positions; --parallel 1, a smaller --ctx or --kv q8"
-            ));
+    }
+}
+
+/// The longest of `hi`, then the multiples of 1024 below it, down to `lo`,
+/// for which `ok` holds (it only gets harder as the context grows).
+fn longest_ctx(lo: usize, hi: usize, ok: impl Fn(usize) -> bool) -> Option<usize> {
+    if ok(hi) {
+        return Some(hi);
+    }
+    let mut c = (hi - 1) / 1024 * 1024;
+    while c >= lo.max(1) {
+        if ok(c) {
+            return Some(c);
         }
-        c = (c / 2).max(1024);
+        c -= 1024;
+    }
+    None
+}
+
+/// Slots of continuous batching for a model loaded with a `ctx`-token
+/// context, `fits(s, c)`: whether s slots of c positions fit beside the
+/// single-request cache of c positions. `ctx_set`: --ctx was given (`ctx`
+/// is it); `parallel`: most slots (--parallel, default `PARALLEL`).
+///
+/// - --ctx N: the context is N, whatever --parallel says; the most slots
+///   up to `parallel` that fit with it, at least 2, else one request at a
+///   time.
+/// - --parallel N alone: N slots, of the longest context they fit with
+///   (down to 1024 positions), else one request at a time.
+/// - Neither: context first, then slots. The whole context if 2 slots fit
+///   with it, else the longest that does down to min(ctx, `AGENT_CTX`);
+///   then the most slots (up to 8) at that context. If not even 2 fit at
+///   min(ctx, AGENT_CTX), one request at a time with the whole context.
+fn plan_slots(
+    ctx: usize,
+    ctx_set: bool,
+    parallel: usize,
+    parallel_set: bool,
+    fits: impl Fn(usize, usize) -> bool,
+) -> SlotPlan {
+    if parallel <= 1 {
+        return SlotPlan::one(ctx, None);
+    }
+    let most = |c: usize| (2..=parallel).rev().find(|&s| fits(s, c));
+    if ctx_set {
+        return match most(ctx) {
+            Some(s) => SlotPlan {
+                slots: s,
+                ctx,
+                note: (parallel_set && s < parallel).then(|| {
+                    format!(
+                        "{s} requests at once: {parallel} slots of --ctx {ctx} don't fit in GPU \
+                         memory (a smaller --ctx or --kv q8 for more)"
+                    )
+                }),
+            },
+            None => SlotPlan::one(
+                ctx,
+                Some(format!(
+                    "one request at a time: 2 slots of --ctx {ctx} don't fit in GPU memory (a \
+                     smaller --ctx or --kv q8 to batch)"
+                )),
+            ),
+        };
+    }
+    if parallel_set {
+        return match longest_ctx(ctx.min(1024), ctx, |c| fits(parallel, c)) {
+            Some(c) => SlotPlan {
+                slots: parallel,
+                ctx: c,
+                note: (c < ctx).then(|| {
+                    format!(
+                        "context {c} tokens: {parallel} slots (--parallel) of {ctx} don't fit \
+                         in GPU memory (fewer --parallel or --kv q8 for more)"
+                    )
+                }),
+            },
+            None => SlotPlan::one(
+                ctx,
+                Some(format!(
+                    "one request at a time: {parallel} slots (--parallel) don't fit in GPU \
+                     memory even at 1024 positions"
+                )),
+            ),
+        };
+    }
+    let floor = ctx.min(AGENT_CTX);
+    match longest_ctx(floor, ctx, |c| fits(2, c)) {
+        Some(c) => SlotPlan {
+            slots: most(c).unwrap_or(2),
+            ctx: c,
+            note: (c < ctx).then(|| {
+                format!(
+                    "context {c} tokens: the longest that 2 requests at once fit with in GPU \
+                     memory, of {ctx} (--parallel 1 for {ctx}; --ctx N or --parallel N to choose)"
+                )
+            }),
+        },
+        None => {
+            // A pool of N slots is N + 1 caches (the single-request one).
+            let at = match longest_ctx(ctx.min(1024), ctx, |c| fits(2, c)) {
+                Some(c2) => format!("2 at once fit at {c2}: --ctx {c2}"),
+                None => "2 at once don't fit even at 1024".into(),
+            };
+            SlotPlan::one(
+                ctx,
+                Some(format!(
+                    "one request at a time, to keep the {ctx}-token context (2 slots and the \
+                     single-request cache are 3 caches); {at}"
+                )),
+            )
+        }
     }
 }
 
