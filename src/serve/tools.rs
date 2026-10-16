@@ -22,9 +22,11 @@
 //! encoded as plain text, never scanned for markers, so text can't forge a
 //! turn (as everywhere else in axon). Tool JSON keeps the request's key
 //! order, using an order-preserving parser here because serde_json's maps
-//! sort keys. A call's `arguments` string that is valid JSON is rendered as
-//! the object, the way llama.cpp and vLLM pass it to the template. Any other
-//! string is rendered as-is.
+//! sort keys. History `arguments` follow each template: Qwen3's prints a
+//! string verbatim (`{%- if tool_call.arguments is string %}`). Qwen2.5's
+//! and Llama 3.1's apply `tojson` to the value: a string that is valid JSON
+//! is rendered as that value re-serialized (as llama.cpp and vLLM pass the
+//! object to these templates), and any other string as-is.
 //!
 //! A request with neither tools nor tool turns never reaches this module:
 //! its prompt is the one main renders, byte for byte.
@@ -42,7 +44,16 @@
 //! **Invalid JSON policy.** A block is a call only if it parses as a JSON
 //! object with a string `"name"`. Otherwise the whole block, tags included,
 //! is returned as content, verbatim. So `tool_calls[].function.arguments`
-//! is always valid JSON (an object, or whatever JSON value the model gave).
+//! is always valid JSON (an object, or whatever JSON value the model gave;
+//! a string value is used as the arguments if it is itself JSON, else it is
+//! returned as its JSON string literal).
+//!
+//! Known false positives (the parser does not understand prose or JSON
+//! strings): `<tool_call>` written in prose opens a block (which then turns
+//! back into content if it isn't a call), and a `</tool_call>` inside a JSON
+//! string value closes the block early (the call then fails to parse and is
+//! returned as content). Llama: a `;`-separated list is tried only when the
+//! whole reply isn't one call.
 //! A block left open when generation ends is a call if its text up to then
 //! parses (the model stopped right after the JSON), else content.
 //!
@@ -76,7 +87,8 @@ pub enum J {
 impl J {
     pub fn get(&self, k: &str) -> Option<&J> {
         match self {
-            J::Obj(m) => m.iter().find(|(key, _)| key == k).map(|(_, v)| v),
+            // The last of duplicate keys wins, as in serde_json.
+            J::Obj(m) => m.iter().rev().find(|(key, _)| key == k).map(|(_, v)| v),
             _ => None,
         }
     }
@@ -298,7 +310,11 @@ impl Reader<'_> {
     }
 
     fn hex4(&mut self) -> Option<u32> {
-        let h = std::str::from_utf8(self.s.get(self.i..self.i + 4)?).ok()?;
+        let h = self.s.get(self.i..self.i + 4)?;
+        if !h.iter().all(u8::is_ascii_hexdigit) {
+            return None;
+        }
+        let h = std::str::from_utf8(h).ok()?;
         self.i += 4;
         u32::from_str_radix(h, 16).ok()
     }
@@ -410,6 +426,8 @@ pub struct HistCall {
     /// The `arguments` as the template gets them: the object if the
     /// string is JSON (or it was given as an object), else the raw string.
     pub args: Result<J, String>,
+    /// The `arguments` string as given (None: given as an object).
+    pub raw: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -499,6 +517,7 @@ pub fn parse(body: &[u8]) -> Result<Option<ToolReq>, ApiError> {
     };
     let get = |k: &str| {
         o.iter()
+            .rev()
             .find(|(key, _)| key == k)
             .map(|(_, v)| v)
             .filter(|v| !v.is_null())
@@ -517,6 +536,16 @@ pub fn parse(body: &[u8]) -> Result<Option<ToolReq>, ApiError> {
         matches!(m.get("role").and_then(J::str), Some("tool" | "ipython")) || has_calls(m)
     });
     if tools.is_empty() && !tool_turns {
+        // A call can't be forced without tools (OpenAI: 400). Anything else
+        // here is an ordinary chat request.
+        let forced = match get("tool_choice") {
+            Some(J::Str(s)) => s == "required",
+            Some(J::Obj(_)) => true,
+            _ => false,
+        };
+        if forced {
+            return Err(bad("tool_choice", "'tool_choice' needs 'tools'"));
+        }
         return Ok(None);
     }
     let mut names = Vec::new();
@@ -599,9 +628,14 @@ pub fn parse(body: &[u8]) -> Result<Option<ToolReq>, ApiError> {
                     Some(J::Str(s)) => parse_json(s).ok_or_else(|| s.clone()),
                     Some(v) => Ok(v.clone()),
                 };
+                let raw = match f.and_then(|f| f.get("arguments")) {
+                    Some(J::Str(s)) => Some(s.clone()),
+                    _ => None,
+                };
                 calls.push(HistCall {
                     name: name.to_string(),
                     args,
+                    raw,
                 });
             }
         }
@@ -747,11 +781,19 @@ const HERMES_HEAD: &str = "# Tools\n\nYou may call one or more functions to assi
 const HERMES_TAIL: &str = "\n</tools>\n\nFor each function call, return a json object with function name and arguments within <tool_call></tool_call> XML tags:\n<tool_call>\n{\"name\": <function-name>, \"arguments\": <args-json-object>}\n</tool_call><|im_end|>\n";
 const LLAMA_TOOLS_HEAD: &str = "Given the following functions, please respond with a JSON for a function call with its proper arguments that best answers the given prompt.\n\nRespond in the format {\"name\": function name, \"parameters\": dictionary of argument name and its value}.Do not use variables.\n\n";
 
-fn args_text(a: &Result<J, String>) -> String {
-    match a {
+/// A history call's arguments as Qwen2.5's and Llama 3.1's templates print
+/// them (`arguments | tojson`): the value, re-serialized; a string that
+/// isn't JSON, as is.
+fn args_tojson(c: &HistCall) -> String {
+    match &c.args {
         Ok(j) => j.dumps(),
         Err(s) => s.clone(),
     }
+}
+
+/// Qwen3's template: a string is printed verbatim, anything else tojson.
+fn args_qwen3(c: &HistCall) -> String {
+    c.raw.clone().unwrap_or_else(|| args_tojson(c))
 }
 
 /// A rendered tool prompt.
@@ -886,7 +928,7 @@ fn hermes(k: &mut Toks, fam: Family, r: &ToolReq) -> Result<(), ApiError> {
                     k.lit("\n<tool_call>\n{\"name\": \"");
                     k.text(&c.name);
                     k.lit("\", \"arguments\": ");
-                    k.text(&args_text(&c.args));
+                    k.text(&args_tojson(c));
                     k.lit("}\n</tool_call>");
                 }
                 k.lit("<|im_end|>\n");
@@ -923,7 +965,7 @@ fn hermes(k: &mut Toks, fam: Family, r: &ToolReq) -> Result<(), ApiError> {
                     k.lit("<tool_call>\n{\"name\": \"");
                     k.text(&c.name);
                     k.lit("\", \"arguments\": ");
-                    k.text(&args_text(&c.args));
+                    k.text(&args_qwen3(c));
                     k.lit("}\n</tool_call>");
                 }
                 k.lit("<|im_end|>\n");
@@ -997,7 +1039,7 @@ fn llama(k: &mut Toks, t: &Template, r: &ToolReq) -> Result<(), ApiError> {
                 k.lit("<|start_header_id|>assistant<|end_header_id|>\n\n{\"name\": \"");
                 k.text(&c.name);
                 k.lit("\", \"parameters\": ");
-                k.text(&args_text(&c.args));
+                k.text(&args_tojson(c));
                 k.lit("}<|eot_id|>");
             }
             _ => {
@@ -1068,8 +1110,9 @@ fn call_id() -> String {
 }
 
 /// A call from a block's JSON: an object with a string "name"; arguments
-/// from "arguments" (Llama: "parameters"), as written, `{}` if absent; a
-/// string value is taken as the arguments' text.
+/// from "arguments" (Llama: "parameters"), as written, `{}` if absent. A
+/// string value is the arguments' text if it is JSON (a double-encoded
+/// object), else the string's own JSON literal: arguments are always JSON.
 fn call_of(body: &str) -> Option<Call> {
     let m = parse_object_spans(body.trim())?;
     let name = m.iter().find(|(k, _, _)| k == "name")?.1.str()?.to_string();
@@ -1078,7 +1121,10 @@ fn call_of(body: &str) -> Option<Call> {
         .find(|(k, _, _)| k == "arguments" || k == "parameters")
     {
         None => "{}".to_string(),
-        Some((_, J::Str(s), _)) => s.clone(),
+        Some((_, J::Str(s), raw)) => match parse_json(s) {
+            Some(_) => s.clone(),
+            None => raw.to_string(),
+        },
         Some((_, _, raw)) => raw.to_string(),
     };
     Some(Call {
@@ -1097,6 +1143,9 @@ pub struct Parser {
     undecided: bool,
     /// Text not yet decided (a block's body; a possible `<tool_call>` start).
     buf: String,
+    /// Hermes, inside a block: `buf` before this has no `</tool_call>`
+    /// (a char boundary), so each search covers only the new text.
+    scan: usize,
     /// Whitespace after the last content, held: dropped if a call follows.
     ws: String,
     /// Calls made so far.
@@ -1112,6 +1161,7 @@ impl Parser {
             inside: false,
             undecided: kind == Kind::Json,
             buf: String::new(),
+            scan: 0,
             ws: String::new(),
             calls: 0,
             after_call: false,
@@ -1192,12 +1242,19 @@ impl Parser {
     fn hermes(&mut self, out: &mut Vec<Piece>) {
         loop {
             if self.inside {
-                let Some(at) = self.buf.find(CLOSE) else {
+                let Some(at) = self.buf[self.scan..].find(CLOSE).map(|a| a + self.scan) else {
+                    // The next search starts where a `</tool_call>` could still begin.
+                    let mut w = self.buf.len().saturating_sub(CLOSE.len() - 1);
+                    while !self.buf.is_char_boundary(w) {
+                        w -= 1;
+                    }
+                    self.scan = w;
                     return;
                 };
                 let body = self.buf[..at].to_string();
                 self.buf.drain(..at + CLOSE.len());
                 self.inside = false;
+                self.scan = 0;
                 self.block(&body, true, out);
             } else if let Some(at) = self.buf.find(OPEN) {
                 let text = self.buf[..at].to_string();
@@ -1251,13 +1308,17 @@ impl Parser {
                 if self.inside {
                     let t = buf.trim_start();
                     let t = t.strip_prefix("<|python_tag|>").unwrap_or(t);
-                    // One object, or several separated by `;`.
-                    let calls: Option<Vec<Call>> = t
-                        .split(';')
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .map(call_of)
-                        .collect();
+                    // One object (whose strings may hold `;`), else several
+                    // separated by `;`.
+                    let calls: Option<Vec<Call>> = match call_of(t) {
+                        Some(c) => Some(vec![c]),
+                        None => t
+                            .split(';')
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(call_of)
+                            .collect(),
+                    };
                     match calls {
                         Some(cs) if !cs.is_empty() => {
                             for c in cs {

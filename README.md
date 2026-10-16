@@ -257,18 +257,31 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
   Call ids are `call_` plus 24 hex digits.
 - A block that isn't a JSON object with a string `"name"` (invalid JSON, or the reply was
   cut off mid-call) is not a call: it is returned as `content`, tags and all. So
-  `arguments` is always valid JSON. Qwen3's reasoning still comes as `reasoning_content`.
+  `arguments` is always valid JSON. A string `arguments` value is used as the arguments if
+  it is itself JSON, else returned as its JSON string literal. Qwen3's reasoning still
+  comes as `reasoning_content`.
+- The parser reads tags, not prose or JSON. `<tool_call>` written in ordinary text opens a
+  block (which comes back as content if it isn't a call), and a `</tool_call>` inside a
+  JSON string value ends the block early (the call then fails to parse and is returned
+  as content).
+- The format is chosen per model family from the vocabulary (ChatML with or without
+  `<think>`, or Llama 3's headers), not read from the GGUF's template. Models of a known
+  family with a different tool format, such as Qwen3-Coder's XML `<function=...>` calls,
+  are not supported.
 - `tool_choice`: `auto` (default); `none` (the tools are not shown to the model, and its
   reply is plain content); `required` or `{"type": "function", "function": {"name": ...}}`.
   The last two start the reply with the opening of a call (the named one: through its
-  `"arguments": `), so the model must call. Qwen3 then skips its reasoning.
+  `"arguments": `), so the model must call. Qwen3 then skips its reasoning. Without
+  `tools` they are a 400.
   `parallel_tool_calls`, `strict`, `store`, `reasoning_effort` and `prompt_cache_key` are
   accepted and ignored.
 - Context: an agent's system prompt and tool schemas can be 15-25k tokens, past the
   8192 default, so pass `--ctx` (up to the model's trained length, 40960 for Qwen3).
   `--kv q8` halves the cache's memory. The prefix cache works across tool turns: the next
   request resends the history with the results appended, and only the tokens after the
-  previous reply's start are run again. The system prompt and tools are never run again.
+  previous reply's start are run again, as long as no other request evicted the prefix in
+  between. There is one KV cache, so a harness's side requests (title generation,
+  summaries) or a second client make the next turn prefill the system prompt and tools again.
 - Harnesses: anything speaking OpenAI Chat Completions, e.g. Synaps (`provider.local.url`),
   opencode and crush (an OpenAI-compatible provider whose base URL is
   `http://127.0.0.1:8080/v1`), and pi (an `openai-completions` model in `models.json`).

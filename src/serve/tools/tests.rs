@@ -39,6 +39,16 @@ fn json_keeps_order_and_prints_like_python() {
     // Nesting is bounded (the parser recurses).
     let deep = "[".repeat(MAX_DEPTH + 2) + &"]".repeat(MAX_DEPTH + 2);
     assert_eq!(parse_json(&deep), None);
+    // Duplicate keys: the last wins (serde_json's rule).
+    assert_eq!(
+        parse_json(r#"{"a": 1, "a": 2}"#).unwrap().get("a"),
+        Some(&J::Num("2".into()))
+    );
+    // \u takes exactly four hex digits.
+    for bad in [r#""\u+123""#, r#""\u 0a1""#, r#""\u12""#, r#""\u00g1""#] {
+        assert_eq!(parse_json(bad), None, "{bad}");
+    }
+    assert_eq!(parse_json(r#""\u00e9""#), Some(J::Str("é".into())));
     let spans = parse_object_spans(r#"{"name": "f", "arguments": {"x": [1, 2]} }"#).unwrap();
     assert_eq!(spans[1].2, r#"{"x": [1, 2]}"#);
 }
@@ -145,6 +155,30 @@ fn requests() {
         parse(br#"{"tool_choice": "required", "messages": [{"role": "tool", "content": "x"}]}"#)
             .unwrap_err();
     assert_eq!(e.param, Some("tool_choice"));
+    // A call can't be forced without tools, tool history or not.
+    for c in [
+        r#""required""#,
+        r#"{"type": "function", "function": {"name": "f"}}"#,
+    ] {
+        let body =
+            format!(r#"{{"tool_choice": {c}, "messages": [{{"role": "user", "content": "x"}}]}}"#);
+        assert_eq!(
+            parse(body.as_bytes()).unwrap_err().param,
+            Some("tool_choice"),
+            "{c}"
+        );
+    }
+    // tool_choice auto/none without tools: an ordinary request, as before.
+    assert_eq!(
+        parse(br#"{"tool_choice": "none", "messages": [{"role": "user", "content": "x"}]}"#)
+            .unwrap(),
+        None
+    );
+    // Duplicate top-level keys: the last wins (as api.rs's serde_json reads it).
+    let r = req(&format!(
+        r#"{{"tools": [], "tools": {TOOLS}, "messages": [{{"role": "user", "content": "x"}}]}}"#
+    ));
+    assert_eq!(r.tools.len(), 2);
     // Assistant messages without a content key (pi) are empty.
     let r = req(
         r#"{"messages": [{"role": "user", "content": "x"}, {"role": "assistant", "tool_calls": [{"id": "a", "type": "function", "function": {"name": "f", "arguments": "not json"}}]}]}"#,
@@ -269,6 +303,12 @@ fn render_qwen3() {
         &expected("Qwen3-8B-Q4_K_M/notools_history"),
     );
     assert!(r.parser.is_some());
+    // The reasoning branch with string arguments (printed verbatim by Qwen3's
+    // template; `{"a":1, "b": [ ]}` is not re-serialized).
+    let r = req(&format!(
+        r#"{{"tools": {TOOLS}, "messages": [{{"role": "user", "content": "q"}}, {{"role": "assistant", "content": "ok", "reasoning_content": "plan", "tool_calls": [{{"id": "c1", "type": "function", "function": {{"name": "f", "arguments": "{{\"a\":1, \"b\": [ ]}}"}}}}]}}, {{"role": "tool", "tool_call_id": "c1", "content": "r"}}]}}"#
+    ));
+    check(&tok, &t, &r, false, &expected("Qwen3-8B-Q4_K_M/reasoning"));
     // Reasoning of a reply after the last query is kept (the template's rule).
     let r = req(
         r#"{"messages": [{"role": "user", "content": "q"}, {"role": "assistant", "content": "<think>\nplan\n</think>\n\nok", "tool_calls": [{"function": {"name": "f", "arguments": "{}"}}]}, {"role": "tool", "content": "r"}, {"role": "assistant", "content": "x", "reasoning_content": "why"}, {"role": "user", "content": "<tool_response>a</tool_response>"}]}"#,
@@ -525,6 +565,12 @@ fn hermes_parser() {
         "<tool_call>[1]</tool_call><tool_call>{\"name\": \"b\"}</tool_call>",
         &[text("<tool_call>[1]</tool_call>"), call("b", "{}")],
     );
+    // A string that isn't JSON: its JSON literal, so arguments stay JSON.
+    every_split(
+        h,
+        "<tool_call>{\"name\": \"s\", \"arguments\": \"hello\"}</tool_call>",
+        &[call("s", "\"hello\"")],
+    );
     // Arguments given as a JSON string are passed through as that string.
     every_split(
         h,
@@ -553,6 +599,17 @@ fn hermes_parser() {
 #[test]
 fn json_parser_llama() {
     let j = Kind::Json;
+    // A `;` inside a string: one call (the whole reply is tried first).
+    every_split(
+        j,
+        r#"{"name":"bash","parameters":{"cmd":"ls; pwd"}}"#,
+        &[call("bash", r#"{"cmd":"ls; pwd"}"#)],
+    );
+    every_split(
+        j,
+        r#"{"name": "s", "parameters": "hello"}"#,
+        &[call("s", "\"hello\"")],
+    );
     every_split(
         j,
         " {\"name\": \"get_weather\", \"parameters\": {\"city\": \"Paris\"}}",
@@ -566,6 +623,20 @@ fn json_parser_llama() {
     every_split(j, "The answer is {x}.", &[text("The answer is {x}.")]);
     every_split(j, "{not a call}", &[text("{not a call}")]);
     every_split(j, "  ", &[text("  ")]);
+}
+
+/// A long block fed a byte at a time (the `</tool_call>` search resumes
+/// where it stopped), with multi-byte characters and a near-miss close tag.
+#[test]
+fn long_block_bytewise() {
+    let args = format!("{{\"text\": \"{}</tool_cal ü\"}}", "é<x>".repeat(5000));
+    let s = format!("<tool_call>{{\"name\": \"w\", \"arguments\": {args}}}</tool_call>tail");
+    let parts: Vec<&str> = s
+        .char_indices()
+        .map(|(i, c)| &s[i..i + c.len_utf8()])
+        .collect();
+    let out = run(&mut Parser::new(Kind::Hermes), &parts);
+    assert_eq!(strip(out), [call("w", &args), text("tail")]);
 }
 
 #[test]

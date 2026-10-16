@@ -36,11 +36,30 @@ multi = [
  {"role": "assistant", "content": "Paris 18C, Rome 25C."},
  {"role": "user", "content": "Thanks"},
 ]
+# Qwen3's template prints string `arguments` verbatim, so its cases use the
+# strings the tests send (Qwen2.5's and Llama's tojson the value: given the
+# object, as llama.cpp/vLLM pass it).
+import copy
+one_s = copy.deepcopy(one)
+one_s[2]["tool_calls"][0]["function"]["arguments"] = '{"city":"Paris"}'
+multi_s = copy.deepcopy(multi)
+multi_s[1]["tool_calls"][0]["function"]["arguments"] = '{"city": "Paris"}'  # second stays an object
+reasoning = [
+ {"role": "user", "content": "q"},
+ {"role": "assistant", "content": "ok", "reasoning_content": "plan",
+  "tool_calls": [{"id": "c1", "type": "function", "function": {"name": "f", "arguments": '{"a":1, "b": [ ]}'}}]},
+ {"role": "tool", "tool_call_id": "c1", "content": "r"},
+]
 out = {}
-for fam in ['Qwen3-8B-Q4_K_M', 'Qwen2.5-7B-Instruct-Q4_K_M']:
+q3 = 'Qwen3-8B-Q4_K_M'
+out[q3 + '/one'] = render(q3, one_s, tools)
+out[q3 + '/multi'] = render(q3, multi_s, tools)
+out[q3 + '/notools_history'] = render(q3, one_s, None)
+out[q3 + '/one_nothink'] = render(q3, one_s, tools, enable_thinking=False)
+out[q3 + '/reasoning'] = render(q3, reasoning, tools)
+for fam in ['Qwen2.5-7B-Instruct-Q4_K_M']:
     out[fam+'/one'] = render(fam, one, tools)
     out[fam+'/multi'] = render(fam, multi, tools)
     out[fam+'/notools_history'] = render(fam, one, None)
-out['Qwen3-8B-Q4_K_M/one_nothink'] = render('Qwen3-8B-Q4_K_M', one, tools, enable_thinking=False)
 out['llama31/one'] = render('Meta-Llama-3.1-8B-Instruct-Q4_K_M', one, tools)
 json.dump(out, open('tests/fixtures/tool_templates.json', 'w'), ensure_ascii=False, indent=1)
