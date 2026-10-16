@@ -350,6 +350,95 @@ fn verify_bits(kv: CacheKv) {
     }
 }
 
+/// Sampled verify: verify_cands' candidates equal forward_cands' per token
+/// (bit for bit: logits and ids) and leave the same KV, for a split's
+/// batched path (CPU hidden_batch, GPU on-device candidates), with and
+/// without the repeat penalty, k up to CAND_MAX and past it (the per-row
+/// fallback), drafts small and past the GPU's max batch.
+#[test]
+fn hybrid_verify_cands_matches_forward_cands() {
+    use crate::sample::{CAND_MAX, CandSpec};
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = mapped(M05) else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let n = block_count(&m).unwrap();
+    let prompt = long_ids(&m, 90);
+    let (&last, rest) = prompt.split_last().unwrap();
+    let start = rest.len();
+    let h = HybridQwen2::new(Some((&g, &km)), &m, 1400, n / 2, CacheKv::F16).unwrap();
+    let mut seed = 99u64;
+    let mut rnd = |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % n) as u32
+    };
+    let specs = [
+        CandSpec {
+            k: 40,
+            penalty: 1.0,
+            last_n: 64,
+        },
+        CandSpec {
+            k: 40,
+            penalty: 1.1,
+            last_n: 64,
+        },
+        CandSpec {
+            k: CAND_MAX,
+            penalty: 1.1,
+            last_n: 8,
+        },
+        CandSpec {
+            k: CAND_MAX + 1,
+            penalty: 1.1,
+            last_n: 64,
+        },
+    ];
+    for spec in &specs {
+        for nb in [1, 2, 8, 9, 300] {
+            let mut toks = vec![last];
+            toks.extend((1..nb).map(|_| rnd(3000)));
+            let recent: Vec<u32> = prompt[..start]
+                .iter()
+                .copied()
+                .chain(toks.iter().copied())
+                .collect();
+            let mut a = h.new_cache(start + nb + 1);
+            let mut b = h.new_cache(start + nb + 1);
+            h.feed_batch(rest, 0, &mut a);
+            h.feed_batch(rest, 0, &mut b);
+            let got = h.verify_cands(&toks, start, &mut a, spec, &recent);
+            let n = recent.len();
+            let want: Vec<_> = (0..nb)
+                .map(|i| {
+                    h.forward_cands(toks[i], start + i, &mut b, spec, &recent[..n - nb + i + 1])
+                })
+                .collect();
+            assert_eq!(got.len(), nb);
+            for (i, (x, y)) in got.iter().zip(&want).enumerate() {
+                let bits = |v: &Vec<crate::sample::Cand>| -> Vec<(u32, u32)> {
+                    v.iter().map(|c| (c.id, c.logit.to_bits())).collect()
+                };
+                assert_eq!(bits(x), bits(y), "{spec:?} nb {nb}: row {i}");
+            }
+            assert!(
+                a.cpu.as_ref().unwrap().bits() == b.cpu.as_ref().unwrap().bits(),
+                "{spec:?} nb {nb}: CPU KV"
+            );
+            assert!(
+                CudaQwen2::kv_bits(a.gpu.as_ref().unwrap())
+                    == CudaQwen2::kv_bits(b.gpu.as_ref().unwrap()),
+                "{spec:?} nb {nb}: GPU KV"
+            );
+        }
+    }
+}
+
 /// Whether `m` refuses to hand out `t`'s bytes (released on a copy).
 fn released(m: &Model, t: &crate::gguf::Tensor) -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

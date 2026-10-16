@@ -1206,7 +1206,9 @@ impl<'a> Qwen2<'a> {
         let n_in = xr[0].len();
         let k = ys.len() / slots;
         if w.r8.is_some() {
-            w.gemm(w.groups(n_in, r0, k, false), &xr[..nb], ys, slots);
+            // To the matrix's end: the GEMM's prefetch may read on past
+            // this chunk's rows, as decode's GEMV does.
+            w.gemm(w.groups(n_in, r0, k, true), &xr[..nb], ys, slots);
         } else {
             let (qt, data) = (w.qt(), w.bytes());
             let rb = row_bytes(qt, n_in);

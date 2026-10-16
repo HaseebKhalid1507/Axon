@@ -691,9 +691,9 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         );
     }
     let n_gen = if cmd == "gen" { extra } else { n_gen };
-    // The cache (and so the placement) is for the prompt and the tokens
-    // generated, or --ctx's context if bigger: a model's speed as a chat or
-    // serve with that context would place it (a long context can split it).
+    // The cache (and so the placement, and the drafter's cache) is for the
+    // prompt and the tokens generated, or --ctx's context if bigger: the
+    // model placed as chat --ctx N places it (a long context can split it).
     let trained = model.ctx_len() as usize;
     if let Some(n) = gen_ctx.filter(|&n| trained > 0 && n > trained) {
         let yarn = rope::yarn(&model).is_some();
@@ -711,7 +711,14 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             }
         ));
     }
-    let cache_ctx = (ids.len() + extra + 1).max(gen_ctx.unwrap_or(0));
+    let need = ids.len() + extra + 1;
+    if let Some(n) = gen_ctx.filter(|&n| n < need) {
+        eprintln!(
+            "axon: note: --ctx {n} is less than the prompt and -n need ({need} tokens); \
+             using {need}"
+        );
+    }
+    let cache_ctx = need.max(gen_ctx.unwrap_or(0));
     let dm = if with_model {
         open_draft_model(draft_path, path, max_draft, device, &model, &tok)
     } else {
@@ -726,7 +733,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         kv,
         false,
         lm::Placing::of(cache_ctx),
-        ids.len() + extra + 1,
+        cache_ctx,
     );
     if sampler.is_some() && drafter.is_some() {
         eprintln!("{}", draft::SAMPLED_NOTE);
@@ -737,6 +744,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         with_model,
         drafter.is_some(),
         is_split(&net),
+        sampler.is_none(),
     );
     let mut cache = net.new_cache(cache_ctx);
 
@@ -1119,6 +1127,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         with_model,
         drafter.is_some(),
         is_split(&net),
+        sargs.resolve(sample::DEFAULT_TEMP).is_none(),
     );
     let (want, ctx) = (ctx, net.ctx(ctx));
     if ctx < want {

@@ -184,18 +184,21 @@ pub fn draft_k(k: Option<usize>, with_model: bool) -> usize {
 pub const SPLIT_MODEL_DRAFT: usize = 7;
 
 /// The K to run with, once the main model is placed: `k` (`draft_k`'s), or
-/// `SPLIT_MODEL_DRAFT` if a draft model runs next to a split model and K
-/// wasn't given (`given`: --draft / AXON_DRAFT), or 0 if a draft model was
-/// asked for (`with_model`) but none runs (`--draft-model auto` found none:
-/// not prompt lookup instead).
+/// `SPLIT_MODEL_DRAFT` if a draft model runs next to a split model, the
+/// decoding is greedy and K wasn't given (`given`: --draft / AXON_DRAFT),
+/// or 0 if a draft model was asked for (`with_model`) but none runs
+/// (`--draft-model auto` found none: not prompt lookup instead). Sampled
+/// decoding keeps `k`: a sampled pick rarely equals a greedy guess, so a
+/// longer draft is mostly verified for nothing (docs/design/spec-split.md).
 pub fn split_k(
     given: Option<usize>,
     k: usize,
     with_model: bool,
     drafter: bool,
     split: bool,
+    greedy: bool,
 ) -> usize {
-    match (given, with_model, drafter, split) {
+    match (given, with_model, drafter, split && greedy) {
         (_, true, false, _) => 0,
         (None, true, true, true) => SPLIT_MODEL_DRAFT,
         _ => k,
@@ -218,7 +221,9 @@ pub fn auto_path(path: &str, main: &Model, tok: &Tokenizer) -> Option<String> {
         .filter_map(|e| e.ok())
         .filter_map(|e| {
             let q = e.path();
-            let len = e.metadata().ok()?.len();
+            // fs::metadata follows symlinks (a Hugging Face cache's
+            // snapshot files are links into its blobs): the file's size.
+            let len = std::fs::metadata(&q).ok()?.len();
             let gguf = q
                 .extension()
                 .is_some_and(|x| x.eq_ignore_ascii_case("gguf"));
@@ -332,6 +337,9 @@ impl DraftModel {
         m: &Model,
         tok: &Tokenizer,
     ) -> Result<DraftModel, String> {
+        if path == "auto" {
+            return Err("auto: picking a draft model is for gen and chat; give a path".into());
+        }
         let d = crate::gguf::load_with(path, copy).map_err(|e| format!("{path}: {e}"))?;
         crate::model::check_supported(&d).map_err(|e| format!("{path}: {e}"))?;
         check_vocab(&d, m, tok).map_err(|e| format!("{path} can't draft for this model: {e}"))?;
@@ -394,8 +402,19 @@ impl DraftModel {
                 debug_assert_eq!(device, Device::Cuda);
                 let (gpu, module) = (r.gpu, r.module);
                 drop(r);
-                let n = CudaQwen2::with_kv(gpu, module, self.model, ctx, cache_kv(kv), false)
-                    .map_err(|e| format!("the draft model: {e}"))?;
+                // No Q6_K prefill copy (a spare-VRAM extra, same bits): the
+                // drafter gets just its reserve, never memory the main
+                // model's cache (made after it) planned for.
+                let n = CudaQwen2::with_kv_q6k8(
+                    gpu,
+                    module,
+                    self.model,
+                    ctx,
+                    cache_kv(kv),
+                    false,
+                    false,
+                )
+                .map_err(|e| format!("the draft model: {e}"))?;
                 Backend::Cuda(Box::new(n))
             }
         };
@@ -404,10 +423,6 @@ impl DraftModel {
 }
 
 const GIB: f64 = (1u64 << 30) as f64;
-
-/// VRAM `load_pair` leaves unheld besides the drafter's reserve (the
-/// driver's own small allocations while the drafter loads).
-const HOLD_SLACK: u64 = 64 << 20;
 
 /// The GPU cache type for `kv` (as `Backend::new` maps it).
 fn cache_kv(kv: KvType) -> CacheKv {
@@ -449,20 +464,7 @@ pub fn load_pair<'a>(
             want_ctx.min(draft_ctx)
         );
     }
-    // The main model's cache (a split's GPU half's too) is made after the
-    // drafter: hold all of the VRAM the reserve doesn't cover while the
-    // drafter loads, so it gets just its reserve and its spare-VRAM extra
-    // (the Q6_K prefill copy, prefill-only) is never made out of memory
-    // the main model planned for.
-    let hold = match &r {
-        Some(r) => {
-            let free = r.gpu.info()?.free_bytes;
-            r.gpu.alloc(free.saturating_sub(HOLD_SLACK) as usize).ok()
-        }
-        None => None,
-    };
     let d = dm.load(device, r, ctx, kv)?;
-    drop(hold);
     Ok((net, Some(d)))
 }
 
@@ -849,17 +851,19 @@ mod tests {
 
     #[test]
     fn split_k_defaults() {
-        // A draft model next to a split model: the split's K unless given.
+        // A draft model next to a split model, greedy: the split's K unless given.
         let d = DEFAULT_MODEL_DRAFT;
-        assert_eq!(split_k(None, d, true, true, true), SPLIT_MODEL_DRAFT);
-        assert_eq!(split_k(Some(3), 3, true, true, true), 3);
-        assert_eq!(split_k(Some(0), 0, true, false, true), 0);
+        assert_eq!(split_k(None, d, true, true, true, true), SPLIT_MODEL_DRAFT);
+        assert_eq!(split_k(Some(3), 3, true, true, true, true), 3);
+        assert_eq!(split_k(Some(0), 0, true, false, true, true), 0);
+        // Sampled: K as draft_k gave it, split or not.
+        assert_eq!(split_k(None, d, true, true, true, false), d);
         // Not split, or prompt lookup: K as draft_k gave it.
-        assert_eq!(split_k(None, d, true, true, false), d);
-        assert_eq!(split_k(None, 7, false, false, true), 7);
+        assert_eq!(split_k(None, d, true, true, false, true), d);
+        assert_eq!(split_k(None, 7, false, false, true, true), 7);
         // A draft model asked for (auto) but none found: off, not lookup.
-        assert_eq!(split_k(None, d, true, false, true), 0);
-        assert_eq!(split_k(Some(5), 5, true, false, false), 0);
+        assert_eq!(split_k(None, d, true, false, true, true), 0);
+        assert_eq!(split_k(Some(5), 5, true, false, false, true), 0);
     }
 
     fn fake(tokens: &[Val], eos: u32) -> Model {

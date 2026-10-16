@@ -2514,6 +2514,52 @@ impl<'g> CudaQwen2<'g> {
             .unwrap_or_else(|e| Self::die(e))
     }
 
+    /// `Lm::verify_cands` from hidden states (laid out as `feed_hidden`'s;
+    /// `recent` ends with the rows' tokens): each row's sampling candidates
+    /// from batched passes, as `verify_cands` does for tokens. Past
+    /// CAND_MAX: `forward_hidden` row by row and the host's `sample::cands`
+    /// (the same logits bit for bit).
+    pub fn verify_cands_hidden(
+        &self,
+        c: &mut CudaCache<'g>,
+        xs: &[f32],
+        start: usize,
+        spec: &CandSpec,
+        recent: &[u32],
+    ) -> Vec<Vec<Cand>> {
+        let (dim, nb, n) = (self.dim, xs.len() / self.dim, recent.len());
+        Self::check_positions(nb, start, c);
+        assert_eq!(xs.len(), nb * dim, "hidden states: whole rows");
+        assert!(n >= nb, "recent must end with the rows' tokens");
+        if spec.k > CAND_MAX {
+            return (0..nb)
+                .map(|b| {
+                    let mut l = self.forward_hidden(c, &xs[b * dim..(b + 1) * dim], start + b);
+                    sample::cands(&mut l, spec, &recent[..n - nb + b + 1])
+                })
+                .collect();
+        }
+        let r = (|| {
+            let max = c.b.as_ref().expect("batch scratch").max;
+            self.samp_upload(c, spec, recent, nb, nb.min(max), None)?;
+            let mut rows = Vec::with_capacity(nb);
+            for r in batch::passes(nb, max) {
+                let input = batch::BatchIn::Hidden(&xs[r.start * dim..r.end * dim]);
+                self.pass_with(
+                    c,
+                    input,
+                    start + r.start,
+                    Head::Sample,
+                    r.start,
+                    &mut |_| Ok(()),
+                )?;
+                rows.extend(self.samp_read(c, spec.k, self.vocab, r.len())?);
+            }
+            Ok(rows)
+        })();
+        r.unwrap_or_else(|e: String| Self::die(e))
+    }
+
     /// Per-kernel GPU time of one step (no graph), in first-launch order,
     /// plus the step's total ms. The events recorded between kernels also
     /// serialize them (no PDL overlap), so this is each kernel alone.
