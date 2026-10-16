@@ -13,6 +13,9 @@ const GGUF_MAGIC: u32 = 0x46554747;
 const MAX_DIMS: u32 = 4;
 /// `general.alignment` when the file doesn't set it.
 const DEFAULT_ALIGNMENT: u64 = 32;
+/// String arrays at least this long are parsed on several threads
+/// (`Reader::strings`).
+const PAR_STRINGS: usize = 16384;
 /// Arrays of arrays are legal GGUF; nothing real nests deeper than this.
 const MAX_ARRAY_DEPTH: u32 = 4;
 /// Most metadata array elements in a file, all arrays together. Each one
@@ -72,6 +75,61 @@ impl<'a> Reader<'a> {
         String::from_utf8(bytes.to_vec()).map_err(|_| bad(format!("{what} is not valid UTF-8")))
     }
 
+    /// An array of `n` strings (the vocabulary, the merges: ~150k each):
+    /// their bounds found in one pass, then the Strings made on up to 4
+    /// threads. The same values as reading them one by one; with both a
+    /// truncated and an invalid UTF-8 string, the truncation is reported.
+    fn strings(&mut self, n: usize) -> io::Result<Val> {
+        const W: &str = "metadata string";
+        // `n` was checked against the bytes left, not against memory: a
+        // corrupt count only grows these as strings are really read.
+        let mut spans = Vec::with_capacity(n.min(1 << 18));
+        for _ in 0..n {
+            let len = self.u64(W)?;
+            let at = self.pos;
+            self.take(len, W)?;
+            spans.push((at, len as usize));
+        }
+        let buf = self.buf;
+        let make = |part: &[(usize, usize)]| -> io::Result<Vec<Val>> {
+            (part.iter())
+                .map(|&(at, len)| {
+                    let b = &buf[at..at + len];
+                    match std::str::from_utf8(b) {
+                        Ok(s) => Ok(Val::Str(s.to_owned())),
+                        Err(_) => Err(bad(format!("{W} is not valid UTF-8"))),
+                    }
+                })
+                .collect()
+        };
+        let threads = std::thread::available_parallelism()
+            .map_or(1, |t| t.get())
+            .clamp(1, 4);
+        let per = n.div_ceil(threads).max(PAR_STRINGS / 2);
+        let parts: Vec<io::Result<Vec<Val>>> = std::thread::scope(|sc| {
+            // A part whose thread didn't start is made here, in order.
+            let hs: Vec<_> = (spans.chunks(per))
+                .map(|c| {
+                    (
+                        c,
+                        std::thread::Builder::new().spawn_scoped(sc, move || make(c)),
+                    )
+                })
+                .collect();
+            (hs.into_iter())
+                .map(|(c, h)| match h {
+                    Ok(h) => h.join().expect("string parse thread"),
+                    Err(_) => make(c),
+                })
+                .collect()
+        });
+        let mut a = Vec::with_capacity(spans.len());
+        for p in parts {
+            a.extend(p?);
+        }
+        Ok(Val::Arr(a))
+    }
+
     /// `n` items of at least `min_size` bytes each must fit in what's left.
     fn check_count(&self, n: u64, min_size: u64, what: &str) -> io::Result<()> {
         if n.checked_mul(min_size).is_none_or(|b| b > self.left()) {
@@ -108,6 +166,9 @@ impl<'a> Reader<'a> {
                     )));
                 }
                 self.elems_left -= n;
+                if et == 8 && n >= PAR_STRINGS as u64 {
+                    return self.strings(n as usize);
+                }
                 let mut a = Vec::with_capacity((n as usize).min(4096));
                 for _ in 0..n {
                     a.push(self.val(et, depth + 1)?);
@@ -1318,6 +1379,59 @@ mod tests {
             m.release(t);
             assert!(m.is_released(t));
         }
+    }
+
+    /// A string array long enough for the threaded parse (`Reader::strings`)
+    /// reads as it would one by one; a bad string in it is an error.
+    #[test]
+    fn parses_a_long_string_array() {
+        let n = PAR_STRINGS * 2 + 7;
+        let texts: Vec<String> = (0..n)
+            .map(|i| format!("t{i}é{}", "x".repeat(i % 13)))
+            .collect();
+        let file = |bad: Option<usize>| {
+            let mut w = W::header(3, 2, 2)
+                .str("general.architecture")
+                .u32(8)
+                .str("qwen2")
+                .str("tokenizer.ggml.tokens")
+                .u32(9)
+                .u32(8)
+                .u64(n as u64);
+            for (i, t) in texts.iter().enumerate() {
+                w = w.str(t);
+                if bad == Some(i) {
+                    let l = w.0.len();
+                    w.0[l - 1] = 0xff; // the last byte of this string
+                }
+            }
+            w.tensor("blk.0.attn_norm.weight", 8, 0)
+                .tensor("output_norm.weight", 8, 32)
+                .pad_to(32, 64)
+        };
+        let h = parse(&file(None)).expect("valid file");
+        let Some((_, Val::Arr(a))) = h
+            .metadata
+            .iter()
+            .find(|(k, _)| k == "tokenizer.ggml.tokens")
+        else {
+            panic!("no array")
+        };
+        assert_eq!(a.len(), n);
+        assert!(
+            a.iter()
+                .zip(&texts)
+                .all(|(v, t)| matches!(v, Val::Str(s) if s == t))
+        );
+        assert_eq!(h.tensors.len(), 2);
+        for i in [0, PAR_STRINGS + 3, n - 1] {
+            assert!(
+                err(&file(Some(i))).contains("not valid UTF-8"),
+                "bad string {i}"
+            );
+        }
+        let f = file(None);
+        assert!(err(&f[..f.len() / 2]).contains("truncated"));
     }
 
     #[test]
