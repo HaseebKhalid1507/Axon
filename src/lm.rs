@@ -337,6 +337,25 @@ impl<'a> Backend<'a> {
         kv: KvType,
         fit: bool,
     ) -> Result<Backend<'a>, String> {
+        Self::new_capped(m, device, max_ctx, gpu_layers, kv, fit, max_ctx)
+    }
+
+    /// `new`, but only the whole model on one GPU placed automatically
+    /// (gpu_layers None) gets a max_ctx cache: a split (automatic or
+    /// --gpu-layers), every layer by --gpu-layers and a multi-GPU pipeline
+    /// get `split_ctx` (<= max_ctx) instead. `axon serve`'s default: the
+    /// trained context where the GPU holds it, the old cap elsewhere (a
+    /// long cache would cost a split GPU layers, a pipeline its fit).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_capped(
+        m: &'a Model,
+        device: Device,
+        max_ctx: usize,
+        gpu_layers: Option<usize>,
+        kv: KvType,
+        fit: bool,
+        split_ctx: usize,
+    ) -> Result<Backend<'a>, String> {
         if device == Device::Cpu {
             // The CPU's f16/f32 choice is AXON_KV's (kv::use_f32).
             if kv == KvType::Q8 {
@@ -361,7 +380,7 @@ impl<'a> Backend<'a> {
                         .into(),
                 );
             }
-            return Self::pipeline(m, list, max_ctx, ckv);
+            return Self::pipeline(m, list, split_ctx, ckv);
         }
         let ordinal = gpus.map_or(0, |l| l[0]);
         let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open_device(ordinal)?));
@@ -377,7 +396,7 @@ impl<'a> Backend<'a> {
             Some(g) => {
                 let n = crate::hybrid::block_count(m)?;
                 if g >= n {
-                    return whole_gpu(max_ctx, false).map_err(|e| {
+                    return whole_gpu(split_ctx, false).map_err(|e| {
                         format!("{g}/{n} layers on the GPU: {e}, or fewer --gpu-layers")
                     });
                 }
@@ -389,7 +408,7 @@ impl<'a> Backend<'a> {
                 // A streaming split's VRAM (its bigger batch scratch and the
                 // stream reserve) is what the split option is weighed by.
                 let split =
-                    || crate::hybrid::auto_gpu_layers(gpu, module, m, max_ctx, ckv, free, stream);
+                    || crate::hybrid::auto_gpu_layers(gpu, module, m, split_ctx, ckv, free, stream);
                 match crate::hybrid::choose_placement(free, max_ctx, fit, whole, split)? {
                     Placement::Gpu { ctx } => return whole_gpu(ctx, false),
                     Placement::Split {
@@ -399,7 +418,7 @@ impl<'a> Backend<'a> {
                         if let Some(c) = gpu_ctx {
                             eprintln!(
                                 "axon: the whole model fits in GPU memory only with a {c}-token \
-                                 context; splitting it to keep {max_ctx} (--ctx {c} for all of it \
+                                 context; splitting it to keep {split_ctx} (--ctx {c} for all of it \
                                  on the GPU, faster; --gpu-layers N to choose the split{})",
                                 if ckv == CacheKv::F16 {
                                     "; --kv q8 halves the KV cache"
@@ -420,8 +439,8 @@ impl<'a> Backend<'a> {
             }
         };
         let h =
-            HybridQwen2::new_with_stream(Some((gpu, module)), m, max_ctx, g, ckv, stream, auto)?;
-        eprintln!("split:       {}", h.describe(max_ctx));
+            HybridQwen2::new_with_stream(Some((gpu, module)), m, split_ctx, g, ckv, stream, auto)?;
+        eprintln!("split:       {}", h.describe(split_ctx));
         Ok(Backend::Hybrid(Box::new(h)))
     }
 

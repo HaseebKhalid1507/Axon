@@ -1760,3 +1760,143 @@ fn serve_shrunk_pool() {
     assert_eq!(r.json()["error"]["code"], "context_length_exceeded");
     batched_vs_solo(a, &batch_bodies(false), "shrunk pool, no max_tokens");
 }
+
+/// `plan_slots` over a model of the memory: the single-request cache and
+/// each slot take `per` bytes a position, out of `free`.
+fn plan(
+    ctx: usize,
+    ctx_set: bool,
+    parallel: usize,
+    parallel_set: bool,
+    free: usize,
+) -> (usize, usize, bool) {
+    let p = super::plan_slots(ctx, ctx_set, parallel, parallel_set, |s, c| {
+        (s + 1) * c <= free
+    });
+    (p.slots, p.ctx, p.note.is_some())
+}
+
+/// The default (neither --ctx nor --parallel): the trained context with as
+/// many slots as fit; slots shorten only down to min(ctx, AGENT_CTX), else
+/// one request at a time with the whole context.
+#[test]
+fn plan_slots_default() {
+    use super::AGENT_CTX;
+    // Everything fits: 8 slots of the whole context, nothing to say.
+    assert_eq!(
+        plan(32768, false, PARALLEL, false, 9 * 32768),
+        (8, 32768, false)
+    );
+    assert_eq!(
+        plan(32768, false, PARALLEL, false, 100 * 32768),
+        (8, 32768, false)
+    );
+    // Room for 4 at the whole context: 4, no shortening.
+    assert_eq!(
+        plan(32768, false, PARALLEL, false, 5 * 32768 + 7),
+        (4, 32768, false)
+    );
+    // 2 fit exactly.
+    assert_eq!(
+        plan(32768, false, PARALLEL, false, 3 * 32768),
+        (2, 32768, false)
+    );
+    // 2 don't fit at 32768 (the floor for a 32k model): one at a time, 32768.
+    assert_eq!(
+        plan(32768, false, PARALLEL, false, 3 * 32768 - 1),
+        (1, 32768, true)
+    );
+    assert_eq!(plan(32768, false, PARALLEL, false, 0), (1, 32768, true));
+    // A 128k model: 2 slots fit at 50000 -> the multiple of 1024 below,
+    // and that's still >= AGENT_CTX, so batching at 49152.
+    assert_eq!(
+        plan(131072, false, PARALLEL, false, 3 * 50000),
+        (2, 49152, true)
+    );
+    // Context first: room for 3 slots of 65536 is 2 of 65536, not 3 shorter.
+    assert_eq!(
+        plan(131072, false, PARALLEL, false, 4 * 49152),
+        (2, 65536, true)
+    );
+    // ... and once the whole context fits 2, the rest goes to slots.
+    assert_eq!(
+        plan(131072, false, PARALLEL, false, 4 * 131072),
+        (3, 131072, false)
+    );
+    // ... but below AGENT_CTX: one at a time with the whole 128k.
+    assert_eq!(
+        plan(131072, false, PARALLEL, false, 3 * AGENT_CTX - 1),
+        (1, 131072, true)
+    );
+    assert_eq!(
+        plan(131072, false, PARALLEL, false, 3 * AGENT_CTX),
+        (2, AGENT_CTX, true)
+    );
+    // A context shorter than AGENT_CTX (a fitted 20000, an 8k model) is
+    // never shortened for slots.
+    assert_eq!(
+        plan(20000, false, PARALLEL, false, 3 * 20000),
+        (2, 20000, false)
+    );
+    assert_eq!(
+        plan(20000, false, PARALLEL, false, 3 * 20000 - 1),
+        (1, 20000, true)
+    );
+    assert_eq!(
+        plan(8192, false, PARALLEL, false, 9 * 8192),
+        (8, 8192, false)
+    );
+    // --parallel 1 (or 0): one at a time, no note.
+    assert_eq!(plan(32768, false, 1, true, 100 * 32768), (1, 32768, false));
+    assert_eq!(plan(32768, false, 0, true, 100 * 32768), (1, 32768, false));
+}
+
+/// An explicit --ctx is never shortened: the slots that fit with it (up
+/// to --parallel), else one request at a time; an explicit --parallel alone
+/// gets its slots, at the longest context they fit with.
+#[test]
+fn plan_slots_explicit() {
+    // --ctx 32768: 3 slots fit, the default --parallel 8 says nothing.
+    assert_eq!(
+        plan(32768, true, PARALLEL, false, 4 * 32768),
+        (3, 32768, false)
+    );
+    // ... 2 don't: one at a time, still 32768 (the default would also
+    // keep it, but for a 128k --ctx it would have batched shorter).
+    assert_eq!(
+        plan(32768, true, PARALLEL, false, 3 * 32768 - 1),
+        (1, 32768, true)
+    );
+    assert_eq!(
+        plan(131072, true, PARALLEL, false, 3 * 50000),
+        (1, 131072, true)
+    );
+    // --ctx and --parallel: --ctx wins, fewer slots, said.
+    assert_eq!(plan(16384, true, 6, true, 5 * 16384), (4, 16384, true));
+    assert_eq!(plan(16384, true, 6, true, 7 * 16384), (6, 16384, false));
+    // --parallel 4 alone: 4 slots, the context shortened to fit (a
+    // multiple of 1024), down to 1024.
+    assert_eq!(plan(32768, false, 4, true, 5 * 32768), (4, 32768, false));
+    assert_eq!(plan(32768, false, 4, true, 5 * 20000), (4, 19456, true));
+    assert_eq!(plan(32768, false, 4, true, 5 * 1024), (4, 1024, true));
+    assert_eq!(plan(32768, false, 4, true, 5 * 1024 - 1), (1, 32768, true));
+    // --parallel 16 (more than the default 8) alone: all 16 if they fit.
+    assert_eq!(plan(4096, false, 16, true, 17 * 4096), (16, 4096, false));
+    // A context under 1024 is kept whole or not batched.
+    assert_eq!(plan(1000, false, 2, true, 3 * 1000), (2, 1000, false));
+    assert_eq!(plan(1000, false, 2, true, 2999), (1, 1000, true));
+}
+
+/// The CPU's default context: the trained one if its cache fits in RAM,
+/// else the most (a multiple of 1024) that does, at least 1024.
+#[test]
+fn ram_ctx_fits() {
+    use super::ram_ctx;
+    let per = 57344; // 7B: 28 layers x 2 x 512 x f16
+    assert_eq!(ram_ctx(32768, per, 32768 * per), 32768);
+    assert_eq!(ram_ctx(32768, per, u64::MAX), 32768);
+    assert_eq!(ram_ctx(32768, per, 32768 * per - 1), 31744);
+    assert_eq!(ram_ctx(131072, per, 50000 * per), 49152);
+    assert_eq!(ram_ctx(32768, per, 0), 1024);
+    assert_eq!(ram_ctx(512, per, 0), 512);
+}

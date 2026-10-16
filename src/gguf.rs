@@ -724,7 +724,7 @@ fn page_size() -> usize {
 }
 
 /// `MemAvailable` from /proc/meminfo, in bytes.
-fn mem_available() -> Option<u64> {
+pub(crate) fn mem_available() -> Option<u64> {
     let s = std::fs::read_to_string("/proc/meminfo").ok()?;
     let line = s.lines().find(|l| l.starts_with("MemAvailable:"))?;
     let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
