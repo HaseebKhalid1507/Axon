@@ -53,12 +53,12 @@ usage:
   axon <model.gguf>                         same as axon info
   axon info <model.gguf>                    print a summary and exit
   axon gen <model.gguf> \"<prompt>\" [-n N] [--draft K] [--draft-model PATH] [--device D]
-            [--gpu-layers N] [--kv T] [sampling flags]
+            [--gpu-layers N] [--gpus L] [--kv T] [sampling flags]
                                             generation (greedy unless --temp > 0)
   axon logits <model.gguf> \"<prompt>\" [-k K]
                                             top-K next-token logits after the prompt
   axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K]
-            [--draft-model PATH] [--device D] [--gpu-layers N] [--kv T] [sampling flags]
+            [--draft-model PATH] [--device D] [--gpu-layers N] [--gpus L] [--kv T] [sampling flags]
                                             talk to an instruct model (sampled; --temp 0: greedy)
   axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--draft K] [--draft-model PATH]
             [--device D] [--gpu-layers N] [--kv T] [--alias NAME] [--max-tokens N] [--cors [ORIGIN]]
@@ -88,6 +88,9 @@ flags:
               the GPU and the rest on the CPU (0 = all on the CPU, as --device cpu; default: all
               if they fit with 256 MiB to spare, else as many as fit with another 640 MiB left
               for the desktop; an explicit N only needs the 256 MiB)
+  --gpus L    gen, chat: the CUDA devices to run on (implies --device cuda): one (\"1\") or a
+              pipeline over several (\"0,1\": the layers split across them in order, the first
+              runs the embedding, the last the head; same results as one GPU)
   --kv T      gen, chat: KV cache type, f16 (default) or q8 (cuda only: int8 with a scale per
               position and head, half the memory; slightly different results; on a split, the
               GPU layers' cache, so more layers fit); as AXON_KV
@@ -127,6 +130,13 @@ environment:
                              attention bandwidth; f32 for A/B, CPU only; q8 cuda only)
   AXON_DEVICE=cpu|cuda       same as --device
   AXON_GPU_LAYERS=N          same as --gpu-layers N
+  AXON_GPUS=L                same as --gpus L (serve too; with --device cuda)
+  AXON_PP_CUTS=K[,K2..]      --gpus pipeline: the first layer of each GPU after the first
+                             (default: even, else what fits)
+  AXON_P2P=1                 --gpus pipeline: try peer access (P2P) between the GPUs.
+                             UNTESTED: no P2P-capable box has run it yet. Default: the
+                             hidden state is copied through host memory by the driver
+                             (tested; ~10 us per token hop on 2x4090 PCIe)
   AXON_STREAM=0              split model: don't stream the CPU's layers through the GPU for
                              prefill batches (default on: their weights are copied over
                              once per prompt chunk; results then get the GPU's numerics)
@@ -345,6 +355,13 @@ fn kv_flag(v: Option<&str>) -> kv::KvType {
     }
 }
 
+/// --gpus LIST: the CUDA devices (`lm::set_gpus`); CUDA is the device.
+fn gpus_flag(v: Option<&str>) -> Device {
+    let v = v.unwrap_or_else(|| fail("--gpus needs GPU ordinals (0 or 0,1)"));
+    lm::set_gpus(lm::parse_gpus(v).unwrap_or_else(|e| fail(&format!("--gpus: {e}"))));
+    Device::Cuda
+}
+
 /// --device's default: $AXON_DEVICE, else the CPU.
 fn device_env() -> Device {
     Device::from_env().unwrap_or_else(|e| fail(&e))
@@ -437,6 +454,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
                         .unwrap_or_else(|| fail("--draft-model needs a path")),
                 );
             }
+            ("--gpus", _) => device = gpus_flag(args.get(i + 1).map(String::as_str)),
             ("-n", Some(v)) => n_gen = v,
             ("-k", Some(v)) => top_k = v,
             ("--draft", Some(v)) => max_draft = Some(v),
@@ -614,6 +632,13 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             n.kv_name()
         );
     }
+    if let Backend::Pipeline(n) = &net {
+        eprintln!(
+            "device:      cuda, {}, kv {}",
+            n.describe(ids.len() + extra + 1),
+            n.kv_name()
+        );
+    }
     if env::var_os("AXON_POOL_DEBUG").is_some() {
         let pool = pool::Pool::global();
         eprintln!(
@@ -712,7 +737,7 @@ const CHAT_HELP: &str = concat!(
 /// stdin is a message; on a terminal it's an interactive session.
 fn run_chat(args: &[String]) -> std::io::Result<()> {
     const CHAT_USAGE: &str = "usage: axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K] \
-         [--draft-model PATH] [--device D] [--gpu-layers N] [--kv T]";
+         [--draft-model PATH] [--device D] [--gpu-layers N] [--gpus L] [--kv T]";
     let Some(path) = args.get(2).filter(|p| !p.starts_with('-')) else {
         fail(CHAT_USAGE);
     };
@@ -751,6 +776,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
                 | "--device"
                 | "--gpu-layers"
                 | "--kv"
+                | "--gpus"
         ) {
             fail(&format!("unknown argument '{f}' for chat"));
         }
@@ -768,6 +794,8 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
             device = Device::parse(v).unwrap_or_else(|e| fail(&e));
         } else if f == "--kv" {
             kv = kv_flag(Some(v));
+        } else if f == "--gpus" {
+            device = gpus_flag(Some(v));
         } else {
             let n = v
                 .parse::<usize>()
@@ -847,6 +875,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     let kvs = match &net {
         Backend::Cuda(n) => format!(" | kv {}", n.kv_name()),
         Backend::Hybrid(n) => format!(" | {} | kv {}", n.describe(ctx), n.kv_name()),
+        Backend::Pipeline(n) => format!(" | {} | kv {}", n.describe(ctx), n.kv_name()),
         Backend::Cpu(_) => String::new(),
     };
     let seed = conv

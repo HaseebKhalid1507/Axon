@@ -7,6 +7,7 @@
 //! inside (one match per token; the CPU's results are the same bits as
 //! calling it directly).
 
+use crate::cuda::qwen2::pipeline::{PipelineCache, PipelineQwen2};
 use crate::cuda::qwen2::{CacheKv, CudaCache, CudaQwen2};
 use crate::cuda::{Gpu, Kernels, Module};
 use crate::gguf::Model;
@@ -178,6 +179,46 @@ impl Device {
     }
 }
 
+/// The GPUs --gpus named (`set_gpus`), in pipeline order.
+static GPUS: std::sync::OnceLock<Vec<usize>> = std::sync::OnceLock::new();
+
+/// "0,1" (or "1,0", "0,1,2,3"; a device may repeat): device ordinals.
+pub fn parse_gpus(s: &str) -> Result<Vec<usize>, String> {
+    let v: Vec<usize> = s
+        .split(',')
+        .map(|d| d.trim().parse::<usize>())
+        .collect::<Result<_, _>>()
+        .map_err(|_| format!("GPU ordinals separated by commas (0,1), got '{s}'"))?;
+    if v.is_empty() {
+        return Err("no GPUs".into());
+    }
+    Ok(v)
+}
+
+/// --gpus: the CUDA devices to run on (`Backend::new`), set once before it.
+pub fn set_gpus(v: Vec<usize>) {
+    let _ = GPUS.set(v);
+}
+
+/// The GPUs to run on: --gpus, else $AXON_GPUS, else None (device 0).
+pub fn gpus_setting() -> Result<Option<Vec<usize>>, String> {
+    if let Some(v) = GPUS.get() {
+        return Ok(Some(v.clone()));
+    }
+    match std::env::var("AXON_GPUS") {
+        Ok(v) => parse_gpus(&v)
+            .map(Some)
+            .map_err(|e| format!("AXON_GPUS: {e}")),
+        Err(_) => Ok(None),
+    }
+}
+
+/// The CUDA device of the model's output head: the last of --gpus (a
+/// pipeline's last stage), else device 0. A draft model goes there.
+pub fn head_gpu() -> Result<usize, String> {
+    Ok(gpus_setting()?.and_then(|l| l.last().copied()).unwrap_or(0))
+}
+
 /// The model on the device the command line picked: the CLI's one `Lm`.
 /// Each call is a match away from the backend's own.
 pub enum Backend<'a> {
@@ -188,12 +229,15 @@ pub enum Backend<'a> {
     Cuda(Box<CudaQwen2<'static>>),
     /// Split across the CPU and the GPU (leaked as for `Cuda`).
     Hybrid(Box<HybridQwen2<'a, 'static>>),
+    /// Layers split across GPUs (--gpus 0,1; leaked as for `Cuda`).
+    Pipeline(Box<PipelineQwen2<'static>>),
 }
 
 pub enum BackendCache {
     Cpu(KvCache),
     Cuda(Box<CudaCache<'static>>),
     Hybrid(Box<HybridCache<'static>>),
+    Pipeline(Box<PipelineCache<'static>>),
 }
 
 impl<'a> Backend<'a> {
@@ -228,13 +272,25 @@ impl<'a> Backend<'a> {
         if gpu_layers == Some(0) {
             return Err("--gpu-layers 0 is --device cpu".into());
         }
-        let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open()?));
-        let module: &'static Module<'static> = Box::leak(Box::new(Kernels::module_for(gpu, m)?));
         // f32 isn't offered on the GPU: f16 there (as always).
         let ckv = match kv {
             KvType::Q8 => CacheKv::Q8 { group: 0 },
             _ => CacheKv::F16,
         };
+        let gpus = gpus_setting()?;
+        if let Some(list) = gpus.as_deref().filter(|l| l.len() > 1) {
+            if gpu_layers.is_some() {
+                return Err(
+                    "--gpus (or AXON_GPUS) with more than one GPU runs every layer on \
+                            them: drop --gpu-layers (or unset AXON_GPU_LAYERS)"
+                        .into(),
+                );
+            }
+            return Self::pipeline(m, list, max_ctx, ckv);
+        }
+        let ordinal = gpus.map_or(0, |l| l[0]);
+        let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open_device(ordinal)?));
+        let module: &'static Module<'static> = Box::leak(Box::new(Kernels::module_for(gpu, m)?));
         let whole_gpu = |ctx: usize, fit: bool| {
             CudaQwen2::with_kv(gpu, module, m, ctx, ckv, fit).map(|n| Backend::Cuda(Box::new(n)))
         };
@@ -294,11 +350,32 @@ impl<'a> Backend<'a> {
         Ok(Backend::Hybrid(Box::new(h)))
     }
 
+    /// The model's layers over the GPUs `ordinals` (in order), a
+    /// `max_ctx`-token cache of type `kv` (`PipelineQwen2::new`: an even
+    /// split if it fits; AXON_PP_CUTS sets it), told on stderr.
+    fn pipeline(
+        m: &Model,
+        ordinals: &[usize],
+        max_ctx: usize,
+        kv: CacheKv,
+    ) -> Result<Backend<'a>, String> {
+        let mut devs = Vec::with_capacity(ordinals.len());
+        for &o in ordinals {
+            let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open_device(o)?));
+            let module: &'static Module<'static> =
+                Box::leak(Box::new(Kernels::module_for(gpu, m)?));
+            devs.push((gpu, module));
+        }
+        let p = PipelineQwen2::new(&devs, m, max_ctx, kv, None)?;
+        eprintln!("pipeline:    {}", p.describe(max_ctx));
+        Ok(Backend::Pipeline(Box::new(p)))
+    }
+
     /// The context the cache was planned for: max_ctx, or less on the GPU
     /// with `fit` (never for a split: it has the whole max_ctx).
     pub fn ctx(&self, max_ctx: usize) -> usize {
         match self {
-            Backend::Cpu(_) | Backend::Hybrid(_) => max_ctx,
+            Backend::Cpu(_) | Backend::Hybrid(_) | Backend::Pipeline(_) => max_ctx,
             Backend::Cuda(n) => n.ctx,
         }
     }
@@ -316,6 +393,10 @@ macro_rules! dispatch {
                 let ($n, $c) = (&**$n, &mut **$c);
                 $body
             }
+            (Backend::Pipeline($n), BackendCache::Pipeline($c)) => {
+                let ($n, $c) = (&**$n, &mut **$c);
+                $body
+            }
             _ => panic!("a cache of another backend"),
         }
     };
@@ -329,6 +410,7 @@ impl Lm for Backend<'_> {
             Backend::Cpu(n) => n.vocab(),
             Backend::Cuda(n) => n.vocab(),
             Backend::Hybrid(n) => n.vocab(),
+            Backend::Pipeline(n) => n.vocab(),
         }
     }
 
@@ -337,6 +419,7 @@ impl Lm for Backend<'_> {
             Backend::Cpu(n) => BackendCache::Cpu(Lm::new_cache(n, max_ctx)),
             Backend::Cuda(n) => BackendCache::Cuda(Box::new(n.new_cache(max_ctx))),
             Backend::Hybrid(n) => BackendCache::Hybrid(Box::new(n.new_cache(max_ctx))),
+            Backend::Pipeline(n) => BackendCache::Pipeline(Box::new(n.new_cache(max_ctx))),
         }
     }
 
@@ -389,6 +472,7 @@ impl Lm for Backend<'_> {
             Backend::Cpu(n) => n.prefill_batch(),
             Backend::Cuda(n) => n.prefill_batch(),
             Backend::Hybrid(n) => n.prefill_batch(),
+            Backend::Pipeline(n) => n.prefill_batch(),
         }
     }
 }

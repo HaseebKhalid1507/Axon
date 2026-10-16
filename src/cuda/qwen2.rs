@@ -329,6 +329,9 @@ pub struct CudaQwen2<'g> {
     /// backend runs (`new_layers`), whose hidden state comes in instead of
     /// a token (`Input::Hidden`).
     pub first: usize,
+    /// The output norm and head are here (the model's last layer is): not
+    /// on a pipeline's earlier stages (`new_stage`).
+    pub has_head: bool,
     /// Quantized matrices, embedding included (if first == 0).
     weights: DevBuf<'g>,
     /// The Q6_K layer matrices' prefill copy (`make_q6k8`; `Mat::c8`), or
@@ -457,6 +460,9 @@ impl Plan<'_> {
 pub(crate) enum Input<'x> {
     Token(u32),
     Hidden(&'x [f32]),
+    /// The hidden state is in the cache's `x` already (a pipeline's
+    /// previous stage copied it there, ordered before the step).
+    Resident,
 }
 
 /// `t` placed in the weight arena after the last of `uploads` (256-byte
@@ -550,6 +556,7 @@ impl<'g> CudaQwen2<'g> {
             m,
             max_ctx,
             0,
+            None,
             kv,
             SPLIT_BATCH,
             fit,
@@ -585,11 +592,59 @@ impl<'g> CudaQwen2<'g> {
             m,
             max_ctx,
             first,
+            None,
             kv,
             split_batch,
             false,
             uploaded,
         )
+    }
+
+    /// A pipeline stage (`pipeline`): layers first..last only, the
+    /// embedding if first == 0, the output norm and head if last is the
+    /// model's layer count; caches of type `kv` for `max_ctx` positions with
+    /// batch scratch for `batch` tokens (first == 0: `PREFILL_BATCH` if it
+    /// fits, as `with_kv`). Err if it doesn't fit in the free VRAM.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_stage(
+        gpu: &'g Gpu,
+        module: &'g Module<'g>,
+        m: &Model,
+        max_ctx: usize,
+        first: usize,
+        last: usize,
+        kv: CacheKv,
+        batch: usize,
+    ) -> Result<CudaQwen2<'g>, String> {
+        Self::build(
+            gpu,
+            module,
+            m,
+            max_ctx,
+            first,
+            Some(last),
+            kv,
+            batch,
+            false,
+            &mut |_| {},
+        )
+    }
+
+    /// VRAM `new_stage(.., max_ctx, first, last, kv, batch)` checks it has
+    /// (the pipeline's placement), without allocating anything.
+    #[allow(clippy::too_many_arguments)]
+    pub fn stage_need(
+        gpu: &'g Gpu,
+        module: &'g Module<'g>,
+        m: &Model,
+        max_ctx: usize,
+        first: usize,
+        last: usize,
+        kv: CacheKv,
+        batch: usize,
+    ) -> Result<u64, String> {
+        let (net, plan) = Self::plan(gpu, module, m, first, Some(last), kv, batch)?;
+        Ok(net.vram_want(&plan, max_ctx))
     }
 
     /// `new_layers` with `with_kv`'s `fit`.
@@ -600,12 +655,13 @@ impl<'g> CudaQwen2<'g> {
         m: &'m Model,
         max_ctx: usize,
         first: usize,
+        last: Option<usize>,
         kv: CacheKv,
         split_batch: usize,
         fit: bool,
         uploaded: &mut dyn FnMut(&'m Tensor),
     ) -> Result<CudaQwen2<'g>, String> {
-        let (mut net, plan) = Self::plan(gpu, module, m, first, kv, split_batch)?;
+        let (mut net, plan) = Self::plan(gpu, module, m, first, last, kv, split_batch)?;
         // Check the whole plan fits before allocating any of it.
         let free = gpu.info()?.free_bytes;
         let mut ctx = max_ctx;
@@ -792,7 +848,7 @@ impl<'g> CudaQwen2<'g> {
         kv: CacheKv,
         split_batch: usize,
     ) -> Result<u64, String> {
-        let (net, plan) = Self::plan(gpu, module, m, first, kv, split_batch)?;
+        let (net, plan) = Self::plan(gpu, module, m, first, None, kv, split_batch)?;
         Ok(net.vram_want(&plan, max_ctx))
     }
 
@@ -804,7 +860,7 @@ impl<'g> CudaQwen2<'g> {
         m: &Model,
         kv: CacheKv,
     ) -> Result<impl Fn(usize) -> u64 + use<'g>, String> {
-        let (net, plan) = Self::plan(gpu, module, m, 0, kv, SPLIT_BATCH)?;
+        let (net, plan) = Self::plan(gpu, module, m, 0, None, kv, SPLIT_BATCH)?;
         let fixed = plan.fixed();
         Ok(move |ctx| net.vram_want_fixed(fixed, ctx))
     }
@@ -826,6 +882,7 @@ impl<'g> CudaQwen2<'g> {
         module: &'g Module<'g>,
         m: &'m Model,
         first: usize,
+        last: Option<usize>,
         kv: CacheKv,
         split_batch: usize,
     ) -> Result<(CudaQwen2<'g>, Plan<'m>), String> {
@@ -862,11 +919,15 @@ impl<'g> CudaQwen2<'g> {
                 "{group} query heads per kv head isn't supported on the GPU (at most {MAX_GROUP})"
             ));
         }
-        if first >= n_layers {
+        let last = last.unwrap_or(n_layers);
+        if first >= last || last > n_layers {
             return Err(format!(
-                "layers {first}.. of {n_layers}: the GPU needs at least one"
+                "layers {first}..{last} of {n_layers}: the GPU needs at least one"
             ));
         }
+        // The output norm and head only with the last layer (a pipeline's
+        // earlier stages leave their hidden state for the next one).
+        let has_head = last == n_layers;
 
         // Every matrix's (tensor, arena offset), uploaded once all fit.
         let mut uploads: Vec<(&Tensor, usize)> = Vec::new();
@@ -884,13 +945,28 @@ impl<'g> CudaQwen2<'g> {
         let embd_t = tensor(m, "token_embd.weight")?;
         let embd = (first == 0).then(|| place(embd_t, &mut uploads));
         let output = match (tensor_opt(m, "output.weight"), embd) {
+            // No head here: its shape only (no bytes, never read).
+            (t, _) if !has_head => {
+                let t = t.unwrap_or(embd_t);
+                let cols = t.dims[0] as usize;
+                Mat {
+                    qt: t.qtype.id,
+                    off: 0,
+                    rb: 0,
+                    rows: t.n_elements as usize / cols,
+                    cols,
+                    c8: None,
+                }
+            }
             (Some(t), _) => place(t, &mut uploads),
             (None, Some(e)) => e,
             // Tied, and the embedding isn't here: upload it as the head.
             (None, None) => place(embd_t, &mut uploads),
         };
         let vocab = output.rows;
-        gemv_type(&output, "output.weight")?;
+        if has_head {
+            gemv_type(&output, "output.weight")?;
+        }
 
         let mut vecs: Vec<f32> = Vec::new();
         let mut push_vec = |v: Vec<f32>| {
@@ -900,8 +976,8 @@ impl<'g> CudaQwen2<'g> {
             off
         };
         let output_norm = push_vec(vec_f32(m, tensor(m, "output_norm.weight")?));
-        let mut layers = Vec::with_capacity(n_layers - first);
-        for i in first..n_layers {
+        let mut layers = Vec::with_capacity(last - first);
+        for i in first..last {
             let name = |s: &str| format!("blk.{i}.{s}");
             let mut mat = |s: &str| -> Result<Mat, String> {
                 let mt = place(tensor(m, &name(s))?, &mut uploads);
@@ -1021,6 +1097,7 @@ impl<'g> CudaQwen2<'g> {
             vocab,
             eps,
             first,
+            has_head,
             weights: gpu.alloc(0)?,
             w8: gpu.alloc(0)?,
             vecs: gpu.alloc(0)?,
@@ -1703,7 +1780,12 @@ impl<'g> CudaQwen2<'g> {
                 hx.copy_to(&c.x, 0, self.dim * 4)?;
                 0
             }
+            Input::Resident => {
+                assert!(self.first > 0, "takes tokens");
+                0
+            }
         };
+        assert!(head == Head::No || self.has_head, "no output head here");
         assert!((token as usize) < self.vocab, "token {token} out of range");
         if head == Head::Sample {
             // samp_upload wrote and copied them, with S.
@@ -2174,6 +2256,7 @@ impl<'g> Lm for CudaQwen2<'g> {
 }
 
 mod batch;
+pub mod pipeline;
 #[cfg(test)]
 mod sample_tests;
 pub(crate) mod stream;

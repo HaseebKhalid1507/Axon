@@ -294,7 +294,9 @@ impl DraftModel {
         if device == Device::Cpu {
             return Ok(None);
         }
-        let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open()?));
+        // The device the main model's head runs on (--gpus: the last one),
+        // where verify passes read the drafter's guesses.
+        let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open_device(crate::lm::head_gpu()?)?));
         let module: &'static Module<'static> =
             Box::leak(Box::new(Kernels::module_for(gpu, self.model)?));
         let need = CudaQwen2::vram_curve(gpu, module, self.model, cache_kv(kv))?(ctx);

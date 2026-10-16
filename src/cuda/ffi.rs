@@ -162,8 +162,25 @@ api! {
         #[cfg_attr(not(test), allow(dead_code))]
         fn cuEventElapsedTime(*mut f32, CUevent, CUevent) -> CUresult;
         fn cuEventDestroy_v2(CUevent) -> CUresult;
+        // Pipeline parallel (cuda::qwen2::pipeline): hidden states between
+        // devices, over P2P when the devices allow it, else staged by the
+        // driver through host memory.
+        fn cuDeviceCanAccessPeer(*mut c_int, CUdevice, CUdevice) -> CUresult;
+        fn cuCtxEnablePeerAccess(CUcontext, c_uint) -> CUresult;
+        fn cuMemcpyPeerAsync(
+            CUdeviceptr,
+            CUcontext,
+            CUdeviceptr,
+            CUcontext,
+            usize,
+            CUstream,
+        ) -> CUresult;
     }
 }
+
+/// `CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED`: `cuCtxEnablePeerAccess` on a
+/// pair that already has it (not a failure).
+pub const CUDA_ERROR_PEER_ACCESS_ALREADY_ENABLED: CUresult = 704;
 
 api! {
     /// NVRTC, CUDA's run-time compiler (libnvrtc.so).

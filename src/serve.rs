@@ -504,6 +504,7 @@ fn engine(
     let kvs = match &net {
         Backend::Cuda(n) => format!("cuda, kv {}", n.kv_name()),
         Backend::Hybrid(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
+        Backend::Pipeline(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
         Backend::Cpu(_) => "cpu".into(),
     };
     let mut e = Engine {

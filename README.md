@@ -107,11 +107,11 @@ curl -L -o models/qwen2.5-0.5b-q4_k_m.gguf \
 axon <model.gguf>                         same as axon info
 axon info <model.gguf>                    print a summary and exit
 axon gen <model.gguf> "<prompt>" [-n N] [--draft K] [--draft-model PATH] [--device D]
-          [--gpu-layers N] [--kv T]
+          [--gpu-layers N] [--gpus L] [--kv T]
                                           generation (default 32 tokens; greedy unless --temp)
 axon logits <model.gguf> "<prompt>" [-k K]  top-K next-token logits (default 10)
 axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K]
-          [--draft-model PATH] [--device D] [--gpu-layers N] [--kv T]
+          [--draft-model PATH] [--device D] [--gpu-layers N] [--gpus L] [--kv T]
                                           talk to an Instruct model (sampled; --temp 0: greedy)
 sampling (gen, chat): --temp T --top-k K --top-p P --min-p P
           --repeat-penalty P --repeat-last-n N --seed S   (axon --help)
@@ -134,6 +134,18 @@ Defaults, as `axon --help` gives them:
   GPU, the rest on the CPU (0 = all on the CPU). Default: all of them if they fit with
   256 MiB to spare, else as many as fit with another 640 MiB left for the desktop; an
   explicit N only needs the 256 MiB.
+- `--gpus L` (gen, chat; `AXON_GPUS=L` for serve too): the CUDA devices to run on. One
+  (`--gpus 1`) runs the model there. Several (`--gpus 0,1`) split its layers across them in
+  order (pipeline parallel): the first GPU runs the embedding and first layers, the last one
+  the rest and the output head, and each token's hidden state (one row of floats) is copied
+  from one to the next. The output is the same, bit for bit, as on one GPU. It doesn't make
+  one stream faster (decode is the sum of the stages: measured 1.00x one 4090 on 32B and 7B)
+  but holds models bigger than one card, and prefill overlaps the stages (1.46x on 7B,
+  1.55x on 32B for a 2098-token prompt on 2x RTX 4090). Layers go evenly if they fit, else
+  in proportion to each card's free memory; `AXON_PP_CUTS` sets them. The copies go through
+  host memory (the driver stages them; ~10 us per token on PCIe 4.0). `AXON_P2P=1` asks
+  for direct peer-to-peer copies instead: UNTESTED, no P2P-capable machine has run it yet.
+  `axon serve` runs a pipeline one request at a time.
 - `--kv T`: `f16`, or `q8` (cuda only; on a split, the GPU layers' cache, so more
   layers fit).
 - `--ctx N` (chat, serve): the model's trained context, at most 8192. On cuda, if the
@@ -304,6 +316,9 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
 | `AXON_DRAFT_MODEL=PATH` | same as `--draft-model PATH` (gen, chat, serve) |
 | `AXON_DEVICE=cpu\|cuda` | same as `--device` (default `cpu`) |
 | `AXON_GPU_LAYERS=N` | same as `--gpu-layers N` (with `--device cuda`) |
+| `AXON_GPUS=L` | same as `--gpus L` (gen, chat, serve; with `--device cuda`) |
+| `AXON_PP_CUTS=K[,K2..]` | `--gpus` pipeline: the first layer of each GPU after the first (default: even if it fits, else by free memory) |
+| `AXON_P2P=1` | `--gpus` pipeline: try direct peer-to-peer copies between the GPUs. UNTESTED (no P2P-capable box has run it); default: copies staged through host memory by the driver (tested) |
 | `AXON_KV=f16\|f32\|q8` | KV cache type (default f16; `f32` CPU only, for A/B; `q8` cuda only, as `--kv q8`) |
 | `AXON_STREAM=0` | split model: don't stream the CPU layers' weights through the GPU for prefill batches (default on: they are copied over once per prompt chunk, and those layers then get the GPU's numerics) |
 | `AXON_STREAM_MIN=N` | split model: smallest prefill batch streamed (default 32). Streaming pins the CPU layers' KV cache in RAM |
