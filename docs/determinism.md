@@ -126,13 +126,14 @@ exact hits. A changed fingerprint means stored outputs may not reproduce.
 (software SHA-256 runs at a few hundred MB/s). The digest instead hashes the file length
 and the union, in file order, of: the header in full, 256 bytes at each end of every
 tensor, and 1024 windows of 4 KiB evenly spaced over the data (`axon-model-digest/2`;
-pinned by `model_digest_golden`, checked against an independent Python model). That's a
-few MB in ~1-2k sorted reads with readahead off: about 40 ms for a 7B Q4_K_M with the file
-in the page cache (measured on a 4090 pod). Another model, a requantization, a fine-tune
-or a merge changes the header or almost every block, so it changes the digest. An edit
-made on purpose to bytes between the samples would not: the digest names a file, it isn't
-a tamper seal. It reads the file itself, not the loaded copy (which may have been repacked
-or released), so it depends on nothing but the file's bytes.
+pinned by `model_digest_golden`, checked against an independent Python model,
+scripts/identity_digest_ref.py). That's a few MB in ~1-2k sorted reads with readahead off:
+about 40 ms for a 7B Q4_K_M with the file in the page cache (measured on a 4090 pod).
+Another model, a requantization, a fine-tune or a merge changes the header or almost every
+block, so it changes the digest. An edit made on purpose to bytes between the samples
+would not: the digest names a file, it isn't a tamper seal. It reads the file itself, not
+the loaded copy (which may have been repacked or released), so it depends on nothing but
+the file's bytes.
 
 **The numerics rule.** `NUMERICS_VERSION` (src/identity.rs) is bumped in the same commit
 as any change that can change an output bit for some model on some backend: a kernel's

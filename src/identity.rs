@@ -619,7 +619,8 @@ mod tests {
     }
 
     /// Test file bytes: a fixed pseudo-random pattern (the golden values
-    /// come from an independent Python/hashlib model of `digest_file`).
+    /// come from an independent Python/hashlib model of `digest_file`,
+    /// scripts/identity_digest_ref.py).
     fn pattern(n: usize) -> Vec<u8> {
         (0..n as u64)
             .map(|i| (((i * 2654435761) & 0xffff_ffff) >> 13) as u8)
