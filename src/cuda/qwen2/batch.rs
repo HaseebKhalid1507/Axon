@@ -185,6 +185,9 @@ pub(super) struct BatchFns<'m> {
     /// gemm2s_q4_k_gu: gate and up (both Q4_K) in one launch, silu(gate) *
     /// up out (`CudaQwen2::gate_up_fused`).
     pub(super) gemm_gu: Option<Func<'m>>,
+    /// Threads per block of Q4_K's 64 x 64 GEMM and of `gemm_gu`: 256, or
+    /// 288 for the producer-warp kernels (`gemm2_pipe`).
+    pub(super) q4k_threads: u32,
     pub(super) q6k_to_i8: Option<Func<'m>>,
     /// hopper.cu gemmh2_q4_k and gemmh2_q4_k_gu: the Q4_K products and the
     /// fused gate + up on wgmma (same bits); sm_90a modules only, off with
@@ -214,6 +217,7 @@ impl<'m> BatchFns<'m> {
         head_dim: usize,
         sms: usize,
     ) -> Result<BatchFns<'m>, String> {
+        let pipe = gemm2_pipe();
         let gemm = if module.mma() {
             let mut fs = Vec::new();
             for (qt, tn) in [
@@ -228,7 +232,11 @@ impl<'m> BatchFns<'m> {
             ] {
                 let big = module.function(&format!("gemm2_{tn}"))?;
                 big.set_max_shared(gemm2_smem(qt, 128, 2))?;
-                let small = module.function(&format!("gemm2s_{tn}"))?;
+                let small = match (qt, pipe) {
+                    (Q4_K, 1) => module.function("gemm2m_q4_k")?,
+                    (Q4_K, 2) => module.function("gemm2p_q4_k")?,
+                    _ => module.function(&format!("gemm2s_{tn}"))?,
+                };
                 small.set_max_shared(gemm2_smem(qt, 64, 3))?;
                 fs.push([big, small]);
             }
@@ -300,7 +308,11 @@ impl<'m> BatchFns<'m> {
             gemm,
             gemm_q6k8,
             gemm_gu: if module.mma() {
-                let f = module.function("gemm2s_q4_k_gu")?;
+                let f = module.function(match pipe {
+                    1 => "gemm2m_q4_k_gu",
+                    2 => "gemm2p_q4_k_gu",
+                    _ => "gemm2s_q4_k_gu",
+                })?;
                 f.set_max_shared(gemm2_smem(Q4_K, 64, 3))?;
                 Some(f)
             } else {
@@ -318,6 +330,7 @@ impl<'m> BatchFns<'m> {
                 None
             },
             gemmh_all: std::env::var("AXON_GEMMH").as_deref() == Ok("1"),
+            q4k_threads: if pipe == 2 { 288 } else { 256 },
             q6k_to_i8: if module.mma() {
                 Some(module.function("q6k_to_i8")?)
             } else {
@@ -327,6 +340,21 @@ impl<'m> BatchFns<'m> {
             unpermute: module.function("unpermute_r8")?,
         })
     }
+}
+
+/// Q4_K's 64 x 64 GEMM (and the fused gate+up) pipeline, AXON_GEMM2M: 0
+/// gemm2s (every warp copies, a block barrier per stage; the default), 1
+/// gemm2m (mbarrier-tracked stages), 2 gemm2p (and a producer warp). The
+/// same bits in every case (prefill.cu gemm2_t PIPE). Off by default: on
+/// the RTX 5070 Ti Laptop (cuda_gemm_sustained) gemm2m is -16 % on the 7B
+/// gate shape and gemm2p -17..-28 % (r8 stage 1, NO-GO); kept for the
+/// H100/sm_89 measurements.
+pub(super) fn gemm2_pipe() -> u32 {
+    std::env::var("AXON_GEMM2M")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&p| p <= 2)
+        .unwrap_or(0)
 }
 
 /// A cache's scratch for batched passes of up to `max` tokens.
@@ -522,10 +550,15 @@ impl<'g> CudaQwen2<'g> {
                         Some((_, f8)) => (&f8[!big as usize], gemm2_smem(Q6_K, bn, st)),
                         None => (&fs[ti][!big as usize], gemm2_smem(mt.qt, bn, st)),
                     };
+                    let threads = if mt.qt == Q4_K && !big {
+                        bf.q4k_threads
+                    } else {
+                        256
+                    };
                     self.gpu.launch(
                         f,
                         (nb.div_ceil(bn) as u32, mt.rows.div_ceil(G2_BM) as u32, 1),
-                        (256, 1, 1),
+                        (threads, 1, 1),
                         smem as u32,
                         &common,
                     )
@@ -1152,7 +1185,7 @@ impl<'g> CudaQwen2<'g> {
                 g.launch(
                     f,
                     (nb.div_ceil(64) as u32, ffn.div_ceil(32) as u32, 1),
-                    (256, 1, 1),
+                    (bf.q4k_threads, 1, 1),
                     gemm2_smem(Q4_K, 64, 3) as u32,
                     &[
                         wts.arg_at(l.gate.off),

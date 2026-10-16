@@ -2412,17 +2412,13 @@ unsafe fn launch_product(
             g.launch(f, (rows.div_ceil(16) as u32, 1, 1), (128, 1, 1), 0, common)
                 .unwrap();
         } else if kernel.starts_with("gemm2") {
-            let (bn, st) = if kernel.starts_with("gemm2s") {
-                (64, 3)
-            } else {
-                (128, 2)
-            };
+            let (bn, st, th) = gemm2_shape(kernel);
             let sm = gemm2_smem(qt, bn, st);
             f.set_max_shared(sm).unwrap();
             g.launch(
                 f,
                 (nb.div_ceil(bn) as u32, rows.div_ceil(G2_BM) as u32, 1),
-                (256, 1, 1),
+                (th, 1, 1),
                 sm as u32,
                 common,
             )
@@ -2443,6 +2439,19 @@ unsafe fn launch_product(
             )
             .unwrap();
         }
+    }
+}
+
+/// A gemm2 kernel's tokens per block, stages and threads per block:
+/// gemm2_* 128, 2; gemm2s_* and Q4_K's pipelined gemm2m_* / gemm2p_* 64, 3
+/// (gemm2p_* with its producer warp, 288 threads).
+fn gemm2_shape(kernel: &str) -> (usize, usize, u32) {
+    if kernel.starts_with("gemm2p") {
+        (64, 3, 288)
+    } else if kernel.starts_with("gemm2s") || kernel.starts_with("gemm2m") {
+        (64, 3, 256)
+    } else {
+        (128, 2, 256)
     }
 }
 
@@ -2789,16 +2798,17 @@ fn gpu_swiglu_epilogue_and_gate_up_match_reference() {
                 let got: Vec<f32> = run(k, &wu, gate.arg(), 2).read().unwrap();
                 assert_eq!(bits(&got), bits(&want), "mode 2 {k} {cols}x{rows} nb {nb}");
             }
-            if km.mma() {
+            let gus = ["gemm2s_q4_k_gu", "gemm2m_q4_k_gu", "gemm2p_q4_k_gu"];
+            for k in gus.iter().filter(|_| km.mma()) {
                 let out = g.alloc(rows * nb * 4).unwrap();
-                let f = km.function("gemm2s_q4_k_gu").unwrap();
+                let f = km.function(k).unwrap();
                 f.set_max_shared(gemm2_smem(Q4_K, 64, 3)).unwrap();
-                // SAFETY: gemm2s_q4_k_gu's signature; as above.
+                // SAFETY: the _gu kernels' signature; as above.
                 unsafe {
                     g.launch(
                         &f,
                         (nb.div_ceil(64) as u32, rows.div_ceil(32) as u32, 1),
-                        (256, 1, 1),
+                        (gemm2_shape(k).2, 1, 1),
                         gemm2_smem(Q4_K, 64, 3) as u32,
                         &[
                             wg.arg(),
@@ -2817,11 +2827,7 @@ fn gpu_swiglu_epilogue_and_gate_up_match_reference() {
                 };
                 g.sync().unwrap();
                 let got: Vec<f32> = out.read().unwrap();
-                assert_eq!(
-                    bits(&got),
-                    bits(&want),
-                    "gemm2s_q4_k_gu {cols}x{rows} nb {nb}"
-                );
+                assert_eq!(bits(&got), bits(&want), "{k} {cols}x{rows} nb {nb}");
             }
         }
         eprintln!("Q4_K {cols} x {rows}: mode 2 and the fused gate+up == gemv_ref");
@@ -2834,9 +2840,14 @@ fn has_gemvm(qt: u32) -> bool {
     !matches!(qt, Q4_1 | Q5_1)
 }
 
+/// Q4_K's also the pipelined 64 x 64 ones (gemm2m_*, gemm2p_*).
 fn gemm2_names(qt: u32) -> Vec<String> {
     let tn = type_name(qt);
-    vec![format!("gemm2_{tn}"), format!("gemm2s_{tn}")]
+    let mut v = vec![format!("gemm2_{tn}"), format!("gemm2s_{tn}")];
+    if qt == Q4_K {
+        v.extend(["gemm2m_q4_k".to_string(), "gemm2p_q4_k".to_string()]);
+    }
+    v
 }
 
 /// Batched products' speed (best of N, events): tensor-core GEMM for
@@ -2866,6 +2877,10 @@ fn cuda_gemm_bench() {
         "gemm2_q6k8",
         "gemm2s_q6k8",
         "gemm2s_q4_k_gu",
+        "gemm2m_q4_k",
+        "gemm2p_q4_k",
+        "gemm2m_q4_k_gu",
+        "gemm2p_q4_k_gu",
         "gemvn_2x8",
         "gemvm8_q4_k",
         "gemvm8_q6_k",
@@ -5313,11 +5328,23 @@ fn cuda_gemm_sustained() {
             let wi = (0..med.len())
                 .min_by(|&a, &b| med[a].total_cmp(&med[b]))
                 .unwrap();
+            // Q4_K: the pipelined kernels' speed-up over gemm2s.
+            let pipe: Vec<String> = (2..med.len())
+                .filter(|&i| kernels[i].starts_with("gemm2m") || kernels[i].starts_with("gemm2p"))
+                .map(|i| {
+                    format!(
+                        " {} {:+.1}%",
+                        &kernels[i][..6],
+                        100.0 * (med[1] / med[i] - 1.0)
+                    )
+                })
+                .collect();
             eprintln!(
-                "SUS {tq} {rows}x{cols} nb {nb:>5}: {}  | best {} (gemm2s/gemm2 {:+.1}%)",
+                "SUS {tq} {rows}x{cols} nb {nb:>5}: {}  | best {} (gemm2s/gemm2 {:+.1}%){}",
                 line.join("  "),
                 kernels[wi],
-                100.0 * (med[1] / med[0] - 1.0)
+                100.0 * (med[1] / med[0] - 1.0),
+                pipe.concat()
             );
         }
     }

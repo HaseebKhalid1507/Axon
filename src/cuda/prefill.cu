@@ -829,6 +829,54 @@ __device__ __forceinline__ void mma32(int* d, u32 a0, u32 a1, u32 a2, u32 a3, u3
                  : "=r"(d[0]), "=r"(d[1]), "=r"(d[2]), "=r"(d[3])
                  : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "r"(0));
 }
+
+// Shared-memory mbarriers (the gemm2m/gemm2p stage pipeline): the copies of
+// a stage arrive on its "full" barrier as they land (cp.async.mbarrier.
+// arrive, counted against the init count), the warps that read a stage on
+// its "empty" one. Every call clobbers memory: no shared load moves across.
+#ifndef G2_SPIN_NS
+#define G2_SPIN_NS 20
+#endif
+__device__ __forceinline__ u32 smem_u32(const void* p) {
+    return (u32)__cvta_generic_to_shared(p);
+}
+__device__ __forceinline__ void mbar_init(u64* b, int n) {
+    asm volatile("mbarrier.init.shared.b64 [%0], %1;" ::"r"(smem_u32(b)), "r"(n) : "memory");
+}
+__device__ __forceinline__ void mbar_arrive(u64* b) {
+    asm volatile("{\n\t.reg .b64 st;\n\tmbarrier.arrive.shared.b64 st, [%0];\n\t}" ::"r"(
+                     smem_u32(b))
+                 : "memory");
+}
+// One arrival on b once every cp.async this thread started has landed.
+__device__ __forceinline__ void cp_arrive(u64* b) {
+    asm volatile("cp.async.mbarrier.arrive.noinc.shared.b64 [%0];" ::"r"(smem_u32(b)) : "memory");
+}
+__device__ __forceinline__ void cp_wait_all() { asm volatile("cp.async.wait_all;" ::: "memory"); }
+// Whether b's phase of parity par has completed.
+__device__ __forceinline__ bool mbar_test(u64* b, int par) {
+    u32 r;
+    asm volatile("{\n\t.reg .pred p;\n\tmbarrier.test_wait.parity.shared.b64 p, [%1], %2;\n\t"
+                 "selp.u32 %0, 1, 0, p;\n\t}"
+                 : "=r"(r)
+                 : "r"(smem_u32(b)), "r"(par)
+                 : "memory");
+    return r != 0;
+}
+__device__ __forceinline__ void mbar_wait(u64* b, int par) {
+#if __CUDA_ARCH__ >= 900
+    u32 r;
+    do {
+        asm volatile("{\n\t.reg .pred p;\n\tmbarrier.try_wait.parity.shared.b64 p, [%1], %2;\n\t"
+                     "selp.u32 %0, 1, 0, p;\n\t}"
+                     : "=r"(r)
+                     : "r"(smem_u32(b)), "r"(par)
+                     : "memory");
+    } while (!r);
+#else
+    while (!mbar_test(b, par)) __nanosleep(G2_SPIN_NS);
+#endif
+}
 #endif
 
 // N words of the bytes at a 2-byte aligned p.
@@ -1134,19 +1182,20 @@ __device__ __forceinline__ void g2_store_w(u8* wb, int nblk, int s, u32 (*reg)[G
 }
 
 // Start the copies of stage s: Q4_K weights (into wb), the activations of
-// tokens z0.. (clamped to nb - 1) into st.
-template <int QT, int BN, int ST, int GU = 0>
+// tokens z0.. (clamped to nb - 1) into st, by the TH threads of the block
+// (or of its producer warp: thread index mod TH).
+template <int QT, int BN, int ST, int GU = 0, int TH = G2_THREADS>
 __device__ __forceinline__ void g2_copy(u8* wb, u8* st, const u8* w, u64 rb, int rows, int r0,
                                         const u8* act, u64 astride, int n, int nb, int z0,
                                         int nblk, int s, const u8* w2 = nullptr) {
 #if __CUDA_ARCH__ >= 800
     typedef G2L<QT, BN, ST> L;
     u64 np = act_np(n);
-    int tid = threadIdx.x;
+    int tid = TH == G2_THREADS ? threadIdx.x : threadIdx.x & (TH - 1);
     if (L::RAW) {
         // 16-byte chunks per block: 9 (Q4_K, 144 bytes), 11 (Q5_K, 176).
         const int CH = GmType<QT>::BYTES / 16;
-        for (int id = tid; id < G2_BM * CH; id += G2_THREADS) {
+        for (int id = tid; id < G2_BM * CH; id += TH) {
             int rr = id / CH, ch = id - CH * rr;
             // GU: rows 0..32 of the tile from w (gate), 32.. the same rows
             // of w2 (up).
@@ -1163,22 +1212,22 @@ __device__ __forceinline__ void g2_copy(u8* wb, u8* st, const u8* w, u64 rb, int
     int c = tid & 15;
     bool cvalid = L::KQ || s * 8 + (c >> 1) < nblk;
 #pragma unroll
-    for (int k = 0; k < BN * 16 / G2_THREADS; k++) {
-        int tk = (tid >> 4) + k * (G2_THREADS / 16);
+    for (int k = 0; k < BN * 16 / TH; k++) {
+        int tk = (tid >> 4) + k * (TH / 16);
         const u8* a = act + (u64)min(z0 + tk, nb - 1) * astride;
         if (cvalid) cp16(xs + tk * 256 + 16 * (c ^ (tk & 7)), a + voff + 16 * c);
     }
     if (L::RAW) {
         int j = tid & 7;
 #pragma unroll
-        for (int k = 0; k < BN * 8 / G2_THREADS; k++) {
-            int tk = (tid >> 3) + k * (G2_THREADS / 8);
+        for (int k = 0; k < BN * 8 / TH; k++) {
+            int tk = (tid >> 3) + k * (TH / 8);
             const u8* a = act + (u64)min(z0 + tk, nb - 1) * astride;
             cp4(xb + tk * 32 + 4 * j, a + 2 * np + np / 64 + 4 * ((u64)s * 8 + j));
         }
     }
     if (L::KQ) {
-        for (int tk = tid; tk < BN; tk += G2_THREADS) {
+        for (int tk = tid; tk < BN; tk += TH) {
             const u8* a = act + (u64)min(z0 + tk, nb - 1) * astride;
             cp4(xd + 4 * tk, a + 2 * np + 4 * (u64)s);
         }
@@ -1186,8 +1235,8 @@ __device__ __forceinline__ void g2_copy(u8* wb, u8* st, const u8* w, u64 rb, int
         int e = tid & 7;
         if (s * 8 + e < nblk) {
 #pragma unroll
-            for (int k = 0; k < BN * 8 / G2_THREADS; k++) {
-                int tk = (tid >> 3) + k * (G2_THREADS / 8);
+            for (int k = 0; k < BN * 8 / TH; k++) {
+                int tk = (tid >> 3) + k * (TH / 8);
                 const u8* a = act + (u64)min(z0 + tk, nb - 1) * astride;
                 cp4(xd + tk * 32 + 4 * e, a + 2 * np + np / 64 + np / 8 + 4 * ((u64)s * 8 + e));
             }
@@ -1476,7 +1525,21 @@ __device__ __forceinline__ void g2_compute(const u8* wb, const u8* st, int nblk,
 #endif
 }
 
-template <int QT, int NT, int ST, int GU = 0>
+// A barrier of the eight math warps (gemm2p's producer has left by then).
+template <int PIPE>
+__device__ __forceinline__ void g2_sync() {
+    if (PIPE == 2)
+        asm volatile("bar.sync 1, %0;" ::"n"(G2_THREADS) : "memory");
+    else
+        __syncthreads();
+}
+
+// PIPE 0: the stages as above (every warp copies, a block barrier a stage);
+// 1 (gemm2m): the same copies, the stages tracked by mbarriers, no block
+// barrier in the loop, so warps drift up to a stage or two apart; 2
+// (gemm2p): a ninth warp issues every copy, the eight math warps only wait
+// for "full" and arrive on "empty". Q4_K/Q5_K (raw rows), ST >= 3 only.
+template <int QT, int NT, int ST, int GU = 0, int PIPE = 0>
 __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, const u8* act,
                                         u64 astride, int nb, const float* bias, int mode,
                                         float* out, u64 ostride, const u8* w2 = nullptr) {
@@ -1514,7 +1577,81 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
         g2_store_w<QT>(wsl(0), nblk, 0, reg);
         if (nst > 1) g2_load_w<QT>(w, rb, rows, r0, nblk, 1, reg);
     }
-    if constexpr (ST == 2) {
+    if constexpr (PIPE != 0) {
+        static_assert(L::RAW && ST >= 3, "gemm2 pipeline: raw rows, three stages");
+        // full[b]: stage s (b = s % ST, phase s / ST) landed; empty[b]: the
+        // eight math warps are done with it (lane 0 of each, after
+        // __syncwarp).
+        __shared__ u64 g2_bar[2 * ST];
+        u64* full = g2_bar;
+        u64* empty = g2_bar + ST;
+        int lane = threadIdx.x & 31;
+        if (threadIdx.x == 0) {
+#pragma unroll
+            for (int b = 0; b < ST; b++) {
+                mbar_init(full + b, PIPE == 2 ? 32 : G2_THREADS);
+                mbar_init(empty + b, G2_THREADS / 32);
+            }
+        }
+        __syncthreads();
+        if constexpr (PIPE == 2) {
+            if (warp == G2_THREADS / 32) {
+                // The producer: stage s into buffer s % ST once the math
+                // warps are done with stage s - ST.
+                for (int s = 0; s < nst; s++) {
+                    if (s >= ST) mbar_wait(empty + s % ST, (s / ST - 1) & 1);
+                    g2_copy<QT, BN, ST, GU, 32>(wsl(s), xsl(s), w, rb, rows, r0, act, astride, n,
+                                                nb, z0, nblk, s, w2);
+                    cp_arrive(full + s % ST);
+                }
+                cp_wait_all();
+                return;
+            }
+            for (int s = 0; s < nst; s++) {
+                mbar_wait(full + s % ST, (s / ST) & 1);
+                g2_compute<QT, NT, ST>(wsl(s), xsl(s), nblk, s, wr, wc, acc);
+                __syncwarp();
+                if (lane == 0) mbar_arrive(empty + s % ST);
+            }
+        } else {
+#pragma unroll
+            for (int p = 0; p < ST - 1; p++) {
+                if (p < nst) {
+                    copy(p);
+                    cp_arrive(full + p);
+                }
+            }
+            for (int s = 0; s < nst; s++) {
+                // Stage s + ST - 1 goes into the buffers of s - 1: now if
+                // every warp is done with s - 1 (lane 0 looks, the warp
+                // follows), else after computing s.
+                int sc = s + ST - 1, sp = s - 1 + ST; // sp: s - 1, kept >= 0
+                u64* e = empty + sp % ST;
+                int par = (sp / ST - 1) & 1;
+                bool late = false;
+                if (sc < nst) {
+                    bool now = s == 0 ||
+                               __shfl_sync(0xffffffffu, lane == 0 ? (int)mbar_test(e, par) : 0, 0);
+                    if (now) {
+                        if (s > 0) mbar_wait(e, par);
+                        copy(sc);
+                        cp_arrive(full + sc % ST);
+                    } else {
+                        late = true;
+                    }
+                }
+                mbar_wait(full + s % ST, (s / ST) & 1);
+                g2_compute<QT, NT, ST>(wsl(s), xsl(s), nblk, s, wr, wc, acc);
+                __syncwarp();
+                if (lane == 0) mbar_arrive(empty + s % ST);
+                if (late) {
+                    mbar_wait(e, par);
+                    copy(sc);
+                    cp_arrive(full + sc % ST);
+                }
+            }
+        }
+    } else if constexpr (ST == 2) {
         // Two stages: copy s + 1 while s is computed; two barriers a stage.
         copy(0);
         cp_commit();
@@ -1567,7 +1704,7 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
         // gm_store mode 2's ops on the same two floats.
         float* xch = (float*)sm;
         const int ID = (threadIdx.x >> 6) * 32 + lane;
-        __syncthreads();
+        g2_sync<PIPE>();
         if (wr == 0) {
 #pragma unroll
             for (int mi = 0; mi < 2; mi++)
@@ -1576,7 +1713,7 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
 #pragma unroll
                     for (int e = 0; e < 4; e++) xch[((mi * NT + f) * 4 + e) * 128 + ID] = acc[mi][f][e];
         }
-        __syncthreads();
+        g2_sync<PIPE>();
         if (wr == 1) {
 #pragma unroll
             for (int mi = 0; mi < 2; mi++)
@@ -1664,6 +1801,25 @@ extern "C" __global__ void __launch_bounds__(G2_THREADS, 1)
                    u64 ostride) {
     gemm2_t<QT_Q4_K, 2, 3, 1>(wg, rb, rows, n, act, astride, nb, nullptr, 0, out, ostride, wu);
 }
+
+// gemm2m_*: gemm2s with mbarrier-tracked stages; gemm2p_*: and a producer
+// warp (G2P_THREADS). The same products, ops and order (gemm2_t PIPE).
+#define G2P_THREADS (G2_THREADS + 32)
+#define GEMM2P(NAME, QT, PIPE, TH)                                                                \
+    extern "C" __global__ void __launch_bounds__(TH, 1) NAME(                                     \
+        const u8* __restrict__ w, u64 rb, int rows, int n, const u8* __restrict__ act,           \
+        u64 astride, int nb, const float* __restrict__ bias, int mode, float* __restrict__ out,  \
+        u64 ostride) {                                                                            \
+        gemm2_t<QT, 2, 3, 0, PIPE>(w, rb, rows, n, act, astride, nb, bias, mode, out, ostride);   \
+    }                                                                                             \
+    extern "C" __global__ void __launch_bounds__(TH, 1) NAME##_gu(                                \
+        const u8* __restrict__ wg, const u8* __restrict__ wu, u64 rb, int rows, int n,           \
+        const u8* __restrict__ act, u64 astride, int nb, float* __restrict__ out, u64 ostride) {  \
+        gemm2_t<QT, 2, 3, 1, PIPE>(wg, rb, rows, n, act, astride, nb, nullptr, 0, out, ostride,   \
+                                   wu);                                                           \
+    }
+GEMM2P(gemm2m_q4_k, QT_Q4_K, 1, G2_THREADS)
+GEMM2P(gemm2p_q4_k, QT_Q4_K, 2, G2P_THREADS)
 
 GEMM2(gemm2_q6k8, QT_Q6K8, 4, 2)
 GEMM2(gemm2s_q6k8, QT_Q6K8, 2, 3)
