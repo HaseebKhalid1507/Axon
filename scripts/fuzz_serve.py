@@ -278,7 +278,8 @@ def cases(srv, ctx, slow):
     for nm, msgs, want in [
         ("messages=[]", [], "any4xx"), ("messages=str", "hi", "any4xx"), ("messages=[1]", [1], "any4xx"),
         ("role=robot", [{"role": "robot", "content": "x"}], "any4xx"),
-        ("role=tool", [{"role": "tool", "content": "x"}], "any4xx"),
+        # main supports tool calling since #26: a tool message is accepted.
+        ("role=tool", [{"role": "tool", "content": "x"}], {200, 400}),
         ("role=int", [{"role": 1, "content": "x"}], "any4xx"),
         ("no-role", [{"content": "x"}], "any4xx"),
         ("no-content", [{"role": "user"}], {200, 400}),
