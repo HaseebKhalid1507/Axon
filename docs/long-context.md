@@ -42,7 +42,9 @@ length the session has reached.
 They work on `gen`, `logits`, `chat` and `serve`, and print what they resolved to on
 stderr, e.g. `rope scaling: yarn, factor 4, original context 32768, context 131072, beta
 32/1, mscale 1.1386`. `--ctx` (chat, serve) may then go up to orig x F; `/v1/models`
-reports the context served. A GGUF that does carry `rope.scaling.type = yarn` (with
+reports the context served. `serve` without `--ctx` takes the model's context where it
+fits, so with the flag that is now orig x F (131072): pass `--kv q8` (and `--ctx` if you
+want less) to keep the KV cache in budget. A GGUF that does carry `rope.scaling.type = yarn` (with
 `factor`, `original_context_length`, and optionally `attn_factor`, `yarn_beta_fast`,
 `yarn_beta_slow`, `yarn_ext_factor`) gets YaRN without flags, as in llama.cpp. Not on gemma3.
 
