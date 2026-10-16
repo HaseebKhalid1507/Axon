@@ -54,14 +54,15 @@ fn no_capture() -> RwLockWriteGuard<'static, ()> {
 /// Why `Gpu::open` fails off Linux.
 pub const LINUX_ONLY: &str = "CUDA support is Linux-only for now";
 
-/// kernels.cu, decode.cu, prefill.cu, stream.cu and sample.cu, compiled at run time as one
-/// module.
+/// kernels.cu, decode.cu, prefill.cu, stream.cu, sample.cu and hopper.cu, compiled at run
+/// time as one module. hopper.cu is empty except for the sm_90a target (`Target::Cubin90a`).
 const KERNELS: &str = concat!(
     include_str!("kernels.cu"),
     include_str!("decode.cu"),
     include_str!("prefill.cu"),
     include_str!("stream.cu"),
-    include_str!("sample.cu")
+    include_str!("sample.cu"),
+    include_str!("hopper.cu")
 );
 
 /// A CUDA device: its retained primary context and a stream to run on.
@@ -399,6 +400,63 @@ impl Gpu {
 }
 
 impl Gpu {
+    /// A TMA descriptor (CUtensorMap, for `Arg::Blob128`) of a 2-D byte
+    /// tensor at device address `base`: `dims` = (bytes per row, rows),
+    /// rows `stride` bytes apart, copied in boxes of `boxd` = (bytes, rows),
+    /// with the 128-byte smem swizzle or none. Boxes past the tensor's edge
+    /// read zeros. Err without cuTensorMapEncodeTiled (driver older than
+    /// CUDA 12.0) or if the driver rejects the shape (`base` must be 16-byte
+    /// aligned, `stride` a multiple of 16, box sides <= 256, the box row a
+    /// multiple of 16 bytes and <= 128 with the swizzle).
+    pub fn tensor_map_2d(
+        &self,
+        base: u64,
+        dims: (u64, u64),
+        stride: u64,
+        boxd: (u32, u32),
+        swizzle128: bool,
+    ) -> Result<[u64; 16], String> {
+        #[repr(C, align(64))]
+        struct Map([u64; 16]);
+        let enc = ffi::tensor_map_encoder().ok_or("the driver has no cuTensorMapEncodeTiled")?;
+        let mut m = Map([0; 16]);
+        let gdim = [dims.0, dims.1];
+        let gstride = [stride];
+        let bdim = [boxd.0, boxd.1];
+        let estride = [1u32, 1];
+        self.bind()?;
+        // SAFETY: m is 128 bytes, 64-byte aligned (as CUtensorMap); the
+        // arrays have rank (2) entries, strides rank - 1. The driver only
+        // encodes base into the map: nothing is accessed until a kernel
+        // uses it.
+        let r = unsafe {
+            enc(
+                &mut m.0,
+                ffi::TENSOR_MAP_DATA_TYPE_UINT8,
+                2,
+                base as *mut c_void,
+                gdim.as_ptr(),
+                gstride.as_ptr(),
+                bdim.as_ptr(),
+                estride.as_ptr(),
+                0, // CU_TENSOR_MAP_INTERLEAVE_NONE
+                if swizzle128 {
+                    ffi::TENSOR_MAP_SWIZZLE_128B
+                } else {
+                    ffi::TENSOR_MAP_SWIZZLE_NONE
+                },
+                ffi::TENSOR_MAP_L2_PROMOTION_256B,
+                0, // CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE (zeros)
+            )
+        };
+        check(
+            self.d,
+            r,
+            &format!("cuTensorMapEncodeTiled dims {dims:?} stride {stride} box {boxd:?}"),
+        )?;
+        Ok(m.0)
+    }
+
     /// `len` bytes of page-locked host memory, for stream-ordered copies.
     pub fn host_alloc(&self, len: usize) -> Result<HostBuf<'_>, String> {
         let mut p: *mut c_void = std::ptr::null_mut();
@@ -997,6 +1055,9 @@ pub enum Arg {
     U32(u32),
     I32(i32),
     F32(f32),
+    /// 128 bytes by value: a CUtensorMap (`Gpu::tensor_map_2d`), the
+    /// kernel's `const __grid_constant__ TMap` (hopper.cu).
+    Blob128([u64; 16]),
 }
 
 impl Arg {
@@ -1007,6 +1068,7 @@ impl Arg {
             Arg::U32(v) => v as *const u32 as *mut c_void,
             Arg::I32(v) => v as *const i32 as *mut c_void,
             Arg::F32(v) => v as *const f32 as *mut c_void,
+            Arg::Blob128(v) => v as *const [u64; 16] as *mut c_void,
         }
     }
 }
@@ -1081,6 +1143,9 @@ pub struct Module<'g> {
     /// Built with AXON_EXT_TYPES (`Kernels::module_ext`): its decode
     /// kernels run Q4_0, Q4_1, Q5_1 and Q5_K too.
     ext: bool,
+    /// Compiled for sm_90a (hopper.cu's kernels are in it) and the driver
+    /// has cuTensorMapEncodeTiled.
+    hopper: bool,
 }
 
 /// Whether programmatic dependent launch is safe and works for code
@@ -1206,6 +1271,10 @@ enum Target {
     Cubin(i32),
     /// PTX for compute_XY, which the driver compiles for any newer device.
     Ptx(i32),
+    /// Machine code for sm_90a: sm_90's plus the arch-specific Hopper
+    /// instructions (wgmma, TMA: hopper.cu). Runs only on compute
+    /// capability 9.0 (H100, H200, H20, GH200).
+    Cubin90a,
 }
 
 impl std::fmt::Display for Target {
@@ -1213,16 +1282,22 @@ impl std::fmt::Display for Target {
         match self {
             Target::Cubin(a) => write!(f, "sm_{a}"),
             Target::Ptx(a) => write!(f, "compute_{a}"),
+            Target::Cubin90a => write!(f, "sm_90a"),
         }
     }
 }
 
 /// The best `Target` for a device of architecture `cc` given the ones NVRTC
-/// supports (`archs`): its own cubin; else a cubin of the newest older minor
-/// of its major (binary compatible); else PTX of the newest older
-/// architecture, for the driver to compile (a GPU newer than NVRTC). Err if
-/// the GPU is older than everything NVRTC still supports.
-fn pick_target(cc: i32, archs: &[i32], nvrtc: (i32, i32)) -> Result<Target, String> {
+/// supports (`archs`): sm_90a for a 9.0 device if `hopper` ($AXON_HOPPER
+/// isn't "0") and NVRTC is 12.0+ (the first with arch-specific targets);
+/// else its own cubin; else a cubin of the newest older minor of its major
+/// (binary compatible); else PTX of the newest older architecture, for the
+/// driver to compile (a GPU newer than NVRTC). Err if the GPU is older than
+/// everything NVRTC still supports.
+fn pick_target(cc: i32, archs: &[i32], nvrtc: (i32, i32), hopper: bool) -> Result<Target, String> {
+    if cc == 90 && hopper && nvrtc.0 >= 12 && archs.contains(&90) {
+        return Ok(Target::Cubin90a);
+    }
     if archs.contains(&cc) {
         return Ok(Target::Cubin(cc));
     }
@@ -1259,6 +1334,12 @@ fn check_versions(driver: (i32, i32), nvrtc: (i32, i32)) -> Result<(), String> {
 /// a cubin, or for a `Ptx` target NUL-terminated PTX (as cuModuleLoadData
 /// takes it). Err carries the compile log.
 fn compile(src: &str, opts: &[String], target: Target) -> Result<Vec<u8>, String> {
+    compile_logged(src, opts, target).map(|(image, _)| image)
+}
+
+/// `compile`, and the compile log of a successful build (ptxas notes, e.g.
+/// wgmma serialization: tests check it's empty).
+fn compile_logged(src: &str, opts: &[String], target: Target) -> Result<(Vec<u8>, String), String> {
     let n = ffi::nvrtc()?;
     let csrc = CString::new(src).map_err(|_| "kernel source has a NUL byte")?;
     let copts: Vec<CString> = opts
@@ -1290,20 +1371,20 @@ fn compile(src: &str, opts: &[String], target: Target) -> Result<Vec<u8>, String
     let p = Prog(n, prog);
     // SAFETY: optp holds optp.len() NUL-terminated strings alive in copts.
     let r = unsafe { (n.nvrtcCompileProgram)(p.1, optp.len() as c_int, optp.as_ptr()) };
+    let mut len = 0usize;
+    // SAFETY: writes one size_t.
+    let mut log = if unsafe { (n.nvrtcGetProgramLogSize)(p.1, &mut len) } == 0 && len > 0 {
+        let mut buf = vec![0u8; len];
+        // SAFETY: buf has the len bytes the log needs (NUL included).
+        let r = unsafe { (n.nvrtcGetProgramLog)(p.1, buf.as_mut_ptr().cast()) };
+        match r {
+            ffi::NVRTC_SUCCESS => String::from_utf8_lossy(&buf[..len - 1]).into_owned(),
+            _ => String::new(), // the compile error itself still goes out
+        }
+    } else {
+        String::new()
+    };
     if r != ffi::NVRTC_SUCCESS {
-        let mut len = 0usize;
-        // SAFETY: writes one size_t.
-        let mut log = if unsafe { (n.nvrtcGetProgramLogSize)(p.1, &mut len) } == 0 && len > 0 {
-            let mut buf = vec![0u8; len];
-            // SAFETY: buf has the len bytes the log needs (NUL included).
-            let r = unsafe { (n.nvrtcGetProgramLog)(p.1, buf.as_mut_ptr().cast()) };
-            match r {
-                ffi::NVRTC_SUCCESS => String::from_utf8_lossy(&buf[..len - 1]).into_owned(),
-                _ => String::new(), // the compile error itself still goes out
-            }
-        } else {
-            String::new()
-        };
         if log.trim().is_empty() {
             log = "(no log)".into();
         }
@@ -1328,7 +1409,7 @@ fn compile(src: &str, opts: &[String], target: Target) -> Result<Vec<u8>, String
     if image.is_empty() || (ptx && image.last() != Some(&0)) {
         return Err(format!("NVRTC produced no code for {target}"));
     }
-    Ok(image)
+    Ok((image, log))
 }
 
 impl<'g> Module<'g> {
@@ -1354,7 +1435,8 @@ impl<'g> Module<'g> {
         let nv = ffi::nvrtc_version(n)?;
         check_versions(ffi::driver_version(gpu.d)?, nv)?;
         let cc = gpu.info()?.cc;
-        let target = pick_target((cc.0 * 10 + cc.1) as i32, &ffi::nvrtc_archs(n)?, nv)?;
+        let hopper = std::env::var("AXON_HOPPER").ok().as_deref() != Some("0");
+        let target = pick_target((cc.0 * 10 + cc.1) as i32, &ffi::nvrtc_archs(n)?, nv, hopper)?;
         Self::load_for(gpu, src, opts, dir, target)
     }
 
@@ -1373,7 +1455,9 @@ impl<'g> Module<'g> {
         let (mut m, status) = Self::load_cached(gpu, src, opts, dir, target)?;
         let arch = match target {
             Target::Cubin(a) | Target::Ptx(a) => a,
+            Target::Cubin90a => 90,
         };
+        m.hopper = target == Target::Cubin90a && ffi::tensor_map_encoder().is_some();
         let cc = gpu.info()?.cc;
         let env = std::env::var("AXON_CUDA_PDL").ok();
         m.arch = arch;
@@ -1449,6 +1533,12 @@ impl<'g> Module<'g> {
         self.arch >= 80
     }
 
+    /// Whether its code has hopper.cu's kernels (built for sm_90a) and the
+    /// driver can make their TMA descriptors (`Gpu::tensor_map_2d`).
+    pub fn hopper(&self) -> bool {
+        self.hopper
+    }
+
     /// Whether the decode kernels run the extra types (`Kernels::module_ext`).
     pub fn ext(&self) -> bool {
         self.ext
@@ -1476,6 +1566,7 @@ impl<'g> Module<'g> {
             pdl: false,
             arch: 0,
             ext: false,
+            hopper: false,
         })
     }
 

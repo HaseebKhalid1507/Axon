@@ -5354,3 +5354,530 @@ fn teacher_forced_dump() {
     }
     std::fs::write(var("AXON_TF_OUT"), serde_json::to_string(&out).unwrap()).unwrap();
 }
+
+/// hopper.cu gemmh's dynamic shared memory for `wgs` warpgroups
+/// (GEMMH_SMEM): two stages of unpacked weights (32 KiB a warpgroup),
+/// activation values (16 KiB), raw Q4_K rows, dk / b32 pieces, per-row
+/// headers; the barriers; 1 KiB of alignment slack.
+fn gemmh_smem(wgs: usize) -> usize {
+    2 * (wgs * 32768 + 16384 + wgs * 64 * 144 + 256 + 1024 + wgs * 64 * 16) + 16 + 1024
+}
+
+/// hopper.cu gemmh2's dynamic shared memory (GEMMH2_SMEM): 4 stages of
+/// activation values (16 KiB) and both warpgroups' raw Q4_K rows, the
+/// warpgroups' dk / b32 pieces, the barriers, 1 KiB of alignment slack.
+const GEMMH2_SMEM: usize = 4 * 16384 + 4 * 128 * 144 + 4 * 2 * 1280 + 2 * 4 * 8 + 1024;
+
+/// A device buffer's address.
+fn dev_addr(b: &DevBuf) -> u64 {
+    match b.arg() {
+        Arg::Ptr(p) => p,
+        _ => unreachable!(),
+    }
+}
+
+/// Launch hopper.cu's `kernel` (gemmh_q4_k: 2 warpgroups, gemmh1_q4_k: 1,
+/// gemmh2_q4_k: 2, register-unpacked) on Q4_K matrix `w` (rows x cols) and `nb` tokens of `act` (stride
+/// `st`): TMA maps for both, grid (ceil(nb / 64), ceil(rows / 64 wgs)).
+///
+/// # Safety
+/// `w` holds rows Q4_K rows of cols, `act` nb activations of stride st,
+/// `out` (stride `rows`) rows * nb floats, `bias` rows floats or null.
+#[allow(clippy::too_many_arguments)]
+unsafe fn launch_gemmh(
+    g: &Gpu,
+    km: &Module,
+    kernel: &str,
+    w: &DevBuf,
+    rows: usize,
+    cols: usize,
+    act: &DevBuf,
+    st: usize,
+    nb: usize,
+    bias: Arg,
+    mode: i32,
+    out: &DevBuf,
+) {
+    let wgs = if kernel.starts_with("gemmh1") { 1 } else { 2 };
+    let rb = (cols / 256 * 144) as u64;
+    let mw = g
+        .tensor_map_2d(
+            dev_addr(w),
+            (rb, rows as u64),
+            rb,
+            (144, 64 * wgs as u32),
+            false,
+        )
+        .unwrap();
+    let mx = g
+        .tensor_map_2d(
+            dev_addr(act),
+            (cols as u64, nb as u64),
+            st as u64,
+            (128, 64),
+            true,
+        )
+        .unwrap();
+    let f = km.function(kernel).unwrap();
+    let sm = if kernel.starts_with("gemmh2") {
+        GEMMH2_SMEM
+    } else {
+        gemmh_smem(wgs)
+    };
+    f.set_max_shared(sm).unwrap();
+    // SAFETY: gemmh's signature; the caller's buffers.
+    unsafe {
+        g.launch(
+            &f,
+            (nb.div_ceil(64) as u32, rows.div_ceil(64 * wgs) as u32, 1),
+            (128 * wgs as u32, 1, 1),
+            sm as u32,
+            &[
+                Arg::Blob128(mw),
+                Arg::Blob128(mx),
+                act.arg(),
+                Arg::U64(st as u64),
+                Arg::I32(rows as i32),
+                Arg::I32(cols as i32),
+                Arg::I32(nb as i32),
+                bias,
+                Arg::I32(mode),
+                out.arg(),
+                Arg::U64(rows as u64),
+            ],
+        )
+        .unwrap();
+    }
+}
+
+/// hopper.cu's wgmma Q4_K GEMMs (gemmh_q4_k, gemmh1_q4_k, gemmh2_q4_k) against
+/// gemv_ref bit for bit: row counts around the 64-row tiles and the 7B's,
+/// 1 to 74 blocks (odd counts: the two-stage ring's parity), token counts
+/// around the 64-token tiles, every epilogue. Hopper (sm_90a) only.
+#[test]
+fn gpu_gemmh_matches_reference_bits() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module_ext(&g).unwrap();
+    if !km.hopper() {
+        eprintln!("skipping: needs an sm_90a module (compute capability 9.0)");
+        return;
+    }
+    let mut rng = Rng(0x0090_a0b1_7e57);
+    let cases: [(usize, usize, &[usize]); 9] = [
+        (64, 256, &[1, 17, 64, 65]),
+        (65, 768, &[17, 64, 65, 128]),
+        (333, 1536, &[17, 65, 128, 1050]),
+        (512, 3584, &[64, 1152]),
+        (1001, 4864, &[77, 129]),
+        (3584, 3584, &[1050]),
+        (18944, 3584, &[129]),
+        (3584, 18944, &[65]),
+        (127, 18944, &[200]),
+    ];
+    for (rows, cols, nbs) in cases {
+        let wd = synth_matrix(&mut rng, Q4_K, rows, cols);
+        let w = g.upload(&wd).unwrap();
+        for &nb in nbs {
+            let xs: Vec<Vec<f32>> = (0..nb)
+                .map(|i| rng.vec(cols, [1.0f32, 1e-3, 40.0][i % 3]))
+                .collect();
+            let epi = match nb % 4 {
+                0 => Epi::default(),
+                1 => Epi {
+                    bias: Some(rng.vec(rows, 3.0)),
+                    init: None,
+                },
+                2 => Epi {
+                    bias: None,
+                    init: Some(rng.vec(rows, 5.0)),
+                },
+                _ => Epi {
+                    bias: Some(rng.vec(rows, 3.0)),
+                    init: Some(rng.vec(rows, 5.0)),
+                },
+            };
+            let act = quantize_batch(&g, &km, &xs, cols);
+            let want = gpu_batched(&g, &km, "gemv_ref", Q4_K, &w, rows, cols, &act, nb, &epi);
+            for k in ["gemmh_q4_k", "gemmh1_q4_k", "gemmh2_q4_k"] {
+                let out = match &epi.init {
+                    Some(v) => g.upload(&v.repeat(nb)).unwrap(),
+                    None => {
+                        let o = g.alloc(rows * nb * 4).unwrap();
+                        o.zero().unwrap();
+                        o
+                    }
+                };
+                let bias = epi.bias.as_ref().map(|b| g.upload(b).unwrap());
+                // SAFETY: w rows x cols Q4_K, act nb tokens, out rows * nb.
+                unsafe {
+                    launch_gemmh(
+                        &g,
+                        &km,
+                        k,
+                        &w,
+                        rows,
+                        cols,
+                        &act,
+                        act_stride_t(cols),
+                        nb,
+                        bias.as_ref().map_or(Arg::Ptr(0), |b| b.arg()),
+                        epi.init.is_some() as i32,
+                        &out,
+                    )
+                };
+                g.sync().unwrap();
+                let got: Vec<f32> = out.read().unwrap();
+                if let Some(i) = (0..rows * nb).find(|&i| got[i].to_bits() != want[i].to_bits()) {
+                    panic!(
+                        "{k} {cols}x{rows} nb {nb} token {} row {}: {} vs ref {}",
+                        i / rows,
+                        i % rows,
+                        got[i],
+                        want[i]
+                    );
+                }
+            }
+            eprintln!("Q4_K {cols}x{rows} nb {nb}: gemmh bit-identical");
+        }
+    }
+}
+
+/// gemmh vs gemm2 on the 7B's Q4_K shapes: interleaved rounds (clocks
+/// drift), each kernel's median / min / max TMAC/s of real MACs (rows x
+/// cols x nb). AXON_BENCH_NB (default 1050), AXON_BENCH_ROUNDS (default 7).
+/// Hopper only for gemmh; run with --ignored.
+#[test]
+#[ignore]
+fn cuda_gemmh_bench() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module_ext(&g).unwrap();
+    let info = g.info().unwrap();
+    eprintln!(
+        "{} sm_{}{} {} SMs, hopper module {}",
+        info.name,
+        info.cc.0,
+        info.cc.1,
+        info.sms,
+        km.hopper()
+    );
+    let nbs: Vec<usize> = std::env::var("AXON_BENCH_NB")
+        .map(|v| v.split(',').map(|x| x.parse().unwrap()).collect())
+        .unwrap_or(vec![1050]);
+    let rounds: usize = std::env::var("AXON_BENCH_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(7);
+    let mut rng = Rng(7);
+    for (what, cols, rows) in [
+        ("gate  Q4_K", 3584usize, 18944usize),
+        ("q/wo  Q4_K", 3584, 3584),
+        ("down  Q4_K", 18944, 3584),
+        ("kv    Q4_K", 3584, 512),
+    ] {
+        let w = g.upload(&synth_matrix(&mut rng, Q4_K, rows, cols)).unwrap();
+        for &nb in &nbs {
+            let xs: Vec<Vec<f32>> = (0..nb).map(|_| rng.vec(cols, 1.0)).collect();
+            let act = quantize_batch(&g, &km, &xs, cols);
+            let st = act_stride_t(cols);
+            let out = g.alloc(rows * nb * 4).unwrap();
+            let mut kernels = vec!["gemm2s_q4_k", "gemm2_q4_k"];
+            if km.hopper() {
+                kernels.extend(["gemmh_q4_k", "gemmh1_q4_k", "gemmh2_q4_k"]);
+            }
+            let mut ms: Vec<Vec<f64>> = vec![Vec::new(); kernels.len()];
+            for _ in 0..rounds {
+                for (ki, k) in kernels.iter().enumerate() {
+                    let run = || {
+                        if k.starts_with("gemmh") {
+                            // SAFETY: as in gpu_gemmh_matches_reference_bits.
+                            unsafe {
+                                launch_gemmh(
+                                    &g,
+                                    &km,
+                                    k,
+                                    &w,
+                                    rows,
+                                    cols,
+                                    &act,
+                                    st,
+                                    nb,
+                                    Arg::Ptr(0),
+                                    0,
+                                    &out,
+                                )
+                            };
+                        } else {
+                            let f = km.function(k).unwrap();
+                            let common = [
+                                w.arg(),
+                                Arg::U64(quant::row_bytes(Q4_K, cols) as u64),
+                                Arg::I32(rows as i32),
+                                Arg::I32(cols as i32),
+                                act.arg(),
+                                Arg::U64(st as u64),
+                                Arg::I32(nb as i32),
+                                Arg::Ptr(0),
+                                Arg::I32(0),
+                                out.arg(),
+                                Arg::U64(rows as u64),
+                            ];
+                            // SAFETY: prefill.cu's gemm2 signature; buffers as above.
+                            unsafe { launch_product(&g, &f, k, Q4_K, rows, nb, &common) };
+                        }
+                    };
+                    run(); // warm (and the smem attribute)
+                    let e0 = g.record().unwrap();
+                    for _ in 0..3 {
+                        run();
+                    }
+                    let e1 = g.record().unwrap();
+                    ms[ki].push(e0.ms_to(&e1).unwrap() as f64 / 3.0);
+                }
+            }
+            let macs = (rows * cols * nb) as f64;
+            for (ki, k) in kernels.iter().enumerate() {
+                let v = &mut ms[ki];
+                v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let t = |x: f64| macs / (x * 1e-3) / 1e12;
+                eprintln!(
+                    "{what} {cols}x{rows} nb {nb} {k}: median {:.1} TMAC/s (min {:.1} max {:.1}; {:.3} ms)",
+                    t(v[v.len() / 2]),
+                    t(v[v.len() - 1]),
+                    t(v[0]),
+                    v[v.len() / 2]
+                );
+            }
+        }
+    }
+    // The fused gate + up (7B: 2 x 18944 x 3584): gemm2s_q4_k_gu vs gemmh2_q4_k_gu.
+    let (cols, rows) = (3584usize, 18944usize);
+    let wg = g.upload(&synth_matrix(&mut rng, Q4_K, rows, cols)).unwrap();
+    let wu = g.upload(&synth_matrix(&mut rng, Q4_K, rows, cols)).unwrap();
+    for &nb in &nbs {
+        let xs: Vec<Vec<f32>> = (0..nb).map(|_| rng.vec(cols, 1.0)).collect();
+        let act = quantize_batch(&g, &km, &xs, cols);
+        let st = act_stride_t(cols);
+        let out = g.alloc(rows * nb * 4).unwrap();
+        let mut kernels = vec!["gemm2s_q4_k_gu"];
+        if km.hopper() {
+            kernels.push("gemmh2_q4_k_gu");
+        }
+        let f2 = km.function("gemm2s_q4_k_gu").unwrap();
+        f2.set_max_shared(gemm2_smem(Q4_K, 64, 3)).unwrap();
+        let mut ms: Vec<Vec<f64>> = vec![Vec::new(); kernels.len()];
+        for _ in 0..rounds {
+            for (ki, k) in kernels.iter().enumerate() {
+                let run = || {
+                    if k.starts_with("gemmh") {
+                        // SAFETY: as in gpu_gemmh_gate_up_match_reference.
+                        unsafe {
+                            launch_gemmh_gu(&g, &km, &wg, &wu, rows, cols, &act, st, nb, &out)
+                        };
+                    } else {
+                        // SAFETY: gemm2s_q4_k_gu's signature; buffers as above.
+                        unsafe {
+                            g.launch(
+                                &f2,
+                                (nb.div_ceil(64) as u32, rows.div_ceil(32) as u32, 1),
+                                (256, 1, 1),
+                                gemm2_smem(Q4_K, 64, 3) as u32,
+                                &[
+                                    wg.arg(),
+                                    wu.arg(),
+                                    Arg::U64(quant::row_bytes(Q4_K, cols) as u64),
+                                    Arg::I32(rows as i32),
+                                    Arg::I32(cols as i32),
+                                    act.arg(),
+                                    Arg::U64(st as u64),
+                                    Arg::I32(nb as i32),
+                                    out.arg(),
+                                    Arg::U64(rows as u64),
+                                ],
+                            )
+                            .unwrap()
+                        };
+                    }
+                };
+                run();
+                let e0 = g.record().unwrap();
+                for _ in 0..3 {
+                    run();
+                }
+                let e1 = g.record().unwrap();
+                ms[ki].push(e0.ms_to(&e1).unwrap() as f64 / 3.0);
+            }
+        }
+        let macs = (2 * rows * cols * nb) as f64;
+        for (ki, k) in kernels.iter().enumerate() {
+            let v = &mut ms[ki];
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let t = |x: f64| macs / (x * 1e-3) / 1e12;
+            eprintln!(
+                "gate+up {cols}x2x{rows} nb {nb} {k}: median {:.1} TMAC/s (min {:.1} max {:.1}; {:.3} ms)",
+                t(v[v.len() / 2]),
+                t(v[v.len() - 1]),
+                t(v[0]),
+                v[v.len() / 2]
+            );
+        }
+    }
+}
+
+/// hopper.cu's gemmh kernels in mode 2 (out = silu(gate) * sum) and
+/// gemmh2_q4_k_gu (gate and up in one launch) against gemv_ref: gate by
+/// gemv_ref (mode 0), then up by gemv_ref in mode 2 on it. Hopper only.
+#[test]
+fn gpu_gemmh_gate_up_match_reference() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    if !km.hopper() {
+        eprintln!("skipping: needs an sm_90a module (compute capability 9.0)");
+        return;
+    }
+    let mut rng = Rng(0x5eed_9a7e_0090);
+    for (cols, rows) in [
+        (256usize, 333usize),
+        (1536, 129),
+        (3584, 1000),
+        (3584, 18944),
+    ] {
+        let gd = synth_matrix(&mut rng, Q4_K, rows, cols);
+        let ud = synth_matrix(&mut rng, Q4_K, rows, cols);
+        let (wg, wu) = (g.upload(&gd).unwrap(), g.upload(&ud).unwrap());
+        let nbs: &[usize] = if rows > 10000 {
+            &[1050]
+        } else {
+            &[17, 64, 100, 129]
+        };
+        for &nb in nbs {
+            let xs: Vec<Vec<f32>> = (0..nb)
+                .map(|i| rng.vec(cols, [1.0f32, 1e-2, 4.0][i % 3]))
+                .collect();
+            let act = quantize_batch(&g, &km, &xs, cols);
+            let st = act_stride_t(cols);
+            let reference = |w: &DevBuf, bias: Arg, mode: i32| -> DevBuf {
+                let out = g.alloc(rows * nb * 4).unwrap();
+                out.zero().unwrap();
+                let f = km.function("gemv_ref").unwrap();
+                let common = [
+                    w.arg(),
+                    Arg::U64(quant::row_bytes(Q4_K, cols) as u64),
+                    Arg::I32(rows as i32),
+                    Arg::I32(cols as i32),
+                    act.arg(),
+                    Arg::U64(st as u64),
+                    Arg::I32(nb as i32),
+                    bias,
+                    Arg::I32(mode),
+                    out.arg(),
+                    Arg::U64(rows as u64),
+                ];
+                // SAFETY: gemv_ref's signature; act nb tokens, out rows * nb.
+                unsafe { launch_product(&g, &f, "gemv_ref", Q4_K, rows, nb, &common) };
+                g.sync().unwrap();
+                out
+            };
+            let gate = reference(&wg, Arg::Ptr(0), 0);
+            let want: Vec<f32> = reference(&wu, gate.arg(), 2).read().unwrap();
+            for k in ["gemmh_q4_k", "gemmh1_q4_k", "gemmh2_q4_k"] {
+                let out = g.alloc(rows * nb * 4).unwrap();
+                // SAFETY: wu rows x cols Q4_K, act nb tokens, out and the
+                // gate rows * nb floats.
+                unsafe {
+                    launch_gemmh(
+                        &g,
+                        &km,
+                        k,
+                        &wu,
+                        rows,
+                        cols,
+                        &act,
+                        st,
+                        nb,
+                        gate.arg(),
+                        2,
+                        &out,
+                    )
+                };
+                g.sync().unwrap();
+                let got: Vec<f32> = out.read().unwrap();
+                assert_eq!(bits(&got), bits(&want), "mode 2 {k} {cols}x{rows} nb {nb}");
+            }
+            let out = g.alloc(rows * nb * 4).unwrap();
+            // SAFETY: gate / up rows x cols Q4_K, act nb tokens, out rows * nb.
+            unsafe { launch_gemmh_gu(&g, &km, &wg, &wu, rows, cols, &act, st, nb, &out) };
+            g.sync().unwrap();
+            let got: Vec<f32> = out.read().unwrap();
+            assert_eq!(
+                bits(&got),
+                bits(&want),
+                "gemmh2_q4_k_gu {cols}x{rows} nb {nb}"
+            );
+        }
+        eprintln!("Q4_K {cols} x {rows}: gemmh mode 2 and gemmh2_q4_k_gu == gemv_ref");
+    }
+}
+
+/// Launch gemmh2_q4_k_gu: out = silu(wg x) * (wu x), rows x nb.
+///
+/// # Safety
+/// As `launch_gemmh`, for both matrices.
+#[allow(clippy::too_many_arguments)]
+unsafe fn launch_gemmh_gu(
+    g: &Gpu,
+    km: &Module,
+    wg: &DevBuf,
+    wu: &DevBuf,
+    rows: usize,
+    cols: usize,
+    act: &DevBuf,
+    st: usize,
+    nb: usize,
+    out: &DevBuf,
+) {
+    let rb = (cols / 256 * 144) as u64;
+    let map = |w: &DevBuf| {
+        g.tensor_map_2d(dev_addr(w), (rb, rows as u64), rb, (144, 64), false)
+            .unwrap()
+    };
+    let (mg, mu) = (map(wg), map(wu));
+    let mx = g
+        .tensor_map_2d(
+            dev_addr(act),
+            (cols as u64, nb as u64),
+            st as u64,
+            (128, 64),
+            true,
+        )
+        .unwrap();
+    let f = km.function("gemmh2_q4_k_gu").unwrap();
+    f.set_max_shared(GEMMH2_SMEM).unwrap();
+    // SAFETY: gemmh2_q4_k_gu's signature; the caller's buffers.
+    unsafe {
+        g.launch(
+            &f,
+            (nb.div_ceil(64) as u32, rows.div_ceil(64) as u32, 1),
+            (256, 1, 1),
+            GEMMH2_SMEM as u32,
+            &[
+                Arg::Blob128(mg),
+                Arg::Blob128(mu),
+                Arg::Blob128(mx),
+                act.arg(),
+                Arg::U64(st as u64),
+                Arg::I32(rows as i32),
+                Arg::I32(cols as i32),
+                Arg::I32(nb as i32),
+                out.arg(),
+                Arg::U64(rows as u64),
+            ],
+        )
+        .unwrap();
+    }
+}

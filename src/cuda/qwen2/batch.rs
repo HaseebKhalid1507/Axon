@@ -23,6 +23,19 @@ use super::*;
 /// Batches of up to this many tokens use gemvn (weight-read-once, CUDA
 /// cores) even where the tensor-core GEMM exists.
 pub(super) const SMALL: usize = 16;
+
+/// hopper.cu gemmh2's dynamic shared memory (GEMMH2_SMEM): 4 stages of
+/// activation values (16 KiB) and two warpgroups' raw Q4_K rows, their dk /
+/// b32 pieces, the barriers, 1 KiB of alignment slack.
+pub(super) const GEMMH2_SMEM: usize = 4 * 16384 + 4 * 128 * 144 + 4 * 2 * 1280 + 2 * 4 * 8 + 1024;
+
+/// The device address in a pointer argument.
+fn dev_ptr(a: Arg) -> u64 {
+    match a {
+        Arg::Ptr(p) => p,
+        _ => unreachable!("not a pointer argument"),
+    }
+}
 /// Query tokens per batched attention launch without tensor cores (sizes
 /// `part_o`).
 pub(super) const ATT_SUB: usize = 64;
@@ -155,6 +168,10 @@ pub(super) struct BatchFns<'m> {
     /// up out (`CudaQwen2::gate_up_fused`).
     pub(super) gemm_gu: Option<Func<'m>>,
     pub(super) q6k_to_i8: Option<Func<'m>>,
+    /// hopper.cu gemmh2_q4_k and gemmh2_q4_k_gu: the Q4_K products (and
+    /// the fused gate + up) on wgmma, same bits; sm_90a modules with
+    /// AXON_GEMMH=1 only (opt-in while it's measured).
+    gemmh: Option<[Func<'m>; 2]>,
     /// SMs of the GPU (the GEMM tile choice).
     sms: usize,
     /// stream.cu: r8/r8q blocks back to GGUF rows.
@@ -262,6 +279,17 @@ impl<'m> BatchFns<'m> {
                 let f = module.function("gemm2s_q4_k_gu")?;
                 f.set_max_shared(gemm2_smem(Q4_K, 64, 3))?;
                 Some(f)
+            } else {
+                None
+            },
+            gemmh: if module.hopper() && std::env::var("AXON_GEMMH").as_deref() == Ok("1") {
+                let (a, b) = (
+                    module.function("gemmh2_q4_k")?,
+                    module.function("gemmh2_q4_k_gu")?,
+                );
+                a.set_max_shared(GEMMH2_SMEM)?;
+                b.set_max_shared(GEMMH2_SMEM)?;
+                Some([a, b])
             } else {
                 None
             },
@@ -411,6 +439,47 @@ impl<'g> CudaQwen2<'g> {
             out,
             Arg::U64(ostride as u64),
         ];
+        if let (Some(h), Q4_K, true) = (&bf.gemmh, mt.qt, nb > SMALL) {
+            // TMA descriptors of the weights (rows of rb bytes, boxes of
+            // 128 rows of one block) and the activations' Q8_K values.
+            let rb = mt.rb as u64;
+            let mw = self.gpu.tensor_map_2d(
+                dev_ptr(wts.arg_at(mt.off)),
+                (rb, mt.rows as u64),
+                rb,
+                (144, 128),
+                false,
+            )?;
+            let mx = self.gpu.tensor_map_2d(
+                dev_ptr(act),
+                (mt.cols as u64, nb as u64),
+                astride as u64,
+                (128, 64),
+                true,
+            )?;
+            // SAFETY: the caller's contract; gemmh2_q4_k's signature.
+            return unsafe {
+                self.gpu.launch(
+                    &h[0],
+                    (nb.div_ceil(64) as u32, mt.rows.div_ceil(128) as u32, 1),
+                    (256, 1, 1),
+                    GEMMH2_SMEM as u32,
+                    &[
+                        Arg::Blob128(mw),
+                        Arg::Blob128(mx),
+                        act,
+                        Arg::U64(astride as u64),
+                        Arg::I32(mt.rows as i32),
+                        Arg::I32(mt.cols as i32),
+                        Arg::I32(nb as i32),
+                        bias,
+                        Arg::I32(mode),
+                        out,
+                        Arg::U64(ostride as u64),
+                    ],
+                )
+            };
+        }
         let ti = type_index(mt.qt);
         // SAFETY: the caller's contract; the matrix is whole in `wts`.
         unsafe {
@@ -998,7 +1067,59 @@ impl<'g> CudaQwen2<'g> {
                 )?;
             }
             on("gate")?;
-            if let (Some(f), true) = (&bf.gemm_gu, fuse) {
+            if let (Some(h), true) = (&bf.gemmh, fuse) {
+                // gemmh2_q4_k_gu: as gemm2s_q4_k_gu below, on wgmma.
+                let rb = l.gate.rb as u64;
+                let map = |off: usize| {
+                    g.tensor_map_2d(
+                        dev_ptr(wts.arg_at(off)),
+                        (rb, ffn as u64),
+                        rb,
+                        (144, 64),
+                        false,
+                    )
+                };
+                let (mg, mu) = (map(l.gate.off)?, map(l.up.off)?);
+                let mx = g.tensor_map_2d(
+                    dev_ptr(b.act.arg()),
+                    (dim as u64, nb as u64),
+                    ast as u64,
+                    (128, 64),
+                    true,
+                )?;
+                g.launch(
+                    &h[1],
+                    (nb.div_ceil(64) as u32, ffn.div_ceil(64) as u32, 1),
+                    (256, 1, 1),
+                    GEMMH2_SMEM as u32,
+                    &[
+                        Arg::Blob128(mg),
+                        Arg::Blob128(mu),
+                        Arg::Blob128(mx),
+                        b.act.arg(),
+                        Arg::U64(ast as u64),
+                        Arg::I32(ffn as i32),
+                        Arg::I32(dim as i32),
+                        Arg::I32(nb as i32),
+                        b.up.arg(),
+                        Arg::U64(ffn as u64),
+                    ],
+                )?;
+                on("gate_up")?;
+                g.launch(
+                    &bf.quantize,
+                    (ffn.div_ceil(256) as u32, nbu, 1),
+                    (32, 1, 1),
+                    0,
+                    &[
+                        b.up.arg(),
+                        Arg::I32(ffn as i32),
+                        want_k(ffn),
+                        b.act.arg(),
+                        Arg::U64(ast as u64),
+                    ],
+                )?;
+            } else if let (Some(f), true) = (&bf.gemm_gu, fuse) {
                 // gate and up in one launch, hid = silu(gate) * up out
                 // (the same floats and ops as below), then quantize_b.
                 g.launch(

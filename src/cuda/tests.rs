@@ -1,6 +1,7 @@
 use super::{
     Arg, CacheStatus, DevBuf, Gpu, KERNEL_OPTS, KERNELS, Kernels, Module, Target, cache_dir,
-    cache_dir_from, check_versions, compile, encode_entry, ffi, pdl_ok, pick_target,
+    cache_dir_from, check_versions, compile, compile_logged, encode_entry, ffi, pdl_ok,
+    pick_target,
 };
 use crate::gguf::Model;
 use crate::quant::{self, F16, F32, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0};
@@ -423,24 +424,94 @@ fn nvrtc_kernels_compile_for_old_archs() {
     }
 }
 
+/// Whether `needle` occurs in `hay` (a kernel name in a cubin's string table).
+fn contains_bytes(hay: &[u8], needle: &[u8]) -> bool {
+    hay.windows(needle.len()).any(|w| w == needle)
+}
+
+/// The whole module compiles for sm_90a (Hopper: hopper.cu's wgmma/TMA
+/// kernels are in the cubin) with no wgmma note in the log: ptxas reports
+/// wgmma it had to serialize or waits it had to inject (C7510-C7517: a
+/// silent 3-5x slowdown) there. For plain sm_90 hopper.cu compiles to nothing. NVRTC
+/// only, no GPU needed; skipped without NVRTC or sm_90.
+#[test]
+fn nvrtc_kernels_compile_for_sm90a() {
+    let n = match ffi::nvrtc() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("skipping: {e}");
+            return;
+        }
+    };
+    if !ffi::nvrtc_archs(n).unwrap().contains(&90) || ffi::nvrtc_version(n).unwrap().0 < 12 {
+        eprintln!("skipping: NVRTC has no sm_90a");
+        return;
+    }
+    let hopper_kernels: [&[u8]; 12] = [
+        b"hopper_check_s8",
+        b"hopper_check_u8",
+        b"hopper_check_rs",
+        b"wg_peak_n64",
+        b"wg_peak_n128",
+        b"wg_peak_n256",
+        b"wg_peak_n256u",
+        b"wg_peak_rs_n128",
+        b"gemmh_q4_k",
+        b"gemmh2_q4_k",
+        b"gemmh2_q4_k_gu",
+        b"gemmh1_q4_k",
+    ];
+    for t in [Target::Cubin90a, Target::Cubin(90)] {
+        let mut opts = vec![format!("--gpu-architecture={t}")];
+        opts.extend(KERNEL_OPTS.iter().map(|s| s.to_string()));
+        let (image, log) = compile_logged(KERNELS, &opts, t).unwrap_or_else(|e| panic!("{t}: {e}"));
+        eprintln!("{t}: {} bytes of cubin", image.len());
+        assert!(
+            !log.contains("wgmma") && !log.contains("serialized") && !log.contains("C751"),
+            "{t}: wgmma notes in the NVRTC log:\n{log}"
+        );
+        for k in hopper_kernels {
+            assert_eq!(
+                contains_bytes(&image, k),
+                t == Target::Cubin90a,
+                "{t}: {}",
+                String::from_utf8_lossy(k)
+            );
+        }
+    }
+}
+
 #[test]
 fn gpu_target_choice() {
     let archs = [75, 80, 86, 87, 89, 90, 100, 103, 110, 120, 121];
     let v = (13, 4);
-    assert_eq!(pick_target(120, &archs, v), Ok(Target::Cubin(120)));
+    assert_eq!(pick_target(120, &archs, v, true), Ok(Target::Cubin(120)));
     // A newer minor of a known major: the older minor's cubin runs on it.
-    assert_eq!(pick_target(88, &archs, v), Ok(Target::Cubin(87)));
-    assert_eq!(pick_target(122, &archs, v), Ok(Target::Cubin(121)));
+    assert_eq!(pick_target(88, &archs, v, true), Ok(Target::Cubin(87)));
+    assert_eq!(pick_target(122, &archs, v, true), Ok(Target::Cubin(121)));
     // A newer major than NVRTC knows: PTX for the driver to compile.
-    assert_eq!(pick_target(130, &archs, v), Ok(Target::Ptx(121)));
-    assert_eq!(pick_target(130, &[75, 80], v), Ok(Target::Ptx(80)));
+    assert_eq!(pick_target(130, &archs, v, true), Ok(Target::Ptx(121)));
+    assert_eq!(pick_target(130, &[75, 80], v, true), Ok(Target::Ptx(80)));
     // Older than anything NVRTC supports.
-    let e = pick_target(61, &archs, v).unwrap_err();
+    let e = pick_target(61, &archs, v, true).unwrap_err();
     assert!(
         e.contains("sm_61") && e.contains("sm_75") && e.contains("13.4"),
         "{e}"
     );
     assert_eq!(Target::Ptx(89).to_string(), "compute_89");
+    // Hopper: the arch-specific sm_90a (wgmma, TMA) unless AXON_HOPPER=0,
+    // or NVRTC is older than 12.0 / lacks sm_90; never for other devices.
+    assert_eq!(pick_target(90, &archs, v, true), Ok(Target::Cubin90a));
+    assert_eq!(pick_target(90, &archs, v, false), Ok(Target::Cubin(90)));
+    assert_eq!(
+        pick_target(90, &archs, (11, 8), true),
+        Ok(Target::Cubin(90))
+    );
+    assert_eq!(pick_target(90, &[75, 80, 89], v, true), Ok(Target::Ptx(89)));
+    assert_eq!(pick_target(89, &archs, v, true), Ok(Target::Cubin(89)));
+    assert_eq!(pick_target(100, &archs, v, true), Ok(Target::Cubin(100)));
+    assert_eq!(pick_target(120, &archs, v, false), Ok(Target::Cubin(120)));
+    assert_eq!(Target::Cubin90a.to_string(), "sm_90a");
 
     assert!(check_versions((13, 4), (13, 4)).is_ok());
     assert!(check_versions((13, 0), (13, 4)).is_ok());
@@ -814,4 +885,260 @@ fn h2d_bandwidth() {
         "h2d: pageable {pageable:.1} GB/s, pinned {pinned_dma:.1} GB/s, file mapping \
          {file_gbs:.1} GB/s, populated file mapping {populated:.1} GB/s ({n} bytes)"
     );
+}
+
+/// A buffer's device address (for `Gpu::tensor_map_2d`).
+fn dev_addr(b: &DevBuf) -> u64 {
+    match b.arg() {
+        Arg::Ptr(p) => p,
+        _ => unreachable!(),
+    }
+}
+
+/// hopper.cu's hopper_check_{s8,u8}: TMA boxes into smem (128-byte swizzle for the
+/// wgmma operands, none for the 144-byte Q4_K rows), then four
+/// m64n64k32 wgmmas from smem descriptors. D must equal the CPU's integer
+/// products exactly (also checks the fragment layout and the descriptors),
+/// boxes past the edges must read zeros, the raw box must round-trip.
+/// Hopper (sm_90a modules) only; skipped elsewhere.
+#[test]
+fn gpu_hopper_tma_wgmma() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    if !km.hopper() {
+        eprintln!("skipping: needs an sm_90a module (compute capability 9.0)");
+        return;
+    }
+    let fs = [
+        km.function("hopper_check_s8").unwrap(),
+        km.function("hopper_check_u8").unwrap(),
+    ];
+    let mut rng = Rng(11);
+    // A: 200 rows x 384 bytes, B: 100 tokens x 512 bytes, raw: 333 Q4_K rows.
+    let (ar, ak, br, bk, rr) = (200usize, 384usize, 100usize, 512usize, 333usize);
+    let mut bytes = |n: usize| -> Vec<u8> { (0..n).map(|_| (rng.next() >> 24) as u8).collect() };
+    let (a, b, raw) = (bytes(ar * ak), bytes(br * bk), bytes(rr * 144));
+    let (ab, bb, rb) = (
+        g.upload(&a).unwrap(),
+        g.upload(&b).unwrap(),
+        g.upload(&raw).unwrap(),
+    );
+    let ma = g
+        .tensor_map_2d(
+            dev_addr(&ab),
+            (ak as u64, ar as u64),
+            ak as u64,
+            (128, 64),
+            true,
+        )
+        .unwrap();
+    let mb = g
+        .tensor_map_2d(
+            dev_addr(&bb),
+            (bk as u64, br as u64),
+            bk as u64,
+            (128, 64),
+            true,
+        )
+        .unwrap();
+    let mr = g
+        .tensor_map_2d(dev_addr(&rb), (144, rr as u64), 144, (144, 128), false)
+        .unwrap();
+    let d = g.alloc(64 * 64 * 4).unwrap();
+    let ro = g.alloc(128 * 144).unwrap();
+    // (ka, ra, kb, tb, rr0, u8a, tw): K offsets in bytes, first
+    // rows/tokens, A as u8, A written by the threads (not TMA). ra 136 and
+    // tb 64 run past A's 200 rows and B's 100 tokens; rr0 256 past the raw
+    // matrix's 333 rows.
+    for (ka, ra, kb, tb, rr0, u8a, tw) in [
+        (0, 0, 0, 0, 0, 1, false),
+        (0, 0, 0, 0, 0, 0, false),
+        (128, 64, 384, 0, 256, 0, false),
+        (256, 136, 0, 64, 128, 1, false),
+        (256, 136, 128, 64, 205, 0, false),
+        (0, 0, 0, 0, 0, 1, true),
+        (128, 64, 384, 0, 256, 0, true),
+        (256, 136, 128, 64, 205, 1, true),
+    ] {
+        // SAFETY: hopper_check's signature; d holds 64 x 64 i32, ro 128 x 144
+        // bytes; the maps describe live buffers.
+        unsafe {
+            g.launch(
+                &fs[u8a as usize],
+                (1, 1, 1),
+                (128, 1, 1),
+                1024 + 8192 + 8192 + 18432 + 8,
+                &[
+                    Arg::Blob128(ma),
+                    Arg::Blob128(mb),
+                    Arg::Blob128(mr),
+                    Arg::I32(ka as i32),
+                    Arg::I32(ra as i32),
+                    Arg::I32(kb as i32),
+                    Arg::I32(tb as i32),
+                    Arg::I32(rr0 as i32),
+                    if tw { ab.arg() } else { Arg::Ptr(0) },
+                    Arg::I32(ak as i32),
+                    Arg::I32(ar as i32),
+                    d.arg(),
+                    ro.arg(),
+                ],
+            )
+            .unwrap();
+        }
+        let got: Vec<i32> = d.read().unwrap();
+        let what = format!("ka {ka} ra {ra} kb {kb} tb {tb} u8a {u8a} tw {tw}");
+        for r in 0..64 {
+            for n in 0..64 {
+                let (ar_, bn) = (ra + r, tb + n);
+                let mut want = 0i32;
+                if ar_ < ar && bn < br {
+                    for k in 0..128 {
+                        let x = a[ar_ * ak + ka + k];
+                        let x = if u8a == 1 { x as i32 } else { x as i8 as i32 };
+                        want += x * b[bn * bk + kb + k] as i8 as i32;
+                    }
+                }
+                assert_eq!(got[r * 64 + n], want, "{what}: D[{r}][{n}]");
+            }
+        }
+        let got: Vec<u8> = ro.read().unwrap();
+        for i in 0..128 {
+            let row = rr0 + i;
+            let want = if row < rr {
+                &raw[row * 144..row * 144 + 144]
+            } else {
+                &[0u8; 144][..]
+            };
+            assert_eq!(&got[i * 144..i * 144 + 144], want, "raw row {row}");
+        }
+    }
+    // RS wgmma: A (as u8) from each thread's registers, B by TMA.
+    let frs = km.function("hopper_check_rs").unwrap();
+    for (ra, kb, tb, ka) in [
+        (0usize, 0usize, 0usize, 0usize),
+        (136, 384, 64, 256),
+        (64, 128, 0, 128),
+    ] {
+        // SAFETY: hopper_check_rs's signature; A from ab at row ra, byte ka
+        // (ag = ab + ka, stride ak), d 64 x 64 i32.
+        unsafe {
+            g.launch(
+                &frs,
+                (1, 1, 1),
+                (128, 1, 1),
+                1024 + 8192 + 8,
+                &[
+                    Arg::Blob128(mb),
+                    Arg::I32(kb as i32),
+                    Arg::I32(tb as i32),
+                    ab.arg_at(ka),
+                    Arg::I32(ak as i32),
+                    Arg::I32(ra as i32),
+                    Arg::I32(ar as i32),
+                    d.arg(),
+                ],
+            )
+            .unwrap();
+        }
+        let got: Vec<i32> = d.read().unwrap();
+        for r in 0..64 {
+            for n in 0..64 {
+                let (ar_, bn) = (ra + r, tb + n);
+                let mut want = 0i32;
+                if ar_ < ar && bn < br {
+                    for k in 0..128 {
+                        want += a[ar_ * ak + ka + k] as i32 * b[bn * bk + kb + k] as i8 as i32;
+                    }
+                }
+                assert_eq!(
+                    got[r * 64 + n],
+                    want,
+                    "rs ra {ra} kb {kb} tb {tb}: D[{r}][{n}]"
+                );
+            }
+        }
+    }
+}
+
+/// wgmma throughput (hopper.cu wg_peak_*: m64nNk32 from smem descriptors;
+/// wg_peak_rs_*: A from registers) next to the int8 mma.sync ceiling
+/// (prefill.cu mma_peak), per block shape.
+/// Hopper only; run with --ignored.
+#[test]
+#[ignore]
+fn cuda_hopper_bench() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let info = g.info().unwrap();
+    eprintln!(
+        "{} sm_{}{} {} SMs",
+        info.name, info.cc.0, info.cc.1, info.sms
+    );
+    let o = g.alloc(4 * 4096).unwrap();
+    let iters = 4096usize;
+    // Best of 5 timed launches, in ms.
+    let time = |f: &super::Func, blocks: usize, threads: usize| -> f64 {
+        let mut best = f64::INFINITY;
+        for _ in 0..5 {
+            let e0 = g.record().unwrap();
+            // SAFETY: (int iters, int* out) kernels; o has a slot per block.
+            unsafe {
+                g.launch(
+                    f,
+                    (blocks as u32, 1, 1),
+                    (threads as u32, 1, 1),
+                    0,
+                    &[Arg::I32(iters as i32), o.arg()],
+                )
+                .unwrap();
+            }
+            let e1 = g.record().unwrap();
+            best = best.min(e0.ms_to(&e1).unwrap() as f64);
+        }
+        best
+    };
+    if km.mma() {
+        let f = km.function("mma_peak").unwrap();
+        let blocks = 4 * info.sms as usize;
+        let ms = time(&f, blocks, 256);
+        let macs = (blocks * 8 * iters * 8 * 16 * 8 * 32) as f64;
+        eprintln!(
+            "mma_peak: {:.1} TMAC/s int8 (m16n8k32, {ms:.2} ms)",
+            macs / (ms * 1e-3) / 1e12
+        );
+    }
+    if !km.hopper() {
+        eprintln!("skipping wg_peak: needs an sm_90a module (compute capability 9.0)");
+        return;
+    }
+    for (name, n) in [
+        ("wg_peak_n64", 64usize),
+        ("wg_peak_n128", 128),
+        ("wg_peak_n256", 256),
+        ("wg_peak_n256u", 256),
+        ("wg_peak_rs_n64", 64),
+        ("wg_peak_rs_n128", 128),
+        ("wg_peak_rs_n256", 256),
+    ] {
+        let f = km.function(name).unwrap();
+        eprintln!("{name}: regs, local bytes {:?}", f.regs_local().unwrap());
+        // (blocks per SM, warpgroups per block)
+        for (bps, wgs) in [(1usize, 1usize), (1, 2), (1, 3), (2, 1), (2, 2)] {
+            if n == 256 && bps * wgs > 3 {
+                continue; // 128 accumulators per thread: 3 warpgroups per SM at most
+            }
+            let blocks = bps * info.sms as usize;
+            let ms = time(&f, blocks, 128 * wgs);
+            let macs = (blocks * wgs * iters * 4 * 64 * n * 32) as f64;
+            eprintln!(
+                "{name}: {bps} block(s)/SM x {wgs} WG: {:.1} TMAC/s ({ms:.2} ms)",
+                macs / (ms * 1e-3) / 1e12
+            );
+        }
+    }
 }

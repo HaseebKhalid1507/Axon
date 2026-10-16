@@ -294,6 +294,43 @@ pub fn driver_version(d: &Driver) -> Result<(i32, i32), String> {
     Ok((v / 1000, v % 1000 / 10))
 }
 
+/// cuTensorMapEncodeTiled (CUDA 12.0+): fills a 128-byte CUtensorMap.
+pub type TensorMapEncodeTiled = unsafe extern "C" fn(
+    *mut [u64; 16], // tensorMap (64-byte aligned)
+    c_uint,         // CUtensorMapDataType
+    c_uint,         // tensorRank
+    *mut c_void,    // globalAddress
+    *const u64,     // globalDim[rank]
+    *const u64,     // globalStrides[rank - 1] (bytes)
+    *const c_uint,  // boxDim[rank]
+    *const c_uint,  // elementStrides[rank]
+    c_uint,         // CUtensorMapInterleave
+    c_uint,         // CUtensorMapSwizzle
+    c_uint,         // CUtensorMapL2promotion
+    c_uint,         // CUtensorMapFloatOOBfill
+) -> CUresult;
+
+pub const TENSOR_MAP_DATA_TYPE_UINT8: c_uint = 0;
+pub const TENSOR_MAP_SWIZZLE_NONE: c_uint = 0;
+pub const TENSOR_MAP_SWIZZLE_128B: c_uint = 3;
+pub const TENSOR_MAP_L2_PROMOTION_256B: c_uint = 3;
+
+/// The driver's cuTensorMapEncodeTiled (TMA descriptors for the Hopper
+/// kernels), None if the driver doesn't export it (older than CUDA 12.0):
+/// optional, unlike `Driver`'s entry points, whose absence is an error.
+pub fn tensor_map_encoder() -> Option<TensorMapEncodeTiled> {
+    static F: OnceLock<Option<TensorMapEncodeTiled>> = OnceLock::new();
+    *F.get_or_init(|| {
+        driver().ok()?;
+        // The loaded driver's handle again (dlopen refcounts; never closed).
+        let lib = open_lib(&["libcuda.so.1".into()]).ok()?;
+        let p = sym(lib, "cuTensorMapEncodeTiled\0").ok()?;
+        // SAFETY: p is the driver's cuTensorMapEncodeTiled, whose C
+        // signature (cuda.h) TensorMapEncodeTiled declares.
+        Some(unsafe { std::mem::transmute::<*mut c_void, TensorMapEncodeTiled>(p) })
+    })
+}
+
 /// Where libnvrtc may be: the soname matching the driver's CUDA major
 /// first (a newer NVRTC's output may not load on an older driver), then the
 /// dev symlink and the other sonames (CUDA 13, 12); each on the library
