@@ -17,6 +17,12 @@
 //!   preempted holding a chunk, i.e. the machine is busy), `active` steps down;
 //!   after a long quiet streak it probes back up. Workers left out park.
 //!   AXON_POOL_ADAPT=0 turns this off.
+//! - Two kinds of job, each with its own participation level (`Kind`):
+//!   prefill's compute-bound matmuls, and one token's memory-bound decode
+//!   matvecs, which stop gaining from threads long before they run out of
+//!   cores and lose to the slowest core's tail. Decode uses at most
+//!   `decode_start` threads (stepping down from there on stalls, probing back
+//!   up to it), and a step down in one kind never throttles the other.
 //! - Fewer threads than cores by default. AXON_THREADS sets the spawned count,
 //!   an upper bound on `active`.
 
@@ -82,19 +88,28 @@ fn participants(word: u64) -> usize {
     (word & ACTIVE_MASK) as usize
 }
 
+/// What a job is, for the participation policy (each kind has its own).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Kind {
+    /// Prefill and everything else: compute-bound, wants every thread.
+    Wide = 0,
+    /// One token's matvecs and attention: memory-bound, settles lower.
+    Decode = 1,
+}
+
 pub struct Pool {
     shared: &'static Shared,
     workers: Vec<Thread>,
     /// One job at a time (also makes `run` safe to call from several threads,
-    /// e.g. the test harness), and the participation policy state.
-    lock: Mutex<Adapt>,
+    /// e.g. the test harness), and the participation policy state per `Kind`.
+    lock: Mutex<[Adapt; 2]>,
     adapt: bool,
-    /// Mirror of the policy's active count (caller included), for `active()`.
+    /// Mirror of each kind's active count (caller included), for `active()`.
     /// Single writer (the caller, under `lock`), read rarely: deliberately not
     /// padded onto its own cache line.
-    active: AtomicUsize,
+    active: [AtomicUsize; 2],
     /// Lowest `active` seen since start, for `min_active()`. Same single writer.
-    min_active: AtomicUsize,
+    min_active: [AtomicUsize; 2],
 }
 
 impl Pool {
@@ -109,21 +124,43 @@ impl Pool {
         self.workers.len() + 1
     }
 
-    /// Threads currently taking part in jobs, including the caller.
+    /// Threads currently taking part in wide jobs, including the caller.
     pub fn active(&self) -> usize {
-        self.active.load(Relaxed)
+        self.active_in(Kind::Wide)
+    }
+
+    /// Threads currently taking part in `kind` jobs, including the caller.
+    pub fn active_in(&self, kind: Kind) -> usize {
+        self.active[kind as usize].load(Relaxed)
     }
 
     /// Lowest `active()` since the pool started (how far adaptation backed off).
     pub fn min_active(&self) -> usize {
-        self.min_active.load(Relaxed)
+        self.min_active_in(Kind::Wide)
     }
 
-    /// Adaptation counters since start, for AXON_POOL_DEBUG. They live in the
-    /// policy state `run` already holds the lock for: no extra hot-path atomics.
-    /// Takes that lock, so don't call it from inside a chunk of `run`.
+    /// Lowest `active_in(kind)` since the pool started.
+    pub fn min_active_in(&self, kind: Kind) -> usize {
+        self.min_active[kind as usize].load(Relaxed)
+    }
+
+    /// Adaptation counters since start (both kinds), for AXON_POOL_DEBUG.
+    /// They live in the policy state `run` already holds the lock for: no
+    /// extra hot-path atomics. Takes that lock, so don't call it from inside
+    /// a chunk of `run`.
     pub fn stats(&self) -> PoolStats {
-        self.lock.lock().unwrap_or_else(|p| p.into_inner()).stats
+        let a = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        let (w, d) = (a[0].stats, a[1].stats);
+        PoolStats {
+            judged: w.judged + d.judged,
+            stalls: w.stalls + d.stalls,
+            stall_us: w.stall_us + d.stall_us,
+            step_downs: w.step_downs + d.step_downs,
+            probes: w.probes + d.probes,
+            failed_probes: w.failed_probes + d.failed_probes,
+            decode_active: a[1].active + 1,
+            decode_min: self.min_active[1].load(Relaxed),
+        }
     }
 
     fn new(threads: usize) -> Pool {
@@ -154,19 +191,33 @@ impl Pool {
                     .clone()
             })
             .collect();
+        // Decode is capped at its own level (a probe up never passes it:
+        // over a long generation probing back to every thread lost the
+        // gain). With adaptation off every kind uses every thread, except
+        // that an explicit AXON_DECODE_THREADS still caps decode.
+        let d = if adapt {
+            decode_start(n + 1) - 1
+        } else {
+            decode_threads_env().map_or(n, |t| t.clamp(1, n + 1) - 1)
+        };
         Pool {
             shared,
             workers,
-            lock: Mutex::new(Adapt::new(n)),
+            lock: Mutex::new([Adapt::new(n), Adapt::new(d)]),
             adapt,
-            active: AtomicUsize::new(n + 1),
-            min_active: AtomicUsize::new(n + 1),
+            active: [AtomicUsize::new(n + 1), AtomicUsize::new(d + 1)],
+            min_active: [AtomicUsize::new(n + 1), AtomicUsize::new(d + 1)],
         }
     }
 
     /// Call `f(c)` for every c in 0..n_chunks, spread over the pool, and return
     /// when all calls are done. A `run` from inside a chunk runs serially.
     pub fn run(&self, n_chunks: usize, f: &(dyn Fn(usize) + Sync)) {
+        self.run_in(Kind::Wide, n_chunks, f)
+    }
+
+    /// `run` as a `kind` job: with that kind's participation.
+    pub fn run_in(&self, kind: Kind, n_chunks: usize, f: &(dyn Fn(usize) + Sync)) {
         if n_chunks == 0 {
             return;
         }
@@ -174,13 +225,14 @@ impl Pool {
             (0..n_chunks).for_each(f);
             return;
         }
-        let mut adapt = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        let mut policy = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        let adapt = &mut policy[kind as usize];
         let s = self.shared;
         let active = adapt.active;
         if active == 0 {
             // No workers (AXON_THREADS=1). Release the lock first: a nested
             // `run` from `f` would otherwise deadlock on it.
-            drop(adapt);
+            drop(policy);
             (0..n_chunks).for_each(f);
             return;
         }
@@ -250,10 +302,10 @@ impl Pool {
                 adapt.stats.stall_us += (tail - own).as_micros() as u64;
             }
             let a = adapt.record(stall) + 1;
-            self.active.store(a, Relaxed);
-            self.min_active.fetch_min(a, Relaxed);
+            self.active[kind as usize].store(a, Relaxed);
+            self.min_active[kind as usize].fetch_min(a, Relaxed);
         }
-        drop(adapt);
+        drop(policy);
         if let Err(p) = mine {
             std::panic::resume_unwind(p);
         }
@@ -265,10 +317,19 @@ impl Pool {
     /// Pin participation to `workers` (test use; pair with adaptation off).
     #[cfg(test)]
     fn force_active(&self, workers: usize) {
-        let mut a = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        for kind in [Kind::Wide, Kind::Decode] {
+            self.force_active_in(kind, workers);
+        }
+    }
+
+    /// `force_active` for one kind of job.
+    #[cfg(test)]
+    fn force_active_in(&self, kind: Kind, workers: usize) {
+        let mut p = self.lock.lock().unwrap_or_else(|p| p.into_inner());
+        let (k, a) = (kind as usize, &mut p[kind as usize]);
         a.active = workers.min(a.max);
-        self.active.store(a.active + 1, Relaxed);
-        self.min_active.fetch_min(a.active + 1, Relaxed);
+        self.active[k].store(a.active + 1, Relaxed);
+        self.min_active[k].fetch_min(a.active + 1, Relaxed);
     }
 }
 
@@ -388,19 +449,25 @@ pub struct PoolStats {
     pub step_downs: u64,
     pub probes: u64,
     pub failed_probes: u64,
+    /// Threads in decode jobs now and at least (caller included).
+    pub decode_active: usize,
+    pub decode_min: usize,
 }
 
 impl std::fmt::Display for PoolStats {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} judged, {} stalls ({:.1} ms lost), {} down, {} probes ({} failed)",
+            "{} judged, {} stalls ({:.1} ms lost), {} down, {} probes ({} failed); \
+             decode {} active now, {} at least",
             self.judged,
             self.stalls,
             self.stall_us as f64 / 1e3,
             self.step_downs,
             self.probes,
-            self.failed_probes
+            self.failed_probes,
+            self.decode_active,
+            self.decode_min
         )
     }
 }
@@ -423,6 +490,7 @@ struct Adapt {
 }
 
 impl Adapt {
+    /// Up to `max` workers, starting at all of them.
     fn new(max: usize) -> Adapt {
         Adapt {
             max,
@@ -501,6 +569,96 @@ fn default_threads() -> usize {
     (cores - cores / 4).max(1)
 }
 
+/// Most threads (caller included) decode jobs use, of `threads`:
+/// AXON_DECODE_THREADS if set; on a hybrid CPU with both kinds of core
+/// allowed, as many as there are physical fast cores (`hybrid_fast_cores`;
+/// SMT siblings count once); else all. With AXON_POOL_ADAPT=0 only an explicit
+/// AXON_DECODE_THREADS applies. One token's matvecs are memory-bound: past the cores that saturate
+/// DRAM, a slow core only adds a tail every fork/join waits for.
+fn decode_start(threads: usize) -> usize {
+    let threads = threads.max(1);
+    if let Some(n) = decode_threads_env() {
+        return n.clamp(1, threads);
+    }
+    match hybrid_fast_cores() {
+        Some(p) => p.clamp(1, threads),
+        None => threads,
+    }
+}
+
+/// AXON_DECODE_THREADS, if set to a number.
+fn decode_threads_env() -> Option<usize> {
+    std::env::var("AXON_DECODE_THREADS")
+        .ok()
+        .and_then(|v| v.trim().parse::<usize>().ok())
+}
+
+/// The performance cores this process may run on, if it may also run on
+/// efficiency cores (Linux: /sys/devices/cpu_core and cpu_atom, and
+/// Cpus_allowed_list); None on a homogeneous CPU or elsewhere. Also None
+/// when SMT is on for those P-cores (cpu_core lists both hyperthreads of a
+/// core; `physical_cores` counts them once): on an i5-13420H (4 P-cores x 2
+/// SMT + 4 E-cores) a cap at the 4 physical or the 8 logical P CPUs both
+/// measured 7-10% below no cap (tg128, 1.5B and 3B), so SMT-on hybrids keep
+/// every thread.
+fn hybrid_fast_cores() -> Option<usize> {
+    let read = |p: &str| std::fs::read_to_string(p).ok();
+    let status = read("/proc/self/status")?;
+    let allowed = cpu_list(
+        status
+            .lines()
+            .find_map(|l| l.strip_prefix("Cpus_allowed_list:"))?,
+    );
+    let mine = |path: &str| -> Option<Vec<usize>> {
+        let cpus = cpu_list(&read(path)?);
+        Some(cpus.into_iter().filter(|c| allowed.contains(c)).collect())
+    };
+    let (p, e) = (
+        mine("/sys/devices/cpu_core/cpus")?,
+        mine("/sys/devices/cpu_atom/cpus")?,
+    );
+    let siblings = |cpu: usize| {
+        let t = format!("/sys/devices/system/cpu/cpu{cpu}/topology");
+        read(&format!("{t}/core_cpus_list")).or_else(|| read(&format!("{t}/thread_siblings_list")))
+    };
+    let cores = physical_cores(&p, siblings);
+    (!p.is_empty() && !e.is_empty() && cores == p.len()).then_some(cores)
+}
+
+/// How many physical cores the logical `cpus` are on: cpus whose sibling
+/// list (`siblings(cpu)`, a Linux cpu list; None if unknown) has the same
+/// lowest cpu share a core; a cpu with no list is a core of its own.
+fn physical_cores(cpus: &[usize], siblings: impl Fn(usize) -> Option<String>) -> usize {
+    let mut cores: Vec<usize> = cpus
+        .iter()
+        .map(|&c| {
+            siblings(c)
+                .and_then(|s| cpu_list(&s).into_iter().min())
+                .unwrap_or(c)
+        })
+        .collect();
+    cores.sort_unstable();
+    cores.dedup();
+    cores.len()
+}
+
+/// A Linux cpu list ("0-7,9,12-15"); malformed parts are skipped.
+fn cpu_list(s: &str) -> Vec<usize> {
+    let mut v = Vec::new();
+    for part in s.trim().split(',') {
+        let mut ends = part
+            .trim()
+            .splitn(2, '-')
+            .map(|x| x.trim().parse::<usize>());
+        match (ends.next(), ends.next()) {
+            (Some(Ok(a)), None) => v.push(a),
+            (Some(Ok(a)), Some(Ok(b))) if a <= b && b - a < 1 << 16 => v.extend(a..=b),
+            _ => {}
+        }
+    }
+    v
+}
+
 /// Split `data` into chunks of `chunk` items and call `f(chunk_index, chunk)`
 /// for each, in parallel on the global pool.
 pub fn for_each_chunk_mut<T: Send>(
@@ -508,10 +666,20 @@ pub fn for_each_chunk_mut<T: Send>(
     chunk: usize,
     f: impl Fn(usize, &mut [T]) + Sync,
 ) {
+    for_each_chunk_mut_in(Kind::Wide, data, chunk, f)
+}
+
+/// `for_each_chunk_mut` as a `kind` job.
+pub fn for_each_chunk_mut_in<T: Send>(
+    kind: Kind,
+    data: &mut [T],
+    chunk: usize,
+    f: impl Fn(usize, &mut [T]) + Sync,
+) {
     assert!(chunk > 0);
     let len = data.len();
     let base = SendPtr(data.as_mut_ptr());
-    Pool::global().run(len.div_ceil(chunk), &|c| {
+    Pool::global().run_in(kind, len.div_ceil(chunk), &|c| {
         let start = c * chunk;
         let n = chunk.min(len - start);
         // SAFETY: chunk c covers [start, start + n), disjoint from every other
@@ -728,6 +896,65 @@ mod tests {
         }
         let word = s.epoch.0.load(Acquire);
         assert!(s.done.iter().all(|d| d.0.load(Acquire) == word));
+    }
+
+    /// Each kind of job has its own participation: decode jobs use only
+    /// their workers, wide jobs keep theirs, and a decode step down leaves
+    /// wide jobs alone.
+    #[test]
+    fn kinds_participate_apart() {
+        let pool = Pool::with(6, false);
+        pool.force_active_in(Kind::Decode, 2);
+        assert_eq!(pool.active_in(Kind::Decode), 3);
+        assert_eq!(pool.active_in(Kind::Wide), 6);
+        for n in [1, 7, 100, 1000] {
+            let hits: Vec<AtomicUsize> = (0..n).map(|_| AtomicUsize::new(0)).collect();
+            let outsider = AtomicBool::new(false);
+            pool.run_in(Kind::Decode, n, &|c| {
+                if worker_index().is_some_and(|w| w >= 2) {
+                    outsider.store(true, Relaxed);
+                }
+                hits[c].fetch_add(1, Relaxed);
+            });
+            assert!(hits.iter().all(|h| h.load(Relaxed) == 1), "n={n}");
+            assert!(
+                !outsider.load(Relaxed),
+                "a left-out worker ran a decode chunk"
+            );
+            // Wide jobs in between wake everyone and still add up.
+            let sum = AtomicUsize::new(0);
+            pool.run(n, &|c| {
+                sum.fetch_add(c, Relaxed);
+            });
+            assert_eq!(sum.load(Relaxed), (0..n).sum::<usize>());
+        }
+        assert_eq!(pool.active_in(Kind::Wide), 6);
+        let word = pool.shared.epoch.0.load(Acquire);
+        assert!(pool.shared.done.iter().all(|d| d.0.load(Acquire) == word));
+
+        // The policy: a decode level with its own ceiling steps down on its
+        // own and never probes past that ceiling.
+        let mut p = [Adapt::new(7), Adapt::new(4)];
+        assert_eq!(p[1].active, 4);
+        for _ in 0..10 {
+            p[1].record(true);
+        }
+        assert_eq!((p[0].active, p[1].active), (7, 1));
+        for _ in 0..PROBE_MAX * 8 {
+            p[1].record(false);
+        }
+        assert_eq!(p[1].active, 4);
+        // SMT: hyperthread siblings count as one core.
+        let smt = |c: usize| Some(format!("{}-{}", c & !1, c | 1));
+        assert_eq!(physical_cores(&[0, 1, 2, 3, 4, 5, 6, 7], smt), 4);
+        assert_eq!(physical_cores(&[0, 2, 3], smt), 2);
+        assert_eq!(physical_cores(&[0, 1, 2, 3], |_| None), 4);
+        let list = |c: usize| Some(if c < 2 { "0,1".into() } else { format!("{c}") });
+        assert_eq!(physical_cores(&[0, 1, 2, 3], list), 3);
+        assert!((1..=64).all(|t| (1..=t).contains(&decode_start(t))));
+        assert_eq!(cpu_list("0-3,8, 10-11\n"), [0, 1, 2, 3, 8, 10, 11]);
+        assert_eq!(cpu_list(""), [] as [usize; 0]);
+        assert_eq!(cpu_list("x,5-2,7"), [7]);
     }
 
     #[test]

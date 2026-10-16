@@ -148,7 +148,7 @@ impl Template {
             _ => (self.default_system, msgs),
         };
         let mut t = self.fr.system(tok, system);
-        for m in rest {
+        for (i, m) in rest.iter().enumerate() {
             let text = match (m.role, &self.think) {
                 (Role::Assistant, Some(_)) => match m.content.rsplit_once("</think>") {
                     Some((_, c)) => c.trim_start_matches('\n'),
@@ -156,7 +156,14 @@ impl Template {
                 },
                 _ => &m.content,
             };
-            t.extend(self.fr.frame(tok, m.role.name(), text, None));
+            // Mistral's first user message carries the system message
+            // (llama.cpp's mistral-v3 placement; mistral_common V2/V3 and HF's
+            // v0.3 template use the last user message: chat.rs module doc).
+            let text = match (i, m.role) {
+                (0, Role::User) => self.fr.first_user(system, text),
+                _ => text.into(),
+            };
+            t.extend(self.fr.frame(tok, m.role.name(), &text, None));
         }
         t.extend(self.fr.opening(tok, "assistant"));
         if no_think && let Some((_, _, empty)) = &self.think {

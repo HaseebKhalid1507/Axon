@@ -9,6 +9,8 @@ pub const QWEN3_MODEL: &str = "models/Qwen3-0.6B-Q8_0.gguf";
 /// The llama test model (`AXON_TEST_LLAMA` overrides it): head_dim 64,
 /// 4 query heads per kv head, tied output, Llama 3 RoPE factors.
 pub const LLAMA_MODEL: &str = "models/Llama-3.2-1B-Instruct-Q4_K_M.gguf";
+/// The optional SentencePiece test model (`AXON_TEST_MISTRAL` overrides it).
+pub const MISTRAL_MODEL: &str = "models/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf";
 
 /// Reference data made by `scripts/oracle/make_fixtures.py`, committed to the repo.
 pub fn fixtures() -> PathBuf {
@@ -98,6 +100,25 @@ pub fn llama_model_path() -> Option<PathBuf> {
         );
     }
     Some(path)
+}
+
+/// The Mistral test model (`AXON_TEST_MISTRAL` overrides the path):
+/// Mistral-7B-Instruct-v0.3 Q4_K_M, a SentencePiece vocabulary with
+/// `[INST]` control tokens. Optional (4.4 GB): None, with a note, when it's
+/// missing.
+pub fn mistral_model() -> Option<Model> {
+    let path = match std::env::var_os("AXON_TEST_MISTRAL") {
+        Some(p) => PathBuf::from(p),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).join(MISTRAL_MODEL),
+    };
+    if !path.exists() {
+        eprintln!(
+            "skipping: {} not present (bartowski/Mistral-7B-Instruct-v0.3-GGUF, optional)",
+            path.display()
+        );
+        return None;
+    }
+    Some(gguf::load(path.to_str().expect("utf-8 path")).expect("load mistral model"))
 }
 
 pub fn read_json(rel: &str) -> serde_json::Value {
