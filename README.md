@@ -70,6 +70,10 @@ Works today, honestly scoped:
   instead of running those layers on the CPU (`AXON_STREAM=0`: off).
 - KV cache: f16 by default; `--kv q8` (GPU only) stores int8 with a scale per position and
   head, half the memory, with slightly different results.
+- Long context (opt-in): `--rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 32768` (llama.cpp's
+  flags) takes Qwen2.5 / Qwen3 from 32k to 128k by YaRN RoPE scaling. It changes the output at
+  every length (measured +8 % perplexity at 2k-8k on Qwen2.5-7B), so only for prompts past the
+  trained context: [docs/long-context.md](docs/long-context.md).
 - Prompt-lookup drafting (`--draft K`, off by default): speculative decoding that guesses
   the next tokens from earlier text (prompt and output) and verifies them in one batched
   pass. Lossless: the same output as without it (greedy, or sampled with the same seed).
@@ -158,6 +162,10 @@ Defaults, as `axon --help` gives them:
 - `--ctx N` (chat): the model's trained context, at most 8192. On cuda, if the
   whole model doesn't fit with it, a shorter context if at least half of it (or 4096)
   fits, else a split. For `serve`, see below: its default is the whole trained context.
+- `--rope-scaling yarn --rope-scale F [--yarn-orig-ctx N]` (gen, logits, chat, serve): off.
+  With it the context is N x F (`--ctx` up to that); also `--yarn-beta-fast` (32),
+  `--yarn-beta-slow` (1), `--yarn-attn-factor` (0.1 ln F + 1). See
+  [docs/long-context.md](docs/long-context.md) for when to use it and what it costs.
 - `-n N`: gen 32 tokens; chat no limit per reply.
 - Sampling: `--temp` 0 for gen, 0.8 for chat; `--top-k` 40 (0 = off, all tokens),
   `--top-p` 0.9, `--min-p` 0 (off), `--repeat-penalty` 1.1 (serve: 1, off),
@@ -497,6 +505,8 @@ The GPU, after that:
 - [docs/results.md](docs/results.md): current standing vs ollama and llama.cpp, with dates and commits
 - [docs/research/](docs/research/README.md): research reports behind the roadmap
 - [docs/log/](docs/log/README.md): one entry per PR (the convention for new work)
+- [docs/long-context.md](docs/long-context.md): YaRN (`--rope-scaling yarn`) past the trained
+  context: when to use it, llama.cpp agreement, retrieval and short-context cost
 - [docs/design/](docs/design/): [multi-GPU](docs/design/multi-gpu.md) and
   [Hopper](docs/design/hopper.md) designs
 
