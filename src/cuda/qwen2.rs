@@ -231,6 +231,9 @@ impl<'m> Q8Fns<'m> {
 /// The decode kernels of a module.
 struct Fns<'m> {
     rmsnorm_quant: Func<'m>,
+    /// rmsnorm_quant with the gain loaded before the PDL wait and x staged
+    /// in shared memory (dim <= NORM2_MAX): the same bits.
+    rmsnorm_quant_v2: Func<'m>,
     quantize: Func<'m>,
     embed: Func<'m>,
     rope_table: Func<'m>,
@@ -238,6 +241,9 @@ struct Fns<'m> {
     gemv1: Func<'m>,
     qkv_rope: Func<'m>,
     gate_up: Func<'m>,
+    /// gate_up with two rows of each matrix per block, for narrow rows
+    /// (`GATE_UP4_ROW`): the same bits.
+    gate_up4: Func<'m>,
     attn_split: Func<'m>,
     attn_combine: Func<'m>,
     /// The tensor-core attention (f16 cache, sm_80+; `tc_attn`): a warp
@@ -252,6 +258,16 @@ struct Fns<'m> {
     /// sample.cu.
     samp_topk: Func<'m>,
 }
+
+/// Largest dim rmsnorm_quant_v2 takes (decode.cu NORM2_MAX: dim floats of
+/// dynamic shared memory, at most 48 KiB without opting in).
+const NORM2_MAX: usize = 12256;
+/// gate_up4 (two rows of each matrix per block) for gate rows narrower
+/// than this many bytes: the 0.5B's and 1.5B's (616-864 B), where it
+/// measured +3-4% tg128 (+8% with rmsnorm_quant_v2). Not wider: qwen3
+/// 0.6B's 1088 B rows were no faster, the 3B's 1152 B ones not reliably
+/// (r5 decode notes), the 7B's 2 KiB rows 0 to -5% in isolation.
+const GATE_UP4_ROW: usize = 1024;
 
 /// Logits per samp_topk block, and its threads (sample.cu).
 const TK_SLICE: usize = 4096;
@@ -359,6 +375,12 @@ pub struct CudaQwen2<'g> {
     /// swiglu in its epilogue (prefill.cu gemm2s_q4_k_gu; AXON_GATE_UP=0
     /// turns it off): the same bits as separate products.
     pub(super) gate_up_fused: bool,
+    /// Decode steps normalize with rmsnorm_quant_v2 (dim <= NORM2_MAX) and
+    /// run gate/up rows under gate_up4_row bytes through gate_up4
+    /// (GATE_UP4_ROW); AXON_DEC_NORM2=0 / AXON_DEC_GU4=0 turn them off
+    /// (tests compare, and force gate_up4 on wider rows: the same bits).
+    pub(super) norm2: bool,
+    pub(super) gate_up4_row: usize,
 }
 
 /// What `CudaQwen2` keeps per sequence: the KV cache, activations, logits,
@@ -960,6 +982,7 @@ impl<'g> CudaQwen2<'g> {
             id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             f: Fns {
                 rmsnorm_quant: module.function("rmsnorm_quant")?,
+                rmsnorm_quant_v2: module.function("rmsnorm_quant_v2")?,
                 quantize: module.function("quantize")?,
                 embed: module.function("embed")?,
                 rope_table: module.function("rope_table")?,
@@ -967,6 +990,7 @@ impl<'g> CudaQwen2<'g> {
                 gemv1: module.function("gemv1")?,
                 qkv_rope: module.function("qkv_rope")?,
                 gate_up: module.function("gate_up")?,
+                gate_up4: module.function("gate_up4")?,
                 attn_split: module.function(if head_dim == 64 {
                     "attn_split_64"
                 } else {
@@ -1014,6 +1038,11 @@ impl<'g> CudaQwen2<'g> {
             ctx: 0,
             swiglu_epi: false,
             gate_up_fused: std::env::var("AXON_GATE_UP").map_or(true, |v| v != "0"),
+            norm2: std::env::var("AXON_DEC_NORM2").map_or(true, |v| v != "0"),
+            gate_up4_row: match std::env::var("AXON_DEC_GU4") {
+                Ok(v) if v == "0" => 0,
+                _ => GATE_UP4_ROW,
+            },
         };
         if let CacheKv::Q8 { group } = kv {
             if group == 0 {
@@ -1285,6 +1314,11 @@ impl<'g> CudaQwen2<'g> {
         let want_k = |n: usize| Arg::I32(n.is_multiple_of(256) as i32);
         let blocks = |n: usize, per: usize| (n.div_ceil(per) as u32, 1, 1);
         let gemv_block = (GEMV_THREADS, 1, 1);
+        let (norm_f, norm_smem) = if self.norm2 && dim <= NORM2_MAX {
+            (&f.rmsnorm_quant_v2, (dim * 4) as u32)
+        } else {
+            (&f.rmsnorm_quant, 0)
+        };
         // SAFETY (every launch below): arguments match decode.cu's kernel
         // signatures, and every buffer is sized for what the kernel reads
         // and writes with them: x holds dim floats, q/att q_dim, hid ffn,
@@ -1329,10 +1363,10 @@ impl<'g> CudaQwen2<'g> {
             for (li, l) in self.layers.iter().enumerate() {
                 let norm = |off: usize| {
                     self.run(
-                        &f.rmsnorm_quant,
+                        norm_f,
                         (1, 1, 1),
                         (1024, 1, 1),
-                        0,
+                        norm_smem,
                         &[
                             c.x.arg(),
                             vec(off),
@@ -1466,24 +1500,46 @@ impl<'g> CudaQwen2<'g> {
                 on_launch("wo", l.o.bytes())?;
                 norm(l.ffn_norm)?;
                 on_launch("rmsnorm", 0)?;
-                self.run(
-                    &f.gate_up,
-                    (self.ffn as u32, 1, 1),
-                    gemv_block,
-                    0,
-                    &[
-                        Arg::I32(l.gate.qt as i32),
-                        w(&l.gate),
-                        Arg::U64(l.gate.rb as u64),
-                        Arg::I32(l.up.qt as i32),
-                        w(&l.up),
-                        Arg::U64(l.up.rb as u64),
-                        Arg::I32(self.ffn as i32),
-                        Arg::I32(dim as i32),
-                        c.act.arg(),
-                        c.hid.arg(),
-                    ],
-                )?;
+                if l.gate.qt == l.up.qt
+                    && l.gate.rb < self.gate_up4_row
+                    && self.ffn.is_multiple_of(2)
+                {
+                    self.run(
+                        &f.gate_up4,
+                        ((self.ffn / 2) as u32, 1, 1),
+                        gemv_block,
+                        0,
+                        &[
+                            Arg::I32(l.gate.qt as i32),
+                            w(&l.gate),
+                            Arg::U64(l.gate.rb as u64),
+                            w(&l.up),
+                            Arg::U64(l.up.rb as u64),
+                            Arg::I32(dim as i32),
+                            c.act.arg(),
+                            c.hid.arg(),
+                        ],
+                    )?;
+                } else {
+                    self.run(
+                        &f.gate_up,
+                        (self.ffn as u32, 1, 1),
+                        gemv_block,
+                        0,
+                        &[
+                            Arg::I32(l.gate.qt as i32),
+                            w(&l.gate),
+                            Arg::U64(l.gate.rb as u64),
+                            Arg::I32(l.up.qt as i32),
+                            w(&l.up),
+                            Arg::U64(l.up.rb as u64),
+                            Arg::I32(self.ffn as i32),
+                            Arg::I32(dim as i32),
+                            c.act.arg(),
+                            c.hid.arg(),
+                        ],
+                    )?;
+                }
                 on_launch("gate_up", l.gate.bytes() + l.up.bytes())?;
                 self.run(
                     &f.quantize,
@@ -1503,10 +1559,10 @@ impl<'g> CudaQwen2<'g> {
             }
             if head != Head::No {
                 self.run(
-                    &f.rmsnorm_quant,
+                    norm_f,
                     (1, 1, 1),
                     (1024, 1, 1),
-                    0,
+                    norm_smem,
                     &[
                         c.x.arg(),
                         vec(self.output_norm),
