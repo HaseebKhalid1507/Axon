@@ -1,7 +1,7 @@
 use super::{
     Arg, CacheStatus, DevBuf, Gpu, KERNEL_OPTS, KERNELS, Kernels, Module, Target, cache_dir,
-    cache_dir_from, check_versions, compile, compile_logged, encode_entry, ffi, pdl_ok,
-    pick_target,
+    cache_dir_from, check_versions, compile, compile_logged, encode_entry, ffi, hopper_env,
+    nvrtc_for, pdl_ok, pick_target,
 };
 use crate::gguf::Model;
 use crate::quant::{self, F16, F32, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0};
@@ -396,13 +396,24 @@ fn run_iota(g: &Gpu, m: &Module) {
     );
 }
 
+/// The NVRTC the engine builds `g`'s kernels with (`nvrtc_for`). Tests that
+/// compile or load by hand use it too: on a machine with several (a Pascal
+/// GPU with CUDA 13 and 12 installed) the first that loads may not even
+/// target the GPU.
+fn engine_nvrtc(g: &Gpu) -> Result<&'static ffi::Nvrtc, String> {
+    let cc = g.info()?.cc;
+    let d = ffi::driver_version(g.d)?;
+    Ok(nvrtc_for((cc.0 * 10 + cc.1) as i32, d, hopper_env())?.0)
+}
+
 /// The whole kernel module compiles (NVRTC, no GPU needed) for the oldest
 /// architectures NVRTC still supports - sm_70 and sm_75, where it has them -
 /// which take the paths without tensor cores (the split attention, gemvn),
-/// and for sm_80 (the oldest with them). Skipped without NVRTC.
+/// and for sm_80 (the oldest with them). With a GPU, by the NVRTC the engine
+/// picks for it. Skipped without NVRTC.
 #[test]
 fn nvrtc_kernels_compile_for_old_archs() {
-    let n = match ffi::nvrtc() {
+    let n = match Gpu::open().map_or_else(|_| ffi::nvrtc(), |g| engine_nvrtc(&g)) {
         Ok(n) => n,
         Err(e) => {
             eprintln!("skipping: {e}");
@@ -419,7 +430,7 @@ fn nvrtc_kernels_compile_for_old_archs() {
         let t = Target::Cubin(a);
         let mut opts = vec![format!("--gpu-architecture={t}")];
         opts.extend(KERNEL_OPTS.iter().map(|s| s.to_string()));
-        let image = compile(KERNELS, &opts, t).unwrap_or_else(|e| panic!("sm_{a}: {e}"));
+        let image = compile(n, KERNELS, &opts, t).unwrap_or_else(|e| panic!("sm_{a}: {e}"));
         eprintln!("sm_{a}: {} bytes of cubin", image.len());
     }
 }
@@ -464,7 +475,8 @@ fn nvrtc_kernels_compile_for_sm90a() {
     for t in [Target::Cubin90a, Target::Cubin(90)] {
         let mut opts = vec![format!("--gpu-architecture={t}")];
         opts.extend(KERNEL_OPTS.iter().map(|s| s.to_string()));
-        let (image, log) = compile_logged(KERNELS, &opts, t).unwrap_or_else(|e| panic!("{t}: {e}"));
+        let (image, log) =
+            compile_logged(n, KERNELS, &opts, t).unwrap_or_else(|e| panic!("{t}: {e}"));
         eprintln!("{t}: {} bytes of cubin", image.len());
         assert!(
             !log.contains("wgmma") && !log.contains("serialized") && !log.contains("C751"),
@@ -586,12 +598,13 @@ fn gpu_only_loadable_code_is_cached() {
     let dir = TempCache::new("loadable");
     let cc = g.info().unwrap().cc;
     let cc = (cc.0 * 10 + cc.1) as i32;
-    let archs = ffi::nvrtc_archs(ffi::nvrtc().unwrap()).unwrap();
+    let n = engine_nvrtc(&g).unwrap();
+    let archs = ffi::nvrtc_archs(n).unwrap();
     let files = || std::fs::read_dir(&dir.0).map_or(0, |r| r.count());
 
     // A cubin of another major can't run here.
     let other = *archs.iter().find(|&&a| a / 10 != cc / 10).unwrap();
-    let e = Module::load_for(&g, IOTA, &[], Some(&dir.0), Target::Cubin(other))
+    let e = Module::load_for(&g, n, IOTA, &[], Some(&dir.0), Target::Cubin(other))
         .err()
         .expect("foreign cubin loads");
     assert!(
@@ -602,7 +615,7 @@ fn gpu_only_loadable_code_is_cached() {
 
     let ptx = *archs.iter().filter(|&&a| a < cc).max().unwrap();
     for want in [CacheStatus::Miss, CacheStatus::Hit] {
-        let (m, st) = Module::load_for(&g, IOTA, &[], Some(&dir.0), Target::Ptx(ptx)).unwrap();
+        let (m, st) = Module::load_for(&g, n, IOTA, &[], Some(&dir.0), Target::Ptx(ptx)).unwrap();
         assert_eq!(st, want, "compute_{ptx}");
         run_iota(&g, &m);
     }
@@ -663,10 +676,10 @@ fn gpu_pdl_gating() {
     // A module compiled as PTX for an older arch never overlaps. The arch
     // must also be <= the device's: PTX doesn't JIT down (an sm_80 device
     // can't load compute_89 PTX).
-    let n = ffi::nvrtc().unwrap();
+    let n = engine_nvrtc(&g).unwrap();
     let archs = ffi::nvrtc_archs(n).unwrap();
     if let Some(&old) = archs.iter().filter(|&&a| a < 90 && a <= cc).max() {
-        let (m, _) = Module::load_for(&g, IOTA, &[], None, Target::Ptx(old)).unwrap();
+        let (m, _) = Module::load_for(&g, n, IOTA, &[], None, Target::Ptx(old)).unwrap();
         assert!(!m.pdl());
     }
 }

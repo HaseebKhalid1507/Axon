@@ -1330,17 +1330,48 @@ fn check_versions(driver: (i32, i32), nvrtc: (i32, i32)) -> Result<(), String> {
     Ok(())
 }
 
-/// Compile CUDA C++ `src` with NVRTC (`opts` include the architecture) to
-/// a cubin, or for a `Ptx` target NUL-terminated PTX (as cuModuleLoadData
-/// takes it). Err carries the compile log.
-fn compile(src: &str, opts: &[String], target: Target) -> Result<Vec<u8>, String> {
-    compile_logged(src, opts, target).map(|(image, _)| image)
+/// The NVRTC to build for a device of architecture `cc` (10 * major +
+/// minor) on a CUDA `driver`, and its `Target` (`hopper`: as `pick_target`):
+/// the first candidate (`ffi::nvrtc_where`, the driver's CUDA major first)
+/// that isn't newer than the driver (`check_versions`) and supports the
+/// device (`pick_target`). So a GPU the newest toolkit dropped (Pascal,
+/// Volta under CUDA 13) gets an older one that is also installed. Err: each
+/// loaded NVRTC's refusal.
+fn nvrtc_for(
+    cc: i32,
+    driver: (i32, i32),
+    hopper: bool,
+) -> Result<(&'static ffi::Nvrtc, Target), String> {
+    let target = std::cell::Cell::new(None);
+    let n = ffi::nvrtc_where(|n| {
+        let nv = ffi::nvrtc_version(n)?;
+        check_versions(driver, nv)?;
+        target.set(Some(pick_target(cc, &ffi::nvrtc_archs(n)?, nv, hopper)?));
+        Ok(())
+    })?;
+    Ok((n, target.get().expect("set for the NVRTC accepted")))
+}
+
+/// Whether sm_90 builds Hopper's sm_90a code: AXON_HOPPER isn't "0".
+fn hopper_env() -> bool {
+    std::env::var("AXON_HOPPER").ok().as_deref() != Some("0")
+}
+
+/// Compile CUDA C++ `src` with NVRTC `n` (`opts` include the architecture)
+/// to a cubin, or for a `Ptx` target NUL-terminated PTX (as
+/// cuModuleLoadData takes it). Err carries the compile log.
+fn compile(n: &ffi::Nvrtc, src: &str, opts: &[String], target: Target) -> Result<Vec<u8>, String> {
+    compile_logged(n, src, opts, target).map(|(image, _)| image)
 }
 
 /// `compile`, and the compile log of a successful build (ptxas notes, e.g.
 /// wgmma serialization: tests check it's empty).
-fn compile_logged(src: &str, opts: &[String], target: Target) -> Result<(Vec<u8>, String), String> {
-    let n = ffi::nvrtc()?;
+fn compile_logged(
+    n: &ffi::Nvrtc,
+    src: &str,
+    opts: &[String],
+    target: Target,
+) -> Result<(Vec<u8>, String), String> {
     let csrc = CString::new(src).map_err(|_| "kernel source has a NUL byte")?;
     let copts: Vec<CString> = opts
         .iter()
@@ -1423,36 +1454,37 @@ impl<'g> Module<'g> {
         Self::load_in(gpu, src, opts, cache_dir().as_deref())
     }
 
-    /// `load` with the cache in `dir` (None: no cache). Checks that NVRTC
-    /// isn't newer than the driver and picks the target (`pick_target`).
+    /// `load` with the cache in `dir` (None: no cache). Picks the NVRTC
+    /// and the target (`nvrtc_for`).
     pub fn load_in(
         gpu: &'g Gpu,
         src: &str,
         opts: &[&str],
         dir: Option<&Path>,
     ) -> Result<(Module<'g>, CacheStatus), String> {
-        let n = ffi::nvrtc()?;
-        let nv = ffi::nvrtc_version(n)?;
-        check_versions(ffi::driver_version(gpu.d)?, nv)?;
         let cc = gpu.info()?.cc;
-        let hopper = std::env::var("AXON_HOPPER").ok().as_deref() != Some("0");
-        let target = pick_target((cc.0 * 10 + cc.1) as i32, &ffi::nvrtc_archs(n)?, nv, hopper)?;
-        Self::load_for(gpu, src, opts, dir, target)
+        let (n, target) = nvrtc_for(
+            (cc.0 * 10 + cc.1) as i32,
+            ffi::driver_version(gpu.d)?,
+            hopper_env(),
+        )?;
+        Self::load_for(gpu, n, src, opts, dir, target)
     }
 
-    /// `load_in` for `target`. Entries are keyed by a hash of the source,
-    /// options, target and NVRTC version. One that can't be read, fails its
-    /// checksum or won't load is compiled again and replaced, never an
-    /// error. Fresh code is stored only once it has loaded, so code the
-    /// driver rejects is never cached.
+    /// `load_in` with NVRTC `n` for `target`. Entries are keyed by a hash of
+    /// the source, options, target and NVRTC version. One that can't be
+    /// read, fails its checksum or won't load is compiled again and replaced,
+    /// never an error. Fresh code is stored only once it has loaded, so code
+    /// the driver rejects is never cached.
     fn load_for(
         gpu: &'g Gpu,
+        n: &ffi::Nvrtc,
         src: &str,
         opts: &[&str],
         dir: Option<&Path>,
         target: Target,
     ) -> Result<(Module<'g>, CacheStatus), String> {
-        let (mut m, status) = Self::load_cached(gpu, src, opts, dir, target)?;
+        let (mut m, status) = Self::load_cached(gpu, n, src, opts, dir, target)?;
         let arch = match target {
             Target::Cubin(a) | Target::Ptx(a) => a,
             Target::Cubin90a => 90,
@@ -1473,12 +1505,12 @@ impl<'g> Module<'g> {
     /// `load_for` without setting `pdl`.
     fn load_cached(
         gpu: &'g Gpu,
+        n: &ffi::Nvrtc,
         src: &str,
         opts: &[&str],
         dir: Option<&Path>,
         target: Target,
     ) -> Result<(Module<'g>, CacheStatus), String> {
-        let n = ffi::nvrtc()?;
         let nv = ffi::nvrtc_version(n)?;
         let mut all = vec![format!("--gpu-architecture={target}")];
         all.extend(opts.iter().map(|s| s.to_string()));
@@ -1491,7 +1523,7 @@ impl<'g> Module<'g> {
             ver.as_bytes(),
         ]);
         let fresh = || -> Result<(Module<'g>, Vec<u8>), String> {
-            let image = compile(src, &all, target)?;
+            let image = compile(n, src, &all, target)?;
             let m = Self::from_image(gpu, &image).map_err(|e| {
                 let d = ffi::driver_version(gpu.d).unwrap_or((0, 0));
                 format!(
@@ -1725,8 +1757,13 @@ impl<'m> Kernels<'m> {
 }
 
 /// One line about the GPU for `axon info`: name, architecture, memory and
-/// theoretical bandwidth, or why there's none.
+/// theoretical bandwidth, or why there's none; and if no NVRTC can build
+/// for it (`nvrtc_for`), that it's unusable and why.
 pub fn summary() -> String {
+    let usable = |i: &DeviceInfo| {
+        let d = ffi::driver_version(ffi::driver()?)?;
+        nvrtc_for((i.cc.0 * 10 + i.cc.1) as i32, d, hopper_env()).map(|_| ())
+    };
     match Gpu::open().and_then(|g| g.info()) {
         Ok(i) => {
             const GIB: f64 = (1u64 << 30) as f64;
@@ -1740,6 +1777,9 @@ pub fn summary() -> String {
             );
             if let Some(bw) = i.bandwidth_gbs() {
                 s.push_str(&format!(" | ~{bw:.0} GB/s"));
+            }
+            if let Err(e) = usable(&i) {
+                s.push_str(&format!(" | unusable: {e}"));
             }
             s
         }

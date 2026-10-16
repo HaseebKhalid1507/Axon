@@ -8,7 +8,7 @@
 //! are loaded once per process and never closed: the tables are `'static`.
 
 use std::ffi::{CStr, c_char, c_int, c_uint, c_void};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 pub type CUresult = c_int;
 pub type CUdevice = c_int;
@@ -363,17 +363,75 @@ fn nvrtc_candidates(driver_major: Option<i32>) -> Vec<String> {
     v
 }
 
-/// NVRTC, or why not.
+/// NVRTC, or why not: the first library on `nvrtc_candidates` that loads.
 pub fn nvrtc() -> Result<&'static Nvrtc, String> {
-    static N: OnceLock<Result<Nvrtc, String>> = OnceLock::new();
-    let l = N.get_or_init(|| {
-        let major = driver().and_then(driver_version).ok().map(|v| v.0);
-        let lib =
-            open_lib(&nvrtc_candidates(major)).map_err(|e| format!("NVRTC not found: {e}"))?;
-        // SAFETY: lib is NVRTC, whose exports have the signatures in `Nvrtc`.
-        unsafe { Nvrtc::resolve(lib) }
+    nvrtc_where(|_| Ok(()))
+}
+
+/// The first NVRTC on `nvrtc_candidates` (in its order) that `ok` accepts.
+/// Each distinct library is loaded once, only when every one before it was
+/// refused (so with CUDA 13 and 12 toolkits both installed, a GPU NVRTC 13
+/// dropped still gets the 12), and never closed. `ok` must not call back
+/// into `nvrtc`. Err: "NVRTC not found: .." (why each name didn't load) if
+/// none loads, else every loaded one's refusal, then why the others didn't
+/// load ("not loaded: ..").
+pub fn nvrtc_where(ok: impl Fn(&Nvrtc) -> Result<(), String>) -> Result<&'static Nvrtc, String> {
+    /// The candidates, the next one to try, those loaded (by handle) and
+    /// why the others didn't load.
+    struct Libs {
+        names: Vec<String>,
+        next: usize,
+        loaded: Vec<(usize, &'static Nvrtc)>,
+        why: Vec<String>,
+    }
+    static LIBS: Mutex<Option<Libs>> = Mutex::new(None);
+    let mut g = LIBS.lock().unwrap_or_else(|e| e.into_inner());
+    let libs = g.get_or_insert_with(|| Libs {
+        names: nvrtc_candidates(driver().and_then(driver_version).ok().map(|v| v.0)),
+        next: 0,
+        loaded: Vec::new(),
+        why: Vec::new(),
     });
-    l.as_ref().map_err(Clone::clone)
+    let mut refused = Vec::new();
+    for i in 0.. {
+        // Load the next distinct library when the loaded ones are used up.
+        while i == libs.loaded.len() && libs.next < libs.names.len() {
+            let name = &libs.names[libs.next];
+            libs.next += 1;
+            let lib = match open_lib(std::slice::from_ref(name)) {
+                Ok(h) => h,
+                Err(e) => {
+                    libs.why.push(e);
+                    continue;
+                }
+            };
+            // The same file by another name (the dev symlink, a path).
+            if libs.loaded.iter().any(|&(h, _)| h == lib as usize) {
+                continue;
+            }
+            // SAFETY: lib is NVRTC, whose exports have the signatures in `Nvrtc`.
+            match unsafe { Nvrtc::resolve(lib) } {
+                Ok(n) => libs.loaded.push((lib as usize, Box::leak(Box::new(n)))),
+                Err(e) => libs.why.push(format!("{name}: {e}")),
+            }
+        }
+        let Some(&(_, n)) = libs.loaded.get(i) else {
+            break;
+        };
+        match ok(n) {
+            Ok(()) => return Ok(n),
+            Err(e) => refused.push(e),
+        }
+    }
+    if libs.loaded.is_empty() {
+        return Err(format!("NVRTC not found: {}", libs.why.join("; ")));
+    }
+    let mut e = refused.join("; ");
+    if !libs.why.is_empty() {
+        // Where else it looked, so a refusal shows what was searched.
+        e.push_str(&format!("; not loaded: {}", libs.why.join("; ")));
+    }
+    Err(e)
 }
 
 /// NVRTC's version, (major, minor).
