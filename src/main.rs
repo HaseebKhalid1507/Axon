@@ -213,7 +213,7 @@ fn main() {
 }
 
 fn run() -> std::io::Result<()> {
-    let args: Vec<String> = env::args().collect();
+    let args = utf8_args(env::args_os()).unwrap_or_else(|e| fail(&e));
 
     match args.get(1).map(String::as_str) {
         None => {
@@ -414,6 +414,37 @@ fn copy_for(device: Device) -> Option<bool> {
     (device == Device::Cuda).then_some(false)
 }
 
+/// The command line as UTF-8 strings: an error naming the first argument
+/// that isn't (`env::args` panics on it).
+fn utf8_args(args: impl Iterator<Item = std::ffi::OsString>) -> Result<Vec<String>, String> {
+    args.enumerate()
+        .map(|(i, a)| {
+            a.into_string()
+                .map_err(|a| format!("argument {i} ({}) is not valid UTF-8", a.to_string_lossy()))
+        })
+        .collect()
+}
+
+/// How many tokens `gen` may generate after a `prompt`-token prompt when
+/// asked for `n`: the cache holds the prompt, those tokens and one more,
+/// and stays within the `trained` context (0: the GGUF doesn't say), as
+/// `chat` and `serve` do (RoPE past it gives garbage; a -n near usize::MAX
+/// overflowed the cache size). An error if the prompt alone is too long.
+fn gen_budget(prompt: usize, n: usize, trained: usize) -> Result<usize, String> {
+    if trained > 0 {
+        if prompt >= trained {
+            return Err(format!(
+                "the prompt is {prompt} tokens; the model was trained on {trained}"
+            ));
+        }
+        return Ok(n.min(trained - prompt - 1));
+    }
+    match prompt.checked_add(n).and_then(|t| t.checked_add(1)) {
+        Some(_) => Ok(n),
+        None => Err(format!("-n {n} is too large")),
+    }
+}
+
 /// `gen` and `logits` subcommands: args = [axon, cmd, model, prompt, flags...]
 fn run_lm(args: &[String]) -> std::io::Result<()> {
     use std::io::Write;
@@ -502,7 +533,21 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         cuda::settle();
         std::process::exit(1);
     }
-    let extra = if cmd == "gen" { n_gen } else { 0 };
+    // The cache holds the prompt, the tokens generated and one more. RoPE
+    // past the trained length gives garbage (0: the GGUF doesn't say), and
+    // a -n near usize::MAX overflowed the sizes: generation stops at the
+    // trained context, as `chat` and `serve` do.
+    let want = if cmd == "gen" { n_gen } else { 0 };
+    let extra = gen_budget(ids.len(), want, model.ctx_len() as usize)
+        .unwrap_or_else(|e| fail(&format!("{path}: {e}")));
+    if extra < want {
+        eprintln!(
+            "axon: note: -n {want} runs past the {}-token context {path} was trained on; \
+             stopping after {extra} tokens",
+            model.ctx_len()
+        );
+    }
+    let n_gen = if cmd == "gen" { extra } else { n_gen };
     let dm = if with_model {
         open_draft_model(draft_path, max_draft, device, &model, &tok)
     } else {
@@ -1272,7 +1317,48 @@ fn human_bytes(b: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{GenOpts, argmax, generate, placement};
+    use super::{GenOpts, argmax, gen_budget, generate, placement, utf8_args};
+
+    /// `gen -n` past the trained context stops there; usize::MAX no longer
+    /// overflows the cache size (it wrapped to 1 and panicked, or to a
+    /// short slice); a prompt alone past the context is an error.
+    #[test]
+    fn gen_budget_caps_and_never_overflows() {
+        assert_eq!(gen_budget(5, 32, 32768), Ok(32));
+        assert_eq!(gen_budget(5, 32762, 32768), Ok(32762));
+        assert_eq!(gen_budget(5, 32763, 32768), Ok(32762));
+        assert_eq!(gen_budget(5, usize::MAX, 32768), Ok(32762));
+        assert_eq!(gen_budget(1, 1 << 63, 32768), Ok(32766));
+        assert_eq!(gen_budget(32767, 10, 32768), Ok(0));
+        assert!(
+            gen_budget(32768, 0, 32768)
+                .unwrap_err()
+                .contains("trained on 32768")
+        );
+        assert_eq!(gen_budget(5, 1000, 0), Ok(1000));
+        assert!(
+            gen_budget(5, usize::MAX, 0)
+                .unwrap_err()
+                .contains("too large")
+        );
+        assert!(gen_budget(1, usize::MAX - 1, 0).is_err());
+        assert_eq!(gen_budget(1, usize::MAX - 2, 0), Ok(usize::MAX - 2));
+    }
+
+    /// A non-UTF-8 argument is an error naming it, not a panic.
+    #[test]
+    fn non_utf8_argument_is_an_error() {
+        use std::os::unix::ffi::OsStringExt;
+        let ok = ["axon", "gen"].map(std::ffi::OsString::from);
+        assert_eq!(utf8_args(ok.into_iter()).unwrap(), ["axon", "gen"]);
+        let bad = [
+            "axon".into(),
+            "gen".into(),
+            std::ffi::OsString::from_vec(b"m\xff.gguf".to_vec()),
+        ];
+        let e = utf8_args(bad.into_iter()).unwrap_err();
+        assert!(e.starts_with("argument 2 (m\u{fffd}.gguf)"), "{e}");
+    }
     use crate::lm::Device;
     use crate::model::Qwen2;
     use crate::spec::PromptLookup;

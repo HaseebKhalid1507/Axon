@@ -58,6 +58,9 @@ pub fn pre_of(m: &Model) -> Result<Pre, String> {
 }
 
 const TYPE_CONTROL: i32 = 3;
+/// Longest pre-token (in bytes) merged by `bpe_scan`; longer ones go
+/// through `bpe_heap` (same tokens).
+const BPE_SCAN_MAX: usize = 64;
 const TYPE_USER_DEFINED: i32 = 4;
 
 pub struct Tokenizer {
@@ -340,10 +343,20 @@ impl Tokenizer {
                 return;
             }
         }
-        let mut syms: Vec<u32> = word
+        let syms: Vec<u32> = word
             .bytes()
             .filter_map(|b| self.byte_id[b as usize])
             .collect();
+        if syms.len() > BPE_SCAN_MAX {
+            self.bpe_heap(syms, out)
+        } else {
+            self.bpe_scan(syms, out)
+        }
+    }
+
+    /// `bpe_word`'s merges by rescanning the pairs after each one: fastest
+    /// on the short pre-tokens of ordinary text, O(n^2) on a long one.
+    fn bpe_scan(&self, mut syms: Vec<u32>, out: &mut Vec<u32>) {
         loop {
             let mut best: Option<(u32, usize, u32)> = None; // (rank, pos, merged id)
             for i in 0..syms.len().saturating_sub(1) {
@@ -358,6 +371,52 @@ impl Tokenizer {
             syms.remove(i + 1);
         }
         out.extend_from_slice(&syms);
+    }
+
+    /// `bpe_word`'s merges on a long pre-token, in O(n log n) instead of the
+    /// scan's O(n^2) (a 1 MB run of letters, one pre-token, took hours):
+    /// the same merges in the same order, so the same tokens. Candidate
+    /// pairs wait in a min-heap keyed by (rank, position of the left
+    /// symbol); symbols keep their first byte's index, so the smallest key
+    /// is the lowest rank, leftmost on ties, as in the scan. Entries left
+    /// stale by a merge are skipped when popped.
+    fn bpe_heap(&self, mut syms: Vec<u32>, out: &mut Vec<u32>) {
+        use std::cmp::Reverse;
+        let n = syms.len();
+        const NONE: usize = usize::MAX;
+        // Doubly linked list over the live symbols.
+        let mut next: Vec<usize> = (1..=n).map(|j| if j == n { NONE } else { j }).collect();
+        let mut prev: Vec<usize> = (0..n).map(|i| i.checked_sub(1).unwrap_or(NONE)).collect();
+        let mut alive = vec![true; n];
+        // (rank, left, right, left id, right id, merged id)
+        type Cand = Reverse<(u32, usize, usize, u32, u32, u32)>;
+        let mut heap: std::collections::BinaryHeap<Cand> = std::collections::BinaryHeap::new();
+        let cand = |syms: &[u32], i: usize, j: usize| -> Option<Cand> {
+            let &(rank, mid) = self.merges.get(&(syms[i], syms[j]))?;
+            Some(Reverse((rank, i, j, syms[i], syms[j], mid)))
+        };
+        heap.extend((0..n - 1).filter_map(|i| cand(&syms, i, i + 1)));
+        while let Some(Reverse((_, i, j, li, ri, mid))) = heap.pop() {
+            if !alive[i] || !alive[j] || next[i] != j || syms[i] != li || syms[j] != ri {
+                continue;
+            }
+            syms[i] = mid;
+            alive[j] = false;
+            let k = next[j];
+            next[i] = k;
+            if k != NONE {
+                prev[k] = i;
+                heap.extend(cand(&syms, i, k));
+            }
+            if prev[i] != NONE {
+                heap.extend(cand(&syms, prev[i], i));
+            }
+        }
+        let mut i = 0;
+        while i != NONE {
+            out.push(syms[i]);
+            i = next[i];
+        }
     }
 
     pub fn decode(&self, ids: &[u32]) -> String {
@@ -660,6 +719,60 @@ mod tests {
                 .collect();
             // Hugging Face parses special tokens in its input by default.
             assert_eq!(t.encode_special(text), want, "text {text:?}");
+        }
+    }
+
+    /// `bpe_heap` merges exactly as `bpe_scan` on words of every length
+    /// around the switch-over and well past it: runs of one letter (one
+    /// merge rank everywhere: the leftmost-on-ties rule), words from a
+    /// small alphabet, and random text with multi-byte characters.
+    #[test]
+    fn bpe_heap_matches_scan() {
+        let Some(t) = tok() else { return };
+        let mut rng = 0x9e37_79b9u32;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            rng
+        };
+        let pieces = [
+            "a", "b", "e", "th", "in", "er", "é", "日本", "🦀", " ", "1", "!", "ab", "\n",
+        ];
+        let mut words: Vec<String> = Vec::new();
+        for n in [1, 2, 3, 63, 64, 65, 100, 257, 1000] {
+            for c in ["a", "e", "!", " ", "中", "ab", "aab"] {
+                words.push(c.repeat(n));
+            }
+        }
+        for _ in 0..400 {
+            let n = 1 + (next() % 300) as usize;
+            let alpha = 1 + (next() as usize % pieces.len());
+            words.push((0..n).map(|_| pieces[next() as usize % alpha]).collect());
+        }
+        for w in &words {
+            let syms: Vec<u32> = (w.bytes()).filter_map(|b| t.byte_id[b as usize]).collect();
+            let (mut a, mut b) = (Vec::new(), Vec::new());
+            t.bpe_scan(syms.clone(), &mut a);
+            t.bpe_heap(syms, &mut b);
+            assert_eq!(a, b, "word {w:?}");
+            assert_eq!(t.decode(&b), *w);
+        }
+    }
+
+    /// A long pre-token (a run of one letter, or of punctuation) used to
+    /// take O(n^2) merge scans: 16 KB took 2 s, a 1 MB request body hours
+    /// of one CPU core. Now it's O(n log n).
+    #[test]
+    fn long_pretoken_encodes_fast() {
+        let Some(t) = tok() else { return };
+        for c in ["a", "!", "中"] {
+            let s = c.repeat((1 << 20) / c.len());
+            let t0 = std::time::Instant::now();
+            let ids = t.encode(&s);
+            let secs = t0.elapsed().as_secs_f64();
+            assert_eq!(t.decode(&ids), s);
+            assert!(secs < 20.0, "1 MB of {c:?}: {secs:.1} s");
         }
     }
 }
