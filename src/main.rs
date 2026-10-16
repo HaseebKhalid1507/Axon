@@ -2,6 +2,7 @@
 mod mv;
 mod chat;
 mod cuda;
+mod draft;
 mod gguf;
 mod hybrid;
 mod kv;
@@ -51,15 +52,16 @@ const USAGE: &str = "\
 usage:
   axon <model.gguf>                         same as axon info
   axon info <model.gguf>                    print a summary and exit
-  axon gen <model.gguf> \"<prompt>\" [-n N] [--draft K] [--device D] [--gpu-layers N]
-            [--kv T] [sampling flags]       generation (greedy unless --temp > 0)
+  axon gen <model.gguf> \"<prompt>\" [-n N] [--draft K] [--draft-model PATH] [--device D]
+            [--gpu-layers N] [--kv T] [sampling flags]
+                                            generation (greedy unless --temp > 0)
   axon logits <model.gguf> \"<prompt>\" [-k K]
                                             top-K next-token logits after the prompt
-  axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K] [--device D]
-            [--gpu-layers N] [--kv T] [sampling flags]
+  axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K]
+            [--draft-model PATH] [--device D] [--gpu-layers N] [--kv T] [sampling flags]
                                             talk to an instruct model (sampled; --temp 0: greedy)
-  axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--draft K] [--device D]
-            [--gpu-layers N] [--kv T] [--alias NAME] [--max-tokens N] [--cors [ORIGIN]]
+  axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--draft K] [--draft-model PATH]
+            [--device D] [--gpu-layers N] [--kv T] [--alias NAME] [--max-tokens N] [--cors [ORIGIN]]
             [--max-conns N] [--max-queue N] [--no-think] [--think-inline] [--quiet]
             [sampling flags; the repeat penalty defaults to 1 (off)]
                                             an OpenAI-compatible HTTP server (/v1/models,
@@ -70,8 +72,15 @@ usage:
 
 flags:
   -n N        gen: tokens to generate (default 32); chat: most tokens per reply (default: no limit)
-  --draft K   gen, chat: draft up to K tokens per step by prompt lookup (default 0 = off; try 7);
+  --draft K   gen, chat, serve: draft up to K tokens per step by prompt lookup (default 0 = off;
+              try 7), or with --draft-model by the draft model (default 3; 0 = off;
+              the gain is when greedy: little or none when sampling);
               lossless: the output is the same either way (greedy, or sampled with the same seed)
+  --draft-model PATH  gen, chat, serve: a small model with the same vocabulary (e.g.
+              Qwen2.5-0.5B-Instruct for Qwen2.5-7B, Qwen3-0.6B for Qwen3-8B, Llama-3.2-1B for
+              Llama-3.1-8B) guesses the next tokens greedily, the model checks them in one pass;
+              on the same --device (on cuda, all of it on the GPU, its memory counted before the
+              model is placed); refused if the vocabularies or end tokens differ
   -k K        logits: how many logits to print (default 10)
   --device D  gen, chat: cpu (default) or cuda (an NVIDIA GPU; a model too big for its memory
               is split: the last layers that fit on the GPU, the first ones on the CPU)
@@ -106,6 +115,7 @@ environment:
   AXON_POOL_ADAPT=0          keep every worker in every job (no adaptive drop-out)
   AXON_POOL_DEBUG=1          gen: print thread-pool stats at the end
   AXON_DRAFT=K               same as --draft K
+  AXON_DRAFT_MODEL=PATH      same as --draft-model PATH
   AXON_MMAP=0|1              cpu: 0: copy the model into huge-page memory, 1: map the
                              file (default: map if every matrix is repacked, else copy
                              unless the file is >60% of free memory; a mapped file must
@@ -264,12 +274,55 @@ fn run() -> std::io::Result<()> {
 /// (spec.rs); output is the same either way. Off by default (DEFAULT_DRAFT);
 /// --draft K or AXON_DRAFT=K turns it on, see round_draft. This is AXON_DRAFT.
 fn draft_env() -> usize {
-    match env::var("AXON_DRAFT") {
-        Ok(v) => v
-            .parse::<usize>()
+    draft_env_set().unwrap_or(DEFAULT_DRAFT)
+}
+
+/// AXON_DRAFT's K, if it's set.
+fn draft_env_set() -> Option<usize> {
+    let v = env::var("AXON_DRAFT").ok()?;
+    Some(
+        v.parse::<usize>()
             .unwrap_or_else(|_| fail(&format!("AXON_DRAFT needs a whole number, got '{v}'"))),
-        Err(_) => DEFAULT_DRAFT,
-    }
+    )
+}
+
+/// The draft model for --draft-model PATH (else $AXON_DRAFT_MODEL), checked
+/// against the main model `m`, or None if there's none or K is 0: a usage
+/// error if it can't draft for `m`. After `open_model_with` of the main
+/// model, before loading it (`draft::load_pair`).
+fn open_draft_model(
+    path: Option<String>,
+    k: usize,
+    device: Device,
+    m: &gguf::Model,
+    tok: &tokenizer::Tokenizer,
+) -> Option<draft::DraftModel> {
+    let path = path.or_else(draft::model_env).filter(|_| k > 0)?;
+    Some(
+        draft::DraftModel::open(&path, copy_for(device), m, tok)
+            .unwrap_or_else(|e| fail(&format!("--draft-model {e}"))),
+    )
+}
+
+/// `backend` with the draft model `dm`'s VRAM held while the main model is
+/// placed (`draft::load_pair`), then the drafter for its context.
+#[allow(clippy::too_many_arguments)]
+fn backend_and_drafter<'a>(
+    model: &'a gguf::Model,
+    dm: Option<&draft::DraftModel>,
+    device: Device,
+    ctx: usize,
+    gpu_layers: Option<usize>,
+    kv: kv::KvType,
+    fit: bool,
+) -> (Backend<'a>, Option<draft::ModelDrafter<Backend<'static>>>) {
+    draft::load_pair(dm, device, ctx, kv, || {
+        backend(model, device, ctx, gpu_layers, kv, fit)
+    })
+    .unwrap_or_else(|e| match device {
+        Device::Cuda => fail(&format!("--device cuda: --draft-model: {e}")),
+        Device::Cpu => fail(&format!("--draft-model: {e}")),
+    })
 }
 
 /// KV cache type (kv.rs): checked up front so a typo is a usage error, not a
@@ -359,7 +412,8 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     let (path, prompt) = (&args[2], &args[3]);
     let mut n_gen = 32usize;
     let mut top_k = 10usize;
-    let mut max_draft = draft_env();
+    let mut max_draft = None;
+    let mut draft_path = None;
     let mut device = device_env();
     let mut gpu_layers = None;
     let mut kv = kv_env();
@@ -376,9 +430,16 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
                 device = Device::parse(v).unwrap_or_else(|e| fail(&e));
             }
             ("--kv", _) => kv = kv_flag(args.get(i + 1).map(String::as_str)),
+            ("--draft-model", _) => {
+                let v = args.get(i + 1).filter(|v| !v.is_empty());
+                draft_path = Some(
+                    v.cloned()
+                        .unwrap_or_else(|| fail("--draft-model needs a path")),
+                );
+            }
             ("-n", Some(v)) => n_gen = v,
             ("-k", Some(v)) => top_k = v,
-            ("--draft", Some(v)) => max_draft = v,
+            ("--draft", Some(v)) => max_draft = Some(v),
             ("--gpu-layers", Some(v)) => gpu_layers = Some(v),
             (f @ ("-n" | "-k" | "--draft" | "--gpu-layers"), None) => fail(&format!(
                 "{f} needs a whole number, got {}",
@@ -389,7 +450,11 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         }
         i += 2;
     }
-    let max_draft = round_draft(max_draft);
+    if cmd == "logits" && draft_path.is_some() {
+        fail("--draft-model is for gen, chat and serve, not logits");
+    }
+    let with_model = cmd == "gen" && (draft_path.is_some() || draft::model_env().is_some());
+    let max_draft = draft::draft_k(max_draft.or_else(draft_env_set), with_model);
     check_stream_decode(max_draft);
     // gen is greedy unless --temp says otherwise: reproducible runs and benchmarks.
     let mut sampler = sargs.resolve(0.0).map(sample::Sampler::new);
@@ -420,7 +485,23 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         std::process::exit(1);
     }
     let extra = if cmd == "gen" { n_gen } else { 0 };
-    let net = backend(&model, device, ids.len() + extra + 1, gpu_layers, kv, false);
+    let dm = if with_model {
+        open_draft_model(draft_path, max_draft, device, &model, &tok)
+    } else {
+        None
+    };
+    let (net, mut drafter) = backend_and_drafter(
+        &model,
+        dm.as_ref(),
+        device,
+        ids.len() + extra + 1,
+        gpu_layers,
+        kv,
+        false,
+    );
+    if sampler.is_some() && drafter.is_some() {
+        eprintln!("{}", draft::SAMPLED_NOTE);
+    }
     let mut cache = net.new_cache(ids.len() + extra + 1);
 
     // Feed the prompt in batches (the backend's size: PREFILL_BATCH on the
@@ -461,7 +542,10 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     out.flush()?;
     // Characters can be split across tokens; the stream holds them back until whole.
     let mut text = tokenizer::Utf8Stream::default();
-    let mut lookup = spec::PromptLookup::new();
+    let mut source = match drafter.as_mut() {
+        Some(d) => draft::Drafter::Model(d),
+        None => draft::Drafter::Lookup(spec::PromptLookup::new()),
+    };
     let t1 = Instant::now();
     let st = generate(
         &net,
@@ -474,10 +558,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             max_draft,
             sample: sampler.as_mut(),
         },
-        &mut |h, max| {
-            lookup.sync(h);
-            lookup.draft(max)
-        },
+        &mut |h, max| source.draft(h, max),
         &mut |id| {
             let done = text.push(&tok.decode_bytes(&[id]));
             if !done.is_empty() {
@@ -557,9 +638,14 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             .map(|nb| format!("nb{nb} {}", ms(st.verify[nb])))
             .collect();
         eprintln!(
-            "draft:       K={}, {} drafted, {} accepted ({:.1}%), {:.2} tok/pass, \
+            "draft:       K={}{}, {} drafted, {} accepted ({:.1}%), {:.2} tok/pass, \
              (decode tok/s = decided tok incl. EOS / s); forward {}; verify {}",
             max_draft,
+            if drafter.is_some() {
+                " (draft model)"
+            } else {
+                " (prompt lookup)"
+            },
             st.drafted,
             st.accepted,
             if st.drafted > 0 {
@@ -579,6 +665,9 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
                 verify.join(", ")
             }
         );
+        if let (Some(d), Some(dm)) = (&drafter, &dm) {
+            eprintln!("drafter:     {}", draft::describe(&dm.name(), d));
+        }
     }
     if !matches!(net, Backend::Cpu(_)) {
         // Everything's written: skip tearing the CUDA context down (freeing
@@ -623,7 +712,7 @@ const CHAT_HELP: &str = concat!(
 /// stdin is a message; on a terminal it's an interactive session.
 fn run_chat(args: &[String]) -> std::io::Result<()> {
     const CHAT_USAGE: &str = "usage: axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K] \
-         [--device D] [--gpu-layers N] [--kv T]";
+         [--draft-model PATH] [--device D] [--gpu-layers N] [--kv T]";
     let Some(path) = args.get(2).filter(|p| !p.starts_with('-')) else {
         fail(CHAT_USAGE);
     };
@@ -631,7 +720,8 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     let mut no_think = false;
     let mut ctx = None;
     let mut max_reply = usize::MAX;
-    let mut max_draft = draft_env();
+    let mut max_draft = None;
+    let mut draft_path = None;
     let mut device = device_env();
     let mut gpu_layers = None;
     let mut kv = kv_env();
@@ -653,7 +743,14 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         }
         if !matches!(
             f,
-            "--system" | "--ctx" | "-n" | "--draft" | "--device" | "--gpu-layers" | "--kv"
+            "--system"
+                | "--ctx"
+                | "-n"
+                | "--draft"
+                | "--draft-model"
+                | "--device"
+                | "--gpu-layers"
+                | "--kv"
         ) {
             fail(&format!("unknown argument '{f}' for chat"));
         }
@@ -662,6 +759,11 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         };
         if f == "--system" {
             system = Some(v.clone());
+        } else if f == "--draft-model" {
+            draft_path = Some(v.clone()).filter(|v| !v.is_empty());
+            if draft_path.is_none() {
+                fail("--draft-model needs a path");
+            }
         } else if f == "--device" {
             device = Device::parse(v).unwrap_or_else(|e| fail(&e));
         } else if f == "--kv" {
@@ -676,7 +778,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
                 "--ctx" => ctx = Some(n),
                 "-n" => max_reply = n,
                 "--gpu-layers" => gpu_layers = Some(n),
-                _ => max_draft = n,
+                _ => max_draft = Some(n),
             }
         }
         i += 2;
@@ -699,8 +801,12 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         None => DEFAULT_CHAT_CTX,
     };
     let tok = tokenizer::Tokenizer::from_gguf(&model);
+    let with_model = draft_path.is_some() || draft::model_env().is_some();
+    let max_draft = draft::draft_k(max_draft.or_else(draft_env_set), with_model);
+    check_stream_decode(max_draft);
+    let dm = open_draft_model(draft_path, max_draft, device, &model, &tok);
     // The default context may shrink to keep the model on the GPU (Backend::new).
-    let net = backend(&model, device, ctx, gpu_layers, kv, fit);
+    let (net, drafter) = backend_and_drafter(&model, dm.as_ref(), device, ctx, gpu_layers, kv, fit);
     let (want, ctx) = (ctx, net.ctx(ctx));
     if ctx < want {
         eprintln!(
@@ -725,12 +831,15 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     }
     conv.no_think = no_think;
     conv.max_reply = max_reply;
-    conv.max_draft = round_draft(max_draft);
-    check_stream_decode(conv.max_draft);
+    conv.max_draft = max_draft;
+    conv.drafter = drafter.map(|d| Box::new(d) as Box<dyn draft::Draft>);
     // chat samples by default (as ollama does): greedy replies loop.
     conv.sampler = sargs
         .resolve(sample::DEFAULT_TEMP)
         .map(sample::Sampler::new);
+    if conv.sampler.is_some() && conv.drafter.is_some() {
+        eprintln!("{}", draft::SAMPLED_NOTE);
+    }
 
     let name = std::path::Path::new(path)
         .file_name()
@@ -744,7 +853,14 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         .sampler
         .as_ref()
         .map_or(" | greedy".into(), |s| format!(" | seed {}", s.cfg.seed));
-    match chat_repl(&mut conv, &tok, &format!("{name} | ctx {ctx}{kvs}{seed}")) {
+    let drafts = dm.as_ref().map_or(String::new(), |d| {
+        format!(" | draft model {} K={max_draft}", d.name())
+    });
+    match chat_repl(
+        &mut conv,
+        &tok,
+        &format!("{name} | ctx {ctx}{kvs}{seed}{drafts}"),
+    ) {
         // stdout went away (a closed pipe): nobody is listening.
         Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         r => r,

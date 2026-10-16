@@ -28,6 +28,7 @@ fn server_with(path: &str, device: Device, f: impl FnOnce(&mut Opts)) -> Server 
         kv: crate::kv::KvType::F16,
         ctx: Some(2048),
         max_draft: 0,
+        draft_model: None,
         sample: SampleArgs::default(),
         no_think: false,
         think_inline: false,
@@ -460,6 +461,80 @@ fn serve_cuda_matches_gen() {
         return;
     };
     serve_matches_gen_and_chat(p.to_str().unwrap(), Device::Cuda);
+}
+
+/// A draft model changes nothing a client sees: completions and chat
+/// replies, greedy and sampled with a seed, across requests that reuse the
+/// cache, equal a server's without one (1.5B main model, 0.5B drafter).
+fn serve_with_draft_model(device: Device) {
+    let Some(d) = crate::testutil::model_path() else {
+        return;
+    };
+    let t = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("models/qwen2.5-1.5b-instruct-q4_k_m.gguf");
+    if !t.exists() && std::env::var_os("AXON_SKIP_MODEL_TESTS").is_some() {
+        return;
+    }
+    let reqs = [
+        (
+            "/v1/completions",
+            json!({"prompt": PROMPT, "max_tokens": 40, "temperature": 0}),
+        ),
+        (
+            "/v1/completions",
+            json!({"prompt": PROMPT, "max_tokens": 40, "temperature": 0.8, "seed": 5}),
+        ),
+        (
+            "/v1/chat/completions",
+            json!({"messages": [{"role": "user", "content": CHAT_MSG}], "max_tokens": 40,
+                   "temperature": 0}),
+        ),
+        (
+            "/v1/chat/completions",
+            json!({"messages": [{"role": "user", "content": CHAT_MSG}], "max_tokens": 40,
+                   "temperature": 0.7, "seed": 11}),
+        ),
+        (
+            "/v1/completions",
+            json!({"prompt": PROMPT, "max_tokens": 40, "temperature": 0}),
+        ),
+    ];
+    let mut outs = Vec::new();
+    for with in [false, true] {
+        let s = server_with(t.to_str().unwrap(), device, |o| {
+            if with {
+                o.draft_model = Some(d.to_str().unwrap().into());
+                o.max_draft = 5;
+            }
+        });
+        let mut got = Vec::new();
+        for (path, req) in &reqs {
+            let mut req = req.clone();
+            req["model"] = json!("alias");
+            let r = post(s.addr, path, req);
+            assert_eq!(r.status, 200, "{}", r.body);
+            let v = r.json();
+            got.push((
+                v["choices"][0].clone(),
+                v["usage"]["completion_tokens"].clone(),
+            ));
+        }
+        outs.push(got);
+    }
+    assert_eq!(outs[0], outs[1], "{device:?}");
+}
+
+#[test]
+fn serve_cpu_with_draft_model() {
+    serve_with_draft_model(Device::Cpu);
+}
+
+#[test]
+fn serve_cuda_with_draft_model() {
+    if crate::testutil::gpu().is_none() {
+        return;
+    }
+    serve_with_draft_model(Device::Cuda);
 }
 
 /// Llama 3: completions start with <|begin_of_text|> and stop on the

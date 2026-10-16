@@ -228,8 +228,12 @@ pub struct Chat<'a, M: Lm> {
     pub no_think: bool,
     /// Most tokens per reply.
     pub max_reply: usize,
-    /// Draft tokens per pass (`round_draft`ed); 0 = off.
+    /// Draft tokens per pass (`round_draft`ed for prompt lookup); 0 = off.
     pub max_draft: usize,
+    /// Guesses from a draft model instead of prompt lookup (draft.rs). It
+    /// follows the history by itself, edits included (`drop_oldest`, the
+    /// reasoning cut): nothing here resets it.
+    pub drafter: Option<Box<dyn crate::draft::Draft + 'a>>,
     /// How replies pick tokens (its RNG runs on across replies); None = greedy.
     pub sampler: Option<Sampler>,
 }
@@ -301,6 +305,7 @@ impl<'a, M: Lm> Chat<'a, M> {
             no_think: false,
             max_reply: usize::MAX,
             max_draft: 0,
+            drafter: None,
             sampler: None,
         };
         c.set_system(system)?;
@@ -448,6 +453,7 @@ impl<'a, M: Lm> Chat<'a, M> {
             lookup,
             fr,
             max_draft,
+            drafter,
             sampler,
             ..
         } = self;
@@ -464,9 +470,12 @@ impl<'a, M: Lm> Chat<'a, M> {
                 max_draft: *max_draft,
                 sample: sampler.as_mut(),
             },
-            &mut |h, max| {
-                lookup.sync(h);
-                lookup.draft(max)
+            &mut |h, max| match drafter {
+                Some(d) => d.draft(h, max),
+                None => {
+                    lookup.sync(h);
+                    lookup.draft(max)
+                }
             },
             &mut |id| {
                 // Before the push: every token in r.ids went through the model.
