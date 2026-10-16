@@ -3,11 +3,13 @@
 LLM inference for Qwen2, Qwen3 and Llama 3 GGUF models on the CPU and on NVIDIA
 GPUs, written from scratch in Rust.
 
+**New here? Start with [docs/START-HERE.md](docs/START-HERE.md).**
+
 No ggml, no BLAS, no binding crates, no CUDA toolkit at build time: a GGUF reader,
 quantized integer dot-product kernels (scalar, AVX2, AVX-VNNI), a spinning worker
 pool and a transformer forward pass on the CPU; on the GPU, CUDA C++ kernels that
 NVRTC compiles at run time, launched through the driver API (both libraries loaded
-with dlopen). About 41k lines of Rust and 4.7k of CUDA, tests included.
+with dlopen). About 42k lines of Rust and 4.7k of CUDA, tests included.
 
 Every optimized path is **bit-identical** to the plain reference path on its
 device: batched prefill produces exactly the logits that feeding one token at a
@@ -69,8 +71,14 @@ Works today, honestly scoped:
 - Draft-model drafting (`--draft-model small.gguf`): a small model of the same vocabulary
   (Qwen2.5-0.5B for Qwen2.5-7B, Qwen3-0.6B for Qwen3-8B, Llama-3.2-1B for Llama-3.1-8B)
   guesses the next tokens, the model verifies them in one batched pass; equally lossless.
-- Serving: `axon serve`, an OpenAI-compatible HTTP server (below).
+  Default K=3 with a draft model. Greedy tg128 medians in its A/B at K=3: +37% Qwen2.5-7B,
+  +44% Qwen3-8B, +63% Llama-3.1-8B; sampled, little or none (below).
+- Serving: `axon serve`, an OpenAI-compatible HTTP server (below), one request at a time.
 - Rust 1.89 or newer.
+
+Not on main yet: tool calling (`serve` refuses `tools` with a 400), batching of concurrent
+requests, multiple GPUs, Gemma and SentencePiece-tokenizer models (Mistral, Llama 2). What's in
+flight and why: [docs/roadmap.md](docs/roadmap.md).
 
 ## Quickstart
 
@@ -250,10 +258,26 @@ use your local model), `--max-conns N` / `--max-queue N` (defaults 256 / 128), `
 ## Numbers
 
 tok/s, median of 3. `pp560` / `pp2100` are prompt evaluation over ~560 / ~2100
-tokens, `tg128` decode over 128 tokens, `@1` one thread. One machine: treat the
-numbers as relative. Methods, ranges and more runs are in [BENCH.md](BENCH.md).
+tokens, `tg128` decode over 128 tokens, `@1` one thread. Compare engines within one
+machine. Methods, ranges and more runs are in [BENCH.md](BENCH.md) (CPU, dev laptop GPU)
+and [docs/benchmarks-gpu.md](docs/benchmarks-gpu.md) (RunPod, RTX 4050 laptop, caveats).
 
-GPU (from BENCH.md): main @ 0851798 (`--device cuda`, whole model on the GPU) vs ollama 0.35.0
+Datacenter and desktop GPUs (RunPod, main @ f8d8a86, 2026-10-15): axon ahead of both
+llama.cpp 4413a19 (`llama-bench -ngl 99`) and ollama 0.35.0 in all 45 cells (3 GPUs ×
+Qwen2.5 0.5B/1.5B/3B/7B and Qwen3 8B Q4_K_M × pp560/pp2100/tg128). Qwen2.5 7B, axon /
+llama.cpp / ollama, and axon's range over llama.cpp across the five models:
+
+| GPU | 7B pp2100 | 7B tg128 | pp2100 vs llama.cpp | tg128 vs llama.cpp |
+|---|---|---|---|---|
+| RTX 4090 | 13842 / 11937 / 12313 | 185 / 176 / 174 | 1.09-1.90x | 1.05-1.31x |
+| RTX 5090 | 18609 / 15416 / 15832 | 308 / 280 / 279 | 1.21-1.94x | 1.10-1.46x |
+| H100 SXM | 12534 / 9691 / 9711 | 311 / 241 / 247 | 1.19-2.10x | 1.22-1.34x |
+
+The H100's prefill trails the 4090's: axon's int8 GEMMs use `mma.sync`, not Hopper's
+`wgmma` ([docs/design/hopper.md](docs/design/hopper.md)). pp560 gaps are wider (up to
+15x) but mostly measure the other engines' fixed per-request cost; quote pp2100.
+
+Parabellum, the dev laptop (from BENCH.md): main @ 0851798 (`--device cuda`, whole model on the GPU) vs ollama 0.35.0
 and llama.cpp 4413a19 (CUDA build, `llama-bench -ngl 99`), same GGUF files, on an
 NVIDIA GeForce RTX 5070 Ti Laptop GPU (the laptop part, not the desktop card; sm_120,
 12 GB), 2026-10-15:
@@ -287,7 +311,7 @@ that commit's own measurements, depending on the model (most on the small ones);
 the table predates them.
 
 CPU, an older run (from BENCH.md: main @ 74fe85e, 2026-10-13, before the GPU backend;
-Qwen2.5-0.5B-Instruct Q4_K_M, Intel Core Ultra 9 275HX, 18 threads, quiet machine):
+Qwen2.5-0.5B-Instruct Q4_K_M, Parabellum's Intel Core Ultra 9 275HX, 18 threads, quiet machine):
 
 | engine | pp560 | pp2100 | tg128 | tg128@1 |
 |---|---|---|---|---|
@@ -330,6 +354,15 @@ The GPU, after that:
 8. **`src/hybrid.rs`**: a model split across devices: the first layers on the CPU, the
    rest and the head on the GPU, one hidden-state copy between them per token; for
    prompts, the CPU layers' weights can be streamed through the GPU instead.
+
+## Docs
+
+- [docs/START-HERE.md](docs/START-HERE.md): what Axon is, what's on main, the bit-identity
+  contract, a map of the source tree
+- [docs/benchmarks-gpu.md](docs/benchmarks-gpu.md): GPU scoreboards with method and caveats
+- [docs/roadmap.md](docs/roadmap.md): what's next, and what isn't planned
+- [docs/design/](docs/design/): [multi-GPU](docs/design/multi-gpu.md) and
+  [Hopper](docs/design/hopper.md) designs
 
 ## Contributing
 

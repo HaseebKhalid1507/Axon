@@ -21,7 +21,7 @@ machine was doing.
 Binaries are the default build: baseline x86-64 with runtime AVX2/VNNI dispatch
 (no `target-cpu`; before the portability change the default was x86-64-v3).
 
-Model: Qwen2.5-0.5B-Instruct Q4_K_M (see CONTRIBUTING.md). Machine "bella":
+Model: Qwen2.5-0.5B-Instruct Q4_K_M (see CONTRIBUTING.md). Machine "Parabellum":
 Intel Core Ultra 9 275HX (8 P + 16 E cores, AVX2 + AVX-VNNI, no AVX-512), DDR5-5600,
 18 threads unless noted.
 
