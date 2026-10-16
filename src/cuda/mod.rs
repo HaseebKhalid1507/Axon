@@ -22,6 +22,7 @@
 
 mod ffi;
 pub mod qwen2;
+pub mod upload;
 
 use ffi::{CUcontext, CUdevice, CUdeviceptr, CUfunction, CUmodule, CUstream, Driver, check};
 use std::ffi::{CString, OsString, c_int, c_void};

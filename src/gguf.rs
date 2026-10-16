@@ -399,6 +399,10 @@ pub struct Model {
     /// and `tensor_data` reads them from it (the mapping stays the file's,
     /// shared and read-only). Empty otherwise (the copy is rewritten in place).
     side: Vec<Side>,
+    /// The file `data` maps, if it does (`tensor_file`).
+    file: Option<File>,
+    /// `read_ahead` started its thread.
+    ahead: bool,
 }
 
 /// A rewritten tensor's bytes outside a file mapping (`Model::side`).
@@ -455,6 +459,15 @@ impl Model {
             return None;
         }
         self.side.iter().find(|s| s.range == *r)
+    }
+
+    /// Where `t`'s bytes (`tensor_data`'s) can be read with pread: the
+    /// mapped file and the offset in it. None on the anonymous copy and for
+    /// a rewritten tensor (its bytes are in a side copy, not the file).
+    pub fn tensor_file(&self, t: &Tensor) -> Option<(&File, u64)> {
+        let r = self.tensor_range(t);
+        let f = self.file.as_ref().filter(|_| self.file_backed)?;
+        self.side_of(&r).is_none().then_some((f, r.start as u64))
     }
 
     /// Whether `data` maps the file (vs the anonymous copy, see `map_weights`).
@@ -531,6 +544,37 @@ impl Model {
                 .data
                 .advise_range(memmap2::Advice::PopulateRead, r.start, r.len());
         }
+    }
+
+    /// The fraction of the tensor data's file pages in the page cache
+    /// (mincore), or None on the anonymous copy or if it can't be told.
+    /// ~1 ms for a 5 GB file.
+    pub fn resident_fraction(&self) -> Option<f64> {
+        if !self.file_backed || !cfg!(target_os = "linux") {
+            return None;
+        }
+        unsafe extern "C" {
+            fn mincore(addr: *mut std::ffi::c_void, len: usize, vec: *mut u8) -> i32;
+        }
+        let page = page_size();
+        let start = self.data_offset as usize / page * page;
+        let len = self.data.len().checked_sub(start).filter(|&l| l > 0)?;
+        let mut v = vec![0u8; len.div_ceil(page)];
+        // SAFETY: [start, start + len) lies in our mapping and starts on a
+        // page boundary (the mapping does); v has a byte per page.
+        let r = unsafe {
+            mincore(
+                self.data.as_ptr().add(start).cast_mut().cast(),
+                len,
+                v.as_mut_ptr(),
+            )
+        };
+        (r == 0).then(|| v.iter().filter(|&&b| b & 1 != 0).count() as f64 / v.len() as f64)
+    }
+
+    /// Whether the background read-ahead (`read_ahead`) was started.
+    pub fn reading_ahead(&self) -> bool {
+        self.ahead
     }
 
     /// Whether `t` was handed back by `release`.
@@ -668,6 +712,17 @@ fn copy_file(file: &File, len: usize) -> io::Result<memmap2::Mmap> {
     anon.make_read_only()
 }
 
+/// The system page size (sysconf), 4096 if it can't be told.
+fn page_size() -> usize {
+    unsafe extern "C" {
+        fn sysconf(name: i32) -> std::ffi::c_long;
+    }
+    const SC_PAGESIZE: i32 = 30; // Linux
+    // SAFETY: sysconf has no preconditions.
+    let p = unsafe { sysconf(SC_PAGESIZE) };
+    if p > 0 { p as usize } else { 4096 }
+}
+
 /// `MemAvailable` from /proc/meminfo, in bytes.
 fn mem_available() -> Option<u64> {
     let s = std::fs::read_to_string("/proc/meminfo").ok()?;
@@ -689,6 +744,9 @@ pub fn load_with(path: &str, copy: Option<bool>) -> io::Result<Model> {
     let h = parse(&data[..len.min(data.len())])?;
     let mut m = Model::new(h, data, file_backed);
     m.unpermute_rope()?;
+    if file_backed {
+        m.file = Some(file);
+    }
     Ok(m)
 }
 
@@ -729,6 +787,7 @@ pub fn load_to_run(
     m.unpermute_rope()?;
     if !copy {
         m.read_ahead(&file);
+        m.file = Some(file);
     }
     Ok(m)
 }
@@ -752,7 +811,7 @@ impl Model {
     /// read far ahead could be dropped again before they're used (a split
     /// model hands its uploaded part back as it goes). AXON_READAHEAD=0
     /// turns it off. Best effort: errors are ignored.
-    fn read_ahead(&self, file: &File) {
+    fn read_ahead(&mut self, file: &File) {
         if std::env::var("AXON_READAHEAD").is_ok_and(|v| v == "0")
             || mem_available().is_none_or(|a| self.data.len() as u64 > a / 2)
         {
@@ -781,7 +840,7 @@ impl Model {
             })
             .collect();
         spans.sort_unstable();
-        let _ = std::thread::Builder::new()
+        self.ahead = std::thread::Builder::new()
             .name("axon-readahead".into())
             .spawn(move || {
                 // SAFETY: read-only, never written through; only advised.
@@ -799,7 +858,8 @@ impl Model {
                         at += n;
                     }
                 }
-            });
+            })
+            .is_ok();
     }
 }
 
@@ -815,6 +875,8 @@ impl Model {
             released: Default::default(),
             any_released: Default::default(),
             side: Vec::new(),
+            file: None,
+            ahead: false,
         }
     }
 
@@ -1226,6 +1288,8 @@ pub fn build_for_test_with(
         released: Default::default(),
         any_released: Default::default(),
         side: Vec::new(),
+        file: None,
+        ahead: false,
     }
 }
 
@@ -1379,6 +1443,22 @@ mod tests {
             m.release(t);
             assert!(m.is_released(t));
         }
+    }
+
+    /// `resident_fraction`: all of a file just written and read is in the
+    /// page cache; the anonymous copy has no answer.
+    #[test]
+    fn resident_fraction_of_a_read_file() {
+        let path = std::env::temp_dir().join(format!("axon-resident-{}.gguf", std::process::id()));
+        std::fs::write(&path, valid().pad_to(32, 64 + (1 << 20))).unwrap();
+        let p = path.to_str().unwrap();
+        let mapped = load_with(p, Some(false)).unwrap();
+        let _ = mapped.data.iter().fold(0u8, |a, &b| a ^ b); // touch every page
+        let f = mapped.resident_fraction().expect("a file mapping");
+        let copied = load_with(p, Some(true)).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(f > 0.99, "{f}");
+        assert_eq!(copied.resident_fraction(), None);
     }
 
     /// A string array long enough for the threaded parse (`Reader::strings`)
