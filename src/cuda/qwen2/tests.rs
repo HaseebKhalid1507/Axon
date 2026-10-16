@@ -3111,7 +3111,12 @@ fn prefill_bits(m: &Model, name: &str, kv: CacheKv) {
     // the GPU's own split count, then 8: attn_blk grids of 8 warps per kv
     // head, each taking several blocks; or splits of more than 32
     // positions past 256.
-    let paths: &[bool] = if km.mma() { &[true, false] } else { &[false] };
+    // (Head size 256, gemma3: the split kernels only.)
+    let paths: &[bool] = if km.mma() && net.head_dim != 256 {
+        &[true, false]
+    } else {
+        &[false]
+    };
     let own = net.max_split;
     for (&tc, max_split) in paths.iter().flat_map(|t| [(t, own), (t, 8)]) {
         net.set_tc_attn(tc);
@@ -5929,5 +5934,490 @@ fn gemmh_plain_routing() {
         assert!(!gemmh_plain(512, 512, sms));
         assert!(!gemmh_plain(512, 1050, sms));
         assert!(!gemmh_plain(896, 1050, sms));
+    }
+}
+
+/// Gemma 3 1B Q8_0 (head size 256, 4 query heads on 1, sliding window 512,
+/// tied Q8_0 head of 262144 rows), mapped; and the 4B Q4_K_M if present
+/// (8 on 4, window 1024, linear RoPE scaling 8 on the global layers).
+fn gemma3_mapped() -> Option<Model> {
+    crate::testutil::gemma3_model_path()?;
+    model_at(crate::testutil::GEMMA3_MODEL)
+}
+const GEMMA3_4B: &str = "models/google_gemma-3-4b-it-Q4_K_M.gguf";
+const GEMMA3_1B_Q4: &str = "models/google_gemma-3-1b-it-Q4_K_M.gguf";
+
+/// The batching contract on gemma3: 1200 tokens cross the 1B's 512 window
+/// (and the 4B's 1024), so batched passes and decode steps both run the
+/// windowed attention, the post-norms, GeGLU and the two RoPE tables.
+#[test]
+fn gpu_gemma3_prefill_and_verify_bits() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = gemma3_mapped() else {
+        return;
+    };
+    prefill_bits(&m, "gemma3 1B", CacheKv::F16);
+    verify_bits(&m, "gemma3 1B", CacheKv::F16);
+    if let Some(mq) = model_at(GEMMA3_1B_Q4) {
+        prefill_bits(&mq, "gemma3 1B Q4_K_M", CacheKv::F16);
+        verify_bits(&mq, "gemma3 1B Q4_K_M", CacheKv::F16);
+    }
+    if let Some(m4) = model_at(GEMMA3_4B) {
+        prefill_bits(&m4, "gemma3 4B", CacheKv::F16);
+        verify_bits(&m4, "gemma3 4B", CacheKv::F16);
+    }
+}
+
+/// `assert_graded` for gemma3, whose CPU disagrees with itself more than
+/// Qwen's does (1B Q8_0, sm_120 and sm_89: CPU per-row vs repacked max
+/// |dlogit| 7.3, a top-1 flip at margin 1.6): the same top-1, flip-margin
+/// (all below max(0.5, the CPU's own spread), at most max(2, 1%) at 0.5 or
+/// more), mean-KL, max-KL and |dlogit| bounds. A position with KL above 0.5
+/// passes if the reference's top-2 margin there is below that tie bound (a
+/// near-tie either side may resolve), or else if `ref_ok(index)` holds: the
+/// independent f64 `gemma3_ref` on that prefix is at least as close to the
+/// GPU as (twice) to the CPU (`gemma3_ref_closer`).
+fn assert_graded_gemma(ag: &Agree, ac: &Agree, ref_ok: &dyn Fn(usize) -> bool) {
+    let n = ag.positions;
+    assert!(
+        ag.top1 * 100 + 2 * n >= ac.top1 * 100 && ag.top1 * 100 >= 94 * n,
+        "top-1 agreement {}/{n} (cpu vs itself {})",
+        ag.top1,
+        ac.top1
+    );
+    let tie = ac.max_abs.max(0.5);
+    let wide = ag.flips.iter().filter(|&&d| d >= 0.5).count();
+    assert!(
+        ag.flips.iter().all(|&d| d < tie) && wide <= (n / 100).max(2),
+        "a top-1 flip with margin >= {tie} or {wide} >= 0.5: {:?}",
+        ag.flips
+    );
+    assert!(ag.sum_kl <= 2.0 * ac.sum_kl, "mean KL");
+    assert!(ag.max_kl < 2.0, "max KL {}", ag.max_kl);
+    for &(i, k, mg, _) in &ag.over_half {
+        assert!(
+            mg < tie || ref_ok(i),
+            "KL {k} at position {i} (reference margin {mg} >= {tie}), and the f64 reference \
+             isn't as close to the GPU as to the CPU there"
+        );
+    }
+    assert!(ag.max_abs < 6.0, "max logit difference");
+}
+
+/// KL(p || q) of f64 logits p and f32 logits q.
+fn kl64(p: &[f64], q: &[f32]) -> f64 {
+    let lse = |v: &mut dyn Iterator<Item = f64>| -> Vec<f64> {
+        let v: Vec<f64> = v.collect();
+        let mx = v.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        let z = v.iter().map(|x| (x - mx).exp()).sum::<f64>().ln() + mx;
+        v.iter().map(|x| x - z).collect()
+    };
+    let lp = lse(&mut p.iter().copied());
+    let lq = lse(&mut q.iter().map(|&x| x as f64));
+    lp.iter().zip(&lq).map(|(a, b)| a.exp() * (a - b)).sum()
+}
+
+/// At `prefix` (the last token included), whether the f64 `gemma3_ref`
+/// next-token distribution is as close to the GPU's as to the CPU's:
+/// KL(ref || gpu) <= max(0.5, 2 KL(ref || cpu)). Fresh caches (both
+/// backends' batched prefill equals their decode bit for bit).
+fn gemma3_ref_closer(m: &Model, cpu: &Qwen2, gpu: &CudaQwen2, prefix: &[u32]) -> bool {
+    let n = prefix.len();
+    let r = &crate::model::gemma3_tests::gemma3_ref(m, prefix, &[n - 1])[0];
+    let mut cc = cpu.new_cache(n);
+    cpu.feed_batch(&prefix[..n - 1], 0, &mut cc);
+    let lc = cpu.forward(prefix[n - 1], n - 1, &mut cc);
+    let mut gc = gpu.new_cache(n);
+    gpu.feed_batch(&prefix[..n - 1], 0, &mut gc);
+    let lg = gpu.forward(prefix[n - 1], n - 1, &mut gc);
+    let (kg, kc) = (kl64(r, &lg), kl64(r, &lc));
+    eprintln!("gemma3 ref at {n} tokens: KL(ref||gpu) {kg:.4}, KL(ref||cpu) {kc:.4}");
+    kg <= (2.0 * kc).max(0.5)
+}
+
+/// `continuations_with`'s walk, returning every divergence's reference
+/// margin: (identical, matched tokens, margins).
+fn continuation_margins<R: Lm, O: Lm>(
+    r: &R,
+    o: &O,
+    tok: &crate::tokenizer::Tokenizer,
+) -> (usize, usize, Vec<f32>) {
+    let (mut same, mut matched, mut margins) = (0, 0, Vec::new());
+    for p in PROMPTS {
+        let ids = tok.encode(p);
+        let (to, _) = greedy(o, &ids, 32, false);
+        let (tr, lr) = greedy(r, &ids, 32, true);
+        match (0..32).find(|&i| to[i] != tr[i]) {
+            None => {
+                same += 1;
+                matched += 32;
+            }
+            Some(i) => {
+                matched += i;
+                margins.push(lr[i][tr[i] as usize] - lr[i][to[i] as usize]);
+            }
+        }
+    }
+    (same, matched, margins)
+}
+
+/// One gemma3 file: GPU vs CPU logits graded (`assert_graded_gemma`, with
+/// the f64 reference judging positions of KL above 0.5 that aren't
+/// near-ties), and greedy continuations whose divergences all have a
+/// reference margin below max(0.5, the largest the CPU's own kernel sets
+/// diverge at).
+fn gemma3_vs_cpu(m: &Model, name: &str) {
+    let g = crate::testutil::gpu().unwrap();
+    let km = Kernels::module_for(&g, m).unwrap();
+    let tok = crate::tokenizer::Tokenizer::from_gguf(m);
+    let gpu = CudaQwen2::new(&g, &km, m, 256).unwrap();
+    let rows = Qwen2::new_with(m, false);
+    let cpu = Qwen2::new(m);
+    const STEPS: usize = 32;
+    let (mut ag, mut ac) = (Agree::default(), Agree::default());
+    let mut seqs = Vec::new();
+    for p in PROMPTS {
+        let ids = tok.encode(p);
+        compare(&cpu, &gpu, &ids, STEPS, &mut ag);
+        compare(&cpu, &rows, &ids, STEPS, &mut ac);
+        // compare's position s of this prompt follows ids + the CPU's
+        // first s greedy picks.
+        let (picks, _) = greedy(&cpu, &ids, STEPS, false);
+        seqs.push((ids, picks));
+    }
+    report(&format!("{name} gpu vs cpu"), &ag);
+    report(&format!("{name} cpu rows vs cpu"), &ac);
+    let ref_ok = |i: usize| {
+        let (k, s) = ((i - 1) / (STEPS + 1), (i - 1) % (STEPS + 1));
+        let (ids, picks) = &seqs[k];
+        let prefix: Vec<u32> = ids.iter().chain(&picks[..s]).copied().collect();
+        gemma3_ref_closer(m, &cpu, &gpu, &prefix)
+    };
+    assert_graded_gemma(&ag, &ac, &ref_ok);
+    let (cs, cm, cmar) = continuation_margins(&cpu, &rows, &tok);
+    let (gs, gm, gmar) = continuation_margins(&cpu, &gpu, &tok);
+    let tie = cmar.iter().cloned().fold(0.5f32, f32::max);
+    eprintln!(
+        "{name} continuations: gpu {gs}/{} identical, {gm} tokens, margins {gmar:?}; cpu rows \
+         {cs}, {cm}, margins {cmar:?} (tie {tie})",
+        PROMPTS.len()
+    );
+    assert!(
+        gmar.iter().all(|&d| d < tie),
+        "not a near-tie: {gmar:?} (tie {tie})"
+    );
+    assert!(
+        gs + 2 >= cs,
+        "identical continuations: gpu {gs}, cpu rows {cs}"
+    );
+    assert!(2 * gm + 32 >= cm, "matched tokens: gpu {gm}, cpu rows {cm}");
+}
+
+/// Diagnostic (ignored): the 1B Q4_K_M, GPU vs CPU over PROMPTS
+/// as `gemma3_vs_cpu`; at every top-1 flip, the f64 `gemma3_ref` there:
+/// its top two, KL(ref || gpu), KL(ref || cpu), KL(ref || cpu rows).
+#[test]
+#[ignore]
+fn gemma3_flip_probe() {
+    use crate::model::gemma3_tests::gemma3_ref;
+    let g = crate::testutil::gpu().unwrap();
+    let m = model_at(GEMMA3_1B_Q4).unwrap();
+    let km = Kernels::module_for(&g, &m).unwrap();
+    let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
+    let gpu = CudaQwen2::new(&g, &km, &m, 256).unwrap();
+    let rows = Qwen2::new_with(&m, false);
+    let cpu = Qwen2::new(&m);
+    const STEPS: usize = 32;
+    let mut ag = Agree::default();
+    let mut seqs = Vec::new();
+    for p in PROMPTS {
+        let ids = tok.encode(p);
+        compare(&cpu, &gpu, &ids, STEPS, &mut ag);
+        let (picks, _) = greedy(&cpu, &ids, STEPS, false);
+        seqs.push((ids, picks));
+    }
+    report("probe gpu vs cpu", &ag);
+    let fresh = |net: &dyn Fn(&[u32]) -> Vec<f32>, pre: &[u32]| net(pre);
+    for &i in &ag.flip_at {
+        let (k, st) = ((i - 1) / (STEPS + 1), (i - 1) % (STEPS + 1));
+        let (ids, picks) = &seqs[k];
+        let pre: Vec<u32> = ids.iter().chain(&picks[..st]).copied().collect();
+        let n = pre.len();
+        let r = &gemma3_ref(&m, &pre, &[n - 1])[0];
+        let run_cpu = |net: &Qwen2| {
+            let mut c = net.new_cache(n);
+            net.feed_batch(&pre[..n - 1], 0, &mut c);
+            net.forward(pre[n - 1], n - 1, &mut c)
+        };
+        let lc = run_cpu(&cpu);
+        let lr = run_cpu(&rows);
+        let lg = fresh(
+            &|p: &[u32]| {
+                let mut c = gpu.new_cache(n);
+                gpu.feed_batch(&p[..n - 1], 0, &mut c);
+                gpu.forward(p[n - 1], n - 1, &mut c)
+            },
+            &pre,
+        );
+        let r32: Vec<f32> = r.iter().map(|&v| v as f32).collect();
+        let (rt, gt, ct) = (crate::argmax(&r32), crate::argmax(&lg), crate::argmax(&lc));
+        eprintln!(
+            "flip at {i} (prompt {k} step {st}): ref top {rt} margin(ref top - gpu top) {:.3}, \
+             (ref top - cpu top) {:.3}; KL(ref||gpu) {:.4} KL(ref||cpu) {:.4} KL(ref||rows) {:.4}; \
+             cpu margin {:.3} gpu margin {:.3}",
+            r[rt as usize] - r[gt as usize],
+            r[rt as usize] - r[ct as usize],
+            kl64(r, &lg),
+            kl64(r, &lc),
+            kl64(r, &lr),
+            lc[ct as usize] - lc[gt as usize],
+            lg[gt as usize] - lg[ct as usize],
+        );
+    }
+}
+
+/// Every position of `gemma3_vs_cpu`'s walk (PROMPTS, the CPU's greedy
+/// picks fed to both) against the f64 `gemma3_ref` on the same tokens:
+/// per backend the mean and max KL(ref || backend) and how often its top-1
+/// is the reference's. (gpu, cpu, cpu rows) in that order.
+fn gemma3_ref_walk(
+    m: &Model,
+    gpu: &CudaQwen2,
+    cpu: &Qwen2,
+    rows: &Qwen2,
+    steps: usize,
+) -> [(f64, f64, usize, usize); 3] {
+    use crate::model::gemma3_tests::{gemma3_ref, top1};
+    let tok = crate::tokenizer::Tokenizer::from_gguf(m);
+    let mut acc = [(0f64, 0f64, 0usize, 0usize); 3];
+    for p in PROMPTS {
+        let ids = tok.encode(p);
+        let (picks, _) = greedy(cpu, &ids, steps, false);
+        let seq: Vec<u32> = ids.iter().chain(&picks).copied().collect();
+        let first = ids.len() - 1;
+        let at: Vec<usize> = (first..seq.len()).collect();
+        let r = gemma3_ref(m, &seq, &at);
+        let walk = |lm: &dyn Fn(u32, usize) -> Vec<f32>| -> Vec<Vec<f32>> {
+            at.iter().map(|&p| lm(seq[p], p)).collect()
+        };
+        let mut gc = gpu.new_cache(seq.len());
+        gpu.feed_batch(&seq[..first], 0, &mut gc);
+        let gl = {
+            let gc = std::cell::RefCell::new(gc);
+            walk(&|t, p| gpu.forward(t, p, &mut gc.borrow_mut()))
+        };
+        let run = |net: &Qwen2| {
+            let c = std::cell::RefCell::new(net.new_cache(seq.len()));
+            net.feed_batch(&seq[..first], 0, &mut c.borrow_mut());
+            walk(&|t, p| net.forward(t, p, &mut c.borrow_mut()))
+        };
+        let (cl, rl) = (run(cpu), run(rows));
+        for (b, ls) in [gl, cl, rl].iter().enumerate() {
+            for (l, rr) in ls.iter().zip(&r) {
+                let k = kl64(rr, l);
+                let l64: Vec<f64> = l.iter().map(|&v| v as f64).collect();
+                acc[b].0 += k;
+                acc[b].1 = acc[b].1.max(k);
+                acc[b].2 += (top1(&l64) == top1(rr)) as usize;
+                acc[b].3 += 1;
+            }
+        }
+    }
+    for a in &mut acc {
+        a.0 /= a.3 as f64;
+    }
+    acc
+}
+
+/// Diagnostic (ignored): `gemma3_ref_walk` on the 1B Q8_0 and Q4_K_M.
+#[test]
+#[ignore]
+fn gemma3_ref_walk_probe() {
+    let g = crate::testutil::gpu().unwrap();
+    for path in [crate::testutil::GEMMA3_MODEL, GEMMA3_1B_Q4] {
+        let Some(m) = model_at(path) else { continue };
+        let km = Kernels::module_for(&g, &m).unwrap();
+        let gpu = CudaQwen2::new(&g, &km, &m, 256).unwrap();
+        let rows = Qwen2::new_with(&m, false);
+        let cpu = Qwen2::new(&m);
+        let a = gemma3_ref_walk(&m, &gpu, &cpu, &rows, 32);
+        for (name, (mean, mx, top, n)) in ["gpu", "cpu", "cpu rows"].iter().zip(a) {
+            eprintln!("{path} {name} vs f64 ref: mean KL {mean:.4} max {mx:.4}, top-1 {top}/{n}");
+        }
+    }
+}
+
+/// Diagnostic (ignored, CPU only): the 1B Q4_K_M at AXON_PROBE's
+/// "prompt:step,..." positions of `gemma3_flip_probe`'s walk: KL(ref ||
+/// cpu) and KL(ref || cpu rows) against the f64 `gemma3_ref`.
+#[test]
+#[ignore]
+fn gemma3_cpu_probe() {
+    use crate::model::gemma3_tests::gemma3_ref;
+    let m = model_at(GEMMA3_1B_Q4).unwrap();
+    let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
+    let rows = Qwen2::new_with(&m, false);
+    let cpu = Qwen2::new(&m);
+    for spec in std::env::var("AXON_PROBE").unwrap().split(',') {
+        let (k, st) = spec.split_once(':').unwrap();
+        let (k, st): (usize, usize) = (k.parse().unwrap(), st.parse().unwrap());
+        let ids = tok.encode(PROMPTS[k]);
+        let (picks, _) = greedy(&cpu, &ids, 32, false);
+        let pre: Vec<u32> = ids.iter().chain(&picks[..st]).copied().collect();
+        let n = pre.len();
+        let r = &gemma3_ref(&m, &pre, &[n - 1])[0];
+        let run = |net: &Qwen2| {
+            let mut c = net.new_cache(n);
+            net.feed_batch(&pre[..n - 1], 0, &mut c);
+            net.forward(pre[n - 1], n - 1, &mut c)
+        };
+        let (lc, lr) = (run(&cpu), run(&rows));
+        eprintln!(
+            "probe {k}:{st} ({n} tokens): KL(ref||cpu) {:.4} KL(ref||rows) {:.4}",
+            kl64(r, &lc),
+            kl64(r, &lr)
+        );
+    }
+}
+
+/// A gemma3 file graded against the independent f64 `gemma3_ref` instead
+/// of the CPU (`gemma3_ref_walk`): the GPU's top-1 agrees with the
+/// reference within 2% of positions of the CPU's own agreement, its mean
+/// KL(ref || gpu) is at most twice the CPU's, and no position is above 2.
+/// For the 1B Q4_K_M, whose Q4_K / Q6_K products take Q8_K activations (one
+/// scale per 256 values; Gemma's residual stream has large outliers), the
+/// CPU itself is far from the reference at some positions (KL up to 0.53;
+/// per-row vs repacked CPU kernels 0.47), so GPU vs CPU flips there say
+/// little. Measured (sm_61 jade, same numbers as sm_89): top-1 vs ref gpu
+/// 191/198, cpu 191, cpu rows 192; mean KL 0.0201 / 0.0151 / 0.0124; max
+/// 0.86 / 0.53 / 0.47. (The 1B Q8_0, same walk: 194 / 195 / 193, mean
+/// 0.0093 / 0.0103 / 0.0138.) A decode-only SiLU on these narrow rows
+/// (#30's gate_up4) is caught by gpu_gemma3_prefill_and_verify_bits on
+/// this file: the batched FFN has no gate_up4.
+fn gemma3_vs_ref(m: &Model, name: &str) {
+    let g = crate::testutil::gpu().unwrap();
+    let km = Kernels::module_for(&g, m).unwrap();
+    let gpu = CudaQwen2::new(&g, &km, m, 256).unwrap();
+    let rows = Qwen2::new_with(m, false);
+    let cpu = Qwen2::new(m);
+    let [ag, ac, ar] = gemma3_ref_walk(m, &gpu, &cpu, &rows, 32);
+    eprintln!(
+        "{name} vs f64 ref: gpu mean KL {:.4} max {:.4} top-1 {}/{}; cpu {:.4} {:.4} {}; cpu rows \
+         {:.4} {:.4} {}",
+        ag.0, ag.1, ag.2, ag.3, ac.0, ac.1, ac.2, ar.0, ar.1, ar.2
+    );
+    let n = ag.3;
+    assert!(
+        ag.2 * 100 + 2 * n >= ac.2 * 100,
+        "top-1 vs reference: gpu {} cpu {}",
+        ag.2,
+        ac.2
+    );
+    assert!(
+        ag.0 <= 2.0 * ac.0,
+        "mean KL vs reference: gpu {} cpu {}",
+        ag.0,
+        ac.0
+    );
+    assert!(ag.1 < 2.0, "max KL vs reference {}", ag.1);
+}
+
+/// gemma3 GPU vs CPU (`gemma3_vs_cpu`) on the 1B Q8_0, the 1B Q4_K_M
+/// against the f64 reference (`gemma3_vs_ref`; its narrow gate/up rows go
+/// through the gate/up selection #30's gate_up4 sits in), then past the
+/// 1B's 512 window (an 1100-token prompt, as
+/// gpu_logits_match_cpu_long_context).
+#[test]
+fn gpu_gemma3_logits_match_cpu() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = gemma3_mapped() else {
+        return;
+    };
+    gemma3_vs_cpu(&m, "gemma3 1B Q8_0");
+    if let Some(mq) = model_at(GEMMA3_1B_Q4) {
+        gemma3_vs_ref(&mq, "gemma3 1B Q4_K_M");
+    }
+    let km = Kernels::module(&g).unwrap();
+    let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
+    let rows = Qwen2::new_with(&m, false);
+    let cpu = Qwen2::new(&m);
+    let gpu = CudaQwen2::new(&g, &km, &m, 1300).unwrap();
+    let (mut ag, mut ac) = (Agree::default(), Agree::default());
+    for p in [PROMPTS[2], PROMPTS[1]] {
+        let one = tok.encode(&format!("{p} "));
+        let ids: Vec<u32> = one
+            .iter()
+            .copied()
+            .cycle()
+            .take(1100 + one.len() / 2)
+            .collect();
+        compare(&cpu, &gpu, &ids, 8, &mut ag);
+        compare(&cpu, &rows, &ids, 8, &mut ac);
+    }
+    report("gemma3 1B long gpu vs cpu", &ag);
+    report("gemma3 1B long cpu rows vs cpu", &ac);
+    // (A reference pass over 1100 tokens is too slow: positions above 0.5
+    // here must be near-ties.)
+    assert_graded_gemma(&ag, &ac, &|_| false);
+}
+
+/// The GPU's gemma3 (decode with and without graphs, batched prefill)
+/// against model.rs's independent f64 `gemma3_ref`, with the file's window
+/// and with a window of 6 (shorter than the prompt): max |dlogit| within
+/// the CPU's bound (1.0; the CPU measures ~0.55 there) and the same top
+/// token.
+#[test]
+fn gpu_gemma3_matches_reference_forward() {
+    use crate::model::gemma3_tests::{gemma3_ref, top1};
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(path) = crate::testutil::gemma3_model_path() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let ids: Vec<u32> = vec![2, 818, 5279, 529, 7001, 563, 9079, 236761, 669, 5279, 529];
+    let n = ids.len();
+    for window in [None, Some(6u32)] {
+        let mut m = crate::gguf::load_with(path.to_str().unwrap(), Some(false)).unwrap();
+        if let Some(w) = window {
+            for (k, v) in m.metadata.iter_mut() {
+                if k == "gemma3.attention.sliding_window" {
+                    *v = crate::gguf::Val::U32(w);
+                }
+            }
+        }
+        let want = gemma3_ref(&m, &ids, &[n - 1]);
+        let mut net = CudaQwen2::new(&g, &km, &m, 16).unwrap();
+        for graphs in [true, false] {
+            net.graphs = graphs;
+            let mut c = net.new_cache(n);
+            let mut dec = Vec::new();
+            for (p, &id) in ids.iter().enumerate() {
+                dec = net.forward(id, p, &mut c);
+            }
+            let mut c = net.new_cache(n);
+            net.feed_batch(&ids[..n - 1], 0, &mut c);
+            let pre = net.forward(ids[n - 1], n - 1, &mut c);
+            assert_eq!(
+                bits(&pre),
+                bits(&dec),
+                "window {window:?}: prefill != decode"
+            );
+            let d = dec
+                .iter()
+                .zip(&want[0])
+                .fold(0f64, |mx, (&a, &b)| mx.max((a as f64 - b).abs()));
+            let d64: Vec<f64> = dec.iter().map(|&v| v as f64).collect();
+            eprintln!(
+                "gemma3 gpu window {window:?} graphs {graphs} vs reference: max |dlogit| {d:.4}"
+            );
+            assert!(d < 1.0, "window {window:?}: {d}");
+            assert_eq!(top1(&d64), top1(&want[0]), "window {window:?}: top token");
+        }
     }
 }

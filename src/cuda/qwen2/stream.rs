@@ -322,6 +322,10 @@ impl<'g> CudaQwen2<'g> {
                 gate: mat(gate),
                 up: mat(up),
                 down: mat(down),
+                // gemma3 never streams (hybrid refuses it).
+                post_attn: None,
+                post_ffn: None,
+                win: 0,
             });
         }
         let stage = Self::stage_for(src);

@@ -176,6 +176,12 @@ struct LayerW {
     gate: Mat,
     up: Mat,
     down: Mat,
+    /// gemma3: the norms of the attention and FFN outputs (rmsnorm_add).
+    post_attn: Option<usize>,
+    post_ffn: Option<usize>,
+    /// gemma3 local layer: its window (0: global), and the local RoPE
+    /// table (`CudaCache::rope_swa`) instead of the global one.
+    win: u32,
 }
 
 /// How a cache stores keys and values (`CudaQwen2::kv`).
@@ -189,6 +195,13 @@ pub enum CacheKv {
     /// the same memory. Results differ from f16's (measured in the tests);
     /// the batching contract holds within the mode.
     Q8 { group: usize },
+}
+
+/// The gemma3 graph's settings (model.rs `Qwen2`'s gemma3 parts).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct GemmaCfg {
+    /// The embedding's scale, sqrt(dim) in f32.
+    pub(super) embed_scale: f32,
 }
 
 /// The q8 kernels for one scale group size (`CacheKv::Q8`).
@@ -257,6 +270,13 @@ struct Fns<'m> {
     q8: [Q8Fns<'m>; 2],
     /// sample.cu.
     samp_topk: Func<'m>,
+    /// gemma.cu (gemma3): the scaled embedding, the post-norm residual
+    /// add, GeGLU, and the windowed attention at head size 256.
+    embed_s: Func<'m>,
+    rmsnorm_add: Func<'m>,
+    gate_up_gelu: Func<'m>,
+    attn_split_w: Func<'m>,
+    attn_combine_w: Func<'m>,
 }
 
 /// Largest dim rmsnorm_quant_v2 takes (decode.cu NORM2_MAX: dim floats of
@@ -341,6 +361,11 @@ pub struct CudaQwen2<'g> {
     vecs: DevBuf<'g>,
     /// RoPE frequencies, f64 (base^(-2i/hd), as model.rs rope_table).
     freq: DevBuf<'g>,
+    /// gemma3: the local layers' RoPE frequencies (model.rs
+    /// rope_freqs_swa), empty otherwise; and the gemma3 graph's extras
+    /// (gemma.cu: embedding scale sqrt(dim), post-norms, GeGLU, windows).
+    freq_swa: DevBuf<'g>,
+    pub(super) gemma: Option<GemmaCfg>,
     /// None when first > 0: tokens are embedded by the backend that runs
     /// the first layers.
     embd: Option<Mat>,
@@ -416,6 +441,8 @@ pub struct CudaCache<'g> {
     best: DevBuf<'g>,
     /// This token's RoPE (sin, cos) per frequency.
     rope: DevBuf<'g>,
+    /// gemma3's local layers' table (empty otherwise).
+    rope_swa: DevBuf<'g>,
     /// {token, pos}, read by the kernels.
     params: DevBuf<'g>,
     host_params: HostBuf<'g>,
@@ -443,6 +470,7 @@ struct Plan<'m> {
     uploads: Vec<(&'m Tensor, usize)>,
     total: usize,
     vecs: Vec<f32>,
+    freq_swa: Vec<f64>,
     freq: Vec<f64>,
 }
 
@@ -788,6 +816,11 @@ impl<'g> CudaQwen2<'g> {
         net.freq = gpu.alloc(plan.freq.len() * 8)?;
         let fb: Vec<u64> = plan.freq.iter().map(|f| f.to_bits()).collect();
         net.freq.write(&fb)?;
+        if !plan.freq_swa.is_empty() {
+            net.freq_swa = gpu.alloc(plan.freq_swa.len() * 8)?;
+            let fb: Vec<u64> = plan.freq_swa.iter().map(|f| f.to_bits()).collect();
+            net.freq_swa.write(&fb)?;
+        }
         if first == 0 {
             net.make_q6k8(ctx)?;
         }
@@ -978,6 +1011,17 @@ impl<'g> CudaQwen2<'g> {
         split_batch: usize,
     ) -> Result<(CudaQwen2<'g>, Plan<'m>), String> {
         crate::model::check_supported(m).map_err(|e| e.to_string())?;
+        let gemma = m.arch == "gemma3";
+        if gemma && first > 0 {
+            return Err(
+                "gemma3 doesn't split across the CPU and GPU yet: the whole model \
+                        goes on the GPU (a smaller --ctx), or --device cpu"
+                    .into(),
+            );
+        }
+        if gemma && kv != CacheKv::F16 {
+            return Err("gemma3 has no q8 KV cache on the GPU yet (--kv f16)".into());
+        }
         if super::needs_ext(m) && !module.ext() {
             return Err(
                 "the model has Q4_0/Q4_1/Q5_1/Q5_K tensors: it needs the kernels \
@@ -1000,11 +1044,23 @@ impl<'g> CudaQwen2<'g> {
         let freq = crate::model::rope_freqs(m, head_dim);
         let trained = meta(m, "context_length").unwrap_or(32768.0);
         let group = n_heads / n_kv_heads;
-        if head_dim != 64 && head_dim != 128 {
+        // gemma3: head size 256 (gemma.cu's split attention: its query
+        // heads of a kv head share attn_split_t's MAX_GROUP * 128 floats).
+        let hd256 = gemma && head_dim == 256 && group * head_dim <= MAX_GROUP * 128;
+        if head_dim != 64 && head_dim != 128 && !hd256 {
             return Err(format!(
-                "head size {head_dim} isn't supported on the GPU (64 or 128)"
+                "head size {head_dim} isn't supported on the GPU (64 or 128; 256 on gemma3)"
             ));
         }
+        let swa = crate::model::gemma_swa(m, n_layers);
+        let freq_swa = match &swa {
+            Some(_) => crate::model::rope_freqs_swa(m, head_dim),
+            None => Vec::new(),
+        };
+        // The tensor-core attention and q8 cache kernels have no head size
+        // 256 build: their slots hold the 128 ones, which a gemma3 model
+        // never launches (tc_attn off, q8 refused above).
+        let hdk = if head_dim == 256 { 128 } else { head_dim };
         if group > MAX_GROUP {
             return Err(format!(
                 "{group} query heads per kv head isn't supported on the GPU (at most {MAX_GROUP})"
@@ -1089,6 +1145,14 @@ impl<'g> CudaQwen2<'g> {
             let mut opt = |s: &str| tensor_opt(m, &name(s)).map(|t| push_vec(vec_f32(m, t)));
             let (bq, bk, bv) = (opt("attn_q.bias"), opt("attn_k.bias"), opt("attn_v.bias"));
             let (qn, kn) = (opt("attn_q_norm.weight"), opt("attn_k_norm.weight"));
+            let (post_attn, post_ffn) = (
+                opt("post_attention_norm.weight"),
+                opt("post_ffw_norm.weight"),
+            );
+            let win = match &swa {
+                Some(s) if s.local[i] => s.window as u32,
+                _ => 0,
+            };
             if qn.is_some() != kn.is_some() {
                 return Err(format!(
                     "blk.{i}: a q norm without a k norm (or the reverse)"
@@ -1130,6 +1194,9 @@ impl<'g> CudaQwen2<'g> {
                 gate,
                 up,
                 down,
+                post_attn,
+                post_ffn,
+                win,
             });
         }
         let total = uploads
@@ -1158,13 +1225,13 @@ impl<'g> CudaQwen2<'g> {
                 qkv_rope: module.function("qkv_rope")?,
                 gate_up: module.function("gate_up")?,
                 gate_up4: module.function("gate_up4")?,
-                attn_split: module.function(if head_dim == 64 {
+                attn_split: module.function(if hdk == 64 {
                     "attn_split_64"
                 } else {
                     "attn_split_128"
                 })?,
                 attn_combine: module.function("attn_combine")?,
-                attn_blk: module.function(if head_dim == 64 {
+                attn_blk: module.function(if hdk == 64 {
                     "attn_blk_64"
                 } else {
                     "attn_blk_128"
@@ -1172,11 +1239,13 @@ impl<'g> CudaQwen2<'g> {
                 attn_cmb: module.function("attn_cmb")?,
                 argmax: module.function("argmax")?,
                 qkv_rope_f32: module.function("qkv_rope_f32")?,
-                q8: [
-                    Q8Fns::new(module, head_dim, head_dim)?,
-                    Q8Fns::new(module, head_dim, 32)?,
-                ],
+                q8: [Q8Fns::new(module, hdk, hdk)?, Q8Fns::new(module, hdk, 32)?],
                 samp_topk: module.function("samp_topk")?,
+                embed_s: module.function("embed_s")?,
+                rmsnorm_add: module.function("rmsnorm_add")?,
+                gate_up_gelu: module.function("gate_up_gelu")?,
+                attn_split_w: module.function("attn_split_w_256")?,
+                attn_combine_w: module.function("attn_combine_w")?,
             },
             n_layers,
             dim,
@@ -1193,14 +1262,18 @@ impl<'g> CudaQwen2<'g> {
             w8: gpu.alloc(0)?,
             vecs: gpu.alloc(0)?,
             freq: gpu.alloc(0)?,
+            freq_swa: gpu.alloc(0)?,
+            gemma: gemma.then(|| GemmaCfg {
+                embed_scale: (dim as f32).sqrt(),
+            }),
             embd,
             output,
             output_norm,
             layers,
             max_split,
-            tc_attn: module.mma(),
+            tc_attn: module.mma() && head_dim != 256,
             graphs: std::env::var("AXON_CUDA_GRAPHS").map_or(true, |v| v != "0"),
-            bf: batch::BatchFns::new(module, head_dim, sms)?,
+            bf: batch::BatchFns::new(module, hdk, sms)?,
             batch: if first > 0 { split_batch } else { PLAN_BATCH },
             kv,
             ctx: 0,
@@ -1225,6 +1298,7 @@ impl<'g> CudaQwen2<'g> {
             uploads,
             vecs,
             freq,
+            freq_swa,
             total,
         };
         Ok((net, plan))
@@ -1322,6 +1396,10 @@ impl<'g> CudaQwen2<'g> {
             !on || self.bf.has_mma(),
             "tensor-core attention without mma"
         );
+        assert!(
+            !on || self.head_dim != 256,
+            "no tensor-core attention at head size 256"
+        );
         self.tc_attn = on;
     }
 
@@ -1383,7 +1461,13 @@ impl<'g> CudaQwen2<'g> {
         let host_x = if self.first > 0 { self.dim * f } else { 0 };
         let act = act_bytes(self.act_len());
         let parts = self.n_heads * self.att_parts(max_ctx) * (self.head_dim + 2) * f;
+        let rope_swa = if self.freq_swa.len() > 0 {
+            self.head_dim * f
+        } else {
+            0
+        };
         kv + (self.dim + 2 * self.q_dim + self.kv_dim() + self.ffn + self.vocab + self.head_dim) * f
+            + rope_swa
             + act
             + parts
             + 64
@@ -1467,6 +1551,11 @@ impl<'g> CudaQwen2<'g> {
             logits: g.alloc(self.vocab * f)?,
             best: g.alloc(4)?,
             rope: g.alloc(self.head_dim / 2 * 8)?,
+            rope_swa: g.alloc(if self.freq_swa.len() == 0 {
+                0
+            } else {
+                self.head_dim / 2 * 8
+            })?,
             params: g.alloc(16)?,
             host_params: g.host_alloc(16)?,
             host_out: g.host_alloc(self.vocab * f)?,
@@ -1522,7 +1611,24 @@ impl<'g> CudaQwen2<'g> {
         unsafe {
             // Without the embedding, x was copied in before the step and
             // rope_table is the first kernel: no PDL overlap to ask for.
-            if let Some(embd) = &self.embd {
+            if let (Some(embd), Some(gm)) = (&self.embd, &self.gemma) {
+                g.launch(
+                    &f.embed_s,
+                    blocks(dim, 256),
+                    (256, 1, 1),
+                    0,
+                    &[
+                        Arg::I32(embd.qt as i32),
+                        w(embd),
+                        Arg::U64(embd.rb as u64),
+                        Arg::I32(dim as i32),
+                        params,
+                        Arg::F32(gm.embed_scale),
+                        c.x.arg(),
+                    ],
+                )?;
+                on_launch("embed", embd.rb)?;
+            } else if let Some(embd) = &self.embd {
                 g.launch(
                     &f.embed,
                     blocks(dim, 256),
@@ -1553,7 +1659,28 @@ impl<'g> CudaQwen2<'g> {
                 self.embd.is_some(),
             )?;
             on_launch("rope", 0)?;
+            if c.rope_swa.len() > 0 {
+                // gemma3's local layers' table.
+                self.run(
+                    &f.rope_table,
+                    (1, 1, 1),
+                    ((hd / 2) as u32, 1, 1),
+                    0,
+                    &[
+                        self.freq_swa.arg(),
+                        Arg::I32((hd / 2) as i32),
+                        params,
+                        c.rope_swa.arg(),
+                    ],
+                )?;
+                on_launch("rope", 0)?;
+            }
             for (li, l) in self.layers.iter().enumerate() {
+                // This layer's RoPE table (gemma3's local layers: their own).
+                let rope = match l.win {
+                    0 => c.rope.arg(),
+                    _ => c.rope_swa.arg(),
+                };
                 let norm = |off: usize| {
                     self.run(
                         norm_f,
@@ -1611,7 +1738,7 @@ impl<'g> CudaQwen2<'g> {
                         Arg::I32(hd as i32),
                         Arg::I32(dim as i32),
                         c.act.arg(),
-                        c.rope.arg(),
+                        rope,
                         params,
                         c.q.arg(),
                         kout[0],
@@ -1627,6 +1754,7 @@ impl<'g> CudaQwen2<'g> {
                 let mut args = vec![c.q.arg()];
                 args.extend_from_slice(&kva);
                 let attn = match c.mode {
+                    CacheKv::F16 if self.gemma.is_some() => &f.attn_split_w,
                     CacheKv::F16 if tc => &f.attn_blk,
                     CacheKv::F16 => &f.attn_split,
                     CacheKv::Q8 { .. } => {
@@ -1651,7 +1779,10 @@ impl<'g> CudaQwen2<'g> {
                 if c.mode == CacheKv::F16 {
                     // qwen3's norms (attn_split_t's QkNorm), kc_out = K.
                     args.extend_from_slice(&[c.kraw.arg(), bias(l.qn)]);
-                    args.extend_from_slice(&[bias(l.kn), Arg::F32(self.eps), c.rope.arg(), kva[0]]);
+                    args.extend_from_slice(&[bias(l.kn), Arg::F32(self.eps), rope, kva[0]]);
+                    if self.gemma.is_some() {
+                        args.push(Arg::I32(l.win as i32));
+                    }
                 } else {
                     args.push(bias(l.ksh));
                     args.extend_from_slice(&[bias(l.qn), bias(l.kn)]);
@@ -1671,29 +1802,80 @@ impl<'g> CudaQwen2<'g> {
                     &args,
                 )?;
                 on_launch("attn", 0)?;
-                self.run(
-                    if tc { &f.attn_cmb } else { &f.attn_combine },
-                    blocks(qd, 256),
-                    (256, 1, 1),
-                    0,
-                    &[
-                        c.part_o.arg(),
-                        c.part_ml.arg(),
-                        params,
-                        Arg::I32(qd as i32),
-                        Arg::I32(hd as i32),
-                        Arg::I32(if tc { nblk_max } else { self.max_split } as i32),
-                        want_k(qd),
-                        c.act.arg(),
-                        c.att.arg(),
-                    ],
-                )?;
+                let mut cargs = vec![
+                    c.part_o.arg(),
+                    c.part_ml.arg(),
+                    params,
+                    Arg::I32(qd as i32),
+                    Arg::I32(hd as i32),
+                    Arg::I32(if tc { nblk_max } else { self.max_split } as i32),
+                    want_k(qd),
+                    c.act.arg(),
+                    c.att.arg(),
+                ];
+                let combine = if self.gemma.is_some() {
+                    cargs.push(Arg::I32(l.win as i32));
+                    &f.attn_combine_w
+                } else if tc {
+                    &f.attn_cmb
+                } else {
+                    &f.attn_combine
+                };
+                self.run(combine, blocks(qd, 256), (256, 1, 1), 0, &cargs)?;
                 on_launch("combine", 0)?;
-                self.gemv(&l.o, &c.act, null, 1, &c.x)?;
-                on_launch("wo", l.o.bytes())?;
+                // gemma3: x += rmsnorm(W act) (the post-attention norm),
+                // the product through hid (free until gate_up).
+                let post_add = |y: &DevBuf, off: usize| {
+                    self.run(
+                        &f.rmsnorm_add,
+                        (1, 1, 1),
+                        (1024, 1, 1),
+                        0,
+                        &[
+                            y.arg(),
+                            vec(off),
+                            Arg::F32(self.eps),
+                            Arg::I32(dim as i32),
+                            c.x.arg(),
+                        ],
+                    )
+                };
+                match l.post_attn {
+                    Some(pa) => {
+                        self.gemv(&l.o, &c.act, null, 0, &c.hid)?;
+                        on_launch("wo", l.o.bytes())?;
+                        post_add(&c.hid, pa)?;
+                        on_launch("post_norm", 0)?;
+                    }
+                    None => {
+                        self.gemv(&l.o, &c.act, null, 1, &c.x)?;
+                        on_launch("wo", l.o.bytes())?;
+                    }
+                }
                 norm(l.ffn_norm)?;
                 on_launch("rmsnorm", 0)?;
-                if l.gate.qt == l.up.qt
+                if self.gemma.is_some() {
+                    // gemma3: GeGLU. Before gate_up4 (its SiLU is fused):
+                    // the 1B Q4_K_M's gate/up rows are 792 bytes (Q5_0, 1152 values).
+                    self.run(
+                        &f.gate_up_gelu,
+                        (self.ffn as u32, 1, 1),
+                        gemv_block,
+                        0,
+                        &[
+                            Arg::I32(l.gate.qt as i32),
+                            w(&l.gate),
+                            Arg::U64(l.gate.rb as u64),
+                            Arg::I32(l.up.qt as i32),
+                            w(&l.up),
+                            Arg::U64(l.up.rb as u64),
+                            Arg::I32(self.ffn as i32),
+                            Arg::I32(dim as i32),
+                            c.act.arg(),
+                            c.hid.arg(),
+                        ],
+                    )?;
+                } else if l.gate.qt == l.up.qt
                     && l.gate.rb < self.gate_up4_row
                     && self.ffn.is_multiple_of(2)
                 {
@@ -1747,8 +1929,20 @@ impl<'g> CudaQwen2<'g> {
                     ],
                 )?;
                 on_launch("quantize", 0)?;
-                self.gemv(&l.down, &c.act, null, 1, &c.x)?;
-                on_launch("down", l.down.bytes())?;
+                match l.post_ffn {
+                    // gemma3: x += rmsnorm(W act), the product through hid
+                    // (quantized into act already).
+                    Some(pf) => {
+                        self.gemv(&l.down, &c.act, null, 0, &c.hid)?;
+                        on_launch("down", l.down.bytes())?;
+                        post_add(&c.hid, pf)?;
+                        on_launch("post_norm", 0)?;
+                    }
+                    None => {
+                        self.gemv(&l.down, &c.act, null, 1, &c.x)?;
+                        on_launch("down", l.down.bytes())?;
+                    }
+                }
             }
             if head != Head::No {
                 self.run(

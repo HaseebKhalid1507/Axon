@@ -230,6 +230,14 @@ pub(super) struct BatchFns<'m> {
     sms: usize,
     /// stream.cu: r8/r8q blocks back to GGUF rows.
     pub(super) unpermute: Func<'m>,
+    /// gemma.cu (gemma3): the scaled embedding, the post-norm residual
+    /// add, GeGLU, q/k norms at head size 256, the windowed attention.
+    embed_s: Func<'m>,
+    rmsnorm_add: Func<'m>,
+    geglu_quant: Func<'m>,
+    rope_kv_norm_256: Func<'m>,
+    attn_split_w: Func<'m>,
+    attn_combine_w: Func<'m>,
 }
 
 impl<'m> BatchFns<'m> {
@@ -355,6 +363,12 @@ impl<'m> BatchFns<'m> {
             },
             sms,
             unpermute: module.function("unpermute_r8")?,
+            embed_s: module.function("embed_bs")?,
+            rmsnorm_add: module.function("rmsnorm_add_b")?,
+            geglu_quant: module.function("geglu_quant_b")?,
+            rope_kv_norm_256: module.function("rope_kv_norm_b_256")?,
+            attn_split_w: module.function("attn_split_bw_256")?,
+            attn_combine_w: module.function("attn_combine_bw")?,
         })
     }
 }
@@ -383,6 +397,8 @@ pub(super) struct BatchBufs<'g> {
     /// Quantized activations, [max][act_stride(act_len())].
     act: DevBuf<'g>,
     rope: DevBuf<'g>,
+    /// gemma3's local layers' table (empty otherwise).
+    rope_swa: DevBuf<'g>,
     part_o: DevBuf<'g>,
     part_ml: DevBuf<'g>,
     /// HEAD_SUB rows, reused per head launch; with `logits_rows` (tests:
@@ -417,7 +433,12 @@ impl<'g> CudaQwen2<'g> {
         let per_tok = (self.dim + 2 * self.q_dim + 2 * kvd + 2 * self.ffn + self.head_dim) * f
             + act_stride(self.act_len())
             + 8
-            + if self.first > 0 { self.dim * f } else { 0 };
+            + if self.first > 0 { self.dim * f } else { 0 }
+            + if self.freq_swa.len() > 0 {
+                self.head_dim / 2 * 8
+            } else {
+                0
+            };
         max * per_tok + parts + max.min(HEAD_SUB) * self.vocab * f + 256
     }
 
@@ -441,6 +462,11 @@ impl<'g> CudaQwen2<'g> {
             up: g.alloc(max * self.ffn * f)?,
             act: g.alloc(max * act_stride(self.act_len()))?,
             rope: g.alloc(max * self.head_dim / 2 * 8)?,
+            rope_swa: g.alloc(if self.freq_swa.len() > 0 {
+                max * self.head_dim / 2 * 8
+            } else {
+                0
+            })?,
             part_o: g.alloc(parts * self.head_dim * f)?,
             part_ml: g.alloc(parts * 2 * f)?,
             logits: g.alloc(max.min(HEAD_SUB) * self.vocab * f)?,
@@ -679,7 +705,28 @@ impl<'g> CudaQwen2<'g> {
         // reads and writes (sizes in batch_bufs); positions start..start + nb
         // are in the cache (the callers check); matrices are whole in the arena.
         unsafe {
-            if let (Some(embd), BatchIn::Tokens(_) | BatchIn::Loaded(_)) = (&self.embd, input) {
+            if let (Some(embd), BatchIn::Tokens(_) | BatchIn::Loaded(_), Some(gm)) =
+                (&self.embd, input, &self.gemma)
+            {
+                g.launch(
+                    &bf.embed_s,
+                    (dim.div_ceil(256) as u32, nb as u32, 1),
+                    (256, 1, 1),
+                    0,
+                    &[
+                        Arg::I32(embd.qt as i32),
+                        w(embd),
+                        Arg::U64(embd.rb as u64),
+                        Arg::I32(dim as i32),
+                        b.tokens.arg(),
+                        Arg::F32(gm.embed_scale),
+                        b.x.arg(),
+                    ],
+                )?;
+                on("embed")?;
+            } else if let (Some(embd), BatchIn::Tokens(_) | BatchIn::Loaded(_)) =
+                (&self.embd, input)
+            {
                 g.launch(
                     &bf.embed,
                     (dim.div_ceil(256) as u32, nb as u32, 1),
@@ -820,8 +867,24 @@ impl<'g> CudaQwen2<'g> {
         rp: Arg,
     ) -> Result<(), String> {
         let hd = self.head_dim;
-        // SAFETY: rope_table_b's signature; b.rope holds b.max >= nb rows.
+        // SAFETY: rope_table_b's signature; b.rope (and b.rope_swa, with
+        // gemma3's local layers) holds b.max >= nb rows.
         unsafe {
+            if b.rope_swa.len() > 0 {
+                self.gpu.launch(
+                    &self.bf.rope_table,
+                    (nb as u32, 1, 1),
+                    ((hd / 2) as u32, 1, 1),
+                    0,
+                    &[
+                        self.freq_swa.arg(),
+                        Arg::I32((hd / 2) as i32),
+                        Arg::I32(start as i32),
+                        b.rope_swa.arg(),
+                        rp,
+                    ],
+                )?;
+            }
             self.gpu.launch(
                 &self.bf.rope_table,
                 (nb as u32, 1, 1),
@@ -977,7 +1040,35 @@ impl<'g> CudaQwen2<'g> {
             // qwen3, as decode).
             let q8 = matches!(mode, CacheKv::Q8 { .. });
             let (kc, vc) = if q8 { (null, null) } else { (kv[0], kv[1]) };
-            if let (Some(qn), Some(kn)) = (l.qn, l.kn) {
+            // This layer's RoPE table (gemma3's local layers: their own).
+            let rope = match l.win {
+                0 => b.rope.arg(),
+                _ => b.rope_swa.arg(),
+            };
+            if let (Some(qn), Some(kn), 256) = (l.qn, l.kn, hd) {
+                // gemma3: rope_kv_norm_b at head size 256.
+                let heads = (qd + 2 * kvd) / hd;
+                g.launch(
+                    &bf.rope_kv_norm_256,
+                    (heads.div_ceil(4) as u32, nbu, 1),
+                    (128, 1, 1),
+                    0,
+                    &[
+                        b.qkv.arg(),
+                        Arg::I32(qd as i32),
+                        Arg::I32(kvd as i32),
+                        Arg::I32(start as i32),
+                        rope,
+                        vec(qn),
+                        vec(kn),
+                        Arg::F32(self.eps),
+                        b.q.arg(),
+                        kc,
+                        vc,
+                        rp,
+                    ],
+                )?;
+            } else if let (Some(qn), Some(kn)) = (l.qn, l.kn) {
                 // qwen3: a warp per head and token (decode.cu warp_norm_rope).
                 let heads = (qd + 2 * kvd) / hd;
                 g.launch(
@@ -1114,6 +1205,9 @@ impl<'g> CudaQwen2<'g> {
                     // (kernel, blocks per kv head and query, threads, the
                     // partials' stride: blocks or splits).
                     let (f, grid, block, stride) = match (tc, q8) {
+                        (false, false) if self.gemma.is_some() => {
+                            (&bf.attn_split_w, ms, ATT_TILE as u32, self.max_split)
+                        }
                         (true, false) => (&bf.attn_blk, gy_blk, 32, b.nblk_max),
                         (true, true) => (&self.q8_fns(mode).attn_blk_b, gy_blk, 32, b.nblk_max),
                         (false, false) => (&bf.attn_split, ms, ATT_TILE as u32, self.max_split),
@@ -1141,6 +1235,11 @@ impl<'g> CudaQwen2<'g> {
                         b.part_ml.arg(),
                         rp,
                     ]);
+                    // gemma3: each query's window (0: a global layer).
+                    let gemma = self.gemma.is_some();
+                    if gemma {
+                        args.push(Arg::I32(l.win as i32));
+                    }
                     g.launch(
                         f,
                         (self.n_kv_heads as u32, grid, nz),
@@ -1149,34 +1248,72 @@ impl<'g> CudaQwen2<'g> {
                         &args,
                     )?;
                     on("attn")?;
+                    let mut cargs = vec![
+                        b.part_o.arg(),
+                        b.part_ml.arg(),
+                        Arg::I32(start as i32),
+                        Arg::I32(z0 as i32),
+                        Arg::I32(qd as i32),
+                        Arg::I32(hd as i32),
+                        Arg::I32(stride as i32),
+                        want_k(qd),
+                        b.act.arg(),
+                        Arg::U64(ast as u64),
+                        rp,
+                    ];
+                    let combine = if gemma {
+                        cargs.push(Arg::I32(l.win as i32));
+                        &bf.attn_combine_w
+                    } else if tc {
+                        &bf.attn_cmb
+                    } else {
+                        &bf.attn_combine
+                    };
                     g.launch(
-                        if tc { &bf.attn_cmb } else { &bf.attn_combine },
+                        combine,
                         (qd.div_ceil(256) as u32, nz, 1),
                         (256, 1, 1),
                         0,
-                        &[
-                            b.part_o.arg(),
-                            b.part_ml.arg(),
-                            Arg::I32(start as i32),
-                            Arg::I32(z0 as i32),
-                            Arg::I32(qd as i32),
-                            Arg::I32(hd as i32),
-                            Arg::I32(stride as i32),
-                            want_k(qd),
-                            b.act.arg(),
-                            Arg::U64(ast as u64),
-                            rp,
-                        ],
+                        &cargs,
                     )?;
                     on("combine")?;
                 }
             }
-            self.bgemm(wts, &l.o, b.act.arg(), ast, nb, null, 1, b.x.arg(), dim)?;
-            on("wo")?;
+            // gemma3: x += rmsnorm(W act) per token (rmsnorm_add_b), the
+            // product through b.up (free until the up product).
+            let post_add = |off: usize| {
+                g.launch(
+                    &bf.rmsnorm_add,
+                    (nbu, 1, 1),
+                    (1024, 1, 1),
+                    0,
+                    &[
+                        b.up.arg(),
+                        Arg::U64(dim as u64),
+                        vec(off),
+                        Arg::F32(self.eps),
+                        Arg::I32(dim as i32),
+                        b.x.arg(),
+                    ],
+                )
+            };
+            match l.post_attn {
+                Some(pa) => {
+                    self.bgemm(wts, &l.o, b.act.arg(), ast, nb, null, 0, b.up.arg(), dim)?;
+                    on("wo")?;
+                    post_add(pa)?;
+                    on("post_norm")?;
+                }
+                None => {
+                    self.bgemm(wts, &l.o, b.act.arg(), ast, nb, null, 1, b.x.arg(), dim)?;
+                    on("wo")?;
+                }
+            }
             self.norm_b(b, vecs, l.ffn_norm, nb)?;
             on("rmsnorm")?;
             // Both Q4_K, a tensor-core batch: one launch for gate and up.
             let fuse = self.gate_up_fused
+                && self.gemma.is_none()
                 && bf.gemm_gu.is_some()
                 && nb > SMALL
                 && l.gate.qt == Q4_K
@@ -1284,7 +1421,7 @@ impl<'g> CudaQwen2<'g> {
                         Arg::U64(ast as u64),
                     ],
                 )?;
-            } else if self.swiglu_epi {
+            } else if self.swiglu_epi && self.gemma.is_none() {
                 // The up product's epilogue (mode 2) makes hid = silu(gate) *
                 // up from the gate product and its own sum (swiglu_quant_b's
                 // ops on the same floats) into b.up, then quantize_b: one
@@ -1318,7 +1455,11 @@ impl<'g> CudaQwen2<'g> {
                 self.bgemm(wts, &l.up, b.act.arg(), ast, nb, null, 0, b.up.arg(), ffn)?;
                 on("gate_up")?;
                 g.launch(
-                    &bf.swiglu_quant,
+                    if self.gemma.is_some() {
+                        &bf.geglu_quant
+                    } else {
+                        &bf.swiglu_quant
+                    },
                     (ffn.div_ceil(256) as u32, nbu, 1),
                     (32, 1, 1),
                     0,
@@ -1333,9 +1474,21 @@ impl<'g> CudaQwen2<'g> {
                 )?;
             }
             on("swiglu")?;
-            self.bgemm(wts, &l.down, b.act.arg(), ast, nb, null, 1, b.x.arg(), dim)?;
-            on(if l.down.qt == Q6_K { "down6" } else { "down4" })?;
-            on("down")?;
+            match l.post_ffn {
+                // gemma3: as the post-attention norm (b.up free again).
+                Some(pf) => {
+                    self.bgemm(wts, &l.down, b.act.arg(), ast, nb, null, 0, b.up.arg(), dim)?;
+                    on(if l.down.qt == Q6_K { "down6" } else { "down4" })?;
+                    on("down")?;
+                    post_add(pf)?;
+                    on("post_norm")?;
+                }
+                None => {
+                    self.bgemm(wts, &l.down, b.act.arg(), ast, nb, null, 1, b.x.arg(), dim)?;
+                    on(if l.down.qt == Q6_K { "down6" } else { "down4" })?;
+                    on("down")?;
+                }
+            }
         }
         Ok(())
     }

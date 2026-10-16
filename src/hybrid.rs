@@ -374,6 +374,13 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
         repack: bool,
         margin: usize,
     ) -> Result<HybridQwen2<'m, 'g>, String> {
+        if m.arch == "gemma3" {
+            return Err(
+                "gemma3 doesn't split across the CPU and GPU yet: the whole model \
+                        goes on the GPU (a smaller --ctx), or --device cpu"
+                    .into(),
+            );
+        }
         let n = block_count(m)?;
         let g = gpu_layers.min(n);
         let k = n - g;

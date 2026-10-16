@@ -1,0 +1,169 @@
+{
+ "source": "llama.cpp 4413a19 llama-server --jinja /apply-template (the GGUF chat template) then /tokenize parse_special on bartowski google_gemma-3-1b-it-Q8_0.gguf; ids exclude the BOS (llama.cpp adds it when tokenizing with add_special)",
+ "convs": [
+  {
+   "messages": [
+    {
+     "role": "user",
+     "content": "Hello!"
+    }
+   ],
+   "prompt": "<start_of_turn>user\nHello!<end_of_turn>\n<start_of_turn>model\n",
+   "ids": [
+    105,
+    2364,
+    107,
+    9259,
+    236888,
+    106,
+    107,
+    105,
+    4368,
+    107
+   ]
+  },
+  {
+   "messages": [
+    {
+     "role": "system",
+     "content": "Be brief."
+    },
+    {
+     "role": "user",
+     "content": "What is 2 + 2?"
+    }
+   ],
+   "prompt": "<start_of_turn>user\nBe brief.\n\nWhat is 2 + 2?<end_of_turn>\n<start_of_turn>model\n",
+   "ids": [
+    105,
+    2364,
+    107,
+    3912,
+    8652,
+    236761,
+    108,
+    3689,
+    563,
+    236743,
+    236778,
+    900,
+    236743,
+    236778,
+    236881,
+    106,
+    107,
+    105,
+    4368,
+    107
+   ]
+  },
+  {
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are a pirate."
+    },
+    {
+     "role": "user",
+     "content": "  Hi there  \n"
+    },
+    {
+     "role": "assistant",
+     "content": " Arr, ahoy! \n"
+    },
+    {
+     "role": "user",
+     "content": "Tell me a joke.\n\nPlease."
+    }
+   ],
+   "prompt": "<start_of_turn>user\nYou are a pirate.\n\nHi there<end_of_turn>\n<start_of_turn>model\nArr, ahoy!<end_of_turn>\n<start_of_turn>user\nTell me a joke.\n\nPlease.<end_of_turn>\n<start_of_turn>model\n",
+   "ids": [
+    105,
+    2364,
+    107,
+    3048,
+    659,
+    496,
+    72650,
+    236761,
+    108,
+    10979,
+    993,
+    106,
+    107,
+    105,
+    4368,
+    107,
+    15581,
+    236764,
+    14018,
+    1088,
+    236888,
+    106,
+    107,
+    105,
+    2364,
+    107,
+    54593,
+    786,
+    496,
+    31481,
+    236761,
+    108,
+    9366,
+    236761,
+    106,
+    107,
+    105,
+    4368,
+    107
+   ]
+  },
+  {
+   "messages": [
+    {
+     "role": "user",
+     "content": "line one\nline two"
+    },
+    {
+     "role": "assistant",
+     "content": "ok"
+    },
+    {
+     "role": "user",
+     "content": "x  y"
+    }
+   ],
+   "prompt": "<start_of_turn>user\nline one\nline two<end_of_turn>\n<start_of_turn>model\nok<end_of_turn>\n<start_of_turn>user\nx  y<end_of_turn>\n<start_of_turn>model\n",
+   "ids": [
+    105,
+    2364,
+    107,
+    1257,
+    886,
+    107,
+    1257,
+    1156,
+    106,
+    107,
+    105,
+    4368,
+    107,
+    680,
+    106,
+    107,
+    105,
+    2364,
+    107,
+    236781,
+    138,
+    236762,
+    106,
+    107,
+    105,
+    4368,
+    107
+   ]
+  }
+ ]
+}

@@ -131,6 +131,21 @@ pub fn swiglu1_f<const F: bool>(g: f32, u: f32) -> f32 {
     g / (1.0 + exp_f::<F>(-g)) * u
 }
 
+// GELU, tanh form: 0.5 x (1 + tanh(z)), z = sqrt(2/pi) (x + 0.044715 x^3).
+// 0.5 (1 + tanh(z)) = 1 / (1 + exp(-2z)), so gelu(x) = x / (1 + exp(-2z)):
+// the same exp as SiLU (llama.cpp's GELU_COEF_A and SQRT_2_OVER_PI).
+const GELU_A: f32 = 0.044715;
+/// -2 sqrt(2/pi).
+const GELU_M2K: f32 = -2.0 * 0.797_884_6;
+
+/// gelu_tanh(g) * u, GeGLU's combine (Gemma): g / (1 + exp(GELU_M2K *
+/// fma(GELU_A * g * g, g, g))) * u.
+#[inline(always)]
+pub fn geglu1_f<const F: bool>(g: f32, u: f32) -> f32 {
+    let z = fma::<F>(GELU_A * g * g, g, g);
+    g / (1.0 + exp_f::<F>(GELU_M2K * z)) * u
+}
+
 /// `swiglu1_f` with F = `fused()`.
 #[cfg(test)]
 pub fn swiglu1(g: f32, u: f32) -> f32 {
@@ -238,6 +253,37 @@ pub mod x86 {
             *g = swiglu1_f::<true>(*g, u);
         }
     }
+
+    /// `super::geglu` with F.
+    #[target_feature(enable = "avx2,fma")]
+    #[inline]
+    pub fn geglu(g: &mut [f32], u: &[f32]) {
+        assert_eq!(g.len(), u.len(), "geglu: gate/up lengths differ");
+        let (gc, gr) = g.as_chunks_mut::<8>();
+        let (uc, ur) = u.as_chunks::<8>();
+        let (one, a, m2k) = (
+            _mm256_set1_ps(1.0),
+            _mm256_set1_ps(GELU_A),
+            _mm256_set1_ps(GELU_M2K),
+        );
+        for (g, u) in gc.iter_mut().zip(uc) {
+            // SAFETY: whole 8-float chunks.
+            unsafe {
+                let x = _mm256_loadu_ps(g.as_ptr());
+                let ax2 = _mm256_mul_ps(_mm256_mul_ps(a, x), x);
+                let z = _mm256_fmadd_ps(ax2, x, x);
+                let e = exp8(_mm256_mul_ps(m2k, z));
+                let y = _mm256_div_ps(x, _mm256_add_ps(one, e));
+                _mm256_storeu_ps(
+                    g.as_mut_ptr(),
+                    _mm256_mul_ps(y, _mm256_loadu_ps(u.as_ptr())),
+                );
+            }
+        }
+        for (g, &u) in gr.iter_mut().zip(ur) {
+            *g = geglu1_f::<true>(*g, u);
+        }
+    }
 }
 
 /// Largest element (-inf for empty), as `fold(-inf, f32::max)`.
@@ -316,6 +362,21 @@ multiversion! {
         assert_eq!(g.len(), u.len(), "swiglu: gate/up lengths differ");
         for (g, &u) in g.iter_mut().zip(u) {
             *g = swiglu1_f::<F>(*g, u);
+        }
+    }
+}
+
+multiversion! {
+    /// g[i] = gelu_tanh(g[i]) * u[i] (`geglu1_f`).
+    pub fn geglu<V3, F>(g: &mut [f32], u: &[f32]) {
+        #[cfg(target_arch = "x86_64")]
+        if V3 {
+            // SAFETY: V3 only in the v3 variant.
+            return unsafe { x86::geglu(g, u) };
+        }
+        assert_eq!(g.len(), u.len(), "geglu: gate/up lengths differ");
+        for (g, &u) in g.iter_mut().zip(u) {
+            *g = geglu1_f::<F>(*g, u);
         }
     }
 }
@@ -541,6 +602,72 @@ mod tests {
                 check(true, &a, &g, "avx2");
             }
         }
+    }
+
+    /// Every GeGLU path this CPU can run equals `geglu1_f` with the same F
+    /// bit for bit at every length, and the f64 tanh-form GELU closely.
+    #[test]
+    fn geglu_paths() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        #[cfg(target_arch = "x86_64")]
+        let avx = can_avx2();
+        #[cfg(not(target_arch = "x86_64"))]
+        let avx = false;
+        let f = fused();
+        let mut err = 0f64;
+        for n in (0..70).chain([255, 1000]) {
+            for scale in [0.5f32, 4.0, 30.0] {
+                let u = rnd_vec(&mut seed, n, 3.0);
+                let g0 = rnd_vec(&mut seed, n, scale);
+                let want = |fz: bool| -> Vec<u32> {
+                    g0.iter()
+                        .zip(&u)
+                        .map(|(&g, &u)| {
+                            if fz {
+                                geglu1_f::<true>(g, u)
+                            } else {
+                                geglu1_f::<false>(g, u)
+                            }
+                            .to_bits()
+                        })
+                        .collect()
+                };
+                let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+                let mut g = g0.clone();
+                // SAFETY (every block): V3 paths only after can_avx2().
+                unsafe { geglu::imp::<false, false>(&mut g, &u) };
+                assert_eq!(bits(&g), want(false), "unfused n={n}");
+                if f {
+                    let mut g = g0.clone();
+                    unsafe { geglu::imp::<false, true>(&mut g, &u) };
+                    assert_eq!(bits(&g), want(true), "fused scalar n={n}");
+                }
+                #[cfg(target_arch = "x86_64")]
+                if fast_fma() {
+                    let mut g = g0.clone();
+                    unsafe { geglu::fma(&mut g, &u) };
+                    assert_eq!(bits(&g), want(true), "fma variant n={n}");
+                }
+                if avx {
+                    let mut g = g0.clone();
+                    unsafe { geglu::imp::<true, true>(&mut g, &u) };
+                    assert_eq!(bits(&g), want(true), "avx2 n={n}");
+                }
+                let mut g = g0.clone();
+                geglu(&mut g, &u);
+                for i in 0..n {
+                    let x = g0[i] as f64;
+                    let k = (2.0 / std::f64::consts::PI).sqrt();
+                    let gl = 0.5 * x * (1.0 + (k * (x + 0.044715 * x * x * x)).tanh());
+                    let want = gl * u[i] as f64;
+                    if want.abs() > 1e-20 {
+                        err = err.max((g[i] as f64 - want).abs() / want.abs().max(1e-3));
+                    }
+                }
+            }
+        }
+        println!("geglu max rel err {err:.2e}");
+        assert!(err < 1e-5, "geglu {err:e}");
     }
 
     fn rnd_vec(seed: &mut u64, n: usize, scale: f32) -> Vec<f32> {

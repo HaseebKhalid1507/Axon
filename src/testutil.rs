@@ -11,6 +11,7 @@ pub const QWEN3_MODEL: &str = "models/Qwen3-0.6B-Q8_0.gguf";
 pub const LLAMA_MODEL: &str = "models/Llama-3.2-1B-Instruct-Q4_K_M.gguf";
 /// The optional SentencePiece test model (`AXON_TEST_MISTRAL` overrides it).
 pub const MISTRAL_MODEL: &str = "models/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf";
+pub const GEMMA3_MODEL: &str = "models/google_gemma-3-1b-it-Q8_0.gguf";
 
 /// Reference data made by `scripts/oracle/make_fixtures.py`, committed to the repo.
 pub fn fixtures() -> PathBuf {
@@ -119,6 +120,30 @@ pub fn mistral_model() -> Option<Model> {
         return None;
     }
     Some(gguf::load(path.to_str().expect("utf-8 path")).expect("load mistral model"))
+}
+
+/// Path of the Gemma 3 test model (`AXON_TEST_GEMMA3` overrides it):
+/// bartowski's google_gemma-3-1b-it Q8_0. Optional (1.1 GB): None, with a
+/// note, when it's missing.
+pub fn gemma3_model_path() -> Option<PathBuf> {
+    let path = match std::env::var_os("AXON_TEST_GEMMA3") {
+        Some(p) => PathBuf::from(p),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).join(GEMMA3_MODEL),
+    };
+    if !path.exists() {
+        eprintln!(
+            "skipping: {} not present (bartowski/google_gemma-3-1b-it-GGUF, optional)",
+            path.display()
+        );
+        return None;
+    }
+    Some(path)
+}
+
+/// The Gemma 3 test model (`gemma3_model_path`), or None to skip.
+pub fn gemma3_model() -> Option<Model> {
+    let path = gemma3_model_path()?;
+    Some(gguf::load(path.to_str().expect("utf-8 path")).expect("load gemma3 model"))
 }
 
 pub fn read_json(rel: &str) -> serde_json::Value {
