@@ -218,8 +218,9 @@ use your local model), `--max-conns N` / `--max-queue N` (defaults 256 / 128),
   A request running alone takes the single-stream path (CUDA graphs, `--draft`), and
   moves into the batch when a second one arrives. Every request's output is exactly what it
   gets alone, whatever else runs with it (greedy, and sampled with a `seed`): the batched
-  kernels are bit-identical per row to the one-sequence ones. On the CPU and with
-  `--gpu-layers` (a CPU/GPU split) the server runs one request at a time.
+  kernels are bit-identical per row to the one-sequence ones. On the CPU, with
+  `--gpu-layers` (a CPU/GPU split) and with a multi-GPU pipeline (several `AXON_GPUS`) the
+  server runs one request at a time; an explicit `--parallel N` (N > 1) there is an error.
 - Requests run each exactly as `gen` / `chat` would run it (greedy `/v1/completions` output
   is byte-identical to `axon gen`'s). The KV cache carries over between requests: a prompt
   that starts with tokens a cache (or a slot) already holds (a chat follow-up resending the

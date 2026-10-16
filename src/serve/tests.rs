@@ -41,6 +41,7 @@ fn server_with(path: &str, device: Device, f: impl FnOnce(&mut Opts)) -> Server 
         max_conns: MAX_CONNS,
         max_queue: MAX_QUEUE,
         parallel: PARALLEL,
+        parallel_set: false,
         slot_ctx: None,
     };
     f(&mut o);

@@ -109,6 +109,9 @@ pub struct Opts {
     /// Most requests decoded together (continuous batching, GPU only);
     /// 1: one at a time.
     pub parallel: usize,
+    /// `--parallel` was given (not the default): a backend that can't batch
+    /// is then an error, not a quiet one-at-a-time.
+    pub parallel_set: bool,
     /// Positions per slot at most (None: the context; tests shrink the pool
     /// with it).
     pub slot_ctx: Option<usize>,
@@ -679,6 +682,17 @@ fn engine(
     let drafts = dm.as_ref().map_or(String::new(), |d| {
         format!(", draft model {} K={}", d.name(), o.max_draft)
     });
+    // Continuous batching runs on one GPU holding every layer: the CPU, a
+    // CPU/GPU split and a multi-GPU pipeline (AXON_GPUS) serve one request
+    // at a time, and an explicit --parallel N there is refused.
+    if o.parallel > 1 && o.parallel_set && !matches!(net, Backend::Cuda(_)) {
+        crate::fail(&format!(
+            "--parallel {}: batching many requests needs the whole model on one GPU \
+             (--device cuda; not with --gpu-layers or several AXON_GPUS); this backend \
+             serves one request at a time (--parallel 1)",
+            o.parallel
+        ));
+    }
     let mut batch = match o.parallel {
         0 | 1 => None,
         n => match pool_for(&net, n, o.slot_ctx.map_or(ctx, |c| c.min(ctx))) {
@@ -834,6 +848,7 @@ fn pool_for<'a>(
 struct EngineOpts {
     /// Requests decoded together at most (`--parallel`); 1: one at a time.
     parallel: usize,
+    parallel_set: bool,
     slot_ctx: Option<usize>,
     path: String,
     device: Device,
@@ -920,6 +935,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
     let queued = Arc::new(AtomicU64::new(0));
     let eo = EngineOpts {
         parallel: o.parallel,
+        parallel_set: o.parallel_set,
         slot_ctx: o.slot_ctx,
         generated: generated.clone(),
         path: o.path.clone(),
@@ -1599,6 +1615,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         max_conns: MAX_CONNS,
         max_queue: MAX_QUEUE,
         parallel: PARALLEL,
+        parallel_set: false,
         slot_ctx: None,
     };
     let mut k = None;
@@ -1667,7 +1684,10 @@ pub fn run(args: &[String]) -> io::Result<()> {
             "--max-tokens" => o.max_tokens = Some(whole(true)),
             "--max-conns" => o.max_conns = whole(true),
             "--max-queue" => o.max_queue = whole(true),
-            "--parallel" => o.parallel = whole(true),
+            "--parallel" => {
+                o.parallel = whole(true);
+                o.parallel_set = true;
+            }
             _ => k = Some(whole(false)),
         }
         i += 2;
