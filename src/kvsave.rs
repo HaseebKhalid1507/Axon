@@ -313,17 +313,17 @@ pub trait KvIo: Lm {
     fn kv_shape(&self) -> (usize, usize, usize);
 }
 
-/// The CPU's arch class: the instruction sets its kernels pick from.
+/// The CPU's arch class: what of its instruction sets changes the bits.
 fn cpu_class() -> String {
     #[cfg(target_arch = "x86_64")]
     {
-        let f = [
-            ("avx2", is_x86_feature_detected!("avx2")),
-            ("fma", is_x86_feature_detected!("fma")),
-            ("f16c", is_x86_feature_detected!("f16c")),
-        ];
-        let on: Vec<&str> = f.iter().filter(|x| x.1).map(|x| x.0).collect();
-        format!("x86_64 {}", on.join(" "))
+        // FMA contraction is the one ISA choice that changes the bits.
+        let fma = if is_x86_feature_detected!("fma") {
+            " fma"
+        } else {
+            ""
+        };
+        format!("x86_64{fma}")
     }
     #[cfg(not(target_arch = "x86_64"))]
     {
@@ -396,11 +396,15 @@ impl<'g> KvIo for CudaQwen2<'g> {
         }
         let (layers, kvd, hd) = self.kv_shape();
         let num = crate::cuda::numerics_tag(self.gpu()).ok()?;
+        let driver = crate::cuda::driver_tag(self.gpu()).unwrap_or_default();
         let class = self.gpu().info().ok()?.arch();
         Some(json!({
             "backend": "cuda",
             "class": class,
             "numerics": format!("{num} host {NUMERICS}"),
+            // Not compared: drivers and NVRTC versions measured to give the
+            // same bits (xarch audit).
+            "info": { "driver": driver },
             "kv": self.cache_kv_name(c),
             "layers": layers, "kv_dim": kvd, "head_dim": hd,
             "row_bytes": self.cache_rows(c).row_bytes(),
@@ -493,12 +497,35 @@ pub fn identity(model: &Value, backend: Option<Value>) -> Option<Value> {
     Some(b)
 }
 
+/// The part of an identity that must match: all but `info` (recorded for
+/// people, e.g. the driver version, which doesn't change the bits).
+fn compared(v: &Value) -> Value {
+    let mut v = v.clone();
+    if let Value::Object(o) = &mut v {
+        o.remove("info");
+    }
+    v
+}
+
+/// The hash binding a KV record of positions ..hi to the tokens whose
+/// cache it is (`tokens[..hi]`): a record of other tokens never loads.
+fn token_hash(tokens: &[u32]) -> u64 {
+    let mut h = Hasher::default();
+    h.update(b"axkv tokens");
+    for t in tokens {
+        h.update(&t.to_le_bytes());
+    }
+    h.finish()
+}
+
 /// What the file holds, as last written or read by this process.
 struct Saved {
     /// The KV records cover positions 0..kv, the cache of tokens[..kv].
     kv: usize,
     tokens: Vec<u32>,
-    /// The file's length after it (an append checks nobody changed it).
+    /// Where the last good STATE ends: the file's length after our last
+    /// save, or what a read found good (a torn or orphaned tail after it
+    /// is cut off before the next append).
     len: u64,
     /// Bytes of STATE records no longer current, and of the current one.
     stale: u64,
@@ -524,22 +551,40 @@ pub struct SaveInfo {
     pub bytes: u64,
 }
 
+/// A KV record in a file.
+#[derive(Clone, Copy, Debug)]
+struct Rec {
+    lo: usize,
+    hi: usize,
+    /// `token_hash` of the tokens ..hi.
+    tokens: u64,
+    /// Offset and length of the payload, and its check.
+    at: u64,
+    n: u64,
+    check: u64,
+}
+
 /// A file's records (`Session::read`).
 pub struct Loaded {
-    /// The last STATE (with `kv`).
+    /// The last good STATE (with `kv`).
     pub state: Value,
-    /// The file's identity matches and its KV records cover the state's
-    /// `kv` positions; else why not.
-    pub usable: Result<usize, String>,
-    /// KV records: (lo, hi, offset of the payload, payload length, check).
-    recs: Vec<(usize, usize, u64, u64, u64)>,
-    len: u64,
+    /// Why the file's cache can't be loaded here (another identity, or
+    /// none), if it can't.
+    ident_err: Option<String>,
+    /// The KV records before the end of the last good STATE.
+    recs: Vec<Rec>,
+    /// Where the last good STATE ends.
+    good_end: u64,
     stale: u64,
     last_state: u64,
 }
 
 /// Bytes of a record's framing: kind, length, check.
 const FRAME: u64 = 17;
+/// lo, hi and the token hash before a KV record's image.
+const KV_HEAD: u64 = 24;
+/// Largest header read.
+const MAX_HEADER: u64 = 1 << 20;
 
 /// Rewrite the file once its stale STATE records pass this many bytes.
 const MAX_STALE: u64 = 64 << 20;
@@ -554,17 +599,19 @@ fn record(w: &mut impl Write, kind: u8, payload: &[u8]) -> io::Result<()> {
 type SaveFn<'a> = dyn FnMut(usize, usize, &mut dyn Write) -> io::Result<()> + 'a;
 type LoadFn<'a> = dyn FnMut(usize, usize, &mut dyn Read) -> io::Result<()> + 'a;
 
-/// A KV record of positions lo..hi (`row` image bytes each).
+/// A KV record of positions lo..hi of the cache of `tokens` (..hi; `row`
+/// image bytes each).
 fn kv_record(
     w: &mut impl Write,
+    tokens: &[u32],
     lo: usize,
-    hi: usize,
     row: usize,
     save: &mut SaveFn,
 ) -> io::Result<()> {
+    let hi = tokens.len();
     let n = ((hi - lo) * row) as u64;
     w.write_all(&[KIND_KV])?;
-    w.write_all(&(16 + n).to_le_bytes())?;
+    w.write_all(&(KV_HEAD + n).to_le_bytes())?;
     let mut hw = HashW {
         w,
         h: Hasher::default(),
@@ -572,11 +619,12 @@ fn kv_record(
     };
     hw.write_all(&(lo as u64).to_le_bytes())?;
     hw.write_all(&(hi as u64).to_le_bytes())?;
+    hw.write_all(&token_hash(tokens).to_le_bytes())?;
     save(lo, hi, &mut hw)?;
-    if hw.n != 16 + n {
+    if hw.n != KV_HEAD + n {
         return Err(io::Error::other(format!(
             "a KV image of {} bytes, {} expected",
-            hw.n - 16,
+            hw.n - KV_HEAD,
             n
         )));
     }
@@ -586,6 +634,16 @@ fn kv_record(
 
 fn bad(msg: impl Into<String>) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg.into())
+}
+
+/// A new file for writing, readable by its owner only (it holds the
+/// conversation).
+fn create_private(p: &Path) -> io::Result<File> {
+    let mut o = std::fs::OpenOptions::new();
+    o.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+    o.open(p)
 }
 
 impl Session {
@@ -604,8 +662,9 @@ impl Session {
     /// Save `state` (JSON; this adds `kv`) with the cache's positions
     /// 0..n holding `tokens` (n = its length), their image written by
     /// `save(lo, hi, out)`, under `ident` (None: tokens only, `kv` 0).
-    /// Appends the new positions if the file holds a prefix of them, else
-    /// rewrites it (through a temporary file renamed over it).
+    /// Appends the new positions if the file holds a prefix of them (after
+    /// cutting off anything past its last good STATE), else rewrites it
+    /// (through a temporary file renamed over it).
     pub fn save(
         &mut self,
         ident: Option<&Value>,
@@ -622,16 +681,22 @@ impl Session {
         let append = self.saved.as_ref().filter(|s| {
             s.kv <= n
                 && tokens[..s.kv] == s.tokens[..s.kv]
-                && cur_len == Some(s.len)
+                && cur_len.is_some_and(|c| c >= s.len)
                 && s.stale + s.last_state <= MAX_STALE
         });
         let mut info = SaveInfo::default();
         let (from, stale, before) = match append {
             Some(s) => {
-                let f = std::fs::OpenOptions::new().append(true).open(&self.path)?;
+                let mut f = std::fs::OpenOptions::new().write(true).open(&self.path)?;
+                // A torn or orphaned tail (a save that never finished)
+                // goes: what follows must come right after the last STATE.
+                if cur_len != Some(s.len) {
+                    f.set_len(s.len)?;
+                }
+                f.seek(SeekFrom::Start(s.len))?;
                 let mut w = BufWriter::with_capacity(1 << 20, f);
                 if n > s.kv {
-                    kv_record(&mut w, s.kv, n, row, save)?;
+                    kv_record(&mut w, &tokens[..n], s.kv, row, save)?;
                 }
                 record(&mut w, KIND_STATE, &st)?;
                 w.into_inner().map_err(|e| e.into_error())?.sync_data()?;
@@ -639,9 +704,10 @@ impl Session {
             }
             None => {
                 info.rewrote = true;
-                let tmp = self.path.with_extension("axkv-tmp");
-                let f = File::create(&tmp)?;
-                let mut w = BufWriter::with_capacity(1 << 20, f);
+                let mut tmp = self.path.clone().into_os_string();
+                tmp.push(".tmp");
+                let tmp = PathBuf::from(tmp);
+                let mut w = BufWriter::with_capacity(1 << 20, create_private(&tmp)?);
                 let hdr =
                     serde_json::to_vec(&json!({ "identity": ident })).map_err(io::Error::other)?;
                 w.write_all(MAGIC)?;
@@ -649,11 +715,19 @@ impl Session {
                 w.write_all(&(hdr.len() as u32).to_le_bytes())?;
                 w.write_all(&hdr)?;
                 if n > 0 {
-                    kv_record(&mut w, 0, n, row, save)?;
+                    kv_record(&mut w, &tokens[..n], 0, row, save)?;
                 }
                 record(&mut w, KIND_STATE, &st)?;
                 w.into_inner().map_err(|e| e.into_error())?.sync_all()?;
                 std::fs::rename(&tmp, &self.path)?;
+                // The rename itself, durable.
+                let dir = match self.path.parent() {
+                    Some(d) if !d.as_os_str().is_empty() => d,
+                    _ => Path::new("."),
+                };
+                if let Ok(d) = File::open(dir) {
+                    let _ = d.sync_all();
+                }
                 (0, 0, 0)
             }
         };
@@ -670,9 +744,9 @@ impl Session {
         Ok(info)
     }
 
-    /// The file's records, checked against `ident` (None: the backend has
-    /// no image). Ok(None) if there is no file. Err only if it isn't a
-    /// session file or holds no conversation.
+    /// The file's records, its identity checked against `ident` (None:
+    /// the backend has no image). Ok(None) if there is no file. Err only if
+    /// it isn't a session file or holds no conversation.
     pub fn read(&self, ident: Option<&Value>) -> io::Result<Option<Loaded>> {
         let f = match File::open(&self.path) {
             Ok(f) => f,
@@ -693,16 +767,19 @@ impl Session {
                 "session file version {ver}; this axon reads {VERSION}"
             )));
         }
-        let hl = u32::from_le_bytes(head[8..12].try_into().expect("4")) as usize;
-        let mut hdr = vec![0u8; hl];
+        let hl = u32::from_le_bytes(head[8..12].try_into().expect("4")) as u64;
+        if hl > MAX_HEADER || hl > len - 12 {
+            return Err(bad("a damaged session file header"));
+        }
+        let mut hdr = vec![0u8; hl as usize];
         r.read_exact(&mut hdr)?;
         let hdr: Value = serde_json::from_slice(&hdr).map_err(|e| bad(format!("header: {e}")))?;
         let file_ident = &hdr["identity"];
         let row = file_ident["row_bytes"].as_u64().unwrap_or(0);
-        let mut pos = 12 + hl as u64;
+        let mut pos = 12 + hl;
         let mut recs = Vec::new();
         let mut state: Option<(Value, u64)> = None;
-        let mut stale = 0;
+        let (mut stale, mut good_end) = (0, 0);
         // Records until the end, or the first torn or failing one.
         loop {
             let mut fr = [0u8; 9];
@@ -715,18 +792,26 @@ impl Session {
             }
             let at = pos + 9;
             match fr[0] {
-                KIND_KV if n >= 16 => {
-                    let mut lohi = [0u8; 16];
-                    r.read_exact(&mut lohi)?;
-                    let lo = u64::from_le_bytes(lohi[..8].try_into().expect("8"));
-                    let hi = u64::from_le_bytes(lohi[8..].try_into().expect("8"));
-                    if hi < lo || (hi - lo).checked_mul(row) != Some(n - 16) {
+                KIND_KV if n >= KV_HEAD => {
+                    let mut h = [0u8; 24];
+                    r.read_exact(&mut h)?;
+                    let w =
+                        |i: usize| u64::from_le_bytes(h[i * 8..i * 8 + 8].try_into().expect("8"));
+                    let (lo, hi) = (w(0), w(1));
+                    if hi < lo || (hi - lo).checked_mul(row) != Some(n - KV_HEAD) {
                         break;
                     }
-                    r.seek_relative((n - 16) as i64)?;
+                    r.seek_relative((n - KV_HEAD) as i64)?;
                     let mut c = [0u8; 8];
                     r.read_exact(&mut c)?;
-                    recs.push((lo as usize, hi as usize, at, n, u64::from_le_bytes(c)));
+                    recs.push(Rec {
+                        lo: lo as usize,
+                        hi: hi as usize,
+                        tokens: w(2),
+                        at,
+                        n,
+                        check: u64::from_le_bytes(c),
+                    });
                 }
                 KIND_STATE => {
                     let mut p = vec![0u8; n as usize];
@@ -743,6 +828,7 @@ impl Session {
                         stale += l;
                     }
                     state = Some((v, FRAME + n));
+                    good_end = at + n + 8;
                 }
                 _ => break,
             }
@@ -751,68 +837,82 @@ impl Session {
         let Some((state, last_state)) = state else {
             return Err(bad("no conversation in the session file"));
         };
-        let kv = state["kv"].as_u64().unwrap_or(0) as usize;
-        // The records tiling 0..kv, in order (later ones belong to a save
-        // whose STATE didn't make it).
-        let mut end = 0;
-        let mut tiling = Vec::new();
-        for &rc in &recs {
-            if end == kv {
-                break;
-            }
-            if rc.0 != end {
-                break;
-            }
-            end = rc.1;
-            tiling.push(rc);
-        }
-        let usable = if kv == 0 || file_ident.is_null() {
-            Err("the file holds no cache".into())
-        } else if Some(file_ident) != ident {
-            Err(match ident {
-                None => "this backend has no cache image".into(),
-                Some(i) => format!("it was made under {}", diff(file_ident, i)),
-            })
-        } else if end != kv {
-            Err("its cache records are incomplete".into())
+        // Records after the last STATE belong to a save that never finished.
+        recs.retain(|r| r.at < good_end);
+        let ident_err = if file_ident.is_null() {
+            Some("the file holds no cache".into())
         } else {
-            Ok(kv)
+            match ident {
+                None => Some("this backend has no cache image".into()),
+                Some(i) if compared(i) != compared(file_ident) => {
+                    Some(format!("it was made under {}", diff(file_ident, i)))
+                }
+                Some(_) => None,
+            }
         };
         Ok(Some(Loaded {
             state,
-            usable,
-            recs: tiling,
-            len,
+            ident_err,
+            recs,
+            good_end,
             stale,
             last_state,
         }))
     }
 
-    /// Load `l`'s positions 0..kv (`usable`) through `load(lo, hi, src)`,
-    /// checking each record's hash as it streams. Err(why) if one fails (the
-    /// rows may then hold anything: prefill them again). On success the
-    /// file is the session's (`save` may append to it).
+    /// Load the cache of `tokens` (positions 0..tokens.len(), the state's
+    /// `kv`) from `l` through `load(lo, hi, src)`: records of exactly these
+    /// tokens tiling 0..kv (the latest one per start), each record's hash
+    /// checked as it streams. Err(why) if the identity differs, the records
+    /// don't cover them, or one fails (the rows may then hold anything:
+    /// prefill them again). On success the file is the session's (`save`
+    /// appends to it).
     pub fn load(&mut self, l: &Loaded, tokens: &[u32], load: &mut LoadFn) -> io::Result<()> {
-        let kv = *l.usable.as_ref().map_err(|e| io::Error::other(e.clone()))?;
+        if let Some(e) = &l.ident_err {
+            return Err(io::Error::other(e.clone()));
+        }
+        let kv = tokens.len();
+        let mut tiles = Vec::new();
+        let mut end = 0;
+        while end < kv {
+            let next = l
+                .recs
+                .iter()
+                .rev()
+                .find(|r| {
+                    r.lo == end
+                        && r.hi > end
+                        && r.hi <= kv
+                        && r.tokens == token_hash(&tokens[..r.hi])
+                })
+                .ok_or_else(|| {
+                    io::Error::other("its cache records don't cover the conversation")
+                })?;
+            tiles.push(*next);
+            end = next.hi;
+        }
         let mut f = BufReader::with_capacity(1 << 20, File::open(&self.path)?);
-        for &(lo, hi, at, n, check) in &l.recs {
-            f.seek(SeekFrom::Start(at))?;
-            let mut take = (&mut f).take(n);
+        for r in tiles {
+            f.seek(SeekFrom::Start(r.at))?;
+            let mut take = (&mut f).take(r.n);
             let mut hr = HashR {
                 r: &mut take,
                 h: Hasher::default(),
             };
-            let mut lohi = [0u8; 16];
-            hr.read_exact(&mut lohi)?;
-            load(lo, hi, &mut hr)?;
-            if hr.h.finish() != check {
-                return Err(bad(format!("cache record {lo}..{hi} fails its check")));
+            let mut head = [0u8; KV_HEAD as usize];
+            hr.read_exact(&mut head)?;
+            load(r.lo, r.hi, &mut hr)?;
+            if hr.h.finish() != r.check {
+                return Err(bad(format!(
+                    "cache record {}..{} fails its check",
+                    r.lo, r.hi
+                )));
             }
         }
         self.saved = Some(Saved {
             kv,
-            tokens: tokens[..kv].to_vec(),
-            len: l.len,
+            tokens: tokens.to_vec(),
+            len: l.good_end,
             stale: l.stale,
             last_state: l.last_state,
         });
@@ -825,9 +925,9 @@ impl Session {
     }
 }
 
-/// The identity fields that differ, for a message: "key file vs ours".
+/// The identity fields that differ, for a message: "key file (now ours)".
 fn diff(file: &Value, ours: &Value) -> String {
-    let (Value::Object(a), Value::Object(b)) = (file, ours) else {
+    let (Value::Object(a), Value::Object(b)) = (compared(file), compared(ours)) else {
         return "another identity".into();
     };
     let mut keys: Vec<&String> = a.keys().chain(b.keys()).collect();
@@ -876,15 +976,47 @@ mod tests {
         assert_ne!(Hasher::of(&[0; 8]), Hasher::of(&[0; 9]));
     }
 
-    /// A fake cache: position p's image is `row` bytes of (p, byte index).
-    fn fake_save(row: usize) -> impl FnMut(usize, usize, &mut dyn Write) -> io::Result<()> {
+    /// A fake cache of `toks`: position p's image is `row` bytes of
+    /// (token, p, byte index).
+    fn fake_save(
+        row: usize,
+        toks: &[u32],
+    ) -> impl FnMut(usize, usize, &mut dyn Write) -> io::Result<()> {
         move |lo, hi, w| {
-            for p in lo..hi {
-                let b: Vec<u8> = (0..row).map(|i| (p * 31 + i) as u8).collect();
+            for (p, &t) in toks.iter().enumerate().take(hi).skip(lo) {
+                let b: Vec<u8> = (0..row)
+                    .map(|i| (t as usize * 7 + p * 31 + i) as u8)
+                    .collect();
                 w.write_all(&b)?;
             }
             Ok(())
         }
+    }
+
+    fn image(row: usize, toks: &[u32]) -> Vec<u8> {
+        let mut v = Vec::new();
+        fake_save(row, toks)(0, toks.len(), &mut v).unwrap();
+        v
+    }
+
+    /// Read `s`'s file and load its cache for `toks[..kv]` (kv from the
+    /// state): (state, image bytes) or the load's error.
+    fn reload(
+        s: &mut Session,
+        ident: &Value,
+        toks: &[u32],
+        row: usize,
+    ) -> (Value, io::Result<Vec<u8>>) {
+        let l = s.read(Some(ident)).unwrap().unwrap();
+        let kv = l.state["kv"].as_u64().unwrap() as usize;
+        let mut got = Vec::new();
+        let r = s.load(&l, &toks[..kv], &mut |lo, hi, src| {
+            let mut b = vec![0u8; (hi - lo) * row];
+            src.read_exact(&mut b)?;
+            got.extend(b);
+            Ok(())
+        });
+        (l.state, r.map(|_| got))
     }
 
     fn scratch(tag: &str) -> PathBuf {
@@ -895,111 +1027,187 @@ mod tests {
         p
     }
 
-    /// Saves append while the tokens extend, rewrite otherwise; reads see
-    /// the last state; a torn tail or a corrupt byte never loads wrong
-    /// bytes; another identity loads no bytes.
+    const ROW: usize = 40;
+
+    fn toks() -> (Vec<u32>, Vec<u32>) {
+        let a: Vec<u32> = (0..300).collect();
+        let mut b = a.clone();
+        for t in &mut b[100..] {
+            *t += 1000;
+        }
+        (a, b)
+    }
+
+    fn save(s: &mut Session, ident: &Value, toks: &[u32], n: u32) -> SaveInfo {
+        s.save(
+            Some(ident),
+            toks,
+            &mut fake_save(ROW, toks),
+            &json!({ "n": n }),
+        )
+        .unwrap()
+    }
+
+    /// Saves append while the tokens extend, rewrite otherwise; a new
+    /// reader sees the last state and appends too; another identity loads
+    /// no bytes (but `info` isn't compared); a flipped byte fails the load.
     #[test]
     fn file_appends_rewrites_and_checks() {
-        let row = 40;
-        let ident = json!({"model": "x", "row_bytes": row});
+        let ident = json!({"model": "x", "row_bytes": ROW, "info": {"driver": "1"}});
         let path = scratch("f.axkv");
+        let (t, other) = toks();
         let mut s = Session::new(path.clone(), json!({}));
-        let toks: Vec<u32> = (0..300).collect();
-        let st = |n: usize| json!({ "n": n });
-        let i1 = s
-            .save(Some(&ident), &toks[..100], &mut fake_save(row), &st(1))
-            .unwrap();
+        let i1 = save(&mut s, &ident, &t[..100], 1);
         assert!(i1.rewrote && i1.kv_written == 100);
-        let i2 = s
-            .save(Some(&ident), &toks[..250], &mut fake_save(row), &st(2))
-            .unwrap();
+        let i2 = save(&mut s, &ident, &t[..250], 2);
         assert!(!i2.rewrote && i2.kv_written == 150, "{i2:?}");
-        let i3 = s
-            .save(Some(&ident), &toks[..250], &mut fake_save(row), &st(3))
-            .unwrap();
+        let i3 = save(&mut s, &ident, &t[..250], 3);
         assert!(!i3.rewrote && i3.kv_written == 0);
-        let full_len = std::fs::metadata(&path).unwrap().len();
 
         let mut r = Session::new(path.clone(), json!({}));
-        let l = r.read(Some(&ident)).unwrap().unwrap();
-        assert_eq!(l.state["n"], 3);
-        assert_eq!(l.usable, Ok(250));
-        let mut got = Vec::new();
-        r.load(&l, &toks, &mut |lo, hi, src| {
-            let mut b = vec![0u8; (hi - lo) * row];
-            src.read_exact(&mut b)?;
-            got.push((lo, hi, b));
-            Ok(())
-        })
-        .unwrap();
-        let mut want = Vec::new();
-        fake_save(row)(0, 250, &mut want).unwrap();
-        assert_eq!(
-            got.iter().flat_map(|g| g.2.clone()).collect::<Vec<_>>(),
-            want
-        );
+        let newer_driver = json!({"model": "x", "row_bytes": ROW, "info": {"driver": "2"}});
+        let (st, img) = reload(&mut r, &newer_driver, &t, ROW);
+        assert_eq!(st["n"], 3);
+        assert_eq!(img.unwrap(), image(ROW, &t[..250]));
         // The reader's session appends.
-        let i4 = r
-            .save(Some(&ident), &toks[..260], &mut fake_save(row), &st(4))
-            .unwrap();
-        assert!(!i4.rewrote, "{i4:?}");
+        assert!(!save(&mut r, &ident, &t[..260], 4).rewrote);
         // Other tokens: rewritten.
-        let mut other = toks.clone();
-        other[5] = 999;
-        let i5 = r
-            .save(Some(&ident), &other[..120], &mut fake_save(row), &st(5))
-            .unwrap();
-        assert!(i5.rewrote);
-        assert_eq!(r.read(Some(&ident)).unwrap().unwrap().usable, Ok(120));
+        assert!(save(&mut r, &ident, &other[..120], 5).rewrote);
+        let (st, img) = reload(
+            &mut Session::new(path.clone(), json!({})),
+            &ident,
+            &other,
+            ROW,
+        );
+        assert_eq!(st["n"], 5);
+        assert_eq!(img.unwrap(), image(ROW, &other[..120]));
 
         // Another identity: tokens only.
-        let o = json!({"model": "y", "row_bytes": row});
-        let l = r.read(Some(&o)).unwrap().unwrap();
-        assert!(
-            l.usable.as_ref().unwrap_err().contains("model"),
-            "{:?}",
-            l.usable
-        );
-        assert!(r.read(None).unwrap().unwrap().usable.is_err());
-
-        // Torn tail: the last save is lost, the one before stands.
-        let mut s = Session::new(path.clone(), json!({}));
-        s.save(Some(&ident), &toks[..100], &mut fake_save(row), &st(1))
-            .unwrap();
-        s.save(Some(&ident), &toks[..250], &mut fake_save(row), &st(2))
-            .unwrap();
-        let len = std::fs::metadata(&path).unwrap().len();
-        for cut in [1, 9, 30] {
-            let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-            f.set_len(len - cut).unwrap();
-            let l = Session::new(path.clone(), json!({}))
-                .read(Some(&ident))
-                .unwrap()
-                .unwrap();
-            assert_eq!(l.state["n"], 1, "cut {cut}");
-            assert_eq!(l.usable, Ok(100), "cut {cut}");
-        }
-        // A save after the torn tail rewrites (the length isn't ours).
-        assert!(
-            s.save(Some(&ident), &toks[..260], &mut fake_save(row), &st(3))
-                .unwrap()
-                .rewrote
-        );
+        let o = json!({"model": "y", "row_bytes": ROW});
+        let (_, e) = reload(&mut Session::new(path.clone(), json!({})), &o, &other, ROW);
+        assert!(e.unwrap_err().to_string().contains("model"));
 
         // A flipped KV byte: the load fails (the caller prefills again).
         let mut bytes = std::fs::read(&path).unwrap();
         let at = bytes.len() / 2;
         bytes[at] ^= 0x40;
         std::fs::write(&path, &bytes).unwrap();
-        let mut r = Session::new(path.clone(), json!({}));
-        let l = r.read(Some(&ident)).unwrap().unwrap();
-        assert_eq!(l.usable, Ok(260));
-        let e = r.load(&l, &toks, &mut |lo, hi, src| {
-            let mut b = vec![0u8; (hi - lo) * row];
-            src.read_exact(&mut b)
-        });
+        let (_, e) = reload(
+            &mut Session::new(path.clone(), json!({})),
+            &ident,
+            &other,
+            ROW,
+        );
         assert!(e.is_err());
-        assert!(full_len > 0);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A save torn at any byte: a new process loads the save before it,
+    /// saves on (the torn tail cut off, then appended to), and the next
+    /// process loads that latest state exactly.
+    #[test]
+    fn torn_tail_then_new_process_saves_on() {
+        let ident = json!({"model": "x", "row_bytes": ROW});
+        let path = scratch("torn.axkv");
+        let (t, _) = toks();
+        let mut s = Session::new(path.clone(), json!({}));
+        save(&mut s, &ident, &t[..100], 1);
+        let good = std::fs::metadata(&path).unwrap().len();
+        save(&mut s, &ident, &t[..250], 2);
+        let len = std::fs::metadata(&path).unwrap().len();
+        let whole = std::fs::read(&path).unwrap();
+        for cut in [1, 9, 30, len - good - 1] {
+            std::fs::write(&path, &whole[..(len - cut) as usize]).unwrap();
+            let mut r = Session::new(path.clone(), json!({}));
+            let (st, img) = reload(&mut r, &ident, &t, ROW);
+            assert_eq!(st["n"], 1, "cut {cut}");
+            assert_eq!(img.unwrap(), image(ROW, &t[..100]), "cut {cut}");
+            let i = save(&mut r, &ident, &t[..260], 3);
+            assert!(!i.rewrote, "cut {cut}: appended after the cut");
+            let (st, img) = reload(&mut Session::new(path.clone(), json!({})), &ident, &t, ROW);
+            assert_eq!(st["n"], 3, "cut {cut}");
+            assert_eq!(img.unwrap(), image(ROW, &t[..260]), "cut {cut}");
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// A complete KV record with no STATE after it (a save cut between
+    /// them) of other tokens at the same positions: never loaded. A new
+    /// process cuts it off; and even appended after (an old writer), the
+    /// records are matched by their tokens, not their positions.
+    #[test]
+    fn orphan_records_never_load() {
+        let ident = json!({"model": "x", "row_bytes": ROW});
+        let path = scratch("orphan.axkv");
+        let (t, other) = toks();
+        let orphan = |path: &Path| {
+            let mut f = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+            kv_record(&mut f, &other[..250], 100, ROW, &mut fake_save(ROW, &other)).unwrap();
+        };
+        let mut s = Session::new(path.clone(), json!({}));
+        save(&mut s, &ident, &t[..100], 1);
+        let good = std::fs::metadata(&path).unwrap().len();
+        orphan(&path);
+        let mut r = Session::new(path.clone(), json!({}));
+        let (st, img) = reload(&mut r, &ident, &t, ROW);
+        assert_eq!(
+            (st["n"].clone(), img.unwrap()),
+            (json!(1), image(ROW, &t[..100]))
+        );
+        save(&mut r, &ident, &t[..250], 2);
+        let (st, img) = reload(&mut Session::new(path.clone(), json!({})), &ident, &t, ROW);
+        assert_eq!(
+            (st["n"].clone(), img.unwrap()),
+            (json!(2), image(ROW, &t[..250]))
+        );
+
+        // Without the cut: a writer appending after the orphan.
+        let mut s = Session::new(path.clone(), json!({}));
+        save(&mut s, &ident, &t[..100], 1);
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), good);
+        orphan(&path);
+        s.saved.as_mut().unwrap().len = std::fs::metadata(&path).unwrap().len();
+        assert!(!save(&mut s, &ident, &t[..250], 2).rewrote);
+        let (st, img) = reload(&mut Session::new(path.clone(), json!({})), &ident, &t, ROW);
+        assert_eq!(
+            (st["n"].clone(), img.unwrap()),
+            (json!(2), image(ROW, &t[..250]))
+        );
+        // Tokens no record holds: nothing loads.
+        let mut s2 = Session::new(path.clone(), json!({}));
+        let l = s2.read(Some(&ident)).unwrap().unwrap();
+        let mut third = t.clone();
+        third[150] = 7;
+        assert!(s2.load(&l, &third[..250], &mut |_, _, _| Ok(())).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// Damaged headers are errors, never panics or huge allocations.
+    #[test]
+    fn hostile_headers() {
+        let path = scratch("hostile.axkv");
+        let mut f = Vec::new();
+        f.extend(MAGIC);
+        f.extend(VERSION.to_le_bytes());
+        for hl in [u32::MAX, 1 << 21, 5] {
+            let mut g = f.clone();
+            g.extend(hl.to_le_bytes());
+            g.extend(b"{}");
+            std::fs::write(&path, &g).unwrap();
+            assert!(
+                Session::new(path.clone(), json!({})).read(None).is_err(),
+                "hl {hl}"
+            );
+        }
+        // A good header, then garbage: no conversation.
+        let mut g = f.clone();
+        g.extend(2u32.to_le_bytes());
+        g.extend(b"{}");
+        g.extend([
+            KIND_STATE, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 1, 2, 3,
+        ]);
+        std::fs::write(&path, &g).unwrap();
+        assert!(Session::new(path.clone(), json!({})).read(None).is_err());
         let _ = std::fs::remove_file(&path);
     }
 

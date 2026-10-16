@@ -111,7 +111,8 @@ flags:
   --session F chat: keep the conversation in file F: loaded at start if it exists, saved after
               every reply (new positions appended). Its KV cache comes back from the file if
               it was made with this model, KV type, backend and GPU; else it is prefilled again
-              from the saved tokens (the same cache, slower): replies continue as if never stopped
+              from the saved tokens (slower; on the CPU or GPU the same cache, so replies continue
+              as if never stopped; on a CPU/GPU split a re-prefilled cache is close, not exact)
   --parallel N  serve: requests decoded together on the GPU (default 8; 1: one at a time;
               N slots cost N + 1 KV caches). By default the context comes first: as many
               slots (2 to 8) as fit with the whole context, or with a shorter one down to

@@ -1425,18 +1425,22 @@ fn cache_dir_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathB
 
 /// What decides the bits this device's kernels compute, as a string
 /// (kvsave's identity: a cache image is only loaded where it was made):
-/// the kernel sources and options, the device's architecture, the driver
-/// (which JIT-compiles PTX) and AXON_HOPPER (the sm_90a build).
+/// the kernel sources and options, the device's architecture and
+/// AXON_HOPPER (the sm_90a build). Not the driver or NVRTC version: the
+/// xarch audit measured the same bits across them (`driver_tag`).
 pub fn numerics_tag(gpu: &Gpu) -> Result<String, String> {
     let src = fnv128(&[KERNELS.as_bytes(), KERNEL_OPTS.join("\n").as_bytes()]);
-    let d = ffi::driver_version(gpu.d)?;
     Ok(format!(
-        "kernels {src:032x} {} driver {}.{} hopper {}",
+        "kernels {src:032x} {} hopper {}",
         gpu.info()?.arch(),
-        d.0,
-        d.1,
         hopper_env()
     ))
+}
+
+/// The driver's CUDA version, "13.0" (kvsave records it, for people).
+pub fn driver_tag(gpu: &Gpu) -> Result<String, String> {
+    let d = ffi::driver_version(gpu.d)?;
+    Ok(format!("{}.{}", d.0, d.1))
 }
 
 /// FNV-1a, 128-bit: a stable hash (unlike std's, which may change between

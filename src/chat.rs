@@ -441,30 +441,41 @@ impl<M: KvIo> Chat<'_, M> {
                 "it was made with another vocabulary (another model family)",
             ));
         }
-        let us = |v: &serde_json::Value| v.as_u64().map(|x| x as usize);
+        // Every number is checked before use: a damaged or hostile file is
+        // an error, never a panic or a wrong cache.
+        let us = |v: &serde_json::Value| v.as_u64().and_then(|x| usize::try_from(x).ok());
         let list = |v: &serde_json::Value| -> Option<Vec<usize>> {
             v.as_array()?.iter().map(us).collect()
         };
+        let vocab = self.net.vocab();
         let hist: Vec<u32> = list(&st["hist"])
-            .ok_or_else(|| bad("no history"))?
+            .filter(|h| h.iter().all(|&t| t < vocab))
+            .ok_or_else(|| bad("no history, or tokens out of the vocabulary"))?
             .into_iter()
             .map(|t| t as u32)
             .collect();
-        let (fed, sys) = (
+        let (fed, sys, kv) = (
             us(&st["fed"]).ok_or_else(|| bad("no fed"))?,
             us(&st["sys"]).ok_or_else(|| bad("no sys"))?,
+            us(&st["kv"]).ok_or_else(|| bad("no kv"))?,
         );
         let turns = list(&st["turns"]).ok_or_else(|| bad("no turns"))?;
         let msgs: Vec<(String, usize)> =
             serde_json::from_value(st["msgs"].clone()).map_err(|e| bad(&e.to_string()))?;
         let system = st["system"].as_str().map(str::to_owned);
-        if hist.iter().any(|&t| t as usize >= self.net.vocab())
-            || fed > hist.len()
+        // Exchange i spans turns[i]..turns[i + 1] (the last: ..hist.len())
+        // and opens with its framed message, msgs[i].1 tokens.
+        let spans_ok = turns.iter().enumerate().all(|(i, &t)| {
+            let end = turns.get(i + 1).copied().unwrap_or(hist.len());
+            t <= end && msgs.get(i).is_some_and(|m| m.1 <= end - t)
+        });
+        if fed > hist.len()
             || sys > hist.len()
+            || (kv != 0 && kv != fed)
             || msgs.len() != turns.len()
-            || turns.windows(2).any(|w| w[0] > w[1])
-            || turns.first().is_some_and(|&t| t < sys)
+            || turns.first().is_some_and(|&t| t != sys)
             || turns.last().is_some_and(|&t| t > hist.len())
+            || !spans_ok
         {
             return Err(bad("an inconsistent conversation"));
         }
@@ -495,10 +506,10 @@ impl<M: KvIo> Chat<'_, M> {
         self.system = system;
         self.lookup = PromptLookup::new();
         self.fed = 0;
-        let mut why = l.usable.clone().err();
+        let mut why = (kv == 0).then(|| "the file holds no cache".to_string());
         if why.is_none() {
             let (net, cache) = (self.net, &mut self.cache);
-            match s.load(&l, &self.hist, &mut |lo, hi, r| {
+            match s.load(&l, &self.hist[..kv], &mut |lo, hi, r| {
                 net.kv_load(cache, lo, hi, r)
             }) {
                 Ok(()) => self.fed = fed,
@@ -1244,6 +1255,13 @@ mod tests {
     /// appended to after the first save; and the same when the file's
     /// identity doesn't match (its tokens prefilled again instead). Then a
     /// /reset (the file rewritten) and one more turn, loaded again.
+    /// The cache image (`kv_save`) of a chat's positions 0..fed.
+    fn cache_image<M: crate::kvsave::KvIo>(c: &Chat<M>) -> Vec<u8> {
+        let mut v = Vec::new();
+        c.net.kv_save(&c.cache, 0, c.fed, &mut v).unwrap();
+        v
+    }
+
     fn session_continues<M: crate::kvsave::KvIo>(
         net: &M,
         tok: &Tokenizer,
@@ -1278,6 +1296,9 @@ mod tests {
                 let mut s = Session::new(path.clone(), ident.clone());
                 let mut got = vec![say(&mut b, MSGS[0])];
                 assert!(b.save_session(&mut s).unwrap().rewrote);
+                // The saved cache, byte for byte: what a load must give back
+                // (from the file, or by prefilling again).
+                let mut saved = (b.fed, cache_image(&b));
                 drop(b);
                 if mismatch {
                     // As if another model file (same vocabulary) had made it.
@@ -1288,6 +1309,11 @@ mod tests {
                     let mut s = Session::new(path.clone(), ident.clone());
                     let r = c.load_session(&mut s).unwrap().unwrap();
                     assert_eq!(r.from_file, !mismatch || i > 1, "{what} turn {i}: {r:?}");
+                    assert_eq!(c.fed, saved.0, "{what} turn {i}");
+                    assert!(
+                        cache_image(&c) == saved.1,
+                        "{what} turn {i}: cache image differs"
+                    );
                     assert_eq!(r.rng, sampled, "{what}");
                     if mismatch && i == 1 {
                         assert!(r.why.as_ref().unwrap().contains("model"), "{what}: {r:?}");
@@ -1301,14 +1327,20 @@ mod tests {
                         "{what} turn {i}: {info:?}"
                     );
                     assert!(info.kv_written > 0, "{what}");
+                    saved = (c.fed, cache_image(&c));
                     if i + 1 == MSGS.len() {
                         c.reset();
                         assert!(c.save_session(&mut s).unwrap().rewrote, "{what}");
+                        saved = (c.fed, cache_image(&c));
                     }
                 }
                 let mut c = mk();
                 let mut s = Session::new(path.clone(), ident.clone());
                 assert!(c.load_session(&mut s).unwrap().unwrap().from_file, "{what}");
+                assert!(
+                    c.fed == saved.0 && cache_image(&c) == saved.1,
+                    "{what}: after reset"
+                );
                 got.push(say(&mut c, MSGS[0]));
                 assert_eq!(got, want, "{what}");
                 let _ = std::fs::remove_file(&path);
@@ -1326,6 +1358,100 @@ mod tests {
         let path = crate::testutil::model_path().unwrap();
         let ident = crate::kvsave::model_ident(&m, &path, net.head_dim).unwrap();
         session_continues(&net, &tok, ident, "cpu");
+    }
+
+    /// A damaged or hostile STATE is an error, never a panic or a wrong
+    /// cache: each field broken in turn, written as a valid record.
+    #[test]
+    fn session_hostile_state() {
+        use crate::kvsave::{KvIo, Session};
+        use serde_json::json;
+        let Some(m) = crate::testutil::model() else {
+            return;
+        };
+        let tok = Tokenizer::from_gguf(&m);
+        let net = Qwen2::new(&m);
+        let mut c = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), 512).unwrap();
+        c.max_reply = 8;
+        c.reply(MSGS[0], &|| false, &mut |_| Ok(())).unwrap();
+        c.reply(MSGS[1], &|| false, &mut |_| Ok(())).unwrap();
+        let good = c.state();
+        let path = session_path("hostile");
+        let ident = json!({"model": "m"});
+        let id = crate::kvsave::identity(&ident, net.kv_ident(&c.cache));
+        let n = good["hist"].as_array().unwrap().len();
+        let mut cases: Vec<(&str, serde_json::Value, usize)> = Vec::new();
+        let fed = c.fed;
+        let mut set = |what, f: &dyn Fn(&mut serde_json::Value), kv: usize| {
+            let mut v = good.clone();
+            f(&mut v);
+            cases.push((what, v, kv));
+        };
+        set(
+            "token past the vocabulary",
+            &|v| v["hist"][3] = json!(1u64 << 40),
+            fed,
+        );
+        set(
+            "token at the vocabulary",
+            &|v| v["hist"][3] = json!(crate::lm::Lm::vocab(&net)),
+            fed,
+        );
+        set("fed past hist", &|v| v["fed"] = json!(n + 5), fed);
+        set("kv != fed", &|_| {}, fed - 5);
+        set(
+            "msg framing past its exchange",
+            &|v| v["msgs"][0][1] = json!(1_000_000_000u64),
+            fed,
+        );
+        set(
+            "msg framing past the next exchange",
+            &|v| v["msgs"][0][1] = json!(n),
+            fed,
+        );
+        set(
+            "first exchange not after the system block",
+            &|v| v["turns"][0] = json!(1),
+            fed,
+        );
+        set(
+            "turns out of order",
+            &|v| v["turns"] = json!([v["turns"][1].clone(), v["turns"][0].clone()]),
+            fed,
+        );
+        set("msgs/turns count", &|v| v["msgs"] = json!([]), fed);
+        set("sys past hist", &|v| v["sys"] = json!(n + 1), fed);
+        set("not numbers", &|v| v["turns"] = json!(["x"]), fed);
+        set(
+            "too long for the context",
+            &|v| v["hist"] = json!(vec![1u32; 600]),
+            fed,
+        );
+        set("no fed", &|v| v["fed"] = json!(null), fed);
+        for (what, st, kv) in cases {
+            let toks = c.hist[..kv].to_vec();
+            let (net2, cache) = (c.net, &c.cache);
+            Session::new(path.clone(), ident.clone())
+                .save(
+                    id.as_ref(),
+                    &toks,
+                    &mut |lo, hi, w| net2.kv_save(cache, lo, hi, w),
+                    &st,
+                )
+                .unwrap();
+            let mut d = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), 512).unwrap();
+            let r = d.load_session(&mut Session::new(path.clone(), ident.clone()));
+            assert!(
+                r.is_err(),
+                "{what}: {:?}",
+                r.map(|r| r.map(|r| r.positions))
+            );
+            // Unchanged, still usable.
+            assert_eq!(d.hist.len(), d.sys, "{what}");
+            d.max_reply = 4;
+            d.reply(MSGS[2], &|| false, &mut |_| Ok(())).unwrap();
+        }
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

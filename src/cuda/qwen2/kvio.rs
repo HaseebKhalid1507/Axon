@@ -77,6 +77,9 @@ impl Rows<'_, '_> {
     /// Positions lo..hi's image to `out`.
     pub fn save(&self, gpu: &Gpu, lo: usize, hi: usize, out: &mut dyn Write) -> io::Result<()> {
         self.check(lo, hi)?;
+        if lo == hi {
+            return Ok(());
+        }
         let segs = segments(lo, hi);
         let (rounds, most) = self.rounds(&segs);
         let mut host = gpu.host_alloc(most).map_err(io::Error::other)?;
@@ -98,6 +101,9 @@ impl Rows<'_, '_> {
     /// waits for them before it is refilled or freed).
     pub fn load(&self, gpu: &Gpu, lo: usize, hi: usize, src: &mut dyn Read) -> io::Result<()> {
         self.check(lo, hi)?;
+        if lo == hi {
+            return Ok(());
+        }
         let segs = segments(lo, hi);
         let (rounds, most) = self.rounds(&segs);
         let mut host = gpu.host_alloc(most).map_err(io::Error::other)?;
@@ -179,6 +185,9 @@ impl<'g> CudaQwen2<'g> {
         hi: usize,
         out: &mut dyn Write,
     ) -> io::Result<()> {
+        if c.net != self.id {
+            return Err(io::Error::other("a cache of another model"));
+        }
         self.cache_rows(c).save(self.gpu, lo, hi, out)
     }
 
@@ -216,6 +225,68 @@ mod tests {
             .collect();
         t.sort_by(f64::total_cmp);
         t[n / 2]
+    }
+
+    /// `Rows`: unaligned lo..hi at a nonzero base, two regions (q8's
+    /// shape), an image over STAGE (several staging rounds): the image is
+    /// kvsave's layout, and a load puts back exactly those rows, nothing
+    /// else.
+    #[test]
+    fn rows_round_trip_multi_round() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let (arrays, regions, max_ctx, base) = (48, vec![512usize, 64], 3000, 200);
+        let total: usize = regions.iter().map(|r| arrays * max_ctx * r).sum();
+        let src: Vec<u8> = (0..total).map(|i| (i * 131 + i / 7) as u8).collect();
+        let dev = g.alloc(total).unwrap();
+        dev.write(&src).unwrap();
+        let rows = |kv| Rows {
+            kv,
+            max_ctx,
+            base,
+            regions: regions.clone(),
+            arrays,
+        };
+        let (lo, hi) = (37, 2750);
+        let r = rows(&dev);
+        assert!((hi - lo) * r.row_bytes() > STAGE, "more than one round");
+        let mut img = Vec::new();
+        r.save(&g, lo, hi, &mut img).unwrap();
+        // Each region's (offset, row), for the reference walks.
+        let regs: Vec<(usize, usize)> = regions
+            .iter()
+            .scan(0, |off, &row| {
+                let o = *off;
+                *off += arrays * max_ctx * row;
+                Some((o, row))
+            })
+            .collect();
+        let mut want = Vec::new();
+        for (s, e) in segments(lo, hi) {
+            for &(reg, row) in &regs {
+                for a in 0..arrays {
+                    let off = reg + (a * max_ctx + base + s) * row;
+                    want.extend_from_slice(&src[off..off + (e - s) * row]);
+                }
+            }
+        }
+        assert!(img == want, "image layout");
+        let dev2 = g.alloc(total).unwrap();
+        dev2.zero().unwrap();
+        rows(&dev2).load(&g, lo, hi, &mut &img[..]).unwrap();
+        let back: Vec<u8> = dev2.read().unwrap();
+        let mut expect = vec![0u8; total];
+        for &(reg, row) in &regs {
+            for a in 0..arrays {
+                let off = reg + (a * max_ctx + base + lo) * row;
+                let n = (hi - lo) * row;
+                expect[off..off + n].copy_from_slice(&src[off..off + n]);
+            }
+        }
+        assert!(back == expect, "rows loaded back");
+        // Nothing to copy: no staging at all.
+        r.save(&g, 5, 5, &mut Vec::new()).unwrap();
     }
 
     /// D2H and H2D bandwidth for a 7B-shaped slot (28 layers, kv_dim 512,
