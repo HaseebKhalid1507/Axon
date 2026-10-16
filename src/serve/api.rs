@@ -543,6 +543,10 @@ pub struct Usage {
     /// request before.
     pub cached_tokens: usize,
     pub completion_tokens: usize,
+    /// From the request's start (alone) or its admission to a slot (in the
+    /// batch) to its prompt's rows all in the cache: in the batch that is
+    /// wall time, other requests' decode steps between its chunks included
+    /// (so `prompt_per_second` there is not the model's prefill rate).
     pub prompt_ms: f64,
     pub decode_ms: f64,
 }

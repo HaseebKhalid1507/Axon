@@ -212,7 +212,10 @@ flags of `chat`, plus `--host` (default 127.0.0.1), `--port` (default 8080), `--
 default: up to the context), `--cors [ORIGIN]` (answer CORS preflights and allow ORIGIN,
 default `*`, to call the server from web pages; off by default, so an arbitrary page can't
 use your local model), `--max-conns N` / `--max-queue N` (defaults 256 / 128),
-`--parallel N` (requests decoded at once on the GPU, default 8; 1: one at a time), `--quiet`
+`--parallel N` (requests decoded at once on the GPU, default 8; 1: one at a time),
+`--prefill-ms MS` / `--prefill-chunk N` (how much prompt a batched step feeds while others
+decode: up to what fits in MS ms beside their decode step, at least N tokens; defaults 60 /
+256; `--prefill-ms 0`: exactly N tokens; `--prefill-chunk 0`: whole prompts), `--quiet`
 (no per-request line on stderr). `GET /health` is 503 until the model is loaded.
 
 - Context (`--ctx N`, per request): by default the model's trained context (32768 for
@@ -229,8 +232,14 @@ use your local model), `--max-conns N` / `--max-queue N` (defaults 256 / 128),
   model's context (at most 32768 by default; a split's 8192) and drafts up to it.
 - Many requests at once (`--device cuda`, the whole model on the GPU): up to `--parallel`
   requests decode together, one token each per step over the model's weights (continuous
-  batching: a request joins as soon as a slot is free, its prompt prefilled as a step of its
-  own, and leaves when done). Each slot is a KV cache as long as the context, and the
+  batching: a request joins as soon as a slot is free, and leaves when done). While others
+  decode, a new prompt is prefilled in chunks, up to `--prefill-ms` / `--prefill-chunk` worth
+  per step in between their steps (shortest remaining prompt first, the oldest never
+  starved), so a long prompt doesn't stop the others' streams while it prefills (on a 4090,
+  7B, a 24k-token prompt: their worst token gap ITLMAX instead of 2.5 s); with nothing
+  decoding it is fed in 4096-token pieces at full speed. A long prompt sent to an idle server
+  takes the single-stream path below and is fed whole: a request arriving during that
+  prefill waits for it. Each slot is a KV cache as long as the context, and the
   request running alone has one more: a pool of N slots costs N + 1 caches (7B at 32768:
   1.75 GiB each). Without `--ctx` or `--parallel` the context comes first: as many slots
   (2 to 8) as fit with the whole context; if not even 2 do, 2 or more with the longest
