@@ -527,6 +527,10 @@ struct Saved {
     /// save, or what a read found good (a torn or orphaned tail after it
     /// is cut off before the next append).
     len: u64,
+    /// `len` came from a read: bytes past it are a tail to cut off. After
+    /// our own save they can only be another writer's (a rewrite), so the
+    /// file is then rewritten, never cut at our old length.
+    from_read: bool,
     /// Bytes of STATE records no longer current, and of the current one.
     stale: u64,
     last_state: u64,
@@ -538,6 +542,8 @@ pub struct Session {
     /// `model_ident`.
     model: Value,
     saved: Option<Saved>,
+    /// The advisory lock on `path` + ".lock" (`lock`), held while we live.
+    lock: Option<File>,
 }
 
 /// What `Session::save` did.
@@ -652,6 +658,39 @@ impl Session {
             path,
             model,
             saved: None,
+            lock: None,
+        }
+    }
+
+    /// Take the session's advisory exclusive lock (a `.lock` file beside
+    /// it, as the session file itself is replaced by rewrites), held until
+    /// the Session drops. Err if another process holds it: two writers
+    /// would each cut or rewrite the other's saves, so `axon chat` refuses
+    /// a session in use rather than run on without saving it.
+    pub fn lock(&mut self) -> io::Result<()> {
+        if self.lock.is_some() {
+            return Ok(());
+        }
+        let mut p = self.path.clone().into_os_string();
+        p.push(".lock");
+        let mut o = std::fs::OpenOptions::new();
+        o.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+        let f = o.open(PathBuf::from(p))?;
+        match f.try_lock() {
+            Ok(()) => {
+                self.lock = Some(f);
+                Ok(())
+            }
+            Err(std::fs::TryLockError::WouldBlock) => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!(
+                    "session {} is in use by another axon process",
+                    self.path.display()
+                ),
+            )),
+            Err(std::fs::TryLockError::Error(e)) => Err(e),
         }
     }
 
@@ -681,7 +720,7 @@ impl Session {
         let append = self.saved.as_ref().filter(|s| {
             s.kv <= n
                 && tokens[..s.kv] == s.tokens[..s.kv]
-                && cur_len.is_some_and(|c| c >= s.len)
+                && cur_len.is_some_and(|c| c == s.len || (s.from_read && c > s.len))
                 && s.stale + s.last_state <= MAX_STALE
         });
         let mut info = SaveInfo::default();
@@ -707,6 +746,8 @@ impl Session {
                 let mut tmp = self.path.clone().into_os_string();
                 tmp.push(".tmp");
                 let tmp = PathBuf::from(tmp);
+                // A leftover one may have other permissions: start afresh.
+                let _ = std::fs::remove_file(&tmp);
                 let mut w = BufWriter::with_capacity(1 << 20, create_private(&tmp)?);
                 let hdr =
                     serde_json::to_vec(&json!({ "identity": ident })).map_err(io::Error::other)?;
@@ -738,6 +779,7 @@ impl Session {
             kv: n,
             tokens: tokens[..n].to_vec(),
             len,
+            from_read: false,
             stale,
             last_state: FRAME + st.len() as u64,
         });
@@ -913,6 +955,7 @@ impl Session {
             kv,
             tokens: tokens.to_vec(),
             len: l.good_end,
+            from_read: true,
             stale: l.stale,
             last_state: l.last_state,
         });
@@ -1180,6 +1223,76 @@ mod tests {
         third[150] = 7;
         assert!(s2.load(&l, &third[..250], &mut |_, _, _| Ok(())).is_err());
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Two writers on one file (no lock taken): after B rewrites it
+    /// longer, A's next save rewrites it rather than cut it at A's old
+    /// length, and the file loads A's latest state. A leftover .tmp with
+    /// other permissions doesn't make the file readable by others.
+    #[test]
+    fn second_writer_then_save_rewrites() {
+        let ident = json!({"model": "x", "row_bytes": ROW});
+        let path = scratch("two.axkv");
+        let (t, other) = toks();
+        let mut a = Session::new(path.clone(), json!({}));
+        save(&mut a, &ident, &t[..100], 1);
+        let len_a = std::fs::metadata(&path).unwrap().len();
+        let mut b = Session::new(path.clone(), json!({}));
+        let (st, img) = reload(&mut b, &ident, &t, ROW);
+        assert_eq!(
+            (st["n"].clone(), img.unwrap()),
+            (json!(1), image(ROW, &t[..100]))
+        );
+        // Another conversation from the start: B rewrites the file.
+        let mut third = other.clone();
+        third[5] = 4242;
+        assert!(save(&mut b, &ident, &third[..250], 2).rewrote);
+        assert!(std::fs::metadata(&path).unwrap().len() > len_a);
+        let mut tmp = path.clone().into_os_string();
+        tmp.push(".tmp");
+        std::fs::write(&tmp, b"leftover").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let i = save(&mut a, &ident, &t[..150], 3);
+        assert!(i.rewrote, "{i:?}");
+        let (st, img) = reload(&mut Session::new(path.clone(), json!({})), &ident, &t, ROW);
+        assert_eq!(
+            (st["n"].clone(), img.unwrap()),
+            (json!(3), image(ROW, &t[..150]))
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// One process per session: a second lock fails with a clear message
+    /// until the first Session drops.
+    #[test]
+    fn lock_refuses_a_second_holder() {
+        let path = scratch("locked.axkv");
+        let mut x = Session::new(path.clone(), json!({}));
+        x.lock().unwrap();
+        x.lock().unwrap(); // held already: fine
+        let mut y = Session::new(path.clone(), json!({}));
+        let e = y.lock().unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
+        assert!(
+            e.to_string().contains("in use by another axon process"),
+            "{e}"
+        );
+        drop(x);
+        y.lock().unwrap();
+        let mut lock = path.into_os_string();
+        lock.push(".lock");
+        drop(y);
+        let _ = std::fs::remove_file(lock);
     }
 
     /// Damaged headers are errors, never panics or huge allocations.

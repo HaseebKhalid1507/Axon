@@ -113,6 +113,7 @@ flags:
               it was made with this model, KV type, backend and GPU; else it is prefilled again
               from the saved tokens (slower; on the CPU or GPU the same cache, so replies continue
               as if never stopped; on a CPU/GPU split a re-prefilled cache is close, not exact)
+              One process per session file: a session in use by another axon process is refused
   --parallel N  serve: requests decoded together on the GPU (default 8; 1: one at a time;
               N slots cost N + 1 KV caches). By default the context comes first: as many
               slots (2 to 8) as fit with the whole context, or with a shorter one down to
@@ -993,7 +994,10 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
                 model_ident.get_or_init(|| m)
             }
         };
-        Ok(kvsave::Session::new(p, m.clone()))
+        // One process per session file (see `Session::lock`).
+        let mut s = kvsave::Session::new(p, m.clone());
+        s.lock()?;
+        Ok(s)
     };
     let explicit_seed = sargs.seed;
     let sess = ChatSession {
@@ -1055,9 +1059,20 @@ impl ChatSession<'_> {
         p: std::path::PathBuf,
         new_ok: bool,
     ) -> String {
-        let mut s = match (self.make)(p.clone()) {
-            Ok(s) => s,
-            Err(e) => return format!("axon: session {}: {e}", p.display()),
+        // Our own file again: the same Session (and its lock).
+        let reused = self.cur.as_ref().is_some_and(|c| c.path == p);
+        let mut s = match self.cur.take_if(|_| reused) {
+            Some(mut s) => {
+                s.forget();
+                s
+            }
+            None => match (self.make)(p.clone()) {
+                Ok(s) => s,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    return format!("axon: {e}");
+                }
+                Err(e) => return format!("axon: session {}: {e}", p.display()),
+            },
         };
         let shown = p.display().to_string();
         match conv.load_session(&mut s) {
@@ -1065,7 +1080,12 @@ impl ChatSession<'_> {
                 self.cur = Some(s);
                 format!("(new session {shown})")
             }
-            Ok(None) => format!("axon: no session file {shown}"),
+            Ok(None) => {
+                if reused {
+                    self.cur = Some(s);
+                }
+                format!("axon: no session file {shown}")
+            }
             Ok(Some(r)) => {
                 if let (Some(seed), Some(smp)) = (self.explicit_seed, conv.sampler.as_mut())
                     && smp.cfg.seed != seed
@@ -1088,7 +1108,12 @@ impl ChatSession<'_> {
                     if r.rng { "; sampler continues" } else { "" }
                 )
             }
-            Err(e) => format!("axon: session {shown}: {e}"),
+            Err(e) => {
+                if reused {
+                    self.cur = Some(s);
+                }
+                format!("axon: session {shown}: {e}")
+            }
         }
     }
 
@@ -1182,10 +1207,18 @@ fn chat_repl<M: kvsave::KvIo>(
                 }
                 "save" => {
                     let arg = arg.trim();
-                    if !arg.is_empty() {
+                    let same = sess.cur.as_ref().is_some_and(|c| c.path.as_os_str() == arg);
+                    if !arg.is_empty() && !same {
                         match (sess.make)(arg.into()) {
                             Ok(s) => sess.cur = Some(s),
-                            Err(e) => note(&format!("axon: {e}")),
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                note(&format!("axon: {e}"));
+                                continue;
+                            }
+                            Err(e) => {
+                                note(&format!("axon: session {arg}: {e}"));
+                                continue;
+                            }
                         }
                     }
                     match &sess.cur {
