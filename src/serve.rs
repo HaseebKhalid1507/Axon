@@ -658,16 +658,31 @@ fn engine(
     stop: Arc<AtomicBool>,
 ) {
     let (device, gpu_layers) = crate::placement(o.device, o.gpu_layers);
-    let model = crate::open_model_with(&o.path, crate::copy_for(device), &o.rope);
+    let rope = crate::rope::RopeArgs {
+        ctx: o.ctx,
+        ..o.rope.clone()
+    };
+    let model = crate::open_model_with(&o.path, crate::copy_for(device), &rope);
     let trained = model.ctx_len() as usize;
+    let yarn = crate::rope::yarn(&model).is_some();
     let fit = o.ctx.is_none();
     // The default: the trained context (the whole model on one GPU: as
     // much of it as fits, `Backend::new`'s fit); a split, a pipeline or
     // --gpu-layers keep the old cap (`SPLIT_CTX`).
     let want = match o.ctx {
         Some(n) if trained > 0 && n > trained => crate::fail(&format!(
-            "--ctx {n} is past the {trained} tokens {} was trained on",
-            o.path
+            "--ctx {n} is past the {trained} tokens {} {}{}",
+            o.path,
+            if yarn {
+                "runs with YaRN"
+            } else {
+                "was trained on"
+            },
+            if yarn {
+                String::new()
+            } else {
+                crate::rope::ctx_hint(n, trained)
+            }
         )),
         Some(n) => n,
         None if trained > 0 => trained,
@@ -710,7 +725,7 @@ fn engine(
         _ if ctx >= want => None,
         Backend::Cuda(_) => Some(gpu_fit_note(ctx, want, o.kv, gpu_layers.is_some())),
         Backend::Pipeline(_) => Some(format!(
-            "{ctx} fit on the GPUs beside the weights, of the {want} the model was trained on \
+            "{ctx} fit on the GPUs beside the weights, of the model's {want} \
              (--ctx N for another{})",
             if o.kv == KvType::Q8 {
                 ""
@@ -720,7 +735,7 @@ fn engine(
         )),
         Backend::Hybrid(_) => Some(format!(
             "the default for a CPU/GPU split (automatic or --gpu-layers): a cache for the \
-             {want} tokens the model was trained on would take GPU memory from its layers \
+             model's {want} tokens would take GPU memory from its layers \
              (--ctx N for another)"
         )),
         Backend::Cpu(_) => None,
@@ -971,7 +986,7 @@ fn ram_ctx(want: usize, per_pos: u64, avail: u64) -> usize {
 /// (`all_layers`: --gpu-layers put every layer there).
 fn gpu_fit_note(c: usize, want: usize, kv: KvType, all_layers: bool) -> String {
     format!(
-        "{c} fit in GPU memory beside the weights, of the {want} the model was trained on \
+        "{c} fit in GPU memory beside the weights, of the model's {want} \
          (--ctx N for another: {}{})",
         if all_layers {
             "a longer one doesn't fit with every layer on the GPU"
@@ -1001,7 +1016,7 @@ fn cpu_ctx(want: usize, per_pos: u64, mapped: u64, avail: Option<u64>) -> (usize
 /// Why the CPU's default context is shorter than the trained `want`.
 fn ram_note(want: usize, per_pos: u64, avail: u64) -> String {
     format!(
-        "a KV cache of the {want} tokens the model was trained on takes {:.1} GiB, {:.1} GiB \
+        "a KV cache of the model's {want} tokens takes {:.1} GiB, {:.1} GiB \
          of RAM is free beside the model (--ctx N for another)",
         (want as u64 * per_pos) as f64 / GIB,
         avail as f64 / GIB

@@ -59,7 +59,7 @@ pub(crate) fn default_mscale(factor: f32) -> f32 {
     }
 }
 
-/// Axon's own key for an explicit `--yarn-attn-factor` (the whole (sin,
+/// Axon's own key for an explicit `--yarn-mscale` (the whole (sin,
 /// cos) multiplier); GGUF's `attn_factor` multiplies the default instead.
 const MSCALE_KEY: &str = "axon_mscale";
 
@@ -127,8 +127,9 @@ pub(crate) fn mscale(m: &Model) -> f32 {
 }
 
 /// `--rope-scaling`, `--rope-scale`, `--yarn-orig-ctx`, `--yarn-beta-fast`,
-/// `--yarn-beta-slow`, `--yarn-attn-factor` (llama.cpp's names), for gen,
-/// logits, chat and serve.
+/// `--yarn-beta-slow` (llama.cpp's names) and `--yarn-mscale` (Axon's: the
+/// whole (sin, cos) multiplier, not llama.cpp's `--yarn-attn-factor`, which
+/// llama.cpp overrides in YaRN mode), for gen, logits, chat and serve.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct RopeArgs {
     pub scaling: Option<String>,
@@ -136,7 +137,10 @@ pub struct RopeArgs {
     pub orig_ctx: Option<usize>,
     pub beta_fast: Option<f64>,
     pub beta_slow: Option<f64>,
-    pub attn_factor: Option<f64>,
+    pub mscale: Option<f64>,
+    /// Not a flag: chat's and serve's `--ctx`, from which a missing
+    /// `--rope-scale` defaults to ceil(ctx / orig).
+    pub ctx: Option<usize>,
 }
 
 pub const FLAGS: [&str; 6] = [
@@ -145,8 +149,17 @@ pub const FLAGS: [&str; 6] = [
     "--yarn-orig-ctx",
     "--yarn-beta-fast",
     "--yarn-beta-slow",
-    "--yarn-attn-factor",
+    "--yarn-mscale",
 ];
+
+/// The advice the "--ctx past the trained context" errors end with.
+pub fn ctx_hint(ctx: usize, trained: usize) -> String {
+    format!(
+        "; for a longer context add --rope-scaling yarn (YaRN: --rope-scale {} by default \
+         for --ctx {ctx}; it changes the output at every length, docs/long-context.md)",
+        ctx.div_ceil(trained.max(1))
+    )
+}
 
 impl RopeArgs {
     pub fn is_flag(f: &str) -> bool {
@@ -172,10 +185,13 @@ impl RopeArgs {
                 }
             },
             "--rope-scale" => {
-                self.factor = Some(pos()?).filter(|&x| x >= 1.0).map_or_else(
-                    || Err(format!("--rope-scale needs a number >= 1, got '{v}'")),
-                    |x| Ok(Some(x)),
-                )?
+                let x = pos()?;
+                if x <= 1.0 {
+                    return Err(format!(
+                        "--rope-scale needs a number > 1 (1 scales nothing), got '{v}'"
+                    ));
+                }
+                self.factor = Some(x);
             }
             "--yarn-orig-ctx" => {
                 self.orig_ctx = Some(
@@ -187,37 +203,58 @@ impl RopeArgs {
             }
             "--yarn-beta-fast" => self.beta_fast = Some(pos()?),
             "--yarn-beta-slow" => self.beta_slow = Some(pos()?),
-            "--yarn-attn-factor" => self.attn_factor = Some(pos()?),
+            "--yarn-mscale" => self.mscale = Some(pos()?),
             _ => return Err(format!("unknown flag {f}")),
         }
         Ok(())
     }
 
-    /// Nothing given: the model runs as its file says.
+    /// No flag given: the model runs as its file says.
     pub fn is_empty(&self) -> bool {
-        *self == RopeArgs::default()
+        self.scaling.is_none()
+            && self.factor.is_none()
+            && self.orig_ctx.is_none()
+            && self.beta_fast.is_none()
+            && self.beta_slow.is_none()
+            && self.mscale.is_none()
     }
 
     /// Write the flags into `m`'s metadata (before `check_supported`):
-    /// a usage error if they don't make sense. Returns a line describing
-    /// the scaling, if any.
-    pub fn apply(&self, m: &mut Model) -> Result<Option<String>, String> {
+    /// a usage error if they don't make sense. Returns the lines to print
+    /// on stderr (what the scaling resolved to, and notes).
+    pub fn apply(&self, m: &mut Model) -> Result<Vec<String>, String> {
         if self.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
         let yarn_only = self.factor.is_some()
             || self.orig_ctx.is_some()
             || self.beta_fast.is_some()
             || self.beta_slow.is_some()
-            || self.attn_factor.is_some();
+            || self.mscale.is_some();
+        let ctx_key = format!("{}.context_length", m.arch);
+        fn set(m: &mut Model, k: String, v: Val) {
+            match m.metadata.iter_mut().find(|(n, _)| *n == k) {
+                Some(e) => e.1 = v,
+                None => m.metadata.push((k, v)),
+            }
+        }
         match self.scaling.as_deref() {
             Some("none") if yarn_only => {
                 return Err("--rope-scaling none takes no --rope-scale / --yarn-* flags".into());
             }
             Some("none") => {
+                // A YaRN file's context_length is orig x factor: back to orig.
+                let back = yarn(m).map(|y| y.orig);
                 let p = key(m, "");
                 m.metadata.retain(|(k, _)| !k.starts_with(&p));
-                return Ok(Some("rope scaling: none".into()));
+                let a = m.arch.clone();
+                m.metadata
+                    .retain(|(k, _)| *k != format!("{a}.rope.scale_linear"));
+                if let Some(n) = back.filter(|&n| n >= 1.0) {
+                    set(m, ctx_key, Val::U32(n as u32));
+                    return Ok(vec![format!("rope scaling: none, context {}", n as u32)]);
+                }
+                return Ok(vec!["rope scaling: none".into()]);
             }
             None => {
                 return Err("--rope-scale and --yarn-* need --rope-scaling yarn".into());
@@ -227,26 +264,37 @@ impl RopeArgs {
         if m.arch == "gemma3" {
             return Err("--rope-scaling yarn isn't supported on gemma3".into());
         }
-        let ctx_key = format!("{}.context_length", m.arch);
         let trained = meta_num(m, &ctx_key);
         let file = yarn(m);
-        let factor = self
-            .factor
-            .or(file.map(|y| y.factor))
-            .ok_or("--rope-scaling yarn needs --rope-scale F (e.g. 4: 32768 -> 131072)")?;
+        let mut notes = Vec::new();
         let orig = match (self.orig_ctx, file) {
             (Some(n), _) => n as f64,
             (None, Some(y)) => y.orig,
             (None, None) => {
-                trained.ok_or("the model has no context_length: give --yarn-orig-ctx")?
+                let t = trained.ok_or("the model has no context_length: give --yarn-orig-ctx")?;
+                if m.arch == "qwen3" && t == 40960.0 {
+                    notes.push(
+                        "note: qwen3's context_length 40960 is 32768 + an output reserve; \
+                         its model card uses --yarn-orig-ctx 32768"
+                            .into(),
+                    );
+                }
+                t
             }
         };
-        fn set(m: &mut Model, k: String, v: Val) {
-            match m.metadata.iter_mut().find(|(n, _)| *n == k) {
-                Some(e) => e.1 = v,
-                None => m.metadata.push((k, v)),
+        let factor = match (self.factor, file, self.ctx) {
+            (Some(f), _, _) => f,
+            (None, Some(y), _) => y.factor,
+            // Spec L2: the smallest whole factor that fits --ctx.
+            (None, None, Some(c)) if c as f64 > orig => (c as f64 / orig).ceil(),
+            _ => {
+                return Err(
+                    "--rope-scaling yarn needs --rope-scale F (e.g. 4: 32768 -> 131072), \
+                     or a --ctx past the trained context to take it from"
+                        .into(),
+                );
             }
-        }
+        };
         set(m, key(m, "type"), Val::Str("yarn".into()));
         set(m, key(m, "factor"), Val::F32(factor as f32));
         set(m, key(m, "original_context_length"), Val::U32(orig as u32));
@@ -256,20 +304,22 @@ impl RopeArgs {
         if let Some(b) = self.beta_slow {
             set(m, key(m, "yarn_beta_slow"), Val::F32(b as f32));
         }
-        if let Some(s) = self.attn_factor {
+        if let Some(s) = self.mscale {
             set(m, key(m, MSCALE_KEY), Val::F32(s as f32));
         }
-        let y = yarn(m);
+        // factor > 1 here (`set`, or the file's, or a ceil above 1).
+        let y = yarn(m).ok_or("--rope-scaling yarn: the factor must be above 1")?;
         // llama.cpp: n_ctx_train = n_ctx_orig_yarn / freq_scale.
-        let ctx = y.map_or(orig as usize, |y| y.ctx());
+        let ctx = y.ctx();
         set(m, ctx_key, Val::U32(ctx.min(u32::MAX as usize) as u32));
-        Ok(Some(match y {
-            Some(y) => format!(
+        notes.insert(
+            0,
+            format!(
                 "rope scaling: yarn, factor {}, original context {}, context {ctx}, beta {}/{}, mscale {:.4}",
                 y.factor, y.orig, y.beta_fast, y.beta_slow, y.mscale
             ),
-            None => format!("rope scaling: yarn, factor {factor} (no change), context {ctx}"),
-        }))
+        );
+        Ok(notes)
     }
 }
 
@@ -309,6 +359,14 @@ mod tests {
         for i in 24..40 {
             assert!(f[i] < base[i] && f[i] > base[i] / 4.0, "pair {i}");
         }
+        // Goldens of the blend (review of PR #49, from the formula).
+        for (i, want) in [(24, 5.375321e-3), (30, 1.064361e-3), (39, 6.490394e-5)] {
+            assert!(
+                (f[i] / want - 1.0).abs() < 1e-6,
+                "pair {i}: {} vs {want}",
+                f[i]
+            );
+        }
         assert_eq!(y.ctx(), 131072);
     }
 
@@ -322,6 +380,10 @@ mod tests {
         assert_eq!(a.factor, Some(4.0));
         assert!(a.set("--rope-scaling", Some("linear")).is_err());
         assert!(a.set("--rope-scale", Some("0.5")).is_err());
+        assert!(a.set("--rope-scale", Some("1")).is_err());
+        assert!(a.set("--yarn-attn-factor", Some("1.1")).is_err());
+        a.set("--yarn-mscale", Some("1.2")).unwrap();
+        assert_eq!(a.mscale, Some(1.2));
         assert!(a.set("--yarn-orig-ctx", Some("x")).is_err());
         assert!(a.set("--yarn-beta-fast", None).is_err());
     }

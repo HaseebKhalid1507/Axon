@@ -126,7 +126,8 @@ flags:
               Qwen2.5 / Qwen3 to 131072 with --rope-scale 4 --yarn-orig-ctx 32768. Changes the
               output at every length, short prompts too: only for prompts past the trained
               context (docs/long-context.md). --yarn-beta-fast B (32), --yarn-beta-slow B (1),
-              --yarn-attn-factor M (the q and k scale, default 0.1 ln F + 1);
+              --yarn-mscale M (the q and k scale, default 0.1 ln F + 1; not llama.cpp's
+              --yarn-attn-factor); without --rope-scale, chat/serve take F = ceil(--ctx / N);
               --rope-scaling none drops a GGUF's own rope.scaling keys
 
 sampling flags (gen, chat; applied in this order, as llama.cpp):
@@ -210,23 +211,25 @@ fn open_model(path: &str, lm: bool) -> gguf::Model {
 /// read: `copy` forces the copy-vs-map choice, None copies only if the CPU
 /// model reads its matrices in place (`model::reads_matrices_in_place`).
 /// `rope`: the --rope-scaling flags, written into the model's metadata
-/// (`rope::RopeArgs::apply`) and checked again.
+/// (`rope::RopeArgs::apply`) before the model is checked, so that
+/// `--rope-scaling none` can run a file whose own scaling is refused.
 fn open_model_with(path: &str, copy: Option<bool>, rope: &rope::RopeArgs) -> gguf::Model {
     let mut m = gguf::load_to_run(path, copy, |m| {
-        if let Err(e) = model::check_supported(m) {
+        // With rope flags the check waits for them (below).
+        if rope.is_empty()
+            && let Err(e) = model::check_supported(m)
+        {
             fail(&format!("{path}: {e}"));
         }
         model::reads_matrices_in_place(m)
     })
     .unwrap_or_else(|e| load_failed(path, e));
-    match rope.apply(&mut m) {
-        Err(e) => fail(&e),
-        Ok(None) => {}
-        Ok(Some(line)) => {
+    if !rope.is_empty() {
+        for line in rope.apply(&mut m).unwrap_or_else(|e| fail(&e)) {
             eprintln!("axon: {line}");
-            if let Err(e) = model::check_supported(&m) {
-                fail(&format!("{path}: {e}"));
-            }
+        }
+        if let Err(e) = model::check_supported(&m) {
+            fail(&format!("{path}: {e}"));
         }
     }
     m
@@ -937,18 +940,35 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     if device == Device::Cuda {
         cuda::preinit();
     }
+    rargs.ctx = ctx;
     let model = open_model_with(path, copy_for(device), &rargs);
     // RoPE past the trained length gives garbage; 0 = the GGUF doesn't say.
     let trained = model.ctx_len() as usize;
+    let yarn = rope::yarn(&model).is_some();
     let fit = ctx.is_none();
     let ctx = match ctx {
         Some(n) if trained > 0 && n > trained => fail(&format!(
-            "--ctx {n} is past the {trained} tokens {path} was trained on"
+            "--ctx {n} is past the {trained} tokens {path} {}{}",
+            if yarn {
+                "runs with YaRN"
+            } else {
+                "was trained on"
+            },
+            if yarn {
+                String::new()
+            } else {
+                rope::ctx_hint(n, trained)
+            }
         )),
         Some(n) => n,
         None if trained > 0 => trained.min(DEFAULT_CHAT_CTX),
         None => DEFAULT_CHAT_CTX,
     };
+    if yarn && fit {
+        eprintln!(
+            "axon: note: YaRN is on but chat's context is {ctx} (the default); --ctx N for a longer one"
+        );
+    }
     let tok = tokenizer::Tokenizer::from_gguf(&model);
     let with_model = draft_path.is_some() || draft::model_env().is_some();
     let max_draft = draft::draft_k(max_draft.or_else(draft_env_set), with_model);

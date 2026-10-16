@@ -33,11 +33,16 @@ length the session has reached.
 | flag | meaning | default |
 |---|---|---|
 | `--rope-scaling yarn` | turn YaRN on (`none`: drop a GGUF's own `rope.scaling.*` keys) | off |
-| `--rope-scale F` | the factor; the context becomes orig x F | required (or the GGUF's) |
+| `--rope-scale F` | the factor (> 1); the context becomes orig x F | the GGUF's; else, for chat and serve, the smallest whole F with orig x F >= `--ctx` |
 | `--yarn-orig-ctx N` | the trained context the ramp is computed from | the GGUF's `context_length` (pass 32768 for Qwen3, as its card does) |
 | `--yarn-beta-fast B` | pairs turning at least B times in N keep their frequency | 32 |
 | `--yarn-beta-slow B` | pairs turning at most B times in N are divided by F | 1 |
-| `--yarn-attn-factor M` | the scale on q and k (logits x M^2) | 0.1 ln F + 1 (1.1386 at F = 4) |
+| `--yarn-mscale M` | the whole scale on q and k (logits x M^2) | 0.1 ln F + 1 (1.1386 at F = 4) |
+
+`--yarn-mscale` is Axon's own name on purpose: llama.cpp's `--yarn-attn-factor` is a
+different knob (in YaRN mode llama.cpp replaces it with 0.1 ln F + 1 and multiplies the
+GGUF's `attn_factor` on top), so it isn't accepted here. With the defaults both engines
+apply the same 1.1386.
 
 They work on `gen`, `logits`, `chat` and `serve`, and print what they resolved to on
 stderr, e.g. `rope scaling: yarn, factor 4, original context 32768, context 131072, beta
@@ -46,7 +51,11 @@ reports the context served. `serve` without `--ctx` takes the model's context wh
 fits, so with the flag that is now orig x F (131072): pass `--kv q8` (and `--ctx` if you
 want less) to keep the KV cache in budget. A GGUF that does carry `rope.scaling.type = yarn` (with
 `factor`, `original_context_length`, and optionally `attn_factor`, `yarn_beta_fast`,
-`yarn_beta_slow`, `yarn_ext_factor`) gets YaRN without flags, as in llama.cpp. Not on gemma3.
+`yarn_beta_slow`, `yarn_ext_factor`) gets YaRN without flags, as in llama.cpp;
+`--rope-scaling none` runs such a file without it, at its original context. Not on gemma3,
+and not combined with `rope.scale_linear`. On Qwen3 the GGUF's `context_length` is 40960
+(32k plus an output reserve): pass `--yarn-orig-ctx 32768` as its card does (Axon prints a
+note otherwise). `chat` keeps its 8192 default context with YaRN on (it says so): give `--ctx`.
 
 ## What it computes
 

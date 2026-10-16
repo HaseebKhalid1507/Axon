@@ -40,7 +40,7 @@ fn model(yarn: bool) -> Option<Model> {
             factor: Some(env_or("AXON_YARN_FACTOR", "4").parse().unwrap()),
             ..Default::default()
         };
-        eprintln!("{}", args.apply(&mut m).unwrap().unwrap());
+        eprintln!("{}", args.apply(&mut m).unwrap().join("\n"));
         crate::model::check_supported(&m).unwrap();
     }
     Some(m)

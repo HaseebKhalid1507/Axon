@@ -1473,6 +1473,24 @@ fn gpu_yarn_matches_reference_and_keeps_bits() {
     let mut m = qwen3_fixture(Q8_0);
     with_yarn(&mut m, 4.0, 16);
     let want = qwen3_ref(&m, &ids, NormBug::None);
+    // Far from the plain reference and from YaRN without the mscale, so a
+    // kernel ignoring the ramp or `m` fails below.
+    let plain = qwen3_ref(&qwen3_fixture(Q8_0), &ids, NormBug::None);
+    let mut m1 = qwen3_fixture(Q8_0);
+    let no_m = crate::rope::RopeArgs {
+        scaling: Some("yarn".into()),
+        factor: Some(4.0),
+        orig_ctx: Some(16),
+        mscale: Some(1.0),
+        ..Default::default()
+    };
+    no_m.apply(&mut m1).unwrap();
+    let no_m = qwen3_ref(&m1, &ids, NormBug::None);
+    for (what, r) in [("plain", &plain), ("no mscale", &no_m)] {
+        let d = max_diff(r, &want);
+        eprintln!("gpu yarn test: {what} reference vs yarn's: {d:.3}");
+        assert!(d > 4.0 * QWEN3_Q8_TOL, "{what}: only {d}");
+    }
     for kv in [CacheKv::F16, CacheKv::Q8 { group: 0 }] {
         let mut net = CudaQwen2::with_kv(&g, &km, &m, 16, kv, false).unwrap();
         assert_eq!(net.rope_m, crate::rope::mscale(&m));

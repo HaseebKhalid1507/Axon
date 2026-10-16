@@ -585,6 +585,11 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
         {
             return Err(bad("RoPE scaling yarn: a parameter is out of range".into()));
         }
+        if num("rope.scale_linear").is_some_and(|v| v != 1.0 && v != 0.0) {
+            return Err(bad(
+                "RoPE scaling yarn with rope.scale_linear is not supported".into(),
+            ));
+        }
         if num("rope.scaling.yarn_log_multiplier").is_some_and(|v| v != 0.0) {
             return Err(bad(
                 "RoPE scaling yarn with yarn_log_multiplier is not supported".into(),
@@ -3623,14 +3628,54 @@ pub(crate) mod tests {
             dec[n - 1].iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
             "yarn: decode != batched prefill"
         );
-        // Off: --rope-scaling none on a plain model changes nothing.
-        let mut m = qwen3_fixture(F32);
+        // The mscale alone moves the logits far beyond the tolerance too (a
+        // table builder ignoring it would fail above).
+        let mut m1 = qwen3_fixture(F32);
+        let no_m = crate::rope::RopeArgs {
+            mscale: Some(1.0),
+            ..args.clone()
+        };
+        no_m.apply(&mut m1).unwrap();
+        let d1 = max_diff(&qwen3_ref(&m1, &ids, NormBug::None), &want);
+        eprintln!("yarn without mscale vs yarn reference: max |dlogit| {d1:.3}");
+        assert!(d1 > 100.0 * TOL, "mscale hardly changes the logits ({d1})");
+        // Off: --rope-scaling none on a plain model changes nothing; on a
+        // YaRN model (here the flags' keys) it restores the original context.
         let none = crate::rope::RopeArgs {
             scaling: Some("none".into()),
             ..Default::default()
         };
         none.apply(&mut m).unwrap();
         assert!(crate::rope::yarn(&m).is_none());
+        assert_eq!(m.ctx_len(), 16);
+        check_supported(&m).unwrap();
+        let mut m = qwen3_fixture(F32);
+        none.apply(&mut m).unwrap();
+        assert!(crate::rope::yarn(&m).is_none());
+        assert_eq!(m.ctx_len(), 64);
+        // No --rope-scale: ceil(--ctx / orig) (spec L2), else an error.
+        let mut m = qwen3_fixture(F32);
+        let by_ctx = crate::rope::RopeArgs {
+            scaling: Some("yarn".into()),
+            orig_ctx: Some(16),
+            ctx: Some(40),
+            ..Default::default()
+        };
+        by_ctx.apply(&mut m).unwrap();
+        assert_eq!(crate::rope::yarn(&m).unwrap().factor, 3.0);
+        assert_eq!(m.ctx_len(), 48);
+        let mut m = qwen3_fixture(F32);
+        let short = crate::rope::RopeArgs {
+            ctx: Some(16),
+            ..by_ctx.clone()
+        };
+        assert!(short.apply(&mut m).is_err());
+        // yarn with a linear scale too: refused.
+        let mut m = qwen3_fixture(F32);
+        args.apply(&mut m).unwrap();
+        m.metadata
+            .push(("qwen3.rope.scale_linear".into(), Val::F32(2.0)));
+        assert!(check_supported(&m).is_err());
         // Flags without the type, and yarn on gemma3, are refused.
         let mut m = qwen3_fixture(F32);
         let bare = crate::rope::RopeArgs {

@@ -164,7 +164,7 @@ Defaults, as `axon --help` gives them:
   fits, else a split. For `serve`, see below: its default is the whole trained context.
 - `--rope-scaling yarn --rope-scale F [--yarn-orig-ctx N]` (gen, logits, chat, serve): off.
   With it the context is N x F (`--ctx` up to that); also `--yarn-beta-fast` (32),
-  `--yarn-beta-slow` (1), `--yarn-attn-factor` (0.1 ln F + 1). See
+  `--yarn-beta-slow` (1), `--yarn-mscale` (0.1 ln F + 1; not llama.cpp's `--yarn-attn-factor`). See
   [docs/long-context.md](docs/long-context.md) for when to use it and what it costs.
 - `-n N`: gen 32 tokens; chat no limit per reply.
 - Sampling: `--temp` 0 for gen, 0.8 for chat; `--top-k` 40 (0 = off, all tokens),
