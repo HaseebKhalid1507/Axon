@@ -192,7 +192,9 @@ pub struct Qwen2<'a> {
     eps: f32,
     /// RoPE frequency per pair (`rope_freqs`), head_dim / 2 of them; on
     /// gemma3 with local layers, then theirs (`rope_freqs_swa`).
-    freqs: Vec<f64>,
+    /// (A boxed slice, not a Vec: `lm::Backend` holds this struct inline,
+    /// near clippy's size bound.)
+    freqs: Box<[f64]>,
     /// YaRN's (sin, cos) multiplier on the global table (`rope::mscale`;
     /// 1 without YaRN).
     rope_m: f32,
@@ -943,7 +945,7 @@ impl<'a> Qwen2<'a> {
             q_dim: n_heads * head_dim,
             vocab,
             eps,
-            freqs: [freqs, freqs_swa].concat(),
+            freqs: [freqs, freqs_swa].concat().into_boxed_slice(),
             rope_m: crate::rope::mscale(m),
             gemma,
             token_embd,
