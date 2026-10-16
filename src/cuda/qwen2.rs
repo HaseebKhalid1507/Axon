@@ -485,6 +485,12 @@ fn place<'t>(t: &'t Tensor, uploads: &mut Vec<(&'t Tensor, usize)>) -> Mat {
     }
 }
 
+/// The ring uploads only with at least this fraction of the GGUF in the
+/// page cache (`Model::resident_fraction`; see `build`). Between the two
+/// measured ends (cold ~1/3 at upload time: ring 45-55 ms slower; warm: ~110
+/// ms faster) the break-even is about 2/3 by interpolation (ESTIMATED).
+const RING_RESIDENT: f64 = 0.75;
+
 /// Bytes per 256-value block of a Q6_K matrix's prefill copy (prefill.cu
 /// Q6K8_BYTES).
 const Q6K8_BYTES: usize = 288;
@@ -702,31 +708,82 @@ impl<'g> CudaQwen2<'g> {
         // ld_a2) read up to 2 bytes past a Q8_0/Q5_0/Q4_0/Q4_1/Q5_1 block,
         // which may be the arena's last.
         net.weights = gpu.alloc(plan.total + ARENA_PAD)?;
-        // A thread fills in the page tables of the matrices ahead of the
-        // copies (`Model::prefault`): out of a file mapping the driver's
-        // pageable copy otherwise stops at a page fault every 64 KB (11.5
-        // vs 14.3 GB/s, cuda::tests::h2d_bandwidth). It skips the ones
-        // already being copied (`uploaded` may release them).
-        let next = std::sync::atomic::AtomicUsize::new(0);
-        std::thread::scope(|sc| {
-            sc.spawn(|| {
-                for (i, &(t, _)) in plan.uploads.iter().enumerate() {
-                    if next.load(std::sync::atomic::Ordering::Relaxed) <= i {
-                        m.prefault(t);
+        let t0 = std::time::Instant::now();
+        // Through the pinned ring (`upload`) when the weights are in the page
+        // cache, else the driver's pageable copies, as before (and if the
+        // ring can't pin its staging memory). Measured on bella (7 rounds,
+        // 7B / 8B, short prompt): warm 610 / 621 -> 497 / 500 ms, but cold
+        // 836 / 866 -> 890 / 910 ms: with the reads disk-bound, the ring's
+        // 8 preads lose to the fault-driven copy behind `read_ahead`. At
+        // upload time a cold load has ~a third of the file in (`read_ahead`
+        // has run during CUDA init), a warm one all of it.
+        let resident = m.resident_fraction();
+        let ring = super::upload::Shape::pick(plan.total)
+            .filter(|_| {
+                super::upload::Shape::forced() || resident.is_none_or(|f| f >= RING_RESIDENT)
+            })
+            .and_then(|s| super::upload::Ring::new(gpu, s).ok());
+        let shape = ring.as_ref().map(|r| r.shape());
+        let mut waits = None;
+        if let Some(mut ring) = ring {
+            use super::upload::{Piece, Src};
+            // Read with pread where the file has the bytes (no page tables
+            // to fill in for a mapping), else copied from memory.
+            let pread = std::env::var("AXON_UPLOAD_PREAD").as_deref() != Ok("0");
+            let pieces: Vec<Piece> = (plan.uploads.iter())
+                .map(|&(t, off)| Piece {
+                    off,
+                    len: t.n_bytes as usize,
+                    src: match m.tensor_file(t).filter(|_| pread) {
+                        Some((f, fo)) => Src::File(f, fo),
+                        None => Src::Mem(m.tensor_data(t)),
+                    },
+                })
+                .collect();
+            let stream = gpu.new_stream()?;
+            let t1 = std::time::Instant::now();
+            ring.upload(
+                &stream,
+                &net.weights,
+                &pieces,
+                &mut |i| uploaded(plan.uploads[i].0),
+                // Ahead of the copies, memory pieces get their page tables
+                // filled in. pread pieces need nothing: MADV_WILLNEED ahead
+                // of them measured slower cold (bella 7B 871 -> 890 ms) and
+                // the same warm.
+                &|i| {
+                    if matches!(pieces[i].src, Src::Mem(_)) {
+                        m.prefault(plan.uploads[i].0)
                     }
-                }
-            });
-            let r = (|| {
-                for (i, &(t, off)) in plan.uploads.iter().enumerate() {
-                    next.store(i + 1, std::sync::atomic::Ordering::Relaxed);
-                    net.weights.write_at(off, m.tensor_data(t))?; // synchronous
-                    uploaded(t);
-                }
-                Ok::<(), String>(())
-            })();
-            next.store(usize::MAX, std::sync::atomic::Ordering::Relaxed);
-            r
-        })?;
+                },
+            )?;
+            waits = Some((t1.elapsed().as_secs_f64(), ring.waits.get()));
+        } else {
+            Self::upload_pageable(&net.weights, m, &plan.uploads, uploaded)?;
+        }
+        if std::env::var_os("AXON_UPLOAD_TRACE").is_some() {
+            let s = t0.elapsed().as_secs_f64();
+            eprintln!(
+                "[upload] {:.1} MB in {:.1} ms: {:.1} GB/s, {} resident ({}{})",
+                plan.total as f64 / 1e6,
+                s * 1e3,
+                plan.total as f64 / s / 1e9,
+                resident.map_or("?".into(), |f| format!("{:.0}%", f * 100.0)),
+                shape.map_or("pageable".into(), |s| format!(
+                    "ring {} x {} MB, {} threads",
+                    s.slots,
+                    s.slot >> 20,
+                    s.threads
+                )),
+                waits.map_or(String::new(), |(c, (f, d))| format!(
+                    "; copy {:.1} ms, waited {:.1} ms for reads, {:.1} for DMAs; read-ahead {}",
+                    c * 1e3,
+                    f * 1e3,
+                    d * 1e3,
+                    if m.reading_ahead() { "on" } else { "off" }
+                ))
+            );
+        }
         net.vecs = gpu.upload(&plan.vecs)?;
         net.freq = gpu.alloc(plan.freq.len() * 8)?;
         let fb: Vec<u64> = plan.freq.iter().map(|f| f.to_bits()).collect();
@@ -735,6 +792,40 @@ impl<'g> CudaQwen2<'g> {
             net.make_q6k8(ctx)?;
         }
         Ok(net)
+    }
+
+    /// The matrices' upload without the ring: the driver's pageable
+    /// copies, one per matrix. A thread fills in the page tables of the
+    /// matrices ahead of the copies (`Model::prefault`): out of a file
+    /// mapping the driver's pageable copy otherwise stops at a page fault
+    /// every 64 KB (11.5 vs 14.3 GB/s, cuda::tests::h2d_bandwidth). It skips
+    /// the ones already being copied (`uploaded` may release them).
+    fn upload_pageable<'m>(
+        weights: &DevBuf,
+        m: &'m Model,
+        uploads: &[(&'m Tensor, usize)],
+        uploaded: &mut dyn FnMut(&'m Tensor),
+    ) -> Result<(), String> {
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        std::thread::scope(|sc| {
+            sc.spawn(|| {
+                for (i, &(t, _)) in uploads.iter().enumerate() {
+                    if next.load(std::sync::atomic::Ordering::Relaxed) <= i {
+                        m.prefault(t);
+                    }
+                }
+            });
+            let r = (|| {
+                for (i, &(t, off)) in uploads.iter().enumerate() {
+                    next.store(i + 1, std::sync::atomic::Ordering::Relaxed);
+                    weights.write_at(off, m.tensor_data(t))?; // synchronous
+                    uploaded(t);
+                }
+                Ok::<(), String>(())
+            })();
+            next.store(usize::MAX, std::sync::atomic::Ordering::Relaxed);
+            r
+        })
     }
 
     /// Bytes of the Q6_K layer matrices' prefill copy (prefill.cu Q6K8).

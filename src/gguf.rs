@@ -13,6 +13,9 @@ const GGUF_MAGIC: u32 = 0x46554747;
 const MAX_DIMS: u32 = 4;
 /// `general.alignment` when the file doesn't set it.
 const DEFAULT_ALIGNMENT: u64 = 32;
+/// String arrays at least this long are parsed on several threads
+/// (`Reader::strings`).
+const PAR_STRINGS: usize = 16384;
 /// Arrays of arrays are legal GGUF; nothing real nests deeper than this.
 const MAX_ARRAY_DEPTH: u32 = 4;
 /// Most metadata array elements in a file, all arrays together. Each one
@@ -72,6 +75,61 @@ impl<'a> Reader<'a> {
         String::from_utf8(bytes.to_vec()).map_err(|_| bad(format!("{what} is not valid UTF-8")))
     }
 
+    /// An array of `n` strings (the vocabulary, the merges: ~150k each):
+    /// their bounds found in one pass, then the Strings made on up to 4
+    /// threads. The same values as reading them one by one; with both a
+    /// truncated and an invalid UTF-8 string, the truncation is reported.
+    fn strings(&mut self, n: usize) -> io::Result<Val> {
+        const W: &str = "metadata string";
+        // `n` was checked against the bytes left, not against memory: a
+        // corrupt count only grows these as strings are really read.
+        let mut spans = Vec::with_capacity(n.min(1 << 18));
+        for _ in 0..n {
+            let len = self.u64(W)?;
+            let at = self.pos;
+            self.take(len, W)?;
+            spans.push((at, len as usize));
+        }
+        let buf = self.buf;
+        let make = |part: &[(usize, usize)]| -> io::Result<Vec<Val>> {
+            (part.iter())
+                .map(|&(at, len)| {
+                    let b = &buf[at..at + len];
+                    match std::str::from_utf8(b) {
+                        Ok(s) => Ok(Val::Str(s.to_owned())),
+                        Err(_) => Err(bad(format!("{W} is not valid UTF-8"))),
+                    }
+                })
+                .collect()
+        };
+        let threads = std::thread::available_parallelism()
+            .map_or(1, |t| t.get())
+            .clamp(1, 4);
+        let per = n.div_ceil(threads).max(PAR_STRINGS / 2);
+        let parts: Vec<io::Result<Vec<Val>>> = std::thread::scope(|sc| {
+            // A part whose thread didn't start is made here, in order.
+            let hs: Vec<_> = (spans.chunks(per))
+                .map(|c| {
+                    (
+                        c,
+                        std::thread::Builder::new().spawn_scoped(sc, move || make(c)),
+                    )
+                })
+                .collect();
+            (hs.into_iter())
+                .map(|(c, h)| match h {
+                    Ok(h) => h.join().expect("string parse thread"),
+                    Err(_) => make(c),
+                })
+                .collect()
+        });
+        let mut a = Vec::with_capacity(spans.len());
+        for p in parts {
+            a.extend(p?);
+        }
+        Ok(Val::Arr(a))
+    }
+
     /// `n` items of at least `min_size` bytes each must fit in what's left.
     fn check_count(&self, n: u64, min_size: u64, what: &str) -> io::Result<()> {
         if n.checked_mul(min_size).is_none_or(|b| b > self.left()) {
@@ -108,6 +166,9 @@ impl<'a> Reader<'a> {
                     )));
                 }
                 self.elems_left -= n;
+                if et == 8 && n >= PAR_STRINGS as u64 {
+                    return self.strings(n as usize);
+                }
                 let mut a = Vec::with_capacity((n as usize).min(4096));
                 for _ in 0..n {
                     a.push(self.val(et, depth + 1)?);
@@ -338,6 +399,10 @@ pub struct Model {
     /// and `tensor_data` reads them from it (the mapping stays the file's,
     /// shared and read-only). Empty otherwise (the copy is rewritten in place).
     side: Vec<Side>,
+    /// The file `data` maps, if it does (`tensor_file`).
+    file: Option<File>,
+    /// `read_ahead` started its thread.
+    ahead: bool,
 }
 
 /// A rewritten tensor's bytes outside a file mapping (`Model::side`).
@@ -394,6 +459,15 @@ impl Model {
             return None;
         }
         self.side.iter().find(|s| s.range == *r)
+    }
+
+    /// Where `t`'s bytes (`tensor_data`'s) can be read with pread: the
+    /// mapped file and the offset in it. None on the anonymous copy and for
+    /// a rewritten tensor (its bytes are in a side copy, not the file).
+    pub fn tensor_file(&self, t: &Tensor) -> Option<(&File, u64)> {
+        let r = self.tensor_range(t);
+        let f = self.file.as_ref().filter(|_| self.file_backed)?;
+        self.side_of(&r).is_none().then_some((f, r.start as u64))
     }
 
     /// Whether `data` maps the file (vs the anonymous copy, see `map_weights`).
@@ -470,6 +544,37 @@ impl Model {
                 .data
                 .advise_range(memmap2::Advice::PopulateRead, r.start, r.len());
         }
+    }
+
+    /// The fraction of the tensor data's file pages in the page cache
+    /// (mincore), or None on the anonymous copy or if it can't be told.
+    /// ~1 ms for a 5 GB file.
+    pub fn resident_fraction(&self) -> Option<f64> {
+        if !self.file_backed || !cfg!(target_os = "linux") {
+            return None;
+        }
+        unsafe extern "C" {
+            fn mincore(addr: *mut std::ffi::c_void, len: usize, vec: *mut u8) -> i32;
+        }
+        let page = page_size();
+        let start = self.data_offset as usize / page * page;
+        let len = self.data.len().checked_sub(start).filter(|&l| l > 0)?;
+        let mut v = vec![0u8; len.div_ceil(page)];
+        // SAFETY: [start, start + len) lies in our mapping and starts on a
+        // page boundary (the mapping does); v has a byte per page.
+        let r = unsafe {
+            mincore(
+                self.data.as_ptr().add(start).cast_mut().cast(),
+                len,
+                v.as_mut_ptr(),
+            )
+        };
+        (r == 0).then(|| v.iter().filter(|&&b| b & 1 != 0).count() as f64 / v.len() as f64)
+    }
+
+    /// Whether the background read-ahead (`read_ahead`) was started.
+    pub fn reading_ahead(&self) -> bool {
+        self.ahead
     }
 
     /// Whether `t` was handed back by `release`.
@@ -607,6 +712,17 @@ fn copy_file(file: &File, len: usize) -> io::Result<memmap2::Mmap> {
     anon.make_read_only()
 }
 
+/// The system page size (sysconf), 4096 if it can't be told.
+fn page_size() -> usize {
+    unsafe extern "C" {
+        fn sysconf(name: i32) -> std::ffi::c_long;
+    }
+    const SC_PAGESIZE: i32 = 30; // Linux
+    // SAFETY: sysconf has no preconditions.
+    let p = unsafe { sysconf(SC_PAGESIZE) };
+    if p > 0 { p as usize } else { 4096 }
+}
+
 /// `MemAvailable` from /proc/meminfo, in bytes.
 fn mem_available() -> Option<u64> {
     let s = std::fs::read_to_string("/proc/meminfo").ok()?;
@@ -628,6 +744,9 @@ pub fn load_with(path: &str, copy: Option<bool>) -> io::Result<Model> {
     let h = parse(&data[..len.min(data.len())])?;
     let mut m = Model::new(h, data, file_backed);
     m.unpermute_rope()?;
+    if file_backed {
+        m.file = Some(file);
+    }
     Ok(m)
 }
 
@@ -668,6 +787,7 @@ pub fn load_to_run(
     m.unpermute_rope()?;
     if !copy {
         m.read_ahead(&file);
+        m.file = Some(file);
     }
     Ok(m)
 }
@@ -691,7 +811,7 @@ impl Model {
     /// read far ahead could be dropped again before they're used (a split
     /// model hands its uploaded part back as it goes). AXON_READAHEAD=0
     /// turns it off. Best effort: errors are ignored.
-    fn read_ahead(&self, file: &File) {
+    fn read_ahead(&mut self, file: &File) {
         if std::env::var("AXON_READAHEAD").is_ok_and(|v| v == "0")
             || mem_available().is_none_or(|a| self.data.len() as u64 > a / 2)
         {
@@ -720,7 +840,7 @@ impl Model {
             })
             .collect();
         spans.sort_unstable();
-        let _ = std::thread::Builder::new()
+        self.ahead = std::thread::Builder::new()
             .name("axon-readahead".into())
             .spawn(move || {
                 // SAFETY: read-only, never written through; only advised.
@@ -738,7 +858,8 @@ impl Model {
                         at += n;
                     }
                 }
-            });
+            })
+            .is_ok();
     }
 }
 
@@ -754,6 +875,8 @@ impl Model {
             released: Default::default(),
             any_released: Default::default(),
             side: Vec::new(),
+            file: None,
+            ahead: false,
         }
     }
 
@@ -1165,6 +1288,8 @@ pub fn build_for_test_with(
         released: Default::default(),
         any_released: Default::default(),
         side: Vec::new(),
+        file: None,
+        ahead: false,
     }
 }
 
@@ -1318,6 +1443,75 @@ mod tests {
             m.release(t);
             assert!(m.is_released(t));
         }
+    }
+
+    /// `resident_fraction`: all of a file just written and read is in the
+    /// page cache; the anonymous copy has no answer.
+    #[test]
+    fn resident_fraction_of_a_read_file() {
+        let path = std::env::temp_dir().join(format!("axon-resident-{}.gguf", std::process::id()));
+        std::fs::write(&path, valid().pad_to(32, 64 + (1 << 20))).unwrap();
+        let p = path.to_str().unwrap();
+        let mapped = load_with(p, Some(false)).unwrap();
+        let _ = mapped.data.iter().fold(0u8, |a, &b| a ^ b); // touch every page
+        let f = mapped.resident_fraction().expect("a file mapping");
+        let copied = load_with(p, Some(true)).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(f > 0.99, "{f}");
+        assert_eq!(copied.resident_fraction(), None);
+    }
+
+    /// A string array long enough for the threaded parse (`Reader::strings`)
+    /// reads as it would one by one; a bad string in it is an error.
+    #[test]
+    fn parses_a_long_string_array() {
+        let n = PAR_STRINGS * 2 + 7;
+        let texts: Vec<String> = (0..n)
+            .map(|i| format!("t{i}é{}", "x".repeat(i % 13)))
+            .collect();
+        let file = |bad: Option<usize>| {
+            let mut w = W::header(3, 2, 2)
+                .str("general.architecture")
+                .u32(8)
+                .str("qwen2")
+                .str("tokenizer.ggml.tokens")
+                .u32(9)
+                .u32(8)
+                .u64(n as u64);
+            for (i, t) in texts.iter().enumerate() {
+                w = w.str(t);
+                if bad == Some(i) {
+                    let l = w.0.len();
+                    w.0[l - 1] = 0xff; // the last byte of this string
+                }
+            }
+            w.tensor("blk.0.attn_norm.weight", 8, 0)
+                .tensor("output_norm.weight", 8, 32)
+                .pad_to(32, 64)
+        };
+        let h = parse(&file(None)).expect("valid file");
+        let Some((_, Val::Arr(a))) = h
+            .metadata
+            .iter()
+            .find(|(k, _)| k == "tokenizer.ggml.tokens")
+        else {
+            panic!("no array")
+        };
+        assert_eq!(a.len(), n);
+        assert!(
+            a.iter()
+                .zip(&texts)
+                .all(|(v, t)| matches!(v, Val::Str(s) if s == t))
+        );
+        assert_eq!(h.tensors.len(), 2);
+        for i in [0, PAR_STRINGS + 3, n - 1] {
+            assert!(
+                err(&file(Some(i))).contains("not valid UTF-8"),
+                "bad string {i}"
+            );
+        }
+        let f = file(None);
+        assert!(err(&f[..f.len() / 2]).contains("truncated"));
     }
 
     #[test]

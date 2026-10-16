@@ -835,6 +835,113 @@ fn h2d_bench() {
     assert_eq!(back[12345], 9);
 }
 
+/// The pinned ring (`upload::Ring`) writes every piece's bytes where
+/// `write_at` would, zeros between them, for ring shapes from 2 tiny slots
+/// to more slots than chunks, and calls `staged` once per piece in order.
+#[test]
+fn ring_upload_matches_write_at() {
+    use super::upload::{Piece, Ring, Shape, Src};
+    let Ok(g) = Gpu::open() else {
+        eprintln!("no GPU: skipped");
+        return;
+    };
+    let mut rng = Rng(0x9e3779b97f4a7c15);
+    // Pieces of odd sizes with gaps of 0..300 bytes, as the arena's
+    // 256-byte alignment leaves them, plus one big one.
+    let mut data: Vec<Vec<u8>> = Vec::new();
+    let mut offs = Vec::new();
+    let mut at = 64; // the first piece needn't start at 0
+    for i in 0..40 {
+        let n = if i == 17 {
+            300_001
+        } else {
+            (rng.next() % 9000) as usize
+        };
+        offs.push(at);
+        data.push((0..n).map(|_| rng.next() as u8).collect());
+        at += n + (rng.next() % 300) as usize;
+    }
+    let end = offs[39] + data[39].len();
+    // Every third piece read from a file holding the same bytes.
+    let path = std::env::temp_dir().join(format!("axon-ring-{}", std::process::id()));
+    std::fs::write(&path, data.concat()).unwrap();
+    let file = std::fs::File::open(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    let mut fo = 0u64;
+    let pieces: Vec<Piece> = (offs.iter().zip(&data).enumerate())
+        .map(|(i, (&off, d))| {
+            let src = if i % 3 == 1 {
+                Src::File(&file, fo)
+            } else {
+                Src::Mem(d)
+            };
+            fo += d.len() as u64;
+            Piece {
+                off,
+                len: d.len(),
+                src,
+            }
+        })
+        .collect();
+    let mut want = vec![0u8; end];
+    for (&o, d) in offs.iter().zip(&data) {
+        want[o..o + d.len()].copy_from_slice(d);
+    }
+    let stream = g.new_stream().unwrap();
+    for (slots, slot, threads) in [
+        (2, 4096, 1),
+        (2, 4096, 3),
+        (3, 65536, 2),
+        (4, 1 << 20, 4),
+        (64, 8192, 2),
+    ] {
+        let dst = g.alloc(end + 100).unwrap();
+        dst.write(&vec![0xAAu8; end + 100]).unwrap();
+        let mut ring = Ring::new(
+            &g,
+            Shape {
+                slots,
+                slot,
+                threads,
+            },
+        )
+        .unwrap();
+        let mut seen = Vec::new();
+        let pre_calls = std::sync::atomic::AtomicUsize::new(0);
+        ring.upload(&stream, &dst, &pieces, &mut |i| seen.push(i), &|_| {
+            pre_calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        })
+        .unwrap();
+        let got: Vec<u8> = dst.read().unwrap();
+        let first = pieces[0].off;
+        let bad = (first..end).find(|&i| got[i] != want[i]);
+        assert!(
+            bad.is_none(),
+            "shape {slots} x {slot} B, {threads} threads: first wrong byte {bad:?} of {first}..{end}"
+        );
+        assert!(
+            got[..first].iter().chain(&got[end..]).all(|&b| b == 0xAA),
+            "outside the range"
+        );
+        assert_eq!(seen, (0..pieces.len()).collect::<Vec<_>>());
+    }
+    // Out of bounds: an error, nothing written past the buffer.
+    let small = g.alloc(end - 1).unwrap();
+    let mut ring = Ring::new(
+        &g,
+        Shape {
+            slots: 2,
+            slot: 4096,
+            threads: 2,
+        },
+    )
+    .unwrap();
+    assert!(
+        ring.upload(&stream, &small, &pieces, &mut |_| {}, &|_| {})
+            .is_err()
+    );
+}
+
 /// Host-to-device bandwidth: pageable (`write_at`, the weight upload's
 /// path) vs page-locked (`HostBuf::copy_to`), 1 GB in 32 MB copies, best of
 /// 3. Startup measurement; prints only. Run with --ignored --nocapture.
@@ -898,6 +1005,195 @@ fn h2d_bandwidth() {
         "h2d: pageable {pageable:.1} GB/s, pinned {pinned_dma:.1} GB/s, file mapping \
          {file_gbs:.1} GB/s, populated file mapping {populated:.1} GB/s ({n} bytes)"
     );
+    let stream = g.new_stream().unwrap();
+    // Zero-copy: register the file's pages themselves (shared and private
+    // read-only mappings), DMA straight out of the page cache.
+    for private in [false, true] {
+        // SAFETY: read-only maps of a file nobody writes.
+        let map = unsafe {
+            if private {
+                memmap2::MmapOptions::new().len(n).map_copy_read_only(&file)
+            } else {
+                memmap2::MmapOptions::new().len(n).map(&file)
+            }
+        }
+        .unwrap();
+        let t = std::time::Instant::now();
+        let _ = map.advise(memmap2::Advice::PopulateRead);
+        let pop = t.elapsed().as_secs_f64() * 1e3;
+        let t = std::time::Instant::now();
+        // SAFETY: map stays mapped while the registration lives.
+        let reg = unsafe { g.register(map.as_ptr(), n, true) };
+        let rt = t.elapsed().as_secs_f64() * 1e3;
+        match reg {
+            Err(e) => {
+                eprintln!("h2d register file mapping (private {private}): {e} after {rt:.1} ms")
+            }
+            Ok(p) => {
+                let t = std::time::Instant::now();
+                for off in (0..n).step_by(CHUNK) {
+                    // SAFETY: registered, mapped, unchanged until synced below.
+                    unsafe { stream.h2d(&dst, off, map.as_ptr().add(off), CHUNK).unwrap() };
+                }
+                stream.sync().unwrap();
+                let gbs = n as f64 / t.elapsed().as_secs_f64() / 1e9;
+                let t = std::time::Instant::now();
+                drop(p);
+                eprintln!(
+                    "h2d register file mapping (private {private}): populate {pop:.1} ms, register {rt:.1} ms, \
+                     DMA {gbs:.1} GB/s, unregister {:.1} ms",
+                    t.elapsed().as_secs_f64() * 1e3
+                );
+            }
+        }
+    }
+    // What pinning costs: cuMemHostAlloc (+ host_alloc's zeroing) vs
+    // registering an anonymous mapping (4 KB pages, or 2 MB THP).
+    for mb in [16usize, 64] {
+        let len = mb << 20;
+        let t = std::time::Instant::now();
+        let h = g.host_alloc(len).unwrap();
+        let alloc = t.elapsed().as_secs_f64() * 1e3;
+        drop(h);
+        for huge in [false, true] {
+            let mut a = memmap2::MmapMut::map_anon(len).unwrap();
+            if huge {
+                let _ = a.advise(memmap2::Advice::HugePage);
+            }
+            let t = std::time::Instant::now();
+            a.fill(0);
+            let touch = t.elapsed().as_secs_f64() * 1e3;
+            let t = std::time::Instant::now();
+            // SAFETY: a stays mapped while the registration lives.
+            let p = unsafe { g.register(a.as_ptr(), len, false) }.unwrap();
+            let reg = t.elapsed().as_secs_f64() * 1e3;
+            drop(p);
+            eprintln!(
+                "h2d pin {mb} MB: host_alloc {alloc:.1} ms; anon{} touch {touch:.1} ms + register {reg:.1} ms",
+                if huge { " THP" } else { "" }
+            );
+        }
+    }
+    // The CPU side alone: `threads` threads reading the file's first n
+    // bytes into a 64 MB pinned buffer, stripe by stripe (pread vs a copy
+    // out of a populated mapping, population not timed).
+    {
+        let mut buf = g.host_alloc(64 << 20).unwrap();
+        let ptr = buf.bytes_mut().unwrap().as_mut_ptr() as usize;
+        // SAFETY: read-only map of a file nobody writes.
+        let map = unsafe { memmap2::Mmap::map(&file) }.unwrap();
+        let _ = map.advise(memmap2::Advice::PopulateRead);
+        for threads in [1, 2, 4, 8, 16] {
+            for pread in [false, true] {
+                let t = std::time::Instant::now();
+                std::thread::scope(|sc| {
+                    for w in 0..threads {
+                        let (file, map) = (&file, &map);
+                        sc.spawn(move || {
+                            use std::os::unix::fs::FileExt;
+                            let stripe = (64 << 20) / threads;
+                            for c in (0..n).step_by(64 << 20) {
+                                let a = c + w * stripe;
+                                let len = stripe.min(n.saturating_sub(a));
+                                if len == 0 {
+                                    continue;
+                                }
+                                // SAFETY: this thread's stripe of the pinned buffer.
+                                let out = unsafe {
+                                    std::slice::from_raw_parts_mut(
+                                        (ptr as *mut u8).add(w * stripe),
+                                        len,
+                                    )
+                                };
+                                if pread {
+                                    file.read_exact_at(out, a as u64).unwrap();
+                                } else {
+                                    out.copy_from_slice(&map[a..a + len]);
+                                }
+                            }
+                        });
+                    }
+                });
+                eprintln!(
+                    "h2d fill only, {threads} threads, {}: {:.1} GB/s",
+                    if pread { "pread" } else { "populated mapping" },
+                    n as f64 / t.elapsed().as_secs_f64() / 1e9
+                );
+            }
+        }
+    }
+    // The pinned ring (`upload::Ring`) out of a fresh file mapping, its
+    // page tables filled by the ring's helper thread (as the weight
+    // upload does), 1 MB pieces; the ring's setup timed apart.
+    let mut shapes = vec![
+        (4, 16, 4),
+        (4, 16, 2),
+        (4, 16, 6),
+        (4, 8, 4),
+        (6, 32, 4),
+        (3, 64, 4),
+        (8, 4, 4),
+    ];
+    if let Ok(v) = std::env::var("AXON_H2D_SHAPES") {
+        // "slots,MB,threads;..."
+        shapes = (v.split(';'))
+            .filter_map(|x| {
+                let p: Vec<usize> = x.split(',').filter_map(|y| y.trim().parse().ok()).collect();
+                (p.len() == 3).then(|| (p[0], p[1], p[2]))
+            })
+            .collect();
+    }
+    for ((slots, mb, threads), pread) in shapes.into_iter().flat_map(|s| [(s, false), (s, true)]) {
+        use super::upload::{Piece, Ring, Shape, Src};
+        let t = std::time::Instant::now();
+        let mut ring = Ring::new(
+            &g,
+            Shape {
+                slots,
+                slot: mb << 20,
+                threads,
+            },
+        )
+        .unwrap();
+        let setup = t.elapsed().as_secs_f64() * 1e3;
+        let best = (0..3)
+            .map(|_| {
+                // SAFETY: read-only map of a file nobody writes.
+                let map = unsafe { memmap2::Mmap::map(&file) }.unwrap();
+                let pieces: Vec<Piece> = (0..n)
+                    .step_by(1 << 20)
+                    .map(|o| {
+                        let len = (1 << 20).min(n - o);
+                        let src = if pread {
+                            Src::File(&file, o as u64)
+                        } else {
+                            Src::Mem(&map[o..o + len])
+                        };
+                        Piece { off: o, len, src }
+                    })
+                    .collect();
+                let t = std::time::Instant::now();
+                ring.upload(&stream, &dst, &pieces, &mut |_| {}, &|i| {
+                    if !pread {
+                        let _ = map.advise_range(
+                            memmap2::Advice::PopulateRead,
+                            pieces[i].off,
+                            pieces[i].len,
+                        );
+                    }
+                })
+                .unwrap();
+                n as f64 / t.elapsed().as_secs_f64() / 1e9
+            })
+            .fold(0.0, f64::max);
+        let t = std::time::Instant::now();
+        drop(ring);
+        let free = t.elapsed().as_secs_f64() * 1e3;
+        eprintln!(
+            "h2d ring {slots} x {mb} MB, {threads} threads, {}: {best:.1} GB/s (pin {setup:.1} ms, free {free:.1} ms)",
+            if pread { "pread" } else { "mapping" }
+        );
+    }
 }
 
 /// A buffer's device address (for `Gpu::tensor_map_2d`).
