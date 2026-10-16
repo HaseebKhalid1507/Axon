@@ -222,7 +222,7 @@ const WINDOWS: u64 = 1024;
 /// The model's digest: SHA-256 (hex) over the file length, the whole header
 /// (metadata and tensor table, up to the data), the first and last
 /// `TENSOR_EDGE` bytes of every tensor, and `WINDOWS` windows of `WINDOW`
-/// bytes evenly spaced over the data: a few MB read, ~10 ms warm, against
+/// bytes evenly spaced over the data: a few MB read, ~40 ms warm (7B), against
 /// seconds for every byte of a 5 GB file on every start. Another model, a
 /// requant, a fine-tune or a merge changes the header or (nearly) every
 /// block, so the samples see it; a deliberate edit of bytes between

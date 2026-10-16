@@ -90,13 +90,14 @@ A client that caches or replays by `(system_fingerprint, prompt, params, seed)` 
 exact hits. A changed fingerprint means stored outputs may not reproduce.
 
 **Model digest: why sampled.** Hashing all of a 5 GB file costs seconds on every start
-(software SHA-256 runs at a few hundred MB/s). The digest instead reads the header in full and, of
-the data, 256 bytes at each end of every tensor and 1024 windows of 4 KiB evenly spaced:
-a few MB, about 10 ms with the file in the page cache. Another model, a requantization, a
-fine-tune or a merge changes the header or almost every block, so it changes the digest.
-An edit made on purpose to bytes between the samples would not: the digest names a file,
-it isn't a tamper seal. It reads the file itself, not the loaded copy (which may have been
-repacked or released), so it depends on nothing but the file's bytes.
+(software SHA-256 runs at a few hundred MB/s). The digest instead reads the header in full
+and, of the data, 256 bytes at each end of every tensor and 1024 windows of 4 KiB evenly
+spaced: a few MB, about 40 ms for a 7B Q4_K_M with the file in the page cache (measured on
+a 4090 pod). Another model, a requantization, a fine-tune or a merge changes the header or
+almost every block, so it changes the digest. An edit made on purpose to bytes between the
+samples would not: the digest names a file, it isn't a tamper seal. It reads the file
+itself, not the loaded copy (which may have been repacked or released), so it depends on
+nothing but the file's bytes.
 
 **The numerics rule.** `NUMERICS_VERSION` (src/identity.rs) is bumped in the same commit
 as any change that can change an output bit for some model on some backend: a kernel's
