@@ -70,6 +70,8 @@ pub struct Opts {
     pub kv: KvType,
     pub ctx: Option<usize>,
     pub max_draft: usize,
+    /// A draft model guesses the tokens (draft.rs), if `max_draft` > 0.
+    pub draft_model: Option<String>,
     /// Sampling flags: the default for fields a request leaves out.
     pub sample: SampleArgs,
     /// Qwen3: answer without reasoning unless a request asks for it.
@@ -291,6 +293,8 @@ struct Engine<'a> {
     /// The tokens whose rows the cache holds, from position 0.
     hist: Vec<u32>,
     max_draft: usize,
+    /// Guesses from a draft model instead of prompt lookup.
+    drafter: Option<crate::draft::ModelDrafter<Backend<'static>>>,
     log: bool,
     /// Tokens generated so far, all requests.
     generated: Arc<AtomicU64>,
@@ -350,7 +354,10 @@ impl Engine<'_> {
         let prompt_ms = t0.elapsed().as_secs_f64() * 1e3;
 
         let mut sampler = job.sample.map(Sampler::new);
-        let mut lookup = PromptLookup::new();
+        let mut source = match self.drafter.as_mut() {
+            Some(d) => crate::draft::Drafter::Model(d),
+            None => crate::draft::Drafter::Lookup(PromptLookup::new()),
+        };
         let mut out = TextOut {
             tok: self.tok,
             utf8: Utf8Stream::default(),
@@ -376,10 +383,7 @@ impl Engine<'_> {
                 max_draft: self.max_draft,
                 sample: sampler.as_mut(),
             },
-            &mut |h, max| {
-                lookup.sync(h);
-                lookup.draft(max)
-            },
+            &mut |h, max| source.draft(h, max),
             &mut |id| {
                 if cancelled() {
                     gone = true;
@@ -488,7 +492,12 @@ fn engine(
         None => crate::DEFAULT_CHAT_CTX,
     };
     let tok: &'static Tokenizer = Box::leak(Box::new(Tokenizer::from_gguf(&model)));
-    let net = crate::backend(&model, device, ctx, gpu_layers, o.kv, fit);
+    let dm = o.draft_model.as_ref().filter(|_| o.max_draft > 0).map(|p| {
+        crate::draft::DraftModel::open(p, crate::copy_for(device), &model, tok)
+            .unwrap_or_else(|e| crate::fail(&format!("--draft-model {e}")))
+    });
+    let (net, drafter) =
+        crate::backend_and_drafter(&model, dm.as_ref(), device, ctx, gpu_layers, o.kv, fit);
     let ctx = net.ctx(ctx);
     let template = Template::new(tok, &model.arch);
     let kvs = match &net {
@@ -502,10 +511,14 @@ fn engine(
         cache: net.new_cache(ctx),
         hist: Vec::new(),
         max_draft: o.max_draft,
+        drafter,
         log: o.log,
         generated: o.generated,
     };
-    let banner = format!("{kvs}, ctx {ctx}");
+    let drafts = dm.as_ref().map_or(String::new(), |d| {
+        format!(", draft model {} K={}", d.name(), o.max_draft)
+    });
+    let banner = format!("{kvs}, ctx {ctx}{drafts}");
     if ready
         .send(Loaded {
             tok,
@@ -534,6 +547,7 @@ struct EngineOpts {
     kv: KvType,
     ctx: Option<usize>,
     max_draft: usize,
+    draft_model: Option<String>,
     log: bool,
     generated: Arc<AtomicU64>,
 }
@@ -598,6 +612,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
         kv: o.kv,
         ctx: o.ctx,
         max_draft: o.max_draft,
+        draft_model: o.draft_model.clone(),
         log: o.log,
     };
     let stop2 = stop.clone();
@@ -1100,7 +1115,7 @@ fn stream(
 }
 
 const SERVE_USAGE: &str = "usage: axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--device D] \
-     [--gpu-layers N] [--kv T] [--draft K] [--alias NAME] [--max-tokens N] [--cors [ORIGIN]] \
+     [--gpu-layers N] [--kv T] [--draft K] [--draft-model PATH] [--alias NAME] [--max-tokens N] [--cors [ORIGIN]] \
      [--max-conns N] [--max-queue N] [--no-think] [--think-inline] [--quiet] [sampling flags]";
 
 /// `serve` subcommand: args = [axon, serve, model, flags...]
@@ -1116,7 +1131,8 @@ pub fn run(args: &[String]) -> io::Result<()> {
         gpu_layers: None,
         kv: crate::kv_env(),
         ctx: None,
-        max_draft: crate::draft_env(),
+        max_draft: 0,
+        draft_model: crate::draft::model_env(),
         sample: SampleArgs::default(),
         no_think: false,
         think_inline: false,
@@ -1127,6 +1143,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         max_conns: MAX_CONNS,
         max_queue: MAX_QUEUE,
     };
+    let mut k = None;
     let mut i = 3;
     while i < args.len() {
         let f = args[i].as_str();
@@ -1161,8 +1178,9 @@ pub fn run(args: &[String]) -> io::Result<()> {
                 i += 2;
                 continue;
             }
-            "--host" | "--port" | "--ctx" | "--draft" | "--device" | "--gpu-layers" | "--kv"
-            | "--alias" | "--max-tokens" | "--max-conns" | "--max-queue" => {}
+            "--host" | "--port" | "--ctx" | "--draft" | "--draft-model" | "--device"
+            | "--gpu-layers" | "--kv" | "--alias" | "--max-tokens" | "--max-conns"
+            | "--max-queue" => {}
             _ => crate::fail(&format!("unknown argument '{f}' for serve")),
         }
         let Some(v) = args.get(i + 1) else {
@@ -1177,6 +1195,8 @@ pub fn run(args: &[String]) -> io::Result<()> {
         match f {
             "--host" => o.host = v.clone(),
             "--alias" => o.alias = Some(v.clone()),
+            "--draft-model" if v.is_empty() => crate::fail("--draft-model needs a path"),
+            "--draft-model" => o.draft_model = Some(v.clone()),
             "--device" => o.device = Device::parse(v).unwrap_or_else(|e| crate::fail(&e)),
             "--kv" => o.kv = crate::kv_flag(Some(v)),
             "--port" => {
@@ -1189,11 +1209,11 @@ pub fn run(args: &[String]) -> io::Result<()> {
             "--max-tokens" => o.max_tokens = Some(whole(true)),
             "--max-conns" => o.max_conns = whole(true),
             "--max-queue" => o.max_queue = whole(true),
-            _ => o.max_draft = whole(false),
+            _ => k = Some(whole(false)),
         }
         i += 2;
     }
-    o.max_draft = crate::round_draft(o.max_draft);
+    o.max_draft = crate::draft::draft_k(k.or_else(crate::draft_env_set), o.draft_model.is_some());
     crate::check_stream_decode(o.max_draft);
     start(o)?.wait()
 }
