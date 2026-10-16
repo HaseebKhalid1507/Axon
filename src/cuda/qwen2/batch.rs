@@ -29,6 +29,16 @@ pub(super) const SMALL: usize = 16;
 /// b32 pieces, the barriers, 1 KiB of alignment slack.
 pub(super) const GEMMH2_SMEM: usize = 4 * 16384 + 4 * 128 * 144 + 4 * 2 * 1280 + 2 * 4 * 8 + 1024;
 
+/// Whether a Q4_K product of `rows` outputs over `nb` tokens goes to
+/// gemmh2_q4_k by default: the row counts measured faster than gemm2s on an
+/// H100 (3584 and 18944: +6-19 % in cuda_gemmh_bench at nb 512 and 1050,
+/// +6-10 % in the 7B pass), with at least a full wave of its 128 x 64
+/// blocks on `sms` SMs (the one loss measured, 512 rows at nb 512, had 32
+/// blocks on 114 SMs).
+pub(super) fn gemmh_plain(rows: usize, nb: usize, sms: usize) -> bool {
+    rows >= 3584 && nb.div_ceil(64) * rows.div_ceil(128) >= sms
+}
+
 /// The device address in a pointer argument.
 fn dev_ptr(a: Arg) -> u64 {
     match a {
@@ -168,10 +178,16 @@ pub(super) struct BatchFns<'m> {
     /// up out (`CudaQwen2::gate_up_fused`).
     pub(super) gemm_gu: Option<Func<'m>>,
     pub(super) q6k_to_i8: Option<Func<'m>>,
-    /// hopper.cu gemmh2_q4_k and gemmh2_q4_k_gu: the Q4_K products (and
-    /// the fused gate + up) on wgmma, same bits; sm_90a modules with
-    /// AXON_GEMMH=1 only (opt-in while it's measured).
+    /// hopper.cu gemmh2_q4_k and gemmh2_q4_k_gu: the Q4_K products and the
+    /// fused gate + up on wgmma (same bits); sm_90a modules only, off with
+    /// AXON_GEMMH=0. Measured on an H100 PCIe (r7 E0, 7B, nb 1050):
+    /// gemmh2_q4_k_gu 80.3 vs gemm2s_q4_k_gu 68.1 TMAC/s, and in the pass
+    /// q / wo / down 6-10 % faster than gemm2s; a 512-row matrix at nb 512
+    /// (32 blocks) was slower (21.6 vs 35.6). See `gemmh_plain`.
     gemmh: Option<[Func<'m>; 2]>,
+    /// AXON_GEMMH=1: every Q4_K product of a batch through gemmh2_q4_k,
+    /// whatever its shape (else only those `gemmh_plain` picks).
+    gemmh_all: bool,
     /// SMs of the GPU (the GEMM tile choice).
     sms: usize,
     /// stream.cu: r8/r8q blocks back to GGUF rows.
@@ -282,7 +298,7 @@ impl<'m> BatchFns<'m> {
             } else {
                 None
             },
-            gemmh: if module.hopper() && std::env::var("AXON_GEMMH").as_deref() == Ok("1") {
+            gemmh: if module.hopper() && std::env::var("AXON_GEMMH").as_deref() != Ok("0") {
                 let (a, b) = (
                     module.function("gemmh2_q4_k")?,
                     module.function("gemmh2_q4_k_gu")?,
@@ -293,6 +309,7 @@ impl<'m> BatchFns<'m> {
             } else {
                 None
             },
+            gemmh_all: std::env::var("AXON_GEMMH").as_deref() == Ok("1"),
             q6k_to_i8: if module.mma() {
                 Some(module.function("q6k_to_i8")?)
             } else {
@@ -439,7 +456,8 @@ impl<'g> CudaQwen2<'g> {
             out,
             Arg::U64(ostride as u64),
         ];
-        if let (Some(h), Q4_K, true) = (&bf.gemmh, mt.qt, nb > SMALL) {
+        let plain = bf.gemmh_all || gemmh_plain(mt.rows, nb, bf.sms);
+        if let (Some(h), Q4_K, true, true) = (&bf.gemmh, mt.qt, nb > SMALL, plain) {
             // TMA descriptors of the weights (rows of rb bytes, boxes of
             // 128 rows of one block) and the activations' Q8_K values.
             let rb = mt.rb as u64;

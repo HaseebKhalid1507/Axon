@@ -5881,3 +5881,23 @@ unsafe fn launch_gemmh_gu(
         .unwrap();
     }
 }
+
+/// The default Hopper routing of plain Q4_K products (batch::gemmh_plain):
+/// the 7B's q / wo (3584 rows) and gate / down shapes at prefill batch
+/// sizes, never the small-grid shapes (512-row k / v at nb 512 measured
+/// slower on an H100 PCIe, 114 SMs).
+#[test]
+fn gemmh_plain_routing() {
+    use batch::gemmh_plain;
+    for sms in [114, 132] {
+        assert!(gemmh_plain(3584, 1050, sms));
+        assert!(gemmh_plain(3584, 512, sms)); // 8 x 28 = 224 blocks
+        assert!(gemmh_plain(18944, 1050, sms));
+        assert!(gemmh_plain(18944, 64, sms)); // 148
+        assert!(!gemmh_plain(3584, 256, sms)); // 112
+        assert!(!gemmh_plain(3584, 64, sms));
+        assert!(!gemmh_plain(512, 512, sms));
+        assert!(!gemmh_plain(512, 1050, sms));
+        assert!(!gemmh_plain(896, 1050, sms));
+    }
+}
