@@ -133,11 +133,12 @@ pub fn read_json(rel: &str) -> serde_json::Value {
 /// open) is a test failure, not a silent pass. Machines without one (CI)
 /// opt out explicitly with `AXON_SKIP_GPU_TESTS=1`.
 ///
-/// On cards with less than 8 GiB (a 6 GB laptop 4050), two GPU tests that
-/// load models at once run out of VRAM and fail spuriously, so there the
-/// calling test holds a process-wide lock until its thread ends (libtest
-/// runs each test on its own thread). `AXON_TEST_GPU_SERIAL=0|1` forces it
-/// off/on.
+/// On cards with less than 16 GiB (a 6 GB laptop 4050, a 12 GB laptop
+/// 5070 Ti), GPU tests that load models at once run out of VRAM and fail
+/// spuriously: libtest starts one test per core, and the 3B/4B/8B tests need
+/// 3-5 GiB each. So there the calling test holds a process-wide lock until
+/// its thread ends (libtest runs each test on its own thread).
+/// `AXON_TEST_GPU_SERIAL=0|1` forces it off/on.
 pub fn gpu() -> Option<crate::cuda::Gpu> {
     match crate::cuda::Gpu::open() {
         Ok(g) => {
@@ -167,7 +168,7 @@ fn serialize_small_gpu(g: &crate::cuda::Gpu) {
         let on = match std::env::var("AXON_TEST_GPU_SERIAL").as_deref() {
             Ok("0") => false,
             Ok("1") => true,
-            _ => total < 8 << 30,
+            _ => total < 16 << 30,
         };
         if on {
             // Straight to stderr: libtest captures eprintln! inside tests.
