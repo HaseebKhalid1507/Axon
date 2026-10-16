@@ -128,12 +128,14 @@ and the union, in file order, of: the header in full, 256 bytes at each end of e
 tensor, and 1024 windows of 4 KiB evenly spaced over the data (`axon-model-digest/2`;
 pinned by `model_digest_golden`, checked against an independent Python model,
 scripts/identity_digest_ref.py). That's a few MB in ~1-2k sorted reads with readahead off:
-about 40 ms for a 7B Q4_K_M with the file in the page cache (measured on a 4090 pod).
-Another model, a requantization, a fine-tune or a merge changes the header or almost every
-block, so it changes the digest. An edit made on purpose to bytes between the samples
-would not: the digest names a file, it isn't a tamper seal. It reads the file itself, not
-the loaded copy (which may have been repacked or released), so it depends on nothing but
-the file's bytes.
+over what `axon info` used to read (the header alone): +40 ms warm for a 7B Q4_K_M on a
+4090 pod, +75 ms warm on a laptop i5 (1.5B), and +180 ms cold (the file evicted with
+`posix_fadvise(DONTNEED)`, 0 bytes resident by `fincore`; Llama 3.2 1B on a laptop NVMe,
+~10 MB read). A slow disk or network filesystem pays ~2k random reads. Another model, a
+requantization, a fine-tune or a merge changes the header or almost every block, so it
+changes the digest. An edit made on purpose to bytes between the samples would not: the
+digest names a file, it isn't a tamper seal. It reads the file itself, not the loaded copy
+(which may have been repacked or released), so it depends on nothing but the file's bytes.
 
 **The numerics rule.** `NUMERICS_VERSION` (src/identity.rs) is bumped in the same commit
 as any change that can change an output bit for some model on some backend: a kernel's
