@@ -60,8 +60,14 @@ struct Prefill<'t> {
     seq: Seq<'t>,
     /// Prompt tokens whose rows the slot holds.
     fed: usize,
+    /// Steps in a row it was given nothing (shorter prompts went first).
+    starved: usize,
     t0: Instant,
 }
+
+/// Steps a prompt may be passed over for shorter ones before it goes
+/// first.
+const STARVE: usize = 4;
 
 /// Prompt tokens a step feeds at least while requests decode (default,
 /// `--prefill-chunk`; 0: no chunks, every prompt fed whole).
@@ -201,6 +207,7 @@ impl<'a, 't> Batch<'a, 't> {
                 job,
             },
             fed: reuse,
+            starved: 0,
             t0: now,
         });
     }
@@ -234,14 +241,12 @@ impl<'a, 't> Batch<'a, 't> {
         }
     }
 
-    /// Feed this step's prompt tokens (`budget`): first, shortest
-    /// remainder first, the prompts (not the oldest) that finish within
-    /// half of it, so a short prompt isn't held up behind a long one; then
-    /// the oldest prompts first with the rest (a prompt whose remainder is
-    /// at most a floor more than what is left fed whole: no last sliver of
-    /// a pass of its own). The oldest gets at least half
-    /// of each step: it can't starve. Prompts then in their slots join the
-    /// running requests.
+    /// Feed this step's prompt tokens (`budget`), shortest remainder first
+    /// (a short prompt isn't held up behind a long one), but a prompt
+    /// passed over STARVE steps in a row goes first: none starves. A
+    /// remainder at most half a floor more than what is left is fed whole (no
+    /// last sliver of a pass of its own). Prompts then in their slots join
+    /// the running requests.
     fn prefill(&mut self) -> Result<(), String> {
         if self.pre.is_empty() {
             return Ok(());
@@ -253,32 +258,29 @@ impl<'a, 't> Batch<'a, 't> {
             .map(|f| f.seq.hist.len() - 1 - f.fed)
             .collect();
         let mut plan = vec![0; rem.len()];
-        let mut short = budget / 2;
-        let mut by_len: Vec<usize> = (1..rem.len()).collect();
-        by_len.sort_by_key(|&i| rem[i]);
-        for i in by_len {
-            if rem[i] <= short {
-                plan[i] = rem[i];
-                short -= rem[i];
-            }
-        }
-        let mut left = budget - plan.iter().sum::<usize>();
-        for i in 0..rem.len() {
+        // Starved ones first (oldest first), then shortest remainder first.
+        let mut order: Vec<usize> = (0..rem.len()).collect();
+        order.sort_by_key(|&i| (self.pre[i].starved < STARVE, rem[i], i));
+        let mut left = budget;
+        for i in order {
             if left == 0 {
                 break;
             }
-            let want = rem[i] - plan[i];
-            let n = if want <= left.saturating_add(self.policy.floor) {
+            let want = rem[i];
+            let n = if want <= left.saturating_add(self.policy.floor / 2) {
                 want
             } else {
                 left
             };
-            plan[i] += n;
+            plan[i] = n;
             left = left.saturating_sub(n);
         }
         for (i, &n) in plan.iter().enumerate() {
             if n > 0 {
+                self.pre[i].starved = 0;
                 self.feed(i, n)?;
+            } else {
+                self.pre[i].starved += 1;
             }
         }
         let mut i = 0;

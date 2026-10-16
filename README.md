@@ -236,7 +236,7 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
   decode, a new prompt is prefilled in chunks, up to `--prefill-ms` / `--prefill-chunk` worth
   per step in between their steps (shortest remaining prompt first, the oldest never
   starved), so a long prompt doesn't stop the others' streams while it prefills (on a 4090,
-  7B, a 24k-token prompt: their worst token gap ITLMAX instead of 2.5 s); with nothing
+  7B, a 24k-token prompt: their worst token gap ~70 ms instead of 2.4 s); with nothing
   decoding it is fed in 4096-token pieces at full speed. A long prompt sent to an idle server
   takes the single-stream path below and is fed whole: a request arriving during that
   prefill waits for it. Each slot is a KV cache as long as the context, and the
