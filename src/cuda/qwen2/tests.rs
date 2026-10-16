@@ -1065,6 +1065,7 @@ fn qkv_rope_check(g: &Gpu, m: &Model) {
                         Arg::I32((hd / 2) as i32),
                         params.arg(),
                         rope.arg(),
+                        Arg::F32(1.0),
                     ],
                 )
                 .unwrap();
@@ -1442,6 +1443,60 @@ fn gpu_qwen3_matches_reference_forward() {
             );
         }
     }
+}
+
+/// `--rope-scaling yarn --rope-scale F --yarn-orig-ctx N` on `m`.
+fn with_yarn(m: &mut Model, factor: f64, orig: usize) {
+    let args = crate::rope::RopeArgs {
+        scaling: Some("yarn".into()),
+        factor: Some(factor),
+        orig_ctx: Some(orig),
+        ..Default::default()
+    };
+    args.apply(m).unwrap();
+    crate::model::check_supported(m).unwrap();
+}
+
+/// YaRN on the GPU: the qwen3 fixture (orig 16, so the ramp is crossed in
+/// a few positions) against the reference's own YaRN on both caches, decode
+/// bit-identical to batched prefill; then qwen2.5-0.5B with the 7B recipe
+/// (factor 4, orig 32768): batchings, verify and GPU vs CPU as without.
+#[test]
+fn gpu_yarn_matches_reference_and_keeps_bits() {
+    use crate::model::tests::{NormBug, QWEN3_Q8_TOL, max_diff, qwen3_fixture, qwen3_ref};
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let ids = [3u32, 17, 42, 9, 5, 11, 60, 2, 33, 21, 8, 40];
+    let n = ids.len();
+    let mut m = qwen3_fixture(Q8_0);
+    with_yarn(&mut m, 4.0, 16);
+    let want = qwen3_ref(&m, &ids, NormBug::None);
+    for kv in [CacheKv::F16, CacheKv::Q8 { group: 0 }] {
+        let mut net = CudaQwen2::with_kv(&g, &km, &m, 16, kv, false).unwrap();
+        assert_eq!(net.rope_m, crate::rope::mscale(&m));
+        for graphs in [true, false] {
+            net.graphs = graphs;
+            let mut c = net.new_cache(n);
+            let dec: Vec<Vec<f32>> = (0..n).map(|p| net.forward(ids[p], p, &mut c)).collect();
+            let mut c = net.new_cache(n);
+            net.feed_batch(&ids[..n - 1], 0, &mut c);
+            let pre = net.forward(ids[n - 1], n - 1, &mut c);
+            let d = max_diff(&dec, &want);
+            eprintln!("gpu yarn {kv:?} graphs {graphs} vs reference: max |dlogit| {d:.4}");
+            assert!(d <= QWEN3_Q8_TOL, "gpu yarn {kv:?}: {d}");
+            assert_eq!(bits(&pre), bits(&dec[n - 1]), "gpu yarn {kv:?}: decode != prefill");
+        }
+    }
+    let Some(mut m) = model_at(crate::testutil::MODEL) else {
+        return;
+    };
+    with_yarn(&mut m, 4.0, 32768);
+    prefill_bits(&m, "qwen2.5 0.5B yarn", CacheKv::F16);
+    prefill_bits(&m, "qwen2.5 0.5B yarn", CacheKv::Q8 { group: 0 });
+    verify_bits(&m, "qwen2.5 0.5B yarn", CacheKv::F16);
+    logits_match(&m, "qwen2.5 0.5B yarn");
 }
 
 /// Llama-3.2-1B-Instruct, mapped (as `qwen3_mapped`): head_dim 64, GQA 4,

@@ -45,14 +45,16 @@ extern "C" __global__ void embed_b(int qt, const u8* __restrict__ w, u64 row_byt
     if (i < n) x[(u64)z * n + i] = deq(qt, w + (u64)tokens[z] * row_bytes, i);
 }
 
-// rope[z] = rope_table at position start + z (rp: rp_pos). Grid nb x half.
+// rope[z] = rope_table at position start + z (rp: rp_pos), times m as
+// rope_table. Grid nb x half.
 extern "C" __global__ void rope_table_b(const double* __restrict__ freq, int half, int start,
-                                        float2* __restrict__ rope, const u32* __restrict__ rp) {
+                                        float2* __restrict__ rope, const u32* __restrict__ rp,
+                                        float m) {
     int i = threadIdx.x, z = blockIdx.x;
     if (i < half) {
         double s, c;
         sincos((double)rp_pos(rp, start, z) * freq[i], &s, &c);
-        rope[(u64)z * half + i] = make_float2((float)s, (float)c);
+        rope[(u64)z * half + i] = make_float2((float)(s * (double)m), (float)(c * (double)m));
     }
 }
 

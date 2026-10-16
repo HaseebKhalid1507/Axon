@@ -882,6 +882,7 @@ impl<'g> CudaQwen2<'g> {
                         Arg::I32(start as i32),
                         b.rope_swa.arg(),
                         rp,
+                        Arg::F32(1.0),
                     ],
                 )?;
             }
@@ -896,6 +897,7 @@ impl<'g> CudaQwen2<'g> {
                     Arg::I32(start as i32),
                     b.rope.arg(),
                     rp,
+                    Arg::F32(self.rope_m),
                 ],
             )
         }

@@ -11,6 +11,7 @@ mod kvstore;
 mod lineedit;
 mod lm;
 mod model;
+mod rope;
 mod pool;
 mod quant;
 mod sample;
@@ -200,14 +201,27 @@ fn open_model(path: &str, lm: bool) -> gguf::Model {
 /// A model to run (`gguf::load_to_run`), checked before it's copied or
 /// read: `copy` forces the copy-vs-map choice, None copies only if the CPU
 /// model reads its matrices in place (`model::reads_matrices_in_place`).
-fn open_model_with(path: &str, copy: Option<bool>) -> gguf::Model {
-    gguf::load_to_run(path, copy, |m| {
+/// `rope`: the --rope-scaling flags, written into the model's metadata
+/// (`rope::RopeArgs::apply`) and checked again.
+fn open_model_with(path: &str, copy: Option<bool>, rope: &rope::RopeArgs) -> gguf::Model {
+    let mut m = gguf::load_to_run(path, copy, |m| {
         if let Err(e) = model::check_supported(m) {
             fail(&format!("{path}: {e}"));
         }
         model::reads_matrices_in_place(m)
     })
-    .unwrap_or_else(|e| load_failed(path, e))
+    .unwrap_or_else(|e| load_failed(path, e));
+    match rope.apply(&mut m) {
+        Err(e) => fail(&e),
+        Ok(None) => {}
+        Ok(Some(line)) => {
+            eprintln!("axon: {line}");
+            if let Err(e) = model::check_supported(&m) {
+                fail(&format!("{path}: {e}"));
+            }
+        }
+    }
+    m
 }
 
 fn load_failed(path: &str, e: std::io::Error) -> ! {
@@ -491,11 +505,15 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     let mut gpu_layers = None;
     let mut kv = kv_env();
     let mut sargs = sample::SampleArgs::default();
+    let mut rargs = rope::RopeArgs::default();
     let mut i = 4;
     while i < args.len() {
         let val = args.get(i + 1).and_then(|s| s.parse::<usize>().ok());
         match (args[i].as_str(), val) {
             (f, _) if sample::SampleArgs::is_flag(f) => sargs
+                .set(f, args.get(i + 1).map(String::as_str))
+                .unwrap_or_else(|e| fail(&e)),
+            (f, _) if rope::RopeArgs::is_flag(f) => rargs
                 .set(f, args.get(i + 1).map(String::as_str))
                 .unwrap_or_else(|e| fail(&e)),
             ("--device", _) => {
@@ -549,7 +567,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     if device == Device::Cuda {
         cuda::preinit();
     }
-    let model = open_model_with(path, copy_for(device));
+    let model = open_model_with(path, copy_for(device), &rargs);
     let tok = tokenizer::Tokenizer::from_gguf(&model);
 
     let ids = tok.encode_prompt(prompt);
@@ -832,6 +850,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     let mut kv = kv_env();
     let mut sargs = sample::SampleArgs::default();
     let mut session = None;
+    let mut rargs = rope::RopeArgs::default();
     let mut i = 3;
     while i < args.len() {
         let f = args[i].as_str();
@@ -842,6 +861,13 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         }
         if sample::SampleArgs::is_flag(f) {
             sargs
+                .set(f, args.get(i + 1).map(String::as_str))
+                .unwrap_or_else(|e| fail(&e));
+            i += 2;
+            continue;
+        }
+        if rope::RopeArgs::is_flag(f) {
+            rargs
                 .set(f, args.get(i + 1).map(String::as_str))
                 .unwrap_or_else(|e| fail(&e));
             i += 2;
@@ -903,7 +929,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     if device == Device::Cuda {
         cuda::preinit();
     }
-    let model = open_model_with(path, copy_for(device));
+    let model = open_model_with(path, copy_for(device), &rargs);
     // RoPE past the trained length gives garbage; 0 = the GGUF doesn't say.
     let trained = model.ctx_len() as usize;
     let fit = ctx.is_none();
