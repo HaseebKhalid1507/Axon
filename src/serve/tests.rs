@@ -2216,8 +2216,8 @@ fn serve_cancel_mid_prefill_reuses_rows() {
 }
 
 /// The requests `identity_checks` follows: greedy and seeded chat (one
-/// long, ~700 tokens of prompt, so a batch admits it in pieces once
-/// prefill is chunked), seeded completions; at most 48 tokens each.
+/// long, ~700 tokens of prompt, which a batch admits in chunks), seeded
+/// completions; at most 48 tokens each.
 fn identity_targets() -> Vec<(bool, Value)> {
     let long = "The river bends past the old mill and the bell tower. ".repeat(60);
     vec![
@@ -2343,7 +2343,8 @@ fn identity_checks(a: SocketAddr, load: &[Value], what: &str) -> (Value, Vec<Str
 }
 
 /// Same request, same fingerprint, same text: alone, with its prefix
-/// cached, streamed and under concurrent load, on the f16 and q8 caches
+/// cached, streamed and under concurrent load (its long prompt prefilled
+/// in 64-token chunks between decode steps), on the f16 and q8 caches
 /// (8 slots); a restarted server has the same fingerprint, and the cache
 /// type (and backend) is part of it.
 #[test]
@@ -2362,6 +2363,8 @@ fn serve_identity() {
             o.kv = kv;
             o.parallel = 8;
             o.max_draft = 3;
+            // The long target is admitted in chunks while others decode.
+            o.prefill_chunk = 64;
         });
         let (id, _) = identity_checks(s.addr, &load, &format!("cuda {kv:?}"));
         assert_eq!(id["backend"], "cuda");
