@@ -294,10 +294,6 @@ fn gpu_logits_match_cpu_q5_k_m_q4_0() {
         ("Qwen2.5-0.5B-Instruct-Q4_0.gguf", "0.5B Q4_0"),
         ("Qwen2.5-1.5B-Instruct-Q5_K_M.gguf", "1.5B Q5_K_M"),
         ("Qwen2.5-1.5B-Instruct-Q4_0.gguf", "1.5B Q4_0"),
-        ("Qwen2.5-1.5B-Instruct-Q3_K_M.gguf", "1.5B Q3_K_M"),
-        ("Llama-3.2-1B-Instruct-Q3_K_L.gguf", "Llama 1B Q3_K_L"),
-        ("Qwen2.5-0.5B-Instruct-Q2_K.gguf", "0.5B Q2_K"),
-        ("Qwen2.5-0.5B-Instruct-Q3_K_M.gguf", "0.5B Q3_K_M"),
     ] {
         let Some(m) = model_at(&format!("models/{f}")) else {
             continue;
@@ -3960,6 +3956,143 @@ fn gpu_verify_matches_forward_argmax_1_5b() {
     verify_bits(&m, "1.5B", CacheKv::F16);
 }
 
+/// The new types' products on the real files' weights (the first two
+/// layers and the last of 1.5B Q3_K_M, 7B Q2_K, 0.5B Q2_K, whichever are
+/// present): the decode GEMV within f32 rounding of the CPU's dot_row_q8
+/// (relative to sum |w x|) on the same quantized activation, and every
+/// batched kernel (gemvn, the tensor-core gemm2 / gemm2s) == the GEMV bit for
+/// bit, at batches below, inside and past the tiles.
+#[test]
+fn gpu_products_real_weights_q2k_q3k() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module_ext(&g).unwrap();
+    let mut rng = Rng(0x0a3b_2c1d_7e6f_5a4b);
+    let mut seen = Vec::new();
+    for f in [
+        "Qwen2.5-1.5B-Instruct-Q3_K_M.gguf",
+        "Qwen2.5-7B-Instruct-Q2_K.gguf",
+        "Qwen2.5-0.5B-Instruct-Q2_K.gguf",
+    ] {
+        let Some(m) = model_at(&format!("models/{f}")) else {
+            continue;
+        };
+        let nl = m
+            .tensors
+            .iter()
+            .filter(|t| t.name.ends_with("attn_norm.weight"))
+            .count();
+        for t in &m.tensors {
+            let qt = t.qtype.id;
+            let layer_ok = [0, 1, nl - 1]
+                .iter()
+                .any(|l| t.name.starts_with(&format!("blk.{l}.")));
+            if !matches!(qt, Q2_K | Q3_K | IQ4_NL) || !layer_ok || t.dims.len() != 2 {
+                continue;
+            }
+            let cols = t.dims[0] as usize;
+            let rb = quant::row_bytes(qt, cols);
+            let rows = (t.n_elements as usize / cols).min(1001);
+            let wd = &m.tensor_data(t)[..rows * rb];
+            let w = g.upload(wd).unwrap();
+            let x = rng.vec(cols, 2.0);
+            let want = gpu_gemv(&g, &km, "gemv", qt, wd, cols, &x);
+            let xq = quant::QuantizedAct::for_types(&x, &[qt]);
+            let mut row = vec![0f32; cols];
+            let mut worst = 0f64;
+            for r in 0..rows {
+                let wr = &wd[r * rb..(r + 1) * rb];
+                let cpu = quant::dot_row_q8(qt, wr, &xq) as f64;
+                quant::dequant(qt, wr, &mut row);
+                let mag: f64 = row
+                    .iter()
+                    .zip(&x)
+                    .map(|(&a, &b)| (a as f64 * b as f64).abs())
+                    .sum();
+                worst = worst.max((want[r] as f64 - cpu).abs() / mag.max(1e-30));
+            }
+            assert!(worst < 1e-6, "{f} {}: gemv vs cpu {worst:e}", t.name);
+            for nb in [7usize, 77, 129] {
+                let xs: Vec<Vec<f32>> = (0..nb).map(|_| rng.vec(cols, 2.0)).collect();
+                let wants: Vec<Vec<f32>> = xs
+                    .iter()
+                    .map(|x| gpu_gemv(&g, &km, "gemv", qt, wd, cols, x))
+                    .collect();
+                let act = quantize_batch(&g, &km, &xs, cols);
+                let mut kernels: Vec<String> = vec!["gemvn_2x8".into(), "gemvn_2x16".into()];
+                if km.mma() {
+                    kernels.extend(gemm2_names(qt));
+                }
+                for k in &kernels {
+                    let got =
+                        gpu_batched(&g, &km, k, qt, &w, rows, cols, &act, nb, &Epi::default());
+                    for z in 0..nb {
+                        assert_eq!(
+                            bits(&got[z * rows..(z + 1) * rows]),
+                            bits(&wants[z]),
+                            "{f} {} {k} nb {nb} token {z}",
+                            t.name
+                        );
+                    }
+                }
+            }
+            eprintln!(
+                "{f} {} ({}): gemv vs cpu {worst:.2e}; batched == gemv",
+                t.name,
+                crate::gguf::qtype(qt).name
+            );
+            seen.push(qt);
+        }
+    }
+    eprintln!("types covered: {seen:?}");
+}
+
+/// The Q2_K / Q3_K / IQ4_NL files against the CPU, graded by the CPU's own
+/// spread on the same file (its two kernel sets, `ac`). These low-bit models
+/// are sensitive: on the 1.5B Q3_K_M the CPU disagrees with itself on 11/198
+/// top-1s with KL 1.2e-2 (its Q3_K rows are the same per-row kernel in both
+/// sets; only the Q4_K / Q6_K rows differ), 3x the 1.5B Q4_K_M's. So: top-1
+/// within 2% of the CPU's self-agreement, mean KL at most 1.5x the CPU's
+/// self-KL, max KL at most 2x its, every flip below the CPU's max |dlogit|.
+/// The products themselves are checked exactly (gpu_products_real_weights_q2k_q3k).
+#[test]
+fn gpu_logits_match_cpu_q2k_q3k() {
+    if crate::testutil::gpu().is_none() {
+        return;
+    }
+    for (f, name) in [
+        ("Qwen2.5-1.5B-Instruct-Q3_K_M.gguf", "1.5B Q3_K_M"),
+        ("Llama-3.2-1B-Instruct-Q3_K_L.gguf", "Llama 1B Q3_K_L"),
+        ("Qwen2.5-0.5B-Instruct-Q2_K.gguf", "0.5B Q2_K"),
+        ("Qwen2.5-0.5B-Instruct-Q3_K_M.gguf", "0.5B Q3_K_M"),
+    ] {
+        let Some(m) = model_at(&format!("models/{f}")) else {
+            continue;
+        };
+        let (ag, ac) = agreement(&m, 32);
+        report(&format!("{name} gpu vs cpu"), &ag);
+        report(&format!("{name} cpu rows vs cpu"), &ac);
+        let n = ag.positions;
+        assert!(
+            ag.top1 * 100 + 2 * n >= ac.top1 * 100 && ag.top1 * 100 >= 90 * n,
+            "{name}: top-1 {}/{n} (cpu vs itself {})",
+            ag.top1,
+            ac.top1
+        );
+        // Floors for files whose CPU kernel sets nearly agree (no repacked rows).
+        let self_kl = (ac.sum_kl / n as f64).max(2.5e-3);
+        assert!(ag.sum_kl / n as f64 <= 1.5 * self_kl, "{name}: mean KL");
+        assert!(ag.max_kl <= 2.0 * ac.max_kl.max(0.1), "{name}: max KL");
+        let tie = ac.max_abs.max(0.5);
+        assert!(
+            ag.flips.iter().all(|&d| d < tie),
+            "{name}: flips {:?}",
+            ag.flips
+        );
+    }
+}
+
 /// Q2_K / Q3_K files (bartowski's, whichever are present): decode ==
 /// every prefill batching == prefill from a fed prefix (cache reuse) ==
 /// verify, bit for bit, on both caches; the 7B Q2_K's Q2_K rows (and its
@@ -3986,8 +4119,9 @@ fn gpu_prefill_batchings_bit_identical_q2k_q3k() {
         prefill_bits(&m, name, CacheKv::F16);
         verify_bits(&m, name, CacheKv::F16);
         if q8 {
-            prefill_bits(&m, name, CacheKv::Q8 { group: 64 });
-            verify_bits(&m, name, CacheKv::Q8 { group: 64 });
+            // Group 32: valid at every head size (64 only where it's head_dim).
+            prefill_bits(&m, name, CacheKv::Q8 { group: 32 });
+            verify_bits(&m, name, CacheKv::Q8 { group: 32 });
         }
     }
 }
