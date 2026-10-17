@@ -1365,11 +1365,6 @@ impl<'g> CudaQwen2<'g> {
         self.n_kv_heads * self.head_dim
     }
 
-    /// The device it runs on.
-    pub fn gpu(&self) -> &'g Gpu {
-        self.gpu
-    }
-
     /// `max_split` when the attention runs without tensor cores (head size
     /// 256, or below sm_80): that path's order depends on it. None on the
     /// tensor-core path, whose order is fixed by the position alone.
