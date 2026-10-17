@@ -3,6 +3,10 @@
 Short and opinionated. "On main" means merged at `e998d6f`. Everything else is planned or in flight.
 Estimates come from the design notes and are labeled.
 
+**Mission: make LLM inference cheap and fast, and run the best open models.** Cheap means it runs on the
+hardware people already own and wastes none of it; fast means as close to the hardware limit as the math
+allows; the best models means the frontier open models, not only the ones that fit a laptop. Every item below serves one of those three.
+
 ## The thinking behind the order
 
 Single-stream decode on a 7B/8B model is near the hardware limit. On Parabellum (RTX 5070 Ti Laptop),
@@ -21,8 +25,8 @@ and has a specific fix ([design/hopper.md](design/hopper.md)).
 
 ## Long-term goals
 
-These are not priorities, and nothing here jumps the queue below. They say where the work is headed, so that
-choices made along the way don't close them off.
+These are not priorities, and nothing here jumps the queue below. They are where the mission points (the best
+models, cheaply and fast), so choices made along the way shouldn't close them off.
 
 - **Run Kimi K2** (1T parameters, 32B active per token, the DeepSeek V3 architecture). It is the largest open
   model and the test of whether Axon scales past a 12 GB card. Every piece it needs is useful on its own, and

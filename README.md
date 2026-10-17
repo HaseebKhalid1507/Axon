@@ -3,6 +3,10 @@
 LLM inference for Qwen2, Qwen3, Llama 3 and Gemma 3 GGUF models on the CPU and on NVIDIA
 GPUs, written from scratch in Rust.
 
+**Mission: make LLM inference cheap and fast, and run the best open models.** Cheap means it runs on the
+hardware people already own and wastes none of it; fast means as close to the hardware limit as the math
+allows; the best models means the frontier open models, not only the ones that fit a laptop.
+
 **New here? Start with [docs/START-HERE.md](docs/START-HERE.md).**
 
 No ggml, no BLAS, no binding crates, no CUDA toolkit at build time: a GGUF reader,
