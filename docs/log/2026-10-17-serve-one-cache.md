@@ -1,6 +1,6 @@
-# serve: no N+1 cache, the single-request path runs in slot 0  (PR #PRNUM)
+# serve: no N+1 cache, the single-request path runs in slot 0  (PR #60)
 
-- Date: 2026-10-17. Branch: feat/serve-one-cache. Base: main cf68e9d (after #57). Status: open
+- Date: 2026-10-17. Branch: feat/serve-one-cache. Base: main cf68e9d (after #57). Status: open (PR #60)
 - Pick / design: r10 round C2 (specs/r10-scope.md §4.4, §4.6 row C2; roadmap Scale #2).
 
 ## What changed
@@ -34,11 +34,11 @@ view it is.
 ## How it was verified
 | gate | result | job ID / log |
 |---|---|---|
-| serve:: avante (sm_89) release | RELAVANTE | 1017-042200-3d54 |
-| serve:: avante debug-assertions | DBGAVANTE | 1017-042201-36ec |
-| serve:: bella (sm_120) release | RELBELLA | 1017-042201-25e8 |
-| serve:: bella debug-assertions | DBGBELLA | 1017-042201-741e |
-| full release suite, `--shard 3` | SHARDS | group 1017-042451-5252 |
+| serve:: avante (sm_89) release | 71 passed, 0 failed, 2 ignored | 1017-042200-3d54 |
+| serve:: avante debug-assertions | 71 / 0 / 2 | 1017-042201-36ec |
+| serve:: bella (sm_120) release | 71 / 0 / 2 | 1017-042201-25e8 |
+| serve:: bella debug-assertions | 71 / 0 / 2 | 1017-042201-741e |
+| full release suite, `--shard 3` | PASS: 471 passed, 0 failed, 35 ignored (avante + bella) | group 1017-042451-5252 |
 | md5 of `gen`, main cf68e9d vs candidate, bella: CUDA f16, CUDA `--kv q8`, CPU (5 models x 3 prompts, -n 64) | 0/15, 0/15, 0/15 differ | 1017-042159-14aa |
 | serve vs gen at C=1 (`scripts/serve_check.py`, 7B, bella): default (2 slots), `--kv q8` (5 slots), `--ctx 8192` (8 slots) | ALL OK x3 | 1017-042200-691a |
 | new test `slot_view_matches_a_cache` (prefill, graphed decode, verify with rejected guesses, prefix re-feed in a view of slots 0 and 1: picks and KV bytes == a plain cache; other slots untouched; adopt no-op) and `pool_steps_match_solo_in_any_order` with the hand-over from a view | pass (avante) | 1017-041012-94ab |
