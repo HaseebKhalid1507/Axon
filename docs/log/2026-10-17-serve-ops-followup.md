@@ -29,9 +29,9 @@
 ## How it was verified
 | gate | result | job |
 |---|---|---|
-| serve:: release / debug-assertion, avante | RES_AV | 1017-072023-ad59, 1017-072023-e4af |
-| serve:: release / debug-assertion, bella | RES_BE | 1017-072024-10aa, 1017-072024-ffb7 |
-| md5 main 3310ba3 vs candidate (gen + serve with ops flags on) | RES_MD5 | RES_MD5_JOB |
+| serve:: release / debug-assertion, avante | 83/0, 83/0 | 1017-072023-ad59, 1017-072023-e4af |
+| serve:: release / debug-assertion, bella | 83/0, 83/0 | 1017-072024-10aa, 1017-072024-ffb7 |
+| md5 main 3310ba3 vs candidate (gen + serve with ops flags on) | 26/26 same | 1017-072246-7480 |
 | fuzz_serve.py --ops / plain | 226 / 183 checks, 0 findings | 1017-072655-0fa1 |
 | clippy -D warnings (bin + tests), rustfmt | clean | local |
 
