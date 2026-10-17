@@ -181,6 +181,10 @@ pub trait BatchLm: Lm {
         cache: &Self::Cache,
         n: usize,
     ) -> Result<(), String>;
+
+    /// Most tokens one of `feed_slot`'s passes takes: a longer feed is
+    /// split into equal passes of at most this many.
+    fn pass_max(&self, pool: &Self::Pool) -> usize;
 }
 
 impl Lm for Qwen2<'_> {
@@ -669,5 +673,9 @@ impl BatchLm for Backend<'_> {
             (Backend::Cuda(m), BackendCache::Cuda(c)) => m.adopt_cache(pool, slot, c, n),
             _ => Err("adopt: a cache of another backend".into()),
         }
+    }
+
+    fn pass_max(&self, pool: &Self::Pool) -> usize {
+        pool.pass_max()
     }
 }

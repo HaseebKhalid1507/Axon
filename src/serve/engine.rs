@@ -84,12 +84,10 @@ const SEED_CHUNK: usize = 512;
 const DEPTH_K: f64 = 8192.0;
 /// A step's prompt tokens when nothing decodes, before a chunk's cost is
 /// known (as hybrid.rs STREAM_BATCH), and its time budget once it is: long
-/// pieces at full speed, but an arrival still starts within about that.
+/// pieces at full speed, but an arrival still starts within about that (up
+/// to twice it once rounded up to whole passes).
 const IDLE_CHUNK: usize = 4096;
 const IDLE_MS: f64 = 250.0;
-/// An idle piece is a whole number of this many tokens: the GPU's prefill
-/// pass (cuda PREFILL_BATCH), so pieces add no partial passes.
-const IDLE_ROUND: usize = 1152;
 /// Feeds of at least this many tokens teach the cost (smaller ones are
 /// mostly a pass's fixed part).
 const LEARN_MIN: usize = 128;
@@ -138,6 +136,9 @@ pub(super) struct Batch<'a, 't> {
     cost: Option<f64>,
     /// The last decode step's time.
     decode_ms: f64,
+    /// Most tokens of one of `feed_slot`'s passes (`BatchLm::pass_max`):
+    /// an idle piece is a whole number of them (no extra partial passes).
+    pass: usize,
     log: bool,
     generated: Arc<AtomicU64>,
 }
@@ -152,8 +153,10 @@ impl<'a, 't> Batch<'a, 't> {
         log: bool,
         generated: Arc<AtomicU64>,
     ) -> Batch<'a, 't> {
+        let pass = net.pass_max(&pool).max(1);
         Batch {
             net,
+            pass,
             pool,
             slots,
             ctx,
@@ -207,6 +210,14 @@ impl<'a, 't> Batch<'a, 't> {
         let last = p.len() - 1;
         let (slot, common) = self.free_slot(p).expect("admit: a free slot");
         let reuse = common.min(last);
+        if super::debug() {
+            eprintln!(
+                "axon serve: #{} prefill: chunked, slot {slot}, {} tok ({reuse} cached), {} decoding",
+                job.id,
+                p.len(),
+                self.seqs.len()
+            );
+        }
         self.busy[slot] = true;
         self.held[slot].truncate(reuse);
         let sampler = job.sample.map(Sampler::new);
@@ -267,7 +278,15 @@ impl<'a, 't> Batch<'a, 't> {
         let fed: Vec<usize> = self.pre.iter().map(|f| f.fed).collect();
         let starved: Vec<usize> = self.pre.iter().map(|f| f.starved).collect();
         let idle = self.seqs.is_empty();
-        let plan = plan(budget, self.policy.floor, &fed, &rem, &starved, idle);
+        let plan = plan(
+            budget,
+            self.policy.floor,
+            self.pass,
+            &fed,
+            &rem,
+            &starved,
+            idle,
+        );
         for (f, s) in self.pre.iter_mut().zip(starve(&plan, &starved, idle)) {
             f.starved = s;
         }
@@ -502,10 +521,12 @@ impl<'a, 't> Batch<'a, 't> {
 /// of its own); a later prompt's share under `floor` is skipped unless it
 /// finishes the prompt (no sliver of a long one beside another's chunk).
 /// On an `idle` step (nothing decodes) the first's time share rounds up to
-/// whole IDLE_ROUND passes and takes the step: prompts go one after another.
+/// whole passes of `pass` tokens and takes the step: prompts go one after
+/// another.
 fn plan(
     budget: Budget,
     floor: usize,
+    pass: usize,
     fed: &[usize],
     rem: &[usize],
     starved: &[usize],
@@ -529,7 +550,7 @@ fn plan(
                 let dk = fed[i] as f64 + DEPTH_K;
                 let n = ((dk * dk + 2.0 * us / c).sqrt() - dk) as usize;
                 match (first, idle) {
-                    (true, true) => n.max(floor).div_ceil(IDLE_ROUND) * IDLE_ROUND,
+                    (true, true) => n.max(floor).div_ceil(pass) * pass,
                     (true, false) => n.max(floor),
                     _ => n,
                 }
@@ -559,17 +580,24 @@ fn plan(
     plan
 }
 
-/// Each prompt's count of steps in a row passed over, after `plan`: reset
-/// when fed, else one more, but not on an idle step (nothing decodes:
-/// prompts are best fed one after another, and the head is never
-/// pre-empted for fairness there).
+/// Each prompt's count of steps in a row passed over, after `plan`. While
+/// requests decode: reset when fed, else one more. On an idle step a
+/// prompt counts a miss only when a younger one was fed instead (two long
+/// prompts go one after another, the older first, with no misses), and a
+/// feed doesn't reset the count: a prompt that reached STARVE keeps the
+/// head to its end. So a stream of short prompts that each finish within
+/// their own step holds a long one back STARVE pieces at most.
 fn starve(plan: &[usize], starved: &[usize], idle: bool) -> Vec<usize> {
+    let youngest_fed = plan.iter().rposition(|&n| n > 0);
     plan.iter()
         .zip(starved)
-        .map(|(&n, &s)| match (n, idle) {
-            (0, false) => s + 1,
-            (0, true) => s,
-            _ => 0,
+        .enumerate()
+        .map(|(i, (&n, &s))| match (n > 0, idle) {
+            (true, false) => 0,
+            (false, false) => s + 1,
+            (true, true) => s,
+            (false, true) if youngest_fed.is_some_and(|j| j > i) => s + 1,
+            (false, true) => s,
         })
         .collect()
 }
@@ -591,7 +619,10 @@ fn emit(s: &mut Seq, id: u32) -> Option<End> {
 
 #[cfg(test)]
 mod plan_tests {
-    use super::{Budget, DEPTH_K, IDLE_ROUND, STARVE, plan, starve};
+    use super::{Budget, DEPTH_K, STARVE, plan, starve};
+
+    /// The GPU's prefill pass (cuda PREFILL_BATCH).
+    const PASS: usize = 1152;
 
     /// µs that `n` tokens from depth `d` cost at `c` (the model `plan` uses).
     fn cost(c: f64, d: usize, n: usize) -> f64 {
@@ -606,6 +637,7 @@ mod plan_tests {
             plan(
                 Budget::Tokens(512),
                 256,
+                PASS,
                 &[0, 0],
                 &[10_000, 300],
                 &[0, 0],
@@ -618,6 +650,7 @@ mod plan_tests {
             plan(
                 Budget::Tokens(1024),
                 256,
+                PASS,
                 &[0, 0],
                 &[10_000, 300],
                 &[0, 0],
@@ -627,11 +660,11 @@ mod plan_tests {
         );
         // A remainder within half a floor past the share is fed whole.
         assert_eq!(
-            plan(Budget::Tokens(512), 256, &[0], &[600], &[0], false),
+            plan(Budget::Tokens(512), 256, PASS, &[0], &[600], &[0], false),
             [600]
         );
         assert_eq!(
-            plan(Budget::Tokens(512), 256, &[0], &[700], &[0], false),
+            plan(Budget::Tokens(512), 256, PASS, &[0], &[700], &[0], false),
             [512]
         );
     }
@@ -640,10 +673,19 @@ mod plan_tests {
     fn micros_shares_follow_each_prompts_depth() {
         let c = 0.005;
         let us = 50_000.0;
-        let shallow = plan(Budget::Micros(us, c), 16, &[0], &[100_000], &[0], false)[0];
+        let shallow = plan(
+            Budget::Micros(us, c),
+            16,
+            PASS,
+            &[0],
+            &[100_000],
+            &[0],
+            false,
+        )[0];
         let deep = plan(
             Budget::Micros(us, c),
             16,
+            PASS,
             &[30_000],
             &[100_000],
             &[0],
@@ -659,6 +701,7 @@ mod plan_tests {
         let p = plan(
             Budget::Micros(us, c),
             16,
+            PASS,
             &[0, 30_000],
             &[100_000, 50_000],
             &[0, 0],
@@ -674,6 +717,7 @@ mod plan_tests {
             plan(
                 Budget::Micros(0.0, 0.005),
                 256,
+                PASS,
                 &[0],
                 &[10_000],
                 &[0],
@@ -685,6 +729,7 @@ mod plan_tests {
             plan(
                 Budget::Micros(0.0, 0.005),
                 256,
+                PASS,
                 &[0, 0],
                 &[10_000, 9_000],
                 &[0, 0],
@@ -703,6 +748,7 @@ mod plan_tests {
             plan(
                 Budget::Tokens(256),
                 256,
+                PASS,
                 &[0; 3],
                 &[5_000, 100, 200],
                 &s,
@@ -715,6 +761,7 @@ mod plan_tests {
             plan(
                 Budget::Tokens(256),
                 256,
+                PASS,
                 &[0; 3],
                 &[5_000, 100, 200],
                 &[STARVE, 0, 0],
@@ -728,6 +775,7 @@ mod plan_tests {
             plan(
                 Budget::Tokens(256),
                 256,
+                PASS,
                 &[0; 3],
                 &[5_000, 100, 200],
                 &[STARVE - 1, 0, 0],
@@ -746,18 +794,20 @@ mod plan_tests {
         let p = plan(
             Budget::Micros(us, c),
             256,
+            PASS,
             &[0, 0],
             &[14_000, 14_400],
             &[0, 0],
             true,
         );
         assert_eq!(p[1], 0, "{p:?}");
-        assert!(p[0] > 0 && p[0].is_multiple_of(IDLE_ROUND), "{p:?}");
+        assert!(p[0] > 0 && p[0].is_multiple_of(PASS), "{p:?}");
         // Before a cost is known: IDLE_CHUNK tokens, all to the head.
         assert_eq!(
             plan(
                 Budget::Tokens(4096),
                 256,
+                PASS,
                 &[0, 0],
                 &[14_000, 14_400],
                 &[0, 0],
@@ -770,6 +820,7 @@ mod plan_tests {
             plan(
                 Budget::Tokens(4096),
                 256,
+                PASS,
                 &[0, 0],
                 &[14_000, 14_400],
                 &[0, STARVE],
@@ -780,9 +831,146 @@ mod plan_tests {
     }
 
     #[test]
-    fn idle_steps_starve_nobody() {
+    fn idle_misses_count_only_behind_a_younger_prompt() {
+        // The older one fed: the younger waits without a miss.
         assert_eq!(starve(&[4096, 0], &[0, 2], true), [0, 2]);
+        // A younger one fed instead: the older one counts a miss.
+        assert_eq!(starve(&[0, 1000], &[1, 0], true), [2, 0]);
+        // Idle feeds don't reset: a starved head stays starved.
+        assert_eq!(starve(&[4096, 0], &[STARVE, 0], true), [STARVE, 0]);
+        // While requests decode: reset when fed, else one more.
         assert_eq!(starve(&[4096, 0], &[0, 2], false), [0, 3]);
         assert_eq!(starve(&[0, 300], &[1, 3], false), [2, 0]);
+    }
+
+    #[test]
+    fn idle_two_long_prompts_go_one_after_another() {
+        // Arrival order, no misses: the older finishes first, untouched.
+        let (mut fed, mut rem, mut st) = (vec![0, 0], vec![14_400, 14_400], vec![0, 0]);
+        let mut steps = 0;
+        while rem[0] > 0 {
+            let p = plan(Budget::Tokens(4096), 256, PASS, &fed, &rem, &st, true);
+            // The older one every step (the younger only gets what its
+            // last piece leaves).
+            assert!(
+                p[0] > 0 && (p[1] == 0 || p[0] == rem[0]),
+                "step {steps}: {p:?}"
+            );
+            st = starve(&p, &st, true);
+            for i in 0..2 {
+                fed[i] += p[i];
+                rem[i] -= p[i];
+            }
+            steps += 1;
+        }
+        assert_eq!(st, [0, 0]);
+        assert!(steps <= 4, "{steps}");
+    }
+
+    #[test]
+    fn idle_short_prompts_finishing_in_their_step_cant_starve_a_long_one() {
+        // Each step one more short prompt (1000 tokens, shorter than the
+        // long one's remainder) arrives, takes the head and finishes in its
+        // step (as a request with max_tokens 1 leaves): the long one is
+        // passed over at most STARVE steps, then keeps the head to its end.
+        let (c, floor) = (0.005, 256);
+        let us = cost(c, 0, 1000) + 1.0; // a short prompt takes the step
+        let (mut fed, mut rem, mut st) = (vec![0], vec![60_000], vec![0]);
+        let mut missed = 0;
+        let mut steps = 0;
+        while rem[0] > 0 {
+            fed.push(0);
+            rem.push(1000);
+            st.push(0);
+            let p = plan(Budget::Micros(us, c), floor, PASS, &fed, &rem, &st, true);
+            if p[0] == 0 {
+                missed += 1;
+            } else {
+                assert!(missed >= STARVE, "fed before starving? {p:?}");
+            }
+            st = starve(&p, &st, true);
+            for i in 0..p.len() {
+                fed[i] += p[i];
+                rem[i] -= p[i];
+            }
+            // Finished short prompts leave (they decode, then end).
+            let keep: Vec<bool> = (0..rem.len()).map(|i| i == 0 || rem[i] > 0).collect();
+            for v in [&mut fed, &mut rem, &mut st] {
+                let mut k = keep.iter();
+                v.retain(|_| *k.next().unwrap());
+            }
+            steps += 1;
+            assert!(steps < 1000, "the long prompt starved");
+        }
+        assert_eq!(missed, STARVE);
+    }
+
+    #[test]
+    fn idle_round_up_is_capped_and_floor_applies_first() {
+        // A remainder within half a floor of the rounded share: fed whole,
+        // not rounded up past it.
+        assert_eq!(
+            plan(
+                Budget::Micros(1.0, 0.005),
+                256,
+                PASS,
+                &[0],
+                &[1000],
+                &[0],
+                true
+            ),
+            [1000]
+        );
+        assert_eq!(
+            plan(
+                Budget::Micros(1.0, 0.005),
+                256,
+                PASS,
+                &[0],
+                &[1280],
+                &[0],
+                true
+            ),
+            [1280]
+        );
+        // A larger one: whole passes.
+        assert_eq!(
+            plan(
+                Budget::Micros(1.0, 0.005),
+                256,
+                PASS,
+                &[0],
+                &[5000],
+                &[0],
+                true
+            ),
+            [1152]
+        );
+        // The floor first (2000 > the time share), then whole passes.
+        assert_eq!(
+            plan(
+                Budget::Micros(0.0, 0.005),
+                2000,
+                PASS,
+                &[0],
+                &[100_000],
+                &[0],
+                true
+            ),
+            [2304]
+        );
+        // The pass size is the pool's (PLAN_BATCH 1024 passes).
+        assert_eq!(
+            plan(
+                Budget::Micros(0.0, 0.005),
+                2000,
+                1024,
+                &[0],
+                &[100_000],
+                &[0],
+                true
+            ),
+            [2048]
+        );
     }
 }
