@@ -70,6 +70,8 @@ Also open:
   is on main; these two remain (ESTIMATED 700-1000 and 300-400 lines).
 - **Qwen3 0.6B Q8_0 long prefill on sm_89.** The one cell Axon loses on the RTX 4050
   ([benchmarks-gpu.md](benchmarks-gpu.md)).
+- **Gemma 3 27B (head_dim 128) on CUDA.** Needs the head-128 windowed attention kernels and the
+  1/sqrt(dim/heads) query scale; refused at load today (CPU and GPU).
 
 ## Scale: bigger models, longer sessions, multi-user, concurrent requests
 

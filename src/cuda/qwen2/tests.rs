@@ -248,6 +248,26 @@ pub(crate) fn assert_graded_floor(ag: &Agree, ac: &Agree, floor: usize) {
     assert!(ag.max_abs < 6.0, "max logit difference");
 }
 
+/// The GPU's head sizes (no GPU or model needed): 64 and 128, gemma3 256
+/// only (its window-taking kernels); a gemma3 model of head size 128 (27B)
+/// or 64 is refused at load, not launched short of an argument.
+#[test]
+fn gpu_head_sizes() {
+    for hd in [64, 128] {
+        assert!(gpu_head_ok(false, hd, 7).is_ok(), "head {hd}");
+        let e = gpu_head_ok(true, hd, 2).unwrap_err();
+        assert!(
+            e.contains(&format!("head size {hd}")) && e.contains("--device cpu"),
+            "{e}"
+        );
+    }
+    assert!(gpu_head_ok(false, 256, 1).is_err(), "head 256 off gemma3");
+    assert!(gpu_head_ok(true, 256, 2).is_ok(), "gemma3 head 256");
+    assert!(gpu_head_ok(true, 256, MAX_GROUP / 2).is_ok());
+    assert!(gpu_head_ok(true, 256, MAX_GROUP / 2 + 1).is_err());
+    assert!(gpu_head_ok(false, 96, 1).is_err());
+}
+
 #[test]
 fn gpu_logits_match_cpu_0_5b() {
     if crate::testutil::gpu().is_none() {

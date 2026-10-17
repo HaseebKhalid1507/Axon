@@ -550,9 +550,41 @@ impl<'g> CudaCache<'g> {
         // Table entries are pages of the whole buffer: no view offset too
         // (a view's row0 can be 0, slot 0's: the flag, not row0).
         assert!(tab.is_none() || !self.view, "a paged cache is no slot view");
+        // A pool's views address its rows plainly: no table under them.
+        assert!(
+            self.view || Rc::strong_count(&self.kv) == 1,
+            "set_tab on a pool with live slot views"
+        );
         self.tab = tab;
         self.graph = Default::default();
     }
+}
+
+/// Whether the GPU has attention kernels for the head size: 64 or 128, and
+/// gemma3 256 only (gemma.cu's split attention, whose query heads of a kv
+/// head share attn_split_t's MAX_GROUP * 128 floats). A gemma3 model of
+/// another head size (27B: 128) would launch the 64/128 kernels without the
+/// window argument: refused.
+fn gpu_head_ok(gemma: bool, head_dim: usize, group: usize) -> Result<(), String> {
+    if gemma && head_dim != 256 {
+        return Err(format!(
+            "gemma3 with head size {head_dim} isn't supported on the GPU yet (256 only): \
+             --device cpu"
+        ));
+    }
+    if gemma && group * head_dim > MAX_GROUP * 128 {
+        return Err(format!(
+            "gemma3 with {group} query heads per kv head isn't supported on the GPU \
+             (at most {}): --device cpu",
+            MAX_GROUP / 2
+        ));
+    }
+    if !gemma && head_dim != 64 && head_dim != 128 {
+        return Err(format!(
+            "head size {head_dim} isn't supported on the GPU (64 or 128; 256 on gemma3)"
+        ));
+    }
+    Ok(())
 }
 
 /// Bytes of a quantized-activation buffer for n values (decode.cu Act).
@@ -1181,14 +1213,7 @@ impl<'g> CudaQwen2<'g> {
         let rope_m = crate::rope::mscale(m);
         let trained = meta(m, "context_length").unwrap_or(32768.0);
         let group = n_heads / n_kv_heads;
-        // gemma3: head size 256 (gemma.cu's split attention: its query
-        // heads of a kv head share attn_split_t's MAX_GROUP * 128 floats).
-        let hd256 = gemma && head_dim == 256 && group * head_dim <= MAX_GROUP * 128;
-        if head_dim != 64 && head_dim != 128 && !hd256 {
-            return Err(format!(
-                "head size {head_dim} isn't supported on the GPU (64 or 128; 256 on gemma3)"
-            ));
-        }
+        gpu_head_ok(gemma, head_dim, group)?;
         let swa = crate::model::gemma_swa(m, n_layers);
         let freq_swa = match &swa {
             Some(_) => crate::model::rope_freqs_swa(m, head_dim),
