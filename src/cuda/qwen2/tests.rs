@@ -3282,9 +3282,10 @@ const FA_MEASURED: &[FaRow] = &[
     (89, 20, 14, 2, 64, 1016, 32768, [6896.2, 8654.1, 6585.9]),
 ];
 
-/// `fa_pick` never takes a variant measured slower than Full (beyond 1 %
-/// noise) on any GPU measured, and takes the fastest where it beats Full by
-/// more than 10 %.
+/// A regression guard on the rows `fa_eff` was fitted to (FA_MEASURED is
+/// the same data, not held out): `fa_pick` never takes a variant measured
+/// slower than Full (beyond 1 % noise), and is within 5 % of the fastest
+/// where that beats Full by more than 10 %. A new GPU needs its own rows.
 #[test]
 fn fa_pick_never_slower_than_full_measured() {
     use super::batch::{Fa, FaGeom, fa_pick};
@@ -3375,9 +3376,10 @@ fn fa_passes_shapes() {
             }
         }
     }
-    // RTX 4090, Qwen3-8B at 32512: 29 passes of 1121 (Kv: 576 blocks, 2.25
-    // waves) -> 32 of 1016 (512 blocks, 2 waves): MEASURED 4760 us per 1121
-    // vs 3868 per 1016 at 32k, -12 % per token.
+    // A regression guard on fitted data (the 4090 rows fa_eff came from), not
+    // a validation: RTX 4090, Qwen3-8B at 32512: 29 passes of 1121 (Kv: 576
+    // blocks, 2.25 waves) -> 32 of 1016 (512 blocks, 2 waves): MEASURED 4760
+    // us per 1121 vs 3868 per 1016 at 32k, -12 % per token.
     let g = FaGeom {
         cc: 89,
         sms: 128,
@@ -5799,9 +5801,9 @@ fn gpu_gemmh_matches_reference_bits() {
     }
     let mut rng = Rng(0x0090_a0b1_7e57);
     let cases: [(usize, usize, &[usize]); 9] = [
-        (64, 256, &[1, 17, 64]),
-        (65, 768, &[17, 64, 65]),
-        (333, 1536, &[17, 65, 128]),
+        (64, 256, &[1, 17, 64, 65]),
+        (65, 768, &[17, 64, 65, 128]),
+        (333, 1536, &[17, 65, 128, 1050]),
         (512, 3584, &[64, 1152]),
         (1001, 4864, &[77, 129]),
         (3584, 3584, &[1050]),

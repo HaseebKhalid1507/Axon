@@ -122,19 +122,19 @@ pub(super) fn fa_work(hd: usize, v: Fa, n_kv: usize, group: usize, nb: usize, sm
 /// time) on compute capability cc (major * 10 + minor): the slowest seen on
 /// a GPU of that architecture (cuda_fa_bench at 16k and 32k positions, 1016
 /// to 1121 queries: sm_89 RTX 4050 Laptop 20 SMs and RTX 4090 128, sm_120
-/// RTX 5070 Ti Laptop 46 and RTX 5090 170; lcpre NOTES). 0: never picked -
+/// RTX 5070 Ti Laptop 46 and RTX 5090 170; lcpre NOTES). None: never picked -
 /// Kv at head size 64 on sm_120 (5090 1.07-1.10, but the laptop's 0.88 at
 /// 1121 queries), and every architecture not measured (Full and Small, as
 /// before).
-pub(super) fn fa_eff(cc: u32, hd: usize, v: Fa) -> f64 {
+pub(super) fn fa_eff(cc: u32, hd: usize, v: Fa) -> Option<f64> {
     match (cc, hd, v) {
-        (_, _, Fa::Full) => 1.0,
-        (89, 128, Fa::Small) => 0.85,
-        (89, 128, Fa::Kv) => 0.94,
-        (89, 64, Fa::Kv) => 1.01,
-        (120, 128, Fa::Small) => 0.93,
-        (120, 128, Fa::Kv) => 1.0,
-        _ => 0.0,
+        (_, _, Fa::Full) => Some(1.0),
+        (89, 128, Fa::Small) => Some(0.85),
+        (89, 128, Fa::Kv) => Some(0.94),
+        (89, 64, Fa::Kv) => Some(1.01),
+        (120, 128, Fa::Small) => Some(0.93),
+        (120, 128, Fa::Kv) => Some(1.0),
+        _ => None,
     }
 }
 
@@ -175,8 +175,7 @@ pub(super) fn fa_pick(g: FaGeom, nb: usize) -> Fa {
     let base = fa_work(g.hd, Fa::Full, g.n_kv, g.group, nb, g.sms);
     let mut best = (Fa::Full, base);
     for v in [Fa::Small, Fa::Kv] {
-        let e = fa_eff(g.cc, g.hd, v);
-        if e > 0.0 {
+        if let Some(e) = fa_eff(g.cc, g.hd, v) {
             let t = fa_work(g.hd, v, g.n_kv, g.group, nb, g.sms) / e;
             if t <= FA_MARGIN * base && t < best.1 {
                 best = (v, t);
@@ -189,8 +188,8 @@ pub(super) fn fa_pick(g: FaGeom, nb: usize) -> Fa {
 /// `fa_pick`'s launch time for nb queries, in Full's rows per SM.
 pub(super) fn fa_time(g: FaGeom, nb: usize) -> f64 {
     let v = fa_pick(g, nb);
-    let e = fa_eff(g.cc, g.hd, v);
-    fa_work(g.hd, v, g.n_kv, g.group, nb, g.sms) / if e > 0.0 { e } else { 1.0 }
+    // Small for a short batch has no measured speed: Full's (it isn't compared).
+    fa_work(g.hd, v, g.n_kv, g.group, nb, g.sms) / fa_eff(g.cc, g.hd, v).unwrap_or(1.0)
 }
 
 /// Prompts reaching this many positions get their passes sized for the
@@ -1315,7 +1314,12 @@ impl<'g> CudaQwen2<'g> {
                 let (rows, threads, smem) = fa_shape(hd, v, kg);
                 let f = match q8 {
                     false => &bf.attn_fa[v as usize],
-                    true => &self.q8_fns(mode).attn_fa[v as usize],
+                    // The q8 cache has attn_fa_b and attn_fa_bs only (fa_pick).
+                    true => match v {
+                        Fa::Full => &self.q8_fns(mode).attn_fa[0],
+                        Fa::Small => &self.q8_fns(mode).attn_fa[1],
+                        Fa::Kv => unreachable!("fa_pick: attn_fa_k is f16 only"),
+                    },
                 };
                 let mut args = vec![b.q.arg()];
                 args.extend_from_slice(kv);
