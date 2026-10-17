@@ -123,6 +123,8 @@ pub struct Opts {
     /// A batched step's time budget for its chunk and decode, in ms
     /// (`--prefill-ms`; 0: chunks of exactly `prefill_chunk`).
     pub prefill_ms: usize,
+    /// `--rope-scaling yarn` and friends (rope.rs).
+    pub rope: crate::rope::RopeArgs,
 }
 
 /// The chat framing `axon chat` uses (chat.rs: ChatML, or Llama 3's
@@ -656,16 +658,31 @@ fn engine(
     stop: Arc<AtomicBool>,
 ) {
     let (device, gpu_layers) = crate::placement(o.device, o.gpu_layers);
-    let model = crate::open_model_with(&o.path, crate::copy_for(device));
+    let rope = crate::rope::RopeArgs {
+        ctx: o.ctx,
+        ..o.rope.clone()
+    };
+    let model = crate::open_model_with(&o.path, crate::copy_for(device), &rope);
     let trained = model.ctx_len() as usize;
+    let yarn = crate::rope::yarn(&model).is_some();
     let fit = o.ctx.is_none();
     // The default: the trained context (the whole model on one GPU: as
     // much of it as fits, `Backend::new`'s fit); a split, a pipeline or
     // --gpu-layers keep the old cap (`SPLIT_CTX`).
     let want = match o.ctx {
         Some(n) if trained > 0 && n > trained => crate::fail(&format!(
-            "--ctx {n} is past the {trained} tokens {} was trained on",
-            o.path
+            "--ctx {n} is past the {trained} tokens {} {}{}",
+            o.path,
+            if yarn {
+                "runs with YaRN"
+            } else {
+                "was trained on"
+            },
+            if yarn {
+                String::new()
+            } else {
+                crate::rope::ctx_hint(n, trained)
+            }
         )),
         Some(n) => n,
         None if trained > 0 => trained,
@@ -708,7 +725,7 @@ fn engine(
         _ if ctx >= want => None,
         Backend::Cuda(_) => Some(gpu_fit_note(ctx, want, o.kv, gpu_layers.is_some())),
         Backend::Pipeline(_) => Some(format!(
-            "{ctx} fit on the GPUs beside the weights, of the {want} the model was trained on \
+            "{ctx} fit on the GPUs beside the weights, of the model's {want} \
              (--ctx N for another{})",
             if o.kv == KvType::Q8 {
                 ""
@@ -718,7 +735,7 @@ fn engine(
         )),
         Backend::Hybrid(_) => Some(format!(
             "the default for a CPU/GPU split (automatic or --gpu-layers): a cache for the \
-             {want} tokens the model was trained on would take GPU memory from its layers \
+             model's {want} tokens would take GPU memory from its layers \
              (--ctx N for another)"
         )),
         Backend::Cpu(_) => None,
@@ -969,7 +986,7 @@ fn ram_ctx(want: usize, per_pos: u64, avail: u64) -> usize {
 /// (`all_layers`: --gpu-layers put every layer there).
 fn gpu_fit_note(c: usize, want: usize, kv: KvType, all_layers: bool) -> String {
     format!(
-        "{c} fit in GPU memory beside the weights, of the {want} the model was trained on \
+        "{c} fit in GPU memory beside the weights, of the model's {want} \
          (--ctx N for another: {}{})",
         if all_layers {
             "a longer one doesn't fit with every layer on the GPU"
@@ -999,7 +1016,7 @@ fn cpu_ctx(want: usize, per_pos: u64, mapped: u64, avail: Option<u64>) -> (usize
 /// Why the CPU's default context is shorter than the trained `want`.
 fn ram_note(want: usize, per_pos: u64, avail: u64) -> String {
     format!(
-        "a KV cache of the {want} tokens the model was trained on takes {:.1} GiB, {:.1} GiB \
+        "a KV cache of the model's {want} tokens takes {:.1} GiB, {:.1} GiB \
          of RAM is free beside the model (--ctx N for another)",
         (want as u64 * per_pos) as f64 / GIB,
         avail as f64 / GIB
@@ -1153,6 +1170,7 @@ struct EngineOpts {
     draft_model: Option<String>,
     log: bool,
     generated: Arc<AtomicU64>,
+    rope: crate::rope::RopeArgs,
 }
 
 /// A running server. Dropping it (or `shutdown`) stops it: the acceptor
@@ -1242,6 +1260,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
         max_draft: o.max_draft,
         draft_model: o.draft_model.clone(),
         log: o.log,
+        rope: o.rope.clone(),
     };
     let stop2 = stop.clone();
     let engine = std::thread::Builder::new()
@@ -1916,6 +1935,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         slot_ctx: None,
         prefill_chunk: engine::PREFILL_CHUNK,
         prefill_ms: engine::PREFILL_MS,
+        rope: Default::default(),
     };
     let mut k = None;
     let mut i = 3;
@@ -1947,6 +1967,13 @@ pub fn run(args: &[String]) -> io::Result<()> {
             }
             _ if SampleArgs::is_flag(f) => {
                 o.sample
+                    .set(f, args.get(i + 1).map(String::as_str))
+                    .unwrap_or_else(|e| crate::fail(&e));
+                i += 2;
+                continue;
+            }
+            _ if crate::rope::RopeArgs::is_flag(f) => {
+                o.rope
                     .set(f, args.get(i + 1).map(String::as_str))
                     .unwrap_or_else(|e| crate::fail(&e));
                 i += 2;

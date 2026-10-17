@@ -1065,6 +1065,7 @@ fn qkv_rope_check(g: &Gpu, m: &Model) {
                         Arg::I32((hd / 2) as i32),
                         params.arg(),
                         rope.arg(),
+                        Arg::F32(1.0),
                     ],
                 )
                 .unwrap();
@@ -1442,6 +1443,82 @@ fn gpu_qwen3_matches_reference_forward() {
             );
         }
     }
+}
+
+/// `--rope-scaling yarn --rope-scale F --yarn-orig-ctx N` on `m`.
+fn with_yarn(m: &mut Model, factor: f64, orig: usize) {
+    let args = crate::rope::RopeArgs {
+        scaling: Some("yarn".into()),
+        factor: Some(factor),
+        orig_ctx: Some(orig),
+        ..Default::default()
+    };
+    args.apply(m).unwrap();
+    crate::model::check_supported(m).unwrap();
+}
+
+/// YaRN on the GPU: the qwen3 fixture (orig 16, so the ramp is crossed in
+/// a few positions) against the reference's own YaRN on both caches, decode
+/// bit-identical to batched prefill; then qwen2.5-0.5B with the 7B recipe
+/// (factor 4, orig 32768): batchings, verify and GPU vs CPU as without.
+#[test]
+fn gpu_yarn_matches_reference_and_keeps_bits() {
+    use crate::model::tests::{NormBug, QWEN3_Q8_TOL, max_diff, qwen3_fixture, qwen3_ref};
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let ids = [3u32, 17, 42, 9, 5, 11, 60, 2, 33, 21, 8, 40];
+    let n = ids.len();
+    let mut m = qwen3_fixture(Q8_0);
+    with_yarn(&mut m, 4.0, 16);
+    let want = qwen3_ref(&m, &ids, NormBug::None);
+    // Far from the plain reference and from YaRN without the mscale, so a
+    // kernel ignoring the ramp or `m` fails below.
+    let plain = qwen3_ref(&qwen3_fixture(Q8_0), &ids, NormBug::None);
+    let mut m1 = qwen3_fixture(Q8_0);
+    let no_m = crate::rope::RopeArgs {
+        scaling: Some("yarn".into()),
+        factor: Some(4.0),
+        orig_ctx: Some(16),
+        mscale: Some(1.0),
+        ..Default::default()
+    };
+    no_m.apply(&mut m1).unwrap();
+    let no_m = qwen3_ref(&m1, &ids, NormBug::None);
+    for (what, r) in [("plain", &plain), ("no mscale", &no_m)] {
+        let d = max_diff(r, &want);
+        eprintln!("gpu yarn test: {what} reference vs yarn's: {d:.3}");
+        assert!(d > 4.0 * QWEN3_Q8_TOL, "{what}: only {d}");
+    }
+    for kv in [CacheKv::F16, CacheKv::Q8 { group: 0 }] {
+        let mut net = CudaQwen2::with_kv(&g, &km, &m, 16, kv, false).unwrap();
+        assert_eq!(net.rope_m, crate::rope::mscale(&m));
+        for graphs in [true, false] {
+            net.graphs = graphs;
+            let mut c = net.new_cache(n);
+            let dec: Vec<Vec<f32>> = (0..n).map(|p| net.forward(ids[p], p, &mut c)).collect();
+            let mut c = net.new_cache(n);
+            net.feed_batch(&ids[..n - 1], 0, &mut c);
+            let pre = net.forward(ids[n - 1], n - 1, &mut c);
+            let d = max_diff(&dec, &want);
+            eprintln!("gpu yarn {kv:?} graphs {graphs} vs reference: max |dlogit| {d:.4}");
+            assert!(d <= QWEN3_Q8_TOL, "gpu yarn {kv:?}: {d}");
+            assert_eq!(
+                bits(&pre),
+                bits(&dec[n - 1]),
+                "gpu yarn {kv:?}: decode != prefill"
+            );
+        }
+    }
+    let Some(mut m) = model_at(crate::testutil::MODEL) else {
+        return;
+    };
+    with_yarn(&mut m, 4.0, 32768);
+    prefill_bits(&m, "qwen2.5 0.5B yarn", CacheKv::F16);
+    prefill_bits(&m, "qwen2.5 0.5B yarn", CacheKv::Q8 { group: 0 });
+    verify_bits(&m, "qwen2.5 0.5B yarn", CacheKv::F16);
+    logits_match(&m, "qwen2.5 0.5B yarn");
 }
 
 /// Llama-3.2-1B-Instruct, mapped (as `qwen3_mapped`): head_dim 64, GQA 4,
@@ -5353,11 +5430,19 @@ fn cuda_gemm_sustained() {
 /// "tokens"}]}), AXON_TF_DEV (cpu or cuda); writes AXON_TF_OUT: per
 /// sequence, at the prompt's end and after each of its tokens, the top 5
 /// (id, logprob). Prompt prefilled in batches, the rest one token a pass.
+/// AXON_TF_CTX: the GPU context (default 1024); AXON_TF_YARN=F: YaRN
+/// factor F over the file's context (`with_yarn`).
 #[test]
 #[ignore]
 fn teacher_forced_dump() {
     let var = |k: &str| std::env::var(k).unwrap_or_else(|_| panic!("{k} not set"));
-    let m = crate::gguf::load_with(&var("AXON_TF_MODEL"), Some(false)).unwrap();
+    let mut m = crate::gguf::load_with(&var("AXON_TF_MODEL"), Some(false)).unwrap();
+    // AXON_TF_YARN=F: --rope-scaling yarn --rope-scale F.
+    if let Ok(f) = std::env::var("AXON_TF_YARN") {
+        let orig = m.ctx_len() as usize;
+        with_yarn(&mut m, f.parse().unwrap(), orig);
+    }
+    let max_ctx = std::env::var("AXON_TF_CTX").map_or(1024, |v| v.parse().unwrap());
     let inp: serde_json::Value =
         serde_json::from_str(&std::fs::read_to_string(var("AXON_TF_IN")).unwrap()).unwrap();
     let ids = |v: &serde_json::Value| -> Vec<u32> {
@@ -5376,7 +5461,7 @@ fn teacher_forced_dump() {
     let km = g.as_ref().map(|g| Kernels::module(g).unwrap());
     let cnet = (!gpu).then(|| Qwen2::new(&m));
     let gnet = g.as_ref().map(|g| {
-        CudaQwen2::with_kv(g, km.as_ref().unwrap(), &m, 1024, CacheKv::F16, false).unwrap()
+        CudaQwen2::with_kv(g, km.as_ref().unwrap(), &m, max_ctx, CacheKv::F16, false).unwrap()
     });
     let mut out = Vec::new();
     for gn in inp["gens"].as_array().unwrap() {

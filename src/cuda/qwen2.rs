@@ -365,6 +365,9 @@ pub struct CudaQwen2<'g> {
     /// rope_freqs_swa), empty otherwise; and the gemma3 graph's extras
     /// (gemma.cu: embedding scale sqrt(dim), post-norms, GeGLU, windows).
     freq_swa: DevBuf<'g>,
+    /// YaRN's (sin, cos) multiplier on the global RoPE table
+    /// (`rope::mscale`; 1 without YaRN).
+    pub(super) rope_m: f32,
     pub(super) gemma: Option<GemmaCfg>,
     /// None when first > 0: tokens are embedded by the backend that runs
     /// the first layers.
@@ -1078,6 +1081,7 @@ impl<'g> CudaQwen2<'g> {
         let q_dim = n_heads * head_dim;
         let eps = meta(m, "attention.layer_norm_rms_epsilon").unwrap_or(1e-6) as f32;
         let freq = crate::model::rope_freqs(m, head_dim);
+        let rope_m = crate::rope::mscale(m);
         let trained = meta(m, "context_length").unwrap_or(32768.0);
         let group = n_heads / n_kv_heads;
         // gemma3: head size 256 (gemma.cu's split attention: its query
@@ -1207,10 +1211,13 @@ impl<'g> CudaQwen2<'g> {
                     let i = r % head_dim % (head_dim / 2);
                     freq[i] * trained <= std::f64::consts::FRAC_PI_3
                 };
+                // The keys are RoPE'd times rope_m (YaRN): so is the
+                // shift (rope_m = 1: b itself).
+                let m = rope_m as f64;
                 push_vec(
                     b.iter()
                         .enumerate()
-                        .map(|(r, &x)| if slow(r) { x } else { 0.0 })
+                        .map(|(r, &x)| if slow(r) { (x as f64 * m) as f32 } else { 0.0 })
                         .collect(),
                 )
             });
@@ -1299,6 +1306,7 @@ impl<'g> CudaQwen2<'g> {
             vecs: gpu.alloc(0)?,
             freq: gpu.alloc(0)?,
             freq_swa: gpu.alloc(0)?,
+            rope_m,
             gemma: gemma.then(|| GemmaCfg {
                 embed_scale: (dim as f32).sqrt(),
             }),
@@ -1691,6 +1699,7 @@ impl<'g> CudaQwen2<'g> {
                     Arg::I32((hd / 2) as i32),
                     params,
                     c.rope.arg(),
+                    Arg::F32(self.rope_m),
                 ],
                 self.embd.is_some(),
             )?;
@@ -1707,6 +1716,7 @@ impl<'g> CudaQwen2<'g> {
                         Arg::I32((hd / 2) as i32),
                         params,
                         c.rope_swa.arg(),
+                        Arg::F32(1.0),
                     ],
                 )?;
                 on_launch("rope", 0)?;
@@ -2622,3 +2632,5 @@ pub(crate) mod slots;
 pub(crate) mod stream;
 #[cfg(test)]
 pub(crate) mod tests;
+#[cfg(test)]
+mod yarn_eval;

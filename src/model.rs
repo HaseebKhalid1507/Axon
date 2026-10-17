@@ -192,7 +192,12 @@ pub struct Qwen2<'a> {
     eps: f32,
     /// RoPE frequency per pair (`rope_freqs`), head_dim / 2 of them; on
     /// gemma3 with local layers, then theirs (`rope_freqs_swa`).
-    freqs: Vec<f64>,
+    /// (A boxed slice, not a Vec: `lm::Backend` holds this struct inline,
+    /// near clippy's size bound.)
+    freqs: Box<[f64]>,
+    /// YaRN's (sin, cos) multiplier on the global table (`rope::mscale`;
+    /// 1 without YaRN).
+    rope_m: f32,
     /// gemma3: GELU (tanh form) in `glu`, the embedding times sqrt(dim),
     /// and `freqs` followed by the local layers' table. (Flags, not data:
     /// `lm::Backend` holds this struct inline, near clippy's size bound.)
@@ -442,7 +447,7 @@ pub(crate) fn rope_freqs(m: &Model, head_dim: usize) -> Vec<f64> {
     let base = meta_num(m, &format!("{}.rope.freq_base", m.arch)).unwrap_or(10000.0);
     let factors = find_opt(m, "rope_freqs.weight").map(|t| load_vec(m, t));
     let scale = rope_linear_scale(m);
-    (0..head_dim / 2)
+    let mut freqs: Vec<f64> = (0..head_dim / 2)
         .map(|i| {
             let f = base.powf(-2.0 * i as f64 / head_dim as f64);
             let f = match &factors {
@@ -451,7 +456,12 @@ pub(crate) fn rope_freqs(m: &Model, head_dim: usize) -> Vec<f64> {
             };
             if scale == 1.0 { f } else { f * scale }
         })
-        .collect()
+        .collect();
+    // YaRN (rope.rs), after Llama 3's factors as llama.cpp's theta / ff.
+    if let Some(y) = crate::rope::yarn(m) {
+        y.apply(&mut freqs, base, head_dim);
+    }
+    freqs
 }
 
 /// Tensor types the kernels run (`quant::dequant` and `dot_row_q8`).
@@ -555,7 +565,37 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
     // llama.cpp's linear scaling, so any factor other than 1 is refused.
     let factor = num("rope.scaling.factor").or(num("rope.scale_linear"));
     let gemma = m.arch == "gemma3";
-    if let Some(f) = factor.filter(|&f| f != 1.0 && f != 0.0) {
+    let yarn = m.metadata.iter().any(|(k, v)| {
+        *k == format!("{}.rope.scaling.type", m.arch) && matches!(v, Val::Str(t) if t == "yarn")
+    });
+    if yarn && let Some(f) = factor.filter(|&f| f != 1.0 && f != 0.0) {
+        // YaRN (rope.rs): any factor above 1, not on gemma3.
+        if gemma || !(f > 1.0 && f.is_finite()) {
+            return Err(bad(format!(
+                "RoPE scaling yarn (factor {f}) is not supported"
+            )));
+        }
+        let ok = |k: &str, lo: f64| num(k).is_none_or(|v| v.is_finite() && v >= lo);
+        if !ok("rope.scaling.original_context_length", 1.0)
+            || !ok("rope.scaling.yarn_beta_fast", f64::MIN_POSITIVE)
+            || !ok("rope.scaling.yarn_beta_slow", f64::MIN_POSITIVE)
+            || !ok("rope.scaling.yarn_ext_factor", 0.0)
+            || !ok("rope.scaling.attn_factor", f64::MIN_POSITIVE)
+            || !ok("rope.scaling.axon_mscale", f64::MIN_POSITIVE)
+        {
+            return Err(bad("RoPE scaling yarn: a parameter is out of range".into()));
+        }
+        if num("rope.scale_linear").is_some_and(|v| v != 1.0 && v != 0.0) {
+            return Err(bad(
+                "RoPE scaling yarn with rope.scale_linear is not supported".into(),
+            ));
+        }
+        if num("rope.scaling.yarn_log_multiplier").is_some_and(|v| v != 0.0) {
+            return Err(bad(
+                "RoPE scaling yarn with yarn_log_multiplier is not supported".into(),
+            ));
+        }
+    } else if let Some(f) = factor.filter(|&f| f != 1.0 && f != 0.0) {
         // gemma3's global layers: linear scaling (`rope_linear_scale`).
         let linear = !m.metadata.iter().any(|(k, v)| {
             *k == format!("{}.rope.scaling.type", m.arch)
@@ -586,7 +626,9 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
             )));
         }
     }
-    if let Some(f) = num("rope.scaling.attn_factor").filter(|&f| f != 1.0) {
+    if let Some(f) =
+        num("rope.scaling.attn_factor").filter(|&f| f != 1.0 && crate::rope::yarn(m).is_none())
+    {
         return Err(bad(format!(
             "RoPE scaling (attention factor {f}) is not supported"
         )));
@@ -908,7 +950,8 @@ impl<'a> Qwen2<'a> {
             q_dim: n_heads * head_dim,
             vocab,
             eps,
-            freqs: [freqs, freqs_swa].concat(),
+            freqs: [freqs, freqs_swa].concat().into_boxed_slice(),
+            rope_m: crate::rope::mscale(m),
             gemma,
             token_embd,
             embd: m.tensor_data(token_embd),
@@ -1451,20 +1494,24 @@ impl<'a> Qwen2<'a> {
     /// spins fast, high i spins slowly. Every head in every layer uses the
     /// same angles, so this runs once a token.
     fn rope_table(&self, pos: usize) -> Vec<(f32, f32)> {
-        Self::rope_table_of(&self.freqs[..self.head_dim / 2], pos)
+        Self::rope_table_of(&self.freqs[..self.head_dim / 2], pos, self.rope_m)
     }
 
     /// `rope_table` of gemma3's local layers (`freqs_swa`; empty if none).
     fn rope_table_swa(&self, pos: usize) -> Vec<(f32, f32)> {
-        Self::rope_table_of(&self.freqs[self.head_dim / 2..], pos)
+        Self::rope_table_of(&self.freqs[self.head_dim / 2..], pos, 1.0)
     }
 
-    fn rope_table_of(freqs: &[f64], pos: usize) -> Vec<(f32, f32)> {
+    /// The table at `pos`, each value times `m` (YaRN's mscale) in f64
+    /// before the rounding, as decode.cu's rope_table: m = 1 leaves the
+    /// bits as they were.
+    fn rope_table_of(freqs: &[f64], pos: usize, m: f32) -> Vec<(f32, f32)> {
+        let m = m as f64;
         freqs
             .iter()
             .map(|&freq| {
                 let angle = pos as f64 * freq;
-                (angle.sin() as f32, angle.cos() as f32)
+                ((angle.sin() * m) as f32, (angle.cos() * m) as f32)
             })
             .collect()
     }
@@ -3282,11 +3329,32 @@ pub(crate) mod tests {
             let inv = 1.0 / (x.iter().map(|v| v * v).sum::<f64>() / x.len() as f64 + eps).sqrt();
             x.iter().zip(g).map(|(v, g)| v * inv * g).collect()
         };
+        // YaRN as HF transformers' _compute_yarn_parameters (truncate):
+        // inv_freq = interp (1 - extrap) + extrap_freq extrap, extrap =
+        // 1 - linear ramp over [low, high]; cos and sin times the
+        // attention factor.
+        let yarn = crate::rope::yarn(m);
+        let inv_freq = |i: usize, f: f64| -> f64 {
+            let pf = base.powf(2.0 * i as f64 / hd as f64) * f;
+            let Some(y) = yarn else { return 1.0 / pf };
+            let corr = |rot: f64| {
+                (hd as f64 * (y.orig / (rot * 2.0 * std::f64::consts::PI)).ln()) / (2.0 * base.ln())
+            };
+            let low = corr(y.beta_fast).floor().max(0.0);
+            let mut high = corr(y.beta_slow).ceil().min(hd as f64 - 1.0);
+            if high == low {
+                high += 0.001;
+            }
+            let ramp = ((i as f64 - low) / (high - low)).clamp(0.0, 1.0);
+            let extrap = 1.0 - ramp;
+            (1.0 / (y.factor * pf)) * (1.0 - extrap) + (1.0 / pf) * extrap
+        };
+        let att = yarn.map_or(1.0, |y| y.mscale as f64);
         let rope = |v: &mut [f64], pos: usize| {
             for head in v.chunks_mut(hd) {
                 for (i, f) in factors.iter().enumerate() {
-                    let th = pos as f64 * base.powf(-2.0 * i as f64 / hd as f64) / f;
-                    let (s, c) = (th.sin(), th.cos());
+                    let th = pos as f64 * inv_freq(i, *f);
+                    let (s, c) = (th.sin() * att, th.cos() * att);
                     let (a, b) = if llama && rbug != RopeBug::Unpermuted {
                         (2 * i, 2 * i + 1)
                     } else {
@@ -3510,6 +3578,111 @@ pub(crate) mod tests {
             );
             assert!(d <= TOL && dp <= TOL, "cpu vs reference: {d} / {dp}");
         }
+    }
+
+    /// YaRN (`--rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 16`, so a
+    /// short test crosses the ramp: the first few pairs blend, the rest are
+    /// divided by 4) on the CPU against the reference's own YaRN (HF's formulation),
+    /// decode bit-identical to batched prefill, and the scaling moving the
+    /// logits far beyond the tolerance (so a dropped mscale or ramp fails).
+    #[test]
+    fn yarn_matches_reference_forward() {
+        const TOL: f32 = 2e-3;
+        let ids = [3u32, 17, 42, 9, 5, 11, 60, 2, 33, 21, 8, 40];
+        let n = ids.len();
+        let args = crate::rope::RopeArgs {
+            scaling: Some("yarn".into()),
+            factor: Some(4.0),
+            orig_ctx: Some(16),
+            ..Default::default()
+        };
+        let plain = qwen3_ref(&qwen3_fixture(F32), &ids, NormBug::None);
+        let mut m = qwen3_fixture(F32);
+        args.apply(&mut m).unwrap();
+        check_supported(&m).unwrap();
+        assert_eq!(m.ctx_len(), 64);
+        let y = crate::rope::yarn(&m).unwrap();
+        let base = meta_num(&m, "qwen3.rope.freq_base").unwrap_or(10000.0);
+        let (low, high) = y.corr_dims(base, 64);
+        eprintln!("yarn {y:?}: blend pairs {low}..{high}");
+        assert!(high > low && high < 31.0, "{low}..{high}");
+        let want = qwen3_ref(&m, &ids, NormBug::None);
+        let moved = max_diff(&plain, &want);
+        eprintln!("yarn vs plain reference: max |dlogit| {moved:.3}");
+        assert!(
+            moved > 100.0 * TOL,
+            "yarn hardly changes the logits ({moved})"
+        );
+        let net = Qwen2::new_with(&m, false);
+        assert_eq!(net.rope_m, y.mscale);
+        let mut c = net.new_cache(n);
+        let dec: Vec<Vec<f32>> = (0..n).map(|p| net.forward(ids[p], p, &mut c)).collect();
+        let mut c = net.new_cache(n);
+        net.feed_batch(&ids[..n - 1], 0, &mut c);
+        let pre = net.forward(ids[n - 1], n - 1, &mut c);
+        let d = max_diff(&dec, &want);
+        eprintln!("cpu yarn vs reference: max |dlogit| {d:.2e}");
+        assert!(d <= TOL, "cpu yarn vs reference: {d}");
+        assert_eq!(
+            pre.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            dec[n - 1].iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+            "yarn: decode != batched prefill"
+        );
+        // The mscale alone moves the logits far beyond the tolerance too (a
+        // table builder ignoring it would fail above).
+        let mut m1 = qwen3_fixture(F32);
+        let no_m = crate::rope::RopeArgs {
+            mscale: Some(1.0),
+            ..args.clone()
+        };
+        no_m.apply(&mut m1).unwrap();
+        let d1 = max_diff(&qwen3_ref(&m1, &ids, NormBug::None), &want);
+        eprintln!("yarn without mscale vs yarn reference: max |dlogit| {d1:.3}");
+        assert!(d1 > 100.0 * TOL, "mscale hardly changes the logits ({d1})");
+        // Off: --rope-scaling none on a plain model changes nothing; on a
+        // YaRN model (here the flags' keys) it restores the original context.
+        let none = crate::rope::RopeArgs {
+            scaling: Some("none".into()),
+            ..Default::default()
+        };
+        none.apply(&mut m).unwrap();
+        assert!(crate::rope::yarn(&m).is_none());
+        assert_eq!(m.ctx_len(), 16);
+        check_supported(&m).unwrap();
+        let mut m = qwen3_fixture(F32);
+        none.apply(&mut m).unwrap();
+        assert!(crate::rope::yarn(&m).is_none());
+        assert_eq!(m.ctx_len(), 64);
+        // No --rope-scale: ceil(--ctx / orig) (spec L2), else an error.
+        let mut m = qwen3_fixture(F32);
+        let by_ctx = crate::rope::RopeArgs {
+            scaling: Some("yarn".into()),
+            orig_ctx: Some(16),
+            ctx: Some(40),
+            ..Default::default()
+        };
+        by_ctx.apply(&mut m).unwrap();
+        assert_eq!(crate::rope::yarn(&m).unwrap().factor, 3.0);
+        assert_eq!(m.ctx_len(), 48);
+        let mut m = qwen3_fixture(F32);
+        let short = crate::rope::RopeArgs {
+            ctx: Some(16),
+            ..by_ctx.clone()
+        };
+        assert!(short.apply(&mut m).is_err());
+        // yarn with a linear scale too: refused.
+        let mut m = qwen3_fixture(F32);
+        args.apply(&mut m).unwrap();
+        m.metadata
+            .push(("qwen3.rope.scale_linear".into(), Val::F32(2.0)));
+        assert!(check_supported(&m).is_err());
+        // Flags without the type, and yarn on gemma3, are refused.
+        let mut m = qwen3_fixture(F32);
+        let bare = crate::rope::RopeArgs {
+            factor: Some(4.0),
+            ..Default::default()
+        };
+        assert!(bare.apply(&mut m).is_err());
     }
 
     /// The tiny model as llama: no biases, llama.* keys, `edit` /

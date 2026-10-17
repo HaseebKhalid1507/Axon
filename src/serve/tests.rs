@@ -45,6 +45,7 @@ fn server_with(path: &str, device: Device, f: impl FnOnce(&mut Opts)) -> Server 
         slot_ctx: None,
         prefill_chunk: super::engine::PREFILL_CHUNK,
         prefill_ms: super::engine::PREFILL_MS,
+        rope: Default::default(),
     };
     f(&mut o);
     start(o).expect("start the server")

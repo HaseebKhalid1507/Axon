@@ -304,18 +304,20 @@ extern "C" __global__ void embed(int qt, const u8* __restrict__ w, u64 row_bytes
 }
 
 // RoPE angles of this token, once for all layers: rope[i] = (sin, cos) of
-// P[pos] * freq[i] in f64, rounded to f32, as model.rs rope_table does with
-// Rust's f64 sin/cos. CUDA's f64 sincos is within 2 ulp (of f64), so the f32
-// values are the same in practice (equal in the tests up to position
-// 32767) but not guaranteed bit-identical. One block of `half` threads.
+// P[pos] * freq[i] in f64, times m (YaRN's mscale, else 1) in f64, rounded
+// to f32, as model.rs rope_table does with Rust's f64 sin/cos. CUDA's f64
+// sincos is within 2 ulp (of f64), so the f32 values are the same in
+// practice (equal in the tests up to position 32767) but not guaranteed
+// bit-identical. One block of `half` threads.
 extern "C" __global__ void rope_table(const double* __restrict__ freq, int half,
-                                      const u32* __restrict__ P, float2* __restrict__ rope) {
+                                      const u32* __restrict__ P, float2* __restrict__ rope,
+                                      float m) {
     PDL_START();
     int i = threadIdx.x;
     if (i < half) {
         double s, c;
         sincos((double)P[P_POS] * freq[i], &s, &c);
-        rope[i] = make_float2((float)s, (float)c);
+        rope[i] = make_float2((float)(s * (double)m), (float)(c * (double)m));
     }
 }
 

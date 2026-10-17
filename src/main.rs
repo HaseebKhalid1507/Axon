@@ -13,6 +13,7 @@ mod lm;
 mod model;
 mod pool;
 mod quant;
+mod rope;
 mod sample;
 mod serve;
 mod spec;
@@ -122,6 +123,15 @@ flags:
               32768 (or the whole one, if less); if not even 2 fit, one request at a time.
               With --ctx N, the slots that fit with N; with --parallel N alone, N slots of
               the longest context that fits them
+  --rope-scaling yarn --rope-scale F [--yarn-orig-ctx N]
+              gen, logits, chat, serve: YaRN RoPE scaling (llama.cpp's flags), off by default:
+              the model's context becomes N x F (N: default the model's trained context), e.g.
+              Qwen2.5 / Qwen3 to 131072 with --rope-scale 4 --yarn-orig-ctx 32768. Changes the
+              output at every length, short prompts too: only for prompts past the trained
+              context (docs/long-context.md). --yarn-beta-fast B (32), --yarn-beta-slow B (1),
+              --yarn-mscale M (the q and k scale, default 0.1 ln F + 1; not llama.cpp's
+              --yarn-attn-factor); without --rope-scale, chat/serve take F = ceil(--ctx / N);
+              --rope-scaling none drops a GGUF's own rope.scaling keys
 
 sampling flags (gen, chat; applied in this order, as llama.cpp):
   --repeat-penalty P  divide (multiply, if negative) the logits of tokens among the last N by P
@@ -203,14 +213,29 @@ fn open_model(path: &str, lm: bool) -> gguf::Model {
 /// A model to run (`gguf::load_to_run`), checked before it's copied or
 /// read: `copy` forces the copy-vs-map choice, None copies only if the CPU
 /// model reads its matrices in place (`model::reads_matrices_in_place`).
-fn open_model_with(path: &str, copy: Option<bool>) -> gguf::Model {
-    gguf::load_to_run(path, copy, |m| {
-        if let Err(e) = model::check_supported(m) {
+/// `rope`: the --rope-scaling flags, written into the model's metadata
+/// (`rope::RopeArgs::apply`) before the model is checked, so that
+/// `--rope-scaling none` can run a file whose own scaling is refused.
+fn open_model_with(path: &str, copy: Option<bool>, rope: &rope::RopeArgs) -> gguf::Model {
+    let mut m = gguf::load_to_run(path, copy, |m| {
+        // With rope flags the check waits for them (below).
+        if rope.is_empty()
+            && let Err(e) = model::check_supported(m)
+        {
             fail(&format!("{path}: {e}"));
         }
         model::reads_matrices_in_place(m)
     })
-    .unwrap_or_else(|e| load_failed(path, e))
+    .unwrap_or_else(|e| load_failed(path, e));
+    if !rope.is_empty() {
+        for line in rope.apply(&mut m).unwrap_or_else(|e| fail(&e)) {
+            eprintln!("axon: {line}");
+        }
+        if let Err(e) = model::check_supported(&m) {
+            fail(&format!("{path}: {e}"));
+        }
+    }
+    m
 }
 
 fn load_failed(path: &str, e: std::io::Error) -> ! {
@@ -494,11 +519,15 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     let mut gpu_layers = None;
     let mut kv = kv_env();
     let mut sargs = sample::SampleArgs::default();
+    let mut rargs = rope::RopeArgs::default();
     let mut i = 4;
     while i < args.len() {
         let val = args.get(i + 1).and_then(|s| s.parse::<usize>().ok());
         match (args[i].as_str(), val) {
             (f, _) if sample::SampleArgs::is_flag(f) => sargs
+                .set(f, args.get(i + 1).map(String::as_str))
+                .unwrap_or_else(|e| fail(&e)),
+            (f, _) if rope::RopeArgs::is_flag(f) => rargs
                 .set(f, args.get(i + 1).map(String::as_str))
                 .unwrap_or_else(|e| fail(&e)),
             ("--device", _) => {
@@ -552,7 +581,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     if device == Device::Cuda {
         cuda::preinit();
     }
-    let model = open_model_with(path, copy_for(device));
+    let model = open_model_with(path, copy_for(device), &rargs);
     let tok = tokenizer::Tokenizer::from_gguf(&model);
 
     let ids = tok.encode_prompt(prompt);
@@ -835,6 +864,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     let mut kv = kv_env();
     let mut sargs = sample::SampleArgs::default();
     let mut session = None;
+    let mut rargs = rope::RopeArgs::default();
     let mut i = 3;
     while i < args.len() {
         let f = args[i].as_str();
@@ -845,6 +875,13 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         }
         if sample::SampleArgs::is_flag(f) {
             sargs
+                .set(f, args.get(i + 1).map(String::as_str))
+                .unwrap_or_else(|e| fail(&e));
+            i += 2;
+            continue;
+        }
+        if rope::RopeArgs::is_flag(f) {
+            rargs
                 .set(f, args.get(i + 1).map(String::as_str))
                 .unwrap_or_else(|e| fail(&e));
             i += 2;
@@ -916,18 +953,35 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     if device == Device::Cuda {
         cuda::preinit();
     }
-    let model = open_model_with(path, copy_for(device));
+    rargs.ctx = ctx;
+    let model = open_model_with(path, copy_for(device), &rargs);
     // RoPE past the trained length gives garbage; 0 = the GGUF doesn't say.
     let trained = model.ctx_len() as usize;
+    let yarn = rope::yarn(&model).is_some();
     let fit = ctx.is_none();
     let ctx = match ctx {
         Some(n) if trained > 0 && n > trained => fail(&format!(
-            "--ctx {n} is past the {trained} tokens {path} was trained on"
+            "--ctx {n} is past the {trained} tokens {path} {}{}",
+            if yarn {
+                "runs with YaRN"
+            } else {
+                "was trained on"
+            },
+            if yarn {
+                String::new()
+            } else {
+                rope::ctx_hint(n, trained)
+            }
         )),
         Some(n) => n,
         None if trained > 0 => trained.min(DEFAULT_CHAT_CTX),
         None => DEFAULT_CHAT_CTX,
     };
+    if yarn && fit {
+        eprintln!(
+            "axon: note: YaRN is on but chat's context is {ctx} (the default); --ctx N for a longer one"
+        );
+    }
     let tok = tokenizer::Tokenizer::from_gguf(&model);
     let with_model = draft_path.is_some() || draft::model_env().is_some();
     let max_draft = draft::draft_k(max_draft.or_else(draft_env_set), with_model);
