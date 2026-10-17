@@ -302,8 +302,12 @@ pub fn predicted(path: &str, m: &Model) -> io::Result<Vec<(String, Result<Identi
         .then(|| crate::cuda::qwen2::max_split(info.sms as usize, n_kv));
     let gs = gpu_field(&info.arch(), &code, split);
     for kv in ["f16", "q8"] {
-        let id = Identity::new(&digest, &types, "cuda", Some(&gs), None, kv);
-        v.push((format!("cuda --kv {kv}"), Ok(id)));
+        let id = match kv == "q8" && head == 256 {
+            // The q8 cache has no head size 256 kernels: gen refuses it.
+            true => Err("no q8 cache at head size 256".to_string()),
+            false => Ok(Identity::new(&digest, &types, "cuda", Some(&gs), None, kv)),
+        };
+        v.push((format!("cuda --kv {kv}"), id));
     }
     Ok(v)
 }
@@ -801,6 +805,38 @@ mod tests {
         assert_eq!(parts.len(), 2, "{g}");
         assert_eq!(parts[0], parts[1]);
         assert_eq!(get(&id, "kv").unwrap(), "f16");
+    }
+
+    /// B2: Gemma 3 (head size 256) runs the split attention on every GPU:
+    /// its `gpu` field carries `max_split` for this card's SM count, `axon
+    /// info` predicts the same fingerprint gen gets, and no q8 one.
+    #[test]
+    fn of_split_attention_gemma3() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let Some(gp) = crate::testutil::gemma3_model_path() else {
+            return;
+        };
+        let sms = g.info().unwrap().sms as usize;
+        drop(g);
+        let path = gp.to_str().unwrap();
+        let m = crate::gguf::load_with(path, Some(false)).unwrap();
+        let kv = crate::kv::KvType::F16;
+        let net = Backend::new(&m, crate::lm::Device::Cuda, 256, None, kv, false).unwrap();
+        let Backend::Cuda(n) = &net else {
+            panic!("not on the GPU")
+        };
+        let k = crate::cuda::qwen2::max_split(sms, m.n_kv_heads() as usize);
+        assert_eq!(n.split_attention(), Some(k));
+        let id = of(path, &m, &net);
+        let gf = &id.fields.iter().find(|(f, _)| *f == "gpu").unwrap().1;
+        assert!(gf.ends_with(&format!(", split attention {k}")), "{gf}");
+        let p = predicted(path, &m).unwrap();
+        let f16 = p.iter().find(|(l, _)| l == "cuda --kv f16").unwrap();
+        assert_eq!(f16.1.as_ref().unwrap().fingerprint(), id.fingerprint());
+        let q8 = p.iter().find(|(l, _)| l == "cuda --kv q8").unwrap();
+        assert!(q8.1.is_err());
     }
 
     /// The model digest reads the file: stable, and it sees a change in the
