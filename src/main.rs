@@ -12,6 +12,7 @@ mod kvstore;
 mod lineedit;
 mod lm;
 mod model;
+mod moe;
 mod pool;
 mod quant;
 mod rope;
@@ -1200,6 +1201,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         Backend::Cuda(n) => format!(" | kv {}", n.kv_name()),
         Backend::Hybrid(n) => format!(" | {} | kv {}", n.describe(ctx), n.kv_name()),
         Backend::Pipeline(n) => format!(" | {} | kv {}", n.describe(ctx), n.kv_name()),
+        Backend::Moe(n) => format!(" | {} | kv {}", n.describe(ctx), n.kv_name()),
         Backend::Cpu(_) => String::new(),
     };
     let seed = conv

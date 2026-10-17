@@ -1177,8 +1177,30 @@ mod tests {
         };
         let tok = Tokenizer::from_gguf(&m);
         let net = Qwen2::new(&m);
+        moe_turns(&net, &tok);
+    }
+
+    /// `moe_turns_match_fresh_prefill` with the attention and routers on the
+    /// GPU, the experts on the CPU (`crate::moe`, r11 stage 2): hard
+    /// equality too.
+    #[test]
+    fn moe_gpu_turns_match_fresh_prefill() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let Some(m) = crate::testutil::moe_model(true) else {
+            return;
+        };
+        let tok = Tokenizer::from_gguf(&m);
+        let km = crate::cuda::Kernels::module_for(&g, &m).unwrap();
+        let mm = crate::cuda::Kernels::moe_module(&g).unwrap();
+        let net = crate::moe::tests::moe_net(&g, &km, &mm, &m, 2048);
+        moe_turns(&net, &tok);
+    }
+
+    fn moe_turns<L: crate::lm::Lm>(net: &L, tok: &Tokenizer) {
         for (max_reply, k) in [(12, 0), (24, 7), (48, 3)] {
-            let mut chat = Chat::new(&net, &tok, None, 2048).unwrap();
+            let mut chat = Chat::new(net, tok, None, 2048).unwrap();
             chat.no_think = true;
             chat.max_reply = max_reply;
             chat.max_draft = round_draft(k);

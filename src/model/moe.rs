@@ -34,6 +34,9 @@ const W_SUM_MIN: f32 = 6.103_515_6e-5;
 /// depend on it (every token is routed and computed on its own).
 const MOE_BATCH: usize = 512;
 
+/// A token's experts in rank order and their weights.
+pub(crate) type Route = (Vec<usize>, Vec<f32>);
+
 /// One layer's experts and router.
 pub(super) struct Moe<'a> {
     pub(super) n_expert: usize,
@@ -147,7 +150,8 @@ impl MoeInfo {
         let d = self.dims;
         [
             format!(
-                "moe: {} experts, top-{}, expert ffn {}, {} shared | CPU only for now",
+                "moe: {} experts, top-{}, expert ffn {}, {} shared | --device cuda: attention and \
+                 routers on the GPU, experts on the CPU",
                 d.n_expert,
                 d.k,
                 d.ffn,
@@ -214,11 +218,12 @@ fn check_ram_with(m: &Model, repack: bool, avail: Option<u64>) -> Result<(), Str
     }
 }
 
-/// The refusal of any GPU placement for now.
+/// The refusal of every GPU placement but `crate::moe`'s.
 pub(crate) fn gpu_refusal(m: &Model) -> String {
     format!(
-        "{}: mixture-of-experts models run on the CPU only for now (--device cpu); \
-         attention on the GPU with the experts on the CPU is not implemented yet",
+        "{}: a mixture-of-experts model runs on the CPU (--device cpu) or with its attention \
+         on one GPU and its experts on the CPU (--device cuda); it doesn't split by layers, \
+         across GPUs or as a draft model",
         m.arch
     )
 }
@@ -357,10 +362,51 @@ impl<'a> Moe<'a> {
 impl<'a> Qwen2<'a> {
     /// The MoE FFN of one token's normed hidden state `h`: two fork/joins.
     pub(super) fn moe_ffn(&self, moe: &Moe, h: &[f32]) -> Vec<f32> {
-        let (k, ffn, dim) = (moe.k, moe.ffn, self.dim);
-        let mut ids = vec![0usize; k];
-        let mut w = vec![0f32; k];
+        let mut ids = vec![0usize; moe.k];
+        let mut w = vec![0f32; moe.k];
         moe.route(h, &mut ids, &mut w);
+        self.moe_ffn_routed(moe, h, &ids, &w)
+    }
+
+    /// Layer l's MoE layer of `h`, routed already (the GPU's router:
+    /// `crate::moe`): `ids` (rank order) and their weights `w`.
+    pub(crate) fn moe_layer(&self, l: usize, h: &[f32], ids: &[usize], w: &[f32]) -> Vec<f32> {
+        let moe = self.layer_moe(l);
+        assert!(ids.len() == moe.k && w.len() == moe.k && h.len() == self.dim);
+        assert!(
+            ids.iter().all(|&e| e < moe.n_expert),
+            "expert id out of range"
+        );
+        self.moe_ffn_routed(moe, h, ids, w)
+    }
+
+    /// `moe_layer` of each token t of `hs`, routed by `routes[t]`: the
+    /// output in (row, token) layout, y[r * nb + t], each token's column
+    /// bit for bit its `moe_layer`.
+    pub(crate) fn moe_layer_batch(&self, l: usize, hs: &[&[f32]], routes: &[Route]) -> Vec<f32> {
+        let moe = self.layer_moe(l);
+        assert_eq!(hs.len(), routes.len());
+        for (ids, w) in routes {
+            assert!(ids.len() == moe.k && w.len() == moe.k);
+            assert!(
+                ids.iter().all(|&e| e < moe.n_expert),
+                "expert id out of range"
+            );
+        }
+        self.moe_ffn_batch_with(moe, hs, Some(routes), Vec::new())
+    }
+
+    /// Layer l's experts (a MoE layer).
+    fn layer_moe(&self, l: usize) -> &Moe<'a> {
+        match &self.layers[l].ffn {
+            super::Ffn::Moe(m) => m,
+            super::Ffn::Dense { .. } => panic!("layer {l} is not a mixture-of-experts layer"),
+        }
+    }
+
+    /// The MoE FFN of `h` routed to experts `ids` with weights `w`.
+    fn moe_ffn_routed(&self, moe: &Moe, h: &[f32], ids: &[usize], w: &[f32]) -> Vec<f32> {
+        let (k, ffn, dim) = (moe.k, moe.ffn, self.dim);
         let xq = QuantizedAct::for_types(h, &[moe.gate[0].qt(), moe.up[0].qt()]);
         let (align_a, align_b) = moe.aligns();
         let threads = Pool::global().threads();
@@ -412,29 +458,55 @@ impl<'a> Qwen2<'a> {
     /// token slot) layout, y[r * nb + t] (`out` recycled), each token's
     /// column bit for bit `moe_ffn` of it.
     pub(super) fn moe_ffn_batch(&self, moe: &Moe, hs: &[Vec<f32>], out: Vec<f32>) -> Vec<f32> {
+        self.moe_ffn_batch_with(moe, hs, None, out)
+    }
+
+    /// `moe_ffn_batch`, routed by `routes` if given (else here).
+    fn moe_ffn_batch_with<H: AsRef<[f32]> + Sync>(
+        &self,
+        moe: &Moe,
+        hs: &[H],
+        routes: Option<&[Route]>,
+        out: Vec<f32>,
+    ) -> Vec<f32> {
         let nb = hs.len();
         let dim = self.dim;
         let mut y = super::recycle(out, dim * nb);
         for t0 in (0..nb).step_by(MOE_BATCH) {
             let t1 = (t0 + MOE_BATCH).min(nb);
-            self.moe_sub_batch(moe, &hs[t0..t1], &mut y, nb, t0);
+            let r = routes.map(|r| &r[t0..t1]);
+            self.moe_sub_batch(moe, &hs[t0..t1], r, &mut y, nb, t0);
         }
         y
     }
 
     /// Tokens t0..t0 + hs.len() of `moe_ffn_batch` into their columns of y
-    /// (`slots` columns).
-    fn moe_sub_batch(&self, moe: &Moe, hs: &[Vec<f32>], y: &mut [f32], slots: usize, t0: usize) {
+    /// (`slots` columns), routed by `routes` (theirs) if given.
+    fn moe_sub_batch<H: AsRef<[f32]> + Sync>(
+        &self,
+        moe: &Moe,
+        hs: &[H],
+        routes: Option<&[Route]>,
+        y: &mut [f32],
+        slots: usize,
+        t0: usize,
+    ) {
         let nb = hs.len();
         let (k, ffn, dim, n_e) = (moe.k, moe.ffn, self.dim, moe.n_expert);
         let types = [moe.gate[0].qt(), moe.up[0].qt()];
         // Route and quantize each token as `moe_ffn` does.
         let routed: Vec<(Vec<usize>, Vec<f32>, QuantizedAct)> =
             par_map(nb, n_e * dim / 8 + dim, |t| {
-                let mut ids = vec![0usize; k];
-                let mut w = vec![0f32; k];
-                moe.route(&hs[t], &mut ids, &mut w);
-                (ids, w, QuantizedAct::for_types(&hs[t], &types))
+                let (ids, w) = match routes {
+                    Some(r) => r[t].clone(),
+                    None => {
+                        let mut ids = vec![0usize; k];
+                        let mut w = vec![0f32; k];
+                        moe.route(hs[t].as_ref(), &mut ids, &mut w);
+                        (ids, w)
+                    }
+                };
+                (ids, w, QuantizedAct::for_types(hs[t].as_ref(), &types))
             });
         // Pairs p = t * k + i grouped by expert, ascending p within each.
         let mut off = vec![0usize; n_e + 1];

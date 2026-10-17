@@ -802,6 +802,10 @@ fn engine(
              model's {want} tokens would take GPU memory from its layers \
              (--ctx N for another)"
         )),
+        Backend::Moe(_) => Some(format!(
+            "{ctx} fit on the GPU beside the attention weights, of the model's {want} \
+             (--ctx N for another)"
+        )),
         Backend::Cpu(_) => None,
     };
     let (ctx, why) = match &net {
@@ -825,6 +829,7 @@ fn engine(
         Backend::Cuda(n) => format!("cuda, kv {}", n.kv_name()),
         Backend::Hybrid(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
         Backend::Pipeline(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
+        Backend::Moe(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
         Backend::Cpu(_) => "cpu".into(),
     };
     let drafts = dm.as_ref().map_or(String::new(), |d| {

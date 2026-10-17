@@ -1949,6 +1949,12 @@ impl<'m> Kernels<'m> {
         Ok(m)
     }
 
+    /// moe.cu (the MoE router, `crate::moe`) on its own: the dense
+    /// models' module stays as it is.
+    pub fn moe_module(gpu: &Gpu) -> Result<Module<'_>, String> {
+        Ok(Module::load(gpu, include_str!("moe.cu"), &KERNEL_OPTS)?.0)
+    }
+
     /// The module model `m` needs: `module_ext` if it has an extra type.
     pub fn module_for<'g>(gpu: &'g Gpu, m: &crate::gguf::Model) -> Result<Module<'g>, String> {
         if needs_ext(m) {

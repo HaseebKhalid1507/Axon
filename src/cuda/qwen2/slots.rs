@@ -379,7 +379,7 @@ impl<'g> CudaQwen2<'g> {
         let row0 = slot * p.ctx;
         if c.row0 != row0 {
             c.row0 = row0;
-            c.graph = Default::default();
+            c.drop_graphs();
         }
         Ok(())
     }
