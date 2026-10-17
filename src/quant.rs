@@ -5123,6 +5123,52 @@ mod tests {
         }
     }
 
+    /// Single-thread GMAC/s of the batched CPU path per type (64 tokens,
+    /// 128 rows): the new types' per-row 4-token kernels next to Q4_K's r8
+    /// GEMM and per-row kernel (`--ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn q23_multi_speed() {
+        let mut rng = Lcg(0x5eed);
+        let (rows, nt, n) = (128usize, 64usize, 3584usize);
+        for qt in [Q4_K, Q2_K, Q3_K, IQ4_NL, Q4_0, Q5_0] {
+            let w: Vec<u8> = (0..rows)
+                .flat_map(|_| synthetic_row(qt, n, &mut rng))
+                .collect();
+            let rb = row_bytes(qt, n);
+            let qas: Vec<QuantizedAct> = (0..nt)
+                .map(|_| QuantizedAct::for_types(&synthetic_x(n, &mut rng), &[qt]))
+                .collect();
+            let xs: Vec<&QuantizedAct> = qas.iter().collect();
+            let mut o = vec![0f32; nt];
+            let mut reps = 0usize;
+            let t = std::time::Instant::now();
+            while t.elapsed().as_secs_f64() < 0.6 {
+                for r in 0..rows {
+                    dot_row_q8_multi(qt, &w[r * rb..(r + 1) * rb], &xs, &mut o);
+                }
+                reps += 1;
+            }
+            let gmac = (reps * rows * n * nt) as f64 / t.elapsed().as_secs_f64() / 1e9;
+            println!(
+                "{} per-row x4: {gmac:.2} GMAC/s",
+                crate::gguf::qtype(qt).name
+            );
+            if qt == Q4_K {
+                let p = r8::repack(qt, &w, rows, n);
+                let mut o = vec![0f32; rows * nt];
+                let mut reps = 0usize;
+                let t = std::time::Instant::now();
+                while t.elapsed().as_secs_f64() < 0.6 {
+                    r8::gemm(qt, &p, &xs, &mut o, nt);
+                    reps += 1;
+                }
+                let gmac = (reps * rows * n * nt) as f64 / t.elapsed().as_secs_f64() / 1e9;
+                println!("Q4_K r8 gemm: {gmac:.2} GMAC/s");
+            }
+        }
+    }
+
     /// `rows` rows of `qt`, width n: random, and K-quant extremes per block.
     fn r8_matrix(qt: u32, rows: usize, n: usize, extreme: bool, rng: &mut Lcg) -> Vec<u8> {
         (0..rows)
