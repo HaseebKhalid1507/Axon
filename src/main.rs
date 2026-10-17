@@ -125,6 +125,10 @@ flags:
               32768 (or the whole one, if less); if not even 2 fit, one request at a time.
               With --ctx N, the slots that fit with N; with --parallel N alone, N slots of
               the longest context that fits them
+  --prefill-ms MS  serve: while requests decode, a step feeds new prompts up to what fits in
+              MS ms beside their decode step (default 60; 0: exactly --prefill-chunk tokens)
+  --prefill-chunk N  serve: at least N prompt tokens per such step (default 256; 0: prompts
+              fed whole, the others' streams wait)
   --rope-scaling yarn --rope-scale F [--yarn-orig-ctx N]
               gen, logits, chat, serve: YaRN RoPE scaling (llama.cpp's flags), off by default:
               the model's context becomes N x F (N: default the model's trained context), e.g.

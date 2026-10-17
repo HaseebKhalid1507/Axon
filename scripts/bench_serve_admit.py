@@ -2,7 +2,7 @@
 """`axon serve` under load: a long prompt admitted while other clients decode (stdlib only).
 
     bench_serve_admit.py admit  ROUNDS MODEL_TAG BIN... [--decoders=4] [--long=20000] [--flags-I=...]
-    bench_serve_admit.py single ROUNDS MODEL_TAG BIN... [--n=128] [--parallel=8]
+    bench_serve_admit.py single ROUNDS MODEL_TAG BIN... [--n=128] [--parallel=8] [--idle-long=N]
     common: [--models=DIR] (default bella's ~/Projects/axon/models) [--kv=f16]
 
 Run through the GPU queue (it loads models on the GPU). Binaries interleaved per round, cool-gated, GPU logged.
@@ -14,7 +14,8 @@ Run through the GPU queue (it loads models on the GPU). Binaries interleaved per
     after the long one, its TTFT. Every binary gets the same prompts in a
     round: same_text=1 when its greedy outputs equal the first binary's (the batching contract).
   * single: one server, one client: a streamed greedy request (max_tokens N, salted): TTFT and decode tok/s;
-    then a 560-token prompt with max_tokens 1: TTFT.
+    then a 560-token prompt with max_tokens 1: TTFT; with --idle-long=N two ~N-token prompts sent together
+    to the idle server (the batch's idle chunked path; needs --parallel >= 2): the first and last first-token times.
 Extra server flags per binary: --flags-1="--prefill-chunk 256" (index into BIN...). --models=DIR: the model files.
 """
 import http.client, json, statistics, subprocess, sys, threading, time, itertools, urllib.request
@@ -26,6 +27,7 @@ N = int(opts.get('n', '128'))
 DEC = int(opts.get('decoders', '4'))
 LONG = int(opts.get('long', '20000'))
 SHORT = int(opts.get('short', '0'))
+IDLE_LONG = int(opts.get('idle-long', '0'))
 KV = opts.get('kv', 'f16')
 M = opts.get('models', '/home/haseeb/Projects/axon/models').rstrip('/') + '/'
 MODELS = {'0.5B': 'qwen2.5-0.5b-q4_k_m.gguf', '7B': 'Qwen2.5-7B-Instruct-Q4_K_M.gguf'}
@@ -123,7 +125,7 @@ def admit_once(n_long, dec_tokens, s):
     """DEC decoders, then one long admit; prompts salted from `s` (the same for every binary in a round,
     so their greedy texts must match); returns the stats dict."""
     times = [[] for _ in range(DEC)]
-    texts = [[] for _ in range(DEC + 1)]
+    texts = [[] for _ in range(DEC + 2)]  # decoders, the long prompt, the short one
     res = [None] * DEC
     base = {'temperature': 0, 'stream': True, 'stream_options': {'include_usage': True}}
 
@@ -141,7 +143,8 @@ def admit_once(n_long, dec_tokens, s):
     def late():
         # a short prompt arriving while the long one prefills: its TTFT (shortest-first)
         time.sleep(0.3)
-        short['ttft'] = stream('/v1/completions', {**base, 'prompt': long_prompt(SHORT, s + 99), 'max_tokens': 8})[0]
+        short['ttft'] = stream('/v1/completions', {**base, 'prompt': long_prompt(SHORT, s + 99), 'max_tokens': 8},
+                               None, texts[DEC + 1])[0]
     ts = threading.Thread(target=late)
     if SHORT:
         ts.start()
@@ -180,7 +183,7 @@ def main():
             t = cool()
             g0 = gpu()
             if MODE == 'admit':
-                ctx = LONG + 4096
+                ctx = LONG * 5 // 4 + 1024
                 p = serve(b, i, ctx, DEC + 1 + (1 if SHORT else 0))
                 try:
                     admit_once(2000, 200, s0 + 50)  # warm-up: graphs for every row count, the long path
@@ -195,7 +198,7 @@ def main():
                     p.kill()
                     p.wait()
             else:
-                p = serve(b, i, 4096, int(opts.get('parallel', '8')))
+                p = serve(b, i, max(4096, IDLE_LONG * 5 // 4 + 1024), int(opts.get('parallel', '8')))
                 try:
                     base = {'temperature': 0, 'stream': True, 'stream_options': {'include_usage': True}}
                     stream('/v1/completions', {**base, 'prompt': 'Hello', 'max_tokens': 4})
@@ -204,8 +207,24 @@ def main():
                                                {**base, 'prompt': f'{s0} {DECODE}', 'max_tokens': N}, None, out)
                     pp, _, _, _, _ = stream('/v1/completions',
                                             {**base, 'prompt': f'{s0 + 1} {PP560}', 'max_tokens': 1})
+                    r = {'ttft_dec': ttft, 'tg': tg, 'n': n, 'pp560_ttft': pp}
+                    if IDLE_LONG:
+                        # two long prompts sent together to the idle server: they go to the batch with nothing
+                        # decoding (the idle chunked path); each one's TTFT
+                        outs, tt = [[], []], [0.0, 0.0]
+
+                        def one(k):
+                            tt[k] = stream('/v1/completions', {**base, 'prompt': long_prompt(IDLE_LONG, s0 + 2 + k),
+                                                               'max_tokens': 4}, None, outs[k])[0]
+                        th = [threading.Thread(target=one, args=(k,)) for k in range(2)]
+                        for t2 in th:
+                            t2.start()
+                        for t2 in th:
+                            t2.join()
+                        r['idle2_ttft_first'], r['idle2_ttft_last'] = min(tt), max(tt)
+                        out += ['|'] + outs[0] + ['|'] + outs[1]
                     ref = ref or out
-                    r = {'ttft_dec': ttft, 'tg': tg, 'n': n, 'pp560_ttft': pp, 'same_text': int(out == ref)}
+                    r['same_text'] = int(out == ref)
                 finally:
                     p.kill()
                     p.wait()

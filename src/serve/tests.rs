@@ -2007,7 +2007,7 @@ fn serve_chunked_prefill_matches_solo() {
     let mut configs = vec![
         (p.clone(), F16, 16, 0),
         (p.clone(), Q8, 16, 0),
-        (p, F16, 16, 3),
+        (p, F16, 16, 20),
     ];
     if let Some(g) = crate::testutil::gemma3_model_path() {
         configs.push((g, F16, 16, 0));
