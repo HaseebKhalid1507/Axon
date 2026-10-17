@@ -778,9 +778,14 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         );
         let mut order: Vec<usize> = (0..logits.len()).collect();
         order.sort_by(|&a, &b| logits[b].total_cmp(&logits[a]));
+        // AXON_LOGITS_DIGITS: more decimals for scripts (oracle/llama_logits.py).
+        let digits = env::var("AXON_LOGITS_DIGITS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok());
+        let (dl, dp) = digits.map_or((4, 3), |d| (d, d));
         for &id in order.iter().take(top_k) {
             println!(
-                "{:>7}  {:>10.4}  {:>8.3}  {:?}",
+                "{:>7}  {:>10.dl$}  {:>8.dp$}  {:?}",
                 id,
                 logits[id],
                 logits[id] - lse,

@@ -1167,6 +1167,34 @@ mod tests {
         }
     }
 
+    /// `turns_match_fresh_prefill` on a qwen3moe (the 4x0.6B: top-2 of 4
+    /// experts, CPU): the cache carried across turns, prompt-lookup drafts
+    /// verified by batched passes, every reply a fresh prefill's.
+    #[test]
+    fn moe_turns_match_fresh_prefill() {
+        let Some(m) = crate::testutil::moe_model(true) else {
+            return;
+        };
+        let tok = Tokenizer::from_gguf(&m);
+        let net = Qwen2::new(&m);
+        for (max_reply, k) in [(12, 0), (24, 7), (48, 3)] {
+            let mut chat = Chat::new(&net, &tok, None, 2048).unwrap();
+            chat.no_think = true;
+            chat.max_reply = max_reply;
+            chat.max_draft = round_draft(k);
+            for msg in MSGS {
+                let mut prompt = chat.hist.clone();
+                prompt.extend(chat.frame("user", msg, Some("assistant")));
+                if chat.thinks() {
+                    prompt.extend(tok.encode_special("<think>\n\n</think>\n\n"));
+                }
+                let r = chat.reply(msg, &|| false, &mut |_| Ok(())).unwrap();
+                let want = fresh(chat.net, &prompt, max_reply, &chat.fr.stop);
+                assert_eq!(r.ids, want, "{msg:?} max_reply {max_reply} k {k}");
+            }
+        }
+    }
+
     /// Qwen3: no system block unless given, `no_think`'s empty reasoning
     /// block, and each closed reply kept as the template renders an earlier
     /// turn (text after `</think>`, leading newlines dropped); every reply is

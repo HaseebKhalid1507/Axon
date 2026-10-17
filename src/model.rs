@@ -84,21 +84,30 @@ impl<'a> Weight<'a> {
     /// release a tensor read elsewhere: the token embedding (a tied output
     /// matrix is the same tensor).
     fn load(m: &'a Model, t: &'a Tensor, dst: Option<&mut [u8]>, release: bool) -> Weight<'a> {
+        let repacked = dst.is_some();
+        let w = Self::load_bytes(t, m.tensor_data(t), dst);
+        if repacked && release {
+            m.release(t);
+        }
+        w
+    }
+
+    /// `load` of the matrix whose bytes are `data` (all of `t`, or one
+    /// expert's slice of a 3-D `t`: a dims[1] x dims[0] matrix either way),
+    /// releasing nothing.
+    fn load_bytes(t: &'a Tensor, data: &'a [u8], dst: Option<&mut [u8]>) -> Weight<'a> {
         let Some(buf) = dst else {
             return Weight {
                 t,
-                data: Some(m.tensor_data(t)),
+                data: Some(data),
                 r8: None,
             };
         };
         let (qt, rows, n) = (t.qtype.id, t.dims[1] as usize, t.dims[0] as usize);
         if r8q::can_repack(qt, rows, n) {
-            r8q::repack_into(qt, m.tensor_data(t), rows, n, buf);
+            r8q::repack_into(qt, data, rows, n, buf);
         } else {
-            r8::repack_into(qt, m.tensor_data(t), rows, n, buf);
-        }
-        if release {
-            m.release(t);
+            r8::repack_into(qt, data, rows, n, buf);
         }
         Weight {
             t,
@@ -168,9 +177,7 @@ struct Layer<'a> {
     k_norm: Option<Vec<f32>>,
     wo: Weight<'a>,
     ffn_norm: Vec<f32>,
-    w_gate: Weight<'a>,
-    w_up: Weight<'a>,
-    w_down: Weight<'a>,
+    ffn: Ffn<'a>,
     /// gemma3: RMSNorm weights of the attention output and of the FFN
     /// output, applied before each residual add.
     post_attn_norm: Option<Vec<f32>>,
@@ -178,6 +185,46 @@ struct Layer<'a> {
     /// gemma3 local layer: attends to the last `window` positions only
     /// (`window_start`) and uses the local RoPE table.
     window: Option<usize>,
+}
+
+/// A layer's feed-forward block: the gated FFN, or experts and a router.
+enum Ffn<'a> {
+    Dense {
+        gate: Weight<'a>,
+        up: Weight<'a>,
+        down: Weight<'a>,
+    },
+    Moe(Box<moe::Moe<'a>>),
+}
+
+impl<'a> Layer<'a> {
+    /// The gated FFN's gate, up and down (a dense layer: every caller but
+    /// the MoE paths, which no other backend takes).
+    fn dense(&self) -> (&Weight<'a>, &Weight<'a>, &Weight<'a>) {
+        match &self.ffn {
+            Ffn::Dense { gate, up, down } => (gate, up, down),
+            Ffn::Moe(_) => panic!("a mixture-of-experts layer has no dense FFN"),
+        }
+    }
+
+    /// Every matrix, in the r8 arena's order (`Qwen2::build`).
+    fn weights(&self) -> Vec<&Weight<'a>> {
+        let mut v = vec![&self.wq, &self.wk, &self.wv, &self.wo];
+        match &self.ffn {
+            Ffn::Dense { gate, up, down } => v.extend([gate, up, down]),
+            Ffn::Moe(m) => v.extend(m.weights()),
+        }
+        v
+    }
+
+    fn weights_mut(&mut self) -> Vec<&mut Weight<'a>> {
+        let mut v = vec![&mut self.wq, &mut self.wk, &mut self.wv, &mut self.wo];
+        match &mut self.ffn {
+            Ffn::Dense { gate, up, down } => v.extend([gate, up, down]),
+            Ffn::Moe(m) => v.extend(m.weights_mut()),
+        }
+        v
+    }
 }
 
 pub struct Qwen2<'a> {
@@ -366,14 +413,12 @@ fn load_vec(m: &Model, t: &Tensor) -> Vec<f32> {
 /// HF's `1 + w` already added by llama.cpp's converter, so they are plain
 /// RMSNorm weights here.
 /// qwen3moe (Qwen3-30B-A3B & co.) is qwen3 with each FFN replaced by
-/// experts and a router (`moe`): loaded and checked, not run yet.
+/// experts and a router (`moe`): CPU only for now.
 pub const ARCHS: [&str; 5] = ["qwen2", "qwen3", "llama", "gemma3", "qwen3moe"];
 
 #[path = "model/moe.rs"]
 mod moe;
-pub(crate) use moe::{
-    MoeInfo, cpu_refusal as moe_cpu_refusal, gpu_refusal as moe_gpu_refusal, is_moe,
-};
+pub(crate) use moe::{MoeInfo, check_ram as moe_check_ram, gpu_refusal as moe_gpu_refusal, is_moe};
 
 /// Gemma 3's layer layout: local (sliding-window) layers attend to the last
 /// `window` positions only (key t is seen from position p iff p - t <
@@ -482,8 +527,12 @@ const SUPPORTED_TYPES: [u32; 10] = [F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K
 /// r8 arena (huge pages itself) and the file is read once: the embedding
 /// (one row per token) and the norm/bias vectors (copied out) are all
 /// that's left in the mapping.
+///
+/// A MoE file is always mapped: its experts are most of it, and a copy
+/// beside the r8 arena would hold them twice (the 30B: 18.6 + 17.9 GB).
 pub fn reads_matrices_in_place(m: &Model) -> bool {
-    reads_in_place_with(m, std::env::var("AXON_REPACK").map_or(true, |v| v != "0"))
+    !moe::is_moe(m)
+        && reads_in_place_with(m, std::env::var("AXON_REPACK").map_or(true, |v| v != "0"))
 }
 
 /// `reads_matrices_in_place` for `Qwen2::new_with(m, repack)`.
@@ -943,13 +992,27 @@ impl<'a> Qwen2<'a> {
             "ffn_down.weight",
         ];
         let lt = |i: usize, s: &str| find(m, &format!("blk.{i}.{s}"));
+        // A MoE layer: the attention matrices, then each expert tensor's
+        // n_expert matrices (one repack each: `moe::Moe`).
+        let moe_dims = moe::moe_dims(m);
+        let layer_mats = |i: usize| -> Vec<&Tensor> {
+            match moe_dims {
+                None => MATS.map(|s| lt(i, s)).to_vec(),
+                Some(d) => MATS[..4]
+                    .iter()
+                    .map(|s| lt(i, s))
+                    .chain(
+                        moe::EXPS
+                            .iter()
+                            .flat_map(|s| std::iter::repeat_n(lt(i, s), d.n_expert)),
+                    )
+                    .collect(),
+            }
+        };
         let mut plan: Vec<Option<(usize, usize)>> = Vec::new();
         let mut total = 0;
         let out_ts = head.then_some(out_t);
-        for t in out_ts
-            .into_iter()
-            .chain((0..k).flat_map(|i| MATS.map(|s| lt(i, s))))
-        {
+        for t in out_ts.into_iter().chain((0..k).flat_map(layer_mats)) {
             let len = if repack { repacked_len(t) } else { None };
             plan.push(len.map(|len| (total, len)));
             total += len.map_or(0, |l| l.next_multiple_of(64));
@@ -979,7 +1042,7 @@ impl<'a> Qwen2<'a> {
             false => Vec::new(),
         };
         let layer_slots: Vec<std::sync::Mutex<Vec<Option<&mut [u8]>>>> = (0..k)
-            .map(|_| std::sync::Mutex::new(slots.by_ref().take(MATS.len()).collect()))
+            .map(|i| std::sync::Mutex::new(slots.by_ref().take(layer_mats(i).len()).collect()))
             .collect();
 
         // One pool task per layer (`floats` set so it never runs inline):
@@ -999,21 +1062,48 @@ impl<'a> Qwen2<'a> {
                 v
             };
             let bias = |s: &str| find_opt(m, &format!("blk.{i}.{s}")).map(vals);
+            let [wq, wk, wv, wo] = [0, 1, 2, 3].map(|j| w(MATS[j]));
+            let ffn = match moe_dims {
+                None => Ffn::Dense {
+                    gate: w(MATS[4]),
+                    up: w(MATS[5]),
+                    down: w(MATS[6]),
+                },
+                Some(d) => {
+                    // Each expert's slice of the 3-D tensor, repacked on its
+                    // own; the tensor's pages go back once all are.
+                    let [gate, up, down] = moe::EXPS.map(|s| {
+                        let t = t(s);
+                        let ws: Vec<Weight> = (0..d.n_expert)
+                            .map(|e| {
+                                let dst = dst.next().unwrap();
+                                let repacked = dst.is_some();
+                                let w = Weight::load_bytes(t, moe::expert_bytes(m, t, e), dst);
+                                if repacked && e + 1 == d.n_expert {
+                                    m.release(t);
+                                }
+                                w
+                            })
+                            .collect();
+                        ws
+                    });
+                    let router = vals(t("ffn_gate_inp.weight"));
+                    Ffn::Moe(Box::new(moe::Moe::new(d, router, gate, up, down)))
+                }
+            };
             Layer {
                 attn_norm: vals(t("attn_norm.weight")),
-                wq: w(MATS[0]),
-                wk: w(MATS[1]),
-                wv: w(MATS[2]),
+                wq,
+                wk,
+                wv,
                 bq: bias("attn_q.bias"),
                 bk: bias("attn_k.bias"),
                 bv: bias("attn_v.bias"),
                 q_norm: bias("attn_q_norm.weight"),
                 k_norm: bias("attn_k_norm.weight"),
-                wo: w(MATS[3]),
+                wo,
                 ffn_norm: vals(t("ffn_norm.weight")),
-                w_gate: w(MATS[4]),
-                w_up: w(MATS[5]),
-                w_down: w(MATS[6]),
+                ffn,
                 post_attn_norm: bias("post_attention_norm.weight"),
                 post_ffn_norm: bias("post_ffw_norm.weight"),
                 window: swa.as_ref().filter(|s| s.local[i]).map(|s| s.window),
@@ -1023,17 +1113,9 @@ impl<'a> Qwen2<'a> {
         drop(slots);
         if let Some(a) = arena.take() {
             let map = std::sync::Arc::new(a.make_read_only().expect("r8: mprotect"));
-            let ws = output.iter_mut().chain(layers.iter_mut().flat_map(|l| {
-                [
-                    &mut l.wq,
-                    &mut l.wk,
-                    &mut l.wv,
-                    &mut l.wo,
-                    &mut l.w_gate,
-                    &mut l.w_up,
-                    &mut l.w_down,
-                ]
-            }));
+            let ws = output
+                .iter_mut()
+                .chain(layers.iter_mut().flat_map(|l| l.weights_mut()));
             for (w, p) in ws.zip(&plan) {
                 w.r8 = p.map(|(off, len)| R8 {
                     map: map.clone(),
@@ -1080,15 +1162,16 @@ impl<'a> Qwen2<'a> {
             }
         }
         let ly = &self.layers[l];
+        let (gate, up, down) = ly.dense();
         HostLayer {
             mats: [
                 mat(&ly.wq),
                 mat(&ly.wk),
                 mat(&ly.wv),
                 mat(&ly.wo),
-                mat(&ly.w_gate),
-                mat(&ly.w_up),
-                mat(&ly.w_down),
+                mat(gate),
+                mat(up),
+                mat(down),
             ],
             attn_norm: &ly.attn_norm,
             ffn_norm: &ly.ffn_norm,
@@ -1105,7 +1188,7 @@ impl<'a> Qwen2<'a> {
         let w = self
             .layers
             .iter()
-            .flat_map(|l| [&l.wq, &l.wk, &l.wv, &l.wo, &l.w_gate, &l.w_up, &l.w_down])
+            .flat_map(|l| l.weights())
             .chain(self.output.as_ref())
             .find_map(|w| w.r8.as_ref())?;
         Some(&w.map[..])
@@ -1846,16 +1929,25 @@ impl<'a> Qwen2<'a> {
                 self.norm_cols(&mut os, slots, nb, w);
             }
 
-            let types = [layer.w_gate.qt(), layer.w_up.qt()];
             let res = (os, slots);
+            let (gu, gw, w_down) = match &layer.ffn {
+                Ffn::Dense { gate, up, down } => (gate, up, down),
+                Ffn::Moe(moe) => {
+                    let hs = self.add_norm(&mut xs, Some(&res), &layer.ffn_norm);
+                    o_buf = res.0;
+                    let y = self.moe_ffn_batch(moe, &hs, std::mem::take(&mut down_buf));
+                    pending = Some((y, nb));
+                    continue;
+                }
+            };
+            let types = [gu.qt(), gw.qt()];
             let hq = self.add_norm_quant(&mut xs, Some(&res), &layer.ffn_norm, &types);
             o_buf = res.0;
-            let (gu, gw) = (&layer.w_gate, &layer.w_up);
             let (acts, a_slots) = self.matmul_swiglu_q(gu, gw, &hq, std::mem::take(&mut act_buf));
             drop(hq);
-            let aq = Self::quantize_cols(&acts, a_slots, nb, &[layer.w_down.qt()]);
+            let aq = Self::quantize_cols(&acts, a_slots, nb, &[w_down.qt()]);
             act_buf = acts;
-            let mut down = self.matmul_q_in([&layer.w_down], &aq, std::mem::take(&mut down_buf));
+            let mut down = self.matmul_q_in([w_down], &aq, std::mem::take(&mut down_buf));
             if let Some(w) = &layer.post_ffn_norm {
                 self.norm_cols(&mut down.0, down.2, nb, w);
             }
@@ -1894,6 +1986,29 @@ impl<'a> Qwen2<'a> {
             });
         });
         out.into_iter().map(|o| o.unwrap()).collect()
+    }
+
+    /// `add_norm_quant` without the quantization: the normed vectors (the
+    /// MoE router reads them in f32).
+    fn add_norm(
+        &self,
+        xs: &mut [Vec<f32>],
+        res: Option<&(Vec<f32>, usize)>,
+        w: &[f32],
+    ) -> Vec<Vec<f32>> {
+        let dim = self.dim;
+        let mut out: Vec<Vec<f32>> = vec![Vec::new(); xs.len()];
+        let mut items: Vec<_> = xs.iter_mut().zip(out.iter_mut()).collect();
+        per_block(&mut items, dim, |b0, blk| {
+            if let Some((y, slots)) = res {
+                let mut rows: Vec<&mut [f32]> = blk.iter_mut().map(|(x, _)| &mut x[..]).collect();
+                add_cols(y, *slots, b0, &mut rows);
+            }
+            for (x, o) in blk.iter_mut() {
+                **o = self.rmsnorm(x, w);
+            }
+        });
+        out
     }
 
     /// Every layer for one token: store its keys and values in the cache and
@@ -1979,9 +2094,15 @@ impl<'a> Qwen2<'a> {
             // ---- Feed-forward sub-block (SwiGLU) ----
             // 7. Normalize, then gate * up: silu(gate(h)) decides how much of up(h) passes.
             let h = self.rmsnorm(&x, &layer.ffn_norm);
-            let act = self.matvec_swiglu(&layer.w_gate, &layer.w_up, &h);
-            // 8. Project back down to model width and add to the residual stream.
-            let mut d = self.matvec(&layer.w_down, &act);
+            let mut d = match &layer.ffn {
+                Ffn::Dense { gate, up, down } => {
+                    let act = self.matvec_swiglu(gate, up, &h);
+                    // 8. Project back down to model width and add to the residual stream.
+                    self.matvec(down, &act)
+                }
+                // 7-8 with experts: the router's top k, their FFNs summed.
+                Ffn::Moe(moe) => self.moe_ffn(moe, &h),
+            };
             if let Some(w) = &layer.post_ffn_norm {
                 d = self.rmsnorm(&d, w);
             }
@@ -3228,9 +3349,13 @@ pub(crate) mod tests {
         dense_fixture("llama", mt)
     }
 
-    /// `qwen3_fixture` / `llama_fixture` (arch "qwen3" or "llama").
-    fn dense_fixture(arch: &str, mt: u32) -> (Model, RawTensors) {
+    /// `qwen3_fixture` / `llama_fixture` (arch "qwen3" or "llama"), or a
+    /// qwen3moe (`MOE_FIXTURE` experts of ffn 256, top-2, an F32 router)
+    /// that is the qwen3 fixture otherwise.
+    pub(crate) fn dense_fixture(arch: &str, mt: u32) -> (Model, RawTensors) {
         let (dim, nh, nkv, hd, ffn, vocab, nl) = (128usize, 4, 2, 64, 256, 64, 2);
+        let moe = arch == "qwen3moe";
+        let (n_exp, k_exp) = MOE_FIXTURE;
         let (qd, kvd) = (nh * hd, nkv * hd);
         let mut st = 0x9e37_79b9_7f4a_7c15u64;
         let mut uni = move |lo: f32, hi: f32| {
@@ -3256,9 +3381,25 @@ pub(crate) mod tests {
             t.push(mat(n("attn_k.weight"), dim, kvd, qk));
             t.push(mat(n("attn_v.weight"), dim, kvd, 1.0));
             t.push(mat(n("attn_output.weight"), qd, dim, 1.0));
-            t.push(mat(n("ffn_gate.weight"), dim, ffn, 1.0));
-            t.push(mat(n("ffn_up.weight"), dim, ffn, 1.0));
-            t.push(mat(n("ffn_down.weight"), ffn, dim, 1.0));
+            if moe {
+                // [cols, rows, n_exp]: n_exp matrices one after another.
+                let mut exps = |s: &str, cols: usize, rows: usize| {
+                    let (name, mut d, v) = mat(n(s), cols, rows * n_exp, 1.0);
+                    d[1] = rows as u64;
+                    d.push(n_exp as u64);
+                    (name, d, v)
+                };
+                t.push(exps("ffn_gate_exps.weight", dim, ffn));
+                t.push(exps("ffn_up_exps.weight", dim, ffn));
+                t.push(exps("ffn_down_exps.weight", ffn, dim));
+                // Router logits of a few units: a clear but not saturated
+                // preference.
+                t.push(mat(n("ffn_gate_inp.weight"), dim, n_exp, 3.0));
+            } else {
+                t.push(mat(n("ffn_gate.weight"), dim, ffn, 1.0));
+                t.push(mat(n("ffn_up.weight"), dim, ffn, 1.0));
+                t.push(mat(n("ffn_down.weight"), ffn, dim, 1.0));
+            }
         }
         ts.extend(t);
         // The embedding (and tied head): uniform in [-1, 1).
@@ -3271,7 +3412,7 @@ pub(crate) mod tests {
             let n = |s: &str| format!("blk.{i}.{s}");
             vecs(n("attn_norm.weight"), dim, 0.8, 1.2);
             vecs(n("ffn_norm.weight"), dim, 0.8, 1.2);
-            if arch == "qwen3" {
+            if arch == "qwen3" || moe {
                 vecs(n("attn_q_norm.weight"), hd, 0.25, 4.0);
                 vecs(n("attn_k_norm.weight"), hd, 0.25, 4.0);
             }
@@ -3279,7 +3420,13 @@ pub(crate) mod tests {
         if arch == "llama" {
             vecs("rope_freqs.weight".into(), hd / 2, 1.0, 8.0);
         }
-        let ty = |t: &(String, Vec<u64>, Vec<f32>)| if t.1.len() == 2 { mt } else { F32 };
+        let ty = |t: &(String, Vec<u64>, Vec<f32>)| {
+            if t.1.len() >= 2 && !t.0.ends_with("ffn_gate_inp.weight") {
+                mt
+            } else {
+                F32
+            }
+        };
         let bytes = |t: &(String, Vec<u64>, Vec<f32>)| -> Vec<u8> {
             match ty(t) {
                 F32 => t.2.iter().flat_map(|v| v.to_le_bytes()).collect(),
@@ -3301,7 +3448,7 @@ pub(crate) mod tests {
             }
         };
         let k = |s: &str| -> &'static str { format!("{arch}.{s}").leak() };
-        let meta = vec![
+        let mut meta = vec![
             ("general.architecture", Val::Str(arch.into())),
             (k("block_count"), Val::U32(nl as u32)),
             (k("embedding_length"), Val::U32(dim as u32)),
@@ -3318,6 +3465,11 @@ pub(crate) mod tests {
                 Val::Arr((0..vocab).map(|i| Val::Str(format!("t{i}"))).collect()),
             ),
         ];
+        if moe {
+            meta.push((k("expert_count"), Val::U32(n_exp as u32)));
+            meta.push((k("expert_used_count"), Val::U32(k_exp as u32)));
+            meta.push((k("expert_feed_forward_length"), Val::U32(ffn as u32)));
+        }
         let list: Vec<(&str, &[u64], u32)> =
             ts.iter().map(|t| (t.0.as_str(), &t.1[..], ty(t))).collect();
         let data: Vec<Vec<u8>> = ts.iter().map(bytes).collect();
@@ -3329,6 +3481,9 @@ pub(crate) mod tests {
             .collect();
         (m, raw)
     }
+
+    /// The qwen3moe fixture's (experts, experts used per token).
+    pub(crate) const MOE_FIXTURE: (usize, usize) = (4, 2);
 
     /// Ways to get qwen3's q/k norm wrong, for showing `qwen3_ref` (and so
     /// the tests built on it) tells them apart from the right one.
@@ -3387,7 +3542,7 @@ pub(crate) mod tests {
     /// `qwen3_ref` (raw None: the loaded model's tensors, NEOX RoPE, q/k
     /// norms) or `llama_ref` (raw: the file's tensors, adjacent-pair RoPE
     /// with the file's frequency factors, no q/k norm: `bug` Dropped).
-    fn dense_ref(
+    pub(crate) fn dense_ref(
         m: &Model,
         raw: Option<&RawTensors>,
         ids: &[u32],
@@ -3497,6 +3652,16 @@ pub(crate) mod tests {
         } else {
             (embd.clone(), dim)
         };
+        // qwen3moe (llama.cpp's build_moe_ffn: softmax gating, top k,
+        // weights renormalized, no shared expert): its experts, top k.
+        let moe = m.arch == "qwen3moe";
+        let (n_exp, k_exp) = match moe {
+            true => (
+                num("expert_count") as usize,
+                num("expert_used_count") as usize,
+            ),
+            false => (0, 0),
+        };
         let lw: Vec<_> = (0..nl)
             .map(|i| {
                 let n = |s: &str| w(&format!("blk.{i}.{s}"));
@@ -3517,9 +3682,26 @@ pub(crate) mod tests {
                     },
                     n("attn_output.weight"),
                     n("ffn_norm.weight"),
-                    n("ffn_gate.weight"),
-                    n("ffn_up.weight"),
-                    n("ffn_down.weight"),
+                    n(if moe {
+                        "ffn_gate_exps.weight"
+                    } else {
+                        "ffn_gate.weight"
+                    }),
+                    n(if moe {
+                        "ffn_up_exps.weight"
+                    } else {
+                        "ffn_up.weight"
+                    }),
+                    n(if moe {
+                        "ffn_down_exps.weight"
+                    } else {
+                        "ffn_down.weight"
+                    }),
+                    if moe {
+                        n("ffn_gate_inp.weight")
+                    } else {
+                        (Vec::new(), 0)
+                    },
                 ]
             })
             .collect();
@@ -3530,7 +3712,7 @@ pub(crate) mod tests {
         let mut logits = Vec::new();
         for (pos, &id) in ids.iter().enumerate() {
             let mut x: Vec<f64> = embd[id as usize * dim..(id as usize + 1) * dim].to_vec();
-            for (l, [an, wq, wk, wv, qn, kn, wo, fnm, wg, wu, wd]) in lw.iter().enumerate() {
+            for (l, [an, wq, wk, wv, qn, kn, wo, fnm, wg, wu, wd, wr]) in lw.iter().enumerate() {
                 let h = rms(&x, &an.0, eps);
                 let (mut q, mut k, v) = (mv(wq, &h), mv(wk, &h), mv(wv, &h));
                 match bug {
@@ -3580,14 +3762,39 @@ pub(crate) mod tests {
                     *x += o;
                 }
                 let h = rms(&x, &fnm.0, eps);
-                let (g, u) = (mv(wg, &h), mv(wu, &h));
-                let act: Vec<f64> = g
-                    .iter()
-                    .zip(&u)
-                    .map(|(g, u)| g / (1.0 + (-g).exp()) * u)
-                    .collect();
-                for (x, d) in x.iter_mut().zip(mv(wd, &act)) {
-                    *x += d;
+                let ffn =
+                    |wg: &(Vec<f64>, usize), wu: &(Vec<f64>, usize), wd: &(Vec<f64>, usize)| {
+                        let (g, u) = (mv(wg, &h), mv(wu, &h));
+                        let act: Vec<f64> = g
+                            .iter()
+                            .zip(&u)
+                            .map(|(g, u)| g / (1.0 + (-g).exp()) * u)
+                            .collect();
+                        mv(wd, &act)
+                    };
+                if !moe {
+                    for (x, d) in x.iter_mut().zip(ffn(wg, wu, wd)) {
+                        *x += d;
+                    }
+                    continue;
+                }
+                let lg = mv(wr, &h);
+                let mx = lg.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let z: f64 = lg.iter().map(|v| (v - mx).exp()).sum();
+                let p: Vec<f64> = lg.iter().map(|v| (v - mx).exp() / z).collect();
+                let mut order: Vec<usize> = (0..n_exp).collect();
+                order.sort_by(|&a, &b| p[b].total_cmp(&p[a]).then(a.cmp(&b)));
+                let top = &order[..k_exp];
+                let s: f64 = top.iter().map(|&e| p[e]).sum();
+                let part = |t: &(Vec<f64>, usize), e: usize| {
+                    let per = t.0.len() / n_exp;
+                    (t.0[e * per..(e + 1) * per].to_vec(), t.1)
+                };
+                for &e in top {
+                    let d = ffn(&part(wg, e), &part(wu, e), &part(wd, e));
+                    for (x, d) in x.iter_mut().zip(d) {
+                        *x += p[e] / s * d;
+                    }
                 }
             }
             let h = rms(&x, &out_norm, eps);
@@ -4154,7 +4361,11 @@ pub(crate) mod tests {
                 return;
             };
             let net = Qwen2::new_with(&m, repack);
-            let repacked = net.layers.iter().filter(|l| l.w_down.r8.is_some()).count();
+            let repacked = net
+                .layers
+                .iter()
+                .filter(|l| l.dense().2.r8.is_some())
+                .count();
             assert_eq!(
                 repacked > 0,
                 repack,
@@ -4162,10 +4373,7 @@ pub(crate) mod tests {
             );
             // Every Q5_0/Q8_0 matrix (0.5B: attention, gate/up, the head)
             // goes through r8q when repacking, none otherwise.
-            let all = net
-                .layers
-                .iter()
-                .flat_map(|l| [&l.wq, &l.wk, &l.wv, &l.wo, &l.w_gate, &l.w_up, &l.w_down]);
+            let all = net.layers.iter().flat_map(|l| l.weights());
             for w in all.chain([net.head()]) {
                 if matches!(w.qt(), Q5_0 | Q8_0) {
                     assert_eq!(w.r8.is_some(), repack, "{}", w.t.name);
@@ -4218,7 +4426,7 @@ pub(crate) mod tests {
         let repacked: Vec<&str> = net
             .layers
             .iter()
-            .flat_map(|l| [&l.wq, &l.wv, &l.w_gate, &l.w_down])
+            .flat_map(|l| [&l.wq, &l.wv, l.dense().0, l.dense().2])
             .chain([net.head()])
             .filter(|w| w.r8.is_some())
             .map(|w| w.t.qtype.name)
@@ -4347,11 +4555,12 @@ pub(crate) mod tests {
                 check(w, &ha);
             }
             let h = net.rmsnorm(&x, &layer.ffn_norm);
-            let act = net.matvec_swiglu(&layer.w_gate, &layer.w_up, &h);
-            check(&layer.w_down, &act);
-            check(&layer.w_gate, &h);
-            check(&layer.w_up, &h);
-            let d = net.matvec(&layer.w_down, &act);
+            let (w_gate, w_up, w_down) = layer.dense();
+            let act = net.matvec_swiglu(w_gate, w_up, &h);
+            check(w_down, &act);
+            check(w_gate, &h);
+            check(w_up, &h);
+            let d = net.matvec(w_down, &act);
             for i in 0..x.len() {
                 x[i] += d[i];
             }
@@ -4411,7 +4620,7 @@ pub(crate) mod tests {
             let repacked: Vec<&Tensor> = net
                 .layers
                 .iter()
-                .flat_map(|l| [&l.w_down, &l.w_gate, &l.wq])
+                .flat_map(|l| [l.dense().2, l.dense().0, &l.wq])
                 .filter(|w| w.r8.is_some())
                 .map(|w| w.t)
                 .collect();
@@ -4469,7 +4678,7 @@ pub(crate) mod tests {
         assert!(eq, "copy and file map give different logits");
     }
 
-    fn feed_batch_matches_feed_on(net: &Qwen2) {
+    pub(crate) fn feed_batch_matches_feed_on(net: &Qwen2) {
         // 483 spread-out ordinary token ids (Qwen2's special tokens start at
         // 151643, Llama 3's at 128000). (Taken mod the vocab: the same ids
         // on a real model.)

@@ -395,9 +395,7 @@ impl<'a> Backend<'a> {
             if kv == KvType::Q8 {
                 return Err("the q8 KV cache is cuda-only (--device cuda)".into());
             }
-            if crate::model::is_moe(m) {
-                return Err(crate::model::moe_cpu_refusal(m));
-            }
+            crate::model::moe_check_ram(m)?;
             return Ok(Backend::Cpu(Qwen2::new(m)));
         }
         if crate::model::is_moe(m) {
