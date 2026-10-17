@@ -1920,16 +1920,16 @@ pub struct Kernels<'m> {
 /// NVRTC options for kernels.cu beyond the architecture. Denormals kept,
 /// as on the CPU (the defaults, spelled out: they are part of the cache key).
 const KERNEL_OPTS: [&str; 2] = ["--std=c++17", "--ftz=false"];
-/// `KERNEL_OPTS` plus the extra weight types (Q4_0, Q4_1, Q5_1, Q5_K) in the
+/// `KERNEL_OPTS` plus the extra weight types (Q4_0, Q4_1, Q5_1, Q5_K, Q2_K, Q3_K, IQ4_NL) in the
 /// decode kernels' type switch.
 const KERNEL_OPTS_EXT: [&str; 3] = ["--std=c++17", "--ftz=false", "-DAXON_EXT_TYPES"];
 
 /// Whether `m` has a matrix type only `Kernels::module_ext` runs.
 pub fn needs_ext(m: &crate::gguf::Model) -> bool {
-    use crate::quant::{Q4_0, Q4_1, Q5_1, Q5_K};
+    use crate::quant::{IQ4_NL, Q2_K, Q3_K, Q4_0, Q4_1, Q5_1, Q5_K};
     m.tensors
         .iter()
-        .any(|t| matches!(t.qtype.id, Q4_0 | Q4_1 | Q5_1 | Q5_K))
+        .any(|t| matches!(t.qtype.id, Q4_0 | Q4_1 | Q5_1 | Q5_K | Q2_K | Q3_K | IQ4_NL))
 }
 
 impl<'m> Kernels<'m> {
@@ -1979,12 +1979,12 @@ impl<'m> Kernels<'m> {
         n: usize,
         rows: &[u32],
     ) -> Result<Vec<f32>, String> {
-        use crate::quant::{F16, F32, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0};
+        use crate::quant::{F16, F32, IQ4_NL, Q2_K, Q3_K, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0};
         let q = crate::gguf::qtype(qt);
-        if ![F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K].contains(&qt) {
+        if ![F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL].contains(&qt) {
             return Err(format!("dequant_rows: unsupported type {}", q.name));
         }
-        if [Q4_0, Q4_1, Q5_1, Q5_K].contains(&qt) && !self.ext {
+        if [Q4_0, Q4_1, Q5_1, Q5_K, Q2_K, Q3_K, IQ4_NL].contains(&qt) && !self.ext {
             return Err(format!(
                 "dequant_rows: type {} needs Kernels::module_ext",
                 q.name

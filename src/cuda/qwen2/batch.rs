@@ -314,8 +314,9 @@ pub(crate) struct RowAt {
 }
 
 /// Weight types of the tensor-core GEMMs (gemm2), in table order; the
-/// first `NTYPES_VM` have gemvm kernels too (Q4_1 / Q5_1 take gemvn).
-const NTYPES: usize = 8;
+/// first `NTYPES_VM` have gemvm kernels too (Q4_1 / Q5_1 / Q2_K / Q3_K / IQ4_NL
+/// take gemvn).
+const NTYPES: usize = 11;
 const NTYPES_VM: usize = 6;
 
 /// `qt`'s slot in the per-type kernel tables.
@@ -329,6 +330,9 @@ fn type_index(qt: u32) -> usize {
         Q4_0 => 5,
         Q4_1 => 6,
         Q5_1 => 7,
+        Q2_K => 8,
+        Q3_K => 9,
+        IQ4_NL => 10,
         _ => unreachable!("type_index: {qt}"),
     }
 }
@@ -422,6 +426,9 @@ impl<'m> BatchFns<'m> {
                 (Q4_0, "q4_0"),
                 (Q4_1, "q4_1"),
                 (Q5_1, "q5_1"),
+                (Q2_K, "q2_k"),
+                (Q3_K, "q3_k"),
+                (IQ4_NL, "iq4_nl"),
             ] {
                 let big = module.function(&format!("gemm2_{tn}"))?;
                 big.set_max_shared(gemm2_smem(qt, 128, 2))?;

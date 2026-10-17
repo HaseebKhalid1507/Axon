@@ -265,8 +265,10 @@ impl<'g> CudaQwen2<'g> {
                 .iter()
                 .zip(["q", "k", "v", "o", "gate", "up", "down"])
             {
-                // Q5_K / Q4_0 / Q4_1 / Q5_1 have no CPU repack: they stream as GGUF rows.
-                let raw_ok = matches!(m.qt, Q5_K | Q4_0 | Q4_1 | Q5_1) && !m.repacked;
+                // Q5_K / Q4_0 / Q4_1 / Q5_1 / Q2_K / Q3_K / IQ4_NL have no CPU repack:
+                // they stream as GGUF rows.
+                let raw_ok =
+                    matches!(m.qt, Q5_K | Q4_0 | Q4_1 | Q5_1 | Q2_K | Q3_K | IQ4_NL) && !m.repacked;
                 if !raw_ok && ![Q4_K, Q6_K, Q5_0, Q8_0].contains(&m.qt) {
                     return Err(format!(
                         "layer {i} {s}: type {} can't be streamed",

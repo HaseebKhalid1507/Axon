@@ -294,6 +294,10 @@ fn gpu_logits_match_cpu_q5_k_m_q4_0() {
         ("Qwen2.5-0.5B-Instruct-Q4_0.gguf", "0.5B Q4_0"),
         ("Qwen2.5-1.5B-Instruct-Q5_K_M.gguf", "1.5B Q5_K_M"),
         ("Qwen2.5-1.5B-Instruct-Q4_0.gguf", "1.5B Q4_0"),
+        ("Qwen2.5-1.5B-Instruct-Q3_K_M.gguf", "1.5B Q3_K_M"),
+        ("Llama-3.2-1B-Instruct-Q3_K_L.gguf", "Llama 1B Q3_K_L"),
+        ("Qwen2.5-0.5B-Instruct-Q2_K.gguf", "0.5B Q2_K"),
+        ("Qwen2.5-0.5B-Instruct-Q3_K_M.gguf", "0.5B Q3_K_M"),
     ] {
         let Some(m) = model_at(&format!("models/{f}")) else {
             continue;
@@ -520,6 +524,12 @@ fn gpu_gemv_matches_cpu_new_types() {
         (Q5_K, 8960),
         (Q4_1, 896),
         (Q5_1, 4864),
+        (Q2_K, 1536),
+        (Q2_K, 18944),
+        (Q3_K, 3584),
+        (Q3_K, 8960),
+        (IQ4_NL, 896),
+        (IQ4_NL, 4864),
     ] {
         let rows = 333;
         let w = synth_matrix(&mut rng, qt, rows, cols);
@@ -2643,6 +2653,9 @@ fn type_name(qt: u32) -> &'static str {
         Q4_0 => "q4_0",
         Q4_1 => "q4_1",
         Q5_1 => "q5_1",
+        Q2_K => "q2_k",
+        Q3_K => "q3_k",
+        IQ4_NL => "iq4_nl",
         _ => "q5_0",
     }
 }
@@ -2662,14 +2675,23 @@ fn synth_matrix(rng: &mut Rng, qt: u32, rows: usize, cols: usize) -> Vec<u8> {
         Q4_0 => (18, 32),
         Q4_1 => (20, 32),
         Q5_1 => (24, 32),
+        Q2_K => (84, 256),
+        Q3_K => (110, 256),
+        IQ4_NL => (18, 32),
         _ => (22, 32),
     };
     for b in 0..rows * cols / vb {
-        let o = b * bb + if qt == Q6_K { 208 } else { 0 };
+        let o = b * bb
+            + match qt {
+                Q6_K => 208,
+                Q2_K => 80,
+                Q3_K => 108,
+                _ => 0,
+            };
         let mut scale = || (0x1000u16 + (rng.next() & 0x7ff) as u16) | (rng.next() as u16 & 0x8000);
         let d = scale();
         w[o..o + 2].copy_from_slice(&d.to_le_bytes());
-        if matches!(qt, Q4_K | Q5_K | Q4_1 | Q5_1) {
+        if matches!(qt, Q4_K | Q5_K | Q4_1 | Q5_1 | Q2_K) {
             let dmin = scale();
             w[o + 2..o + 4].copy_from_slice(&dmin.to_le_bytes());
         }
@@ -2725,6 +2747,14 @@ fn gpu_batched_products_match_gemv_bits() {
         "synth Q4_1 4864",
         "synth Q5_1 896",
         "synth Q5_1 4864",
+        "synth Q2_K 1536",
+        "synth Q2_K 3584",
+        "synth Q2_K 18944",
+        "synth Q3_K 768",
+        "synth Q3_K 1536",
+        "synth Q3_K 18944",
+        "synth IQ4_NL 896",
+        "synth IQ4_NL 4864",
     ] {
         let synth: Vec<u8>;
         let (qt, cols, rows, wd): (u32, usize, usize, &[u8]) = if name.starts_with("synth") {
@@ -2737,6 +2767,9 @@ fn gpu_batched_products_match_gemv_bits() {
                 "Q4_0" => Q4_0,
                 "Q4_1" => Q4_1,
                 "Q5_1" => Q5_1,
+                "Q2_K" => Q2_K,
+                "Q3_K" => Q3_K,
+                "IQ4_NL" => IQ4_NL,
                 _ => Q5_0,
             };
             let cols: usize = f[2].parse().unwrap();
@@ -2808,7 +2841,7 @@ fn gpu_batched_products_match_gemv_bits() {
         eprintln!("{name} {}: bit-identical", crate::gguf::qtype(qt).name);
         seen.push(qt);
     }
-    for qt in [Q4_K, Q6_K, Q5_0, Q8_0, Q5_K, Q4_0, Q4_1, Q5_1] {
+    for qt in [Q4_K, Q6_K, Q5_0, Q8_0, Q5_K, Q4_0, Q4_1, Q5_1, Q2_K, Q3_K, IQ4_NL] {
         assert!(seen.contains(&qt), "type {qt} not covered");
     }
 }
@@ -2825,8 +2858,8 @@ fn gpu_products_match_reference_bits() {
     let km = Kernels::module_ext(&g).unwrap();
     let mut rng = Rng(0x0dd5_eed5_2026_1014);
     let mut cases: Vec<(u32, usize, usize)> = Vec::new();
-    for qt in [Q4_K, Q6_K, Q8_0, Q5_0, Q5_K, Q4_0, Q4_1, Q5_1] {
-        let vb = if matches!(qt, Q4_K | Q5_K | Q6_K) {
+    for qt in [Q4_K, Q6_K, Q8_0, Q5_0, Q5_K, Q4_0, Q4_1, Q5_1, Q2_K, Q3_K, IQ4_NL] {
+        let vb = if matches!(qt, Q4_K | Q5_K | Q6_K | Q2_K | Q3_K) {
             256
         } else {
             32
@@ -3018,7 +3051,7 @@ fn gpu_swiglu_epilogue_and_gate_up_match_reference() {
 /// The tensor-core GEMMs of a type (prefill.cu gemm2_*).
 /// Whether type qt has gemvm kernels.
 fn has_gemvm(qt: u32) -> bool {
-    !matches!(qt, Q4_1 | Q5_1)
+    !matches!(qt, Q4_1 | Q5_1 | Q2_K | Q3_K | IQ4_NL)
 }
 
 fn gemm2_names(qt: u32) -> Vec<String> {
@@ -3286,7 +3319,7 @@ fn prefill_with(net: &CudaQwen2, ids: &[u32], sizes: &[usize]) -> (Vec<u16>, Vec
 /// token's logit bits are identical.
 fn prefill_bits(m: &Model, name: &str, kv: CacheKv) {
     let g = crate::testutil::gpu().unwrap();
-    let km = Kernels::module(&g).unwrap();
+    let km = Kernels::module_for(&g, m).unwrap();
     let ids = long_ids(m, 1200);
     let mut net = CudaQwen2::new(&g, &km, m, ids.len() + 1).unwrap();
     net.kv = kv;
@@ -3689,7 +3722,7 @@ fn gpu_prefill_batchings_bit_identical_1_5b() {
 /// the max batch) passes.
 fn verify_bits(m: &Model, name: &str, kv: CacheKv) {
     let g = crate::testutil::gpu().unwrap();
-    let km = Kernels::module(&g).unwrap();
+    let km = Kernels::module_for(&g, m).unwrap();
     let prompt = long_ids(m, 90);
     let mut net = CudaQwen2::new(&g, &km, m, 1400).unwrap();
     net.kv = kv;
@@ -3921,6 +3954,34 @@ fn gpu_verify_matches_forward_argmax_1_5b() {
         return;
     };
     verify_bits(&m, "1.5B", CacheKv::F16);
+}
+
+/// Q2_K / Q3_K files (bartowski's, whichever are present): decode ==
+/// every prefill batching == prefill from a fed prefix (cache reuse) ==
+/// verify, bit for bit, on both caches; the 7B Q2_K's Q2_K rows (and its
+/// Q3_K ffn_down) at its shapes.
+#[test]
+fn gpu_prefill_batchings_bit_identical_q2k_q3k() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    for (f, name, q8) in [
+        ("Qwen2.5-0.5B-Instruct-Q2_K.gguf", "0.5B Q2_K", true),
+        ("Qwen2.5-0.5B-Instruct-Q3_K_M.gguf", "0.5B Q3_K_M", false),
+        ("Qwen2.5-1.5B-Instruct-Q3_K_M.gguf", "1.5B Q3_K_M", true),
+        ("Llama-3.2-1B-Instruct-Q3_K_L.gguf", "llama 1B Q3_K_L", false),
+        ("Qwen2.5-7B-Instruct-Q2_K.gguf", "7B Q2_K", false),
+    ] {
+        let Some(m) = model_at(&format!("models/{f}")) else {
+            continue;
+        };
+        prefill_bits(&m, name, CacheKv::F16);
+        verify_bits(&m, name, CacheKv::F16);
+        if q8 {
+            prefill_bits(&m, name, CacheKv::Q8 { group: 64 });
+            verify_bits(&m, name, CacheKv::Q8 { group: 64 });
+        }
+    }
 }
 
 /// Where a batched prefill pass spends its time, per kernel kind (events

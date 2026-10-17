@@ -4,7 +4,7 @@ use super::{
     nvrtc_for, pdl_ok, pick_target,
 };
 use crate::gguf::Model;
-use crate::quant::{self, F16, F32, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0};
+use crate::quant::{self, F16, F32, IQ4_NL, Q2_K, Q3_K, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0};
 use std::path::PathBuf;
 
 struct Rng(u64);
@@ -121,6 +121,11 @@ fn gpu_dequant_bitwise_every_tensor_q5k_q4_0() {
         "Qwen2.5-0.5B-Instruct-Q4_0.gguf",
         "Qwen2.5-1.5B-Instruct-Q5_K_M.gguf",
         "Qwen2.5-1.5B-Instruct-Q4_0.gguf",
+        "Qwen2.5-1.5B-Instruct-Q3_K_M.gguf",
+        "Llama-3.2-1B-Instruct-Q3_K_L.gguf",
+        "Qwen2.5-7B-Instruct-Q2_K.gguf",
+        "Qwen2.5-0.5B-Instruct-Q2_K.gguf",
+        "Qwen2.5-0.5B-Instruct-Q3_K_M.gguf",
     ] {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("models")
@@ -169,7 +174,10 @@ fn gpu_dequant_bitwise_synthetic() {
     assert_rows_match(&g, &k, "random f32", F32, &f32s, 1024, &[0, 1, 2, 3]);
 
     // (type, offsets of the block's f16 scales)
-    let quants: [(u32, &[usize]); 8] = [
+    let quants: [(u32, &[usize]); 11] = [
+        (IQ4_NL, &[0]),
+        (Q2_K, &[80, 82]),
+        (Q3_K, &[108]),
         (Q5_0, &[0]),
         (Q8_0, &[0]),
         (Q4_K, &[0, 2]),
