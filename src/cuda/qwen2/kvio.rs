@@ -14,11 +14,13 @@ const STAGE: usize = 64 << 20;
 
 /// A cache's rows in device memory: `kv` holds, per region, `2 * nl`
 /// arrays of `max_ctx` rows (`CudaCache::kv`'s layout); `base` is the
-/// row a sequence starts at (a pool slot's `slot * ctx`).
+/// row a sequence starts at (a pool slot's `slot * ctx`), and `len` its
+/// positions (a slot's ctx: its rows end there, the next slot's begin).
 pub(crate) struct Rows<'a, 'g> {
     pub kv: &'a DevBuf<'g>,
     pub max_ctx: usize,
     pub base: usize,
+    pub len: usize,
     /// Bytes per row of each region.
     pub regions: Vec<usize>,
     pub arrays: usize,
@@ -124,10 +126,10 @@ impl Rows<'_, '_> {
     }
 
     fn check(&self, lo: usize, hi: usize) -> io::Result<()> {
-        if lo > hi || self.base + hi > self.max_ctx {
+        if lo > hi || hi > self.len || self.base + hi > self.max_ctx {
             return Err(io::Error::other(format!(
-                "positions {lo}..{hi} at row {} of a {}-row cache",
-                self.base, self.max_ctx
+                "positions {lo}..{hi} of a {}-position sequence at row {} of a {}-row cache",
+                self.len, self.base, self.max_ctx
             )));
         }
         Ok(())
@@ -148,12 +150,14 @@ impl<'g> CudaQwen2<'g> {
         }
     }
 
-    /// `c`'s rows (a whole cache: base 0; a slot view: its slot's).
+    /// `c`'s rows (a whole cache: base 0; a slot view: its slot's, and
+    /// no further).
     pub(crate) fn cache_rows<'a>(&self, c: &'a CudaCache<'g>) -> Rows<'a, 'g> {
         Rows {
             kv: &c.kv,
             max_ctx: c.rows,
             base: c.row0,
+            len: c.max_ctx,
             regions: self.kv_regions(c.mode),
             arrays: 2 * self.layers.len(),
         }
@@ -245,6 +249,7 @@ mod tests {
             kv,
             max_ctx,
             base,
+            len: max_ctx - base,
             regions: regions.clone(),
             arrays,
         };
@@ -326,6 +331,7 @@ mod tests {
             kv: &dev,
             max_ctx: ctx,
             base: 0,
+            len: ctx,
             regions: vec![row],
             arrays,
         };

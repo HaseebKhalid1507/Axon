@@ -3154,3 +3154,118 @@ fn serve_api_key_no_body_without_the_key() {
         3.0
     );
 }
+
+/// A completion's (text, cached prompt tokens, prompt tokens, completion
+/// tokens), greedy.
+fn completion_usage(a: SocketAddr, prompt: &str, n: usize) -> (Value, u64, u64, u64) {
+    let r = post(
+        a,
+        "/v1/completions",
+        json!({"prompt": prompt, "max_tokens": n, "temperature": 0}),
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    let v = r.json();
+    let u = &v["usage"];
+    (
+        v["choices"][0]["text"].clone(),
+        u["prompt_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .unwrap(),
+        u["prompt_tokens"].as_u64().unwrap(),
+        u["completion_tokens"].as_u64().unwrap(),
+    )
+}
+
+/// The request running alone runs in slot 0 (`Batch::lend_solo` /
+/// `end_solo`), so slot 0's rows are shared by the batch and the solo
+/// path, and each reuses what the other left there:
+/// (a) a request the batch admits into slot 0 (slot 1 busy), then a request
+///     alone sharing its prompt's prefix: cached_tokens is that prefix, and
+///     the reply is the one it gets alone;
+/// (b) a request alone that hands over to the batch partway (a second one
+///     arrives) and finishes there, then a request alone sharing its
+///     prefix: the same.
+#[test]
+fn serve_solo_and_batch_share_slot_0() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server_with(p.to_str().unwrap(), Device::Cuda, |o| {
+        o.parallel = 2;
+        o.max_draft = 3;
+    });
+    let a = s.addr;
+    let g = &s.generated;
+    let text = |w: &str| -> String {
+        (0..60)
+            .map(|i| {
+                format!(
+                    "{w} {i}: a {} box holds {} stones. ",
+                    ["tin", "oak"][i % 2],
+                    i * 7
+                )
+            })
+            .collect()
+    };
+    let (shared_a, shared_b) = (text("Item"), text("Crate"));
+    let decoder = "The history of the Roman Empire";
+    let x_prompt = format!("{shared_b}Summary:");
+    let (z_prompt, w_prompt) = (format!("{shared_a}Total:"), format!("{shared_a}Count:"));
+    let v_prompt = format!("{shared_b}List:");
+    // Each alone first (the references).
+    let alone = |p: &str, n| completion_usage(a, p, n);
+    let w_ref = alone(&w_prompt, 24);
+    let v_ref = alone(&v_prompt, 24);
+    let x_ref = alone(&x_prompt, 200);
+    assert_eq!(x_ref.3, 200, "the hand-over request runs to its length");
+    // The shared prefix's tokens: what an extension of it reuses.
+    let prefix = |p: &str| completion_usage(a, p, 1).2 - 1;
+    let (pre_a, pre_b) = (prefix(&shared_a), prefix(&shared_b));
+
+    std::thread::scope(|sc| {
+        // (b) X alone (slot 0); Y arrives after X's 20th token: X hands
+        // over and finishes in the batch, Y decodes on in slot 1.
+        let g0 = g.load(Ordering::Relaxed);
+        let x = sc.spawn(|| completion_usage(a, &x_prompt, 200));
+        wait_for("X decoding alone", || g.load(Ordering::Relaxed) >= g0 + 20);
+        let y = sc.spawn(|| completion_usage(a, decoder, 1000));
+        let x = x.join().unwrap();
+        assert_eq!(x.0, x_ref.0, "X, handed over: its reply alone");
+        // (a) Z arrives with Y running: the batch admits it into slot 0
+        // (the only free one).
+        completion_usage(a, &z_prompt, 16);
+        assert!(!y.is_finished(), "Y still running while Z was admitted");
+        y.join().unwrap();
+    });
+    // (a) W alone: slot 0 holds Z's prompt.
+    let w = completion_usage(a, &w_prompt, 24);
+    assert_eq!(w.0, w_ref.0, "W after Z in slot 0: its reply alone");
+    assert!(
+        w.1 + 4 >= pre_a && w.1 <= w.2,
+        "W reuses Z's prefix: {} cached of {} (prefix {pre_a})",
+        w.1,
+        w.2
+    );
+    // (b) slot 0 now holds W; X's rows were overwritten. Run X's prefix
+    // again through a hand-over, then V alone reuses it.
+    std::thread::scope(|sc| {
+        let g0 = g.load(Ordering::Relaxed);
+        let x = sc.spawn(|| completion_usage(a, &x_prompt, 200));
+        wait_for("X decoding alone", || g.load(Ordering::Relaxed) >= g0 + 20);
+        let y = sc.spawn(|| completion_usage(a, decoder, 40));
+        assert_eq!(x.join().unwrap().0, x_ref.0, "X again, handed over");
+        y.join().unwrap();
+    });
+    // Y (40 tokens) may outlast X, in slot 1: slot 0 still holds X's rows.
+    let v = completion_usage(a, &v_prompt, 24);
+    assert_eq!(v.0, v_ref.0, "V after X's hand-over: its reply alone");
+    assert!(
+        v.1 + 4 >= pre_b && v.1 <= v.2,
+        "V reuses X's prefix: {} cached of {} (prefix {pre_b})",
+        v.1,
+        v.2
+    );
+}

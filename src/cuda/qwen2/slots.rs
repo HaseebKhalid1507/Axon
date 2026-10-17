@@ -357,14 +357,15 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// `BatchLm::adopt`: positions 0..n of `src` (a cache of this model,
-    /// the pool's KV type) into slot `slot`, enqueued.
+    /// the pool's KV type) into slot `slot`, enqueued; the bytes copied (0:
+    /// `src` is that slot's view).
     pub fn adopt_cache(
         &self,
         p: &mut CudaPool<'g>,
         slot: usize,
         src: &CudaCache<'g>,
         n: usize,
-    ) -> Result<(), String> {
+    ) -> Result<usize, String> {
         if slot >= p.slots || n > p.ctx || n > src.max_ctx {
             return Err(format!(
                 "adopt: {n} positions into slot {slot} (pool {} x {})",
@@ -379,7 +380,7 @@ impl<'g> CudaQwen2<'g> {
             // it is this slot's, and copying another slot's view's would
             // be a copy within the pool, which nothing needs.
             return match src.row0 == slot * p.ctx {
-                true => Ok(()),
+                true => Ok(0),
                 false => Err(format!("adopt: another slot's view into slot {slot}")),
             };
         }
@@ -391,9 +392,15 @@ impl<'g> CudaQwen2<'g> {
             CacheKv::Q8 { group } => vec![(kvd, 0), (kvd / group * 4, 1)],
         };
         let nl = self.layers.len();
+        // The copy reads src's rows from row 0: a plain cache, or a view of
+        // another pool's slot 0.
+        if src.row0 != 0 {
+            return Err("adopt: a view of another pool's slot past 0".into());
+        }
         let (ns, np) = (src.rows, p.c.rows);
         let mut src_at = 0;
         let mut dst_at = 0;
+        let mut copied = 0;
         for (row, _) in regions {
             for a in 0..2 * nl {
                 src.kv.copy_into(
@@ -402,11 +409,12 @@ impl<'g> CudaQwen2<'g> {
                     dst_at + (a * np + slot * p.ctx) * row,
                     n * row,
                 )?;
+                copied += n * row;
             }
             src_at += 2 * nl * ns * row;
             dst_at += 2 * nl * np * row;
         }
-        Ok(())
+        Ok(copied)
     }
 }
 
@@ -442,7 +450,7 @@ impl<'g> BatchLm for CudaQwen2<'g> {
         cache: &CudaCache<'g>,
         n: usize,
     ) -> Result<(), String> {
-        self.adopt_cache(pool, slot, cache, n)
+        self.adopt_cache(pool, slot, cache, n).map(|_| ())
     }
 
     fn pass_max(&self, pool: &CudaPool<'g>) -> usize {
@@ -756,7 +764,8 @@ mod tests {
                     for step in 0..steps + late_at {
                         if step == 2 {
                             let n = hist[handed].len() - 1;
-                            net.adopt_cache(&mut p, slot_of[handed], &c, n).unwrap();
+                            let copied = net.adopt_cache(&mut p, slot_of[handed], &c, n).unwrap();
+                            assert_eq!(copied == 0, via_view, "adopt copies iff not a view");
                         }
                         if step == late_at {
                             let n = prompts[late].len();
@@ -843,6 +852,10 @@ mod tests {
         let mut guess = vec![h[h.len() - 1]];
         guess.extend_from_slice(&prompt[61..68]);
         let v = net.verify_argmax(&guess, h.len() - 1, c);
+        assert!(
+            v.iter().zip(&guess[1..]).any(|(a, b)| a != b),
+            "a guess is rejected"
+        );
         out.extend_from_slice(&v);
         // Back to the prompt's prefix (reuse of 40 rows), the rest fed
         // again.
@@ -877,23 +890,56 @@ mod tests {
                 let other = ids(30, 5, net.vocab);
                 net.feed_slot(&mut p, 2, &other, 0).unwrap();
                 let other_kv = slot_bytes(&net, &p.c, 2 * ctx, 30);
+                assert!(slot_bytes(&net, &p.c, 2 * ctx, 30) == other_kv);
+                let mut row = Vec::new();
+                net.save_kv(&plain, 0, 90, &mut row).unwrap();
                 for slot in [0, 1] {
                     let what = format!("{} {kv:?} slot {slot}", m.arch);
+                    // Every other slot's rows, whole, before the view runs.
+                    let others: Vec<(usize, Vec<u8>)> = (0..slots)
+                        .filter(|&o| o != slot)
+                        .map(|o| (o, slot_bytes(&net, &p.c, o * ctx, ctx)))
+                        .collect();
                     let mut c = net.slot_view(&p, slot).unwrap();
                     assert_eq!(run(&net, &prompt, &mut c), want, "{what}: picks");
                     assert!(
                         slot_bytes(&net, &p.c, slot * ctx, 90) == want_kv,
                         "{what}: KV bytes"
                     );
-                    assert!(
-                        slot_bytes(&net, &p.c, 2 * ctx, 30) == other_kv,
-                        "{what}: another slot's bytes"
-                    );
-                    net.adopt_cache(&mut p, slot, &c, 90).unwrap();
+                    for (o, b) in &others {
+                        assert!(
+                            slot_bytes(&net, &p.c, o * ctx, ctx) == *b,
+                            "{what}: slot {o}'s bytes"
+                        );
+                    }
+                    assert_eq!(net.adopt_cache(&mut p, slot, &c, 90), Ok(0), "{what}");
                     assert!(slot_bytes(&net, &p.c, slot * ctx, 90) == want_kv, "{what}");
                     assert!(net.adopt_cache(&mut p, 2, &c, 90).is_err(), "{what}");
+                    // kvsave's rows of a view: the slot's, and no further.
+                    let mut img = Vec::new();
+                    net.save_kv(&c, 0, 90, &mut img).unwrap();
+                    assert!(img == row, "{what}: saved image");
+                    net.save_kv(&c, 0, ctx, &mut Vec::new()).unwrap();
+                    assert!(
+                        net.save_kv(&c, 0, ctx + 1, &mut Vec::new()).is_err(),
+                        "{what}"
+                    );
+                    assert!(
+                        net.save_kv(&c, ctx, ctx + 1, &mut Vec::new()).is_err(),
+                        "{what}"
+                    );
+                    let big = vec![0u8; img.len() * 4];
+                    assert!(
+                        net.load_kv(&mut c, ctx - 10, ctx + 10, &mut &big[..])
+                            .is_err(),
+                        "{what}: load past the slot"
+                    );
                 }
                 assert!(net.slot_view(&p, slots).is_err());
+                // A plain cache's adopt copies its rows (what the view's
+                // count of 0 is told apart from).
+                assert!(net.adopt_cache(&mut p, 2, &plain, 90).unwrap() > 0);
+                assert!(slot_bytes(&net, &p.c, 2 * ctx, 90) == want_kv);
             }
         }
     }

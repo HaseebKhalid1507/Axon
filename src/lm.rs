@@ -688,7 +688,9 @@ impl BatchLm for Backend<'_> {
         n: usize,
     ) -> Result<(), String> {
         match (self, cache) {
-            (Backend::Cuda(m), BackendCache::Cuda(c)) => m.adopt_cache(pool, slot, c, n),
+            (Backend::Cuda(m), BackendCache::Cuda(c)) => {
+                m.adopt_cache(pool, slot, c, n).map(|_| ())
+            }
             _ => Err("adopt: a cache of another backend".into()),
         }
     }

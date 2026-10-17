@@ -189,20 +189,9 @@ impl<'a, 't> Batch<'a, 't> {
         self.busy.iter().filter(|b| !**b).count()
     }
 
-    /// A free slot: the one holding the longest prefix of `prompt` (its
-    /// length), or (no prompt) any.
+    /// A free slot for `prompt` (`best_slot`).
     fn free_slot(&self, prompt: &[u32]) -> Option<(usize, usize)> {
-        (0..self.slots)
-            .filter(|&s| !self.busy[s])
-            .map(|s| {
-                let n = self.held[s]
-                    .iter()
-                    .zip(prompt)
-                    .take_while(|(a, b)| a == b)
-                    .count();
-                (s, n)
-            })
-            .max_by_key(|&(s, n)| (n, std::cmp::Reverse(s)))
+        best_slot(&self.held, &self.busy, prompt)
     }
 
     /// Give `job` a free slot: its prompt (all but its last token, which is
@@ -653,6 +642,51 @@ fn emit(s: &mut Seq, id: u32) -> Option<End> {
         return Some(End::Gone);
     }
     hit.then_some(End::Stop)
+}
+
+/// The free slot (not `busy`) whose `held` tokens share the longest prefix
+/// with `prompt`, and that length. Ties go to the highest slot, so slot 0,
+/// where a request running alone runs (`lend_solo`), is taken last: batch
+/// traffic keeps the lone request's prefix there as long as it can.
+fn best_slot(held: &[Vec<u32>], busy: &[bool], prompt: &[u32]) -> Option<(usize, usize)> {
+    (0..held.len())
+        .filter(|&s| !busy[s])
+        .map(|s| {
+            let n = held[s]
+                .iter()
+                .zip(prompt)
+                .take_while(|(a, b)| a == b)
+                .count();
+            (s, n)
+        })
+        .max_by_key(|&(s, n)| (n, s))
+}
+
+#[cfg(test)]
+mod slot_tests {
+    use super::best_slot;
+
+    /// The longest shared prefix wins; on a tie (no match at all, the
+    /// usual case for a new conversation) the highest free slot, slot 0
+    /// last; busy slots never.
+    #[test]
+    fn best_slot_prefers_prefix_then_keeps_slot_0() {
+        let held = vec![vec![1, 2, 3], vec![9], vec![], vec![1, 2]];
+        let free = [false; 4];
+        assert_eq!(best_slot(&held, &free, &[1, 2, 3, 4]), Some((0, 3)));
+        assert_eq!(best_slot(&held, &free, &[1, 2, 7]), Some((3, 2)));
+        assert_eq!(best_slot(&held, &free, &[5, 6]), Some((3, 0)));
+        assert_eq!(best_slot(&held, &free, &[]), Some((3, 0)));
+        assert_eq!(
+            best_slot(&held, &[false, true, true, true], &[5]),
+            Some((0, 0))
+        );
+        assert_eq!(
+            best_slot(&held, &[false, false, true, true], &[5]),
+            Some((1, 0))
+        );
+        assert_eq!(best_slot(&held, &[true; 4], &[1]), None);
+    }
 }
 
 #[cfg(test)]

@@ -268,7 +268,9 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
   to an idle server alone takes the single-stream path below and is fed whole: a request
   arriving during that prefill waits for it. Each slot is a KV cache as long as the context, and a
   pool of N slots costs N caches (7B at 32768: 1.75 GiB each): the request running alone
-  runs in slot 0's memory (its own scratch beside it, no cache of its own). Without `--ctx` or `--parallel` the context comes first: as many slots
+  runs in slot 0's memory (its own scratch beside it, no cache of its own), which batched
+  requests take last (unless it holds their prefix), so its prefix stays cached there.
+  Without `--ctx` or `--parallel` the context comes first: as many slots
   (2 to 8) as fit with the whole context; if not even 2 do, 2 or more with the longest
   context they fit with, down to 32768 (or the whole context, if shorter); below that, one
   request at a time with the whole context, and stderr says at which context 2 would fit

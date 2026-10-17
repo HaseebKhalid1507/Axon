@@ -68,3 +68,23 @@ Within noise (round spread ~±2 tok/s). Every request's text was identical acros
   pool's; sharing it is possible but touches the batch passes. KV was the slot's worth.
 - The solo path always uses slot 0. A request alone whose prefix sits in another slot re-prefills (main kept
   the solo cache's own history instead; same bits either way: cache reuse == fresh prefill).
+- Q6_K prefill copy at `--kv q8 --ctx 32768`: not made with 5 slots ("0.79 GiB free beside the caches"), and
+  not made on main's 4 slots either (same note, 1017-042200-5fdc). At f16 32768 it is made with 2 slots.
+
+## Review round 1 (shady, 2a4eed6: SHIP-AFTER-FIXES)
+- Slot choice (`engine::best_slot`): ties now go to the highest free slot, so slot 0 is taken last. At first
+  ties went to slot 0, which let any batched admit with no prefix match evict the request-alone's prefix there.
+  On main the solo cache was out of reach of batch traffic; now batch traffic takes slot 0 only when every
+  other slot is busy or slot 0 holds the longest match. Unit test `best_slot_prefers_prefix_then_keeps_slot_0`.
+- kvsave rows of a view (`kvio::Rows::len`): `save_kv`/`load_kv` on a slot view are bounded by the slot
+  (`row0 + max_ctx`), not the pool's rows, so they can't reach the next slot. Tested in
+  `slot_view_matches_a_cache` (save of 0..ctx works, ..ctx+1 and a load past the slot are refused; a view's
+  saved image == a plain cache's).
+- `adopt_cache` returns the bytes copied: 0 for the slot's own view, >0 for a plain cache (both asserted, also
+  in `pool_steps_match_solo_in_any_order`); the copy path refuses a source with `row0 != 0`.
+- `slot_view_matches_a_cache` also asserts its verify pass rejected a guess, and that every other slot's rows
+  are byte-identical before and after a view runs.
+- New serve test `serve_solo_and_batch_share_slot_0`, 2 slots: (a) a request the batch admits into slot 0, then
+  a request alone sharing its prefix: cached_tokens covers the prefix and the reply == alone; (b) alone ->
+  hand-over -> finishes batched -> a request alone sharing its prefix: the same.
+- `layer_kv` (pipeline.rs, tests) documents that on a view it dumps the whole pool.
