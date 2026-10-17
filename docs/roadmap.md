@@ -191,6 +191,7 @@ trigger each step. Nothing here is scheduled.
 | Llama 3.1 405B | dense | ≈ 243 GB | ≈ 243 GB | `llama`; pipeline parallel (#34) should run it on a 4×80 GB pod (untested) | tensor parallel, to make it fast |
 | DeepSeek V3 / R1 (671B, 37B active) | MoE + MLA | ≈ 403 GB | ≈ 22 GB | refused | MLA attention, DeepSeek routing, ≥ 450 GB RAM or a GPU node |
 | Kimi K2 (1T, 32B active) | DeepSeek V3 architecture | ≈ 600 GB | ≈ 19 GB | refused | same as DeepSeek, plus Kimi's tokenizer and 2–3-bit types; ≥ 650 GB at Q4_K_M ([long-term goal](#long-term-goals)) |
+| DeepSeek V4.1 Flash (1017) | MoE + new attention, vision | 444.7 GB (MEASURED: published GGUF shards) | ≈ 9 GB | refused (`deepseek41`) | a new architecture ([below](#deepseek-v41-flash)), experts on the GPU, a ≥ 500 GB node |
 
 **What's missing, in build order.**
 
@@ -231,6 +232,36 @@ trigger each step. Nothing here is scheduled.
    network volume means each file downloads once.
    - *Trigger:* whenever a step above needs a full-size gate.
 
+**DeepSeek V4.1 Flash.** <a id="deepseek-v41-flash"></a>Added 2026-10-17 at Haseeb's request
+([HF](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017)). A target, not a plan: we deal with it
+when MoE on the GPU and the DeepSeek V3 work above are done.
+
+- **What it is** (MEASURED from the HF `config.json` and a published GGUF's header): 40 layers, width 5120,
+  384 routed experts + 1 shared, 6 used per token, expert FFN 2304, 1M context (YaRN ×16). The attention is
+  not V3's MLA: 64 query heads over 1 KV head of 512 dims (64 roped), a query LoRA (1280), a grouped output
+  LoRA (8 groups, rank 1024), a 128-token sliding window, per-layer KV compression ratios, and a sparse-attention
+  indexer (32 heads × 128, top-512). Also new: 4-way hyper-connections normalised by 20 Sinkhorn iterations,
+  "engram" n-gram hash embeddings at layers 1 and 14, `sqrtsoftplus` gating, a SwiGLU clamp, 3 draft layers
+  (MTP/DSpark) and a vision tower. Native weights are FP8 (32×32 blocks, ue8m0 scales) with FP4 experts:
+  510 GB of safetensors. GGUFs exist with `general.architecture = deepseek41`: Q4_K_M 444.7 GB, Q2_K 264.5 GB.
+- **Reference:** our llama.cpp checkout (2026-10-12) has `deepseek4` but not `deepseek41`. Find the
+  implementation that produced those GGUFs before designing anything; it is the oracle.
+- **What Axon needs:** the `deepseek41` architecture (attention, indexer, compression, hyper-connections, engram,
+  routing), MoE experts on the GPU (stages 2–3), multi-GPU for a 445 GB file, and FP8/FP4 types only if we want
+  the native weights rather than GGUF. Text first; vision later. The draft layers could feed `--draft`.
+- **Exactness:** the indexer's top-k must break ties by position and pick the same keys in decode, prefill and
+  verify; the Sinkhorn loop runs a fixed number of iterations in a fixed order; compressed and uncompressed layers
+  each keep one fold order. Same decode == prefill rule as everything else.
+- **Hardware:** Parabellum can't download it (≈ 35 GB free disk). Q4_K_M needs 8×80 GB (640 GB) or 4×H200 (564 GB,
+  tight once KV is added) with pipeline parallel, or a ≥ 512 GB RAM server with the experts on the CPU, plus a
+  ≥ 500 GB network volume so the file downloads once.
+- **Cost of one full-size gate:** ESTIMATED from our account's prices (H100 $2.89/h): 8×H100 ≈ $23/h, so a
+  2-hour session (download + gates + bench) ≈ $50. That is above the current $38 guard cap; raise it for that run.
+- **Read per token:** ESTIMATED ≈ 15B active weights (≈ 10B expert, ≈ 5B attention) × 4.8 bits ≈ 9 GB.
+- **Dev model:** no small `deepseek41` sibling is known yet; check at the time. Otherwise prune to 2–3 layers and
+  a few experts on a big-disk pod, as the Pruned-2B did for MoE, and gate kernels against the reference there.
+- *Trigger:* MoE stage 3 and the DeepSeek V3 item (2) are done.
+
 **Why this order.** Item 1 is already planned and unlocks most of the table. Item 2 unlocks the two biggest
 models. Item 3 matters for dense giants. Item 4 only matters past RAM.
 
@@ -244,6 +275,8 @@ models. Item 3 matters for dense giants. Item 4 only matters past RAM.
 | DeepSeek V3 | server, experts on CPU, assumed ~300 GB/s RAM | ≈ 14 tok/s |
 | Llama 3.1 405B | 4×H100, pipeline parallel (today's code) | ≤ 14 tok/s |
 | Llama 3.1 405B | 4×H100, tensor parallel (item 3) | up to ~50 tok/s before the all-reduce cost |
+| DeepSeek V4.1 Flash | 8×H100, pipeline parallel, Q4_K_M | ≤ ~370 tok/s (≈ 9 GB ÷ 3.35 TB/s) |
+| DeepSeek V4.1 Flash | server, experts on CPU (≈ 6 GB/token), assumed ~300 GB/s RAM | ≈ 50 tok/s |
 
 ## Not planned, and why
 
