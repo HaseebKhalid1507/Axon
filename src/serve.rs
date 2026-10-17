@@ -116,6 +116,13 @@ pub struct Opts {
     /// Positions per slot at most (None: the context; tests shrink the pool
     /// with it).
     pub slot_ctx: Option<usize>,
+    /// Prompt tokens a batched step feeds at least while requests decode
+    /// (`--prefill-chunk`; 0: prompts fed whole): a long prompt prefills in
+    /// chunks between the running requests' steps.
+    pub prefill_chunk: usize,
+    /// A batched step's time budget for its chunk and decode, in ms
+    /// (`--prefill-ms`; 0: chunks of exactly `prefill_chunk`).
+    pub prefill_ms: usize,
 }
 
 /// The chat framing `axon chat` uses (chat.rs: ChatML, or Llama 3's
@@ -828,8 +835,13 @@ fn engine(
         log: o.log,
         generated: o.generated,
     };
-    let mut batch = pool
-        .map(|(pool, n, slot_ctx)| Batch::new(&net, pool, n, slot_ctx, o.log, e.generated.clone()));
+    let mut batch = pool.map(|(pool, n, slot_ctx)| {
+        let policy = engine::ChunkPolicy {
+            floor: o.prefill_chunk,
+            ms: o.prefill_ms,
+        };
+        Batch::new(&net, pool, n, slot_ctx, policy, o.log, e.generated.clone())
+    });
     let served = batch.as_ref().map_or(ctx, |b| b.ctx.min(ctx));
     let banner = match &batch {
         Some(b) => format!("{kvs}, ctx {served}{drafts}, {} requests at once", b.slots),
@@ -876,9 +888,9 @@ fn engine(
                 Err(_) => break,
             }
         }
-        // Admit the first request that fits a slot (its prefill a step of
-        // its own) if others run or wait; one alone runs the S1 way, as
-        // does one that fits no slot, once the batch is idle.
+        // Admit the first request that fits a slot (its prompt then fed a
+        // chunk per step) if others run or wait; one alone runs the S1 way,
+        // as does one that fits no slot, once the batch is idle.
         let first_fit = waiting.iter().position(|j| fits_slot(j, b.ctx));
         if let Some(i) = first_fit
             && b.has_free()
@@ -886,10 +898,7 @@ fn engine(
         {
             let job = waiting.remove(i).unwrap();
             let out = text_out(e.tok, &job);
-            let tx = job.tx.clone();
-            if let Err(err) = or_exit("a prefill", || b.admit(job, out)) {
-                fatal(b, &err, Some(tx));
-            }
+            b.admit(job, out);
         } else if b.idle() {
             if let Some(job) = waiting.pop_front() {
                 let ho = Handover {
@@ -1133,6 +1142,8 @@ struct EngineOpts {
     parallel: usize,
     parallel_set: bool,
     slot_ctx: Option<usize>,
+    prefill_chunk: usize,
+    prefill_ms: usize,
     path: String,
     device: Device,
     gpu_layers: Option<usize>,
@@ -1220,6 +1231,8 @@ pub fn start(o: Opts) -> io::Result<Server> {
         parallel: o.parallel,
         parallel_set: o.parallel_set,
         slot_ctx: o.slot_ctx,
+        prefill_chunk: o.prefill_chunk,
+        prefill_ms: o.prefill_ms,
         generated: generated.clone(),
         path: o.path.clone(),
         device: o.device,
@@ -1871,8 +1884,8 @@ fn stream(
 
 const SERVE_USAGE: &str = "usage: axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--device D] \
      [--gpu-layers N] [--kv T] [--draft K] [--draft-model PATH] [--alias NAME] [--max-tokens N] \
-     [--cors [ORIGIN]] [--max-conns N] [--max-queue N] [--parallel N] [--no-think] [--think-inline] \
-     [--quiet] [sampling flags]";
+     [--cors [ORIGIN]] [--max-conns N] [--max-queue N] [--parallel N] [--prefill-chunk N] \
+     [--prefill-ms MS] [--no-think] [--think-inline] [--quiet] [sampling flags]";
 
 /// `serve` subcommand: args = [axon, serve, model, flags...]
 pub fn run(args: &[String]) -> io::Result<()> {
@@ -1901,6 +1914,8 @@ pub fn run(args: &[String]) -> io::Result<()> {
         parallel: PARALLEL,
         parallel_set: false,
         slot_ctx: None,
+        prefill_chunk: engine::PREFILL_CHUNK,
+        prefill_ms: engine::PREFILL_MS,
     };
     let mut k = None;
     let mut i = 3;
@@ -1939,7 +1954,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
             }
             "--host" | "--port" | "--ctx" | "--draft" | "--draft-model" | "--device"
             | "--gpu-layers" | "--kv" | "--alias" | "--max-tokens" | "--max-conns"
-            | "--max-queue" | "--parallel" => {}
+            | "--max-queue" | "--parallel" | "--prefill-chunk" | "--prefill-ms" => {}
             _ => crate::fail(&format!("unknown argument '{f}' for serve")),
         }
         let Some(v) = args.get(i + 1) else {
@@ -1968,6 +1983,8 @@ pub fn run(args: &[String]) -> io::Result<()> {
             "--max-tokens" => o.max_tokens = Some(whole(true)),
             "--max-conns" => o.max_conns = whole(true),
             "--max-queue" => o.max_queue = whole(true),
+            "--prefill-chunk" => o.prefill_chunk = whole(false),
+            "--prefill-ms" => o.prefill_ms = whole(false),
             "--parallel" => {
                 o.parallel = whole(true);
                 o.parallel_set = true;

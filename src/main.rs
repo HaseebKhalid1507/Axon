@@ -65,8 +65,8 @@ usage:
                                             talk to an instruct model (sampled; --temp 0: greedy)
   axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--draft K] [--draft-model PATH]
             [--device D] [--gpu-layers N] [--kv T] [--alias NAME] [--max-tokens N] [--cors [ORIGIN]]
-            [--max-conns N] [--max-queue N] [--parallel N] [--no-think] [--think-inline]
-            [--quiet] [sampling flags; the repeat penalty defaults to 1 (off)]
+            [--max-conns N] [--max-queue N] [--parallel N] [--prefill-chunk N] [--prefill-ms MS]
+            [--no-think] [--think-inline] [--quiet] [sampling flags; the repeat penalty defaults to 1 (off)]
                                             an OpenAI-compatible HTTP server (/v1/models,
                                             /v1/chat/completions, /v1/completions; on cuda
                                             up to --parallel (8) requests decode together,

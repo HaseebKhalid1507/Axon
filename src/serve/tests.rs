@@ -43,6 +43,8 @@ fn server_with(path: &str, device: Device, f: impl FnOnce(&mut Opts)) -> Server 
         parallel: PARALLEL,
         parallel_set: false,
         slot_ctx: None,
+        prefill_chunk: super::engine::PREFILL_CHUNK,
+        prefill_ms: super::engine::PREFILL_MS,
     };
     f(&mut o);
     start(o).expect("start the server")
@@ -1979,4 +1981,235 @@ fn serve_default_ctx() {
     assert_eq!(r.status, 200, "{}", r.body);
     let used = r.json()["usage"]["prompt_tokens"].as_u64().unwrap();
     assert!(used > 8192 && used < c, "{used} prompt tokens");
+}
+
+/// Chunked prefill (`--prefill-chunk`, `--prefill-ms`): long prompts
+/// admitted while other requests decode are fed a chunk per step in
+/// between those requests' steps (the decoding ones keep producing tokens
+/// meanwhile), and every request's reply is the one it gets alone: two
+/// long ones sent together (both prefilling at once), greedy and sampled
+/// (top_k off: the host selects); chunks of 16 on the f16 and q8 caches,
+/// chunks sized by a time budget (varying sizes), and the Gemma 3 model
+/// (sliding-window layers, prompts past their window) when present; then
+/// again with the long prompts extended, so their slots' rows are reused
+/// and only the rest is fed in chunks.
+#[test]
+fn serve_chunked_prefill_matches_solo() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    use crate::kv::KvType::{F16, Q8};
+    // (model, kv, chunk floor, ms budget)
+    let mut configs = vec![
+        (p.clone(), F16, 16, 0),
+        (p.clone(), Q8, 16, 0),
+        (p, F16, 16, 3),
+    ];
+    if let Some(g) = crate::testutil::gemma3_model_path() {
+        configs.push((g, F16, 16, 0));
+    }
+    const N: u64 = 400;
+    let decoders = [
+        json!({"prompt": "The history of the Roman Empire", "max_tokens": N, "temperature": 0}),
+        json!({"prompt": "Once upon a time, in a small village by the sea,", "max_tokens": N,
+               "temperature": 0.8, "seed": 7}),
+    ];
+    let text: String = (0..120)
+        .map(|i| {
+            format!(
+                "Line {i}: the {} cat sat on mat number {}. ",
+                ["red", "blue", "green"][i % 3],
+                i * 7
+            )
+        })
+        .collect();
+    let longs = |tail: &str| {
+        [
+            json!({"prompt": format!("{text}{tail}Summary:"), "max_tokens": 40, "temperature": 0}),
+            json!({"prompt": format!("Notes. {text}{tail}In short,"), "max_tokens": 40,
+                   "temperature": 0.9, "seed": 3, "top_k": 0}),
+        ]
+    };
+    let completion = |r: &Resp| -> (String, Value) {
+        assert_eq!(r.status, 200, "{}", r.body);
+        let v = r.json();
+        (
+            v["choices"][0]["text"].to_string(),
+            v["usage"]["completion_tokens"].clone(),
+        )
+    };
+    for (path, kv, chunk, ms) in configs {
+        let gemma = path.to_string_lossy().contains("gemma");
+        let s = server_with(path.to_str().unwrap(), Device::Cuda, |o| {
+            o.kv = kv;
+            o.parallel = 4;
+            o.max_draft = 3;
+            o.prefill_chunk = chunk;
+            o.prefill_ms = ms;
+        });
+        let a = s.addr;
+        for (round, tail) in ["", "And one more line about a dog. "]
+            .into_iter()
+            .enumerate()
+        {
+            let long = longs(tail);
+            let solo_dec: Vec<_> = decoders
+                .iter()
+                .map(|b| completion(&post(a, "/v1/completions", b.clone())))
+                .collect();
+            // (Gemma's raw completions may end early: then the "decoded
+            // meanwhile" check is skipped.)
+            let running = solo_dec.iter().all(|d| d.1 == N);
+            assert!(
+                running || gemma,
+                "{kv:?}: the decoding requests must run {N} tokens"
+            );
+            let solo_long: Vec<_> = long
+                .iter()
+                .map(|b| completion(&post(a, "/v1/completions", b.clone())))
+                .collect();
+            let what = format!(
+                "{} {kv:?} chunk {chunk} ms {ms} round {round}",
+                path.display()
+            );
+            std::thread::scope(|sc| {
+                let g = &s.generated;
+                let g0 = g.load(Ordering::Relaxed);
+                let dec: Vec<_> = decoders
+                    .iter()
+                    .map(|b| sc.spawn(move || completion(&post(a, "/v1/completions", b.clone()))))
+                    .collect();
+                wait_for("the decoding requests", || {
+                    g.load(Ordering::Relaxed) >= g0 + 20
+                });
+                // The first long one streamed: how many tokens the others
+                // made between its arrival and its first token.
+                let mut b0 = long[0].clone();
+                b0["stream"] = json!(true);
+                let first = sc.spawn(move || {
+                    let mut c = TcpStream::connect(a).unwrap();
+                    c.set_read_timeout(Some(Duration::from_secs(300))).unwrap();
+                    let req = request("POST", "/v1/completions", &b0.to_string(), true);
+                    let mut buf = Vec::new();
+                    let g1 = g.load(Ordering::Relaxed);
+                    c.write_all(req.as_bytes()).unwrap();
+                    while !buf.windows(6).any(|w| w == b"data: ") {
+                        let mut t = [0u8; 4096];
+                        let n = c.read(&mut t).expect("read");
+                        assert!(n > 0, "EOF before the first token");
+                        buf.extend_from_slice(&t[..n]);
+                    }
+                    let during = g.load(Ordering::Relaxed) - g1;
+                    let r = read_resp(&mut c, &mut buf);
+                    assert_eq!(r.status, 200, "{}", r.body);
+                    let (t, _) = streamed_text(&r, false);
+                    (during, t)
+                });
+                let r = post(a, "/v1/completions", long[1].clone());
+                let second = completion(&r);
+                let v = r.json();
+                let cached = v["usage"]["prompt_tokens_details"]["cached_tokens"]
+                    .as_u64()
+                    .unwrap();
+                let prompt = v["usage"]["prompt_tokens"].as_u64().unwrap();
+                assert!(prompt > 1000, "{what}: a {prompt}-token prompt");
+                if round == 1 {
+                    // Its slot holds round 0's prompt, all but the tail.
+                    assert!(cached + 30 > prompt, "{what}: {cached} of {prompt} cached");
+                }
+                let (during, t0) = first.join().unwrap();
+                eprintln!("{what}: {during} tokens decoded while the long prompt prefilled");
+                assert_eq!(
+                    serde_json::to_string(&t0).unwrap(),
+                    solo_long[0].0,
+                    "{what}: long request 0"
+                );
+                assert_eq!(second, solo_long[1], "{what}: long request 1");
+                for (i, (h, d)) in dec.into_iter().zip(&solo_dec).enumerate() {
+                    assert_eq!(&h.join().unwrap(), d, "{what}: decoding request {i}");
+                }
+                // Over 60 chunks of 16 for a prompt of over 1000 tokens,
+                // each followed by a step of the two decoding requests
+                // (round 1 feeds only the tail; a time budget's chunks
+                // are larger).
+                assert!(
+                    round == 1 || ms > 0 || !running || during >= 40,
+                    "{what}: {during} tokens decoded while a long prompt prefilled"
+                );
+            });
+        }
+    }
+}
+
+/// A request cancelled while its prompt is being fed in chunks frees its
+/// slot with the rows fed so far, and the next prompt sharing that prefix
+/// reuses them (cached_tokens) and gets the reply it gets alone.
+#[test]
+fn serve_cancel_mid_prefill_reuses_rows() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    // One token per chunk, a decode step between chunks: the prompt takes
+    // over a second to feed, longer than a disconnect takes to notice.
+    let s = server_with(p.to_str().unwrap(), Device::Cuda, |o| {
+        o.parallel = 4;
+        o.prefill_chunk = 1;
+        o.prefill_ms = 0;
+    });
+    let a = s.addr;
+    let text: String = (0..120)
+        .map(|i| {
+            format!(
+                "Item {i}: a {} box holds {} stones. ",
+                ["tin", "oak"][i % 2],
+                i * 3
+            )
+        })
+        .collect();
+    let decoder =
+        json!({"prompt": "The history of the Roman Empire", "max_tokens": 1500, "temperature": 0});
+    let next = json!({"prompt": format!("{text}Total:"), "max_tokens": 30, "temperature": 0});
+    let solo = post(a, "/v1/completions", next.clone()).json();
+    let solo_text = solo["choices"][0]["text"].clone();
+    std::thread::scope(|sc| {
+        let g = &s.generated;
+        let g0 = g.load(Ordering::Relaxed);
+        let dec = sc.spawn(move || post(a, "/v1/completions", decoder));
+        wait_for("the decoding request", || {
+            g.load(Ordering::Relaxed) >= g0 + 20
+        });
+        // Its prompt: the same text with another end; gone partway in.
+        let gone = json!({"prompt": format!("{text}Count:"), "max_tokens": 30, "stream": true});
+        let mut c = TcpStream::connect(a).unwrap();
+        let g1 = g.load(Ordering::Relaxed);
+        c.write_all(request("POST", "/v1/completions", &gone.to_string(), true).as_bytes())
+            .unwrap();
+        // 50 decode steps: 50 chunks of its prompt fed.
+        wait_for("its prefill to start", || {
+            g.load(Ordering::Relaxed) >= g1 + 50
+        });
+        drop(c);
+        // Once the disconnect is noticed (POLL) the slot is free again.
+        std::thread::sleep(Duration::from_millis(600));
+        let r = post(a, "/v1/completions", next);
+        let v = r.json();
+        assert_eq!(r.status, 200, "{}", r.body);
+        let cached = v["usage"]["prompt_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .unwrap();
+        let prompt = v["usage"]["prompt_tokens"].as_u64().unwrap();
+        assert!(
+            cached > 0 && cached + 10 < prompt,
+            "{cached} of {prompt} tokens cached: the cancelled prompt's partial rows"
+        );
+        assert_eq!(v["choices"][0]["text"], solo_text);
+        let d = dec.join().unwrap();
+        assert_eq!(d.status, 200, "{}", d.body);
+    });
 }
