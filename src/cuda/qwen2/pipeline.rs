@@ -590,7 +590,7 @@ impl<'g> PipelineQwen2<'g> {
 pub(crate) fn layer_kv(net: &CudaQwen2, c: &CudaCache) -> Vec<Vec<u8>> {
     let all: Vec<u8> = c.kv.read().unwrap();
     let nl = net.layers.len();
-    let n = c.max_ctx * net.kv_dim();
+    let n = c.rows * net.kv_dim();
     match c.mode {
         CacheKv::F16 => all.chunks(4 * n).map(<[u8]>::to_vec).collect(),
         CacheKv::Q8 { group } => {

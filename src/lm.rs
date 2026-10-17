@@ -173,6 +173,11 @@ pub trait BatchLm: Lm {
     /// each row's keys and values into its slot, and its result.
     fn step(&self, pool: &mut Self::Pool, rows: &[SeqRow]) -> Result<Vec<RowOut>, StepError>;
 
+    /// A cache whose rows are slot `slot`'s (the same memory): what the
+    /// `Lm` calls write there, the slot holds, and `adopt` of it into that
+    /// slot copies nothing.
+    fn slot_cache(&self, pool: &Self::Pool, slot: usize) -> Result<Self::Cache, String>;
+
     /// Copy positions 0..n of `cache` into slot `slot`.
     fn adopt(
         &self,
@@ -662,6 +667,15 @@ impl BatchLm for Backend<'_> {
     fn step(&self, pool: &mut Self::Pool, rows: &[SeqRow]) -> Result<Vec<RowOut>, StepError> {
         match self {
             Backend::Cuda(n) => n.step_rows(pool, rows),
+            _ => unreachable!("a pool is the GPU model's"),
+        }
+    }
+
+    fn slot_cache(&self, pool: &Self::Pool, slot: usize) -> Result<BackendCache, String> {
+        match self {
+            Backend::Cuda(n) => n
+                .slot_view(pool, slot)
+                .map(|c| BackendCache::Cuda(Box::new(c))),
             _ => unreachable!("a pool is the GPU model's"),
         }
     }

@@ -9,10 +9,11 @@
 //! position, the greedy pick or its sampling candidates back), each request's
 //! next token picked on the host (`Sampler::pick`, its own seeded rng), its
 //! text sent, and finished requests' slots freed. A request admitted while
-//! nothing else runs goes the S1 way (`Engine::job`: `generate` on the
-//! engine's own cache, with CUDA graphs and drafting); if another request
-//! arrives meanwhile, its rows are copied into a slot (`BatchLm::adopt`) and
-//! it carries on in the steps.
+//! nothing else runs goes the S1 way (`Engine::job`: `generate` with CUDA
+//! graphs and drafting, on a cache that is a view of slot 0's rows,
+//! `BatchLm::slot_cache`: no cache beside the pool); if another request
+//! arrives meanwhile, its rows are already in slot 0 (`BatchLm::adopt`
+//! copies nothing) and it carries on in the steps.
 //!
 //! So while requests decode, a long prompt is fed a chunk per step, in
 //! between their steps: they keep producing tokens while it prefills (a
@@ -332,15 +333,31 @@ impl<'a, 't> Batch<'a, 't> {
         Ok(())
     }
 
-    /// Take over a request `generate` was running on `cache` (the S1 path):
-    /// its rows 0..hist.len() - 1 copied into a free slot.
+    /// The tokens slot 0 holds, for the S1 path to run there (on
+    /// `slot_cache(0)`, from as many of them as its prompt shares); the
+    /// slot holds nothing meanwhile. With the batch idle: slot 0 is free.
+    pub fn lend_solo(&mut self) -> Vec<u32> {
+        assert!(self.idle() && !self.busy[0], "lend_solo: slot 0 is busy");
+        std::mem::take(&mut self.held[0])
+    }
+
+    /// The S1 path ended (without a hand-over): slot 0 holds the rows of
+    /// `hist`.
+    pub fn end_solo(&mut self, hist: Vec<u32>) {
+        self.held[0] = hist;
+    }
+
+    /// Take over a request `generate` was running on `cache` (the S1 path,
+    /// in slot 0: `slot_cache(0)`, so its rows 0..hist.len() - 1 are
+    /// already there and `BatchLm::adopt` copies nothing).
     pub fn adopt(
         &mut self,
         mut seq: Seq<'t>,
         cache: &<Backend<'a> as crate::lm::Lm>::Cache,
     ) -> Result<(), String> {
         let n = seq.hist.len() - 1;
-        let (slot, _) = self.free_slot(&[]).expect("adopt: a free slot");
+        let slot = 0;
+        assert!(!self.busy[slot], "adopt: slot 0 is busy");
         self.net.adopt(&mut self.pool, slot, cache, n)?;
         self.busy[slot] = true;
         self.held[slot] = seq.hist[..n].to_vec();

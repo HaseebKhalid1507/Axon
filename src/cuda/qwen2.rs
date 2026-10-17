@@ -39,6 +39,7 @@ use crate::gguf::{Model, Tensor};
 use crate::lm::Lm;
 use crate::quant::{self, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0};
 use crate::sample::{self, CAND_MAX, Cand, CandSpec};
+use std::rc::Rc;
 
 /// Positions per attention tile (decode.cu ATT_TILE) and largest GQA group.
 const ATT_TILE: usize = 128;
@@ -460,10 +461,16 @@ pub struct CudaCache<'g> {
     max_ctx: usize,
     /// How kv stores keys and values.
     mode: CacheKv,
-    /// F16: per layer, K then V, each [max_ctx][kv_dim] f16. Q8: per layer
-    /// K then V int8 [max_ctx][kv_dim], then per layer K then V scales f32
-    /// [max_ctx][kv_dim / group] (`kv_args`).
-    kv: DevBuf<'g>,
+    /// F16: per layer, K then V, each [rows][kv_dim] f16. Q8: per layer
+    /// K then V int8 [rows][kv_dim], then per layer K then V scales f32
+    /// [rows][kv_dim / group] (`kv_args`). Shared by a pool and its slot
+    /// view (`CudaQwen2::slot_view`): the view's positions are rows
+    /// row0..row0 + max_ctx of the pool's.
+    kv: Rc<DevBuf<'g>>,
+    /// Rows of each K/V array of `kv` (max_ctx, or a view's pool's).
+    rows: usize,
+    /// The row position 0 is at (0, or a view's slot's first row).
+    row0: usize,
     /// Q8: this token's keys and values, f32 [2][kv_dim], on their way into
     /// the cache (qkv_rope_f32 to attn_split_q8). Empty for F16.
     kvf: DevBuf<'g>,
@@ -1438,8 +1445,8 @@ impl<'g> CudaQwen2<'g> {
 
     /// `kv_args` from cache row `row0` on (a pool slot's first row).
     fn kv_args_at(&self, c: &CudaCache, l: usize, row0: usize) -> Vec<Arg> {
-        let n = c.max_ctx * self.kv_dim();
-        let e = row0 * self.kv_dim();
+        let n = c.rows * self.kv_dim();
+        let e = (c.row0 + row0) * self.kv_dim();
         assert!(row0 <= c.max_ctx, "row {row0} past the cache");
         match c.mode {
             CacheKv::F16 => vec![
@@ -1590,6 +1597,18 @@ impl<'g> CudaQwen2<'g> {
         mode: CacheKv,
         att_ctx: usize,
     ) -> Result<CudaCache<'g>, String> {
+        self.make_cache(max_ctx, mode, att_ctx, None)
+    }
+
+    /// `try_cache_at`; with `shared` (a pool's KV, its rows per array and
+    /// the view's first row) a view of those rows: no KV of its own.
+    pub(super) fn make_cache(
+        &self,
+        max_ctx: usize,
+        mode: CacheKv,
+        att_ctx: usize,
+        shared: Option<(Rc<DevBuf<'g>>, usize, usize)>,
+    ) -> Result<CudaCache<'g>, String> {
         let g = self.gpu;
         let f = 4;
         let mode = match mode {
@@ -1609,8 +1628,12 @@ impl<'g> CudaQwen2<'g> {
         // context, ~360 MiB at 32k: the attention partials grow with it),
         // so every one is checked against what is free now, before any of
         // it is allocated.
+        let own_kv = match shared {
+            None => self.kv_cache_bytes(mode, max_ctx),
+            Some(_) => 0,
+        };
         let want = (self.cache_bytes_kv(mode, att_ctx) - self.kv_cache_bytes(mode, att_ctx)
-            + self.kv_cache_bytes(mode, max_ctx)) as u64
+            + own_kv) as u64
             + CACHE_HEADROOM;
         let free = g.info()?.free_bytes;
         if want > free {
@@ -1626,15 +1649,27 @@ impl<'g> CudaQwen2<'g> {
                 }
             ));
         }
-        let kv = g.alloc(self.kv_cache_bytes(mode, max_ctx)).map_err(|e| {
-            format!("no room for a {max_ctx}-token KV cache on the GPU ({e}); try a smaller --ctx")
-        })?;
+        let fresh = shared.is_none();
+        let (kv, rows, row0) = match shared {
+            Some(s) => s,
+            None => {
+                let kv = g.alloc(own_kv).map_err(|e| {
+                    format!(
+                        "no room for a {max_ctx}-token KV cache on the GPU ({e}); try a smaller --ctx"
+                    )
+                })?;
+                (Rc::new(kv), max_ctx, 0)
+            }
+        };
+        assert!(row0 + max_ctx <= rows, "a view past its pool's rows");
         let q8 = matches!(mode, CacheKv::Q8 { .. });
         let c = CudaCache {
             net: self.id,
             max_ctx,
             mode,
             kv,
+            rows,
+            row0,
             kvf: g.alloc(if q8 { 2 * self.kv_dim() * f } else { 0 })?,
             x: g.alloc(self.dim * f)?,
             q: g.alloc(self.q_dim * f)?,
@@ -1668,8 +1703,10 @@ impl<'g> CudaQwen2<'g> {
             samp: None,
         };
         // Stale KV rows are never read (attention stops at pos), but zeroed
-        // memory keeps a bug from reading NaNs.
-        c.kv.zero()?;
+        // memory keeps a bug from reading NaNs (a view's pool zeroed its).
+        if fresh {
+            c.kv.zero()?;
+        }
         c.att.zero()?; // the counters: zero between launches
         Ok(c)
     }

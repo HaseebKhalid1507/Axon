@@ -148,12 +148,12 @@ impl<'g> CudaQwen2<'g> {
         }
     }
 
-    /// `c`'s rows (a whole cache: base 0).
+    /// `c`'s rows (a whole cache: base 0; a slot view: its slot's).
     pub(crate) fn cache_rows<'a>(&self, c: &'a CudaCache<'g>) -> Rows<'a, 'g> {
         Rows {
             kv: &c.kv,
-            max_ctx: c.max_ctx,
-            base: 0,
+            max_ctx: c.rows,
+            base: c.row0,
             regions: self.kv_regions(c.mode),
             arrays: 2 * self.layers.len(),
         }

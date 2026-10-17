@@ -1772,8 +1772,9 @@ fn serve_shrunk_pool() {
     batched_vs_solo(a, &batch_bodies(false), "shrunk pool, no max_tokens");
 }
 
-/// `plan_slots` over a model of the memory: the single-request cache and
-/// each slot take `per` bytes a position, out of `free`.
+/// `plan_slots` over a model of the memory: s slots of c positions fit
+/// in `free` if (s + 1) * c positions do (any cost growing with s and c
+/// will do: `plan_slots` only asks `fits`).
 fn plan(
     ctx: usize,
     ctx_set: bool,
