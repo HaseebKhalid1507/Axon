@@ -312,6 +312,8 @@ struct Fns<'m> {
     rmsnorm_add: Func<'m>,
     gate_up_gelu: Func<'m>,
     attn_split_w: Func<'m>,
+    /// attn_split_w through a page table (a paged cache).
+    attn_split_w_pg: Func<'m>,
     attn_combine_w: Func<'m>,
 }
 
@@ -517,10 +519,35 @@ impl<'g> CudaCache<'g> {
         self.tab.as_ref().map_or(Arg::Ptr(0), |t| t.arg_at(e * 4))
     }
 
+    /// Debug builds: a sequence counted from `base` (paged: its first table
+    /// entry; plain: its first row) holds positions 0..end: the table has
+    /// entries base .. base + ceil(end / 64), or the cache rows base + end.
+    /// (A row offset passed as a table entry, or the other way round, fails
+    /// here unless it is 0.)
+    pub(super) fn debug_covers(&self, base: usize, end: usize) {
+        match &self.tab {
+            Some(t) => debug_assert!(
+                base + end.div_ceil(ATT_BLK) <= t.len() / 4,
+                "positions ..{end} from table entry {base}: the table has {} entries",
+                t.len() / 4
+            ),
+            None => debug_assert!(
+                base + end <= self.max_ctx,
+                "positions ..{end} from row {base}: the cache has {} rows",
+                self.max_ctx
+            ),
+        }
+    }
+
     /// Read and write the KV rows through `tab` (None: plain). The captured
     /// steps hold the table's address: they go.
     #[cfg(test)]
     pub(super) fn set_tab(&mut self, tab: Option<DevBuf<'g>>) {
+        // Table entries are pages of the whole buffer: no view offset too.
+        assert!(
+            tab.is_none() || self.row0 == 0,
+            "a paged cache is no slot view"
+        );
         self.tab = tab;
         self.graph = Default::default();
     }
@@ -1356,6 +1383,7 @@ impl<'g> CudaQwen2<'g> {
                 rmsnorm_add: module.function("rmsnorm_add")?,
                 gate_up_gelu: module.function("gate_up_gelu")?,
                 attn_split_w: module.function("attn_split_w_256")?,
+                attn_split_w_pg: module.function("attn_split_w_256_pg")?,
                 attn_combine_w: module.function("attn_combine_w")?,
             },
             n_layers,
@@ -1468,6 +1496,12 @@ impl<'g> CudaQwen2<'g> {
         let n = c.rows * self.kv_dim();
         let e = (c.row0 + row0) * self.kv_dim();
         assert!(row0 <= c.max_ctx, "row {row0} past the cache");
+        // Paged: the rows are the table's, from the buffer's row 0 (a view's
+        // row0 and a table never both apply).
+        debug_assert!(
+            c.tab.is_none() || c.row0 + row0 == 0,
+            "a paged cache's arrays from row 0"
+        );
         match c.mode {
             CacheKv::F16 => vec![
                 c.kv.arg_at((2 * l * n + e) * 2),
@@ -1919,6 +1953,7 @@ impl<'g> CudaQwen2<'g> {
                 let mut args = vec![c.q.arg()];
                 args.extend_from_slice(&kva);
                 let attn = match c.mode {
+                    CacheKv::F16 if self.gemma.is_some() && c.tab.is_some() => &f.attn_split_w_pg,
                     CacheKv::F16 if self.gemma.is_some() => &f.attn_split_w,
                     CacheKv::F16 if tc => &f.attn_blk,
                     CacheKv::F16 => &f.attn_split,
@@ -1953,7 +1988,10 @@ impl<'g> CudaQwen2<'g> {
                     args.extend_from_slice(&[bias(l.qn), bias(l.kn)]);
                     args.extend_from_slice(&[Arg::F32(self.eps), c.rope.arg()]);
                 }
-                args.push(tab);
+                // (gemma3's plain-cache kernel takes no table: gemma.cu.)
+                if self.gemma.is_none() || c.tab.is_some() {
+                    args.push(tab);
+                }
                 // attn_blk: at most max_split warps per kv head (each takes
                 // blocks y, y + max_split, ..), whatever the position.
                 let (gy, bx) = match tc {
@@ -2254,6 +2292,7 @@ impl<'g> CudaQwen2<'g> {
             "position {pos} exceeds cache size {}",
             c.max_ctx
         );
+        c.debug_covers(0, pos + 1);
         let token = match input {
             Input::Token(t) => {
                 assert!(
@@ -2639,6 +2678,7 @@ impl<'g> CudaQwen2<'g> {
     ) -> Result<(Vec<KernelTime>, f64), String> {
         assert_eq!(c.net, self.id, "a CudaCache used with another CudaQwen2");
         assert!(pos < c.max_ctx && (token as usize) < self.vocab);
+        c.debug_covers(0, pos + 1);
         let p = c.host_params.bytes_mut()?;
         p[0..4].copy_from_slice(&token.to_le_bytes());
         p[4..8].copy_from_slice(&(pos as u32).to_le_bytes());

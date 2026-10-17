@@ -427,17 +427,17 @@ __device__ __forceinline__ void attn_fa_bt(const float* q, const unsigned short*
     auto qrow = [&](int r) -> u64 { return (u64)(r / group) * qs + (kvh * group + r % group) * HD; };
     auto load = [&](int bl) {
         int st = bl % ST, t0 = bl * ATT_BLK;
-        u64 rb = att_rb(tab, t0);
+        u32 kb = att_rb(tab, t0); // the tile's first cache row
         if constexpr (Q8) {
             signed char* r8 = raw8(st);
             float* rs = rawsc(st);
-            att_load_q8<HD, KGs>(r8, rs, q8.k, q8.ks, t0, np_max, kv_dim, kvh, tid, 32 * NW, rb);
+            att_load_q8<HD, KGs>(r8, rs, q8.k, q8.ks, t0, np_max, kv_dim, kvh, tid, 32 * NW, kb);
             att_load_q8<HD, KGs>(r8 + ATT_BLK * HD, rs + ATT_BLK * HD / KGs, q8.v, q8.vs, t0,
-                                 np_max, kv_dim, kvh, tid, 32 * NW, rb);
+                                 np_max, kv_dim, kvh, tid, 32 * NW, kb);
         } else {
-            att_load<HD>(fa_sm + 2 * st * TILE, kc, t0, np_max, kv_dim, kvh, tid, 32 * NW, rb);
+            att_load<HD>(fa_sm + 2 * st * TILE, kc, t0, np_max, kv_dim, kvh, tid, 32 * NW, kb);
             att_load<HD>(fa_sm + (2 * st + 1) * TILE, vc, t0, np_max, kv_dim, kvh, tid, 32 * NW,
-                         rb);
+                         kb);
         }
     };
     u32 qa[HD / 16][4];
@@ -533,10 +533,12 @@ __device__ __forceinline__ void attn_fa_bt(const float* q, const unsigned short*
              float pre, float* y, const u32* __restrict__ tab) {                                   \
         attn_fa_bt<HD, NW, ST>(q, kc, vc, start, nb, n_heads, n_kv, pre, y, Q8Kv{}, tab);          \
     }
-// Registers (ptxas, sm_120): the hd-128 variants sit at the cap - attn_fa_b_128
-// 254, attn_fa_bs_128 242, the q8 hd-128 ones 254-255 (CUDA 13.4 nvcc: no
-// spills; cuda_attn_bench prints NVRTC's count of local bytes per variant,
-// where a few bytes of spill have been seen). __launch_bounds__(256, 1) is
+// Registers (ptxas -v, CUDA 13.4 nvcc, with the page table): the hd-128
+// variants sit at the cap - sm_120: attn_fa_b_128 254, attn_fa_bs_128 255,
+// the q8 hd-128 ones 254-255; sm_89: 244-254; no spills. The table's tile
+// row base is a u32 (att_rb): as a u64 it spilled attn_fa_b_q8_128 on
+// sm_120 (4 B stores / 8 B loads). cuda_attn_bench prints NVRTC's count of
+// local bytes per variant. __launch_bounds__(256, 1) is
 // exactly satisfiable: 256 x 255 = 65280 of the SM's 65536 registers. A
 // smaller m-tile per warp for hd 128 (32 rows per 2 warps, less O and S
 // live per thread) is the follow-up if a toolkit starts spilling here.

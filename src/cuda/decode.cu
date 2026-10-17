@@ -1240,16 +1240,20 @@ __device__ __forceinline__ unsigned short* att_chunk(unsigned short* t, int r, i
 // zero-filled. The block's nthr threads share the chunks.
 template <int HD>
 __device__ __forceinline__ void att_load(unsigned short* t, const unsigned short* c, int t0,
-                                         int lim, int kv_dim, int kvh, int tid, int nthr, u64 rb) {
+                                         int lim, int kv_dim, int kvh, int tid, int nthr, u32 rb) {
     for (int i = tid; i < ATT_BLK * HD / 8; i += nthr) {
         int r = i / (HD / 8), ch = i % (HD / 8);
         bool ok = t0 + r < lim;
-        const unsigned short* src = ok ? c + (rb + r) * kv_dim + kvh * HD + ch * 8 : c;
+        const unsigned short* src = ok ? c + (u64)(rb + r) * kv_dim + kvh * HD + ch * 8 : c;
         cp16z(att_chunk<HD>(t, r, ch), src, ok);
     }
 }
 // The first cache row of the tile at position t0 (a multiple of ATT_BLK).
-__device__ __forceinline__ u64 att_rb(const u32* tab, int t0) { return pg_row(tab, t0); }
+// 32 bits (a cache has < 2^32 rows: the host's u32 rows): one register less
+// than a u64 in the register-capped prefill kernels.
+__device__ __forceinline__ u32 att_rb(const u32* tab, int t0) {
+    return tab ? tab[t0 / PG_ROWS] * PG_ROWS : (u32)t0;
+}
 
 // The q8 cache (Q8Kv) in the same order: its tiles are f16(fmul(q, d))
 // (q the int8 value, d its group's scale; cvt.rn), made in shared memory
@@ -1265,17 +1269,17 @@ __device__ __forceinline__ void cp4z(void* dst, const void* src, bool ok) {
 template <int HD, int KG>
 __device__ __forceinline__ void att_load_q8(signed char* r8, float* rs, const signed char* c8,
                                             const float* cs, int t0, int lim, int kv_dim, int kvh,
-                                            int tid, int nthr, u64 rb) {
+                                            int tid, int nthr, u32 rb) {
     for (int i = tid; i < ATT_BLK * HD / 16; i += nthr) {
         int r = i / (HD / 16), ch = i % (HD / 16);
         bool ok = t0 + r < lim;
-        const signed char* src = ok ? c8 + (rb + r) * kv_dim + kvh * HD + ch * 16 : c8;
+        const signed char* src = ok ? c8 + (u64)(rb + r) * kv_dim + kvh * HD + ch * 16 : c8;
         cp16z(r8 + r * HD + ch * 16, src, ok);
     }
     for (int i = tid; i < ATT_BLK * (HD / KG); i += nthr) {
         int r = i / (HD / KG), gi = i % (HD / KG);
         bool ok = t0 + r < lim;
-        const float* src = ok ? cs + ((rb + r) * kv_dim + kvh * HD) / KG + gi : cs;
+        const float* src = ok ? cs + ((u64)(rb + r) * kv_dim + kvh * HD) / KG + gi : cs;
         cp4z(rs + i, src, ok);
     }
 }
@@ -2064,7 +2068,7 @@ __device__ void attn_blk_t(const float* __restrict__ q, const unsigned short* kc
     bsync();
     for (int b = blockIdx.y; b < nblk; b += gridDim.y) {
         int t0 = b * ATT_BLK;
-        u64 rb = att_rb(tab, t0);
+        u32 rb = att_rb(tab, t0);
         // NW > 1: K and V as two groups, V still landing during steps
         // 2-7 (waited for before its first use). Not on the q8 block that
         // rereads row np - 1's scales below: no copy may be in flight to

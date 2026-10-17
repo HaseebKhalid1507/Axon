@@ -693,8 +693,9 @@ fn gpu_paged_gemma_window_bits() {
         return;
     };
     let km = Kernels::module(&g).unwrap();
-    let (fw, fbw, frn) = (
+    let (fw0, fw, fbw, frn) = (
         km.function("attn_split_w_256").unwrap(),
+        km.function("attn_split_w_256_pg").unwrap(),
         km.function("attn_split_bw_256").unwrap(),
         km.function("rope_kv_norm_b_256").unwrap(),
     );
@@ -830,6 +831,34 @@ fn gpu_paged_gemma_window_bits() {
                         )
                         .unwrap();
                     }
+                    // The plain cache's own kernel (no table argument) gives the
+                    // table kernel's bits with no table.
+                    if tab.is_none() {
+                        let po0 = g.alloc(nh * ms * hd * 4).unwrap();
+                        let pm0 = g.alloc(nh * ms * 2 * 4).unwrap();
+                        po0.zero().unwrap();
+                        pm0.zero().unwrap();
+                        let mut a0 = args[..args.len() - 1].to_vec();
+                        a0[8] = po0.arg();
+                        a0[9] = pm0.arg();
+                        // SAFETY: as above, without the table.
+                        unsafe {
+                            g.launch(
+                                &fw0,
+                                (nkv as u32, ms as u32, 1),
+                                (ATT_TILE as u32, 1, 1),
+                                0,
+                                &a0,
+                            )
+                            .unwrap();
+                        }
+                        let same = po0.read::<u8>().unwrap() == po.read::<u8>().unwrap()
+                            && pm0.read::<u8>().unwrap() == pm.read::<u8>().unwrap();
+                        assert!(
+                            same,
+                            "{what}: attn_split_w_256 != attn_split_w_256_pg, no table"
+                        );
+                    }
                     outs.push((
                         format!("attn_split_w norms {norms} part_o"),
                         po.read().unwrap(),
@@ -909,8 +938,8 @@ fn kv_bytes(net: &CudaQwen2, c: &CudaCache, tab: Option<&[u32]>, n: usize) -> Ve
             let mut at = 0;
             rbs.iter()
                 .map(|&rb| {
-                    let a = &l[at..at + c.max_ctx * rb];
-                    at += c.max_ctx * rb;
+                    let a = &l[at..at + c.rows * rb];
+                    at += c.rows * rb;
                     let mut v = gather(a, rb, tab, n.div_ceil(PAGE));
                     v.truncate(n * rb);
                     v

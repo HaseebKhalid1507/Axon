@@ -78,16 +78,38 @@ gate_up_gelu(int qtg, const u8* __restrict__ wg, u64 rbg, int qtu, const u8* __r
 
 // attn_split_256 over the layer's window: the positions win_lo..np of the
 // cache, as a cache that starts there (the split schedule then depends on
-// the window's length, which attn_combine_w uses too; attn_split_t's lo).
-// qn non-null: the q/k norms and RoPE (QkNorm) with `rope` this layer's table.
+// the window's length, which attn_combine_w uses too). qn non-null: the q/k
+// norms and RoPE (QkNorm) with `rope` this layer's table. This is the plain
+// cache's kernel: no table, the window a pointer offset, the code from
+// before paged KV. One kernel for both (a runtime null table) was MEASURED
+// slower on bella, gemma3 1B decode attention 18.4 us vs 12.4 per layer at
+// position 8 (tg128 -6 %), 15.9 even with this path inside it; the paged
+// twin below is a kernel of its own.
 extern "C" __global__ void __launch_bounds__(ATT_TILE)
 attn_split_w_256(const float* __restrict__ q, const unsigned short* kc,
                  const unsigned short* __restrict__ vc, const u32* __restrict__ P, int n_heads,
                  int n_kv, float scale, int max_split, float* __restrict__ part_o,
                  float* __restrict__ part_ml, const float* __restrict__ kraw,
                  const float* __restrict__ qn, const float* __restrict__ kn, float eps,
-                 const float2* __restrict__ rope, unsigned short* kc_out, int win,
-                 const u32* __restrict__ tab) {
+                 const float2* __restrict__ rope, unsigned short* kc_out, int win) {
+    PDL_START();
+    int np = (int)P[P_POS] + 1, lo = win_lo(np, win);
+    u64 off = (u64)lo * n_kv * 256;
+    attn_split_t<256>(q, kc + off, vc + off, np - lo, blockIdx.x, blockIdx.y, n_heads, n_kv, scale,
+                      max_split, part_o, part_ml, Q8Kv{},
+                      QkNorm{kraw, qn, kn, eps, rope, kc_out ? kc_out + off : nullptr});
+}
+
+// attn_split_w_256 through a page table (paged KV): the window's first
+// position lo added before translation (attn_split_t's lo).
+extern "C" __global__ void __launch_bounds__(ATT_TILE)
+attn_split_w_256_pg(const float* __restrict__ q, const unsigned short* kc,
+                    const unsigned short* __restrict__ vc, const u32* __restrict__ P, int n_heads,
+                    int n_kv, float scale, int max_split, float* __restrict__ part_o,
+                    float* __restrict__ part_ml, const float* __restrict__ kraw,
+                    const float* __restrict__ qn, const float* __restrict__ kn, float eps,
+                    const float2* __restrict__ rope, unsigned short* kc_out, int win,
+                    const u32* __restrict__ tab) {
     PDL_START();
     int np = (int)P[P_POS] + 1, lo = win_lo(np, win);
     attn_split_t<256>(q, kc, vc, np - lo, blockIdx.x, blockIdx.y, n_heads, n_kv, scale, max_split,

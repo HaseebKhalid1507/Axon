@@ -151,8 +151,13 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// `c`'s rows (a whole cache: base 0; a slot view: its slot's, and
-    /// no further).
+    /// no further). Plain rows only: a paged cache's positions are in its
+    /// table's pages (not yet supported here).
     pub(crate) fn cache_rows<'a>(&self, c: &'a CudaCache<'g>) -> Rows<'a, 'g> {
+        assert!(
+            c.tab.is_none(),
+            "kv save/load of a paged cache: rows aren't positions"
+        );
         Rows {
             kv: &c.kv,
             max_ctx: c.rows,
@@ -192,6 +197,11 @@ impl<'g> CudaQwen2<'g> {
         if c.net != self.id {
             return Err(io::Error::other("a cache of another model"));
         }
+        if c.tab.is_some() {
+            return Err(io::Error::other(
+                "kv save/load of a paged cache isn't supported yet",
+            ));
+        }
         self.cache_rows(c).save(self.gpu, lo, hi, out)
     }
 
@@ -205,6 +215,11 @@ impl<'g> CudaQwen2<'g> {
     ) -> io::Result<()> {
         if c.net != self.id {
             return Err(io::Error::other("a cache of another model"));
+        }
+        if c.tab.is_some() {
+            return Err(io::Error::other(
+                "kv save/load of a paged cache isn't supported yet",
+            ));
         }
         self.cache_rows(c).load(self.gpu, lo, hi, src)
     }

@@ -75,6 +75,9 @@ impl<'g> CudaQwen2<'g> {
         if slot >= p.slots {
             return Err(format!("slot {slot} of a {}-slot pool", p.slots));
         }
+        if p.c.tab.is_some() {
+            return Err("slot_view of a paged pool (a view is plain rows)".into());
+        }
         let shared = (p.c.kv.clone(), p.c.rows, slot * p.ctx);
         self.make_cache(p.ctx, p.c.mode, p.ctx, Some(shared))
     }
@@ -228,10 +231,10 @@ impl<'g> CudaQwen2<'g> {
         if !sampled.is_empty() {
             self.samp_upload_rows(&mut p.c, &sampled, kmax)?;
         }
-        let paged = p.c.tab.is_some();
+        let tab = p.c.tab.as_ref().map(|t| t.len() / 4);
         let b = p.c.b.as_mut().expect("batch scratch");
         self.load_input(b, BatchIn::Tokens(&tokens))?;
-        b.upload_rows(&at, paged)?;
+        b.upload_rows(&at, tab)?;
         // The kernels: the step's graph (made on its first use).
         let c = &mut p.c;
         let mut pass = || {
@@ -396,6 +399,9 @@ impl<'g> CudaQwen2<'g> {
         }
         if src.mode != p.c.mode || src.net != self.id {
             return Err("adopt: a cache of another model or KV type".into());
+        }
+        if src.tab.is_some() || p.c.tab.is_some() {
+            return Err("adopt: a paged cache (row copies are of plain rows)".into());
         }
         if Rc::ptr_eq(&src.kv, &p.c.kv) {
             // A view of the pool (`slot_view`): its rows are in place if

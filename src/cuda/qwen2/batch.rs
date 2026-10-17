@@ -834,6 +834,9 @@ impl<'g> CudaQwen2<'g> {
         let dim = self.dim;
         // Paged (c.tab): the layers' arrays from row 0 and the rows through
         // the table, a sequence's from entry base on.
+        if let Place::Seq { start, base } = place {
+            c.debug_covers(base, start + nb);
+        }
         let (base, tab) = match (place, c.tab.is_some()) {
             (Place::Seq { base, .. }, false) => (base, Arg::Ptr(0)),
             (Place::Seq { base, .. }, true) => (0, c.tab_at(base)),
@@ -1801,9 +1804,20 @@ impl<'g> BatchBufs<'g> {
     }
 
     /// Enqueue the copy of `Place::Rows` into `rp` (a pool's scratch):
-    /// per row its position and cache row, or (`paged`: `CudaCache::tab`)
-    /// its sequence's first entry in the table.
-    pub(super) fn upload_rows(&mut self, rows: &[RowAt], paged: bool) -> Result<(), String> {
+    /// per row its position and cache row, or (`tab` Some: `CudaCache::tab`
+    /// of that many entries) its sequence's first entry in the table.
+    pub(super) fn upload_rows(&mut self, rows: &[RowAt], tab: Option<usize>) -> Result<(), String> {
+        let paged = tab.is_some();
+        if let Some(n) = tab {
+            for r in rows {
+                debug_assert!(
+                    r.base as usize + (r.pos as usize + 1).div_ceil(ATT_BLK) <= n,
+                    "row at {} from table entry {}: the table has {n} entries",
+                    r.pos,
+                    r.base
+                );
+            }
+        }
         let (d, h) = self.rp.as_mut().expect("a pool's scratch: Place::Rows");
         let hb = h.bytes_mut()?;
         for (i, r) in rows.iter().enumerate() {
