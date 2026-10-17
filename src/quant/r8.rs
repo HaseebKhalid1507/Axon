@@ -380,24 +380,6 @@ pub(super) unsafe fn gemv_with(
     }
 }
 
-/// `gemm`'s software prefetch distance in bytes for `nt` tokens: decode's
-/// (`AXON_PREFETCH`) up to `GEMM_PREFETCH_MAX_NT` tokens, where a pass is
-/// still bound by reading the weights (a speculative verify), else 0 (a
-/// prefill chunk computes long enough per block for the hardware
-/// prefetcher). AXON_GEMM_PREFETCH=0 turns it off (A/B; same bits).
-fn gemm_prefetch(nt: usize) -> usize {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let on = *ON.get_or_init(|| std::env::var("AXON_GEMM_PREFETCH").map_or(true, |v| v != "0"));
-    if on && nt <= GEMM_PREFETCH_MAX_NT {
-        crate::quant::DecodeCfg::get().prefetch
-    } else {
-        0
-    }
-}
-
-/// Most tokens `gemm` prefetches for (see `gemm_prefetch`).
-const GEMM_PREFETCH_MAX_NT: usize = 16;
-
 thread_local! {
     /// Per-token f32 accumulators (8 rows) for the GEMM.
     static ACC: std::cell::RefCell<Vec<[f32; 8]>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -458,20 +440,16 @@ pub(super) unsafe fn gemm_with(
             acc.resize(nt, [0f32; 8]);
         }
         let acc = &mut acc[..nt];
-        // Software prefetch as decode's (`gemv`): a small batch is still
-        // a stream over the weights, and the hardware prefetcher alone
-        // leaves DRAM idle while a block's tiles compute.
-        let pf = gemm_prefetch(nt);
-        for (gi, og) in out.chunks_exact_mut(8 * stride).enumerate().take(ng) {
-            let base = gi * gb;
+        for (g, og) in groups
+            .chunks_exact(gb)
+            .zip(out.chunks_exact_mut(8 * stride))
+        {
             // SAFETY (below): guaranteed by our caller.
             match (simd, qtype_id) {
-                (Simd::Vnni, Q4_K) => unsafe {
-                    x86::vnni::gemm_q4_k(groups, base, gb, &xk, acc, pf)
-                },
-                (Simd::Vnni, _) => unsafe { x86::vnni::gemm_q6_k(groups, base, gb, &xk, acc, pf) },
-                (_, Q4_K) => unsafe { x86::avx2::gemm_q4_k(groups, base, gb, &xk, acc, pf) },
-                (_, _) => unsafe { x86::avx2::gemm_q6_k(groups, base, gb, &xk, acc, pf) },
+                (Simd::Vnni, Q4_K) => unsafe { x86::vnni::gemm_q4_k(g, &xk, acc) },
+                (Simd::Vnni, _) => unsafe { x86::vnni::gemm_q6_k(g, &xk, acc) },
+                (_, Q4_K) => unsafe { x86::avx2::gemm_q4_k(g, &xk, acc) },
+                (_, _) => unsafe { x86::avx2::gemm_q6_k(g, &xk, acc) },
             }
             for (t, a) in acc.iter().enumerate() {
                 for r in 0..8 {
@@ -927,22 +905,11 @@ mod x86 {
                 /// # Safety
                 /// The CPU must support the enabled target features.
                 #[target_feature(enable = $feat)]
-                pub unsafe fn gemm_q4_k(
-                    groups: &[u8],
-                    base: usize,
-                    gb: usize,
-                    xk: &[&[KBlock]],
-                    acc: &mut [[f32; 8]],
-                    pf: usize,
-                ) {
+                pub unsafe fn gemm_q4_k(group: &[u8], xk: &[&[KBlock]], acc: &mut [[f32; 8]]) {
                     let nt = xk.len();
                     acc.fill([0.0; 8]);
                     let mut u = Unpacked::ZERO;
-                    let group = &groups[base..base + gb];
                     for (sb, b) in group.as_chunks::<R8_Q4_K>().0.iter().enumerate() {
-                        if pf > 0 {
-                            prefetch(groups, base + sb * R8_Q4_K + pf, R8_Q4_K);
-                        }
                         unpack_q4_k(b, &mut u);
                         let mut t0 = 0;
                         while t0 + 4 <= nt {
@@ -963,22 +930,11 @@ mod x86 {
                 /// # Safety
                 /// The CPU must support the enabled target features.
                 #[target_feature(enable = $feat)]
-                pub unsafe fn gemm_q6_k(
-                    groups: &[u8],
-                    base: usize,
-                    gb: usize,
-                    xk: &[&[KBlock]],
-                    acc: &mut [[f32; 8]],
-                    pf: usize,
-                ) {
+                pub unsafe fn gemm_q6_k(group: &[u8], xk: &[&[KBlock]], acc: &mut [[f32; 8]]) {
                     let nt = xk.len();
                     acc.fill([0.0; 8]);
                     let mut u = Unpacked::ZERO;
-                    let group = &groups[base..base + gb];
                     for (sb, b) in group.as_chunks::<R8_Q6_K>().0.iter().enumerate() {
-                        if pf > 0 {
-                            prefetch(groups, base + sb * R8_Q6_K + pf, R8_Q6_K);
-                        }
                         unpack_q6_k(b, &mut u);
                         let mut t0 = 0;
                         while t0 + 4 <= nt {
