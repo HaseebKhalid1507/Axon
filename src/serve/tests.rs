@@ -3707,7 +3707,11 @@ fn serve_ollama_and_responses_routes() {
     );
     let ps = authed("GET", "/api/ps", "").json();
     assert_eq!(ps["models"][0]["context_length"], 2048);
-    for body in ["{\"model\":\"alias:latest\"}", "{\"name\":\"alias\"}"] {
+    for body in [
+        "{\"model\":\"alias:latest\"}",
+        "{\"name\":\"alias\"}",
+        "{\"model\":\"\",\"name\":\"alias\"}",
+    ] {
         let sh = authed("POST", "/api/show", body).json();
         assert_eq!(sh["model_info"]["qwen2.context_length"], 2048, "{sh}");
         assert_eq!(sh["model_info"]["general.architecture"], "qwen2");

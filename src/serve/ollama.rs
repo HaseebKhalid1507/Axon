@@ -158,10 +158,11 @@ pub(super) fn route(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared) -> io::
                 Ok(Value::Object(o)) => Value::Object(o),
                 _ => return reply(c, bad("model", "the body must be a JSON object")),
             };
-            let name = v
-                .get("model")
-                .or_else(|| v.get("name"))
-                .and_then(Value::as_str);
+            // The CLI sends `name` with an empty `model`.
+            let name = ["model", "name"]
+                .iter()
+                .filter_map(|k| v.get(*k).and_then(Value::as_str))
+                .find(|n| !n.is_empty());
             let Some(name) = name else {
                 return reply(c, bad("model", "'model' is required"));
             };
