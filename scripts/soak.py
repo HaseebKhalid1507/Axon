@@ -531,7 +531,10 @@ def verdict(rows, summary, cfg):
         med = statistics.median(rss)
         s = slope_per_h(ts, rss)
         bound = max(cfg.rss_floor_mib, cfg.rss_frac * med)
+        q = max(1, len(rss) // 4)
         checks["rss"] = {"slope_mib_per_h": round(s, 3), "growth_24h_mib": round(s * 24, 1),
+                         # informational: a one-time step (an arena, a lazily captured graph) vs steady growth
+                         "last_vs_first_quarter_mib": round(statistics.median(rss[-q:]) - statistics.median(rss[:q]), 1),
                          "bound_24h_mib": round(bound, 1), "median_mib": round(med, 1),
                          "min_mib": min(rss), "max_mib": max(rss), "pass": s * 24 < bound}
         vp = [r for r in post if float(r["vram_mib"]) >= 0 and (r["vram_src"] == "pid" or cfg.vram_card)]
@@ -539,7 +542,9 @@ def verdict(rows, summary, cfg):
         if len(vr) >= 3:
             vt = [float(r["t_s"]) for r in vp]
             vs = slope_per_h(vt, vr)
+            q = max(1, len(vr) // 4)
             checks["vram"] = {"slope_mib_per_h": round(vs, 3), "growth_24h_mib": round(vs * 24, 1),
+                              "last_vs_first_quarter_mib": round(statistics.median(vr[-q:]) - statistics.median(vr[:q]), 1),
                               "bound_24h_mib": cfg.vram_floor_mib, "min_mib": min(vr), "max_mib": max(vr),
                               "src": post[-1]["vram_src"], "pass": vs * 24 < cfg.vram_floor_mib}
     else:
