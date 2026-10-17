@@ -146,4 +146,5 @@ summary in [benchmarks-gpu.md](benchmarks-gpu.md#jaded-cpu-only-for-context).
 - CPU decode vs ollama: tied (DRAM-bound), not ahead, on 1.5B–8B. jade 0.5B tg loses to llama.cpp (0.93x).
 - Sampled speculative decoding gains nothing.
 - Multi-GPU: vLLM TP2 beats axon's single stream on 2×4090 (65–70 vs 43 tok/s, 32B AWQ vs Q4_K_M; different quantization).
-- Serving on bella's 12 GB at 32k serves 7B one request at a time by default since #42 (the N+1 cache layout).
+- Serving on bella's 12 GB at 32k served 7B one request at a time by default since #42 (the N+1 cache layout);
+  since feat/serve-one-cache (no N+1 cache) it serves 2 at once (`--kv q8`: 5).

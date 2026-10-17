@@ -266,15 +266,14 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
   to whole prefill passes; 4096 tokens until the server has measured a chunk's cost); a
   prompt that 4 shorter, younger ones have finished ahead of goes first. A long prompt sent
   to an idle server alone takes the single-stream path below and is fed whole: a request
-  arriving during that prefill waits for it. Each slot is a KV cache as long as the context, and the
-  request running alone has one more: a pool of N slots costs N + 1 caches (7B at 32768:
-  1.75 GiB each). Without `--ctx` or `--parallel` the context comes first: as many slots
+  arriving during that prefill waits for it. Each slot is a KV cache as long as the context, and a
+  pool of N slots costs N caches (7B at 32768: 1.75 GiB each): the request running alone
+  runs in slot 0's memory (its own scratch beside it, no cache of its own). Without `--ctx` or `--parallel` the context comes first: as many slots
   (2 to 8) as fit with the whole context; if not even 2 do, 2 or more with the longest
   context they fit with, down to 32768 (or the whole context, if shorter); below that, one
   request at a time with the whole context, and stderr says at which context 2 would fit
-  (and how many `--kv q8` fits). Measured: Qwen2.5-7B Q4_K_M on a 12 GB laptop GPU (10.6
-  GiB free) serves one at a time with 32768 (2 would fit at 30720; `--kv q8`: 4 at 32768),
-  on a 24 GB RTX 4090 8 at once with 32768. `--parallel N` alone: N slots of the longest
+  (and how many `--kv q8` fits). Measured: Qwen2.5-7B Q4_K_M on a 12 GB laptop GPU serves 2
+  at once with 32768 (`--kv q8`: 5 at 32768), on a 24 GB RTX 4090 8 at once with 32768. `--parallel N` alone: N slots of the longest
   context that fits them (down to 1024 positions). `--ctx N`: never shortened; the slots
   that fit with it (up to `--parallel`), else one at a time. The server says on stderr what
   it chose and why; the context it serves is a slot's (`/v1/models` `meta.n_ctx`; longer
@@ -282,7 +281,8 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
   for prefill's tensor cores, same results; 1.02 GiB on 7B Q4_K_M) is made after the
   caches and slots, only from the memory they leave (`AXON_Q6K8=0` never makes it).
   A request running alone takes the single-stream path (CUDA graphs, `--draft`), and
-  moves into the batch when a second one arrives. Every request's output is exactly what it
+  moves into the batch when a second one arrives (its rows are already in slot 0: nothing
+  is copied). Every request's output is exactly what it
   gets alone, whatever else runs with it (greedy, and sampled with a `seed`): the batched
   kernels are bit-identical per row to the one-sequence ones. On the CPU, with
   `--gpu-layers` (a CPU/GPU split) and with a multi-GPU pipeline (several `AXON_GPUS`) the
