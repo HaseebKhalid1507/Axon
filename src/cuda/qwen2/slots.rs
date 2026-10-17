@@ -131,7 +131,7 @@ impl<'g> CudaQwen2<'g> {
         if let Some(t) = tokens.iter().find(|&&t| t as usize >= self.vocab) {
             return Err(format!("token {t} out of range"));
         }
-        let max = p.c.b.as_ref().expect("batch scratch").max;
+        let max = p.pass_max();
         let base = slot * p.ctx;
         for r in passes(tokens.len(), max) {
             let input = BatchIn::Tokens(&tokens[r.clone()]);
@@ -413,6 +413,18 @@ impl<'g> BatchLm for CudaQwen2<'g> {
         n: usize,
     ) -> Result<(), String> {
         self.adopt_cache(pool, slot, cache, n)
+    }
+
+    fn pass_max(&self, pool: &CudaPool<'g>) -> usize {
+        pool.pass_max()
+    }
+}
+
+impl CudaPool<'_> {
+    /// `BatchLm::pass_max`: the batch scratch's tokens (PREFILL_BATCH, or
+    /// PLAN_BATCH when the bigger passes don't fit; `feed_slot` splits by it).
+    pub fn pass_max(&self) -> usize {
+        self.c.b.as_ref().expect("batch scratch").max
     }
 }
 

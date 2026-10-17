@@ -2,7 +2,7 @@
 """`axon serve` under load: a long prompt admitted while other clients decode (stdlib only).
 
     bench_serve_admit.py admit  ROUNDS MODEL_TAG BIN... [--decoders=4] [--long=20000] [--flags-I=...]
-    bench_serve_admit.py single ROUNDS MODEL_TAG BIN... [--n=128] [--parallel=8] [--idle-long=N]
+    bench_serve_admit.py single ROUNDS MODEL_TAG BIN... [--n=128] [--parallel=8] [--idle-long=N [--idle-long2=M]]
     common: [--models=DIR] (default bella's ~/Projects/axon/models) [--kv=f16]
 
 Run through the GPU queue (it loads models on the GPU). Binaries interleaved per round, cool-gated, GPU logged.
@@ -16,9 +16,11 @@ Run through the GPU queue (it loads models on the GPU). Binaries interleaved per
   * single: one server, one client: a streamed greedy request (max_tokens N, salted): TTFT and decode tok/s;
     then a 560-token prompt with max_tokens 1: TTFT; with --idle-long=N two ~N-token prompts sent together
     to the idle server (the batch's idle chunked path; needs --parallel >= 2): the first and last first-token times.
+Each run's prefill paths (S1 = alone on the single-stream path, C = chunked in a slot; '?' = a binary without
+AXON_SERVE_DEBUG) are printed per round: the idle two-prompt case is bimodal when the first prompt is picked up alone.
 Extra server flags per binary: --flags-1="--prefill-chunk 256" (index into BIN...). --models=DIR: the model files.
 """
-import http.client, json, statistics, subprocess, sys, threading, time, itertools, urllib.request
+import http.client, json, os, statistics, subprocess, sys, threading, time, itertools, urllib.request
 
 args = [a for a in sys.argv[1:] if not a.startswith('--')]
 opts = dict(a[2:].split('=', 1) for a in sys.argv[1:] if a.startswith('--') and '=' in a)
@@ -28,6 +30,7 @@ DEC = int(opts.get('decoders', '4'))
 LONG = int(opts.get('long', '20000'))
 SHORT = int(opts.get('short', '0'))
 IDLE_LONG = int(opts.get('idle-long', '0'))
+IDLE_LONG2 = int(opts.get('idle-long2', str(IDLE_LONG)))  # the second idle prompt (default: the same length)
 KV = opts.get('kv', 'f16')
 M = opts.get('models', '/home/haseeb/Projects/axon/models').rstrip('/') + '/'
 MODELS = {'0.5B': 'qwen2.5-0.5b-q4_k_m.gguf', '7B': 'Qwen2.5-7B-Instruct-Q4_K_M.gguf'}
@@ -95,7 +98,8 @@ def serve(b, i, ctx, parallel):
     cmd = [b, 'serve', M + FILE, '--device', 'cuda', '--port', str(PORT), '--ctx', str(ctx), '--kv', KV,
            '--parallel', str(parallel)] + opts.get(f'flags-{i}', '').split()
     log = open(f'/dev/shm/bsa-{i}.log', 'w')
-    p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=log)
+    # AXON_SERVE_DEBUG=1: the server logs each request's prefill path (paths())
+    p = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=log, env={**os.environ, 'AXON_SERVE_DEBUG': '1'})
     t0 = time.time()
     while time.time() - t0 < 300:
         if p.poll() is not None:
@@ -108,6 +112,12 @@ def serve(b, i, ctx, parallel):
             pass
         time.sleep(0.2)
     raise RuntimeError('server did not come up')
+
+
+def paths(i, n):
+    """How the server prefilled its last n requests: S1 (alone, single-stream) or C (chunked in a slot)."""
+    ls = [l for l in open(f'/dev/shm/bsa-{i}.log') if ' prefill: ' in l]
+    return '+'.join('S1' if 'single-stream' in l else 'C' for l in ls[-n:]) or '?'
 
 
 def pct(v, q):
@@ -194,11 +204,12 @@ def main():
                     texts = r.pop('texts')
                     ref = ref or texts
                     r['same_text'] = int(texts == ref)  # vs bin0 (greedy: must be 1)
+                    r['paths'] = paths(i, DEC + 1 + (1 if SHORT else 0))
                 finally:
                     p.kill()
                     p.wait()
             else:
-                p = serve(b, i, max(4096, IDLE_LONG * 5 // 4 + 1024), int(opts.get('parallel', '8')))
+                p = serve(b, i, max(4096, max(IDLE_LONG, IDLE_LONG2) * 5 // 4 + 1024), int(opts.get('parallel', '8')))
                 try:
                     base = {'temperature': 0, 'stream': True, 'stream_options': {'include_usage': True}}
                     stream('/v1/completions', {**base, 'prompt': 'Hello', 'max_tokens': 4})
@@ -214,7 +225,8 @@ def main():
                         outs, tt = [[], []], [0.0, 0.0]
 
                         def one(k):
-                            tt[k] = stream('/v1/completions', {**base, 'prompt': long_prompt(IDLE_LONG, s0 + 2 + k),
+                            tt[k] = stream('/v1/completions', {**base, 'prompt': long_prompt([IDLE_LONG, IDLE_LONG2][k],
+                                                                                             s0 + 2 + k),
                                                                'max_tokens': 4}, None, outs[k])[0]
                         th = [threading.Thread(target=one, args=(k,)) for k in range(2)]
                         for t2 in th:
@@ -222,6 +234,8 @@ def main():
                         for t2 in th:
                             t2.join()
                         r['idle2_ttft_first'], r['idle2_ttft_last'] = min(tt), max(tt)
+                        r['idle2_ttft_a'], r['idle2_ttft_b'] = tt  # by prompt (--idle-long, --idle-long2)
+                        r['idle2_paths'] = paths(i, 2)
                         out += ['|'] + outs[0] + ['|'] + outs[1]
                     ref = ref or out
                     r['same_text'] = int(out == ref)
@@ -239,6 +253,9 @@ def main():
             if k == 'gpu':
                 continue
             v = [r[k] for r in res[i]]
+            if not all(isinstance(x, (int, float)) for x in v):
+                print(f"    {k:15} {' '.join(map(str, v))}", flush=True)
+                continue
             print(f"    {k:15} {statistics.median(v):10.2f}  [{min(v):.2f}..{max(v):.2f}]", flush=True)
 
 

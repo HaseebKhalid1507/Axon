@@ -415,6 +415,14 @@ fn or_exit<T>(what: &str, f: impl FnOnce() -> T) -> T {
     }
 }
 
+/// AXON_SERVE_DEBUG=1: a line on stderr per request saying how its prompt
+/// is prefilled (alone, the single-stream path, or in chunks in a slot);
+/// benchmarks use it to tell the paths apart.
+fn debug() -> bool {
+    static D: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *D.get_or_init(|| std::env::var_os("AXON_SERVE_DEBUG").is_some_and(|v| v == "1"))
+}
+
 /// The detokenizer and stop matcher of `job`'s reply.
 fn text_out<'t>(tok: &'t Tokenizer, job: &Job) -> TextOut<'t> {
     TextOut {
@@ -482,6 +490,13 @@ impl<'a> Engine<'a> {
         let t0 = Instant::now();
         let p = &job.prompt;
         let last = p.len() - 1;
+        if debug() {
+            eprintln!(
+                "axon serve: #{} prefill: single-stream, {} tok",
+                job.id,
+                p.len()
+            );
+        }
         // Reuse the cached prefix; the last prompt token is always fed (its logits).
         let reuse = self
             .hist
