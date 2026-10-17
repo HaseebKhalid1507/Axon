@@ -1,6 +1,6 @@
 # serve: no N+1 cache, the single-request path runs in a slot  (PR #60)
 
-- Date: 2026-10-17. Branch: feat/serve-one-cache. Base: main cf68e9d (after #57). Status: open (PR #60)
+- Date: 2026-10-17. Branch: feat/serve-one-cache. Base: main cf68e9d, now rebased on 817e611 (after #61, #63, #62). Status: open (PR #60)
 - Pick / design: r10 round C2 (specs/r10-scope.md §4.4, §4.6 row C2; roadmap Scale #2).
 
 ## What changed
@@ -11,11 +11,12 @@
 - `CudaQwen2::slot_view(pool, slot)` (slots.rs) and `BatchLm::slot_cache`: a cache whose KV is a pool slot's rows
   (same device memory), with scratch and CUDA graphs of its own. `adopt_cache` of a pool's own view into its slot
   copies nothing (into another slot: refused).
-- `axon serve` (serve.rs `engine`): the pool is made first, and the single-request cache is `slot_cache(0)`
-  instead of a separate `new_cache(ctx)`. The batch lends slot 0's token history to the engine for the solo run
-  (`Batch::lend_solo` / `end_solo`), so prefix reuse works across solo and batched requests in that slot; a
-  hand-over is `adopt` into slot 0 (bookkeeping only). With no pool (one request at a time, CPU, split,
-  pipeline) nothing changes.
+- `axon serve` (serve.rs `engine`): the pool is made first, and the single-request cache is a `slot_cache`
+  view instead of a separate `new_cache(ctx)`. Per request alone the batch picks a slot as it does for an admit
+  (round 2/3 below: the slot holding a prefix that counts, else the least recently used), points the view at it
+  (`BatchLm::move_slot_cache`) and lends its token history (`Batch::lend_solo` / `end_solo`), so prefix reuse
+  works across solo and batched requests in every slot; a hand-over is `adopt` into that slot (bookkeeping
+  only). With no pool (one request at a time, CPU, split, pipeline) nothing changes.
 - Memory planning: `serve_bytes_kv` counts the solo path's scratch but not a second KV cache, so `plan_slots`
   fits N caches, not N + 1. The stderr note no longer says "2 slots and the single-request cache are 3 caches".
 - `--parallel` help, README serve paragraph, results/roadmap/experiments-rejected rows updated.
@@ -32,6 +33,8 @@ exists (the first request takes 1-row batch steps). Measured the second as a one
 view it is.
 
 ## How it was verified
+Round 0 (2a4eed6, before review; the final gates are at the end):
+
 | gate | result | job ID / log |
 |---|---|---|
 | serve:: avante (sm_89) release | 71 passed, 0 failed, 2 ignored | 1017-042200-3d54 |
@@ -138,3 +141,12 @@ too. Unit test `best_slot_ignores_a_trivial_prefix`.
 The other reuse assertions in serve::tests (same prompt again, after a
 stop cut, tool-call next turn, chunked round 1, cancelled-prefill rows, identity "again") only ask for reuse
 and still hold. The CPU path still checks fresh prefill == reuse.
+
+## Final gates (629de21 on main 817e611)
+| gate | result | job |
+|---|---|---|
+| serve:: avante release / debug | 88/0 / 88/0 (2 ignored) | 1017-105654-f2f7 / 1017-105930-64f9 |
+| serve:: bella release / debug | 88/0 / 88/0 (2 ignored) | 1017-105654-745d / 1017-105930-c0b4 |
+| full release suite, `--shard 3` | PASS: 503 passed, 0 failed, 35 ignored | group 1017-105654-cf84 |
+| md5 of `gen`, main 817e611 vs candidate, bella: CUDA f16, CUDA q8, CPU | 0/15, 0/15, 0/15 differ | 1017-105657-1063 |
+| clippy -D warnings (bin + tests), rustfmt | clean | local |
