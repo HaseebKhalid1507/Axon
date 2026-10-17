@@ -81,8 +81,8 @@ usage:
 flags:
   -n N        gen: tokens to generate (default 32); chat: most tokens per reply (default: no limit)
   --draft K   gen, chat, serve: draft up to K tokens per step by prompt lookup (default 0 = off;
-              try 7), or with --draft-model by the draft model (default 3, gen and chat 7 next
-              to a model split across the CPU and GPU; 0 = off;
+              try 7), or with --draft-model by the draft model (default 3; greedy gen and chat:
+              7 next to a model split across the CPU and GPU; 0 = off;
               the gain is when greedy: little or none when sampling);
               lossless: the output is the same either way (greedy, or sampled with the same seed)
   --draft-model PATH  gen, chat, serve: a small model with the same vocabulary (e.g.
@@ -735,7 +735,8 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         lm::Placing::of(cache_ctx),
         cache_ctx,
     );
-    if sampler.is_some() && drafter.is_some() {
+    // On a split, sampled drafting pays too (docs/design/spec-split.md).
+    if sampler.is_some() && drafter.is_some() && !is_split(&net) {
         eprintln!("{}", draft::SAMPLED_NOTE);
     }
     let max_draft = draft::split_k(
@@ -1121,12 +1122,13 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         lm::Placing::of(ctx),
         ctx,
     );
+    let split = is_split(&net);
     let max_draft = draft::split_k(
         k_given,
         max_draft,
         with_model,
         drafter.is_some(),
-        is_split(&net),
+        split,
         sargs.resolve(sample::DEFAULT_TEMP).is_none(),
     );
     let (want, ctx) = (ctx, net.ctx(ctx));
@@ -1159,7 +1161,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     conv.sampler = sargs
         .resolve(sample::DEFAULT_TEMP)
         .map(sample::Sampler::new);
-    if conv.sampler.is_some() && conv.drafter.is_some() {
+    if conv.sampler.is_some() && conv.drafter.is_some() && !split {
         eprintln!("{}", draft::SAMPLED_NOTE);
     }
 

@@ -188,8 +188,9 @@ pub const SPLIT_MODEL_DRAFT: usize = 7;
 /// decoding is greedy and K wasn't given (`given`: --draft / AXON_DRAFT),
 /// or 0 if a draft model was asked for (`with_model`) but none runs
 /// (`--draft-model auto` found none: not prompt lookup instead). Sampled
-/// decoding keeps `k`: a sampled pick rarely equals a greedy guess, so a
-/// longer draft is mostly verified for nothing (docs/design/spec-split.md).
+/// decoding keeps `k`: there a pick equals a greedy guess less often, and
+/// on bella's 32B sampled chat K=7 was no faster than K=3 (code and
+/// summaries were; docs/design/spec-split.md), so --draft 7 is opt-in.
 pub fn split_k(
     given: Option<usize>,
     k: usize,

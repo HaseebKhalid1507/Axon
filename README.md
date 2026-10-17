@@ -82,7 +82,7 @@ Works today, honestly scoped:
   guesses the next tokens, the model verifies them in one batched pass; equally lossless.
   Default K=3 with a draft model. Greedy tg128 medians in its A/B at K=3: +37% Qwen2.5-7B,
   +44% Qwen3-8B, +63% Llama-3.1-8B; sampled, little or none (below). Next to a model split
-  across the CPU and GPU (32B on a 12 GB card) gen and chat default to K=7: the split's
+  across the CPU and GPU (32B on a 12 GB card), greedy gen and chat default to K=7: the split's
   step is bound by reading the CPU layers' weights from RAM, which a verify pass does once for
   all of its tokens, so drafting pays far more there (`docs/design/spec-split.md`).
 - Serving: `axon serve`, an OpenAI-compatible HTTP server (below) with tool calling. On one GPU it
@@ -137,8 +137,8 @@ axon --help | --version
 
 Defaults, as `axon --help` gives them:
 
-- `--draft K`: 0 (off); try 7. With `--draft-model`: 3 (0 = off); gen and chat: 7 when the
-  model is split across the CPU and GPU. The gain is in greedy decoding (`--temp 0`); sampled, it's little or none (measured +0.8 % on 7B at temp 0.8, K=3; slower at K 5 and 7).
+- `--draft K`: 0 (off); try 7. With `--draft-model`: 3 (0 = off); gen and chat decoding
+  greedily: 7 when the model is split across the CPU and GPU. The gain is in greedy decoding (`--temp 0`); sampled, it's little or none (measured +0.8 % on 7B at temp 0.8, K=3; slower at K 5 and 7).
 - `--draft-model PATH`: none. The draft model runs on the same `--device` (on `cuda` all of
   it on the GPU; its memory is set aside before the model is placed). A model whose token
   table isn't the start of the main model's, or whose end-of-generation tokens differ, is
