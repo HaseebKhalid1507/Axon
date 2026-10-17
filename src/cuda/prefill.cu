@@ -381,7 +381,7 @@ template <int HD, int NW, int ST, int KG = 0>
 __device__ __forceinline__ void attn_fa_bt(const float* q, const unsigned short* __restrict__ kc,
                                            const unsigned short* __restrict__ vc, int start,
                                            int nb, int n_heads, int n_kv, float pre, float* y,
-                                           Q8Kv q8 = Q8Kv{}) {
+                                           Q8Kv q8 = Q8Kv{}, const u32* __restrict__ tab = nullptr) {
 #if __CUDA_ARCH__ >= 800
     constexpr bool Q8 = KG > 0;
     constexpr int KGs = Q8 ? KG : 1;
@@ -407,15 +407,17 @@ __device__ __forceinline__ void attn_fa_bt(const float* q, const unsigned short*
     auto qrow = [&](int r) -> u64 { return (u64)(r / group) * qs + (kvh * group + r % group) * HD; };
     auto load = [&](int bl) {
         int st = bl % ST, t0 = bl * ATT_BLK;
+        u64 rb = att_rb(tab, t0);
         if constexpr (Q8) {
             signed char* r8 = raw8(st);
             float* rs = rawsc(st);
-            att_load_q8<HD, KGs>(r8, rs, q8.k, q8.ks, t0, np_max, kv_dim, kvh, tid, 32 * NW);
+            att_load_q8<HD, KGs>(r8, rs, q8.k, q8.ks, t0, np_max, kv_dim, kvh, tid, 32 * NW, rb);
             att_load_q8<HD, KGs>(r8 + ATT_BLK * HD, rs + ATT_BLK * HD / KGs, q8.v, q8.vs, t0,
-                                 np_max, kv_dim, kvh, tid, 32 * NW);
+                                 np_max, kv_dim, kvh, tid, 32 * NW, rb);
         } else {
-            att_load<HD>(fa_sm + 2 * st * TILE, kc, t0, np_max, kv_dim, kvh, tid, 32 * NW);
-            att_load<HD>(fa_sm + (2 * st + 1) * TILE, vc, t0, np_max, kv_dim, kvh, tid, 32 * NW);
+            att_load<HD>(fa_sm + 2 * st * TILE, kc, t0, np_max, kv_dim, kvh, tid, 32 * NW, rb);
+            att_load<HD>(fa_sm + (2 * st + 1) * TILE, vc, t0, np_max, kv_dim, kvh, tid, 32 * NW,
+                         rb);
         }
     };
     u32 qa[HD / 16][4];
@@ -510,6 +512,12 @@ __device__ __forceinline__ void attn_fa_bt(const float* q, const unsigned short*
              const unsigned short* __restrict__ vc, int start, int nb, int n_heads, int n_kv,      \
              float pre, float* y) {                                                                \
         attn_fa_bt<HD, NW, ST>(q, kc, vc, start, nb, n_heads, n_kv, pre, y);                       \
+    }                                                                                              \
+    extern "C" __global__ void __launch_bounds__(32 * NW, MINB)                                    \
+        NAME##_pg(const float* q, const unsigned short* __restrict__ kc,                           \
+                  const unsigned short* __restrict__ vc, int start, int nb, int n_heads, int n_kv, \
+                  float pre, float* y, const u32* __restrict__ tab) {                              \
+        attn_fa_bt<HD, NW, ST>(q, kc, vc, start, nb, n_heads, n_kv, pre, y, Q8Kv{}, tab);          \
     }
 // Registers (ptxas, sm_120): the hd-128 variants sit at the cap - attn_fa_b_128
 // 254, attn_fa_bs_128 242, the q8 hd-128 ones 254-255 (CUDA 13.4 nvcc: no
@@ -533,7 +541,8 @@ ATTN_FA_B(attn_fa_bs_128, 128, 4, 1, 2)
 template <int HD, int NW>
 __device__ __forceinline__ void attn_fa_kt(const float* q, const unsigned short* __restrict__ kc,
                                            const unsigned short* __restrict__ vc, int start,
-                                           int nb, int n_heads, int n_kv, float pre, float* y) {
+                                           int nb, int n_heads, int n_kv, float pre, float* y,
+                                           const u32* __restrict__ tab = nullptr) {
 #if __CUDA_ARCH__ >= 800
     extern __shared__ __align__(16) unsigned short fa_sm[];
     const int TILE = ATT_BLK * HD;
@@ -556,14 +565,14 @@ __device__ __forceinline__ void attn_fa_kt(const float* q, const unsigned short*
 #pragma unroll
     for (int n = 0; n < HD / 8; n++) O[n][0] = O[n][1] = O[n][2] = O[n][3] = 0.0f;
     float M[2] = {-INFINITY, -INFINITY}, L[2] = {0.0f, 0.0f};
-    att_load<HD>(fa_sm, kc, 0, np_max, kv_dim, kvh, tid, 32 * NW);
+    att_load<HD>(fa_sm, kc, 0, np_max, kv_dim, kvh, tid, 32 * NW, att_rb(tab, 0));
     att_commit();
     for (int b = 0; b < nblk; b++) {
         int t0 = b * ATT_BLK;
         unsigned short* kt = fa_sm + (b & 1) * TILE;
         att_wait<0>();
         __syncthreads(); // K(b) in; everyone past P V(b - 1): vt free
-        att_load<HD>(vt, vc, t0, np_max, kv_dim, kvh, tid, 32 * NW);
+        att_load<HD>(vt, vc, t0, np_max, kv_dim, kvh, tid, 32 * NW, att_rb(tab, t0));
         att_commit();
         bool act = t0 < whi;
         float m[2], l[2], al[2], wt[2];
@@ -590,7 +599,7 @@ __device__ __forceinline__ void attn_fa_kt(const float* q, const unsigned short*
         __syncthreads(); // V(b) in (K(b + 1)'s tile: last read by b - 1's scores)
         if (b + 1 < nblk)
             att_load<HD>(fa_sm + ((b + 1) & 1) * TILE, kc, t0 + ATT_BLK, np_max, kv_dim, kvh, tid,
-                         32 * NW);
+                         32 * NW, att_rb(tab, t0 + ATT_BLK));
         att_commit();
         if (act) {
 #pragma unroll
@@ -632,6 +641,12 @@ __device__ __forceinline__ void attn_fa_kt(const float* q, const unsigned short*
              const unsigned short* __restrict__ vc, int start, int nb, int n_heads, int n_kv,      \
              float pre, float* y) {                                                                \
         attn_fa_kt<HD, NW>(q, kc, vc, start, nb, n_heads, n_kv, pre, y);                           \
+    }                                                                                              \
+    extern "C" __global__ void __launch_bounds__(32 * NW, MINB)                                    \
+        NAME##_pg(const float* q, const unsigned short* __restrict__ kc,                           \
+                  const unsigned short* __restrict__ vc, int start, int nb, int n_heads, int n_kv, \
+                  float pre, float* y, const u32* __restrict__ tab) {                              \
+        attn_fa_kt<HD, NW>(q, kc, vc, start, nb, n_heads, n_kv, pre, y, tab);                      \
     }
 // Registers (ptxas, CUDA 13.4): attn_fa_k_128 254 on sm_120 / 245 on sm_89,
 // attn_fa_k_64 156 / 154 (3 blocks per SM need <= 168); no spills. The host
@@ -650,6 +665,14 @@ ATTN_FA_K(attn_fa_k_128, 128, 4, 2)
              float* y) {                                                                           \
         attn_fa_bt<HD, NW, ST, KG>(q, nullptr, nullptr, start, nb, n_heads, n_kv, pre, y,          \
                                    Q8Kv{kq, vq, ks, vs, nullptr, nullptr});                        \
+    }                                                                                              \
+    extern "C" __global__ void __launch_bounds__(32 * NW, MINB)                                    \
+        NAME##_pg(const float* q, const signed char* __restrict__ kq,                              \
+                  const signed char* __restrict__ vq, const float* __restrict__ ks,                \
+                  const float* __restrict__ vs, int start, int nb, int n_heads, int n_kv,          \
+                  float pre, float* y, const u32* __restrict__ tab) {                              \
+        attn_fa_bt<HD, NW, ST, KG>(q, nullptr, nullptr, start, nb, n_heads, n_kv, pre, y,          \
+                                   Q8Kv{kq, vq, ks, vs, nullptr, nullptr}, tab);                   \
     }
 ATTN_FA_B_Q8(attn_fa_b_q8_64, 64, 4, 3, 2, 64)
 ATTN_FA_B_Q8(attn_fa_b_q8_128, 128, 8, 2, 1, 128)

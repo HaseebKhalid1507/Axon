@@ -2788,6 +2788,8 @@ impl<'g> Lm for CudaQwen2<'g> {
 
 mod batch;
 pub(crate) mod kvio;
+#[cfg(test)]
+mod paged_tests;
 pub mod pipeline;
 #[cfg(test)]
 mod sample_tests;
