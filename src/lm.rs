@@ -159,6 +159,10 @@ pub trait BatchLm: Lm {
     /// there is none (no room, or a backend without one).
     fn new_pool(&self, slots: usize, ctx: usize) -> Result<Self::Pool, String>;
 
+    /// A paged pool (specs r11) of `pages` KV pages for up to `slots`
+    /// sequences of up to `ctx` positions each.
+    fn new_pool_paged(&self, slots: usize, ctx: usize, pages: usize) -> Result<Self::Pool, String>;
+
     /// `feed_batch` into slot `slot`: `tokens[b]` at `start + b`.
     fn feed_slot(
         &self,
@@ -365,7 +369,16 @@ pub struct Placing {
     /// Leave the GPU model's Q6_K prefill copy to the caller
     /// (`CudaQwen2::make_q6k8_spare`, once serve's caches are made).
     pub defer_q6k8: bool,
+    /// A paged KV pool will hold the caches (`axon serve`, specs r11): the
+    /// context is a slot's cap, not memory reserved for it, so placed
+    /// automatically the whole model goes on the GPU if it fits beside a
+    /// `PAGED_FLOOR`-token cache (planned for that; the pool takes what is
+    /// left), rather than splitting for a cache of the whole context.
+    pub paged: bool,
 }
+
+/// The shortest cache a paged serve keeps the whole model on the GPU for.
+pub const PAGED_FLOOR: usize = 8192;
 
 impl Placing {
     /// `new`'s: max_ctx everywhere, the Q6_K copy made with the model.
@@ -373,6 +386,7 @@ impl Placing {
         Placing {
             split_ctx: max_ctx,
             defer_q6k8: false,
+            paged: false,
         }
     }
 }
@@ -493,6 +507,10 @@ impl<'a> Backend<'a> {
             None => {
                 let free = gpu.info()?.free_bytes;
                 let whole = CudaQwen2::vram_curve(gpu, module, m, ckv)?;
+                let floor = PAGED_FLOOR.min(max_ctx);
+                if p.paged && whole(max_ctx) > free && whole(floor) <= free {
+                    return whole_gpu(max_ctx, true);
+                }
                 // A streaming split's VRAM (its bigger batch scratch and the
                 // stream reserve) is what the split option is weighed by.
                 let split =
@@ -679,6 +697,20 @@ impl BatchLm for Backend<'_> {
     fn new_pool(&self, slots: usize, ctx: usize) -> Result<Self::Pool, String> {
         match self {
             Backend::Cuda(n) => n.pool(slots, ctx).map(Box::new),
+            _ => Err("batching many requests is GPU-only (--device cuda, every layer)".into()),
+        }
+    }
+
+    fn new_pool_paged(&self, slots: usize, ctx: usize, pages: usize) -> Result<Self::Pool, String> {
+        match self {
+            Backend::Cuda(n) => n
+                .pool_with(
+                    slots,
+                    ctx,
+                    Some(pages),
+                    crate::cuda::qwen2::pages::shuffle_env(),
+                )
+                .map(Box::new),
             _ => Err("batching many requests is GPU-only (--device cuda, every layer)".into()),
         }
     }

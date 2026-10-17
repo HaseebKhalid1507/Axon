@@ -50,6 +50,7 @@ fn test_opts(path: &str, device: Device) -> Opts {
         parallel: PARALLEL,
         parallel_set: false,
         slot_ctx: None,
+        kv_pages: None,
         prefill_chunk: super::engine::PREFILL_CHUNK,
         prefill_ms: super::engine::PREFILL_MS,
         rope: Default::default(),
@@ -1788,6 +1789,54 @@ fn serve_shrunk_pool() {
     assert_eq!(r.status, 400, "{}", r.body);
     assert_eq!(r.json()["error"]["code"], "context_length_exceeded");
     batched_vs_solo(a, &batch_bodies(false), "shrunk pool, no max_tokens");
+}
+
+/// A paged pool squeezed to fewer pages than its requests need at once
+/// (`kv_pages`; 40 pages = 2560 positions for 6 requests of ~500-token
+/// prompts and up to 400 tokens each): admissions wait for pages, idle
+/// prefixes are reclaimed, prompts back off and the youngest running
+/// request is preempted (fed again): every request still gets a 200 with
+/// the reply it gets alone, /slots reports the pages, none leak.
+#[test]
+fn serve_paged_pressure() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server_with(p.to_str().unwrap(), Device::Cuda, |o| {
+        o.parallel = 6;
+        o.parallel_set = true;
+        o.kv_pages = Some(40);
+    });
+    let a = s.addr;
+    let sl = call(a, "GET", "/slots", "").json();
+    assert_eq!(sl["pages_total"], 40, "{sl}");
+    assert_eq!(sl["page_tokens"], 64, "{sl}");
+    let bodies: Vec<Value> = (0..6)
+        .map(|i| {
+            let words = format!("{i} ") + &"the river runs past the old mill. ".repeat(60);
+            json!({"messages": [{"role": "user", "content": words}], "max_tokens": 300 + 20 * i,
+                   "temperature": if i % 2 == 0 { json!(0) } else { json!(0.8) }, "seed": i})
+        })
+        .collect();
+    batched_vs_solo(a, &bodies, "paged pool under pressure");
+    wait_for("the pool idle", || {
+        call(a, "GET", "/slots", "").json()["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|x| x["busy"] == false)
+    });
+    let sl = call(a, "GET", "/slots", "").json();
+    let held: u64 = sl["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["pages_used"].as_u64().unwrap())
+        .sum();
+    assert_eq!(held + sl["pages_free"].as_u64().unwrap(), 40, "{sl}");
 }
 
 /// `plan_slots` over a model of the memory: s slots of c positions fit

@@ -115,6 +115,17 @@ impl<'g> CudaQwen2<'g> {
             + self.batch_for(ctx) * 8
     }
 
+    /// `serve_bytes_kv` of a paged pool (`pool_paged_bytes`).
+    pub fn serve_paged_bytes(&self, kv: CacheKv, slots: usize, ctx: usize, pages: usize) -> usize {
+        self.cache_bytes_kv(kv, ctx) - self.kv_cache_bytes(kv, ctx)
+            + self.pool_paged_bytes(kv, slots, ctx, pages)
+    }
+
+    /// Bytes of one page (PAGE positions of every layer) of a `kv` cache.
+    pub fn page_bytes(&self, kv: CacheKv) -> usize {
+        self.kv_cache_bytes(kv, PAGE)
+    }
+
     /// VRAM a paged pool of `pages` pages for `slots` slots of up to `ctx`
     /// positions takes (`pool_paged`; its scratch is sized by `ctx`).
     pub fn pool_paged_bytes(&self, kv: CacheKv, slots: usize, ctx: usize, pages: usize) -> usize {
@@ -634,6 +645,15 @@ impl<'g> BatchLm for CudaQwen2<'g> {
 
     fn new_pool(&self, slots: usize, ctx: usize) -> Result<CudaPool<'g>, String> {
         self.pool(slots, ctx)
+    }
+
+    fn new_pool_paged(
+        &self,
+        slots: usize,
+        ctx: usize,
+        pages: usize,
+    ) -> Result<CudaPool<'g>, String> {
+        self.pool_with(slots, ctx, Some(pages), pages::shuffle_env())
     }
 
     fn feed_slot(
