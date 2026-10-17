@@ -46,6 +46,23 @@ In this fuzz run (bella CPU, 0.5B, `--slot-idle-ms 1000`), the default-buffer st
 starts varies from run to run, and it can exceed a 1900-token reply. #61's "roughly 500+ tokens" is a lower
 bound, not a typical value. The 4 KiB case was stable: 158 tokens and 1.7 s here, 202 and 1.7 s before.
 
+## Update: shady's #62 review (r10 thread msg-90ee277d)
+- MUST, fixed: the head-time gate reused `refused()`, which exempts /health and every OPTIONS, so `POST /health` or
+  an `OPTIONS` with a body and no key still had its whole body (up to 1 MiB) read. With a key set, the gate now
+  checks every body-carrying request (Content-Length > 0 or chunked) against `ops::authorized` alone, so no body
+  gets through without the key, whatever the route. Bodiless /health and OPTIONS stay open.
+- A refused HEAD gets its 401 with headers only (`Conn::refused` keeps the method).
+- Auth comes before the 413: the MAX_BODY check moved from `parse_head` to `read_request`, after the gate. An
+  unauthenticated client sees a 401 for an oversize body, and a client with the key still gets the 413.
+- Caveat, documented: an unauthenticated upload still going after `linger`'s 2 s (or past 4 MiB) can be reset
+  before the client reads the 401.
+- Key resolution is `api_key_of(flag, env)`; test `api_key_flag_wins_over_bad_env` covers a flag set with a
+  blank or non-UTF-8 env var (the variable isn't read at all).
+- Tests: `serve_api_key_no_body_without_the_key` sends only the head, so a server that read the body would
+  answer 408 after 30 s. It covers POST /health with 1 MiB declared, OPTIONS with a body, chunked /health, GET
+  /health with a body, a 9 MB body (401, not 413; 413 with the key), and HEAD with a body (a 401 with headers
+  only). Fuzz cases `auth:no-key-*` cover the same and add an Expect variant on /health.
+
 ## What didn't work
 Nothing was dropped. The weaker option, rewording the docs and keeping the Expect-only check, was rejected:
 any client could still make the server buffer and parse a 1 MiB body without the key.

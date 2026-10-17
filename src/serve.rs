@@ -1478,11 +1478,16 @@ fn connection(s: TcpStream, sh: &Shared) {
     c.head_timeout = IDLE;
     c.extra = sh.extra.clone();
     // A request with a body but without the key is refused right after its
-    // head: its body is never buffered or parsed (nor invited by `100
+    // head, whatever the route (/health and OPTIONS are open only without a
+    // body): its body is never buffered or parsed (nor invited by `100
     // Continue`). What the client sends anyway is drained by `linger` (at
-    // most LINGER / LINGER_BYTES) so the 401 isn't lost to a reset.
+    // most LINGER / LINGER_BYTES) so the 401 isn't lost to a reset; an
+    // upload still going after LINGER can be reset before the client reads
+    // the 401.
     if let Some(key) = sh.api_key.clone() {
-        c.gate = Some(Box::new(move |r: &Request| !refused(Some(&key), r)));
+        c.gate = Some(Box::new(move |r: &Request| {
+            ops::authorized(&r.headers, &key)
+        }));
     }
     loop {
         sh.waiting.set(id, handle.as_ref());
@@ -1494,15 +1499,17 @@ fn connection(s: TcpStream, sh: &Shared) {
         match r {
             Ok(None) => return,
             Err(e) => {
-                // Not the previous request's HEAD: the error has a body.
-                c.head_only = false;
+                // Not the previous request's HEAD: the error has a body,
+                // unless it answers a refused HEAD.
+                let refused = c.refused.take();
+                c.head_only = refused.as_ref().is_some_and(|(_, m)| m == "HEAD");
                 if e.status == 401 {
                     let _ = unauthorized(&mut c, false);
                 } else {
                     let body = ApiError::new(e.status, "invalid_request_error", e.msg).json();
                     let _ = c.respond(e.status, "application/json", body.as_bytes(), false, &[]);
                 }
-                let route = c.refused.take().map_or("other", |p| ops::route_label(&p));
+                let route = refused.map_or("other", |(p, _)| ops::route_label(&p));
                 sh.metrics.request(route, e.status);
                 // Evictable while it lingers: it serves nothing more.
                 sh.waiting.set(id, handle.as_ref());
@@ -2202,6 +2209,18 @@ fn env_key(v: Option<std::ffi::OsString>) -> Result<Option<String>, &'static str
     }
 }
 
+/// The server's key and where it came from: `--api-key`'s (`flag`; then
+/// `env` is never read), else AXON_API_KEY's (`env_key`).
+fn api_key_of(
+    flag: Option<String>,
+    env: impl FnOnce() -> Option<std::ffi::OsString>,
+) -> Result<(Option<String>, &'static str), &'static str> {
+    match flag {
+        Some(k) => Ok((Some(k), "--api-key")),
+        None => Ok((env_key(env())?, "AXON_API_KEY")),
+    }
+}
+
 /// `serve` subcommand: args = [axon, serve, model, flags...]
 pub fn run(args: &[String]) -> io::Result<()> {
     let Some(path) = args.get(2).filter(|p| !p.starts_with('-')) else {
@@ -2237,7 +2256,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         slot_idle_ms: None,
     };
     let mut k = None;
-    let mut key_from = "--api-key";
+    let key_from;
     let mut i = 3;
     while i < args.len() {
         let f = args[i].as_str();
@@ -2353,10 +2372,9 @@ pub fn run(args: &[String]) -> io::Result<()> {
     // AXON_API_KEY keeps the key out of `ps`; --api-key wins over it (the
     // variable isn't even read then). A secret file's trailing newline is
     // trimmed; set but blank, or not UTF-8, is an error (auth was asked for).
-    if o.api_key.is_none() {
-        o.api_key = env_key(std::env::var_os("AXON_API_KEY")).unwrap_or_else(|e| crate::fail(e));
-        key_from = "AXON_API_KEY";
-    }
+    let (key, from) = api_key_of(o.api_key.take(), || std::env::var_os("AXON_API_KEY"))
+        .unwrap_or_else(|e| crate::fail(e));
+    (o.api_key, key_from) = (key, from);
     o.max_draft = crate::draft::draft_k(k.or_else(crate::draft_env_set), o.draft_model.is_some());
     crate::check_stream_decode(o.max_draft);
     if o.log {
