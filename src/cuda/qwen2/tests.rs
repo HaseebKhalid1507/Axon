@@ -3956,12 +3956,71 @@ fn gpu_verify_matches_forward_argmax_1_5b() {
     verify_bits(&m, "1.5B", CacheKv::F16);
 }
 
-/// The new types' products on the real files' weights (the first two
-/// layers and the last of 1.5B Q3_K_M, 7B Q2_K, 0.5B Q2_K, whichever are
-/// present): the decode GEMV within f32 rounding of the CPU's dot_row_q8
-/// (relative to sum |w x|) on the same quantized activation, and every
-/// batched kernel (gemvn, the tensor-core gemm2 / gemm2s) == the GEMV bit for
-/// bit, at batches below, inside and past the tiles.
+/// The files the Q2_K / Q3_K tests run on, and the new types each holds.
+/// bartowski's 0.5B "Q2_K" and "Q3_K_M" have NO Q2_K and NO Q3_K tensors
+/// respectively at 896 columns: llama.cpp stores those rows as IQ4_NL (896
+/// isn't a multiple of 256); the 0.5B Q2_K's 4864-wide ffn_down is Q3_K.
+/// Real Q2_K tensors exist only in the 7B Q2_K here.
+const Q23_FILES: [(&str, &str, &[u32]); 5] = [
+    (
+        "Qwen2.5-0.5B-Instruct-Q2_K.gguf",
+        "0.5B Q2_K",
+        &[IQ4_NL, Q3_K],
+    ),
+    (
+        "Qwen2.5-0.5B-Instruct-Q3_K_M.gguf",
+        "0.5B Q3_K_M",
+        &[IQ4_NL],
+    ),
+    ("Qwen2.5-1.5B-Instruct-Q3_K_M.gguf", "1.5B Q3_K_M", &[Q3_K]),
+    (
+        "Llama-3.2-1B-Instruct-Q3_K_L.gguf",
+        "llama 1B Q3_K_L",
+        &[Q3_K],
+    ),
+    ("Qwen2.5-7B-Instruct-Q2_K.gguf", "7B Q2_K", &[Q2_K, Q3_K]),
+];
+
+/// `f` (one of `Q23_FILES`) loaded, after checking it holds the types it's
+/// listed with; None (said loudly) when the file isn't there.
+fn q23_model(f: &str, want: &[u32]) -> Option<Model> {
+    let m = model_at(&format!("models/{f}"));
+    match &m {
+        None => eprintln!("SKIPPING {f}: not in models/ (its Q2_K/Q3_K/IQ4_NL coverage is lost)"),
+        Some(m) => {
+            for &qt in want {
+                assert!(
+                    m.tensors.iter().any(|t| t.qtype.id == qt),
+                    "{f}: no {} tensor",
+                    crate::gguf::qtype(qt).name
+                );
+            }
+        }
+    }
+    m
+}
+
+/// Asserts the runs covered all three new types, unless a file was missing.
+fn q23_assert_covered(seen: &[u32], all_present: bool, what: &str) {
+    if !all_present {
+        eprintln!("SKIPPING {what}'s coverage check: model files missing (see above)");
+        return;
+    }
+    for qt in [Q2_K, Q3_K, IQ4_NL] {
+        assert!(
+            seen.contains(&qt),
+            "{what}: {} not covered",
+            crate::gguf::qtype(qt).name
+        );
+    }
+}
+
+/// The new types' products on the real files' weights (every Q2_K / Q3_K /
+/// IQ4_NL matrix of the first two layers and the last): the decode GEMV within
+/// f32 rounding of the CPU's dot_row_q8 (relative to sum |w x|) on the same
+/// quantized activation, and every batched kernel (gemvn, the tensor-core
+/// gemm2 / gemm2s) == the GEMV bit for bit, at batches below, inside and past
+/// the tiles. A wrong sub-block scale moves a row by ~1e-3 of sum |w x|.
 #[test]
 fn gpu_products_real_weights_q2k_q3k() {
     let Some(g) = crate::testutil::gpu() else {
@@ -3969,13 +4028,10 @@ fn gpu_products_real_weights_q2k_q3k() {
     };
     let km = Kernels::module_ext(&g).unwrap();
     let mut rng = Rng(0x0a3b_2c1d_7e6f_5a4b);
-    let mut seen = Vec::new();
-    for f in [
-        "Qwen2.5-1.5B-Instruct-Q3_K_M.gguf",
-        "Qwen2.5-7B-Instruct-Q2_K.gguf",
-        "Qwen2.5-0.5B-Instruct-Q2_K.gguf",
-    ] {
-        let Some(m) = model_at(&format!("models/{f}")) else {
+    let (mut seen, mut all_present) = (Vec::new(), true);
+    for (f, _, want) in Q23_FILES {
+        let Some(m) = q23_model(f, want) else {
+            all_present = false;
             continue;
         };
         let nl = m
@@ -3983,6 +4039,7 @@ fn gpu_products_real_weights_q2k_q3k() {
             .iter()
             .filter(|t| t.name.ends_with("attn_norm.weight"))
             .count();
+        let mut file_seen = Vec::new();
         for t in &m.tensors {
             let qt = t.qtype.id;
             let layer_ok = [0, 1, nl - 1]
@@ -4042,32 +4099,48 @@ fn gpu_products_real_weights_q2k_q3k() {
                 t.name,
                 crate::gguf::qtype(qt).name
             );
-            seen.push(qt);
+            file_seen.push(qt);
         }
+        for &qt in want {
+            assert!(
+                file_seen.contains(&qt),
+                "{f}: no {} matrix checked",
+                crate::gguf::qtype(qt).name
+            );
+        }
+        seen.extend(file_seen);
     }
-    eprintln!("types covered: {seen:?}");
+    q23_assert_covered(&seen, all_present, "gpu_products_real_weights_q2k_q3k");
 }
 
-/// The Q2_K / Q3_K / IQ4_NL files against the CPU, graded by the CPU's own
-/// spread on the same file (its two kernel sets, `ac`). These low-bit models
-/// are sensitive: on the 1.5B Q3_K_M the CPU disagrees with itself on 11/198
-/// top-1s with KL 1.2e-2 (its Q3_K rows are the same per-row kernel in both
-/// sets; only the Q4_K / Q6_K rows differ), 3x the 1.5B Q4_K_M's. So: top-1
-/// within 2% of the CPU's self-agreement, mean KL at most 1.5x the CPU's
-/// self-KL, max KL at most 2x its, every flip below the CPU's max |dlogit|.
+/// The Q2_K / Q3_K / IQ4_NL files, GPU vs CPU: `assert_graded`'s rules, with
+/// the near-tie flip rules scaled by the CPU's own spread on the same file
+/// (`ac`, its per-row vs its default kernels; on these files only their
+/// Q4_K / Q6_K / Q5_0 / Q8_0 rows differ between the two sets, so `ac`
+/// measures how much the model amplifies last-bit noise, not Q2_K/Q3_K).
+/// Measured on sm_120 (1017-173844-9d79), 1.5B Q3_K_M: GPU vs CPU 188/198
+/// top-1, mean KL 1.13e-2, flips 0.55 / 0.78 / 0.81 at >= 0.5; the CPU vs
+/// itself 187/198, 1.23e-2 (1.6x the 1.5B Q4_K_M's 7.8e-3), largest flip
+/// 0.42. So:
+/// - top-1 within 2 points of the CPU's self-agreement and >= 94%;
+/// - every flip below max(0.5, 2x the CPU's largest self-flip margin);
+/// - flips at >= 0.5: at most max(2, CPU's own + 2, 2 x the CPU's self-KL
+///   over the 1.5B Q4_K_M's 7.8e-3, rounded up): a file whose CPU kernel sets
+///   disagree k times as much gets k times assert_graded's 2;
+/// - mean KL within 2x the CPU's own (absolute 5e-3 where the CPU's two
+///   sets nearly agree), KL above 0.5 at one position at most and only where
+///   the CPU flips too, none above 2, max |dlogit| below 6.
+///
 /// The products themselves are checked exactly (gpu_products_real_weights_q2k_q3k).
 #[test]
 fn gpu_logits_match_cpu_q2k_q3k() {
     if crate::testutil::gpu().is_none() {
         return;
     }
-    for (f, name) in [
-        ("Qwen2.5-1.5B-Instruct-Q3_K_M.gguf", "1.5B Q3_K_M"),
-        ("Llama-3.2-1B-Instruct-Q3_K_L.gguf", "Llama 1B Q3_K_L"),
-        ("Qwen2.5-0.5B-Instruct-Q2_K.gguf", "0.5B Q2_K"),
-        ("Qwen2.5-0.5B-Instruct-Q3_K_M.gguf", "0.5B Q3_K_M"),
-    ] {
-        let Some(m) = model_at(&format!("models/{f}")) else {
+    let (mut seen, mut all_present) = (Vec::new(), true);
+    for (f, name, want) in Q23_FILES {
+        let Some(m) = q23_model(f, want) else {
+            all_present = false;
             continue;
         };
         let (ag, ac) = agreement(&m, 32);
@@ -4075,55 +4148,79 @@ fn gpu_logits_match_cpu_q2k_q3k() {
         report(&format!("{name} cpu rows vs cpu"), &ac);
         let n = ag.positions;
         assert!(
-            ag.top1 * 100 + 2 * n >= ac.top1 * 100 && ag.top1 * 100 >= 90 * n,
+            ag.top1 * 100 + 2 * n >= ac.top1 * 100 && ag.top1 * 100 >= 94 * n,
             "{name}: top-1 {}/{n} (cpu vs itself {})",
             ag.top1,
             ac.top1
         );
-        // Floors for files whose CPU kernel sets nearly agree (no repacked rows).
-        let self_kl = (ac.sum_kl / n as f64).max(2.5e-3);
-        assert!(ag.sum_kl / n as f64 <= 1.5 * self_kl, "{name}: mean KL");
-        assert!(ag.max_kl <= 2.0 * ac.max_kl.max(0.1), "{name}: max KL");
-        let tie = ac.max_abs.max(0.5);
+        let ac_flip = ac.flips.iter().fold(0f32, |a, &d| a.max(d));
+        let tie = (2.0 * ac_flip).max(0.5);
+        let self_kl = ac.sum_kl / n as f64;
+        let ac_wide = ac.flips.iter().filter(|&&d| d >= 0.5).count();
+        let scaled = (2.0 * self_kl / 7.8e-3).ceil() as usize;
+        let max_wide = 2.max(ac_wide + 2).max(scaled);
+        let wide = ag.flips.iter().filter(|&&d| d >= 0.5).count();
         assert!(
-            ag.flips.iter().all(|&d| d < tie),
-            "{name}: flips {:?}",
+            ag.flips.iter().all(|&d| d < tie) && wide <= max_wide,
+            "{name}: a flip >= {tie} or {wide} > {max_wide} at >= 0.5: {:?}",
             ag.flips
         );
+        let kl_cap = if self_kl > 1e-4 {
+            2.0 * ac.sum_kl
+        } else {
+            5e-3 * n as f64
+        };
+        assert!(ag.sum_kl <= kl_cap, "{name}: mean KL");
+        assert!(
+            ag.over_half.len() <= 1 && ag.max_kl < 2.0,
+            "{name}: max KL {} (above 0.5: {:?})",
+            ag.max_kl,
+            ag.over_half
+        );
+        for &(i, k, mg, _) in &ag.over_half {
+            assert!(
+                ac.flip_at.contains(&i),
+                "{name}: KL {k} at position {i} (margin {mg}), where the CPU's kernel sets agree"
+            );
+        }
+        assert!(
+            ag.max_abs < 6.0,
+            "{name}: max logit difference {}",
+            ag.max_abs
+        );
+        seen.extend_from_slice(want);
     }
+    q23_assert_covered(&seen, all_present, "gpu_logits_match_cpu_q2k_q3k");
 }
 
-/// Q2_K / Q3_K files (bartowski's, whichever are present): decode ==
-/// every prefill batching == prefill from a fed prefix (cache reuse) ==
-/// verify, bit for bit, on both caches; the 7B Q2_K's Q2_K rows (and its
-/// Q3_K ffn_down) at its shapes.
+/// The Q2_K / Q3_K files: decode == every prefill batching == prefill from a
+/// fed prefix (cache reuse) == verify, bit for bit, on the f16 cache, and on
+/// the q8 one for the 0.5B Q2_K and the 1.5B Q3_K_M.
 #[test]
 fn gpu_prefill_batchings_bit_identical_q2k_q3k() {
     let Some(_) = crate::testutil::gpu() else {
         return;
     };
-    for (f, name, q8) in [
-        ("Qwen2.5-0.5B-Instruct-Q2_K.gguf", "0.5B Q2_K", true),
-        ("Qwen2.5-0.5B-Instruct-Q3_K_M.gguf", "0.5B Q3_K_M", false),
-        ("Qwen2.5-1.5B-Instruct-Q3_K_M.gguf", "1.5B Q3_K_M", true),
-        (
-            "Llama-3.2-1B-Instruct-Q3_K_L.gguf",
-            "llama 1B Q3_K_L",
-            false,
-        ),
-        ("Qwen2.5-7B-Instruct-Q2_K.gguf", "7B Q2_K", false),
-    ] {
-        let Some(m) = model_at(&format!("models/{f}")) else {
+    let (mut seen, mut all_present) = (Vec::new(), true);
+    for (f, name, want) in Q23_FILES {
+        let Some(m) = q23_model(f, want) else {
+            all_present = false;
             continue;
         };
         prefill_bits(&m, name, CacheKv::F16);
         verify_bits(&m, name, CacheKv::F16);
-        if q8 {
+        if matches!(name, "0.5B Q2_K" | "1.5B Q3_K_M") {
             // Group 32: valid at every head size (64 only where it's head_dim).
             prefill_bits(&m, name, CacheKv::Q8 { group: 32 });
             verify_bits(&m, name, CacheKv::Q8 { group: 32 });
         }
+        seen.extend_from_slice(want);
     }
+    q23_assert_covered(
+        &seen,
+        all_present,
+        "gpu_prefill_batchings_bit_identical_q2k_q3k",
+    );
 }
 
 /// Where a batched prefill pass spends its time, per kernel kind (events
