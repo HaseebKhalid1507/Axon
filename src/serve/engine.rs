@@ -65,8 +65,9 @@ struct Prefill<'t> {
     t0: Instant,
 }
 
-/// Steps a prompt may be passed over for shorter ones before it goes
-/// first.
+/// Steps in a row a prompt may be passed over for shorter ones before it
+/// goes first (consecutive misses: under a steady trickle of short prompts
+/// a long one still gets about one prefill step in STARVE + 1).
 const STARVE: usize = 4;
 
 /// Prompt tokens a step feeds at least while requests decode (default,
@@ -81,8 +82,21 @@ const SEED_CHUNK: usize = 512;
 /// (the weights' share as DEPTH_K positions of attention), so a chunk's
 /// time is predicted at the depth it will run, not the last one's.
 const DEPTH_K: f64 = 8192.0;
-/// A step's prompt tokens when nothing decodes (as hybrid.rs STREAM_BATCH).
+/// A step's prompt tokens when nothing decodes, before a chunk's cost is
+/// known (as hybrid.rs STREAM_BATCH), and its time budget once it is: long
+/// pieces at full speed, but an arrival still starts within about that.
 const IDLE_CHUNK: usize = 4096;
+const IDLE_MS: f64 = 250.0;
+/// Feeds of at least this many tokens teach the cost (smaller ones are
+/// mostly a pass's fixed part).
+const LEARN_MIN: usize = 128;
+
+/// What a step may feed: tokens, or µs at the measured cost.
+#[derive(Clone, Copy)]
+enum Budget {
+    Tokens(usize),
+    Micros(f64, f64),
+}
 
 /// How much prompt a step feeds while requests decode.
 #[derive(Clone, Copy)]
@@ -212,41 +226,34 @@ impl<'a, 't> Batch<'a, 't> {
         });
     }
 
-    /// Prompt tokens this step may feed: with nothing decoding (nobody to
-    /// stall) IDLE_CHUNK, so requests arriving meanwhile can still start
-    /// between chunks; all of them without chunking; else `floor`, or with
-    /// a time budget what fits in it beside the last decode step at the
-    /// measured cost, at the oldest prompt's depth (the first chunk
-    /// SEED_CHUNK), at least `floor`.
-    fn budget(&self) -> usize {
+    /// What this step may feed: everything without chunking; with
+    /// nothing decoding (nobody to stall) IDLE_MS worth (IDLE_CHUNK before
+    /// a cost is known), so requests arriving meanwhile still start soon;
+    /// else `floor` tokens (no time budget), or what fits in the budget
+    /// beside the last decode step at the measured cost (SEED_CHUNK before
+    /// one is known).
+    fn budget(&self) -> Budget {
         let ChunkPolicy { floor, ms } = self.policy;
         if floor == 0 {
-            return usize::MAX;
+            return Budget::Tokens(usize::MAX);
         }
-        if self.seqs.is_empty() {
-            return IDLE_CHUNK.max(floor);
-        }
-        if ms == 0 {
-            return floor;
-        }
-        match self.cost {
-            None => SEED_CHUNK.max(floor),
-            Some(c) => {
-                // n tokens from depth d cost c * n * (d + n / 2 + K).
-                let left_us = (ms as f64 - self.decode_ms).max(0.0) * 1e3;
-                let dk = self.pre[0].fed as f64 + DEPTH_K;
-                let n = (dk * dk + 2.0 * left_us / c).sqrt() - dk;
-                (n as usize).max(floor)
-            }
+        let idle = self.seqs.is_empty();
+        match (self.cost, idle, ms) {
+            (_, true, 0) | (None, true, _) => Budget::Tokens(IDLE_CHUNK.max(floor)),
+            (Some(c), true, _) => Budget::Micros(IDLE_MS * 1e3, c),
+            (_, false, 0) => Budget::Tokens(floor),
+            (None, false, _) => Budget::Tokens(SEED_CHUNK.max(floor)),
+            (Some(c), false, _) => Budget::Micros((ms as f64 - self.decode_ms).max(0.0) * 1e3, c),
         }
     }
 
-    /// Feed this step's prompt tokens (`budget`), shortest remainder first
-    /// (a short prompt isn't held up behind a long one), but a prompt
-    /// passed over STARVE steps in a row goes first: none starves. A
-    /// remainder at most half a floor more than what is left is fed whole (no
-    /// last sliver of a pass of its own). Prompts then in their slots join
-    /// the running requests.
+    /// Feed this step's prompt (`budget`), shortest remainder first (a
+    /// short prompt isn't held up behind a long one), but a prompt passed
+    /// over STARVE steps in a row goes first: none starves. With a time
+    /// budget each prompt's chunk is sized at its own depth, the first at
+    /// least `floor`. A remainder at most half a floor past its share is
+    /// fed whole (no last sliver of a pass of its own). Prompts then in
+    /// their slots join the running requests.
     fn prefill(&mut self) -> Result<(), String> {
         if self.pre.is_empty() {
             return Ok(());
@@ -261,19 +268,42 @@ impl<'a, 't> Batch<'a, 't> {
         // Starved ones first (oldest first), then shortest remainder first.
         let mut order: Vec<usize> = (0..rem.len()).collect();
         order.sort_by_key(|&i| (self.pre[i].starved < STARVE, rem[i], i));
-        let mut left = budget;
+        let floor = self.policy.floor;
+        let mut budget = budget;
+        let mut first = true;
         for i in order {
-            if left == 0 {
+            // This prompt's share: tokens left, or what the time left buys
+            // at its depth (n tokens from depth d cost c n (d + n/2 + K)).
+            let share = match budget {
+                Budget::Tokens(t) => t,
+                Budget::Micros(us, c) => {
+                    let dk = self.pre[i].fed as f64 + DEPTH_K;
+                    let n = ((dk * dk + 2.0 * us / c).sqrt() - dk) as usize;
+                    if first { n.max(floor) } else { n }
+                }
+            };
+            if share == 0 {
                 break;
             }
             let want = rem[i];
-            let n = if want <= left.saturating_add(self.policy.floor / 2) {
+            let n = if want <= share.saturating_add(floor / 2) {
                 want
+            } else if first || share >= floor {
+                share
             } else {
-                left
+                // Not a sliver of a long prompt beside another's chunk.
+                continue;
             };
+            first = false;
             plan[i] = n;
-            left = left.saturating_sub(n);
+            budget = match budget {
+                Budget::Tokens(t) => Budget::Tokens(t.saturating_sub(n)),
+                Budget::Micros(us, c) => {
+                    let d = self.pre[i].fed as f64;
+                    let spent = c * n as f64 * (d + n as f64 / 2.0 + DEPTH_K);
+                    Budget::Micros((us - spent).max(0.0), c)
+                }
+            };
         }
         for (i, &n) in plan.iter().enumerate() {
             if n > 0 {
@@ -309,9 +339,9 @@ impl<'a, 't> Batch<'a, 't> {
         let c = t.elapsed().as_secs_f64() * 1e6 / (n as f64 * mid);
         self.held[s].extend_from_slice(toks);
         f.fed += n;
-        // Only chunks of a long prompt teach the cost (a short prompt's
-        // feed costs more per token: a pass's fixed part).
-        if n >= self.policy.floor.max(1) {
+        // Only long enough feeds teach the cost (a short one costs more per
+        // token: a pass's fixed part).
+        if n >= LEARN_MIN {
             self.cost = Some(self.cost.map_or(c, |a| 0.5 * a + 0.5 * c));
         }
         Ok(())
