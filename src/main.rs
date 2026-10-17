@@ -55,7 +55,7 @@ fn round_draft(k: usize) -> usize {
 const USAGE: &str = "\
 usage:
   axon <model.gguf>                         same as axon info
-  axon info <model.gguf>                    print a summary and exit
+  axon info <model.gguf> [rope flags]       print a summary and exit
   axon gen <model.gguf> \"<prompt>\" [-n N] [--draft K] [--draft-model PATH] [--device D]
             [--gpu-layers N] [--gpus L] [--kv T] [--verbose] [sampling flags]
                                             generation (greedy unless --temp > 0;
@@ -296,8 +296,8 @@ fn run() -> std::io::Result<()> {
 
     // `axon info <model>`, or just `axon <model>`.
     let path = match args[1].as_str() {
-        "info" if args.len() == 3 => &args[2],
-        "info" => fail("usage: axon info <model.gguf>"),
+        "info" if args.len() >= 3 => &args[2],
+        "info" => fail("usage: axon info <model.gguf> [rope flags]"),
         f if f.starts_with('-') => fail(&format!("unknown flag '{f}'")),
         // A lone argument is a model to summarize, unless it can't be one.
         p if args.len() == 2 && (p.ends_with(".gguf") || std::path::Path::new(p).exists()) => {
@@ -308,7 +308,26 @@ fn run() -> std::io::Result<()> {
         )),
     };
 
-    let model = open_model(path, false);
+    // --rope-scaling and friends, as gen takes them: the fingerprints
+    // below are for the model as those flags run it.
+    let mut rargs = rope::RopeArgs::default();
+    let mut i = 3;
+    while i < args.len() {
+        let f = args[i].as_str();
+        if !rope::RopeArgs::is_flag(f) {
+            fail(&format!(
+                "unknown argument '{f}' for info (it takes the rope flags)"
+            ));
+        }
+        rargs
+            .set(f, args.get(i + 1).map(String::as_str))
+            .unwrap_or_else(|e| fail(&e));
+        i += 2;
+    }
+    let mut model = open_model(path, false);
+    for line in rargs.apply(&mut model).unwrap_or_else(|e| fail(&e)) {
+        eprintln!("axon: {line}");
+    }
     println!("axon v{}", env!("CARGO_PKG_VERSION"));
     println!();
     println!(

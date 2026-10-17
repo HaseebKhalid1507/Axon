@@ -24,6 +24,8 @@
 //! - `cpu`: what decides CPU bits (fused multiply-add or not, r8 repack or
 //!   per-row kernels) when any layer runs on the CPU.
 //! - `kv`: the KV cache type (f16, q8, q8/32; f32 on the CPU).
+//! - `rope`: the effective RoPE scaling (`rope_field`: YaRN from the GGUF
+//!   or --rope-scaling, gemma3's linear scale) when not plain RoPE.
 //! - `serve`: `axon serve`'s settings a request inherits when it leaves
 //!   them out (`serve_field`), only when not the defaults.
 //!
@@ -34,8 +36,8 @@
 //! longer and never changes a token below the limit), --parallel and the
 //! slot count, chunked prefill, thread counts, CUDA graphs and PDL. Sampling
 //! params and the seed are per request, so they're the request's, not the
-//! server's. A future flag that does change bits (a RoPE scaling override,
-//! say) must add a field here, set only when the flag is.
+//! server's. A flag that does change bits must add a field here, set only
+//! when the flag is (as --rope-scaling's `rope`).
 //!
 //! The model digest reads the file itself (never the loaded copy, which
 //! may have been rewritten or released), so it's a function of the file's
@@ -65,6 +67,9 @@ const SCHEME: &str = "axon-identity/1";
 pub struct Identity {
     /// (name, value), in the order the module doc lists them.
     pub fields: Vec<(&'static str, String)>,
+    /// The fields that couldn't be read (their value says why): then no
+    /// identity is claimed (`fingerprint` is `fp_unknown`).
+    pub unknown: Vec<&'static str>,
 }
 
 impl Identity {
@@ -90,7 +95,27 @@ impl Identity {
             f.push(("cpu", c.to_string()));
         }
         f.push(("kv", kv.to_string()));
-        Identity { fields: f }
+        Identity {
+            fields: f,
+            unknown: Vec::new(),
+        }
+    }
+
+    /// The tuple with `field` marked unreadable (`unknown`).
+    pub fn unreadable(mut self, field: &'static str) -> Identity {
+        if !self.unknown.contains(&field) {
+            self.unknown.push(field);
+        }
+        self
+    }
+
+    /// The tuple with the effective RoPE scaling (`rope_field`), if any,
+    /// after `kv`.
+    pub fn with_rope(mut self, rope: Option<String>) -> Identity {
+        if let Some(r) = rope {
+            self.fields.push(("rope", r));
+        }
+        self
     }
 
     /// What the fingerprint hashes: the scheme, then `name=value` lines.
@@ -113,7 +138,7 @@ impl Identity {
     /// `fp_` and the first 16 hex digits of the SHA-256 of `canonical`;
     /// `fp_unknown` if a part couldn't be read (see `of`).
     pub fn fingerprint(&self) -> String {
-        if self.fields.iter().any(|(_, v)| v.contains("unknown")) {
+        if !self.unknown.is_empty() {
             return "fp_unknown".into();
         }
         format!("fp_{}", &hex(&sha256(self.canonical().as_bytes()))[..16])
@@ -131,6 +156,9 @@ impl Identity {
             };
             m.insert((*k).into(), v);
         }
+        if !self.unknown.is_empty() {
+            m.insert("unknown".into(), self.unknown.clone().into());
+        }
         serde_json::Value::Object(m)
     }
 
@@ -147,30 +175,77 @@ impl Identity {
 }
 
 /// The identity of `net`, loaded from the GGUF file at `path` (`m`). A
-/// part that can't be read (the file, the GPU) is "unknown ...", and then
-/// the fingerprint is `fp_unknown`: no identity is claimed.
+/// part that can't be read (the file, the GPU) says why ("unknown (...)")
+/// and is marked `unreadable`: the fingerprint is then `fp_unknown`, no
+/// identity is claimed. `m` is the model as run: after `RopeArgs::apply`,
+/// so `rope` sees --rope-scaling too.
 pub fn of(path: &str, m: &Model, net: &Backend) -> Identity {
-    let digest = model_digest(Path::new(path), m).unwrap_or_else(|e| format!("unknown ({e})"));
+    let digest = model_digest(Path::new(path), m);
+    let d = digest
+        .as_ref()
+        .map_or_else(|e| format!("unknown ({e})"), |d| d.clone());
     let types = quant_types(m);
     let cpu_kv = if crate::kv::use_f32() { "f32" } else { "f16" };
-    match net {
-        Backend::Cpu(_) => Identity::new(&digest, &types, "cpu", None, Some(&cpu()), cpu_kv),
+    let mut gpu_ok = true;
+    let mut gpu = |n: &crate::cuda::qwen2::CudaQwen2| {
+        let (g, ok) = gpu(n);
+        gpu_ok &= ok;
+        g
+    };
+    let id = match net {
+        Backend::Cpu(_) => Identity::new(&d, &types, "cpu", None, Some(&cpu()), cpu_kv),
         Backend::Cuda(n) => {
             let g = gpu(n);
-            Identity::new(&digest, &types, "cuda", Some(&g), None, n.kv_name())
+            Identity::new(&d, &types, "cuda", Some(&g), None, n.kv_name())
         }
         Backend::Hybrid(n) => {
-            let g = n.gpu_net().map(gpu);
+            let g = n.gpu_net().map(&mut gpu);
             let b = hybrid_backend(n.gpu_layers, n.n_layers, n.streams());
             let kv = format!("{} (cpu layers {cpu_kv})", n.kv_name());
-            Identity::new(&digest, &types, &b, g.as_deref(), Some(&cpu()), &kv)
+            Identity::new(&d, &types, &b, g.as_deref(), Some(&cpu()), &kv)
         }
         Backend::Pipeline(n) => {
-            let gs: Vec<String> = n.stages().into_iter().map(gpu).collect();
+            let gs: Vec<String> = n.stages().into_iter().map(&mut gpu).collect();
             let b = pipeline_backend(&n.cuts);
-            Identity::new(&digest, &types, &b, Some(&gs.join("; ")), None, n.kv_name())
+            Identity::new(&d, &types, &b, Some(&gs.join("; ")), None, n.kv_name())
         }
+    };
+    let mut id = id.with_rope(rope_field(m));
+    if digest.is_err() {
+        id = id.unreadable("model");
     }
+    if !gpu_ok {
+        id = id.unreadable("gpu");
+    }
+    id
+}
+
+/// The `rope` field: the model's effective RoPE scaling, read from its
+/// metadata as run (the GGUF's own keys, rewritten in memory by
+/// --rope-scaling), when it isn't plain RoPE: YaRN's parameters (factor,
+/// original context, betas, ext factor, (sin, cos) multiplier) and gemma3's
+/// linear scale, with the frequency base. None for plain RoPE, so plain
+/// models' fingerprints carry no `rope` field. The model digest can't do
+/// this: it hashes the file, which the flags don't touch.
+pub fn rope_field(m: &Model) -> Option<String> {
+    let y = crate::rope::yarn(m);
+    let lin = crate::model::rope_linear_scale(m);
+    if y.is_none() && lin == 1.0 {
+        return None;
+    }
+    let base = crate::model::meta_num(m, &format!("{}.rope.freq_base", m.arch)).unwrap_or(10000.0);
+    let mut v = Vec::new();
+    if let Some(y) = y {
+        v.push(format!(
+            "yarn factor {} orig {} beta_fast {} beta_slow {} ext {} mscale {}",
+            y.factor, y.orig, y.beta_fast, y.beta_slow, y.ext, y.mscale
+        ));
+    }
+    if lin != 1.0 {
+        v.push(format!("linear {lin}"));
+    }
+    v.push(format!("freq_base {base}"));
+    Some(v.join(", "))
 }
 
 /// The backend field of a CPU/GPU split: its layer split and, when the
@@ -214,14 +289,15 @@ pub fn gpu_field(arch: &str, code: &str, split: Option<usize>) -> String {
     s
 }
 
-/// `gpu_field` of a loaded GPU model.
-fn gpu(n: &crate::cuda::qwen2::CudaQwen2) -> String {
+/// `gpu_field` of a loaded GPU model, and whether every part of it could
+/// be read.
+fn gpu(n: &crate::cuda::qwen2::CudaQwen2) -> (String, bool) {
     let g = n.gpu();
-    let arch = g
-        .info()
-        .map_or_else(|e| format!("unknown ({e})"), |i| i.arch());
-    let code = crate::cuda::code_target(g).map_or_else(|e| format!("unknown ({e})"), |c| c.0);
-    gpu_field(&arch, &code, n.split_attention())
+    let (info, code) = (g.info(), crate::cuda::code_target(g));
+    let ok = info.is_ok() && code.is_ok();
+    let arch = info.map_or_else(|e| format!("unknown ({e})"), |i| i.arch());
+    let code = code.map_or_else(|e| format!("unknown ({e})"), |c| c.0);
+    (gpu_field(&arch, &code, n.split_attention()), ok)
 }
 
 /// The server's settings that change a request's output when it leaves
@@ -269,14 +345,10 @@ pub fn predicted(path: &str, m: &Model) -> io::Result<Vec<(String, Result<Identi
     let cpu_kv = if crate::kv::use_f32() { "f32" } else { "f16" };
     let mut v = vec![(
         "cpu".to_string(),
-        Ok(Identity::new(
-            &digest,
-            &types,
-            "cpu",
-            None,
-            Some(&cpu()),
-            cpu_kv,
-        )),
+        Ok(
+            Identity::new(&digest, &types, "cpu", None, Some(&cpu()), cpu_kv)
+                .with_rope(rope_field(m)),
+        ),
     )];
     let Ok(g) = crate::cuda::Gpu::open() else {
         return Ok(v);
@@ -305,7 +377,8 @@ pub fn predicted(path: &str, m: &Model) -> io::Result<Vec<(String, Result<Identi
         let id = match kv == "q8" && head == 256 {
             // The q8 cache has no head size 256 kernels: gen refuses it.
             true => Err("no q8 cache at head size 256".to_string()),
-            false => Ok(Identity::new(&digest, &types, "cuda", Some(&gs), None, kv)),
+            false => Ok(Identity::new(&digest, &types, "cuda", Some(&gs), None, kv)
+                .with_rope(rope_field(m))),
         };
         v.push((format!("cuda --kv {kv}"), id));
     }
@@ -748,8 +821,10 @@ mod tests {
                 .ends_with("serve=no-think, temp 0.7, seed 5\n")
         );
         let unk = Identity::new("unknown (gone)", "Q4_K:1", "cpu", None, None, "f16");
-        assert_eq!(unk.fingerprint(), "fp_unknown");
-        assert_eq!(base("unknown (no driver)").fingerprint(), "fp_unknown");
+        // The text is no sentinel: only `unreadable` withholds the fp.
+        assert_ne!(unk.fingerprint(), "fp_unknown");
+        assert_eq!(unk.clone().unreadable("model").fingerprint(), "fp_unknown");
+        assert_eq!(base("sm_89").unreadable("gpu").fingerprint(), "fp_unknown");
     }
 
     /// `of` on a real CPU/GPU split and a two-stage pipeline (both stages on
@@ -837,6 +912,59 @@ mod tests {
         assert_eq!(f16.1.as_ref().unwrap().fingerprint(), id.fingerprint());
         let q8 = p.iter().find(|(l, _)| l == "cuda --kv q8").unwrap();
         assert!(q8.1.is_err());
+    }
+
+    /// `rope`: --rope-scaling yarn (and another --rope-scale) changes the
+    /// fingerprint, though the file and its digest don't; --rope-scaling
+    /// none on a plain model is the same as no flag; `predicted` (axon
+    /// info with the same flags) gives the fingerprint `of` does.
+    #[test]
+    fn rope_scaling_in_the_fingerprint() {
+        let Some(mp) = crate::testutil::model_path() else {
+            return;
+        };
+        let path = mp.to_str().unwrap();
+        let kv = crate::kv::KvType::F16;
+        let run = |r: crate::rope::RopeArgs| {
+            let mut m = crate::gguf::load_with(path, Some(false)).unwrap();
+            r.apply(&mut m).unwrap();
+            let net = Backend::new(&m, crate::lm::Device::Cpu, 64, None, kv, false).unwrap();
+            let id = of(path, &m, &net);
+            let p = predicted(path, &m).unwrap().remove(0);
+            assert_eq!(p.0, "cpu");
+            assert_eq!(p.1.unwrap(), id, "axon info predicts gen's");
+            (id, rope_field(&m))
+        };
+        let yarn = |f: f64| crate::rope::RopeArgs {
+            scaling: Some("yarn".into()),
+            factor: Some(f),
+            ..Default::default()
+        };
+        let (plain, r0) = run(Default::default());
+        assert_eq!(r0, None, "plain RoPE: no rope field");
+        assert!(!plain.canonical().contains("rope="));
+        let (none, _) = run(crate::rope::RopeArgs {
+            scaling: Some("none".into()),
+            ..Default::default()
+        });
+        assert_eq!(none.fingerprint(), plain.fingerprint());
+        let (y4, r4) = run(yarn(4.0));
+        let (y2, _) = run(yarn(2.0));
+        let r4 = r4.unwrap();
+        assert!(r4.starts_with("yarn factor 4 orig 32768 "), "{r4}");
+        assert!(r4.contains("freq_base "), "{r4}");
+        let field = |id: &Identity, k: &str| {
+            id.fields
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(field(&y4, "model"), field(&plain, "model"), "same file");
+        let fps = [plain.fingerprint(), y4.fingerprint(), y2.fingerprint()];
+        assert!(
+            fps[0] != fps[1] && fps[1] != fps[2] && fps[0] != fps[2],
+            "{fps:?}"
+        );
     }
 
     /// The model digest reads the file: stable, and it sees a change in the

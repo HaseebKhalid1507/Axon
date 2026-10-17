@@ -93,6 +93,7 @@ The identity (`src/identity.rs`) is everything that decides the bits:
 | `gpu`      | per GPU: its exact architecture (`sm_120`); the code when it isn't the device's own cubin; the split count without tensor-core attention |
 | `cpu`      | when any layer runs on the CPU: arch, FMA or not, r8 repack or per-row (`AXON_REPACK=0` changes the low bits); not the SIMD path, which matches scalar bit for bit |
 | `kv`       | `f16`, `q8`, `q8/32`; `f32` on the CPU with `AXON_KV=f32`             |
+| `rope`     | when not plain RoPE: the effective scaling as run (YaRN's factor, original context, betas, ext factor and (sin, cos) multiplier, from the GGUF or `--rope-scaling`; gemma3's linear scale) and `freq_base`. Read from the model's metadata after the flags rewrite it: the model digest hashes the file, which the flags don't change. `--rope-scaling none` on a plain model adds nothing |
 | `serve`    | `axon serve` only, when not the defaults: `no-think`, `think-inline`, the server's sampling flags |
 
 Left out because they never change bits: drafting, `--parallel`/slots, chunk sizes,
@@ -142,8 +143,9 @@ as any change that can change an output bit for some model on some backend: a ke
 arithmetic or reduction order (CPU or CUDA), the attention fold, RoPE, norms, dequant, the
 sampler's order or RNG; and what turns a request into tokens or text: the tokenizer,
 chat templates and prompt rendering, stop tokens and stop strings, think handling. A
-change that keeps every bit (proven by the md5 gate) doesn't bump it. A new flag that changes bits (a RoPE scaling override, say) adds a field to the tuple,
-set only when the flag is, so default fingerprints stay put.
+change that keeps every bit (proven by the md5 gate) doesn't bump it. A new flag that
+changes bits adds a field to the tuple, set only when the flag is, so default fingerprints
+stay put (as `--rope-scaling` adds `rope`).
 
 ## How this compares
 
