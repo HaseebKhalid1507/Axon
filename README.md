@@ -268,8 +268,10 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
   to an idle server alone takes the single-stream path below and is fed whole: a request
   arriving during that prefill waits for it. Each slot is a KV cache as long as the context, and a
   pool of N slots costs N caches (7B at 32768: 1.75 GiB each): the request running alone
-  runs in a slot's memory (its own scratch beside it, no cache of its own): the slot holding
-  the longest prefix of its prompt, else the one idle the longest, as a batched request picks.
+  runs in a slot's memory (its own scratch beside it, no cache of its own), picked as a
+  batched request's is: the slot holding the longest prefix of its prompt if that prefix is
+  at least half the slot's tokens or more than half the prompt's, else the one idle the
+  longest (a shared <bos> or system prompt doesn't evict a conversation).
   Without `--ctx` or `--parallel` the context comes first: as many slots
   (2 to 8) as fit with the whole context; if not even 2 do, 2 or more with the longest
   context they fit with, down to 32768 (or the whole context, if shorter); below that, one

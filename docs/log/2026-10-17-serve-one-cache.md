@@ -113,3 +113,28 @@ the solo prefix or the solo path can evict a batched conversation. Neither is "n
 - `/slots`: `Engine::run` publishes the slot it runs in (`Metrics::publish_slot(i, ..)`).
 - `slot_view_matches_a_cache` points slot 0's view at slot 1 (`retarget_view`) for its second half: same picks
   and KV bytes after the recapture.
+
+## Round 3: tests that assumed one cache
+`serve_cuda_matches_gen` (avante, 1017-073428-fb09) failed at `r2 cached_tokens < 5`. `serve_checks` sends an
+unrelated "Hello" between two copies of a chat follow-up, and expects the follow-up to be prefilled from scratch.
+That held while there was one single-request cache. Now a request alone takes the slot holding its prefix, else
+the least recently used, so with a pool "Hello" lands in another slot and the follow-up keeps its prefix. That's
+the intended behaviour (the point of round 2), not a bug. `serve_checks` now reads the slot count from
+`GET /slots` and asserts both cases explicitly, for the follow-up and for the same prompt after a cancel:
+- 1 slot (the CPU, asserted): prefilled again (< 5 cached; < np - 1);
+- 2+ slots: the prefix kept, exactly all but the last token (prompt - 1).
+The same reply either way, as before.
+
+That rerun then failed on Llama 3.2 1B and Gemma 3 1B (1017-103828-3017: "8 slots: the prefix kept", 1 cached).
+That one was a real policy bug, not the test: their prompts start with <bos>, so "Hello" shared 1 token with the
+follow-up's slot and 0 with the empty ones, and the longest prefix won, evicting a 70-token conversation for
+1 token of reuse. `best_slot` now counts a shared prefix only if it is at least half of what the slot holds (the
+request continues that conversation) or more than half of the prompt (llama-server's
+`--slot-prompt-similarity` 0.5). Otherwise the least recently used slot takes the request. That fixes a <bos>
+or a system prompt every chat starts with pulling a new conversation into a live one's slot. The same rule
+applies to batched admits (`admit` uses `best_slot`), so on main a <bos> match could evict a conversation there
+too. Unit test `best_slot_ignores_a_trivial_prefix`.
+
+The other reuse assertions in serve::tests (same prompt again, after a
+stop cut, tool-call next turn, chunked round 1, cancelled-prefill rows, identity "again") only ask for reuse
+and still hold. The CPU path still checks fresh prefill == reuse.

@@ -393,19 +393,34 @@ fn serve_checks(path: &str, device: Device, reference: &str, chat_ref: &str) {
         .as_u64()
         .unwrap();
     assert!(cached > 20, "follow-up reused {cached} tokens");
-    // Something unrelated in between: the follow-up is then prefilled from scratch.
+    // Something unrelated in between. With one cache (the CPU) it takes
+    // the follow-up's rows: the follow-up is prefilled from scratch. With a
+    // pool it runs in another slot (a request alone takes the slot holding
+    // its prefix, else the least recently used: `best_slot`), so the
+    // follow-up keeps its prefix: all but its last token. Either way the
+    // same reply.
+    let slots = call(a, "GET", "/slots", "").json()["slots"]
+        .as_array()
+        .unwrap()
+        .len();
+    if device == Device::Cpu {
+        assert_eq!(slots, 1, "the CPU serves one request at a time");
+    }
     post(
         a,
         "/v1/completions",
         json!({"prompt": "Hello", "max_tokens": 2}),
     );
     let r2 = post(a, "/v1/chat/completions", follow).json();
-    assert!(
-        r2["usage"]["prompt_tokens_details"]["cached_tokens"]
-            .as_u64()
-            .unwrap()
-            < 5
-    );
+    let cached2 = r2["usage"]["prompt_tokens_details"]["cached_tokens"]
+        .as_u64()
+        .unwrap();
+    let prompt2 = r2["usage"]["prompt_tokens"].as_u64().unwrap();
+    if slots > 1 {
+        assert_eq!(cached2, prompt2 - 1, "{slots} slots: the prefix kept");
+    } else {
+        assert!(cached2 < 5, "one cache: prefilled again, {cached2} cached");
+    }
     assert_eq!(r1["choices"][0]["message"], r2["choices"][0]["message"]);
 
     // Seeded sampling is reproducible.
@@ -436,7 +451,8 @@ fn serve_checks(path: &str, device: Device, reference: &str, chat_ref: &str) {
     assert_eq!(n1, n2, "still generating after the client left");
     assert!(n1 - at < 1000, "{at} -> {n1}");
     // The cache after a cancel: the same prompt, reused, answers as after
-    // an unrelated request (a fresh prefill).
+    // an unrelated request (one cache: a fresh prefill; a pool: the
+    // unrelated one takes another slot and the prefix is kept).
     let count = json!({"prompt": "Count: 1, 2, 3,", "max_tokens": 24, "temperature": 0,
                        "repetition_penalty": 1.0});
     let x = post(a, "/v1/completions", count.clone()).json();
@@ -448,12 +464,14 @@ fn serve_checks(path: &str, device: Device, reference: &str, chat_ref: &str) {
         json!({"prompt": "Hello", "max_tokens": 2}),
     );
     let y = post(a, "/v1/completions", count).json();
-    assert!(
-        y["usage"]["prompt_tokens_details"]["cached_tokens"]
-            .as_u64()
-            .unwrap()
-            < np - 1
-    );
+    let cached_y = y["usage"]["prompt_tokens_details"]["cached_tokens"]
+        .as_u64()
+        .unwrap();
+    if slots > 1 {
+        assert_eq!(cached_y, np - 1, "{slots} slots: the prefix kept");
+    } else {
+        assert!(cached_y < np - 1, "one cache: {cached_y} of {np} cached");
+    }
     assert_eq!(x["choices"][0]["text"], y["choices"][0]["text"]);
     // The server goes on.
     let v = post(a, "/v1/completions", req).json();

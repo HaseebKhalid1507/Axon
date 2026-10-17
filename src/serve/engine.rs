@@ -675,9 +675,10 @@ fn emit(s: &mut Seq, id: u32) -> Option<End> {
     hit.then_some(End::Stop)
 }
 
-/// The free slot (not `busy`) whose `held` tokens share the longest prefix
-/// with `prompt`, and that length. Ties go to the least recently `used`
-/// slot (then the lowest): a request, batched or alone, evicts the
+/// The free slot (not `busy`) for `prompt`, and how many of its `held`
+/// tokens are a prefix of `prompt`. The slot with the longest such prefix,
+/// if that prefix counts (`counts`); else, or on a tie, the least recently
+/// `used` slot (then the lowest): a request, batched or alone, evicts the
 /// conversation idle the longest, as one cache per conversation would.
 fn best_slot(
     held: &[Vec<u32>],
@@ -695,7 +696,24 @@ fn best_slot(
                 .count();
             (s, n)
         })
-        .max_by_key(|&(s, n)| (n, std::cmp::Reverse((used[s], s))))
+        .max_by_key(|&(s, n)| {
+            let n = if counts(n, held[s].len(), prompt.len()) {
+                n
+            } else {
+                0
+            };
+            (n, std::cmp::Reverse((used[s], s)))
+        })
+}
+
+/// Whether a shared prefix of `n` tokens makes a slot holding `held` tokens
+/// the place for a prompt of `prompt` tokens: it is at least half of what
+/// the slot holds (the request continues that conversation), or more than
+/// half of the prompt (llama-server's `--slot-prompt-similarity` 0.5). A
+/// <bos> or a system prompt every chat starts with is neither, and doesn't
+/// evict a conversation when another slot is free.
+fn counts(n: usize, held: usize, prompt: usize) -> bool {
+    n > 0 && (2 * n >= held || 2 * n > prompt)
 }
 
 #[cfg(test)]
@@ -719,6 +737,36 @@ mod slot_tests {
         let busy = [false, true, false, true];
         assert_eq!(best_slot(&held, &busy, &used, &[5]), Some((2, 0)));
         assert_eq!(best_slot(&held, &[true; 4], &used, &[1]), None);
+    }
+
+    /// A short shared prefix (a <bos>, a common system prompt) doesn't pull
+    /// a request into a conversation's slot: the least recently used one
+    /// takes it, with what it shares (its reuse) reported.
+    #[test]
+    fn best_slot_ignores_a_trivial_prefix() {
+        let conv: Vec<u32> = (1..=100).collect();
+        let held = vec![conv.clone(), vec![]];
+        let free = [false; 2];
+        // <bos> + "Hello": 1 of 100 held, 1 of 2 prompt tokens.
+        assert_eq!(best_slot(&held, &free, &[2, 0], &[1, 500]), Some((1, 0)));
+        // A system prompt of 20 shared, a new 60-token chat after it.
+        let mut chat = conv[..20].to_vec();
+        chat.extend(1000..1040);
+        assert_eq!(best_slot(&held, &free, &[2, 0], &chat), Some((1, 0)));
+        // The conversation continued: its slot.
+        let mut more = conv.clone();
+        more.extend([7, 8, 9]);
+        assert_eq!(best_slot(&held, &free, &[2, 0], &more), Some((0, 100)));
+        // Most of a short prompt is the slot's prefix (60 of 100 held, 60 of
+        // 70 prompt tokens): its slot.
+        let mut part = conv[..60].to_vec();
+        part.extend(2000..2010);
+        assert_eq!(best_slot(&held, &free, &[2, 0], &part), Some((0, 60)));
+        // Every slot busy but the conversation's: it takes what it shares.
+        assert_eq!(
+            best_slot(&held, &[false, true], &[2, 0], &[1, 500]),
+            Some((0, 1))
+        );
     }
 }
 
