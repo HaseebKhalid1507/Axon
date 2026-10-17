@@ -1389,24 +1389,47 @@ impl<'g> CudaQwen2<'g> {
                 for z0 in (0..nb).step_by(per) {
                     let nz = (nb - z0).min(per) as u32;
                     // (kernel, blocks per kv head and query, threads, the
-                    // partials' stride: blocks or splits).
-                    let (f, grid, block, stride) = match (tc, q8) {
-                        (false, false) if self.gemma.is_some() => {
-                            let f = if paged {
-                                &bf.attn_split_w_pg
+                    // partials' stride: blocks or splits, the arguments
+                    // after rp: the kernel's own, picked with it).
+                    let gemma = self.gemma.is_some();
+                    let (f, grid, block, stride, tail) = match (tc, q8, gemma) {
+                        // gemma3: each query's window (0: a global layer);
+                        // its plain-cache kernel takes no table (gemma.cu).
+                        (false, false, true) => {
+                            let win = Arg::I32(l.win as i32);
+                            let (f, tail) = if paged {
+                                (&bf.attn_split_w_pg, vec![win, tab])
                             } else {
-                                &bf.attn_split_w
+                                (&bf.attn_split_w, vec![win])
                             };
-                            (f, ms, ATT_TILE as u32, self.max_split)
+                            (f, ms, ATT_TILE as u32, self.max_split, tail)
                         }
-                        (true, false) => (&bf.attn_blk, gy_blk, 32, b.nblk_max),
-                        (true, true) => (&self.q8_fns(mode).attn_blk_b, gy_blk, 32, b.nblk_max),
-                        (false, false) => (&bf.attn_split, ms, ATT_TILE as u32, self.max_split),
-                        (false, true) => (
+                        (_, _, true) => {
+                            return Err("gemma3 attention: f16 split kernels only (load refuses \
+                                 head sizes but 256, tensor cores and the q8 cache)"
+                                .into());
+                        }
+                        (true, false, false) => (&bf.attn_blk, gy_blk, 32, b.nblk_max, vec![tab]),
+                        (true, true, false) => (
+                            &self.q8_fns(mode).attn_blk_b,
+                            gy_blk,
+                            32,
+                            b.nblk_max,
+                            vec![tab],
+                        ),
+                        (false, false, false) => (
+                            &bf.attn_split,
+                            ms,
+                            ATT_TILE as u32,
+                            self.max_split,
+                            vec![tab],
+                        ),
+                        (false, true, false) => (
                             &self.q8_fns(mode).attn_split_b,
                             ms,
                             ATT_TILE as u32,
                             self.max_split,
+                            vec![tab],
                         ),
                     };
                     let mut args = vec![b.q.arg()];
@@ -1426,15 +1449,7 @@ impl<'g> CudaQwen2<'g> {
                         b.part_ml.arg(),
                         rp,
                     ]);
-                    // gemma3: each query's window (0: a global layer).
-                    let gemma = self.gemma.is_some();
-                    if gemma {
-                        args.push(Arg::I32(l.win as i32));
-                    }
-                    // (gemma3's plain-cache kernel takes no table: gemma.cu.)
-                    if !gemma || paged {
-                        args.push(tab);
-                    }
+                    args.extend(tail);
                     g.launch(
                         f,
                         (self.n_kv_heads as u32, grid, nz),

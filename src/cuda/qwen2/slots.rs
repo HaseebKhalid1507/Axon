@@ -904,16 +904,10 @@ mod tests {
         out
     }
 
-    /// A view of a slot (`slot_view`, serve's single-request cache) runs
-    /// the one-sequence calls as a cache of its own: prefill, the decode
-    /// step (its graphs), a verify pass with rejected guesses (drafting),
-    /// and a prefix reuse fed again at a position: the same picks, and the
-    /// slot's KV bytes == the plain cache's; the other slots stay as they
-    /// were; `adopt_cache` of it into its slot copies nothing, into another
-    /// slot is refused. f16 and q8, qwen2 and qwen3.
     /// A slot view is never paged: `set_tab` refuses slot 0's view (row0 0)
-    /// as any other's, `retarget_view` refuses a view with a table, and
-    /// `slot_view` a paged pool (a table and a view offset never both apply).
+    /// as any other's and a pool with a live view, `retarget_view` refuses a
+    /// view with a table, and `slot_view` a paged pool (a table and a view
+    /// offset never both apply).
     #[test]
     fn paged_views_refused() {
         let Some(g) = crate::testutil::gpu() else {
@@ -936,10 +930,24 @@ mod tests {
                 "retarget of a paged view"
             );
         }
+        {
+            let _v = net.slot_view(&p, 0).unwrap();
+            let t = g.upload(&[0u32, 1, 2, 3]).unwrap();
+            let set =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.c.set_tab(Some(t))));
+            assert!(set.is_err(), "set_tab on a pool with a live view");
+        }
         p.c.set_tab(Some(g.upload(&[0u32, 1, 2, 3]).unwrap()));
         assert!(net.slot_view(&p, 0).is_err(), "slot_view of a paged pool");
     }
 
+    /// A view of a slot (`slot_view`, serve's single-request cache) runs
+    /// the one-sequence calls as a cache of its own: prefill, the decode
+    /// step (its graphs), a verify pass with rejected guesses (drafting),
+    /// and a prefix reuse fed again at a position: the same picks, and the
+    /// slot's KV bytes == the plain cache's; the other slots stay as they
+    /// were; `adopt_cache` of it into its slot copies nothing, into another
+    /// slot is refused. f16 and q8, qwen2 and qwen3.
     #[test]
     fn slot_view_matches_a_cache() {
         let Some(g) = crate::testutil::gpu() else {
