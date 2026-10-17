@@ -27,8 +27,17 @@ pub fn authorized(headers: &[(String, String)], key: &str) -> bool {
     let Some((scheme, token)) = v.split_once(' ') else {
         return false;
     };
-    scheme.eq_ignore_ascii_case("bearer") && ct_eq(token.trim().as_bytes(), key.as_bytes())
+    let token = token.trim();
+    // An empty key (a library caller's Opts; the CLI refuses it) never
+    // authenticates an empty token.
+    !token.is_empty()
+        && !key.is_empty()
+        && scheme.eq_ignore_ascii_case("bearer")
+        && ct_eq(token.as_bytes(), key.as_bytes())
 }
+
+/// The 401's message.
+pub const AUTH_MSG: &str = "a valid API key is needed: send 'Authorization: Bearer <key>'";
 
 /// `a == b`, in time that depends only on the lengths.
 pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
@@ -145,6 +154,7 @@ pub struct SlotsView {
     /// The batch's pool (empty: one request at a time).
     pub pool: Vec<SlotState>,
     /// The engine's own cache (`Engine::job`: a request running alone).
+    /// Becomes slot 0 once #60 (one cache: the solo path runs in slot 0) lands.
     pub solo: SlotState,
 }
 
@@ -301,7 +311,7 @@ impl Metrics {
         self.ttft.render(
             &mut o,
             "axon_ttft_seconds",
-            "Time from a request's arrival to its first text.",
+            "Time from a request's arrival (its body read) to its first text.",
         );
         self.itl.render(
             &mut o,
@@ -312,9 +322,50 @@ impl Metrics {
     }
 }
 
+/// Whether `unacked` can read anything here: Linux SIOCOUTQ (= TIOCOUTQ),
+/// 0x5411 on the asm-generic ioctl numbering. mips, powerpc, sparc and
+/// alpha number it differently, so they are left out (None, as elsewhere).
+pub const OUTQ_PROBE: bool = cfg!(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86",
+        target_arch = "x86_64",
+        target_arch = "arm",
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "s390x",
+        target_arch = "loongarch64"
+    )
+));
+
+/// `unacked`, with one warning on stderr the first time it can't be read
+/// (only a blocked write is detected then).
+pub fn unacked_or_warn(s: &TcpStream) -> Option<u64> {
+    static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let u = unacked(s);
+    if u.is_none() && OUTQ_PROBE && !WARNED.swap(true, Ordering::Relaxed) {
+        eprintln!(
+            "axon serve: --slot-idle-ms: can't read a socket's unacknowledged bytes (SIOCOUTQ); \
+             only a write blocked for the idle time is detected"
+        );
+    }
+    u
+}
+
 /// Bytes written to `s` the peer hasn't acknowledged yet (Linux SIOCOUTQ),
 /// None where that can't be read.
-#[cfg(target_os = "linux")]
+#[cfg(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86",
+        target_arch = "x86_64",
+        target_arch = "arm",
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "s390x",
+        target_arch = "loongarch64"
+    )
+))]
 pub fn unacked(s: &TcpStream) -> Option<u64> {
     use std::os::fd::AsRawFd;
     unsafe extern "C" {
@@ -327,7 +378,18 @@ pub fn unacked(s: &TcpStream) -> Option<u64> {
     (r == 0 && n >= 0).then_some(n as u64)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(all(
+    target_os = "linux",
+    any(
+        target_arch = "x86",
+        target_arch = "x86_64",
+        target_arch = "arm",
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "s390x",
+        target_arch = "loongarch64"
+    )
+)))]
 pub fn unacked(_: &TcpStream) -> Option<u64> {
     None
 }
@@ -391,6 +453,10 @@ mod tests {
         assert!(!authorized(&h("Bearer"), "k1"));
         assert!(!authorized(&h("k1"), "k1"));
         assert!(!authorized(&[], "k1"));
+        // An empty key never accepts an empty token.
+        assert!(!authorized(&h("Bearer "), ""));
+        assert!(!authorized(&h("Bearer"), ""));
+        assert!(!authorized(&h("Bearer x"), ""));
     }
 
     #[test]

@@ -75,6 +75,9 @@ const POLL: Duration = Duration::from_millis(200);
 /// `linger`: longest wait, most bytes dropped.
 const LINGER: Duration = Duration::from_secs(2);
 const LINGER_BYTES: usize = 4 << 20;
+/// `--slot-idle-ms` at least: delayed ACKs (40-200 ms) and retransmit
+/// backoff on a lossy link pause a live client's acknowledgements.
+pub const MIN_SLOT_IDLE_MS: u64 = 1000;
 /// Most bytes the acceptor drops from a connection it answers 503.
 const ACCEPT_DRAIN: usize = 64 << 10;
 
@@ -130,10 +133,12 @@ pub struct Opts {
     /// preflights) needs `Authorization: Bearer <key>`.
     pub api_key: Option<String>,
     /// `--max-prompt-tokens`: longer prompts are refused (400) before
-    /// prefill.
+    /// prefill. Counts the whole rendered prompt: the chat template's
+    /// tokens and the tool schemas too; exactly N is allowed.
     pub max_prompt_tokens: Option<usize>,
     /// `--slot-idle-ms`: a stream whose client stops reading for this long
-    /// is cancelled (its slot freed), as if it had disconnected.
+    /// is cancelled (its slot freed), as if it had disconnected. The CLI
+    /// refuses less than `MIN_SLOT_IDLE_MS` (tests use less).
     pub slot_idle_ms: Option<u64>,
 }
 
@@ -1294,6 +1299,12 @@ impl Drop for Server {
 /// Bind, start accepting (503 until the model is loaded), load the model
 /// on the engine thread; returns once it is loaded.
 pub fn start(o: Opts) -> io::Result<Server> {
+    if o.api_key.as_ref().is_some_and(|k| k.trim().is_empty()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "an empty API key would accept an empty token",
+        ));
+    }
     let listener = TcpListener::bind((o.host.as_str(), o.port))?;
     let addr = listener.local_addr()?;
     let (jobs_tx, jobs_rx) = mpsc::sync_channel(o.max_queue);
@@ -1466,6 +1477,11 @@ fn connection(s: TcpStream, sh: &Shared) {
     let mut c = Conn::new(s);
     c.head_timeout = IDLE;
     c.extra = sh.extra.clone();
+    // An `Expect: 100-continue` request without the key is refused before
+    // its body is invited (else anyone could upload MAX_BODY bytes).
+    if let Some(key) = sh.api_key.clone() {
+        c.gate = Some(Box::new(move |r: &Request| !refused(Some(&key), r)));
+    }
     loop {
         sh.waiting.set(id, handle.as_ref());
         let r = c.read_request();
@@ -1476,8 +1492,12 @@ fn connection(s: TcpStream, sh: &Shared) {
         match r {
             Ok(None) => return,
             Err(e) => {
-                let body = ApiError::new(e.status, "invalid_request_error", e.msg).json();
-                let _ = c.respond(e.status, "application/json", body.as_bytes(), false, &[]);
+                if e.status == 401 {
+                    let _ = unauthorized(&mut c, false);
+                } else {
+                    let body = ApiError::new(e.status, "invalid_request_error", e.msg).json();
+                    let _ = c.respond(e.status, "application/json", body.as_bytes(), false, &[]);
+                }
                 sh.metrics.request("other", e.status);
                 // Evictable while it lingers: it serves nothing more.
                 sh.waiting.set(id, handle.as_ref());
@@ -1539,6 +1559,28 @@ fn api_err<S: io::Read + Write>(c: &mut Conn<S>, e: ApiError, keep: bool) -> io:
     json_reply(c, e.status, &e.json(), keep)
 }
 
+/// --api-key: whether `req` lacks the key it needs. Everything but /health
+/// and CORS preflights needs it (a browser sends preflights without
+/// credentials; they answer with headers only).
+fn refused(key: Option<&str>, req: &Request) -> bool {
+    key.is_some_and(|k| {
+        req.path != "/health" && req.method != "OPTIONS" && !ops::authorized(&req.headers, k)
+    })
+}
+
+/// The 401 for a request without the right key (OpenAI's error shape).
+fn unauthorized<S: io::Read + Write>(c: &mut Conn<S>, keep: bool) -> io::Result<()> {
+    let mut e = ApiError::new(401, "invalid_request_error", ops::AUTH_MSG);
+    e.code = Some("invalid_api_key");
+    c.respond(
+        401,
+        "application/json",
+        e.json().as_bytes(),
+        keep,
+        &[("WWW-Authenticate", "Bearer")],
+    )
+}
+
 /// Answer one request; Ok(true) if the connection can take another.
 fn route(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared) -> io::Result<bool> {
     let keep = req.keep_alive;
@@ -1554,26 +1596,8 @@ fn route(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared) -> io::Result<bool
             "the model is loading; try again shortly",
         )
     };
-    // --api-key: everything but /health and CORS preflights (a browser
-    // sends those without credentials; they answer with headers only).
-    if let Some(key) = &sh.api_key
-        && req.path != "/health"
-        && req.method != "OPTIONS"
-        && !ops::authorized(&req.headers, key)
-    {
-        let mut e = ApiError::new(
-            401,
-            "invalid_request_error",
-            "a valid API key is needed: send 'Authorization: Bearer <key>'",
-        );
-        e.code = Some("invalid_api_key");
-        c.respond(
-            401,
-            "application/json",
-            e.json().as_bytes(),
-            keep,
-            &[("WWW-Authenticate", "Bearer")],
-        )?;
+    if refused(sh.api_key.as_deref(), req) {
+        unauthorized(c, keep)?;
         return Ok(keep);
     }
     match (req.method.as_str(), req.path.as_str()) {
@@ -1662,6 +1686,8 @@ fn route(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared) -> io::Result<bool
 /// /v1/chat/completions (`chat`) and /v1/completions.
 fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -> io::Result<bool> {
     let keep = req.keep_alive;
+    // Its arrival (the body read): TTFT counts tokenizing and the queue too.
+    let arrived = Instant::now();
     let Some(m) = sh.model.get() else {
         return api_err(
             c,
@@ -1792,9 +1818,8 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
         cancel: cancel.clone(),
         tx,
         id: n,
-        arrived: Instant::now(),
+        arrived,
     };
-    let arrived = job.arrived;
     match sh.jobs.try_send(job) {
         Ok(()) => {
             sh.queued.fetch_add(1, Ordering::Relaxed);
@@ -1826,8 +1851,8 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
     let r = if g.stream {
         if let Some(idle) = sh.slot_idle {
             ev.stall = Some(ops::Stall::new(idle));
-            let _ =
-                c.s.set_write_timeout(Some(idle.max(Duration::from_millis(1))));
+            // Never slower than without the flag.
+            let _ = c.s.set_write_timeout(Some(idle.min(WRITE_TIMEOUT)));
         }
         let r = stream(c, req, &g, &mut ev, chat, &id, model, created, parser);
         let _ = c.s.set_write_timeout(Some(WRITE_TIMEOUT));
@@ -1899,7 +1924,8 @@ impl<'a> Events<'a> {
     fn seen(&mut self, e: Event) -> Event {
         let now = Instant::now();
         match &e {
-            Event::Text { .. } | Event::Done { .. } if self.last.is_none() => {
+            // Text events are never empty; a Done without text isn't a first token.
+            Event::Text { .. } if self.last.is_none() => {
                 self.m.ttft.observe(now - self.arrived);
                 self.last = Some(now);
             }
@@ -1945,7 +1971,7 @@ impl<'a> Events<'a> {
                     return None;
                 }
                 if let Some(s) = self.stall.as_mut()
-                    && s.check(c.written, ops::unacked(&c.s))
+                    && s.check(c.written, ops::unacked_or_warn(&c.s))
                 {
                     self.stalled = true;
                     return None;
@@ -2152,6 +2178,16 @@ const SERVE_USAGE: &str = "usage: axon serve <model.gguf> [--host H] [--port P] 
      [--prefill-ms MS] [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS] [--no-think] \
      [--think-inline] [--quiet] [sampling flags]";
 
+/// AXON_API_KEY's key: trimmed (a secret file's trailing newline); set but
+/// blank is an error, not a server without auth.
+fn env_key(v: Option<String>) -> Result<Option<String>, &'static str> {
+    match v.as_deref().map(str::trim) {
+        None => Ok(None),
+        Some("") => Err("AXON_API_KEY is set but empty: unset it, or give a key"),
+        Some(k) => Ok(Some(k.to_string())),
+    }
+}
+
 /// `serve` subcommand: args = [axon, serve, model, flags...]
 pub fn run(args: &[String]) -> io::Result<()> {
     let Some(path) = args.get(2).filter(|p| !p.starts_with('-')) else {
@@ -2183,11 +2219,16 @@ pub fn run(args: &[String]) -> io::Result<()> {
         prefill_ms: engine::PREFILL_MS,
         rope: Default::default(),
         // The environment keeps the key out of `ps`; --api-key overrides it.
-        api_key: std::env::var("AXON_API_KEY").ok().filter(|k| !k.is_empty()),
+        api_key: None,
         max_prompt_tokens: None,
         slot_idle_ms: None,
     };
     let mut k = None;
+    let mut key_from = "AXON_API_KEY";
+    // The environment keeps the key out of `ps`; --api-key overrides it. A
+    // secret file's trailing newline is trimmed; set but blank is an error
+    // (auth was asked for).
+    o.api_key = env_key(std::env::var("AXON_API_KEY").ok()).unwrap_or_else(|e| crate::fail(e));
     let mut i = 3;
     while i < args.len() {
         let f = args[i].as_str();
@@ -2280,9 +2321,21 @@ pub fn run(args: &[String]) -> io::Result<()> {
             "--api-key" if v.trim().is_empty() || v.trim() != v => {
                 crate::fail("--api-key needs a key (no spaces around it)")
             }
-            "--api-key" => o.api_key = Some(v.clone()),
+            "--api-key" => {
+                o.api_key = Some(v.clone());
+                key_from = "--api-key";
+            }
             "--max-prompt-tokens" => o.max_prompt_tokens = Some(whole(true)),
-            "--slot-idle-ms" => o.slot_idle_ms = Some(whole(true) as u64),
+            "--slot-idle-ms" => {
+                let n = whole(true) as u64;
+                if n < MIN_SLOT_IDLE_MS {
+                    crate::fail(&format!(
+                        "--slot-idle-ms {n}: at least {MIN_SLOT_IDLE_MS} (delayed ACKs and \
+                         retransmits pause a live client's acknowledgements for hundreds of ms)"
+                    ));
+                }
+                o.slot_idle_ms = Some(n);
+            }
             "--parallel" => {
                 o.parallel = whole(true);
                 o.parallel_set = true;
@@ -2293,6 +2346,19 @@ pub fn run(args: &[String]) -> io::Result<()> {
     }
     o.max_draft = crate::draft::draft_k(k.or_else(crate::draft_env_set), o.draft_model.is_some());
     crate::check_stream_decode(o.max_draft);
+    if o.log {
+        // Never the key itself.
+        if o.api_key.is_some() {
+            eprintln!("axon serve: api key: on (from {key_from})");
+        }
+        if o.slot_idle_ms.is_some() && !ops::OUTQ_PROBE {
+            eprintln!(
+                "axon serve: --slot-idle-ms: this platform can't read a socket's unacknowledged \
+                 bytes; only a write blocked for the idle time is detected (once the client's and \
+                 the server's buffers are full: minutes for a slow stream)"
+            );
+        }
+    }
     start(o)?.wait()
 }
 

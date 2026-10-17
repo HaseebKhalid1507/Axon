@@ -34,7 +34,7 @@ HOST = "127.0.0.1"
 AUTH = None
 OPS_KEY = b"fuzz-key-0123456789"
 OPS_MAX_PROMPT = 256
-OPS_IDLE_MS = 500
+OPS_IDLE_MS = 1000
 
 
 def inject(raw):
@@ -785,16 +785,40 @@ def ops_cases(srv):
     for v in ["high", 0, -1, 10**30, 1e308, None, [], {}, True]:
         E(f"priority:{json.dumps(v)[:20]}", cj({"prompt": "Hi", "max_tokens": 1, "priority": v}), "ok")
 
-    # A client that stops reading its stream: its slot is freed.
-    name = "slot-idle:stalled-reader"
+    # Expect: 100-continue without the key: a 401, no invitation to send the body.
+    AUTH = None
+    try:
+        raw = (b"POST /v1/completions HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\n"
+               b"Content-Length: 1000000\r\nConnection: close\r\n\r\n")
+        st, _, body = request(P, raw, 10)
+        record("auth:expect-100-no-key", st == 401 and check_error_body(body), f"{st}")
+    except Exception as e:
+        record("auth:expect-100-no-key", False, repr(e))
+    finally:
+        AUTH = key
+    alive(srv, "auth:expect-100-no-key")
+
+    # A client that stops reading its stream: its slot is freed. With a tiny
+    # receive buffer (4 KiB: the clock starts almost at once), then the
+    # default one (the clock starts only once it is full).
+    for rcvbuf in (4096, None):
+        stalled_reader(srv, rcvbuf, metrics)
+
+
+def stalled_reader(srv, rcvbuf, metrics):
+    P = srv.port
+    name = f"slot-idle:stalled-reader-rcvbuf-{rcvbuf or 'default'}"
     try:
         raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        raw.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 4096)
+        if rcvbuf:
+            raw.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
         raw.settimeout(30)
         raw.connect((HOST, P))
         s = AuthSock(raw)
-        before = metrics()[2].get("axon_slot_idle_evictions_total", 0)
-        s.sendall(cj({"prompt": "Count to a thousand: 1, 2, 3,", "max_tokens": 1800, "stream": True,
+        m0 = metrics()[2]
+        before = m0.get("axon_slot_idle_evictions_total", 0)
+        g0 = m0.get("axon_generated_tokens_total", 0)
+        s.sendall(cj({"prompt": "Count to a thousand: 1, 2, 3,", "max_tokens": 1900, "stream": True,
                       "temperature": 0}))
         s.recv(256)
         t0 = time.time()
@@ -806,9 +830,13 @@ def ops_cases(srv):
             if not j["solo"]["busy"] and not any(x["busy"] for x in j["slots"]):
                 freed = time.time() - t0
                 break
-        after = metrics()[2].get("axon_slot_idle_evictions_total", 0)
-        record(name, freed is not None and after == before + 1,
-               f"slot freed after {freed}s (stall + {OPS_IDLE_MS} ms), evictions {before}->{after}")
+        m1 = metrics()[2]
+        after = m1.get("axon_slot_idle_evictions_total", 0)
+        toks = m1.get("axon_generated_tokens_total", 0) - g0
+        # The default buffer may hold the whole reply: then it simply finishes.
+        ok = freed is not None and (after == before + 1 or (rcvbuf is None and toks >= 1900))
+        record(name, ok, f"slot freed after {freed}s, {toks:.0f} tokens generated meanwhile "
+                         f"(--slot-idle-ms {OPS_IDLE_MS}), evictions {before}->{after}")
         s.close()
     except Exception as e:
         record(name, False, repr(e))

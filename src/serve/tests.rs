@@ -2939,3 +2939,65 @@ fn serve_cuda_slots() {
             && sl["solo"]["busy"] == false
     });
 }
+
+/// AXON_API_KEY is trimmed (a secret file's newline); set but blank is an
+/// error; an empty key can't start a server (it would take an empty token).
+#[test]
+fn api_key_env_and_empty() {
+    assert_eq!(super::env_key(None), Ok(None));
+    assert_eq!(super::env_key(Some("k3y\n".into())), Ok(Some("k3y".into())));
+    assert_eq!(
+        super::env_key(Some("  k3y \r\n".into())),
+        Ok(Some("k3y".into()))
+    );
+    assert!(super::env_key(Some(" \n".into())).is_err());
+    assert!(super::env_key(Some(String::new())).is_err());
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let mut o = None;
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        server_with(p.to_str().unwrap(), Device::Cpu, |x| {
+            x.api_key = Some(" ".into());
+            o = Some(());
+        })
+    }));
+    assert!(o.is_some() && r.is_err(), "an empty key must not start");
+}
+
+/// --api-key and `Expect: 100-continue`: without the key, a 401 before
+/// the body is invited (no `100 Continue`); with it, the usual 100 then
+/// the answer.
+#[test]
+fn serve_api_key_before_100_continue() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server_with(p.to_str().unwrap(), Device::Cpu, |o| {
+        o.api_key = Some("k3y".into());
+    });
+    let body = json!({"prompt": "Hi", "max_tokens": 1, "temperature": 0}).to_string();
+    for (auth, want) in [("", 401), ("Authorization: Bearer k3y\r\n", 200)] {
+        let mut c = TcpStream::connect(s.addr).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
+        write!(
+            c,
+            "POST /v1/completions HTTP/1.1\r\nHost: x\r\n{auth}Expect: 100-continue\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        let mut buf = Vec::new();
+        let r = read_resp(&mut c, &mut buf);
+        if want == 401 {
+            assert_eq!(r.status, 401, "{}", r.body);
+            assert_eq!(r.json()["error"]["code"], "invalid_api_key");
+            assert_eq!(r.header("www-authenticate"), Some("Bearer"));
+            continue;
+        }
+        assert_eq!(r.status, 100);
+        c.write_all(body.as_bytes()).unwrap();
+        let r = read_resp(&mut c, &mut buf);
+        assert_eq!(r.status, 200, "{}", r.body);
+    }
+}

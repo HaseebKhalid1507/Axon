@@ -322,24 +322,36 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
   `GET /health` needs `Authorization: Bearer KEY` (compared in constant time); without it a
   401 with an OpenAI-shaped error (`code: "invalid_api_key"`) and `WWW-Authenticate: Bearer`.
   CORS preflights (`OPTIONS`) stay open: browsers send them without credentials, and they
-  answer with headers only. Still plain HTTP: put TLS in front of it beyond a trusted LAN.
+  answer with headers only. An `Expect: 100-continue` upload without the key gets the 401
+  before its body is invited. `AXON_API_KEY` is trimmed (a secret file's trailing newline);
+  set but blank is an error. stderr says `api key: on (from AXON_API_KEY|--api-key)`, never
+  the key. Still plain HTTP: put TLS in front of it beyond a trusted LAN.
 - `GET /metrics`: Prometheus text format. `axon_requests_total{route,status}`,
   `axon_generated_tokens_total`, `axon_prompt_tokens_total`,
   `axon_prompt_cached_tokens_total` (prefix reuse), `axon_requests_in_flight`,
   `axon_queue_depth` (in flight, not in a slot), `axon_slots_busy` / `axon_slots_free`,
   `axon_slot_idle_evictions_total`, `axon_prompt_refused_total`, and the histograms
-  `axon_ttft_seconds` (arrival to first text) and `axon_itl_seconds` (between a request's
+  `axon_ttft_seconds` (from the request's body read, so tokenizing and queueing count, to
+  its first text) and `axon_itl_seconds` (between a request's
   text events, about one token each). No host-RAM KV store hits yet: serve has no store.
 - `GET /slots`: JSON, `{"ctx", "slots": [{"id", "busy", "held_tokens", "request_id",
   "age_ms"}], "solo": {...}, "queue_depth"}`. `held_tokens`: the prefix whose KV rows the
   slot holds (what a later prompt can reuse); `request_id` is the `#n` of the stderr log;
-  `solo` is the single-request cache (the CPU, a split, or a request alone on the GPU).
+  `solo` is the single-request cache (the CPU, a split, or a request alone on the GPU; it
+  becomes slot 0 once serve runs the solo path in a slot).
 - `--max-prompt-tokens N`: a longer prompt is refused before prefill with a 400
-  (`code: "context_length_exceeded"`, as a prompt past the context).
-- `--slot-idle-ms MS`: a stream whose client stops reading is cancelled (as a disconnect:
-  its slot freed for the next request) once its socket has taken no bytes for MS ms. A
-  client that reads slowly isn't affected; one that stops is detected when its receive
-  buffer fills (Linux: the unacknowledged bytes stop moving), or a write blocks for MS ms.
+  (`code: "context_length_exceeded"`, as a prompt past the context). It counts the whole
+  rendered prompt: the chat template's tokens and the tool schemas too; exactly N is allowed.
+- `--slot-idle-ms MS` (at least 1000: delayed ACKs and retransmits pause a live client's
+  acknowledgements for hundreds of ms): a stream whose client stops reading is cancelled (as
+  a disconnect: its slot freed for the next request). A client that reads slowly isn't
+  affected. A stopped one can't be told from a slow one until its receive buffer is full, so
+  the clock starts only then: on Linux (x86, arm, riscv64, s390x, loongarch64), once the
+  unacknowledged bytes stop moving for MS ms. With a default ~128 KiB receive window that is
+  roughly 500+ tokens of SSE after the client stopped (DEFAULT_RESULT); a reply shorter than
+  that just finishes into the buffer. Elsewhere only a write blocked for MS ms (at most the
+  60 s write timeout) is detected, after the server's send buffer fills too, and stderr says
+  so at startup.
 - A request's `priority` field is accepted and ignored (requests run in arrival order).
 
 #### Tool calling

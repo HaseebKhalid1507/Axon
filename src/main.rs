@@ -137,10 +137,12 @@ flags:
               fed whole, the others' streams wait)
   --api-key KEY  serve: every route but /health (and CORS preflights) needs
               `Authorization: Bearer KEY` (else 401); AXON_API_KEY sets it too, out of `ps`
+              (trimmed; set but blank is an error)
   --max-prompt-tokens N  serve: a longer prompt is refused (400, context_length_exceeded)
-              before prefill
+              before prefill (the rendered prompt: template and tool tokens count)
   --slot-idle-ms MS  serve: a stream whose client stops reading for MS ms is cancelled
-              and its slot freed, as if it had disconnected (default: off)
+              and its slot freed, as if it had disconnected (default: off; at least 1000).
+              The clock starts once the client's receive buffer is full (README)
   --rope-scaling yarn --rope-scale F [--yarn-orig-ctx N]
               gen, logits, chat, serve: YaRN RoPE scaling (llama.cpp's flags), off by default:
               the model's context becomes N x F (N: default the model's trained context), e.g.
