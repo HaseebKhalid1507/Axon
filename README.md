@@ -14,7 +14,7 @@ No ggml, no BLAS, no binding crates, no CUDA toolkit at build time: a GGUF reade
 quantized integer dot-product kernels (scalar, AVX2, AVX-VNNI), a spinning worker
 pool and a transformer forward pass on the CPU; on the GPU, CUDA C++ kernels that
 NVRTC compiles at run time, launched through the driver API (both libraries loaded
-with dlopen). About 42k lines of Rust and 4.7k of CUDA, tests included.
+with dlopen). About 67k lines of Rust and 6.5k of CUDA, tests included.
 
 Every optimized path is **bit-identical** to the plain reference path on its
 device: batched prefill produces exactly the logits that feeding one token at a
@@ -47,14 +47,14 @@ Works today, honestly scoped:
   per token. Attention on the GPU with the experts on the CPU is next
   ([roadmap](docs/roadmap.md#mixture-of-experts)). Other architectures, other
   mixture-of-experts models and RoPE scaling (a factor other than 1; Gemma 3's linear
-  scaling excepted) are refused with an error.
+  scaling and YaRN, below, excepted) are refused with an error.
 - Tensor types: F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K on the CPU. On the
   GPU every weight matrix must be one of the eight quantized types (F16/F32 matrices are
   refused there). Others load for `info` but can't run.
 - Sampling: greedy, or temperature / top-k / top-p / min-p / repeat penalty with a seed
   (llama.cpp's order, ollama's defaults). `gen` continues raw text, greedy unless `--temp`
   is above 0 (reproducible output and benchmarks); `chat` talks to an Instruct model
-  through its chat template (ChatML, or Llama 3's) and samples by default (`--temp 0` for greedy). On the GPU
+  through its chat template (ChatML, Llama 3's, Mistral's `[INST]` or Gemma 3's) and samples by default (`--temp 0` for greedy). On the GPU
   the penalty and top-k (up to 256) run on the device, so only k candidates come back per
   token; with top-k 0 (off: the whole vocab, as llama.cpp) the logits come back instead.
 - CPU: any x86-64 (others build too, scalar only). The default build is baseline x86-64 and
@@ -70,8 +70,9 @@ Works today, honestly scoped:
   `/usr/local/cuda` or `/opt/cuda`), compiles its kernels for the GPU on first use and
   caches them in `~/.cache/axon/cuda` (`$XDG_CACHE_HOME/axon/cuda`). The driver must
   support CUDA 12 or newer, and at least NVRTC's CUDA major version. A GPU newer than
-  NVRTC gets PTX for the driver to compile; one older than every architecture NVRTC
-  supports is refused.
+  NVRTC gets PTX for the driver to compile. If the first NVRTC found can't target the GPU
+  (NVRTC 13 dropped Pascal and Volta), the next one installed is tried, so a GTX 1050
+  (sm_61) runs on NVRTC 12.x beside 13; a GPU no installed NVRTC can target is refused.
   The int8 tensor-core GEMMs (batched prefill, speculative verify) and the tensor-core
   attention need sm_80 or newer; older GPUs run batches through the decode kernels
   (dp4a): correct, not fast. Without a usable GPU, `--device cuda` stops with the reason;
@@ -82,6 +83,11 @@ Works today, honestly scoped:
   instead of running those layers on the CPU (`AXON_STREAM=0`: off).
 - KV cache: f16 by default; `--kv q8` (GPU only) stores int8 with a scale per position and
   head, half the memory, with slightly different results.
+- Sessions: `chat --session FILE` keeps a conversation in a file, saved after every reply.
+  At the next start its KV cache is loaded back if the model, KV type, backend and GPU
+  match, else the saved tokens are prefilled again; either way the reply continues as if
+  never stopped (on a CPU/GPU split a re-prefilled cache is close, not exact). Measured:
+  a 29.8k-position 7B session restores in 0.41-0.45 s against a 3.16 s re-prefill (RTX 4090).
 - Long context (opt-in): `--rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 32768` (llama.cpp's
   flags) takes Qwen2.5 / Qwen3 from 32k to 128k by YaRN RoPE scaling. It changes the output at
   every length (measured +8 % perplexity at 2k-8k on Qwen2.5-7B), so only for prompts past the
@@ -98,11 +104,15 @@ Works today, honestly scoped:
   step is bound by reading the CPU layers' weights from RAM, which a verify pass does once for
   all of its tokens, so drafting pays far more there (`docs/design/spec-split.md`).
 - Serving: `axon serve`, an OpenAI-compatible HTTP server (below) with tool calling. On one GPU it
-  batches the decode steps of concurrent requests (`--parallel N`); elsewhere it runs one request at a time.
+  batches the decode steps of concurrent requests (`--parallel N`) and feeds new prompts in chunks
+  between them, every slot one KV cache (no extra cache for a request running alone); elsewhere it
+  runs one request at a time. Operations: `--api-key`, `GET /metrics` (Prometheus), `GET /slots`,
+  `--max-prompt-tokens`, `--slot-idle-ms`.
 - Rust 1.89 or newer.
 
-Not on main yet: tensor parallel, chunked prefill in `serve` (#45), the long-context decode attention
-fix. What's in flight and why: [docs/roadmap.md](docs/roadmap.md). How Axon is built and measured, and
+Not on main yet: tensor parallel, paged KV in `serve` (the kernels read through a page table; the pool
+doesn't use it yet), saving and restoring `serve` slots, the `/v1/responses` and ollama-native APIs,
+Q2_K/Q3_K, and the MoE paths on the GPU (#67). What's in flight and why: [docs/roadmap.md](docs/roadmap.md). How Axon is built and measured, and
 what was tried and dropped: [docs/methodology.md](docs/methodology.md),
 [docs/history.md](docs/history.md), [docs/experiments-rejected.md](docs/experiments-rejected.md).
 
@@ -137,7 +147,7 @@ axon gen <model.gguf> "<prompt>" [-n N] [--draft K] [--draft-model PATH] [--devi
                                           generation (default 32 tokens; greedy unless --temp)
 axon logits <model.gguf> "<prompt>" [-k K]  top-K next-token logits (default 10)
 axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K]
-          [--draft-model PATH] [--device D] [--gpu-layers N] [--gpus L] [--kv T]
+          [--draft-model PATH] [--device D] [--gpu-layers N] [--gpus L] [--kv T] [--session F]
                                           talk to an Instruct model (sampled; --temp 0: greedy)
 sampling (gen, chat): --temp T --top-k K --top-p P --min-p P
           --repeat-penalty P --repeat-last-n N --seed S   (axon --help)
@@ -484,8 +494,9 @@ llama.cpp / ollama, and axon's range over llama.cpp across the five models:
 | RTX 5090 | 18609 / 15416 / 15832 | 308 / 280 / 279 | 1.21-1.94x | 1.10-1.46x |
 | H100 SXM | 12534 / 9691 / 9711 | 311 / 241 / 247 | 1.19-2.10x | 1.22-1.34x |
 
-The H100's prefill trails the 4090's: axon's int8 GEMMs use `mma.sync`, not Hopper's
-`wgmma` ([docs/design/hopper.md](docs/design/hopper.md)). pp560 gaps are wider (up to
+The H100's prefill trails the 4090's: in this run axon's int8 GEMMs used `mma.sync`, not Hopper's
+`wgmma`. Since #33 the fused gate+up and the large Q4_K products run on `wgmma` on sm_90a (+12 % on a
+7B prefill pass with `AXON_GEMMH=1`, H100 PCIe; the new default routing itself is not yet measured on an H100; [docs/design/hopper.md](docs/design/hopper.md)). pp560 gaps are wider (up to
 15x) but mostly measure the other engines' fixed per-request cost; quote pp2100.
 
 Parabellum, the dev laptop (from BENCH.md): main @ 0851798 (`--device cuda`, whole model on the GPU) vs ollama 0.35.0
