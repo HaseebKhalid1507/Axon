@@ -11,6 +11,11 @@ How Axon is developed, what was tried (including what failed) and where it stand
 
 ## What Axon is
 
+**Mission: make LLM inference cheap and fast, and run the best open models.** Cheap means wasting no
+hardware, from a laptop to a datacenter: the most tokens per GPU, per watt and per dollar. Fast means as close
+to the hardware limit as the math allows, for one stream and for thousands. The best models means the frontier
+open models, not only the ones that fit a laptop.
+
 Axon is an LLM inference engine for GGUF models (Qwen2, Qwen3, Llama 3), written from scratch in Rust.
 It runs on the CPU and on NVIDIA GPUs. It doesn't use ggml, BLAS, binding crates, or a CUDA toolkit at
 build time. The CPU path is a GGUF reader, integer dot-product kernels (scalar, AVX2, AVX-VNNI), a

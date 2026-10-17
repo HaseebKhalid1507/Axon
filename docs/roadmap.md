@@ -3,6 +3,11 @@
 Short and opinionated. "On main" means merged at `e998d6f`. Everything else is planned or in flight.
 Estimates come from the design notes and are labeled.
 
+**Mission: make LLM inference cheap and fast, and run the best open models.** Cheap means wasting no
+hardware, from a laptop to a datacenter: the most tokens per GPU, per watt and per dollar. Fast means as close
+to the hardware limit as the math allows, for one stream and for thousands. The best models means the frontier
+open models, not only the ones that fit a laptop. Every item below serves one of those three.
+
 ## The thinking behind the order
 
 Single-stream decode on a 7B/8B model is near the hardware limit. On Parabellum (RTX 5070 Ti Laptop),
@@ -18,6 +23,25 @@ hostile files, bad requests and long-running load comes right after batching (it
 
 The exception is the H100, where prefill is issue-bound at 7.6% of its int8 peak. That gap is real
 and has a specific fix ([design/hopper.md](design/hopper.md)).
+
+## Long-term goals
+
+These are not priorities, and nothing here jumps the queue below. They are where the mission points (the best
+models, cheaply and fast), so choices made along the way shouldn't close them off.
+
+- **Run Kimi K2** (1T parameters, 32B active per token, the DeepSeek V3 architecture). It is the largest open
+  model and the test of whether Axon scales past a 12 GB card. Every piece it needs is useful on its own, and
+  each is listed under [Frontier models](#frontier-models-100b-to-1t):
+  - experts on the GPU (MoE stages 2–3, already planned);
+  - MLA attention and DeepSeek routing (the `deepseek2` architecture), tried first on a small DeepSeek-architecture
+    model that fits Parabellum;
+  - Kimi's tokenizer (its own vocabulary and pre-tokenizer; to be checked against the GGUF);
+  - 2–3-bit weight types. At Q4_K_M the model is ≈ 600 GB; at 2–3 bits it is ≈ 250–380 GB. The GGUF reader names
+    Q2_K and Q3_K but there are no kernels for them;
+  - an expert cache across GPU, RAM and disk, and multi-GPU (pipeline parallel is on main, #34);
+  - the hardware to test it at full size: a multi-GPU or large-RAM pod, a few dollars to tens of dollars an hour.
+
+  YaRN, which K2 uses for its long context, is already on main (#49).
 
 ## Recently landed
 
@@ -142,7 +166,7 @@ trigger each step. Nothing here is scheduled.
 | Qwen3-Coder-480B-A35B | MoE | ≈ 288 GB | ≈ 21 GB | `qwen3moe`, CPU only | as above, ≥ 320 GB RAM |
 | Llama 3.1 405B | dense | ≈ 243 GB | ≈ 243 GB | `llama`; pipeline parallel (#34) should run it on a 4×80 GB pod (untested) | tensor parallel, to make it fast |
 | DeepSeek V3 / R1 (671B, 37B active) | MoE + MLA | ≈ 403 GB | ≈ 22 GB | refused | MLA attention, DeepSeek routing, ≥ 450 GB RAM or a GPU node |
-| Kimi K2 (1T, 32B active) | DeepSeek V3 architecture | ≈ 600 GB | ≈ 19 GB | refused | same as DeepSeek, ≥ 650 GB |
+| Kimi K2 (1T, 32B active) | DeepSeek V3 architecture | ≈ 600 GB | ≈ 19 GB | refused | same as DeepSeek, plus Kimi's tokenizer and 2–3-bit types; ≥ 650 GB at Q4_K_M ([long-term goal](#long-term-goals)) |
 
 **What's missing, in build order.**
 
