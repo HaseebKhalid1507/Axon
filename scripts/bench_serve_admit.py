@@ -182,7 +182,7 @@ def main():
             t = cool()
             g0 = gpu()
             if MODE == 'admit':
-                ctx = LONG + 4096
+                ctx = LONG * 5 // 4 + 1024
                 p = serve(b, i, ctx, DEC + 1 + (1 if SHORT else 0))
                 try:
                     admit_once(2000, 200, s0 + 50)  # warm-up: graphs for every row count, the long path
@@ -197,7 +197,7 @@ def main():
                     p.kill()
                     p.wait()
             else:
-                p = serve(b, i, max(4096, IDLE_LONG + 1024), int(opts.get('parallel', '8')))
+                p = serve(b, i, max(4096, IDLE_LONG * 5 // 4 + 1024), int(opts.get('parallel', '8')))
                 try:
                     base = {'temperature': 0, 'stream': True, 'stream_options': {'include_usage': True}}
                     stream('/v1/completions', {**base, 'prompt': 'Hello', 'max_tokens': 4})
