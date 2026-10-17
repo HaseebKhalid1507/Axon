@@ -3384,6 +3384,167 @@ fn q6k8_never_costs_context() {
     assert!(!q6k8_fits(100 * gib, cache, 0, false));
 }
 
+/// A cuda_fa_bench median (us; lcpre NOTES): (cc, SMs, n_heads, n_kv, hd,
+/// queries, start, [Full, Small, Kv]).
+type FaRow = (u32, usize, usize, usize, usize, usize, usize, [f64; 3]);
+#[rustfmt::skip]
+const FA_MEASURED: &[FaRow] = &[
+    // RTX 5070 Ti Laptop (sm_120, 46 SMs; bella), c5-bella.log.
+    (120, 46, 28, 4, 128, 1121, 16384, [7156.2, 6652.4, 6118.7]),
+    (120, 46, 28, 4, 128, 1121, 32768, [14094.0, 13082.4, 12168.3]),
+    (120, 46, 28, 4, 128, 1042, 32768, [11705.7, 11812.5, 11088.1]),
+    (120, 46, 28, 4, 128, 1016, 32768, [11906.5, 11919.9, 11044.9]),
+    (120, 46, 32, 8, 128, 1121, 16384, [8422.7, 7703.7, 7214.0]),
+    (120, 46, 32, 8, 128, 1121, 32768, [16845.2, 15394.6, 14380.3]),
+    (120, 46, 32, 8, 128, 1042, 32768, [14577.2, 14623.8, 13475.8]),
+    (120, 46, 32, 8, 128, 1016, 32768, [14175.7, 14423.7, 13246.4]),
+    (120, 46, 14, 2, 64, 1121, 16384, [1473.4, 2041.5, 1671.1]),
+    (120, 46, 14, 2, 64, 1121, 32768, [2928.2, 3967.4, 3289.9]),
+    (120, 46, 14, 2, 64, 1016, 32768, [3094.5, 3898.1, 2900.3]),
+    // RTX 5090 (sm_120, 170 SMs), c5-pod3-5090.log.
+    (120, 170, 28, 4, 128, 1121, 16384, [1836.3, 1469.4, 1374.1]),
+    (120, 170, 28, 4, 128, 1121, 32768, [3652.1, 2910.3, 2709.2]),
+    (120, 170, 28, 4, 128, 1016, 32768, [3650.0, 2904.4, 2711.3]),
+    (120, 170, 32, 8, 128, 1121, 16384, [1860.9, 1895.1, 1775.6]),
+    (120, 170, 32, 8, 128, 1121, 32768, [3693.4, 3904.5, 3512.7]),
+    (120, 170, 32, 8, 128, 1016, 32768, [3660.5, 3805.4, 3479.5]),
+    (120, 170, 14, 2, 64, 1121, 16384, [572.2, 597.6, 520.7]),
+    (120, 170, 14, 2, 64, 1121, 32768, [1112.9, 1159.3, 1012.9]),
+    (120, 170, 14, 2, 64, 1016, 32768, [1110.9, 1155.4, 1033.3]),
+    // RTX 4090 (sm_89, 128 SMs), c5-pod2-4090.log.
+    (89, 128, 28, 4, 128, 1121, 16384, [2134.4, 2285.9, 2146.2]),
+    (89, 128, 28, 4, 128, 1121, 32768, [3803.4, 4085.8, 3832.0]),
+    (89, 128, 28, 4, 128, 1016, 32768, [3794.6, 4053.7, 3814.4]),
+    (89, 128, 32, 8, 128, 1121, 16384, [2887.1, 2552.2, 2418.3]),
+    (89, 128, 32, 8, 128, 1121, 32768, [5680.5, 5024.1, 4759.6]),
+    (89, 128, 32, 8, 128, 1016, 32768, [3813.4, 4090.2, 3867.9]),
+    (89, 128, 14, 2, 64, 1121, 16384, [472.9, 807.5, 457.4]),
+    (89, 128, 14, 2, 64, 1121, 32768, [917.1, 1583.8, 881.7]),
+    (89, 128, 14, 2, 64, 1016, 32768, [912.7, 1570.1, 884.4]),
+    // RTX 4050 Laptop (sm_89, 20 SMs; avante), c5-avante.log.
+    (89, 20, 28, 4, 128, 1121, 16384, [15306.4, 16479.6, 13934.3]),
+    (89, 20, 28, 4, 128, 1121, 32768, [29937.3, 32213.3, 28750.2]),
+    (89, 20, 28, 4, 128, 1016, 32768, [28110.7, 29784.3, 26120.3]),
+    (89, 20, 32, 8, 128, 1121, 16384, [18688.7, 20330.9, 17777.7]),
+    (89, 20, 32, 8, 128, 1121, 32768, [35845.5, 39916.9, 36830.2]),
+    (89, 20, 32, 8, 128, 1016, 32768, [31105.3, 33705.6, 32274.5]),
+    (89, 20, 14, 2, 64, 1121, 16384, [3786.6, 4706.8, 3533.8]),
+    (89, 20, 14, 2, 64, 1121, 32768, [7521.5, 9423.8, 6975.1]),
+    (89, 20, 14, 2, 64, 1016, 32768, [6896.2, 8654.1, 6585.9]),
+];
+
+/// A regression guard on the rows `fa_eff` was fitted to (FA_MEASURED is
+/// the same data, not held out): `fa_pick` never takes a variant measured
+/// slower than Full (beyond 1 % noise), and is within 5 % of the fastest
+/// where that beats Full by more than 10 %. A new GPU needs its own rows.
+#[test]
+fn fa_pick_never_slower_than_full_measured() {
+    use super::batch::{Fa, FaGeom, fa_pick};
+    for &(cc, sms, nh, n_kv, hd, nb, start, t) in FA_MEASURED {
+        let g = FaGeom {
+            cc,
+            sms,
+            hd,
+            kg: 0,
+            n_kv,
+            group: nh / n_kv,
+        };
+        let v = fa_pick(g, nb);
+        let what = format!("sm_{cc} {sms} SMs {nh}/{n_kv}x{hd} nb {nb} at {start}: {v:?} {t:?}");
+        assert!(t[v as usize] <= 1.01 * t[Fa::Full as usize], "{what}");
+        let best = t.iter().cloned().fold(f64::INFINITY, f64::min);
+        if best < 0.9 * t[Fa::Full as usize] {
+            assert!(t[v as usize] <= 1.05 * best, "{what}");
+        }
+    }
+}
+
+/// `fa_pick`: Small for short batches as before; the q8 cache and the
+/// GPUs not measured keep Full.
+#[test]
+fn fa_pick_rules() {
+    use super::batch::{Fa, FaGeom, fa_pick};
+    let g = |cc, sms, kg| FaGeom {
+        cc,
+        sms,
+        hd: 128,
+        kg,
+        n_kv: 4,
+        group: 7,
+    };
+    assert_eq!(fa_pick(g(120, 46, 0), 100), Fa::Small);
+    assert_eq!(fa_pick(g(120, 170, 32), 1121), Fa::Full);
+    assert_eq!(fa_pick(g(86, 84, 0), 1121), Fa::Full);
+    assert_eq!(fa_pick(g(90, 132, 0), 1121), Fa::Full);
+    assert_eq!(fa_pick(g(120, 170, 0), 1121), Fa::Kv);
+}
+
+/// `fa_passes`: whole prompts in at most a few more passes than `passes`,
+/// none longer than max, no more GEMM token tiles; short prompts and
+/// unmeasured GPUs as `passes`; fewer attention waves where it pays.
+#[test]
+fn fa_passes_shapes() {
+    use super::batch::{FaGeom, fa_passes, fa_time, passes};
+    let geoms = [
+        (120, 46, 28, 4, 128),
+        (120, 46, 32, 8, 128),
+        (120, 46, 14, 2, 64),
+        (120, 170, 28, 4, 128),
+        (89, 128, 32, 8, 128),
+        (89, 20, 28, 4, 128),
+        (86, 84, 28, 4, 128),
+    ];
+    for (cc, sms, nh, n_kv, hd) in geoms {
+        let g = FaGeom {
+            cc,
+            sms,
+            hd,
+            kg: 0,
+            n_kv,
+            group: nh / n_kv,
+        };
+        for (n, start) in [
+            (2100, 0),
+            (8192, 0),
+            (16384, 0),
+            (32512, 0),
+            (5000, 20000),
+            (8000, 100),
+            (30, 9000),
+        ] {
+            let (v, base) = (fa_passes(n, 1152, start, g), passes(n, 1152));
+            let tiles = |p: &[std::ops::Range<usize>]| -> usize {
+                p.iter().map(|r| r.len().div_ceil(128)).sum()
+            };
+            assert_eq!(v.first().unwrap().start, 0);
+            assert_eq!(v.last().unwrap().end, n);
+            assert!(v.windows(2).all(|w| w[0].end == w[1].start));
+            assert!(v.iter().all(|r| !r.is_empty() && r.len() <= 1152));
+            assert!(v.len() >= base.len() && v.len() <= base.len() + (base.len() / 8).max(1));
+            assert!(tiles(&v) <= tiles(&base));
+            if start + n < 8192 || cc == 86 || hd == 64 {
+                assert_eq!(v, base, "sm_{cc} n {n} at {start}");
+            }
+        }
+    }
+    // A regression guard on fitted data (the 4090 rows fa_eff came from), not
+    // a validation: RTX 4090, Qwen3-8B at 32512: 29 passes of 1121 (Kv: 576
+    // blocks, 2.25 waves) -> 32 of 1016 (512 blocks, 2 waves): MEASURED 4760
+    // us per 1121 vs 3868 per 1016 at 32k, -12 % per token.
+    let g = FaGeom {
+        cc: 89,
+        sms: 128,
+        hd: 128,
+        kg: 0,
+        n_kv: 8,
+        group: 4,
+    };
+    let v = fa_passes(32512, 1152, 0, g);
+    assert_eq!((v.len(), v[0].len()), (32, 1016));
+    let w = |nb: usize| fa_time(g, nb) / nb as f64;
+    assert!(w(1016) < 0.97 * w(1122));
+}
+
 #[test]
 fn batch_passes_equal_split() {
     use super::batch::passes;
@@ -4100,10 +4261,10 @@ fn cuda_attn_bench() {
     ];
     let fs: Vec<Func> = names.iter().map(|n| km.function(n).unwrap()).collect();
     fs[0]
-        .set_max_shared(batch::fa_shape(hd, false, 0).2)
+        .set_max_shared(batch::fa_shape(hd, batch::Fa::Full, 0).2)
         .unwrap();
     fs[6]
-        .set_max_shared(batch::fa_shape(hd, true, 0).2)
+        .set_max_shared(batch::fa_shape(hd, batch::Fa::Small, 0).2)
         .unwrap();
     for (n, f) in names.iter().zip(&fs) {
         eprintln!("{n}: regs, local {:?}", f.regs_local().unwrap());
@@ -4125,7 +4286,12 @@ fn cuda_attn_bench() {
             // SAFETY: decode.cu / prefill.cu's signatures; buffers sized for
             // nz queries over ctx positions (part_* for nq).
             unsafe {
-                let (fa_rows, fa_thr, fa_smem) = batch::fa_shape(hd, k == 6, 0);
+                let fv = if k == 6 {
+                    batch::Fa::Small
+                } else {
+                    batch::Fa::Full
+                };
+                let (fa_rows, fa_thr, fa_smem) = batch::fa_shape(hd, fv, 0);
                 match k {
                     0 | 6 => g.launch(
                         f,
@@ -4272,6 +4438,118 @@ fn cuda_attn_bench() {
     }
 }
 
+/// The flash attention kernels side by side, sustained (AXON_FA_LOOP
+/// launches between two events), interleaved over AXON_FA_ROUNDS rounds:
+/// AXON_FA_KERNELS (attn_fa_b,attn_fa_bs,attn_fa_k: batch::Fa; `_{hd}`
+/// appended) for
+/// every shape in AXON_FA_SHAPES (n_heads,n_kv,hd;... default 7B, 0.5B,
+/// Qwen3-8B), AXON_FA_NZ (1121: pp32512's passes; a list) queries at each of AXON_FA_STARTS
+/// (16384,32768). y goes to its own buffer and must match the first
+/// kernel's bit for bit.
+#[test]
+#[ignore]
+fn cuda_fa_bench() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let env = |k: &str, d: &str| std::env::var(k).unwrap_or(d.into());
+    let nums = |s: &str| -> Vec<usize> { s.split(',').map(|v| v.parse().unwrap()).collect() };
+    let shapes = env("AXON_FA_SHAPES", "28,4,128;14,2,64;32,8,128");
+    let kernels = env("AXON_FA_KERNELS", "attn_fa_b,attn_fa_bs,attn_fa_k");
+    let nzs = nums(&env("AXON_FA_NZ", "1121"));
+    let starts = nums(&env("AXON_FA_STARTS", "16384,32768"));
+    let rounds: usize = env("AXON_FA_ROUNDS", "5").parse().unwrap();
+    let lp: usize = env("AXON_FA_LOOP", "3").parse().unwrap();
+    for shape in shapes.split(';') {
+        let s = nums(shape);
+        let (nh, nkv, hd) = (s[0], s[1], s[2]);
+        let names: Vec<String> = kernels.split(',').map(|k| format!("{k}_{hd}")).collect();
+        let shp = |n: &str| match n.trim_end_matches(&format!("_{hd}")) {
+            "attn_fa_bs" => batch::fa_shape(hd, batch::Fa::Small, 0),
+            "attn_fa_k" => batch::fa_shape(hd, batch::Fa::Kv, 0),
+            _ => batch::fa_shape(hd, batch::Fa::Full, 0),
+        };
+        let fs: Vec<Func> = names.iter().map(|n| km.function(n).unwrap()).collect();
+        for (n, f) in names.iter().zip(&fs) {
+            f.set_max_shared(shp(n).2).unwrap();
+            eprintln!("{n}: regs, local {:?}", f.regs_local().unwrap());
+        }
+        for (&start, &nz) in starts.iter().flat_map(|s| nzs.iter().map(move |n| (s, n))) {
+            let ctx = start + nz;
+            let mut rng = Rng(5);
+            let kh: Vec<u16> = (0..ctx * nkv * hd)
+                .map(|_| quant::f32_to_f16(rng.f() * 2.0))
+                .collect();
+            let vh: Vec<u16> = (0..ctx * nkv * hd)
+                .map(|_| quant::f32_to_f16(rng.f()))
+                .collect();
+            let (kc, vc) = (g.upload(&kh).unwrap(), g.upload(&vh).unwrap());
+            let dim = nh * hd;
+            let q = g.upload(&rng.vec(nz * dim, 1.0)).unwrap();
+            let y = g.alloc(nz * dim * 4).unwrap();
+            let pre = Arg::F32(att_pre(hd));
+            let flops: f64 =
+                (0..nz).map(|z| (start + z + 1) as f64).sum::<f64>() * (nh * hd * 4) as f64;
+            let mut ms = vec![Vec::new(); fs.len()];
+            let mut y0: Option<Vec<u32>> = None;
+            for r in 0..rounds {
+                for (k, f) in fs.iter().enumerate() {
+                    let (rows, thr, smem) = shp(&names[k]);
+                    let e0 = g.record().unwrap();
+                    for _ in 0..lp {
+                        // SAFETY: prefill.cu's attn_fa signature; q / y nz
+                        // rows of dim floats, the cache ctx rows.
+                        unsafe {
+                            g.launch(
+                                f,
+                                (nkv as u32, (nz * nh / nkv).div_ceil(rows) as u32, 1),
+                                (thr as u32, 1, 1),
+                                smem as u32,
+                                &[
+                                    q.arg(),
+                                    kc.arg(),
+                                    vc.arg(),
+                                    Arg::I32(start as i32),
+                                    Arg::I32(nz as i32),
+                                    Arg::I32(nh as i32),
+                                    Arg::I32(nkv as i32),
+                                    pre,
+                                    y.arg(),
+                                ],
+                            )
+                            .unwrap();
+                        }
+                    }
+                    let e1 = g.record().unwrap();
+                    ms[k].push(e0.ms_to(&e1).unwrap() as f64 / lp as f64);
+                    if r == 0 {
+                        let v: Vec<u32> = y.read().unwrap();
+                        match &y0 {
+                            None => y0 = Some(v),
+                            Some(y0) => {
+                                let bad = v.iter().zip(y0).filter(|(a, b)| a != b).count();
+                                assert_eq!(bad, 0, "{}: {bad} y values differ", names[k]);
+                            }
+                        }
+                    }
+                }
+            }
+            for (n, mut m) in names.iter().zip(ms) {
+                m.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                let med = m[m.len() / 2];
+                eprintln!(
+                    "FA {nh}/{nkv}x{hd} {n:<16} nz {nz} start {start}: med {:>9.1} us (min {:.1} max {:.1}) {:>6.2} TFLOP/s",
+                    med * 1e3,
+                    m[0] * 1e3,
+                    m[m.len() - 1] * 1e3,
+                    flops / (med * 1e-3) / 1e12
+                );
+            }
+        }
+    }
+}
+
 /// The batched tensor-core attention gives each query the decode kernels'
 /// bits (decode.cu "Tensor-core attention"): attn_fa_b + quantize_b (y up
 /// to the sign of a zero, act exactly) and attn_blk_b + attn_cmb_b (block
@@ -4316,15 +4594,20 @@ fn gpu_batched_attention_matches_decode_bits() {
         };
         let fd = km.function(&format!("attn_blk_{q8n}{hd}")).unwrap();
         let fb = km.function(&format!("attn_blk_b_{q8n}{hd}")).unwrap();
-        let ffs: Vec<Func> = ["attn_fa_b", "attn_fa_bs"]
-            .iter()
-            .enumerate()
-            .map(|(i, n)| {
-                let f = km.function(&format!("{n}_{q8n}{hd}")).unwrap();
-                f.set_max_shared(batch::fa_shape(hd, i == 1, kg).2).unwrap();
-                f
-            })
-            .collect();
+        // Every attn_fa_b variant of the cache format (batch::Fa).
+        let mut ffs: Vec<(batch::Fa, Func)> = Vec::new();
+        for (v, n) in [
+            (batch::Fa::Full, "attn_fa_b"),
+            (batch::Fa::Small, "attn_fa_bs"),
+            (batch::Fa::Kv, "attn_fa_k"),
+        ] {
+            if kg > 0 && v == batch::Fa::Kv {
+                continue;
+            }
+            let f = km.function(&format!("{n}_{q8n}{hd}")).unwrap();
+            f.set_max_shared(batch::fa_shape(hd, v, kg).2).unwrap();
+            ffs.push((v, f));
+        }
         let pre = Arg::F32(att_pre(hd));
         // (start, nb, z0 of the attn_blk_b launch, decode grid y).
         let cases: &[(usize, usize, usize, usize)] = &[
@@ -4339,6 +4622,7 @@ fn gpu_batched_attention_matches_decode_bits() {
             (1100, 64, 33, 7),
             (1983, 130, 64, 23),
             (3000, 17, 1, 46),
+            (8190, 37, 2, 46),
             (0, 1024, 1000, 46),
         ];
         for &(start, nb, z0, gy) in cases {
@@ -4384,58 +4668,59 @@ fn gpu_batched_attention_matches_decode_bits() {
             let q = rng.vec(nb * dim, 1.0);
             let ast = act_stride_t(dim);
             let want_k = Arg::I32(dim.is_multiple_of(256) as i32);
-            // Flash (both block sizes, alternately): all nb queries, y in
-            // place of q, then act.
-            let small = (start + nb) % 2 == 1;
+            // Flash, every variant: all nb queries, y in place of q, then act.
             let ctxs = |what: &str, z: usize| {
                 format!(
-                    "{nh}/{nkv}x{hd} kg {kg} start {start} nb {nb} z0 {z0} small {small}: {what} query {z} (np {})",
+                    "{nh}/{nkv}x{hd} kg {kg} start {start} nb {nb} z0 {z0}: {what} query {z} (np {})",
                     start + z + 1
                 )
             };
-            let (fa_rows, fa_thr, fa_smem) = batch::fa_shape(hd, small, kg);
-            let qy = g.upload(&q).unwrap();
-            let fact = g.alloc(nb * ast).unwrap();
-            fact.zero().unwrap();
-            // SAFETY: prefill.cu's signatures; q/y nb rows of dim, the cache
-            // max_ctx rows, act nb strides.
-            unsafe {
-                g.launch(
-                    &ffs[small as usize],
-                    (nkv as u32, (nb * group).div_ceil(fa_rows) as u32, 1),
-                    (fa_thr as u32, 1, 1),
-                    fa_smem as u32,
-                    &[
-                        &[qy.arg()][..],
-                        &kva[..],
+            let mut flash: Vec<(batch::Fa, Vec<f32>, Vec<u8>)> = Vec::new();
+            for (v, ff) in &ffs {
+                let (fa_rows, fa_thr, fa_smem) = batch::fa_shape(hd, *v, kg);
+                let qy = g.upload(&q).unwrap();
+                let fact = g.alloc(nb * ast).unwrap();
+                fact.zero().unwrap();
+                // SAFETY: prefill.cu's signatures; q/y nb rows of dim, the
+                // cache max_ctx rows, act nb strides.
+                unsafe {
+                    g.launch(
+                        ff,
+                        (nkv as u32, (nb * group).div_ceil(fa_rows) as u32, 1),
+                        (fa_thr as u32, 1, 1),
+                        fa_smem as u32,
                         &[
-                            Arg::I32(start as i32),
-                            Arg::I32(nb as i32),
-                            Arg::I32(nh as i32),
-                            Arg::I32(nkv as i32),
-                            pre,
+                            &[qy.arg()][..],
+                            &kva[..],
+                            &[
+                                Arg::I32(start as i32),
+                                Arg::I32(nb as i32),
+                                Arg::I32(nh as i32),
+                                Arg::I32(nkv as i32),
+                                pre,
+                                qy.arg(),
+                            ],
+                        ]
+                        .concat(),
+                    )
+                    .unwrap();
+                    g.launch(
+                        &fq,
+                        (dim.div_ceil(256) as u32, nb as u32, 1),
+                        (32, 1, 1),
+                        0,
+                        &[
                             qy.arg(),
+                            Arg::I32(dim as i32),
+                            want_k,
+                            fact.arg(),
+                            Arg::U64(ast as u64),
                         ],
-                    ]
-                    .concat(),
-                )
-                .unwrap();
-                g.launch(
-                    &fq,
-                    (dim.div_ceil(256) as u32, nb as u32, 1),
-                    (32, 1, 1),
-                    0,
-                    &[
-                        qy.arg(),
-                        Arg::I32(dim as i32),
-                        want_k,
-                        fact.arg(),
-                        Arg::U64(ast as u64),
-                    ],
-                )
-                .unwrap();
+                    )
+                    .unwrap();
+                }
+                flash.push((*v, qy.read().unwrap(), fact.read().unwrap()));
             }
-            let (fy, fact): (Vec<f32>, Vec<u8>) = (qy.read().unwrap(), fact.read().unwrap());
             // Per query: queries z0.. of the batch.
             let nz = nb - z0;
             let qb = g.upload(&q).unwrap();
@@ -4549,18 +4834,20 @@ fn gpu_batched_attention_matches_decode_bits() {
                     "{}",
                     ctxs("decode y finite", z)
                 );
-                for (d, (a, b)) in fy[z * dim..(z + 1) * dim].iter().zip(&wy).enumerate() {
+                for (v, fy, fact) in &flash {
+                    for (d, (a, b)) in fy[z * dim..(z + 1) * dim].iter().zip(&wy).enumerate() {
+                        assert!(
+                            a.to_bits() == b.to_bits() || (*a == 0.0 && *b == 0.0),
+                            "{}: y[{d}] {a} vs {b}",
+                            ctxs(&format!("flash {v:?}"), z)
+                        );
+                    }
                     assert!(
-                        a.to_bits() == b.to_bits() || (*a == 0.0 && *b == 0.0),
-                        "{}: y[{d}] {a} vs {b}",
-                        ctxs("flash", z)
+                        fact[z * ast..z * ast + ab] == wact[..],
+                        "{}",
+                        ctxs(&format!("flash {v:?} act"), z)
                     );
                 }
-                assert!(
-                    fact[z * ast..z * ast + ab] == wact[..],
-                    "{}",
-                    ctxs("flash act", z)
-                );
                 if z < z0 {
                     continue;
                 }
