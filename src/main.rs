@@ -113,6 +113,9 @@ flags:
               it was made with this model, KV type, backend and GPU; else it is prefilled again
               from the saved tokens (slower; on the CPU or GPU the same cache, so replies continue
               as if never stopped; on a CPU/GPU split a re-prefilled cache is close, not exact)
+              One process per session file: a session in use by another axon process is refused
+              (an advisory lock on F.lock beside it, left in place; where the filesystem can't lock,
+              a warning and no lock)
   --parallel N  serve: requests decoded together on the GPU (default 8; 1: one at a time;
               N slots cost N + 1 KV caches). By default the context comes first: as many
               slots (2 to 8) as fit with the whole context, or with a shorter one down to
@@ -899,6 +902,16 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         i += 2;
     }
 
+    // --session's lock first: a session in use fails before the model loads.
+    let session = session.map(|p| {
+        let mut s = kvsave::Session::new(kvsave::canonical(&p), serde_json::Value::Null);
+        match s.lock() {
+            Err(e) => fail(&e.to_string()),
+            Ok(Some(w)) => eprintln!("axon: {w}"),
+            Ok(None) => {}
+        }
+        s
+    });
     let (device, gpu_layers) = placement(device, gpu_layers);
     if device == Device::Cuda {
         cuda::preinit();
@@ -985,7 +998,9 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     // A session's identity: the model file, hashed once (then remembered).
     let model_ident = std::cell::OnceCell::new();
     let head_dim = kvsave::KvIo::kv_shape(&net).2;
-    let mk_session = |p: std::path::PathBuf| -> std::io::Result<kvsave::Session> {
+    let mk_session = |p: std::path::PathBuf,
+                      locked: Option<kvsave::Session>|
+     -> std::io::Result<kvsave::Session> {
         let m = match model_ident.get() {
             Some(m) => m,
             None => {
@@ -993,7 +1008,19 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
                 model_ident.get_or_init(|| m)
             }
         };
-        Ok(kvsave::Session::new(p, m.clone()))
+        // One process per session file (see `Session::lock`).
+        let mut s = match locked {
+            Some(s) => s,
+            None => {
+                let mut s = kvsave::Session::new(p, serde_json::Value::Null);
+                if let Some(w) = s.lock()? {
+                    eprintln!("axon: {w}");
+                }
+                s
+            }
+        };
+        s.set_model(m.clone());
+        Ok(s)
     };
     let explicit_seed = sargs.seed;
     let sess = ChatSession {
@@ -1039,10 +1066,14 @@ fn read_piped_message(input: &mut impl std::io::BufRead) -> std::io::Result<(Str
 
 /// `axon chat`'s session file (--session, /save, /load).
 struct ChatSession<'a> {
-    make: &'a dyn Fn(std::path::PathBuf) -> std::io::Result<kvsave::Session>,
+    /// A session of a canonical path (`kvsave::canonical`), locked, with the
+    /// model's identity; given an already locked one, that one.
+    make:
+        &'a dyn Fn(std::path::PathBuf, Option<kvsave::Session>) -> std::io::Result<kvsave::Session>,
     cur: Option<kvsave::Session>,
     /// --session: loaded (if it exists) before the first message.
-    start: Option<std::path::PathBuf>,
+    /// (Locked before the model loaded.)
+    start: Option<kvsave::Session>,
     /// --seed: wins over a loaded session's seed.
     explicit_seed: Option<u64>,
 }
@@ -1055,9 +1086,22 @@ impl ChatSession<'_> {
         p: std::path::PathBuf,
         new_ok: bool,
     ) -> String {
-        let mut s = match (self.make)(p.clone()) {
-            Ok(s) => s,
-            Err(e) => return format!("axon: session {}: {e}", p.display()),
+        // Our own file again (by its canonical path): the same Session and
+        // lock.
+        let p = kvsave::canonical(&p);
+        let reused = self.cur.as_ref().is_some_and(|c| c.path == p);
+        let mut s = match self.cur.take_if(|_| reused) {
+            Some(mut s) => {
+                s.forget();
+                s
+            }
+            None => match (self.make)(p.clone(), self.start.take_if(|s| s.path == p)) {
+                Ok(s) => s,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    return format!("axon: {e}");
+                }
+                Err(e) => return format!("axon: session {}: {e}", p.display()),
+            },
         };
         let shown = p.display().to_string();
         match conv.load_session(&mut s) {
@@ -1065,7 +1109,12 @@ impl ChatSession<'_> {
                 self.cur = Some(s);
                 format!("(new session {shown})")
             }
-            Ok(None) => format!("axon: no session file {shown}"),
+            Ok(None) => {
+                if reused {
+                    self.cur = Some(s);
+                }
+                format!("axon: no session file {shown}")
+            }
             Ok(Some(r)) => {
                 if let (Some(seed), Some(smp)) = (self.explicit_seed, conv.sampler.as_mut())
                     && smp.cfg.seed != seed
@@ -1088,7 +1137,12 @@ impl ChatSession<'_> {
                     if r.rng { "; sampler continues" } else { "" }
                 )
             }
-            Err(e) => format!("axon: session {shown}: {e}"),
+            Err(e) => {
+                if reused {
+                    self.cur = Some(s);
+                }
+                format!("axon: session {shown}: {e}")
+            }
         }
     }
 
@@ -1139,7 +1193,7 @@ fn chat_repl<M: kvsave::KvIo>(
     } else {
         None
     };
-    if let Some(p) = sess.start.take() {
+    if let Some(p) = sess.start.as_ref().map(|s| s.path.clone()) {
         let n = sess.load(conv, p, true);
         if n.starts_with("axon:") {
             // A session that can't be used isn't overwritten: stop here.
@@ -1182,10 +1236,19 @@ fn chat_repl<M: kvsave::KvIo>(
                 }
                 "save" => {
                     let arg = arg.trim();
-                    if !arg.is_empty() {
-                        match (sess.make)(arg.into()) {
+                    let canon = kvsave::canonical(std::path::Path::new(arg));
+                    let same = sess.cur.as_ref().is_some_and(|c| c.path == canon);
+                    if !arg.is_empty() && !same {
+                        match (sess.make)(canon, None) {
                             Ok(s) => sess.cur = Some(s),
-                            Err(e) => note(&format!("axon: {e}")),
+                            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                note(&format!("axon: {e}"));
+                                continue;
+                            }
+                            Err(e) => {
+                                note(&format!("axon: session {arg}: {e}"));
+                                continue;
+                            }
                         }
                     }
                     match &sess.cur {

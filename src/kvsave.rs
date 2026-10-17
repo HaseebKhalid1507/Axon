@@ -527,9 +527,58 @@ struct Saved {
     /// save, or what a read found good (a torn or orphaned tail after it
     /// is cut off before the next append).
     len: u64,
+    /// `len` came from a read: bytes past it are a tail to cut off. After
+    /// our own save they can only be another writer's (a rewrite), so the
+    /// file is then rewritten, never cut at our old length.
+    from_read: bool,
+    /// The file's (device, inode) then: a file replaced by another writer
+    /// (a rename over it) is rewritten, not appended to.
+    id: Option<(u64, u64)>,
     /// Bytes of STATE records no longer current, and of the current one.
     stale: u64,
     last_state: u64,
+}
+
+/// Errors that mean "this filesystem can't lock", not "someone holds it":
+/// no locks (ENOLCK), unsupported (EOPNOTSUPP), no permission, read-only.
+fn lock_unsupported(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::Unsupported
+            | io::ErrorKind::PermissionDenied
+            | io::ErrorKind::ReadOnlyFilesystem
+    ) || matches!(e.raw_os_error(), Some(37 | 95 | 13 | 30))
+}
+
+/// The file's (device, inode), to tell a file replaced under us from ours.
+fn file_id(m: &std::fs::Metadata) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        Some((m.dev(), m.ino()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = m;
+        None
+    }
+}
+
+/// `p` made absolute with symlinks resolved, so `./F`, `F` and a link to it
+/// are one session; for a file not there yet, its directory's canonical
+/// path with the name appended (else `p` as given).
+pub fn canonical(p: &Path) -> PathBuf {
+    if let Ok(c) = std::fs::canonicalize(p) {
+        return c;
+    }
+    let dir = match p.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => Path::new("."),
+    };
+    match (std::fs::canonicalize(dir), p.file_name()) {
+        (Ok(d), Some(n)) => d.join(n),
+        _ => p.to_path_buf(),
+    }
 }
 
 /// A session file (`axon chat --session`).
@@ -538,6 +587,8 @@ pub struct Session {
     /// `model_ident`.
     model: Value,
     saved: Option<Saved>,
+    /// The advisory lock on `path` + ".lock" (`lock`), held while we live.
+    lock: Option<File>,
 }
 
 /// What `Session::save` did.
@@ -575,6 +626,8 @@ pub struct Loaded {
     recs: Vec<Rec>,
     /// Where the last good STATE ends.
     good_end: u64,
+    /// The file's (device, inode) when read.
+    id: Option<(u64, u64)>,
     stale: u64,
     last_state: u64,
 }
@@ -652,7 +705,68 @@ impl Session {
             path,
             model,
             saved: None,
+            lock: None,
         }
+    }
+
+    /// Take the session's advisory exclusive lock, held until the Session
+    /// drops. It is a sidecar, `F.lock` (0600), because rewrites replace F
+    /// itself; it is never removed (unlinking a lock file races with the
+    /// next process opening it). Err(WouldBlock) if another holder has it
+    /// (another process, or another Session in this one): two writers would
+    /// rewrite each other's saves. Ok(Some(why)) if this filesystem can't
+    /// lock (no flock, read-only, no permission): the session runs
+    /// unlocked, which `load` keeps safe (see `save`).
+    pub fn lock(&mut self) -> io::Result<Option<String>> {
+        if self.lock.is_some() {
+            return Ok(None);
+        }
+        let mut p = self.path.clone().into_os_string();
+        p.push(".lock");
+        let p = PathBuf::from(p);
+        let mut o = std::fs::OpenOptions::new();
+        o.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut o, 0o600);
+        let opened = match o.open(&p) {
+            // flock needs no write access: an existing read-only lock file
+            // (another user's directory, a read-only share) still locks.
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => File::open(&p).map_err(|_| e),
+            r => r,
+        };
+        let unavailable = |e: io::Error| -> io::Result<Option<String>> {
+            if lock_unsupported(&e) {
+                Ok(Some(format!(
+                    "session lock unavailable on this filesystem ({e}); running without a lock"
+                )))
+            } else {
+                Err(e)
+            }
+        };
+        let f = match opened {
+            Ok(f) => f,
+            Err(e) => return unavailable(e),
+        };
+        match f.try_lock() {
+            Ok(()) => {
+                self.lock = Some(f);
+                Ok(None)
+            }
+            Err(std::fs::TryLockError::WouldBlock) => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!(
+                    "session {} is in use by another axon process (or another session in this one)",
+                    self.path.display()
+                ),
+            )),
+            Err(std::fs::TryLockError::Error(e)) => unavailable(e),
+        }
+    }
+
+    /// Set the model identity (`model_ident`) once it is known: the lock is
+    /// taken before the model loads, so a session in use fails fast.
+    pub fn set_model(&mut self, model: Value) {
+        self.model = model;
     }
 
     pub fn model(&self) -> &Value {
@@ -677,11 +791,20 @@ impl Session {
         let mut state = state.clone();
         state["kv"] = json!(n);
         let st = serde_json::to_vec(&state).map_err(io::Error::other)?;
-        let cur_len = std::fs::metadata(&self.path).map(|m| m.len()).ok();
+        // Appending is an optimisation only. The contract (never restore a
+        // wrong cache) rests on `load`: it tiles records whose hash covers
+        // the whole token prefix they cache, so bytes written by another
+        // writer never load for our tokens whatever this check misses (a
+        // same-length rewrite in place). `from_read` and the file id only
+        // keep another writer's saves from being cut (less data lost).
+        let cur = std::fs::metadata(&self.path).ok();
+        let cur_len = cur.as_ref().map(|m| m.len());
+        let cur_id = cur.as_ref().and_then(file_id);
         let append = self.saved.as_ref().filter(|s| {
             s.kv <= n
                 && tokens[..s.kv] == s.tokens[..s.kv]
-                && cur_len.is_some_and(|c| c >= s.len)
+                && cur_len.is_some_and(|c| c == s.len || (s.from_read && c > s.len))
+                && cur_id == s.id
                 && s.stale + s.last_state <= MAX_STALE
         });
         let mut info = SaveInfo::default();
@@ -707,6 +830,8 @@ impl Session {
                 let mut tmp = self.path.clone().into_os_string();
                 tmp.push(".tmp");
                 let tmp = PathBuf::from(tmp);
+                // A leftover one may have other permissions: start afresh.
+                let _ = std::fs::remove_file(&tmp);
                 let mut w = BufWriter::with_capacity(1 << 20, create_private(&tmp)?);
                 let hdr =
                     serde_json::to_vec(&json!({ "identity": ident })).map_err(io::Error::other)?;
@@ -731,13 +856,16 @@ impl Session {
                 (0, 0, 0)
             }
         };
-        let len = std::fs::metadata(&self.path)?.len();
+        let meta = std::fs::metadata(&self.path)?;
+        let len = meta.len();
         info.kv_written = n - from;
         info.bytes = len - before;
         self.saved = Some(Saved {
             kv: n,
             tokens: tokens[..n].to_vec(),
             len,
+            from_read: false,
+            id: file_id(&meta),
             stale,
             last_state: FRAME + st.len() as u64,
         });
@@ -753,7 +881,8 @@ impl Session {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(e),
         };
-        let len = f.metadata()?.len();
+        let meta = f.metadata()?;
+        let len = meta.len();
         let mut r = BufReader::with_capacity(1 << 16, f);
         let mut head = [0u8; 12];
         r.read_exact(&mut head)
@@ -855,6 +984,7 @@ impl Session {
             ident_err,
             recs,
             good_end,
+            id: file_id(&meta),
             stale,
             last_state,
         }))
@@ -913,6 +1043,8 @@ impl Session {
             kv,
             tokens: tokens.to_vec(),
             len: l.good_end,
+            from_read: true,
+            id: l.id,
             stale: l.stale,
             last_state: l.last_state,
         });
@@ -1180,6 +1312,141 @@ mod tests {
         third[150] = 7;
         assert!(s2.load(&l, &third[..250], &mut |_, _, _| Ok(())).is_err());
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Two writers on one file (no lock taken): after B rewrites it
+    /// longer, A's next save rewrites it rather than cut it at A's old
+    /// length, and the file loads A's latest state. A leftover .tmp with
+    /// other permissions doesn't make the file readable by others.
+    #[test]
+    fn second_writer_then_save_rewrites() {
+        let ident = json!({"model": "x", "row_bytes": ROW});
+        let path = scratch("two.axkv");
+        let (t, other) = toks();
+        let mut a = Session::new(path.clone(), json!({}));
+        save(&mut a, &ident, &t[..100], 1);
+        let len_a = std::fs::metadata(&path).unwrap().len();
+        let mut b = Session::new(path.clone(), json!({}));
+        let (st, img) = reload(&mut b, &ident, &t, ROW);
+        assert_eq!(
+            (st["n"].clone(), img.unwrap()),
+            (json!(1), image(ROW, &t[..100]))
+        );
+        // Another conversation from the start: B rewrites the file.
+        let mut third = other.clone();
+        third[5] = 4242;
+        assert!(save(&mut b, &ident, &third[..250], 2).rewrote);
+        assert!(std::fs::metadata(&path).unwrap().len() > len_a);
+        let mut tmp = path.clone().into_os_string();
+        tmp.push(".tmp");
+        std::fs::write(&tmp, b"leftover").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+        let i = save(&mut a, &ident, &t[..150], 3);
+        assert!(i.rewrote, "{i:?}");
+        let (st, img) = reload(&mut Session::new(path.clone(), json!({})), &ident, &t, ROW);
+        assert_eq!(
+            (st["n"].clone(), img.unwrap()),
+            (json!(3), image(ROW, &t[..150]))
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    /// The safety property itself: another writer rewrites the file in
+    /// place to exactly our length with other tokens (so neither the length
+    /// nor the file id tells), we append and save our state; a reload of our
+    /// state must not hand back the other writer's prefix: its load fails
+    /// (the caller prefills again). Never a wrong cache.
+    #[test]
+    fn same_length_foreign_rewrite_never_restores_wrong_state() {
+        let ident = json!({"model": "x", "row_bytes": ROW});
+        let path = scratch("same-len.axkv");
+        let other_path = scratch("same-len-b.axkv");
+        let (t, _) = toks();
+        let mut foreign = t.clone();
+        foreign[3] = 999;
+        let mut a = Session::new(path.clone(), json!({}));
+        save(&mut a, &ident, &t[..100], 1);
+        let mut b = Session::new(other_path.clone(), json!({}));
+        save(&mut b, &ident, &foreign[..100], 1);
+        let bytes = std::fs::read(&other_path).unwrap();
+        assert_eq!(bytes.len() as u64, std::fs::metadata(&path).unwrap().len());
+        std::fs::write(&path, &bytes).unwrap(); // in place: same inode
+        assert!(
+            !save(&mut a, &ident, &t[..150], 2).rewrote,
+            "appended: nothing tells"
+        );
+        let (st, img) = reload(&mut Session::new(path.clone(), json!({})), &ident, &t, ROW);
+        assert_eq!(st["n"], 2);
+        let e = img.expect_err("must not load another writer's prefix");
+        assert!(e.to_string().contains("don't cover"), "{e}");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(&other_path);
+    }
+
+    #[test]
+    fn canonical_names_one_session() {
+        let dir = scratch("canon-dir");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("s.axkv");
+        // Not there yet: the directory's canonical path plus the name.
+        let before = canonical(&f);
+        assert_eq!(before, std::fs::canonicalize(&dir).unwrap().join("s.axkv"));
+        std::fs::write(&f, b"x").unwrap();
+        assert_eq!(canonical(&f), before);
+        assert_eq!(canonical(&dir.join(".").join("s.axkv")), before);
+        #[cfg(unix)]
+        {
+            let link = dir.join("link.axkv");
+            std::os::unix::fs::symlink(&f, &link).unwrap();
+            assert_eq!(canonical(&link), before);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// One process per session: a second lock fails with a clear message
+    /// until the first Session drops; a lock file we can only read still
+    /// locks (flock needs no write access).
+    #[test]
+    fn lock_refuses_a_second_holder() {
+        let path = scratch("locked.axkv");
+        let mut x = Session::new(path.clone(), json!({}));
+        assert_eq!(x.lock().unwrap(), None);
+        assert_eq!(x.lock().unwrap(), None); // held already: fine
+        let mut y = Session::new(path.clone(), json!({}));
+        let e = y.lock().unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
+        assert!(
+            e.to_string().contains("in use by another axon process"),
+            "{e}"
+        );
+        drop(x);
+        assert_eq!(y.lock().unwrap(), None);
+        drop(y);
+        let mut lock = path.clone().into_os_string();
+        lock.push(".lock");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o400)).unwrap();
+            let mut z = Session::new(path.clone(), json!({}));
+            assert_eq!(z.lock().unwrap(), None);
+            let e = Session::new(path.clone(), json!({})).lock().unwrap_err();
+            assert_eq!(e.kind(), io::ErrorKind::WouldBlock);
+            drop(z);
+            std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let _ = std::fs::remove_file(lock);
     }
 
     /// Damaged headers are errors, never panics or huge allocations.
