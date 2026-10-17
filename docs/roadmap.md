@@ -1,6 +1,6 @@
 # Roadmap
 
-Short and opinionated. "On main" means merged at `e998d6f`. Everything else is planned or in flight.
+Short and opinionated. "On main" means merged at `69adfa2` (2026-10-17). Everything else is planned or in flight.
 Estimates come from the design notes and are labeled.
 
 **Mission: make LLM inference cheap and fast, and run the best open models.** Cheap means wasting no
@@ -21,8 +21,8 @@ Two things will:
 Speed is not the only bar. Nobody runs Axon in production yet, so hardening against
 hostile files, bad requests and long-running load comes right after batching (item 2).
 
-The exception is the H100, where prefill is issue-bound at 7.6% of its int8 peak. That gap is real
-and has a specific fix ([design/hopper.md](design/hopper.md)).
+The exception is the H100, where prefill was issue-bound at 7.6% of its int8 peak. A first wgmma round is on main
+(#33: +12 % 7B prefill on an H100 PCIe, MEASURED); the plain products are still issue-bound ([design/hopper.md](design/hopper.md)).
 
 ## Long-term goals
 
@@ -45,29 +45,44 @@ models, cheaply and fast), so choices made along the way shouldn't close them of
 
 ## Recently landed
 
-- **Draft-model speculative decoding** (`--draft-model`, #27). Lossless, with K = 3 by default.
-  Greedy tg128 medians were +37% on Qwen2.5-7B, +44% on Qwen3-8B and +63% on Llama-3.1-8B at K = 3
-  (MEASURED in the go/no-go A/B, recorded in `src/draft.rs`). Sampled at temp 0.8 the gain was
-  +0.8% on 7B (README).
+Newest first, as of `69adfa2`; the numbers are the PRs' own MEASURED headlines.
+
+- **Paged KV, stages 0–1** (#64, #68): every cache kernel through a page table; same bits, same speed.
+- **One cache instead of N+1 in `serve`** (#60): bella 7B at 32k serves 2 slots instead of 1 (q8: 5 instead of 4).
+- **Serve ops** (#61, #62): `--api-key`, `GET /metrics`, `GET /slots`, `--max-prompt-tokens`, `--slot-idle-ms`.
+- **MoE stages 0–1** (#63): `qwen3moe` loads and runs on the CPU, exact.
+- **Chunked prefill in `serve`** (#45, #55, #57): other streams' ITL p99 during a 24k admit 2392 → 70 ms (7B, 4090).
+- **Draft model next to a CPU/GPU split** (#52): 32B on bella, greedy 2–3.5× faster, sampled 1.7–3.3×.
+- **Long-prompt prefill attention** (#56): 7B pp16k +5.5 %, pp32k +3.4 % on bella, bit-identical.
+- **Long-context decode attention** (#50): 7B tg@32k +3.3 % f16, +17.6 % `--kv q8` (bella).
+- **Identity tuple and `system_fingerprint`** (#51; [determinism.md](determinism.md)).
+- **YaRN RoPE override** (#49): Qwen 32k → 128k, opt-in ([long-context.md](long-context.md), [log](log/2026-10-16-yarn.md)).
+- **KV save/restore, stage A** (#48, #54): `chat --session`; a 29.8k-position session restores in 0.41–0.45 s vs 3.16 s.
+- **Gemma 3 1B/4B** (#35), CPU and CUDA.
 
 ## Priorities
 
 | # | item | why | status |
 |---|---|---|---|
-| 1 | **S2: continuous batching in `serve`.** Slot KV cache, per-row positions and sampling, a FIFO scheduler; whole-prompt prefill as its own step. | The largest product gap: ollama and llama-server already serve parallel requests, while `serve` ran one at a time. MEASURED (#38): 7B 4090 C=8 740 tok/s (4.3×), C=16 1017 (5.9×); bella C=16 355 (4.4×). Batched output is identical to solo. Why 4.3× and not the 5.5× estimate: whole-prompt prefill steps stall every row (the "Scale" section, C1). | done |
-| 2 | **Real-world hardening.** Fuzz the GGUF reader (truncated files, bad offsets, oversized dims, size overflow) and the HTTP API (malformed JSON, huge bodies, bad UTF-8, invalid params, clients that disconnect mid-stream, many idle connections). Edge prompts: empty, at and over the context limit, odd Unicode. A model-zoo sweep of GGUFs from different converters and quant mixes: each one either matches llama.cpp or is refused with a clear error. Multi-hour soak with many clients, watching RAM/VRAM for leaks. Clean failure on OOM and GPU errors. | Speed is measured; robustness is not. Axon has no users yet and has never served real traffic, while llama.cpp has years of edge cases behind it. Gate: no panic, no out-of-bounds, no hang on any fuzz input; every refusal is a clear error; the server stays up; the soak shows flat memory. Fuzz harness and soak script live in the repo. | in progress (#37: the fuzz-found fixes) |
+| 1 | **S2: continuous batching in `serve`.** Slot KV cache, per-row positions and sampling, a FIFO scheduler; whole-prompt prefill as its own step. | The largest product gap: ollama and llama-server already serve parallel requests, while `serve` ran one at a time. MEASURED (#38): 7B 4090 C=8 740 tok/s (4.3×), C=16 1017 (5.9×); bella C=16 355 (4.4×). Batched output is identical to solo. Why 4.3× and not the 5.5× estimate: whole-prompt prefill steps stall every row (the "Scale" section, C1). | done (#38) |
+| 2 | **Real-world hardening.** Fuzz the GGUF reader (truncated files, bad offsets, oversized dims, size overflow) and the HTTP API (malformed JSON, huge bodies, bad UTF-8, invalid params, clients that disconnect mid-stream, many idle connections). Edge prompts: empty, at and over the context limit, odd Unicode. A model-zoo sweep of GGUFs from different converters and quant mixes: each one either matches llama.cpp or is refused with a clear error. Multi-hour soak with many clients, watching RAM/VRAM for leaks. Clean failure on OOM and GPU errors. | Speed is measured; robustness is not. Axon has no users yet and has never served real traffic, while llama.cpp has years of edge cases behind it. Gate: no panic, no out-of-bounds, no hang on any fuzz input; every refusal is a clear error; the server stays up; the soak shows flat memory. Fuzz harness and soak script live in the repo. | fuzzers and the fuzz-found fixes done (#37: `scripts/fuzz_gguf.py`, `scripts/fuzz_serve.py`, 9 findings fixed); soak + model-zoo sweep **in flight** (feat/soak-zoo) |
 | 3 | **Startup round 2.** Pinned staging for the weight upload, upload/prefill overlap, faster tokenizer and GGUF parsing. | Time to first token. ESTIMATED 7B warm short-prompt TTFT 624 → ~480 ms, from the measured 25.4 GB/s pinned upload. No change to output bits. | done (#41) |
-| 4 | **Multi-GPU, pipeline parallel (stage 1).** | Models bigger than one card, and KV room for serving. Bit-identical to one GPU by construction (MEASURED on 2×4090: decode 1.00×, prefill 1.46–1.55×). Stage 1b (serve pool over the pipeline, ~2× aggregate ESTIMATED) is in the "Scale" section. | stage 1 done ([design](design/multi-gpu.md)) |
-| 5 | **Hopper wgmma/TMA prefill.** | H100 prefill trails the 4090 and 5090. ESTIMATED 7B pp2100 12.5k → 22–32k tok/s. Gated on a ~1-hour pod experiment. | design; experiment pending ([design](design/hopper.md)) |
+| 4 | **Multi-GPU, pipeline parallel (stage 1).** | Models bigger than one card, and KV room for serving. Bit-identical to one GPU by construction (MEASURED on 2×4090: decode 1.00×, prefill 1.46–1.55×). Stage 1b (serve pool over the pipeline, ~2× aggregate ESTIMATED) is in the "Scale" section. | stage 1 done (#34) ([design](design/multi-gpu.md)) |
+| 5 | **Hopper wgmma/TMA prefill.** | H100 prefill trails the 4090 and 5090. ESTIMATED 7B pp2100 12.5k → 22–32k tok/s. Gated on a ~1-hour pod experiment. | first round done (#33): fused gate+up on wgmma, 7B prefill 9263 → 10376 tok/s (+12.0 %) on an H100 PCIe (MEASURED, `AXON_GEMMH=1`). The plain products reach 84 TMAC/s (issue-bound), so the 22–32k estimate is not reached; the default routing itself was not run on an H100 ([design](design/hopper.md)) |
 | 6 | **Gemma 3** (1B/4B/12B). | The most-requested missing family. Medium bit-identity risk: new attention variants (head dim 256, sliding window) must keep decode == batched. | 1B/4B done (#35); 27B refused |
-| 7 | **Old GPUs (sm_61, Pascal).** | Fixes for Pascal cards, tested on Jaded's GTX 1050. Main has no tested sm_61 path; it refuses a GPU the installed NVRTC can't target. | in flight |
-| 8 | **SentencePiece tokenizer** (Mistral 7B v0.3, Llama 2, TinyLlama) on the existing `llama` path. | Cheap coverage, no kernel risk. A port of llama.cpp's SPM tokenizer, checked token for token against llama-server; Mistral's `[INST]` chat format included. | done |
+| 7 | **Old GPUs (sm_61, Pascal).** | Fixes for Pascal cards, tested on Jaded's GTX 1050. Main has no tested sm_61 path; it refuses a GPU the installed NVRTC can't target. | done (#39): with NVRTC 13 and 12.9 installed, jade's GTX 1050 (sm_61) now falls back to 12.9 and generates (main refused); 25/25 CUDA tests pass there (MEASURED) |
+| 8 | **SentencePiece tokenizer** (Mistral 7B v0.3, Llama 2, TinyLlama) on the existing `llama` path. | Cheap coverage, no kernel risk. A port of llama.cpp's SPM tokenizer, checked token for token against llama-server; Mistral's `[INST]` chat format included. | done (#32) |
 | 9 | **CPU re-board on main, then what it shows.** | The last full CPU scoreboard predates several merged CPU changes. Remaining items (pool spin, P/E-core tail) are ESTIMATED at a few percent. | planned |
-| 10 | **GPU decode: long-context attention; locked-clock trial.** | ESTIMATED +3% decode at 4k context. A locked SM clock may recover part of the 9% laptop power-cap cost (MEASURED cost; the fix is untested). The long-context part is Scale item 3. | planned |
+| 10 | **GPU decode: long-context attention; locked-clock trial.** | ESTIMATED +3% decode at 4k context. A locked SM clock may recover part of the 9% laptop power-cap cost (MEASURED cost; the fix is untested). The long-context part is Scale item 3. | long-context attention done (#50, Scale item 3); locked-clock trial planned |
 
 Also open:
 - **Tool calling: `/v1/responses` (codex) and the ollama-native API.** Chat-completions tool calling
-  is on main; these two remain (ESTIMATED 700-1000 and 300-400 lines).
+  is on main; these two remain (ESTIMATED 700-1000 and 300-400 lines). **In flight** (feat/serve-apis).
+- **Q2_K and Q3_K.** The GGUF reader names both, but `model.rs` doesn't accept them (`SUPPORTED_TYPES`) and
+  there are no kernels; the 2–3-bit frontier models need them ([Long-term goals](#long-term-goals)).
+  **In flight** (feat/q2k-q3k).
+- **MoE stage 2** (attention and router on the GPU, experts on the CPU). **In flight** (PR #67); its status
+  lives in Scale item 7 and [Mixture-of-experts](#mixture-of-experts).
 - **Qwen3 0.6B Q8_0 long prefill on sm_89.** The one cell Axon loses on the RTX 4050
   ([benchmarks-gpu.md](benchmarks-gpu.md)).
 - **Gemma 3 27B (head_dim 128) on CUDA.** Needs the head-128 windowed attention kernels and the
@@ -77,8 +92,8 @@ Also open:
 
 Four themes Haseeb asked for by name. The full scope (code references, the KV cost model per model and card,
 what llama-server / ollama / vLLM do, gates) is the r10-scope note in the overnight workspace; this is the cut.
-The short version: on a 12 GB card, a 7B serves **one** 32k slot today (MEASURED in #42), an agent swarm thrashes the prefix cache, a 14B at 32k becomes a split at 17 tok/s because a slot is a
-*reservation*, and nothing survives a restart. The fixes compound, so the order matters more than any one item.
+The short version, as first written: on a 12 GB card, a 7B served **one** 32k slot (MEASURED in #42; two since #60), an agent swarm thrashes the prefix cache, a 14B at 32k becomes a split at 17 tok/s because a slot is a
+*reservation*, and nothing survived a restart (`chat --session` does now, #48; `serve` doesn't yet). The fixes compound, so the order matters more than any one item.
 
 Where Axon can beat llama-server and vLLM on this hardware is exactness: cache bytes are a pure function of the
 token prefix, so a slot saved, restored, paged or chunked continues bit for bit. llama.cpp's `--cache-ram`,
@@ -86,23 +101,30 @@ token prefix, so a slot saved, restored, paged or chunked continues bit for bit.
 
 | # | item | why | status |
 |---|---|---|---|
-| 1 | **Chunked prefill in `serve`.** A waiting prompt enters ≤ 512 tokens per step, interleaved with the decode rows, instead of a whole-prompt step that stalls everyone. | A 20k agent prompt is a 7 s freeze for every other client today (MEASURED 2682 tok/s at depth). ESTIMATED: steps of ≤ 0.2 s instead, and +10–15 % aggregate at 8 closed-loop clients, since those stalls are most of the gap between the measured 4.3× and the estimated 5.5×. Low bits risk: a chunk is `feed_slot` at a position. Gate: ITL p99 ≤ 2× p50 during a 20k admit; identity with random chunk sizes. | in flight |
-| 2 | **Drop the N+1 cache.** A pool of N slots costs N+1 KV caches: the request running alone has its own (`serve.rs` `Engine.cache`). Alias it to slot 0's memory, or retire the solo path once a pool exists. | 7B f16 at 32k on 12 GB: 1 → 2–3 slots; `--kv q8` 3 → 5 (ESTIMATED from the cache sizes; 1 and 3 are MEASURED in #42). No bits change. 8–16 h. MEASURED on bella: f16 1 → 2, q8 4 → 5 (the solo path in a view of a slot; C=1 decode unchanged). | PR open (feat/serve-one-cache) |
-| 3 | **Long-context decode attention** (one KV block per warp, a wider combine, then the q8 path). | Decode at 32k is where the lead breaks (MEASURED 7B 72.4 vs llama.cpp 76.7), and attention is paid per row, so it is also the concurrency bottleneck for agents: 8 clients at 32k are ESTIMATED 150 tok/s aggregate today, 216–320 after. q8 tg@32k +13.8 % MEASURED on the branch. | in flight |
-| 4 | **KV save/restore.** Slot ↔ pinned host RAM (`--cache-ram`, LRU by prefix) on eviction, `POST /slots/:id?action=save\|restore` to files in llama-server's shape, `chat --session FILE`. | More conversations than slots is the swarm's normal state; eviction costs a 5–12 s re-prefill today and ESTIMATED ~0.1 s after (1.75 GiB at the MEASURED 25.4 GB/s). A restored slot continues bit for bit; llama-server can't promise that. 20–30 h. Gate: restored == uninterrupted, tokens and KV bytes. | planned, after 1 |
-| 5 | **Paged KV.** A slot takes 64-position pages as it grows; `--ctx` is a cap, not a reservation. | The widest payoff of the list: a 14B agent on 12 GB stays all-GPU at 10–25k used tokens (ESTIMATED 17 → ~55 tok/s), a 7B card holds ~7 agents at 15k instead of 1–2 slots, and requests that fit no slot stop starving. Bit-identical by construction: paging changes addresses, never order (`docs/design` to come; r4-serve §4.2). The broadest kernel touch since S2 — keep the old entry points as identity-table wrappers. 40–60 h. | planned, after 2 |
+| 1 | **Chunked prefill in `serve`.** A waiting prompt enters ≤ 512 tokens per step, interleaved with the decode rows, instead of a whole-prompt step that stalls everyone. | A 20k agent prompt is a 7 s freeze for every other client today (MEASURED 2682 tok/s at depth). ESTIMATED: steps of ≤ 0.2 s instead, and +10–15 % aggregate at 8 closed-loop clients, since those stalls are most of the gap between the measured 4.3× and the estimated 5.5×. Low bits risk: a chunk is `feed_slot` at a position. Gate: ITL p99 ≤ 2× p50 during a 20k admit; identity with random chunk sizes. | done (#45, #55, #57): during a 24k admit, the other streams' ITL p99 went 2392 → 70 ms (7B, RTX 4090, MEASURED in #45; p50 59 ms) and a short prompt arriving meanwhile gets its first token in 111 ms instead of 2.1 s; the long prompt's own TTFT is +48 %. #55/#57: per-prompt depth budgets and idle fairness |
+| 2 | **Drop the N+1 cache.** A pool of N slots costs N+1 KV caches: the request running alone has its own (`serve.rs` `Engine.cache`). Alias it to slot 0's memory, or retire the solo path once a pool exists. | 7B f16 at 32k on 12 GB: 1 → 2–3 slots; `--kv q8` 3 → 5 (ESTIMATED from the cache sizes; 1 and 3 are MEASURED in #42). No bits change. 8–16 h. MEASURED on bella: f16 1 → 2, q8 4 → 5 (the solo path in a view of a slot; C=1 decode unchanged). | done (#60): bella 7B at 32k, f16 1 → 2 slots, `--kv q8` 4 → 5; C=1 decode 101.4 → 102.8 tok/s, within noise (MEASURED) ([log](log/2026-10-17-serve-one-cache.md)) |
+| 3 | **Long-context decode attention** (one KV block per warp, a wider combine, then the q8 path). | Decode at 32k is where the lead breaks (MEASURED 7B 72.4 vs llama.cpp 76.7), and attention is paid per row, so it is also the concurrency bottleneck for agents: 8 clients at 32k are ESTIMATED 150 tok/s aggregate today, 216–320 after. q8 tg@32k +13.8 % MEASURED on the branch. | done (#50): bella 7B tg@32k f16 +3.3 % (the +12 % gate not met: attention is near the DRAM ceiling), `--kv q8` +17.6 %, 0.5B f16 +10 % (MEASURED). Next: the in-flight fold of the combine, ESTIMATED ≈ +4 % |
+| 4 | **KV save/restore.** Slot ↔ pinned host RAM (`--cache-ram`, LRU by prefix) on eviction, `POST /slots/:id?action=save\|restore` to files in llama-server's shape, `chat --session FILE`. | More conversations than slots is the swarm's normal state; eviction costs a 5–12 s re-prefill today and ESTIMATED ~0.1 s after (1.75 GiB at the MEASURED 25.4 GB/s). A restored slot continues bit for bit; llama-server can't promise that. 20–30 h. Gate: restored == uninterrupted, tokens and KV bytes. | stage A done (#48, #54): AXKV session files and `chat --session`, exact; a 29.8k-position 7B f16 session restores in 0.41–0.45 s vs a 3.16 s re-prefill (RTX 4090, MEASURED). Stage B (`serve`: `--cache-ram`, `/slots` save/restore) planned |
+| 5 | **Paged KV.** A slot takes 64-position pages as it grows; `--ctx` is a cap, not a reservation. | The widest payoff of the list: a 14B agent on 12 GB stays all-GPU at 10–25k used tokens (ESTIMATED 17 → ~55 tok/s), a 7B card holds ~7 agents at 15k instead of 1–2 slots, and requests that fit no slot stop starving. Bit-identical by construction: paging changes addresses, never order (`docs/design` to come; r4-serve §4.2). The broadest kernel touch since S2 — keep the old entry points as identity-table wrappers. 40–60 h. | stages 0–1 done (#64, #68): every cache kernel reads through a page table (null = identity); `gen` md5 identical, C=1 speed within noise on bella (tg128 0.997×, 30k-prefix decode 1.000×, MEASURED) ([log](log/2026-10-17-paged-kv-s01.md)). Stages 2–3 (allocator, pool, serve policy) **in flight** (feat/paged-kv-pool) |
 | 6 | **Serve ops: `--api-key`, `/metrics`, `/slots`, `--max-prompt-tokens`, idle-slot timeout.** | What exposing `serve` on a LAN needs; parity with llama-server's operational surface. No bits risk. 12–20 h. | planned |
 | 7 | **MoE with the experts on the CPU** (Qwen3-30B-A3B first): router, attention and shared weights on the GPU, experts on the CPU for decode, experts streamed through the GPU for prefill (the hybrid's streamer, per expert). | 30B-class quality on 12 GB. ESTIMATED decode 35–55 tok/s (1.0 GB of active experts per token over 75 GB/s RAM) and 3000+ tok/s prefill, where llama.cpp's `--cpu-moe` prefills on the CPU. Medium bits risk: a new architecture and an exact top-k. 80–120 h. Gate: logits within llama.cpp's own CPU/CUDA spread; cache reuse == fresh prefill. gpt-oss-20b (MXFP4, sinks) after. | stages 0–1 in review: qwen3moe loads and runs on the CPU only (exact, at the memory roofline); GPU attention + CPU experts (stage 2) and streamed prefill (stage 3) next ([plan](#mixture-of-experts), [log](log/2026-10-17-moe-stage1.md)) |
 | 8 | **YaRN RoPE as an override** (`--rope-scaling yarn --rope-scale 4 --yarn-orig-ctx N`, llama.cpp's names), plus `chat` forgetting in halves. | No Qwen2.5/Qwen3 GGUF carries scaling keys (checked): 128k is a flag in llama.cpp and a refusal here. A 7B at 128k q8 fits 12 GB (3.7 GiB) and decodes at ESTIMATED 34 tok/s today, 65 after item 3; the 2-minute prefill is why item 4 comes first. New bits only when on. 12–20 h. `chat` today re-prefills ~24k tokens on nearly every exchange once a 32k window is full (`drop_oldest` keeps the minimum): dropping to half is 2–4 h. | planned, after 3 and 4 |
 | 9 | **Multi-GPU stage 1b**: the pool over a pipeline, two step batches in flight; and a measured 70B on 2×24 GB. | 32B serve on 2×4090 ≈ 2× one GPU's aggregate (ESTIMATED, [design](design/multi-gpu.md) §3.1); 70B Q4_K_M already runs under PP (ESTIMATED ~21 tok/s on 2×4090, 12k f16 / 24k q8 of KV) but no one has measured it: a $5 pod. 40–60 h + 8. | design done |
-| 10 | **Batched speculative decoding.** Draft rows for every running request in one verify step, on while rows × (K+1) ≤ 16 (the weight-read-once regime), off above. | +30–50 % per stream at ≤ 4 clients with a draft model (ESTIMATED from the MEASURED solo gains), nothing lost at 16. Lossless by the verify contract. 30–50 h. | planned, after 1 |
+| 10 | **Batched speculative decoding.** Draft rows for every running request in one verify step, on while rows × (K+1) ≤ 16 (the weight-read-once regime), off above. | +30–50 % per stream at ≤ 4 clients with a draft model (ESTIMATED from the MEASURED solo gains), nothing lost at 16. Lossless by the verify contract. 30–50 h. | planned (item 1 is done) |
 
 Below the line: shared-prefix pages (copy-on-write over item 5: a swarm's 20k system prompt held once; the swarm's
 real memory win), fairness (aging for oversize requests, shortest-first admission), a batched-decode kernel profile
 (inside item 1's bench), q4 KV (under "Not planned", below).
 
-Dependencies: #42 → 1 → {4, 10}; #42 → 2 → 5 → shared-prefix pages; 3 → 8; 4 → 8; stage 1 (done) → 9; the
-streamer (done) → 7. Item 6 depends on nothing.
+Also done, not yet in the table: **item 6, serve ops** (#61, #62: `--api-key`, `/metrics`, `/slots`,
+`--max-prompt-tokens`, `--slot-idle-ms`; [log](log/2026-10-17-serve-ops.md),
+[follow-up](log/2026-10-17-serve-ops-followup.md)), and **item 8's YaRN override** (#49: a pass-key needle 18/18 up to 128k
+with it, 9/18 without; +7.7–8.0 % perplexity at 2k–8k on 7B, so opt-in; [log](log/2026-10-16-yarn.md)). Item 8's other half,
+`chat` forgetting in halves, is still planned: `chat` drops the fewest exchanges that make room. Both status
+cells sit next to item 7's, which PR #67 edits, so they are updated here until #67 merges.
+
+Dependencies: 1 (done) → {4 stage B, 10}; 2 (done) → 5 (stages 0–1 done) → shared-prefix pages; 3 (done) and 4
+→ the rest of 8; stage 1 (done) → 9; the streamer (done) → 7.
 
 ## Mixture-of-experts
 
