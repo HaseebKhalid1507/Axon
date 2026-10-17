@@ -3,7 +3,8 @@
 
     scripts/soak.py <axon binary> <model.gguf> --hours H [--clients N] [--out DIR]
                     [--port P] [--sample-s 30] [--warmup-min M] [--seed S] [-- serve flags]
-    scripts/soak.py report DIR            (re-read DIR/samples.csv and DIR/summary.json, print the verdict)
+    scripts/soak.py report DIR            (re-read DIR/summary.json, print the verdict)
+    scripts/soak.py summarise FILE [MIN]  (a markdown table of samples.csv or a job log, MIN-minute buckets)
 
 Starts `axon serve` itself (so it knows the pid), then N client threads run a
 realistic mix until the deadline:
@@ -444,7 +445,13 @@ def identity_run(cfg):
             rng = random.Random(7)
             msgs = [{"role": "user", "content": "Repeat the last word: " + words(rng, cfg.slot_ctx // 3)}]
         b = dict({"model": MODEL[0], "messages": msgs, "max_tokens": 64, "temperature": 0}, **extra)
-        st, _, rb = request(cfg.port, "POST", "/v1/chat/completions", b, timeout=cfg.req_timeout)
+        # A 503 is back-pressure (a full queue under load), not an answer: retry it.
+        t0 = time.time()
+        while True:
+            st, _, rb = request(cfg.port, "POST", "/v1/chat/completions", b, timeout=cfg.req_timeout)
+            if st != 503 or time.time() - t0 > 600:
+                break
+            time.sleep(2)
         if st != 200:
             out.append({"kind": kind, "status": st})
             continue
@@ -550,7 +557,32 @@ def verdict(rows, summary, cfg):
     summary["pass"] = all(c["pass"] for c in checks.values())
 
 
+def summarise(path, bucket_min=30):
+    """A markdown table of a samples.csv (or a job log with CSV, lines) in bucket_min buckets."""
+    lines = [ln[4:] if ln.startswith("CSV,") else ln for ln in open(path, errors="replace")]
+    hdr = next(i for i, ln in enumerate(lines) if ln.startswith("t_s,"))
+    rows = list(csv.DictReader([ln for ln in lines[hdr:] if ln[:1].isdigit() or ln.startswith("t_s,")]))
+    print("| minutes | requests | ok | 503 | 4xx exp. | cancelled | failing | RSS MiB | VRAM MiB | fds | threads "
+          "| lat p50 ms | lat p99 ms | TTFT p50 ms |")
+    print("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+    b = {}
+    for r in rows:
+        b.setdefault(int(float(r["t_s"]) // (bucket_min * 60)), []).append(r)
+    for k in sorted(b):
+        rs = b[k]
+        n = lambda c: sum(int(r[c]) for r in rs)  # noqa: E731
+        med = lambda c: statistics.median([float(r[c]) for r in rs if r[c] != ""] or [0])  # noqa: E731
+        print(f"| {k * bucket_min}-{(k + 1) * bucket_min} | {n('requests')} | {n('ok')} | {n('503')} | "
+              f"{n('4xx-expected')} | {n('cancelled')} | {sum(n(c) for c in sorted(BAD))} | "
+              f"{rs[-1]['rss_mib']} | {rs[-1]['vram_mib'] if rs[-1]['vram_src'] == 'pid' else '-'} | {max(int(r['fds']) for r in rs)} | "
+              f"{max(int(r['threads']) for r in rs)} | {med('lat_p50_ms'):.0f} | {med('lat_p99_ms'):.0f} | "
+              f"{med('ttft_p50_ms'):.0f} |")
+
+
 def main():
+    if len(sys.argv) > 1 and sys.argv[1] == "summarise":
+        summarise(sys.argv[2], int(sys.argv[3]) if len(sys.argv) > 3 else 30)
+        return 0
     if len(sys.argv) > 1 and sys.argv[1] == "report":
         d = sys.argv[2]
         s = json.load(open(os.path.join(d, "summary.json")))
