@@ -391,12 +391,22 @@ pub type FuncGetParamInfo =
 pub fn param_info() -> Option<FuncGetParamInfo> {
     static F: OnceLock<Option<FuncGetParamInfo>> = OnceLock::new();
     *F.get_or_init(|| {
-        driver().ok()?;
-        let lib = open_lib(&["libcuda.so.1".into()]).ok()?;
-        let p = sym(lib, "cuFuncGetParamInfo\0").ok()?;
-        // SAFETY: p is the driver's cuFuncGetParamInfo, whose C signature
-        // (cuda.h) FuncGetParamInfo declares.
-        Some(unsafe { std::mem::transmute::<*mut c_void, FuncGetParamInfo>(p) })
+        let f = (|| {
+            driver().ok()?;
+            let lib = open_lib(&["libcuda.so.1".into()]).ok()?;
+            let p = sym(lib, "cuFuncGetParamInfo\0").ok()?;
+            // SAFETY: p is the driver's cuFuncGetParamInfo, whose C signature
+            // (cuda.h) FuncGetParamInfo declares.
+            Some(unsafe { std::mem::transmute::<*mut c_void, FuncGetParamInfo>(p) })
+        })();
+        if f.is_none() {
+            // Once (the OnceLock): the check is off, say so.
+            eprintln!(
+                "axon: the CUDA driver has no cuFuncGetParamInfo (older than 12.4): \
+                 kernel launch argument counts are not checked"
+            );
+        }
+        f
     })
 }
 

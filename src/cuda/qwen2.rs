@@ -473,6 +473,10 @@ pub struct CudaCache<'g> {
     rows: usize,
     /// The row position 0 is at (0, or a view's slot's first row).
     row0: usize,
+    /// A view of a pool's rows (`slot_view`), whatever its row0 (slot 0's
+    /// view has row0 0): never paged (`set_tab`, `retarget_view`).
+    #[cfg_attr(not(test), allow(dead_code))] // read by set_tab (tests, until stage 2)
+    view: bool,
     /// Q8: this token's keys and values, f32 [2][kv_dim], on their way into
     /// the cache (qkv_rope_f32 to attn_split_q8). Empty for F16.
     kvf: DevBuf<'g>,
@@ -543,11 +547,9 @@ impl<'g> CudaCache<'g> {
     /// steps hold the table's address: they go.
     #[cfg(test)]
     pub(super) fn set_tab(&mut self, tab: Option<DevBuf<'g>>) {
-        // Table entries are pages of the whole buffer: no view offset too.
-        assert!(
-            tab.is_none() || self.row0 == 0,
-            "a paged cache is no slot view"
-        );
+        // Table entries are pages of the whole buffer: no view offset too
+        // (a view's row0 can be 0, slot 0's: the flag, not row0).
+        assert!(tab.is_none() || !self.view, "a paged cache is no slot view");
         self.tab = tab;
         self.graph = Default::default();
     }
@@ -1724,6 +1726,7 @@ impl<'g> CudaQwen2<'g> {
             kv,
             rows,
             row0,
+            view: !fresh,
             kvf: g.alloc(if q8 { 2 * self.kv_dim() * f } else { 0 })?,
             x: g.alloc(self.dim * f)?,
             q: g.alloc(self.q_dim * f)?,

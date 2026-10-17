@@ -373,6 +373,9 @@ impl<'g> CudaQwen2<'g> {
         if !Rc::ptr_eq(&c.kv, &p.c.kv) || slot >= p.slots {
             return Err(format!("retarget: not a view of this pool, or slot {slot}"));
         }
+        if c.tab.is_some() || p.c.tab.is_some() {
+            return Err("retarget: a paged cache or pool (a view is plain rows)".into());
+        }
         let row0 = slot * p.ctx;
         if c.row0 != row0 {
             c.row0 = row0;
@@ -908,6 +911,35 @@ mod tests {
     /// slot's KV bytes == the plain cache's; the other slots stay as they
     /// were; `adopt_cache` of it into its slot copies nothing, into another
     /// slot is refused. f16 and q8, qwen2 and qwen3.
+    /// A slot view is never paged: `set_tab` refuses slot 0's view (row0 0)
+    /// as any other's, `retarget_view` refuses a view with a table, and
+    /// `slot_view` a paged pool (a table and a view offset never both apply).
+    #[test]
+    fn paged_views_refused() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let Some(m) = crate::testutil::model() else {
+            return;
+        };
+        let km = Kernels::module(&g).unwrap();
+        let net = CudaQwen2::with_kv(&g, &km, &m, 128, CacheKv::F16, false).unwrap();
+        let mut p = net.pool(2, 128).unwrap();
+        for slot in [0, 1] {
+            let mut v = net.slot_view(&p, slot).unwrap();
+            let t = g.upload(&[0u32, 1]).unwrap();
+            let set = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| v.set_tab(Some(t))));
+            assert!(set.is_err(), "set_tab on slot {slot}'s view");
+            v.tab = Some(g.upload(&[0u32, 1]).unwrap());
+            assert!(
+                net.retarget_view(&p, &mut v, 1 - slot).is_err(),
+                "retarget of a paged view"
+            );
+        }
+        p.c.set_tab(Some(g.upload(&[0u32, 1, 2, 3]).unwrap()));
+        assert!(net.slot_view(&p, 0).is_err(), "slot_view of a paged pool");
+    }
+
     #[test]
     fn slot_view_matches_a_cache() {
         let Some(g) = crate::testutil::gpu() else {

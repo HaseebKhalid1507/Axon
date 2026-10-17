@@ -682,7 +682,7 @@ fn gpu_paged_store_bits() {
 }
 
 /// gemma3's head-256 path on every GPU: the decode attn_split_w_256 (with
-/// its q/k norms and K store) and the batched attn_split_bw_256 (one
+/// its q/k norms and K store) and the batched attn_split_bw_256_pg (one
 /// sequence and `Place::Rows`), sliding windows whose first position
 /// (win_lo, now an integer offset before the table) falls inside, on and
 /// across page boundaries, window lengths that are no multiple of 64 or
@@ -693,10 +693,11 @@ fn gpu_paged_gemma_window_bits() {
         return;
     };
     let km = Kernels::module(&g).unwrap();
-    let (fw0, fw, fbw, frn) = (
+    let (fw0, fw, fbw0, fbw, frn) = (
         km.function("attn_split_w_256").unwrap(),
         km.function("attn_split_w_256_pg").unwrap(),
         km.function("attn_split_bw_256").unwrap(),
+        km.function("attn_split_bw_256_pg").unwrap(),
         km.function("rope_kv_norm_b_256").unwrap(),
     );
     let hd = 256;
@@ -778,6 +779,34 @@ fn gpu_paged_gemma_window_bits() {
                             &args,
                         )
                         .unwrap();
+                    }
+                    // The plain cache's own kernel == the table kernel with no
+                    // table (and so, by check_paged, with the identity table).
+                    if tab.is_none() {
+                        let po0 = g.alloc(nz * nh * ms * hd * 4).unwrap();
+                        let pm0 = g.alloc(nz * nh * ms * 2 * 4).unwrap();
+                        po0.zero().unwrap();
+                        pm0.zero().unwrap();
+                        let mut a0 = args[..args.len() - 1].to_vec();
+                        a0[9] = po0.arg();
+                        a0[10] = pm0.arg();
+                        // SAFETY: as above, without the table.
+                        unsafe {
+                            g.launch(
+                                &fbw0,
+                                (nkv as u32, ms as u32, nz as u32),
+                                (ATT_TILE as u32, 1, 1),
+                                0,
+                                &a0,
+                            )
+                            .unwrap();
+                        }
+                        let same = po0.read::<u8>().unwrap() == po.read::<u8>().unwrap()
+                            && pm0.read::<u8>().unwrap() == pm.read::<u8>().unwrap();
+                        assert!(
+                            same,
+                            "{what} rows {rows_mode}: attn_split_bw_256 != _pg, no table"
+                        );
                     }
                     outs.push((
                         format!("attn_split_bw rows {rows_mode} part_o"),

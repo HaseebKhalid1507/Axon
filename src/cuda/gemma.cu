@@ -214,13 +214,30 @@ extern "C" __global__ void rope_kv_norm_b_256(const float* __restrict__ qkv, int
 // attn_split_b at head size 256 over each query's window (attn_split_w_256
 // per query token: the same cache view, splits and code; rp: the token's
 // sequence's rows). Grid (n_kv, max_split, nz) x ATT_TILE; part_* per query
-// of the launch.
+// of the launch. The plain cache's kernel, as attn_split_w_256 (with the
+// table path inside it, gemma3 1B prefill was MEASURED 0.94x on bella).
 extern "C" __global__ void __launch_bounds__(ATT_TILE)
 attn_split_bw_256(const float* __restrict__ q, const unsigned short* __restrict__ kc,
                   const unsigned short* __restrict__ vc, int start, int z0, int n_heads, int n_kv,
                   float scale, int max_split, float* __restrict__ part_o,
-                  float* __restrict__ part_ml, const u32* __restrict__ rp, int win,
-                  const u32* __restrict__ tab) {
+                  float* __restrict__ part_ml, const u32* __restrict__ rp, int win) {
+    int zl = blockIdx.z, z = z0 + zl;
+    u64 nh = n_heads;
+    int np = (int)rp_pos(rp, start, z) + 1, lo = win_lo(np, win);
+    u64 off = (rp_base(rp, z, nullptr) + (u64)lo) * n_kv * 256;
+    attn_split_t<256>(q + (u64)z * nh * 256, kc + off, vc + off, np - lo, blockIdx.x, blockIdx.y,
+                      n_heads, n_kv, scale, max_split, part_o + (u64)zl * nh * max_split * 256,
+                      part_ml + (u64)zl * nh * max_split * 2);
+}
+
+// attn_split_bw_256 through a page table (rp: each token's sequence's table
+// at entry rp[2z + 1]; the window's lo added before translation).
+extern "C" __global__ void __launch_bounds__(ATT_TILE)
+attn_split_bw_256_pg(const float* __restrict__ q, const unsigned short* __restrict__ kc,
+                     const unsigned short* __restrict__ vc, int start, int z0, int n_heads,
+                     int n_kv, float scale, int max_split, float* __restrict__ part_o,
+                     float* __restrict__ part_ml, const u32* __restrict__ rp, int win,
+                     const u32* __restrict__ tab) {
     int zl = blockIdx.z, z = z0 + zl;
     u64 nh = n_heads;
     int np = (int)rp_pos(rp, start, z) + 1, lo = win_lo(np, win);

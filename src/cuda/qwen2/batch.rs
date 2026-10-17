@@ -393,6 +393,8 @@ pub(super) struct BatchFns<'m> {
     geglu_quant: Func<'m>,
     rope_kv_norm_256: Func<'m>,
     attn_split_w: Func<'m>,
+    /// attn_split_w through a page table (a paged cache).
+    attn_split_w_pg: Func<'m>,
     attn_combine_w: Func<'m>,
 }
 
@@ -529,6 +531,7 @@ impl<'m> BatchFns<'m> {
             geglu_quant: module.function("geglu_quant_b")?,
             rope_kv_norm_256: module.function("rope_kv_norm_b_256")?,
             attn_split_w: module.function("attn_split_bw_256")?,
+            attn_split_w_pg: module.function("attn_split_bw_256_pg")?,
             attn_combine_w: module.function("attn_combine_bw")?,
         })
     }
@@ -1153,6 +1156,7 @@ impl<'g> CudaQwen2<'g> {
         on: &mut dyn FnMut(&'static str) -> Result<(), String>,
     ) -> Result<(), String> {
         let rows = !matches!(rp, Arg::Ptr(0));
+        let paged = !matches!(tab, Arg::Ptr(0));
         let (dim, hd, kvd, ffn) = (self.dim, self.head_dim, self.kv_dim(), self.ffn);
         let qd = self.q_dim;
         let (g, bf) = (self.gpu, &self.bf);
@@ -1388,7 +1392,12 @@ impl<'g> CudaQwen2<'g> {
                     // partials' stride: blocks or splits).
                     let (f, grid, block, stride) = match (tc, q8) {
                         (false, false) if self.gemma.is_some() => {
-                            (&bf.attn_split_w, ms, ATT_TILE as u32, self.max_split)
+                            let f = if paged {
+                                &bf.attn_split_w_pg
+                            } else {
+                                &bf.attn_split_w
+                            };
+                            (f, ms, ATT_TILE as u32, self.max_split)
                         }
                         (true, false) => (&bf.attn_blk, gy_blk, 32, b.nblk_max),
                         (true, true) => (&self.q8_fns(mode).attn_blk_b, gy_blk, 32, b.nblk_max),
@@ -1422,7 +1431,10 @@ impl<'g> CudaQwen2<'g> {
                     if gemma {
                         args.push(Arg::I32(l.win as i32));
                     }
-                    args.push(tab);
+                    // (gemma3's plain-cache kernel takes no table: gemma.cu.)
+                    if !gemma || paged {
+                        args.push(tab);
+                    }
                     g.launch(
                         f,
                         (self.n_kv_heads as u32, grid, nz),
