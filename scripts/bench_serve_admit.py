@@ -2,7 +2,7 @@
 """`axon serve` under load: a long prompt admitted while other clients decode (stdlib only).
 
     bench_serve_admit.py admit  ROUNDS MODEL_TAG BIN... [--decoders=4] [--long=20000] [--flags-I=...]
-    bench_serve_admit.py single ROUNDS MODEL_TAG BIN... [--n=128] [--parallel=8] [--idle-long=N]
+    bench_serve_admit.py single ROUNDS MODEL_TAG BIN... [--n=128] [--parallel=8] [--idle-long=N [--idle-long2=M]]
     common: [--models=DIR] (default bella's ~/Projects/axon/models) [--kv=f16]
 
 Run through the GPU queue (it loads models on the GPU). Binaries interleaved per round, cool-gated, GPU logged.
@@ -30,6 +30,7 @@ DEC = int(opts.get('decoders', '4'))
 LONG = int(opts.get('long', '20000'))
 SHORT = int(opts.get('short', '0'))
 IDLE_LONG = int(opts.get('idle-long', '0'))
+IDLE_LONG2 = int(opts.get('idle-long2', str(IDLE_LONG)))  # the second idle prompt (default: the same length)
 KV = opts.get('kv', 'f16')
 M = opts.get('models', '/home/haseeb/Projects/axon/models').rstrip('/') + '/'
 MODELS = {'0.5B': 'qwen2.5-0.5b-q4_k_m.gguf', '7B': 'Qwen2.5-7B-Instruct-Q4_K_M.gguf'}
@@ -208,7 +209,7 @@ def main():
                     p.kill()
                     p.wait()
             else:
-                p = serve(b, i, max(4096, IDLE_LONG * 5 // 4 + 1024), int(opts.get('parallel', '8')))
+                p = serve(b, i, max(4096, max(IDLE_LONG, IDLE_LONG2) * 5 // 4 + 1024), int(opts.get('parallel', '8')))
                 try:
                     base = {'temperature': 0, 'stream': True, 'stream_options': {'include_usage': True}}
                     stream('/v1/completions', {**base, 'prompt': 'Hello', 'max_tokens': 4})
@@ -224,7 +225,8 @@ def main():
                         outs, tt = [[], []], [0.0, 0.0]
 
                         def one(k):
-                            tt[k] = stream('/v1/completions', {**base, 'prompt': long_prompt(IDLE_LONG, s0 + 2 + k),
+                            tt[k] = stream('/v1/completions', {**base, 'prompt': long_prompt([IDLE_LONG, IDLE_LONG2][k],
+                                                                                             s0 + 2 + k),
                                                                'max_tokens': 4}, None, outs[k])[0]
                         th = [threading.Thread(target=one, args=(k,)) for k in range(2)]
                         for t2 in th:
@@ -232,6 +234,7 @@ def main():
                         for t2 in th:
                             t2.join()
                         r['idle2_ttft_first'], r['idle2_ttft_last'] = min(tt), max(tt)
+                        r['idle2_ttft_a'], r['idle2_ttft_b'] = tt  # by prompt (--idle-long, --idle-long2)
                         r['idle2_paths'] = paths(i, 2)
                         out += ['|'] + outs[0] + ['|'] + outs[1]
                     ref = ref or out
