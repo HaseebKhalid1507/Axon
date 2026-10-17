@@ -87,6 +87,9 @@ const DEPTH_K: f64 = 8192.0;
 /// pieces at full speed, but an arrival still starts within about that.
 const IDLE_CHUNK: usize = 4096;
 const IDLE_MS: f64 = 250.0;
+/// An idle piece is a whole number of this many tokens: the GPU's prefill
+/// pass (cuda PREFILL_BATCH), so pieces add no partial passes.
+const IDLE_ROUND: usize = 1152;
 /// Feeds of at least this many tokens teach the cost (smaller ones are
 /// mostly a pass's fixed part).
 const LEARN_MIN: usize = 128;
@@ -263,13 +266,14 @@ impl<'a, 't> Batch<'a, 't> {
             .collect();
         let fed: Vec<usize> = self.pre.iter().map(|f| f.fed).collect();
         let starved: Vec<usize> = self.pre.iter().map(|f| f.starved).collect();
-        let plan = plan(budget, self.policy.floor, &fed, &rem, &starved);
+        let idle = self.seqs.is_empty();
+        let plan = plan(budget, self.policy.floor, &fed, &rem, &starved, idle);
+        for (f, s) in self.pre.iter_mut().zip(starve(&plan, &starved, idle)) {
+            f.starved = s;
+        }
         for (i, &n) in plan.iter().enumerate() {
             if n > 0 {
-                self.pre[i].starved = 0;
                 self.feed(i, n)?;
-            } else {
-                self.pre[i].starved += 1;
             }
         }
         let mut i = 0;
@@ -497,12 +501,15 @@ impl<'a, 't> Batch<'a, 't> {
 /// most half a floor past its share is fed whole (no last sliver of a pass
 /// of its own); a later prompt's share under `floor` is skipped unless it
 /// finishes the prompt (no sliver of a long one beside another's chunk).
+/// On an `idle` step (nothing decodes) the first's time share rounds up to
+/// whole IDLE_ROUND passes and takes the step: prompts go one after another.
 fn plan(
     budget: Budget,
     floor: usize,
     fed: &[usize],
     rem: &[usize],
     starved: &[usize],
+    idle: bool,
 ) -> Vec<usize> {
     let mut plan = vec![0; rem.len()];
     let mut order: Vec<usize> = (0..rem.len()).collect();
@@ -521,7 +528,11 @@ fn plan(
             Budget::Micros(us, c) => {
                 let dk = fed[i] as f64 + DEPTH_K;
                 let n = ((dk * dk + 2.0 * us / c).sqrt() - dk) as usize;
-                if first { n.max(floor) } else { n }
+                match (first, idle) {
+                    (true, true) => n.max(floor).div_ceil(IDLE_ROUND) * IDLE_ROUND,
+                    (true, false) => n.max(floor),
+                    _ => n,
+                }
             }
         };
         let want = rem[i];
@@ -548,6 +559,21 @@ fn plan(
     plan
 }
 
+/// Each prompt's count of steps in a row passed over, after `plan`: reset
+/// when fed, else one more, but not on an idle step (nothing decodes:
+/// prompts are best fed one after another, and the head is never
+/// pre-empted for fairness there).
+fn starve(plan: &[usize], starved: &[usize], idle: bool) -> Vec<usize> {
+    plan.iter()
+        .zip(starved)
+        .map(|(&n, &s)| match (n, idle) {
+            (0, false) => s + 1,
+            (0, true) => s,
+            _ => 0,
+        })
+        .collect()
+}
+
 /// Send `id`'s text; Some(end) if that ended the request (a stop string,
 /// or the client is gone).
 fn emit(s: &mut Seq, id: u32) -> Option<End> {
@@ -565,7 +591,7 @@ fn emit(s: &mut Seq, id: u32) -> Option<End> {
 
 #[cfg(test)]
 mod plan_tests {
-    use super::{Budget, DEPTH_K, STARVE, plan};
+    use super::{Budget, DEPTH_K, IDLE_ROUND, STARVE, plan, starve};
 
     /// µs that `n` tokens from depth `d` cost at `c` (the model `plan` uses).
     fn cost(c: f64, d: usize, n: usize) -> f64 {
@@ -577,25 +603,52 @@ mod plan_tests {
         // A short prompt goes first; the 212 tokens left would be a sliver
         // of the long one (under the floor): skipped this step.
         assert_eq!(
-            plan(Budget::Tokens(512), 256, &[0, 0], &[10_000, 300], &[0, 0]),
+            plan(
+                Budget::Tokens(512),
+                256,
+                &[0, 0],
+                &[10_000, 300],
+                &[0, 0],
+                false
+            ),
             [0, 300]
         );
         // Left with at least a floor, the long one gets it.
         assert_eq!(
-            plan(Budget::Tokens(1024), 256, &[0, 0], &[10_000, 300], &[0, 0]),
+            plan(
+                Budget::Tokens(1024),
+                256,
+                &[0, 0],
+                &[10_000, 300],
+                &[0, 0],
+                false
+            ),
             [724, 300]
         );
         // A remainder within half a floor past the share is fed whole.
-        assert_eq!(plan(Budget::Tokens(512), 256, &[0], &[600], &[0]), [600]);
-        assert_eq!(plan(Budget::Tokens(512), 256, &[0], &[700], &[0]), [512]);
+        assert_eq!(
+            plan(Budget::Tokens(512), 256, &[0], &[600], &[0], false),
+            [600]
+        );
+        assert_eq!(
+            plan(Budget::Tokens(512), 256, &[0], &[700], &[0], false),
+            [512]
+        );
     }
 
     #[test]
     fn micros_shares_follow_each_prompts_depth() {
         let c = 0.005;
         let us = 50_000.0;
-        let shallow = plan(Budget::Micros(us, c), 16, &[0], &[100_000], &[0])[0];
-        let deep = plan(Budget::Micros(us, c), 16, &[30_000], &[100_000], &[0])[0];
+        let shallow = plan(Budget::Micros(us, c), 16, &[0], &[100_000], &[0], false)[0];
+        let deep = plan(
+            Budget::Micros(us, c),
+            16,
+            &[30_000],
+            &[100_000],
+            &[0],
+            false,
+        )[0];
         assert!(shallow > deep && deep > 16, "{shallow} {deep}");
         // Each share costs about the budget at its own depth.
         for (d, n) in [(0, shallow), (30_000, deep)] {
@@ -609,6 +662,7 @@ mod plan_tests {
             &[0, 30_000],
             &[100_000, 50_000],
             &[0, 0],
+            false,
         );
         assert_eq!(p[1], deep);
         assert_eq!(p[0], 0, "{p:?}: nothing (or a sliver) left");
@@ -617,7 +671,14 @@ mod plan_tests {
     #[test]
     fn micros_first_gets_the_floor() {
         assert_eq!(
-            plan(Budget::Micros(0.0, 0.005), 256, &[0], &[10_000], &[0]),
+            plan(
+                Budget::Micros(0.0, 0.005),
+                256,
+                &[0],
+                &[10_000],
+                &[0],
+                false
+            ),
             [256]
         );
         assert_eq!(
@@ -626,7 +687,8 @@ mod plan_tests {
                 256,
                 &[0, 0],
                 &[10_000, 9_000],
-                &[0, 0]
+                &[0, 0],
+                false
             ),
             [0, 256]
         );
@@ -638,7 +700,14 @@ mod plan_tests {
         // decides (by remainder the two short ones would take the step).
         let s = [STARVE; 3];
         assert_eq!(
-            plan(Budget::Tokens(256), 256, &[0; 3], &[5_000, 100, 200], &s),
+            plan(
+                Budget::Tokens(256),
+                256,
+                &[0; 3],
+                &[5_000, 100, 200],
+                &s,
+                false
+            ),
             [256, 0, 0]
         );
         // A starved long prompt goes before fresher short ones.
@@ -648,7 +717,8 @@ mod plan_tests {
                 256,
                 &[0; 3],
                 &[5_000, 100, 200],
-                &[STARVE, 0, 0]
+                &[STARVE, 0, 0],
+                false
             ),
             [256, 0, 0]
         );
@@ -660,9 +730,59 @@ mod plan_tests {
                 256,
                 &[0; 3],
                 &[5_000, 100, 200],
-                &[STARVE - 1, 0, 0]
+                &[STARVE - 1, 0, 0],
+                false
             ),
             [0, 100, 200]
         );
+    }
+
+    #[test]
+    fn idle_feeds_the_head_in_whole_passes() {
+        // Nothing decodes: the head (shortest first) takes the whole step,
+        // its share rounded up to whole passes; the other gets nothing.
+        let c = 0.005;
+        let us = 250_000.0;
+        let p = plan(
+            Budget::Micros(us, c),
+            256,
+            &[0, 0],
+            &[14_000, 14_400],
+            &[0, 0],
+            true,
+        );
+        assert_eq!(p[1], 0, "{p:?}");
+        assert!(p[0] > 0 && p[0].is_multiple_of(IDLE_ROUND), "{p:?}");
+        // Before a cost is known: IDLE_CHUNK tokens, all to the head.
+        assert_eq!(
+            plan(
+                Budget::Tokens(4096),
+                256,
+                &[0, 0],
+                &[14_000, 14_400],
+                &[0, 0],
+                true
+            ),
+            [4096, 0]
+        );
+        // An already starved prompt still goes first.
+        assert_eq!(
+            plan(
+                Budget::Tokens(4096),
+                256,
+                &[0, 0],
+                &[14_000, 14_400],
+                &[0, STARVE],
+                true
+            ),
+            [0, 4096]
+        );
+    }
+
+    #[test]
+    fn idle_steps_starve_nobody() {
+        assert_eq!(starve(&[4096, 0], &[0, 2], true), [0, 2]);
+        assert_eq!(starve(&[4096, 0], &[0, 2], false), [0, 3]);
+        assert_eq!(starve(&[0, 300], &[1, 3], false), [2, 0]);
     }
 }
