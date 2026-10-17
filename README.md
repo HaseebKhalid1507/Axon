@@ -34,9 +34,15 @@ Works today, honestly scoped:
   head size 256, sliding-window layers, GeGLU) runs on the CPU and the GPU with its
   `<start_of_turn>` chat format; on the GPU the whole model must fit (no CPU/GPU split, no
   `--kv q8` yet), and its local layers keep a full-length KV cache. 27B is refused.
-  Other architectures, mixture-of-experts models and RoPE scaling (a factor other than 1;
-  Gemma 3's linear scaling excepted) are refused with an error. MoE support is planned:
-  see [the roadmap](docs/roadmap.md#mixture-of-experts).
+  `qwen3moe` (Qwen3-30B-A3B and its relatives: softmax top-k routing, no shared expert)
+  runs on the CPU only for now (`--device cpu`; the GPU and a split refuse it with an
+  error): every expert repacked for the r8 kernels, decode == batched prefill == verify bit
+  for bit, logits within llama.cpp's own CPU/CUDA spread (stage 1, see
+  [the log](docs/log/2026-10-17-moe-stage1.md)); `axon info` prints its experts and bytes
+  per token. Attention on the GPU with the experts on the CPU is next
+  ([roadmap](docs/roadmap.md#mixture-of-experts)). Other architectures, other
+  mixture-of-experts models and RoPE scaling (a factor other than 1; Gemma 3's linear
+  scaling excepted) are refused with an error.
 - Tensor types: F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K on the CPU. On the
   GPU every weight matrix must be one of the eight quantized types (F16/F32 matrices are
   refused there). Others load for `info` but can't run.
