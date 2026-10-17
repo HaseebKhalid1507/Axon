@@ -522,6 +522,121 @@ ATTN_FA_B(attn_fa_b_128, 128, 8, 2, 1)
 ATTN_FA_B(attn_fa_bs_64, 64, 2, 2, 3)
 ATTN_FA_B(attn_fa_bs_128, 128, 4, 1, 2)
 
+// attn_fa_bt's rows (the f16 cache) with K and V on separate copies, for
+// small blocks several to an SM: three tiles - K of blocks b and b + 1, V
+// of block b. Per block: wait for K(b), copy V(b) during the scores and
+// softmax, wait for V(b), copy K(b + 1) during P V. The same steps on the
+// same tiles as attn_fa_bt; only when the bytes arrive changes. Grid as
+// attn_fa_b, 3 * 64 * HD * 2 bytes of dynamic shared memory.
+template <int HD, int NW>
+__device__ __forceinline__ void attn_fa_kt(const float* q, const unsigned short* __restrict__ kc,
+                                           const unsigned short* __restrict__ vc, int start,
+                                           int nb, int n_heads, int n_kv, float pre, float* y) {
+#if __CUDA_ARCH__ >= 800
+    extern __shared__ __align__(16) unsigned short fa_sm[];
+    const int TILE = ATT_BLK * HD;
+    int kvh = blockIdx.x, cta = gridDim.y - 1 - blockIdx.y, tid = threadIdx.x;
+    int lane = tid & 31, w = tid >> 5, group = n_heads / n_kv, kv_dim = n_kv * HD;
+    int rows = nb * group, r0 = cta * 16 * NW;
+    int ra = r0 + 16 * w + (lane >> 2), rb = ra + 8;
+    int np0 = ra < rows ? start + ra / group + 1 : 0;
+    int np1 = rb < rows ? start + rb / group + 1 : 0;
+    int wlo = start + min(r0 + 16 * w, rows - 1) / group + 1;
+    int whi = r0 + 16 * w < rows ? start + min(r0 + 16 * w + 15, rows - 1) / group + 1 : 0;
+    int np_max = start + min(r0 + 16 * NW - 1, rows - 1) / group + 1;
+    int nblk = (np_max + ATT_BLK - 1) / ATT_BLK;
+    u64 qs = (u64)n_heads * HD;
+    auto qrow = [&](int r) -> u64 { return (u64)(r / group) * qs + (kvh * group + r % group) * HD; };
+    unsigned short* vt = fa_sm + 2 * TILE;
+    u32 qa[HD / 16][4];
+    att_qfrag<HD>(qa, ra < rows ? q + qrow(ra) : nullptr, rb < rows ? q + qrow(rb) : nullptr, pre);
+    float O[HD / 8][4];
+#pragma unroll
+    for (int n = 0; n < HD / 8; n++) O[n][0] = O[n][1] = O[n][2] = O[n][3] = 0.0f;
+    float M[2] = {-INFINITY, -INFINITY}, L[2] = {0.0f, 0.0f};
+    att_load<HD>(fa_sm, kc, 0, np_max, kv_dim, kvh, tid, 32 * NW);
+    att_commit();
+    for (int b = 0; b < nblk; b++) {
+        int t0 = b * ATT_BLK;
+        unsigned short* kt = fa_sm + (b & 1) * TILE;
+        att_wait<0>();
+        __syncthreads(); // K(b) in; everyone past P V(b - 1): vt free
+        att_load<HD>(vt, vc, t0, np_max, kv_dim, kvh, tid, 32 * NW);
+        att_commit();
+        bool act = t0 < whi;
+        float m[2], l[2], al[2], wt[2];
+        bool on[2] = {t0 < np0, t0 < np1};
+        u32 pa[4][4];
+        if (act) {
+            float s[8][4];
+            att_scores<HD>(s, qa, kt);
+            if (t0 + ATT_BLK > wlo)
+                att_softmax<true>(s, t0, np0, np1, m, l, pa);
+            else
+                att_softmax<false>(s, t0, np0, np1, m, l, pa);
+#pragma unroll
+            for (int i = 0; i < 2; i++) {
+                float mn;
+                att_fold_w(M[i], m[i], &mn, &al[i], &wt[i]);
+                if (on[i]) {
+                    M[i] = mn;
+                    L[i] = att_fold_o(L[i], l[i], al[i], wt[i]);
+                }
+            }
+        }
+        att_wait<0>();
+        __syncthreads(); // V(b) in (K(b + 1)'s tile: last read by b - 1's scores)
+        if (b + 1 < nblk)
+            att_load<HD>(fa_sm + ((b + 1) & 1) * TILE, kc, t0 + ATT_BLK, np_max, kv_dim, kvh, tid,
+                         32 * NW);
+        att_commit();
+        if (act) {
+#pragma unroll
+            for (int h = 0; h < HD / 64; h++) {
+                float o[8][4];
+                if (h == 0)
+                    att_pv<HD, 0, 64>(o, pa, vt);
+                else
+                    att_pv<HD, 64, 64>(o, pa, vt);
+#pragma unroll
+                for (int n = 0; n < 8; n++) {
+#pragma unroll
+                    for (int j = 0; j < 4; j++) {
+                        int i = j >> 1;
+                        if (on[i]) O[8 * h + n][j] = att_fold_o(O[8 * h + n][j], o[n][j], al[i], wt[i]);
+                    }
+                }
+            }
+        }
+    }
+    int c = 2 * (lane & 3);
+    if (ra < rows) {
+        float* yr = y + qrow(ra) + c;
+#pragma unroll
+        for (int n = 0; n < HD / 8; n++)
+            *(float2*)(yr + 8 * n) = make_float2(__fdiv_rn(O[n][0], L[0]), __fdiv_rn(O[n][1], L[0]));
+    }
+    if (rb < rows) {
+        float* yr = y + qrow(rb) + c;
+#pragma unroll
+        for (int n = 0; n < HD / 8; n++)
+            *(float2*)(yr + 8 * n) = make_float2(__fdiv_rn(O[n][2], L[1]), __fdiv_rn(O[n][3], L[1]));
+    }
+#endif
+}
+#define ATTN_FA_K(NAME, HD, NW, MINB)                                                              \
+    extern "C" __global__ void __launch_bounds__(32 * NW, MINB)                                    \
+        NAME(const float* q, const unsigned short* __restrict__ kc,                                \
+             const unsigned short* __restrict__ vc, int start, int nb, int n_heads, int n_kv,      \
+             float pre, float* y) {                                                                \
+        attn_fa_kt<HD, NW>(q, kc, vc, start, nb, n_heads, n_kv, pre, y);                           \
+    }
+// Registers (ptxas, CUDA 13.4): attn_fa_k_128 254 on sm_120 / 245 on sm_89,
+// attn_fa_k_64 156 / 154 (3 blocks per SM need <= 168); no spills. The host
+// picks a variant per GPU and batch (batch.rs fa_pick).
+ATTN_FA_K(attn_fa_k_64, 64, 4, 3)
+ATTN_FA_K(attn_fa_k_128, 128, 4, 2)
+
 // attn_fa_b on the q8 cache (written by kv_q8_b), KG values per scale.
 // Dynamic shared memory: 2 * 64 * HD bytes of tile, then per stage
 // (2 * 64 * HD + 2 * 64 * HD / KG * 4) bytes.

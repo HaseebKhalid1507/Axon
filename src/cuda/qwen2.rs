@@ -226,8 +226,8 @@ impl<'m> Q8Fns<'m> {
         let f = |s: &str| module.function(&format!("{s}_{q}_{head_dim}"));
         let fa = [f("attn_fa_b")?, f("attn_fa_bs")?];
         if module.mma() {
-            for (small, fa) in fa.iter().enumerate() {
-                fa.set_max_shared(batch::fa_shape(head_dim, small == 1, group).2)?;
+            for (v, fa) in [batch::Fa::Full, batch::Fa::Small].into_iter().zip(&fa) {
+                fa.set_max_shared(batch::fa_shape(head_dim, v, group).2)?;
             }
         }
         Ok(Q8Fns {
@@ -1309,7 +1309,10 @@ impl<'g> CudaQwen2<'g> {
             max_split,
             tc_attn: module.mma() && head_dim != 256,
             graphs: std::env::var("AXON_CUDA_GRAPHS").map_or(true, |v| v != "0"),
-            bf: batch::BatchFns::new(module, hdk, sms)?,
+            bf: batch::BatchFns::new(module, hdk, sms, {
+                let cc = gpu.info()?.cc;
+                cc.0 * 10 + cc.1
+            })?,
             batch: if first > 0 { split_batch } else { PLAN_BATCH },
             kv,
             ctx: 0,

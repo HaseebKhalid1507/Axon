@@ -61,24 +61,178 @@ pub(super) fn att_per_query(head_dim: usize) -> usize {
 /// Tokens per output-head launch in `verify_argmax` (sizes the logits).
 pub(super) const HEAD_SUB: usize = 16;
 
-/// attn_fa_b's variants for head size hd and q8 scale group kg (0: the
-/// f16 cache): (rows per block, threads, dynamic shared memory: f16, its
-/// stages of K and V tiles of ATT_BLK rows; q8, one f16 tile and per stage
-/// the raw rows and their scales). `small`: attn_fa_bs (half the rows,
-/// more blocks, for short batches).
-pub(super) fn fa_shape(hd: usize, small: bool, kg: usize) -> (usize, usize, usize) {
-    let (rows, stages) = match (hd, small, kg) {
-        (64, false, _) => (64, 3),
-        (64, true, _) => (32, 2),
-        (_, false, _) => (128, 2),
-        (_, true, 0) => (64, 1),
-        (_, true, _) => (64, 2),
+/// attn_fa_b's launch shapes (prefill.cu): `Full` attn_fa_b, `Small`
+/// attn_fa_bs (half the rows: short batches), `Kv` attn_fa_k (4 warps, 64
+/// rows, K and V copied apart, several blocks per SM). Each row's ops are
+/// the same in all of them (rows are independent, prefill.cu attn_fa_bt):
+/// the shape is only speed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Fa {
+    Full = 0,
+    Small = 1,
+    Kv = 2,
+}
+
+/// attn_fa_b's variant v for head size hd and q8 scale group kg (0: the f16
+/// cache; Kv is f16 only): (rows per block, threads, dynamic shared memory:
+/// f16, its stages of K and V tiles of ATT_BLK rows (Kv: K, K and V); q8,
+/// one f16 tile and per stage the raw rows and their scales).
+pub(super) fn fa_shape(hd: usize, v: Fa, kg: usize) -> (usize, usize, usize) {
+    let tile = ATT_BLK * hd * 2;
+    let (rows, stages) = match (hd, v, kg) {
+        (_, Fa::Kv, _) => return (64, 128, 3 * tile),
+        (64, Fa::Full, _) => (64, 3),
+        (64, Fa::Small, _) => (32, 2),
+        (_, Fa::Full, _) => (128, 2),
+        (_, Fa::Small, 0) => (64, 1),
+        (_, Fa::Small, _) => (64, 2),
     };
     let smem = match kg {
-        0 => stages * 2 * ATT_BLK * hd * 2,
-        _ => ATT_BLK * hd * 2 + stages * 2 * ATT_BLK * (hd + hd / kg * 4),
+        0 => stages * 2 * tile,
+        _ => tile + stages * 2 * ATT_BLK * (hd + hd / kg * 4),
     };
     (rows, rows * 2, smem)
+}
+
+/// Blocks of variant v resident per SM (prefill.cu's launch bounds).
+fn fa_per_sm(hd: usize, v: Fa) -> usize {
+    match (hd, v) {
+        (64, Fa::Small) | (64, Fa::Kv) => 3,
+        (64, Fa::Full) | (_, Fa::Small) | (_, Fa::Kv) => 2,
+        (_, Fa::Full) => 1,
+    }
+}
+
+/// The work of one attn_fa_b launch of nb queries in variant v, in rows per
+/// SM, padded to the waves the blocks run in: whole waves of per-SM blocks
+/// on `sms` SMs, then the last partial wave as the most blocks it puts on
+/// an SM (a block runs as fast with fewer neighbours). Blocks are equally
+/// long at long context. Multiplied by the positions per row, this is
+/// proportional to the kernel time per variant (MEASURED on 20, 128 and 170
+/// SMs, lcpre NOTES).
+pub(super) fn fa_work(hd: usize, v: Fa, n_kv: usize, group: usize, nb: usize, sms: usize) -> f64 {
+    let (rows, _, _) = fa_shape(hd, v, 0);
+    let per = fa_per_sm(hd, v);
+    let blocks = n_kv * (nb * group).div_ceil(rows);
+    let (full, rem) = (blocks / (per * sms), blocks % (per * sms));
+    (full * per * rows + rem.div_ceil(sms) * rows) as f64
+}
+
+/// Variant v's speed at full occupancy relative to Full's (`fa_work` per
+/// time) on compute capability cc (major * 10 + minor): the slowest seen on
+/// a GPU of that architecture (cuda_fa_bench at 16k and 32k positions, 1016
+/// to 1121 queries: sm_89 RTX 4050 Laptop 20 SMs and RTX 4090 128, sm_120
+/// RTX 5070 Ti Laptop 46 and RTX 5090 170; lcpre NOTES). 0: never picked -
+/// Kv at head size 64 on sm_120 (5090 1.07-1.10, but the laptop's 0.88 at
+/// 1121 queries), and every architecture not measured (Full and Small, as
+/// before).
+pub(super) fn fa_eff(cc: u32, hd: usize, v: Fa) -> f64 {
+    match (cc, hd, v) {
+        (_, _, Fa::Full) => 1.0,
+        (89, 128, Fa::Small) => 0.85,
+        (89, 128, Fa::Kv) => 0.94,
+        (89, 64, Fa::Kv) => 1.01,
+        (120, 128, Fa::Small) => 0.93,
+        (120, 128, Fa::Kv) => 1.0,
+        _ => 0.0,
+    }
+}
+
+/// Architectures whose waves `fa_work` was checked on (`fa_eff`): passes
+/// are sized for them only.
+fn fa_measured(cc: u32) -> bool {
+    matches!(cc, 89 | 120)
+}
+
+/// An alternative variant must look this much faster than Full.
+const FA_MARGIN: f64 = 0.97;
+
+/// What the flash attention launch depends on: the GPU's compute
+/// capability (major * 10 + minor) and SMs, the head size, the q8 scale
+/// group (0: f16), kv heads and query heads per kv head.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct FaGeom {
+    pub(super) cc: u32,
+    pub(super) sms: usize,
+    pub(super) hd: usize,
+    pub(super) kg: usize,
+    pub(super) n_kv: usize,
+    pub(super) group: usize,
+}
+
+/// The flash attention variant for nb queries: Small when Full's blocks
+/// don't fill the GPU (short batches, as before), else the variant with the
+/// least `fa_work` / `fa_eff`: Full unless another looks FA_MARGIN better.
+/// The q8 cache: Full or Small.
+pub(super) fn fa_pick(g: FaGeom, nb: usize) -> Fa {
+    let full = fa_shape(g.hd, Fa::Full, g.kg).0;
+    if g.n_kv * (nb * g.group).div_ceil(full) < g.sms {
+        return Fa::Small;
+    }
+    if g.kg > 0 {
+        return Fa::Full;
+    }
+    let base = fa_work(g.hd, Fa::Full, g.n_kv, g.group, nb, g.sms);
+    let mut best = (Fa::Full, base);
+    for v in [Fa::Small, Fa::Kv] {
+        let e = fa_eff(g.cc, g.hd, v);
+        if e > 0.0 {
+            let t = fa_work(g.hd, v, g.n_kv, g.group, nb, g.sms) / e;
+            if t <= FA_MARGIN * base && t < best.1 {
+                best = (v, t);
+            }
+        }
+    }
+    best.0
+}
+
+/// `fa_pick`'s launch time for nb queries, in Full's rows per SM.
+pub(super) fn fa_time(g: FaGeom, nb: usize) -> f64 {
+    let v = fa_pick(g, nb);
+    let e = fa_eff(g.cc, g.hd, v);
+    fa_work(g.hd, v, g.n_kv, g.group, nb, g.sms) / if e > 0.0 { e } else { 1.0 }
+}
+
+/// Prompts reaching this many positions get their passes sized for the
+/// attention's waves (`fa_passes`); shorter ones keep `passes`.
+pub(super) const FA_LONG: usize = 8192;
+
+/// The passes of n tokens from position start with at most max per pass,
+/// for the flash attention: `passes`, or for a long prompt (start + n >=
+/// FA_LONG) with 128-wide heads a few more, equal, passes when that puts the attention's
+/// blocks in fewer, fuller waves (`fa_work` of the variant `fa_pick` takes,
+/// times the positions each pass reads) and doesn't add GEMM token tiles
+/// (128 tokens). Results don't depend on it.
+pub(super) fn fa_passes(
+    n: usize,
+    max: usize,
+    start: usize,
+    g: FaGeom,
+) -> Vec<std::ops::Range<usize>> {
+    let np0 = n.div_ceil(max).max(1);
+    // 64-wide heads: their 2- and 3-per-SM blocks don't follow fa_work's
+    // partial waves on the laptop (MEASURED, bella: 0.5B pp32512 in 32
+    // passes of 1016 instead of 29 of 1121 was 6 % slower).
+    if start + n < FA_LONG || !fa_measured(g.cc) || g.hd != 128 {
+        return passes(n, max);
+    }
+    let tiles =
+        |v: &[std::ops::Range<usize>]| -> usize { v.iter().map(|r| r.len().div_ceil(128)).sum() };
+    let cost = |v: &[std::ops::Range<usize>]| -> f64 {
+        v.iter()
+            .map(|r| fa_time(g, r.len()) * (start + r.end) as f64)
+            .sum()
+    };
+    let base = passes_n(n, np0);
+    let (t0, mut best) = (tiles(&base), (cost(&base), base));
+    for np in np0 + 1..=np0 + (np0 / 8).max(1) {
+        let v = passes_n(n, np);
+        let c = cost(&v);
+        if tiles(&v) <= t0 && c < FA_MARGIN * best.0 {
+            best = (c, v);
+        }
+    }
+    best.1
 }
 
 /// Bytes per token of a batched activation buffer: a decode.cu Act, padded
@@ -196,9 +350,11 @@ pub(super) struct BatchFns<'m> {
     /// fold: batches of at most att_per_query tokens.
     attn_blk: Func<'m>,
     attn_cmb: Func<'m>,
-    /// attn_fa_b and attn_fa_bs (fa_shape) for this head size (larger
-    /// batches), then quantize_b.
-    attn_fa: [Func<'m>; 2],
+    /// attn_fa_b's variants (`Fa`, indexed by it) for this head size
+    /// (larger batches), then quantize_b.
+    attn_fa: [Func<'m>; 3],
+    /// The device's compute capability, major * 10 + minor (`fa_pick`).
+    cc: u32,
     quantize: Func<'m>,
     argmax: Func<'m>,
     gemvn8: Func<'m>,
@@ -251,6 +407,7 @@ impl<'m> BatchFns<'m> {
         module: &'m Module<'m>,
         head_dim: usize,
         sms: usize,
+        cc: u32,
     ) -> Result<BatchFns<'m>, String> {
         let gemm = if module.mma() {
             let mut fs = Vec::new();
@@ -320,16 +477,20 @@ impl<'m> BatchFns<'m> {
             })?,
             attn_cmb: module.function("attn_cmb_b")?,
             attn_fa: {
-                let (a, b) = (
-                    module.function(&format!("attn_fa_b_{head_dim}"))?,
-                    module.function(&format!("attn_fa_bs_{head_dim}"))?,
-                );
-                if module.mma() {
-                    a.set_max_shared(fa_shape(head_dim, false, 0).2)?;
-                    b.set_max_shared(fa_shape(head_dim, true, 0).2)?;
-                }
-                [a, b]
+                let f = |n: &str, v: Fa| -> Result<Func<'m>, String> {
+                    let f = module.function(&format!("{n}_{head_dim}"))?;
+                    if module.mma() {
+                        f.set_max_shared(fa_shape(head_dim, v, 0).2)?;
+                    }
+                    Ok(f)
+                };
+                [
+                    f("attn_fa_b", Fa::Full)?,
+                    f("attn_fa_bs", Fa::Small)?,
+                    f("attn_fa_k", Fa::Kv)?,
+                ]
             },
+            cc,
             quantize: module.function("quantize_b")?,
             argmax: module.function("argmax_b")?,
             gemvn8: module.function("gemvn_2x8")?,
@@ -1147,15 +1308,14 @@ impl<'g> CudaQwen2<'g> {
             if self.tc_attn && nb > att_per_query(hd) && !rows {
                 // Flash attention, every query of the pass in one launch,
                 // y in place of q; then act (the decode kernels' bits,
-                // prefill.cu attn_fa_bt). Half-size blocks when the full
-                // ones don't fill the GPU.
+                // prefill.cu attn_fa_bt), in the variant fa_pick takes for
+                // this GPU and batch.
                 let group = self.n_heads / self.n_kv_heads;
-                let full = fa_shape(hd, false, kg).0;
-                let small = self.n_kv_heads * (nb * group).div_ceil(full) < bf.sms;
-                let (rows, threads, smem) = fa_shape(hd, small, kg);
+                let v = fa_pick(self.fa_geom(kg), nb);
+                let (rows, threads, smem) = fa_shape(hd, v, kg);
                 let f = match q8 {
-                    false => &bf.attn_fa[small as usize],
-                    true => &self.q8_fns(mode).attn_fa[small as usize],
+                    false => &bf.attn_fa[v as usize],
+                    true => &self.q8_fns(mode).attn_fa[v as usize],
                 };
                 let mut args = vec![b.q.arg()];
                 args.extend_from_slice(kv);
@@ -1493,16 +1653,50 @@ impl<'g> CudaQwen2<'g> {
         Ok(())
     }
 
-    /// `feed_batch`: passes of up to the cache's batch max (`passes`), then
-    /// a wait (so a device fault surfaces here, as with `feed`).
+    /// The flash attention's shapes for cache scale group kg (0: f16).
+    fn fa_geom(&self, kg: usize) -> FaGeom {
+        FaGeom {
+            cc: self.bf.cc,
+            sms: self.bf.sms,
+            hd: self.head_dim,
+            kg,
+            n_kv: self.n_kv_heads,
+            group: self.n_heads / self.n_kv_heads,
+        }
+    }
+
+    /// The passes of n tokens at start for cache c (`fa_passes` when the
+    /// flash attention runs them, else `passes`).
+    fn prompt_passes(
+        &self,
+        c: &CudaCache<'g>,
+        n: usize,
+        start: usize,
+    ) -> Vec<std::ops::Range<usize>> {
+        let max = c.b.as_ref().expect("batch scratch").max;
+        match self.tc_attn && max > att_per_query(self.head_dim) {
+            true => fa_passes(
+                n,
+                max,
+                start,
+                self.fa_geom(match c.mode {
+                    CacheKv::F16 => 0,
+                    CacheKv::Q8 { group } => group,
+                }),
+            ),
+            false => passes(n, max),
+        }
+    }
+
+    /// `feed_batch`: passes of up to the cache's batch max (`prompt_passes`),
+    /// then a wait (so a device fault surfaces here, as with `feed`).
     pub(super) fn feed_tokens(
         &self,
         c: &mut CudaCache<'g>,
         input: BatchIn,
         start: usize,
     ) -> Result<(), String> {
-        let max = c.b.as_ref().expect("batch scratch").max;
-        for r in passes(input.len(self.dim), max) {
+        for r in self.prompt_passes(c, input.len(self.dim), start) {
             let ch = input.range(r.clone(), self.dim);
             self.pass(c, ch, start + r.start, false, &mut |_| Ok(()))?;
         }
@@ -1517,8 +1711,7 @@ impl<'g> CudaQwen2<'g> {
         tokens: &[u32],
         start: usize,
     ) -> Result<Vec<f32>, String> {
-        let max = c.b.as_ref().expect("batch scratch").max;
-        let ps = passes(tokens.len(), max);
+        let ps = self.prompt_passes(c, tokens.len(), start);
         for (i, r) in ps.iter().enumerate() {
             let head = if i + 1 == ps.len() {
                 Head::Last
@@ -1563,7 +1756,11 @@ impl<'g> CudaQwen2<'g> {
 /// multiple of max doesn't end in a short pass (latency-bound GEMMs: the
 /// weights read once more for a few tokens). Results don't depend on it.
 pub(super) fn passes(n: usize, max: usize) -> Vec<std::ops::Range<usize>> {
-    let np = n.div_ceil(max);
+    passes_n(n, n.div_ceil(max))
+}
+
+/// n tokens in np equal passes (the first ones one token longer).
+fn passes_n(n: usize, np: usize) -> Vec<std::ops::Range<usize>> {
     let (q, r) = (n / np.max(1), n % np.max(1));
     let mut v = Vec::with_capacity(np);
     let mut s = 0;
