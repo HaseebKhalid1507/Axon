@@ -752,6 +752,7 @@ fn gpu_attention_matches_cpu() {
                         Arg::F32(0.0),
                         Arg::Ptr(0),
                         Arg::Ptr(0),
+                        Arg::Ptr(0), // no page table
                     ],
                 )
                 .unwrap();
@@ -895,6 +896,7 @@ fn gpu_tc_attention_close_to_f64() {
                         Arg::F32(0.0),
                         Arg::Ptr(0),
                         Arg::Ptr(0),
+                        Arg::Ptr(0), // no page table
                     ],
                 )
                 .unwrap();
@@ -1158,6 +1160,7 @@ fn qkv_rope_check(g: &Gpu, m: &Model) {
                         kc.arg(),
                         vc.arg(),
                         if norm { kraw.arg() } else { Arg::Ptr(0) },
+                        Arg::Ptr(0), // no page table
                     ],
                 )
                 .unwrap();
@@ -4308,6 +4311,7 @@ fn cuda_attn_bench() {
                             Arg::I32(nkv as i32),
                             pre,
                             q.arg(),
+                            Arg::Ptr(0), // no page table
                         ],
                     ),
                     1 => g.launch(
@@ -4341,6 +4345,7 @@ fn cuda_attn_bench() {
                             po.arg(),
                             pm.arg(),
                             Arg::Ptr(0),
+                            Arg::Ptr(0), // no page table
                         ],
                     ),
                     3 => g.launch(
@@ -4384,6 +4389,7 @@ fn cuda_attn_bench() {
                             Arg::F32(0.0),
                             Arg::Ptr(0),
                             Arg::Ptr(0),
+                            Arg::Ptr(0), // no page table
                         ],
                     ),
                     // attn_cmb: 64 outputs per block, y and the counters.
@@ -4516,6 +4522,7 @@ fn cuda_fa_bench() {
                                     Arg::I32(nkv as i32),
                                     pre,
                                     y.arg(),
+                                    Arg::Ptr(0), // no page table
                                 ],
                             )
                             .unwrap();
@@ -4699,6 +4706,7 @@ fn gpu_batched_attention_matches_decode_bits() {
                                 Arg::I32(nkv as i32),
                                 pre,
                                 qy.arg(),
+                                Arg::Ptr(0), // no page table
                             ],
                         ]
                         .concat(),
@@ -4749,6 +4757,7 @@ fn gpu_batched_attention_matches_decode_bits() {
                             bpo.arg(),
                             bpm.arg(),
                             Arg::Ptr(0),
+                            Arg::Ptr(0), // no page table
                         ],
                     ]
                     .concat(),
@@ -4822,6 +4831,7 @@ fn gpu_batched_attention_matches_decode_bits() {
                                 Arg::Ptr(0),
                             ],
                             if kg > 0 { &[] } else { &[Arg::Ptr(0)][..] },
+                            &[Arg::Ptr(0)], // no page table
                         ]
                         .concat(),
                     )
@@ -4977,6 +4987,7 @@ fn gpu_split_attention_matches_decode_bits() {
                         bpo.arg(),
                         bpm.arg(),
                         Arg::Ptr(0),
+                        Arg::Ptr(0), // no page table
                     ],
                 ]
                 .concat();
@@ -5047,6 +5058,7 @@ fn gpu_split_attention_matches_decode_bits() {
                             Arg::Ptr(0),
                         ],
                         if kg > 0 { &[] } else { &[Arg::Ptr(0)][..] },
+                        &[Arg::Ptr(0)], // no page table
                     ]
                     .concat();
                     g.launch(
@@ -5263,6 +5275,7 @@ fn gpu_q8_store_matches_rule() {
                         Arg::Ptr(0), // no qwen3 k norm
                         Arg::F32(0.0),
                         Arg::Ptr(0), // one sequence
+                        Arg::Ptr(0), // no page table
                     ],
                 )
                 .unwrap();
@@ -5714,6 +5727,7 @@ fn gpu_q8_attention_matches_reference() {
                                 Arg::Ptr(0),
                                 Arg::F32(0.0),
                                 Arg::Ptr(0),
+                                Arg::Ptr(0), // no page table
                             ],
                         )
                         .unwrap();

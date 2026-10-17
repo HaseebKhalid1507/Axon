@@ -228,9 +228,10 @@ impl<'g> CudaQwen2<'g> {
         if !sampled.is_empty() {
             self.samp_upload_rows(&mut p.c, &sampled, kmax)?;
         }
+        let paged = p.c.tab.is_some();
         let b = p.c.b.as_mut().expect("batch scratch");
         self.load_input(b, BatchIn::Tokens(&tokens))?;
-        b.upload_rows(&at)?;
+        b.upload_rows(&at, paged)?;
         // The kernels: the step's graph (made on its first use).
         let c = &mut p.c;
         let mut pass = || {

@@ -504,6 +504,26 @@ pub struct CudaCache<'g> {
     b: Option<batch::BatchBufs<'g>>,
     /// Scratch for sampling candidates (`samp_upload`).
     samp: Option<SampBufs<'g>>,
+    /// Paged KV (specs r11): the page table, u32 entries (decode.cu
+    /// pg_row; None: plain rows, the identity). A one-sequence pass reads
+    /// the sequence's table from entry `Place::Seq` base on, a `Place::Rows`
+    /// token from its `RowAt::base`; the decode step from entry 0.
+    tab: Option<DevBuf<'g>>,
+}
+
+impl<'g> CudaCache<'g> {
+    /// The page table from entry `e` on, as a kernel argument (null: none).
+    fn tab_at(&self, e: usize) -> Arg {
+        self.tab.as_ref().map_or(Arg::Ptr(0), |t| t.arg_at(e * 4))
+    }
+
+    /// Read and write the KV rows through `tab` (None: plain). The captured
+    /// steps hold the table's address: they go.
+    #[cfg(test)]
+    pub(super) fn set_tab(&mut self, tab: Option<DevBuf<'g>>) {
+        self.tab = tab;
+        self.graph = Default::default();
+    }
 }
 
 /// Bytes of a quantized-activation buffer for n values (decode.cu Act).
@@ -1701,6 +1721,7 @@ impl<'g> CudaQwen2<'g> {
             graph: [[None, None, None], [None, None, None]],
             b: Some(self.batch_bufs(self.batch_for(att_ctx), att_ctx)?),
             samp: None,
+            tab: None,
         };
         // Stale KV rows are never read (attention stops at pos), but zeroed
         // memory keeps a bug from reading NaNs (a view's pool zeroed its).
@@ -1848,6 +1869,7 @@ impl<'g> CudaQwen2<'g> {
                 let items = qd / 2 + kvd / 2 + kvd / 2;
                 let bias = |b: Option<usize>| b.map_or(null, vec);
                 let kva = self.kv_args(c, li);
+                let tab = c.tab_at(0);
                 // q8: keys and values to kvf, which attn_split_q8 stores.
                 let (qkv_f, kout, kraw) = match c.mode {
                     CacheKv::F16 => (&f.qkv_rope, [kva[0], kva[1]], c.kraw.arg()),
@@ -1888,6 +1910,7 @@ impl<'g> CudaQwen2<'g> {
                         // Raw q and k for the attention's norms (qwen3):
                         // kraw, or kvf's keys on the q8 cache.
                         if qk_norm { kraw } else { null },
+                        tab,
                     ],
                 )?;
                 on_launch("qkv", l.q.bytes() + l.k.bytes() + l.v.bytes())?;
@@ -1930,6 +1953,7 @@ impl<'g> CudaQwen2<'g> {
                     args.extend_from_slice(&[bias(l.qn), bias(l.kn)]);
                     args.extend_from_slice(&[Arg::F32(self.eps), c.rope.arg()]);
                 }
+                args.push(tab);
                 // attn_blk: at most max_split warps per kv head (each takes
                 // blocks y, y + max_split, ..), whatever the position.
                 let (gy, bx) = match tc {
