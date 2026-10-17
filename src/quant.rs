@@ -2939,6 +2939,19 @@ unsafe fn dot_rows_q8_with(
                 }
                 return;
             }
+            // SAFETY (the three below): guaranteed by our caller.
+            Q2_K if x.k.is_some() => {
+                let xk = x.k.as_deref().expect("checked");
+                return unsafe { k23::x86::q2_k_rows(rows, rb, xk, out, pf) };
+            }
+            Q3_K if x.k.is_some() => {
+                let xk = x.k.as_deref().expect("checked");
+                return unsafe { k23::x86::q3_k_rows(rows, rb, xk, out, pf) };
+            }
+            IQ4_NL if x.b32.is_some() => {
+                let b = x.b32.as_ref().expect("checked");
+                return unsafe { iq4nl::x86::iq4_nl_rows(rows, rb, &b.d, &b.q, out, pf) };
+            }
             Q4_K | Q6_K if x.k.is_some() => {
                 let xk = x.k.as_deref().expect("checked");
                 while max_rows >= 2 && nr - done >= 2 {

@@ -107,6 +107,43 @@ pub(super) mod x86 {
         sum
     }
 
+    /// Decode rows: `out[r]` = `iq4_nl_avx2` of row r (rows of `rb`
+    /// bytes), bit for bit, prefetching `pf` bytes ahead.
+    ///
+    /// # Safety
+    /// As `iq4_nl_avx2`.
+    #[target_feature(enable = "avx2,fma,f16c")]
+    pub unsafe fn iq4_nl_rows(
+        rows: &[u8],
+        rb: usize,
+        dx: &[f32],
+        qx: &[[i8; 32]],
+        out: &mut [f32],
+        pf: usize,
+    ) {
+        for (r, o) in out.iter_mut().enumerate() {
+            let row = &rows[r * rb..(r + 1) * rb];
+            let mut sum = 0f32;
+            for (i, (b, (&d, x))) in row
+                .as_chunks::<IQ4_NL_BYTES>()
+                .0
+                .iter()
+                .zip(dx.iter().zip(qx))
+                .enumerate()
+            {
+                if pf != 0 && i % 4 == 0 {
+                    let off = r * rb + i * IQ4_NL_BYTES + pf;
+                    if off < rows.len() {
+                        // SAFETY: in bounds; a prefetch never faults anyway.
+                        unsafe { _mm_prefetch::<_MM_HINT_T0>(rows.as_ptr().add(off).cast()) }
+                    }
+                }
+                sum += step(b, d, dot(weights(b), x));
+            }
+            *o = sum;
+        }
+    }
+
     /// Four tokens: each token's `iq4_nl_avx2`, bit for bit.
     ///
     /// # Safety

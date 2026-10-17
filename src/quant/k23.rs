@@ -148,7 +148,7 @@ pub(super) fn dot_q3_k_q8(row: &[u8], xk: &[KBlock]) -> f32 {
 pub(super) mod x86 {
     //! AVX2: the same integers as the scalar sums (maddubs pairs < 2^15,
     //! madd by the sub-block scales into i32), the same float steps.
-    use super::{KBlock, Q2_K_BYTES, Q3_K_BYTES, q2_k_step, q3_k_scales, q3_k_step};
+    use super::{KBlock, Q2_K_BYTES, Q3_K_BYTES, q2_k_step, q3_k_step};
     use std::arch::x86_64::*;
 
     #[inline]
@@ -224,13 +224,29 @@ pub(super) mod x86 {
         })
     }
 
+    /// `q3_k_scales` as 16 i8 lanes (ggml's aux word unpacking).
+    #[inline]
+    #[target_feature(enable = "avx2,fma,f16c")]
+    fn q3_k_scales_v(s: &[u8]) -> __m128i {
+        const KMASK1: u32 = 0x0303_0303;
+        const KMASK2: u32 = 0x0f0f_0f0f;
+        let w = |i: usize| u32::from_le_bytes([s[4 * i], s[4 * i + 1], s[4 * i + 2], s[4 * i + 3]]);
+        let (a0, a1, t) = (w(0), w(1), w(2));
+        let r2 = ((a0 >> 4) & KMASK2) | (((t >> 4) & KMASK1) << 4);
+        let r3 = ((a1 >> 4) & KMASK2) | (((t >> 6) & KMASK1) << 4);
+        let r0 = (a0 & KMASK2) | ((t & KMASK1) << 4);
+        let r1 = (a1 & KMASK2) | (((t >> 2) & KMASK1) << 4);
+        _mm_sub_epi8(
+            _mm_set_epi32(r3 as i32, r2 as i32, r1 as i32, r0 as i32),
+            _mm_set1_epi8(32),
+        )
+    }
+
     /// T tokens' S of a Q3_K block.
     #[inline]
     #[target_feature(enable = "avx2,fma,f16c")]
     fn q3_k_sums<const T: usize>(b: &[u8; Q3_K_BYTES], a: [&KBlock; T]) -> [i32; T] {
-        let scb = q3_k_scales(&b[96..108]);
-        // SAFETY: 16 bytes.
-        let sc = unsafe { _mm_loadu_si128(scb.as_ptr().cast()) };
+        let sc = q3_k_scales_v(&b[96..108]);
         let lo = low2(&b[32..96]);
         let hm = ld32(&b[0..32]);
         let m1 = _mm256_set1_epi8(1);
@@ -276,6 +292,60 @@ pub(super) mod x86 {
             sum += q3_k_step(b, a.d, s);
         }
         sum
+    }
+
+    #[inline]
+    #[target_feature(enable = "avx2,fma,f16c")]
+    fn prefetch(rows: &[u8], off: usize) {
+        if off < rows.len() {
+            // SAFETY: off is in bounds; a prefetch never faults anyway.
+            unsafe { _mm_prefetch::<_MM_HINT_T0>(rows.as_ptr().add(off).cast()) }
+        }
+    }
+
+    /// Decode rows: `out[r]` = `q2_k_avx2` of row r (rows of `rb` bytes),
+    /// bit for bit, prefetching `pf` bytes ahead.
+    ///
+    /// # Safety
+    /// As `q2_k_avx2`.
+    #[target_feature(enable = "avx2,fma,f16c")]
+    pub unsafe fn q2_k_rows(rows: &[u8], rb: usize, xk: &[KBlock], out: &mut [f32], pf: usize) {
+        for (r, o) in out.iter_mut().enumerate() {
+            let row = &rows[r * rb..(r + 1) * rb];
+            let mut sum = 0f32;
+            for (i, (b, a)) in row.as_chunks::<Q2_K_BYTES>().0.iter().zip(xk).enumerate() {
+                if pf != 0 {
+                    let off = r * rb + i * Q2_K_BYTES + pf;
+                    prefetch(rows, off);
+                    prefetch(rows, off + 64);
+                }
+                let [(s, m)] = q2_k_sums(b, [a]);
+                sum += q2_k_step(b, a.d, s, m);
+            }
+            *o = sum;
+        }
+    }
+
+    /// Decode rows: `out[r]` = `q3_k_avx2` of row r, bit for bit.
+    ///
+    /// # Safety
+    /// As `q2_k_avx2`.
+    #[target_feature(enable = "avx2,fma,f16c")]
+    pub unsafe fn q3_k_rows(rows: &[u8], rb: usize, xk: &[KBlock], out: &mut [f32], pf: usize) {
+        for (r, o) in out.iter_mut().enumerate() {
+            let row = &rows[r * rb..(r + 1) * rb];
+            let mut sum = 0f32;
+            for (i, (b, a)) in row.as_chunks::<Q3_K_BYTES>().0.iter().zip(xk).enumerate() {
+                if pf != 0 {
+                    let off = r * rb + i * Q3_K_BYTES + pf;
+                    prefetch(rows, off);
+                    prefetch(rows, off + 64);
+                }
+                let [s] = q3_k_sums(b, [a]);
+                sum += q3_k_step(b, a.d, s);
+            }
+            *o = sum;
+        }
     }
 
     /// Four tokens: each token's `q2_k_avx2`, bit for bit.
