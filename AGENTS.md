@@ -269,7 +269,8 @@ any AVX instruction leaking into the baseline build. Green CI does not mean the 
   with the GPU, driver and CUDA version.
 - **Maintainers run the GPU gates** for any PR that touches GPU, kernel, model or serve code, across
   the architectures it could affect (sm_61 to sm_120). A maintainer adds the `run-gpu` label once the diff
-  has been read. Outside code never runs on maintainer machines before that, and you can't trigger it.
+  has been read; the gates then run on a throwaway rented GPU pod. Outside code never runs on maintainer
+  machines, and you can't trigger it yourself.
   Results are posted on the PR.
 - A PR is not merged until its GPU gates are green, or until the PR says why they don't apply.
 

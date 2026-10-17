@@ -17,7 +17,7 @@ labels=(
   "serve|006b75|axon serve: HTTP API, scheduler, slots, batching."
   "gpu|b60205|CUDA path. GPU gates required (maintainer-run)."
   "cpu|0052cc|CPU path: SIMD kernels, worker pool, repacks."
-  "good-first-issue|7057ff|Small and well-bounded; a good first PR."
+  "good first issue|7057ff|Small and well-bounded; a good first PR."
   "run-gpu|e99695|Maintainer-applied: run GPU gates on maintainer hardware."
   "blocked|000000|Waiting on another issue, PR or decision. Don't start or claim."
 )

@@ -14,8 +14,8 @@ runs it; it uses `gh label create --force`). Edit this table and the script toge
 | `serve` | `#006b75` | `axon serve`: HTTP API, scheduler, slots, batching. |
 | `gpu` | `#b60205` | CUDA path. GPU gates required (maintainer-run). |
 | `cpu` | `#0052cc` | CPU path: SIMD kernels, worker pool, repacks. |
-| `good-first-issue` | `#7057ff` | Small and well-bounded; a good first PR. |
-| `run-gpu` | `#e99695` | PRs only, maintainer-applied: run the GPU gates on maintainer hardware after the diff was read. |
+| `good first issue` | `#7057ff` | Small and well-bounded; a good first PR. |
+| `run-gpu` | `#e99695` | PRs only, maintainer-applied: run the GPU gates on a throwaway rented GPU pod after the diff was read. |
 | `blocked` | `#000000` | Waiting on another issue, PR or decision. Don't start or claim. |
 
 Rules of thumb:
