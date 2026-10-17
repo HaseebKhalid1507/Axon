@@ -12,7 +12,7 @@ how the request was run:
 | Run it...                                                        | Same bits? |
 |------------------------------------------------------------------|------------|
 | one token at a time (decode) or the whole prompt at once (batched prefill) | yes, except on a streamed CPU/GPU split (below) |
-| through speculative drafting (prompt lookup or a draft model): drafts are verified with the same kernels, and sampled drafting takes the same random numbers | yes |
+| through speculative drafting (prompt lookup or a draft model): drafts are verified with the same kernels, and sampled drafting takes the same random numbers | yes, for a given placement: on an automatic CPU/GPU split a `--draft-model` can move the split point (below) |
 | with the prompt prefilled in chunks (the batch engine's chunked prefill) | yes |
 | with its prefix taken from the cache (a chat follow-up, a slot reused) or prefilled fresh | yes, except on a streamed CPU/GPU split (below) |
 | alone, or in a batch with up to `--parallel` other requests, in any slot, at any position in the batch, joining or leaving mid-generation | yes |
@@ -36,7 +36,12 @@ and the token's position, never on the batch. The tests that hold this in place:
 
 - **CPU vs GPU.** Same model, same answer to within float tolerance (the tests check
   logits agree closely), but not the same bits. They are different identities. A
-  CPU/GPU split (`--gpu-layers`, or placed automatically) is its own identity too.
+  CPU/GPU split (`--gpu-layers`, or placed automatically) is its own identity too. An
+  automatic split's point follows the free VRAM at load time, and what has to fit next to
+  the layers: a `--draft-model`'s VRAM reserve and the KV cache's size (`--ctx`, including
+  `gen --ctx`). So adding a drafter or changing the context can move the split, which changes
+  the bits, and the identity says so (`gpu layers N/M`). Pin `--gpu-layers` where cross-run
+  reproducibility matters (see [spec-split.md](design/spec-split.md)).
 - **A split that streams its CPU layers for prefill** (on by default when there's VRAM for
   it; `AXON_STREAM=0` turns it off). Prefill batches of at least 32 tokens
   (`AXON_STREAM_MIN`) run the CPU's layers on the GPU, with GPU numerics; decode and shorter
@@ -98,11 +103,15 @@ The identity (`src/identity.rs`) is everything that decides the bits:
 
 Left out because they never change bits: drafting, `--parallel`/slots, chunk sizes,
 threads, CUDA graphs, PDL, and the context size (`--ctx`, or `serve`'s default, the trained
-length where it fits). Attention covers only the positions filled, in 64-position blocks,
-so a bigger cache lets a request run longer but never changes a token it would have
-produced under the smaller limit; a request that hits the limit just stops (or is refused)
-sooner. So set `max_tokens` when replaying: without it a reply runs to the server's context
-or `--max-tokens`, which bound its length (not its tokens). Sampling params and the seed
+length where it fits), for a given placement. Attention covers only the positions filled,
+in 64-position blocks, so a bigger cache lets a request run longer but never changes a
+token it would have produced under the smaller limit; a request that hits the limit just
+stops (or is refused) sooner. So set `max_tokens` when replaying: without it a reply runs
+to the server's context or `--max-tokens`, which bound its length (not its tokens). The
+exception is an automatic CPU/GPU split: a draft model's VRAM reserve and the cache size
+feed its placement, so `--draft-model` or `--ctx` (`gen --ctx` too) can move the split
+point. That changes the bits, and the `backend` field (`gpu layers N/M`) changes with them,
+so the fingerprint stays truthful. Pin `--gpu-layers` to keep the split fixed. Sampling params and the seed
 belong to the request. A part that can't be read (the model file, the GPU) makes the
 fingerprint `fp_unknown`: no identity is claimed. The
 fingerprint is conservative: two identities can differ and still give the same bits
