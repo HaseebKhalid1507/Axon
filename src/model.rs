@@ -6,7 +6,7 @@ use crate::gguf::{Model, Tensor, Val};
 use crate::kv::{Half, KvData, KvElem, Layers};
 use crate::pool::{self, Kind, Pool};
 use crate::quant::{
-    DecodeCfg, F16, F32, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0, QuantizedAct, batch_slots,
+    DecodeCfg, F16, F32, Q2_K, Q3_K, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0, QuantizedAct, batch_slots,
     dequant, dot_row_q8_multi, dot_rows_q8, dot_rows_q8_multi, r8, r8q, row_bytes,
 };
 use crate::vmath;
@@ -518,7 +518,9 @@ pub(crate) fn rope_freqs(m: &Model, head_dim: usize) -> Vec<f64> {
 }
 
 /// Tensor types the kernels run (`quant::dequant` and `dot_row_q8`).
-const SUPPORTED_TYPES: [u32; 10] = [F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K];
+const SUPPORTED_TYPES: [u32; 12] = [
+    F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K,
+];
 
 /// Whether `Qwen2::new` reads any weight matrix in place from the model's
 /// bytes on every token (AXON_REPACK=0, or a matrix with no r8/r8q form),
@@ -763,7 +765,7 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
         let q = t.qtype;
         if !SUPPORTED_TYPES.contains(&q.id) {
             return Err(bad(format!(
-                "tensor {name}: type {} ({}) is not supported (F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K)",
+                "tensor {name}: type {} ({}) is not supported (F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K)",
                 q.name, q.id
             )));
         }
