@@ -338,12 +338,12 @@ pub const OUTQ_PROBE: bool = cfg!(all(
     )
 ));
 
-/// `unacked`, with one warning on stderr the first time it can't be read
-/// (only a blocked write is detected then).
-pub fn unacked_or_warn(s: &TcpStream) -> Option<u64> {
+/// `unacked`, with one warning on stderr (if `log`: not --quiet) the first
+/// time it can't be read (only a blocked write is detected then).
+pub fn unacked_or_warn(s: &TcpStream, log: bool) -> Option<u64> {
     static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     let u = unacked(s);
-    if u.is_none() && OUTQ_PROBE && !WARNED.swap(true, Ordering::Relaxed) {
+    if u.is_none() && OUTQ_PROBE && log && !WARNED.swap(true, Ordering::Relaxed) {
         eprintln!(
             "axon serve: --slot-idle-ms: can't read a socket's unacknowledged bytes (SIOCOUTQ); \
              only a write blocked for the idle time is detected"
@@ -353,21 +353,15 @@ pub fn unacked_or_warn(s: &TcpStream) -> Option<u64> {
 }
 
 /// Bytes written to `s` the peer hasn't acknowledged yet (Linux SIOCOUTQ),
-/// None where that can't be read.
-#[cfg(all(
-    target_os = "linux",
-    any(
-        target_arch = "x86",
-        target_arch = "x86_64",
-        target_arch = "arm",
-        target_arch = "aarch64",
-        target_arch = "riscv64",
-        target_arch = "s390x",
-        target_arch = "loongarch64"
-    )
-))]
+/// None where that can't be read (`OUTQ_PROBE`: the arches where the
+/// number is right; the call is compiled on every Linux but never made on
+/// the others).
+#[cfg(target_os = "linux")]
 pub fn unacked(s: &TcpStream) -> Option<u64> {
     use std::os::fd::AsRawFd;
+    if !OUTQ_PROBE {
+        return None;
+    }
     unsafe extern "C" {
         fn ioctl(fd: std::ffi::c_int, req: std::ffi::c_ulong, ...) -> std::ffi::c_int;
     }
@@ -378,18 +372,7 @@ pub fn unacked(s: &TcpStream) -> Option<u64> {
     (r == 0 && n >= 0).then_some(n as u64)
 }
 
-#[cfg(not(all(
-    target_os = "linux",
-    any(
-        target_arch = "x86",
-        target_arch = "x86_64",
-        target_arch = "arm",
-        target_arch = "aarch64",
-        target_arch = "riscv64",
-        target_arch = "s390x",
-        target_arch = "loongarch64"
-    )
-)))]
+#[cfg(not(target_os = "linux"))]
 pub fn unacked(_: &TcpStream) -> Option<u64> {
     None
 }

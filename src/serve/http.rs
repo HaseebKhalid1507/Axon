@@ -109,9 +109,12 @@ pub struct Conn<S> {
     pub extra: String,
     /// Answering a HEAD request: `respond` sends the headers only.
     pub head_only: bool,
-    /// Whether a request whose head asks `Expect: 100-continue` may send
-    /// its body (--api-key: false answers 401 without inviting it).
+    /// Whether a request that carries a body may send it (--api-key: false
+    /// answers 401 right after the head, the body never buffered and the
+    /// connection then closed; `100 Continue` is never sent for it).
     pub gate: Option<Gate>,
+    /// The path of the request `gate` just refused (its route label).
+    pub refused: Option<String>,
     /// The status of the last response started (0: none yet).
     pub status: u16,
     /// Bytes written so far.
@@ -301,6 +304,7 @@ impl<S: Read + Write> Conn<S> {
             extra: String::new(),
             head_only: false,
             gate: None,
+            refused: None,
             status: 0,
             written: 0,
         }
@@ -379,7 +383,9 @@ impl<S: Read + Write> Conn<S> {
         };
         let (mut req, body, cont) = parse_head(&self.buf[..end])?;
         self.buf.drain(..end);
-        if cont && self.gate.as_ref().is_some_and(|g| !g(&req)) {
+        let has_body = !matches!(body, BodyLen::Fixed(0));
+        if has_body && self.gate.as_ref().is_some_and(|g| !g(&req)) {
+            self.refused = Some(req.path);
             return err(401, "unauthorized");
         }
         if cont && self.buf.is_empty() {

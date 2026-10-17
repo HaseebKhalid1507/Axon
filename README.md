@@ -322,9 +322,12 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
   `GET /health` needs `Authorization: Bearer KEY` (compared in constant time); without it a
   401 with an OpenAI-shaped error (`code: "invalid_api_key"`) and `WWW-Authenticate: Bearer`.
   CORS preflights (`OPTIONS`) stay open: browsers send them without credentials, and they
-  answer with headers only. An `Expect: 100-continue` upload without the key gets the 401
-  before its body is invited. `AXON_API_KEY` is trimmed (a secret file's trailing newline);
-  set but blank is an error. stderr says `api key: on (from AXON_API_KEY|--api-key)`, never
+  answer with headers only. A request with a body but without the key gets the 401 right
+  after its headers (no `100 Continue`); its body is never buffered or parsed, and the
+  connection closes (after dropping what the client already sent, at most 2 s / 4 MiB, so
+  the 401 isn't lost to a reset). `--api-key` wins over `AXON_API_KEY` (the variable isn't
+  read then); the variable is trimmed (a secret file's trailing newline), and set but blank
+  or not UTF-8 is an error. stderr says `api key: on (from AXON_API_KEY|--api-key)`, never
   the key. Still plain HTTP: put TLS in front of it beyond a trusted LAN.
 - `GET /metrics`: Prometheus text format. `axon_requests_total{route,status}`,
   `axon_generated_tokens_total`, `axon_prompt_tokens_total`,

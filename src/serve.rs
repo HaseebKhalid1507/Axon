@@ -1477,8 +1477,10 @@ fn connection(s: TcpStream, sh: &Shared) {
     let mut c = Conn::new(s);
     c.head_timeout = IDLE;
     c.extra = sh.extra.clone();
-    // An `Expect: 100-continue` request without the key is refused before
-    // its body is invited (else anyone could upload MAX_BODY bytes).
+    // A request with a body but without the key is refused right after its
+    // head: its body is never buffered or parsed (nor invited by `100
+    // Continue`). What the client sends anyway is drained by `linger` (at
+    // most LINGER / LINGER_BYTES) so the 401 isn't lost to a reset.
     if let Some(key) = sh.api_key.clone() {
         c.gate = Some(Box::new(move |r: &Request| !refused(Some(&key), r)));
     }
@@ -1492,13 +1494,16 @@ fn connection(s: TcpStream, sh: &Shared) {
         match r {
             Ok(None) => return,
             Err(e) => {
+                // Not the previous request's HEAD: the error has a body.
+                c.head_only = false;
                 if e.status == 401 {
                     let _ = unauthorized(&mut c, false);
                 } else {
                     let body = ApiError::new(e.status, "invalid_request_error", e.msg).json();
                     let _ = c.respond(e.status, "application/json", body.as_bytes(), false, &[]);
                 }
-                sh.metrics.request("other", e.status);
+                let route = c.refused.take().map_or("other", |p| ops::route_label(&p));
+                sh.metrics.request(route, e.status);
                 // Evictable while it lingers: it serves nothing more.
                 sh.waiting.set(id, handle.as_ref());
                 linger(&c.s);
@@ -1848,6 +1853,7 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
     let model = (model, m.identity.fingerprint());
     let _flight = InFlight::new(&sh.metrics.in_flight);
     let mut ev = Events::new(&rx, &sh.metrics, arrived);
+    ev.log = sh.log;
     let r = if g.stream {
         if let Some(idle) = sh.slot_idle {
             ev.stall = Some(ops::Stall::new(idle));
@@ -1907,6 +1913,8 @@ struct Events<'a> {
     stall: Option<ops::Stall>,
     /// `stall` ended the request.
     stalled: bool,
+    /// Warnings on stderr (not --quiet).
+    log: bool,
 }
 
 impl<'a> Events<'a> {
@@ -1918,6 +1926,7 @@ impl<'a> Events<'a> {
             last: None,
             stall: None,
             stalled: false,
+            log: false,
         }
     }
 
@@ -1971,7 +1980,7 @@ impl<'a> Events<'a> {
                     return None;
                 }
                 if let Some(s) = self.stall.as_mut()
-                    && s.check(c.written, ops::unacked_or_warn(&c.s))
+                    && s.check(c.written, ops::unacked_or_warn(&c.s, self.log))
                 {
                     self.stalled = true;
                     return None;
@@ -2179,12 +2188,17 @@ const SERVE_USAGE: &str = "usage: axon serve <model.gguf> [--host H] [--port P] 
      [--think-inline] [--quiet] [sampling flags]";
 
 /// AXON_API_KEY's key: trimmed (a secret file's trailing newline); set but
-/// blank is an error, not a server without auth.
-fn env_key(v: Option<String>) -> Result<Option<String>, &'static str> {
-    match v.as_deref().map(str::trim) {
-        None => Ok(None),
-        Some("") => Err("AXON_API_KEY is set but empty: unset it, or give a key"),
-        Some(k) => Ok(Some(k.to_string())),
+/// blank, or not UTF-8, is an error, not a server without auth.
+fn env_key(v: Option<std::ffi::OsString>) -> Result<Option<String>, &'static str> {
+    let Some(v) = v else {
+        return Ok(None);
+    };
+    let v = v
+        .into_string()
+        .map_err(|_| "AXON_API_KEY is not valid UTF-8: give a key in UTF-8 (or --api-key)")?;
+    match v.trim() {
+        "" => Err("AXON_API_KEY is set but empty: unset it, or give a key"),
+        k => Ok(Some(k.to_string())),
     }
 }
 
@@ -2218,17 +2232,12 @@ pub fn run(args: &[String]) -> io::Result<()> {
         prefill_chunk: engine::PREFILL_CHUNK,
         prefill_ms: engine::PREFILL_MS,
         rope: Default::default(),
-        // The environment keeps the key out of `ps`; --api-key overrides it.
         api_key: None,
         max_prompt_tokens: None,
         slot_idle_ms: None,
     };
     let mut k = None;
-    let mut key_from = "AXON_API_KEY";
-    // The environment keeps the key out of `ps`; --api-key overrides it. A
-    // secret file's trailing newline is trimmed; set but blank is an error
-    // (auth was asked for).
-    o.api_key = env_key(std::env::var("AXON_API_KEY").ok()).unwrap_or_else(|e| crate::fail(e));
+    let mut key_from = "--api-key";
     let mut i = 3;
     while i < args.len() {
         let f = args[i].as_str();
@@ -2321,10 +2330,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
             "--api-key" if v.trim().is_empty() || v.trim() != v => {
                 crate::fail("--api-key needs a key (no spaces around it)")
             }
-            "--api-key" => {
-                o.api_key = Some(v.clone());
-                key_from = "--api-key";
-            }
+            "--api-key" => o.api_key = Some(v.clone()),
             "--max-prompt-tokens" => o.max_prompt_tokens = Some(whole(true)),
             "--slot-idle-ms" => {
                 let n = whole(true) as u64;
@@ -2343,6 +2349,13 @@ pub fn run(args: &[String]) -> io::Result<()> {
             _ => k = Some(whole(false)),
         }
         i += 2;
+    }
+    // AXON_API_KEY keeps the key out of `ps`; --api-key wins over it (the
+    // variable isn't even read then). A secret file's trailing newline is
+    // trimmed; set but blank, or not UTF-8, is an error (auth was asked for).
+    if o.api_key.is_none() {
+        o.api_key = env_key(std::env::var_os("AXON_API_KEY")).unwrap_or_else(|e| crate::fail(e));
+        key_from = "AXON_API_KEY";
     }
     o.max_draft = crate::draft::draft_k(k.or_else(crate::draft_env_set), o.draft_model.is_some());
     crate::check_stream_decode(o.max_draft);
