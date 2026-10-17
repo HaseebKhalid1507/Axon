@@ -151,19 +151,18 @@ impl SlotState {
 /// The engine's last published slot states.
 #[derive(Default)]
 pub struct SlotsView {
-    /// The batch's pool (empty: one request at a time).
+    /// The slots: the batch's pool, or (one request at a time) the one
+    /// cache as slot 0 (empty until a request ran: a free slot 0). A
+    /// request running alone (`Engine::job`) runs in slot 0 either way:
+    /// with a pool its cache is a view of slot 0's rows.
     pub pool: Vec<SlotState>,
-    /// The engine's own cache (`Engine::job`: a request running alone).
-    /// Becomes slot 0 once #60 (one cache: the solo path runs in slot 0) lands.
-    pub solo: SlotState,
 }
 
 impl SlotsView {
-    /// Slots in total, and busy: the pool's (or, with none, the one cache).
-    /// A request running alone beside an idle pool counts as one busy.
+    /// Slots in total, and busy.
     pub fn counts(&self) -> (usize, usize) {
         let total = self.pool.len().max(1);
-        let busy = self.pool.iter().filter(|s| s.busy).count() + usize::from(self.solo.busy);
+        let busy = self.pool.iter().filter(|s| s.busy).count();
         (total, busy.min(total))
     }
 }
@@ -213,8 +212,13 @@ impl Metrics {
         lock(&self.slots).pool = pool;
     }
 
-    pub fn publish_solo(&self, solo: SlotState) {
-        lock(&self.slots).solo = solo;
+    /// Slot 0's state: where a request running alone runs.
+    pub fn publish_slot0(&self, s: SlotState) {
+        let mut v = lock(&self.slots);
+        match v.pool.first_mut() {
+            Some(s0) => *s0 = s,
+            None => v.pool.push(s),
+        }
     }
 
     /// Requests waiting for a slot: those in flight less those running.
@@ -227,8 +231,9 @@ impl Metrics {
         let now = Instant::now();
         let v = lock(&self.slots);
         let (_, busy) = v.counts();
-        let pool: Vec<_> = v
-            .pool
+        let one = [SlotState::default()];
+        let slots = if v.pool.is_empty() { &one[..] } else { &v.pool };
+        let pool: Vec<_> = slots
             .iter()
             .enumerate()
             .map(|(i, s)| {
@@ -240,7 +245,6 @@ impl Metrics {
         serde_json::json!({
             "ctx": ctx,
             "slots": pool,
-            "solo": v.solo.json(now),
             "queue_depth": self.queue_depth(busy),
         })
         .to_string()
@@ -476,13 +480,31 @@ mod tests {
     fn slot_counts() {
         let mut v = SlotsView::default();
         assert_eq!(v.counts(), (1, 0));
-        v.solo.busy = true;
-        assert_eq!(v.counts(), (1, 1));
         v.pool = vec![SlotState::default(); 4];
+        assert_eq!(v.counts(), (4, 0));
+        // A request alone runs in slot 0: one busy, not one more.
+        v.pool[0].busy = true;
         assert_eq!(v.counts(), (4, 1));
-        v.solo.busy = false;
+        v.pool[0].busy = false;
         v.pool[2].busy = true;
         v.pool[3].busy = true;
         assert_eq!(v.counts(), (4, 2));
+        // One request at a time: the one cache is slot 0.
+        let m = Metrics::default();
+        let slot = |m: &Metrics| -> serde_json::Value {
+            serde_json::from_str::<serde_json::Value>(&m.slots_json(64)).unwrap()["slots"].clone()
+        };
+        assert_eq!(slot(&m).as_array().unwrap().len(), 1);
+        assert_eq!(slot(&m)[0]["busy"], false);
+        m.publish_slot0(SlotState {
+            held: 9,
+            busy: true,
+            request: None,
+        });
+        assert_eq!(lock(&m.slots).counts(), (1, 1));
+        assert_eq!(slot(&m)[0]["held_tokens"], 9);
+        m.publish_pool(vec![SlotState::default(); 3]);
+        m.publish_slot0(SlotState::default());
+        assert_eq!(slot(&m).as_array().unwrap().len(), 3);
     }
 }

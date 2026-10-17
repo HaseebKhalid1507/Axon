@@ -504,13 +504,15 @@ impl<'a> Engine<'a> {
             return None;
         }
         let id = job.id;
-        self.metrics.publish_solo(ops::SlotState {
+        // It runs in slot 0 (with a pool, the engine's cache is a view of
+        // slot 0's rows; else the one cache).
+        self.metrics.publish_slot0(ops::SlotState {
             held: self.hist.len(),
             busy: true,
             request: Some((id, job.arrived)),
         });
         let r = or_exit(&format!("request #{id}"), || self.job(job, ho));
-        self.metrics.publish_solo(ops::SlotState {
+        self.metrics.publish_slot0(ops::SlotState {
             held: self.hist.len(),
             ..Default::default()
         });

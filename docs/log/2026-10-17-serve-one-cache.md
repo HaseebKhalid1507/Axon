@@ -88,3 +88,12 @@ Within noise (round spread ~±2 tok/s). Every request's text was identical acros
   a request alone sharing its prefix: cached_tokens covers the prefix and the reply == alone; (b) alone ->
   hand-over -> finishes batched -> a request alone sharing its prefix: the same.
 - `layer_kv` (pipeline.rs, tests) documents that on a view it dumps the whole pool.
+
+## Rebased on #61 (serve ops pack)
+- `GET /slots` (#61) published the solo cache as a separate `solo` entry. Here the solo path runs in slot 0, so
+  that entry is folded into `slots[0]`: `Engine::run` publishes slot 0 busy with its request and its held tokens
+  after (`Metrics::publish_slot0`, replacing `publish_solo`); `SlotsView` has no `solo`, so a request alone is
+  counted once; with one request at a time the one cache is `slots[0]` (a free slot 0 before any request).
+  `serve_cuda_slots` now runs a request alone first (slot 0 busy, slot 1 free, 1 busy / 1 free in /metrics, its
+  prefix held in slot 0 after); `serve_metrics_slots_max_prompt` and the slot-idle test read `slots[0]`; the
+  `slot_counts` unit test covers the fold. README and #61's log entry (an Update line) say so.

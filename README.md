@@ -348,10 +348,9 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
   its first text) and `axon_itl_seconds` (between a request's
   text events, about one token each). No host-RAM KV store hits yet: serve has no store.
 - `GET /slots`: JSON, `{"ctx", "slots": [{"id", "busy", "held_tokens", "request_id",
-  "age_ms"}], "solo": {...}, "queue_depth"}`. `held_tokens`: the prefix whose KV rows the
-  slot holds (what a later prompt can reuse); `request_id` is the `#n` of the stderr log;
-  `solo` is the single-request cache (the CPU, a split, or a request alone on the GPU; it
-  becomes slot 0 once serve runs the solo path in a slot).
+  "age_ms"}], "queue_depth"}`. `held_tokens`: the prefix whose KV rows the slot holds (what
+  a later prompt can reuse); `request_id` is the `#n` of the stderr log. A request running
+  alone is in slot 0 (on the CPU, a split or a pipeline, the one cache is slot 0).
 - `--max-prompt-tokens N`: a longer prompt is refused before prefill with a 400
   (`code: "context_length_exceeded"`, as a prompt past the context). It counts the whole
   rendered prompt: the chat template's tokens and the tool schemas too; exactly N is allowed.

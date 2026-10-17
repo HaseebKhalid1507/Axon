@@ -2625,7 +2625,7 @@ fn serve_api_key() {
 }
 
 /// GET /metrics parses as Prometheus text and counts what was served;
-/// GET /slots has its shape (CPU: the one cache, `solo`); `priority` is
+/// GET /slots has its shape (CPU: the one cache, slot 0); `priority` is
 /// accepted and ignored; --max-prompt-tokens refuses before prefill.
 #[test]
 fn serve_metrics_slots_max_prompt() {
@@ -2650,9 +2650,11 @@ fn serve_metrics_slots_max_prompt() {
     }
     let sl = call(a, "GET", "/slots", "").json();
     assert_eq!(sl["ctx"], 2048);
-    assert_eq!(sl["slots"], json!([]));
-    assert_eq!(sl["solo"]["busy"], false);
-    assert_eq!(sl["solo"]["request_id"], Value::Null);
+    assert_eq!(sl["slots"].as_array().unwrap().len(), 1, "{sl}");
+    assert_eq!(sl["slots"][0]["id"], 0);
+    assert_eq!(sl["slots"][0]["busy"], false);
+    assert_eq!(sl["slots"][0]["request_id"], Value::Null);
+    assert_eq!(sl.get("solo"), None, "{sl}");
     assert_eq!(sl["queue_depth"], 0);
 
     // Two requests (one with `priority`, ignored); the second reuses the
@@ -2703,8 +2705,8 @@ fn serve_metrics_slots_max_prompt() {
     assert!(m["axon_itl_seconds_count"] >= 2.0, "{m:?}");
     assert_eq!(m["axon_requests_in_flight"], 0.0);
     let sl = call(a, "GET", "/slots", "").json();
-    assert_eq!(sl["solo"]["busy"], false);
-    assert!(sl["solo"]["held_tokens"].as_u64().unwrap() >= prompt_tokens / 2);
+    assert_eq!(sl["slots"][0]["busy"], false);
+    assert!(sl["slots"][0]["held_tokens"].as_u64().unwrap() >= prompt_tokens / 2);
 
     // While a request runs: busy, its id and age.
     let mut c = TcpStream::connect(a).unwrap();
@@ -2716,17 +2718,17 @@ fn serve_metrics_slots_max_prompt() {
         .unwrap();
     assert!(c.read(&mut [0u8; 256]).unwrap() > 0);
     wait_for("the stream to show in /slots", || {
-        call(a, "GET", "/slots", "").json()["solo"]["busy"] == true
+        call(a, "GET", "/slots", "").json()["slots"][0]["busy"] == true
     });
     let sl = call(a, "GET", "/slots", "").json();
-    assert_eq!(sl["solo"]["request_id"], 3, "{sl}");
-    assert!(sl["solo"]["age_ms"].as_u64().is_some(), "{sl}");
+    assert_eq!(sl["slots"][0]["request_id"], 3, "{sl}");
+    assert!(sl["slots"][0]["age_ms"].as_u64().is_some(), "{sl}");
     let m = prom_parse(&call(a, "GET", "/metrics", "").body);
     assert_eq!((m["axon_slots_busy"], m["axon_slots_free"]), (1.0, 0.0));
     assert_eq!(m["axon_requests_in_flight"], 1.0);
     drop(c);
     wait_for("the cancelled stream to free the slot", || {
-        call(a, "GET", "/slots", "").json()["solo"]["busy"] == false
+        call(a, "GET", "/slots", "").json()["slots"][0]["busy"] == false
     });
 
     // --max-prompt-tokens 16: refused with a 400 before anything is queued.
@@ -2849,7 +2851,7 @@ fn serve_slot_idle_frees_a_stalled_stream() {
             }
             assert!(last.1.elapsed() < Duration::from_secs(120), "never filled");
         };
-        let busy = || call(a, "GET", "/slots", "").json()["solo"]["busy"] == true;
+        let busy = || call(a, "GET", "/slots", "").json()["slots"][0]["busy"] == true;
         let what = format!("--slot-idle-ms {idle:?}");
         match idle {
             Some(n) => {
@@ -2883,8 +2885,10 @@ fn serve_slot_idle_frees_a_stalled_stream() {
     }
 }
 
-/// GET /slots over a pool (GPU): one entry per slot, two concurrent
-/// streams in two busy slots with their ids, freed when they leave.
+/// GET /slots over a pool (GPU): one entry per slot; a request alone runs
+/// in slot 0 (busy, counted once) and leaves its prefix there; two
+/// concurrent streams in two busy slots with their ids, freed when they
+/// leave.
 #[test]
 fn serve_cuda_slots() {
     let Some(_) = crate::testutil::gpu() else {
@@ -2900,9 +2904,29 @@ fn serve_cuda_slots() {
     let a = s.addr;
     let sl = call(a, "GET", "/slots", "").json();
     assert_eq!(sl["slots"].as_array().unwrap().len(), 2, "{sl}");
+    assert_eq!(sl.get("solo"), None, "{sl}");
     let body = json!({"prompt": "Count: 1, 2, 3,", "max_tokens": 1500, "stream": true,
                       "temperature": 0})
     .to_string();
+    // One alone: slot 0.
+    let mut c = TcpStream::connect(a).unwrap();
+    c.write_all(request("POST", "/v1/completions", &body, false).as_bytes())
+        .unwrap();
+    wait_for("the request alone in slot 0", || {
+        call(a, "GET", "/slots", "").json()["slots"][0]["busy"] == true
+    });
+    let sl = call(a, "GET", "/slots", "").json();
+    assert_eq!(sl["slots"][1]["busy"], false, "{sl}");
+    assert!(sl["slots"][0]["request_id"].as_u64().is_some(), "{sl}");
+    let m = prom_parse(&call(a, "GET", "/metrics", "").body);
+    assert_eq!((m["axon_slots_busy"], m["axon_slots_free"]), (1.0, 1.0));
+    drop(c);
+    wait_for("slot 0 freed", || {
+        call(a, "GET", "/slots", "").json()["slots"][0]["busy"] == false
+    });
+    let sl = call(a, "GET", "/slots", "").json();
+    assert!(sl["slots"][0]["held_tokens"].as_u64().unwrap() > 0, "{sl}");
+    assert_eq!(sl["slots"][1]["held_tokens"], 0, "{sl}");
     let cs: Vec<TcpStream> = (0..2)
         .map(|_| {
             let mut c = TcpStream::connect(a).unwrap();
@@ -2930,7 +2954,7 @@ fn serve_cuda_slots() {
         })
         .collect();
     ids.sort();
-    assert_eq!(ids, [1, 2], "{sl}");
+    assert_eq!(ids, [2, 3], "{sl}");
     assert_eq!(sl["slots"][0]["id"], 0);
     let m = prom_parse(&call(a, "GET", "/metrics", "").body);
     assert_eq!((m["axon_slots_busy"], m["axon_slots_free"]), (2.0, 0.0));
@@ -2942,7 +2966,6 @@ fn serve_cuda_slots() {
             .unwrap()
             .iter()
             .all(|x| x["busy"] == false)
-            && sl["solo"]["busy"] == false
     });
 }
 
