@@ -3,9 +3,10 @@
 LLM inference for Qwen2, Qwen3, Llama 3 and Gemma 3 GGUF models on the CPU and on NVIDIA
 GPUs, written from scratch in Rust.
 
-**Mission: make LLM inference cheap and fast, and run the best open models.** Cheap means it runs on the
-hardware people already own and wastes none of it; fast means as close to the hardware limit as the math
-allows; the best models means the frontier open models, not only the ones that fit a laptop.
+**Mission: make LLM inference cheap and fast, and run the best open models.** Cheap means wasting no
+hardware, from a laptop to a datacenter: the most tokens per GPU, per watt and per dollar. Fast means as close
+to the hardware limit as the math allows, for one stream and for thousands. The best models means the frontier
+open models, not only the ones that fit a laptop.
 
 **New here? Start with [docs/START-HERE.md](docs/START-HERE.md).**
 

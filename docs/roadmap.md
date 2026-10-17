@@ -3,9 +3,10 @@
 Short and opinionated. "On main" means merged at `e998d6f`. Everything else is planned or in flight.
 Estimates come from the design notes and are labeled.
 
-**Mission: make LLM inference cheap and fast, and run the best open models.** Cheap means it runs on the
-hardware people already own and wastes none of it; fast means as close to the hardware limit as the math
-allows; the best models means the frontier open models, not only the ones that fit a laptop. Every item below serves one of those three.
+**Mission: make LLM inference cheap and fast, and run the best open models.** Cheap means wasting no
+hardware, from a laptop to a datacenter: the most tokens per GPU, per watt and per dollar. Fast means as close
+to the hardware limit as the math allows, for one stream and for thousands. The best models means the frontier
+open models, not only the ones that fit a laptop. Every item below serves one of those three.
 
 ## The thinking behind the order
 
