@@ -176,6 +176,74 @@ pub fn draft_k(k: Option<usize>, with_model: bool) -> usize {
     }
 }
 
+/// Draft tokens per pass with a draft model next to a model split across
+/// the CPU and the GPU, when --draft isn't given. A split's step is bound by
+/// reading the CPU layers' weights from RAM, which a verify pass does once
+/// for all its rows, while a draft step on the GPU costs ~1-2 ms: longer
+/// drafts pay (NOTES: bella 32B sweep).
+pub const SPLIT_MODEL_DRAFT: usize = 7;
+
+/// The K to run with, once the main model is placed: `k` (`draft_k`'s), or
+/// `SPLIT_MODEL_DRAFT` if a draft model runs next to a split model, the
+/// decoding is greedy and K wasn't given (`given`: --draft / AXON_DRAFT),
+/// or 0 if a draft model was asked for (`with_model`) but none runs
+/// (`--draft-model auto` found none: not prompt lookup instead). Sampled
+/// decoding keeps `k`: there a pick equals a greedy guess less often, and
+/// on bella's 32B sampled chat K=7 was no faster than K=3 (code and
+/// summaries were; docs/design/spec-split.md), so --draft 7 is opt-in.
+pub fn split_k(
+    given: Option<usize>,
+    k: usize,
+    with_model: bool,
+    drafter: bool,
+    split: bool,
+    greedy: bool,
+) -> usize {
+    match (given, with_model, drafter, split && greedy) {
+        (_, true, false, _) => 0,
+        (None, true, true, true) => SPLIT_MODEL_DRAFT,
+        _ => k,
+    }
+}
+
+/// `--draft-model auto`: the smallest GGUF next to the main model (`main`,
+/// at `path`) that can draft for it (`check_vocab`) and is at most
+/// `AUTO_MAX_FRACTION` of its size: None if there's none. Opt-in (the
+/// flag): drafting is off unless asked for.
+pub fn auto_path(path: &str, main: &Model, tok: &Tokenizer) -> Option<String> {
+    let p = std::path::Path::new(path);
+    let size = std::fs::metadata(p).ok()?.len();
+    let dir = match p.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d,
+        _ => std::path::Path::new("."),
+    };
+    let mut cands: Vec<(u64, String)> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter_map(|e| {
+            let q = e.path();
+            // fs::metadata follows symlinks (a Hugging Face cache's
+            // snapshot files are links into its blobs): the file's size.
+            let len = std::fs::metadata(&q).ok()?.len();
+            let gguf = q
+                .extension()
+                .is_some_and(|x| x.eq_ignore_ascii_case("gguf"));
+            (gguf && len > 0 && len <= size / AUTO_MAX_FRACTION && q != p)
+                .then(|| (len, q.to_string_lossy().into_owned()))
+        })
+        .collect();
+    cands.sort();
+    cands.into_iter().map(|(_, c)| c).find(|c| {
+        crate::gguf::load_with(c, Some(false)).is_ok_and(|d| {
+            crate::model::check_supported(&d).is_ok() && check_vocab(&d, main, tok).is_ok()
+        })
+    })
+}
+
+/// `auto_path`'s size limit: a draft model at most 1/AUTO_MAX_FRACTION of
+/// the main model's file (Qwen2.5-0.5B's 0.49 GB Q4_K_M for 7B's 4.7 GB).
+pub const AUTO_MAX_FRACTION: u64 = 8;
+
 /// The token table (`tokenizer.ggml.tokens`) of a GGUF.
 fn tokens(m: &Model) -> Option<&[Val]> {
     m.metadata.iter().find_map(|(k, v)| match v {
@@ -270,6 +338,9 @@ impl DraftModel {
         m: &Model,
         tok: &Tokenizer,
     ) -> Result<DraftModel, String> {
+        if path == "auto" {
+            return Err("auto: picking a draft model is for gen and chat; give a path".into());
+        }
         let d = crate::gguf::load_with(path, copy).map_err(|e| format!("{path}: {e}"))?;
         crate::model::check_supported(&d).map_err(|e| format!("{path}: {e}"))?;
         check_vocab(&d, m, tok).map_err(|e| format!("{path} can't draft for this model: {e}"))?;
@@ -332,8 +403,20 @@ impl DraftModel {
                 debug_assert_eq!(device, Device::Cuda);
                 let (gpu, module) = (r.gpu, r.module);
                 drop(r);
-                let n = CudaQwen2::with_kv(gpu, module, self.model, ctx, cache_kv(kv), false)
-                    .map_err(|e| format!("the draft model: {e}"))?;
+                // No Q6_K prefill copy (a spare-VRAM extra, same bits), so
+                // the drafter doesn't take memory the main model's cache
+                // (made after it) planned for. Its batch scratch may still
+                // widen to PREFILL_BATCH from free VRAM (128 tokens' worth).
+                let n = CudaQwen2::with_kv_q6k8(
+                    gpu,
+                    module,
+                    self.model,
+                    ctx,
+                    cache_kv(kv),
+                    false,
+                    false,
+                )
+                .map_err(|e| format!("the draft model: {e}"))?;
                 Backend::Cuda(Box::new(n))
             }
         };
@@ -342,10 +425,6 @@ impl DraftModel {
 }
 
 const GIB: f64 = (1u64 << 30) as f64;
-
-/// VRAM `load_pair` leaves unheld besides the drafter's reserve (the
-/// driver's own small allocations while the drafter loads).
-const HOLD_SLACK: u64 = 64 << 20;
 
 /// The GPU cache type for `kv` (as `Backend::new` maps it).
 fn cache_kv(kv: KvType) -> CacheKv {
@@ -376,33 +455,18 @@ pub fn load_pair<'a>(
     let r = dm.reserve(device, draft_ctx, kv)?;
     let net = target();
     let ctx = net.ctx(want_ctx).min(draft_ctx);
-    if matches!(net, Backend::Hybrid(_)) {
-        eprintln!(
-            "axon: warning: the model is split across the CPU and GPU; a draft model next to a \
-             split model is almost always slower than none (--draft 0, or a smaller --ctx / \
-             --kv q8 to fit the model on the GPU)"
-        );
-    } else if ctx < want_ctx.min(draft_ctx) {
+    // A split model gets no warning: its decode is bound by reading the CPU
+    // layers' weights, which a verify pass does once for all of its tokens,
+    // so drafting pays even though the drafter's VRAM costs the GPU a layer
+    // or two (docs/design/spec-split.md).
+    if !matches!(net, Backend::Hybrid(_)) && ctx < want_ctx.min(draft_ctx) {
         eprintln!(
             "axon: warning: with the draft model's memory set aside, the context shrank from \
              {} to {ctx} tokens (--draft 0 for the whole context)",
             want_ctx.min(draft_ctx)
         );
     }
-    // The main model's cache (a split's GPU half's too) is made after the
-    // drafter: hold all of the VRAM the reserve doesn't cover while the
-    // drafter loads, so it gets just its reserve and its spare-VRAM extra
-    // (the Q6_K prefill copy, prefill-only) is never made out of memory
-    // the main model planned for.
-    let hold = match &r {
-        Some(r) => {
-            let free = r.gpu.info()?.free_bytes;
-            r.gpu.alloc(free.saturating_sub(HOLD_SLACK) as usize).ok()
-        }
-        None => None,
-    };
     let d = dm.load(device, r, ctx, kv)?;
-    drop(hold);
     Ok((net, Some(d)))
 }
 
@@ -785,6 +849,23 @@ mod tests {
         assert_eq!(draft_k(Some(5), true), 5);
         assert_eq!(draft_k(Some(0), true), 0);
         assert_eq!(draft_k(Some(5), false), crate::round_draft(5));
+    }
+
+    #[test]
+    fn split_k_defaults() {
+        // A draft model next to a split model, greedy: the split's K unless given.
+        let d = DEFAULT_MODEL_DRAFT;
+        assert_eq!(split_k(None, d, true, true, true, true), SPLIT_MODEL_DRAFT);
+        assert_eq!(split_k(Some(3), 3, true, true, true, true), 3);
+        assert_eq!(split_k(Some(0), 0, true, false, true, true), 0);
+        // Sampled: K as draft_k gave it, split or not.
+        assert_eq!(split_k(None, d, true, true, true, false), d);
+        // Not split, or prompt lookup: K as draft_k gave it.
+        assert_eq!(split_k(None, d, true, true, false, true), d);
+        assert_eq!(split_k(None, 7, false, false, true, true), 7);
+        // A draft model asked for (auto) but none found: off, not lookup.
+        assert_eq!(split_k(None, d, true, false, true, true), 0);
+        assert_eq!(split_k(Some(5), 5, true, false, false, true), 0);
     }
 
     fn fake(tokens: &[Val], eos: u32) -> Model {

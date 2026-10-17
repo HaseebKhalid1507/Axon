@@ -81,7 +81,10 @@ Works today, honestly scoped:
   (Qwen2.5-0.5B for Qwen2.5-7B, Qwen3-0.6B for Qwen3-8B, Llama-3.2-1B for Llama-3.1-8B)
   guesses the next tokens, the model verifies them in one batched pass; equally lossless.
   Default K=3 with a draft model. Greedy tg128 medians in its A/B at K=3: +37% Qwen2.5-7B,
-  +44% Qwen3-8B, +63% Llama-3.1-8B; sampled, little or none (below).
+  +44% Qwen3-8B, +63% Llama-3.1-8B; sampled, little or none (below). Next to a model split
+  across the CPU and GPU (32B on a 12 GB card), greedy gen and chat default to K=7: the split's
+  step is bound by reading the CPU layers' weights from RAM, which a verify pass does once for
+  all of its tokens, so drafting pays far more there (`docs/design/spec-split.md`).
 - Serving: `axon serve`, an OpenAI-compatible HTTP server (below) with tool calling. On one GPU it
   batches the decode steps of concurrent requests (`--parallel N`); elsewhere it runs one request at a time.
 - Rust 1.89 or newer.
@@ -118,7 +121,7 @@ curl -L -o models/qwen2.5-0.5b-q4_k_m.gguf \
 axon <model.gguf>                         same as axon info
 axon info <model.gguf>                    print a summary and exit
 axon gen <model.gguf> "<prompt>" [-n N] [--draft K] [--draft-model PATH] [--device D]
-          [--gpu-layers N] [--gpus L] [--kv T]
+          [--ctx N] [--gpu-layers N] [--gpus L] [--kv T]
                                           generation (default 32 tokens; greedy unless --temp)
 axon logits <model.gguf> "<prompt>" [-k K]  top-K next-token logits (default 10)
 axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K]
@@ -134,11 +137,14 @@ axon --help | --version
 
 Defaults, as `axon --help` gives them:
 
-- `--draft K`: 0 (off); try 7. With `--draft-model`: 3 (0 = off). The gain is in greedy decoding (`--temp 0`); sampled, it's little or none (measured +0.8 % on 7B at temp 0.8, K=3; slower at K 5 and 7).
+- `--draft K`: 0 (off); try 7. With `--draft-model`: 3 (0 = off); gen and chat decoding
+  greedily: 7 when the model is split across the CPU and GPU. The gain is in greedy decoding (`--temp 0`); sampled, it's little or none (measured +0.8 % on 7B at temp 0.8, K=3; slower at K 5 and 7).
 - `--draft-model PATH`: none. The draft model runs on the same `--device` (on `cuda` all of
   it on the GPU; its memory is set aside before the model is placed). A model whose token
   table isn't the start of the main model's, or whose end-of-generation tokens differ, is
-  refused.
+  refused. gen, chat: `--draft-model auto` picks the smallest GGUF in the model's directory,
+  at most 1/8 of its size, that can draft for it (none found: drafting off, said on stderr).
+  Opt-in: drafting is never turned on without the flag.
 - `--device D`: `cpu`, or `cuda`. A model too big for the GPU's memory is split
   automatically: the last layers that fit on the GPU, the first ones on the CPU.
 - `--gpu-layers N` (with `--device cuda`): the last N layers and the output head on the
@@ -162,6 +168,8 @@ Defaults, as `axon --help` gives them:
 - `--ctx N` (chat): the model's trained context, at most 8192. On cuda, if the
   whole model doesn't fit with it, a shorter context if at least half of it (or 4096)
   fits, else a split. For `serve`, see below: its default is the whole trained context.
+  gen: none (the cache holds the prompt and `-n`); `--ctx N` places the model and sizes its
+  cache for N tokens, as chat would, to measure a long context's speed.
 - `--rope-scaling yarn --rope-scale F [--yarn-orig-ctx N]` (gen, logits, chat, serve): off.
   With it the context is N x F (`--ctx` up to that); also `--yarn-beta-fast` (32),
   `--yarn-beta-slow` (1), `--yarn-mscale` (0.1 ln F + 1; not llama.cpp's `--yarn-attn-factor`). See

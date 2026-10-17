@@ -350,6 +350,172 @@ fn verify_bits(kv: CacheKv) {
     }
 }
 
+/// Sampled verify: verify_cands' candidates equal forward_cands' per token
+/// (bit for bit: logits and ids) and leave the same KV, for a split's
+/// batched path (CPU hidden_batch, GPU on-device candidates), with and
+/// without the repeat penalty, k up to CAND_MAX and past it (the per-row
+/// fallback), drafts small and past the GPU's max batch.
+#[test]
+fn hybrid_verify_cands_matches_forward_cands() {
+    use crate::sample::{CAND_MAX, CandSpec};
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = mapped(M05) else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let n = block_count(&m).unwrap();
+    let prompt = long_ids(&m, 90);
+    let (&last, rest) = prompt.split_last().unwrap();
+    let start = rest.len();
+    let h = HybridQwen2::new(Some((&g, &km)), &m, 1400, n / 2, CacheKv::F16).unwrap();
+    let mut seed = 99u64;
+    let mut rnd = |n: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        (seed % n) as u32
+    };
+    let specs = [
+        CandSpec {
+            k: 40,
+            penalty: 1.0,
+            last_n: 64,
+        },
+        CandSpec {
+            k: 40,
+            penalty: 1.1,
+            last_n: 64,
+        },
+        CandSpec {
+            k: CAND_MAX,
+            penalty: 1.1,
+            last_n: 8,
+        },
+        CandSpec {
+            k: CAND_MAX + 1,
+            penalty: 1.1,
+            last_n: 64,
+        },
+    ];
+    for spec in &specs {
+        for nb in [1, 2, 8, 9, 300] {
+            let mut toks = vec![last];
+            toks.extend((1..nb).map(|_| rnd(3000)));
+            let recent: Vec<u32> = prompt[..start]
+                .iter()
+                .copied()
+                .chain(toks.iter().copied())
+                .collect();
+            let mut a = h.new_cache(start + nb + 1);
+            let mut b = h.new_cache(start + nb + 1);
+            h.feed_batch(rest, 0, &mut a);
+            h.feed_batch(rest, 0, &mut b);
+            let got = h.verify_cands(&toks, start, &mut a, spec, &recent);
+            let n = recent.len();
+            let want: Vec<_> = (0..nb)
+                .map(|i| {
+                    h.forward_cands(toks[i], start + i, &mut b, spec, &recent[..n - nb + i + 1])
+                })
+                .collect();
+            assert_eq!(got.len(), nb);
+            for (i, (x, y)) in got.iter().zip(&want).enumerate() {
+                let bits = |v: &Vec<crate::sample::Cand>| -> Vec<(u32, u32)> {
+                    v.iter().map(|c| (c.id, c.logit.to_bits())).collect()
+                };
+                assert_eq!(bits(x), bits(y), "{spec:?} nb {nb}: row {i}");
+            }
+            assert!(
+                a.cpu.as_ref().unwrap().bits() == b.cpu.as_ref().unwrap().bits(),
+                "{spec:?} nb {nb}: CPU KV"
+            );
+            assert!(
+                CudaQwen2::kv_bits(a.gpu.as_ref().unwrap())
+                    == CudaQwen2::kv_bits(b.gpu.as_ref().unwrap()),
+                "{spec:?} nb {nb}: GPU KV"
+            );
+        }
+    }
+}
+
+/// End to end on a split: `generate` with a deliberately bad drafter (its
+/// guesses right for a while, then wrong, then random) gives the no-draft
+/// output, greedy and sampled at a fixed seed: every rejection rolls back
+/// and re-verifies over the rejected slots.
+#[test]
+fn hybrid_bad_drafter_output_unchanged() {
+    use crate::sample::{SampleArgs, Sampler};
+    use crate::{GenOpts, generate};
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = mapped(M05) else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let n = block_count(&m).unwrap();
+    let h = HybridQwen2::new(Some((&g, &km)), &m, 1400, n / 2, CacheKv::F16).unwrap();
+    let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
+    let ids = tok.encode_prompt(PROMPTS[0]);
+    let stop = tok.eog();
+    let n_gen = 48;
+    let sampler = |temp: f32| {
+        (temp > 0.0).then(|| {
+            let a = SampleArgs {
+                temp: Some(temp),
+                seed: Some(7),
+                ..Default::default()
+            };
+            Sampler::new(a.resolve(0.0).unwrap())
+        })
+    };
+    let run = |temp: f32, k: usize, bad: &mut dyn FnMut(&[u32], usize) -> Vec<u32>| {
+        let mut c = h.new_cache(ids.len() + n_gen + 16);
+        let logits = h.prefill_logits(&ids, 0, &mut c);
+        let mut s = sampler(temp);
+        let o = GenOpts {
+            n_gen,
+            stop: &stop,
+            max_draft: k,
+            sample: s.as_mut(),
+        };
+        generate(&h, &mut c, &ids, logits, o, bad, &mut |_| Ok(())).unwrap()
+    };
+    for temp in [0.0, 0.8] {
+        let want = run(temp, 0, &mut |_, _| Vec::new()).ids;
+        assert!(want.len() > 8, "temp {temp}: too short a reference");
+        for k in [3, 7] {
+            // Right for the first `good` guesses of each draft, then wrong
+            // (a shifted token), and every third call pure noise.
+            let mut calls = 0u32;
+            let mut bad = |hist: &[u32], max: usize| -> Vec<u32> {
+                calls += 1;
+                let at = hist.len() - ids.len();
+                let good = (calls % 4) as usize;
+                (0..max)
+                    .map(|i| {
+                        let r = want.get(at + i).copied().unwrap_or(1);
+                        if calls.is_multiple_of(3) {
+                            (r * 7919 + 13) % 5000
+                        } else if i < good {
+                            r
+                        } else {
+                            (r + 1) % 5000
+                        }
+                    })
+                    .collect()
+            };
+            let st = run(temp, k, &mut bad);
+            assert_eq!(st.ids, want, "temp {temp} K={k}");
+            assert!(st.drafted > st.accepted, "temp {temp} K={k}: no rejections");
+            if temp == 0.0 {
+                assert!(st.accepted > 0, "K={k}: no acceptances");
+            }
+        }
+    }
+}
+
 /// Whether `m` refuses to hand out `t`'s bytes (released on a copy).
 fn released(m: &Model, t: &crate::gguf::Tensor) -> bool {
     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

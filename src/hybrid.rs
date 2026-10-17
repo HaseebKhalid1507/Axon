@@ -747,6 +747,36 @@ impl<'g> Lm for HybridQwen2<'_, 'g> {
         }
     }
 
+    /// Sampled verify: the CPU half's batched pass, then the GPU half's
+    /// batched passes with on-device candidates (`verify_cands_hidden`), so
+    /// a sampled draft reads the CPU layers' weights once per pass, as a
+    /// greedy one does. Same candidates as `forward_cands` per row: each
+    /// half's rows have its per-token bits, and the GPU's candidates equal
+    /// the host's `sample::cands` of the same logits.
+    fn verify_cands(
+        &self,
+        tokens: &[u32],
+        start: usize,
+        c: &mut HybridCache<'g>,
+        spec: &crate::sample::CandSpec,
+        recent: &[u32],
+    ) -> Vec<Vec<crate::sample::Cand>> {
+        let (nb, n) = (tokens.len(), recent.len());
+        assert!(
+            n >= nb && recent[n - nb..] == *tokens,
+            "recent must end with tokens"
+        );
+        match self.split(c) {
+            (Some((n, c)), None) => n.verify_cands(tokens, start, c, spec, recent),
+            (None, Some((n, c))) => Lm::verify_cands(n, tokens, start, c, spec, recent),
+            (Some((cn, cc)), Some((gn, gc))) => {
+                let xs = cn.hidden_batch(tokens, start, cc);
+                gn.verify_cands_hidden(gc, &flat(xs), start, spec, recent)
+            }
+            (None, None) => unreachable!(),
+        }
+    }
+
     /// The CPU half's batch whenever it has layers: its batched pass sets
     /// the pace, and the GPU half chunks any size into its own passes
     /// (its scratch is sized for this: `cuda::qwen2::SPLIT_BATCH`).
