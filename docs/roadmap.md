@@ -76,8 +76,9 @@ Newest first, as of `69adfa2`; the numbers are the PRs' own MEASURED headlines.
 | 10 | **GPU decode: long-context attention; locked-clock trial.** | ESTIMATED +3% decode at 4k context. A locked SM clock may recover part of the 9% laptop power-cap cost (MEASURED cost; the fix is untested). The long-context part is Scale item 3. | long-context attention done (#50, Scale item 3); locked-clock trial planned |
 
 Also open:
-- **Tool calling: `/v1/responses` (codex) and the ollama-native API.** Chat-completions tool calling
-  is on main; these two remain (ESTIMATED 700-1000 and 300-400 lines). **In flight** (feat/serve-apis).
+- ~~**Tool calling: `/v1/responses` (codex) and the ollama-native API.**~~ Done
+  (docs/serve-apis.md, log 2026-10-17-serve-responses-ollama). Left: `format` / structured
+  output (needs grammar-constrained sampling), embeddings.
 - **Q2_K and Q3_K.** The GGUF reader names both, but `model.rs` doesn't accept them (`SUPPORTED_TYPES`) and
   there are no kernels; the 2–3-bit frontier models need them ([Long-term goals](#long-term-goals)).
   **In flight** (feat/q2k-q3k).

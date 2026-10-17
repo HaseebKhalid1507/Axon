@@ -16,6 +16,10 @@ sends every request above with the key, and adds the operational cases:
 hostile Authorization headers, /metrics (strict Prometheus text check) and
 /slots, oversize prompts, odd `priority` values, and a client that stops
 reading its stream (its slot must be freed).
+
+--apis runs only the /v1/responses and ollama /api/* cases (apis_cases): bad
+shapes (each a 4xx in its API's shape), type-swapped mutations of valid bodies,
+whole and streamed answers, the describe routes and the refused ones.
 """
 
 import argparse
@@ -204,9 +208,10 @@ def record(name, ok, detail):
 
 
 def check_error_body(body):
+    """OpenAI's error shape, or ollama's ({"error": "..."}, the /api/* routes)."""
     try:
-        j = json.loads(body)
-        return bool(j.get("error", {}).get("message"))
+        e = json.loads(body).get("error")
+        return bool(e) and (isinstance(e, str) or bool(e.get("message")))
     except Exception:
         return False
 
@@ -650,6 +655,81 @@ def cases(srv, ctx, slow):
         alive(srv, name)
 
 
+def apis_cases(srv):
+    """/v1/responses (responses.rs) and the ollama API (ollama.rs)."""
+    E = lambda name, raw, want="any4xx", timeout=120.0: expect(srv, name, raw, want, timeout)
+    R = lambda b: post("/v1/responses", b if isinstance(b, (str, bytes)) else json.dumps(b))
+    OC = lambda b: post("/api/chat", b if isinstance(b, (str, bytes)) else json.dumps(b))
+    OG = lambda b: post("/api/generate", b if isinstance(b, (str, bytes)) else json.dumps(b))
+    U = [{"role": "user", "content": "Hi"}]
+    FN = {"type": "function", "name": "f", "parameters": {"type": "object", "properties": {}}}
+    # Valid ones.
+    E("responses:whole", R({"input": "Hi", "max_output_tokens": 4, "temperature": 0}), "ok")
+    E("responses:stream", R({"input": "Hi", "max_output_tokens": 4, "stream": True}), "ok")
+    E("responses:items+tools", R({"input": [{"role": "user", "content": [{"type": "input_text", "text": "Hi"}]},
+                                            {"type": "function_call", "call_id": "c", "name": "f", "arguments": "{}"},
+                                            {"type": "function_call_output", "call_id": "c", "output": "x"}],
+                                  "tools": [FN, {"type": "web_search"}], "max_output_tokens": 4}), "ok")
+    E("ollama:chat-whole", OC({"messages": U, "stream": False, "options": {"num_predict": 4}}), "ok")
+    E("ollama:chat-stream", OC({"messages": U, "options": {"num_predict": 4}}), "ok")
+    E("ollama:generate", OG({"prompt": "Hi", "stream": False, "options": {"num_predict": 4}}), "ok")
+    E("ollama:generate-raw", OG({"prompt": "Hi", "raw": True, "options": {"num_predict": 4}}), "ok")
+    E("ollama:load", OG({"model": "x"}), {200, 404})
+    for path in ["/", "/api/tags", "/api/ps", "/api/version"]:
+        E(f"ollama:GET{path}", f"GET {path} HTTP/1.1\r\nConnection: close\r\n\r\n".encode(), "ok")
+    E("ollama:show-missing", post("/api/show", "{}"), {400})
+    E("ollama:show-unknown", post("/api/show", '{"model":"nope:1b"}'), {404})
+    E("ollama:embed", post("/api/embed", '{"input":"x"}'), {501})
+    E("ollama:delete", b"DELETE /api/delete HTTP/1.1\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}", {501})
+    E("ollama:GET-chat", b"GET /api/chat HTTP/1.1\r\nConnection: close\r\n\r\n", {405})
+    E("responses:GET", b"GET /v1/responses HTTP/1.1\r\nConnection: close\r\n\r\n", {405})
+    # Bad shapes.
+    for nm, b in [("empty", ""), ("array", "[]"), ("str", '"x"'), ("no-input", "{}"), ("input-num", '{"input":1}'),
+                  ("input-empty", '{"input":[]}'), ("item-num", '{"input":[1]}'), ("item-bogus", '{"input":[{"type":"x"}]}'),
+                  ("image", '{"input":[{"role":"user","content":[{"type":"input_image","image_url":"x"}]}]}'),
+                  ("fc-no-id", '{"input":[{"type":"function_call","name":"f"}]}'),
+                  ("fco-no-id", '{"input":[{"type":"function_call_output","output":"x"}]}'),
+                  ("tools-obj", '{"input":"x","tools":{}}'), ("tool-noname", '{"input":"x","tools":[{"type":"function"}]}'),
+                  ("choice-hosted", '{"input":"x","tool_choice":{"type":"web_search"}}'),
+                  ("choice-missing", '{"input":"x","tools":[{"type":"function","name":"f"}],"tool_choice":{"type":"function","name":"g"}}'),
+                  ("prev-unknown", '{"input":"x","previous_response_id":"resp-nope"}'),
+                  ("json-schema", '{"input":"x","text":{"format":{"type":"json_schema"}}}'),
+                  ("background", '{"input":"x","background":true}'), ("max0", '{"input":"x","max_output_tokens":0}'),
+                  ("deep", '{"input":"x","metadata":' + "[" * 50000 + "]" * 50000 + "}")]:
+        E(f"responses:bad:{nm}", R(b))
+    for nm, b in [("empty", ""), ("array", "[]"), ("msgs-obj", '{"messages":{}}'), ("msg-num", '{"messages":[1]}'),
+                  ("no-role", '{"messages":[{"content":"x"}]}'), ("content-num", '{"messages":[{"role":"user","content":1}]}'),
+                  ("images", '{"messages":[{"role":"user","content":"x","images":["aGk="]}]}'),
+                  ("format", '{"messages":[{"role":"user","content":"x"}],"format":"json"}'),
+                  ("options-num", '{"messages":[{"role":"user","content":"x"}],"options":1}'),
+                  ("temp-str", '{"messages":[{"role":"user","content":"x"}],"options":{"temperature":"x"}}'),
+                  ("num-predict-0", '{"messages":[{"role":"user","content":"x"}],"options":{"num_predict":0}}'),
+                  ("bad-call", '{"messages":[{"role":"assistant","tool_calls":[{"function":{}}]}]}'),
+                  ("deep", '{"messages":' + "[" * 50000 + "]" * 50000 + "}")]:
+        E(f"ollama:chat-bad:{nm}", OC(b))
+    for nm, b in [("prompt-num", '{"prompt":1}'), ("suffix", '{"prompt":"x","suffix":"y"}'),
+                  ("context", '{"prompt":"x","context":[1]}'), ("raw-str", '{"prompt":"x","raw":"y"}')]:
+        E(f"ollama:generate-bad:{nm}", OG(b))
+    # Type-swapped mutations of valid bodies: 200 or a 4xx with an error, never a 5xx/crash.
+    import random
+    rnd = random.Random(7)
+    vals = [None, True, 0, -1, 1e308, "", "x" * 300, [], [1, "a"], {}, {"type": "x"}, [[[]]]]
+    bases = [(R, {"input": [{"role": "user", "content": "Hi"}], "tools": [FN], "tool_choice": "auto",
+                  "max_output_tokens": 2, "instructions": "s", "reasoning": {"effort": "none"}, "stream": False}),
+             (OC, {"messages": U, "tools": [{"type": "function", "function": FN}], "think": False, "stream": False,
+                   "options": {"num_predict": 2, "temperature": 0, "stop": ["x"]}}),
+             (OG, {"prompt": "Hi", "system": "s", "stream": False, "options": {"num_predict": 2}})]
+    for i in range(60):
+        mk, base = bases[i % 3]
+        b = json.loads(json.dumps(base))
+        k = rnd.choice(list(b))
+        if isinstance(b[k], dict) and b[k] and rnd.random() < 0.5:
+            b[k][rnd.choice(list(b[k]))] = rnd.choice(vals)
+        else:
+            b[k] = rnd.choice(vals)
+        E(f"apis:mutate:{i}:{k}", mk(b), {200, 400, 404, 422})
+
+
 PROM_LINE = re.compile(r'^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{([a-zA-Z_][a-zA-Z0-9_]*="(?:[^"\\\n]|\\.)*"'
                        r'(?:,[a-zA-Z_][a-zA-Z0-9_]*="(?:[^"\\\n]|\\.)*")*)?\})? (\S+)$')
 
@@ -864,6 +944,7 @@ def main():
     ap.add_argument("--slow", action="store_true")
     ap.add_argument("--log-dir", help="where the server's log goes (default: a new temporary directory)")
     ap.add_argument("--ops", action="store_true", help="auth, metrics, slots, max prompt, slot idle (see above)")
+    ap.add_argument("--apis", action="store_true", help="only the /v1/responses and /api/* cases")
     ap.add_argument("extra", nargs="*")
     a = ap.parse_args()
     log_dir = a.log_dir or tempfile.mkdtemp(prefix="axon-fuzz-serve-")
@@ -879,7 +960,9 @@ def main():
     try:
         if a.ops:
             ops_cases(srv)
-        cases(srv, a.ctx, a.slow)
+        if not a.apis:
+            cases(srv, a.ctx, a.slow)
+        apis_cases(srv)
     finally:
         rc = srv.p.poll()
         srv.stop()
