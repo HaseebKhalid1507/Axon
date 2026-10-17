@@ -66,7 +66,7 @@ token prefix, so a slot saved, restored, paged or chunked continues bit for bit.
 | 4 | **KV save/restore.** Slot ↔ pinned host RAM (`--cache-ram`, LRU by prefix) on eviction, `POST /slots/:id?action=save\|restore` to files in llama-server's shape, `chat --session FILE`. | More conversations than slots is the swarm's normal state; eviction costs a 5–12 s re-prefill today and ESTIMATED ~0.1 s after (1.75 GiB at the MEASURED 25.4 GB/s). A restored slot continues bit for bit; llama-server can't promise that. 20–30 h. Gate: restored == uninterrupted, tokens and KV bytes. | planned, after 1 |
 | 5 | **Paged KV.** A slot takes 64-position pages as it grows; `--ctx` is a cap, not a reservation. | The widest payoff of the list: a 14B agent on 12 GB stays all-GPU at 10–25k used tokens (ESTIMATED 17 → ~55 tok/s), a 7B card holds ~7 agents at 15k instead of 1–2 slots, and requests that fit no slot stop starving. Bit-identical by construction: paging changes addresses, never order (`docs/design` to come; r4-serve §4.2). The broadest kernel touch since S2 — keep the old entry points as identity-table wrappers. 40–60 h. | planned, after 2 |
 | 6 | **Serve ops: `--api-key`, `/metrics`, `/slots`, `--max-prompt-tokens`, idle-slot timeout.** | What exposing `serve` on a LAN needs; parity with llama-server's operational surface. No bits risk. 12–20 h. | planned |
-| 7 | **MoE with the experts on the CPU** (Qwen3-30B-A3B first): router, attention and shared weights on the GPU, experts on the CPU for decode, experts streamed through the GPU for prefill (the hybrid's streamer, per expert). | 30B-class quality on 12 GB. ESTIMATED decode 35–55 tok/s (1.0 GB of active experts per token over 75 GB/s RAM) and 3000+ tok/s prefill, where llama.cpp's `--cpu-moe` prefills on the CPU. Medium bits risk: a new architecture and an exact top-k. 80–120 h. Gate: logits within llama.cpp's own CPU/CUDA spread; cache reuse == fresh prefill. gpt-oss-20b (MXFP4, sinks) after. | planned, after Gemma 3 settles |
+| 7 | **MoE with the experts on the CPU** (Qwen3-30B-A3B first): router, attention and shared weights on the GPU, experts on the CPU for decode, experts streamed through the GPU for prefill (the hybrid's streamer, per expert). | 30B-class quality on 12 GB. ESTIMATED decode 35–55 tok/s (1.0 GB of active experts per token over 75 GB/s RAM) and 3000+ tok/s prefill, where llama.cpp's `--cpu-moe` prefills on the CPU. Medium bits risk: a new architecture and an exact top-k. 80–120 h. Gate: logits within llama.cpp's own CPU/CUDA spread; cache reuse == fresh prefill. gpt-oss-20b (MXFP4, sinks) after. | planned, after Gemma 3 settles ([plan](#mixture-of-experts)) |
 | 8 | **YaRN RoPE as an override** (`--rope-scaling yarn --rope-scale 4 --yarn-orig-ctx N`, llama.cpp's names), plus `chat` forgetting in halves. | No Qwen2.5/Qwen3 GGUF carries scaling keys (checked): 128k is a flag in llama.cpp and a refusal here. A 7B at 128k q8 fits 12 GB (3.7 GiB) and decodes at ESTIMATED 34 tok/s today, 65 after item 3; the 2-minute prefill is why item 4 comes first. New bits only when on. 12–20 h. `chat` today re-prefills ~24k tokens on nearly every exchange once a 32k window is full (`drop_oldest` keeps the minimum): dropping to half is 2–4 h. | planned, after 3 and 4 |
 | 9 | **Multi-GPU stage 1b**: the pool over a pipeline, two step batches in flight; and a measured 70B on 2×24 GB. | 32B serve on 2×4090 ≈ 2× one GPU's aggregate (ESTIMATED, [design](design/multi-gpu.md) §3.1); 70B Q4_K_M already runs under PP (ESTIMATED ~21 tok/s on 2×4090, 12k f16 / 24k q8 of KV) but no one has measured it: a $5 pod. 40–60 h + 8. | design done |
 | 10 | **Batched speculative decoding.** Draft rows for every running request in one verify step, on while rows × (K+1) ≤ 16 (the weight-read-once regime), off above. | +30–50 % per stream at ≤ 4 clients with a draft model (ESTIMATED from the MEASURED solo gains), nothing lost at 16. Lossless by the verify contract. 30–50 h. | planned, after 1 |
@@ -77,6 +77,52 @@ real memory win), fairness (aging for oversize requests, shortest-first admissio
 
 Dependencies: #42 → 1 → {4, 10}; #42 → 2 → 5 → shared-prefix pages; 3 → 8; 4 → 8; stage 1 (done) → 9; the
 streamer (done) → 7. Item 6 depends on nothing.
+
+## Mixture-of-experts
+
+**Why.** A mixture-of-experts model activates a few experts per token, so most of its weights sit idle on any
+given step. Qwen3-30B-A3B runs about 3B parameters per token: 30B-class quality, with a per-token read a 12 GB card
+plus system RAM can handle. Today Axon refuses MoE GGUFs with an error (README). llama.cpp's `--cpu-moe` has made
+"experts on the CPU, attention on the GPU" the usual way to run these models on 8–16 GB cards.
+
+**The plan, in order.**
+
+1. **Qwen3-30B-A3B** (Scale item 7; r10 B2). Router + top-k on the GPU, with an exact select (ties broken by
+   index) so decode == prefill. Attention, norms and the shared weights also on the GPU. Experts on the CPU for
+   decode: a new CPU expert GEMV over the repacked layout, 8 experts gathered, fixed summation order. Experts
+   **streamed** through the GPU for prefill: the existing streamer, per expert matrix.
+   - Speed on bella, ESTIMATED: decode 35–55 tok/s (1.0 GB of active experts per token over 75 GB/s RAM),
+     prefill 3000+ tok/s on long prompts. llama.cpp's `--cpu-moe` prefills those experts on the CPU.
+   - Cost: 80–120 builder-hours. Bits risk: medium. It is a new architecture (`ffn_gate_inp` and 3-D
+     `ffn_*_exps` tensors), each layer mixes devices (today's split is a single cut), and the top-k must be exact.
+   - Gates: logits vs llama.cpp within llama.cpp's own CPU/CUDA spread on 30B-A3B; `feed_batch == feed` on the MoE
+     layers; chat cache reuse == fresh prefill; a bench against `llama-server --cpu-moe` (decode, pp560, pp2100)
+     on bella.
+2. **gpt-oss-20b** (r10 B6), after item 1 and Gemma 3's sliding window. New pieces: the MXFP4 tensor type,
+   attention sinks, and an alternating 128-token sliding window. 60–90 builder-hours, medium bits risk (a new quant
+   type, and sinks in every attention kernel); gates as item 1. ESTIMATED ~45 tok/s decode with every expert on the
+   CPU ([research-bigmodels](research/research-bigmodels.md) §4.3).
+3. **Later, not scheduled:** DeepSeek-class models (MLA attention) and Qwen3-235B-A22B on multi-GPU pods over the
+   pipeline parallel from #34. No scope or estimates exist for these yet.
+
+**Ordering.** MoE is rank 7 in r10's merged ranking. It comes after C2 (one cache instead of N+1, rank 2) and
+paged KV (rank 5), because that ranking puts what unblocks an agent swarm on a 12 GB card first. In r10's
+dependency graph, MoE's own prerequisites are the streamer (on main) and Gemma 3 settling, since both edit
+`check_supported`. Nothing in `serve` is a prerequisite, and the serve ops pack (Scale item 6) has no dependencies,
+so it can run in parallel.
+
+**Exactness.** Same rule as the CPU/GPU split: exact per device. Decode always runs a given layer's experts on
+the same device. Prefill streams them through the GPU, which relaxes bit-identity in the same way the dense split
+already documents.
+
+**Not planned for MoE** ([research-bigmodels](research/research-bigmodels.md) §6):
+- Lossy shortcuts, which change the model's output: expert deferral, mixed-precision or low-rank stand-ins for
+  missed experts, and pre-gated routing (that one also needs fine-tuning).
+- Loading experts from disk on demand. Both target models fit in RAM.
+- Attention on the CPU. The KV cache belongs on the 648 GB/s side.
+
+Sources: [r10-scope](research/r10-scope.md) §1.3–1.4, §5–6; [research-bigmodels](research/research-bigmodels.md)
+§4–6; [design/multi-gpu.md](design/multi-gpu.md).
 
 ## Not planned, and why
 
@@ -90,7 +136,7 @@ streamer (done) → 7. Item 6 depends on nothing.
 - **macOS and Windows builds.** CPU-only ports of dlopen, mmap and thread affinity can't be verified
   here, and Metal would be a new backend.
 - **Mixture-of-experts** (Qwen3-30B-A3B, gpt-oss-20b) as a GPU-resident model: they don't fit a 12 GB card.
-  With the experts on the CPU they do; that is Scale item 7 below.
+  With the experts on the CPU they do: see [Mixture-of-experts](#mixture-of-experts), above.
 - **Context shift (llama.cpp's K-shift on overflow).** It re-positions cached keys in place, so the cache is no
   longer what a fresh prefill writes: it breaks "cache reuse == fresh prefill" by design. Agent harnesses compact
   their own history on a 400; `chat` truncates. Save/restore (Scale item 4) is the exact alternative.

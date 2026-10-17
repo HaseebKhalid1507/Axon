@@ -35,7 +35,8 @@ Works today, honestly scoped:
   `<start_of_turn>` chat format; on the GPU the whole model must fit (no CPU/GPU split, no
   `--kv q8` yet), and its local layers keep a full-length KV cache. 27B is refused.
   Other architectures, mixture-of-experts models and RoPE scaling (a factor other than 1;
-  Gemma 3's linear scaling excepted) are refused with an error.
+  Gemma 3's linear scaling excepted) are refused with an error. MoE support is planned:
+  see [the roadmap](docs/roadmap.md#mixture-of-experts).
 - Tensor types: F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K on the CPU. On the
   GPU every weight matrix must be one of the eight quantized types (F16/F32 matrices are
   refused there). Others load for `info` but can't run.
