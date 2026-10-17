@@ -586,11 +586,13 @@ impl<'g> PipelineQwen2<'g> {
 
 /// Cache `c`'s KV bytes per layer of `net` (`CudaCache::kv`'s layout: f16
 /// K, V per layer; q8 int8 K, V per layer, then every layer's scales).
+/// All of each layer's `rows`: on a slot view (`slot_view`), the whole
+/// pool's, not only the slot's.
 #[cfg(test)]
 pub(crate) fn layer_kv(net: &CudaQwen2, c: &CudaCache) -> Vec<Vec<u8>> {
     let all: Vec<u8> = c.kv.read().unwrap();
     let nl = net.layers.len();
-    let n = c.max_ctx * net.kv_dim();
+    let n = c.rows * net.kv_dim();
     match c.mode {
         CacheKv::F16 => all.chunks(4 * n).map(<[u8]>::to_vec).collect(),
         CacheKv::Q8 { group } => {

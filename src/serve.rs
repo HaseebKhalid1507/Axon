@@ -420,6 +420,8 @@ struct Engine<'a> {
     /// Tokens generated so far, all requests.
     generated: Arc<AtomicU64>,
     metrics: Arc<ops::Metrics>,
+    /// The slot its cache is (with a pool: `Batch::lend_solo`'s; else 0).
+    slot: usize,
 }
 
 /// Run `f`; a panic in it (CUDA errors panic, and are sticky: every later
@@ -504,16 +506,24 @@ impl<'a> Engine<'a> {
             return None;
         }
         let id = job.id;
-        self.metrics.publish_solo(ops::SlotState {
-            held: self.hist.len(),
-            busy: true,
-            request: Some((id, job.arrived)),
-        });
+        // It runs in slot `slot` (with a pool, the engine's cache is a
+        // view of its rows; else the one cache, slot 0).
+        self.metrics.publish_slot(
+            self.slot,
+            ops::SlotState {
+                held: self.hist.len(),
+                busy: true,
+                request: Some((id, job.arrived)),
+            },
+        );
         let r = or_exit(&format!("request #{id}"), || self.job(job, ho));
-        self.metrics.publish_solo(ops::SlotState {
-            held: self.hist.len(),
-            ..Default::default()
-        });
+        self.metrics.publish_slot(
+            self.slot,
+            ops::SlotState {
+                held: self.hist.len(),
+                ..Default::default()
+            },
+        );
         r
     }
 
@@ -832,8 +842,8 @@ fn engine(
         ));
     }
     // The slots and their context (`plan_slots`), measured against the GPU
-    // memory left before the single-request cache is made: a pool of N
-    // slots and that cache are N + 1 caches.
+    // memory free now: a pool of N slots is N caches (the single-request
+    // path runs in a slot, with scratch of its own: `serve_bytes_kv`).
     let plan = match &net {
         Backend::Cuda(n) if o.parallel > 1 => match n.free_bytes() {
             Ok(free) => {
@@ -862,11 +872,12 @@ fn engine(
     if let Some(note) = plan.note.as_ref().filter(|_| o.log) {
         eprintln!("axon serve: {note}");
     }
-    // With a pool, the single-request cache is a slot's length: the
-    // context served is a slot's (every request fits one).
+    // With a pool, the context served is a slot's (every request fits
+    // one), and the single-request cache is a view of a slot's rows
+    // (`slot_cache`, pointed at a slot per request: `Batch::lend_solo`),
+    // so no cache beside the pool and a hand-over copies nothing).
     let ctx = plan.ctx;
-    let cache = net.new_cache(ctx);
-    let pool = match plan.slots {
+    let mut pool = match plan.slots {
         0 | 1 => None,
         n => {
             // Tests shrink the slots below the context (`Opts::slot_ctx`).
@@ -881,6 +892,18 @@ fn engine(
                 }
             }
         }
+    };
+    let solo = pool.as_ref().map(|(p, _, _)| net.slot_cache(p, 0));
+    let cache = match solo {
+        Some(Ok(c)) => c,
+        Some(Err(why)) => {
+            if o.log {
+                eprintln!("axon serve: one request at a time ({why})");
+            }
+            pool = None;
+            net.new_cache(ctx)
+        }
+        None => net.new_cache(ctx),
     };
     // The Q6_K prefill copy only out of what the cache and slots leave
     // (prefill-only: the same products without it, slower).
@@ -906,6 +929,7 @@ fn engine(
         log: o.log,
         generated: o.generated,
         metrics: o.metrics.clone(),
+        slot: 0,
     };
     let mut batch = pool.map(|(pool, n, slot_ctx)| {
         let policy = engine::ChunkPolicy {
@@ -984,11 +1008,26 @@ fn engine(
                     slot_ctx: Some(b.ctx),
                     room: b.slots,
                 };
-                if let Some(seq) = e.run(job, Some(ho)) {
-                    let tx = seq.job.tx.clone();
-                    if let Err(err) = or_exit("a hand-over", || b.adopt(seq, &e.cache)) {
-                        fatal(b, &err, Some(tx));
+                // It runs in a slot (the engine's cache is a view of it,
+                // pointed at the one with its longest prefix, else the
+                // least recently used): from the rows the slot holds, and
+                // the slot holds its rows after.
+                let lent = or_exit("a slot for a request alone", || {
+                    b.lend_solo(&job.prompt, &mut e.cache)
+                });
+                match lent {
+                    Ok(hist) => e.hist = hist,
+                    Err(err) => fatal(b, &err, Some(job.tx.clone())),
+                }
+                e.slot = b.solo_slot();
+                match e.run(job, Some(ho)) {
+                    Some(seq) => {
+                        let tx = seq.job.tx.clone();
+                        if let Err(err) = or_exit("a hand-over", || b.adopt(seq, &e.cache)) {
+                            fatal(b, &err, Some(tx));
+                        }
                     }
+                    None => b.end_solo(std::mem::take(&mut e.hist)),
                 }
             }
             continue;
@@ -1020,8 +1059,8 @@ const SPLIT_CTX: usize = crate::DEFAULT_CHAT_CTX;
 /// time with the whole context wins over batching (`plan_slots`).
 pub const AGENT_CTX: usize = 32768;
 
-/// VRAM a pool leaves free beyond itself and the single-request cache (the
-/// hand-over copy and other transient buffers).
+/// VRAM a pool leaves free beyond itself and the single-request path's
+/// scratch (transient buffers).
 const POOL_SPARE: usize = 256 << 20;
 
 /// RAM a CPU server's default context leaves free beyond its KV cache.
@@ -1119,8 +1158,8 @@ fn longest_ctx(lo: usize, hi: usize, ok: impl Fn(usize) -> bool) -> Option<usize
 }
 
 /// Slots of continuous batching for a model loaded with a `ctx`-token
-/// context, `fits(s, c)`: whether s slots of c positions fit beside the
-/// single-request cache of c positions. `ctx_set`: --ctx was given (`ctx`
+/// context, `fits(s, c)`: whether s slots of c positions fit (with the
+/// single-request path's scratch: it runs in a slot). `ctx_set`: --ctx was given (`ctx`
 /// is it); `parallel`: most slots (--parallel, default `PARALLEL`).
 ///
 /// - --ctx N: the context is N, whatever --parallel says; the most slots
@@ -1198,7 +1237,6 @@ fn plan_slots(
             }),
         },
         None => {
-            // A pool of N slots is N + 1 caches (the single-request one).
             let at = match longest_ctx(ctx.min(1024), ctx, |c| fits(2, c)) {
                 Some(c2) => format!("2 at once fit at {c2}: --ctx {c2}"),
                 None => "2 at once don't fit even at 1024".into(),
@@ -1206,8 +1244,8 @@ fn plan_slots(
             SlotPlan::one(
                 ctx,
                 Some(format!(
-                    "one request at a time, to keep the {ctx}-token context (2 slots and the \
-                     single-request cache are 3 caches); {at}"
+                    "one request at a time, to keep the {ctx}-token context (2 slots of it \
+                     don't fit in GPU memory); {at}"
                 )),
             )
         }

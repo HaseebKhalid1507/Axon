@@ -30,6 +30,7 @@ use super::batch::{BatchIn, HEAD_SUB, Place, RowAt, passes};
 use super::*;
 use crate::lm::{BatchLm, RowHead, RowOut, SeqRow, StepError};
 use std::collections::HashMap;
+use std::rc::Rc;
 
 /// sample.cu SP_PER_ROW: S[1] when each row has its own penalty.
 const SP_PER_ROW: u32 = u32::MAX;
@@ -55,10 +56,27 @@ const MAX_GRAPHS: usize = 64;
 
 impl<'g> CudaQwen2<'g> {
     /// VRAM a pool of `slots` x `ctx` (`pool_bytes_kv`) and the
-    /// single-request cache (`cache_bytes`) take with caches of type `kv`
-    /// (the model's, or serve's `--kv q8` hint).
+    /// single-request cache, a view of a slot (`slot_view`: its scratch,
+    /// no KV of its own), take with caches of type `kv` (the model's, or
+    /// serve's `--kv q8` hint).
     pub fn serve_bytes_kv(&self, kv: CacheKv, slots: usize, ctx: usize) -> usize {
-        self.cache_bytes_kv(kv, ctx) + self.pool_bytes_kv(kv, slots, ctx)
+        self.cache_bytes_kv(kv, ctx) - self.kv_cache_bytes(kv, ctx)
+            + self.pool_bytes_kv(kv, slots, ctx)
+    }
+
+    /// A cache of slot `slot`'s rows of `p` (`Lm`'s calls on it read and
+    /// write that slot's KV bytes, its own scratch and graphs beside), or
+    /// why there's no room for its scratch. The single-request path of
+    /// `axon serve` runs in a slot this way (`retarget_view` picks which,
+    /// per request): no cache beside the pool, and
+    /// its rows are the slot's for the batch to take over (`adopt_cache`
+    /// copies nothing).
+    pub fn slot_view(&self, p: &CudaPool<'g>, slot: usize) -> Result<CudaCache<'g>, String> {
+        if slot >= p.slots {
+            return Err(format!("slot {slot} of a {}-slot pool", p.slots));
+        }
+        let shared = (p.c.kv.clone(), p.c.rows, slot * p.ctx);
+        self.make_cache(p.ctx, p.c.mode, p.ctx, Some(shared))
     }
 
     /// VRAM a pool of `slots` x `ctx` takes with caches of type `kv`
@@ -339,15 +357,36 @@ impl<'g> CudaQwen2<'g> {
         s.host_s.copy_to(&s.s, 0, need * 4)
     }
 
+    /// Point `c`, a view of `p` (`slot_view`), at slot `slot`'s rows. Its
+    /// captured steps hold the old slot's addresses: they go (the next
+    /// steps are captured again; the same kernels, so the same bits).
+    pub fn retarget_view(
+        &self,
+        p: &CudaPool<'g>,
+        c: &mut CudaCache<'g>,
+        slot: usize,
+    ) -> Result<(), String> {
+        if !Rc::ptr_eq(&c.kv, &p.c.kv) || slot >= p.slots {
+            return Err(format!("retarget: not a view of this pool, or slot {slot}"));
+        }
+        let row0 = slot * p.ctx;
+        if c.row0 != row0 {
+            c.row0 = row0;
+            c.graph = Default::default();
+        }
+        Ok(())
+    }
+
     /// `BatchLm::adopt`: positions 0..n of `src` (a cache of this model,
-    /// the pool's KV type) into slot `slot`, enqueued.
+    /// the pool's KV type) into slot `slot`, enqueued; the bytes copied (0:
+    /// `src` is that slot's view).
     pub fn adopt_cache(
         &self,
         p: &mut CudaPool<'g>,
         slot: usize,
         src: &CudaCache<'g>,
         n: usize,
-    ) -> Result<(), String> {
+    ) -> Result<usize, String> {
         if slot >= p.slots || n > p.ctx || n > src.max_ctx {
             return Err(format!(
                 "adopt: {n} positions into slot {slot} (pool {} x {})",
@@ -357,6 +396,15 @@ impl<'g> CudaQwen2<'g> {
         if src.mode != p.c.mode || src.net != self.id {
             return Err("adopt: a cache of another model or KV type".into());
         }
+        if Rc::ptr_eq(&src.kv, &p.c.kv) {
+            // A view of the pool (`slot_view`): its rows are in place if
+            // it is this slot's, and copying another slot's view's would
+            // be a copy within the pool, which nothing needs.
+            return match src.row0 == slot * p.ctx {
+                true => Ok(0),
+                false => Err(format!("adopt: another slot's view into slot {slot}")),
+            };
+        }
         let kvd = self.kv_dim();
         // (bytes per row, per layer K/V array rows) of each region: the
         // rows, then (q8) their scales.
@@ -365,9 +413,15 @@ impl<'g> CudaQwen2<'g> {
             CacheKv::Q8 { group } => vec![(kvd, 0), (kvd / group * 4, 1)],
         };
         let nl = self.layers.len();
-        let (ns, np) = (src.max_ctx, p.c.max_ctx);
+        // The copy reads src's rows from row 0: a plain cache, or a view of
+        // another pool's slot 0.
+        if src.row0 != 0 {
+            return Err("adopt: a view of another pool's slot past 0".into());
+        }
+        let (ns, np) = (src.rows, p.c.rows);
         let mut src_at = 0;
         let mut dst_at = 0;
+        let mut copied = 0;
         for (row, _) in regions {
             for a in 0..2 * nl {
                 src.kv.copy_into(
@@ -376,11 +430,12 @@ impl<'g> CudaQwen2<'g> {
                     dst_at + (a * np + slot * p.ctx) * row,
                     n * row,
                 )?;
+                copied += n * row;
             }
             src_at += 2 * nl * ns * row;
             dst_at += 2 * nl * np * row;
         }
-        Ok(())
+        Ok(copied)
     }
 }
 
@@ -405,6 +460,19 @@ impl<'g> BatchLm for CudaQwen2<'g> {
         self.step_rows(pool, rows)
     }
 
+    fn slot_cache(&self, pool: &CudaPool<'g>, slot: usize) -> Result<CudaCache<'g>, String> {
+        self.slot_view(pool, slot)
+    }
+
+    fn move_slot_cache(
+        &self,
+        pool: &CudaPool<'g>,
+        cache: &mut CudaCache<'g>,
+        slot: usize,
+    ) -> Result<(), String> {
+        self.retarget_view(pool, cache, slot)
+    }
+
     fn adopt(
         &self,
         pool: &mut CudaPool<'g>,
@@ -412,7 +480,7 @@ impl<'g> BatchLm for CudaQwen2<'g> {
         cache: &CudaCache<'g>,
         n: usize,
     ) -> Result<(), String> {
-        self.adopt_cache(pool, slot, cache, n)
+        self.adopt_cache(pool, slot, cache, n).map(|_| ())
     }
 
     fn pass_max(&self, pool: &CudaPool<'g>) -> usize {
@@ -448,10 +516,10 @@ mod tests {
         let mut at = 0;
         for row in rows {
             for a in 0..2 * net.n_layers {
-                let s = at + (a * c.max_ctx + base) * row;
+                let s = at + (a * c.rows + base) * row;
                 out.extend_from_slice(&all[s..s + n * row]);
             }
-            at += 2 * net.n_layers * c.max_ctx * row;
+            at += 2 * net.n_layers * c.rows * row;
         }
         out
     }
@@ -667,122 +735,251 @@ mod tests {
                 let refs: Vec<_> = (0..nr)
                     .map(|i| solo(&net, ctx, &prompts[i], kinds[i], steps))
                     .collect();
-                let slots = nr + 1;
-                let mut p = net.pool(slots, ctx).unwrap();
-                let mut perm = 0x9e37_79b9u32;
-                let mut rnd = |n: usize| {
-                    perm ^= perm << 13;
-                    perm ^= perm >> 17;
-                    perm ^= perm << 5;
-                    perm as usize % n
-                };
-                // Slot of each request: a shuffle of the slots.
-                let mut slot_of: Vec<usize> = (0..slots).collect();
-                for i in (1..slots).rev() {
-                    slot_of.swap(i, rnd(i + 1));
-                }
-                // Request 1 starts alone in a plain cache (5 steps), then
-                // is adopted; request 5 joins at step 9.
-                let (handed, late, handed_at, late_at) = (1usize, 5usize, 5usize, 9usize);
-                let mut hist: Vec<Vec<u32>> = prompts.clone();
-                let mut sms: Vec<Option<Sampler>> = kinds
-                    .iter()
-                    .map(|k| match *k {
-                        Kind::Greedy => None,
-                        Kind::Sampled(k, pen, seed) => Some(sampler(k, pen, seed)),
-                    })
-                    .collect();
-                let mut done = vec![0usize; nr];
-                // The handed-over request's first steps, alone.
-                let mut c = net.new_cache(ctx);
-                {
-                    let h = &mut hist[handed];
-                    let n = h.len();
-                    net.feed_batch(&h[..n - 1], 0, &mut c);
-                    for _ in 0..handed_at {
-                        let (tok, pos) = (h[h.len() - 1], h.len() - 1);
-                        let s = sms[handed].as_mut().unwrap();
-                        let spec = s.cfg.spec();
-                        let cs = net.forward_cands(tok, pos, &mut c, &spec, h);
-                        assert_eq!(RowOut::Cands(cs.clone()), refs[handed].0[done[handed]]);
-                        h.push(s.pick(&cs));
-                        done[handed] += 1;
+                // The handed-over request runs alone in a plain cache
+                // (adopt copies its rows), or in a view of its slot
+                // (`slot_view`, as serve's: adopt copies nothing).
+                for via_view in [false, true] {
+                    let slots = nr + 1;
+                    let mut p = net.pool(slots, ctx).unwrap();
+                    let mut perm = 0x9e37_79b9u32;
+                    let mut rnd = |n: usize| {
+                        perm ^= perm << 13;
+                        perm ^= perm >> 17;
+                        perm ^= perm << 5;
+                        perm as usize % n
+                    };
+                    // Slot of each request: a shuffle of the slots.
+                    let mut slot_of: Vec<usize> = (0..slots).collect();
+                    for i in (1..slots).rev() {
+                        slot_of.swap(i, rnd(i + 1));
                     }
-                }
-                for i in 0..nr {
-                    if i != handed && i != late {
-                        let n = prompts[i].len();
-                        net.feed_slot(&mut p, slot_of[i], &prompts[i][..n - 1], 0)
-                            .unwrap();
-                    }
-                }
-                for step in 0..steps + late_at {
-                    if step == 2 {
-                        let n = hist[handed].len() - 1;
-                        net.adopt_cache(&mut p, slot_of[handed], &c, n).unwrap();
-                    }
-                    if step == late_at {
-                        let n = prompts[late].len();
-                        net.feed_slot(&mut p, slot_of[late], &prompts[late][..n - 1], 0)
-                            .unwrap();
-                    }
-                    let mut live: Vec<usize> = (0..nr)
-                        .filter(|&i| done[i] < steps)
-                        .filter(|&i| i != handed || step >= 2)
-                        .filter(|&i| i != late || step >= late_at)
-                        .collect();
-                    for i in (1..live.len()).rev() {
-                        live.swap(i, rnd(i + 1));
-                    }
-                    if live.is_empty() {
-                        break;
-                    }
-                    let specs: Vec<Option<CandSpec>> = live
+                    // Request 1 starts alone in a plain cache (5 steps), then
+                    // is adopted; request 5 joins at step 9.
+                    let (handed, late, handed_at, late_at) = (1usize, 5usize, 5usize, 9usize);
+                    let mut hist: Vec<Vec<u32>> = prompts.clone();
+                    let mut sms: Vec<Option<Sampler>> = kinds
                         .iter()
-                        .map(|&i| sms[i].as_ref().map(|s| s.cfg.spec()))
-                        .collect();
-                    let rows: Vec<SeqRow> = live
-                        .iter()
-                        .zip(&specs)
-                        .map(|(&i, spec)| {
-                            let h = &hist[i];
-                            SeqRow {
-                                token: h[h.len() - 1],
-                                pos: h.len() - 1,
-                                slot: slot_of[i],
-                                head: match spec {
-                                    None => RowHead::Argmax,
-                                    Some(spec) => RowHead::Sample {
-                                        spec: *spec,
-                                        recent: &h[h.len() - spec.last_n.clamp(1, h.len())..],
-                                    },
-                                },
-                            }
+                        .map(|k| match *k {
+                            Kind::Greedy => None,
+                            Kind::Sampled(k, pen, seed) => Some(sampler(k, pen, seed)),
                         })
                         .collect();
-                    let outs = net.step_rows(&mut p, &rows).unwrap();
-                    for (&i, o) in live.iter().zip(outs) {
-                        let what = format!("{} {kv:?} request {i} step {}", m.arch, done[i]);
-                        assert_eq!(o, refs[i].0[done[i]], "{what}");
-                        let next = match (&o, sms[i].as_mut()) {
-                            (RowOut::Pick(t), None) => *t,
-                            (RowOut::Cands(cs), Some(s)) => s.pick(cs),
-                            _ => panic!("{what}: a result of another head"),
-                        };
-                        hist[i].push(next);
-                        done[i] += 1;
+                    let mut done = vec![0usize; nr];
+                    // The handed-over request's first steps, alone.
+                    let mut c = match via_view {
+                        false => net.new_cache(ctx),
+                        true => net.slot_view(&p, slot_of[handed]).unwrap(),
+                    };
+                    {
+                        let h = &mut hist[handed];
+                        let n = h.len();
+                        net.feed_batch(&h[..n - 1], 0, &mut c);
+                        for _ in 0..handed_at {
+                            let (tok, pos) = (h[h.len() - 1], h.len() - 1);
+                            let s = sms[handed].as_mut().unwrap();
+                            let spec = s.cfg.spec();
+                            let cs = net.forward_cands(tok, pos, &mut c, &spec, h);
+                            assert_eq!(RowOut::Cands(cs.clone()), refs[handed].0[done[handed]]);
+                            h.push(s.pick(&cs));
+                            done[handed] += 1;
+                        }
+                    }
+                    for i in 0..nr {
+                        if i != handed && i != late {
+                            let n = prompts[i].len();
+                            net.feed_slot(&mut p, slot_of[i], &prompts[i][..n - 1], 0)
+                                .unwrap();
+                        }
+                    }
+                    for step in 0..steps + late_at {
+                        if step == 2 {
+                            let n = hist[handed].len() - 1;
+                            let copied = net.adopt_cache(&mut p, slot_of[handed], &c, n).unwrap();
+                            assert_eq!(copied == 0, via_view, "adopt copies iff not a view");
+                        }
+                        if step == late_at {
+                            let n = prompts[late].len();
+                            net.feed_slot(&mut p, slot_of[late], &prompts[late][..n - 1], 0)
+                                .unwrap();
+                        }
+                        let mut live: Vec<usize> = (0..nr)
+                            .filter(|&i| done[i] < steps)
+                            .filter(|&i| i != handed || step >= 2)
+                            .filter(|&i| i != late || step >= late_at)
+                            .collect();
+                        for i in (1..live.len()).rev() {
+                            live.swap(i, rnd(i + 1));
+                        }
+                        if live.is_empty() {
+                            break;
+                        }
+                        let specs: Vec<Option<CandSpec>> = live
+                            .iter()
+                            .map(|&i| sms[i].as_ref().map(|s| s.cfg.spec()))
+                            .collect();
+                        let rows: Vec<SeqRow> = live
+                            .iter()
+                            .zip(&specs)
+                            .map(|(&i, spec)| {
+                                let h = &hist[i];
+                                SeqRow {
+                                    token: h[h.len() - 1],
+                                    pos: h.len() - 1,
+                                    slot: slot_of[i],
+                                    head: match spec {
+                                        None => RowHead::Argmax,
+                                        Some(spec) => RowHead::Sample {
+                                            spec: *spec,
+                                            recent: &h[h.len() - spec.last_n.clamp(1, h.len())..],
+                                        },
+                                    },
+                                }
+                            })
+                            .collect();
+                        let outs = net.step_rows(&mut p, &rows).unwrap();
+                        for (&i, o) in live.iter().zip(outs) {
+                            let what = format!(
+                                "{} {kv:?} view {via_view} request {i} step {}",
+                                m.arch, done[i]
+                            );
+                            assert_eq!(o, refs[i].0[done[i]], "{what}");
+                            let next = match (&o, sms[i].as_mut()) {
+                                (RowOut::Pick(t), None) => *t,
+                                (RowOut::Cands(cs), Some(s)) => s.pick(cs),
+                                _ => panic!("{what}: a result of another head"),
+                            };
+                            hist[i].push(next);
+                            done[i] += 1;
+                        }
+                    }
+                    for i in 0..nr {
+                        let what = format!("{} {kv:?} view {via_view} request {i}", m.arch);
+                        assert_eq!(done[i], steps, "{what}");
+                        assert_eq!(hist[i], refs[i].1, "{what}: tokens");
+                        let n = hist[i].len() - 1;
+                        assert!(
+                            slot_bytes(&net, &p.c, slot_of[i] * ctx, n) == refs[i].2,
+                            "{what}: KV bytes"
+                        );
                     }
                 }
-                for i in 0..nr {
-                    let what = format!("{} {kv:?} request {i}", m.arch);
-                    assert_eq!(done[i], steps, "{what}");
-                    assert_eq!(hist[i], refs[i].1, "{what}: tokens");
-                    let n = hist[i].len() - 1;
+            }
+        }
+    }
+
+    /// `slot_view_matches_a_cache`'s calls on cache `c`: its picks.
+    fn run<'g>(net: &CudaQwen2<'g>, prompt: &[u32], c: &mut CudaCache<'g>) -> Vec<u32> {
+        let mut out = Vec::new();
+        net.feed_batch(&prompt[..60], 0, c);
+        let mut h = prompt[..61].to_vec();
+        for _ in 0..12 {
+            let t = net.forward_argmax(h[h.len() - 1], h.len() - 1, c);
+            out.push(t);
+            h.push(t);
+        }
+        // A drafting pass: the last pick, then guesses (most of them
+        // wrong).
+        let mut guess = vec![h[h.len() - 1]];
+        guess.extend_from_slice(&prompt[61..68]);
+        let v = net.verify_argmax(&guess, h.len() - 1, c);
+        assert!(
+            v.iter().zip(&guess[1..]).any(|(a, b)| a != b),
+            "a guess is rejected"
+        );
+        out.extend_from_slice(&v);
+        // Back to the prompt's prefix (reuse of 40 rows), the rest fed
+        // again.
+        net.feed_batch(&prompt[40..89], 40, c);
+        out.push(net.forward_argmax(prompt[89], 89, c));
+        out
+    }
+
+    /// A view of a slot (`slot_view`, serve's single-request cache) runs
+    /// the one-sequence calls as a cache of its own: prefill, the decode
+    /// step (its graphs), a verify pass with rejected guesses (drafting),
+    /// and a prefix reuse fed again at a position: the same picks, and the
+    /// slot's KV bytes == the plain cache's; the other slots stay as they
+    /// were; `adopt_cache` of it into its slot copies nothing, into another
+    /// slot is refused. f16 and q8, qwen2 and qwen3.
+    #[test]
+    fn slot_view_matches_a_cache() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let km = Kernels::module(&g).unwrap();
+        for m in models() {
+            for kv in [CacheKv::F16, CacheKv::Q8 { group: 0 }] {
+                let ctx = 192;
+                let net = CudaQwen2::with_kv(&g, &km, &m, ctx, kv, false).unwrap();
+                let prompt = ids(90, 77, net.vocab);
+                let mut plain = net.new_cache(ctx);
+                let want = run(&net, &prompt, &mut plain);
+                let want_kv = slot_bytes(&net, &plain, 0, 90);
+                let slots = 3;
+                let mut p = net.pool(slots, ctx).unwrap();
+                let other = ids(30, 5, net.vocab);
+                net.feed_slot(&mut p, 2, &other, 0).unwrap();
+                let other_kv = slot_bytes(&net, &p.c, 2 * ctx, 30);
+                assert!(slot_bytes(&net, &p.c, 2 * ctx, 30) == other_kv);
+                let mut row = Vec::new();
+                net.save_kv(&plain, 0, 90, &mut row).unwrap();
+                let mut moved: Option<CudaCache> = None;
+                for slot in [0, 1] {
+                    let what = format!("{} {kv:?} slot {slot}", m.arch);
+                    // Every other slot's rows, whole, before the view runs.
+                    let others: Vec<(usize, Vec<u8>)> = (0..slots)
+                        .filter(|&o| o != slot)
+                        .map(|o| (o, slot_bytes(&net, &p.c, o * ctx, ctx)))
+                        .collect();
+                    // Slot 0's view, then the same view pointed at slot 1
+                    // (`retarget_view`: its graphs captured again).
+                    let mut c = match moved.take() {
+                        None => net.slot_view(&p, slot).unwrap(),
+                        Some(mut c) => {
+                            net.retarget_view(&p, &mut c, slot).unwrap();
+                            c
+                        }
+                    };
+                    assert_eq!(run(&net, &prompt, &mut c), want, "{what}: picks");
                     assert!(
-                        slot_bytes(&net, &p.c, slot_of[i] * ctx, n) == refs[i].2,
+                        slot_bytes(&net, &p.c, slot * ctx, 90) == want_kv,
                         "{what}: KV bytes"
                     );
+                    for (o, b) in &others {
+                        assert!(
+                            slot_bytes(&net, &p.c, o * ctx, ctx) == *b,
+                            "{what}: slot {o}'s bytes"
+                        );
+                    }
+                    assert_eq!(net.adopt_cache(&mut p, slot, &c, 90), Ok(0), "{what}");
+                    assert!(slot_bytes(&net, &p.c, slot * ctx, 90) == want_kv, "{what}");
+                    assert!(net.adopt_cache(&mut p, 2, &c, 90).is_err(), "{what}");
+                    // kvsave's rows of a view: the slot's, and no further.
+                    let mut img = Vec::new();
+                    net.save_kv(&c, 0, 90, &mut img).unwrap();
+                    assert!(img == row, "{what}: saved image");
+                    net.save_kv(&c, 0, ctx, &mut Vec::new()).unwrap();
+                    assert!(
+                        net.save_kv(&c, 0, ctx + 1, &mut Vec::new()).is_err(),
+                        "{what}"
+                    );
+                    assert!(
+                        net.save_kv(&c, ctx, ctx + 1, &mut Vec::new()).is_err(),
+                        "{what}"
+                    );
+                    let big = vec![0u8; img.len() * 4];
+                    assert!(
+                        net.load_kv(&mut c, ctx - 10, ctx + 10, &mut &big[..])
+                            .is_err(),
+                        "{what}: load past the slot"
+                    );
+                    moved = Some(c);
                 }
+                assert!(net.slot_view(&p, slots).is_err());
+                // A plain cache's adopt copies its rows (what the view's
+                // count of 0 is told apart from).
+                assert!(net.adopt_cache(&mut p, 2, &plain, 90).unwrap() > 0);
+                assert!(slot_bytes(&net, &p.c, 2 * ctx, 90) == want_kv);
             }
         }
     }

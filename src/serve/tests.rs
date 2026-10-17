@@ -393,19 +393,34 @@ fn serve_checks(path: &str, device: Device, reference: &str, chat_ref: &str) {
         .as_u64()
         .unwrap();
     assert!(cached > 20, "follow-up reused {cached} tokens");
-    // Something unrelated in between: the follow-up is then prefilled from scratch.
+    // Something unrelated in between. With one cache (the CPU) it takes
+    // the follow-up's rows: the follow-up is prefilled from scratch. With a
+    // pool it runs in another slot (a request alone takes the slot holding
+    // its prefix, else the least recently used: `best_slot`), so the
+    // follow-up keeps its prefix: all but its last token. Either way the
+    // same reply.
+    let slots = call(a, "GET", "/slots", "").json()["slots"]
+        .as_array()
+        .unwrap()
+        .len();
+    if device == Device::Cpu {
+        assert_eq!(slots, 1, "the CPU serves one request at a time");
+    }
     post(
         a,
         "/v1/completions",
         json!({"prompt": "Hello", "max_tokens": 2}),
     );
     let r2 = post(a, "/v1/chat/completions", follow).json();
-    assert!(
-        r2["usage"]["prompt_tokens_details"]["cached_tokens"]
-            .as_u64()
-            .unwrap()
-            < 5
-    );
+    let cached2 = r2["usage"]["prompt_tokens_details"]["cached_tokens"]
+        .as_u64()
+        .unwrap();
+    let prompt2 = r2["usage"]["prompt_tokens"].as_u64().unwrap();
+    if slots > 1 {
+        assert_eq!(cached2, prompt2 - 1, "{slots} slots: the prefix kept");
+    } else {
+        assert!(cached2 < 5, "one cache: prefilled again, {cached2} cached");
+    }
     assert_eq!(r1["choices"][0]["message"], r2["choices"][0]["message"]);
 
     // Seeded sampling is reproducible.
@@ -436,7 +451,8 @@ fn serve_checks(path: &str, device: Device, reference: &str, chat_ref: &str) {
     assert_eq!(n1, n2, "still generating after the client left");
     assert!(n1 - at < 1000, "{at} -> {n1}");
     // The cache after a cancel: the same prompt, reused, answers as after
-    // an unrelated request (a fresh prefill).
+    // an unrelated request (one cache: a fresh prefill; a pool: the
+    // unrelated one takes another slot and the prefix is kept).
     let count = json!({"prompt": "Count: 1, 2, 3,", "max_tokens": 24, "temperature": 0,
                        "repetition_penalty": 1.0});
     let x = post(a, "/v1/completions", count.clone()).json();
@@ -448,12 +464,14 @@ fn serve_checks(path: &str, device: Device, reference: &str, chat_ref: &str) {
         json!({"prompt": "Hello", "max_tokens": 2}),
     );
     let y = post(a, "/v1/completions", count).json();
-    assert!(
-        y["usage"]["prompt_tokens_details"]["cached_tokens"]
-            .as_u64()
-            .unwrap()
-            < np - 1
-    );
+    let cached_y = y["usage"]["prompt_tokens_details"]["cached_tokens"]
+        .as_u64()
+        .unwrap();
+    if slots > 1 {
+        assert_eq!(cached_y, np - 1, "{slots} slots: the prefix kept");
+    } else {
+        assert!(cached_y < np - 1, "one cache: {cached_y} of {np} cached");
+    }
     assert_eq!(x["choices"][0]["text"], y["choices"][0]["text"]);
     // The server goes on.
     let v = post(a, "/v1/completions", req).json();
@@ -1772,8 +1790,9 @@ fn serve_shrunk_pool() {
     batched_vs_solo(a, &batch_bodies(false), "shrunk pool, no max_tokens");
 }
 
-/// `plan_slots` over a model of the memory: the single-request cache and
-/// each slot take `per` bytes a position, out of `free`.
+/// `plan_slots` over a model of the memory: s slots of c positions fit
+/// in `free` if (s + 1) * c positions do (any cost growing with s and c
+/// will do: `plan_slots` only asks `fits`).
 fn plan(
     ctx: usize,
     ctx_set: bool,
@@ -2052,14 +2071,21 @@ fn serve_chunked_prefill_matches_solo() {
     };
     for (path, kv, chunk, ms) in configs {
         let gemma = path.to_string_lossy().contains("gemma");
-        let s = server_with(path.to_str().unwrap(), Device::Cuda, |o| {
+        let opts = |o: &mut Opts| {
             o.kv = kv;
             o.parallel = 4;
             o.max_draft = 3;
             o.prefill_chunk = chunk;
             o.prefill_ms = ms;
-        });
+        };
+        let s = server_with(path.to_str().unwrap(), Device::Cuda, opts);
         let a = s.addr;
+        // The replies alone come from a second server: a request alone runs
+        // in a pool slot, and on this one it would leave its prompt's rows
+        // for the batched run to reuse (then nothing is left to prefill in
+        // chunks, the thing this test measures).
+        let refs = server_with(path.to_str().unwrap(), Device::Cuda, opts);
+        let ra = refs.addr;
         for (round, tail) in ["", "And one more line about a dog. "]
             .into_iter()
             .enumerate()
@@ -2067,7 +2093,7 @@ fn serve_chunked_prefill_matches_solo() {
             let long = longs(tail);
             let solo_dec: Vec<_> = decoders
                 .iter()
-                .map(|b| completion(&post(a, "/v1/completions", b.clone())))
+                .map(|b| completion(&post(ra, "/v1/completions", b.clone())))
                 .collect();
             // (Gemma's raw completions may end early: then the "decoded
             // meanwhile" check is skipped.)
@@ -2078,7 +2104,7 @@ fn serve_chunked_prefill_matches_solo() {
             );
             let solo_long: Vec<_> = long
                 .iter()
-                .map(|b| completion(&post(a, "/v1/completions", b.clone())))
+                .map(|b| completion(&post(ra, "/v1/completions", b.clone())))
                 .collect();
             let what = format!(
                 "{} {kv:?} chunk {chunk} ms {ms} round {round}",
@@ -2166,12 +2192,17 @@ fn serve_cancel_mid_prefill_reuses_rows() {
     };
     // One token per chunk, a decode step between chunks: the prompt takes
     // over a second to feed, longer than a disconnect takes to notice.
-    let s = server_with(p.to_str().unwrap(), Device::Cuda, |o| {
+    let opts = |o: &mut Opts| {
         o.parallel = 4;
         o.prefill_chunk = 1;
         o.prefill_ms = 0;
-    });
+    };
+    let s = server_with(p.to_str().unwrap(), Device::Cuda, opts);
     let a = s.addr;
+    // The reply alone from a second server: on this one a request alone
+    // runs in a pool slot and would leave the whole prompt's rows behind,
+    // not only the cancelled prompt's partial ones this test is about.
+    let refs = server_with(p.to_str().unwrap(), Device::Cuda, opts);
     let text: String = (0..120)
         .map(|i| {
             format!(
@@ -2184,7 +2215,7 @@ fn serve_cancel_mid_prefill_reuses_rows() {
     let decoder =
         json!({"prompt": "The history of the Roman Empire", "max_tokens": 1500, "temperature": 0});
     let next = json!({"prompt": format!("{text}Total:"), "max_tokens": 30, "temperature": 0});
-    let solo = post(a, "/v1/completions", next.clone()).json();
+    let solo = post(refs.addr, "/v1/completions", next.clone()).json();
     let solo_text = solo["choices"][0]["text"].clone();
     std::thread::scope(|sc| {
         let g = &s.generated;
@@ -2624,7 +2655,7 @@ fn serve_api_key() {
 }
 
 /// GET /metrics parses as Prometheus text and counts what was served;
-/// GET /slots has its shape (CPU: the one cache, `solo`); `priority` is
+/// GET /slots has its shape (CPU: the one cache, slot 0); `priority` is
 /// accepted and ignored; --max-prompt-tokens refuses before prefill.
 #[test]
 fn serve_metrics_slots_max_prompt() {
@@ -2649,9 +2680,11 @@ fn serve_metrics_slots_max_prompt() {
     }
     let sl = call(a, "GET", "/slots", "").json();
     assert_eq!(sl["ctx"], 2048);
-    assert_eq!(sl["slots"], json!([]));
-    assert_eq!(sl["solo"]["busy"], false);
-    assert_eq!(sl["solo"]["request_id"], Value::Null);
+    assert_eq!(sl["slots"].as_array().unwrap().len(), 1, "{sl}");
+    assert_eq!(sl["slots"][0]["id"], 0);
+    assert_eq!(sl["slots"][0]["busy"], false);
+    assert_eq!(sl["slots"][0]["request_id"], Value::Null);
+    assert_eq!(sl.get("solo"), None, "{sl}");
     assert_eq!(sl["queue_depth"], 0);
 
     // Two requests (one with `priority`, ignored); the second reuses the
@@ -2702,8 +2735,8 @@ fn serve_metrics_slots_max_prompt() {
     assert!(m["axon_itl_seconds_count"] >= 2.0, "{m:?}");
     assert_eq!(m["axon_requests_in_flight"], 0.0);
     let sl = call(a, "GET", "/slots", "").json();
-    assert_eq!(sl["solo"]["busy"], false);
-    assert!(sl["solo"]["held_tokens"].as_u64().unwrap() >= prompt_tokens / 2);
+    assert_eq!(sl["slots"][0]["busy"], false);
+    assert!(sl["slots"][0]["held_tokens"].as_u64().unwrap() >= prompt_tokens / 2);
 
     // While a request runs: busy, its id and age.
     let mut c = TcpStream::connect(a).unwrap();
@@ -2715,17 +2748,17 @@ fn serve_metrics_slots_max_prompt() {
         .unwrap();
     assert!(c.read(&mut [0u8; 256]).unwrap() > 0);
     wait_for("the stream to show in /slots", || {
-        call(a, "GET", "/slots", "").json()["solo"]["busy"] == true
+        call(a, "GET", "/slots", "").json()["slots"][0]["busy"] == true
     });
     let sl = call(a, "GET", "/slots", "").json();
-    assert_eq!(sl["solo"]["request_id"], 3, "{sl}");
-    assert!(sl["solo"]["age_ms"].as_u64().is_some(), "{sl}");
+    assert_eq!(sl["slots"][0]["request_id"], 3, "{sl}");
+    assert!(sl["slots"][0]["age_ms"].as_u64().is_some(), "{sl}");
     let m = prom_parse(&call(a, "GET", "/metrics", "").body);
     assert_eq!((m["axon_slots_busy"], m["axon_slots_free"]), (1.0, 0.0));
     assert_eq!(m["axon_requests_in_flight"], 1.0);
     drop(c);
     wait_for("the cancelled stream to free the slot", || {
-        call(a, "GET", "/slots", "").json()["solo"]["busy"] == false
+        call(a, "GET", "/slots", "").json()["slots"][0]["busy"] == false
     });
 
     // --max-prompt-tokens 16: refused with a 400 before anything is queued.
@@ -2848,7 +2881,7 @@ fn serve_slot_idle_frees_a_stalled_stream() {
             }
             assert!(last.1.elapsed() < Duration::from_secs(120), "never filled");
         };
-        let busy = || call(a, "GET", "/slots", "").json()["solo"]["busy"] == true;
+        let busy = || call(a, "GET", "/slots", "").json()["slots"][0]["busy"] == true;
         let what = format!("--slot-idle-ms {idle:?}");
         match idle {
             Some(n) => {
@@ -2882,8 +2915,11 @@ fn serve_slot_idle_frees_a_stalled_stream() {
     }
 }
 
-/// GET /slots over a pool (GPU): one entry per slot, two concurrent
-/// streams in two busy slots with their ids, freed when they leave.
+/// GET /slots over a pool (GPU): one entry per slot; a request alone on a
+/// fresh server runs in slot 0 (every slot unused: the lowest; busy,
+/// counted once) and leaves its prefix there; two
+/// concurrent streams in two busy slots with their ids, freed when they
+/// leave.
 #[test]
 fn serve_cuda_slots() {
     let Some(_) = crate::testutil::gpu() else {
@@ -2899,9 +2935,29 @@ fn serve_cuda_slots() {
     let a = s.addr;
     let sl = call(a, "GET", "/slots", "").json();
     assert_eq!(sl["slots"].as_array().unwrap().len(), 2, "{sl}");
+    assert_eq!(sl.get("solo"), None, "{sl}");
     let body = json!({"prompt": "Count: 1, 2, 3,", "max_tokens": 1500, "stream": true,
                       "temperature": 0})
     .to_string();
+    // One alone: slot 0.
+    let mut c = TcpStream::connect(a).unwrap();
+    c.write_all(request("POST", "/v1/completions", &body, false).as_bytes())
+        .unwrap();
+    wait_for("the request alone in slot 0", || {
+        call(a, "GET", "/slots", "").json()["slots"][0]["busy"] == true
+    });
+    let sl = call(a, "GET", "/slots", "").json();
+    assert_eq!(sl["slots"][1]["busy"], false, "{sl}");
+    assert!(sl["slots"][0]["request_id"].as_u64().is_some(), "{sl}");
+    let m = prom_parse(&call(a, "GET", "/metrics", "").body);
+    assert_eq!((m["axon_slots_busy"], m["axon_slots_free"]), (1.0, 1.0));
+    drop(c);
+    wait_for("slot 0 freed", || {
+        call(a, "GET", "/slots", "").json()["slots"][0]["busy"] == false
+    });
+    let sl = call(a, "GET", "/slots", "").json();
+    assert!(sl["slots"][0]["held_tokens"].as_u64().unwrap() > 0, "{sl}");
+    assert_eq!(sl["slots"][1]["held_tokens"], 0, "{sl}");
     let cs: Vec<TcpStream> = (0..2)
         .map(|_| {
             let mut c = TcpStream::connect(a).unwrap();
@@ -2929,7 +2985,7 @@ fn serve_cuda_slots() {
         })
         .collect();
     ids.sort();
-    assert_eq!(ids, [1, 2], "{sl}");
+    assert_eq!(ids, [2, 3], "{sl}");
     assert_eq!(sl["slots"][0]["id"], 0);
     let m = prom_parse(&call(a, "GET", "/metrics", "").body);
     assert_eq!((m["axon_slots_busy"], m["axon_slots_free"]), (2.0, 0.0));
@@ -2941,7 +2997,6 @@ fn serve_cuda_slots() {
             .unwrap()
             .iter()
             .all(|x| x["busy"] == false)
-            && sl["solo"]["busy"] == false
     });
 }
 
@@ -3151,5 +3206,121 @@ fn serve_api_key_no_body_without_the_key() {
     assert_eq!(
         m["axon_requests_total{route=\"/health\",status=\"401\"}"],
         3.0
+    );
+}
+
+/// A completion's (text, cached prompt tokens, prompt tokens, completion
+/// tokens), greedy.
+fn completion_usage(a: SocketAddr, prompt: &str, n: usize) -> (Value, u64, u64, u64) {
+    let r = post(
+        a,
+        "/v1/completions",
+        json!({"prompt": prompt, "max_tokens": n, "temperature": 0}),
+    );
+    assert_eq!(r.status, 200, "{}", r.body);
+    let v = r.json();
+    let u = &v["usage"];
+    (
+        v["choices"][0]["text"].clone(),
+        u["prompt_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .unwrap(),
+        u["prompt_tokens"].as_u64().unwrap(),
+        u["completion_tokens"].as_u64().unwrap(),
+    )
+}
+
+/// The request running alone runs in a slot (`Batch::lend_solo`: the one
+/// holding its longest prefix, else the least recently used), so slots are
+/// shared by the batch and the solo path, and each reuses what the other
+/// left there:
+/// (a) a request the batch admits (the other slot busy), then a request
+///     alone sharing its prompt's prefix: cached_tokens is that prefix, and
+///     the reply is the one it gets alone;
+/// (b) a request alone that hands over to the batch partway (a second one
+///     arrives) and finishes there, then a request alone sharing its
+///     prefix: the same.
+#[test]
+fn serve_solo_and_batch_share_slots() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server_with(p.to_str().unwrap(), Device::Cuda, |o| {
+        o.parallel = 2;
+        o.max_draft = 3;
+    });
+    let a = s.addr;
+    let g = &s.generated;
+    let text = |w: &str| -> String {
+        (0..60)
+            .map(|i| {
+                format!(
+                    "{w} {i}: a {} box holds {} stones. ",
+                    ["tin", "oak"][i % 2],
+                    i * 7
+                )
+            })
+            .collect()
+    };
+    let (shared_a, shared_b) = (text("Item"), text("Crate"));
+    let decoder = "The history of the Roman Empire";
+    let x_prompt = format!("{shared_b}Summary:");
+    let (z_prompt, w_prompt) = (format!("{shared_a}Total:"), format!("{shared_a}Count:"));
+    let v_prompt = format!("{shared_b}List:");
+    // Each alone first (the references).
+    let alone = |p: &str, n| completion_usage(a, p, n);
+    let w_ref = alone(&w_prompt, 24);
+    let v_ref = alone(&v_prompt, 24);
+    let x_ref = alone(&x_prompt, 200);
+    assert_eq!(x_ref.3, 200, "the hand-over request runs to its length");
+    // The shared prefix's tokens: what an extension of it reuses.
+    let prefix = |p: &str| completion_usage(a, p, 1).2 - 1;
+    let (pre_a, pre_b) = (prefix(&shared_a), prefix(&shared_b));
+
+    std::thread::scope(|sc| {
+        // (b) X alone (in a slot); Y arrives after X's 20th token: X hands
+        // over and finishes in the batch, Y decodes on in the other slot.
+        let g0 = g.load(Ordering::Relaxed);
+        let x = sc.spawn(|| completion_usage(a, &x_prompt, 200));
+        wait_for("X decoding alone", || g.load(Ordering::Relaxed) >= g0 + 20);
+        let y = sc.spawn(|| completion_usage(a, decoder, 1000));
+        let x = x.join().unwrap();
+        assert_eq!(x.0, x_ref.0, "X, handed over: its reply alone");
+        // (a) Z arrives with Y running: the batch admits it into X's slot
+        // (the only free one).
+        completion_usage(a, &z_prompt, 16);
+        assert!(!y.is_finished(), "Y still running while Z was admitted");
+        y.join().unwrap();
+    });
+    // (a) W alone: Z's slot holds Z's prompt.
+    let w = completion_usage(a, &w_prompt, 24);
+    assert_eq!(w.0, w_ref.0, "W after Z in its slot: its reply alone");
+    assert!(
+        w.1 + 4 >= pre_a && w.1 <= w.2,
+        "W reuses Z's prefix: {} cached of {} (prefix {pre_a})",
+        w.1,
+        w.2
+    );
+    // (b) Z's slot now holds W; X's rows there were overwritten. Run X's
+    // prefix again through a hand-over, then V alone reuses it.
+    std::thread::scope(|sc| {
+        let g0 = g.load(Ordering::Relaxed);
+        let x = sc.spawn(|| completion_usage(a, &x_prompt, 200));
+        wait_for("X decoding alone", || g.load(Ordering::Relaxed) >= g0 + 20);
+        let y = sc.spawn(|| completion_usage(a, decoder, 40));
+        assert_eq!(x.join().unwrap().0, x_ref.0, "X again, handed over");
+        y.join().unwrap();
+    });
+    // Y (40 tokens) may outlast X, in the other slot: X's slot holds its rows.
+    let v = completion_usage(a, &v_prompt, 24);
+    assert_eq!(v.0, v_ref.0, "V after X's hand-over: its reply alone");
+    assert!(
+        v.1 + 4 >= pre_b && v.1 <= v.2,
+        "V reuses X's prefix: {} cached of {} (prefix {pre_b})",
+        v.1,
+        v.2
     );
 }

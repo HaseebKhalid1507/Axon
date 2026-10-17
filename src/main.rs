@@ -126,7 +126,7 @@ flags:
               (an advisory lock on F.lock beside it, left in place; where the filesystem can't lock,
               a warning and no lock)
   --parallel N  serve: requests decoded together on the GPU (default 8; 1: one at a time;
-              N slots cost N + 1 KV caches). By default the context comes first: as many
+              N slots cost N KV caches). By default the context comes first: as many
               slots (2 to 8) as fit with the whole context, or with a shorter one down to
               32768 (or the whole one, if less); if not even 2 fit, one request at a time.
               With --ctx N, the slots that fit with N; with --parallel N alone, N slots of
