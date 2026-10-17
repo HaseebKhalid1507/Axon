@@ -193,10 +193,14 @@ pub(super) mod x86 {
         unsafe {
             let m3 = _mm256_set1_epi8(3);
             let q = [ld32(&qs[0..32]), ld32(&qs[32..64])];
-            std::array::from_fn(|c| {
+            let mut w = [_mm256_setzero_si256(); 8];
+            // (Loops, not array::from_fn: its closure doesn't inherit the
+            // target features and isn't inlined.)
+            for (c, wc) in w.iter_mut().enumerate() {
                 let (n, j) = (c / 4, c % 4);
-                _mm256_and_si256(_mm256_srl_epi16(q[n], _mm_cvtsi32_si128(2 * j as i32)), m3)
-            })
+                *wc = _mm256_and_si256(_mm256_srl_epi16(q[n], _mm_cvtsi32_si128(2 * j as i32)), m3);
+            }
+            w
         }
     }
 
@@ -208,8 +212,12 @@ pub(super) mod x86 {
         let sc = _mm_and_si128(sb, _mm_set1_epi8(0xf));
         let mn = _mm256_cvtepu8_epi16(_mm_and_si128(_mm_srli_epi16(sb, 4), _mm_set1_epi8(0xf)));
         let w = low2(&b[16..80]);
-        let s: [__m256i; 8] = std::array::from_fn(|c| pair_scale(sc, c));
-        std::array::from_fn(|t| {
+        let mut s = [_mm256_setzero_si256(); 8];
+        for (c, sc_c) in s.iter_mut().enumerate() {
+            *sc_c = pair_scale(sc, c);
+        }
+        let mut out = [(0i32, 0i32); T];
+        for t in 0..T {
             // SAFETY: bsums is 16 i16 = 32 bytes.
             let bs = unsafe { _mm256_loadu_si256(a[t].bsums.as_ptr().cast()) };
             let summ = hsum_i32x8(_mm256_madd_epi16(mn, bs));
@@ -220,8 +228,9 @@ pub(super) mod x86 {
                 let p = _mm256_maddubs_epi16(w[c], x);
                 acc = _mm256_add_epi32(acc, _mm256_madd_epi16(s[c], p));
             }
-            (hsum_i32x8(acc), summ)
-        })
+            out[t] = (hsum_i32x8(acc), summ);
+        }
+        out
     }
 
     /// `q3_k_scales` as 16 i8 lanes (ggml's aux word unpacking).
@@ -252,13 +261,17 @@ pub(super) mod x86 {
         let m1 = _mm256_set1_epi8(1);
         let four = _mm256_set1_epi8(4);
         // Signed values q - 4 (bit clear) as |w| and the sign applied to x.
-        let w: [__m256i; 8] = std::array::from_fn(|c| {
+        let mut w = [_mm256_setzero_si256(); 8];
+        let mut aw = [_mm256_setzero_si256(); 8];
+        let mut s = [_mm256_setzero_si256(); 8];
+        for c in 0..8 {
             let h = _mm256_and_si256(_mm256_srl_epi16(hm, _mm_cvtsi32_si128(c as i32)), m1);
-            _mm256_sub_epi8(_mm256_or_si256(lo[c], _mm256_slli_epi16(h, 2)), four)
-        });
-        let aw: [__m256i; 8] = std::array::from_fn(|c| _mm256_sign_epi8(w[c], w[c]));
-        let s: [__m256i; 8] = std::array::from_fn(|c| pair_scale(sc, c));
-        std::array::from_fn(|t| {
+            w[c] = _mm256_sub_epi8(_mm256_or_si256(lo[c], _mm256_slli_epi16(h, 2)), four);
+            aw[c] = _mm256_sign_epi8(w[c], w[c]);
+            s[c] = pair_scale(sc, c);
+        }
+        let mut out = [0i32; T];
+        for t in 0..T {
             let mut acc = _mm256_setzero_si256();
             for c in 0..8 {
                 // SAFETY: 32 bytes of the 256.
@@ -266,8 +279,9 @@ pub(super) mod x86 {
                 let p = _mm256_maddubs_epi16(aw[c], _mm256_sign_epi8(x, w[c]));
                 acc = _mm256_add_epi32(acc, _mm256_madd_epi16(s[c], p));
             }
-            hsum_i32x8(acc)
-        })
+            out[t] = hsum_i32x8(acc);
+        }
+        out
     }
 
     /// # Safety
