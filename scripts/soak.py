@@ -466,6 +466,37 @@ def identity_run(cfg):
     return out
 
 
+# ---------------------------------------------------------------- priming
+
+def prime(cfg):
+    """Before the measured window: run every batch mix the slots can form, so
+    the server's one-time allocations are made up front. On CUDA the batched
+    decode step is captured as a graph per (rows, greedy rows, sampled rows)
+    on its first use (cuda/qwen2/slots.rs, at most MAX_GRAPHS = 64 kept), and
+    each instantiated graph takes driver memory: a mix first seen hours into
+    the soak shows as a VRAM step that isn't a leak. Each mix: nb streams sent
+    together, ng of them greedy, twice."""
+    n = 0
+    for nb in range(1, cfg.slots + 1):
+        for ng in range(nb + 1):
+            for rep in range(2):
+                def one(k):
+                    b = {"model": MODEL[0], "max_tokens": 24, "stream": True,
+                         "messages": [{"role": "user", "content": f"prime {nb} {ng} {rep} {k}: count to ten"}]}
+                    b.update(temperature=0) if k < ng else b.update(temperature=0.7, seed=k)
+                    try:
+                        request(cfg.port, "POST", "/v1/chat/completions", b, timeout=cfg.req_timeout)
+                    except OSError:
+                        pass
+                ts = [threading.Thread(target=one, args=(k,)) for k in range(nb)]
+                for t in ts:
+                    t.start()
+                for t in ts:
+                    t.join()
+                n += nb
+    return n
+
+
 # ---------------------------------------------------------------- sampling
 
 def proc_stats(pid):
@@ -617,6 +648,8 @@ def main():
     ap.add_argument("--rss-floor-mib", type=float, default=64)
     ap.add_argument("--rss-frac", type=float, default=0.02)
     ap.add_argument("--vram-floor-mib", type=float, default=16)
+    ap.add_argument("--no-prime", dest="prime", action="store_false",
+                    help="skip priming every batch mix before the load (see prime())")
     ap.add_argument("--vram-card", action="store_true",
                     help="judge VRAM on the card's total when nvidia-smi doesn't list the server pid "
                          "(only on a GPU nothing else uses)")
@@ -634,6 +667,10 @@ def main():
     t_start = time.time()
     rows = []
     try:
+        if cfg.prime:
+            t0 = time.time()
+            summary["primed_requests"] = prime(cfg)
+            print(f"primed {summary['primed_requests']} requests in {time.time() - t0:.0f}s", flush=True)
         ident0 = identity_run(cfg)
         summary["identity_ref"] = ident0
         summary["identity_runs"] = 1
