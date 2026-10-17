@@ -2,10 +2,17 @@
 //! specs/r4-serve.md, brief specs/r6-pick.md §4): a pool of slots and the
 //! multi-sequence step.
 //!
-//! The pool is one cache of `slots` x `ctx` positions: slot s holds a
-//! sequence's rows s * ctx.. (`kv_args_at` gives a slot's layer pointers).
-//! A prompt is fed into its slot by the batched passes as `feed_batch`
-//! (`Place::Seq` with the slot's first row); a step runs one token of each
+//! The pool is one cache whose rows are pages of 64 positions (specs
+//! r11 §2, pages.rs): slot s's position t is at row
+//! `tab[s * cap + t / 64] * 64 + t % 64`, `tab` the pool's page table on
+//! the device (fixed address: graphs hold it; contents change) and
+//! `PageMap` its host side. A slot holds pages only for the positions it
+//! has (`ensure` before a feed or step writes past them, `release` when
+//! its rows are dropped), so `ctx` is a slot's cap, not a reservation.
+//! With AXON_PAGED_KV=0 the pool is plain: slot s holds rows s * ctx..
+//! (the layout before paging). A prompt is fed into its slot by the
+//! batched passes as `feed_batch` (`Place::Seq` with the slot's first
+//! table entry, or row); a step runs one token of each
 //! of many sequences together (`Place::Rows`: per token its position and
 //! cache row, prefill.cu "Placement"), its attention the decode kernel per
 //! query on its own slot's rows. Every kernel does per token what the
@@ -27,8 +34,9 @@
 //! a step costs one launch (AXON_CUDA_GRAPHS=0: kernel by kernel).
 
 use super::batch::{BatchIn, HEAD_SUB, Place, RowAt, passes};
+use super::pages::{self, NoPages, PAGE, PageMap};
 use super::*;
-use crate::lm::{BatchLm, RowHead, RowOut, SeqRow, StepError};
+use crate::lm::{BatchLm, PoolPages, RowHead, RowOut, SeqRow, StepError};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -40,6 +48,10 @@ pub struct CudaPool<'g> {
     c: CudaCache<'g>,
     slots: usize,
     ctx: usize,
+    /// Paged: which pages each slot holds (`c.tab` its device mirror; the
+    /// last page, `sink`, is in no slot: table entries of positions a slot
+    /// doesn't hold point there). None: plain rows (AXON_PAGED_KV=0).
+    pm: Option<PageMap>,
     /// Most rows per step (logits scratch rows).
     rows_max: usize,
     /// Captured steps by (rows, greedy rows, + device-sampled rows): a
@@ -75,30 +87,73 @@ impl<'g> CudaQwen2<'g> {
         if slot >= p.slots {
             return Err(format!("slot {slot} of a {}-slot pool", p.slots));
         }
-        if p.c.tab.is_some() {
-            return Err("slot_view of a paged pool (a view is plain rows)".into());
+        if p.pm.is_none() {
+            let shared = (p.c.kv.clone(), p.c.rows, slot * p.ctx);
+            return self.make_cache(p.ctx, p.c.mode, p.ctx, Some(shared));
         }
-        let shared = (p.c.kv.clone(), p.c.rows, slot * p.ctx);
-        self.make_cache(p.ctx, p.c.mode, p.ctx, Some(shared))
+        // Paged: the pool's arrays from row 0 and its table from the slot's
+        // first entry. Its positions go to the cap whatever the pool's rows
+        // (the caller `reserve`s pages for those the `Lm` calls write: past
+        // them, the table points at the sink page).
+        let shared = (p.c.kv.clone(), p.c.rows, 0);
+        let mut c = self.make_cache(p.ctx.min(p.c.rows), p.c.mode, p.ctx, Some(shared))?;
+        c.max_ctx = p.ctx;
+        c.tab = p.c.tab.clone();
+        c.tab0 = p.base(slot);
+        Ok(c)
     }
 
     /// VRAM a pool of `slots` x `ctx` takes with caches of type `kv`
     /// (`pool` checks it is free).
     fn pool_bytes_kv(&self, kv: CacheKv, slots: usize, ctx: usize) -> usize {
+        if pages::paged_env() {
+            return self.pool_paged_bytes(kv, slots, ctx, slots * ctx.div_ceil(PAGE));
+        }
         self.cache_bytes_kv(kv, ctx) - self.kv_cache_bytes(kv, ctx)
             + self.kv_cache_bytes(kv, slots * ctx)
             + slots.saturating_sub(HEAD_SUB) * self.vocab * 4
             + self.batch_for(ctx) * 8
     }
 
+    /// VRAM a paged pool of `pages` pages for `slots` slots of up to `ctx`
+    /// positions takes (`pool_paged`; its scratch is sized by `ctx`).
+    pub fn pool_paged_bytes(&self, kv: CacheKv, slots: usize, ctx: usize, pages: usize) -> usize {
+        self.cache_bytes_kv(kv, ctx) - self.kv_cache_bytes(kv, ctx)
+            + self.kv_cache_bytes(kv, (pages + 1) * PAGE)
+            + slots * ctx.div_ceil(PAGE) * 4
+            + slots.saturating_sub(HEAD_SUB) * self.vocab * 4
+            + self.batch_for(ctx) * 8
+    }
+
     /// A pool of `slots` sequences of up to `ctx` positions, in the model's
-    /// KV type, or why there's no room for it.
+    /// KV type, or why there's no room for it: paged with a page for every
+    /// position of every slot (AXON_PAGE_SHUFFLE: in a shuffled order), or
+    /// plain with AXON_PAGED_KV=0.
     pub fn pool(&self, slots: usize, ctx: usize) -> Result<CudaPool<'g>, String> {
-        if slots == 0 || ctx == 0 {
-            return Err("a pool needs at least one slot and position".into());
+        let pages = pages::paged_env().then(|| slots.saturating_mul(ctx.div_ceil(PAGE)));
+        self.pool_with(slots, ctx, pages, pages::shuffle_env())
+    }
+
+    /// A paged pool of `pages` pages for `slots` slots of up to `ctx`
+    /// positions each (`pages` None: plain, every slot its ctx rows);
+    /// `shuffle`: pages handed out in a seeded random order.
+    pub fn pool_with(
+        &self,
+        slots: usize,
+        ctx: usize,
+        pages: Option<usize>,
+        shuffle: Option<u64>,
+    ) -> Result<CudaPool<'g>, String> {
+        if slots == 0 || ctx == 0 || pages == Some(0) {
+            return Err("a pool needs at least one slot, position and page".into());
         }
-        let max_ctx = slots
-            .checked_mul(ctx)
+        let cap = ctx.div_ceil(PAGE);
+        let rows = match pages {
+            None => slots.checked_mul(ctx),
+            // The sink page after the pool's.
+            Some(n) => n.checked_add(1).and_then(|n| n.checked_mul(PAGE)),
+        };
+        let max_ctx = rows
             .filter(|&n| n <= u32::MAX as usize)
             .ok_or_else(|| format!("{slots} slots of {ctx} positions: too many"))?;
         if self.first > 0 {
@@ -106,6 +161,15 @@ impl<'g> CudaQwen2<'g> {
         }
         let mut c = self.try_cache_at(max_ctx, self.kv, ctx)?;
         let g = self.gpu;
+        let pm = match pages {
+            None => None,
+            Some(n) => {
+                // Every entry at the sink until a slot takes pages.
+                let tab = g.upload(&vec![n as u32; slots * cap])?;
+                c.tab = Some(Rc::new(tab));
+                Some(PageMap::new(slots, cap, n, shuffle))
+            }
+        };
         let b = c.b.as_mut().expect("batch scratch");
         let rows_max = slots.max(HEAD_SUB);
         if rows_max > b.max {
@@ -127,6 +191,7 @@ impl<'g> CudaQwen2<'g> {
             c,
             slots,
             ctx,
+            pm,
             rows_max,
             graphs: HashMap::new(),
             steps: 0,
@@ -152,8 +217,17 @@ impl<'g> CudaQwen2<'g> {
         if let Some(t) = tokens.iter().find(|&&t| t as usize >= self.vocab) {
             return Err(format!("token {t} out of range"));
         }
+        let short = self.reserve(p, slot, start + tokens.len())?;
+        if short > 0 {
+            return Err(format!(
+                "feed_slot: slot {slot} positions {start}..{}: {short} KV pages short",
+                start + tokens.len()
+            ));
+        }
+        #[cfg(debug_assertions)]
+        p.debug_tab();
         let max = p.pass_max();
-        let base = slot * p.ctx;
+        let base = p.base(slot);
         for r in passes(tokens.len(), max) {
             let input = BatchIn::Tokens(&tokens[r.clone()]);
             let place = Place::Seq {
@@ -195,7 +269,76 @@ impl<'g> CudaQwen2<'g> {
                 }
             }
         }
+        // Each row's page (a new one every PAGE positions).
+        for r in rows {
+            match self.reserve(p, r.slot, r.pos + 1) {
+                Ok(0) => {}
+                Ok(short) => {
+                    return bad(format!(
+                        "row at {} of slot {}: {short} KV pages short",
+                        r.pos, r.slot
+                    ));
+                }
+                Err(e) => return Err(StepError::Device(e)),
+            }
+        }
+        #[cfg(debug_assertions)]
+        p.debug_tab();
         self.step_checked(p, rows).map_err(StepError::Device)
+    }
+
+    /// Pages for slot `slot`'s positions 0..hi: Ok(0) once it holds them
+    /// (its new table entries copied to the device, ordered before any
+    /// later work), or the pages short (nothing taken). A plain pool holds
+    /// every slot's ctx rows: Ok(0).
+    pub fn reserve(&self, p: &mut CudaPool<'g>, slot: usize, hi: usize) -> Result<usize, String> {
+        if slot >= p.slots || hi > p.ctx {
+            return Err(format!(
+                "reserve: slot {slot} positions ..{hi} (pool {} x {})",
+                p.slots, p.ctx
+            ));
+        }
+        let Some(m) = p.pm.as_mut() else {
+            return Ok(0);
+        };
+        if m.retired() {
+            // Released pages are free once nothing in flight reads them.
+            self.gpu.sync()?;
+            m.flush();
+        }
+        let r = match m.ensure(slot, hi) {
+            Ok(r) => r,
+            Err(NoPages { short }) => return Ok(short),
+        };
+        if !r.is_empty() {
+            let tab = p.c.tab.as_ref().expect("a paged pool's table");
+            let e = slot * m.cap() + r.start;
+            tab.write_at(e * 4, &m.pages(slot)[r])?;
+        }
+        Ok(0)
+    }
+
+    /// Slot `slot` keeps the pages of positions 0..lo (a paged pool; plain:
+    /// nothing changes): the others are free once no work in flight can
+    /// read them, and their table entries point at the sink.
+    pub fn release(&self, p: &mut CudaPool<'g>, slot: usize, lo: usize) -> Result<(), String> {
+        if slot >= p.slots {
+            return Err(format!("release: slot {slot} of {}", p.slots));
+        }
+        let Some(m) = p.pm.as_mut() else {
+            return Ok(());
+        };
+        let (keep, had) = (PageMap::need(lo), m.pages(slot).len());
+        if keep >= had {
+            return Ok(());
+        }
+        m.release(slot, lo);
+        let tab = p.c.tab.as_ref().expect("a paged pool's table");
+        let sink = vec![m.total() as u32; had - keep];
+        // Synchronous: the step in flight is done too, so the pages are free.
+        tab.write_at((slot * m.cap() + keep) * 4, &sink)?;
+        m.flush();
+        Ok(())
     }
 
     /// `step_rows` after its checks.
@@ -217,7 +360,7 @@ impl<'g> CudaQwen2<'g> {
             .iter()
             .map(|&i| RowAt {
                 pos: rows[i].pos as u32,
-                base: (rows[i].slot * p.ctx) as u32,
+                base: p.base(rows[i].slot) as u32,
             })
             .collect();
         let sampled: Vec<(CandSpec, &[u32])> = order[ng..ns]
@@ -373,12 +516,17 @@ impl<'g> CudaQwen2<'g> {
         if !Rc::ptr_eq(&c.kv, &p.c.kv) || slot >= p.slots {
             return Err(format!("retarget: not a view of this pool, or slot {slot}"));
         }
-        if c.tab.is_some() || p.c.tab.is_some() {
-            return Err("retarget: a paged cache or pool (a view is plain rows)".into());
+        let paged = |t: &Option<Rc<DevBuf<'g>>>| t.as_ref().map(Rc::as_ptr);
+        if paged(&c.tab) != paged(&p.c.tab) {
+            return Err("retarget: a view of a paged pool takes its table only".into());
         }
-        let row0 = slot * p.ctx;
-        if c.row0 != row0 {
-            c.row0 = row0;
+        // Paged: the slot's first table entry; plain: its first row.
+        let (at, now) = match p.pm {
+            Some(_) => (&mut c.tab0, p.base(slot)),
+            None => (&mut c.row0, slot * p.ctx),
+        };
+        if *at != now {
+            *at = now;
             c.graph = Default::default();
         }
         Ok(())
@@ -403,8 +551,22 @@ impl<'g> CudaQwen2<'g> {
         if src.mode != p.c.mode || src.net != self.id {
             return Err("adopt: a cache of another model or KV type".into());
         }
-        if src.tab.is_some() || p.c.tab.is_some() {
-            return Err("adopt: a paged cache (row copies are of plain rows)".into());
+        if Rc::ptr_eq(&src.kv, &p.c.kv) && p.pm.is_some() {
+            // A view of the paged pool: in place if it is this slot's (its
+            // positions in the slot's pages, which `reserve` took).
+            if src.tab0 != p.base(slot) {
+                return Err(format!("adopt: another slot's view into slot {slot}"));
+            }
+            let held = p.pm.as_ref().map_or(0, |m| m.pages(slot).len());
+            if held < PageMap::need(n) {
+                return Err(format!(
+                    "adopt: slot {slot} holds {held} pages, not {n} positions"
+                ));
+            }
+            return Ok(0);
+        }
+        if src.tab.is_some() {
+            return Err("adopt: a paged cache of another pool".into());
         }
         if Rc::ptr_eq(&src.kv, &p.c.kv) {
             // A view of the pool (`slot_view`): its rows are in place if
@@ -428,19 +590,37 @@ impl<'g> CudaQwen2<'g> {
         if src.row0 != 0 {
             return Err("adopt: a view of another pool's slot past 0".into());
         }
+        // Runs of positions (first, first row in the pool, count): one,
+        // or a page each through the table.
+        let runs: Vec<(usize, usize, usize)> = match p.pm.is_some() {
+            false => vec![(0, slot * p.ctx, n)],
+            true => {
+                let short = self.reserve(p, slot, n)?;
+                if short > 0 {
+                    return Err(format!("adopt: {short} KV pages short"));
+                }
+                let m = p.pm.as_ref().expect("paged");
+                (0..n)
+                    .step_by(PAGE)
+                    .map(|t| (t, m.pages(slot)[t / PAGE] as usize * PAGE, PAGE.min(n - t)))
+                    .collect()
+            }
+        };
         let (ns, np) = (src.rows, p.c.rows);
         let mut src_at = 0;
         let mut dst_at = 0;
         let mut copied = 0;
         for (row, _) in regions {
             for a in 0..2 * nl {
-                src.kv.copy_into(
-                    src_at + a * ns * row,
-                    &p.c.kv,
-                    dst_at + (a * np + slot * p.ctx) * row,
-                    n * row,
-                )?;
-                copied += n * row;
+                for &(t, r, k) in &runs {
+                    src.kv.copy_into(
+                        src_at + (a * ns + t) * row,
+                        &p.c.kv,
+                        dst_at + (a * np + r) * row,
+                        k * row,
+                    )?;
+                    copied += k * row;
+                }
             }
             src_at += 2 * nl * ns * row;
             dst_at += 2 * nl * np * row;
@@ -496,9 +676,60 @@ impl<'g> BatchLm for CudaQwen2<'g> {
     fn pass_max(&self, pool: &CudaPool<'g>) -> usize {
         pool.pass_max()
     }
+
+    fn reserve(&self, pool: &mut CudaPool<'g>, slot: usize, hi: usize) -> Result<usize, String> {
+        CudaQwen2::reserve(self, pool, slot, hi)
+    }
+
+    fn release(&self, pool: &mut CudaPool<'g>, slot: usize, lo: usize) -> Result<(), String> {
+        CudaQwen2::release(self, pool, slot, lo)
+    }
+
+    fn pages(&self, pool: &CudaPool<'g>) -> Option<PoolPages> {
+        pool.page_info()
+    }
 }
 
 impl CudaPool<'_> {
+    /// Slot `slot`'s first table entry (paged), or first row (plain): a
+    /// `Place::Seq` / `RowAt` base.
+    fn base(&self, slot: usize) -> usize {
+        match &self.pm {
+            Some(m) => slot * m.cap(),
+            None => slot * self.ctx,
+        }
+    }
+
+    /// Debug builds: the allocator's invariants hold and the device table
+    /// is its mirror (a slot's entries its pages, then the sink).
+    #[cfg(debug_assertions)]
+    fn debug_tab(&self) {
+        let (Some(m), Some(t)) = (&self.pm, &self.c.tab) else {
+            return;
+        };
+        m.check();
+        let tab: Vec<u32> = t.read().expect("the page table");
+        for (s, row) in tab.chunks(m.cap()).enumerate() {
+            let l = m.pages(s);
+            assert_eq!(&row[..l.len()], l, "slot {s}'s table row");
+            assert!(
+                row[l.len()..].iter().all(|&e| e as usize == m.total()),
+                "slot {s}'s table past its pages"
+            );
+        }
+    }
+
+    /// `BatchLm::pages`.
+    pub fn page_info(&self) -> Option<PoolPages> {
+        let m = self.pm.as_ref()?;
+        Some(PoolPages {
+            size: PAGE,
+            free: m.free(),
+            total: m.total(),
+            held: (0..self.slots).map(|s| m.pages(s).len()).collect(),
+        })
+    }
+
     /// `BatchLm::pass_max`: the batch scratch's tokens (PREFILL_BATCH, or
     /// PLAN_BATCH when the bigger passes don't fit; `feed_slot` splits by it).
     pub fn pass_max(&self) -> usize {
@@ -528,6 +759,58 @@ mod tests {
             for a in 0..2 * net.n_layers {
                 let s = at + (a * c.rows + base) * row;
                 out.extend_from_slice(&all[s..s + n * row]);
+            }
+            at += 2 * net.n_layers * c.rows * row;
+        }
+        out
+    }
+
+    /// The pool layouts the slot tests run on: plain rows
+    /// (AXON_PAGED_KV=0), pages handed out in order, and shuffled pages
+    /// (AXON_PAGE_SHUFFLE) with a few spare.
+    #[derive(Clone, Copy, Debug)]
+    enum Lay {
+        Plain,
+        Paged,
+        Shuffled(u64),
+    }
+
+    const LAYS: [Lay; 3] = [Lay::Plain, Lay::Paged, Lay::Shuffled(0x5eed)];
+
+    fn pool_of<'g>(net: &CudaQwen2<'g>, slots: usize, ctx: usize, lay: Lay) -> CudaPool<'g> {
+        let pages = slots * ctx.div_ceil(PAGE);
+        match lay {
+            Lay::Plain => net.pool_with(slots, ctx, None, None),
+            Lay::Paged => net.pool_with(slots, ctx, Some(pages), None),
+            Lay::Shuffled(s) => net.pool_with(slots, ctx, Some(pages + 3), Some(s)),
+        }
+        .unwrap()
+    }
+
+    /// Slot `slot`'s first `n` positions of every layer (a paged slot's:
+    /// those it holds pages for, at most n), gathered through its pages:
+    /// `slot_bytes`' layout.
+    fn pool_bytes(net: &CudaQwen2, p: &CudaPool, slot: usize, n: usize) -> Vec<u8> {
+        let Some(m) = &p.pm else {
+            return slot_bytes(net, &p.c, slot * p.ctx, n);
+        };
+        let pages = m.pages(slot);
+        let n = n.min(pages.len() * PAGE);
+        let all: Vec<u8> = p.c.kv.read().unwrap();
+        let (c, kvd) = (&p.c, net.kv_dim());
+        let rows: Vec<usize> = match c.mode {
+            CacheKv::F16 => vec![kvd * 2],
+            CacheKv::Q8 { group } => vec![kvd, kvd / group * 4],
+        };
+        let mut out = Vec::new();
+        let mut at = 0;
+        for row in rows {
+            for a in 0..2 * net.n_layers {
+                for t in (0..n).step_by(PAGE) {
+                    let r = pages[t / PAGE] as usize * PAGE;
+                    let s = at + (a * c.rows + r) * row;
+                    out.extend_from_slice(&all[s..s + PAGE.min(n - t) * row]);
+                }
             }
             at += 2 * net.n_layers * c.rows * row;
         }
@@ -590,7 +873,10 @@ mod tests {
                 let net = CudaQwen2::with_kv(&g, &km, &m, ctx, kv, false).unwrap();
                 let v = net.vocab;
                 let prompt = ids(61, 7, v);
-                for (nb, slot) in [(1usize, 0usize), (5, 2), (16, 1)] {
+                let cases = LAYS
+                    .iter()
+                    .flat_map(|&l| [(1usize, 0usize), (5, 2), (16, 1)].map(|x| (l, x)));
+                for (lay, (nb, slot)) in cases {
                     let toks = ids(nb, 99 + nb as u32, v);
                     let start = prompt.len();
                     let mut recent = prompt.clone();
@@ -607,7 +893,7 @@ mod tests {
                     let want_g = net.verify_argmax(&toks, start, &mut c);
                     let want_kv = slot_bytes(&net, &c, 0, start + nb);
                     // The pool: the same prompt in `slot`, then one step.
-                    let mut p = net.pool(3, ctx).unwrap();
+                    let mut p = pool_of(&net, 3, ctx, lay);
                     net.feed_slot(&mut p, slot, &prompt, 0).unwrap();
                     let n = recent.len();
                     let rows: Vec<SeqRow> = (0..nb)
@@ -622,7 +908,7 @@ mod tests {
                         })
                         .collect();
                     let got = net.step_rows(&mut p, &rows).unwrap();
-                    let what = format!("{} {kv:?} nb {nb} slot {slot}", m.arch);
+                    let what = format!("{} {kv:?} {lay:?} nb {nb} slot {slot}", m.arch);
                     for (b, o) in got.iter().enumerate() {
                         assert_eq!(*o, RowOut::Cands(want_c[b].clone()), "{what} row {b}");
                         if let RowOut::Cands(c) = o {
@@ -632,9 +918,8 @@ mod tests {
                             assert_eq!(bits(c), bits(&want_c[b]), "{what} row {b} bits");
                         }
                     }
-                    let base = slot * ctx;
                     assert!(
-                        slot_bytes(&net, &p.c, base, start + nb) == want_kv,
+                        pool_bytes(&net, &p, slot, start + nb) == want_kv,
                         "{what}: KV bytes"
                     );
                     // Greedy rows (argmax_b), the same positions again (rows
@@ -650,7 +935,7 @@ mod tests {
                     let want: Vec<RowOut> = want_g.iter().map(|&t| RowOut::Pick(t)).collect();
                     assert_eq!(got, want, "{what}: greedy");
                     assert!(
-                        slot_bytes(&net, &p.c, base, start + nb) == want_kv,
+                        pool_bytes(&net, &p, slot, start + nb) == want_kv,
                         "{what}: KV bytes after the greedy step"
                     );
                 }
@@ -748,9 +1033,10 @@ mod tests {
                 // The handed-over request runs alone in a plain cache
                 // (adopt copies its rows), or in a view of its slot
                 // (`slot_view`, as serve's: adopt copies nothing).
-                for via_view in [false, true] {
+                let cases = LAYS.iter().flat_map(|&l| [(l, false), (l, true)]);
+                for (lay, via_view) in cases {
                     let slots = nr + 1;
-                    let mut p = net.pool(slots, ctx).unwrap();
+                    let mut p = pool_of(&net, slots, ctx, lay);
                     let mut perm = 0x9e37_79b9u32;
                     let mut rnd = |n: usize| {
                         perm ^= perm << 13;
@@ -778,7 +1064,12 @@ mod tests {
                     // The handed-over request's first steps, alone.
                     let mut c = match via_view {
                         false => net.new_cache(ctx),
-                        true => net.slot_view(&p, slot_of[handed]).unwrap(),
+                        true => {
+                            // The `Lm` calls take no pages: reserved first.
+                            let n = prompts[handed].len() + handed_at;
+                            assert_eq!(net.reserve(&mut p, slot_of[handed], n), Ok(0));
+                            net.slot_view(&p, slot_of[handed]).unwrap()
+                        }
                     };
                     {
                         let h = &mut hist[handed];
@@ -849,7 +1140,7 @@ mod tests {
                         let outs = net.step_rows(&mut p, &rows).unwrap();
                         for (&i, o) in live.iter().zip(outs) {
                             let what = format!(
-                                "{} {kv:?} view {via_view} request {i} step {}",
+                                "{} {kv:?} {lay:?} view {via_view} request {i} step {}",
                                 m.arch, done[i]
                             );
                             assert_eq!(o, refs[i].0[done[i]], "{what}");
@@ -863,12 +1154,12 @@ mod tests {
                         }
                     }
                     for i in 0..nr {
-                        let what = format!("{} {kv:?} view {via_view} request {i}", m.arch);
+                        let what = format!("{} {kv:?} {lay:?} view {via_view} request {i}", m.arch);
                         assert_eq!(done[i], steps, "{what}");
                         assert_eq!(hist[i], refs[i].1, "{what}: tokens");
                         let n = hist[i].len() - 1;
                         assert!(
-                            slot_bytes(&net, &p.c, slot_of[i] * ctx, n) == refs[i].2,
+                            pool_bytes(&net, &p, slot_of[i], n) == refs[i].2,
                             "{what}: KV bytes"
                         );
                     }
@@ -904,10 +1195,10 @@ mod tests {
         out
     }
 
-    /// A slot view is never paged: `set_tab` refuses slot 0's view (row0 0)
-    /// as any other's and a pool with a live view, `retarget_view` refuses a
-    /// view with a table, and `slot_view` a paged pool (a table and a view
-    /// offset never both apply).
+    /// Views and tables: `set_tab` (tests' tables) refuses a view and a
+    /// pool with a live view; a plain pool's view never gets a table
+    /// (`retarget_view` refuses one); a paged pool's view shares the pool's
+    /// table from its slot's first entry, and `retarget_view` moves it.
     #[test]
     fn paged_views_refused() {
         let Some(g) = crate::testutil::gpu() else {
@@ -918,18 +1209,19 @@ mod tests {
         };
         let km = Kernels::module(&g).unwrap();
         let net = CudaQwen2::with_kv(&g, &km, &m, 128, CacheKv::F16, false).unwrap();
-        let mut p = net.pool(2, 128).unwrap();
+        let p = pool_of(&net, 2, 128, Lay::Plain);
         for slot in [0, 1] {
             let mut v = net.slot_view(&p, slot).unwrap();
             let t = g.upload(&[0u32, 1]).unwrap();
             let set = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| v.set_tab(Some(t))));
             assert!(set.is_err(), "set_tab on slot {slot}'s view");
-            v.tab = Some(g.upload(&[0u32, 1]).unwrap());
+            v.tab = Some(Rc::new(g.upload(&[0u32, 1]).unwrap()));
             assert!(
                 net.retarget_view(&p, &mut v, 1 - slot).is_err(),
-                "retarget of a paged view"
+                "retarget of a paged view of a plain pool"
             );
         }
+        let mut p = pool_of(&net, 2, 128, Lay::Plain);
         {
             let _v = net.slot_view(&p, 0).unwrap();
             let t = g.upload(&[0u32, 1, 2, 3]).unwrap();
@@ -937,8 +1229,22 @@ mod tests {
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| p.c.set_tab(Some(t))));
             assert!(set.is_err(), "set_tab on a pool with a live view");
         }
-        p.c.set_tab(Some(g.upload(&[0u32, 1, 2, 3]).unwrap()));
-        assert!(net.slot_view(&p, 0).is_err(), "slot_view of a paged pool");
+        let p = pool_of(&net, 2, 128, Lay::Paged);
+        let mut v = net.slot_view(&p, 1).unwrap();
+        assert!(Rc::ptr_eq(
+            v.tab.as_ref().unwrap(),
+            p.c.tab.as_ref().unwrap()
+        ));
+        assert_eq!((v.tab0, v.row0, v.max_ctx), (2, 0, 128));
+        net.retarget_view(&p, &mut v, 0).unwrap();
+        assert_eq!(v.tab0, 0);
+        let t = g.upload(&[0u32, 1]).unwrap();
+        let set = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| v.set_tab(Some(t))));
+        assert!(set.is_err(), "set_tab on a paged pool's view");
+        let mut plain = net
+            .slot_view(&pool_of(&net, 2, 128, Lay::Plain), 0)
+            .unwrap();
+        assert!(net.retarget_view(&p, &mut plain, 1).is_err());
     }
 
     /// A view of a slot (`slot_view`, serve's single-request cache) runs
@@ -963,70 +1269,267 @@ mod tests {
                 let want = run(&net, &prompt, &mut plain);
                 let want_kv = slot_bytes(&net, &plain, 0, 90);
                 let slots = 3;
-                let mut p = net.pool(slots, ctx).unwrap();
-                let other = ids(30, 5, net.vocab);
-                net.feed_slot(&mut p, 2, &other, 0).unwrap();
-                let other_kv = slot_bytes(&net, &p.c, 2 * ctx, 30);
-                assert!(slot_bytes(&net, &p.c, 2 * ctx, 30) == other_kv);
-                let mut row = Vec::new();
-                net.save_kv(&plain, 0, 90, &mut row).unwrap();
-                let mut moved: Option<CudaCache> = None;
-                for slot in [0, 1] {
-                    let what = format!("{} {kv:?} slot {slot}", m.arch);
-                    // Every other slot's rows, whole, before the view runs.
-                    let others: Vec<(usize, Vec<u8>)> = (0..slots)
-                        .filter(|&o| o != slot)
-                        .map(|o| (o, slot_bytes(&net, &p.c, o * ctx, ctx)))
-                        .collect();
-                    // Slot 0's view, then the same view pointed at slot 1
-                    // (`retarget_view`: its graphs captured again).
-                    let mut c = match moved.take() {
-                        None => net.slot_view(&p, slot).unwrap(),
-                        Some(mut c) => {
-                            net.retarget_view(&p, &mut c, slot).unwrap();
-                            c
-                        }
-                    };
-                    assert_eq!(run(&net, &prompt, &mut c), want, "{what}: picks");
-                    assert!(
-                        slot_bytes(&net, &p.c, slot * ctx, 90) == want_kv,
-                        "{what}: KV bytes"
-                    );
-                    for (o, b) in &others {
+                for lay in LAYS {
+                    let mut p = pool_of(&net, slots, ctx, lay);
+                    let other = ids(30, 5, net.vocab);
+                    net.feed_slot(&mut p, 2, &other, 0).unwrap();
+                    let other_kv = pool_bytes(&net, &p, 2, 30);
+                    assert!(pool_bytes(&net, &p, 2, 30) == other_kv);
+                    let mut row = Vec::new();
+                    net.save_kv(&plain, 0, 90, &mut row).unwrap();
+                    let mut moved: Option<CudaCache> = None;
+                    for slot in [0, 1] {
+                        let what = format!("{} {kv:?} {lay:?} slot {slot}", m.arch);
+                        // The `Lm` calls take no pages: the slot's, reserved.
+                        assert_eq!(net.reserve(&mut p, slot, ctx), Ok(0), "{what}");
+                        // Every other slot's rows, whole, before the view runs.
+                        let others: Vec<(usize, Vec<u8>)> = (0..slots)
+                            .filter(|&o| o != slot)
+                            .map(|o| (o, pool_bytes(&net, &p, o, ctx)))
+                            .collect();
+                        // Slot 0's view, then the same view pointed at slot 1
+                        // (`retarget_view`: its graphs captured again).
+                        let mut c = match moved.take() {
+                            None => net.slot_view(&p, slot).unwrap(),
+                            Some(mut c) => {
+                                net.retarget_view(&p, &mut c, slot).unwrap();
+                                c
+                            }
+                        };
+                        assert_eq!(run(&net, &prompt, &mut c), want, "{what}: picks");
                         assert!(
-                            slot_bytes(&net, &p.c, o * ctx, ctx) == *b,
-                            "{what}: slot {o}'s bytes"
+                            pool_bytes(&net, &p, slot, 90) == want_kv,
+                            "{what}: KV bytes"
                         );
+                        for (o, b) in &others {
+                            assert!(
+                                pool_bytes(&net, &p, *o, ctx) == *b,
+                                "{what}: slot {o}'s bytes"
+                            );
+                        }
+                        assert_eq!(net.adopt_cache(&mut p, slot, &c, 90), Ok(0), "{what}");
+                        assert!(pool_bytes(&net, &p, slot, 90) == want_kv, "{what}");
+                        assert!(net.adopt_cache(&mut p, 2, &c, 90).is_err(), "{what}");
+                        // kvsave's rows of a view: the slot's, and no further.
+                        let mut img = Vec::new();
+                        net.save_kv(&c, 0, 90, &mut img).unwrap();
+                        assert!(img == row, "{what}: saved image");
+                        net.save_kv(&c, 0, ctx, &mut Vec::new()).unwrap();
+                        assert!(
+                            net.save_kv(&c, 0, ctx + 1, &mut Vec::new()).is_err(),
+                            "{what}"
+                        );
+                        assert!(
+                            net.save_kv(&c, ctx, ctx + 1, &mut Vec::new()).is_err(),
+                            "{what}"
+                        );
+                        let big = vec![0u8; img.len() * 4];
+                        assert!(
+                            net.load_kv(&mut c, ctx - 10, ctx + 10, &mut &big[..])
+                                .is_err(),
+                            "{what}: load past the slot"
+                        );
+                        moved = Some(c);
                     }
-                    assert_eq!(net.adopt_cache(&mut p, slot, &c, 90), Ok(0), "{what}");
-                    assert!(slot_bytes(&net, &p.c, slot * ctx, 90) == want_kv, "{what}");
-                    assert!(net.adopt_cache(&mut p, 2, &c, 90).is_err(), "{what}");
-                    // kvsave's rows of a view: the slot's, and no further.
-                    let mut img = Vec::new();
-                    net.save_kv(&c, 0, 90, &mut img).unwrap();
-                    assert!(img == row, "{what}: saved image");
-                    net.save_kv(&c, 0, ctx, &mut Vec::new()).unwrap();
-                    assert!(
-                        net.save_kv(&c, 0, ctx + 1, &mut Vec::new()).is_err(),
-                        "{what}"
-                    );
-                    assert!(
-                        net.save_kv(&c, ctx, ctx + 1, &mut Vec::new()).is_err(),
-                        "{what}"
-                    );
-                    let big = vec![0u8; img.len() * 4];
-                    assert!(
-                        net.load_kv(&mut c, ctx - 10, ctx + 10, &mut &big[..])
-                            .is_err(),
-                        "{what}: load past the slot"
-                    );
-                    moved = Some(c);
+                    assert!(net.slot_view(&p, slots).is_err());
+                    // A plain cache's adopt copies its rows (what the view's
+                    // count of 0 is told apart from).
+                    assert!(net.adopt_cache(&mut p, 2, &plain, 90).unwrap() > 0);
+                    assert!(pool_bytes(&net, &p, 2, 90) == want_kv);
                 }
-                assert!(net.slot_view(&p, slots).is_err());
-                // A plain cache's adopt copies its rows (what the view's
-                // count of 0 is told apart from).
-                assert!(net.adopt_cache(&mut p, 2, &plain, 90).unwrap() > 0);
-                assert!(slot_bytes(&net, &p.c, 2 * ctx, 90) == want_kv);
+            }
+        }
+    }
+
+    /// `t` fed into slot `slot` from position `at` in uneven chunks
+    /// (`chunk` first).
+    fn feed_chunks<'g>(
+        net: &CudaQwen2<'g>,
+        p: &mut CudaPool<'g>,
+        slot: usize,
+        t: &[u32],
+        at: usize,
+        chunk: usize,
+    ) {
+        let mut i = 0;
+        for n in [chunk, 1, 64, 63, 200].iter().cycle() {
+            let e = (i + n).min(t.len());
+            net.feed_slot(p, slot, &t[i..e], at + i).unwrap();
+            i = e;
+            if i == t.len() {
+                break;
+            }
+        }
+    }
+
+    /// 8 greedy decode steps on `c` from token `t` at `pos`.
+    fn cont<'g>(net: &CudaQwen2<'g>, c: &mut CudaCache<'g>, mut t: u32, pos: usize) -> Vec<u32> {
+        (0..8)
+            .map(|i| {
+                t = net.forward_argmax(t, pos + i, c);
+                t
+            })
+            .collect()
+    }
+
+    /// Paged pool life (spec §3.1.2), four model families (gemma3: head
+    /// 256, the split kernel, its 512-position window across pages), over
+    /// shuffled pages: prompts fed in uneven chunks, a slot's pages
+    /// released and taken by another, a prefix kept and the rest fed again,
+    /// then steps of both slots: results, tokens and KV bytes == running
+    /// each alone. Out of pages: `reserve` says how many are short and
+    /// takes none, `feed_slot` and `step_rows` refuse before any work.
+    #[test]
+    fn paged_release_refeed_four_families() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let km = Kernels::module(&g).unwrap();
+        let ms: Vec<Model> = [
+            crate::testutil::model(),
+            crate::testutil::qwen3_model(),
+            crate::testutil::llama_model(),
+            crate::testutil::gemma3_model(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let (ctx, steps) = (768usize, 6usize);
+        for m in ms {
+            let kvs: &[CacheKv] = match m.arch.as_str() {
+                "qwen2" => &[CacheKv::F16, CacheKv::Q8 { group: 0 }],
+                _ => &[CacheKv::F16],
+            };
+            for &kv in kvs {
+                let net = CudaQwen2::with_kv(&g, &km, &m, ctx, kv, false).unwrap();
+                let v = net.vocab;
+                let what = format!("{} {kv:?}", m.arch);
+                let (a, b, c) = (ids(601, 11, v), ids(300, 12, v), ids(421, 13, v));
+                let ref_a = solo(&net, ctx, &a, Kind::Greedy, steps);
+                let ref_c = solo(&net, ctx, &c, Kind::Greedy, steps);
+                // A's 10 pages + C's 7 + one each to grow, and 2 spare.
+                let need = PageMap::need(601 + steps) + PageMap::need(421 + steps);
+                let mut p = net.pool_with(3, ctx, Some(need + 2), Some(0xfeed)).unwrap();
+                feed_chunks(&net, &mut p, 0, &a[..600], 0, 37);
+                feed_chunks(&net, &mut p, 1, &b, 0, 100);
+                // Slot 1 gone: C takes its pages; A keeps 200 and refeeds.
+                net.release(&mut p, 1, 0).unwrap();
+                feed_chunks(&net, &mut p, 2, &c[..420], 0, 129);
+                net.release(&mut p, 0, 200).unwrap();
+                assert_eq!(p.page_info().unwrap().held[0], 4, "{what}");
+                feed_chunks(&net, &mut p, 0, &a[200..600], 200, 65);
+                // Out of pages.
+                let before = p.page_info().unwrap();
+                let short = net.reserve(&mut p, 1, ctx).unwrap();
+                assert_eq!(short, PageMap::need(ctx) - before.free, "{what}");
+                assert_eq!(p.page_info().unwrap(), before, "{what}: nothing taken");
+                assert!(net.feed_slot(&mut p, 1, &b, 0).is_err(), "{what}");
+                assert_eq!(p.page_info().unwrap(), before, "{what}");
+                let mut hist = [a.clone(), c.clone()];
+                for step in 0..steps {
+                    let rows: Vec<SeqRow> = [(0usize, 0usize), (1, 2)]
+                        .iter()
+                        .map(|&(i, slot)| SeqRow {
+                            token: hist[i][hist[i].len() - 1],
+                            pos: hist[i].len() - 1,
+                            slot,
+                            head: RowHead::Argmax,
+                        })
+                        .collect();
+                    let outs = net.step_rows(&mut p, &rows).unwrap();
+                    for (i, o) in outs.into_iter().enumerate() {
+                        let r = [&ref_a, &ref_c][i];
+                        assert_eq!(o, r.0[step], "{what} request {i} step {step}");
+                        let RowOut::Pick(t) = o else { unreachable!() };
+                        hist[i].push(t);
+                    }
+                }
+                assert_eq!(hist[0], ref_a.1, "{what}: tokens");
+                assert_eq!(hist[1], ref_c.1, "{what}: tokens");
+                assert!(
+                    pool_bytes(&net, &p, 0, 600 + steps) == ref_a.2,
+                    "{what}: A's KV"
+                );
+                assert!(
+                    pool_bytes(&net, &p, 2, 420 + steps) == ref_c.2,
+                    "{what}: C's KV"
+                );
+                // A step whose row needs a page none is free for: refused.
+                let free = p.page_info().unwrap().free;
+                let hog = net.reserve(&mut p, 1, free * PAGE).unwrap();
+                assert_eq!(hog, 0, "{what}");
+                let row = SeqRow {
+                    token: 5,
+                    pos: free * PAGE,
+                    slot: 1,
+                    head: RowHead::Argmax,
+                };
+                let before = p.page_info().unwrap();
+                assert!(
+                    matches!(net.step_rows(&mut p, &[row]), Err(StepError::Input(_))),
+                    "{what}: a step past the pages"
+                );
+                assert_eq!(p.page_info().unwrap(), before, "{what}");
+            }
+        }
+    }
+
+    /// kvsave over pages (spec §3.1.5): a paged slot's image is a plain
+    /// cache's (the file format doesn't change); it restores into a plain
+    /// cache and into a slot of a differently shuffled pool, and both
+    /// continue as the slot does.
+    #[test]
+    fn paged_kvsave_round_trip() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let km = Kernels::module(&g).unwrap();
+        for m in models() {
+            for kv in [CacheKv::F16, CacheKv::Q8 { group: 0 }] {
+                let ctx = 320;
+                let net = CudaQwen2::with_kv(&g, &km, &m, ctx, kv, false).unwrap();
+                let what = format!("{} {kv:?}", m.arch);
+                let prompt = ids(151, 21, net.vocab);
+                let n = 150;
+                let mut plain = net.new_cache(ctx);
+                net.feed_batch(&prompt[..n], 0, &mut plain);
+                let mut want_img = Vec::new();
+                net.save_kv(&plain, 0, n, &mut want_img).unwrap();
+                let pa = |seed| net.pool_with(3, ctx, Some(16), Some(seed)).unwrap();
+                let mut p = pa(1);
+                net.feed_slot(&mut p, 2, &ids(70, 3, net.vocab), 0).unwrap();
+                net.feed_slot(&mut p, 1, &prompt[..n], 0).unwrap();
+                let v = net.slot_view(&p, 1).unwrap();
+                let mut img = Vec::new();
+                net.save_kv(&v, 0, n, &mut img).unwrap();
+                assert!(img == want_img, "{what}: image");
+                assert!(net.save_kv(&v, 0, 193, &mut Vec::new()).is_err(), "{what}");
+                let want = cont(&net, &mut plain, prompt[n], n);
+                let mut c2 = net.new_cache(ctx);
+                net.load_kv(&mut c2, 0, n, &mut &img[..]).unwrap();
+                assert_eq!(
+                    cont(&net, &mut c2, prompt[n], n),
+                    want,
+                    "{what}: restored into a plain cache"
+                );
+                let mut q = pa(2);
+                net.feed_slot(&mut q, 0, &ids(130, 4, net.vocab), 0)
+                    .unwrap();
+                assert_eq!(net.reserve(&mut q, 2, n + 8), Ok(0));
+                let mut w = net.slot_view(&q, 2).unwrap();
+                net.load_kv(&mut w, 0, n, &mut &img[..]).unwrap();
+                assert_eq!(
+                    cont(&net, &mut w, prompt[n], n),
+                    want,
+                    "{what}: restored into another pool"
+                );
+                let mut v = v;
+                assert_eq!(net.reserve(&mut p, 1, n + 8), Ok(0));
+                assert_eq!(
+                    cont(&net, &mut v, prompt[n], n),
+                    want,
+                    "{what}: the slot itself"
+                );
             }
         }
     }
@@ -1130,7 +1633,7 @@ mod tests {
                 assert_eq!(hist[i], refs[i].1, "{} request {i}: tokens", m.arch);
                 let n = hist[i].len() - 1;
                 assert!(
-                    slot_bytes(&net, &p.c, slot_of(i) * ctx, n) == refs[i].2,
+                    pool_bytes(&net, &p, slot_of(i), n) == refs[i].2,
                     "{} request {i}: KV bytes",
                     m.arch
                 );

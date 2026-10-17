@@ -213,7 +213,7 @@ impl<'a, 't> Batch<'a, 't> {
     /// its first row) is fed a chunk per step from the next step on, past
     /// the rows the slot already holds; it decodes from the step that feeds
     /// its last chunk.
-    pub fn admit(&mut self, job: Job, out: TextOut<'t>) {
+    pub fn admit(&mut self, job: Job, out: TextOut<'t>) -> Result<(), String> {
         let p = &job.prompt;
         let last = p.len() - 1;
         let (slot, common) = self.free_slot(p).expect("admit: a free slot");
@@ -229,6 +229,8 @@ impl<'a, 't> Batch<'a, 't> {
         self.busy[slot] = true;
         self.touch(slot);
         self.held[slot].truncate(reuse);
+        // The rest of the slot's pages are free (a paged pool).
+        self.net.release(&mut self.pool, slot, reuse)?;
         let sampler = job.sample.map(Sampler::new);
         let now = Instant::now();
         self.pre.push(Prefill {
@@ -248,6 +250,7 @@ impl<'a, 't> Batch<'a, 't> {
             starved: 0,
             t0: now,
         });
+        Ok(())
     }
 
     /// What this step may feed: everything without chunking; with
@@ -343,9 +346,14 @@ impl<'a, 't> Batch<'a, 't> {
     /// recently used), `cache` (a `slot_cache` of the pool) pointed at it,
     /// and the tokens the slot holds (the engine reuses as many as the
     /// prompt shares); the slot holds nothing meanwhile. The batch is idle.
+    /// A paged pool: the slot holds pages for every position the request
+    /// may write (`n_gen` past its prompt, at most a slot's ctx), since the
+    /// `Lm` calls on the view take none; idle slots' prefixes give theirs
+    /// up for them, least recently used first.
     pub fn lend_solo(
         &mut self,
         prompt: &[u32],
+        n_gen: usize,
         cache: &mut <Backend<'a> as crate::lm::Lm>::Cache,
     ) -> Result<Vec<u32>, String> {
         assert!(self.idle(), "lend_solo: the batch is running");
@@ -353,7 +361,32 @@ impl<'a, 't> Batch<'a, 't> {
         self.net.move_slot_cache(&self.pool, cache, slot)?;
         self.solo = slot;
         self.touch(slot);
+        let want = prompt.len().saturating_add(n_gen).min(self.ctx);
+        let mut short = self.net.reserve(&mut self.pool, slot, want)?;
+        while short > 0 && self.reclaim(slot)? {
+            short = self.net.reserve(&mut self.pool, slot, want)?;
+        }
+        if short > 0 {
+            return Err(format!("{short} KV pages short for a request alone"));
+        }
         Ok(std::mem::take(&mut self.held[slot]))
+    }
+
+    /// The least recently used idle slot (not `keep`) holding pages gives
+    /// them all up (its prefix forgotten): whether there was one.
+    fn reclaim(&mut self, keep: usize) -> Result<bool, String> {
+        let Some(pages) = self.net.pages(&self.pool) else {
+            return Ok(false);
+        };
+        let victim = (0..self.slots)
+            .filter(|&s| s != keep && !self.busy[s] && pages.held[s] > 0)
+            .min_by_key(|&s| self.used[s]);
+        let Some(s) = victim else {
+            return Ok(false);
+        };
+        self.held[s].clear();
+        self.net.release(&mut self.pool, s, 0)?;
+        Ok(true)
     }
 
     /// The slot the S1 path runs in (`lend_solo`).
@@ -363,8 +396,11 @@ impl<'a, 't> Batch<'a, 't> {
 
     /// The S1 path ended (without a hand-over): its slot holds the rows of
     /// `hist`.
-    pub fn end_solo(&mut self, hist: Vec<u32>) {
+    pub fn end_solo(&mut self, hist: Vec<u32>) -> Result<(), String> {
+        // Pages past its rows (reserved for what it didn't generate) free.
+        self.net.release(&mut self.pool, self.solo, hist.len())?;
         self.held[self.solo] = hist;
+        Ok(())
     }
 
     /// Take over a request `generate` was running on `cache` (the S1 path,
@@ -379,6 +415,8 @@ impl<'a, 't> Batch<'a, 't> {
         let slot = self.solo;
         assert!(!self.busy[slot], "adopt: the S1 slot is busy");
         self.net.adopt(&mut self.pool, slot, cache, n)?;
+        // Its pages past its rows free: the steps take each next one.
+        self.net.release(&mut self.pool, slot, n)?;
         self.busy[slot] = true;
         self.held[slot] = seq.hist[..n].to_vec();
         seq.slot = slot;

@@ -999,7 +999,10 @@ fn engine(
         {
             let job = waiting.remove(i).unwrap();
             let out = text_out(e.tok, &job);
-            b.admit(job, out);
+            let tx = job.tx.clone();
+            if let Err(err) = or_exit("an admission", || b.admit(job, out)) {
+                fatal(b, &err, Some(tx));
+            }
         } else if b.idle() {
             if let Some(job) = waiting.pop_front() {
                 let ho = Handover {
@@ -1013,7 +1016,7 @@ fn engine(
                 // least recently used): from the rows the slot holds, and
                 // the slot holds its rows after.
                 let lent = or_exit("a slot for a request alone", || {
-                    b.lend_solo(&job.prompt, &mut e.cache)
+                    b.lend_solo(&job.prompt, job.n_gen, &mut e.cache)
                 });
                 match lent {
                     Ok(hist) => e.hist = hist,
@@ -1027,7 +1030,11 @@ fn engine(
                             fatal(b, &err, Some(tx));
                         }
                     }
-                    None => b.end_solo(std::mem::take(&mut e.hist)),
+                    None => {
+                        if let Err(err) = b.end_solo(std::mem::take(&mut e.hist)) {
+                            fatal(b, &err, None);
+                        }
+                    }
                 }
             }
             continue;

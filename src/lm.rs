@@ -198,6 +198,30 @@ pub trait BatchLm: Lm {
     /// Most tokens one of `feed_slot`'s passes takes: a longer feed is
     /// split into equal passes of at most this many.
     fn pass_max(&self, pool: &Self::Pool) -> usize;
+
+    /// KV pages for slot `slot`'s positions 0..hi (a paged pool, specs
+    /// r11): Ok(0) once it holds them, or how many pages are short (nothing
+    /// taken). `feed_slot` and `step` take them themselves; the `Lm` calls
+    /// on a `slot_cache` don't (infallible), so whoever runs those reserves
+    /// the positions they write first. A plain pool: Ok(0).
+    fn reserve(&self, pool: &mut Self::Pool, slot: usize, hi: usize) -> Result<usize, String>;
+
+    /// Slot `slot` keeps the pages of positions 0..lo; the rest are free.
+    fn release(&self, pool: &mut Self::Pool, slot: usize, lo: usize) -> Result<(), String>;
+
+    /// The pool's pages (None: plain, every slot its ctx rows).
+    fn pages(&self, pool: &Self::Pool) -> Option<PoolPages>;
+}
+
+/// A paged pool's pages (`BatchLm::pages`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PoolPages {
+    /// Positions per page.
+    pub size: usize,
+    pub free: usize,
+    pub total: usize,
+    /// Pages each slot holds.
+    pub held: Vec<usize>,
 }
 
 impl Lm for Qwen2<'_> {
@@ -717,5 +741,23 @@ impl BatchLm for Backend<'_> {
 
     fn pass_max(&self, pool: &Self::Pool) -> usize {
         pool.pass_max()
+    }
+
+    fn reserve(&self, pool: &mut Self::Pool, slot: usize, hi: usize) -> Result<usize, String> {
+        match self {
+            Backend::Cuda(n) => n.reserve(pool, slot, hi),
+            _ => unreachable!("a pool is the GPU model's"),
+        }
+    }
+
+    fn release(&self, pool: &mut Self::Pool, slot: usize, lo: usize) -> Result<(), String> {
+        match self {
+            Backend::Cuda(n) => n.release(pool, slot, lo),
+            _ => unreachable!("a pool is the GPU model's"),
+        }
+    }
+
+    fn pages(&self, pool: &Self::Pool) -> Option<PoolPages> {
+        pool.page_info()
     }
 }

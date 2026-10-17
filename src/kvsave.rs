@@ -407,7 +407,7 @@ impl<'g> KvIo for CudaQwen2<'g> {
             "info": { "driver": driver },
             "kv": self.cache_kv_name(c),
             "layers": layers, "kv_dim": kvd, "head_dim": hd,
-            "row_bytes": self.cache_rows(c).row_bytes(),
+            "row_bytes": self.cache_row_bytes(c),
         }))
     }
 

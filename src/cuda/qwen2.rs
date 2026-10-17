@@ -474,8 +474,8 @@ pub struct CudaCache<'g> {
     /// The row position 0 is at (0, or a view's slot's first row).
     row0: usize,
     /// A view of a pool's rows (`slot_view`), whatever its row0 (slot 0's
-    /// view has row0 0): never paged (`set_tab`, `retarget_view`).
-    #[cfg_attr(not(test), allow(dead_code))] // read by set_tab (tests, until stage 2)
+    /// view has row0 0): `set_tab` refuses it (a paged pool's views share
+    /// its table: `slot_view`).
     view: bool,
     /// Q8: this token's keys and values, f32 [2][kv_dim], on their way into
     /// the cache (qkv_rope_f32 to attn_split_q8). Empty for F16.
@@ -513,14 +513,20 @@ pub struct CudaCache<'g> {
     /// Paged KV (specs r11): the page table, u32 entries (decode.cu
     /// pg_row; None: plain rows, the identity). A one-sequence pass reads
     /// the sequence's table from entry `Place::Seq` base on, a `Place::Rows`
-    /// token from its `RowAt::base`; the decode step from entry 0.
-    tab: Option<DevBuf<'g>>,
+    /// token from its `RowAt::base`; the decode step from entry 0. Shared
+    /// by a paged pool and its slot views (`slot_view`).
+    tab: Option<Rc<DevBuf<'g>>>,
+    /// The table entry this cache's position 0 is at (a paged pool's slot
+    /// view: its slot's first entry; else 0).
+    tab0: usize,
 }
 
 impl<'g> CudaCache<'g> {
     /// The page table from entry `e` on, as a kernel argument (null: none).
     fn tab_at(&self, e: usize) -> Arg {
-        self.tab.as_ref().map_or(Arg::Ptr(0), |t| t.arg_at(e * 4))
+        self.tab
+            .as_ref()
+            .map_or(Arg::Ptr(0), |t| t.arg_at((self.tab0 + e) * 4))
     }
 
     /// Debug builds: a sequence counted from `base` (paged: its first table
@@ -531,7 +537,7 @@ impl<'g> CudaCache<'g> {
     pub(super) fn debug_covers(&self, base: usize, end: usize) {
         match &self.tab {
             Some(t) => debug_assert!(
-                base + end.div_ceil(ATT_BLK) <= t.len() / 4,
+                self.tab0 + base + end.div_ceil(ATT_BLK) <= t.len() / 4,
                 "positions ..{end} from table entry {base}: the table has {} entries",
                 t.len() / 4
             ),
@@ -555,7 +561,8 @@ impl<'g> CudaCache<'g> {
             self.view || Rc::strong_count(&self.kv) == 1,
             "set_tab on a pool with live slot views"
         );
-        self.tab = tab;
+        self.tab = tab.map(Rc::new);
+        self.tab0 = 0;
         self.graph = Default::default();
     }
 }
@@ -1784,6 +1791,7 @@ impl<'g> CudaQwen2<'g> {
             b: Some(self.batch_bufs(self.batch_for(att_ctx), att_ctx)?),
             samp: None,
             tab: None,
+            tab0: 0,
         };
         // Stale KV rows are never read (attention stops at pos), but zeroed
         // memory keeps a bug from reading NaNs (a view's pool zeroed its).
@@ -2882,6 +2890,7 @@ mod batch;
 pub(crate) mod kvio;
 #[cfg(test)]
 mod paged_tests;
+pub(crate) mod pages;
 pub mod pipeline;
 #[cfg(test)]
 mod sample_tests;
