@@ -4,7 +4,9 @@ use super::{
     nvrtc_for, pdl_ok, pick_target,
 };
 use crate::gguf::Model;
-use crate::quant::{self, F16, F32, IQ4_NL, Q2_K, Q3_K, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0};
+use crate::quant::{
+    self, F16, F32, IQ4_NL, Q2_K, Q3_K, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0,
+};
 use std::path::PathBuf;
 
 struct Rng(u64);

@@ -1979,9 +1979,15 @@ impl<'m> Kernels<'m> {
         n: usize,
         rows: &[u32],
     ) -> Result<Vec<f32>, String> {
-        use crate::quant::{F16, F32, IQ4_NL, Q2_K, Q3_K, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0};
+        use crate::quant::{
+            F16, F32, IQ4_NL, Q2_K, Q3_K, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0,
+        };
         let q = crate::gguf::qtype(qt);
-        if ![F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL].contains(&qt) {
+        if ![
+            F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL,
+        ]
+        .contains(&qt)
+        {
             return Err(format!("dequant_rows: unsupported type {}", q.name));
         }
         if [Q4_0, Q4_1, Q5_1, Q5_K, Q2_K, Q3_K, IQ4_NL].contains(&qt) && !self.ext {

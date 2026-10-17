@@ -1245,7 +1245,11 @@ impl<'g> CudaQwen2<'g> {
         // Every matrix's (tensor, arena offset), uploaded once all fit.
         let mut uploads: Vec<(&Tensor, usize)> = Vec::new();
         let gemv_type = |mt: &Mat, name: &str| -> Result<(), String> {
-            if [Q4_K, Q5_K, Q6_K, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, IQ4_NL].contains(&mt.qt) {
+            if [
+                Q4_K, Q5_K, Q6_K, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, IQ4_NL,
+            ]
+            .contains(&mt.qt)
+            {
                 Ok(())
             } else {
                 Err(format!(

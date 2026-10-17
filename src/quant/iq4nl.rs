@@ -16,6 +16,7 @@ pub(super) const KVALUES: [i8; 16] = [
     -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
 ];
 
+#[allow(clippy::needless_range_loop)] // indexes several arrays
 pub(super) fn dequant_iq4_nl_block(b: &[u8], y: &mut [f32]) {
     let d = rd_f16(b, 0);
     let qs = &b[2..18];
@@ -25,6 +26,7 @@ pub(super) fn dequant_iq4_nl_block(b: &[u8], y: &mut [f32]) {
     }
 }
 
+#[allow(clippy::needless_range_loop)] // indexes several arrays
 #[inline(always)]
 fn block_sum(b: &[u8; IQ4_NL_BYTES], x: &[i8; 32]) -> i32 {
     let mut s = 0i32;

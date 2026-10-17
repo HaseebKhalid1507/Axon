@@ -40,6 +40,7 @@ pub(super) fn q3_k_scales(s: &[u8]) -> [i8; 16] {
     out
 }
 
+#[allow(clippy::needless_range_loop)] // indexes several arrays
 pub(super) fn dequant_q2_k_block(b: &[u8], y: &mut [f32]) {
     let d = rd_f16(b, 80);
     let min = rd_f16(b, 82);
@@ -55,6 +56,7 @@ pub(super) fn dequant_q2_k_block(b: &[u8], y: &mut [f32]) {
     }
 }
 
+#[allow(clippy::needless_range_loop)] // indexes several arrays
 pub(super) fn dequant_q3_k_block(b: &[u8], y: &mut [f32]) {
     let d = rd_f16(b, 108);
     let hm = &b[0..32];
@@ -86,6 +88,7 @@ pub(super) fn q3_k_step(b: &[u8; Q3_K_BYTES], dx: f32, sumi: i32) -> f32 {
 }
 
 /// (S, M) of one Q2_K block.
+#[allow(clippy::needless_range_loop)] // g indexes several arrays
 #[inline(always)]
 fn q2_k_sums(b: &[u8; Q2_K_BYTES], a: &KBlock) -> (i32, i32) {
     let qs = &b[16..80];
@@ -103,6 +106,7 @@ fn q2_k_sums(b: &[u8; Q2_K_BYTES], a: &KBlock) -> (i32, i32) {
 }
 
 /// S of one Q3_K block.
+#[allow(clippy::needless_range_loop)] // g indexes several arrays
 #[inline(always)]
 fn q3_k_sums(b: &[u8; Q3_K_BYTES], a: &KBlock) -> i32 {
     let hm = &b[0..32];
@@ -144,7 +148,7 @@ pub(super) fn dot_q3_k_q8(row: &[u8], xk: &[KBlock]) -> f32 {
 pub(super) mod x86 {
     //! AVX2: the same integers as the scalar sums (maddubs pairs < 2^15,
     //! madd by the sub-block scales into i32), the same float steps.
-    use super::{KBlock, Q2_K_BYTES, Q3_K_BYTES, q2_k_step, q3_k_step, q3_k_scales};
+    use super::{KBlock, Q2_K_BYTES, Q3_K_BYTES, q2_k_step, q3_k_scales, q3_k_step};
     use std::arch::x86_64::*;
 
     #[inline]
@@ -234,8 +238,7 @@ pub(super) mod x86 {
         // Signed values q - 4 (bit clear) as |w| and the sign applied to x.
         let w: [__m256i; 8] = std::array::from_fn(|c| {
             let h = _mm256_and_si256(_mm256_srl_epi16(hm, _mm_cvtsi32_si128(c as i32)), m1);
-            let v = _mm256_sub_epi8(_mm256_or_si256(lo[c], _mm256_slli_epi16(h, 2)), four);
-            v
+            _mm256_sub_epi8(_mm256_or_si256(lo[c], _mm256_slli_epi16(h, 2)), four)
         });
         let aw: [__m256i; 8] = std::array::from_fn(|c| _mm256_sign_epi8(w[c], w[c]));
         let s: [__m256i; 8] = std::array::from_fn(|c| pair_scale(sc, c));

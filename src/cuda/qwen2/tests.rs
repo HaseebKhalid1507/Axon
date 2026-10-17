@@ -2841,7 +2841,9 @@ fn gpu_batched_products_match_gemv_bits() {
         eprintln!("{name} {}: bit-identical", crate::gguf::qtype(qt).name);
         seen.push(qt);
     }
-    for qt in [Q4_K, Q6_K, Q5_0, Q8_0, Q5_K, Q4_0, Q4_1, Q5_1, Q2_K, Q3_K, IQ4_NL] {
+    for qt in [
+        Q4_K, Q6_K, Q5_0, Q8_0, Q5_K, Q4_0, Q4_1, Q5_1, Q2_K, Q3_K, IQ4_NL,
+    ] {
         assert!(seen.contains(&qt), "type {qt} not covered");
     }
 }
@@ -2858,7 +2860,9 @@ fn gpu_products_match_reference_bits() {
     let km = Kernels::module_ext(&g).unwrap();
     let mut rng = Rng(0x0dd5_eed5_2026_1014);
     let mut cases: Vec<(u32, usize, usize)> = Vec::new();
-    for qt in [Q4_K, Q6_K, Q8_0, Q5_0, Q5_K, Q4_0, Q4_1, Q5_1, Q2_K, Q3_K, IQ4_NL] {
+    for qt in [
+        Q4_K, Q6_K, Q8_0, Q5_0, Q5_K, Q4_0, Q4_1, Q5_1, Q2_K, Q3_K, IQ4_NL,
+    ] {
         let vb = if matches!(qt, Q4_K | Q5_K | Q6_K | Q2_K | Q3_K) {
             256
         } else {
@@ -3969,7 +3973,11 @@ fn gpu_prefill_batchings_bit_identical_q2k_q3k() {
         ("Qwen2.5-0.5B-Instruct-Q2_K.gguf", "0.5B Q2_K", true),
         ("Qwen2.5-0.5B-Instruct-Q3_K_M.gguf", "0.5B Q3_K_M", false),
         ("Qwen2.5-1.5B-Instruct-Q3_K_M.gguf", "1.5B Q3_K_M", true),
-        ("Llama-3.2-1B-Instruct-Q3_K_L.gguf", "llama 1B Q3_K_L", false),
+        (
+            "Llama-3.2-1B-Instruct-Q3_K_L.gguf",
+            "llama 1B Q3_K_L",
+            false,
+        ),
         ("Qwen2.5-7B-Instruct-Q2_K.gguf", "7B Q2_K", false),
     ] {
         let Some(m) = model_at(&format!("models/{f}")) else {

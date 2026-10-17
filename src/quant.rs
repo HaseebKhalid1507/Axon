@@ -556,7 +556,8 @@ impl QuantizedAct {
         let wants = |ts: &[u32]| qtypes.iter().any(|t| ts.contains(t));
         let b32 = (wants(&[Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, IQ4_NL]) && n.is_multiple_of(QK8_0))
             .then(|| quantize_b32(x));
-        let k = (wants(&[Q2_K, Q3_K, Q4_K, Q5_K, Q6_K]) && n.is_multiple_of(QK_K)).then(|| quantize_k(x));
+        let k = (wants(&[Q2_K, Q3_K, Q4_K, Q5_K, Q6_K]) && n.is_multiple_of(QK_K))
+            .then(|| quantize_k(x));
         let x = if wants(&[F32, F16]) {
             x.to_vec()
         } else {
@@ -4056,7 +4057,9 @@ mod tests {
     fn dot_row_q8_extreme_weights() {
         // saturated quants (all bits set / all clear) stress the i32 accumulators
         let mut rng = Lcg(7);
-        for qt in [Q5_0, Q8_0, Q4_K, Q6_K, Q4_0, Q5_K, Q4_1, Q5_1, Q2_K, Q3_K, IQ4_NL] {
+        for qt in [
+            Q5_0, Q8_0, Q4_K, Q6_K, Q4_0, Q5_K, Q4_1, Q5_1, Q2_K, Q3_K, IQ4_NL,
+        ] {
             for fill in [0x00u8, 0xff, 0x80, 0x7f] {
                 let n = 512;
                 let row = extreme_row(qt, n, fill, &mut rng);
@@ -4228,7 +4231,11 @@ mod tests {
                     for &p in &paths {
                         // SAFETY: Scalar, or a path listed by simd_paths().
                         let got = unsafe { dot_row_q8_with(p, qt, &row, &qa) };
-                        assert_eq!(got.to_bits(), want.to_bits(), "qt {qt} n {n} rep {rep} {p:?}");
+                        assert_eq!(
+                            got.to_bits(),
+                            want.to_bits(),
+                            "qt {qt} n {n} rep {rep} {p:?}"
+                        );
                     }
                 }
             }
@@ -4237,6 +4244,7 @@ mod tests {
 
     /// Q2_K / Q3_K blocks by hand: dequant is the documented layout.
     #[test]
+    #[allow(clippy::needless_range_loop)] // e, l index several arrays
     fn q2_k_q3_k_blocks() {
         // Q2_K: d = 1, dmin = 0.5; sub-block g scale g & 15, min 15 - g.
         let mut b = vec![0u8; Q2_K_BYTES];
@@ -4255,7 +4263,11 @@ mod tests {
             let (g, l) = (e / 16, e % 16);
             let (n, j, h) = (g / 8, (g % 8) / 2, g % 2);
             let q = (32 * n + 16 * h + l + j) & 3;
-            assert_eq!(out[e], g as f32 * q as f32 - 0.5 * (15 - g) as f32, "q2_k e={e}");
+            assert_eq!(
+                out[e],
+                g as f32 * q as f32 - 0.5 * (15 - g) as f32,
+                "q2_k e={e}"
+            );
         }
         // Q3_K: d = 2, scales 0..16 - 32 (6-bit packing), qs as above,
         // hmask bit 4n + j set for odd l only.
@@ -4324,7 +4336,9 @@ mod tests {
     fn simd_matches_scalar_extreme() {
         let paths = simd_paths();
         let mut rng = Lcg(0xe7);
-        for qt in [Q5_0, Q8_0, Q4_K, Q6_K, Q4_0, Q5_K, Q4_1, Q5_1, Q2_K, Q3_K, IQ4_NL] {
+        for qt in [
+            Q5_0, Q8_0, Q4_K, Q6_K, Q4_0, Q5_K, Q4_1, Q5_1, Q2_K, Q3_K, IQ4_NL,
+        ] {
             for fill in [0x00u8, 0xff, 0x80, 0x7f, 0x55, 0xaa] {
                 for n in [256, 1280] {
                     let row = extreme_row(qt, n, fill, &mut rng);
