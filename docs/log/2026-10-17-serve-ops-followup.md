@@ -66,3 +66,12 @@ bound, not a typical value. The 4 KiB case was stable: 158 tokens and 1.7 s here
 ## What didn't work
 Nothing was dropped. The weaker option, rewording the docs and keeping the Expect-only check, was rejected:
 any client could still make the server buffer and parse a 1 MiB body without the key.
+
+Gates after the #62 review fixes (code 6725445):
+| gate | result | job |
+|---|---|---|
+| serve:: release / debug, avante | 85/0, 85/0 | 1017-090150-d8e9, 1017-090151-8dc1 |
+| serve:: release / debug, bella | 85/0, 85/0 | 1017-090151-1162, 1017-090151-c212 |
+| md5 main 3310ba3 vs candidate | 26/26 same | 1017-090152-eca5 |
+| fuzz_serve.py --ops / plain | 232 / 183 checks, 0 findings (all `auth:no-key-*` cases answered 401 in 0.00 s) | 1017-090152-127d |
+| clippy -D warnings (bin + tests), rustfmt | clean | local |
