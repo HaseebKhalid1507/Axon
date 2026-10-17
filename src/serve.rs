@@ -1961,7 +1961,12 @@ fn run_request(
             );
         }
     }
-    let id = format!("{}-{n:x}{:x}", out.id_prefix(), sh.created);
+    let id = match out {
+        // Keys of the in-memory store (previous_response_id): unique in
+        // the process, not only per server.
+        Out::Responses(_) => responses::fresh_id(sh.created),
+        _ => format!("{}-{n:x}{:x}", out.id_prefix(), sh.created),
+    };
     let model = g.model.as_deref().unwrap_or(&sh.model_id);
     let model = (model, m.identity.fingerprint());
     let _flight = InFlight::new(&sh.metrics.in_flight);

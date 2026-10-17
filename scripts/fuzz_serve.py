@@ -854,7 +854,7 @@ def ops_cases(srv):
     st, _, body = request(P, get("/slots"))
     try:
         j = json.loads(body)
-        ok = st == 200 and isinstance(j["slots"], list) and "busy" in j["solo"] and "queue_depth" in j \
+        ok = st == 200 and isinstance(j["slots"], list) and j["slots"] and "queue_depth" in j \
             and all({"id", "busy", "held_tokens", "request_id", "age_ms"} <= set(x) for x in j["slots"])
     except Exception:
         ok = False
@@ -919,7 +919,8 @@ def stalled_reader(srv, rcvbuf, metrics):
             time.sleep(0.1)
             _, _, b = request(P, get("/slots"))
             j = json.loads(b)
-            if not j["solo"]["busy"] and not any(x["busy"] for x in j["slots"]):
+            # Since #60/d657757 the request alone is slot 0 (no "solo" entry).
+            if not any(x["busy"] for x in j["slots"]):
                 freed = time.time() - t0
                 break
         m1 = metrics()[2]

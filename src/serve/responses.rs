@@ -258,6 +258,15 @@ fn items(input: &[J], out: &mut Vec<J>) -> Result<(), ApiError> {
     Ok(())
 }
 
+/// A response id: `resp-`, a process-wide sequence number and the server's
+/// start time (hex). Unique in the process, so two servers in one process
+/// (the tests) never share a store key.
+pub(super) fn fresh_id(created: u64) -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("resp-{n:x}-{created:x}")
+}
+
 /// The stored conversations, oldest first: (response id, messages, bytes).
 static STORE: Mutex<VecDeque<(String, Vec<J>, usize)>> = Mutex::new(VecDeque::new());
 
@@ -1251,6 +1260,14 @@ mod tests {
         let (_, x) = p(json!({"input": "x", "store": false})).unwrap();
         keep(&x, "resp-test-nostore", "a", "", &[]);
         assert!(store_get("resp-test-nostore").is_none());
+    }
+
+    #[test]
+    fn ids_are_unique_per_process() {
+        // Two servers started in the same second share `created`.
+        let (a, b) = (fresh_id(7), fresh_id(7));
+        assert_ne!(a, b);
+        assert!(a.starts_with("resp-"));
     }
 
     #[test]
