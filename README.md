@@ -40,11 +40,13 @@ Works today, honestly scoped:
   `<start_of_turn>` chat format; on the GPU the whole model must fit (no CPU/GPU split, no
   `--kv q8` yet), and its local layers keep a full-length KV cache. 27B is refused.
   `qwen3moe` (Qwen3-30B-A3B and its relatives: softmax top-k routing, no shared expert)
-  runs on the CPU only for now (`--device cpu`; the GPU and a split refuse it with an
-  error): every expert repacked for the r8 kernels, decode == batched prefill == verify bit
-  for bit, logits within llama.cpp's own CPU/CUDA spread (stage 1, see
-  [the log](docs/log/2026-10-17-moe-stage1.md)); `axon info` prints its experts and bytes
-  per token. Attention on the GPU with the experts on the CPU is next
+  runs on the CPU (`--device cpu`: every expert repacked for the r8 kernels, stage 1, see
+  [the log](docs/log/2026-10-17-moe-stage1.md)) or, with `--device cuda`, with its attention,
+  norms, routers and head on the GPU and its experts on the CPU (llama.cpp's `--cpu-moe`
+  layout; stage 2, [log](docs/log/2026-10-17-moe-stage2.md)). Both: decode == batched
+  prefill == verify bit for bit, logits within llama.cpp's own CPU/CUDA spread; no layer
+  split (`--gpu-layers`), multi-GPU or MoE draft model. `axon info` prints its experts and
+  bytes per token. Streaming the experts through the GPU for long prompts is next
   ([roadmap](docs/roadmap.md#mixture-of-experts)). Other architectures, other
   mixture-of-experts models and RoPE scaling (a factor other than 1; Gemma 3's linear
   scaling and YaRN, below, excepted) are refused with an error.
@@ -469,6 +471,7 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
 | `AXON_STREAM_MIN=N` | split model: smallest prefill batch streamed (default 32). Streaming pins the CPU layers' KV cache in RAM |
 | `AXON_STREAM_DECODE=1` | split model, experiment: stream one-token decode steps too (slower; refused with `--draft`) |
 | `AXON_CUDA_GRAPHS=0` | cuda: launch each token's kernels one by one instead of replaying a captured CUDA graph (same results, slower) |
+| `AXON_MOE_PROFILE=1` | cuda, mixture-of-experts model: every 64 decode steps, print per layer the GPU segment (attention + router; synced for the profile, so a little slower), the copy down, the CPU experts and the copy up |
 | `AXON_CUDA_PDL=0` | cuda: no programmatic dependent launch (used only on sm_90+ with a CUDA 12.3+ driver) |
 | `AXON_GATE_UP=0` | cuda: run the FFN's gate and up products (both Q4_K) as two GEMMs instead of one fused launch in batched passes (same bits) |
 | `AXON_HOPPER=0` | cuda, H100/H200 (compute capability 9.0): compile the kernels for plain sm_90 instead of sm_90a, which turns the wgmma/TMA kernels off (same bits) |
