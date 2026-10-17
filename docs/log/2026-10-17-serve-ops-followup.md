@@ -1,4 +1,4 @@
-# Serve ops follow-up: shady's non-blocking items from the #61 re-review  (PR #PRNUM)
+# Serve ops follow-up: shady's non-blocking items from the #61 re-review  (PR #62)
 
 - Date: 2026-10-17. Branch: fix/serve-ops-followup. Base: main 3310ba3 (#61 merged). Status: open.
 - Source: shady's re-review of #61 (MERGE 9/10, r10 thread, reply to msg-b4e103d6): non-blocking follow-ups.
