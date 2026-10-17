@@ -33,7 +33,7 @@ HOST = "127.0.0.1"
 # --ops: the API key every request carries (None: no auth).
 AUTH = None
 OPS_KEY = b"fuzz-key-0123456789"
-OPS_MAX_PROMPT = 64
+OPS_MAX_PROMPT = 256
 OPS_IDLE_MS = 500
 
 
