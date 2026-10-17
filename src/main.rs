@@ -238,7 +238,8 @@ fn open_model(path: &str, lm: bool) -> gguf::Model {
 
 /// A model to run (`gguf::load_to_run`), checked before it's copied or
 /// read: `copy` forces the copy-vs-map choice, None copies only if the CPU
-/// model reads its matrices in place (`model::reads_matrices_in_place`).
+/// model reads its matrices in place (`model::reads_matrices_in_place`); a
+/// MoE model is always mapped, whatever `copy` and AXON_MMAP say.
 /// `rope`: the --rope-scaling flags, written into the model's metadata
 /// (`rope::RopeArgs::apply`) before the model is checked, so that
 /// `--rope-scaling none` can run a file whose own scaling is refused.
@@ -250,7 +251,11 @@ fn open_model_with(path: &str, copy: Option<bool>, rope: &rope::RopeArgs) -> ggu
         {
             fail(&format!("{path}: {e}"));
         }
-        model::reads_matrices_in_place(m)
+        // A MoE file is always mapped (`reads_matrices_in_place`'s note).
+        match model::is_moe(m) {
+            true => gguf::CopyWish::MapOnly,
+            false => gguf::CopyWish::Want(model::reads_matrices_in_place(m)),
+        }
     })
     .unwrap_or_else(|e| load_failed(path, e));
     if !rope.is_empty() {
@@ -369,6 +374,11 @@ fn run() -> std::io::Result<()> {
         model.total_params() as f64 / 1e9,
         human_bytes(model.total_bytes())
     );
+    if let Some(i) = model::MoeInfo::of(&model) {
+        for l in i.lines() {
+            println!("{l}");
+        }
+    }
     println!("{}", cuda::summary());
     // What decides the output bits (docs/determinism.md), per placement.
     match identity::predicted(path, &model) {
@@ -782,9 +792,14 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         );
         let mut order: Vec<usize> = (0..logits.len()).collect();
         order.sort_by(|&a, &b| logits[b].total_cmp(&logits[a]));
+        // AXON_LOGITS_DIGITS: more decimals for scripts (oracle/llama_logits.py).
+        let digits = env::var("AXON_LOGITS_DIGITS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok());
+        let (dl, dp) = digits.map_or((4, 3), |d| (d, d));
         for &id in order.iter().take(top_k) {
             println!(
-                "{:>7}  {:>10.4}  {:>8.3}  {:?}",
+                "{:>7}  {:>10.dl$}  {:>8.dp$}  {:?}",
                 id,
                 logits[id],
                 logits[id] - lse,

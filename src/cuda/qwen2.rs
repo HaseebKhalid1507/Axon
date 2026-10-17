@@ -1088,6 +1088,9 @@ impl<'g> CudaQwen2<'g> {
         split_batch: usize,
     ) -> Result<(CudaQwen2<'g>, Plan<'m>), String> {
         crate::model::check_supported(m).map_err(|e| e.to_string())?;
+        if crate::model::is_moe(m) {
+            return Err(crate::model::moe_gpu_refusal(m));
+        }
         let gemma = m.arch == "gemma3";
         if gemma && first > 0 {
             return Err(

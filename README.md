@@ -34,9 +34,15 @@ Works today, honestly scoped:
   head size 256, sliding-window layers, GeGLU) runs on the CPU and the GPU with its
   `<start_of_turn>` chat format; on the GPU the whole model must fit (no CPU/GPU split, no
   `--kv q8` yet), and its local layers keep a full-length KV cache. 27B is refused.
-  Other architectures, mixture-of-experts models and RoPE scaling (a factor other than 1;
-  Gemma 3's linear scaling excepted) are refused with an error. MoE support is planned:
-  see [the roadmap](docs/roadmap.md#mixture-of-experts).
+  `qwen3moe` (Qwen3-30B-A3B and its relatives: softmax top-k routing, no shared expert)
+  runs on the CPU only for now (`--device cpu`; the GPU and a split refuse it with an
+  error): every expert repacked for the r8 kernels, decode == batched prefill == verify bit
+  for bit, logits within llama.cpp's own CPU/CUDA spread (stage 1, see
+  [the log](docs/log/2026-10-17-moe-stage1.md)); `axon info` prints its experts and bytes
+  per token. Attention on the GPU with the experts on the CPU is next
+  ([roadmap](docs/roadmap.md#mixture-of-experts)). Other architectures, other
+  mixture-of-experts models and RoPE scaling (a factor other than 1; Gemma 3's linear
+  scaling excepted) are refused with an error.
 - Tensor types: F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K on the CPU. On the
   GPU every weight matrix must be one of the eight quantized types (F16/F32 matrices are
   refused there). Others load for `info` but can't run.
@@ -422,7 +428,7 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
 | `AXON_DECODE_THREADS=N` | CPU: at most N threads per decode-step job (default: the P-core count on a hybrid Intel CPU without SMT, else every thread; prefill always uses every thread) |
 | `AXON_POOL_ADAPT=0` | keep every worker in every job (no adaptive drop-out under load) |
 | `AXON_POOL_DEBUG=1` | `gen`: print thread-pool stats at the end |
-| `AXON_MMAP=0\|1` | CPU: `0`: copy the model into huge-page memory; `1`: map the file. Default: map it when every weight matrix is repacked (Q4_K/Q6_K/Q5_0/Q8_0 models: the repack holds them in huge pages, so a copy would only be a second pass over the file), else copy unless the file is over 60% of available memory. A mapped model stays mapped while axon runs: overwriting the GGUF in place meanwhile (e.g. `curl -o` onto the same file) can crash it with SIGBUS; use `AXON_MMAP=0`, or write a new file and rename it over the old one. The GPU always maps (it reads the file once) |
+| `AXON_MMAP=0\|1` | CPU: `0`: copy the model into huge-page memory; `1`: map the file. Default: map it when every weight matrix is repacked (Q4_K/Q6_K/Q5_0/Q8_0 models: the repack holds them in huge pages, so a copy would only be a second pass over the file), else copy unless the file is over 60% of available memory. A mapped model stays mapped while axon runs: overwriting the GGUF in place meanwhile (e.g. `curl -o` onto the same file) can crash it with SIGBUS; use `AXON_MMAP=0`, or write a new file and rename it over the old one. The GPU always maps (it reads the file once), and so does a mixture-of-experts model (`qwen3moe`, `AXON_MMAP=0` included: a copy beside its repacked experts would hold them twice) |
 | `AXON_READAHEAD=0` | `gen`/`chat`: don't read a mapped model into the page cache ahead of use on a background thread (on by default unless the file is over half of available memory) |
 | `AXON_PREFETCH=N` | decode: software prefetch distance in bytes (default 8192, 0 = off, max 1 MiB) |
 | `AXON_DECODE_ROWS=1\|2\|4` | decode: rows per kernel call (default 4; K-quants use at most 2) |

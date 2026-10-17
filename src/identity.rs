@@ -354,6 +354,10 @@ pub fn predicted(path: &str, m: &Model) -> io::Result<Vec<(String, Result<Identi
                 .with_rope(rope_field(m)),
         ),
     )];
+    if crate::model::is_moe(m) {
+        v.push(("cuda".to_string(), Err(crate::model::moe_gpu_refusal(m))));
+        return Ok(v);
+    }
     let Ok(g) = crate::cuda::Gpu::open() else {
         return Ok(v);
     };

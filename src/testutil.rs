@@ -146,6 +146,38 @@ pub fn gemma3_model() -> Option<Model> {
     Some(gguf::load(path.to_str().expect("utf-8 path")).expect("load gemma3 model"))
 }
 
+/// The qwen3moe test models (`AXON_TEST_MOE` / `AXON_TEST_MOE_SMALL`
+/// override them). MOE_MODEL: mradermacher's Qwen3-30B-A3B-Instruct-Pruned-2B
+/// Q4_K_M, 3 layers with the 30B's exact shapes and type mix (128 experts,
+/// top-8, Q6_K down in layer 2); gibberish out, every kernel exercised.
+/// MOE_SMALL_MODEL: Qwen3-MOE-4x0.6B Q4_K_M (4 experts, top-2, 28 layers),
+/// coherent text. Optional (1.5 / 1.0 GB): None, with a note, when missing.
+pub const MOE_MODEL: &str = "models/Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M.gguf";
+pub const MOE_SMALL_MODEL: &str = "models/Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M.gguf";
+
+/// `MOE_MODEL` (small: `MOE_SMALL_MODEL`)'s path, or None to skip.
+pub fn moe_model_path(small: bool) -> Option<PathBuf> {
+    let (var, rel) = match small {
+        false => ("AXON_TEST_MOE", MOE_MODEL),
+        true => ("AXON_TEST_MOE_SMALL", MOE_SMALL_MODEL),
+    };
+    let path = match std::env::var_os(var) {
+        Some(p) => PathBuf::from(p),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).join(rel),
+    };
+    if !path.exists() {
+        eprintln!("skipping: {} not present (optional)", path.display());
+        return None;
+    }
+    Some(path)
+}
+
+/// The qwen3moe test model (`moe_model_path`), or None to skip.
+pub fn moe_model(small: bool) -> Option<Model> {
+    let path = moe_model_path(small)?;
+    Some(gguf::load(path.to_str().expect("utf-8 path")).expect("load moe model"))
+}
+
 pub fn read_json(rel: &str) -> serde_json::Value {
     let path = fixtures().join(rel);
     let s = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));

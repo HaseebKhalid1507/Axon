@@ -761,10 +761,14 @@ pub fn load_with(path: &str, copy: Option<bool>) -> io::Result<Model> {
 /// (`Model::read_ahead`). It stays mapped for the whole run: rewriting the
 /// file in place meanwhile (not replacing it) can kill the process with
 /// SIGBUS, as with any mapped file; AXON_MMAP=0 copies instead.
+/// `wants_copy` says what the model wants: `Want(bool)`, the copy that
+/// pays or not (the choice above); `MapOnly`, mapped whatever `copy` and
+/// AXON_MMAP say (a MoE model: a copy beside its r8 arena would hold the
+/// experts twice).
 pub fn load_to_run(
     path: &str,
     copy: Option<bool>,
-    wants_copy: impl FnOnce(&Model) -> bool,
+    wants_copy: impl FnOnce(&Model) -> CopyWish,
 ) -> io::Result<Model> {
     let file = File::open(path)?;
     let len = file.metadata()?.len() as usize;
@@ -774,8 +778,10 @@ pub fn load_to_run(
     let mut m = Model::new(h, data, true);
     // Always asked (the caller may check the model there), used if `copy`
     // is None.
-    let wanted = wants_copy(&m);
-    let copy = copy.unwrap_or_else(|| copy_choice(None, len, wanted));
+    let copy = match wants_copy(&m) {
+        CopyWish::MapOnly => false,
+        CopyWish::Want(wanted) => copy.unwrap_or_else(|| copy_choice(None, len, wanted)),
+    };
     if copy {
         // Same bytes (parse checked every tensor range against len).
         m.data = copy_file(&file, len)?;
@@ -790,6 +796,15 @@ pub fn load_to_run(
         m.file = Some(file);
     }
     Ok(m)
+}
+
+/// `load_to_run`'s copy-vs-map wish of a model.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CopyWish {
+    /// Whether a copy pays (reads in place), subject to `copy` / AXON_MMAP.
+    Want(bool),
+    /// Always mapped.
+    MapOnly,
 }
 
 /// Bytes per read-ahead request. One MADV_WILLNEED reads at most the
@@ -1459,6 +1474,20 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         assert!(f > 0.99, "{f}");
         assert_eq!(copied.resident_fraction(), None);
+    }
+
+    /// `load_to_run`: `MapOnly` maps even when `copy` (or so AXON_MMAP=0,
+    /// which is only read without it) asks for the copy; `Want` follows it.
+    #[test]
+    fn load_to_run_map_only_never_copies() {
+        let path = std::env::temp_dir().join(format!("axon-maponly-{}.gguf", std::process::id()));
+        std::fs::write(&path, valid().pad_to(32, 64 + 4096)).unwrap();
+        let p = path.to_str().unwrap();
+        let mapped = load_to_run(p, Some(true), |_| CopyWish::MapOnly).unwrap();
+        let copied = load_to_run(p, Some(true), |_| CopyWish::Want(false)).unwrap();
+        let _ = std::fs::remove_file(&path);
+        assert!(mapped.file_backed());
+        assert!(!copied.file_backed());
     }
 
     /// A string array long enough for the threaded parse (`Reader::strings`)
