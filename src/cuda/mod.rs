@@ -960,6 +960,16 @@ impl HostBuf<'_> {
         Ok(unsafe { std::slice::from_raw_parts_mut(self.p, self.len) })
     }
 
+    /// Forget the copy in flight: the caller waited for the stream since it
+    /// was enqueued (another buffer's `bytes_mut`, a `sync`), so the next
+    /// `bytes_mut` needn't wait again.
+    ///
+    /// # Safety
+    /// The stream has been synchronized after the last copy to or from us.
+    pub unsafe fn assume_synced(&self) {
+        self.pending.set(false);
+    }
+
     /// Ok if `n` bytes at `off` fit in a `len`-byte device buffer and in us.
     fn check_range(&self, off: usize, n: usize, len: usize) -> Result<(), String> {
         if n > self.len || off.checked_add(n).is_none_or(|end| end > len) {

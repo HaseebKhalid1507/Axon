@@ -450,6 +450,7 @@ impl<'a> Backend<'a> {
                 if long { max_ctx } else { split_ctx },
                 ckv,
                 fit,
+                !p.defer_q6k8,
             );
         }
         let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open_device(ordinal)?));
@@ -523,7 +524,8 @@ impl<'a> Backend<'a> {
     /// A qwen3moe model on GPU `ordinal`: attention, routers and head there
     /// (a `max_ctx` cache of type `kv`, shorter with `fit` if need be), the
     /// experts on the CPU. There's no layer split: --gpu-layers below the
-    /// layer count is refused.
+    /// layer count is refused. `q6k8`: make the Q6_K prefill copy now
+    /// (`Placing::defer_q6k8` off), as the whole-GPU model.
     fn moe(
         m: &'a Model,
         ordinal: usize,
@@ -531,6 +533,7 @@ impl<'a> Backend<'a> {
         max_ctx: usize,
         kv: CacheKv,
         fit: bool,
+        q6k8: bool,
     ) -> Result<Backend<'a>, String> {
         let n = crate::hybrid::block_count(m)?;
         if gpu_layers.is_some_and(|g| g < n) {
@@ -543,7 +546,7 @@ impl<'a> Backend<'a> {
         let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open_device(ordinal)?));
         let module: &'static Module<'static> = Box::leak(Box::new(Kernels::module_for(gpu, m)?));
         let mm: &'static Module<'static> = Box::leak(Box::new(Kernels::moe_module(gpu)?));
-        let n = MoeQwen3::new(gpu, module, mm, m, max_ctx, kv, fit)?;
+        let n = MoeQwen3::new(gpu, module, mm, m, max_ctx, kv, fit, q6k8)?;
         eprintln!("moe:         {}", n.describe(n.ctx));
         Ok(Backend::Moe(Box::new(n)))
     }

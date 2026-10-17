@@ -153,7 +153,7 @@ pub(crate) fn moe_net<'m, 'g>(
     m: &'m Model,
     ctx: usize,
 ) -> MoeQwen3<'m, 'g> {
-    MoeQwen3::new(g, km, mm, m, ctx, CacheKv::F16, false).unwrap()
+    MoeQwen3::new(g, km, mm, m, ctx, CacheKv::F16, false, true).unwrap()
 }
 
 /// `model::tests::feed_batch_matches_feed_on` for the MoE backend: 483
@@ -263,12 +263,19 @@ fn moe_gpu_verify_matches_forward_small() {
 /// graded as the GPU is against the CPU (`cuda::qwen2::tests::logits_match`):
 /// logits after each prompt and 96 greedy steps (AXON_TEST_MOE_STEPS),
 /// against the CPU's own spread between its two kernel sets (r8 vs
-/// per-row). 96, not the dense tests' 32: at 32 (198 positions) the
-/// Pruned-2B's top-1 was 189 vs the CPU's self-agreement 193 and its mean KL
-/// 2.4x the CPU's (7.8e-3 vs 3.2e-3), at 96 (582 positions) 568 vs 568 and
-/// 1.76x (5.2e-3 vs 2.9e-3): the same flips (near-ties, the widest 0.89 and
-/// 0.61) dominate a short run. MEASURED, bella sm_120. The 4x0.6B passes at
-/// 32 too (191 vs 191, 7.1e-3 vs 6.8e-3).
+/// per-row). 96, not the dense tests' 32, and that is a statistics
+/// choice, not an explanation: at 32 (198 positions) the Pruned-2B FAILS
+/// (top-1 189 vs the CPU's self-agreement 193; mean KL 2.4x the CPU's,
+/// 7.8e-3 vs 3.2e-3). At 96 (582 positions) it passes (568 vs 568; 1.76x,
+/// 5.2e-3 vs 2.9e-3), but its first 198 positions are the same ones, still
+/// at 2.4x (same max KL 0.13, same widest flips 0.89 / 0.61): positions
+/// 199-582 run at ~1.4x and dilute the mean. What bounds the cause:
+/// `moe_gpu_route_matches_cpu_twin_*` (the router alone, on identical h)
+/// and the 4x0.6B, a real 28-layer MoE, at 32 steps too: 191 vs 191 and
+/// 1.04x (7.1e-3 vs 6.8e-3), dense-like. The Pruned-2B is a 3-layer
+/// cut of a 48-layer model, high-entropy output and frequent k-th / (k+1)-th
+/// expert near-ties, so upstream differences in h (the GPU's attention)
+/// flip experts more often. MEASURED, bella sm_120.
 fn logits_graded(small: bool, name: &str) {
     let Some(g) = crate::testutil::gpu() else {
         return;
@@ -382,7 +389,8 @@ fn moe_gpu_paged_and_graph_generation() {
                 );
             }
         }
-        out.extend(net.verify_argmax(&out[..5].to_vec(), 270, c));
+        let guess = out[..5].to_vec();
+        out.extend(net.verify_argmax(&guess, 270, c));
         out
     }
     let mut c0 = net.new_cache(ctx);
@@ -400,4 +408,130 @@ fn moe_gpu_paged_and_graph_generation() {
     let mut c1 = net.new_cache(phys * PAGE);
     c1.c.set_tab(Some(g.upload(&pool).unwrap()));
     assert_eq!(script(&net, &prompt, &mut c1, None), want, "paged cache");
+}
+
+/// Diagnostic (review of #67): the GPU router vs its CPU twin
+/// (`Moe::route`) on IDENTICAL normed states: every (layer, token) h the GPU
+/// handed the CPU experts during a prefill of PROMPTS, routed again on the
+/// CPU. Separates the router's own math (a lane-split dot and `expf` vs a
+/// sequential dot and `vmath`'s exp) from everything upstream of h. Bounds:
+/// a set differs only where the CPU's own k-th and (k+1)-th probabilities
+/// are within 1e-4 (a near-tie) and the expert that differs carries no
+/// weight; where the sets agree the weights are within 1e-4.
+fn route_matches_cpu_twin(small: bool, name: &str) {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = crate::testutil::moe_model(small) else {
+        return;
+    };
+    let km = Kernels::module_for(&g, &m).unwrap();
+    let mm = Kernels::moe_module(&g).unwrap();
+    let net = moe_net(&g, &km, &mm, &m, 1024);
+    let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
+    let ids: Vec<u32> = PROMPTS.iter().flat_map(|p| tok.encode(p)).collect();
+    // (layer, h, ids, w) per round trip.
+    type Seen = (usize, Vec<f32>, Vec<i32>, Vec<f32>);
+    let mut seen: Vec<Seen> = Vec::new();
+    let mut c = net.new_cache(1024);
+    let mut ex = |l: usize, h: &[f32], i: &[i32], w: &[f32], y: &mut [f32]| {
+        seen.push((l, h.to_vec(), i.to_vec(), w.to_vec()));
+        net.experts(l, h, i, w, y)
+    };
+    net.gpu
+        .moe_tokens(&net.mf, &mut c.c, &mut c.mb, &ids, 0, Head::No, &mut ex)
+        .unwrap();
+    let dim = net.gpu.dim;
+    // Per differing set: the CPU's own gap between its k-th and (k+1)-th
+    // probabilities (a near-tie flips on any rounding difference).
+    let (mut n, mut sets, mut order, mut wmax, mut gap_max) = (0, 0, 0, 0f32, 0f32);
+    // And the most weight an expert in one set but not the other gets
+    // (either side): what a flip moves.
+    let mut w_flip = 0f32;
+    for (l, h, gi, gw) in &seen {
+        let k = gi.len() / (h.len() / dim);
+        for (t, hr) in h.chunks_exact(dim).enumerate() {
+            let (ci, cw) = net.cpu.moe_route(*l, hr, false);
+            let gi: Vec<usize> = gi[t * k..(t + 1) * k].iter().map(|&e| e as usize).collect();
+            let gw = &gw[t * k..(t + 1) * k];
+            n += 1;
+            let (mut a, mut b) = (ci.clone(), gi.clone());
+            a.sort();
+            b.sort();
+            if a != b {
+                sets += 1;
+                let (_, p) = net.cpu.moe_route(*l, hr, true);
+                gap_max = gap_max.max(p[k - 1] - p[k]);
+                for (i, e) in ci.iter().enumerate() {
+                    if !gi.contains(e) {
+                        w_flip = w_flip.max(cw[i]);
+                    }
+                }
+                for (i, e) in gi.iter().enumerate() {
+                    if !ci.contains(e) {
+                        w_flip = w_flip.max(gw[i]);
+                    }
+                }
+                continue;
+            }
+            if ci != gi {
+                order += 1;
+            }
+            for (x, y) in cw.iter().zip(gw) {
+                wmax = wmax.max((x - y).abs());
+            }
+        }
+    }
+    eprintln!(
+        "{name}: router GPU vs CPU twin on identical h: {n} (layer, token) routes, expert sets \
+         differ {sets} ({:.3}%), rank order only {order}, max |w| diff (same set) {wmax:.2e}, \
+         widest CPU k-th vs (k+1)-th probability gap where the sets differ {gap_max:.2e}, \
+         most weight on a differing expert {w_flip:.2e}",
+        100.0 * sets as f64 / n as f64
+    );
+    assert!(n > 0);
+    // Only near-ties flip: the probability gap where they do is at the
+    // rounding level of a dot over dim inputs and an exp (MEASURED below
+    // 1e-4); the same-set weights agree as closely.
+    assert!(
+        gap_max < 1e-4,
+        "{name}: a set differs at probability gap {gap_max}"
+    );
+    assert!(wmax < 1e-4, "{name}: weights differ by {wmax}");
+    // MEASURED: the 4x0.6B's 46 of 3108 differing sets (1.5%) are all
+    // exact ties of underflowed probabilities (gap 0, the differing
+    // expert's weight <= 1.1e-38): no effect on y. The Pruned-2B: 0 of 333.
+    assert!(
+        w_flip < 1e-20,
+        "{name}: a differing expert has weight {w_flip}"
+    );
+}
+
+#[test]
+fn moe_gpu_route_matches_cpu_twin_pruned() {
+    route_matches_cpu_twin(false, "Pruned-2B");
+}
+
+#[test]
+fn moe_gpu_route_matches_cpu_twin_small() {
+    route_matches_cpu_twin(true, "4x0.6B");
+}
+
+/// `transpose_tiled` == the plain transpose, at ragged sizes.
+#[test]
+fn transpose_tiled_transposes() {
+    for (nb, dim) in [(1, 1), (2, 2048), (33, 64), (100, 37), (512, 1024)] {
+        let yc: Vec<f32> = (0..nb * dim).map(|i| i as f32).collect();
+        let mut y = vec![0f32; nb * dim];
+        super::transpose_tiled(&yc, nb, dim, &mut y);
+        for t in 0..nb {
+            for r in 0..dim {
+                assert_eq!(
+                    y[t * dim + r],
+                    yc[r * nb + t],
+                    "nb {nb} dim {dim} ({t}, {r})"
+                );
+            }
+        }
+    }
 }

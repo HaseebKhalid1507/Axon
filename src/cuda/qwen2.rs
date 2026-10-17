@@ -807,6 +807,7 @@ impl<'g> CudaQwen2<'g> {
         max_ctx: usize,
         kv: CacheKv,
         fit: bool,
+        q6k8: bool,
     ) -> Result<CudaQwen2<'g>, String> {
         Self::build(
             gpu,
@@ -818,7 +819,7 @@ impl<'g> CudaQwen2<'g> {
             kv,
             SPLIT_BATCH,
             fit,
-            true,
+            q6k8,
             true,
             &mut |_| {},
         )

@@ -34,6 +34,9 @@ const W_SUM_MIN: f32 = 6.103_515_6e-5;
 /// depend on it (every token is routed and computed on its own).
 const MOE_BATCH: usize = 512;
 
+/// Most experts per token `moe_layer` takes (qwen3moe: 8).
+const MAX_K: usize = 64;
+
 /// A token's experts in rank order and their weights.
 pub(crate) type Route = (Vec<usize>, Vec<f32>);
 
@@ -365,19 +368,38 @@ impl<'a> Qwen2<'a> {
         let mut ids = vec![0usize; moe.k];
         let mut w = vec![0f32; moe.k];
         moe.route(h, &mut ids, &mut w);
-        self.moe_ffn_routed(moe, h, &ids, &w)
+        let mut y = vec![0f32; self.dim];
+        self.moe_ffn_routed(moe, h, &ids, &w, &mut y);
+        y
     }
 
     /// Layer l's MoE layer of `h`, routed already (the GPU's router:
     /// `crate::moe`): `ids` (rank order) and their weights `w`.
-    pub(crate) fn moe_layer(&self, l: usize, h: &[f32], ids: &[usize], w: &[f32]) -> Vec<f32> {
+    /// Into `y` (dim floats), with the GPU's i32 ids.
+    pub(crate) fn moe_layer(&self, l: usize, h: &[f32], ids: &[i32], w: &[f32], y: &mut [f32]) {
         let moe = self.layer_moe(l);
         assert!(ids.len() == moe.k && w.len() == moe.k && h.len() == self.dim);
-        assert!(
-            ids.iter().all(|&e| e < moe.n_expert),
-            "expert id out of range"
-        );
-        self.moe_ffn_routed(moe, h, ids, w)
+        assert!(y.len() == self.dim && moe.k <= MAX_K);
+        let mut idx = [0usize; MAX_K];
+        let idx = &mut idx[..moe.k];
+        for (d, &e) in idx.iter_mut().zip(ids) {
+            assert!((e as usize) < moe.n_expert, "expert id {e} out of range");
+            *d = e as usize;
+        }
+        self.moe_ffn_routed(moe, h, idx, w, y);
+    }
+
+    /// Layer l's router on the CPU (`Moe::route`, the twin of the GPU's
+    /// moe_logits + moe_topk) of h: its experts and weights.
+    /// With `all`, every expert ranked (k = n_expert: the weights are then
+    /// the probabilities, renormalized by their ~1 sum).
+    #[cfg(test)]
+    pub(crate) fn moe_route(&self, l: usize, h: &[f32], all: bool) -> Route {
+        let moe = self.layer_moe(l);
+        let k = if all { moe.n_expert } else { moe.k };
+        let mut r = (vec![0usize; k], vec![0f32; k]);
+        moe.route(h, &mut r.0, &mut r.1);
+        r
     }
 
     /// `moe_layer` of each token t of `hs`, routed by `routes[t]`: the
@@ -405,7 +427,7 @@ impl<'a> Qwen2<'a> {
     }
 
     /// The MoE FFN of `h` routed to experts `ids` with weights `w`.
-    fn moe_ffn_routed(&self, moe: &Moe, h: &[f32], ids: &[usize], w: &[f32]) -> Vec<f32> {
+    fn moe_ffn_routed(&self, moe: &Moe, h: &[f32], ids: &[usize], w: &[f32], y: &mut [f32]) {
         let (k, ffn, dim) = (moe.k, moe.ffn, self.dim);
         let xq = QuantizedAct::for_types(h, &[moe.gate[0].qt(), moe.up[0].qt()]);
         let (align_a, align_b) = moe.aligns();
@@ -439,8 +461,7 @@ impl<'a> Qwen2<'a> {
             .clamp(8, MAX_B)
             .next_multiple_of(align_b)
             .min(MAX_B);
-        let mut y = vec![0f32; dim];
-        pool::for_each_chunk_mut_in(Kind::Decode, &mut y, chunk_b, |c, ys| {
+        pool::for_each_chunk_mut_in(Kind::Decode, y, chunk_b, |c, ys| {
             let r0 = c * chunk_b;
             let mut d = [0f32; MAX_B];
             let d = &mut d[..ys.len()];
@@ -451,7 +472,6 @@ impl<'a> Qwen2<'a> {
                 }
             }
         });
-        y
     }
 
     /// `moe_ffn` for a batch of normed hidden states: the output in (row,

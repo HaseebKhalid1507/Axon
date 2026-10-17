@@ -271,6 +271,9 @@ impl<'g> CudaQwen2<'g> {
         let (hb, rest) = b.split_at(nb * dim * 4);
         let (ib, wb) = rest.split_at(nb * k * 4);
         let (h, ids, w) = (as_f32(hb), as_i32(ib), as_f32(wb));
+        // SAFETY: host_r's wait above synced the stream, after host_y's
+        // last copy (the previous layer's y): no second wait for it.
+        unsafe { mb.host_y.assume_synced() };
         let yb = &mut mb.host_y.bytes_mut()?[..nb * dim * 4];
         // SAFETY: any bytes are a valid f32; the prefix is empty (asserted).
         let (pre, y, _) = unsafe { yb.align_to_mut::<f32>() };

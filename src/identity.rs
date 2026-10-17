@@ -360,7 +360,8 @@ pub fn predicted(path: &str, m: &Model) -> io::Result<Vec<(String, Result<Identi
         ),
     )];
     if crate::model::is_moe(m) {
-        let why = "attention on the GPU, experts on the CPU: gen --device cuda prints its identity";
+        let why = "not predicted here (attention on the GPU, experts on the CPU; it runs): \
+                   gen --device cuda prints its identity";
         v.push(("cuda".to_string(), Err(why.to_string())));
         return Ok(v);
     }

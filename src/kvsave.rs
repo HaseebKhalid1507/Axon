@@ -478,6 +478,8 @@ impl KvIo for Backend<'_> {
             Backend::Cpu(n) => n.kv_shape(),
             Backend::Cuda(n) => n.kv_shape(),
             // No image (`kv_ident` is None): nothing depends on the shape.
+            // A MoE model (attention on the GPU, experts on the CPU) has no
+            // cache image yet either: chat's session save/restore is off.
             Backend::Hybrid(_) | Backend::Pipeline(_) | Backend::Moe(_) => (0, 0, 0),
         }
     }

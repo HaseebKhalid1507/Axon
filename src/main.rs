@@ -895,6 +895,13 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             n.kv_name()
         );
     }
+    if let Backend::Moe(n) = &net {
+        eprintln!(
+            "device:      cuda + cpu experts, {}, kv {}",
+            n.describe(cache_ctx),
+            n.kv_name()
+        );
+    }
     let id = identity::of(path, &model, &net);
     match verbose {
         true => eprint!("identity:    {}\n{}", id.fingerprint(), id.canonical()),

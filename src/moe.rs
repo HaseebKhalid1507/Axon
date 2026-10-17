@@ -45,7 +45,9 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
     /// `m` (a qwen3moe model) with its attention on `gpu` (a `max_ctx`
     /// cache of type `kv`; with `fit` a shorter one if that doesn't fit)
     /// and its experts on the CPU. `module` is the model's kernel module,
-    /// `moe_module` moe.cu's (`Kernels::moe_module`).
+    /// `moe_module` moe.cu's (`Kernels::moe_module`). `q6k8`: the Q6_K
+    /// prefill copy now (as `CudaQwen2::with_kv_q6k8`).
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         gpu: &'g Gpu,
         module: &'g Module<'g>,
@@ -54,9 +56,10 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
         max_ctx: usize,
         kv: CacheKv,
         fit: bool,
+        q6k8: bool,
     ) -> Result<MoeQwen3<'m, 'g>, String> {
         crate::model::moe_check_ram(m)?;
-        let net = CudaQwen2::with_kv_moe(gpu, module, m, max_ctx, kv, fit)?;
+        let net = CudaQwen2::with_kv_moe(gpu, module, m, max_ctx, kv, fit, q6k8)?;
         let mf = MoeFns::new(moe_module)?;
         let cpu = Qwen2::new_experts(m);
         Ok(MoeQwen3 {
@@ -80,7 +83,7 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
     pub fn describe(&self, max_ctx: usize) -> String {
         let d = self.gpu.moe.expect("qwen3moe");
         format!(
-            "moe: attention + router on the GPU ({:.2} GiB, ctx {max_ctx}), {} experts x {} \
+            "attention + router on the GPU ({:.2} GiB, ctx {max_ctx}), {} experts x {} \
              layers on the CPU (top-{})",
             self.gpu.weight_bytes() as f64 / (1u64 << 30) as f64,
             d.n_expert,
@@ -97,6 +100,10 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
     fn experts(&self, l: usize, h: &[f32], ids: &[i32], w: &[f32], y: &mut [f32]) {
         let dim = self.gpu.dim;
         let nb = h.len() / dim;
+        if nb == 1 {
+            self.cpu.moe_layer(l, h, ids, w, y);
+            return;
+        }
         let k = ids.len() / nb;
         let route = |t: usize| -> MoeRoute {
             (
@@ -107,20 +114,10 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
                 w[t * k..(t + 1) * k].to_vec(),
             )
         };
-        if nb == 1 {
-            let (ids, w) = route(0);
-            y.copy_from_slice(&self.cpu.moe_layer(l, h, &ids, &w));
-            return;
-        }
         let hs: Vec<&[f32]> = h.chunks_exact(dim).collect();
         let routes: Vec<MoeRoute> = (0..nb).map(route).collect();
-        // (row, token) layout back to token major.
         let yc = self.cpu.moe_layer_batch(l, &hs, &routes);
-        for (t, yt) in y.chunks_exact_mut(dim).enumerate() {
-            for (r, v) in yt.iter_mut().enumerate() {
-                *v = yc[r * nb + t];
-            }
-        }
+        transpose_tiled(&yc, nb, dim, y);
     }
 
     fn step(&self, token: u32, pos: usize, c: &mut MoeCache<'g>) {
@@ -152,6 +149,27 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
             .moe_tokens(&self.mf, &mut c.c, &mut c.mb, tokens, start, head, &mut ex)
             .unwrap_or_else(|e| Self::die(e))
     }
+}
+
+/// y[t][r] = yc[r][t] (yc: dim rows of nb, y: nb rows of dim), in
+/// parallel over blocks of `TILE` tokens, each copied in TILE x TILE tiles
+/// (a row of yc read TILE floats at a time, not one per 4 * nb bytes).
+fn transpose_tiled(yc: &[f32], nb: usize, dim: usize, y: &mut [f32]) {
+    const TILE: usize = 32;
+    assert!(yc.len() == nb * dim && y.len() == nb * dim);
+    crate::pool::for_each_chunk_mut(y, TILE * dim, |c, ys| {
+        let t0 = c * TILE;
+        let nt = ys.len() / dim;
+        for r0 in (0..dim).step_by(TILE) {
+            let nr = TILE.min(dim - r0);
+            for r in r0..r0 + nr {
+                let src = &yc[r * nb + t0..r * nb + t0 + nt];
+                for (j, &v) in src.iter().enumerate() {
+                    ys[j * dim + r] = v;
+                }
+            }
+        }
+    });
 }
 
 impl<'g> Lm for MoeQwen3<'_, 'g> {
