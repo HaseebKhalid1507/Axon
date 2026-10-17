@@ -43,6 +43,31 @@ use crate::sample::{self, CAND_MAX, Cand, CandSpec};
 /// Positions per attention tile (decode.cu ATT_TILE) and largest GQA group.
 const ATT_TILE: usize = 128;
 const MAX_GROUP: usize = 8;
+/// Warps per block of the decode step's attention kernels (decode.cu
+/// ATT_NW: attn_blk_128 and the q8 cache's; attn_blk_64 has one). Four
+/// warps share a 64-position block's scores and P V: on the 7B at 32k,
+/// the q8 cache's attention goes from 143 to 70 us per layer; 64-wide heads
+/// on the f16 cache keep one (four is slower there at 8k: 13.7 vs 11.9 us).
+pub(crate) fn att_nw(head_dim: usize, q8: bool) -> u32 {
+    if head_dim == 64 && !q8 { 1 } else { 4 }
+}
+/// Decode steps past this many ATT_BLK blocks of positions combine by
+/// attn_cmb (64 outputs per block), others by attn_cmb256 (256: no counter
+/// path, ~2 us cheaper per layer at short positions; MEASURED: the two tie
+/// at 128 blocks). Same bits either way.
+const CMB64_BLKS: usize = 128;
+
+/// Whether the decode step at `pos` combines by attn_cmb: past CMB64_BLKS
+/// blocks of positions. Steps either side are captured as separate graphs.
+fn cmb64_at(pos: usize) -> bool {
+    (pos + 1).div_ceil(ATT_BLK) > CMB64_BLKS
+}
+
+/// Bytes of attn_cmb's counters (one u32 per 256 outputs), kept after the
+/// q_dim floats of `CudaCache::att`.
+fn cmb_cnt_bytes(q_dim: usize) -> usize {
+    q_dim.div_ceil(256) * 4
+}
 /// Most attention splits (decode.cu MAX_SPLIT).
 const MAX_SPLIT: usize = 256;
 /// Positions per block of the tensor-core attention (decode.cu ATT_BLK).
@@ -270,7 +295,9 @@ struct Fns<'m> {
     /// The tensor-core attention (f16 cache, sm_80+; `tc_attn`): a warp
     /// per 64 positions, then the fold.
     attn_blk: Func<'m>,
+    /// attn_blk's fold, 64 outputs per block (attn_cmb256: 256).
     attn_cmb: Func<'m>,
+    attn_cmb256: Func<'m>,
     argmax: Func<'m>,
     /// The q8 cache's: qkv_rope with f32 keys and values out, and per scale
     /// group (head_dim, 32) the attention kernels.
@@ -387,6 +414,8 @@ pub struct CudaQwen2<'g> {
     /// Attention splits (grid y of attn_split; the q8 cache and GPUs
     /// without tensor cores), and the most blocks of an attn_blk launch.
     max_split: usize,
+    /// Tests: attn_blk's grid y (0: max_split; any gives the same bits).
+    att_gy: usize,
     /// The attention runs on the tensor cores (decode.cu "Tensor-core
     /// attention"), decode and batched alike, either cache: sm_80+.
     tc_attn: bool,
@@ -440,6 +469,7 @@ pub struct CudaCache<'g> {
     kvf: DevBuf<'g>,
     x: DevBuf<'g>,
     q: DevBuf<'g>,
+    /// The attention's output (q_dim f32), then attn_cmb's counters.
     att: DevBuf<'g>,
     hid: DevBuf<'g>,
     act: DevBuf<'g>,
@@ -462,7 +492,7 @@ pub struct CudaCache<'g> {
     host_x: Option<HostBuf<'g>>,
     /// Captured steps, by `Head`: without the output head, with the
     /// argmax, with sampling candidates.
-    graph: [Option<Graph<'g>>; 3],
+    graph: [[Option<Graph<'g>>; 3]; 2],
     /// Scratch for batched passes (prefill, verify).
     b: Option<batch::BatchBufs<'g>>,
     /// Scratch for sampling candidates (`samp_upload`).
@@ -1287,6 +1317,7 @@ impl<'g> CudaQwen2<'g> {
                     "attn_blk_128"
                 })?,
                 attn_cmb: module.function("attn_cmb")?,
+                attn_cmb256: module.function("attn_cmb256")?,
                 argmax: module.function("argmax")?,
                 qkv_rope_f32: module.function("qkv_rope_f32")?,
                 q8: [Q8Fns::new(module, hdk, hdk)?, Q8Fns::new(module, hdk, 32)?],
@@ -1322,6 +1353,7 @@ impl<'g> CudaQwen2<'g> {
             output_norm,
             layers,
             max_split,
+            att_gy: 0,
             tc_attn: module.mma() && head_dim != 256,
             graphs: std::env::var("AXON_CUDA_GRAPHS").map_or(true, |v| v != "0"),
             bf: batch::BatchFns::new(module, hdk, sms)?,
@@ -1600,7 +1632,11 @@ impl<'g> CudaQwen2<'g> {
             kvf: g.alloc(if q8 { 2 * self.kv_dim() * f } else { 0 })?,
             x: g.alloc(self.dim * f)?,
             q: g.alloc(self.q_dim * f)?,
-            att: g.alloc(self.q_dim * f)?,
+            // The step's attention output, then attn_cmb's counters: no
+            // allocation of their own. (As a separate allocation they cost
+            // the 0.5B's decode 0.6-1.4 % at short positions, MEASURED; the
+            // cause is unknown.)
+            att: g.alloc(self.q_dim * f + cmb_cnt_bytes(self.q_dim))?,
             hid: g.alloc(self.ffn * f)?,
             act: g.alloc(act_bytes(self.act_len()))?,
             part_o: g.alloc(self.n_heads * self.att_parts(att_ctx) * self.head_dim * f)?,
@@ -1621,23 +1657,26 @@ impl<'g> CudaQwen2<'g> {
                 0 => None,
                 _ => Some(g.host_alloc(self.dim * f)?),
             },
-            graph: [None, None, None],
+            graph: [[None, None, None], [None, None, None]],
             b: Some(self.batch_bufs(self.batch_for(att_ctx), att_ctx)?),
             samp: None,
         };
         // Stale KV rows are never read (attention stops at pos), but zeroed
         // memory keeps a bug from reading NaNs.
         c.kv.zero()?;
+        c.att.zero()?; // the counters: zero between launches
         Ok(c)
     }
 
     /// Launch every kernel of one step on the stream (no sync): the layers,
     /// and with a `head` the output norm, head and argmax (or sampling
     /// candidates). `on_launch(name, bytes)` runs after each launch (profiling).
+    /// `cmb64`: combine by attn_cmb (`cmb64_at` of the step's position).
     fn enqueue(
         &self,
         c: &CudaCache,
         head: Head,
+        cmb64: bool,
         on_launch: &mut dyn FnMut(&'static str, usize) -> Result<(), String>,
     ) -> Result<(), String> {
         let g = self.gpu;
@@ -1851,7 +1890,14 @@ impl<'g> CudaQwen2<'g> {
                 // attn_blk: at most max_split warps per kv head (each takes
                 // blocks y, y + max_split, ..), whatever the position.
                 let (gy, bx) = match tc {
-                    true => (self.max_split.min(nblk_max), 32),
+                    true => (
+                        match self.att_gy {
+                            0 => self.max_split,
+                            g => g,
+                        }
+                        .min(nblk_max),
+                        32 * att_nw(hd, c.mode != CacheKv::F16),
+                    ),
                     false => (self.max_split, ATT_TILE as u32),
                 };
                 self.run(
@@ -1862,6 +1908,14 @@ impl<'g> CudaQwen2<'g> {
                     &args,
                 )?;
                 on_launch("attn", 0)?;
+                // attn_cmb past CMB64_BLKS blocks of positions (attn_cmb256's
+                // fold is latency-bound at long positions; below, its
+                // in-block quantization skips attn_cmb's ~2 us counter path).
+                let cmb64 = cmb64 && tc && self.gemma.is_none();
+                debug_assert!(
+                    c.att.len() >= qd * 4 + cmb_cnt_bytes(qd),
+                    "attn_cmb's counters after att"
+                );
                 let mut cargs = vec![
                     c.part_o.arg(),
                     c.part_ml.arg(),
@@ -1873,15 +1927,18 @@ impl<'g> CudaQwen2<'g> {
                     c.act.arg(),
                     c.att.arg(),
                 ];
-                let combine = if self.gemma.is_some() {
+                let (combine, per) = if self.gemma.is_some() {
                     cargs.push(Arg::I32(l.win as i32));
-                    &f.attn_combine_w
+                    (&f.attn_combine_w, 256)
+                } else if cmb64 {
+                    cargs.push(c.att.arg_at(qd * 4));
+                    (&f.attn_cmb, 64)
                 } else if tc {
-                    &f.attn_cmb
+                    (&f.attn_cmb256, 256)
                 } else {
-                    &f.attn_combine
+                    (&f.attn_combine, 256)
                 };
-                self.run(combine, blocks(qd, 256), (256, 1, 1), 0, &cargs)?;
+                self.run(combine, blocks(qd, per), (per as u32, 1, 1), 0, &cargs)?;
                 on_launch("combine", 0)?;
                 // gemma3: x += rmsnorm(W act) (the post-attention norm),
                 // the product through hid (free until gate_up).
@@ -2167,20 +2224,21 @@ impl<'g> CudaQwen2<'g> {
             p[4..8].copy_from_slice(&(pos as u32).to_le_bytes());
             c.host_params.copy_to(&c.params, 0, 8)?;
         }
+        let cmb64 = cmb64_at(pos);
         if !self.graphs {
-            return self.enqueue(c, head, &mut |_, _| Ok(()));
+            return self.enqueue(c, head, cmb64, &mut |_, _| Ok(()));
         }
-        let slot = head as usize;
-        if c.graph[slot].is_none() {
+        let (long, slot) = (cmb64 as usize, head as usize);
+        if c.graph[long][slot].is_none() {
             let g = self
                 .gpu
-                .capture(|| self.enqueue(c, head, &mut |_, _| Ok(())))?;
-            c.graph[slot] = Some(g);
+                .capture(|| self.enqueue(c, head, cmb64, &mut |_, _| Ok(())))?;
+            c.graph[long][slot] = Some(g);
         }
         // SAFETY: the graph's buffers are the cache's and the model's, both
         // borrowed for this call; the cache owns the graph, so it can't
         // outlive them.
-        unsafe { c.graph[slot].as_ref().unwrap().launch() }
+        unsafe { c.graph[long][slot].as_ref().unwrap().launch() }
     }
 
     /// model.rs `hidden_batch`'s checks, with its messages.
@@ -2315,7 +2373,9 @@ impl<'g> CudaQwen2<'g> {
             .is_some_and(|s| s.cap >= need && s.rows >= rows);
         if !fits {
             // New buffers: the sampling graph holds the old ones' addresses.
-            c.graph[Head::Sample as usize] = None;
+            for g in &mut c.graph {
+                g[Head::Sample as usize] = None;
+            }
             let old = c.samp.take();
             let cap = need.max(4 + 5 + 256).max(old.as_ref().map_or(0, |s| s.cap));
             let rows = rows.max(old.as_ref().map_or(1, |s| s.rows));
@@ -2471,7 +2531,7 @@ impl<'g> CudaQwen2<'g> {
         p[4..8].copy_from_slice(&(pos as u32).to_le_bytes());
         c.host_params.copy_to(&c.params, 0, 8)?;
         let mut evs = vec![("start", self.gpu.record()?, 0)];
-        self.enqueue(c, Head::Argmax, &mut |name, bytes| {
+        self.enqueue(c, Head::Argmax, cmb64_at(pos), &mut |name, bytes| {
             evs.push((name, self.gpu.record()?, bytes));
             Ok(())
         })?;
