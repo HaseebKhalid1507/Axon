@@ -10,6 +10,12 @@ bad request must get a 4xx with a JSON error message (overload: 503); a
 crash, a wedge, a 5xx other than 503, or a dropped connection where a 4xx
 was due is a finding. --slow adds the cases that wait out the server's 30 s
 idle/request timeouts (slowloris). Exits 1 on any finding.
+
+--ops starts the server with --api-key, --max-prompt-tokens and --slot-idle-ms,
+sends every request above with the key, and adds the operational cases:
+hostile Authorization headers, /metrics (strict Prometheus text check) and
+/slots, oversize prompts, odd `priority` values, and a client that stops
+reading its stream (its slot must be freed).
 """
 
 import argparse
@@ -24,6 +30,43 @@ import threading
 import time
 
 HOST = "127.0.0.1"
+# --ops: the API key every request carries (None: no auth).
+AUTH = None
+OPS_KEY = b"fuzz-key-0123456789"
+OPS_MAX_PROMPT = 256
+OPS_IDLE_MS = 1000
+
+
+def inject(raw):
+    """raw with the Authorization header after each request line (--ops)."""
+    if not AUTH or not isinstance(raw, (bytes, bytearray)):
+        return raw
+    out, i = b"", 0
+    while True:
+        j = raw.find(b" HTTP/1.", i)
+        k = raw.find(b"\n", j) if j >= 0 else -1
+        if k < 0:
+            return out + raw[i:]
+        out += raw[i:k + 1] + b"Authorization: Bearer " + AUTH + b"\r\n"
+        i = k + 1
+
+
+class AuthSock:
+    """A socket whose writes carry the key (--ops)."""
+
+    def __init__(self, s):
+        self._s = s
+
+    def sendall(self, b, *a):
+        return self._s.sendall(inject(b), *a)
+
+    def send(self, b, *a):
+        b2 = inject(b)
+        n = self._s.send(b2, *a)
+        return len(b) if n == len(b2) else min(n, len(b))
+
+    def __getattr__(self, n):
+        return getattr(self._s, n)
 
 
 class Server:
@@ -60,7 +103,7 @@ class Server:
 def connect(port, timeout):
     s = socket.create_connection((HOST, port), timeout=timeout)
     s.settimeout(timeout)
-    return s
+    return AuthSock(s) if AUTH else s
 
 
 def read_response(s, deadline):
@@ -607,6 +650,199 @@ def cases(srv, ctx, slow):
         alive(srv, name)
 
 
+PROM_LINE = re.compile(r'^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{([a-zA-Z_][a-zA-Z0-9_]*="(?:[^"\\\n]|\\.)*"'
+                       r'(?:,[a-zA-Z_][a-zA-Z0-9_]*="(?:[^"\\\n]|\\.)*")*)?\})? (\S+)$')
+
+
+def prom_check(text):
+    """Strict Prometheus text 0.0.4 check: (ok, detail, samples {name{labels}: value})."""
+    types, samples = {}, {}
+    if not text.endswith("\n"):
+        return False, "no final newline", samples
+    for ln in text.split("\n")[:-1]:
+        if ln.startswith("# HELP "):
+            if len(ln.split(" ", 3)) < 4:
+                return False, f"bad HELP: {ln!r}", samples
+            continue
+        if ln.startswith("# TYPE "):
+            p = ln.split(" ")
+            if len(p) != 4 or p[3] not in ("counter", "gauge", "histogram", "summary", "untyped"):
+                return False, f"bad TYPE: {ln!r}", samples
+            if p[2] in types:
+                return False, f"TYPE twice: {p[2]}", samples
+            types[p[2]] = p[3]
+            continue
+        m = PROM_LINE.match(ln)
+        if not m:
+            return False, f"bad sample line: {ln!r}", samples
+        name, val = m.group(1), m.group(4)
+        try:
+            float(val.replace("+Inf", "inf"))
+        except ValueError:
+            return False, f"bad value: {ln!r}", samples
+        fam = re.sub(r"_(bucket|sum|count)$", "", name) if re.sub(r"_(bucket|sum|count)$", "", name) in types else name
+        if fam not in types:
+            return False, f"sample before its TYPE: {ln!r}", samples
+        key = name + (m.group(2) or "")
+        if key in samples:
+            return False, f"duplicate sample: {key}", samples
+        samples[key] = float(val)
+    for fam, t in types.items():
+        if t != "histogram":
+            continue
+        b = [(k, v) for k, v in samples.items() if k.startswith(fam + "_bucket{")]
+        vals = [v for _, v in b]
+        if not b or vals != sorted(vals) or 'le="+Inf"' not in b[-1][0] or b[-1][1] != samples.get(fam + "_count"):
+            return False, f"histogram {fam} not cumulative / +Inf != count", samples
+    return True, f"{len(types)} families, {len(samples)} samples", samples
+
+
+def get(path, extra=""):
+    return f"GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n{extra}\r\n".encode()
+
+
+def ops_cases(srv):
+    global AUTH
+    P = srv.port
+    key = AUTH
+    E = lambda name, raw, want="any4xx": expect(srv, name, raw, want)
+
+    # Auth: raw requests without the injected key.
+    AUTH = None
+    try:
+        def auth(name, hdr, want, path="/v1/models"):
+            E("auth:" + name, get(path, hdr), want)
+        auth("none", "", {401})
+        auth("empty-bearer", "Authorization: Bearer\r\n", {401})
+        auth("bearer-space", "Authorization: Bearer \r\n", {401})
+        auth("wrong", "Authorization: Bearer nope\r\n", {401})
+        auth("prefix", f"Authorization: Bearer {key.decode()[:-1]}\r\n", {401})
+        auth("longer", f"Authorization: Bearer {key.decode()}x\r\n", {401})
+        auth("basic", f"Authorization: Basic {key.decode()}\r\n", {401})
+        auth("no-scheme", f"Authorization: {key.decode()}\r\n", {401})
+        auth("lowercase-scheme", f"Authorization: bearer {key.decode()}\r\n", "ok")
+        auth("right", f"Authorization: Bearer {key.decode()}\r\n", "ok")
+        auth("huge", "Authorization: Bearer " + "k" * 15000 + "\r\n", {401, 431})
+        auth("too-huge", "Authorization: Bearer " + "k" * 20000 + "\r\n", {431})
+        E("auth:non-utf8", get("/v1/models").replace(b"Connection", b"Authorization: Bearer \xff\xfe\r\nConnection"),
+          {400, 401})
+        auth("dup-wrong-first", f"Authorization: Bearer x\r\nAuthorization: Bearer {key.decode()}\r\n", {401, 200})
+        auth("health-open", "", "ok", "/health")
+        auth("metrics-closed", "", {401}, "/metrics")
+        auth("slots-closed", "", {401}, "/slots")
+        auth("404-closed", "", {401}, "/nope")
+        E("auth:post-closed", cj({"prompt": "Hi", "max_tokens": 1}), {401})
+        E("auth:options-open", b"OPTIONS /v1/chat/completions HTTP/1.1\r\nConnection: close\r\n\r\n", {204})
+        # The 401 body is OpenAI's error shape.
+        st, h, body = request(P, get("/v1/models"))
+        try:
+            e = json.loads(body)["error"]
+            ok = st == 401 and e["code"] == "invalid_api_key" and h.get("www-authenticate") == "Bearer"
+        except Exception:
+            ok = False
+        record("auth:401-shape", ok, f"{st} {body[:120]!r}")
+    finally:
+        AUTH = key
+
+    # /metrics and /slots.
+    def metrics():
+        st, h, body = request(P, get("/metrics"))
+        ok, detail, samples = prom_check(body.decode("utf-8", "replace"))
+        ok = ok and st == 200 and h.get("content-type", "").startswith("text/plain")
+        return ok, detail, samples
+    ok, detail, samples = metrics()
+    record("metrics:format", ok, detail)
+    for nm in ["axon_generated_tokens_total", "axon_prompt_tokens_total", "axon_queue_depth",
+               "axon_slots_busy", "axon_slots_free", "axon_ttft_seconds_count", "axon_itl_seconds_count"]:
+        if nm not in samples:
+            record("metrics:has-" + nm, False, "missing")
+    E("metrics:HEAD", b"HEAD /metrics HTTP/1.1\r\nConnection: close\r\n\r\n", "ok")
+    E("metrics:POST", post("/metrics", "{}"), {405})
+    E("metrics:query", get("/metrics?name[]=x&%00"), "ok")
+    st, _, body = request(P, get("/slots"))
+    try:
+        j = json.loads(body)
+        ok = st == 200 and isinstance(j["slots"], list) and "busy" in j["solo"] and "queue_depth" in j \
+            and all({"id", "busy", "held_tokens", "request_id", "age_ms"} <= set(x) for x in j["slots"])
+    except Exception:
+        ok = False
+    record("slots:shape", ok, f"{st} {body[:160]!r}")
+    E("slots:DELETE", b"DELETE /slots HTTP/1.1\r\nConnection: close\r\n\r\n", {405})
+
+    # --max-prompt-tokens and priority.
+    long = " ".join(["word"] * (OPS_MAX_PROMPT * 2))
+    for nm, raw in [("text", cj({"prompt": long, "max_tokens": 1})),
+                    ("chat", chat({"messages": [{"role": "user", "content": long}], "max_tokens": 1})),
+                    ("bytes", cj({"prompt": "x" * 200000, "max_tokens": 1}))]:
+        st, _, body = request(P, raw)
+        try:
+            ok = st == 400 and json.loads(body)["error"]["code"] == "context_length_exceeded"
+        except Exception:
+            ok = False
+        record("max-prompt:" + nm, ok, f"{st} {body[:110]!r}")
+        alive(srv, "max-prompt:" + nm)
+    E("max-prompt:at-limit-ok", cj({"prompt": "Hi", "max_tokens": 1}), "ok")
+    for v in ["high", 0, -1, 10**30, 1e308, None, [], {}, True]:
+        E(f"priority:{json.dumps(v)[:20]}", cj({"prompt": "Hi", "max_tokens": 1, "priority": v}), "ok")
+
+    # Expect: 100-continue without the key: a 401, no invitation to send the body.
+    AUTH = None
+    try:
+        raw = (b"POST /v1/completions HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\n"
+               b"Content-Length: 1000000\r\nConnection: close\r\n\r\n")
+        st, _, body = request(P, raw, 10)
+        record("auth:expect-100-no-key", st == 401 and check_error_body(body), f"{st}")
+    except Exception as e:
+        record("auth:expect-100-no-key", False, repr(e))
+    finally:
+        AUTH = key
+    alive(srv, "auth:expect-100-no-key")
+
+    # A client that stops reading its stream: its slot is freed. With a tiny
+    # receive buffer (4 KiB: the clock starts almost at once), then the
+    # default one (the clock starts only once it is full).
+    for rcvbuf in (4096, None):
+        stalled_reader(srv, rcvbuf, metrics)
+
+
+def stalled_reader(srv, rcvbuf, metrics):
+    P = srv.port
+    name = f"slot-idle:stalled-reader-rcvbuf-{rcvbuf or 'default'}"
+    try:
+        raw = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        if rcvbuf:
+            raw.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, rcvbuf)
+        raw.settimeout(30)
+        raw.connect((HOST, P))
+        s = AuthSock(raw)
+        m0 = metrics()[2]
+        before = m0.get("axon_slot_idle_evictions_total", 0)
+        g0 = m0.get("axon_generated_tokens_total", 0)
+        s.sendall(cj({"prompt": "Count to a thousand: 1, 2, 3,", "max_tokens": 1900, "stream": True,
+                      "temperature": 0}))
+        s.recv(256)
+        t0 = time.time()
+        freed = None
+        while time.time() - t0 < 120:
+            time.sleep(0.1)
+            _, _, b = request(P, get("/slots"))
+            j = json.loads(b)
+            if not j["solo"]["busy"] and not any(x["busy"] for x in j["slots"]):
+                freed = time.time() - t0
+                break
+        m1 = metrics()[2]
+        after = m1.get("axon_slot_idle_evictions_total", 0)
+        toks = m1.get("axon_generated_tokens_total", 0) - g0
+        # The default buffer may hold the whole reply: then it simply finishes.
+        ok = freed is not None and (after == before + 1 or (rcvbuf is None and toks >= 1900))
+        record(name, ok, f"slot freed after {freed}s, {toks:.0f} tokens generated meanwhile "
+                         f"(--slot-idle-ms {OPS_IDLE_MS}), evictions {before}->{after}")
+        s.close()
+    except Exception as e:
+        record(name, False, repr(e))
+    alive(srv, name)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("axon")
@@ -615,13 +851,22 @@ def main():
     ap.add_argument("--ctx", type=int, default=2048)
     ap.add_argument("--slow", action="store_true")
     ap.add_argument("--log-dir", help="where the server's log goes (default: a new temporary directory)")
+    ap.add_argument("--ops", action="store_true", help="auth, metrics, slots, max prompt, slot idle (see above)")
     ap.add_argument("extra", nargs="*")
     a = ap.parse_args()
     log_dir = a.log_dir or tempfile.mkdtemp(prefix="axon-fuzz-serve-")
     os.makedirs(log_dir, exist_ok=True)
-    srv = Server(a.axon, a.model, a.port, a.ctx, a.extra, log_dir)
+    extra = a.extra
+    if a.ops:
+        global AUTH
+        AUTH = OPS_KEY
+        extra = extra + ["--api-key", OPS_KEY.decode(), "--max-prompt-tokens", str(OPS_MAX_PROMPT),
+                         "--slot-idle-ms", str(OPS_IDLE_MS)]
+    srv = Server(a.axon, a.model, a.port, a.ctx, extra, log_dir)
     print(f"server log: {srv.log_path}", flush=True)
     try:
+        if a.ops:
+            ops_cases(srv)
         cases(srv, a.ctx, a.slow)
     finally:
         rc = srv.p.poll()

@@ -94,6 +94,9 @@ impl Peer for std::net::TcpStream {
     }
 }
 
+/// `Conn::gate`.
+pub type Gate = Box<dyn Fn(&Request) -> bool + Send>;
+
 /// One connection: its stream and the bytes read but not yet used.
 pub struct Conn<S> {
     pub s: S,
@@ -106,6 +109,13 @@ pub struct Conn<S> {
     pub extra: String,
     /// Answering a HEAD request: `respond` sends the headers only.
     pub head_only: bool,
+    /// Whether a request whose head asks `Expect: 100-continue` may send
+    /// its body (--api-key: false answers 401 without inviting it).
+    pub gate: Option<Gate>,
+    /// The status of the last response started (0: none yet).
+    pub status: u16,
+    /// Bytes written so far.
+    pub written: u64,
 }
 
 /// The status line's reason phrase.
@@ -115,6 +125,7 @@ pub fn reason(status: u16) -> &'static str {
         200 => "OK",
         204 => "No Content",
         400 => "Bad Request",
+        401 => "Unauthorized",
         404 => "Not Found",
         405 => "Method Not Allowed",
         408 => "Request Timeout",
@@ -289,6 +300,9 @@ impl<S: Read + Write> Conn<S> {
             chunked: false,
             extra: String::new(),
             head_only: false,
+            gate: None,
+            status: 0,
+            written: 0,
         }
     }
 
@@ -365,6 +379,9 @@ impl<S: Read + Write> Conn<S> {
         };
         let (mut req, body, cont) = parse_head(&self.buf[..end])?;
         self.buf.drain(..end);
+        if cont && self.gate.as_ref().is_some_and(|g| !g(&req)) {
+            return err(401, "unauthorized");
+        }
         if cont && self.buf.is_empty() {
             self.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
                 .or(err(400, "connection closed mid-request"))?;
@@ -445,6 +462,7 @@ impl<S: Read + Write> Conn<S> {
 
     fn write_all(&mut self, b: &[u8]) -> io::Result<()> {
         self.s.write_all(b)?;
+        self.written += b.len() as u64;
         self.s.flush()
     }
 
@@ -457,6 +475,7 @@ impl<S: Read + Write> Conn<S> {
         keep_alive: bool,
         extra: &[(&str, &str)],
     ) -> io::Result<()> {
+        self.status = status;
         let mut out = format!(
             "HTTP/1.1 {status} {}\r\nDate: {}\r\n{}",
             reason(status),
@@ -492,6 +511,7 @@ impl<S: Read + Write> Conn<S> {
         minor: u8,
         keep_alive: bool,
     ) -> io::Result<()> {
+        self.status = status;
         self.chunked = minor == 1;
         let mut out = format!(
             "HTTP/1.1 {status} {}\r\nDate: {}\r\n{}Content-Type: {ctype}\r\nCache-Control: no-cache\r\n",

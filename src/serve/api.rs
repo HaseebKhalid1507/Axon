@@ -21,6 +21,7 @@
 //! | `n` | 1 only |
 //! | `tools`, `tool_choice` (chat) | tool calling: tools.rs (`required` and a named function prefill a call) |
 //! | `parallel_tool_calls`, `store`, `reasoning_effort`, `prompt_cache_key`, `user` | accepted and ignored |
+//! | `priority` (vLLM's; scheduling is arrival order for now) | accepted and ignored |
 //! | `logprobs`, `functions`, `tools` on /v1/completions, `logit_bias`, `response_format` other than text, `echo`, `suffix`, `best_of` > 1 | refused (400) |
 
 use crate::sample::{SampleArgs, SampleCfg};

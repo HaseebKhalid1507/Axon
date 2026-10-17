@@ -46,6 +46,9 @@ fn server_with(path: &str, device: Device, f: impl FnOnce(&mut Opts)) -> Server 
         prefill_chunk: super::engine::PREFILL_CHUNK,
         prefill_ms: super::engine::PREFILL_MS,
         rope: Default::default(),
+        api_key: None,
+        max_prompt_tokens: None,
+        slot_idle_ms: None,
     };
     f(&mut o);
     start(o).expect("start the server")
@@ -2415,4 +2418,586 @@ fn serve_identity_cpu() {
     let (c, mut b) = identity_targets().swap_remove(2);
     b["seed"] = json!(4);
     assert_ne!(identity_reply(s.addr, c, &b, false).0, texts[2]);
+}
+
+/// `call` with extra header lines (`Name: value\r\n` each).
+fn call_h(addr: SocketAddr, method: &str, path: &str, body: &str, hdr: &str) -> Resp {
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(300))).unwrap();
+    let req =
+        request(method, path, body, true).replacen("Host: x\r\n", &format!("Host: x\r\n{hdr}"), 1);
+    s.write_all(req.as_bytes()).unwrap();
+    read_resp(&mut s, &mut Vec::new())
+}
+
+/// A strict check of Prometheus text format 0.0.4 (what `prometheus_client`'s
+/// parser takes): HELP/TYPE before a family's samples, one TYPE per family,
+/// `name{label="v",...} value` lines, histograms cumulative with `+Inf` ==
+/// `_count`. Returns the samples, `name{labels}` -> value.
+fn prom_parse(text: &str) -> std::collections::BTreeMap<String, f64> {
+    let name_ok = |n: &str| {
+        !n.is_empty()
+            && !n.starts_with(|c: char| c.is_ascii_digit())
+            && n.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':')
+    };
+    assert!(text.ends_with('\n'), "no final newline");
+    let mut types: std::collections::BTreeMap<String, String> = Default::default();
+    let mut samples = std::collections::BTreeMap::new();
+    for l in text.lines() {
+        if let Some(r) = l.strip_prefix("# HELP ") {
+            let (n, help) = r.split_once(' ').unwrap_or_else(|| panic!("HELP: {l}"));
+            assert!(name_ok(n) && !help.is_empty(), "HELP: {l}");
+            continue;
+        }
+        if let Some(r) = l.strip_prefix("# TYPE ") {
+            let (n, t) = r.split_once(' ').unwrap_or_else(|| panic!("TYPE: {l}"));
+            assert!(name_ok(n), "TYPE: {l}");
+            assert!(["counter", "gauge", "histogram"].contains(&t), "TYPE: {l}");
+            assert!(
+                types.insert(n.into(), t.into()).is_none(),
+                "TYPE twice: {l}"
+            );
+            continue;
+        }
+        assert!(!l.starts_with('#') && !l.is_empty(), "stray line: {l:?}");
+        let (key, v) = l.rsplit_once(' ').unwrap_or_else(|| panic!("sample: {l}"));
+        let v: f64 = match v {
+            "+Inf" => f64::INFINITY,
+            v => v.parse().unwrap_or_else(|_| panic!("value: {l}")),
+        };
+        let (name, labels) = match key.split_once('{') {
+            Some((n, rest)) => (
+                n,
+                Some(rest.strip_suffix('}').unwrap_or_else(|| panic!("{l}"))),
+            ),
+            None => (key, None),
+        };
+        assert!(name_ok(name), "name: {l}");
+        if let Some(ls) = labels {
+            for kv in ls.split(',') {
+                let (k, q) = kv.split_once('=').unwrap_or_else(|| panic!("label: {l}"));
+                assert!(name_ok(k), "label name: {l}");
+                assert!(
+                    q.len() >= 2 && q.starts_with('"') && q.ends_with('"'),
+                    "label value: {l}"
+                );
+                assert!(!q[1..q.len() - 1].contains(['"', '\\', '\n']), "{l}");
+            }
+        }
+        let fam = ["_bucket", "_sum", "_count"]
+            .iter()
+            .find_map(|s| {
+                name.strip_suffix(s)
+                    .filter(|f| types.get(*f).is_some_and(|t| t == "histogram"))
+            })
+            .unwrap_or(name);
+        let t = types
+            .get(fam)
+            .unwrap_or_else(|| panic!("sample before its TYPE: {l}"));
+        if t == "counter" {
+            assert!(name.ends_with("_total") && v >= 0.0, "counter: {l}");
+        }
+        assert!(
+            samples.insert(key.to_string(), v).is_none(),
+            "duplicate: {l}"
+        );
+    }
+    for (fam, _) in types.iter().filter(|(_, t)| *t == "histogram") {
+        let b: Vec<(&String, &f64)> = samples
+            .iter()
+            .filter(|(k, _)| k.starts_with(&format!("{fam}_bucket{{")))
+            .collect();
+        assert!(!b.is_empty(), "{fam}: no buckets");
+        // BTreeMap order isn't le order: sort by le.
+        let mut b: Vec<(f64, f64)> = b
+            .iter()
+            .map(|(k, v)| {
+                let le = k.split("le=\"").nth(1).unwrap().trim_end_matches("\"}");
+                (
+                    if le == "+Inf" {
+                        f64::INFINITY
+                    } else {
+                        le.parse().unwrap()
+                    },
+                    **v,
+                )
+            })
+            .collect();
+        b.sort_by(|x, y| x.0.total_cmp(&y.0));
+        assert!(
+            b.windows(2).all(|w| w[0].1 <= w[1].1),
+            "{fam} not cumulative: {b:?}"
+        );
+        assert_eq!(b.last().unwrap().0, f64::INFINITY, "{fam}: no +Inf");
+        assert_eq!(
+            Some(&b.last().unwrap().1),
+            samples.get(&format!("{fam}_count")),
+            "{fam}"
+        );
+        assert!(samples.contains_key(&format!("{fam}_sum")), "{fam}");
+    }
+    samples
+}
+
+#[test]
+fn prom_parse_rejects_bad_text() {
+    let ok = "# HELP a_total x\n# TYPE a_total counter\na_total{r=\"/\"} 1\n";
+    assert_eq!(prom_parse(ok)["a_total{r=\"/\"}"], 1.0);
+    for bad in [
+        "a_total 1\n",
+        "# TYPE a_total counter\na_total one\n",
+        "# TYPE a_total counter\na_total 1",
+        "# TYPE a_total counter\n# TYPE a_total counter\na_total 1\n",
+        "# TYPE a_total counter\na_total{r=/} 1\n",
+        "# TYPE h histogram\nh_bucket{le=\"1\"} 2\nh_bucket{le=\"+Inf\"} 1\nh_sum 0\nh_count 1\n",
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| prom_parse(bad)).is_err(),
+            "accepted {bad:?}"
+        );
+    }
+}
+
+/// --api-key: every route but /health (and CORS preflights) needs the
+/// Bearer key; wrong or missing is a 401 in OpenAI's error shape.
+#[test]
+fn serve_api_key() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server_with(p.to_str().unwrap(), Device::Cpu, |o| {
+        o.api_key = Some("s3cret-key".into());
+    });
+    let a = s.addr;
+    let right = "Authorization: Bearer s3cret-key\r\n";
+    for path in ["/v1/models", "/metrics", "/slots", "/identity", "/nope"] {
+        for hdr in [
+            "",
+            "Authorization: Bearer s3cret-kez\r\n",
+            "Authorization: Bearer s3cret-key2\r\n",
+            "Authorization: Bearer \r\n",
+            "Authorization: Basic s3cret-key\r\n",
+            "Authorization: s3cret-key\r\n",
+        ] {
+            let r = call_h(a, "GET", path, "", hdr);
+            assert_eq!(r.status, 401, "{path} {hdr:?}: {}", r.body);
+            assert_eq!(r.header("www-authenticate"), Some("Bearer"));
+            let e = &r.json()["error"];
+            assert_eq!(e["code"], "invalid_api_key", "{}", r.body);
+            assert_eq!(e["type"], "invalid_request_error");
+            assert!(e["message"].as_str().unwrap().contains("Bearer"));
+        }
+    }
+    for path in ["/v1/models", "/metrics", "/slots", "/identity"] {
+        assert_eq!(call_h(a, "GET", path, "", right).status, 200, "{path}");
+    }
+    assert_eq!(call_h(a, "GET", "/nope", "", right).status, 404);
+    let lower = "Authorization: bearer s3cret-key\r\n";
+    assert_eq!(call_h(a, "GET", "/v1/models", "", lower).status, 200);
+    // /health stays open, as do CORS preflights.
+    assert_eq!(call(a, "GET", "/health", "").status, 200);
+    assert_eq!(call(a, "OPTIONS", "/v1/chat/completions", "").status, 204);
+    // Generation: refused without the key (nothing queued), served with it.
+    let body = json!({"prompt": "Hi", "max_tokens": 2, "temperature": 0}).to_string();
+    let r = call_h(a, "POST", "/v1/completions", &body, "");
+    assert_eq!(r.status, 401);
+    assert_eq!(s.queued.load(Ordering::Relaxed), 0);
+    let r = call_h(a, "POST", "/v1/completions", &body, right);
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.json()["usage"]["completion_tokens"], 2);
+    // The 401s are counted.
+    let m = prom_parse(&call_h(a, "GET", "/metrics", "", right).body);
+    assert_eq!(
+        m["axon_requests_total{route=\"/v1/models\",status=\"401\"}"],
+        6.0
+    );
+    assert_eq!(
+        m["axon_requests_total{route=\"/v1/completions\",status=\"200\"}"],
+        1.0
+    );
+}
+
+/// GET /metrics parses as Prometheus text and counts what was served;
+/// GET /slots has its shape (CPU: the one cache, `solo`); `priority` is
+/// accepted and ignored; --max-prompt-tokens refuses before prefill.
+#[test]
+fn serve_metrics_slots_max_prompt() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server_with(p.to_str().unwrap(), Device::Cpu, |o| {
+        o.max_prompt_tokens = Some(16);
+    });
+    let a = s.addr;
+    // Before any request: zeros, a free slot.
+    let m = prom_parse(&call(a, "GET", "/metrics", "").body);
+    for (k, v) in [
+        ("axon_generated_tokens_total", 0.0),
+        ("axon_prompt_tokens_total", 0.0),
+        ("axon_queue_depth", 0.0),
+        ("axon_slots_busy", 0.0),
+        ("axon_slots_free", 1.0),
+        ("axon_ttft_seconds_count", 0.0),
+    ] {
+        assert_eq!(m[k], v, "{k}");
+    }
+    let sl = call(a, "GET", "/slots", "").json();
+    assert_eq!(sl["ctx"], 2048);
+    assert_eq!(sl["slots"], json!([]));
+    assert_eq!(sl["solo"]["busy"], false);
+    assert_eq!(sl["solo"]["request_id"], Value::Null);
+    assert_eq!(sl["queue_depth"], 0);
+
+    // Two requests (one with `priority`, ignored); the second reuses the
+    // first's prompt rows.
+    let mut prompt_tokens = 0;
+    let mut cached = 0;
+    let mut texts = Vec::new();
+    for b in [
+        json!({"prompt": PROMPT, "max_tokens": 6, "temperature": 0}),
+        json!({"prompt": PROMPT, "max_tokens": 6, "temperature": 0, "priority": 7, "stream": true,
+               "stream_options": {"include_usage": true}}),
+    ] {
+        let r = post(a, "/v1/completions", b.clone());
+        assert_eq!(r.status, 200, "{}", r.body);
+        let u = if b["stream"] == true {
+            let (t, last) = streamed_text(&r, false);
+            texts.push(t);
+            last["usage"].clone()
+        } else {
+            texts.push(r.json()["choices"][0]["text"].as_str().unwrap().to_string());
+            r.json()["usage"].clone()
+        };
+        prompt_tokens += u["prompt_tokens"].as_u64().unwrap();
+        cached += u["prompt_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .unwrap();
+    }
+    assert_eq!(texts[0], texts[1], "priority changes nothing");
+    assert!(cached > 0);
+    let m = prom_parse(&call(a, "GET", "/metrics", "").body);
+    assert_eq!(
+        m["axon_generated_tokens_total"],
+        s.generated.load(Ordering::Relaxed) as f64
+    );
+    assert_eq!(m["axon_generated_tokens_total"], 12.0);
+    assert_eq!(m["axon_prompt_tokens_total"], prompt_tokens as f64);
+    assert_eq!(m["axon_prompt_cached_tokens_total"], cached as f64);
+    assert_eq!(
+        m["axon_requests_total{route=\"/v1/completions\",status=\"200\"}"],
+        2.0
+    );
+    assert_eq!(
+        m["axon_requests_total{route=\"/metrics\",status=\"200\"}"],
+        1.0
+    );
+    assert_eq!(m["axon_ttft_seconds_count"], 2.0);
+    assert!(m["axon_ttft_seconds_sum"] > 0.0);
+    assert!(m["axon_itl_seconds_count"] >= 2.0, "{m:?}");
+    assert_eq!(m["axon_requests_in_flight"], 0.0);
+    let sl = call(a, "GET", "/slots", "").json();
+    assert_eq!(sl["solo"]["busy"], false);
+    assert!(sl["solo"]["held_tokens"].as_u64().unwrap() >= prompt_tokens / 2);
+
+    // While a request runs: busy, its id and age.
+    let mut c = TcpStream::connect(a).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
+    let body = json!({"prompt": "Count: 1, 2, 3,", "max_tokens": 1500, "stream": true,
+                      "temperature": 0})
+    .to_string();
+    c.write_all(request("POST", "/v1/completions", &body, false).as_bytes())
+        .unwrap();
+    assert!(c.read(&mut [0u8; 256]).unwrap() > 0);
+    wait_for("the stream to show in /slots", || {
+        call(a, "GET", "/slots", "").json()["solo"]["busy"] == true
+    });
+    let sl = call(a, "GET", "/slots", "").json();
+    assert_eq!(sl["solo"]["request_id"], 3, "{sl}");
+    assert!(sl["solo"]["age_ms"].as_u64().is_some(), "{sl}");
+    let m = prom_parse(&call(a, "GET", "/metrics", "").body);
+    assert_eq!((m["axon_slots_busy"], m["axon_slots_free"]), (1.0, 0.0));
+    assert_eq!(m["axon_requests_in_flight"], 1.0);
+    drop(c);
+    wait_for("the cancelled stream to free the slot", || {
+        call(a, "GET", "/slots", "").json()["solo"]["busy"] == false
+    });
+
+    // --max-prompt-tokens 16: refused with a 400 before anything is queued.
+    let q = s.queued.load(Ordering::Relaxed);
+    let long = "one two three four five six seven eight nine ten eleven twelve thirteen \
+                fourteen fifteen sixteen seventeen";
+    for (path, b, param) in [
+        ("/v1/completions", json!({"prompt": long}), "prompt"),
+        (
+            "/v1/chat/completions",
+            json!({"messages": [{"role": "user", "content": long}]}),
+            "messages",
+        ),
+        (
+            "/v1/completions",
+            json!({"prompt": "x".repeat(200_000)}),
+            "prompt",
+        ),
+    ] {
+        let r = post(a, path, b);
+        assert_eq!(r.status, 400, "{}", r.body);
+        let e = &r.json()["error"];
+        assert_eq!(e["code"], "context_length_exceeded", "{}", r.body);
+        assert_eq!(e["param"], param);
+        assert!(
+            e["message"]
+                .as_str()
+                .unwrap()
+                .contains("--max-prompt-tokens")
+        );
+    }
+    assert_eq!(s.queued.load(Ordering::Relaxed), q, "nothing queued");
+    let r = post(
+        a,
+        "/v1/completions",
+        json!({"prompt": "Hi", "max_tokens": 1}),
+    );
+    assert_eq!(r.status, 200, "a short prompt still runs");
+    let m = prom_parse(&call(a, "GET", "/metrics", "").body);
+    assert_eq!(m["axon_prompt_refused_total"], 3.0);
+}
+
+/// Set `s`'s receive buffer (bytes; the kernel doubles it), so a client
+/// that stops reading closes its window after a few KiB.
+#[cfg(target_os = "linux")]
+fn small_rcvbuf(s: &TcpStream, n: i32) {
+    use std::os::fd::AsRawFd;
+    unsafe extern "C" {
+        fn setsockopt(
+            fd: std::ffi::c_int,
+            level: std::ffi::c_int,
+            name: std::ffi::c_int,
+            val: *const std::ffi::c_void,
+            len: u32,
+        ) -> std::ffi::c_int;
+    }
+    const SOL_SOCKET: std::ffi::c_int = 1;
+    const SO_RCVBUF: std::ffi::c_int = 8;
+    // SAFETY: an int option on an fd we own.
+    let r = unsafe {
+        setsockopt(
+            s.as_raw_fd(),
+            SOL_SOCKET,
+            SO_RCVBUF,
+            &n as *const i32 as *const std::ffi::c_void,
+            4,
+        )
+    };
+    assert_eq!(r, 0, "setsockopt");
+}
+
+/// Bytes waiting in `s`'s receive queue (FIONREAD).
+#[cfg(target_os = "linux")]
+fn inq(s: &TcpStream) -> i32 {
+    use std::os::fd::AsRawFd;
+    unsafe extern "C" {
+        fn ioctl(fd: std::ffi::c_int, req: std::ffi::c_ulong, ...) -> std::ffi::c_int;
+    }
+    let mut n: std::ffi::c_int = 0;
+    // SAFETY: FIONREAD writes one int.
+    let r = unsafe { ioctl(s.as_raw_fd(), 0x541B, &mut n as *mut std::ffi::c_int) };
+    assert_eq!(r, 0, "FIONREAD");
+    n
+}
+
+/// A streaming client that stops reading: with --slot-idle-ms N the
+/// stream is cancelled (as a disconnect) N ms after its receive window
+/// fills, plus a poll and a step, and the slot serves the next request;
+/// without it, the same client keeps the slot.
+#[cfg(target_os = "linux")]
+#[test]
+fn serve_slot_idle_frees_a_stalled_stream() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    const IDLE: u64 = 300;
+    for idle in [Some(IDLE), None] {
+        let s = server_with(p.to_str().unwrap(), Device::Cpu, |o| {
+            o.slot_idle_ms = idle;
+        });
+        let a = s.addr;
+        let c = TcpStream::connect(a).unwrap();
+        small_rcvbuf(&c, 2048);
+        let body = json!({"prompt": "Count: 1, 2, 3,", "max_tokens": 1800, "stream": true,
+                          "temperature": 0})
+        .to_string();
+        (&c).write_all(request("POST", "/v1/completions", &body, false).as_bytes())
+            .unwrap();
+        // The window is full when the client's queue stops growing while
+        // the engine goes on generating (2 more tokens).
+        let mut last = (inq(&c), Instant::now(), s.generated.load(Ordering::Relaxed));
+        let full = loop {
+            std::thread::sleep(Duration::from_millis(10));
+            let n = inq(&c);
+            let g = s.generated.load(Ordering::Relaxed);
+            if n != last.0 {
+                last = (n, Instant::now(), g);
+            } else if n > 0 && g >= last.2 + 2 {
+                break last.1;
+            }
+            assert!(last.1.elapsed() < Duration::from_secs(120), "never filled");
+        };
+        let busy = || call(a, "GET", "/slots", "").json()["solo"]["busy"] == true;
+        let what = format!("--slot-idle-ms {idle:?}");
+        match idle {
+            Some(n) => {
+                wait_for("the stalled stream to free its slot", || !busy());
+                let took = full.elapsed();
+                eprintln!("{what}: freed {took:?} after the window filled");
+                // The stall time, a poll (n/4), a token step on a loaded
+                // machine, and the time spent seeing the window full.
+                assert!(
+                    took < Duration::from_millis(n + 2500),
+                    "{what}: freed {took:?} after the window filled"
+                );
+                assert!(took >= Duration::from_millis(n / 2), "{what}: {took:?}");
+                let m = prom_parse(&call(a, "GET", "/metrics", "").body);
+                assert_eq!(m["axon_slot_idle_evictions_total"], 1.0);
+                let r = post(
+                    a,
+                    "/v1/completions",
+                    json!({"prompt": "Hi", "max_tokens": 1}),
+                );
+                assert_eq!(r.status, 200, "the slot serves the next request");
+            }
+            None => {
+                std::thread::sleep(Duration::from_millis(IDLE + 1500));
+                assert!(busy(), "{what}: the stalled client still holds the slot");
+                let m = prom_parse(&call(a, "GET", "/metrics", "").body);
+                assert_eq!(m["axon_slot_idle_evictions_total"], 0.0);
+            }
+        }
+        drop(c);
+    }
+}
+
+/// GET /slots over a pool (GPU): one entry per slot, two concurrent
+/// streams in two busy slots with their ids, freed when they leave.
+#[test]
+fn serve_cuda_slots() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server_with(p.to_str().unwrap(), Device::Cuda, |o| {
+        o.parallel = 2;
+        o.parallel_set = true;
+    });
+    let a = s.addr;
+    let sl = call(a, "GET", "/slots", "").json();
+    assert_eq!(sl["slots"].as_array().unwrap().len(), 2, "{sl}");
+    let body = json!({"prompt": "Count: 1, 2, 3,", "max_tokens": 1500, "stream": true,
+                      "temperature": 0})
+    .to_string();
+    let cs: Vec<TcpStream> = (0..2)
+        .map(|_| {
+            let mut c = TcpStream::connect(a).unwrap();
+            c.write_all(request("POST", "/v1/completions", &body, false).as_bytes())
+                .unwrap();
+            c
+        })
+        .collect();
+    wait_for("both streams in slots", || {
+        call(a, "GET", "/slots", "").json()["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|x| x["busy"] == true)
+    });
+    let sl = call(a, "GET", "/slots", "").json();
+    let mut ids: Vec<u64> = sl["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| {
+            assert!(x["age_ms"].as_u64().is_some(), "{sl}");
+            assert!(x["held_tokens"].as_u64().unwrap() > 0, "{sl}");
+            x["request_id"].as_u64().unwrap()
+        })
+        .collect();
+    ids.sort();
+    assert_eq!(ids, [1, 2], "{sl}");
+    assert_eq!(sl["slots"][0]["id"], 0);
+    let m = prom_parse(&call(a, "GET", "/metrics", "").body);
+    assert_eq!((m["axon_slots_busy"], m["axon_slots_free"]), (2.0, 0.0));
+    drop(cs);
+    wait_for("the slots to be freed", || {
+        let sl = call(a, "GET", "/slots", "").json();
+        sl["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|x| x["busy"] == false)
+            && sl["solo"]["busy"] == false
+    });
+}
+
+/// AXON_API_KEY is trimmed (a secret file's newline); set but blank is an
+/// error; an empty key can't start a server (it would take an empty token).
+#[test]
+fn api_key_env_and_empty() {
+    assert_eq!(super::env_key(None), Ok(None));
+    assert_eq!(super::env_key(Some("k3y\n".into())), Ok(Some("k3y".into())));
+    assert_eq!(
+        super::env_key(Some("  k3y \r\n".into())),
+        Ok(Some("k3y".into()))
+    );
+    assert!(super::env_key(Some(" \n".into())).is_err());
+    assert!(super::env_key(Some(String::new())).is_err());
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let mut o = None;
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        server_with(p.to_str().unwrap(), Device::Cpu, |x| {
+            x.api_key = Some(" ".into());
+            o = Some(());
+        })
+    }));
+    assert!(o.is_some() && r.is_err(), "an empty key must not start");
+}
+
+/// --api-key and `Expect: 100-continue`: without the key, a 401 before
+/// the body is invited (no `100 Continue`); with it, the usual 100 then
+/// the answer.
+#[test]
+fn serve_api_key_before_100_continue() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server_with(p.to_str().unwrap(), Device::Cpu, |o| {
+        o.api_key = Some("k3y".into());
+    });
+    let body = json!({"prompt": "Hi", "max_tokens": 1, "temperature": 0}).to_string();
+    for (auth, want) in [("", 401), ("Authorization: Bearer k3y\r\n", 200)] {
+        let mut c = TcpStream::connect(s.addr).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
+        write!(
+            c,
+            "POST /v1/completions HTTP/1.1\r\nHost: x\r\n{auth}Expect: 100-continue\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        let mut buf = Vec::new();
+        let r = read_resp(&mut c, &mut buf);
+        if want == 401 {
+            assert_eq!(r.status, 401, "{}", r.body);
+            assert_eq!(r.json()["error"]["code"], "invalid_api_key");
+            assert_eq!(r.header("www-authenticate"), Some("Bearer"));
+            continue;
+        }
+        assert_eq!(r.status, 100);
+        c.write_all(body.as_bytes()).unwrap();
+        let r = read_resp(&mut c, &mut buf);
+        assert_eq!(r.status, 200, "{}", r.body);
+    }
 }
