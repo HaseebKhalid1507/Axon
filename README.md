@@ -496,7 +496,7 @@ llama.cpp / ollama, and axon's range over llama.cpp across the five models:
 
 The H100's prefill trails the 4090's: in this run axon's int8 GEMMs used `mma.sync`, not Hopper's
 `wgmma`. Since #33 the fused gate+up and the large Q4_K products run on `wgmma` on sm_90a (+12 % on a
-7B prefill pass, H100 PCIe; [docs/design/hopper.md](docs/design/hopper.md)). pp560 gaps are wider (up to
+7B prefill pass with `AXON_GEMMH=1`, H100 PCIe; the new default routing itself is not yet measured on an H100; [docs/design/hopper.md](docs/design/hopper.md)). pp560 gaps are wider (up to
 15x) but mostly measure the other engines' fixed per-request cost; quote pp2100.
 
 Parabellum, the dev laptop (from BENCH.md): main @ 0851798 (`--device cuda`, whole model on the GPU) vs ollama 0.35.0

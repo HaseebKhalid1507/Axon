@@ -4,7 +4,7 @@
 - Pick / design: maintainer request to bring the status columns up to date with what is merged.
 
 ## What was stale
-`docs/roadmap.md` said "on main means merged at `e998d6f`" (#35), and about twenty PRs had merged since. Rows
+`docs/roadmap.md` said "on main means merged at `e998d6f`" (#35), and 25 PRs had merged since. Rows
 still read "in flight", "PR open" or "planned" for work on main: chunked prefill (#45, #55, #57), one cache
 instead of N+1 (#60), long-context decode attention (#50), KV save stage A (#48, #54), serve ops (#61, #62), paged
 KV stages 0–1 (#64, #68), YaRN (#49), old GPUs (#39), and Hopper wgmma (#33, still "experiment pending").
