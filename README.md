@@ -242,13 +242,13 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
   requests decode together, one token each per step over the model's weights (continuous
   batching: a request joins as soon as a slot is free, and leaves when done). While others
   decode, a new prompt is prefilled in chunks, up to `--prefill-ms` / `--prefill-chunk` worth
-  per step in between their steps (shortest remaining prompt first, the oldest never
-  starved: passed over 4 steps in a row, it goes first), so a long prompt doesn't stop the
-  others' streams while it prefills (on a 4090, 7B, a 24k-token prompt: their worst token
-  gap ~70 ms instead of 2.4 s); with nothing decoding, prompts are fed one after another in
-  pieces of 250-500 ms at full speed (250 ms worth rounded up to whole prefill passes;
-  4096 tokens until the server has measured a chunk's cost), the oldest first unless a
-  shorter one arrives (which then goes first, at most 4 pieces in a row). A long prompt sent
+  per step in between their steps (shortest remaining prompt first; one passed over 4
+  steps in a row goes first), so a long prompt doesn't stop the others' streams while it
+  prefills (on a 4090, 7B, a 24k-token prompt: their worst token gap ~70 ms instead of
+  2.4 s); with nothing decoding, prompts are fed one after another, shortest remaining
+  first, each to its end, in pieces of 250-500 ms at full speed (250 ms worth rounded up
+  to whole prefill passes; 4096 tokens until the server has measured a chunk's cost); a
+  prompt that 4 shorter, younger ones have finished ahead of goes first. A long prompt sent
   to an idle server alone takes the single-stream path below and is fed whole: a request
   arriving during that prefill waits for it. Each slot is a KV cache as long as the context, and the
   request running alone has one more: a pool of N slots costs N + 1 caches (7B at 32768:
