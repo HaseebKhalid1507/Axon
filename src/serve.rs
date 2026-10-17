@@ -647,6 +647,9 @@ struct Loaded {
     /// many bytes is more than `ctx` tokens, refused before encoding it.
     max_token_bytes: usize,
     banner: String,
+    /// What decides the output bits (`crate::identity`): every response's
+    /// `system_fingerprint`, GET /identity.
+    identity: crate::identity::Identity,
 }
 
 /// Load the model and serve jobs until every sender is gone. Runs on its
@@ -864,6 +867,7 @@ fn engine(
         Some(b) => format!("{kvs}, ctx {served}{drafts}, {} requests at once", b.slots),
         None => format!("{kvs}, ctx {ctx}{drafts}, one request at a time"),
     };
+    let identity = crate::identity::of(&o.path, &model, &net);
     if ready
         .send(Loaded {
             tok,
@@ -871,6 +875,7 @@ fn engine(
             ctx: served,
             max_token_bytes: tok.max_token_bytes(),
             banner,
+            identity,
         })
         .is_err()
     {
@@ -1316,7 +1321,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
         #[cfg(test)]
         sh: sh.clone(),
     };
-    let Ok(l) = ready_rx.recv() else {
+    let Ok(mut l) = ready_rx.recv() else {
         server.shutdown();
         return Err(io::Error::other("the engine failed to start"));
     };
@@ -1326,6 +1331,8 @@ pub fn start(o: Opts) -> io::Result<Server> {
             o.path
         ));
     }
+    let serve = crate::identity::serve_field(o.no_think, o.think_inline, &o.sample);
+    l.identity = l.identity.with_serve(serve);
     if o.log {
         eprintln!(
             "axon serve: {model_id} ({}) on http://{addr}/v1{}",
@@ -1336,6 +1343,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
                 ""
             }
         );
+        eprintln!("axon serve: identity {}", l.identity.line());
     }
     let _ = sh.model.set(l);
     Ok(server)
@@ -1470,7 +1478,7 @@ fn api_err<S: io::Read + Write>(c: &mut Conn<S>, e: ApiError, keep: bool) -> io:
 fn route(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared) -> io::Result<bool> {
     let keep = req.keep_alive;
     let methods = match req.path.as_str() {
-        "/v1/models" | "/health" => "GET, HEAD, OPTIONS",
+        "/v1/models" | "/health" | "/identity" => "GET, HEAD, OPTIONS",
         "/v1/chat/completions" | "/v1/completions" => "POST, OPTIONS",
         _ => "",
     };
@@ -1511,19 +1519,24 @@ fn route(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared) -> io::Result<bool
             let Some(m) = sh.model.get() else {
                 return api_err(c, loading(), keep);
             };
+            let meta = serde_json::json!({"n_ctx": m.ctx, "identity": m.identity.json()});
             let mut data = vec![serde_json::json!({
                 "id": sh.model_id, "object": "model", "created": sh.created, "owned_by": "axon",
-                "meta": {"n_ctx": m.ctx},
+                "meta": meta,
             })];
             if let Some(a) = &sh.alias {
                 data.push(serde_json::json!({
                     "id": a, "object": "model", "created": sh.created, "owned_by": "axon",
-                    "meta": {"n_ctx": m.ctx},
+                    "meta": meta,
                 }));
             }
             let body = serde_json::json!({"object": "list", "data": data}).to_string();
             json_reply(c, 200, &body, keep)
         }
+        ("GET" | "HEAD", "/identity") => match sh.model.get() {
+            Some(m) => json_reply(c, 200, &m.identity.json().to_string(), keep),
+            None => api_err(c, loading(), keep),
+        },
         ("GET" | "HEAD", "/health") => match sh.model.get() {
             Some(_) => json_reply(c, 200, "{\"status\":\"ok\"}", keep),
             None => json_reply(c, 503, "{\"status\":\"loading\"}", keep),
@@ -1681,6 +1694,7 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
         sh.created
     );
     let model = g.model.as_deref().unwrap_or(&sh.model_id);
+    let model = (model, m.identity.fingerprint());
     let r = if g.stream {
         stream(c, req, &g, &rx, chat, &id, model, created, parser)
     } else {
@@ -1725,7 +1739,8 @@ fn whole(
     rx: &mpsc::Receiver<Event>,
     chat: bool,
     id: &str,
-    model: &str,
+    // The model's name and the fingerprint.
+    model: (&str, String),
     created: u64,
     parser: Option<tools::Parser>,
 ) -> io::Result<bool> {
@@ -1754,7 +1769,7 @@ fn whole(
                             tools::Piece::Call(c) => calls.push(c),
                         }
                     }
-                    let h = api::head(id, "chat.completion", created, model);
+                    let h = api::head(id, "chat.completion", created, model.0, &model.1);
                     let body = if calls.is_empty() {
                         api::chat_response(&h, &text, &reasoning, finish, &usage)
                     } else {
@@ -1768,10 +1783,10 @@ fn whole(
                     return json_reply(c, 200, &body, keep);
                 }
                 let body = if chat {
-                    let h = api::head(id, "chat.completion", created, model);
+                    let h = api::head(id, "chat.completion", created, model.0, &model.1);
                     api::chat_response(&h, &content, &reasoning, finish, &usage)
                 } else {
-                    let h = api::head(id, "text_completion", created, model);
+                    let h = api::head(id, "text_completion", created, model.0, &model.1);
                     api::text_response(&h, &content, finish, &usage)
                 };
                 return json_reply(c, 200, &body, keep);
@@ -1788,7 +1803,8 @@ fn stream(
     rx: &mpsc::Receiver<Event>,
     chat: bool,
     id: &str,
-    model: &str,
+    // The model's name and the fingerprint.
+    model: (&str, String),
     created: u64,
     mut parser: Option<tools::Parser>,
 ) -> io::Result<bool> {
@@ -1802,7 +1818,8 @@ fn stream(
             "text_completion"
         },
         created,
-        model,
+        model.0,
+        &model.1,
     );
     // With include_usage every chunk has `"usage": null` but the last (OpenAI's shape).
     let u = |j: String| {

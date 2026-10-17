@@ -664,7 +664,7 @@ fn forced_and_ids() {
 #[test]
 fn response_json() {
     use crate::serve::api::{Usage, head};
-    let h = head("chatcmpl-1", "chat.completion.chunk", 7, "m");
+    let h = head("chatcmpl-1", "chat.completion.chunk", 7, "m", "fp_1");
     let c = Call {
         id: "call_1".into(),
         name: "f".into(),

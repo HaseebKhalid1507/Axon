@@ -424,7 +424,7 @@ pub(crate) fn rope_freqs_swa(m: &Model, head_dim: usize) -> Vec<f64> {
 /// (or rope.scale_linear) unless the scaling type is "none" (llama.cpp:
 /// rope_freq_scale_train, and freq scale 1 for type none). 1 elsewhere
 /// (`check_supported` refuses scaling on the other architectures).
-fn rope_linear_scale(m: &Model) -> f64 {
+pub(crate) fn rope_linear_scale(m: &Model) -> f64 {
     if m.arch != "gemma3" {
         return 1.0;
     }

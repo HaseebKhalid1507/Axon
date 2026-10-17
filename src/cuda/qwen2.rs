@@ -58,6 +58,14 @@ const GEMV_THREADS: u32 = 128;
 /// Rows per block of the gemm2 GEMMs (prefill.cu G2_BM); tokens per block
 /// and stages are 128 and 2 (gemm2_*) or 64 and 3 (gemm2s_*).
 const G2_BM: usize = 64;
+/// Splits per kv head of the attention without tensor cores
+/// (`CudaQwen2::max_split`): up to ~8 attention blocks per SM at long
+/// contexts. It sets that path's reduction order, so its bits depend on the
+/// SM count (`crate::identity`).
+pub fn max_split(sms: usize, n_kv_heads: usize) -> usize {
+    (8 * sms / n_kv_heads).clamp(1, MAX_SPLIT)
+}
+
 /// gemm2's dynamic shared memory for type qt, bn tokens per block and st
 /// stages (prefill.cu G2L::SMEM; the kernel traps if given less).
 fn gemm2_smem(qt: u32, bn: usize, st: usize) -> usize {
@@ -1251,8 +1259,7 @@ impl<'g> CudaQwen2<'g> {
         }
 
         let sms = gpu.info()?.sms as usize;
-        // Up to ~8 attention blocks per SM at long contexts.
-        let max_split = (8 * sms / n_kv_heads).clamp(1, MAX_SPLIT);
+        let max_split = max_split(sms, n_kv_heads);
         static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let mut net = CudaQwen2 {
             gpu,
@@ -1356,6 +1363,13 @@ impl<'g> CudaQwen2<'g> {
 
     fn kv_dim(&self) -> usize {
         self.n_kv_heads * self.head_dim
+    }
+
+    /// `max_split` when the attention runs without tensor cores (head size
+    /// 256, or below sm_80): that path's order depends on it. None on the
+    /// tensor-core path, whose order is fixed by the position alone.
+    pub fn split_attention(&self) -> Option<usize> {
+        (!self.tc_attn).then_some(self.max_split)
     }
 
     /// "f16", "q8" (a scale per kv head row) or "q8/32" (per 32 values):

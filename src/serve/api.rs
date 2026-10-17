@@ -481,12 +481,14 @@ pub fn sse(json: &str) -> String {
 
 pub const SSE_DONE: &str = "data: [DONE]\n\n";
 
-/// The part of every chunk/response before `choices`.
-pub fn head(id: &str, object: &str, created: u64, model: &str) -> String {
+/// The part of every chunk/response before `choices`; `fp` is the
+/// `system_fingerprint` (`crate::identity`).
+pub fn head(id: &str, object: &str, created: u64, model: &str, fp: &str) -> String {
     format!(
-        "\"id\":{},\"object\":\"{object}\",\"created\":{created},\"model\":{}",
+        "\"id\":{},\"object\":\"{object}\",\"created\":{created},\"model\":{},\"system_fingerprint\":{}",
         quote(id),
-        quote(model)
+        quote(model),
+        quote(fp)
     )
 }
 
@@ -831,11 +833,11 @@ mod tests {
 
     #[test]
     fn sse_framing() {
-        let h = head("chatcmpl-1", "chat.completion.chunk", 7, "m");
+        let h = head("chatcmpl-1", "chat.completion.chunk", 7, "m", "fp_1");
         let first = sse(&chat_chunk(&h, true, "", "", None));
         assert_eq!(
             first,
-            "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":7,\"model\":\"m\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"logprobs\":null,\"finish_reason\":null}]}\n\n"
+            "data: {\"id\":\"chatcmpl-1\",\"object\":\"chat.completion.chunk\",\"created\":7,\"model\":\"m\",\"system_fingerprint\":\"fp_1\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"logprobs\":null,\"finish_reason\":null}]}\n\n"
         );
         for s in [
             chat_chunk(&h, false, "a\"\n\u{1}é", "", None),

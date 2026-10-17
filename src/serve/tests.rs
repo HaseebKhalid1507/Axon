@@ -1023,7 +1023,7 @@ fn http_overhead() {
         let r = c.read_request().unwrap().unwrap();
         c.start_stream(200, "text/event-stream", r.minor, true)
             .unwrap();
-        let h = api::head("chatcmpl-1", "chat.completion.chunk", 1, "model");
+        let h = api::head("chatcmpl-1", "chat.completion.chunk", 1, "model", "fp_0");
         let t = Instant::now();
         for i in 0..CHUNKS {
             let j = api::chat_chunk(
@@ -2213,4 +2213,206 @@ fn serve_cancel_mid_prefill_reuses_rows() {
         let d = dec.join().unwrap();
         assert_eq!(d.status, 200, "{}", d.body);
     });
+}
+
+/// The requests `identity_checks` follows: greedy and seeded chat (one
+/// long, ~700 tokens of prompt, which a batch admits in chunks), seeded
+/// completions; at most 48 tokens each.
+fn identity_targets() -> Vec<(bool, Value)> {
+    let long = "The river bends past the old mill and the bell tower. ".repeat(60);
+    vec![
+        (
+            true,
+            json!({"messages": [{"role": "user", "content": "Tell me about owls."}],
+                   "max_tokens": 48, "temperature": 0}),
+        ),
+        (
+            true,
+            json!({"messages": [{"role": "user", "content": format!("{long}Summarize.")}],
+                   "max_tokens": 32, "temperature": 0.8, "seed": 9, "top_p": 0.9}),
+        ),
+        (
+            false,
+            json!({"prompt": PROMPT, "max_tokens": 40, "temperature": 1.0, "seed": 3,
+                   "top_k": 40}),
+        ),
+    ]
+}
+
+/// One target's reply text, its `system_fingerprint` and its cached prompt
+/// tokens, whole or streamed (every streamed chunk must carry the same
+/// fingerprint).
+fn identity_reply(a: SocketAddr, chat: bool, body: &Value, stream: bool) -> (String, String, u64) {
+    let path = if chat {
+        "/v1/chat/completions"
+    } else {
+        "/v1/completions"
+    };
+    let mut b = body.clone();
+    if stream {
+        b["stream"] = json!(true);
+        b["stream_options"] = json!({"include_usage": true});
+    }
+    let r = post(a, path, b);
+    assert_eq!(r.status, 200, "{}", r.body);
+    if !stream {
+        let v = r.json();
+        let text = if chat {
+            v["choices"][0]["message"]["content"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        } else {
+            v["choices"][0]["text"].as_str().unwrap().to_string()
+        };
+        let cached = v["usage"]["prompt_tokens_details"]["cached_tokens"]
+            .as_u64()
+            .unwrap_or(0);
+        return (
+            text,
+            v["system_fingerprint"].as_str().unwrap().into(),
+            cached,
+        );
+    }
+    let ev = r.events();
+    let fps: Vec<String> = (ev[..ev.len() - 1].iter())
+        .map(|e| {
+            let v: Value = serde_json::from_str(e).unwrap();
+            v["system_fingerprint"].as_str().unwrap().to_string()
+        })
+        .collect();
+    assert!(fps.windows(2).all(|w| w[0] == w[1]), "{fps:?}");
+    let (text, last) = streamed_text(&r, chat);
+    let cached = last["usage"]["prompt_tokens_details"]["cached_tokens"]
+        .as_u64()
+        .unwrap_or(0);
+    (text, fps[0].clone(), cached)
+}
+
+/// The determinism contract over HTTP (docs/determinism.md) on server `a`:
+/// each target alone, again (its prompt now cached: prefix reuse), streamed,
+/// and in the middle of `load` other requests (concurrent: batched on the
+/// GPU, queued on the CPU) gives the same text, and every response carries
+/// the fingerprint GET /identity and /v1/models report. Returns the
+/// identity and the targets' texts.
+fn identity_checks(a: SocketAddr, load: &[Value], what: &str) -> (Value, Vec<String>) {
+    let id = call(a, "GET", "/identity", "").json();
+    let fp = id["system_fingerprint"].as_str().unwrap().to_string();
+    assert!(fp.starts_with("fp_"), "{id}");
+    assert_eq!(id["numerics"], crate::identity::NUMERICS_VERSION);
+    let models = call(a, "GET", "/v1/models", "").json();
+    for d in models["data"].as_array().unwrap() {
+        assert_eq!(d["meta"]["identity"], id, "{what}");
+    }
+    let targets = identity_targets();
+    let mut solo = Vec::new();
+    for (i, (c, b)) in targets.iter().enumerate() {
+        let s = identity_reply(a, *c, b, false);
+        assert_eq!(s.1, fp, "{what}: target {i}");
+        // Right away, so its prompt is still the cache's (one request at a time).
+        let again = identity_reply(a, *c, b, false);
+        assert_eq!(again.0, s.0, "{what}: target {i} with its prompt cached");
+        assert!(again.2 > 0, "{what}: target {i} reused nothing");
+        assert_eq!(again.1, fp);
+        let st = identity_reply(a, *c, b, true);
+        assert_eq!((&st.0, &st.1), (&s.0, &fp), "{what}: target {i} streamed");
+        solo.push(s);
+    }
+    // Under load: the targets go in after the others, interleaved with them.
+    let loaded: Vec<_> = std::thread::scope(|sc| {
+        let others: Vec<_> = (load.iter())
+            .map(|b| sc.spawn(move || post(a, "/v1/chat/completions", b.clone()).status))
+            .collect();
+        let hs: Vec<_> = (targets.iter().enumerate())
+            .map(|(i, (c, b))| {
+                sc.spawn(move || {
+                    std::thread::sleep(Duration::from_millis(20 + 30 * i as u64));
+                    identity_reply(a, *c, b, i == 1)
+                })
+            })
+            .collect();
+        for o in others {
+            assert_eq!(o.join().unwrap(), 200);
+        }
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for (i, (l, s)) in loaded.iter().zip(&solo).enumerate() {
+        assert_eq!((&l.0, &l.1), (&s.0, &fp), "{what}: target {i} under load");
+    }
+    (id, solo.into_iter().map(|s| s.0).collect())
+}
+
+/// Same request, same fingerprint, same text: alone, with its prefix
+/// cached, streamed and under concurrent load (its long prompt prefilled
+/// in 64-token chunks between decode steps), on the f16 and q8 caches
+/// (8 slots); a restarted server has the same fingerprint, and the cache
+/// type (and backend) is part of it.
+#[test]
+fn serve_identity() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    let load = batch_bodies(true);
+    let mut fps = Vec::new();
+    for kv in [crate::kv::KvType::F16, crate::kv::KvType::Q8] {
+        let s = server_with(p, Device::Cuda, |o| {
+            o.kv = kv;
+            o.parallel = 8;
+            o.max_draft = 3;
+            // The long target is admitted in chunks while others decode.
+            o.prefill_chunk = 64;
+        });
+        let (id, _) = identity_checks(s.addr, &load, &format!("cuda {kv:?}"));
+        assert_eq!(id["backend"], "cuda");
+        assert_eq!(
+            id["kv"],
+            if kv == crate::kv::KvType::F16 {
+                "f16"
+            } else {
+                "q8"
+            }
+        );
+        assert!(id["gpu"].as_str().unwrap().starts_with("sm_"), "{id}");
+        fps.push(id["system_fingerprint"].clone());
+    }
+    assert_ne!(fps[0], fps[1], "the cache type is in the fingerprint");
+    // A restart (other slots, no drafting: neither is in it) has the same one.
+    let s = server_with(p, Device::Cuda, |o| o.parallel = 2);
+    let again = call(s.addr, "GET", "/identity", "").json();
+    assert_eq!(again["system_fingerprint"], fps[0]);
+    let s = server_with(p, Device::Cpu, |o| o.parallel = 1);
+    let cpu = call(s.addr, "GET", "/identity", "").json();
+    assert_ne!(cpu["system_fingerprint"], fps[0], "the backend is in it");
+}
+
+/// `serve_identity` on the CPU (one request at a time, the others queued);
+/// a restarted server has the same fingerprint and, seeded, the same
+/// samples (a fresh engine, nothing cached).
+#[test]
+fn serve_identity_cpu() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let p = p.to_str().unwrap();
+    let load: Vec<Value> = batch_bodies(true).into_iter().take(3).collect();
+    let s = server_with(p, Device::Cpu, |_| {});
+    let (id, texts) = identity_checks(s.addr, &load, "cpu");
+    assert_eq!(id["backend"], "cpu");
+    assert!(id.get("gpu").is_none(), "{id}");
+    drop(s);
+    let s = server_with(p, Device::Cpu, |_| {});
+    assert_eq!(call(s.addr, "GET", "/identity", "").json(), id);
+    for (i, ((c, b), t)) in identity_targets().iter().zip(&texts).enumerate() {
+        let r = identity_reply(s.addr, *c, b, false);
+        assert_eq!(&r.0, t, "target {i} after a restart");
+        assert!(i > 0 || r.2 == 0, "a fresh engine has nothing cached");
+    }
+    // A different seed samples differently (the seed is really used).
+    let (c, mut b) = identity_targets().swap_remove(2);
+    b["seed"] = json!(4);
+    assert_ne!(identity_reply(s.addr, c, &b, false).0, texts[2]);
 }

@@ -5,6 +5,7 @@ mod cuda;
 mod draft;
 mod gguf;
 mod hybrid;
+mod identity;
 mod kv;
 mod kvsave;
 mod kvstore;
@@ -54,10 +55,11 @@ fn round_draft(k: usize) -> usize {
 const USAGE: &str = "\
 usage:
   axon <model.gguf>                         same as axon info
-  axon info <model.gguf>                    print a summary and exit
+  axon info <model.gguf> [rope flags]       print a summary and exit
   axon gen <model.gguf> \"<prompt>\" [-n N] [--draft K] [--draft-model PATH] [--device D]
-            [--gpu-layers N] [--gpus L] [--kv T] [sampling flags]
-                                            generation (greedy unless --temp > 0)
+            [--gpu-layers N] [--gpus L] [--kv T] [--verbose] [sampling flags]
+                                            generation (greedy unless --temp > 0;
+                                            --verbose: the full identity tuple)
   axon logits <model.gguf> \"<prompt>\" [-k K]
                                             top-K next-token logits after the prompt
   axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K]
@@ -294,8 +296,8 @@ fn run() -> std::io::Result<()> {
 
     // `axon info <model>`, or just `axon <model>`.
     let path = match args[1].as_str() {
-        "info" if args.len() == 3 => &args[2],
-        "info" => fail("usage: axon info <model.gguf>"),
+        "info" if args.len() >= 3 => &args[2],
+        "info" => fail("usage: axon info <model.gguf> [rope flags]"),
         f if f.starts_with('-') => fail(&format!("unknown flag '{f}'")),
         // A lone argument is a model to summarize, unless it can't be one.
         p if args.len() == 2 && (p.ends_with(".gguf") || std::path::Path::new(p).exists()) => {
@@ -306,7 +308,26 @@ fn run() -> std::io::Result<()> {
         )),
     };
 
-    let model = open_model(path, false);
+    // --rope-scaling and friends, as gen takes them: the fingerprints
+    // below are for the model as those flags run it.
+    let mut rargs = rope::RopeArgs::default();
+    let mut i = 3;
+    while i < args.len() {
+        let f = args[i].as_str();
+        if !rope::RopeArgs::is_flag(f) {
+            fail(&format!(
+                "unknown argument '{f}' for info (it takes the rope flags)"
+            ));
+        }
+        rargs
+            .set(f, args.get(i + 1).map(String::as_str))
+            .unwrap_or_else(|e| fail(&e));
+        i += 2;
+    }
+    let mut model = open_model(path, false);
+    for line in rargs.apply(&mut model).unwrap_or_else(|e| fail(&e)) {
+        eprintln!("axon: {line}");
+    }
     println!("axon v{}", env!("CARGO_PKG_VERSION"));
     println!();
     println!(
@@ -325,6 +346,25 @@ fn run() -> std::io::Result<()> {
         human_bytes(model.total_bytes())
     );
     println!("{}", cuda::summary());
+    // What decides the output bits (docs/determinism.md), per placement.
+    match identity::predicted(path, &model) {
+        Ok(ids) => {
+            if let Some((_, Ok(i))) = ids.first() {
+                let model = &i.fields[1].1;
+                println!(
+                    "model digest: {model} (sampled SHA-256, identity numerics {})",
+                    identity::NUMERICS_VERSION
+                );
+            }
+            for (what, i) in ids {
+                match i {
+                    Ok(i) => println!("fingerprint {what}: {}", i.line()),
+                    Err(why) => println!("fingerprint {what}: none ({why})"),
+                }
+            }
+        }
+        Err(e) => println!("fingerprint: none ({e})"),
+    }
     Ok(())
 }
 
@@ -520,8 +560,14 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     let mut kv = kv_env();
     let mut sargs = sample::SampleArgs::default();
     let mut rargs = rope::RopeArgs::default();
+    let mut verbose = false;
     let mut i = 4;
     while i < args.len() {
+        if args[i] == "--verbose" {
+            verbose = true;
+            i += 1;
+            continue;
+        }
         let val = args.get(i + 1).and_then(|s| s.parse::<usize>().ok());
         match (args[i].as_str(), val) {
             (f, _) if sample::SampleArgs::is_flag(f) => sargs
@@ -748,6 +794,11 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             n.describe(ids.len() + extra + 1),
             n.kv_name()
         );
+    }
+    let id = identity::of(path, &model, &net);
+    match verbose {
+        true => eprint!("identity:    {}\n{}", id.fingerprint(), id.canonical()),
+        false => eprintln!("identity:    {}", id.fingerprint()),
     }
     if env::var_os("AXON_POOL_DEBUG").is_some() {
         let pool = pool::Pool::global();

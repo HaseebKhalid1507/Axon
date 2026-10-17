@@ -2051,5 +2051,20 @@ pub fn summary() -> String {
     }
 }
 
+/// The code `Module::load` builds for `gpu` (`nvrtc_for`'s target), as
+/// NVRTC names it ("sm_89", "sm_90a", "compute_90"); for PTX, which the
+/// driver compiles, with the driver's version; and the architecture it is
+/// for (10 * major + minor, `Module::mma`'s). For the identity tuple.
+pub fn code_target(gpu: &Gpu) -> Result<(String, i32), String> {
+    let cc = gpu.info()?.cc;
+    let d = ffi::driver_version(gpu.d)?;
+    let (_, target) = nvrtc_for((cc.0 * 10 + cc.1) as i32, d, hopper_env())?;
+    Ok(match target {
+        Target::Ptx(a) => (format!("{target} PTX, driver {}.{}", d.0, d.1), a),
+        Target::Cubin(a) => (target.to_string(), a),
+        Target::Cubin90a => (target.to_string(), 90),
+    })
+}
+
 #[cfg(test)]
 mod tests;
