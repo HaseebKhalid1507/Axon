@@ -103,6 +103,45 @@ def sha256(p):
     return h.hexdigest()
 
 
+def gguf_meta(p, want=("general.quantization_version", "general.file_type", "tokenizer.ggml.pre",
+                        "general.name")):
+    """GGUF version and a few metadata values, read from the header (arrays skipped)."""
+    import struct
+    out = {}
+    sizes = {0: 1, 1: 1, 2: 2, 3: 2, 4: 4, 5: 4, 6: 4, 7: 1, 10: 8, 11: 8, 12: 8}
+    fmt = {0: "B", 1: "b", 2: "H", 3: "h", 4: "I", 5: "i", 6: "f", 7: "?", 10: "Q", 11: "q", 12: "d"}
+    with open(p, "rb") as f:
+        if f.read(4) != b"GGUF":
+            return {"gguf": "not GGUF"}
+        ver, = struct.unpack("<I", f.read(4))
+        out["gguf"] = ver
+        _, nkv = struct.unpack("<QQ", f.read(16))
+
+        def s():
+            n, = struct.unpack("<Q", f.read(8))
+            return f.read(n).decode("utf-8", "replace")
+
+        def val(t):
+            if t == 8:
+                return s()
+            if t == 9:
+                et, n = struct.unpack("<IQ", f.read(12))
+                if et == 8:
+                    for _ in range(n):
+                        s()
+                else:
+                    f.seek(sizes[et] * n, 1)
+                return None
+            return struct.unpack("<" + fmt[t], f.read(sizes[t]))[0]
+        for _ in range(min(nkv, 10000)):
+            k = s()
+            t, = struct.unpack("<I", f.read(4))
+            v = val(t)
+            if k in want:
+                out[k.split(".")[-1]] = v
+    return out
+
+
 def run(cmd, timeout=900, env=None):
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=timeout,
@@ -207,6 +246,10 @@ def one(a, e):
         return r
     r["size_mb"] = round(os.path.getsize(p) / 1e6)
     r["sha256"] = sha256(p)
+    try:
+        r["meta"] = gguf_meta(p)
+    except Exception as ex:  # noqa: BLE001
+        r["meta"] = {"error": repr(ex)}
     env = {"AXON_DEVICE": a.device} if a.device else {}
     rc, out, err = run([a.axon, "info", p], env=env)
     r["info_rc"] = rc
@@ -312,14 +355,21 @@ def do_run(a):
 
 def table(a):
     res = json.load(open(a.file))
-    print("| file | source | MB | expect | verdict | top-1 | KL mean | gen chars = llama.cpp | refusal / note |")
-    print("|---|---|---:|---|---|---:|---:|---:|---|")
+    print("| file | source | MB | GGUF v / quant v / pre | tensor types | expect | verdict | top-1 | KL mean "
+          "| gen chars = llama.cpp | refusal / note |")
+    print("|---|---|---:|---|---|---|---|---:|---:|---:|---|")
     for r in res:
         kl = f"{r['kl_mean']:.1e}" if "kl_mean" in r else ""
         note = r.get("refusal") or "; ".join(r.get("problems", [])) or r.get("llama", "") or r.get("why", "")
-        print(f"| {r['file']} | {r['repo'].split('/')[0]} | {r.get('size_mb', '')} | {r['expect']} | "
+        note = re.sub(r"^axon: [^:]*\.gguf: ", "", note)
+        if r.get("refusal"):
+            note = re.sub(r" \(supported: [^)]*\)", "", note)
+        m = r.get("meta", {})
+        mv = f"{m.get('gguf', '')} / {m.get('quantization_version', '-')} / {m.get('pre', '-')}"
+        ty = re.sub(r"^types? ", "", r.get("types", "")).split(", backend")[0]
+        print(f"| {r['file']} | {r['repo'].split('/')[0]} | {r.get('size_mb', '')} | {mv} | {ty} | {r['expect']} | "
               f"{r['verdict']} | {r.get('top1', '')} | {kl} | {r.get('gen_common_chars', '')} | "
-              f"{note.replace('|', '/')[:160]} |")
+              f"{note.replace('|', '/')[:220]} |")
 
 
 def main():
