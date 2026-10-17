@@ -312,6 +312,8 @@ struct Fns<'m> {
     rmsnorm_add: Func<'m>,
     gate_up_gelu: Func<'m>,
     attn_split_w: Func<'m>,
+    /// attn_split_w through a page table (a paged cache).
+    attn_split_w_pg: Func<'m>,
     attn_combine_w: Func<'m>,
 }
 
@@ -471,6 +473,10 @@ pub struct CudaCache<'g> {
     rows: usize,
     /// The row position 0 is at (0, or a view's slot's first row).
     row0: usize,
+    /// A view of a pool's rows (`slot_view`), whatever its row0 (slot 0's
+    /// view has row0 0): never paged (`set_tab`, `retarget_view`).
+    #[cfg_attr(not(test), allow(dead_code))] // read by set_tab (tests, until stage 2)
+    view: bool,
     /// Q8: this token's keys and values, f32 [2][kv_dim], on their way into
     /// the cache (qkv_rope_f32 to attn_split_q8). Empty for F16.
     kvf: DevBuf<'g>,
@@ -504,6 +510,49 @@ pub struct CudaCache<'g> {
     b: Option<batch::BatchBufs<'g>>,
     /// Scratch for sampling candidates (`samp_upload`).
     samp: Option<SampBufs<'g>>,
+    /// Paged KV (specs r11): the page table, u32 entries (decode.cu
+    /// pg_row; None: plain rows, the identity). A one-sequence pass reads
+    /// the sequence's table from entry `Place::Seq` base on, a `Place::Rows`
+    /// token from its `RowAt::base`; the decode step from entry 0.
+    tab: Option<DevBuf<'g>>,
+}
+
+impl<'g> CudaCache<'g> {
+    /// The page table from entry `e` on, as a kernel argument (null: none).
+    fn tab_at(&self, e: usize) -> Arg {
+        self.tab.as_ref().map_or(Arg::Ptr(0), |t| t.arg_at(e * 4))
+    }
+
+    /// Debug builds: a sequence counted from `base` (paged: its first table
+    /// entry; plain: its first row) holds positions 0..end: the table has
+    /// entries base .. base + ceil(end / 64), or the cache rows base + end.
+    /// (A row offset passed as a table entry, or the other way round, fails
+    /// here unless it is 0.)
+    pub(super) fn debug_covers(&self, base: usize, end: usize) {
+        match &self.tab {
+            Some(t) => debug_assert!(
+                base + end.div_ceil(ATT_BLK) <= t.len() / 4,
+                "positions ..{end} from table entry {base}: the table has {} entries",
+                t.len() / 4
+            ),
+            None => debug_assert!(
+                base + end <= self.max_ctx,
+                "positions ..{end} from row {base}: the cache has {} rows",
+                self.max_ctx
+            ),
+        }
+    }
+
+    /// Read and write the KV rows through `tab` (None: plain). The captured
+    /// steps hold the table's address: they go.
+    #[cfg(test)]
+    pub(super) fn set_tab(&mut self, tab: Option<DevBuf<'g>>) {
+        // Table entries are pages of the whole buffer: no view offset too
+        // (a view's row0 can be 0, slot 0's: the flag, not row0).
+        assert!(tab.is_none() || !self.view, "a paged cache is no slot view");
+        self.tab = tab;
+        self.graph = Default::default();
+    }
 }
 
 /// Bytes of a quantized-activation buffer for n values (decode.cu Act).
@@ -1336,6 +1385,7 @@ impl<'g> CudaQwen2<'g> {
                 rmsnorm_add: module.function("rmsnorm_add")?,
                 gate_up_gelu: module.function("gate_up_gelu")?,
                 attn_split_w: module.function("attn_split_w_256")?,
+                attn_split_w_pg: module.function("attn_split_w_256_pg")?,
                 attn_combine_w: module.function("attn_combine_w")?,
             },
             n_layers,
@@ -1448,6 +1498,12 @@ impl<'g> CudaQwen2<'g> {
         let n = c.rows * self.kv_dim();
         let e = (c.row0 + row0) * self.kv_dim();
         assert!(row0 <= c.max_ctx, "row {row0} past the cache");
+        // Paged: the rows are the table's, from the buffer's row 0 (a view's
+        // row0 and a table never both apply).
+        debug_assert!(
+            c.tab.is_none() || c.row0 + row0 == 0,
+            "a paged cache's arrays from row 0"
+        );
         match c.mode {
             CacheKv::F16 => vec![
                 c.kv.arg_at((2 * l * n + e) * 2),
@@ -1670,6 +1726,7 @@ impl<'g> CudaQwen2<'g> {
             kv,
             rows,
             row0,
+            view: !fresh,
             kvf: g.alloc(if q8 { 2 * self.kv_dim() * f } else { 0 })?,
             x: g.alloc(self.dim * f)?,
             q: g.alloc(self.q_dim * f)?,
@@ -1701,6 +1758,7 @@ impl<'g> CudaQwen2<'g> {
             graph: [[None, None, None], [None, None, None]],
             b: Some(self.batch_bufs(self.batch_for(att_ctx), att_ctx)?),
             samp: None,
+            tab: None,
         };
         // Stale KV rows are never read (attention stops at pos), but zeroed
         // memory keeps a bug from reading NaNs (a view's pool zeroed its).
@@ -1848,6 +1906,7 @@ impl<'g> CudaQwen2<'g> {
                 let items = qd / 2 + kvd / 2 + kvd / 2;
                 let bias = |b: Option<usize>| b.map_or(null, vec);
                 let kva = self.kv_args(c, li);
+                let tab = c.tab_at(0);
                 // q8: keys and values to kvf, which attn_split_q8 stores.
                 let (qkv_f, kout, kraw) = match c.mode {
                     CacheKv::F16 => (&f.qkv_rope, [kva[0], kva[1]], c.kraw.arg()),
@@ -1888,6 +1947,7 @@ impl<'g> CudaQwen2<'g> {
                         // Raw q and k for the attention's norms (qwen3):
                         // kraw, or kvf's keys on the q8 cache.
                         if qk_norm { kraw } else { null },
+                        tab,
                     ],
                 )?;
                 on_launch("qkv", l.q.bytes() + l.k.bytes() + l.v.bytes())?;
@@ -1896,6 +1956,7 @@ impl<'g> CudaQwen2<'g> {
                 let mut args = vec![c.q.arg()];
                 args.extend_from_slice(&kva);
                 let attn = match c.mode {
+                    CacheKv::F16 if self.gemma.is_some() && c.tab.is_some() => &f.attn_split_w_pg,
                     CacheKv::F16 if self.gemma.is_some() => &f.attn_split_w,
                     CacheKv::F16 if tc => &f.attn_blk,
                     CacheKv::F16 => &f.attn_split,
@@ -1929,6 +1990,10 @@ impl<'g> CudaQwen2<'g> {
                     args.push(bias(l.ksh));
                     args.extend_from_slice(&[bias(l.qn), bias(l.kn)]);
                     args.extend_from_slice(&[Arg::F32(self.eps), c.rope.arg()]);
+                }
+                // (gemma3's plain-cache kernel takes no table: gemma.cu.)
+                if self.gemma.is_none() || c.tab.is_some() {
+                    args.push(tab);
                 }
                 // attn_blk: at most max_split warps per kv head (each takes
                 // blocks y, y + max_split, ..), whatever the position.
@@ -2230,6 +2295,7 @@ impl<'g> CudaQwen2<'g> {
             "position {pos} exceeds cache size {}",
             c.max_ctx
         );
+        c.debug_covers(0, pos + 1);
         let token = match input {
             Input::Token(t) => {
                 assert!(
@@ -2615,6 +2681,7 @@ impl<'g> CudaQwen2<'g> {
     ) -> Result<(Vec<KernelTime>, f64), String> {
         assert_eq!(c.net, self.id, "a CudaCache used with another CudaQwen2");
         assert!(pos < c.max_ctx && (token as usize) < self.vocab);
+        c.debug_covers(0, pos + 1);
         let p = c.host_params.bytes_mut()?;
         p[0..4].copy_from_slice(&token.to_le_bytes());
         p[4..8].copy_from_slice(&(pos as u32).to_le_bytes());
@@ -2788,6 +2855,8 @@ impl<'g> Lm for CudaQwen2<'g> {
 
 mod batch;
 pub(crate) mod kvio;
+#[cfg(test)]
+mod paged_tests;
 pub mod pipeline;
 #[cfg(test)]
 mod sample_tests;

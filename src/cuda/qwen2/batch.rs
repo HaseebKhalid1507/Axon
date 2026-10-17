@@ -294,10 +294,11 @@ impl BatchIn<'_> {
 #[derive(Clone, Copy)]
 pub(crate) enum Place {
     /// Positions start.., in the cache's rows base + start.. (a slot of a
-    /// pool starts at row base; a plain cache at 0).
+    /// pool starts at row base; a plain cache at 0). Paged (`CudaCache::tab`):
+    /// the sequence's table starts at entry base.
     Seq { start: usize, base: usize },
-    /// Token z at position rows[z].pos of the sequence whose rows start at
-    /// rows[z].base, those `RowAt`s in the scratch's `rp` (`upload_rows`
+    /// Token z at position rows[z].pos of the sequence whose rows (paged:
+    /// table entries) start at rows[z].base, those `RowAt`s in the scratch's `rp` (`upload_rows`
     /// first: the copy stays out of a captured pass). A sequence's rows of a
     /// pass in ascending positions; the attention of each row sees its
     /// sequence's rows up to its own (those of the pass included), so the
@@ -392,6 +393,8 @@ pub(super) struct BatchFns<'m> {
     geglu_quant: Func<'m>,
     rope_kv_norm_256: Func<'m>,
     attn_split_w: Func<'m>,
+    /// attn_split_w through a page table (a paged cache).
+    attn_split_w_pg: Func<'m>,
     attn_combine_w: Func<'m>,
 }
 
@@ -528,6 +531,7 @@ impl<'m> BatchFns<'m> {
             geglu_quant: module.function("geglu_quant_b")?,
             rope_kv_norm_256: module.function("rope_kv_norm_b_256")?,
             attn_split_w: module.function("attn_split_bw_256")?,
+            attn_split_w_pg: module.function("attn_split_bw_256_pg")?,
             attn_combine_w: module.function("attn_combine_bw")?,
         })
     }
@@ -831,9 +835,15 @@ impl<'g> CudaQwen2<'g> {
     ) -> Result<(), String> {
         let nb = input.len(self.dim);
         let dim = self.dim;
-        let base = match place {
-            Place::Seq { base, .. } => base,
-            Place::Rows => 0,
+        // Paged (c.tab): the layers' arrays from row 0 and the rows through
+        // the table, a sequence's from entry base on.
+        if let Place::Seq { start, base } = place {
+            c.debug_covers(base, start + nb);
+        }
+        let (base, tab) = match (place, c.tab.is_some()) {
+            (Place::Seq { base, .. }, false) => (base, Arg::Ptr(0)),
+            (Place::Seq { base, .. }, true) => (0, c.tab_at(base)),
+            (Place::Rows, _) => (0, c.tab_at(0)),
         };
         let kvas: Vec<Vec<Arg>> = (0..self.layers.len())
             .map(|l| self.kv_args_at(c, l, base))
@@ -920,6 +930,7 @@ impl<'g> CudaQwen2<'g> {
                     nb,
                     start,
                     rp,
+                    tab,
                     on,
                 )?;
             }
@@ -1120,6 +1131,8 @@ impl<'g> CudaQwen2<'g> {
     /// format `mode`, which picks the attention kernels. b.rope holds the
     /// batch's table. rp non-null: the tokens' (position, cache row) pairs
     /// (`Place::Rows`, start unused), which takes the per-query attention.
+    /// tab non-null: the page table (paged KV, `CudaCache::tab`; with rp,
+    /// the pool's, and rp's rows are the tokens' entries into it).
     /// `on` runs after each step, by name.
     ///
     /// # Safety
@@ -1139,9 +1152,11 @@ impl<'g> CudaQwen2<'g> {
         nb: usize,
         start: usize,
         rp: Arg,
+        tab: Arg,
         on: &mut dyn FnMut(&'static str) -> Result<(), String>,
     ) -> Result<(), String> {
         let rows = !matches!(rp, Arg::Ptr(0));
+        let paged = !matches!(tab, Arg::Ptr(0));
         let (dim, hd, kvd, ffn) = (self.dim, self.head_dim, self.kv_dim(), self.ffn);
         let qd = self.q_dim;
         let (g, bf) = (self.gpu, &self.bf);
@@ -1228,6 +1243,7 @@ impl<'g> CudaQwen2<'g> {
                         kc,
                         vc,
                         rp,
+                        tab,
                     ],
                 )?;
             } else if let (Some(qn), Some(kn)) = (l.qn, l.kn) {
@@ -1252,6 +1268,7 @@ impl<'g> CudaQwen2<'g> {
                         kc,
                         vc,
                         rp,
+                        tab,
                     ],
                 )?;
             } else {
@@ -1272,6 +1289,7 @@ impl<'g> CudaQwen2<'g> {
                         kc,
                         vc,
                         rp,
+                        tab,
                     ],
                 )?;
             }
@@ -1288,6 +1306,7 @@ impl<'g> CudaQwen2<'g> {
                 args.push(bias(l.kn));
                 args.push(Arg::F32(self.eps));
                 args.push(rp);
+                args.push(tab);
                 g.launch(
                     &self.q8_fns(mode).store_b,
                     (self.n_kv_heads as u32, nbu, 1),
@@ -1332,6 +1351,7 @@ impl<'g> CudaQwen2<'g> {
                     Arg::I32(self.n_kv_heads as i32),
                     pre,
                     b.q.arg(),
+                    tab,
                 ]);
                 g.launch(
                     f,
@@ -1372,7 +1392,12 @@ impl<'g> CudaQwen2<'g> {
                     // partials' stride: blocks or splits).
                     let (f, grid, block, stride) = match (tc, q8) {
                         (false, false) if self.gemma.is_some() => {
-                            (&bf.attn_split_w, ms, ATT_TILE as u32, self.max_split)
+                            let f = if paged {
+                                &bf.attn_split_w_pg
+                            } else {
+                                &bf.attn_split_w
+                            };
+                            (f, ms, ATT_TILE as u32, self.max_split)
                         }
                         (true, false) => (&bf.attn_blk, gy_blk, 32, b.nblk_max),
                         (true, true) => (&self.q8_fns(mode).attn_blk_b, gy_blk, 32, b.nblk_max),
@@ -1405,6 +1430,10 @@ impl<'g> CudaQwen2<'g> {
                     let gemma = self.gemma.is_some();
                     if gemma {
                         args.push(Arg::I32(l.win as i32));
+                    }
+                    // (gemma3's plain-cache kernel takes no table: gemma.cu.)
+                    if !gemma || paged {
+                        args.push(tab);
                     }
                     g.launch(
                         f,
@@ -1786,13 +1815,27 @@ impl<'g> BatchBufs<'g> {
         &self.x
     }
 
-    /// Enqueue the copy of `Place::Rows` into `rp` (a pool's scratch).
-    pub(super) fn upload_rows(&mut self, rows: &[RowAt]) -> Result<(), String> {
+    /// Enqueue the copy of `Place::Rows` into `rp` (a pool's scratch):
+    /// per row its position and cache row, or (`tab` Some: `CudaCache::tab`
+    /// of that many entries) its sequence's first entry in the table.
+    pub(super) fn upload_rows(&mut self, rows: &[RowAt], tab: Option<usize>) -> Result<(), String> {
+        let paged = tab.is_some();
+        if let Some(n) = tab {
+            for r in rows {
+                debug_assert!(
+                    r.base as usize + (r.pos as usize + 1).div_ceil(ATT_BLK) <= n,
+                    "row at {} from table entry {}: the table has {n} entries",
+                    r.pos,
+                    r.base
+                );
+            }
+        }
         let (d, h) = self.rp.as_mut().expect("a pool's scratch: Place::Rows");
         let hb = h.bytes_mut()?;
         for (i, r) in rows.iter().enumerate() {
+            let row = if paged { r.base } else { r.base + r.pos };
             hb[8 * i..8 * i + 4].copy_from_slice(&r.pos.to_le_bytes());
-            hb[8 * i + 4..8 * i + 8].copy_from_slice(&(r.base + r.pos).to_le_bytes());
+            hb[8 * i + 4..8 * i + 8].copy_from_slice(&row.to_le_bytes());
         }
         h.copy_to(d, 0, 8 * rows.len())
     }

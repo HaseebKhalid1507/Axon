@@ -24,15 +24,25 @@
 // = its cache row; its sequence's rows start at row - position (a slot of
 // the cache). Every per-token op is the same on the same position and
 // rows, so the bits are those of the one-sequence pass.
+// Paged (tab non-null, decode.cu pg_row): one sequence's rows through tab
+// (its table); with rp, rp[2z + 1] is the entry of the pool's table tab
+// where token z's sequence's table starts, and its rows go through that.
 __device__ __forceinline__ u32 rp_pos(const u32* rp, int start, int z) {
     return rp ? rp[2 * z] : (u32)(start + z);
 }
-__device__ __forceinline__ u64 rp_row(const u32* rp, int start, int z) {
+// Token z's table (null: none).
+__device__ __forceinline__ const u32* rp_tab(const u32* rp, int z, const u32* tab) {
+    return tab && rp ? tab + rp[2 * z + 1] : tab;
+}
+// Token z's cache row.
+__device__ __forceinline__ u64 rp_row(const u32* rp, int start, int z, const u32* tab) {
+    if (tab) return pg_row(rp_tab(rp, z, tab), (int)rp_pos(rp, start, z));
     return rp ? (u64)rp[2 * z + 1] : (u64)(start + z);
 }
-// The first cache row of token z's sequence (0 for one sequence).
-__device__ __forceinline__ u64 rp_base(const u32* rp, int z) {
-    return rp ? (u64)(rp[2 * z + 1] - rp[2 * z]) : 0;
+// The row token z's sequence's rows are counted from (0 for one sequence
+// and for a table: the table has them).
+__device__ __forceinline__ u64 rp_base(const u32* rp, int z, const u32* tab) {
+    return rp && !tab ? (u64)(rp[2 * z + 1] - rp[2 * z]) : 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -120,11 +130,11 @@ extern "C" __global__ void rope_kv_b(const float* __restrict__ qkv, int nq, int 
                                      int start, const float2* __restrict__ rope,
                                      float* __restrict__ q, unsigned short* __restrict__ kc,
                                      unsigned short* __restrict__ vc,
-                                     const u32* __restrict__ rp) {
+                                     const u32* __restrict__ rp, const u32* __restrict__ tab) {
     int z = blockIdx.y, item = blockIdx.x * blockDim.x + threadIdx.x;
     int half = hd >> 1, npq = nq >> 1, npk = nk >> 1;
     const float* y = qkv + (u64)z * (nq + 2 * nk);
-    u64 pos = rp_row(rp, start, z); // the cache row
+    u64 pos = rp_row(rp, start, z, tab); // the cache row
     if (item >= npq + npk + nk || (!kc && item >= npq)) return;
     if (item >= npq + npk) {
         int r = item - npq - npk;
@@ -158,7 +168,7 @@ template <int HD, int KG>
 __device__ __forceinline__ void kv_q8_bt(const float* __restrict__ qkv, int nq, int nk, int start,
                                          const float2* __restrict__ rope, Q8Kv c,
                                          const float* __restrict__ kn, float eps,
-                                         const u32* __restrict__ rp) {
+                                         const u32* __restrict__ rp, const u32* __restrict__ tab) {
     __shared__ float xs[2 * HD];
     int kvh = blockIdx.x, z = blockIdx.y, tid = threadIdx.x, half = HD / 2;
     const float* y = qkv + (u64)z * (nq + 2 * nk) + nq + kvh * HD;
@@ -184,7 +194,7 @@ __device__ __forceinline__ void kv_q8_bt(const float* __restrict__ qkv, int nq, 
     }
     for (int i = tid; i < HD; i += blockDim.x) xs[HD + i] = y[nk + i];
     __syncthreads();
-    kv_q8_store<HD, KG>(xs, c, rp_row(rp, start, z) * nk + kvh * HD,
+    kv_q8_store<HD, KG>(xs, c, rp_row(rp, start, z, tab) * nk + kvh * HD,
                         c.ksh ? c.ksh + kvh * HD : nullptr);
 }
 
@@ -194,9 +204,9 @@ __device__ __forceinline__ void kv_q8_bt(const float* __restrict__ qkv, int nq, 
              const float2* __restrict__ rope, signed char* __restrict__ kq,                        \
              signed char* __restrict__ vq, float* __restrict__ ks, float* __restrict__ vs,         \
              const float* __restrict__ ksh, const float* __restrict__ kn, float eps,               \
-             const u32* __restrict__ rp) {                                                         \
+             const u32* __restrict__ rp, const u32* __restrict__ tab) {                            \
         kv_q8_bt<HD, KG>(qkv, nq, nk, start, rope, Q8Kv{kq, vq, ks, vs, nullptr, ksh}, kn, eps,    \
-                         rp);                                                                      \
+                         rp, tab);                                                                 \
     }
 KV_Q8_B(kv_q8_b_64, 64, 64)
 KV_Q8_B(kv_q8_b_128, 128, 128)
@@ -215,12 +225,12 @@ extern "C" __global__ void rope_kv_norm_b(const float* __restrict__ qkv, int nq,
                                           const float* __restrict__ kn, float eps,
                                           float* __restrict__ q, unsigned short* __restrict__ kc,
                                           unsigned short* __restrict__ vc,
-                                          const u32* __restrict__ rp) {
+                                          const u32* __restrict__ rp, const u32* __restrict__ tab) {
     int z = blockIdx.y, h = blockIdx.x * 4 + (threadIdx.x >> 5), lane = threadIdx.x & 31;
     int half = hd >> 1, hq = nq / hd, hk = nk / hd;
     if (h >= hq + 2 * hk || (!kc && h >= hq)) return;
     const float* y = qkv + (u64)z * (nq + 2 * nk);
-    u64 pos = rp_row(rp, start, z); // the cache row
+    u64 pos = rp_row(rp, start, z, tab); // the cache row
     if (h >= hq + hk) {
         for (int e = (h - hq - hk) * hd + lane; e < (h - hq - hk + 1) * hd; e += 32)
             vc[pos * nk + e] = kv_half(y[nq + nk + e]);
@@ -274,29 +284,34 @@ __device__ __forceinline__ void attn_split_bt(const float* q, const unsigned sho
                                               const unsigned short* vc, int start, int z0,
                                               int n_heads, int n_kv, float scale, int max_split,
                                               float* part_o, float* part_ml, const u32* rp,
-                                              Q8Kv q8 = Q8Kv{}) {
+                                              const u32* tab, Q8Kv q8 = Q8Kv{}) {
     int zl = blockIdx.z, z = z0 + zl;
-    u64 nh = n_heads, e = rp_base(rp, z) * (u64)(n_kv * HD);
+    u64 nh = n_heads, e = rp_base(rp, z, tab) * (u64)(n_kv * HD);
     attn_split_t<HD, KG>(q + (u64)z * nh * HD, kv_at(kc, e), kv_at(vc, e),
                          rp_pos(rp, start, z) + 1, blockIdx.x, blockIdx.y, n_heads, n_kv, scale,
                          max_split, part_o + (u64)zl * nh * max_split * HD,
-                         part_ml + (u64)zl * nh * max_split * 2, q8_at<KG>(q8, e));
+                         part_ml + (u64)zl * nh * max_split * 2, q8_at<KG>(q8, e), QkNorm{},
+                         rp_tab(rp, z, tab));
 }
 
 extern "C" __global__ void __launch_bounds__(ATT_TILE)
 attn_split_b_64(const float* __restrict__ q, const unsigned short* __restrict__ kc,
                 const unsigned short* __restrict__ vc, int start, int z0, int n_heads, int n_kv,
                 float scale, int max_split, float* __restrict__ part_o,
-                float* __restrict__ part_ml, const u32* __restrict__ rp) {
-    attn_split_bt<64>(q, kc, vc, start, z0, n_heads, n_kv, scale, max_split, part_o, part_ml, rp);
+                float* __restrict__ part_ml, const u32* __restrict__ rp,
+                const u32* __restrict__ tab) {
+    attn_split_bt<64>(q, kc, vc, start, z0, n_heads, n_kv, scale, max_split, part_o, part_ml, rp,
+                      tab);
 }
 
 extern "C" __global__ void __launch_bounds__(ATT_TILE)
 attn_split_b_128(const float* __restrict__ q, const unsigned short* __restrict__ kc,
                  const unsigned short* __restrict__ vc, int start, int z0, int n_heads, int n_kv,
                  float scale, int max_split, float* __restrict__ part_o,
-                 float* __restrict__ part_ml, const u32* __restrict__ rp) {
-    attn_split_bt<128>(q, kc, vc, start, z0, n_heads, n_kv, scale, max_split, part_o, part_ml, rp);
+                 float* __restrict__ part_ml, const u32* __restrict__ rp,
+                 const u32* __restrict__ tab) {
+    attn_split_bt<128>(q, kc, vc, start, z0, n_heads, n_kv, scale, max_split, part_o, part_ml, rp,
+                       tab);
 }
 
 // The tensor-core decode attention (decode.cu attn_blk_t) for query tokens
@@ -307,28 +322,32 @@ template <int HD>
 __device__ __forceinline__ void attn_blk_bt(const float* q, const unsigned short* kc,
                                             const unsigned short* vc, int start, int z0,
                                             int n_heads, int n_kv, float pre, int nblk_max,
-                                            float* part_o, float* part_ml, const u32* rp) {
+                                            float* part_o, float* part_ml, const u32* rp,
+                                            const u32* tab) {
     int zl = blockIdx.z, z = z0 + zl;
-    u64 nh = n_heads, e = rp_base(rp, z) * (u64)(n_kv * HD);
+    u64 nh = n_heads, e = rp_base(rp, z, tab) * (u64)(n_kv * HD);
     attn_blk_t<HD>(q + (u64)z * nh * HD, kv_at(kc, e), kv_at(vc, e), rp_pos(rp, start, z) + 1,
                    blockIdx.x, n_heads, n_kv, pre, nblk_max,
-                   part_o + (u64)zl * nh * nblk_max * HD, part_ml + (u64)zl * nh * nblk_max * 2);
+                   part_o + (u64)zl * nh * nblk_max * HD, part_ml + (u64)zl * nh * nblk_max * 2,
+                   QkNorm{}, Q8Kv{}, rp_tab(rp, z, tab));
 }
 
 extern "C" __global__ void __launch_bounds__(32)
 attn_blk_b_64(const float* __restrict__ q, const unsigned short* __restrict__ kc,
               const unsigned short* __restrict__ vc, int start, int z0, int n_heads, int n_kv,
               float pre, int nblk_max, float* __restrict__ part_o, float* __restrict__ part_ml,
-              const u32* __restrict__ rp) {
-    attn_blk_bt<64>(q, kc, vc, start, z0, n_heads, n_kv, pre, nblk_max, part_o, part_ml, rp);
+              const u32* __restrict__ rp, const u32* __restrict__ tab) {
+    attn_blk_bt<64>(q, kc, vc, start, z0, n_heads, n_kv, pre, nblk_max, part_o, part_ml, rp,
+                    tab);
 }
 
 extern "C" __global__ void __launch_bounds__(32)
 attn_blk_b_128(const float* __restrict__ q, const unsigned short* __restrict__ kc,
                const unsigned short* __restrict__ vc, int start, int z0, int n_heads, int n_kv,
                float pre, int nblk_max, float* __restrict__ part_o, float* __restrict__ part_ml,
-               const u32* __restrict__ rp) {
-    attn_blk_bt<128>(q, kc, vc, start, z0, n_heads, n_kv, pre, nblk_max, part_o, part_ml, rp);
+               const u32* __restrict__ rp, const u32* __restrict__ tab) {
+    attn_blk_bt<128>(q, kc, vc, start, z0, n_heads, n_kv, pre, nblk_max, part_o, part_ml, rp,
+                     tab);
 }
 
 // attn_blk_b on the q8 cache (written by kv_q8_b; nothing to store here).
@@ -338,14 +357,15 @@ attn_blk_b_128(const float* __restrict__ q, const unsigned short* __restrict__ k
              const signed char* __restrict__ vq, const float* __restrict__ ks,                     \
              const float* __restrict__ vs, int start, int z0, int n_heads, int n_kv, float pre,    \
              int nblk_max, float* __restrict__ part_o, float* __restrict__ part_ml,                \
-             const u32* __restrict__ rp) {                                                         \
+             const u32* __restrict__ rp, const u32* __restrict__ tab) {                            \
         int zl = blockIdx.z, z = z0 + zl;                                                          \
-        u64 nh = n_heads, e = rp_base(rp, z) * (u64)(n_kv * HD);                                   \
+        u64 nh = n_heads, e = rp_base(rp, z, tab) * (u64)(n_kv * HD);                              \
         attn_blk_t<HD, KG>(q + (u64)z * nh * HD, nullptr, nullptr, rp_pos(rp, start, z) + 1,       \
                            blockIdx.x, n_heads, n_kv, pre, nblk_max,                               \
                            part_o + (u64)zl * nh * nblk_max * HD,                                  \
                            part_ml + (u64)zl * nh * nblk_max * 2, QkNorm{},                        \
-                           q8_at<KG>(Q8Kv{kq, vq, ks, vs, nullptr, nullptr}, e));                  \
+                           q8_at<KG>(Q8Kv{kq, vq, ks, vs, nullptr, nullptr}, e),                   \
+                           rp_tab(rp, z, tab));                                                    \
     }
 ATTN_BLK_B_Q8(attn_blk_b_q8_64, 64, 64)
 ATTN_BLK_B_Q8(attn_blk_b_q8_128, 128, 128)
@@ -381,7 +401,7 @@ template <int HD, int NW, int ST, int KG = 0>
 __device__ __forceinline__ void attn_fa_bt(const float* q, const unsigned short* __restrict__ kc,
                                            const unsigned short* __restrict__ vc, int start,
                                            int nb, int n_heads, int n_kv, float pre, float* y,
-                                           Q8Kv q8 = Q8Kv{}) {
+                                           Q8Kv q8 = Q8Kv{}, const u32* __restrict__ tab = nullptr) {
 #if __CUDA_ARCH__ >= 800
     constexpr bool Q8 = KG > 0;
     constexpr int KGs = Q8 ? KG : 1;
@@ -407,15 +427,17 @@ __device__ __forceinline__ void attn_fa_bt(const float* q, const unsigned short*
     auto qrow = [&](int r) -> u64 { return (u64)(r / group) * qs + (kvh * group + r % group) * HD; };
     auto load = [&](int bl) {
         int st = bl % ST, t0 = bl * ATT_BLK;
+        u32 kb = att_rb(tab, t0); // the tile's first cache row
         if constexpr (Q8) {
             signed char* r8 = raw8(st);
             float* rs = rawsc(st);
-            att_load_q8<HD, KGs>(r8, rs, q8.k, q8.ks, t0, np_max, kv_dim, kvh, tid, 32 * NW);
+            att_load_q8<HD, KGs>(r8, rs, q8.k, q8.ks, t0, np_max, kv_dim, kvh, tid, 32 * NW, kb);
             att_load_q8<HD, KGs>(r8 + ATT_BLK * HD, rs + ATT_BLK * HD / KGs, q8.v, q8.vs, t0,
-                                 np_max, kv_dim, kvh, tid, 32 * NW);
+                                 np_max, kv_dim, kvh, tid, 32 * NW, kb);
         } else {
-            att_load<HD>(fa_sm + 2 * st * TILE, kc, t0, np_max, kv_dim, kvh, tid, 32 * NW);
-            att_load<HD>(fa_sm + (2 * st + 1) * TILE, vc, t0, np_max, kv_dim, kvh, tid, 32 * NW);
+            att_load<HD>(fa_sm + 2 * st * TILE, kc, t0, np_max, kv_dim, kvh, tid, 32 * NW, kb);
+            att_load<HD>(fa_sm + (2 * st + 1) * TILE, vc, t0, np_max, kv_dim, kvh, tid, 32 * NW,
+                         kb);
         }
     };
     u32 qa[HD / 16][4];
@@ -508,13 +530,15 @@ __device__ __forceinline__ void attn_fa_bt(const float* q, const unsigned short*
     extern "C" __global__ void __launch_bounds__(32 * NW, MINB)                                    \
         NAME(const float* q, const unsigned short* __restrict__ kc,                                \
              const unsigned short* __restrict__ vc, int start, int nb, int n_heads, int n_kv,      \
-             float pre, float* y) {                                                                \
-        attn_fa_bt<HD, NW, ST>(q, kc, vc, start, nb, n_heads, n_kv, pre, y);                       \
+             float pre, float* y, const u32* __restrict__ tab) {                                   \
+        attn_fa_bt<HD, NW, ST>(q, kc, vc, start, nb, n_heads, n_kv, pre, y, Q8Kv{}, tab);          \
     }
-// Registers (ptxas, sm_120): the hd-128 variants sit at the cap - attn_fa_b_128
-// 254, attn_fa_bs_128 242, the q8 hd-128 ones 254-255 (CUDA 13.4 nvcc: no
-// spills; cuda_attn_bench prints NVRTC's count of local bytes per variant,
-// where a few bytes of spill have been seen). __launch_bounds__(256, 1) is
+// Registers (ptxas -v, CUDA 13.4 nvcc, with the page table): the hd-128
+// variants sit at the cap - sm_120: attn_fa_b_128 254, attn_fa_bs_128 255,
+// the q8 hd-128 ones 254-255; sm_89: 244-254; no spills. The table's tile
+// row base is a u32 (att_rb): as a u64 it spilled attn_fa_b_q8_128 on
+// sm_120 (4 B stores / 8 B loads). cuda_attn_bench prints NVRTC's count of
+// local bytes per variant. __launch_bounds__(256, 1) is
 // exactly satisfiable: 256 x 255 = 65280 of the SM's 65536 registers. A
 // smaller m-tile per warp for hd 128 (32 rows per 2 warps, less O and S
 // live per thread) is the follow-up if a toolkit starts spilling here.
@@ -533,7 +557,8 @@ ATTN_FA_B(attn_fa_bs_128, 128, 4, 1, 2)
 template <int HD, int NW>
 __device__ __forceinline__ void attn_fa_kt(const float* q, const unsigned short* __restrict__ kc,
                                            const unsigned short* __restrict__ vc, int start,
-                                           int nb, int n_heads, int n_kv, float pre, float* y) {
+                                           int nb, int n_heads, int n_kv, float pre, float* y,
+                                           const u32* __restrict__ tab = nullptr) {
 #if __CUDA_ARCH__ >= 800
     extern __shared__ __align__(16) unsigned short fa_sm[];
     const int TILE = ATT_BLK * HD;
@@ -556,14 +581,14 @@ __device__ __forceinline__ void attn_fa_kt(const float* q, const unsigned short*
 #pragma unroll
     for (int n = 0; n < HD / 8; n++) O[n][0] = O[n][1] = O[n][2] = O[n][3] = 0.0f;
     float M[2] = {-INFINITY, -INFINITY}, L[2] = {0.0f, 0.0f};
-    att_load<HD>(fa_sm, kc, 0, np_max, kv_dim, kvh, tid, 32 * NW);
+    att_load<HD>(fa_sm, kc, 0, np_max, kv_dim, kvh, tid, 32 * NW, att_rb(tab, 0));
     att_commit();
     for (int b = 0; b < nblk; b++) {
         int t0 = b * ATT_BLK;
         unsigned short* kt = fa_sm + (b & 1) * TILE;
         att_wait<0>();
         __syncthreads(); // K(b) in; everyone past P V(b - 1): vt free
-        att_load<HD>(vt, vc, t0, np_max, kv_dim, kvh, tid, 32 * NW);
+        att_load<HD>(vt, vc, t0, np_max, kv_dim, kvh, tid, 32 * NW, att_rb(tab, t0));
         att_commit();
         bool act = t0 < whi;
         float m[2], l[2], al[2], wt[2];
@@ -590,7 +615,7 @@ __device__ __forceinline__ void attn_fa_kt(const float* q, const unsigned short*
         __syncthreads(); // V(b) in (K(b + 1)'s tile: last read by b - 1's scores)
         if (b + 1 < nblk)
             att_load<HD>(fa_sm + ((b + 1) & 1) * TILE, kc, t0 + ATT_BLK, np_max, kv_dim, kvh, tid,
-                         32 * NW);
+                         32 * NW, att_rb(tab, t0 + ATT_BLK));
         att_commit();
         if (act) {
 #pragma unroll
@@ -630,8 +655,8 @@ __device__ __forceinline__ void attn_fa_kt(const float* q, const unsigned short*
     extern "C" __global__ void __launch_bounds__(32 * NW, MINB)                                    \
         NAME(const float* q, const unsigned short* __restrict__ kc,                                \
              const unsigned short* __restrict__ vc, int start, int nb, int n_heads, int n_kv,      \
-             float pre, float* y) {                                                                \
-        attn_fa_kt<HD, NW>(q, kc, vc, start, nb, n_heads, n_kv, pre, y);                           \
+             float pre, float* y, const u32* __restrict__ tab) {                                   \
+        attn_fa_kt<HD, NW>(q, kc, vc, start, nb, n_heads, n_kv, pre, y, tab);                      \
     }
 // Registers (ptxas, CUDA 13.4): attn_fa_k_128 254 on sm_120 / 245 on sm_89,
 // attn_fa_k_64 156 / 154 (3 blocks per SM need <= 168); no spills. The host
@@ -646,10 +671,10 @@ ATTN_FA_K(attn_fa_k_128, 128, 4, 2)
     extern "C" __global__ void __launch_bounds__(32 * NW, MINB)                                    \
         NAME(const float* q, const signed char* __restrict__ kq,                                   \
              const signed char* __restrict__ vq, const float* __restrict__ ks,                     \
-             const float* __restrict__ vs, int start, int nb, int n_heads, int n_kv, float pre,    \
-             float* y) {                                                                           \
+             const float* __restrict__ vs, int start, int nb, int n_heads, int n_kv,               \
+             float pre, float* y, const u32* __restrict__ tab) {                                   \
         attn_fa_bt<HD, NW, ST, KG>(q, nullptr, nullptr, start, nb, n_heads, n_kv, pre, y,          \
-                                   Q8Kv{kq, vq, ks, vs, nullptr, nullptr});                        \
+                                   Q8Kv{kq, vq, ks, vs, nullptr, nullptr}, tab);                   \
     }
 ATTN_FA_B_Q8(attn_fa_b_q8_64, 64, 4, 3, 2, 64)
 ATTN_FA_B_Q8(attn_fa_b_q8_128, 128, 8, 2, 1, 128)
@@ -681,9 +706,9 @@ extern "C" __global__ void quantize_b(const float* __restrict__ x, int n, int wa
              const signed char* __restrict__ vq, const float* __restrict__ ks,                     \
              const float* __restrict__ vs, int start, int z0, int n_heads, int n_kv, float scale,  \
              int max_split, float* __restrict__ part_o, float* __restrict__ part_ml,               \
-             const u32* __restrict__ rp) {                                                         \
+             const u32* __restrict__ rp, const u32* __restrict__ tab) {                            \
         attn_split_bt<HD, KG>(q, nullptr, nullptr, start, z0, n_heads, n_kv, scale, max_split,     \
-                              part_o, part_ml, rp, Q8Kv{kq, vq, ks, vs, nullptr, nullptr});        \
+                              part_o, part_ml, rp, tab, Q8Kv{kq, vq, ks, vs, nullptr, nullptr});   \
     }
 ATTN_SPLIT_B_Q8(attn_split_b_q8_64, 64, 64)
 ATTN_SPLIT_B_Q8(attn_split_b_q8_128, 128, 128)

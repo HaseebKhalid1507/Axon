@@ -438,6 +438,10 @@ impl<'g> CudaQwen2<'g> {
         let nb = xs.len() / dim;
         Self::check_positions(nb, start, c);
         assert_eq!(c.net, self.id, "a CudaCache used with another CudaQwen2");
+        assert!(
+            c.tab.is_none(),
+            "streamed layers copy plain rows: no paged cache"
+        );
         assert_eq!(xs.len(), nb * dim, "hidden states: whole rows");
         let k = self.first;
         assert!(src.len() == k && st.layers.len() == k && hkv.len() == k);
@@ -497,6 +501,7 @@ impl<'g> CudaQwen2<'g> {
                         CacheKv::F16,
                         nb,
                         start,
+                        Arg::Ptr(0),
                         Arg::Ptr(0),
                         &mut on,
                     )?;

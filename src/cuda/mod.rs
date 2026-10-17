@@ -375,6 +375,21 @@ impl Gpu {
         overlap: bool,
     ) -> Result<(), String> {
         self.bind()?;
+        // Debug builds: the kernel takes exactly args.len() parameters (a
+        // missing one is read from past the array: undefined behaviour,
+        // not an error). Needs the driver's cuFuncGetParamInfo (12.4+).
+        #[cfg(debug_assertions)]
+        if let Some(info) = ffi::param_info() {
+            let (mut off, mut size) = (0usize, 0usize);
+            let n = args.len();
+            // SAFETY: f is a loaded kernel; off and size are written.
+            let mut has = |i: usize| unsafe { info(f.f, i, &mut off, &mut size) } == 0;
+            assert!(
+                (n == 0 || has(n - 1)) && !has(n),
+                "launch of {} with {n} arguments: not its parameter count",
+                f.name
+            );
+        }
         // cuLaunchKernelEx copies each parameter from these addresses before returning.
         let mut ptrs: Vec<*mut c_void> = args.iter().map(Arg::addr).collect();
         let mut attr = ffi::LaunchAttr {

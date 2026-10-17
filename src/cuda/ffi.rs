@@ -380,6 +380,36 @@ pub fn tensor_map_encoder() -> Option<TensorMapEncodeTiled> {
     })
 }
 
+/// cuFuncGetParamInfo (CUDA 12.4+): a kernel parameter's offset and size.
+pub type FuncGetParamInfo =
+    unsafe extern "C" fn(CUfunction, usize, *mut usize, *mut usize) -> CUresult;
+
+/// The driver's cuFuncGetParamInfo, None if it doesn't export it (older
+/// than CUDA 12.4): debug builds check every launch's argument count with
+/// it (`Gpu::launch_raw`).
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+pub fn param_info() -> Option<FuncGetParamInfo> {
+    static F: OnceLock<Option<FuncGetParamInfo>> = OnceLock::new();
+    *F.get_or_init(|| {
+        let f = (|| {
+            driver().ok()?;
+            let lib = open_lib(&["libcuda.so.1".into()]).ok()?;
+            let p = sym(lib, "cuFuncGetParamInfo\0").ok()?;
+            // SAFETY: p is the driver's cuFuncGetParamInfo, whose C signature
+            // (cuda.h) FuncGetParamInfo declares.
+            Some(unsafe { std::mem::transmute::<*mut c_void, FuncGetParamInfo>(p) })
+        })();
+        if f.is_none() {
+            // Once (the OnceLock): the check is off, say so.
+            eprintln!(
+                "axon: the CUDA driver has no cuFuncGetParamInfo (older than 12.4): \
+                 kernel launch argument counts are not checked"
+            );
+        }
+        f
+    })
+}
+
 /// Where libnvrtc may be: the soname matching the driver's CUDA major
 /// first (a newer NVRTC's output may not load on an older driver), then the
 /// dev symlink and the other sonames (CUDA 13, 12); each on the library
