@@ -360,6 +360,11 @@ fn run() -> std::io::Result<()> {
         model.total_params() as f64 / 1e9,
         human_bytes(model.total_bytes())
     );
+    if let Some(i) = model::MoeInfo::of(&model) {
+        for l in i.lines() {
+            println!("{l}");
+        }
+    }
     println!("{}", cuda::summary());
     // What decides the output bits (docs/determinism.md), per placement.
     match identity::predicted(path, &model) {

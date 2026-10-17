@@ -365,7 +365,15 @@ fn load_vec(m: &Model, t: &Tensor) -> Vec<f32> {
 /// and sliding-window layers (`Gemma`). Its norm weights are stored with
 /// HF's `1 + w` already added by llama.cpp's converter, so they are plain
 /// RMSNorm weights here.
-pub const ARCHS: [&str; 4] = ["qwen2", "qwen3", "llama", "gemma3"];
+/// qwen3moe (Qwen3-30B-A3B & co.) is qwen3 with each FFN replaced by
+/// experts and a router (`moe`): loaded and checked, not run yet.
+pub const ARCHS: [&str; 5] = ["qwen2", "qwen3", "llama", "gemma3", "qwen3moe"];
+
+#[path = "model/moe.rs"]
+mod moe;
+pub(crate) use moe::{
+    MoeInfo, cpu_refusal as moe_cpu_refusal, gpu_refusal as moe_gpu_refusal, is_moe,
+};
 
 /// Gemma 3's layer layout: local (sliding-window) layers attend to the last
 /// `window` positions only (key t is seen from position p iff p - t <
@@ -489,6 +497,7 @@ fn reads_in_place_with(m: &Model, repack: bool) -> bool {
         .filter(|t| {
             t.dims.len() >= 2
                 && t.dims[1] > 1
+                && !t.name.ends_with(".ffn_gate_inp.weight")
                 && (t.name.starts_with("blk.")
                     || t.name == "output.weight"
                     || (tied && t.name == "token_embd.weight"))
@@ -504,7 +513,7 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
     let bad = |msg: String| std::io::Error::new(std::io::ErrorKind::InvalidData, msg);
     if !ARCHS.contains(&m.arch.as_str()) {
         return Err(bad(format!(
-            "architecture '{}' is not supported (qwen2, qwen3, llama, gemma3)",
+            "architecture '{}' is not supported (qwen2, qwen3, llama, gemma3, qwen3moe)",
             if m.arch.is_empty() { "<none>" } else { &m.arch }
         )));
     }
@@ -554,9 +563,50 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
             "rope.dimension_count differs from the head size {head_dim} (partial RoPE)"
         )));
     }
-    if num("expert_count").is_some_and(|v| v != 0.0) {
-        return Err(bad("mixture-of-experts models are not supported".into()));
+    let moe = moe::is_moe(m);
+    if !moe && num("expert_count").is_some_and(|v| v != 0.0) {
+        return Err(bad(format!(
+            "mixture-of-experts models are not supported on {} (qwen3moe is)",
+            m.arch
+        )));
     }
+    let moe = match moe {
+        false => None,
+        true => {
+            let d = moe::MoeDims {
+                n_expert: need("expert_count")?,
+                k: need("expert_used_count")?,
+                ffn: need("expert_feed_forward_length")?,
+            };
+            if d.k > d.n_expert {
+                return Err(bad(format!(
+                    "expert_used_count {} exceeds expert_count {}",
+                    d.k, d.n_expert
+                )));
+            }
+            if num("expert_shared_count").is_some_and(|v| v != 0.0) {
+                return Err(bad("shared experts are not supported".into()));
+            }
+            if let Some(v) = num("expert_weights_scale").filter(|&v| v != 0.0 && v != 1.0) {
+                return Err(bad(format!("expert_weights_scale {v} is not supported")));
+            }
+            // llama.cpp's LLAMA_EXPERT_GATING_FUNC_TYPE: 0 (unset) or 1 softmax.
+            if let Some(v) = num("expert_gating_func").filter(|&v| v != 0.0 && v != 1.0) {
+                return Err(bad(format!(
+                    "expert_gating_func {v} is not supported (softmax only)"
+                )));
+            }
+            if num("expert_group_count").is_some_and(|v| v > 1.0) {
+                return Err(bad("grouped expert selection is not supported".into()));
+            }
+            if num("expert_weights_norm").is_some_and(|v| v == 0.0) {
+                return Err(bad(
+                    "expert_weights_norm false is not supported (qwen3moe renormalizes)".into(),
+                ));
+            }
+            Some(d)
+        }
+    };
     if num("attention.scale").is_some_and(|v| v != 0.0) {
         return Err(bad("a custom attention.scale is not supported".into()));
     }
@@ -718,7 +768,7 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
             if m.arch == "llama" && has {
                 return Err(bad(format!("blk.{i}.{b}: llama has no q/k norm")));
             }
-            if m.arch == "qwen3" || gemma || has {
+            if m.arch == "qwen3" || moe.is_some() || gemma || has {
                 t(b, head_dim, None)?;
             }
         }
@@ -752,9 +802,61 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
         }
         t("attn_output.weight", q_dim, Some(dim))?;
         t("ffn_norm.weight", dim, None)?;
-        let ffn = t("ffn_gate.weight", dim, Some(0))?.dims[1] as usize;
-        t("ffn_up.weight", dim, Some(ffn))?;
-        t("ffn_down.weight", ffn, Some(dim))?;
+        let Some(d) = moe else {
+            let ffn = t("ffn_gate.weight", dim, Some(0))?.dims[1] as usize;
+            t("ffn_up.weight", dim, Some(ffn))?;
+            t("ffn_down.weight", ffn, Some(dim))?;
+            continue;
+        };
+        // Experts: [cols, rows, n_expert] tensors, and the router.
+        for b in [
+            "ffn_gate.weight",
+            "ffn_up.weight",
+            "ffn_down.weight",
+            "ffn_gate_shexp.weight",
+            "ffn_up_shexp.weight",
+            "ffn_down_shexp.weight",
+            "ffn_gate_inp_shexp.weight",
+            "ffn_gate_inp.bias",
+            "exp_probs_b.bias",
+        ] {
+            if find_opt(m, &format!("blk.{i}.{b}")).is_some() {
+                return Err(bad(format!("blk.{i}.{b} is not supported on {}", m.arch)));
+            }
+        }
+        let r = t("ffn_gate_inp.weight", dim, Some(d.n_expert))?;
+        if r.qtype.id != F32 && r.qtype.id != F16 {
+            return Err(bad(format!(
+                "blk.{i}.ffn_gate_inp.weight: type {} (want F32 or F16)",
+                r.qtype.name
+            )));
+        }
+        for (b, cols, rows) in [
+            ("ffn_gate_exps.weight", dim, d.ffn),
+            ("ffn_up_exps.weight", dim, d.ffn),
+            ("ffn_down_exps.weight", d.ffn, dim),
+        ] {
+            let name = format!("blk.{i}.{b}");
+            let t = find_opt(m, &name).ok_or_else(|| bad(format!("missing tensor {name}")))?;
+            let q = t.qtype;
+            if !SUPPORTED_TYPES.contains(&q.id) {
+                return Err(bad(format!(
+                    "tensor {name}: type {} ({}) is not supported",
+                    q.name, q.id
+                )));
+            }
+            let want = [cols as u64, rows as u64, d.n_expert as u64];
+            if t.dims.len() < 3
+                || t.dims[..3] != want
+                || t.dims[3..].iter().any(|&x| x != 1)
+                || !t.dims[0].is_multiple_of(q.block_size as u64)
+            {
+                return Err(bad(format!(
+                    "tensor {name}: shape {:?} doesn't fit the model ({cols} x {rows} x {})",
+                    t.dims, d.n_expert
+                )));
+            }
+        }
     }
 
     crate::tokenizer::pre_of(m).map_err(bad)?;
@@ -2808,6 +2910,10 @@ multiversion! {
 pub(crate) mod gemma3_tests;
 
 #[cfg(test)]
+#[path = "model/moe_tests.rs"]
+mod moe_tests;
+
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::vmath::fmadd;
@@ -3059,7 +3165,7 @@ pub(crate) mod tests {
 
     /// The tiny model as qwen3: q_dim (4 heads of 32 = 128) != dim (64), q/k
     /// norms, no biases.
-    fn tiny3(
+    pub(crate) fn tiny3(
         edit: impl FnOnce(&mut Vec<(String, Vec<u64>, u32)>),
         edit_meta: impl FnOnce(&mut Vec<(&'static str, Val)>),
     ) -> std::io::Result<()> {

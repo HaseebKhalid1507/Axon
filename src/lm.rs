@@ -395,7 +395,13 @@ impl<'a> Backend<'a> {
             if kv == KvType::Q8 {
                 return Err("the q8 KV cache is cuda-only (--device cuda)".into());
             }
+            if crate::model::is_moe(m) {
+                return Err(crate::model::moe_cpu_refusal(m));
+            }
             return Ok(Backend::Cpu(Qwen2::new(m)));
+        }
+        if crate::model::is_moe(m) {
+            return Err(crate::model::moe_gpu_refusal(m));
         }
         if gpu_layers == Some(0) {
             return Err("--gpu-layers 0 is --device cpu".into());
