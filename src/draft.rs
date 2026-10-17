@@ -403,9 +403,10 @@ impl DraftModel {
                 debug_assert_eq!(device, Device::Cuda);
                 let (gpu, module) = (r.gpu, r.module);
                 drop(r);
-                // No Q6_K prefill copy (a spare-VRAM extra, same bits): the
-                // drafter gets just its reserve, never memory the main
-                // model's cache (made after it) planned for.
+                // No Q6_K prefill copy (a spare-VRAM extra, same bits), so
+                // the drafter doesn't take memory the main model's cache
+                // (made after it) planned for. Its batch scratch may still
+                // widen to PREFILL_BATCH from free VRAM (128 tokens' worth).
                 let n = CudaQwen2::with_kv_q6k8(
                     gpu,
                     module,

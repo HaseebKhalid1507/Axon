@@ -23,12 +23,10 @@ Median of 5 (a local bench, not in the tree: one model load, then `verify_argmax
 | host | split | nb1 | nb2 | nb4 | nb6 | nb8 | nb9 | nb10 | nb12 |
 |---|---|---|---|---|---|---|---|---|---|
 | bella (Core Ultra 9 275HX, DDR5), main's GEMM | 32B, 27/64 GPU | 182 | 207 | 203 | 209 | 231 | 253 | 283 | 299 |
-| bella, GEMM prefetch (this PR) | 32B, 27/64 GPU | 155–167 | 163–183 | 170–187 | 170–195 | 175–198 | 190–203 | 224–254 | 217–233 |
 | pod (Ryzen 9 7950X, 4090) | 14B, 20/48 GPU | 138 | 124 | 126 | 128 | 123 | 120 | 129 | 134 |
 
-On bella a pass of up to 8 rows costs 1.1–1.27× a token (1.05–1.2× with the prefetch below);
-past 8–9 the CPU's compute shows. Different runs: the first row is main's binary on a quiet
-machine, the second this PR's under load. The pod's Zen 4 cores keep 12 rows under the RAM read.
+On bella a pass of up to 8 rows costs 1.1–1.27× a token;
+past 8–9 the CPU's compute shows. The pod's Zen 4 cores keep 12 rows under the RAM read.
 
 ## Choosing K
 
@@ -101,24 +99,13 @@ The split's K = 7 default applies to greedy decoding only; sampled keeps the dra
 K = 3 (chat samples by default, temp 0.8; `--draft 7` for code-heavy sampled sessions). The
 "little or no gain when sampling" note is no longer printed next to a split model.
 
-## CPU GEMM prefetch
+## CPU GEMM prefetch (tried, dropped)
 
-The CPU's batched r8 GEMM had no software prefetch (decode's GEMV has it). A verify pass of
-a few rows is still a stream over the weights, so the GEMM now prefetches as the GEMV does for
-batches of up to 16 tokens, through to the matrix's end like the GEMV (loads only: same bits;
-`AXON_GEMM_PREFETCH=0` off). Bella, 32B, prefetch on vs off in the same job, 27–28/64 GPU
-layers (ms per pass):
-
-| run | nb 4 on / off | nb 8 on / off | nb 12 on / off |
-|---|---|---|---|
-| job 0d19 round 1 (load 6–11) | 170 / 200 | 175 / 213 | 217 / 259 |
-| job 0d19 round 2 (load 11–14) | 187 / 194 | 198 / 223 | 233 / 271 |
-| job 1cf9, to_end added (load 11–14) | 220 / 218 | 233 / 226 | 259 / 285 |
-
-From no difference to −15 %, under load that moves nb 1 (no GEMM) by up to 10 % between runs:
-probably a small gain past nb 8, not proven at nb ≤ 8 on a busy machine. The Ryzen pod showed no
-difference (its verify pass was already flat). It costs nothing in bits; drop the commit if a
-quiet bella A/B shows nothing.
+A software prefetch in the batched r8 GEMM for small batches (as decode's GEMV has) measured
+from −15 % to no difference per verify pass on a loaded bella, and nothing on the Ryzen pod.
+Unproven, so not in this change; it needs a quiet A/B as its own PR. The 32B tables above
+(bench jobs 0d19 and 1cf9) were taken with it on and the 14B ones without; it changes no bits,
+so only those tok/s figures carry its effect, at most the range above.
 
 ## The drafter's VRAM
 
@@ -128,8 +115,12 @@ plain decode drops from 5.8–6.1 to 4.6–5.3 tok/s (about −13 %: three more 
 from RAM per pass). The 1.5B drafter leaves 22/64. Drafting more than repays it (table above);
 trimming the drafter's reserve on a split (it keeps its own 256 MiB headroom on top of the main
 model's) would win back about a layer and is left as a follow-up. The drafter is loaded without
-the spare-VRAM Q6_K prefill copy (same bits), so it takes just its reserve; `load_pair` no
-longer holds the rest of the GPU's free memory while it loads.
+the spare-VRAM Q6_K prefill copy (same bits), and `load_pair` no longer holds the rest of the
+GPU's free memory while it loads. One spare-VRAM extra is left: `CudaQwen2::build` widens the
+drafter's batch scratch from 1024 to 1152 tokens if free VRAM shows room when it loads, and
+that free VRAM still includes the main model's planned but not yet allocated KV cache. The
+extra is the scratch for 128 more tokens (not measured); pinning the drafter's batch would
+close it.
 
 ## `--draft-model auto` (opt-in)
 
