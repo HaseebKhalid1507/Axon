@@ -1163,6 +1163,32 @@ fn serve_caps_and_slow_reader() {
     let r = read_resp(&mut cd, &mut Vec::new());
     assert_eq!(r.status, 503, "{}", r.body);
     assert!(r.body.contains("queued"));
+    // The same refusal on the ollama API is in ollama's shape, and on
+    // /v1/responses in OpenAI's.
+    let n0 = s.conns();
+    for (path, body) in [
+        (
+            "/api/chat",
+            json!({"messages": [{"role": "user", "content": "Hi"}], "stream": false}),
+        ),
+        (
+            "/v1/responses",
+            json!({"input": "Hi", "max_output_tokens": 1}),
+        ),
+    ] {
+        let mut co = conn();
+        co.write_all(request("POST", path, &body.to_string(), true).as_bytes())
+            .unwrap();
+        let r = read_resp(&mut co, &mut Vec::new());
+        assert_eq!(r.status, 503, "{path}: {}", r.body);
+        let v: Value = serde_json::from_str(&r.body).unwrap();
+        if path == "/api/chat" {
+            assert_eq!(v, json!({"error": "too many queued requests"}), "{path}");
+        } else {
+            assert_eq!(v["error"]["message"], "too many queued requests", "{path}");
+        }
+    }
+    wait_for("the refused connections to close", || s.conns() == n0);
     // While A's client reads nothing, the engine goes on, and /health
     // answers while A is still generating: it isn't queued behind it (A
     // runs to ~2000 tokens, the context; B and C haven't run).

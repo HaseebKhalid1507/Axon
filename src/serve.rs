@@ -1878,7 +1878,7 @@ fn run_request(
     let (prompt, stop_ids, think) = match &g.prompt {
         Prompt::Chat { messages, no_think } => {
             let Some(t) = &m.template else {
-                return api_err(
+                return out.err(
                     c,
                     ApiError::new(
                         400,
@@ -1947,14 +1947,14 @@ fn run_request(
             sh.queued.fetch_add(1, Ordering::Relaxed);
         }
         Err(mpsc::TrySendError::Full(_)) => {
-            return api_err(
+            return out.err(
                 c,
                 ApiError::new(503, "server_error", "too many queued requests"),
                 keep,
             );
         }
         Err(mpsc::TrySendError::Disconnected(_)) => {
-            return api_err(
+            return out.err(
                 c,
                 ApiError::new(503, "server_error", "the server is shutting down"),
                 false,
@@ -1962,9 +1962,9 @@ fn run_request(
         }
     }
     let id = match out {
-        // Keys of the in-memory store (previous_response_id): unique in
-        // the process, not only per server.
-        Out::Responses(_) => responses::fresh_id(sh.created),
+        // Keys of the in-memory store (previous_response_id): unguessable,
+        // and unique in the process, not only per server.
+        Out::Responses(_) => responses::fresh_id(),
         _ => format!("{}-{n:x}{:x}", out.id_prefix(), sh.created),
     };
     let model = g.model.as_deref().unwrap_or(&sh.model_id);
@@ -1983,7 +1983,9 @@ fn run_request(
                 let chat = matches!(out, Out::Chat);
                 stream(c, req, &g, &mut ev, chat, &id, model, created, parser)
             }
-            Out::Responses(x) => responses::stream(c, req, x, &mut ev, &id, model, created, parser),
+            Out::Responses(x) => {
+                responses::stream(c, req, x, m.tok, &mut ev, &id, model, created, parser)
+            }
             Out::Ollama(x) => ollama::stream(c, req, x, &mut ev, model, arrived, parser),
         };
         let _ = c.s.set_write_timeout(Some(WRITE_TIMEOUT));
@@ -1994,7 +1996,9 @@ fn run_request(
                 let chat = matches!(out, Out::Chat);
                 whole(c, keep, &mut ev, chat, &id, model, created, parser)
             }
-            Out::Responses(x) => responses::whole(c, keep, x, &mut ev, &id, model, created, parser),
+            Out::Responses(x) => {
+                responses::whole(c, keep, x, m.tok, &mut ev, &id, model, created, parser)
+            }
             Out::Ollama(x) => ollama::whole(c, keep, x, &mut ev, model, arrived, parser),
         }
     };

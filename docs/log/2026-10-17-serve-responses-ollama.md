@@ -103,10 +103,28 @@ Transcripts: `~/.cache/axon-apis/transcripts/`.
 
 - `format` / JSON-schema output is refused. It needs grammar-constrained sampling, which
   axon doesn't have. `text.format` other than text on Responses is refused too.
-- `output_tokens_details.reasoning_tokens` is always 0: the engine reports text, not a
-  per-channel token count.
+- `output_tokens_details.reasoning_tokens` is the reasoning text re-encoded (+2 for the
+  think markers): the engine reports text, not a per-channel token count.
 - Responses function calls are streamed when the reply ends, after the message item. The
   tool parser decides a call whole, so each call's arguments come in one delta.
 - `/api/show` reports the served context (`--ctx`), not the trained context, as
   `<arch>.context_length`. Clients size their prompts by it.
 - `num_ctx` is ignored: one server, one context.
+
+## Review round 1 (Shady, SHIP-AFTER-FIXES 7/10)
+
+- Response ids were `resp-<seq>-<start>`: guessable, and with `store` on by default any key
+  holder could continue another client's conversation. Now `resp-` + 128 bits from
+  /dev/urandom + the process sequence number (unique even with equal random bits). The docs
+  say a stored response is readable by whoever holds its id.
+- Three errors in `run_request` (no chat template 400, queue full 503, shutting down 503)
+  still used `api_err`, the OpenAI shape, on the ollama routes: now `out.err`.
+  `serve_caps_and_slow_reader` asserts the queue-full 503 is exactly
+  `{"error": "too many queued requests"}` on /api/chat (and OpenAI's on /v1/responses), and
+  the fuzzer checks /api/* errors are exactly `{"error": "..."}`.
+- docs: ollama's sampling defaults (top_k 40, top_p 0.9, repeat_penalty 1.1, num_ctx 2048)
+  are not applied.
+- A message item's `status` follows the response's (`incomplete` when cut off);
+  `reasoning_tokens` is counted from the reasoning text.
+- NITs: `serves()` compares methods exactly (split, not substring); the GET routes answer
+  consistently while loading (above); the store sizes a conversation without printing it.

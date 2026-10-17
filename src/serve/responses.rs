@@ -45,6 +45,7 @@
 use super::api::{self, ApiError, GenReq, Usage};
 use super::tools::{self, Call, J, Piece};
 use super::{Conn, Event, Events, Request, Shared, json_reply};
+use crate::tokenizer::Tokenizer;
 use serde_json::{Map, Value, json};
 use std::collections::VecDeque;
 use std::io;
@@ -258,13 +259,38 @@ fn items(input: &[J], out: &mut Vec<J>) -> Result<(), ApiError> {
     Ok(())
 }
 
-/// A response id: `resp-`, a process-wide sequence number and the server's
-/// start time (hex). Unique in the process, so two servers in one process
-/// (the tests) never share a store key.
-pub(super) fn fresh_id(created: u64) -> String {
+/// A response id: `resp-`, 128 random bits (/dev/urandom) and a
+/// process-wide sequence number (hex). The id is the only key to a stored
+/// conversation (`previous_response_id`), so it must not be guessable; the
+/// sequence number keeps it unique in the process (two servers in one
+/// process, the tests) whatever the random bits.
+pub(super) fn fresh_id() -> String {
+    use std::io::Read;
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    format!("resp-{n:x}-{created:x}")
+    let mut b = [0u8; 16];
+    let ok = std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b));
+    if ok.is_err() {
+        // No /dev/urandom: the clock, the counter and an address, mixed.
+        // Not unguessable; say so once.
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            eprintln!("axon serve: /dev/urandom unreadable: response ids are guessable")
+        });
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos() as u64);
+        let mut z = t ^ n.rotate_left(32) ^ (&b as *const _ as u64);
+        for c in b.chunks_mut(8) {
+            z = z.wrapping_add(0x9E37_79B9_7F4A_7C15);
+            let mut x = z;
+            x = (x ^ (x >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+            x = (x ^ (x >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+            c.copy_from_slice(&(x ^ (x >> 31)).to_le_bytes());
+        }
+    }
+    let hex: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!("resp-{hex}{n:x}")
 }
 
 /// The stored conversations, oldest first: (response id, messages, bytes).
@@ -277,8 +303,19 @@ fn store_get(id: &str) -> Option<Vec<J>> {
         .map(|(_, m, _)| m.clone())
 }
 
+/// About the JSON size of `j` (its strings and numbers plus a little per
+/// node), without printing it.
+fn approx_bytes(j: &J) -> usize {
+    8 + match j {
+        J::Str(t) | J::Num(t) => t.len(),
+        J::Arr(a) => a.iter().map(approx_bytes).sum(),
+        J::Obj(m) => m.iter().map(|(k, v)| k.len() + approx_bytes(v)).sum(),
+        J::Null | J::Bool(_) => 0,
+    }
+}
+
 fn store_put(id: String, msgs: Vec<J>) {
-    let bytes: usize = msgs.iter().map(|m| m.dumps().len()).sum();
+    let bytes: usize = msgs.iter().map(approx_bytes).sum();
     if bytes > STORE_BYTES {
         return;
     }
@@ -567,12 +604,23 @@ pub(super) fn handle(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared) -> io:
     }
 }
 
-fn usage_json(u: &Usage) -> Value {
+/// Of a reply's tokens, its reasoning's: the reasoning text encoded again,
+/// plus `<think>` and `</think>` (at most the reply's count). The engine
+/// reports text, not tokens per channel, so this is the text's tokens: the
+/// count generated unless the model wrote a split the tokenizer wouldn't.
+fn reasoning_tokens(tok: &Tokenizer, reasoning: &str, completion: usize) -> usize {
+    if reasoning.is_empty() {
+        return 0;
+    }
+    (tok.encode(reasoning).len() + 2).min(completion)
+}
+
+fn usage_json((u, reasoning): (&Usage, usize)) -> Value {
     json!({
         "input_tokens": u.prompt_tokens,
         "input_tokens_details": {"cached_tokens": u.cached_tokens},
         "output_tokens": u.completion_tokens,
-        "output_tokens_details": {"reasoning_tokens": 0},
+        "output_tokens_details": {"reasoning_tokens": reasoning},
         "total_tokens": u.prompt_tokens + u.completion_tokens,
     })
 }
@@ -586,7 +634,8 @@ fn response(
     created: u64,
     status: &str,
     output: &[Value],
-    usage: Option<&Usage>,
+    // The usage and its reasoning tokens.
+    usage: Option<(&Usage, usize)>,
     finish: Option<&str>,
 ) -> Value {
     let mut r = x.echo.clone();
@@ -691,6 +740,7 @@ pub(super) fn whole(
     c: &mut Conn<TcpStream>,
     keep_alive: bool,
     x: &Req,
+    tok: &Tokenizer,
     ev: &mut Events,
     id: &str,
     model: (&str, String),
@@ -719,7 +769,8 @@ pub(super) fn whole(
                     out.push(reasoning_item(&item_id("rs", id, 0), &reasoning));
                 }
                 if !text.is_empty() || calls.is_empty() {
-                    out.push(message_item(&item_id("msg", id, 0), &text, "completed"));
+                    let st = status_of(finish);
+                    out.push(message_item(&item_id("msg", id, 0), &text, st));
                 }
                 for call in &calls {
                     out.push(call_item(call, "completed", &call.args));
@@ -732,7 +783,10 @@ pub(super) fn whole(
                     created,
                     status_of(finish),
                     &out,
-                    Some(&usage),
+                    Some((
+                        &usage,
+                        reasoning_tokens(tok, &reasoning, usage.completion_tokens),
+                    )),
                     Some(finish),
                 );
                 return json_reply(c, 200, &r.to_string(), keep_alive);
@@ -773,6 +827,7 @@ pub(super) fn stream(
     c: &mut Conn<TcpStream>,
     req: &Request,
     x: &Req,
+    tok: &Tokenizer,
     ev: &mut Events,
     id: &str,
     model: (&str, String),
@@ -795,7 +850,8 @@ pub(super) fn stream(
     let mut open = Open::None;
     let mut calls: Vec<Call> = Vec::new();
     let (mut all_text, mut all_reasoning) = (String::new(), String::new());
-    let close = |sse: &mut Sse, open: &mut Open, out: &mut Vec<Value>| {
+    // `status`: the message item's (the response's, at its end).
+    let close = |sse: &mut Sse, open: &mut Open, out: &mut Vec<Value>, status: &str| {
         let n = out.len();
         match std::mem::replace(open, Open::None) {
             Open::None => {}
@@ -822,7 +878,7 @@ pub(super) fn stream(
                     "response.content_part.done",
                     json!({"item_id": iid, "output_index": n, "content_index": 0, "part": part}),
                 );
-                let item = message_item(&iid, &text, "completed");
+                let item = message_item(&iid, &text, status);
                 sse.ev(
                     "response.output_item.done",
                     json!({"output_index": n, "item": item}),
@@ -833,7 +889,7 @@ pub(super) fn stream(
     };
     let reasoning_delta = |sse: &mut Sse, open: &mut Open, out: &mut Vec<Value>, r: &str| {
         if !matches!(open, Open::Reasoning { .. }) {
-            close(sse, open, out);
+            close(sse, open, out, "completed");
             let iid = item_id("rs", id, out.len());
             sse.ev(
                 "response.output_item.added",
@@ -855,7 +911,7 @@ pub(super) fn stream(
     };
     let text_delta = |sse: &mut Sse, open: &mut Open, out: &mut Vec<Value>, t: &str| {
         if !matches!(open, Open::Message { .. }) {
-            close(sse, open, out);
+            close(sse, open, out, "completed");
             let iid = item_id("msg", id, out.len());
             let n = out.len();
             sse.ev(
@@ -909,7 +965,7 @@ pub(super) fn stream(
                     }
                 }
                 Event::Error(m) => {
-                    close(&mut sse, &mut open, &mut out);
+                    close(&mut sse, &mut open, &mut out, "incomplete");
                     sse.ev(
                         "error",
                         json!({"code": "server_error", "message": m, "param": null}),
@@ -936,7 +992,7 @@ pub(super) fn stream(
                         // An empty reply is still one message item.
                         text_delta(&mut sse, &mut open, &mut out, "");
                     }
-                    close(&mut sse, &mut open, &mut out);
+                    close(&mut sse, &mut open, &mut out, status_of(finish));
                     for call in &calls {
                         let n = out.len();
                         let fid = format!("fc_{}", call.id.trim_start_matches("call_"));
@@ -969,7 +1025,10 @@ pub(super) fn stream(
                         created,
                         status,
                         &out,
-                        Some(&usage),
+                        Some((
+                            &usage,
+                            reasoning_tokens(tok, &all_reasoning, usage.completion_tokens),
+                        )),
                         Some(finish),
                     );
                     sse.ev(&format!("response.{status}"), json!({"response": r}));
@@ -1265,9 +1324,12 @@ mod tests {
     #[test]
     fn ids_are_unique_per_process() {
         // Two servers started in the same second share `created`.
-        let (a, b) = (fresh_id(7), fresh_id(7));
+        let (a, b) = (fresh_id(), fresh_id());
         assert_ne!(a, b);
         assert!(a.starts_with("resp-"));
+        // 128 random bits (32 hex digits) before the sequence number.
+        assert!(a.len() > 5 + 32, "{a}");
+        assert_ne!(a[5..37], b[5..37], "random parts differ");
     }
 
     #[test]
@@ -1298,9 +1360,10 @@ mod tests {
             7,
             status_of("length"),
             &[],
-            Some(&u),
+            Some((&u, 3)),
             Some("length"),
         );
+        assert_eq!(r["usage"]["output_tokens_details"]["reasoning_tokens"], 3);
         assert_eq!(r["status"], "incomplete");
         assert_eq!(r["incomplete_details"]["reason"], "max_output_tokens");
         assert_eq!(r["usage"]["total_tokens"], 15);
@@ -1315,7 +1378,7 @@ mod tests {
             7,
             status_of("stop"),
             &[],
-            Some(&u),
+            Some((&u, 0)),
             Some("stop"),
         );
         assert_eq!(r["status"], "completed");

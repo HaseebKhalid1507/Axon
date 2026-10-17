@@ -207,13 +207,23 @@ def record(name, ok, detail):
         findings.append((name, detail))
 
 
-def check_error_body(body):
-    """OpenAI's error shape, or ollama's ({"error": "..."}, the /api/* routes)."""
+def check_error_body(body, ollama=False):
+    """OpenAI's error shape ({"error": {"message": ...}}), or with `ollama`
+    (the /api/* routes) exactly ollama's: {"error": "..."} and nothing else."""
     try:
-        e = json.loads(body).get("error")
-        return bool(e) and (isinstance(e, str) or bool(e.get("message")))
+        j = json.loads(body)
+        e = j.get("error")
+        if ollama:
+            return isinstance(e, str) and bool(e) and list(j) == ["error"]
+        return isinstance(e, dict) and bool(e.get("message"))
     except Exception:
         return False
+
+
+def is_ollama(raw):
+    """The request goes to an ollama route (/api/...)."""
+    head = bytes(raw[:200]) if isinstance(raw, (bytes, bytearray)) else b""
+    return b" /api/" in head.split(b"\n", 1)[0]
 
 
 def expect(srv, name, raw, want, timeout=60.0):
@@ -222,12 +232,13 @@ def expect(srv, name, raw, want, timeout=60.0):
     try:
         st, h, body = request(srv.port, raw, timeout)
         dt = time.time() - t0
+        ol = is_ollama(raw)
         if want == "ok":
             good = st == 200
         elif want == "any4xx":
-            good = 400 <= st < 500 and check_error_body(body)
+            good = 400 <= st < 500 and check_error_body(body, ol)
         else:
-            good = st in want and (st < 400 or check_error_body(body) or h.get("content-length") == "0")
+            good = st in want and (st < 400 or check_error_body(body, ol) or h.get("content-length") == "0")
         msg = ""
         if st >= 400:
             try:

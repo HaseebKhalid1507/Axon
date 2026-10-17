@@ -38,7 +38,7 @@ openai-python SDK's typed `responses.create` / `responses.stream`.
 | `temperature`, `top_p` | as on chat completions; axon's extensions (`top_k`, `min_p`, `seed`, `repetition_penalty`, `repeat_last_n`, `stop`) are passed through too |
 | `reasoning.effort` | `"none"`: Qwen3 answers without thinking; other values: the model's default. `reasoning.summary` is ignored |
 | `previous_response_id` | continues a stored response (its input and output, not its instructions). Responses with `store` (default true) are kept in memory: the last 256, at most 64 MiB, until the server restarts. Unknown: 400 `previous_response_not_found` |
-| `store` | false: not kept (codex sends false and resends the items) |
+| `store` | false: not kept (codex sends false and resends the items). A stored response is readable by anyone who holds its id (and, with `--api-key`, the key): ids are `resp-` + 128 random bits, unguessable, but not tied to a client; send `store: false` for conversations other key holders must not continue |
 | `text.format` | `text` only; `json_schema` / `json_object`: 400 |
 | `background`, `conversation`, `prompt`, `top_logprobs` > 0 | 400 |
 | `parallel_tool_calls`, `metadata`, `user`, `include`, `truncation`, `prompt_cache_key`, `service_tier`, `safety_identifier`, `client_metadata`, `max_tool_calls`, `stream_options` | accepted; `metadata`, `user` and `parallel_tool_calls` are echoed, the rest ignored (`truncation` is always `disabled`: a prompt past the context is a 400) |
@@ -47,12 +47,15 @@ The response object: `id` (`resp-...`), `object: "response"`, `created_at`, `sta
 (`completed`; `incomplete` with `incomplete_details.reason: "max_output_tokens"` when cut
 off by the limit or the context; `failed` on an engine error), `model`, `output`, `usage`
 (`input_tokens`, `input_tokens_details.cached_tokens`, `output_tokens`,
-`output_tokens_details.reasoning_tokens` (always 0: not counted separately),
+`output_tokens_details.reasoning_tokens` (the reasoning text encoded again, plus the
+`<think>`/`</think>` markers: the engine reports text, not tokens per channel, so this equals
+the generated count unless the model wrote a split the tokenizer wouldn't make),
 `total_tokens`), `system_fingerprint`, and the echoed request fields.
 
 `output` is `[reasoning?, message?, function_call...]`: a `reasoning` item (`summary: []`,
 `content: [{"type": "reasoning_text", ...}]`) when the model thought, a `message` item
-(`output_text` part) when there is text (or nothing else), then one `function_call` item per
+(`output_text` part; `status` `incomplete` when the response is) when there is text (or
+nothing else), then one `function_call` item per
 call (`id` `fc_...`, `call_id` `call_...`, `arguments` a JSON string). Sent back as input,
 these render as the chat-completions history of the same reply.
 
@@ -68,7 +71,17 @@ when the reply ends, after the message item (the parser decides each call whole)
 
 ## The ollama API
 
-Field names follow ollama's `docs/api.md`. Errors are `{"error": "..."}`.
+Field names follow ollama's `docs/api.md`. Errors from the routes are `{"error": "..."}`
+(also the 503s: loading, queue full, shutting down). Errors the HTTP layer answers before
+routing (401 without the key, 413, 431, malformed requests) are in OpenAI's shape on every
+path.
+
+**Sampling defaults are axon's, not ollama's.** ollama fills in `top_k` 40, `top_p` 0.9,
+`repeat_penalty` 1.1 and `num_ctx` 2048 (plus a Modelfile's `PARAMETER`s) when a request
+leaves them out; axon doesn't. An option left out takes `axon serve`'s flag (`--temp`,
+`--top-k`, `--top-p`, `--repeat-penalty`, ...; their defaults: `axon chat`'s, with the repeat
+penalty off), and the context is the server's `--ctx`. To get ollama's sampling, send those
+values in `options`.
 
 `POST /api/chat`
 
@@ -95,6 +108,12 @@ aren't a JSON object gets `{}`. No messages: ollama's load request, answered at 
 `/v1/completions` takes it, no template); `stream`, `think`, `options` as above; the text
 is `response` (reasoning: `thinking`). `suffix`, `template`, `context` and `images`: 400.
 No prompt: the load request.
+
+While the model loads, `GET /`, `/api/version`, `/api/tags` and `/api/ps` all answer 200:
+`/api/tags` lists the model from its file (size, date; no digest, family or size label
+yet), and `/api/ps` lists nothing (no model is loaded yet), as ollama does with a model on
+disk and none in memory. `/api/show`, `/api/chat` and `/api/generate` are 503 until it has
+loaded.
 
 `GET /api/tags` and `/api/ps`: the model under each of its names, with `size` (the file),
 `digest` (the identity's model digest), `modified_at` (the file's), `details` (`format`

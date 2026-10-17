@@ -83,7 +83,8 @@ pub fn methods(path: &str) -> Option<&'static str> {
 /// Whether `method` on `path` is one of this module's routes.
 pub fn serves(method: &str, path: &str) -> bool {
     methods(path).is_some_and(|m| {
-        method != "OPTIONS" && (m.contains(method) || (method == "HEAD" && m.contains("GET")))
+        let has = |x: &str| m.split(", ").any(|y| y == x);
+        method != "OPTIONS" && (has(method) || (method == "HEAD" && has("GET")))
     })
 }
 
@@ -127,17 +128,28 @@ pub(super) fn route(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared) -> io::
         }
         _ => {}
     }
+    // While the model loads, the four GET routes still answer (`/` and
+    // /api/version as ever; /api/tags lists the model from its file;
+    // /api/ps lists nothing: no model is loaded yet), as ollama does with
+    // a model on disk and none in memory. The rest are 503.
+    let loaded = sh.model.get();
+    match (req.path.as_str(), loaded) {
+        ("/api/tags", _) => {
+            let i = Info::of(sh, loaded);
+            let models: Vec<Value> = sh.names().iter().map(|n| i.tag(n)).collect();
+            return json_reply(c, 200, &json!({ "models": models }).to_string(), keep);
+        }
+        ("/api/ps", None) => {
+            return json_reply(c, 200, &json!({ "models": [] }).to_string(), keep);
+        }
+        _ => {}
+    }
     let arrived = Instant::now();
-    let Some(m) = sh.model.get() else {
+    let Some(m) = loaded else {
         return reply(c, super::loading());
     };
-    let info = || Info::of(sh, m);
+    let info = || Info::of(sh, Some(m));
     match req.path.as_str() {
-        "/api/tags" => {
-            let i = info();
-            let models: Vec<Value> = sh.names().iter().map(|n| i.tag(n)).collect();
-            json_reply(c, 200, &json!({ "models": models }).to_string(), keep)
-        }
         "/api/ps" => {
             let i = info();
             let models: Vec<Value> = sh
@@ -234,7 +246,8 @@ struct Info {
 }
 
 impl Info {
-    fn of(sh: &Shared, m: &super::Loaded) -> Info {
+    /// `m`: None while the model loads (then only the file's facts).
+    fn of(sh: &Shared, m: Option<&super::Loaded>) -> Info {
         let meta = std::fs::metadata(&sh.path).ok();
         let modified = meta
             .as_ref()
@@ -242,10 +255,7 @@ impl Info {
             .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
             .map_or_else(rfc3339_now, |d| rfc3339(d.as_secs(), 0));
         let field = |k: &str| {
-            m.identity
-                .fields
-                .iter()
-                .find(|(n, _)| *n == k)
+            m.and_then(|m| m.identity.fields.iter().find(|(n, _)| *n == k))
                 .map(|(_, v)| v.clone())
                 .unwrap_or_default()
         };
@@ -259,8 +269,8 @@ impl Info {
         Info {
             size: meta.map_or(0, |m| m.len()),
             digest: field("model"),
-            arch: m.arch.clone(),
-            params: m.params,
+            arch: m.map_or(String::new(), |m| m.arch.clone()),
+            params: m.map_or(0, |m| m.params),
             quant,
             gpu: field("backend").contains("cuda"),
             modified,
@@ -271,11 +281,18 @@ impl Info {
         let p = self.params as f64;
         let size = if p >= 1e9 {
             format!("{:.1}B", p / 1e9)
-        } else {
+        } else if p > 0.0 {
             format!("{:.0}M", p / 1e6)
+        } else {
+            // Still loading: not known yet.
+            String::new()
         };
+        let families: Vec<&str> = Some(self.arch.as_str())
+            .filter(|a| !a.is_empty())
+            .into_iter()
+            .collect();
         json!({"parent_model": "", "format": "gguf", "family": self.arch,
-               "families": [self.arch], "parameter_size": size,
+               "families": families, "parameter_size": size,
                "quantization_level": self.quant})
     }
 
@@ -959,6 +976,9 @@ mod tests {
         assert!(serves("GET", "/api/tags") && serves("HEAD", "/"));
         assert!(serves("POST", "/api/chat") && !serves("GET", "/api/chat"));
         assert!(!serves("OPTIONS", "/api/chat") && !serves("GET", "/api/nope"));
+        // Exact methods, not substrings of the list.
+        assert!(!serves("GE", "/api/tags") && !serves("POS", "/api/chat") && !serves("T", "/"));
+        assert!(!serves("ET, HEAD", "/api/tags"));
         assert_eq!(base_name("a:latest"), "a");
         assert_eq!(base_name("a:7b"), "a:7b");
     }
