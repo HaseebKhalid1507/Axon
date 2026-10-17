@@ -103,8 +103,8 @@ the GPU paths below are what's left. llama.cpp's `--cpu-moe` has made
    attention sinks, and an alternating 128-token sliding window. 60–90 builder-hours, medium bits risk (a new quant
    type, and sinks in every attention kernel); gates as item 1. ESTIMATED ~45 tok/s decode with every expert on the
    CPU ([research-bigmodels](research/research-bigmodels.md) §4.3).
-3. **Later, not scheduled:** DeepSeek-class models (MLA attention) and Qwen3-235B-A22B on multi-GPU pods over the
-   pipeline parallel from #34. No scope or estimates exist for these yet.
+3. **Later:** the 100B–1T models (Qwen3-235B, Qwen3-Coder-480B, DeepSeek V3, Kimi K2). See
+   [Frontier models](#frontier-models-100b-to-1t), below.
 
 **Ordering.** MoE is rank 7 in r10's merged ranking. It comes after C2 (one cache instead of N+1, rank 2) and
 paged KV (rank 5), because that ranking puts what unblocks an agent swarm on a 12 GB card first. In r10's
@@ -119,11 +119,83 @@ already documents.
 **Not planned for MoE** ([research-bigmodels](research/research-bigmodels.md) §6):
 - Lossy shortcuts, which change the model's output: expert deferral, mixed-precision or low-rank stand-ins for
   missed experts, and pre-gated routing (that one also needs fine-tuning).
-- Loading experts from disk on demand. Both target models fit in RAM.
+- Loading experts from disk on demand. Both target models fit in RAM; for models that don't, see
+  [Frontier models](#frontier-models-100b-to-1t) item 4.
 - Attention on the CPU. The KV cache belongs on the 648 GB/s side.
 
 Sources: [r10-scope](research/r10-scope.md) §1.3–1.4, §5–6; [research-bigmodels](research/research-bigmodels.md)
 §4–6; [design/multi-gpu.md](design/multi-gpu.md).
+
+## Frontier models (100B to 1T)
+
+**Why it's here.** People judge an engine's top end by the largest open models. None of them runs on Parabellum
+today. Two of them need new architecture work, and none fits the machine (30 GB RAM, 12 GB VRAM, ~49 GB of free
+disk). This section is the plan for when building it makes sense: what's missing, in what order, and what should
+trigger each step. Nothing here is scheduled.
+
+**The models.** Sizes are ≈ 4.8 bits per weight × parameters, the Q4_K_M average (calculated; none downloaded).
+"Read per token" is the weight bytes one decode step reads at that size.
+
+| model | kind | Q4_K_M | read per token | in Axon today | missing |
+|---|---|---|---|---|---|
+| Qwen3-235B-A22B | MoE | ≈ 141 GB | ≈ 13 GB | `qwen3moe`, CPU only (#63) | experts on the GPU (MoE stages 2–3); a box with ≥ 160 GB RAM |
+| Qwen3-Coder-480B-A35B | MoE | ≈ 288 GB | ≈ 21 GB | `qwen3moe`, CPU only | as above, ≥ 320 GB RAM |
+| Llama 3.1 405B | dense | ≈ 243 GB | ≈ 243 GB | `llama`; pipeline parallel (#34) should run it on a 4×80 GB pod (untested) | tensor parallel, to make it fast |
+| DeepSeek V3 / R1 (671B, 37B active) | MoE + MLA | ≈ 403 GB | ≈ 22 GB | refused | MLA attention, DeepSeek routing, ≥ 450 GB RAM or a GPU node |
+| Kimi K2 (1T, 32B active) | DeepSeek V3 architecture | ≈ 600 GB | ≈ 19 GB | refused | same as DeepSeek, ≥ 650 GB |
+
+**What's missing, in build order.**
+
+1. **Experts on the GPU.** MoE stages 2–3, already planned ([Mixture-of-experts](#mixture-of-experts), above).
+   Three of the five rows depend on it, and so do both DeepSeek-architecture rows once item 2 exists.
+   *Trigger:* already next in the MoE plan.
+2. **MLA attention and DeepSeek routing** (the `deepseek2` GGUF architecture, which covers V2, V3 and Kimi K2).
+   MLA caches one compressed latent per token per layer (576 values at DeepSeek V3's shapes) instead of full K and
+   V. Decode can fold the up-projections into the query ("absorbed" form), which reads far less KV per step.
+   The routing adds shared experts, sigmoid scores with a per-expert bias, and a grouped top-k.
+   - **Exactness:** the absorbed and expanded forms round differently, so decode, prefill and verify must pick one
+     order and keep it, the same decode == prefill rule as every other kernel.
+   - **Dev model that fits Parabellum:** DeepSeek-V2-Lite (16B total, 2.4B active, MLA, `deepseek2`; ≈ 10 GB at
+     Q4_K_M). It plays the role the 3-layer Pruned-2B played for MoE: every kernel and layout at small scale,
+     checkable against llama.cpp. DeepSeek V3 and Kimi K2 then run on a pod.
+   - **Gates:** logits vs llama.cpp within its own CPU/CUDA spread on V2-Lite; decode == prefill == verify; tok/s vs
+     llama.cpp on the same box.
+   - **Cost:** no estimate yet. Scope it with a design note first, as r11 did for MoE.
+   - *Trigger:* MoE stage 3 is done, and someone asks for DeepSeek-class models (or they become the default for
+     people running models locally).
+3. **Tensor parallel over PCIe, with fixed-order reductions.** Today's multi-GPU is pipeline parallel: the GPUs
+   take turns, so one stream decodes at one GPU's bandwidth over the whole model. Splitting every layer across the
+   GPUs lets them all read at once. The all-reduce has to sum in a fixed order (no ring, no atomics) to keep the
+   exactness contract; that costs speed against NCCL, and it is why "beat vLLM on NVLink" stays under
+   [Not planned](#not-planned-and-why).
+   - ESTIMATED for 405B on 4×H100: pipeline ≤ 14 tok/s (243 GB ÷ 3.35 TB/s), tensor parallel up to ~4× that before
+     the all-reduce cost.
+   - *Trigger:* multi-GPU stage 1b (Scale item 9) is done, and a measured 70B or 405B pipeline run shows decode is
+     the gap.
+4. **Experts from host RAM or disk, cached on the GPU.** For MoE models bigger than the box: hot experts stay on
+   the GPU, the rest in pinned RAM, the cold tail on NVMe. Exact by construction, because caching changes where an
+   expert is read from, never which experts run. Prior work: MoE-Infinity, MoE-CORE, MawForge
+   ([research-bigmodels](research/research-bigmodels.md) §2.2).
+   - ESTIMATED on Parabellum from NVMe alone (~5 GB/s): Qwen3-235B ≈ 0.4 tok/s. That's not useful, so this is a
+     pod and workstation feature, not a laptop one.
+   - *Trigger:* after item 1, when a target model is bigger than the machine's RAM.
+5. **Hardware and disk.** Parabellum can't hold any of these files. Full-size gates need pods with large disks; a
+   network volume means each file downloads once.
+   - *Trigger:* whenever a step above needs a full-size gate.
+
+**Why this order.** Item 1 is already planned and unlocks most of the table. Item 2 unlocks the two biggest
+models. Item 3 matters for dense giants. Item 4 only matters past RAM.
+
+**Decode ceilings, batch 1** (ESTIMATED: bandwidth ÷ bytes read per token; real numbers land below these):
+
+| model | where | ceiling |
+|---|---|---|
+| Qwen3-235B-A22B | Parabellum, weights from NVMe (~5 GB/s) | ≈ 0.4 tok/s |
+| Llama 3.1 405B | Parabellum, weights from NVMe | ≈ 0.02 tok/s (one token per ~50 s) |
+| Qwen3-235B-A22B | server, experts on CPU, assumed ~300 GB/s RAM | ≈ 20 tok/s |
+| DeepSeek V3 | server, experts on CPU, assumed ~300 GB/s RAM | ≈ 14 tok/s |
+| Llama 3.1 405B | 4×H100, pipeline parallel (today's code) | ≤ 14 tok/s |
+| Llama 3.1 405B | 4×H100, tensor parallel (item 3) | up to ~50 tok/s before the all-reduce cost |
 
 ## Not planned, and why
 
@@ -146,4 +218,5 @@ Sources: [r10-scope](research/r10-scope.md) §1.3–1.4, §5–6; [research-bigm
   long-context attention round, as an experiment with a KL gate.
 - **Beating vLLM tensor parallel on NVLink H100/A100 for one stream.** Their all-reduce is ~5 µs there
   and their kernels are mature. Axon's multi-GPU case is PCIe consumer boxes and reproducible output
-  ([design/multi-gpu.md](design/multi-gpu.md) §4).
+  ([design/multi-gpu.md](design/multi-gpu.md) §4). Exact tensor parallel with fixed-order reductions is planned
+  ([Frontier models](#frontier-models-100b-to-1t) item 3); it trades some speed for that contract.
