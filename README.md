@@ -348,7 +348,9 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
   affected. A stopped one can't be told from a slow one until its receive buffer is full, so
   the clock starts only then: on Linux (x86, arm, riscv64, s390x, loongarch64), once the
   unacknowledged bytes stop moving for MS ms. With a default ~128 KiB receive window that is
-  roughly 500+ tokens of SSE after the client stopped (DEFAULT_RESULT); a reply shorter than
+  roughly 500+ tokens of SSE after the client stopped (MEASURED, bella CPU, 0.5B,
+  `--slot-idle-ms 1000`, a client with default buffers: 792 tokens and 6.3 s from its last
+  read to the slot freed; with a 4 KiB `SO_RCVBUF`, 202 tokens and 1.7 s); a reply shorter than
   that just finishes into the buffer. Elsewhere only a write blocked for MS ms (at most the
   60 s write timeout) is detected, after the server's send buffer fills too, and stderr says
   so at startup.
