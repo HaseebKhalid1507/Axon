@@ -56,7 +56,7 @@ const MAX_GRAPHS: usize = 64;
 
 impl<'g> CudaQwen2<'g> {
     /// VRAM a pool of `slots` x `ctx` (`pool_bytes_kv`) and the
-    /// single-request cache, a view of slot 0 (`slot_view`: its scratch,
+    /// single-request cache, a view of a slot (`slot_view`: its scratch,
     /// no KV of its own), take with caches of type `kv` (the model's, or
     /// serve's `--kv q8` hint).
     pub fn serve_bytes_kv(&self, kv: CacheKv, slots: usize, ctx: usize) -> usize {
@@ -67,7 +67,8 @@ impl<'g> CudaQwen2<'g> {
     /// A cache of slot `slot`'s rows of `p` (`Lm`'s calls on it read and
     /// write that slot's KV bytes, its own scratch and graphs beside), or
     /// why there's no room for its scratch. The single-request path of
-    /// `axon serve` runs in slot 0 this way: no cache beside the pool, and
+    /// `axon serve` runs in a slot this way (`retarget_view` picks which,
+    /// per request): no cache beside the pool, and
     /// its rows are the slot's for the batch to take over (`adopt_cache`
     /// copies nothing).
     pub fn slot_view(&self, p: &CudaPool<'g>, slot: usize) -> Result<CudaCache<'g>, String> {
@@ -356,6 +357,26 @@ impl<'g> CudaQwen2<'g> {
         s.host_s.copy_to(&s.s, 0, need * 4)
     }
 
+    /// Point `c`, a view of `p` (`slot_view`), at slot `slot`'s rows. Its
+    /// captured steps hold the old slot's addresses: they go (the next
+    /// steps are captured again; the same kernels, so the same bits).
+    pub fn retarget_view(
+        &self,
+        p: &CudaPool<'g>,
+        c: &mut CudaCache<'g>,
+        slot: usize,
+    ) -> Result<(), String> {
+        if !Rc::ptr_eq(&c.kv, &p.c.kv) || slot >= p.slots {
+            return Err(format!("retarget: not a view of this pool, or slot {slot}"));
+        }
+        let row0 = slot * p.ctx;
+        if c.row0 != row0 {
+            c.row0 = row0;
+            c.graph = Default::default();
+        }
+        Ok(())
+    }
+
     /// `BatchLm::adopt`: positions 0..n of `src` (a cache of this model,
     /// the pool's KV type) into slot `slot`, enqueued; the bytes copied (0:
     /// `src` is that slot's view).
@@ -441,6 +462,15 @@ impl<'g> BatchLm for CudaQwen2<'g> {
 
     fn slot_cache(&self, pool: &CudaPool<'g>, slot: usize) -> Result<CudaCache<'g>, String> {
         self.slot_view(pool, slot)
+    }
+
+    fn move_slot_cache(
+        &self,
+        pool: &CudaPool<'g>,
+        cache: &mut CudaCache<'g>,
+        slot: usize,
+    ) -> Result<(), String> {
+        self.retarget_view(pool, cache, slot)
     }
 
     fn adopt(
@@ -893,6 +923,7 @@ mod tests {
                 assert!(slot_bytes(&net, &p.c, 2 * ctx, 30) == other_kv);
                 let mut row = Vec::new();
                 net.save_kv(&plain, 0, 90, &mut row).unwrap();
+                let mut moved: Option<CudaCache> = None;
                 for slot in [0, 1] {
                     let what = format!("{} {kv:?} slot {slot}", m.arch);
                     // Every other slot's rows, whole, before the view runs.
@@ -900,7 +931,15 @@ mod tests {
                         .filter(|&o| o != slot)
                         .map(|o| (o, slot_bytes(&net, &p.c, o * ctx, ctx)))
                         .collect();
-                    let mut c = net.slot_view(&p, slot).unwrap();
+                    // Slot 0's view, then the same view pointed at slot 1
+                    // (`retarget_view`: its graphs captured again).
+                    let mut c = match moved.take() {
+                        None => net.slot_view(&p, slot).unwrap(),
+                        Some(mut c) => {
+                            net.retarget_view(&p, &mut c, slot).unwrap();
+                            c
+                        }
+                    };
                     assert_eq!(run(&net, &prompt, &mut c), want, "{what}: picks");
                     assert!(
                         slot_bytes(&net, &p.c, slot * ctx, 90) == want_kv,
@@ -934,6 +973,7 @@ mod tests {
                             .is_err(),
                         "{what}: load past the slot"
                     );
+                    moved = Some(c);
                 }
                 assert!(net.slot_view(&p, slots).is_err());
                 // A plain cache's adopt copies its rows (what the view's

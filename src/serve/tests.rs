@@ -2053,14 +2053,21 @@ fn serve_chunked_prefill_matches_solo() {
     };
     for (path, kv, chunk, ms) in configs {
         let gemma = path.to_string_lossy().contains("gemma");
-        let s = server_with(path.to_str().unwrap(), Device::Cuda, |o| {
+        let opts = |o: &mut Opts| {
             o.kv = kv;
             o.parallel = 4;
             o.max_draft = 3;
             o.prefill_chunk = chunk;
             o.prefill_ms = ms;
-        });
+        };
+        let s = server_with(path.to_str().unwrap(), Device::Cuda, opts);
         let a = s.addr;
+        // The replies alone come from a second server: a request alone runs
+        // in a pool slot, and on this one it would leave its prompt's rows
+        // for the batched run to reuse (then nothing is left to prefill in
+        // chunks, the thing this test measures).
+        let refs = server_with(path.to_str().unwrap(), Device::Cuda, opts);
+        let ra = refs.addr;
         for (round, tail) in ["", "And one more line about a dog. "]
             .into_iter()
             .enumerate()
@@ -2068,7 +2075,7 @@ fn serve_chunked_prefill_matches_solo() {
             let long = longs(tail);
             let solo_dec: Vec<_> = decoders
                 .iter()
-                .map(|b| completion(&post(a, "/v1/completions", b.clone())))
+                .map(|b| completion(&post(ra, "/v1/completions", b.clone())))
                 .collect();
             // (Gemma's raw completions may end early: then the "decoded
             // meanwhile" check is skipped.)
@@ -2079,7 +2086,7 @@ fn serve_chunked_prefill_matches_solo() {
             );
             let solo_long: Vec<_> = long
                 .iter()
-                .map(|b| completion(&post(a, "/v1/completions", b.clone())))
+                .map(|b| completion(&post(ra, "/v1/completions", b.clone())))
                 .collect();
             let what = format!(
                 "{} {kv:?} chunk {chunk} ms {ms} round {round}",
@@ -2167,12 +2174,17 @@ fn serve_cancel_mid_prefill_reuses_rows() {
     };
     // One token per chunk, a decode step between chunks: the prompt takes
     // over a second to feed, longer than a disconnect takes to notice.
-    let s = server_with(p.to_str().unwrap(), Device::Cuda, |o| {
+    let opts = |o: &mut Opts| {
         o.parallel = 4;
         o.prefill_chunk = 1;
         o.prefill_ms = 0;
-    });
+    };
+    let s = server_with(p.to_str().unwrap(), Device::Cuda, opts);
     let a = s.addr;
+    // The reply alone from a second server: on this one a request alone
+    // runs in a pool slot and would leave the whole prompt's rows behind,
+    // not only the cancelled prompt's partial ones this test is about.
+    let refs = server_with(p.to_str().unwrap(), Device::Cuda, opts);
     let text: String = (0..120)
         .map(|i| {
             format!(
@@ -2185,7 +2197,7 @@ fn serve_cancel_mid_prefill_reuses_rows() {
     let decoder =
         json!({"prompt": "The history of the Roman Empire", "max_tokens": 1500, "temperature": 0});
     let next = json!({"prompt": format!("{text}Total:"), "max_tokens": 30, "temperature": 0});
-    let solo = post(a, "/v1/completions", next.clone()).json();
+    let solo = post(refs.addr, "/v1/completions", next.clone()).json();
     let solo_text = solo["choices"][0]["text"].clone();
     std::thread::scope(|sc| {
         let g = &s.generated;
@@ -2885,8 +2897,9 @@ fn serve_slot_idle_frees_a_stalled_stream() {
     }
 }
 
-/// GET /slots over a pool (GPU): one entry per slot; a request alone runs
-/// in slot 0 (busy, counted once) and leaves its prefix there; two
+/// GET /slots over a pool (GPU): one entry per slot; a request alone on a
+/// fresh server runs in slot 0 (every slot unused: the lowest; busy,
+/// counted once) and leaves its prefix there; two
 /// concurrent streams in two busy slots with their ids, freed when they
 /// leave.
 #[test]
@@ -3199,17 +3212,18 @@ fn completion_usage(a: SocketAddr, prompt: &str, n: usize) -> (Value, u64, u64, 
     )
 }
 
-/// The request running alone runs in slot 0 (`Batch::lend_solo` /
-/// `end_solo`), so slot 0's rows are shared by the batch and the solo
-/// path, and each reuses what the other left there:
-/// (a) a request the batch admits into slot 0 (slot 1 busy), then a request
+/// The request running alone runs in a slot (`Batch::lend_solo`: the one
+/// holding its longest prefix, else the least recently used), so slots are
+/// shared by the batch and the solo path, and each reuses what the other
+/// left there:
+/// (a) a request the batch admits (the other slot busy), then a request
 ///     alone sharing its prompt's prefix: cached_tokens is that prefix, and
 ///     the reply is the one it gets alone;
 /// (b) a request alone that hands over to the batch partway (a second one
 ///     arrives) and finishes there, then a request alone sharing its
 ///     prefix: the same.
 #[test]
-fn serve_solo_and_batch_share_slot_0() {
+fn serve_solo_and_batch_share_slots() {
     let Some(_) = crate::testutil::gpu() else {
         return;
     };
@@ -3249,31 +3263,31 @@ fn serve_solo_and_batch_share_slot_0() {
     let (pre_a, pre_b) = (prefix(&shared_a), prefix(&shared_b));
 
     std::thread::scope(|sc| {
-        // (b) X alone (slot 0); Y arrives after X's 20th token: X hands
-        // over and finishes in the batch, Y decodes on in slot 1.
+        // (b) X alone (in a slot); Y arrives after X's 20th token: X hands
+        // over and finishes in the batch, Y decodes on in the other slot.
         let g0 = g.load(Ordering::Relaxed);
         let x = sc.spawn(|| completion_usage(a, &x_prompt, 200));
         wait_for("X decoding alone", || g.load(Ordering::Relaxed) >= g0 + 20);
         let y = sc.spawn(|| completion_usage(a, decoder, 1000));
         let x = x.join().unwrap();
         assert_eq!(x.0, x_ref.0, "X, handed over: its reply alone");
-        // (a) Z arrives with Y running: the batch admits it into slot 0
+        // (a) Z arrives with Y running: the batch admits it into X's slot
         // (the only free one).
         completion_usage(a, &z_prompt, 16);
         assert!(!y.is_finished(), "Y still running while Z was admitted");
         y.join().unwrap();
     });
-    // (a) W alone: slot 0 holds Z's prompt.
+    // (a) W alone: Z's slot holds Z's prompt.
     let w = completion_usage(a, &w_prompt, 24);
-    assert_eq!(w.0, w_ref.0, "W after Z in slot 0: its reply alone");
+    assert_eq!(w.0, w_ref.0, "W after Z in its slot: its reply alone");
     assert!(
         w.1 + 4 >= pre_a && w.1 <= w.2,
         "W reuses Z's prefix: {} cached of {} (prefix {pre_a})",
         w.1,
         w.2
     );
-    // (b) slot 0 now holds W; X's rows were overwritten. Run X's prefix
-    // again through a hand-over, then V alone reuses it.
+    // (b) Z's slot now holds W; X's rows there were overwritten. Run X's
+    // prefix again through a hand-over, then V alone reuses it.
     std::thread::scope(|sc| {
         let g0 = g.load(Ordering::Relaxed);
         let x = sc.spawn(|| completion_usage(a, &x_prompt, 200));
@@ -3282,7 +3296,7 @@ fn serve_solo_and_batch_share_slot_0() {
         assert_eq!(x.join().unwrap().0, x_ref.0, "X again, handed over");
         y.join().unwrap();
     });
-    // Y (40 tokens) may outlast X, in slot 1: slot 0 still holds X's rows.
+    // Y (40 tokens) may outlast X, in the other slot: X's slot holds its rows.
     let v = completion_usage(a, &v_prompt, 24);
     assert_eq!(v.0, v_ref.0, "V after X's hand-over: its reply alone");
     assert!(

@@ -1,4 +1,4 @@
-# serve: no N+1 cache, the single-request path runs in slot 0  (PR #60)
+# serve: no N+1 cache, the single-request path runs in a slot  (PR #60)
 
 - Date: 2026-10-17. Branch: feat/serve-one-cache. Base: main cf68e9d (after #57). Status: open (PR #60)
 - Pick / design: r10 round C2 (specs/r10-scope.md §4.4, §4.6 row C2; roadmap Scale #2).
@@ -66,16 +66,15 @@ Within noise (round spread ~±2 tok/s). Every request's text was identical acros
 ## Not done / notes
 - The view's scratch (attention partials, batch buffers; ~0.4 GiB on 7B at 32k) is still separate from the
   pool's; sharing it is possible but touches the batch passes. KV was the slot's worth.
-- The solo path always uses slot 0. A request alone whose prefix sits in another slot re-prefills (main kept
-  the solo cache's own history instead; same bits either way: cache reuse == fresh prefill).
+- Prefix reuse vs main: superseded by the "slot choice" section below (the solo path no longer sits in slot 0).
 - Q6_K prefill copy at `--kv q8 --ctx 32768`: not made with 5 slots ("0.79 GiB free beside the caches"), and
   not made on main's 4 slots either (same note, 1017-042200-5fdc). At f16 32768 it is made with 2 slots.
 
 ## Review round 1 (shady, 2a4eed6: SHIP-AFTER-FIXES)
-- Slot choice (`engine::best_slot`): ties now go to the highest free slot, so slot 0 is taken last. At first
-  ties went to slot 0, which let any batched admit with no prefix match evict the request-alone's prefix there.
-  On main the solo cache was out of reach of batch traffic; now batch traffic takes slot 0 only when every
-  other slot is busy or slot 0 holds the longest match. Unit test `best_slot_prefers_prefix_then_keeps_slot_0`.
+- Slot choice: first "ties go to the highest slot, slot 0 last" (shady's suggestion). That kept the solo prefix
+  from batch traffic, but the reverse broke: under load slot 0 was the last one handed out, so a batched
+  conversation landed there and the next request alone overwrote it. `serve_chunked_prefill_matches_solo`
+  caught it (avante, 1017-065753-7b93: "F16 chunk 16 ms 20 round 1: 0 of 2046 cached"). Superseded below.
 - kvsave rows of a view (`kvio::Rows::len`): `save_kv`/`load_kv` on a slot view are bounded by the slot
   (`row0 + max_ctx`), not the pool's rows, so they can't reach the next slot. Tested in
   `slot_view_matches_a_cache` (save of 0..ctx works, ..ctx+1 and a load past the slot are refused; a view's
@@ -84,7 +83,7 @@ Within noise (round spread ~±2 tok/s). Every request's text was identical acros
   in `pool_steps_match_solo_in_any_order`); the copy path refuses a source with `row0 != 0`.
 - `slot_view_matches_a_cache` also asserts its verify pass rejected a guess, and that every other slot's rows
   are byte-identical before and after a view runs.
-- New serve test `serve_solo_and_batch_share_slot_0`, 2 slots: (a) a request the batch admits into slot 0, then
+- New serve test `serve_solo_and_batch_share_slots`, 2 slots: (a) a request the batch admits, then
   a request alone sharing its prefix: cached_tokens covers the prefix and the reply == alone; (b) alone ->
   hand-over -> finishes batched -> a request alone sharing its prefix: the same.
 - `layer_kv` (pipeline.rs, tests) documents that on a view it dumps the whole pool.
@@ -97,3 +96,20 @@ Within noise (round spread ~±2 tok/s). Every request's text was identical acros
   `serve_cuda_slots` now runs a request alone first (slot 0 busy, slot 1 free, 1 busy / 1 free in /metrics, its
   prefix held in slot 0 after); `serve_metrics_slots_max_prompt` and the slot-idle test read `slots[0]`; the
   `slot_counts` unit test covers the fold. README and #61's log entry (an Update line) say so.
+
+## Round 2: the solo path follows the prefix (any slot), LRU on ties
+Pinning the solo path to slot 0 means one slot is shared by two users of the cache, so either the batch can evict
+the solo prefix or the solo path can evict a batched conversation. Neither is "not worse than main". So:
+- The single-request cache is still one view (one set of scratch), but it is pointed at a slot per request:
+  `Batch::lend_solo(prompt, cache)` picks the slot as `admit` does and calls `BatchLm::move_slot_cache`
+  (`CudaQwen2::retarget_view`: `row0` changes, and the view's captured graphs are dropped, because they hold the
+  old slot's addresses. The next steps are recaptured, with the same kernels and so the same bits). A request alone
+  that continues a conversation lands in the conversation's slot: no recapture.
+- `engine::best_slot`: the longest shared prefix, then the least recently used free slot (`Batch::used`, stamped
+  on admit, hand-over and lend), then the lowest. Unit test `best_slot_prefers_prefix_then_least_recent`.
+- So a request alone reuses a prefix in any slot, including one a batched request left (main's solo cache only
+  had the last request alone's), and a new conversation evicts the one idle the longest. Main's N+1th cache was a
+  separate place for the last request alone, which an LRU over N slots approximates with one cache less.
+- `/slots`: `Engine::run` publishes the slot it runs in (`Metrics::publish_slot(i, ..)`).
+- `slot_view_matches_a_cache` points slot 0's view at slot 1 (`retarget_view`) for its second half: same picks
+  and KV bytes after the recapture.

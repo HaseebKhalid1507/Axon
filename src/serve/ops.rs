@@ -153,8 +153,8 @@ impl SlotState {
 pub struct SlotsView {
     /// The slots: the batch's pool, or (one request at a time) the one
     /// cache as slot 0 (empty until a request ran: a free slot 0). A
-    /// request running alone (`Engine::job`) runs in slot 0 either way:
-    /// with a pool its cache is a view of slot 0's rows.
+    /// request running alone (`Engine::job`) runs in one of them: with a
+    /// pool its cache is a view of a slot's rows (`Batch::lend_solo`).
     pub pool: Vec<SlotState>,
 }
 
@@ -212,13 +212,13 @@ impl Metrics {
         lock(&self.slots).pool = pool;
     }
 
-    /// Slot 0's state: where a request running alone runs.
-    pub fn publish_slot0(&self, s: SlotState) {
+    /// Slot `i`'s state: where a request running alone runs.
+    pub fn publish_slot(&self, i: usize, s: SlotState) {
         let mut v = lock(&self.slots);
-        match v.pool.first_mut() {
-            Some(s0) => *s0 = s,
-            None => v.pool.push(s),
+        if v.pool.len() <= i {
+            v.pool.resize(i + 1, SlotState::default());
         }
+        v.pool[i] = s;
     }
 
     /// Requests waiting for a slot: those in flight less those running.
@@ -482,7 +482,7 @@ mod tests {
         assert_eq!(v.counts(), (1, 0));
         v.pool = vec![SlotState::default(); 4];
         assert_eq!(v.counts(), (4, 0));
-        // A request alone runs in slot 0: one busy, not one more.
+        // A request alone runs in a slot: one busy, not one more.
         v.pool[0].busy = true;
         assert_eq!(v.counts(), (4, 1));
         v.pool[0].busy = false;
@@ -496,15 +496,27 @@ mod tests {
         };
         assert_eq!(slot(&m).as_array().unwrap().len(), 1);
         assert_eq!(slot(&m)[0]["busy"], false);
-        m.publish_slot0(SlotState {
-            held: 9,
-            busy: true,
-            request: None,
-        });
+        m.publish_slot(
+            0,
+            SlotState {
+                held: 9,
+                busy: true,
+                request: None,
+            },
+        );
         assert_eq!(lock(&m.slots).counts(), (1, 1));
         assert_eq!(slot(&m)[0]["held_tokens"], 9);
         m.publish_pool(vec![SlotState::default(); 3]);
-        m.publish_slot0(SlotState::default());
+        m.publish_slot(
+            2,
+            SlotState {
+                held: 5,
+                busy: true,
+                request: None,
+            },
+        );
         assert_eq!(slot(&m).as_array().unwrap().len(), 3);
+        assert_eq!(slot(&m)[2]["held_tokens"], 5);
+        assert_eq!(lock(&m.slots).counts(), (3, 1));
     }
 }

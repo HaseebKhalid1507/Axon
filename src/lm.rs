@@ -178,6 +178,14 @@ pub trait BatchLm: Lm {
     /// slot copies nothing.
     fn slot_cache(&self, pool: &Self::Pool, slot: usize) -> Result<Self::Cache, String>;
 
+    /// Point `cache`, a `slot_cache` of `pool`, at slot `slot` instead.
+    fn move_slot_cache(
+        &self,
+        pool: &Self::Pool,
+        cache: &mut Self::Cache,
+        slot: usize,
+    ) -> Result<(), String>;
+
     /// Copy positions 0..n of `cache` into slot `slot`.
     fn adopt(
         &self,
@@ -677,6 +685,18 @@ impl BatchLm for Backend<'_> {
                 .slot_view(pool, slot)
                 .map(|c| BackendCache::Cuda(Box::new(c))),
             _ => unreachable!("a pool is the GPU model's"),
+        }
+    }
+
+    fn move_slot_cache(
+        &self,
+        pool: &Self::Pool,
+        cache: &mut BackendCache,
+        slot: usize,
+    ) -> Result<(), String> {
+        match (self, cache) {
+            (Backend::Cuda(n), BackendCache::Cuda(c)) => n.retarget_view(pool, c, slot),
+            _ => Err("move_slot_cache: a cache of another backend".into()),
         }
     }
 

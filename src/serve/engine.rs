@@ -10,9 +10,10 @@
 //! next token picked on the host (`Sampler::pick`, its own seeded rng), its
 //! text sent, and finished requests' slots freed. A request admitted while
 //! nothing else runs goes the S1 way (`Engine::job`: `generate` with CUDA
-//! graphs and drafting, on a cache that is a view of slot 0's rows,
+//! graphs and drafting, on a cache that is a view of a slot's rows (the
+//! slot `lend_solo` picks, as `admit` would),
 //! `BatchLm::slot_cache`: no cache beside the pool); if another request
-//! arrives meanwhile, its rows are already in slot 0 (`BatchLm::adopt`
+//! arrives meanwhile, its rows are already in that slot (`BatchLm::adopt`
 //! copies nothing) and it carries on in the steps.
 //!
 //! So while requests decode, a long prompt is fed a chunk per step, in
@@ -130,6 +131,11 @@ pub(super) struct Batch<'a, 't> {
     /// The tokens whose rows each slot holds (prefix reuse), from 0.
     held: Vec<Vec<u32>>,
     busy: Vec<bool>,
+    /// When each slot was last taken (`uses` then; 0: never).
+    used: Vec<u64>,
+    uses: u64,
+    /// The slot the S1 path runs in (`lend_solo`).
+    solo: usize,
     pub seqs: Vec<Seq<'t>>,
     /// Requests being prefilled, oldest first.
     pre: Vec<Prefill<'t>>,
@@ -166,6 +172,9 @@ impl<'a, 't> Batch<'a, 't> {
             ctx,
             held: vec![Vec::new(); slots],
             busy: vec![false; slots],
+            used: vec![0; slots],
+            uses: 0,
+            solo: 0,
             seqs: Vec::new(),
             pre: Vec::new(),
             policy,
@@ -191,7 +200,13 @@ impl<'a, 't> Batch<'a, 't> {
 
     /// A free slot for `prompt` (`best_slot`).
     fn free_slot(&self, prompt: &[u32]) -> Option<(usize, usize)> {
-        best_slot(&self.held, &self.busy, prompt)
+        best_slot(&self.held, &self.busy, &self.used, prompt)
+    }
+
+    /// Slot `s` is taken now (`used`).
+    fn touch(&mut self, s: usize) {
+        self.uses += 1;
+        self.used[s] = self.uses;
     }
 
     /// Give `job` a free slot: its prompt (all but its last token, which is
@@ -212,6 +227,7 @@ impl<'a, 't> Batch<'a, 't> {
             );
         }
         self.busy[slot] = true;
+        self.touch(slot);
         self.held[slot].truncate(reuse);
         let sampler = job.sample.map(Sampler::new);
         let now = Instant::now();
@@ -322,22 +338,37 @@ impl<'a, 't> Batch<'a, 't> {
         Ok(())
     }
 
-    /// The tokens slot 0 holds, for the S1 path to run there (on
-    /// `slot_cache(0)`, from as many of them as its prompt shares); the
-    /// slot holds nothing meanwhile. With the batch idle: slot 0 is free.
-    pub fn lend_solo(&mut self) -> Vec<u32> {
-        assert!(self.idle() && !self.busy[0], "lend_solo: slot 0 is busy");
-        std::mem::take(&mut self.held[0])
+    /// A slot for the S1 path to run `prompt` in, chosen as `admit`
+    /// chooses (`best_slot`: the longest prefix of it, else the least
+    /// recently used), `cache` (a `slot_cache` of the pool) pointed at it,
+    /// and the tokens the slot holds (the engine reuses as many as the
+    /// prompt shares); the slot holds nothing meanwhile. The batch is idle.
+    pub fn lend_solo(
+        &mut self,
+        prompt: &[u32],
+        cache: &mut <Backend<'a> as crate::lm::Lm>::Cache,
+    ) -> Result<Vec<u32>, String> {
+        assert!(self.idle(), "lend_solo: the batch is running");
+        let (slot, _) = self.free_slot(prompt).expect("lend_solo: a free slot");
+        self.net.move_slot_cache(&self.pool, cache, slot)?;
+        self.solo = slot;
+        self.touch(slot);
+        Ok(std::mem::take(&mut self.held[slot]))
     }
 
-    /// The S1 path ended (without a hand-over): slot 0 holds the rows of
+    /// The slot the S1 path runs in (`lend_solo`).
+    pub fn solo_slot(&self) -> usize {
+        self.solo
+    }
+
+    /// The S1 path ended (without a hand-over): its slot holds the rows of
     /// `hist`.
     pub fn end_solo(&mut self, hist: Vec<u32>) {
-        self.held[0] = hist;
+        self.held[self.solo] = hist;
     }
 
     /// Take over a request `generate` was running on `cache` (the S1 path,
-    /// in slot 0: `slot_cache(0)`, so its rows 0..hist.len() - 1 are
+    /// in the slot `lend_solo` gave it, so its rows 0..hist.len() - 1 are
     /// already there and `BatchLm::adopt` copies nothing).
     pub fn adopt(
         &mut self,
@@ -345,8 +376,8 @@ impl<'a, 't> Batch<'a, 't> {
         cache: &<Backend<'a> as crate::lm::Lm>::Cache,
     ) -> Result<(), String> {
         let n = seq.hist.len() - 1;
-        let slot = 0;
-        assert!(!self.busy[slot], "adopt: slot 0 is busy");
+        let slot = self.solo;
+        assert!(!self.busy[slot], "adopt: the S1 slot is busy");
         self.net.adopt(&mut self.pool, slot, cache, n)?;
         self.busy[slot] = true;
         self.held[slot] = seq.hist[..n].to_vec();
@@ -645,10 +676,15 @@ fn emit(s: &mut Seq, id: u32) -> Option<End> {
 }
 
 /// The free slot (not `busy`) whose `held` tokens share the longest prefix
-/// with `prompt`, and that length. Ties go to the highest slot, so slot 0,
-/// where a request running alone runs (`lend_solo`), is taken last: batch
-/// traffic keeps the lone request's prefix there as long as it can.
-fn best_slot(held: &[Vec<u32>], busy: &[bool], prompt: &[u32]) -> Option<(usize, usize)> {
+/// with `prompt`, and that length. Ties go to the least recently `used`
+/// slot (then the lowest): a request, batched or alone, evicts the
+/// conversation idle the longest, as one cache per conversation would.
+fn best_slot(
+    held: &[Vec<u32>],
+    busy: &[bool],
+    used: &[u64],
+    prompt: &[u32],
+) -> Option<(usize, usize)> {
     (0..held.len())
         .filter(|&s| !busy[s])
         .map(|s| {
@@ -659,7 +695,7 @@ fn best_slot(held: &[Vec<u32>], busy: &[bool], prompt: &[u32]) -> Option<(usize,
                 .count();
             (s, n)
         })
-        .max_by_key(|&(s, n)| (n, s))
+        .max_by_key(|&(s, n)| (n, std::cmp::Reverse((used[s], s))))
 }
 
 #[cfg(test)]
@@ -667,25 +703,22 @@ mod slot_tests {
     use super::best_slot;
 
     /// The longest shared prefix wins; on a tie (no match at all, the
-    /// usual case for a new conversation) the highest free slot, slot 0
-    /// last; busy slots never.
+    /// usual case for a new conversation) the least recently used free
+    /// slot, then the lowest; busy slots never.
     #[test]
-    fn best_slot_prefers_prefix_then_keeps_slot_0() {
+    fn best_slot_prefers_prefix_then_least_recent() {
         let held = vec![vec![1, 2, 3], vec![9], vec![], vec![1, 2]];
         let free = [false; 4];
-        assert_eq!(best_slot(&held, &free, &[1, 2, 3, 4]), Some((0, 3)));
-        assert_eq!(best_slot(&held, &free, &[1, 2, 7]), Some((3, 2)));
-        assert_eq!(best_slot(&held, &free, &[5, 6]), Some((3, 0)));
-        assert_eq!(best_slot(&held, &free, &[]), Some((3, 0)));
-        assert_eq!(
-            best_slot(&held, &[false, true, true, true], &[5]),
-            Some((0, 0))
-        );
-        assert_eq!(
-            best_slot(&held, &[false, false, true, true], &[5]),
-            Some((1, 0))
-        );
-        assert_eq!(best_slot(&held, &[true; 4], &[1]), None);
+        let used = [4, 1, 3, 2];
+        assert_eq!(best_slot(&held, &free, &used, &[1, 2, 3, 4]), Some((0, 3)));
+        // Slots 0 and 3 share 2 tokens: 3 was used longer ago.
+        assert_eq!(best_slot(&held, &free, &used, &[1, 2, 7]), Some((3, 2)));
+        assert_eq!(best_slot(&held, &free, &used, &[5, 6]), Some((1, 0)));
+        assert_eq!(best_slot(&held, &free, &used, &[]), Some((1, 0)));
+        assert_eq!(best_slot(&held, &free, &[0; 4], &[5]), Some((0, 0)));
+        let busy = [false, true, false, true];
+        assert_eq!(best_slot(&held, &busy, &used, &[5]), Some((2, 0)));
+        assert_eq!(best_slot(&held, &[true; 4], &used, &[1]), None);
     }
 }
 

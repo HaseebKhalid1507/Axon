@@ -268,8 +268,8 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
   to an idle server alone takes the single-stream path below and is fed whole: a request
   arriving during that prefill waits for it. Each slot is a KV cache as long as the context, and a
   pool of N slots costs N caches (7B at 32768: 1.75 GiB each): the request running alone
-  runs in slot 0's memory (its own scratch beside it, no cache of its own), which batched
-  requests take last (unless it holds their prefix), so its prefix stays cached there.
+  runs in a slot's memory (its own scratch beside it, no cache of its own): the slot holding
+  the longest prefix of its prompt, else the one idle the longest, as a batched request picks.
   Without `--ctx` or `--parallel` the context comes first: as many slots
   (2 to 8) as fit with the whole context; if not even 2 do, 2 or more with the longest
   context they fit with, down to 32768 (or the whole context, if shorter); below that, one
@@ -283,7 +283,7 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
   for prefill's tensor cores, same results; 1.02 GiB on 7B Q4_K_M) is made after the
   caches and slots, only from the memory they leave (`AXON_Q6K8=0` never makes it).
   A request running alone takes the single-stream path (CUDA graphs, `--draft`), and
-  moves into the batch when a second one arrives (its rows are already in slot 0: nothing
+  moves into the batch when a second one arrives (its rows are already in its slot: nothing
   is copied). Every request's output is exactly what it
   gets alone, whatever else runs with it (greedy, and sampled with a `seed`): the batched
   kernels are bit-identical per row to the one-sequence ones. On the CPU, with
@@ -350,7 +350,7 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
 - `GET /slots`: JSON, `{"ctx", "slots": [{"id", "busy", "held_tokens", "request_id",
   "age_ms"}], "queue_depth"}`. `held_tokens`: the prefix whose KV rows the slot holds (what
   a later prompt can reuse); `request_id` is the `#n` of the stderr log. A request running
-  alone is in slot 0 (on the CPU, a split or a pipeline, the one cache is slot 0).
+  alone is in the slot it runs in (on the CPU, a split or a pipeline, the one cache is slot 0).
 - `--max-prompt-tokens N`: a longer prompt is refused before prefill with a 400
   (`code: "context_length_exceeded"`, as a prompt past the context). It counts the whole
   rendered prompt: the chat template's tokens and the tool schemas too; exactly N is allowed.
