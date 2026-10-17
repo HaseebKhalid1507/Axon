@@ -21,7 +21,14 @@ fn server(path: &str, device: Device) -> Server {
 const ORIGIN: &str = "http://app.test";
 
 fn server_with(path: &str, device: Device, f: impl FnOnce(&mut Opts)) -> Server {
-    let mut o = Opts {
+    let mut o = test_opts(path, device);
+    f(&mut o);
+    start(o).expect("start the server")
+}
+
+/// The tests' server settings (`server_with` before its changes).
+fn test_opts(path: &str, device: Device) -> Opts {
+    Opts {
         path: path.into(),
         host: "127.0.0.1".into(),
         port: 0,
@@ -49,9 +56,7 @@ fn server_with(path: &str, device: Device, f: impl FnOnce(&mut Opts)) -> Server 
         api_key: None,
         max_prompt_tokens: None,
         slot_idle_ms: None,
-    };
-    f(&mut o);
-    start(o).expect("start the server")
+    }
 }
 
 /// A parsed response: status, headers (names lowercased), body (chunked
@@ -2951,18 +2956,24 @@ fn api_key_env_and_empty() {
         Ok(Some("k3y".into()))
     );
     assert!(super::env_key(Some(" \n".into())).is_err());
-    assert!(super::env_key(Some(String::new())).is_err());
-    let Some(p) = crate::testutil::model_path() else {
-        return;
-    };
-    let mut o = None;
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        server_with(p.to_str().unwrap(), Device::Cpu, |x| {
-            x.api_key = Some(" ".into());
-            o = Some(());
-        })
-    }));
-    assert!(o.is_some() && r.is_err(), "an empty key must not start");
+    assert!(super::env_key(Some(Default::default())).is_err());
+    // Not UTF-8: an error, never "unset" (which would turn auth off).
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let bad = std::ffi::OsString::from_vec(vec![b'k', 0xff, b'y']);
+        assert!(super::env_key(Some(bad)).unwrap_err().contains("UTF-8"));
+    }
+    // start() refuses an empty or blank key before binding or loading
+    // anything (no model needed).
+    for k in ["", " ", "\n"] {
+        let mut o = test_opts("/nonexistent/model.gguf", Device::Cpu);
+        o.api_key = Some(k.into());
+        match start(o) {
+            Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput, "{k:?}: {e}"),
+            Ok(_) => panic!("{k:?}: an empty key must not start"),
+        }
+    }
 }
 
 /// --api-key and `Expect: 100-continue`: without the key, a 401 before
@@ -3000,4 +3011,145 @@ fn serve_api_key_before_100_continue() {
         let r = read_resp(&mut c, &mut buf);
         assert_eq!(r.status, 200, "{}", r.body);
     }
+}
+
+/// An error answered by `connection` after a HEAD request on the same
+/// keep-alive connection still has its body (not the HEAD's headers-only
+/// mode); a body-carrying request without the key is refused after its
+/// head (no `100 Continue`) and counted under its route.
+#[test]
+fn serve_api_key_error_after_head() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server_with(p.to_str().unwrap(), Device::Cpu, |o| {
+        o.api_key = Some("k3y".into());
+    });
+    let mut c = TcpStream::connect(s.addr).unwrap();
+    c.set_read_timeout(Some(Duration::from_secs(120))).unwrap();
+    let mut buf = Vec::new();
+    c.write_all(b"HEAD /health HTTP/1.1\r\nHost: x\r\n\r\n")
+        .unwrap();
+    let r = read_resp_to(&mut c, &mut buf, true);
+    assert_eq!((r.status, r.body.as_str()), (200, ""));
+    c.write_all(
+        b"POST /v1/completions HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\n\
+          Content-Length: 50\r\n\r\n",
+    )
+    .unwrap();
+    let r = read_resp(&mut c, &mut buf);
+    assert_eq!(r.status, 401, "{}", r.body);
+    assert_eq!(r.json()["error"]["code"], "invalid_api_key");
+    // Without Expect: the body (sent with the head) is never read as a
+    // request; the 401 comes, then the connection closes.
+    let body = json!({"prompt": "Hi", "max_tokens": 1}).to_string();
+    let r = call_h(s.addr, "POST", "/v1/chat/completions", &body, "");
+    assert_eq!(r.status, 401, "{}", r.body);
+    assert_eq!(r.header("connection"), Some("close"));
+    assert_eq!(s.queued.load(Ordering::Relaxed), 0);
+    let ok = "Authorization: Bearer k3y\r\n";
+    let m = prom_parse(&call_h(s.addr, "GET", "/metrics", "", ok).body);
+    assert_eq!(
+        m["axon_requests_total{route=\"/v1/completions\",status=\"401\"}"],
+        1.0
+    );
+    assert_eq!(
+        m["axon_requests_total{route=\"/v1/chat/completions\",status=\"401\"}"],
+        1.0
+    );
+    assert!(!m.keys().any(|k| k.contains("route=\"other\"")), "{m:?}");
+}
+
+/// --api-key wins over AXON_API_KEY: the variable isn't read at all, so a
+/// blank or non-UTF-8 one doesn't abort a server started with the flag.
+#[test]
+fn api_key_flag_wins_over_bad_env() {
+    let never = || -> Option<std::ffi::OsString> { panic!("the env var was read") };
+    assert_eq!(
+        super::api_key_of(Some("k".into()), never),
+        Ok((Some("k".into()), "--api-key"))
+    );
+    assert_eq!(
+        super::api_key_of(None, || Some(" k \n".into())),
+        Ok((Some("k".into()), "AXON_API_KEY"))
+    );
+    assert!(super::api_key_of(None, || Some(" ".into())).is_err());
+    assert_eq!(super::api_key_of(None, || None), Ok((None, "AXON_API_KEY")));
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStringExt;
+        let bad = || Some(std::ffi::OsString::from_vec(vec![0xff]));
+        assert!(super::api_key_of(None, bad).is_err());
+        assert_eq!(
+            super::api_key_of(Some("k".into()), bad),
+            Ok((Some("k".into()), "--api-key"))
+        );
+    }
+}
+
+/// With --api-key no body gets through without the key, whatever the
+/// route: POST /health, OPTIONS and a chunked /health with a body are
+/// refused right after the head (only the head is sent: a server that read
+/// the body would wait for it), as is a body past MAX_BODY (401, not 413);
+/// a refused HEAD gets headers only. Bodiless /health and OPTIONS stay open.
+#[test]
+fn serve_api_key_no_body_without_the_key() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server_with(p.to_str().unwrap(), Device::Cpu, |o| {
+        o.api_key = Some("k3y".into());
+    });
+    let head_only = |head: &str, no_body: bool| {
+        let mut c = TcpStream::connect(s.addr).unwrap();
+        // A server waiting for the body would answer 408 after 30 s.
+        c.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+        c.write_all(head.as_bytes()).unwrap();
+        let mut buf = Vec::new();
+        let r = read_resp_to(&mut c, &mut buf, no_body);
+        let mut rest = [0u8; 64];
+        let n = c.read(&mut rest).unwrap_or(0);
+        (r, buf.len() + n)
+    };
+    for head in [
+        format!(
+            "POST /health HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n",
+            1 << 20
+        ),
+        "OPTIONS /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n".into(),
+        "POST /health HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n".into(),
+        "POST /v1/completions HTTP/1.1\r\nHost: x\r\nContent-Length: 9000000\r\n\r\n".into(),
+        "GET /health HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\n".into(),
+    ] {
+        let (r, extra) = head_only(&head, false);
+        assert_eq!(r.status, 401, "{head:?}: {}", r.body);
+        assert_eq!(r.json()["error"]["code"], "invalid_api_key", "{head:?}");
+        assert_eq!(r.header("connection"), Some("close"), "{head:?}");
+        assert_eq!(extra, 0, "{head:?}: nothing after the 401");
+    }
+    // HEAD with a body and no key: a 401 with headers only.
+    let (r, extra) = head_only(
+        "HEAD /v1/models HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\n",
+        true,
+    );
+    assert_eq!((r.status, r.body.as_str(), extra), (401, "", 0));
+    // With the key, past MAX_BODY is still a 413.
+    let (r, _) = head_only(
+        "POST /v1/completions HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer k3y\r\n\
+         Content-Length: 9000000\r\n\r\n",
+        false,
+    );
+    assert_eq!(r.status, 413, "{}", r.body);
+    // Bodiless /health and OPTIONS stay open.
+    assert_eq!(call(s.addr, "GET", "/health", "").status, 200);
+    assert_eq!(
+        call(s.addr, "OPTIONS", "/v1/chat/completions", "").status,
+        204
+    );
+    let ok = "Authorization: Bearer k3y\r\n";
+    let m = prom_parse(&call_h(s.addr, "GET", "/metrics", "", ok).body);
+    assert_eq!(
+        m["axon_requests_total{route=\"/health\",status=\"401\"}"],
+        3.0
+    );
 }

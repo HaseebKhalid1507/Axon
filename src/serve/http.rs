@@ -109,9 +109,14 @@ pub struct Conn<S> {
     pub extra: String,
     /// Answering a HEAD request: `respond` sends the headers only.
     pub head_only: bool,
-    /// Whether a request whose head asks `Expect: 100-continue` may send
-    /// its body (--api-key: false answers 401 without inviting it).
+    /// Whether a request that carries a body may send it (--api-key: false
+    /// answers 401 right after the head, before a 413, the body never
+    /// buffered and the connection then closed; `100 Continue` is never
+    /// sent for it).
     pub gate: Option<Gate>,
+    /// The path and method of the request `gate` just refused (its route
+    /// label; a HEAD's 401 has no body).
+    pub refused: Option<(String, String)>,
     /// The status of the last response started (0: none yet).
     pub status: u16,
     /// Bytes written so far.
@@ -284,7 +289,7 @@ fn parse_head(head: &[u8]) -> Result<(Request, BodyLen, bool), HttpError> {
         (Some(_), Some(_)) => return err(400, "both Transfer-Encoding and Content-Length"),
         (Some(_), None) if minor == 0 => return err(400, "chunked request in HTTP/1.0"),
         (Some(_), None) => BodyLen::Chunked,
-        (None, Some(n)) if n > MAX_BODY => return err(413, "request body too large"),
+        // Past MAX_BODY: 413 in `read_request`, after `Conn::gate`.
         (None, n) => BodyLen::Fixed(n.unwrap_or(0)),
     };
     let cont = cont && !matches!(body, BodyLen::Fixed(0));
@@ -301,6 +306,7 @@ impl<S: Read + Write> Conn<S> {
             extra: String::new(),
             head_only: false,
             gate: None,
+            refused: None,
             status: 0,
             written: 0,
         }
@@ -379,8 +385,15 @@ impl<S: Read + Write> Conn<S> {
         };
         let (mut req, body, cont) = parse_head(&self.buf[..end])?;
         self.buf.drain(..end);
-        if cont && self.gate.as_ref().is_some_and(|g| !g(&req)) {
+        let has_body = !matches!(body, BodyLen::Fixed(0));
+        if has_body && self.gate.as_ref().is_some_and(|g| !g(&req)) {
+            self.refused = Some((req.path, req.method));
             return err(401, "unauthorized");
+        }
+        if let BodyLen::Fixed(n) = body
+            && n > MAX_BODY
+        {
+            return err(413, "request body too large");
         }
         if cont && self.buf.is_empty() {
             self.write_all(b"HTTP/1.1 100 Continue\r\n\r\n")

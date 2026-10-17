@@ -733,6 +733,18 @@ def ops_cases(srv):
         auth("404-closed", "", {401}, "/nope")
         E("auth:post-closed", cj({"prompt": "Hi", "max_tokens": 1}), {401})
         E("auth:options-open", b"OPTIONS /v1/chat/completions HTTP/1.1\r\nConnection: close\r\n\r\n", {204})
+        # No body gets through without the key, whatever the route: only the head is sent, so a
+        # server that read the body would answer 408 after 30 s (the 10 s timeout is a finding).
+        for nm, raw in [
+            ("health-1MiB-body", b"POST /health HTTP/1.1\r\nHost: x\r\nContent-Length: 1048576\r\n\r\n"),
+            ("options-body", b"OPTIONS /v1/chat/completions HTTP/1.1\r\nHost: x\r\nContent-Length: 100\r\n\r\n"),
+            ("health-chunked", b"POST /health HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"),
+            ("health-expect", b"POST /health HTTP/1.1\r\nHost: x\r\nExpect: 100-continue\r\nContent-Length: 5\r\n\r\n"),
+            ("over-max-body", b"POST /v1/completions HTTP/1.1\r\nHost: x\r\nContent-Length: 9000000\r\n\r\n"),
+        ]:
+            expect(srv, "auth:no-key-" + nm, raw, {401}, timeout=10)
+        st, h, body = request(P, b"HEAD /v1/models HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\n", 10)
+        record("auth:no-key-HEAD-body", st == 401 and body == b"", f"{st} body {len(body)} bytes")
         # The 401 body is OpenAI's error shape.
         st, h, body = request(P, get("/v1/models"))
         try:

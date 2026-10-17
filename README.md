@@ -328,9 +328,14 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
   `GET /health` needs `Authorization: Bearer KEY` (compared in constant time); without it a
   401 with an OpenAI-shaped error (`code: "invalid_api_key"`) and `WWW-Authenticate: Bearer`.
   CORS preflights (`OPTIONS`) stay open: browsers send them without credentials, and they
-  answer with headers only. An `Expect: 100-continue` upload without the key gets the 401
-  before its body is invited. `AXON_API_KEY` is trimmed (a secret file's trailing newline);
-  set but blank is an error. stderr says `api key: on (from AXON_API_KEY|--api-key)`, never
+  answer with headers only. A request with a body but without the key gets the 401 right
+  after its headers, whatever the route (`/health` and `OPTIONS` are open only without a
+  body), before a 413 for a body past 1 MiB and without `100 Continue`; its body is never
+  buffered or parsed, and the connection closes (after dropping what the client already
+  sent, at most 2 s / 4 MiB, so the 401 isn't lost to a reset; an upload still going after
+  that can be reset before the client reads the 401). `--api-key` wins over `AXON_API_KEY` (the variable isn't
+  read then); the variable is trimmed (a secret file's trailing newline), and set but blank
+  or not UTF-8 is an error. stderr says `api key: on (from AXON_API_KEY|--api-key)`, never
   the key. Still plain HTTP: put TLS in front of it beyond a trusted LAN.
 - `GET /metrics`: Prometheus text format. `axon_requests_total{route,status}`,
   `axon_generated_tokens_total`, `axon_prompt_tokens_total`,
@@ -356,8 +361,9 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
   unacknowledged bytes stop moving for MS ms. With a default ~128 KiB receive window that is
   roughly 500+ tokens of SSE after the client stopped (MEASURED, bella CPU, 0.5B,
   `--slot-idle-ms 1000`, a client with default buffers: 792 tokens and 6.3 s from its last
-  read to the slot freed; with a 4 KiB `SO_RCVBUF`, 202 tokens and 1.7 s); a reply shorter than
-  that just finishes into the buffer. Elsewhere only a write blocked for MS ms (at most the
+  read to the slot freed, and in another run the autotuned buffers absorbed a whole
+  1900-token reply; with a 4 KiB `SO_RCVBUF`, 158-202 tokens and 1.7 s). A reply shorter
+  than that just finishes into the buffers. Elsewhere only a write blocked for MS ms (at most the
   60 s write timeout) is detected, after the server's send buffer fills too, and stderr says
   so at startup.
 - A request's `priority` field is accepted and ignored (requests run in arrival order).
