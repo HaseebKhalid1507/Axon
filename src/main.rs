@@ -229,7 +229,8 @@ fn open_model(path: &str, lm: bool) -> gguf::Model {
 
 /// A model to run (`gguf::load_to_run`), checked before it's copied or
 /// read: `copy` forces the copy-vs-map choice, None copies only if the CPU
-/// model reads its matrices in place (`model::reads_matrices_in_place`).
+/// model reads its matrices in place (`model::reads_matrices_in_place`); a
+/// MoE model is always mapped, whatever `copy` and AXON_MMAP say.
 /// `rope`: the --rope-scaling flags, written into the model's metadata
 /// (`rope::RopeArgs::apply`) before the model is checked, so that
 /// `--rope-scaling none` can run a file whose own scaling is refused.
@@ -241,7 +242,11 @@ fn open_model_with(path: &str, copy: Option<bool>, rope: &rope::RopeArgs) -> ggu
         {
             fail(&format!("{path}: {e}"));
         }
-        model::reads_matrices_in_place(m)
+        // A MoE file is always mapped (`reads_matrices_in_place`'s note).
+        match model::is_moe(m) {
+            true => gguf::CopyWish::MapOnly,
+            false => gguf::CopyWish::Want(model::reads_matrices_in_place(m)),
+        }
     })
     .unwrap_or_else(|e| load_failed(path, e));
     if !rope.is_empty() {

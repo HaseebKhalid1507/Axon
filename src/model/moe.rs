@@ -86,10 +86,11 @@ pub(super) fn expert_bytes<'m>(m: &'m Model, t: &Tensor, e: usize) -> &'m [u8] {
     &m.tensor_data(t)[e * per..(e + 1) * per]
 }
 
-/// Bytes of one expert matrix of `t` as the CPU holds it: repacked if it
-/// has an r8/r8q form, else as in the file.
-fn held_bytes(t: &Tensor) -> u64 {
-    super::repacked_len(t).map_or(t.n_bytes / t.dims[2], |l| l as u64)
+/// Bytes of one expert matrix of `t` as the CPU holds it: repacked (with
+/// `repack`) if it has an r8/r8q form, else as in the file.
+fn held_bytes(t: &Tensor, repack: bool) -> u64 {
+    let len = if repack { super::repacked_len(t) } else { None };
+    len.map_or(t.n_bytes / t.dims[2], |l| l as u64)
 }
 
 /// What `axon info` says about a MoE model: sizes from the tensor table.
@@ -97,7 +98,8 @@ fn held_bytes(t: &Tensor) -> u64 {
 pub(crate) struct MoeInfo {
     pub dims: MoeDims,
     pub shared: usize,
-    /// All expert tensors, as in the file and as the CPU holds them (r8).
+    /// All expert tensors, as in the file and as the CPU holds them (r8,
+    /// or the file's bytes when `of_with` is told there's no repack).
     pub expert_bytes: u64,
     pub expert_held: u64,
     /// k experts of every layer: what one token reads.
@@ -108,7 +110,12 @@ pub(crate) struct MoeInfo {
 }
 
 impl MoeInfo {
+    /// `of_with` the repack on (`axon info`'s r8 column).
     pub fn of(m: &Model) -> Option<MoeInfo> {
+        Self::of_with(m, true)
+    }
+
+    pub fn of_with(m: &Model, repack: bool) -> Option<MoeInfo> {
         let dims = moe_dims(m)?;
         let mut i = MoeInfo {
             dims,
@@ -124,9 +131,9 @@ impl MoeInfo {
             if EXPS.iter().any(|s| t.name.ends_with(s)) && t.dims.len() >= 3 && t.dims[2] > 0 {
                 let n = t.dims[2];
                 i.expert_bytes += t.n_bytes;
-                i.expert_held += held_bytes(t) * n;
+                i.expert_held += held_bytes(t, repack) * n;
                 i.active_bytes += t.n_bytes / n * dims.k as u64;
-                i.active_held += held_bytes(t) * dims.k as u64;
+                i.active_held += held_bytes(t, repack) * dims.k as u64;
             } else {
                 i.dense_bytes += t.n_bytes;
             }
@@ -165,14 +172,36 @@ impl MoeInfo {
     }
 }
 
+/// Headroom `check_ram` wants beyond the CPU model's anonymous memory.
+const RAM_HEADROOM: u64 = 3 << 29;
+
+/// Anonymous memory the CPU model of `i` takes beyond the mapped file, plus
+/// `RAM_HEADROOM`: with `repack`, the r8 arena (every expert and, roughly,
+/// the dense weights); without, none (everything is read in place from the
+/// mapping, page cache the kernel can reclaim).
+fn ram_need(i: &MoeInfo, repack: bool) -> u64 {
+    let arena = if repack {
+        i.expert_held + i.dense_bytes
+    } else {
+        0
+    };
+    arena + RAM_HEADROOM
+}
+
 /// The CPU model's RAM beyond the file: refuse a MoE model that wouldn't fit
-/// in `MemAvailable` (the r8 arena plus 1.5 GiB) instead of swapping.
+/// in `MemAvailable` (`ram_need`) instead of swapping. `repack` as
+/// `Qwen2::new` (AXON_REPACK).
 pub(crate) fn check_ram(m: &Model) -> Result<(), String> {
-    let Some(i) = MoeInfo::of(m) else {
+    let repack = std::env::var("AXON_REPACK").map_or(true, |v| v != "0");
+    check_ram_with(m, repack, crate::gguf::mem_available())
+}
+
+fn check_ram_with(m: &Model, repack: bool, avail: Option<u64>) -> Result<(), String> {
+    let Some(i) = MoeInfo::of_with(m, repack) else {
         return Ok(());
     };
-    let want = i.expert_held + i.dense_bytes + (3 << 29);
-    match crate::gguf::mem_available() {
+    let want = ram_need(&i, repack);
+    match avail {
         Some(avail) if avail < want => Err(format!(
             "{}: the CPU model needs about {:.1} GB of RAM (its repacked experts {:.1} GB) and \
              only {:.1} GB is available",
@@ -514,6 +543,26 @@ impl<'a> Qwen2<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `check_ram`'s need: the r8 arena with the repack, none without it
+    /// (AXON_REPACK=0 reads the mapped file in place).
+    #[test]
+    fn ram_need_counts_the_arena_only_when_repacking() {
+        let (m, _) = crate::model::tests::dense_fixture("qwen3moe", crate::quant::Q8_0);
+        let on = MoeInfo::of_with(&m, true).unwrap();
+        let off = MoeInfo::of_with(&m, false).unwrap();
+        assert!(on.expert_held > 0 && off.expert_held > 0);
+        assert_eq!(
+            ram_need(&on, true),
+            on.expert_held + on.dense_bytes + RAM_HEADROOM
+        );
+        assert_eq!(ram_need(&off, false), RAM_HEADROOM);
+        // Room for the headroom only: refused with the repack, fine without.
+        let avail = Some(RAM_HEADROOM + 1);
+        assert!(check_ram_with(&m, true, avail).is_err());
+        assert!(check_ram_with(&m, false, avail).is_ok());
+        assert!(check_ram_with(&m, true, None).is_ok());
+    }
 
     #[test]
     fn chunk_dividing_divides() {
