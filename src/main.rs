@@ -69,6 +69,7 @@ usage:
   axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--draft K] [--draft-model PATH]
             [--device D] [--gpu-layers N] [--kv T] [--alias NAME] [--max-tokens N] [--cors [ORIGIN]]
             [--max-conns N] [--max-queue N] [--parallel N] [--prefill-chunk N] [--prefill-ms MS]
+            [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS]
             [--no-think] [--think-inline] [--quiet] [sampling flags; the repeat penalty defaults to 1 (off)]
                                             an OpenAI-compatible HTTP server (/v1/models,
                                             /v1/chat/completions, /v1/completions; on cuda
@@ -134,6 +135,12 @@ flags:
               MS ms beside their decode step (default 60; 0: exactly --prefill-chunk tokens)
   --prefill-chunk N  serve: at least N prompt tokens per such step (default 256; 0: prompts
               fed whole, the others' streams wait)
+  --api-key KEY  serve: every route but /health (and CORS preflights) needs
+              `Authorization: Bearer KEY` (else 401); AXON_API_KEY sets it too, out of `ps`
+  --max-prompt-tokens N  serve: a longer prompt is refused (400, context_length_exceeded)
+              before prefill
+  --slot-idle-ms MS  serve: a stream whose client stops reading for MS ms is cancelled
+              and its slot freed, as if it had disconnected (default: off)
   --rope-scaling yarn --rope-scale F [--yarn-orig-ctx N]
               gen, logits, chat, serve: YaRN RoPE scaling (llama.cpp's flags), off by default:
               the model's context becomes N x F (N: default the model's trained context), e.g.

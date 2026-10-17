@@ -221,7 +221,8 @@ curl -N localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
 
 An OpenAI-compatible HTTP/1.1 server (any OpenAI client works with
 `base_url="http://127.0.0.1:8080/v1"`): `GET /v1/models`, `POST /v1/chat/completions`,
-`POST /v1/completions` (raw text, no template, as `gen`), `GET /health`; streamed
+`POST /v1/completions` (raw text, no template, as `gen`), `GET /health`, `GET /metrics`,
+`GET /slots` (below); streamed
 (server-sent events, `data: [DONE]` at the end; `stream_options.include_usage` adds a
 usage chunk) or whole. It takes the device, `--ctx`, `--kv`, `--gpu-layers` and `--draft`
 flags of `chat`, plus `--host` (default 127.0.0.1), `--port` (default 8080), `--alias NAME`
@@ -314,6 +315,32 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
   localhost.
 - If the engine fails on a request (a CUDA error is sticky: every later request would fail
   too), the server logs the error and exits with code 70, for a supervisor to restart it.
+
+#### Operations: auth, metrics, slots
+
+- `--api-key KEY` (or `AXON_API_KEY`, which keeps the key out of `ps`): every route but
+  `GET /health` needs `Authorization: Bearer KEY` (compared in constant time); without it a
+  401 with an OpenAI-shaped error (`code: "invalid_api_key"`) and `WWW-Authenticate: Bearer`.
+  CORS preflights (`OPTIONS`) stay open: browsers send them without credentials, and they
+  answer with headers only. Still plain HTTP: put TLS in front of it beyond a trusted LAN.
+- `GET /metrics`: Prometheus text format. `axon_requests_total{route,status}`,
+  `axon_generated_tokens_total`, `axon_prompt_tokens_total`,
+  `axon_prompt_cached_tokens_total` (prefix reuse), `axon_requests_in_flight`,
+  `axon_queue_depth` (in flight, not in a slot), `axon_slots_busy` / `axon_slots_free`,
+  `axon_slot_idle_evictions_total`, `axon_prompt_refused_total`, and the histograms
+  `axon_ttft_seconds` (arrival to first text) and `axon_itl_seconds` (between a request's
+  text events, about one token each). No host-RAM KV store hits yet: serve has no store.
+- `GET /slots`: JSON, `{"ctx", "slots": [{"id", "busy", "held_tokens", "request_id",
+  "age_ms"}], "solo": {...}, "queue_depth"}`. `held_tokens`: the prefix whose KV rows the
+  slot holds (what a later prompt can reuse); `request_id` is the `#n` of the stderr log;
+  `solo` is the single-request cache (the CPU, a split, or a request alone on the GPU).
+- `--max-prompt-tokens N`: a longer prompt is refused before prefill with a 400
+  (`code: "context_length_exceeded"`, as a prompt past the context).
+- `--slot-idle-ms MS`: a stream whose client stops reading is cancelled (as a disconnect:
+  its slot freed for the next request) once its socket has taken no bytes for MS ms. A
+  client that reads slowly isn't affected; one that stops is detected when its receive
+  buffer fills (Linux: the unacknowledged bytes stop moving), or a write blocks for MS ms.
+- A request's `priority` field is accepted and ignored (requests run in arrival order).
 
 #### Tool calling
 

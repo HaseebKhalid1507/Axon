@@ -34,6 +34,7 @@
 pub mod api;
 mod engine;
 pub mod http;
+pub mod ops;
 pub mod tools;
 
 use crate::chat::{self, Framing, special};
@@ -125,6 +126,15 @@ pub struct Opts {
     pub prefill_ms: usize,
     /// `--rope-scaling yarn` and friends (rope.rs).
     pub rope: crate::rope::RopeArgs,
+    /// `--api-key` / AXON_API_KEY: every route but /health (and CORS
+    /// preflights) needs `Authorization: Bearer <key>`.
+    pub api_key: Option<String>,
+    /// `--max-prompt-tokens`: longer prompts are refused (400) before
+    /// prefill.
+    pub max_prompt_tokens: Option<usize>,
+    /// `--slot-idle-ms`: a stream whose client stops reading for this long
+    /// is cancelled (its slot freed), as if it had disconnected.
+    pub slot_idle_ms: Option<u64>,
 }
 
 /// The chat framing `axon chat` uses (chat.rs: ChatML, or Llama 3's
@@ -216,6 +226,8 @@ struct Job {
     cancel: Arc<AtomicBool>,
     tx: mpsc::Sender<Event>,
     id: u64,
+    /// When it was queued (GET /slots: its age).
+    arrived: Instant,
 }
 
 enum Event {
@@ -264,6 +276,14 @@ struct Shared {
     next_conn: AtomicU64,
     /// `Server::queued`.
     queued: Arc<AtomicU64>,
+    /// `Server::generated`.
+    generated: Arc<AtomicU64>,
+    /// `Opts::api_key`.
+    api_key: Option<String>,
+    max_prompt_tokens: Option<usize>,
+    slot_idle: Option<Duration>,
+    metrics: Arc<ops::Metrics>,
+    log: bool,
 }
 
 /// `Shared::waiting`: (connection id, a handle to shut it down), oldest first.
@@ -394,6 +414,7 @@ struct Engine<'a> {
     log: bool,
     /// Tokens generated so far, all requests.
     generated: Arc<AtomicU64>,
+    metrics: Arc<ops::Metrics>,
 }
 
 /// Run `f`; a panic in it (CUDA errors panic, and are sticky: every later
@@ -478,7 +499,17 @@ impl<'a> Engine<'a> {
             return None;
         }
         let id = job.id;
-        or_exit(&format!("request #{id}"), || self.job(job, ho))
+        self.metrics.publish_solo(ops::SlotState {
+            held: self.hist.len(),
+            busy: true,
+            request: Some((id, job.arrived)),
+        });
+        let r = or_exit(&format!("request #{id}"), || self.job(job, ho));
+        self.metrics.publish_solo(ops::SlotState {
+            held: self.hist.len(),
+            ..Default::default()
+        });
+        r
     }
 
     /// Run `job` alone on the engine's cache (stage S1). With `ho`, it
@@ -869,6 +900,7 @@ fn engine(
         drafter,
         log: o.log,
         generated: o.generated,
+        metrics: o.metrics.clone(),
     };
     let mut batch = pool.map(|(pool, n, slot_ctx)| {
         let policy = engine::ChunkPolicy {
@@ -898,6 +930,9 @@ fn engine(
     }
     let mut waiting: VecDeque<Job> = VecDeque::new();
     loop {
+        if let Some(b) = &batch {
+            o.metrics.publish_pool(b.slot_states());
+        }
         if batch.as_ref().is_none_or(Batch::idle) && waiting.is_empty() {
             match jobs.recv_timeout(Duration::from_millis(100)) {
                 Ok(job) => waiting.push_back(job),
@@ -1191,6 +1226,7 @@ struct EngineOpts {
     log: bool,
     generated: Arc<AtomicU64>,
     rope: crate::rope::RopeArgs,
+    metrics: Arc<ops::Metrics>,
 }
 
 /// A running server. Dropping it (or `shutdown`) stops it: the acceptor
@@ -1265,7 +1301,9 @@ pub fn start(o: Opts) -> io::Result<Server> {
     let stop = Arc::new(AtomicBool::new(false));
     let generated = Arc::new(AtomicU64::new(0));
     let queued = Arc::new(AtomicU64::new(0));
+    let metrics = Arc::new(ops::Metrics::default());
     let eo = EngineOpts {
+        metrics: metrics.clone(),
         parallel: o.parallel,
         parallel_set: o.parallel_set,
         slot_ctx: o.slot_ctx,
@@ -1321,6 +1359,12 @@ pub fn start(o: Opts) -> io::Result<Server> {
         waiting: Default::default(),
         next_conn: AtomicU64::new(0),
         queued: queued.clone(),
+        generated: generated.clone(),
+        api_key: o.api_key,
+        max_prompt_tokens: o.max_prompt_tokens,
+        slot_idle: o.slot_idle_ms.map(Duration::from_millis),
+        metrics,
+        log: o.log,
     });
     let sh2 = sh.clone();
     let accept = std::thread::Builder::new()
@@ -1434,6 +1478,7 @@ fn connection(s: TcpStream, sh: &Shared) {
             Err(e) => {
                 let body = ApiError::new(e.status, "invalid_request_error", e.msg).json();
                 let _ = c.respond(e.status, "application/json", body.as_bytes(), false, &[]);
+                sh.metrics.request("other", e.status);
                 // Evictable while it lingers: it serves nothing more.
                 sh.waiting.set(id, handle.as_ref());
                 linger(&c.s);
@@ -1442,7 +1487,12 @@ fn connection(s: TcpStream, sh: &Shared) {
             }
             Ok(Some(req)) => {
                 c.head_only = req.method == "HEAD";
-                match route(&mut c, &req, sh) {
+                c.status = 0;
+                let r = route(&mut c, &req, sh);
+                if c.status != 0 {
+                    sh.metrics.request(ops::route_label(&req.path), c.status);
+                }
+                match r {
                     Ok(true) if req.keep_alive => {}
                     _ => return,
                 }
@@ -1493,7 +1543,7 @@ fn api_err<S: io::Read + Write>(c: &mut Conn<S>, e: ApiError, keep: bool) -> io:
 fn route(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared) -> io::Result<bool> {
     let keep = req.keep_alive;
     let methods = match req.path.as_str() {
-        "/v1/models" | "/health" | "/identity" => "GET, HEAD, OPTIONS",
+        "/v1/models" | "/health" | "/identity" | "/metrics" | "/slots" => "GET, HEAD, OPTIONS",
         "/v1/chat/completions" | "/v1/completions" => "POST, OPTIONS",
         _ => "",
     };
@@ -1504,6 +1554,28 @@ fn route(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared) -> io::Result<bool
             "the model is loading; try again shortly",
         )
     };
+    // --api-key: everything but /health and CORS preflights (a browser
+    // sends those without credentials; they answer with headers only).
+    if let Some(key) = &sh.api_key
+        && req.path != "/health"
+        && req.method != "OPTIONS"
+        && !ops::authorized(&req.headers, key)
+    {
+        let mut e = ApiError::new(
+            401,
+            "invalid_request_error",
+            "a valid API key is needed: send 'Authorization: Bearer <key>'",
+        );
+        e.code = Some("invalid_api_key");
+        c.respond(
+            401,
+            "application/json",
+            e.json().as_bytes(),
+            keep,
+            &[("WWW-Authenticate", "Bearer")],
+        )?;
+        return Ok(keep);
+    }
     match (req.method.as_str(), req.path.as_str()) {
         (_, _) if methods.is_empty() => api_err(
             c,
@@ -1550,6 +1622,21 @@ fn route(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared) -> io::Result<bool
         }
         ("GET" | "HEAD", "/identity") => match sh.model.get() {
             Some(m) => json_reply(c, 200, &m.identity.json().to_string(), keep),
+            None => api_err(c, loading(), keep),
+        },
+        ("GET" | "HEAD", "/metrics") => {
+            let body = sh.metrics.render(sh.generated.load(Ordering::Relaxed));
+            c.respond(
+                200,
+                "text/plain; version=0.0.4; charset=utf-8",
+                body.as_bytes(),
+                keep,
+                &[],
+            )?;
+            Ok(keep)
+        }
+        ("GET" | "HEAD", "/slots") => match sh.model.get() {
+            Some(m) => json_reply(c, 200, &sh.metrics.slots_json(m.ctx), keep),
             None => api_err(c, loading(), keep),
         },
         ("GET" | "HEAD", "/health") => match sh.model.get() {
@@ -1620,6 +1707,25 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
     if bytes > m.ctx.saturating_mul(m.max_token_bytes) {
         return api_err(c, too_long(format!("{bytes} bytes")), keep);
     }
+    // --max-prompt-tokens: refused before prefill (and, past its bytes'
+    // worth of the longest token, before encoding).
+    let over_max = |n: String| {
+        sh.metrics.refused_prompts.fetch_add(1, Ordering::Relaxed);
+        let mut e = ApiError::bad(
+            if chat { "messages" } else { "prompt" },
+            format!(
+                "the prompt is {n}; this server takes at most {} (--max-prompt-tokens)",
+                sh.max_prompt_tokens.unwrap_or(0)
+            ),
+        );
+        e.code = Some("context_length_exceeded");
+        e
+    };
+    if let Some(max) = sh.max_prompt_tokens
+        && bytes > max.saturating_mul(m.max_token_bytes)
+    {
+        return api_err(c, over_max(format!("{bytes} bytes")), keep);
+    }
     let mut parser = None;
     let (prompt, stop_ids, think) = match &g.prompt {
         Prompt::Chat { messages, no_think } => {
@@ -1666,6 +1772,9 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
     if prompt.len() >= m.ctx {
         return api_err(c, too_long(format!("{} tokens", prompt.len())), keep);
     }
+    if sh.max_prompt_tokens.is_some_and(|max| prompt.len() > max) {
+        return api_err(c, over_max(format!("{} tokens", prompt.len())), keep);
+    }
     let n = sh.next_id.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -1683,7 +1792,9 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
         cancel: cancel.clone(),
         tx,
         id: n,
+        arrived: Instant::now(),
     };
+    let arrived = job.arrived;
     match sh.jobs.try_send(job) {
         Ok(()) => {
             sh.queued.fetch_add(1, Ordering::Relaxed);
@@ -1710,39 +1821,141 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
     );
     let model = g.model.as_deref().unwrap_or(&sh.model_id);
     let model = (model, m.identity.fingerprint());
+    let _flight = InFlight::new(&sh.metrics.in_flight);
+    let mut ev = Events::new(&rx, &sh.metrics, arrived);
     let r = if g.stream {
-        stream(c, req, &g, &rx, chat, &id, model, created, parser)
+        if let Some(idle) = sh.slot_idle {
+            ev.stall = Some(ops::Stall::new(idle));
+            let _ =
+                c.s.set_write_timeout(Some(idle.max(Duration::from_millis(1))));
+        }
+        let r = stream(c, req, &g, &mut ev, chat, &id, model, created, parser);
+        let _ = c.s.set_write_timeout(Some(WRITE_TIMEOUT));
+        r
     } else {
-        whole(c, keep, &rx, chat, &id, model, created, parser)
+        whole(c, keep, &mut ev, chat, &id, model, created, parser)
     };
+    // A write blocked for the stall time is a stalled client too.
+    let blocked = |e: &io::Error| {
+        matches!(
+            e.kind(),
+            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+        )
+    };
+    let blocked = g.stream && sh.slot_idle.is_some() && r.as_ref().is_err_and(blocked);
+    if ev.stalled || blocked {
+        sh.metrics.idle_evictions.fetch_add(1, Ordering::Relaxed);
+        if sh.log {
+            eprintln!("axon serve: #{n} cancelled: its client stopped reading (--slot-idle-ms)");
+        }
+    }
     if !matches!(r, Ok(true)) {
         cancel.store(true, Ordering::Relaxed);
     }
     r
 }
 
-/// The next event, checking every `POLL` that the client is still there
-/// (`checked`: when it last was), also while events keep coming: a whole
-/// (non-streamed) response writes nothing until the end, so before, a
-/// client that left mid-generation went unnoticed and the engine ran on
-/// to max_tokens or the context's end (minutes at --ctx 32768) while
-/// every later request waited. None: it isn't there (or the engine is gone).
-fn next_event(
-    c: &Conn<TcpStream>,
-    rx: &mpsc::Receiver<Event>,
-    checked: &mut Instant,
-) -> Option<Event> {
-    loop {
-        if checked.elapsed() >= POLL {
-            *checked = Instant::now();
-            if c.s.closed() {
-                return None;
-            }
+/// Counts a request in flight while it lives.
+struct InFlight<'a>(&'a AtomicUsize);
+
+impl<'a> InFlight<'a> {
+    fn new(n: &'a AtomicUsize) -> InFlight<'a> {
+        n.fetch_add(1, Ordering::Relaxed);
+        InFlight(n)
+    }
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+/// A request's events from the engine, as the connection receives them:
+/// the time to its first text and between texts, its usage (/metrics),
+/// and with `stall` (`--slot-idle-ms`), whether its client stopped reading.
+struct Events<'a> {
+    rx: &'a mpsc::Receiver<Event>,
+    m: &'a ops::Metrics,
+    arrived: Instant,
+    last: Option<Instant>,
+    stall: Option<ops::Stall>,
+    /// `stall` ended the request.
+    stalled: bool,
+}
+
+impl<'a> Events<'a> {
+    fn new(rx: &'a mpsc::Receiver<Event>, m: &'a ops::Metrics, arrived: Instant) -> Events<'a> {
+        Events {
+            rx,
+            m,
+            arrived,
+            last: None,
+            stall: None,
+            stalled: false,
         }
-        match rx.recv_timeout(POLL) {
-            Ok(e) => return Some(e),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+    }
+
+    fn seen(&mut self, e: Event) -> Event {
+        let now = Instant::now();
+        match &e {
+            Event::Text { .. } | Event::Done { .. } if self.last.is_none() => {
+                self.m.ttft.observe(now - self.arrived);
+                self.last = Some(now);
+            }
+            Event::Text { .. } => {
+                if let Some(t) = self.last.replace(now) {
+                    self.m.itl.observe(now - t);
+                }
+            }
+            _ => {}
+        }
+        if let Event::Done { usage, .. } = &e {
+            let m = self.m;
+            m.prompt_tokens
+                .fetch_add(usage.prompt_tokens as u64, Ordering::Relaxed);
+            m.cached_tokens
+                .fetch_add(usage.cached_tokens as u64, Ordering::Relaxed);
+        }
+        e
+    }
+
+    /// An event already there.
+    fn try_next(&mut self) -> Option<Event> {
+        let e = self.rx.try_recv().ok()?;
+        Some(self.seen(e))
+    }
+
+    /// The next event, checking every `POLL` (or a quarter of the stall
+    /// time, if shorter) that the client is still there (`checked`: when it
+    /// last was) and, with `stall`, still reading, also while events keep
+    /// coming: a whole (non-streamed) response writes nothing until the
+    /// end, so before, a client that left mid-generation went unnoticed and
+    /// the engine ran on to max_tokens or the context's end (minutes at
+    /// --ctx 32768) while every later request waited. None: it isn't there
+    /// (or the engine is gone).
+    fn next(&mut self, c: &Conn<TcpStream>, checked: &mut Instant) -> Option<Event> {
+        let poll = self.stall.as_ref().map_or(POLL, |s| {
+            POLL.min(s.idle() / 4).max(Duration::from_millis(5))
+        });
+        loop {
+            if checked.elapsed() >= poll {
+                *checked = Instant::now();
+                if c.s.closed() {
+                    return None;
+                }
+                if let Some(s) = self.stall.as_mut()
+                    && s.check(c.written, ops::unacked(&c.s))
+                {
+                    self.stalled = true;
+                    return None;
+                }
+            }
+            match self.rx.recv_timeout(poll) {
+                Ok(e) => return Some(self.seen(e)),
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => return None,
+            }
         }
     }
 }
@@ -1751,7 +1964,7 @@ fn next_event(
 fn whole(
     c: &mut Conn<TcpStream>,
     keep: bool,
-    rx: &mpsc::Receiver<Event>,
+    ev: &mut Events,
     chat: bool,
     id: &str,
     // The model's name and the fingerprint.
@@ -1762,7 +1975,7 @@ fn whole(
     let (mut content, mut reasoning) = (String::new(), String::new());
     let mut checked = Instant::now();
     loop {
-        match next_event(c, rx, &mut checked) {
+        match ev.next(c, &mut checked) {
             None => return Ok(false),
             Some(Event::Text {
                 content: t,
@@ -1815,7 +2028,7 @@ fn stream(
     c: &mut Conn<TcpStream>,
     req: &Request,
     g: &api::GenReq,
-    rx: &mpsc::Receiver<Event>,
+    rx: &mut Events,
     chat: bool,
     id: &str,
     // The model's name and the fingerprint.
@@ -1866,7 +2079,7 @@ fn stream(
         }
     };
     let mut checked = Instant::now();
-    let mut ev = next_event(c, rx, &mut checked);
+    let mut ev = rx.next(c, &mut checked);
     loop {
         // Everything already there goes out in one write.
         let mut done = false;
@@ -1918,7 +2131,7 @@ fn stream(
             if done {
                 break;
             }
-            ev = rx.try_recv().ok();
+            ev = rx.try_next();
         }
         c.send(buf.as_bytes())?;
         buf.clear();
@@ -1926,7 +2139,7 @@ fn stream(
             c.end_stream()?;
             return Ok(keep);
         }
-        ev = next_event(c, rx, &mut checked);
+        ev = rx.next(c, &mut checked);
         if ev.is_none() {
             return Ok(false);
         }
@@ -1936,7 +2149,8 @@ fn stream(
 const SERVE_USAGE: &str = "usage: axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--device D] \
      [--gpu-layers N] [--kv T] [--draft K] [--draft-model PATH] [--alias NAME] [--max-tokens N] \
      [--cors [ORIGIN]] [--max-conns N] [--max-queue N] [--parallel N] [--prefill-chunk N] \
-     [--prefill-ms MS] [--no-think] [--think-inline] [--quiet] [sampling flags]";
+     [--prefill-ms MS] [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS] [--no-think] \
+     [--think-inline] [--quiet] [sampling flags]";
 
 /// `serve` subcommand: args = [axon, serve, model, flags...]
 pub fn run(args: &[String]) -> io::Result<()> {
@@ -1968,6 +2182,10 @@ pub fn run(args: &[String]) -> io::Result<()> {
         prefill_chunk: engine::PREFILL_CHUNK,
         prefill_ms: engine::PREFILL_MS,
         rope: Default::default(),
+        // The environment keeps the key out of `ps`; --api-key overrides it.
+        api_key: std::env::var("AXON_API_KEY").ok().filter(|k| !k.is_empty()),
+        max_prompt_tokens: None,
+        slot_idle_ms: None,
     };
     let mut k = None;
     let mut i = 3;
@@ -2011,9 +2229,24 @@ pub fn run(args: &[String]) -> io::Result<()> {
                 i += 2;
                 continue;
             }
-            "--host" | "--port" | "--ctx" | "--draft" | "--draft-model" | "--device"
-            | "--gpu-layers" | "--kv" | "--alias" | "--max-tokens" | "--max-conns"
-            | "--max-queue" | "--parallel" | "--prefill-chunk" | "--prefill-ms" => {}
+            "--host"
+            | "--port"
+            | "--ctx"
+            | "--draft"
+            | "--draft-model"
+            | "--device"
+            | "--gpu-layers"
+            | "--kv"
+            | "--alias"
+            | "--max-tokens"
+            | "--max-conns"
+            | "--max-queue"
+            | "--parallel"
+            | "--prefill-chunk"
+            | "--prefill-ms"
+            | "--api-key"
+            | "--max-prompt-tokens"
+            | "--slot-idle-ms" => {}
             _ => crate::fail(&format!("unknown argument '{f}' for serve")),
         }
         let Some(v) = args.get(i + 1) else {
@@ -2044,6 +2277,12 @@ pub fn run(args: &[String]) -> io::Result<()> {
             "--max-queue" => o.max_queue = whole(true),
             "--prefill-chunk" => o.prefill_chunk = whole(false),
             "--prefill-ms" => o.prefill_ms = whole(false),
+            "--api-key" if v.trim().is_empty() || v.trim() != v => {
+                crate::fail("--api-key needs a key (no spaces around it)")
+            }
+            "--api-key" => o.api_key = Some(v.clone()),
+            "--max-prompt-tokens" => o.max_prompt_tokens = Some(whole(true)),
+            "--slot-idle-ms" => o.slot_idle_ms = Some(whole(true) as u64),
             "--parallel" => {
                 o.parallel = whole(true);
                 o.parallel_set = true;

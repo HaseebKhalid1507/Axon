@@ -452,6 +452,21 @@ impl<'a, 't> Batch<'a, 't> {
         Ok(())
     }
 
+    /// Each slot's state, for GET /slots and /metrics (read only).
+    pub fn slot_states(&self) -> Vec<super::ops::SlotState> {
+        let mut v: Vec<super::ops::SlotState> = (0..self.slots)
+            .map(|s| super::ops::SlotState {
+                held: self.held[s].len(),
+                busy: self.busy[s],
+                request: None,
+            })
+            .collect();
+        for s in self.pre.iter().map(|f| &f.seq).chain(&self.seqs) {
+            v[s.slot].request = Some((s.job.id, s.job.arrived));
+        }
+        v
+    }
+
     /// Every running request gets error `e` and leaves (its slot freed).
     pub fn fail_all(&mut self, e: &str) {
         let pre = self.pre.drain(..).map(|f| f.seq);
