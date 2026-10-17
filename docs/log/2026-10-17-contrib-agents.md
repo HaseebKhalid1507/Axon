@@ -1,4 +1,4 @@
-# Contributor contract: AGENTS.md, issue forms, PR template, labels  (PR #TBD)
+# Contributor contract: AGENTS.md, issue forms, PR template, labels  (PR #74)
 
 - Date: 2026-10-17. Branch: docs/contrib-agents. Base: main 5a73f63. Status: open
 - Pick / design: Haseeb, to open Axon to outside contributors (people and their agents) with the issue board as the work queue.
