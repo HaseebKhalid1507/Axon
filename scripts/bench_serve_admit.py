@@ -14,7 +14,8 @@ Run through the GPU queue (it loads models on the GPU). Binaries interleaved per
     after the long one, its TTFT. Every binary gets the same prompts in a
     round: same_text=1 when its greedy outputs equal the first binary's (the batching contract).
   * single: one server, one client: a streamed greedy request (max_tokens N, salted): TTFT and decode tok/s;
-    then a 560-token prompt with max_tokens 1: TTFT; with --idle-long=N a ~N-token prompt alone: TTFT.
+    then a 560-token prompt with max_tokens 1: TTFT; with --idle-long=N two ~N-token prompts sent together
+    to the idle server (the batch's idle chunked path; needs --parallel >= 2): the first and last first-token times.
 Extra server flags per binary: --flags-1="--prefill-chunk 256" (index into BIN...). --models=DIR: the model files.
 """
 import http.client, json, statistics, subprocess, sys, threading, time, itertools, urllib.request
@@ -208,10 +209,20 @@ def main():
                                             {**base, 'prompt': f'{s0 + 1} {PP560}', 'max_tokens': 1})
                     r = {'ttft_dec': ttft, 'tg': tg, 'n': n, 'pp560_ttft': pp}
                     if IDLE_LONG:
-                        # a long prompt sent to the idle server, alone
-                        out.append('|')
-                        r['idle_long_ttft'] = stream('/v1/completions', {**base, 'prompt': long_prompt(IDLE_LONG, s0 + 2),
-                                                                         'max_tokens': 4}, None, out)[0]
+                        # two long prompts sent together to the idle server: they go to the batch with nothing
+                        # decoding (the idle chunked path); each one's TTFT
+                        outs, tt = [[], []], [0.0, 0.0]
+
+                        def one(k):
+                            tt[k] = stream('/v1/completions', {**base, 'prompt': long_prompt(IDLE_LONG, s0 + 2 + k),
+                                                               'max_tokens': 4}, None, outs[k])[0]
+                        th = [threading.Thread(target=one, args=(k,)) for k in range(2)]
+                        for t2 in th:
+                            t2.start()
+                        for t2 in th:
+                            t2.join()
+                        r['idle2_ttft_first'], r['idle2_ttft_last'] = min(tt), max(tt)
+                        out += ['|'] + outs[0] + ['|'] + outs[1]
                     ref = ref or out
                     r['same_text'] = int(out == ref)
                 finally:

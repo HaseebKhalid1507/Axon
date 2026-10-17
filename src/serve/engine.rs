@@ -130,7 +130,8 @@ pub(super) struct Batch<'a, 't> {
     pre: Vec<Prefill<'t>>,
     policy: ChunkPolicy,
     /// Prefill cost per token per position attended (+ DEPTH_K), µs:
-    /// a moving average over chunks of at least the floor, once measured.
+    /// a moving average over feeds of at least LEARN_MIN tokens, once
+    /// measured.
     cost: Option<f64>,
     /// The last decode step's time.
     decode_ms: f64,
@@ -238,7 +239,8 @@ impl<'a, 't> Batch<'a, 't> {
             return Budget::Tokens(usize::MAX);
         }
         let idle = self.seqs.is_empty();
-        match (self.cost, idle, ms) {
+        let cost = self.cost.filter(|&c| c > 0.0);
+        match (cost, idle, ms) {
             (_, true, 0) | (None, true, _) => Budget::Tokens(IDLE_CHUNK.max(floor)),
             (Some(c), true, _) => Budget::Micros(IDLE_MS * 1e3, c),
             (_, false, 0) => Budget::Tokens(floor),
@@ -247,13 +249,8 @@ impl<'a, 't> Batch<'a, 't> {
         }
     }
 
-    /// Feed this step's prompt (`budget`), shortest remainder first (a
-    /// short prompt isn't held up behind a long one), but a prompt passed
-    /// over STARVE steps in a row goes first: none starves. With a time
-    /// budget each prompt's chunk is sized at its own depth, the first at
-    /// least `floor`. A remainder at most half a floor past its share is
-    /// fed whole (no last sliver of a pass of its own). Prompts then in
-    /// their slots join the running requests.
+    /// Feed this step's prompt (`budget`, split by `plan`); prompts then
+    /// in their slots join the running requests.
     fn prefill(&mut self) -> Result<(), String> {
         if self.pre.is_empty() {
             return Ok(());
@@ -264,47 +261,9 @@ impl<'a, 't> Batch<'a, 't> {
             .iter()
             .map(|f| f.seq.hist.len() - 1 - f.fed)
             .collect();
-        let mut plan = vec![0; rem.len()];
-        // Starved ones first (oldest first), then shortest remainder first.
-        let mut order: Vec<usize> = (0..rem.len()).collect();
-        order.sort_by_key(|&i| (self.pre[i].starved < STARVE, rem[i], i));
-        let floor = self.policy.floor;
-        let mut budget = budget;
-        let mut first = true;
-        for i in order {
-            // This prompt's share: tokens left, or what the time left buys
-            // at its depth (n tokens from depth d cost c n (d + n/2 + K)).
-            let share = match budget {
-                Budget::Tokens(t) => t,
-                Budget::Micros(us, c) => {
-                    let dk = self.pre[i].fed as f64 + DEPTH_K;
-                    let n = ((dk * dk + 2.0 * us / c).sqrt() - dk) as usize;
-                    if first { n.max(floor) } else { n }
-                }
-            };
-            if share == 0 {
-                break;
-            }
-            let want = rem[i];
-            let n = if want <= share.saturating_add(floor / 2) {
-                want
-            } else if first || share >= floor {
-                share
-            } else {
-                // Not a sliver of a long prompt beside another's chunk.
-                continue;
-            };
-            first = false;
-            plan[i] = n;
-            budget = match budget {
-                Budget::Tokens(t) => Budget::Tokens(t.saturating_sub(n)),
-                Budget::Micros(us, c) => {
-                    let d = self.pre[i].fed as f64;
-                    let spent = c * n as f64 * (d + n as f64 / 2.0 + DEPTH_K);
-                    Budget::Micros((us - spent).max(0.0), c)
-                }
-            };
-        }
+        let fed: Vec<usize> = self.pre.iter().map(|f| f.fed).collect();
+        let starved: Vec<usize> = self.pre.iter().map(|f| f.starved).collect();
+        let plan = plan(budget, self.policy.floor, &fed, &rem, &starved);
         for (i, &n) in plan.iter().enumerate() {
             if n > 0 {
                 self.pre[i].starved = 0;
@@ -528,6 +487,67 @@ impl<'a, 't> Batch<'a, 't> {
     }
 }
 
+/// One step's prefill plan: the tokens to feed each prompt being
+/// prefilled (`fed` rows in its slot, `rem` still to feed, passed over
+/// `starved` steps in a row; all in arrival order). Prompts passed over
+/// STARVE steps in a row go first, oldest first; then the others, shortest
+/// remainder first. Each gets what is left of `budget`: tokens, or what the
+/// time left buys at its own depth (n tokens from depth d cost
+/// c n (d + n/2 + DEPTH_K)), the first at least `floor`. A remainder at
+/// most half a floor past its share is fed whole (no last sliver of a pass
+/// of its own); a later prompt's share under `floor` is skipped unless it
+/// finishes the prompt (no sliver of a long one beside another's chunk).
+fn plan(
+    budget: Budget,
+    floor: usize,
+    fed: &[usize],
+    rem: &[usize],
+    starved: &[usize],
+) -> Vec<usize> {
+    let mut plan = vec![0; rem.len()];
+    let mut order: Vec<usize> = (0..rem.len()).collect();
+    order.sort_by_key(|&i| {
+        if starved[i] >= STARVE {
+            (false, 0, i)
+        } else {
+            (true, rem[i], i)
+        }
+    });
+    let mut budget = budget;
+    let mut first = true;
+    for i in order {
+        let share = match budget {
+            Budget::Tokens(t) => t,
+            Budget::Micros(us, c) => {
+                let dk = fed[i] as f64 + DEPTH_K;
+                let n = ((dk * dk + 2.0 * us / c).sqrt() - dk) as usize;
+                if first { n.max(floor) } else { n }
+            }
+        };
+        let want = rem[i];
+        let n = if want <= share.saturating_add(floor / 2) {
+            want
+        } else if first || share >= floor {
+            share
+        } else {
+            0
+        };
+        if n == 0 || share == 0 {
+            continue;
+        }
+        first = false;
+        plan[i] = n;
+        budget = match budget {
+            Budget::Tokens(t) => Budget::Tokens(t.saturating_sub(n)),
+            Budget::Micros(us, c) => {
+                let spent = c * n as f64 * (fed[i] as f64 + n as f64 / 2.0 + DEPTH_K);
+                Budget::Micros((us - spent).max(0.0), c)
+            }
+        };
+    }
+    plan
+}
+
 /// Send `id`'s text; Some(end) if that ended the request (a stop string,
 /// or the client is gone).
 fn emit(s: &mut Seq, id: u32) -> Option<End> {
@@ -541,4 +561,108 @@ fn emit(s: &mut Seq, id: u32) -> Option<End> {
         return Some(End::Gone);
     }
     hit.then_some(End::Stop)
+}
+
+#[cfg(test)]
+mod plan_tests {
+    use super::{Budget, DEPTH_K, STARVE, plan};
+
+    /// µs that `n` tokens from depth `d` cost at `c` (the model `plan` uses).
+    fn cost(c: f64, d: usize, n: usize) -> f64 {
+        c * n as f64 * (d as f64 + n as f64 / 2.0 + DEPTH_K)
+    }
+
+    #[test]
+    fn tokens_shortest_first_and_no_sliver() {
+        // A short prompt goes first; the 212 tokens left would be a sliver
+        // of the long one (under the floor): skipped this step.
+        assert_eq!(
+            plan(Budget::Tokens(512), 256, &[0, 0], &[10_000, 300], &[0, 0]),
+            [0, 300]
+        );
+        // Left with at least a floor, the long one gets it.
+        assert_eq!(
+            plan(Budget::Tokens(1024), 256, &[0, 0], &[10_000, 300], &[0, 0]),
+            [724, 300]
+        );
+        // A remainder within half a floor past the share is fed whole.
+        assert_eq!(plan(Budget::Tokens(512), 256, &[0], &[600], &[0]), [600]);
+        assert_eq!(plan(Budget::Tokens(512), 256, &[0], &[700], &[0]), [512]);
+    }
+
+    #[test]
+    fn micros_shares_follow_each_prompts_depth() {
+        let c = 0.005;
+        let us = 50_000.0;
+        let shallow = plan(Budget::Micros(us, c), 16, &[0], &[100_000], &[0])[0];
+        let deep = plan(Budget::Micros(us, c), 16, &[30_000], &[100_000], &[0])[0];
+        assert!(shallow > deep && deep > 16, "{shallow} {deep}");
+        // Each share costs about the budget at its own depth.
+        for (d, n) in [(0, shallow), (30_000, deep)] {
+            assert!((cost(c, d, n) - us).abs() < cost(c, d, 1) + 1.0, "{d} {n}");
+        }
+        // Two prompts: the shorter (and here deeper) one is sized at its
+        // own depth, the other gets the time left at its depth.
+        let p = plan(
+            Budget::Micros(us, c),
+            16,
+            &[0, 30_000],
+            &[100_000, 50_000],
+            &[0, 0],
+        );
+        assert_eq!(p[1], deep);
+        assert_eq!(p[0], 0, "{p:?}: nothing (or a sliver) left");
+    }
+
+    #[test]
+    fn micros_first_gets_the_floor() {
+        assert_eq!(
+            plan(Budget::Micros(0.0, 0.005), 256, &[0], &[10_000], &[0]),
+            [256]
+        );
+        assert_eq!(
+            plan(
+                Budget::Micros(0.0, 0.005),
+                256,
+                &[0, 0],
+                &[10_000, 9_000],
+                &[0, 0]
+            ),
+            [0, 256]
+        );
+    }
+
+    #[test]
+    fn starved_prompts_go_oldest_first() {
+        // All passed over STARVE times: arrival order, not the remainder,
+        // decides (by remainder the two short ones would take the step).
+        let s = [STARVE; 3];
+        assert_eq!(
+            plan(Budget::Tokens(256), 256, &[0; 3], &[5_000, 100, 200], &s),
+            [256, 0, 0]
+        );
+        // A starved long prompt goes before fresher short ones.
+        assert_eq!(
+            plan(
+                Budget::Tokens(256),
+                256,
+                &[0; 3],
+                &[5_000, 100, 200],
+                &[STARVE, 0, 0]
+            ),
+            [256, 0, 0]
+        );
+        // Not starved yet: shortest first (the 200 fed whole: within half a
+        // floor past the 156 left).
+        assert_eq!(
+            plan(
+                Budget::Tokens(256),
+                256,
+                &[0; 3],
+                &[5_000, 100, 200],
+                &[STARVE - 1, 0, 0]
+            ),
+            [0, 100, 200]
+        );
+    }
 }
