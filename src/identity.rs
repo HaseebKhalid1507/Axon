@@ -34,7 +34,11 @@
 //! the trained length where it fits: attention runs over the positions
 //! filled, in 64-position blocks, so a bigger cache only lets a request run
 //! longer and never changes a token below the limit), --parallel and the
-//! slot count, chunked prefill, thread counts, CUDA graphs and PDL. Sampling
+//! slot count, chunked prefill, thread counts, CUDA graphs and PDL. All of
+//! that is for a given placement: on an automatic CPU/GPU split, a draft
+//! model's VRAM reserve and the cache size (--ctx, gen's too) feed where the
+//! split falls, so they can move it, which changes bits, and `backend`'s
+//! layer split says so. Pin --gpu-layers for reproducible runs. Sampling
 //! params and the seed are per request, so they're the request's, not the
 //! server's. A flag that does change bits must add a field here, set only
 //! when the flag is (as --rope-scaling's `rope`).
