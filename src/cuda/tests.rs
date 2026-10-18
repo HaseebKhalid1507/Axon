@@ -423,6 +423,7 @@ fn engine_nvrtc(g: &Gpu) -> Result<&'static ffi::Nvrtc, String> {
 /// picks for it. Skipped without NVRTC.
 #[test]
 fn nvrtc_kernels_compile_for_old_archs() {
+    // No testutil::gpu lock: the handle only picks the NVRTC, no GPU work runs.
     let n = match Gpu::open().map_or_else(|_| ffi::nvrtc(), |g| engine_nvrtc(&g)) {
         Ok(n) => n,
         Err(e) => {
