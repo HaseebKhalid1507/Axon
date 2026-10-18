@@ -974,6 +974,17 @@ fn deepseek2_check_supported() {
     let mut extra = list.clone();
     extra.push(("blk.2.attn_q.bias".into(), vec![96], F32));
     refuse(meta.clone(), extra, "not supported on deepseek2");
+    // An i-quant the kernels don't run: the shared refusal (model.rs unsupported_type).
+    let mut iq = list.clone();
+    iq.iter_mut()
+        .find(|t| t.0 == "blk.2.attn_v_b.weight")
+        .unwrap()
+        .2 = 22;
+    refuse(
+        meta.clone(),
+        iq,
+        "tensor blk.2.attn_v_b.weight: type IQ2_S (22) is not supported (supported: F32",
+    );
     let mut short = list.clone();
     short.retain(|t| t.0 != "blk.2.attn_v_b.weight");
     refuse(meta.clone(), short, "missing tensor blk.2.attn_v_b.weight");

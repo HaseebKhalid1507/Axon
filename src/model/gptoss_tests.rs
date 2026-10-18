@@ -452,6 +452,26 @@ fn check_supported_gpt_oss() {
         t.qtype = crate::gguf::qtype(MXFP4);
     }
     assert!(check_supported(&q).is_err());
+    // A gpt-oss file with an unsupported attention tensor: the refusal names
+    // it, and the mixed-file summary leaves out the (supported) MXFP4 experts.
+    let mut m = oss_fixture();
+    let retype = |m: &mut Model, name: &str, id: u32| {
+        m.tensors.iter_mut().find(|t| t.name == name).unwrap().qtype = crate::gguf::qtype(id);
+    };
+    retype(&mut m, "blk.0.attn_q.weight", 23);
+    let e = check_supported(&m).unwrap_err().to_string();
+    assert!(e.contains("blk.0.attn_q.weight: type IQ4_XS (23)"), "{e}");
+    assert!(
+        !e.contains("the file has unsupported tensors") && !e.contains("MXFP4"),
+        "{e}"
+    );
+    retype(&mut m, "blk.1.attn_k.weight", 22);
+    let e = check_supported(&m).unwrap_err().to_string();
+    assert!(
+        e.contains("(the file has unsupported tensors: 1 IQ4_XS, 1 IQ2_S)"),
+        "{e}"
+    );
+    assert!(!e.contains("MXFP4"), "{e}");
     // The layout: even layers local, window 4.
     let swa = gemma_swa(&oss_fixture(), 3).unwrap();
     assert_eq!((swa.window, swa.local), (4, vec![true, false, true]));

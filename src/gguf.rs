@@ -368,6 +368,37 @@ const QTYPES: &[QType] = &[
     },
 ];
 
+/// GGML types (llama.cpp's `ggml_type` ids) whose block layout isn't in
+/// `QTYPES`: named in messages (`axon info`, refusals), never sized.
+const UNSIZED_NAMES: &[(u32, &str)] = &[
+    (16, "IQ2_XXS"),
+    (17, "IQ2_XS"),
+    (18, "IQ3_XXS"),
+    (19, "IQ1_S"),
+    (21, "IQ3_S"),
+    (22, "IQ2_S"),
+    (23, "IQ4_XS"),
+    (24, "I8"),
+    (25, "I16"),
+    (26, "I32"),
+    (27, "I64"),
+    (28, "F64"),
+    (29, "IQ1_M"),
+    (31, "Q4_0_4_4"),
+    (32, "Q4_0_4_8"),
+    (33, "Q4_0_8_8"),
+    (34, "TQ1_0"),
+    (35, "TQ2_0"),
+    (36, "IQ4_NL_4_4"),
+    (37, "IQ4_NL_4_8"),
+    (38, "IQ4_NL_8_8"),
+];
+
+/// Whether `id`'s block size is known (its tensors' byte sizes are checked).
+pub fn sized(id: u32) -> bool {
+    QTYPES.iter().any(|q| q.id == id)
+}
+
 pub fn qtype(id: u32) -> QType {
     QTYPES
         .iter()
@@ -375,7 +406,10 @@ pub fn qtype(id: u32) -> QType {
         .copied()
         .unwrap_or(QType {
             id,
-            name: "??",
+            name: UNSIZED_NAMES
+                .iter()
+                .find(|n| n.0 == id)
+                .map_or("??", |n| n.1),
             block_size: 1,
             block_bytes: 1,
         })
@@ -1184,8 +1218,8 @@ fn parse(buf: &[u8]) -> io::Result<Header> {
             .iter()
             .try_fold(1u64, |n, &d| n.checked_mul(d))
             .ok_or_else(|| bad(format!("tensor {name}: element count overflows ({dims:?})")))?;
-        // Unknown types (qtype "??") have no known size; only their offset is checked.
-        let n_bytes = if qt.name == "??" {
+        // Types without a known block layout: only their offset is checked.
+        let n_bytes = if !sized(qt.id) {
             0
         } else {
             if n_elements % qt.block_size as u64 != 0 {
@@ -1382,6 +1416,27 @@ pub fn gguf_bytes_for_test(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Types without a block layout here are named (for refusals and `axon
+    /// info`) but stay unsized: only their offset is checked on load.
+    #[test]
+    fn unsized_types_are_named_not_sized() {
+        for (id, n) in [
+            (19, "IQ1_S"),
+            (23, "IQ4_XS"),
+            (29, "IQ1_M"),
+            (31, "Q4_0_4_4"),
+            (36, "IQ4_NL_4_4"),
+        ] {
+            assert_eq!(qtype(id).name, n);
+            assert!(!sized(id), "{n}");
+        }
+        assert_eq!(qtype(99).name, "??");
+        assert!(sized(30) && qtype(30).name == "BF16");
+        assert!(sized(39) && qtype(39).name == "MXFP4");
+        assert!(sized(20) && qtype(20).name == "IQ4_NL");
+        assert!(UNSIZED_NAMES.iter().all(|&(id, _)| !sized(id)));
+    }
 
     /// The row reordering on its own: head sizes 64 and 128, a quantized
     /// matrix (Q8_0 rows of 2 blocks) and a 1-D F32 bias, against the
