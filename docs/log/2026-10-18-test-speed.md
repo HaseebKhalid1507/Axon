@@ -57,13 +57,19 @@ the slot is freed are unchanged. No timeout was raised.
 ## How it was verified
 | gate | result | job ID / log |
 |---|---|---|
-| release suite (rebased tree) | pending | 1018-022946-e1f5 |
-| debug-assertion suite (rebased tree) | pending | 1018-022946-32cb |
-| test count, `--list` main vs branch | 578 = 578 (35 ignored both) | local `--list` |
+| release suite, tree 0e3f4cb, AXON_TEST_GPU_SERIAL=1 | pending | 1018-032116-538f |
+| debug-assertion suite, tree 0e3f4cb, AXON_TEST_GPU_SERIAL=1 | pending | 1018-032116-2f3a |
+| test count, `--list` main a032773 vs branch | 578 = 578 (35 ignored both) | local `--list` |
 | non-test release binary, main vs branch | byte-identical, md5 697d88a026572ebf2651732eed6d51ef | local build, same flags |
-| md5 of `gen` (0.5B, cuda, -n 64), same host | pending | 1018-022915-1235 / 1018-022937-5c6d |
+| md5 of `gen` (0.5B, cuda, -n 64), same host | pending (and implied by the identical binary) | 1018-022915-1235 / 1018-022937-5c6d |
 | clippy -D warnings (bin + tests), rustfmt | clean | local |
-| flake, 20 runs each under CPU load, main vs branch | pending | 1018-021925-f066 / 1018-021949-7daa |
+| slot-idle test x20 in a CPU-loaded suite slice, main vs branch | pending | 1018-021925-f066 / 1018-021949-7daa |
+| slot-idle stress (AXON_THREADS=1, 64 spinning threads) x10, main | reproduces "never filled" (run 1 failed; rest pending) | 1018-031600-534b |
+| same stress x10, branch | pending | 1018-032125-50cf |
+
+The stress runs link `stress.o`, a measurement-only constructor: AXON_REPEAT=N runs the test binary N times,
+and AXON_HOG=K starts K spinning threads in each run, which gives a loaded host on demand. With one pool thread
+and 64 hogs, a token step takes longer than the 300 ms eviction, which is the failure's mechanism.
 
 ## Results
 Release suite, exclusive 4090 pod3 (same host for both), `--test-threads 1`, MEASURED:
