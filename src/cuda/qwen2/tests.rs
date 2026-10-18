@@ -55,6 +55,58 @@ pub(crate) fn compare<R: Lm, O: Lm>(r: &R, o: &O, ids: &[u32], steps: usize, a: 
     compare_from(r, &mut rc, o, &mut oc, last, rest.len(), steps, a);
 }
 
+/// The reference's half of `compare`, run once: its logits after the
+/// prompt and after each of `steps` greedy tokens of its own (exactly the
+/// calls `compare` makes on it), so several models can be graded against
+/// one reference pass (`compare_trace`) instead of recomputing it per model.
+pub(crate) struct Trace {
+    ids: Vec<u32>,
+    steps: usize,
+    /// (token fed at position rest.len() + s, the reference's logits there).
+    at: Vec<(u32, Vec<f32>)>,
+}
+
+pub(crate) fn trace<R: Lm>(r: &R, ids: &[u32], steps: usize) -> Trace {
+    let mut rc = r.new_cache(ids.len() + steps + 1);
+    let (&last, rest) = ids.split_last().unwrap();
+    r.feed_batch(rest, 0, &mut rc);
+    let mut tok = last;
+    let mut at = Vec::with_capacity(steps + 1);
+    for s in 0..=steps {
+        let lr = r.forward(tok, rest.len() + s, &mut rc);
+        let next = crate::argmax(&lr);
+        at.push((tok, lr));
+        tok = next;
+    }
+    Trace {
+        ids: ids.to_vec(),
+        steps,
+        at,
+    }
+}
+
+/// `compare(r, o, ids, steps, a)` with `t = trace(r, ids, steps)`: the same
+/// calls on `o`, the same tally.
+pub(crate) fn compare_trace<O: Lm>(t: &Trace, o: &O, a: &mut Agree) {
+    let mut oc = o.new_cache(t.ids.len() + t.steps + 1);
+    let rest = &t.ids[..t.ids.len() - 1];
+    o.feed_batch(rest, 0, &mut oc);
+    a.last_kl = 0.0;
+    for (s, (tok, lr)) in t.at.iter().enumerate() {
+        let lo = o.forward(*tok, rest.len() + s, &mut oc);
+        a.tally(lr, &lo);
+    }
+}
+
+/// `compare` against several models at once: `trace` once, then
+/// `compare_trace` for each (model, tally) pair.
+macro_rules! compare_each {
+    ($r:expr, $ids:expr, $steps:expr, $(($o:expr, $a:expr)),+ $(,)?) => {{
+        let t = $crate::cuda::qwen2::tests::trace($r, $ids, $steps);
+        $($crate::cuda::qwen2::tests::compare_trace(&t, $o, $a);)+
+    }};
+}
+
 /// `compare` from caches already holding positions 0..pos: `last` at pos,
 /// then `steps` greedy tokens of `r`.
 #[allow(clippy::too_many_arguments)]
@@ -74,18 +126,27 @@ pub(crate) fn compare_from<R: Lm, O: Lm>(
         let pos = pos + s;
         let lr = r.forward(tok, pos, rc);
         let lo = o.forward(tok, pos, oc);
-        let (ar, ao) = (crate::argmax(&lr), crate::argmax(&lo));
+        a.tally(&lr, &lo);
+        tok = crate::argmax(&lr);
+    }
+}
+
+impl Agree {
+    /// One position: reference logits `lr`, the other's `lo`.
+    fn tally(&mut self, lr: &[f32], lo: &[f32]) {
+        let a = self;
+        let (ar, ao) = (crate::argmax(lr), crate::argmax(lo));
         a.positions += 1;
         a.top1 += (ar == ao) as usize;
-        let k = kl(&lr, &lo);
+        let k = kl(lr, lo);
         a.max_kl = a.max_kl.max(k);
         if k > 0.5 {
             a.over_half
-                .push((a.positions, k, top2_margin(&lr), a.last_kl));
+                .push((a.positions, k, top2_margin(lr), a.last_kl));
         }
         a.last_kl = k;
         a.sum_kl += k;
-        for (x, y) in lr.iter().zip(&lo) {
+        for (x, y) in lr.iter().zip(lo) {
             a.max_abs = a.max_abs.max((x - y).abs());
         }
         if ar != ao {
@@ -93,7 +154,6 @@ pub(crate) fn compare_from<R: Lm, O: Lm>(
             a.flips.push(lr[ar as usize] - lr[ao as usize]);
             a.flip_at.push(a.positions);
         }
-        tok = ar;
     }
 }
 
@@ -133,8 +193,7 @@ fn agreement(m: &Model, steps: usize) -> (Agree, Agree) {
     let (mut ag, mut ac) = (Agree::default(), Agree::default());
     for p in PROMPTS {
         let ids = tok.encode(p);
-        compare(&cpu, &gpu, &ids, steps, &mut ag);
-        compare(&cpu, &rows, &ids, steps, &mut ac);
+        compare_each!(&cpu, &ids, steps, (&gpu, &mut ag), (&rows, &mut ac));
     }
     (ag, ac)
 }
@@ -1349,11 +1408,24 @@ fn continuations_with<R: Lm, O: Lm>(
     name: &str,
     tie: f32,
 ) -> (usize, usize) {
+    continuations_by(&mut |ids| greedy(r, ids, 32, true), o, tok, name, tie)
+}
+
+/// `continuations_with` with the reference's `greedy(r, ids, 32, true)`
+/// from `reference` (called once per prompt, in PROMPTS order, after `o`'s
+/// continuation): `continuations_match` computes it once for several models.
+fn continuations_by<O: Lm>(
+    reference: &mut dyn FnMut(&[u32]) -> (Vec<u32>, Vec<Vec<f32>>),
+    o: &O,
+    tok: &crate::tokenizer::Tokenizer,
+    name: &str,
+    tie: f32,
+) -> (usize, usize) {
     let (mut same, mut matched) = (0, 0);
     for p in PROMPTS {
         let ids = tok.encode(p);
         let (to, _) = greedy(o, &ids, 32, false);
-        let (tr, lr) = greedy(r, &ids, 32, true);
+        let (tr, lr) = reference(&ids);
         match (0..32).find(|&i| to[i] != tr[i]) {
             None => {
                 same += 1;
@@ -1411,11 +1483,25 @@ fn continuations_match(m: &Model, name: &str) {
     let mut gpu = CudaQwen2::new(&g, &km, m, 256).unwrap();
     let rows = Qwen2::new_with(m, false);
     let cpu = Qwen2::new(m);
-    let (cs, cm) = continuations_with(&cpu, &rows, &tok, &format!("{name} cpu rows"), tie);
+    // The CPU's continuations (with logits), once for all the comparisons.
+    let refs: Vec<_> = PROMPTS
+        .iter()
+        .map(|p| greedy(&cpu, &tok.encode(p), 32, true))
+        .collect();
+    let refs = &refs;
+    let by_ref = || {
+        let mut i = 0;
+        move |_: &[u32]| {
+            i += 1;
+            refs[i - 1].clone()
+        }
+    };
+    let (cs, cm) = continuations_by(&mut by_ref(), &rows, &tok, &format!("{name} cpu rows"), tie);
     let paths: &[bool] = if km.mma() { &[true, false] } else { &[false] };
     for &tc in paths {
         gpu.set_tc_attn(tc); // greedy makes its caches after this
-        let (gs, gm) = continuations_with(&cpu, &gpu, &tok, &format!("{name} gpu tc {tc}"), tie);
+        let name = format!("{name} gpu tc {tc}");
+        let (gs, gm) = continuations_by(&mut by_ref(), &gpu, &tok, &name, tie);
         assert!(
             gs + 2 >= cs,
             "tc {tc}: identical continuations: gpu {gs}, cpu rows {cs}"
@@ -1607,7 +1693,9 @@ fn gpu_yarn_matches_reference_and_keeps_bits() {
 /// Llama-3.2-1B-Instruct, mapped (as `qwen3_mapped`): head_dim 64, GQA 4,
 /// tied Q6_K head, Llama 3 RoPE factors, q/k rows reordered at load.
 fn llama_mapped() -> Option<Model> {
-    crate::testutil::llama_model()?;
+    // The path check only (skip or panic as llama_model does): loading the
+    // model here too cost a whole extra copy of the file per test.
+    crate::testutil::llama_model_path()?;
     model_at(crate::testutil::LLAMA_MODEL)
 }
 
@@ -2059,8 +2147,7 @@ fn gpu_logits_match_cpu_long_context() {
             .cycle()
             .take(1100 + one.len() / 2)
             .collect();
-        compare(&cpu, &gpu, &ids, 8, &mut ag);
-        compare(&cpu, &rows, &ids, 8, &mut ac);
+        compare_each!(&cpu, &ids, 8, (&gpu, &mut ag), (&rows, &mut ac));
     }
     report("0.5B long gpu vs cpu", &ag);
     report("0.5B long cpu rows vs cpu", &ac);
@@ -2094,8 +2181,7 @@ fn gpu_logits_match_cpu_2000_tokens() {
     let (mut ag, mut ac) = (Agree::default(), Agree::default());
     let one = tok.encode(&format!("{} ", PROMPTS[4]));
     let ids: Vec<u32> = one.iter().copied().cycle().take(2000).collect();
-    compare(&cpu, &gpu, &ids, 6, &mut ag);
-    compare(&cpu, &rows, &ids, 6, &mut ac);
+    compare_each!(&cpu, &ids, 6, (&gpu, &mut ag), (&rows, &mut ac));
     report("0.5B 2000 gpu vs cpu", &ag);
     report("0.5B 2000 cpu rows vs cpu", &ac);
     let n = ag.positions;
@@ -2122,8 +2208,7 @@ fn natural_long(m: &Model, name: &str) {
     let cpu = Qwen2::new(m);
     let ids = natural_ids(m, 1600);
     let (mut ag, mut ac) = (Agree::default(), Agree::default());
-    compare_forced(&cpu, &gpu, &ids, 1100, &mut ag);
-    compare_forced(&cpu, &rows, &ids, 1100, &mut ac);
+    compare_forced2(&cpu, &gpu, &rows, &ids, 1100, &mut ag, &mut ac);
     report(&format!("{name} natural 1100..1600 gpu vs cpu"), &ag);
     report(&format!("{name} natural 1100..1600 cpu rows vs cpu"), &ac);
     // Measured, GPU / CPU per-row vs CPU (top-1, mean KL, max KL): 0.5B
@@ -5387,24 +5472,37 @@ fn compare_forced<R: Lm, O: Lm>(r: &R, o: &O, ids: &[u32], from: usize, a: &mut 
     for (pos, &t) in ids.iter().enumerate().skip(from) {
         let lr = r.forward(t, pos, &mut rc);
         let lo = o.forward(t, pos, &mut oc);
-        let (ar, ao) = (crate::argmax(&lr), crate::argmax(&lo));
-        a.positions += 1;
-        a.top1 += (ar == ao) as usize;
-        let k = kl(&lr, &lo);
-        a.max_kl = a.max_kl.max(k);
-        if k > 0.5 {
-            a.over_half
-                .push((a.positions, k, top2_margin(&lr), a.last_kl));
-        }
-        a.last_kl = k;
-        a.sum_kl += k;
-        for (x, y) in lr.iter().zip(&lo) {
-            a.max_abs = a.max_abs.max((x - y).abs());
-        }
-        if ar != ao {
-            a.flips.push(lr[ar as usize] - lr[ao as usize]);
-            a.flip_at.push(a.positions);
-        }
+        a.tally(&lr, &lo);
+    }
+}
+
+/// `compare_forced(r, o1, ..)` and `compare_forced(r, o2, ..)` in one
+/// pass: the same calls on each model, the reference's run once (the
+/// teacher-forced inputs don't depend on any model's output).
+#[allow(clippy::too_many_arguments)]
+fn compare_forced2<R: Lm, O1: Lm, O2: Lm>(
+    r: &R,
+    o1: &O1,
+    o2: &O2,
+    ids: &[u32],
+    from: usize,
+    a1: &mut Agree,
+    a2: &mut Agree,
+) {
+    let mut rc = r.new_cache(ids.len());
+    let mut c1 = o1.new_cache(ids.len());
+    let mut c2 = o2.new_cache(ids.len());
+    for (i, ch) in ids[..from].chunks(512).enumerate().filter(|_| from > 0) {
+        r.feed_batch(ch, i * 512, &mut rc);
+        o1.feed_batch(ch, i * 512, &mut c1);
+        o2.feed_batch(ch, i * 512, &mut c2);
+    }
+    a1.last_kl = 0.0;
+    a2.last_kl = 0.0;
+    for (pos, &t) in ids.iter().enumerate().skip(from) {
+        let lr = r.forward(t, pos, &mut rc);
+        a1.tally(&lr, &o1.forward(t, pos, &mut c1));
+        a2.tally(&lr, &o2.forward(t, pos, &mut c2));
     }
 }
 
@@ -6708,8 +6806,7 @@ fn gemma3_vs_cpu(m: &Model, name: &str) {
     let mut seqs = Vec::new();
     for p in PROMPTS {
         let ids = tok.encode(p);
-        compare(&cpu, &gpu, &ids, STEPS, &mut ag);
-        compare(&cpu, &rows, &ids, STEPS, &mut ac);
+        compare_each!(&cpu, &ids, STEPS, (&gpu, &mut ag), (&rows, &mut ac));
         // compare's position s of this prompt follows ids + the CPU's
         // first s greedy picks.
         let (picks, _) = greedy(&cpu, &ids, STEPS, false);
@@ -6983,8 +7080,7 @@ fn gpu_gemma3_logits_match_cpu() {
             .cycle()
             .take(1100 + one.len() / 2)
             .collect();
-        compare(&cpu, &gpu, &ids, 8, &mut ag);
-        compare(&cpu, &rows, &ids, 8, &mut ac);
+        compare_each!(&cpu, &ids, 8, (&gpu, &mut ag), (&rows, &mut ac));
     }
     report("gemma3 1B long gpu vs cpu", &ag);
     report("gemma3 1B long cpu rows vs cpu", &ac);
