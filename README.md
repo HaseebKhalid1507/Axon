@@ -155,8 +155,9 @@ axon gen <model.gguf> "<prompt>" [-n N] [--draft K] [--draft-model PATH] [--devi
           [--ctx N] [--gpu-layers N] [--gpus L] [--kv T]
                                           generation (default 32 tokens; greedy unless --temp)
 axon logits <model.gguf> "<prompt>" [-k K]  top-K next-token logits (default 10)
-axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K]
-          [--draft-model PATH] [--device D] [--gpu-layers N] [--gpus L] [--kv T] [--session F]
+axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [--forget-to F] [-n N]
+          [--draft K] [--draft-model PATH] [--device D] [--gpu-layers N] [--gpus L] [--kv T]
+          [--session F]
                                           talk to an Instruct model (sampled; --temp 0: greedy)
 sampling (gen, chat): --temp T --top-k K --top-p P --min-p P
           --repeat-penalty P --repeat-last-n N --seed S   (axon --help)
@@ -201,6 +202,13 @@ Defaults, as `axon --help` gives them:
   fits, else a split. For `serve`, see below: its default is the whole trained context.
   gen: none (the cache holds the prompt and `-n`); `--ctx N` places the model and sizes its
   cache for N tokens, as chat would, to measure a long context's speed.
+- `--forget-to F` (chat): 0.5. When the conversation outgrows `--ctx`, the oldest exchanges
+  are forgotten until the rest, with the new message, fills at most F of the context (the
+  newest exchange stays unless the new message needs its room). The next turns append to
+  the cache until it's full again; a reply reserves room for itself (`-n`, or a quarter of
+  the context if unlimited), so with the defaults 0.5 leaves a quarter of the context to grow
+  into. `min`, 0 or 1: only as many as make room for the reply (the old behaviour).
+  Ctrl-C before a reply's first token puts the forgotten exchanges back.
 - `--rope-scaling yarn --rope-scale F [--yarn-orig-ctx N]` (gen, logits, chat, serve): off.
   With it the context is N x F (`--ctx` up to that); also `--yarn-beta-fast` (32),
   `--yarn-beta-slow` (1), `--yarn-mscale` (0.1 ln F + 1; not llama.cpp's `--yarn-attn-factor`). See
@@ -225,7 +233,11 @@ the line, never quits; Ctrl-D on an empty line (or `/exit`) quits. Keys typed wh
 a reply streams wait for the next prompt instead of mixing into the reply. The
 terminal is in raw mode while chat runs, so Ctrl-Z and Ctrl-\ do nothing. Piped,
 each line of stdin is a message and each reply one block of stdout. When the
-conversation outgrows `--ctx` (default: the model's, at most 8192), the oldest exchanges are forgotten.
+conversation outgrows `--ctx` (default: the model's, at most 8192), the oldest exchanges are forgotten,
+down to half the context by default (`--forget-to`). Forgetting shifts every position, so what's kept is
+prefilled again; forgetting only what makes room would pay that near-full prefill on every turn once the
+context is full, while half leaves room for the next several turns to append to the cache. The cache after
+forgetting is the same, byte for byte, as a fresh prefill of what's kept.
 
 Llama 3 uses the official 3.1/3.2 template (no tools): a system block that always
 opens with the template's "Cutting Knowledge Date: December 2023 / Today Date: 26 Jul
