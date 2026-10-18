@@ -327,7 +327,8 @@ pub(super) fn wave_passes(
     }
     // Ties: fewer token tiles, then the more even, then the shorter last
     // pass (the others full: 2100 -> 1088 + 1012, not 1024 + 1076).
-    let mut best: Option<((u64, usize, usize, usize), Vec<usize>)> = None;
+    type Key = (u64, usize, usize, usize);
+    let mut best: Option<(Key, Vec<usize>)> = None;
     for (s, fs) in f.iter().enumerate() {
         let (Some((c, m, v)), last) = (fs, n - 64 * s) else {
             continue;
