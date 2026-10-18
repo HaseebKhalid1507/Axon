@@ -1366,21 +1366,49 @@ mod tests {
                 .map(|x| x.as_u64().unwrap() as u32)
                 .collect()
         };
+        // llama.cpp turns <|start|>, <|message|>, <|channel|>, <|constrain|>
+        // and <|end|> into USER_DEFINED tokens for this vocabulary ("quick
+        // hack for gpt-oss"), so its plain-text tokenizing parses them too.
+        // Here plain text never makes a control token (user text can't
+        // forge a turn): for text with those markers only the special
+        // parse is llama.cpp's.
+        let forged = |s: &str| {
+            [
+                "<|start|>",
+                "<|message|>",
+                "<|channel|>",
+                "<|constrain|>",
+                "<|end|>",
+            ]
+            .iter()
+            .any(|m| s.contains(m))
+        };
         let cases = d["cases"].as_array().expect("cases");
         assert!(cases.len() >= 40);
+        let mut marked = 0;
         for c in cases {
             let text = c["text"].as_str().expect("text");
-            assert_eq!(t.encode(text), ids(&c["ids"]), "text {text:?}");
             assert_eq!(
                 t.encode_special(text),
                 ids(&c["ids_special"]),
                 "special {text:?}"
             );
+            if forged(text) {
+                marked += 1;
+                assert!(t.encode(text).iter().all(|&i| i < 199998), "{text:?}");
+                continue;
+            }
+            assert_eq!(t.encode(text), ids(&c["ids"]), "text {text:?}");
             assert_eq!(t.decode(&t.encode(text)), text);
         }
+        assert_eq!(marked, 1);
         for c in d["prompts"].as_array().expect("prompts") {
             let text = c["text"].as_str().expect("text");
-            assert_eq!(t.encode_prompt(text), ids(&c["ids"]), "prompt {text:?}");
+            let want = ids(&c["ids"]);
+            match forged(text) {
+                true => assert_eq!(t.encode_special(text), want, "prompt {text:?}"),
+                false => assert_eq!(t.encode_prompt(text), want, "prompt {text:?}"),
+            }
         }
         // <|return|> and <|call|> end generation; <|end|> (200007) doesn't.
         assert_eq!(t.eog(), vec![200002, 200012]);
