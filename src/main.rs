@@ -715,22 +715,33 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
 
     let mut ids = tok.encode_prompt(prompt);
     // AXON_LOGITS_IDS=1,2,3: `logits` of these token ids instead of the
-    // prompt's (oracles compare on ids, never on text).
+    // prompt's (oracles compare on ids, never on text); with
+    // AXON_LOGITS_ALL, several sequences separated by ';' (one load).
+    let mut seqs: Vec<Vec<u32>> = Vec::new();
     if let Ok(v) = env::var("AXON_LOGITS_IDS").map(|v| v.trim().to_string())
         && cmd == "logits"
         && !v.is_empty()
     {
-        ids = v
-            .trim_matches(['[', ']'])
-            .split(',')
-            .map(|x| x.trim().parse::<u32>())
-            .collect::<Result<_, _>>()
-            .unwrap_or_else(|_| fail("AXON_LOGITS_IDS needs comma-separated token ids"));
-        if let Some(&bad) = ids.iter().find(|&&t| t as usize >= tok.vocab_len()) {
-            fail(&format!(
-                "AXON_LOGITS_IDS: token {bad} is past the vocabulary"
-            ));
+        for part in v.split(';').filter(|p| !p.trim().is_empty()) {
+            let seq: Vec<u32> = part
+                .trim()
+                .trim_matches(['[', ']'])
+                .split(',')
+                .map(|x| x.trim().parse::<u32>())
+                .collect::<Result<_, _>>()
+                .unwrap_or_else(|_| fail("AXON_LOGITS_IDS needs comma-separated token ids"));
+            if let Some(&bad) = seq.iter().find(|&&t| t as usize >= tok.vocab_len()) {
+                fail(&format!(
+                    "AXON_LOGITS_IDS: token {bad} is past the vocabulary"
+                ));
+            }
+            seqs.push(seq);
         }
+        ids = seqs
+            .iter()
+            .max_by_key(|s| s.len())
+            .cloned()
+            .unwrap_or_default();
     }
     if ids.is_empty() {
         eprintln!("prompt encodes to zero tokens");
@@ -830,20 +841,25 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         .map_or(0, |n| n.min(ids.len()));
     let t0 = Instant::now();
     let logits = if all > 0 {
-        let first = ids.len() - all;
-        if first > 0 {
-            net.feed_batch(&ids[..first], 0, &mut cache);
+        if seqs.is_empty() {
+            seqs.push(ids.clone());
         }
-        println!("prompt ids ({}): {:?}", ids.len(), ids);
         let mut last = Vec::new();
-        for p in first..ids.len() {
-            last = net.forward(ids[p], p, &mut cache);
-            if p + 1 < ids.len() {
+        for (k, ids) in seqs.iter().enumerate() {
+            if k > 0 {
+                cache = net.new_cache(cache_ctx);
+            }
+            let first = ids.len() - all.min(ids.len());
+            if first > 0 {
+                net.feed_batch(&ids[..first], 0, &mut cache);
+            }
+            println!("prompt ids ({}): {:?}", ids.len(), ids);
+            for p in first..ids.len() {
+                last = net.forward(ids[p], p, &mut cache);
                 println!("position {p}:");
                 print_top(&tok, &last, top_k, net.vocab());
             }
         }
-        println!("position {}:", ids.len() - 1);
         last
     } else {
         net.prefill_logits(&ids, 0, &mut cache)
@@ -852,7 +868,6 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
 
     if cmd == "logits" {
         if all > 0 {
-            print_top(&tok, &logits, top_k, net.vocab());
             return Ok(());
         }
         println!("prompt ids ({}): {:?}", ids.len(), ids);

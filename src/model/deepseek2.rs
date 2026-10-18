@@ -127,6 +127,16 @@ fn num(m: &Model, k: &str) -> Option<f64> {
     meta_num(m, &format!("deepseek2.{k}"))
 }
 
+/// A boolean key (GGUF bool, or a number: non-zero), None if absent.
+fn flag(m: &Model, k: &str) -> Option<bool> {
+    let key = format!("deepseek2.{k}");
+    match m.metadata.iter().find(|(n, _)| *n == key).map(|(_, v)| v) {
+        Some(Val::Bool(b)) => Some(*b),
+        Some(v) => v.as_f64().map(|x| x != 0.0),
+        None => None,
+    }
+}
+
 fn bad(msg: String) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, msg)
 }
@@ -459,7 +469,7 @@ pub(super) fn build<'a>(m: &'a Model, repack: bool) -> Qwen2<'a> {
     let gate = moe::Gate {
         sigmoid: sigmoid_gating(m, n_layers, vocab).expect("checked"),
         bias: None,
-        norm: num("expert_weights_norm").is_some_and(|v| v != 0.0),
+        norm: flag(m, "expert_weights_norm").unwrap_or(false),
         scale: num("expert_weights_scale")
             .filter(|&v| v != 0.0)
             .map_or(1.0, |v| v as f32),
@@ -606,6 +616,11 @@ pub(super) fn build<'a>(m: &'a Model, repack: bool) -> Qwen2<'a> {
 /// A K-only cache of `n_layers` layers, rows of `krow` (V is each row's
 /// first `lat`: no V arrays).
 pub(super) fn new_cache(n_layers: usize, krow: usize, max_ctx: usize) -> KvCache {
+    new_cache_of(n_layers, krow, max_ctx, crate::kv::use_f32())
+}
+
+/// `new_cache` with f32 (else f16) elements.
+pub(super) fn new_cache_of(n_layers: usize, krow: usize, max_ctx: usize, f32: bool) -> KvCache {
     fn k_only<T: KvElem>(n: usize, len: usize) -> Layers<T> {
         Layers {
             k: (0..n).map(|_| crate::kv::KvBuf::zeroed(len)).collect(),
@@ -614,7 +629,7 @@ pub(super) fn new_cache(n_layers: usize, krow: usize, max_ctx: usize) -> KvCache
     }
     let len = max_ctx * krow;
     KvCache {
-        data: if crate::kv::use_f32() {
+        data: if f32 {
             KvData::F32(k_only(n_layers, len))
         } else {
             KvData::F16(k_only(n_layers, len))
@@ -1006,7 +1021,7 @@ pub(crate) fn info_lines(m: &Model) -> Option<Vec<String>> {
     let scale = num("expert_weights_scale")
         .filter(|&s| s != 0.0)
         .unwrap_or(1.0);
-    let norm = num("expert_weights_norm").is_some_and(|x| x != 0.0);
+    let norm = flag(m, "expert_weights_norm").unwrap_or(false);
     v.push(format!(
         "routing: {}{}, top-{} of {}, {}, x{scale} | shared {} (width {}) | dense lead {} (ffn {})",
         if sig { "sigmoid" } else { "softmax" },

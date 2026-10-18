@@ -509,8 +509,10 @@ pub(crate) fn deepseek2_ref(m: &Model, raw: &RawTensors, ids: &[u32], bug: Bug) 
 }
 
 const IDS: [u32; 14] = [3, 17, 42, 9, 5, 61, 33, 2, 28, 50, 11, 7, 44, 19];
-/// F32 fixture: CPU (exact float rows, f16 cache) vs the f64 reference.
-const TOL: f32 = 2e-3;
+/// F32 fixture: CPU (exact float rows) vs the f64 reference, with an f32
+/// cache (MEASURED ~1e-5) and with the default f16 one (~5e-3).
+const TOL: f32 = 2e-4;
+const TOL_F16: f32 = 1.5e-2;
 const Q8_TOL: f32 = 0.15;
 
 fn all_opts() -> [Opt; 4] {
@@ -546,20 +548,27 @@ fn deepseek2_matches_expanded_reference() {
             let d = max_diff(&deepseek2_ref(&m, &raw, &IDS, bug), &want);
             eprintln!("{o:?}: reference with {bug:?}: max |dlogit| {d:.4}");
             assert!(
-                d > 50.0 * TOL,
+                d > 30.0 * TOL_F16,
                 "{o:?}: {bug:?} hardly changes the logits ({d})"
             );
         }
-        for repack in [true, false] {
+        for (repack, f32) in [(true, true), (false, true), (true, false)] {
+            let (m, _) = ds2_fixture(o, F32);
             let net = Qwen2::new_with(&m, repack);
-            let mut c = net.new_cache(n);
+            let cache = || super::deepseek2::new_cache_of(net.n_layers, net.head_dim, n, f32);
+            let mut c = cache();
             let dec: Vec<Vec<f32>> = (0..n).map(|p| net.forward(IDS[p], p, &mut c)).collect();
-            let mut c = net.new_cache(n);
+            let mut c = cache();
             net.feed_batch(&IDS[..n - 1], 0, &mut c);
             let pre = net.forward(IDS[n - 1], n - 1, &mut c);
             let (d, dp) = (max_diff(&dec, &want), max_diff(&[pre], &want[n - 1..]));
-            eprintln!("{o:?} cpu (repack {repack}) vs reference: {d:.2e}, after prefill {dp:.2e}");
-            assert!(d <= TOL && dp <= TOL, "{o:?}: cpu vs reference {d} / {dp}");
+            // The f32 cache: the math alone; f16: plus the cache's rounding
+            // of the latent (which is V too).
+            let tol = if f32 { TOL } else { TOL_F16 };
+            eprintln!(
+                "{o:?} cpu (repack {repack}, f32 cache {f32}) vs reference: {d:.2e}, after prefill {dp:.2e}"
+            );
+            assert!(d <= tol && dp <= tol, "{o:?}: cpu vs reference {d} / {dp}");
         }
         let (m8, raw8) = ds2_fixture(o, Q8_0);
         let want8 = deepseek2_ref(&m8, &raw8, &IDS, Bug::None);
@@ -896,7 +905,12 @@ fn kimi_tokenizer_matches_hf() {
         }
         assert_eq!(t.decode(&t.encode(text)), text);
     }
-    assert!(bad.is_empty(), "{} of {} differ from HF: {bad:?}", bad.len(), cases.len());
+    assert!(
+        bad.is_empty(),
+        "{} of {} differ from HF: {bad:?}",
+        bad.len(),
+        cases.len()
+    );
     // No BOS (the file has no add_bos_token; the template adds none).
     assert_eq!(t.encode_prompt("hi"), t.encode("hi"));
     let fr = crate::chat::Framing::new(&t).expect("framing");
@@ -912,9 +926,17 @@ fn kimi_tokenizer_matches_hf() {
         }
         out
     };
-    assert_eq!(conv(&d["chat"], sys.as_deref()), ids(&d["chat"]["ids"]), "chat");
+    assert_eq!(
+        conv(&d["chat"], sys.as_deref()),
+        ids(&d["chat"]["ids"]),
+        "chat"
+    );
     let s = d["chat_sys"]["system"].as_str();
-    assert_eq!(conv(&d["chat_sys"], s), ids(&d["chat_sys"]["ids"]), "chat + system");
+    assert_eq!(
+        conv(&d["chat_sys"], s),
+        ids(&d["chat_sys"]["ids"]),
+        "chat + system"
+    );
 }
 
 /// The `deepseek-v3` pre-tokenizer (three sequential splits) on DeepSeek
@@ -929,7 +951,10 @@ fn deepseek3_tokenizer_matches_hf() {
         return;
     };
     let m = crate::gguf::load_with(&path, Some(false)).unwrap();
-    assert_eq!(crate::tokenizer::pre_of(&m), Ok(crate::tokenizer::Pre::DeepSeek3));
+    assert_eq!(
+        crate::tokenizer::pre_of(&m),
+        Ok(crate::tokenizer::Pre::DeepSeek3)
+    );
     let t = crate::tokenizer::Tokenizer::from_gguf(&m);
     let d = crate::testutil::read_json("tokens_deepseek3.json");
     let ids = |v: &serde_json::Value| -> Vec<u32> {
@@ -945,7 +970,12 @@ fn deepseek3_tokenizer_matches_hf() {
             bad.push(text.chars().take(60).collect::<String>());
         }
     }
-    assert!(bad.is_empty(), "{} of {} differ from HF: {bad:?}", bad.len(), cases.len());
+    assert!(
+        bad.is_empty(),
+        "{} of {} differ from HF: {bad:?}",
+        bad.len(),
+        cases.len()
+    );
     let fr = crate::chat::Framing::new(&t).expect("framing");
     assert!(matches!(fr.format, crate::chat::Format::DeepSeek3 { .. }));
     let c = &d["chat_sys"];
