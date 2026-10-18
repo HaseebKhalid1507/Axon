@@ -3014,10 +3014,19 @@ fn serve_slot_idle_frees_a_stalled_stream() {
             idle.is_some() && m()["axon_slot_idle_evictions_total"] > 0.0
         };
         let mut last = (inq(&c), Instant::now(), s.generated.load(Ordering::Relaxed));
+        // The longest engine step seen (time between token counts, from the
+        // first token on): freeing the slot waits for engine steps (below).
+        let (mut step, mut tok) = (Duration::ZERO, (last.2, Instant::now()));
         let full = loop {
             std::thread::sleep(Duration::from_millis(10));
             let n = inq(&c);
             let g = s.generated.load(Ordering::Relaxed);
+            if g != tok.0 {
+                if tok.0 > 0 {
+                    step = step.max(tok.1.elapsed());
+                }
+                tok = (g, Instant::now());
+            }
             if n != last.0 {
                 last = (n, Instant::now(), g);
             } else if n > 0 && (g >= last.2 + 2 || evicted()) {
@@ -3029,14 +3038,33 @@ fn serve_slot_idle_frees_a_stalled_stream() {
         let what = format!("--slot-idle-ms {idle:?}");
         match idle {
             Some(n) => {
-                wait_for("the stalled stream to free its slot", || !busy());
+                // When the server evicted the stream, then when the slot is free.
+                let ev_at = std::cell::Cell::new(None);
+                wait_for("the stalled stream to free its slot", || {
+                    if ev_at.get().is_none() && evicted() {
+                        ev_at.set(Some(full.elapsed()));
+                    }
+                    !busy()
+                });
+                let ev_at = ev_at.get();
                 let took = full.elapsed();
-                eprintln!("{what}: freed {took:?} after the window filled");
-                // The stall time, a poll (n/4), a token step on a loaded
-                // machine, and the time spent seeing the window full.
+                eprintln!(
+                    "{what}: evicted {ev_at:?}, freed {took:?} after the window filled (longest \
+                     step {step:?})"
+                );
+                // The stall time, a poll (n/4) and the time spent seeing the
+                // window full, plus up to two engine steps: the stall check
+                // counts unacknowledged bytes, and after the fill there are
+                // none until the next token is written (one step); the cancel
+                // then lands in a step that has to finish before the next one
+                // reaps the slot (`Batch::reap`). Neither delays anyone: the
+                // engine can't run another request before that step ends
+                // anyway. Idle host: ~0.02-0.1 s per step; 8 pool threads
+                // among 64 spinning ones on a 6.8-vCPU pod: 2-6 s, freed at
+                // 4-12 s.
                 assert!(
-                    took < Duration::from_millis(n + 2500),
-                    "{what}: freed {took:?} after the window filled"
+                    took < Duration::from_millis(n + 2500) + 2 * step,
+                    "{what}: freed {took:?} after the window filled (longest step {step:?})"
                 );
                 assert!(took >= Duration::from_millis(n / 2), "{what}: {took:?}");
                 let m = prom_parse(&call(a, "GET", "/metrics", "").body);

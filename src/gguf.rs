@@ -920,13 +920,13 @@ impl Model {
         }
         let base = self.data_offset as usize;
         if self.file_backed {
-            for &(i, heads) in &perm {
+            for &(i, heads, sub) in &perm {
                 let t = &self.tensors[i];
                 let s = base + t.offset as usize;
                 let range = s..s + t.n_bytes as usize;
                 let mut m = memmap2::MmapMut::map_anon(range.len().max(1))?;
                 m[..range.len()].copy_from_slice(&self.data[range.clone()]);
-                unpermute_rows(&mut m[..range.len()], t, heads);
+                unpermute_rows(&mut m[..range.len()], t, heads, sub);
                 self.side.push(Side {
                     range,
                     map: m.make_read_only()?,
@@ -960,27 +960,55 @@ impl Model {
 /// permutation, which leaves every q.k (and so the whole model) unchanged;
 /// values aren't touched. Empty for other architectures or if the head
 /// counts are missing (`check_supported` reports that).
-fn rope_unpermute_plan(
-    arch: &str,
-    metadata: &[(String, Val)],
-    tensors: &[Tensor],
-) -> Vec<(usize, usize)> {
-    if arch != "llama" {
-        return Vec::new();
-    }
+///
+/// deepseek2 (MLA) turns only a 64-dim sub-head the same "normal" way: the
+/// last `rope.dimension_count` rows of each `key_length_mla` query head
+/// (attn_q / attn_q_b) and of the one shared key (attn_kv_a_mqa, after the
+/// `kv_lora_rank` latent rows). Those rows get the same reordering, inside
+/// their range only (`Sub`).
+fn rope_unpermute_plan(arch: &str, metadata: &[(String, Val)], tensors: &[Tensor]) -> Vec<Perm> {
     let num = |k: &str| {
         metadata
             .iter()
-            .find(|(n, _)| n == &format!("llama.{k}"))
+            .find(|(n, _)| n == &format!("{arch}.{k}"))
             .and_then(|(_, v)| v.as_f64())
             .filter(|&v| v >= 1.0 && v.fract() == 0.0)
             .map(|v| v as usize)
     };
+    let mut out = Vec::new();
+    if arch == "deepseek2" {
+        let (Some(nh), Some(rope), Some(lat)) = (
+            num("attention.head_count"),
+            num("rope.dimension_count"),
+            num("attention.kv_lora_rank"),
+        ) else {
+            return out;
+        };
+        let Some(hk) = num("attention.key_length_mla") else {
+            return out;
+        };
+        if rope > hk || !rope.is_multiple_of(2) {
+            return out;
+        }
+        for (i, t) in tensors.iter().enumerate() {
+            let (heads, sub) = match t.kind.as_str() {
+                "attn_q.weight" | "attn_q_b.weight" => (nh, (hk - rope, rope)),
+                "attn_kv_a_mqa.weight" => (1, (lat, rope)),
+                _ => continue,
+            };
+            if t.layer >= 0 {
+                out.push((i, heads, Some(sub)));
+            }
+        }
+        return out;
+    }
+    if arch != "llama" {
+        return out;
+    }
     let (Some(nh), Some(nkv)) = (num("attention.head_count"), num("attention.head_count_kv"))
     else {
-        return Vec::new();
+        return out;
     };
-    let mut out = Vec::new();
     for (i, t) in tensors.iter().enumerate() {
         let heads = match t.kind.as_str() {
             "attn_q.weight" | "attn_q.bias" => nh,
@@ -988,11 +1016,18 @@ fn rope_unpermute_plan(
             _ => continue,
         };
         if t.layer >= 0 {
-            out.push((i, heads));
+            out.push((i, heads, None));
         }
     }
     out
 }
+
+/// Rows off..off + len of each head (`rope_unpermute_plan`'s deepseek2
+/// sub-heads); None: the whole head.
+type Sub = Option<(usize, usize)>;
+
+/// A tensor to reorder: its index, its head count, the rows of each head.
+type Perm = (usize, usize, Sub);
 
 /// Undo the converter's per-head row permutation (see
 /// `rope_unpermute_plan`) on each planned tensor of `data`: within a head of
@@ -1000,18 +1035,20 @@ fn rope_unpermute_plan(
 /// whole quant blocks (dims[0] values each), so this moves bytes only.
 /// Tensors whose shape doesn't split into heads of an even size are left as
 /// they are (`check_supported` rejects them).
-fn apply_rope_unpermute(data: &mut [u8], base: usize, tensors: &[Tensor], plan: &[(usize, usize)]) {
-    for &(i, heads) in plan {
+fn apply_rope_unpermute(data: &mut [u8], base: usize, tensors: &[Tensor], plan: &[Perm]) {
+    for &(i, heads, sub) in plan {
         let t = &tensors[i];
         let s = base + t.offset as usize;
-        unpermute_rows(&mut data[s..s + t.n_bytes as usize], t, heads);
+        unpermute_rows(&mut data[s..s + t.n_bytes as usize], t, heads, sub);
     }
 }
 
 /// `apply_rope_unpermute` on one tensor's bytes `b`. Left as is (and
 /// rejected by `check_supported`) if its shape doesn't split into whole
-/// rows of whole quant blocks and heads of an even size.
-fn unpermute_rows(b: &mut [u8], t: &Tensor, heads: usize) {
+/// rows of whole quant blocks and heads of an even size. With `sub`
+/// (off, len), only rows off..off + len of each head move, among
+/// themselves.
+fn unpermute_rows(b: &mut [u8], t: &Tensor, heads: usize, sub: Sub) {
     let rows = match t.dims.len() {
         1 => t.dims[0],
         n if n >= 2 => t.dims[1..].iter().product(),
@@ -1028,17 +1065,23 @@ fn unpermute_rows(b: &mut [u8], t: &Tensor, heads: usize) {
     }
     let hd = rows / heads;
     let rb = t.n_bytes as usize / rows;
-    if !hd.is_multiple_of(2) || rb * rows != t.n_bytes as usize || b.len() != t.n_bytes as usize {
+    let (off, len) = sub.unwrap_or((0, hd));
+    if !len.is_multiple_of(2)
+        || off + len > hd
+        || rb * rows != t.n_bytes as usize
+        || b.len() != t.n_bytes as usize
+    {
         return;
     }
-    let mut tmp = Vec::with_capacity(hd * rb);
+    let mut tmp = Vec::with_capacity(len * rb);
     for head in b.chunks_exact_mut(hd * rb) {
+        let part = &mut head[off * rb..(off + len) * rb];
         tmp.clear();
-        tmp.extend_from_slice(head);
+        tmp.extend_from_slice(part);
         for (r, src) in tmp.chunks_exact(rb).enumerate() {
             let (i, j) = (r / 2, r % 2);
-            let d = j * hd / 2 + i;
-            head[d * rb..(d + 1) * rb].copy_from_slice(src);
+            let d = j * len / 2 + i;
+            part[d * rb..(d + 1) * rb].copy_from_slice(src);
         }
     }
 }
@@ -1242,6 +1285,35 @@ pub fn build_for_test_with(
     tensors: &[(&str, &[u64], u32)],
     data: &[Vec<u8>],
 ) -> Model {
+    let b = gguf_bytes_for_test(meta, tensors, data);
+    let h = parse(&b).expect("build_for_test: parse");
+    let mut data = memmap2::MmapMut::map_anon(b.len()).unwrap();
+    data.copy_from_slice(&b);
+    let perm = rope_unpermute_plan(&h.arch, &h.metadata, &h.tensors);
+    apply_rope_unpermute(&mut data, h.data_offset as usize, &h.tensors, &perm);
+    Model {
+        arch: h.arch,
+        metadata: h.metadata,
+        tensors: h.tensors,
+        data: data.make_read_only().unwrap(),
+        data_offset: h.data_offset,
+        file_backed: false,
+        released: Default::default(),
+        any_released: Default::default(),
+        side: Vec::new(),
+        file: None,
+        ahead: false,
+    }
+}
+
+/// The GGUF file `build_for_test_with` parses (tests that hand a fixture
+/// to llama.cpp write it out).
+#[cfg(test)]
+pub fn gguf_bytes_for_test(
+    meta: &[(&str, Val)],
+    tensors: &[(&str, &[u64], u32)],
+    data: &[Vec<u8>],
+) -> Vec<u8> {
     fn str(b: &mut Vec<u8>, s: &str) {
         b.extend_from_slice(&(s.len() as u64).to_le_bytes());
         b.extend_from_slice(s.as_bytes());
@@ -1249,10 +1321,12 @@ pub fn build_for_test_with(
     fn val(b: &mut Vec<u8>, v: &Val) {
         match v {
             Val::U32(x) => b.extend_from_slice(&x.to_le_bytes()),
+            Val::I32(x) => b.extend_from_slice(&x.to_le_bytes()),
             Val::F32(x) => b.extend_from_slice(&x.to_le_bytes()),
+            Val::Bool(x) => b.push(u8::from(*x)),
             Val::Str(s) => str(b, s),
             Val::Arr(a) => {
-                b.extend_from_slice(&8u32.to_le_bytes());
+                b.extend_from_slice(&a.first().map_or(8, type_id).to_le_bytes());
                 b.extend_from_slice(&(a.len() as u64).to_le_bytes());
                 a.iter().for_each(|x| val(b, x));
             }
@@ -1262,7 +1336,9 @@ pub fn build_for_test_with(
     fn type_id(v: &Val) -> u32 {
         match v {
             Val::U32(_) => 4,
+            Val::I32(_) => 5,
             Val::F32(_) => 6,
+            Val::Bool(_) => 7,
             Val::Str(_) => 8,
             _ => 9,
         }
@@ -1300,24 +1376,7 @@ pub fn build_for_test_with(
         assert_eq!(d.len(), len, "build_for_test_with: tensor bytes");
         b[base + off..base + off + len].copy_from_slice(d);
     }
-    let h = parse(&b).expect("build_for_test: parse");
-    let mut data = memmap2::MmapMut::map_anon(b.len()).unwrap();
-    data.copy_from_slice(&b);
-    let perm = rope_unpermute_plan(&h.arch, &h.metadata, &h.tensors);
-    apply_rope_unpermute(&mut data, h.data_offset as usize, &h.tensors, &perm);
-    Model {
-        arch: h.arch,
-        metadata: h.metadata,
-        tensors: h.tensors,
-        data: data.make_read_only().unwrap(),
-        data_offset: h.data_offset,
-        file_backed: false,
-        released: Default::default(),
-        any_released: Default::default(),
-        side: Vec::new(),
-        file: None,
-        ahead: false,
-    }
+    b
 }
 
 #[cfg(test)]
@@ -1359,7 +1418,7 @@ mod tests {
                     layer: 0,
                     kind: "attn_q.weight".into(),
                 };
-                unpermute_rows(&mut gguf, &t, heads);
+                unpermute_rows(&mut gguf, &t, heads, None);
                 assert_eq!(gguf, hf, "hd {hd} type {}", qt.name);
             }
         }

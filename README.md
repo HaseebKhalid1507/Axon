@@ -1,7 +1,8 @@
 # Axon
 
 LLM inference for Qwen2, Qwen3, Llama 3 and Gemma 3 GGUF models on the CPU and on NVIDIA
-GPUs, written from scratch in Rust.
+GPUs, plus Qwen3 MoE (Qwen3-30B-A3B's architecture) and gpt-oss-20b (CPU only for now), written
+from scratch in Rust.
 
 **Mission: make LLM inference cheap and fast, and run the best open models.** Cheap means wasting no
 hardware, from a laptop to a datacenter: the most tokens per GPU, per watt and per dollar. Fast means as close
@@ -14,7 +15,7 @@ No ggml, no BLAS, no binding crates, no CUDA toolkit at build time: a GGUF reade
 quantized integer dot-product kernels (scalar, AVX2, AVX-VNNI), a spinning worker
 pool and a transformer forward pass on the CPU; on the GPU, CUDA C++ kernels that
 NVRTC compiles at run time, launched through the driver API (both libraries loaded
-with dlopen). About 67k lines of Rust and 6.5k of CUDA, tests included.
+with dlopen). About 76k lines of Rust and 7k of CUDA, tests included.
 
 Every optimized path is **bit-identical** to the plain reference path on its
 device: batched prefill produces exactly the logits that feeding one token at a
@@ -47,7 +48,15 @@ Works today, honestly scoped:
   prefill == verify bit for bit, logits within llama.cpp's own CPU/CUDA spread; no layer
   split (`--gpu-layers`), multi-GPU or MoE draft model. `axon info` prints its experts and
   bytes per token. Streaming the experts through the GPU for long prompts is next
-  ([roadmap](docs/roadmap.md#mixture-of-experts)). `gpt-oss` (gpt-oss-20b, ggml-org's MXFP4
+  ([roadmap](docs/roadmap.md#mixture-of-experts)). `deepseek2` (DeepSeek V2/V3/V3.1, Kimi K2,
+  Moonlight: MLA attention in the absorbed form with a K-only 576-wide cache, sigmoid routing
+  with `exp_probs_b` and shared experts, YaRN's DeepSeek attention scale; the `kimi-k2` and
+  `deepseek-v3` tokenizers and the Kimi and DeepSeek V3 chat formats) runs on the CPU only
+  (`--device cpu`), decode == batched prefill == verify bit for bit; checked on
+  Moonlight-16B-A3B ([log](docs/log/2026-10-18-deepseek2-s0.md)). Legacy non-MLA deepseek2
+  GGUFs (an unsplit `attn_kv_b`, e.g. the published DeepSeek-V2-Lite files) are refused with a
+  re-convert message.
+  `gpt-oss` (gpt-oss-20b, ggml-org's MXFP4
   GGUF) runs on the CPU only for now (stage 0, [log](docs/log/2026-10-18-gpt-oss-s0.md)): MXFP4
   experts read in place, attention sinks, the 128-token sliding window on alternate layers,
   YaRN, the o200k tokenizer and the harmony chat format (`axon chat` shows the `final`
@@ -116,12 +125,13 @@ Works today, honestly scoped:
   batches the decode steps of concurrent requests (`--parallel N`) and feeds new prompts in chunks
   between them, over a paged KV cache (64-position pages shared by every slot: a slot holds only the
   positions it has; no extra cache for a request running alone); elsewhere it
-  runs one request at a time. Operations: `--api-key`, `GET /metrics` (Prometheus), `GET /slots`,
-  `--max-prompt-tokens`, `--slot-idle-ms`.
+  runs one request at a time. Besides chat completions it speaks OpenAI's Responses API (what codex
+  uses) and ollama's native API ([docs/serve-apis.md](docs/serve-apis.md)). Operations: `--api-key`,
+  `GET /metrics` (Prometheus), `GET /slots`, `--max-prompt-tokens`, `--slot-idle-ms`.
 - Rust 1.89 or newer.
 
-Not on main yet: tensor parallel, saving and restoring `serve` slots, the `/v1/responses` and ollama-native APIs,
-and the MoE paths on the GPU (#67). What's in flight and why: [docs/roadmap.md](docs/roadmap.md). How Axon is built and measured, and
+Not on main yet: tensor parallel, saving and restoring `serve` slots, streaming MoE experts through the GPU for long
+prompts (stage 3), and gpt-oss on the GPU. What's in flight and why: [docs/roadmap.md](docs/roadmap.md). How Axon is built and measured, and
 what was tried and dropped: [docs/methodology.md](docs/methodology.md),
 [docs/history.md](docs/history.md), [docs/experiments-rejected.md](docs/experiments-rejected.md).
 
@@ -668,6 +678,7 @@ The GPU, after that:
 - [docs/history.md](docs/history.md): the engineering log, round by round, with before/after numbers
 - [docs/experiments-rejected.md](docs/experiments-rejected.md): what was tried and didn't work, with numbers
 - [docs/results.md](docs/results.md): current standing vs ollama and llama.cpp, with dates and commits
+- [docs/testing.md](docs/testing.md): how the test suite is built, the fast and full tiers, what to run when
 - [docs/research/](docs/research/README.md): research reports behind the roadmap
 - [docs/log/](docs/log/README.md): one entry per PR (the convention for new work)
 - [docs/long-context.md](docs/long-context.md): YaRN (`--rope-scaling yarn`) past the trained
