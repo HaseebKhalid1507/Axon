@@ -3,7 +3,7 @@
 
     bench_serve_admit.py admit  ROUNDS MODEL_TAG BIN... [--decoders=4] [--long=20000] [--flags-I=...]
     bench_serve_admit.py single ROUNDS MODEL_TAG BIN... [--n=128] [--parallel=8] [--idle-long=N [--idle-long2=M]]
-    common: [--models=DIR] (default bella's ~/Projects/axon/models) [--kv=f16]
+    common: [--models=DIR] (else $AXON_MODELS, else models/ in this repo) [--kv=f16]
 
 Run through the GPU queue (it loads models on the GPU). Binaries interleaved per round, cool-gated, GPU logged.
   * admit: `--decoders` streamed greedy /v1/completions clients (salted prompts, long max_tokens); once each has
@@ -32,7 +32,8 @@ SHORT = int(opts.get('short', '0'))
 IDLE_LONG = int(opts.get('idle-long', '0'))
 IDLE_LONG2 = int(opts.get('idle-long2', str(IDLE_LONG)))  # the second idle prompt (default: the same length)
 KV = opts.get('kv', 'f16')
-M = opts.get('models', '/home/haseeb/Projects/axon/models').rstrip('/') + '/'
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+M = opts.get('models', os.environ.get('AXON_MODELS', os.path.join(REPO, 'models'))).rstrip('/') + '/'
 MODELS = {'0.5B': 'qwen2.5-0.5b-q4_k_m.gguf', '7B': 'Qwen2.5-7B-Instruct-Q4_K_M.gguf'}
 FILE = MODELS[TAG]
 SENT = "The quick brown fox jumps over the lazy dog near the river bank."
