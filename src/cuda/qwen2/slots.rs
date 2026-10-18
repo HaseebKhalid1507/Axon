@@ -1284,7 +1284,7 @@ mod tests {
                 v => v,
             };
             // AXON_STEP_KM: the kernel builds to run in turn per depth, e.g.
-            // "plain,AXON_G2_ZFILL,plain,AXON_G2_ZFILL" (prefill.cu g2_copy).
+            // "plain,SOME_DEFINE,plain,SOME_DEFINE" (prefill.cu experiments).
             let kms: Vec<String> = std::env::var("AXON_STEP_KM")
                 .unwrap_or("plain".into())
                 .split(',')

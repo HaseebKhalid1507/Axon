@@ -1337,22 +1337,17 @@ __device__ __forceinline__ void g2_store_w(u8* wb, int nblk, int s, u32 (*reg)[G
 }
 
 // A tile's column z past the batch (nb not a tile multiple: a decode
-// step's rows) is never stored, so what it loads changes no output.
-// AXON_G2_ZFILL: nothing (cp.async zero-fill); else token z mod nb, a real
-// token again (it used to be token nb - 1 for every such column, which made
-// gemm2 slower the fewer real tokens a tile had).
-#ifdef AXON_G2_ZFILL
-#define G2_CP16(d, a, off, live) cp16q(d, (a) + (off), live)
-#define G2_CP4(d, a, off, live) cp4q(d, (a) + (off), live)
-__device__ __forceinline__ int g2_tok(int z, int nb) { return z < nb ? z : 0; }
-#else
-#define G2_CP16(d, a, off, live) cp16(d, (a) + (off))
-#define G2_CP4(d, a, off, live) cp4(d, (a) + (off))
-__device__ __forceinline__ int g2_tok(int z, int nb) { return z < nb ? z : z % nb; }
-#endif
+// step's rows) is never stored, so it loads nothing: cp.async with a source
+// size of 0 zero-fills its shared memory (and token 0's address, valid, is
+// what it doesn't read). It used to load token nb - 1 for every such
+// column, which made gemm2 slower the fewer real tokens a tile had
+// (C-curve log: 7B pool step at nb 32 14.1 -> 9.8 ms on an RTX 4090).
+__device__ __forceinline__ const u8* g2_row(const u8* act, u64 astride, int z, int nb) {
+    return act + (u64)(z < nb ? z : 0) * astride;
+}
 
 // Start the copies of stage s: Q4_K weights (into wb), the activations of
-// tokens z0.. (past nb: g2_tok) into st.
+// tokens z0.. (past nb: zero-filled, g2_row) into st.
 template <int QT, int BN, int ST, int GU = 0>
 __device__ __forceinline__ void g2_copy(u8* wb, u8* st, const u8* w, u64 rb, int rows, int r0,
                                         const u8* act, u64 astride, int n, int nb, int z0,
@@ -1383,23 +1378,23 @@ __device__ __forceinline__ void g2_copy(u8* wb, u8* st, const u8* w, u64 rb, int
 #pragma unroll
     for (int k = 0; k < BN * 16 / G2_THREADS; k++) {
         int tk = (tid >> 4) + k * (G2_THREADS / 16), z = z0 + tk;
-        const u8* a = act + (u64)g2_tok(z, nb) * astride;
-        if (cvalid) G2_CP16(xs + tk * 256 + 16 * (c ^ (tk & 7)), a, voff + 16 * c, z < nb);
+        const u8* a = g2_row(act, astride, z, nb);
+        if (cvalid) cp16q(xs + tk * 256 + 16 * (c ^ (tk & 7)), a + voff + 16 * c, z < nb);
     }
     if (L::RAW) {
         int j = tid & 7;
 #pragma unroll
         for (int k = 0; k < BN * 8 / G2_THREADS; k++) {
             int tk = (tid >> 3) + k * (G2_THREADS / 8), z = z0 + tk;
-            const u8* a = act + (u64)g2_tok(z, nb) * astride;
-            G2_CP4(xb + tk * 32 + 4 * j, a, 2 * np + np / 64 + 4 * ((u64)s * 8 + j), z < nb);
+            const u8* a = g2_row(act, astride, z, nb);
+            cp4q(xb + tk * 32 + 4 * j, a + 2 * np + np / 64 + 4 * ((u64)s * 8 + j), z < nb);
         }
     }
     if (L::KQ) {
         for (int tk = tid; tk < BN; tk += G2_THREADS) {
             int z = z0 + tk;
-            const u8* a = act + (u64)g2_tok(z, nb) * astride;
-            G2_CP4(xd + 4 * tk, a, 2 * np + 4 * (u64)s, z < nb);
+            const u8* a = g2_row(act, astride, z, nb);
+            cp4q(xd + 4 * tk, a + 2 * np + 4 * (u64)s, z < nb);
         }
     } else {
         int e = tid & 7;
@@ -1407,9 +1402,9 @@ __device__ __forceinline__ void g2_copy(u8* wb, u8* st, const u8* w, u64 rb, int
 #pragma unroll
             for (int k = 0; k < BN * 8 / G2_THREADS; k++) {
                 int tk = (tid >> 3) + k * (G2_THREADS / 8), z = z0 + tk;
-                const u8* a = act + (u64)g2_tok(z, nb) * astride;
-                G2_CP4(xd + tk * 32 + 4 * e, a, 2 * np + np / 64 + np / 8 + 4 * ((u64)s * 8 + e),
-                       z < nb);
+                const u8* a = g2_row(act, astride, z, nb);
+                cp4q(xd + tk * 32 + 4 * e, a + 2 * np + np / 64 + np / 8 + 4 * ((u64)s * 8 + e),
+                     z < nb);
             }
         }
     }
