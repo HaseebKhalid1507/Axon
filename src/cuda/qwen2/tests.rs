@@ -3059,7 +3059,9 @@ fn gpu_products_match_reference_bits() {
 /// The up product's swiglu epilogue (mode 2: out = silu(gate) * sum) in
 /// every product kernel, and gemm2s_q4_k_gu (gate and up in one launch),
 /// against gemv_ref: gate by gemv_ref (mode 0), then up by gemv_ref in
-/// mode 2 on it.
+/// mode 2 on it. Where rows % 256 == 0, gemm2s_q4_k_gu's own quantize of
+/// its output (counters, `gu_quant`) == quantize_b of it, byte for byte,
+/// over two launches (the counters back at zero after each).
 #[test]
 fn gpu_swiglu_epilogue_and_gate_up_match_reference() {
     let Some(g) = crate::testutil::gpu() else {
@@ -3067,7 +3069,13 @@ fn gpu_swiglu_epilogue_and_gate_up_match_reference() {
     };
     let km = Kernels::module(&g).unwrap();
     let mut rng = Rng(0x5eed_9a7e_0042);
-    for (cols, rows) in [(256usize, 333usize), (1536, 129), (3584, 1000)] {
+    for (cols, rows) in [
+        (256usize, 333usize),
+        (1536, 129),
+        (3584, 1000),
+        (512, 768),
+        (1024, 256),
+    ] {
         let (qt, tn) = (Q4_K, "q4_k");
         let gd = synth_matrix(&mut rng, qt, rows, cols);
         let ud = synth_matrix(&mut rng, qt, rows, cols);
@@ -3121,35 +3129,84 @@ fn gpu_swiglu_epilogue_and_gate_up_match_reference() {
                 let out = g.alloc(rows * nb * 4).unwrap();
                 let f = km.function("gemm2s_q4_k_gu").unwrap();
                 f.set_max_shared(gemm2_smem(Q4_K, 64, 3)).unwrap();
-                // SAFETY: gemm2s_q4_k_gu's signature; as above.
-                unsafe {
-                    g.launch(
-                        &f,
-                        (nb.div_ceil(64) as u32, rows.div_ceil(32) as u32, 1),
-                        (256, 1, 1),
-                        gemm2_smem(Q4_K, 64, 3) as u32,
-                        &[
-                            wg.arg(),
-                            wu.arg(),
-                            Arg::U64(rb),
-                            Arg::I32(rows as i32),
-                            Arg::I32(cols as i32),
-                            act.arg(),
-                            Arg::U64(st),
-                            Arg::I32(nb as i32),
-                            out.arg(),
-                            Arg::U64(rows as u64),
-                        ],
-                    )
-                    .unwrap()
-                };
-                g.sync().unwrap();
-                let got: Vec<f32> = out.read().unwrap();
-                assert_eq!(
-                    bits(&got),
-                    bits(&want),
-                    "gemm2s_q4_k_gu {cols}x{rows} nb {nb}"
-                );
+                let qst = act_stride_t(rows);
+                let quant = rows.is_multiple_of(256);
+                let qact = g.alloc(qst * nb).unwrap();
+                let cnt = g.alloc(nb.div_ceil(64) * (rows / 256).max(1) * 4).unwrap();
+                cnt.zero().unwrap();
+                for rep in 0..if quant { 2 } else { 1 } {
+                    qact.zero().unwrap();
+                    // SAFETY: gemm2s_q4_k_gu's signature; as above, qact
+                    // nb tokens of qst bytes, cnt a u32 per 64 tokens and
+                    // 256 rows (null: no quantize).
+                    unsafe {
+                        g.launch(
+                            &f,
+                            (nb.div_ceil(64) as u32, rows.div_ceil(32) as u32, 1),
+                            (256, 1, 1),
+                            gemm2_smem(Q4_K, 64, 3) as u32,
+                            &[
+                                wg.arg(),
+                                wu.arg(),
+                                Arg::U64(rb),
+                                Arg::I32(rows as i32),
+                                Arg::I32(cols as i32),
+                                act.arg(),
+                                Arg::U64(st),
+                                Arg::I32(nb as i32),
+                                out.arg(),
+                                Arg::U64(rows as u64),
+                                qact.arg(),
+                                Arg::U64(qst as u64),
+                                Arg::I32(1),
+                                if quant { cnt.arg() } else { Arg::Ptr(0) },
+                            ],
+                        )
+                        .unwrap()
+                    };
+                    g.sync().unwrap();
+                    let got: Vec<f32> = out.read().unwrap();
+                    assert_eq!(
+                        bits(&got),
+                        bits(&want),
+                        "gemm2s_q4_k_gu {cols}x{rows} nb {nb}"
+                    );
+                    if !quant {
+                        continue;
+                    }
+                    let wq = g.alloc(qst * nb).unwrap();
+                    wq.zero().unwrap();
+                    let fq = km.function("quantize_b").unwrap();
+                    // SAFETY: quantize_b's signature; out nb rows of rows
+                    // floats, wq nb tokens of qst bytes.
+                    unsafe {
+                        g.launch(
+                            &fq,
+                            ((rows / 256) as u32, nb as u32, 1),
+                            (32, 1, 1),
+                            0,
+                            &[
+                                out.arg(),
+                                Arg::I32(rows as i32),
+                                Arg::I32(1),
+                                wq.arg(),
+                                Arg::U64(qst as u64),
+                            ],
+                        )
+                        .unwrap()
+                    };
+                    g.sync().unwrap();
+                    let (a, b): (Vec<u8>, Vec<u8>) = (qact.read().unwrap(), wq.read().unwrap());
+                    let bad = a.iter().zip(&b).position(|(x, y)| x != y);
+                    assert!(
+                        bad.is_none(),
+                        "gemm2s_q4_k_gu quantize {cols}x{rows} nb {nb} launch {rep}: byte {bad:?} \
+                         of token {:?}",
+                        bad.map(|i| i / qst)
+                    );
+                    let c: Vec<u32> = cnt.read().unwrap();
+                    assert!(c.iter().all(|&x| x == 0), "counters left {c:?}");
+                }
             }
         }
         eprintln!("Q4_K {cols} x {rows}: mode 2 and the fused gate+up == gemv_ref");
@@ -3481,17 +3538,21 @@ fn prefill_bits(m: &Model, name: &str, kv: CacheKv) {
         // by the VRAM rule, so the passes above used it if they have Q6_K).
         let copy = net.q6k8_vram() > 0;
         // (first position, swiglu in the up product's epilogue, gate and up
-        // fused in one launch where both are Q4_K).
-        for (from, epi, fused) in [
-            (0, true, true),
-            (300, true, true),
-            (1000, true, false),
-            (0, false, false),
-            (5, true, true),
-            (7, true, true),
+        // fused in one launch where both are Q4_K, the fused launch
+        // quantizing hid itself: `gu_quant`).
+        for (from, epi, fused, gq) in [
+            (0, true, true, true),
+            (300, true, true, true),
+            (0, false, true, false),
+            (300, false, true, false),
+            (1000, true, false, true),
+            (0, false, false, true),
+            (5, true, true, true),
+            (7, true, true, true),
         ] {
             net.swiglu_epi = epi;
             net.gate_up_fused = fused;
+            net.gu_quant = gq;
             if from == 5 {
                 net.drop_q6k8().unwrap();
             }
@@ -3515,8 +3576,8 @@ fn prefill_bits(m: &Model, name: &str, kv: CacheKv) {
             assert_eq!(
                 bits(&l),
                 bits(&l0),
-                "{name} prefill_logits from {from} epi {epi} fused {fused} tc {tc} split \
-                 {max_split}: logits"
+                "{name} prefill_logits from {from} epi {epi} fused {fused} gu_quant {gq} tc {tc} \
+                 split {max_split}: logits"
             );
             if gu.is_some() {
                 net.bf.gemm_gu = gu;
@@ -3524,13 +3585,14 @@ fn prefill_bits(m: &Model, name: &str, kv: CacheKv) {
         }
         net.gate_up_fused = true;
         net.swiglu_epi = false;
+        net.gu_quant = true;
         if copy {
             eprintln!("{name}: with and without the Q6_K prefill copy");
             net.make_q6k8(net.cache_bytes(ids.len() + 1)).unwrap();
         }
     }
     eprintln!(
-        "{name} {kv:?}: prefill bit-identical over 7 batchings + 4 prefill_logits of {} \
+        "{name} {kv:?}: prefill bit-identical over 7 batchings + 8 prefill_logits of {} \
          tokens, {} attention paths x 2 split counts",
         ids.len(),
         paths.len()
@@ -3805,6 +3867,78 @@ fn gpu_prefill_logits_match_forward_big() {
             eprintln!("{f}: prefill_logits == feed_batch + forward at {n} tokens");
         }
     }
+}
+
+/// `gu_quant`'s counters and fences under repetition (prefill.cu
+/// gu_quant_tail): one prompt prefilled AXON_STRESS_REPS times (default
+/// 200) with gemm2s_q4_k_gu quantizing hid itself, every run's logit bits
+/// and KV bytes == the run with quantize_b (`gu_quant` off), the counters
+/// zero after each. AXON_STRESS_MODEL (default the 3B), AXON_STRESS_N
+/// tokens (default 2100: two passes, each with a partial token tile).
+/// Fails if the model is missing or doesn't take the fused path.
+#[test]
+#[ignore]
+fn gpu_gu_quant_repeat_stress() {
+    use std::hash::{Hash, Hasher};
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let env = |k: &str, d: usize| std::env::var(k).map_or(d, |v| v.parse().unwrap());
+    let rel = std::env::var("AXON_STRESS_MODEL")
+        .unwrap_or("models/qwen2.5-3b-instruct-q4_k_m.gguf".into());
+    let (reps, n) = (env("AXON_STRESS_REPS", 200), env("AXON_STRESS_N", 2100));
+    let m = model_at(&rel).expect("the stress model");
+    let km = Kernels::module_for(&g, &m).unwrap();
+    let mut net = CudaQwen2::new(&g, &km, &m, n + 1).unwrap();
+    let (gate, up, _) = net.layers[0].dense();
+    assert!(
+        net.gate_up_fused
+            && net.gemma.is_none()
+            && net.bf.gemm_gu.is_some()
+            && net.bf.gemmh.is_none()
+            && gate.qt == Q4_K
+            && up.qt == Q4_K
+            && net.ffn.is_multiple_of(256)
+            && n > net.prefill_batch(),
+        "{rel}: not the fused gate + up path with its quantize, or one pass"
+    );
+    let ids = long_ids(&m, n);
+    let mut c = net.new_cache(n + 1);
+    let hash = |l: &[f32], kv: &[u16]| {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        bits(l).hash(&mut h);
+        kv.hash(&mut h);
+        h.finish()
+    };
+    net.gu_quant = false;
+    let l0 = net.prefill_logits(&ids, 0, &mut c);
+    let kv0 = kv_bytes(&net, &c, n);
+    let h0 = hash(&l0, &kv0);
+    net.gu_quant = true;
+    let t = std::time::Instant::now();
+    let mut bad = Vec::new();
+    for r in 0..reps {
+        let l = net.prefill_logits(&ids, 0, &mut c);
+        let h = hash(&l, &kv_bytes(&net, &c, n));
+        let cnt: Vec<u32> = c.b.as_ref().unwrap().gu_cnt.read().unwrap();
+        assert!(cnt.iter().all(|&x| x == 0), "rep {r}: counters left");
+        if h != h0 {
+            eprintln!("rep {r}: hash {h:016x} != {h0:016x}");
+            bad.push(r);
+        }
+        if r % 25 == 0 || r + 1 == reps {
+            eprintln!(
+                "rep {r}/{reps}: hash {h:016x} ({:.1} s)",
+                t.elapsed().as_secs_f64()
+            );
+        }
+    }
+    eprintln!(
+        "{rel} {n} tokens: {reps} prefills with gu_quant, {} differ from quantize_b's hash \
+         {h0:016x}",
+        bad.len()
+    );
+    assert!(bad.is_empty(), "differing reps: {bad:?}");
 }
 
 #[test]
@@ -4439,12 +4573,106 @@ fn cuda_prefill_profile() {
     let nb: usize = std::env::var("AXON_PROF_NB").map_or(512, |v| v.parse().unwrap());
     let start: usize = std::env::var("AXON_PROF_START").map_or(0, |v| v.parse().unwrap());
     let km = Kernels::module(&g).unwrap();
-    let net = CudaQwen2::new(&g, &km, &m, start + nb + 8).unwrap();
+    let mut net = CudaQwen2::new(&g, &km, &m, start + nb + 8).unwrap();
     let mut c = net.new_cache(start + nb + 8);
     let ids = long_ids(&m, start + nb);
     if start > 0 {
         net.feed_batch(&ids[..start], 0, &mut c);
     }
+    // AXON_PROF_GUQ_AB=n: n rounds of `gu_quant` off vs on, interleaved
+    // (the order alternating), one warm-up and one evented pass each; per
+    // round and median: gate_up, swiglu (quantize_b), their sum, down and
+    // the pass, plus the pass's callback-free GPU time.
+    if let Ok(n) = std::env::var("AXON_PROF_GUQ_AB") {
+        let n: usize = n.parse().unwrap();
+        let mut res: [Vec<[f64; 6]>; 2] = [Vec::new(), Vec::new()];
+        for round in 0..n {
+            let order = if round % 2 == 0 {
+                [false, true]
+            } else {
+                [true, false]
+            };
+            for gq in order {
+                net.gu_quant = gq;
+                let mut run = |on: &mut dyn FnMut(&'static str) -> Result<(), String>| {
+                    net.pass(
+                        &mut c,
+                        batch::BatchIn::Tokens(&ids[start..]),
+                        start,
+                        false,
+                        on,
+                    )
+                    .unwrap();
+                    g.sync().unwrap();
+                };
+                run(&mut |_| Ok(()));
+                let e0 = g.record().unwrap();
+                run(&mut |_| Ok(()));
+                let e1 = g.record().unwrap();
+                g.sync().unwrap();
+                let plain = e0.ms_to(&e1).unwrap() as f64;
+                let mut evs = vec![("start", g.record().unwrap())];
+                run(&mut |name| {
+                    evs.push((name, g.record()?));
+                    Ok(())
+                });
+                let mut r = [0.0f64; 6];
+                for i in 1..evs.len() {
+                    let ms = evs[i - 1].1.ms_to(&evs[i].1).unwrap() as f64;
+                    match evs[i].0 {
+                        "gate_up" => r[0] += ms,
+                        "swiglu" => r[1] += ms,
+                        "down4" | "down6" => r[3] += ms,
+                        _ => {}
+                    }
+                    r[4] += ms;
+                }
+                r[2] = r[0] + r[1];
+                r[5] = plain;
+                eprintln!(
+                    "round {round} gu_quant {gq}: gate_up {:.3} swiglu {:.3} sum {:.3} down {:.3} \
+                     pass {:.3} ms (evented), {:.3} ms (plain)",
+                    r[0], r[1], r[2], r[3], r[4], r[5]
+                );
+                res[gq as usize].push(r);
+            }
+        }
+        let med = |v: &[[f64; 6]], k: usize| {
+            let mut x: Vec<f64> = v.iter().map(|r| r[k]).collect();
+            x.sort_by(f64::total_cmp);
+            x[x.len() / 2]
+        };
+        let names = [
+            "gate_up",
+            "swiglu",
+            "gate_up+swiglu",
+            "down",
+            "pass (evented)",
+            "pass (plain)",
+        ];
+        eprintln!("{rel} nb {nb} at {start}: medians of {n} rounds, gu_quant off -> on");
+        for (k, nm) in names.iter().enumerate() {
+            let (a, b) = (med(&res[0], k), med(&res[1], k));
+            eprintln!(
+                "  {nm:<16} {a:>9.3} -> {b:>9.3} ms ({:+.2} %)",
+                if a > 0.0 { 100.0 * (b - a) / a } else { 0.0 }
+            );
+        }
+        let (sw, gs0, gs1) = (med(&res[0], 1), med(&res[0], 2), med(&res[1], 2));
+        eprintln!(
+            "  swiglu share (off) {:.2} % of the pass; kill rule: gate_up+swiglu drop {:.3} ms = {:.0} % \
+             of the old swiglu (needs >= 60 %)",
+            100.0 * sw / med(&res[0], 4),
+            gs0 - gs1,
+            if sw > 0.0 {
+                100.0 * (gs0 - gs1) / sw
+            } else {
+                0.0
+            }
+        );
+        return;
+    }
+    let net = net;
     // AXON_PROF_LOOP=n: n back-to-back passes (sustained power/clocks: sample
     // nvidia-smi meanwhile), per-pass wall ms printed.
     if let Ok(n) = std::env::var("AXON_PROF_LOOP") {
@@ -6870,6 +7098,10 @@ fn cuda_gemmh_bench() {
                                     Arg::I32(nb as i32),
                                     out.arg(),
                                     Arg::U64(rows as u64),
+                                    Arg::Ptr(0),
+                                    Arg::U64(0),
+                                    Arg::I32(0),
+                                    Arg::Ptr(0),
                                 ],
                             )
                             .unwrap()

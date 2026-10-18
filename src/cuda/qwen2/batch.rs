@@ -400,7 +400,7 @@ pub(super) struct BatchFns<'m> {
     /// gemmh2_q4_k_gu 80.3 vs gemm2s_q4_k_gu 68.1 TMAC/s, and in the pass
     /// q / wo / down 6-10 % faster than gemm2s; a 512-row matrix at nb 512
     /// (32 blocks) was slower (21.6 vs 35.6). See `gemmh_plain`.
-    gemmh: Option<[Func<'m>; 2]>,
+    pub(super) gemmh: Option<[Func<'m>; 2]>,
     /// AXON_GEMMH=1: every Q4_K product of a batch through gemmh2_q4_k,
     /// whatever its shape (else only those `gemmh_plain` picks).
     gemmh_all: bool,
@@ -610,6 +610,10 @@ pub(super) struct BatchBufs<'g> {
     up: DevBuf<'g>,
     /// Quantized activations, [max][act_stride(act_len())].
     pub(super) act: DevBuf<'g>,
+    /// gemm2s_q4_k_gu's arrival counters (`CudaQwen2::gu_quant`): one u32
+    /// per 64-token tile and 256 rows of ffn, zero between launches (empty
+    /// unless ffn % 256 == 0).
+    pub(super) gu_cnt: DevBuf<'g>,
     rope: DevBuf<'g>,
     /// gemma3's local layers' table (empty otherwise).
     rope_swa: DevBuf<'g>,
@@ -657,7 +661,15 @@ impl<'g> CudaQwen2<'g> {
             } else {
                 0
             };
-        max * per_tok + parts + max.min(HEAD_SUB) * self.vocab * f + 256
+        max * per_tok + parts + max.min(HEAD_SUB) * self.vocab * f + 256 + self.gu_cnt_bytes(max)
+    }
+
+    /// Bytes of `BatchBufs::gu_cnt` for passes of up to max tokens.
+    fn gu_cnt_bytes(&self, max: usize) -> usize {
+        match self.ffn.is_multiple_of(256) {
+            true => max.div_ceil(64) * (self.ffn / 256) * 4,
+            false => 0,
+        }
     }
 
     pub(super) fn batch_bufs(&self, max: usize, max_ctx: usize) -> Result<BatchBufs<'g>, String> {
@@ -679,6 +691,11 @@ impl<'g> CudaQwen2<'g> {
             gate: g.alloc(max * self.ffn * f)?,
             up: g.alloc(max * self.ffn * f)?,
             act: g.alloc(max * act_stride(self.act_len()))?,
+            gu_cnt: {
+                let c = g.alloc(self.gu_cnt_bytes(max))?;
+                c.zero()?;
+                c
+            },
             rope: g.alloc(max * self.head_dim / 2 * 8)?,
             rope_swa: g.alloc(if self.freq_swa.len() > 0 {
                 max * self.head_dim / 2 * 8
@@ -1697,6 +1714,19 @@ impl<'g> CudaQwen2<'g> {
             // Gate and up in one gemvmx launch where they qualify (not
             // with the up product's swiglu epilogue, which reads the gate's).
             let epi = self.swiglu_epi && self.gemma.is_none();
+            // Where the down product reads hid quantized: b.gate when the
+            // fused launch quantizes it (`gu_quant`; its counters cover
+            // nb, and nb tokens of act fit in b.gate's floats), else b.act.
+            let hact_gate = fuse
+                && bf.gemmh.is_none()
+                && self.gu_quant
+                && ffn.is_multiple_of(256)
+                && b.gu_cnt.len() >= nb.div_ceil(64) * (ffn / 256) * 4
+                && nb * ast <= b.gate.len();
+            let hact = match hact_gate {
+                true => b.gate.arg(),
+                false => b.act.arg(),
+            };
             let gu_x = !(fuse || epi)
                 && self.bgemm_x(
                     wts,
@@ -1764,7 +1794,14 @@ impl<'g> CudaQwen2<'g> {
                 )?;
             } else if let (Some(f), true) = (&bf.gemm_gu, fuse) {
                 // gate and up in one launch, hid = silu(gate) * up out
-                // (the same floats and ops as below), then quantize_b.
+                // (the same floats and ops as below), then quantize_b - or,
+                // with `gu_quant`, quantize_b's work in the launch's tail
+                // into b.gate (free: the gate product never goes to
+                // memory), for the down product to read.
+                let cnt = match hact_gate {
+                    true => b.gu_cnt.arg(),
+                    false => null,
+                };
                 g.launch(
                     f,
                     (nb.div_ceil(64) as u32, ffn.div_ceil(32) as u32, 1),
@@ -1781,22 +1818,28 @@ impl<'g> CudaQwen2<'g> {
                         Arg::I32(nb as i32),
                         b.up.arg(),
                         Arg::U64(ffn as u64),
+                        hact,
+                        Arg::U64(ast as u64),
+                        want_k(ffn),
+                        cnt,
                     ],
                 )?;
                 on("gate_up")?;
-                g.launch(
-                    &bf.quantize,
-                    (ffn.div_ceil(256) as u32, nbu, 1),
-                    (32, 1, 1),
-                    0,
-                    &[
-                        b.up.arg(),
-                        Arg::I32(ffn as i32),
-                        want_k(ffn),
-                        b.act.arg(),
-                        Arg::U64(ast as u64),
-                    ],
-                )?;
+                if !hact_gate {
+                    g.launch(
+                        &bf.quantize,
+                        (ffn.div_ceil(256) as u32, nbu, 1),
+                        (32, 1, 1),
+                        0,
+                        &[
+                            b.up.arg(),
+                            Arg::I32(ffn as i32),
+                            want_k(ffn),
+                            b.act.arg(),
+                            Arg::U64(ast as u64),
+                        ],
+                    )?;
+                }
             } else if self.swiglu_epi && self.gemma.is_none() {
                 // The up product's epilogue (mode 2) makes hid = silu(gate) *
                 // up from the gate product and its own sum (swiglu_quant_b's
@@ -1855,14 +1898,14 @@ impl<'g> CudaQwen2<'g> {
             match l.post_ffn {
                 // gemma3: as the post-attention norm (b.up free again).
                 Some(pf) => {
-                    self.bgemm(wts, down, b.act.arg(), ast, nb, null, 0, b.up.arg(), dim)?;
+                    self.bgemm(wts, down, hact, ast, nb, null, 0, b.up.arg(), dim)?;
                     on(if down.qt == Q6_K { "down6" } else { "down4" })?;
                     on("down")?;
                     post_add(pf)?;
                     on("post_norm")?;
                 }
                 None => {
-                    self.bgemm(wts, down, b.act.arg(), ast, nb, null, 1, b.x.arg(), dim)?;
+                    self.bgemm(wts, down, hact, ast, nb, null, 1, b.x.arg(), dim)?;
                     on(if down.qt == Q6_K { "down6" } else { "down4" })?;
                     on("down")?;
                 }

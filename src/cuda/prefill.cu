@@ -2052,11 +2052,54 @@ GEMM2(gemm2s_iq4_nl, QT_IQ4_NL, 2, 3)
 // out = silu(gate) * up (gate_up's ops; swiglu_quant_b's floats): a block
 // takes rows 32 y.. of both (gate in its row-warps 0, up in 1), so the
 // gate product never goes to memory. Grid (ceil(nb / 64), ceil(rows / 32)).
+//
+// With cnt non-null (rows % 256 == 0; the host checks) the kernel also does
+// quantize_b's work on out into qact (qstride bytes a token, a buffer the
+// products don't read): the 8 blocks of a 256-row block (y / 8) and token
+// tile (x) count their arrivals in cnt[x * rows / 256 + y / 8], and the
+// last to arrive runs quant_warp on the tile's 64 tokens x 256 values while
+// they're in L2, then zeroes its counter for the next launch (zero on
+// entry: the host zeroes cnt once). The same function on the same floats as
+// quantize_b (n % 256 == 0: every value valid), so the same bits; the
+// counter only picks which block computes. Ordering (the last block reads
+// the other 7's stores): every thread's stores, then its __threadfence
+// (release, gpu scope), a barrier, thread 0's fence and atomicAdd; the last
+// block's thread 0 fences again (acquire) before the barrier its readers
+// wait on, and they load with __ldcg (L2, never a stale L1 line).
+__device__ __forceinline__ void gu_quant_tail(const float* out, u64 ostride, int rows, int nb,
+                                              u8* qact, u64 qstride, int want_k, u32* cnt) {
+    __shared__ int last;
+    __threadfence();
+    __syncthreads();
+    u32* c = cnt + (u64)blockIdx.x * (rows / 256) + (blockIdx.y >> 3);
+    if (threadIdx.x == 0) {
+        __threadfence();
+        last = atomicAdd(c, 1u) == 7;
+        if (last) __threadfence();
+    }
+    __syncthreads();
+    if (!last) return;
+    int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, blk = blockIdx.y >> 3;
+    for (int zz = warp; zz < 64; zz += G2_THREADS / 32) {
+        int z = blockIdx.x * 64 + zz;
+        if (z >= nb) break;
+        const float* xz = out + (u64)z * ostride + blk * 256 + lane * 8;
+        float v[8];
+#pragma unroll
+        for (int i = 0; i < 8; i++) v[i] = __ldcg(xz + i);
+        quant_warp(v, rows, blk, qact + z * qstride, want_k);
+    }
+    if (threadIdx.x == 0) *c = 0;
+}
+
 extern "C" __global__ void __launch_bounds__(G2_THREADS, 1)
     gemm2s_q4_k_gu(const u8* __restrict__ wg, const u8* __restrict__ wu, u64 rb, int rows, int n,
-                   const u8* __restrict__ act, u64 astride, int nb, float* __restrict__ out,
-                   u64 ostride) {
+                   const u8* __restrict__ act, u64 astride, int nb, float* out, u64 ostride,
+                   u8* __restrict__ qact, u64 qstride, int want_k, u32* __restrict__ cnt) {
     gemm2_t<QT_Q4_K, 2, 3, 1>(wg, rb, rows, n, act, astride, nb, nullptr, 0, out, ostride, wu);
+#if __CUDA_ARCH__ >= 800
+    if (cnt) gu_quant_tail(out, ostride, rows, nb, qact, qstride, want_k, cnt);
+#endif
 }
 
 GEMM2(gemm2_q6k8, QT_Q6K8, 4, 2)
