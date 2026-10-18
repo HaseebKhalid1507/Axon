@@ -351,6 +351,48 @@ pub unsafe fn softmax<const V3: bool, const F: bool>(s: &mut [f32]) {
     }
 }
 
+/// `softmax` with an attention sink (gpt-oss): a score `sink` that takes
+/// part in the max and the normalizer but has no value row, so the weights
+/// sum to less than 1 (llama.cpp's soft_max_ext with sinks): m = max(max s,
+/// sink), s[t] = exp(s[t] - m) (`exp_sum`'s order), then times 1 / (that
+/// sum + exp(sink - m)).
+///
+/// # Safety
+/// As `softmax`.
+#[inline(always)]
+pub unsafe fn softmax_sink<const V3: bool, const F: bool>(s: &mut [f32], sink: f32) {
+    // SAFETY: our caller's contract.
+    let m = unsafe { max::<V3>(s) }.max(sink);
+    // SAFETY: as above.
+    let sum = unsafe { exp_sum::<V3, F>(s, m) } + exp_f::<F>(sink - m);
+    let inv = 1.0 / sum;
+    for e in s.iter_mut() {
+        *e *= inv;
+    }
+}
+
+/// gpt-oss's SwiGLU (llama.cpp ggml_swiglu_oai, alpha 1.702, limit 7):
+/// x = min(g, 7), y = clamp(u, -7, 7), x / (1 + exp(-(1.702 x))) * (y + 1).
+#[inline(always)]
+pub fn swiglu_oai1_f<const F: bool>(g: f32, u: f32) -> f32 {
+    const ALPHA: f32 = 1.702;
+    const LIMIT: f32 = 7.0;
+    let x = g.min(LIMIT);
+    let y = u.clamp(-LIMIT, LIMIT);
+    x / (1.0 + exp_f::<F>(-(ALPHA * x))) * (y + 1.0)
+}
+
+multiversion! {
+    /// g[i] = `swiglu_oai1_f`(g[i], u[i]) (scalar code in every variant:
+    /// it runs over the selected experts' rows only).
+    pub fn swiglu_oai<V3, F>(g: &mut [f32], u: &[f32]) {
+        assert_eq!(g.len(), u.len(), "swiglu_oai: gate/up lengths differ");
+        for (g, &u) in g.iter_mut().zip(u) {
+            *g = swiglu_oai1_f::<F>(*g, u);
+        }
+    }
+}
+
 multiversion! {
     /// g[i] = silu(g[i]) * u[i] (`swiglu1_f`).
     pub fn swiglu<V3, F>(g: &mut [f32], u: &[f32]) {

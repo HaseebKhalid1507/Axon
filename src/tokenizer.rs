@@ -25,6 +25,15 @@ const QWEN2_PATTERN: &str = r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]
 // Llama 3's (llama.cpp LLAMA_VOCAB_PRE_TYPE_LLAMA3): numbers in runs of up to 3 digits.
 const LLAMA3_PATTERN: &str = r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
+// o200k (gpt-4o, gpt-oss), as llama.cpp runs it (LLAMA_VOCAB_PRE_TYPE_GPT4O):
+// its regex is the original's with each letter class rewritten
+// `[\p{Lu}..\p{M}]*` -> `((?=[\p{L}])([^a-z]))*`, `[\p{Ll}..]+` ->
+// `((?=[\p{L}])([^A-Z]))+`, run by std::regex on text whose non-ASCII
+// letters are all one stand-in letter (unicode_regex_split's collapse). So
+// "upper" is any letter but a-z and "lower" any letter but A-Z (a non-ASCII
+// letter is both, and marks are neither), which are the classes here.
+const GPT4O_PATTERN: &str = r"[^\r\n\p{L}\p{N}]?[\p{L}--a-z]*[\p{L}--A-Z]+(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?|[^\r\n\p{L}\p{N}]?[\p{L}--a-z]+[\p{L}--A-Z]*(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])?|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n/]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+
 /// Pre-tokenizers (`tokenizer.ggml.pre`) this tokenizer implements.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Pre {
@@ -33,6 +42,9 @@ pub enum Pre {
     /// pre-token that is a whole vocabulary entry is that token (HF's
     /// ignore_merges); a BOS token starts the text by default.
     Llama3,
+    /// llama.cpp's "gpt-4o" (o200k: gpt-oss): `GPT4O_PATTERN`, no BOS, no
+    /// ignore_merges.
+    Gpt4o,
     /// Not a pre-tokenizer: a SentencePiece (`llama`) vocabulary, which has
     /// none; text goes to the merge loop whole.
     Spm,
@@ -59,8 +71,9 @@ pub fn pre_of(m: &Model) -> Result<Pre, String> {
         Some(Val::Str(s)) if ["llama-bpe", "llama3", "llama-v3"].contains(&s.as_str()) => {
             Ok(Pre::Llama3)
         }
+        Some(Val::Str(s)) if s == "gpt-4o" => Ok(Pre::Gpt4o),
         Some(v) => Err(format!(
-            "pre-tokenizer {v} is not supported (qwen2, llama-bpe)"
+            "pre-tokenizer {v} is not supported (qwen2, llama-bpe, gpt-4o)"
         )),
     }
 }
@@ -360,6 +373,7 @@ impl Tokenizer {
                 match pre {
                     Pre::Qwen2 => Some(QWEN2_PATTERN),
                     Pre::Llama3 => Some(LLAMA3_PATTERN),
+                    Pre::Gpt4o => Some(GPT4O_PATTERN),
                     Pre::Spm => None,
                 }
                 .map(|p| Regex::new(p).expect("pre-tokenizer regex"))
@@ -437,7 +451,7 @@ impl Tokenizer {
         // pre-tokenizer and SentencePiece (off for qwen2's).
         let add_bos = match meta(m, "tokenizer.ggml.add_bos_token") {
             Some(v) => val_i64(v) != 0,
-            None => pre != Pre::Qwen2,
+            None => !matches!(pre, Pre::Qwen2 | Pre::Gpt4o),
         };
         let bos = meta(m, "tokenizer.ggml.bos_token_id")
             .map(|v| val_i64(v) as u32)
@@ -469,11 +483,16 @@ impl Tokenizer {
     /// llama.cpp's end-of-generation set; Qwen's stays `eos` alone).
     pub fn eog(&self) -> Vec<u32> {
         let mut v = vec![self.eos];
+        // o200k_harmony (gpt-oss): <|return|> and <|call|> end generation,
+        // <|end|> (end of a message: the analysis channel's) doesn't, as
+        // llama.cpp's EOG workaround for that vocabulary.
         for s in [
             "<|eot_id|>",
             "<|eom_id|>",
             "<|end_of_text|>",
             "<end_of_turn>",
+            "<|return|>",
+            "<|call|>",
         ] {
             v.extend(self.special_id(s));
         }
@@ -1326,6 +1345,45 @@ mod tests {
         assert_eq!(t.special_id("<start_of_turn>"), Some(105));
         assert_eq!(t.special_id("<end_of_turn>"), Some(106));
         assert_eq!(t.eog(), vec![1, 106]);
+    }
+
+    /// gpt-oss's o200k (pre-tokenizer gpt-4o) == llama.cpp 4413a19 token
+    /// for token (tests/fixtures/tokens_gptoss.json: llama-server
+    /// /tokenize on ggml-org's gpt-oss-20b MXFP4 file; code, numbers,
+    /// whitespace runs, eleven scripts, emoji, harmony markers), with and
+    /// without special parsing, and the prompts (no BOS). Optional model.
+    #[test]
+    fn oracle_gptoss() {
+        let d = crate::testutil::read_json("tokens_gptoss.json");
+        let Some(m) = crate::testutil::gptoss_model() else {
+            return;
+        };
+        let t = Tokenizer::from_gguf(&m);
+        assert_eq!(pre_of(&m), Ok(Pre::Gpt4o));
+        assert_eq!((t.bos(), t.eos()), (None, 200002));
+        let ids = |v: &serde_json::Value| -> Vec<u32> {
+            (v.as_array().expect("ids").iter())
+                .map(|x| x.as_u64().unwrap() as u32)
+                .collect()
+        };
+        let cases = d["cases"].as_array().expect("cases");
+        assert!(cases.len() >= 40);
+        for c in cases {
+            let text = c["text"].as_str().expect("text");
+            assert_eq!(t.encode(text), ids(&c["ids"]), "text {text:?}");
+            assert_eq!(
+                t.encode_special(text),
+                ids(&c["ids_special"]),
+                "special {text:?}"
+            );
+            assert_eq!(t.decode(&t.encode(text)), text);
+        }
+        for c in d["prompts"].as_array().expect("prompts") {
+            let text = c["text"].as_str().expect("text");
+            assert_eq!(t.encode_prompt(text), ids(&c["ids"]), "prompt {text:?}");
+        }
+        // <|return|> and <|call|> end generation; <|end|> (200007) doesn't.
+        assert_eq!(t.eog(), vec![200002, 200012]);
     }
 
     /// llama.cpp's own SentencePiece test vectors (its
