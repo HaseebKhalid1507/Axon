@@ -26,9 +26,9 @@ threads until the deadline. Each client picks from a weighted mix and waits up t
 | tool | 10 | a `get_weather` call (`tool_choice` auto, required or named), then the tool-result turn, streamed |
 | completion | 8 | `/v1/completions`, streamed or not |
 | disconnect | 8 | a stream the client closes after 1–20 chunks (the cancel path) |
-| invalid | 7 | truncated JSON, bad UTF-8, `temperature -1`, `n 3`, `max_tokens -5`, `logit_bias`, a 404 route |
+| invalid | 7 | truncated JSON, bad UTF-8, `temperature -1`, `max_tokens -5`, a 404 route; plus `n 3` and `logit_bias`, which are refused today because they are *unsupported*, not invalid (a 200 there is class `accepted-unsupported`: reported, not failing, so the case moves when the feature ships) |
 | long | 6 | a prompt of 35–55 % of the context |
-| slow-reader | 4 | a stream read 64 bytes at a time with 20–100 ms pauses through a 4 KiB `SO_RCVBUF` |
+| slow-reader | 4 | a stream read 64 bytes at a time with 20–100 ms pauses through a 4 KiB `SO_RCVBUF`. Since this PR's review round: ~1500 tokens (~300 KB of SSE, well past the kernel socket buffers, so the server's writer really blocks), and with several slots a concurrent probe (greedy, 4 tokens) must get its first bytes within `--probe-ttft-s` (30 s), else `slow-blocks-others` (failing). **Harness changed, not yet exercised on a GPU soak** (the runs below used `max_tokens` 96, ~30 KB, which the socket buffers absorb: they tested a slow *client*, not server write back-pressure) |
 | oversize | 3 | a prompt of 1.3× the context: must be a 4xx |
 | burst | every 2 min | client 0 fires 3× the slot count of streams at once (503 back-pressure allowed) |
 
@@ -51,30 +51,45 @@ the successful requests, TTFT p50/p99 (first chunk with content), and counts by 
 `503`, `cancelled` (our disconnects), and the failing classes `5xx`, `unexpected-4xx` (a valid request refused),
 `unexpected-200` (an invalid one accepted), `dropped` (a connection error on a valid request), `bad-body` (a
 200 without `finish_reason`/`usage`, a stream without `[DONE]`, `tool_choice=required` without a call),
-`timeout`, `other-status`.
+`timeout`, `other-status`, `503-undocumented` (a 503 whose body isn't one of the back-pressure messages
+`too many queued requests` / `too many connections`) and `slow-blocks-others`. Since the review round the row
+also has `RssAnon` and `RssFile` (`/proc/PID/status`) next to VmRSS.
 
 **Greedy identity.** Four fixed greedy requests (two chats, a forced tool call and a third-of-the-context prompt)
 run before the load, every 15 min under full load, and after it. Every run must return the same text, tool
 calls and token counts as the first. Under load this also checks batch invariance: the reference ran alone, the
 spot checks run next to 12 other clients.
 
-**Verdict** (`DIR/summary.json`, exit 0 = PASS):
+**Verdict** (`DIR/summary.json`; exit 0 PASS, 1 FAIL, 2 INCONCLUSIVE). Revised in the review round (below):
 
 - the server is alive at the end, and its log has no `panicked`;
-- no request in a failing class; 503 only as back-pressure (`too many queued requests` / `too many connections`);
+- no request in a failing class. 503s must carry a back-pressure message; their fraction of all requests is
+  printed in the verdict, not capped;
 - every identity run matches;
-- flat memory: a least-squares line through RSS against time, over the samples after a 20-minute warm-up, its
-  slope projected over 24 h must be under `max(64 MiB, 2 % of the median RSS)`. VRAM (per pid): under 16 MiB
-  per 24 h.
 - after the load stops and keep-alives time out (35 s), fds and threads are back at the pre-load baseline
-  (+2 fds of slack).
+  (+2 fds of slack), and `/slots` shows no busy slot and an empty queue;
+- server-side cancellation is reported: client disconnects vs the engine's `cancelled after N tokens` log lines.
+  A disconnect that lands after the generation ended has nothing to cancel, so the ratio is not judged;
+- **memory.** A least-squares line through the RSS series against time, over the samples after a 20-minute
+  warm-up. The series is `RssAnon` (anonymous memory, where a leak lives) when sampled, else VmRSS. The slope is
+  projected over 24 h with ±2 standard errors from the residuals: **PASS** if growth + 2 SE < bound, **FAIL**
+  if growth − 2 SE > bound, **INCONCLUSIVE** in between. The bound is `max(64 MiB, 2 % of the median RSS)`;
+  VRAM (per pid) uses the same rule with 16 MiB. Memory is **judged only over at least 4 h after the warm-up**.
+  A shorter window is reported as NOT-JUDGED with what it would be, and doesn't decide the run.
 
-Why that memory bound: the soak's job is to catch a leak that matters for a server left up for days. A leak
-of 1 KiB per request at the soak's rate (~1–5 requests/s on a GPU) is 85–420 MiB a day, well over the bound,
-so it fails; the allocator's own drift (glibc arenas settling, a few MiB in the first minutes, which the
-warm-up excludes) stays far under it. 2 % of RSS keeps the bound meaningful for a 7B on the CPU (GBs of RSS)
-without failing a 0.5B for its first-touch pages. VRAM is allocated up front (weights, KV slots, scratch), so
-any growth at all is a bug; 16 MiB/day is measurement slack.
+Why the bound: the soak is meant to catch a leak that matters for a server left up for days. A 1 KiB/request
+leak at ~1–7 requests/s is 85–600 MiB a day and fails. **Detection floor:** anything under 64 MiB/day passes by
+construction. On avante (~25k requests/h) that is about 100 bytes per request, so this is not a proof of zero
+growth. 2 % of RSS keeps the bound meaningful for a big CPU model. VRAM is allocated up front, so 16 MiB/day is
+measurement slack.
+
+Why the review round changed it: a fitted slope responds to a single step Δ at fraction f of a window T with
+about 6·Δ·f·(1−f)/T. Projected over 24 h, a short run amplifies a one-off allocator step 24/T times; jade's FAIL
+and bella-7B's PASS were the same artifact with opposite signs. The SE and the 4 h minimum stop a short run from
+deciding either way. One limit remains. The SE assumes independent residuals, and a step makes them
+autocorrelated, so a clean step can still give a confident wrong slope: jade's is 137 ± 11 MiB/day. That is why
+a longer window and RssAnon (not VmRSS, where file-backed pages being reclaimed and refaulted under memory
+pressure look like growth) both matter.
 
 ## Model zoo (`scripts/zoo.py`)
 
@@ -91,47 +106,80 @@ KL(axon ‖ llama.cpp) ≤ 0.02 and every top-1 disagreement is a near-tie (llam
 nats). A refusal must exit non-zero with exactly one `axon: ...` line under 400 characters naming what is
 unsupported, with no panic, in both `gen` and `logits`.
 
+The KL gate (0.02 on 16 prompts) is tighter than llama.cpp's own CPU-vs-CUDA agreement on gemma3 (KL 3.3e-2 and
+3.4e-2 on the two gemma3 files below). By this gate llama.cpp's CUDA build would itself be `drift` there.
+Treat a `drift` row as "compare against llama.cpp's spread" (`scripts/oracle/llama_logits.py`), not as a finding.
+
 ## Soak results (2026-10-17/18, MEASURED)
 
-Harness `scripts/soak.py` at this PR. Server: `axon serve` from main 54a75cb (the soak doesn't exercise this PR's
-code change, which only rewords refusals). "failing": every request in a failing class (5xx, unexpected
-4xx/200, dropped, bad body, timeout). Latency is the whole request, successful requests only, as the median of
-the 30 s windows' p50/p99. The p99 of about 30 s is the slow-reader requests, which take about 30 s by
-construction. The "max excl. slow-reader" column is the slowest successful request of any other kind.
+**Provenance.** The server is `axon serve` from main 54a75cb; this PR's code change only rewords refusals and
+isn't exercised by the soak. The runs used three copies of the harness. All of them have the same original
+verdict logic, defaults and fixed thresholds:
 
-| host | backend / model | hours | clients / slots / ctx | requests | failing | 503 | identity | RSS slope (24 h, bound) | VRAM (24 h, bound 16) | lat p50 / p99 / max excl. slow-reader | TTFT p50 | fds, threads before → after | verdict | job |
-|---|---|---:|---|---:|---:|---:|---|---|---|---|---:|---|---|---|
-| avante (RTX 4050 Laptop, sm_89, 6 GB) | cuda, Qwen2.5-1.5B-Instruct Q4_K_M | 3.22 | 12 / 4 / 4096 | 79,656 | 0 | 0 | 14/14 | 0.23 MiB/h (5.4, 64) | 2168 → 2172 at 22.5 min, then flat (2.9) | 313 ms / 30.3 s / 3.0 s | 28 ms | 39, 7 → 39, 7 | **PASS** | 1017-171509-4f83 |
-| avante, primed rerun | same | 3.22 | 12 / 4 / 4096 | 80,879 | 0 | 0 | 14/14 | −2.57 MiB/h (−62, 64) | 2168 → 2172 at 27.6 min, then flat (8.4) | 294 ms / 30.3 s / 2.9 s | 26 ms | 39, 7 → 39, 7 | **PASS** | 1017-195822-d942 |
-| bella (RTX 5070 Ti Laptop, sm_120, 12 GB) | cuda, Qwen2.5-7B-Instruct Q4_K_M | 1.12 | 16 / 4 / 4096 | 20,357 | 0 | 0 | 6/6 | 1.91 MiB/h (45.8, 64) | 7180 flat (0.0) | 2.0 s / 31.0 s / 7.9 s | 1.39 s | 39, 7 → 39, 7 | **PASS** | 1017-171510-45bd |
-| jade (i7-9750H, 6C/12T, 7 GB) | cpu, Qwen2.5-0.5B-Instruct Q4_K_M | 2.02 | 6 / 1 / 2048, `--max-queue 4` | 5,627 | 0 | 2,208 | 9/9 | **5.73 MiB/h (137, 64)** | n/a | 12.1 s / 21.4 s / 30.2 s | 11.1 s | 5, 3 → 5, 3 | **FAIL** (memory slope only) | 1017-175220-4700 |
-| bella CPU (8 threads) | cpu, Qwen2.5-0.5B-Instruct Q4_K_M | 4.02 | 6 / 1 / 2048, `--max-queue 4` | 36,941 | 0 | 544 | 17/17 | 0.42 MiB/h (10.0, 64) | n/a | 1.0 s / 30.7 s / 13.0 s | 0.77 s | 5, 10 → 5, 10 | **PASS** | 1017-195600-9552 |
+- 4f83, 45bd: no 503 back-off, no `summarise`, no priming.
+- 4700: back-off and the identity 503 retry.
+- d942: priming added.
+- 9552: everything above.
 
-The 503s are the documented back-pressure: one CPU slot plus a 4-deep queue, 6 clients and bursts of 3. Every
-503 carried `too many queued requests`, and clients back off 1–3 s. A GPU run never filled its 128-deep queue.
+None of them had the review-round additions: the slope ±2 SE verdict, RssAnon, the 503 body check, the 1500-token
+slow reader with probe, cancel counting and slots-idle. **The memory columns below are re-judged from each run's
+saved CSV rows with the revised logic (`soak.py rejudge LOG`)**. That is pure analysis of the same samples on
+VmRSS: none of these runs sampled RssAnon.
 
-**Reading the two FAIL-shaped results:**
+"Requests" counts every request the clients sent, including expected 4xx (invalid/oversize, ~9 %),
+self-cancelled disconnects (~7 %) and 503s; "ok" is the successful ones. "failing": every request in a failing
+class. Latency is the whole request, successful requests only, as the median of the 30 s windows' p50/p99. That
+understates the true p99. The p99 of about 30 s is the slow-reader requests (96 tokens drained at ~1 KB/s by the
+client). "max excl. slow-reader" is the slowest successful request of any other kind.
 
-- **jade, RSS: FAIL by the criterion.** Its RSS sat at 529.8–531.9 MiB for the first 80 min. It stepped to 537.9
-  MiB at 81 min, then stayed at 537.6–537.9 for the last 40 min. A least-squares line through a single
-  late step over a 1.7 h window projects to 137 MiB/day, so the run fails. The bella CPU run of the same binary,
-  model and mix (4.02 h, 36,941 requests, 6.6× jade's) has a slope of 0.42 MiB/h (10 MiB/day), with
-  the last quarter 1.6 MiB *below* the first. Its RSS also moves in ±25 MiB swings (406–457 MiB) as the
-  allocator takes and returns memory, so an 8 MiB step is well inside what glibc does on its own. Our reading:
-  jade's step is a one-off allocator step, not a leak. The verdict stays FAIL: the criterion was set before the
-  data, and a short run can't tell a step from growth. A 4 h jade replicate (1017-220905-24da) never started:
-  axon-node refused it because MemAvailable was under its 2560 MB floor (other jobs were using jade's RAM).
-- **avante, VRAM: passes, with an unexplained one-time step.** Both 3.2 h runs show exactly one +4 MiB step in
-  the server's own VRAM, at 22.5 min and at 27.6 min, then nothing for about 3 h. Priming every batch mix first
-  didn't remove it, so the batch graph cache (`cuda/qwen2/slots.rs`, bounded at 64 graphs) is not the whole
-  cause. Other candidates are the solo path's decode graph for long positions (`cmb64`, captured on first
-  use), or the driver growing a pool on a first rare shape. Two flat 3 h tails don't look like a leak. The
-  slope check passes in both runs (2.9 and 8.4 MiB/day against 16). Not identified.
+| host | backend / model | hours | clients / slots / ctx | requests / ok | failing | 503 (fraction) | identity | RSS growth/24 h ±2 SE (bound) | VRAM growth/24 h ±2 SE (bound 16) | memory (revised rule) | lat p50 / p99 / max excl. slow-reader | TTFT p50 | fds, threads before → after | other checks | job |
+|---|---|---:|---|---:|---:|---:|---|---|---|---|---|---:|---|---|---|
+| avante (RTX 4050 Laptop, sm_89, 6 GB) | cuda, Qwen2.5-1.5B-Instruct Q4_K_M | 3.22 | 12 / 4 / 4096 | 79,656 / 67,270 | 0 | 0 | 14/14 | 5.4 [4.8, 5.9] (64) | 2.9 [1.4, 4.3]; one +4 MiB step at 22.5 min | NOT-JUDGED (2.86 h < 4 h); would be PASS | 313 ms / 30.3 s / 3.0 s | 28 ms | 39, 7 → 39, 7 | pass | 1017-171509-4f83 |
+| avante, primed rerun | same | 3.22 | 12 / 4 / 4096 | 80,879 / 68,368 | 0 | 0 | 14/14 | −61.8 [−70.1, −53.4] (64) | 8.4 [6.0, 10.8]; same step at 27.6 min | NOT-JUDGED (2.86 h); would be PASS | 294 ms / 30.3 s / 2.9 s | 26 ms | 39, 7 → 39, 7 | pass | 1017-195822-d942 |
+| bella (RTX 5070 Ti Laptop, sm_120, 12 GB) | cuda, Qwen2.5-7B-Instruct Q4_K_M | 1.12 | 16 / 4 / 4096 | 20,357 / 17,144 | 0 | 0 | 6/6 | 45.8 **[−74.3, 166.0]** (64) | 0.0 [0.0, 0.0] | NOT-JUDGED (0.76 h); **would be INCONCLUSIVE** | 2.0 s / 31.0 s / 7.9 s | 1.39 s | 39, 7 → 39, 7 | pass | 1017-171510-45bd |
+| jade (i7-9750H, 6C/12T, 7 GB) | cpu, Qwen2.5-0.5B-Instruct Q4_K_M | 2.02 | 6 / 1 / 2048, `--max-queue 4` | 5,627 / 2,650 | 0 | 2,216 (39 %) | 9/9 | 137.4 [126.0, 148.8] (64) | n/a | NOT-JUDGED (1.66 h); **would be FAIL** | 12.1 s / 21.4 s / 30.2 s | 11.1 s | 5, 3 → 5, 3 | pass | 1017-175220-4700 |
+| bella CPU (8 threads) | cpu, Qwen2.5-0.5B-Instruct Q4_K_M | 4.02 | 6 / 1 / 2048, `--max-queue 4` | 36,941 / 30,672 | 0 | 544 (1.5 %) | 17/17 | 10.0 [−9.2, 29.1] (64) | n/a | NOT-JUDGED (3.66 h after warm-up); would be PASS | 1.0 s / 30.7 s / 13.0 s | 0.77 s | 5, 10 → 5, 10 | pass | 1017-195600-9552 |
+
+Under the original rule (slope × 24 h < bound, no minimum window) these were PASS, PASS, PASS, **FAIL**, PASS.
+
+**What the revised rule says, honestly:** none of the five runs has 4 h after its warm-up, so **no run's
+memory verdict is judged**. That includes bella CPU: 4.02 h minus the 20-min warm-up is 3.66 h. The
+non-memory checks pass on all five: 0 failing of 223,460 requests (186,104 ok), every identity run matched, no
+panic, the server stayed up, fds and threads back at baseline. What the memory data would say:
+
+- **bella-7B is INCONCLUSIVE.** Its "PASS" at 45.8 MiB/day sat on a 1.1 h run, and ±2 SE spans −74 to +166
+  MiB/day. It doesn't support a memory claim either way.
+- **jade would still FAIL.** RSS rose 6 MiB in two steps (531.7 → 533.7 MiB at 72 min, → 537.9 at 81 min), then
+  stayed at 537.6–537.9 for 40 min. Steps make the residuals small and autocorrelated, so the SE is tight
+  (±11) and wrong in the same direction as the slope. The bella CPU run of the same binary, model and mix (6.6× the
+  requests over 4 h) grows 10 MiB/day, its last quarter 1.6 MiB *below* its first, while VmRSS swings ±25 MiB
+  (406–457) as the allocator takes and returns memory. Our reading is a one-off allocator step, not a leak.
+  That is a reading, not a result: jade sampled only VmRSS, and it ran under memory pressure, where file-backed
+  pages being reclaimed and refaulted show up in VmRSS. The RssAnon column added in the review round would
+  settle it. A 4 h jade replicate (1017-220905-24da) never started: axon-node refused it because MemAvailable
+  was under its 2560 MB floor.
+- **avante VRAM would pass, but the verdict depends on when the step lands.** Both 3.2 h runs show exactly one
+  +4 MiB step in the server's own VRAM (at 22.5 and 27.6 min), then nothing for about 3 h. Near the start of the
+  window, a step barely moves the slope. The same step at the midpoint would give ~45 MiB/day and FAIL the
+  16 MiB bound. Priming every batch mix didn't remove it, so the batch graph cache (`cuda/qwen2/slots.rs`, ≤ 64
+  graphs) is not the whole cause. Other candidates: the solo path's long-position decode graph (`cmb64`), or a
+  driver pool growing on a first rare shape. Not identified.
+
+**503s.** On the CPU runs (1 slot, a 4-deep queue, 6 clients and bursts of 3) they are back-pressure by design.
+39 % on jade is a load the box can't keep up with, not a soak of steady service. These runs did not check
+503 bodies; the revised harness does (class `503-undocumented`). The GPU runs never filled their 128-deep queue.
+
+**Server-side cancellation.** Only the bella CPU run kept its whole serve log: 2,505 `cancelled after N tokens`
+lines for 2,588 client disconnects (0.97). The rest are disconnects that came after the generation ended. The
+revised harness reports this ratio for every run.
 
 Latency, for scale: 1.5B on the 4050 laptop serves 6–7 requests/s at a p50 of about 0.3 s. A 7B on the 5070 Ti Laptop runs
 16 clients at a p50 of 2.0 s. A slot holds up to ~75 % of a 4096 context (the `long` prompts).
 
-**Not covered:** multi-day runs (the longest is 4 h); pod GPUs; `--kv q8`; `--draft`; a split
+**Not covered:** a judged memory verdict (no run has 4 h after warm-up; the next soak should run ≥ 4.5 h on jade
+or a pod); RssAnon sampling, the 1500-token slow reader with its probe, the 503 body check and cancel counting
+on a real soak (implemented in the review round, smoke-tested on jade CPU only: one slot, so no probe);
+multi-day runs (the longest is 4 h); pod GPUs; `--kv q8`; `--draft`; a split
 (`--gpu-layers`) or pipeline server; Qwen3 reasoning streams; `--api-key`/`--slot-idle-ms` under load (fuzzed in
 #61, not soaked); thousands of idle connections (`fuzz_serve.py`); OOM and GPU-error injection (still open
 under item 2).
