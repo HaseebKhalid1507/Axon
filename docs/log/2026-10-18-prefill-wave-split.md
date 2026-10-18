@@ -55,7 +55,11 @@ per-token decode (`prefill_bits` from 1200 tokens, `gpu_prefill_logits_match_for
 vacuously). The md5 gate adds ~2100- and ~1780-token prompts, so `gen` runs more than one pass.
 
 ## Verification and measurement
-See PR body for job ids. bella A/B: same binary, `AXON_WAVE_SPLIT=0` vs `1`, interleaved with alternating order,
+Gates at 0b2f029 (branch head 711cbce merges main 2b89410): release suite group 1018-163238-7f0e, a844 PASS and
+d187 FAIL on `serve::tests::serve_api_key` only, which is the /metrics race fixed by #93 and not this change. d187's
+shard was rerun at 711cbce as 1018-193811-9a1a, with `serve::` in debug as 1018-193812-0bea (both pending). The
+debug suite (group 1018-163238-f2c9: ee59, 033e) PASS. Big-model bits on bella (1018-163242-49f2) PASS. md5 vs main
+(1018-163243-9a15) PASS. That makes 5/6 PASS. The bella A/B is 1018-163243-7684. bella A/B: same binary, `AXON_WAVE_SPLIT=0` vs `1`, interleaved with alternating order,
 7 rounds, 3 s cooldown, medians, exact token counts. 7B and Qwen3-8B at pp2100 (waves differ for both), pp3000
 (both), pp1153 (7B only) and pp1777 (neither: the control). Kill rule (r15): ≥ 1.5 % at the predicted lengths.
 
