@@ -51,9 +51,12 @@ Works today, honestly scoped:
   ([roadmap](docs/roadmap.md#mixture-of-experts)). `deepseek2` (DeepSeek V2/V3/V3.1, Kimi K2,
   Moonlight: MLA attention in the absorbed form with a K-only 576-wide cache, sigmoid routing
   with `exp_probs_b` and shared experts, YaRN's DeepSeek attention scale; the `kimi-k2` and
-  `deepseek-v3` tokenizers and the Kimi and DeepSeek V3 chat formats) runs on the CPU only
-  (`--device cpu`), decode == batched prefill == verify bit for bit; checked on
-  Moonlight-16B-A3B ([log](docs/log/2026-10-18-deepseek2-s0.md)). Legacy non-MLA deepseek2
+  `deepseek-v3` tokenizers and the Kimi and DeepSeek V3 chat formats) runs on the CPU
+  (`--device cpu`, [log](docs/log/2026-10-18-deepseek2-s0.md)) or, with `--device cuda`, as
+  qwen3moe does: MLA attention (its own kernels, a 576-wide f16 latent cache), router, shared
+  experts and the dense lead layer on the GPU, the routed experts on the CPU (stage 1,
+  [log](docs/log/2026-10-18-deepseek2-s1.md); f16 KV only for now). Both: decode == batched
+  prefill == verify bit for bit; checked on Moonlight-16B-A3B. Legacy non-MLA deepseek2
   GGUFs (an unsplit `attn_kv_b`, e.g. the published DeepSeek-V2-Lite files) are refused with a
   re-convert message.
   `gpt-oss` (gpt-oss-20b, ggml-org's MXFP4
