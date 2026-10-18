@@ -184,28 +184,29 @@ impl Framing {
             special(tok, "<|channel|>"),
             special(tok, "<|return|>"),
         );
-        let (format, im_start, im_end) = if let (Some(st), Some(end), Some(message), Some(channel), Some(_)) =
-            harmony
-        {
-            (Format::Harmony { message, channel }, st, end)
-        } else if let (Some(start), Some(end), Some(eot)) = llama {
-            let bos = tok.bos();
-            (Format::Llama3 { start, end, bos }, start, eot)
-        } else if let (Some(sot), Some(eot)) = (
-            special(tok, "<start_of_turn>"),
-            special(tok, "<end_of_turn>"),
-        ) {
-            (Format::Gemma { bos: tok.bos() }, sot, eot)
-        } else if let (Some(inst), Some(end)) = (special(tok, "[INST]"), special(tok, "[/INST]")) {
-            let bos = tok.bos();
-            (Format::Mistral { end, bos }, inst, tok.eos())
-        } else if let (Some(im_start), Some(im_end)) =
-            (special(tok, "<|im_start|>"), special(tok, "<|im_end|>"))
-        {
-            (Format::ChatMl, im_start, im_end)
-        } else {
-            return None;
-        };
+        let (format, im_start, im_end) =
+            if let (Some(st), Some(end), Some(message), Some(channel), Some(_)) = harmony {
+                (Format::Harmony { message, channel }, st, end)
+            } else if let (Some(start), Some(end), Some(eot)) = llama {
+                let bos = tok.bos();
+                (Format::Llama3 { start, end, bos }, start, eot)
+            } else if let (Some(sot), Some(eot)) = (
+                special(tok, "<start_of_turn>"),
+                special(tok, "<end_of_turn>"),
+            ) {
+                (Format::Gemma { bos: tok.bos() }, sot, eot)
+            } else if let (Some(inst), Some(end)) =
+                (special(tok, "[INST]"), special(tok, "[/INST]"))
+            {
+                let bos = tok.bos();
+                (Format::Mistral { end, bos }, inst, tok.eos())
+            } else if let (Some(im_start), Some(im_end)) =
+                (special(tok, "<|im_start|>"), special(tok, "<|im_end|>"))
+            {
+                (Format::ChatMl, im_start, im_end)
+            } else {
+                return None;
+            };
         // Harmony's `<|end|>` ends a message (the reasoning), not the reply.
         let mut stop = vec![tok.eos()];
         if !matches!(format, Format::Harmony { .. }) {
@@ -1074,7 +1075,9 @@ impl<'a, M: Lm> Chat<'a, M> {
             // channel is `final` (else all of it: a reply cut short).
             let at = start + opened;
             if let Some(p) = self.hist[at..].iter().rposition(|&t| t == channel) {
-                let name = self.tok.decode_bytes(&self.hist[at + p + 1..(at + p + 2).min(self.hist.len())]);
+                let name = self
+                    .tok
+                    .decode_bytes(&self.hist[at + p + 1..(at + p + 2).min(self.hist.len())]);
                 if p > 0 && name.trim_ascii().starts_with(b"final") {
                     self.hist.drain(at..at + p);
                     self.fed = self.fed.min(at);

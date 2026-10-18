@@ -7,10 +7,23 @@
 use super::tests::feed_batch_matches_feed_on;
 use super::*;
 
+/// A fixture's tensors: (name, dims, type, bytes).
+type Ts = Vec<(String, Vec<u64>, u32, Vec<u8>)>;
+
 /// (layers, dim, q heads, kv heads, head dim, expert ffn, experts, top-k,
 /// vocab, window): a gpt-oss in miniature, 3 layers (local, global, local).
-const OSS: (usize, usize, usize, usize, usize, usize, usize, usize, usize, usize) =
-    (3, 64, 4, 2, 16, 64, 4, 2, 64, 4);
+const OSS: (
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+    usize,
+) = (3, 64, 4, 2, 16, 64, 4, 2, 64, 4);
 
 /// 32 values as one MXFP4 block (17 bytes): the scale 2^(e-128) from the
 /// largest magnitude, each value the nearest code.
@@ -58,7 +71,7 @@ fn q8_0_bytes(v: &[f32]) -> Vec<u8> {
 /// biases, F32 router (+ bias), YaRN (factor 4 over 16), window 4 on the
 /// even layers. `edit` changes the tensor list, `edit_meta` the metadata.
 pub(super) fn oss_fixture_with(
-    edit: impl FnOnce(&mut Vec<(String, Vec<u64>, u32, Vec<u8>)>),
+    edit: impl FnOnce(&mut Ts),
     edit_meta: impl FnOnce(&mut Vec<(&'static str, Val)>),
 ) -> Model {
     let (nl, dim, nh, nkv, hd, ffn, ne, k, vocab, win) = OSS;
@@ -70,16 +83,26 @@ pub(super) fn oss_fixture_with(
         st ^= st << 17;
         lo + (hi - lo) * ((st >> 40) as f32 / (1u64 << 24) as f32)
     };
-    let mut ts: Vec<(String, Vec<u64>, u32, Vec<u8>)> = Vec::new();
+    let mut ts: Ts = Vec::new();
     let f32b = |v: Vec<f32>| -> Vec<u8> { v.iter().flat_map(|x| x.to_le_bytes()).collect() };
     let mat = |uni: &mut dyn FnMut(f32, f32) -> f32, cols: usize, rows: usize, rms: f32| {
         let a = rms * (3.0 / cols as f32).sqrt();
         (0..cols * rows).map(|_| uni(-a, a)).collect::<Vec<f32>>()
     };
     let embd: Vec<f32> = (0..dim * vocab).map(|_| uni(-1.0, 1.0)).collect();
-    ts.push(("token_embd.weight".into(), vec![dim as u64, vocab as u64], Q8_0, q8_0_bytes(&embd)));
+    ts.push((
+        "token_embd.weight".into(),
+        vec![dim as u64, vocab as u64],
+        Q8_0,
+        q8_0_bytes(&embd),
+    ));
     let out = mat(&mut uni, dim, vocab, 1.0);
-    ts.push(("output.weight".into(), vec![dim as u64, vocab as u64], Q8_0, q8_0_bytes(&out)));
+    ts.push((
+        "output.weight".into(),
+        vec![dim as u64, vocab as u64],
+        Q8_0,
+        q8_0_bytes(&out),
+    ));
     let on: Vec<f32> = (0..dim).map(|_| uni(0.8, 1.2)).collect();
     ts.push(("output_norm.weight".into(), vec![dim as u64], F32, f32b(on)));
     for i in 0..nl {
@@ -107,7 +130,12 @@ pub(super) fn oss_fixture_with(
             ts.push((n(s), vec![len as u64], F32, f32b(v)));
         }
         let r = mat(&mut uni, dim, ne, 3.0);
-        ts.push((n("ffn_gate_inp.weight"), vec![dim as u64, ne as u64], F32, f32b(r)));
+        ts.push((
+            n("ffn_gate_inp.weight"),
+            vec![dim as u64, ne as u64],
+            F32,
+            f32b(r),
+        ));
         // gate/up of a few units so the clamps (gate <= 7, |up| <= 7) bite.
         for (s, cols, rows, rms) in [
             ("ffn_gate_exps", dim, ffn, 4.0),
@@ -119,7 +147,12 @@ pub(super) fn oss_fixture_with(
             let d = vec![cols as u64, rows as u64, ne as u64];
             ts.push((n(&format!("{s}.weight")), d, MXFP4, bytes));
             let b: Vec<f32> = (0..rows * ne).map(|_| uni(-0.5, 0.5)).collect();
-            ts.push((n(&format!("{s}.bias")), vec![rows as u64, ne as u64], F32, f32b(b)));
+            ts.push((
+                n(&format!("{s}.bias")),
+                vec![rows as u64, ne as u64],
+                F32,
+                f32b(b),
+            ));
         }
     }
     edit(&mut ts);
@@ -171,7 +204,9 @@ fn deq(m: &Model, name: &str) -> Vec<f64> {
 
 /// `w` (rows of `cols`) times x.
 fn mv(w: &[f64], cols: usize, x: &[f64]) -> Vec<f64> {
-    w.chunks(cols).map(|r| r.iter().zip(x).map(|(a, b)| a * b).sum()).collect()
+    w.chunks(cols)
+        .map(|r| r.iter().zip(x).map(|(a, b)| a * b).sum())
+        .collect()
 }
 
 fn rms(x: &[f64], w: &[f64], eps: f64) -> Vec<f64> {
@@ -205,8 +240,12 @@ fn oss_ref(m: &Model, ids: &[u32], bug: OssBug) -> Vec<Vec<f32>> {
     let (base, factor, orig) = (150000f64, 4f64, 16f64);
     let half = hd / 2;
     // ggml_rope_yarn_corr_dims and rope_yarn: theta_extrap = base^(-2i/hd).
-    let corr = |rot: f64| hd as f64 * (orig / (rot * 2.0 * std::f64::consts::PI)).ln() / (2.0 * base.ln());
-    let (low, high) = (corr(32.0).floor().max(0.0), corr(1.0).ceil().min(hd as f64 - 1.0));
+    let corr =
+        |rot: f64| hd as f64 * (orig / (rot * 2.0 * std::f64::consts::PI)).ln() / (2.0 * base.ln());
+    let (low, high) = (
+        corr(32.0).floor().max(0.0),
+        corr(1.0).ceil().min(hd as f64 - 1.0),
+    );
     let theta: Vec<f64> = (0..half)
         .map(|i| {
             let ex = base.powf(-2.0 * i as f64 / hd as f64);
@@ -218,7 +257,11 @@ fn oss_ref(m: &Model, ids: &[u32], bug: OssBug) -> Vec<Vec<f32>> {
             ex / factor * (1.0 - ramp) + ex * ramp
         })
         .collect();
-    let msc = if bug == OssBug::NoYarn { 1.0 } else { 0.1 * factor.ln() + 1.0 };
+    let msc = if bug == OssBug::NoYarn {
+        1.0
+    } else {
+        0.1 * factor.ln() + 1.0
+    };
     let rope = |v: &mut [f64], pos: usize| {
         for h in v.chunks_mut(hd) {
             for i in 0..half {
@@ -239,7 +282,9 @@ fn oss_ref(m: &Model, ids: &[u32], bug: OssBug) -> Vec<Vec<f32>> {
         for l in 0..nl {
             let g = |s: &str| deq(m, &format!("blk.{l}.{s}"));
             let h = rms(&x, &g("attn_norm.weight"), eps);
-            let add = |a: Vec<f64>, b: Vec<f64>| -> Vec<f64> { a.iter().zip(&b).map(|(x, y)| x + y).collect() };
+            let add = |a: Vec<f64>, b: Vec<f64>| -> Vec<f64> {
+                a.iter().zip(&b).map(|(x, y)| x + y).collect()
+            };
             let mut q = add(mv(&g("attn_q.weight"), dim, &h), g("attn_q.bias"));
             let mut kk = add(mv(&g("attn_k.weight"), dim, &h), g("attn_k.bias"));
             let v = add(mv(&g("attn_v.weight"), dim, &h), g("attn_v.bias"));
@@ -248,7 +293,11 @@ fn oss_ref(m: &Model, ids: &[u32], bug: OssBug) -> Vec<Vec<f32>> {
             ks[l].push(kk);
             vs[l].push(v);
             let local = l % 2 == 0 && bug != OssBug::NoWindow;
-            let t0 = if local { (pos + 1).saturating_sub(win) } else { 0 };
+            let t0 = if local {
+                (pos + 1).saturating_sub(win)
+            } else {
+                0
+            };
             let sinks = g("attn_sinks.weight");
             let mut att = vec![0f64; nh * hd];
             for qh in 0..nh {
@@ -260,7 +309,11 @@ fn oss_ref(m: &Model, ids: &[u32], bug: OssBug) -> Vec<Vec<f32>> {
                         qv.iter().zip(kv).map(|(a, b)| a * b).sum::<f64>() / (hd as f64).sqrt()
                     })
                     .collect();
-                let sink = if bug == OssBug::NoSinks { f64::NEG_INFINITY } else { sinks[qh] };
+                let sink = if bug == OssBug::NoSinks {
+                    f64::NEG_INFINITY
+                } else {
+                    sinks[qh]
+                };
                 let mx = sc.iter().copied().fold(sink, f64::max);
                 let e: Vec<f64> = sc.iter().map(|s| (s - mx).exp()).collect();
                 let z = e.iter().sum::<f64>() + (sink - mx).exp();
@@ -271,7 +324,10 @@ fn oss_ref(m: &Model, ids: &[u32], bug: OssBug) -> Vec<Vec<f32>> {
                     }
                 }
             }
-            let o = add(mv(&g("attn_output.weight"), nh * hd, &att), g("attn_output.bias"));
+            let o = add(
+                mv(&g("attn_output.weight"), nh * hd, &att),
+                g("attn_output.bias"),
+            );
             x = add(x, o);
             let h = rms(&x, &g("post_attention_norm.weight"), eps);
             let mut logits = mv(&g("ffn_gate_inp.weight"), dim, &h);
@@ -289,8 +345,16 @@ fn oss_ref(m: &Model, ids: &[u32], bug: OssBug) -> Vec<Vec<f32>> {
                 let s: f64 = e.iter().sum();
                 e.iter().map(|v| v / s).collect()
             };
-            let (wg, wu, wd) = (g("ffn_gate_exps.weight"), g("ffn_up_exps.weight"), g("ffn_down_exps.weight"));
-            let (bg, bu, bd) = (g("ffn_gate_exps.bias"), g("ffn_up_exps.bias"), g("ffn_down_exps.bias"));
+            let (wg, wu, wd) = (
+                g("ffn_gate_exps.weight"),
+                g("ffn_up_exps.weight"),
+                g("ffn_down_exps.weight"),
+            );
+            let (bg, bu, bd) = (
+                g("ffn_gate_exps.bias"),
+                g("ffn_up_exps.bias"),
+                g("ffn_down_exps.bias"),
+            );
             let mut y = vec![0f64; dim];
             for (&e, &we) in sel.iter().zip(&w) {
                 let gt = mv(&wg[e * ffn * dim..(e + 1) * ffn * dim], dim, &h);
@@ -314,7 +378,12 @@ fn oss_ref(m: &Model, ids: &[u32], bug: OssBug) -> Vec<Vec<f32>> {
             x = add(x, y);
         }
         let h = rms(&x, &deq(m, "output_norm.weight"), eps);
-        out.push(mv(&deq(m, "output.weight"), dim, &h).into_iter().map(|v| v as f32).collect());
+        out.push(
+            mv(&deq(m, "output.weight"), dim, &h)
+                .into_iter()
+                .map(|v| v as f32)
+                .collect(),
+        );
     }
     out
 }
@@ -329,31 +398,57 @@ fn argmax(l: &[f32]) -> u32 {
 }
 
 fn ids(n: usize) -> Vec<u32> {
-    (0..n as u32).map(|i| (i * 37 + 11) % OSS.8 as u32).collect()
+    (0..n as u32)
+        .map(|i| (i * 37 + 11) % OSS.8 as u32)
+        .collect()
 }
 
 #[test]
 fn check_supported_gpt_oss() {
     check_supported(&oss_fixture()).expect("gpt-oss fixture");
-    let rejects = |edit: &dyn Fn(&mut Vec<(String, Vec<u64>, u32, Vec<u8>)>), want: &str| {
+    let rejects = |edit: &dyn Fn(&mut Ts), want: &str| {
         let m = oss_fixture_with(|ts| edit(ts), |_| {});
         let e = check_supported(&m).expect_err("malformed gpt-oss accepted");
         assert!(e.to_string().contains(want), "{e}");
     };
-    rejects(&|ts| ts.retain(|t| t.0 != "blk.1.attn_sinks.weight"), "missing tensor blk.1.attn_sinks.weight");
-    rejects(&|ts| ts.retain(|t| t.0 != "blk.0.attn_output.bias"), "missing tensor blk.0.attn_output.bias");
-    rejects(&|ts| ts.retain(|t| t.0 != "blk.2.ffn_up_exps.bias"), "missing tensor blk.2.ffn_up_exps.bias");
-    rejects(&|ts| ts.retain(|t| t.0 != "blk.0.ffn_gate_inp.bias"), "missing tensor blk.0.ffn_gate_inp.bias");
+    rejects(
+        &|ts| ts.retain(|t| t.0 != "blk.1.attn_sinks.weight"),
+        "missing tensor blk.1.attn_sinks.weight",
+    );
+    rejects(
+        &|ts| ts.retain(|t| t.0 != "blk.0.attn_output.bias"),
+        "missing tensor blk.0.attn_output.bias",
+    );
+    rejects(
+        &|ts| ts.retain(|t| t.0 != "blk.2.ffn_up_exps.bias"),
+        "missing tensor blk.2.ffn_up_exps.bias",
+    );
+    rejects(
+        &|ts| ts.retain(|t| t.0 != "blk.0.ffn_gate_inp.bias"),
+        "missing tensor blk.0.ffn_gate_inp.bias",
+    );
     rejects(
         &|ts| ts.retain(|t| t.0 != "blk.0.post_attention_norm.weight"),
         "missing tensor blk.0.post_attention_norm.weight",
     );
-    let m = oss_fixture_with(|_| {}, |m| m.push(("gpt-oss.rope.freq_base_swa", Val::F32(10000.0))));
-    assert!(check_supported(&m).unwrap_err().to_string().contains("freq_base_swa"));
+    let m = oss_fixture_with(
+        |_| {},
+        |m| m.push(("gpt-oss.rope.freq_base_swa", Val::F32(10000.0))),
+    );
+    assert!(
+        check_supported(&m)
+            .unwrap_err()
+            .to_string()
+            .contains("freq_base_swa")
+    );
     // MXFP4 is gpt-oss's alone: a qwen3moe with MXFP4 experts is refused.
     let (mut q, _) = super::tests::dense_fixture("qwen3moe", Q8_0);
     assert!(check_supported(&q).is_ok());
-    if let Some(t) = q.tensors.iter_mut().find(|t| t.name == "blk.0.ffn_up_exps.weight") {
+    if let Some(t) = q
+        .tensors
+        .iter_mut()
+        .find(|t| t.name == "blk.0.ffn_up_exps.weight")
+    {
         t.qtype = crate::gguf::qtype(MXFP4);
     }
     assert!(check_supported(&q).is_err());
@@ -371,14 +466,27 @@ fn gpt_oss_matches_reference_forward() {
     let m = oss_fixture();
     let net = Qwen2::new(&m);
     let mut c = net.new_cache(ids.len());
-    let got: Vec<Vec<f32>> = ids.iter().enumerate().map(|(p, &id)| net.forward(id, p, &mut c)).collect();
+    let got: Vec<Vec<f32>> = ids
+        .iter()
+        .enumerate()
+        .map(|(p, &id)| net.forward(id, p, &mut c))
+        .collect();
     let d = super::tests::max_diff(&got, &want);
     eprintln!("gpt-oss fixture vs f64 reference: max |dlogit| {d}");
-    for bug in [OssBug::NoSinks, OssBug::NoWindow, OssBug::NoRouterBias, OssBug::PlainSwiglu, OssBug::NoYarn] {
+    for bug in [
+        OssBug::NoSinks,
+        OssBug::NoWindow,
+        OssBug::NoRouterBias,
+        OssBug::PlainSwiglu,
+        OssBug::NoYarn,
+    ] {
         let b = oss_ref(&oss_fixture(), &ids, bug);
         let db = super::tests::max_diff(&b, &want);
         eprintln!("  {bug:?}: {db}");
-        assert!(db > 2.5 * d.max(0.05), "{bug:?} only moves the logits by {db}");
+        assert!(
+            db > 2.5 * d.max(0.05),
+            "{bug:?} only moves the logits by {db}"
+        );
     }
     // MEASURED 0.32 (one position; the rest <= 0.19): 8-bit activations,
     // and with top-2 of 4 a near tie of two experts can flip.
@@ -401,13 +509,22 @@ fn gpt_oss_decode_batch_verify_bits() {
 /// before, then the rest in another batch) == one fresh prefill.
 fn contract(net: &Qwen2, n: usize) {
     let v = net.vocab as u32;
-    let ids: Vec<u32> = (0..n as u32).map(|i| (i * 7919 + 13) % v.min(150_000)).collect();
+    let ids: Vec<u32> = (0..n as u32)
+        .map(|i| (i * 7919 + 13) % v.min(150_000))
+        .collect();
     let mut a = net.new_cache(n);
-    let fwd: Vec<Vec<f32>> = ids.iter().enumerate().map(|(p, &id)| net.forward(id, p, &mut a)).collect();
+    let fwd: Vec<Vec<f32>> = ids
+        .iter()
+        .enumerate()
+        .map(|(p, &id)| net.forward(id, p, &mut a))
+        .collect();
     let mut b = net.new_cache(n);
     let ver = net.verify_batch(&ids, 0, &mut b);
     for (p, (x, y)) in fwd.iter().zip(&ver).enumerate() {
-        assert!(x.iter().zip(y).all(|(p, q)| p.to_bits() == q.to_bits()), "verify != forward at {p}");
+        assert!(
+            x.iter().zip(y).all(|(p, q)| p.to_bits() == q.to_bits()),
+            "verify != forward at {p}"
+        );
     }
     let picks = net.verify_argmax(&ids, 0, &mut net.new_cache(n));
     assert_eq!(picks, fwd.iter().map(|l| argmax(l)).collect::<Vec<_>>());
@@ -422,7 +539,12 @@ fn contract(net: &Qwen2, n: usize) {
     let l2 = net.forward(ids[n - 1], n - 1, &mut d);
     assert_eq!(c.bits(), d.bits(), "reused-prefix cache != fresh prefill");
     assert!(l1.iter().zip(&l2).all(|(p, q)| p.to_bits() == q.to_bits()));
-    assert!(fwd[n - 1].iter().zip(&l2).all(|(p, q)| p.to_bits() == q.to_bits()));
+    assert!(
+        fwd[n - 1]
+            .iter()
+            .zip(&l2)
+            .all(|(p, q)| p.to_bits() == q.to_bits())
+    );
 }
 
 /// The real model (optional, CPU): the same contract, and a sanity answer.

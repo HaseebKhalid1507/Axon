@@ -7,8 +7,7 @@ use crate::kv::{Half, KvData, KvElem, Layers};
 use crate::pool::{self, Kind, Pool};
 use crate::quant::{
     DecodeCfg, F16, F32, MXFP4, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0, QuantizedAct,
-    batch_slots,
-    dequant, dot_row_q8_multi, dot_rows_q8, dot_rows_q8_multi, r8, r8q, row_bytes,
+    batch_slots, dequant, dot_row_q8_multi, dot_rows_q8, dot_rows_q8_multi, r8, r8q, row_bytes,
 };
 use crate::vmath;
 
@@ -463,7 +462,8 @@ pub(crate) fn gemma_swa(m: &Model, n_layers: usize) -> Option<Swa> {
         _ => return None,
     };
     let a = &m.arch;
-    let window = meta_num(m, &format!("{a}.attention.sliding_window")).filter(|&w| w > 0.0)? as usize;
+    let window =
+        meta_num(m, &format!("{a}.attention.sliding_window")).filter(|&w| w > 0.0)? as usize;
     let key = format!("{a}.attention.sliding_window_pattern");
     let local = match m.metadata.iter().find(|(k, _)| *k == key).map(|(_, v)| v) {
         Some(Val::Arr(a)) => (0..n_layers)
@@ -879,17 +879,19 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
             t("attn_output.bias", dim, None)?;
             let s = t("attn_sinks.weight", n_heads, None)?;
             if s.qtype.id != F32 {
-                return Err(bad(format!("blk.{i}.attn_sinks.weight: type {} (want F32)", s.qtype.name)));
+                return Err(bad(format!(
+                    "blk.{i}.attn_sinks.weight: type {} (want F32)",
+                    s.qtype.name
+                )));
             }
         } else if find_opt(m, &format!("blk.{i}.attn_sinks.weight")).is_some() {
-            return Err(bad(format!("blk.{i}.attn_sinks.weight is not supported on {}", m.arch)));
+            return Err(bad(format!(
+                "blk.{i}.attn_sinks.weight is not supported on {}",
+                m.arch
+            )));
         }
         // Biases nothing here would add.
-        for b in [
-            "ffn_gate.bias",
-            "ffn_up.bias",
-            "ffn_down.bias",
-        ] {
+        for b in ["ffn_gate.bias", "ffn_up.bias", "ffn_down.bias"] {
             if find_opt(m, &format!("blk.{i}.{b}")).is_some() {
                 return Err(bad(format!("blk.{i}.{b} is not supported")));
             }
@@ -951,7 +953,7 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
             let name = format!("blk.{i}.{b}");
             let t = find_opt(m, &name).ok_or_else(|| bad(format!("missing tensor {name}")))?;
             let q = t.qtype;
-            if !SUPPORTED_TYPES.contains(&q.id) && !(oss && EXPERT_TYPES.contains(&q.id)) {
+            if !(SUPPORTED_TYPES.contains(&q.id) || oss && EXPERT_TYPES.contains(&q.id)) {
                 return Err(bad(format!(
                     "tensor {name}: type {} ({}) is not supported",
                     q.name, q.id
@@ -2053,7 +2055,10 @@ impl<'a> Qwen2<'a> {
                     let s0 = window_start(layer.window, start + b) * kv_dim;
                     let qg = &qs[b * q_dim + kvh * qn..b * q_dim + (kvh + 1) * qn];
                     let (kw, vw) = (&kc[s0..], &vc[s0..]);
-                    let sk = layer.sinks.as_deref().map(|s| &s[kvh * group..(kvh + 1) * group]);
+                    let sk = layer
+                        .sinks
+                        .as_deref()
+                        .map(|s| &s[kvh * group..(kvh + 1) * group]);
                     attend_group(qg, kw, vw, kv_dim, hd, kvh, np - s0 / kv_dim, sk, out);
                 });
             });
@@ -3260,7 +3265,9 @@ pub(crate) mod tests {
         let mut out = vec![0f32; q.len()];
         let mut buf = Vec::new();
         let threads = Pool::global().threads();
-        attend(q, kc, vc, kv_dim, hd, np, tile, threads, None, &mut buf, &mut out);
+        attend(
+            q, kc, vc, kv_dim, hd, np, tile, threads, None, &mut buf, &mut out,
+        );
         out
     }
 
@@ -5243,13 +5250,19 @@ pub(crate) mod tests {
 
                 let (mut sa, mut sb) = (vec![0.0; (np + 1) * group], vec![1.0; (np + 1) * group]);
                 let (mut a, mut b) = (vec![0.0; group * hd], vec![1.0; group * hd]);
-                attend_causal::portable(&qg, &kh, &vh, kv_dim, hd, kvh, np, scale, None, &mut sa, &mut a);
+                attend_causal::portable(
+                    &qg, &kh, &vh, kv_dim, hd, kvh, np, scale, None, &mut sa, &mut a,
+                );
                 unsafe {
-                    attend_causal::v3(&qg, &kh, &vh, kv_dim, hd, kvh, np, scale, None, &mut sb, &mut b)
+                    attend_causal::v3(
+                        &qg, &kh, &vh, kv_dim, hd, kvh, np, scale, None, &mut sb, &mut b,
+                    )
                 };
                 assert_eq!(bits(&a), bits(&b), "attend_causal hd={hd} np={np}");
                 unsafe {
-                    attend_causal::fma(&qg, &kh, &vh, kv_dim, hd, kvh, np, scale, None, &mut sb, &mut b)
+                    attend_causal::fma(
+                        &qg, &kh, &vh, kv_dim, hd, kvh, np, scale, None, &mut sb, &mut b,
+                    )
                 };
                 assert_eq!(bits(&a), bits(&b), "attend_causal fma hd={hd} np={np}");
             }
@@ -5449,7 +5462,9 @@ pub(crate) mod tests {
         for tile in tiles {
             for threads in [1, 5, 18, 64] {
                 let mut got = vec![f32::NAN; nq];
-                attend(q, kc, vc, kv_dim, hd, np, tile, threads, None, buf, &mut got);
+                attend(
+                    q, kc, vc, kv_dim, hd, np, tile, threads, None, buf, &mut got,
+                );
                 if let Some(i) = (0..nq).find(|&i| got[i].to_bits() != want[i].to_bits()) {
                     panic!(
                         "{ty} hd={hd} group={group} n_kv={n_kv} np={np} tile={tile:?} \

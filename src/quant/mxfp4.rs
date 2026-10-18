@@ -265,7 +265,9 @@ mod tests {
                 }
                 dequant(super::super::MXFP4, &b, &mut y);
                 if e == 127 && j == 1 {
-                    let want = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 0.0, -0.5, -1.0, -1.5];
+                    let want = [
+                        0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 0.0, -0.5, -1.0, -1.5,
+                    ];
                     assert_eq!(&y[..12], &want);
                     assert_eq!(y[16..], [0.5; 16]);
                 }
@@ -364,7 +366,10 @@ mod tests {
             let xs: Vec<Vec<f32>> = (0..6)
                 .map(|t| (0..n).map(|_| rng.f() * [1.0, 30.0, 0.01][t % 3]).collect())
                 .collect();
-            let qa: Vec<QuantizedAct> = xs.iter().map(|x| QuantizedAct::for_types(x, &[qt])).collect();
+            let qa: Vec<QuantizedAct> = xs
+                .iter()
+                .map(|x| QuantizedAct::for_types(x, &[qt]))
+                .collect();
             let qr: Vec<&QuantizedAct> = qa.iter().collect();
             // SAFETY: Scalar needs nothing.
             let want: Vec<Vec<f32>> = (0..nr)
@@ -387,7 +392,10 @@ mod tests {
                         mag += (wv as f64 * xv).abs();
                     }
                     let got = want[r][t] as f64;
-                    assert!((got - e).abs() <= 1e-5 * mag + 1e-30, "n {n} r {r} t {t}: {got} vs {e}");
+                    assert!(
+                        (got - e).abs() <= 1e-5 * mag + 1e-30,
+                        "n {n} r {r} t {t}: {got} vs {e}"
+                    );
                 }
             }
             for p in paths() {
@@ -398,7 +406,11 @@ mod tests {
                             // SAFETY: a detected path.
                             unsafe { dot_rows_q8_with(p, qt, &w, x, &mut out, pf, max_rows) };
                             for r in 0..nr {
-                                assert_eq!(out[r].to_bits(), want[r][t].to_bits(), "{p:?} rows n {n}");
+                                assert_eq!(
+                                    out[r].to_bits(),
+                                    want[r][t].to_bits(),
+                                    "{p:?} rows n {n}"
+                                );
                             }
                         }
                     }
@@ -414,7 +426,13 @@ mod tests {
                 let (mut o0, mut o1) = (vec![0f32; qr.len()], vec![0f32; qr.len()]);
                 // SAFETY: as above.
                 unsafe {
-                    dot_rows_q8_multi_with(p, [qt, qt], [&w[..rb], &w[rb..2 * rb]], &qr, [&mut o0, &mut o1])
+                    dot_rows_q8_multi_with(
+                        p,
+                        [qt, qt],
+                        [&w[..rb], &w[rb..2 * rb]],
+                        &qr,
+                        [&mut o0, &mut o1],
+                    )
                 };
                 for t in 0..qr.len() {
                     assert_eq!(o0[t].to_bits(), want[0][t].to_bits(), "{p:?} pair");
