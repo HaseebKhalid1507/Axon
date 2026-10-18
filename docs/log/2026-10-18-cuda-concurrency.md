@@ -1,4 +1,4 @@
-# GPU tests serialize on every card; CUDA_ERROR_ILLEGAL_ADDRESS on packed 4090 pods  (PR #N)
+# GPU tests serialize on every card; CUDA_ERROR_ILLEGAL_ADDRESS on packed 4090 pods  (PR #82)
 
 - Date: 2026-10-18. Branch: fix/cuda-concurrency. Base: main 5a73f63. Status: open.
 - Pick / design: foreman bug hunt (r10): context-poisoning ILLEGAL_ADDRESS on RunPod 4090 pods, hidden by
@@ -65,9 +65,22 @@ GPU outside tests, so a test harness that never overlaps GPU tests removes the h
 controls. With one GPU thread nothing faulted, but the evidence is short runs, not a proof of zero.
 
 ## How it was verified
-Gates (job IDs in the PR body): `gpu_tests_never_overlap` faults before (main, 4090) and passes after; the
-faulting set x5 on packed IOMMU pods with default threads; release and debug-assertion suites; md5 of gen vs
-main; clippy -D warnings; rustfmt.
+MEASURED at 323770d (pods show UTC; the dates/times here are EDT):
+
+| gate | job | host | result |
+|---|---|---|---|
+| release suite, shard 1/2/3, default env (now serial) | 8500 / ea6b / 3e7b | pod2 / pod1 / pod1 | 246/0, 163/0, 105/0 (514 pass, 0 fail, no POISON) |
+| debug-assertion suite (+ the size check), shard 1/2/3 | de1c / 59c9 / 4ba3 | pod1 / pod1 / pod4 | 246/0, 163/0, 105/0 (514 pass, 0 fail) |
+| `gpu_tests_never_overlap` on main + the test only | dfda | pod1 | rc 101: fails on main (the second test got the GPU while the first held it) |
+| same test on this branch | 8500 (rel), de1c (dbg) | pod2, pod1 | pass |
+| set10 (the faulting set), default 4 threads, packed pod1 | 1990, 5258 | pod1 (EPYC, IOMMU, 2 co-tenants each) | 10/10, 10/10 (main: FAULT in 3 of 4) |
+| set10 runs 3-5 | f026 / f287 / e592 | pod1/pod2 | see PR (submitted 05:03, pods down at the 05:50 budget cap) |
+| md5 of gen, main vs candidate (3 models x 3 prompts x cuda/cpu) | 4309 | bella | 18 same, 0 differ |
+| clippy -D warnings (bin + tests, debug cfg), rustfmt --check | local | bella | clean |
+
+axon-node exits rc 102 for any poisoned context from 04:22 EDT on (devstack 7f14147). 5258 and dfda started
+after that, so 5258's rc 0 is clean evidence by itself. The other gates have no POISON-RERUN line in their
+logs and 0 failures, so they are clean too.
 
 ## What didn't work / open
 - The faulting kernel isn't named: the coredump env hides the fault, and memcheck finds nothing.

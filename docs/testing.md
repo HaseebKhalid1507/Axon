@@ -19,9 +19,10 @@ or time it:
 - **CPU forwards don't run in parallel across tests.** `pool::Pool` is process-wide and runs one job at a
   time. Four test threads that run CPU models take turns on one pool, so a test's CPU work costs suite wall
   time no matter how many test threads there are. Removing CPU work is the lever (see below).
-- **GPU tests are serialized on cards below 16 GiB** (bella, avante, jade: `testutil::gpu` takes a
-  process-wide lock until the test's thread ends; `AXON_TEST_GPU_SERIAL=0|1` forces it). On a 24 GB pod they
-  run concurrently.
+- **GPU tests are serialized on every card** (`testutil::gpu` takes a process-wide lock until the test's
+  thread ends; `AXON_TEST_GPU_SERIAL=0` turns it off, for hunting only). Below 16 GiB, concurrent tests ran out
+  of VRAM. On 24 GB EPYC pods, GPU tests in flight together lost the CUDA context to ILLEGAL_ADDRESS
+  (docs/log/2026-10-18-cuda-concurrency.md).
 - **Packed pods are slow.** Three jobs share a 4090 and its vCPUs, and a test there takes 3-8x its exclusive
   time. Serial on an exclusive 4090, the whole release suite is ~2200 s. Packed with 4 test threads it is
   ~2400 s, so on a pod the test threads don't buy wall time.
@@ -73,8 +74,9 @@ scripts/test-tier.sh full REL_BIN DBG_BIN      # the final round, before merge
 - **full**: every test in both builds on GPU hosts, then the md5 gate (`gen` outputs main vs candidate,
   `axon-run --same-host`).
 
-The script sets `AXON_TEST_GPU_SERIAL=1` unless you set it, so GPU tests run one at a time on every host. A
-pod run with GPU tests concurrent can hit the open ILLEGAL_ADDRESS fault, and a POISON-RERUN pass isn't clean.
+The script sets `AXON_TEST_GPU_SERIAL=1` unless you set it (also `testutil::gpu`'s default since #82), so
+GPU tests run one at a time on every host. A pod run with GPU tests concurrent (`AXON_TEST_GPU_SERIAL=0`) can
+hit the ILLEGAL_ADDRESS fault, and a POISON-RERUN pass isn't clean.
 
 Options (environment): `TIER_SHARD=N` splits each suite with `axon-run --shard N`, `TIER_DETACH=1` submits
 and returns, `TIER_RUN_OPTS="--big-models --on pods"` adds `axon-run` options, `TIER_BASE` is the ref the
