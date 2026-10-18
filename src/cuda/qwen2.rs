@@ -466,6 +466,9 @@ pub struct CudaQwen2<'g> {
     layers: Vec<LayerW>,
     /// qwen3moe (`crate::moe`): experts, top k, expert ffn; None if dense.
     pub(crate) moe: Option<crate::model::MoeDims>,
+    /// deepseek2 (`mla`): its MLA layers (then `layers` is empty and
+    /// head_dim is the RoPE width); None otherwise.
+    pub(crate) mla: Option<Box<mla::MlaNet>>,
     /// Attention splits (grid y of attn_split; the q8 cache and GPUs
     /// without tensor cores), and the most blocks of an attn_blk launch.
     max_split: usize,
@@ -1287,14 +1290,22 @@ impl<'g> CudaQwen2<'g> {
         let dim = need("embedding_length")?;
         let n_heads = need("attention.head_count")?;
         let n_kv_heads = need("attention.head_count_kv")?;
-        let head_dim = meta(m, "attention.key_length").map_or(dim / n_heads, |v| v as usize);
+        // deepseek2: its own attention (mla.rs); head_dim is its RoPE
+        // width (the step's RoPE table).
+        let mla_d = mla::dims(m, kv)?;
+        let head_dim = match &mla_d {
+            Some(c) => c.d.rope,
+            None => meta(m, "attention.key_length").map_or(dim / n_heads, |v| v as usize),
+        };
         let q_dim = n_heads * head_dim;
         let eps = meta(m, "attention.layer_norm_rms_epsilon").unwrap_or(1e-6) as f32;
         let freq = crate::model::rope_freqs(m, head_dim);
-        let rope_m = crate::rope::mscale(m);
+        let rope_m = mla_d.as_ref().map_or_else(|| crate::rope::mscale(m), |c| c.d.rope_m);
         let trained = meta(m, "context_length").unwrap_or(32768.0);
         let group = n_heads / n_kv_heads;
-        gpu_head_ok(gemma, head_dim, group)?;
+        if mla_d.is_none() {
+            gpu_head_ok(gemma, head_dim, group)?;
+        }
         let swa = crate::model::gemma_swa(m, n_layers);
         let freq_swa = match &swa {
             Some(_) => crate::model::rope_freqs_swa(m, head_dim),
@@ -1303,8 +1314,12 @@ impl<'g> CudaQwen2<'g> {
         // The tensor-core attention and q8 cache kernels have no head size
         // 256 build: their slots hold the 128 ones, which a gemma3 model
         // never launches (tc_attn off, q8 refused above).
-        let hdk = if head_dim == 256 { 128 } else { head_dim };
-        if group > MAX_GROUP {
+        let hdk = match head_dim {
+            _ if mla_d.is_some() => 64,
+            256 => 128,
+            hd => hd,
+        };
+        if group > MAX_GROUP && mla_d.is_none() {
             return Err(format!(
                 "{group} query heads per kv head isn't supported on the GPU (at most {MAX_GROUP})"
             ));
@@ -1371,7 +1386,16 @@ impl<'g> CudaQwen2<'g> {
         };
         let output_norm = push_vec(vec_f32(m, tensor(m, "output_norm.weight")?));
         let mut layers = Vec::with_capacity(last - first);
-        for i in first..last {
+        let mla = match mla_d {
+            Some(d) => Some(Box::new(mla::plan_layers(
+                m,
+                d,
+                &mut uploads,
+                &mut push_vec,
+            )?)),
+            None => None,
+        };
+        for i in (first..last).filter(|_| mla.is_none()) {
             let name = |s: &str| format!("blk.{i}.{s}");
             let mut mat = |s: &str| -> Result<Mat, String> {
                 let mt = place(tensor(m, &name(s))?, &mut uploads);
@@ -1461,7 +1485,7 @@ impl<'g> CudaQwen2<'g> {
             Ffn::Dense { gate, .. } => gate.rows,
             Ffn::Moe { .. } => 0,
         };
-        let ffn = ffn_rows(&layers[0]);
+        let ffn = layers.first().map_or(0, ffn_rows);
         if layers.iter().any(|l| ffn_rows(l) != ffn) {
             return Err("layers of different FFN sizes aren't supported on the GPU".into());
         }
@@ -1532,6 +1556,7 @@ impl<'g> CudaQwen2<'g> {
             output_norm,
             layers,
             moe: moe_dims,
+            mla,
             max_split,
             att_gy: 0,
             tc_attn: module.mma() && head_dim != 256,
@@ -1599,6 +1624,9 @@ impl<'g> CudaQwen2<'g> {
 
     /// Bytes of the keys and values of a `kv` cache for max_ctx positions.
     pub fn kv_cache_bytes(&self, kv: CacheKv, max_ctx: usize) -> usize {
+        if let Some(ml) = &self.mla {
+            return ml.kv_bytes(max_ctx);
+        }
         let n = 2 * self.layers.len() * max_ctx * self.kv_dim();
         match kv {
             CacheKv::F16 => 2 * n,
@@ -1747,6 +1775,7 @@ impl<'g> CudaQwen2<'g> {
             + 64
             + host_x
             + self.batch_bytes(self.batch_for(max_ctx), max_ctx)
+            + self.mla_scratch_bytes(self.batch_for(max_ctx))
     }
 
     /// A cache for positions 0..max_ctx, or why there's no room for it.
@@ -3089,6 +3118,7 @@ impl<'g> Lm for CudaQwen2<'g> {
 
 mod batch;
 pub(crate) mod kvio;
+pub(crate) mod mla;
 pub(crate) mod moe;
 #[cfg(test)]
 mod paged_tests;

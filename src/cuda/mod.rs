@@ -1980,6 +1980,18 @@ impl<'m> Kernels<'m> {
         Ok(Module::load(gpu, include_str!("moe.cu"), &KERNEL_OPTS)?.0)
     }
 
+    /// mla.cu (deepseek2's MLA attention and router, `cuda::qwen2::mla`)
+    /// on its own, after kernels.cu's dequantization (every type) and
+    /// moe.cu's router logits: the other modules stay as they are.
+    pub fn mla_module(gpu: &Gpu) -> Result<Module<'_>, String> {
+        const SRC: &str = concat!(
+            include_str!("kernels.cu"),
+            include_str!("moe.cu"),
+            include_str!("mla.cu")
+        );
+        Ok(Module::load(gpu, SRC, &KERNEL_OPTS_EXT)?.0)
+    }
+
     /// The module model `m` needs: `module_ext` if it has an extra type.
     pub fn module_for<'g>(gpu: &'g Gpu, m: &crate::gguf::Model) -> Result<Module<'g>, String> {
         if needs_ext(m) {
