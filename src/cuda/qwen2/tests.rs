@@ -4759,7 +4759,8 @@ fn cuda_attn_bench() {
     attn_bench(&g, &km, [shape[0], shape[1], shape[2]], nz, start);
 }
 
-/// cuda_attn_bench at the 7B shape over a grid, three interleaved rounds:
+/// cuda_attn_bench at AXON_MQ_SHAPE (n_heads,n_kv,hd; default the 7B's
+/// 28,4,128) over a grid, three interleaved rounds:
 /// AXON_MQ_NZ queries (default 4,8,16,24,32,48,64,96) at AXON_MQ_DEPTH
 /// positions (default 4096,8192,16384,24576). Per point a `SWEEP` line:
 /// depth, queries, then us of the per-query path over all of them with
@@ -4781,10 +4782,12 @@ fn cuda_attn_mq_sweep() {
     };
     let nzs = list("AXON_MQ_NZ", "4,8,16,24,32,48,64,96");
     let depths = list("AXON_MQ_DEPTH", "4096,8192,16384,24576");
+    // AXON_MQ_SHAPE: n_heads,n_kv,hd (default the 7B's).
+    let sh = list("AXON_MQ_SHAPE", "28,4,128");
     for r in 0..3 {
         for &start in &depths {
             for &nz in &nzs {
-                let b = attn_bench(&g, &km, [28, 4, 128], nz, start);
+                let b = attn_bench(&g, &km, [sh[0], sh[1], sh[2]], nz, start);
                 eprintln!(
                     "SWEEP round {r} depth {start} nz {nz} mq {:.1} blk_b {:.1} fa_b {:.1} fa_bs {:.1}",
                     b[8] * 1e3,
