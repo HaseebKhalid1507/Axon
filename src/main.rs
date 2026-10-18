@@ -12,6 +12,7 @@ mod kvstore;
 mod lineedit;
 mod lm;
 mod model;
+mod moe;
 mod pool;
 mod quant;
 mod rope;
@@ -894,6 +895,13 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             n.kv_name()
         );
     }
+    if let Backend::Moe(n) = &net {
+        eprintln!(
+            "device:      cuda + cpu experts, {}, kv {}",
+            n.describe(cache_ctx),
+            n.kv_name()
+        );
+    }
     let id = identity::of(path, &model, &net);
     match verbose {
         true => eprint!("identity:    {}\n{}", id.fingerprint(), id.canonical()),
@@ -1200,6 +1208,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         Backend::Cuda(n) => format!(" | kv {}", n.kv_name()),
         Backend::Hybrid(n) => format!(" | {} | kv {}", n.describe(ctx), n.kv_name()),
         Backend::Pipeline(n) => format!(" | {} | kv {}", n.describe(ctx), n.kv_name()),
+        Backend::Moe(n) => format!(" | {} | kv {}", n.describe(ctx), n.kv_name()),
         Backend::Cpu(_) => String::new(),
     };
     let seed = conv

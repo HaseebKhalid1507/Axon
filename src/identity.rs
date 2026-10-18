@@ -208,6 +208,11 @@ pub fn of(path: &str, m: &Model, net: &Backend) -> Identity {
             let kv = format!("{} (cpu layers {cpu_kv})", n.kv_name());
             Identity::new(&d, &types, &b, g.as_deref(), Some(&cpu()), &kv)
         }
+        Backend::Moe(n) => {
+            let g = gpu(n.gpu_net());
+            let kv = format!("{} (experts on the cpu)", n.kv_name());
+            Identity::new(&d, &types, "cuda+cpu experts", Some(&g), Some(&cpu()), &kv)
+        }
         Backend::Pipeline(n) => {
             let gs: Vec<String> = n.stages().into_iter().map(&mut gpu).collect();
             let b = pipeline_backend(&n.cuts);
@@ -355,7 +360,9 @@ pub fn predicted(path: &str, m: &Model) -> io::Result<Vec<(String, Result<Identi
         ),
     )];
     if crate::model::is_moe(m) {
-        v.push(("cuda".to_string(), Err(crate::model::moe_gpu_refusal(m))));
+        let why = "not predicted here (attention on the GPU, experts on the CPU; it runs): \
+                   gen --device cuda prints its identity";
+        v.push(("cuda".to_string(), Err(why.to_string())));
         return Ok(v);
     }
     let Ok(g) = crate::cuda::Gpu::open() else {
