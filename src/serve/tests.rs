@@ -2951,8 +2951,8 @@ fn serve_slot_idle_frees_a_stalled_stream() {
                 // reaps the slot (`Batch::reap`). Neither delays anyone: the
                 // engine can't run another request before that step ends
                 // anyway. Idle host: ~0.02-0.1 s per step; 8 pool threads
-                // among 64 spinning ones on a 6.8-vCPU pod: ~2 s, freed at
-                // ~4.1 s.
+                // among 64 spinning ones on a 6.8-vCPU pod: 2-6 s, freed at
+                // 4-12 s.
                 assert!(
                     took < Duration::from_millis(n + 2500) + 2 * step,
                     "{what}: freed {took:?} after the window filled (longest step {step:?})"
