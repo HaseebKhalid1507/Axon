@@ -375,6 +375,10 @@ pub(super) struct BatchFns<'m> {
     gemvmx: Option<[[Func<'m>; NTYPES_VM]; 2]>,
     /// AXON_GEMVMX=0: never `bgemm_x` (q, k, v and gate, up one launch each).
     pub(super) gemvmx_on: bool,
+    /// Gate and up (both Q4_K, the fused gemm2s_q4_k_gu) on gemm2 from this
+    /// many tokens even where gemvm would take them (9..=16; 0 or past
+    /// SMALL: never). AXON_GEMVM_GU_MIN.
+    pub(super) gu_min: usize,
     /// AXON_GEMVM_MAX: 16, gemvm for at most 16 tokens (main's routing);
     /// 32, for up to 32 whatever the product; 0 or unset, by the product's
     /// shape (`CudaQwen2::takes_gemvm`).
@@ -496,6 +500,10 @@ impl<'m> BatchFns<'m> {
         Ok(BatchFns {
             gemvmx,
             gemvmx_on: std::env::var("AXON_GEMVMX").map_or(true, |v| v != "0"),
+            gu_min: std::env::var("AXON_GEMVM_GU_MIN")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
             embed: module.function("embed_b")?,
             rope_table: module.function("rope_table_b")?,
             rmsnorm_quant: module.function("rmsnorm_quant_b")?,
@@ -1674,7 +1682,7 @@ impl<'g> CudaQwen2<'g> {
             let fuse = self.gate_up_fused
                 && self.gemma.is_none()
                 && bf.gemm_gu.is_some()
-                && !self.takes_gemvm(gate.rows, nb)
+                && (!self.takes_gemvm(gate.rows, nb) || (bf.gu_min > 0 && nb >= bf.gu_min))
                 && gate.qt == Q4_K
                 && up.qt == Q4_K
                 && gate.cols == dim

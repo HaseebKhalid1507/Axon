@@ -3022,6 +3022,137 @@ fn gpu_swiglu_epilogue_and_gate_up_match_reference() {
     }
 }
 
+/// Gate|up (7B shape, Q4_K 3584 -> 18944, both) at decode-sized batches:
+/// gemvmx (the two products in one gemvm launch, `bgemm_x`) vs
+/// gemm2s_q4_k_gu (one gemm2 launch, silu(gate) * up out). The weights are
+/// AXON_BENCH_COPIES pairs (default 6, ~460 MB) cycled through, so they
+/// stream from DRAM as in a pass, not from L2. AXON_BENCH_NB: the batches
+/// (default 4,8,12,16). Rounds alternate the kernels; median ms per call.
+#[test]
+#[ignore]
+fn cuda_gu_bench() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    if !km.mma() {
+        return;
+    }
+    let info = g.info().unwrap();
+    eprintln!(
+        "{} sm_{}{} {} SMs",
+        info.name, info.cc.0, info.cc.1, info.sms
+    );
+    let (cols, rows) = (3584usize, 18944usize);
+    let copies: usize = std::env::var("AXON_BENCH_COPIES").map_or(6, |v| v.parse().unwrap());
+    let nbs: Vec<usize> = std::env::var("AXON_BENCH_NB").map_or(vec![4, 8, 12, 16], |v| {
+        v.split(',').map(|x| x.parse().unwrap()).collect()
+    });
+    let mut rng = Rng(0x6075_bead);
+    let ws: Vec<(DevBuf, DevBuf)> = (0..copies)
+        .map(|_| {
+            let a = synth_matrix(&mut rng, Q4_K, rows, cols);
+            let b = synth_matrix(&mut rng, Q4_K, rows, cols);
+            (g.upload(&a).unwrap(), g.upload(&b).unwrap())
+        })
+        .collect();
+    let rb = quant::row_bytes(Q4_K, cols) as u64;
+    let st = act_stride_t(cols) as u64;
+    let gu = km.function("gemm2s_q4_k_gu").unwrap();
+    let smem = gemm2_smem(Q4_K, 64, 3);
+    gu.set_max_shared(smem).unwrap();
+    for nb in nbs {
+        let xs: Vec<Vec<f32>> = (0..nb).map(|_| rng.vec(cols, 1.0)).collect();
+        let act = quantize_batch(&g, &km, &xs, cols);
+        let (og, ou) = (
+            g.alloc(rows * nb * 4).unwrap(),
+            g.alloc(rows * nb * 4).unwrap(),
+        );
+        let vx = km
+            .function(&format!("gemvmx{}_q4_k", if nb <= 8 { 8 } else { 16 }))
+            .unwrap();
+        let null = Arg::Ptr(0);
+        let mut t = [Vec::new(), Vec::new()];
+        for _round in 0..12 {
+            for (k, tk) in t.iter_mut().enumerate() {
+                let e0 = g.record().unwrap();
+                for (wg, wu) in &ws {
+                    // SAFETY: gemvmx's / gemm2s_q4_k_gu's signatures; the
+                    // matrices hold rows x cols Q4_K, act nb tokens, og / ou
+                    // rows * nb floats.
+                    unsafe {
+                        if k == 0 {
+                            g.launch(
+                                &vx,
+                                ((2 * rows).div_ceil(16) as u32, 1, 1),
+                                (128, 1, 1),
+                                0,
+                                &[
+                                    wg.arg(),
+                                    wu.arg(),
+                                    null,
+                                    Arg::I32(rows as i32),
+                                    Arg::I32(rows as i32),
+                                    Arg::I32(0),
+                                    null,
+                                    null,
+                                    null,
+                                    og.arg(),
+                                    ou.arg(),
+                                    null,
+                                    Arg::U64(rb),
+                                    Arg::I32(cols as i32),
+                                    act.arg(),
+                                    Arg::U64(st),
+                                    Arg::I32(nb as i32),
+                                    Arg::U64(rows as u64),
+                                ],
+                            )
+                            .unwrap();
+                        } else {
+                            g.launch(
+                                &gu,
+                                (nb.div_ceil(64) as u32, rows.div_ceil(32) as u32, 1),
+                                (256, 1, 1),
+                                smem as u32,
+                                &[
+                                    wg.arg(),
+                                    wu.arg(),
+                                    Arg::U64(rb),
+                                    Arg::I32(rows as i32),
+                                    Arg::I32(cols as i32),
+                                    act.arg(),
+                                    Arg::U64(st),
+                                    Arg::I32(nb as i32),
+                                    ou.arg(),
+                                    Arg::U64(rows as u64),
+                                ],
+                            )
+                            .unwrap();
+                        }
+                    }
+                }
+                let e1 = g.record().unwrap();
+                tk.push(e0.ms_to(&e1).unwrap() as f64 / copies as f64);
+            }
+        }
+        let med = |v: &mut Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let (a, b) = (med(&mut t[0]), med(&mut t[1]));
+        let gb = 2.0 * (rows as f64) * rb as f64 / 1e9;
+        eprintln!(
+            "gate|up 3584x18944 nb {nb:2}: gemvmx {:.3} ms ({:.0} GB/s), gemm2s_q4_k_gu {:.3} ms ({:.0} GB/s), gu/vx {:.3}",
+            a,
+            gb / a * 1e3,
+            b,
+            gb / b * 1e3,
+            b / a
+        );
+    }
+}
+
 /// The tensor-core GEMMs of a type (prefill.cu gemm2_*).
 /// Whether type qt has gemvm kernels.
 fn has_gemvm(qt: u32) -> bool {

@@ -1138,12 +1138,13 @@ mod tests {
         }
     }
 
-    /// Pool steps of 17..64 rows (past gemvm16: the products split between
-    /// gemvm32 and gemm2's partial tiles, `takes_gemvm`; the head in one
-    /// product over all rows; samp_tail in launches of HEAD_SUB rows), on
-    /// the 0.5B and Llama 1B, mixed greedy and sampled rows: every
-    /// request's results and tokens == running it alone, under each
-    /// gemvm routing (AXON_GEMVM_MAX 16, 32, by shape).
+    /// Pool steps of 9..64 rows, on the 0.5B and Llama 1B, mixed greedy and
+    /// sampled rows: every request's results and tokens == running it
+    /// alone, under each routing. At 9..16 rows gate|up runs on gemvm or on
+    /// gemm2 (`gu_min`). Past 16 the products split between gemvm32 and
+    /// gemm2's partial tiles (`takes_gemvm`; AXON_GEMVM_MAX 16, 32, by
+    /// shape). The head is one product over all rows; samp_tail runs in
+    /// launches of HEAD_SUB rows.
     #[test]
     fn pool_steps_past_gemvm16_match_solo() {
         let Some(g) = crate::testutil::gpu() else {
@@ -1175,9 +1176,16 @@ mod tests {
             let refs: Vec<_> = (0..slots)
                 .map(|i| solo(&net, ctx, &prompts[i], kinds[i], steps))
                 .collect();
-            for vm in [16usize, 32, 0] {
+            // (gemvm limit, gate|up on gemm2 from gu tokens): nb 9..16 under
+            // both gate|up routings, nb 17.. under each gemvm limit.
+            for (vm, gu) in [(16usize, 0usize), (32, 0), (0, 0), (0, 9)] {
                 net.bf.vm_max = vm;
-                for nb in [17usize, 33, 48, 64] {
+                net.bf.gu_min = gu;
+                let nbs: &[usize] = match (vm, gu) {
+                    (0, 0) | (0, 9) => &[9, 12, 16, 17, 33, 48, 64],
+                    _ => &[17, 33, 48, 64],
+                };
+                for &nb in nbs {
                     let mut p = net.pool(slots, ctx).unwrap();
                     for (i, pr) in prompts.iter().enumerate().take(nb) {
                         net.feed_slot(&mut p, i, &pr[..pr.len() - 1], 0).unwrap();
@@ -1214,8 +1222,10 @@ mod tests {
                             .collect();
                         let outs = net.step_rows(&mut p, &rows).unwrap();
                         for (i, o) in outs.into_iter().enumerate() {
-                            let what =
-                                format!("{} vm {vm} nb {nb} request {i} step {step}", m.arch);
+                            let what = format!(
+                                "{} vm {vm} gu {gu} nb {nb} request {i} step {step}",
+                                m.arch
+                            );
                             assert_eq!(o, refs[i].0[step], "{what}");
                             let next = match (&o, sms[i].as_mut()) {
                                 (RowOut::Pick(t), None) => *t,
@@ -1226,7 +1236,11 @@ mod tests {
                         }
                     }
                     for i in 0..nb {
-                        assert_eq!(hist[i], refs[i].1, "{} vm {vm} nb {nb} request {i}", m.arch);
+                        assert_eq!(
+                            hist[i], refs[i].1,
+                            "{} vm {vm} gu {gu} nb {nb} request {i}",
+                            m.arch
+                        );
                     }
                 }
             }
@@ -1285,6 +1299,16 @@ mod tests {
             };
             // AXON_STEP_X: bgemm_x on (1) / off (0), in turn (default 1).
             let xs = list("AXON_STEP_X", "1");
+            // AXON_STEP_GU: BatchFns::gu_min values in turn (default the build's).
+            let gus = match list("AXON_STEP_GU", "") {
+                v if v.is_empty() => vec![
+                    std::env::var("AXON_GEMVM_GU_MIN")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0),
+                ],
+                v => v,
+            };
             // AXON_STEP_KM: the kernel builds to run in turn per depth, e.g.
             // "plain,SOME_DEFINE,plain,SOME_DEFINE" (prefill.cu experiments).
             let kms: Vec<String> = std::env::var("AXON_STEP_KM")
@@ -1371,16 +1395,21 @@ mod tests {
                 };
                 for &nb in nbs.iter().filter(|&&nb| nb <= slots) {
                     let rs = rows(nb);
-                    for (&vm, &x) in vms.iter().flat_map(|v| xs.iter().map(move |x| (v, x))) {
+                    let combos = vms
+                        .iter()
+                        .flat_map(|v| xs.iter().map(move |x| (v, x)))
+                        .flat_map(|(v, x)| gus.iter().map(move |u| (*v, *x, *u)));
+                    for (vm, x, gu) in combos {
                         net.bf.vm_max = vm;
                         net.bf.gemvmx_on = x == 1;
+                        net.bf.gu_min = gu;
                         // (The graphs hold the kernels picked when made.)
                         p.graphs.clear();
                         let t = time(&mut || {
                             std::hint::black_box(net.step_rows(&mut p, &rs).unwrap());
                         });
                         eprintln!(
-                            "| {depth} | {nb} | {vm} x{x} | {t:.3} | {:.2} | {:.0} |",
+                            "| {depth} | {nb} | {vm} x{x} gu{gu} | {t:.3} | {:.2} | {:.0} |",
                             t / d,
                             nb as f64 * 1e3 / t
                         );
@@ -1388,6 +1417,7 @@ mod tests {
                 }
                 net.bf.vm_max = *vms.last().unwrap();
                 net.bf.gemvmx_on = *xs.last().unwrap() == 1;
+                net.bf.gu_min = *gus.last().unwrap();
                 for &nb in profs.iter().filter(|&&nb| nb <= slots) {
                     let tokens = vec![5u32; nb];
                     let at: Vec<RowAt> = (0..nb)
