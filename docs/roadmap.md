@@ -210,6 +210,10 @@ trigger each step. Nothing here is scheduled.
    V. Decode can fold the up-projections into the query ("absorbed" form), which reads far less KV per step.
    The routing adds shared experts, sigmoid scores with a per-expert bias, and a grouped top-k (no published GGUF
    carries the group count, and llama.cpp doesn't apply it: refused until one does).
+   - **Cleanups owed:** `model::moe::Moe` carries deepseek2's router rule (`gate_fn`) and gpt-oss's biases
+     (`oai`) side by side, and correctness rests on never setting both: make it one
+     `enum Router { Gate(Gate), Oai(Box<Oai>) }` (review of #79). Byte-level BPE vocabularies don't split
+     USER_DEFINED tokens (`</think>`, harmony markers) out of plain text as llama.cpp and HF do.
    - **Status (2026-10-18): stage 0 done** ([log](log/2026-10-18-deepseek2-s0.md), design note
      `specs/r12-deepseek2.md`): the absorbed form on the CPU for decode, prefill and verify alike (bit for bit),
      a K-only 576-wide cache, DeepSeek V3 YaRN's attention scale, the `kimi-k2` and `deepseek-v3` tokenizers, the

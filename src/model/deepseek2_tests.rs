@@ -285,18 +285,26 @@ pub(crate) enum Bug {
 /// sigmoid router + exp_probs_b selection, renorm, x2.446, plus the shared
 /// expert.
 pub(crate) fn deepseek2_ref(m: &Model, raw: &RawTensors, ids: &[u32], bug: Bug) -> Vec<Vec<f32>> {
-    deepseek2_ref_routes(m, raw, ids, bug).0
+    deepseek2_ref_routes(m, raw, ids, bug, None).0
 }
 
-/// `deepseek2_ref`, and the experts each MoE layer picked at each position
-/// (routes[pos][moe layer], rank order) with the selection margin there
-/// (the k-th selection score minus the (k+1)-th).
+/// Routes per position, per MoE layer (rank order).
+type Routes = Vec<Vec<Vec<usize>>>;
+
+/// `deepseek2_ref`, and the experts each MoE layer would pick at each
+/// position (routes[pos][moe layer], rank order) with the selection margin
+/// there (the k-th selection score minus the (k+1)-th). With `forced`, each
+/// MoE layer runs the forced experts instead (their unbiased probabilities,
+/// renorm, scale: the same weight rule), so a run's routing discontinuities
+/// (a near-tied router flipping an expert, and everything downstream of
+/// it, later positions' cache rows included) are taken out of a comparison.
 #[allow(clippy::type_complexity)]
 fn deepseek2_ref_routes(
     m: &Model,
     raw: &RawTensors,
     ids: &[u32],
     bug: Bug,
+    forced: Option<&Routes>,
 ) -> (Vec<Vec<f32>>, Vec<Vec<(Vec<usize>, f64)>>) {
     let f = FX;
     let num = |k: &str| meta_num(m, &format!("deepseek2.{k}"));
@@ -489,9 +497,13 @@ fn deepseek2_ref_routes(
                 let sel: Vec<f64> = p.iter().zip(&b).map(|(p, b)| p + b).collect();
                 let mut order: Vec<usize> = (0..f.n_exp).collect();
                 order.sort_by(|&a, &c| sel[c].total_cmp(&sel[a]).then(a.cmp(&c)));
-                let picks = &order[..f.k_exp];
+                let mine = &routes.last().unwrap();
+                let picks: Vec<usize> = match forced {
+                    Some(fr) => fr[pos][mine.len()].clone(),
+                    None => order[..f.k_exp].to_vec(),
+                };
                 routes.last_mut().unwrap().push((
-                    picks.to_vec(),
+                    order[..f.k_exp].to_vec(),
                     sel[order[f.k_exp - 1]] - sel[order[f.k_exp]],
                 ));
                 let mut ws: Vec<f64> = picks
@@ -609,29 +621,36 @@ fn deepseek2_matches_expanded_reference() {
 }
 
 /// The Q8_0 (r8q) fixture against the reference on its dequantized weights:
-/// a smoke check of the quantized path; exactness is the F32 rows' gate.
-/// 8-bit activations (and, with q_lora, q_a's and q_b's inputs quantized in
-/// turn) move logits, so the bounds are this fixture's own measurements
-/// with a 2x margin (`q8_bounds`): max |dlogit| <= bound, every logit finite,
-/// and a greedy pick may flip only where the reference's top-1/top-2 gap is
-/// under the same bound (a perturbation of size d can't flip a pick with a
-/// gap above 2d; any count of such flips is allowed: the old "at most one"
-/// was a count over 14 positions, not a property, and q_lora/no-yarn has 4).
-/// The gate must be able to fire: at least `Q8_GATED` positions have a gap
-/// at or above the bound. The routes of each MoE layer (decode, recorded by
-/// `moe::ROUTES`) are printed beside the reference's with its margins, so a
-/// large |dlogit| shows whether an expert flipped at a near-tied router.
+/// a smoke check of the quantized path (exactness is the F32 rows' gate).
+///
+/// Routing first. A router near-tie (selection margin of a few 1e-2) flips
+/// an expert under 8-bit activations, and that changes the FFN output, the
+/// next layers, and every later position through the cache: MEASURED, the
+/// q_lora/no-yarn max |dlogit| 1.45 is exactly that (position 6, layer 2:
+/// experts [0,3] vs the reference's [0,1] at a margin of 0.009, then
+/// positions 9, 11, 12), not a q_lora r8q error. So the logits are compared
+/// with the reference *forced onto this run's routes*, which isolates the
+/// quantization noise, and the routes are gated on their own: wherever this
+/// run's expert set differs from what the forced reference itself would
+/// pick, the reference's margin must be under `ROUTE_MARGIN`.
+///
+/// Logits: max |dlogit| <= `Q8_BOUND` (2x this fixture's MEASURED maximum,
+/// below), every logit finite, and a greedy pick may flip only where the
+/// reference's top-1/top-2 gap is under `Q8_BOUND` (a perturbation of size
+/// d can't flip a pick whose gap is over 2d). Any number of such flips is
+/// allowed: the earlier "at most one" was a count over 14 positions, not a
+/// property of the path. The gate must be able to fire: at least `Q8_GATED`
+/// positions have a gap at or above `Q8_BOUND` (asserted).
 fn q8_smoke(o: Opt, n: usize) {
     let (m8, raw8) = ds2_fixture(o, Q8_0);
-    let (want8, rroutes) = deepseek2_ref_routes(&m8, &raw8, &IDS, Bug::None);
     let net = Qwen2::new(&m8);
     let mut c = net.new_cache(n);
-    let mut got_routes = Vec::new();
+    let mut got: Routes = Vec::new();
     let l: Vec<Vec<f32>> = (0..n)
         .map(|p| {
             moe::ROUTES.with_borrow_mut(|r| r.clear());
             let v = net.forward(IDS[p], p, &mut c);
-            got_routes.push(moe::ROUTES.with_borrow(|r| r.clone()));
+            got.push(moe::ROUTES.with_borrow(|r| r.clone()));
             v
         })
         .collect();
@@ -639,7 +658,10 @@ fn q8_smoke(o: Opt, n: usize) {
         l.iter().flatten().all(|v| v.is_finite()),
         "{o:?} Q8_0: non-finite logits"
     );
+    let (free, _) = deepseek2_ref_routes(&m8, &raw8, &IDS, Bug::None, None);
+    let (want8, own) = deepseek2_ref_routes(&m8, &raw8, &IDS, Bug::None, Some(&got));
     let d = max_diff(&l, &want8);
+    let d_free = max_diff(&l, &free);
     let top = |v: &[f32]| (0..v.len()).fold(0, |b, i| if v[i] > v[b] { i } else { b });
     // The reference's top-1 minus top-2 logit at each position.
     let gap = |v: &[f32]| {
@@ -650,59 +672,61 @@ fn q8_smoke(o: Opt, n: usize) {
             .fold(f32::MIN, f32::max)
     };
     let gaps: Vec<f32> = want8.iter().map(|v| gap(v)).collect();
-    let bound = q8_bounds(o);
     let flips: Vec<f32> = l
         .iter()
         .zip(&want8)
         .filter(|(a, b)| top(a) != top(b))
         .map(|(_, b)| gap(b))
         .collect();
-    let gated = gaps.iter().filter(|&&g| g >= bound).count();
-    eprintln!(
-        "{o:?} Q8_0 fixture (r8q): max |dlogit| {d:.4} (bound {bound}), top-1 flips at gaps \
-         {flips:?}, {gated}/{n} positions gated, reference gaps {gaps:.3?}"
-    );
-    for (p, (lp, wp)) in l.iter().zip(&want8).enumerate() {
-        let dp = lp
-            .iter()
-            .zip(wp)
-            .map(|(a, b)| (a - b).abs())
-            .fold(0f32, f32::max);
-        let ours: Vec<&Vec<usize>> = got_routes[p].iter().collect();
-        let refs: Vec<String> = rroutes[p]
-            .iter()
-            .map(|(ids, mg)| format!("{ids:?}@{mg:.3}"))
-            .collect();
-        let same = got_routes[p].len() == rroutes[p].len()
-            && got_routes[p]
-                .iter()
-                .zip(&rroutes[p])
-                .all(|(a, (b, _))| a == b);
-        eprintln!(
-            "  pos {p:2}: |dlogit| {dp:.4}, routes q8 {ours:?} ref {refs:?}{}",
-            if same { "" } else { "  <- expert flip" }
-        );
+    let gated = gaps.iter().filter(|&&g| g >= Q8_BOUND).count();
+    let set = |v: &[usize]| {
+        let mut v = v.to_vec();
+        v.sort_unstable();
+        v
+    };
+    let mut route_flips = Vec::new();
+    for p in 0..n {
+        for (layer, (ours, (theirs, margin))) in got[p].iter().zip(&own[p]).enumerate() {
+            if set(ours) != set(theirs) {
+                route_flips.push((p, layer, *margin));
+            }
+        }
     }
-    assert!(d <= bound, "{o:?} Q8_0: max |dlogit| {d} over {bound}");
+    eprintln!(
+        "{o:?} Q8_0 fixture (r8q): max |dlogit| {d:.4} vs the reference on this run's routes \
+         ({d_free:.4} on its own), bound {Q8_BOUND}; top-1 flips at gaps {flips:?}; \
+         {gated}/{n} positions gated; expert flips (pos, moe layer, ref margin) {route_flips:?}; \
+         reference gaps {gaps:.3?}"
+    );
     assert!(
-        flips.iter().all(|&g| g < bound),
-        "{o:?} Q8_0: top-1 flips at reference gaps {flips:?} (bound {bound})"
+        d <= Q8_BOUND,
+        "{o:?} Q8_0: max |dlogit| {d} over {Q8_BOUND}"
+    );
+    assert!(
+        flips.iter().all(|&g| g < Q8_BOUND),
+        "{o:?} Q8_0: top-1 flips at reference gaps {flips:?} (bound {Q8_BOUND})"
     );
     assert!(
         gated >= Q8_GATED,
-        "{o:?} Q8_0: only {gated} positions have a reference gap >= {bound}: the flip gate can't fire"
+        "{o:?} Q8_0: only {gated} positions have a reference gap >= {Q8_BOUND}: the flip gate can't fire"
+    );
+    assert!(
+        route_flips.iter().all(|&(_, _, mg)| mg < ROUTE_MARGIN),
+        "{o:?} Q8_0: an expert flipped at a clear router margin: {route_flips:?}"
     );
 }
 
-/// `q8_smoke`'s bound per config, 2x this fixture's MEASURED max |dlogit|
-/// (rounded up): 0.33 without q_lora -> 0.7. With q_lora, MEASURED 1.45
-/// (no yarn; 0.42 with) -> 3.0: a catastrophe bound only (NaN, garbage, a
-/// wrong expert slice, RopeWrongPart-sized errors), documented as such.
-fn q8_bounds(o: Opt) -> f32 {
-    if o.q_lora { 3.0 } else { 0.7 }
-}
+/// `q8_smoke`'s logit bound on the route-forced comparison: 2x this
+/// fixture's MEASURED max |dlogit| over the four configs, rounded up
+/// (filled in from 1018-0541xx).
+const Q8_BOUND: f32 = 0.7;
 
-/// Positions (of IDS' 14) whose reference gap must reach `q8_bounds` for
+/// Largest reference router margin (k-th minus (k+1)-th selection score)
+/// at which an expert may flip under 8-bit activations: 2x the MEASURED
+/// largest flip margin, rounded up (filled in from 1018-0541xx).
+const ROUTE_MARGIN: f64 = 0.1;
+
+/// Positions (of IDS' 14) whose reference gap must reach `Q8_BOUND` for
 /// the flip gate to mean anything.
 const Q8_GATED: usize = 4;
 
