@@ -74,7 +74,9 @@ MEASURED at 323770d (pods show UTC; the dates/times here are EDT):
 | `gpu_tests_never_overlap` on main + the test only | dfda | pod1 | rc 101: fails on main (the second test got the GPU while the first held it) |
 | same test on this branch | 8500 (rel), de1c (dbg) | pod2, pod1 | pass |
 | set10 (the faulting set), default 4 threads, packed pod1 | 1990, 5258 | pod1 (EPYC, IOMMU, 2 co-tenants each) | 10/10, 10/10 (main: FAULT in 3 of 4) |
-| set10 runs 3-5 | f026 / f287 / e592 | pod1/pod2 | see PR (submitted 05:03, pods down at the 05:50 budget cap) |
+| set10 runs 3-5 | f026 / f287 / e592 | pod2 / pod1 / pod1 (EPYC, IOMMU) | 10/10 each: 5/5 clean vs main 3/4 faulted |
+| release suite after merging main c8e34fd (54c348d) | bb4c / b6b6 / 303d | pod4 / pod2 / pod1 | 553 pass, 0 fail |
+| debug + release suites after merging main ac358d4 (097249f) | see PR #82 | pods or bella | see PR |
 | md5 of gen, main vs candidate (3 models x 3 prompts x cuda/cpu) | 4309 | bella | 18 same, 0 differ |
 | clippy -D warnings (bin + tests, debug cfg), rustfmt --check | local | bella | clean |
 
