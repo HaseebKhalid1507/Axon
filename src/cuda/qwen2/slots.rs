@@ -1649,7 +1649,9 @@ mod tests {
                 let ctx = 192;
                 let net = CudaQwen2::with_kv(&g, &km, &m, ctx, kv, false).unwrap();
                 let what = format!("{} {kv:?}", m.arch);
-                let prompt = ids(90, 77, net.vocab);
+                // 91 tokens: `run` uses the first 90, the pool's step after the loan
+                // the 91st (at position 90). ids' first 90 are `run`'s prompt.
+                let prompt = ids(91, 77, net.vocab);
                 let mut plain = net.new_cache(ctx);
                 let want = run(&net, &prompt, &mut plain);
                 let want_kv = slot_bytes(&net, &plain, 0, 90);

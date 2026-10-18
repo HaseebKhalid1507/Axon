@@ -378,14 +378,29 @@ impl Gpu {
         // Debug builds: the kernel takes exactly args.len() parameters (a
         // missing one is read from past the array: undefined behaviour,
         // not an error). Needs the driver's cuFuncGetParamInfo (12.4+).
+        // A query that fails for another reason than "no such parameter"
+        // (CUDA_ERROR_INVALID_VALUE), e.g. a context an earlier kernel left
+        // in CUDA_ERROR_ILLEGAL_ADDRESS, is that error, not a count mismatch.
         #[cfg(debug_assertions)]
         if let Some(info) = ffi::param_info() {
+            const INVALID_VALUE: ffi::CUresult = 1;
             let (mut off, mut size) = (0usize, 0usize);
             let n = args.len();
             // SAFETY: f is a loaded kernel; off and size are written.
-            let mut has = |i: usize| unsafe { info(f.f, i, &mut off, &mut size) } == 0;
+            let mut query = |i: usize| unsafe { info(f.f, i, &mut off, &mut size) };
+            let last = if n == 0 {
+                ffi::CUDA_SUCCESS
+            } else {
+                query(n - 1)
+            };
+            let past = query(n);
+            for r in [last, past] {
+                if r != ffi::CUDA_SUCCESS && r != INVALID_VALUE {
+                    check(self.d, r, &format!("cuFuncGetParamInfo ({})", f.name))?;
+                }
+            }
             assert!(
-                (n == 0 || has(n - 1)) && !has(n),
+                last == ffi::CUDA_SUCCESS && past == INVALID_VALUE,
                 "launch of {} with {n} arguments: not its parameter count",
                 f.name
             );
@@ -1930,16 +1945,16 @@ pub struct Kernels<'m> {
 /// NVRTC options for kernels.cu beyond the architecture. Denormals kept,
 /// as on the CPU (the defaults, spelled out: they are part of the cache key).
 const KERNEL_OPTS: [&str; 2] = ["--std=c++17", "--ftz=false"];
-/// `KERNEL_OPTS` plus the extra weight types (Q4_0, Q4_1, Q5_1, Q5_K) in the
+/// `KERNEL_OPTS` plus the extra weight types (Q4_0, Q4_1, Q5_1, Q5_K, Q2_K, Q3_K, IQ4_NL) in the
 /// decode kernels' type switch.
 const KERNEL_OPTS_EXT: [&str; 3] = ["--std=c++17", "--ftz=false", "-DAXON_EXT_TYPES"];
 
 /// Whether `m` has a matrix type only `Kernels::module_ext` runs.
 pub fn needs_ext(m: &crate::gguf::Model) -> bool {
-    use crate::quant::{Q4_0, Q4_1, Q5_1, Q5_K};
+    use crate::quant::{IQ4_NL, Q2_K, Q3_K, Q4_0, Q4_1, Q5_1, Q5_K};
     m.tensors
         .iter()
-        .any(|t| matches!(t.qtype.id, Q4_0 | Q4_1 | Q5_1 | Q5_K))
+        .any(|t| matches!(t.qtype.id, Q4_0 | Q4_1 | Q5_1 | Q5_K | Q2_K | Q3_K | IQ4_NL))
 }
 
 impl<'m> Kernels<'m> {
@@ -1995,12 +2010,18 @@ impl<'m> Kernels<'m> {
         n: usize,
         rows: &[u32],
     ) -> Result<Vec<f32>, String> {
-        use crate::quant::{F16, F32, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0};
+        use crate::quant::{
+            F16, F32, IQ4_NL, Q2_K, Q3_K, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0,
+        };
         let q = crate::gguf::qtype(qt);
-        if ![F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K].contains(&qt) {
+        if ![
+            F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL,
+        ]
+        .contains(&qt)
+        {
             return Err(format!("dequant_rows: unsupported type {}", q.name));
         }
-        if [Q4_0, Q4_1, Q5_1, Q5_K].contains(&qt) && !self.ext {
+        if [Q4_0, Q4_1, Q5_1, Q5_K, Q2_K, Q3_K, IQ4_NL].contains(&qt) && !self.ext {
             return Err(format!(
                 "dequant_rows: type {} needs Kernels::module_ext",
                 q.name

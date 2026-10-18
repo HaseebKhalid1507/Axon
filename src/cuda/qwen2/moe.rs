@@ -297,7 +297,7 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// One decode step of `token` at `pos` (logits and the argmax into the
-    /// cache with `Head::Argmax`), the experts by `experts`. Waits for every
+    /// cache; `head` must be `Head::Argmax`), the experts by `experts`. Waits for every
     /// layer's router; the head is enqueued, not waited for.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn moe_step(
@@ -311,15 +311,15 @@ impl<'g> CudaQwen2<'g> {
         experts: &mut Experts,
     ) -> Result<(), String> {
         assert_eq!(c.net, self.id, "a CudaCache used with another CudaQwen2");
-        assert!(
-            matches!(head, Head::No | Head::Argmax),
-            "moe_step: {head:?}"
-        );
+        // Head::No would only add the last layer's FFN into x, which the
+        // next step's embedding overwrites: no caller wants it.
+        assert!(head == Head::Argmax, "moe_step: {head:?}");
         assert!(
             pos < c.max_ctx,
             "position {pos} exceeds cache size {}",
             c.max_ctx
         );
+        c.debug_covers(0, pos + 1);
         assert!((token as usize) < self.vocab, "token {token} out of range");
         let p = c.host_params.bytes_mut()?;
         p[0..4].copy_from_slice(&token.to_le_bytes());
@@ -346,7 +346,7 @@ impl<'g> CudaQwen2<'g> {
                     if seg < n {
                         self.enqueue_attn(c, seg, params, cmb64, on)?;
                         self.moe_route(mf, mb, seg, c.x.arg(), 1)?;
-                    } else if head != Head::No {
+                    } else {
                         self.enqueue_head(c, head, on)?;
                     }
                 }
@@ -464,5 +464,65 @@ impl<'g> CudaQwen2<'g> {
             }
         };
         Ok((picks, logits))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cuda::Kernels;
+
+    /// A dense batched pass (`pass_at`: no MoE hook, as a branch that
+    /// forgets `moe_tokens` would call it) on a MoE model is an Err, not
+    /// `LayerW::dense`'s panic.
+    #[test]
+    fn moe_gpu_dense_pass_is_an_err() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let Some(m) = crate::testutil::moe_model(true) else {
+            return;
+        };
+        let km = Kernels::module_for(&g, &m).unwrap();
+        let net = CudaQwen2::with_kv_moe(&g, &km, &m, 256, CacheKv::F16, false, false).unwrap();
+        let mut c = net.try_cache(256).unwrap();
+        let tokens = [1u32, 2, 3];
+        let e = net.pass_with(
+            &mut c,
+            BatchIn::Tokens(&tokens),
+            0,
+            Head::Argmax,
+            0,
+            &mut |_| Ok(()),
+        );
+        assert!(e.is_err_and(|e| e.contains("mixture-of-experts")));
+    }
+
+    /// The dense decode step (`step`, `profile`) on a MoE model is an Err
+    /// before anything is written or captured: with graphs on, the stream
+    /// is not left in capture mode, so a `moe_step` after it runs.
+    #[test]
+    fn moe_gpu_dense_step_is_an_err() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let Some(m) = crate::testutil::moe_model(true) else {
+            return;
+        };
+        let km = Kernels::module_for(&g, &m).unwrap();
+        let mm = Kernels::moe_module(&g).unwrap();
+        let mut net = CudaQwen2::with_kv_moe(&g, &km, &m, 256, CacheKv::F16, false, false).unwrap();
+        net.graphs = true;
+        let mut c = net.try_cache(256).unwrap();
+        let moe_err = |r: Result<(), String>| r.is_err_and(|e| e.contains("mixture-of-experts"));
+        assert!(moe_err(net.step(&mut c, Input::Token(1), 0, true)));
+        assert!(moe_err(net.profile(&mut c, 1, 0).map(|_| ())));
+        let mf = MoeFns::new(&mm).unwrap();
+        let mut mb = net.moe_bufs(CudaQwen2::batch_max(&c)).unwrap();
+        // Zero experts: only the stream's health is under test.
+        let mut ex = |_: usize, _: &[f32], _: &[i32], _: &[f32], y: &mut [f32]| y.fill(0.0);
+        net.moe_step(&mf, &mut c, &mut mb, 1, 0, Head::Argmax, &mut ex)
+            .unwrap();
+        assert!((net.moe_pick(&mut c).unwrap() as usize) < net.vocab);
     }
 }
