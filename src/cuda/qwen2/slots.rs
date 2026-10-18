@@ -83,6 +83,7 @@ impl<'g> CudaQwen2<'g> {
     /// per request): no cache beside the pool, and
     /// its rows are the slot's for the batch to take over (`adopt_cache`
     /// copies nothing).
+    #[cfg_attr(not(test), allow(dead_code))] // serve takes `slot_view_bare`
     pub fn slot_view(&self, p: &CudaPool<'g>, slot: usize) -> Result<CudaCache<'g>, String> {
         self.slot_view_with(p, slot, true)
     }
