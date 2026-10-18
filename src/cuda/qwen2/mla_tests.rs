@@ -318,3 +318,26 @@ fn mla_topk_matches_cpu_rule() {
         }
     }
 }
+
+/// The MLA module compiles (NVRTC, no GPU needed) for sm_70 (no tensor
+/// cores; the MLA kernels use none), sm_80 and sm_90, with every weight
+/// type (its deq). Skipped without NVRTC.
+#[test]
+fn mla_kernels_compile_for_archs() {
+    use crate::cuda::{KERNEL_OPTS_EXT, MLA_KERNELS, Target, compile, ffi};
+    let n = match ffi::nvrtc() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("skipping: {e}");
+            return;
+        }
+    };
+    let archs = ffi::nvrtc_archs(n).unwrap();
+    for a in [70, 80, 90].into_iter().filter(|a| archs.contains(a)) {
+        let t = Target::Cubin(a);
+        let mut opts = vec![format!("--gpu-architecture={t}")];
+        opts.extend(KERNEL_OPTS_EXT.iter().map(|s| s.to_string()));
+        let image = compile(n, MLA_KERNELS, &opts, t).unwrap_or_else(|e| panic!("sm_{a}: {e}"));
+        eprintln!("mla sm_{a}: {} bytes of cubin", image.len());
+    }
+}

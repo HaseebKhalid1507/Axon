@@ -1942,6 +1942,14 @@ pub struct Kernels<'m> {
     ext: bool,
 }
 
+/// `Kernels::mla_module`'s source: kernels.cu's dequantization, moe.cu's
+/// router logits and add, mla.cu.
+const MLA_KERNELS: &str = concat!(
+    include_str!("kernels.cu"),
+    include_str!("moe.cu"),
+    include_str!("mla.cu")
+);
+
 /// NVRTC options for kernels.cu beyond the architecture. Denormals kept,
 /// as on the CPU (the defaults, spelled out: they are part of the cache key).
 const KERNEL_OPTS: [&str; 2] = ["--std=c++17", "--ftz=false"];
@@ -1984,12 +1992,7 @@ impl<'m> Kernels<'m> {
     /// on its own, after kernels.cu's dequantization (every type) and
     /// moe.cu's router logits: the other modules stay as they are.
     pub fn mla_module(gpu: &Gpu) -> Result<Module<'_>, String> {
-        const SRC: &str = concat!(
-            include_str!("kernels.cu"),
-            include_str!("moe.cu"),
-            include_str!("mla.cu")
-        );
-        Ok(Module::load(gpu, SRC, &KERNEL_OPTS_EXT)?.0)
+        Ok(Module::load(gpu, MLA_KERNELS, &KERNEL_OPTS_EXT)?.0)
     }
 
     /// The module model `m` needs: `module_ext` if it has an extra type.
