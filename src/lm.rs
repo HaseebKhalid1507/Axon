@@ -382,16 +382,50 @@ pub struct Placing {
     /// Leave the GPU model's Q6_K prefill copy to the caller
     /// (`CudaQwen2::make_q6k8_spare`, once serve's caches are made).
     pub defer_q6k8: bool,
-    /// A paged KV pool will hold the caches (`axon serve`, specs r11): the
-    /// context is a slot's cap, not memory reserved for it, so placed
-    /// automatically the whole model goes on the GPU if it fits beside a
-    /// `PAGED_FLOOR`-token cache (planned for that; the pool takes what is
-    /// left), rather than splitting for a cache of the whole context.
+    /// A paged KV pool will hold the caches (`axon serve`, specs r11),
+    /// which needs `PAGED_MARGIN` beside one cache (`paged_placement`).
     pub paged: bool,
 }
 
-/// The shortest cache a paged serve keeps the whole model on the GPU for.
+/// The shortest cache a paged serve keeps the whole model on the GPU for
+/// when no --ctx was given.
 pub const PAGED_FLOOR: usize = 8192;
+
+/// VRAM a paged pool needs beyond what one cache of the context takes
+/// (`vram_curve`): serve's POOL_SPARE, the single-request view's own
+/// decode scratch, the slots' logits rows and sampling buffers, the table
+/// and the sink page (~0.3 GiB on a 14B; rounded up).
+pub const PAGED_MARGIN: u64 = 384 << 20;
+
+/// Where a paged serve's model goes, placed automatically, with `free`
+/// bytes of VRAM and `whole(c)` the whole model with one c-token cache.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PagedPlace {
+    /// Every layer on the GPU, the cache planned at the longest that fits
+    /// (no --ctx: the context may be shorter than trained, as main's fit).
+    WholeShrunk,
+    /// main's rule (`choose_placement`) against this much VRAM: the whole
+    /// model if one cache of the context fits beside the pool's needs,
+    /// else layers move to the CPU until it does. An explicit --ctx is
+    /// never shortened: at least one full sequence of it fits the pool.
+    Main { free: u64 },
+}
+
+/// `PagedPlace` of a model: with --ctx (`!fit`) main's rule with the pool's
+/// margin taken off; without, the whole model on the GPU if it fits beside
+/// a `PAGED_FLOOR`-token cache (the pool's pages then cap the context).
+pub fn paged_placement(
+    free: u64,
+    max_ctx: usize,
+    fit: bool,
+    whole: impl Fn(usize) -> u64,
+) -> PagedPlace {
+    let free = free.saturating_sub(PAGED_MARGIN);
+    if fit && whole(max_ctx) > free && whole(PAGED_FLOOR.min(max_ctx)) <= free {
+        return PagedPlace::WholeShrunk;
+    }
+    PagedPlace::Main { free }
+}
 
 impl Placing {
     /// `new`'s: max_ctx everywhere, the Q6_K copy made with the model.
@@ -529,11 +563,13 @@ impl<'a> Backend<'a> {
                 g
             }
             None => {
-                let free = gpu.info()?.free_bytes;
+                let mut free = gpu.info()?.free_bytes;
                 let whole = CudaQwen2::vram_curve(gpu, module, m, ckv)?;
-                let floor = PAGED_FLOOR.min(max_ctx);
-                if p.paged && whole(max_ctx) > free && whole(floor) <= free {
-                    return whole_gpu(max_ctx, true);
+                if p.paged {
+                    match paged_placement(free, max_ctx, fit, &whole) {
+                        PagedPlace::WholeShrunk => return whole_gpu(max_ctx, true),
+                        PagedPlace::Main { free: f } => free = f,
+                    }
                 }
                 // A streaming split's VRAM (its bigger batch scratch and the
                 // stream reserve) is what the split option is weighed by.
@@ -871,5 +907,76 @@ impl BatchLm for Backend<'_> {
             (Backend::Cuda(n), BackendCache::Cuda(c)) => n.return_scratch(pool, c),
             _ => Err("return_scratch: a cache of another backend".into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod paged_place_tests {
+    use super::*;
+    use crate::hybrid::{Placement, choose_placement};
+
+    const GIB: u64 = 1 << 30;
+
+    /// A model of `w` GiB of weights, `kib` KiB of KV per position and
+    /// `scratch` GiB of scratch (+ HEADROOM-like 0.25 GiB).
+    fn curve(w: f64, kib: u64, scratch: f64) -> impl Fn(usize) -> u64 {
+        move |c| ((w + scratch + 0.25) * GIB as f64) as u64 + c as u64 * kib * 1024
+    }
+
+    /// Paged placement then main's rule: (on the GPU, its planned ctx) or a
+    /// split; `split_layers` what the split would put on the GPU.
+    fn place(free: u64, ctx: usize, fit: bool, w: &dyn Fn(usize) -> u64) -> Placement {
+        match paged_placement(free, ctx, fit, w) {
+            PagedPlace::WholeShrunk => Placement::Gpu { ctx: 0 },
+            PagedPlace::Main { free } => choose_placement(free, ctx, fit, w, || Ok(35)).unwrap(),
+        }
+    }
+
+    /// Qwen2.5-14B Q4_K_M, `--kv q8 --ctx 32768` on a 12 GB card with
+    /// 11.2 GiB free (the bella case): one full 32k sequence doesn't fit
+    /// beside the weights, so it splits as main does (no 400 for a prompt
+    /// main accepts); `--ctx 16384` fits whole.
+    #[test]
+    fn paged_placement_14b() {
+        let w = curve(8.37, 99, 0.6);
+        let free = (11.2 * GIB as f64) as u64;
+        assert!(matches!(
+            place(free, 32768, false, &w),
+            Placement::Split { .. }
+        ));
+        assert_eq!(place(free, 16384, false, &w), Placement::Gpu { ctx: 16384 });
+    }
+
+    /// Squeezed VRAM (another process holds 0.7 GiB more): --ctx 16384 isn't
+    /// shortened to what fits all-GPU, it splits; without --ctx the model
+    /// stays on the GPU with a shorter context (the pages cap it).
+    #[test]
+    fn paged_placement_squeezed_splits_rather_than_shrinks() {
+        let w = curve(8.37, 99, 0.6);
+        let free = (10.5 * GIB as f64) as u64;
+        assert!(matches!(
+            place(free, 16384, false, &w),
+            Placement::Split { .. }
+        ));
+        assert_eq!(
+            paged_placement(free, 32768, true, &w),
+            PagedPlace::WholeShrunk
+        );
+        // Past even the floor: main's rule (it shrinks or splits).
+        let tiny = (9.0 * GIB as f64) as u64;
+        assert!(matches!(
+            paged_placement(tiny, 32768, true, &w),
+            PagedPlace::Main { .. }
+        ));
+    }
+
+    /// Qwen2.5-7B Q4_K_M f16 at 32768 on the same card: the whole model
+    /// with the full context, with --ctx or without.
+    #[test]
+    fn paged_placement_all_gpu_kept() {
+        let w = curve(4.36, 56, 0.8);
+        let free = (11.2 * GIB as f64) as u64;
+        assert_eq!(place(free, 32768, false, &w), Placement::Gpu { ctx: 32768 });
+        assert_eq!(place(free, 32768, true, &w), Placement::Gpu { ctx: 32768 });
     }
 }
