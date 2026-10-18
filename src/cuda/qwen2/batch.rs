@@ -1681,8 +1681,8 @@ impl<'g> CudaQwen2<'g> {
                 && up.cols == dim;
             // Gate and up in one gemvmx launch where they qualify (not
             // with the up product's swiglu epilogue, which reads the gate's).
-            let gu_x = !fuse
-                && !(self.swiglu_epi && self.gemma.is_none())
+            let epi = self.swiglu_epi && self.gemma.is_none();
+            let gu_x = !(fuse || epi)
                 && self.bgemm_x(
                     wts,
                     &[(gate, null, b.gate.arg()), (up, null, b.up.arg())],
