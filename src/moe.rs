@@ -58,7 +58,7 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
         fit: bool,
         q6k8: bool,
     ) -> Result<MoeQwen3<'m, 'g>, String> {
-        crate::model::moe_check_ram(m)?;
+        crate::model::moe_check_ram(m, false)?;
         let net = CudaQwen2::with_kv_moe(gpu, module, m, max_ctx, kv, fit, q6k8)?;
         let mf = MoeFns::new(moe_module)?;
         let cpu = Qwen2::new_experts(m);

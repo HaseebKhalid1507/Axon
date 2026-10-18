@@ -577,6 +577,10 @@ pub(super) struct BatchBufs<'g> {
     pub(super) host_best: HostBuf<'g>,
 }
 
+/// `pass_hooked`'s Err for a MoE model without its hook.
+const MOE_DENSE_PASS: &str = "a mixture-of-experts model's batched pass needs its experts \
+     (crate::moe: moe_tokens), not the dense pass";
+
 impl<'g> CudaQwen2<'g> {
     /// Tokens per batched pass a cache of `max_ctx` positions gets scratch for.
     pub(super) fn batch_for(&self, max_ctx: usize) -> usize {
@@ -843,7 +847,8 @@ impl<'g> CudaQwen2<'g> {
     /// `pass_at`, a mixture-of-experts layer's FFN by `moe`
     /// (`crate::moe`): after the layer's attention half, `moe(layer, x,
     /// nb)` with x the residual stream ([nb][dim] floats) leaves x + the
-    /// layer's FFN output there. None (dense layers): `layer` as always.
+    /// layer's FFN output there. None (dense layers): `layer` as always;
+    /// None on a MoE model: an Err, before anything is enqueued.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn pass_hooked(
         &self,
@@ -856,6 +861,9 @@ impl<'g> CudaQwen2<'g> {
         on: &mut dyn FnMut(&'static str) -> Result<(), String>,
         mut moe: Option<&mut MoeHook>,
     ) -> Result<(), String> {
+        if moe.is_none() && self.layers.iter().any(|l| matches!(l.ffn, Ffn::Moe { .. })) {
+            return Err(MOE_DENSE_PASS.into());
+        }
         let nb = input.len(self.dim);
         let dim = self.dim;
         // Paged (c.tab): the layers' arrays from row 0 and the rows through

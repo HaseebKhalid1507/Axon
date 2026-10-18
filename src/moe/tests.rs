@@ -315,6 +315,29 @@ fn moe_gpu_logits_graded_small() {
     logits_graded(true, "4x0.6B");
 }
 
+/// `moe_step` takes `Head::Argmax` only: `Head::No` (an add nobody reads)
+/// is refused before anything is enqueued.
+#[test]
+fn moe_gpu_step_refuses_head_no() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = crate::testutil::moe_model(true) else {
+        return;
+    };
+    let km = Kernels::module_for(&g, &m).unwrap();
+    let mm = Kernels::moe_module(&g).unwrap();
+    let net = moe_net(&g, &km, &mm, &m, 256);
+    let mut c = net.new_cache(256);
+    let mut ex =
+        |l: usize, h: &[f32], i: &[i32], w: &[f32], y: &mut [f32]| net.experts(l, h, i, w, y);
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        net.gpu
+            .moe_step(&net.mf, &mut c.c, &mut c.mb, 1, 0, Head::No, &mut ex)
+    }));
+    assert!(r.is_err());
+}
+
 /// A MoE model through `Backend::new` on the GPU: the MoE backend (no
 /// layer split: --gpu-layers below the layer count is refused).
 #[test]
