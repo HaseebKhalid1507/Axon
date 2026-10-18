@@ -2,6 +2,9 @@
 
 - Date: 2026-10-18. Branch: feat/test-speed. Base: main a032773 (the timings were taken on main 5a73f63, before the
   rebase onto #67/#70/#74; those merges touch none of the timed tests' helpers). Status: open
+- Headline: this PR's code saves ~166 s of the release suite (-7.6 %, MEASURED, exclusive 4090). The rest of the
+  measured -224 s is main's run paying ~55 s of cold kernel cache, which isn't this PR. The bigger lever is the
+  fast tier for review rounds: 1209 s, i.e. 55 % of main's full release suite.
 - Pick / design: foreman's "test-suite speed" track. The test queue is the bottleneck: 49 GPU-host hours of jobs
   in 24 h, 22 h of them full release suites (237 jobs) and 17 h debug-assertion suites.
 
@@ -67,9 +70,10 @@ Release suite, exclusive 4090 pod3 (same host for both), `--test-threads 1`, MEA
 
 | | main 5a73f63 | branch | |
 |---|---|---|---|
-| whole suite | 2195.6 s | 1971.6 s | -10.2 % |
-| the 22 changed tests | 452.7 s | 286.4 s | -37 % |
-| the other 491 tests | 1742.7 s | 1685.0 s | -3 % (noise, plus main's run compiling kernels into a cold pod cache: `gpu_batched_products_match_gemv_bits` 44.9 -> 2.8 s, `gpu_capture_survives_pinning_elsewhere` 28.0 -> 15.1 s) |
+| the 22 changed tests (this PR's code) | 452.7 s | 286.4 s | **-166.3 s, -7.6 % of main's suite** |
+| `gpu_batched_products_match_gemv_bits` + `gpu_capture_survives_pinning_elsewhere` | 72.8 s | 17.9 s | -55 s, not this PR: main's run compiled kernels into the pod's cold NVRTC cache, the branch's found them there |
+| the other 489 tests | 1669.9 s | 1667.2 s | -0.2 % (noise) |
+| whole suite | 2195.6 s | 1971.6 s | -224 s, -10.2 % as measured |
 
 Jobs: 1018-005814-52ea (main), 1018-014201-c3d2 (branch).
 
@@ -104,17 +108,22 @@ nvrtc sm90a 129 s, draft cpu 86 s, hybrid_real_model_sampling 78 s). So debug as
 debug suite cost a GPU slot for ~40 min: it's the same GPU work run a second time. That's why the fast tier
 runs the debug build on the CPU queue.
 
-The tiers (from the measured per-test times, so ESTIMATED as a whole-tier number):
+The tiers, from the measured per-test times (so ESTIMATED as whole-tier numbers). One baseline: main's full release
+suite on the exclusive 4090, 2195.6 s.
 
-| per review round | GPU-slot time (serial, exclusive 4090) |
-|---|---|
-| before: release + debug suite on GPU | ~2200 s + ~2200-2400 s |
-| fast tier, branch: release minus the skip list | 1209 s (-45 % vs main's release), plus the debug suite on a CPU slot (main's took 698 s packed, 1018-014631-dd84) |
-| full tier (final round): release + debug + md5 | as before, minus this PR's 10 % |
+| per review round | GPU-slot time (serial, exclusive 4090) | vs main's release suite |
+|---|---|---|
+| before: release + debug suite, both on GPU hosts | 2195.6 s + roughly the same again | 200 % |
+| full tier, this branch (final round): release + debug + md5 | 1971.6 s + debug | ~180 % |
+| fast tier, this branch: release minus the skip list | 1209 s, plus the debug suite on a CPU slot (main's took 698 s packed, 1018-014631-dd84) | 55 % |
 
-The skip list is 763 s of the branch's release suite (39 %). Every entry repeats a contract that the fast tier
-checks on a smaller model: Llama 3B/8B, Qwen3 4B, the Qwen2.5 1.5B siblings. It also holds the two NVRTC
-cross-arch builds, which come back in when a branch touches `src/cuda/*.cu` or `src/cuda/mod.rs`.
+The skip list is 763 s of the branch's release suite (39 %). Its entries are NOT redundant. Each is the only test
+of some shape or weight-type combination (`scripts/test-fast-skip.txt` says which): head size 128 with GQA 3/4/6
+and K-quant weights (Llama 3B/8B, Qwen2.5 1.5B batchings and grading), Qwen3 with K-quant weights (4B), and the
+NVRTC builds for sm_70/75/80/90a. Between review rounds the fast tier covers head size 128 only through Qwen3 0.6B
+(GQA 2, Q8_0) and the 1.5B verify and q8 tests. The NVRTC builds come back in whenever the branch or the working
+tree changes `src/cuda/*.cu`, `src/cuda/mod.rs` or `src/cuda/ffi.rs`. `gpu_bits_llama_3b_8b` is also a witness
+in the open pod ILLEGAL_ADDRESS investigation (sa_315).
 
 ## What didn't work / wasn't done
 - Process-wide model and `Qwen2` fixtures (OnceLock): no gain worth the RSS (loads are 0.2 s). Also unsafe

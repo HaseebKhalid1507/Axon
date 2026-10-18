@@ -12,7 +12,8 @@
 #
 # Env: TIER_SHARD=N (axon-run --shard N per suite, default: one job per suite), TIER_DETACH=1 (submit and
 # return), TIER_NAME (job name prefix, default the worktree's name), TIER_BASE (ref for the kernel-change
-# check, default origin/main), TIER_RUN_OPTS (extra axon-run options, e.g. "--big-models --on pods").
+# check, default origin/main), TIER_RUN_OPTS (extra axon-run options, e.g. "--big-models --on pods"),
+# AXON_TEST_GPU_SERIAL (default 1 here: see below).
 set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(cd "$here/.." && pwd)
@@ -30,6 +31,10 @@ for b in "$rel" $dbg; do
     [ -x "$b" ] || { echo "test-tier: $b is not an executable" >&2; exit 2; }
 done
 name=${TIER_NAME:-$(basename "$root")}
+# GPU tests one at a time on every host (axon-run forwards AXON_*): until the pod ILLEGAL_ADDRESS fault (GPU
+# tests at once in one process; sa_315) is fixed, a pass with them concurrent isn't clean evidence.
+# AXON_TEST_GPU_SERIAL=0 in your environment turns it off.
+export AXON_TEST_GPU_SERIAL=${AXON_TEST_GPU_SERIAL:-1}
 if [ -n "${TIER_SHARD:-}" ] && [[ " ${TIER_RUN_OPTS:-} " == *" --dry-run "* ]]; then
     # axon-run --shard submits for real even with --dry-run (seen 2026-10-18).
     echo "test-tier: --dry-run doesn't work with TIER_SHARD; unset one" >&2

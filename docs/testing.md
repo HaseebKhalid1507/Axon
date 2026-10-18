@@ -63,17 +63,24 @@ scripts/test-tier.sh full REL_BIN DBG_BIN      # the final round, before merge
 
 - **fast**: the release suite minus `scripts/test-fast-skip.txt`, plus, with `DBG_BIN`, the debug-assertion
   suite on the CPU queue (`axon-run --cpu`, where GPU tests skip themselves, so it takes no GPU slot). The
-  skip list holds bigger-model repeats of contracts the fast tier checks on a small model (Llama 3B/8B,
-  Qwen3 4B, the Qwen2.5 1.5B siblings), plus the NVRTC builds for sm_70/75/80/90a. Those NVRTC builds come
-  back in when the branch changes `src/cuda/*.cu` or `src/cuda/mod.rs`. On an exclusive 4090 the list is
-  ~39 % of the release suite. The script fails if a name in it no longer matches exactly one test.
+  skip list holds the bigger-model tests (Llama 3B/8B, Qwen3 4B, the Qwen2.5 1.5B batchings and grading) and
+  the NVRTC builds for sm_70/75/80/90a. They aren't redundant: each is the only test of some shape or weight
+  type (head size 128 with GQA 3/4/6, K-quant weights at head size 128). The file says which, and the fast tier
+  accepts that gap between review rounds. The NVRTC builds come back in whenever the branch or the working tree
+  changes `src/cuda/*.cu`, `src/cuda/mod.rs` or `src/cuda/ffi.rs`. On an exclusive 4090 the list is ~39 % of the
+  release suite, and the fast tier's release part is ~55 % of main's full release suite. The script fails if a
+  name in the list no longer matches exactly one test, or if the binary lists no tests.
 - **full**: every test in both builds on GPU hosts, then the md5 gate (`gen` outputs main vs candidate,
   `axon-run --same-host`).
+
+The script sets `AXON_TEST_GPU_SERIAL=1` unless you set it, so GPU tests run one at a time on every host. A
+pod run with GPU tests concurrent can hit the open ILLEGAL_ADDRESS fault, and a POISON-RERUN pass isn't clean.
 
 Options (environment): `TIER_SHARD=N` splits each suite with `axon-run --shard N`, `TIER_DETACH=1` submits
 and returns, `TIER_RUN_OPTS="--big-models --on pods"` adds `axon-run` options, `TIER_BASE` is the ref the
 kernel-change check diffs against (default `origin/main`).
 
 The policy: fast for every intermediate round. Full once, on the commit that gets merged. Also full whenever
-a round changes a kernel's numerics, a cache layout or anything the bit-identity contracts cover on more than
-one model, because the bigger-model tests are the ones that catch shape-dependent bugs.
+a round changes a kernel's numerics, a cache layout, a head-size or GQA path, or anything the bit-identity
+contracts cover on more than one model, because the skipped bigger-model tests are the only ones that see
+those shapes.
