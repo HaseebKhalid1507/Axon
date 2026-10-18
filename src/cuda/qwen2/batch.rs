@@ -24,10 +24,9 @@ use super::*;
 /// cores) even where the tensor-core GEMM exists.
 pub(super) const SMALL: usize = 16;
 
-/// The most tokens a gemvm kernel takes (gemvm64): products of up to
-/// `BatchFns::vm_max` tokens (a pool's decode step) read the weights once
-/// on gemvm rather than in gemm2's 64-token tiles.
-pub(super) const VM_MAX: usize = 64;
+/// The most tokens a gemvm kernel takes (gemvm32; `CudaQwen2::takes_gemvm`
+/// picks it over gemm2 for the products too small to fill the GPU).
+pub(super) const VM_MAX: usize = 32;
 
 /// hopper.cu gemmh2's dynamic shared memory (GEMMH2_SMEM): 4 stages of
 /// activation values (16 KiB) and two warpgroups' raw Q4_K rows, their dk /
@@ -368,12 +367,12 @@ pub(super) struct BatchFns<'m> {
     pub(super) argmax: Func<'m>,
     gemvn8: Func<'m>,
     gemvn16: Func<'m>,
-    /// gemvm8_*, gemvm16_*, gemvm32_*, gemvm64_* per type (as `gemm`);
-    /// None without tensor cores.
-    gemvm: Option<[[Func<'m>; NTYPES_VM]; 4]>,
-    /// Products of up to this many tokens of a gemvm type take gemvm (16..=
-    /// VM_MAX; AXON_GEMVM_MAX), more gemm2; 0: by the model
-    /// (`CudaQwen2::vm_max`).
+    /// gemvm8_*, gemvm16_*, gemvm32_* per type (as `gemm`); None without
+    /// tensor cores.
+    gemvm: Option<[[Func<'m>; NTYPES_VM]; 3]>,
+    /// AXON_GEMVM_MAX: 16, gemvm for at most 16 tokens (main's routing);
+    /// 32, for up to 32 whatever the product; 0 or unset, by the product's
+    /// shape (`CudaQwen2::takes_gemvm`).
     pub(super) vm_max: usize,
     /// Per type (Q4_K, Q6_K, Q8_0, Q5_0, Q5_K, Q4_0: `NTYPES`, indexed by
     /// `type_index`): gemm2_* (128 tokens per block)
@@ -469,7 +468,7 @@ impl<'m> BatchFns<'m> {
                     n("q4_0")?,
                 ])
             };
-            Some([f(8)?, f(16)?, f(32)?, f(64)?])
+            Some([f(8)?, f(16)?, f(32)?])
         } else {
             None
         };
@@ -515,7 +514,10 @@ impl<'m> BatchFns<'m> {
             vm_max: std::env::var("AXON_GEMVM_MAX")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .map_or(0, |v: usize| v.clamp(SMALL, VM_MAX)),
+                .map_or(
+                    0,
+                    |v: usize| if v == 0 { 0 } else { v.clamp(SMALL, VM_MAX) },
+                ),
             gemm,
             gemm_q6k8,
             gemm_gu: if module.mma() {
@@ -686,7 +688,7 @@ impl<'g> CudaQwen2<'g> {
         let bf = &self.bf;
         let ti = type_index(mt.qt);
         // gemvm (weight-read-once) for up to vm_max tokens of its types.
-        let vm = bf.gemvm.is_some() && ti < NTYPES_VM && nb <= self.vm_max();
+        let vm = bf.gemvm.is_some() && ti < NTYPES_VM && self.takes_gemvm(mt.rows, nb);
         let small = vm || nb <= SMALL;
         // Q6_K by its prefill copy where made (the same products).
         let q8c = match (mt.c8, &bf.gemm_q6k8) {
@@ -1666,7 +1668,7 @@ impl<'g> CudaQwen2<'g> {
             let fuse = self.gate_up_fused
                 && self.gemma.is_none()
                 && bf.gemm_gu.is_some()
-                && nb > self.vm_max()
+                && !self.takes_gemvm(gate.rows, nb)
                 && gate.qt == Q4_K
                 && up.qt == Q4_K
                 && gate.cols == dim
@@ -1834,17 +1836,21 @@ impl<'g> CudaQwen2<'g> {
         Ok(())
     }
 
-    /// The most tokens of a product that take gemvm (`BatchFns::vm_max`).
-    /// By default 32 on models of width <= 1024, else SMALL: gemvm32 is a
-    /// CTA of 16 rows x 32 tokens that reads its tokens' activations per 16
-    /// rows, which loses to gemm2 on the 7B (C-curve log, RTX 4090: 7B
-    /// step at nb 32 18.5 vs 14.7 ms) and wins on the 0.5B (3.49 vs 4.01
-    /// ms), whose products are too small for gemm2's tiles to fill the GPU.
-    pub(super) fn vm_max(&self) -> usize {
-        match self.bf.vm_max {
-            0 if self.dim <= 1024 => 32,
-            0 => SMALL,
-            v => v,
+    /// Whether a product of `rows` outputs over nb tokens (of a gemvm type)
+    /// takes gemvm rather than gemm2: up to SMALL tokens always; up to
+    /// VM_MAX when gemm2's tiles would leave the GPU mostly idle (fewer
+    /// 64-row tiles than a quarter of the SMs, e.g. the 7B's 512-row k / v,
+    /// the 0.5B's 896-row q / o / down) and gemvm32's one pass over the
+    /// weights wins (C-curve log, RTX 4090: 7B k at nb 32 12.3 vs 20.5 us);
+    /// bigger products stay on gemm2, where gemvm32's 16-row blocks re-read
+    /// the tokens' activations (7B gate at nb 32: 138 vs 96 us).
+    /// `BatchFns::vm_max` (AXON_GEMVM_MAX) overrides.
+    pub(super) fn takes_gemvm(&self, rows: usize, nb: usize) -> bool {
+        match (nb, self.bf.vm_max) {
+            (..=SMALL, _) => true,
+            (_, _) if nb > VM_MAX => false,
+            (_, 0) => 4 * rows.div_ceil(G2_BM) < self.bf.sms,
+            (_, v) => nb <= v,
         }
     }
 
