@@ -61,6 +61,20 @@ pub(super) fn att_per_query(head_dim: usize) -> usize {
 /// Tokens per output-head launch in `verify_argmax` (sizes the logits).
 pub(super) const HEAD_SUB: usize = 16;
 
+/// Queries per block of decode.cu attn_mq_t (MQ_Q).
+pub(super) const MQ_Q: usize = 16;
+
+/// attn_mq_t's dynamic shared memory for head size hd and q8 scale group
+/// kg (0: the f16 cache): the K and V tiles, q8 also their raw rows and
+/// scales.
+pub(super) fn mq_smem(hd: usize, kg: usize) -> usize {
+    let tile = ATT_BLK * hd * 2;
+    match kg {
+        0 => 2 * tile,
+        _ => 2 * tile + 2 * ATT_BLK * hd + 2 * ATT_BLK * (hd / kg) * 4,
+    }
+}
+
 /// attn_fa_b's launch shapes (prefill.cu): `Full` attn_fa_b, `Small`
 /// attn_fa_bs (half the rows: short batches), `Kv` attn_fa_k (4 warps, 64
 /// rows, K and V copied apart, several blocks per SM). Each row's ops are
@@ -354,6 +368,9 @@ pub(super) struct BatchFns<'m> {
     /// fold: batches of at most att_per_query tokens.
     attn_blk: Func<'m>,
     attn_cmb: Func<'m>,
+    /// The same partials 16 queries of one sequence at a time (decode.cu
+    /// attn_mq_t): `mq_smem`.
+    attn_mq: Func<'m>,
     /// attn_fa_b's variants (`Fa`, indexed by it) for this head size
     /// (larger batches), then quantize_b.
     attn_fa: [Func<'m>; 3],
@@ -482,6 +499,13 @@ impl<'m> BatchFns<'m> {
                 "attn_blk_b_128"
             })?,
             attn_cmb: module.function("attn_cmb_b")?,
+            attn_mq: {
+                let f = module.function(&format!("attn_blk_mq_{head_dim}"))?;
+                if module.mma() {
+                    f.set_max_shared(mq_smem(head_dim, 0))?;
+                }
+                f
+            },
             attn_fa: {
                 let f = |n: &str, v: Fa| -> Result<Func<'m>, String> {
                     let f = module.function(&format!("{n}_{head_dim}"))?;
@@ -1460,71 +1484,112 @@ impl<'g> CudaQwen2<'g> {
                     // partials' stride: blocks or splits, the arguments
                     // after rp: the kernel's own, picked with it).
                     let gemma = self.gemma.is_some();
-                    let (f, grid, block, stride, tail) = match (tc, q8, gemma) {
-                        // gemma3: each query's window (0: a global layer);
-                        // its plain-cache kernel takes no table (gemma.cu).
-                        (false, false, true) => {
-                            let win = Arg::I32(l.win as i32);
-                            let (f, tail) = if paged {
-                                (&bf.attn_split_w_pg, vec![win, tab])
-                            } else {
-                                (&bf.attn_split_w, vec![win])
-                            };
-                            (f, ms, ATT_TILE as u32, self.max_split, tail)
-                        }
-                        (_, _, true) => {
-                            return Err("gemma3 attention: f16 split kernels only (load refuses \
+                    let stride = if tc { b.nblk_max } else { self.max_split };
+                    // One sequence on the tensor cores: attn_blk_b's
+                    // partials MQ_Q queries per block (attn_mq_t), each K /
+                    // V tile read once for them.
+                    if tc && !rows && !gemma && self.att_mq {
+                        let f = match q8 {
+                            false => &bf.attn_mq,
+                            true => &self.q8_fns(mode).attn_blk_mq,
+                        };
+                        let mut args = vec![b.q.arg()];
+                        args.extend_from_slice(kv);
+                        args.extend_from_slice(&[
+                            Arg::I32(start as i32),
+                            Arg::I32(z0 as i32),
+                            Arg::I32(self.n_heads as i32),
+                            Arg::I32(self.n_kv_heads as i32),
+                            pre,
+                            Arg::I32(b.nblk_max as i32),
+                            b.part_o.arg(),
+                            b.part_ml.arg(),
+                            tab,
+                            Arg::I32(nz as i32),
+                        ]);
+                        let group = self.n_heads / self.n_kv_heads;
+                        g.launch(
+                            f,
+                            (
+                                self.n_kv_heads as u32,
+                                gy_blk,
+                                (nz as usize).div_ceil(MQ_Q) as u32,
+                            ),
+                            (32 * group as u32, 1, 1),
+                            mq_smem(hd, kg) as u32,
+                            &args,
+                        )?;
+                    } else {
+                        let (f, grid, block, _, tail) = match (tc, q8, gemma) {
+                            // gemma3: each query's window (0: a global layer);
+                            // its plain-cache kernel takes no table (gemma.cu).
+                            (false, false, true) => {
+                                let win = Arg::I32(l.win as i32);
+                                let (f, tail) = if paged {
+                                    (&bf.attn_split_w_pg, vec![win, tab])
+                                } else {
+                                    (&bf.attn_split_w, vec![win])
+                                };
+                                (f, ms, ATT_TILE as u32, self.max_split, tail)
+                            }
+                            (_, _, true) => {
+                                return Err(
+                                    "gemma3 attention: f16 split kernels only (load refuses \
                                  head sizes but 256, tensor cores and the q8 cache)"
-                                .into());
-                        }
-                        (true, false, false) => (&bf.attn_blk, gy_blk, 32, b.nblk_max, vec![tab]),
-                        (true, true, false) => (
-                            &self.q8_fns(mode).attn_blk_b,
-                            gy_blk,
-                            32,
-                            b.nblk_max,
-                            vec![tab],
-                        ),
-                        (false, false, false) => (
-                            &bf.attn_split,
-                            ms,
-                            ATT_TILE as u32,
-                            self.max_split,
-                            vec![tab],
-                        ),
-                        (false, true, false) => (
-                            &self.q8_fns(mode).attn_split_b,
-                            ms,
-                            ATT_TILE as u32,
-                            self.max_split,
-                            vec![tab],
-                        ),
-                    };
-                    let mut args = vec![b.q.arg()];
-                    args.extend_from_slice(kv);
-                    args.extend_from_slice(&[
-                        Arg::I32(start as i32),
-                        Arg::I32(z0 as i32),
-                        Arg::I32(self.n_heads as i32),
-                        Arg::I32(self.n_kv_heads as i32),
-                        if tc {
-                            pre
-                        } else {
-                            Arg::F32(1.0 / (hd as f32).sqrt())
-                        },
-                        Arg::I32(stride as i32),
-                        b.part_o.arg(),
-                        b.part_ml.arg(),
-                        rp,
-                    ]);
-                    args.extend(tail);
-                    g.launch(
-                        f,
-                        (self.n_kv_heads as u32, grid, nz),
-                        (block, 1, 1),
-                        0,
-                        &args,
-                    )?;
+                                        .into(),
+                                );
+                            }
+                            (true, false, false) => {
+                                (&bf.attn_blk, gy_blk, 32, b.nblk_max, vec![tab])
+                            }
+                            (true, true, false) => (
+                                &self.q8_fns(mode).attn_blk_b,
+                                gy_blk,
+                                32,
+                                b.nblk_max,
+                                vec![tab],
+                            ),
+                            (false, false, false) => (
+                                &bf.attn_split,
+                                ms,
+                                ATT_TILE as u32,
+                                self.max_split,
+                                vec![tab],
+                            ),
+                            (false, true, false) => (
+                                &self.q8_fns(mode).attn_split_b,
+                                ms,
+                                ATT_TILE as u32,
+                                self.max_split,
+                                vec![tab],
+                            ),
+                        };
+                        let mut args = vec![b.q.arg()];
+                        args.extend_from_slice(kv);
+                        args.extend_from_slice(&[
+                            Arg::I32(start as i32),
+                            Arg::I32(z0 as i32),
+                            Arg::I32(self.n_heads as i32),
+                            Arg::I32(self.n_kv_heads as i32),
+                            if tc {
+                                pre
+                            } else {
+                                Arg::F32(1.0 / (hd as f32).sqrt())
+                            },
+                            Arg::I32(stride as i32),
+                            b.part_o.arg(),
+                            b.part_ml.arg(),
+                            rp,
+                        ]);
+                        args.extend(tail);
+                        g.launch(
+                            f,
+                            (self.n_kv_heads as u32, grid, nz),
+                            (block, 1, 1),
+                            0,
+                            &args,
+                        )?;
+                    }
                     on("attn")?;
                     let mut cargs = vec![
                         b.part_o.arg(),

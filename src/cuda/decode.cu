@@ -2208,6 +2208,177 @@ ATTN_BLK_Q8(attn_blk_q8_128, 128, 128, ATT_NW)
 ATTN_BLK_Q8(attn_blk_q8g32_64, 64, 32, ATT_NW)
 ATTN_BLK_Q8(attn_blk_q8g32_128, 128, 32, ATT_NW)
 
+// ---------------------------------------------------------------------------
+// Multi-query block attention (r12): attn_blk_b's partials for up to MQ_Q
+// consecutive queries of one sequence per block, each K / V tile loaded
+// once for all of them. Block (kv head blockIdx.x, positions 64b .. for b
+// = blockIdx.y + k gridDim.y, queries zq = 16 blockIdx.z .. of the launch)
+// of `group` warps: rows r = (z - zq) * group + g (query z, head kvh *
+// group + g), warp w the m16 tile of rows 16w .. 16w + 15 (MQ_Q * group /
+// 16 = group tiles). Per row, steps 1-8 are attn_blk_t's with one warp
+// (att_qfrag, att_scores, att_softmax, att_pv: the same chains on the same
+// values; a row's result doesn't depend on its tile-mates), and the
+// partial (o_b, m_b, l_b) of every block with 64b < np goes where
+// attn_blk_b puts it, so attn_cmb_b folds the same bits. Tiles hold the
+// positions below the block's last query's np: a row with a smaller np
+// sees real V rows where attn_blk_b has zero fill, with p = +0 there:
+// prefill's asymmetry (decode.cu "Tensor-core attention", end): at most
+// the sign of an exactly zero o_b[d], which the fold can't turn into
+// anything but a zero and quant_warp erases; a NaN value written by this
+// batch poisons its earlier queries too. Rows past the launch's nz: zero
+// queries, never stored. The q8 cache: raw K and V rows, then both f16
+// tiles by att_cvt_q8 (attn_blk_t's values). Dynamic shared memory: the K
+// and V tiles, q8 also the raw rows and their scales (batch::mq_smem).
+#define MQ_Q 16
+#if __CUDA_ARCH__ >= 800
+// Step 8 for dims D0 .. D0 + 64, stored for the lane's rows a and b at
+// po[0], po[1] (null: not stored).
+template <int HD, int D0>
+__device__ __forceinline__ void mq_pv_store(const u32 (*pa)[4], unsigned short* vt,
+                                            float* const* po) {
+    float o[8][4];
+    att_pv<HD, D0, 64>(o, pa, vt);
+#pragma unroll
+    for (int i = 0; i < 2; i++) {
+        if (po[i]) {
+#pragma unroll
+            for (int n = 0; n < 8; n++)
+                *(float2*)(po[i] + D0 + 8 * n) = make_float2(o[n][2 * i], o[n][2 * i + 1]);
+        }
+    }
+}
+#endif
+template <int HD, int KG = 0>
+__device__ __forceinline__ void attn_mq_t(const float* __restrict__ q,
+                                          const unsigned short* __restrict__ kc,
+                                          const unsigned short* __restrict__ vc, int start, int z0,
+                                          int nz, int n_heads, int n_kv, float pre, int nblk_max,
+                                          float* __restrict__ part_o, float* __restrict__ part_ml,
+                                          Q8Kv q8, const u32* __restrict__ tab) {
+#if __CUDA_ARCH__ >= 800
+    constexpr bool Q8 = KG > 0;
+    constexpr int KGs = Q8 ? KG : 1;
+    extern __shared__ __align__(16) unsigned short mq_sm[];
+    unsigned short* kt = mq_sm;
+    unsigned short* vt = mq_sm + ATT_BLK * HD;
+    signed char* r8 = (signed char*)(mq_sm + 2 * ATT_BLK * HD);
+    float* rs = (float*)(r8 + 2 * ATT_BLK * HD);
+    int tid = threadIdx.x, lane = tid & 31, w = tid >> 5, nt = blockDim.x;
+    int group = n_heads / n_kv, kvh = blockIdx.x, kv_dim = n_kv * HD;
+    int zq = blockIdx.z * MQ_Q, nq = min(MQ_Q, nz - zq), rows = nq * group;
+    // Query zl of the launch is at position start + z0 + zl: np = that + 1.
+    int np_base = start + z0 + zq + 1, np_max = np_base + nq - 1;
+    int nblk = (np_max + ATT_BLK - 1) / ATT_BLK;
+    if ((int)blockIdx.y >= nblk) return;
+    int ra = 16 * w + (lane >> 2), rb = ra + 8;
+    int np0 = ra < rows ? np_base + ra / group : 0;
+    int np1 = rb < rows ? np_base + rb / group : 0;
+    // The warp's tile: its fewest and most positions (rows < rows).
+    bool live = 16 * w < rows;
+    int np_lo = np_base + 16 * w / group;
+    int np_hi = np_base + (min(16 * w + 15, rows - 1)) / group;
+    auto qrow = [&](int r) -> const float* {
+        return r < rows ? q + ((u64)(z0 + zq + r / group) * n_heads + kvh * group + r % group) * HD
+                        : nullptr;
+    };
+    u32 qa[HD / 16][4];
+    if (live) att_qfrag<HD>(qa, qrow(ra), qrow(rb), pre);
+    u64 nh = n_heads;
+    for (int b = blockIdx.y; b < nblk; b += gridDim.y) {
+        int t0 = b * ATT_BLK;
+        u32 rbase = att_rb(tab, t0);
+        if constexpr (Q8) {
+            att_load_q8<HD, KGs>(r8, rs, q8.k, q8.ks, t0, np_max, kv_dim, kvh, tid, nt, rbase);
+            att_load_q8<HD, KGs>(r8 + ATT_BLK * HD, rs + ATT_BLK * HD / KGs, q8.v, q8.vs, t0,
+                                 np_max, kv_dim, kvh, tid, nt, rbase);
+            att_commit();
+            att_wait<0>();
+            __syncthreads();
+            att_cvt_q8<HD, KGs>(kt, r8, rs, tid, nt);
+            att_cvt_q8<HD, KGs>(vt, r8 + ATT_BLK * HD, rs + ATT_BLK * HD / KGs, tid, nt);
+        } else {
+            // K, then V (landing during the scores).
+            att_load<HD>(kt, kc, t0, np_max, kv_dim, kvh, tid, nt, rbase);
+            att_commit();
+            att_load<HD>(vt, vc, t0, np_max, kv_dim, kvh, tid, nt, rbase);
+            att_commit();
+            att_wait<1>();
+        }
+        __syncthreads();
+        // Warp-uniform: some row of the tile has block b.
+        bool act = live && t0 < np_hi;
+        float m[2], l[2];
+        u32 pa[4][4];
+        if (act) {
+            float s[8][4];
+            att_scores<HD>(s, qa, kt);
+            if (t0 + ATT_BLK > np_lo)
+                att_softmax<true>(s, t0, np0, np1, m, l, pa);
+            else
+                att_softmax<false>(s, t0, np0, np1, m, l, pa);
+        }
+        if constexpr (!Q8) {
+            att_wait<0>();
+            __syncthreads();
+        }
+        if (act) {
+            // Row a's and b's partials (null: no block b for the row).
+            float* po[2];
+#pragma unroll
+            for (int i = 0; i < 2; i++) {
+                int r = i ? rb : ra, np = i ? np1 : np0;
+                po[i] = nullptr;
+                if (t0 < np) {
+                    u64 hb = ((u64)(zq + r / group) * nh + kvh * group + r % group) * nblk_max + b;
+                    po[i] = part_o + hb * HD + 2 * (lane & 3);
+                    if ((lane & 3) == 0) *(float2*)(part_ml + hb * 2) = make_float2(m[i], l[i]);
+                }
+            }
+            // P V 64 dims at a time (each n-tile's chain is the same: the
+            // registers of half the accumulators).
+            mq_pv_store<HD, 0>(pa, vt, po);
+            if constexpr (HD > 64) mq_pv_store<HD, 64>(pa, vt, po);
+        }
+        __syncthreads();
+    }
+#endif
+}
+
+// Grid (n_kv, <= nblk_max, ceil(nz / MQ_Q)) x 32 group, batch::mq_smem
+// bytes of dynamic shared memory; part_* as attn_blk_b's (per query of the
+// launch, queries z0 .. z0 + nz at positions start + z0 ..; one sequence:
+// tab its table or null).
+extern "C" __global__ void __launch_bounds__(32 * MAX_GROUP)
+attn_blk_mq_64(const float* __restrict__ q, const unsigned short* __restrict__ kc,
+               const unsigned short* __restrict__ vc, int start, int z0, int n_heads, int n_kv,
+               float pre, int nblk_max, float* __restrict__ part_o, float* __restrict__ part_ml,
+               const u32* __restrict__ tab, int nz) {
+    attn_mq_t<64>(q, kc, vc, start, z0, nz, n_heads, n_kv, pre, nblk_max, part_o, part_ml, Q8Kv{},
+                  tab);
+}
+extern "C" __global__ void __launch_bounds__(32 * MAX_GROUP, 2)
+attn_blk_mq_128(const float* __restrict__ q, const unsigned short* __restrict__ kc,
+                const unsigned short* __restrict__ vc, int start, int z0, int n_heads, int n_kv,
+                float pre, int nblk_max, float* __restrict__ part_o, float* __restrict__ part_ml,
+                const u32* __restrict__ tab, int nz) {
+    attn_mq_t<128>(q, kc, vc, start, z0, nz, n_heads, n_kv, pre, nblk_max, part_o, part_ml,
+                   Q8Kv{}, tab);
+}
+#define ATTN_BLK_MQ_Q8(NAME, HD, KG)                                                               \
+    extern "C" __global__ void __launch_bounds__(32 * MAX_GROUP, 2)                                \
+        NAME(const float* __restrict__ q, const signed char* __restrict__ kq,                      \
+             const signed char* __restrict__ vq, const float* __restrict__ ks,                     \
+             const float* __restrict__ vs, int start, int z0, int n_heads, int n_kv, float pre,    \
+             int nblk_max, float* __restrict__ part_o, float* __restrict__ part_ml,                \
+             const u32* __restrict__ tab, int nz) {                                                \
+        attn_mq_t<HD, KG>(q, nullptr, nullptr, start, z0, nz, n_heads, n_kv, pre, nblk_max,        \
+                          part_o, part_ml, Q8Kv{kq, vq, ks, vs, nullptr, nullptr}, tab);           \
+    }
+ATTN_BLK_MQ_Q8(attn_blk_mq_q8_64, 64, 64)
+ATTN_BLK_MQ_Q8(attn_blk_mq_q8_128, 128, 128)
+ATTN_BLK_MQ_Q8(attn_blk_mq_q8g32_64, 64, 32)
+ATTN_BLK_MQ_Q8(attn_blk_mq_q8g32_128, 128, 32)
+
 // attn_blk's blocks folded (step 9, blocks in order) and finalized (step
 // 10): out[h * hd + d] = O[d] / L, quantized for the output projection
 // (and stored as f32 in y if non-null). Grid n / 256 blocks of 256 threads
