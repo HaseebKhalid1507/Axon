@@ -74,6 +74,9 @@ Job IDs and the final status of every gate are in the PR's evidence table.
   `--device cuda` (the split) and `--device cpu`, plus qwen2.5-0.5b and Qwen3-0.6B on cuda: **0 of 18 differ**, all
   rc 0 (1018-013250-dfed). Banner: main prints `moe:` and `device: cuda + cpu experts` with the same text; the
   branch prints only `moe: …, kv f16`.
+- Round 2 head (5564731): rustfmt and clippy (bin + tests) clean. md5 vs main on bella, same 18 pairs:
+  **0 of 18 differ**, all rc 0, same banner (1018-021340-3543). `moe paged` (39 tests) release
+  1018-020450-3003 and debug-assertions 1018-021133-6b76 on bella: see the PR for their status.
 - Release, bella sm_120: **PASS** 38 / 0 / 0, no `skipping:` lines (1018-011840-da59).
 - jade sm_61 (GTX 1050 3 GB, 7.5 GB host), release, `--test-threads 1` (1018-012634-242e): `backend_places_moe` and
   `moe_gpu_feed_batch_matches_feed_pruned`, which the RAM check refused in #67's jade run, now **load and pass**.
