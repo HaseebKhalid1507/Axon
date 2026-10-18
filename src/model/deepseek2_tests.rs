@@ -270,6 +270,11 @@ pub(crate) enum Bug {
     NormOverRow,
     /// No YaRN frequency interpolation (mscale kept).
     NoYarn,
+    /// YaRN's mscale on the (sin, cos) table (Axon's qwen rule) instead of
+    /// in the attention scale: kq = 1/sqrt(nope + rope).
+    MscaleOnTable,
+    /// YaRN's frequencies, but no mscale anywhere: kq = 1/sqrt(nope + rope).
+    NoMscale,
 }
 
 /// The fixture's logits after each of `ids`, in f64, the *expanded* MLA
@@ -335,12 +340,19 @@ pub(crate) fn deepseek2_ref(m: &Model, raw: &RawTensors, ids: &[u32], bug: Bug) 
     };
     let scale = match bug {
         Bug::ScaleOfKeyRow => 1.0 / ((f.lat + f.rope) as f64).sqrt(),
+        Bug::MscaleOnTable | Bug::NoMscale => 1.0 / (hk as f64).sqrt(),
         _ => mscale * mscale / (hk as f64).sqrt(),
     };
     // Adjacent pairs (2i, 2i + 1) turn by pos * inv_freq(i).
+    let table_m = if bug == Bug::MscaleOnTable {
+        mscale
+    } else {
+        1.0
+    };
     let rope = |v: &mut [f64], pos: usize| {
         for i in 0..v.len() / 2 {
             let (s, c) = (pos as f64 * inv_freq(i)).sin_cos();
+            let (s, c) = (s * table_m, c * table_m);
             let (a, b) = (v[2 * i], v[2 * i + 1]);
             v[2 * i] = a * c - b * s;
             v[2 * i + 1] = a * s + b * c;
@@ -544,8 +556,11 @@ fn deepseek2_matches_expanded_reference() {
             Bug::ScaleBeforeRenorm,
             Bug::NormOverRow,
             Bug::NoYarn,
+            Bug::MscaleOnTable,
+            Bug::NoMscale,
         ] {
-            if bug == Bug::NoYarn && !o.yarn {
+            let yarn_only = matches!(bug, Bug::NoYarn | Bug::MscaleOnTable | Bug::NoMscale);
+            if yarn_only && !o.yarn {
                 continue;
             }
             let d = max_diff(&deepseek2_ref(&m, &raw, &IDS, bug), &want);
@@ -579,12 +594,23 @@ fn deepseek2_matches_expanded_reference() {
         let mut c = net.new_cache(n);
         let l: Vec<Vec<f32>> = (0..n).map(|p| net.forward(IDS[p], p, &mut c)).collect();
         let d = max_diff(&l, &want8);
-        eprintln!("{o:?} Q8_0 fixture (r8q): cpu vs reference {d:.4}");
-        // q_lora quantizes the queries' activations twice (q_a, q_b) into
-        // sharp attention: MEASURED 1.45 there. A smoke check of the r8q
-        // path; exactness is the F32 rows' gate above.
-        let tol = if o.q_lora { 2.5 * Q8_TOL } else { Q8_TOL };
-        assert!(d <= tol, "{o:?} Q8_0: cpu vs reference {d}");
+        let top = |v: &[f32]| (0..v.len()).fold(0, |b, i| if v[i] > v[b] { i } else { b });
+        let agree = l
+            .iter()
+            .zip(&want8)
+            .filter(|(a, b)| top(a) == top(b))
+            .count();
+        eprintln!("{o:?} Q8_0 fixture (r8q): cpu vs reference {d:.4}, top-1 {agree}/{n}");
+        // A smoke check of the r8q path (exactness is the F32 rows' gate
+        // above): the greedy pick at every position. Max |dlogit| bounds
+        // only the configs without q_lora: q_lora quantizes the queries'
+        // activations twice (q_a, q_b) into sharp attention (MEASURED 1.45
+        // max |dlogit| there), and a max-diff bound just over a measurement
+        // gates nothing.
+        assert_eq!(agree, n, "{o:?} Q8_0: top-1 agreement");
+        if !o.q_lora {
+            assert!(d <= Q8_TOL, "{o:?} Q8_0: cpu vs reference {d}");
+        }
     }
 }
 

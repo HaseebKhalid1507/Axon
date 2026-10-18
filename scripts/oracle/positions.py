@@ -182,15 +182,30 @@ def dump_lib(a):
     json.dump(parse_axon(out, seqs, a.n, a.k), open(a.out, "w"))
 
 
-def kl_top(pa, pb):
+def pkl_top(pa, pb):
+    """Not a KL divergence: the partial sum of p_a (log p_a - log p_b) over a's top K only (the rest of the
+    vocabulary is dropped, and b's logprob of a token outside b's top K is floored at b's K-th). It is 0 for
+    identical top lists and grows with the disagreement, the same truncation for every pair, so pairs compare."""
     db = dict((i, lp) for i, lp in pb)
     floor = min(lp for _, lp in pb)
     return sum(math.exp(lp) * (lp - db.get(i, floor)) for i, lp in pa)
 
 
+def misses(a, b):
+    """(sequence, position) where a's and b's top-1 differ."""
+    out = set()
+    for k, (x, y) in enumerate(zip(a, b)):
+        for p, (ta, tb) in enumerate(zip(x["tops"], y["tops"])):
+            if ta[0][0] != tb[0][0]:
+                out.add((k, x["first"] + p))
+    return out
+
+
 def compare(files):
     runs = [(f, json.load(open(f))) for f in files]
-    print(f"{'pair':<66} {'top1':>11} {'KL mean':>9} {'KL p99':>9} {'KL max':>9} {'max|dlp1|':>9}")
+    k = len(runs[0][1][0]["tops"][0])
+    print(f"pKL@{k}: partial KL over the first file's top {k} (not a full KL; see pkl_top)")
+    print(f"{'pair':<66} {'top1':>11} {'pKL mean':>9} {'pKL p99':>9} {'pKL max':>9} {'max|dlp1|':>9}")
     for i in range(len(runs)):
         for j in range(i + 1, len(runs)):
             (fa, a), (fb, b) = runs[i], runs[j]
@@ -201,7 +216,7 @@ def compare(files):
                 for ta, tb in zip(x["tops"], y["tops"]):
                     tot += 1
                     agree += ta[0][0] == tb[0][0]
-                    kls.append(kl_top(ta, tb))
+                    kls.append(pkl_top(ta, tb))
                     db = dict((t, lp) for t, lp in tb)
                     if ta[0][0] in db:
                         dl = max(dl, abs(ta[0][1] - db[ta[0][0]]))
@@ -209,6 +224,14 @@ def compare(files):
             name = f"{os.path.basename(fa)} vs {os.path.basename(fb)}"
             print(f"{name:<66} {agree:>5}/{tot:<5} {sum(kls) / len(kls):>9.2e} "
                   f"{kls[int(0.99 * (len(kls) - 1))]:>9.2e} {kls[-1]:>9.2e} {dl:>9.4f}")
+    if len(runs) >= 3:
+        (f0, base) = runs[0]
+        ms = [(os.path.basename(f), misses(base, r)) for f, r in runs[1:]]
+        print(f"top-1 misses against {os.path.basename(f0)}, and their overlap:")
+        for x in range(len(ms)):
+            for y in range(x + 1, len(ms)):
+                (na, sa), (nb, sb) = ms[x], ms[y]
+                print(f"  {na}: {len(sa)}, {nb}: {len(sb)}, both: {len(sa & sb)}")
 
 
 def main():

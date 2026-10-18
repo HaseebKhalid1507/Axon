@@ -92,6 +92,11 @@ pub(crate) fn is_moe(m: &Model) -> bool {
     m.arch == "qwen3moe" || m.arch == "deepseek2"
 }
 
+/// deepseek2: CPU only for now (its GPU MLA attention is stage 1).
+pub(crate) fn cpu_only(m: &Model) -> bool {
+    m.arch == "deepseek2"
+}
+
 pub(crate) fn moe_dims(m: &Model) -> Option<MoeDims> {
     if !is_moe(m) {
         return None;
@@ -125,6 +130,13 @@ fn held_bytes(t: &Tensor, repack: bool) -> u64 {
     len.map_or(t.n_bytes / t.dims[2], |l| l as u64)
 }
 
+/// Bytes of one expert matrix of `t` in the anonymous r8 arena: its repack,
+/// or 0 when it's read in place from the mapping.
+fn arena_bytes(t: &Tensor, repack: bool) -> u64 {
+    let len = if repack { super::repacked_len(t) } else { None };
+    len.map_or(0, |l| l as u64)
+}
+
 /// What `axon info` says about a MoE model: sizes from the tensor table.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct MoeInfo {
@@ -140,7 +152,10 @@ pub(crate) struct MoeInfo {
     /// Everything else (attention, routers, norms, embedding, head;
     /// deepseek2's dense lead layers and shared experts).
     pub dense_bytes: u64,
-    /// No GPU placement yet (deepseek2).
+    /// The experts' share of the anonymous r8 arena (`expert_held` when
+    /// every expert repacks; 0 for experts read in place).
+    pub expert_arena: u64,
+    /// `cpu_only`.
     pub cpu_only: bool,
 }
 
@@ -161,7 +176,8 @@ impl MoeInfo {
             active_bytes: 0,
             active_held: 0,
             dense_bytes: 0,
-            cpu_only: m.arch == "deepseek2",
+            expert_arena: 0,
+            cpu_only: cpu_only(m),
         };
         for t in &m.tensors {
             if EXPS.iter().any(|s| t.name.ends_with(s)) && t.dims.len() >= 3 && t.dims[2] > 0 {
@@ -170,6 +186,7 @@ impl MoeInfo {
                 i.expert_held += held_bytes(t, repack) * n;
                 i.active_bytes += t.n_bytes / n * dims.k as u64;
                 i.active_held += held_bytes(t, repack) * dims.k as u64;
+                i.expert_arena += arena_bytes(t, repack) * n;
             } else {
                 i.dense_bytes += t.n_bytes;
             }
@@ -193,7 +210,7 @@ impl MoeInfo {
                     self.shared.to_string()
                 },
                 if self.cpu_only {
-                    "CPU only (--device cpu)"
+                    "CPU only for now (--device cpu)"
                 } else {
                     "--device cuda: attention and routers on the GPU, experts on the CPU"
                 }
@@ -222,7 +239,7 @@ const RAM_HEADROOM: u64 = 3 << 29;
 /// mapping, page cache the kernel can reclaim).
 fn ram_need(i: &MoeInfo, repack: bool) -> u64 {
     let arena = if repack {
-        i.expert_held + i.dense_bytes
+        i.expert_arena + i.dense_bytes
     } else {
         0
     };
@@ -257,6 +274,12 @@ fn check_ram_with(m: &Model, repack: bool, avail: Option<u64>) -> Result<(), Str
 
 /// The refusal of every GPU placement but `crate::moe`'s.
 pub(crate) fn gpu_refusal(m: &Model) -> String {
+    if cpu_only(m) {
+        return format!(
+            "{}: runs on the CPU only for now (--device cpu); its GPU path is the next stage",
+            m.arch
+        );
+    }
     format!(
         "{}: a mixture-of-experts model runs on the CPU (--device cpu) or with its attention \
          on one GPU and its experts on the CPU (--device cuda); it doesn't split by layers, \

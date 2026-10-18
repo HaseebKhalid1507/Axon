@@ -169,9 +169,20 @@ pub(super) fn check(m: &Model) -> io::Result<Dims> {
             Some(v) => Err(bad(format!(
                 "metadata deepseek2.{k} = {v} is not a positive integer"
             ))),
-            None => Err(bad(format!(
-                "metadata deepseek2.{k} is missing or not a number"
-            ))),
+            None => {
+                let key = format!("deepseek2.{k}");
+                Err(bad(match m.metadata.iter().find(|(n, _)| *n == key) {
+                    // llama.cpp reads some keys per layer (get_key_or_arr:
+                    // expert_feed_forward_length); one value per model here.
+                    Some((_, Val::Arr(a))) => format!(
+                        "metadata {key} is an array ({} values, per layer): per-layer values \
+                         are not supported",
+                        a.len()
+                    ),
+                    Some((_, v)) => format!("metadata {key} = {v} is not a number"),
+                    None => format!("metadata {key} is missing"),
+                }))
+            }
         }
     };
     let n_layers = need("block_count")?;

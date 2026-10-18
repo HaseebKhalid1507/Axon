@@ -428,7 +428,7 @@ mod moe;
 pub(crate) use deepseek2::info_lines as deepseek2_info;
 
 pub(crate) use moe::{
-    MoeDims, MoeInfo, Route as MoeRoute, check_ram as moe_check_ram,
+    MoeDims, MoeInfo, Route as MoeRoute, check_ram as moe_check_ram, cpu_only as moe_cpu_only,
     gpu_refusal as moe_gpu_refusal, is_moe, moe_dims,
 };
 
@@ -1202,8 +1202,13 @@ impl<'a> Qwen2<'a> {
     }
 
     /// Layer l's weights as the CPU holds them, for streaming them to the
-    /// GPU (`cuda::qwen2::stream`): repacked bytes or the file's.
+    /// GPU (`cuda::qwen2::stream`): repacked bytes or the file's. Not for
+    /// deepseek2 (its blocks are `ds2`'s; the split that streams is refused).
     pub(crate) fn host_layer(&self, l: usize) -> crate::cuda::qwen2::stream::HostLayer<'_> {
+        assert!(
+            !self.is_mla(),
+            "host_layer: deepseek2 has no streamable layers"
+        );
         use crate::cuda::qwen2::stream::{HostLayer, HostMat};
         fn mat<'s>(w: &'s Weight<'_>) -> HostMat<'s> {
             HostMat {
@@ -1255,7 +1260,9 @@ impl<'a> Qwen2<'a> {
         self.ds2.is_some()
     }
 
-    /// Layers here (0..k of the model).
+    /// Layers here (0..k of the model): `Layer`s, so 0 on deepseek2, whose
+    /// blocks are `ds2`'s (`n_layers` counts them; only the refused split
+    /// and streaming paths call this).
     pub(crate) fn layer_count(&self) -> usize {
         self.layers.len()
     }
