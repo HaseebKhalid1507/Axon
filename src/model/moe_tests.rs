@@ -162,7 +162,14 @@ fn route_of(scales: &[f32], k: usize, h: &[f32]) -> (Vec<usize>, Vec<f32>) {
         .iter()
         .flat_map(|&s| (0..h.len()).map(move |c| s * (1.0 + c as f32 / 8.0)))
         .collect();
-    let r = moe::Moe::new(dims, router, Vec::new(), Vec::new(), Vec::new());
+    let r = moe::Moe::new(
+        dims,
+        router,
+        Vec::new(),
+        Vec::new(),
+        Vec::new(),
+        moe::Gate::SOFTMAX_NORM,
+    );
     let (mut ids, mut w) = (vec![0; k], vec![0.0; k]);
     r.route(h, &mut ids, &mut w);
     (ids, w)

@@ -1,7 +1,7 @@
 # Engineering log
 
 One file per PR and per NO-GO experiment, written by whoever did the work. The long-form history up to
-2026-10-16 is in [../history.md](../history.md); rejected experiments up to then are in
+2026-10-16 is in [../history.md](../history.md) (its last two phases summarize the merges to 2026-10-18); rejected experiments up to then are in
 [../experiments-rejected.md](../experiments-rejected.md). From now on, new entries go here, so parallel PRs
 never edit the same file.
 
