@@ -1615,6 +1615,8 @@ fn connection(s: TcpStream, sh: &Shared) {
                 let refused = c.refused.take();
                 c.head_only = refused.as_ref().is_some_and(|(_, m)| m == "HEAD");
                 let path = c.path.take();
+                let route = refused.map_or("other", |(p, _)| ops::route_label(&p));
+                c.on_status = Some(count(sh, route));
                 if e.status == 401 {
                     let _ = unauthorized(&mut c, false, path.as_deref());
                 } else {
@@ -1622,10 +1624,10 @@ fn connection(s: TcpStream, sh: &Shared) {
                     let body = error_body(path.as_deref(), &e);
                     let _ = c.respond(e.status, "application/json", body.as_bytes(), false, &[]);
                 }
+                // Counted (`on_status`): disarm it whatever happened.
+                c.on_status = None;
                 #[cfg(test)]
                 sh.hold.here();
-                let route = refused.map_or("other", |(p, _)| ops::route_label(&p));
-                sh.metrics.request(route, e.status);
                 // Evictable while it lingers: it serves nothing more.
                 sh.waiting.set(id, handle.as_ref());
                 linger(&c.s);
@@ -1634,13 +1636,13 @@ fn connection(s: TcpStream, sh: &Shared) {
             }
             Ok(Some(req)) => {
                 c.head_only = req.method == "HEAD";
-                c.status = 0;
+                // Counted as its response starts, before the client can
+                // read it (and so look at /metrics); not if none was sent.
+                c.on_status = Some(count(sh, ops::route_label(&req.path)));
                 let r = route(&mut c, &req, sh);
+                c.on_status = None;
                 #[cfg(test)]
                 sh.hold.here();
-                if c.status != 0 {
-                    sh.metrics.request(ops::route_label(&req.path), c.status);
-                }
                 match r {
                     Ok(true) if req.keep_alive => {}
                     _ => return,
@@ -1648,6 +1650,13 @@ fn connection(s: TcpStream, sh: &Shared) {
             }
         }
     }
+}
+
+/// `Conn::on_status` counting the response to a request on `route`
+/// (`Metrics::request`): once, before the client can read it.
+fn count(sh: &Shared, route: &'static str) -> http::OnStatus {
+    let m = sh.metrics.clone();
+    Box::new(move |status| m.request(route, status))
 }
 
 /// Before closing after an error answered mid-request (413, 431, ...):
