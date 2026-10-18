@@ -595,19 +595,35 @@ fn deepseek2_matches_expanded_reference() {
         let l: Vec<Vec<f32>> = (0..n).map(|p| net.forward(IDS[p], p, &mut c)).collect();
         let d = max_diff(&l, &want8);
         let top = |v: &[f32]| (0..v.len()).fold(0, |b, i| if v[i] > v[b] { i } else { b });
-        let agree = l
+        // The reference's top-1 minus top-2 logit at each position.
+        let gap = |v: &[f32]| {
+            let t = top(v);
+            v[t] - (0..v.len())
+                .filter(|&i| i != t)
+                .map(|i| v[i])
+                .fold(f32::MIN, f32::max)
+        };
+        let flips: Vec<f32> = l
             .iter()
             .zip(&want8)
-            .filter(|(a, b)| top(a) == top(b))
-            .count();
-        eprintln!("{o:?} Q8_0 fixture (r8q): cpu vs reference {d:.4}, top-1 {agree}/{n}");
+            .filter(|(a, b)| top(a) != top(b))
+            .map(|(_, b)| gap(b))
+            .collect();
+        eprintln!(
+            "{o:?} Q8_0 fixture (r8q): cpu vs reference {d:.4}, top-1 flips at gaps {flips:?}"
+        );
         // A smoke check of the r8q path (exactness is the F32 rows' gate
-        // above): the greedy pick at every position. Max |dlogit| bounds
-        // only the configs without q_lora: q_lora quantizes the queries'
-        // activations twice (q_a, q_b) into sharp attention (MEASURED 1.45
-        // max |dlogit| there), and a max-diff bound just over a measurement
-        // gates nothing.
-        assert_eq!(agree, n, "{o:?} Q8_0: top-1 agreement");
+        // above): the greedy pick may only flip at a near-tie of the
+        // reference, a top-1/top-2 gap under 2 * Q8_TOL (8-bit activations
+        // move logits by up to Q8_TOL, MEASURED 0.18-0.33 without q_lora).
+        // Max |dlogit| bounds only the configs without q_lora: q_lora
+        // quantizes the queries' activations twice (q_a, q_b) into sharp
+        // attention (MEASURED 1.45 there), and a bound just over one
+        // measurement gates nothing.
+        assert!(
+            flips.len() <= 1 && flips.iter().all(|&g| g < 2.0 * Q8_TOL),
+            "{o:?} Q8_0: top-1 flips at reference gaps {flips:?}"
+        );
         if !o.q_lora {
             assert!(d <= Q8_TOL, "{o:?} Q8_0: cpu vs reference {d}");
         }
