@@ -1054,7 +1054,15 @@ fn deepseek3_tokenizer_matches_hf() {
         let want = ids(&c["ids_special"]);
         // Plain encode equals it when the text has no special-token strings.
         let plain = c["has_special"].as_bool() == Some(true) || t.encode(text) == want;
-        if !plain || t.encode_special(text) != want {
+        let got = t.encode_special(text);
+        if !plain || got != want {
+            let i = got.iter().zip(&want).take_while(|(a, b)| a == b).count();
+            let ctx = |v: &[u32]| t.decode(&v[i.saturating_sub(3)..(i + 4).min(v.len())]);
+            eprintln!(
+                "deepseek-v3 differs at token {i}: axon {:?} vs HF {:?}",
+                ctx(&got),
+                ctx(&want)
+            );
             bad.push(text.chars().take(60).collect::<String>());
         }
     }
