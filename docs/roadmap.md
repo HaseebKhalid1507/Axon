@@ -36,8 +36,8 @@ models, cheaply and fast), so choices made along the way shouldn't close them of
   - MLA attention and DeepSeek routing (the `deepseek2` architecture), tried first on a small DeepSeek-architecture
     model that fits Parabellum;
   - Kimi's tokenizer (its own vocabulary and pre-tokenizer; to be checked against the GGUF);
-  - 2–3-bit weight types. At Q4_K_M the model is ≈ 600 GB; at 2–3 bits it is ≈ 250–380 GB. The GGUF reader names
-    Q2_K and Q3_K but there are no kernels for them;
+  - 2–3-bit weight types. At Q4_K_M the model is ≈ 600 GB; at 2–3 bits it is ≈ 250–380 GB. Q2_K and Q3_K (and
+    IQ4_NL, their files' fallback type) run on the CPU and CUDA (feat/q2k-q3k, [log](log/2026-10-17-q2k-q3k.md));
   - an expert cache across GPU, RAM and disk, and multi-GPU (pipeline parallel is on main, #34);
   - the hardware to test it at full size: a multi-GPU or large-RAM pod, a few dollars to tens of dollars an hour.
 
@@ -79,9 +79,10 @@ Also open:
 - ~~**Tool calling: `/v1/responses` (codex) and the ollama-native API.**~~ Done
   (docs/serve-apis.md, log 2026-10-17-serve-responses-ollama). Left: `format` / structured
   output (needs grammar-constrained sampling), embeddings.
-- **Q2_K and Q3_K.** The GGUF reader names both, but `model.rs` doesn't accept them (`SUPPORTED_TYPES`) and
-  there are no kernels; the 2–3-bit frontier models need them ([Long-term goals](#long-term-goals)).
-  **In flight** (feat/q2k-q3k).
+- **Q2_K and Q3_K.** CPU and CUDA kernels for Q2_K, Q3_K and IQ4_NL (the fallback type in the same files);
+  the 2–3-bit frontier models need them ([Long-term goals](#long-term-goals)). **In review** (feat/q2k-q3k,
+  [log](log/2026-10-17-q2k-q3k.md)); follow-ups: a repacked (r8) CPU layout (CPU prefill on 7B Q2_K /
+  Q3_K_M is 41% / 22% behind llama.cpp at pp2100, MEASURED) and gemvm small-batch kernels.
 - **MoE stage 2** (attention and router on the GPU, experts on the CPU). **In flight** (PR #67); its status
   lives in Scale item 7 and [Mixture-of-experts](#mixture-of-experts).
 - **Qwen3 0.6B Q8_0 long prefill on sm_89.** The one cell Axon loses on the RTX 4050
@@ -121,7 +122,9 @@ Also done, not yet in the table: **item 6, serve ops** (#61, #62: `--api-key`, `
 `--max-prompt-tokens`, `--slot-idle-ms`; [log](log/2026-10-17-serve-ops.md),
 [follow-up](log/2026-10-17-serve-ops-followup.md)), and **item 8's YaRN override** (#49: a pass-key needle 18/18 up to 128k
 with it, 9/18 without; +7.7–8.0 % perplexity at 2k–8k on 7B, so opt-in; [log](log/2026-10-16-yarn.md)). Item 8's other half,
-`chat` forgetting in halves, is still planned: `chat` drops the fewest exchanges that make room. Both status
+`chat` forgetting in halves, is in review (`chat --forget-to F`, default 0.5: once the window is full, the oldest
+exchanges go until the rest fills half of it, so the next turns append to the cache instead of each re-prefilling
+it; cache == fresh prefill of what's kept; [log](log/2026-10-18-chat-halves.md)). Both status
 cells sit next to item 7's, which PR #67 edits, so they are updated here until #67 merges.
 
 Dependencies: 1 (done) → {4 stage B, 10}; 2 (done) → 5 (stages 0–1 done) → shared-prefix pages; 3 (done) and 4
