@@ -4242,8 +4242,10 @@ fn gpu_mma_f16_is_deterministic() {
 /// Batched attention speed, 7B shape (28 heads, 4 kv heads, 128 wide) by
 /// default, AXON_ATT_NZ (64) queries at AXON_PROF_START (1536): the flash
 /// kernel (attn_fa_b) and its quantize_b, the per-query decode kernels
-/// (attn_blk_b, attn_cmb_b), and one decode step's attn_blk + attn_cmb at
-/// the last query's position. Interleaved rounds, best of each.
+/// (attn_blk_b, attn_cmb_b), one decode step's attn_blk + attn_cmb at the
+/// last query's position, attn_blk_mq, and the batched pass's per-query
+/// path over all the queries (attn_blk_mq or attn_blk_b, then attn_cmb_b,
+/// att_per_query at a time). Interleaved rounds, best of each.
 #[test]
 #[ignore]
 fn cuda_attn_bench() {
@@ -4257,9 +4259,32 @@ fn cuda_attn_bench() {
         .split(',')
         .map(|v| v.parse().unwrap())
         .collect();
-    let (nh, nkv, hd) = (shape[0], shape[1], shape[2]);
     let nz: usize = std::env::var("AXON_ATT_NZ").map_or(64, |v| v.parse().unwrap());
     let start: usize = std::env::var("AXON_PROF_START").map_or(1536, |v| v.parse().unwrap());
+    attn_bench(&g, &km, [shape[0], shape[1], shape[2]], nz, start);
+}
+
+/// cuda_attn_bench at the 7B shape without environment (pods): 32 and 128
+/// queries at depths 8192, 16384, 24576, three interleaved rounds.
+#[test]
+#[ignore]
+fn cuda_attn_mq_sweep() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    for r in 0..3 {
+        for start in [8192, 16384, 24576] {
+            for nz in [32, 128] {
+                eprintln!("== round {r} depth {start} nz {nz}");
+                attn_bench(&g, &km, [28, 4, 128], nz, start);
+            }
+        }
+    }
+}
+
+fn attn_bench(g: &Gpu, km: &crate::cuda::Module, shape: [usize; 3], nz: usize, start: usize) {
+    let [nh, nkv, hd] = shape;
     let ctx = start + nz;
     let nblk_max = ctx.div_ceil(64);
     let max_split = (8 * g.info().unwrap().sms as usize / nkv).clamp(1, MAX_SPLIT);
