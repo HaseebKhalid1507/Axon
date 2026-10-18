@@ -3307,6 +3307,10 @@ fn prefill_bits(m: &Model, name: &str, kv: CacheKv) {
         &[false]
     };
     let own = net.max_split;
+    // Random chunk sizes of 1..48 tokens: one sequence's passes either side
+    // of att_per_query and MQ_MAX (attn_blk_b, attn_blk_mq, attn_fa_b).
+    let mut rng = Rng(4242);
+    let rand: Vec<usize> = (0..60).map(|_| 1 + (rng.next() % 48) as usize).collect();
     for (&tc, max_split) in paths.iter().flat_map(|t| [(t, own), (t, 8)]) {
         net.set_tc_attn(tc);
         net.max_split = max_split;
@@ -3318,6 +3322,8 @@ fn prefill_bits(m: &Model, name: &str, kv: CacheKv) {
             vec![max],
             vec![5, 100, 3, 17, 260, 1, 33],
             vec![16, 0, 9, 0, 0, 200],
+            vec![24, 32, 31, 2, 47],
+            rand.clone(),
         ] {
             let (kv, l) = prefill_with(&net, &ids, &sizes);
             let bad = kv.iter().zip(&kv0).position(|(a, b)| a != b);
@@ -4264,8 +4270,12 @@ fn cuda_attn_bench() {
     attn_bench(&g, &km, [shape[0], shape[1], shape[2]], nz, start);
 }
 
-/// cuda_attn_bench at the 7B shape without environment (pods): 32 and 128
-/// queries at depths 8192, 16384, 24576, three interleaved rounds.
+/// cuda_attn_bench at the 7B shape over a grid, three interleaved rounds:
+/// AXON_MQ_NZ queries (default 4,8,16,24,32,48,64,96) at AXON_MQ_DEPTH
+/// positions (default 4096,8192,16384,24576). Per point a `SWEEP` line:
+/// depth, queries, then us of the per-query path over all of them with
+/// attn_blk_mq and with attn_blk_b (+ attn_cmb_b, att_per_query at a
+/// time), attn_fa_b + quantize_b, attn_fa_bs + quantize_b.
 #[test]
 #[ignore]
 fn cuda_attn_mq_sweep() {
@@ -4273,17 +4283,39 @@ fn cuda_attn_mq_sweep() {
         return;
     };
     let km = Kernels::module(&g).unwrap();
+    let list = |k: &str, d: &str| -> Vec<usize> {
+        std::env::var(k)
+            .unwrap_or(d.into())
+            .split(',')
+            .map(|v| v.parse().unwrap())
+            .collect()
+    };
+    let nzs = list("AXON_MQ_NZ", "4,8,16,24,32,48,64,96");
+    let depths = list("AXON_MQ_DEPTH", "4096,8192,16384,24576");
     for r in 0..3 {
-        for start in [8192, 16384, 24576] {
-            for nz in [32, 128] {
-                eprintln!("== round {r} depth {start} nz {nz}");
-                attn_bench(&g, &km, [28, 4, 128], nz, start);
+        for &start in &depths {
+            for &nz in &nzs {
+                let b = attn_bench(&g, &km, [28, 4, 128], nz, start);
+                eprintln!(
+                    "SWEEP round {r} depth {start} nz {nz} mq {:.1} blk_b {:.1} fa_b {:.1} fa_bs {:.1}",
+                    b[8] * 1e3,
+                    b[9] * 1e3,
+                    (b[0] + b[1]) * 1e3,
+                    (b[6] + b[1]) * 1e3
+                );
             }
         }
     }
 }
 
-fn attn_bench(g: &Gpu, km: &crate::cuda::Module, shape: [usize; 3], nz: usize, start: usize) {
+/// One cuda_attn_bench point; the best ms of each entry.
+fn attn_bench(
+    g: &Gpu,
+    km: &crate::cuda::Module,
+    shape: [usize; 3],
+    nz: usize,
+    start: usize,
+) -> [f64; 10] {
     let [nh, nkv, hd] = shape;
     let ctx = start + nz;
     let nblk_max = ctx.div_ceil(64);
@@ -4589,6 +4621,7 @@ fn attn_bench(g: &Gpu, km: &crate::cuda::Module, shape: [usize; 3], nz: usize, s
             b * 1e3
         );
     }
+    best
 }
 
 /// The flash attention kernels side by side, sustained (AXON_FA_LOOP

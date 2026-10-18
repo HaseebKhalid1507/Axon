@@ -64,6 +64,14 @@ pub(super) const HEAD_SUB: usize = 16;
 /// Queries per block of decode.cu attn_mq_t (MQ_Q).
 pub(super) const MQ_Q: usize = 16;
 
+/// Batches of one sequence of up to this many queries take the per-query
+/// path when attn_blk_mq runs it (`CudaQwen2::att_mq`), not attn_fa_b:
+/// cuda_attn_mq_sweep, 7B shape, on an RTX 4090 and bella (docs/log
+/// 2026-10-18-attn-mq). attn_blk_mq writes a 4 hd-byte partial per (query,
+/// head, block) that attn_cmb_b reads back, so it falls behind the flash
+/// kernel's in-register fold as queries grow. AXON_ATT_MQ_MAX overrides.
+pub(super) const MQ_MAX: usize = 32;
+
 /// attn_mq_t's dynamic shared memory for head size hd and q8 scale group
 /// kg (0: the f16 cache): the K and V tiles, q8 also their raw rows and
 /// scales.
@@ -605,6 +613,21 @@ impl<'g> CudaQwen2<'g> {
     /// Tokens per batched pass a cache of `max_ctx` positions gets scratch for.
     pub(super) fn batch_for(&self, max_ctx: usize) -> usize {
         self.batch.min(max_ctx).max(1)
+    }
+
+    /// Whether a one-sequence pass of nb queries takes the flash attention
+    /// (attn_fa_b) rather than the per-query path (attn_blk_mq or
+    /// attn_blk_b): more than att_per_query queries, or than `att_mq_max`
+    /// when attn_blk_mq runs the per-query path.
+    pub(super) fn att_flash(&self, nb: usize) -> bool {
+        let per = att_per_query(self.head_dim);
+        self.tc_attn
+            && nb
+                > if self.att_mq {
+                    per.max(self.att_mq_max)
+                } else {
+                    per
+                }
     }
 
     /// Partials (per head, hd + 2 floats each) of the batched attention:
@@ -1417,7 +1440,7 @@ impl<'g> CudaQwen2<'g> {
                 rows || start + nb <= b.nblk_max * ATT_BLK,
                 "batch past its cache"
             );
-            if self.tc_attn && nb > att_per_query(hd) && !rows {
+            if !rows && self.att_flash(nb) {
                 // Flash attention, every query of the pass in one launch,
                 // y in place of q; then act (the decode kernels' bits,
                 // prefill.cu attn_fa_bt), in the variant fa_pick takes for
@@ -1894,7 +1917,7 @@ impl<'g> CudaQwen2<'g> {
         start: usize,
     ) -> Vec<std::ops::Range<usize>> {
         let max = c.b.as_ref().expect("batch scratch").max;
-        match self.tc_attn && max > att_per_query(self.head_dim) {
+        match self.att_flash(max) {
             true => fa_passes(
                 n,
                 max,

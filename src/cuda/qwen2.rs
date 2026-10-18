@@ -474,6 +474,9 @@ pub struct CudaQwen2<'g> {
     /// (each tile read once per 16 queries), not attn_blk_b per query: the
     /// same partials (AXON_ATT_MQ=0 turns it off).
     att_mq: bool,
+    /// One sequence's passes of up to this many queries take the per-query
+    /// path when att_mq (`batch::MQ_MAX`; AXON_ATT_MQ_MAX).
+    att_mq_max: usize,
     /// Replay a captured graph per token (else launch kernel by kernel).
     pub graphs: bool,
     bf: batch::BatchFns<'g>,
@@ -1539,6 +1542,10 @@ impl<'g> CudaQwen2<'g> {
             att_gy: 0,
             tc_attn: module.mma() && head_dim != 256,
             att_mq: std::env::var("AXON_ATT_MQ").map_or(true, |v| v != "0"),
+            att_mq_max: std::env::var("AXON_ATT_MQ_MAX")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(batch::MQ_MAX),
             graphs: std::env::var("AXON_CUDA_GRAPHS").map_or(true, |v| v != "0"),
             bf: batch::BatchFns::new(module, hdk, sms, {
                 let cc = gpu.info()?.cc;
