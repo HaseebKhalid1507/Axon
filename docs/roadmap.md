@@ -120,7 +120,9 @@ Also done, not yet in the table: **item 6, serve ops** (#61, #62: `--api-key`, `
 `--max-prompt-tokens`, `--slot-idle-ms`; [log](log/2026-10-17-serve-ops.md),
 [follow-up](log/2026-10-17-serve-ops-followup.md)), and **item 8's YaRN override** (#49: a pass-key needle 18/18 up to 128k
 with it, 9/18 without; +7.7–8.0 % perplexity at 2k–8k on 7B, so opt-in; [log](log/2026-10-16-yarn.md)). Item 8's other half,
-`chat` forgetting in halves, is still planned: `chat` drops the fewest exchanges that make room. Both status
+`chat` forgetting in halves, is in review (`chat --forget-to F`, default 0.5: once the window is full, the oldest
+exchanges go until the rest fills half of it, so the next turns append to the cache instead of each re-prefilling
+it; cache == fresh prefill of what's kept; [log](log/2026-10-18-chat-halves.md)). Both status
 cells sit next to item 7's, which PR #67 edits, so they are updated here until #67 merges.
 
 Dependencies: 1 (done) → {4 stage B, 10}; 2 (done) → 5 (stages 0–1 done) → shared-prefix pages; 3 (done) and 4

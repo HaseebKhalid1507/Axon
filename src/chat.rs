@@ -351,6 +351,11 @@ pub struct Chat<'a, M: Lm> {
     pub max_reply: usize,
     /// Draft tokens per pass (`round_draft`ed for prompt lookup); 0 = off.
     pub max_draft: usize,
+    /// When the context is full, forget the oldest exchanges until the rest
+    /// and the new message fill at most this fraction of it (the newest
+    /// exchange kept), so the next turns append to the cache instead of each
+    /// prefilling it again; 0 = only as many as make room (`FORGET_TO`).
+    pub forget_to: f64,
     /// Guesses from a draft model instead of prompt lookup (draft.rs). It
     /// follows the history by itself, edits included (`drop_oldest`, the
     /// reasoning cut): nothing here resets it.
@@ -570,6 +575,9 @@ pub fn special(tok: &Tokenizer, s: &str) -> Option<u32> {
     }
 }
 
+/// `Chat::forget_to`'s default: forget down to half the context.
+pub const FORGET_TO: f64 = 0.5;
+
 impl<'a, M: Lm> Chat<'a, M> {
     /// A conversation with `system` as the system message (None: no system
     /// block), in a cache of `ctx` positions. Err if the vocabulary has no
@@ -611,6 +619,7 @@ impl<'a, M: Lm> Chat<'a, M> {
             no_think: false,
             max_reply: usize::MAX,
             max_draft: 0,
+            forget_to: FORGET_TO,
             drafter: None,
             sampler: None,
             vocab: std::cell::OnceCell::new(),
@@ -765,6 +774,15 @@ impl<'a, M: Lm> Chat<'a, M> {
         let mut k = 0;
         while k < n && kept(k) + user.len() + close + want > self.ctx {
             k += 1;
+        }
+        // Forgetting shifts positions, so what's kept is prefilled again:
+        // forget down to `forget_to` of the context (never the newest
+        // exchange), and the next turns append to the cache.
+        if k > 0 && self.forget_to > 0.0 {
+            let target = (self.forget_to.min(1.0) * self.ctx as f64) as usize;
+            while k + 1 < n && kept(k) + user.len() > target {
+                k += 1;
+            }
         }
         if k == n && n > 0 {
             // Every exchange goes: this message becomes the first one.
@@ -1376,6 +1394,58 @@ mod tests {
         }
     }
 
+    /// A session saved after forgetting down to half the context (the
+    /// file rewritten: its prefix changed) loads back to the same cache, and
+    /// the conversation goes on as if never stopped.
+    #[test]
+    fn session_after_forgetting() {
+        use crate::kvsave::Session;
+        let Some(m) = crate::testutil::model() else {
+            return;
+        };
+        let tok = Tokenizer::from_gguf(&m);
+        let net = Qwen2::new(&m);
+        let path = crate::testutil::model_path().unwrap();
+        let ident = crate::kvsave::model_ident(&m, &path, net.head_dim).unwrap();
+        let mk = || {
+            let mut c = Chat::new(&net, &tok, Some("Be brief."), 320).unwrap();
+            c.max_reply = 24;
+            c
+        };
+        let say =
+            |c: &mut Chat<Qwen2>, msg: &str| c.reply(msg, &|| false, &mut |_| Ok(())).unwrap();
+        let mut a = mk();
+        let want: Vec<Vec<u32>> = MSGS
+            .iter()
+            .cycle()
+            .take(12)
+            .map(|m| say(&mut a, m).ids)
+            .collect();
+        let file = session_path("forgetting");
+        let mut b = mk();
+        let mut s = Session::new(file.clone(), ident.clone());
+        let (mut got, mut reloads) = (Vec::new(), 0);
+        for msg in MSGS.iter().cycle().take(12) {
+            let r = say(&mut b, msg);
+            let info = b.save_session(&mut s).unwrap();
+            if r.dropped > 0 {
+                // The prefix changed: the file is written again, then a
+                // new process picks the conversation up from it.
+                assert!(info.rewrote, "turn {}: {info:?}", got.len());
+                let saved = (b.fed, b.hist.clone(), cache_image(&b));
+                b = mk();
+                s = Session::new(file.clone(), ident.clone());
+                assert!(b.load_session(&mut s).unwrap().unwrap().from_file);
+                assert!((b.fed, b.hist.clone(), cache_image(&b)) == saved);
+                reloads += 1;
+            }
+            got.push(r.ids);
+        }
+        assert!(reloads > 0);
+        assert_eq!(got, want);
+        let _ = std::fs::remove_file(&file);
+    }
+
     #[test]
     fn session_continues_cpu() {
         let Some(m) = crate::testutil::model() else {
@@ -1651,7 +1721,12 @@ mod tests {
         assert_graded(&ag, &ac);
     }
 
-    /// A small context forgets the oldest exchanges and stays exact.
+    /// A small context forgets the oldest exchanges and stays exact, by
+    /// the fewest that make room (`forget_to` 0) or down to a fraction of
+    /// the context: every reply equals a fresh greedy pass over its
+    /// history, the cache after forgetting equals a fresh prefill of what's
+    /// kept (byte for byte), and forgetting down to half prefills less, in
+    /// fewer turns, than forgetting the minimum.
     #[test]
     fn full_context_drops_oldest() {
         let Some(m) = crate::testutil::model() else {
@@ -1659,22 +1734,212 @@ mod tests {
         };
         let tok = Tokenizer::from_gguf(&m);
         let net = Qwen2::new(&m);
-        let mut chat = Chat::new(&net, &tok, Some("Be brief."), 160).unwrap();
-        chat.max_reply = 24;
-        let sys = chat.hist.clone();
-        let mut dropped = 0;
-        for msg in MSGS.iter().chain(&MSGS) {
-            let r = chat.reply(msg, &|| false, &mut |_| Ok(())).unwrap();
-            dropped += r.dropped;
-            assert!(chat.hist.len() <= 160);
-            assert_eq!(chat.hist[..sys.len()], sys[..]);
-            let prompt = &chat.hist[..chat.hist.len() - r.ids.len() - 2];
-            assert_eq!(r.ids, fresh(chat.net, prompt, 24, &chat.fr.stop), "{msg:?}");
+        let mut cost = Vec::new();
+        for (ctx, forget_to) in [(160, 0.0), (160, 0.5), (320, 0.0), (320, 0.5), (320, 0.25)] {
+            let what = format!("ctx {ctx} forget_to {forget_to}");
+            let mut chat = Chat::new(&net, &tok, Some("Be brief."), ctx).unwrap();
+            chat.max_reply = 24;
+            chat.forget_to = forget_to;
+            let sys = chat.hist.clone();
+            let (mut dropped, mut refills, mut fed) = (0, 0, 0);
+            for msg in MSGS.iter().cycle().take(16) {
+                let n = chat.turns.len();
+                let r = chat.reply(msg, &|| false, &mut |_| Ok(())).unwrap();
+                fed += r.prompt_tokens;
+                assert!(chat.hist.len() <= ctx, "{what}");
+                assert_eq!(chat.hist[..sys.len()], sys[..], "{what}");
+                let prompt = &chat.hist[..chat.hist.len() - r.ids.len() - 2];
+                assert_eq!(
+                    r.ids,
+                    fresh(chat.net, prompt, 24, &chat.fr.stop),
+                    "{what} {msg:?}"
+                );
+                if r.dropped == 0 {
+                    continue;
+                }
+                dropped += r.dropped;
+                refills += 1;
+                // With a target, what's kept (the new message included)
+                // fits it, unless that takes the newest exchange.
+                let kept = *chat.turns.last().unwrap();
+                let user = chat.hist.len() - kept - r.ids.len() - 2;
+                if forget_to > 0.0 {
+                    let target = (forget_to * ctx as f64) as usize;
+                    assert!(kept + user <= target || r.dropped + 1 >= n, "{what}");
+                }
+                // The cache == a fresh prefill of the kept history.
+                let mut c = net.new_cache(ctx);
+                for (i, b) in chat.hist[..chat.fed]
+                    .chunks(crate::PREFILL_BATCH)
+                    .enumerate()
+                {
+                    net.feed_batch(b, i * crate::PREFILL_BATCH, &mut c);
+                }
+                let mut want = Vec::new();
+                crate::kvsave::KvIo::kv_save(&net, &c, 0, chat.fed, &mut want).unwrap();
+                assert!(cache_image(&chat) == want, "{what}: cache differs");
+            }
+            assert!(dropped > 0, "{what}");
+            cost.push((ctx, forget_to, refills, fed));
+            chat.reset();
+            assert_eq!(chat.hist, sys);
+            assert!(chat.turns.is_empty());
         }
-        assert!(dropped > 0);
-        chat.reset();
-        assert_eq!(chat.hist, sys);
-        assert!(chat.turns.is_empty());
+        eprintln!(
+            "full_context_drops_oldest (ctx, forget_to, turns that forgot, prefilled): {cost:?}"
+        );
+        // At 320, half: fewer turns forget, fewer tokens prefilled.
+        let (min, half) = (cost[2], cost[3]);
+        assert!(half.2 < min.2 && half.3 < min.3, "{cost:?}");
+    }
+
+    /// Forgetting the fewest exchanges vs down to half, over a scripted
+    /// greedy chat on the GPU (else the CPU): per config, the turns that
+    /// forgot, the tokens prefilled, and time to first token per turn.
+    /// 0.5B (`MODEL`) at `--ctx` 2048, -n 160; `forget_bench_7b`: 7B Q4_K_M
+    /// at 8192, -n 400. Env overrides: `AXON_FB_MODEL` (a file in models/),
+    /// `AXON_FB_CTX`, `AXON_FB_TURNS` (40), `AXON_FB_N`, `AXON_FB_ROUNDS` (2,
+    /// configs interleaved). `chat::tests::forget_bench -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn forget_bench() {
+        forget_bench_with(crate::testutil::MODEL, 2048, 160);
+    }
+
+    #[test]
+    #[ignore]
+    fn forget_bench_7b() {
+        forget_bench_with("models/Qwen2.5-7B-Instruct-Q4_K_M.gguf", 8192, 400);
+    }
+
+    fn forget_bench_with(model: &str, ctx: usize, n: usize) {
+        let env = |k: &str, d: usize| -> usize {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d)
+        };
+        let model =
+            std::env::var("AXON_FB_MODEL").map_or(model.to_string(), |f| format!("models/{f}"));
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(&model);
+        eprintln!("FB model {}", path.display());
+        let m = crate::gguf::load_with(path.to_str().unwrap(), None).expect("load model");
+        let (ctx, turns, n, rounds) = (
+            env("AXON_FB_CTX", ctx),
+            env("AXON_FB_TURNS", 40),
+            env("AXON_FB_N", n),
+            env("AXON_FB_ROUNDS", 2),
+        );
+        eprintln!("FB ctx {ctx} turns {turns} n {n} rounds {rounds}");
+        let tok = Tokenizer::from_gguf(&m);
+        let topics = [
+            "Explain how a hash map handles collisions.",
+            "Write a short poem about the sea.",
+            "What are three tips for learning a new language?",
+            "Summarize the plot of Romeo and Juliet.",
+            "How does a CPU cache work?",
+            "Give me a recipe for pancakes.",
+            "Why is the sky blue?",
+            "Write a Python function that reverses a list.",
+            "What is the difference between TCP and UDP?",
+            "Describe a good morning routine.",
+        ];
+        let script: Vec<String> = (0..turns)
+            .map(|i| format!("{} (question {})", topics[i % topics.len()], i + 1))
+            .collect();
+        fn one<M: crate::lm::Lm>(
+            net: &M,
+            tok: &Tokenizer,
+            ctx: usize,
+            n: usize,
+            forget_to: f64,
+            script: &[String],
+        ) -> Vec<(usize, usize, f64, f64)> {
+            use std::time::Instant;
+            let mut chat = Chat::new(net, tok, Some(DEFAULT_SYSTEM), ctx).unwrap();
+            chat.max_reply = n;
+            chat.forget_to = forget_to;
+            let mut out = Vec::new();
+            for msg in script {
+                let t0 = Instant::now();
+                let mut ttft = None;
+                let r = chat
+                    .reply(msg, &|| false, &mut |_| {
+                        ttft.get_or_insert_with(|| t0.elapsed().as_secs_f64());
+                        Ok(())
+                    })
+                    .unwrap();
+                let ttft = ttft.unwrap_or_else(|| t0.elapsed().as_secs_f64());
+                out.push((r.dropped, r.prompt_tokens, r.prompt_secs, ttft));
+            }
+            out
+        }
+        let report = |name: &str, forget_to: f64, t: &[(usize, usize, f64, f64)]| {
+            let forgot = t.iter().filter(|x| x.0 > 0).count();
+            let first = t.iter().position(|x| x.0 > 0).unwrap_or(t.len());
+            let prefilled: usize = t.iter().map(|x| x.1).sum();
+            let after: usize = t[first..].iter().map(|x| x.1).sum();
+            let mut tt: Vec<f64> = t.iter().map(|x| x.3 * 1e3).collect();
+            let mean = tt.iter().sum::<f64>() / tt.len() as f64;
+            let mut full: Vec<f64> = t[first..].iter().map(|x| x.3 * 1e3).collect();
+            let fmean = full.iter().sum::<f64>() / full.len().max(1) as f64;
+            tt.sort_by(f64::total_cmp);
+            full.sort_by(f64::total_cmp);
+            let p95 = |v: &[f64]| {
+                v.get((v.len() * 95).div_ceil(100).max(1) - 1)
+                    .copied()
+                    .unwrap_or(0.0)
+            };
+            eprintln!(
+                "FB {name} forget_to {forget_to}: turns {} | forgot on {forgot} turns (first at turn {}) \
+                 | turns per re-prefill {:.2} | prefilled {prefilled} tok ({after} from the first forget on) \
+                 | ttft ms mean {mean:.1} p95 {:.1} | after the window filled: mean {fmean:.1} p95 {:.1}",
+                t.len(),
+                first + 1,
+                (t.len() - first) as f64 / forgot.max(1) as f64,
+                p95(&tt),
+                p95(&full),
+            );
+            for (i, x) in t.iter().enumerate() {
+                eprintln!(
+                    "FBT {name} {forget_to} turn {} dropped {} prompt {} prefill_ms {:.1} ttft_ms {:.1}",
+                    i + 1,
+                    x.0,
+                    x.1,
+                    x.2 * 1e3,
+                    x.3 * 1e3
+                );
+            }
+        };
+        let configs = [0.0, 0.5];
+        let gpu = crate::testutil::gpu();
+        match &gpu {
+            Some(g) => {
+                let km = crate::cuda::Kernels::module_for(g, &m).unwrap();
+                let net = crate::cuda::qwen2::CudaQwen2::new(g, &km, &m, ctx).unwrap();
+                for round in 0..rounds {
+                    for &f in &configs {
+                        report(
+                            &format!("cuda r{round}"),
+                            f,
+                            &one(&net, &tok, ctx, n, f, &script),
+                        );
+                    }
+                }
+            }
+            None => {
+                let net = Qwen2::new(&m);
+                for round in 0..rounds {
+                    for &f in &configs {
+                        report(
+                            &format!("cpu r{round}"),
+                            f,
+                            &one(&net, &tok, ctx, n, f, &script),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// Mistral v0.3 (`[INST]` control tokens, SentencePiece): llama.cpp's
@@ -1734,22 +1999,30 @@ mod tests {
         }
         // A full context drops the oldest exchange; the next one then
         // carries the system message.
+        // (Forgetting the fewest that make room, then down to half the
+        // context, several exchanges at once.)
         let mut chat = Chat::new(&net, &tok, Some("Be brief."), 96).unwrap();
-        chat.max_reply = 8;
-        let mut dropped = 0;
-        for msg in MSGS {
-            let r = chat.reply(msg, &|| false, &mut |_| Ok(())).unwrap();
-            dropped += r.dropped;
-            assert!(chat.hist.len() <= 96);
-            assert_eq!(chat.hist[0], bos);
-            let first = chat.frame_user(&chat.msgs[0].0, true);
-            assert_eq!(chat.hist[1..1 + first.len()], first[..]);
-            for (i, (m, _)) in chat.msgs.iter().enumerate().skip(1) {
-                let u = chat.frame_user(m, false);
-                assert_eq!(chat.hist[chat.turns[i]..chat.turns[i] + u.len()], u[..]);
+        for forget_to in [0.0, 0.5] {
+            chat.reset();
+            chat.max_reply = 8;
+            chat.forget_to = forget_to;
+            let mut dropped = 0;
+            for msg in MSGS.iter().cycle().take(8) {
+                let r = chat.reply(msg, &|| false, &mut |_| Ok(())).unwrap();
+                dropped += r.dropped;
+                assert!(chat.hist.len() <= 96);
+                assert_eq!(chat.hist[0], bos);
+                let first = chat.frame_user(&chat.msgs[0].0, true);
+                assert_eq!(chat.hist[1..1 + first.len()], first[..]);
+                for (i, (m, _)) in chat.msgs.iter().enumerate().skip(1) {
+                    let u = chat.frame_user(m, false);
+                    assert_eq!(chat.hist[chat.turns[i]..chat.turns[i] + u.len()], u[..]);
+                }
+                let prompt = &chat.hist[..chat.hist.len() - r.ids.len() - 1];
+                assert_eq!(r.ids, fresh(chat.net, prompt, 8, &chat.fr.stop), "{msg:?}");
             }
+            assert!(dropped > 0);
         }
-        assert!(dropped > 0);
         // Messages that fit only without the system message: refused before
         // anything is forgotten (the conversation stays as it was).
         let mut refused = 0;

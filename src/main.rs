@@ -62,9 +62,9 @@ usage:
                                             --verbose: the full identity tuple)
   axon logits <model.gguf> \"<prompt>\" [-k K]
                                             top-K next-token logits after the prompt
-  axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K]
-            [--draft-model PATH] [--device D] [--gpu-layers N] [--gpus L] [--kv T] [--session F]
-            [sampling flags]
+  axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [--forget-to F] [-n N]
+            [--draft K] [--draft-model PATH] [--device D] [--gpu-layers N] [--gpus L] [--kv T]
+            [--session F] [sampling flags]
                                             talk to an instruct model (sampled; --temp 0: greedy)
   axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--draft K] [--draft-model PATH]
             [--device D] [--gpu-layers N] [--kv T] [--alias NAME] [--max-tokens N] [--cors [ORIGIN]]
@@ -110,13 +110,20 @@ flags:
   --no-think  chat: qwen3: answer without reasoning first (by default it thinks, as ollama does)
   --ctx N     chat: context size in tokens (default: the model's, at most 8192; on cuda, if the
               whole model doesn't fit with it, less if at least half (or 4096) fits, else a
-              split); when the conversation outgrows it, the oldest exchanges are forgotten;
+              split); when the conversation outgrows it, the oldest exchanges are forgotten
+              (see --forget-to);
               serve: per request (default: the model's trained context if the whole model fits
               on the GPU(s) with it, else the longest that does if at least 4096; on the CPU, as
               much of it as fits in free RAM, at least 8192; a CPU/GPU split, at most 8192; a
               shorter one is said on stderr); an explicit N is never shortened;
               gen: place the model and size its cache for N tokens, as chat would (default: the
               prompt and -n), to see a long context's speed (it may split the model)
+  --forget-to F  chat: when the conversation outgrows --ctx, forget the oldest exchanges until
+              the rest (with the new message) fills at most F of the context (default 0.5; the
+              newest exchange stays unless the new message needs its room). Forgetting shifts positions, so what's kept is
+              prefilled again: half the context means the next turns append to the cache instead
+              of each prefilling nearly all of it again. min (or 0): forget only as many as make
+              room for the reply (every turn after the context fills prefills it again)
   --session F chat: keep the conversation in file F: loaded at start if it exists, saved after
               every reply (new positions appended). Its KV cache comes back from the file if
               it was made with this model, KV type, backend and GPU; else it is prefilled again
@@ -995,11 +1002,22 @@ const CHAT_HELP: &str = concat!(
     "  Ctrl-C (stop a reply; clear the line), Ctrl-D on an empty line (quit)",
 );
 
+/// `chat --forget-to`: a fraction of the context in [0, 1], or "min" (0).
+fn forget_to_flag(v: &str) -> Result<f64, String> {
+    if v == "min" {
+        return Ok(0.0);
+    }
+    v.parse::<f64>()
+        .ok()
+        .filter(|f| (0.0..=1.0).contains(f))
+        .ok_or_else(|| format!("--forget-to needs a fraction from 0 to 1 or min, got '{v}'"))
+}
+
 /// `chat` subcommand: args = [axon, chat, model, flags...]. Each line of
 /// stdin is a message; on a terminal it's an interactive session.
 fn run_chat(args: &[String]) -> std::io::Result<()> {
-    const CHAT_USAGE: &str = "usage: axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K] \
-         [--draft-model PATH] [--device D] [--gpu-layers N] [--gpus L] [--kv T] [--session FILE]";
+    const CHAT_USAGE: &str = "usage: axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [--forget-to F] [-n N] \
+         [--draft K] [--draft-model PATH] [--device D] [--gpu-layers N] [--gpus L] [--kv T] [--session FILE]";
     let Some(path) = args.get(2).filter(|p| !p.starts_with('-')) else {
         fail(CHAT_USAGE);
     };
@@ -1007,6 +1025,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     let mut no_think = false;
     let mut ctx = None;
     let mut max_reply = usize::MAX;
+    let mut forget_to = chat::FORGET_TO;
     let mut max_draft = None;
     let mut draft_path = None;
     let mut device = device_env();
@@ -1041,6 +1060,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
             f,
             "--system"
                 | "--ctx"
+                | "--forget-to"
                 | "-n"
                 | "--draft"
                 | "--draft-model"
@@ -1057,6 +1077,8 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         };
         if f == "--system" {
             system = Some(v.clone());
+        } else if f == "--forget-to" {
+            forget_to = forget_to_flag(v).unwrap_or_else(|e| fail(&e));
         } else if f == "--session" {
             if v.is_empty() {
                 fail("--session needs a path");
@@ -1183,6 +1205,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     }
     conv.no_think = no_think;
     conv.max_reply = max_reply;
+    conv.forget_to = forget_to;
     conv.max_draft = max_draft;
     conv.drafter = drafter.map(|d| Box::new(d) as Box<dyn draft::Draft>);
     // chat samples by default (as ollama does): greedy replies loop.
