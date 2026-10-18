@@ -903,7 +903,13 @@ fn engine(
             let plan = n
                 .free_bytes()
                 .ok()
-                .and_then(|free| paged_plan(n, kv, want.max(ctx), slots, free as usize));
+                .and_then(|free| paged_plan(n, kv, want.max(ctx), slots, free as usize, !fit));
+            if plan.is_none() && !fit && o.log {
+                eprintln!(
+                    "axon serve: KV pages for one {ctx}-token sequence (--ctx) don't fit beside \
+                     the model: slots reserved at the full context instead"
+                );
+            }
             // Tests: fewer pages (the cap within them).
             plan.map(|p| match o.kv_pages {
                 Some(k) => PagedPlan {
@@ -1033,10 +1039,12 @@ fn engine(
     let served = batch.as_ref().map_or(ctx, |b| b.ctx.min(ctx));
     let banner = match (&batch, &paged) {
         (Some(b), Some(p)) => format!(
-            "{kvs}, ctx {served}{drafts}, KV: {} pages x {PAGE_TOKENS} = {} tokens over up to {} \
-             slots (cap {served})",
+            "{kvs}, ctx {served}{drafts}, every layer on the GPU, KV: {} pages x {PAGE_TOKENS} = \
+             {} tokens ({} sequences of the full {served} at once) over up to {} slots \
+             (cap {served})",
             p.pages,
             p.pages * PAGE_TOKENS,
+            p.pages / served.div_ceil(PAGE_TOKENS).max(1),
             b.slots
         ),
         (Some(b), None) => format!("{kvs}, ctx {served}{drafts}, {} requests at once", b.slots),
@@ -1216,21 +1224,39 @@ fn paged_plan(
     want: usize,
     slots: usize,
     free: usize,
+    exact: bool,
+) -> Option<PagedPlan> {
+    let fixed = |cap: usize| n.serve_paged_bytes(kv, slots, cap, 0);
+    paged_plan_with(want, slots, free, exact, fixed, n.page_bytes(kv))
+}
+
+/// `paged_plan` over a model of the memory: `fixed(cap)` the pool's and
+/// the view's bytes besides the pages at a cap, `page` a page's bytes.
+/// `exact` (--ctx given): the cap is `want` or there's no paged plan (the
+/// caller falls back to reserved slots, one request at a time at worst):
+/// at least one full sequence of --ctx always fits.
+fn paged_plan_with(
+    want: usize,
+    slots: usize,
+    free: usize,
+    exact: bool,
+    fixed: impl Fn(usize) -> usize,
+    page: usize,
 ) -> Option<PagedPlan> {
     if slots < 2 {
         return None;
     }
     let pages = |cap: usize| {
-        let fixed = n.serve_paged_bytes(kv, slots, cap, 0);
-        let budget = free.checked_sub(fixed + POOL_SPARE)?;
-        Some((budget / n.page_bytes(kv)).min(slots * cap.div_ceil(PAGE_TOKENS)))
+        let budget = free.checked_sub(fixed(cap) + POOL_SPARE)?;
+        Some((budget / page).min(slots * cap.div_ceil(PAGE_TOKENS)))
     };
     // The longest cap the pages hold (a longer cap's scratch leaves fewer
     // pages): the whole context, else a whole number of pages.
     let holds = |cap: usize| pages(cap).is_some_and(|p| p * PAGE_TOKENS >= cap);
-    let cap = match holds(want) {
-        true => want,
-        false => {
+    let cap = match (holds(want), exact) {
+        (true, _) => want,
+        (false, true) => return None,
+        (false, false) => {
             let (mut lo, mut hi) = (0, want / PAGE_TOKENS);
             while lo < hi {
                 let mid = (lo + hi).div_ceil(2);

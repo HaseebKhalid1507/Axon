@@ -1818,6 +1818,32 @@ fn serve_shrunk_pool() {
     batched_vs_solo(a, &batch_bodies(false), "shrunk pool, no max_tokens");
 }
 
+/// `paged_plan_with` over a 14B-shaped model (q8 page 6.2 MiB, 0.6 GiB of
+/// scratch at a 32k cap, less at a shorter one): with --ctx 32768 the
+/// pages don't hold one full sequence, so no paged plan (reserved slots:
+/// --ctx is never shortened); without --ctx the cap shrinks to the pages';
+/// a 7B-shaped one holds the full 32k several times over.
+#[test]
+fn paged_plan_honours_ctx() {
+    const MIB: usize = 1 << 20;
+    let scratch = |cap: usize| 300 * MIB + cap * 9 * 1024;
+    let (page14, free14) = (6 * MIB + MIB / 5, 2560 * MIB);
+    assert!(super::paged_plan_with(32768, 16, free14, true, scratch, page14).is_none());
+    let p = super::paged_plan_with(32768, 16, free14, false, scratch, page14).unwrap();
+    assert!(
+        p.cap < 32768 && p.pages * 64 >= p.cap && p.cap % 64 == 0,
+        "{} {}",
+        p.cap,
+        p.pages
+    );
+    let p = super::paged_plan_with(p.cap, 16, free14, true, scratch, page14).unwrap();
+    assert!(p.pages * 64 >= p.cap);
+    let (page7, free7) = (7 * MIB / 2, 6400 * MIB);
+    let p = super::paged_plan_with(32768, 16, free7, true, scratch, page7).unwrap();
+    assert_eq!(p.cap, 32768);
+    assert!(p.pages >= 3 * 512, "{}", p.pages);
+}
+
 /// A paged pool whose pages hold less than the context (`kv_pages`: 16
 /// pages = 1024 tokens of a 2048 context): the context served is what the
 /// pages hold, and a longer prompt's 400 says why and what to do.
