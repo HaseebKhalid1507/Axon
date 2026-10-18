@@ -15,6 +15,7 @@ use crate::gguf::Model;
 use crate::hybrid::{HybridCache, HybridQwen2, Placement};
 use crate::kv::KvType;
 use crate::model::{KvCache, Qwen2};
+use crate::moe::{MoeCache, MoeQwen3};
 use crate::sample::{self, Cand, CandSpec};
 
 /// A causal language model with a KV cache of its own type. Positions are
@@ -359,6 +360,9 @@ pub enum Backend<'a> {
     Hybrid(Box<HybridQwen2<'a, 'static>>),
     /// Layers split across GPUs (--gpus 0,1; leaked as for `Cuda`).
     Pipeline(Box<PipelineQwen2<'static>>),
+    /// A mixture-of-experts model: attention on the GPU, experts on the
+    /// CPU (leaked as for `Cuda`).
+    Moe(Box<MoeQwen3<'a, 'static>>),
 }
 
 pub enum BackendCache {
@@ -366,6 +370,7 @@ pub enum BackendCache {
     Cuda(Box<CudaCache<'static>>),
     Hybrid(Box<HybridCache<'static>>),
     Pipeline(Box<PipelineCache<'static>>),
+    Moe(Box<MoeCache<'static>>),
 }
 
 /// How `Backend::new_capped` places a model beyond `new`'s arguments.
@@ -457,11 +462,11 @@ impl<'a> Backend<'a> {
             crate::model::moe_check_ram(m)?;
             return Ok(Backend::Cpu(Qwen2::new(m)));
         }
-        if crate::model::is_moe(m) {
-            return Err(crate::model::moe_gpu_refusal(m));
-        }
         if gpu_layers == Some(0) {
             return Err("--gpu-layers 0 is --device cpu".into());
+        }
+        if crate::model::moe_cpu_only(m) {
+            return Err(crate::model::moe_gpu_refusal(m));
         }
         // f32 isn't offered on the GPU: f16 there (as always).
         let ckv = match kv {
@@ -486,6 +491,17 @@ impl<'a> Backend<'a> {
             );
         }
         let ordinal = gpus.map_or(0, |l| l[0]);
+        if crate::model::is_moe(m) {
+            return Self::moe(
+                m,
+                ordinal,
+                gpu_layers,
+                if long { max_ctx } else { split_ctx },
+                ckv,
+                fit,
+                !p.defer_q6k8,
+            );
+        }
         let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open_device(ordinal)?));
         let module: &'static Module<'static> = Box::leak(Box::new(Kernels::module_for(gpu, m)?));
         let whole_gpu = |ctx: usize, fit: bool| {
@@ -558,6 +574,36 @@ impl<'a> Backend<'a> {
         Ok(Backend::Hybrid(Box::new(h)))
     }
 
+    /// A qwen3moe model on GPU `ordinal`: attention, routers and head there
+    /// (a `max_ctx` cache of type `kv`, shorter with `fit` if need be), the
+    /// experts on the CPU. There's no layer split: --gpu-layers below the
+    /// layer count is refused. `q6k8`: make the Q6_K prefill copy now
+    /// (`Placing::defer_q6k8` off), as the whole-GPU model.
+    fn moe(
+        m: &'a Model,
+        ordinal: usize,
+        gpu_layers: Option<usize>,
+        max_ctx: usize,
+        kv: CacheKv,
+        fit: bool,
+        q6k8: bool,
+    ) -> Result<Backend<'a>, String> {
+        let n = crate::hybrid::block_count(m)?;
+        if gpu_layers.is_some_and(|g| g < n) {
+            return Err(format!(
+                "{}: a mixture-of-experts model doesn't split by layers (--gpu-layers): its \
+                 attention runs on the GPU and its experts on the CPU",
+                m.arch
+            ));
+        }
+        let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open_device(ordinal)?));
+        let module: &'static Module<'static> = Box::leak(Box::new(Kernels::module_for(gpu, m)?));
+        let mm: &'static Module<'static> = Box::leak(Box::new(Kernels::moe_module(gpu)?));
+        let n = MoeQwen3::new(gpu, module, mm, m, max_ctx, kv, fit, q6k8)?;
+        eprintln!("moe:         {}", n.describe(n.ctx));
+        Ok(Backend::Moe(Box::new(n)))
+    }
+
     /// The model's layers over the GPUs `ordinals` (in order), a
     /// `max_ctx`-token cache of type `kv` (`PipelineQwen2::new`: an even
     /// split if it fits; AXON_PP_CUTS sets it), told on stderr. With
@@ -597,6 +643,7 @@ impl<'a> Backend<'a> {
             Backend::Cuda(n) => n.ctx,
             Backend::Hybrid(n) => n.ctx,
             Backend::Pipeline(n) => n.ctx(),
+            Backend::Moe(n) => n.ctx,
         }
     }
 }
@@ -617,6 +664,10 @@ macro_rules! dispatch {
                 let ($n, $c) = (&**$n, &mut **$c);
                 $body
             }
+            (Backend::Moe($n), BackendCache::Moe($c)) => {
+                let ($n, $c) = (&**$n, &mut **$c);
+                $body
+            }
             _ => panic!("a cache of another backend"),
         }
     };
@@ -631,6 +682,7 @@ impl Lm for Backend<'_> {
             Backend::Cuda(n) => n.vocab(),
             Backend::Hybrid(n) => n.vocab(),
             Backend::Pipeline(n) => n.vocab(),
+            Backend::Moe(n) => n.vocab(),
         }
     }
 
@@ -640,6 +692,7 @@ impl Lm for Backend<'_> {
             Backend::Cuda(n) => BackendCache::Cuda(Box::new(n.new_cache(max_ctx))),
             Backend::Hybrid(n) => BackendCache::Hybrid(Box::new(n.new_cache(max_ctx))),
             Backend::Pipeline(n) => BackendCache::Pipeline(Box::new(n.new_cache(max_ctx))),
+            Backend::Moe(n) => BackendCache::Moe(Box::new(n.new_cache(max_ctx))),
         }
     }
 
@@ -693,6 +746,7 @@ impl Lm for Backend<'_> {
             Backend::Cuda(n) => n.prefill_batch(),
             Backend::Hybrid(n) => n.prefill_batch(),
             Backend::Pipeline(n) => n.prefill_batch(),
+            Backend::Moe(n) => n.prefill_batch(),
         }
     }
 }

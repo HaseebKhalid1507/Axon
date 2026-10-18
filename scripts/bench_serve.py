@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 """Single-stream serving benchmark: `axon gen` vs `axon serve` vs llama-server vs ollama (stdlib only).
 
-    bench_serve.py ROUNDS MODEL_TAG AXON_BIN [--engines gen,axon,llama,ollama] [--n 128]
+    bench_serve.py ROUNDS MODEL_TAG AXON_BIN [--engines=gen,axon,llama,ollama] [--n=128]
+                   [--models=DIR] [--llama-server=PATH]
+
+--models=DIR: the model files (else $AXON_MODELS, else models/ in this repo).
+--llama-server=PATH: llama.cpp's llama-server (else $LLAMA_SERVER, else `llama-server` on PATH).
 
 Run through the GPU queue: axon-q gpu timeout 2400 ... (it loads models on the GPU).
 Per round, per engine (interleaved; medians reported):
@@ -18,8 +22,9 @@ opts = dict(a[2:].split('=', 1) for a in sys.argv[1:] if a.startswith('--') and 
 ROUNDS, TAG, AXON = int(args[0]), args[1], args[2]
 ENGINES = opts.get('engines', 'gen,axon,llama,ollama').split(',')
 N = int(opts.get('n', '128'))
-M = '/home/haseeb/Projects/axon/models/'
-LS = '/home/haseeb/Projects/llama.cpp/build-cuda/bin/llama-server'
+REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+M = opts.get('models', os.environ.get('AXON_MODELS', os.path.join(REPO, 'models'))).rstrip('/') + '/'
+LS = opts.get('llama-server', os.environ.get('LLAMA_SERVER', 'llama-server'))
 MODELS = {'0.5B': ('qwen2.5-0.5b-q4_k_m.gguf', 'axon-oracle'), '7B': ('Qwen2.5-7B-Instruct-Q4_K_M.gguf', 'axon-q7'),
           '1.5B': ('qwen2.5-1.5b-instruct-q4_k_m.gguf', 'axon-q15'), 'q3-8B': ('Qwen3-8B-Q4_K_M.gguf', 'axon-qwen3-8b')}
 FILE, OLLAMA = MODELS[TAG]

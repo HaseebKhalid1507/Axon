@@ -207,15 +207,56 @@ struct LayerW {
     k: Mat,
     v: Mat,
     o: Mat,
-    gate: Mat,
-    up: Mat,
-    down: Mat,
+    ffn: Ffn,
     /// gemma3: the norms of the attention and FFN outputs (rmsnorm_add).
     post_attn: Option<usize>,
     post_ffn: Option<usize>,
     /// gemma3 local layer: its window (0: global), and the local RoPE
     /// table (`CudaCache::rope_swa`) instead of the global one.
     win: u32,
+}
+
+/// A layer's feed-forward block on the GPU (model.rs `Ffn`'s mirror).
+#[derive(Clone, Copy)]
+enum Ffn {
+    Dense {
+        gate: Mat,
+        up: Mat,
+        down: Mat,
+    },
+    /// qwen3moe: the router ([n_expert][dim] f32, moe.cu `moe_logits`) at
+    /// this offset in floats into `vecs`; the experts run on the CPU
+    /// (`crate::moe`).
+    Moe {
+        router: usize,
+    },
+}
+
+impl LayerW {
+    /// The gated FFN's gate, up and down (every path but `crate::moe`'s).
+    fn dense(&self) -> (&Mat, &Mat, &Mat) {
+        match &self.ffn {
+            Ffn::Dense { gate, up, down } => (gate, up, down),
+            Ffn::Moe { .. } => panic!("a mixture-of-experts layer has no dense FFN"),
+        }
+    }
+
+    /// Its matrices: q, k, v, o, then gate, up, down (dense).
+    fn mats(&self) -> Vec<Mat> {
+        let mut v = vec![self.q, self.k, self.v, self.o];
+        if let Ffn::Dense { gate, up, down } = self.ffn {
+            v.extend([gate, up, down]);
+        }
+        v
+    }
+
+    fn mats_mut(&mut self) -> Vec<&mut Mat> {
+        let mut v = vec![&mut self.q, &mut self.k, &mut self.v, &mut self.o];
+        if let Ffn::Dense { gate, up, down } = &mut self.ffn {
+            v.extend([gate, up, down]);
+        }
+        v
+    }
 }
 
 /// How a cache stores keys and values (`CudaQwen2::kv`).
@@ -336,7 +377,7 @@ const TK_THREADS: u32 = 512;
 /// slot. `Last` (batched passes only): the logits of the pass's last token
 /// alone, into the batch scratch's logits row 0 (`Lm::prefill_logits`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub(super) enum Head {
+pub(crate) enum Head {
     No = 0,
     Argmax = 1,
     Sample = 2,
@@ -414,6 +455,8 @@ pub struct CudaQwen2<'g> {
     output_norm: usize,
     /// Layers first..n_layers (index i is layer first + i).
     layers: Vec<LayerW>,
+    /// qwen3moe (`crate::moe`): experts, top k, expert ffn; None if dense.
+    pub(crate) moe: Option<crate::model::MoeDims>,
     /// Attention splits (grid y of attn_split; the q8 cache and GPUs
     /// without tensor cores), and the most blocks of an attn_blk launch.
     max_split: usize,
@@ -506,6 +549,10 @@ pub struct CudaCache<'g> {
     /// Captured steps, by `Head`: without the output head, with the
     /// argmax, with sampling candidates.
     graph: [[Option<Graph<'g>>; 3]; 2],
+    /// Bumped whenever `graph` is dropped because an address it holds
+    /// changed (`drop_graphs`): graphs kept elsewhere for this cache
+    /// (`crate::moe`'s, in `moe::MoeBufs`) check it before a replay.
+    pub(crate) graph_gen: u64,
     /// Scratch for batched passes (prefill, verify).
     b: Option<batch::BatchBufs<'g>>,
     /// Scratch for sampling candidates (`samp_upload`).
@@ -552,7 +599,7 @@ impl<'g> CudaCache<'g> {
     /// Read and write the KV rows through `tab` (None: plain). The captured
     /// steps hold the table's address: they go.
     #[cfg(test)]
-    pub(super) fn set_tab(&mut self, tab: Option<DevBuf<'g>>) {
+    pub(crate) fn set_tab(&mut self, tab: Option<DevBuf<'g>>) {
         // Table entries are pages of the whole buffer: no view offset too
         // (a view's row0 can be 0, slot 0's: the flag, not row0).
         assert!(tab.is_none() || !self.view, "a paged cache is no slot view");
@@ -563,7 +610,14 @@ impl<'g> CudaCache<'g> {
         );
         self.tab = tab.map(Rc::new);
         self.tab0 = 0;
+        self.drop_graphs();
+    }
+
+    /// Drop the captured steps (an address they hold changed), and any
+    /// kept elsewhere (`graph_gen`).
+    pub(crate) fn drop_graphs(&mut self) {
         self.graph = Default::default();
+        self.graph_gen += 1;
     }
 }
 
@@ -746,6 +800,34 @@ impl<'g> CudaQwen2<'g> {
             SPLIT_BATCH,
             fit,
             q6k8,
+            false,
+            &mut |_| {},
+        )
+    }
+
+    /// The attention, norms, routers, embedding and head of a qwen3moe
+    /// model (`crate::moe`: the experts run on the CPU), as `with_kv_q6k8`.
+    pub(crate) fn with_kv_moe(
+        gpu: &'g Gpu,
+        module: &'g Module<'g>,
+        m: &Model,
+        max_ctx: usize,
+        kv: CacheKv,
+        fit: bool,
+        q6k8: bool,
+    ) -> Result<CudaQwen2<'g>, String> {
+        Self::build(
+            gpu,
+            module,
+            m,
+            max_ctx,
+            0,
+            None,
+            kv,
+            SPLIT_BATCH,
+            fit,
+            q6k8,
+            true,
             &mut |_| {},
         )
     }
@@ -783,6 +865,7 @@ impl<'g> CudaQwen2<'g> {
             split_batch,
             false,
             true,
+            false,
             uploaded,
         )
     }
@@ -814,6 +897,7 @@ impl<'g> CudaQwen2<'g> {
             batch,
             false,
             true,
+            false,
             &mut |_| {},
         )
     }
@@ -831,7 +915,7 @@ impl<'g> CudaQwen2<'g> {
         kv: CacheKv,
         batch: usize,
     ) -> Result<u64, String> {
-        let (net, plan) = Self::plan(gpu, module, m, first, Some(last), kv, batch)?;
+        let (net, plan) = Self::plan(gpu, module, m, first, Some(last), kv, batch, false)?;
         Ok(net.vram_want(&plan, max_ctx))
     }
 
@@ -848,9 +932,10 @@ impl<'g> CudaQwen2<'g> {
         split_batch: usize,
         fit: bool,
         q6k8: bool,
+        moe: bool,
         uploaded: &mut dyn FnMut(&'m Tensor),
     ) -> Result<CudaQwen2<'g>, String> {
-        let (mut net, plan) = Self::plan(gpu, module, m, first, last, kv, split_batch)?;
+        let (mut net, plan) = Self::plan(gpu, module, m, first, last, kv, split_batch, moe)?;
         // Check the whole plan fits before allocating any of it.
         let free = gpu.info()?.free_bytes;
         let mut ctx = max_ctx;
@@ -1020,7 +1105,7 @@ impl<'g> CudaQwen2<'g> {
     fn q6k8_bytes(&self) -> usize {
         self.layers
             .iter()
-            .flat_map(|l| [l.q, l.k, l.v, l.o, l.gate, l.up, l.down])
+            .flat_map(|l| l.mats())
             .filter(|m| m.qt == Q6_K)
             .map(|m| m.rows * m.cols / 256 * Q6K8_BYTES)
             .sum()
@@ -1052,15 +1137,7 @@ impl<'g> CudaQwen2<'g> {
         let w8 = self.gpu.alloc(bytes)?;
         let mut off = 0;
         for l in self.layers.iter_mut() {
-            for m in [
-                &mut l.q,
-                &mut l.k,
-                &mut l.v,
-                &mut l.o,
-                &mut l.gate,
-                &mut l.up,
-                &mut l.down,
-            ] {
+            for m in l.mats_mut() {
                 if m.qt != Q6_K {
                     continue;
                 }
@@ -1116,15 +1193,7 @@ impl<'g> CudaQwen2<'g> {
     #[cfg(test)]
     pub(super) fn drop_q6k8(&mut self) -> Result<(), String> {
         for l in self.layers.iter_mut() {
-            for m in [
-                &mut l.q,
-                &mut l.k,
-                &mut l.v,
-                &mut l.o,
-                &mut l.gate,
-                &mut l.up,
-                &mut l.down,
-            ] {
+            for m in l.mats_mut() {
                 m.c8 = None;
             }
         }
@@ -1144,7 +1213,7 @@ impl<'g> CudaQwen2<'g> {
         kv: CacheKv,
         split_batch: usize,
     ) -> Result<u64, String> {
-        let (net, plan) = Self::plan(gpu, module, m, first, None, kv, split_batch)?;
+        let (net, plan) = Self::plan(gpu, module, m, first, None, kv, split_batch, false)?;
         Ok(net.vram_want(&plan, max_ctx))
     }
 
@@ -1156,7 +1225,7 @@ impl<'g> CudaQwen2<'g> {
         m: &Model,
         kv: CacheKv,
     ) -> Result<impl Fn(usize) -> u64 + use<'g>, String> {
-        let (net, plan) = Self::plan(gpu, module, m, 0, None, kv, SPLIT_BATCH)?;
+        let (net, plan) = Self::plan(gpu, module, m, 0, None, kv, SPLIT_BATCH, false)?;
         let fixed = plan.fixed();
         Ok(move |ctx| net.vram_want_fixed(fixed, ctx))
     }
@@ -1173,6 +1242,7 @@ impl<'g> CudaQwen2<'g> {
 
     /// The model with nothing allocated yet (caches of type `kv`), and what
     /// to upload.
+    #[allow(clippy::too_many_arguments)]
     fn plan<'m>(
         gpu: &'g Gpu,
         module: &'g Module<'g>,
@@ -1181,9 +1251,11 @@ impl<'g> CudaQwen2<'g> {
         last: Option<usize>,
         kv: CacheKv,
         split_batch: usize,
+        moe: bool,
     ) -> Result<(CudaQwen2<'g>, Plan<'m>), String> {
         crate::model::check_supported(m).map_err(|e| e.to_string())?;
-        if crate::model::is_moe(m) {
+        let moe_dims = crate::model::moe_dims(m);
+        if moe_dims.is_some() && !(moe && first == 0 && last.is_none()) {
             return Err(crate::model::moe_gpu_refusal(m));
         }
         let gemma = m.arch == "gemma3";
@@ -1306,11 +1378,17 @@ impl<'g> CudaQwen2<'g> {
                 mat("attn_v.weight")?,
                 mat("attn_output.weight")?,
             );
-            let (gate, up, down) = (
-                mat("ffn_gate.weight")?,
-                mat("ffn_up.weight")?,
-                mat("ffn_down.weight")?,
-            );
+            let ffn = match moe_dims {
+                None => Ffn::Dense {
+                    gate: mat("ffn_gate.weight")?,
+                    up: mat("ffn_up.weight")?,
+                    down: mat("ffn_down.weight")?,
+                },
+                // The router as in the file, [n_expert][dim] (moe_logits).
+                Some(_) => Ffn::Moe {
+                    router: push_vec(vec_f32(m, tensor(m, &name("ffn_gate_inp.weight"))?)),
+                },
+            };
             let mut opt = |s: &str| tensor_opt(m, &name(s)).map(|t| push_vec(vec_f32(m, t)));
             let (bq, bk, bv) = (opt("attn_q.bias"), opt("attn_k.bias"), opt("attn_v.bias"));
             let (qn, kn) = (opt("attn_q_norm.weight"), opt("attn_k_norm.weight"));
@@ -1363,9 +1441,7 @@ impl<'g> CudaQwen2<'g> {
                 k,
                 v,
                 o,
-                gate,
-                up,
-                down,
+                ffn,
                 post_attn,
                 post_ffn,
                 win,
@@ -1374,8 +1450,13 @@ impl<'g> CudaQwen2<'g> {
         let total = uploads
             .last()
             .map_or(0, |&(t, off)| off + t.n_bytes as usize);
-        let ffn = layers[0].gate.rows;
-        if layers.iter().any(|l| l.gate.rows != ffn) {
+        // A MoE model has no dense FFN here (no scratch for one).
+        let ffn_rows = |l: &LayerW| match l.ffn {
+            Ffn::Dense { gate, .. } => gate.rows,
+            Ffn::Moe { .. } => 0,
+        };
+        let ffn = ffn_rows(&layers[0]);
+        if layers.iter().any(|l| ffn_rows(l) != ffn) {
             return Err("layers of different FFN sizes aren't supported on the GPU".into());
         }
 
@@ -1444,6 +1525,7 @@ impl<'g> CudaQwen2<'g> {
             output,
             output_norm,
             layers,
+            moe: moe_dims,
             max_split,
             att_gy: 0,
             tc_attn: module.mma() && head_dim != 256,
@@ -1621,12 +1703,7 @@ impl<'g> CudaQwen2<'g> {
         let l: usize = self
             .layers
             .iter()
-            .map(|l| {
-                [l.q, l.k, l.v, l.o, l.gate, l.up, l.down]
-                    .iter()
-                    .map(Mat::bytes)
-                    .sum::<usize>()
-            })
+            .map(|l| l.mats().iter().map(Mat::bytes).sum::<usize>())
             .sum();
         l + if head { self.output.bytes() } else { 0 }
     }
@@ -1796,6 +1873,7 @@ impl<'g> CudaQwen2<'g> {
                 _ => Some(g.host_alloc(self.dim * f)?),
             },
             graph: [[None, None, None], [None, None, None]],
+            graph_gen: 0,
             b: match batch {
                 true => Some(self.batch_bufs(self.batch_for(att_ctx), att_ctx)?),
                 false => None,
@@ -1824,7 +1902,6 @@ impl<'g> CudaQwen2<'g> {
         cmb64: bool,
         on_launch: &mut dyn FnMut(&'static str, usize) -> Result<(), String>,
     ) -> Result<(), String> {
-        let g = self.gpu;
         let f = &self.f;
         // {token, pos}: the sampling step's come with its S, in one copy.
         let params = match head {
@@ -1834,7 +1911,7 @@ impl<'g> CudaQwen2<'g> {
         let w = |mt: &Mat| self.weights.arg_at(mt.off);
         let vec = |off: usize| self.vecs.arg_at(off * 4);
         let null = Arg::Ptr(0);
-        let (dim, hd, kvd) = (self.dim, self.head_dim, self.kv_dim());
+        let dim = self.dim;
         let want_k = |n: usize| Arg::I32(n.is_multiple_of(256) as i32);
         let blocks = |n: usize, per: usize| (n.div_ceil(per) as u32, 1, 1);
         let gemv_block = (GEMV_THREADS, 1, 1);
@@ -1850,6 +1927,157 @@ impl<'g> CudaQwen2<'g> {
         // per layer (P[pos] < max_ctx: `step` checks; q8: int8 rows and
         // their scales, kvf 2 kv_dim floats), part_* n_heads * att_parts
         // splits, logits vocab; matrices are whole in the arena.
+        unsafe {
+            self.enqueue_input(c, params, on_launch)?;
+            for (li, l) in self.layers.iter().enumerate() {
+                self.enqueue_attn(c, li, params, cmb64, on_launch)?;
+                let norm = |off: usize| {
+                    self.run(
+                        norm_f,
+                        (1, 1, 1),
+                        (1024, 1, 1),
+                        norm_smem,
+                        &[
+                            c.x.arg(),
+                            vec(off),
+                            Arg::F32(self.eps),
+                            Arg::I32(dim as i32),
+                            want_k(dim),
+                            c.act.arg(),
+                            null,
+                        ],
+                    )
+                };
+                // gemma3: x += rmsnorm(W act) (the post-attention norm),
+                // the product through hid (free until gate_up).
+                let post_add = |y: &DevBuf, off: usize| {
+                    self.run(
+                        &f.rmsnorm_add,
+                        (1, 1, 1),
+                        (1024, 1, 1),
+                        0,
+                        &[
+                            y.arg(),
+                            vec(off),
+                            Arg::F32(self.eps),
+                            Arg::I32(dim as i32),
+                            c.x.arg(),
+                        ],
+                    )
+                };
+                let (gate, up, down) = l.dense();
+                norm(l.ffn_norm)?;
+                on_launch("rmsnorm", 0)?;
+                if self.gemma.is_some() {
+                    // gemma3: GeGLU. Before gate_up4 (its SiLU is fused):
+                    // the 1B Q4_K_M's gate/up rows are 792 bytes (Q5_0, 1152 values).
+                    self.run(
+                        &f.gate_up_gelu,
+                        (self.ffn as u32, 1, 1),
+                        gemv_block,
+                        0,
+                        &[
+                            Arg::I32(gate.qt as i32),
+                            w(gate),
+                            Arg::U64(gate.rb as u64),
+                            Arg::I32(up.qt as i32),
+                            w(up),
+                            Arg::U64(up.rb as u64),
+                            Arg::I32(self.ffn as i32),
+                            Arg::I32(dim as i32),
+                            c.act.arg(),
+                            c.hid.arg(),
+                        ],
+                    )?;
+                } else if gate.qt == up.qt
+                    && gate.rb < self.gate_up4_row
+                    && self.ffn.is_multiple_of(2)
+                {
+                    self.run(
+                        &f.gate_up4,
+                        ((self.ffn / 2) as u32, 1, 1),
+                        gemv_block,
+                        0,
+                        &[
+                            Arg::I32(gate.qt as i32),
+                            w(gate),
+                            Arg::U64(gate.rb as u64),
+                            w(up),
+                            Arg::U64(up.rb as u64),
+                            Arg::I32(dim as i32),
+                            c.act.arg(),
+                            c.hid.arg(),
+                        ],
+                    )?;
+                } else {
+                    self.run(
+                        &f.gate_up,
+                        (self.ffn as u32, 1, 1),
+                        gemv_block,
+                        0,
+                        &[
+                            Arg::I32(gate.qt as i32),
+                            w(gate),
+                            Arg::U64(gate.rb as u64),
+                            Arg::I32(up.qt as i32),
+                            w(up),
+                            Arg::U64(up.rb as u64),
+                            Arg::I32(self.ffn as i32),
+                            Arg::I32(dim as i32),
+                            c.act.arg(),
+                            c.hid.arg(),
+                        ],
+                    )?;
+                }
+                on_launch("gate_up", gate.bytes() + up.bytes())?;
+                self.run(
+                    &f.quantize,
+                    blocks(self.ffn, 256),
+                    (32, 1, 1),
+                    0,
+                    &[
+                        c.hid.arg(),
+                        Arg::I32(self.ffn as i32),
+                        want_k(self.ffn),
+                        c.act.arg(),
+                    ],
+                )?;
+                on_launch("quantize", 0)?;
+                match l.post_ffn {
+                    // gemma3: x += rmsnorm(W act), the product through hid
+                    // (quantized into act already).
+                    Some(pf) => {
+                        self.gemv(down, &c.act, null, 0, &c.hid)?;
+                        on_launch("down", down.bytes())?;
+                        post_add(&c.hid, pf)?;
+                        on_launch("post_norm", 0)?;
+                    }
+                    None => {
+                        self.gemv(down, &c.act, null, 1, &c.x)?;
+                        on_launch("down", down.bytes())?;
+                    }
+                }
+            }
+            if head != Head::No {
+                self.enqueue_head(c, head, on_launch)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// A step's start (enqueue's, and `crate::moe`'s): the embedding of
+    /// the token (if first == 0) and this position's RoPE table(s).
+    pub(super) fn enqueue_input(
+        &self,
+        c: &CudaCache,
+        params: Arg,
+        on_launch: &mut dyn FnMut(&'static str, usize) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let (g, f) = (self.gpu, &self.f);
+        let w = |mt: &Mat| self.weights.arg_at(mt.off);
+        let (dim, hd) = (self.dim, self.head_dim);
+        let blocks = |n: usize, per: usize| (n.div_ceil(per) as u32, 1, 1);
+        // SAFETY (every launch): as `enqueue`'s.
         unsafe {
             // Without the embedding, x was copied in before the step and
             // rope_table is the first kernel: no PDL overlap to ask for.
@@ -1919,301 +2147,100 @@ impl<'g> CudaQwen2<'g> {
                 )?;
                 on_launch("rope", 0)?;
             }
-            for (li, l) in self.layers.iter().enumerate() {
-                // This layer's RoPE table (gemma3's local layers: their own).
-                let rope = match l.win {
-                    0 => c.rope.arg(),
-                    _ => c.rope_swa.arg(),
-                };
-                let norm = |off: usize| {
-                    self.run(
-                        norm_f,
-                        (1, 1, 1),
-                        (1024, 1, 1),
-                        norm_smem,
-                        &[
-                            c.x.arg(),
-                            vec(off),
-                            Arg::F32(self.eps),
-                            Arg::I32(dim as i32),
-                            want_k(dim),
-                            c.act.arg(),
-                            null,
-                        ],
-                    )
-                };
-                norm(l.attn_norm)?;
-                on_launch("rmsnorm", 0)?;
-                // Row pairs: query and key RoPE pairs, value rows two by two.
-                let qd = self.q_dim;
-                let qk_norm = l.qn.is_some();
-                let items = qd / 2 + kvd / 2 + kvd / 2;
-                let bias = |b: Option<usize>| b.map_or(null, vec);
-                let kva = self.kv_args(c, li);
-                let tab = c.tab_at(0);
-                // q8: keys and values to kvf, which attn_split_q8 stores.
-                let (qkv_f, kout, kraw) = match c.mode {
-                    CacheKv::F16 => (&f.qkv_rope, [kva[0], kva[1]], c.kraw.arg()),
-                    CacheKv::Q8 { .. } => (
-                        &f.qkv_rope_f32,
-                        [c.kvf.arg(), c.kvf.arg_at(kvd * 4)],
-                        c.kvf.arg(),
-                    ),
-                };
-                self.run(
-                    qkv_f,
-                    (items as u32, 1, 1),
-                    gemv_block,
-                    0,
-                    &[
-                        Arg::I32(l.q.qt as i32),
-                        w(&l.q),
-                        Arg::U64(l.q.rb as u64),
-                        Arg::I32(l.k.qt as i32),
-                        w(&l.k),
-                        Arg::U64(l.k.rb as u64),
-                        Arg::I32(l.v.qt as i32),
-                        w(&l.v),
-                        Arg::U64(l.v.rb as u64),
-                        bias(l.bq),
-                        bias(l.bk),
-                        bias(l.bv),
-                        Arg::I32(qd as i32),
-                        Arg::I32(kvd as i32),
-                        Arg::I32(hd as i32),
-                        Arg::I32(dim as i32),
-                        c.act.arg(),
-                        rope,
-                        params,
-                        c.q.arg(),
-                        kout[0],
-                        kout[1],
-                        // Raw q and k for the attention's norms (qwen3):
-                        // kraw, or kvf's keys on the q8 cache.
-                        if qk_norm { kraw } else { null },
-                        tab,
-                    ],
-                )?;
-                on_launch("qkv", l.q.bytes() + l.k.bytes() + l.v.bytes())?;
-                let tc = self.tc_attn;
-                let nblk_max = Self::nblk_max(c.max_ctx);
-                let mut args = vec![c.q.arg()];
-                args.extend_from_slice(&kva);
-                let attn = match c.mode {
-                    CacheKv::F16 if self.gemma.is_some() && c.tab.is_some() => &f.attn_split_w_pg,
-                    CacheKv::F16 if self.gemma.is_some() => &f.attn_split_w,
-                    CacheKv::F16 if tc => &f.attn_blk,
-                    CacheKv::F16 => &f.attn_split,
-                    CacheKv::Q8 { .. } => {
-                        args.push(c.kvf.arg());
-                        let q8 = self.q8_fns(c.mode);
-                        if tc { &q8.attn_blk } else { &q8.attn_split }
-                    }
-                };
-                args.extend_from_slice(&[
-                    params,
-                    Arg::I32(self.n_heads as i32),
-                    Arg::I32(self.n_kv_heads as i32),
-                    if tc {
-                        Arg::F32(att_pre(hd))
-                    } else {
-                        Arg::F32(1.0 / (hd as f32).sqrt())
-                    },
-                    Arg::I32(if tc { nblk_max } else { self.max_split } as i32),
-                    c.part_o.arg(),
-                    c.part_ml.arg(),
-                ]);
-                if c.mode == CacheKv::F16 {
-                    // qwen3's norms (attn_split_t's QkNorm), kc_out = K.
-                    args.extend_from_slice(&[c.kraw.arg(), bias(l.qn)]);
-                    args.extend_from_slice(&[bias(l.kn), Arg::F32(self.eps), rope, kva[0]]);
-                    if self.gemma.is_some() {
-                        args.push(Arg::I32(l.win as i32));
-                    }
-                } else {
-                    args.push(bias(l.ksh));
-                    args.extend_from_slice(&[bias(l.qn), bias(l.kn)]);
-                    args.extend_from_slice(&[Arg::F32(self.eps), c.rope.arg()]);
-                }
-                // (gemma3's plain-cache kernel takes no table: gemma.cu.)
-                if self.gemma.is_none() || c.tab.is_some() {
-                    args.push(tab);
-                }
-                // attn_blk: at most max_split warps per kv head (each takes
-                // blocks y, y + max_split, ..), whatever the position.
-                let (gy, bx) = match tc {
-                    true => (
-                        match self.att_gy {
-                            0 => self.max_split,
-                            g => g,
-                        }
-                        .min(nblk_max),
-                        32 * att_nw(hd, c.mode != CacheKv::F16),
-                    ),
-                    false => (self.max_split, ATT_TILE as u32),
-                };
-                self.run(
-                    attn,
-                    (self.n_kv_heads as u32, gy as u32, 1),
-                    (bx, 1, 1),
-                    0,
-                    &args,
-                )?;
-                on_launch("attn", 0)?;
-                // attn_cmb past CMB64_BLKS blocks of positions (attn_cmb256's
-                // fold is latency-bound at long positions; below, its
-                // in-block quantization skips attn_cmb's ~2 us counter path).
-                let cmb64 = cmb64 && tc && self.gemma.is_none();
-                debug_assert!(
-                    c.att.len() >= qd * 4 + cmb_cnt_bytes(qd),
-                    "attn_cmb's counters after att"
-                );
-                let mut cargs = vec![
-                    c.part_o.arg(),
-                    c.part_ml.arg(),
-                    params,
-                    Arg::I32(qd as i32),
-                    Arg::I32(hd as i32),
-                    Arg::I32(if tc { nblk_max } else { self.max_split } as i32),
-                    want_k(qd),
+        }
+        Ok(())
+    }
+
+    /// The output norm, head and argmax (or sampling candidates) of a
+    /// step (enqueue's tail, and `crate::moe`'s).
+    pub(super) fn enqueue_head(
+        &self,
+        c: &CudaCache,
+        head: Head,
+        on_launch: &mut dyn FnMut(&'static str, usize) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let f = &self.f;
+        let vec = |off: usize| self.vecs.arg_at(off * 4);
+        let null = Arg::Ptr(0);
+        let dim = self.dim;
+        let want_k = |n: usize| Arg::I32(n.is_multiple_of(256) as i32);
+        let (norm_f, norm_smem) = if self.norm2 && dim <= NORM2_MAX {
+            (&f.rmsnorm_quant_v2, (dim * 4) as u32)
+        } else {
+            (&f.rmsnorm_quant, 0)
+        };
+        // SAFETY (every launch): as `enqueue`'s.
+        unsafe {
+            self.run(
+                norm_f,
+                (1, 1, 1),
+                (1024, 1, 1),
+                norm_smem,
+                &[
+                    c.x.arg(),
+                    vec(self.output_norm),
+                    Arg::F32(self.eps),
+                    Arg::I32(dim as i32),
+                    want_k(dim),
                     c.act.arg(),
-                    c.att.arg(),
-                ];
-                let (combine, per) = if self.gemma.is_some() {
-                    cargs.push(Arg::I32(l.win as i32));
-                    (&f.attn_combine_w, 256)
-                } else if cmb64 {
-                    cargs.push(c.att.arg_at(qd * 4));
-                    (&f.attn_cmb, 64)
-                } else if tc {
-                    (&f.attn_cmb256, 256)
-                } else {
-                    (&f.attn_combine, 256)
-                };
-                self.run(combine, blocks(qd, per), (per as u32, 1, 1), 0, &cargs)?;
-                on_launch("combine", 0)?;
-                // gemma3: x += rmsnorm(W act) (the post-attention norm),
-                // the product through hid (free until gate_up).
-                let post_add = |y: &DevBuf, off: usize| {
-                    self.run(
-                        &f.rmsnorm_add,
-                        (1, 1, 1),
-                        (1024, 1, 1),
-                        0,
-                        &[
-                            y.arg(),
-                            vec(off),
-                            Arg::F32(self.eps),
-                            Arg::I32(dim as i32),
-                            c.x.arg(),
-                        ],
-                    )
-                };
-                match l.post_attn {
-                    Some(pa) => {
-                        self.gemv(&l.o, &c.act, null, 0, &c.hid)?;
-                        on_launch("wo", l.o.bytes())?;
-                        post_add(&c.hid, pa)?;
-                        on_launch("post_norm", 0)?;
-                    }
-                    None => {
-                        self.gemv(&l.o, &c.act, null, 1, &c.x)?;
-                        on_launch("wo", l.o.bytes())?;
-                    }
-                }
-                norm(l.ffn_norm)?;
-                on_launch("rmsnorm", 0)?;
-                if self.gemma.is_some() {
-                    // gemma3: GeGLU. Before gate_up4 (its SiLU is fused):
-                    // the 1B Q4_K_M's gate/up rows are 792 bytes (Q5_0, 1152 values).
-                    self.run(
-                        &f.gate_up_gelu,
-                        (self.ffn as u32, 1, 1),
-                        gemv_block,
-                        0,
-                        &[
-                            Arg::I32(l.gate.qt as i32),
-                            w(&l.gate),
-                            Arg::U64(l.gate.rb as u64),
-                            Arg::I32(l.up.qt as i32),
-                            w(&l.up),
-                            Arg::U64(l.up.rb as u64),
-                            Arg::I32(self.ffn as i32),
-                            Arg::I32(dim as i32),
-                            c.act.arg(),
-                            c.hid.arg(),
-                        ],
-                    )?;
-                } else if l.gate.qt == l.up.qt
-                    && l.gate.rb < self.gate_up4_row
-                    && self.ffn.is_multiple_of(2)
-                {
-                    self.run(
-                        &f.gate_up4,
-                        ((self.ffn / 2) as u32, 1, 1),
-                        gemv_block,
-                        0,
-                        &[
-                            Arg::I32(l.gate.qt as i32),
-                            w(&l.gate),
-                            Arg::U64(l.gate.rb as u64),
-                            w(&l.up),
-                            Arg::U64(l.up.rb as u64),
-                            Arg::I32(dim as i32),
-                            c.act.arg(),
-                            c.hid.arg(),
-                        ],
-                    )?;
-                } else {
-                    self.run(
-                        &f.gate_up,
-                        (self.ffn as u32, 1, 1),
-                        gemv_block,
-                        0,
-                        &[
-                            Arg::I32(l.gate.qt as i32),
-                            w(&l.gate),
-                            Arg::U64(l.gate.rb as u64),
-                            Arg::I32(l.up.qt as i32),
-                            w(&l.up),
-                            Arg::U64(l.up.rb as u64),
-                            Arg::I32(self.ffn as i32),
-                            Arg::I32(dim as i32),
-                            c.act.arg(),
-                            c.hid.arg(),
-                        ],
-                    )?;
-                }
-                on_launch("gate_up", l.gate.bytes() + l.up.bytes())?;
+                    null,
+                ],
+            )?;
+            on_launch("rmsnorm", 0)?;
+            self.gemv(&self.output, &c.act, null, 0, &c.logits)?;
+            on_launch("head", self.output.bytes())?;
+            if head == Head::Sample {
+                let s = c.samp.as_ref().expect("samp_upload before a sampling step");
+                self.samp_tail(s, c.logits.arg(), self.vocab, 1, 0, 0, true)?;
+                on_launch("sample", 0)?;
+            } else {
                 self.run(
-                    &f.quantize,
-                    blocks(self.ffn, 256),
-                    (32, 1, 1),
+                    &f.argmax,
+                    (1, 1, 1),
+                    (1024, 1, 1),
                     0,
-                    &[
-                        c.hid.arg(),
-                        Arg::I32(self.ffn as i32),
-                        want_k(self.ffn),
-                        c.act.arg(),
-                    ],
+                    &[c.logits.arg(), Arg::I32(self.vocab as i32), c.best.arg()],
                 )?;
-                on_launch("quantize", 0)?;
-                match l.post_ffn {
-                    // gemma3: x += rmsnorm(W act), the product through hid
-                    // (quantized into act already).
-                    Some(pf) => {
-                        self.gemv(&l.down, &c.act, null, 0, &c.hid)?;
-                        on_launch("down", l.down.bytes())?;
-                        post_add(&c.hid, pf)?;
-                        on_launch("post_norm", 0)?;
-                    }
-                    None => {
-                        self.gemv(&l.down, &c.act, null, 1, &c.x)?;
-                        on_launch("down", l.down.bytes())?;
-                    }
-                }
+                on_launch("argmax", 0)?;
             }
-            if head != Head::No {
+        }
+        Ok(())
+    }
+
+    /// One layer's attention sub-block of a step (enqueue's per-layer
+    /// first half, and `crate::moe`'s): the attention norm, q/k/v and RoPE,
+    /// the attention, and x += W_o att (gemma3: its post-norm too). Layer
+    /// `li` here; `params` the step's {token, pos}.
+    pub(super) fn enqueue_attn(
+        &self,
+        c: &CudaCache,
+        li: usize,
+        params: Arg,
+        cmb64: bool,
+        on_launch: &mut dyn FnMut(&'static str, usize) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let f = &self.f;
+        let l = &self.layers[li];
+        let w = |mt: &Mat| self.weights.arg_at(mt.off);
+        let vec = |off: usize| self.vecs.arg_at(off * 4);
+        let null = Arg::Ptr(0);
+        let (dim, hd, kvd) = (self.dim, self.head_dim, self.kv_dim());
+        let want_k = |n: usize| Arg::I32(n.is_multiple_of(256) as i32);
+        let blocks = |n: usize, per: usize| (n.div_ceil(per) as u32, 1, 1);
+        let gemv_block = (GEMV_THREADS, 1, 1);
+        let (norm_f, norm_smem) = if self.norm2 && dim <= NORM2_MAX {
+            (&f.rmsnorm_quant_v2, (dim * 4) as u32)
+        } else {
+            (&f.rmsnorm_quant, 0)
+        };
+        // SAFETY (every launch): as `enqueue`'s.
+        unsafe {
+            // This layer's RoPE table (gemma3's local layers: their own).
+            let rope = match l.win {
+                0 => c.rope.arg(),
+                _ => c.rope_swa.arg(),
+            };
+            let norm = |off: usize| {
                 self.run(
                     norm_f,
                     (1, 1, 1),
@@ -2221,30 +2248,192 @@ impl<'g> CudaQwen2<'g> {
                     norm_smem,
                     &[
                         c.x.arg(),
-                        vec(self.output_norm),
+                        vec(off),
                         Arg::F32(self.eps),
                         Arg::I32(dim as i32),
                         want_k(dim),
                         c.act.arg(),
                         null,
                     ],
-                )?;
-                on_launch("rmsnorm", 0)?;
-                self.gemv(&self.output, &c.act, null, 0, &c.logits)?;
-                on_launch("head", self.output.bytes())?;
-                if head == Head::Sample {
-                    let s = c.samp.as_ref().expect("samp_upload before a sampling step");
-                    self.samp_tail(s, c.logits.arg(), self.vocab, 1, 0, 0, true)?;
-                    on_launch("sample", 0)?;
+                )
+            };
+            norm(l.attn_norm)?;
+            on_launch("rmsnorm", 0)?;
+            // Row pairs: query and key RoPE pairs, value rows two by two.
+            let qd = self.q_dim;
+            let qk_norm = l.qn.is_some();
+            let items = qd / 2 + kvd / 2 + kvd / 2;
+            let bias = |b: Option<usize>| b.map_or(null, vec);
+            let kva = self.kv_args(c, li);
+            let tab = c.tab_at(0);
+            // q8: keys and values to kvf, which attn_split_q8 stores.
+            let (qkv_f, kout, kraw) = match c.mode {
+                CacheKv::F16 => (&f.qkv_rope, [kva[0], kva[1]], c.kraw.arg()),
+                CacheKv::Q8 { .. } => (
+                    &f.qkv_rope_f32,
+                    [c.kvf.arg(), c.kvf.arg_at(kvd * 4)],
+                    c.kvf.arg(),
+                ),
+            };
+            self.run(
+                qkv_f,
+                (items as u32, 1, 1),
+                gemv_block,
+                0,
+                &[
+                    Arg::I32(l.q.qt as i32),
+                    w(&l.q),
+                    Arg::U64(l.q.rb as u64),
+                    Arg::I32(l.k.qt as i32),
+                    w(&l.k),
+                    Arg::U64(l.k.rb as u64),
+                    Arg::I32(l.v.qt as i32),
+                    w(&l.v),
+                    Arg::U64(l.v.rb as u64),
+                    bias(l.bq),
+                    bias(l.bk),
+                    bias(l.bv),
+                    Arg::I32(qd as i32),
+                    Arg::I32(kvd as i32),
+                    Arg::I32(hd as i32),
+                    Arg::I32(dim as i32),
+                    c.act.arg(),
+                    rope,
+                    params,
+                    c.q.arg(),
+                    kout[0],
+                    kout[1],
+                    // Raw q and k for the attention's norms (qwen3):
+                    // kraw, or kvf's keys on the q8 cache.
+                    if qk_norm { kraw } else { null },
+                    tab,
+                ],
+            )?;
+            on_launch("qkv", l.q.bytes() + l.k.bytes() + l.v.bytes())?;
+            let tc = self.tc_attn;
+            let nblk_max = Self::nblk_max(c.max_ctx);
+            let mut args = vec![c.q.arg()];
+            args.extend_from_slice(&kva);
+            let attn = match c.mode {
+                CacheKv::F16 if self.gemma.is_some() && c.tab.is_some() => &f.attn_split_w_pg,
+                CacheKv::F16 if self.gemma.is_some() => &f.attn_split_w,
+                CacheKv::F16 if tc => &f.attn_blk,
+                CacheKv::F16 => &f.attn_split,
+                CacheKv::Q8 { .. } => {
+                    args.push(c.kvf.arg());
+                    let q8 = self.q8_fns(c.mode);
+                    if tc { &q8.attn_blk } else { &q8.attn_split }
+                }
+            };
+            args.extend_from_slice(&[
+                params,
+                Arg::I32(self.n_heads as i32),
+                Arg::I32(self.n_kv_heads as i32),
+                if tc {
+                    Arg::F32(att_pre(hd))
                 } else {
-                    self.run(
-                        &f.argmax,
-                        (1, 1, 1),
-                        (1024, 1, 1),
-                        0,
-                        &[c.logits.arg(), Arg::I32(self.vocab as i32), c.best.arg()],
-                    )?;
-                    on_launch("argmax", 0)?;
+                    Arg::F32(1.0 / (hd as f32).sqrt())
+                },
+                Arg::I32(if tc { nblk_max } else { self.max_split } as i32),
+                c.part_o.arg(),
+                c.part_ml.arg(),
+            ]);
+            if c.mode == CacheKv::F16 {
+                // qwen3's norms (attn_split_t's QkNorm), kc_out = K.
+                args.extend_from_slice(&[c.kraw.arg(), bias(l.qn)]);
+                args.extend_from_slice(&[bias(l.kn), Arg::F32(self.eps), rope, kva[0]]);
+                if self.gemma.is_some() {
+                    args.push(Arg::I32(l.win as i32));
+                }
+            } else {
+                args.push(bias(l.ksh));
+                args.extend_from_slice(&[bias(l.qn), bias(l.kn)]);
+                args.extend_from_slice(&[Arg::F32(self.eps), c.rope.arg()]);
+            }
+            // (gemma3's plain-cache kernel takes no table: gemma.cu.)
+            if self.gemma.is_none() || c.tab.is_some() {
+                args.push(tab);
+            }
+            // attn_blk: at most max_split warps per kv head (each takes
+            // blocks y, y + max_split, ..), whatever the position.
+            let (gy, bx) = match tc {
+                true => (
+                    match self.att_gy {
+                        0 => self.max_split,
+                        g => g,
+                    }
+                    .min(nblk_max),
+                    32 * att_nw(hd, c.mode != CacheKv::F16),
+                ),
+                false => (self.max_split, ATT_TILE as u32),
+            };
+            self.run(
+                attn,
+                (self.n_kv_heads as u32, gy as u32, 1),
+                (bx, 1, 1),
+                0,
+                &args,
+            )?;
+            on_launch("attn", 0)?;
+            // attn_cmb past CMB64_BLKS blocks of positions (attn_cmb256's
+            // fold is latency-bound at long positions; below, its
+            // in-block quantization skips attn_cmb's ~2 us counter path).
+            let cmb64 = cmb64 && tc && self.gemma.is_none();
+            debug_assert!(
+                c.att.len() >= qd * 4 + cmb_cnt_bytes(qd),
+                "attn_cmb's counters after att"
+            );
+            let mut cargs = vec![
+                c.part_o.arg(),
+                c.part_ml.arg(),
+                params,
+                Arg::I32(qd as i32),
+                Arg::I32(hd as i32),
+                Arg::I32(if tc { nblk_max } else { self.max_split } as i32),
+                want_k(qd),
+                c.act.arg(),
+                c.att.arg(),
+            ];
+            let (combine, per) = if self.gemma.is_some() {
+                cargs.push(Arg::I32(l.win as i32));
+                (&f.attn_combine_w, 256)
+            } else if cmb64 {
+                cargs.push(c.att.arg_at(qd * 4));
+                (&f.attn_cmb, 64)
+            } else if tc {
+                (&f.attn_cmb256, 256)
+            } else {
+                (&f.attn_combine, 256)
+            };
+            self.run(combine, blocks(qd, per), (per as u32, 1, 1), 0, &cargs)?;
+            on_launch("combine", 0)?;
+            // gemma3: x += rmsnorm(W act) (the post-attention norm),
+            // the product through hid (free until gate_up).
+            let post_add = |y: &DevBuf, off: usize| {
+                self.run(
+                    &f.rmsnorm_add,
+                    (1, 1, 1),
+                    (1024, 1, 1),
+                    0,
+                    &[
+                        y.arg(),
+                        vec(off),
+                        Arg::F32(self.eps),
+                        Arg::I32(dim as i32),
+                        c.x.arg(),
+                    ],
+                )
+            };
+            match l.post_attn {
+                Some(pa) => {
+                    self.gemv(&l.o, &c.act, null, 0, &c.hid)?;
+                    on_launch("wo", l.o.bytes())?;
+                    post_add(&c.hid, pa)?;
+                    on_launch("post_norm", 0)?;
+                }
+                None => {
+                    self.gemv(&l.o, &c.act, null, 1, &c.x)?;
+                    on_launch("wo", l.o.bytes())?;
                 }
             }
         }
@@ -2899,6 +3088,7 @@ impl<'g> Lm for CudaQwen2<'g> {
 
 mod batch;
 pub(crate) mod kvio;
+pub(crate) mod moe;
 #[cfg(test)]
 mod paged_tests;
 pub(crate) mod pages;

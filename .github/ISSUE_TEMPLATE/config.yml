@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Contributor contract (AGENTS.md)
+    url: https://github.com/HaseebKhalid1507/Axon/blob/main/AGENTS.md
+    about: Read this before claiming an issue or opening a PR, whether you're a person or an agent.
+  - name: Report a security vulnerability
+    url: https://github.com/HaseebKhalid1507/Axon/security/advisories/new
+    about: Please report security problems privately, not as a public issue. See SECURITY.md.

@@ -607,7 +607,7 @@ impl<'g> CudaQwen2<'g> {
         };
         if *at != now {
             *at = now;
-            c.graph = Default::default();
+            c.drop_graphs();
         }
         Ok(())
     }
