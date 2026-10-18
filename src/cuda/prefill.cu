@@ -2202,7 +2202,7 @@ struct GvW<QT_Q4_0> : GvW32<QT_Q4_0> {};
 template <int QT, int NF>
 __device__ __forceinline__ void gemvm_t(const u8* w, u64 rb, int rows, int n, const u8* act,
                                         u64 astride, int nb, const float* bias, int mode,
-                                        float* out, u64 ostride) {
+                                        float* out, u64 ostride, int blk) {
 #if __CUDA_ARCH__ >= 800
     const int KQ = QT == QT_Q4_K || QT == QT_Q5_K || QT == QT_Q6_K;
     const bool K45 = QT == QT_Q4_K || QT == QT_Q5_K; // (d, dmin) types
@@ -2213,7 +2213,7 @@ __device__ __forceinline__ void gemvm_t(const u8* w, u64 rb, int rows, int n, co
     __shared__ float rs[2][CH][16];
     __shared__ float ts[2][CH][NT];
     int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, g = lane >> 2, t = lane & 3;
-    int r0 = blockIdx.x * 16;
+    int r0 = blk * 16;
     const u8* rws[2] = {w + (u64)min(r0 + g, rows - 1) * rb, w + (u64)min(r0 + g + 8, rows - 1) * rb};
     u64 np = act_np(n);
     int nblk = n / (KQ ? 256 : 32);
@@ -2389,11 +2389,11 @@ __device__ __forceinline__ void gemvm_t(const u8* w, u64 rb, int rows, int n, co
 }
 
 #define GEMVM(NAME, QT, NF)                                                                       \
-    extern "C" __global__ void __launch_bounds__(GV_THREADS) NAME(                                \
+    extern "C" __global__ void __launch_bounds__(GV_THREADS) NAME(                                                       \
         const u8* __restrict__ w, u64 rb, int rows, int n, const u8* __restrict__ act,           \
         u64 astride, int nb, const float* __restrict__ bias, int mode, float* __restrict__ out,  \
         u64 ostride) {                                                                            \
-        gemvm_t<QT, NF>(w, rb, rows, n, act, astride, nb, bias, mode, out, ostride);              \
+        gemvm_t<QT, NF>(w, rb, rows, n, act, astride, nb, bias, mode, out, ostride, blockIdx.x);  \
     }
 GEMVM(gemvm8_q4_k, QT_Q4_K, 1)
 GEMVM(gemvm8_q6_k, QT_Q6_K, 1)
@@ -2413,6 +2413,40 @@ GEMVM(gemvm32_q8_0, QT_Q8_0, 4)
 GEMVM(gemvm32_q5_0, QT_Q5_0, 4)
 GEMVM(gemvm32_q5_k, QT_Q5_K, 4)
 GEMVM(gemvm32_q4_0, QT_Q4_0, 4)
+
+// gemvmx_*: gemvm over up to three matrices of one type and width in one
+// launch (q, k, v of a layer; gate and up), each with its own rows, bias
+// and output: block b runs matrix j's block b - (blocks of the ones
+// before), as its own launch would (the same outputs, so the same bits).
+// Fills the GPU where one matrix alone can't (the 7B's 512-row k and v:
+// 32 blocks on 128 SMs). rows2 0: two matrices.
+#define GEMVMX(NAME, QT, NF)                                                                      \
+    extern "C" __global__ void __launch_bounds__(GV_THREADS) NAME(                                                       \
+        const u8* __restrict__ w0, const u8* __restrict__ w1, const u8* __restrict__ w2,          \
+        int rows0, int rows1, int rows2, const float* __restrict__ b0,                           \
+        const float* __restrict__ b1, const float* __restrict__ b2, float* __restrict__ o0,       \
+        float* __restrict__ o1, float* __restrict__ o2, u64 rb, int n,                           \
+        const u8* __restrict__ act, u64 astride, int nb, u64 ostride) {                           \
+        int b = blockIdx.x, n0 = (rows0 + 15) / 16, n1 = (rows1 + 15) / 16;                     \
+        if (b < n0)                                                                               \
+            gemvm_t<QT, NF>(w0, rb, rows0, n, act, astride, nb, b0, 0, o0, ostride, b);           \
+        else if (b < n0 + n1)                                                                     \
+            gemvm_t<QT, NF>(w1, rb, rows1, n, act, astride, nb, b1, 0, o1, ostride, b - n0);      \
+        else                                                                                      \
+            gemvm_t<QT, NF>(w2, rb, rows2, n, act, astride, nb, b2, 0, o2, ostride, b - n0 - n1); \
+    }
+GEMVMX(gemvmx8_q4_k, QT_Q4_K, 1)
+GEMVMX(gemvmx8_q6_k, QT_Q6_K, 1)
+GEMVMX(gemvmx8_q8_0, QT_Q8_0, 1)
+GEMVMX(gemvmx8_q5_0, QT_Q5_0, 1)
+GEMVMX(gemvmx8_q5_k, QT_Q5_K, 1)
+GEMVMX(gemvmx8_q4_0, QT_Q4_0, 1)
+GEMVMX(gemvmx16_q4_k, QT_Q4_K, 2)
+GEMVMX(gemvmx16_q6_k, QT_Q6_K, 2)
+GEMVMX(gemvmx16_q8_0, QT_Q8_0, 2)
+GEMVMX(gemvmx16_q5_0, QT_Q5_0, 2)
+GEMVMX(gemvmx16_q5_k, QT_Q5_K, 2)
+GEMVMX(gemvmx16_q4_0, QT_Q4_0, 2)
 
 // Test: for every half h and a few x, fmul(h2f(h), x) == fmul(f16_to_f32(h),
 // x) bit for bit (the products convert block scales with the hardware cvt,
