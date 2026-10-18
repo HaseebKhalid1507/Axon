@@ -498,17 +498,17 @@ pub struct CudaQwen2<'g> {
     /// swiglu in its epilogue (prefill.cu gemm2s_q4_k_gu; AXON_GATE_UP=0
     /// turns it off): the same bits as separate products.
     pub(super) gate_up_fused: bool,
-    /// gemm2s_q4_k_gu also quantizes hid for the down product (the last
-    /// block of each 256-row block and token tile runs quantize_b's
-    /// quant_warp on it; ffn % 256 == 0), so quantize_b doesn't run;
-    /// AXON_GU_QUANT=0 turns it off (the same bits).
-    pub(super) gu_quant: bool,
     /// Decode steps normalize with rmsnorm_quant_v2 (dim <= NORM2_MAX) and
     /// run gate/up rows under gate_up4_row bytes through gate_up4
     /// (GATE_UP4_ROW); AXON_DEC_NORM2=0 / AXON_DEC_GU4=0 turn them off
     /// (tests compare, and force gate_up4 on wider rows: the same bits).
     pub(super) norm2: bool,
     pub(super) gate_up4_row: usize,
+    /// gemm2s_q4_k_gu also quantizes hid for the down product (the last
+    /// block of each 256-row block and token tile runs quantize_b's
+    /// quant_warp on it; ffn % 256 == 0), so quantize_b doesn't run;
+    /// AXON_GU_QUANT=0 turns it off (the same bits).
+    pub(super) gu_quant: bool,
 }
 
 /// What `CudaQwen2` keeps per sequence: the KV cache, activations, logits,
@@ -1550,12 +1550,12 @@ impl<'g> CudaQwen2<'g> {
             ctx: 0,
             swiglu_epi: false,
             gate_up_fused: std::env::var("AXON_GATE_UP").map_or(true, |v| v != "0"),
-            gu_quant: std::env::var("AXON_GU_QUANT").map_or(true, |v| v != "0"),
             norm2: std::env::var("AXON_DEC_NORM2").map_or(true, |v| v != "0"),
             gate_up4_row: match std::env::var("AXON_DEC_GU4") {
                 Ok(v) if v == "0" => 0,
                 _ => GATE_UP4_ROW,
             },
+            gu_quant: std::env::var("AXON_GU_QUANT").map_or(true, |v| v != "0"),
         };
         if let CacheKv::Q8 { group } = kv {
             if group == 0 {
