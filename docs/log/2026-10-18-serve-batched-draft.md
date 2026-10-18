@@ -1,4 +1,4 @@
-# Batched speculative decoding in `axon serve` (r14 stage 1)  (PR pending number; kill rule PENDING)
+# Batched speculative decoding in `axon serve` (r14 stage 1)  (PR #90; kill rule PENDING)
 
 Branch `feat/serve-batched-draft`, spec `specs/r14-batched-spec.md` (stage 1: greedy, plain drafter pool,
 goodput-gated K). Status: **kill rule PENDING** — the bella timing job 1018-101159-4afd is queued (bella in
