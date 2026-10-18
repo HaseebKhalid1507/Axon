@@ -296,6 +296,33 @@ struct Shared {
     slot_idle: Option<Duration>,
     metrics: Arc<ops::Metrics>,
     log: bool,
+    /// Tests: `Server::hold`.
+    #[cfg(test)]
+    hold: Hold,
+}
+
+/// Tests (`Server::hold`): while on, a connection thread that has answered
+/// a request waits here, between its response and whatever follows it, so
+/// a test can look at the server (/metrics) at that instant.
+#[cfg(test)]
+#[derive(Default)]
+struct Hold(std::sync::Mutex<bool>, std::sync::Condvar);
+
+#[cfg(test)]
+impl Hold {
+    fn set(&self, on: bool) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = on;
+        self.1.notify_all();
+    }
+
+    /// Wait while on (at most 30 s: a test that fails while holding must
+    /// not wedge its threads forever).
+    fn here(&self) {
+        let g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = self
+            .1
+            .wait_timeout_while(g, Duration::from_secs(30), |on| *on);
+    }
 }
 
 /// `Shared::waiting`: (connection id, a handle to shut it down), oldest first.
@@ -1340,6 +1367,12 @@ impl Server {
     pub fn conns(&self) -> usize {
         self.sh.conns.load(Ordering::Relaxed)
     }
+
+    /// While on, every connection thread stops right after it has written
+    /// a response (`Hold`), until it is turned off.
+    pub fn hold(&self, on: bool) {
+        self.sh.hold.set(on);
+    }
 }
 
 impl Server {
@@ -1452,6 +1485,8 @@ pub fn start(o: Opts) -> io::Result<Server> {
         slot_idle: o.slot_idle_ms.map(Duration::from_millis),
         metrics,
         log: o.log,
+        #[cfg(test)]
+        hold: Hold::default(),
     });
     let sh2 = sh.clone();
     let accept = std::thread::Builder::new()
@@ -1587,6 +1622,8 @@ fn connection(s: TcpStream, sh: &Shared) {
                     let body = error_body(path.as_deref(), &e);
                     let _ = c.respond(e.status, "application/json", body.as_bytes(), false, &[]);
                 }
+                #[cfg(test)]
+                sh.hold.here();
                 let route = refused.map_or("other", |(p, _)| ops::route_label(&p));
                 sh.metrics.request(route, e.status);
                 // Evictable while it lingers: it serves nothing more.
@@ -1599,6 +1636,8 @@ fn connection(s: TcpStream, sh: &Shared) {
                 c.head_only = req.method == "HEAD";
                 c.status = 0;
                 let r = route(&mut c, &req, sh);
+                #[cfg(test)]
+                sh.hold.here();
                 if c.status != 0 {
                     sh.metrics.request(ops::route_label(&req.path), c.status);
                 }
