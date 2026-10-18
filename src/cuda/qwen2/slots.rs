@@ -1284,19 +1284,27 @@ mod tests {
                 v => v,
             };
             // AXON_STEP_KM: the kernel builds to run in turn per depth, e.g.
-            // "plain,zfill,plain,zfill" (zfill: -DAXON_G2_ZFILL, prefill.cu g2_copy).
+            // "plain,AXON_G2_ZFILL,plain,AXON_G2_ZFILL" (prefill.cu g2_copy).
             let kms: Vec<String> = std::env::var("AXON_STEP_KM")
                 .unwrap_or("plain".into())
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .collect();
-            let plain = Kernels::module(&g).unwrap();
-            let zfill = kms.iter().any(|k| k == "zfill").then(|| {
-                let opts = ["--std=c++17", "--ftz=false", "-DAXON_G2_ZFILL"];
-                crate::cuda::Module::load(&g, crate::cuda::KERNELS, &opts)
-                    .unwrap()
-                    .0
-            });
+            // Each entry "plain", or defines joined by '+' (e.g. "GVM_PF2+GVM_MINB=4").
+            let mods: Vec<(String, crate::cuda::Module)> = kms
+                .iter()
+                .map(|k| {
+                    let mut opts = vec!["--std=c++17".to_string(), "--ftz=false".to_string()];
+                    if k != "plain" {
+                        opts.extend(k.split('+').map(|d| format!("-D{d}")));
+                    }
+                    let o: Vec<&str> = opts.iter().map(|s| s.as_str()).collect();
+                    let m = crate::cuda::Module::load(&g, crate::cuda::KERNELS, &o)
+                        .unwrap()
+                        .0;
+                    (k.clone(), m)
+                })
+                .collect();
             let time = |f: &mut dyn FnMut()| {
                 f();
                 let mut v: Vec<f64> = (0..5)
@@ -1315,10 +1323,7 @@ mod tests {
             let gi = g.info().unwrap();
             eprintln!("C curve: {name} ({}), {} ({} SMs)", m.arch, gi.name, gi.sms);
             for (&depth, kname) in depths.iter().flat_map(|d| kms.iter().map(move |k| (d, k))) {
-                let km = match kname.as_str() {
-                    "zfill" => zfill.as_ref().unwrap(),
-                    _ => &plain,
-                };
+                let km = &mods.iter().find(|m| &m.0 == kname).unwrap().1;
                 eprintln!("kernels: {kname}");
                 let ctx = (depth + 64).next_multiple_of(64);
                 let mut net = CudaQwen2::new(&g, km, &m, ctx).unwrap();
