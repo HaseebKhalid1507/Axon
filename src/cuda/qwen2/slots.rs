@@ -1283,6 +1283,8 @@ mod tests {
                 v if v.is_empty() => vec![0],
                 v => v,
             };
+            // AXON_STEP_X: bgemm_x on (1) / off (0), in turn (default 1).
+            let xs = list("AXON_STEP_X", "1");
             // AXON_STEP_KM: the kernel builds to run in turn per depth, e.g.
             // "plain,SOME_DEFINE,plain,SOME_DEFINE" (prefill.cu experiments).
             let kms: Vec<String> = std::env::var("AXON_STEP_KM")
@@ -1369,21 +1371,23 @@ mod tests {
                 };
                 for &nb in nbs.iter().filter(|&&nb| nb <= slots) {
                     let rs = rows(nb);
-                    for &vm in &vms {
+                    for (&vm, &x) in vms.iter().flat_map(|v| xs.iter().map(move |x| (v, x))) {
                         net.bf.vm_max = vm;
+                        net.bf.gemvmx_on = x == 1;
                         // (The graphs hold the kernels picked when made.)
                         p.graphs.clear();
                         let t = time(&mut || {
                             std::hint::black_box(net.step_rows(&mut p, &rs).unwrap());
                         });
                         eprintln!(
-                            "| {depth} | {nb} | {vm} | {t:.3} | {:.2} | {:.0} |",
+                            "| {depth} | {nb} | {vm} x{x} | {t:.3} | {:.2} | {:.0} |",
                             t / d,
                             nb as f64 * 1e3 / t
                         );
                     }
                 }
                 net.bf.vm_max = *vms.last().unwrap();
+                net.bf.gemvmx_on = *xs.last().unwrap() == 1;
                 for &nb in profs.iter().filter(|&&nb| nb <= slots) {
                     let tokens = vec![5u32; nb];
                     let at: Vec<RowAt> = (0..nb)
