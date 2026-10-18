@@ -69,6 +69,11 @@ fn base_name(name: &str) -> &str {
     name.strip_suffix(":latest").unwrap_or(name)
 }
 
+/// An ollama path (/api/...): its errors are `{"error": "..."}`.
+pub fn is_path(path: &str) -> bool {
+    path == "/api" || path.starts_with("/api/")
+}
+
 /// The routes this module answers, with their methods.
 pub fn methods(path: &str) -> Option<&'static str> {
     Some(match path {

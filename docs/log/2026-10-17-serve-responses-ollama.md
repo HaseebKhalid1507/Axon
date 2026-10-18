@@ -128,3 +128,14 @@ Transcripts: `~/.cache/axon-apis/transcripts/`.
   `reasoning_tokens` is counted from the reasoning text.
 - NITs: `serves()` compares methods exactly (split, not substring); the GET routes answer
   consistently while loading (above); the store sizes a conversation without printing it.
+
+## Review round 2: error shape on /api/*
+
+The v6 fuzz (1017-191716-e96e) found `ollama:GET-chat`: the 405 fallback in `route()` always
+answered in OpenAI's shape. So did the 404 for unknown paths and the errors answered before
+routing (401, 413, broken bodies). Now `error_body(path, e)` picks the shape by path for all
+of them, and `Conn::path` records the parsed head's path so the pre-routing errors know it
+(it is reset per request; only a head that doesn't parse, with no path, stays OpenAI's).
+Tests: `error_body_shape_follows_the_path` and `serve_ollama_error_shapes` (405 with Allow,
+404, 413, 400, and 401 with and without a body; OpenAI's shape kept elsewhere). The fuzzer
+gained `ollama:unknown-route` and `ollama:oversize`.

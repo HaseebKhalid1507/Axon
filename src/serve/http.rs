@@ -117,6 +117,10 @@ pub struct Conn<S> {
     /// The path and method of the request `gate` just refused (its route
     /// label; a HEAD's 401 has no body).
     pub refused: Option<(String, String)>,
+    /// The path of the request whose head was read last (None: no head
+    /// read yet, or it didn't parse): an error answered before routing
+    /// (401, 413, a broken body) takes that route's API's shape.
+    pub path: Option<String>,
     /// The status of the last response started (0: none yet).
     pub status: u16,
     /// Bytes written so far.
@@ -307,6 +311,7 @@ impl<S: Read + Write> Conn<S> {
             head_only: false,
             gate: None,
             refused: None,
+            path: None,
             status: 0,
             written: 0,
         }
@@ -344,6 +349,8 @@ impl<S: Read + Write> Conn<S> {
     /// the socket's read timeout) between requests. An error should be
     /// answered with its status, then the connection closed.
     pub fn read_request(&mut self) -> Result<Option<Request>, HttpError> {
+        // An error below belongs to this request, not the one before.
+        self.path = None;
         // Empty lines before a request are allowed (RFC 9112 2.2).
         let mut since = None;
         let end = loop {
@@ -384,6 +391,7 @@ impl<S: Read + Write> Conn<S> {
             }
         };
         let (mut req, body, cont) = parse_head(&self.buf[..end])?;
+        self.path = Some(req.path.clone());
         self.buf.drain(..end);
         let has_body = !matches!(body, BodyLen::Fixed(0));
         if has_body && self.gate.as_ref().is_some_and(|g| !g(&req)) {

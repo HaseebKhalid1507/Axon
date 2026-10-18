@@ -1558,10 +1558,12 @@ fn connection(s: TcpStream, sh: &Shared) {
                 // unless it answers a refused HEAD.
                 let refused = c.refused.take();
                 c.head_only = refused.as_ref().is_some_and(|(_, m)| m == "HEAD");
+                let path = c.path.take();
                 if e.status == 401 {
-                    let _ = unauthorized(&mut c, false);
+                    let _ = unauthorized(&mut c, false, path.as_deref());
                 } else {
-                    let body = ApiError::new(e.status, "invalid_request_error", e.msg).json();
+                    let e = ApiError::new(e.status, "invalid_request_error", e.msg);
+                    let body = error_body(path.as_deref(), &e);
                     let _ = c.respond(e.status, "application/json", body.as_bytes(), false, &[]);
                 }
                 let route = refused.map_or("other", |(p, _)| ops::route_label(&p));
@@ -1635,14 +1637,29 @@ fn refused(key: Option<&str>, req: &Request) -> bool {
     })
 }
 
-/// The 401 for a request without the right key (OpenAI's error shape).
-fn unauthorized<S: io::Read + Write>(c: &mut Conn<S>, keep: bool) -> io::Result<()> {
+/// `e`'s body in the shape of the API `path` belongs to: ollama's
+/// `{"error": "..."}` on /api/*, else OpenAI's (also when the path isn't
+/// known: a request head that didn't parse).
+fn error_body(path: Option<&str>, e: &ApiError) -> String {
+    if path.is_some_and(ollama::is_path) {
+        ollama::error_json(&e.msg)
+    } else {
+        e.json()
+    }
+}
+
+/// The 401 for a request to `path` without the right key.
+fn unauthorized<S: io::Read + Write>(
+    c: &mut Conn<S>,
+    keep: bool,
+    path: Option<&str>,
+) -> io::Result<()> {
     let mut e = ApiError::new(401, "invalid_request_error", ops::AUTH_MSG);
     e.code = Some("invalid_api_key");
     c.respond(
         401,
         "application/json",
-        e.json().as_bytes(),
+        error_body(path, &e).as_bytes(),
         keep,
         &[("WWW-Authenticate", "Bearer")],
     )
@@ -1657,19 +1674,18 @@ fn route(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared) -> io::Result<bool
         p => ollama::methods(p).unwrap_or(""),
     };
     if refused(sh.api_key.as_deref(), req) {
-        unauthorized(c, keep)?;
+        unauthorized(c, keep, Some(&req.path))?;
         return Ok(keep);
     }
     match (req.method.as_str(), req.path.as_str()) {
-        (_, _) if methods.is_empty() => api_err(
-            c,
-            ApiError::new(
+        (_, _) if methods.is_empty() => {
+            let e = ApiError::new(
                 404,
                 "invalid_request_error",
                 format!("no route {}", req.path),
-            ),
-            keep,
-        ),
+            );
+            json_reply(c, 404, &error_body(Some(&req.path), &e), keep)
+        }
         ("OPTIONS", _) => {
             // A CORS preflight (when --cors is on), or a plain OPTIONS.
             let mut h = vec![("Allow", methods)];
@@ -1736,7 +1752,7 @@ fn route(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared) -> io::Result<bool
             c.respond(
                 405,
                 "application/json",
-                e.json().as_bytes(),
+                error_body(Some(&req.path), &e).as_bytes(),
                 keep,
                 &[("Allow", methods)],
             )?;

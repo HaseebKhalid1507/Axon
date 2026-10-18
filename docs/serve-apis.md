@@ -71,10 +71,12 @@ when the reply ends, after the message item (the parser decides each call whole)
 
 ## The ollama API
 
-Field names follow ollama's `docs/api.md`. Errors from the routes are `{"error": "..."}`
-(also the 503s: loading, queue full, shutting down). Errors the HTTP layer answers before
-routing (401 without the key, 413, 431, malformed requests) are in OpenAI's shape on every
-path.
+Field names follow ollama's `docs/api.md`. Every error on an `/api/*` path is
+`{"error": "..."}` and nothing else: the routes' 400/404/501, the 503s (loading, queue full,
+shutting down), a wrong method (405, with `Allow`), an unknown `/api/...` route (404), and
+what the HTTP layer answers before routing once the request line is read (401 without the
+key, 413, a broken body). Only a request whose head doesn't parse (431, a malformed request
+line), whose path isn't known, gets OpenAI's shape.
 
 **Sampling defaults are axon's, not ollama's.** ollama fills in `top_k` 40, `top_p` 0.9,
 `repeat_penalty` 1.1 and `num_ctx` 2048 (plus a Modelfile's `PARAMETER`s) when a request

@@ -693,6 +693,8 @@ def apis_cases(srv):
     E("ollama:embed", post("/api/embed", '{"input":"x"}'), {501})
     E("ollama:delete", b"DELETE /api/delete HTTP/1.1\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}", {501})
     E("ollama:GET-chat", b"GET /api/chat HTTP/1.1\r\nConnection: close\r\n\r\n", {405})
+    E("ollama:unknown-route", b"GET /api/foo HTTP/1.1\r\nConnection: close\r\n\r\n", {404})
+    E("ollama:oversize", b"POST /api/chat HTTP/1.1\r\nContent-Length: 2000000\r\nConnection: close\r\n\r\n", {413})
     E("responses:GET", b"GET /v1/responses HTTP/1.1\r\nConnection: close\r\n\r\n", {405})
     # Bad shapes.
     for nm, b in [("empty", ""), ("array", "[]"), ("str", '"x"'), ("no-input", "{}"), ("input-num", '{"input":1}'),

@@ -3823,3 +3823,101 @@ fn serve_ollama_and_responses_routes() {
     assert!(m.contains("route=\"/api/generate\""), "{m}");
     assert!(m.contains("route=\"/v1/responses\""), "{m}");
 }
+
+/// Every error on an /api/* path is ollama's `{"error": "..."}` and
+/// nothing else, whichever layer answers it: a wrong method (405, Allow
+/// kept), an unknown /api route (404), a body past MAX_BODY (413, before
+/// routing), and without the key (401 before routing, with and without a
+/// body). Other paths keep OpenAI's shape.
+#[test]
+fn error_body_shape_follows_the_path() {
+    let e = super::api::ApiError::new(405, "invalid_request_error", "use POST");
+    assert_eq!(
+        super::error_body(Some("/api/chat"), &e),
+        r#"{"error":"use POST"}"#
+    );
+    assert_eq!(
+        super::error_body(Some("/api"), &e),
+        r#"{"error":"use POST"}"#
+    );
+    for p in [Some("/v1/chat/completions"), Some("/apis"), Some("/"), None] {
+        let v: Value = serde_json::from_str(&super::error_body(p, &e)).unwrap();
+        assert_eq!(v["error"]["message"], "use POST", "{p:?}");
+    }
+}
+
+fn ollama_error(r: &Resp) -> String {
+    let v: Value = serde_json::from_str(&r.body).unwrap_or_else(|e| panic!("{e}: {}", r.body));
+    let o = v.as_object().unwrap();
+    assert_eq!(o.len(), 1, "only 'error': {}", r.body);
+    o["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a string: {}", r.body))
+        .to_string()
+}
+
+#[test]
+fn serve_ollama_error_shapes() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server(p.to_str().unwrap(), Device::Cpu);
+    let a = s.addr;
+    let r = call(a, "GET", "/api/chat", "");
+    assert_eq!(r.status, 405);
+    assert_eq!(r.header("allow"), Some("POST, OPTIONS"));
+    assert!(ollama_error(&r).contains("POST"), "{}", r.body);
+    let r = call(a, "DELETE", "/api/tags", "");
+    assert_eq!(r.status, 405);
+    assert_eq!(r.header("allow"), Some("GET, HEAD, OPTIONS"));
+    ollama_error(&r);
+    let r = call(a, "GET", "/api/foo", "");
+    assert_eq!(r.status, 404);
+    assert!(ollama_error(&r).contains("/api/foo"));
+    // Past MAX_BODY: refused after the head, before routing.
+    let mut st = TcpStream::connect(a).unwrap();
+    st.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+    st.write_all(
+        format!(
+            "POST /api/chat HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n",
+            super::http::MAX_BODY + 1
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    let r = read_resp(&mut st, &mut Vec::new());
+    assert_eq!(r.status, 413);
+    ollama_error(&r);
+    // A bad body on a generation route (routed): ollama's shape too.
+    let r = call(a, "POST", "/api/generate", "{");
+    assert_eq!(r.status, 400);
+    ollama_error(&r);
+    // Other paths: OpenAI's.
+    for (m, path) in [("GET", "/v1/nope"), ("GET", "/v1/chat/completions")] {
+        let r = call(a, m, path, "");
+        assert!(
+            r.json()["error"]["message"].is_string(),
+            "{path}: {}",
+            r.body
+        );
+    }
+    drop(s);
+
+    let s = server_with(p.to_str().unwrap(), Device::Cpu, |o| {
+        o.api_key = Some("k3y".into());
+    });
+    let a = s.addr;
+    for (m, path, body) in [
+        ("GET", "/api/tags", ""),
+        ("POST", "/api/chat", "{\"messages\":[]}"),
+        ("GET", "/api/foo", ""),
+    ] {
+        let r = call(a, m, path, body);
+        assert_eq!(r.status, 401, "{m} {path}");
+        assert_eq!(r.header("www-authenticate"), Some("Bearer"));
+        assert!(ollama_error(&r).contains("API key"), "{}", r.body);
+    }
+    let r = call(a, "POST", "/v1/responses", "{\"input\":\"x\"}");
+    assert_eq!(r.status, 401);
+    assert_eq!(r.json()["error"]["code"], "invalid_api_key");
+}
