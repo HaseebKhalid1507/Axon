@@ -1252,180 +1252,187 @@ mod tests {
         let Some(g) = crate::testutil::gpu() else {
             return;
         };
-        let path = std::env::var("AXON_STEP_MODEL").ok();
-        let m = match &path {
-            Some(p) => crate::gguf::load_with(p, Some(false)).unwrap(),
-            None => match crate::testutil::model() {
-                Some(m) => m,
-                None => return,
-            },
+        // AXON_STEP_MODEL: one model file or several, comma-separated (one
+        // job for a whole round).
+        let paths: Vec<Option<String>> = match std::env::var("AXON_STEP_MODEL") {
+            Ok(v) => v.split(',').map(|p| Some(p.trim().to_string())).collect(),
+            Err(_) => vec![None],
         };
-        let list = |var: &str, def: &str| -> Vec<usize> {
-            std::env::var(var)
-                .unwrap_or(def.into())
-                .split(',')
-                .filter(|s| !s.is_empty())
-                .map(|s| s.trim().parse().unwrap())
-                .collect()
-        };
-        let depths = list("AXON_STEP_DEPTHS", "600,4096");
-        let nbs = list("AXON_STEP_NB", "1,2,4,8,16,24,32,48,64");
-        let profs = list("AXON_STEP_PROF", "1,8,16,32,64");
-        // gemvm's batch limits to compare (the last one profiled), default
-        // the build's.
-        let vms = match list("AXON_STEP_VM", "") {
-            v if v.is_empty() => vec![0],
-            v => v,
-        };
-        // AXON_STEP_KM: the kernel builds to run in turn per depth, e.g.
-        // "plain,zfill,plain,zfill" (zfill: -DAXON_G2_ZFILL, prefill.cu g2_copy).
-        let kms: Vec<String> = std::env::var("AXON_STEP_KM")
-            .unwrap_or("plain".into())
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .collect();
-        let plain = Kernels::module(&g).unwrap();
-        let zfill = kms.iter().any(|k| k == "zfill").then(|| {
-            let opts = ["--std=c++17", "--ftz=false", "-DAXON_G2_ZFILL"];
-            crate::cuda::Module::load(&g, crate::cuda::KERNELS, &opts)
-                .unwrap()
-                .0
-        });
-        let time = |f: &mut dyn FnMut()| {
-            f();
-            let mut v: Vec<f64> = (0..5)
-                .map(|_| {
-                    let t = std::time::Instant::now();
-                    for _ in 0..40 {
-                        f();
-                    }
-                    t.elapsed().as_secs_f64() * 1e3 / 40.0
-                })
-                .collect();
-            v.sort_by(f64::total_cmp);
-            v[2]
-        };
-        let name = path.as_deref().unwrap_or("default 0.5B");
-        let gi = g.info().unwrap();
-        eprintln!("C curve: {name} ({}), {} ({} SMs)", m.arch, gi.name, gi.sms);
-        for (&depth, kname) in depths.iter().flat_map(|d| kms.iter().map(move |k| (d, k))) {
-            let km = match kname.as_str() {
-                "zfill" => zfill.as_ref().unwrap(),
-                _ => &plain,
+        for path in paths {
+            let m = match &path {
+                Some(p) => crate::gguf::load_with(p, Some(false)).unwrap(),
+                None => match crate::testutil::model() {
+                    Some(m) => m,
+                    None => return,
+                },
             };
-            eprintln!("kernels: {kname}");
-            let ctx = (depth + 64).next_multiple_of(64);
-            let mut net = CudaQwen2::new(&g, km, &m, ctx).unwrap();
-            net.graphs = true;
-            let prompt: Vec<u32> = (0..depth)
-                .map(|i| 1000 + (i * 7919 % 20000) as u32)
-                .collect();
-            let d = {
-                let mut c = net.new_cache(ctx);
-                net.feed_batch(&prompt, 0, &mut c);
-                time(&mut || {
-                    std::hint::black_box(net.forward_argmax(5, depth, &mut c));
-                })
-            };
-            let want = *nbs.iter().chain(&profs).max().unwrap();
-            let mut slots = want;
-            let mut p = loop {
-                match net.pool(slots, ctx) {
-                    Ok(p) => break p,
-                    Err(e) if slots > 1 => {
-                        eprintln!("  pool of {slots} x {ctx}: {e}");
-                        slots /= 2;
-                    }
-                    Err(e) => panic!("{e}"),
-                }
-            };
-            for s in 0..slots {
-                net.feed_slot(&mut p, s, &prompt, 0).unwrap();
-            }
-            eprintln!(
-                "depth {depth}: decode step (forward_argmax) {d:.3} ms; pool {slots} x {ctx}"
-            );
-            eprintln!("| depth | nb | gemvm max | ms/step | x solo | rows/s |");
-            let rows = |nb: usize| -> Vec<SeqRow> {
-                (0..nb)
-                    .map(|s| SeqRow {
-                        token: 5,
-                        pos: depth,
-                        slot: s,
-                        head: RowHead::Argmax,
-                    })
+            let list = |var: &str, def: &str| -> Vec<usize> {
+                std::env::var(var)
+                    .unwrap_or(def.into())
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.trim().parse().unwrap())
                     .collect()
             };
-            for &nb in nbs.iter().filter(|&&nb| nb <= slots) {
-                let rs = rows(nb);
-                for &vm in &vms {
-                    net.bf.vm_max = vm;
-                    // (The graphs hold the kernels picked when made.)
-                    p.graphs.clear();
-                    let t = time(&mut || {
-                        std::hint::black_box(net.step_rows(&mut p, &rs).unwrap());
-                    });
-                    eprintln!(
-                        "| {depth} | {nb} | {vm} | {t:.3} | {:.2} | {:.0} |",
-                        t / d,
-                        nb as f64 * 1e3 / t
-                    );
-                }
-            }
-            net.bf.vm_max = *vms.last().unwrap();
-            for &nb in profs.iter().filter(|&&nb| nb <= slots) {
-                let tokens = vec![5u32; nb];
-                let at: Vec<RowAt> = (0..nb)
-                    .map(|s| RowAt {
-                        pos: depth as u32,
-                        base: (s * p.ctx) as u32,
+            let depths = list("AXON_STEP_DEPTHS", "600,4096");
+            let nbs = list("AXON_STEP_NB", "1,2,4,8,16,24,32,48,64");
+            let profs = list("AXON_STEP_PROF", "1,8,16,32,64");
+            // gemvm's batch limits to compare (the last one profiled), default
+            // the build's.
+            let vms = match list("AXON_STEP_VM", "") {
+                v if v.is_empty() => vec![0],
+                v => v,
+            };
+            // AXON_STEP_KM: the kernel builds to run in turn per depth, e.g.
+            // "plain,zfill,plain,zfill" (zfill: -DAXON_G2_ZFILL, prefill.cu g2_copy).
+            let kms: Vec<String> = std::env::var("AXON_STEP_KM")
+                .unwrap_or("plain".into())
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
+            let plain = Kernels::module(&g).unwrap();
+            let zfill = kms.iter().any(|k| k == "zfill").then(|| {
+                let opts = ["--std=c++17", "--ftz=false", "-DAXON_G2_ZFILL"];
+                crate::cuda::Module::load(&g, crate::cuda::KERNELS, &opts)
+                    .unwrap()
+                    .0
+            });
+            let time = |f: &mut dyn FnMut()| {
+                f();
+                let mut v: Vec<f64> = (0..5)
+                    .map(|_| {
+                        let t = std::time::Instant::now();
+                        for _ in 0..40 {
+                            f();
+                        }
+                        t.elapsed().as_secs_f64() * 1e3 / 40.0
                     })
                     .collect();
-                for round in 0..3 {
-                    let tab = p.c.tab.as_ref().map(|t| t.len() / 4);
-                    let b = p.c.b.as_mut().unwrap();
-                    net.load_input(b, BatchIn::Tokens(&tokens)).unwrap();
-                    b.upload_rows(&at, tab).unwrap();
-                    let mut evs = vec![("start", g.record().unwrap())];
-                    net.pass_at(
-                        &mut p.c,
-                        BatchIn::Loaded(nb),
-                        Place::Rows,
-                        Head::Sample,
-                        Some((nb, nb)),
-                        0,
-                        &mut |n| {
-                            evs.push((n, g.record()?));
-                            Ok(())
-                        },
-                    )
-                    .unwrap();
-                    g.sync().unwrap();
-                    if round < 2 {
-                        continue;
-                    }
-                    let mut agg: Vec<(&str, f64, usize)> = Vec::new();
-                    for i in 1..evs.len() {
-                        let ms = evs[i - 1].1.ms_to(&evs[i].1).unwrap() as f64;
-                        match agg.iter_mut().find(|a| a.0 == evs[i].0) {
-                            Some(a) => {
-                                a.1 += ms;
-                                a.2 += 1
-                            }
-                            None => agg.push((evs[i].0, ms, 1)),
+                v.sort_by(f64::total_cmp);
+                v[2]
+            };
+            let name = path.as_deref().unwrap_or("default 0.5B");
+            let gi = g.info().unwrap();
+            eprintln!("C curve: {name} ({}), {} ({} SMs)", m.arch, gi.name, gi.sms);
+            for (&depth, kname) in depths.iter().flat_map(|d| kms.iter().map(move |k| (d, k))) {
+                let km = match kname.as_str() {
+                    "zfill" => zfill.as_ref().unwrap(),
+                    _ => &plain,
+                };
+                eprintln!("kernels: {kname}");
+                let ctx = (depth + 64).next_multiple_of(64);
+                let mut net = CudaQwen2::new(&g, km, &m, ctx).unwrap();
+                net.graphs = true;
+                let prompt: Vec<u32> = (0..depth)
+                    .map(|i| 1000 + (i * 7919 % 20000) as u32)
+                    .collect();
+                let d = {
+                    let mut c = net.new_cache(ctx);
+                    net.feed_batch(&prompt, 0, &mut c);
+                    time(&mut || {
+                        std::hint::black_box(net.forward_argmax(5, depth, &mut c));
+                    })
+                };
+                let want = *nbs.iter().chain(&profs).max().unwrap();
+                let mut slots = want;
+                let mut p = loop {
+                    match net.pool(slots, ctx) {
+                        Ok(p) => break p,
+                        Err(e) if slots > 1 => {
+                            eprintln!("  pool of {slots} x {ctx}: {e}");
+                            slots /= 2;
                         }
+                        Err(e) => panic!("{e}"),
                     }
-                    let total: f64 = agg.iter().map(|a| a.1).sum();
-                    let segs: Vec<String> = agg
-                        .iter()
-                        .filter(|a| a.1 >= 0.005)
-                        .map(|a| format!("{} {:.3}", a.0, a.1))
+                };
+                for s in 0..slots {
+                    net.feed_slot(&mut p, s, &prompt, 0).unwrap();
+                }
+                eprintln!(
+                    "depth {depth}: decode step (forward_argmax) {d:.3} ms; pool {slots} x {ctx}"
+                );
+                eprintln!("| depth | nb | gemvm max | ms/step | x solo | rows/s |");
+                let rows = |nb: usize| -> Vec<SeqRow> {
+                    (0..nb)
+                        .map(|s| SeqRow {
+                            token: 5,
+                            pos: depth,
+                            slot: s,
+                            head: RowHead::Argmax,
+                        })
+                        .collect()
+                };
+                for &nb in nbs.iter().filter(|&&nb| nb <= slots) {
+                    let rs = rows(nb);
+                    for &vm in &vms {
+                        net.bf.vm_max = vm;
+                        // (The graphs hold the kernels picked when made.)
+                        p.graphs.clear();
+                        let t = time(&mut || {
+                            std::hint::black_box(net.step_rows(&mut p, &rs).unwrap());
+                        });
+                        eprintln!(
+                            "| {depth} | {nb} | {vm} | {t:.3} | {:.2} | {:.0} |",
+                            t / d,
+                            nb as f64 * 1e3 / t
+                        );
+                    }
+                }
+                net.bf.vm_max = *vms.last().unwrap();
+                for &nb in profs.iter().filter(|&&nb| nb <= slots) {
+                    let tokens = vec![5u32; nb];
+                    let at: Vec<RowAt> = (0..nb)
+                        .map(|s| RowAt {
+                            pos: depth as u32,
+                            base: (s * p.ctx) as u32,
+                        })
                         .collect();
-                    eprintln!(
-                        "prof depth {depth} nb {nb}: {total:.3} ms (no graph, {} events): {}",
-                        evs.len() - 1,
-                        segs.join(", ")
-                    );
+                    for round in 0..3 {
+                        let tab = p.c.tab.as_ref().map(|t| t.len() / 4);
+                        let b = p.c.b.as_mut().unwrap();
+                        net.load_input(b, BatchIn::Tokens(&tokens)).unwrap();
+                        b.upload_rows(&at, tab).unwrap();
+                        let mut evs = vec![("start", g.record().unwrap())];
+                        net.pass_at(
+                            &mut p.c,
+                            BatchIn::Loaded(nb),
+                            Place::Rows,
+                            Head::Sample,
+                            Some((nb, nb)),
+                            0,
+                            &mut |n| {
+                                evs.push((n, g.record()?));
+                                Ok(())
+                            },
+                        )
+                        .unwrap();
+                        g.sync().unwrap();
+                        if round < 2 {
+                            continue;
+                        }
+                        let mut agg: Vec<(&str, f64, usize)> = Vec::new();
+                        for i in 1..evs.len() {
+                            let ms = evs[i - 1].1.ms_to(&evs[i].1).unwrap() as f64;
+                            match agg.iter_mut().find(|a| a.0 == evs[i].0) {
+                                Some(a) => {
+                                    a.1 += ms;
+                                    a.2 += 1
+                                }
+                                None => agg.push((evs[i].0, ms, 1)),
+                            }
+                        }
+                        let total: f64 = agg.iter().map(|a| a.1).sum();
+                        let segs: Vec<String> = agg
+                            .iter()
+                            .filter(|a| a.1 >= 0.005)
+                            .map(|a| format!("{} {:.3}", a.0, a.1))
+                            .collect();
+                        eprintln!(
+                            "prof depth {depth} nb {nb}: {total:.3} ms (no graph, {} events): {}",
+                            evs.len() - 1,
+                            segs.join(", ")
+                        );
+                    }
                 }
             }
         }
