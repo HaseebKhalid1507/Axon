@@ -323,6 +323,10 @@ pub struct MlaBufs<'g> {
     graphs: Vec<Option<Graph<'g>>>,
     /// Recorded after the router's copy down (`mla_round_trip`).
     ev: SyncEvent<'g>,
+    /// AXON_MOE_PROFILE=1: decode steps' seconds (GPU segments synced,
+    /// waits for the router's copy, CPU experts) and the steps, told on
+    /// stderr every 64 steps (the segments synced: slower).
+    prof: Option<[f64; 4]>,
     /// The cache's `graph_gen` when `graphs` were captured.
     graph_gen: u64,
 }
@@ -438,6 +442,9 @@ impl<'g> CudaQwen2<'g> {
             graphs: (0..=2 * self.n_layers).map(|_| None).collect(),
             graph_gen: 0,
             ev: g.new_event()?,
+            prof: std::env::var("AXON_MOE_PROFILE")
+                .is_ok_and(|v| v == "1")
+                .then_some([0.0; 4]),
         })
     }
 
@@ -866,7 +873,9 @@ impl<'g> CudaQwen2<'g> {
         mb.host_r.copy_from(&mb.r, 0, n)?;
         self.gpu.record_main(&mb.ev)?;
         shared(mb)?;
+        let t0 = std::time::Instant::now();
         mb.ev.sync()?; // the layer and the copy down, not the shared experts
+        let t1 = std::time::Instant::now();
         // SAFETY: the event fired after the copy down and, earlier on the
         // stream, host_y's last copy up (the previous layer's y): neither
         // buffer has a copy in flight.
@@ -883,6 +892,10 @@ impl<'g> CudaQwen2<'g> {
         let (pre, y, _) = unsafe { yb.align_to_mut::<f32>() };
         assert!(pre.is_empty(), "pinned buffer alignment");
         experts(self.first + li, h, ids, w, y);
+        if let (Some(p), 1) = (&mut mb.prof, nb) {
+            p[1] += (t1 - t0).as_secs_f64();
+            p[2] += t1.elapsed().as_secs_f64();
+        }
         mb.host_y.copy_to(&mb.y, 0, nb * dim * 4)
     }
 
@@ -948,6 +961,11 @@ impl<'g> CudaQwen2<'g> {
             } else {
                 run(mb)?;
             }
+            if let Some(p) = &mut mb.prof {
+                let t = std::time::Instant::now();
+                self.gpu.sync()?;
+                p[0] += t.elapsed().as_secs_f64();
+            }
             if seg < n && self.mla_is_moe(seg) {
                 let gi = n + 1 + seg;
                 let mut shared = |mb: &mut MlaBufs<'g>| -> Result<(), String> {
@@ -964,6 +982,21 @@ impl<'g> CudaQwen2<'g> {
                     unsafe { mb.graphs[gi].as_ref().unwrap().launch() }
                 };
                 self.mla_round_trip(mb, seg, 1, &mut shared, experts)?;
+            }
+        }
+        if let Some(p) = &mut mb.prof {
+            p[3] += 1.0;
+            if p[3] >= 64.0 {
+                let ms = |x: f64| x / p[3] * 1e3;
+                eprintln!(
+                    "[moe profile] per step (ms): gpu segments (synced) {:.3}, waits for the \
+                     router {:.3}, cpu experts {:.3} ({} steps)",
+                    ms(p[0]),
+                    ms(p[1]),
+                    ms(p[2]),
+                    p[3]
+                );
+                *p = [0.0; 4];
             }
         }
         Ok(())
