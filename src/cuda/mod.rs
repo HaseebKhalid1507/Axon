@@ -378,14 +378,29 @@ impl Gpu {
         // Debug builds: the kernel takes exactly args.len() parameters (a
         // missing one is read from past the array: undefined behaviour,
         // not an error). Needs the driver's cuFuncGetParamInfo (12.4+).
+        // A query that fails for another reason than "no such parameter"
+        // (CUDA_ERROR_INVALID_VALUE), e.g. a context an earlier kernel left
+        // in CUDA_ERROR_ILLEGAL_ADDRESS, is that error, not a count mismatch.
         #[cfg(debug_assertions)]
         if let Some(info) = ffi::param_info() {
+            const INVALID_VALUE: ffi::CUresult = 1;
             let (mut off, mut size) = (0usize, 0usize);
             let n = args.len();
             // SAFETY: f is a loaded kernel; off and size are written.
-            let mut has = |i: usize| unsafe { info(f.f, i, &mut off, &mut size) } == 0;
+            let mut query = |i: usize| unsafe { info(f.f, i, &mut off, &mut size) };
+            let last = if n == 0 {
+                ffi::CUDA_SUCCESS
+            } else {
+                query(n - 1)
+            };
+            let past = query(n);
+            for r in [last, past] {
+                if r != ffi::CUDA_SUCCESS && r != INVALID_VALUE {
+                    check(self.d, r, &format!("cuFuncGetParamInfo ({})", f.name))?;
+                }
+            }
             assert!(
-                (n == 0 || has(n - 1)) && !has(n),
+                last == ffi::CUDA_SUCCESS && past == INVALID_VALUE,
                 "launch of {} with {n} arguments: not its parameter count",
                 f.name
             );

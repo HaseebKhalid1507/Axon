@@ -4193,6 +4193,75 @@ fn gpu_logits_match_cpu_q2k_q3k() {
     q23_assert_covered(&seen, all_present, "gpu_logits_match_cpu_q2k_q3k");
 }
 
+/// Dumps `gpu_logits_match_cpu_q2k_q3k`'s positions for an outside
+/// comparison (llama.cpp CPU vs CUDA on the same token prefixes): for the
+/// model at $AXON_DUMP_MODEL, PROMPTS with 32 greedy CPU steps each; per
+/// position the prefix ids and the top-20 log-probabilities of the CPU (to
+/// $AXON_DUMP_OUT.axon-cpu.json) and of the GPU (.axon-cuda.json), in
+/// scripts/oracle/llama_logits.py's format.
+#[test]
+#[ignore]
+fn dump_logits_positions() {
+    let (Ok(path), Ok(out)) = (
+        std::env::var("AXON_DUMP_MODEL"),
+        std::env::var("AXON_DUMP_OUT"),
+    ) else {
+        return;
+    };
+    let g = crate::testutil::gpu().unwrap();
+    let m = crate::gguf::load_with(&path, Some(false)).unwrap();
+    let km = Kernels::module_for(&g, &m).unwrap();
+    let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
+    let gpu = CudaQwen2::new(&g, &km, &m, 256).unwrap();
+    let cpu = Qwen2::new(&m);
+    let top = |l: &[f32]| -> String {
+        let ls = log_softmax(l);
+        let mut idx: Vec<usize> = (0..l.len()).collect();
+        idx.sort_by(|&a, &b| l[b].total_cmp(&l[a]).then(a.cmp(&b)));
+        let v: Vec<String> = idx[..20]
+            .iter()
+            .map(|&i| format!("[{i}, {}]", ls[i]))
+            .collect();
+        format!("[{}]", v.join(", "))
+    };
+    let (mut jc, mut jg) = (Vec::new(), Vec::new());
+    for (pi, p) in PROMPTS.iter().enumerate() {
+        let mut ids = tok.encode(p);
+        let mut rc = cpu.new_cache(ids.len() + 34);
+        let mut oc = gpu.new_cache(ids.len() + 34);
+        let (&last, rest) = ids.split_last().unwrap();
+        let start = rest.len();
+        cpu.feed_batch(rest, 0, &mut rc);
+        gpu.feed_batch(rest, 0, &mut oc);
+        let mut t = last;
+        for s in 0..=32 {
+            let pos = start + s;
+            let lr = cpu.forward(t, pos, &mut rc);
+            let lo = gpu.forward(t, pos, &mut oc);
+            let idl: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+            let head = format!(
+                "{{\"prompt\": \"p{pi}s{s}\", \"ids\": [{}], \"top\": ",
+                idl.join(", ")
+            );
+            jc.push(format!("{head}{}}}", top(&lr)));
+            jg.push(format!("{head}{}}}", top(&lo)));
+            t = crate::argmax(&lr);
+            ids.push(t);
+        }
+    }
+    std::fs::write(
+        format!("{out}.axon-cpu.json"),
+        format!("[{}]", jc.join(",\n")),
+    )
+    .unwrap();
+    std::fs::write(
+        format!("{out}.axon-cuda.json"),
+        format!("[{}]", jg.join(",\n")),
+    )
+    .unwrap();
+    eprintln!("dumped {} positions", jc.len());
+}
+
 /// The Q2_K / Q3_K files: decode == every prefill batching == prefill from a
 /// fed prefix (cache reuse) == verify, bit for bit, on the f16 cache, and on
 /// the q8 one for the 0.5B Q2_K and the 1.5B Q3_K_M.
