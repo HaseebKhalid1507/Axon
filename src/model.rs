@@ -6,8 +6,9 @@ use crate::gguf::{Model, Tensor, Val};
 use crate::kv::{Half, KvData, KvElem, Layers};
 use crate::pool::{self, Kind, Pool};
 use crate::quant::{
-    DecodeCfg, F16, F32, MXFP4, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0, QuantizedAct,
-    batch_slots, dequant, dot_row_q8_multi, dot_rows_q8, dot_rows_q8_multi, r8, r8q, row_bytes,
+    DecodeCfg, F16, F32, IQ4_NL, MXFP4, Q2_K, Q3_K, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0,
+    QuantizedAct, batch_slots, dequant, dot_row_q8_multi, dot_rows_q8, dot_rows_q8_multi, r8, r8q,
+    row_bytes,
 };
 use crate::vmath;
 
@@ -556,7 +557,9 @@ pub(crate) fn rope_freqs(m: &Model, head_dim: usize) -> Vec<f64> {
 }
 
 /// Tensor types the kernels run (`quant::dequant` and `dot_row_q8`).
-const SUPPORTED_TYPES: [u32; 10] = [F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K];
+const SUPPORTED_TYPES: [u32; 13] = [
+    F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL,
+];
 
 /// gpt-oss's expert matrices only (`check_supported`).
 const EXPERT_TYPES: [u32; 1] = [MXFP4];
@@ -824,7 +827,7 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
         let q = t.qtype;
         if !SUPPORTED_TYPES.contains(&q.id) {
             return Err(bad(format!(
-                "tensor {name}: type {} ({}) is not supported (F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K)",
+                "tensor {name}: type {} ({}) is not supported (F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL)",
                 q.name, q.id
             )));
         }
@@ -4818,7 +4821,7 @@ pub(crate) mod tests {
     /// K-quants, Q8_0 32-blocks for Q5_0/Q8_0) and dequantized, in f64.
     fn quantized_values(qt: u32, inp: &[f32]) -> Vec<f64> {
         let mut out = Vec::with_capacity(inp.len());
-        if matches!(qt, Q4_0 | Q4_1 | Q5_0 | Q5_1 | Q8_0) {
+        if matches!(qt, Q4_0 | Q4_1 | Q5_0 | Q5_1 | Q8_0 | IQ4_NL) {
             for c in inp.chunks(32) {
                 let amax = c.iter().fold(0f32, |m, v| m.max(v.abs()));
                 let d = crate::quant::f16_to_f32(crate::quant::f32_to_f16(amax / 127.0));

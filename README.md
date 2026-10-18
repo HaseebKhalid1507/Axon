@@ -63,10 +63,11 @@ Works today, honestly scoped:
   yet); `--device cuda` is refused until stage 1. Other architectures, other
   mixture-of-experts models and RoPE scaling (a factor other than 1; Gemma 3's linear
   scaling and YaRN, below, excepted) are refused with an error.
-- Tensor types: F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K on the CPU, and
-  MXFP4 for gpt-oss's experts (CPU only). On the
-  GPU every weight matrix must be one of the eight quantized types (F16/F32 matrices are
-  refused there). Others load for `info` but can't run.
+- Tensor types: F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K and
+  IQ4_NL on the CPU, so every Q2_K and Q3_K_S/M/L GGUF runs (IQ4_NL is llama.cpp's fallback
+  for their rows that aren't a multiple of 256, e.g. the 0.5B's 896), and MXFP4 for
+  gpt-oss's experts (CPU only). On the GPU every weight matrix must be one of the eleven
+  quantized types (F16/F32 matrices are refused there). Others load for `info` but can't run.
 - Sampling: greedy, or temperature / top-k / top-p / min-p / repeat penalty with a seed
   (llama.cpp's order, ollama's defaults). `gen` continues raw text, greedy unless `--temp`
   is above 0 (reproducible output and benchmarks); `chat` talks to an Instruct model
@@ -128,7 +129,7 @@ Works today, honestly scoped:
 
 Not on main yet: tensor parallel, paged KV in `serve` (the kernels read through a page table; the pool
 doesn't use it yet), saving and restoring `serve` slots, the `/v1/responses` and ollama-native APIs,
-Q2_K/Q3_K, and the MoE paths on the GPU (#67). What's in flight and why: [docs/roadmap.md](docs/roadmap.md). How Axon is built and measured, and
+and the MoE paths on the GPU (#67). What's in flight and why: [docs/roadmap.md](docs/roadmap.md). How Axon is built and measured, and
 what was tried and dropped: [docs/methodology.md](docs/methodology.md),
 [docs/history.md](docs/history.md), [docs/experiments-rejected.md](docs/experiments-rejected.md).
 

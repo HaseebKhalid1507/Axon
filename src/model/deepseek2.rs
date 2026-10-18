@@ -279,7 +279,7 @@ pub(super) fn check(m: &Model) -> io::Result<Dims> {
         let q = t.qtype;
         if !SUPPORTED_TYPES.contains(&q.id) {
             return Err(bad(format!(
-                "tensor {name}: type {} ({}) is not supported (F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K)",
+                "tensor {name}: type {} ({}) is not supported (F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL)",
                 q.name, q.id
             )));
         }

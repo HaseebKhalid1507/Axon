@@ -37,7 +37,7 @@
 use super::{Arg, DevBuf, Func, Gpu, Graph, HostBuf, Module};
 use crate::gguf::{Model, Tensor};
 use crate::lm::Lm;
-use crate::quant::{self, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0};
+use crate::quant::{self, IQ4_NL, Q2_K, Q3_K, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0};
 use crate::sample::{self, CAND_MAX, Cand, CandSpec};
 use std::rc::Rc;
 
@@ -95,14 +95,18 @@ pub fn max_split(sms: usize, n_kv_heads: usize) -> usize {
 /// gemm2's dynamic shared memory for type qt, bn tokens per block and st
 /// stages (prefill.cu G2L::SMEM; the kernel traps if given less).
 fn gemm2_smem(qt: u32, bn: usize, st: usize) -> usize {
-    let (raw, kq) = (matches!(qt, Q4_K | Q5_K), matches!(qt, Q4_K | Q5_K | Q6_K));
+    let (raw, kq) = (
+        matches!(qt, Q4_K | Q5_K),
+        matches!(qt, Q4_K | Q5_K | Q6_K | Q2_K | Q3_K),
+    );
     let w = if raw {
         G2_BM * 176
     } else {
         G2_BM * 256
             + G2_BM
                 * match qt {
-                    Q6_K => 20,
+                    Q6_K | Q3_K => 20,
+                    Q2_K => 40,
                     Q4_1 | Q5_1 => 64,
                     _ => 32,
                 }
@@ -258,6 +262,11 @@ impl LayerW {
         v
     }
 }
+
+/// `step_with`'s and `profile`'s Err on a MoE model (its decode is
+/// `moe_step`).
+const MOE_DENSE_STEP: &str =
+    "a mixture-of-experts model's decode step needs its experts (crate::moe: moe_step)";
 
 /// How a cache stores keys and values (`CudaQwen2::kv`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1264,7 +1273,7 @@ impl<'g> CudaQwen2<'g> {
         }
         if super::needs_ext(m) && !module.ext() {
             return Err(
-                "the model has Q4_0/Q4_1/Q5_1/Q5_K tensors: it needs the kernels \
+                "the model has Q4_0/Q4_1/Q5_1/Q5_K/Q2_K/Q3_K/IQ4_NL tensors: it needs the kernels \
                         built with the extra types (Kernels::module_for / module_ext)"
                     .into(),
             );
@@ -1313,12 +1322,16 @@ impl<'g> CudaQwen2<'g> {
         // Every matrix's (tensor, arena offset), uploaded once all fit.
         let mut uploads: Vec<(&Tensor, usize)> = Vec::new();
         let gemv_type = |mt: &Mat, name: &str| -> Result<(), String> {
-            if [Q4_K, Q5_K, Q6_K, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0].contains(&mt.qt) {
+            if [
+                Q4_K, Q5_K, Q6_K, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, IQ4_NL,
+            ]
+            .contains(&mt.qt)
+            {
                 Ok(())
             } else {
                 Err(format!(
                     "tensor {name}: type {} isn't supported by the CUDA backend \
-                     (Q4_K, Q5_K, Q6_K, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0)",
+                     (Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, IQ4_NL)",
                     crate::gguf::qtype(mt.qt).name
                 ))
             }
@@ -2502,6 +2515,10 @@ impl<'g> CudaQwen2<'g> {
         pos: usize,
         head: Head,
     ) -> Result<(), String> {
+        // Before any write or capture: a MoE layer has no dense FFN.
+        if self.moe.is_some() {
+            return Err(MOE_DENSE_STEP.into());
+        }
         assert_eq!(c.net, self.id, "a CudaCache used with another CudaQwen2");
         assert!(head != Head::Last, "Head::Last: batched passes only");
         assert!(
@@ -2893,6 +2910,9 @@ impl<'g> CudaQwen2<'g> {
         token: u32,
         pos: usize,
     ) -> Result<(Vec<KernelTime>, f64), String> {
+        if self.moe.is_some() {
+            return Err(MOE_DENSE_STEP.into());
+        }
         assert_eq!(c.net, self.id, "a CudaCache used with another CudaQwen2");
         assert!(pos < c.max_ctx && (token as usize) < self.vocab);
         c.debug_covers(0, pos + 1);

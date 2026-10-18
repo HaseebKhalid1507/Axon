@@ -253,38 +253,43 @@ impl MoeInfo {
 const RAM_HEADROOM: u64 = 3 << 29;
 
 /// Anonymous memory the CPU model of `i` takes beyond the mapped file, plus
-/// `RAM_HEADROOM`: with `repack`, the r8 arena (every expert and, roughly,
-/// the dense weights); without, none (everything is read in place from the
-/// mapping, page cache the kernel can reclaim).
-fn ram_need(i: &MoeInfo, repack: bool) -> u64 {
-    let arena = if repack {
-        i.expert_arena + i.dense_bytes
-    } else {
-        0
+/// `RAM_HEADROOM`: with `repack`, the r8 arena (the experts that repack
+/// and, with `dense`, roughly the dense weights too); without, none
+/// (everything is read in place from the mapping, page cache the kernel can
+/// reclaim). `dense` false is `crate::moe`'s split: the attention,
+/// embedding and head live on the GPU, the host keeps the experts (its
+/// norms and routers, tens of MB, are inside the headroom).
+fn ram_need(i: &MoeInfo, repack: bool, dense: bool) -> u64 {
+    let arena = match (repack, dense) {
+        (false, _) => 0,
+        (true, true) => i.expert_arena + i.dense_bytes,
+        (true, false) => i.expert_arena,
     };
     arena + RAM_HEADROOM
 }
 
 /// The CPU model's RAM beyond the file: refuse a MoE model that wouldn't fit
 /// in `MemAvailable` (`ram_need`) instead of swapping. `repack` as
-/// `Qwen2::new` (AXON_REPACK).
-pub(crate) fn check_ram(m: &Model) -> Result<(), String> {
+/// `Qwen2::new` (AXON_REPACK). `dense` false: `crate::moe`'s split (the
+/// host holds the experts only).
+pub(crate) fn check_ram(m: &Model, dense: bool) -> Result<(), String> {
     let repack = std::env::var("AXON_REPACK").map_or(true, |v| v != "0");
-    check_ram_with(m, repack, crate::gguf::mem_available())
+    check_ram_with(m, repack, dense, crate::gguf::mem_available())
 }
 
-fn check_ram_with(m: &Model, repack: bool, avail: Option<u64>) -> Result<(), String> {
+fn check_ram_with(m: &Model, repack: bool, dense: bool, avail: Option<u64>) -> Result<(), String> {
     let Some(i) = MoeInfo::of_with(m, repack) else {
         return Ok(());
     };
-    let want = ram_need(&i, repack);
+    let want = ram_need(&i, repack, dense);
     match avail {
         Some(avail) if avail < want => Err(format!(
-            "{}: the CPU model needs about {:.1} GB of RAM (its repacked experts {:.1} GB) and \
+            "{}: the {} needs about {:.1} GB of RAM (its repacked experts {:.1} GB) and \
              only {:.1} GB is available",
             m.arch,
+            if dense { "CPU model" } else { "CPU experts" },
             want as f64 / 1e9,
-            i.expert_held as f64 / 1e9,
+            i.expert_arena as f64 / 1e9,
             avail as f64 / 1e9
         )),
         _ => Ok(()),
@@ -820,7 +825,8 @@ mod tests {
     use super::*;
 
     /// `check_ram`'s need: the r8 arena with the repack, none without it
-    /// (AXON_REPACK=0 reads the mapped file in place).
+    /// (AXON_REPACK=0 reads the mapped file in place); the split's, the
+    /// experts only.
     #[test]
     fn ram_need_counts_the_arena_only_when_repacking() {
         let (m, _) = crate::model::tests::dense_fixture("qwen3moe", crate::quant::Q8_0);
@@ -828,15 +834,23 @@ mod tests {
         let off = MoeInfo::of_with(&m, false).unwrap();
         assert!(on.expert_held > 0 && off.expert_held > 0);
         assert_eq!(
-            ram_need(&on, true),
+            ram_need(&on, true, true),
             on.expert_held + on.dense_bytes + RAM_HEADROOM
         );
-        assert_eq!(ram_need(&off, false), RAM_HEADROOM);
+        assert_eq!(ram_need(&off, false, true), RAM_HEADROOM);
+        // The GPU split: the experts only.
+        assert_eq!(on.expert_arena, on.expert_held, "every Q8_0 expert repacks");
+        assert_eq!(ram_need(&on, true, false), on.expert_arena + RAM_HEADROOM);
+        assert_eq!(ram_need(&off, false, false), RAM_HEADROOM);
         // Room for the headroom only: refused with the repack, fine without.
         let avail = Some(RAM_HEADROOM + 1);
-        assert!(check_ram_with(&m, true, avail).is_err());
-        assert!(check_ram_with(&m, false, avail).is_ok());
-        assert!(check_ram_with(&m, true, None).is_ok());
+        assert!(check_ram_with(&m, true, true, avail).is_err());
+        assert!(check_ram_with(&m, false, true, avail).is_ok());
+        assert!(check_ram_with(&m, true, true, None).is_ok());
+        // Room for the experts but not the dense weights: the split fits.
+        let avail = Some(on.expert_arena + RAM_HEADROOM);
+        assert!(check_ram_with(&m, true, true, avail).is_err());
+        assert!(check_ram_with(&m, true, false, avail).is_ok());
     }
 
     #[test]

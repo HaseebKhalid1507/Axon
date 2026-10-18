@@ -2895,7 +2895,15 @@ fn serve_slot_idle_frees_a_stalled_stream() {
         (&c).write_all(request("POST", "/v1/completions", &body, false).as_bytes())
             .unwrap();
         // The window is full when the client's queue stops growing while
-        // the engine goes on generating (2 more tokens).
+        // the engine goes on generating (2 more tokens), or, with the flag,
+        // once the server has evicted the stream for it: its queue can't
+        // grow after that. (Only the tokens can be missed: on a loaded host
+        // a step can take longer than the eviction's 300 ms, so the stream
+        // may be gone before 2 more come, and nothing would grow again.)
+        let evicted = || {
+            let m = || prom_parse(&call(a, "GET", "/metrics", "").body);
+            idle.is_some() && m()["axon_slot_idle_evictions_total"] > 0.0
+        };
         let mut last = (inq(&c), Instant::now(), s.generated.load(Ordering::Relaxed));
         let full = loop {
             std::thread::sleep(Duration::from_millis(10));
@@ -2903,7 +2911,7 @@ fn serve_slot_idle_frees_a_stalled_stream() {
             let g = s.generated.load(Ordering::Relaxed);
             if n != last.0 {
                 last = (n, Instant::now(), g);
-            } else if n > 0 && g >= last.2 + 2 {
+            } else if n > 0 && (g >= last.2 + 2 || evicted()) {
                 break last.1;
             }
             assert!(last.1.elapsed() < Duration::from_secs(120), "never filled");
