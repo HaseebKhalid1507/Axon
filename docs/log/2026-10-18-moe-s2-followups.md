@@ -47,7 +47,18 @@ Five small fixes from the #67 review (MERGE 9/10). No output change: greedy bits
 - `moe_gpu_step_refuses_head_no` downcasts the panic payload and checks that it names `moe_step`, so an unrelated
   panic doesn't pass.
 - Stack note: feat/gpt-oss renamed `expert_held` → `expert_arena` in `ram_need`, so this PR's `src/model/moe.rs`
-  hunk will conflict there when one of them rebases on the other.
+  hunk conflicted with it.
+
+## Rebase onto main cf8dee4 (#78 gpt-oss merged)
+
+`src/model/moe.rs` conflicted in `ram_need`. I kept both sides: `ram_need(i, repack, dense)` (this PR's split,
+which counts only what the host holds) now bills #78's `expert_arena` (the experts that really land in the r8
+arena; MXFP4 experts read in place count 0) instead of `expert_held`. So the split counts `expert_arena` and the
+CPU model counts `expert_arena + dense_bytes`. The refusal message's "repacked experts" figure is `expert_arena`
+too. #78's `cpu_only` and `oai` are unchanged; gpt-oss is CPU-only, so it takes `check_ram(m, true)` on the CPU
+path. For qwen3moe Q8_0/Q4_K every expert repacks, so `expert_arena == expert_held` (now asserted in
+`ram_need_counts_the_arena_only_when_repacking`) and the RAM table above is unchanged. #79 (deepseek2) adapts to
+`check_ram(m, dense)`.
 
 ## RAM need, before → after (from `axon info` sizes; formula = `ram_need`, headroom 3 << 29 B = 1.61 GB)
 
