@@ -192,37 +192,44 @@ under item 2).
 
 ## Model-zoo results (2026-10-18, MEASURED)
 
-18 files, 5.7 GB downloaded plus 6 already in `models/`. Axon at this PR, CPU, against llama.cpp b11580
-(4413a19) CPU, 16 prompts, top-20 (job 1017-175220-02a3; the run on main before the fix: 1017-171548-0e4e).
-GGUF version, `general.quantization_version` and `tokenizer.ggml.pre` come from each file's header.
-TheBloke's TinyLlama (late 2023) predates the pre-tokenizer key and runs anyway. sha256 are in the PR body.
+18 files, 5.7 GB downloaded plus 6 already in `models/`. Axon at this PR merged with main 45d4dce (commit
+0bf1d35, which includes #72's Q2_K/Q3_K/IQ4_NL), CPU, against llama.cpp b11580 (4413a19) CPU, 16 prompts, top-20
+(job 1018-053457-037d). Earlier runs: on main before the fix 1017-171548-0e4e; at this PR before #72
+1017-175220-02a3, where IQ4_NL and the two Q2_K/Q3_K_M files were the expected refusals. GGUF version,
+`general.quantization_version` and `tokenizer.ggml.pre` come from each file's header. TheBloke's TinyLlama (late
+2023) predates the pre-tokenizer key and runs anyway. sha256 are in the PR body.
 
 | file | source | MB | GGUF v / quant v / pre | tensor types | expect | verdict | top-1 | KL mean | gen chars = llama.cpp | refusal / note |
 |---|---|---:|---|---|---|---|---:|---:|---:|---|
 | qwen2.5-0.5b-q4_k_m.gguf | Qwen | 491 | 3 / 2 / qwen2 | F32:121 Q5_0:133 Q8_0:13 Q4_K:12 Q6_K:12 | run | match | 14/16 | 2.4e-03 | 143 | Qwen official, Q4_K_M |
-| Qwen3-0.6B-UD-Q4_K_XL.gguf | unsloth | 405 | 3 / 2 / qwen2 | F32:113 Q4_K:110 Q5_K:30 Q6_K:37 IQ4_XS:20 | refuse | refused |  |  |  | tensor blk.3.attn_q.weight: type IQ4_XS (23) is not supported; i-quants (IQ*) and ternary (TQ*) types are not supported: use a K-quant file (Q4_K_M, Q5_K_M, Q6_K) or Q8_0 |
+| Qwen3-0.6B-UD-Q4_K_XL.gguf | unsloth | 405 | 3 / 2 / qwen2 | F32:113 Q4_K:110 Q5_K:30 Q6_K:37 IQ4_XS:20 | refuse | refused |  |  |  | tensor blk.3.attn_q.weight: type IQ4_XS (23) is not supported; this i-quant or ternary type is not supported: use a K-quant file (Q4_K_M, Q5_K_M, Q6_K) or Q8_0 |
 | Qwen3-0.6B-Q4_1.gguf | unsloth | 409 | 3 / 2 / qwen2 | F32:113 Q4_1:196 Q6_K:1 | run | match | 16/16 | 1.2e-03 | 182 | Q4_1 |
-| Qwen3-0.6B-IQ4_NL.gguf | unsloth | 382 | 3 / 2 / qwen2 | F32:113 Q6_K:1 IQ4_NL:196 | refuse | refused |  |  |  | tensor blk.0.attn_q.weight: type IQ4_NL (20) is not supported; i-quants (IQ*) and ternary (TQ*) types are not supported: use a K-quant file (Q4_K_M, Q5_K_M, Q6_K) or Q8_0 |
+| Qwen3-0.6B-IQ4_NL.gguf | unsloth | 382 | 3 / 2 / qwen2 | F32:113 Q6_K:1 IQ4_NL:196 | run | match | 16/16 | 4.9e-04 | 87 | IQ4_NL (supported since #72) |
 | Qwen3-0.6B-BF16.gguf | unsloth | 1198 | 3 / 2 / qwen2 | F32:113 BF16:197 | refuse | refused |  |  |  | tensor token_embd.weight: type BF16 (30) is not supported; use the F16 or Q8_0 file |
 | Qwen2.5-0.5B-Instruct-Q6_K.gguf | lmstudio-community | 506 | 3 / 2 / qwen2 | F32:121 Q8_0:145 Q6_K:24 | run | match | 16/16 | 2.9e-03 | 72 | Q6_K |
 | Qwen2.5-0.5B-Instruct.i1-Q4_K_M.gguf | mradermacher | 398 | 3 / 2 / qwen2 | F32:121 Q5_0:132 Q8_0:13 Q4_K:12 Q6_K:12 | run | match | 16/16 | 5.0e-03 | 348 | imatrix Q4_K_M |
-| Qwen2.5-0.5B-Instruct.i1-IQ2_M.gguf | mradermacher | 329 | 3 / 2 / qwen2 | F32:121 Q5_0:24 Q8_0:1 IQ4_NL:120 IQ3_S:3 IQ2_S:21 | refuse | refused |  |  |  | tensor blk.0.attn_q.weight: type IQ4_NL (20) is not supported (the file has unsupported tensors: 3 IQ3_S, 120 IQ4_NL, 21 IQ2_S); i-quants (IQ*) and ternary (TQ*) types are not supported: use a K-quant file (Q4_K_M, Q5_K_ |
+| Qwen2.5-0.5B-Instruct.i1-IQ2_M.gguf | mradermacher | 329 | 3 / 2 / qwen2 | F32:121 Q5_0:24 Q8_0:1 IQ4_NL:120 IQ3_S:3 IQ2_S:21 | refuse | refused |  |  |  | tensor blk.0.ffn_down.weight: type IQ3_S (21) is not supported (the file has unsupported tensors: 3 IQ3_S, 21 IQ2_S); this i-quant or ternary type is not supported: use a K-quant file (Q4_K_M, Q5_K_M, Q6_K) or Q8_0 |
 | Qwen2.5-0.5B-Instruct.i1-Q4_0_4_4.gguf | mradermacher | 352 | 3 / 2 / qwen2 | F32:121 Q8_0:1 Q4_0_4_4:168 | refuse | refused |  |  |  | tensor blk.0.attn_q.weight: type Q4_0_4_4 (31) is not supported; it is an ARM repacked layout that llama.cpp has dropped: use the Q4_0 file |
-| SmolLM2-360M-Instruct-Q8_0.gguf | bartowski | 386 | 3 / 2 / smollm | F32:65 Q8_0:225 | refuse | refused |  |  |  | pre-tokenizer smollm is not supported (qwen2, llama-bpe) |
+| SmolLM2-360M-Instruct-Q8_0.gguf | bartowski | 386 | 3 / 2 / smollm | F32:65 Q8_0:225 | refuse | refused |  |  |  | pre-tokenizer smollm is not supported (qwen2, llama-bpe, gpt-4o) |
 | tinyllama-1.1b-chat-v1.0.Q4_K_M.gguf | TheBloke | 669 | 3 / 2 / - | F32:45 Q4_K:135 Q6_K:21 | run | match | 16/16 | 1.4e-03 | 279 | 2023 converter (TheBloke) |
-| gpt2.Q8_0.gguf | QuantFactory | 178 | 3 / 2 / gpt-2 | F32:99 Q8_0:50 | refuse | refused |  |  |  | architecture 'gpt2' is not supported (qwen2, qwen3, llama, gemma3, qwen3moe) |
+| gpt2.Q8_0.gguf | QuantFactory | 178 | 3 / 2 / gpt-2 | F32:99 Q8_0:50 | refuse | refused |  |  |  | architecture 'gpt2' is not supported (qwen2, qwen3, llama, gemma3, qwen3moe, gpt-oss) |
 | gemma-3-1b-it-Q4_K_M.gguf | ggml-org | 806 | 3 / 2 / default | F32:157 Q5_0:117 Q8_0:14 Q4_K:39 Q6_K:13 | run | match | 16/16 | 6.4e-03 | 334 | ggml-org gemma3 |
 | google_gemma-3-1b-it-Q4_K_M.gguf | bartowski | 806 | 3 / 2 / default | F32:157 Q5_0:117 Q8_0:14 Q4_K:39 Q6_K:13 | run | drift | 15/16 | 1.5e-02 | 350 | bartowski gemma3 |
 | Llama-3.2-1B-Instruct-Q4_K_M.gguf | bartowski | 808 | 3 / 2 / llama-bpe | F32:34 Q4_K:96 Q6_K:17 | run | match | 16/16 | 3.3e-03 | 130 | llama3.2 |
-| Qwen2.5-0.5B-Instruct-Q2_K.gguf | bartowski | 339 | 3 / 2 / qwen2 | F32:121 Q5_0:24 Q8_0:1 Q3_K:24 IQ4_NL:120 | refuse | refused |  |  |  | tensor blk.0.attn_q.weight: type IQ4_NL (20) is not supported (the file has unsupported tensors: 24 Q3_K, 120 IQ4_NL); i-quants (IQ*) and ternary (TQ*) types are not supported: use a K-quant file (Q4_K_M, Q5_K_M, Q6_K) o |
-| Qwen2.5-0.5B-Instruct-Q3_K_M.gguf | bartowski | 355 | 3 / 2 / qwen2 | F32:121 Q5_0:46 Q5_1:2 Q8_0:1 Q4_K:23 Q5_K:1 IQ4_NL:96 | refuse | refused |  |  |  | tensor blk.0.attn_q.weight: type IQ4_NL (20) is not supported; i-quants (IQ*) and ternary (TQ*) types are not supported: use a K-quant file (Q4_K_M, Q5_K_M, Q6_K) or Q8_0 |
+| Qwen2.5-0.5B-Instruct-Q2_K.gguf | bartowski | 339 | 3 / 2 / qwen2 | F32:121 Q5_0:24 Q8_0:1 Q3_K:24 IQ4_NL:120 | run | match | 16/16 | 2.1e-03 | 121 | Q2_K file: Q3_K + IQ4_NL fallback tensors (896 columns aren't whole 256-blocks); since #72 |
+| Qwen2.5-0.5B-Instruct-Q3_K_M.gguf | bartowski | 355 | 3 / 2 / qwen2 | F32:121 Q5_0:46 Q5_1:2 Q8_0:1 Q4_K:23 Q5_K:1 IQ4_NL:96 | run | match | 16/16 | -1.1e-03 | 330 | Q3_K_M (+ IQ4_NL fallback tensors); since #72 |
 | Qwen3-0.6B-Q8_0.gguf | Qwen | 639 | 3 / 2 / qwen2 | F32:113 Q8_0:197 | run | match | 15/16 | 3.3e-03 | 326 | Qwen official Qwen3 Q8_0 |
 
-**Verdicts:** 8 `match`; 1 `drift`, which is within llama.cpp's own spread (below); 9 clean refusals; 0 bugs. The
-two Q2_K / Q3_K_M files are refused as expected on main, because the Q2_K/Q3_K kernels are in PR #72. They are expected to load once #72
-lands: #72 ("Q2_K, Q3_K (+ IQ4_NL)") also adds IQ4_NL, and its tests use exactly these two files. The two files
-mix types: alongside their K-quants they hold 120 IQ4_NL tensors (896 columns aren't whole 256-blocks, so llama.cpp
-falls back to IQ4_NL), and the "Q2_K" file holds no Q2_K tensors at all, only Q3_K and IQ4_NL.
+**Verdicts (MEASURED, 0bf1d35):**
+- **11 `match`.** Since #72 this includes unsloth's IQ4_NL (16/16, KL 5e-4) and both bartowski Q2_K/Q3_K_M
+  files (16/16 each). Those two hold 120 IQ4_NL tensors alongside their K-quants (896 columns aren't whole
+  256-blocks), and the "Q2_K" file has no Q2_K tensors at all, only Q3_K and IQ4_NL.
+- **1 `drift`**, within llama.cpp's own spread (below).
+- **6 clean refusals.**
+- **0 bugs.**
+
+A KL mean slightly below 0 (Q3_K_M, −1.1e-3) is the estimator: KL over axon's top 20, with llama.cpp's logprob
+floored at its own 20th. That can undershoot when the two top-20 sets differ, so read it as ≈ 0.
 
 **The gemma3 `drift` row, against llama.cpp's own CPU-vs-CUDA spread** (50 prompts of
 `scripts/oracle/llama_logits.py`, bella, same token ids, job 1017-175220-02a3):
@@ -242,7 +249,8 @@ llama.cpp's spread it is a match, and the zoo gate is tighter than llama.cpp's o
 
 **What the zoo found:** before this PR, every i-quant or repacked file was refused as `type ?? (20) is not
 supported`, and an "IQ2_M" file's first unsupported tensor was IQ4_NL, which a user can't connect to the file's
-name. That covered 6 of the 18 files (both IQ files, UD-Q4_K_XL, Q4_0_4_4, and the two Q2_K/Q3_K files). The refusal
+name. That covered 6 of the 18 files at the time (both IQ files, UD-Q4_K_XL, Q4_0_4_4, and the two Q2_K/Q3_K files;
+since #72, IQ4_NL and the Q2_K/Q3_K files run). The refusal
 now names the type, lists every unsupported type in a mixed file, and says which file to get instead (the log
 entry has the before/after). Clean refusals left as they are: SmolLM2's `smollm` pre-tokenizer (a llama-arch
 file Axon could run once that regex is added) and gpt2's architecture.
