@@ -4125,7 +4125,21 @@ fn gpu_products_real_weights_q2k_q3k() {
 /// itself 187/198, 1.23e-2 (1.6x the 1.5B Q4_K_M's 7.8e-3), largest flip
 /// 0.42. So:
 /// - top-1 within 2 points of the CPU's self-agreement and >= 94%;
-/// - every flip below max(0.5, 2x the CPU's largest self-flip margin);
+/// - every flip below max(0.5, 2x the CPU's largest self-flip margin, half
+///   the CPU's own max |dlogit| on the file): flipping a margin m moves two
+///   logits m apart, and the CPU's two kernel sets move single logits by up
+///   to `ac.max_abs` against each other on the same positions. Measured on
+///   the 0.5B Q2_K (sm_120, 1018-014632-e746 and 1017-195144-d5d0, the same
+///   numbers twice): one flip of 0.95 at the haiku prompt's step 22 (EOT vs
+///   "\n"), CPU max |dlogit| 2.29, so a 1.14 bound. It is attention-order
+///   noise, not a product deviation: on the same positions
+///   (dump_logits_positions, 1018-023350-ffd4) the GPU with the split
+///   attention (another in-contract float order, the same weight kernels)
+///   keeps the CPU's token there (margin 0.88), and flips other near-ties
+///   instead (0.53, 0.59); llama.cpp's CPU and CUDA both keep the CPU's token
+///   (1018-022009-945f), though its own CPU vs CUDA spread on this file is
+///   smaller (max flip 0.15; 3.48 on the 0.5B Q3_K_M: 1018-013634-86b9), and
+///   the products are exact (gpu_products_real_weights_q2k_q3k);
 /// - flips at >= 0.5: at most max(2, CPU's own + 2, 2 x the CPU's self-KL
 ///   over the 1.5B Q4_K_M's 7.8e-3, rounded up): a file whose CPU kernel sets
 ///   disagree k times as much gets k times assert_graded's 2;
@@ -4156,7 +4170,7 @@ fn gpu_logits_match_cpu_q2k_q3k() {
             ac.top1
         );
         let ac_flip = ac.flips.iter().fold(0f32, |a, &d| a.max(d));
-        let tie = (2.0 * ac_flip).max(0.5);
+        let tie = (2.0 * ac_flip).max(0.5).max(ac.max_abs / 2.0);
         let self_kl = ac.sum_kl / n as f64;
         let ac_wide = ac.flips.iter().filter(|&&d| d >= 0.5).count();
         let scaled = (2.0 * self_kl / 7.8e-3).ceil() as usize;
