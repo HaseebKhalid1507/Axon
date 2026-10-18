@@ -1138,7 +1138,8 @@ mod tests {
         }
     }
 
-    /// Pool steps of 17..64 rows (past gemvm16: the products split between
+    /// Pool steps of 9..64 rows (9..16: q|k|v and gate|up in one gemvmx
+    /// launch each, `bgemm_x`; past gemvm16: the products split between
     /// gemvm32 and gemm2's partial tiles, `takes_gemvm`; the head in one
     /// product over all rows; samp_tail in launches of HEAD_SUB rows), on
     /// the 0.5B and Llama 1B, mixed greedy and sampled rows: every
@@ -1177,7 +1178,13 @@ mod tests {
                 .collect();
             for vm in [16usize, 32, 0] {
                 net.bf.vm_max = vm;
-                for nb in [17usize, 33, 48, 64] {
+                // nb 9..16: q|k|v and gate|up on gemvmx (the gemvm limit
+                // doesn't apply there, so once).
+                let nbs: &[usize] = match vm {
+                    0 => &[9, 12, 16, 17, 33, 48, 64],
+                    _ => &[17, 33, 48, 64],
+                };
+                for &nb in nbs {
                     let mut p = net.pool(slots, ctx).unwrap();
                     for (i, pr) in prompts.iter().enumerate().take(nb) {
                         net.feed_slot(&mut p, i, &pr[..pr.len() - 1], 0).unwrap();
@@ -1292,7 +1299,7 @@ mod tests {
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .collect();
-            // Each entry "plain", or defines joined by '+' (e.g. "GVM_PF2+GVM_MINB=4").
+            // Each entry "plain", or defines joined by '+' (e.g. "AXON_G2_ZFILL+FOO=1").
             let mods: Vec<(String, crate::cuda::Module)> = kms
                 .iter()
                 .map(|k| {

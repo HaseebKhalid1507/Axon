@@ -1893,11 +1893,12 @@ impl<'g> CudaQwen2<'g> {
         let (Some(fs), true) = (&bf.gemvmx, bf.gemvmx_on) else {
             return Ok(false);
         };
+        if nb > SMALL || !(2..=3).contains(&ms.len()) {
+            return Ok(false);
+        }
         let m0 = ms[0].0;
         let ti = type_index(m0.qt);
-        if nb > SMALL
-            || !(2..=3).contains(&ms.len())
-            || ti >= NTYPES_VM
+        if ti >= NTYPES_VM
             || ms
                 .iter()
                 .any(|(m, _, _)| m.qt != m0.qt || m.cols != m0.cols || m.rb != m0.rb)

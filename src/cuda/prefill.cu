@@ -2093,12 +2093,6 @@ extern "C" __global__ void q6k_to_i8(const u8* __restrict__ w, u64 rb, int nblk,
 // at a time; then each thread runs the fma chains of its outputs over them.
 
 #define GV_THREADS 128
-// gemvm's resident blocks per SM asked of the compiler (launch bounds).
-#ifdef GVM_MINB
-#define GVM_LB __launch_bounds__(GV_THREADS, GVM_MINB)
-#else
-#define GVM_LB __launch_bounds__(GV_THREADS)
-#endif
 
 // A word of the bytes at a 2-byte aligned p.
 __device__ __forceinline__ u32 ldw_a2(const u8* p) {
@@ -2237,22 +2231,13 @@ __device__ __forceinline__ void gemvm_t(const u8* w, u64 rb, int rows, int n, co
     for (int k = 0; k < NF; k++) acc[k] = 0.0f;
     GvW<QT> cur = {}, nxt = {}; // (warps past the last block copy nxt unloaded)
     if (warp < nblk) nxt.load(rws, warp, t);
-#ifdef GVM_PF2
-    GvW<QT> nx2 = {};
-    if (warp + 4 < nblk) nx2.load(rws, warp + 4, t);
-#endif
     for (int base = 0, it = 0; base < nblk; base += CH, it++) {
         int buf = it & 1, end = min(nblk, base + CH);
         // Warp w: blocks w, w + 4, ...
         for (int b = base + warp; b < end; b += 4) {
             int sl = b - base;
             cur = nxt;
-#ifdef GVM_PF2
-            nxt = nx2;
-            if (b + 8 < nblk) nx2.load(rws, b + 8, t);
-#else
             if (b + 4 < nblk) nxt.load(rws, b + 4, t);
-#endif
             float v[NO];
             if constexpr (K45) {
                 float d[2], dmin[2];
@@ -2404,7 +2389,7 @@ __device__ __forceinline__ void gemvm_t(const u8* w, u64 rb, int rows, int n, co
 }
 
 #define GEMVM(NAME, QT, NF)                                                                       \
-    extern "C" __global__ void GVM_LB NAME(                                                       \
+    extern "C" __global__ void __launch_bounds__(GV_THREADS) NAME(                                                       \
         const u8* __restrict__ w, u64 rb, int rows, int n, const u8* __restrict__ act,           \
         u64 astride, int nb, const float* __restrict__ bias, int mode, float* __restrict__ out,  \
         u64 ostride) {                                                                            \
@@ -2436,7 +2421,7 @@ GEMVM(gemvm32_q4_0, QT_Q4_0, 4)
 // Fills the GPU where one matrix alone can't (the 7B's 512-row k and v:
 // 32 blocks on 128 SMs). rows2 0: two matrices.
 #define GEMVMX(NAME, QT, NF)                                                                      \
-    extern "C" __global__ void GVM_LB NAME(                                                       \
+    extern "C" __global__ void __launch_bounds__(GV_THREADS) NAME(                                                       \
         const u8* __restrict__ w0, const u8* __restrict__ w1, const u8* __restrict__ w2,          \
         int rows0, int rows1, int rows2, const float* __restrict__ b0,                           \
         const float* __restrict__ b1, const float* __restrict__ b2, float* __restrict__ o0,       \
