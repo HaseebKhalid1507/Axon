@@ -195,7 +195,11 @@ Defaults, as `axon --help` gives them:
   cache for N tokens, as chat would, to measure a long context's speed.
 - `--forget-to F` (chat): 0.5. When the conversation outgrows `--ctx`, the oldest exchanges
   are forgotten until the rest, with the new message, fills at most F of the context (the
-  newest exchange stays unless the new message needs its room). `min` (or 0): only as many as make room for the reply.
+  newest exchange stays unless the new message needs its room). The next turns append to
+  the cache until it's full again; a reply reserves room for itself (`-n`, or a quarter of
+  the context if unlimited), so with the defaults 0.5 leaves a quarter of the context to grow
+  into. `min`, 0 or 1: only as many as make room for the reply (the old behaviour).
+  Ctrl-C before a reply's first token puts the forgotten exchanges back.
 - `--rope-scaling yarn --rope-scale F [--yarn-orig-ctx N]` (gen, logits, chat, serve): off.
   With it the context is N x F (`--ctx` up to that); also `--yarn-beta-fast` (32),
   `--yarn-beta-slow` (1), `--yarn-mscale` (0.1 ln F + 1; not llama.cpp's `--yarn-attn-factor`). See

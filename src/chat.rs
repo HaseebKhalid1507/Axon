@@ -575,6 +575,9 @@ pub fn special(tok: &Tokenizer, s: &str) -> Option<u32> {
     }
 }
 
+/// A conversation before a turn forgot exchanges: history, turns, messages.
+type Forgotten = (Vec<u32>, Vec<usize>, Vec<(String, usize)>);
+
 /// `Chat::forget_to`'s default: forget down to half the context.
 pub const FORGET_TO: f64 = 0.5;
 
@@ -719,6 +722,21 @@ impl<'a, M: Lm> Chat<'a, M> {
         self.lookup = PromptLookup::new();
     }
 
+    /// A turn stopped before its reply's first token: put back the
+    /// exchanges it forgot (`before`: history, turns, messages). The cache
+    /// holds the shifted history from `dropped_fed` on, so only what's
+    /// before that is still valid.
+    fn undo_forget(&mut self, before: Option<Forgotten>, dropped_fed: usize, r: &mut Reply) {
+        if let Some((hist, turns, msgs)) = before {
+            self.hist = hist;
+            self.turns = turns;
+            self.msgs = msgs;
+            self.fed = self.fed.min(dropped_fed);
+            self.lookup = PromptLookup::new();
+            r.dropped = 0;
+        }
+    }
+
     /// `frame_user` with the system message given (None: not the first exchange).
     fn frame_user_with(fr: &Framing, tok: &Tokenizer, system: Option<&str>, msg: &str) -> Vec<u32> {
         fr.frame_first(tok, "user", system, msg, Some("assistant"))
@@ -728,8 +746,9 @@ impl<'a, M: Lm> Chat<'a, M> {
     /// error from `emit` ends the turn and is returned (the exchange is then
     /// kept up to the tokens emitted). `cancel` is polled between prefill
     /// batches and before each token: true stops the turn, a stop before
-    /// the reply's first token drops the message from the conversation
-    /// (exchanges already forgotten to make room for it stay forgotten).
+    /// the reply's first token drops the message from the conversation and
+    /// puts back the exchanges forgotten to make room for it (they are
+    /// prefilled again by the next turn, which forgets afresh).
     pub fn reply(
         &mut self,
         msg: &str,
@@ -777,7 +796,11 @@ impl<'a, M: Lm> Chat<'a, M> {
         }
         // Forgetting shifts positions, so what's kept is prefilled again:
         // forget down to `forget_to` of the context (never the newest
-        // exchange), and the next turns append to the cache.
+        // exchange), and the next turns append to the cache. The target
+        // counts what's kept and the message only: the reply's room (`close`,
+        // `want`) decides when to forget, not how much, so with unlimited
+        // replies (want = ctx/4) 0.5 leaves a quarter of the context to grow
+        // into. At 1 the target never binds: the same as 0.
         if k > 0 && self.forget_to > 0.0 {
             let target = (self.forget_to.min(1.0) * self.ctx as f64) as usize;
             while k + 1 < n && kept(k) + user.len() > target {
@@ -799,10 +822,13 @@ impl<'a, M: Lm> Chat<'a, M> {
             opened = first.len();
             framed = first;
         }
+        // What a cancel before the reply's first token puts back.
+        let before = (k > 0).then(|| (self.hist.clone(), self.turns.clone(), self.msgs.clone()));
         for _ in 0..k {
             self.drop_oldest();
             r.dropped += 1;
         }
+        let dropped_fed = self.fed;
 
         let start = self.hist.len();
         let turn_fed = self.fed;
@@ -820,6 +846,7 @@ impl<'a, M: Lm> Chat<'a, M> {
         for (i, batch) in chunks.iter().enumerate() {
             if cancel() {
                 self.hist.truncate(start);
+                self.undo_forget(before, dropped_fed, &mut r);
                 r.interrupted = true;
                 return Ok(r);
             }
@@ -896,6 +923,7 @@ impl<'a, M: Lm> Chat<'a, M> {
             self.hist.truncate(start);
             self.fed = start;
             self.lookup = PromptLookup::new();
+            self.undo_forget(before, dropped_fed, &mut r);
             return Ok(r);
         }
         // Every reply token but the last went through the model (to pick the
@@ -1726,7 +1754,11 @@ mod tests {
     /// the context: every reply equals a fresh greedy pass over its
     /// history, the cache after forgetting equals a fresh prefill of what's
     /// kept (byte for byte), and forgetting down to half prefills less, in
-    /// fewer turns, than forgetting the minimum.
+    /// fewer turns, than forgetting the minimum. Before each turn, the same
+    /// message is stopped before its first token at each prefill batch and
+    /// then at the first token: each time the conversation
+    /// comes back as it was, forgotten exchanges included, and the cache
+    /// still equals a fresh prefill of `hist[..fed]`.
     #[test]
     fn full_context_drops_oldest() {
         let Some(m) = crate::testutil::model() else {
@@ -1734,16 +1766,94 @@ mod tests {
         };
         let tok = Tokenizer::from_gguf(&m);
         let net = Qwen2::new(&m);
+        let cost = full_context(
+            &net,
+            &tok,
+            &[(160, 0.0), (160, 0.5), (320, 0.0), (320, 0.5), (320, 0.25)],
+        );
+        // At 320, half: fewer turns forget, fewer tokens prefilled.
+        let (min, half) = (cost[2], cost[3]);
+        assert!(half.2 < min.2 && half.3 < min.3, "{cost:?}");
+    }
+
+    /// `full_context_drops_oldest` on the GPU (`CudaQwen2`): the cache
+    /// after forgetting, and after a stopped turn, == a fresh prefill.
+    #[test]
+    fn full_context_drops_oldest_cuda() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let Some(m) = crate::testutil::model() else {
+            return;
+        };
+        let km = crate::cuda::Kernels::module(&g).unwrap();
+        let tok = Tokenizer::from_gguf(&m);
+        let net = crate::cuda::qwen2::CudaQwen2::new(&g, &km, &m, 2048).unwrap();
+        let cost = full_context(&net, &tok, &[(320, 0.0), (320, 0.5)]);
+        let (min, half) = (cost[0], cost[1]);
+        assert!(half.2 < min.2 && half.3 < min.3, "{cost:?}");
+    }
+
+    /// The cache rows 0..fed == a fresh prefill of `hist[..fed]`, byte for byte.
+    fn assert_fresh_cache<M: crate::kvsave::KvIo>(chat: &Chat<M>, ctx: usize, what: &str) {
+        let net = chat.net;
+        let mut c = net.new_cache(ctx);
+        for (i, b) in chat.hist[..chat.fed]
+            .chunks(crate::PREFILL_BATCH)
+            .enumerate()
+        {
+            net.feed_batch(b, i * crate::PREFILL_BATCH, &mut c);
+        }
+        let mut want = Vec::new();
+        net.kv_save(&c, 0, chat.fed, &mut want).unwrap();
+        assert!(cache_image(chat) == want, "{what}: cache differs");
+    }
+
+    /// `full_context_drops_oldest`'s body: (ctx, forget_to, turns that
+    /// forgot, tokens prefilled) per config.
+    fn full_context<M: crate::kvsave::KvIo>(
+        net: &M,
+        tok: &Tokenizer,
+        configs: &[(usize, f64)],
+    ) -> Vec<(usize, f64, usize, usize)> {
+        use std::cell::Cell;
         let mut cost = Vec::new();
-        for (ctx, forget_to) in [(160, 0.0), (160, 0.5), (320, 0.0), (320, 0.5), (320, 0.25)] {
+        for &(ctx, forget_to) in configs {
             let what = format!("ctx {ctx} forget_to {forget_to}");
-            let mut chat = Chat::new(&net, &tok, Some("Be brief."), ctx).unwrap();
+            let mut chat = Chat::new(net, tok, Some("Be brief."), ctx).unwrap();
             chat.max_reply = 24;
             chat.forget_to = forget_to;
             let sys = chat.hist.clone();
             let (mut dropped, mut refills, mut fed) = (0, 0, 0);
+            let (mut undone, mut undone_late) = (0, 0);
             for msg in MSGS.iter().cycle().take(16) {
                 let n = chat.turns.len();
+                let state = (chat.hist.clone(), chat.turns.clone(), chat.msgs.clone());
+                // Stopped at poll 1, 2, ...: in the prefill until a stop
+                // lands at the first token (`prompt_tokens` set).
+                let mut late = false;
+                for at in 1..=8 {
+                    if late {
+                        break;
+                    }
+                    let polls = Cell::new(0);
+                    let stop = || {
+                        polls.set(polls.get() + 1);
+                        polls.get() >= at
+                    };
+                    let r = chat.reply(msg, &stop, &mut |_| Ok(())).unwrap();
+                    assert!(
+                        r.interrupted && r.ids.is_empty() && r.dropped == 0,
+                        "{what}"
+                    );
+                    let now = (chat.hist.clone(), chat.turns.clone(), chat.msgs.clone());
+                    assert!(
+                        now == state,
+                        "{what}: a stopped turn changed the conversation"
+                    );
+                    assert_fresh_cache(&chat, ctx, &format!("{what}, stopped at poll {at}"));
+                    late |= r.prompt_tokens > 0;
+                }
                 let r = chat.reply(msg, &|| false, &mut |_| Ok(())).unwrap();
                 fed += r.prompt_tokens;
                 assert!(chat.hist.len() <= ctx, "{what}");
@@ -1757,6 +1867,9 @@ mod tests {
                 if r.dropped == 0 {
                     continue;
                 }
+                // The stopped tries above forgot as this one did, then put it back.
+                undone += 1;
+                undone_late += usize::from(late);
                 dropped += r.dropped;
                 refills += 1;
                 // With a target, what's kept (the new message included)
@@ -1767,37 +1880,23 @@ mod tests {
                     let target = (forget_to * ctx as f64) as usize;
                     assert!(kept + user <= target || r.dropped + 1 >= n, "{what}");
                 }
-                // The cache == a fresh prefill of the kept history.
-                let mut c = net.new_cache(ctx);
-                for (i, b) in chat.hist[..chat.fed]
-                    .chunks(crate::PREFILL_BATCH)
-                    .enumerate()
-                {
-                    net.feed_batch(b, i * crate::PREFILL_BATCH, &mut c);
-                }
-                let mut want = Vec::new();
-                crate::kvsave::KvIo::kv_save(&net, &c, 0, chat.fed, &mut want).unwrap();
-                assert!(cache_image(&chat) == want, "{what}: cache differs");
+                assert_fresh_cache(&chat, ctx, &what);
             }
-            assert!(dropped > 0, "{what}");
+            assert!(dropped > 0 && undone > 0 && undone_late > 0, "{what}");
             cost.push((ctx, forget_to, refills, fed));
             chat.reset();
             assert_eq!(chat.hist, sys);
             assert!(chat.turns.is_empty());
         }
-        eprintln!(
-            "full_context_drops_oldest (ctx, forget_to, turns that forgot, prefilled): {cost:?}"
-        );
-        // At 320, half: fewer turns forget, fewer tokens prefilled.
-        let (min, half) = (cost[2], cost[3]);
-        assert!(half.2 < min.2 && half.3 < min.3, "{cost:?}");
+        eprintln!("full_context (ctx, forget_to, turns that forgot, prefilled): {cost:?}");
+        cost
     }
 
     /// Forgetting the fewest exchanges vs down to half, over a scripted
     /// greedy chat on the GPU (else the CPU): per config, the turns that
     /// forgot, the tokens prefilled, and time to first token per turn.
     /// 0.5B (`MODEL`) at `--ctx` 2048, -n 160; `forget_bench_7b`: 7B Q4_K_M
-    /// at 8192, -n 400. Env overrides: `AXON_FB_MODEL` (a file in models/),
+    /// at 8192, -n 400; each also with -n unlimited. Env overrides: `AXON_FB_MODEL` (a file in models/),
     /// `AXON_FB_CTX`, `AXON_FB_TURNS` (40), `AXON_FB_N`, `AXON_FB_ROUNDS` (2,
     /// configs interleaved). `chat::tests::forget_bench -- --ignored --nocapture`.
     #[test]
@@ -1890,14 +1989,28 @@ mod tests {
                     .copied()
                     .unwrap_or(0.0)
             };
+            // p95 of 40 turns hides a handful of forgetting turns: their
+            // own median and the max are reported too.
+            let med = |mut v: Vec<f64>| {
+                v.sort_by(f64::total_cmp);
+                v.get(v.len() / 2).copied().unwrap_or(f64::NAN)
+            };
+            let ftt = med(t.iter().filter(|x| x.0 > 0).map(|x| x.3 * 1e3).collect());
+            let stt = med(t[first..]
+                .iter()
+                .filter(|x| x.0 == 0)
+                .map(|x| x.3 * 1e3)
+                .collect());
             eprintln!(
                 "FB {name} forget_to {forget_to}: turns {} | forgot on {forgot} turns (first at turn {}) \
                  | turns per re-prefill {:.2} | prefilled {prefilled} tok ({after} from the first forget on) \
-                 | ttft ms mean {mean:.1} p95 {:.1} | after the window filled: mean {fmean:.1} p95 {:.1}",
+                 | ttft ms mean {mean:.1} p95 {:.1} max {:.1} | after the window filled: mean {fmean:.1} \
+                 p95 {:.1} | forgetting turns: median {ftt:.1} | other turns after the fill: median {stt:.1}",
                 t.len(),
                 first + 1,
                 (t.len() - first) as f64 / forgot.max(1) as f64,
                 p95(&tt),
+                tt.last().copied().unwrap_or(0.0),
                 p95(&full),
             );
             for (i, x) in t.iter().enumerate() {
@@ -1911,31 +2024,35 @@ mod tests {
                 );
             }
         };
+        // -n as given, then unlimited (the CLI default: a reply reserves
+        // ctx/4, so halving leaves a quarter of the context to grow into).
         let configs = [0.0, 0.5];
         let gpu = crate::testutil::gpu();
+        let label = |dev: &str, n: usize, round: usize| match n {
+            usize::MAX => format!("{dev} n=unlimited r{round}"),
+            n => format!("{dev} n={n} r{round}"),
+        };
         match &gpu {
             Some(g) => {
                 let km = crate::cuda::Kernels::module_for(g, &m).unwrap();
                 let net = crate::cuda::qwen2::CudaQwen2::new(g, &km, &m, ctx).unwrap();
-                for round in 0..rounds {
-                    for &f in &configs {
-                        report(
-                            &format!("cuda r{round}"),
-                            f,
-                            &one(&net, &tok, ctx, n, f, &script),
-                        );
+                for n in [n, usize::MAX] {
+                    for round in 0..rounds {
+                        for &f in &configs {
+                            let t = one(&net, &tok, ctx, n, f, &script);
+                            report(&label("cuda", n, round), f, &t);
+                        }
                     }
                 }
             }
             None => {
                 let net = Qwen2::new(&m);
-                for round in 0..rounds {
-                    for &f in &configs {
-                        report(
-                            &format!("cpu r{round}"),
-                            f,
-                            &one(&net, &tok, ctx, n, f, &script),
-                        );
+                for n in [n, usize::MAX] {
+                    for round in 0..rounds {
+                        for &f in &configs {
+                            let t = one(&net, &tok, ctx, n, f, &script);
+                            report(&label("cpu", n, round), f, &t);
+                        }
                     }
                 }
             }

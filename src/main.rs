@@ -120,10 +120,12 @@ flags:
               prompt and -n), to see a long context's speed (it may split the model)
   --forget-to F  chat: when the conversation outgrows --ctx, forget the oldest exchanges until
               the rest (with the new message) fills at most F of the context (default 0.5; the
-              newest exchange stays unless the new message needs its room). Forgetting shifts positions, so what's kept is
-              prefilled again: half the context means the next turns append to the cache instead
-              of each prefilling nearly all of it again. min (or 0): forget only as many as make
-              room for the reply (every turn after the context fills prefills it again)
+              newest exchange stays unless the new message needs its room). Forgetting shifts
+              positions, so what's kept is prefilled again; with room left, the next turns append
+              to the cache instead (the room is what's free less a reply's: with -n unlimited a
+              reply reserves a quarter of the context, so 0.5 leaves a quarter). min, 0 or 1:
+              forget only as many as make room for the reply (once the context is full, nearly
+              every turn prefills it all again)
   --session F chat: keep the conversation in file F: loaded at start if it exists, saved after
               every reply (new positions appended). Its KV cache comes back from the file if
               it was made with this model, KV type, backend and GPU; else it is prefilled again
@@ -1016,8 +1018,9 @@ fn forget_to_flag(v: &str) -> Result<f64, String> {
 /// `chat` subcommand: args = [axon, chat, model, flags...]. Each line of
 /// stdin is a message; on a terminal it's an interactive session.
 fn run_chat(args: &[String]) -> std::io::Result<()> {
-    const CHAT_USAGE: &str = "usage: axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [--forget-to F] [-n N] \
-         [--draft K] [--draft-model PATH] [--device D] [--gpu-layers N] [--gpus L] [--kv T] [--session FILE]";
+    const CHAT_USAGE: &str = "usage: axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] \
+         [--forget-to F] [-n N] [--draft K] [--draft-model PATH] [--device D] [--gpu-layers N] \
+         [--gpus L] [--kv T] [--session FILE]";
     let Some(path) = args.get(2).filter(|p| !p.starts_with('-')) else {
         fail(CHAT_USAGE);
     };
@@ -1597,8 +1600,16 @@ fn chat_repl<M: kvsave::KvIo>(
             notes.push_str(&format!(" | cut at {} tokens", r.ids.len()));
         }
         if r.dropped > 0 {
+            let f = conv.forget_to;
+            let to = if f <= 0.0 || f >= 1.0 {
+                "to fit".to_string()
+            } else if f == 0.5 {
+                "(down to half the context)".to_string()
+            } else {
+                format!("(down to {:.0}% of the context)", f * 100.0)
+            };
             notes.push_str(&format!(
-                " | forgot the oldest {} exchange{} to fit",
+                " | forgot the oldest {} exchange{} {to}",
                 r.dropped,
                 if r.dropped == 1 { "" } else { "s" }
             ));
