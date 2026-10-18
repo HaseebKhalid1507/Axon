@@ -290,3 +290,26 @@ fn gpu_lock_is_reentrant() {
         return;
     };
 }
+
+/// The gpt-oss test model (`AXON_TEST_GPTOSS` overrides it):
+/// ggml-org/gpt-oss-20b-GGUF's MXFP4 file (12.1 GB, sha256 27cd6c43...).
+/// Optional: None, with a note, when it's missing. Mapped, never copied.
+pub const GPTOSS_MODEL: &str = "models/gpt-oss-20b-MXFP4.gguf";
+
+pub fn gptoss_model_path() -> Option<PathBuf> {
+    let path = match std::env::var_os("AXON_TEST_GPTOSS") {
+        Some(p) => PathBuf::from(p),
+        None => Path::new(env!("CARGO_MANIFEST_DIR")).join(GPTOSS_MODEL),
+    };
+    if !path.exists() {
+        eprintln!("skipping: {} not present (optional)", path.display());
+        return None;
+    }
+    Some(path)
+}
+
+/// The gpt-oss test model (`gptoss_model_path`), or None to skip.
+pub fn gptoss_model() -> Option<Model> {
+    let path = gptoss_model_path()?;
+    Some(gguf::load_with(path.to_str().expect("utf-8 path"), Some(false)).expect("load gpt-oss"))
+}

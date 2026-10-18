@@ -1,0 +1,39 @@
+# Tests the FAST tier (scripts/test-tier.sh fast) skips: exact libtest names, one per line, '#' comments.
+# The FULL tier (release + debug-assertion suites, every test) runs all of them before a PR is merged.
+# Seconds: serial time of each on an exclusive 4090 (docs/log/2026-10-18-test-speed.md); the list is ~39 % of
+# the release suite. test-tier.sh checks that every name here exists, so a renamed test can't drop out silently.
+# These are NOT redundant: each is the only test of some shape or weight-type combination, listed below. The fast
+# tier accepts not covering them between review rounds; the full tier is where they're checked.
+
+# Llama 3B / 8B batchings + verify, f16 and q8/g128 caches (232 s). Head size 128 with GQA 3 (3B) / 4 (8B), Q4_K
+# weights. Llama 1B in the fast tier is head size 64, GQA 4, q8/g64+g32, so it covers none of that. In the fast tier
+# head size 128 comes only from Qwen3 0.6B (GQA 2, Q8_0 weights, q8/g128 + g32 in gpu_q8_qwen3) and the 1.5B verify
+# tests (gpu_verify_matches_forward_argmax_1_5b, _q8_1_5b). The llama-specific RoPE factors and row reorder at head
+# size 128 are full-tier only. Also a witness test in the open pod ILLEGAL_ADDRESS investigation (sa_315): it was
+# in flight in 3 of the faulting runs.
+cuda::qwen2::tests::gpu_bits_llama_3b_8b
+# Qwen3 4B (51 + 61 + 7 s): Q4_K_M weights (Q4_K/Q6_K), q_dim 4096 != dim 2560, GQA 4. Qwen3 0.6B in the fast tier
+# is Q8_0 weights, GQA 2. Qwen3 with K-quant weights is full-tier only.
+cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_qwen3_4b
+cuda::qwen2::tests::gpu_q8_qwen3_4b
+cuda::qwen2::tests::gpu_verify_matches_forward_argmax_qwen3_4b
+# Qwen2.5 1.5B: head size 128 (0.5B is 64), GQA 6 (0.5B 7), Q4_K_M. The fast tier keeps its verify and q8-accuracy
+# tests (gpu_verify_matches_forward_argmax_1_5b, _q8_1_5b, gpu_q8_kv_close_to_f16_1_5b) and its dequant check.
+# Batched prefill bits, GPU vs CPU grading and the hybrid/streamed splits at head size 128 on Qwen2 are full-tier only.
+cuda::qwen2::tests::gpu_logits_match_cpu_natural_long_1_5b
+cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_1_5b
+cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_1_5b
+cuda::qwen2::tests::gpu_continuations_match_cpu_1_5b
+cuda::qwen2::tests::gpu_logits_match_cpu_1_5b
+hybrid::tests::hybrid_logits_match_cpu_1_5b
+hybrid::tests::stream_logits_match_cpu_1_5b
+hybrid::tests::hybrid_q8_close_to_f16_1_5b
+hybrid::tests::hybrid_prefill_batchings_bit_identical_1_5b
+hybrid::tests::hybrid_prefill_batchings_bit_identical_q8_1_5b
+hybrid::tests::stream_prefill_is_gpu_bits_1_5b
+cuda::qwen2::pipeline::tests::pipeline_same_device_matches_cuda_1_5b
+# NVRTC builds for GPUs nobody tests on (sm_70/75/80; sm_90a/sm_90): 63 + 84 s of compiling. test-tier.sh keeps
+# them in the fast tier when the branch or the working tree changes src/cuda/*.cu, src/cuda/mod.rs or
+# src/cuda/ffi.rs.
+cuda::tests::nvrtc_kernels_compile_for_old_archs
+cuda::tests::nvrtc_kernels_compile_for_sm90a

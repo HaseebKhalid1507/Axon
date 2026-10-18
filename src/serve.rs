@@ -34,7 +34,9 @@
 pub mod api;
 mod engine;
 pub mod http;
+mod ollama;
 pub mod ops;
+mod responses;
 pub mod tools;
 
 use crate::chat::{self, Framing, special};
@@ -228,6 +230,9 @@ struct Job {
     stops: Vec<String>,
     /// Route `<think>...</think>` (these ids) to reasoning.
     think: Option<(u32, u32)>,
+    /// gpt-oss (harmony): the analysis channel to reasoning, the final
+    /// channel to content, the markers nowhere.
+    channels: Option<chat::Channels>,
     cancel: Arc<AtomicBool>,
     tx: mpsc::Sender<Event>,
     id: u64,
@@ -248,6 +253,8 @@ struct Shared {
     model: OnceLock<Loaded>,
     model_id: String,
     alias: Option<String>,
+    /// The model file (ollama.rs: its size and date).
+    path: String,
     no_think: bool,
     think_inline: bool,
     sample: SampleArgs,
@@ -341,6 +348,13 @@ impl Shared {
     fn serves(&self, model: &str) -> bool {
         model == self.model_id || self.alias.as_deref() == Some(model)
     }
+
+    /// The names the model answers to.
+    fn names(&self) -> Vec<&str> {
+        std::iter::once(self.model_id.as_str())
+            .chain(self.alias.as_deref())
+            .collect()
+    }
 }
 
 fn unix_now() -> u64 {
@@ -355,6 +369,7 @@ struct TextOut<'t> {
     tok: &'t Tokenizer,
     utf8: Utf8Stream,
     think: Option<(u32, u32)>,
+    channels: Option<chat::Channels>,
     /// Inside `<think>...</think>`.
     reasoning: bool,
     /// Before the first token (a thinking reply opens with `<think>`).
@@ -368,6 +383,17 @@ impl TextOut<'_> {
     /// One more token: (content, reasoning, a stop string was hit).
     fn push(&mut self, id: u32) -> (String, String, bool) {
         let first = std::mem::replace(&mut self.first, false);
+        if let Some(ch) = &mut self.channels {
+            let bytes = self.tok.decode_bytes(&[id]);
+            return match ch.push(id, &bytes) {
+                chat::Part::Hidden => Default::default(),
+                chat::Part::Reasoning => (String::new(), self.utf8.push(&bytes), false),
+                chat::Part::Answer => {
+                    let (c, hit) = self.stop.push(&self.utf8.push(&bytes));
+                    (c, String::new(), hit)
+                }
+            };
+        }
         if let Some((open, close)) = self.think {
             if first && id == open {
                 self.reasoning = true;
@@ -457,6 +483,7 @@ fn text_out<'t>(tok: &'t Tokenizer, job: &Job) -> TextOut<'t> {
         tok,
         utf8: Utf8Stream::default(),
         think: job.think,
+        channels: job.channels.clone(),
         reasoning: false,
         first: true,
         strip_nl: false,
@@ -711,6 +738,9 @@ struct Loaded {
     /// What decides the output bits (`crate::identity`): every response's
     /// `system_fingerprint`, GET /identity.
     identity: crate::identity::Identity,
+    /// The GGUF's architecture and parameter count (ollama.rs: /api/show).
+    arch: String,
+    params: u64,
 }
 
 /// Load the model and serve jobs until every sender is gone. Runs on its
@@ -802,6 +832,10 @@ fn engine(
              model's {want} tokens would take GPU memory from its layers \
              (--ctx N for another)"
         )),
+        Backend::Moe(_) => Some(format!(
+            "{ctx} fit on the GPU beside the attention weights, of the model's {want} \
+             (--ctx N for another)"
+        )),
         Backend::Cpu(_) => None,
     };
     let (ctx, why) = match &net {
@@ -825,6 +859,7 @@ fn engine(
         Backend::Cuda(n) => format!("cuda, kv {}", n.kv_name()),
         Backend::Hybrid(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
         Backend::Pipeline(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
+        Backend::Moe(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
         Backend::Cpu(_) => "cpu".into(),
     };
     let drafts = dm.as_ref().map_or(String::new(), |d| {
@@ -952,6 +987,8 @@ fn engine(
             max_token_bytes: tok.max_token_bytes(),
             banner,
             identity,
+            arch: model.arch.clone(),
+            params: model.total_params(),
         })
         .is_err()
     {
@@ -1392,6 +1429,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
     let sh = Arc::new(Shared {
         model: OnceLock::new(),
         model_id: model_id.clone(),
+        path: o.path.clone(),
         alias: o.alias,
         no_think: o.no_think,
         think_inline: o.think_inline,
@@ -1541,10 +1579,12 @@ fn connection(s: TcpStream, sh: &Shared) {
                 // unless it answers a refused HEAD.
                 let refused = c.refused.take();
                 c.head_only = refused.as_ref().is_some_and(|(_, m)| m == "HEAD");
+                let path = c.path.take();
                 if e.status == 401 {
-                    let _ = unauthorized(&mut c, false);
+                    let _ = unauthorized(&mut c, false, path.as_deref());
                 } else {
-                    let body = ApiError::new(e.status, "invalid_request_error", e.msg).json();
+                    let e = ApiError::new(e.status, "invalid_request_error", e.msg);
+                    let body = error_body(path.as_deref(), &e);
                     let _ = c.respond(e.status, "application/json", body.as_bytes(), false, &[]);
                 }
                 let route = refused.map_or("other", |(p, _)| ops::route_label(&p));
@@ -1618,14 +1658,29 @@ fn refused(key: Option<&str>, req: &Request) -> bool {
     })
 }
 
-/// The 401 for a request without the right key (OpenAI's error shape).
-fn unauthorized<S: io::Read + Write>(c: &mut Conn<S>, keep: bool) -> io::Result<()> {
+/// `e`'s body in the shape of the API `path` belongs to: ollama's
+/// `{"error": "..."}` on /api/*, else OpenAI's (also when the path isn't
+/// known: a request head that didn't parse).
+fn error_body(path: Option<&str>, e: &ApiError) -> String {
+    if path.is_some_and(ollama::is_path) {
+        ollama::error_json(&e.msg)
+    } else {
+        e.json()
+    }
+}
+
+/// The 401 for a request to `path` without the right key.
+fn unauthorized<S: io::Read + Write>(
+    c: &mut Conn<S>,
+    keep: bool,
+    path: Option<&str>,
+) -> io::Result<()> {
     let mut e = ApiError::new(401, "invalid_request_error", ops::AUTH_MSG);
     e.code = Some("invalid_api_key");
     c.respond(
         401,
         "application/json",
-        e.json().as_bytes(),
+        error_body(path, &e).as_bytes(),
         keep,
         &[("WWW-Authenticate", "Bearer")],
     )
@@ -1636,30 +1691,22 @@ fn route(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared) -> io::Result<bool
     let keep = req.keep_alive;
     let methods = match req.path.as_str() {
         "/v1/models" | "/health" | "/identity" | "/metrics" | "/slots" => "GET, HEAD, OPTIONS",
-        "/v1/chat/completions" | "/v1/completions" => "POST, OPTIONS",
-        _ => "",
-    };
-    let loading = || {
-        ApiError::new(
-            503,
-            "server_error",
-            "the model is loading; try again shortly",
-        )
+        "/v1/chat/completions" | "/v1/completions" | "/v1/responses" => "POST, OPTIONS",
+        p => ollama::methods(p).unwrap_or(""),
     };
     if refused(sh.api_key.as_deref(), req) {
-        unauthorized(c, keep)?;
+        unauthorized(c, keep, Some(&req.path))?;
         return Ok(keep);
     }
     match (req.method.as_str(), req.path.as_str()) {
-        (_, _) if methods.is_empty() => api_err(
-            c,
-            ApiError::new(
+        (_, _) if methods.is_empty() => {
+            let e = ApiError::new(
                 404,
                 "invalid_request_error",
                 format!("no route {}", req.path),
-            ),
-            keep,
-        ),
+            );
+            json_reply(c, 404, &error_body(Some(&req.path), &e), keep)
+        }
         ("OPTIONS", _) => {
             // A CORS preflight (when --cors is on), or a plain OPTIONS.
             let mut h = vec![("Allow", methods)];
@@ -1719,12 +1766,14 @@ fn route(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared) -> io::Result<bool
         },
         ("POST", "/v1/chat/completions") => completion(c, req, sh, true),
         ("POST", "/v1/completions") => completion(c, req, sh, false),
+        ("POST", "/v1/responses") => responses::handle(c, req, sh),
+        (m, p) if ollama::serves(m, p) => ollama::route(c, req, sh),
         (_, _) => {
             let e = ApiError::new(405, "invalid_request_error", format!("use {methods}"));
             c.respond(
                 405,
                 "application/json",
-                e.json().as_bytes(),
+                error_body(Some(&req.path), &e).as_bytes(),
                 keep,
                 &[("Allow", methods)],
             )?;
@@ -1735,25 +1784,85 @@ fn route(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared) -> io::Result<bool
 
 /// /v1/chat/completions (`chat`) and /v1/completions.
 fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -> io::Result<bool> {
-    let keep = req.keep_alive;
     // Its arrival (the body read): TTFT counts tokenizing and the queue too.
     let arrived = Instant::now();
+    let out = if chat { Out::Chat } else { Out::Text };
+    if sh.model.get().is_none() {
+        return out.err(c, loading(), req.keep_alive);
+    }
+    match api::parse(&req.body, chat) {
+        Ok(g) => run_request(c, req, sh, g, out, arrived),
+        Err(e) => out.err(c, e, req.keep_alive),
+    }
+}
+
+fn loading() -> ApiError {
+    ApiError::new(
+        503,
+        "server_error",
+        "the model is loading; try again shortly",
+    )
+}
+
+/// The API a generation request came in on: how it is answered. Every
+/// route turns its body into a `GenReq` (the chat-completions request),
+/// and `run_request` runs it the one way.
+pub(crate) enum Out {
+    Chat,
+    Text,
+    /// /v1/responses (responses.rs).
+    Responses(Box<responses::Req>),
+    /// /api/chat and /api/generate (ollama.rs).
+    Ollama(Box<ollama::Req>),
+}
+
+impl Out {
+    /// An error in this API's shape.
+    fn err<S: io::Read + Write>(
+        &self,
+        c: &mut Conn<S>,
+        e: ApiError,
+        keep: bool,
+    ) -> io::Result<bool> {
+        match self {
+            Out::Ollama(_) => json_reply(c, e.status, &ollama::error_json(&e.msg), keep),
+            _ => api_err(c, e, keep),
+        }
+    }
+
+    /// The request field a prompt-size error names.
+    fn prompt_param(&self, g: &api::GenReq) -> &'static str {
+        match (self, &g.prompt) {
+            (Out::Responses(_), _) => "input",
+            (_, Prompt::Chat { .. }) => "messages",
+            (_, Prompt::Text(_)) => "prompt",
+        }
+    }
+
+    fn id_prefix(&self) -> &'static str {
+        match self {
+            Out::Chat => "chatcmpl",
+            Out::Text => "cmpl",
+            Out::Responses(_) => "resp",
+            Out::Ollama(_) => "ollama",
+        }
+    }
+}
+
+/// Run a parsed generation request and answer it in `out`'s shape.
+fn run_request(
+    c: &mut Conn<TcpStream>,
+    req: &Request,
+    sh: &Shared,
+    g: api::GenReq,
+    out: Out,
+    arrived: Instant,
+) -> io::Result<bool> {
+    let keep = req.keep_alive;
     let Some(m) = sh.model.get() else {
-        return api_err(
-            c,
-            ApiError::new(
-                503,
-                "server_error",
-                "the model is loading; try again shortly",
-            ),
-            keep,
-        );
+        return out.err(c, loading(), keep);
     };
     let created = unix_now();
-    let g = match api::parse(&req.body, chat) {
-        Ok(g) => g,
-        Err(e) => return api_err(c, e, keep),
-    };
     if let Some(m) = &g.model
         && !sh.serves(m)
     {
@@ -1764,7 +1873,7 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
         );
         e.param = Some("model");
         e.code = Some("model_not_found");
-        return api_err(c, e, keep);
+        return out.err(c, e, keep);
     }
     // More bytes than the context's worth of the longest token: more
     // tokens than the context, without spending the time to encode them.
@@ -1774,21 +1883,21 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
     } + g.tools.as_ref().map_or(0, tools::ToolReq::extra_bytes);
     let too_long = |n: String| {
         let mut e = ApiError::bad(
-            if chat { "messages" } else { "prompt" },
+            out.prompt_param(&g),
             format!("the prompt is {n}; the context is {} tokens (--ctx)", m.ctx),
         );
         e.code = Some("context_length_exceeded");
         e
     };
     if bytes > m.ctx.saturating_mul(m.max_token_bytes) {
-        return api_err(c, too_long(format!("{bytes} bytes")), keep);
+        return out.err(c, too_long(format!("{bytes} bytes")), keep);
     }
     // --max-prompt-tokens: refused before prefill (and, past its bytes'
     // worth of the longest token, before encoding).
     let over_max = |n: String| {
         sh.metrics.refused_prompts.fetch_add(1, Ordering::Relaxed);
         let mut e = ApiError::bad(
-            if chat { "messages" } else { "prompt" },
+            out.prompt_param(&g),
             format!(
                 "the prompt is {n}; this server takes at most {} (--max-prompt-tokens)",
                 sh.max_prompt_tokens.unwrap_or(0)
@@ -1800,13 +1909,14 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
     if let Some(max) = sh.max_prompt_tokens
         && bytes > max.saturating_mul(m.max_token_bytes)
     {
-        return api_err(c, over_max(format!("{bytes} bytes")), keep);
+        return out.err(c, over_max(format!("{bytes} bytes")), keep);
     }
     let mut parser = None;
+    let mut channels = None;
     let (prompt, stop_ids, think) = match &g.prompt {
         Prompt::Chat { messages, no_think } => {
             let Some(t) = &m.template else {
-                return api_err(
+                return out.err(
                     c,
                     ApiError::new(
                         400,
@@ -1818,6 +1928,7 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
                 );
             };
             let no_think = no_think.unwrap_or(sh.no_think) && t.thinks();
+            channels = chat::Channels::new(&t.fr).filter(|_| !sh.think_inline);
             let think = t
                 .think
                 .as_ref()
@@ -1835,7 +1946,7 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
                         let think = think.filter(|_| !r.no_reasoning);
                         (r.ids, t.stop().to_vec(), think)
                     }
-                    Err(e) => return api_err(c, e, keep),
+                    Err(e) => return out.err(c, e, keep),
                 },
             }
         }
@@ -1843,13 +1954,13 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
         Prompt::Text(s) => (m.tok.encode_prompt(s), m.tok.eog(), None),
     };
     if prompt.is_empty() {
-        return api_err(c, ApiError::bad("prompt", "the prompt is empty"), keep);
+        return out.err(c, ApiError::bad("prompt", "the prompt is empty"), keep);
     }
     if prompt.len() >= m.ctx {
-        return api_err(c, too_long(format!("{} tokens", prompt.len())), keep);
+        return out.err(c, too_long(format!("{} tokens", prompt.len())), keep);
     }
     if sh.max_prompt_tokens.is_some_and(|max| prompt.len() > max) {
-        return api_err(c, over_max(format!("{} tokens", prompt.len())), keep);
+        return out.err(c, over_max(format!("{} tokens", prompt.len())), keep);
     }
     let n = sh.next_id.fetch_add(1, Ordering::Relaxed);
     let (tx, rx) = mpsc::channel();
@@ -1865,6 +1976,7 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
         stop_ids,
         stops: g.stop.clone(),
         think,
+        channels,
         cancel: cancel.clone(),
         tx,
         id: n,
@@ -1875,25 +1987,26 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
             sh.queued.fetch_add(1, Ordering::Relaxed);
         }
         Err(mpsc::TrySendError::Full(_)) => {
-            return api_err(
+            return out.err(
                 c,
                 ApiError::new(503, "server_error", "too many queued requests"),
                 keep,
             );
         }
         Err(mpsc::TrySendError::Disconnected(_)) => {
-            return api_err(
+            return out.err(
                 c,
                 ApiError::new(503, "server_error", "the server is shutting down"),
                 false,
             );
         }
     }
-    let id = format!(
-        "{}-{n:x}{:x}",
-        if chat { "chatcmpl" } else { "cmpl" },
-        sh.created
-    );
+    let id = match out {
+        // Keys of the in-memory store (previous_response_id): unguessable,
+        // and unique in the process, not only per server.
+        Out::Responses(_) => responses::fresh_id(),
+        _ => format!("{}-{n:x}{:x}", out.id_prefix(), sh.created),
+    };
     let model = g.model.as_deref().unwrap_or(&sh.model_id);
     let model = (model, m.identity.fingerprint());
     let _flight = InFlight::new(&sh.metrics.in_flight);
@@ -1905,11 +2018,29 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
             // Never slower than without the flag.
             let _ = c.s.set_write_timeout(Some(idle.min(WRITE_TIMEOUT)));
         }
-        let r = stream(c, req, &g, &mut ev, chat, &id, model, created, parser);
+        let r = match &out {
+            Out::Chat | Out::Text => {
+                let chat = matches!(out, Out::Chat);
+                stream(c, req, &g, &mut ev, chat, &id, model, created, parser)
+            }
+            Out::Responses(x) => {
+                responses::stream(c, req, x, m.tok, &mut ev, &id, model, created, parser)
+            }
+            Out::Ollama(x) => ollama::stream(c, req, x, &mut ev, model, arrived, parser),
+        };
         let _ = c.s.set_write_timeout(Some(WRITE_TIMEOUT));
         r
     } else {
-        whole(c, keep, &mut ev, chat, &id, model, created, parser)
+        match &out {
+            Out::Chat | Out::Text => {
+                let chat = matches!(out, Out::Chat);
+                whole(c, keep, &mut ev, chat, &id, model, created, parser)
+            }
+            Out::Responses(x) => {
+                responses::whole(c, keep, x, m.tok, &mut ev, &id, model, created, parser)
+            }
+            Out::Ollama(x) => ollama::whole(c, keep, x, &mut ev, model, arrived, parser),
+        }
     };
     // A write blocked for the stall time is a stalled client too.
     let blocked = |e: &io::Error| {

@@ -71,6 +71,28 @@
 //! <bos><start_of_turn>user\n{system}\n\n{message}<end_of_turn>\n
 //! <start_of_turn>model\n{reply}<end_of_turn>\n
 //! ```
+//!
+//! gpt-oss's harmony format (a vocabulary with `<|start|>`, `<|message|>`,
+//! `<|channel|>`, `<|end|>` and `<|return|>`), its GGUF template without
+//! tools, with a fixed date (`HARMONY_DATE`, so a conversation's tokens
+//! don't depend on the day) and the default reasoning effort:
+//!
+//! ```text
+//! <|start|>system<|message|>{HARMONY_SYSTEM}<|end|>
+//! <|start|>developer<|message|># Instructions\n\n{system}\n\n<|end|>   (with a system message)
+//! <|start|>user<|message|>{message}<|end|>
+//! <|start|>assistant<|channel|>final<|message|>{reply}<|end|>
+//! ```
+//!
+//! (no newlines between the blocks). A reply is generated after
+//! `<|start|>assistant`: usually `<|channel|>analysis<|message|>{reasoning}
+//! <|end|><|start|>assistant<|channel|>final<|message|>{answer}`, ended by
+//! `<|return|>` (`<|end|>` ends a message, not the reply). As the template
+//! drops the reasoning of earlier turns, a closed reply keeps only its last
+//! channel on (`<|channel|>final<|message|>{answer}`) and `<|end|>` closes
+//! it; the next turn feeds it again from there. `Channels` tells the
+//! reasoning from the answer as tokens arrive: `axon chat` shows the answer
+//! only, `axon serve` returns the reasoning as `reasoning_content`.
 
 use crate::kvsave::{self, Hasher, KvIo, SaveInfo, Session};
 use crate::lm::Lm;
@@ -89,6 +111,20 @@ pub const DEFAULT_SYSTEM: &str =
 /// date, so a conversation's tokens don't depend on the day).
 pub const LLAMA3_SYSTEM_HEAD: &str =
     "Cutting Knowledge Date: December 2023\nToday Date: 26 Jul 2024\n\n";
+
+/// The harmony system message's date (`Current date: ...`): fixed, as
+/// Llama 3's, so a conversation's tokens don't depend on the day.
+pub const HARMONY_DATE: &str = "2025-08-05";
+
+/// The harmony system message (the template's defaults: model identity,
+/// knowledge cutoff, `HARMONY_DATE`, reasoning effort medium, the channels).
+pub fn harmony_system() -> String {
+    format!(
+        "You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: \
+         2024-06\nCurrent date: {HARMONY_DATE}\n\nReasoning: medium\n\n# Valid channels: \
+         analysis, commentary, final. Channel must be included for every message."
+    )
+}
 
 /// A chat format's marker tokens.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -110,6 +146,9 @@ pub enum Format {
     /// BOS first if the model adds one, the system message in the first
     /// user message.
     Gemma { bos: Option<u32> },
+    /// gpt-oss's harmony messages: `<|start|>{role}<|message|>{text}<|end|>`
+    /// (`im_start` / `im_end`), assistant messages on a channel.
+    Harmony { message: u32, channel: u32 },
 }
 
 /// How a vocabulary's conversations are framed: the format, its turn
@@ -138,25 +177,41 @@ impl Framing {
             special(tok, "<|end_header_id|>"),
             special(tok, "<|eot_id|>"),
         );
-        let (format, im_start, im_end) = if let (Some(start), Some(end), Some(eot)) = llama {
-            let bos = tok.bos();
-            (Format::Llama3 { start, end, bos }, start, eot)
-        } else if let (Some(sot), Some(eot)) = (
-            special(tok, "<start_of_turn>"),
-            special(tok, "<end_of_turn>"),
-        ) {
-            (Format::Gemma { bos: tok.bos() }, sot, eot)
-        } else if let (Some(inst), Some(end)) = (special(tok, "[INST]"), special(tok, "[/INST]")) {
-            let bos = tok.bos();
-            (Format::Mistral { end, bos }, inst, tok.eos())
-        } else if let (Some(im_start), Some(im_end)) =
-            (special(tok, "<|im_start|>"), special(tok, "<|im_end|>"))
-        {
-            (Format::ChatMl, im_start, im_end)
-        } else {
-            return None;
-        };
-        let mut stop = vec![tok.eos(), im_end];
+        let harmony = (
+            special(tok, "<|start|>"),
+            special(tok, "<|end|>"),
+            special(tok, "<|message|>"),
+            special(tok, "<|channel|>"),
+            special(tok, "<|return|>"),
+        );
+        let (format, im_start, im_end) =
+            if let (Some(st), Some(end), Some(message), Some(channel), Some(_)) = harmony {
+                (Format::Harmony { message, channel }, st, end)
+            } else if let (Some(start), Some(end), Some(eot)) = llama {
+                let bos = tok.bos();
+                (Format::Llama3 { start, end, bos }, start, eot)
+            } else if let (Some(sot), Some(eot)) = (
+                special(tok, "<start_of_turn>"),
+                special(tok, "<end_of_turn>"),
+            ) {
+                (Format::Gemma { bos: tok.bos() }, sot, eot)
+            } else if let (Some(inst), Some(end)) =
+                (special(tok, "[INST]"), special(tok, "[/INST]"))
+            {
+                let bos = tok.bos();
+                (Format::Mistral { end, bos }, inst, tok.eos())
+            } else if let (Some(im_start), Some(im_end)) =
+                (special(tok, "<|im_start|>"), special(tok, "<|im_end|>"))
+            {
+                (Format::ChatMl, im_start, im_end)
+            } else {
+                return None;
+            };
+        // Harmony's `<|end|>` ends a message (the reasoning), not the reply.
+        let mut stop = vec![tok.eos()];
+        if !matches!(format, Format::Harmony { .. }) {
+            stop.push(im_end);
+        }
         stop.extend(tok.eog());
         stop.extend(special(tok, "<|endoftext|>"));
         stop.sort_unstable();
@@ -194,6 +249,21 @@ impl Framing {
             let (s, e) = (self.im_start, self.im_end);
             return frame(tok, s, e, gemma_role(role), text.trim(), next);
         }
+        if let Format::Harmony { message, channel } = self.format {
+            let mut t = vec![self.im_start];
+            t.extend(tok.encode(role));
+            if role == "assistant" {
+                t.push(channel);
+                t.extend(tok.encode("final"));
+            }
+            t.push(message);
+            t.extend(tok.encode(text));
+            t.push(self.im_end);
+            if let Some(r) = next {
+                t.extend(self.opening(tok, r));
+            }
+            return t;
+        }
         let Format::Llama3 { start, end, .. } = self.format else {
             return frame(tok, self.im_start, self.im_end, role, text, next);
         };
@@ -218,6 +288,7 @@ impl Framing {
         let mut t = vec![self.im_start];
         match self.format {
             Format::Mistral { .. } => unreachable!(),
+            Format::Harmony { .. } => t.extend(tok.encode(role)),
             Format::ChatMl => t.extend(tok.encode(&format!("{role}\n"))),
             Format::Gemma { .. } => t.extend(tok.encode(&format!("{}\n", gemma_role(role)))),
             Format::Llama3 { end, .. } => {
@@ -238,6 +309,14 @@ impl Framing {
         match self.format {
             Format::Mistral { bos, .. } | Format::Gemma { bos } => bos.into_iter().collect(),
             Format::ChatMl => system.map_or(Vec::new(), |s| self.frame(tok, "system", s, None)),
+            Format::Harmony { .. } => {
+                let mut t = self.frame(tok, "system", &harmony_system(), None);
+                if let Some(s) = system.filter(|s| !s.is_empty()) {
+                    let text = format!("# Instructions\n\n{s}\n\n");
+                    t.extend(self.frame(tok, "developer", &text, None));
+                }
+                t
+            }
             Format::Llama3 { start, end, bos } => {
                 let mut t: Vec<u32> = bos.into_iter().collect();
                 t.push(start);
@@ -295,6 +374,76 @@ impl Framing {
             t.extend(tok.encode("\n"));
         }
         t
+    }
+}
+
+/// Where a harmony reply's tokens go, as they arrive (`Channels::push`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Part {
+    /// Markers and channel headers: nobody sees them.
+    Hidden,
+    /// A message on the analysis (or commentary) channel.
+    Reasoning,
+    /// A message on the final channel: the answer.
+    Answer,
+}
+
+/// A harmony reply split by channel: each message's header (`<|channel|>`
+/// name `<|message|>`) is read as it comes, its text is `Answer` if the
+/// name is `final`, else `Reasoning`; `<|end|>` / `<|start|>` / `<|return|>`
+/// end it. A reply with no header at all is the answer.
+#[derive(Clone, Debug)]
+pub struct Channels {
+    start: u32,
+    end: u32,
+    message: u32,
+    channel: u32,
+    /// The current header's text (inside `<|channel|>`..`<|message|>`).
+    name: Option<Vec<u8>>,
+    part: Part,
+}
+
+impl Channels {
+    /// None if the format isn't harmony.
+    pub fn new(fr: &Framing) -> Option<Channels> {
+        let Format::Harmony { message, channel } = fr.format else {
+            return None;
+        };
+        Some(Channels {
+            start: fr.im_start,
+            end: fr.im_end,
+            message,
+            channel,
+            name: None,
+            part: Part::Answer,
+        })
+    }
+
+    /// Token `id` (`bytes`, its text): where it goes.
+    pub fn push(&mut self, id: u32, bytes: &[u8]) -> Part {
+        if id == self.channel {
+            self.name = Some(Vec::new());
+            self.part = Part::Hidden;
+            return Part::Hidden;
+        }
+        if id == self.message {
+            self.part = match self.name.take() {
+                Some(n) if n.trim_ascii().starts_with(b"final") => Part::Answer,
+                Some(_) => Part::Reasoning,
+                None => Part::Answer,
+            };
+            return Part::Hidden;
+        }
+        if id == self.start || id == self.end {
+            self.name = None;
+            self.part = Part::Hidden;
+            return Part::Hidden;
+        }
+        if let Some(n) = &mut self.name {
+            n.extend_from_slice(bytes);
+            return Part::Hidden;
+        }
+        self.part
     }
 }
 
@@ -656,6 +805,11 @@ impl<'a, M: Lm> Chat<'a, M> {
         self.think.is_some()
     }
 
+    /// A harmony reply's channel splitter (None for other formats).
+    pub fn channels(&self) -> Option<Channels> {
+        Channels::new(&self.fr)
+    }
+
     /// A new system message (None: none); forgets the exchanges. The cache
     /// keeps whatever prefix the old and new system blocks share.
     pub fn set_system(&mut self, system: Option<&str>) -> Result<(), String> {
@@ -913,6 +1067,22 @@ impl<'a, M: Lm> Chat<'a, M> {
                 self.hist.drain(at..cut);
                 self.fed = self.fed.min(at);
                 self.lookup = PromptLookup::new();
+            }
+        }
+        if let Format::Harmony { channel, .. } = self.fr.format {
+            // The template renders an earlier reply as its final message
+            // alone: keep the reply from its last `<|channel|>` on, if that
+            // channel is `final` (else all of it: a reply cut short).
+            let at = start + opened;
+            if let Some(p) = self.hist[at..].iter().rposition(|&t| t == channel) {
+                let name = self
+                    .tok
+                    .decode_bytes(&self.hist[at + p + 1..(at + p + 2).min(self.hist.len())]);
+                if p > 0 && name.trim_ascii().starts_with(b"final") {
+                    self.hist.drain(at..at + p);
+                    self.fed = self.fed.min(at);
+                    self.lookup = PromptLookup::new();
+                }
             }
         }
         let closing = self.closing();
@@ -1177,8 +1347,30 @@ mod tests {
         };
         let tok = Tokenizer::from_gguf(&m);
         let net = Qwen2::new(&m);
+        moe_turns(&net, &tok);
+    }
+
+    /// `moe_turns_match_fresh_prefill` with the attention and routers on the
+    /// GPU, the experts on the CPU (`crate::moe`, r11 stage 2): hard
+    /// equality too.
+    #[test]
+    fn moe_gpu_turns_match_fresh_prefill() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let Some(m) = crate::testutil::moe_model(true) else {
+            return;
+        };
+        let tok = Tokenizer::from_gguf(&m);
+        let km = crate::cuda::Kernels::module_for(&g, &m).unwrap();
+        let mm = crate::cuda::Kernels::moe_module(&g).unwrap();
+        let net = crate::moe::tests::moe_net(&g, &km, &mm, &m, 2048);
+        moe_turns(&net, &tok);
+    }
+
+    fn moe_turns<L: crate::lm::Lm>(net: &L, tok: &Tokenizer) {
         for (max_reply, k) in [(12, 0), (24, 7), (48, 3)] {
-            let mut chat = Chat::new(&net, &tok, None, 2048).unwrap();
+            let mut chat = Chat::new(net, tok, None, 2048).unwrap();
             chat.no_think = true;
             chat.max_reply = max_reply;
             chat.max_draft = round_draft(k);
@@ -1771,6 +1963,51 @@ mod tests {
     /// replies end on <end_of_turn> and equal a fresh greedy run on the
     /// framed history (with and without drafting); a full context drops the
     /// oldest exchange and re-frames the next with the system message.
+    /// gpt-oss's harmony framing == its GGUF template (rendered by llama.cpp's
+    /// jinja with this date and messages: docs/log/2026-10-18-gpt-oss-s0.md),
+    /// and the channel split of a reply. Tokenizer only (optional model).
+    #[test]
+    fn harmony_framing_and_channels() {
+        let Some(m) = crate::testutil::gptoss_model() else {
+            return;
+        };
+        use super::{Channels, Format, Framing, Part, harmony_system};
+        let tok = Tokenizer::from_gguf(&m);
+        let fr = Framing::new(&tok).unwrap();
+        assert!(matches!(fr.format, Format::Harmony { .. }));
+        // <|end|> is not a stop: the analysis message ends with it.
+        assert_eq!(fr.stop, vec![199999, 200002, 200012]);
+        let mut t = fr.system(&tok, Some("Be brief."));
+        t.extend(fr.frame_first(&tok, "user", Some("Be brief."), "Hi", None));
+        t.extend(fr.frame(&tok, "assistant", "Hello!", None));
+        t.extend(fr.frame(&tok, "user", "What is 2+2?", Some("assistant")));
+        let want = format!(
+            "<|start|>system<|message|>{}<|end|><|start|>developer<|message|># Instructions\n\n\
+             Be brief.\n\n<|end|><|start|>user<|message|>Hi<|end|><|start|>assistant<|channel|>\
+             final<|message|>Hello!<|end|><|start|>user<|message|>What is 2+2?<|end|>\
+             <|start|>assistant",
+            harmony_system()
+        );
+        assert_eq!(String::from_utf8(tok.decode_bytes(&t)).unwrap(), want);
+        assert_eq!(t, tok.encode_special(&want));
+        assert!(fr.system(&tok, None).len() < fr.system(&tok, Some("x")).len());
+        // A reply: reasoning, then the answer; markers hidden.
+        let reply = tok.encode_special(
+            "<|channel|>analysis<|message|>Add them.<|end|><|start|>assistant<|channel|>final<|message|>4",
+        );
+        let mut ch = Channels::new(&fr).unwrap();
+        let (mut r, mut a) = (Vec::new(), Vec::new());
+        for &id in &reply {
+            let b = tok.decode_bytes(&[id]);
+            match ch.push(id, &b) {
+                Part::Reasoning => r.extend(b),
+                Part::Answer => a.extend(b),
+                Part::Hidden => {}
+            }
+        }
+        assert_eq!((&r[..], &a[..]), (&b"Add them."[..], &b"4"[..]));
+    }
+
     #[test]
     fn gemma3_framing_and_replies() {
         let Some(m) = crate::testutil::gemma3_model() else {

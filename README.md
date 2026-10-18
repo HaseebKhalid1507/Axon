@@ -40,15 +40,23 @@ Works today, honestly scoped:
   `<start_of_turn>` chat format; on the GPU the whole model must fit (no CPU/GPU split, no
   `--kv q8` yet), and its local layers keep a full-length KV cache. 27B is refused.
   `qwen3moe` (Qwen3-30B-A3B and its relatives: softmax top-k routing, no shared expert)
-  runs on the CPU only for now (`--device cpu`; the GPU and a split refuse it with an
-  error): every expert repacked for the r8 kernels, decode == batched prefill == verify bit
-  for bit, logits within llama.cpp's own CPU/CUDA spread (stage 1, see
-  [the log](docs/log/2026-10-17-moe-stage1.md)); `axon info` prints its experts and bytes
-  per token. Attention on the GPU with the experts on the CPU is next
-  ([roadmap](docs/roadmap.md#mixture-of-experts)). Other architectures, other
+  runs on the CPU (`--device cpu`: every expert repacked for the r8 kernels, stage 1, see
+  [the log](docs/log/2026-10-17-moe-stage1.md)) or, with `--device cuda`, with its attention,
+  norms, routers and head on the GPU and its experts on the CPU (llama.cpp's `--cpu-moe`
+  layout; stage 2, [log](docs/log/2026-10-17-moe-stage2.md)). Both: decode == batched
+  prefill == verify bit for bit, logits within llama.cpp's own CPU/CUDA spread; no layer
+  split (`--gpu-layers`), multi-GPU or MoE draft model. `axon info` prints its experts and
+  bytes per token. Streaming the experts through the GPU for long prompts is next
+  ([roadmap](docs/roadmap.md#mixture-of-experts)). `gpt-oss` (gpt-oss-20b, ggml-org's MXFP4
+  GGUF) runs on the CPU only for now (stage 0, [log](docs/log/2026-10-18-gpt-oss-s0.md)): MXFP4
+  experts read in place, attention sinks, the 128-token sliding window on alternate layers,
+  YaRN, the o200k tokenizer and the harmony chat format (`axon chat` shows the `final`
+  channel; `axon serve` returns the `analysis` channel as `reasoning_content`; no tools
+  yet); `--device cuda` is refused until stage 1. Other architectures, other
   mixture-of-experts models and RoPE scaling (a factor other than 1; Gemma 3's linear
   scaling and YaRN, below, excepted) are refused with an error.
-- Tensor types: F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K on the CPU. On the
+- Tensor types: F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K on the CPU, and
+  MXFP4 for gpt-oss's experts (CPU only). On the
   GPU every weight matrix must be one of the eight quantized types (F16/F32 matrices are
   refused there). Others load for `info` but can't run.
 - Sampling: greedy, or temperature / top-k / top-p / min-p / repeat penalty with a seed
@@ -242,7 +250,8 @@ curl -N localhost:8080/v1/chat/completions -H 'Content-Type: application/json' \
 
 An OpenAI-compatible HTTP/1.1 server (any OpenAI client works with
 `base_url="http://127.0.0.1:8080/v1"`): `GET /v1/models`, `POST /v1/chat/completions`,
-`POST /v1/completions` (raw text, no template, as `gen`), `GET /health`, `GET /metrics`,
+`POST /v1/completions` (raw text, no template, as `gen`), `POST /v1/responses` and the
+ollama API (`/api/chat`, `/api/generate`, ...; below), `GET /health`, `GET /metrics`,
 `GET /slots` (below); streamed
 (server-sent events, `data: [DONE]` at the end; `stream_options.include_usage` adds a
 usage chunk) or whole. It takes the device, `--ctx`, `--kv`, `--gpu-layers` and `--draft`
@@ -441,7 +450,46 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
 - Harnesses: anything speaking OpenAI Chat Completions, e.g. Synaps (`provider.local.url`),
   opencode and crush (an OpenAI-compatible provider whose base URL is
   `http://127.0.0.1:8080/v1`), and pi (an `openai-completions` model in `models.json`).
-  Codex CLI speaks only the Responses API (`/v1/responses`), which axon doesn't serve.
+  Codex CLI and pi's `openai-responses` speak the Responses API, and ollama clients the
+  ollama API: both are served too (below).
+
+#### The Responses API and the ollama API
+
+`POST /v1/responses` (OpenAI's Responses API, what codex speaks) and ollama's native API
+(`POST /api/chat`, `POST /api/generate`, `GET /api/tags`, `POST /api/show`, `GET /api/ps`,
+`GET /api/version`, `GET /`) are served next to chat completions, so a client written for
+OpenAI or for ollama works unchanged. Each request is translated into the chat-completions
+request and run the same way: the same `--api-key` gate, size limits, queue, batching and
+cache, and greedy output identical to `/v1/chat/completions` for the same messages (a test
+checks it on every route). [docs/serve-apis.md](docs/serve-apis.md) lists every field.
+
+```bash
+# codex, against a local provider (~/.codex/config.toml, or a CODEX_HOME of its own):
+#   model = "qwen3-8b"
+#   model_provider = "axon"
+#   [model_providers.axon]
+#   name = "axon"
+#   base_url = "http://127.0.0.1:8080/v1"
+#   wire_api = "responses"
+codex exec "Read hello.txt and tell me the magic number"
+# or codex's own ollama provider:
+CODEX_OSS_BASE_URL=http://127.0.0.1:8080/v1 codex exec --oss --local-provider ollama -m qwen3-8b "..."
+# any ollama client:
+OLLAMA_HOST=http://127.0.0.1:8080 ollama run qwen3-8b
+```
+
+- `/v1/responses`: `input` (a string, or `message`, `function_call`,
+  `function_call_output` and `reasoning` items), `instructions`, function `tools` (other
+  tool types, such as codex's `web_search` and `namespace`, are dropped), `tool_choice`,
+  `stream` (OpenAI's events, `response.created` through `response.completed`),
+  `max_output_tokens`, sampling, `usage`, and `previous_response_id` (responses with
+  `store`, the default, are kept in memory: the last 256). Structured output, background
+  responses and conversations are a 400.
+- ollama: `stream` defaults to true (NDJSON); `options` carries the sampling settings
+  (`num_predict` is the token limit; `num_ctx` and the runtime options are ignored: the
+  server's `--ctx` applies); `think`; tool calls with object arguments; ollama's counts and
+  durations. The model answers to its file name and `--alias`, with or without `:latest`.
+  `format` (JSON / structured output), images and embeddings are refused with a clear error.
 
 ### Environment
 
@@ -469,6 +517,7 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
 | `AXON_STREAM_MIN=N` | split model: smallest prefill batch streamed (default 32). Streaming pins the CPU layers' KV cache in RAM |
 | `AXON_STREAM_DECODE=1` | split model, experiment: stream one-token decode steps too (slower; refused with `--draft`) |
 | `AXON_CUDA_GRAPHS=0` | cuda: launch each token's kernels one by one instead of replaying a captured CUDA graph (same results, slower) |
+| `AXON_MOE_PROFILE=1` | cuda, mixture-of-experts model: every 64 decode steps, print per layer the GPU segment (attention + router; synced for the profile, so a little slower), the copy down, the CPU experts and the copy up |
 | `AXON_CUDA_PDL=0` | cuda: no programmatic dependent launch (used only on sm_90+ with a CUDA 12.3+ driver) |
 | `AXON_GATE_UP=0` | cuda: run the FFN's gate and up products (both Q4_K) as two GEMMs instead of one fused launch in batched passes (same bits) |
 | `AXON_HOPPER=0` | cuda, H100/H200 (compute capability 9.0): compile the kernels for plain sm_90 instead of sm_90a, which turns the wgmma/TMA kernels off (same bits) |
@@ -581,6 +630,8 @@ The GPU, after that:
 
 - [docs/START-HERE.md](docs/START-HERE.md): what Axon is, what's on main, the bit-identity
   contract, a map of the source tree
+- [docs/serve-apis.md](docs/serve-apis.md): `axon serve`'s routes and the fields each takes
+  (chat completions, completions, the Responses API, the ollama API)
 - [docs/determinism.md](docs/determinism.md): what is bit-identical (and what isn't), the
   identity tuple behind every response's `system_fingerprint` (`GET /identity` on `axon serve`)
 - [docs/benchmarks-gpu.md](docs/benchmarks-gpu.md): GPU scoreboards with method and caveats
@@ -598,7 +649,11 @@ The GPU, after that:
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md): test model, oracles, checks to run.
+Contributions from people and from their AI agents are welcome. The work queue is the issue board.
+
+- **[AGENTS.md](AGENTS.md)** first: how to claim an `agent-ready` issue, the hard rules (bit identity,
+  the md5 gate against `main`, no new crates), how to measure, and the evidence every PR must include.
+- **[CONTRIBUTING.md](CONTRIBUTING.md)**: setup, test models, oracles, the checks to run.
 
 ## License
 
