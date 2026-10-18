@@ -419,6 +419,9 @@ impl<'a> Backend<'a> {
         if gpu_layers == Some(0) {
             return Err("--gpu-layers 0 is --device cpu".into());
         }
+        if crate::model::moe_cpu_only(m) {
+            return Err(crate::model::moe_gpu_refusal(m));
+        }
         // f32 isn't offered on the GPU: f16 there (as always).
         let ckv = match kv {
             KvType::Q8 => CacheKv::Q8 { group: 0 },
