@@ -1325,8 +1325,14 @@ __device__ __forceinline__ void g2_store_w(u8* wb, int nblk, int s, u32 (*reg)[G
     }
 }
 
+// The token whose activations a tile's column z loads: z itself, or past
+// the batch (nb not a tile multiple: a decode step's rows) a real token
+// again, z mod nb, rather than every such column the last token (columns
+// past nb are never stored, so which token they load changes no output).
+__device__ __forceinline__ int g2_tok(int z, int nb) { return z < nb ? z : z % nb; }
+
 // Start the copies of stage s: Q4_K weights (into wb), the activations of
-// tokens z0.. (clamped to nb - 1) into st.
+// tokens z0.. (past nb: g2_tok) into st.
 template <int QT, int BN, int ST, int GU = 0>
 __device__ __forceinline__ void g2_copy(u8* wb, u8* st, const u8* w, u64 rb, int rows, int r0,
                                         const u8* act, u64 astride, int n, int nb, int z0,
@@ -1357,7 +1363,7 @@ __device__ __forceinline__ void g2_copy(u8* wb, u8* st, const u8* w, u64 rb, int
 #pragma unroll
     for (int k = 0; k < BN * 16 / G2_THREADS; k++) {
         int tk = (tid >> 4) + k * (G2_THREADS / 16);
-        const u8* a = act + (u64)min(z0 + tk, nb - 1) * astride;
+        const u8* a = act + (u64)g2_tok(z0 + tk, nb) * astride;
         if (cvalid) cp16(xs + tk * 256 + 16 * (c ^ (tk & 7)), a + voff + 16 * c);
     }
     if (L::RAW) {
@@ -1365,13 +1371,13 @@ __device__ __forceinline__ void g2_copy(u8* wb, u8* st, const u8* w, u64 rb, int
 #pragma unroll
         for (int k = 0; k < BN * 8 / G2_THREADS; k++) {
             int tk = (tid >> 3) + k * (G2_THREADS / 8);
-            const u8* a = act + (u64)min(z0 + tk, nb - 1) * astride;
+            const u8* a = act + (u64)g2_tok(z0 + tk, nb) * astride;
             cp4(xb + tk * 32 + 4 * j, a + 2 * np + np / 64 + 4 * ((u64)s * 8 + j));
         }
     }
     if (L::KQ) {
         for (int tk = tid; tk < BN; tk += G2_THREADS) {
-            const u8* a = act + (u64)min(z0 + tk, nb - 1) * astride;
+            const u8* a = act + (u64)g2_tok(z0 + tk, nb) * astride;
             cp4(xd + 4 * tk, a + 2 * np + 4 * (u64)s);
         }
     } else {
@@ -1380,7 +1386,7 @@ __device__ __forceinline__ void g2_copy(u8* wb, u8* st, const u8* w, u64 rb, int
 #pragma unroll
             for (int k = 0; k < BN * 8 / G2_THREADS; k++) {
                 int tk = (tid >> 3) + k * (G2_THREADS / 8);
-                const u8* a = act + (u64)min(z0 + tk, nb - 1) * astride;
+                const u8* a = act + (u64)g2_tok(z0 + tk, nb) * astride;
                 cp4(xd + tk * 32 + 4 * e, a + 2 * np + np / 64 + np / 8 + 4 * ((u64)s * 8 + e));
             }
         }

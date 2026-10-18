@@ -1179,7 +1179,7 @@ mod tests {
         // gemvm's batch limits to compare (the last one profiled), default
         // the build's.
         let vms = match list("AXON_STEP_VM", "") {
-            v if v.is_empty() => vec![super::super::batch::VM_MAX],
+            v if v.is_empty() => vec![0],
             v => v,
         };
         let km = Kernels::module(&g).unwrap();

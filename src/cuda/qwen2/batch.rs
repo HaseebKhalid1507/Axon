@@ -372,7 +372,8 @@ pub(super) struct BatchFns<'m> {
     /// None without tensor cores.
     gemvm: Option<[[Func<'m>; NTYPES_VM]; 4]>,
     /// Products of up to this many tokens of a gemvm type take gemvm (16..=
-    /// VM_MAX; AXON_GEMVM_MAX, default VM_MAX), more gemm2.
+    /// VM_MAX; AXON_GEMVM_MAX), more gemm2; 0: by the model
+    /// (`CudaQwen2::vm_max`).
     pub(super) vm_max: usize,
     /// Per type (Q4_K, Q6_K, Q8_0, Q5_0, Q5_K, Q4_0: `NTYPES`, indexed by
     /// `type_index`): gemm2_* (128 tokens per block)
@@ -514,7 +515,7 @@ impl<'m> BatchFns<'m> {
             vm_max: std::env::var("AXON_GEMVM_MAX")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .map_or(VM_MAX, |v: usize| v.clamp(SMALL, VM_MAX)),
+                .map_or(0, |v: usize| v.clamp(SMALL, VM_MAX)),
             gemm,
             gemm_q6k8,
             gemm_gu: if module.mma() {
@@ -685,7 +686,7 @@ impl<'g> CudaQwen2<'g> {
         let bf = &self.bf;
         let ti = type_index(mt.qt);
         // gemvm (weight-read-once) for up to vm_max tokens of its types.
-        let vm = bf.gemvm.is_some() && ti < NTYPES_VM && nb <= bf.vm_max.max(SMALL);
+        let vm = bf.gemvm.is_some() && ti < NTYPES_VM && nb <= self.vm_max();
         let small = vm || nb <= SMALL;
         // Q6_K by its prefill copy where made (the same products).
         let q8c = match (mt.c8, &bf.gemm_q6k8) {
@@ -760,7 +761,10 @@ impl<'g> CudaQwen2<'g> {
                     // the register-staged types in 64 x 128, given at least
                     // ~1.5 blocks per SM.
                     let ctas = nb.div_ceil(128) * mt.rows.div_ceil(G2_BM);
-                    let big = !matches!(mt.qt, Q4_K | Q5_K) && 2 * ctas >= 3 * bf.sms;
+                    // (Not for decode-sized batches: a 128-token tile of
+                    // <= 64 tokens is half padding; the lm_head of a pool's
+                    // 32 rows ran 2x slower in it, C-curve log.)
+                    let big = !matches!(mt.qt, Q4_K | Q5_K) && 2 * ctas >= 3 * bf.sms && nb > 64;
                     let (bn, st) = if big { (128, 2) } else { (64, 3) };
                     let (f, smem) = match q8c {
                         Some((_, f8)) => (&f8[!big as usize], gemm2_smem(Q6_K, bn, st)),
@@ -1662,7 +1666,7 @@ impl<'g> CudaQwen2<'g> {
             let fuse = self.gate_up_fused
                 && self.gemma.is_none()
                 && bf.gemm_gu.is_some()
-                && nb > bf.vm_max.max(SMALL)
+                && nb > self.vm_max()
                 && gate.qt == Q4_K
                 && up.qt == Q4_K
                 && gate.cols == dim
@@ -1828,6 +1832,20 @@ impl<'g> CudaQwen2<'g> {
             }
         }
         Ok(())
+    }
+
+    /// The most tokens of a product that take gemvm (`BatchFns::vm_max`).
+    /// By default 32 on models of width <= 1024, else SMALL: gemvm32 is a
+    /// CTA of 16 rows x 32 tokens that reads its tokens' activations per 16
+    /// rows, which loses to gemm2 on the 7B (C-curve log, RTX 4090: 7B
+    /// step at nb 32 18.5 vs 14.7 ms) and wins on the 0.5B (3.49 vs 4.01
+    /// ms), whose products are too small for gemm2's tiles to fill the GPU.
+    pub(super) fn vm_max(&self) -> usize {
+        match self.bf.vm_max {
+            0 if self.dim <= 1024 => 32,
+            0 => SMALL,
+            v => v,
+        }
     }
 
     /// The flash attention's shapes for cache scale group kg (0: f16).
