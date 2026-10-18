@@ -1,4 +1,4 @@
-# serve: count a request before its response is written (PR #TBD)
+# serve: count a request before its response is written (PR #93)
 
 - Date: 2026-10-18. Branch: fix/serve-metrics-race. Base: main 50cd609. Status: open
 - Pick / design: flake fix, `serve::tests::serve_api_key` ("no entry found for key"), 2 failures in ~130 logs.
