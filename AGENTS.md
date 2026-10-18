@@ -23,7 +23,8 @@ was already tried and lost, with numbers.
 3. **Wait to be assigned.** A maintainer assigns you and adds `claimed`. An issue that is already
    assigned or `claimed` is taken. Don't start work on it.
 4. **Open a PR within 48 hours of being assigned**, or the claim lapses and the issue goes back to
-   `agent-ready`. An early PR with gates still pending is fine. Say which ones are pending.
+   `agent-ready`. An early PR with gates still pending is fine. Say which ones are pending. Need more
+   time? Ask for an extension on the issue before the 48 hours are up.
 5. **One PR per issue, one issue per PR.** Put `Closes #N` in the PR body. Fill in every section of
    the [PR template](.github/pull_request_template.md) ([Evidence](#evidence-every-pr-body)).
 6. **Branch from current `main`** in your fork: `feat/<slug>`, `fix/<slug>` or `docs/<slug>`.
@@ -105,7 +106,11 @@ done
 - With a GPU, repeat with `--device cuda` and `--device cuda --kv q8`. Each device gets its own set.
   Never compare CPU md5s against GPU md5s.
 - If the change touches an architecture (gemma3, MoE, ...), add that model.
-- Report it as a table: set, n/N identical, base commit, machine.
+- Report it as this table (the PR template has the same one), one row per set:
+
+| md5 set vs main @ <sha> (models × prompts × device, -n 64) | machine | identical |
+|---|---|---|
+| | | n/N |
 
 ## Measuring honestly
 
@@ -179,8 +184,8 @@ caches instead of N + 1. No flag; no change with one request at a time (CPU, spl
 |---|---|
 | CPU, RAM | Intel Core Ultra 9 275HX (8 P + 16 E, AVX2 + AVX-VNNI), 30 GB |
 | GPU, VRAM | RTX 5070 Ti Laptop (sm_120), 12 GB |
-| driver, CUDA / NVRTC | 615.71.09, NVRTC 13.4 |
-| OS, kernel | CachyOS, Linux 7.2 |
+| driver, CUDA / NVRTC | <driver>, NVRTC <version> |
+| OS, kernel | <distro>, Linux <kernel> |
 | threads / pinning | defaults, no pinning |
 | power / thermal | AC, 140 W GPU cap; cool-gated before each server start; the desktop shares the GPU |
 | base commit | `main` @ cf68e9d |
@@ -227,11 +232,11 @@ fmt clean · clippy `-D warnings` clean.
 | `serve::` tests, debug assertions | sm_120, sm_89 | 71 / 0 / 2 each |
 | `scripts/serve_check.py` (serve == gen), 7B: default, `--kv q8`, `--ctx 8192` | sm_120 | ALL OK ×3 |
 
-| md5 set vs `main` cf68e9d (greedy `gen -n 64`) | identical |
-|---|---|
-| 5 models × 3 prompts, cuda f16 | 15/15 |
-| same, cuda `--kv q8` | 15/15 |
-| same, cpu | 15/15 |
+| md5 set vs main @ cf68e9d (models × prompts × device, -n 64) | machine | identical |
+|---|---|---|
+| 5 models × 3 prompts, cuda f16 | RTX 5070 Ti Laptop | 15/15 |
+| 5 models × 3 prompts, cuda `--kv q8` | RTX 5070 Ti Laptop | 15/15 |
+| 5 models × 3 prompts, cpu | Core Ultra 9 275HX | 15/15 |
 
 ## 7. Raw logs
 <details><summary>bench (3 rounds)</summary>

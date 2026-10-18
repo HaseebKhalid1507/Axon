@@ -44,8 +44,8 @@ body:
     id: gates
     attributes:
       label: Acceptance gates
-      description: What must hold for the PR to merge.
-      value: |
+      description: "What must hold for the PR to merge: bits, md5 set, perf must-not-regress rows, perf target (if any), tests."
+      placeholder: |
         - **Bits:** <e.g. decode == batched prefill == verify, unchanged; or: new bits only behind --flag>
         - **md5 set vs main:** <models × prompts × devices, e.g. 3 test models × 3 prompts × {cpu, cuda f16, cuda --kv q8}>
         - **Perf must not regress:** <rows, e.g. 7B pp560, pp2100, tg128 on cuda; 0.5B tg128 on cpu>

@@ -57,7 +57,8 @@ Contexts tested: · Prompt lengths:
 
 ## 6. Correctness
 
-- [ ] `cargo fmt --check` · [ ] `RUSTFLAGS="-D warnings" cargo clippy --all-targets`
+- [ ] `cargo fmt --check`
+- [ ] `RUSTFLAGS="-D warnings" cargo clippy --all-targets`
 
 | check | where (device / arch) | passed / failed / ignored |
 |---|---|---|
@@ -66,9 +67,9 @@ Contexts tested: · Prompt lengths:
 | `AXON_SIMD=scalar cargo test` | | |
 | GPU suite | <!-- yours, or "maintainer (run-gpu)" --> | |
 
-| md5 set vs `main` (models × prompts × device, `-n`) | identical |
-|---|---|
-| | n/N |
+| md5 set vs main @ <sha> (models × prompts × device, -n 64) | machine | identical |
+|---|---|---|
+| | | n/N |
 
 <!-- Any md5 that differs: which, and why it is intended. -->
 
