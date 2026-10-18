@@ -711,6 +711,9 @@ struct Loaded {
     /// The longest token's bytes: a prompt of more than `ctx` times this
     /// many bytes is more than `ctx` tokens, refused before encoding it.
     max_token_bytes: usize,
+    /// Why the context is `ctx`, for a too-long prompt's error ("--ctx", or
+    /// what a paged pool's pages hold and how to get more).
+    ctx_why: String,
     banner: String,
     /// What decides the output bits (`crate::identity`): every response's
     /// `system_fingerprint`, GET /identity.
@@ -1011,6 +1014,16 @@ fn engine(
             template,
             ctx: served,
             max_token_bytes: tok.max_token_bytes(),
+            ctx_why: match &paged {
+                Some(p) if batch.is_some() && served < want => format!(
+                    "the KV pages that fit in GPU memory beside the model hold {} tokens: \
+                     send a shorter prompt, or start the server with {}a smaller model or \
+                     less else on the GPU",
+                    p.pages * PAGE_TOKENS,
+                    if kv == CacheKv::F16 { "--kv q8, " } else { "" }
+                ),
+                _ => "--ctx".into(),
+            },
             banner,
             identity,
         })
@@ -1088,12 +1101,12 @@ fn engine(
                 match e.run(job, Some(ho)) {
                     Some(seq) => {
                         let tx = seq.job.tx.clone();
-                        if let Err(err) = or_exit("a hand-over", || b.adopt(seq, &e.cache)) {
+                        if let Err(err) = or_exit("a hand-over", || b.adopt(seq, &mut e.cache)) {
                             fatal(b, &err, Some(tx));
                         }
                     }
                     None => {
-                        if let Err(err) = b.end_solo(std::mem::take(&mut e.hist)) {
+                        if let Err(err) = b.end_solo(std::mem::take(&mut e.hist), &mut e.cache) {
                             fatal(b, &err, None);
                         }
                     }
@@ -1913,7 +1926,10 @@ fn completion(c: &mut Conn<TcpStream>, req: &Request, sh: &Shared, chat: bool) -
     let too_long = |n: String| {
         let mut e = ApiError::bad(
             if chat { "messages" } else { "prompt" },
-            format!("the prompt is {n}; the context is {} tokens (--ctx)", m.ctx),
+            format!(
+                "the prompt is {n}; the context is {} tokens ({})",
+                m.ctx, m.ctx_why
+            ),
         );
         e.code = Some("context_length_exceeded");
         e

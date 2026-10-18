@@ -215,6 +215,14 @@ pub trait BatchLm: Lm {
 
     /// The pool's pages (None: plain, every slot its ctx rows).
     fn pages(&self, pool: &Self::Pool) -> Option<PoolPages>;
+
+    /// Lend the pool's batch scratch to `cache` (its `slot_cache`, which
+    /// may have none of its own) for the `Lm` calls on it; the pool's
+    /// `feed_slot` / `step` wait for `return_scratch`.
+    fn lend_scratch(&self, pool: &mut Self::Pool, cache: &mut Self::Cache) -> Result<(), String>;
+
+    /// `lend_scratch` undone.
+    fn return_scratch(&self, pool: &mut Self::Pool, cache: &mut Self::Cache) -> Result<(), String>;
 }
 
 /// A paged pool's pages (`BatchLm::pages`).
@@ -738,7 +746,7 @@ impl BatchLm for Backend<'_> {
     fn slot_cache(&self, pool: &Self::Pool, slot: usize) -> Result<BackendCache, String> {
         match self {
             Backend::Cuda(n) => n
-                .slot_view(pool, slot)
+                .slot_view_bare(pool, slot)
                 .map(|c| BackendCache::Cuda(Box::new(c))),
             _ => unreachable!("a pool is the GPU model's"),
         }
@@ -791,5 +799,23 @@ impl BatchLm for Backend<'_> {
 
     fn pages(&self, pool: &Self::Pool) -> Option<PoolPages> {
         pool.page_info()
+    }
+
+    fn lend_scratch(&self, pool: &mut Self::Pool, cache: &mut BackendCache) -> Result<(), String> {
+        match (self, cache) {
+            (Backend::Cuda(n), BackendCache::Cuda(c)) => n.lend_scratch(pool, c),
+            _ => Err("lend_scratch: a cache of another backend".into()),
+        }
+    }
+
+    fn return_scratch(
+        &self,
+        pool: &mut Self::Pool,
+        cache: &mut BackendCache,
+    ) -> Result<(), String> {
+        match (self, cache) {
+            (Backend::Cuda(n), BackendCache::Cuda(c)) => n.return_scratch(pool, c),
+            _ => Err("return_scratch: a cache of another backend".into()),
+        }
     }
 }

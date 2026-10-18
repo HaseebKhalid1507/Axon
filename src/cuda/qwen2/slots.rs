@@ -84,19 +84,78 @@ impl<'g> CudaQwen2<'g> {
     /// its rows are the slot's for the batch to take over (`adopt_cache`
     /// copies nothing).
     pub fn slot_view(&self, p: &CudaPool<'g>, slot: usize) -> Result<CudaCache<'g>, String> {
+        self.slot_view_with(p, slot, true)
+    }
+
+    /// `slot_view` of a paged pool without batch scratch of its own (serve's
+    /// single-request cache: `BatchLm::slot_cache`): its batched passes
+    /// (prefill, verify) run on the pool's, lent while it runs
+    /// (`lend_scratch` .. `return_scratch`), as the pool and the view never
+    /// run at once. A plain pool's view has its own (as before paging).
+    pub fn slot_view_bare(&self, p: &CudaPool<'g>, slot: usize) -> Result<CudaCache<'g>, String> {
+        self.slot_view_with(p, slot, p.pm.is_none())
+    }
+
+    /// The pool's batch scratch, lent to `c` (its bare view: `slot_view_bare`;
+    /// a view with scratch of its own: nothing to do). The pool's own passes
+    /// can't run until `return_scratch`. The buffers move, their addresses
+    /// don't: the pool's captured steps hold them still.
+    pub fn lend_scratch(&self, p: &mut CudaPool<'g>, c: &mut CudaCache<'g>) -> Result<(), String> {
+        if c.b.is_some() {
+            return Ok(());
+        }
+        if !Rc::ptr_eq(&c.kv, &p.c.kv) {
+            return Err("lend_scratch: not a view of this pool".into());
+        }
+        let mut b =
+            p.c.b
+                .take()
+                .ok_or("lend_scratch: the pool's scratch is lent")?;
+        // A one-sequence cache's head writes one row per launch.
+        b.logits_rows = false;
+        c.b = Some(b);
+        Ok(())
+    }
+
+    /// `lend_scratch` undone (a no-op for a view with scratch of its own).
+    pub fn return_scratch(
+        &self,
+        p: &mut CudaPool<'g>,
+        c: &mut CudaCache<'g>,
+    ) -> Result<(), String> {
+        if p.c.b.is_some() {
+            return Ok(());
+        }
+        if !Rc::ptr_eq(&c.kv, &p.c.kv) {
+            return Err("return_scratch: not a view of this pool".into());
+        }
+        let mut b =
+            c.b.take()
+                .ok_or("return_scratch: the view holds no scratch")?;
+        b.logits_rows = true;
+        p.c.b = Some(b);
+        Ok(())
+    }
+
+    fn slot_view_with(
+        &self,
+        p: &CudaPool<'g>,
+        slot: usize,
+        batch: bool,
+    ) -> Result<CudaCache<'g>, String> {
         if slot >= p.slots {
             return Err(format!("slot {slot} of a {}-slot pool", p.slots));
         }
         if p.pm.is_none() {
             let shared = (p.c.kv.clone(), p.c.rows, slot * p.ctx);
-            return self.make_cache(p.ctx, p.c.mode, p.ctx, Some(shared));
+            return self.make_cache(p.ctx, p.c.mode, p.ctx, Some(shared), true);
         }
         // Paged: the pool's arrays from row 0 and its table from the slot's
         // first entry. Its positions go to the cap whatever the pool's rows
         // (the caller `reserve`s pages for those the `Lm` calls write: past
         // them, the table points at the sink page).
         let shared = (p.c.kv.clone(), p.c.rows, 0);
-        let mut c = self.make_cache(p.ctx.min(p.c.rows), p.c.mode, p.ctx, Some(shared))?;
+        let mut c = self.make_cache(p.ctx.min(p.c.rows), p.c.mode, p.ctx, Some(shared), batch)?;
         c.max_ctx = p.ctx;
         c.tab = p.c.tab.clone();
         c.tab0 = p.base(slot);
@@ -116,8 +175,11 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// `serve_bytes_kv` of a paged pool (`pool_paged_bytes`).
+    /// (The view is bare: `slot_view_bare`, the pool's batch scratch lent.)
     pub fn serve_paged_bytes(&self, kv: CacheKv, slots: usize, ctx: usize, pages: usize) -> usize {
-        self.cache_bytes_kv(kv, ctx) - self.kv_cache_bytes(kv, ctx)
+        self.cache_bytes_kv(kv, ctx)
+            - self.kv_cache_bytes(kv, ctx)
+            - self.batch_bytes(self.batch_for(ctx), ctx)
             + self.pool_paged_bytes(kv, slots, ctx, pages)
     }
 
@@ -228,6 +290,9 @@ impl<'g> CudaQwen2<'g> {
         if let Some(t) = tokens.iter().find(|&&t| t as usize >= self.vocab) {
             return Err(format!("token {t} out of range"));
         }
+        if p.c.b.is_none() {
+            return Err("feed_slot: the pool's scratch is lent (`return_scratch` first)".into());
+        }
         let short = self.reserve(p, slot, start + tokens.len())?;
         if short > 0 {
             return Err(format!(
@@ -263,6 +328,9 @@ impl<'g> CudaQwen2<'g> {
         let bad = |e: String| Err(StepError::Input(e));
         if nb > p.rows_max {
             return bad(format!("{nb} rows: the pool takes {}", p.rows_max));
+        }
+        if p.c.b.is_none() {
+            return bad("the pool's scratch is lent (`return_scratch` first)".into());
         }
         for r in rows {
             if r.slot >= p.slots || r.pos >= p.ctx || r.token as usize >= self.vocab {
@@ -671,7 +739,15 @@ impl<'g> BatchLm for CudaQwen2<'g> {
     }
 
     fn slot_cache(&self, pool: &CudaPool<'g>, slot: usize) -> Result<CudaCache<'g>, String> {
-        self.slot_view(pool, slot)
+        self.slot_view_bare(pool, slot)
+    }
+
+    fn lend_scratch(&self, pool: &mut CudaPool<'g>, c: &mut CudaCache<'g>) -> Result<(), String> {
+        CudaQwen2::lend_scratch(self, pool, c)
+    }
+
+    fn return_scratch(&self, pool: &mut CudaPool<'g>, c: &mut CudaCache<'g>) -> Result<(), String> {
+        CudaQwen2::return_scratch(self, pool, c)
     }
 
     fn move_slot_cache(
@@ -1550,6 +1626,64 @@ mod tests {
                     want,
                     "{what}: the slot itself"
                 );
+            }
+        }
+    }
+
+    /// serve's single-request cache over a paged pool (`slot_view_bare`):
+    /// no batch scratch of its own; with the pool's lent it runs the
+    /// one-sequence calls (prefill, decode graphs, a verify with rejected
+    /// guesses, a prefix refed) with a plain cache's picks and KV bytes;
+    /// the pool refuses its own passes while it is lent, and after
+    /// `return_scratch` its steps run as before (the same bits as alone).
+    /// f16 and q8, qwen2 and qwen3.
+    #[test]
+    fn bare_view_borrows_the_pool_scratch() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let km = Kernels::module(&g).unwrap();
+        for m in models() {
+            for kv in [CacheKv::F16, CacheKv::Q8 { group: 0 }] {
+                let ctx = 192;
+                let net = CudaQwen2::with_kv(&g, &km, &m, ctx, kv, false).unwrap();
+                let what = format!("{} {kv:?}", m.arch);
+                let prompt = ids(90, 77, net.vocab);
+                let mut plain = net.new_cache(ctx);
+                let want = run(&net, &prompt, &mut plain);
+                let want_kv = slot_bytes(&net, &plain, 0, 90);
+                let mut p = pool_of(&net, 3, ctx, Lay::Shuffled(9));
+                let mut v = net.slot_view_bare(&p, 1).unwrap();
+                assert!(v.b.is_none(), "{what}: a bare view");
+                assert_eq!(net.reserve(&mut p, 1, ctx), Ok(0));
+                net.lend_scratch(&mut p, &mut v).unwrap();
+                assert!(
+                    net.feed_slot(&mut p, 0, &prompt[..5], 0).is_err(),
+                    "{what}: lent"
+                );
+                assert_eq!(run(&net, &prompt, &mut v), want, "{what}: picks");
+                assert!(pool_bytes(&net, &p, 1, 90) == want_kv, "{what}: KV bytes");
+                net.return_scratch(&mut p, &mut v).unwrap();
+                assert!(
+                    v.b.is_none() && p.c.b.as_ref().unwrap().logits_rows,
+                    "{what}"
+                );
+                // The pool's own step after the loan: slot 1 goes on from 90.
+                let (refs, _, _) = solo(&net, ctx, &prompt[..91], Kind::Greedy, 1);
+                let row = SeqRow {
+                    token: prompt[90],
+                    pos: 90,
+                    slot: 1,
+                    head: RowHead::Argmax,
+                };
+                // Positions 40..90 were refed by `run`: the rows are prompt's.
+                assert_eq!(net.step_rows(&mut p, &[row]).unwrap(), refs, "{what}: step");
+                // A plain pool's view has its own scratch: lending is a no-op.
+                let mut q = pool_of(&net, 2, ctx, Lay::Plain);
+                let mut w = net.slot_view_bare(&q, 0).unwrap();
+                assert!(w.b.is_some(), "{what}");
+                net.lend_scratch(&mut q, &mut w).unwrap();
+                assert!(q.c.b.is_some(), "{what}");
             }
         }
     }

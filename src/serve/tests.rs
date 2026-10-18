@@ -1791,6 +1791,40 @@ fn serve_shrunk_pool() {
     batched_vs_solo(a, &batch_bodies(false), "shrunk pool, no max_tokens");
 }
 
+/// A paged pool whose pages hold less than the context (`kv_pages`: 16
+/// pages = 1024 tokens of a 2048 context): the context served is what the
+/// pages hold, and a longer prompt's 400 says why and what to do.
+#[test]
+fn serve_paged_cap_message() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server_with(p.to_str().unwrap(), Device::Cuda, |o| {
+        o.parallel = 2;
+        o.parallel_set = true;
+        o.kv_pages = Some(16);
+    });
+    let a = s.addr;
+    let v = call(a, "GET", "/v1/models", "").json();
+    assert_eq!(v["data"][0]["meta"]["n_ctx"], 1024, "{v}");
+    let r = post(
+        a,
+        "/v1/completions",
+        json!({"prompt": "word ".repeat(1500), "max_tokens": 4}),
+    );
+    assert_eq!(r.status, 400, "{}", r.body);
+    let e = &r.json()["error"];
+    assert_eq!(e["code"], "context_length_exceeded", "{e}");
+    let msg = e["message"].as_str().unwrap();
+    assert!(
+        msg.contains("KV pages") && msg.contains("shorter prompt") && msg.contains("--kv q8"),
+        "{msg}"
+    );
+}
+
 /// A paged pool squeezed to fewer pages than its requests need at once
 /// (`kv_pages`; 40 pages = 2560 positions for 6 requests of ~500-token
 /// prompts and up to 400 tokens each): admissions wait for pages, idle

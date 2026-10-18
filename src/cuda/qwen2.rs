@@ -1685,17 +1685,20 @@ impl<'g> CudaQwen2<'g> {
         mode: CacheKv,
         att_ctx: usize,
     ) -> Result<CudaCache<'g>, String> {
-        self.make_cache(max_ctx, mode, att_ctx, None)
+        self.make_cache(max_ctx, mode, att_ctx, None, true)
     }
 
     /// `try_cache_at`; with `shared` (a pool's KV, its rows per array and
     /// the view's first row) a view of those rows: no KV of its own.
+    /// Without `batch`, no batch scratch either (a paged pool's view
+    /// borrows the pool's: `lend_scratch`).
     pub(super) fn make_cache(
         &self,
         max_ctx: usize,
         mode: CacheKv,
         att_ctx: usize,
         shared: Option<(Rc<DevBuf<'g>>, usize, usize)>,
+        batch: bool,
     ) -> Result<CudaCache<'g>, String> {
         let g = self.gpu;
         let f = 4;
@@ -1720,8 +1723,13 @@ impl<'g> CudaQwen2<'g> {
             None => self.kv_cache_bytes(mode, max_ctx),
             Some(_) => 0,
         };
+        let no_batch = match batch {
+            true => 0,
+            false => self.batch_bytes(self.batch_for(att_ctx), att_ctx),
+        };
         let want = (self.cache_bytes_kv(mode, att_ctx) - self.kv_cache_bytes(mode, att_ctx)
-            + own_kv) as u64
+            + own_kv
+            - no_batch) as u64
             + CACHE_HEADROOM;
         let free = g.info()?.free_bytes;
         if want > free {
@@ -1788,7 +1796,10 @@ impl<'g> CudaQwen2<'g> {
                 _ => Some(g.host_alloc(self.dim * f)?),
             },
             graph: [[None, None, None], [None, None, None]],
-            b: Some(self.batch_bufs(self.batch_for(att_ctx), att_ctx)?),
+            b: match batch {
+                true => Some(self.batch_bufs(self.batch_for(att_ctx), att_ctx)?),
+                false => None,
+            },
             samp: None,
             tab: None,
             tab0: 0,

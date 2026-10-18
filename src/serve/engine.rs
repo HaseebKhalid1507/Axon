@@ -446,6 +446,9 @@ impl<'a, 't> Batch<'a, 't> {
         if short > 0 {
             return Err(format!("{short} KV pages short for a request alone"));
         }
+        // Its batched passes run on the pool's scratch (a paged pool's view
+        // has none of its own), back at `end_solo` / `adopt`.
+        self.net.lend_scratch(&mut self.pool, cache)?;
         Ok(std::mem::take(&mut self.held[slot]))
     }
 
@@ -484,7 +487,12 @@ impl<'a, 't> Batch<'a, 't> {
 
     /// The S1 path ended (without a hand-over): its slot holds the rows of
     /// `hist`.
-    pub fn end_solo(&mut self, hist: Vec<u32>) -> Result<(), String> {
+    pub fn end_solo(
+        &mut self,
+        hist: Vec<u32>,
+        cache: &mut <Backend<'a> as crate::lm::Lm>::Cache,
+    ) -> Result<(), String> {
+        self.net.return_scratch(&mut self.pool, cache)?;
         // Pages past its rows (reserved for what it didn't generate) free.
         self.net.release(&mut self.pool, self.solo, hist.len())?;
         self.held[self.solo] = hist;
@@ -497,8 +505,9 @@ impl<'a, 't> Batch<'a, 't> {
     pub fn adopt(
         &mut self,
         mut seq: Seq<'t>,
-        cache: &<Backend<'a> as crate::lm::Lm>::Cache,
+        cache: &mut <Backend<'a> as crate::lm::Lm>::Cache,
     ) -> Result<(), String> {
+        self.net.return_scratch(&mut self.pool, cache)?;
         let n = seq.hist.len() - 1;
         let slot = self.solo;
         assert!(!self.busy[slot], "adopt: the S1 slot is busy");
