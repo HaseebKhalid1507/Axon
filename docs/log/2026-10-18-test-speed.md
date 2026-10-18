@@ -1,4 +1,4 @@
-# Test-suite speed: one CPU reference per input, a fast tier, and a deterministic slot-idle test  (PR #N)
+# Test-suite speed: one CPU reference per input, a fast tier, and a deterministic slot-idle test  (PR #80)
 
 - Date: 2026-10-18. Branch: feat/test-speed. Base: main a032773 (the timings were taken on main 5a73f63, before the
   rebase onto #67/#70/#74; those merges touch none of the timed tests' helpers). Status: open
