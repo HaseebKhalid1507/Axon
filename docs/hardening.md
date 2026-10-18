@@ -103,7 +103,7 @@ construction. The "max excl. slow-reader" column is the slowest successful reque
 |---|---|---:|---|---:|---:|---:|---|---|---|---|---:|---|---|---|
 | avante (RTX 4050 Laptop, sm_89, 6 GB) | cuda, Qwen2.5-1.5B-Instruct Q4_K_M | 3.22 | 12 / 4 / 4096 | 79,656 | 0 | 0 | 14/14 | 0.23 MiB/h (5.4, 64) | 2168 → 2172 at 22.5 min, then flat (2.9) | 313 ms / 30.3 s / 3.0 s | 28 ms | 39, 7 → 39, 7 | **PASS** | 1017-171509-4f83 |
 | avante, primed rerun | same | 3.22 | 12 / 4 / 4096 | 80,879 | 0 | 0 | 14/14 | −2.57 MiB/h (−62, 64) | 2168 → 2172 at 27.6 min, then flat (8.4) | 294 ms / 30.3 s / 2.9 s | 26 ms | 39, 7 → 39, 7 | **PASS** | 1017-195822-d942 |
-| bella (RTX 5090, sm_120, 12 GB) | cuda, Qwen2.5-7B-Instruct Q4_K_M | 1.12 | 16 / 4 / 4096 | 20,357 | 0 | 0 | 6/6 | 1.91 MiB/h (45.8, 64) | 7180 flat (0.0) | 2.0 s / 31.0 s / 7.9 s | 1.39 s | 39, 7 → 39, 7 | **PASS** | 1017-171510-45bd |
+| bella (RTX 5070 Ti Laptop, sm_120, 12 GB) | cuda, Qwen2.5-7B-Instruct Q4_K_M | 1.12 | 16 / 4 / 4096 | 20,357 | 0 | 0 | 6/6 | 1.91 MiB/h (45.8, 64) | 7180 flat (0.0) | 2.0 s / 31.0 s / 7.9 s | 1.39 s | 39, 7 → 39, 7 | **PASS** | 1017-171510-45bd |
 | jade (i7-9750H, 6C/12T, 7 GB) | cpu, Qwen2.5-0.5B-Instruct Q4_K_M | 2.02 | 6 / 1 / 2048, `--max-queue 4` | 5,627 | 0 | 2,208 | 9/9 | **5.73 MiB/h (137, 64)** | n/a | 12.1 s / 21.4 s / 30.2 s | 11.1 s | 5, 3 → 5, 3 | **FAIL** (memory slope only) | 1017-175220-4700 |
 | bella CPU (8 threads) | cpu, Qwen2.5-0.5B-Instruct Q4_K_M | 4.02 | 6 / 1 / 2048, `--max-queue 4` | 36,941 | 0 | 544 | 17/17 | 0.42 MiB/h (10.0, 64) | n/a | 1.0 s / 30.7 s / 13.0 s | 0.77 s | 5, 10 → 5, 10 | **PASS** | 1017-195600-9552 |
 
@@ -128,7 +128,7 @@ The 503s are the documented back-pressure: one CPU slot plus a 4-deep queue, 6 c
   use), or the driver growing a pool on a first rare shape. Two flat 3 h tails don't look like a leak. The
   slope check passes in both runs (2.9 and 8.4 MiB/day against 16). Not identified.
 
-Latency, for scale: 1.5B on the 4050 laptop serves 6–7 requests/s at a p50 of about 0.3 s. A 7B on the 5090 runs
+Latency, for scale: 1.5B on the 4050 laptop serves 6–7 requests/s at a p50 of about 0.3 s. A 7B on the 5070 Ti Laptop runs
 16 clients at a p50 of 2.0 s. A slot holds up to ~75 % of a 4096 context (the `long` prompts).
 
 **Not covered:** multi-day runs (the longest is 4 h); pod GPUs; `--kv q8`; `--draft`; a split
@@ -165,10 +165,10 @@ TheBloke's TinyLlama (late 2023) predates the pre-tokenizer key and runs anyway.
 | Qwen3-0.6B-Q8_0.gguf | Qwen | 639 | 3 / 2 / qwen2 | F32:113 Q8_0:197 | run | match | 15/16 | 3.3e-03 | 326 | Qwen official Qwen3 Q8_0 |
 
 **Verdicts:** 8 `match`; 1 `drift`, which is within llama.cpp's own spread (below); 9 clean refusals; 0 bugs. The
-two Q2_K / Q3_K_M files are refused as expected on main, because the Q2_K/Q3_K kernels are in PR #72. These two
-0.5B files would still be refused after #72: they also hold 120 IQ4_NL tensors (896 columns aren't whole
-256-blocks, so llama.cpp falls back to IQ4_NL), and the "Q2_K" file holds no Q2_K tensors at all, only Q3_K and
-IQ4_NL.
+two Q2_K / Q3_K_M files are refused as expected on main, because the Q2_K/Q3_K kernels are in PR #72. They are expected to load once #72
+lands: #72 ("Q2_K, Q3_K (+ IQ4_NL)") also adds IQ4_NL, and its tests use exactly these two files. The two files
+mix types: alongside their K-quants they hold 120 IQ4_NL tensors (896 columns aren't whole 256-blocks, so llama.cpp
+falls back to IQ4_NL), and the "Q2_K" file holds no Q2_K tensors at all, only Q3_K and IQ4_NL.
 
 **The gemma3 `drift` row, against llama.cpp's own CPU-vs-CUDA spread** (50 prompts of
 `scripts/oracle/llama_logits.py`, bella, same token ids, job 1017-175220-02a3):
