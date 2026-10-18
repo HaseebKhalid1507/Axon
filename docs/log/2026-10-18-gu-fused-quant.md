@@ -1,4 +1,4 @@
-# The FFN hid quantize inside the fused gate + up launch (`AXON_GU_QUANT`, r15 pick 2)
+# The FFN hid quantize inside the fused gate + up launch (`AXON_GU_QUANT`, r15 pick 2) (PR #94)
 
 - Date: 2026-10-18. Branch: feat/gu-fused-quant, off main 2b89410. Status: draft, gates and measurement pending.
 - Spec: r15-4090-prefill.md §4 pick 2. Evidence for building it: r15-profile.md §5–7.
