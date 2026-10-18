@@ -4214,7 +4214,12 @@ fn dump_logits_positions() {
     let m = crate::gguf::load_with(&path, Some(false)).unwrap();
     let km = Kernels::module_for(&g, &m).unwrap();
     let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
-    let gpu = CudaQwen2::new(&g, &km, &m, 256).unwrap();
+    let mut gpu = CudaQwen2::new(&g, &km, &m, 256).unwrap();
+    // AXON_DUMP_SPLIT=1: the split attention (no tensor cores), another
+    // in-contract GPU float order, to see how far a position moves.
+    if std::env::var("AXON_DUMP_SPLIT").as_deref() == Ok("1") {
+        gpu.set_tc_attn(false);
+    }
     let cpu = Qwen2::new(&m);
     let top = |l: &[f32]| -> String {
         let ls = log_softmax(l);
