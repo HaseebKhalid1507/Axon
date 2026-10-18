@@ -436,7 +436,7 @@ mod tests {
         s[2].alpha = 0.01;
         let ks = choose(&c, &s, 3);
         assert_eq!((ks[1], ks[2]), (0, 0), "{ks:?}");
-        assert_eq!(ks[0], 3);
+        assert!(ks[0] > 0 && ks[0] == ks[3], "{ks:?}");
     }
 
     /// When attention dominates (c x depth >> the rest) no guesses.

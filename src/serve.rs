@@ -956,8 +956,9 @@ fn engine(
     // takes what is left): its solo cache becomes a view of a slot of it.
     let mut drafter = drafter;
     let mut dpool = None;
-    if let (Some((_, n, slot_ctx)), Some(md)) = (pool.as_ref(), drafter.take())
+    if let Some((_, n, slot_ctx)) = pool.as_ref()
         && kd > 0
+        && let Some(md) = drafter.take()
     {
         let (dp, md) = draft_pool(md, *n, *slot_ctx, draft_ctx, o.log);
         drafter = Some(md);
