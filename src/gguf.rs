@@ -349,6 +349,12 @@ const QTYPES: &[QType] = &[
         block_bytes: 292,
     },
     QType {
+        id: 20,
+        name: "IQ4_NL",
+        block_size: 32,
+        block_bytes: 18,
+    },
+    QType {
         id: 30,
         name: "BF16",
         block_size: 1,
@@ -369,7 +375,6 @@ const UNSIZED_NAMES: &[(u32, &str)] = &[
     (17, "IQ2_XS"),
     (18, "IQ3_XXS"),
     (19, "IQ1_S"),
-    (20, "IQ4_NL"),
     (21, "IQ3_S"),
     (22, "IQ2_S"),
     (23, "IQ4_XS"),
@@ -1358,7 +1363,7 @@ mod tests {
     #[test]
     fn unsized_types_are_named_not_sized() {
         for (id, n) in [
-            (20, "IQ4_NL"),
+            (19, "IQ1_S"),
             (23, "IQ4_XS"),
             (29, "IQ1_M"),
             (31, "Q4_0_4_4"),
@@ -1370,6 +1375,7 @@ mod tests {
         assert_eq!(qtype(99).name, "??");
         assert!(sized(30) && qtype(30).name == "BF16");
         assert!(sized(39) && qtype(39).name == "MXFP4");
+        assert!(sized(20) && qtype(20).name == "IQ4_NL");
         assert!(UNSIZED_NAMES.iter().all(|&(id, _)| !sized(id)));
     }
 

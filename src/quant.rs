@@ -36,15 +36,22 @@ pub const Q4_1: u32 = 3;
 pub const Q5_0: u32 = 6;
 pub const Q5_1: u32 = 7;
 pub const Q8_0: u32 = 8;
+pub const Q2_K: u32 = 10;
+pub const Q3_K: u32 = 11;
 pub const Q4_K: u32 = 12;
 pub const Q5_K: u32 = 13;
 pub const Q6_K: u32 = 14;
+pub const IQ4_NL: u32 = 20;
 pub const MXFP4: u32 = 39;
 
+mod iq4nl;
+mod k23;
 mod mxfp4;
 pub mod r8;
 pub mod r8q;
 
+use iq4nl::IQ4_NL_BYTES;
+use k23::{Q2_K_BYTES, Q3_K_BYTES};
 use mxfp4::MXFP4_BYTES;
 
 /// MXFP4's code table (tests build fixtures with it).
@@ -63,6 +70,9 @@ fn block_info(qtype_id: u32) -> (usize, usize) {
         Q5_1 => (QK5_0, Q5_1_BYTES),
         Q5_0 => (QK5_0, Q5_0_BYTES),
         Q8_0 => (QK8_0, Q8_0_BYTES),
+        IQ4_NL => (QK8_0, IQ4_NL_BYTES),
+        Q2_K => (QK_K, Q2_K_BYTES),
+        Q3_K => (QK_K, Q3_K_BYTES),
         Q4_K => (QK_K, Q4_K_BYTES),
         Q5_K => (QK_K, Q5_K_BYTES),
         Q6_K => (QK_K, Q6_K_BYTES),
@@ -289,6 +299,9 @@ pub fn dequant(qtype_id: u32, bytes: &[u8], out: &mut [f32]) {
                 Q5_1 => dequant_q5_1_block,
                 Q5_0 => dequant_q5_0_block,
                 Q8_0 => dequant_q8_0_block,
+                IQ4_NL => iq4nl::dequant_iq4_nl_block,
+                Q2_K => k23::dequant_q2_k_block,
+                Q3_K => k23::dequant_q3_k_block,
                 Q4_K => dequant_q4_k_block,
                 Q5_K => dequant_q5_k_block,
                 Q6_K => dequant_q6_k_block,
@@ -552,9 +565,11 @@ impl QuantizedAct {
     pub fn for_types(x: &[f32], qtypes: &[u32]) -> QuantizedAct {
         let n = x.len();
         let wants = |ts: &[u32]| qtypes.iter().any(|t| ts.contains(t));
-        let b32 = (wants(&[Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, MXFP4]) && n.is_multiple_of(QK8_0))
-            .then(|| quantize_b32(x));
-        let k = (wants(&[Q4_K, Q5_K, Q6_K]) && n.is_multiple_of(QK_K)).then(|| quantize_k(x));
+        let b32 = (wants(&[Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, IQ4_NL, MXFP4])
+            && n.is_multiple_of(QK8_0))
+        .then(|| quantize_b32(x));
+        let k = (wants(&[Q2_K, Q3_K, Q4_K, Q5_K, Q6_K]) && n.is_multiple_of(QK_K))
+            .then(|| quantize_k(x));
         let x = if wants(&[F32, F16]) {
             x.to_vec()
         } else {
@@ -2735,6 +2750,41 @@ unsafe fn dot_row_q8_with(simd: Simd, qtype_id: u32, row: &[u8], x: &QuantizedAc
                 Simd::Scalar => mxfp4::dot_mxfp4_q8(row, dx, qx),
             }
         }
+        IQ4_NL => {
+            let B32 { d: dx, q: qx, .. } = x.b32.as_ref().unwrap_or_else(|| {
+                panic!(
+                    "dot_row_q8: {} needs input len multiple of 32, got {} (or the 32-block view wasn't built)",
+                    name(),
+                    n
+                )
+            });
+            let row = &row[..row_bytes(qtype_id, n)];
+            match simd {
+                // SAFETY: guaranteed by our caller.
+                #[cfg(target_arch = "x86_64")]
+                Simd::Avx2 | Simd::Vnni => unsafe { iq4nl::x86::iq4_nl_avx2(row, dx, qx) },
+                Simd::Scalar => iq4nl::dot_iq4_nl_q8(row, dx, qx),
+            }
+        }
+        Q2_K | Q3_K => {
+            let xk = x.k.as_deref().unwrap_or_else(|| {
+                panic!(
+                    "dot_row_q8: {} needs input len multiple of 256, got {} (or the 256-block view wasn't built)",
+                    name(),
+                    n
+                )
+            });
+            let row = &row[..row_bytes(qtype_id, n)];
+            match (qtype_id, simd) {
+                // SAFETY: guaranteed by our caller.
+                #[cfg(target_arch = "x86_64")]
+                (Q2_K, Simd::Avx2 | Simd::Vnni) => unsafe { k23::x86::q2_k_avx2(row, xk) },
+                #[cfg(target_arch = "x86_64")]
+                (_, Simd::Avx2 | Simd::Vnni) => unsafe { k23::x86::q3_k_avx2(row, xk) },
+                (Q2_K, Simd::Scalar) => k23::dot_q2_k_q8(row, xk),
+                (_, Simd::Scalar) => k23::dot_q3_k_q8(row, xk),
+            }
+        }
         Q4_1 | Q5_1 => {
             let b = x.b32.as_ref().unwrap_or_else(|| {
                 panic!(
@@ -2920,6 +2970,19 @@ unsafe fn dot_rows_q8_with(
                 }
                 return;
             }
+            // SAFETY (the three below): guaranteed by our caller.
+            Q2_K if x.k.is_some() => {
+                let xk = x.k.as_deref().expect("checked");
+                return unsafe { k23::x86::q2_k_rows(rows, rb, xk, out, pf) };
+            }
+            Q3_K if x.k.is_some() => {
+                let xk = x.k.as_deref().expect("checked");
+                return unsafe { k23::x86::q3_k_rows(rows, rb, xk, out, pf) };
+            }
+            IQ4_NL if x.b32.is_some() => {
+                let b = x.b32.as_ref().expect("checked");
+                return unsafe { iq4nl::x86::iq4_nl_rows(rows, rb, &b.d, &b.q, out, pf) };
+            }
             MXFP4 if x.b32.is_some() => {
                 let b = x.b32.as_ref().expect("checked");
                 let (dx, qx) = (&b.d[..], &b.q[..]);
@@ -3031,9 +3094,8 @@ unsafe fn kquant_rows<const R: usize>(
 /// A lone token isn't padded: 4x the arithmetic for the same one row read.
 pub fn batch_slots(qtypes: &[u32], n: usize, nb: usize) -> usize {
     let grouped = qtypes.iter().all(|&qt| match qt {
-        Q4_0 | Q5_0 | Q8_0 => n.is_multiple_of(QK8_0),
-        Q4_K | Q5_K | Q6_K => n.is_multiple_of(QK_K),
-        MXFP4 => n.is_multiple_of(QK8_0),
+        Q4_0 | Q5_0 | Q8_0 | IQ4_NL | MXFP4 => n.is_multiple_of(QK8_0),
+        Q2_K | Q3_K | Q4_K | Q5_K | Q6_K => n.is_multiple_of(QK_K),
         _ => false,
     });
     if nb >= 2 && grouped && simd() != Simd::Scalar {
@@ -3182,6 +3244,32 @@ unsafe fn dot_row_q8_x4(
                 Simd::Avx2 => unsafe { mxfp4::x86::avx2::x4(row, dx, qx) },
                 Simd::Vnni => unsafe { mxfp4::x86::vnni::x4(row, dx, qx) },
                 Simd::Scalar => return None,
+            })
+        }
+        IQ4_NL => {
+            let mut dx: [&[f32]; 4] = [&[]; 4];
+            let mut qx: [&[[i8; 32]]; 4] = [&[]; 4];
+            for t in 0..4 {
+                let b = xs[t].b32.as_ref()?;
+                dx[t] = b.d.as_slice();
+                qx[t] = b.q.as_slice();
+            }
+            let row = &row[..row_bytes(qtype_id, n)];
+            Some(match simd {
+                Simd::Avx2 | Simd::Vnni => unsafe { iq4nl::x86::iq4_nl_avx2_x4(row, dx, qx) },
+                Simd::Scalar => return None,
+            })
+        }
+        Q2_K | Q3_K => {
+            let mut xk: [&[KBlock]; 4] = [&[]; 4];
+            for t in 0..4 {
+                xk[t] = xs[t].k.as_deref()?;
+            }
+            let row = &row[..row_bytes(qtype_id, n)];
+            Some(match (qtype_id, simd) {
+                (Q2_K, Simd::Avx2 | Simd::Vnni) => unsafe { k23::x86::q2_k_avx2_x4(row, xk) },
+                (_, Simd::Avx2 | Simd::Vnni) => unsafe { k23::x86::q3_k_avx2_x4(row, xk) },
+                (_, Simd::Scalar) => return None,
             })
         }
         _ => None,
@@ -3732,6 +3820,18 @@ mod tests {
             hash(Q5_1, 0x1319_8A2E_0370_7344, 24, 32, &[0, 2]),
             0x5f34_2d15_154a_6849
         );
+        assert_eq!(
+            hash(Q2_K, 0xA409_3822_299F_31D0, 84, 256, &[80, 82]),
+            0xc1fc_a545_4ea5_59d5
+        );
+        assert_eq!(
+            hash(Q3_K, 0x082E_FA98_EC4E_6C89, 110, 256, &[108]),
+            0x3ea6_511d_8885_b60a
+        );
+        assert_eq!(
+            hash(IQ4_NL, 0xBE54_66CF_34E9_0C6C, 18, 32, &[0]),
+            0x111d_48f7_b813_57f3
+        );
         // The harness's control: an existing type through the same generator.
         assert_eq!(hash(Q4_K, k, 144, 256, &[0, 2]), 0x3046_51e0_52ca_e34f);
     }
@@ -3885,6 +3985,9 @@ mod tests {
             Q4_0 | Q5_0 | Q8_0 => &[0],
             Q4_K | Q5_K | Q4_1 | Q5_1 => &[0, 2],
             Q6_K => &[208],
+            Q2_K => &[80, 82],
+            Q3_K => &[108],
+            IQ4_NL => &[0],
             F16 => &[0],
             F32 => {
                 return (0..n).flat_map(|_| rng.f().to_le_bytes()).collect();
@@ -3911,7 +4014,7 @@ mod tests {
     /// The activations as dot_row_q8 sees them for weight type `qt`.
     fn dequant_act(qt: u32, qa: &QuantizedAct) -> Vec<f32> {
         match qt {
-            Q4_0 | Q4_1 | Q5_0 | Q5_1 | Q8_0 => {
+            Q4_0 | Q4_1 | Q5_0 | Q5_1 | Q8_0 | IQ4_NL => {
                 let B32 { d, q, c, n128 } = qa.b32.as_ref().unwrap();
                 for ((q, c), &s) in q.iter().zip(c).zip(n128) {
                     for (lane, &cl) in q.as_chunks::<4>().0.iter().zip(c) {
@@ -3924,7 +4027,7 @@ mod tests {
                     .flat_map(|(&d, q)| q.map(|v| d * v as f32))
                     .collect()
             }
-            Q4_K | Q5_K | Q6_K => {
+            Q2_K | Q3_K | Q4_K | Q5_K | Q6_K => {
                 let k = qa.k.as_ref().unwrap();
                 for b in k {
                     for (g, s) in b.qs.as_chunks::<16>().0.iter().zip(b.bsums) {
@@ -3981,6 +4084,12 @@ mod tests {
             (Q4_0, 4864),
             (Q5_K, 1280),
             (Q5_K, 4864),
+            (IQ4_NL, 896),
+            (IQ4_NL, 4864),
+            (Q2_K, 1280),
+            (Q2_K, 4864),
+            (Q3_K, 1280),
+            (Q3_K, 4864),
             (Q4_1, 896),
             (Q5_1, 896),
             (Q5_1, 4864),
@@ -4004,6 +4113,9 @@ mod tests {
             Q4_0 | Q5_0 | Q8_0 => 0..2,
             Q4_K | Q5_K | Q4_1 | Q5_1 => 0..4,
             Q6_K => 208..210,
+            Q2_K => 80..84,
+            Q3_K => 108..110,
+            IQ4_NL => 0..2,
             _ => unreachable!(),
         };
         for blk in 0..n / bs {
@@ -4032,7 +4144,9 @@ mod tests {
     fn dot_row_q8_extreme_weights() {
         // saturated quants (all bits set / all clear) stress the i32 accumulators
         let mut rng = Lcg(7);
-        for qt in [Q5_0, Q8_0, Q4_K, Q6_K, Q4_0, Q5_K, Q4_1, Q5_1] {
+        for qt in [
+            Q5_0, Q8_0, Q4_K, Q6_K, Q4_0, Q5_K, Q4_1, Q5_1, Q2_K, Q3_K, IQ4_NL,
+        ] {
             for fill in [0x00u8, 0xff, 0x80, 0x7f] {
                 let n = 512;
                 let row = extreme_row(qt, n, fill, &mut rng);
@@ -4161,12 +4275,113 @@ mod tests {
             (Q5_K, 4864),
             (Q4_1, 896),
             (Q5_1, 896),
+            (IQ4_NL, 32),
+            (IQ4_NL, 896),
+            (Q2_K, 256),
+            (Q2_K, 4864),
+            (Q3_K, 256),
+            (Q3_K, 4864),
         ] {
             for rep in 0..8 {
                 let row = synthetic_row(qt, n, &mut rng);
                 let x = synthetic_x(n, &mut rng);
                 check_simd(qt, &row, &x, &paths, &format!("qt {qt} n {n} rep {rep}"));
             }
+        }
+    }
+
+    /// Q2_K / Q3_K: every path (scalar, AVX2, the 4-token kernels) computes
+    /// the same exact integers and the same float step per block, so the
+    /// same bits, on random, extreme and all-max blocks.
+    #[test]
+    fn q2_k_q3_k_simd_bits_match_scalar() {
+        let mut paths = vec![Simd::Scalar];
+        paths.extend(simd_paths());
+        let mut rng = Lcg(0x2b3c);
+        for qt in [Q2_K, Q3_K, IQ4_NL] {
+            for n in [256usize, 1536, 4864] {
+                for rep in 0..12 {
+                    let row = match rep % 4 {
+                        1 => extreme_row(qt, n, 0x00, &mut rng),
+                        2 => extreme_row(qt, n, 0xff, &mut rng),
+                        3 => extreme_row(qt, n, 0xaa, &mut rng),
+                        _ => synthetic_row(qt, n, &mut rng),
+                    };
+                    let x = if rep % 2 == 0 {
+                        synthetic_x(n, &mut rng)
+                    } else {
+                        extreme_x(n, &mut rng)
+                    };
+                    let qa = QuantizedAct::for_types(&x, &[qt]);
+                    // SAFETY: Scalar needs nothing.
+                    let want = unsafe { dot_row_q8_with(Simd::Scalar, qt, &row, &qa) };
+                    for &p in &paths {
+                        // SAFETY: Scalar, or a path listed by simd_paths().
+                        let got = unsafe { dot_row_q8_with(p, qt, &row, &qa) };
+                        assert_eq!(
+                            got.to_bits(),
+                            want.to_bits(),
+                            "qt {qt} n {n} rep {rep} {p:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Q2_K / Q3_K blocks by hand: dequant is the documented layout.
+    #[test]
+    #[allow(clippy::needless_range_loop)] // e, l index several arrays
+    fn q2_k_q3_k_blocks() {
+        // Q2_K: d = 1, dmin = 0.5; sub-block g scale g & 15, min 15 - g.
+        let mut b = vec![0u8; Q2_K_BYTES];
+        for g in 0..16 {
+            b[g] = (g as u8) | ((15 - g as u8) << 4);
+        }
+        // qs: byte k's 2-bit field j = (k + j) & 3.
+        for k in 0..64 {
+            b[16 + k] = (0..4).map(|j| (((k + j) & 3) << (2 * j)) as u8).sum();
+        }
+        b[80..82].copy_from_slice(&0x3c00u16.to_le_bytes());
+        b[82..84].copy_from_slice(&0x3800u16.to_le_bytes());
+        let mut out = [0f32; 256];
+        dequant(Q2_K, &b, &mut out);
+        for e in 0..256 {
+            let (g, l) = (e / 16, e % 16);
+            let (n, j, h) = (g / 8, (g % 8) / 2, g % 2);
+            let q = (32 * n + 16 * h + l + j) & 3;
+            assert_eq!(
+                out[e],
+                g as f32 * q as f32 - 0.5 * (15 - g) as f32,
+                "q2_k e={e}"
+            );
+        }
+        // Q3_K: d = 2, scales 0..16 - 32 (6-bit packing), qs as above,
+        // hmask bit 4n + j set for odd l only.
+        let mut b = vec![0u8; Q3_K_BYTES];
+        for k in 0..64 {
+            b[32 + k] = (0..4).map(|j| (((k + j) & 3) << (2 * j)) as u8).sum();
+        }
+        for l in 0..32 {
+            b[l] = if l % 2 == 1 { 0xff } else { 0 };
+        }
+        let sc: Vec<u8> = (0..16).map(|i| (i * 4 + 1) as u8).collect(); // 6-bit
+        for i in 0..16 {
+            if i < 8 {
+                b[96 + i] |= sc[i] & 0xf;
+            } else {
+                b[96 + i - 8] |= (sc[i] & 0xf) << 4;
+            }
+            b[96 + 8 + i % 4] |= ((sc[i] >> 4) & 3) << (2 * (i / 4));
+        }
+        b[108..110].copy_from_slice(&0x4000u16.to_le_bytes());
+        dequant(Q3_K, &b, &mut out);
+        for e in 0..256 {
+            let (g, l) = (e / 16, e % 16);
+            let (n, j, h) = (g / 8, (g % 8) / 2, g % 2);
+            let q = ((32 * n + 16 * h + l + j) & 3) as i32 - if l % 2 == 1 { 0 } else { 4 };
+            let want = 2.0 * (sc[g] as i32 - 32) as f32 * q as f32;
+            assert_eq!(out[e], want, "q3_k e={e}");
         }
     }
 
@@ -4208,7 +4423,9 @@ mod tests {
     fn simd_matches_scalar_extreme() {
         let paths = simd_paths();
         let mut rng = Lcg(0xe7);
-        for qt in [Q5_0, Q8_0, Q4_K, Q6_K, Q4_0, Q5_K, Q4_1, Q5_1] {
+        for qt in [
+            Q5_0, Q8_0, Q4_K, Q6_K, Q4_0, Q5_K, Q4_1, Q5_1, Q2_K, Q3_K, IQ4_NL,
+        ] {
             for fill in [0x00u8, 0xff, 0x80, 0x7f, 0x55, 0xaa] {
                 for n in [256, 1280] {
                     let row = extreme_row(qt, n, fill, &mut rng);
@@ -4257,6 +4474,9 @@ mod tests {
             (Q5_K, 4864),
             (Q4_1, 896),
             (Q5_1, 896),
+            (Q2_K, 4864),
+            (Q3_K, 4864),
+            (IQ4_NL, 896),
         ] {
             for nb in [1usize, 2, 3, 4, 5, 6, 7, 8, 9, 13] {
                 let row = synthetic_row(qt, n, &mut rng);
@@ -4295,6 +4515,9 @@ mod tests {
             ([Q4_K, Q4_K], 896 * 2 + 256),
             ([Q6_K, Q6_K], 4864),
             ([Q4_K, Q6_K], 4864),
+            ([Q2_K, Q3_K], 4864),
+            ([Q3_K, Q6_K], 4864),
+            ([IQ4_NL, Q5_0], 896),
         ] {
             assert_eq!(batch_slots(&qts, n, 1), 1);
             assert!(batch_slots(&[F32], n, 3) == 3);
@@ -4656,9 +4879,20 @@ mod tests {
                 (Q4_1 | Q5_1, 1) => extreme_row(qt, n, 0x00, rng),
                 (Q4_1 | Q5_1, 2) => extreme_row(qt, n, 0xff, rng),
                 (Q4_1 | Q5_1, 3) => extreme_row(qt, n, 0xf0, rng),
+                (IQ4_NL, 1) => extreme_row(qt, n, 0x00, rng),
+                (IQ4_NL, 2) => extreme_row(qt, n, 0xff, rng),
+                (IQ4_NL, 3) => extreme_row(qt, n, 0x0f, rng),
+                (Q2_K | Q3_K, 1) => extreme_row(qt, n, 0x00, rng),
+                (Q2_K | Q3_K, 2) => extreme_row(qt, n, 0xff, rng),
+                (Q2_K | Q3_K, 3) => extreme_row(qt, n, 0x55, rng),
                 (_, 4) => {
                     let mut row = synthetic_row(qt, n, rng);
-                    let d_off = if qt == Q6_K { 208 } else { 0 };
+                    let d_off = match qt {
+                        Q6_K => 208,
+                        Q2_K => 80,
+                        Q3_K => 108,
+                        _ => 0,
+                    };
                     for blk in 0..n / bs {
                         let v = 0x7bffu16 | (((rng.next_u32() & 1) as u16) << 15);
                         let p = blk * bb + d_off;
@@ -4687,6 +4921,9 @@ mod tests {
             (Q5_K, [256, 4864]),
             (Q4_1, [896, 4864]),
             (Q5_1, [896, 4864]),
+            (IQ4_NL, [896, 4864]),
+            (Q2_K, [256, 4864]),
+            (Q3_K, [256, 4864]),
         ] {
             for n in widths {
                 let rb = row_bytes(qt, n);
@@ -4956,6 +5193,52 @@ mod tests {
                         s / (reps * rows / 8) as f64 * 1e6
                     );
                 }
+            }
+        }
+    }
+
+    /// Single-thread GMAC/s of the batched CPU path per type (64 tokens,
+    /// 128 rows): the new types' per-row 4-token kernels next to Q4_K's r8
+    /// GEMM and per-row kernel (`--ignored --nocapture`).
+    #[test]
+    #[ignore]
+    fn q23_multi_speed() {
+        let mut rng = Lcg(0x5eed);
+        let (rows, nt, n) = (128usize, 64usize, 3584usize);
+        for qt in [Q4_K, Q2_K, Q3_K, IQ4_NL, Q4_0, Q5_0] {
+            let w: Vec<u8> = (0..rows)
+                .flat_map(|_| synthetic_row(qt, n, &mut rng))
+                .collect();
+            let rb = row_bytes(qt, n);
+            let qas: Vec<QuantizedAct> = (0..nt)
+                .map(|_| QuantizedAct::for_types(&synthetic_x(n, &mut rng), &[qt]))
+                .collect();
+            let xs: Vec<&QuantizedAct> = qas.iter().collect();
+            let mut o = vec![0f32; nt];
+            let mut reps = 0usize;
+            let t = std::time::Instant::now();
+            while t.elapsed().as_secs_f64() < 0.6 {
+                for r in 0..rows {
+                    dot_row_q8_multi(qt, &w[r * rb..(r + 1) * rb], &xs, &mut o);
+                }
+                reps += 1;
+            }
+            let gmac = (reps * rows * n * nt) as f64 / t.elapsed().as_secs_f64() / 1e9;
+            println!(
+                "{} per-row x4: {gmac:.2} GMAC/s",
+                crate::gguf::qtype(qt).name
+            );
+            if qt == Q4_K {
+                let p = r8::repack(qt, &w, rows, n);
+                let mut o = vec![0f32; rows * nt];
+                let mut reps = 0usize;
+                let t = std::time::Instant::now();
+                while t.elapsed().as_secs_f64() < 0.6 {
+                    r8::gemm(qt, &p, &xs, &mut o, nt);
+                    reps += 1;
+                }
+                let gmac = (reps * rows * n * nt) as f64 / t.elapsed().as_secs_f64() / 1e9;
+                println!("Q4_K r8 gemm: {gmac:.2} GMAC/s");
             }
         }
     }

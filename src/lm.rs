@@ -413,7 +413,7 @@ impl<'a> Backend<'a> {
             if kv == KvType::Q8 {
                 return Err("the q8 KV cache is cuda-only (--device cuda)".into());
             }
-            crate::model::moe_check_ram(m)?;
+            crate::model::moe_check_ram(m, true)?;
             return Ok(Backend::Cpu(Qwen2::new(m)));
         }
         if gpu_layers == Some(0) {
@@ -550,7 +550,7 @@ impl<'a> Backend<'a> {
         let module: &'static Module<'static> = Box::leak(Box::new(Kernels::module_for(gpu, m)?));
         let mm: &'static Module<'static> = Box::leak(Box::new(Kernels::moe_module(gpu)?));
         let n = MoeQwen3::new(gpu, module, mm, m, max_ctx, kv, fit, q6k8)?;
-        eprintln!("moe:         {}", n.describe(n.ctx));
+        eprintln!("moe:         {}, kv {}", n.describe(n.ctx), n.kv_name());
         Ok(Backend::Moe(Box::new(n)))
     }
 

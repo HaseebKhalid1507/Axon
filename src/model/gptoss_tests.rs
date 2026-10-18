@@ -458,9 +458,9 @@ fn check_supported_gpt_oss() {
     let retype = |m: &mut Model, name: &str, id: u32| {
         m.tensors.iter_mut().find(|t| t.name == name).unwrap().qtype = crate::gguf::qtype(id);
     };
-    retype(&mut m, "blk.0.attn_q.weight", 20);
+    retype(&mut m, "blk.0.attn_q.weight", 23);
     let e = check_supported(&m).unwrap_err().to_string();
-    assert!(e.contains("blk.0.attn_q.weight: type IQ4_NL (20)"), "{e}");
+    assert!(e.contains("blk.0.attn_q.weight: type IQ4_XS (23)"), "{e}");
     assert!(
         !e.contains("the file has unsupported tensors") && !e.contains("MXFP4"),
         "{e}"
@@ -468,7 +468,7 @@ fn check_supported_gpt_oss() {
     retype(&mut m, "blk.1.attn_k.weight", 22);
     let e = check_supported(&m).unwrap_err().to_string();
     assert!(
-        e.contains("(the file has unsupported tensors: 1 IQ4_NL, 1 IQ2_S)"),
+        e.contains("(the file has unsupported tensors: 1 IQ4_XS, 1 IQ2_S)"),
         "{e}"
     );
     assert!(!e.contains("MXFP4"), "{e}");

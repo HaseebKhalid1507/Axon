@@ -36,8 +36,8 @@ models, cheaply and fast), so choices made along the way shouldn't close them of
   - MLA attention and DeepSeek routing (the `deepseek2` architecture), tried first on a small DeepSeek-architecture
     model that fits Parabellum;
   - Kimi's tokenizer (its own vocabulary and pre-tokenizer; to be checked against the GGUF);
-  - 2–3-bit weight types. At Q4_K_M the model is ≈ 600 GB; at 2–3 bits it is ≈ 250–380 GB. The GGUF reader names
-    Q2_K and Q3_K but there are no kernels for them;
+  - 2–3-bit weight types. At Q4_K_M the model is ≈ 600 GB; at 2–3 bits it is ≈ 250–380 GB. Q2_K and Q3_K (and
+    IQ4_NL, their files' fallback type) run on the CPU and CUDA (feat/q2k-q3k, [log](log/2026-10-17-q2k-q3k.md));
   - an expert cache across GPU, RAM and disk, and multi-GPU (pipeline parallel is on main, #34);
   - the hardware to test it at full size: a multi-GPU or large-RAM pod, a few dollars to tens of dollars an hour.
 
@@ -79,9 +79,10 @@ Also open:
 - ~~**Tool calling: `/v1/responses` (codex) and the ollama-native API.**~~ Done
   (docs/serve-apis.md, log 2026-10-17-serve-responses-ollama). Left: `format` / structured
   output (needs grammar-constrained sampling), embeddings.
-- **Q2_K and Q3_K.** The GGUF reader names both, but `model.rs` doesn't accept them (`SUPPORTED_TYPES`) and
-  there are no kernels; the 2–3-bit frontier models need them ([Long-term goals](#long-term-goals)).
-  **In flight** (feat/q2k-q3k).
+- **Q2_K and Q3_K.** CPU and CUDA kernels for Q2_K, Q3_K and IQ4_NL (the fallback type in the same files);
+  the 2–3-bit frontier models need them ([Long-term goals](#long-term-goals)). **In review** (feat/q2k-q3k,
+  [log](log/2026-10-17-q2k-q3k.md)); follow-ups: a repacked (r8) CPU layout (CPU prefill on 7B Q2_K /
+  Q3_K_M is 41% / 22% behind llama.cpp at pp2100, MEASURED) and gemvm small-batch kernels.
 - **MoE stage 2** (attention and router on the GPU, experts on the CPU). **In flight** (PR #67); its status
   lives in Scale item 7 and [Mixture-of-experts](#mixture-of-experts).
 - **Qwen3 0.6B Q8_0 long prefill on sm_89.** The one cell Axon loses on the RTX 4050
