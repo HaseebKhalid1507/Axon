@@ -29,6 +29,8 @@ use super::*;
 pub(crate) struct MoeFns<'m> {
     logits: Func<'m>,
     topk: Func<'m>,
+    /// gpt-oss: the biased logits' top k, softmax over those k.
+    topk_oai: Func<'m>,
     add: Func<'m>,
 }
 
@@ -37,6 +39,7 @@ impl<'m> MoeFns<'m> {
         Ok(MoeFns {
             logits: module.function("moe_logits")?,
             topk: module.function("moe_topk")?,
+            topk_oai: module.function("moe_topk_oai")?,
             add: module.function("moe_add")?,
         })
     }
@@ -142,7 +145,7 @@ fn f32s(b: &[u8]) -> Vec<f32> {
 
 impl<'g> CudaQwen2<'g> {
     fn moe_k(&self) -> (usize, usize) {
-        let d = self.moe.expect("a qwen3moe model");
+        let d = self.moe.expect("a mixture-of-experts model");
         (d.n_expert, d.k)
     }
 
@@ -214,6 +217,23 @@ impl<'g> CudaQwen2<'g> {
                     mb.lg.arg(),
                 ],
             )?;
+            if let Some(o) = l.oss {
+                // gpt-oss: the router's bias (n_e floats), moe_topk_oai.
+                return self.gpu.launch(
+                    &mf.topk_oai,
+                    (nb as u32, 1, 1),
+                    (MOE_THREADS, 1, 1),
+                    (n_e * 4) as u32,
+                    &[
+                        mb.lg.arg(),
+                        self.vecs.arg_at(o.router_b * 4),
+                        Arg::I32(n_e as i32),
+                        Arg::I32(k as i32),
+                        ids,
+                        w,
+                    ],
+                );
+            }
             self.gpu.launch(
                 &mf.topk,
                 (nb as u32, 1, 1),

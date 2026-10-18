@@ -3275,7 +3275,7 @@ pub(crate) mod deepseek2_tests;
 
 #[cfg(test)]
 #[path = "model/gptoss_tests.rs"]
-mod gptoss_tests;
+pub(crate) mod gptoss_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {

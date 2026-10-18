@@ -6497,6 +6497,37 @@ fn teacher_forced_dump() {
         o.sort_by(|&a, &b| lp[b].total_cmp(&lp[a]));
         o[..5].iter().map(|&i| (i, lp[i])).collect()
     };
+    // AXON_TF_DEV=moe: the MoE backend (crate::moe: attention on the GPU,
+    // experts on the CPU).
+    if var("AXON_TF_DEV") == "moe" {
+        fn rows<L: Lm>(
+            net: &L,
+            seq: &[u32],
+            n: usize,
+            top: &dyn Fn(&[f32]) -> Vec<(usize, f64)>,
+        ) -> Vec<Vec<(usize, f64)>> {
+            let mut c = net.new_cache(seq.len() + 1);
+            net.feed_batch(&seq[..n - 1], 0, &mut c);
+            let mut r = Vec::new();
+            for (i, &id) in seq.iter().enumerate().skip(n - 1) {
+                r.push(top(&net.forward(id, i, &mut c)));
+            }
+            r
+        }
+        let g = crate::testutil::gpu().unwrap();
+        let km = Kernels::module_for(&g, &m).unwrap();
+        let mm = Kernels::moe_module(&g).unwrap();
+        let net = crate::moe::tests::moe_net(&g, &km, &mm, &m, max_ctx);
+        let out: Vec<_> = (inp["gens"].as_array().unwrap().iter())
+            .map(|gn| {
+                let (p, t) = (ids(&gn["prompt_ids"]), ids(&gn["tokens"]));
+                let seq: Vec<u32> = p.iter().chain(&t).copied().collect();
+                rows(&net, &seq, p.len(), &top)
+            })
+            .collect();
+        std::fs::write(var("AXON_TF_OUT"), serde_json::to_string(&out).unwrap()).unwrap();
+        return;
+    }
     let gpu = var("AXON_TF_DEV") == "cuda";
     let g = gpu.then(|| crate::testutil::gpu().unwrap());
     let km = g.as_ref().map(|g| Kernels::module(g).unwrap());

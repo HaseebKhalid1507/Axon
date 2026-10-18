@@ -1503,7 +1503,22 @@ impl<'g> CudaQwen2<'g> {
                     // partials' stride: blocks or splits, the arguments
                     // after rp: the kernel's own, picked with it).
                     let gemma = self.gemma.is_some();
+                    let oss = l.oss.zip(self.f.oss.as_ref());
                     let (f, grid, block, stride, tail) = match (tc, q8, gemma) {
+                        // gpt-oss: each query's window, the table (null:
+                        // plain) last (oss.cu).
+                        (false, false, false) if oss.is_some() => (
+                            &oss.unwrap().1.attn_split_b,
+                            ms,
+                            ATT_TILE as u32,
+                            self.max_split,
+                            vec![Arg::I32(oss.unwrap().0.win as i32), tab],
+                        ),
+                        _ if oss.is_some() => {
+                            return Err("gpt-oss attention: f16 split kernels only (load \
+                                 refuses tensor cores and the q8 cache)"
+                                .into());
+                        }
                         // gemma3: each query's window (0: a global layer);
                         // its plain-cache kernel takes no table (gemma.cu).
                         (false, false, true) => {
@@ -1582,7 +1597,10 @@ impl<'g> CudaQwen2<'g> {
                         Arg::U64(ast as u64),
                         rp,
                     ];
-                    let combine = if gemma {
+                    let combine = if let Some((o, of)) = oss {
+                        cargs.extend_from_slice(&[Arg::I32(o.win as i32), vec(o.sinks)]);
+                        &of.attn_combine_b
+                    } else if gemma {
                         cargs.push(Arg::I32(l.win as i32));
                         &bf.attn_combine_w
                     } else if tc {
@@ -1626,7 +1644,9 @@ impl<'g> CudaQwen2<'g> {
                     on("post_norm")?;
                 }
                 None => {
-                    self.bgemm(wts, &l.o, b.act.arg(), ast, nb, null, 1, b.x.arg(), dim)?;
+                    // gpt-oss: x += W_o act + b_o.
+                    let bo = l.oss.map_or(null, |o| vec(o.bo));
+                    self.bgemm(wts, &l.o, b.act.arg(), ast, nb, bo, 1, b.x.arg(), dim)?;
                     on("wo")?;
                 }
             }

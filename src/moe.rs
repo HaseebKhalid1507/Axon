@@ -81,7 +81,7 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
 
     /// One line for the banner.
     pub fn describe(&self, max_ctx: usize) -> String {
-        let d = self.gpu.moe.expect("qwen3moe");
+        let d = self.gpu.moe.expect("a mixture-of-experts model");
         format!(
             "attention + router on the GPU ({:.2} GiB, ctx {max_ctx}), {} experts x {} \
              layers on the CPU (top-{})",
@@ -223,3 +223,6 @@ impl<'g> Lm for MoeQwen3<'_, 'g> {
 
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod oss_tests;

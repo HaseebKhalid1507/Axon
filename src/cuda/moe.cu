@@ -156,3 +156,58 @@ extern "C" __global__ void moe_add(float* __restrict__ x, const float* __restric
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) x[i] = __fadd_rn(x[i], y[i]);
 }
+
+// gpt-oss's router (model/moe.rs `route_oai`), one token per block
+// (MOE_THREADS threads; grid = tokens): l = logits + bias, the k largest in
+// rank order (k rounds of tree argmax, ties to the lower index), their
+// weights the softmax over those k: max = the first, e_i = exp(l_i - max),
+// s = ((e_0 + e_1) + ..) + e_{k-1}, w_i = e_i * (1 / s). Dynamic shared
+// memory: n_e floats.
+extern "C" __global__ void __launch_bounds__(MOE_THREADS)
+moe_topk_oai(const float* __restrict__ logits, const float* __restrict__ bias, int n_e, int k,
+             int* __restrict__ ids, float* __restrict__ w) {
+    extern __shared__ float p[];
+    __shared__ float red[MOE_THREADS];
+    __shared__ int rid[MOE_THREADS];
+    int t = threadIdx.x;
+    size_t tok = blockIdx.x;
+    for (int e = t; e < n_e; e += MOE_THREADS) p[e] = __fadd_rn(logits[tok * n_e + e], bias[e]);
+    __syncthreads();
+    for (int r = 0; r < k; r++) {
+        float bv = __int_as_float(0xff800000);  // -inf
+        int bi = 0x7fffffff;
+        for (int e = t; e < n_e; e += MOE_THREADS)
+            if (p[e] == p[e] && moe_beats(p[e], e, bv, bi)) {
+                bv = p[e];
+                bi = e;
+            }
+        red[t] = bv;
+        rid[t] = bi;
+        __syncthreads();
+        for (int s = MOE_THREADS / 2; s > 0; s >>= 1) {
+            if (t < s && moe_beats(red[t + s], rid[t + s], red[t], rid[t])) {
+                red[t] = red[t + s];
+                rid[t] = rid[t + s];
+            }
+            __syncthreads();
+        }
+        if (t == 0) {
+            int e = rid[0];
+            ids[tok * k + r] = e;
+            w[tok * k + r] = red[0];
+            p[e] = __int_as_float(0x7fc00000);  // NaN: taken
+        }
+        __syncthreads();
+    }
+    if (t == 0) {
+        float mx = w[tok * k];
+        float s = 0.0f;
+        for (int r = 0; r < k; r++) {
+            float v = expf(__fsub_rn(w[tok * k + r], mx));
+            w[tok * k + r] = v;
+            s = __fadd_rn(s, v);
+        }
+        float inv = __fdiv_rn(1.0f, s);
+        for (int r = 0; r < k; r++) w[tok * k + r] = __fmul_rn(w[tok * k + r], inv);
+    }
+}

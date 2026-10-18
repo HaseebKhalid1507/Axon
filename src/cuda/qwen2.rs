@@ -218,6 +218,46 @@ struct LayerW {
     /// gemma3 local layer: its window (0: global), and the local RoPE
     /// table (`CudaCache::rope_swa`) instead of the global one.
     win: u32,
+    /// gpt-oss: its window, sinks and biases (oss.cu).
+    oss: Option<OssLayer>,
+}
+
+/// A gpt-oss layer's extras: offsets in floats into `vecs`.
+#[derive(Clone, Copy)]
+struct OssLayer {
+    /// The sliding window (0: a global layer). Its RoPE table is the global
+    /// one (YaRN on every layer, as llama.cpp's freq_base_swa = freq_base).
+    win: u32,
+    /// One sink score per query head.
+    sinks: usize,
+    /// The attention output's bias, dim floats.
+    bo: usize,
+    /// The router's bias, n_expert floats (moe.cu `moe_topk_oai`).
+    router_b: usize,
+}
+
+/// oss.cu's kernels (a gpt-oss model's module: `Kernels::module_for`).
+pub(super) struct OssFns<'m> {
+    pub(super) attn_split: Func<'m>,
+    pub(super) attn_combine: Func<'m>,
+    pub(super) attn_split_b: Func<'m>,
+    pub(super) attn_combine_b: Func<'m>,
+}
+
+impl<'m> OssFns<'m> {
+    fn new(module: &'m Module<'_>) -> Result<OssFns<'m>, String> {
+        let f = |n: &str| {
+            module
+                .function(n)
+                .map_err(|e| format!("{e} (gpt-oss needs its module: Kernels::module_for)"))
+        };
+        Ok(OssFns {
+            attn_split: f("attn_split_ws_64")?,
+            attn_combine: f("attn_combine_ws")?,
+            attn_split_b: f("attn_split_bws_64")?,
+            attn_combine_b: f("attn_combine_bws")?,
+        })
+    }
 }
 
 /// A layer's feed-forward block on the GPU (model.rs `Ffn`'s mirror).
@@ -365,6 +405,8 @@ struct Fns<'m> {
     /// attn_split_w through a page table (a paged cache).
     attn_split_w_pg: Func<'m>,
     attn_combine_w: Func<'m>,
+    /// gpt-oss only (oss.cu).
+    oss: Option<OssFns<'m>>,
 }
 
 /// Largest dim rmsnorm_quant_v2 takes (decode.cu NORM2_MAX: dim floats of
@@ -1271,6 +1313,10 @@ impl<'g> CudaQwen2<'g> {
         if gemma && kv != CacheKv::F16 {
             return Err("gemma3 has no q8 KV cache on the GPU yet (--kv f16)".into());
         }
+        let oss = m.arch == "gpt-oss";
+        if oss && kv != CacheKv::F16 {
+            return Err("gpt-oss has no q8 KV cache on the GPU yet (--kv f16)".into());
+        }
         if super::needs_ext(m) && !module.ext() {
             return Err(
                 "the model has Q4_0/Q4_1/Q5_1/Q5_K/Q2_K/Q3_K/IQ4_NL tensors: it needs the kernels \
@@ -1295,7 +1341,15 @@ impl<'g> CudaQwen2<'g> {
         let trained = meta(m, "context_length").unwrap_or(32768.0);
         let group = n_heads / n_kv_heads;
         gpu_head_ok(gemma, head_dim, group)?;
-        let swa = crate::model::gemma_swa(m, n_layers);
+        if oss && head_dim != 64 {
+            return Err(format!(
+                "gpt-oss with head size {head_dim} isn't supported on the GPU (64 only)"
+            ));
+        }
+        // gpt-oss's windows are oss.cu's (OssLayer); its local layers use
+        // the global RoPE table.
+        let swa = crate::model::gemma_swa(m, n_layers).filter(|_| !oss);
+        let oss_swa = crate::model::gemma_swa(m, n_layers).filter(|_| oss);
         let freq_swa = match &swa {
             Some(_) => crate::model::rope_freqs_swa(m, head_dim),
             None => Vec::new(),
@@ -1398,10 +1452,30 @@ impl<'g> CudaQwen2<'g> {
             let mut opt = |s: &str| tensor_opt(m, &name(s)).map(|t| push_vec(vec_f32(m, t)));
             let (bq, bk, bv) = (opt("attn_q.bias"), opt("attn_k.bias"), opt("attn_v.bias"));
             let (qn, kn) = (opt("attn_q_norm.weight"), opt("attn_k_norm.weight"));
-            let (post_attn, post_ffn) = (
-                opt("post_attention_norm.weight"),
-                opt("post_ffw_norm.weight"),
-            );
+            // gpt-oss: its post_attention_norm is the pre-FFN norm.
+            let (post_attn, post_ffn) = match oss {
+                true => (None, None),
+                false => (
+                    opt("post_attention_norm.weight"),
+                    opt("post_ffw_norm.weight"),
+                ),
+            };
+            let oss_l = match oss {
+                false => None,
+                true => {
+                    let mut need =
+                        |s: &str| opt(s).ok_or_else(|| format!("gpt-oss: missing {}", name(s)));
+                    Some(OssLayer {
+                        win: match &oss_swa {
+                            Some(s) if s.local[i] => s.window as u32,
+                            _ => 0,
+                        },
+                        sinks: need("attn_sinks.weight")?,
+                        bo: need("attn_output.bias")?,
+                        router_b: need("ffn_gate_inp.bias")?,
+                    })
+                }
+            };
             let win = match &swa {
                 Some(s) if s.local[i] => s.window as u32,
                 _ => 0,
@@ -1442,7 +1516,16 @@ impl<'g> CudaQwen2<'g> {
                 bv,
                 qn,
                 kn,
-                ffn_norm: push_vec(vec_f32(m, tensor(m, &name("ffn_norm.weight"))?)),
+                ffn_norm: push_vec(vec_f32(
+                    m,
+                    tensor(
+                        m,
+                        &name(match oss {
+                            true => "post_attention_norm.weight",
+                            false => "ffn_norm.weight",
+                        }),
+                    )?,
+                )),
                 q,
                 k,
                 v,
@@ -1451,6 +1534,7 @@ impl<'g> CudaQwen2<'g> {
                 post_attn,
                 post_ffn,
                 win,
+                oss: oss_l,
             });
         }
         let total = uploads
@@ -1506,6 +1590,11 @@ impl<'g> CudaQwen2<'g> {
                 attn_split_w: module.function("attn_split_w_256")?,
                 attn_split_w_pg: module.function("attn_split_w_256_pg")?,
                 attn_combine_w: module.function("attn_combine_w")?,
+                oss: if oss {
+                    Some(OssFns::new(module)?)
+                } else {
+                    None
+                },
             },
             n_layers,
             dim,
@@ -1534,7 +1623,8 @@ impl<'g> CudaQwen2<'g> {
             moe: moe_dims,
             max_split,
             att_gy: 0,
-            tc_attn: module.mma() && head_dim != 256,
+            // gpt-oss: the split attention (oss.cu), as gemma3's.
+            tc_attn: module.mma() && head_dim != 256 && !oss,
             graphs: std::env::var("AXON_CUDA_GRAPHS").map_or(true, |v| v != "0"),
             bf: batch::BatchFns::new(module, hdk, sms, {
                 let cc = gpu.info()?.cc;
@@ -2308,7 +2398,9 @@ impl<'g> CudaQwen2<'g> {
             let nblk_max = Self::nblk_max(c.max_ctx);
             let mut args = vec![c.q.arg()];
             args.extend_from_slice(&kva);
+            let oss = l.oss.zip(f.oss.as_ref());
             let attn = match c.mode {
+                CacheKv::F16 if oss.is_some() => &oss.unwrap().1.attn_split,
                 CacheKv::F16 if self.gemma.is_some() && c.tab.is_some() => &f.attn_split_w_pg,
                 CacheKv::F16 if self.gemma.is_some() => &f.attn_split_w,
                 CacheKv::F16 if tc => &f.attn_blk,
@@ -2338,6 +2430,9 @@ impl<'g> CudaQwen2<'g> {
                 args.extend_from_slice(&[bias(l.kn), Arg::F32(self.eps), rope, kva[0]]);
                 if self.gemma.is_some() {
                     args.push(Arg::I32(l.win as i32));
+                }
+                if let Some((o, _)) = oss {
+                    args.push(Arg::I32(o.win as i32));
                 }
             } else {
                 args.push(bias(l.ksh));
@@ -2388,7 +2483,10 @@ impl<'g> CudaQwen2<'g> {
                 c.act.arg(),
                 c.att.arg(),
             ];
-            let (combine, per) = if self.gemma.is_some() {
+            let (combine, per) = if let Some((o, of)) = oss {
+                cargs.extend_from_slice(&[Arg::I32(o.win as i32), vec(o.sinks)]);
+                (&of.attn_combine, 256)
+            } else if self.gemma.is_some() {
                 cargs.push(Arg::I32(l.win as i32));
                 (&f.attn_combine_w, 256)
             } else if cmb64 {
@@ -2426,7 +2524,9 @@ impl<'g> CudaQwen2<'g> {
                     on_launch("post_norm", 0)?;
                 }
                 None => {
-                    self.gemv(&l.o, &c.act, null, 1, &c.x)?;
+                    // gpt-oss: x += W_o act + b_o.
+                    let bo = l.oss.map_or(null, |o| vec(o.bo));
+                    self.gemv(&l.o, &c.act, bo, 1, &c.x)?;
                     on_launch("wo", l.o.bytes())?;
                 }
             }

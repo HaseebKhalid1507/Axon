@@ -118,10 +118,10 @@ pub(crate) fn is_moe(m: &Model) -> bool {
     matches!(m.arch.as_str(), "qwen3moe" | "gpt-oss" | "deepseek2")
 }
 
-/// gpt-oss: no GPU MoE path for its MXFP4 experts, sinks and biases yet;
-/// deepseek2: its GPU MLA attention is stage 1. CPU only for now.
+/// deepseek2: its GPU MLA attention is stage 1. CPU only for now. (gpt-oss
+/// runs as qwen3moe does: attention on the GPU, experts on the CPU.)
 pub(crate) fn cpu_only(m: &Model) -> bool {
-    matches!(m.arch.as_str(), "gpt-oss" | "deepseek2")
+    matches!(m.arch.as_str(), "deepseek2")
 }
 
 pub(crate) fn moe_dims(m: &Model) -> Option<MoeDims> {
