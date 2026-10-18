@@ -566,8 +566,10 @@ fn unsupported_type(m: &Model, name: &str, q: crate::gguf::QType) -> String {
         String::new()
     };
     let n = q.name;
-    let hint = if n.starts_with("Q4_0_") || n.starts_with("IQ4_NL_") {
+    let hint = if n.starts_with("Q4_0_") {
         "; it is an ARM repacked layout that llama.cpp has dropped: use the Q4_0 file"
+    } else if n.starts_with("IQ4_NL_") {
+        "; it is an ARM repacked layout that llama.cpp has dropped: use the IQ4_NL file"
     } else if n.starts_with("IQ") || n.starts_with("TQ") {
         "; i-quants (IQ*) and ternary (TQ*) types are not supported: use a K-quant file \
          (Q4_K_M, Q5_K_M, Q6_K) or Q8_0"
@@ -578,10 +580,14 @@ fn unsupported_type(m: &Model, name: &str, q: crate::gguf::QType) -> String {
     } else {
         ""
     };
+    let ok: Vec<&str> = SUPPORTED_TYPES
+        .iter()
+        .map(|&id| crate::gguf::qtype(id).name)
+        .collect();
     format!(
-        "tensor {name}: type {n} ({}) is not supported (supported: F32, F16, Q4_0, Q4_1, \
-         Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K){all}{hint}",
-        q.id
+        "tensor {name}: type {n} ({}) is not supported (supported: {}){all}{hint}",
+        q.id,
+        ok.join(", ")
     )
 }
 
@@ -3486,10 +3492,25 @@ pub(crate) mod tests {
             },
             "(the file has unsupported tensors: 1 IQ2_S, 1 IQ4_NL); i-quants",
         );
+        let ok: Vec<&str> = SUPPORTED_TYPES
+            .iter()
+            .map(|&id| crate::gguf::qtype(id).name)
+            .collect();
         rejects(
             set("blk.0.attn_q.weight", vec![64, 64], 31),
-            "Q4_0_4_4 (31) is not supported (supported: F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, \
-             Q8_0, Q4_K, Q5_K, Q6_K); it is an ARM repacked layout that llama.cpp has dropped",
+            &format!(
+                "Q4_0_4_4 (31) is not supported (supported: {}); it is an ARM repacked layout \
+                 that llama.cpp has dropped: use the Q4_0 file",
+                ok.join(", ")
+            ),
+        );
+        rejects(
+            set("blk.0.attn_q.weight", vec![64, 64], 36),
+            "IQ4_NL_4_4 (36) is not supported",
+        );
+        rejects(
+            set("blk.0.attn_q.weight", vec![64, 64], 36),
+            "dropped: use the IQ4_NL file",
         );
         rejects(
             set("blk.0.attn_k.weight", vec![64, 64], Q8_0),
