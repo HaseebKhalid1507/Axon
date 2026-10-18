@@ -851,8 +851,8 @@ fn h2d_bench() {
 #[test]
 fn ring_upload_matches_write_at() {
     use super::upload::{Piece, Ring, Shape, Src};
-    let Ok(g) = Gpu::open() else {
-        eprintln!("no GPU: skipped");
+    // Through testutil::gpu (the GPU test lock), like every GPU test.
+    let Some(g) = crate::testutil::gpu() else {
         return;
     };
     let mut rng = Rng(0x9e3779b97f4a7c15);

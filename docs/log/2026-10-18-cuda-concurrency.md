@@ -5,7 +5,9 @@
   axon-node's POISON-RERUN ("culprit none (did not reproduce alone)", rc 0). Follows #53 (illaddr, NO-GO).
 
 ## What changed
-- `src/testutil.rs`: `testutil::gpu()` takes the process-wide GPU test lock on every card. Before, it took it
+- `src/testutil.rs`: `testutil::gpu()` takes the process-wide GPU test lock on every card (`ring_upload_matches_write_at`,
+  the one GPU test that opened the GPU directly, now goes through it too). A wait on a lock one holder has
+  kept past AXON_TEST_GPU_LOCK_TIMEOUT (default 2700 s) panics instead of hanging the suite. Before, it took it
   only on cards under 16 GiB, so on 24 GiB 4090s libtest ran up to 4 GPU tests at once. `AXON_TEST_GPU_SERIAL=0`
   still turns the lock off, for hunting. The new test `gpu_tests_never_overlap` checks that a second GPU test
   waits for the first. It fails on main on any card of 16 GiB or more and passes here.
@@ -60,9 +62,32 @@ Reading: the fault needs two things at once. First, more than one stream of deco
 the process. Second, a process being created on the host. The process doesn't have to touch CUDA, and doesn't
 even have to be our child: packed co-tenant suites are enough. It shows up on the IOMMU-enabled EPYC pods.
 Nothing Axon does in-process triggers it. memcheck and the guards find no out-of-bounds access. ESTIMATED,
-not proven: below Axon (driver, IOMMU or host), not an Axon buffer bug. Axon itself is single-threaded on the
-GPU outside tests, so a test harness that never overlaps GPU tests removes the half of the trigger Axon
-controls. With one GPU thread nothing faulted, but the evidence is short runs, not a proof of zero.
+not proven: below Axon (driver, IOMMU or host), not an Axon buffer bug.
+
+What this PR does and doesn't cover: it stops GPU tests from overlapping, so a test process has one test's
+streams in flight at a time. That is what the measurements tested: one decode thread next to the aggressors
+never faulted, but those were short runs, not a proof of zero. It says nothing about production. Production
+drives the GPU from one thread, but with more than one stream in flight, and none of these paths has run next
+to a process-creating aggressor:
+- pipeline parallel (`qwen2::pipeline`): stage s runs chunk i+1 while stage s+1 runs chunk i, each stage
+  replaying its own captured graph, on one device or several;
+- hybrid weight streaming (`qwen2::stream`): the `copy` and `unp` streams run beside the compute stream;
+- speculative decoding: the drafter has its own `Gpu` and stream (`draft.rs`), next to the main model's.
+Serve's GPU work is on its one engine thread (conn threads don't touch the GPU), and Axon spawns no
+processes, but a shared host's co-tenants do. So production isn't shown to be safe. Follow-up (not run):
+the matrix hunt with these as victims (two pipeline stages on one device; a streamed split; a drafted
+decode), each with the `spawn` aggressor, on an EPYC/IOMMU pod.
+
+Other limits of the mitigation:
+- The lock is per test, not per stream: a test's own extra streams (the cases above, in their tests) still
+  overlap.
+- `Drop for Gpu` destroys the stream without waiting (cuStreamDestroy returns at once), so a test that drops
+  its handle with work queued can let the next test start while that work runs. No test is known to do this.
+- A thread that a GPU test spawns, if it calls `testutil::gpu()` while its parent holds the lock, would wait
+  forever. Instead, such a wait now panics once one holder has kept the lock for AXON_TEST_GPU_LOCK_TIMEOUT
+  (default 45 min), naming the holder. No current test does this (all spawn closures checked).
+- The size check compares sizes only (cuFuncGetParamInfo reports no types). Its Blob128 path (hopper.cu,
+  sm_90a) hasn't run on hardware yet.
 
 ## How it was verified
 MEASURED at 323770d (pods show UTC; the dates/times here are EDT):
@@ -76,9 +101,11 @@ MEASURED at 323770d (pods show UTC; the dates/times here are EDT):
 | set10 (the faulting set), default 4 threads, packed pod1 | 1990, 5258 | pod1 (EPYC, IOMMU, 2 co-tenants each) | 10/10, 10/10 (main: FAULT in 3 of 4) |
 | set10 runs 3-5 | f026 / f287 / e592 | pod2 / pod1 / pod1 (EPYC, IOMMU) | 10/10 each: 5/5 clean vs main 3/4 faulted |
 | release suite after merging main c8e34fd (54c348d) | bb4c / b6b6 / 303d | pod4 / pod2 / pod1 | 553 pass, 0 fail |
-| debug + release suites after merging main ac358d4 (097249f) | see PR #82 | pods or bella | see PR |
+| debug-assertion suite after merging main ac358d4 (097249f: gpt-oss, Q2_K/Q3_K/IQ4_NL, MoE launches under the size check) | d078 / d8d8 / fb0d (group 1018-054610-1375) | pod4 / pod1 / pod2 | 193+255+113 = 561 pass, 0 fail |
+| release suite at 097249f | 3516 / 7f8d / f487 (group 1018-054823-4c08) | pod1 / pod4 / pod3 | 561 pass, 0 fail |
+| clippy -D warnings bin + tests at 097249f | local | bella | rc 0 |
 | md5 of gen, main vs candidate (3 models x 3 prompts x cuda/cpu) | 4309 | bella | 18 same, 0 differ |
-| clippy -D warnings (bin + tests, debug cfg), rustfmt --check | local | bella | clean |
+| clippy -D warnings (bin + tests, debug cfg), rustfmt --check at 323770d | local | bella | clean |
 
 axon-node exits rc 102 for any poisoned context from 04:22 EDT on (devstack 7f14147). 5258 and dfda started
 after that, so 5258's rc 0 is clean evidence by itself. The other gates have no POISON-RERUN line in their
@@ -87,5 +114,5 @@ logs and 0 failures, so they are clean too.
 ## What didn't work / open
 - The faulting kernel isn't named: the coredump env hides the fault, and memcheck finds nothing.
 - Untested: an IOMMU-enabled host without packing; IOMMU passthrough (`iommu=pt`) on the same host.
-- Untested: whether production `axon serve` (one GPU thread) can fault on an IOMMU host with process churn.
-  A short 1-thread run was clean.
+- Untested: production's multi-stream paths (pipeline, weight streaming, the drafter) next to process
+  creation; see "What this PR does and doesn't cover". A short one-thread, one-stream run was clean.

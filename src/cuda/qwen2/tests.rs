@@ -7805,13 +7805,17 @@ fn gpu_concurrency_hunt_child() {
 }
 
 /// Hunting aid: `gpu_concurrency_hunt_child` in fresh processes, AXON_HUNT_ROUNDS
-/// (default 2) per aggressor of AXON_HUNT_AGGS (default all), a table of
-/// which ones poisoned the context.
+/// (default 2) per aggressor of AXON_HUNT_AGGS (default all of them, the
+/// ones that faulted first), and a table of which ones poisoned the
+/// context.
 #[test]
 #[ignore = "hunting aid: --ignored --nocapture, AXON_HUNT_AGGS / AXON_HUNT_ROUNDS / AXON_STRESS_SECS"]
 fn gpu_concurrency_matrix_hunt() {
     let aggs = std::env::var("AXON_HUNT_AGGS")
-        .unwrap_or_else(|_| "churn,none,pin,alloc,module,ctx,hostbuf".into());
+        // spawn / proc / proc-ctx first: the only ones that ever faulted
+        // (docs/log/2026-10-18-cuda-concurrency.md); the rest are the
+        // in-process controls, all clean there.
+        .unwrap_or_else(|_| "spawn,proc,proc-ctx,none,churn,pin,alloc,module,ctx,hostbuf".into());
     let rounds: usize = std::env::var("AXON_HUNT_ROUNDS")
         .ok()
         .and_then(|v| v.parse().ok())

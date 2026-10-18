@@ -405,13 +405,21 @@ impl Gpu {
                 f.name
             );
             // And each argument's size is its parameter's: a U32 where the
-            // kernel takes a pointer leaves the pointer's high half (and
-            // every later parameter) as whatever the driver finds there.
+            // kernel takes a pointer has the driver copy 8 bytes from a
+            // 4-byte value, so the pointer's high half is garbage. Each
+            // parameter is copied from its own address, so only that one
+            // is wrong. Sizes only: cuFuncGetParamInfo reports no types, so
+            // u32 / i32 / f32, and Ptr / U64, can't be told apart.
             for (i, a) in args.iter().enumerate() {
                 // SAFETY: as above; i < the parameter count (checked).
                 let r = unsafe { info(f.f, i, &mut off, &mut size) };
+                check(
+                    self.d,
+                    r,
+                    &format!("cuFuncGetParamInfo {} param {i}", f.name),
+                )?;
                 assert!(
-                    r == 0 && size == a.size(),
+                    size == a.size(),
                     "launch of {}: argument {i} is {a:?}, {} bytes; the parameter has {size}",
                     f.name,
                     a.size()

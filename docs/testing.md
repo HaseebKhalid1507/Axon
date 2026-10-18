@@ -19,13 +19,16 @@ or time it:
 - **CPU forwards don't run in parallel across tests.** `pool::Pool` is process-wide and runs one job at a
   time. Four test threads that run CPU models take turns on one pool, so a test's CPU work costs suite wall
   time no matter how many test threads there are. Removing CPU work is the lever (see below).
-- **GPU tests are serialized on every card** (`testutil::gpu` takes a process-wide lock until the test's
-  thread ends; `AXON_TEST_GPU_SERIAL=0` turns it off, for hunting only). Below 16 GiB, concurrent tests ran out
-  of VRAM. On 24 GB EPYC pods, GPU tests in flight together lost the CUDA context to ILLEGAL_ADDRESS
-  (docs/log/2026-10-18-cuda-concurrency.md).
+- **GPU tests are serialized on every card.** `testutil::gpu` takes a process-wide lock until the test's
+  thread ends. Any GPU test opens the GPU through it. `AXON_TEST_GPU_SERIAL=0` turns it off, for hunting
+  only; any other value, or none, leaves it on. Below 16 GiB, concurrent tests ran out of VRAM. On 24 GB
+  pods, GPU tests in flight together were observed to lose the CUDA context to ILLEGAL_ADDRESS. That was
+  seen on EPYC hosts with the AMD IOMMU on, while processes were being started. The cause is a hypothesis:
+  [log](log/2026-10-18-cuda-concurrency.md). A thread spawned by a GPU test must not call `testutil::gpu()`.
+  That would deadlock on its parent's lock, so it panics after `AXON_TEST_GPU_LOCK_TIMEOUT` s (default 2700).
 - **Packed pods are slow.** Three jobs share a 4090 and its vCPUs, and a test there takes 3-8x its exclusive
-  time. Serial on an exclusive 4090, the whole release suite is ~2200 s. Packed with 4 test threads it is
-  ~2400 s, so on a pod the test threads don't buy wall time.
+  time. Serial on an exclusive 4090, the whole release suite is ~2200 s. (The packed 4-thread figure,
+  ~2400 s, was measured with GPU tests concurrent. It hasn't been re-measured with the lock.)
 - **Model loads are cheap once the page cache is warm.** A copy load or `Qwen2::new` repack of a 0.5-1B model
   takes 0.1-0.4 s uncontended. The 8-26 s seen on cold, packed pods were disk and contention, not a reason
   for process-wide model fixtures.

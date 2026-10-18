@@ -194,12 +194,26 @@ pub fn read_json(rel: &str) -> serde_json::Value {
 /// until its thread ends (libtest runs each test on its own thread). Two
 /// reasons. On cards under 16 GiB (a 6 GB laptop 4050, a 12 GB 5070 Ti)
 /// tests that load models at once run out of VRAM. And on 24 GiB RTX 4090
-/// pods (EPYC hosts with the AMD IOMMU on), GPU tests in flight together in
-/// one process lose the whole context to CUDA_ERROR_ILLEGAL_ADDRESS when
-/// a process starts on the host (even a non-CUDA one), every later GPU test
-/// with it (docs/log/2026-10-18-cuda-concurrency.md: no fault with one GPU
-/// test at a time). `AXON_TEST_GPU_SERIAL=0` turns it off (hunting:
-/// cuda::qwen2::tests::gpu_concurrency_matrix_hunt), `=1` is the default.
+/// pods, GPU tests in flight together in one process were observed to lose
+/// the whole context to CUDA_ERROR_ILLEGAL_ADDRESS, every later GPU test
+/// with it. That was seen on EPYC hosts with the AMD IOMMU on, while
+/// processes were being started on the host. Never with one GPU test at a
+/// time. The cause is a hypothesis (driver or host, not shown to be
+/// Axon's): docs/log/2026-10-18-cuda-concurrency.md.
+///
+/// `AXON_TEST_GPU_SERIAL=0` turns the lock off (hunting:
+/// cuda::qwen2::tests::gpu_concurrency_matrix_hunt). Any other value, or
+/// none, leaves it on.
+///
+/// A thread that a GPU test spawns must not call `gpu()` while its parent
+/// holds the lock: it would wait forever. Instead of hanging the suite,
+/// such a wait panics once one holder has kept the lock for
+/// `AXON_TEST_GPU_LOCK_TIMEOUT` seconds (default 2700, 45 min). No GPU test
+/// is known to come near that. The slowest measured single GPU test is
+/// ~4 min on a packed pod (prefill_batchings_q8_1_5b, 235 s with 4 threads
+/// contending); a debug build on a laptop GPU can take a few times longer.
+/// The clock runs per holder, so waiting through a queue of other tests
+/// doesn't count.
 pub fn gpu() -> Option<crate::cuda::Gpu> {
     match crate::cuda::Gpu::open() {
         Ok(g) => {
@@ -220,10 +234,20 @@ pub fn gpu() -> Option<crate::cuda::Gpu> {
 /// Re-entrant: a thread already holding it does nothing.
 fn serialize_gpu(g: &crate::cuda::Gpu) {
     use std::cell::RefCell;
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::{Mutex, MutexGuard, OnceLock, TryLockError};
+    use std::time::{Duration, Instant};
     static LOCK: Mutex<()> = Mutex::new(());
+    /// The holder: its thread's name and when it took the lock.
+    static HOLDER: Mutex<Option<(String, Instant)>> = Mutex::new(None);
     static ON: OnceLock<bool> = OnceLock::new();
-    thread_local!(static HELD: RefCell<Option<MutexGuard<'static, ()>>> = const { RefCell::new(None) });
+    /// The lock's guard; clears `HOLDER` before releasing it.
+    struct Held(#[allow(dead_code)] MutexGuard<'static, ()>);
+    impl Drop for Held {
+        fn drop(&mut self) {
+            *HOLDER.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        }
+    }
+    thread_local!(static HELD: RefCell<Option<Held>> = const { RefCell::new(None) });
     let on = *ON.get_or_init(|| {
         let total = g.info().map_or(u64::MAX, |i| i.total_bytes);
         let on = std::env::var("AXON_TEST_GPU_SERIAL").as_deref() != Ok("0");
@@ -238,14 +262,38 @@ fn serialize_gpu(g: &crate::cuda::Gpu) {
         }
         on
     });
-    if on {
-        HELD.with(|h| {
-            let mut h = h.borrow_mut();
-            if h.is_none() {
-                *h = Some(LOCK.lock().unwrap_or_else(|e| e.into_inner()));
-            }
-        });
+    if !on || HELD.with(|h| h.borrow().is_some()) {
+        return;
     }
+    let limit = Duration::from_secs(
+        std::env::var("AXON_TEST_GPU_LOCK_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2700),
+    );
+    let guard = loop {
+        match LOCK.try_lock() {
+            Ok(g) => break g,
+            Err(TryLockError::Poisoned(e)) => break e.into_inner(),
+            Err(TryLockError::WouldBlock) => {}
+        }
+        let held = HOLDER.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some((who, since)) = held
+            && since.elapsed() > limit
+        {
+            panic!(
+                "the GPU test lock has been held by thread '{who}' for over {} s \
+                 (AXON_TEST_GPU_LOCK_TIMEOUT): a thread spawned by a GPU test calling \
+                 testutil::gpu() while its parent holds the lock? (that never returns)",
+                limit.as_secs()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let me = std::thread::current();
+    *HOLDER.lock().unwrap_or_else(|e| e.into_inner()) =
+        Some((me.name().unwrap_or("?").to_string(), Instant::now()));
+    HELD.with(|h| *h.borrow_mut() = Some(Held(guard)));
 }
 
 /// Two GPU tests never hold the GPU at once, whatever the card (unless
