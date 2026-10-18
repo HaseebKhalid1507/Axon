@@ -378,6 +378,11 @@ pub(super) struct BatchFns<'m> {
     /// 32, for up to 32 whatever the product; 0 or unset, by the product's
     /// shape (`CudaQwen2::takes_gemvm`).
     pub(super) vm_max: usize,
+    /// A pool step's attention (tensor cores) in as few attn_blk_b launches
+    /// as its partials hold at the rows' depth (`att_rows`), not one per
+    /// att_per_query rows; AXON_ATT_ONE=0: per att_per_query rows (the same
+    /// bits either way).
+    pub(super) att_one: bool,
     /// Per type (Q4_K, Q6_K, Q8_0, Q5_0, Q5_K, Q4_0: `NTYPES`, indexed by
     /// `type_index`): gemm2_* (128 tokens per block)
     /// and gemm2s_* (64); None without int8 tensor cores.
@@ -525,6 +530,7 @@ impl<'m> BatchFns<'m> {
                     0,
                     |v: usize| if v == 0 { 0 } else { v.clamp(SMALL, VM_MAX) },
                 ),
+            att_one: std::env::var("AXON_ATT_ONE").map_or(true, |v| v != "0"),
             gemm,
             gemm_q6k8,
             gemm_gu: if module.mma() {
@@ -570,6 +576,12 @@ pub(super) struct BatchBufs<'g> {
     /// Blocks of ATT_BLK positions of the cache it's for (the stride of
     /// attn_blk_b's partials).
     nblk_max: usize,
+    /// Partials per head (`batch_parts`): blocks x queries of a launch.
+    parts: usize,
+    /// A pool step's queries per attn_blk_b launch (`att_rows`; their
+    /// partials' stride parts / att_z blocks), 0: att_per_query (stride
+    /// nblk_max).
+    pub(super) att_z: usize,
     pub(super) tokens: DevBuf<'g>,
     host_tokens: HostBuf<'g>,
     /// `Place::Rows` of the pass: per token (position, cache row), u32s;
@@ -622,6 +634,22 @@ impl<'g> CudaQwen2<'g> {
 
     /// VRAM of the batch scratch for `max` tokens of a cache of max_ctx
     /// positions.
+    /// A pool step's queries per attn_blk_b launch for nb rows whose
+    /// deepest is at position pos_max (`BatchBufs::att_z`; 0 without tensor
+    /// cores or with `BatchFns::att_one` off): the fewest launches whose
+    /// partials fit, the rows split evenly. Partials are blocks x queries
+    /// (`batch_parts`), so at a shallow depth one launch takes every row.
+    /// Graphs replay at any depth with the same att_z: a launch of att_z
+    /// queries fits whenever this gives that att_z again.
+    pub(super) fn att_rows(&self, b: &BatchBufs, nb: usize, pos_max: usize) -> usize {
+        if !self.tc_attn || !self.bf.att_one || nb == 0 {
+            return 0;
+        }
+        let need = (pos_max + 1).div_ceil(ATT_BLK);
+        let z = (b.parts / need).max(att_per_query(self.head_dim)).max(1);
+        nb.div_ceil(nb.div_ceil(z))
+    }
+
     pub(super) fn batch_bytes(&self, max: usize, max_ctx: usize) -> usize {
         let (f, kvd) = (4, self.kv_dim());
         let parts = self.n_heads * self.batch_parts(max, max_ctx) * (self.head_dim + 2) * f;
@@ -643,6 +671,8 @@ impl<'g> CudaQwen2<'g> {
         Ok(BatchBufs {
             max,
             nblk_max: Self::nblk_max(max_ctx),
+            parts: self.batch_parts(max, max_ctx),
+            att_z: 0,
             tokens: g.alloc(max * 4)?,
             host_tokens: g.host_alloc(max * 4)?,
             rp: None,
@@ -1495,7 +1525,14 @@ impl<'g> CudaQwen2<'g> {
                 // decode kernels per query (the same code), attn_blk_t, or
                 // attn_split_t ATT_SUB queries per launch.
                 let tc = self.tc_attn;
-                let per = if tc { att_per_query(hd) } else { ATT_SUB };
+                // A pool step: att_z queries per launch (`att_rows`), their
+                // partials parts / att_z blocks apart (a stride is only a
+                // layout: the same bits).
+                let (per, blk_stride) = match (tc, rows && b.att_z > 0) {
+                    (true, true) => (b.att_z, b.parts / b.att_z),
+                    (true, false) => (att_per_query(hd), b.nblk_max),
+                    (false, _) => (ATT_SUB, b.nblk_max),
+                };
                 let (gy_blk, ms) = (self.max_split.min(b.nblk_max) as u32, self.max_split as u32);
                 for z0 in (0..nb).step_by(per) {
                     let nz = (nb - z0).min(per) as u32;
@@ -1520,12 +1557,12 @@ impl<'g> CudaQwen2<'g> {
                                  head sizes but 256, tensor cores and the q8 cache)"
                                 .into());
                         }
-                        (true, false, false) => (&bf.attn_blk, gy_blk, 32, b.nblk_max, vec![tab]),
+                        (true, false, false) => (&bf.attn_blk, gy_blk, 32, blk_stride, vec![tab]),
                         (true, true, false) => (
                             &self.q8_fns(mode).attn_blk_b,
                             gy_blk,
                             32,
-                            b.nblk_max,
+                            blk_stride,
                             vec![tab],
                         ),
                         (false, false, false) => (

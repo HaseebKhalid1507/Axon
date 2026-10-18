@@ -5157,7 +5157,7 @@ fn gpu_batched_attention_matches_decode_bits() {
             (8190, 37, 2, 46),
             (0, 1024, 1000, 46),
         ];
-        for &(start, nb, z0, gy) in cases {
+        for (ci, &(start, nb, z0, gy)) in cases.iter().enumerate() {
             if nb == 1024 && (hd == 128 && nh == 12 || kg > 0) {
                 continue; // one 1024-batch per head size is enough
             }
@@ -5254,10 +5254,13 @@ fn gpu_batched_attention_matches_decode_bits() {
                 }
                 flash.push((*v, qy.read().unwrap(), fact.read().unwrap()));
             }
-            // Per query: queries z0.. of the batch.
+            // Per query: queries z0.. of the batch, their partials bs >=
+            // nblk_max blocks apart (a pool step's one launch strides them
+            // by what its buffer holds: batch.rs att_rows).
             let nz = nb - z0;
+            let bs = nblk_max + [0, 1, 37][ci % 3];
             let qb = g.upload(&q).unwrap();
-            let (po_n, pm_n) = (nh * nblk_max * hd, nh * nblk_max * 2);
+            let (po_n, pm_n) = (nh * bs * hd, nh * bs * 2);
             let bpo = g.alloc(nz * po_n * 4).unwrap();
             let bpm = g.alloc(nz * pm_n * 4).unwrap();
             let bact = g.alloc(nb * ast).unwrap();
@@ -5278,7 +5281,7 @@ fn gpu_batched_attention_matches_decode_bits() {
                             Arg::I32(nh as i32),
                             Arg::I32(nkv as i32),
                             pre,
-                            Arg::I32(nblk_max as i32),
+                            Arg::I32(bs as i32),
                             bpo.arg(),
                             bpm.arg(),
                             Arg::Ptr(0),
@@ -5300,7 +5303,7 @@ fn gpu_batched_attention_matches_decode_bits() {
                         Arg::I32(z0 as i32),
                         Arg::I32(dim as i32),
                         Arg::I32(hd as i32),
-                        Arg::I32(nblk_max as i32),
+                        Arg::I32(bs as i32),
                         want_k,
                         bact.arg(),
                         Arg::U64(ast as u64),
@@ -5390,17 +5393,17 @@ fn gpu_batched_attention_matches_decode_bits() {
                 let (wpo, wpm): (Vec<f32>, Vec<f32>) = (po.read().unwrap(), pm.read().unwrap());
                 for h in 0..nh {
                     for b in 0..np.div_ceil(64) {
-                        let o = (h * nblk_max + b) * hd;
+                        let (o, wo) = ((h * bs + b) * hd, (h * nblk_max + b) * hd);
                         assert_eq!(
                             bits(&bpo[zl * po_n + o..zl * po_n + o + hd]),
-                            bits(&wpo[o..o + hd]),
+                            bits(&wpo[wo..wo + hd]),
                             "{}: head {h} block {b} sums",
                             ctxs("attn_blk_b", z)
                         );
-                        let m = (h * nblk_max + b) * 2;
+                        let (m, wm) = ((h * bs + b) * 2, (h * nblk_max + b) * 2);
                         assert_eq!(
                             bits(&bpm[zl * pm_n + m..zl * pm_n + m + 2]),
-                            bits(&wpm[m..m + 2]),
+                            bits(&wpm[wm..wm + 2]),
                             "{}: head {h} block {b} m, l",
                             ctxs("attn_blk_b", z)
                         );

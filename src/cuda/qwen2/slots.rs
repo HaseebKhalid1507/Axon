@@ -54,12 +54,13 @@ pub struct CudaPool<'g> {
     pm: Option<PageMap>,
     /// Most rows per step (logits scratch rows).
     rows_max: usize,
-    /// Captured steps by (rows, greedy rows, + device-sampled rows): a
-    /// step's kernels and their arguments depend on nothing else (its
-    /// tokens, places and S are copied in before the graph runs).
+    /// Captured steps by (rows, greedy rows, + device-sampled rows, the
+    /// attention's queries per launch `BatchBufs::att_z`): a step's kernels
+    /// and their arguments depend on nothing else (its tokens, places and S
+    /// are copied in before the graph runs).
     /// Each with the step count of its last use: the least recently used
     /// one goes when one more is needed past MAX_GRAPHS.
-    graphs: HashMap<(usize, usize, usize), (Graph<'g>, u64)>,
+    graphs: HashMap<(usize, usize, usize, usize), (Graph<'g>, u64)>,
     steps: u64,
 }
 
@@ -458,6 +459,9 @@ impl<'g> CudaQwen2<'g> {
         let b = p.c.b.as_mut().expect("batch scratch");
         self.load_input(b, BatchIn::Tokens(&tokens))?;
         b.upload_rows(&at, tab)?;
+        let pos_max = rows.iter().map(|r| r.pos).max().unwrap_or(0);
+        b.att_z = self.att_rows(b, nb, pos_max);
+        let att_z = b.att_z;
         // The kernels: the step's graph (made on its first use).
         let c = &mut p.c;
         let mut pass = || {
@@ -472,7 +476,7 @@ impl<'g> CudaQwen2<'g> {
             )
         };
         if self.graphs {
-            let key = (nb, ng, ns);
+            let key = (nb, ng, ns, att_z);
             p.steps += 1;
             if !p.graphs.contains_key(&key) {
                 if p.graphs.len() >= MAX_GRAPHS {
@@ -1803,7 +1807,10 @@ mod tests {
     /// product over all rows; samp_tail in launches of HEAD_SUB rows), on
     /// the 0.5B and Llama 1B, mixed greedy and sampled rows: every
     /// request's results and tokens == running it alone, under each
-    /// gemvm routing (AXON_GEMVM_MAX 16, 32, by shape).
+    /// gemvm routing (AXON_GEMVM_MAX 16, 32, by shape); the attention in
+    /// launches of att_per_query rows (AXON_ATT_ONE=0), and in as few as the
+    /// partials hold (`att_rows`), at 256 positions (64 rows: 2 launches)
+    /// and in a paged pool of 2048 (1 launch).
     #[test]
     fn pool_steps_past_gemvm16_match_solo() {
         let Some(g) = crate::testutil::gpu() else {
@@ -1835,10 +1842,20 @@ mod tests {
             let refs: Vec<_> = (0..slots)
                 .map(|i| solo(&net, ctx, &prompts[i], kinds[i], steps))
                 .collect();
-            for vm in [16usize, 32, 0] {
+            for (vm, one, cap) in [
+                (16usize, true, ctx),
+                (32, true, ctx),
+                (0, true, ctx),
+                (0, false, ctx),
+                (0, true, 2048),
+            ] {
                 net.bf.vm_max = vm;
+                net.bf.att_one = one;
                 for nb in [17usize, 33, 48, 64] {
-                    let mut p = net.pool(slots, ctx).unwrap();
+                    let mut p = match cap {
+                        c if c == ctx => net.pool(slots, ctx).unwrap(),
+                        c => net.pool_with(slots, c, Some(slots * 5), None).unwrap(),
+                    };
                     for (i, pr) in prompts.iter().enumerate().take(nb) {
                         net.feed_slot(&mut p, i, &pr[..pr.len() - 1], 0).unwrap();
                     }
@@ -1873,9 +1890,17 @@ mod tests {
                             })
                             .collect();
                         let outs = net.step_rows(&mut p, &rows).unwrap();
+                        let att_z = p.c.b.as_ref().unwrap().att_z;
+                        match (one, cap) {
+                            (false, _) => assert_eq!(att_z, 0),
+                            (true, 2048) => assert_eq!(att_z, nb, "one launch"),
+                            (true, _) => assert!(att_z > 0 && att_z <= nb),
+                        }
                         for (i, o) in outs.into_iter().enumerate() {
-                            let what =
-                                format!("{} vm {vm} nb {nb} request {i} step {step}", m.arch);
+                            let what = format!(
+                                "{} vm {vm} one {one} cap {cap} nb {nb} request {i} step {step}",
+                                m.arch
+                            );
                             assert_eq!(o, refs[i].0[step], "{what}");
                             let next = match (&o, sms[i].as_mut()) {
                                 (RowOut::Pick(t), None) => *t,
@@ -1886,7 +1911,11 @@ mod tests {
                         }
                     }
                     for i in 0..nb {
-                        assert_eq!(hist[i], refs[i].1, "{} vm {vm} nb {nb} request {i}", m.arch);
+                        assert_eq!(
+                            hist[i], refs[i].1,
+                            "{} vm {vm} one {one} cap {cap} nb {nb} request {i}",
+                            m.arch
+                        );
                     }
                 }
             }
@@ -1899,7 +1928,10 @@ mod tests {
     /// `AXON_STEP_NB` (default "1,2,4,8,16,24,32,48,64"), `AXON_STEP_PROF`
     /// (the nb's profiled per kernel, default "1,8,16,32,64"; "" none),
     /// `AXON_STEP_VM` (gemvm's batch limits `BatchFns::vm_max` to compare,
-    /// default the build's).
+    /// default the build's), `AXON_STEP_ONE` (`BatchFns::att_one` 1 / 0 in
+    /// turn, e.g. "1,0,1,0"; default the build's), `AXON_STEP_CAP` (a paged
+    /// pool of slots of this many positions holding only the pages the
+    /// depth needs, as serve's; default a plain pool of depth + 64).
     /// Per depth: one pool of max(nb) slots (fewer if it doesn't fit), every
     /// slot fed `depth` tokens; then nb rows of distinct slots at position
     /// `depth`, greedy, graphs on (as serve), ms per step = median of 5 runs
@@ -1942,6 +1974,27 @@ mod tests {
             let vms = match list("AXON_STEP_VM", "") {
                 v if v.is_empty() => vec![0],
                 v => v,
+            };
+            let ones: Vec<Option<bool>> = match list("AXON_STEP_ONE", "") {
+                v if v.is_empty() => vec![None],
+                v => v.into_iter().map(|o| Some(o != 0)).collect(),
+            };
+            let cap = list("AXON_STEP_CAP", "").first().copied();
+            // The GPU's temperature and SM clock now (thermal honesty: A/Bs
+            // are interleaved, the start of each row logged).
+            let temp = || -> String {
+                std::process::Command::new("nvidia-smi")
+                    .args([
+                        "--query-gpu=temperature.gpu,clocks.sm",
+                        "--format=csv,noheader",
+                    ])
+                    .output()
+                    .map(|o| {
+                        String::from_utf8_lossy(&o.stdout)
+                            .trim()
+                            .replace('\n', "; ")
+                    })
+                    .unwrap_or_else(|_| "?".into())
             };
             // AXON_STEP_KM: the kernel builds to run in turn per depth, e.g.
             // "plain,SOME_DEFINE,plain,SOME_DEFINE" (prefill.cu experiments).
@@ -1986,6 +2039,7 @@ mod tests {
                 let km = &mods.iter().find(|m| &m.0 == kname).unwrap().1;
                 eprintln!("kernels: {kname}");
                 let ctx = (depth + 64).next_multiple_of(64);
+                let pctx = cap.map_or(ctx, |c| c.max(ctx));
                 let mut net = CudaQwen2::new(&g, km, &m, ctx).unwrap();
                 net.graphs = true;
                 let prompt: Vec<u32> = (0..depth)
@@ -2001,10 +2055,14 @@ mod tests {
                 let want = *nbs.iter().chain(&profs).max().unwrap();
                 let mut slots = want;
                 let mut p = loop {
-                    match net.pool(slots, ctx) {
+                    let p = match cap {
+                        None => net.pool(slots, ctx),
+                        Some(_) => net.pool_with(slots, pctx, Some(slots * ctx / PAGE), None),
+                    };
+                    match p {
                         Ok(p) => break p,
                         Err(e) if slots > 1 => {
-                            eprintln!("  pool of {slots} x {ctx}: {e}");
+                            eprintln!("  pool of {slots} x {pctx}: {e}");
                             slots /= 2;
                         }
                         Err(e) => panic!("{e}"),
@@ -2014,9 +2072,13 @@ mod tests {
                     net.feed_slot(&mut p, s, &prompt, 0).unwrap();
                 }
                 eprintln!(
-                    "depth {depth}: decode step (forward_argmax) {d:.3} ms; pool {slots} x {ctx}"
+                    "depth {depth}: decode step (forward_argmax) {d:.3} ms; pool {slots} x {pctx}{}; gpu {}",
+                    if cap.is_some() { " paged" } else { "" },
+                    temp()
                 );
-                eprintln!("| depth | nb | gemvm max | ms/step | x solo | rows/s |");
+                eprintln!(
+                    "| depth | nb | gemvm max | att one | att_z | ms/step | x solo | rows/s | gpu at start |"
+                );
                 let rows = |nb: usize| -> Vec<SeqRow> {
                     (0..nb)
                         .map(|s| SeqRow {
@@ -2029,27 +2091,36 @@ mod tests {
                 };
                 for &nb in nbs.iter().filter(|&&nb| nb <= slots) {
                     let rs = rows(nb);
-                    for &vm in &vms {
+                    for (&vm, &one) in vms.iter().flat_map(|v| ones.iter().map(move |o| (v, o))) {
                         net.bf.vm_max = vm;
+                        if let Some(o) = one {
+                            net.bf.att_one = o;
+                        }
                         // (The graphs hold the kernels picked when made.)
                         p.graphs.clear();
+                        let t0 = temp();
                         let t = time(&mut || {
                             std::hint::black_box(net.step_rows(&mut p, &rs).unwrap());
                         });
                         eprintln!(
-                            "| {depth} | {nb} | {vm} | {t:.3} | {:.2} | {:.0} |",
+                            "| {depth} | {nb} | {vm} | {} | {} | {t:.3} | {:.2} | {:.0} | {t0} |",
+                            net.bf.att_one as u8,
+                            p.c.b.as_ref().unwrap().att_z,
                             t / d,
                             nb as f64 * 1e3 / t
                         );
                     }
                 }
                 net.bf.vm_max = *vms.last().unwrap();
+                if let Some(o) = *ones.last().unwrap() {
+                    net.bf.att_one = o;
+                }
                 for &nb in profs.iter().filter(|&&nb| nb <= slots) {
                     let tokens = vec![5u32; nb];
                     let at: Vec<RowAt> = (0..nb)
                         .map(|s| RowAt {
                             pos: depth as u32,
-                            base: (s * p.ctx) as u32,
+                            base: p.base(s) as u32,
                         })
                         .collect();
                     for round in 0..3 {
@@ -2057,6 +2128,7 @@ mod tests {
                         let b = p.c.b.as_mut().unwrap();
                         net.load_input(b, BatchIn::Tokens(&tokens)).unwrap();
                         b.upload_rows(&at, tab).unwrap();
+                        b.att_z = net.att_rows(b, nb, depth);
                         let mut evs = vec![("start", g.record().unwrap())];
                         net.pass_at(
                             &mut p.c,
