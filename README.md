@@ -333,7 +333,17 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
   caches and slots, only from the memory they leave (`AXON_Q6K8=0` never makes it).
   A request running alone takes the single-stream path (CUDA graphs, `--draft`), and
   moves into the batch when a second one arrives (its rows are already in its slot: nothing
-  is copied). Every request's output is exactly what it
+  is copied). With `--draft-model` the batch drafts too: the draft model gets a pool of its
+  own beside the main model's (slot for slot, as long as fits up to the slot's context;
+  stderr says if shorter, and past it requests don't draft), and each step a gate gives
+  every greedy request 0 to K guesses, verified together in one step (K + 1 rows per
+  request). The gate maximises expected tokens per ms from step costs it measures at
+  startup (both models, a few row counts and depths; corrected by every step since) and
+  each request's guess acceptance; where drafting doesn't pay (deep contexts, many
+  requests) it runs the plain step. `AXON_DRAFT_CALIB=0` skips the measuring (every greedy
+  request drafts K). Sampled requests don't draft in the batch. Greedy output is the same
+  bytes with or without the draft model; `/metrics` counts the rounds by K, the guesses and
+  those kept (`axon_draft_*`). Every request's output is exactly what it
   gets alone, whatever else runs with it (greedy, and sampled with a `seed`): the batched
   kernels are bit-identical per row to the one-sequence ones. On the CPU, with
   `--gpu-layers` (a CPU/GPU split) and with a multi-GPU pipeline (several `AXON_GPUS`) the
@@ -530,6 +540,7 @@ OLLAMA_HOST=http://127.0.0.1:8080 ollama run qwen3-8b
 | `AXON_REPACK=0` | CPU: run every matrix in place from the GGUF's blocks instead of repacking Q4_K/Q6_K/Q5_0/Q8_0 for the faster kernels (for comparisons) |
 | `AXON_DRAFT=K` | same as `--draft K` (gen, chat, serve): prompt-lookup speculative decoding, up to K draft tokens per step (default 0 = off; try 7). Lossless: same output as without it (greedy, or sampled with the same seed) |
 | `AXON_DRAFT_MODEL=PATH` | same as `--draft-model PATH` (gen, chat, serve) |
+| `AXON_DRAFT_CALIB=0` | serve with `--draft-model` and a pool: don't measure the step costs at startup; every greedy batched request drafts K (default: measured, the gate picks 0..K per request per step) |
 | `AXON_DEVICE=cpu\|cuda` | same as `--device` (default `cpu`) |
 | `AXON_GPU_LAYERS=N` | same as `--gpu-layers N` (with `--device cuda`) |
 | `AXON_GPUS=L` | same as `--gpus L` (gen, chat, serve; with `--device cuda`) |
