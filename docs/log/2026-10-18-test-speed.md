@@ -57,19 +57,26 @@ the slot is freed are unchanged. No timeout was raised.
 ## How it was verified
 | gate | result | job ID / log |
 |---|---|---|
-| release suite, tree 0e3f4cb, AXON_TEST_GPU_SERIAL=1 | pending | 1018-032116-538f |
-| debug-assertion suite, tree 0e3f4cb, AXON_TEST_GPU_SERIAL=1 | pending | 1018-032116-2f3a |
+| release suite, tree 0e3f4cb, AXON_TEST_GPU_SERIAL=1 | 543 passed, 0 failed, 35 ignored; rc 0; no POISON-RERUN (pod2 e81870b2b3d8, packed, 2415.9 s) | 1018-032116-538f |
+| debug-assertion suite, tree 0e3f4cb, AXON_TEST_GPU_SERIAL=1 | 543 passed, 0 failed, 35 ignored; rc 0 (bella, 3183.3 s) | 1018-032116-2f3a |
 | test count, `--list` main a032773 vs branch | 578 = 578 (35 ignored both) | local `--list` |
 | non-test release binary, main vs branch | byte-identical, md5 697d88a026572ebf2651732eed6d51ef | local build, same flags |
-| md5 of `gen` (0.5B, cuda, -n 64), same host | pending (and implied by the identical binary) | 1018-022915-1235 / 1018-022937-5c6d |
-| clippy -D warnings (bin + tests), rustfmt | clean | local |
-| slot-idle test x20 in a CPU-loaded suite slice, main vs branch | pending | 1018-021925-f066 / 1018-021949-7daa |
-| slot-idle stress (AXON_THREADS=1, 64 spinning threads) x10, main | reproduces "never filled" (run 1 failed; rest pending) | 1018-031600-534b |
-| same stress x10, branch | pending | 1018-032125-50cf |
+| md5 of `gen` (0.5B, cuda, -n 64), same host (pod2) | identical, 22703eeab624b382bb353f6cb44859a4 both; rc 0 | 1018-022915-1235 / 1018-022937-5c6d |
+| clippy -D warnings (bin + tests), rustfmt | clean on 0e3f4cb; clippy also clean on the merge with main cf8dee4 | local |
+| slot-idle x20 in a CPU-loaded slice (pod2, 8 pool threads, 4 test threads, + 5 CPU-heavy tests), main / branch | 0/20 failed / 0/20 failed | 1018-021925-f066 / 1018-021949-7daa |
+| slot-idle stress x10, 1 pool thread + 64 spinning threads (pod3 9ec6dd14dd25), main / branch | **10/10 failed "never filled"** / **0/10 failed** (freed 0.50-1.70 s after the fill, bound 2.8 s) | 1018-031600-534b / 1018-032125-50cf |
+| slot-idle stress x10, 8 pool threads + 64 spinning threads (pod3), main / branch | 10/10 failed "never filled" / pending | 1018-030316-d4af / 1018-044914-c136 |
 
 The stress runs link `stress.o`, a measurement-only constructor: AXON_REPEAT=N runs the test binary N times,
-and AXON_HOG=K starts K spinning threads in each run, which gives a loaded host on demand. With one pool thread
-and 64 hogs, a token step takes longer than the 300 ms eviction, which is the failure's mechanism.
+and AXON_HOG=K starts K spinning threads in each run, which gives a loaded host on demand. Under that load main
+fails every time, so the old test isn't flaky in the random sense. It fails deterministically once a token step
+is slower than the gap the server leaves (~300 ms between the window filling and the eviction, during which the
+test needs 2 more tokens). An idle host steps far faster than that (0.5B CPU decode: ~18 ms per token in release on a pod, a few times that in
+debug). So main passes there, and in a packed suite it only fails when other tests' CPU forwards (one shared
+pool) and the pod's neighbours slow the engine enough: once in main's debug suite (1018-014631-dd84), 0 of 20
+in the milder slice above. GitHub CI never runs it at all (`AXON_SKIP_MODEL_TESTS=1`). Debug assertions matter
+only in that they make each step slower. With the branch, the stressed runs all pass, inside the unchanged
+timing bound.
 
 ## Results
 Release suite, exclusive 4090 pod3 (same host for both), `--test-threads 1`, MEASURED:
@@ -80,6 +87,11 @@ Release suite, exclusive 4090 pod3 (same host for both), `--test-threads 1`, MEA
 | `gpu_batched_products_match_gemv_bits` + `gpu_capture_survives_pinning_elsewhere` | 72.8 s | 17.9 s | -55 s, not this PR: main's run compiled kernels into the pod's cold NVRTC cache, the branch's found them there |
 | the other 489 tests | 1669.9 s | 1667.2 s | -0.2 % (noise) |
 | whole suite | 2195.6 s | 1971.6 s | -224 s, -10.2 % as measured |
+
+Method: one exclusive 4090 pod (pod3 9ec6dd14dd25, 6.8 vCPU, AXON_THREADS=8) for both runs, `--test-threads 1`,
+libtest `--report-time --format json`. The per-test times are libtest's, the suite's is libtest's
+`exec_time`. One run each (a docs-and-scripts round, no rerun of main's exclusive timing). The gate-of-record
+suites above ran packed or on bella with AXON_TEST_GPU_SERIAL=1 and aren't timing evidence.
 
 Jobs: 1018-005814-52ea (main), 1018-014201-c3d2 (branch).
 
