@@ -3958,3 +3958,130 @@ fn serve_ollama_error_shapes() {
     assert_eq!(r.status, 401);
     assert_eq!(r.json()["error"]["code"], "invalid_api_key");
 }
+
+/// A request is in /metrics by the time its response is on the wire, on
+/// every path: a response from `route` (whole, streamed, HEAD), a 401
+/// from the --api-key gate and a 413 answered before routing (both then
+/// linger), counted exactly once each. `Server::hold` stops every
+/// connection thread right after its response, so a count made after
+/// the response (the old order: the serve_api_key flake of jobs
+/// 1018-163238-d187 and 1018-014632-e746) is missing here every time.
+#[test]
+fn serve_counts_a_request_before_answering_it() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server_with(p.to_str().unwrap(), Device::Cpu, |o| {
+        o.api_key = Some("s3cret-key".into());
+    });
+    let a = s.addr;
+    let right = "Authorization: Bearer s3cret-key\r\n";
+    let probes = std::cell::Cell::new(0.0);
+    let requests = || {
+        let r = call_h(a, "GET", "/metrics", "", right);
+        assert_eq!(r.status, 200, "{}", r.body);
+        probes.set(probes.get() + 1.0);
+        prom_parse(&r.body)
+            .into_iter()
+            .filter(|(k, _)| k.starts_with("axon_requests_total{"))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let key = |route: &str, status: u16| {
+        format!("axon_requests_total{{route=\"{route}\",status=\"{status}\"}}")
+    };
+    // One raw exchange: `head` (+ `body`), the response (`head_only`: to
+    // a HEAD).
+    let raw = |head: String, body: &str, head_only: bool| {
+        let mut c = TcpStream::connect(a).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(300))).unwrap();
+        c.write_all(head.as_bytes()).unwrap();
+        c.write_all(body.as_bytes()).unwrap();
+        read_resp_to(&mut c, &mut Vec::new(), head_only).status
+    };
+    let one = json!({"prompt": "Hi", "max_tokens": 1, "temperature": 0}).to_string();
+    let stream =
+        json!({"prompt": "Hi", "max_tokens": 1, "temperature": 0, "stream": true}).to_string();
+    type Case<'a> = (&'a str, &'static str, u16, Box<dyn Fn() -> u16 + 'a>);
+    let cases: Vec<Case> = vec![
+        // `route`'s 401 (no body: past the gate).
+        (
+            "GET no key",
+            "/v1/models",
+            401,
+            Box::new(|| call_h(a, "GET", "/v1/models", "", "").status),
+        ),
+        // The gate's 401 (a body without the key): read_request's error path.
+        (
+            "POST no key",
+            "/v1/completions",
+            401,
+            Box::new(|| call_h(a, "POST", "/v1/completions", &one, "").status),
+        ),
+        // A 413 before routing: the error path, route "other".
+        (
+            "413",
+            "other",
+            413,
+            Box::new(|| {
+                let h = format!(
+                    "POST /v1/completions HTTP/1.1\r\nHost: x\r\n{right}Content-Length: {}\r\n\r\n",
+                    super::http::MAX_BODY + 1
+                );
+                raw(h, "", false)
+            }),
+        ),
+        (
+            "HEAD",
+            "/v1/models",
+            200,
+            Box::new(|| {
+                raw(
+                    format!(
+                        "HEAD /v1/models HTTP/1.1\r\nHost: x\r\n{right}Connection: close\r\n\r\n"
+                    ),
+                    "",
+                    true,
+                )
+            }),
+        ),
+        (
+            "404",
+            "other",
+            404,
+            Box::new(|| call_h(a, "GET", "/nope", "", right).status),
+        ),
+        (
+            "generation",
+            "/v1/completions",
+            200,
+            Box::new(|| call_h(a, "POST", "/v1/completions", &one, right).status),
+        ),
+        (
+            "stream",
+            "/v1/completions",
+            200,
+            Box::new(|| call_h(a, "POST", "/v1/completions", &stream, right).status),
+        ),
+    ];
+    let mut want = requests();
+    s.hold(true);
+    for (what, route, status, run) in &cases {
+        // Each probe of /metrics is a request too, counted no later than
+        // the next probe's answer.
+        *want.entry(key("/metrics", 200)).or_default() += 1.0;
+        assert_eq!(run(), *status, "{what}");
+        *want.entry(key(route, *status)).or_default() += 1.0;
+        assert_eq!(requests(), want, "{what}: answered, not yet counted");
+    }
+    s.hold(false);
+    // Once every connection is done (lingers included), nothing more was
+    // counted: each request exactly once.
+    let t = Instant::now();
+    while s.conns() > 0 {
+        assert!(t.elapsed() < Duration::from_secs(60), "connections left");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    *want.entry(key("/metrics", 200)).or_default() += 1.0;
+    assert_eq!(requests(), want, "after the connections ended");
+    assert_eq!(probes.get(), cases.len() as f64 + 2.0);
+}
