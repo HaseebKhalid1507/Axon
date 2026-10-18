@@ -5,9 +5,9 @@
 #   scripts/test-tier.sh full REL_BIN DBG_BIN     the final round before merge (plus the md5 gate)
 #
 # fast: the release suite minus scripts/test-fast-skip.txt (bigger-model repeats of contracts the fast tier
-#       checks on a small model; the NVRTC cross-arch builds stay in when the branch touches src/cuda/*.cu or
-#       src/cuda/mod.rs), and, with DBG_BIN, the debug-assertion suite on the CPU queue (axon-run --cpu: GPU
-#       tests skip themselves), so it doesn't take a GPU slot.
+#       checks on a small model; the NVRTC cross-arch builds stay in when the branch or the working tree
+#       touches src/cuda/*.cu, src/cuda/mod.rs or src/cuda/ffi.rs), and, with DBG_BIN, the debug-assertion
+#       suite on the CPU queue (axon-run --cpu: GPU tests skip themselves), so it takes no GPU slot.
 # full: every test, release and debug-assertion builds, on GPU hosts.
 #
 # Env: TIER_SHARD=N (axon-run --shard N per suite, default: one job per suite), TIER_DETACH=1 (submit and
@@ -39,14 +39,24 @@ run_opts=(${TIER_RUN_OPTS:-})
 [ "${TIER_DETACH:-0}" = 1 ] && run_opts+=(--detach)
 
 # Every test of the release binary.
-list=$(nice -n 19 "$rel" --list 2>/dev/null | sed -n 's/: test$//p')
+list=$(nice -n 19 "$rel" --list 2>/dev/null | sed -n 's/: test$//p' || true)
+if [ -z "$list" ]; then
+    echo "test-tier: '$rel --list' listed no tests (not a libtest binary, or it failed to start)" >&2
+    exit 2
+fi
 total=$(grep -c . <<<"$list")
 
 skip=()
 if [ "$tier" = fast ]; then
+    # Kernel sources changed since the merge base with TIER_BASE, committed or not (the working tree,
+    # untracked files included): then the NVRTC cross-arch builds stay in.
     kernels=0
-    if git -C "$root" diff --name-only "${TIER_BASE:-origin/main}"...HEAD 2>/dev/null |
-        grep -qE '^src/cuda/([^/]+\.cu|mod\.rs)$'; then
+    base=$(git -C "$root" merge-base "${TIER_BASE:-origin/main}" HEAD) || {
+        echo "test-tier: no merge base with ${TIER_BASE:-origin/main}" >&2
+        exit 2
+    }
+    if { git -C "$root" diff --name-only "$base" && git -C "$root" ls-files --others --exclude-standard; } |
+        grep -qE '^src/cuda/([^/]+\.cu|mod\.rs|ffi\.rs)$'; then
         kernels=1
     fi
     while read -r t; do

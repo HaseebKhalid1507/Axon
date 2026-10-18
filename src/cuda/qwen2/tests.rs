@@ -66,6 +66,14 @@ pub(crate) struct Trace {
     at: Vec<(u32, Vec<f32>)>,
 }
 
+impl Trace {
+    /// The reference's greedy picks: the tokens fed after the prompt's last
+    /// (`steps` of them).
+    pub(crate) fn picks(&self) -> Vec<u32> {
+        self.at[1..].iter().map(|(t, _)| *t).collect()
+    }
+}
+
 pub(crate) fn trace<R: Lm>(r: &R, ids: &[u32], steps: usize) -> Trace {
     let mut rc = r.new_cache(ids.len() + steps + 1);
     let (&last, rest) = ids.split_last().unwrap();
@@ -134,25 +142,24 @@ pub(crate) fn compare_from<R: Lm, O: Lm>(
 impl Agree {
     /// One position: reference logits `lr`, the other's `lo`.
     fn tally(&mut self, lr: &[f32], lo: &[f32]) {
-        let a = self;
         let (ar, ao) = (crate::argmax(lr), crate::argmax(lo));
-        a.positions += 1;
-        a.top1 += (ar == ao) as usize;
+        self.positions += 1;
+        self.top1 += (ar == ao) as usize;
         let k = kl(lr, lo);
-        a.max_kl = a.max_kl.max(k);
+        self.max_kl = self.max_kl.max(k);
         if k > 0.5 {
-            a.over_half
-                .push((a.positions, k, top2_margin(lr), a.last_kl));
+            self.over_half
+                .push((self.positions, k, top2_margin(lr), self.last_kl));
         }
-        a.last_kl = k;
-        a.sum_kl += k;
+        self.last_kl = k;
+        self.sum_kl += k;
         for (x, y) in lr.iter().zip(lo) {
-            a.max_abs = a.max_abs.max((x - y).abs());
+            self.max_abs = self.max_abs.max((x - y).abs());
         }
         if ar != ao {
             // How close a call it was, in the reference's logits.
-            a.flips.push(lr[ar as usize] - lr[ao as usize]);
-            a.flip_at.push(a.positions);
+            self.flips.push(lr[ar as usize] - lr[ao as usize]);
+            self.flip_at.push(self.positions);
         }
     }
 }
@@ -1489,14 +1496,20 @@ fn continuations_match(m: &Model, name: &str) {
     // The CPU's continuations (with logits), once for all the comparisons.
     let refs: Vec<_> = PROMPTS
         .iter()
-        .map(|p| greedy(&cpu, &tok.encode(p), 32, true))
+        .map(|p| {
+            let ids = tok.encode(p);
+            let c = greedy(&cpu, &ids, 32, true);
+            (ids, c)
+        })
         .collect();
     let refs = &refs;
     let by_ref = || {
         let mut i = 0;
-        move |_: &[u32]| {
+        move |ids: &[u32]| {
             i += 1;
-            refs[i - 1].clone()
+            let (want, c) = &refs[i - 1];
+            debug_assert_eq!(ids, &want[..], "continuations_by asks in PROMPTS order");
+            c.clone()
         }
     };
     let (cs, cm) = continuations_by(&mut by_ref(), &rows, &tok, &format!("{name} cpu rows"), tie);
@@ -1696,10 +1709,10 @@ fn gpu_yarn_matches_reference_and_keeps_bits() {
 /// Llama-3.2-1B-Instruct, mapped (as `qwen3_mapped`): head_dim 64, GQA 4,
 /// tied Q6_K head, Llama 3 RoPE factors, q/k rows reordered at load.
 fn llama_mapped() -> Option<Model> {
-    // The path check only (skip or panic as llama_model does): loading the
-    // model here too cost a whole extra copy of the file per test.
-    crate::testutil::llama_model_path()?;
-    model_at(crate::testutil::LLAMA_MODEL)
+    // llama_model's path (AXON_TEST_LLAMA, skip or panic as it does),
+    // mapped; not llama_model itself, which loads a whole copy.
+    let p = crate::testutil::llama_model_path()?;
+    Some(crate::gguf::load_with(p.to_str().unwrap(), Some(false)).unwrap())
 }
 
 /// Llama-3.2-3B-Instruct Q4_K_M (head_dim 128, GQA 3: 24 query heads on 8),
@@ -6809,11 +6822,12 @@ fn gemma3_vs_cpu(m: &Model, name: &str) {
     let mut seqs = Vec::new();
     for p in PROMPTS {
         let ids = tok.encode(p);
-        compare_each!(&cpu, &ids, STEPS, (&gpu, &mut ag), (&rows, &mut ac));
+        let t = trace(&cpu, &ids, STEPS);
+        compare_trace(&t, &gpu, &mut ag);
+        compare_trace(&t, &rows, &mut ac);
         // compare's position s of this prompt follows ids + the CPU's
-        // first s greedy picks.
-        let (picks, _) = greedy(&cpu, &ids, STEPS, false);
-        seqs.push((ids, picks));
+        // first s greedy picks (the tokens the trace fed).
+        seqs.push((ids, t.picks()));
     }
     report(&format!("{name} gpu vs cpu"), &ag);
     report(&format!("{name} cpu rows vs cpu"), &ac);
