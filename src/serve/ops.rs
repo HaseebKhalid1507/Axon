@@ -59,6 +59,13 @@ pub const ROUTES: &[&str] = &[
     "/identity",
     "/metrics",
     "/slots",
+    "/v1/responses",
+    "/api/chat",
+    "/api/generate",
+    "/api/tags",
+    "/api/show",
+    "/api/ps",
+    "/api/version",
 ];
 
 pub fn route_label(path: &str) -> &'static str {
