@@ -285,6 +285,19 @@ pub(crate) enum Bug {
 /// sigmoid router + exp_probs_b selection, renorm, x2.446, plus the shared
 /// expert.
 pub(crate) fn deepseek2_ref(m: &Model, raw: &RawTensors, ids: &[u32], bug: Bug) -> Vec<Vec<f32>> {
+    deepseek2_ref_routes(m, raw, ids, bug).0
+}
+
+/// `deepseek2_ref`, and the experts each MoE layer picked at each position
+/// (routes[pos][moe layer], rank order) with the selection margin there
+/// (the k-th selection score minus the (k+1)-th).
+#[allow(clippy::type_complexity)]
+fn deepseek2_ref_routes(
+    m: &Model,
+    raw: &RawTensors,
+    ids: &[u32],
+    bug: Bug,
+) -> (Vec<Vec<f32>>, Vec<Vec<(Vec<usize>, f64)>>) {
     let f = FX;
     let num = |k: &str| meta_num(m, &format!("deepseek2.{k}"));
     let eps = num("attention.layer_norm_rms_epsilon").unwrap();
@@ -366,7 +379,9 @@ pub(crate) fn deepseek2_ref(m: &Model, raw: &RawTensors, ids: &[u32], bug: Bug) 
     let mut keys: Vec<Vec<Heads>> = vec![Vec::new(); f.nl];
     let mut vals: Vec<Vec<Heads>> = vec![Vec::new(); f.nl];
     let mut out = Vec::new();
+    let mut routes: Vec<Vec<(Vec<usize>, f64)>> = Vec::new();
     for (pos, &tok) in ids.iter().enumerate() {
+        routes.push(Vec::new());
         let mut x: Vec<f64> = embd.0[tok as usize * f.dim..(tok as usize + 1) * f.dim].to_vec();
         for l in 0..f.nl {
             let n = |s: &str| format!("blk.{l}.{s}");
@@ -475,6 +490,10 @@ pub(crate) fn deepseek2_ref(m: &Model, raw: &RawTensors, ids: &[u32], bug: Bug) 
                 let mut order: Vec<usize> = (0..f.n_exp).collect();
                 order.sort_by(|&a, &c| sel[c].total_cmp(&sel[a]).then(a.cmp(&c)));
                 let picks = &order[..f.k_exp];
+                routes.last_mut().unwrap().push((
+                    picks.to_vec(),
+                    sel[order[f.k_exp - 1]] - sel[order[f.k_exp]],
+                ));
                 let mut ws: Vec<f64> = picks
                     .iter()
                     .map(|&e| {
@@ -518,7 +537,7 @@ pub(crate) fn deepseek2_ref(m: &Model, raw: &RawTensors, ids: &[u32], bug: Bug) 
         let h = rms(&x, &out_norm);
         out.push(mv(&out_w, &h).into_iter().map(|v| v as f32).collect());
     }
-    out
+    (out, routes)
 }
 
 const IDS: [u32; 14] = [3, 17, 42, 9, 5, 61, 33, 2, 28, 50, 11, 7, 44, 19];
@@ -526,9 +545,6 @@ const IDS: [u32; 14] = [3, 17, 42, 9, 5, 61, 33, 2, 28, 50, 11, 7, 44, 19];
 /// cache (MEASURED ~1e-5) and with the default f16 one (~5e-3).
 const TOL: f32 = 2e-4;
 const TOL_F16: f32 = 1.5e-2;
-/// Q8_0 weights: the activations quantized to 8 bits too (MEASURED 0.18-0.33
-/// without q_lora; the llama fixture allows 0.6 on the CPU).
-const Q8_TOL: f32 = 0.6;
 
 fn all_opts() -> [Opt; 4] {
     let o = |q_lora, yarn| Opt { q_lora, yarn };
@@ -588,47 +604,107 @@ fn deepseek2_matches_expanded_reference() {
             );
             assert!(d <= tol && dp <= tol, "{o:?}: cpu vs reference {d} / {dp}");
         }
-        let (m8, raw8) = ds2_fixture(o, Q8_0);
-        let want8 = deepseek2_ref(&m8, &raw8, &IDS, Bug::None);
-        let net = Qwen2::new(&m8);
-        let mut c = net.new_cache(n);
-        let l: Vec<Vec<f32>> = (0..n).map(|p| net.forward(IDS[p], p, &mut c)).collect();
-        let d = max_diff(&l, &want8);
-        let top = |v: &[f32]| (0..v.len()).fold(0, |b, i| if v[i] > v[b] { i } else { b });
-        // The reference's top-1 minus top-2 logit at each position.
-        let gap = |v: &[f32]| {
-            let t = top(v);
-            v[t] - (0..v.len())
-                .filter(|&i| i != t)
-                .map(|i| v[i])
-                .fold(f32::MIN, f32::max)
-        };
-        let flips: Vec<f32> = l
-            .iter()
-            .zip(&want8)
-            .filter(|(a, b)| top(a) != top(b))
-            .map(|(_, b)| gap(b))
-            .collect();
-        eprintln!(
-            "{o:?} Q8_0 fixture (r8q): cpu vs reference {d:.4}, top-1 flips at gaps {flips:?}"
-        );
-        // A smoke check of the r8q path (exactness is the F32 rows' gate
-        // above): the greedy pick may only flip at a near-tie of the
-        // reference (MEASURED: flips at gaps 0.02-0.11), a top-1/top-2 gap under 2 * Q8_TOL (8-bit activations
-        // move logits by up to Q8_TOL, MEASURED 0.18-0.33 without q_lora).
-        // Max |dlogit| bounds only the configs without q_lora: q_lora
-        // quantizes the queries' activations twice (q_a, q_b) into sharp
-        // attention (MEASURED 1.45 there), and a bound just over one
-        // measurement gates nothing.
-        assert!(
-            flips.iter().all(|&g| g < 2.0 * Q8_TOL),
-            "{o:?} Q8_0: top-1 flips at reference gaps {flips:?}"
-        );
-        if !o.q_lora {
-            assert!(d <= Q8_TOL, "{o:?} Q8_0: cpu vs reference {d}");
-        }
+        q8_smoke(o, n);
     }
 }
+
+/// The Q8_0 (r8q) fixture against the reference on its dequantized weights:
+/// a smoke check of the quantized path; exactness is the F32 rows' gate.
+/// 8-bit activations (and, with q_lora, q_a's and q_b's inputs quantized in
+/// turn) move logits, so the bounds are this fixture's own measurements
+/// with a 2x margin (`q8_bounds`): max |dlogit| <= bound, every logit finite,
+/// and a greedy pick may flip only where the reference's top-1/top-2 gap is
+/// under the same bound (a perturbation of size d can't flip a pick with a
+/// gap above 2d; any count of such flips is allowed: the old "at most one"
+/// was a count over 14 positions, not a property, and q_lora/no-yarn has 4).
+/// The gate must be able to fire: at least `Q8_GATED` positions have a gap
+/// at or above the bound. The routes of each MoE layer (decode, recorded by
+/// `moe::ROUTES`) are printed beside the reference's with its margins, so a
+/// large |dlogit| shows whether an expert flipped at a near-tied router.
+fn q8_smoke(o: Opt, n: usize) {
+    let (m8, raw8) = ds2_fixture(o, Q8_0);
+    let (want8, rroutes) = deepseek2_ref_routes(&m8, &raw8, &IDS, Bug::None);
+    let net = Qwen2::new(&m8);
+    let mut c = net.new_cache(n);
+    let mut got_routes = Vec::new();
+    let l: Vec<Vec<f32>> = (0..n)
+        .map(|p| {
+            moe::ROUTES.with_borrow_mut(|r| r.clear());
+            let v = net.forward(IDS[p], p, &mut c);
+            got_routes.push(moe::ROUTES.with_borrow(|r| r.clone()));
+            v
+        })
+        .collect();
+    assert!(
+        l.iter().flatten().all(|v| v.is_finite()),
+        "{o:?} Q8_0: non-finite logits"
+    );
+    let d = max_diff(&l, &want8);
+    let top = |v: &[f32]| (0..v.len()).fold(0, |b, i| if v[i] > v[b] { i } else { b });
+    // The reference's top-1 minus top-2 logit at each position.
+    let gap = |v: &[f32]| {
+        let t = top(v);
+        v[t] - (0..v.len())
+            .filter(|&i| i != t)
+            .map(|i| v[i])
+            .fold(f32::MIN, f32::max)
+    };
+    let gaps: Vec<f32> = want8.iter().map(|v| gap(v)).collect();
+    let bound = q8_bounds(o);
+    let flips: Vec<f32> = l
+        .iter()
+        .zip(&want8)
+        .filter(|(a, b)| top(a) != top(b))
+        .map(|(_, b)| gap(b))
+        .collect();
+    let gated = gaps.iter().filter(|&&g| g >= bound).count();
+    eprintln!(
+        "{o:?} Q8_0 fixture (r8q): max |dlogit| {d:.4} (bound {bound}), top-1 flips at gaps \
+         {flips:?}, {gated}/{n} positions gated, reference gaps {gaps:.3?}"
+    );
+    for (p, (lp, wp)) in l.iter().zip(&want8).enumerate() {
+        let dp = lp
+            .iter()
+            .zip(wp)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0f32, f32::max);
+        let ours: Vec<&Vec<usize>> = got_routes[p].iter().collect();
+        let refs: Vec<String> = rroutes[p]
+            .iter()
+            .map(|(ids, mg)| format!("{ids:?}@{mg:.3}"))
+            .collect();
+        let same = got_routes[p].len() == rroutes[p].len()
+            && got_routes[p]
+                .iter()
+                .zip(&rroutes[p])
+                .all(|(a, (b, _))| a == b);
+        eprintln!(
+            "  pos {p:2}: |dlogit| {dp:.4}, routes q8 {ours:?} ref {refs:?}{}",
+            if same { "" } else { "  <- expert flip" }
+        );
+    }
+    assert!(d <= bound, "{o:?} Q8_0: max |dlogit| {d} over {bound}");
+    assert!(
+        flips.iter().all(|&g| g < bound),
+        "{o:?} Q8_0: top-1 flips at reference gaps {flips:?} (bound {bound})"
+    );
+    assert!(
+        gated >= Q8_GATED,
+        "{o:?} Q8_0: only {gated} positions have a reference gap >= {bound}: the flip gate can't fire"
+    );
+}
+
+/// `q8_smoke`'s bound per config, 2x this fixture's MEASURED max |dlogit|
+/// (rounded up): 0.33 without q_lora -> 0.7. With q_lora, MEASURED 1.45
+/// (no yarn; 0.42 with) -> 3.0: a catastrophe bound only (NaN, garbage, a
+/// wrong expert slice, RopeWrongPart-sized errors), documented as such.
+fn q8_bounds(o: Opt) -> f32 {
+    if o.q_lora { 3.0 } else { 0.7 }
+}
+
+/// Positions (of IDS' 14) whose reference gap must reach `q8_bounds` for
+/// the flip gate to mean anything.
+const Q8_GATED: usize = 4;
 
 /// decode == feed_batch == verify, bit for bit: the cache after a batched
 /// prefill equals the one after feeding token by token, the logits after
@@ -873,32 +949,29 @@ fn deepseek2_check_supported() {
 }
 
 /// The fixture as a GGUF file at $AXON_DS2_FIXTURE_OUT (for the llama.cpp
-/// oracle: scripts/oracle/ds2_fixture.sh); q_lora and YaRN on (llama.cpp
-/// wants q_lora_rank on a 3-layer deepseek2), F32 matrices.
+/// oracle: fxoracle.sh); q_lora and YaRN on (llama.cpp wants q_lora_rank on
+/// a 3-layer deepseek2), F32 matrices or (AXON_DS2_FIXTURE_TYPE=q8_0) Q8_0.
 #[test]
 #[ignore = "writes a file; run with AXON_DS2_FIXTURE_OUT=path"]
 fn deepseek2_write_fixture() {
     let path = std::env::var("AXON_DS2_FIXTURE_OUT").expect("AXON_DS2_FIXTURE_OUT");
-    let (meta, list, data) = fixture_tensors(
-        Opt {
-            q_lora: true,
-            yarn: true,
-        },
-        F32,
-    );
+    // AXON_DS2_FIXTURE_TYPE=q8_0: Q8_0 matrices (the r8q path), else F32.
+    let mt = match std::env::var("AXON_DS2_FIXTURE_TYPE").as_deref() {
+        Ok("q8_0") => Q8_0,
+        _ => F32,
+    };
+    let o = Opt {
+        q_lora: true,
+        yarn: true,
+    };
+    let (meta, list, data) = fixture_tensors(o, mt);
     let l: Vec<(&str, &[u64], u32)> = list.iter().map(|t| (t.0.as_str(), &t.1[..], t.2)).collect();
     std::fs::write(&path, crate::gguf::gguf_bytes_for_test(&meta, &l, &data)).unwrap();
-    let (m, raw) = ds2_fixture(
-        Opt {
-            q_lora: true,
-            yarn: true,
-        },
-        F32,
-    );
+    let (m, raw) = ds2_fixture(o, mt);
     let want = deepseek2_ref(&m, &raw, &IDS, Bug::None);
     let p: Vec<String> = IDS.iter().map(|i| i.to_string()).collect();
     eprintln!(
-        "wrote {path}; ids {}; reference logits[last][..4] {:?}",
+        "wrote {path} (type {mt}); ids {}; reference logits[last][..4] {:?}",
         p.join(","),
         &want[IDS.len() - 1][..4]
     );

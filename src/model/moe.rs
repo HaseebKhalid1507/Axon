@@ -96,6 +96,14 @@ impl Gate {
     };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests: every route `Moe::route` picked on this thread (rank order),
+    /// for comparing a run's experts with a reference's.
+    pub(super) static ROUTES: std::cell::RefCell<Vec<Vec<usize>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 /// The MoE hyperparameters of a model (`qwen3moe.*`), None for a dense one.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct MoeDims {
@@ -452,6 +460,8 @@ impl<'a> Moe<'a> {
             *id = best;
             *wi = p[best];
         }
+        #[cfg(test)]
+        ROUTES.with_borrow_mut(|r| r.push(ids.to_vec()));
         if g.norm {
             let mut s = 0f32;
             for &v in w.iter() {
