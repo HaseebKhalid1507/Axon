@@ -554,6 +554,9 @@ impl<'a, 't> Batch<'a, 't> {
         let (v, _) = super::drafting::fit_steps(self.net, &mut self.pool, c, self.ctx, &vnb)?;
         let (d, _) = super::drafting::fit_steps(md.net(), &mut dp.pool, c, dp.ctx, &dnb)?;
         dp.costs = Some(super::drafting::Costs::new(v, d, rows.max(3 * c)));
+        super::drafting::warm_graphs(self.net, &mut self.pool, c, 1..=rows)?;
+        let drows = c * (1 + crate::draft::STEP_CATCH_UP);
+        super::drafting::warm_graphs(md.net(), &mut dp.pool, c, 1..=drows)?;
         Ok(format!(
             "verify {:.3} + {:.4}/row + {:.3e}/pos ms, draft {:.3} + {:.4}/row + {:.3e}/pos ms",
             v.a, v.b, v.c, d.a, d.b, d.c

@@ -328,6 +328,29 @@ fn time_step<P>(
     Ok((sd, ts[ts.len() / 2]))
 }
 
+/// One untimed step of each row count in `nbs` (greedy rows over `slots`
+/// slots at position 0..): every step shape a round can take is captured
+/// before the first request, not on its first use.
+pub fn warm_graphs<P>(
+    net: &impl BatchLm<Pool = P>,
+    pool: &mut P,
+    slots: usize,
+    nbs: std::ops::RangeInclusive<usize>,
+) -> Result<(), String> {
+    for nb in nbs {
+        let rows: Vec<SeqRow> = (0..nb)
+            .map(|r| SeqRow {
+                token: 100,
+                pos: r / slots,
+                slot: r % slots,
+                head: RowHead::Argmax,
+            })
+            .collect();
+        net.step(pool, &rows).map_err(|e| format!("{e:?}"))?;
+    }
+    Ok(())
+}
+
 /// The depths calibration times at: 512, 4096, 16384, each clamped below
 /// `ctx` (room for `per_slot` rows a slot), deduplicated.
 fn calib_depths(ctx: usize, per_slot: usize) -> Vec<usize> {
