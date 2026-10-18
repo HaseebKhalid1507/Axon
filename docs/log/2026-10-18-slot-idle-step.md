@@ -1,4 +1,4 @@
-# Slot-idle test: the freeing bound counts the engine steps it waits for  (PR #N)
+# Slot-idle test: the freeing bound counts the engine steps it waits for  (PR #87)
 
 - Date: 2026-10-18. Branch: fix/slot-idle-step. Base: main c8e34fd. Status: open
 - Pick / design: follow-up to #80 / #85. Under 8 pool threads plus 64 spinning threads `serve_slot_idle_frees_a_stalled_stream`
@@ -56,8 +56,8 @@ use, so it wasn't done.
 | same stress x10, this branch | pending | 1018-052924-0f34 |
 | stress x10, 1 pool thread + 64 spinning, this branch (jade) | pending | 1018-052926-f051 |
 | same 1-thread stress on pod3: main (before #80) / #80 | 10/10 failed "never filled" / 0/10 failed | 1018-031600-534b / 1018-032125-50cf |
-| the test unstressed, release and debug builds (jade) | pending | |
-| clippy -D warnings (bin + tests), rustfmt | pending | local |
+| the test unstressed, release and debug builds (jade) | pending | 1018-053349-8b2b / 1018-053350-bd00 |
+| clippy -D warnings (bin + tests), rustfmt | clean | local |
 
 ## What didn't work / wasn't done
 - A server-side change (zero-window detection, reaping mid-step): no slot is freed any earlier in usable time.
