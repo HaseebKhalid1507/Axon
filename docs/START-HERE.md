@@ -137,6 +137,8 @@ cargo fmt && cargo clippy && cargo test
   variables and also runs the suite on the scalar path and under a qemu Nehalem CPU, so no AVX
   instruction can slip into the baseline build.
 - Kernel cache: `$XDG_CACHE_HOME/axon/cuda` (else `~/.cache/axon/cuda`); it is safe to delete.
+- Where the suite's time goes, how to time it, and the fast / full test tiers for PR rounds:
+  [testing.md](testing.md).
 
 ## In flight (not on main)
 
