@@ -333,6 +333,11 @@ fn cpu_class() -> String {
 
 impl KvIo for Qwen2<'_> {
     fn kv_ident(&self, c: &KvCache) -> Option<Value> {
+        // deepseek2's K-only MLA cache has no image format yet: a saved
+        // session is prefilled again.
+        if self.is_mla() {
+            return None;
+        }
         let (layers, kvd, hd) = self.kv_shape();
         let (name, size) = c.elem();
         Some(json!({

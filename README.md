@@ -48,7 +48,15 @@ Works today, honestly scoped:
   prefill == verify bit for bit, logits within llama.cpp's own CPU/CUDA spread; no layer
   split (`--gpu-layers`), multi-GPU or MoE draft model. `axon info` prints its experts and
   bytes per token. Streaming the experts through the GPU for long prompts is next
-  ([roadmap](docs/roadmap.md#mixture-of-experts)). `gpt-oss` (gpt-oss-20b, ggml-org's MXFP4
+  ([roadmap](docs/roadmap.md#mixture-of-experts)). `deepseek2` (DeepSeek V2/V3/V3.1, Kimi K2,
+  Moonlight: MLA attention in the absorbed form with a K-only 576-wide cache, sigmoid routing
+  with `exp_probs_b` and shared experts, YaRN's DeepSeek attention scale; the `kimi-k2` and
+  `deepseek-v3` tokenizers and the Kimi and DeepSeek V3 chat formats) runs on the CPU only
+  (`--device cpu`), decode == batched prefill == verify bit for bit; checked on
+  Moonlight-16B-A3B ([log](docs/log/2026-10-18-deepseek2-s0.md)). Legacy non-MLA deepseek2
+  GGUFs (an unsplit `attn_kv_b`, e.g. the published DeepSeek-V2-Lite files) are refused with a
+  re-convert message.
+  `gpt-oss` (gpt-oss-20b, ggml-org's MXFP4
   GGUF) runs on the CPU only for now (stage 0, [log](docs/log/2026-10-18-gpt-oss-s0.md)): MXFP4
   experts read in place, attention sinks, the 128-token sliding window on alternate layers,
   YaRN, the o200k tokenizer and the harmony chat format (`axon chat` shows the `final`

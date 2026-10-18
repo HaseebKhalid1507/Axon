@@ -259,10 +259,13 @@ pub struct Qwen2<'a> {
     embd: &'a [u8],
     /// Empty, and `output` None, in a model of the first layers only
     /// (`new_layers`): the output head is another backend's.
-    output_norm: Vec<f32>,
+    /// (A boxed slice, as `freqs`.)
+    output_norm: Box<[f32]>,
     output: Option<Weight<'a>>,
-    /// Layers 0..layers.len() (all n_layers unless `new_layers`).
+    /// Layers 0..layers.len() (all n_layers unless `new_layers`); empty
+    /// on deepseek2, whose blocks are `ds2`'s.
     layers: Vec<Layer<'a>>,
+    ds2: Option<Box<deepseek2::Ds2<'a>>>,
 }
 
 /// Keys and values of every past position, per layer.
@@ -426,10 +429,24 @@ fn load_vec(m: &Model, t: &Tensor) -> Vec<f32> {
 /// a biased router, top-4 then softmax over the four, biased experts and
 /// the clamped SwiGLU (`vmath::swiglu_oai`); the pre-FFN norm is its
 /// `post_attention_norm`. Experts are MXFP4 (quant/mxfp4.rs). CPU only.
-pub const ARCHS: [&str; 6] = ["qwen2", "qwen3", "llama", "gemma3", "qwen3moe", "gpt-oss"];
+/// deepseek2 (DeepSeek V2/V3, Kimi K2, Moonlight: MLA attention, shared
+/// experts) is its own block (`deepseek2`), on the CPU only.
+pub const ARCHS: [&str; 7] = [
+    "qwen2",
+    "qwen3",
+    "llama",
+    "gemma3",
+    "qwen3moe",
+    "gpt-oss",
+    "deepseek2",
+];
 
+#[path = "model/deepseek2.rs"]
+mod deepseek2;
 #[path = "model/moe.rs"]
 mod moe;
+pub(crate) use deepseek2::info_lines as deepseek2_info;
+
 pub(crate) use moe::{
     MoeDims, MoeInfo, Route as MoeRoute, check_ram as moe_check_ram, cpu_only as moe_cpu_only,
     gpu_refusal as moe_gpu_refusal, is_moe, moe_dims,
@@ -589,9 +606,12 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
     let bad = |msg: String| std::io::Error::new(std::io::ErrorKind::InvalidData, msg);
     if !ARCHS.contains(&m.arch.as_str()) {
         return Err(bad(format!(
-            "architecture '{}' is not supported (qwen2, qwen3, llama, gemma3, qwen3moe, gpt-oss)",
+            "architecture '{}' is not supported (qwen2, qwen3, llama, gemma3, qwen3moe, gpt-oss, deepseek2)",
             if m.arch.is_empty() { "<none>" } else { &m.arch }
         )));
+    }
+    if m.arch == "deepseek2" {
+        return deepseek2::check(m).map(|_| ());
     }
     let need = |k: &str| -> std::io::Result<usize> {
         let key = format!("{}.{k}", m.arch);
@@ -1041,6 +1061,13 @@ impl<'a> Qwen2<'a> {
         if let Err(e) = check_supported(m) {
             panic!("{e}");
         }
+        if m.arch == "deepseek2" {
+            assert!(
+                !tie && !experts && keep == usize::MAX,
+                "deepseek2: the whole model on the CPU only"
+            );
+            return deepseek2::build(m, repack);
+        }
         let a = &m.arch;
         let key = |k: &str| format!("{a}.{k}");
         let need =
@@ -1202,7 +1229,7 @@ impl<'a> Qwen2<'a> {
                         ws
                     });
                     let router = vals(t("ffn_gate_inp.weight"));
-                    let mut moe = moe::Moe::new(d, router, gate, up, down);
+                    let mut moe = moe::Moe::new(d, router, gate, up, down, moe::Gate::SOFTMAX_NORM);
                     if oss {
                         let [router, gate, up, down] = [
                             "ffn_gate_inp.bias",
@@ -1279,15 +1306,21 @@ impl<'a> Qwen2<'a> {
             gemma,
             token_embd,
             embd: m.tensor_data(token_embd),
-            output_norm,
+            output_norm: output_norm.into_boxed_slice(),
             output,
             layers,
+            ds2: None,
         }
     }
 
     /// Layer l's weights as the CPU holds them, for streaming them to the
-    /// GPU (`cuda::qwen2::stream`): repacked bytes or the file's.
+    /// GPU (`cuda::qwen2::stream`): repacked bytes or the file's. Not for
+    /// deepseek2 (its blocks are `ds2`'s; the split that streams is refused).
     pub(crate) fn host_layer(&self, l: usize) -> crate::cuda::qwen2::stream::HostLayer<'_> {
+        assert!(
+            !self.is_mla(),
+            "host_layer: deepseek2 has no streamable layers"
+        );
         use crate::cuda::qwen2::stream::{HostLayer, HostMat};
         fn mat<'s>(w: &'s Weight<'_>) -> HostMat<'s> {
             HostMat {
@@ -1334,7 +1367,14 @@ impl<'a> Qwen2<'a> {
         Some(&w.map[..])
     }
 
-    /// Layers here (0..k of the model).
+    /// A deepseek2 (MLA) model: K-only cache rows of `head_dim` (576).
+    pub(crate) fn is_mla(&self) -> bool {
+        self.ds2.is_some()
+    }
+
+    /// Layers here (0..k of the model): `Layer`s, so 0 on deepseek2, whose
+    /// blocks are `ds2`'s (`n_layers` counts them; only the refused split
+    /// and streaming paths call this).
     pub(crate) fn layer_count(&self) -> usize {
         self.layers.len()
     }
@@ -1346,6 +1386,9 @@ impl<'a> Qwen2<'a> {
     }
 
     pub fn new_cache(&self, max_ctx: usize) -> KvCache {
+        if self.ds2.is_some() {
+            return deepseek2::new_cache(self.n_layers, self.head_dim, max_ctx);
+        }
         let kv_dim = self.n_kv_heads * self.head_dim;
         let len = max_ctx * kv_dim;
         KvCache {
@@ -1950,6 +1993,9 @@ impl<'a> Qwen2<'a> {
         start: usize,
         cache: &mut KvCache,
     ) -> Vec<Vec<f32>> {
+        if self.ds2.is_some() {
+            return self.ds2_hidden_batch(tokens, start, cache);
+        }
         let nb = tokens.len();
         assert!(nb > 0, "feed_batch: empty batch");
         assert!(
@@ -2163,6 +2209,9 @@ impl<'a> Qwen2<'a> {
     /// Every layer for one token: store its keys and values in the cache and
     /// return the final hidden state (before the output norm).
     pub(crate) fn hidden(&self, token: u32, pos: usize, cache: &mut KvCache) -> Vec<f32> {
+        if self.ds2.is_some() {
+            return self.ds2_hidden(token, pos, cache);
+        }
         assert!(
             pos < cache.max_ctx,
             "position {pos} exceeds cache size {}",
@@ -3219,6 +3268,10 @@ pub(crate) mod gemma3_tests;
 #[cfg(test)]
 #[path = "model/moe_tests.rs"]
 mod moe_tests;
+
+#[cfg(test)]
+#[path = "model/deepseek2_tests.rs"]
+pub(crate) mod deepseek2_tests;
 
 #[cfg(test)]
 #[path = "model/gptoss_tests.rs"]
