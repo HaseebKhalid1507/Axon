@@ -1,5 +1,8 @@
 # Contributing to Axon
 
+By taking part you agree to the [Code of Conduct](CODE_OF_CONDUCT.md). Security problems go through
+[SECURITY.md](SECURITY.md), not public issues.
+
 ## Setup
 
 ```bash

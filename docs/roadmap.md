@@ -153,6 +153,9 @@ streaming the experts through the GPU for prefill (stage 3) is what's left of it
    attention sinks, and an alternating 128-token sliding window. 60–90 builder-hours, medium bits risk (a new quant
    type, and sinks in every attention kernel); gates as item 1. ESTIMATED ~45 tok/s decode with every expert on the
    CPU ([research-bigmodels](research/research-bigmodels.md) §4.3).
+   **Stage 0 done** (CPU only, exact: MXFP4, sinks, the window, YaRN, o200k, harmony;
+   [log](log/2026-10-18-gpt-oss-s0.md)). Stage 1 next: #67's split (attention, sinks, router and head on the
+   GPU, experts on the CPU) for 12 GB cards, the whole model on 24 GB ones.
 3. **Later:** the 100B–1T models (Qwen3-235B, Qwen3-Coder-480B, DeepSeek V3, Kimi K2). See
    [Frontier models](#frontier-models-100b-to-1t), below.
 

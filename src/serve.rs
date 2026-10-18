@@ -230,6 +230,9 @@ struct Job {
     stops: Vec<String>,
     /// Route `<think>...</think>` (these ids) to reasoning.
     think: Option<(u32, u32)>,
+    /// gpt-oss (harmony): the analysis channel to reasoning, the final
+    /// channel to content, the markers nowhere.
+    channels: Option<chat::Channels>,
     cancel: Arc<AtomicBool>,
     tx: mpsc::Sender<Event>,
     id: u64,
@@ -366,6 +369,7 @@ struct TextOut<'t> {
     tok: &'t Tokenizer,
     utf8: Utf8Stream,
     think: Option<(u32, u32)>,
+    channels: Option<chat::Channels>,
     /// Inside `<think>...</think>`.
     reasoning: bool,
     /// Before the first token (a thinking reply opens with `<think>`).
@@ -379,6 +383,17 @@ impl TextOut<'_> {
     /// One more token: (content, reasoning, a stop string was hit).
     fn push(&mut self, id: u32) -> (String, String, bool) {
         let first = std::mem::replace(&mut self.first, false);
+        if let Some(ch) = &mut self.channels {
+            let bytes = self.tok.decode_bytes(&[id]);
+            return match ch.push(id, &bytes) {
+                chat::Part::Hidden => Default::default(),
+                chat::Part::Reasoning => (String::new(), self.utf8.push(&bytes), false),
+                chat::Part::Answer => {
+                    let (c, hit) = self.stop.push(&self.utf8.push(&bytes));
+                    (c, String::new(), hit)
+                }
+            };
+        }
         if let Some((open, close)) = self.think {
             if first && id == open {
                 self.reasoning = true;
@@ -468,6 +483,7 @@ fn text_out<'t>(tok: &'t Tokenizer, job: &Job) -> TextOut<'t> {
         tok,
         utf8: Utf8Stream::default(),
         think: job.think,
+        channels: job.channels.clone(),
         reasoning: false,
         first: true,
         strip_nl: false,
@@ -1896,6 +1912,7 @@ fn run_request(
         return out.err(c, over_max(format!("{bytes} bytes")), keep);
     }
     let mut parser = None;
+    let mut channels = None;
     let (prompt, stop_ids, think) = match &g.prompt {
         Prompt::Chat { messages, no_think } => {
             let Some(t) = &m.template else {
@@ -1911,6 +1928,7 @@ fn run_request(
                 );
             };
             let no_think = no_think.unwrap_or(sh.no_think) && t.thinks();
+            channels = chat::Channels::new(&t.fr).filter(|_| !sh.think_inline);
             let think = t
                 .think
                 .as_ref()
@@ -1958,6 +1976,7 @@ fn run_request(
         stop_ids,
         stops: g.stop.clone(),
         think,
+        channels,
         cancel: cancel.clone(),
         tx,
         id: n,

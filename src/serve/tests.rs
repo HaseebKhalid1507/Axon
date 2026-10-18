@@ -988,6 +988,7 @@ fn text_out_reasoning_and_stops() {
             tok: &tok,
             utf8: Utf8Stream::default(),
             think,
+            channels: None,
             reasoning: false,
             first: true,
             strip_nl: false,

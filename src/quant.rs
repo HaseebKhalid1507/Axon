@@ -42,14 +42,23 @@ pub const Q4_K: u32 = 12;
 pub const Q5_K: u32 = 13;
 pub const Q6_K: u32 = 14;
 pub const IQ4_NL: u32 = 20;
+pub const MXFP4: u32 = 39;
 
 mod iq4nl;
 mod k23;
+mod mxfp4;
 pub mod r8;
 pub mod r8q;
 
 use iq4nl::IQ4_NL_BYTES;
 use k23::{Q2_K_BYTES, Q3_K_BYTES};
+use mxfp4::MXFP4_BYTES;
+
+/// MXFP4's code table (tests build fixtures with it).
+#[cfg(test)]
+pub(crate) fn mxfp4_kvalues() -> [i8; 16] {
+    mxfp4::KVALUES
+}
 
 /// (values per block, bytes per block)
 fn block_info(qtype_id: u32) -> (usize, usize) {
@@ -67,6 +76,7 @@ fn block_info(qtype_id: u32) -> (usize, usize) {
         Q4_K => (QK_K, Q4_K_BYTES),
         Q5_K => (QK_K, Q5_K_BYTES),
         Q6_K => (QK_K, Q6_K_BYTES),
+        MXFP4 => (QK8_0, MXFP4_BYTES),
         _ => panic!(
             "quant: unsupported qtype {} ({})",
             qtype_id,
@@ -295,6 +305,7 @@ pub fn dequant(qtype_id: u32, bytes: &[u8], out: &mut [f32]) {
                 Q4_K => dequant_q4_k_block,
                 Q5_K => dequant_q5_k_block,
                 Q6_K => dequant_q6_k_block,
+                MXFP4 => mxfp4::dequant_mxfp4_block,
                 _ => unreachable!(),
             };
             for i in 0..nb {
@@ -554,8 +565,9 @@ impl QuantizedAct {
     pub fn for_types(x: &[f32], qtypes: &[u32]) -> QuantizedAct {
         let n = x.len();
         let wants = |ts: &[u32]| qtypes.iter().any(|t| ts.contains(t));
-        let b32 = (wants(&[Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, IQ4_NL]) && n.is_multiple_of(QK8_0))
-            .then(|| quantize_b32(x));
+        let b32 = (wants(&[Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, IQ4_NL, MXFP4])
+            && n.is_multiple_of(QK8_0))
+        .then(|| quantize_b32(x));
         let k = (wants(&[Q2_K, Q3_K, Q4_K, Q5_K, Q6_K]) && n.is_multiple_of(QK_K))
             .then(|| quantize_k(x));
         let x = if wants(&[F32, F16]) {
@@ -2719,6 +2731,25 @@ unsafe fn dot_row_q8_with(simd: Simd, qtype_id: u32, row: &[u8], x: &QuantizedAc
                 (_, Simd::Scalar) => dot_q6_k_q8(row, xk),
             }
         }
+        MXFP4 => {
+            let B32 { d: dx, q: qx, .. } = x.b32.as_ref().unwrap_or_else(|| {
+                panic!(
+                    "dot_row_q8: {} needs input len multiple of 32, got {} (or the 32-block view wasn't built)",
+                    name(),
+                    n
+                )
+            });
+            let row = &row[..row_bytes(qtype_id, n)];
+            let rb = row.len();
+            // SAFETY (unsafe calls below): guaranteed by our caller.
+            match simd {
+                #[cfg(target_arch = "x86_64")]
+                Simd::Avx2 => unsafe { mxfp4::x86::avx2::rows::<1>(row, rb, dx, qx, 0)[0] },
+                #[cfg(target_arch = "x86_64")]
+                Simd::Vnni => unsafe { mxfp4::x86::vnni::rows::<1>(row, rb, dx, qx, 0)[0] },
+                Simd::Scalar => mxfp4::dot_mxfp4_q8(row, dx, qx),
+            }
+        }
         IQ4_NL => {
             let B32 { d: dx, q: qx, .. } = x.b32.as_ref().unwrap_or_else(|| {
                 panic!(
@@ -2952,6 +2983,33 @@ unsafe fn dot_rows_q8_with(
                 let b = x.b32.as_ref().expect("checked");
                 return unsafe { iq4nl::x86::iq4_nl_rows(rows, rb, &b.d, &b.q, out, pf) };
             }
+            MXFP4 if x.b32.is_some() => {
+                let b = x.b32.as_ref().expect("checked");
+                let (dx, qx) = (&b.d[..], &b.q[..]);
+                // SAFETY (all four): guaranteed by our caller.
+                let rows4 = |r: &[u8]| unsafe {
+                    match simd {
+                        Simd::Vnni => mxfp4::x86::vnni::rows::<4>(r, rb, dx, qx, pf),
+                        _ => mxfp4::x86::avx2::rows::<4>(r, rb, dx, qx, pf),
+                    }
+                };
+                let rows1 = |r: &[u8]| unsafe {
+                    match simd {
+                        Simd::Vnni => mxfp4::x86::vnni::rows::<1>(r, rb, dx, qx, pf),
+                        _ => mxfp4::x86::avx2::rows::<1>(r, rb, dx, qx, pf),
+                    }
+                };
+                while max_rows >= 4 && nr - done >= 4 {
+                    let o = rows4(&rows[done * rb..]);
+                    out[done..done + 4].copy_from_slice(&o);
+                    done += 4;
+                }
+                while nr - done >= 1 {
+                    out[done] = rows1(&rows[done * rb..])[0];
+                    done += 1;
+                }
+                return;
+            }
             Q4_K | Q6_K if x.k.is_some() => {
                 let xk = x.k.as_deref().expect("checked");
                 while max_rows >= 2 && nr - done >= 2 {
@@ -3036,7 +3094,7 @@ unsafe fn kquant_rows<const R: usize>(
 /// A lone token isn't padded: 4x the arithmetic for the same one row read.
 pub fn batch_slots(qtypes: &[u32], n: usize, nb: usize) -> usize {
     let grouped = qtypes.iter().all(|&qt| match qt {
-        Q4_0 | Q5_0 | Q8_0 | IQ4_NL => n.is_multiple_of(QK8_0),
+        Q4_0 | Q5_0 | Q8_0 | IQ4_NL | MXFP4 => n.is_multiple_of(QK8_0),
         Q2_K | Q3_K | Q4_K | Q5_K | Q6_K => n.is_multiple_of(QK_K),
         _ => false,
     });
@@ -3170,6 +3228,22 @@ unsafe fn dot_row_q8_x4(
                 (Q5_K, Simd::Avx2 | Simd::Vnni) => unsafe { x86::q5_k_avx2_x4(row, xk) },
                 (_, Simd::Avx2 | Simd::Vnni) => unsafe { x86::q6_k_avx2_x4(row, xk) },
                 (_, Simd::Scalar) => return None,
+            })
+        }
+        MXFP4 => {
+            let mut dx: [&[f32]; 4] = [&[]; 4];
+            let mut qx: [&[[i8; 32]]; 4] = [&[]; 4];
+            for t in 0..4 {
+                let b = xs[t].b32.as_ref()?;
+                dx[t] = b.d.as_slice();
+                qx[t] = b.q.as_slice();
+            }
+            let row = &row[..row_bytes(qtype_id, n)];
+            // SAFETY: guaranteed by our caller.
+            Some(match simd {
+                Simd::Avx2 => unsafe { mxfp4::x86::avx2::x4(row, dx, qx) },
+                Simd::Vnni => unsafe { mxfp4::x86::vnni::x4(row, dx, qx) },
+                Simd::Scalar => return None,
             })
         }
         IQ4_NL => {
