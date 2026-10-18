@@ -626,9 +626,10 @@ fn deepseek2_matches_expanded_reference() {
 /// Routing first. A router near-tie (selection margin of a few 1e-2) flips
 /// an expert under 8-bit activations, and that changes the FFN output, the
 /// next layers, and every later position through the cache: MEASURED, the
-/// q_lora/no-yarn max |dlogit| 1.45 is exactly that (position 6, layer 2:
-/// experts [0,3] vs the reference's [0,1] at a margin of 0.009, then
-/// positions 9, 11, 12), not a q_lora r8q error. So the logits are compared
+/// q_lora/no-yarn max |dlogit| 1.45 is exactly that (position 6, MoE layer
+/// 1: experts [0,3] vs the reference's [0,1] at a margin of 0.009; then
+/// position 9 at 0.005 and 11 at 0.045), not a q_lora r8q error: on the
+/// routes the run took, the same config is at 0.32. So the logits are compared
 /// with the reference *forced onto this run's routes*, which isolates the
 /// quantization noise, and the routes are gated on their own: wherever this
 /// run's expert set differs from what the forced reference itself would
@@ -716,14 +717,20 @@ fn q8_smoke(o: Opt, n: usize) {
     );
 }
 
-/// `q8_smoke`'s logit bound on the route-forced comparison: 2x this
-/// fixture's MEASURED max |dlogit| over the four configs, rounded up
-/// (filled in from 1018-0541xx).
+/// `q8_smoke`'s logit bound on the route-forced comparison. MEASURED max
+/// |dlogit| (1018-053935-7964): 0.33 / 0.18 without q_lora (no yarn /
+/// yarn), 0.32 / 0.42 with (q_lora/no-yarn was 1.45 against the unforced
+/// reference: the expert flips at positions 6, 9, 11). 0.7 is 1.65-3.9x
+/// those; the margin can't grow to 2x the largest (0.85) without leaving
+/// the q_lora/yarn config's flip gate fewer than `Q8_GATED` positions with
+/// a gap above it (its gaps: one over 0.9, five over 0.7).
 const Q8_BOUND: f32 = 0.7;
 
 /// Largest reference router margin (k-th minus (k+1)-th selection score)
 /// at which an expert may flip under 8-bit activations: 2x the MEASURED
-/// largest flip margin, rounded up (filled in from 1018-0541xx).
+/// largest flip margin (0.045; the flips: 0.009, 0.005, 0.045, all
+/// q_lora/no-yarn, 1018-053935-7964), rounded up. The fixture's margins run
+/// to 0.9, so the gate can fire.
 const ROUTE_MARGIN: f64 = 0.1;
 
 /// Positions (of IDS' 14) whose reference gap must reach `Q8_BOUND` for
