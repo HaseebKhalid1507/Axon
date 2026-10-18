@@ -85,13 +85,33 @@ Job IDs and the final status of every gate are in the PR's evidence table.
   `--device cuda` (the split) and `--device cpu`, plus qwen2.5-0.5b and Qwen3-0.6B on cuda: **0 of 18 differ**, all
   rc 0 (1018-013250-dfed). Banner: main prints `moe:` and `device: cuda + cpu experts` with the same text; the
   branch prints only `moe: …, kv f16`.
-- Round 2 head (5564731): rustfmt and clippy (bin + tests) clean. md5 vs main on bella, same 18 pairs:
+- Round 2 head (5564731, 48d6721 after the rebase): rustfmt and clippy (bin + tests) clean. md5 vs main on bella, same 18 pairs:
   **0 of 18 differ**, all rc 0, same banner (1018-021340-3543). `moe paged` (39 tests) release
   1018-020450-3003 and debug-assertions 1018-021133-6b76 on bella: see the PR for their status.
-- Release, bella sm_120: **PASS** 38 / 0 / 0, no `skipping:` lines (1018-011840-da59).
-- jade sm_61 (GTX 1050 3 GB, 7.5 GB host), release, `--test-threads 1` (1018-012634-242e): `backend_places_moe` and
+- Round 1, release, bella sm_120: **PASS** 38 / 0 / 0, no `skipping:` lines (1018-011840-da59).
+- Round 1, jade sm_61 (GTX 1050 3 GB, 7.5 GB host), release, `--test-threads 1` (1018-012634-242e): `backend_places_moe` and
   `moe_gpu_feed_batch_matches_feed_pruned`, which the RAM check refused in #67's jade run, now **load and pass**.
   The Pruned-2B tests page its file from jade's HDD, so the job is slow; see the PR for its final status.
+
+### Gates of record: HEAD b0e860f (rebased on cf8dee4; src identical to f019cba, where the binaries were built)
+
+Filters `moe paged gptoss` = 44 tests; the full suite has 590. Pod runs used `AXON_TEST_GPU_SERIAL=1`. No
+`skipping:` lines and no ILLEGAL_ADDRESS in any of these logs. All MEASURED.
+
+| gate | host | result | job |
+|---|---|---|---|
+| md5 vs main cf8dee4, same host (18 pairs as above) | bella sm_120 | **0 / 18 differ**, all rc 0 | 1018-033613-4d59 |
+| release `moe paged gptoss` | bella sm_120 | **PASS** 44 / 0 | 1018-033128-2988 |
+| debug-assertions `moe paged gptoss` (exercises `debug_covers` in `moe_step`) | bella sm_120 | **PASS** 44 / 0 | 1018-033340-988e |
+| release `moe paged gptoss` | pod2 4090 sm_89 | **PASS** 44 / 0 | 1018-033129-381d |
+| debug-assertions `moe paged gptoss` | pod2 4090 sm_89 | **PASS** 44 / 0 | 1018-033340-c13c |
+| release full suite, 3 shards | pods | **PASS** 555 / 0 / 35 ignored (128 + 250 + 177) | 1018-033129-5764, -1f4c, -7262 |
+| debug-assertions full suite, 3 shards | pods | shard 1 **PASS** 128 / 0 / 12; shards 2 and 3 in the PR | 1018-034440-ed59, -043c, -2db4 |
+
+Main later moved to c8e34fd (#80, test-speed: test code, scripts and docs only). `git merge-tree` against it is
+clean. #80 only adds to `src/cuda/qwen2/tests.rs` and removes none of the helpers `src/moe/tests.rs` imports.
+The merged tree (a scratch commit, not pushed) passes `clippy --test -D warnings`. #80's fast-tier skip list
+names no MoE test.
 
 ## What didn't work
 
