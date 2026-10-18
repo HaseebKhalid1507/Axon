@@ -1114,7 +1114,7 @@ fn engine(
         // as does one that fits no slot, once the batch is idle.
         let first_fit = waiting.iter().position(|j| fits_slot(j, b.ctx));
         if let Some(i) = first_fit
-            && b.can_admit(&waiting[i].prompt)
+            && b.can_admit(&waiting[i])
             && (!b.idle() || waiting.len() > 1)
         {
             let job = waiting.remove(i).unwrap();

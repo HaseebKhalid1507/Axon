@@ -383,19 +383,13 @@ pub struct Placing {
     /// (`CudaQwen2::make_q6k8_spare`, once serve's caches are made).
     pub defer_q6k8: bool,
     /// A paged KV pool will hold the caches (`axon serve`, specs r11),
-    /// which needs `PAGED_MARGIN` beside one cache (`paged_placement`).
+    /// placed as main places it with --ctx (`paged_placement`).
     pub paged: bool,
 }
 
 /// The shortest cache a paged serve keeps the whole model on the GPU for
 /// when no --ctx was given.
 pub const PAGED_FLOOR: usize = 8192;
-
-/// VRAM a paged pool needs beyond what one cache of the context takes
-/// (`vram_curve`): serve's POOL_SPARE, the single-request view's own
-/// decode scratch, the slots' logits rows and sampling buffers, the table
-/// and the sink page (~0.3 GiB on a 14B; rounded up).
-pub const PAGED_MARGIN: u64 = 384 << 20;
 
 /// Where a paged serve's model goes, placed automatically, with `free`
 /// bytes of VRAM and `whole(c)` the whole model with one c-token cache.
@@ -404,23 +398,25 @@ pub enum PagedPlace {
     /// Every layer on the GPU, the cache planned at the longest that fits
     /// (no --ctx: the context may be shorter than trained, as main's fit).
     WholeShrunk,
-    /// main's rule (`choose_placement`) against this much VRAM: the whole
-    /// model if one cache of the context fits beside the pool's needs,
-    /// else layers move to the CPU until it does. An explicit --ctx is
-    /// never shortened: at least one full sequence of it fits the pool.
+    /// main's rule (`choose_placement`), with this much VRAM: the same
+    /// placement main makes (every layer on the GPU whenever one cache of
+    /// the context fits; an explicit --ctx is never shortened). If the
+    /// pages then hold less than one full --ctx sequence, serve takes
+    /// main's plain plan (`serve::paged_plan`).
     Main { free: u64 },
 }
 
-/// `PagedPlace` of a model: with --ctx (`!fit`) main's rule with the pool's
-/// margin taken off; without, the whole model on the GPU if it fits beside
-/// a `PAGED_FLOOR`-token cache (the pool's pages then cap the context).
+/// `PagedPlace` of a model: with --ctx (`!fit`) main's rule as is (a
+/// margin for the pool here cost the 14B at --ctx 16384 five layers on the
+/// CPU where main keeps all: 1018-044243-ceb5); without, the whole model
+/// on the GPU if it fits beside a `PAGED_FLOOR`-token cache (the pool's
+/// pages then cap the context).
 pub fn paged_placement(
     free: u64,
     max_ctx: usize,
     fit: bool,
     whole: impl Fn(usize) -> u64,
 ) -> PagedPlace {
-    let free = free.saturating_sub(PAGED_MARGIN);
     if fit && whole(max_ctx) > free && whole(PAGED_FLOOR.min(max_ctx)) <= free {
         return PagedPlace::WholeShrunk;
     }
@@ -963,11 +959,26 @@ mod paged_place_tests {
             PagedPlace::WholeShrunk
         );
         // Past even the floor: main's rule (it shrinks or splits).
-        let tiny = (9.0 * GIB as f64) as u64;
+        let tiny = (9.5 * GIB as f64) as u64;
         assert!(matches!(
             paged_placement(tiny, 32768, true, &w),
             PagedPlace::Main { .. }
         ));
+    }
+
+    /// Wherever main places every layer on the GPU with one --ctx cache, the
+    /// paged placement does too (and splits where main splits): 14B q8 at
+    /// --ctx 16384 and 32768 over a sweep of free VRAM.
+    #[test]
+    fn paged_placement_matches_main_with_ctx() {
+        let w = curve(8.37, 99, 0.6);
+        for ctx in [8192, 16384, 32768] {
+            for tenth in 90..=130 {
+                let free = (tenth as f64 / 10.0 * GIB as f64) as u64;
+                let main = choose_placement(free, ctx, false, &w, || Ok(35)).unwrap();
+                assert_eq!(place(free, ctx, false, &w), main, "ctx {ctx} free {tenth}");
+            }
+        }
     }
 
     /// Qwen2.5-7B Q4_K_M f16 at 32768 on the same card: the whole model

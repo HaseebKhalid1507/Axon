@@ -155,6 +155,18 @@ pub(super) struct Batch<'a, 't> {
     pub preempted: u64,
 }
 
+/// Generated tokens a paged admission reserves pages for, per request (at
+/// most its n_gen): without it a request admitted on its prompt's pages
+/// alone gets preempted by the others' growth (a 15k prompt fed again:
+/// MEASURED in 1018-044243-ceb5, 1 preemption a round at 7 x 15k + 600).
+const GROW_TOKENS: usize = 1024;
+
+/// Prompts a paged pool prefills at once at most: more of them share each
+/// step's chunk and finish together, late (7 x 15k: mean TTFT 37 s vs 33 s
+/// fed in turn, ceb5); the rest wait in the queue, and start as each one
+/// finishes. A plain pool's slots bound it already.
+const MAX_PREFILLING: usize = 2;
+
 /// Pages of positions 0..n.
 fn pages_for(n: usize, size: usize) -> usize {
     n.div_ceil(size)
@@ -197,28 +209,39 @@ impl<'a, 't> Batch<'a, 't> {
         self.seqs.is_empty() && self.pre.is_empty()
     }
 
-    /// Whether `prompt` can start now: a free slot, and (a paged pool)
-    /// pages for its rows beyond the prefix the slot keeps, beside those
-    /// the prompts being prefilled still need and a page for each running
-    /// request's growth; idle slots' prefixes count, they give theirs up
-    /// (`reclaim`). Otherwise it waits (never a failure for pages).
-    pub fn can_admit(&self, prompt: &[u32]) -> bool {
+    /// Whether `job` can start now: a free slot, and (a paged pool) fewer
+    /// than `MAX_PREFILLING` prompts being prefilled, and pages for its
+    /// prompt past the prefix the slot keeps and its first `GROW_TOKENS`
+    /// generated tokens, beside what the prompts being prefilled and the
+    /// running requests still need on the same terms; idle slots' prefixes
+    /// count, they give theirs up (`reclaim`). Otherwise it waits (never a
+    /// failure for pages).
+    pub fn can_admit(&self, job: &Job) -> bool {
+        let prompt = &job.prompt;
         let Some((slot, common)) = self.free_slot(prompt) else {
             return false;
         };
         let Some(pg) = self.pages() else {
             return true;
         };
+        if self.pre.len() >= MAX_PREFILLING {
+            return false;
+        }
+        // Pages a sequence of `at` positions needs to grow `left` more.
+        let need =
+            |at: usize, left: usize| pages_for((at + left.min(GROW_TOKENS)).min(self.ctx), pg.size);
         let last = prompt.len() - 1;
         let keep = pages_for(common.min(last), pg.size);
-        let want = pages_for(last, pg.size) - keep;
-        let pending: usize = self
-            .pre
-            .iter()
-            .map(|f| pages_for(f.seq.hist.len() - 1, pg.size).saturating_sub(pg.held[f.seq.slot]))
+        let want = need(last, job.n_gen).saturating_sub(keep);
+        let others: usize = (self.pre.iter().map(|f| &f.seq))
+            .chain(&self.seqs)
+            .map(|q| {
+                let left = q.job.n_gen.saturating_sub(q.ids.len());
+                need(q.hist.len(), left).saturating_sub(pg.held[q.slot])
+            })
             .sum();
         let have = pg.free + self.idle_pages(&pg, slot) + pg.held[slot].saturating_sub(keep);
-        have >= want + pending + self.seqs.len()
+        have >= want + others
     }
 
     /// The pool's pages (None: plain).
