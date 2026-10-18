@@ -1883,7 +1883,7 @@ extern "C" __global__ void q6k_to_i8(const u8* __restrict__ w, u64 rb, int nblk,
 
 // ---------------------------------------------------------------------------
 // gemvm_*: small batches (nb <= 8 NF) on tensor cores, weight-read-once: the
-// verify pass of a draft. A block: 16 rows x 8 NF tokens, 4 warps splitting
+// verify pass of a draft, and a pool's decode step (NF up to 8: 64 rows). A block: 16 rows x 8 NF tokens, 4 warps splitting
 // K (warp w takes blocks w, w + 4, ...), weights loaded straight from global
 // memory (the next block's while one is used). Each block's value per
 // output (and its row and token scales) goes to shared memory, GVM_CH blocks
@@ -1993,8 +1993,12 @@ struct GvW<QT_Q5_0> : GvW32<QT_Q5_0> {};
 template <>
 struct GvW<QT_Q4_0> : GvW32<QT_Q4_0> {};
 
-// Blocks per chunk of gemvm's (block, output) values in shared memory.
+// Blocks per chunk of gemvm's (block, output) values in shared memory (NF 8:
+// half, to stay in 48 KiB of static shared memory). The chunking is only
+// where the barriers fall: each output's chain runs over the blocks in order
+// whatever it is.
 #define GVM_CH 8
+#define GVM_CHN(NF) ((NF) > 4 ? GVM_CH / 2 : GVM_CH)
 
 template <int QT, int NF>
 __device__ __forceinline__ void gemvm_t(const u8* w, u64 rb, int rows, int n, const u8* act,
@@ -2003,12 +2007,12 @@ __device__ __forceinline__ void gemvm_t(const u8* w, u64 rb, int rows, int n, co
 #if __CUDA_ARCH__ >= 800
     const int KQ = QT == QT_Q4_K || QT == QT_Q5_K || QT == QT_Q6_K;
     const bool K45 = QT == QT_Q4_K || QT == QT_Q5_K; // (d, dmin) types
-    const int NT = 8 * NF, NO = 4 * NF;
+    const int NT = 8 * NF, NO = 4 * NF, CH = GVM_CHN(NF);
     // Per chunk (two, alternating): each block's value per output, and its
     // per-row (Q6_K d, Q8_0/Q5_0 dw) and per-token (dk, d0) scales.
-    __shared__ float vs[2][GVM_CH][16][NT];
-    __shared__ float rs[2][GVM_CH][16];
-    __shared__ float ts[2][GVM_CH][NT];
+    __shared__ float vs[2][CH][16][NT];
+    __shared__ float rs[2][CH][16];
+    __shared__ float ts[2][CH][NT];
     int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, g = lane >> 2, t = lane & 3;
     int r0 = blockIdx.x * 16;
     const u8* rws[2] = {w + (u64)min(r0 + g, rows - 1) * rb, w + (u64)min(r0 + g + 8, rows - 1) * rb};
@@ -2022,14 +2026,16 @@ __device__ __forceinline__ void gemvm_t(const u8* w, u64 rb, int rows, int n, co
 #pragma unroll
     for (int o = 0; o < NO; o++)
         xo[o] = act + (u64)min(8 * (o >> 2) + 2 * t + (o & 1), nb - 1) * astride;
-    const u8* xs = act + (u64)min(lane, nb - 1) * astride; // lane < NT: token lane's scales
+    // Token lane's scales (and lane + 32's, NF 8).
+    const u8* xs[2] = {act + (u64)min(lane, nb - 1) * astride,
+                       act + (u64)min(lane + 32, nb - 1) * astride};
     float acc[NF];
 #pragma unroll
     for (int k = 0; k < NF; k++) acc[k] = 0.0f;
     GvW<QT> cur = {}, nxt = {}; // (warps past the last block copy nxt unloaded)
     if (warp < nblk) nxt.load(rws, warp, t);
-    for (int base = 0, it = 0; base < nblk; base += GVM_CH, it++) {
-        int buf = it & 1, end = min(nblk, base + GVM_CH);
+    for (int base = 0, it = 0; base < nblk; base += CH, it++) {
+        int buf = it & 1, end = min(nblk, base + CH);
         // Warp w: blocks w, w + 4, ...
         for (int b = base + warp; b < end; b += 4) {
             int sl = b - base;
@@ -2156,9 +2162,11 @@ __device__ __forceinline__ void gemvm_t(const u8* w, u64 rb, int rows, int n, co
 #pragma unroll
             for (int o = 0; o < NO; o++)
                 vs[buf][sl][g + ((o & 2) ? 8 : 0)][8 * (o >> 2) + 2 * t + (o & 1)] = v[o];
-            if (lane < NT)
-                ts[buf][sl][lane] = *(const float*)(xs + 2 * np + (KQ ? 0 : np / 64 + np / 8) +
-                                                    4 * (u64)b);
+#pragma unroll
+            for (int h = 0; h < 2; h++)
+                if (lane + 32 * h < NT)
+                    ts[buf][sl][lane + 32 * h] =
+                        *(const float*)(xs[h] + 2 * np + (KQ ? 0 : np / 64 + np / 8) + 4 * (u64)b);
         }
         __syncthreads();
         // The chains: output q = threadIdx.x + 128 k (row q / NT, token q % NT).
@@ -2204,6 +2212,18 @@ GEMVM(gemvm16_q8_0, QT_Q8_0, 2)
 GEMVM(gemvm16_q5_0, QT_Q5_0, 2)
 GEMVM(gemvm16_q5_k, QT_Q5_K, 2)
 GEMVM(gemvm16_q4_0, QT_Q4_0, 2)
+GEMVM(gemvm32_q4_k, QT_Q4_K, 4)
+GEMVM(gemvm32_q6_k, QT_Q6_K, 4)
+GEMVM(gemvm32_q8_0, QT_Q8_0, 4)
+GEMVM(gemvm32_q5_0, QT_Q5_0, 4)
+GEMVM(gemvm32_q5_k, QT_Q5_K, 4)
+GEMVM(gemvm32_q4_0, QT_Q4_0, 4)
+GEMVM(gemvm64_q4_k, QT_Q4_K, 8)
+GEMVM(gemvm64_q6_k, QT_Q6_K, 8)
+GEMVM(gemvm64_q8_0, QT_Q8_0, 8)
+GEMVM(gemvm64_q5_0, QT_Q5_0, 8)
+GEMVM(gemvm64_q5_k, QT_Q5_K, 8)
+GEMVM(gemvm64_q4_0, QT_Q4_0, 8)
 
 // Test: for every half h and a few x, fmul(h2f(h), x) == fmul(f16_to_f32(h),
 // x) bit for bit (the products convert block scales with the hardware cvt,

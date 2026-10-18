@@ -1142,7 +1142,9 @@ mod tests {
     /// check; `--ignored --nocapture` to see). `AXON_STEP_MODEL=path`
     /// (default the 0.5B); `AXON_STEP_DEPTHS` (default "600,4096"),
     /// `AXON_STEP_NB` (default "1,2,4,8,16,24,32,48,64"), `AXON_STEP_PROF`
-    /// (the nb's profiled per kernel, default "1,8,16,32,64"; "" none).
+    /// (the nb's profiled per kernel, default "1,8,16,32,64"; "" none),
+    /// `AXON_STEP_VM` (gemvm's batch limits `BatchFns::vm_max` to compare,
+    /// default the build's).
     /// Per depth: one pool of max(nb) slots (fewer if it doesn't fit), every
     /// slot fed `depth` tokens; then nb rows of distinct slots at position
     /// `depth`, greedy, graphs on (as serve), ms per step = median of 5 runs
@@ -1174,6 +1176,12 @@ mod tests {
         let depths = list("AXON_STEP_DEPTHS", "600,4096");
         let nbs = list("AXON_STEP_NB", "1,2,4,8,16,24,32,48,64");
         let profs = list("AXON_STEP_PROF", "1,8,16,32,64");
+        // gemvm's batch limits to compare (the last one profiled), default
+        // the build's.
+        let vms = match list("AXON_STEP_VM", "") {
+            v if v.is_empty() => vec![super::super::batch::VM_MAX],
+            v => v,
+        };
         let km = Kernels::module(&g).unwrap();
         let time = |f: &mut dyn FnMut()| {
             f();
@@ -1224,7 +1232,7 @@ mod tests {
             eprintln!(
                 "depth {depth}: decode step (forward_argmax) {d:.3} ms; pool {slots} x {ctx}"
             );
-            eprintln!("| depth | nb | ms/step | x solo | rows/s |");
+            eprintln!("| depth | nb | gemvm max | ms/step | x solo | rows/s |");
             let rows = |nb: usize| -> Vec<SeqRow> {
                 (0..nb)
                     .map(|s| SeqRow {
@@ -1237,15 +1245,21 @@ mod tests {
             };
             for &nb in nbs.iter().filter(|&&nb| nb <= slots) {
                 let rs = rows(nb);
-                let t = time(&mut || {
-                    std::hint::black_box(net.step_rows(&mut p, &rs).unwrap());
-                });
-                eprintln!(
-                    "| {depth} | {nb} | {t:.3} | {:.2} | {:.0} |",
-                    t / d,
-                    nb as f64 * 1e3 / t
-                );
+                for &vm in &vms {
+                    net.bf.vm_max = vm;
+                    // (The graphs hold the kernels picked when made.)
+                    p.graphs.clear();
+                    let t = time(&mut || {
+                        std::hint::black_box(net.step_rows(&mut p, &rs).unwrap());
+                    });
+                    eprintln!(
+                        "| {depth} | {nb} | {vm} | {t:.3} | {:.2} | {:.0} |",
+                        t / d,
+                        nb as f64 * 1e3 / t
+                    );
+                }
             }
+            net.bf.vm_max = *vms.last().unwrap();
             for &nb in profs.iter().filter(|&&nb| nb <= slots) {
                 let tokens = vec![5u32; nb];
                 let at: Vec<RowAt> = (0..nb)

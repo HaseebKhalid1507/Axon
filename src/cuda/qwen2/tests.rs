@@ -2752,7 +2752,7 @@ fn gpu_batched_products_match_gemv_bits() {
             (qt, cols, rows, &m.tensor_data(t)[..rows * rb])
         };
         let w = g.upload(wd).unwrap();
-        for nb in [1usize, 6, 7, 8, 13, 64, 66, 77, 129] {
+        for nb in [1usize, 6, 7, 8, 13, 31, 33, 64, 66, 77, 129] {
             let xs: Vec<Vec<f32>> = (0..nb)
                 .map(|i| rng.vec(cols, [1.0f32, 1e-3, 40.0][i % 3]))
                 .collect();
@@ -2786,8 +2786,10 @@ fn gpu_batched_products_match_gemv_bits() {
                 if nb <= 8 && has_gemvm(qt) {
                     kernels.push(format!("gemvm8_{tn}"));
                 }
-                if nb <= 16 && has_gemvm(qt) {
-                    kernels.push(format!("gemvm16_{tn}"));
+                for vm in [16, 32, 64] {
+                    if nb <= vm && has_gemvm(qt) {
+                        kernels.push(format!("gemvm{vm}_{tn}"));
+                    }
                 }
             }
             for k in &kernels {
@@ -2850,7 +2852,7 @@ fn gpu_products_match_reference_bits() {
         let w = g.upload(&wd).unwrap();
         let w8 = (qt == Q6_K && km.mma()).then(|| q6k8_copy(&g, &km, &w, rows, cols));
         let tn = type_name(qt);
-        for nb in [1usize, 7, 16, 17, 100, 128, 129, 512] {
+        for nb in [1usize, 7, 16, 17, 32, 45, 64, 100, 128, 129, 512] {
             let xs: Vec<Vec<f32>> = (0..nb)
                 .map(|i| rng.vec(cols, [1.0f32, 1e-3, 40.0][i % 3]))
                 .collect();
@@ -2894,8 +2896,10 @@ fn gpu_products_match_reference_bits() {
                 if nb <= 8 && has_gemvm(qt) {
                     kernels.push(format!("gemvm8_{tn}"));
                 }
-                if nb <= 16 && has_gemvm(qt) {
-                    kernels.push(format!("gemvm16_{tn}"));
+                for vm in [16, 32, 64] {
+                    if nb <= vm && has_gemvm(qt) {
+                        kernels.push(format!("gemvm{vm}_{tn}"));
+                    }
                 }
                 kernels.extend(gemm2_names(qt));
             }
@@ -2934,7 +2938,7 @@ fn gpu_swiglu_epilogue_and_gate_up_match_reference() {
         let gd = synth_matrix(&mut rng, qt, rows, cols);
         let ud = synth_matrix(&mut rng, qt, rows, cols);
         let (wg, wu) = (g.upload(&gd).unwrap(), g.upload(&ud).unwrap());
-        for nb in [1usize, 9, 16, 17, 64, 100, 129] {
+        for nb in [1usize, 9, 16, 17, 33, 64, 100, 129] {
             let xs: Vec<Vec<f32>> = (0..nb)
                 .map(|i| rng.vec(cols, [1.0f32, 1e-2, 4.0][i % 3]))
                 .collect();
@@ -2968,13 +2972,14 @@ fn gpu_swiglu_epilogue_and_gate_up_match_reference() {
             let want: Vec<f32> = run("gemv_ref", &wu, gate.arg(), 2).read().unwrap();
             let mut kernels: Vec<String> = vec!["gemvn_2x8".into(), "gemvn_2x16".into()];
             if km.mma() {
-                kernels.push(format!("gemvm{}_{tn}", if nb <= 8 { 8 } else { 16 }));
+                for vm in [8, 16, 32, 64] {
+                    if nb <= vm {
+                        kernels.push(format!("gemvm{vm}_{tn}"));
+                    }
+                }
                 kernels.extend(gemm2_names(qt));
             }
             for k in &kernels {
-                if k.starts_with("gemvm") && nb > 16 {
-                    continue;
-                }
                 let got: Vec<f32> = run(k, &wu, gate.arg(), 2).read().unwrap();
                 assert_eq!(bits(&got), bits(&want), "mode 2 {k} {cols}x{rows} nb {nb}");
             }
@@ -3060,6 +3065,10 @@ fn cuda_gemm_bench() {
         "gemvm8_q6_k",
         "gemvm16_q4_k",
         "gemvm16_q6_k",
+        "gemvm32_q4_k",
+        "gemvm32_q6_k",
+        "gemvm64_q4_k",
+        "gemvm64_q6_k",
     ];
     for k in kernels_all {
         if let Ok(f) = km.function(k) {
@@ -3163,9 +3172,11 @@ fn cuda_gemm_bench() {
             let mut kernels: Vec<String> = Vec::new();
             if nb <= 16 {
                 kernels.push(if nb <= 8 { "gemvn_2x8" } else { "gemvn_2x16" }.into());
-                if has_gemvm(qt) {
-                    kernels.push(format!("gemvm{}_{tn}", if nb <= 8 { 8 } else { 16 }));
-                }
+            }
+            if let Some(vm) = [8, 16, 32, 64].into_iter().find(|&v| nb <= v)
+                && has_gemvm(qt)
+            {
+                kernels.push(format!("gemvm{vm}_{tn}"));
             }
             kernels.extend(gemm2_names(qt));
             // Rounds over all kernels (interleaved: clocks drift as the GPU
