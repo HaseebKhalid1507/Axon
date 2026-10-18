@@ -220,7 +220,10 @@ fn oss_gpu_matches_cpu_fixture() {
     let mm = Kernels::moe_module(&g).unwrap();
     let net = moe_net(&g, &km, &mm, &m, 64);
     let ids = ids_mod(40, net.vocab() as u64);
-    let cpu = crate::model::Qwen2::new(&m);
+    // A model of its own: the GPU half's CPU experts released what they
+    // repacked.
+    let mc = fixture();
+    let cpu = crate::model::Qwen2::new(&mc);
     let d = max_dlogit(&net, &cpu, &ids);
     let bugs: [(&str, Model); 3] = [
         (
