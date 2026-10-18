@@ -76,8 +76,9 @@ Newest first, as of `69adfa2`; the numbers are the PRs' own MEASURED headlines.
 | 10 | **GPU decode: long-context attention; locked-clock trial.** | ESTIMATED +3% decode at 4k context. A locked SM clock may recover part of the 9% laptop power-cap cost (MEASURED cost; the fix is untested). The long-context part is Scale item 3. | long-context attention done (#50, Scale item 3); locked-clock trial planned |
 
 Also open:
-- **Tool calling: `/v1/responses` (codex) and the ollama-native API.** Chat-completions tool calling
-  is on main; these two remain (ESTIMATED 700-1000 and 300-400 lines). **In flight** (feat/serve-apis).
+- ~~**Tool calling: `/v1/responses` (codex) and the ollama-native API.**~~ Done
+  (docs/serve-apis.md, log 2026-10-17-serve-responses-ollama). Left: `format` / structured
+  output (needs grammar-constrained sampling), embeddings.
 - **Q2_K and Q3_K.** CPU and CUDA kernels for Q2_K, Q3_K and IQ4_NL (the fallback type in the same files);
   the 2–3-bit frontier models need them ([Long-term goals](#long-term-goals)). **In review** (feat/q2k-q3k,
   [log](log/2026-10-17-q2k-q3k.md)); follow-ups: a repacked (r8) CPU layout and gemvm small-batch kernels.
@@ -107,7 +108,7 @@ token prefix, so a slot saved, restored, paged or chunked continues bit for bit.
 | 4 | **KV save/restore.** Slot ↔ pinned host RAM (`--cache-ram`, LRU by prefix) on eviction, `POST /slots/:id?action=save\|restore` to files in llama-server's shape, `chat --session FILE`. | More conversations than slots is the swarm's normal state; eviction costs a 5–12 s re-prefill today and ESTIMATED ~0.1 s after (1.75 GiB at the MEASURED 25.4 GB/s). A restored slot continues bit for bit; llama-server can't promise that. 20–30 h. Gate: restored == uninterrupted, tokens and KV bytes. | stage A done (#48, #54): AXKV session files and `chat --session`, exact; a 29.8k-position 7B f16 session restores in 0.41–0.45 s vs a 3.16 s re-prefill (RTX 4090, MEASURED). Stage B (`serve`: `--cache-ram`, `/slots` save/restore) planned |
 | 5 | **Paged KV.** A slot takes 64-position pages as it grows; `--ctx` is a cap, not a reservation. | The widest payoff of the list: a 14B agent on 12 GB stays all-GPU at 10–25k used tokens (ESTIMATED 17 → ~55 tok/s), a 7B card holds ~7 agents at 15k instead of 1–2 slots, and requests that fit no slot stop starving. Bit-identical by construction: paging changes addresses, never order (`docs/design` to come; r4-serve §4.2). The broadest kernel touch since S2 — keep the old entry points as identity-table wrappers. 40–60 h. | stages 0–1 done (#64, #68): every cache kernel reads through a page table (null = identity); `gen` md5 identical, C=1 speed within noise on bella (tg128 0.997×, 30k-prefix decode 1.000×, MEASURED) ([log](log/2026-10-17-paged-kv-s01.md)). Stages 2–3 (allocator, pool, serve policy) **in flight** (builder running, branch feat/paged-kv-pool) |
 | 6 | **Serve ops: `--api-key`, `/metrics`, `/slots`, `--max-prompt-tokens`, idle-slot timeout.** | What exposing `serve` on a LAN needs; parity with llama-server's operational surface. No bits risk. 12–20 h. | planned |
-| 7 | **MoE with the experts on the CPU** (Qwen3-30B-A3B first): router, attention and shared weights on the GPU, experts on the CPU for decode, experts streamed through the GPU for prefill (the hybrid's streamer, per expert). | 30B-class quality on 12 GB. ESTIMATED decode 35–55 tok/s (1.0 GB of active experts per token over 75 GB/s RAM) and 3000+ tok/s prefill, where llama.cpp's `--cpu-moe` prefills on the CPU. Medium bits risk: a new architecture and an exact top-k. 80–120 h. Gate: logits within llama.cpp's own CPU/CUDA spread; cache reuse == fresh prefill. gpt-oss-20b (MXFP4, sinks) after. | stages 0–1 in review: qwen3moe loads and runs on the CPU only (exact, at the memory roofline); GPU attention + CPU experts (stage 2) and streamed prefill (stage 3) next ([plan](#mixture-of-experts), [log](log/2026-10-17-moe-stage1.md)) |
+| 7 | **MoE with the experts on the CPU** (Qwen3-30B-A3B first): router, attention and shared weights on the GPU, experts on the CPU for decode, experts streamed through the GPU for prefill (the hybrid's streamer, per expert). | 30B-class quality on 12 GB. ESTIMATED decode 35–55 tok/s (1.0 GB of active experts per token over 75 GB/s RAM) and 3000+ tok/s prefill, where llama.cpp's `--cpu-moe` prefills on the CPU. Medium bits risk: a new architecture and an exact top-k. 80–120 h. Gate: logits within llama.cpp's own CPU/CUDA spread; cache reuse == fresh prefill. gpt-oss-20b (MXFP4, sinks) after. | stages 0–1 on main (CPU only, exact); stage 2 in review: GPU attention + router, CPU experts (exact, graded vs the CPU; 30B decode ESTIMATED 46–51 tok/s at 8k from the Pruned-2B's per-layer timings); streamed prefill (stage 3) next ([plan](#mixture-of-experts), [log 1](log/2026-10-17-moe-stage1.md), [log 2](log/2026-10-17-moe-stage2.md)) |
 | 8 | **YaRN RoPE as an override** (`--rope-scaling yarn --rope-scale 4 --yarn-orig-ctx N`, llama.cpp's names), plus `chat` forgetting in halves. | No Qwen2.5/Qwen3 GGUF carries scaling keys (checked): 128k is a flag in llama.cpp and a refusal here. A 7B at 128k q8 fits 12 GB (3.7 GiB) and decodes at ESTIMATED 34 tok/s today, 65 after item 3; the 2-minute prefill is why item 4 comes first. New bits only when on. 12–20 h. `chat` today re-prefills ~24k tokens on nearly every exchange once a 32k window is full (`drop_oldest` keeps the minimum): dropping to half is 2–4 h. | planned, after 3 and 4 |
 | 9 | **Multi-GPU stage 1b**: the pool over a pipeline, two step batches in flight; and a measured 70B on 2×24 GB. | 32B serve on 2×4090 ≈ 2× one GPU's aggregate (ESTIMATED, [design](design/multi-gpu.md) §3.1); 70B Q4_K_M already runs under PP (ESTIMATED ~21 tok/s on 2×4090, 12k f16 / 24k q8 of KV) but no one has measured it: a $5 pod. 40–60 h + 8. | design done |
 | 10 | **Batched speculative decoding.** Draft rows for every running request in one verify step, on while rows × (K+1) ≤ 16 (the weight-read-once regime), off above. | +30–50 % per stream at ≤ 4 clients with a draft model (ESTIMATED from the MEASURED solo gains), nothing lost at 16. Lossless by the verify contract. 30–50 h. | planned (item 1 is done) |
@@ -130,8 +131,9 @@ Dependencies: 1 (done) → {4 stage B, 10}; 2 (done) → 5 (stages 0–1 done) �
 
 **Why.** A mixture-of-experts model activates a few experts per token, so most of its weights sit idle on any
 given step. Qwen3-30B-A3B runs about 3B parameters per token: 30B-class quality, with a per-token read a 12 GB card
-plus system RAM can handle. Axon runs `qwen3moe` on the CPU (stages 0–1, [log](log/2026-10-17-moe-stage1.md));
-the GPU paths below are what's left. llama.cpp's `--cpu-moe` has made
+plus system RAM can handle. Axon runs `qwen3moe` on the CPU (stages 0–1, [log](log/2026-10-17-moe-stage1.md))
+and with attention + routers on the GPU and the experts on the CPU (stage 2, [log](log/2026-10-17-moe-stage2.md));
+streaming the experts through the GPU for prefill (stage 3) is what's left of item 1. llama.cpp's `--cpu-moe` has made
 "experts on the CPU, attention on the GPU" the usual way to run these models on 8–16 GB cards.
 
 **The plan, in order.**
@@ -191,6 +193,7 @@ trigger each step. Nothing here is scheduled.
 | Llama 3.1 405B | dense | ≈ 243 GB | ≈ 243 GB | `llama`; pipeline parallel (#34) should run it on a 4×80 GB pod (untested) | tensor parallel, to make it fast |
 | DeepSeek V3 / R1 (671B, 37B active) | MoE + MLA | ≈ 403 GB | ≈ 22 GB | refused | MLA attention, DeepSeek routing, ≥ 450 GB RAM or a GPU node |
 | Kimi K2 (1T, 32B active) | DeepSeek V3 architecture | ≈ 600 GB | ≈ 19 GB | refused | same as DeepSeek, plus Kimi's tokenizer and 2–3-bit types; ≥ 650 GB at Q4_K_M ([long-term goal](#long-term-goals)) |
+| DeepSeek V4.1 Flash (1017) | MoE + new attention, vision | 444.7 GB (MEASURED: published GGUF shards) | ≈ 9 GB | refused (`deepseek41`) | a new architecture ([below](#deepseek-v41-flash)), experts on the GPU, a ≥ 500 GB node |
 
 **What's missing, in build order.**
 
@@ -231,6 +234,36 @@ trigger each step. Nothing here is scheduled.
    network volume means each file downloads once.
    - *Trigger:* whenever a step above needs a full-size gate.
 
+**DeepSeek V4.1 Flash.** <a id="deepseek-v41-flash"></a>Added 2026-10-17 at Haseeb's request
+([HF](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017)). A target, not a plan: we deal with it
+when MoE on the GPU and the DeepSeek V3 work above are done.
+
+- **What it is** (MEASURED from the HF `config.json` and a published GGUF's header): 40 layers, width 5120,
+  384 routed experts + 1 shared, 6 used per token, expert FFN 2304, 1M context (YaRN ×16). The attention is
+  not V3's MLA: 64 query heads over 1 KV head of 512 dims (64 roped), a query LoRA (1280), a grouped output
+  LoRA (8 groups, rank 1024), a 128-token sliding window, per-layer KV compression ratios, and a sparse-attention
+  indexer (32 heads × 128, top-512). Also new: 4-way hyper-connections normalised by 20 Sinkhorn iterations,
+  "engram" n-gram hash embeddings at layers 1 and 14, `sqrtsoftplus` gating, a SwiGLU clamp, 3 draft layers
+  (MTP/DSpark) and a vision tower. Native weights are FP8 (32×32 blocks, ue8m0 scales) with FP4 experts:
+  510 GB of safetensors. GGUFs exist with `general.architecture = deepseek41`: Q4_K_M 444.7 GB, Q2_K 264.5 GB.
+- **Reference:** our llama.cpp checkout (2026-10-12) has `deepseek4` but not `deepseek41`. Find the
+  implementation that produced those GGUFs before designing anything; it is the oracle.
+- **What Axon needs:** the `deepseek41` architecture (attention, indexer, compression, hyper-connections, engram,
+  routing), MoE experts on the GPU (stages 2–3), multi-GPU for a 445 GB file, and FP8/FP4 types only if we want
+  the native weights rather than GGUF. Text first; vision later. The draft layers could feed `--draft`.
+- **Exactness:** the indexer's top-k must break ties by position and pick the same keys in decode, prefill and
+  verify; the Sinkhorn loop runs a fixed number of iterations in a fixed order; compressed and uncompressed layers
+  each keep one fold order. Same decode == prefill rule as everything else.
+- **Hardware:** Parabellum can't download it (≈ 35 GB free disk). Q4_K_M needs 8×80 GB (640 GB) or 4×H200 (564 GB,
+  tight once KV is added) with pipeline parallel, or a ≥ 512 GB RAM server with the experts on the CPU, plus a
+  ≥ 500 GB network volume so the file downloads once.
+- **Cost of one full-size gate:** ESTIMATED from our account's prices (H100 $2.89/h): 8×H100 ≈ $23/h, so a
+  2-hour session (download + gates + bench) ≈ $50. That is above the current $38 guard cap; raise it for that run.
+- **Read per token:** ESTIMATED ≈ 15B active weights (≈ 10B expert, ≈ 5B attention) × 4.8 bits ≈ 9 GB.
+- **Dev model:** no small `deepseek41` sibling is known yet; check at the time. Otherwise prune to 2–3 layers and
+  a few experts on a big-disk pod, as the Pruned-2B did for MoE, and gate kernels against the reference there.
+- *Trigger:* MoE stage 3 and the DeepSeek V3 item (2) are done.
+
 **Why this order.** Item 1 is already planned and unlocks most of the table. Item 2 unlocks the two biggest
 models. Item 3 matters for dense giants. Item 4 only matters past RAM.
 
@@ -244,6 +277,8 @@ models. Item 3 matters for dense giants. Item 4 only matters past RAM.
 | DeepSeek V3 | server, experts on CPU, assumed ~300 GB/s RAM | ≈ 14 tok/s |
 | Llama 3.1 405B | 4×H100, pipeline parallel (today's code) | ≤ 14 tok/s |
 | Llama 3.1 405B | 4×H100, tensor parallel (item 3) | up to ~50 tok/s before the all-reduce cost |
+| DeepSeek V4.1 Flash | 8×H100, pipeline parallel, Q4_K_M | ≤ ~370 tok/s (≈ 9 GB ÷ 3.35 TB/s) |
+| DeepSeek V4.1 Flash | server, experts on CPU (≈ 6 GB/token), assumed ~300 GB/s RAM | ≈ 50 tok/s |
 
 ## Not planned, and why
 

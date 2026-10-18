@@ -2223,8 +2223,8 @@ fn gpu_decode_norm2_gate_up4_identical() {
         let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
         let mut net = CudaQwen2::new(&g, &km, &m, 256).unwrap();
         let lay = &net.layers[0];
-        assert!(lay.gate.qt == lay.up.qt && net.ffn.is_multiple_of(2));
-        let rule = lay.gate.rb < GATE_UP4_ROW;
+        assert!(lay.dense().0.qt == lay.dense().1.qt && net.ffn.is_multiple_of(2));
+        let rule = lay.dense().0.rb < GATE_UP4_ROW;
         assert!(net.dim <= NORM2_MAX);
         let ids = tok.encode(PROMPTS[3]);
         net.norm2 = false;
@@ -2260,7 +2260,9 @@ fn gpu_decode_norm2_gate_up4_identical() {
         eprintln!(
             "dim {} ffn {} gate {} B/row (gate_up4 by rule: {rule}): rmsnorm_quant_v2 and \
              gate_up4 bit-identical over 16 steps",
-            net.dim, net.ffn, net.layers[0].gate.rb
+            net.dim,
+            net.ffn,
+            net.layers[0].dense().0.rb
         );
     }
 }
@@ -4388,9 +4390,9 @@ fn cuda_prefill_profile() {
                 "k" => macs(&l0.k),
                 "v4" | "v6" => macs(&l0.v) * k as f64 / nl,
                 "wo" => macs(&l0.o),
-                "gate" => macs(&l0.gate),
-                "gate_up" => macs(&l0.up),
-                "down4" | "down6" => macs(&l0.down) * k as f64 / nl,
+                "gate" => macs(l0.dense().0),
+                "gate_up" => macs(l0.dense().1),
+                "down4" | "down6" => macs(l0.dense().2) * k as f64 / nl,
                 _ => 0.0,
             };
             let shape = match n {
@@ -4400,13 +4402,18 @@ fn cuda_prefill_profile() {
                 "wo" => format!("{}x{} {}", l0.o.rows, l0.o.cols, type_name(l0.o.qt)),
                 "gate" => format!(
                     "{}x{} {}",
-                    l0.gate.rows,
-                    l0.gate.cols,
-                    type_name(l0.gate.qt)
+                    l0.dense().0.rows,
+                    l0.dense().0.cols,
+                    type_name(l0.dense().0.qt)
                 ),
-                "gate_up" => format!("up {}x{} {}", l0.up.rows, l0.up.cols, type_name(l0.up.qt)),
-                "down4" => format!("{}x{} q4_k", l0.down.rows, l0.down.cols),
-                "down6" => format!("{}x{} q6_k", l0.down.rows, l0.down.cols),
+                "gate_up" => format!(
+                    "up {}x{} {}",
+                    l0.dense().1.rows,
+                    l0.dense().1.cols,
+                    type_name(l0.dense().1.qt)
+                ),
+                "down4" => format!("{}x{} q4_k", l0.dense().2.rows, l0.dense().2.cols),
+                "down6" => format!("{}x{} q6_k", l0.dense().2.rows, l0.dense().2.cols),
                 "v6" => format!("v {}x{} q6_k", l0.v.rows, l0.v.cols),
                 _ => String::new(),
             };

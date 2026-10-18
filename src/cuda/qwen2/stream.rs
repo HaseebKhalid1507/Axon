@@ -321,9 +321,11 @@ impl<'g> CudaQwen2<'g> {
                 k: mat(k),
                 v: mat(v),
                 o: mat(o),
-                gate: mat(gate),
-                up: mat(up),
-                down: mat(down),
+                ffn: Ffn::Dense {
+                    gate: mat(gate),
+                    up: mat(up),
+                    down: mat(down),
+                },
                 // gemma3 never streams (hybrid refuses it).
                 post_attn: None,
                 post_ffn: None,
@@ -585,15 +587,8 @@ impl<'g> CudaQwen2<'g> {
         }
         let mats = &src[i].mats;
         let l = &mut lw[i];
-        let dst: [&mut Mat; 7] = [
-            &mut l.q,
-            &mut l.k,
-            &mut l.v,
-            &mut l.o,
-            &mut l.gate,
-            &mut l.up,
-            &mut l.down,
-        ];
+        let dst = l.mats_mut();
+        assert_eq!(dst.len(), 7, "a streamed layer is dense");
         for ((m, hm), d) in mats.iter().enumerate().zip(dst) {
             let bytes = d.rows * d.rb;
             let (off, wait) = st.ring.place(bytes)?;

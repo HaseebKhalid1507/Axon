@@ -1,0 +1,74 @@
+name: Change request
+description: Propose a change (perf, architecture, quant type, serve feature). A maintainer turns it into an agent-ready spec.
+title: "[change] "
+labels: ["needs-spec"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read [AGENTS.md](https://github.com/HaseebKhalid1507/Axon/blob/main/AGENTS.md) first. This issue is not
+        claimable until a maintainer replaces `needs-spec` with `agent-ready`.
+        Check [docs/experiments-rejected.md](https://github.com/HaseebKhalid1507/Axon/blob/main/docs/experiments-rejected.md)
+        before proposing a speedup: it may already have been tried.
+  - type: textarea
+    id: goal
+    attributes:
+      label: Goal and motivation
+      description: What should change, and why. Which part of the mission (cheap, fast, best models) it serves. Cite the measurement or user need behind it.
+      placeholder: |
+        Decode at 32k context on a 7B trails llama.cpp by 6 % on an RTX 4090 (MEASURED, log ...).
+        Goal: close the gap without changing output bits.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Files or modules that may change, and what is explicitly out of scope.
+      placeholder: |
+        In: src/cuda/decode.cu (attention), src/cuda/qwen2.rs (launch).
+        Out: prefill kernels, serve, CPU path.
+    validations:
+      required: true
+  - type: textarea
+    id: targets
+    attributes:
+      label: Target models and hardware
+      description: Which models (file, quant) and which hardware (CPU class, GPU and arch) the change is for, and which must not regress.
+      placeholder: |
+        For: Qwen2.5-7B Q4_K_M and Qwen3-8B Q4_K_M, CUDA, sm_89 and sm_120.
+        Must not regress: the three CONTRIBUTING test models on CPU (AVX2, AVX-VNNI); sm_61 still runs.
+    validations:
+      required: true
+  - type: textarea
+    id: gates
+    attributes:
+      label: Acceptance gates
+      description: "What must hold for the PR to merge: bits, md5 set, perf must-not-regress rows, perf target (if any), tests."
+      placeholder: |
+        - **Bits:** <e.g. decode == batched prefill == verify, unchanged; or: new bits only behind --flag>
+        - **md5 set vs main:** <models × prompts × devices, e.g. 3 test models × 3 prompts × {cpu, cuda f16, cuda --kv q8}>
+        - **Perf must not regress:** <rows, e.g. 7B pp560, pp2100, tg128 on cuda; 0.5B tg128 on cpu>
+        - **Perf target (if any):** <e.g. 7B tg@32k ≥ +5 %, or "none: correctness/feature only">
+        - **Tests:** <new or changed tests expected>
+    validations:
+      required: true
+  - type: textarea
+    id: measure
+    attributes:
+      label: How to measure
+      description: Machine class, models, commands, rounds. Base vs candidate on the same machine, interleaved, medians, both pp and tg.
+      placeholder: |
+        scripts/bench.py base=... cand=... -r 5 on an AVX2 CPU, Qwen2.5-0.5B Q4_K_M.
+        GPU: axon gen --device cuda, --ctx 32768 with a 30k prompt, 5 interleaved rounds, cool-gated.
+    validations:
+      required: true
+  - type: textarea
+    id: refs
+    attributes:
+      label: References
+      description: Roadmap item, design doc, log entries, papers, related issues and PRs.
+      placeholder: |
+        docs/roadmap.md Scale item 3; docs/log/2026-10-17-paged-kv-s01.md; #50
+    validations:
+      required: false

@@ -289,6 +289,10 @@ impl BatchIn<'_> {
     }
 }
 
+/// `pass_hooked`'s mixture-of-experts FFN: (layer, the residual stream,
+/// tokens).
+pub(super) type MoeHook<'a> = dyn FnMut(usize, Arg, usize) -> Result<(), String> + 'a;
+
 /// Where a pass's tokens go: one sequence, or (the server's decode step,
 /// serve S2) a row per token of many (prefill.cu "Placement").
 #[derive(Clone, Copy)]
@@ -339,7 +343,7 @@ fn type_index(qt: u32) -> usize {
 
 /// The batched kernels of a module.
 pub(super) struct BatchFns<'m> {
-    embed: Func<'m>,
+    pub(super) embed: Func<'m>,
     rope_table: Func<'m>,
     rmsnorm_quant: Func<'m>,
     swiglu_quant: Func<'m>,
@@ -360,7 +364,7 @@ pub(super) struct BatchFns<'m> {
     /// The device's compute capability, major * 10 + minor (`fa_pick`).
     cc: u32,
     quantize: Func<'m>,
-    argmax: Func<'m>,
+    pub(super) argmax: Func<'m>,
     gemvn8: Func<'m>,
     gemvn16: Func<'m>,
     /// gemvm8_*, gemvm16_* per type (as `gemm`); None without tensor cores.
@@ -550,7 +554,7 @@ pub(super) struct BatchBufs<'g> {
     /// Blocks of ATT_BLK positions of the cache it's for (the stride of
     /// attn_blk_b's partials).
     nblk_max: usize,
-    tokens: DevBuf<'g>,
+    pub(super) tokens: DevBuf<'g>,
     host_tokens: HostBuf<'g>,
     /// `Place::Rows` of the pass: per token (position, cache row), u32s;
     /// a pool's scratch only (`slots.rs`).
@@ -558,7 +562,7 @@ pub(super) struct BatchBufs<'g> {
     /// Incoming hidden states, [max][dim] (first > 0 only).
     host_x: Option<HostBuf<'g>>,
     /// Residual stream, [max][dim].
-    x: DevBuf<'g>,
+    pub(super) x: DevBuf<'g>,
     /// Products of the q, k, v matrices (biases added), [max][q_dim + 2 kv_dim].
     qkv: DevBuf<'g>,
     /// Rotated queries, [max][q_dim].
@@ -566,7 +570,7 @@ pub(super) struct BatchBufs<'g> {
     gate: DevBuf<'g>,
     up: DevBuf<'g>,
     /// Quantized activations, [max][act_stride(act_len())].
-    act: DevBuf<'g>,
+    pub(super) act: DevBuf<'g>,
     rope: DevBuf<'g>,
     /// gemma3's local layers' table (empty otherwise).
     rope_swa: DevBuf<'g>,
@@ -576,8 +580,8 @@ pub(super) struct BatchBufs<'g> {
     /// `keep_logits`) one row per token of the pass instead.
     pub(super) logits: DevBuf<'g>,
     pub(super) logits_rows: bool,
-    best: DevBuf<'g>,
-    host_best: HostBuf<'g>,
+    pub(super) best: DevBuf<'g>,
+    pub(super) host_best: HostBuf<'g>,
 }
 
 impl<'g> CudaQwen2<'g> {
@@ -660,7 +664,7 @@ impl<'g> CudaQwen2<'g> {
     /// or has mt.rows floats (mode 2: nb rows of ostride floats); the matrix
     /// is whole in `wts`.
     #[allow(clippy::too_many_arguments)]
-    unsafe fn bgemm(
+    pub(super) unsafe fn bgemm(
         &self,
         wts: &DevBuf,
         mt: &Mat,
@@ -840,6 +844,25 @@ impl<'g> CudaQwen2<'g> {
         row0: usize,
         on: &mut dyn FnMut(&'static str) -> Result<(), String>,
     ) -> Result<(), String> {
+        self.pass_hooked(c, input, place, head, split, row0, on, None)
+    }
+
+    /// `pass_at`, a mixture-of-experts layer's FFN by `moe`
+    /// (`crate::moe`): after the layer's attention half, `moe(layer, x,
+    /// nb)` with x the residual stream ([nb][dim] floats) leaves x + the
+    /// layer's FFN output there. None (dense layers): `layer` as always.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn pass_hooked(
+        &self,
+        c: &mut CudaCache<'g>,
+        input: BatchIn,
+        place: Place,
+        head: Head,
+        split: Option<(usize, usize)>,
+        row0: usize,
+        on: &mut dyn FnMut(&'static str) -> Result<(), String>,
+        mut moe: Option<&mut MoeHook>,
+    ) -> Result<(), String> {
         let nb = input.len(self.dim);
         let dim = self.dim;
         // Paged (c.tab): the layers' arrays from row 0 and the rows through
@@ -927,19 +950,37 @@ impl<'g> CudaQwen2<'g> {
                 on("rope")?;
             }
             for (li, l) in self.layers.iter().enumerate() {
-                self.layer(
-                    b,
-                    l,
-                    &self.weights,
-                    &self.vecs,
-                    &kvas[li],
-                    mode,
-                    nb,
-                    start,
-                    rp,
-                    tab,
-                    on,
-                )?;
+                match (&l.ffn, moe.as_deref_mut()) {
+                    (Ffn::Moe { .. }, Some(f)) => {
+                        self.attn_half(
+                            b,
+                            l,
+                            &self.weights,
+                            &self.vecs,
+                            &kvas[li],
+                            mode,
+                            nb,
+                            start,
+                            rp,
+                            tab,
+                            on,
+                        )?;
+                        f(li, b.x.arg(), nb)?;
+                    }
+                    _ => self.layer(
+                        b,
+                        l,
+                        &self.weights,
+                        &self.vecs,
+                        &kvas[li],
+                        mode,
+                        nb,
+                        start,
+                        rp,
+                        tab,
+                        on,
+                    )?,
+                }
             }
             if head == Head::Last {
                 // The last row alone: its norm into act row 0, the head
@@ -1086,7 +1127,7 @@ impl<'g> CudaQwen2<'g> {
     ///
     /// # Safety
     /// nb <= b.max; vecs holds dim floats at off.
-    unsafe fn norm_b(
+    pub(super) unsafe fn norm_b(
         &self,
         b: &BatchBufs,
         vecs: &DevBuf,
@@ -1101,7 +1142,7 @@ impl<'g> CudaQwen2<'g> {
     ///
     /// # Safety
     /// z0 + n <= b.max; vecs holds dim floats at off.
-    unsafe fn norm_rows(
+    pub(super) unsafe fn norm_rows(
         &self,
         b: &BatchBufs,
         vecs: &DevBuf,
@@ -1162,9 +1203,36 @@ impl<'g> CudaQwen2<'g> {
         tab: Arg,
         on: &mut dyn FnMut(&'static str) -> Result<(), String>,
     ) -> Result<(), String> {
+        // SAFETY: the caller's contract (`attn_half`'s and `ffn_half`'s).
+        unsafe {
+            self.attn_half(b, l, wts, vecs, kv, mode, nb, start, rp, tab, on)?;
+            self.ffn_half(b, l, wts, vecs, nb, on)
+        }
+    }
+
+    /// `layer`'s first half: the attention norm through x += W_o att
+    /// (gemma3: and its post-norm). `crate::moe` runs it per layer.
+    ///
+    /// # Safety
+    /// As `layer`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) unsafe fn attn_half(
+        &self,
+        b: &BatchBufs,
+        l: &LayerW,
+        wts: &DevBuf,
+        vecs: &DevBuf,
+        kv: &[Arg],
+        mode: CacheKv,
+        nb: usize,
+        start: usize,
+        rp: Arg,
+        tab: Arg,
+        on: &mut dyn FnMut(&'static str) -> Result<(), String>,
+    ) -> Result<(), String> {
         let rows = !matches!(rp, Arg::Ptr(0));
         let paged = !matches!(tab, Arg::Ptr(0));
-        let (dim, hd, kvd, ffn) = (self.dim, self.head_dim, self.kv_dim(), self.ffn);
+        let (dim, hd, kvd) = (self.dim, self.head_dim, self.kv_dim());
         let qd = self.q_dim;
         let (g, bf) = (self.gpu, &self.bf);
         let vec = |off: usize| vecs.arg_at(off * 4);
@@ -1526,6 +1594,53 @@ impl<'g> CudaQwen2<'g> {
                     on("wo")?;
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// `layer`'s second half: the FFN norm, gate/up, SwiGLU (gemma3:
+    /// GeGLU), down into x (gemma3: through its post-norm).
+    ///
+    /// # Safety
+    /// As `layer` (a dense layer).
+    pub(super) unsafe fn ffn_half(
+        &self,
+        b: &BatchBufs,
+        l: &LayerW,
+        wts: &DevBuf,
+        vecs: &DevBuf,
+        nb: usize,
+        on: &mut dyn FnMut(&'static str) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let (dim, ffn) = (self.dim, self.ffn);
+        let (g, bf) = (self.gpu, &self.bf);
+        let vec = |off: usize| vecs.arg_at(off * 4);
+        let null = Arg::Ptr(0);
+        let want_k = |n: usize| Arg::I32(n.is_multiple_of(256) as i32);
+        let ast = act_stride(self.act_len());
+        let nbu = nb as u32;
+        let (gate, up, down) = l.dense();
+        // SAFETY (every launch): as `pass`, with the caller's contract for
+        // the matrices and vectors.
+        unsafe {
+            // gemma3: x += rmsnorm(W act) per token (rmsnorm_add_b), the
+            // product through b.up (free until the up product).
+            let post_add = |off: usize| {
+                g.launch(
+                    &bf.rmsnorm_add,
+                    (nbu, 1, 1),
+                    (1024, 1, 1),
+                    0,
+                    &[
+                        b.up.arg(),
+                        Arg::U64(dim as u64),
+                        vec(off),
+                        Arg::F32(self.eps),
+                        Arg::I32(dim as i32),
+                        b.x.arg(),
+                    ],
+                )
+            };
             self.norm_b(b, vecs, l.ffn_norm, nb)?;
             on("rmsnorm")?;
             // Both Q4_K, a tensor-core batch: one launch for gate and up.
@@ -1533,27 +1648,17 @@ impl<'g> CudaQwen2<'g> {
                 && self.gemma.is_none()
                 && bf.gemm_gu.is_some()
                 && nb > SMALL
-                && l.gate.qt == Q4_K
-                && l.up.qt == Q4_K
-                && l.gate.cols == dim
-                && l.up.cols == dim;
+                && gate.qt == Q4_K
+                && up.qt == Q4_K
+                && gate.cols == dim
+                && up.cols == dim;
             if !fuse {
-                self.bgemm(
-                    wts,
-                    &l.gate,
-                    b.act.arg(),
-                    ast,
-                    nb,
-                    null,
-                    0,
-                    b.gate.arg(),
-                    ffn,
-                )?;
+                self.bgemm(wts, gate, b.act.arg(), ast, nb, null, 0, b.gate.arg(), ffn)?;
             }
             on("gate")?;
             if let (Some(h), true) = (&bf.gemmh, fuse) {
                 // gemmh2_q4_k_gu: as gemm2s_q4_k_gu below, on wgmma.
-                let rb = l.gate.rb as u64;
+                let rb = gate.rb as u64;
                 let map = |off: usize| {
                     g.tensor_map_2d(
                         dev_ptr(wts.arg_at(off)),
@@ -1563,7 +1668,7 @@ impl<'g> CudaQwen2<'g> {
                         false,
                     )
                 };
-                let (mg, mu) = (map(l.gate.off)?, map(l.up.off)?);
+                let (mg, mu) = (map(gate.off)?, map(up.off)?);
                 let mx = g.tensor_map_2d(
                     dev_ptr(b.act.arg()),
                     (dim as u64, nb as u64),
@@ -1612,9 +1717,9 @@ impl<'g> CudaQwen2<'g> {
                     (256, 1, 1),
                     gemm2_smem(Q4_K, 64, 3) as u32,
                     &[
-                        wts.arg_at(l.gate.off),
-                        wts.arg_at(l.up.off),
-                        Arg::U64(l.gate.rb as u64),
+                        wts.arg_at(gate.off),
+                        wts.arg_at(up.off),
+                        Arg::U64(gate.rb as u64),
                         Arg::I32(ffn as i32),
                         Arg::I32(dim as i32),
                         b.act.arg(),
@@ -1645,7 +1750,7 @@ impl<'g> CudaQwen2<'g> {
                 // fp32 product less written and read back per layer.
                 self.bgemm(
                     wts,
-                    &l.up,
+                    up,
                     b.act.arg(),
                     ast,
                     nb,
@@ -1669,7 +1774,7 @@ impl<'g> CudaQwen2<'g> {
                     ],
                 )?;
             } else {
-                self.bgemm(wts, &l.up, b.act.arg(), ast, nb, null, 0, b.up.arg(), ffn)?;
+                self.bgemm(wts, up, b.act.arg(), ast, nb, null, 0, b.up.arg(), ffn)?;
                 on("gate_up")?;
                 g.launch(
                     if self.gemma.is_some() {
@@ -1694,15 +1799,15 @@ impl<'g> CudaQwen2<'g> {
             match l.post_ffn {
                 // gemma3: as the post-attention norm (b.up free again).
                 Some(pf) => {
-                    self.bgemm(wts, &l.down, b.act.arg(), ast, nb, null, 0, b.up.arg(), dim)?;
-                    on(if l.down.qt == Q6_K { "down6" } else { "down4" })?;
+                    self.bgemm(wts, down, b.act.arg(), ast, nb, null, 0, b.up.arg(), dim)?;
+                    on(if down.qt == Q6_K { "down6" } else { "down4" })?;
                     on("down")?;
                     post_add(pf)?;
                     on("post_norm")?;
                 }
                 None => {
-                    self.bgemm(wts, &l.down, b.act.arg(), ast, nb, null, 1, b.x.arg(), dim)?;
-                    on(if l.down.qt == Q6_K { "down6" } else { "down4" })?;
+                    self.bgemm(wts, down, b.act.arg(), ast, nb, null, 1, b.x.arg(), dim)?;
+                    on(if down.qt == Q6_K { "down6" } else { "down4" })?;
                     on("down")?;
                 }
             }
@@ -1724,7 +1829,7 @@ impl<'g> CudaQwen2<'g> {
 
     /// The passes of n tokens at start for cache c (`fa_passes` when the
     /// flash attention runs them, else `passes`).
-    fn prompt_passes(
+    pub(super) fn prompt_passes(
         &self,
         c: &CudaCache<'g>,
         n: usize,

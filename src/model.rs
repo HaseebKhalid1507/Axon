@@ -414,12 +414,15 @@ fn load_vec(m: &Model, t: &Tensor) -> Vec<f32> {
 /// HF's `1 + w` already added by llama.cpp's converter, so they are plain
 /// RMSNorm weights here.
 /// qwen3moe (Qwen3-30B-A3B & co.) is qwen3 with each FFN replaced by
-/// experts and a router (`moe`): CPU only for now.
+/// experts and a router (`moe`; on the GPU, `crate::moe`).
 pub const ARCHS: [&str; 5] = ["qwen2", "qwen3", "llama", "gemma3", "qwen3moe"];
 
 #[path = "model/moe.rs"]
 mod moe;
-pub(crate) use moe::{MoeInfo, check_ram as moe_check_ram, gpu_refusal as moe_gpu_refusal, is_moe};
+pub(crate) use moe::{
+    MoeDims, MoeInfo, Route as MoeRoute, check_ram as moe_check_ram,
+    gpu_refusal as moe_gpu_refusal, is_moe, moe_dims,
+};
 
 /// Gemma 3's layer layout: local (sliding-window) layers attend to the last
 /// `window` positions only (key t is seen from position p iff p - t <
@@ -935,7 +938,17 @@ impl<'a> Qwen2<'a> {
     }
 
     pub fn new_with(m: &'a Model, repack: bool) -> Qwen2<'a> {
-        Self::build(m, repack, false, usize::MAX)
+        Self::build(m, repack, false, usize::MAX, false)
+    }
+
+    /// The experts of a MoE model (every layer's, repacked unless
+    /// AXON_REPACK=0), for the GPU backend that runs everything else
+    /// (`crate::moe`): no output head, and the attention matrices are left
+    /// in the mapping, never read. It runs `moe_layer` / `moe_layer_batch`
+    /// only.
+    pub(crate) fn new_experts(m: &'a Model) -> Qwen2<'a> {
+        let repack = std::env::var("AXON_REPACK").map_or(true, |v| v != "0");
+        Self::build(m, repack, false, usize::MAX, true)
     }
 
     /// The embedding and layers 0..k only (all of them, and the output head,
@@ -944,13 +957,14 @@ impl<'a> Qwen2<'a> {
     /// rest of the mapping is never touched. Without the head it runs
     /// `hidden` / `hidden_batch` only; its cache holds k layers.
     pub fn new_layers(m: &'a Model, repack: bool, k: usize) -> Qwen2<'a> {
-        Self::build(m, repack, false, k)
+        Self::build(m, repack, false, k, false)
     }
 
     /// `tie`: use the token embedding as the output matrix even if the model
     /// has its own (tests: the tied-embedding case on any model). `keep`:
     /// layers 0..keep only, the output head only if that's all of them.
-    fn build(m: &'a Model, repack: bool, tie: bool, keep: usize) -> Qwen2<'a> {
+    /// `experts`: `new_experts`'s model (no head, attention in place).
+    fn build(m: &'a Model, repack: bool, tie: bool, keep: usize, experts: bool) -> Qwen2<'a> {
         if let Err(e) = check_supported(m) {
             panic!("{e}");
         }
@@ -960,7 +974,7 @@ impl<'a> Qwen2<'a> {
             |k: &str| meta_num(m, &key(k)).unwrap_or_else(|| panic!("missing metadata {}", key(k)));
 
         let n_layers = need("block_count") as usize;
-        let (k, head) = (keep.min(n_layers), keep >= n_layers);
+        let (k, head) = (keep.min(n_layers), keep >= n_layers && !experts);
         let dim = need("embedding_length") as usize;
         let n_heads = need("attention.head_count") as usize;
         let n_kv_heads = need("attention.head_count_kv") as usize;
@@ -1015,8 +1029,23 @@ impl<'a> Qwen2<'a> {
         let mut plan: Vec<Option<(usize, usize)>> = Vec::new();
         let mut total = 0;
         let out_ts = head.then_some(out_t);
-        for t in out_ts.into_iter().chain((0..k).flat_map(layer_mats)) {
-            let len = if repack { repacked_len(t) } else { None };
+        // `experts`: a layer's first 4 (attention) stay in the mapping.
+        let held = |i: usize| {
+            layer_mats(i)
+                .into_iter()
+                .enumerate()
+                .map(move |(j, t)| (t, !(experts && j < 4)))
+        };
+        for (t, hold) in out_ts
+            .map(|t| (t, true))
+            .into_iter()
+            .chain((0..k).flat_map(held))
+        {
+            let len = if repack && hold {
+                repacked_len(t)
+            } else {
+                None
+            };
             plan.push(len.map(|len| (total, len)));
             total += len.map_or(0, |l| l.next_multiple_of(64));
         }
@@ -4619,7 +4648,7 @@ pub(crate) mod tests {
         for copy in [true, false] {
             let m = crate::testutil::model_with(Some(copy)).unwrap();
             assert_eq!(m.file_backed(), !copy);
-            let net = Qwen2::build(&m, true, true, usize::MAX);
+            let net = Qwen2::build(&m, true, true, usize::MAX, false);
             let repacked: Vec<&Tensor> = net
                 .layers
                 .iter()

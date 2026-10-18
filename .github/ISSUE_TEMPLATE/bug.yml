@@ -1,0 +1,59 @@
+name: Bug report
+description: Wrong output, a crash, a refusal that shouldn't happen, or a slowdown against an earlier commit.
+title: "[bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One bug per issue. Paste text, not screenshots. If you can, reproduce it on current `main` first.
+  - type: input
+    id: model
+    attributes:
+      label: Model file and quant
+      description: File name, quant type, and where it came from (URL or converter). sha256 if you have it.
+      placeholder: "qwen2.5-0.5b-instruct-q4_k_m.gguf (Q4_K_M, Qwen/Qwen2.5-0.5B-Instruct-GGUF)"
+    validations:
+      required: true
+  - type: textarea
+    id: device
+    attributes:
+      label: Device
+      description: "CPU: model name (and whether it has AVX2 / AVX-VNNI). GPU: model, driver version, CUDA / NVRTC version. OS."
+      placeholder: |
+        CPU: Intel Core i7-9750H (AVX2, no VNNI)
+        GPU: GTX 1050 3 GB, driver 580.xx, NVRTC 12.9
+        OS: Arch Linux, kernel 6.x
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Exact command
+      description: The full command line, including flags and relevant environment variables (AXON_*).
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected output
+      description: What should have happened. For wrong text, what llama.cpp, ollama or an earlier axon commit gives.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual output
+      description: stdout and stderr, including any panic message and backtrace (RUST_BACKTRACE=1).
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: version
+    attributes:
+      label: Version
+      description: Output of `axon --version`, plus `git rev-parse HEAD` if you built from source (the version string alone doesn't name the commit).
+      render: text
+    validations:
+      required: true
