@@ -32,6 +32,7 @@
 //! it, instead of answering 500 forever while /health says ok.
 
 pub mod api;
+mod drafting;
 mod engine;
 pub mod http;
 mod ollama;
@@ -142,6 +143,10 @@ pub struct Opts {
     /// is cancelled (its slot freed), as if it had disconnected. The CLI
     /// refuses less than `MIN_SLOT_IDLE_MS` (tests use less).
     pub slot_idle_ms: Option<u64>,
+    /// With a draft model and a pool: measure the steps' costs at startup
+    /// for the gate that picks each round's guesses (`drafting.rs`); false
+    /// (AXON_DRAFT_CALIB=0): every greedy request drafts K.
+    pub draft_calib: bool,
 }
 
 /// The chat framing `axon chat` uses (chat.rs: ChatML, or Llama 3's
@@ -878,12 +883,19 @@ fn engine(
     }
     // The slots and their context (`plan_slots`), measured against the GPU
     // memory free now: a pool of N slots is N caches (the single-request
-    // path runs in a slot, with scratch of its own: `serve_bytes_kv`).
+    // path runs in a slot, with scratch of its own: `serve_bytes_rows`).
+    // With a draft model on the GPU, a step verifies up to K + 1 rows per
+    // slot (`Batch::round`): the pool's logits scratch is sized for them.
+    let kd = match &drafter {
+        Some(d) if matches!(d.net(), Backend::Cuda(_)) => o.max_draft.min(drafting::K_MAX),
+        _ => 0,
+    };
     let plan = match &net {
         Backend::Cuda(n) if o.parallel > 1 => match n.free_bytes() {
             Ok(free) => {
                 let free = free as usize;
-                let fits = |kv, s, c| n.serve_bytes_kv(kv, s, c) + POOL_SPARE <= free;
+                let fits =
+                    |kv, s, c| n.serve_bytes_rows(kv, s, c, s * (kd + 1)) + POOL_SPARE <= free;
                 let kv = match o.kv {
                     KvType::Q8 => CacheKv::Q8 { group: 0 },
                     _ => CacheKv::F16,
@@ -917,7 +929,7 @@ fn engine(
         n => {
             // Tests shrink the slots below the context (`Opts::slot_ctx`).
             let slot_ctx = o.slot_ctx.map_or(ctx, |c| c.min(ctx));
-            match net.new_pool(n, slot_ctx) {
+            match net.new_pool_rows(n, slot_ctx, n * (kd + 1)) {
                 Ok(pool) => Some((pool, n, slot_ctx)),
                 Err(why) => {
                     if o.log {
@@ -940,6 +952,17 @@ fn engine(
         }
         None => net.new_cache(ctx),
     };
+    // The draft model's pool beside the batch's (before the Q6_K copy
+    // takes what is left): its solo cache becomes a view of a slot of it.
+    let mut drafter = drafter;
+    let mut dpool = None;
+    if let (Some((_, n, slot_ctx)), Some(md)) = (pool.as_ref(), drafter.take())
+        && kd > 0
+    {
+        let (dp, md) = draft_pool(md, *n, *slot_ctx, draft_ctx, o.log);
+        drafter = Some(md);
+        dpool = dp;
+    }
     // The Q6_K prefill copy only out of what the cache and slots leave
     // (prefill-only: the same products without it, slower).
     if let Backend::Cuda(n) = &mut net {
@@ -973,6 +996,30 @@ fn engine(
         };
         Batch::new(&net, pool, n, slot_ctx, policy, o.log, e.generated.clone())
     });
+    if let (Some(b), Some((dp, dctx))) = (batch.as_mut(), dpool) {
+        b.dp = Some(drafting::DraftPool {
+            pool: dp,
+            ctx: dctx,
+            cached: vec![Vec::new(); b.slots],
+            alpha: vec![1.0; b.slots],
+            global: None,
+            k: kd,
+            costs: None,
+            metrics: o.metrics.draft.clone(),
+        });
+        let md = e.drafter.as_ref().expect("the drafter");
+        if o.draft_calib {
+            let t = Instant::now();
+            match or_exit("calibrating the draft gate", || b.calibrate(md)) {
+                Ok(line) if o.log => eprintln!(
+                    "axon serve: draft gate calibrated in {:.0} ms: {line}",
+                    t.elapsed().as_secs_f64() * 1e3
+                ),
+                Ok(_) => {}
+                Err(e) => eprintln!("axon serve: draft gate not calibrated ({e}): K={kd} always"),
+            }
+        }
+    }
     let served = batch.as_ref().map_or(ctx, |b| b.ctx.min(ctx));
     let banner = match &batch {
         Some(b) => format!("{kvs}, ctx {served}{drafts}, {} requests at once", b.slots),
@@ -1050,7 +1097,7 @@ fn engine(
                 // least recently used): from the rows the slot holds, and
                 // the slot holds its rows after.
                 let lent = or_exit("a slot for a request alone", || {
-                    b.lend_solo(&job.prompt, &mut e.cache)
+                    b.lend_solo(&job.prompt, &mut e.cache, e.drafter.as_mut())
                 });
                 match lent {
                     Ok(hist) => e.hist = hist,
@@ -1060,17 +1107,74 @@ fn engine(
                 match e.run(job, Some(ho)) {
                     Some(seq) => {
                         let tx = seq.job.tx.clone();
-                        if let Err(err) = or_exit("a hand-over", || b.adopt(seq, &e.cache)) {
+                        if let Err(err) =
+                            or_exit("a hand-over", || b.adopt(seq, &e.cache, e.drafter.as_mut()))
+                        {
                             fatal(b, &err, Some(tx));
                         }
                     }
-                    None => b.end_solo(std::mem::take(&mut e.hist)),
+                    None => b.end_solo(std::mem::take(&mut e.hist), e.drafter.as_mut()),
                 }
             }
             continue;
         }
-        if let Err(err) = or_exit("a batched step", || b.step()) {
+        if let Err(err) = or_exit("a batched step", || b.step(e.drafter.as_mut())) {
             fatal(b, &err, None);
+        }
+    }
+}
+
+/// VRAM the draft model's pool leaves free beyond itself.
+const DRAFT_SPARE: usize = 128 << 20;
+
+/// The draft model's pool for `slots` slots (rows for a catch-up and a
+/// guess each per step), its context the longest that fits up to
+/// min(`slot_ctx`, `draft_ctx`) (past it requests draft nothing), and the
+/// drafter on a view of its slot 0 (the solo path's; `Batch::lend_solo`
+/// points it per request). None (the drafter as it was) if it isn't on the
+/// GPU or no pool of 1024 positions fits.
+fn draft_pool(
+    md: engine::Md,
+    slots: usize,
+    slot_ctx: usize,
+    draft_ctx: usize,
+    log: bool,
+) -> (
+    Option<(<Backend<'static> as BatchLm>::Pool, usize)>,
+    engine::Md,
+) {
+    let old_ctx = md.ctx();
+    let (net, stop) = md.into_parts();
+    let rows = slots * (1 + crate::draft::STEP_CATCH_UP);
+    let made = match &net {
+        Backend::Cuda(dn) => dn.free_bytes().map_err(|e| e.to_string()).and_then(|free| {
+            let free = free as usize;
+            let want = slot_ctx.min(draft_ctx);
+            let fits = |c| dn.serve_bytes_rows(dn.kv, slots, c, rows) + DRAFT_SPARE <= free;
+            let c = longest_ctx(want.min(1024), want, fits)
+                .ok_or_else(|| format!("{slots} slots of 1024 positions don't fit"))?;
+            let p = net.new_pool_rows(slots, c, rows)?;
+            let v = net.slot_cache(&p, 0)?;
+            Ok((p, c, v))
+        }),
+        _ => Err("the draft model isn't on the GPU".into()),
+    };
+    match made {
+        Ok((p, c, v)) => {
+            if log && c < slot_ctx.min(draft_ctx) {
+                eprintln!(
+                    "axon serve: the draft model drafts up to {c} positions (its pool of {slots} \
+                     slots fits that beside the main model's)"
+                );
+            }
+            let md = crate::draft::ModelDrafter::with_cache(net, v, c, &stop);
+            (Some((p, c)), md)
+        }
+        Err(why) => {
+            if log {
+                eprintln!("axon serve: no batched drafting ({why}): the draft model runs alone");
+            }
+            (None, crate::draft::ModelDrafter::new(net, old_ctx, &stop))
         }
     }
 }
@@ -1303,6 +1407,7 @@ struct EngineOpts {
     ctx: Option<usize>,
     max_draft: usize,
     draft_model: Option<String>,
+    draft_calib: bool,
     log: bool,
     generated: Arc<AtomicU64>,
     rope: crate::rope::RopeArgs,
@@ -1403,6 +1508,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
         ctx: o.ctx,
         max_draft: o.max_draft,
         draft_model: o.draft_model.clone(),
+        draft_calib: o.draft_calib,
         log: o.log,
         rope: o.rope.clone(),
     };
@@ -2423,6 +2529,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         api_key: None,
         max_prompt_tokens: None,
         slot_idle_ms: None,
+        draft_calib: drafting::calib_enabled(),
     };
     let mut k = None;
     let key_from;

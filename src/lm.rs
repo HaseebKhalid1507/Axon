@@ -160,6 +160,10 @@ pub trait BatchLm: Lm {
     /// there is none (no room, or a backend without one).
     fn new_pool(&self, slots: usize, ctx: usize) -> Result<Self::Pool, String>;
 
+    /// `new_pool` whose steps take up to `rows` rows (at least `slots`;
+    /// a speculative round verifies several rows of a slot at once).
+    fn new_pool_rows(&self, slots: usize, ctx: usize, rows: usize) -> Result<Self::Pool, String>;
+
     /// `feed_batch` into slot `slot`: `tokens[b]` at `start + b`.
     fn feed_slot(
         &self,
@@ -710,6 +714,13 @@ impl BatchLm for Backend<'_> {
         match self {
             Backend::Cuda(n) => n.pool(slots, ctx).map(Box::new),
             _ => Err("batching many requests is GPU-only (--device cuda, every layer)".into()),
+        }
+    }
+
+    fn new_pool_rows(&self, slots: usize, ctx: usize, rows: usize) -> Result<Self::Pool, String> {
+        match self {
+            Backend::Cuda(n) => n.pool_rows(slots, ctx, rows).map(Box::new),
+            _ => self.new_pool(slots, ctx),
         }
     }
 

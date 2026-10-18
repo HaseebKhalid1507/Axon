@@ -58,10 +58,11 @@ impl<'g> CudaQwen2<'g> {
     /// VRAM a pool of `slots` x `ctx` (`pool_bytes_kv`) and the
     /// single-request cache, a view of a slot (`slot_view`: its scratch,
     /// no KV of its own), take with caches of type `kv` (the model's, or
-    /// serve's `--kv q8` hint).
-    pub fn serve_bytes_kv(&self, kv: CacheKv, slots: usize, ctx: usize) -> usize {
+    /// serve's `--kv q8` hint), its steps taking up to `rows` rows
+    /// (`pool_rows`).
+    pub fn serve_bytes_rows(&self, kv: CacheKv, slots: usize, ctx: usize, rows: usize) -> usize {
         self.cache_bytes_kv(kv, ctx) - self.kv_cache_bytes(kv, ctx)
-            + self.pool_bytes_kv(kv, slots, ctx)
+            + self.pool_bytes_kv(kv, slots, ctx, rows)
     }
 
     /// A cache of slot `slot`'s rows of `p` (`Lm`'s calls on it read and
@@ -84,16 +85,23 @@ impl<'g> CudaQwen2<'g> {
 
     /// VRAM a pool of `slots` x `ctx` takes with caches of type `kv`
     /// (`pool` checks it is free).
-    fn pool_bytes_kv(&self, kv: CacheKv, slots: usize, ctx: usize) -> usize {
+    fn pool_bytes_kv(&self, kv: CacheKv, slots: usize, ctx: usize, rows: usize) -> usize {
+        let rows = rows.max(slots);
         self.cache_bytes_kv(kv, ctx) - self.kv_cache_bytes(kv, ctx)
             + self.kv_cache_bytes(kv, slots * ctx)
-            + slots.saturating_sub(HEAD_SUB) * self.vocab * 4
+            + rows.saturating_sub(HEAD_SUB) * self.vocab * 4
             + self.batch_for(ctx) * 8
     }
 
     /// A pool of `slots` sequences of up to `ctx` positions, in the model's
     /// KV type, or why there's no room for it.
     pub fn pool(&self, slots: usize, ctx: usize) -> Result<CudaPool<'g>, String> {
+        self.pool_rows(slots, ctx, slots)
+    }
+
+    /// `pool` whose steps take up to `rows` rows (at least `slots`): a
+    /// speculative round verifies several rows of each slot in one step.
+    pub fn pool_rows(&self, slots: usize, ctx: usize, rows: usize) -> Result<CudaPool<'g>, String> {
         if slots == 0 || ctx == 0 {
             return Err("a pool needs at least one slot and position".into());
         }
@@ -107,10 +115,10 @@ impl<'g> CudaQwen2<'g> {
         let mut c = self.try_cache_at(max_ctx, self.kv, ctx)?;
         let g = self.gpu;
         let b = c.b.as_mut().expect("batch scratch");
-        let rows_max = slots.max(HEAD_SUB);
+        let rows_max = slots.max(rows).max(HEAD_SUB);
         if rows_max > b.max {
             return Err(format!(
-                "{slots} slots: more than a pass's {} tokens",
+                "{rows_max} rows a step: more than a pass's {} tokens",
                 b.max
             ));
         }
@@ -456,6 +464,10 @@ impl<'g> BatchLm for CudaQwen2<'g> {
         self.pool(slots, ctx)
     }
 
+    fn new_pool_rows(&self, slots: usize, ctx: usize, rows: usize) -> Result<CudaPool<'g>, String> {
+        self.pool_rows(slots, ctx, rows)
+    }
+
     fn feed_slot(
         &self,
         pool: &mut CudaPool<'g>,
@@ -654,6 +666,132 @@ mod tests {
                         "{what}: KV bytes after the greedy step"
                     );
                 }
+            }
+        }
+    }
+
+    /// A speculative round's verify in a pool: one step with several rows
+    /// of each of 3 slots (1, 4 and 2 rows at consecutive positions, the
+    /// slots' rows interleaved) == `verify_argmax` / `verify_cands` of each
+    /// slot's rows on a plain cache, picks and candidates bit for bit, and
+    /// each slot's KV bytes == its cache's; f16 and q8, qwen2 and qwen3.
+    #[test]
+    fn pool_rows_of_many_slots_match_verify() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let km = Kernels::module(&g).unwrap();
+        if !km.mma() {
+            return;
+        }
+        let spec = CandSpec {
+            k: 40,
+            penalty: 1.15,
+            last_n: 64,
+        };
+        // (slot, prompt length, rows)
+        let plan = [(2usize, 61usize, 1usize), (0, 23, 4), (1, 90, 2)];
+        // The step's order: (index into plan, row), each slot's ascending.
+        let order = [(1, 0), (0, 0), (1, 1), (2, 0), (1, 2), (2, 1), (1, 3)];
+        for m in models() {
+            for kv in [CacheKv::F16, CacheKv::Q8 { group: 0 }] {
+                let ctx = 160;
+                let net = CudaQwen2::with_kv(&g, &km, &m, ctx, kv, false).unwrap();
+                let v = net.vocab;
+                let what = format!("{} {kv:?}", m.arch);
+                let prompts: Vec<Vec<u32>> = plan
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &(_, n, _))| ids(n, 300 + i as u32, v))
+                    .collect();
+                let toks: Vec<Vec<u32>> = plan
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &(_, _, nb))| ids(nb, 900 + i as u32, v))
+                    .collect();
+                let recents: Vec<Vec<u32>> = (0..plan.len())
+                    .map(|i| [prompts[i].clone(), toks[i].clone()].concat())
+                    .collect();
+                // References: each slot's rows on a plain cache.
+                let mut want_g = Vec::new();
+                let mut want_c = Vec::new();
+                let mut want_kv = Vec::new();
+                for i in 0..plan.len() {
+                    let mut c = net.new_cache(ctx);
+                    net.feed_batch(&prompts[i], 0, &mut c);
+                    let start = prompts[i].len();
+                    want_c.push(net.verify_cands(&toks[i], start, &mut c, &spec, &recents[i]));
+                    want_g.push(net.verify_argmax(&toks[i], start, &mut c));
+                    want_kv.push(slot_bytes(&net, &c, 0, start + toks[i].len()));
+                }
+                let mut p = net.pool_rows(3, ctx, 7).unwrap();
+                for (i, &(slot, _, _)) in plan.iter().enumerate() {
+                    net.feed_slot(&mut p, slot, &prompts[i], 0).unwrap();
+                }
+                for greedy in [true, false] {
+                    let rows: Vec<SeqRow> = order
+                        .iter()
+                        .map(|&(i, b)| {
+                            let n = recents[i].len() - toks[i].len() + b + 1;
+                            SeqRow {
+                                token: toks[i][b],
+                                pos: prompts[i].len() + b,
+                                slot: plan[i].0,
+                                head: if greedy {
+                                    RowHead::Argmax
+                                } else {
+                                    RowHead::Sample {
+                                        spec,
+                                        recent: &recents[i][..n],
+                                    }
+                                },
+                            }
+                        })
+                        .collect();
+                    let got = net.step_rows(&mut p, &rows).unwrap();
+                    for (o, &(i, b)) in got.iter().zip(&order) {
+                        let w = if greedy {
+                            RowOut::Pick(want_g[i][b])
+                        } else {
+                            RowOut::Cands(want_c[i][b].clone())
+                        };
+                        assert_eq!(*o, w, "{what} greedy {greedy}: slot {} row {b}", plan[i].0);
+                        if let (RowOut::Cands(c), RowOut::Cands(wc)) = (o, &w) {
+                            let bits = |c: &[Cand]| -> Vec<(u32, u32)> {
+                                c.iter().map(|c| (c.logit.to_bits(), c.id)).collect()
+                            };
+                            assert_eq!(
+                                bits(c),
+                                bits(wc),
+                                "{what}: slot {} row {b} bits",
+                                plan[i].0
+                            );
+                        }
+                    }
+                    for (i, &(slot, n, nb)) in plan.iter().enumerate() {
+                        assert!(
+                            slot_bytes(&net, &p.c, slot * ctx, n + nb) == want_kv[i],
+                            "{what} greedy {greedy}: slot {slot} KV bytes"
+                        );
+                    }
+                }
+                // More rows than the pool takes: refused, nothing run.
+                let row = SeqRow {
+                    token: 1,
+                    pos: 100,
+                    slot: 0,
+                    head: RowHead::Argmax,
+                };
+                let rows: Vec<SeqRow> = (0..17)
+                    .map(|b| SeqRow {
+                        pos: 100 + b,
+                        ..row
+                    })
+                    .collect();
+                assert!(matches!(
+                    net.step_rows(&mut p, &rows),
+                    Err(StepError::Input(_))
+                ));
             }
         }
     }

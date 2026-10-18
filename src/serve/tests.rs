@@ -56,6 +56,7 @@ fn test_opts(path: &str, device: Device) -> Opts {
         api_key: None,
         max_prompt_tokens: None,
         slot_idle_ms: None,
+        draft_calib: true,
     }
 }
 
@@ -3957,4 +3958,119 @@ fn serve_ollama_error_shapes() {
     let r = call(a, "POST", "/v1/responses", "{\"input\":\"x\"}");
     assert_eq!(r.status, 401);
     assert_eq!(r.json()["error"]["code"], "invalid_api_key");
+}
+
+/// Batched speculative decoding (a draft model's pool, drafting.rs): 1.5B
+/// with the 0.5B drafter at 4 slots, prompts fed in 16-token chunks. The
+/// batch test's requests (greedy and seeded sampling mixed; max_tokens
+/// caps that land mid-round) plus greedy ones with stop strings, sent
+/// together twice (the second time their prompts' rows are reused), with a
+/// streamed greedy request cancelled partway in the first: every reply
+/// (content, reasoning, token count, finish reason) equals the server's
+/// without a draft model. Once with the gate forced to draft K (no
+/// calibration: drafted rounds must have run and guesses been kept), once
+/// calibrated.
+#[test]
+fn serve_batched_draft_matches_plain() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(d) = crate::testutil::model_path() else {
+        return;
+    };
+    let t = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("models/qwen2.5-1.5b-instruct-q4_k_m.gguf");
+    if !t.exists() {
+        assert!(
+            std::env::var_os("AXON_SKIP_MODEL_TESTS").is_some(),
+            "{} missing",
+            t.display()
+        );
+        return;
+    }
+    let mut bodies = batch_bodies(true);
+    for (m, n, stop) in [
+        ("Write a short poem about the sea.", 90, json!(["\n\n"])),
+        ("Explain how a bicycle works.", 70, json!([".", "!"])),
+        (
+            "Count from one to thirty in words.",
+            120,
+            json!(["fifteen"]),
+        ),
+    ] {
+        bodies.push(
+            json!({"messages": [{"role": "user", "content": m}], "max_tokens": n,
+                           "temperature": 0, "stop": stop}),
+        );
+    }
+    let reply = |r: &Resp| -> (String, String, Value, Value) {
+        assert_eq!(r.status, 200, "{}", r.body);
+        let v = r.json();
+        let c = &v["choices"][0];
+        (
+            c["message"]["content"].to_string(),
+            c["message"]["reasoning_content"].to_string(),
+            v["usage"]["completion_tokens"].clone(),
+            c["finish_reason"].clone(),
+        )
+    };
+    let gone = json!({"messages": [{"role": "user", "content": "Tell a very long story."}],
+                      "max_tokens": 400, "temperature": 0, "stream": true});
+    // Every reply, two rounds, from a server set by `f`; and its /metrics.
+    let run = |f: &dyn Fn(&mut Opts)| -> (Vec<_>, String) {
+        let s = server_with(t.to_str().unwrap(), Device::Cuda, |o| {
+            o.parallel = 4;
+            o.parallel_set = true;
+            o.prefill_chunk = 16;
+            o.prefill_ms = 0;
+            f(o);
+        });
+        let a = s.addr;
+        let mut all = Vec::new();
+        for round in 0..2 {
+            let got: Vec<_> = std::thread::scope(|sc| {
+                let hs: Vec<_> = bodies
+                    .iter()
+                    .map(|b| sc.spawn(move || reply(&post(a, "/v1/chat/completions", b.clone()))))
+                    .collect();
+                if round == 0 {
+                    let g = &s.generated;
+                    let mut c = TcpStream::connect(a).unwrap();
+                    c.write_all(
+                        request("POST", "/v1/chat/completions", &gone.to_string(), true).as_bytes(),
+                    )
+                    .unwrap();
+                    let g0 = g.load(Ordering::Relaxed);
+                    let mut buf = [0u8; 4096];
+                    let _ = c.read(&mut buf);
+                    wait_for("some tokens", || g.load(Ordering::Relaxed) >= g0 + 30);
+                    drop(c);
+                }
+                hs.into_iter().map(|h| h.join().unwrap()).collect()
+            });
+            all.extend(got);
+        }
+        let m = call(a, "GET", "/metrics", "").body;
+        (all, m)
+    };
+    let (plain, _) = run(&|_| {});
+    let dm = d.to_str().unwrap().to_string();
+    for calib in [false, true] {
+        let (got, m) = run(&|o: &mut Opts| {
+            o.draft_model = Some(dm.clone());
+            o.max_draft = 3;
+            o.draft_calib = calib;
+        });
+        for (i, (g, p)) in got.iter().zip(&plain).enumerate() {
+            assert_eq!(g, p, "calibrated {calib}: request {i}");
+        }
+        let prom = prom_parse(&m);
+        let kept = prom
+            .get("axon_draft_accepted_total")
+            .copied()
+            .unwrap_or(0.0);
+        if !calib {
+            assert!(kept > 0.0, "no guesses kept with K forced:\n{m}");
+        }
+    }
 }

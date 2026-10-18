@@ -30,7 +30,7 @@ pub const DEFAULT_MODEL_DRAFT: usize = 3;
 /// are new: the main model's correction token, which the first draft step
 /// runs anyway, and the last guess of a fully accepted draft, which no draft
 /// step ran.
-const STEP_CATCH_UP: usize = 2;
+pub(crate) const STEP_CATCH_UP: usize = 2;
 
 /// Guesses the next tokens with a model of its own (see the module doc).
 pub struct ModelDrafter<M: Lm> {
@@ -68,6 +68,46 @@ impl<M: Lm> ModelDrafter<M> {
             stop: stop.to_vec(),
             stats: DraftStats::default(),
         }
+    }
+
+    /// A drafter on an existing cache of `ctx` positions (`axon serve`: a
+    /// view of a slot of the drafter's pool), holding nothing yet.
+    pub fn with_cache(net: M, cache: M::Cache, ctx: usize, stop: &[u32]) -> ModelDrafter<M> {
+        ModelDrafter {
+            net,
+            cache,
+            ctx,
+            cached: Vec::new(),
+            stop: stop.to_vec(),
+            stats: DraftStats::default(),
+        }
+    }
+
+    /// Its model and stop set (the cache dropped).
+    pub fn into_parts(self) -> (M, Vec<u32>) {
+        (self.net, self.stop)
+    }
+
+    /// Positions its cache has room for.
+    pub fn ctx(&self) -> usize {
+        self.ctx
+    }
+
+    /// Its model.
+    pub fn net(&self) -> &M {
+        &self.net
+    }
+
+    /// Its model and cache, and the tokens whose rows the cache holds
+    /// (serve moves the cache between slots of a pool and keeps `cached`
+    /// per slot).
+    pub fn parts_mut(&mut self) -> (&M, &mut M::Cache, &mut Vec<u32>) {
+        (&self.net, &mut self.cache, &mut self.cached)
+    }
+
+    /// The stop set (the main model's EOG ids).
+    pub fn stop(&self) -> &[u32] {
+        &self.stop
     }
 
     /// Up to `max` greedy guesses of the tokens after `hist`, stopping before

@@ -29,11 +29,17 @@
 //! Every row's results are the bits the one-sequence calls give
 //! (`BatchLm`'s contract), and the host does per request what `generate`
 //! does per token (a seeded pick from the same candidates, the same stop
-//! rules), so a request's tokens are the same whatever else runs with it.
+//! rules), so a request's tokens are the same whatever else runs with it,
+//! and whether it was drafted.
+//!
+//! With a draft model (`DraftPool`, drafting.rs) a step may be a
+//! speculative round: greedy requests get guesses from the drafter's pool
+//! and one step verifies them, several rows per request (`round`).
 
 use super::api::Usage;
+use super::drafting::{DraftPool, GateIn};
 use super::{Event, Job, TextOut};
-use crate::lm::{Backend, BatchLm, RowHead, RowOut, SeqRow, StepError};
+use crate::lm::{Backend, BatchLm, Lm, RowHead, RowOut, SeqRow, StepError};
 use crate::sample::Sampler;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -113,6 +119,9 @@ pub struct ChunkPolicy {
     pub ms: usize,
 }
 
+/// The draft model (serve's: its cache a view of a slot of its pool).
+pub(super) type Md = crate::draft::ModelDrafter<Backend<'static>>;
+
 /// How a request ended.
 enum End {
     Stop,
@@ -151,6 +160,8 @@ pub(super) struct Batch<'a, 't> {
     pass: usize,
     log: bool,
     generated: Arc<AtomicU64>,
+    /// The draft model's pool and gate (speculative rounds), if any.
+    pub dp: Option<DraftPool>,
 }
 
 impl<'a, 't> Batch<'a, 't> {
@@ -182,6 +193,7 @@ impl<'a, 't> Batch<'a, 't> {
             decode_ms: 0.0,
             log,
             generated,
+            dp: None,
         }
     }
 
@@ -229,6 +241,9 @@ impl<'a, 't> Batch<'a, 't> {
         self.busy[slot] = true;
         self.touch(slot);
         self.held[slot].truncate(reuse);
+        if let Some(dp) = self.dp.as_mut() {
+            dp.alpha[slot] = dp.start_alpha();
+        }
         let sampler = job.sample.map(Sampler::new);
         let now = Instant::now();
         self.pre.push(Prefill {
@@ -274,7 +289,7 @@ impl<'a, 't> Batch<'a, 't> {
 
     /// Feed this step's prompt (`budget`, split by `plan`); prompts then
     /// in their slots join the running requests.
-    fn prefill(&mut self) -> Result<(), String> {
+    fn prefill(&mut self, mut md: Option<&mut Md>) -> Result<(), String> {
         if self.pre.is_empty() {
             return Ok(());
         }
@@ -301,7 +316,7 @@ impl<'a, 't> Batch<'a, 't> {
         }
         for (i, &n) in plan.iter().enumerate() {
             if n > 0 {
-                self.feed(i, n)?;
+                self.feed(i, n, md.as_deref_mut())?;
             }
         }
         let mut i = 0;
@@ -319,13 +334,18 @@ impl<'a, 't> Batch<'a, 't> {
         Ok(())
     }
 
-    /// Feed the next `n` tokens of prefill `i`'s prompt into its slot.
-    fn feed(&mut self, i: usize, n: usize) -> Result<(), String> {
+    /// Feed the next `n` tokens of prefill `i`'s prompt into its slot (and
+    /// the drafter's slot up to there, if drafting: its chunk rides in the
+    /// same time budget).
+    fn feed(&mut self, i: usize, n: usize, md: Option<&mut Md>) -> Result<(), String> {
         let f = &mut self.pre[i];
         let s = f.seq.slot;
         let toks = &f.seq.hist[f.fed..f.fed + n];
         let t = Instant::now();
         self.net.feed_slot(&mut self.pool, s, toks, f.fed)?;
+        if let (Some(dp), Some(md)) = (self.dp.as_mut(), md) {
+            mirror(dp, md.net(), s, &f.seq.hist[..f.fed + n])?;
+        }
         let mid = f.fed as f64 + n as f64 / 2.0 + DEPTH_K;
         let c = t.elapsed().as_secs_f64() * 1e6 / (n as f64 * mid);
         self.held[s].extend_from_slice(toks);
@@ -347,10 +367,17 @@ impl<'a, 't> Batch<'a, 't> {
         &mut self,
         prompt: &[u32],
         cache: &mut <Backend<'a> as crate::lm::Lm>::Cache,
+        md: Option<&mut Md>,
     ) -> Result<Vec<u32>, String> {
         assert!(self.idle(), "lend_solo: the batch is running");
         let (slot, _) = self.free_slot(prompt).expect("lend_solo: a free slot");
         self.net.move_slot_cache(&self.pool, cache, slot)?;
+        // The drafter's cache is a view of its pool too: the same slot.
+        if let (Some(dp), Some(md)) = (self.dp.as_mut(), md) {
+            let (dnet, dcache, cached) = md.parts_mut();
+            dnet.move_slot_cache(&dp.pool, dcache, slot)?;
+            *cached = std::mem::take(&mut dp.cached[slot]);
+        }
         self.solo = slot;
         self.touch(slot);
         Ok(std::mem::take(&mut self.held[slot]))
@@ -363,8 +390,11 @@ impl<'a, 't> Batch<'a, 't> {
 
     /// The S1 path ended (without a hand-over): its slot holds the rows of
     /// `hist`.
-    pub fn end_solo(&mut self, hist: Vec<u32>) {
+    pub fn end_solo(&mut self, hist: Vec<u32>, md: Option<&mut Md>) {
         self.held[self.solo] = hist;
+        if let (Some(dp), Some(md)) = (self.dp.as_mut(), md) {
+            dp.cached[self.solo] = std::mem::take(md.parts_mut().2);
+        }
     }
 
     /// Take over a request `generate` was running on `cache` (the S1 path,
@@ -374,11 +404,16 @@ impl<'a, 't> Batch<'a, 't> {
         &mut self,
         mut seq: Seq<'t>,
         cache: &<Backend<'a> as crate::lm::Lm>::Cache,
+        md: Option<&mut Md>,
     ) -> Result<(), String> {
         let n = seq.hist.len() - 1;
         let slot = self.solo;
         assert!(!self.busy[slot], "adopt: the S1 slot is busy");
         self.net.adopt(&mut self.pool, slot, cache, n)?;
+        if let (Some(dp), Some(md)) = (self.dp.as_mut(), md) {
+            dp.cached[slot] = std::mem::take(md.parts_mut().2);
+            dp.alpha[slot] = dp.start_alpha();
+        }
         self.busy[slot] = true;
         self.held[slot] = seq.hist[..n].to_vec();
         seq.slot = slot;
@@ -410,12 +445,18 @@ impl<'a, 't> Batch<'a, 't> {
 
     /// One step: a chunk of the prompts being prefilled, then a row per
     /// running request and each one's next token.
-    pub fn step(&mut self) -> Result<(), String> {
+    pub fn step(&mut self, mut md: Option<&mut Md>) -> Result<(), String> {
         self.reap();
-        self.prefill()?;
+        self.prefill(md.as_deref_mut())?;
         if self.seqs.is_empty() {
             return Ok(());
         }
+        if let (Some(md), Some(ks)) = (md, self.gate())
+            && self.round(ks, md)?
+        {
+            return Ok(());
+        }
+        let sd: f64 = self.seqs.iter().map(|s| (s.hist.len() - 1) as f64).sum();
         let specs: Vec<_> = self
             .seqs
             .iter()
@@ -446,6 +487,14 @@ impl<'a, 't> Batch<'a, 't> {
         let t = Instant::now();
         let res = self.net.step(&mut self.pool, &rows);
         self.decode_ms = t.elapsed().as_secs_f64() * 1e3;
+        if let Some(dp) = self.dp.as_mut()
+            && res.is_ok()
+        {
+            if let Some(c) = dp.costs.as_mut() {
+                c.saw_verify(rows.len(), sd, self.decode_ms);
+            }
+            dp.metrics.rounds[0].fetch_add(1, Ordering::Relaxed);
+        }
         let outs = match res {
             Ok(o) => o,
             // Refused before any work: those requests fail, the rest of the
@@ -487,6 +536,279 @@ impl<'a, 't> Batch<'a, 't> {
             self.finish(s, end);
         }
         Ok(())
+    }
+
+    /// Measure both models' step costs on the idle pools and fit the
+    /// gate's cost model (drafting.rs); the fit, for the log.
+    pub fn calibrate(&mut self, md: &Md) -> Result<String, String> {
+        let c = self.slots;
+        let dp = self.dp.as_mut().ok_or("no draft pool")?;
+        let rows = c * (dp.k + 1);
+        let mut vnb: Vec<usize> = [1, c, 2 * c, 3 * c, 4 * c, rows]
+            .iter()
+            .map(|&n| n.min(rows))
+            .collect();
+        vnb.sort_unstable();
+        vnb.dedup();
+        let dnb = [1, c, 2 * c];
+        let (v, _) = super::drafting::fit_steps(self.net, &mut self.pool, c, self.ctx, &vnb)?;
+        let (d, _) = super::drafting::fit_steps(md.net(), &mut dp.pool, c, dp.ctx, &dnb)?;
+        dp.costs = Some(super::drafting::Costs::new(v, d, rows.max(3 * c)));
+        Ok(format!(
+            "verify {:.3} + {:.4}/row + {:.3e}/pos ms, draft {:.3} + {:.4}/row + {:.3e}/pos ms",
+            v.a, v.b, v.c, d.a, d.b, d.c
+        ))
+    }
+
+    /// This round's guesses per running request (`DraftPool::choose`), or
+    /// None: no drafting, or none chosen (the plain step).
+    fn gate(&self) -> Option<Vec<usize>> {
+        let dp = self.dp.as_ref()?;
+        let ins: Vec<GateIn> = self
+            .seqs
+            .iter()
+            .map(|s| {
+                let n = s.hist.len();
+                let left = s.job.n_gen - s.ids.len();
+                // Guesses past the token after the last one needing logits
+                // are useless (generate's rule); the drafter's steps run at
+                // positions n - 1.. and must stay inside its slot.
+                let cap = match s.sampler {
+                    Some(_) => 0,
+                    None => left.saturating_sub(1).min((dp.ctx + 1).saturating_sub(n)),
+                };
+                GateIn {
+                    alpha: dp.alpha[s.slot],
+                    cap,
+                    depth: n - 1,
+                }
+            })
+            .collect();
+        let ks = dp.choose(&ins);
+        ks.iter().any(|&k| k > 0).then_some(ks)
+    }
+
+    /// A speculative round with `ks[i]` guesses for request i (see the
+    /// module doc); false if the drafter refused its rows (nothing changed
+    /// in the batch: the plain step runs instead).
+    fn round(&mut self, mut ks: Vec<usize>, md: &mut Md) -> Result<bool, String> {
+        let t0 = Instant::now();
+        let n = self.seqs.len();
+        let dp = self.dp.as_mut().expect("a draft pool");
+        let dnet = md.net();
+        let stop = md.stop();
+        let dv = dnet.vocab();
+        // A main-model id past the drafter's vocabulary: token 0 there (as
+        // ModelDrafter; its guesses may suffer, never the output).
+        let id = |t: u32| if (t as usize) < dv { t } else { 0 };
+        // Catch the drafter's slots up to each history but its last token:
+        // a few rows in the first draft step, or a feed if more (only for
+        // a request that drafts now).
+        let mut gaps: Vec<(usize, Vec<u32>)> = vec![(0, Vec::new()); n];
+        for (i, s) in self.seqs.iter().enumerate() {
+            let last = s.hist.len() - 1;
+            if s.sampler.is_some() || last > dp.ctx {
+                ks[i] = 0;
+                continue;
+            }
+            let c = &mut dp.cached[s.slot];
+            let common = lcp(c, &s.hist[..last]);
+            c.truncate(common);
+            let gap = &s.hist[common..last];
+            if gap.len() <= crate::draft::STEP_CATCH_UP {
+                gaps[i] = (common, gap.to_vec());
+            } else if ks[i] > 0 {
+                let g: Vec<u32> = gap.iter().map(|&t| id(t)).collect();
+                dnet.feed_slot(&mut dp.pool, s.slot, &g, common)?;
+                c.extend_from_slice(gap);
+            }
+        }
+        // The draft steps: step j has a row per request with K_i >= j still
+        // guessing (its guess j - 1, or its last token), plus the catch-up
+        // rows in the first.
+        let kmax = ks.iter().copied().max().unwrap_or(0);
+        let mut guesses: Vec<Vec<u32>> = vec![Vec::new(); n];
+        let td = Instant::now();
+        for j in 1..=kmax {
+            let mut rows = Vec::new();
+            // Per row: the request it guesses for, and its token.
+            let mut who: Vec<(Option<usize>, u32)> = Vec::new();
+            for (i, s) in self.seqs.iter().enumerate() {
+                if j == 1 {
+                    let (at, g) = &gaps[i];
+                    for (r, &t) in g.iter().enumerate() {
+                        rows.push(SeqRow {
+                            token: id(t),
+                            pos: at + r,
+                            slot: s.slot,
+                            head: RowHead::Argmax,
+                        });
+                        who.push((None, t));
+                    }
+                }
+                if ks[i] >= j && guesses[i].len() == j - 1 {
+                    let last = s.hist.len() - 1;
+                    let t = if j == 1 {
+                        s.hist[last]
+                    } else {
+                        guesses[i][j - 2]
+                    };
+                    rows.push(SeqRow {
+                        token: id(t),
+                        pos: last + j - 1,
+                        slot: s.slot,
+                        head: RowHead::Argmax,
+                    });
+                    who.push((Some(i), t));
+                }
+            }
+            if rows.is_empty() {
+                break;
+            }
+            let sd: f64 = rows.iter().map(|r| r.pos as f64).sum();
+            let ts = Instant::now();
+            let outs = match dnet.step(&mut dp.pool, &rows) {
+                Ok(o) => o,
+                Err(StepError::Input(e)) => {
+                    eprintln!("axon serve: a draft step was refused: {e}");
+                    return Ok(false);
+                }
+                Err(StepError::Device(e)) => return Err(e),
+            };
+            if let Some(c) = dp.costs.as_mut() {
+                c.saw_draft(rows.len(), sd, ts.elapsed().as_secs_f64() * 1e3);
+            }
+            for ((o, (w, t)), r) in outs.into_iter().zip(who).zip(&rows) {
+                dp.cached[r.slot].push(t);
+                let (Some(i), RowOut::Pick(p)) = (w, o) else {
+                    continue;
+                };
+                // A guess of a stop token ends the request's guesses (a row
+                // verifying it would never be used).
+                if stop.contains(&p) {
+                    ks[i] = j - 1;
+                } else {
+                    guesses[i].push(p);
+                }
+            }
+        }
+        let draft_us = td.elapsed().as_secs_f64() * 1e6;
+        for (k, g) in ks.iter_mut().zip(&guesses) {
+            *k = (*k).min(g.len());
+        }
+        // The verify step: per request its last token then its guesses, at
+        // their positions.
+        let specs: Vec<_> = self
+            .seqs
+            .iter()
+            .map(|s| s.sampler.as_ref().map(|x| x.cfg.spec()))
+            .collect();
+        let mut rows: Vec<SeqRow> = Vec::new();
+        for (i, (s, spec)) in self.seqs.iter().zip(&specs).enumerate() {
+            let h = &s.hist;
+            let last = h.len() - 1;
+            rows.push(SeqRow {
+                token: h[last],
+                pos: last,
+                slot: s.slot,
+                head: match spec {
+                    None => RowHead::Argmax,
+                    Some(spec) => RowHead::Sample {
+                        spec: *spec,
+                        recent: &h[h.len() - spec.last_n.clamp(1, h.len())..],
+                    },
+                },
+            });
+            for (r, &g) in guesses[i][..ks[i]].iter().enumerate() {
+                rows.push(SeqRow {
+                    token: g,
+                    pos: last + 1 + r,
+                    slot: s.slot,
+                    head: RowHead::Argmax,
+                });
+            }
+        }
+        let sd: f64 = rows.iter().map(|r| r.pos as f64).sum();
+        let tv = Instant::now();
+        let res = self.net.step(&mut self.pool, &rows);
+        let verify_ms = tv.elapsed().as_secs_f64() * 1e3;
+        self.decode_ms = t0.elapsed().as_secs_f64() * 1e3;
+        let nb = rows.len();
+        drop(rows);
+        let outs = match res {
+            Ok(o) => o,
+            Err(StepError::Input(e)) => {
+                eprintln!("axon serve: a step was refused: {e}");
+                self.fail_all(&e);
+                return Ok(true);
+            }
+            Err(StepError::Device(e)) => return Err(e),
+        };
+        if let Some(c) = dp.costs.as_mut() {
+            c.saw_verify(nb, sd, verify_ms);
+        }
+        let m = dp.metrics.clone();
+        m.rounds[kmax.min(super::drafting::K_MAX)].fetch_add(1, Ordering::Relaxed);
+        m.draft_us.fetch_add(draft_us as u64, Ordering::Relaxed);
+        m.verify_us
+            .fetch_add((verify_ms * 1e3) as u64, Ordering::Relaxed);
+        // The walk: per request generate's queue, each pick through the
+        // plain step's rules in order; a guess equal to the token just
+        // emitted makes the next row's pick the next token.
+        let mut outs: Vec<Option<RowOut>> = outs.into_iter().map(Some).collect();
+        let mut off = 0;
+        let mut done = Vec::new();
+        let (mut drafted, mut kept) = (0u64, 0u64);
+        for (i, s) in self.seqs.iter_mut().enumerate() {
+            let k = ks[i];
+            drafted += k as u64;
+            let fed = s.hist.len();
+            self.held[s.slot].push(s.hist[fed - 1]);
+            let mut j = 0;
+            let end = loop {
+                let o = outs[off + j].take().expect("a row's result");
+                let next = match (o, s.sampler.as_mut()) {
+                    (RowOut::Pick(t), None) => t,
+                    (RowOut::Cands(c), Some(sm)) => sm.pick(&c),
+                    _ => unreachable!("a row's result is its head's"),
+                };
+                if s.job.stop_ids.contains(&next) {
+                    break Some(End::Stop);
+                }
+                s.ids.push(next);
+                s.hist.push(next);
+                self.generated.fetch_add(1, Ordering::Relaxed);
+                if let Some(end) = emit(s, next) {
+                    break Some(end);
+                }
+                if s.ids.len() >= s.job.n_gen {
+                    break Some(End::Length);
+                }
+                if j < k {
+                    let ok = next == guesses[i][j];
+                    dp.saw(s.slot, ok);
+                    if ok {
+                        kept += 1;
+                        self.held[s.slot].push(next);
+                        j += 1;
+                        continue;
+                    }
+                }
+                break None;
+            };
+            off += k + 1;
+            if let Some(end) = end {
+                done.push((i, end));
+            }
+        }
+        m.drafted.fetch_add(drafted, Ordering::Relaxed);
+        m.accepted.fetch_add(kept, Ordering::Relaxed);
+        done.sort_by_key(|d| std::cmp::Reverse(d.0));
+        for (i, end) in done {
+            let s = self.seqs.swap_remove(i);
+            self.finish(s, end);
+        }
+        Ok(true)
     }
 
     /// Each slot's state, for GET /slots and /metrics (read only).
@@ -658,6 +980,35 @@ fn starve(plan: &[usize], rem: &[usize], starved: &[usize], idle: bool) -> Vec<u
             (false, true) => s,
         })
         .collect()
+}
+
+/// How many leading tokens `a` and `b` share.
+fn lcp(a: &[u32], b: &[u32]) -> usize {
+    a.iter().zip(b).take_while(|(x, y)| x == y).count()
+}
+
+/// Bring drafter slot `s` to hold `toks` (as far as its context goes):
+/// feed what follows the prefix it already holds.
+fn mirror(
+    dp: &mut DraftPool,
+    dnet: &Backend<'static>,
+    s: usize,
+    toks: &[u32],
+) -> Result<(), String> {
+    let end = toks.len().min(dp.ctx);
+    let c = &mut dp.cached[s];
+    let common = lcp(c, &toks[..end]);
+    c.truncate(common);
+    if common < end {
+        let dv = dnet.vocab();
+        let g: Vec<u32> = toks[common..end]
+            .iter()
+            .map(|&t| if (t as usize) < dv { t } else { 0 })
+            .collect();
+        dnet.feed_slot(&mut dp.pool, s, &g, common)?;
+        c.extend_from_slice(&toks[common..end]);
+    }
+    Ok(())
 }
 
 /// Send `id`'s text; Some(end) if that ended the request (a stop string,

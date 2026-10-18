@@ -188,6 +188,8 @@ pub struct Metrics {
     pub ttft: Histogram,
     pub itl: Histogram,
     pub slots: Mutex<SlotsView>,
+    /// Speculative rounds in the batch (a draft model's pool).
+    pub draft: std::sync::Arc<super::drafting::DraftMetrics>,
 }
 
 impl Default for Metrics {
@@ -202,6 +204,7 @@ impl Default for Metrics {
             ttft: Histogram::new(TTFT_BOUNDS),
             itl: Histogram::new(ITL_BOUNDS),
             slots: Mutex::default(),
+            draft: Default::default(),
         }
     }
 }
@@ -329,6 +332,48 @@ impl Metrics {
             "axon_itl_seconds",
             "Time between a request's text events (about one token each).",
         );
+        let d = &self.draft;
+        let rounds: Vec<u64> = d.rounds.iter().map(|r| r.load(Ordering::Relaxed)).collect();
+        if rounds.iter().any(|&r| r > 0) {
+            let _ = writeln!(
+                o,
+                "# HELP axon_draft_rounds_total Batched steps by their most guesses per request \
+                 (k=0: plain steps).\n# TYPE axon_draft_rounds_total counter"
+            );
+            for (k, r) in rounds.iter().enumerate() {
+                let _ = writeln!(o, "axon_draft_rounds_total{{k=\"{k}\"}} {r}");
+            }
+            counter(
+                &mut o,
+                "axon_draft_tokens_total",
+                "Draft-model guesses verified in batched steps.",
+                d.drafted.load(Ordering::Relaxed),
+            );
+            counter(
+                &mut o,
+                "axon_draft_accepted_total",
+                "Guesses kept (equal to the model's own pick).",
+                d.accepted.load(Ordering::Relaxed),
+            );
+            let _ = writeln!(
+                o,
+                "# HELP axon_draft_alpha The server's guess acceptance (EMA).\n\
+                 # TYPE axon_draft_alpha gauge\naxon_draft_alpha {}",
+                d.alpha_ppm.load(Ordering::Relaxed) as f64 / 1e6
+            );
+            counter(
+                &mut o,
+                "axon_draft_step_us_total",
+                "Time in draft-model steps, microseconds.",
+                d.draft_us.load(Ordering::Relaxed),
+            );
+            counter(
+                &mut o,
+                "axon_draft_verify_us_total",
+                "Time in the main model's verify steps of drafted rounds, microseconds.",
+                d.verify_us.load(Ordering::Relaxed),
+            );
+        }
         o
     }
 }
