@@ -20,11 +20,12 @@ fn bits(v: &[f32]) -> Vec<u32> {
     v.iter().map(|x| x.to_bits()).collect()
 }
 
-/// mla_attn of nb tokens at positions start.. over cache `kv` (f16 bits).
+/// mla_attn + mla_attn_cmb of nb tokens at positions start.. over cache
+/// `kv` (f16 bits).
 #[allow(clippy::too_many_arguments)]
 fn attn_gpu(
     g: &Gpu,
-    f: &Func,
+    ml: &Module,
     qa: &[f32],
     kv: &DevBuf,
     krow: usize,
@@ -33,37 +34,56 @@ fn attn_gpu(
     scale: f32,
     start: usize,
 ) -> Vec<f32> {
+    let (fa, fc) = (
+        ml.function("mla_attn").unwrap(),
+        ml.function("mla_attn_cmb").unwrap(),
+    );
     let nb = qa.len() / (n_h * krow);
+    let ns = (start + nb).div_ceil(MLA_SPLIT);
     let q = g.upload(qa).unwrap();
+    let part = g.alloc(nb * ns * n_h * (lat + 2) * 4).unwrap();
     let out = g.alloc(nb * n_h * lat * 4).unwrap();
     let hpb = n_h.min(8);
-    // SAFETY: mla_attn's signature; the cache holds start + nb rows.
+    let pos = [
+        Arg::Ptr(0),
+        Arg::I32(start as i32),
+        Arg::I32(MLA_SPLIT as i32),
+        Arg::I32(ns as i32),
+    ];
+    // SAFETY: the kernels' signatures; the cache holds start + nb rows,
+    // part nb x ns splits.
     unsafe {
+        let mut a = vec![
+            q.arg(),
+            kv.arg(),
+            Arg::I32(krow as i32),
+            Arg::I32(lat as i32),
+            Arg::I32(n_h as i32),
+            Arg::I32(hpb as i32),
+            Arg::F32(scale),
+        ];
+        a.extend(pos);
+        a.push(part.arg());
         g.launch(
-            f,
-            ((n_h / hpb) as u32, nb as u32, 1),
+            &fa,
+            ((n_h / hpb) as u32, nb as u32, ns as u32),
             (256, 1, 1),
             (MLA_TILE * krow * 2) as u32,
-            &[
-                q.arg(),
-                kv.arg(),
-                Arg::I32(krow as i32),
-                Arg::I32(lat as i32),
-                Arg::I32(n_h as i32),
-                Arg::I32(hpb as i32),
-                Arg::F32(scale),
-                Arg::Ptr(0),
-                Arg::I32(start as i32),
-                out.arg(),
-            ],
+            &a,
         )
         .unwrap();
+        let mut a = vec![part.arg(), Arg::I32(lat as i32), Arg::I32(n_h as i32)];
+        a.extend(pos);
+        a.push(out.arg());
+        g.launch(&fc, (n_h as u32, nb as u32, 1), (256, 1, 1), 0, &a)
+            .unwrap();
     }
     out.read().unwrap()
 }
 
-/// The attention on Moonlight's shapes (16 heads, row 576, latent 512),
-/// K2's (64 heads) and the fixture's (2, 80, 64): within 1e-5 of an f64
+/// The attention (its splits of MLA_SPLIT rows and their combine) on
+/// Moonlight's shapes (16 heads, row 576, latent 512), K2's (64 heads)
+/// and the fixture's (2, 80, 64), up to 3 splits: within 1e-5 of an f64
 /// softmax over the same f16 rows (|K| < 2, |q| < 1; an f32 numpy
 /// emulation of the same online softmax is off by 3.3e-7 at Moonlight's
 /// shape), and each token's output the same bits alone (decode) as in a
@@ -74,8 +94,7 @@ fn mla_attn_matches_reference_and_batch() {
         return;
     };
     let ml = Kernels::mla_module(&g).unwrap();
-    let f = ml.function("mla_attn").unwrap();
-    for (n_h, krow, lat, np) in [(16, 576, 512, 100), (2, 80, 64, 70), (64, 576, 512, 33)] {
+    for (n_h, krow, lat, np) in [(16, 576, 512, 300), (2, 80, 64, 70), (64, 576, 512, 140)] {
         let mut r = Rng(0x9e37_79b9_7f4a_7c15 ^ krow as u64);
         let k16: Vec<u16> = (0..np * krow)
             .map(|_| crate::quant::f32_to_f16(r.f() * 2.0))
@@ -84,15 +103,15 @@ fn mla_attn_matches_reference_and_batch() {
         let kv = g.upload(&k16).unwrap();
         let qa: Vec<f32> = (0..np * n_h * krow).map(|_| r.f()).collect();
         let scale = 1.0 / (192f32).sqrt();
-        let all = attn_gpu(&g, &f, &qa, &kv, krow, lat, n_h, scale, 0);
+        let all = attn_gpu(&g, &ml, &qa, &kv, krow, lat, n_h, scale, 0);
         let w = n_h * krow;
-        for p in [0, 1, 31, 32, 33, np / 2, np - 1]
+        for p in [0, 1, 31, 32, 33, 127, 128, 129, np / 2, np - 1]
             .into_iter()
             .filter(|&p| p < np)
         {
             let one = attn_gpu(
                 &g,
-                &f,
+                &ml,
                 &qa[p * w..(p + 1) * w],
                 &kv,
                 krow,

@@ -37,6 +37,15 @@ use crate::model::{Ds2GpuCfg, MoeDims};
 /// mla.cu MLA_TILE (rows per attention tile) and MLA_MV_T (tokens per
 /// warp of mla_heads_mv).
 const MLA_TILE: usize = 32;
+/// Rows per attention split (a multiple of MLA_TILE): a token at position
+/// p has ceil((p + 1) / MLA_SPLIT) splits run in parallel, then combined.
+/// Fixed: the split points are part of a token's bits.
+const MLA_SPLIT: usize = 128;
+/// mla.cu MLA_MAX_SPLITS: the longest cache is MLA_SPLIT x this.
+const MLA_MAX_SPLITS: usize = 2048;
+/// VRAM for the attention's split partials: a batched pass runs its
+/// attention in chunks of tokens whose partials fit.
+const MLA_PART_BUDGET: usize = 64 << 20;
 const MLA_MV_T: usize = 8;
 /// mla.cu MLA_MAXI: krow <= 64 * MLA_MAXI.
 const MLA_MAX_KROW: usize = 576;
@@ -253,6 +262,7 @@ pub(crate) struct MlaFns<'m> {
     qrope: Func<'m>,
     heads_mv: Func<'m>,
     attn: Func<'m>,
+    attn_cmb: Func<'m>,
     topk: Func<'m>,
     logits: Func<'m>,
     add: Func<'m>,
@@ -269,6 +279,7 @@ impl<'m> MlaFns<'m> {
             qrope: mla.function("mla_qrope")?,
             heads_mv: mla.function("mla_heads_mv")?,
             attn: mla.function("mla_attn")?,
+            attn_cmb: mla.function("mla_attn_cmb")?,
             topk: mla.function("mla_topk")?,
             logits: mla.function("moe_logits")?,
             add: mla.function("moe_add")?,
@@ -297,6 +308,11 @@ pub struct MlaBufs<'g> {
     gate: DevBuf<'g>,
     up: DevBuf<'g>,
     rope: DevBuf<'g>,
+    /// The attention's split partials: `att_chunk` tokens x `ns` splits x
+    /// n_h heads x (m, l, acc[lat]).
+    part: DevBuf<'g>,
+    ns: usize,
+    att_chunk: usize,
     r: DevBuf<'g>,
     lg: DevBuf<'g>,
     y: DevBuf<'g>,
@@ -334,6 +350,16 @@ fn f32s(b: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+/// The attention partials' splits for a cache of max_ctx, tokens per
+/// attention launch of a pass of up to `max`, and their bytes.
+fn part_shape(ml: &MlaNet, max: usize, max_ctx: usize) -> (usize, usize, usize) {
+    let d = &ml.cfg.d;
+    let ns = max_ctx.div_ceil(MLA_SPLIT).max(1);
+    let per = ns * d.n_heads * (d.lat + 2) * 4;
+    let chunk = (MLA_PART_BUDGET / per).clamp(1, max.max(1));
+    (ns, chunk, chunk * per)
+}
+
 /// Per-token floats of the scratch (`mla_bufs`), and the activations'
 /// stride.
 fn per_token(ml: &MlaNet, dim: usize, k: usize, n_e: usize) -> (usize, usize) {
@@ -361,17 +387,26 @@ impl<'g> CudaQwen2<'g> {
         self.moe.expect("a deepseek2 model's experts")
     }
 
-    /// VRAM (and pinned RAM) of `mla_bufs(max)`; 0 without MLA layers.
-    pub(super) fn mla_scratch_bytes(&self, max: usize) -> usize {
+    /// VRAM (and pinned RAM) of `mla_bufs(max, max_ctx)`; 0 without MLA
+    /// layers.
+    pub(super) fn mla_scratch_bytes(&self, max: usize, max_ctx: usize) -> usize {
         let Some(ml) = &self.mla else { return 0 };
         let e = self.moe_dims();
         let (f, ast) = per_token(ml, self.dim, e.k, e.n_expert);
-        max * (4 * f + ast) + 16 * 256
+        max * (4 * f + ast) + part_shape(ml, max, max_ctx).2 + 16 * 256
     }
 
-    /// Scratch for passes of up to `max` tokens (the cache's batch max).
-    pub(crate) fn mla_bufs(&self, max: usize) -> Result<MlaBufs<'g>, String> {
+    /// Scratch for passes of up to `max` tokens (the cache's batch max) of
+    /// a cache of `max_ctx` positions.
+    pub(crate) fn mla_bufs(&self, max: usize, max_ctx: usize) -> Result<MlaBufs<'g>, String> {
         let ml = self.ml();
+        if max_ctx > MLA_SPLIT * MLA_MAX_SPLITS {
+            return Err(format!(
+                "deepseek2 on the GPU: at most {} positions (asked {max_ctx})",
+                MLA_SPLIT * MLA_MAX_SPLITS
+            ));
+        }
+        let (ns, att_chunk, pb) = part_shape(ml, max, max_ctx);
         let d = &ml.cfg.d;
         let e = self.moe_dims();
         let g = self.gpu;
@@ -392,6 +427,9 @@ impl<'g> CudaQwen2<'g> {
             gate: g.alloc(max * ml.ffn_max * f)?,
             up: g.alloc(max * ml.ffn_max * f)?,
             rope: g.alloc(max * d.rope / 2 * 8)?,
+            part: g.alloc(pb)?,
+            ns,
+            att_chunk,
             r: g.alloc(rb)?,
             lg: g.alloc(max * e.n_expert * f)?,
             y: g.alloc(yb)?,
@@ -658,25 +696,55 @@ impl<'g> CudaQwen2<'g> {
                 )
             };
             heads(&l.wk_b, d.lat, mb.q.arg(), d.hk(), mb.qa.arg(), kr)?;
+            // The attention in chunks of tokens whose split partials fit
+            // (decode: one token, its splits from P's position: the
+            // cache's most splits launched, those past it return).
             let hpb = ml.hpb();
-            g.launch(
-                &mf.attn,
-                ((nh / hpb) as u32, nbu, 1),
-                (256, 1, 1),
-                (MLA_TILE * kr * 2) as u32,
-                &[
-                    mb.qa.arg(),
+            let decode = !matches!(p, Arg::Ptr(0));
+            assert!(!decode || nb == 1, "a step decodes one token");
+            for z0 in (0..nb).step_by(mb.att_chunk) {
+                let nz = (nb - z0).min(mb.att_chunk);
+                let s0 = start + z0;
+                let ns = match decode {
+                    true => mb.ns,
+                    false => (s0 + nz).div_ceil(MLA_SPLIT),
+                };
+                assert!(ns <= mb.ns, "positions past the cache's splits");
+                let pos = [
+                    p,
+                    Arg::I32(s0 as i32),
+                    Arg::I32(MLA_SPLIT as i32),
+                    Arg::I32(mb.ns as i32),
+                ];
+                let mut args = vec![
+                    mb.qa.arg_at(z0 * nh * kr * 4),
                     kv,
                     Arg::I32(kr as i32),
                     Arg::I32(d.lat as i32),
                     Arg::I32(nh as i32),
                     Arg::I32(hpb as i32),
                     Arg::F32(d.kq_scale),
-                    p,
-                    Arg::I32(start as i32),
-                    mb.att.arg(),
-                ],
-            )?;
+                ];
+                args.extend(pos);
+                args.push(mb.part.arg());
+                g.launch(
+                    &mf.attn,
+                    ((nh / hpb) as u32, nz as u32, ns as u32),
+                    (256, 1, 1),
+                    (MLA_TILE * kr * 2) as u32,
+                    &args,
+                )?;
+                let mut args = vec![mb.part.arg(), Arg::I32(d.lat as i32), Arg::I32(nh as i32)];
+                args.extend(pos);
+                args.push(mb.att.arg_at(z0 * nh * d.lat * 4));
+                g.launch(
+                    &mf.attn_cmb,
+                    (nh as u32, nz as u32, 1),
+                    (256, 1, 1),
+                    0,
+                    &args,
+                )?;
+            }
             heads(&l.wv_b, d.hv, mb.att.arg(), d.lat, mb.v.arg(), d.hv)?;
             self.mla_quant(mf, mb, mb.v.arg(), nh * d.hv, nb)?;
             self.mla_mm(mb, &l.wo, nb, null, 1, x, dim)?;

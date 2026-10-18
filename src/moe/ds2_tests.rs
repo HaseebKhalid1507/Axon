@@ -126,7 +126,7 @@ fn bits_on(net: &mut MoeQwen3, ids: &[u32], splits: &[usize], what: &str) {
 }
 
 /// Spec r12 stage 1 gate (b) on the fixture: 60 positions (two attention
-/// tiles), every option.
+/// tiles; 150 with YaRN: two splits), every option.
 #[test]
 fn ds2_gpu_fixture_bits() {
     let Some(g) = crate::testutil::gpu() else {
@@ -136,8 +136,10 @@ fn ds2_gpu_fixture_bits() {
     let ml = Kernels::mla_module(&g).unwrap();
     for o in OPTS {
         let (m, _) = ds2_fixture(o, crate::quant::Q8_0);
-        let mut net = ds2_net(&g, &km, &ml, &m, 64);
-        let ids = ids_for(60, net.vocab(), 3);
+        // YaRN's 256-position fixture: past an attention split (128 rows).
+        let n = if o.yarn { 150 } else { 60 };
+        let mut net = ds2_net(&g, &km, &ml, &m, n + 1);
+        let ids = ids_for(n, net.vocab(), 3);
         bits_on(
             &mut net,
             &ids,

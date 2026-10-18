@@ -1777,7 +1777,7 @@ impl<'g> CudaQwen2<'g> {
             + 64
             + host_x
             + self.batch_bytes(self.batch_for(max_ctx), max_ctx)
-            + self.mla_scratch_bytes(self.batch_for(max_ctx))
+            + self.mla_scratch_bytes(self.batch_for(max_ctx), max_ctx)
     }
 
     /// A cache for positions 0..max_ctx, or why there's no room for it.

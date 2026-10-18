@@ -228,10 +228,11 @@ impl<'g> Lm for MoeQwen3<'_, 'g> {
     fn new_cache(&self, max_ctx: usize) -> MoeCache<'g> {
         let c = Lm::new_cache(&self.gpu, max_ctx);
         let max = CudaQwen2::batch_max(&c);
-        let xb = self
-            .xf
-            .as_ref()
-            .map(|_| self.gpu.mla_bufs(max).unwrap_or_else(|e| Self::die(e)));
+        let xb = self.xf.as_ref().map(|_| {
+            self.gpu
+                .mla_bufs(max, max_ctx)
+                .unwrap_or_else(|e| Self::die(e))
+        });
         let mb = self
             .gpu
             .moe_bufs(if xb.is_some() { 1 } else { max })

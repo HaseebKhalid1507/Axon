@@ -137,29 +137,36 @@ mla_heads_mv(int qt, const u8* __restrict__ w, u64 rb, int rph, int cols, int n_
 }
 
 // The attention of nb tokens' absorbed queries over their cache rows 0..np
-// (np = pos0 + z + 1): o_h = softmax(Q_h . K_t * scale) . K_t[..lat].
-// Grid (n_h / hpb, nb), MLA_THREADS threads; hpb heads per block (a power
-// of two <= 8 dividing n_h). Rows in tiles of MLA_TILE from row 0, the
-// tile's K rows in shared memory (f16), an online softmax per head across
-// tiles in order. Warp w scores head w of the block (lane l: columns 2l,
-// 2l + 1, 2l + 64, ..: one fma chain per row, then the xor tree), keeps the
-// head's max m, sum l and the tile's p_t (= exp(s_t - m_new)); thread t
-// then rescales and accumulates head t / tph's columns 2 (t % tph) +
-// 2 tph j (+1) over the tile's rows in order. The ops of a (token, head)
-// depend on np only: the same in decode and in any batch.
+// (np = pos0 + z + 1): o_h = softmax(Q_h . K_t * scale) . K_t[..lat], in
+// splits of `split` rows (a multiple of MLA_TILE) from row 0: split sp of a
+// token covers rows sp * split .. min(np, (sp + 1) * split), so a token has
+// ceil(np / split) of them, whatever its batch.
+// Grid (n_h / hpb, nb, max splits), MLA_THREADS threads; hpb heads per block
+// (a power of two <= 8 dividing n_h); a block past its token's last split
+// does nothing. Rows in tiles of MLA_TILE, the tile's K rows in shared
+// memory (f16), an online softmax per head across the split's tiles in
+// order. Warp w scores head w of the block (lane l: columns 2l, 2l + 1,
+// 2l + 64, ..: one fma chain per row, then the xor tree), keeps the head's
+// max m, sum l and the tile's p_t (= exp(s_t - m_new)); thread t then
+// rescales and accumulates head t / tph's columns 2 (t % tph) + 2 tph j
+// (+1) over the tile's rows in order. Out: the split's (m, l, acc[lat])
+// per head at part[((z * ns + sp) * n_h + h) * (lat + 2)] (mla_attn_cmb
+// combines them). The ops of a (token, head) depend on np only.
 #define MLA_TILE 32
 #define MLA_MAXI 9   // krow <= 576: 64-column steps of the score
 #define MLA_MAXC 16  // lat <= 512 at tph 32: column pairs per thread
 extern "C" __global__ void __launch_bounds__(MLA_THREADS)
 mla_attn(const float* __restrict__ qa, const unsigned short* __restrict__ kv, int krow, int lat,
-         int n_h, int hpb, float scale, const u32* __restrict__ P, int start,
-         float* __restrict__ att) {
+         int n_h, int hpb, float scale, const u32* __restrict__ P, int start, int split, int ns,
+         float* __restrict__ part) {
     extern __shared__ unsigned short ks[];  // [MLA_TILE][krow]
     __shared__ float ps[8][MLA_TILE];
     __shared__ float ms[8], ls[8], al[8];
     int t = threadIdx.x, lane = t & 31, w = t >> 5;
-    int z = blockIdx.y, h0 = blockIdx.x * hpb;
+    int z = blockIdx.y, h0 = blockIdx.x * hpb, sp = blockIdx.z;
     int np = mla_pos0(P, start) + z + 1;
+    int rb = sp * split, re = min(np, rb + split);
+    if (rb >= np) return;
     int tph = MLA_THREADS / hpb;
     // The score warp's query (head h0 + w, if w < hpb): column pairs.
     float2 qr[MLA_MAXI];
@@ -182,8 +189,8 @@ mla_attn(const float* __restrict__ qa, const unsigned short* __restrict__ kv, in
 #pragma unroll
     for (int j = 0; j < MLA_MAXC; j++) acc[j] = make_float2(0.0f, 0.0f);
     int kw = krow >> 1;  // u32 words per row
-    for (int r0 = 0; r0 < np; r0 += MLA_TILE) {
-        int nr = min(MLA_TILE, np - r0);
+    for (int r0 = rb; r0 < re; r0 += MLA_TILE) {
+        int nr = min(MLA_TILE, re - r0);
         __syncthreads();
         const unsigned* src = (const unsigned*)(kv + (u64)r0 * krow);
         for (int i = t; i < nr * kw; i += MLA_THREADS) ((unsigned*)ks)[i] = src[i];
@@ -245,16 +252,47 @@ mla_attn(const float* __restrict__ qa, const unsigned short* __restrict__ kv, in
     }
     __syncthreads();
     if (ah < hpb) {
-        float l = ls[ah];
-        float* o = att + ((u64)z * n_h + h0 + ah) * lat;
+        float* o = part + (((u64)z * ns + sp) * n_h + h0 + ah) * (lat + 2);
+        if (t % tph == 0) {
+            o[0] = ms[ah];
+            o[1] = ls[ah];
+        }
 #pragma unroll
         for (int j = 0; j < MLA_MAXC; j++) {
             int c = ac + 2 * tph * j;
             if (c < lat) {
-                o[c] = __fdiv_rn(acc[j].x, l);
-                o[c + 1] = __fdiv_rn(acc[j].y, l);
+                o[2 + c] = acc[j].x;
+                o[2 + c + 1] = acc[j].y;
             }
         }
+    }
+}
+
+// mla_attn's splits of each (token, head) combined (grid (n_h, nb),
+// MLA_THREADS): M = max m_sp, w_sp = exp(m_sp - M), L = sum l_sp w_sp and
+// out[c] = (sum acc_sp[c] w_sp) / L, both fma chains over sp ascending. One
+// split: w = 1, L = l, out = acc / l exactly. At most MLA_MAX_SPLITS splits.
+#define MLA_MAX_SPLITS 2048
+extern "C" __global__ void __launch_bounds__(MLA_THREADS)
+mla_attn_cmb(const float* __restrict__ part, int lat, int n_h, const u32* __restrict__ P,
+             int start, int split, int ns, float* __restrict__ att) {
+    __shared__ float wsh[MLA_MAX_SPLITS];
+    int h = blockIdx.x, z = blockIdx.y, t = threadIdx.x;
+    int np = mla_pos0(P, start) + z + 1;
+    int n = (np + split - 1) / split;
+    const float* pz = part + ((u64)z * ns * n_h + h) * (lat + 2);
+    u64 st = (u64)n_h * (lat + 2);
+    float mx = __int_as_float(0xff800000);
+    for (int sp = 0; sp < n; sp++) mx = fmaxf(mx, pz[sp * st]);
+    for (int sp = t; sp < n; sp += MLA_THREADS) wsh[sp] = expf(__fsub_rn(pz[sp * st], mx));
+    __syncthreads();
+    float l = 0.0f;
+    for (int sp = 0; sp < n; sp++) l = __fmaf_rn(pz[sp * st + 1], wsh[sp], l);
+    float* o = att + ((u64)z * n_h + h) * lat;
+    for (int c = t; c < lat; c += MLA_THREADS) {
+        float v = 0.0f;
+        for (int sp = 0; sp < n; sp++) v = __fmaf_rn(pz[sp * st + 2 + c], wsh[sp], v);
+        o[c] = __fdiv_rn(v, l);
     }
 }
 
