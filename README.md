@@ -1,7 +1,8 @@
 # Axon
 
 LLM inference for Qwen2, Qwen3, Llama 3 and Gemma 3 GGUF models on the CPU and on NVIDIA
-GPUs, written from scratch in Rust.
+GPUs, plus Qwen3 MoE (Qwen3-30B-A3B's architecture) and gpt-oss-20b (CPU only for now), written
+from scratch in Rust.
 
 **Mission: make LLM inference cheap and fast, and run the best open models.** Cheap means wasting no
 hardware, from a laptop to a datacenter: the most tokens per GPU, per watt and per dollar. Fast means as close
@@ -14,7 +15,7 @@ No ggml, no BLAS, no binding crates, no CUDA toolkit at build time: a GGUF reade
 quantized integer dot-product kernels (scalar, AVX2, AVX-VNNI), a spinning worker
 pool and a transformer forward pass on the CPU; on the GPU, CUDA C++ kernels that
 NVRTC compiles at run time, launched through the driver API (both libraries loaded
-with dlopen). About 67k lines of Rust and 6.5k of CUDA, tests included.
+with dlopen). About 76k lines of Rust and 7k of CUDA, tests included.
 
 Every optimized path is **bit-identical** to the plain reference path on its
 device: batched prefill produces exactly the logits that feeding one token at a
@@ -115,13 +116,14 @@ Works today, honestly scoped:
 - Serving: `axon serve`, an OpenAI-compatible HTTP server (below) with tool calling. On one GPU it
   batches the decode steps of concurrent requests (`--parallel N`) and feeds new prompts in chunks
   between them, every slot one KV cache (no extra cache for a request running alone); elsewhere it
-  runs one request at a time. Operations: `--api-key`, `GET /metrics` (Prometheus), `GET /slots`,
-  `--max-prompt-tokens`, `--slot-idle-ms`.
+  runs one request at a time. Besides chat completions it speaks OpenAI's Responses API (what codex
+  uses) and ollama's native API ([docs/serve-apis.md](docs/serve-apis.md)). Operations: `--api-key`,
+  `GET /metrics` (Prometheus), `GET /slots`, `--max-prompt-tokens`, `--slot-idle-ms`.
 - Rust 1.89 or newer.
 
 Not on main yet: tensor parallel, paged KV in `serve` (the kernels read through a page table; the pool
-doesn't use it yet), saving and restoring `serve` slots, the `/v1/responses` and ollama-native APIs,
-and the MoE paths on the GPU (#67). What's in flight and why: [docs/roadmap.md](docs/roadmap.md). How Axon is built and measured, and
+doesn't use it yet), saving and restoring `serve` slots, streaming MoE experts through the GPU for long
+prompts (stage 3), and gpt-oss on the GPU. What's in flight and why: [docs/roadmap.md](docs/roadmap.md). How Axon is built and measured, and
 what was tried and dropped: [docs/methodology.md](docs/methodology.md),
 [docs/history.md](docs/history.md), [docs/experiments-rejected.md](docs/experiments-rejected.md).
 
@@ -653,6 +655,7 @@ The GPU, after that:
 - [docs/history.md](docs/history.md): the engineering log, round by round, with before/after numbers
 - [docs/experiments-rejected.md](docs/experiments-rejected.md): what was tried and didn't work, with numbers
 - [docs/results.md](docs/results.md): current standing vs ollama and llama.cpp, with dates and commits
+- [docs/testing.md](docs/testing.md): how the test suite is built, the fast and full tiers, what to run when
 - [docs/research/](docs/research/README.md): research reports behind the roadmap
 - [docs/log/](docs/log/README.md): one entry per PR (the convention for new work)
 - [docs/long-context.md](docs/long-context.md): YaRN (`--rope-scaling yarn`) past the trained
