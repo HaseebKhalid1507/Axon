@@ -157,6 +157,7 @@ As of main `a591e17` (2026-10-16). Each item is a branch or an open PR:
 - [design/hopper.md](design/hopper.md): why the H100 trails on prefill, and the wgmma plan.
 - [roadmap.md](roadmap.md): priorities, and what is not planned.
 - [methodology.md](methodology.md): how work is picked, built, reviewed, gated and benchmarked.
+- [hardening.md](hardening.md): fuzzers, the multi-hour serve soak and the model-zoo sweep: method and results.
 - [history.md](history.md): every round and PR, with why, how it was verified, and before/after numbers.
 - [experiments-rejected.md](experiments-rejected.md): NO-GOs and regressions, with numbers. Read before starting a round.
 - [results.md](results.md): current standing vs ollama and llama.cpp, with dates, commits and hosts.
