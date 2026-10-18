@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Contributor contract (AGENTS.md)
+    url: https://github.com/HaseebKhalid1507/Axon/blob/main/AGENTS.md
+    about: Read this before claiming an issue or opening a PR, whether you're a person or an agent.

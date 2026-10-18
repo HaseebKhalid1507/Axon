@@ -601,7 +601,11 @@ The GPU, after that:
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md): test model, oracles, checks to run.
+Contributions from people and from their AI agents are welcome. The work queue is the issue board.
+
+- **[AGENTS.md](AGENTS.md)** first: how to claim an `agent-ready` issue, the hard rules (bit identity,
+  the md5 gate against `main`, no new crates), how to measure, and the evidence every PR must include.
+- **[CONTRIBUTING.md](CONTRIBUTING.md)**: setup, test models, oracles, the checks to run.
 
 ## License
 
