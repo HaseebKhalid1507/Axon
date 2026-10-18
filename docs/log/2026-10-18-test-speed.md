@@ -65,7 +65,7 @@ the slot is freed are unchanged. No timeout was raised.
 | clippy -D warnings (bin + tests), rustfmt | clean on 0e3f4cb; clippy also clean on the merge with main cf8dee4 | local |
 | slot-idle x20 in a CPU-loaded slice (pod2, 8 pool threads, 4 test threads, + 5 CPU-heavy tests), main / branch | 0/20 failed / 0/20 failed | 1018-021925-f066 / 1018-021949-7daa |
 | slot-idle stress x10, 1 pool thread + 64 spinning threads (pod3 9ec6dd14dd25), main / branch | **10/10 failed "never filled"** / **0/10 failed** (freed 0.50-1.70 s after the fill, bound 2.8 s) | 1018-031600-534b / 1018-032125-50cf |
-| slot-idle stress x10, 8 pool threads + 64 spinning threads (pod3), main / branch | 10/10 failed "never filled" / pending | 1018-030316-d4af / 1018-044914-c136 |
+| slot-idle stress x10, 8 pool threads + 64 spinning threads (pod3), main / branch | 10/10 failed "never filled" / **10/10 failed**: the window detection now works, but the slot was freed 4.00-4.20 s after the fill in 8 runs and 7.8-7.9 s in 2, past the test's 2.8 s bound | 1018-030316-d4af / 1018-044914-c136 |
 
 The stress runs link `stress.o`, a measurement-only constructor: AXON_REPEAT=N runs the test binary N times,
 and AXON_HOG=K starts K spinning threads in each run, which gives a loaded host on demand. Under that load main
@@ -75,8 +75,14 @@ test needs 2 more tokens). An idle host steps far faster than that (0.5B CPU dec
 debug). So main passes there, and in a packed suite it only fails when other tests' CPU forwards (one shared
 pool) and the pod's neighbours slow the engine enough: once in main's debug suite (1018-014631-dd84), 0 of 20
 in the milder slice above. GitHub CI never runs it at all (`AXON_SKIP_MODEL_TESTS=1`). Debug assertions matter
-only in that they make each step slower. With the branch, the stressed runs all pass, inside the unchanged
-timing bound.
+only in that they make each step slower. With the branch, the 1-pool-thread stress passes 10/10 inside the
+unchanged timing bound.
+
+**Update 2026-10-18 (after merge):** the fix covers the 1-pool-thread stress but NOT the 8-pool-thread one. Under 8
+pool threads plus 64 spinning threads the branch also fails 10/10 (1018-044914-c136). It no longer fails on "never
+filled". It fails on the freeing bound instead: freed 4.00-4.20 s after the window filled (8 runs) and 7.8-7.9 s
+(2 runs), against 2.8 s. So #80 made nothing worse (main fails 10/10 there too, earlier in the test), but the test
+isn't green under that stress. The follow-up investigates the ~4.1 s.
 
 ## Results
 Release suite, exclusive 4090 pod3 (same host for both), `--test-threads 1`, MEASURED:
