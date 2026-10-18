@@ -1300,7 +1300,9 @@ impl<'g> CudaQwen2<'g> {
         let q_dim = n_heads * head_dim;
         let eps = meta(m, "attention.layer_norm_rms_epsilon").unwrap_or(1e-6) as f32;
         let freq = crate::model::rope_freqs(m, head_dim);
-        let rope_m = mla_d.as_ref().map_or_else(|| crate::rope::mscale(m), |c| c.d.rope_m);
+        let rope_m = mla_d
+            .as_ref()
+            .map_or_else(|| crate::rope::mscale(m), |c| c.d.rope_m);
         let trained = meta(m, "context_length").unwrap_or(32768.0);
         let group = n_heads / n_kv_heads;
         if mla_d.is_none() {

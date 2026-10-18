@@ -12,7 +12,7 @@ impl Rng {
         self.0 ^= self.0 << 13;
         self.0 ^= self.0 >> 7;
         self.0 ^= self.0 << 17;
-        (self.0 >> 40) as f32 / (1u64 << 23) as f32 * 2.0 - 1.0
+        (self.0 >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0
     }
 }
 
@@ -62,10 +62,12 @@ fn attn_gpu(
     out.read().unwrap()
 }
 
-/// The attention on Moonlight's shapes (16 heads, row 576, latent 512)
-/// and the fixture's (2, 80, 64): within 2e-5 relative of an f64
-/// softmax over the same f16 rows, and each token's output the same bits
-/// alone (decode) as in a batch.
+/// The attention on Moonlight's shapes (16 heads, row 576, latent 512),
+/// K2's (64 heads) and the fixture's (2, 80, 64): within 1e-5 of an f64
+/// softmax over the same f16 rows (|K| < 2, |q| < 1; an f32 numpy
+/// emulation of the same online softmax is off by 3.3e-7 at Moonlight's
+/// shape), and each token's output the same bits alone (decode) as in a
+/// batch.
 #[test]
 fn mla_attn_matches_reference_and_batch() {
     let Some(g) = crate::testutil::gpu() else {
@@ -85,7 +87,17 @@ fn mla_attn_matches_reference_and_batch() {
         let all = attn_gpu(&g, &f, &qa, &kv, krow, lat, n_h, scale, 0);
         let w = n_h * krow;
         for p in [0, 1, 31, 32, 33, np / 2, np - 1] {
-            let one = attn_gpu(&g, &f, &qa[p * w..(p + 1) * w], &kv, krow, lat, n_h, scale, p);
+            let one = attn_gpu(
+                &g,
+                &f,
+                &qa[p * w..(p + 1) * w],
+                &kv,
+                krow,
+                lat,
+                n_h,
+                scale,
+                p,
+            );
             let o = n_h * lat;
             assert_eq!(
                 bits(&one),
@@ -97,7 +109,10 @@ fn mla_attn_matches_reference_and_batch() {
                 let s: Vec<f64> = (0..=p)
                     .map(|t| {
                         let kr = &kf[t * krow..(t + 1) * krow];
-                        q.iter().zip(kr).map(|(&a, &b)| a as f64 * b as f64).sum::<f64>()
+                        q.iter()
+                            .zip(kr)
+                            .map(|(&a, &b)| a as f64 * b as f64)
+                            .sum::<f64>()
                             * scale as f64
                     })
                     .collect();
@@ -109,7 +124,7 @@ fn mla_attn_matches_reference_and_batch() {
                         (0..=p).map(|t| e[t] * kf[t * krow + c] as f64).sum::<f64>() / z;
                     let got = one[h * lat + c] as f64;
                     assert!(
-                        (got - want).abs() <= 2e-5 * (1.0 + want.abs()),
+                        (got - want).abs() <= 1e-5,
                         "({n_h}, {krow}) pos {p} head {h} col {c}: {got} vs {want}"
                     );
                 }
@@ -128,7 +143,9 @@ fn random_blocks(r: &mut Rng, qt: u32, n: usize) -> Vec<u8> {
         Q4_K => (256, 144, &[0, 2]),
         _ => unimplemented!("random_blocks: type {qt}"),
     };
-    let mut b: Vec<u8> = (0..n / bs * bb).map(|_| (r.f() * 128.0 + 128.0) as u8).collect();
+    let mut b: Vec<u8> = (0..n / bs * bb)
+        .map(|_| (r.f() * 128.0 + 128.0) as u8)
+        .collect();
     for blk in b.chunks_exact_mut(bb) {
         for &o in scales {
             let h = crate::quant::f32_to_f16(0.01 + 0.02 * r.f().abs());
@@ -215,7 +232,9 @@ fn mla_heads_mv_matches_dequant() {
 
 /// mla_topk against the CPU router's rule (moe.rs `route` with a `Gate`):
 /// sigmoid + bias selection, unbiased weights renormalized then scaled;
-/// softmax without bias; the same ids and weights within 1 ulp-ish.
+/// softmax without bias. Selection on f32 values as the kernel's (ties,
+/// which a saturated sigmoid makes, to the lower index, as `route`); the
+/// same ids, weights within 1e-6 of f64.
 #[test]
 fn mla_topk_matches_cpu_rule() {
     let Some(g) = crate::testutil::gpu() else {
@@ -227,7 +246,11 @@ fn mla_topk_matches_cpu_rule() {
     let mut r = Rng(5);
     let lg: Vec<f32> = (0..nb * n_e).map(|_| 4.0 * r.f()).collect();
     let bias: Vec<f32> = (0..n_e).map(|_| 0.3 * r.f()).collect();
-    for (sigm, use_bias, norm, scale) in [(1, true, 1, 2.446f32), (0, false, 1, 1.0), (1, false, 0, 2.5)] {
+    for (sigm, use_bias, norm, scale) in [
+        (1, true, 1, 2.446f32),
+        (0, false, 1, 1.0),
+        (1, false, 0, 2.5),
+    ] {
         let lgd = g.upload(&lg).unwrap();
         let bd = g.upload(&bias).unwrap();
         let ids = g.alloc(nb * k * 4).unwrap();
@@ -265,8 +288,16 @@ fn mla_topk_matches_cpu_rule() {
                 let s: f64 = e.iter().sum();
                 e.iter().map(|v| v / s).collect()
             };
-            let sel: Vec<f64> = (0..n_e)
-                .map(|e| p[e] + if use_bias { bias[e] as f64 } else { 0.0 })
+            // The kernel's f32 selection values (sigmoid: its ops).
+            let sel: Vec<f32> = (0..n_e)
+                .map(|e| {
+                    let pf = if sigm == 1 {
+                        1.0 / (1.0 + (-l[e]).exp())
+                    } else {
+                        p[e] as f32
+                    };
+                    pf + if use_bias { bias[e] } else { 0.0 }
+                })
                 .collect();
             let mut order: Vec<usize> = (0..n_e).collect();
             order.sort_by(|&a, &b| sel[b].partial_cmp(&sel[a]).unwrap().then(a.cmp(&b)));
@@ -276,7 +307,10 @@ fn mla_topk_matches_cpu_rule() {
                 assert_eq!(gi[z * k + i] as usize, e, "token {z} rank {i}");
                 let want = p[e] / if norm == 1 { s } else { 1.0 } * scale as f64;
                 let got = gw[z * k + i] as f64;
-                assert!((got - want).abs() <= 1e-6 * want.abs().max(1.0), "{got} vs {want}");
+                assert!(
+                    (got - want).abs() <= 1e-6 * want.abs().max(1.0),
+                    "{got} vs {want}"
+                );
             }
         }
     }

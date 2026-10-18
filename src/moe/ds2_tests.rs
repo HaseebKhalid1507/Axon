@@ -136,7 +136,12 @@ fn ds2_gpu_fixture_bits() {
         let (m, _) = ds2_fixture(o, crate::quant::Q8_0);
         let mut net = ds2_net(&g, &km, &ml, &m, 64);
         let ids = ids_for(60, net.vocab(), 3);
-        bits_on(&mut net, &ids, &[1, 2, 3, 5, 8, 13, 17, 11], &format!("{o:?}"));
+        bits_on(
+            &mut net,
+            &ids,
+            &[1, 2, 3, 5, 8, 13, 17, 11],
+            &format!("{o:?}"),
+        );
     }
 }
 
@@ -153,9 +158,11 @@ fn ds2_gpu_fixture_graded() {
     let km = Kernels::module(&g).unwrap();
     let ml = Kernels::mla_module(&g).unwrap();
     for o in OPTS {
+        // Two copies: each model releases what it repacks.
         let (m, _) = ds2_fixture(o, crate::quant::Q8_0);
-        let cpu = Qwen2::new(&m);
+        let (mc, _) = ds2_fixture(o, crate::quant::Q8_0);
         let net = ds2_net(&g, &km, &ml, &m, 64);
+        let cpu = Qwen2::new(&mc);
         let mut a = Agree::default();
         for seed in 0..6 {
             let ids = ids_for(9, net.vocab(), 11 * seed + 1);
@@ -193,7 +200,7 @@ fn ds2_gpu_moonlight_bits() {
     bits_on(&mut net, &ids, &[1, 7, 64, 3, 100], "moonlight");
     let l = net.prefill_logits(&ids[..20], 0, &mut net.new_cache(32));
     let top = crate::argmax(&l);
-    eprintln!("moonlight gpu: next token {top} {:?}", tok.decode(&[top as u32]));
+    eprintln!("moonlight gpu: next token {top} {:?}", tok.decode(&[top]));
 
     use crate::chat::Chat;
     let sys = crate::chat::template_default_system(&m);

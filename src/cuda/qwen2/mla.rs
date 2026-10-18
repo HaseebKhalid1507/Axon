@@ -31,6 +31,7 @@
 
 use super::batch::{BatchIn, act_stride, passes};
 use super::*;
+use crate::cuda::SyncEvent;
 use crate::model::{Ds2GpuCfg, MoeDims};
 
 /// mla.cu MLA_TILE (rows per attention tile) and MLA_MV_T (tokens per
@@ -301,8 +302,11 @@ pub struct MlaBufs<'g> {
     y: DevBuf<'g>,
     host_r: HostBuf<'g>,
     host_y: HostBuf<'g>,
-    /// Per segment (`n_layers + 1`): its captured decode graph.
+    /// Per segment (`n_layers + 1`): its captured decode graph, then per
+    /// layer its shared experts' (`n_layers`).
     graphs: Vec<Option<Graph<'g>>>,
+    /// Recorded after the router's copy down (`mla_round_trip`).
+    ev: SyncEvent<'g>,
     /// The cache's `graph_gen` when `graphs` were captured.
     graph_gen: u64,
 }
@@ -393,8 +397,9 @@ impl<'g> CudaQwen2<'g> {
             y: g.alloc(yb)?,
             host_r: g.host_alloc(rb)?,
             host_y: g.host_alloc(yb)?,
-            graphs: (0..=self.n_layers).map(|_| None).collect(),
+            graphs: (0..=2 * self.n_layers).map(|_| None).collect(),
             graph_gen: 0,
+            ev: g.new_event()?,
         })
     }
 
@@ -714,11 +719,36 @@ impl<'g> CudaQwen2<'g> {
                             mb.r.arg_at(hb + nb * k * 4),
                         ],
                     )?;
-                    if let Some((sg, su, sd)) = shared {
-                        self.mla_ffn(mf, mb, x, l.ffn_norm, (sg, su, sd), nb)?;
-                    }
+                    let _ = shared; // mla_shared, after the router's copy down
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Enqueue MoE layer li's shared experts over nb tokens of x (x +=
+    /// theirs), after its `mla_layer` (the same x: the FFN's input). The
+    /// round trip enqueues them behind the router's copy down, so they run
+    /// while the CPU computes the routed experts.
+    ///
+    /// # Safety
+    /// As `mla_layer`.
+    unsafe fn mla_shared(
+        &self,
+        mf: &MlaFns,
+        mb: &MlaBufs,
+        li: usize,
+        x: Arg,
+        nb: usize,
+    ) -> Result<(), String> {
+        let l = &self.ml().layers[li];
+        if let MlaFfn::Moe {
+            shared: Some((sg, su, sd)),
+            ..
+        } = &l.ffn
+        {
+            // SAFETY: the caller's contract.
+            unsafe { self.mla_ffn(mf, mb, x, l.ffn_norm, (sg, su, sd), nb)? };
         }
         Ok(())
     }
@@ -743,26 +773,36 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// The host round trip of MoE layer li after its `mla_layer`
-    /// (enqueued): the router's output down, the CPU experts, y up
-    /// (enqueued, ordered before what comes next on the stream).
+    /// (enqueued): the router's output down, then `shared` (the shared
+    /// experts, enqueued behind the copy: they run meanwhile), the CPU
+    /// experts once the copy is in, y up (enqueued, ordered before what
+    /// comes next on the stream).
     fn mla_round_trip(
         &self,
         mb: &mut MlaBufs<'g>,
         li: usize,
         nb: usize,
+        shared: &mut dyn FnMut(&mut MlaBufs<'g>) -> Result<(), String>,
         experts: &mut super::moe::Experts,
     ) -> Result<(), String> {
         let k = self.moe_dims().k;
         let dim = self.dim;
         let n = nb * (dim + 2 * k) * 4;
         mb.host_r.copy_from(&mb.r, 0, n)?;
-        let b = &mb.host_r.bytes_mut()?[..n]; // waits for the layer and copy
+        self.gpu.record_main(&mb.ev)?;
+        shared(mb)?;
+        mb.ev.sync()?; // the layer and the copy down, not the shared experts
+        // SAFETY: the event fired after the copy down and, earlier on the
+        // stream, host_y's last copy up (the previous layer's y): neither
+        // buffer has a copy in flight.
+        unsafe {
+            mb.host_r.assume_synced();
+            mb.host_y.assume_synced();
+        }
+        let b = &mb.host_r.bytes_mut()?[..n];
         let (hb, rest) = b.split_at(nb * dim * 4);
         let (ib, wb) = rest.split_at(nb * k * 4);
         let (h, ids, w) = (as_f32(hb), as_i32(ib), as_f32(wb));
-        // SAFETY: host_r's wait above synced the stream, after host_y's
-        // last copy (the previous layer's y).
-        unsafe { mb.host_y.assume_synced() };
         let yb = &mut mb.host_y.bytes_mut()?[..nb * dim * 4];
         // SAFETY: any bytes are a valid f32; the prefix is empty (asserted).
         let (pre, y, _) = unsafe { yb.align_to_mut::<f32>() };
@@ -834,7 +874,21 @@ impl<'g> CudaQwen2<'g> {
                 run(mb)?;
             }
             if seg < n && self.mla_is_moe(seg) {
-                self.mla_round_trip(mb, seg, 1, experts)?;
+                let gi = n + 1 + seg;
+                let mut shared = |mb: &mut MlaBufs<'g>| -> Result<(), String> {
+                    // SAFETY: as `run`'s.
+                    let run = |mb: &MlaBufs| unsafe { self.mla_shared(mf, mb, seg, c.x.arg(), 1) };
+                    if !self.graphs {
+                        return run(mb);
+                    }
+                    if mb.graphs[gi].is_none() {
+                        let g = self.gpu.capture(|| run(mb))?;
+                        mb.graphs[gi] = Some(g);
+                    }
+                    // SAFETY: as the segment's graph.
+                    unsafe { mb.graphs[gi].as_ref().unwrap().launch() }
+                };
+                self.mla_round_trip(mb, seg, 1, &mut shared, experts)?;
             }
         }
         Ok(())
@@ -917,7 +971,11 @@ impl<'g> CudaQwen2<'g> {
                     self.mla_layer(mf, c, mb, li, b.x.arg(), nb, mb.rope.arg(), null, s0)?;
                 }
                 if self.mla_is_moe(li) {
-                    self.mla_round_trip(mb, li, nb, experts)?;
+                    let x = b.x.arg();
+                    // SAFETY: as above.
+                    let mut shared =
+                        |mb: &mut MlaBufs<'g>| unsafe { self.mla_shared(mf, mb, li, x, nb) };
+                    self.mla_round_trip(mb, li, nb, &mut shared, experts)?;
                     // SAFETY: as above.
                     unsafe { self.mla_add(mf, mb, b.x.arg(), nb)? };
                 }
