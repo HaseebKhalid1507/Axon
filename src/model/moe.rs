@@ -1,4 +1,11 @@
-//! Mixture-of-experts FFN (`qwen3moe`) on the CPU.
+//! Mixture-of-experts FFN (`qwen3moe`, `gpt-oss`) on the CPU.
+//!
+//! gpt-oss (`Oai`) differs in four places, as llama.cpp's build_moe_ffn
+//! with LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX_WEIGHT and
+//! LLM_FFN_SWIGLU_OAI_MOE: the router logits get a bias; the top k are taken
+//! on the logits themselves and their weights are the softmax over those k
+//! (no renormalization); each expert's gate, up and down outputs get that
+//! expert's bias; and the activation is `vmath::swiglu_oai`.
 //!
 //! A MoE layer replaces the gated FFN with `n_expert` small ones and a
 //! router. Per token: router logits (an f32 `[n_expert x dim]` matrix times
@@ -52,6 +59,17 @@ pub(super) struct Moe<'a> {
     pub(super) gate: Vec<Weight<'a>>,
     pub(super) up: Vec<Weight<'a>>,
     pub(super) down: Vec<Weight<'a>>,
+    /// gpt-oss's router and expert biases (module doc); None on qwen3moe.
+    pub(super) oai: Option<Box<Oai>>,
+}
+
+/// gpt-oss's biases: the router's (n_expert), and per expert e its gate's
+/// and up's (`gate[e * ffn..][..ffn]`) and its down's (`down[e * dim..][..dim]`).
+pub(super) struct Oai {
+    pub(super) router: Vec<f32>,
+    pub(super) gate: Vec<f32>,
+    pub(super) up: Vec<f32>,
+    pub(super) down: Vec<f32>,
 }
 
 /// The MoE hyperparameters of a model (`qwen3moe.*`), None for a dense one.
@@ -63,7 +81,13 @@ pub(crate) struct MoeDims {
 }
 
 pub(crate) fn is_moe(m: &Model) -> bool {
-    m.arch == "qwen3moe"
+    matches!(m.arch.as_str(), "qwen3moe" | "gpt-oss")
+}
+
+/// gpt-oss: CPU only for now (no GPU MoE path for its MXFP4 experts,
+/// sinks and biases yet).
+pub(crate) fn cpu_only(m: &Model) -> bool {
+    m.arch == "gpt-oss"
 }
 
 pub(crate) fn moe_dims(m: &Model) -> Option<MoeDims> {
@@ -99,6 +123,13 @@ fn held_bytes(t: &Tensor, repack: bool) -> u64 {
     len.map_or(t.n_bytes / t.dims[2], |l| l as u64)
 }
 
+/// Bytes of one expert matrix of `t` in the anonymous r8 arena: its repack,
+/// or 0 when it's read in place from the mapping (no r8 form: MXFP4).
+fn arena_bytes(t: &Tensor, repack: bool) -> u64 {
+    let len = if repack { super::repacked_len(t) } else { None };
+    len.map_or(0, |l| l as u64)
+}
+
 /// What `axon info` says about a MoE model: sizes from the tensor table.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct MoeInfo {
@@ -113,6 +144,11 @@ pub(crate) struct MoeInfo {
     pub active_held: u64,
     /// Everything else (attention, routers, norms, embedding, head).
     pub dense_bytes: u64,
+    /// The experts' share of the anonymous r8 arena (`expert_held` when
+    /// every expert repacks; 0 for experts read in place).
+    pub expert_arena: u64,
+    /// `cpu_only`.
+    pub cpu_only: bool,
 }
 
 impl MoeInfo {
@@ -132,6 +168,8 @@ impl MoeInfo {
             active_bytes: 0,
             active_held: 0,
             dense_bytes: 0,
+            expert_arena: 0,
+            cpu_only: cpu_only(m),
         };
         for t in &m.tensors {
             if EXPS.iter().any(|s| t.name.ends_with(s)) && t.dims.len() >= 3 && t.dims[2] > 0 {
@@ -140,6 +178,7 @@ impl MoeInfo {
                 i.expert_held += held_bytes(t, repack) * n;
                 i.active_bytes += t.n_bytes / n * dims.k as u64;
                 i.active_held += held_bytes(t, repack) * dims.k as u64;
+                i.expert_arena += arena_bytes(t, repack) * n;
             } else {
                 i.dense_bytes += t.n_bytes;
             }
@@ -153,8 +192,7 @@ impl MoeInfo {
         let d = self.dims;
         [
             format!(
-                "moe: {} experts, top-{}, expert ffn {}, {} shared | --device cuda: attention and \
-                 routers on the GPU, experts on the CPU",
+                "moe: {} experts, top-{}, expert ffn {}, {} shared | {}",
                 d.n_expert,
                 d.k,
                 d.ffn,
@@ -162,6 +200,11 @@ impl MoeInfo {
                     "none".to_string()
                 } else {
                     self.shared.to_string()
+                },
+                if self.cpu_only {
+                    "CPU only for now (--device cpu)"
+                } else {
+                    "--device cuda: attention and routers on the GPU, experts on the CPU"
                 }
             ),
             format!(
@@ -183,38 +226,43 @@ impl MoeInfo {
 const RAM_HEADROOM: u64 = 3 << 29;
 
 /// Anonymous memory the CPU model of `i` takes beyond the mapped file, plus
-/// `RAM_HEADROOM`: with `repack`, the r8 arena (every expert and, roughly,
-/// the dense weights); without, none (everything is read in place from the
-/// mapping, page cache the kernel can reclaim).
-fn ram_need(i: &MoeInfo, repack: bool) -> u64 {
-    let arena = if repack {
-        i.expert_held + i.dense_bytes
-    } else {
-        0
+/// `RAM_HEADROOM`: with `repack`, the r8 arena (the experts that repack
+/// and, with `dense`, roughly the dense weights too); without, none
+/// (everything is read in place from the mapping, page cache the kernel can
+/// reclaim). `dense` false is `crate::moe`'s split: the attention,
+/// embedding and head live on the GPU, the host keeps the experts (its
+/// norms and routers, tens of MB, are inside the headroom).
+fn ram_need(i: &MoeInfo, repack: bool, dense: bool) -> u64 {
+    let arena = match (repack, dense) {
+        (false, _) => 0,
+        (true, true) => i.expert_arena + i.dense_bytes,
+        (true, false) => i.expert_arena,
     };
     arena + RAM_HEADROOM
 }
 
 /// The CPU model's RAM beyond the file: refuse a MoE model that wouldn't fit
 /// in `MemAvailable` (`ram_need`) instead of swapping. `repack` as
-/// `Qwen2::new` (AXON_REPACK).
-pub(crate) fn check_ram(m: &Model) -> Result<(), String> {
+/// `Qwen2::new` (AXON_REPACK). `dense` false: `crate::moe`'s split (the
+/// host holds the experts only).
+pub(crate) fn check_ram(m: &Model, dense: bool) -> Result<(), String> {
     let repack = std::env::var("AXON_REPACK").map_or(true, |v| v != "0");
-    check_ram_with(m, repack, crate::gguf::mem_available())
+    check_ram_with(m, repack, dense, crate::gguf::mem_available())
 }
 
-fn check_ram_with(m: &Model, repack: bool, avail: Option<u64>) -> Result<(), String> {
+fn check_ram_with(m: &Model, repack: bool, dense: bool, avail: Option<u64>) -> Result<(), String> {
     let Some(i) = MoeInfo::of_with(m, repack) else {
         return Ok(());
     };
-    let want = ram_need(&i, repack);
+    let want = ram_need(&i, repack, dense);
     match avail {
         Some(avail) if avail < want => Err(format!(
-            "{}: the CPU model needs about {:.1} GB of RAM (its repacked experts {:.1} GB) and \
+            "{}: the {} needs about {:.1} GB of RAM (its repacked experts {:.1} GB) and \
              only {:.1} GB is available",
             m.arch,
+            if dense { "CPU model" } else { "CPU experts" },
             want as f64 / 1e9,
-            i.expert_held as f64 / 1e9,
+            i.expert_arena as f64 / 1e9,
             avail as f64 / 1e9
         )),
         _ => Ok(()),
@@ -223,6 +271,12 @@ fn check_ram_with(m: &Model, repack: bool, avail: Option<u64>) -> Result<(), Str
 
 /// The refusal of every GPU placement but `crate::moe`'s.
 pub(crate) fn gpu_refusal(m: &Model) -> String {
+    if cpu_only(m) {
+        return format!(
+            "{}: runs on the CPU only for now (--device cpu); its GPU path is the next stage",
+            m.arch
+        );
+    }
     format!(
         "{}: a mixture-of-experts model runs on the CPU (--device cpu) or with its attention \
          on one GPU and its experts on the CPU (--device cuda); it doesn't split by layers, \
@@ -282,6 +336,7 @@ impl<'a> Moe<'a> {
             gate,
             up,
             down,
+            oai: None,
         }
     }
 
@@ -330,6 +385,9 @@ impl<'a> Moe<'a> {
                 *l += wv * x;
             }
         }
+        if let Some(o) = &self.oai {
+            return Self::route_oai(&mut p, &o.router, ids, w);
+        }
         let max = p.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
         let mut sum = 0f32;
         for v in p.iter_mut() {
@@ -358,6 +416,64 @@ impl<'a> Moe<'a> {
         let s = s.max(W_SUM_MIN);
         for v in w.iter_mut() {
             *v /= s;
+        }
+    }
+}
+
+impl Moe<'_> {
+    /// gpt-oss's routing of logits `p` (bias `b` added): the top k logits
+    /// (the higher first, the lower index on ties), their weights the
+    /// softmax over those k in rank order (max = the first; exp sum in rank
+    /// order; times 1 / sum, as ggml_soft_max).
+    fn route_oai(p: &mut [f32], b: &[f32], ids: &mut [usize], w: &mut [f32]) {
+        let n = p.len();
+        for (l, &bv) in p.iter_mut().zip(b) {
+            *l += bv;
+        }
+        let mut taken = vec![false; n];
+        for (id, wi) in ids.iter_mut().zip(w.iter_mut()) {
+            let mut best = usize::MAX;
+            for e in 0..n {
+                if !taken[e] && (best == usize::MAX || p[e] > p[best]) {
+                    best = e;
+                }
+            }
+            taken[best] = true;
+            *id = best;
+            *wi = p[best];
+        }
+        let max = w[0];
+        let mut sum = 0f32;
+        for v in w.iter_mut() {
+            *v = exp(*v - max);
+            sum += *v;
+        }
+        let inv = 1.0 / sum;
+        for v in w.iter_mut() {
+            *v *= inv;
+        }
+    }
+
+    /// Expert e's gate and up rows r0..r0 + g.len() (one token): its biases
+    /// if gpt-oss, then the activation into `g`.
+    #[inline]
+    fn act(&self, net: &Qwen2, e: usize, r0: usize, g: &mut [f32], u: &mut [f32]) {
+        if let Some(o) = &self.oai {
+            let at = e * self.ffn + r0;
+            super::add_assign(g, &o.gate[at..at + g.len()]);
+            super::add_assign(u, &o.up[at..at + u.len()]);
+            crate::vmath::swiglu_oai(g, u);
+        } else {
+            net.glu(g, u);
+        }
+    }
+
+    /// Expert e's down bias on its rows r0..r0 + d.len() (gpt-oss).
+    #[inline]
+    fn down_bias(&self, e: usize, dim: usize, r0: usize, d: &mut [f32]) {
+        if let Some(o) = &self.oai {
+            let at = e * dim + r0;
+            super::add_assign(d, &o.down[at..at + d.len()]);
         }
     }
 }
@@ -446,7 +562,7 @@ impl<'a> Qwen2<'a> {
             let ub = &mut ub[..ys.len()];
             self.rows_vec(&moe.gate[e], r, &xq, ys, cfg, own_all);
             self.rows_vec(&moe.up[e], r, &xq, ub, cfg, own_all);
-            self.glu(ys, ub);
+            moe.act(self, e, r, ys, ub);
         });
         let dt = [moe.down[0].qt()];
         let aq: Vec<QuantizedAct> = act
@@ -467,6 +583,7 @@ impl<'a> Qwen2<'a> {
             let d = &mut d[..ys.len()];
             for (i, &e) in ids.iter().enumerate() {
                 self.rows_vec(&moe.down[e], r0, &aq[i], d, cfg, own_all);
+                moe.down_bias(e, dim, r0, d);
                 for (yv, &dv) in ys.iter_mut().zip(d.iter()) {
                     combine(yv, w[i], dv, i == 0);
                 }
@@ -570,8 +687,22 @@ impl<'a> Qwen2<'a> {
                 let (gs, us) = sc.split_at_mut(rows_a * slots);
                 self.rows_batch(gate, r0, &xr, n, gs);
                 self.rows_batch(up, r0, &xr, n, us);
-                for (gr, ur) in gs.chunks_mut(slots).zip(us.chunks(slots)) {
-                    self.glu(&mut gr[..n], &ur[..n]);
+                if moe.oai.is_some() {
+                    // Per (row, token) the decode path's ops: biases, then
+                    // the activation, on one token's values at a time.
+                    let mut g1 = [0f32; 1];
+                    let mut u1 = [0f32; 1];
+                    for (r, (gr, ur)) in gs.chunks_mut(slots).zip(us.chunks(slots)).enumerate() {
+                        for b in 0..n {
+                            (g1[0], u1[0]) = (gr[b], ur[b]);
+                            moe.act(self, e, r0 + r, &mut g1, &mut u1);
+                            gr[b] = g1[0];
+                        }
+                    }
+                } else {
+                    for (gr, ur) in gs.chunks_mut(slots).zip(us.chunks(slots)) {
+                        self.glu(&mut gr[..n], &ur[..n]);
+                    }
                 }
                 for (b, &p) in ps.iter().enumerate() {
                     for r in 0..rows_a {
@@ -607,6 +738,13 @@ impl<'a> Qwen2<'a> {
             let rows = rows_b.min(dim - r0);
             with_rows_scratch(rows * slots, |ds| {
                 self.rows_batch(down, r0, &xr, n, ds);
+                if moe.oai.is_some() {
+                    for (r, dr) in ds.chunks_mut(slots).enumerate() {
+                        for v in &mut dr[..n] {
+                            moe.down_bias(e, dim, r0 + r, std::slice::from_mut(v));
+                        }
+                    }
+                }
                 for (b, &p) in ps.iter().enumerate() {
                     for r in 0..rows {
                         // SAFETY: as in stage A.
@@ -637,7 +775,8 @@ mod tests {
     use super::*;
 
     /// `check_ram`'s need: the r8 arena with the repack, none without it
-    /// (AXON_REPACK=0 reads the mapped file in place).
+    /// (AXON_REPACK=0 reads the mapped file in place); the split's, the
+    /// experts only.
     #[test]
     fn ram_need_counts_the_arena_only_when_repacking() {
         let (m, _) = crate::model::tests::dense_fixture("qwen3moe", crate::quant::Q8_0);
@@ -645,15 +784,23 @@ mod tests {
         let off = MoeInfo::of_with(&m, false).unwrap();
         assert!(on.expert_held > 0 && off.expert_held > 0);
         assert_eq!(
-            ram_need(&on, true),
+            ram_need(&on, true, true),
             on.expert_held + on.dense_bytes + RAM_HEADROOM
         );
-        assert_eq!(ram_need(&off, false), RAM_HEADROOM);
+        assert_eq!(ram_need(&off, false, true), RAM_HEADROOM);
+        // The GPU split: the experts only.
+        assert_eq!(on.expert_arena, on.expert_held, "every Q8_0 expert repacks");
+        assert_eq!(ram_need(&on, true, false), on.expert_arena + RAM_HEADROOM);
+        assert_eq!(ram_need(&off, false, false), RAM_HEADROOM);
         // Room for the headroom only: refused with the repack, fine without.
         let avail = Some(RAM_HEADROOM + 1);
-        assert!(check_ram_with(&m, true, avail).is_err());
-        assert!(check_ram_with(&m, false, avail).is_ok());
-        assert!(check_ram_with(&m, true, None).is_ok());
+        assert!(check_ram_with(&m, true, true, avail).is_err());
+        assert!(check_ram_with(&m, false, true, avail).is_ok());
+        assert!(check_ram_with(&m, true, true, None).is_ok());
+        // Room for the experts but not the dense weights: the split fits.
+        let avail = Some(on.expert_arena + RAM_HEADROOM);
+        assert!(check_ram_with(&m, true, true, avail).is_err());
+        assert!(check_ram_with(&m, true, false, avail).is_ok());
     }
 
     #[test]

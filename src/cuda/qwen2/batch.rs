@@ -322,8 +322,9 @@ pub(crate) struct RowAt {
 }
 
 /// Weight types of the tensor-core GEMMs (gemm2), in table order; the
-/// first `NTYPES_VM` have gemvm kernels too (Q4_1 / Q5_1 take gemvn).
-const NTYPES: usize = 8;
+/// first `NTYPES_VM` have gemvm kernels too (Q4_1 / Q5_1 / Q2_K / Q3_K / IQ4_NL
+/// take gemvn).
+const NTYPES: usize = 11;
 const NTYPES_VM: usize = 6;
 
 /// `qt`'s slot in the per-type kernel tables.
@@ -337,6 +338,9 @@ fn type_index(qt: u32) -> usize {
         Q4_0 => 5,
         Q4_1 => 6,
         Q5_1 => 7,
+        Q2_K => 8,
+        Q3_K => 9,
+        IQ4_NL => 10,
         _ => unreachable!("type_index: {qt}"),
     }
 }
@@ -440,6 +444,9 @@ impl<'m> BatchFns<'m> {
                 (Q4_0, "q4_0"),
                 (Q4_1, "q4_1"),
                 (Q5_1, "q5_1"),
+                (Q2_K, "q2_k"),
+                (Q3_K, "q3_k"),
+                (IQ4_NL, "iq4_nl"),
             ] {
                 let big = module.function(&format!("gemm2_{tn}"))?;
                 big.set_max_shared(gemm2_smem(qt, 128, 2))?;
@@ -615,6 +622,10 @@ pub(super) struct BatchBufs<'g> {
     pub(super) best: DevBuf<'g>,
     pub(super) host_best: HostBuf<'g>,
 }
+
+/// `pass_hooked`'s Err for a MoE model without its hook.
+const MOE_DENSE_PASS: &str = "a mixture-of-experts model's batched pass needs its experts \
+     (crate::moe: moe_tokens), not the dense pass";
 
 impl<'g> CudaQwen2<'g> {
     /// Tokens per batched pass a cache of `max_ctx` positions gets scratch for.
@@ -888,7 +899,8 @@ impl<'g> CudaQwen2<'g> {
     /// `pass_at`, a mixture-of-experts layer's FFN by `moe`
     /// (`crate::moe`): after the layer's attention half, `moe(layer, x,
     /// nb)` with x the residual stream ([nb][dim] floats) leaves x + the
-    /// layer's FFN output there. None (dense layers): `layer` as always.
+    /// layer's FFN output there. None (dense layers): `layer` as always;
+    /// None on a MoE model: an Err, before anything is enqueued.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn pass_hooked(
         &self,
@@ -901,6 +913,9 @@ impl<'g> CudaQwen2<'g> {
         on: &mut dyn FnMut(&'static str) -> Result<(), String>,
         mut moe: Option<&mut MoeHook>,
     ) -> Result<(), String> {
+        if moe.is_none() && self.moe.is_some() {
+            return Err(MOE_DENSE_PASS.into());
+        }
         let nb = input.len(self.dim);
         let dim = self.dim;
         // Paged (c.tab): the layers' arrays from row 0 and the rows through

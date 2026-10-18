@@ -6,8 +6,9 @@ use crate::gguf::{Model, Tensor, Val};
 use crate::kv::{Half, KvData, KvElem, Layers};
 use crate::pool::{self, Kind, Pool};
 use crate::quant::{
-    DecodeCfg, F16, F32, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0, QuantizedAct, batch_slots,
-    dequant, dot_row_q8_multi, dot_rows_q8, dot_rows_q8_multi, r8, r8q, row_bytes,
+    DecodeCfg, F16, F32, IQ4_NL, MXFP4, Q2_K, Q3_K, Q4_0, Q4_1, Q4_K, Q5_0, Q5_1, Q5_K, Q6_K, Q8_0,
+    QuantizedAct, batch_slots, dequant, dot_row_q8_multi, dot_rows_q8, dot_rows_q8_multi, r8, r8q,
+    row_bytes,
 };
 use crate::vmath;
 
@@ -185,6 +186,10 @@ struct Layer<'a> {
     /// gemma3 local layer: attends to the last `window` positions only
     /// (`window_start`) and uses the local RoPE table.
     window: Option<usize>,
+    /// gpt-oss: the attention output's bias, and one sink score per query
+    /// head (`vmath::softmax_sink`).
+    bo: Option<Vec<f32>>,
+    sinks: Option<Vec<f32>>,
 }
 
 /// A layer's feed-forward block: the gated FFN, or experts and a router.
@@ -414,12 +419,19 @@ fn load_vec(m: &Model, t: &Tensor) -> Vec<f32> {
 /// RMSNorm weights here.
 /// qwen3moe (Qwen3-30B-A3B & co.) is qwen3 with each FFN replaced by
 /// experts and a router (`moe`; on the GPU, `crate::moe`).
-pub const ARCHS: [&str; 5] = ["qwen2", "qwen3", "llama", "gemma3", "qwen3moe"];
+/// gpt-oss (gpt-oss-20b/120b, llama.cpp src/models/openai-moe.cpp) is
+/// qwen2 (qkv biases) plus a bias on the attention output, per-head
+/// attention sinks, sliding-window (128) layers alternating with global
+/// ones (even layers local), YaRN on every layer, and MoE FFNs (`moe`) with
+/// a biased router, top-4 then softmax over the four, biased experts and
+/// the clamped SwiGLU (`vmath::swiglu_oai`); the pre-FFN norm is its
+/// `post_attention_norm`. Experts are MXFP4 (quant/mxfp4.rs). CPU only.
+pub const ARCHS: [&str; 6] = ["qwen2", "qwen3", "llama", "gemma3", "qwen3moe", "gpt-oss"];
 
 #[path = "model/moe.rs"]
 mod moe;
 pub(crate) use moe::{
-    MoeDims, MoeInfo, Route as MoeRoute, check_ram as moe_check_ram,
+    MoeDims, MoeInfo, Route as MoeRoute, check_ram as moe_check_ram, cpu_only as moe_cpu_only,
     gpu_refusal as moe_gpu_refusal, is_moe, moe_dims,
 };
 
@@ -441,21 +453,28 @@ pub(crate) struct Swa {
 /// `load_swa_pattern(ml, 6)`: an array `attention.sliding_window_pattern`
 /// gives each layer; a number n (default 6) makes layer il local iff
 /// il % n < n - 1 (every n-th layer global).
+///
+/// gpt-oss the same with llama.cpp's `load_swa_pattern(ml, 2)`: by default
+/// the even layers are local.
 pub(crate) fn gemma_swa(m: &Model, n_layers: usize) -> Option<Swa> {
-    if m.arch != "gemma3" {
-        return None;
-    }
-    let window = meta_num(m, "gemma3.attention.sliding_window").filter(|&w| w > 0.0)? as usize;
-    let key = "gemma3.attention.sliding_window_pattern";
-    let local = match m.metadata.iter().find(|(k, _)| k == key).map(|(_, v)| v) {
+    let pattern = match m.arch.as_str() {
+        "gemma3" => 6,
+        "gpt-oss" => 2,
+        _ => return None,
+    };
+    let a = &m.arch;
+    let window =
+        meta_num(m, &format!("{a}.attention.sliding_window")).filter(|&w| w > 0.0)? as usize;
+    let key = format!("{a}.attention.sliding_window_pattern");
+    let local = match m.metadata.iter().find(|(k, _)| *k == key).map(|(_, v)| v) {
         Some(Val::Arr(a)) => (0..n_layers)
             .map(|i| a.get(i).and_then(|v| v.as_f64()).is_some_and(|v| v != 0.0))
             .collect(),
         Some(v) => {
-            let n = v.as_f64().unwrap_or(6.0) as usize;
+            let n = v.as_f64().unwrap_or(pattern as f64) as usize;
             (0..n_layers).map(|i| n == 0 || i % n < n - 1).collect()
         }
-        None => (0..n_layers).map(|i| i % 6 < 5).collect(),
+        None => (0..n_layers).map(|i| i % pattern < pattern - 1).collect(),
     };
     Some(Swa { window, local })
 }
@@ -521,7 +540,12 @@ pub(crate) fn rope_freqs(m: &Model, head_dim: usize) -> Vec<f64> {
 }
 
 /// Tensor types the kernels run (`quant::dequant` and `dot_row_q8`).
-const SUPPORTED_TYPES: [u32; 10] = [F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K];
+const SUPPORTED_TYPES: [u32; 13] = [
+    F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL,
+];
+
+/// gpt-oss's expert matrices only (`check_supported`).
+const EXPERT_TYPES: [u32; 1] = [MXFP4];
 
 /// Whether `Qwen2::new` reads any weight matrix in place from the model's
 /// bytes on every token (AXON_REPACK=0, or a matrix with no r8/r8q form),
@@ -565,7 +589,7 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
     let bad = |msg: String| std::io::Error::new(std::io::ErrorKind::InvalidData, msg);
     if !ARCHS.contains(&m.arch.as_str()) {
         return Err(bad(format!(
-            "architecture '{}' is not supported (qwen2, qwen3, llama, gemma3, qwen3moe)",
+            "architecture '{}' is not supported (qwen2, qwen3, llama, gemma3, qwen3moe, gpt-oss)",
             if m.arch.is_empty() { "<none>" } else { &m.arch }
         )));
     }
@@ -707,6 +731,23 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
             return Err(bad(format!("RoPE scaling (factor {f}) is not supported")));
         }
     }
+    let oss = m.arch == "gpt-oss";
+    if oss
+        && let Some(b) = num("rope.freq_base_swa")
+        && Some(b) != num("rope.freq_base")
+    {
+        return Err(bad(format!(
+            "gpt-oss rope.freq_base_swa {b} (other than rope.freq_base) is not supported"
+        )));
+    }
+    if oss
+        && let Some(w) = num("attention.sliding_window").filter(|&w| w > 0.0)
+        && (w.fract() != 0.0 || w > u32::MAX as f64)
+    {
+        return Err(bad(format!(
+            "attention.sliding_window {w} is not an integer"
+        )));
+    }
     if gemma {
         for k in ["final_logit_softcapping", "attn_logit_softcapping"] {
             if num(k).is_some_and(|v| v != 0.0) {
@@ -766,7 +807,7 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
         let q = t.qtype;
         if !SUPPORTED_TYPES.contains(&q.id) {
             return Err(bad(format!(
-                "tensor {name}: type {} ({}) is not supported (F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q4_K, Q5_K, Q6_K)",
+                "tensor {name}: type {} ({}) is not supported (F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL)",
                 q.name, q.id
             )));
         }
@@ -820,25 +861,40 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
             if m.arch == "llama" && has {
                 return Err(bad(format!("blk.{i}.{b}: llama has no q/k norm")));
             }
-            if m.arch == "qwen3" || moe.is_some() || gemma || has {
+            if oss && has {
+                return Err(bad(format!("blk.{i}.{b}: gpt-oss has no q/k norm")));
+            }
+            if m.arch == "qwen3" || (moe.is_some() && !oss) || gemma || has {
                 t(b, head_dim, None)?;
             }
         }
         // gemma3's norms of the attention and FFN outputs ("sandwich").
+        // gpt-oss: its `post_attention_norm` is the pre-FFN norm (llama.cpp's
+        // attn_post_norm), and it has an output bias and attention sinks.
         for b in ["post_attention_norm.weight", "post_ffw_norm.weight"] {
-            if gemma {
+            if gemma || (oss && b == "post_attention_norm.weight") {
                 t(b, dim, None)?;
             } else if find_opt(m, &format!("blk.{i}.{b}")).is_some() {
                 return Err(bad(format!("blk.{i}.{b} is not supported on {}", m.arch)));
             }
         }
+        if oss {
+            t("attn_output.bias", dim, None)?;
+            let s = t("attn_sinks.weight", n_heads, None)?;
+            if s.qtype.id != F32 {
+                return Err(bad(format!(
+                    "blk.{i}.attn_sinks.weight: type {} (want F32)",
+                    s.qtype.name
+                )));
+            }
+        } else if find_opt(m, &format!("blk.{i}.attn_sinks.weight")).is_some() {
+            return Err(bad(format!(
+                "blk.{i}.attn_sinks.weight is not supported on {}",
+                m.arch
+            )));
+        }
         // Biases nothing here would add.
-        for b in [
-            "attn_output.bias",
-            "ffn_gate.bias",
-            "ffn_up.bias",
-            "ffn_down.bias",
-        ] {
+        for b in ["ffn_gate.bias", "ffn_up.bias", "ffn_down.bias"] {
             if find_opt(m, &format!("blk.{i}.{b}")).is_some() {
                 return Err(bad(format!("blk.{i}.{b} is not supported")));
             }
@@ -852,8 +908,13 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
                 t(b, n, None)?;
             }
         }
+        if !oss && find_opt(m, &format!("blk.{i}.attn_output.bias")).is_some() {
+            return Err(bad(format!("blk.{i}.attn_output.bias is not supported")));
+        }
         t("attn_output.weight", q_dim, Some(dim))?;
-        t("ffn_norm.weight", dim, None)?;
+        if !oss {
+            t("ffn_norm.weight", dim, None)?;
+        }
         let Some(d) = moe else {
             let ffn = t("ffn_gate.weight", dim, Some(0))?.dims[1] as usize;
             t("ffn_up.weight", dim, Some(ffn))?;
@@ -872,6 +933,10 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
             "ffn_gate_inp.bias",
             "exp_probs_b.bias",
         ] {
+            if oss && b == "ffn_gate_inp.bias" {
+                t(b, d.n_expert, None)?;
+                continue;
+            }
             if find_opt(m, &format!("blk.{i}.{b}")).is_some() {
                 return Err(bad(format!("blk.{i}.{b} is not supported on {}", m.arch)));
             }
@@ -891,7 +956,7 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
             let name = format!("blk.{i}.{b}");
             let t = find_opt(m, &name).ok_or_else(|| bad(format!("missing tensor {name}")))?;
             let q = t.qtype;
-            if !SUPPORTED_TYPES.contains(&q.id) {
+            if !(SUPPORTED_TYPES.contains(&q.id) || oss && EXPERT_TYPES.contains(&q.id)) {
                 return Err(bad(format!(
                     "tensor {name}: type {} ({}) is not supported",
                     q.name, q.id
@@ -907,6 +972,17 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
                     "tensor {name}: shape {:?} doesn't fit the model ({cols} x {rows} x {})",
                     t.dims, d.n_expert
                 )));
+            }
+            // gpt-oss: each expert's bias, [rows, n_expert].
+            let bn = format!("blk.{i}.{}", b.replace(".weight", ".bias"));
+            match (oss, find_opt(m, &bn)) {
+                (true, _) => {
+                    check(&bn, rows * d.n_expert, None)?;
+                }
+                (false, Some(_)) => {
+                    return Err(bad(format!("{bn} is not supported on {}", m.arch)));
+                }
+                (false, None) => {}
             }
         }
     }
@@ -981,7 +1057,10 @@ impl<'a> Qwen2<'a> {
         let freqs = rope_freqs(m, head_dim);
         let gemma = m.arch == "gemma3";
         let swa = gemma_swa(m, n_layers);
+        let oss = m.arch == "gpt-oss";
+        // gpt-oss's local layers turn as its global ones (YaRN too).
         let freqs_swa = match &swa {
+            Some(_) if oss => freqs.clone(),
             Some(_) => rope_freqs_swa(m, head_dim),
             None => Vec::new(),
         };
@@ -1103,6 +1182,12 @@ impl<'a> Qwen2<'a> {
                     // own; the tensor's pages go back once all are.
                     let [gate, up, down] = moe::EXPS.map(|s| {
                         let t = t(s);
+                        // Read in place (MXFP4: no repack): the page tables
+                        // filled now, not by a fault per 4 KB on the first
+                        // tokens (file mapping only; no extra memory).
+                        if repacked_len(t).is_none() || !repack {
+                            m.prefault(t);
+                        }
                         let ws: Vec<Weight> = (0..d.n_expert)
                             .map(|e| {
                                 let dst = dst.next().unwrap();
@@ -1117,7 +1202,23 @@ impl<'a> Qwen2<'a> {
                         ws
                     });
                     let router = vals(t("ffn_gate_inp.weight"));
-                    Ffn::Moe(Box::new(moe::Moe::new(d, router, gate, up, down)))
+                    let mut moe = moe::Moe::new(d, router, gate, up, down);
+                    if oss {
+                        let [router, gate, up, down] = [
+                            "ffn_gate_inp.bias",
+                            "ffn_gate_exps.bias",
+                            "ffn_up_exps.bias",
+                            "ffn_down_exps.bias",
+                        ]
+                        .map(|s| vals(t(s)));
+                        moe.oai = Some(Box::new(moe::Oai {
+                            router,
+                            gate,
+                            up,
+                            down,
+                        }));
+                    }
+                    Ffn::Moe(Box::new(moe))
                 }
             };
             Layer {
@@ -1131,11 +1232,21 @@ impl<'a> Qwen2<'a> {
                 q_norm: bias("attn_q_norm.weight"),
                 k_norm: bias("attn_k_norm.weight"),
                 wo,
-                ffn_norm: vals(t("ffn_norm.weight")),
+                // gpt-oss's post_attention_norm is its pre-FFN norm.
+                ffn_norm: vals(t(match oss {
+                    true => "post_attention_norm.weight",
+                    false => "ffn_norm.weight",
+                })),
                 ffn,
-                post_attn_norm: bias("post_attention_norm.weight"),
+                post_attn_norm: if oss {
+                    None
+                } else {
+                    bias("post_attention_norm.weight")
+                },
                 post_ffn_norm: bias("post_ffw_norm.weight"),
                 window: swa.as_ref().filter(|s| s.local[i]).map(|s| s.window),
+                bo: bias("attn_output.bias"),
+                sinks: bias("attn_sinks.weight"),
             }
         });
         drop(layer_slots);
@@ -1711,9 +1822,11 @@ impl<'a> Qwen2<'a> {
         Self::rope_table_of(&self.freqs[..self.head_dim / 2], pos, self.rope_m)
     }
 
-    /// `rope_table` of gemma3's local layers (`freqs_swa`; empty if none).
+    /// `rope_table` of the local layers (`freqs_swa`; empty if none). The
+    /// mscale is YaRN's, so 1 on gemma3 (which refuses YaRN): gpt-oss's
+    /// local layers are scaled as its global ones.
     fn rope_table_swa(&self, pos: usize) -> Vec<(f32, f32)> {
-        Self::rope_table_of(&self.freqs[self.head_dim / 2..], pos, 1.0)
+        Self::rope_table_of(&self.freqs[self.head_dim / 2..], pos, self.rope_m)
     }
 
     /// The table at `pos`, each value times `m` (YaRN's mscale) in f64
@@ -1945,7 +2058,11 @@ impl<'a> Qwen2<'a> {
                     let s0 = window_start(layer.window, start + b) * kv_dim;
                     let qg = &qs[b * q_dim + kvh * qn..b * q_dim + (kvh + 1) * qn];
                     let (kw, vw) = (&kc[s0..], &vc[s0..]);
-                    attend_group(qg, kw, vw, kv_dim, hd, kvh, np - s0 / kv_dim, out);
+                    let sk = layer
+                        .sinks
+                        .as_deref()
+                        .map(|s| &s[kvh * group..(kvh + 1) * group]);
+                    attend_group(qg, kw, vw, kv_dim, hd, kvh, np - s0 / kv_dim, sk, out);
                 });
             });
             qkv_buf = qkv;
@@ -1954,6 +2071,9 @@ impl<'a> Qwen2<'a> {
             let aq = Self::quantize_batch(&att_rows, &[layer.wo.qt()]);
             let (mut os, _, slots) = self.matmul_q_in([&layer.wo], &aq, std::mem::take(&mut o_buf));
             drop(aq);
+            if let Some(b) = &layer.bo {
+                bias_cols(&mut os, slots, nb, b);
+            }
             if let Some(w) = &layer.post_attn_norm {
                 self.norm_cols(&mut os, slots, nb, w);
             }
@@ -2108,6 +2228,7 @@ impl<'a> Qwen2<'a> {
                     np - s0,
                     tile,
                     threads,
+                    layer.sinks.as_deref(),
                     &mut buf,
                     &mut att_out,
                 );
@@ -2115,6 +2236,9 @@ impl<'a> Qwen2<'a> {
 
             // 6. Mix the heads back together and add to the residual stream.
             let mut o = self.matvec(&layer.wo, &att_out);
+            if let Some(b) = &layer.bo {
+                add_assign(&mut o, b);
+            }
             if let Some(w) = &layer.post_attn_norm {
                 o = self.rmsnorm(&o, w);
             }
@@ -2291,6 +2415,16 @@ fn unbatch(y: &[f32], slots: usize, nb: usize) -> Vec<Vec<f32>> {
 /// xs[b][i] += y[i * slots + b]: the residual add straight from a row-major
 /// (row, token slot) buffer, same single add per element as adding
 /// `unbatch(y)`.
+/// y[r * slots + b] += bias[r] for the first `nb` slots (`add_assign`'s
+/// op per element, in the (row, slot) layout of a matmul output).
+fn bias_cols(y: &mut [f32], slots: usize, nb: usize, bias: &[f32]) {
+    for (yr, &bv) in y.chunks_exact_mut(slots).zip(bias) {
+        for v in &mut yr[..nb] {
+            *v += bv;
+        }
+    }
+}
+
 fn add_unbatched(xs: &mut [Vec<f32>], y: &[f32], slots: usize) {
     let n = xs.first().map_or(0, |x| x.len());
     per_token(xs, n, |b, x| add_col(x, y, slots, b));
@@ -2452,6 +2586,7 @@ fn attend<T: KvElem>(
     np: usize,
     tile: Option<usize>,
     threads: usize,
+    sinks: Option<&[f32]>,
     buf: &mut Vec<f32>,
     out: &mut [f32],
 ) {
@@ -2484,7 +2619,8 @@ fn attend<T: KvElem>(
     if tile.is_none() {
         pool::for_each_chunk_mut_in(Kind::Decode, wts, np, |qh, s| {
             let qv = &q[qh * hd..(qh + 1) * hd];
-            score_softmax(qv, kc, kv_dim, qh / group * hd, scale, s);
+            let sink = sinks.map(|v| v[qh]);
+            score_softmax(qv, kc, kv_dim, qh / group * hd, scale, sink, s);
         });
     } else {
         pool::for_each_chunk_mut_in(Kind::Decode, sc, tc * group, |c, s| {
@@ -2495,7 +2631,8 @@ fn attend<T: KvElem>(
         let sc = &*sc;
         pool::for_each_chunk_mut_in(Kind::Decode, wts, np, |qh, w| {
             let (kvh, g) = (qh / group, qh % group);
-            softmax_from(&sc[kvh * nt * tc * group + g..], group, w);
+            let sink = sinks.map(|v| v[qh]);
+            softmax_from(&sc[kvh * nt * tc * group + g..], group, sink, w);
         });
     }
 
@@ -2546,7 +2683,8 @@ fn vsum_split(threads: usize, cols: usize, group: usize) -> usize {
 
 /// Prefill attention of one token's `group` query heads qg (contiguous) on
 /// kv head kvh over cache positions 0..np, into out ([head][hd]): the same
-/// dot, `* scale`, softmax and V-sum order per head as `attend`.
+/// dot, `* scale`, softmax and V-sum order per head as `attend`. `sinks`:
+/// the group's sink scores (gpt-oss), as `attend`'s.
 #[allow(clippy::too_many_arguments)]
 fn attend_group<T: KvElem>(
     qg: &[f32],
@@ -2556,12 +2694,13 @@ fn attend_group<T: KvElem>(
     hd: usize,
     kvh: usize,
     np: usize,
+    sinks: Option<&[f32]>,
     out: &mut [f32],
 ) {
     let group = qg.len() / hd;
     let scale = 1.0 / (hd as f32).sqrt();
     with_scores((np + 1) * group, |sc| {
-        attend_causal(qg, kc, vc, kv_dim, hd, kvh, np, scale, sc, out)
+        attend_causal(qg, kc, vc, kv_dim, hd, kvh, np, scale, sinks, sc, out)
     });
 }
 
@@ -2573,14 +2712,16 @@ fn attend_group<T: KvElem>(
 // operations in the same order as the scalar code with F.
 
 multiversion! {
-    /// Decode scores of one query head, then `softmax`: s[t] =
-    /// dot(qv, k_t) * scale with k_t = kc[t * kv_dim + k_off..][..qv.len()].
+    /// Decode scores of one query head, then `softmax` (`softmax_sink`
+    /// with a sink): s[t] = dot(qv, k_t) * scale with k_t = kc[t * kv_dim +
+    /// k_off..][..qv.len()].
     fn score_softmax<V3, F, T: KvElem>(
         qv: &[f32],
         kc: &[T],
         kv_dim: usize,
         k_off: usize,
         scale: f32,
+        sink: Option<f32>,
         s: &mut [f32],
     ) {
         let hd = qv.len();
@@ -2590,7 +2731,22 @@ multiversion! {
             *s = unsafe { dot::<V3, F, T>(qv, &kc[k0..k0 + hd]) } * scale;
         }
         // SAFETY: as above.
-        unsafe { vmath::softmax::<V3, F>(s) };
+        unsafe { softmax_opt::<V3, F>(s, sink) };
+    }
+}
+
+/// `vmath::softmax`, or `vmath::softmax_sink` with a sink.
+///
+/// # Safety
+/// As `vmath::softmax`.
+#[inline(always)]
+unsafe fn softmax_opt<const V3: bool, const F: bool>(s: &mut [f32], sink: Option<f32>) {
+    // SAFETY: our caller's contract.
+    unsafe {
+        match sink {
+            None => vmath::softmax::<V3, F>(s),
+            Some(k) => vmath::softmax_sink::<V3, F>(s, k),
+        }
     }
 }
 
@@ -2633,6 +2789,7 @@ multiversion! {
         kvh: usize,
         np: usize,
         scale: f32,
+        sinks: Option<&[f32]>,
         sc: &mut [f32],
         out: &mut [f32],
     ) {
@@ -2646,8 +2803,8 @@ multiversion! {
                 sc[g * np + t] = s * scale;
             }
         }
-        for s in sc.chunks_exact_mut(np) {
-            unsafe { vmath::softmax::<V3, F>(s) };
+        for (g, s) in sc.chunks_exact_mut(np).enumerate() {
+            unsafe { softmax_opt::<V3, F>(s, sinks.map(|v| v[g])) };
         }
         let vb = &vc[kvh * hd..];
         unsafe { vsum_rows::imp::<V3, F, T>(sc, np, np, group, vb, kv_dim, out, hd) };
@@ -2658,7 +2815,7 @@ multiversion! {
     /// `softmax` of the scores src[t * stride], t in 0..dst.len(), written to
     /// dst: gathered, then `vmath::softmax` in place, so the same bits as
     /// `softmax` on a copy.
-    fn softmax_from<V3, F>(src: &[f32], stride: usize, dst: &mut [f32]) {
+    fn softmax_from<V3, F>(src: &[f32], stride: usize, sink: Option<f32>, dst: &mut [f32]) {
         let n = dst.len();
         assert!(
             n == 0 || (n - 1) * stride < src.len(),
@@ -2668,7 +2825,7 @@ multiversion! {
             *d = src[t * stride];
         }
         // SAFETY: V3 only in the v3 variant.
-        unsafe { vmath::softmax::<V3, F>(dst) };
+        unsafe { softmax_opt::<V3, F>(dst, sink) };
     }
 }
 
@@ -3064,6 +3221,10 @@ pub(crate) mod gemma3_tests;
 mod moe_tests;
 
 #[cfg(test)]
+#[path = "model/gptoss_tests.rs"]
+mod gptoss_tests;
+
+#[cfg(test)]
 pub(crate) mod tests {
     use super::*;
     use crate::vmath::fmadd;
@@ -3107,7 +3268,9 @@ pub(crate) mod tests {
         let mut out = vec![0f32; q.len()];
         let mut buf = Vec::new();
         let threads = Pool::global().threads();
-        attend(q, kc, vc, kv_dim, hd, np, tile, threads, &mut buf, &mut out);
+        attend(
+            q, kc, vc, kv_dim, hd, np, tile, threads, None, &mut buf, &mut out,
+        );
         out
     }
 
@@ -4605,7 +4768,7 @@ pub(crate) mod tests {
     /// K-quants, Q8_0 32-blocks for Q5_0/Q8_0) and dequantized, in f64.
     fn quantized_values(qt: u32, inp: &[f32]) -> Vec<f64> {
         let mut out = Vec::with_capacity(inp.len());
-        if matches!(qt, Q4_0 | Q4_1 | Q5_0 | Q5_1 | Q8_0) {
+        if matches!(qt, Q4_0 | Q4_1 | Q5_0 | Q5_1 | Q8_0 | IQ4_NL) {
             for c in inp.chunks(32) {
                 let amax = c.iter().fold(0f32, |m, v| m.max(v.abs()));
                 let d = crate::quant::f16_to_f32(crate::quant::f32_to_f16(amax / 127.0));
@@ -5027,10 +5190,10 @@ pub(crate) mod tests {
                 for stride in [1, 3] {
                     let src = mixed(n * stride, next(), 8.0, edgy);
                     let (mut a, mut b) = (vec![0.0; n], vec![1.0; n]);
-                    softmax_from::portable(&src, stride, &mut a);
-                    unsafe { softmax_from::v3(&src, stride, &mut b) };
+                    softmax_from::portable(&src, stride, None, &mut a);
+                    unsafe { softmax_from::v3(&src, stride, None, &mut b) };
                     assert_eq!(bits(&a), bits(&b), "softmax_from n={n}");
-                    unsafe { softmax_from::fma(&src, stride, &mut b) };
+                    unsafe { softmax_from::fma(&src, stride, None, &mut b) };
                     assert_eq!(bits(&a), bits(&b), "softmax_from fma n={n}");
                 }
             }
@@ -5062,13 +5225,13 @@ pub(crate) mod tests {
                 assert_eq!(bits(&a), bits(&b), "dot_group hd={hd} g={group}");
 
                 let (mut a, mut b) = (vec![0.0; np], vec![1.0; np]);
-                score_softmax::portable(&qg[..hd], &kc, kv_dim, off, scale, &mut a);
-                unsafe { score_softmax::v3(&qg[..hd], &kc, kv_dim, off, scale, &mut b) };
+                score_softmax::portable(&qg[..hd], &kc, kv_dim, off, scale, None, &mut a);
+                unsafe { score_softmax::v3(&qg[..hd], &kc, kv_dim, off, scale, None, &mut b) };
                 assert_eq!(bits(&a), bits(&b), "score_softmax hd={hd} np={np}");
-                score_softmax::portable(&qg[..hd], &kh, kv_dim, off, scale, &mut a);
-                unsafe { score_softmax::v3(&qg[..hd], &kh, kv_dim, off, scale, &mut b) };
+                score_softmax::portable(&qg[..hd], &kh, kv_dim, off, scale, None, &mut a);
+                unsafe { score_softmax::v3(&qg[..hd], &kh, kv_dim, off, scale, None, &mut b) };
                 assert_eq!(bits(&a), bits(&b), "score_softmax f16 hd={hd} np={np}");
-                unsafe { score_softmax::fma(&qg[..hd], &kh, kv_dim, off, scale, &mut b) };
+                unsafe { score_softmax::fma(&qg[..hd], &kh, kv_dim, off, scale, None, &mut b) };
                 assert_eq!(bits(&a), bits(&b), "score_softmax fma hd={hd} np={np}");
 
                 let (mut a, mut b) = (vec![0.0; tc * group], vec![1.0; tc * group]);
@@ -5090,13 +5253,19 @@ pub(crate) mod tests {
 
                 let (mut sa, mut sb) = (vec![0.0; (np + 1) * group], vec![1.0; (np + 1) * group]);
                 let (mut a, mut b) = (vec![0.0; group * hd], vec![1.0; group * hd]);
-                attend_causal::portable(&qg, &kh, &vh, kv_dim, hd, kvh, np, scale, &mut sa, &mut a);
+                attend_causal::portable(
+                    &qg, &kh, &vh, kv_dim, hd, kvh, np, scale, None, &mut sa, &mut a,
+                );
                 unsafe {
-                    attend_causal::v3(&qg, &kh, &vh, kv_dim, hd, kvh, np, scale, &mut sb, &mut b)
+                    attend_causal::v3(
+                        &qg, &kh, &vh, kv_dim, hd, kvh, np, scale, None, &mut sb, &mut b,
+                    )
                 };
                 assert_eq!(bits(&a), bits(&b), "attend_causal hd={hd} np={np}");
                 unsafe {
-                    attend_causal::fma(&qg, &kh, &vh, kv_dim, hd, kvh, np, scale, &mut sb, &mut b)
+                    attend_causal::fma(
+                        &qg, &kh, &vh, kv_dim, hd, kvh, np, scale, None, &mut sb, &mut b,
+                    )
                 };
                 assert_eq!(bits(&a), bits(&b), "attend_causal fma hd={hd} np={np}");
             }
@@ -5145,7 +5314,7 @@ pub(crate) mod tests {
                 // SAFETY: V3 false.
                 unsafe {
                     attend_causal::imp::<false, false, f32>(
-                        &q, &kc, &vc, hd, hd, 0, np, scale, &mut sc, &mut out,
+                        &q, &kc, &vc, hd, hd, 0, np, scale, None, &mut sc, &mut out,
                     )
                 };
                 for g in 0..group {
@@ -5178,7 +5347,7 @@ pub(crate) mod tests {
                     let mut w = vec![f32::NAN; np];
                     // SAFETY: V3 false.
                     unsafe {
-                        score_softmax::imp::<false, false, f32>(qv, &kc, hd, 0, scale, &mut w)
+                        score_softmax::imp::<false, false, f32>(qv, &kc, hd, 0, scale, None, &mut w)
                     };
                     for t in 0..np {
                         assert_eq!(w[t].to_bits(), (e[t] * inv).to_bits(), "weights t={t}");
@@ -5284,7 +5453,7 @@ pub(crate) mod tests {
         let mut got = vec![f32::NAN; nq];
         for (kvh, o) in got.chunks_exact_mut(group * hd).enumerate() {
             let qg = &q[kvh * group * hd..(kvh + 1) * group * hd];
-            attend_group(qg, kc, vc, kv_dim, hd, kvh, np, o);
+            attend_group(qg, kc, vc, kv_dim, hd, kvh, np, None, o);
         }
         if let Some(i) = (0..nq).find(|&i| got[i].to_bits() != want[i].to_bits()) {
             panic!(
@@ -5296,7 +5465,9 @@ pub(crate) mod tests {
         for tile in tiles {
             for threads in [1, 5, 18, 64] {
                 let mut got = vec![f32::NAN; nq];
-                attend(q, kc, vc, kv_dim, hd, np, tile, threads, buf, &mut got);
+                attend(
+                    q, kc, vc, kv_dim, hd, np, tile, threads, None, buf, &mut got,
+                );
                 if let Some(i) = (0..nq).find(|&i| got[i].to_bits() != want[i].to_bits()) {
                     panic!(
                         "{ty} hd={hd} group={group} n_kv={n_kv} np={np} tile={tile:?} \

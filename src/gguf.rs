@@ -349,10 +349,22 @@ const QTYPES: &[QType] = &[
         block_bytes: 292,
     },
     QType {
+        id: 20,
+        name: "IQ4_NL",
+        block_size: 32,
+        block_bytes: 18,
+    },
+    QType {
         id: 30,
         name: "BF16",
         block_size: 1,
         block_bytes: 2,
+    },
+    QType {
+        id: 39,
+        name: "MXFP4",
+        block_size: 32,
+        block_bytes: 17,
     },
 ];
 

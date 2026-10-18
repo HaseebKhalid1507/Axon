@@ -55,6 +55,66 @@ pub(crate) fn compare<R: Lm, O: Lm>(r: &R, o: &O, ids: &[u32], steps: usize, a: 
     compare_from(r, &mut rc, o, &mut oc, last, rest.len(), steps, a);
 }
 
+/// The reference's half of `compare`, run once: its logits after the
+/// prompt and after each of `steps` greedy tokens of its own (exactly the
+/// calls `compare` makes on it), so several models can be graded against
+/// one reference pass (`compare_trace`) instead of recomputing it per model.
+pub(crate) struct Trace {
+    ids: Vec<u32>,
+    steps: usize,
+    /// (token fed at position rest.len() + s, the reference's logits there).
+    at: Vec<(u32, Vec<f32>)>,
+}
+
+impl Trace {
+    /// The reference's greedy picks: the tokens fed after the prompt's last
+    /// (`steps` of them).
+    pub(crate) fn picks(&self) -> Vec<u32> {
+        self.at[1..].iter().map(|(t, _)| *t).collect()
+    }
+}
+
+pub(crate) fn trace<R: Lm>(r: &R, ids: &[u32], steps: usize) -> Trace {
+    let mut rc = r.new_cache(ids.len() + steps + 1);
+    let (&last, rest) = ids.split_last().unwrap();
+    r.feed_batch(rest, 0, &mut rc);
+    let mut tok = last;
+    let mut at = Vec::with_capacity(steps + 1);
+    for s in 0..=steps {
+        let lr = r.forward(tok, rest.len() + s, &mut rc);
+        let next = crate::argmax(&lr);
+        at.push((tok, lr));
+        tok = next;
+    }
+    Trace {
+        ids: ids.to_vec(),
+        steps,
+        at,
+    }
+}
+
+/// `compare(r, o, ids, steps, a)` with `t = trace(r, ids, steps)`: the same
+/// calls on `o`, the same tally.
+pub(crate) fn compare_trace<O: Lm>(t: &Trace, o: &O, a: &mut Agree) {
+    let mut oc = o.new_cache(t.ids.len() + t.steps + 1);
+    let rest = &t.ids[..t.ids.len() - 1];
+    o.feed_batch(rest, 0, &mut oc);
+    a.last_kl = 0.0;
+    for (s, (tok, lr)) in t.at.iter().enumerate() {
+        let lo = o.forward(*tok, rest.len() + s, &mut oc);
+        a.tally(lr, &lo);
+    }
+}
+
+/// `compare` against several models at once: `trace` once, then
+/// `compare_trace` for each (model, tally) pair.
+macro_rules! compare_each {
+    ($r:expr, $ids:expr, $steps:expr, $(($o:expr, $a:expr)),+ $(,)?) => {{
+        let t = $crate::cuda::qwen2::tests::trace($r, $ids, $steps);
+        $($crate::cuda::qwen2::tests::compare_trace(&t, $o, $a);)+
+    }};
+}
+
 /// `compare` from caches already holding positions 0..pos: `last` at pos,
 /// then `steps` greedy tokens of `r`.
 #[allow(clippy::too_many_arguments)]
@@ -74,26 +134,33 @@ pub(crate) fn compare_from<R: Lm, O: Lm>(
         let pos = pos + s;
         let lr = r.forward(tok, pos, rc);
         let lo = o.forward(tok, pos, oc);
-        let (ar, ao) = (crate::argmax(&lr), crate::argmax(&lo));
-        a.positions += 1;
-        a.top1 += (ar == ao) as usize;
-        let k = kl(&lr, &lo);
-        a.max_kl = a.max_kl.max(k);
+        a.tally(&lr, &lo);
+        tok = crate::argmax(&lr);
+    }
+}
+
+impl Agree {
+    /// One position: reference logits `lr`, the other's `lo`.
+    fn tally(&mut self, lr: &[f32], lo: &[f32]) {
+        let (ar, ao) = (crate::argmax(lr), crate::argmax(lo));
+        self.positions += 1;
+        self.top1 += (ar == ao) as usize;
+        let k = kl(lr, lo);
+        self.max_kl = self.max_kl.max(k);
         if k > 0.5 {
-            a.over_half
-                .push((a.positions, k, top2_margin(&lr), a.last_kl));
+            self.over_half
+                .push((self.positions, k, top2_margin(lr), self.last_kl));
         }
-        a.last_kl = k;
-        a.sum_kl += k;
-        for (x, y) in lr.iter().zip(&lo) {
-            a.max_abs = a.max_abs.max((x - y).abs());
+        self.last_kl = k;
+        self.sum_kl += k;
+        for (x, y) in lr.iter().zip(lo) {
+            self.max_abs = self.max_abs.max((x - y).abs());
         }
         if ar != ao {
             // How close a call it was, in the reference's logits.
-            a.flips.push(lr[ar as usize] - lr[ao as usize]);
-            a.flip_at.push(a.positions);
+            self.flips.push(lr[ar as usize] - lr[ao as usize]);
+            self.flip_at.push(self.positions);
         }
-        tok = ar;
     }
 }
 
@@ -133,8 +200,7 @@ fn agreement(m: &Model, steps: usize) -> (Agree, Agree) {
     let (mut ag, mut ac) = (Agree::default(), Agree::default());
     for p in PROMPTS {
         let ids = tok.encode(p);
-        compare(&cpu, &gpu, &ids, steps, &mut ag);
-        compare(&cpu, &rows, &ids, steps, &mut ac);
+        compare_each!(&cpu, &ids, steps, (&gpu, &mut ag), (&rows, &mut ac));
     }
     (ag, ac)
 }
@@ -520,6 +586,12 @@ fn gpu_gemv_matches_cpu_new_types() {
         (Q5_K, 8960),
         (Q4_1, 896),
         (Q5_1, 4864),
+        (Q2_K, 1536),
+        (Q2_K, 18944),
+        (Q3_K, 3584),
+        (Q3_K, 8960),
+        (IQ4_NL, 896),
+        (IQ4_NL, 4864),
     ] {
         let rows = 333;
         let w = synth_matrix(&mut rng, qt, rows, cols);
@@ -1349,11 +1421,27 @@ fn continuations_with<R: Lm, O: Lm>(
     name: &str,
     tie: f32,
 ) -> (usize, usize) {
+    continuations_by(&mut |ids| greedy(r, ids, 32, true), o, tok, name, tie)
+}
+
+/// `greedy(.., keep: true)`'s picks and logits.
+type Continuation = (Vec<u32>, Vec<Vec<f32>>);
+
+/// `continuations_with` with the reference's `greedy(r, ids, 32, true)`
+/// from `reference` (called once per prompt, in PROMPTS order, after `o`'s
+/// continuation): `continuations_match` computes it once for several models.
+fn continuations_by<O: Lm>(
+    reference: &mut dyn FnMut(&[u32]) -> Continuation,
+    o: &O,
+    tok: &crate::tokenizer::Tokenizer,
+    name: &str,
+    tie: f32,
+) -> (usize, usize) {
     let (mut same, mut matched) = (0, 0);
     for p in PROMPTS {
         let ids = tok.encode(p);
         let (to, _) = greedy(o, &ids, 32, false);
-        let (tr, lr) = greedy(r, &ids, 32, true);
+        let (tr, lr) = reference(&ids);
         match (0..32).find(|&i| to[i] != tr[i]) {
             None => {
                 same += 1;
@@ -1411,11 +1499,31 @@ fn continuations_match(m: &Model, name: &str) {
     let mut gpu = CudaQwen2::new(&g, &km, m, 256).unwrap();
     let rows = Qwen2::new_with(m, false);
     let cpu = Qwen2::new(m);
-    let (cs, cm) = continuations_with(&cpu, &rows, &tok, &format!("{name} cpu rows"), tie);
+    // The CPU's continuations (with logits), once for all the comparisons.
+    let refs: Vec<_> = PROMPTS
+        .iter()
+        .map(|p| {
+            let ids = tok.encode(p);
+            let c = greedy(&cpu, &ids, 32, true);
+            (ids, c)
+        })
+        .collect();
+    let refs = &refs;
+    let by_ref = || {
+        let mut i = 0;
+        move |ids: &[u32]| {
+            i += 1;
+            let (want, c) = &refs[i - 1];
+            debug_assert_eq!(ids, &want[..], "continuations_by asks in PROMPTS order");
+            c.clone()
+        }
+    };
+    let (cs, cm) = continuations_by(&mut by_ref(), &rows, &tok, &format!("{name} cpu rows"), tie);
     let paths: &[bool] = if km.mma() { &[true, false] } else { &[false] };
     for &tc in paths {
         gpu.set_tc_attn(tc); // greedy makes its caches after this
-        let (gs, gm) = continuations_with(&cpu, &gpu, &tok, &format!("{name} gpu tc {tc}"), tie);
+        let name = format!("{name} gpu tc {tc}");
+        let (gs, gm) = continuations_by(&mut by_ref(), &gpu, &tok, &name, tie);
         assert!(
             gs + 2 >= cs,
             "tc {tc}: identical continuations: gpu {gs}, cpu rows {cs}"
@@ -1607,8 +1715,10 @@ fn gpu_yarn_matches_reference_and_keeps_bits() {
 /// Llama-3.2-1B-Instruct, mapped (as `qwen3_mapped`): head_dim 64, GQA 4,
 /// tied Q6_K head, Llama 3 RoPE factors, q/k rows reordered at load.
 fn llama_mapped() -> Option<Model> {
-    crate::testutil::llama_model()?;
-    model_at(crate::testutil::LLAMA_MODEL)
+    // llama_model's path (AXON_TEST_LLAMA, skip or panic as it does),
+    // mapped; not llama_model itself, which loads a whole copy.
+    let p = crate::testutil::llama_model_path()?;
+    Some(crate::gguf::load_with(p.to_str().unwrap(), Some(false)).unwrap())
 }
 
 /// Llama-3.2-3B-Instruct Q4_K_M (head_dim 128, GQA 3: 24 query heads on 8),
@@ -2059,8 +2169,7 @@ fn gpu_logits_match_cpu_long_context() {
             .cycle()
             .take(1100 + one.len() / 2)
             .collect();
-        compare(&cpu, &gpu, &ids, 8, &mut ag);
-        compare(&cpu, &rows, &ids, 8, &mut ac);
+        compare_each!(&cpu, &ids, 8, (&gpu, &mut ag), (&rows, &mut ac));
     }
     report("0.5B long gpu vs cpu", &ag);
     report("0.5B long cpu rows vs cpu", &ac);
@@ -2094,8 +2203,7 @@ fn gpu_logits_match_cpu_2000_tokens() {
     let (mut ag, mut ac) = (Agree::default(), Agree::default());
     let one = tok.encode(&format!("{} ", PROMPTS[4]));
     let ids: Vec<u32> = one.iter().copied().cycle().take(2000).collect();
-    compare(&cpu, &gpu, &ids, 6, &mut ag);
-    compare(&cpu, &rows, &ids, 6, &mut ac);
+    compare_each!(&cpu, &ids, 6, (&gpu, &mut ag), (&rows, &mut ac));
     report("0.5B 2000 gpu vs cpu", &ag);
     report("0.5B 2000 cpu rows vs cpu", &ac);
     let n = ag.positions;
@@ -2122,8 +2230,7 @@ fn natural_long(m: &Model, name: &str) {
     let cpu = Qwen2::new(m);
     let ids = natural_ids(m, 1600);
     let (mut ag, mut ac) = (Agree::default(), Agree::default());
-    compare_forced(&cpu, &gpu, &ids, 1100, &mut ag);
-    compare_forced(&cpu, &rows, &ids, 1100, &mut ac);
+    compare_forced2(&cpu, &gpu, &rows, &ids, 1100, &mut ag, &mut ac);
     report(&format!("{name} natural 1100..1600 gpu vs cpu"), &ag);
     report(&format!("{name} natural 1100..1600 cpu rows vs cpu"), &ac);
     // Measured, GPU / CPU per-row vs CPU (top-1, mean KL, max KL): 0.5B
@@ -2645,6 +2752,9 @@ fn type_name(qt: u32) -> &'static str {
         Q4_0 => "q4_0",
         Q4_1 => "q4_1",
         Q5_1 => "q5_1",
+        Q2_K => "q2_k",
+        Q3_K => "q3_k",
+        IQ4_NL => "iq4_nl",
         _ => "q5_0",
     }
 }
@@ -2664,14 +2774,23 @@ fn synth_matrix(rng: &mut Rng, qt: u32, rows: usize, cols: usize) -> Vec<u8> {
         Q4_0 => (18, 32),
         Q4_1 => (20, 32),
         Q5_1 => (24, 32),
+        Q2_K => (84, 256),
+        Q3_K => (110, 256),
+        IQ4_NL => (18, 32),
         _ => (22, 32),
     };
     for b in 0..rows * cols / vb {
-        let o = b * bb + if qt == Q6_K { 208 } else { 0 };
+        let o = b * bb
+            + match qt {
+                Q6_K => 208,
+                Q2_K => 80,
+                Q3_K => 108,
+                _ => 0,
+            };
         let mut scale = || (0x1000u16 + (rng.next() & 0x7ff) as u16) | (rng.next() as u16 & 0x8000);
         let d = scale();
         w[o..o + 2].copy_from_slice(&d.to_le_bytes());
-        if matches!(qt, Q4_K | Q5_K | Q4_1 | Q5_1) {
+        if matches!(qt, Q4_K | Q5_K | Q4_1 | Q5_1 | Q2_K) {
             let dmin = scale();
             w[o + 2..o + 4].copy_from_slice(&dmin.to_le_bytes());
         }
@@ -2727,6 +2846,14 @@ fn gpu_batched_products_match_gemv_bits() {
         "synth Q4_1 4864",
         "synth Q5_1 896",
         "synth Q5_1 4864",
+        "synth Q2_K 1536",
+        "synth Q2_K 3584",
+        "synth Q2_K 18944",
+        "synth Q3_K 768",
+        "synth Q3_K 1536",
+        "synth Q3_K 18944",
+        "synth IQ4_NL 896",
+        "synth IQ4_NL 4864",
     ] {
         let synth: Vec<u8>;
         let (qt, cols, rows, wd): (u32, usize, usize, &[u8]) = if name.starts_with("synth") {
@@ -2739,6 +2866,9 @@ fn gpu_batched_products_match_gemv_bits() {
                 "Q4_0" => Q4_0,
                 "Q4_1" => Q4_1,
                 "Q5_1" => Q5_1,
+                "Q2_K" => Q2_K,
+                "Q3_K" => Q3_K,
+                "IQ4_NL" => IQ4_NL,
                 _ => Q5_0,
             };
             let cols: usize = f[2].parse().unwrap();
@@ -2812,7 +2942,9 @@ fn gpu_batched_products_match_gemv_bits() {
         eprintln!("{name} {}: bit-identical", crate::gguf::qtype(qt).name);
         seen.push(qt);
     }
-    for qt in [Q4_K, Q6_K, Q5_0, Q8_0, Q5_K, Q4_0, Q4_1, Q5_1] {
+    for qt in [
+        Q4_K, Q6_K, Q5_0, Q8_0, Q5_K, Q4_0, Q4_1, Q5_1, Q2_K, Q3_K, IQ4_NL,
+    ] {
         assert!(seen.contains(&qt), "type {qt} not covered");
     }
 }
@@ -2829,8 +2961,10 @@ fn gpu_products_match_reference_bits() {
     let km = Kernels::module_ext(&g).unwrap();
     let mut rng = Rng(0x0dd5_eed5_2026_1014);
     let mut cases: Vec<(u32, usize, usize)> = Vec::new();
-    for qt in [Q4_K, Q6_K, Q8_0, Q5_0, Q5_K, Q4_0, Q4_1, Q5_1] {
-        let vb = if matches!(qt, Q4_K | Q5_K | Q6_K) {
+    for qt in [
+        Q4_K, Q6_K, Q8_0, Q5_0, Q5_K, Q4_0, Q4_1, Q5_1, Q2_K, Q3_K, IQ4_NL,
+    ] {
+        let vb = if matches!(qt, Q4_K | Q5_K | Q6_K | Q2_K | Q3_K) {
             256
         } else {
             32
@@ -3025,7 +3159,7 @@ fn gpu_swiglu_epilogue_and_gate_up_match_reference() {
 /// The tensor-core GEMMs of a type (prefill.cu gemm2_*).
 /// Whether type qt has gemvm kernels.
 fn has_gemvm(qt: u32) -> bool {
-    !matches!(qt, Q4_1 | Q5_1)
+    !matches!(qt, Q4_1 | Q5_1 | Q2_K | Q3_K | IQ4_NL)
 }
 
 fn gemm2_names(qt: u32) -> Vec<String> {
@@ -3297,7 +3431,7 @@ fn prefill_with(net: &CudaQwen2, ids: &[u32], sizes: &[usize]) -> (Vec<u16>, Vec
 /// token's logit bits are identical.
 fn prefill_bits(m: &Model, name: &str, kv: CacheKv) {
     let g = crate::testutil::gpu().unwrap();
-    let km = Kernels::module(&g).unwrap();
+    let km = Kernels::module_for(&g, m).unwrap();
     let ids = long_ids(m, 1200);
     let mut net = CudaQwen2::new(&g, &km, m, ids.len() + 1).unwrap();
     net.kv = kv;
@@ -3700,7 +3834,7 @@ fn gpu_prefill_batchings_bit_identical_1_5b() {
 /// the max batch) passes.
 fn verify_bits(m: &Model, name: &str, kv: CacheKv) {
     let g = crate::testutil::gpu().unwrap();
-    let km = Kernels::module(&g).unwrap();
+    let km = Kernels::module_for(&g, m).unwrap();
     let prompt = long_ids(m, 90);
     let mut net = CudaQwen2::new(&g, &km, m, 1400).unwrap();
     net.kv = kv;
@@ -3932,6 +4066,361 @@ fn gpu_verify_matches_forward_argmax_1_5b() {
         return;
     };
     verify_bits(&m, "1.5B", CacheKv::F16);
+}
+
+/// The files the Q2_K / Q3_K tests run on, and the new types each holds.
+/// bartowski's 0.5B "Q2_K" and "Q3_K_M" have NO Q2_K and NO Q3_K tensors
+/// respectively at 896 columns: llama.cpp stores those rows as IQ4_NL (896
+/// isn't a multiple of 256); the 0.5B Q2_K's 4864-wide ffn_down is Q3_K.
+/// Real Q2_K tensors exist only in the 7B Q2_K here.
+const Q23_FILES: [(&str, &str, &[u32]); 5] = [
+    (
+        "Qwen2.5-0.5B-Instruct-Q2_K.gguf",
+        "0.5B Q2_K",
+        &[IQ4_NL, Q3_K],
+    ),
+    (
+        "Qwen2.5-0.5B-Instruct-Q3_K_M.gguf",
+        "0.5B Q3_K_M",
+        &[IQ4_NL],
+    ),
+    ("Qwen2.5-1.5B-Instruct-Q3_K_M.gguf", "1.5B Q3_K_M", &[Q3_K]),
+    (
+        "Llama-3.2-1B-Instruct-Q3_K_L.gguf",
+        "llama 1B Q3_K_L",
+        &[Q3_K],
+    ),
+    ("Qwen2.5-7B-Instruct-Q2_K.gguf", "7B Q2_K", &[Q2_K, Q3_K]),
+];
+
+/// `f` (one of `Q23_FILES`) loaded, after checking it holds the types it's
+/// listed with; None (said loudly) when the file isn't there.
+fn q23_model(f: &str, want: &[u32]) -> Option<Model> {
+    let m = model_at(&format!("models/{f}"));
+    match &m {
+        None => eprintln!("SKIPPING {f}: not in models/ (its Q2_K/Q3_K/IQ4_NL coverage is lost)"),
+        Some(m) => {
+            for &qt in want {
+                assert!(
+                    m.tensors.iter().any(|t| t.qtype.id == qt),
+                    "{f}: no {} tensor",
+                    crate::gguf::qtype(qt).name
+                );
+            }
+        }
+    }
+    m
+}
+
+/// Asserts the runs covered all three new types, unless a file was missing.
+fn q23_assert_covered(seen: &[u32], all_present: bool, what: &str) {
+    if !all_present {
+        eprintln!("SKIPPING {what}'s coverage check: model files missing (see above)");
+        return;
+    }
+    for qt in [Q2_K, Q3_K, IQ4_NL] {
+        assert!(
+            seen.contains(&qt),
+            "{what}: {} not covered",
+            crate::gguf::qtype(qt).name
+        );
+    }
+}
+
+/// The new types' products on the real files' weights (every Q2_K / Q3_K /
+/// IQ4_NL matrix of the first two layers and the last): the decode GEMV within
+/// f32 rounding of the CPU's dot_row_q8 (relative to sum |w x|) on the same
+/// quantized activation, and every batched kernel (gemvn, the tensor-core
+/// gemm2 / gemm2s) == the GEMV bit for bit, at batches below, inside and past
+/// the tiles. A wrong sub-block scale moves a row by ~1e-3 of sum |w x|.
+#[test]
+fn gpu_products_real_weights_q2k_q3k() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module_ext(&g).unwrap();
+    let mut rng = Rng(0x0a3b_2c1d_7e6f_5a4b);
+    let (mut seen, mut all_present) = (Vec::new(), true);
+    for (f, _, want) in Q23_FILES {
+        let Some(m) = q23_model(f, want) else {
+            all_present = false;
+            continue;
+        };
+        let nl = m
+            .tensors
+            .iter()
+            .filter(|t| t.name.ends_with("attn_norm.weight"))
+            .count();
+        let mut file_seen = Vec::new();
+        for t in &m.tensors {
+            let qt = t.qtype.id;
+            let layer_ok = [0, 1, nl - 1]
+                .iter()
+                .any(|l| t.name.starts_with(&format!("blk.{l}.")));
+            if !matches!(qt, Q2_K | Q3_K | IQ4_NL) || !layer_ok || t.dims.len() != 2 {
+                continue;
+            }
+            let cols = t.dims[0] as usize;
+            let rb = quant::row_bytes(qt, cols);
+            let rows = (t.n_elements as usize / cols).min(1001);
+            let wd = &m.tensor_data(t)[..rows * rb];
+            let w = g.upload(wd).unwrap();
+            let x = rng.vec(cols, 2.0);
+            let want = gpu_gemv(&g, &km, "gemv", qt, wd, cols, &x);
+            let xq = quant::QuantizedAct::for_types(&x, &[qt]);
+            let mut row = vec![0f32; cols];
+            let mut worst = 0f64;
+            for r in 0..rows {
+                let wr = &wd[r * rb..(r + 1) * rb];
+                let cpu = quant::dot_row_q8(qt, wr, &xq) as f64;
+                quant::dequant(qt, wr, &mut row);
+                let mag: f64 = row
+                    .iter()
+                    .zip(&x)
+                    .map(|(&a, &b)| (a as f64 * b as f64).abs())
+                    .sum();
+                worst = worst.max((want[r] as f64 - cpu).abs() / mag.max(1e-30));
+            }
+            assert!(worst < 1e-6, "{f} {}: gemv vs cpu {worst:e}", t.name);
+            for nb in [7usize, 77, 129] {
+                let xs: Vec<Vec<f32>> = (0..nb).map(|_| rng.vec(cols, 2.0)).collect();
+                let wants: Vec<Vec<f32>> = xs
+                    .iter()
+                    .map(|x| gpu_gemv(&g, &km, "gemv", qt, wd, cols, x))
+                    .collect();
+                let act = quantize_batch(&g, &km, &xs, cols);
+                let mut kernels: Vec<String> = vec!["gemvn_2x8".into(), "gemvn_2x16".into()];
+                if km.mma() {
+                    kernels.extend(gemm2_names(qt));
+                }
+                for k in &kernels {
+                    let got =
+                        gpu_batched(&g, &km, k, qt, &w, rows, cols, &act, nb, &Epi::default());
+                    for z in 0..nb {
+                        assert_eq!(
+                            bits(&got[z * rows..(z + 1) * rows]),
+                            bits(&wants[z]),
+                            "{f} {} {k} nb {nb} token {z}",
+                            t.name
+                        );
+                    }
+                }
+            }
+            eprintln!(
+                "{f} {} ({}): gemv vs cpu {worst:.2e}; batched == gemv",
+                t.name,
+                crate::gguf::qtype(qt).name
+            );
+            file_seen.push(qt);
+        }
+        for &qt in want {
+            assert!(
+                file_seen.contains(&qt),
+                "{f}: no {} matrix checked",
+                crate::gguf::qtype(qt).name
+            );
+        }
+        seen.extend(file_seen);
+    }
+    q23_assert_covered(&seen, all_present, "gpu_products_real_weights_q2k_q3k");
+}
+
+/// The Q2_K / Q3_K / IQ4_NL files, GPU vs CPU: `assert_graded`'s rules, with
+/// the near-tie flip rules scaled by the CPU's own spread on the same file
+/// (`ac`, its per-row vs its default kernels; on these files only their
+/// Q4_K / Q6_K / Q5_0 / Q8_0 rows differ between the two sets, so `ac`
+/// measures how much the model amplifies last-bit noise, not Q2_K/Q3_K).
+/// Measured on sm_120 (1017-173844-9d79), 1.5B Q3_K_M: GPU vs CPU 188/198
+/// top-1, mean KL 1.13e-2, flips 0.55 / 0.78 / 0.81 at >= 0.5; the CPU vs
+/// itself 187/198, 1.23e-2 (1.6x the 1.5B Q4_K_M's 7.8e-3), largest flip
+/// 0.42. So:
+/// - top-1 within 2 points of the CPU's self-agreement and >= 94%;
+/// - every flip below max(0.5, 2x the CPU's largest self-flip margin, half
+///   the CPU's own max |dlogit| on the file): flipping a margin m moves two
+///   logits m apart, and the CPU's two kernel sets move single logits by up
+///   to `ac.max_abs` against each other on the same positions. Measured on
+///   the 0.5B Q2_K (sm_120, 1018-014632-e746 and 1017-195144-d5d0, the same
+///   numbers twice): one flip of 0.95 at the haiku prompt's step 22 (EOT vs
+///   "\n"), CPU max |dlogit| 2.29, so a 1.14 bound. It is attention-order
+///   noise, not a product deviation: on the same positions
+///   (dump_logits_positions, 1018-023350-ffd4) the GPU with the split
+///   attention (another in-contract float order, the same weight kernels)
+///   keeps the CPU's token there (margin 0.88), and flips other near-ties
+///   instead (0.53, 0.59); llama.cpp's CPU and CUDA both keep the CPU's token
+///   (1018-022009-945f), though its own CPU vs CUDA spread on this file is
+///   smaller (max flip 0.15; 3.48 on the 0.5B Q3_K_M: 1018-013634-86b9), and
+///   the products are exact (gpu_products_real_weights_q2k_q3k);
+/// - flips at >= 0.5: at most max(2, CPU's own + 2, 2 x the CPU's self-KL
+///   over the 1.5B Q4_K_M's 7.8e-3, rounded up): a file whose CPU kernel sets
+///   disagree k times as much gets k times assert_graded's 2;
+/// - mean KL within 2x the CPU's own (absolute 5e-3 where the CPU's two
+///   sets nearly agree), KL above 0.5 at one position at most and only where
+///   the CPU flips too, none above 2, max |dlogit| below 6.
+///
+/// The products themselves are checked exactly (gpu_products_real_weights_q2k_q3k).
+#[test]
+fn gpu_logits_match_cpu_q2k_q3k() {
+    if crate::testutil::gpu().is_none() {
+        return;
+    }
+    let (mut seen, mut all_present) = (Vec::new(), true);
+    for (f, name, want) in Q23_FILES {
+        let Some(m) = q23_model(f, want) else {
+            all_present = false;
+            continue;
+        };
+        let (ag, ac) = agreement(&m, 32);
+        report(&format!("{name} gpu vs cpu"), &ag);
+        report(&format!("{name} cpu rows vs cpu"), &ac);
+        let n = ag.positions;
+        assert!(
+            ag.top1 * 100 + 2 * n >= ac.top1 * 100 && ag.top1 * 100 >= 94 * n,
+            "{name}: top-1 {}/{n} (cpu vs itself {})",
+            ag.top1,
+            ac.top1
+        );
+        let ac_flip = ac.flips.iter().fold(0f32, |a, &d| a.max(d));
+        let tie = (2.0 * ac_flip).max(0.5).max(ac.max_abs / 2.0);
+        let self_kl = ac.sum_kl / n as f64;
+        let ac_wide = ac.flips.iter().filter(|&&d| d >= 0.5).count();
+        let scaled = (2.0 * self_kl / 7.8e-3).ceil() as usize;
+        let max_wide = 2.max(ac_wide + 2).max(scaled);
+        let wide = ag.flips.iter().filter(|&&d| d >= 0.5).count();
+        assert!(
+            ag.flips.iter().all(|&d| d < tie) && wide <= max_wide,
+            "{name}: a flip >= {tie} or {wide} > {max_wide} at >= 0.5: {:?}",
+            ag.flips
+        );
+        let kl_cap = if self_kl > 1e-4 {
+            2.0 * ac.sum_kl
+        } else {
+            5e-3 * n as f64
+        };
+        assert!(ag.sum_kl <= kl_cap, "{name}: mean KL");
+        assert!(
+            ag.over_half.len() <= 1 && ag.max_kl < 2.0,
+            "{name}: max KL {} (above 0.5: {:?})",
+            ag.max_kl,
+            ag.over_half
+        );
+        for &(i, k, mg, _) in &ag.over_half {
+            assert!(
+                ac.flip_at.contains(&i),
+                "{name}: KL {k} at position {i} (margin {mg}), where the CPU's kernel sets agree"
+            );
+        }
+        assert!(
+            ag.max_abs < 6.0,
+            "{name}: max logit difference {}",
+            ag.max_abs
+        );
+        seen.extend_from_slice(want);
+    }
+    q23_assert_covered(&seen, all_present, "gpu_logits_match_cpu_q2k_q3k");
+}
+
+/// Dumps `gpu_logits_match_cpu_q2k_q3k`'s positions for an outside
+/// comparison (llama.cpp CPU vs CUDA on the same token prefixes): for the
+/// model at $AXON_DUMP_MODEL, PROMPTS with 32 greedy CPU steps each; per
+/// position the prefix ids and the top-20 log-probabilities of the CPU (to
+/// $AXON_DUMP_OUT.axon-cpu.json) and of the GPU (.axon-cuda.json), in
+/// scripts/oracle/llama_logits.py's format.
+#[test]
+#[ignore]
+fn dump_logits_positions() {
+    let (Ok(path), Ok(out)) = (
+        std::env::var("AXON_DUMP_MODEL"),
+        std::env::var("AXON_DUMP_OUT"),
+    ) else {
+        return;
+    };
+    let g = crate::testutil::gpu().unwrap();
+    let m = crate::gguf::load_with(&path, Some(false)).unwrap();
+    let km = Kernels::module_for(&g, &m).unwrap();
+    let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
+    let mut gpu = CudaQwen2::new(&g, &km, &m, 256).unwrap();
+    // AXON_DUMP_SPLIT=1: the split attention (no tensor cores), another
+    // in-contract GPU float order, to see how far a position moves.
+    if std::env::var("AXON_DUMP_SPLIT").as_deref() == Ok("1") {
+        gpu.set_tc_attn(false);
+    }
+    let cpu = Qwen2::new(&m);
+    let top = |l: &[f32]| -> String {
+        let ls = log_softmax(l);
+        let mut idx: Vec<usize> = (0..l.len()).collect();
+        idx.sort_by(|&a, &b| l[b].total_cmp(&l[a]).then(a.cmp(&b)));
+        let v: Vec<String> = idx[..20]
+            .iter()
+            .map(|&i| format!("[{i}, {}]", ls[i]))
+            .collect();
+        format!("[{}]", v.join(", "))
+    };
+    let (mut jc, mut jg) = (Vec::new(), Vec::new());
+    for (pi, p) in PROMPTS.iter().enumerate() {
+        let mut ids = tok.encode(p);
+        let mut rc = cpu.new_cache(ids.len() + 34);
+        let mut oc = gpu.new_cache(ids.len() + 34);
+        let (&last, rest) = ids.split_last().unwrap();
+        let start = rest.len();
+        cpu.feed_batch(rest, 0, &mut rc);
+        gpu.feed_batch(rest, 0, &mut oc);
+        let mut t = last;
+        for s in 0..=32 {
+            let pos = start + s;
+            let lr = cpu.forward(t, pos, &mut rc);
+            let lo = gpu.forward(t, pos, &mut oc);
+            let idl: Vec<String> = ids.iter().map(|i| i.to_string()).collect();
+            let head = format!(
+                "{{\"prompt\": \"p{pi}s{s}\", \"ids\": [{}], \"top\": ",
+                idl.join(", ")
+            );
+            jc.push(format!("{head}{}}}", top(&lr)));
+            jg.push(format!("{head}{}}}", top(&lo)));
+            t = crate::argmax(&lr);
+            ids.push(t);
+        }
+    }
+    std::fs::write(
+        format!("{out}.axon-cpu.json"),
+        format!("[{}]", jc.join(",\n")),
+    )
+    .unwrap();
+    std::fs::write(
+        format!("{out}.axon-cuda.json"),
+        format!("[{}]", jg.join(",\n")),
+    )
+    .unwrap();
+    eprintln!("dumped {} positions", jc.len());
+}
+
+/// The Q2_K / Q3_K files: decode == every prefill batching == prefill from a
+/// fed prefix (cache reuse) == verify, bit for bit, on the f16 cache, and on
+/// the q8 one for the 0.5B Q2_K and the 1.5B Q3_K_M.
+#[test]
+fn gpu_prefill_batchings_bit_identical_q2k_q3k() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let (mut seen, mut all_present) = (Vec::new(), true);
+    for (f, name, want) in Q23_FILES {
+        let Some(m) = q23_model(f, want) else {
+            all_present = false;
+            continue;
+        };
+        prefill_bits(&m, name, CacheKv::F16);
+        verify_bits(&m, name, CacheKv::F16);
+        if matches!(name, "0.5B Q2_K" | "1.5B Q3_K_M") {
+            // Group 32: valid at every head size (64 only where it's head_dim).
+            prefill_bits(&m, name, CacheKv::Q8 { group: 32 });
+            verify_bits(&m, name, CacheKv::Q8 { group: 32 });
+        }
+        seen.extend_from_slice(want);
+    }
+    q23_assert_covered(
+        &seen,
+        all_present,
+        "gpu_prefill_batchings_bit_identical_q2k_q3k",
+    );
 }
 
 /// Where a batched prefill pass spends its time, per kernel kind (events
@@ -5396,24 +5885,37 @@ fn compare_forced<R: Lm, O: Lm>(r: &R, o: &O, ids: &[u32], from: usize, a: &mut 
     for (pos, &t) in ids.iter().enumerate().skip(from) {
         let lr = r.forward(t, pos, &mut rc);
         let lo = o.forward(t, pos, &mut oc);
-        let (ar, ao) = (crate::argmax(&lr), crate::argmax(&lo));
-        a.positions += 1;
-        a.top1 += (ar == ao) as usize;
-        let k = kl(&lr, &lo);
-        a.max_kl = a.max_kl.max(k);
-        if k > 0.5 {
-            a.over_half
-                .push((a.positions, k, top2_margin(&lr), a.last_kl));
-        }
-        a.last_kl = k;
-        a.sum_kl += k;
-        for (x, y) in lr.iter().zip(&lo) {
-            a.max_abs = a.max_abs.max((x - y).abs());
-        }
-        if ar != ao {
-            a.flips.push(lr[ar as usize] - lr[ao as usize]);
-            a.flip_at.push(a.positions);
-        }
+        a.tally(&lr, &lo);
+    }
+}
+
+/// `compare_forced(r, o1, ..)` and `compare_forced(r, o2, ..)` in one
+/// pass: the same calls on each model, the reference's run once (the
+/// teacher-forced inputs don't depend on any model's output).
+#[allow(clippy::too_many_arguments)]
+fn compare_forced2<R: Lm, O1: Lm, O2: Lm>(
+    r: &R,
+    o1: &O1,
+    o2: &O2,
+    ids: &[u32],
+    from: usize,
+    a1: &mut Agree,
+    a2: &mut Agree,
+) {
+    let mut rc = r.new_cache(ids.len());
+    let mut c1 = o1.new_cache(ids.len());
+    let mut c2 = o2.new_cache(ids.len());
+    for (i, ch) in ids[..from].chunks(512).enumerate().filter(|_| from > 0) {
+        r.feed_batch(ch, i * 512, &mut rc);
+        o1.feed_batch(ch, i * 512, &mut c1);
+        o2.feed_batch(ch, i * 512, &mut c2);
+    }
+    a1.last_kl = 0.0;
+    a2.last_kl = 0.0;
+    for (pos, &t) in ids.iter().enumerate().skip(from) {
+        let lr = r.forward(t, pos, &mut rc);
+        a1.tally(&lr, &o1.forward(t, pos, &mut c1));
+        a2.tally(&lr, &o2.forward(t, pos, &mut c2));
     }
 }
 
@@ -6717,12 +7219,12 @@ fn gemma3_vs_cpu(m: &Model, name: &str) {
     let mut seqs = Vec::new();
     for p in PROMPTS {
         let ids = tok.encode(p);
-        compare(&cpu, &gpu, &ids, STEPS, &mut ag);
-        compare(&cpu, &rows, &ids, STEPS, &mut ac);
+        let t = trace(&cpu, &ids, STEPS);
+        compare_trace(&t, &gpu, &mut ag);
+        compare_trace(&t, &rows, &mut ac);
         // compare's position s of this prompt follows ids + the CPU's
-        // first s greedy picks.
-        let (picks, _) = greedy(&cpu, &ids, STEPS, false);
-        seqs.push((ids, picks));
+        // first s greedy picks (the tokens the trace fed).
+        seqs.push((ids, t.picks()));
     }
     report(&format!("{name} gpu vs cpu"), &ag);
     report(&format!("{name} cpu rows vs cpu"), &ac);
@@ -6992,8 +7494,7 @@ fn gpu_gemma3_logits_match_cpu() {
             .cycle()
             .take(1100 + one.len() / 2)
             .collect();
-        compare(&cpu, &gpu, &ids, 8, &mut ag);
-        compare(&cpu, &rows, &ids, 8, &mut ac);
+        compare_each!(&cpu, &ids, 8, (&gpu, &mut ag), (&rows, &mut ac));
     }
     report("gemma3 1B long gpu vs cpu", &ag);
     report("gemma3 1B long cpu rows vs cpu", &ac);

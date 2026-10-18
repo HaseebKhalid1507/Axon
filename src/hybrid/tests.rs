@@ -1,7 +1,9 @@
 use super::*;
 use crate::cuda::Kernels;
 use crate::cuda::qwen2::CacheKv;
-use crate::cuda::qwen2::tests::{Agree, PROMPTS, assert_graded, compare, kv_compare, report};
+use crate::cuda::qwen2::tests::{
+    Agree, PROMPTS, assert_graded, compare_trace, kv_compare, report, trace as ref_trace,
+};
 use std::path::PathBuf;
 
 /// A model file under models/, mapped (not copied): several models are
@@ -111,17 +113,23 @@ fn mixed_graded(rel: &str, name: &str) {
     let n = block_count(&m).unwrap();
     let rows = Qwen2::new_with(&m, false);
     let cpu = Qwen2::new(&m);
+    // The CPU's reference pass over each prompt, once for all four
+    // comparisons below.
+    let refs: Vec<_> = PROMPTS
+        .iter()
+        .map(|p| ref_trace(&cpu, &tok.encode(p), 32))
+        .collect();
     let mut ac = Agree::default();
-    for p in PROMPTS {
-        compare(&cpu, &rows, &tok.encode(p), 32, &mut ac);
+    for t in &refs {
+        compare_trace(t, &rows, &mut ac);
     }
     drop(rows);
     report(&format!("{name} cpu rows vs cpu"), &ac);
     for k in [1, n / 2, n - 1] {
         let h = HybridQwen2::new(Some((&g, &km)), &m, 256, n - k, CacheKv::F16).unwrap();
         let mut ag = Agree::default();
-        for p in PROMPTS {
-            compare(&cpu, &h, &tok.encode(p), 32, &mut ag);
+        for t in &refs {
+            compare_trace(t, &h, &mut ag);
         }
         report(&format!("{name} hybrid k={k} vs cpu"), &ag);
         assert_graded(&ag, &ac);
@@ -949,9 +957,14 @@ fn stream_graded(rel: &str, name: &str) {
     let n = block_count(&m).unwrap();
     let rows = Qwen2::new_with(&m, false);
     let cpu = Qwen2::new(&m);
+    // The CPU's reference pass over each prompt, once (as `mixed_graded`).
+    let refs: Vec<_> = PROMPTS
+        .iter()
+        .map(|p| ref_trace(&cpu, &tok.encode(p), 32))
+        .collect();
     let mut ac = Agree::default();
-    for p in PROMPTS {
-        compare(&cpu, &rows, &tok.encode(p), 32, &mut ac);
+    for t in &refs {
+        compare_trace(t, &rows, &mut ac);
     }
     drop(rows);
     report(&format!("{name} cpu rows vs cpu"), &ac);
@@ -959,8 +972,8 @@ fn stream_graded(rel: &str, name: &str) {
         // min 2: every prompt here streams.
         let h = streamed(&g, &km, &m, 256, n - k, 2);
         let mut ag = Agree::default();
-        for p in PROMPTS {
-            compare(&cpu, &h, &tok.encode(p), 32, &mut ag);
+        for t in &refs {
+            compare_trace(t, &h, &mut ag);
         }
         report(&format!("{name} streamed k={k} vs cpu"), &ag);
         // Every prompt's prefill streamed (each cache had its slots).
