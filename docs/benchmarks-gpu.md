@@ -104,6 +104,23 @@ Image: `runpod/base:1.4.0-cuda1281-ubuntu2404` on all three.
 | q3-8B | pp2100 | 11,539 | 9,700 | 9,633 | 1.19× | 1.20× |
 | q3-8B | tg128 | 287 | 230 | 227 | 1.25× | 1.27× |
 
+## Concurrency: RTX 4090, Qwen2.5-7B (2026-10-18)
+
+Closed-loop serving on one RunPod RTX 4090 (secure, driver 580.159.04). `scripts/serve_load.py`: C clients, each
+sending 2 requests one after the other; ~560-token prompts, 512-token outputs, greedy; aggregate = completion tokens
+/ wall. Two rounds per cell, medians. Detail, the per-step curve and methodology:
+[log/2026-10-18-c-curve.md](log/2026-10-18-c-curve.md).
+
+| engine | weights | C=1 | C=8 | C=16 | C=32 | C=64 |
+|---|---|---|---|---|---|---|
+| Axon (feat/c-curve), `--parallel 32` | Q4_K_M GGUF | 181 | 999 | 1542 | 2240 | – |
+| llama-server 4413a19, `-np 32 -fa on` | the same GGUF | 133 | 613 | 667 | 976 | – |
+| vLLM 0.31.0 (Marlin) | Qwen2.5-7B-Instruct-AWQ int4 | 166 | 1149 | 1958 | 2954 | 3609 |
+
+vLLM runs other weights (AWQ int4, group 128) with other kernels, so it isn't a bits-equal comparison. It is the
+datacenter bar on the same card. Axon leads at C=1 and is 2.3× llama-server at C=32. It trails vLLM by 13–24 % at
+C=8–32 because its batched step still grows with the rows (ITL p50 7.2 → 11.7 ms from C=8 to C=32, vLLM 6.2 → 8.0).
+
 ## Laptops
 
 ### Parabellum: RTX 5070 Ti Laptop (sm_120, 12 GB)

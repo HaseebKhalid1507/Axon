@@ -24,6 +24,10 @@ use super::*;
 /// cores) even where the tensor-core GEMM exists.
 pub(super) const SMALL: usize = 16;
 
+/// The most tokens a gemvm kernel takes (gemvm32; `CudaQwen2::takes_gemvm`
+/// picks it over gemm2 for the products too small to fill the GPU).
+pub(super) const VM_MAX: usize = 32;
+
 /// hopper.cu gemmh2's dynamic shared memory (GEMMH2_SMEM): 4 stages of
 /// activation values (16 KiB) and two warpgroups' raw Q4_K rows, their dk /
 /// b32 pieces, the barriers, 1 KiB of alignment slack.
@@ -367,8 +371,13 @@ pub(super) struct BatchFns<'m> {
     pub(super) argmax: Func<'m>,
     gemvn8: Func<'m>,
     gemvn16: Func<'m>,
-    /// gemvm8_*, gemvm16_* per type (as `gemm`); None without tensor cores.
-    gemvm: Option<[[Func<'m>; NTYPES_VM]; 2]>,
+    /// gemvm8_*, gemvm16_*, gemvm32_* per type (as `gemm`); None without
+    /// tensor cores.
+    gemvm: Option<[[Func<'m>; NTYPES_VM]; 3]>,
+    /// AXON_GEMVM_MAX: 16, gemvm for at most 16 tokens (main's routing);
+    /// 32, for up to 32 whatever the product; 0 or unset, by the product's
+    /// shape (`CudaQwen2::takes_gemvm`).
+    pub(super) vm_max: usize,
     /// Per type (Q4_K, Q6_K, Q8_0, Q5_0, Q5_K, Q4_0: `NTYPES`, indexed by
     /// `type_index`): gemm2_* (128 tokens per block)
     /// and gemm2s_* (64); None without int8 tensor cores.
@@ -466,7 +475,7 @@ impl<'m> BatchFns<'m> {
                     n("q4_0")?,
                 ])
             };
-            Some([f(8)?, f(16)?])
+            Some([f(8)?, f(16)?, f(32)?])
         } else {
             None
         };
@@ -509,6 +518,13 @@ impl<'m> BatchFns<'m> {
             gemvn8: module.function("gemvn_2x8")?,
             gemvn16: module.function("gemvn_2x16")?,
             gemvm,
+            vm_max: std::env::var("AXON_GEMVM_MAX")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .map_or(
+                    0,
+                    |v: usize| if v == 0 { 0 } else { v.clamp(SMALL, VM_MAX) },
+                ),
             gemm,
             gemm_q6k8,
             gemm_gu: if module.mma() {
@@ -681,9 +697,13 @@ impl<'g> CudaQwen2<'g> {
         ostride: usize,
     ) -> Result<(), String> {
         let bf = &self.bf;
+        let ti = type_index(mt.qt);
+        // gemvm (weight-read-once) for up to vm_max tokens of its types.
+        let vm = bf.gemvm.is_some() && ti < NTYPES_VM && self.takes_gemvm(mt.rows, nb);
+        let small = vm || nb <= SMALL;
         // Q6_K by its prefill copy where made (the same products).
         let q8c = match (mt.c8, &bf.gemm_q6k8) {
-            (Some(c8), Some(f)) if nb > SMALL => Some((c8, f)),
+            (Some(c8), Some(f)) if !small => Some((c8, f)),
             _ => None,
         };
         let (wa, rb) = match q8c {
@@ -704,7 +724,7 @@ impl<'g> CudaQwen2<'g> {
             Arg::U64(ostride as u64),
         ];
         let plain = bf.gemmh_all || gemmh_plain(mt.rows, nb, bf.sms);
-        if let (Some(h), Q4_K, true, true) = (&bf.gemmh, mt.qt, nb > SMALL, plain) {
+        if let (Some(h), Q4_K, true, true) = (&bf.gemmh, mt.qt, !small, plain) {
             // TMA descriptors of the weights (rows of rb bytes, boxes of
             // 128 rows of one block) and the activations' Q8_K values.
             let rb = mt.rb as u64;
@@ -745,17 +765,19 @@ impl<'g> CudaQwen2<'g> {
                 )
             };
         }
-        let ti = type_index(mt.qt);
         // SAFETY: the caller's contract; the matrix is whole in `wts`.
         unsafe {
             match (&bf.gemm, &bf.gemvm) {
-                (Some(fs), _) if nb > SMALL => {
+                (Some(fs), _) if !small => {
                     // Measured (cuda_gemm_bench): Q4_K is fastest in 64 x 64
                     // tiles (three stages, one barrier each) at every size;
                     // the register-staged types in 64 x 128, given at least
                     // ~1.5 blocks per SM.
                     let ctas = nb.div_ceil(128) * mt.rows.div_ceil(G2_BM);
-                    let big = !matches!(mt.qt, Q4_K | Q5_K) && 2 * ctas >= 3 * bf.sms;
+                    // (Not for decode-sized batches: a 128-token tile of
+                    // <= 64 tokens is half padding; the lm_head of a pool's
+                    // 32 rows ran 2x slower in it, C-curve log.)
+                    let big = !matches!(mt.qt, Q4_K | Q5_K) && 2 * ctas >= 3 * bf.sms && nb > 64;
                     let (bn, st) = if big { (128, 2) } else { (64, 3) };
                     let (f, smem) = match q8c {
                         Some((_, f8)) => (&f8[!big as usize], gemm2_smem(Q6_K, bn, st)),
@@ -769,8 +791,8 @@ impl<'g> CudaQwen2<'g> {
                         &common,
                     )
                 }
-                (_, Some(fs)) if nb <= SMALL && ti < NTYPES_VM => self.gpu.launch(
-                    &fs[(nb > 8) as usize][ti],
+                (_, Some(fs)) if vm => self.gpu.launch(
+                    &fs[nb.next_power_of_two().max(8).trailing_zeros() as usize - 3][ti],
                     (mt.rows.div_ceil(16) as u32, 1, 1),
                     (128, 1, 1),
                     0,
@@ -1012,8 +1034,12 @@ impl<'g> CudaQwen2<'g> {
                 self.norm_b(b, &self.vecs, self.output_norm, nb)?;
                 on("rmsnorm")?;
                 let v = self.vocab;
-                for z0 in (0..nb).step_by(HEAD_SUB) {
-                    let nz = (nb - z0).min(HEAD_SUB);
+                // Logits of every row (a pool's): the head in one product
+                // over all of them (the weights read once), each row's
+                // logits the same bits as in slices of HEAD_SUB.
+                let sub = if b.logits_rows { nb } else { HEAD_SUB };
+                for z0 in (0..nb).step_by(sub) {
+                    let nz = (nb - z0).min(sub);
                     let lg = b.logits.arg_at(if b.logits_rows { z0 * v * 4 } else { 0 });
                     self.bgemm(
                         &self.weights,
@@ -1039,10 +1065,12 @@ impl<'g> CudaQwen2<'g> {
                             &[lg, Arg::I32(v as i32), b.best.arg_at(z0 * 4)],
                         )?;
                     }
-                    if za < zs {
+                    // (samp_tail takes HEAD_SUB rows a launch.)
+                    for z in (za..zs).step_by(HEAD_SUB) {
+                        let nr = (zs - z).min(HEAD_SUB);
                         let s = c.samp.as_ref().expect("samp_upload before a sampling pass");
-                        let ls = b.logits.arg_at(lo + (za - z0) * v * 4);
-                        self.samp_tail(s, ls, v, zs - za, row0 + za - ng, za - ng, false)?;
+                        let ls = b.logits.arg_at(lo + (z - z0) * v * 4);
+                        self.samp_tail(s, ls, v, nr, row0 + z - ng, z - ng, false)?;
                     }
                     on("head")?;
                 }
@@ -1655,7 +1683,7 @@ impl<'g> CudaQwen2<'g> {
             let fuse = self.gate_up_fused
                 && self.gemma.is_none()
                 && bf.gemm_gu.is_some()
-                && nb > SMALL
+                && !self.takes_gemvm(gate.rows, nb)
                 && gate.qt == Q4_K
                 && up.qt == Q4_K
                 && gate.cols == dim
@@ -1821,6 +1849,24 @@ impl<'g> CudaQwen2<'g> {
             }
         }
         Ok(())
+    }
+
+    /// Whether a product of `rows` outputs over nb tokens (of a gemvm type)
+    /// takes gemvm rather than gemm2: up to SMALL tokens always; up to
+    /// VM_MAX when gemm2's tiles would leave the GPU mostly idle (fewer
+    /// 64-row tiles than a quarter of the SMs, e.g. the 7B's 512-row k / v,
+    /// the 0.5B's 896-row q / o / down) and gemvm32's one pass over the
+    /// weights wins (C-curve log, RTX 4090: 7B k at nb 32 12.3 vs 20.5 us);
+    /// bigger products stay on gemm2, where gemvm32's 16-row blocks re-read
+    /// the tokens' activations (7B gate at nb 32: 138 vs 96 us).
+    /// `BatchFns::vm_max` (AXON_GEMVM_MAX) overrides.
+    pub(super) fn takes_gemvm(&self, rows: usize, nb: usize) -> bool {
+        match (nb, self.bf.vm_max) {
+            (..=SMALL, _) => true,
+            (_, _) if nb > VM_MAX => false,
+            (_, 0) => 4 * rows.div_ceil(G2_BM) < self.bf.sms,
+            (_, v) => nb <= v,
+        }
     }
 
     /// The flash attention's shapes for cache scale group kg (0: f16).

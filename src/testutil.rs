@@ -178,6 +178,26 @@ pub fn moe_model(small: bool) -> Option<Model> {
     Some(gguf::load(path.to_str().expect("utf-8 path")).expect("load moe model"))
 }
 
+/// deepseek2's real-model test file: Moonlight-16B-A3B-Instruct Q4_K_M
+/// (10.54 GB; the CPU model repacks it into ~10.5 GB of RAM more).
+pub const DS2_MODEL: &str = "models/Moonlight-16B-A3B-Instruct-Q4_K_M.gguf";
+
+/// `DS2_MODEL` if AXON_TEST_DS2 names it (1: the default path), else None:
+/// opt-in, so a suite never loads it by accident (bella's memory rule:
+/// > 8 GB of RAM runs on a pod).
+pub fn ds2_model() -> Option<Model> {
+    let path = match std::env::var("AXON_TEST_DS2").ok()?.as_str() {
+        "" | "0" => return None,
+        "1" => Path::new(env!("CARGO_MANIFEST_DIR")).join(DS2_MODEL),
+        p => PathBuf::from(p),
+    };
+    if !path.exists() {
+        eprintln!("skipping: {} not present (optional)", path.display());
+        return None;
+    }
+    Some(gguf::load(path.to_str().expect("utf-8 path")).expect("load deepseek2 model"))
+}
+
 pub fn read_json(rel: &str) -> serde_json::Value {
     let path = fixtures().join(rel);
     let s = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));

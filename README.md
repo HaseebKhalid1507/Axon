@@ -1,7 +1,8 @@
 # Axon
 
 LLM inference for Qwen2, Qwen3, Llama 3 and Gemma 3 GGUF models on the CPU and on NVIDIA
-GPUs, written from scratch in Rust.
+GPUs, plus Qwen3 MoE (Qwen3-30B-A3B's architecture) and gpt-oss-20b (CPU only for now), written
+from scratch in Rust.
 
 **Mission: make LLM inference cheap and fast, and run the best open models.** Cheap means wasting no
 hardware, from a laptop to a datacenter: the most tokens per GPU, per watt and per dollar. Fast means as close
@@ -14,7 +15,7 @@ No ggml, no BLAS, no binding crates, no CUDA toolkit at build time: a GGUF reade
 quantized integer dot-product kernels (scalar, AVX2, AVX-VNNI), a spinning worker
 pool and a transformer forward pass on the CPU; on the GPU, CUDA C++ kernels that
 NVRTC compiles at run time, launched through the driver API (both libraries loaded
-with dlopen). About 67k lines of Rust and 6.5k of CUDA, tests included.
+with dlopen). About 76k lines of Rust and 7k of CUDA, tests included.
 
 Every optimized path is **bit-identical** to the plain reference path on its
 device: batched prefill produces exactly the logits that feeding one token at a
@@ -47,7 +48,15 @@ Works today, honestly scoped:
   prefill == verify bit for bit, logits within llama.cpp's own CPU/CUDA spread; no layer
   split (`--gpu-layers`), multi-GPU or MoE draft model. `axon info` prints its experts and
   bytes per token. Streaming the experts through the GPU for long prompts is next
-  ([roadmap](docs/roadmap.md#mixture-of-experts)). `gpt-oss` (gpt-oss-20b, ggml-org's MXFP4
+  ([roadmap](docs/roadmap.md#mixture-of-experts)). `deepseek2` (DeepSeek V2/V3/V3.1, Kimi K2,
+  Moonlight: MLA attention in the absorbed form with a K-only 576-wide cache, sigmoid routing
+  with `exp_probs_b` and shared experts, YaRN's DeepSeek attention scale; the `kimi-k2` and
+  `deepseek-v3` tokenizers and the Kimi and DeepSeek V3 chat formats) runs on the CPU only
+  (`--device cpu`), decode == batched prefill == verify bit for bit; checked on
+  Moonlight-16B-A3B ([log](docs/log/2026-10-18-deepseek2-s0.md)). Legacy non-MLA deepseek2
+  GGUFs (an unsplit `attn_kv_b`, e.g. the published DeepSeek-V2-Lite files) are refused with a
+  re-convert message.
+  `gpt-oss` (gpt-oss-20b, ggml-org's MXFP4
   GGUF) runs on the CPU only for now (stage 0, [log](docs/log/2026-10-18-gpt-oss-s0.md)): MXFP4
   experts read in place, attention sinks, the 128-token sliding window on alternate layers,
   YaRN, the o200k tokenizer and the harmony chat format (`axon chat` shows the `final`
@@ -115,13 +124,14 @@ Works today, honestly scoped:
 - Serving: `axon serve`, an OpenAI-compatible HTTP server (below) with tool calling. On one GPU it
   batches the decode steps of concurrent requests (`--parallel N`) and feeds new prompts in chunks
   between them, every slot one KV cache (no extra cache for a request running alone); elsewhere it
-  runs one request at a time. Operations: `--api-key`, `GET /metrics` (Prometheus), `GET /slots`,
-  `--max-prompt-tokens`, `--slot-idle-ms`.
+  runs one request at a time. Besides chat completions it speaks OpenAI's Responses API (what codex
+  uses) and ollama's native API ([docs/serve-apis.md](docs/serve-apis.md)). Operations: `--api-key`,
+  `GET /metrics` (Prometheus), `GET /slots`, `--max-prompt-tokens`, `--slot-idle-ms`.
 - Rust 1.89 or newer.
 
 Not on main yet: tensor parallel, paged KV in `serve` (the kernels read through a page table; the pool
-doesn't use it yet), saving and restoring `serve` slots, the `/v1/responses` and ollama-native APIs,
-and the MoE paths on the GPU (#67). What's in flight and why: [docs/roadmap.md](docs/roadmap.md). How Axon is built and measured, and
+doesn't use it yet), saving and restoring `serve` slots, streaming MoE experts through the GPU for long
+prompts (stage 3), and gpt-oss on the GPU. What's in flight and why: [docs/roadmap.md](docs/roadmap.md). How Axon is built and measured, and
 what was tried and dropped: [docs/methodology.md](docs/methodology.md),
 [docs/history.md](docs/history.md), [docs/experiments-rejected.md](docs/experiments-rejected.md).
 
@@ -155,8 +165,9 @@ axon gen <model.gguf> "<prompt>" [-n N] [--draft K] [--draft-model PATH] [--devi
           [--ctx N] [--gpu-layers N] [--gpus L] [--kv T]
                                           generation (default 32 tokens; greedy unless --temp)
 axon logits <model.gguf> "<prompt>" [-k K]  top-K next-token logits (default 10)
-axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K]
-          [--draft-model PATH] [--device D] [--gpu-layers N] [--gpus L] [--kv T] [--session F]
+axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [--forget-to F] [-n N]
+          [--draft K] [--draft-model PATH] [--device D] [--gpu-layers N] [--gpus L] [--kv T]
+          [--session F]
                                           talk to an Instruct model (sampled; --temp 0: greedy)
 sampling (gen, chat): --temp T --top-k K --top-p P --min-p P
           --repeat-penalty P --repeat-last-n N --seed S   (axon --help)
@@ -201,6 +212,13 @@ Defaults, as `axon --help` gives them:
   fits, else a split. For `serve`, see below: its default is the whole trained context.
   gen: none (the cache holds the prompt and `-n`); `--ctx N` places the model and sizes its
   cache for N tokens, as chat would, to measure a long context's speed.
+- `--forget-to F` (chat): 0.5. When the conversation outgrows `--ctx`, the oldest exchanges
+  are forgotten until the rest, with the new message, fills at most F of the context (the
+  newest exchange stays unless the new message needs its room). The next turns append to
+  the cache until it's full again; a reply reserves room for itself (`-n`, or a quarter of
+  the context if unlimited), so with the defaults 0.5 leaves a quarter of the context to grow
+  into. `min`, 0 or 1: only as many as make room for the reply (the old behaviour).
+  Ctrl-C before a reply's first token puts the forgotten exchanges back.
 - `--rope-scaling yarn --rope-scale F [--yarn-orig-ctx N]` (gen, logits, chat, serve): off.
   With it the context is N x F (`--ctx` up to that); also `--yarn-beta-fast` (32),
   `--yarn-beta-slow` (1), `--yarn-mscale` (0.1 ln F + 1; not llama.cpp's `--yarn-attn-factor`). See
@@ -225,7 +243,11 @@ the line, never quits; Ctrl-D on an empty line (or `/exit`) quits. Keys typed wh
 a reply streams wait for the next prompt instead of mixing into the reply. The
 terminal is in raw mode while chat runs, so Ctrl-Z and Ctrl-\ do nothing. Piped,
 each line of stdin is a message and each reply one block of stdout. When the
-conversation outgrows `--ctx` (default: the model's, at most 8192), the oldest exchanges are forgotten.
+conversation outgrows `--ctx` (default: the model's, at most 8192), the oldest exchanges are forgotten,
+down to half the context by default (`--forget-to`). Forgetting shifts every position, so what's kept is
+prefilled again; forgetting only what makes room would pay that near-full prefill on every turn once the
+context is full, while half leaves room for the next several turns to append to the cache. The cache after
+forgetting is the same, byte for byte, as a fresh prefill of what's kept.
 
 Llama 3 uses the official 3.1/3.2 template (no tools): a system block that always
 opens with the template's "Cutting Knowledge Date: December 2023 / Today Date: 26 Jul
@@ -641,6 +663,7 @@ The GPU, after that:
 - [docs/history.md](docs/history.md): the engineering log, round by round, with before/after numbers
 - [docs/experiments-rejected.md](docs/experiments-rejected.md): what was tried and didn't work, with numbers
 - [docs/results.md](docs/results.md): current standing vs ollama and llama.cpp, with dates and commits
+- [docs/testing.md](docs/testing.md): how the test suite is built, the fast and full tiers, what to run when
 - [docs/research/](docs/research/README.md): research reports behind the roadmap
 - [docs/log/](docs/log/README.md): one entry per PR (the convention for new work)
 - [docs/long-context.md](docs/long-context.md): YaRN (`--rope-scaling yarn`) past the trained

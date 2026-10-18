@@ -63,9 +63,9 @@ usage:
                                             --verbose: the full identity tuple)
   axon logits <model.gguf> \"<prompt>\" [-k K]
                                             top-K next-token logits after the prompt
-  axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K]
-            [--draft-model PATH] [--device D] [--gpu-layers N] [--gpus L] [--kv T] [--session F]
-            [sampling flags]
+  axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [--forget-to F] [-n N]
+            [--draft K] [--draft-model PATH] [--device D] [--gpu-layers N] [--gpus L] [--kv T]
+            [--session F] [sampling flags]
                                             talk to an instruct model (sampled; --temp 0: greedy)
   axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--draft K] [--draft-model PATH]
             [--device D] [--gpu-layers N] [--kv T] [--alias NAME] [--max-tokens N] [--cors [ORIGIN]]
@@ -111,13 +111,22 @@ flags:
   --no-think  chat: qwen3: answer without reasoning first (by default it thinks, as ollama does)
   --ctx N     chat: context size in tokens (default: the model's, at most 8192; on cuda, if the
               whole model doesn't fit with it, less if at least half (or 4096) fits, else a
-              split); when the conversation outgrows it, the oldest exchanges are forgotten;
+              split); when the conversation outgrows it, the oldest exchanges are forgotten
+              (see --forget-to);
               serve: per request (default: the model's trained context if the whole model fits
               on the GPU(s) with it, else the longest that does if at least 4096; on the CPU, as
               much of it as fits in free RAM, at least 8192; a CPU/GPU split, at most 8192; a
               shorter one is said on stderr); an explicit N is never shortened;
               gen: place the model and size its cache for N tokens, as chat would (default: the
               prompt and -n), to see a long context's speed (it may split the model)
+  --forget-to F  chat: when the conversation outgrows --ctx, forget the oldest exchanges until
+              the rest (with the new message) fills at most F of the context (default 0.5; the
+              newest exchange stays unless the new message needs its room). Forgetting shifts
+              positions, so what's kept is prefilled again; with room left, the next turns append
+              to the cache instead (the room is what's free less a reply's: with -n unlimited a
+              reply reserves a quarter of the context, so 0.5 leaves a quarter). min, 0 or 1:
+              forget only as many as make room for the reply (once the context is full, nearly
+              every turn prefills it all again)
   --session F chat: keep the conversation in file F: loaded at start if it exists, saved after
               every reply (new positions appended). Its KV cache comes back from the file if
               it was made with this model, KV type, backend and GPU; else it is prefilled again
@@ -380,6 +389,9 @@ fn run() -> std::io::Result<()> {
             println!("{l}");
         }
     }
+    for l in model::deepseek2_info(&model).unwrap_or_default() {
+        println!("{l}");
+    }
     println!("{}", cuda::summary());
     // What decides the output bits (docs/determinism.md), per placement.
     match identity::predicted(path, &model) {
@@ -591,6 +603,28 @@ fn gen_budget(prompt: usize, n: usize, trained: usize) -> Result<usize, String> 
     }
 }
 
+/// The top `k` of `logits` (id, logit, logprob, text), as `logits` prints them.
+fn print_top(tok: &tokenizer::Tokenizer, logits: &[f32], k: usize, vocab: usize) {
+    let mx = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let lse = mx + logits.iter().map(|l| (l - mx).exp()).sum::<f32>().ln();
+    println!("top-{k} of {vocab} (id, logit, logprob, text):");
+    let mut order: Vec<usize> = (0..logits.len()).collect();
+    order.sort_by(|&a, &b| logits[b].total_cmp(&logits[a]));
+    let digits = env::var("AXON_LOGITS_DIGITS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+    let (dl, dp) = digits.map_or((4, 3), |d| (d, d));
+    for &id in order.iter().take(k) {
+        println!(
+            "{:>7}  {:>10.dl$}  {:>8.dp$}  {:?}",
+            id,
+            logits[id],
+            logits[id] - lse,
+            tok.decode(&[id as u32])
+        );
+    }
+}
+
 /// `gen` and `logits` subcommands: args = [axon, cmd, model, prompt, flags...]
 fn run_lm(args: &[String]) -> std::io::Result<()> {
     use std::io::Write;
@@ -688,7 +722,36 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     let model = open_model_with(path, copy_for(device), &rargs);
     let tok = tokenizer::Tokenizer::from_gguf(&model);
 
-    let ids = tok.encode_prompt(prompt);
+    let mut ids = tok.encode_prompt(prompt);
+    // AXON_LOGITS_IDS=1,2,3: `logits` of these token ids instead of the
+    // prompt's (oracles compare on ids, never on text); with
+    // AXON_LOGITS_ALL, several sequences separated by ';' (one load).
+    let mut seqs: Vec<Vec<u32>> = Vec::new();
+    if let Ok(v) = env::var("AXON_LOGITS_IDS").map(|v| v.trim().to_string())
+        && cmd == "logits"
+        && !v.is_empty()
+    {
+        for part in v.split(';').filter(|p| !p.trim().is_empty()) {
+            let seq: Vec<u32> = part
+                .trim()
+                .trim_matches(['[', ']'])
+                .split(',')
+                .map(|x| x.trim().parse::<u32>())
+                .collect::<Result<_, _>>()
+                .unwrap_or_else(|_| fail("AXON_LOGITS_IDS needs comma-separated token ids"));
+            if let Some(&bad) = seq.iter().find(|&&t| t as usize >= tok.vocab_len()) {
+                fail(&format!(
+                    "AXON_LOGITS_IDS: token {bad} is past the vocabulary"
+                ));
+            }
+            seqs.push(seq);
+        }
+        ids = seqs
+            .iter()
+            .max_by_key(|s| s.len())
+            .cloned()
+            .unwrap_or_default();
+    }
     if ids.is_empty() {
         eprintln!("prompt encodes to zero tokens");
         cuda::settle();
@@ -778,11 +841,44 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     // token. Only the last position's logits are used, so the others skip
     // the output head (the GPU runs the last token in the final batched
     // pass, the head on its row alone: `Lm::prefill_logits`).
+    // AXON_LOGITS_ALL=N: `logits` after each of the last N positions
+    // (prefill of the rest, then one decode step each).
+    let all = env::var("AXON_LOGITS_ALL")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|_| cmd == "logits")
+        .map_or(0, |n| n.min(ids.len()));
     let t0 = Instant::now();
-    let logits = net.prefill_logits(&ids, 0, &mut cache);
+    let logits = if all > 0 {
+        if seqs.is_empty() {
+            seqs.push(ids.clone());
+        }
+        let mut last = Vec::new();
+        for (k, ids) in seqs.iter().enumerate() {
+            if k > 0 {
+                cache = net.new_cache(cache_ctx);
+            }
+            let first = ids.len() - all.min(ids.len());
+            if first > 0 {
+                net.feed_batch(&ids[..first], 0, &mut cache);
+            }
+            println!("prompt ids ({}): {:?}", ids.len(), ids);
+            for (p, &t) in ids.iter().enumerate().skip(first) {
+                last = net.forward(t, p, &mut cache);
+                println!("position {p}:");
+                print_top(&tok, &last, top_k, net.vocab());
+            }
+        }
+        last
+    } else {
+        net.prefill_logits(&ids, 0, &mut cache)
+    };
     let prompt_secs = t0.elapsed().as_secs_f64();
 
     if cmd == "logits" {
+        if all > 0 {
+            return Ok(());
+        }
         println!("prompt ids ({}): {:?}", ids.len(), ids);
         // log-softmax normaliser, so we can print logprobs comparable to Ollama's
         let mx = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
@@ -997,11 +1093,23 @@ const CHAT_HELP: &str = concat!(
     "  Ctrl-C (stop a reply; clear the line), Ctrl-D on an empty line (quit)",
 );
 
+/// `chat --forget-to`: a fraction of the context in [0, 1], or "min" (0).
+fn forget_to_flag(v: &str) -> Result<f64, String> {
+    if v == "min" {
+        return Ok(0.0);
+    }
+    v.parse::<f64>()
+        .ok()
+        .filter(|f| (0.0..=1.0).contains(f))
+        .ok_or_else(|| format!("--forget-to needs a fraction from 0 to 1 or min, got '{v}'"))
+}
+
 /// `chat` subcommand: args = [axon, chat, model, flags...]. Each line of
 /// stdin is a message; on a terminal it's an interactive session.
 fn run_chat(args: &[String]) -> std::io::Result<()> {
-    const CHAT_USAGE: &str = "usage: axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] [-n N] [--draft K] \
-         [--draft-model PATH] [--device D] [--gpu-layers N] [--gpus L] [--kv T] [--session FILE]";
+    const CHAT_USAGE: &str = "usage: axon chat <model.gguf> [--system TEXT] [--no-think] [--ctx N] \
+         [--forget-to F] [-n N] [--draft K] [--draft-model PATH] [--device D] [--gpu-layers N] \
+         [--gpus L] [--kv T] [--session FILE]";
     let Some(path) = args.get(2).filter(|p| !p.starts_with('-')) else {
         fail(CHAT_USAGE);
     };
@@ -1009,6 +1117,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     let mut no_think = false;
     let mut ctx = None;
     let mut max_reply = usize::MAX;
+    let mut forget_to = chat::FORGET_TO;
     let mut max_draft = None;
     let mut draft_path = None;
     let mut device = device_env();
@@ -1043,6 +1152,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
             f,
             "--system"
                 | "--ctx"
+                | "--forget-to"
                 | "-n"
                 | "--draft"
                 | "--draft-model"
@@ -1059,6 +1169,8 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         };
         if f == "--system" {
             system = Some(v.clone());
+        } else if f == "--forget-to" {
+            forget_to = forget_to_flag(v).unwrap_or_else(|e| fail(&e));
         } else if f == "--session" {
             if v.is_empty() {
                 fail("--session needs a path");
@@ -1175,7 +1287,9 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         );
     }
     // Qwen2.5's template brings a default system message, Qwen3's none.
-    let system = system.or_else(|| (model.arch == "qwen2").then(|| chat::DEFAULT_SYSTEM.into()));
+    let system = system
+        .or_else(|| (model.arch == "qwen2").then(|| chat::DEFAULT_SYSTEM.into()))
+        .or_else(|| chat::template_default_system(&model));
     let mut conv = chat::Chat::new(&net, &tok, system.as_deref(), ctx)
         .unwrap_or_else(|e| fail(&format!("{path}: {e}")));
     if no_think && !conv.thinks() {
@@ -1185,6 +1299,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     }
     conv.no_think = no_think;
     conv.max_reply = max_reply;
+    conv.forget_to = forget_to;
     conv.max_draft = max_draft;
     conv.drafter = drafter.map(|d| Box::new(d) as Box<dyn draft::Draft>);
     // chat samples by default (as ollama does): greedy replies loop.
@@ -1594,8 +1709,16 @@ fn chat_repl<M: kvsave::KvIo>(
             notes.push_str(&format!(" | cut at {} tokens", r.ids.len()));
         }
         if r.dropped > 0 {
+            let f = conv.forget_to;
+            let to = if f <= 0.0 || f >= 1.0 {
+                "to fit".to_string()
+            } else if f == 0.5 {
+                "(down to half the context)".to_string()
+            } else {
+                format!("(down to {:.0}% of the context)", f * 100.0)
+            };
             notes.push_str(&format!(
-                " | forgot the oldest {} exchange{} to fit",
+                " | forgot the oldest {} exchange{} {to}",
                 r.dropped,
                 if r.dropped == 1 { "" } else { "s" }
             ));

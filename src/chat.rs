@@ -72,6 +72,26 @@
 //! <start_of_turn>model\n{reply}<end_of_turn>\n
 //! ```
 //!
+//! Kimi (Kimi K2, Moonlight: `<|im_user|>`, `<|im_assistant|>`,
+//! `<|im_system|>`, `<|im_middle|>`): ChatML with a start token per role and
+//! `<|im_middle|>` in place of the newline, no newlines between messages, no
+//! BOS. The GGUF's template inserts a default system message when the
+//! conversation has none (`template_default_system`: `axon chat` passes it):
+//!
+//! ```text
+//! <|im_system|>system<|im_middle|>{system}<|im_end|>
+//! <|im_user|>user<|im_middle|>{message}<|im_end|>
+//! <|im_assistant|>assistant<|im_middle|>{reply}<|im_end|>
+//! ```
+//!
+//! DeepSeek V3 / V3.1 (`<｜User｜>`, `<｜Assistant｜>`), the V3.1 template's
+//! non-thinking mode: BOS, the system text bare, then each user message after
+//! `<｜User｜>` and each reply after `<｜Assistant｜></think>`, ended by EOS:
+//!
+//! ```text
+//! <｜begin▁of▁sentence｜>{system}<｜User｜>{message}<｜Assistant｜></think>{reply}<｜end▁of▁sentence｜>
+//! ```
+//!
 //! gpt-oss's harmony format (a vocabulary with `<|start|>`, `<|message|>`,
 //! `<|channel|>`, `<|end|>` and `<|return|>`), its GGUF template without
 //! tools, with a fixed date (`HARMONY_DATE`, so a conversation's tokens
@@ -146,6 +166,24 @@ pub enum Format {
     /// BOS first if the model adds one, the system message in the first
     /// user message.
     Gemma { bos: Option<u32> },
+    /// Kimi's turns: a start token per role (`<|im_system|>`, `<|im_user|>`,
+    /// `<|im_assistant|>`), the role name, `<|im_middle|>`, the text, then
+    /// `<|im_end|>`.
+    Kimi {
+        system: u32,
+        user: u32,
+        assistant: u32,
+        middle: u32,
+    },
+    /// DeepSeek V3's: `<｜User｜>{msg}`, a reply opened by `<｜Assistant｜>`
+    /// and `</think>` (`think_end`: its tokens) and closed by EOS.
+    DeepSeek3 {
+        user: u32,
+        assistant: u32,
+        bos: Option<u32>,
+        think_end: [u32; 4],
+        n_think: usize,
+    },
     /// gpt-oss's harmony messages: `<|start|>{role}<|message|>{text}<|end|>`
     /// (`im_start` / `im_end`), assistant messages on a channel.
     Harmony { message: u32, channel: u32 },
@@ -184,9 +222,40 @@ impl Framing {
             special(tok, "<|channel|>"),
             special(tok, "<|return|>"),
         );
+        let kimi = (
+            special(tok, "<|im_system|>"),
+            special(tok, "<|im_user|>"),
+            special(tok, "<|im_assistant|>"),
+            special(tok, "<|im_middle|>"),
+            special(tok, "<|im_end|>"),
+        );
+        let ds3 = (special(tok, "<｜User｜>"), special(tok, "<｜Assistant｜>"));
         let (format, im_start, im_end) =
             if let (Some(st), Some(end), Some(message), Some(channel), Some(_)) = harmony {
                 (Format::Harmony { message, channel }, st, end)
+            } else if let (Some(system), Some(user), Some(assistant), Some(middle), Some(end)) =
+                kimi
+            {
+                let f = Format::Kimi {
+                    system,
+                    user,
+                    assistant,
+                    middle,
+                };
+                (f, user, end)
+            } else if let (Some(user), Some(assistant)) = ds3 {
+                let t = tok.encode_special("</think>");
+                let mut think_end = [0u32; 4];
+                let n_think = t.len().min(4);
+                think_end[..n_think].copy_from_slice(&t[..n_think]);
+                let f = Format::DeepSeek3 {
+                    user,
+                    assistant,
+                    bos: tok.bos(),
+                    think_end,
+                    n_think,
+                };
+                (f, user, tok.eos())
             } else if let (Some(start), Some(end), Some(eot)) = llama {
                 let bos = tok.bos();
                 (Format::Llama3 { start, end, bos }, start, eot)
@@ -233,6 +302,38 @@ impl Framing {
     /// message `[INST]{text}[/INST]`; the reply opening is empty. For a
     /// conversation's first message see `first_user`.
     pub fn frame(&self, tok: &Tokenizer, role: &str, text: &str, next: Option<&str>) -> Vec<u32> {
+        if let Format::Kimi { middle, .. } = self.format {
+            let mut t = vec![self.kimi_start(role)];
+            t.extend(tok.encode(role));
+            t.push(middle);
+            t.extend(tok.encode(text));
+            t.push(self.im_end);
+            if let Some(r) = next {
+                t.extend(self.opening(tok, r));
+            }
+            return t;
+        }
+        if let Format::DeepSeek3 { .. } = self.format {
+            // A reply: its text and EOS; a user message: after <｜User｜>;
+            // a system message: bare (`system`).
+            let mut t = match role {
+                "assistant" => {
+                    let mut t = tok.encode(text);
+                    t.push(self.im_end);
+                    t
+                }
+                "system" => tok.encode(text),
+                _ => {
+                    let mut t = vec![self.im_start];
+                    t.extend(tok.encode(text));
+                    t
+                }
+            };
+            if let Some(r) = next {
+                t.extend(self.opening(tok, r));
+            }
+            return t;
+        }
         if let Format::Mistral { end, .. } = self.format {
             if role == "assistant" {
                 let mut t = tok.encode(text.trim());
@@ -285,10 +386,27 @@ impl Framing {
         if let Format::Mistral { .. } = self.format {
             return Vec::new();
         }
+        if let Format::DeepSeek3 {
+            assistant,
+            think_end,
+            n_think,
+            ..
+        } = self.format
+        {
+            return match role {
+                "assistant" => [&[assistant], &think_end[..n_think]].concat(),
+                _ => vec![self.im_start],
+            };
+        }
         let mut t = vec![self.im_start];
         match self.format {
-            Format::Mistral { .. } => unreachable!(),
+            Format::Mistral { .. } | Format::DeepSeek3 { .. } => unreachable!(),
             Format::Harmony { .. } => t.extend(tok.encode(role)),
+            Format::Kimi { middle, .. } => {
+                t[0] = self.kimi_start(role);
+                t.extend(tok.encode(role));
+                t.push(middle);
+            }
             Format::ChatMl => t.extend(tok.encode(&format!("{role}\n"))),
             Format::Gemma { .. } => t.extend(tok.encode(&format!("{}\n", gemma_role(role)))),
             Format::Llama3 { end, .. } => {
@@ -308,7 +426,14 @@ impl Framing {
     pub fn system(&self, tok: &Tokenizer, system: Option<&str>) -> Vec<u32> {
         match self.format {
             Format::Mistral { bos, .. } | Format::Gemma { bos } => bos.into_iter().collect(),
-            Format::ChatMl => system.map_or(Vec::new(), |s| self.frame(tok, "system", s, None)),
+            Format::ChatMl | Format::Kimi { .. } => {
+                system.map_or(Vec::new(), |s| self.frame(tok, "system", s, None))
+            }
+            Format::DeepSeek3 { bos, .. } => {
+                let mut t: Vec<u32> = bos.into_iter().collect();
+                t.extend(system.map_or(Vec::new(), |s| tok.encode(s)));
+                t
+            }
             Format::Harmony { .. } => {
                 let mut t = self.frame(tok, "system", &harmony_system(), None);
                 if let Some(s) = system.filter(|s| !s.is_empty()) {
@@ -364,6 +489,24 @@ impl Framing {
                 frame(tok, s, e, gemma_role(role), &text, next.map(gemma_role))
             }
             _ => self.frame(tok, role, &text, next),
+        }
+    }
+
+    /// Kimi's start token of a `role` message (`<|im_system|>` for roles
+    /// other than user and assistant, as its template).
+    fn kimi_start(&self, role: &str) -> u32 {
+        match self.format {
+            Format::Kimi {
+                system,
+                user,
+                assistant,
+                ..
+            } => match role {
+                "user" => user,
+                "assistant" => assistant,
+                _ => system,
+            },
+            _ => self.im_start,
         }
     }
 
@@ -500,6 +643,11 @@ pub struct Chat<'a, M: Lm> {
     pub max_reply: usize,
     /// Draft tokens per pass (`round_draft`ed for prompt lookup); 0 = off.
     pub max_draft: usize,
+    /// When the context is full, forget the oldest exchanges until the rest
+    /// and the new message fill at most this fraction of it (the newest
+    /// exchange kept), so the next turns append to the cache instead of each
+    /// prefilling it again; 0 = only as many as make room (`FORGET_TO`).
+    pub forget_to: f64,
     /// Guesses from a draft model instead of prompt lookup (draft.rs). It
     /// follows the history by itself, edits included (`drop_oldest`, the
     /// reasoning cut): nothing here resets it.
@@ -711,6 +859,25 @@ fn gemma_role(role: &str) -> &str {
     if role == "assistant" { "model" } else { role }
 }
 
+/// The system message a GGUF's chat template inserts when a conversation
+/// has none, if it is a fixed text in a Kimi-style system block
+/// (`<|im_system|>system<|im_middle|>TEXT<|im_end|>`): Moonlight's "You are
+/// a helpful assistant", Kimi K2's "You are Kimi, ...".
+pub fn template_default_system(m: &crate::gguf::Model) -> Option<String> {
+    let t = m
+        .metadata
+        .iter()
+        .find(|(k, _)| k == "tokenizer.chat_template")
+        .and_then(|(_, v)| match v {
+            crate::gguf::Val::Str(s) => Some(s.as_str()),
+            _ => None,
+        })?;
+    const OPEN: &str = "<|im_system|>system<|im_middle|>";
+    let rest = &t[t.find(OPEN)? + OPEN.len()..];
+    let text = &rest[..rest.find("<|im_end|>")?];
+    (!text.is_empty() && !text.contains(['{', '}'])).then(|| text.to_string())
+}
+
 /// The id of a special token, if the vocabulary has it as one.
 pub fn special(tok: &Tokenizer, s: &str) -> Option<u32> {
     match tok.encode_special(s)[..] {
@@ -718,6 +885,12 @@ pub fn special(tok: &Tokenizer, s: &str) -> Option<u32> {
         _ => None,
     }
 }
+
+/// A conversation before a turn forgot exchanges: history, turns, messages.
+type Forgotten = (Vec<u32>, Vec<usize>, Vec<(String, usize)>);
+
+/// `Chat::forget_to`'s default: forget down to half the context.
+pub const FORGET_TO: f64 = 0.5;
 
 impl<'a, M: Lm> Chat<'a, M> {
     /// A conversation with `system` as the system message (None: no system
@@ -738,7 +911,9 @@ impl<'a, M: Lm> Chat<'a, M> {
                     .into(),
             );
         };
+        // Qwen3's thinking blocks (DeepSeek V3.1's are its framing's).
         let think = match (special(tok, "<think>"), special(tok, "</think>")) {
+            _ if matches!(fr.format, Format::DeepSeek3 { .. } | Format::Kimi { .. }) => None,
             (Some(_), Some(end)) => Some((end, tok.encode_special("<think>\n\n</think>\n\n"))),
             _ => None,
         };
@@ -760,6 +935,7 @@ impl<'a, M: Lm> Chat<'a, M> {
             no_think: false,
             max_reply: usize::MAX,
             max_draft: 0,
+            forget_to: FORGET_TO,
             drafter: None,
             sampler: None,
             vocab: std::cell::OnceCell::new(),
@@ -771,6 +947,12 @@ impl<'a, M: Lm> Chat<'a, M> {
     /// Positions in use, and the cache size.
     pub fn used(&self) -> (usize, usize) {
         (self.hist.len(), self.ctx)
+    }
+
+    /// Every token of the conversation (tests).
+    #[cfg(test)]
+    pub(crate) fn history_for_test(&self) -> &[u32] {
+        &self.hist
     }
 
     /// A message, then the opening of `next` if given (`Framing::frame`).
@@ -864,6 +1046,21 @@ impl<'a, M: Lm> Chat<'a, M> {
         self.lookup = PromptLookup::new();
     }
 
+    /// A turn stopped before its reply's first token: put back the
+    /// exchanges it forgot (`before`: history, turns, messages). The cache
+    /// holds the shifted history from `dropped_fed` on, so only what's
+    /// before that is still valid.
+    fn undo_forget(&mut self, before: Option<Forgotten>, dropped_fed: usize, r: &mut Reply) {
+        if let Some((hist, turns, msgs)) = before {
+            self.hist = hist;
+            self.turns = turns;
+            self.msgs = msgs;
+            self.fed = self.fed.min(dropped_fed);
+            self.lookup = PromptLookup::new();
+            r.dropped = 0;
+        }
+    }
+
     /// `frame_user` with the system message given (None: not the first exchange).
     fn frame_user_with(fr: &Framing, tok: &Tokenizer, system: Option<&str>, msg: &str) -> Vec<u32> {
         fr.frame_first(tok, "user", system, msg, Some("assistant"))
@@ -873,8 +1070,9 @@ impl<'a, M: Lm> Chat<'a, M> {
     /// error from `emit` ends the turn and is returned (the exchange is then
     /// kept up to the tokens emitted). `cancel` is polled between prefill
     /// batches and before each token: true stops the turn, a stop before
-    /// the reply's first token drops the message from the conversation
-    /// (exchanges already forgotten to make room for it stay forgotten).
+    /// the reply's first token drops the message from the conversation and
+    /// puts back the exchanges forgotten to make room for it (they are
+    /// prefilled again by the next turn, which forgets afresh).
     pub fn reply(
         &mut self,
         msg: &str,
@@ -920,6 +1118,19 @@ impl<'a, M: Lm> Chat<'a, M> {
         while k < n && kept(k) + user.len() + close + want > self.ctx {
             k += 1;
         }
+        // Forgetting shifts positions, so what's kept is prefilled again:
+        // forget down to `forget_to` of the context (never the newest
+        // exchange), and the next turns append to the cache. The target
+        // counts what's kept and the message only: the reply's room (`close`,
+        // `want`) decides when to forget, not how much, so with unlimited
+        // replies (want = ctx/4) 0.5 leaves a quarter of the context to grow
+        // into. At 1 the target never binds: the same as 0.
+        if k > 0 && self.forget_to > 0.0 {
+            let target = (self.forget_to.min(1.0) * self.ctx as f64) as usize;
+            while k + 1 < n && kept(k) + user.len() > target {
+                k += 1;
+            }
+        }
         if k == n && n > 0 {
             // Every exchange goes: this message becomes the first one.
             let first = self.frame_user(msg, true);
@@ -935,10 +1146,13 @@ impl<'a, M: Lm> Chat<'a, M> {
             opened = first.len();
             framed = first;
         }
+        // What a cancel before the reply's first token puts back.
+        let before = (k > 0).then(|| (self.hist.clone(), self.turns.clone(), self.msgs.clone()));
         for _ in 0..k {
             self.drop_oldest();
             r.dropped += 1;
         }
+        let dropped_fed = self.fed;
 
         let start = self.hist.len();
         let turn_fed = self.fed;
@@ -956,6 +1170,7 @@ impl<'a, M: Lm> Chat<'a, M> {
         for (i, batch) in chunks.iter().enumerate() {
             if cancel() {
                 self.hist.truncate(start);
+                self.undo_forget(before, dropped_fed, &mut r);
                 r.interrupted = true;
                 return Ok(r);
             }
@@ -1032,6 +1247,7 @@ impl<'a, M: Lm> Chat<'a, M> {
             self.hist.truncate(start);
             self.fed = start;
             self.lookup = PromptLookup::new();
+            self.undo_forget(before, dropped_fed, &mut r);
             return Ok(r);
         }
         // Every reply token but the last went through the model (to pick the
@@ -1568,6 +1784,58 @@ mod tests {
         }
     }
 
+    /// A session saved after forgetting down to half the context (the
+    /// file rewritten: its prefix changed) loads back to the same cache, and
+    /// the conversation goes on as if never stopped.
+    #[test]
+    fn session_after_forgetting() {
+        use crate::kvsave::Session;
+        let Some(m) = crate::testutil::model() else {
+            return;
+        };
+        let tok = Tokenizer::from_gguf(&m);
+        let net = Qwen2::new(&m);
+        let path = crate::testutil::model_path().unwrap();
+        let ident = crate::kvsave::model_ident(&m, &path, net.head_dim).unwrap();
+        let mk = || {
+            let mut c = Chat::new(&net, &tok, Some("Be brief."), 320).unwrap();
+            c.max_reply = 24;
+            c
+        };
+        let say =
+            |c: &mut Chat<Qwen2>, msg: &str| c.reply(msg, &|| false, &mut |_| Ok(())).unwrap();
+        let mut a = mk();
+        let want: Vec<Vec<u32>> = MSGS
+            .iter()
+            .cycle()
+            .take(12)
+            .map(|m| say(&mut a, m).ids)
+            .collect();
+        let file = session_path("forgetting");
+        let mut b = mk();
+        let mut s = Session::new(file.clone(), ident.clone());
+        let (mut got, mut reloads) = (Vec::new(), 0);
+        for msg in MSGS.iter().cycle().take(12) {
+            let r = say(&mut b, msg);
+            let info = b.save_session(&mut s).unwrap();
+            if r.dropped > 0 {
+                // The prefix changed: the file is written again, then a
+                // new process picks the conversation up from it.
+                assert!(info.rewrote, "turn {}: {info:?}", got.len());
+                let saved = (b.fed, b.hist.clone(), cache_image(&b));
+                b = mk();
+                s = Session::new(file.clone(), ident.clone());
+                assert!(b.load_session(&mut s).unwrap().unwrap().from_file);
+                assert!((b.fed, b.hist.clone(), cache_image(&b)) == saved);
+                reloads += 1;
+            }
+            got.push(r.ids);
+        }
+        assert!(reloads > 0);
+        assert_eq!(got, want);
+        let _ = std::fs::remove_file(&file);
+    }
+
     #[test]
     fn session_continues_cpu() {
         let Some(m) = crate::testutil::model() else {
@@ -1843,7 +2111,16 @@ mod tests {
         assert_graded(&ag, &ac);
     }
 
-    /// A small context forgets the oldest exchanges and stays exact.
+    /// A small context forgets the oldest exchanges and stays exact, by
+    /// the fewest that make room (`forget_to` 0) or down to a fraction of
+    /// the context: every reply equals a fresh greedy pass over its
+    /// history, the cache after forgetting equals a fresh prefill of what's
+    /// kept (byte for byte), and forgetting down to half prefills less, in
+    /// fewer turns, than forgetting the minimum. Before each turn, the same
+    /// message is stopped before its first token at each prefill batch and
+    /// then at the first token: each time the conversation
+    /// comes back as it was, forgotten exchanges included, and the cache
+    /// still equals a fresh prefill of `hist[..fed]`.
     #[test]
     fn full_context_drops_oldest() {
         let Some(m) = crate::testutil::model() else {
@@ -1851,22 +2128,297 @@ mod tests {
         };
         let tok = Tokenizer::from_gguf(&m);
         let net = Qwen2::new(&m);
-        let mut chat = Chat::new(&net, &tok, Some("Be brief."), 160).unwrap();
-        chat.max_reply = 24;
-        let sys = chat.hist.clone();
-        let mut dropped = 0;
-        for msg in MSGS.iter().chain(&MSGS) {
-            let r = chat.reply(msg, &|| false, &mut |_| Ok(())).unwrap();
-            dropped += r.dropped;
-            assert!(chat.hist.len() <= 160);
-            assert_eq!(chat.hist[..sys.len()], sys[..]);
-            let prompt = &chat.hist[..chat.hist.len() - r.ids.len() - 2];
-            assert_eq!(r.ids, fresh(chat.net, prompt, 24, &chat.fr.stop), "{msg:?}");
+        let cost = full_context(
+            &net,
+            &tok,
+            &[(160, 0.0), (160, 0.5), (320, 0.0), (320, 0.5), (320, 0.25)],
+        );
+        // At 320, half: fewer turns forget, fewer tokens prefilled.
+        let (min, half) = (cost[2], cost[3]);
+        assert!(half.2 < min.2 && half.3 < min.3, "{cost:?}");
+    }
+
+    /// `full_context_drops_oldest` on the GPU (`CudaQwen2`): the cache
+    /// after forgetting, and after a stopped turn, == a fresh prefill.
+    #[test]
+    fn full_context_drops_oldest_cuda() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let Some(m) = crate::testutil::model() else {
+            return;
+        };
+        let km = crate::cuda::Kernels::module(&g).unwrap();
+        let tok = Tokenizer::from_gguf(&m);
+        let net = crate::cuda::qwen2::CudaQwen2::new(&g, &km, &m, 2048).unwrap();
+        let cost = full_context(&net, &tok, &[(320, 0.0), (320, 0.5)]);
+        let (min, half) = (cost[0], cost[1]);
+        assert!(half.2 < min.2 && half.3 < min.3, "{cost:?}");
+    }
+
+    /// The cache rows 0..fed == a fresh prefill of `hist[..fed]`, byte for byte.
+    fn assert_fresh_cache<M: crate::kvsave::KvIo>(chat: &Chat<M>, ctx: usize, what: &str) {
+        let net = chat.net;
+        let mut c = net.new_cache(ctx);
+        for (i, b) in chat.hist[..chat.fed]
+            .chunks(crate::PREFILL_BATCH)
+            .enumerate()
+        {
+            net.feed_batch(b, i * crate::PREFILL_BATCH, &mut c);
         }
-        assert!(dropped > 0);
-        chat.reset();
-        assert_eq!(chat.hist, sys);
-        assert!(chat.turns.is_empty());
+        let mut want = Vec::new();
+        net.kv_save(&c, 0, chat.fed, &mut want).unwrap();
+        assert!(cache_image(chat) == want, "{what}: cache differs");
+    }
+
+    /// `full_context_drops_oldest`'s body: (ctx, forget_to, turns that
+    /// forgot, tokens prefilled) per config.
+    fn full_context<M: crate::kvsave::KvIo>(
+        net: &M,
+        tok: &Tokenizer,
+        configs: &[(usize, f64)],
+    ) -> Vec<(usize, f64, usize, usize)> {
+        use std::cell::Cell;
+        let mut cost = Vec::new();
+        for &(ctx, forget_to) in configs {
+            let what = format!("ctx {ctx} forget_to {forget_to}");
+            let mut chat = Chat::new(net, tok, Some("Be brief."), ctx).unwrap();
+            chat.max_reply = 24;
+            chat.forget_to = forget_to;
+            let sys = chat.hist.clone();
+            let (mut dropped, mut refills, mut fed) = (0, 0, 0);
+            let (mut undone, mut undone_late) = (0, 0);
+            for msg in MSGS.iter().cycle().take(16) {
+                let n = chat.turns.len();
+                let state = (chat.hist.clone(), chat.turns.clone(), chat.msgs.clone());
+                // Stopped at poll 1, 2, ...: in the prefill until a stop
+                // lands at the first token (`prompt_tokens` set).
+                let mut late = false;
+                for at in 1..=8 {
+                    if late {
+                        break;
+                    }
+                    let polls = Cell::new(0);
+                    let stop = || {
+                        polls.set(polls.get() + 1);
+                        polls.get() >= at
+                    };
+                    let r = chat.reply(msg, &stop, &mut |_| Ok(())).unwrap();
+                    assert!(
+                        r.interrupted && r.ids.is_empty() && r.dropped == 0,
+                        "{what}"
+                    );
+                    let now = (chat.hist.clone(), chat.turns.clone(), chat.msgs.clone());
+                    assert!(
+                        now == state,
+                        "{what}: a stopped turn changed the conversation"
+                    );
+                    assert_fresh_cache(&chat, ctx, &format!("{what}, stopped at poll {at}"));
+                    late |= r.prompt_tokens > 0;
+                }
+                let r = chat.reply(msg, &|| false, &mut |_| Ok(())).unwrap();
+                fed += r.prompt_tokens;
+                assert!(chat.hist.len() <= ctx, "{what}");
+                assert_eq!(chat.hist[..sys.len()], sys[..], "{what}");
+                let prompt = &chat.hist[..chat.hist.len() - r.ids.len() - 2];
+                assert_eq!(
+                    r.ids,
+                    fresh(chat.net, prompt, 24, &chat.fr.stop),
+                    "{what} {msg:?}"
+                );
+                if r.dropped == 0 {
+                    continue;
+                }
+                // The stopped tries above forgot as this one did, then put it back.
+                undone += 1;
+                undone_late += usize::from(late);
+                dropped += r.dropped;
+                refills += 1;
+                // With a target, what's kept (the new message included)
+                // fits it, unless that takes the newest exchange.
+                let kept = *chat.turns.last().unwrap();
+                let user = chat.hist.len() - kept - r.ids.len() - 2;
+                if forget_to > 0.0 {
+                    let target = (forget_to * ctx as f64) as usize;
+                    assert!(kept + user <= target || r.dropped + 1 >= n, "{what}");
+                }
+                assert_fresh_cache(&chat, ctx, &what);
+            }
+            assert!(dropped > 0 && undone > 0 && undone_late > 0, "{what}");
+            cost.push((ctx, forget_to, refills, fed));
+            chat.reset();
+            assert_eq!(chat.hist, sys);
+            assert!(chat.turns.is_empty());
+        }
+        eprintln!("full_context (ctx, forget_to, turns that forgot, prefilled): {cost:?}");
+        cost
+    }
+
+    /// Forgetting the fewest exchanges vs down to half, over a scripted
+    /// greedy chat on the GPU (else the CPU): per config, the turns that
+    /// forgot, the tokens prefilled, and time to first token per turn.
+    /// 0.5B (`MODEL`) at `--ctx` 2048, -n 160; `forget_bench_7b`: 7B Q4_K_M
+    /// at 8192, -n 400; each also with -n unlimited. Env overrides: `AXON_FB_MODEL` (a file in models/),
+    /// `AXON_FB_CTX`, `AXON_FB_TURNS` (40), `AXON_FB_N`, `AXON_FB_ROUNDS` (2,
+    /// configs interleaved). `chat::tests::forget_bench -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn forget_bench() {
+        forget_bench_with(crate::testutil::MODEL, 2048, 160);
+    }
+
+    #[test]
+    #[ignore]
+    fn forget_bench_7b() {
+        forget_bench_with("models/Qwen2.5-7B-Instruct-Q4_K_M.gguf", 8192, 400);
+    }
+
+    fn forget_bench_with(model: &str, ctx: usize, n: usize) {
+        let env = |k: &str, d: usize| -> usize {
+            std::env::var(k)
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(d)
+        };
+        let model =
+            std::env::var("AXON_FB_MODEL").map_or(model.to_string(), |f| format!("models/{f}"));
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(&model);
+        eprintln!("FB model {}", path.display());
+        let m = crate::gguf::load_with(path.to_str().unwrap(), None).expect("load model");
+        let (ctx, turns, n, rounds) = (
+            env("AXON_FB_CTX", ctx),
+            env("AXON_FB_TURNS", 40),
+            env("AXON_FB_N", n),
+            env("AXON_FB_ROUNDS", 2),
+        );
+        eprintln!("FB ctx {ctx} turns {turns} n {n} rounds {rounds}");
+        let tok = Tokenizer::from_gguf(&m);
+        let topics = [
+            "Explain how a hash map handles collisions.",
+            "Write a short poem about the sea.",
+            "What are three tips for learning a new language?",
+            "Summarize the plot of Romeo and Juliet.",
+            "How does a CPU cache work?",
+            "Give me a recipe for pancakes.",
+            "Why is the sky blue?",
+            "Write a Python function that reverses a list.",
+            "What is the difference between TCP and UDP?",
+            "Describe a good morning routine.",
+        ];
+        let script: Vec<String> = (0..turns)
+            .map(|i| format!("{} (question {})", topics[i % topics.len()], i + 1))
+            .collect();
+        fn one<M: crate::lm::Lm>(
+            net: &M,
+            tok: &Tokenizer,
+            ctx: usize,
+            n: usize,
+            forget_to: f64,
+            script: &[String],
+        ) -> Vec<(usize, usize, f64, f64)> {
+            use std::time::Instant;
+            let mut chat = Chat::new(net, tok, Some(DEFAULT_SYSTEM), ctx).unwrap();
+            chat.max_reply = n;
+            chat.forget_to = forget_to;
+            let mut out = Vec::new();
+            for msg in script {
+                let t0 = Instant::now();
+                let mut ttft = None;
+                let r = chat
+                    .reply(msg, &|| false, &mut |_| {
+                        ttft.get_or_insert_with(|| t0.elapsed().as_secs_f64());
+                        Ok(())
+                    })
+                    .unwrap();
+                let ttft = ttft.unwrap_or_else(|| t0.elapsed().as_secs_f64());
+                out.push((r.dropped, r.prompt_tokens, r.prompt_secs, ttft));
+            }
+            out
+        }
+        let report = |name: &str, forget_to: f64, t: &[(usize, usize, f64, f64)]| {
+            let forgot = t.iter().filter(|x| x.0 > 0).count();
+            let first = t.iter().position(|x| x.0 > 0).unwrap_or(t.len());
+            let prefilled: usize = t.iter().map(|x| x.1).sum();
+            let after: usize = t[first..].iter().map(|x| x.1).sum();
+            let mut tt: Vec<f64> = t.iter().map(|x| x.3 * 1e3).collect();
+            let mean = tt.iter().sum::<f64>() / tt.len() as f64;
+            let mut full: Vec<f64> = t[first..].iter().map(|x| x.3 * 1e3).collect();
+            let fmean = full.iter().sum::<f64>() / full.len().max(1) as f64;
+            tt.sort_by(f64::total_cmp);
+            full.sort_by(f64::total_cmp);
+            let p95 = |v: &[f64]| {
+                v.get((v.len() * 95).div_ceil(100).max(1) - 1)
+                    .copied()
+                    .unwrap_or(0.0)
+            };
+            // p95 of 40 turns hides a handful of forgetting turns: their
+            // own median and the max are reported too.
+            let med = |mut v: Vec<f64>| {
+                v.sort_by(f64::total_cmp);
+                v.get(v.len() / 2).copied().unwrap_or(f64::NAN)
+            };
+            let ftt = med(t.iter().filter(|x| x.0 > 0).map(|x| x.3 * 1e3).collect());
+            let stt = med(t[first..]
+                .iter()
+                .filter(|x| x.0 == 0)
+                .map(|x| x.3 * 1e3)
+                .collect());
+            eprintln!(
+                "FB {name} forget_to {forget_to}: turns {} | forgot on {forgot} turns (first at turn {}) \
+                 | turns per re-prefill {:.2} | prefilled {prefilled} tok ({after} from the first forget on) \
+                 | ttft ms mean {mean:.1} p95 {:.1} max {:.1} | after the window filled: mean {fmean:.1} \
+                 p95 {:.1} | forgetting turns: median {ftt:.1} | other turns after the fill: median {stt:.1}",
+                t.len(),
+                first + 1,
+                (t.len() - first) as f64 / forgot.max(1) as f64,
+                p95(&tt),
+                tt.last().copied().unwrap_or(0.0),
+                p95(&full),
+            );
+            for (i, x) in t.iter().enumerate() {
+                eprintln!(
+                    "FBT {name} {forget_to} turn {} dropped {} prompt {} prefill_ms {:.1} ttft_ms {:.1}",
+                    i + 1,
+                    x.0,
+                    x.1,
+                    x.2 * 1e3,
+                    x.3 * 1e3
+                );
+            }
+        };
+        // -n as given, then unlimited (the CLI default: a reply reserves
+        // ctx/4, so halving leaves a quarter of the context to grow into).
+        let configs = [0.0, 0.5];
+        let gpu = crate::testutil::gpu();
+        let label = |dev: &str, n: usize, round: usize| match n {
+            usize::MAX => format!("{dev} n=unlimited r{round}"),
+            n => format!("{dev} n={n} r{round}"),
+        };
+        match &gpu {
+            Some(g) => {
+                let km = crate::cuda::Kernels::module_for(g, &m).unwrap();
+                let net = crate::cuda::qwen2::CudaQwen2::new(g, &km, &m, ctx).unwrap();
+                for n in [n, usize::MAX] {
+                    for round in 0..rounds {
+                        for &f in &configs {
+                            let t = one(&net, &tok, ctx, n, f, &script);
+                            report(&label("cuda", n, round), f, &t);
+                        }
+                    }
+                }
+            }
+            None => {
+                let net = Qwen2::new(&m);
+                for n in [n, usize::MAX] {
+                    for round in 0..rounds {
+                        for &f in &configs {
+                            let t = one(&net, &tok, ctx, n, f, &script);
+                            report(&label("cpu", n, round), f, &t);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// Mistral v0.3 (`[INST]` control tokens, SentencePiece): llama.cpp's
@@ -1926,22 +2478,30 @@ mod tests {
         }
         // A full context drops the oldest exchange; the next one then
         // carries the system message.
+        // (Forgetting the fewest that make room, then down to half the
+        // context, several exchanges at once.)
         let mut chat = Chat::new(&net, &tok, Some("Be brief."), 96).unwrap();
-        chat.max_reply = 8;
-        let mut dropped = 0;
-        for msg in MSGS {
-            let r = chat.reply(msg, &|| false, &mut |_| Ok(())).unwrap();
-            dropped += r.dropped;
-            assert!(chat.hist.len() <= 96);
-            assert_eq!(chat.hist[0], bos);
-            let first = chat.frame_user(&chat.msgs[0].0, true);
-            assert_eq!(chat.hist[1..1 + first.len()], first[..]);
-            for (i, (m, _)) in chat.msgs.iter().enumerate().skip(1) {
-                let u = chat.frame_user(m, false);
-                assert_eq!(chat.hist[chat.turns[i]..chat.turns[i] + u.len()], u[..]);
+        for forget_to in [0.0, 0.5] {
+            chat.reset();
+            chat.max_reply = 8;
+            chat.forget_to = forget_to;
+            let mut dropped = 0;
+            for msg in MSGS.iter().cycle().take(8) {
+                let r = chat.reply(msg, &|| false, &mut |_| Ok(())).unwrap();
+                dropped += r.dropped;
+                assert!(chat.hist.len() <= 96);
+                assert_eq!(chat.hist[0], bos);
+                let first = chat.frame_user(&chat.msgs[0].0, true);
+                assert_eq!(chat.hist[1..1 + first.len()], first[..]);
+                for (i, (m, _)) in chat.msgs.iter().enumerate().skip(1) {
+                    let u = chat.frame_user(m, false);
+                    assert_eq!(chat.hist[chat.turns[i]..chat.turns[i] + u.len()], u[..]);
+                }
+                let prompt = &chat.hist[..chat.hist.len() - r.ids.len() - 1];
+                assert_eq!(r.ids, fresh(chat.net, prompt, 8, &chat.fr.stop), "{msg:?}");
             }
+            assert!(dropped > 0);
         }
-        assert!(dropped > 0);
         // Messages that fit only without the system message: refused before
         // anything is forgotten (the conversation stays as it was).
         let mut refused = 0;

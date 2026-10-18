@@ -34,8 +34,9 @@ models, cheaply and fast), so choices made along the way shouldn't close them of
   each is listed under [Frontier models](#frontier-models-100b-to-1t):
   - experts on the GPU (MoE stages 2–3, already planned);
   - MLA attention and DeepSeek routing (the `deepseek2` architecture), tried first on a small DeepSeek-architecture
-    model that fits Parabellum;
-  - Kimi's tokenizer (its own vocabulary and pre-tokenizer; to be checked against the GGUF);
+    model that fits Parabellum. **Stage 0 (CPU-only exact reference) is in** (2026-10-18, on Moonlight-16B-A3B,
+    K2's routing and tokenizer at 1/60 of its size; [log](log/2026-10-18-deepseek2-s0.md)); GPU attention is next;
+  - Kimi's tokenizer (`kimi-k2`): **in**, token for token with Hugging Face's on a varied corpus;
   - 2–3-bit weight types. At Q4_K_M the model is ≈ 600 GB; at 2–3 bits it is ≈ 250–380 GB. Q2_K and Q3_K (and
     IQ4_NL, their files' fallback type) run on the CPU and CUDA (feat/q2k-q3k, [log](log/2026-10-17-q2k-q3k.md));
   - an expert cache across GPU, RAM and disk, and multi-GPU (pipeline parallel is on main, #34);
@@ -122,7 +123,9 @@ Also done, not yet in the table: **item 6, serve ops** (#61, #62: `--api-key`, `
 `--max-prompt-tokens`, `--slot-idle-ms`; [log](log/2026-10-17-serve-ops.md),
 [follow-up](log/2026-10-17-serve-ops-followup.md)), and **item 8's YaRN override** (#49: a pass-key needle 18/18 up to 128k
 with it, 9/18 without; +7.7–8.0 % perplexity at 2k–8k on 7B, so opt-in; [log](log/2026-10-16-yarn.md)). Item 8's other half,
-`chat` forgetting in halves, is still planned: `chat` drops the fewest exchanges that make room. Both status
+`chat` forgetting in halves, is in review (`chat --forget-to F`, default 0.5: once the window is full, the oldest
+exchanges go until the rest fills half of it, so the next turns append to the cache instead of each re-prefilling
+it; cache == fresh prefill of what's kept; [log](log/2026-10-18-chat-halves.md)). Both status
 cells sit next to item 7's, which PR #67 edits, so they are updated here until #67 merges.
 
 Dependencies: 1 (done) → {4 stage B, 10}; 2 (done) → 5 (stages 0–1 done) → shared-prefix pages; 3 (done) and 4
@@ -207,12 +210,22 @@ trigger each step. Nothing here is scheduled.
 2. **MLA attention and DeepSeek routing** (the `deepseek2` GGUF architecture, which covers V2, V3 and Kimi K2).
    MLA caches one compressed latent per token per layer (576 values at DeepSeek V3's shapes) instead of full K and
    V. Decode can fold the up-projections into the query ("absorbed" form), which reads far less KV per step.
-   The routing adds shared experts, sigmoid scores with a per-expert bias, and a grouped top-k.
+   The routing adds shared experts, sigmoid scores with a per-expert bias, and a grouped top-k (no published GGUF
+   carries the group count, and llama.cpp doesn't apply it: refused until one does).
+   - **Cleanups owed:** `model::moe::Moe` carries deepseek2's router rule (`gate_fn`) and gpt-oss's biases
+     (`oai`) side by side, and correctness rests on never setting both: make it one
+     `enum Router { Gate(Gate), Oai(Box<Oai>) }` (review of #79). Byte-level BPE vocabularies don't split
+     USER_DEFINED tokens (`</think>`, harmony markers) out of plain text as llama.cpp and HF do.
+   - **Status (2026-10-18): stage 0 done** ([log](log/2026-10-18-deepseek2-s0.md), design note
+     `specs/r12-deepseek2.md`): the absorbed form on the CPU for decode, prefill and verify alike (bit for bit),
+     a K-only 576-wide cache, DeepSeek V3 YaRN's attention scale, the `kimi-k2` and `deepseek-v3` tokenizers, the
+     Kimi and DeepSeek V3 chat formats. Next: stage 1, GPU MLA attention + router + shared experts with the routed
+     experts on the CPU (the #67 split).
    - **Exactness:** the absorbed and expanded forms round differently, so decode, prefill and verify must pick one
      order and keep it, the same decode == prefill rule as every other kernel.
-   - **Dev model that fits Parabellum:** DeepSeek-V2-Lite (16B total, 2.4B active, MLA, `deepseek2`; ≈ 10 GB at
-     Q4_K_M). It plays the role the 3-layer Pruned-2B played for MoE: every kernel and layout at small scale,
-     checkable against llama.cpp. DeepSeek V3 and Kimi K2 then run on a pod.
+   - **Dev model that fits Parabellum:** Moonlight-16B-A3B-Instruct (Q4_K_M 10.54 GB): the current absorbed GGUF
+     layout, Kimi K2's routing and tokenizer. (Every published DeepSeek-V2-Lite GGUF is the legacy non-MLA layout,
+     which Axon refuses with a re-convert message.) DeepSeek V3 and Kimi K2 then run on a pod.
    - **Gates:** logits vs llama.cpp within its own CPU/CUDA spread on V2-Lite; decode == prefill == verify; tok/s vs
      llama.cpp on the same box.
    - **Cost:** no estimate yet. Scope it with a design note first, as r11 did for MoE.
