@@ -9,14 +9,15 @@ use crate::gguf::Val;
 
 /// Fixture shapes: dim 64, 2 heads of nope 32 + rope 16, latent 32, values
 /// 32 per head, a dense lead layer (ffn 128) then 2 MoE layers (4 experts
-/// of 64, top-2, 1 shared), vocab 64. (The spec's nope 16 / rope 8 don't
+/// of 64, top-2, 1 shared), vocab 64; latent 64 so that the key row
+/// (80) differs from nope + rope (48). (The spec's nope 16 / rope 8 don't
 /// make whole Q8_0 rows: 32-wide blocks.)
 pub(crate) const FX: Fx = Fx {
     dim: 64,
     nh: 2,
     nope: 32,
     rope: 16,
-    lat: 32,
+    lat: 64,
     hv: 32,
     q_lora: 32,
     ffn: 128,
@@ -864,4 +865,97 @@ fn deepseek2_moonlight_bits() {
         tok.decode(&r1.ids),
         tok.decode(&r2.ids)
     );
+}
+
+/// The `kimi-k2` tokenizer against Hugging Face's (Moonlight's
+/// tokenization_moonshot.py, tiktoken): every case token for token, plain
+/// and with special-token parsing; the Kimi chat framing against its
+/// `apply_chat_template`. Needs only the GGUF's header (mapped, not run).
+#[test]
+fn kimi_tokenizer_matches_hf() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(crate::testutil::DS2_MODEL);
+    if !path.exists() {
+        eprintln!("skipping: {} not present (optional)", path.display());
+        return;
+    }
+    let m = crate::gguf::load_with(path.to_str().unwrap(), Some(false)).unwrap();
+    let t = crate::tokenizer::Tokenizer::from_gguf(&m);
+    let d = crate::testutil::read_json("tokens_kimi.json");
+    let ids = |v: &serde_json::Value| -> Vec<u32> {
+        (v.as_array().expect("ids").iter())
+            .map(|x| x.as_u64().unwrap() as u32)
+            .collect()
+    };
+    let cases = d["cases"].as_array().expect("cases");
+    assert!(cases.len() >= 40);
+    let mut bad = Vec::new();
+    for c in cases {
+        let text = c["text"].as_str().expect("text");
+        if t.encode(text) != ids(&c["ids"]) || t.encode_special(text) != ids(&c["ids_special"]) {
+            bad.push(text.chars().take(60).collect::<String>());
+        }
+        assert_eq!(t.decode(&t.encode(text)), text);
+    }
+    assert!(bad.is_empty(), "{} of {} differ from HF: {bad:?}", bad.len(), cases.len());
+    // No BOS (the file has no add_bos_token; the template adds none).
+    assert_eq!(t.encode_prompt("hi"), t.encode("hi"));
+    let fr = crate::chat::Framing::new(&t).expect("framing");
+    assert!(matches!(fr.format, crate::chat::Format::Kimi { .. }));
+    let sys = crate::chat::template_default_system(&m);
+    let conv = |c: &serde_json::Value, sys: Option<&str>| {
+        let msgs = c["messages"].as_array().unwrap();
+        let mut out = fr.system(&t, sys);
+        for (i, msg) in msgs.iter().enumerate() {
+            let role = msg["role"].as_str().unwrap();
+            let next = (i + 1 == msgs.len()).then_some("assistant");
+            out.extend(fr.frame(&t, role, msg["content"].as_str().unwrap(), next));
+        }
+        out
+    };
+    assert_eq!(conv(&d["chat"], sys.as_deref()), ids(&d["chat"]["ids"]), "chat");
+    let s = d["chat_sys"]["system"].as_str();
+    assert_eq!(conv(&d["chat_sys"], s), ids(&d["chat_sys"]["ids"]), "chat + system");
+}
+
+/// The `deepseek-v3` pre-tokenizer (three sequential splits) on DeepSeek
+/// V3.1's vocabulary against Hugging Face's tokenizer.json, and the
+/// DeepSeek3 chat framing against its template (thinking off). The GGUF:
+/// AXON_TEST_DS3_HEADER, a header-only stub of unsloth's V3.1 Q4_K_M shard
+/// 1 (sparse; only the header is read). Skipped without it.
+#[test]
+fn deepseek3_tokenizer_matches_hf() {
+    let Ok(path) = std::env::var("AXON_TEST_DS3_HEADER") else {
+        eprintln!("skipping: AXON_TEST_DS3_HEADER not set (optional)");
+        return;
+    };
+    let m = crate::gguf::load_with(&path, Some(false)).unwrap();
+    assert_eq!(crate::tokenizer::pre_of(&m), Ok(crate::tokenizer::Pre::DeepSeek3));
+    let t = crate::tokenizer::Tokenizer::from_gguf(&m);
+    let d = crate::testutil::read_json("tokens_deepseek3.json");
+    let ids = |v: &serde_json::Value| -> Vec<u32> {
+        (v.as_array().expect("ids").iter())
+            .map(|x| x.as_u64().unwrap() as u32)
+            .collect()
+    };
+    let mut bad = Vec::new();
+    let cases = d["cases"].as_array().expect("cases");
+    for c in cases {
+        let text = c["text"].as_str().expect("text");
+        if t.encode(text) != ids(&c["ids"]) || t.encode_special(text) != ids(&c["ids_special"]) {
+            bad.push(text.chars().take(60).collect::<String>());
+        }
+    }
+    assert!(bad.is_empty(), "{} of {} differ from HF: {bad:?}", bad.len(), cases.len());
+    let fr = crate::chat::Framing::new(&t).expect("framing");
+    assert!(matches!(fr.format, crate::chat::Format::DeepSeek3 { .. }));
+    let c = &d["chat_sys"];
+    let msgs = c["messages"].as_array().unwrap();
+    let mut out = fr.system(&t, c["system"].as_str());
+    // A user message opens the reply after it (as `Chat` frames turns).
+    for msg in msgs {
+        let role = msg["role"].as_str().unwrap();
+        let next = (role == "user").then_some("assistant");
+        out.extend(fr.frame(&t, role, msg["content"].as_str().unwrap(), next));
+    }
+    assert_eq!(out, ids(&c["ids"]), "chat");
 }
