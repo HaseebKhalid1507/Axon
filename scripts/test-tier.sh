@@ -30,6 +30,11 @@ for b in "$rel" $dbg; do
     [ -x "$b" ] || { echo "test-tier: $b is not an executable" >&2; exit 2; }
 done
 name=${TIER_NAME:-$(basename "$root")}
+if [ -n "${TIER_SHARD:-}" ] && [[ " ${TIER_RUN_OPTS:-} " == *" --dry-run "* ]]; then
+    # axon-run --shard submits for real even with --dry-run (seen 2026-10-18).
+    echo "test-tier: --dry-run doesn't work with TIER_SHARD; unset one" >&2
+    exit 2
+fi
 run_opts=(${TIER_RUN_OPTS:-})
 [ "${TIER_DETACH:-0}" = 1 ] && run_opts+=(--detach)
 
