@@ -263,6 +263,11 @@ impl LayerW {
     }
 }
 
+/// `step_with`'s and `profile`'s Err on a MoE model (its decode is
+/// `moe_step`).
+const MOE_DENSE_STEP: &str =
+    "a mixture-of-experts model's decode step needs its experts (crate::moe: moe_step)";
+
 /// How a cache stores keys and values (`CudaQwen2::kv`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CacheKv {
@@ -2510,6 +2515,10 @@ impl<'g> CudaQwen2<'g> {
         pos: usize,
         head: Head,
     ) -> Result<(), String> {
+        // Before any write or capture: a MoE layer has no dense FFN.
+        if self.moe.is_some() {
+            return Err(MOE_DENSE_STEP.into());
+        }
         assert_eq!(c.net, self.id, "a CudaCache used with another CudaQwen2");
         assert!(head != Head::Last, "Head::Last: batched passes only");
         assert!(
@@ -2901,6 +2910,9 @@ impl<'g> CudaQwen2<'g> {
         token: u32,
         pos: usize,
     ) -> Result<(Vec<KernelTime>, f64), String> {
+        if self.moe.is_some() {
+            return Err(MOE_DENSE_STEP.into());
+        }
         assert_eq!(c.net, self.id, "a CudaCache used with another CudaQwen2");
         assert!(pos < c.max_ctx && (token as usize) < self.vocab);
         c.debug_covers(0, pos + 1);
