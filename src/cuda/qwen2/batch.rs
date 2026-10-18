@@ -65,11 +65,13 @@ pub(super) const HEAD_SUB: usize = 16;
 pub(super) const MQ_Q: usize = 16;
 
 /// Batches of one sequence of up to this many queries take the per-query
-/// path when attn_blk_mq runs it (`CudaQwen2::att_mq`), not attn_fa_b:
-/// cuda_attn_mq_sweep, 7B shape, on an RTX 4090 and bella (docs/log
+/// path when attn_blk_mq runs it (`CudaQwen2::att_mq`), not attn_fa_b,
+/// whatever the head size: cuda_attn_mq_sweep, 7B shape (hd 128) on an RTX
+/// 4090 and bella, 14 / 2 x 64 on an RTX 4050 Laptop (docs/log
 /// 2026-10-18-attn-mq). attn_blk_mq writes a 4 hd-byte partial per (query,
 /// head, block) that attn_cmb_b reads back, so it falls behind the flash
-/// kernel's in-register fold as queries grow. AXON_ATT_MQ_MAX overrides.
+/// kernel's in-register fold as queries grow (hd 64: 48 queries lose from
+/// 16k positions, 1.5-1.7x attn_fa_bs). AXON_ATT_MQ_MAX overrides.
 pub(super) const MQ_MAX: usize = 32;
 
 /// attn_mq_t's dynamic shared memory for head size hd and q8 scale group
@@ -628,17 +630,15 @@ impl<'g> CudaQwen2<'g> {
 
     /// Whether a one-sequence pass of nb queries takes the flash attention
     /// (attn_fa_b) rather than the per-query path (attn_blk_mq or
-    /// attn_blk_b): more than att_per_query queries, or than `att_mq_max`
-    /// when attn_blk_mq runs the per-query path.
+    /// attn_blk_b): more than `att_mq_max` queries when attn_blk_mq runs
+    /// the per-query path (whatever att_per_query), else more than
+    /// att_per_query. Every choice gives the same bits.
     pub(super) fn att_flash(&self, nb: usize) -> bool {
-        let per = att_per_query(self.head_dim);
-        self.tc_attn
-            && nb
-                > if self.att_mq {
-                    per.max(self.att_mq_max)
-                } else {
-                    per
-                }
+        let max = match self.att_mq {
+            true => self.att_mq_max,
+            false => att_per_query(self.head_dim),
+        };
+        self.tc_attn && nb > max
     }
 
     /// Partials (per head, hd + 2 floats each) of the batched attention:
