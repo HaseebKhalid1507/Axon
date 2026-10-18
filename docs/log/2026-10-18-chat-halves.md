@@ -53,7 +53,7 @@ All MEASURED; the TTFT cells give both rounds (r0 · r1). The 0.5B timings come 
 
 Commands: `axon-run --vram 2500 -- axon-test chat::tests::forget_bench --exact --ignored --nocapture`; the same with `--timing 4090`; `axon-run --timing bella|4090 --big-models --vram 9000 -- axon-test chat::tests::forget_bench_7b --exact --ignored --nocapture`.
 
-At a 32k window the same arithmetic applies: min re-prefills ~30k tokens on nearly every turn once the window is full, while half re-prefills ~16k once every several turns (ESTIMATED from the 0.5B ratio; the 7B rows above measure 8k).
+At a 32k window the same arithmetic applies: min re-prefills ~24k tokens (the window less the ctx/4 reply budget) on nearly every turn once the window is full, while half re-prefills at most ~16k once every several turns (ESTIMATED by the same arithmetic; the 7B rows above measure 8k).
 
 ## What didn't work / notes
 - Counting the reply budget (`want`) in the target was rejected. With unlimited replies `want` is ctx/4, so
