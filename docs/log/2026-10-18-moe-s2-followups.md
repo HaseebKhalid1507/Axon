@@ -33,11 +33,33 @@ Five small fixes from the #67 review (MERGE 9/10). No output change: greedy bits
 
 ## RAM need, before → after (from `axon info` sizes; formula = `ram_need`, headroom 3 << 29 B = 1.61 GB)
 
-RAMNUMBERS
+`axon info` on bella (job 1018-013250-dfed): Pruned-2B experts r8 1.10 GB, non-expert 465,609,728 B; the 30B
+(the sparse header stub of unsloth's Q4_K_M) experts r8 17.93 GB, non-expert 997,554,176 B.
+
+| model | placement | before (main) | after |
+|---|---|---|---|
+| Qwen3-30B-A3B-Instruct-Pruned-2B Q4_K_M | `--device cpu` | 3.2 GB | 3.2 GB (unchanged) |
+| Qwen3-30B-A3B-Instruct-Pruned-2B Q4_K_M | `--device cuda` (split) | 3.2 GB (1.10 + 0.47 + 1.61) | **2.7 GB** (1.10 + 1.61) |
+| Qwen3-30B-A3B Q4_K_M (header stub) | `--device cpu` | 20.5 GB | 20.5 GB (unchanged) |
+| Qwen3-30B-A3B Q4_K_M (header stub) | `--device cuda` (split) | 20.5 GB (17.93 + 1.00 + 1.61) | **19.5 GB** (17.93 + 1.61) |
+
+The 3.2 GB in the first row is exactly the number in the jade refusal quoted in the stage 2 log ("needs about 3.2 GB
+of RAM ... only 3.1 GB available"). At 2.7 GB the split fits jade's 3.1 GB: see the jade row below.
 
 ## Verification
 
-EVIDENCE
+Test filters `moe paged` (38 tests: every MoE test incl. the three new ones, `paged_tests`, `chat::moe_`).
+Job IDs and the final status of every gate are in the PR's evidence table.
+
+- rustfmt `--check` clean; clippy `-D warnings` bin and `--test` clean.
+- md5 vs main (6143dcf), same host (bella sm_120), greedy `-n 64`, 3 prompts: the 4x0.6B and the Pruned-2B on
+  `--device cuda` (the split) and `--device cpu`, plus qwen2.5-0.5b and Qwen3-0.6B on cuda: **0 of 18 differ**, all
+  rc 0 (1018-013250-dfed). Banner: main prints `moe:` and `device: cuda + cpu experts` with the same text; the
+  branch prints only `moe: …, kv f16`.
+- Release, bella sm_120: **PASS** 38 / 0 / 0, no `skipping:` lines (1018-011840-da59).
+- jade sm_61 (GTX 1050 3 GB, 7.5 GB host), release, `--test-threads 1` (1018-012634-242e): `backend_places_moe` and
+  `moe_gpu_feed_batch_matches_feed_pruned`, which the RAM check refused in #67's jade run, now **load and pass**.
+  The Pruned-2B tests page its file from jade's HDD, so the job is slow; see the PR for its final status.
 
 ## What didn't work
 
