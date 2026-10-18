@@ -22,6 +22,24 @@
   with forget_to 0 and 0.5 over 8 exchanges, and also checks each reply against a fresh pass. New ignored
   benches: `forget_bench` (0.5B) and `forget_bench_7b`.
 
+### After Shady's review (5cae03a)
+- **Ctrl-C during the re-prefill** used to lose everything the turn had forgotten, up to half the conversation.
+  Now a stop before the reply's first token puts the forgotten exchanges back (`Chat::undo_forget`). The cache
+  holds the shifted history from where it began (`fed` after the drops, at most the system block), so `fed` is
+  lowered to that point and the next turn prefills from there; it forgets afresh if it has to. `r.dropped` is 0
+  after an undo.
+- `full_context_drops_oldest` is now generic over the backend, and `full_context_drops_oldest_cuda` runs it on
+  `CudaQwen2` (ctx 320, forget_to 0 and 0.5). Before every turn, the same message is stopped at each prefill
+  batch and then at its first token. Each time the conversation must come back unchanged and the cache must still
+  equal a fresh prefill of `hist[..fed]`, and the test requires that at least one forgetting turn was stopped at
+  its first token.
+- The bench also runs with -n unlimited (the CLI default) and reports the max TTFT and the forgetting turns'
+  median TTFT; a p95 over 40 turns hides 2–5 forgetting turns.
+- The stats line says "forgot the oldest N exchanges (down to half the context)" (or "to fit" under min). The help
+  lines are wrapped to the file's width, and help/README say that `--forget-to 1` == min and that with -n unlimited
+  a reply reserves ctx/4, so 0.5 leaves a quarter of the context to grow into. A comment at the target explains
+  why it leaves out the reply's room (`close`, `want`).
+
 ## Why
 Forgetting shifts every position after the system block, so the whole kept history is prefilled again. With the
 minimum dropped, the window is full again right after, so every turn after the window first fills pays a
@@ -29,14 +47,22 @@ near-full re-prefill. The roadmap's figure is ~24k tokens per exchange at a 32k 
 pays one re-prefill of ~half the window, and the next several turns append to a warm cache.
 
 ## How it was verified
+Round 1, code 955ee0f (the binaries for this round were built before a help-text-only edit):
 | gate | result | job ID / log |
 |---|---|---|
 | release suite (3 shards, 4090 pods) | PASS 514 / 0 / 37 ignored. Shard 2 hit the pod CUDA poison (ILLEGAL_ADDRESS cascade, first `gpu_prefill_batchings_bit_identical_q8_0_5b`); its 28 failures passed when axon-run re-ran them in a fresh process, so under the new rule that shard is **not clean evidence**. Every `chat::` test passed in the first run | group 1018-003131-4eea (f872, 73e4, 90c3); binary `axon-test-rel`, 955ee0f source minus a help-text wording edit |
 | debug-assertion suite, first run (4090 pod) | 418 / 96 failed: POISON-RERUN (first `gpu_prefill_batchings_bit_identical_qwen3`). All 96 passed alone in fresh processes. Not clean evidence | 1018-003316-4224 |
-| debug-assertion suite, gate of record, `AXON_TEST_GPU_SERIAL=1` (4090 pod) | **pending** | 1018-032502-5029, binary `axon-test-dbg-3406e77` (HEAD 3406e77) |
 | md5 `gen` main 5a73f63 vs candidate (`axon-cand`, 955ee0f = HEAD code), bella RTX 5070 Ti Laptop (sm_120), 5 models × 3 prompts, -n 64 greedy | cuda 0/15 differ, cpu 0/15 differ | 1018-003503-003d |
 | chat md5, bella, 0.5B `--ctx 512 --temp 0 -n 64`, 16 messages | main == `--forget-to min` on cuda and cpu (same stdout, 11 forgetting turns each); default: 4 forgetting turns. Its stdout happened to match too: these one-line questions don't depend on the forgotten history, so the strong evidence is the unit tests | 1018-003503-003d |
 | clippy -D warnings (bin + tests), rustfmt --check | clean | local |
+
+
+Round 2, code 5cae03a (Shady's fixes), binaries `axon-test-5cae03a`, `axon-test-dbg-5cae03a` and `axon-cand-5cae03a`.
+These jobs were queued when this entry was written; their results go in the PR body and in an Update line below.
+- `chat::` release tests on pods, with `AXON_TEST_GPU_SERIAL=1`: job 1018-033525-7682
+- debug-assertion suite (the gate of record) on pods, with `AXON_TEST_GPU_SERIAL=1`: job 1018-033814-8723
+- md5 of `gen`, main 5a73f63 vs 5cae03a, plus a history-dependent chat md5 (must give base == `--forget-to min` != default), on bella cuda + cpu: job 1018-033814-bf37
+- bench, -n as given and -n unlimited, 0.5B + 7B, one `--timing 4090` job: 1018-033527-1588
 
 ## Results
 Methodology: `chat::tests::forget_bench` / `forget_bench_7b`, ignored tests added in this PR. Each is a 40-exchange scripted greedy chat with the default Qwen system message (10 topics cycled, each message numbered). forget_to 0 (main's behaviour, through the same code path) and 0.5 run interleaved, 2 rounds, in one process on one GPU, under exclusive placement. Per turn the bench records `Reply::prompt_tokens`, the prefill ms, and the TTFT, timed from the `reply()` call to the first emitted token. "Steady" = turns after the window first filled that didn't forget. Medians are over both rounds; the token counts were identical in both rounds. Binary: `axon-test-bench`, 955ee0f source minus a help-text wording edit (chat.rs identical to HEAD 3406e77). Per-turn rows (`FBT`) are in the job logs.
@@ -54,7 +80,7 @@ All MEASURED. Mean / p95 TTFT over all 40 turns (r0): 0.5B 11.5 / 17.5 → 4.3 /
 
 Commands: `axon-run --timing 4090 --vram 2500 -- axon-test-bench chat::tests::forget_bench --exact --ignored --nocapture`; `axon-run --timing 4090|bella --big-models --vram 9000 -- axon-test-bench chat::tests::forget_bench_7b --exact --ignored --nocapture`. Stats: `fbstats.py` over the `FBT` lines. An earlier non-exclusive 0.5B run (1018-003138-4b40, shared pod) gave the same counts.
 
-At a 32k window the same arithmetic applies: min re-prefills ~24k tokens (the window less the ctx/4 reply budget) on nearly every turn once the window is full, while half re-prefills at most ~16k once every several turns (ESTIMATED by the same arithmetic; the 7B rows above measure 8k).
+What that means at 32k (ESTIMATED from the measured 8k rows above): with -n 400, a forgetting turn under min re-prefilled a median of 7394 of 8192 positions (90 %, 7B 4090 row), and under half 3910 (48 %). At a 32k window that's ~29.5k vs ~15.6k tokens, and under min it happens on nearly every turn. With -n unlimited (the CLI default), a reply reserves ctx/4, so min keeps at most ~24k of 32k (the roadmap's figure) and re-prefills that on nearly every turn. Half keeps at most 16k, leaving ctx/4 = 8k for later turns to append into before the next forget. The -n unlimited bench (job 1018-033527-1588) measures the turns per re-prefill under the defaults; Shady's estimate is ~2.7 on 0.5B at 2048 and 4–5 on 7B at 8192.
 
 ## What didn't work / notes
 - Counting the reply budget (`want`) in the target was rejected. With unlimited replies `want` is ctx/4, so
