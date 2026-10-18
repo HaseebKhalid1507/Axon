@@ -81,7 +81,8 @@ Also open:
   output (needs grammar-constrained sampling), embeddings.
 - **Q2_K and Q3_K.** CPU and CUDA kernels for Q2_K, Q3_K and IQ4_NL (the fallback type in the same files);
   the 2–3-bit frontier models need them ([Long-term goals](#long-term-goals)). **In review** (feat/q2k-q3k,
-  [log](log/2026-10-17-q2k-q3k.md)); follow-ups: a repacked (r8) CPU layout and gemvm small-batch kernels.
+  [log](log/2026-10-17-q2k-q3k.md)); follow-ups: a repacked (r8) CPU layout (CPU prefill on 7B Q2_K /
+  Q3_K_M is 41% / 22% behind llama.cpp at pp2100, MEASURED) and gemvm small-batch kernels.
 - **MoE stage 2** (attention and router on the GPU, experts on the CPU). **In flight** (PR #67); its status
   lives in Scale item 7 and [Mixture-of-experts](#mixture-of-experts).
 - **Qwen3 0.6B Q8_0 long prefill on sm_89.** The one cell Axon loses on the RTX 4050
