@@ -86,7 +86,10 @@ fn mla_attn_matches_reference_and_batch() {
         let scale = 1.0 / (192f32).sqrt();
         let all = attn_gpu(&g, &f, &qa, &kv, krow, lat, n_h, scale, 0);
         let w = n_h * krow;
-        for p in [0, 1, 31, 32, 33, np / 2, np - 1] {
+        for p in [0, 1, 31, 32, 33, np / 2, np - 1]
+            .into_iter()
+            .filter(|&p| p < np)
+        {
             let one = attn_gpu(
                 &g,
                 &f,

@@ -121,7 +121,7 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
              layers on the CPU (top-{})",
             self.gpu.weight_bytes() as f64 / (1u64 << 30) as f64,
             d.n_expert,
-            self.gpu.n_layers,
+            self.gpu.mla_moe_layers().unwrap_or(self.gpu.n_layers),
             d.k
         )
     }

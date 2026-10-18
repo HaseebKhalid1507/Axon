@@ -5,13 +5,15 @@
 
 use super::*;
 use crate::cuda::Kernels;
-use crate::cuda::qwen2::tests::{Agree, compare, report};
 use crate::lm::Lm;
 use crate::model::deepseek2_tests::{Opt, ds2_fixture};
 
 fn bits(v: &[f32]) -> Vec<u32> {
     v.iter().map(|x| x.to_bits()).collect()
 }
+
+/// The fixture's vocabulary (`deepseek2_tests::FX`).
+const FX_VOCAB: usize = crate::model::deepseek2_tests::FX.vocab;
 
 /// The fixture's four option sets.
 const OPTS: [Opt; 4] = [
@@ -145,11 +147,38 @@ fn ds2_gpu_fixture_bits() {
     }
 }
 
-/// Gate (c) on the fixture: the GPU model vs the CPU-only one (absorbed
-/// too; f32 attention, other quantized-activation kernels), greedy
-/// continuations from several prompts. Both quantize activations to 8
-/// bits in other orders, so a near-tied router (vocab 64, random weights:
-/// many) flips an expert now and then.
+/// Per-position teacher-forced logits of `net` over `ids` (decode).
+fn decode_all<L: Lm>(net: &L, ids: &[u32]) -> Vec<Vec<f32>> {
+    let mut c = net.new_cache(ids.len());
+    (0..ids.len())
+        .map(|p| net.forward(ids[p], p, &mut c))
+        .collect()
+}
+
+/// (top-1 agreements, mean |dlogit|, max |dlogit|) of `a` against the
+/// reference `r`, per position.
+fn vs_ref(r: &[Vec<f32>], a: &[Vec<f32>]) -> (usize, f64, f32) {
+    let (mut top, mut sum, mut mx, mut n) = (0, 0.0, 0f32, 0);
+    for (lr, la) in r.iter().zip(a) {
+        top += (crate::argmax(lr) == crate::argmax(la)) as usize;
+        for (x, y) in lr.iter().zip(la) {
+            let d = (x - y).abs();
+            sum += d as f64;
+            mx = mx.max(d);
+            n += 1;
+        }
+    }
+    (top, sum / n as f64, mx)
+}
+
+/// Gate (c) on the fixture: the GPU model and the CPU-only one (both
+/// absorbed, both quantizing activations to 8 bits, in other kernels)
+/// against the f64 *expanded* reference (`deepseek2_ref`, the stage 0
+/// oracle) on teacher-forced ids: the GPU no further from it than the CPU
+/// (mean |dlogit| at most 1.5x the CPU's, top-1 at most 2 positions
+/// behind). Not GPU vs CPU directly: on the fixture (random weights,
+/// vocab 64, near-tied routers everywhere) two correct 8-bit models flip
+/// experts and top-1 against each other often.
 #[test]
 fn ds2_gpu_fixture_graded() {
     let Some(g) = crate::testutil::gpu() else {
@@ -158,24 +187,30 @@ fn ds2_gpu_fixture_graded() {
     let km = Kernels::module(&g).unwrap();
     let ml = Kernels::mla_module(&g).unwrap();
     for o in OPTS {
-        // Two copies: each model releases what it repacks.
-        let (m, _) = ds2_fixture(o, crate::quant::Q8_0);
+        // Copies: each model releases what it repacks.
+        let (m, raw) = ds2_fixture(o, crate::quant::Q8_0);
         let (mc, _) = ds2_fixture(o, crate::quant::Q8_0);
-        let net = ds2_net(&g, &km, &ml, &m, 64);
-        let cpu = Qwen2::new(&mc);
-        let mut a = Agree::default();
-        for seed in 0..6 {
-            let ids = ids_for(9, net.vocab(), 11 * seed + 1);
-            compare(&cpu, &net, &ids, 40, &mut a);
-        }
-        report(&format!("ds2 fixture {o:?} gpu vs cpu"), &a);
-        assert!(
-            a.top1 * 10 >= a.positions * 9,
-            "{o:?}: top-1 {}/{}",
-            a.top1,
-            a.positions
+        let (mr, _) = ds2_fixture(o, crate::quant::Q8_0);
+        let n = if o.yarn { 160 } else { 60 };
+        let ids = ids_for(n, FX_VOCAB, 7);
+        let r = crate::model::deepseek2_tests::deepseek2_ref(
+            &mr,
+            &raw,
+            &ids,
+            crate::model::deepseek2_tests::Bug::None,
         );
-        assert!(a.max_kl < 0.5, "{o:?}: max KL {}", a.max_kl);
+        let net = ds2_net(&g, &km, &ml, &m, n);
+        let gl = decode_all(&net, &ids);
+        drop(net);
+        let cl = decode_all(&Qwen2::new(&mc), &ids);
+        let (gt, gm, gx) = vs_ref(&r, &gl);
+        let (ct, cm, cx) = vs_ref(&r, &cl);
+        eprintln!(
+            "ds2 fixture {o:?} vs the f64 reference ({n} positions): gpu top-1 {gt}, mean \
+             |dlogit| {gm:.4}, max {gx:.3}; cpu top-1 {ct}, mean {cm:.4}, max {cx:.3}"
+        );
+        assert!(gm <= 1.5 * cm, "{o:?}: gpu mean |dlogit| {gm} vs cpu {cm}");
+        assert!(gt + 2 >= ct, "{o:?}: gpu top-1 {gt} vs cpu {ct}");
     }
 }
 

@@ -403,6 +403,13 @@ impl<'g> CudaQwen2<'g> {
         })
     }
 
+    /// deepseek2: how many layers have routed experts (the dense lead
+    /// doesn't); None for other models.
+    pub(crate) fn mla_moe_layers(&self) -> Option<usize> {
+        let ml = self.mla.as_deref()?;
+        Some(ml.layers.len() - ml.cfg.lead.min(ml.layers.len()))
+    }
+
     /// Whether layer li's FFN is the experts' (a host round trip).
     fn mla_is_moe(&self, li: usize) -> bool {
         matches!(self.ml().layers[li].ffn, MlaFfn::Moe { .. })
