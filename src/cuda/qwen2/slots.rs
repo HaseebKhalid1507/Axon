@@ -1276,7 +1276,8 @@ mod tests {
         }
     }
 
-    /// Pool steps of 17..64 rows (past gemvm16: the products split between
+    /// Pool steps of 9..64 rows (9..16: q|k|v and gate|up in one gemvmx
+    /// launch each, `bgemm_x`; past gemvm16: the products split between
     /// gemvm32 and gemm2's partial tiles, `takes_gemvm`; the head in one
     /// product over all rows; samp_tail in launches of HEAD_SUB rows), on
     /// the 0.5B and Llama 1B, mixed greedy and sampled rows: every
@@ -1315,7 +1316,13 @@ mod tests {
                 .collect();
             for vm in [16usize, 32, 0] {
                 net.bf.vm_max = vm;
-                for nb in [17usize, 33, 48, 64] {
+                // nb 9..16: q|k|v and gate|up on gemvmx (the gemvm limit
+                // doesn't apply there, so once).
+                let nbs: &[usize] = match vm {
+                    0 => &[9, 12, 16, 17, 33, 48, 64],
+                    _ => &[17, 33, 48, 64],
+                };
+                for &nb in nbs {
                     let mut p = net.pool(slots, ctx).unwrap();
                     for (i, pr) in prompts.iter().enumerate().take(nb) {
                         net.feed_slot(&mut p, i, &pr[..pr.len() - 1], 0).unwrap();
@@ -1421,6 +1428,8 @@ mod tests {
                 v if v.is_empty() => vec![0],
                 v => v,
             };
+            // AXON_STEP_X: bgemm_x on (1) / off (0), in turn (default 1).
+            let xs = list("AXON_STEP_X", "1");
             // AXON_STEP_KM: the kernel builds to run in turn per depth, e.g.
             // "plain,SOME_DEFINE,plain,SOME_DEFINE" (prefill.cu experiments).
             let kms: Vec<String> = std::env::var("AXON_STEP_KM")
@@ -1428,7 +1437,7 @@ mod tests {
                 .split(',')
                 .map(|s| s.trim().to_string())
                 .collect();
-            // Each entry "plain", or defines joined by '+' (e.g. "GVM_PF2+GVM_MINB=4").
+            // Each entry "plain", or defines joined by '+' (e.g. "AXON_G2_ZFILL+FOO=1").
             let mods: Vec<(String, crate::cuda::Module)> = kms
                 .iter()
                 .map(|k| {
@@ -1507,21 +1516,23 @@ mod tests {
                 };
                 for &nb in nbs.iter().filter(|&&nb| nb <= slots) {
                     let rs = rows(nb);
-                    for &vm in &vms {
+                    for (&vm, &x) in vms.iter().flat_map(|v| xs.iter().map(move |x| (v, x))) {
                         net.bf.vm_max = vm;
+                        net.bf.gemvmx_on = x == 1;
                         // (The graphs hold the kernels picked when made.)
                         p.graphs.clear();
                         let t = time(&mut || {
                             std::hint::black_box(net.step_rows(&mut p, &rs).unwrap());
                         });
                         eprintln!(
-                            "| {depth} | {nb} | {vm} | {t:.3} | {:.2} | {:.0} |",
+                            "| {depth} | {nb} | {vm} x{x} | {t:.3} | {:.2} | {:.0} |",
                             t / d,
                             nb as f64 * 1e3 / t
                         );
                     }
                 }
                 net.bf.vm_max = *vms.last().unwrap();
+                net.bf.gemvmx_on = *xs.last().unwrap() == 1;
                 for &nb in profs.iter().filter(|&&nb| nb <= slots) {
                     let tokens = vec![5u32; nb];
                     let at: Vec<RowAt> = (0..nb)

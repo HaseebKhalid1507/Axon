@@ -564,6 +564,51 @@ const SUPPORTED_TYPES: [u32; 13] = [
 /// gpt-oss's expert matrices only (`check_supported`).
 const EXPERT_TYPES: [u32; 1] = [MXFP4];
 
+/// The refusal for a tensor of a type the kernels don't run: the type by
+/// name, what is supported, and which file to get instead.
+/// A mixed file (an "IQ2_M" is mostly IQ2_S/IQ3_S, with IQ4_NL where a
+/// row isn't whole 256-blocks) also gets every unsupported type it holds.
+fn unsupported_type(m: &Model, name: &str, q: crate::gguf::QType) -> String {
+    let mut seen: Vec<(&str, usize)> = Vec::new();
+    for t in m.tensors.iter().filter(|t| {
+        !(SUPPORTED_TYPES.contains(&t.qtype.id)
+            || m.arch == "gpt-oss" && EXPERT_TYPES.contains(&t.qtype.id))
+    }) {
+        match seen.iter_mut().find(|s| s.0 == t.qtype.name) {
+            Some(s) => s.1 += 1,
+            None => seen.push((t.qtype.name, 1)),
+        }
+    }
+    let all = if seen.len() > 1 {
+        let l: Vec<String> = seen.iter().map(|(n, c)| format!("{c} {n}")).collect();
+        format!(" (the file has unsupported tensors: {})", l.join(", "))
+    } else {
+        String::new()
+    };
+    let n = q.name;
+    let hint = if n.starts_with("Q4_0_") {
+        "; it is an ARM repacked layout that llama.cpp has dropped: use the Q4_0 file"
+    } else if n.starts_with("IQ4_NL_") {
+        "; it is an ARM repacked layout that llama.cpp has dropped: use the IQ4_NL file"
+    } else if n.starts_with("IQ") || n.starts_with("TQ") {
+        "; this i-quant or ternary type is not supported: use a K-quant file \
+         (Q4_K_M, Q5_K_M, Q6_K) or Q8_0"
+    } else if n == "BF16" {
+        "; use the F16 or Q8_0 file"
+    } else {
+        ""
+    };
+    let ok: Vec<&str> = SUPPORTED_TYPES
+        .iter()
+        .map(|&id| crate::gguf::qtype(id).name)
+        .collect();
+    format!(
+        "tensor {name}: type {n} ({}) is not supported (supported: {}){all}{hint}",
+        q.id,
+        ok.join(", ")
+    )
+}
+
 /// Whether `Qwen2::new` reads any weight matrix in place from the model's
 /// bytes on every token (AXON_REPACK=0, or a matrix with no r8/r8q form),
 /// so that the anonymous huge-page copy of the file pays (`gguf::load_then`).
@@ -826,10 +871,7 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
         let t = find_opt(m, name).ok_or_else(|| bad(format!("missing tensor {name}")))?;
         let q = t.qtype;
         if !SUPPORTED_TYPES.contains(&q.id) {
-            return Err(bad(format!(
-                "tensor {name}: type {} ({}) is not supported (F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL)",
-                q.name, q.id
-            )));
+            return Err(bad(unsupported_type(m, name, q)));
         }
         let ok = match rows {
             None => t.n_elements == cols as u64,
@@ -977,10 +1019,7 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
             let t = find_opt(m, &name).ok_or_else(|| bad(format!("missing tensor {name}")))?;
             let q = t.qtype;
             if !(SUPPORTED_TYPES.contains(&q.id) || oss && EXPERT_TYPES.contains(&q.id)) {
-                return Err(bad(format!(
-                    "tensor {name}: type {} ({}) is not supported",
-                    q.name, q.id
-                )));
+                return Err(bad(unsupported_type(m, &name, q)));
             }
             let want = [cols as u64, rows as u64, d.n_expert as u64];
             if t.dims.len() < 3
@@ -3489,6 +3528,47 @@ pub(crate) mod tests {
         rejects(
             set("blk.1.ffn_down.weight", vec![128, 64], 99),
             "?? (99) is not supported",
+        );
+        // Zoo sweep: i-quants and repacked types were "?? (23)" with no way out.
+        rejects(
+            set("blk.0.attn_q.weight", vec![64, 64], 23),
+            "type IQ4_XS (23) is not supported (supported: F32",
+        );
+        rejects(
+            set("blk.0.attn_q.weight", vec![64, 64], 19),
+            "type IQ1_S (19) is not supported",
+        );
+        rejects(
+            set("blk.0.attn_q.weight", vec![64, 64], 19),
+            "use a K-quant file (Q4_K_M, Q5_K_M, Q6_K) or Q8_0",
+        );
+        rejects(
+            |ts: &mut Vec<(String, Vec<u64>, u32)>| {
+                for (n, ty) in [("blk.0.attn_q.weight", 22), ("blk.1.attn_q.weight", 19)] {
+                    ts.iter_mut().find(|t| t.0 == n).unwrap().2 = ty;
+                }
+            },
+            "(the file has unsupported tensors: 1 IQ2_S, 1 IQ1_S); this i-quant",
+        );
+        let ok: Vec<&str> = SUPPORTED_TYPES
+            .iter()
+            .map(|&id| crate::gguf::qtype(id).name)
+            .collect();
+        rejects(
+            set("blk.0.attn_q.weight", vec![64, 64], 31),
+            &format!(
+                "Q4_0_4_4 (31) is not supported (supported: {}); it is an ARM repacked layout \
+                 that llama.cpp has dropped: use the Q4_0 file",
+                ok.join(", ")
+            ),
+        );
+        rejects(
+            set("blk.0.attn_q.weight", vec![64, 64], 36),
+            "IQ4_NL_4_4 (36) is not supported",
+        );
+        rejects(
+            set("blk.0.attn_q.weight", vec![64, 64], 36),
+            "dropped: use the IQ4_NL file",
         );
         rejects(
             set("blk.0.attn_k.weight", vec![64, 64], Q8_0),
