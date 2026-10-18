@@ -66,7 +66,7 @@ scripts/test-tier.sh full REL_BIN DBG_BIN      # the final round, before merge
   skip list holds bigger-model repeats of contracts the fast tier checks on a small model (Llama 3B/8B,
   Qwen3 4B, the Qwen2.5 1.5B siblings), plus the NVRTC builds for sm_70/75/80/90a. Those NVRTC builds come
   back in when the branch changes `src/cuda/*.cu` or `src/cuda/mod.rs`. On an exclusive 4090 the list is
-  ~38 % of the release suite. The script fails if a name in it no longer matches exactly one test.
+  ~39 % of the release suite. The script fails if a name in it no longer matches exactly one test.
 - **full**: every test in both builds on GPU hosts, then the md5 gate (`gen` outputs main vs candidate,
   `axon-run --same-host`).
 

@@ -1,7 +1,7 @@
 # Tests the FAST tier (scripts/test-tier.sh fast) skips: exact libtest names, one per line, '#' comments.
 # Each one repeats a contract that a smaller model's test in the fast tier also checks; the FULL tier
 # (release + debug-assertion suites, every test) runs all of them before a PR is merged. Seconds are the
-# serial time of each on an exclusive 4090 (docs/log/2026-10-18-test-speed.md); the list adds up to ~38 %
+# serial time of each on an exclusive 4090 (docs/log/2026-10-18-test-speed.md); the list adds up to ~39 %
 # of the release suite. test-tier.sh checks that every name here exists, so a renamed test can't drop out silently.
 
 # Llama 3B / 8B batchings + verify (232 s). Same contract on Llama 1B:
