@@ -123,8 +123,9 @@ fn gemm2_smem(qt: u32, bn: usize, st: usize) -> usize {
 }
 /// Most tokens per batched pass on the GPU (`Lm::prefill_batch`): big
 /// batches keep the tensor cores busy and read the weights fewer times.
-/// 9 x 128 (gemm2's token tiles): with equal-size passes (`batch::passes`)
-/// a 2100-token prompt is two passes of 1050, not 1024 + 1024 + 52 (the
+/// 9 x 128 (gemm2's token tiles): a 2100-token prompt is two passes (the
+/// equal `batch::passes` 1050 + 1050, or `batch::wave_passes`' sizes for the
+/// GPU's GEMM waves, 1088 + 1012 on an RTX 4090), not 1024 + 1024 + 52 (the
 /// short pass's GEMMs are latency-bound: ~5 % of the prompt's time).
 const PREFILL_BATCH: usize = 1152;
 /// The batch scratch placement and `fit` budget for (main's 1024 before
@@ -498,6 +499,10 @@ pub struct CudaQwen2<'g> {
     /// swiglu in its epilogue (prefill.cu gemm2s_q4_k_gu; AXON_GATE_UP=0
     /// turns it off): the same bits as separate products.
     pub(super) gate_up_fused: bool,
+    /// Prompts of several passes get pass sizes that fill the GEMMs' waves
+    /// on this GPU (`batch::wave_passes`); AXON_WAVE_SPLIT=0: equal passes
+    /// (`batch::passes`). The same bits either way.
+    pub(super) wave_split: bool,
     /// Decode steps normalize with rmsnorm_quant_v2 (dim <= NORM2_MAX) and
     /// run gate/up rows under gate_up4_row bytes through gate_up4
     /// (GATE_UP4_ROW); AXON_DEC_NORM2=0 / AXON_DEC_GU4=0 turn them off
@@ -1545,6 +1550,7 @@ impl<'g> CudaQwen2<'g> {
             ctx: 0,
             swiglu_epi: false,
             gate_up_fused: std::env::var("AXON_GATE_UP").map_or(true, |v| v != "0"),
+            wave_split: std::env::var("AXON_WAVE_SPLIT").map_or(true, |v| v != "0"),
             norm2: std::env::var("AXON_DEC_NORM2").map_or(true, |v| v != "0"),
             gate_up4_row: match std::env::var("AXON_DEC_GU4") {
                 Ok(v) if v == "0" => 0,
