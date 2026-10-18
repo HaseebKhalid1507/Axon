@@ -38,6 +38,9 @@ MEASURED unless marked otherwise, and comes from a scoreboard or a PR. Main is `
 > | — | #54, #62, #68, #76 | code with no speed claim, output unchanged (md5): session-file lock (#54), auth before any body (#62), CUDA refuses gemma3 head sizes other than 256 (#68), MoE guards and a host-only RAM check (#76: a `qwen3moe` split's RAM need, from the check's formula, Pruned-2B 3.2 → 2.7 GB, 30B 20.5 → 19.5 GB) |
 > | — | #46, #47, #53, #58, #59, #65, #66, #69, #73, #74, #77, #80, #85, #87 | docs, tests and scripts only; no speed or output effect (#80's non-test release binary is byte-identical to main's) |
 >
+> **Exception:** the [RunPod board of 2026-10-18](#gpu-runpod-rtx-4090--rtx-5090--h100-sxm-main-7f42c02-2026-10-18-1411--1508)
+> ran on main `7f42c02` (which contains `4507c75` and every PR in this table), so the table does not apply to it.
+>
 > Treat the tables as "at least this good on the default path", with the caveat that nobody has
 > re-measured that. The exceptions are start-up costs: #51's model digest and #72's one-time kernel compile come
 > after the startup rows below.
@@ -79,9 +82,42 @@ the foreman's log; BENCH.md says the version "was not recorded with this run".
 Ahead on 21 of 21 cells. The thin ones are in bold. #24 (merged after this board) measured +2.3–23 % on
 pp2100 for these models. Llama 3.x and Gemma 3 are not on this board.
 
+## GPU: RunPod RTX 4090 / RTX 5090 / H100 SXM, main 7f42c02, 2026-10-18 14:11 – 15:08
+
+Full tables, hardware and caveats in [benchmarks-gpu.md](benchmarks-gpu.md#runpod-rtx-4090-rtx-5090-h100-sxm-2026-10-18-current).
+vs llama.cpp master `ff5a233` (`llama-bench -ngl 99`) and ollama 0.40.6. Ahead of both engines on **45 of 45
+cells** (0.5B–7B and Qwen3 8B × pp560/pp2100/tg128 × 3 GPUs), and of llama.cpp `4413a19` on all 15 extra 4090
+cells. Ranges over llama.cpp across the five models: tg128 1.03–1.19x (4090), 1.12–1.70x (5090), 1.13–1.30x
+(H100); pp2100 1.06–1.77x / 1.26–2.10x / 1.32–2.16x. The thinnest margins:
+
+| GPU | model | pp2100 axon / llama.cpp / ollama | tg128 axon / llama.cpp / ollama |
+|---|---|---|---|
+| RTX 4090 | 7B | 13,632 / 12,064 / 11,655 (1.13x / 1.17x) | 186 / 181 / 167 (1.03x / 1.11x) |
+| RTX 4090 | Qwen3 8B | 12,450 / 11,710 / 11,340 (1.06x / 1.10x) | 170 / 165 / 153 (1.03x / 1.11x) |
+| RTX 5090 | 7B | 18,529 / 14,633 / 14,311 (1.27x / 1.29x) | 310 / 276 / 237 (1.12x / 1.30x) |
+| H100 SXM | 7B | 14,413 / 9,684 / 9,742 (1.49x / 1.48x) | 314 / 264 / 218 (1.19x / 1.44x) |
+
+The 4090's 7B and 8B decode are only +3 % over llama.cpp (7B +2.5 % before rounding). Not settled: the 5090's
+axon prefill is 0.4–8.5 % below the 10-15 board, cross-pod (EPYC 7543 host, driver 580, host load up to 119;
+llama.cpp also dropped on that pod). A bella A/B, job `1018-144942-8284`, is **pending**.
+
+Cost (axon-pods guard estimate; RunPod bills per second and not for refused creates, so the real charge is at or
+below it): **$2.79** in total. The three boards cost $1.94 (H100 $1.332, 5090 $0.478, 4090 $0.134). The other
+$0.85 was waste: an H100 and a 4090 pod killed by a bug in the run script's model-sha check ($0.333 + $0.045), a
+4090 whose on-pod llama.cpp builds never finished on an oversubscribed host ($0.373), and 7 refused creates booked
+at 1 min each ($0.096). Inside the board pods, about 6 min of the H100's 19.2 min went to the on-pod llama.cpp
+build and ollama install, and about 11 min of the 5090's 23.3 min to waiting on the ollama download.
+
+New rule from this run (axon-devstack `62c3178`, BUILDER-RULES.md): **pods never compile.** Every binary a pod
+needs (axon at the SHA under test, llama.cpp CUDA for the target card's architecture) is built on bella
+beforehand, inside a container matching the pod image, and copied over with the pre-hashed models; a pod is
+created only once binaries, models and the run script are ready. Why: on this run the H100 ($3.99/h) and a 4090
+compiled llama.cpp on the pod, paid GPU time spent idle (the rule puts it at ~10 min and ~$0.80). The 5090 and
+final 4090 boards already used bella-built llama.cpp binaries.
+
 ## GPU: RunPod RTX 4090 / RTX 5090 / H100 SXM, main f8d8a86, 2026-10-15 23:53 – 10-16 00:11
 
-Full tables in [benchmarks-gpu.md](benchmarks-gpu.md#runpod-rtx-4090-rtx-5090-h100-sxm-2026-10-15). Ahead of
+Full tables in [benchmarks-gpu.md](benchmarks-gpu.md#previous-board-runpod-rtx-4090-rtx-5090-h100-sxm-2026-10-15). Ahead of
 both engines on **45 of 45 cells** (0.5B–7B and Qwen3 8B × pp560/pp2100/tg128 × 3 GPUs). The thinnest margins:
 
 | GPU | model | pp2100 axon / llama.cpp / ollama | tg128 axon / llama.cpp / ollama |
