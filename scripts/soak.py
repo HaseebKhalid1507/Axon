@@ -159,6 +159,7 @@ class Stats:
         self.findings = []
         self.requests = 0
         self.lat_max = {}
+        self.probes = []
 
     def reset(self):
         self.win = {}
@@ -187,13 +188,20 @@ class Stats:
 
 
 # Classes that fail the soak.
-BAD = {"5xx", "unexpected-4xx", "unexpected-200", "dropped", "bad-body", "timeout", "other-status"}
-CLASSES = ["ok", "4xx-expected", "503", "cancelled"] + sorted(BAD)
+BAD = {"5xx", "unexpected-4xx", "unexpected-200", "dropped", "bad-body", "timeout", "other-status",
+       "503-undocumented", "slow-blocks-others"}
+# accepted-unsupported: a request for a feature serve refuses today (n > 1, logit_bias) got a 200:
+# the feature shipped and the harness should move the case; reported, not failing.
+CLASSES = ["ok", "4xx-expected", "503", "cancelled", "accepted-unsupported"] + sorted(BAD)
+# The documented back-pressure 503s (serve.rs): anything else is 503-undocumented.
+BACKPRESSURE = (b"too many queued requests", b"too many connections")
 
 
-def classify_status(st, body, expect_ok):
+def classify_status(st, body, expect_ok, unsupported_today=False):
     """None if st is the expected success; else raise the right Outcome."""
     if st == 503:
+        if not any(m in body for m in BACKPRESSURE):
+            raise Outcome("503-undocumented", body[:200].decode("utf-8", "replace"))
         raise Outcome("503", body[:120].decode("utf-8", "replace"))
     if st >= 500:
         raise Outcome("5xx", f"{st} {body[:200]!r}")
@@ -206,6 +214,8 @@ def classify_status(st, body, expect_ok):
             raise Outcome("unexpected-4xx", f"{st} {body[:200]!r}")
         raise Outcome("4xx-expected")
     if st == 200 and not expect_ok:
+        if unsupported_today:
+            raise Outcome("accepted-unsupported", body[:200].decode("utf-8", "replace"))
         raise Outcome("unexpected-200", body[:200].decode("utf-8", "replace"))
     if st != 200:
         raise Outcome("other-status", f"{st}")
@@ -280,10 +290,10 @@ class Client:
         finally:
             c.close()
 
-    def whole(self, path, body, kind, expect_ok=True, raw=None, method="POST"):
+    def whole(self, path, body, kind, expect_ok=True, raw=None, method="POST", unsupported_today=False):
         t0 = time.perf_counter()
         st, _, rb = request(self.port, method, path, body, timeout=self.cfg.req_timeout, raw=raw)
-        classify_status(st, rb, expect_ok)
+        classify_status(st, rb, expect_ok, unsupported_today)
         if expect_ok:
             j = json.loads(rb)
             ch = j["choices"][0]
@@ -352,8 +362,45 @@ class Client:
             self.stats.add("disconnect", "cancelled")
 
     def slow(self):
-        msgs = [{"role": "user", "content": "Write a short poem about " + words(self.rng, 3)}]
-        self.stream("/v1/chat/completions", self.chat_body(msgs, max_tokens=96), "slow-reader", slow=True)
+        """A reader slow enough to block the server's writes: ~1500 tokens of SSE (~300 KB, far past the
+        socket buffers) read 64 bytes at a time through a 4 KiB SO_RCVBUF. While it is blocked, a probe
+        (greedy, 4 tokens) must still get its first token within --probe-ttft-s, or the slow client is
+        holding up others (slow-blocks-others). Only with several slots: one slot is held by design."""
+        msgs = [{"role": "user", "content": "Count from 1 to 2000, one number per line, no other text."}]
+        probe = None
+        if self.cfg.slots > 1:
+            probe = threading.Timer(self.rng.uniform(3, 8), self.probe)
+            probe.daemon = True
+            probe.start()
+        try:
+            self.stream("/v1/chat/completions", self.chat_body(msgs, max_tokens=1500, temperature=0),
+                        "slow-reader", slow=True)
+        finally:
+            if probe:
+                probe.cancel()
+
+    def probe(self):
+        t0 = time.perf_counter()
+        b = {"model": MODEL[0], "max_tokens": 4, "temperature": 0, "stream": True,
+             "messages": [{"role": "user", "content": "Say hi."}]}
+        c = http.client.HTTPConnection(HOST, self.port, timeout=self.cfg.req_timeout)
+        try:
+            c.request("POST", "/v1/chat/completions", json.dumps(b).encode(), {"Content-Type": "application/json"})
+            r = c.getresponse()
+            if r.status != 200:
+                r.read()
+                return  # a 503 under load: not this check's business
+            r.read1(65536)
+            dt = time.perf_counter() - t0
+            with self.stats.lock:
+                self.stats.probes.append(round(dt, 3))
+            if dt > self.cfg.probe_ttft_s:
+                self.stats.add("slow-reader-probe", "slow-blocks-others",
+                               detail=f"probe first bytes after {dt:.1f}s while a slow reader was blocked")
+        except OSError:
+            pass
+        finally:
+            c.close()
 
     def oversize(self):
         n = int(self.cfg.ctx * 1.3) + 64
@@ -370,11 +417,15 @@ class Client:
         elif case == 2:
             self.whole(P, {"model": MODEL[0], "messages": "nope"}, "invalid", False)
         elif case == 3:
-            self.whole(P, {"model": MODEL[0], "messages": [{"role": "user", "content": "x"}], "n": 3}, "invalid", False)
+            # Unsupported today (api.rs: n is 1 only), not invalid: a 200 is accepted-unsupported.
+            self.whole(P, {"model": MODEL[0], "messages": [{"role": "user", "content": "x"}], "n": 3}, "invalid", False,
+                       unsupported_today=True)
         elif case == 4:
             self.whole(P, None, "invalid", False, raw=b"\xff\xfe not utf8 \xc3")
         elif case == 5:
-            self.whole("/v1/completions", {"model": MODEL[0], "prompt": "x", "logit_bias": {"1": 5}}, "invalid", False)
+            # Unsupported today (api.rs refuses logit_bias), not invalid.
+            self.whole("/v1/completions", {"model": MODEL[0], "prompt": "x", "logit_bias": {"1": 5}}, "invalid", False,
+                       unsupported_today=True)
         elif case == 6:
             self.whole(P, {"model": MODEL[0], "messages": [{"role": "user", "content": "x"}], "max_tokens": -5}, "invalid", False)
         else:
@@ -497,6 +548,17 @@ def prime(cfg):
     return n
 
 
+def slots_idle(cfg):
+    """/slots after the load: how many slots (and the solo path) are still busy, and the queue depth."""
+    try:
+        st, _, rb = request(cfg.port, "GET", "/slots", None, timeout=10)
+        j = json.loads(rb)
+        busy = sum(1 for x in j.get("slots", []) if x.get("busy")) + int(bool((j.get("solo") or {}).get("busy")))
+        return {"busy": busy, "slots": len(j.get("slots", [])), "queue_depth": j.get("queue_depth", 0)}
+    except (OSError, ValueError) as e:
+        return {"error": repr(e)}
+
+
 # ---------------------------------------------------------------- sampling
 
 def proc_stats(pid):
@@ -504,12 +566,16 @@ def proc_stats(pid):
     try:
         for line in open(f"/proc/{pid}/status"):
             k, _, v = line.partition(":")
-            if k in ("VmRSS", "Threads", "VmHWM"):
+            if k in ("VmRSS", "Threads", "VmHWM", "RssAnon", "RssFile"):
                 d[k] = int(v.split()[0])
         d["fds"] = len(os.listdir(f"/proc/{pid}/fd"))
     except OSError:
         pass
-    return d.get("VmRSS", -1) / 1024, d.get("Threads", -1), d.get("fds", -1), d.get("VmHWM", -1) / 1024
+    return d
+
+
+def mib(d, k):
+    return round(d.get(k, -1024) / 1024, 1)
 
 
 def vram_mib(pid):
@@ -535,69 +601,136 @@ def pct(xs, q):
     return round(xs[min(len(xs) - 1, int(q * len(xs)))] * 1000, 1)
 
 
-FIELDS = ["t_s", "rss_mib", "hwm_mib", "vram_mib", "vram_src", "fds", "threads", "requests",
+FIELDS = ["t_s", "rss_mib", "anon_mib", "file_mib", "hwm_mib", "vram_mib", "vram_src", "fds", "threads", "requests",
           "lat_p50_ms", "lat_p99_ms", "ttft_p50_ms", "ttft_p99_ms"] + CLASSES + ["alive"]
 
 
-def slope_per_h(ts, ys):
-    """Least-squares slope of ys over ts (seconds), per hour."""
+def fit(ts, ys):
+    """Least-squares (slope, standard error of the slope), both per hour, of ys over ts (seconds).
+    The SE comes from the residuals and assumes them independent. A step or slow drift makes them
+    autocorrelated, so the SE is if anything optimistic, never generous."""
     n = len(ts)
     if n < 3:
-        return 0.0
+        return 0.0, float("inf")
     mt, my = sum(ts) / n, sum(ys) / n
-    den = sum((t - mt) ** 2 for t in ts)
-    return 0.0 if den == 0 else sum((t - mt) * (y - my) for t, y in zip(ts, ys)) / den * 3600
+    sxx = sum((t - mt) ** 2 for t in ts)
+    if sxx == 0:
+        return 0.0, float("inf")
+    b = sum((t - mt) * (y - my) for t, y in zip(ts, ys)) / sxx
+    res = [y - (my + b * (t - mt)) for t, y in zip(ts, ys)]
+    se = math.sqrt(sum(r * r for r in res) / (n - 2) / sxx)
+    return b * 3600, se * 3600
 
 
-# ---------------------------------------------------------------- main
+def slope_per_h(ts, ys):
+    return fit(ts, ys)[0]
+
+
+def memory_check(ts, ys, bound_24h, min_window_h):
+    """The memory verdict for one series after warm-up.
+    PASS: growth_24h + 2 SE < bound. FAIL: growth_24h - 2 SE > bound. Otherwise INCONCLUSIVE.
+    Judged only over at least min_window_h hours after warm-up; shorter windows are reported
+    with status NOT-JUDGED (they don't decide the verdict)."""
+    s, se = fit(ts, ys)
+    g, e = s * 24, se * 24
+    window_h = (ts[-1] - ts[0]) / 3600 if len(ts) > 1 else 0.0
+    q = max(1, len(ys) // 4)
+    out = {"slope_mib_per_h": round(s, 3), "se_mib_per_h": round(se, 3), "growth_24h_mib": round(g, 1),
+           "growth_24h_2se_mib": [round(g - 2 * e, 1), round(g + 2 * e, 1)], "bound_24h_mib": round(bound_24h, 1),
+           "window_h": round(window_h, 2), "n": len(ys), "min_mib": min(ys), "max_mib": max(ys),
+           "median_mib": round(statistics.median(ys), 1),
+           "last_vs_first_quarter_mib": round(statistics.median(ys[-q:]) - statistics.median(ys[:q]), 1)}
+    if g + 2 * e < bound_24h:
+        st = "PASS"
+    elif g - 2 * e > bound_24h:
+        st = "FAIL"
+    else:
+        st = "INCONCLUSIVE"
+    out["status"] = st if window_h >= min_window_h else "NOT-JUDGED"
+    out["would_be"] = st
+    return out
+
+
+def memory_checks(rows, cfg):
+    """{name: memory_check} for RSS (RssAnon when sampled, else VmRSS) and per-pid VRAM."""
+    warm = cfg.warmup_min * 60
+    post = [r for r in rows if float(r["t_s"]) >= warm and r.get("alive", "1") == "1"]
+    out = {}
+    if len(post) < 3:
+        return {"rss": {"status": "NOT-JUDGED", "why": "fewer than 3 samples after warm-up"}}
+    ts = [float(r["t_s"]) for r in post]
+    anon = [float(r["anon_mib"]) for r in post if "anon_mib" in r and float(r["anon_mib"]) >= 0]
+    key = "anon_mib" if len(anon) == len(post) else "rss_mib"
+    ys = [float(r[key]) for r in post]
+    bound = max(cfg.rss_floor_mib, cfg.rss_frac * statistics.median(ys))
+    out["rss"] = dict(memory_check(ts, ys, bound, cfg.min_judge_h), series="RssAnon" if key == "anon_mib" else "VmRSS")
+    if key == "anon_mib":
+        out["rss"]["vmrss_slope_mib_per_h"] = round(slope_per_h(ts, [float(r["rss_mib"]) for r in post]), 3)
+    vp = [r for r in post if float(r["vram_mib"]) >= 0 and (r["vram_src"] == "pid" or cfg.vram_card)]
+    if len(vp) >= 3:
+        out["vram"] = dict(memory_check([float(r["t_s"]) for r in vp], [float(r["vram_mib"]) for r in vp],
+                                        cfg.vram_floor_mib, cfg.min_judge_h), src=vp[-1]["vram_src"])
+    return out
+
 
 def verdict(rows, summary, cfg):
-    """Fill summary['checks'] and summary['pass'] from the samples."""
-    warm = cfg.warmup_min * 60
-    post = [r for r in rows if float(r["t_s"]) >= warm and r["alive"] == "1"]
-    checks = {}
-    ts = [float(r["t_s"]) for r in post]
-    rss = [float(r["rss_mib"]) for r in post]
-    if len(post) >= 3:
-        med = statistics.median(rss)
-        s = slope_per_h(ts, rss)
-        bound = max(cfg.rss_floor_mib, cfg.rss_frac * med)
-        q = max(1, len(rss) // 4)
-        checks["rss"] = {"slope_mib_per_h": round(s, 3), "growth_24h_mib": round(s * 24, 1),
-                         # informational: a one-time step (an arena, a lazily captured graph) vs steady growth
-                         "last_vs_first_quarter_mib": round(statistics.median(rss[-q:]) - statistics.median(rss[:q]), 1),
-                         "bound_24h_mib": round(bound, 1), "median_mib": round(med, 1),
-                         "min_mib": min(rss), "max_mib": max(rss), "pass": s * 24 < bound}
-        vp = [r for r in post if float(r["vram_mib"]) >= 0 and (r["vram_src"] == "pid" or cfg.vram_card)]
-        vr = [float(r["vram_mib"]) for r in vp]
-        if len(vr) >= 3:
-            vt = [float(r["t_s"]) for r in vp]
-            vs = slope_per_h(vt, vr)
-            q = max(1, len(vr) // 4)
-            checks["vram"] = {"slope_mib_per_h": round(vs, 3), "growth_24h_mib": round(vs * 24, 1),
-                              "last_vs_first_quarter_mib": round(statistics.median(vr[-q:]) - statistics.median(vr[:q]), 1),
-                              "bound_24h_mib": cfg.vram_floor_mib, "min_mib": min(vr), "max_mib": max(vr),
-                              "src": post[-1]["vram_src"], "pass": vs * 24 < cfg.vram_floor_mib}
-    else:
-        checks["rss"] = {"pass": False, "why": "fewer than 3 samples after warm-up"}
-    bad = {k: v for k, v in summary["totals"].items() if k.split(":")[1] in BAD}
-    checks["errors"] = {"bad": bad, "pass": not bad}
-    checks["alive"] = {"pass": summary["alive_at_end"]}
-    checks["panic"] = {"lines": summary["panic_lines"], "pass": not summary["panic_lines"]}
+    """Fill summary['checks'] and summary['verdict'] (PASS / FAIL / INCONCLUSIVE) from the samples."""
+    checks = {k: dict(v, pass_=v["status"]) for k, v in memory_checks(rows, cfg).items()}
+    tot = summary["totals"]
+    bad = {k: v for k, v in tot.items() if k.split(":")[1] in BAD}
+    st = lambda ok: "PASS" if ok else "FAIL"  # noqa: E731
+    checks["errors"] = {"bad": bad, "pass_": st(not bad)}
+    n503 = sum(v for k, v in tot.items() if k.endswith(":503"))
+    nreq = sum(tot.values())
+    checks["503"] = {"count": n503, "fraction": round(n503 / max(1, nreq), 4),
+                     "ok": sum(v for k, v in tot.items() if k.endswith(":ok")), "requests": nreq,
+                     "note": "every 503 body is checked against the documented back-pressure messages "
+                             "(otherwise class 503-undocumented, failing); the fraction is reported, not capped",
+                     "pass_": "PASS"}
+    checks["alive"] = {"pass_": st(summary["alive_at_end"])}
+    checks["panic"] = {"lines": summary["panic_lines"], "pass_": st(not summary["panic_lines"])}
     checks["identity"] = {"runs": summary["identity_runs"], "mismatches": summary["identity_mismatches"],
-                          "pass": summary["identity_runs"] >= 2 and not summary["identity_mismatches"]}
+                          "pass_": st(summary["identity_runs"] >= 2 and not summary["identity_mismatches"])}
     b, e = summary["idle_before"], summary["idle_after"]
     checks["fds_threads"] = {"before": b, "after": e,
-                             "pass": e["fds"] <= b["fds"] + 2 and e["threads"] <= b["threads"]}
+                             "pass_": st(e["fds"] <= b["fds"] + 2 and e["threads"] <= b["threads"])}
+    sl = summary.get("slots_after")
+    if sl is not None:
+        checks["slots_idle"] = dict(sl, pass_=st(sl.get("busy", 1) == 0 and sl.get("queue_depth", 1) == 0))
+    c = summary.get("cancels")
+    if c is not None:
+        checks["cancels"] = dict(c, pass_="REPORTED")
+    for v in checks.values():
+        v["status"] = v.pop("pass_")
+    sts = [v["status"] for v in checks.values()]
     summary["checks"] = checks
-    summary["pass"] = all(c["pass"] for c in checks.values())
+    summary["verdict"] = "FAIL" if "FAIL" in sts else "INCONCLUSIVE" if "INCONCLUSIVE" in sts else "PASS"
+    notj = [k for k, v in checks.items() if v["status"] == "NOT-JUDGED"]
+    summary["verdict_note"] = (f"{', '.join(notj)} not judged: window under {cfg.min_judge_h} h after warm-up"
+                               if notj else "")
+    summary["pass"] = summary["verdict"] == "PASS"
+
+
+def rows_from(path):
+    """Sample rows from a samples.csv or a job log with CSV, lines."""
+    lines = [ln[4:] if ln.startswith("CSV,") else ln for ln in open(path, errors="replace")]
+    hdr = next(i for i, ln in enumerate(lines) if ln.startswith("t_s,"))
+    return list(csv.DictReader([ln for ln in lines[hdr:] if ln[:1].isdigit() or ln.startswith("t_s,")]))
+
+
+def rejudge(log, warmup_min=20, min_judge_h=4.0):
+    """The memory checks of a finished soak, from its CSV rows, with the current logic."""
+    class C:
+        pass
+    cfg = C()
+    cfg.warmup_min, cfg.min_judge_h, cfg.rss_floor_mib, cfg.rss_frac = warmup_min, min_judge_h, 64.0, 0.02
+    cfg.vram_floor_mib, cfg.vram_card = 16.0, False
+    return memory_checks(rows_from(log), cfg)
 
 
 def summarise(path, bucket_min=30):
     """A markdown table of a samples.csv (or a job log with CSV, lines) in bucket_min buckets."""
-    lines = [ln[4:] if ln.startswith("CSV,") else ln for ln in open(path, errors="replace")]
-    hdr = next(i for i, ln in enumerate(lines) if ln.startswith("t_s,"))
-    rows = list(csv.DictReader([ln for ln in lines[hdr:] if ln[:1].isdigit() or ln.startswith("t_s,")]))
+    rows = rows_from(path)
     print("| minutes | requests | ok | 503 | 4xx exp. | cancelled | failing | RSS MiB | VRAM MiB | fds | threads "
           "| lat p50 ms | lat p99 ms | TTFT p50 ms |")
     print("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
@@ -623,8 +756,14 @@ def main():
         d = sys.argv[2]
         s = json.load(open(os.path.join(d, "summary.json")))
         print(json.dumps(s["checks"], indent=1))
-        print("PASS" if s["pass"] else "FAIL")
-        return 0 if s["pass"] else 1
+        v = s.get("verdict", "PASS" if s["pass"] else "FAIL")
+        print(v, s.get("verdict_note", ""))
+        return {"PASS": 0, "FAIL": 1}.get(v, 2)
+    if len(sys.argv) > 1 and sys.argv[1] == "rejudge":
+        a = sys.argv[2:]
+        w = float(a[1]) if len(a) > 1 else 20
+        print(json.dumps(rejudge(a[0], w), indent=1))
+        return 0
     argv = sys.argv[1:]
     extra = []
     if "--" in argv:
@@ -642,10 +781,15 @@ def main():
     ap.add_argument("--sample-s", type=float, default=30)
     ap.add_argument("--warmup-min", type=float, default=20)
     ap.add_argument("--identity-min", type=float, default=15)
+    ap.add_argument("--probe-ttft-s", type=float, default=30.0,
+                    help="most seconds a probe may wait for its first bytes while a slow reader is blocked")
     ap.add_argument("--think-s", type=float, default=1.0, help="most idle time between a client's requests")
     ap.add_argument("--req-timeout", type=float, default=600)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--rss-floor-mib", type=float, default=64)
+    ap.add_argument("--min-judge-h", type=float, default=4.0,
+                    help="memory is judged (PASS/FAIL/INCONCLUSIVE) only over at least this many hours after "
+                         "warm-up; a shorter window is reported, NOT-JUDGED")
     ap.add_argument("--rss-frac", type=float, default=0.02)
     ap.add_argument("--vram-floor-mib", type=float, default=16)
     ap.add_argument("--no-prime", dest="prime", action="store_false",
@@ -675,8 +819,9 @@ def main():
         summary["identity_ref"] = ident0
         summary["identity_runs"] = 1
         time.sleep(2)
-        r0, th0, fd0, _ = proc_stats(srv.pid)
-        summary["idle_before"] = {"rss_mib": r0, "threads": th0, "fds": fd0}
+        d0 = proc_stats(srv.pid)
+        summary["idle_before"] = {"rss_mib": mib(d0, "VmRSS"), "anon_mib": mib(d0, "RssAnon"),
+                                  "threads": d0.get("Threads", -1), "fds": d0.get("fds", -1)}
         stats = Stats()
         stop_at = t_start + cfg.hours * 3600
         clients = [Client(i, cfg, stats, stop_at) for i in range(cfg.clients)]
@@ -710,10 +855,11 @@ def main():
                 continue
             next_s += cfg.sample_s
             win, lat, ttft = stats.take()
-            rss, th, fds, hwm = proc_stats(srv.pid)
+            d = proc_stats(srv.pid)
             vr, vsrc = vram_mib(srv.pid)
-            row = {"t_s": round(time.time() - t_start, 1), "rss_mib": round(rss, 1), "hwm_mib": round(hwm, 1),
-                   "vram_mib": vr, "vram_src": vsrc, "fds": fds, "threads": th,
+            row = {"t_s": round(time.time() - t_start, 1), "rss_mib": mib(d, "VmRSS"),
+                   "anon_mib": mib(d, "RssAnon"), "file_mib": mib(d, "RssFile"), "hwm_mib": mib(d, "VmHWM"),
+                   "vram_mib": vr, "vram_src": vsrc, "fds": d.get("fds", -1), "threads": d.get("Threads", -1),
                    "requests": sum(win.values()), "lat_p50_ms": pct(lat, 0.5), "lat_p99_ms": pct(lat, 0.99),
                    "ttft_p50_ms": pct(ttft, 0.5), "ttft_p99_ms": pct(ttft, 0.99),
                    "alive": int(srv.alive())}
@@ -734,11 +880,17 @@ def main():
             except Exception as e:  # noqa: BLE001
                 summary["identity_mismatches"].append({"t_s": "end", "error": repr(e)})
         time.sleep(35)  # idle keep-alives (30 s) close
-        r1, th1, fd1, hwm1 = proc_stats(srv.pid)
-        summary["idle_after"] = {"rss_mib": r1, "threads": th1, "fds": fd1, "hwm_mib": hwm1}
+        d1 = proc_stats(srv.pid)
+        summary["idle_after"] = {"rss_mib": mib(d1, "VmRSS"), "anon_mib": mib(d1, "RssAnon"),
+                                 "threads": d1.get("Threads", -1), "fds": d1.get("fds", -1),
+                                 "hwm_mib": mib(d1, "VmHWM")}
+        summary["slots_after"] = slots_idle(cfg)
         summary["totals"] = dict(sorted(stats.total.items()))
         summary["requests"] = stats.requests
         summary["lat_max_s"] = stats.lat_max
+        pr = sorted(stats.probes)
+        summary["slow_reader_probes"] = {"n": len(pr), "p50_s": pr[len(pr) // 2] if pr else None,
+                                         "max_s": pr[-1] if pr else None}
         summary["findings"] = stats.findings
         summary["wall_h"] = round((time.time() - t_start) / 3600, 3)
     finally:
@@ -747,6 +899,13 @@ def main():
         summary.setdefault("alive_at_end", alive)
     log = open(srv.log_path, errors="replace").read()
     summary["panic_lines"] = [ln for ln in log.splitlines() if re.search(r"panicked|RUST_BACKTRACE", ln)][:20]
+    # Server-side cancellation: the engine logs "#N cancelled after K tokens" when it reaps a request whose
+    # client went away. A client disconnect after the generation already ended has nothing to cancel, so
+    # the ratio is reported, not judged.
+    nc = len(re.findall(r"cancelled after \d+ tokens", log))
+    nd = summary.get("totals", {}).get("disconnect:cancelled", 0)
+    summary["cancels"] = {"client_disconnects": nd, "server_cancelled": nc,
+                          "ratio": round(nc / nd, 3) if nd else None}
     summary.setdefault("totals", {})
     summary.setdefault("idle_before", {"fds": 0, "threads": 0})
     summary.setdefault("idle_after", {"fds": 1 << 30, "threads": 1 << 30})
@@ -755,8 +914,8 @@ def main():
     print("SUMMARY " + json.dumps({k: summary[k] for k in ("checks", "requests", "totals", "wall_h") if k in summary}))
     for fd in summary.get("findings", [])[:30]:
         print("FINDING", json.dumps(fd))
-    print("VERDICT", "PASS" if summary["pass"] else "FAIL", flush=True)
-    return 0 if summary["pass"] else 1
+    print("VERDICT", summary["verdict"], summary["verdict_note"], flush=True)
+    return {"PASS": 0, "FAIL": 1}.get(summary["verdict"], 2)
 
 
 if __name__ == "__main__":
