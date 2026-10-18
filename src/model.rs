@@ -1250,6 +1250,11 @@ impl<'a> Qwen2<'a> {
         Some(&w.map[..])
     }
 
+    /// A deepseek2 (MLA) model: K-only cache rows of `head_dim` (576).
+    pub(crate) fn is_mla(&self) -> bool {
+        self.ds2.is_some()
+    }
+
     /// Layers here (0..k of the model).
     pub(crate) fn layer_count(&self) -> usize {
         self.layers.len()

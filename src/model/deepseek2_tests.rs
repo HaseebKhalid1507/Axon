@@ -703,6 +703,8 @@ fn deepseek2_cache_is_k_only() {
     );
     let net = Qwen2::new(&m);
     let c = net.new_cache(10);
+    // No session image yet (kvsave): a saved chat is prefilled again.
+    assert!(crate::kvsave::KvIo::kv_ident(&net, &c).is_none());
     let arrays = c.arrays();
     assert_eq!(arrays.len(), 2 * FX.nl);
     let row = (FX.lat + FX.rope) * c.elem().1;
@@ -1021,7 +1023,9 @@ fn kimi_tokenizer_matches_hf() {
 }
 
 /// The `deepseek-v3` pre-tokenizer (three sequential splits) on DeepSeek
-/// V3.1's vocabulary against Hugging Face's tokenizer.json, and the
+/// V3.1's vocabulary against Hugging Face's tokenizer.json (through
+/// `tokenizers` itself: transformers 5's AutoTokenizer rebuilds it as a
+/// LlamaTokenizer, which drops the byte-level spaces), and the
 /// DeepSeek3 chat framing against its template (thinking off). The GGUF:
 /// AXON_TEST_DS3_HEADER, a header-only stub of unsloth's V3.1 Q4_K_M shard
 /// 1 (sparse; only the header is read). Skipped without it.
@@ -1047,7 +1051,10 @@ fn deepseek3_tokenizer_matches_hf() {
     let cases = d["cases"].as_array().expect("cases");
     for c in cases {
         let text = c["text"].as_str().expect("text");
-        if t.encode(text) != ids(&c["ids"]) || t.encode_special(text) != ids(&c["ids_special"]) {
+        let want = ids(&c["ids_special"]);
+        // Plain encode equals it when the text has no special-token strings.
+        let plain = c["has_special"].as_bool() == Some(true) || t.encode(text) == want;
+        if !plain || t.encode_special(text) != want {
             bad.push(text.chars().take(60).collect::<String>());
         }
     }
