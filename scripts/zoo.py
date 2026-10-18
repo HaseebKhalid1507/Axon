@@ -45,7 +45,7 @@ ZOO = [
     ("unsloth/Qwen3-0.6B-GGUF", "Qwen3-0.6B-UD-Q4_K_XL.gguf", "refuse",
      "unsloth dynamic 2.0 mix (IQ4_XS in some layers)"),
     ("unsloth/Qwen3-0.6B-GGUF", "Qwen3-0.6B-Q4_1.gguf", "run", "Q4_1"),
-    ("unsloth/Qwen3-0.6B-GGUF", "Qwen3-0.6B-IQ4_NL.gguf", "refuse", "IQ4_NL"),
+    ("unsloth/Qwen3-0.6B-GGUF", "Qwen3-0.6B-IQ4_NL.gguf", "run", "IQ4_NL (supported since #72)"),
     ("unsloth/Qwen3-0.6B-GGUF", "Qwen3-0.6B-BF16.gguf", "refuse", "BF16 weights"),
     ("lmstudio-community/Qwen2.5-0.5B-Instruct-GGUF", "Qwen2.5-0.5B-Instruct-Q6_K.gguf", "run", "Q6_K"),
     ("mradermacher/Qwen2.5-0.5B-Instruct-i1-GGUF", "Qwen2.5-0.5B-Instruct.i1-Q4_K_M.gguf", "run",
@@ -61,10 +61,10 @@ ZOO = [
     ("ggml-org/gemma-3-1b-it-GGUF", "gemma-3-1b-it-Q4_K_M.gguf", "run", "ggml-org gemma3"),
     ("bartowski/google_gemma-3-1b-it-GGUF", "local:google_gemma-3-1b-it-Q4_K_M.gguf", "run", "bartowski gemma3"),
     ("bartowski/Llama-3.2-1B-Instruct-GGUF", "local:Llama-3.2-1B-Instruct-Q4_K_M.gguf", "run", "llama3.2"),
-    ("bartowski/Qwen2.5-0.5B-Instruct-GGUF", "local:Qwen2.5-0.5B-Instruct-Q2_K.gguf", "refuse",
-     "Q2_K (+ IQ4_NL fallback tensors: 896 columns aren't whole 256-blocks)"),
-    ("bartowski/Qwen2.5-0.5B-Instruct-GGUF", "local:Qwen2.5-0.5B-Instruct-Q3_K_M.gguf", "refuse",
-     "Q3_K_M (+ IQ4_NL fallback tensors)"),
+    ("bartowski/Qwen2.5-0.5B-Instruct-GGUF", "local:Qwen2.5-0.5B-Instruct-Q2_K.gguf", "run",
+     "Q2_K file: Q3_K + IQ4_NL fallback tensors (896 columns aren't whole 256-blocks); since #72"),
+    ("bartowski/Qwen2.5-0.5B-Instruct-GGUF", "local:Qwen2.5-0.5B-Instruct-Q3_K_M.gguf", "run",
+     "Q3_K_M (+ IQ4_NL fallback tensors); since #72"),
     ("Qwen/Qwen3-0.6B-GGUF", "local:Qwen3-0.6B-Q8_0.gguf", "run", "Qwen official Qwen3 Q8_0"),
 ]
 

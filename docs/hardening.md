@@ -87,7 +87,13 @@ Why the review round changed it: a fitted slope responds to a single step Δ at 
 about 6·Δ·f·(1−f)/T. Projected over 24 h, a short run amplifies a one-off allocator step 24/T times; jade's FAIL
 and bella-7B's PASS were the same artifact with opposite signs. The SE and the 4 h minimum stop a short run from
 deciding either way. One limit remains. The SE assumes independent residuals, and a step makes them
-autocorrelated, so a clean step can still give a confident wrong slope: jade's is 137 ± 11 MiB/day. That is why
+autocorrelated, so a clean step can still give a confident wrong slope: jade's is 137 ± 11 MiB/day. The harness smoke run in the review round shows the same thing from the other side. On jade, 0.5B, with
+`--min-judge-h 0.05` forced so a 5-minute window would be judged (1018-041451-3d5e), RssAnon rose 3.2 MiB during
+warm-up. The fit projected that to 710 MiB/day with a ±2 SE interval of [321, 1099], so the run FAILED with
+apparent confidence: early warm-up growth is autocorrelated and not linear, and the SE can't see that. **The
+SE band alone does not protect the verdict; the ≥ 4 h minimum window does.** That smoke is a harness test, not a
+result. It confirmed that the RssAnon/RssFile columns are recorded and that the slots-idle and cancel checks
+run and pass. That is why
 a longer window and RssAnon (not VmRSS, where file-backed pages being reclaimed and refaulted under memory
 pressure look like growth) both matter.
 
