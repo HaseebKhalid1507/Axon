@@ -18,7 +18,7 @@
   - New section "New models and types since the boards": #63, #67, #78, #72 vs llama.cpp, from their PRs.
   - Known losses: as of 4507c75; added #72's CPU prefill and GPU losses, #67's MoE prefill vs `--cpu-moe`,
     #55's bella mid-admit ITL p99, and that MoE / gpt-oss have only dev-model or CPU numbers.
-- `docs/history.md`: Phase 17 (a591e17 → 69adfa2, 10-16 16:55 → 10-17 17:22) and Phase 18 (the night of
+- `docs/history.md`: Phase 17 (a591e17 → d2e8eaf, 10-16 16:55 → 10-17 17:22) and Phase 18 (the night of
   10-17/18, 5a73f63 → 4507c75), one row per PR. Status updates on #45, #46, lcdec and the r10 tracks; #45's row
   now gives the merged version's numbers next to the first revision's.
 - `README.md`: the opening line names Qwen3 MoE and gpt-oss; serve's bullet names the Responses and ollama APIs;

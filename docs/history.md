@@ -364,7 +364,7 @@ From the research reports ([research/](research/README.md)): `spec32` (speculati
 #45 chunked prefill and lcdec (#50) landed too. Pod packing is still unsolved: #53 recorded the
 ILLEGAL_ADDRESS investigation as a NO-GO.
 
-## Phase 17: r10 lands, serve rounds, MoE and paged KV begin (2026-10-16 16:55 → 10-17 17:22, main a591e17 → 69adfa2)
+## Phase 17: r10 lands, serve rounds, MoE and paged KV begin (2026-10-16 16:55 → 10-17 17:22, main a591e17 → d2e8eaf)
 
 Numbers are copied from each PR body, MEASURED there unless marked. "md5" is `gen` on main vs the PR, same host.
 
@@ -372,7 +372,7 @@ Numbers are copied from each PR body, MEASURED there unless marked. "md5" is `ge
 |---|---|---|---|---|
 | #47 | 10-16 16:55 | docs: methodology, this history, rejected experiments, results, research reports; the `docs/log/` convention | put the record in the repo | docs only |
 | #46 | 10-16 17:19 | test fix (Phase 15) | shared-GPU false failures | test only |
-| #53 | 10-16 18:41 | docs/log: ILLEGAL_ADDRESS on packed 4090 pods. **NO-GO, root cause not found** | 9 incidents on packed pods on 10-16 | reproduced on pod5 (4 hits in ~90 one-minute rounds), always inside one decode step's `cuGraphLaunch`; memcheck found no invalid access |
+| #53 | 10-16 18:41 | docs/log: ILLEGAL_ADDRESS on packed 4090 pods. **NO-GO, root cause not found** | 9 incidents on packed pods on 10-16 | reproduced on pod5 (4 hits in ~90 one-minute rounds), every hit in the decode loop of `prefill_with`; the one `CUDA_LAUNCH_BLOCKING=1` hit came from `cuGraphLaunch`; memcheck found no invalid access |
 | #48 kvsave stage A | 10-16 19:15 | exact KV save/restore (`AXKV` files), `chat --session`, `/save`, `/load`; a host page store, not wired in yet | research-kvmem P1: restart without re-prefilling | 4090, 7B, 29,840 positions: restore 408–451 ms (f16) / 223–234 ms (q8) vs re-prefill 3.16 s / 3.39 s; bella page-wise restore of a 32k 7B slot 67 ms. md5 30/30 |
 | #54 | 10-16 21:30 | kvsave: one writer per session file (sidecar `F.lock`); a save after another writer's rewrite does a full rewrite | review: a second process could cut the file at a stale length | correctness only |
 | #49 YaRN | 10-16 22:06 | `--rope-scaling yarn` (llama.cpp's flags), opt-in: Qwen 32k → 128k | research-longctx L2 | default md5 30/30 equal; needle 18/18 with it vs 9/18 without (7B, RTX 5090); perplexity +7.7–8.0 % at 2k–8k, so opt-in only |

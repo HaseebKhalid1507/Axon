@@ -170,7 +170,7 @@ summary in [benchmarks-gpu.md](benchmarks-gpu.md#jaded-cpu-only-for-context).
 
 ## New models and types since the boards
 
-Each row is the PR's own run against llama.cpp 4413a19. None of these models is on a scoreboard.
+Each row is the PR's own run against llama.cpp 4413a19 (#63, #67, #78; #72 doesn't state its llama.cpp build). None of these models is on a scoreboard.
 
 | path | PR | measured | host and caveats |
 |---|---|---|---|
@@ -182,7 +182,7 @@ Each row is the PR's own run against llama.cpp 4413a19. None of these models is 
 
 ## Known losses and gaps (as of 4507c75)
 
-- Long-context decode at 32k on 7B / 0.5B vs llama.cpp (above). #50 merged (+3.5 % on 7B f16, +10–12 % on 0.5B
+- Long-context decode at 32k on 7B / 0.5B vs llama.cpp (above). #50 merged (+3.3–3.5 % on 7B f16, +10–12 % on 0.5B
   f16 in its own runs); nobody has re-boarded it against llama.cpp.
 - Gemma 3 prefill at pp2100 vs llama.cpp on the 4090 (1B 32748 vs 40504; 4B 8782 vs 17920): no tensor-core
   attention at head dim 256 (#35).
