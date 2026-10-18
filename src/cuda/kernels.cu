@@ -24,9 +24,12 @@ typedef unsigned long long u64;
 #define QT_Q5_0 6
 #define QT_Q5_1 7
 #define QT_Q8_0 8
+#define QT_Q2_K 10
+#define QT_Q3_K 11
 #define QT_Q4_K 12
 #define QT_Q5_K 13
 #define QT_Q6_K 14
+#define QT_IQ4_NL 20
 
 // Little-endian reads from bytes: blocks are only 2-byte aligned (Q5_0 is 22
 // bytes, Q6_K 210), so no wider loads.
@@ -147,6 +150,49 @@ __device__ __forceinline__ float deq_q6_k(const u8* b, int i) {
     return __fmul_rn(ds, (float)q);
 }
 
+// block_q2_K { u8 scales[16]; u8 qs[64]; half d; half dmin; }, 256 values,
+// 84 bytes. Value i = 16 g + l (sub-block g = 8 n + 2 j + h): bits 2j of
+// qs[32 n + 16 h + l]; scale scales[g] & 15, min scales[g] >> 4.
+__device__ __forceinline__ float deq_q2_k(const u8* b, int i) {
+    int g = i >> 4, l = i & 15, n = g >> 3, j = (g & 7) >> 1, h = g & 1;
+    u32 sc = b[g];
+    float dl = __fmul_rn(rd_f16(b + 80), (float)(sc & 15));
+    float ml = __fmul_rn(rd_f16(b + 82), (float)(sc >> 4));
+    u32 q = (b[16 + 32 * n + 16 * h + l] >> (2 * j)) & 3;
+    return __fsub_rn(__fmul_rn(dl, (float)q), ml);
+}
+
+// Q3_K's 6-bit scale of sub-block g (12 packed bytes at s), minus 32.
+__device__ __forceinline__ int q3k_scale(const u8* s, int g) {
+    u32 lo = g < 8 ? (s[g] & 15) : (s[g - 8] >> 4);
+    u32 hi = (s[8 + (g & 3)] >> (2 * (g >> 2))) & 3;
+    return (int)(lo | (hi << 4)) - 32;
+}
+
+// block_q3_K { u8 hmask[32]; u8 qs[64]; u8 scales[12]; half d; }, 256
+// values, 110 bytes: Q2_K's low bits (at 32), minus 4 where bit 4 n + j of
+// hmask[16 h + l] is clear.
+__device__ __forceinline__ float deq_q3_k(const u8* b, int i) {
+    int g = i >> 4, l = i & 15, n = g >> 3, j = (g & 7) >> 1, h = g & 1;
+    int q = (int)((b[32 + 32 * n + 16 * h + l] >> (2 * j)) & 3) -
+            (((b[16 * h + l] >> (4 * n + j)) & 1) ? 0 : 4);
+    float dl = __fmul_rn(rd_f16(b + 108), (float)q3k_scale(b + 96, g));
+    return __fmul_rn(dl, (float)q);
+}
+
+// block_iq4_nl { half d; u8 qs[16]; }, 32 values, 18 bytes: Q4_0's
+// nibbles, as indices into ggml's kvalues_iq4nl.
+__device__ __forceinline__ int iq4nl_value(u32 q) {
+    const signed char kv[16] = {-127, -104, -83, -65, -49, -35, -22, -10,
+                                1,    13,   25,  38,  53,  69,  89,  113};
+    return kv[q & 15];
+}
+__device__ __forceinline__ float deq_iq4_nl(const u8* b, int i) {
+    int j = i & 15;
+    u32 q = i < 16 ? (b[2 + j] & 0x0f) : (b[2 + j] >> 4);
+    return __fmul_rn(rd_f16(b), (float)iq4nl_value(q));
+}
+
 // Element i of a row of type qt (one of the QT_* ids).
 __device__ __forceinline__ float deq(int qt, const u8* row, int i) {
     switch (qt) {
@@ -164,6 +210,12 @@ __device__ __forceinline__ float deq(int qt, const u8* row, int i) {
         return deq_q5_1(row + 24 * (i >> 5), i & 31);
     case QT_Q5_K:
         return deq_q5_k(row + 176 * (i >> 8), i & 255);
+    case QT_Q2_K:
+        return deq_q2_k(row + 84 * (i >> 8), i & 255);
+    case QT_Q3_K:
+        return deq_q3_k(row + 110 * (i >> 8), i & 255);
+    case QT_IQ4_NL:
+        return deq_iq4_nl(row + 18 * (i >> 5), i & 31);
 #endif
     case QT_Q5_0:
         return deq_q5_0(row + 22 * (i >> 5), i & 31);

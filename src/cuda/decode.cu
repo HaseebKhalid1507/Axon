@@ -531,6 +531,131 @@ __device__ __forceinline__ void blk_q5_k(const u8* const* rows, int base, int en
     }
 }
 
+// Q2_K (quant/k23.rs): lane p of a group takes qs bytes 8p.. (n = p / 4,
+// positions l0.. = 8 (p % 4) of the 32), so for j = 0..3 the 8 values
+// 128 n + 32 j + l0.. of sub-block 8 n + 2 j + h (h = l0 / 16): S as
+// Q4_K's, M = sum_g m_g bsum16_g with each lane's part of bsum16 by dp4a
+// with ones (exact), then Q4_K's pair.
+template <int R, int T, int CAP>
+__device__ __forceinline__ void blk_q2_k(const u8* const* rows, int base, int end, const u8* act,
+                                         u64 astride, int n, int zmax, float2* sh) {
+    int t = threadIdx.x, g = t >> 3, p = t & 7, nn = p >> 2, l0 = 8 * (p & 3), hh = (p & 3) >> 1;
+    u32 mask = 0xffu << (t & 24);
+    for (int b = base + g; b < end; b += GEMV_THREADS / 8) {
+        uint2 q[R], sc[R];
+        u32 dm[R];
+#pragma unroll
+        for (int r = 0; r < R; r++) {
+            const u8* blk = rows[r] + (u64)b * 84;
+            q[r] = make_uint2(__ldg((const u32*)(blk + 16 + 8 * p)),
+                              __ldg((const u32*)(blk + 20 + 8 * p)));
+            sc[r] = make_uint2(__ldg((const u32*)(blk + 8 * nn)),
+                               __ldg((const u32*)(blk + 8 * nn + 4)));
+            dm[r] = __ldg((const u32*)(blk + 80));
+        }
+#pragma unroll
+        for (int j = 0; j < T; j++) {
+            Act a = act_view(act + (u64)min(j, zmax) * astride, n);
+            const signed char* xb = a.qk + b * 256 + 128 * nn + l0;
+            uint2 x[4];
+            int bs[4];
+#pragma unroll
+            for (int k = 0; k < 4; k++) {
+                x[k] = *(const uint2*)(xb + 32 * k);
+                bs[k] = __dp4a((int)x[k].y, 0x01010101, __dp4a((int)x[k].x, 0x01010101, 0));
+            }
+            float dk = a.dk[b];
+#pragma unroll
+            for (int r = 0; r < R; r++) {
+                int S = 0, M = 0;
+#pragma unroll
+                for (int k = 0; k < 4; k++) {
+                    // Sub-block 8 nn + 2 k + hh: byte 2 k + hh of sc.
+                    int kb = 2 * k + hh;
+                    u32 sb = ((kb < 4 ? sc[r].x : sc[r].y) >> (8 * (kb & 3))) & 0xff;
+                    u32 w0 = (q[r].x >> (2 * k)) & 0x03030303;
+                    u32 w1 = (q[r].y >> (2 * k)) & 0x03030303;
+                    int s = __dp4a((int)w0, (int)x[k].x, 0);
+                    s = __dp4a((int)w1, (int)x[k].y, s);
+                    S += (int)(sb & 15) * s;
+                    M += (int)(sb >> 4) * bs[k];
+                }
+#pragma unroll
+                for (int o = 1; o < 8; o <<= 1) {
+                    S += __shfl_xor_sync(mask, S, o);
+                    M += __shfl_xor_sync(mask, M, o);
+                }
+                if (p == 0) {
+                    float d = h2f(dm[r] & 0xffff), dmin = h2f(dm[r] >> 16);
+                    float v = __fsub_rn(__fmul_rn(d, i2f_rn(S)), __fmul_rn(dmin, i2f_rn(M)));
+                    GV_PAIR(sh, CAP, r, j, T, b, base) = make_float2(dk, v);
+                }
+            }
+        }
+    }
+}
+
+// Byte k (0..11) of Q3_K's packed scales held in three words.
+__device__ __forceinline__ u32 q3k_byte(const u32* s, int k) { return (s[k >> 2] >> (8 * (k & 3))) & 0xff; }
+
+// Q3_K (quant/k23.rs): Q2_K's lanes; values q - 4 where bit 4 n + j of
+// hmask[16 h + l] is clear (hmask bytes l0.. hold this lane's positions),
+// signed 6-bit scales; Q6_K's pair (dk d, S).
+template <int R, int T, int CAP>
+__device__ __forceinline__ void blk_q3_k(const u8* const* rows, int base, int end, const u8* act,
+                                         u64 astride, int n, int zmax, float2* sh) {
+    int t = threadIdx.x, g = t >> 3, p = t & 7, nn = p >> 2, l0 = 8 * (p & 3), hh = (p & 3) >> 1;
+    u32 mask = 0xffu << (t & 24);
+    for (int b = base + g; b < end; b += GEMV_THREADS / 8) {
+        uint2 q[R], hm[R];
+        u32 sw[R][3];
+        float dw[R];
+#pragma unroll
+        for (int r = 0; r < R; r++) {
+            const u8* blk = rows[r] + (u64)b * 110;
+            q[r] = ld8_a2(blk + 32 + 8 * p);
+            hm[r] = ld8_a2(blk + l0);
+            uint2 s01 = ld8_a2(blk + 96);
+            sw[r][0] = s01.x, sw[r][1] = s01.y, sw[r][2] = ld4_a2(blk + 104);
+            dw[r] = h2f(rd_u16(blk + 108));
+        }
+#pragma unroll
+        for (int j = 0; j < T; j++) {
+            Act a = act_view(act + (u64)min(j, zmax) * astride, n);
+            const signed char* xb = a.qk + b * 256 + 128 * nn + l0;
+            uint2 x[4];
+#pragma unroll
+            for (int k = 0; k < 4; k++) x[k] = *(const uint2*)(xb + 32 * k);
+            float dk = a.dk[b];
+#pragma unroll
+            for (int r = 0; r < R; r++) {
+                int S = 0;
+#pragma unroll
+                for (int k = 0; k < 4; k++) {
+                    int gi = 8 * nn + 2 * k + hh, hb = 4 * nn + k;
+                    u32 lo = gi < 8 ? (q3k_byte(sw[r], gi) & 15) : (q3k_byte(sw[r], gi - 8) >> 4);
+                    u32 hi = (q3k_byte(sw[r], 8 + (gi & 3)) >> (2 * (gi >> 2))) & 3;
+                    int sc = (int)(lo | (hi << 4)) - 32;
+                    u32 w0 = __vsub4(((q[r].x >> (2 * k)) & 0x03030303) |
+                                         (((hm[r].x >> hb) & 0x01010101) << 2),
+                                     0x04040404);
+                    u32 w1 = __vsub4(((q[r].y >> (2 * k)) & 0x03030303) |
+                                         (((hm[r].y >> hb) & 0x01010101) << 2),
+                                     0x04040404);
+                    int s = __dp4a((int)w0, (int)x[k].x, 0);
+                    s = __dp4a((int)w1, (int)x[k].y, s);
+                    S += sc * s;
+                }
+#pragma unroll
+                for (int o = 1; o < 8; o <<= 1) S += __shfl_xor_sync(mask, S, o);
+                if (p == 0)
+                    GV_PAIR(sh, CAP, r, j, T, b, base) =
+                        make_float2(__fmul_rn(dk, dw[r]), i2f_rn(S));
+            }
+        }
+    }
+}
+
 // Q6_K (dot_q6_k_q8's integers): lane p of a group takes half hh = p / 4,
 // positions l0..l0+8 (l0 = 8 (p % 4)) of each of that half's 4 quarters.
 template <int R, int T, int CAP>
@@ -696,6 +821,51 @@ __device__ __forceinline__ void blk_q4_0(const u8* const* rows, int base, int en
     }
 }
 
+// Four IQ4_NL indices (bytes 0..15 of w) to their kvalues_iq4nl bytes.
+__device__ __forceinline__ u32 iq4nl_bytes(u32 w) {
+    const u32 t0 = 0xbfad9881u, t1 = 0xf6eaddcfu, t2 = 0x26190d01u, t3 = 0x71594535u;
+    u32 sel = (w & 7) | ((w >> 4) & 0x70) | ((w >> 8) & 0x700) | ((w >> 12) & 0x7000);
+    u32 lo = __byte_perm(t0, t1, sel), hi = __byte_perm(t2, t3, sel);
+    u32 m = ((w >> 3) & 0x01010101) * 0xff;
+    return (hi & m) | (lo & ~m);
+}
+
+// IQ4_NL (quant/iq4nl.rs): blk_q4_0's lanes, the nibbles through the table.
+template <int R, int T, int CAP>
+__device__ __forceinline__ void blk_iq4_nl(const u8* const* rows, int base, int end, const u8* act,
+                                           u64 astride, int n, int zmax, float2* sh) {
+    int t = threadIdx.x, g = t >> 2, p = t & 3;
+    u32 mask = 0xfu << (t & 28);
+    for (int b = base + g; b < end; b += GEMV_THREADS / 4) {
+        uint2 q[R];
+        float dw[R];
+#pragma unroll
+        for (int r = 0; r < R; r++) {
+            const u8* blk = rows[r] + (u64)b * 18;
+            q[r] = ld8_a2(blk + 2 + 8 * (p & 1));
+            dw[r] = h2f(rd_u16(blk));
+        }
+#pragma unroll
+        for (int j = 0; j < T; j++) {
+            Act a = act_view(act + (u64)min(j, zmax) * astride, n);
+            uint2 x = *(const uint2*)(a.q0 + b * 32 + 8 * p);
+            float d0 = a.d0[b];
+#pragma unroll
+            for (int r = 0; r < R; r++) {
+                u32 n0 = p < 2 ? (q[r].x & 0x0f0f0f0f) : ((q[r].x >> 4) & 0x0f0f0f0f);
+                u32 n1 = p < 2 ? (q[r].y & 0x0f0f0f0f) : ((q[r].y >> 4) & 0x0f0f0f0f);
+                int s = __dp4a((int)iq4nl_bytes(n0), (int)x.x, 0);
+                s = __dp4a((int)iq4nl_bytes(n1), (int)x.y, s);
+                s += __shfl_xor_sync(mask, s, 1);
+                s += __shfl_xor_sync(mask, s, 2);
+                if (p == 0)
+                    GV_PAIR(sh, CAP, r, j, T, b, base) =
+                        make_float2(__fmul_rn(dw[r], d0), i2f_rn(s));
+            }
+        }
+    }
+}
+
 // Q4_1 / Q5_1 (quant.rs dot_q_1_q8): blk_q5_0's lanes, unsigned weights
 // w, the block's min m: pair (d0, d * sum(w x) + m * sum(x)).
 template <int R, int T, int CAP, bool Q5>
@@ -779,7 +949,7 @@ __device__ __forceinline__ float dot_rows_t(int qt, const u8* const* rows, int n
     // other model runs keep their old code (a bigger switch cost decode
     // ~1% on 7B / 4B: register allocation, a qkv_rope spill).
 #ifdef AXON_EXT_TYPES
-    bool kq = qt == QT_Q4_K || qt == QT_Q5_K || qt == QT_Q6_K;
+    bool kq = qt == QT_Q4_K || qt == QT_Q5_K || qt == QT_Q6_K || qt == QT_Q2_K || qt == QT_Q3_K;
 #else
     bool kq = qt == QT_Q4_K || qt == QT_Q6_K;
 #endif
@@ -799,6 +969,9 @@ __device__ __forceinline__ float dot_rows_t(int qt, const u8* const* rows, int n
         case QT_Q4_0: blk_q4_0<R, T, CAP>(rows, base, end, act, astride, n, zmax, sh); break;
         case QT_Q4_1: blk_q_1<R, T, CAP, false>(rows, base, end, act, astride, n, zmax, sh); break;
         case QT_Q5_1: blk_q_1<R, T, CAP, true>(rows, base, end, act, astride, n, zmax, sh); break;
+        case QT_Q2_K: blk_q2_k<R, T, CAP>(rows, base, end, act, astride, n, zmax, sh); break;
+        case QT_Q3_K: blk_q3_k<R, T, CAP>(rows, base, end, act, astride, n, zmax, sh); break;
+        case QT_IQ4_NL: blk_iq4_nl<R, T, CAP>(rows, base, end, act, astride, n, zmax, sh); break;
 #endif
         default: blk_q5_0<R, T, CAP>(rows, base, end, act, astride, n, zmax, sh); break; // QT_Q5_0
         }
