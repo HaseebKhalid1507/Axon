@@ -1,0 +1,31 @@
+# Tests the FAST tier (scripts/test-tier.sh fast) skips: exact libtest names, one per line, '#' comments.
+# Each one repeats a contract that a smaller model's test in the fast tier also checks; the FULL tier
+# (release + debug-assertion suites, every test) runs all of them before a PR is merged. Seconds are the
+# serial time of each on an exclusive 4090 (docs/log/2026-10-18-test-speed.md); the list adds up to ~38 %
+# of the release suite. test-tier.sh checks that every name here exists, so a renamed test can't drop out silently.
+
+# Llama 3B / 8B batchings + verify (232 s). Same contract on Llama 1B:
+# gpu_prefill_batchings_bit_identical_llama, gpu_q8_llama.
+cuda::qwen2::tests::gpu_bits_llama_3b_8b
+# Qwen3 4B (51 + 61 + 7 s). Same contract on Qwen3 0.6B: gpu_prefill_batchings_bit_identical_qwen3,
+# gpu_q8_qwen3, gpu_verify_matches_forward_argmax_qwen3.
+cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_qwen3_4b
+cuda::qwen2::tests::gpu_q8_qwen3_4b
+cuda::qwen2::tests::gpu_verify_matches_forward_argmax_qwen3_4b
+# Qwen2.5 1.5B. Same contract on 0.5B (the *_0_5b / unsuffixed sibling of each).
+cuda::qwen2::tests::gpu_logits_match_cpu_natural_long_1_5b
+cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_1_5b
+cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_1_5b
+cuda::qwen2::tests::gpu_continuations_match_cpu_1_5b
+cuda::qwen2::tests::gpu_logits_match_cpu_1_5b
+hybrid::tests::hybrid_logits_match_cpu_1_5b
+hybrid::tests::stream_logits_match_cpu_1_5b
+hybrid::tests::hybrid_q8_close_to_f16_1_5b
+hybrid::tests::hybrid_prefill_batchings_bit_identical_1_5b
+hybrid::tests::hybrid_prefill_batchings_bit_identical_q8_1_5b
+hybrid::tests::stream_prefill_is_gpu_bits_1_5b
+cuda::qwen2::pipeline::tests::pipeline_same_device_matches_cuda_1_5b
+# NVRTC builds for GPUs nobody tests on (sm_70/75/80; sm_90a/sm_90): 63 + 84 s of compiling. test-tier.sh
+# keeps them in the fast tier when the branch changes a kernel source (src/cuda/*.cu) or src/cuda/mod.rs.
+cuda::tests::nvrtc_kernels_compile_for_old_archs
+cuda::tests::nvrtc_kernels_compile_for_sm90a

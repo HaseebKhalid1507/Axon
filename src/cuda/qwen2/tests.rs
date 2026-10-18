@@ -1411,11 +1411,14 @@ fn continuations_with<R: Lm, O: Lm>(
     continuations_by(&mut |ids| greedy(r, ids, 32, true), o, tok, name, tie)
 }
 
+/// `greedy(.., keep: true)`'s picks and logits.
+type Continuation = (Vec<u32>, Vec<Vec<f32>>);
+
 /// `continuations_with` with the reference's `greedy(r, ids, 32, true)`
 /// from `reference` (called once per prompt, in PROMPTS order, after `o`'s
 /// continuation): `continuations_match` computes it once for several models.
 fn continuations_by<O: Lm>(
-    reference: &mut dyn FnMut(&[u32]) -> (Vec<u32>, Vec<Vec<f32>>),
+    reference: &mut dyn FnMut(&[u32]) -> Continuation,
     o: &O,
     tok: &crate::tokenizer::Tokenizer,
     name: &str,
