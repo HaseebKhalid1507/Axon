@@ -988,6 +988,7 @@ fn text_out_reasoning_and_stops() {
             tok: &tok,
             utf8: Utf8Stream::default(),
             think,
+            channels: None,
             reasoning: false,
             first: true,
             strip_nl: false,
@@ -1163,6 +1164,32 @@ fn serve_caps_and_slow_reader() {
     let r = read_resp(&mut cd, &mut Vec::new());
     assert_eq!(r.status, 503, "{}", r.body);
     assert!(r.body.contains("queued"));
+    // The same refusal on the ollama API is in ollama's shape, and on
+    // /v1/responses in OpenAI's.
+    let n0 = s.conns();
+    for (path, body) in [
+        (
+            "/api/chat",
+            json!({"messages": [{"role": "user", "content": "Hi"}], "stream": false}),
+        ),
+        (
+            "/v1/responses",
+            json!({"input": "Hi", "max_output_tokens": 1}),
+        ),
+    ] {
+        let mut co = conn();
+        co.write_all(request("POST", path, &body.to_string(), true).as_bytes())
+            .unwrap();
+        let r = read_resp(&mut co, &mut Vec::new());
+        assert_eq!(r.status, 503, "{path}: {}", r.body);
+        let v: Value = serde_json::from_str(&r.body).unwrap();
+        if path == "/api/chat" {
+            assert_eq!(v, json!({"error": "too many queued requests"}), "{path}");
+        } else {
+            assert_eq!(v["error"]["message"], "too many queued requests", "{path}");
+        }
+    }
+    wait_for("the refused connections to close", || s.conns() == n0);
     // While A's client reads nothing, the engine goes on, and /health
     // answers while A is still generating: it isn't queued behind it (A
     // runs to ~2000 tokens, the context; B and C haven't run).
@@ -3323,4 +3350,575 @@ fn serve_solo_and_batch_share_slots() {
         v.1,
         v.2
     );
+}
+
+// ---------------------------------------------------------------------------
+// /v1/responses and the ollama API (responses.rs, ollama.rs).
+
+/// A /v1/responses stream: its events (`event:` name, data), checked for
+/// the framing every event shares (name == type, sequence numbers 0..).
+fn responses_events(r: &Resp) -> Vec<(String, Value)> {
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert!(r.body.ends_with("\n\n"), "{:?}", r.body);
+    let mut out = Vec::new();
+    for (i, e) in r.body.split("\n\n").filter(|e| !e.is_empty()).enumerate() {
+        let (name, data) = e
+            .strip_prefix("event: ")
+            .and_then(|e| e.split_once("\ndata: "))
+            .unwrap_or_else(|| panic!("not an event: {e:?}"));
+        let v: Value = serde_json::from_str(data).unwrap();
+        assert_eq!(v["type"], name, "{e}");
+        assert_eq!(v["sequence_number"], i, "{e}");
+        out.push((name.to_string(), v));
+    }
+    out
+}
+
+/// A streamed response's text, reasoning, calls (name, args) and final
+/// response object; the deltas must add up to the items they're in.
+fn responses_stream(r: &Resp) -> (String, String, Vec<(String, String)>, Value) {
+    let ev = responses_events(r);
+    assert_eq!(ev[0].0, "response.created");
+    assert_eq!(ev[1].0, "response.in_progress");
+    let (mut text, mut reasoning, mut calls) = (String::new(), String::new(), Vec::new());
+    let mut args = String::new();
+    let mut done_items = Vec::new();
+    for (name, v) in &ev {
+        match name.as_str() {
+            "response.output_text.delta" => text.push_str(v["delta"].as_str().unwrap()),
+            "response.reasoning_text.delta" => reasoning.push_str(v["delta"].as_str().unwrap()),
+            "response.function_call_arguments.delta" => args.push_str(v["delta"].as_str().unwrap()),
+            "response.function_call_arguments.done" => {
+                assert_eq!(v["arguments"], json!(args));
+                calls.push((
+                    v["name"].as_str().unwrap().to_string(),
+                    std::mem::take(&mut args),
+                ));
+            }
+            "response.output_item.done" => done_items.push(v["item"].clone()),
+            _ => {}
+        }
+    }
+    let (last, fin) = ev.last().unwrap();
+    assert!(
+        last == "response.completed" || last == "response.incomplete",
+        "{last}"
+    );
+    let resp = fin["response"].clone();
+    assert_eq!(
+        resp["output"],
+        json!(done_items),
+        "the items streamed are the response's"
+    );
+    (text, reasoning, calls, resp)
+}
+
+/// The NDJSON lines of an ollama stream.
+fn ndjson(r: &Resp) -> Vec<Value> {
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.header("content-type"), Some("application/x-ndjson"));
+    r.body
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
+        .collect()
+}
+
+/// Greedy, the same messages through /v1/chat/completions, /v1/responses
+/// (whole and streamed), /api/chat (whole and streamed) and /api/generate:
+/// the same text, the same token count, the same prompt tokens. Then the
+/// same with a forced tool call: the same call. `think`: Qwen3 (reasoning
+/// off, as every route can ask).
+fn apis_match_chat(path: &str, device: Device, think: bool) {
+    let s = server(path, device);
+    let a = s.addr;
+    let sys = "You are terse.";
+    let user = "Name three colors.";
+    let mut chat = json!({"messages": [{"role": "system", "content": sys},
+                                       {"role": "user", "content": user}],
+                          "temperature": 0, "max_tokens": 24});
+    let mut resp = json!({"instructions": sys, "input": user, "temperature": 0,
+                          "max_output_tokens": 24});
+    let mut ol = json!({"model": "alias:latest", "messages": chat["messages"],
+                        "stream": false, "options": {"temperature": 0, "num_predict": 24}});
+    let mut genr = json!({"model": "alias", "system": sys, "prompt": user, "stream": false,
+                         "options": {"temperature": 0, "num_predict": 24}});
+    if think {
+        chat["chat_template_kwargs"] = json!({"enable_thinking": false});
+        resp["reasoning"] = json!({"effort": "none"});
+        ol["think"] = json!(false);
+        genr["think"] = json!(false);
+    }
+    let c = post(a, "/v1/chat/completions", chat.clone()).json();
+    let text = c["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let n = c["usage"]["completion_tokens"].as_u64().unwrap();
+    let np = c["usage"]["prompt_tokens"].as_u64().unwrap();
+    assert!(!text.is_empty(), "{c}");
+
+    let r = post(a, "/v1/responses", resp.clone()).json();
+    assert_eq!(r["object"], "response");
+    assert!(r["id"].as_str().unwrap().starts_with("resp-"), "{r}");
+    let out = r["output"].as_array().unwrap();
+    let msg = out.iter().find(|i| i["type"] == "message").unwrap();
+    assert_eq!(msg["content"][0]["text"], json!(text), "{r}");
+    assert_eq!(r["usage"]["output_tokens"], n);
+    assert_eq!(r["usage"]["input_tokens"], np);
+    assert_eq!(
+        r["status"],
+        if c["choices"][0]["finish_reason"] == "length" {
+            "incomplete"
+        } else {
+            "completed"
+        }
+    );
+    let mut sresp = resp.clone();
+    sresp["stream"] = json!(true);
+    let (st, _, scalls, sr) = responses_stream(&post(a, "/v1/responses", sresp));
+    assert_eq!(st, text);
+    assert!(scalls.is_empty());
+    assert_eq!(sr["usage"]["output_tokens"], n);
+
+    let o = post(a, "/api/chat", ol.clone()).json();
+    assert_eq!(o["message"]["content"], json!(text), "{o}");
+    assert_eq!(o["model"], "alias:latest");
+    assert_eq!(o["done"], true);
+    assert_eq!(o["eval_count"], n);
+    assert_eq!(o["prompt_eval_count"], np);
+    assert!(o["total_duration"].as_u64().unwrap() > 0);
+    let mut sol = ol.clone();
+    sol.as_object_mut().unwrap().remove("stream");
+    let lines = ndjson(&post(a, "/api/chat", sol));
+    let (last, body) = lines.split_last().unwrap();
+    assert!(body.iter().all(|l| l["done"] == false));
+    assert_eq!(last["done"], true);
+    assert_eq!(last["eval_count"], n);
+    let st: String = body
+        .iter()
+        .map(|l| l["message"]["content"].as_str().unwrap())
+        .collect();
+    assert_eq!(st, text);
+
+    let g = post(a, "/api/generate", genr).json();
+    assert_eq!(g["response"], json!(text), "{g}");
+    assert_eq!(g["eval_count"], n);
+
+    // Tools: a forced call is the same call everywhere.
+    let params = json!({"type": "object", "properties": {"city": {"type": "string"}},
+                        "required": ["city"]});
+    let ctools = json!([{"type": "function", "function": {"name": "get_weather",
+        "description": "Get the weather in a city", "parameters": params}}]);
+    let rtools = json!([{"type": "function", "name": "get_weather",
+        "description": "Get the weather in a city", "parameters": params}]);
+    let ask = "What's the weather in Paris?";
+    let mut tchat = json!({"messages": [{"role": "user", "content": ask}], "tools": ctools,
+                           "tool_choice": "required", "temperature": 0, "max_tokens": 48});
+    let mut tresp = json!({"input": ask, "tools": rtools, "tool_choice": "required",
+                           "temperature": 0, "max_output_tokens": 48});
+    if think {
+        tchat["chat_template_kwargs"] = json!({"enable_thinking": false});
+        tresp["reasoning"] = json!({"effort": "none"});
+    }
+    let c = post(a, "/v1/chat/completions", tchat).json();
+    let m = &c["choices"][0]["message"];
+    let Some(calls) = m["tool_calls"].as_array() else {
+        // Not a call (the model's choice): nothing more to compare.
+        return;
+    };
+    let want: Vec<(String, String)> = calls
+        .iter()
+        .map(|c| {
+            (
+                c["function"]["name"].as_str().unwrap().to_string(),
+                c["function"]["arguments"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    let r = post(a, "/v1/responses", tresp.clone()).json();
+    let got: Vec<(String, String)> = r["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["type"] == "function_call")
+        .map(|i| {
+            assert!(i["call_id"].as_str().unwrap().starts_with("call_"));
+            (
+                i["name"].as_str().unwrap().to_string(),
+                i["arguments"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(got, want, "{r}");
+    tresp["stream"] = json!(true);
+    let (_, _, scalls, _) = responses_stream(&post(a, "/v1/responses", tresp));
+    assert_eq!(scalls, want);
+    // ollama: arguments are an object.
+    let mut tol = json!({"messages": [{"role": "user", "content": ask}], "tools": ctools,
+                         "stream": false, "options": {"temperature": 0, "num_predict": 48}});
+    if think {
+        tol["think"] = json!(false);
+    }
+    let o = post(a, "/api/chat", tol).json();
+    // tool_choice auto here: compare only if it called.
+    if let Some(oc) = o["message"]["tool_calls"].as_array() {
+        assert_eq!(oc[0]["function"]["name"], json!(want[0].0), "{o}");
+        assert!(oc[0]["function"]["arguments"].is_object(), "{o}");
+    }
+}
+
+#[test]
+fn serve_apis_match_chat_completions() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    apis_match_chat(p.to_str().unwrap(), Device::Cpu, false);
+    if crate::testutil::qwen3_model().is_some() {
+        let q = std::env::var_os("AXON_TEST_QWEN3").map_or_else(
+            || std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(crate::testutil::QWEN3_MODEL),
+            std::path::PathBuf::from,
+        );
+        apis_match_chat(q.to_str().unwrap(), Device::Cpu, true);
+    }
+}
+
+#[test]
+fn serve_cuda_apis_match_chat_completions() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    apis_match_chat(p.to_str().unwrap(), Device::Cuda, false);
+}
+
+/// A tool loop over /v1/responses as codex runs it: the reply's items sent
+/// back as input with the call's output (store false), and again through
+/// previous_response_id: both continue the same conversation, reuse the
+/// cache, and give the same reply.
+#[test]
+fn serve_responses_tool_loop() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server(p.to_str().unwrap(), Device::Cpu);
+    let a = s.addr;
+    let tools = json!([{"type": "function", "name": "get_weather", "strict": false,
+        "description": "Get the weather in a city",
+        "parameters": {"type": "object", "properties": {"city": {"type": "string"}},
+                       "required": ["city"]}},
+        {"type": "web_search"}]);
+    let input = json!([{"type": "message", "role": "user",
+                        "content": [{"type": "input_text", "text": "What's the weather in Paris?"}]}]);
+    let r1 = post(
+        a,
+        "/v1/responses",
+        json!({"input": input, "tools": tools, "tool_choice": "required", "temperature": 0,
+               "max_output_tokens": 48}),
+    )
+    .json();
+    let out = r1["output"].as_array().unwrap().clone();
+    let Some(call) = out.iter().find(|i| i["type"] == "function_call").cloned() else {
+        return;
+    };
+    // The echo lists only the function tool (web_search is dropped).
+    assert_eq!(r1["tools"].as_array().unwrap().len(), 1, "{r1}");
+    let result = json!({"type": "function_call_output", "call_id": call["call_id"],
+                        "output": "18C, sunny"});
+    let mut items = input.as_array().unwrap().clone();
+    items.extend(out.iter().cloned());
+    items.push(result.clone());
+    let r2 = post(
+        a,
+        "/v1/responses",
+        json!({"input": items, "tools": tools, "temperature": 0, "max_output_tokens": 24,
+               "store": false}),
+    )
+    .json();
+    assert_eq!(r2["status"], "completed", "{r2}");
+    let p1 = r1["usage"]["input_tokens"].as_u64().unwrap();
+    let cached = r2["usage"]["input_tokens_details"]["cached_tokens"]
+        .as_u64()
+        .unwrap();
+    assert!(cached * 10 >= p1 * 9, "reused {cached} of {p1}: {r2}");
+    let r3 = post(
+        a,
+        "/v1/responses",
+        json!({"previous_response_id": r1["id"], "input": [result], "tools": tools,
+               "temperature": 0, "max_output_tokens": 24}),
+    )
+    .json();
+    let text = |r: &Value| {
+        r["output"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|i| i["type"] == "message")
+            .map(|i| i["content"][0]["text"].as_str().unwrap().to_string())
+            .collect::<String>()
+    };
+    assert_eq!(text(&r3), text(&r2));
+    assert_eq!(r3["usage"]["input_tokens"], r2["usage"]["input_tokens"]);
+    assert_eq!(r3["previous_response_id"], r1["id"]);
+    // r2 was store false: it can't be continued.
+    let e = post(
+        a,
+        "/v1/responses",
+        json!({"previous_response_id": r2["id"], "input": "hi"}),
+    );
+    assert_eq!(e.status, 400);
+    assert_eq!(e.json()["error"]["code"], "previous_response_not_found");
+}
+
+/// The ollama routes that describe the server, the "load" request, refused
+/// routes and models, errors in ollama's shape, and the API key gate on
+/// every new route.
+#[test]
+fn serve_ollama_and_responses_routes() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server_with(p.to_str().unwrap(), Device::Cpu, |o| {
+        o.api_key = Some("k3y".into());
+    });
+    let a = s.addr;
+    let authed = |method: &str, path: &str, body: &str| {
+        let mut st = TcpStream::connect(a).unwrap();
+        st.set_read_timeout(Some(Duration::from_secs(300))).unwrap();
+        let req = format!(
+            "{method} {path} HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer k3y\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        st.write_all(req.as_bytes()).unwrap();
+        read_resp_to(&mut st, &mut Vec::new(), method == "HEAD")
+    };
+    // Without the key: 401 everywhere (bodies or not).
+    for (m, path, body) in [
+        ("GET", "/", ""),
+        ("GET", "/api/tags", ""),
+        ("GET", "/api/version", ""),
+        (
+            "POST",
+            "/api/chat",
+            "{\"messages\":[{\"role\":\"user\",\"content\":\"x\"}]}",
+        ),
+        ("POST", "/api/show", "{\"model\":\"alias\"}"),
+        ("POST", "/v1/responses", "{\"input\":\"x\"}"),
+    ] {
+        assert_eq!(call(a, m, path, body).status, 401, "{m} {path}");
+    }
+    let r = authed("GET", "/", "");
+    assert_eq!((r.status, r.body.as_str()), (200, "Ollama is running"));
+    assert_eq!(authed("HEAD", "/", "").status, 200);
+    let v = authed("GET", "/api/version", "").json();
+    assert!(v["version"].as_str().unwrap().starts_with("0."));
+    let t = authed("GET", "/api/tags", "").json();
+    let names: Vec<&str> = t["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["name"].as_str().unwrap())
+        .collect();
+    assert!(names.contains(&"alias"), "{t}");
+    let m0 = &t["models"][0];
+    assert!(m0["size"].as_u64().unwrap() > 1_000_000, "{t}");
+    assert_eq!(m0["details"]["format"], "gguf");
+    assert_eq!(m0["details"]["family"], "qwen2");
+    assert!(
+        !m0["details"]["quantization_level"]
+            .as_str()
+            .unwrap()
+            .is_empty(),
+        "{t}"
+    );
+    let ps = authed("GET", "/api/ps", "").json();
+    assert_eq!(ps["models"][0]["context_length"], 2048);
+    for body in [
+        "{\"model\":\"alias:latest\"}",
+        "{\"name\":\"alias\"}",
+        "{\"model\":\"\",\"name\":\"alias\"}",
+    ] {
+        let sh = authed("POST", "/api/show", body).json();
+        assert_eq!(sh["model_info"]["qwen2.context_length"], 2048, "{sh}");
+        assert_eq!(sh["model_info"]["general.architecture"], "qwen2");
+        assert!(
+            sh["capabilities"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("tools"))
+        );
+    }
+    let nf = authed("POST", "/api/show", "{\"model\":\"llama3:70b\"}");
+    assert_eq!(nf.status, 404);
+    assert!(nf.json()["error"].as_str().unwrap().contains("not found"));
+    let nf = authed(
+        "POST",
+        "/api/chat",
+        "{\"model\":\"llama3:70b\",\"messages\":[{\"role\":\"user\",\"content\":\"x\"}]}",
+    );
+    assert_eq!(nf.status, 404);
+    assert!(
+        nf.json()["error"].is_string(),
+        "ollama's error shape: {}",
+        nf.body
+    );
+    for path in ["/api/embed", "/api/embeddings", "/api/pull"] {
+        let r = authed("POST", path, "{\"model\":\"alias\",\"input\":\"x\"}");
+        assert_eq!(r.status, 501, "{path}");
+        assert!(
+            r.json()["error"]
+                .as_str()
+                .unwrap()
+                .contains("not supported")
+        );
+    }
+    // Load requests: no generation.
+    let l = authed("POST", "/api/generate", "{\"model\":\"alias\"}").json();
+    assert_eq!(
+        (l["done"].clone(), l["done_reason"].clone()),
+        (json!(true), json!("load"))
+    );
+    let l = authed("POST", "/api/chat", "{\"model\":\"alias\",\"messages\":[]}").json();
+    assert_eq!(l["done_reason"], "load");
+    assert_eq!(
+        authed("POST", "/api/generate", "{\"model\":\"nope\"}").status,
+        404
+    );
+    // Bad shapes: 400 in each API's shape.
+    let e = authed(
+        "POST",
+        "/api/chat",
+        "{\"messages\":[{\"role\":\"user\",\"content\":\"x\"}],\"format\":\"json\"}",
+    );
+    assert_eq!(e.status, 400);
+    assert!(e.json()["error"].as_str().unwrap().contains("format"));
+    let e = authed(
+        "POST",
+        "/v1/responses",
+        "{\"input\":[{\"type\":\"bogus\"}]}",
+    );
+    assert_eq!(e.status, 400);
+    assert_eq!(e.json()["error"]["param"], "input");
+    // Wrong method: 405.
+    assert_eq!(authed("GET", "/api/chat", "").status, 405);
+    assert_eq!(authed("GET", "/v1/responses", "").status, 405);
+    // A raw generate is /v1/completions' text.
+    let g = authed(
+        "POST",
+        "/api/generate",
+        &json!({"prompt": PROMPT, "raw": true, "stream": false,
+                "options": {"temperature": 0, "num_predict": 8}})
+        .to_string(),
+    )
+    .json();
+    let c = authed(
+        "POST",
+        "/v1/completions",
+        &json!({"prompt": PROMPT, "temperature": 0, "max_tokens": 8}).to_string(),
+    )
+    .json();
+    assert_eq!(g["response"], c["choices"][0]["text"], "{g} {c}");
+    // /metrics counts the new routes by name.
+    let m = authed("GET", "/metrics", "").body;
+    assert!(m.contains("route=\"/api/generate\""), "{m}");
+    assert!(m.contains("route=\"/v1/responses\""), "{m}");
+}
+
+/// Every error on an /api/* path is ollama's `{"error": "..."}` and
+/// nothing else, whichever layer answers it: a wrong method (405, Allow
+/// kept), an unknown /api route (404), a body past MAX_BODY (413, before
+/// routing), and without the key (401 before routing, with and without a
+/// body). Other paths keep OpenAI's shape.
+#[test]
+fn error_body_shape_follows_the_path() {
+    let e = super::api::ApiError::new(405, "invalid_request_error", "use POST");
+    assert_eq!(
+        super::error_body(Some("/api/chat"), &e),
+        r#"{"error":"use POST"}"#
+    );
+    assert_eq!(
+        super::error_body(Some("/api"), &e),
+        r#"{"error":"use POST"}"#
+    );
+    for p in [Some("/v1/chat/completions"), Some("/apis"), Some("/"), None] {
+        let v: Value = serde_json::from_str(&super::error_body(p, &e)).unwrap();
+        assert_eq!(v["error"]["message"], "use POST", "{p:?}");
+    }
+}
+
+fn ollama_error(r: &Resp) -> String {
+    let v: Value = serde_json::from_str(&r.body).unwrap_or_else(|e| panic!("{e}: {}", r.body));
+    let o = v.as_object().unwrap();
+    assert_eq!(o.len(), 1, "only 'error': {}", r.body);
+    o["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a string: {}", r.body))
+        .to_string()
+}
+
+#[test]
+fn serve_ollama_error_shapes() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server(p.to_str().unwrap(), Device::Cpu);
+    let a = s.addr;
+    let r = call(a, "GET", "/api/chat", "");
+    assert_eq!(r.status, 405);
+    assert_eq!(r.header("allow"), Some("POST, OPTIONS"));
+    assert!(ollama_error(&r).contains("POST"), "{}", r.body);
+    let r = call(a, "DELETE", "/api/tags", "");
+    assert_eq!(r.status, 405);
+    assert_eq!(r.header("allow"), Some("GET, HEAD, OPTIONS"));
+    ollama_error(&r);
+    let r = call(a, "GET", "/api/foo", "");
+    assert_eq!(r.status, 404);
+    assert!(ollama_error(&r).contains("/api/foo"));
+    // Past MAX_BODY: refused after the head, before routing.
+    let mut st = TcpStream::connect(a).unwrap();
+    st.set_read_timeout(Some(Duration::from_secs(60))).unwrap();
+    st.write_all(
+        format!(
+            "POST /api/chat HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n",
+            super::http::MAX_BODY + 1
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    let r = read_resp(&mut st, &mut Vec::new());
+    assert_eq!(r.status, 413);
+    ollama_error(&r);
+    // A bad body on a generation route (routed): ollama's shape too.
+    let r = call(a, "POST", "/api/generate", "{");
+    assert_eq!(r.status, 400);
+    ollama_error(&r);
+    // Other paths: OpenAI's.
+    for (m, path) in [("GET", "/v1/nope"), ("GET", "/v1/chat/completions")] {
+        let r = call(a, m, path, "");
+        assert!(
+            r.json()["error"]["message"].is_string(),
+            "{path}: {}",
+            r.body
+        );
+    }
+    drop(s);
+
+    let s = server_with(p.to_str().unwrap(), Device::Cpu, |o| {
+        o.api_key = Some("k3y".into());
+    });
+    let a = s.addr;
+    for (m, path, body) in [
+        ("GET", "/api/tags", ""),
+        ("POST", "/api/chat", "{\"messages\":[]}"),
+        ("GET", "/api/foo", ""),
+    ] {
+        let r = call(a, m, path, body);
+        assert_eq!(r.status, 401, "{m} {path}");
+        assert_eq!(r.header("www-authenticate"), Some("Bearer"));
+        assert!(ollama_error(&r).contains("API key"), "{}", r.body);
+    }
+    let r = call(a, "POST", "/v1/responses", "{\"input\":\"x\"}");
+    assert_eq!(r.status, 401);
+    assert_eq!(r.json()["error"]["code"], "invalid_api_key");
 }

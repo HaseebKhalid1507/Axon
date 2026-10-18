@@ -77,8 +77,9 @@ Newest first, as of `69adfa2`; the numbers are the PRs' own MEASURED headlines.
 | 10 | **GPU decode: long-context attention; locked-clock trial.** | ESTIMATED +3% decode at 4k context. A locked SM clock may recover part of the 9% laptop power-cap cost (MEASURED cost; the fix is untested). The long-context part is Scale item 3. | long-context attention done (#50, Scale item 3); locked-clock trial planned |
 
 Also open:
-- **Tool calling: `/v1/responses` (codex) and the ollama-native API.** Chat-completions tool calling
-  is on main; these two remain (ESTIMATED 700-1000 and 300-400 lines). **In flight** (feat/serve-apis).
+- ~~**Tool calling: `/v1/responses` (codex) and the ollama-native API.**~~ Done
+  (docs/serve-apis.md, log 2026-10-17-serve-responses-ollama). Left: `format` / structured
+  output (needs grammar-constrained sampling), embeddings.
 - **Q2_K and Q3_K.** The GGUF reader names both, but `model.rs` doesn't accept them (`SUPPORTED_TYPES`) and
   there are no kernels; the 2–3-bit frontier models need them ([Long-term goals](#long-term-goals)).
   **In flight** (feat/q2k-q3k).
@@ -153,6 +154,9 @@ streaming the experts through the GPU for prefill (stage 3) is what's left of it
    attention sinks, and an alternating 128-token sliding window. 60–90 builder-hours, medium bits risk (a new quant
    type, and sinks in every attention kernel); gates as item 1. ESTIMATED ~45 tok/s decode with every expert on the
    CPU ([research-bigmodels](research/research-bigmodels.md) §4.3).
+   **Stage 0 done** (CPU only, exact: MXFP4, sinks, the window, YaRN, o200k, harmony;
+   [log](log/2026-10-18-gpt-oss-s0.md)). Stage 1 next: #67's split (attention, sinks, router and head on the
+   GPU, experts on the CPU) for 12 GB cards, the whole model on 24 GB ones.
 3. **Later:** the 100B–1T models (Qwen3-235B, Qwen3-Coder-480B, DeepSeek V3, Kimi K2). See
    [Frontier models](#frontier-models-100b-to-1t), below.
 

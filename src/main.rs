@@ -1632,8 +1632,22 @@ fn chat_repl<M: kvsave::KvIo>(
             chat::sigint::arm();
             &chat::sigint::hit
         };
+        // gpt-oss (harmony): only the final channel is shown.
+        let mut channels = conv.channels();
+        let mut reasoning = 0usize;
         let res = conv.reply(text, cancel, &mut |id| {
-            let s = stream.push(&tok.decode_bytes(&[id]));
+            let bytes = tok.decode_bytes(&[id]);
+            if let Some(ch) = channels.as_mut() {
+                match ch.push(id, &bytes) {
+                    chat::Part::Answer => {}
+                    chat::Part::Reasoning => {
+                        reasoning += 1;
+                        return Ok(());
+                    }
+                    chat::Part::Hidden => return Ok(()),
+                }
+            }
+            let s = stream.push(&bytes);
             if !s.is_empty() {
                 if tty {
                     write!(out, "{}", s.replace('\n', "\r\n"))?;
@@ -1663,6 +1677,9 @@ fn chat_repl<M: kvsave::KvIo>(
         let rate = |n: usize, s: f64| if s > 0.0 { n as f64 / s } else { 0.0 };
         let (used, size) = conv.used();
         let mut notes = String::new();
+        if reasoning > 0 {
+            notes.push_str(&format!(" | reasoning {reasoning} tok, not shown"));
+        }
         if r.drafted > 0 {
             notes.push_str(&format!(" | drafts {}/{} kept", r.accepted, r.drafted));
         }

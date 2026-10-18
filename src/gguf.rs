@@ -354,6 +354,12 @@ const QTYPES: &[QType] = &[
         block_size: 1,
         block_bytes: 2,
     },
+    QType {
+        id: 39,
+        name: "MXFP4",
+        block_size: 32,
+        block_bytes: 17,
+    },
 ];
 
 pub fn qtype(id: u32) -> QType {

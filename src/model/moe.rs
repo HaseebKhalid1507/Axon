@@ -1,4 +1,11 @@
-//! Mixture-of-experts FFN (`qwen3moe`) on the CPU.
+//! Mixture-of-experts FFN (`qwen3moe`, `gpt-oss`) on the CPU.
+//!
+//! gpt-oss (`Oai`) differs in four places, as llama.cpp's build_moe_ffn
+//! with LLAMA_EXPERT_GATING_FUNC_TYPE_SOFTMAX_WEIGHT and
+//! LLM_FFN_SWIGLU_OAI_MOE: the router logits get a bias; the top k are taken
+//! on the logits themselves and their weights are the softmax over those k
+//! (no renormalization); each expert's gate, up and down outputs get that
+//! expert's bias; and the activation is `vmath::swiglu_oai`.
 //!
 //! A MoE layer replaces the gated FFN with `n_expert` small ones and a
 //! router. Per token: router logits (an f32 `[n_expert x dim]` matrix times
@@ -54,6 +61,17 @@ pub(super) struct Moe<'a> {
     pub(super) down: Vec<Weight<'a>>,
     /// How router logits become selection scores and weights (`Gate`).
     pub(super) gate_fn: Gate,
+    /// gpt-oss's router and expert biases (module doc); None on qwen3moe.
+    pub(super) oai: Option<Box<Oai>>,
+}
+
+/// gpt-oss's biases: the router's (n_expert), and per expert e its gate's
+/// and up's (`gate[e * ffn..][..ffn]`) and its down's (`down[e * dim..][..dim]`).
+pub(super) struct Oai {
+    pub(super) router: Vec<f32>,
+    pub(super) gate: Vec<f32>,
+    pub(super) up: Vec<f32>,
+    pub(super) down: Vec<f32>,
 }
 
 /// A router's rule (llama.cpp build_moe_ffn): probabilities by softmax or
@@ -86,15 +104,16 @@ pub(crate) struct MoeDims {
     pub ffn: usize,
 }
 
-/// A model with experts: qwen3moe, or deepseek2 (its first
+/// A model with experts: qwen3moe, gpt-oss, or deepseek2 (its first
 /// `leading_dense_block_count` layers dense, `deepseek2.rs`).
 pub(crate) fn is_moe(m: &Model) -> bool {
-    m.arch == "qwen3moe" || m.arch == "deepseek2"
+    matches!(m.arch.as_str(), "qwen3moe" | "gpt-oss" | "deepseek2")
 }
 
-/// deepseek2: CPU only for now (its GPU MLA attention is stage 1).
+/// gpt-oss: no GPU MoE path for its MXFP4 experts, sinks and biases yet;
+/// deepseek2: its GPU MLA attention is stage 1. CPU only for now.
 pub(crate) fn cpu_only(m: &Model) -> bool {
-    m.arch == "deepseek2"
+    matches!(m.arch.as_str(), "gpt-oss" | "deepseek2")
 }
 
 pub(crate) fn moe_dims(m: &Model) -> Option<MoeDims> {
@@ -131,7 +150,7 @@ fn held_bytes(t: &Tensor, repack: bool) -> u64 {
 }
 
 /// Bytes of one expert matrix of `t` in the anonymous r8 arena: its repack,
-/// or 0 when it's read in place from the mapping.
+/// or 0 when it's read in place from the mapping (no r8 form: MXFP4).
 fn arena_bytes(t: &Tensor, repack: bool) -> u64 {
     let len = if repack { super::repacked_len(t) } else { None };
     len.map_or(0, |l| l as u64)
@@ -341,6 +360,7 @@ impl<'a> Moe<'a> {
             up,
             down,
             gate_fn,
+            oai: None,
         }
     }
 
@@ -392,6 +412,9 @@ impl<'a> Moe<'a> {
                 *l += wv * x;
             }
         }
+        if let Some(o) = &self.oai {
+            return Self::route_oai(&mut p, &o.router, ids, w);
+        }
         if g.sigmoid {
             // ggml_sigmoid: 1 / (1 + exp(-x)).
             for v in p.iter_mut() {
@@ -438,6 +461,64 @@ impl<'a> Moe<'a> {
             for v in w.iter_mut() {
                 *v *= g.scale;
             }
+        }
+    }
+}
+
+impl Moe<'_> {
+    /// gpt-oss's routing of logits `p` (bias `b` added): the top k logits
+    /// (the higher first, the lower index on ties), their weights the
+    /// softmax over those k in rank order (max = the first; exp sum in rank
+    /// order; times 1 / sum, as ggml_soft_max).
+    fn route_oai(p: &mut [f32], b: &[f32], ids: &mut [usize], w: &mut [f32]) {
+        let n = p.len();
+        for (l, &bv) in p.iter_mut().zip(b) {
+            *l += bv;
+        }
+        let mut taken = vec![false; n];
+        for (id, wi) in ids.iter_mut().zip(w.iter_mut()) {
+            let mut best = usize::MAX;
+            for e in 0..n {
+                if !taken[e] && (best == usize::MAX || p[e] > p[best]) {
+                    best = e;
+                }
+            }
+            taken[best] = true;
+            *id = best;
+            *wi = p[best];
+        }
+        let max = w[0];
+        let mut sum = 0f32;
+        for v in w.iter_mut() {
+            *v = exp(*v - max);
+            sum += *v;
+        }
+        let inv = 1.0 / sum;
+        for v in w.iter_mut() {
+            *v *= inv;
+        }
+    }
+
+    /// Expert e's gate and up rows r0..r0 + g.len() (one token): its biases
+    /// if gpt-oss, then the activation into `g`.
+    #[inline]
+    fn act(&self, net: &Qwen2, e: usize, r0: usize, g: &mut [f32], u: &mut [f32]) {
+        if let Some(o) = &self.oai {
+            let at = e * self.ffn + r0;
+            super::add_assign(g, &o.gate[at..at + g.len()]);
+            super::add_assign(u, &o.up[at..at + u.len()]);
+            crate::vmath::swiglu_oai(g, u);
+        } else {
+            net.glu(g, u);
+        }
+    }
+
+    /// Expert e's down bias on its rows r0..r0 + d.len() (gpt-oss).
+    #[inline]
+    fn down_bias(&self, e: usize, dim: usize, r0: usize, d: &mut [f32]) {
+        if let Some(o) = &self.oai {
+            let at = e * dim + r0;
+            super::add_assign(d, &o.down[at..at + d.len()]);
         }
     }
 }
@@ -526,7 +607,7 @@ impl<'a> Qwen2<'a> {
             let ub = &mut ub[..ys.len()];
             self.rows_vec(&moe.gate[e], r, &xq, ys, cfg, own_all);
             self.rows_vec(&moe.up[e], r, &xq, ub, cfg, own_all);
-            self.glu(ys, ub);
+            moe.act(self, e, r, ys, ub);
         });
         let dt = [moe.down[0].qt()];
         let aq: Vec<QuantizedAct> = act
@@ -547,6 +628,7 @@ impl<'a> Qwen2<'a> {
             let d = &mut d[..ys.len()];
             for (i, &e) in ids.iter().enumerate() {
                 self.rows_vec(&moe.down[e], r0, &aq[i], d, cfg, own_all);
+                moe.down_bias(e, dim, r0, d);
                 for (yv, &dv) in ys.iter_mut().zip(d.iter()) {
                     combine(yv, w[i], dv, i == 0);
                 }
@@ -650,8 +732,22 @@ impl<'a> Qwen2<'a> {
                 let (gs, us) = sc.split_at_mut(rows_a * slots);
                 self.rows_batch(gate, r0, &xr, n, gs);
                 self.rows_batch(up, r0, &xr, n, us);
-                for (gr, ur) in gs.chunks_mut(slots).zip(us.chunks(slots)) {
-                    self.glu(&mut gr[..n], &ur[..n]);
+                if moe.oai.is_some() {
+                    // Per (row, token) the decode path's ops: biases, then
+                    // the activation, on one token's values at a time.
+                    let mut g1 = [0f32; 1];
+                    let mut u1 = [0f32; 1];
+                    for (r, (gr, ur)) in gs.chunks_mut(slots).zip(us.chunks(slots)).enumerate() {
+                        for b in 0..n {
+                            (g1[0], u1[0]) = (gr[b], ur[b]);
+                            moe.act(self, e, r0 + r, &mut g1, &mut u1);
+                            gr[b] = g1[0];
+                        }
+                    }
+                } else {
+                    for (gr, ur) in gs.chunks_mut(slots).zip(us.chunks(slots)) {
+                        self.glu(&mut gr[..n], &ur[..n]);
+                    }
                 }
                 for (b, &p) in ps.iter().enumerate() {
                     for r in 0..rows_a {
@@ -687,6 +783,13 @@ impl<'a> Qwen2<'a> {
             let rows = rows_b.min(dim - r0);
             with_rows_scratch(rows * slots, |ds| {
                 self.rows_batch(down, r0, &xr, n, ds);
+                if moe.oai.is_some() {
+                    for (r, dr) in ds.chunks_mut(slots).enumerate() {
+                        for v in &mut dr[..n] {
+                            moe.down_bias(e, dim, r0 + r, std::slice::from_mut(v));
+                        }
+                    }
+                }
                 for (b, &p) in ps.iter().enumerate() {
                     for r in 0..rows {
                         // SAFETY: as in stage A.
