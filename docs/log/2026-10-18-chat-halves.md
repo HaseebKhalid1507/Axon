@@ -1,6 +1,6 @@
 # `chat` forgets in halves  (PR #75)
 
-- Date: 2026-10-18. Branch: feat/chat-halves. Base: main 5a73f63. Status: open
+- Date: 2026-10-18. Branch: feat/chat-halves. Base: main 5a73f63. Status: open (gates of record green at 5cae03a)
 - Pick / design: roadmap Scale item 8, second half ("`chat` forgetting in halves").
 
 ## What changed
@@ -57,12 +57,15 @@ Round 1, code 955ee0f (the binaries for this round were built before a help-text
 | clippy -D warnings (bin + tests), rustfmt --check | clean | local |
 
 
-Round 2, code 5cae03a (Shady's fixes), binaries `axon-test-5cae03a`, `axon-test-dbg-5cae03a` and `axon-cand-5cae03a`.
-These jobs were queued when this entry was written; their results go in the PR body and in an Update line below.
-- `chat::` release tests on pods, with `AXON_TEST_GPU_SERIAL=1`: job 1018-033525-7682
-- debug-assertion suite (the gate of record) on pods, with `AXON_TEST_GPU_SERIAL=1`: job 1018-033814-8723
-- md5 of `gen`, main 5a73f63 vs 5cae03a, plus a history-dependent chat md5 (must give base == `--forget-to min` != default), on bella cuda + cpu: job 1018-033814-bf37
-- bench, -n as given and -n unlimited, 0.5B + 7B, one `--timing 4090` job: 1018-033527-1588
+Round 2, code 5cae03a (Shady's fixes; the gates of record):
+
+| gate (code 5cae03a) | result | job (binary, host) |
+|---|---|---|
+| `chat::` release tests, `AXON_TEST_GPU_SERIAL=1` | **PASS** 21 / 0 / 2 ignored (the benches), no POISON-RERUN; includes `full_context_drops_oldest`, `full_context_drops_oldest_cuda`, `session_after_forgetting`, `mistral_framing_and_replies` | 1018-033525-7682 (`axon-test-5cae03a`, 4090 pod3) |
+| debug-assertion suite (gate of record), `AXON_TEST_GPU_SERIAL=1` | **PASS** 515 / 0 / 37 ignored, no POISON-RERUN | 1018-033814-8723 (`axon-test-dbg-5cae03a`, 4090 pod4) |
+| md5 `gen` main 5a73f63 vs 5cae03a, 5 models × 3 prompts, -n 64 greedy | **cuda 0/15 differ, cpu 0/15 differ** | 1018-033814-bf37 (`axon-cand-5cae03a`, bella RTX 5070 Ti Laptop sm_120) |
+| chat md5, history-dependent prompts (10 × "remember favourite number #i" + "list every favourite number I told you"), 0.5B `--ctx 512 --temp 0 -n 64` | **cuda and cpu: main == `--forget-to min`** (`0f51987f8e9d`, 6 forgetting turns each); **default differs** (`c251bcf2efe5`, 3 forgetting turns) | 1018-033814-bf37 (bella) |
+| clippy -D warnings (bin + tests), rustfmt --check | clean, at 5cae03a and on the merge with main ac358d4 (`git merge-tree` clean, tree 32b33be, not pushed) | local |
 
 ## Results
 Methodology: `chat::tests::forget_bench` / `forget_bench_7b`, ignored tests added in this PR. Each is a 40-exchange scripted greedy chat with the default Qwen system message (10 topics cycled, each message numbered). forget_to 0 (main's behaviour, through the same code path) and 0.5 run interleaved, 2 rounds, in one process on one GPU, under exclusive placement. Per turn the bench records `Reply::prompt_tokens`, the prefill ms, and the TTFT, timed from the `reply()` call to the first emitted token. "Steady" = turns after the window first filled that didn't forget. Medians are over both rounds; the token counts were identical in both rounds. Binary: `axon-test-bench`, 955ee0f source minus a help-text wording edit (chat.rs identical to HEAD 3406e77). Per-turn rows (`FBT`) are in the job logs.
@@ -80,7 +83,24 @@ All MEASURED. Mean / p95 TTFT over all 40 turns (r0): 0.5B 11.5 / 17.5 → 4.3 /
 
 Commands: `axon-run --timing 4090 --vram 2500 -- axon-test-bench chat::tests::forget_bench --exact --ignored --nocapture`; `axon-run --timing 4090|bella --big-models --vram 9000 -- axon-test-bench chat::tests::forget_bench_7b --exact --ignored --nocapture`. Stats: `fbstats.py` over the `FBT` lines. An earlier non-exclusive 0.5B run (1018-003138-4b40, shared pod) gave the same counts.
 
-What that means at 32k (ESTIMATED from the measured 8k rows above): with -n 400, a forgetting turn under min re-prefilled a median of 7394 of 8192 positions (90 %, 7B 4090 row), and under half 3910 (48 %). At a 32k window that's ~29.5k vs ~15.6k tokens, and under min it happens on nearly every turn. With -n unlimited (the CLI default), a reply reserves ctx/4, so min keeps at most ~24k of 32k (the roadmap's figure) and re-prefills that on nearly every turn. Half keeps at most 16k, leaving ctx/4 = 8k for later turns to append into before the next forget. The -n unlimited bench (job 1018-033527-1588) measures the turns per re-prefill under the defaults; Shady's estimate is ~2.7 on 0.5B at 2048 and 4–5 on 7B at 8192.
+### Round 2 bench (5cae03a, -n as given and -n unlimited)
+
+Bench at 5cae03a, `chat::tests::forget_bench` + `forget_bench_7b` in one `--timing 4090` job (1018-033527-1588, pod4, exclusive). Setup: 40 scripted greedy exchanges; min and half interleaved, 2 rounds each, both with identical token counts. Medians are over both rounds; times are ms.
+
+| model, ctx, -n | config | forgetting turns (of 40) | dropped per forgetting turn, median (max) | turns per re-prefill | tokens prefilled | forgetting turn: prompt tok / prefill / TTFT, median | steady turns: TTFT median (n per run) | TTFT median after the fill | TTFT max |
+|---|---|---|---|---|---|---|---|---|---|
+| 0.5B, 2048, 160 | min | 24 | 1 (2) | 1.17 | 42,488 | 1726 / 16.2 / 16.2 | 3.7 (4) | 16.1 | 17.6 |
+| | half | 5 | 6 (7) | 5.60 | 5,640 (7.5× fewer) | 954 / 8.7 / 8.8 | 3.7 (23) | 3.7 | 8.9 |
+| 0.5B, 2048, **unlimited** | min | 21 | 1 (4) | 1.81 | 21,269 | 1064 / 9.5 / 9.6 | 3.6 (17) | 4.6 | 15.3 |
+| | half | 15 | 2 (5) | 2.53 | 11,277 (1.9× fewer) | 628 / 6.7 / 6.8 | 3.7 (23) | 3.7 | 15.2 |
+| 7B Q4_K_M, 8192, 400 | min | 19 | 1 (2) | 1.00 | 141,761 | 7394 / 583.8 / 583.8 | none (0) | 583.8 | 616.2 |
+| | half | 2 | 10.5 (11) | 9.50 | 8,774 (16× fewer) | 3910 / 292.7 / 292.9 | 19.1 (17) | 19.1 | 294.8 |
+| 7B Q4_K_M, 8192, **unlimited** | min | 28 | 1 (2) | 1.04 | 169,850 | 6086 / 474.5 / 474.6 | 18.6 (1) | 474.5 | 477.8 |
+| | half | 7 | 4 (5) | 4.14 | 26,020 (6.5× fewer) | 3699 / 273.4 / 273.6 | 17.3 (22) | 17.8 | 303.1 |
+
+All MEASURED. With the CLI default (-n unlimited), a reply reserves ctx/4, so halving leaves only a quarter of the window to grow into. The measured result: 7B goes from a re-prefill on every turn (1.04) to one every 4.14 turns, with 6.5× fewer tokens prefilled (Shady estimated 4–5). 0.5B gains less, 1.81 → 2.53 and 1.9× fewer tokens (his estimate 2.7). Its greedy unlimited replies run long, ~1000 tokens, so even min forgets half the window at a time. The forgetting turns are where TTFT is paid: under half they cost about half of min's (273.6 vs 474.6 ms on 7B unlimited) and come 4× less often. The TTFT max is the same order under both configs, because a single forgetting turn sets it.
+
+What that means at 32k (ESTIMATED from the measured 8k rows above): with -n 400, a forgetting turn under min re-prefilled a median of 7394 of 8192 positions (90 %, 7B 4090 row), and under half 3910 (48 %). At a 32k window that's ~29.5k vs ~15.6k tokens, and under min it happens on nearly every turn. With -n unlimited (the CLI default), a reply reserves ctx/4, so min keeps at most ~24k of 32k (the roadmap's figure) and re-prefills that on nearly every turn. Half keeps at most 16k, leaving ctx/4 = 8k for later turns to append into before the next forget. Measured under the defaults (-n unlimited, round 2 table): 4.14 turns per re-prefill on 7B at 8192, 2.53 on 0.5B at 2048.
 
 ## What didn't work / notes
 - Counting the reply budget (`want`) in the target was rejected. With unlimited replies `want` is ctx/4, so
