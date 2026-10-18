@@ -53,10 +53,10 @@ use, so it wasn't done.
 | gate | result | job |
 |---|---|---|
 | stress x10, 8 pool threads + 64 spinning (pod3), #80's code (before) | 10/10 failed (freed 4.0-7.9 s > 2.8 s) | 1018-044914-c136 |
-| same stress x10, this branch | pending | 1018-052924-0f34 |
-| stress x10, 1 pool thread + 64 spinning, this branch (jade) | pending | 1018-052926-f051 |
+| same stress x10, this branch | **0/10 failed** (pod3) | 1018-052924-0f34 |
+| stress x10, 1 pool thread + 64 spinning, this branch (jade) | **0/10 failed** | 1018-052926-f051 |
 | same 1-thread stress on pod3: main (before #80) / #80 | 10/10 failed "never filled" / 0/10 failed | 1018-031600-534b / 1018-032125-50cf |
-| the test unstressed, release and debug builds (jade) | pending | 1018-053349-8b2b / 1018-053350-bd00 |
+| the test unstressed, release and debug builds (jade) | **pass / pass** | 1018-053349-8b2b / 1018-053350-bd00 |
 | clippy -D warnings (bin + tests), rustfmt | clean | local |
 
 ## What didn't work / wasn't done
