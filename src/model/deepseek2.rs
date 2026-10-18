@@ -1002,7 +1002,7 @@ pub(crate) fn info_lines(m: &Model) -> Option<Vec<String>> {
     let yarn = match crate::rope::yarn(m) {
         None => "no scaling".to_string(),
         Some(y) => format!(
-            "yarn x{} (orig {}, beta {}/{}, log_mul {})",
+            "yarn x{} (orig {}, beta {}/{}, log_mul {:.4})",
             y.factor,
             y.orig,
             y.beta_fast,
@@ -1023,7 +1023,7 @@ pub(crate) fn info_lines(m: &Model) -> Option<Vec<String>> {
         .unwrap_or(1.0);
     let norm = flag(m, "expert_weights_norm").unwrap_or(false);
     v.push(format!(
-        "routing: {}{}, top-{} of {}, {}, x{scale} | shared {} (width {}) | dense lead {} (ffn {})",
+        "routing: {}{}, top-{} of {}, {}, x{scale:.4} | shared {} (width {}) | dense lead {} (ffn {})",
         if sig { "sigmoid" } else { "softmax" },
         if bias { " + exp_probs_b" } else { "" },
         n("expert_used_count"),

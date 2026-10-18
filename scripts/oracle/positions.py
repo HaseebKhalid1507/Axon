@@ -8,7 +8,12 @@ same token ids, and their agreement: a teacher-forced version of llama_logits.py
     positions.py dump-axon  --log LOG --model M --seqs S.json ... (the output of a pod job, see `env`)
     positions.py env --model M --seqs S.json [-n 64] --out E.sh   (AXON_LOGITS_IDS/ALL for such a job)
     positions.py dump-llama --server BIN --model M --seqs S.json [-k 20] [-n 64] --out L.json [-- server flags]
+    positions.py dump-lib --lib llama_positions --model M --seqs S.json [-k 20] [-n 64] --out L.json -- NGL CPU_MOE THREADS
     positions.py compare A.json B.json [C.json ...]
+
+dump-lib (preferred): llama.cpp through libllama (llama_positions.cpp: one batch per sequence, the logits of
+every position). dump-llama (llama-server) loses positions whose greedy token ends inside a UTF-8 character
+(the server reports no probabilities for it).
 
 seqs: the token ids of each text by Hugging Face's tokenizer (axon's kimi-k2 is
 checked against it in the tests), cut to their first `-n` + 32 tokens. Both sides then see exactly these ids: axon through
@@ -40,10 +45,12 @@ TEXTS = [
 
 
 def axon_run(axon, model, prompt, k, extra, env):
-    out = subprocess.run([axon, "logits", model, prompt, "-k", str(k)] + extra,
-                         capture_output=True, text=True, check=True,
-                         env=dict(os.environ, AXON_LOGITS_DIGITS="6", **env)).stdout
-    return out
+    r = subprocess.run([axon, "logits", model, prompt, "-k", str(k)] + extra,
+                       capture_output=True, text=True,
+                       env=dict(os.environ, AXON_LOGITS_DIGITS="6", **env))
+    if r.returncode != 0:
+        sys.exit(f"axon logits exited {r.returncode}: {r.stderr[-2000:]}")
+    return r.stdout
 
 
 def parse_top(lines, k):
@@ -140,11 +147,19 @@ def dump_llama(a):
             n = min(a.n, len(ids))
             tops = []
             for p in range(len(ids) - n, len(ids)):
-                body = json.dumps({"prompt": ids[: p + 1], "n_predict": 1, "n_probs": a.k,
-                                   "temperature": 0, "cache_prompt": True,
-                                   "ignore_eos": True}).encode()
-                req = urllib.request.Request(url + "/completion", body, {"Content-Type": "application/json"})
-                r = json.load(urllib.request.urlopen(req, timeout=600))
+                # A token that ends inside a UTF-8 character gets no
+                # probabilities until a later one completes it (server-context.cpp:
+                # add_token only on complete text): predict up to 4, keep the first.
+                for npred in (1, 2, 3, 4):
+                    body = json.dumps({"prompt": ids[: p + 1], "n_predict": npred, "n_probs": a.k,
+                                       "temperature": 0, "cache_prompt": True}).encode()
+                    req = urllib.request.Request(url + "/completion", body,
+                                                 {"Content-Type": "application/json"})
+                    r = json.load(urllib.request.urlopen(req, timeout=600))
+                    if r.get("completion_probabilities"):
+                        break
+                else:
+                    sys.exit(f"no probabilities at seq {len(res)} pos {p}: {json.dumps(r)[:2000]}")
                 cp = r["completion_probabilities"][0]
                 tops.append([[t["id"], t["logprob"]] for t in cp["top_logprobs"]][: a.k])
             res.append({"ids": ids, "first": len(ids) - n, "tops": tops})
@@ -152,6 +167,19 @@ def dump_llama(a):
         json.dump(res, open(a.out, "w"))
     finally:
         srv.terminate(); srv.wait()
+
+
+def dump_lib(a):
+    """llama.cpp through libllama (llama_positions.cpp): one batch per sequence, every position's logits."""
+    seqs = json.load(open(a.seqs))
+    txt = a.out + ".seqs.txt"
+    with open(txt, "w") as f:
+        for s in seqs:
+            f.write(",".join(map(str, s["ids"])) + "\n")
+    ngl, moe, th = (a.extra + ["0", "0", "8"])[:3]
+    out = subprocess.run([a.lib, a.model, txt, str(a.k), str(a.n), ngl, moe, th],
+                         capture_output=True, text=True, check=True).stdout
+    json.dump(parse_axon(out, seqs, a.n, a.k), open(a.out, "w"))
 
 
 def kl_top(pa, pb):
@@ -196,9 +224,15 @@ def main():
         d.add_argument("--model", required=True); d.add_argument("--seqs", required=True)
         d.add_argument("-k", type=int, default=20); d.add_argument("-n", type=int, default=64)
         d.add_argument("--out", required=True); d.add_argument("extra", nargs="*")
+    d = sub.add_parser("dump-lib")
+    d.add_argument("--lib", required=True, help="llama_positions binary")
+    d.add_argument("--model", required=True); d.add_argument("--seqs", required=True)
+    d.add_argument("-k", type=int, default=20); d.add_argument("-n", type=int, default=64)
+    d.add_argument("--out", required=True)
+    d.add_argument("extra", nargs="*", help="N_GPU_LAYERS CPU_MOE THREADS")
     c = sub.add_parser("compare"); c.add_argument("files", nargs="+")
     a = ap.parse_args()
-    {"seqs": seqs, "dump-axon": dump_axon, "dump-llama": dump_llama, "env": env_for}.get(a.cmd, lambda a: compare(a.files))(a)
+    {"seqs": seqs, "dump-axon": dump_axon, "dump-llama": dump_llama, "env": env_for, "dump-lib": dump_lib}.get(a.cmd, lambda a: compare(a.files))(a)
 
 
 if __name__ == "__main__":

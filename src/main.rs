@@ -854,8 +854,8 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
                 net.feed_batch(&ids[..first], 0, &mut cache);
             }
             println!("prompt ids ({}): {:?}", ids.len(), ids);
-            for p in first..ids.len() {
-                last = net.forward(ids[p], p, &mut cache);
+            for (p, &t) in ids.iter().enumerate().skip(first) {
+                last = net.forward(t, p, &mut cache);
                 println!("position {p}:");
                 print_top(&tok, &last, top_k, net.vocab());
             }
