@@ -31,6 +31,24 @@ Five small fixes from the #67 review (MERGE 9/10). No output change: greedy bits
    block. No README or doc quotes either line (grep: only `identity.rs`'s `cuda+cpu experts`, which is the identity
    string and isn't changed).
 
+## Review round 2 (Shady, #76: SHIP-AFTER-FIXES 8/10)
+
+- **The dense decode step on a MoE model returns an Err too.** `CudaQwen2::step_with` and `profile` still reached
+  `LayerW::dense()` and panicked. With CUDA graphs on, the panic fired inside `gpu.capture()` and left the stream
+  in capture mode. Both now return `Err("a mixture-of-experts model's decode step needs its experts (crate::moe:
+  moe_step)")` first, before `host_params` is written or anything is captured. Test
+  `cuda::qwen2::moe::tests::moe_gpu_dense_step_is_an_err` (4x0.6B, graphs forced on): `step` and `profile` both
+  return the Err, then a `moe_step` + `moe_pick` on the same cache runs (zero experts, since only the stream's
+  health is under test).
+- `pass_hooked`'s check is now `self.moe.is_some()` (set exactly when the layers are `Ffn::Moe`), with no scan
+  over the layers.
+- `moe_step`'s last segment: dropped the `head != Head::No` condition. After the Argmax-only assert it was always
+  true.
+- `moe_gpu_step_refuses_head_no` downcasts the panic payload and checks that it names `moe_step`, so an unrelated
+  panic doesn't pass.
+- Stack note: feat/gpt-oss renamed `expert_held` → `expert_arena` in `ram_need`, so this PR's `src/model/moe.rs`
+  hunk will conflict there when one of them rebases on the other.
+
 ## RAM need, before → after (from `axon info` sizes; formula = `ram_need`, headroom 3 << 29 B = 1.61 GB)
 
 `axon info` on bella (job 1018-013250-dfed): Pruned-2B experts r8 1.10 GB, non-expert 465,609,728 B; the 30B

@@ -346,7 +346,7 @@ impl<'g> CudaQwen2<'g> {
                     if seg < n {
                         self.enqueue_attn(c, seg, params, cmb64, on)?;
                         self.moe_route(mf, mb, seg, c.x.arg(), 1)?;
-                    } else if head != Head::No {
+                    } else {
                         self.enqueue_head(c, head, on)?;
                     }
                 }
@@ -496,5 +496,33 @@ mod tests {
             &mut |_| Ok(()),
         );
         assert!(e.is_err_and(|e| e.contains("mixture-of-experts")));
+    }
+
+    /// The dense decode step (`step`, `profile`) on a MoE model is an Err
+    /// before anything is written or captured: with graphs on, the stream
+    /// is not left in capture mode, so a `moe_step` after it runs.
+    #[test]
+    fn moe_gpu_dense_step_is_an_err() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let Some(m) = crate::testutil::moe_model(true) else {
+            return;
+        };
+        let km = Kernels::module_for(&g, &m).unwrap();
+        let mm = Kernels::moe_module(&g).unwrap();
+        let mut net = CudaQwen2::with_kv_moe(&g, &km, &m, 256, CacheKv::F16, false, false).unwrap();
+        net.graphs = true;
+        let mut c = net.try_cache(256).unwrap();
+        let moe_err = |r: Result<(), String>| r.is_err_and(|e| e.contains("mixture-of-experts"));
+        assert!(moe_err(net.step(&mut c, Input::Token(1), 0, true)));
+        assert!(moe_err(net.profile(&mut c, 1, 0).map(|_| ())));
+        let mf = MoeFns::new(&mm).unwrap();
+        let mut mb = net.moe_bufs(CudaQwen2::batch_max(&c)).unwrap();
+        // Zero experts: only the stream's health is under test.
+        let mut ex = |_: usize, _: &[f32], _: &[i32], _: &[f32], y: &mut [f32]| y.fill(0.0);
+        net.moe_step(&mf, &mut c, &mut mb, 1, 0, Head::Argmax, &mut ex)
+            .unwrap();
+        assert!((net.moe_pick(&mut c).unwrap() as usize) < net.vocab);
     }
 }

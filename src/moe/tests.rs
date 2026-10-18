@@ -335,7 +335,13 @@ fn moe_gpu_step_refuses_head_no() {
         net.gpu
             .moe_step(&net.mf, &mut c.c, &mut c.mb, 1, 0, Head::No, &mut ex)
     }));
-    assert!(r.is_err());
+    let p = r.expect_err("Head::No must panic");
+    let msg = p
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| p.downcast_ref::<&str>().copied())
+        .unwrap_or("");
+    assert!(msg.contains("moe_step"), "{msg}");
 }
 
 /// A MoE model through `Backend::new` on the GPU: the MoE backend (no

@@ -861,7 +861,7 @@ impl<'g> CudaQwen2<'g> {
         on: &mut dyn FnMut(&'static str) -> Result<(), String>,
         mut moe: Option<&mut MoeHook>,
     ) -> Result<(), String> {
-        if moe.is_none() && self.layers.iter().any(|l| matches!(l.ffn, Ffn::Moe { .. })) {
+        if moe.is_none() && self.moe.is_some() {
             return Err(MOE_DENSE_PASS.into());
         }
         let nb = input.len(self.dim);
