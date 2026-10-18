@@ -139,3 +139,22 @@ of them, and `Conn::path` records the parsed head's path so the pre-routing erro
 Tests: `error_body_shape_follows_the_path` and `serve_ollama_error_shapes` (405 with Allow,
 404, 413, 400, and 401 with and without a body; OpenAI's shape kept elsewhere). The fuzzer
 gained `ollama:unknown-route` and `ollama:oversize`.
+
+## Final gates (head 61bd403, binaries v7; main 5a73f63, merge-tree clean)
+
+| gate | result | job |
+|---|---|---|
+| clippy -D warnings (bin + tests), rustfmt | clean | |
+| full release suite, --shard 3 | PASS: 565 tests, 530 passed / 0 failed / 35 ignored | group 1018-004505-465f |
+| serve:: release, CUDA (avante) | 105 passed / 0 failed / 2 ignored | 1017-224157-8a6e |
+| serve:: release, CPU (avante) | 105 / 0 / 2 | 1017-225728-455f |
+| serve:: debug-assertions, CPU (avante) | 105 / 0 / 2 | 1017-230250-1417 |
+| serve:: debug-assertions, CUDA (pod2) | 105 / 0 / 2 | 1018-004511-73b5 |
+| md5 gen + serve, main code (d2e8eaf; main has docs only past it) vs v7, bella | 26/26 same | 1018-004504-c452 |
+| fuzz --apis / --ops / plain, bella | 117 / 349 / 300 checks, 0 findings, rc 0 | 1017-224148-078c |
+| e2e (openai-python Responses, ollama-python, greedy identical on 4 routes), Qwen3-8B bella | 20 PASS / 0 FAIL | 1017-224149-4707, 1018-004504-4346 |
+| harness, Qwen3-8B bella | codex exec (responses provider) 4817; pi openai-responses 4817; opencode --standalone + ollama-ai-provider-v2 read hello.txt, 4817; ollama CLI list/show/run OK; codex --oss (ollama provider) tool loop completed (ran `hexdump -n 16 hello.txt`) but the model misread the answer this run (sampled thinking; 4817 on the h1 and v6 runs) | 1018-004504-4346 (earlier 1017-191715-c5e3, 1017-172755-48ac) |
+
+Earlier heads: full release suite on a6a773b 528 passed / 0 failed / 35 ignored (group
+1017-191735-7624); jade runs 628e/dbbf never started (rc 125, jade's free-RAM guard), redone on
+avante.
