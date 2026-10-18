@@ -52,6 +52,30 @@ pub(super) struct Moe<'a> {
     pub(super) gate: Vec<Weight<'a>>,
     pub(super) up: Vec<Weight<'a>>,
     pub(super) down: Vec<Weight<'a>>,
+    /// How router logits become selection scores and weights (`Gate`).
+    pub(super) gate_fn: Gate,
+}
+
+/// A router's rule (llama.cpp build_moe_ffn): probabilities by softmax or
+/// sigmoid; experts selected by probability plus `bias` (DeepSeek V3's
+/// `exp_probs_b`: selection only, the weights stay unbiased); the selected
+/// probabilities renormalized by their sum if `norm`, then times `scale`
+/// (after the renorm). qwen3moe: softmax, no bias, norm, scale 1.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Gate {
+    pub sigmoid: bool,
+    pub bias: Option<Vec<f32>>,
+    pub norm: bool,
+    pub scale: f32,
+}
+
+impl Gate {
+    pub(super) const SOFTMAX_NORM: Gate = Gate {
+        sigmoid: false,
+        bias: None,
+        norm: true,
+        scale: 1.0,
+    };
 }
 
 /// The MoE hyperparameters of a model (`qwen3moe.*`), None for a dense one.
@@ -62,8 +86,10 @@ pub(crate) struct MoeDims {
     pub ffn: usize,
 }
 
+/// A model with experts: qwen3moe, or deepseek2 (its first
+/// `leading_dense_block_count` layers dense, `deepseek2.rs`).
 pub(crate) fn is_moe(m: &Model) -> bool {
-    m.arch == "qwen3moe"
+    m.arch == "qwen3moe" || m.arch == "deepseek2"
 }
 
 pub(crate) fn moe_dims(m: &Model) -> Option<MoeDims> {
@@ -111,8 +137,11 @@ pub(crate) struct MoeInfo {
     /// k experts of every layer: what one token reads.
     pub active_bytes: u64,
     pub active_held: u64,
-    /// Everything else (attention, routers, norms, embedding, head).
+    /// Everything else (attention, routers, norms, embedding, head;
+    /// deepseek2's dense lead layers and shared experts).
     pub dense_bytes: u64,
+    /// No GPU placement yet (deepseek2).
+    pub cpu_only: bool,
 }
 
 impl MoeInfo {
@@ -132,6 +161,7 @@ impl MoeInfo {
             active_bytes: 0,
             active_held: 0,
             dense_bytes: 0,
+            cpu_only: m.arch == "deepseek2",
         };
         for t in &m.tensors {
             if EXPS.iter().any(|s| t.name.ends_with(s)) && t.dims.len() >= 3 && t.dims[2] > 0 {
@@ -153,8 +183,7 @@ impl MoeInfo {
         let d = self.dims;
         [
             format!(
-                "moe: {} experts, top-{}, expert ffn {}, {} shared | --device cuda: attention and \
-                 routers on the GPU, experts on the CPU",
+                "moe: {} experts, top-{}, expert ffn {}, {} shared | {}",
                 d.n_expert,
                 d.k,
                 d.ffn,
@@ -162,6 +191,11 @@ impl MoeInfo {
                     "none".to_string()
                 } else {
                     self.shared.to_string()
+                },
+                if self.cpu_only {
+                    "CPU only (--device cpu)"
+                } else {
+                    "--device cuda: attention and routers on the GPU, experts on the CPU"
                 }
             ),
             format!(
@@ -233,7 +267,7 @@ pub(crate) fn gpu_refusal(m: &Model) -> String {
 
 /// Largest multiple of `align` that is at most `target` (at least `align`)
 /// and divides `n`; `align` itself if none does.
-fn chunk_dividing(n: usize, target: usize, align: usize) -> usize {
+pub(super) fn chunk_dividing(n: usize, target: usize, align: usize) -> usize {
     let mut c = target.max(align).min(n) / align * align;
     while c > align && !n.is_multiple_of(c) {
         c -= align;
@@ -265,6 +299,7 @@ impl<'a> Moe<'a> {
         gate: Vec<Weight<'a>>,
         up: Vec<Weight<'a>>,
         down: Vec<Weight<'a>>,
+        gate_fn: Gate,
     ) -> Moe<'a> {
         let n = dims.n_expert;
         let dim = router.len() / n;
@@ -282,6 +317,7 @@ impl<'a> Moe<'a> {
             gate,
             up,
             down,
+            gate_fn,
         }
     }
 
@@ -316,11 +352,14 @@ impl<'a> Moe<'a> {
         )
     }
 
-    /// The token's experts in rank order and their weights: softmax over the
-    /// router logits of `h`, the top k (higher probability first, the lower
-    /// index on ties), renormalized by their sum (at least `W_SUM_MIN`).
+    /// The token's experts in rank order and their weights: probabilities
+    /// of the router logits of `h` (`Gate`: softmax, or sigmoid), the top k
+    /// by probability (+ the selection bias, if any; the lower index on
+    /// ties), their probabilities renormalized by their sum (at least
+    /// `W_SUM_MIN`) if the gate says so, then times its scale.
     pub(super) fn route(&self, h: &[f32], ids: &mut [usize], w: &mut [f32]) {
         let n = self.n_expert;
+        let g = &self.gate_fn;
         let mut p = vec![0f32; n];
         // logit_e = sum over c ascending of W[e][c] * h[c], multiply then
         // add (elementwise across e: the vector code gives the same bits).
@@ -330,20 +369,31 @@ impl<'a> Moe<'a> {
                 *l += wv * x;
             }
         }
-        let max = p.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-        let mut sum = 0f32;
-        for v in p.iter_mut() {
-            *v = exp(*v - max);
-            sum += *v;
+        if g.sigmoid {
+            // ggml_sigmoid: 1 / (1 + exp(-x)).
+            for v in p.iter_mut() {
+                *v = 1.0 / (1.0 + exp(-*v));
+            }
+        } else {
+            let max = p.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+            let mut sum = 0f32;
+            for v in p.iter_mut() {
+                *v = exp(*v - max);
+                sum += *v;
+            }
+            for v in p.iter_mut() {
+                *v /= sum;
+            }
         }
-        for v in p.iter_mut() {
-            *v /= sum;
-        }
+        let sel: std::borrow::Cow<[f32]> = match &g.bias {
+            None => std::borrow::Cow::Borrowed(&p),
+            Some(b) => std::borrow::Cow::Owned(p.iter().zip(b).map(|(&x, &y)| x + y).collect()),
+        };
         let mut taken = vec![false; n];
         for (id, wi) in ids.iter_mut().zip(w.iter_mut()) {
             let mut best = usize::MAX;
             for e in 0..n {
-                if !taken[e] && (best == usize::MAX || p[e] > p[best]) {
+                if !taken[e] && (best == usize::MAX || sel[e] > sel[best]) {
                     best = e;
                 }
             }
@@ -351,13 +401,20 @@ impl<'a> Moe<'a> {
             *id = best;
             *wi = p[best];
         }
-        let mut s = 0f32;
-        for &v in w.iter() {
-            s += v;
+        if g.norm {
+            let mut s = 0f32;
+            for &v in w.iter() {
+                s += v;
+            }
+            let s = s.max(W_SUM_MIN);
+            for v in w.iter_mut() {
+                *v /= s;
+            }
         }
-        let s = s.max(W_SUM_MIN);
-        for v in w.iter_mut() {
-            *v /= s;
+        if g.scale != 1.0 {
+            for v in w.iter_mut() {
+                *v *= g.scale;
+            }
         }
     }
 }

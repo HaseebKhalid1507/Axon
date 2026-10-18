@@ -25,6 +25,30 @@ const QWEN2_PATTERN: &str = r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]
 // Llama 3's (llama.cpp LLAMA_VOCAB_PRE_TYPE_LLAMA3): numbers in runs of up to 3 digits.
 const LLAMA3_PATTERN: &str = r"(?:'[sS]|'[tT]|'[rR][eE]|'[vV][eE]|'[mM]|'[lL][lL]|'[dD])|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
+// Kimi K2 / Moonlight (`kimi-k2`): the published pattern verbatim
+// (tokenization_kimi.py / tokenization_moonshot.py `pat_str`), which the HF
+// tokenizer runs through tiktoken, itself fancy-regex: so the same engine,
+// class intersections and `(?i:...)` case folding as the reference.
+// (llama.cpp hand-codes a splitter for it instead: unicode.cpp
+// unicode_regex_split_custom_kimi_k2.)
+const KIMI_K2_PATTERN: &str = concat!(
+    r"[\p{Han}]+",
+    r"|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+(?i:'s|'t|'re|'ve|'m|'ll|'d)?",
+    r"|[^\r\n\p{L}\p{N}]?[\p{Lu}\p{Lt}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]+[\p{Ll}\p{Lm}\p{Lo}\p{M}&&[^\p{Han}]]*(?i:'s|'t|'re|'ve|'m|'ll|'d)?",
+    r"|\p{N}{1,3}",
+    r"| ?[^\s\p{L}\p{N}]+[\r\n]*",
+    r"|\s*[\r\n]+",
+    r"|\s+(?!\S)",
+    r"|\s+",
+);
+
+// DeepSeek V3 / V3.1 / R1 (`deepseek-v3`): three splits in sequence, each
+// keeping matches and the text between them as pieces (HF Split
+// "isolated"; llama.cpp LLAMA_VOCAB_PRE_TYPE_DEEPSEEK3_LLM): digit runs of
+// up to 3, runs of CJK ideographs and kana, then the main pattern.
+const DEEPSEEK3_PRE: [&str; 2] = [r"\p{N}{1,3}", r"[一-龥぀-ゟ゠-ヿ]+"];
+const DEEPSEEK3_PATTERN: &str = r"[!\x22#$%&'()*+,\-./:;<=>?@\[\\\]^_`{|}~][A-Za-z]+|[^\r\n\p{L}\p{P}\p{S}]?[\p{L}\p{M}]+| ?[\p{P}\p{S}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+
 /// Pre-tokenizers (`tokenizer.ggml.pre`) this tokenizer implements.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Pre {
@@ -36,6 +60,11 @@ pub enum Pre {
     /// Not a pre-tokenizer: a SentencePiece (`llama`) vocabulary, which has
     /// none; text goes to the merge loop whole.
     Spm,
+    /// `kimi-k2` (Kimi K2, Moonlight): `KIMI_K2_PATTERN`; a pre-token that
+    /// is a whole vocabulary entry is that token (tiktoken's rule).
+    KimiK2,
+    /// `deepseek-v3`: `DEEPSEEK3_PRE` then `DEEPSEEK3_PATTERN`.
+    DeepSeek3,
 }
 
 /// The vocabulary's tokenizer model and pre-tokenizer, if supported: a
@@ -59,8 +88,10 @@ pub fn pre_of(m: &Model) -> Result<Pre, String> {
         Some(Val::Str(s)) if ["llama-bpe", "llama3", "llama-v3"].contains(&s.as_str()) => {
             Ok(Pre::Llama3)
         }
+        Some(Val::Str(s)) if s == "kimi-k2" => Ok(Pre::KimiK2),
+        Some(Val::Str(s)) if s == "deepseek-v3" => Ok(Pre::DeepSeek3),
         Some(v) => Err(format!(
-            "pre-tokenizer {v} is not supported (qwen2, llama-bpe)"
+            "pre-tokenizer {v} is not supported (qwen2, llama-bpe, kimi-k2, deepseek-v3)"
         )),
     }
 }
@@ -235,6 +266,9 @@ pub struct Tokenizer {
     user_specials: Vec<(String, u32)>,
     /// The pre-tokenizer (None for SentencePiece).
     re: Option<Regex>,
+    /// Splits applied before `re`, in order, each to every piece of the
+    /// one before (deepseek-v3); empty for the others.
+    pre_split: Vec<Regex>,
     /// SentencePiece merge data; None for byte-level BPE.
     spm: Option<Spm>,
     /// A pre-token that is a whole vocabulary entry becomes that token
@@ -246,6 +280,40 @@ pub struct Tokenizer {
 }
 
 static BYTE_ENC: std::sync::LazyLock<[char; 256]> = std::sync::LazyLock::new(bytes_to_unicode);
+
+/// GPT-2's byte -> char table (`bytes_to_unicode`).
+#[cfg(test)]
+pub(crate) fn byte_encoder() -> &'static [char; 256] {
+    &BYTE_ENC
+}
+
+/// `text` cut by each regex of `res` in turn: every piece of the previous
+/// step into its matches and the (non-empty) text between them, in order
+/// (HF's Split with "isolated" behavior, llama.cpp's unicode_regex_split).
+fn split_seq<'t>(res: &[Regex], text: &'t str) -> Vec<&'t str> {
+    let mut pieces = vec![text];
+    for re in res {
+        let mut next = Vec::with_capacity(pieces.len());
+        for p in pieces {
+            let mut last = 0;
+            for m in re.find_iter(p) {
+                let Ok(m) = m else { break };
+                if m.start() > last {
+                    next.push(&p[last..m.start()]);
+                }
+                if m.end() > m.start() {
+                    next.push(m.as_str());
+                }
+                last = m.end();
+            }
+            if last < p.len() {
+                next.push(&p[last..]);
+            }
+        }
+        pieces = next;
+    }
+    pieces
+}
 
 /// GPT-2 bytes_to_unicode: printable bytes map to themselves, the rest to U+0100.. in order.
 fn bytes_to_unicode() -> [char; 256] {
@@ -360,6 +428,8 @@ impl Tokenizer {
                 match pre {
                     Pre::Qwen2 => Some(QWEN2_PATTERN),
                     Pre::Llama3 => Some(LLAMA3_PATTERN),
+                    Pre::KimiK2 => Some(KIMI_K2_PATTERN),
+                    Pre::DeepSeek3 => Some(DEEPSEEK3_PATTERN),
                     Pre::Spm => None,
                 }
                 .map(|p| Regex::new(p).expect("pre-tokenizer regex"))
@@ -434,10 +504,17 @@ impl Tokenizer {
             .map(|v| val_i64(v) as u32)
             .unwrap_or(151645);
         // llama.cpp: add_bos_token if the file says, else on for Llama 3's
-        // pre-tokenizer and SentencePiece (off for qwen2's).
+        // pre-tokenizer and SentencePiece (off for the other BPE ones).
         let add_bos = match meta(m, "tokenizer.ggml.add_bos_token") {
             Some(v) => val_i64(v) != 0,
-            None => pre != Pre::Qwen2,
+            None => matches!(pre, Pre::Llama3 | Pre::Spm),
+        };
+        let pre_split = match pre {
+            Pre::DeepSeek3 => DEEPSEEK3_PRE
+                .iter()
+                .map(|p| Regex::new(p).expect("pre-tokenizer regex"))
+                .collect(),
+            _ => Vec::new(),
         };
         let bos = meta(m, "tokenizer.ggml.bos_token_id")
             .map(|v| val_i64(v) as u32)
@@ -452,9 +529,10 @@ impl Tokenizer {
             byte_decoder,
             specials,
             re,
+            pre_split,
             user_specials,
             spm,
-            ignore_merges: pre == Pre::Llama3,
+            ignore_merges: matches!(pre, Pre::Llama3 | Pre::KimiK2),
             eos,
             bos,
         }
@@ -462,6 +540,11 @@ impl Tokenizer {
 
     pub fn eos(&self) -> u32 {
         self.eos
+    }
+
+    /// Tokens in the vocabulary.
+    pub fn vocab_len(&self) -> usize {
+        self.tokens.len()
     }
 
     /// Tokens that end generation: `eos`, and Llama 3's end-of-turn /
@@ -575,6 +658,18 @@ impl Tokenizer {
             }
             return;
         };
+        if !self.pre_split.is_empty() {
+            for piece in split_seq(&self.pre_split, text) {
+                self.split_bpe(re, piece, out);
+            }
+            return;
+        }
+        self.split_bpe(re, text, out);
+    }
+
+    /// `re`'s pieces of `text` (matches and the text between), each
+    /// through `bpe_word`.
+    fn split_bpe(&self, re: &Regex, text: &str, out: &mut Vec<u32>) {
         let mut last = 0;
         for m in re.find_iter(text) {
             match m {

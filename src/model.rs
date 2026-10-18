@@ -254,10 +254,13 @@ pub struct Qwen2<'a> {
     embd: &'a [u8],
     /// Empty, and `output` None, in a model of the first layers only
     /// (`new_layers`): the output head is another backend's.
-    output_norm: Vec<f32>,
+    /// (A boxed slice, as `freqs`.)
+    output_norm: Box<[f32]>,
     output: Option<Weight<'a>>,
-    /// Layers 0..layers.len() (all n_layers unless `new_layers`).
+    /// Layers 0..layers.len() (all n_layers unless `new_layers`); empty
+    /// on deepseek2, whose blocks are `ds2`'s.
     layers: Vec<Layer<'a>>,
+    ds2: Option<Box<deepseek2::Ds2<'a>>>,
 }
 
 /// Keys and values of every past position, per layer.
@@ -414,10 +417,16 @@ fn load_vec(m: &Model, t: &Tensor) -> Vec<f32> {
 /// RMSNorm weights here.
 /// qwen3moe (Qwen3-30B-A3B & co.) is qwen3 with each FFN replaced by
 /// experts and a router (`moe`; on the GPU, `crate::moe`).
-pub const ARCHS: [&str; 5] = ["qwen2", "qwen3", "llama", "gemma3", "qwen3moe"];
+/// deepseek2 (DeepSeek V2/V3, Kimi K2, Moonlight: MLA attention, shared
+/// experts) is its own block (`deepseek2`), on the CPU only.
+pub const ARCHS: [&str; 6] = ["qwen2", "qwen3", "llama", "gemma3", "qwen3moe", "deepseek2"];
 
+#[path = "model/deepseek2.rs"]
+mod deepseek2;
 #[path = "model/moe.rs"]
 mod moe;
+pub(crate) use deepseek2::info_lines as deepseek2_info;
+
 pub(crate) use moe::{
     MoeDims, MoeInfo, Route as MoeRoute, check_ram as moe_check_ram,
     gpu_refusal as moe_gpu_refusal, is_moe, moe_dims,
@@ -565,9 +574,12 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
     let bad = |msg: String| std::io::Error::new(std::io::ErrorKind::InvalidData, msg);
     if !ARCHS.contains(&m.arch.as_str()) {
         return Err(bad(format!(
-            "architecture '{}' is not supported (qwen2, qwen3, llama, gemma3, qwen3moe)",
+            "architecture '{}' is not supported (qwen2, qwen3, llama, gemma3, qwen3moe, deepseek2)",
             if m.arch.is_empty() { "<none>" } else { &m.arch }
         )));
+    }
+    if m.arch == "deepseek2" {
+        return deepseek2::check(m).map(|_| ());
     }
     let need = |k: &str| -> std::io::Result<usize> {
         let key = format!("{}.{k}", m.arch);
@@ -965,6 +977,13 @@ impl<'a> Qwen2<'a> {
         if let Err(e) = check_supported(m) {
             panic!("{e}");
         }
+        if m.arch == "deepseek2" {
+            assert!(
+                !tie && !experts && keep == usize::MAX,
+                "deepseek2: the whole model on the CPU only"
+            );
+            return deepseek2::build(m, repack);
+        }
         let a = &m.arch;
         let key = |k: &str| format!("{a}.{k}");
         let need =
@@ -1117,7 +1136,14 @@ impl<'a> Qwen2<'a> {
                         ws
                     });
                     let router = vals(t("ffn_gate_inp.weight"));
-                    Ffn::Moe(Box::new(moe::Moe::new(d, router, gate, up, down)))
+                    Ffn::Moe(Box::new(moe::Moe::new(
+                        d,
+                        router,
+                        gate,
+                        up,
+                        down,
+                        moe::Gate::SOFTMAX_NORM,
+                    )))
                 }
             };
             Layer {
@@ -1168,9 +1194,10 @@ impl<'a> Qwen2<'a> {
             gemma,
             token_embd,
             embd: m.tensor_data(token_embd),
-            output_norm,
+            output_norm: output_norm.into_boxed_slice(),
             output,
             layers,
+            ds2: None,
         }
     }
 
@@ -1235,6 +1262,9 @@ impl<'a> Qwen2<'a> {
     }
 
     pub fn new_cache(&self, max_ctx: usize) -> KvCache {
+        if self.ds2.is_some() {
+            return deepseek2::new_cache(self.n_layers, self.head_dim, max_ctx);
+        }
         let kv_dim = self.n_kv_heads * self.head_dim;
         let len = max_ctx * kv_dim;
         KvCache {
@@ -1837,6 +1867,9 @@ impl<'a> Qwen2<'a> {
         start: usize,
         cache: &mut KvCache,
     ) -> Vec<Vec<f32>> {
+        if self.ds2.is_some() {
+            return self.ds2_hidden_batch(tokens, start, cache);
+        }
         let nb = tokens.len();
         assert!(nb > 0, "feed_batch: empty batch");
         assert!(
@@ -2043,6 +2076,9 @@ impl<'a> Qwen2<'a> {
     /// Every layer for one token: store its keys and values in the cache and
     /// return the final hidden state (before the output norm).
     pub(crate) fn hidden(&self, token: u32, pos: usize, cache: &mut KvCache) -> Vec<f32> {
+        if self.ds2.is_some() {
+            return self.ds2_hidden(token, pos, cache);
+        }
         assert!(
             pos < cache.max_ctx,
             "position {pos} exceeds cache size {}",
@@ -3062,6 +3098,10 @@ pub(crate) mod gemma3_tests;
 #[cfg(test)]
 #[path = "model/moe_tests.rs"]
 mod moe_tests;
+
+#[cfg(test)]
+#[path = "model/deepseek2_tests.rs"]
+pub(crate) mod deepseek2_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {

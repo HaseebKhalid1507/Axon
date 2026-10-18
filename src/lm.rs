@@ -416,6 +416,9 @@ impl<'a> Backend<'a> {
             crate::model::moe_check_ram(m)?;
             return Ok(Backend::Cpu(Qwen2::new(m)));
         }
+        if m.arch == "deepseek2" {
+            return Err("deepseek2 (MLA) runs on the CPU only so far: --device cpu".into());
+        }
         if gpu_layers == Some(0) {
             return Err("--gpu-layers 0 is --device cpu".into());
         }

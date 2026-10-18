@@ -380,6 +380,9 @@ fn run() -> std::io::Result<()> {
             println!("{l}");
         }
     }
+    for l in model::deepseek2_info(&model).unwrap_or_default() {
+        println!("{l}");
+    }
     println!("{}", cuda::summary());
     // What decides the output bits (docs/determinism.md), per placement.
     match identity::predicted(path, &model) {
@@ -591,6 +594,28 @@ fn gen_budget(prompt: usize, n: usize, trained: usize) -> Result<usize, String> 
     }
 }
 
+/// The top `k` of `logits` (id, logit, logprob, text), as `logits` prints them.
+fn print_top(tok: &tokenizer::Tokenizer, logits: &[f32], k: usize, vocab: usize) {
+    let mx = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let lse = mx + logits.iter().map(|l| (l - mx).exp()).sum::<f32>().ln();
+    println!("top-{k} of {vocab} (id, logit, logprob, text):");
+    let mut order: Vec<usize> = (0..logits.len()).collect();
+    order.sort_by(|&a, &b| logits[b].total_cmp(&logits[a]));
+    let digits = env::var("AXON_LOGITS_DIGITS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+    let (dl, dp) = digits.map_or((4, 3), |d| (d, d));
+    for &id in order.iter().take(k) {
+        println!(
+            "{:>7}  {:>10.dl$}  {:>8.dp$}  {:?}",
+            id,
+            logits[id],
+            logits[id] - lse,
+            tok.decode(&[id as u32])
+        );
+    }
+}
+
 /// `gen` and `logits` subcommands: args = [axon, cmd, model, prompt, flags...]
 fn run_lm(args: &[String]) -> std::io::Result<()> {
     use std::io::Write;
@@ -688,7 +713,25 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     let model = open_model_with(path, copy_for(device), &rargs);
     let tok = tokenizer::Tokenizer::from_gguf(&model);
 
-    let ids = tok.encode_prompt(prompt);
+    let mut ids = tok.encode_prompt(prompt);
+    // AXON_LOGITS_IDS=1,2,3: `logits` of these token ids instead of the
+    // prompt's (oracles compare on ids, never on text).
+    if let Ok(v) = env::var("AXON_LOGITS_IDS").map(|v| v.trim().to_string())
+        && cmd == "logits"
+        && !v.is_empty()
+    {
+        ids = v
+            .trim_matches(['[', ']'])
+            .split(',')
+            .map(|x| x.trim().parse::<u32>())
+            .collect::<Result<_, _>>()
+            .unwrap_or_else(|_| fail("AXON_LOGITS_IDS needs comma-separated token ids"));
+        if let Some(&bad) = ids.iter().find(|&&t| t as usize >= tok.vocab_len()) {
+            fail(&format!(
+                "AXON_LOGITS_IDS: token {bad} is past the vocabulary"
+            ));
+        }
+    }
     if ids.is_empty() {
         eprintln!("prompt encodes to zero tokens");
         cuda::settle();
@@ -778,11 +821,40 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     // token. Only the last position's logits are used, so the others skip
     // the output head (the GPU runs the last token in the final batched
     // pass, the head on its row alone: `Lm::prefill_logits`).
+    // AXON_LOGITS_ALL=N: `logits` after each of the last N positions
+    // (prefill of the rest, then one decode step each).
+    let all = env::var("AXON_LOGITS_ALL")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|_| cmd == "logits")
+        .map_or(0, |n| n.min(ids.len()));
     let t0 = Instant::now();
-    let logits = net.prefill_logits(&ids, 0, &mut cache);
+    let logits = if all > 0 {
+        let first = ids.len() - all;
+        if first > 0 {
+            net.feed_batch(&ids[..first], 0, &mut cache);
+        }
+        println!("prompt ids ({}): {:?}", ids.len(), ids);
+        let mut last = Vec::new();
+        for p in first..ids.len() {
+            last = net.forward(ids[p], p, &mut cache);
+            if p + 1 < ids.len() {
+                println!("position {p}:");
+                print_top(&tok, &last, top_k, net.vocab());
+            }
+        }
+        println!("position {}:", ids.len() - 1);
+        last
+    } else {
+        net.prefill_logits(&ids, 0, &mut cache)
+    };
     let prompt_secs = t0.elapsed().as_secs_f64();
 
     if cmd == "logits" {
+        if all > 0 {
+            print_top(&tok, &logits, top_k, net.vocab());
+            return Ok(());
+        }
         println!("prompt ids ({}): {:?}", ids.len(), ids);
         // log-softmax normaliser, so we can print logprobs comparable to Ollama's
         let mx = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
@@ -1181,7 +1253,9 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         );
     }
     // Qwen2.5's template brings a default system message, Qwen3's none.
-    let system = system.or_else(|| (model.arch == "qwen2").then(|| chat::DEFAULT_SYSTEM.into()));
+    let system = system
+        .or_else(|| (model.arch == "qwen2").then(|| chat::DEFAULT_SYSTEM.into()))
+        .or_else(|| chat::template_default_system(&model));
     let mut conv = chat::Chat::new(&net, &tok, system.as_deref(), ctx)
         .unwrap_or_else(|e| fail(&format!("{path}: {e}")));
     if no_think && !conv.thinks() {
