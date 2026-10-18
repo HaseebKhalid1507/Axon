@@ -1,4 +1,4 @@
-# `chat` forgets in halves  (PR #TBD)
+# `chat` forgets in halves  (PR #75)
 
 - Date: 2026-10-18. Branch: feat/chat-halves. Base: main 5a73f63. Status: open
 - Pick / design: roadmap Scale item 8, second half ("`chat` forgetting in halves").
@@ -29,10 +29,31 @@ near-full re-prefill. The roadmap's figure is ~24k tokens per exchange at a 32k 
 pays one re-prefill of ~half the window, and the next several turns append to a warm cache.
 
 ## How it was verified
-RESULTS_GATES
+| gate | result | job ID / log |
+|---|---|---|
+| release suite (3 shards, 4090 pods) | **PASS** 514 passed / 0 failed / 37 ignored. Shard 2 hit the CUDA ILLEGAL_ADDRESS cascade on pod1, starting in `gpu_prefill_batchings_bit_identical_q8_0_5b` (code untouched here); axon-run's retry of those 28 tests passed 28/28. All `chat::` tests pass, new and extended ones included | group 1018-003131-4eea (f872, 73e4, 90c3) |
+| debug-assertion suite (4090 pod) | pending (running) | 1018-003316-4224 |
+| md5 `gen` main 5a73f63 vs candidate, bella, cuda + cpu, 5 models × 3 prompts | pending (bella queue) | 1018-003503-003d |
+| chat md5 on bella, cuda + cpu, 0.5B `--ctx 512 --temp 0`, 16 messages: main vs `--forget-to min` (must match) | pending (bella queue) | 1018-003503-003d |
+| clippy -D warnings (bin + tests) | clean | local |
+| rustfmt --check | clean | local |
 
 ## Results
-RESULTS_BENCH
+Methodology: `chat::tests::forget_bench` / `forget_bench_7b`, ignored tests added in this PR. Each is a 40-exchange scripted greedy chat with the default Qwen system message (10 topics cycled, each message numbered). forget_to 0 (main's behaviour, through the same code path) and 0.5 run interleaved, 2 rounds, in one process on one GPU. Per turn the bench records `Reply::prompt_tokens`, the prefill time, and the TTFT, timed from the `reply()` call to the first emitted token. "Turns per re-prefill" = turns from the first forgetting turn to the end ÷ the number of forgetting turns. The counts are deterministic: both rounds gave the same ones.
+
+| run | host | model file | ctx / -n | config | forgetting turns (of 40) | turns per re-prefill | prefilled tok, 40 turns | TTFT mean / p95, all turns (ms) | TTFT mean / p95 after the window filled (ms) | job |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 0.5B | 4090 pod2, **shared** (packed) | qwen2.5-0.5b-q4_k_m.gguf | 2048 / 160 | min (main) | 24 (first at turn 13) | 1.17 | 42,488 | 24.5 / 39.7 · 22.6 / 37.7 | 31.7 / 40.9 · 29.6 / 39.2 | 1018-003138-4b40 |
+| 0.5B | 4090 pod2, **shared** (packed) | qwen2.5-0.5b-q4_k_m.gguf | 2048 / 160 | half | 5 (first at turn 13) | 5.60 | 5,640 (**7.5× fewer**) | 6.9 / 10.5 · 5.8 / 10.5 | 7.6 / 14.9 · 5.1 / 10.6 | 1018-003138-4b40 |
+| 0.5B | 4090 pod, exclusive | qwen2.5-0.5b-q4_k_m.gguf | 2048 / 160 | min / half | pending | | | | | 1018-003140-0097 |
+| 7B | 4090 pod, exclusive | Qwen2.5-7B-Instruct-Q4_K_M.gguf | 8192 / 400 | min / half | pending | | | | | 1018-012407-85c0 |
+| 7B | bella, exclusive | Qwen2.5-7B-Instruct-Q4_K_M.gguf | 8192 / 400 | min / half | pending | | | | | 1018-003141-6ad6 |
+
+All MEASURED; the TTFT cells give both rounds (r0 · r1). The 0.5B timings come from a packed pod, so treat them as a relative A/B (interleaved in one process); the exclusive reruns are pending. The token counts don't depend on the host.
+
+Commands: `axon-run --vram 2500 -- axon-test chat::tests::forget_bench --exact --ignored --nocapture`; the same with `--timing 4090`; `axon-run --timing bella|4090 --big-models --vram 9000 -- axon-test chat::tests::forget_bench_7b --exact --ignored --nocapture`.
+
+At a 32k window the same arithmetic applies: min re-prefills ~30k tokens on nearly every turn once the window is full, while half re-prefills ~16k once every several turns (ESTIMATED from the 0.5B ratio; the 7B rows above measure 8k).
 
 ## What didn't work / notes
 - Counting the reply budget (`want`) in the target was rejected. With unlimited replies `want` is ctx/4, so
