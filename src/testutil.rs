@@ -190,16 +190,20 @@ pub fn read_json(rel: &str) -> serde_json::Value {
 /// open) is a test failure, not a silent pass. Machines without one (CI)
 /// opt out explicitly with `AXON_SKIP_GPU_TESTS=1`.
 ///
-/// On cards with less than 16 GiB (a 6 GB laptop 4050, a 12 GB laptop
-/// 5070 Ti), GPU tests that load models at once run out of VRAM and fail
-/// spuriously: libtest starts one test per core, and the 3B/4B/8B tests need
-/// 3-5 GiB each. So there the calling test holds a process-wide lock until
-/// its thread ends (libtest runs each test on its own thread).
-/// `AXON_TEST_GPU_SERIAL=0|1` forces it off/on.
+/// GPU tests run one at a time: the calling test holds a process-wide lock
+/// until its thread ends (libtest runs each test on its own thread). Two
+/// reasons. On cards under 16 GiB (a 6 GB laptop 4050, a 12 GB 5070 Ti)
+/// tests that load models at once run out of VRAM. And on 24 GiB RTX 4090
+/// pods (EPYC hosts with the AMD IOMMU on), GPU tests in flight together in
+/// one process lose the whole context to CUDA_ERROR_ILLEGAL_ADDRESS when
+/// a process starts on the host (even a non-CUDA one), every later GPU test
+/// with it (docs/log/2026-10-18-cuda-concurrency.md: no fault with one GPU
+/// test at a time). `AXON_TEST_GPU_SERIAL=0` turns it off (hunting:
+/// cuda::qwen2::tests::gpu_concurrency_matrix_hunt), `=1` is the default.
 pub fn gpu() -> Option<crate::cuda::Gpu> {
     match crate::cuda::Gpu::open() {
         Ok(g) => {
-            serialize_small_gpu(&g);
+            serialize_gpu(&g);
             Some(g)
         }
         Err(e) if std::env::var_os("AXON_SKIP_GPU_TESTS").is_some() => {
@@ -212,9 +216,9 @@ pub fn gpu() -> Option<crate::cuda::Gpu> {
     }
 }
 
-/// Take the GPU test lock for the rest of this thread if the card is small
-/// (see `gpu`). Re-entrant: a thread already holding it does nothing.
-fn serialize_small_gpu(g: &crate::cuda::Gpu) {
+/// Take the GPU test lock for the rest of this thread (see `gpu`).
+/// Re-entrant: a thread already holding it does nothing.
+fn serialize_gpu(g: &crate::cuda::Gpu) {
     use std::cell::RefCell;
     use std::sync::{Mutex, MutexGuard, OnceLock};
     static LOCK: Mutex<()> = Mutex::new(());
@@ -222,11 +226,7 @@ fn serialize_small_gpu(g: &crate::cuda::Gpu) {
     thread_local!(static HELD: RefCell<Option<MutexGuard<'static, ()>>> = const { RefCell::new(None) });
     let on = *ON.get_or_init(|| {
         let total = g.info().map_or(u64::MAX, |i| i.total_bytes);
-        let on = match std::env::var("AXON_TEST_GPU_SERIAL").as_deref() {
-            Ok("0") => false,
-            Ok("1") => true,
-            _ => total < 16 << 30,
-        };
+        let on = std::env::var("AXON_TEST_GPU_SERIAL").as_deref() != Ok("0");
         if on {
             // Straight to stderr: libtest captures eprintln! inside tests.
             use std::io::Write;
@@ -246,6 +246,42 @@ fn serialize_small_gpu(g: &crate::cuda::Gpu) {
             }
         });
     }
+}
+
+/// Two GPU tests never hold the GPU at once, whatever the card (unless
+/// AXON_TEST_GPU_SERIAL=0): the second waits for the first's thread to end.
+#[test]
+fn gpu_tests_never_overlap() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
+    if std::env::var("AXON_TEST_GPU_SERIAL").as_deref() == Ok("0") {
+        return;
+    }
+    let (held, first_in) = (AtomicBool::new(false), AtomicBool::new(false));
+    std::thread::scope(|s| {
+        s.spawn(|| {
+            let Some(_g) = gpu() else {
+                first_in.store(true, Ordering::SeqCst);
+                return;
+            };
+            held.store(true, Ordering::SeqCst);
+            first_in.store(true, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(300));
+            held.store(false, Ordering::SeqCst);
+            // The lock goes when this thread ends, just after.
+        });
+        while !first_in.load(Ordering::SeqCst) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        s.spawn(|| {
+            if gpu().is_some() {
+                assert!(
+                    !held.load(Ordering::SeqCst),
+                    "a second GPU test got the GPU while the first held it"
+                );
+            }
+        });
+    });
 }
 
 #[test]
