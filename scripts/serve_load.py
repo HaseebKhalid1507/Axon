@@ -44,7 +44,7 @@ def stream(url, body, timeout=900):
     r = c.getresponse()
     if r.status != 200:
         raise RuntimeError(f'HTTP {r.status}: {r.read()[:300]!r}')
-    times, text, usage, finish = [], [], None, None
+    times, text, usage, finish, done = [], [], None, None, False
     buf = b''
     while True:
         chunk = r.read1(65536) if hasattr(r, 'read1') else r.read(1)
@@ -58,6 +58,7 @@ def stream(url, body, timeout=900):
                     continue
                 d = line[6:]
                 if d == b'[DONE]':
+                    done = True
                     continue
                 j = json.loads(d)
                 if j.get('usage'):
@@ -73,6 +74,9 @@ def stream(url, body, timeout=900):
                     if ch.get('finish_reason'):
                         finish = ch['finish_reason']
     c.close()
+    if not done or usage is None:
+        # The server died or cut the stream: never a 200's worth of tokens.
+        raise RuntimeError(f'stream cut after {len(times)} chunks (no [DONE] / usage)')
     return t0, times, ''.join(text), usage, finish
 
 
@@ -145,6 +149,8 @@ def load(url, o):
         'per_stream_tok_s_p50': round(statistics.median(pst), 1) if pst else None,
     }
     print(json.dumps(out), flush=True)
+    if errors:
+        sys.exit(f'load: {len(errors)} requests failed or were cut: {errors[:3]}')
 
 
 IDENT = [
