@@ -1,0 +1,11 @@
+[axon-run 03:03:22] submitted 1019-030322-14bc by /home/haseeb/.cache/axon-st: /home/haseeb/.cache/axon-st/fuzz.sh /home/haseeb/.cache/axon-st/axon-fe4c3ef /home/haseeb/.cache/axon-st/runs/fuzz-fe4c3ef
+[axon-run 03:06:47] job 1019-030322-14bc -> bella: /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-st/fuzz.sh /home/haseeb/.cache/axon-st/axon-fe4c3ef /home/haseeb/.cache/axon-st/runs/fuzz-fe4c3ef
+axon-q 03:06:47 start slot 0-7: /home/haseeb/.cache/axon-st/fuzz.sh /home/haseeb/.cache/axon-st/axon-fe4c3ef /home/haseeb/.cache/axon-st/runs/fuzz-fe4c3ef
+        st-byte-30974-b'-'                       gen  refused  axon: cannot load '/home/haseeb/.cache/axon-st/runs/fuzz-fe4c3ef/st/m0308-st-byte-30974-b_-_': model.safetensors: safetensors tensor mod-l.layers.9.mlp.down_proj.weight: data_offsets [958240768, 96695
+
+309 mutants, 618 runs: ok 51, refused 567
+        data-short-1block                        gen  refused  axon: cannot load '/home/haseeb/.cache/axon-st/runs/fuzz-fe4c3ef/gguf/m1761-data-short-1block.gguf': tensor output_norm.weight: data at 5951488+485448704 (3584 bytes) runs past the end of the file (49
+
+1762 mutants, 3524 runs: ok 389, refused 3135
+FUZZ rc st=0 gguf=0
+[axon-run 03:09:34] exit 0 after 167.1s (host bella)
