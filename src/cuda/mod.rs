@@ -404,6 +404,27 @@ impl Gpu {
                 "launch of {} with {n} arguments: not its parameter count",
                 f.name
             );
+            // And each argument's size is its parameter's: a U32 where the
+            // kernel takes a pointer has the driver copy 8 bytes from a
+            // 4-byte value, so the pointer's high half is garbage. Each
+            // parameter is copied from its own address, so only that one
+            // is wrong. Sizes only: cuFuncGetParamInfo reports no types, so
+            // u32 / i32 / f32, and Ptr / U64, can't be told apart.
+            for (i, a) in args.iter().enumerate() {
+                // SAFETY: as above; i < the parameter count (checked).
+                let r = unsafe { info(f.f, i, &mut off, &mut size) };
+                check(
+                    self.d,
+                    r,
+                    &format!("cuFuncGetParamInfo {} param {i}", f.name),
+                )?;
+                assert!(
+                    size == a.size(),
+                    "launch of {}: argument {i} is {a:?}, {} bytes; the parameter has {size}",
+                    f.name,
+                    a.size()
+                );
+            }
         }
         // cuLaunchKernelEx copies each parameter from these addresses before returning.
         let mut ptrs: Vec<*mut c_void> = args.iter().map(Arg::addr).collect();
@@ -1345,6 +1366,17 @@ pub enum Arg {
 }
 
 impl Arg {
+    /// Bytes of the value (the kernel parameter's size: debug builds check
+    /// it in `Gpu::launch_raw`).
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    fn size(&self) -> usize {
+        match self {
+            Arg::Ptr(_) | Arg::U64(_) => 8,
+            Arg::U32(_) | Arg::I32(_) | Arg::F32(_) => 4,
+            Arg::Blob128(_) => 128,
+        }
+    }
+
     /// Address of the value, as cuLaunchKernel's parameter array wants it.
     fn addr(&self) -> *mut c_void {
         match self {

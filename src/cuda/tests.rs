@@ -423,6 +423,7 @@ fn engine_nvrtc(g: &Gpu) -> Result<&'static ffi::Nvrtc, String> {
 /// picks for it. Skipped without NVRTC.
 #[test]
 fn nvrtc_kernels_compile_for_old_archs() {
+    // No testutil::gpu lock: the handle only picks the NVRTC, no GPU work runs.
     let n = match Gpu::open().map_or_else(|_| ffi::nvrtc(), |g| engine_nvrtc(&g)) {
         Ok(n) => n,
         Err(e) => {
@@ -851,8 +852,8 @@ fn h2d_bench() {
 #[test]
 fn ring_upload_matches_write_at() {
     use super::upload::{Piece, Ring, Shape, Src};
-    let Ok(g) = Gpu::open() else {
-        eprintln!("no GPU: skipped");
+    // Through testutil::gpu (the GPU test lock), like every GPU test.
+    let Some(g) = crate::testutil::gpu() else {
         return;
     };
     let mut rng = Rng(0x9e3779b97f4a7c15);
