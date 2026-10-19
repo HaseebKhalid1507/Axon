@@ -1880,11 +1880,13 @@ fn serve_paged_cap_message() {
 }
 
 /// A paged pool squeezed to fewer pages than its requests need at once
-/// (`kv_pages`; 40 pages = 2560 positions for 6 requests of ~500-token
-/// prompts and up to 400 tokens each): admissions wait for pages, idle
-/// prefixes are reclaimed, prompts back off and the youngest running
-/// request is preempted (fed again): every request still gets a 200 with
-/// the reply it gets alone, /slots reports the pages, none leak.
+/// (`kv_pages` 40 = 2560 positions; `kv_grow` 0: admission reserves no
+/// generated tokens' pages): 6 counting completions (they don't stop early)
+/// of ~260-token prompts and 450 tokens each, started together, grow from
+/// ~5 to ~12 pages each while decoding side by side, past the free and the
+/// reclaimable pages, so requests are preempted (fed again) mid-decode.
+/// Every reply == the same request alone, greedy and seeded-sampled; the
+/// preemption counter in /slots is > 0; no page leaks.
 #[test]
 fn serve_paged_pressure() {
     let Some(_) = crate::testutil::gpu() else {
@@ -1897,8 +1899,6 @@ fn serve_paged_pressure() {
         o.parallel = 6;
         o.parallel_set = true;
         o.kv_pages = Some(40);
-        // Admission reserves no generated tokens' pages: the requests' growth
-        // runs out of pages mid-decode, and the youngest are preempted.
         o.kv_grow = Some(0);
     });
     let a = s.addr;
@@ -1907,12 +1907,44 @@ fn serve_paged_pressure() {
     assert_eq!(sl["page_tokens"], 64, "{sl}");
     let bodies: Vec<Value> = (0..6)
         .map(|i| {
-            let words = format!("{i} ") + &"the river runs past the old mill. ".repeat(60);
-            json!({"messages": [{"role": "user", "content": words}], "max_tokens": 300 + 20 * i,
-                   "temperature": if i % 2 == 0 { json!(0) } else { json!(0.8) }, "seed": i})
+            let prompt = format!("Note {i}. ")
+                + &"The river runs past the old mill and the bridge. ".repeat(24)
+                + "Count: 1, 2, 3, 4, 5,";
+            json!({"prompt": prompt, "max_tokens": 450,
+                   "temperature": if i % 2 == 0 { json!(0) } else { json!(0.3) }, "seed": i})
         })
         .collect();
-    batched_vs_solo(a, &bodies, "paged pool under pressure");
+    let reply = |r: &Resp| -> (String, u64) {
+        assert_eq!(r.status, 200, "{}", r.body);
+        let v = r.json();
+        (
+            v["choices"][0]["text"].to_string(),
+            v["usage"]["completion_tokens"].as_u64().unwrap(),
+        )
+    };
+    let solo: Vec<_> = bodies
+        .iter()
+        .map(|b| reply(&post(a, "/v1/completions", b.clone())))
+        .collect();
+    let generated: u64 = solo.iter().map(|r| r.1).sum();
+    assert!(generated >= 6 * 300, "the replies grow: {generated} tokens");
+    let start = std::sync::Barrier::new(bodies.len());
+    let together: Vec<_> = std::thread::scope(|sc| {
+        let hs: Vec<_> = bodies
+            .iter()
+            .map(|b| {
+                let start = &start;
+                sc.spawn(move || {
+                    start.wait();
+                    reply(&post(a, "/v1/completions", b.clone()))
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for (i, (t, s1)) in together.iter().zip(&solo).enumerate() {
+        assert_eq!(t, s1, "paged pool under pressure: request {i}");
+    }
     wait_for("the pool idle", || {
         call(a, "GET", "/slots", "").json()["slots"]
             .as_array()
@@ -1920,6 +1952,7 @@ fn serve_paged_pressure() {
             .iter()
             .all(|x| x["busy"] == false)
     });
+    // The counters are cumulative (never reset): read after the burst.
     let sl = call(a, "GET", "/slots", "").json();
     let held: u64 = sl["slots"]
         .as_array()
@@ -1928,9 +1961,7 @@ fn serve_paged_pressure() {
         .map(|x| x["pages_used"].as_u64().unwrap())
         .sum();
     assert_eq!(held + sl["pages_free"].as_u64().unwrap(), 40, "{sl}");
-    // The preemption path ran (and every reply above was the request's
-    // alone: preempted requests were fed again and went on, the same bits).
-    assert!(sl["preempted"].as_u64().unwrap() > 0, "{sl}");
+    assert!(sl["preempted"].as_u64().unwrap() > 0, "no preemption: {sl}");
 }
 
 /// `plan_slots` over a model of the memory: s slots of c positions fit
