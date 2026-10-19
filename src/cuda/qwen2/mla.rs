@@ -154,17 +154,7 @@ pub(super) fn plan_layers<'m>(
         let name = |s: &str| format!("blk.{i}.{s}");
         let mut mat = |s: &str| -> Result<Mat, String> {
             let mt = place(tensor(m, &name(s))?, uploads);
-            if ![
-                Q4_K, Q5_K, Q6_K, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, IQ4_NL,
-            ]
-            .contains(&mt.qt)
-            {
-                return Err(format!(
-                    "tensor {}: type {} isn't supported by the CUDA backend",
-                    name(s),
-                    crate::gguf::qtype(mt.qt).name
-                ));
-            }
+            gpu_type_ok(&mt, &name(s))?;
             Ok(mt)
         };
         let q_a = match d.q_lora {

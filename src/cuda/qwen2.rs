@@ -659,6 +659,30 @@ fn act_bytes(n: usize) -> usize {
     2 * np + np / 64 + np / 8 + np / 8
 }
 
+/// The weight types the CUDA kernels take (decode GEMV, batched products,
+/// mla.cu's per-head products).
+const GPU_TYPES: [u32; 11] = [
+    Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, IQ4_NL,
+];
+
+/// Ok if matrix `name` (`mt`) is of a type in `GPU_TYPES`; else the
+/// refusal, in `model::unsupported_type`'s wording.
+fn gpu_type_ok(mt: &Mat, name: &str) -> Result<(), String> {
+    if GPU_TYPES.contains(&mt.qt) {
+        return Ok(());
+    }
+    let ok: Vec<&str> = GPU_TYPES
+        .iter()
+        .map(|&id| crate::gguf::qtype(id).name)
+        .collect();
+    Err(format!(
+        "tensor {name}: type {} ({}) is not supported by the CUDA backend (supported: {})",
+        crate::gguf::qtype(mt.qt).name,
+        mt.qt,
+        ok.join(", ")
+    ))
+}
+
 /// What `CudaQwen2::new_layers` uploads: each matrix's (tensor, arena
 /// offset), the arena's size, norms and biases, RoPE frequencies.
 struct Plan<'m> {
@@ -1338,21 +1362,6 @@ impl<'g> CudaQwen2<'g> {
 
         // Every matrix's (tensor, arena offset), uploaded once all fit.
         let mut uploads: Vec<(&Tensor, usize)> = Vec::new();
-        let gemv_type = |mt: &Mat, name: &str| -> Result<(), String> {
-            if [
-                Q4_K, Q5_K, Q6_K, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, IQ4_NL,
-            ]
-            .contains(&mt.qt)
-            {
-                Ok(())
-            } else {
-                Err(format!(
-                    "tensor {name}: type {} isn't supported by the CUDA backend \
-                     (Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, IQ4_NL)",
-                    crate::gguf::qtype(mt.qt).name
-                ))
-            }
-        };
         let embd_t = tensor(m, "token_embd.weight")?;
         let embd = (first == 0).then(|| place(embd_t, &mut uploads));
         let output = match (tensor_opt(m, "output.weight"), embd) {
@@ -1376,7 +1385,7 @@ impl<'g> CudaQwen2<'g> {
         };
         let vocab = output.rows;
         if has_head {
-            gemv_type(&output, "output.weight")?;
+            gpu_type_ok(&output, "output.weight")?;
         }
 
         let mut vecs: Vec<f32> = Vec::new();
@@ -1401,7 +1410,7 @@ impl<'g> CudaQwen2<'g> {
             let name = |s: &str| format!("blk.{i}.{s}");
             let mut mat = |s: &str| -> Result<Mat, String> {
                 let mt = place(tensor(m, &name(s))?, &mut uploads);
-                gemv_type(&mt, &name(s))?;
+                gpu_type_ok(&mt, &name(s))?;
                 Ok(mt)
             };
             let (q, k, v, o) = (
