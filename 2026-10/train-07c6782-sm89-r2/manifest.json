@@ -1,0 +1,29 @@
+{
+ "label": "train-07c6782-sm89-r2",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1019-161853-1f3c",
+   "name": "sm89-bits-07c6782",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "avante",
+   "hw": "hw-avante.txt",
+   "gpu": "NVIDIA GeForce RTX 4050 Laptop GPU",
+   "driver": "610.43.02",
+   "sha": "07c6782",
+   "binary": "axon-test-07c6782",
+   "started": 1792441132.5614252,
+   "ended": 1792442557.179736,
+   "attempts": 1,
+   "remote_job": "20261019-161856-axon-test-07c6782-3143793",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "3ee18a8854f096c3d209a45df2c63f0527bf95fd4ae4fe0dd85e2b5adb74f974",
+   "log_bytes": 6618
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-19 16:42:39 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}

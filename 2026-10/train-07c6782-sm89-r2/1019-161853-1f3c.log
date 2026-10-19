@@ -1,0 +1,86 @@
+[axon-run 16:18:53] submitted 1019-161853-1f3c by axon-sm89: /home/haseeb/.cache/axon-sm89/axon-test-07c6782 wave_passes_shapes gpu_prompt_chunks_bits long_turn_matches_fresh_prefill_cuda serve_cuda_long_prompt_matches_gen lm_chunk_ranges _bits bit_identical prefill_logits_match_forward swiglu_epilogue_and_gate_up products_match tile_t paged_tests::
+[axon-run 16:18:55] job 1019-161853-1f3c -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 5000 --env AXON_NODE_PACK=1 --src /home/haseeb/.cache/axon-train/wt /home/haseeb/.cache/axon-sm89/axon-test-07c6782 wave_passes_shapes gpu_prompt_chunks_bits long_turn_matches_fresh_prefill_cuda serve_cuda_long_prompt_matches_gen lm_chunk_ranges _bits bit_identical prefill_logits_match_forward swiglu_epilogue_and_gate_up products_match tile_t paged_tests::
+axon-remote: job 20261019-161856-axon-test-07c6782-3143793 on avante (GPU, 5000 MB)
+[axon-node 16:18:56] GPU slot taken; job wants 5000 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 48
+[axon-node 16:18:56] run axon-test-07c6782 (68af1bfbffe3730fd6aedb50) as /home/haseeb/.cache/axon-train/wt on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 61 tests
+testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test chat::tests::long_turn_matches_fresh_prefill_cuda ... ok
+test cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_llama ... ok
+test cuda::qwen2::paged_tests::gpu_paged_attention_bits ... ok
+test cuda::qwen2::paged_tests::gpu_paged_gemma_window_bits ... ok
+test cuda::qwen2::paged_tests::gpu_paged_split_and_batched_bits ... ok
+test cuda::qwen2::paged_tests::gpu_paged_store_bits ... ok
+test cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_gemma3 ... ok
+test cuda::qwen2::tests::gpu_batched_products_match_gemv_bits ... ok
+test cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_qwen25 ... ok
+test cuda::qwen2::tests::gpu_decode_cache_size_same_bits ... ok
+test cuda::qwen2::tests::gpu_ext_module_same_bits_old_types ... ok
+test cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_qwen3 has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_batched_attention_matches_decode_bits has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_bits_llama_3b_8b has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_gemma3_prefill_and_verify_bits has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_gemma3_prefill_and_verify_bits ... ok
+test cuda::qwen2::tests::gpu_gemmh_matches_reference_bits ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_0_5b ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_1_5b has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_1_5b ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_llama ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q2k_q3k ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_0_5b has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_0_5b ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_1_5b has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_1_5b ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_qwen3 ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_qwen3_4b has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_qwen3_4b ... ok
+test cuda::qwen2::tests::gpu_prefill_logits_match_forward_big ... ok
+test cuda::qwen2::tests::gpu_prefill_wave_split_bits ... ok
+test cuda::qwen2::tests::gpu_products_match_reference_bits has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_bits_llama_3b_8b ... ok
+test cuda::qwen2::tests::gpu_prompt_chunks_bits ... ok
+test cuda::qwen2::tests::gpu_split_attention_matches_decode_bits ... ok
+test cuda::qwen2::tests::gpu_swiglu_epilogue_and_gate_up_match_reference ... ok
+test cuda::qwen2::tests::gpu_yarn_matches_reference_and_keeps_bits has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_yarn_matches_reference_and_keeps_bits ... ok
+test cuda::qwen2::tests::lm_chunk_ranges ... ok
+test cuda::qwen2::tests::tile_t_picks ... ok
+test cuda::qwen2::tests::wave_passes_shapes ... ok
+test cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_qwen3 ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_0_5b ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_1_5b ... ok
+test hybrid::tests::hybrid_ends_are_the_backends_bits has been running for over 60 seconds
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_llama ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_q8_0_5b ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_q8_1_5b ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_qwen3 ... ok
+test hybrid::tests::stream_prefill_is_gpu_bits_0_5b ... ok
+test hybrid::tests::stream_prefill_is_gpu_bits_1_5b ... ok
+test hybrid::tests::stream_prefill_is_gpu_bits_llama ... ok
+test hybrid::tests::stream_prefill_is_gpu_bits_qwen3 ... ok
+test hybrid::tests::stream_q8_prefill_bits_0_5b ... ok
+test hybrid::tests::stream_q8_prefill_bits_1_5b ... ok
+test model::deepseek2_tests::deepseek2_batch_matches_decode_bits ... ok
+test model::deepseek2_tests::deepseek2_long_batch_matches_decode_bits ... ok
+test model::deepseek2_tests::deepseek2_moonlight_bits ... ok
+test model::gptoss_tests::gpt_oss_decode_batch_verify_bits ... ok
+test model::gptoss_tests::gpt_oss_model_bits ... ok
+test model::tests::multiversion_bit_identical ... ok
+test cuda::qwen2::tests::gpu_products_match_reference_bits ... ok
+test moe::ds2_tests::ds2_gpu_moonlight_bits ... ok
+test quant::mxfp4::tests::dequant_matches_llama_cpp_bits ... ok
+test quant::mxfp4::tests::every_path_same_bits ... ok
+test quant::tests::multiversion_quantize_bit_identical ... ok
+test quant::tests::q2_k_q3_k_simd_bits_match_scalar ... ok
+test quant::tests::q_1_simd_bits_match_scalar ... ok
+test hybrid::tests::hybrid_ends_are_the_backends_bits ... ok
+test serve::tests::serve_cuda_long_prompt_matches_gen ... ok
+test cuda::qwen2::tests::gpu_batched_attention_matches_decode_bits ... ok
+test moe::ds2_tests::ds2_gpu_fixture_bits ... ok
+
+test result: ok. 61 passed; 0 failed; 0 ignored; 0 measured; 616 filtered out; finished in 1416.91s
+
+[axon-node 16:42:33] exit 0 after 1417.0s
+[axon-node 16:42:33] peak RSS 3804 MB (job process tree PSS, 2 s samples x705)
+[axon-run 16:42:34] exit 0 after 1418.7s (host avante)
