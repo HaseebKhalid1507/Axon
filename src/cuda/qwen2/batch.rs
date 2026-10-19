@@ -1013,16 +1013,16 @@ impl<'g> CudaQwen2<'g> {
                     // 32 rows ran 2x slower in it, C-curve log.)
                     let big = !matches!(mt.qt, Q4_K | Q5_K) && 2 * ctas >= 3 * bf.sms && nb > 64;
                     // Q4_K / Q5_K: 128 x 64 where it pays (`tile_t`).
-                    if let (Some((ft, _)), true) = (&bf.gemm_t, matches!(mt.qt, Q4_K | Q5_K)) {
-                        if tile_t(mt.rows, G2_BM, nb, bf.sms) {
-                            return self.gpu.launch(
-                                &ft[(mt.qt == Q5_K) as usize],
-                                (nb.div_ceil(64) as u32, mt.rows.div_ceil(G2T_BM) as u32, 1),
-                                (256, 1, 1),
-                                gemm2t_smem(mt.qt) as u32,
-                                &common,
-                            );
-                        }
+                    if let (Some((ft, _)), true) = (&bf.gemm_t, matches!(mt.qt, Q4_K | Q5_K))
+                        && tile_t(mt.rows, G2_BM, nb, bf.sms)
+                    {
+                        return self.gpu.launch(
+                            &ft[(mt.qt == Q5_K) as usize],
+                            (nb.div_ceil(64) as u32, mt.rows.div_ceil(G2T_BM) as u32, 1),
+                            (256, 1, 1),
+                            gemm2t_smem(mt.qt) as u32,
+                            &common,
+                        );
                     }
                     let (bn, st) = if big { (128, 2) } else { (64, 3) };
                     let (f, smem) = match q8c {
