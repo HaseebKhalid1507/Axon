@@ -1,7 +1,7 @@
 # Axon
 
 LLM inference for Qwen2, Qwen3, Llama 3 and Gemma 3 GGUF models on the CPU and on NVIDIA
-GPUs, plus Qwen3 MoE (Qwen3-30B-A3B's architecture) and gpt-oss-20b (CPU only for now), written
+GPUs, plus Qwen3 MoE (Qwen3-30B-A3B's architecture) and gpt-oss-20b (attention on the GPU, experts on the CPU), written
 from scratch in Rust.
 
 **Mission: make LLM inference cheap and fast, and run the best open models.** Cheap means wasting no
@@ -57,17 +57,19 @@ Works today, honestly scoped:
   GGUFs (an unsplit `attn_kv_b`, e.g. the published DeepSeek-V2-Lite files) are refused with a
   re-convert message.
   `gpt-oss` (gpt-oss-20b, ggml-org's MXFP4
-  GGUF) runs on the CPU only for now (stage 0, [log](docs/log/2026-10-18-gpt-oss-s0.md)): MXFP4
+  GGUF) runs on the CPU (stage 0, [log](docs/log/2026-10-18-gpt-oss-s0.md)) or, with
+  `--device cuda`, with its attention, norms, router and head on the GPU and its MXFP4 experts on
+  the CPU (stage 1, [log](docs/log/2026-10-18-gpt-oss-s1.md): f16 KV only): MXFP4
   experts read in place, attention sinks, the 128-token sliding window on alternate layers,
   YaRN, the o200k tokenizer and the harmony chat format (`axon chat` shows the `final`
   channel; `axon serve` returns the `analysis` channel as `reasoning_content`; no tools
-  yet); `--device cuda` is refused until stage 1. Other architectures, other
+  yet). Other architectures, other
   mixture-of-experts models and RoPE scaling (a factor other than 1; Gemma 3's linear
   scaling and YaRN, below, excepted) are refused with an error.
 - Tensor types: F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K and
   IQ4_NL on the CPU, so every Q2_K and Q3_K_S/M/L GGUF runs (IQ4_NL is llama.cpp's fallback
   for their rows that aren't a multiple of 256, e.g. the 0.5B's 896), and MXFP4 for
-  gpt-oss's experts (CPU only). On the GPU every weight matrix must be one of the eleven
+  gpt-oss's experts (CPU only: the GPU gets gpt-oss's other tensors). On the GPU every weight matrix must be one of the eleven
   quantized types (F16/F32 matrices are refused there). Others load for `info` but can't run.
 - Sampling: greedy, or temperature / top-k / top-p / min-p / repeat penalty with a seed
   (llama.cpp's order, ollama's defaults). `gen` continues raw text, greedy unless `--temp`
@@ -131,7 +133,7 @@ Works today, honestly scoped:
 
 Not on main yet: tensor parallel, paged KV in `serve` (the kernels read through a page table; the pool
 doesn't use it yet), saving and restoring `serve` slots, streaming MoE experts through the GPU for long
-prompts (stage 3), and gpt-oss on the GPU. What's in flight and why: [docs/roadmap.md](docs/roadmap.md). How Axon is built and measured, and
+prompts (stage 3), and gpt-oss's experts on the GPU. What's in flight and why: [docs/roadmap.md](docs/roadmap.md). How Axon is built and measured, and
 what was tried and dropped: [docs/methodology.md](docs/methodology.md),
 [docs/history.md](docs/history.md), [docs/experiments-rejected.md](docs/experiments-rejected.md).
 
