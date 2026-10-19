@@ -503,6 +503,8 @@ pub struct CudaQwen2<'g> {
     /// on this GPU (`batch::wave_passes`); AXON_WAVE_SPLIT=0: equal passes
     /// (`batch::passes`). The same bits either way.
     pub(super) wave_split: bool,
+    /// AXON_PASS_TRACE: print each prompt's pass sizes (`prompt_passes`).
+    pub(super) pass_trace: bool,
     /// Decode steps normalize with rmsnorm_quant_v2 (dim <= NORM2_MAX) and
     /// run gate/up rows under gate_up4_row bytes through gate_up4
     /// (GATE_UP4_ROW); AXON_DEC_NORM2=0 / AXON_DEC_GU4=0 turn them off
@@ -1551,6 +1553,7 @@ impl<'g> CudaQwen2<'g> {
             swiglu_epi: false,
             gate_up_fused: std::env::var("AXON_GATE_UP").map_or(true, |v| v != "0"),
             wave_split: std::env::var("AXON_WAVE_SPLIT").map_or(true, |v| v != "0"),
+            pass_trace: std::env::var_os("AXON_PASS_TRACE").is_some(),
             norm2: std::env::var("AXON_DEC_NORM2").map_or(true, |v| v != "0"),
             gate_up4_row: match std::env::var("AXON_DEC_GU4") {
                 Ok(v) if v == "0" => 0,

@@ -257,14 +257,31 @@ pub(super) struct WaveGeom {
     pub(super) gemmh_all: bool,
 }
 
+/// What a partial last wave costs, in percent of a full one: PARTIAL_WAVE
+/// fixed plus the rest in proportion to the SMs it fills. Fitted (least
+/// squares, 0.87 GEMM share of the pass) to the 8 e2e cells measured on an
+/// RTX 4090 (7B and Qwen3-8B at pp1153/1777/2100/3000, #92): rms error of
+/// the predicted gain 1.82 points at 100 (r15's model, a partial wave costs
+/// a whole one), 0.97 at 60, 0.63 at 30, 0.99 at 0 (no wave effect, only
+/// the token tiles' padding).
+const PARTIAL_WAVE: usize = 30;
+
 /// The GEMM time of one pass of nb (> VM_MAX) tokens: per product the
-/// waves of its blocks (one block per SM: gemm2s, gemm2, gemmh2) times a
-/// block's MACs, with `bgemm`'s grids: Q4_K / Q5_K in 64 x 64 tiles (rows
-/// x tokens; gemmh2 128 x 64), the register-staged types in 64 x 128 given
-/// ~1.5 blocks per SM, the fused gate + up in 32 (gemmh2 64) rows of each
-/// x 64 tokens. A partial last wave costs a whole one (r15 wave model).
+/// waves of its blocks (one block per SM: gemm2s, gemm2, gemmh2; a partial
+/// last wave as PARTIAL_WAVE says) times a block's MACs, with `bgemm`'s
+/// grids: Q4_K / Q5_K in 64 x 64 tiles (rows x tokens; gemmh2 128 x 64),
+/// the register-staged types in 64 x 128 given ~1.5 blocks per SM, the
+/// fused gate + up in 32 (gemmh2 64) rows of each x 64 tokens. In units of
+/// a percent of a wave per SM (comparable on one GPU only).
 pub(super) fn gemm_cost(ps: &[Gemm], nb: usize, g: WaveGeom) -> u64 {
-    let waves = |ctas: usize, macs: usize| (ctas.div_ceil(g.sms) * macs) as u64;
+    let waves = |ctas: usize, macs: usize| {
+        let (full, rem) = (ctas / g.sms, ctas % g.sms);
+        let part = match rem {
+            0 => 0,
+            _ => PARTIAL_WAVE * g.sms + (100 - PARTIAL_WAVE) * rem,
+        };
+        ((100 * full * g.sms + part) * macs) as u64
+    };
     ps.iter()
         .map(|&p| match p {
             Gemm::One { qt, rows, cols } => {
@@ -284,12 +301,27 @@ pub(super) fn gemm_cost(ps: &[Gemm], nb: usize, g: WaveGeom) -> u64 {
         .sum()
 }
 
-/// A wave split must model this much less GEMM time than the equal one.
-const WAVE_MARGIN: f64 = 0.99;
+/// A wave split must model this much less GEMM time than the equal one
+/// (as FA_MARGIN): the fitted model's rms error is ~0.6 points of e2e
+/// gain, and the one 4090 cell it got most wrong (7B pp1153, 704 + 449)
+/// modelled +1.2 % and measured -0.4 %.
+const WAVE_MARGIN: f64 = 0.97;
+
+/// The shortest pass `wave_passes` makes: a quarter of the batch max (288
+/// tokens at 1152), and always over VM_MAX. The pass count is fixed, so a
+/// cost per pass would be the same for every split and can't steer it; what
+/// a short pass does cost that `gemm_cost` doesn't see is its latency-bound
+/// kernels (norms, quantize, RoPE, attention: time(nb) ~ max(latency,
+/// nb x rate), so a short pass pays the latency for less work). The
+/// shortest pass measured is 449 tokens (4090 pp1153, 704 + 449, -0.4 %);
+/// max / 4 keeps every pass within ~1.6x of that.
+pub(super) fn wave_floor(max: usize) -> usize {
+    (max / 4).max(VM_MAX + 1)
+}
 
 /// `passes`, resized for the GEMMs' waves (AXON_WAVE_SPLIT, default on):
-/// as many passes, none longer than max, all but the last a whole number
-/// of 64-token tiles and the last over VM_MAX tokens, with the least total
+/// as many passes, none longer than max nor shorter than `wave_floor`, all
+/// but the last a whole number of 64-token tiles, with the least total
 /// `cost` (one pass of that many tokens). None (keep `passes`) for one
 /// pass, or when no such split costs WAVE_MARGIN less than the equal one.
 /// Results don't depend on it (determinism.md: pass boundaries are free).
@@ -299,10 +331,13 @@ pub(super) fn wave_passes(
     cost: impl Fn(usize) -> u64,
 ) -> Option<Vec<std::ops::Range<usize>>> {
     let base = passes(n, max);
-    let (np, t) = (base.len(), max / 64);
+    let (np, t, floor) = (base.len(), max / 64, wave_floor(max));
+    // (Equal passes of at most VM_MAX tokens: only with a degenerate max
+    // under 2 * (VM_MAX + 1).)
     if np < 2 || t == 0 || base.iter().any(|r| r.len() <= VM_MAX) {
         return None;
     }
+    let t0 = floor.div_ceil(64);
     let ct: Vec<u64> = (0..=t).map(|i| cost(64 * i)).collect();
     let stiles = n / 64;
     // f[s]: (cost, largest tile count, tile counts) of k whole-tile passes
@@ -314,7 +349,7 @@ pub(super) fn wave_passes(
         let mut g: Vec<Best> = vec![None; stiles + 1];
         for (s, fs) in f.iter().enumerate() {
             let Some((c, m, v)) = fs else { continue };
-            for i in 1..=t.min(stiles - s) {
+            for i in t0..=t.min(stiles - s) {
                 let cand = (c + ct[i], (*m).max(i));
                 if g[s + i].as_ref().is_none_or(|b| cand < (b.0, b.1)) {
                     let mut w = v.clone();
@@ -333,7 +368,7 @@ pub(super) fn wave_passes(
         let (Some((c, m, v)), last) = (fs, n - 64 * s) else {
             continue;
         };
-        if last <= VM_MAX || last > max {
+        if last < floor || last > max {
             continue;
         }
         let lt = last.div_ceil(64);
@@ -347,6 +382,8 @@ pub(super) fn wave_passes(
     if c as f64 >= WAVE_MARGIN * c0 as f64 {
         return None;
     }
+    // Longest first, the remainder last (the remainder isn't always the
+    // shortest: 3000 on a 4090 is 1152 + 1152 + 696).
     v.sort_unstable_by(|a, b| b.cmp(a));
     let mut out = Vec::with_capacity(np);
     let mut s = 0;
@@ -2175,7 +2212,7 @@ impl<'g> CudaQwen2<'g> {
             (None, false) => passes(n, max),
         };
         // AXON_PASS_TRACE: the pass sizes on stderr (A/B logs).
-        if std::env::var_os("AXON_PASS_TRACE").is_some() {
+        if self.pass_trace {
             let lens: Vec<usize> = v.iter().map(|r| r.len()).collect();
             eprintln!(
                 "passes: {n} tokens at {start}, max {max}, {} SMs, wave split {}: {lens:?}",
