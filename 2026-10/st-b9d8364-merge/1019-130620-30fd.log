@@ -1,0 +1,12 @@
+[axon-run 13:06:20] submitted 1019-130620-30fd by /home/haseeb/.cache/axon-st: /home/haseeb/.cache/axon-st/gateA.sh /home/haseeb/.cache/axon-st/axon-test-b9d8364
+[axon-run 13:06:20] scope axon-job-1019-130620-30fd-1792429580.scope in app-axonjobs.slice: MemoryMax 8524 MB, MemoryHigh 7671 MB, no swap, oomd pressure kill 80% (claim 5000 MB): an OOM here kills only this job
+[axon-run 13:06:20] job 1019-130620-30fd -> bella: systemd-run --user --scope --quiet --unit=axon-job-1019-130620-30fd-1792429580 --slice=app-axonjobs.slice -p MemoryMax=8524M -p MemoryHigh=7671M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-st/gateA.sh /home/haseeb/.cache/axon-st/axon-test-b9d8364
+axon-q 13:06:20 start slot 8-15: /home/haseeb/.cache/axon-st/gateA.sh /home/haseeb/.cache/axon-st/axon-test-b9d8364
+qwen2.5: 193 texts token for token
+test safetensors::tests::qwen25_metadata_and_tokenizer_match_gguf ... ok
+test safetensors::tests::qwen3_metadata_and_tokenizer_match_gguf ... ok
+test safetensors::tests::llama32_metadata_tokenizer_and_rope_freqs_match_gguf ... ok
+test safetensors::tests::qwen25_tensors_match_gguf_f16 ... ok
+test safetensors::tests::llama32_tensors_match_gguf_f16 ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 645 filtered out; finished in 2.79s
+[axon-run 13:06:23] exit 0 after 2.9s (host bella)
