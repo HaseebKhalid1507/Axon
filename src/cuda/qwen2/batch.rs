@@ -374,6 +374,11 @@ pub(super) struct BatchFns<'m> {
     /// gemvm8_*, gemvm16_*, gemvm32_* per type (as `gemm`); None without
     /// tensor cores.
     gemvm: Option<[[Func<'m>; NTYPES_VM]; 3]>,
+    /// gemvmx8_*, gemvmx16_*: gemvm over two or three matrices in one launch
+    /// (`CudaQwen2::bgemm_x`); None without tensor cores.
+    gemvmx: Option<[[Func<'m>; NTYPES_VM]; 2]>,
+    /// AXON_GEMVMX=0: never `bgemm_x` (q, k, v and gate, up one launch each).
+    pub(super) gemvmx_on: bool,
     /// AXON_GEMVM_MAX: 16, gemvm for at most 16 tokens (main's routing);
     /// 32, for up to 32 whatever the product; 0 or unset, by the product's
     /// shape (`CudaQwen2::takes_gemvm`).
@@ -479,7 +484,25 @@ impl<'m> BatchFns<'m> {
         } else {
             None
         };
+        let gemvmx = if module.mma() {
+            let f = |nf: usize| -> Result<[Func<'m>; NTYPES_VM], String> {
+                let n = |t: &str| module.function(&format!("gemvmx{nf}_{t}"));
+                Ok([
+                    n("q4_k")?,
+                    n("q6_k")?,
+                    n("q8_0")?,
+                    n("q5_0")?,
+                    n("q5_k")?,
+                    n("q4_0")?,
+                ])
+            };
+            Some([f(8)?, f(16)?])
+        } else {
+            None
+        };
         Ok(BatchFns {
+            gemvmx,
+            gemvmx_on: std::env::var("AXON_GEMVMX").map_or(true, |v| v != "0"),
             embed: module.function("embed_b")?,
             rope_table: module.function("rope_table_b")?,
             rmsnorm_quant: module.function("rmsnorm_quant_b")?,
@@ -1284,44 +1307,27 @@ impl<'g> CudaQwen2<'g> {
             on("rmsnorm")?;
             let bias = |o: Option<usize>| o.map_or(null, vec);
             let qkv_at = |off: usize| b.qkv.arg_at(off * 4);
-            self.bgemm(
-                wts,
-                &l.q,
-                b.act.arg(),
-                ast,
-                nb,
-                bias(l.bq),
-                0,
-                qkv_at(0),
-                qkvw,
-            )?;
-            on("q")?;
-            self.bgemm(
-                wts,
-                &l.k,
-                b.act.arg(),
-                ast,
-                nb,
-                bias(l.bk),
-                0,
-                qkv_at(qd),
-                qkvw,
-            )?;
-            on("k")?;
-            self.bgemm(
-                wts,
-                &l.v,
-                b.act.arg(),
-                ast,
-                nb,
-                bias(l.bv),
-                0,
-                qkv_at(qd + kvd),
-                qkvw,
-            )?;
-            // (Profile segments by type; "qkv", "gate_up", "down" are the
-            // stream's weight-group events, stream.rs.)
-            on(if l.v.qt == Q6_K { "v6" } else { "v4" })?;
+            let (q, k, v) = (
+                (&l.q, bias(l.bq), qkv_at(0)),
+                (&l.k, bias(l.bk), qkv_at(qd)),
+                (&l.v, bias(l.bv), qkv_at(qd + kvd)),
+            );
+            // q, k and v in one launch where they qualify (bgemm_x), else q
+            // and k, else one by one.
+            let one =
+                |m: (&Mat, Arg, Arg)| self.bgemm(wts, m.0, b.act.arg(), ast, nb, m.1, 0, m.2, qkvw);
+            if !self.bgemm_x(wts, &[q, k, v], b.act.arg(), ast, nb, qkvw)? {
+                if !self.bgemm_x(wts, &[q, k], b.act.arg(), ast, nb, qkvw)? {
+                    one(q)?;
+                    on("q")?;
+                    one(k)?;
+                }
+                on("k")?;
+                one(v)?;
+                // (Profile segments by type; "qkv", "gate_up", "down" are
+                // the stream's weight-group events, stream.rs.)
+                on(if l.v.qt == Q6_K { "v6" } else { "v4" })?;
+            }
             on("qkv")?;
             // q8: rope_kv_b (rope_kv_norm_b) does the queries alone (null
             // cache), kv_q8_b the keys and values (normalized first on
@@ -1688,7 +1694,19 @@ impl<'g> CudaQwen2<'g> {
                 && up.qt == Q4_K
                 && gate.cols == dim
                 && up.cols == dim;
-            if !fuse {
+            // Gate and up in one gemvmx launch where they qualify (not
+            // with the up product's swiglu epilogue, which reads the gate's).
+            let epi = self.swiglu_epi && self.gemma.is_none();
+            let gu_x = !(fuse || epi)
+                && self.bgemm_x(
+                    wts,
+                    &[(gate, null, b.gate.arg()), (up, null, b.up.arg())],
+                    b.act.arg(),
+                    ast,
+                    nb,
+                    ffn,
+                )?;
+            if !fuse && !gu_x {
                 self.bgemm(wts, gate, b.act.arg(), ast, nb, null, 0, b.gate.arg(), ffn)?;
             }
             on("gate")?;
@@ -1810,7 +1828,9 @@ impl<'g> CudaQwen2<'g> {
                     ],
                 )?;
             } else {
-                self.bgemm(wts, up, b.act.arg(), ast, nb, null, 0, b.up.arg(), ffn)?;
+                if !gu_x {
+                    self.bgemm(wts, up, b.act.arg(), ast, nb, null, 0, b.up.arg(), ffn)?;
+                }
                 on("gate_up")?;
                 g.launch(
                     if self.gemma.is_some() {
@@ -1849,6 +1869,77 @@ impl<'g> CudaQwen2<'g> {
             }
         }
         Ok(())
+    }
+
+    /// Two or three products of the same activations (q, k, v; gate, up) in
+    /// one gemvmx launch, each matrix with its bias and output (mode 0, the
+    /// outputs `ostride` floats a token apart), if they qualify: at most
+    /// SMALL tokens, one gemvm type and width. Same outputs as a bgemm each.
+    /// Ok(false): nothing launched (the caller runs them one by one).
+    ///
+    /// # Safety
+    /// As `bgemm`, for every matrix.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) unsafe fn bgemm_x(
+        &self,
+        wts: &DevBuf,
+        ms: &[(&Mat, Arg, Arg)],
+        act: Arg,
+        astride: usize,
+        nb: usize,
+        ostride: usize,
+    ) -> Result<bool, String> {
+        let bf = &self.bf;
+        let (Some(fs), true) = (&bf.gemvmx, bf.gemvmx_on) else {
+            return Ok(false);
+        };
+        if nb > SMALL || !(2..=3).contains(&ms.len()) {
+            return Ok(false);
+        }
+        let m0 = ms[0].0;
+        let ti = type_index(m0.qt);
+        if ti >= NTYPES_VM
+            || ms
+                .iter()
+                .any(|(m, _, _)| m.qt != m0.qt || m.cols != m0.cols || m.rb != m0.rb)
+        {
+            return Ok(false);
+        }
+        let blocks: usize = ms.iter().map(|(m, _, _)| m.rows.div_ceil(16)).sum();
+        let at = |i: usize| ms.get(i);
+        let null = Arg::Ptr(0);
+        let mut args = Vec::with_capacity(18);
+        for i in 0..3 {
+            args.push(at(i).map_or(null, |(m, _, _)| wts.arg_at(m.off)));
+        }
+        for i in 0..3 {
+            args.push(Arg::I32(at(i).map_or(0, |(m, _, _)| m.rows as i32)));
+        }
+        for i in 0..3 {
+            args.push(at(i).map_or(null, |&(_, b, _)| b));
+        }
+        for i in 0..3 {
+            args.push(at(i).map_or(null, |&(_, _, o)| o));
+        }
+        args.extend_from_slice(&[
+            Arg::U64(m0.rb as u64),
+            Arg::I32(m0.cols as i32),
+            act,
+            Arg::U64(astride as u64),
+            Arg::I32(nb as i32),
+            Arg::U64(ostride as u64),
+        ]);
+        // SAFETY: the caller's contract; gemvmx's signature (prefill.cu).
+        unsafe {
+            self.gpu.launch(
+                &fs[(nb > 8) as usize][ti],
+                (blocks as u32, 1, 1),
+                (128, 1, 1),
+                0,
+                &args,
+            )?;
+        }
+        Ok(true)
     }
 
     /// Whether a product of `rows` outputs over nb tokens (of a gemvm type)
