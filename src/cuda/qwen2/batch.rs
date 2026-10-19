@@ -383,6 +383,11 @@ pub(super) struct BatchFns<'m> {
     /// 32, for up to 32 whatever the product; 0 or unset, by the product's
     /// shape (`CudaQwen2::takes_gemvm`).
     pub(super) vm_max: usize,
+    /// AXON_ATTN_GRID_CAP=1: the per-query attention's grid y (attn_blk_b)
+    /// sized by the cache's capacity, min(max_split, nblk_max), as before;
+    /// else by the deepest query's blocks (`att_grid`). Any grid y gives the
+    /// same bits (each block's partial is its own).
+    pub(super) grid_cap: bool,
     /// Per type (Q4_K, Q6_K, Q8_0, Q5_0, Q5_K, Q4_0: `NTYPES`, indexed by
     /// `type_index`): gemm2_* (128 tokens per block)
     /// and gemm2s_* (64); None without int8 tensor cores.
@@ -548,6 +553,7 @@ impl<'m> BatchFns<'m> {
                     0,
                     |v: usize| if v == 0 { 0 } else { v.clamp(SMALL, VM_MAX) },
                 ),
+            grid_cap: std::env::var("AXON_ATTN_GRID_CAP").is_ok_and(|v| v == "1"),
             gemm,
             gemm_q6k8,
             gemm_gu: if module.mma() {
@@ -593,6 +599,10 @@ pub(super) struct BatchBufs<'g> {
     /// Blocks of ATT_BLK positions of the cache it's for (the stride of
     /// attn_blk_b's partials).
     nblk_max: usize,
+    /// A pool step's attn_blk_b grid y (`att_grid` of its rows' deepest
+    /// position; the step's graph is keyed by it), 0: min(max_split,
+    /// nblk_max).
+    pub(super) att_gy: usize,
     pub(super) tokens: DevBuf<'g>,
     host_tokens: HostBuf<'g>,
     /// `Place::Rows` of the pass: per token (position, cache row), u32s;
@@ -645,6 +655,21 @@ impl<'g> CudaQwen2<'g> {
 
     /// VRAM of the batch scratch for `max` tokens of a cache of max_ctx
     /// positions.
+    /// attn_blk_b's grid y for queries whose deepest is at position
+    /// pos_max (of a cache of nblk_max blocks): min(max_split, nblk_max) with
+    /// `BatchFns::grid_cap`, else that clamped to the blocks the query has,
+    /// rounded up to a power of two (a pool's graphs are keyed by it: a
+    /// few per step shape). CTAs past a query's blocks exit at once, but
+    /// each takes a launch slot and its shared memory first: at depth 600
+    /// in a 32768-position slot, 82 of max_split 92 (bella, 7B).
+    pub(super) fn att_grid(&self, nblk_max: usize, pos_max: usize) -> usize {
+        let cap = self.max_split.min(nblk_max);
+        match self.bf.grid_cap {
+            true => cap,
+            false => cap.min((pos_max + 1).div_ceil(ATT_BLK).next_power_of_two()),
+        }
+    }
+
     pub(super) fn batch_bytes(&self, max: usize, max_ctx: usize) -> usize {
         let (f, kvd) = (4, self.kv_dim());
         let parts = self.n_heads * self.batch_parts(max, max_ctx) * (self.head_dim + 2) * f;
@@ -666,6 +691,7 @@ impl<'g> CudaQwen2<'g> {
         Ok(BatchBufs {
             max,
             nblk_max: Self::nblk_max(max_ctx),
+            att_gy: 0,
             tokens: g.alloc(max * 4)?,
             host_tokens: g.host_alloc(max * 4)?,
             rp: None,
@@ -1502,7 +1528,14 @@ impl<'g> CudaQwen2<'g> {
                 // attn_split_t ATT_SUB queries per launch.
                 let tc = self.tc_attn;
                 let per = if tc { att_per_query(hd) } else { ATT_SUB };
-                let (gy_blk, ms) = (self.max_split.min(b.nblk_max) as u32, self.max_split as u32);
+                // Grid y: a pool step's (set with its graph key), else by
+                // the pass's last query (start is the launch's argument).
+                let gy_blk = match (rows, b.att_gy) {
+                    (true, 0) => self.max_split.min(b.nblk_max),
+                    (true, g) => g,
+                    (false, _) => self.att_grid(b.nblk_max, start + nb - 1),
+                } as u32;
+                let ms = self.max_split as u32;
                 for z0 in (0..nb).step_by(per) {
                     let nz = (nb - z0).min(per) as u32;
                     // (kernel, blocks per kv head and query, threads, the
@@ -2085,6 +2118,11 @@ impl<'g> BatchBufs<'g> {
     /// (`BatchIn::Placed`).
     pub(super) fn x(&self) -> &DevBuf<'g> {
         &self.x
+    }
+
+    /// Blocks of ATT_BLK positions of the cache it's for.
+    pub(super) fn nblk_max(&self) -> usize {
+        self.nblk_max
     }
 
     /// Enqueue the copy of `Place::Rows` into `rp` (a pool's scratch):
