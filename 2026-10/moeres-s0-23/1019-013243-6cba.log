@@ -1,0 +1,29 @@
+[axon-run 01:32:43] submitted 1019-013243-6cba by /home/haseeb/.cache/axon-moeres: /home/haseeb/.cache/axon-moeres/axon-test-wip3 cuda::qwen2::tests::twin:: --nocapture --test-threads 1
+[axon-run 02:37:40] job 1019-013243-6cba -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 1500 --env AXON_NODE_PACK=1 --src /home/haseeb/.cache/axon-wt-moeres /home/haseeb/.cache/axon-moeres/axon-test-wip3 cuda::qwen2::tests::twin:: --nocapture --test-threads 1
+axon-remote: uploading axon-test-wip3 (40c6382bfd75ed447551cf8c) + source of /home/haseeb/.cache/axon-wt-moeres
+
+sent 1,510,056 bytes  received 4,021 bytes  1,009,384.67 bytes/sec
+total size is 5,507,326  speedup is 3.64
+
+sent 6,170,088 bytes  received 35 bytes  4,113,415.33 bytes/sec
+total size is 19,084,064  speedup is 3.09
+axon-remote: job 20261019-023743-axon-test-wip3-1316480 on avante (GPU, 1500 MB)
+[axon-node 02:37:43] GPU slot taken; job wants 1500 MB; nvidia-smi used/total/temp: 15 MiB, 6141 MiB, 59
+[axon-node 02:37:43] run axon-test-wip3 (40c6382bfd75ed447551cf8c) as /home/haseeb/.cache/axon-wt-moeres on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 4 tests
+test cuda::qwen2::tests::twin::gpu_twin_exp_swiglu_match_cpu ... testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+twin exp/swiglu: 1248266 inputs, F true and false, equal (host fused true)
+ok
+test cuda::qwen2::tests::twin::gpu_twin_gemm2s_matches_cpu_r8 ... twin gemm2s: equal for every shape and batch; plain gemm2s differs on 252574
+ok
+test cuda::qwen2::tests::twin::gpu_twin_gemv_matches_cpu_r8 ... twin gemv: equal on every shape; plain gemv1 differs on 10529 rows
+ok
+test cuda::qwen2::tests::twin::gpu_twin_quant_matches_cpu ... twin quant: 60 vectors, every view equal
+ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 618 filtered out; finished in 103.17s
+
+[axon-node 02:39:27] exit 0 after 103.3s
+[axon-node 02:39:27] peak RSS 621 MB (job process tree PSS, 2 s samples x51)
+[axon-run 02:39:27] exit 0 after 106.9s (host avante)

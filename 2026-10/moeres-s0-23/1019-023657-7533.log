@@ -1,0 +1,33 @@
+[axon-run 02:36:57] submitted 1019-023657-7533 by /home/haseeb/.cache/axon-moeres: /home/haseeb/.cache/axon-moeres/s0-bella-23.sh 3
+[axon-run 06:14:33] job 1019-023657-7533 -> bella: /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-moeres/s0-bella-23.sh 3
+               total        used        free      shared  buff/cache   available
+Mem:           31487       17360        7568        8371       15683       14127
+== S0.2 prefill pp510, AXON_THREADS 12 / 24 / default, 3 rounds interleaved
+-- round 1 temp gpu 62C
+Mem:           31487       17351        7577        8371       15683       14136
+S02 r1 t12 prompt eval: 510 tok in 0.99s (515.42 tok/s)
+S02 r1 t24 prompt eval: 510 tok in 0.68s (745.30 tok/s)
+S02 r1 tdef prompt eval: 510 tok in 0.73s (697.66 tok/s)
+-- round 2 temp gpu 61C
+Mem:           31487       17173       12428        8374       11013       14314
+S02 r2 t12 prompt eval: 510 tok in 0.82s (625.22 tok/s)
+S02 r2 t24 prompt eval: 510 tok in 0.81s (625.87 tok/s)
+S02 r2 tdef prompt eval: 510 tok in 0.71s (716.60 tok/s)
+-- round 3 temp gpu 59C
+Mem:           31487       16908       12714        8356       10974       14579
+S02 r3 t12 prompt eval: 510 tok in 0.80s (641.10 tok/s)
+[axon-run 06:15:05] FOREIGN_GPU sample max=7% mean=2.0% n=6 (Xorg 2750643 1%)
+S02 r3 t24 prompt eval: 510 tok in 0.69s (743.84 tok/s)
+S02 r3 tdef prompt eval: 510 tok in 0.73s (697.46 tok/s)
+== S0.3 decode profile
+moe:         attention + router on the GPU (0.92 GiB, ctx 146), 64 experts x 26 layers on the CPU (top-6), kv f16
+[moe profile] per step (ms): gpu segments (synced) 3.647, waits for the router 0.017, cpu experts 11.852 (64 steps)
+prompt eval: 17 tok in 0.10s (165.73 tok/s)
+decode:      128 tok, 127 passes in 2.04s (62.36 tok/s)
+identity:    fp_0b2bb3694d89e3d4
+draft:       off
+prompt eval: 17 tok in 0.10s (170.64 tok/s)
+decode:      128 tok, 127 passes in 2.03s (62.69 tok/s)
+Mem:           31487       16837       12712        8368       11059       14650
+[axon-run 06:15:26] exit 0 after 53.7s (host bella)
+[axon-run 06:15:28] FOREIGN_GPU max=7% mean=1.8% samples=9 top: Xorg 2750643 7%

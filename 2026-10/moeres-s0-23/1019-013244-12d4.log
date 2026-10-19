@@ -1,0 +1,18 @@
+[axon-run 01:32:44] submitted 1019-013244-12d4 by /home/haseeb/.cache/axon-moeres: /home/haseeb/.cache/axon-moeres/axon-test-wip3 cuda::qwen2::tests::twin:: --nocapture --test-threads 1
+[axon-run 02:38:22] job 1019-013244-12d4 -> bella: /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-moeres/axon-test-wip3 cuda::qwen2::tests::twin:: --nocapture --test-threads 1
+axon-q 02:38:22 start slot 16-23: /home/haseeb/.cache/axon-moeres/axon-test-wip3 cuda::qwen2::tests::twin:: --nocapture --test-threads 1
+
+running 4 tests
+test cuda::qwen2::tests::twin::gpu_twin_exp_swiglu_match_cpu ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+twin exp/swiglu: 1248266 inputs, F true and false, equal (host fused true)
+ok
+test cuda::qwen2::tests::twin::gpu_twin_gemm2s_matches_cpu_r8 ... twin gemm2s: equal for every shape and batch; plain gemm2s differs on 252574
+ok
+test cuda::qwen2::tests::twin::gpu_twin_gemv_matches_cpu_r8 ... twin gemv: equal on every shape; plain gemv1 differs on 10529 rows
+ok
+test cuda::qwen2::tests::twin::gpu_twin_quant_matches_cpu ... twin quant: 60 vectors, every view equal
+ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 618 filtered out; finished in 58.21s
+
+[axon-run 02:39:20] exit 0 after 58.4s (host bella)
