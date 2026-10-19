@@ -737,8 +737,12 @@ impl Lm for Backend<'_> {
         cache: &BackendCache,
     ) -> Vec<std::ops::Range<usize>> {
         match (self, cache) {
+            (Backend::Cpu(net), BackendCache::Cpu(c)) => net.prompt_chunks(n, start, c),
             (Backend::Cuda(net), BackendCache::Cuda(c)) => net.prompt_chunks(n, start, c),
-            _ => chunk_ranges(n, self.prefill_batch()),
+            (Backend::Hybrid(net), BackendCache::Hybrid(c)) => net.prompt_chunks(n, start, c),
+            (Backend::Pipeline(net), BackendCache::Pipeline(c)) => net.prompt_chunks(n, start, c),
+            (Backend::Moe(net), BackendCache::Moe(c)) => net.prompt_chunks(n, start, c),
+            _ => panic!("a cache of another backend"),
         }
     }
 }

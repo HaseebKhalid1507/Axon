@@ -7935,7 +7935,10 @@ fn gpu_prompt_chunks_bits() {
             net.feed_batch(&ids[..from], 0, &mut c);
         }
         let rs = net.prompt_chunks(n - 1 - from, from, &c);
-        assert_eq!(rs, net.prompt_passes(&c, n - 1 - from, from));
+        // Multi-pass and not the old fixed prefill_batch cut (equal or
+        // wave-sized passes: either differs from 1152 + the rest here).
+        assert!(rs.len() >= 2);
+        assert_ne!(rs, crate::lm::chunk_ranges(n - 1 - from, max));
         assert_eq!((rs[0].start, rs.last().unwrap().end), (0, n - 1 - from));
         assert!(rs.windows(2).all(|w| w[0].end == w[1].start));
         assert!(rs.iter().all(|r| !r.is_empty() && r.len() <= max));
@@ -7963,10 +7966,25 @@ fn gpu_prompt_chunks_bits() {
             }
         }
         assert_eq!(bits(&l), bits(&dec), "chat's way from {from}: logits");
+        assert!(
+            kv_bytes(&net, &c, n) == kv_bytes(&net, &d, n),
+            "chat's way from {from}: KV"
+        );
         eprintln!(
-            "prompt_chunks from {from}: {:?} / {:?} == per-token decode",
-            rs.iter().map(|r| r.len()).collect::<Vec<_>>(),
-            net.prompt_chunks(n - 1 - from, from, &c).len()
+            "prompt_chunks from {from}: {:?} == per-token decode",
+            rs.iter().map(|r| r.len()).collect::<Vec<_>>()
+        );
+    }
+    // Exactly one pass (n == the batch max) and just under: one range,
+    // and its KV rows are the decode's.
+    for k in [max, max - 1] {
+        let mut c = net.new_cache(n + 1);
+        let rs = net.prompt_chunks(k, 0, &c);
+        assert_eq!(rs, vec![0..k], "{k} tokens: one pass");
+        net.feed_batch(&ids[..k], 0, &mut c);
+        assert!(
+            kv_bytes(&net, &c, k) == kv_bytes(&net, &d, k),
+            "{k} tokens: KV"
         );
     }
 }
