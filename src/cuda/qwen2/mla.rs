@@ -331,6 +331,12 @@ pub struct MlaBufs<'g> {
     graph_gen: u64,
 }
 
+/// AXON_MOE_PROFILE=1 (read once per process).
+fn profile_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("AXON_MOE_PROFILE").is_ok_and(|v| v == "1"))
+}
+
 /// `b` (4-byte aligned) as floats in place.
 fn as_f32(b: &[u8]) -> &[f32] {
     // SAFETY: any 4 bytes are a valid f32.
@@ -442,9 +448,7 @@ impl<'g> CudaQwen2<'g> {
             graphs: (0..=2 * self.n_layers).map(|_| None).collect(),
             graph_gen: 0,
             ev: g.new_event()?,
-            prof: std::env::var("AXON_MOE_PROFILE")
-                .is_ok_and(|v| v == "1")
-                .then_some([0.0; 4]),
+            prof: profile_on().then_some([0.0; 4]),
         })
     }
 
@@ -762,7 +766,7 @@ impl<'g> CudaQwen2<'g> {
                 MlaFfn::Moe {
                     router,
                     bias,
-                    shared,
+                    shared: _, // mla_shared, after the router's copy down
                 } => {
                     let e = self.moe_dims();
                     let (n_e, k) = (e.n_expert, e.k);
@@ -801,7 +805,6 @@ impl<'g> CudaQwen2<'g> {
                             mb.r.arg_at(hb + nb * k * 4),
                         ],
                     )?;
-                    let _ = shared; // mla_shared, after the router's copy down
                 }
             }
         }

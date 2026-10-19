@@ -211,9 +211,60 @@ fn ds2_gpu_fixture_graded() {
             "ds2 fixture {o:?} vs the f64 reference ({n} positions): gpu top-1 {gt}, mean \
              |dlogit| {gm:.4}, max {gx:.3}; cpu top-1 {ct}, mean {cm:.4}, max {cx:.3}"
         );
-        assert!(gm <= 1.5 * cm, "{o:?}: gpu mean |dlogit| {gm} vs cpu {cm}");
-        assert!(gt + 2 >= ct, "{o:?}: gpu top-1 {gt} vs cpu {ct}");
+        assert!(
+            graded_ok((gt, gm), (ct, cm)),
+            "{o:?}: gpu top-1 {gt}, mean |dlogit| {gm} vs cpu {ct}, {cm}"
+        );
     }
+}
+
+/// `ds2_gpu_fixture_graded`'s criterion: a model's (top-1, mean |dlogit|)
+/// against the reference, given the CPU model's.
+fn graded_ok((top, mean): (usize, f64), (ct, cm): (usize, f64)) -> bool {
+    mean <= 1.5 * cm && top + 2 >= ct
+}
+
+/// Whether `ds2_gpu_fixture_graded`'s criterion has teeth: each of stage
+/// 0's deliberate bugs, run through the f64 reference (a GPU model with
+/// that bug would sit about there), graded against the correct reference
+/// with the CPU model as the yardstick, must fail it. CPU only.
+#[test]
+fn ds2_fixture_graded_criterion_catches_bugs() {
+    use crate::model::deepseek2_tests::{Bug, deepseek2_ref};
+    let mut slipped = Vec::new();
+    for o in OPTS {
+        let (mc, raw) = ds2_fixture(o, crate::quant::Q8_0);
+        let (mr, _) = ds2_fixture(o, crate::quant::Q8_0);
+        let n = if o.yarn { 160 } else { 60 };
+        let ids = ids_for(n, FX_VOCAB, 7);
+        let r = deepseek2_ref(&mr, &raw, &ids, Bug::None);
+        let (ct, cm, _) = vs_ref(&r, &decode_all(&Qwen2::new(&mc), &ids));
+        let bugs = [
+            Bug::RopeWrongPart,
+            Bug::ScaleOfKeyRow,
+            Bug::BiasInWeights,
+            Bug::ScaleBeforeRenorm,
+            Bug::NormOverRow,
+            Bug::NoYarn,
+            Bug::MscaleOnTable,
+            Bug::NoMscale,
+        ];
+        for bug in bugs {
+            if !o.yarn && matches!(bug, Bug::NoYarn | Bug::MscaleOnTable | Bug::NoMscale) {
+                continue; // no YaRN: the same model
+            }
+            let (bt, bm, bx) = vs_ref(&r, &deepseek2_ref(&mr, &raw, &ids, bug));
+            eprintln!(
+                "{o:?} {bug:?}: top-1 {bt} (cpu {ct}), mean |dlogit| {bm:.4} = {:.1}x cpu's \
+                 {cm:.4}, max {bx:.3}",
+                bm / cm
+            );
+            if graded_ok((bt, bm), (ct, cm)) {
+                slipped.push((o, bug));
+            }
+        }
+    }
+    assert!(slipped.is_empty(), "bugs the criterion misses: {slipped:?}");
 }
 
 /// Gate (b) and (e) on Moonlight (AXON_TEST_DS2=1): a 200-token prompt

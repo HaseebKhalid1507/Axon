@@ -340,10 +340,34 @@ fn mla_topk_matches_cpu_rule() {
 
 /// The MLA module compiles (NVRTC, no GPU needed) for sm_70 (no tensor
 /// cores; the MLA kernels use none), sm_80 and sm_90, with every weight
-/// type (its deq). Skipped without NVRTC.
+/// type (its deq), and the constants mla.rs mirrors match its #defines.
+/// Compiling is skipped without NVRTC.
 #[test]
 fn mla_kernels_compile_for_archs() {
     use crate::cuda::{KERNEL_OPTS_EXT, MLA_KERNELS, Target, compile, ffi};
+    // The constants mla.rs mirrors are the source's (a drift would launch
+    // with the wrong shapes silently).
+    for (name, v) in [
+        ("MLA_TILE", MLA_TILE),
+        ("MLA_MV_T", MLA_MV_T),
+        ("MLA_MAX_SPLITS", MLA_MAX_SPLITS),
+        ("MLA_MAXI", MLA_MAX_KROW / 64),
+        ("MLA_THREADS", 256),
+        ("MOE_THREADS", MOE_THREADS as usize),
+        ("MOE_LG_WARPS", MOE_LG_WARPS),
+    ] {
+        let d = format!("#define {name} {v}");
+        assert!(
+            MLA_KERNELS.lines().any(|l| l.starts_with(&d)
+                && l[d.len()..]
+                    .trim_start()
+                    .chars()
+                    .next()
+                    .is_none_or(|c| c == '/')),
+            "{d} not in the MLA module's source"
+        );
+    }
+    assert!(MLA_SPLIT.is_multiple_of(MLA_TILE));
     let n = match ffi::nvrtc() {
         Ok(n) => n,
         Err(e) => {

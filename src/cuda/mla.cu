@@ -346,7 +346,8 @@ mla_topk(const float* __restrict__ logits, int n_e, int k, int sigm,
         float bv = __int_as_float(0xff800000);
         int bi = 0x7fffffff;
         for (int e = t; e < n_e; e += MOE_THREADS)
-            if (sel[e] == sel[e] && moe_beats(sel[e], e, bv, bi)) {
+            // Finite only: NaN never, taken experts (-inf) never again.
+            if (sel[e] > __int_as_float(0xff800000) && moe_beats(sel[e], e, bv, bi)) {
                 bv = sel[e];
                 bi = e;
             }
@@ -361,6 +362,11 @@ mla_topk(const float* __restrict__ logits, int n_e, int k, int sigm,
             __syncthreads();
         }
         if (t == 0) {
+#ifdef MLA_DEBUG
+            // No finite selection score left (a NaN router): debug builds
+            // stop here; release ones route to expert 0 (a NaN weight).
+            if (rid[0] == 0x7fffffff) __trap();
+#endif
             int e = rid[0] == 0x7fffffff ? 0 : rid[0];
             ids[tok * k + r] = e;
             w[tok * k + r] = p[e];
