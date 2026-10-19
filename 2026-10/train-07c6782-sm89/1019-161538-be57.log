@@ -1,0 +1,159 @@
+[axon-run 16:15:38] submitted 1019-161538-be57 by axon-sm89: /home/haseeb/.cache/axon-sm89/axon-test-07c6782 wave_passes_shapes gpu_prompt_chunks_bits long_turn_matches_fresh_prefill_cuda serve_cuda_long_prompt_matches_gen lm_chunk_ranges _bits bit_identical prefill_logits_match_forward swiglu_epilogue_and_gate_up products_match tile_t paged_tests::
+[axon-run 16:15:38] job 1019-161538-be57 -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 5000 --env AXON_NODE_PACK=1 --src /home/haseeb/.cache/axon-wt-gptoss1 /home/haseeb/.cache/axon-sm89/axon-test-07c6782 wave_passes_shapes gpu_prompt_chunks_bits long_turn_matches_fresh_prefill_cuda serve_cuda_long_prompt_matches_gen lm_chunk_ranges _bits bit_identical prefill_logits_match_forward swiglu_epilogue_and_gate_up products_match tile_t paged_tests::
+axon-remote: uploading axon-test-07c6782 (68af1bfbffe3730fd6aedb50) + source of /home/haseeb/.cache/axon-wt-gptoss1
+
+sent 1,661,570 bytes  received 4,283 bytes  3,331,706.00 bytes/sec
+total size is 6,028,916  speedup is 3.62
+
+sent 6,578,105 bytes  received 35 bytes  4,385,426.67 bytes/sec
+total size is 21,062,568  speedup is 3.20
+axon-remote: job 20261019-161541-axon-test-07c6782-3143448 on avante (GPU, 5000 MB)
+[axon-node 16:15:43] GPU slot taken; job wants 5000 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 44
+[axon-node 16:15:43] run axon-test-07c6782 (68af1bfbffe3730fd6aedb50) as /home/haseeb/.cache/axon-wt-gptoss1 on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 61 tests
+test cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_llama ... FAILED
+test cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_qwen25 ... FAILED
+test cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_qwen3 ... FAILED
+testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test chat::tests::long_turn_matches_fresh_prefill_cuda ... FAILED
+test cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_gemma3 ... ok
+test cuda::qwen2::paged_tests::gpu_paged_attention_bits has been running for over 60 seconds
+test cuda::qwen2::paged_tests::gpu_paged_gemma_window_bits has been running for over 60 seconds
+test cuda::qwen2::paged_tests::gpu_paged_split_and_batched_bits has been running for over 60 seconds
+test cuda::qwen2::paged_tests::gpu_paged_store_bits has been running for over 60 seconds
+test cuda::qwen2::paged_tests::gpu_paged_split_and_batched_bits ... ok
+test cuda::qwen2::tests::gpu_batched_attention_matches_decode_bits ... ok
+test cuda::qwen2::tests::gpu_batched_products_match_gemv_bits ... FAILED
+test cuda::qwen2::tests::gpu_bits_llama_3b_8b ... ok
+test cuda::qwen2::tests::gpu_decode_cache_size_same_bits ... FAILED
+test cuda::qwen2::tests::gpu_ext_module_same_bits_old_types has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_ext_module_same_bits_old_types ... ok
+test cuda::qwen2::paged_tests::gpu_paged_store_bits ... ok
+test cuda::qwen2::tests::gpu_gemmh_matches_reference_bits ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_0_5b ... FAILED
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_1_5b ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_llama ... FAILED
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q2k_q3k ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_0_5b ... FAILED
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_1_5b ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_qwen3 ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_qwen3_4b ... ok
+test cuda::qwen2::tests::gpu_prefill_logits_match_forward_big ... ok
+test cuda::qwen2::tests::gpu_prefill_wave_split_bits ... ok
+test cuda::qwen2::tests::gpu_products_match_reference_bits ... ok
+test cuda::qwen2::tests::gpu_prompt_chunks_bits ... FAILED
+test cuda::qwen2::tests::gpu_split_attention_matches_decode_bits ... ok
+test cuda::qwen2::tests::gpu_swiglu_epilogue_and_gate_up_match_reference ... ok
+test cuda::qwen2::tests::gpu_yarn_matches_reference_and_keeps_bits ... ok
+test cuda::qwen2::tests::lm_chunk_ranges ... ok
+test cuda::qwen2::tests::tile_t_picks ... ok
+test cuda::qwen2::tests::wave_passes_shapes ... ok
+test cuda::qwen2::paged_tests::gpu_paged_gemma_window_bits ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_0_5b ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_1_5b ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_llama ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_q8_0_5b ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_q8_1_5b ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_qwen3 ... ok
+test hybrid::tests::stream_prefill_is_gpu_bits_0_5b ... ok
+test hybrid::tests::stream_prefill_is_gpu_bits_1_5b ... ok
+test hybrid::tests::stream_prefill_is_gpu_bits_llama ... ok
+test hybrid::tests::stream_prefill_is_gpu_bits_qwen3 ... ok
+test hybrid::tests::stream_q8_prefill_bits_0_5b ... ok
+test hybrid::tests::stream_q8_prefill_bits_1_5b ... ok
+test model::deepseek2_tests::deepseek2_batch_matches_decode_bits ... ok
+test model::deepseek2_tests::deepseek2_long_batch_matches_decode_bits ... ok
+test model::deepseek2_tests::deepseek2_moonlight_bits ... ok
+test model::gptoss_tests::gpt_oss_decode_batch_verify_bits ... ok
+test model::gptoss_tests::gpt_oss_model_bits ... ok
+test model::tests::multiversion_bit_identical ... ok
+test cuda::qwen2::paged_tests::gpu_paged_attention_bits ... ok
+test moe::ds2_tests::ds2_gpu_moonlight_bits ... ok
+test cuda::qwen2::tests::gpu_gemma3_prefill_and_verify_bits ... ok
+test quant::mxfp4::tests::dequant_matches_llama_cpp_bits ... ok
+test quant::tests::multiversion_quantize_bit_identical ... ok
+test quant::mxfp4::tests::every_path_same_bits ... ok
+test quant::tests::q_1_simd_bits_match_scalar ... ok
+test serve::tests::serve_cuda_long_prompt_matches_gen ... FAILED
+test quant::tests::q2_k_q3_k_simd_bits_match_scalar ... ok
+test moe::ds2_tests::ds2_gpu_fixture_bits ... ok
+test hybrid::tests::hybrid_ends_are_the_backends_bits ... ok
+
+failures:
+
+---- cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_llama stdout ----
+
+thread 'cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_llama' (3143471) panicked at src/testutil.rs:96:9:
+/home/haseeb/.cache/axon-train/wt/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf is missing. Download Llama-3.2-1B-Instruct-Q4_K_M.gguf (bartowski/Llama-3.2-1B-Instruct-GGUF), or set AXON_SKIP_MODEL_TESTS=1 to skip the tests that need it.
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_qwen25 stdout ----
+
+thread 'cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_qwen25' (3143472) panicked at src/testutil.rs:36:9:
+models/qwen2.5-0.5b-q4_k_m.gguf is missing. Download it (see CONTRIBUTING.md), or set AXON_SKIP_MODEL_TESTS=1 to skip the tests that need it.
+
+---- cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_qwen3 stdout ----
+
+thread 'cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_qwen3' (3143474) panicked at src/testutil.rs:68:9:
+/home/haseeb/.cache/axon-train/wt/models/Qwen3-0.6B-Q8_0.gguf is missing. Download Qwen3-0.6B-Q8_0.gguf (Qwen/Qwen3-0.6B-GGUF), or set AXON_SKIP_MODEL_TESTS=1 to skip the tests that need it.
+
+---- chat::tests::long_turn_matches_fresh_prefill_cuda stdout ----
+
+thread 'chat::tests::long_turn_matches_fresh_prefill_cuda' (3143468) panicked at src/testutil.rs:36:9:
+models/qwen2.5-0.5b-q4_k_m.gguf is missing. Download it (see CONTRIBUTING.md), or set AXON_SKIP_MODEL_TESTS=1 to skip the tests that need it.
+
+---- cuda::qwen2::tests::gpu_batched_products_match_gemv_bits stdout ----
+
+thread 'cuda::qwen2::tests::gpu_batched_products_match_gemv_bits' (3143542) panicked at src/testutil.rs:36:9:
+models/qwen2.5-0.5b-q4_k_m.gguf is missing. Download it (see CONTRIBUTING.md), or set AXON_SKIP_MODEL_TESTS=1 to skip the tests that need it.
+
+---- cuda::qwen2::tests::gpu_decode_cache_size_same_bits stdout ----
+
+thread 'cuda::qwen2::tests::gpu_decode_cache_size_same_bits' (3143544) panicked at src/testutil.rs:36:9:
+models/qwen2.5-0.5b-q4_k_m.gguf is missing. Download it (see CONTRIBUTING.md), or set AXON_SKIP_MODEL_TESTS=1 to skip the tests that need it.
+
+---- cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_0_5b stdout ----
+
+thread 'cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_0_5b' (3143589) panicked at src/testutil.rs:36:9:
+models/qwen2.5-0.5b-q4_k_m.gguf is missing. Download it (see CONTRIBUTING.md), or set AXON_SKIP_MODEL_TESTS=1 to skip the tests that need it.
+
+---- cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_llama stdout ----
+
+thread 'cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_llama' (3143591) panicked at src/testutil.rs:96:9:
+/home/haseeb/.cache/axon-train/wt/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf is missing. Download Llama-3.2-1B-Instruct-Q4_K_M.gguf (bartowski/Llama-3.2-1B-Instruct-GGUF), or set AXON_SKIP_MODEL_TESTS=1 to skip the tests that need it.
+
+---- cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_0_5b stdout ----
+
+thread 'cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_0_5b' (3143593) panicked at src/testutil.rs:36:9:
+models/qwen2.5-0.5b-q4_k_m.gguf is missing. Download it (see CONTRIBUTING.md), or set AXON_SKIP_MODEL_TESTS=1 to skip the tests that need it.
+
+---- cuda::qwen2::tests::gpu_prompt_chunks_bits stdout ----
+
+thread 'cuda::qwen2::tests::gpu_prompt_chunks_bits' (3143600) panicked at src/testutil.rs:36:9:
+models/qwen2.5-0.5b-q4_k_m.gguf is missing. Download it (see CONTRIBUTING.md), or set AXON_SKIP_MODEL_TESTS=1 to skip the tests that need it.
+
+---- serve::tests::serve_cuda_long_prompt_matches_gen stdout ----
+
+thread 'serve::tests::serve_cuda_long_prompt_matches_gen' (3143657) panicked at src/testutil.rs:36:9:
+models/qwen2.5-0.5b-q4_k_m.gguf is missing. Download it (see CONTRIBUTING.md), or set AXON_SKIP_MODEL_TESTS=1 to skip the tests that need it.
+
+
+failures:
+    chat::tests::long_turn_matches_fresh_prefill_cuda
+    cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_llama
+    cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_qwen25
+    cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_qwen3
+    cuda::qwen2::tests::gpu_batched_products_match_gemv_bits
+    cuda::qwen2::tests::gpu_decode_cache_size_same_bits
+    cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_0_5b
+    cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_llama
+    cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_0_5b
+    cuda::qwen2::tests::gpu_prompt_chunks_bits
+    serve::tests::serve_cuda_long_prompt_matches_gen
+
+test result: FAILED. 50 passed; 11 failed; 0 ignored; 0 measured; 616 filtered out; finished in 172.89s
+
+[axon-node 16:18:36] exit 101 after 173.0s
+[axon-node 16:18:36] peak RSS 1508 MB (job process tree PSS, 2 s samples x86)
+[axon-run 16:18:37] exit 101 after 178.4s (host avante)
