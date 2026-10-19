@@ -1,0 +1,6 @@
+[axon-run 04:09:21] submitted 1019-040921-690d by /home/haseeb/.cache/axon-st: /home/haseeb/.cache/axon-st/gatesB.sh /home/haseeb/.cache/axon-st/axon-14ea340 /home/haseeb/Projects/axon/models/hf/Llama-3.2-1B-Instruct /home/haseeb/Projects/axon/models/Llama-3.2-1B-Instruct-F16.gguf /home/haseeb/.cache/axon-st/runs/gatesB-llama-14ea340
+[axon-run 04:51:37] job 1019-040921-690d -> bella: /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-st/gatesB.sh /home/haseeb/.cache/axon-st/axon-14ea340 /home/haseeb/Projects/axon/models/hf/Llama-3.2-1B-Instruct /home/haseeb/Projects/axon/models/Llama-3.2-1B-Instruct-F16.gguf /home/haseeb/.cache/axon-st/runs/gatesB-llama-14ea340
+axon-q 04:51:37 start slot 8-15: /home/haseeb/.cache/axon-st/gatesB.sh /home/haseeb/.cache/axon-st/axon-14ea340 /home/haseeb/Projects/axon/models/hf/Llama-3.2-1B-Instruct /home/haseeb/Projects/axon/models/Llama-3.2-1B-Instruct-F16.gg
+lines per logits file: 128258
+B: 50 prompts, 0 differ, 0 nonzero rc
+[axon-run 05:58:12] exit 0 after 3995.0s (host bella)

@@ -1,0 +1,38 @@
+[axon-run 04:09:21] submitted 1019-040921-9ab5 by /home/haseeb/.cache/axon-st: /home/haseeb/.cache/axon-st/gates.sh /home/haseeb/.cache/axon-st/axon-14ea340 /home/haseeb/.cache/axon-st/axon-base-ecb53b7 /home/haseeb/.cache/axon-st/axon-test-14ea340 /home/haseeb/.cache/axon-st/runs/gates-14ea340
+[axon-run 04:31:35] job 1019-040921-9ab5 -> bella: /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-st/gates.sh /home/haseeb/.cache/axon-st/axon-14ea340 /home/haseeb/.cache/axon-st/axon-base-ecb53b7 /home/haseeb/.cache/axon-st/axon-test-14ea340 /home/haseeb/.cache/axon-st/runs/gates-14ea340
+axon-q 04:31:35 start slot 16-23: /home/haseeb/.cache/axon-st/gates.sh /home/haseeb/.cache/axon-st/axon-14ea340 /home/haseeb/.cache/axon-st/axon-base-ecb53b7 /home/haseeb/.cache/axon-st/axon-test-14ea340 /home/haseeb/.cache/axon-st/ru
+== A unit tests
+qwen2.5: 193 texts token for token
+test safetensors::tests::qwen25_metadata_and_tokenizer_match_gguf ... ok
+test safetensors::tests::qwen3_metadata_and_tokenizer_match_gguf ... ok
+test safetensors::tests::llama32_metadata_tokenizer_and_rope_freqs_match_gguf ... ok
+test safetensors::tests::qwen25_tensors_match_gguf_f16 ... ok
+test safetensors::tests::llama32_tensors_match_gguf_f16 ... ok
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 641 filtered out; finished in 2.69s
+== B 50 prompts x {dir, 2-shard, gguf}
+B: 50 prompts, 0 differ, 0 nonzero rc
+lines per logits file: 151938  gen tokens (p1): decode:      128 tok
+== C md5 vs main (GGUF, CPU)
+C: 0 of 20 differ; 0 nonzero rc
+== D load time (gen Hi -n 1, wall s; 2 warm-ups each, 15 interleaved reps)
+dir n=15 median 0.458  all: 0.490 0.479 0.493 0.462 0.458 0.447 0.438 0.441 0.456 0.443 0.444 0.431 0.574 0.737 0.699 
+dir2 n=15 median 0.477  all: 0.463 0.492 0.485 0.463 0.486 0.453 0.477 0.472 0.453 0.473 0.472 0.720 0.598 0.708 0.713 
+gguf n=15 median 0.578  all: 0.652 0.607 0.619 0.573 0.518 0.578 0.550 0.561 0.532 0.578 0.468 1.516 1.533 1.557 1.601 
+== E GPU refusal
+axon: --device cuda: a safetensors checkpoint runs on the CPU only for now (--device cpu): its BF16/F16 matrices have no GPU kernels; GPU support for safetensors weights comes with the FP8 stage B
+try 'axon --help'
+== info (dir, head)
+axon v0.1.0
+
+qwen2 | 24L / 896d / 14h (kv 2) | ctx 32768
+290 tensors | 0.49B params | 942.4 MB
+safetensors checkpoint /home/haseeb/Projects/axon/models/hf/Qwen2.5-0.5B-Instruct (4 files); tensors (HF name -> GGUF name, type, dims):
+  model.embed_tokens.weight -> token_embd.weight F16 (from BF16) [896, 151936]
+  model.norm.weight -> output_norm.weight F32 (from BF16) [896]
+  model.layers.0.input_layernorm.weight -> blk.0.attn_norm.weight F32 (from BF16) [896]
+  model.layers.0.mlp.down_proj.weight -> blk.0.ffn_down.weight F16 (from BF16) [4864, 896]
+  model.layers.0.mlp.gate_proj.weight -> blk.0.ffn_gate.weight F16 (from BF16) [896, 4864]
+  model.layers.0.mlp.up_proj.weight -> blk.0.ffn_up.weight F16 (from BF16) [896, 4864]
+  model.layers.0.post_attention_layernorm.weight -> blk.0.ffn_norm.weight F32 (from BF16) [896]
+GATES: 0 failed
+[axon-run 05:16:16] exit 0 after 2680.6s (host bella)
