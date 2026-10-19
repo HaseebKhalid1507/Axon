@@ -1,0 +1,13 @@
+[axon-run 04:01:39] submitted 1019-040139-682f by axon-gemm128: /home/haseeb/.cache/axon-gemm128/axon-test-005444e --ignored --exact cuda::qwen2::tests::cuda_prefill_profile --nocapture
+[axon-run 06:15:28] job 1019-040139-682f -> bella: /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-gemm128/axon-test-005444e --ignored --exact cuda::qwen2::tests::cuda_prefill_profile --nocapture
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+[axon-run 06:16:00] FOREIGN_GPU sample max=0% mean=0.0% n=6
+TILE_AB models/Qwen2.5-7B-Instruct-Q4_K_M.gguf nb 1050 at 0: gemm2s 224.31 ms (4681 tok/s), gemm2t 191.21 ms (5491 tok/s): +17.3 % tok/s (7 rounds)
+test cuda::qwen2::tests::cuda_prefill_profile ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 629 filtered out; finished in 52.45s
+
+[axon-run 06:16:20] exit 0 after 52.5s (host bella)
+[axon-run 06:16:25] FOREIGN_GPU max=0% mean=0.0% samples=10

@@ -1,0 +1,38 @@
+[axon-run 04:01:40] submitted 1019-040140-5bbf by axon-gemm128: /home/haseeb/.cache/axon-gemm128/axon-test-005444e cuda::qwen2::tests::cuda_gemm_tile_bench --exact --ignored --nocapture
+[axon-run 06:16:25] job 1019-040140-5bbf -> bella: /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-gemm128/axon-test-005444e cuda::qwen2::tests::cuda_gemm_tile_bench --exact --ignored --nocapture
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+NVIDIA GeForce RTX 5070 Ti Laptop GPU sm_120 46 SMs
+REGS gemm2s_q4_k: 185 regs, 0 local bytes
+REGS gemm2s_q4_k_gu: 189 regs, 0 local bytes
+REGS gemm2t_q4_k: 255 regs, 0 local bytes
+REGS gemm2t_q5_k: 255 regs, 0 local bytes
+REGS gemm2t_q4_k_gu: 255 regs, 0 local bytes
+[axon-run 06:16:57] FOREIGN_GPU sample max=0% mean=0.0% n=6
+TILE gate nb 1024  gemm2s_q4_k     median  34.38 TMAC/s (min 34.05 max 34.73) clk 2400 MHz -> 311 MAC/clk/SM
+TILE gate nb 1024  gemm2t_q4_k     median  43.22 TMAC/s (min 42.86 max 43.54) clk 2415 MHz -> 389 MAC/clk/SM
+TILE down nb 1024  gemm2s_q4_k     median  35.77 TMAC/s (min 31.65 max 36.09) clk 2482 MHz -> 313 MAC/clk/SM
+TILE down nb 1024  gemm2t_q4_k     median  45.06 TMAC/s (min 44.33 max 46.26) clk 2385 MHz -> 411 MAC/clk/SM
+TILE q/wo nb 1024  gemm2s_q4_k     median  34.86 TMAC/s (min 34.40 max 35.69) clk 2400 MHz -> 316 MAC/clk/SM
+TILE q/wo nb 1024  gemm2t_q4_k     median  44.40 TMAC/s (min 43.55 max 44.79) clk 2349 MHz -> 411 MAC/clk/SM
+TILE kv   nb 1024  gemm2s_q4_k     median  33.42 TMAC/s (min 33.21 max 33.83) clk 2370 MHz -> 307 MAC/clk/SM
+TILE kv   nb 1024  gemm2t_q4_k     median  34.16 TMAC/s (min 33.90 max 34.17) clk 2368 MHz -> 314 MAC/clk/SM
+TILE gu   nb 1024  gemm2s_q4_k_gu  median  33.37 TMAC/s (min 33.06 max 34.48) clk 2377 MHz -> 305 MAC/clk/SM
+TILE gu   nb 1024  gemm2t_q4_k_gu  median  41.85 TMAC/s (min 41.52 max 42.22) clk 2392 MHz -> 380 MAC/clk/SM
+TILE gate nb 1088  gemm2s_q4_k     median  34.53 TMAC/s (min 34.09 max 37.31) clk 2378 MHz -> 316 MAC/clk/SM
+TILE gate nb 1088  gemm2t_q4_k     median  43.21 TMAC/s (min 40.26 max 43.79) clk 2422 MHz -> 388 MAC/clk/SM
+TILE down nb 1088  gemm2s_q4_k     median  36.32 TMAC/s (min 35.78 max 36.76) clk 2382 MHz -> 332 MAC/clk/SM
+TILE down nb 1088  gemm2t_q4_k     median  43.86 TMAC/s (min 43.67 max 44.48) clk 2370 MHz -> 402 MAC/clk/SM
+TILE q/wo nb 1088  gemm2s_q4_k     median  35.08 TMAC/s (min 34.62 max 36.67) clk 2385 MHz -> 320 MAC/clk/SM
+TILE q/wo nb 1088  gemm2t_q4_k     median  43.09 TMAC/s (min 42.44 max 43.65) clk 2362 MHz -> 397 MAC/clk/SM
+TILE kv   nb 1088  gemm2s_q4_k     median  34.78 TMAC/s (min 34.59 max 34.93) clk 2370 MHz -> 319 MAC/clk/SM
+TILE kv   nb 1088  gemm2t_q4_k     median  35.75 TMAC/s (min 35.40 max 36.26) clk 2392 MHz -> 325 MAC/clk/SM
+TILE gu   nb 1088  gemm2s_q4_k_gu  median  33.56 TMAC/s (min 33.18 max 34.12) clk 2378 MHz -> 307 MAC/clk/SM
+TILE gu   nb 1088  gemm2t_q4_k_gu  median  41.58 TMAC/s (min 41.05 max 42.50) clk 2418 MHz -> 374 MAC/clk/SM
+test cuda::qwen2::tests::cuda_gemm_tile_bench ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 629 filtered out; finished in 43.63s
+
+[axon-run 06:17:09] exit 0 after 43.7s (host bella)
+[axon-run 06:17:13] FOREIGN_GPU max=0% mean=0.0% samples=8
