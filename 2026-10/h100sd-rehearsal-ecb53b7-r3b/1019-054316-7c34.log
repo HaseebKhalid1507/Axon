@@ -1,0 +1,183 @@
+[axon-run 05:43:16] submitted 1019-054316-7c34 by /home/haseeb/.cache/axon-h100sd: /home/haseeb/Projects/axon-devstack/runbooks/h100sd/bella-rehearsal.sh reh3-sglang-ecb53b7 /home/haseeb/.cache/axon-h100sd/axon-ecb53b7 sglang
+[axon-run 11:02:53] scope axon-job-1019-054316-7c34-1792422173.scope in app-axonjobs.slice: MemoryMax 19024 MB, MemoryHigh 17121 MB, no swap, oomd pressure kill 80% (claim 12000 MB): an OOM here kills only this job
+[axon-run 11:02:53] job 1019-054316-7c34 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1019-054316-7c34-1792422173 --slice=app-axonjobs.slice -p MemoryMax=19024M -p MemoryHigh=17121M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/Projects/axon-devstack/runbooks/h100sd/bella-rehearsal.sh reh3-sglang-ecb53b7 /home/haseeb/.cache/axon-h100sd/axon-ecb53b7 sglang
+axon-q 11:02:53 start slot 16-23: /home/haseeb/Projects/axon-devstack/runbooks/h100sd/bella-rehearsal.sh reh3-sglang-ecb53b7 /home/haseeb/.cache/axon-h100sd/axon-ecb53b7 sglang
+11:02:53 waiting for the rehearsal lock (one engine venv on bella at a time)
+11:02:53 installing sglang (pod_setup.sh, pinned) with 65 GB free
+[setup] uv: done before
+[setup] hf-awq05: done before
+[setup 11:02:53] venv-sgl: start
+[setup 11:09:08] venv-sgl: rc 0 after 375 s
+[setup 11:09:08] all steps done, fail=0
+uv	0	3	02:35:27
+hf-awq05	0	20	02:49:47
+venv-sgl	0	375	11:09:08
+19G	/home/haseeb/.cache/axon-h100sd/rehearsal/venv-sgl
+708M	/home/haseeb/.cache/axon-h100sd/rehearsal/hf/qwen2.5-0.5b-awq
+4.0K	/home/haseeb/.cache/axon-h100sd/rehearsal/hf/qwen2.5-0.5b-awq.bytes
+11:09:08 / now 57G free
+flashinfer-cubin==0.7.1
+flashinfer-jit-cache==0.7.1+cu130
+flashinfer-jit-cache-sm100a==0.7.1+cu130
+flashinfer-jit-cache-sm103a==0.7.1+cu130
+flashinfer-jit-cache-sm120f==0.7.1+cu130
+flashinfer-jit-cache-sm80==0.7.1+cu130
+flashinfer-jit-cache-sm89==0.7.1+cu130
+flashinfer-jit-cache-sm90a==0.7.1+cu130
+flashinfer-python==0.7.1
+[sd 11:09:08] === phase rehearsal: axon, vllm, sglang; rounds 1, C [1, 4]
+[sd 11:09:09] axon: up after 1.0 s
+[sd 11:09:09] axon: warm-up (short, long, C=128 burst)
+[sd 11:09:14] vllm: up after 1.0 s
+[sd 11:09:14] vllm: warm-up (short, long, C=128 burst)
+[sd 11:09:16] vllm: park/wake self-test OK
+[sd 11:09:22] sglang: start attempt 1 FAILED: sglang exited rc 1 while starting (engines/sglang.log)
+[sd 11:09:28] sglang: start attempt 2 FAILED: sglang exited rc 1 while starting (engines/sglang.log)
+[sd 11:09:28] sglang: DROPPED for the rest of this phase: sglang: won't start after one retry: sglang exited rc 1 while starting (engines/sglang.log)
+[sd 11:09:29] axon: up after 1.0 s
+[sd 11:09:35] axon mix C=1 r1: 666.9 tok/s, ttft p50/p99 5.3/210.0 ms, itl p50/p99 1.36/2.05 ms, goodput 666.9, errors 0
+[sd 11:09:36] axon classic C=1 r1: 701.3 tok/s, ttft p50/p99 14.5/14.5 ms, itl p50/p99 1.37/2.24 ms, goodput 701.3, errors 0
+[sd 11:09:57] vllm mix C=1 r1: 318.1 tok/s, ttft p50/p99 3.8/12.4 ms, itl p50/p99 3.13/3.37 ms, goodput 318.1, errors 0
+[sd 11:10:00] vllm classic C=1 r1: 318.7 tok/s, ttft p50/p99 4.8/4.8 ms, itl p50/p99 3.13/3.29 ms, goodput 318.7, errors 0
+[sd 11:10:03] vllm classic C=4 r1: 1211.3 tok/s, ttft p50/p99 4.8/5.0 ms, itl p50/p99 3.28/3.46 ms, goodput 1211.3, errors 0
+[sd 11:10:08] [cost] +1.0 min paid $0.00 at $0.00/h | useful 0.6 min $0.00 | waste 0.4 min $0.00 (cold-start 0.3m warm 0.1m) | now: vllm mix C=4 r1
+[sd 11:10:09] vllm mix C=4 r1: 1116.8 tok/s, ttft p50/p99 3.6/13.8 ms, itl p50/p99 3.27/3.55 ms, goodput 1116.8, errors 0
+[sd 11:10:10] axon: up after 1.0 s
+[sd 11:10:12] axon classic C=4 r1: 1811.5 tok/s, ttft p50/p99 26.9/56.8 ms, itl p50/p99 2.05/3.12 ms, goodput 1811.5, errors 0
+[sd 11:10:15] axon mix C=4 r1: 1457.0 tok/s, ttft p50/p99 8.3/229.7 ms, itl p50/p99 2.13/4.8 ms, goodput 1457.0, errors 0
+[sd 11:10:15] === control: sglang without ['--enable-sleep-mode', 'VLLM_SERVER_DEV_MODE', '--enable-memory-saver', '--enable-weights-cpu-backup']: C [4] x ['mix']
+[sd 11:10:21] sglang: start attempt 1 FAILED: sglang exited rc 1 while starting (engines/sglang.log)
+[sd 11:10:27] sglang: start attempt 2 FAILED: sglang exited rc 1 while starting (engines/sglang.log)
+[sd 11:10:27] control sglang: sglang: won't start after one retry: sglang exited rc 1 while starting (engines/sglang.log) (skipped)
+[sd 11:10:28] DEGRADED: required engine(s) dropped: sglang: sglang: won't start after one retry: sglang exited rc 1 while starting (engines/sglang.log); sglang (control): sglang: won't start after one retry: sglang exited rc 1 while starting (engines/sglang.log)
+[sd 11:10:28] [cost] +1.3 min paid $0.00 at $0.00/h | useful 0.7 min $0.00 | waste 0.6 min $0.00 (cold-start 0.3m control 0.2m warm 0.1m) | now: sglang control
+[sd 11:10:28] END degraded: required engine(s) dropped: sglang: sglang: won't start after one retry: sglang exited rc 1 while starting (engines/sglang.log); sglang (control): sglang: won't start after one retry: sglang exited rc 1 while starting (engines/sglang.log); results /home/haseeb/.cache/axon-h100sd/results-bella/reh3-sglang-ecb53b7
+[sd 11:10:28] bella's final rsync acked
+[sd 11:10:28] down: sh -c 'date > /home/haseeb/.cache/axon-h100sd/results-bella/reh3-sglang-ecb53b7.DOWN'
+## workload mix: 4 cells, rounds [1]
+
+**mix: agg_tok_s** (median of rounds; spread = max/min - 1)
+
+| engine | C=1 | C=4 |
+|---|---|---|
+| axon | 667 | 1,457 |
+| vllm | 318 | 1,117 |
+
+**mix: ttft_ms_p50** (median of rounds)
+
+| engine | C=1 | C=4 |
+|---|---|---|
+| axon | 5.3 | 8.3 |
+| vllm | 3.8 | 3.6 |
+
+**mix: itl_ms_p50** (median of rounds)
+
+| engine | C=1 | C=4 |
+|---|---|---|
+| axon | 1.4 | 2.1 |
+| vllm | 3.1 | 3.3 |
+
+**mix: tok_per_chunk** (median of rounds)
+
+| engine | C=1 | C=4 |
+|---|---|---|
+| axon | 1.0 | 1.0 |
+| vllm | 1.0 | 1.0 |
+
+**mix: completion_tokens_mean** (median of rounds)
+
+| engine | C=1 | C=4 |
+|---|---|---|
+| axon | 227 | 262 |
+| vllm | 400 | 352 |
+
+## workload classic: 4 cells, rounds [1]
+
+**classic: agg_tok_s** (median of rounds; spread = max/min - 1)
+
+| engine | C=1 | C=4 |
+|---|---|---|
+| axon | 701 | 1,812 |
+| vllm | 319 | 1,211 |
+
+**classic: ttft_ms_p50** (median of rounds)
+
+| engine | C=1 | C=4 |
+|---|---|---|
+| axon | 14.5 | 26.9 |
+| vllm | 4.8 | 4.8 |
+
+**classic: itl_ms_p50** (median of rounds)
+
+| engine | C=1 | C=4 |
+|---|---|---|
+| axon | 1.4 | 2.0 |
+| vllm | 3.1 | 3.3 |
+
+**classic: tok_per_chunk** (median of rounds)
+
+| engine | C=1 | C=4 |
+|---|---|---|
+| axon | 1.0 | 1.0 |
+| vllm | 1.0 | 1.0 |
+
+**classic: completion_tokens_mean** (median of rounds)
+
+| engine | C=1 | C=4 |
+|---|---|---|
+| axon | 512 | 512 |
+| vllm | 512 | 512 |
+
+start axon 1.01 gpu_mem 2322 
+wake axon 1.03 gpu_mem 2322 
+health-ok axon  gpu_mem 2322 
+park axon 0.2 gpu_mem 1030 
+start vllm 1.0 gpu_mem 1030 
+wake vllm 1.02 gpu_mem 1030 
+health-ok vllm  gpu_mem 1030 
+park vllm 0.0 gpu_mem 1030 
+parked-residue vllm  gpu_mem 1030 
+wake vllm 0.0 gpu_mem 1030 
+health-ok vllm  gpu_mem 1030 
+park vllm 0.0 gpu_mem 1030 
+start-fail sglang  gpu_mem 1030 EngineFail('sglang exited rc 1 while starting (engines/sglang.log)')
+start-fail sglang  gpu_mem 1030 EngineFail('sglang exited rc 1 while starting (engines/sglang.log)')
+drop sglang  gpu_mem 1030 sglang: won't start after one retry: sglang exited rc 1 while starting (engines/sglang.log)
+start axon 1.0 gpu_mem 2322 
+wake axon 1.02 gpu_mem 2322 
+park axon 0.2 gpu_mem 1030 
+wake vllm 0.0 gpu_mem 1030 
+park vllm 0.0 gpu_mem 1030 
+wake vllm 0.0 gpu_mem 1030 
+park vllm 0.0 gpu_mem 1030 
+start axon 1.0 gpu_mem 2322 
+wake axon 1.02 gpu_mem 2322 
+park axon 0.2 gpu_mem 1030 
+start-fail sglang  gpu_mem 1030 EngineFail('sglang exited rc 1 while starting (engines/sglang.log)')
+start-fail sglang  gpu_mem 1106 EngineFail('sglang exited rc 1 while starting (engines/sglang.log)')
+DONE: {"status": "degraded", "why": "required engine(s) dropped: sglang: sglang: won't start after one retry: sglang exited rc 1 while starting (engines/sglang.log); sglang (control): sglang: won't start after one retry: sglang exited rc 1 while starting (engines/sglang.log)", "run": "/home/haseeb/.cache/axon-h100sd/results-bella/reh3-sglang-ecb53b7", "ts": 1792422628.0157795, "cost": {"paid_s": 80, "us
+DOWN called: Mon Oct 19 11:10:28 AM EDT 2026
+== sglang log: sampler/attention/kernels
+===== 2026-10-19 11:09:16 start (attempt 1): /home/haseeb/.cache/axon-h100sd/rehearsal/venv-sgl/bin/python -m sglang.launch_server --model-path /home/haseeb/.cache/axon-h100sd/rehearsal/hf/qwen2.5-0.5b-awq --served-model
+===== 2026-10-19 11:09:22 start (attempt 2): /home/haseeb/.cache/axon-h100sd/rehearsal/venv-sgl/bin/python -m sglang.launch_server --model-path /home/haseeb/.cache/axon-h100sd/rehearsal/hf/qwen2.5-0.5b-awq --served-model
+===== 2026-10-19 11:10:15 start (attempt 1): /home/haseeb/.cache/axon-h100sd/rehearsal/venv-sgl/bin/python -m sglang.launch_server --model-path /home/haseeb/.cache/axon-h100sd/rehearsal/hf/qwen2.5-0.5b-awq --served-model
+===== 2026-10-19 11:10:21 start (attempt 2): /home/haseeb/.cache/axon-h100sd/rehearsal/venv-sgl/bin/python -m sglang.launch_server --model-path /home/haseeb/.cache/axon-h100sd/rehearsal/hf/qwen2.5-0.5b-awq --served-model
+== sglang log tail
+    from sglang.srt.layers.deep_gemm_wrapper.configurer import (
+  File "/home/haseeb/.cache/axon-h100sd/rehearsal/venv-sgl/lib/python3.12/site-packages/sglang/srt/layers/deep_gemm_wrapper/configurer.py", line 55, in <module>
+    ENABLE_JIT_DEEPGEMM = _compute_enable_deep_gemm()
+                          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/haseeb/.cache/axon-h100sd/rehearsal/venv-sgl/lib/python3.12/site-packages/sglang/srt/layers/deep_gemm_wrapper/configurer.py", line 44, in _compute_enable_deep_gemm
+    if sm_version in (120, 121) and not _sm120_deep_gemm_apis_available():
+                                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/haseeb/.cache/axon-h100sd/rehearsal/venv-sgl/lib/python3.12/site-packages/sglang/srt/layers/deep_gemm_wrapper/configurer.py", line 19, in _sm120_deep_gemm_apis_available
+    import deep_gemm
+  File "/home/haseeb/.cache/axon-h100sd/rehearsal/venv-sgl/lib/python3.12/site-packages/deep_gemm/__init__.py", line 562, in <module>
+    find_cuda_home()
+  File "/home/haseeb/.cache/axon-h100sd/rehearsal/venv-sgl/lib/python3.12/site-packages/deep_gemm/cuda_helpers.py", line 20, in find_cuda_home
+    assert cuda_home is not None
+           ^^^^^^^^^^^^^^^^^^^^^
+AssertionError
+REHEARSAL sglang: FAIL (driver rc 3, 0 real sglang cells)
+11:10:34 cleaned: 1.1G in /home/haseeb/.cache/axon-h100sd, / 65G free
+[axon-run 11:10:34] exit 3 after 461.3s (host bella)

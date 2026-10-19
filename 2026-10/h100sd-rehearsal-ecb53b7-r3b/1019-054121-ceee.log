@@ -1,0 +1,227 @@
+[axon-run 05:41:21] submitted 1019-054121-ceee by /home/haseeb/.cache/axon-h100sd: /home/haseeb/Projects/axon-devstack/runbooks/h100sd/bella-rehearsal.sh reh3-vllm-ecb53b7 /home/haseeb/.cache/axon-h100sd/axon-ecb53b7 vllm
+[axon-run 10:53:36] VRAM: claiming the learned 3924 MB instead of --vram 4500 (name:h100sd-rehearsal-vllm)
+[axon-run 10:53:36] scope axon-job-1019-054121-ceee-1792421616.scope in app-axonjobs.slice: MemoryMax 8368 MB, MemoryHigh 7531 MB, no swap, oomd pressure kill 80% (claim 4896 MB): an OOM here kills only this job
+[axon-run 10:53:36] job 1019-054121-ceee -> bella: systemd-run --user --scope --quiet --unit=axon-job-1019-054121-ceee-1792421616 --slice=app-axonjobs.slice -p MemoryMax=8368M -p MemoryHigh=7531M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/Projects/axon-devstack/runbooks/h100sd/bella-rehearsal.sh reh3-vllm-ecb53b7 /home/haseeb/.cache/axon-h100sd/axon-ecb53b7 vllm
+axon-q 10:53:36 waiting: stagger
+axon-q 10:53:52 start slot 16-23: /home/haseeb/Projects/axon-devstack/runbooks/h100sd/bella-rehearsal.sh reh3-vllm-ecb53b7 /home/haseeb/.cache/axon-h100sd/axon-ecb53b7 vllm
+10:53:52 waiting for the rehearsal lock (one engine venv on bella at a time)
+10:53:52 installing vllm (pod_setup.sh, pinned) with 65 GB free
+[setup] uv: done before
+[setup] hf-awq05: done before
+[setup 10:53:52] venv-vllm: start
+[setup 10:59:58] venv-vllm: rc 0 after 366 s
+[setup 10:59:58] all steps done, fail=0
+uv	0	3	02:35:27
+hf-awq05	0	20	02:49:47
+venv-vllm	0	366	10:59:58
+17G	/home/haseeb/.cache/axon-h100sd/rehearsal/venv-vllm
+708M	/home/haseeb/.cache/axon-h100sd/rehearsal/hf/qwen2.5-0.5b-awq
+4.0K	/home/haseeb/.cache/axon-h100sd/rehearsal/hf/qwen2.5-0.5b-awq.bytes
+10:59:59 / now 57G free
+flashinfer-cubin==0.7.0.post1
+flashinfer-jit-cache==0.7.0.post1+cu130
+flashinfer-jit-cache-sm100a==0.7.0.post1+cu130
+flashinfer-jit-cache-sm103a==0.7.0.post1+cu130
+flashinfer-jit-cache-sm120f==0.7.0.post1+cu130
+flashinfer-jit-cache-sm80==0.7.0.post1+cu130
+flashinfer-jit-cache-sm89==0.7.0.post1+cu130
+flashinfer-jit-cache-sm90a==0.7.0.post1+cu130
+flashinfer-python==0.7.0.post1
+[sd 10:59:59] === phase rehearsal: axon, vllm, sglang; rounds 1, C [1, 4]
+[sd 11:00:00] axon: up after 1.0 s
+[sd 11:00:00] axon: warm-up (short, long, C=128 burst)
+[sd 11:00:52] vllm: up after 48.0 s
+[sd 11:00:52] vllm: warm-up (short, long, C=128 burst)
+[sd 11:00:54] vllm: park/wake self-test OK
+[sd 11:00:55] sglang: up after 1.0 s
+[sd 11:00:56] sglang: warm-up (short, long, C=128 burst)
+[sd 11:00:57] sglang: park/wake self-test OK
+[sd 11:00:58] axon: up after 1.0 s
+[sd 11:00:59] [cost] +1.0 min paid $0.00 at $0.00/h | useful 0.0 min $0.00 | waste 1.0 min $0.00 (cold-start 0.9m warm 0.1m) | now: axon mix C=1 r1
+[sd 11:01:03] axon mix C=1 r1: 734.8 tok/s, ttft p50/p99 5.2/182.2 ms, itl p50/p99 1.25/1.61 ms, goodput 734.8, errors 0
+[sd 11:01:05] axon classic C=1 r1: 777.8 tok/s, ttft p50/p99 13.0/13.0 ms, itl p50/p99 1.25/1.51 ms, goodput 777.8, errors 0
+[sd 11:01:11] vllm mix C=1 r1: 565.9 tok/s, ttft p50/p99 7.4/197.6 ms, itl p50/p99 1.65/2.09 ms, goodput 565.9, errors 0
+[sd 11:01:13] vllm classic C=1 r1: 597.7 tok/s, ttft p50/p99 17.3/17.3 ms, itl p50/p99 1.64/2.03 ms, goodput 597.7, errors 0
+[sd 11:01:34] sglang mix C=1 r1: 319.0 tok/s, ttft p50/p99 3.7/12.4 ms, itl p50/p99 3.12/3.31 ms, goodput 319.0, errors 0
+[sd 11:01:37] sglang classic C=1 r1: 319.5 tok/s, ttft p50/p99 4.8/4.8 ms, itl p50/p99 3.12/3.29 ms, goodput 319.5, errors 0
+[sd 11:01:39] vllm classic C=4 r1: 2283.7 tok/s, ttft p50/p99 43.4/44.5 ms, itl p50/p99 1.66/2.06 ms, goodput 2283.7, errors 0
+[sd 11:01:41] vllm mix C=4 r1: 1814.1 tok/s, ttft p50/p99 21.1/201.9 ms, itl p50/p99 1.73/3.6 ms, goodput 1814.1, errors 0
+[sd 11:01:45] sglang classic C=4 r1: 1216.3 tok/s, ttft p50/p99 4.8/5.1 ms, itl p50/p99 3.27/3.45 ms, goodput 1216.3, errors 0
+[sd 11:01:50] sglang mix C=4 r1: 1119.4 tok/s, ttft p50/p99 3.6/13.5 ms, itl p50/p99 3.27/3.44 ms, goodput 1119.4, errors 0
+[sd 11:01:52] axon: up after 2.2 s
+[sd 11:01:55] axon classic C=4 r1: 2049.4 tok/s, ttft p50/p99 23.6/49.1 ms, itl p50/p99 1.86/2.2 ms, goodput 2049.4, errors 0
+[sd 11:01:57] axon mix C=4 r1: 1587.6 tok/s, ttft p50/p99 7.1/198.2 ms, itl p50/p99 1.93/4.74 ms, goodput 1587.6, errors 0
+[sd 11:01:59] [cost] +2.0 min paid $0.00 at $0.00/h | useful 0.9 min $0.00 | waste 1.1 min $0.00 (cold-start 0.9m park/wake 0.0m warm 0.1m) | now: axon mix C=4 r1
+[sd 11:01:59] === control: vllm without ['--enable-sleep-mode', 'VLLM_SERVER_DEV_MODE', '--enable-memory-saver', '--enable-weights-cpu-backup']: C [4] x ['mix']
+[sd 11:02:31] vllm: up after 32.0 s
+[sd 11:02:35] vllm mix C=4 r99 control: 1192.2 tok/s, ttft p50/p99 17.7/256.2 ms, itl p50/p99 2.25/4.22 ms, goodput 1192.2, errors 0
+[sd 11:02:35] [cost] +2.6 min paid $0.00 at $0.00/h | useful 0.9 min $0.00 | waste 1.7 min $0.00 (cold-start 0.9m control 0.6m park/wake 0.0m warm 0.1m) | now: vllm mix C=4 r99 control
+[sd 11:02:35] END ok; results /home/haseeb/.cache/axon-h100sd/results-bella/reh3-vllm-ecb53b7
+[sd 11:02:35] bella's final rsync acked
+[sd 11:02:35] down: sh -c 'date > /home/haseeb/.cache/axon-h100sd/results-bella/reh3-vllm-ecb53b7.DOWN'
+## workload mix: 6 cells, rounds [1]
+
+**mix: agg_tok_s** (median of rounds; spread = max/min - 1)
+
+| engine | C=1 | C=4 |
+|---|---|---|
+| axon | 735 | 1,588 |
+| vllm | 566 | 1,814 |
+| sglang | 319 | 1,119 |
+
+**mix: ttft_ms_p50** (median of rounds)
+
+| engine | C=1 | C=4 |
+|---|---|---|
+| axon | 5.2 | 7.1 |
+| vllm | 7.4 | 21.1 |
+| sglang | 3.7 | 3.6 |
+
+**mix: itl_ms_p50** (median of rounds)
+
+| engine | C=1 | C=4 |
+|---|---|---|
+| axon | 1.2 | 1.9 |
+| vllm | 1.6 | 1.7 |
+| sglang | 3.1 | 3.3 |
+
+**mix: tok_per_chunk** (median of rounds)
+
+| engine | C=1 | C=4 |
+|---|---|---|
+| axon | 1.0 | 1.0 |
+| vllm | 1.0 | 1.0 |
+| sglang | 1.0 | 1.0 |
+
+**mix: completion_tokens_mean** (median of rounds)
+
+| engine | C=1 | C=4 |
+|---|---|---|
+| axon | 248 | 264 |
+| vllm | 222 | 236 |
+| sglang | 400 | 352 |
+
+**mix CONTROL (no sleep/memory-saver flags): agg_tok_s** (median of rounds; spread = max/min - 1)
+
+| engine | C=4 |
+|---|---|
+| vllm | 1,192 |
+
+**mix CONTROL: itl_ms_p50** (median of rounds)
+
+| engine | C=4 |
+|---|---|
+| vllm | 2.2 |
+
+## workload classic: 6 cells, rounds [1]
+
+**classic: agg_tok_s** (median of rounds; spread = max/min - 1)
+
+| engine | C=1 | C=4 |
+|---|---|---|
+| axon | 778 | 2,049 |
+| vllm | 598 | 2,284 |
+| sglang | 320 | 1,216 |
+
+**classic: ttft_ms_p50** (median of rounds)
+
+| engine | C=1 | C=4 |
+|---|---|---|
+| axon | 13.0 | 23.6 |
+| vllm | 17.3 | 43.4 |
+| sglang | 4.8 | 4.8 |
+
+**classic: itl_ms_p50** (median of rounds)
+
+| engine | C=1 | C=4 |
+|---|---|---|
+| axon | 1.2 | 1.9 |
+| vllm | 1.6 | 1.7 |
+| sglang | 3.1 | 3.3 |
+
+**classic: tok_per_chunk** (median of rounds)
+
+| engine | C=1 | C=4 |
+|---|---|---|
+| axon | 1.0 | 1.0 |
+| vllm | 1.0 | 1.0 |
+| sglang | 1.0 | 1.0 |
+
+**classic: completion_tokens_mean** (median of rounds)
+
+| engine | C=1 | C=4 |
+|---|---|---|
+| axon | 512 | 512 |
+| vllm | 512 | 512 |
+| sglang | 512 | 512 |
+
+start axon 1.01 gpu_mem 2316 
+wake axon 1.03 gpu_mem 2316 
+health-ok axon  gpu_mem 2316 
+park axon 0.14 gpu_mem 1024 
+start vllm 48.02 gpu_mem 3572 
+wake vllm 48.04 gpu_mem 3572 
+health-ok vllm  gpu_mem 3594 
+park vllm 0.19 gpu_mem 1396 
+parked-residue vllm  gpu_mem 1396 
+wake vllm 0.02 gpu_mem 3572 
+health-ok vllm  gpu_mem 3594 
+park vllm 0.03 gpu_mem 1396 
+start sglang 1.0 gpu_mem 1396 
+wake sglang 1.02 gpu_mem 1396 
+health-ok sglang  gpu_mem 1396 
+park sglang 0.0 gpu_mem 1396 
+parked-residue sglang  gpu_mem 1396 
+wake sglang 0.0 gpu_mem 1396 
+health-ok sglang  gpu_mem 1396 
+park sglang 0.0 gpu_mem 1396 
+start axon 1.0 gpu_mem 2688 
+wake axon 1.02 gpu_mem 2688 
+park axon 0.16 gpu_mem 1396 
+wake vllm 0.02 gpu_mem 3572 
+park vllm 0.03 gpu_mem 1396 
+wake sglang 0.0 gpu_mem 1396 
+park sglang 0.0 gpu_mem 1386 
+wake vllm 0.25 gpu_mem 3562 
+park vllm 0.03 gpu_mem 1386 
+wake sglang 0.0 gpu_mem 1386 
+park sglang 0.0 gpu_mem 1386 
+start axon 2.22 gpu_mem 2678 
+wake axon 2.24 gpu_mem 2678 
+park axon 0.14 gpu_mem 1386 
+start vllm 32.01 gpu_mem 3576 
+health-ok vllm  gpu_mem 3598 
+DONE: {"status": "ok", "why": "", "run": "/home/haseeb/.cache/axon-h100sd/results-bella/reh3-vllm-ecb53b7", "ts": 1792422155.7692418, "cost": {"paid_s": 157, "useful_s": 55, "waste_s": 101, "rate_per_h": 0.0, "paid_usd": 0.0, "useful_usd": 0.0, "waste_usd": 0.0, "by_category_s": {"boot+setup": 0, "cold-start": 56, "warm": 8, "park/wake": 2, "useful": 55, "control": 36, "end": 0}}}
+DOWN called: Mon Oct 19 11:02:35 AM EDT 2026
+== vllm log: sampler/attention/kernels
+(EngineCore pid=2300937) INFO 10-19 11:00:22 [core.py:133] Initializing a V1 LLM engine (v0.32.0) with config: model='/home/haseeb/.cache/axon-h100sd/rehearsal/hf/qwen2.5-0.5b-awq', speculative_config=None, tokenizer='/h
+(EngineCore pid=2300937) INFO 10-19 11:00:25 [cuda.py:506] Using FLASH_ATTN attention backend out of potential backends: ['FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION'].
+(EngineCore pid=2300937) INFO 10-19 11:00:28 [topk_topp_sampler.py:124] Using FlashInfer for top-p & top-k sampling.
+(EngineCore pid=2300937) INFO 10-19 11:00:42 [kernel_warmup.py:460] Using FlashInfer autotune cache file: /home/haseeb/.cache/axon-h100sd/rehearsal/vllm-cache/flashinfer_autotune_cache/0.7.0.post1/120f/acfdafb9027b43967d
+2026-10-19 11:00:42,602 - INFO - autotuner.py:1046 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+(EngineCore pid=2300937) INFO 10-19 11:00:42 [kernel_warmup.py:367] Running FlashInfer autotune with 2048 tokens and token buckets (1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 768, 1024, 1280, 1536, 1792, 2048).
+2026-10-19 11:00:42,811 - INFO - autotuner.py:1069 - flashinfer.jit: [Autotuner]: Autotuning process ends
+(EngineCore pid=2307656) INFO 10-19 11:02:11 [core.py:133] Initializing a V1 LLM engine (v0.32.0) with config: model='/home/haseeb/.cache/axon-h100sd/rehearsal/hf/qwen2.5-0.5b-awq', speculative_config=None, tokenizer='/h
+(EngineCore pid=2307656) INFO 10-19 11:02:14 [cuda.py:506] Using FLASH_ATTN attention backend out of potential backends: ['FLASH_ATTN', 'FLASHINFER', 'TRITON_ATTN', 'FLEX_ATTENTION'].
+(EngineCore pid=2307656) INFO 10-19 11:02:16 [topk_topp_sampler.py:124] Using FlashInfer for top-p & top-k sampling.
+(EngineCore pid=2307656) INFO 10-19 11:02:27 [kernel_warmup.py:460] Using FlashInfer autotune cache file: /home/haseeb/.cache/axon-h100sd/rehearsal/vllm-cache/flashinfer_autotune_cache/0.7.0.post1/120f/0d81079c4e5b5867a4
+2026-10-19 11:02:27,601 - INFO - autotuner.py:1046 - flashinfer.jit: [Autotuner]: Autotuning process starts ...
+== vllm log tail
+(APIServer pid=2307230) ERROR 10-19 11:02:35 [async_llm.py:906] Traceback (most recent call last):
+(APIServer pid=2307230) ERROR 10-19 11:02:35 [async_llm.py:906]   File "/home/haseeb/.cache/axon-h100sd/rehearsal/venv-vllm/lib/python3.12/site-packages/vllm/v1/engine/async_llm.py", line 849, in output_handler
+(APIServer pid=2307230) ERROR 10-19 11:02:35 [async_llm.py:906]     outputs = await engine_core.get_output_async()
+(APIServer pid=2307230) ERROR 10-19 11:02:35 [async_llm.py:906]               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=2307230) ERROR 10-19 11:02:35 [async_llm.py:906]   File "/home/haseeb/.cache/axon-h100sd/rehearsal/venv-vllm/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 1235, in get_output_async
+(APIServer pid=2307230) ERROR 10-19 11:02:35 [async_llm.py:906]     raise self._format_exception(outputs) from None
+(APIServer pid=2307230) ERROR 10-19 11:02:35 [async_llm.py:906] vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue. See stack trace (above) for the root cause.
+(APIServer pid=2307230) INFO 10-19 11:02:35 [launcher.py:279] [shutdown] API server: engine client stopped
+(APIServer pid=2307230) INFO 10-19 11:02:35 [launcher.py:282] [shutdown] API server: signalling HTTP server shutdown
+(APIServer pid=2307230) INFO 10-19 11:02:35 [launcher.py:304] [shutdown] API server: shutting down FastAPI HTTP server
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+/home/haseeb/.cache/axon-h100sd/rehearsal/uv-python/cpython-3.12.15-linux-x86_64-gnu/lib/python3.12/multiprocessing/resource_tracker.py:279: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to
+  warnings.warn('resource_tracker: There appear to be %d '
+REHEARSAL vllm: PASS (driver ok, 5 real vllm cells)
+11:02:51 cleaned: 1.1G in /home/haseeb/.cache/axon-h100sd, / 65G free
+[axon-run 11:02:51] exit 0 after 555.2s (host bella)

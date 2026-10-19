@@ -1,0 +1,49 @@
+{
+ "label": "h100sd-rehearsal-ecb53b7-r3b",
+ "verdict": "FAIL (1 of 2)",
+ "jobs": [
+  {
+   "job": "1019-054121-ceee",
+   "name": "h100sd-rehearsal-vllm",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.71.09",
+   "sha": "ecb53b7",
+   "binary": "bella-rehearsal.sh",
+   "started": 1792421616.3790672,
+   "ended": 1792422173.2356682,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "1d825761c731d0a5b9c9f0f7d97c22b53b9a44296e04363df090d6f9df9c1f75",
+   "log_bytes": 12659
+  },
+  {
+   "job": "1019-054316-7c34",
+   "name": "h100sd-rehearsal-sglang",
+   "rc": 3,
+   "verdict": "FAIL (rc 3)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.71.09",
+   "sha": "ecb53b7",
+   "binary": "bella-rehearsal.sh",
+   "started": 1792422173.2356682,
+   "ended": 1792422636.077854,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "22265365f9e5ffad5b4234e70b038edb494b2f0dbbe6acec1516d62287cfd1f1",
+   "log_bytes": 10633
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-19 11:10:36 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
