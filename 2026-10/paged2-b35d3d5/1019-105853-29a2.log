@@ -1,0 +1,55 @@
+[axon-run 10:58:53] submitted 1019-105853-29a2 by /home/haseeb/.cache/axon-paged2: /home/haseeb/.cache/axon-paged2/axon-test-b35d3d5 pool_graph_bytes graph_oom_falls_back_to_kernels graph_oom_fill_vram --include-ignored --nocapture
+[axon-run 12:08:48] job 1019-105853-29a2 -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 5500 --env AXON_NODE_PACK=1 --src /home/haseeb/.cache/axon-wt-paged2 /home/haseeb/.cache/axon-paged2/axon-test-b35d3d5 pool_graph_bytes graph_oom_falls_back_to_kernels graph_oom_fill_vram --include-ignored --nocapture
+axon-remote: uploading axon-test-b35d3d5 (5a145a0bf3bdc3c8296fad51) + source of /home/haseeb/.cache/axon-wt-paged2
+
+sent 1,529,222 bytes  received 3,994 bytes  3,066,432.00 bytes/sec
+total size is 5,572,844  speedup is 3.63
+
+sent 6,155,638 bytes  received 35 bytes  4,103,782.00 bytes/sec
+total size is 19,429,992  speedup is 3.16
+axon-remote: job 20261019-120853-axon-test-b35d3d5-784117 on avante (GPU, 5500 MB)
+[axon-node 12:08:53] GPU slot taken; job wants 5500 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 56
+[axon-node 12:08:53] run axon-test-b35d3d5 (5a145a0bf3bdc3c8296fad51) as /home/haseeb/.cache/axon-wt-paged2 on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 3 tests
+testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test cuda::qwen2::slots::tests::graph_oom_falls_back_to_kernels ... ok
+graph_oom_fill_vram: graphs failed with 2.6 MiB free
+
+thread 'cuda::qwen2::slots::tests::graph_oom_fill_vram' (784130) panicked at src/cuda/qwen2/slots.rs:1960:9:
+VRAM ran out without a graph failing
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test cuda::qwen2::slots::tests::graph_oom_fill_vram ... FAILED
+kernel module load: 2.00 MiB, 20.1 ms
+model: qwen2 (24 layers, dim 896; AXON_STEP_MODEL None)
+qwen2: first step nb 1 ng 1, kernel by kernel: 0.00 MiB
+qwen2: first step nb 2 ng 2, kernel by kernel: 0.00 MiB
+qwen2: first step nb 4 ng 4, kernel by kernel: 0.00 MiB
+qwen2: first step nb 8 ng 8, kernel by kernel: 0.00 MiB
+qwen2: first step nb 16 ng 16, kernel by kernel: 0.00 MiB
+qwen2: first step nb 1 ng 0, kernel by kernel: 0.00 MiB
+qwen2: first step nb 8 ng 4, kernel by kernel: 0.00 MiB
+qwen2: first step nb 16 ng 8, kernel by kernel: 0.00 MiB
+qwen2: step graph nb 1 ng 1: 0.00 MiB
+qwen2: step graph nb 2 ng 2: 2.00 MiB
+qwen2: step graph nb 4 ng 4: 2.00 MiB
+qwen2: step graph nb 8 ng 8: 2.00 MiB
+qwen2: step graph nb 16 ng 16: 2.00 MiB
+qwen2: step graph nb 1 ng 0: 2.00 MiB
+qwen2: step graph nb 8 ng 4: 2.00 MiB
+qwen2: step graph nb 16 ng 8: 2.00 MiB
+qwen2: 8 step graphs: 14.00 MiB
+qwen2: first decode step, kernel by kernel: 0.00 MiB
+qwen2: view decode graph: 2.00 MiB
+test cuda::qwen2::slots::tests::pool_graph_bytes ... ok
+
+failures:
+
+failures:
+    cuda::qwen2::slots::tests::graph_oom_fill_vram
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 629 filtered out; finished in 2.27s
+
+[axon-node 12:08:55] exit 101 after 2.4s
+[axon-node 12:08:55] peak RSS 725 MB (job process tree PSS, 2 s samples x1)
+[axon-run 12:08:56] exit 101 after 7.5s (host avante)

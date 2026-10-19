@@ -1,0 +1,36 @@
+[axon-run 10:58:52] submitted 1019-105852-438e by /home/haseeb/.cache/axon-paged2: /home/haseeb/.cache/axon-paged2/axon-test-b35d3d5 pool_graph_bytes graph_oom_falls_back_to_kernels --include-ignored --nocapture
+[axon-run 14:58:43] VRAM: claiming the learned 8777 MB instead of --vram 11000 (bin:axon-test)
+[axon-run 14:58:43] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 14:58:43] scope axon-job-1019-105852-438e-1792436323.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 18119 MB): an OOM here kills only this job
+[axon-run 14:58:43] job 1019-105852-438e -> bella: systemd-run --user --scope --quiet --unit=axon-job-1019-105852-438e-1792436323 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-paged2/axon-test-b35d3d5 pool_graph_bytes graph_oom_falls_back_to_kernels --include-ignored --nocapture --test-threads 6
+axon-q 14:58:43 start slot 16-23: /home/haseeb/.cache/axon-paged2/axon-test-b35d3d5 pool_graph_bytes graph_oom_falls_back_to_kernels --include-ignored --nocapture --test-threads 6
+
+running 2 tests
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test cuda::qwen2::slots::tests::graph_oom_falls_back_to_kernels ... ok
+kernel module load: 2.00 MiB, 20.3 ms
+model: qwen2 (28 layers, dim 3584; AXON_STEP_MODEL Some("/home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf"))
+qwen2: first step nb 1 ng 1, kernel by kernel: 0.00 MiB
+qwen2: first step nb 2 ng 2, kernel by kernel: 0.00 MiB
+qwen2: first step nb 4 ng 4, kernel by kernel: 0.00 MiB
+qwen2: first step nb 8 ng 8, kernel by kernel: 0.00 MiB
+qwen2: first step nb 16 ng 16, kernel by kernel: 0.00 MiB
+qwen2: first step nb 1 ng 0, kernel by kernel: 0.00 MiB
+qwen2: first step nb 8 ng 4, kernel by kernel: 0.00 MiB
+qwen2: first step nb 16 ng 8, kernel by kernel: 0.00 MiB
+qwen2: step graph nb 1 ng 1: 0.00 MiB
+qwen2: step graph nb 2 ng 2: 0.00 MiB
+qwen2: step graph nb 4 ng 4: 0.00 MiB
+qwen2: step graph nb 8 ng 8: 2.00 MiB
+qwen2: step graph nb 16 ng 16: 0.00 MiB
+qwen2: step graph nb 1 ng 0: 0.00 MiB
+qwen2: step graph nb 8 ng 4: 2.00 MiB
+qwen2: step graph nb 16 ng 8: 0.00 MiB
+qwen2: 8 step graphs: 4.00 MiB
+qwen2: first decode step, kernel by kernel: 0.00 MiB
+qwen2: view decode graph: 0.00 MiB
+test cuda::qwen2::slots::tests::pool_graph_bytes ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 630 filtered out; finished in 3.88s
+
+[axon-run 14:58:47] exit 0 after 4.0s (host bella)

@@ -1,0 +1,67 @@
+[axon-run 10:58:53] submitted 1019-105853-7408 by /home/haseeb/.cache/axon-paged2: /home/haseeb/.cache/axon-paged2/r12-excl-b35d3d5.sh
+[axon-run 14:18:30] scope axon-job-1019-105853-7408-1792433910.scope in app-axonjobs.slice: MemoryMax 17581 MB, MemoryHigh 15822 MB, no swap, oomd pressure kill 80% (claim 11038 MB): an OOM here kills only this job
+[axon-run 14:18:30] job 1019-105853-7408 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1019-105853-7408-1792433910 --slice=app-axonjobs.slice -p MemoryMax=17581M -p MemoryHigh=15822M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-paged2/r12-excl-b35d3d5.sh
+=== md5 vs main 2b89410
+[axon-run 14:19:01] FOREIGN_GPU sample max=49% mean=36.8% n=6 (Xorg 2750643 22%, kitty 2752587 17%)
+[axon-run 14:19:33] FOREIGN_GPU sample max=17% mean=6.2% n=6
+--- pairs differing:
+0 of 15 differ
+--- pairs differing:
+0 of 15 differ
+--- pairs differing:
+0 of 15 differ
+gemma3 ./base-2b89410 9959475a1edd
+gemma3 ./axon-rel-b35d3d5 9959475a1edd
+gemma3 ./base-2b89410 425335695714
+gemma3 ./axon-rel-b35d3d5 425335695714
+gemma3 ./base-2b89410 f9b213856452
+gemma3 ./axon-rel-b35d3d5 f9b213856452
+=== identity (gpu: 64, 738 MiB, 1717 MHz)
+[axon-run 14:20:05] FOREIGN_GPU sample max=1% mean=0.2% n=6
+base {} c1 {"digest": "393d877192f2e4d7", "c": 1}
+cand {'AXON_PAGE_SHUFFLE': '1'} c1 {"digest": "393d877192f2e4d7", "c": 1}
+cand {'AXON_PAGE_SHUFFLE': '1'} c8 {"digest": "393d877192f2e4d7", "c": 8}
+[axon-run 14:20:36] FOREIGN_GPU sample max=0% mean=0.0% n=6
+cand {'AXON_PAGED_KV': '0'} c8 {"digest": "393d877192f2e4d7", "c": 8}
+IDENT PASS
+=== C=1/C=8 bench, --ctx 4096 --parallel 8, 3 rounds (gpu: 64, 738 MiB, 2640 MHz)
+{"round": 0, "bin": "base", "c1_agg": 92.4, "c1_stream": 102.2, "c8_agg": 403.7, "c8_itl_p50": 12.12, "c8_itl_p99": 69.17, "gpu": "71, 117.13 W, 2505 MHz, 738 MiB"}
+[axon-run 14:21:07] FOREIGN_GPU sample max=0% mean=0.0% n=6
+{"round": 0, "bin": "cand", "c1_agg": 96.5, "c1_stream": 105.6, "c8_agg": 382.6, "c8_itl_p50": 13.72, "c8_itl_p99": 68.8, "gpu": "63, 128.06 W, 2542 MHz, 738 MiB"}
+{"round": 1, "bin": "cand", "c1_agg": 87.8, "c1_stream": 90.8, "c8_agg": 394.6, "c8_itl_p50": 12.33, "c8_itl_p99": 69.84, "gpu": "71, 120.94 W, 2497 MHz, 738 MiB"}
+[axon-run 14:21:39] FOREIGN_GPU sample max=0% mean=0.0% n=6
+{"round": 1, "bin": "base", "c1_agg": 90.1, "c1_stream": 98.9, "c8_agg": 398.1, "c8_itl_p50": 12.21, "c8_itl_p99": 69.05, "gpu": "69, 121.29 W, 2497 MHz, 738 MiB"}
+{"round": 2, "bin": "base", "c1_agg": 93.1, "c1_stream": 103.4, "c8_agg": 401.2, "c8_itl_p50": 12.1, "c8_itl_p99": 68.71, "gpu": "68, 126.38 W, 2355 MHz, 738 MiB"}
+[axon-run 14:22:10] FOREIGN_GPU sample max=3% mean=0.5% n=6
+{"round": 2, "bin": "cand", "c1_agg": 92.8, "c1_stream": 106.9, "c8_agg": 403.2, "c8_itl_p50": 12.09, "c8_itl_p99": 69.1, "gpu": "62, 123.42 W, 2100 MHz, 738 MiB"}
+MEDIAN c1_agg: base 92.40 cand 92.80 ratio 1.0043
+MEDIAN c1_stream: base 102.20 cand 105.60 ratio 1.0333
+MEDIAN c8_agg: base 401.20 cand 394.60 ratio 0.9835
+MEDIAN c8_itl_p50: base 12.12 cand 12.33 ratio 1.0173
+MEDIAN c8_itl_p99: base 69.05 cand 69.10 ratio 1.0007
+=== 7B f16 round 1, 7 x 15k + 600: base-2b89410 (gpu: 62, 738 MiB, 2100 MHz)
+banner: ['axon serve: no Q6_K prefill copy (0.30 GiB free beside the caches; it speeds up prefill): a smaller --ctx or --parallel, or --kv q8, makes room', 'axon serve: Qwen2.5-7B-Instruct-Q4_K_M (cuda, kv f16, ctx 32768, 3 requests at once) on http://127.0.0.1:18591/v1']
+slots0: {"ctx": 32768, "queue_depth": 0}
+[axon-run 14:22:42] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 14:23:14] FOREIGN_GPU sample max=0% mean=0.0% n=6
+{"n": 7, "tokens": 15000, "wall_s": 57.9, "server_alive": true, "not_200": 0, "agg_completion_tok_s": 72.6, "ttft_s_sorted": [4.08, 10.3, 14.52, 26.9, 32.65, 37.65, 49.88], "itl_ms_p50_p99": [14.7, 105.5], "statuses": [200, 200, 200, 200, 200, 200, 200], "prompt_tokens": [14995, 14995, 14995, 14995, 14995, 14995, 14994], "completion": [600, 600, 600, 600, 600, 600, 600], "decode_tok_s": [34.1, 35.6, 36.3, 33.9, 34.2, 44.9, 76.0], "peak_concurrent_resident": 3, "peak_pages_used": 0, "preemptions": 0}
+=== 7B f16 round 1, 7 x 15k + 600: axon-rel-b35d3d5 (gpu: 75, 738 MiB, 2662 MHz)
+banner: ['axon serve: no Q6_K prefill copy (0.27 GiB free beside the caches; it speeds up prefill): a smaller --ctx or --parallel, or --kv q8, makes room', 'axon serve: Qwen2.5-7B-Instruct-Q4_K_M (cuda, kv f16, ctx 32768, every layer on the GPU, KV: 1653 pages x 64 = 105792 tokens (3 sequences of the full 32768 at once) over up to 16 slots (cap 32768)) on http://127.0.0.1:18591/v1']
+slots0: {"ctx": 32768, "graphs_evicted_oom": 0, "page_tokens": 64, "pages_free": 1653, "pages_total": 1653, "preempted": 0, "prefills_unfed": 0, "queue_depth": 0, "steps_eager_oom": 0}
+[axon-run 14:23:45] FOREIGN_GPU sample max=2% mean=0.3% n=6
+[axon-run 14:24:16] FOREIGN_GPU sample max=0% mean=0.0% n=6
+{"n": 7, "tokens": 15000, "wall_s": 53.1, "server_alive": true, "not_200": 0, "agg_completion_tok_s": 79.1, "ttft_s_sorted": [4.12, 10.39, 15.6, 20.99, 26.53, 31.29, 43.98], "itl_ms_p50_p99": [23.2, 111.9], "statuses": [200, 200, 200, 200, 200, 200, 200], "prompt_tokens": [14995, 14995, 14995, 14995, 14995, 14995, 14994], "completion": [600, 600, 600, 600, 600, 600, 600], "decode_tok_s": [20.1, 17.5, 17.7, 23.5, 28.5, 35.3, 66.4], "peak_concurrent_resident": 6, "peak_pages_used": 1653, "preemptions": 0}
+=== 7B f16 round 2, 7 x 15k + 600: axon-rel-b35d3d5 (gpu: 69, 738 MiB, 2385 MHz)
+banner: ['axon serve: no Q6_K prefill copy (0.27 GiB free beside the caches; it speeds up prefill): a smaller --ctx or --parallel, or --kv q8, makes room', 'axon serve: Qwen2.5-7B-Instruct-Q4_K_M (cuda, kv f16, ctx 32768, every layer on the GPU, KV: 1653 pages x 64 = 105792 tokens (3 sequences of the full 32768 at once) over up to 16 slots (cap 32768)) on http://127.0.0.1:18591/v1']
+slots0: {"ctx": 32768, "graphs_evicted_oom": 0, "page_tokens": 64, "pages_free": 1653, "pages_total": 1653, "preempted": 0, "prefills_unfed": 0, "queue_depth": 0, "steps_eager_oom": 0}
+[axon-run 14:24:48] FOREIGN_GPU sample max=0% mean=0.0% n=6
+{"n": 7, "tokens": 15000, "wall_s": 53.1, "server_alive": true, "not_200": 0, "agg_completion_tok_s": 79.2, "ttft_s_sorted": [4.13, 10.39, 15.55, 21.01, 26.57, 31.34, 44.03], "itl_ms_p50_p99": [23.2, 112.1], "statuses": [200, 200, 200, 200, 200, 200, 200], "prompt_tokens": [14995, 14995, 14995, 14995, 14995, 14995, 14994], "completion": [600, 600, 600, 600, 600, 600, 600], "decode_tok_s": [17.5, 17.7, 20.0, 23.4, 66.8, 28.4, 35.1], "peak_concurrent_resident": 6, "peak_pages_used": 1650, "preemptions": 0}
+=== 7B f16 round 2, 7 x 15k + 600: base-2b89410 (gpu: 72, 738 MiB, 2565 MHz)
+banner: ['axon serve: no Q6_K prefill copy (0.30 GiB free beside the caches; it speeds up prefill): a smaller --ctx or --parallel, or --kv q8, makes room', 'axon serve: Qwen2.5-7B-Instruct-Q4_K_M (cuda, kv f16, ctx 32768, 3 requests at once) on http://127.0.0.1:18591/v1']
+slots0: {"ctx": 32768, "queue_depth": 0}
+[axon-run 14:25:20] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 14:25:51] FOREIGN_GPU sample max=0% mean=0.0% n=6
+{"n": 7, "tokens": 15000, "wall_s": 59.7, "server_alive": true, "not_200": 0, "agg_completion_tok_s": 70.4, "ttft_s_sorted": [4.13, 10.42, 14.69, 27.73, 33.51, 38.56, 51.74], "itl_ms_p50_p99": [17.0, 106.1], "statuses": [200, 200, 200, 200, 200, 200, 200], "prompt_tokens": [14995, 14995, 14995, 14995, 14995, 14995, 14994], "completion": [600, 600, 600, 600, 600, 600, 600], "decode_tok_s": [32.9, 34.2, 34.9, 32.4, 32.1, 42.1, 76.4], "peak_concurrent_resident": 3, "peak_pages_used": 0, "preemptions": 0}
+=== done FAIL=0
+[axon-run 14:26:13] exit 0 after 463.3s (host bella)
+[axon-run 14:26:17] FOREIGN_GPU max=49% mean=3.0% samples=88 top: picom 2750907 23%, kitty 2752587 16%, Xorg 2750643 10%  TAINTED (mean > 5% or max > 25%): timing numbers not trustworthy, rerun
