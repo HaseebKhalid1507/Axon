@@ -497,6 +497,59 @@ fn serve_cuda_matches_gen() {
     serve_matches_gen_and_chat(p.to_str().unwrap(), Device::Cuda);
 }
 
+/// A ~2000-token greedy completion served one request at a time
+/// (`--parallel 1`: the real `Engine::job`, its prompt fed by
+/// `Lm::prompt_chunks`) == `axon gen`'s (one `prefill_logits`). The cut is
+/// asserted multi-pass and not the old fixed prefill_batch one on the
+/// reference net (same model and context as the server's).
+#[test]
+fn serve_cuda_long_prompt_matches_gen() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let path = p.to_str().unwrap();
+    let ctx = 4096;
+    let m = crate::gguf::load_with(path, crate::copy_for(Device::Cuda)).unwrap();
+    let tok = Tokenizer::from_gguf(&m);
+    let mut prompt = String::from("A log of river readings.\n");
+    let mut i = 0;
+    while tok.encode_prompt(&prompt).len() < 2000 {
+        prompt.push_str(&format!(
+            "Day {i}: level {} cm, {} water, {} birds counted.\n",
+            100 + i % 37,
+            ["clear", "muddy", "fast"][i % 3],
+            i % 11
+        ));
+        i += 1;
+    }
+    let n = tok.encode_prompt(&prompt).len();
+    let reference = {
+        let net =
+            crate::lm::Backend::new(&m, Device::Cuda, ctx, None, crate::kv::KvType::F16, false)
+                .unwrap();
+        let cache = net.new_cache(ctx);
+        let rs = net.prompt_chunks(n - 1, 0, &cache);
+        eprintln!("{n} tokens: job feeds {rs:?}");
+        assert!(rs.len() >= 2, "one pass: {rs:?}");
+        assert_ne!(rs, crate::lm::chunk_ranges(n - 1, net.prefill_batch()));
+        gen_text(&net, &tok, &prompt, 24)
+    };
+    drop(m);
+    let s = server_with(path, Device::Cuda, |o| {
+        o.parallel = 1;
+        o.ctx = Some(ctx);
+    });
+    let req = json!({"model": "alias", "prompt": prompt, "max_tokens": 24, "temperature": 0});
+    let r = post(s.addr, "/v1/completions", req);
+    assert_eq!(r.status, 200, "{}", r.body);
+    let v = r.json();
+    assert_eq!(v["usage"]["prompt_tokens"], n);
+    assert_eq!(v["choices"][0]["text"], reference.as_str());
+}
+
 /// A draft model changes nothing a client sees: completions and chat
 /// replies, greedy and sampled with a seed, across requests that reuse the
 /// cache, equal a server's without one (1.5B main model, 0.5B drafter).

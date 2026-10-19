@@ -8282,6 +8282,98 @@ fn cuda_decode_tg() {
     }
 }
 
+/// `crate::lm::chunk_ranges`: 0..n in order, pieces of pb, the last shorter.
+#[test]
+fn lm_chunk_ranges() {
+    use crate::lm::chunk_ranges;
+    assert!(chunk_ranges(0, 4).is_empty());
+    assert_eq!(chunk_ranges(2100, 1152), vec![0..1152, 1152..2100]);
+    assert_eq!(chunk_ranges(5, 2), vec![0..2, 2..4, 4..5]);
+}
+
+/// `Lm::prompt_chunks` on the GPU (what serve's single stream and chat feed
+/// by): `prompt_passes`, contiguous, none over the batch max; and serve's
+/// way of feeding (all but the last token by those chunks, then `forward`)
+/// and chat's (the last chunk by `prefill_logits`), from 0 and after a
+/// prefix, give the bits of the prompt's per-token decode.
+#[test]
+fn gpu_prompt_chunks_bits() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = crate::testutil::model() else {
+        return;
+    };
+    let km = Kernels::module_for(&g, &m).unwrap();
+    let n = 2100;
+    let ids = long_ids(&m, n);
+    let net = CudaQwen2::new(&g, &km, &m, n + 1).unwrap();
+    let max = net.prefill_batch();
+    let mut d = net.new_cache(n + 1);
+    for (p, &t) in ids[..n - 1].iter().enumerate() {
+        net.feed(&mut d, t, p).unwrap();
+    }
+    let dec = net.forward(ids[n - 1], n - 1, &mut d);
+    for from in [0, 300] {
+        let mut c = net.new_cache(n + 1);
+        if from > 0 {
+            net.feed_batch(&ids[..from], 0, &mut c);
+        }
+        let rs = net.prompt_chunks(n - 1 - from, from, &c);
+        // Multi-pass and not the old fixed prefill_batch cut (equal or
+        // wave-sized passes: either differs from 1152 + the rest here).
+        assert!(rs.len() >= 2);
+        assert_ne!(rs, crate::lm::chunk_ranges(n - 1 - from, max));
+        assert_eq!((rs[0].start, rs.last().unwrap().end), (0, n - 1 - from));
+        assert!(rs.windows(2).all(|w| w[0].end == w[1].start));
+        assert!(rs.iter().all(|r| !r.is_empty() && r.len() <= max));
+        for r in &rs {
+            net.feed_batch(&ids[from + r.start..from + r.end], from + r.start, &mut c);
+        }
+        let l = net.forward(ids[n - 1], n - 1, &mut c);
+        assert_eq!(bits(&l), bits(&dec), "serve's way from {from}: logits");
+        assert!(
+            kv_bytes(&net, &c, n) == kv_bytes(&net, &d, n),
+            "serve's way from {from}: KV"
+        );
+        let mut c = net.new_cache(n + 1);
+        if from > 0 {
+            net.feed_batch(&ids[..from], 0, &mut c);
+        }
+        let rs = net.prompt_chunks(n - from, from, &c);
+        let mut l = Vec::new();
+        for (i, r) in rs.iter().enumerate() {
+            let b = &ids[from + r.start..from + r.end];
+            if i + 1 < rs.len() {
+                net.feed_batch(b, from + r.start, &mut c);
+            } else {
+                l = net.prefill_logits(b, from + r.start, &mut c);
+            }
+        }
+        assert_eq!(bits(&l), bits(&dec), "chat's way from {from}: logits");
+        assert!(
+            kv_bytes(&net, &c, n) == kv_bytes(&net, &d, n),
+            "chat's way from {from}: KV"
+        );
+        eprintln!(
+            "prompt_chunks from {from}: {:?} == per-token decode",
+            rs.iter().map(|r| r.len()).collect::<Vec<_>>()
+        );
+    }
+    // Exactly one pass (n == the batch max) and just under: one range,
+    // and its KV rows are the decode's.
+    for k in [max, max - 1] {
+        let mut c = net.new_cache(n + 1);
+        let rs = net.prompt_chunks(k, 0, &c);
+        assert_eq!(rs, vec![0..k], "{k} tokens: one pass");
+        net.feed_batch(&ids[..k], 0, &mut c);
+        assert!(
+            kv_bytes(&net, &c, k) == kv_bytes(&net, &d, k),
+            "{k} tokens: KV"
+        );
+    }
+}
+
 /// Hunting aid: one child process of `gpu_concurrency_matrix_hunt`.
 /// Decode-heavy victims (per-token decode-step graphs, 1200 tokens, file-
 /// mapped models; each pass checked bit for bit against its own first)
