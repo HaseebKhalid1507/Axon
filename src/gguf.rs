@@ -392,6 +392,16 @@ const UNSIZED_NAMES: &[(u32, &str)] = &[
     (36, "IQ4_NL_4_4"),
     (37, "IQ4_NL_4_8"),
     (38, "IQ4_NL_8_8"),
+    // Axon-private: safetensors element types (`crate::safetensors`).
+    (crate::safetensors::QT_F8_E4M3, "F8_E4M3"),
+    (crate::safetensors::QT_F8_E5M2, "F8_E5M2"),
+    (crate::safetensors::QT_F8_E8M0, "F8_E8M0"),
+    (crate::safetensors::QT_F4, "F4"),
+    (crate::safetensors::QT_U8, "U8"),
+    (crate::safetensors::QT_U16, "U16"),
+    (crate::safetensors::QT_U32, "U32"),
+    (crate::safetensors::QT_U64, "U64"),
+    (crate::safetensors::QT_BOOL, "BOOL"),
 ];
 
 /// Whether `id`'s block size is known (its tensors' byte sizes are checked).
@@ -425,6 +435,41 @@ pub struct Tensor {
     pub n_bytes: u64,
     pub layer: i32,   // -1 = global, 0..N = layer index
     pub kind: String, // "attn_q", "ffn_up", "token_embd", etc.
+    /// The mapping the bytes are in: 0 = `Model::data` (a GGUF: the file;
+    /// safetensors: shard 0), i = safetensors shard i, `AUX` = the loader's
+    /// converted arena (`Model::aux`).
+    pub shard: u16,
+    /// safetensors: the Hugging Face tensor it came from (`axon info`).
+    pub hf: Option<HfTensor>,
+}
+
+/// A safetensors tensor's own name and element type.
+#[derive(Debug, Clone)]
+pub struct HfTensor {
+    pub name: String,
+    pub dtype: &'static str,
+}
+
+/// `Tensor::shard` of a tensor in `Model::aux`.
+pub const AUX: u16 = u16::MAX;
+
+/// Where a model was loaded from.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Source {
+    Gguf,
+    /// A Hugging Face checkpoint directory (`crate::safetensors`).
+    Safetensors {
+        dir: std::path::PathBuf,
+        /// Every file the model was read from (config, tokenizer, shards),
+        /// in a fixed order: the digest and cache ids hash these.
+        files: Vec<std::path::PathBuf>,
+    },
+}
+
+/// A safetensors shard after the first (`Model::shards`).
+pub struct Shard {
+    pub map: memmap2::Mmap,
+    pub file: File,
 }
 
 pub struct Model {
@@ -438,7 +483,7 @@ pub struct Model {
     /// Byte ranges of the tensors handed back by `release`, sorted. On the
     /// anonymous copy (zeroed there) `tensor_data` refuses tensors that
     /// overlap one.
-    released: std::sync::Mutex<Vec<std::ops::Range<usize>>>,
+    released: std::sync::Mutex<Vec<(u16, std::ops::Range<usize>)>>,
     any_released: std::sync::atomic::AtomicBool,
     /// Tensors `load` rewrote (llama's reordered q/k rows) when `data` maps
     /// the file: their bytes live here, each in its own anonymous mapping,
@@ -449,6 +494,14 @@ pub struct Model {
     file: Option<File>,
     /// `read_ahead` started its thread.
     ahead: bool,
+    /// safetensors shards 1.. (`Tensor::shard` i is `shards[i - 1]`);
+    /// empty for a GGUF.
+    shards: Vec<Shard>,
+    /// The loader's own arena (`Tensor::shard` == `AUX`): BF16 tensors
+    /// converted to F16 / F32, misaligned ones copied. Anonymous, huge
+    /// pages asked for, 64-byte aligned slots.
+    aux: Option<memmap2::Mmap>,
+    pub source: Source,
 }
 
 /// A rewritten tensor's bytes outside a file mapping (`Model::side`).
@@ -473,30 +526,58 @@ const RELEASE_ALIGN: usize = 64 << 10;
 const RELEASE_ALIGN_HUGE: usize = 2 << 20;
 
 impl Model {
-    /// In bounds for every tensor of a loaded model: `parse` checks the ranges.
+    /// In bounds for every tensor of a loaded model: `parse` (and the
+    /// safetensors loader) check the ranges. In the tensor's own mapping
+    /// (`region`).
     fn tensor_range(&self, t: &Tensor) -> std::ops::Range<usize> {
-        let s = (self.data_offset + t.offset) as usize;
+        let s = match t.shard {
+            0 => (self.data_offset + t.offset) as usize,
+            _ => t.offset as usize,
+        };
         s..s + t.n_bytes as usize
     }
 
-    /// The tensor's bytes. Panics if they were `release`d from the anonymous
-    /// copy (they'd read as zeros).
+    /// Mapping `s`'s bytes, and whether it maps a file (vs anonymous
+    /// memory, whose released pages read back as zeros).
+    fn region(&self, s: u16) -> (&memmap2::Mmap, bool) {
+        match s {
+            0 => (&self.data, self.file_backed),
+            AUX => (
+                self.aux
+                    .as_ref()
+                    .expect("tensor in the aux arena before it was filled"),
+                false,
+            ),
+            i => (&self.shards[i as usize - 1].map, true),
+        }
+    }
+
+    /// The tensor's bytes. Panics if they were `release`d from anonymous
+    /// memory (they'd read as zeros).
     pub fn tensor_data(&self, t: &Tensor) -> &[u8] {
         let r = self.tensor_range(t);
-        if let Some(s) = self.side_of(&r) {
+        if t.shard == 0
+            && let Some(s) = self.side_of(&r)
+        {
             return &s.map[..r.len()];
         }
-        if !self.file_backed && self.any_released.load(std::sync::atomic::Ordering::Acquire) {
+        let (map, file_backed) = self.region(t.shard);
+        assert!(
+            r.end <= map.len(),
+            "tensor {} was not converted (a header-only load: gguf::load_header)",
+            t.name
+        );
+        if !file_backed && self.any_released.load(std::sync::atomic::Ordering::Acquire) {
             // Unlocked before the panic: a caught one leaves the lock usable.
-            let gone =
-                (self.released.lock().unwrap().iter()).any(|x| x.start < r.end && r.start < x.end);
+            let gone = (self.released.lock().unwrap().iter())
+                .any(|(s, x)| *s == t.shard && x.start < r.end && r.start < x.end);
             assert!(
                 !gone,
                 "tensor {} was released after repacking; load the model again to read it",
                 t.name
             );
         }
-        &self.data[r]
+        &map[r]
     }
 
     /// The side copy holding bytes `r` of `data`, if any.
@@ -508,12 +589,19 @@ impl Model {
     }
 
     /// Where `t`'s bytes (`tensor_data`'s) can be read with pread: the
-    /// mapped file and the offset in it. None on the anonymous copy and for
-    /// a rewritten tensor (its bytes are in a side copy, not the file).
+    /// mapped file and the offset in it. None on the anonymous copy, for a
+    /// rewritten tensor (its bytes are in a side copy, not the file) and
+    /// for a converted one (`AUX`).
     pub fn tensor_file(&self, t: &Tensor) -> Option<(&File, u64)> {
         let r = self.tensor_range(t);
-        let f = self.file.as_ref().filter(|_| self.file_backed)?;
-        self.side_of(&r).is_none().then_some((f, r.start as u64))
+        match t.shard {
+            0 => {
+                let f = self.file.as_ref().filter(|_| self.file_backed)?;
+                self.side_of(&r).is_none().then_some((f, r.start as u64))
+            }
+            AUX => None,
+            i => Some((&self.shards[i as usize - 1].file, r.start as u64)),
+        }
     }
 
     /// Whether `data` maps the file (vs the anonymous copy, see `map_weights`).
@@ -528,75 +616,78 @@ impl Model {
     /// (bytes no tensor owns), so small tensors next to each other go too;
     /// it never holds a byte of a tensor that wasn't released. On a file
     /// mapping the pages just leave this mapping and a later read faults them
-    /// back in from the file. On the anonymous copy they come back as zeros,
-    /// so `tensor_data` panics on a released tensor from then on. A tensor
-    /// with a side copy (`side`) keeps it (see `Side`); only its untouched
-    /// file pages go.
+    /// back in from the file. On anonymous memory (the copy, the aux arena)
+    /// they come back as zeros, so `tensor_data` panics on a released tensor
+    /// from then on. A tensor with a side copy (`side`) keeps it (see
+    /// `Side`); only its untouched file pages go. Per mapping (`region`).
     pub fn release(&self, t: &Tensor) {
         let r = self.tensor_range(t);
         if r.is_empty() {
             return;
         }
+        let s = t.shard;
         let mut rel = self.released.lock().unwrap();
-        let i = rel.partition_point(|x| x.start < r.start);
-        if rel.get(i) == Some(&r) {
+        let i = rel.partition_point(|x| (x.0, x.1.start) < (s, r.start));
+        if rel.get(i) == Some(&(s, r.clone())) {
             return;
         }
-        rel.insert(i, r);
-        if !self.file_backed {
+        rel.insert(i, (s, r));
+        let (map, file_backed) = self.region(s);
+        if !file_backed {
             self.any_released
                 .store(true, std::sync::atomic::Ordering::Release);
         }
         // The run of released tensors around this one, joined across gaps
         // that hold no tensor bytes.
         let (mut lo, mut hi) = (i, i);
-        while lo > 0 && self.unowned(rel[lo - 1].end, rel[lo].start) {
+        while lo > 0 && rel[lo - 1].0 == s && self.unowned(s, rel[lo - 1].1.end, rel[lo].1.start) {
             lo -= 1;
         }
-        while hi + 1 < rel.len() && self.unowned(rel[hi].end, rel[hi + 1].start) {
+        while hi + 1 < rel.len()
+            && rel[hi + 1].0 == s
+            && self.unowned(s, rel[hi].1.end, rel[hi + 1].1.start)
+        {
             hi += 1;
         }
-        let base = self.data.as_ptr() as usize;
-        let align = if self.file_backed {
+        let base = map.as_ptr() as usize;
+        let align = if file_backed {
             RELEASE_ALIGN
         } else {
             RELEASE_ALIGN_HUGE
         };
         let Some(std::ops::Range { start, end }) =
-            release_span(base, rel[lo].start..rel[hi].end, align)
+            release_span(base, rel[lo].1.start..rel[hi].1.end, align)
         else {
             return;
         };
-        // SAFETY: [start, end) is inside `data` and inside released tensors
-        // or bytes no tensor owns; nothing reads those again (on the
-        // anonymous copy `tensor_data` enforces that; the slices handed out
-        // before were all consumed by their owners before `release`). Blocks
-        // dropped by an earlier call are simply dropped again. On a file
-        // mapping the bytes don't change at all.
+        // SAFETY: [start, end) is inside the mapping and inside released
+        // tensors or bytes no tensor owns; nothing reads those again (on
+        // anonymous memory `tensor_data` enforces that; the slices handed
+        // out before were all consumed by their owners before `release`).
+        // Blocks dropped by an earlier call are simply dropped again. On a
+        // file mapping the bytes don't change at all.
         let _ = unsafe {
-            self.data
-                .unchecked_advise_range(memmap2::UncheckedAdvice::DontNeed, start, end - start)
+            map.unchecked_advise_range(memmap2::UncheckedAdvice::DontNeed, start, end - start)
         };
     }
 
     /// Fill in the page tables for `t`'s bytes on a file mapping
     /// (MADV_POPULATE_READ: from the page cache, reading the file where it
     /// isn't there), so a copy out of them doesn't stop at a page fault
-    /// every 64 KB. Nothing on the anonymous copy. Best effort.
+    /// every 64 KB. Nothing on anonymous memory. Best effort.
     pub fn prefault(&self, t: &Tensor) {
         let r = self.tensor_range(t);
-        if self.file_backed && !r.is_empty() {
-            let _ = self
-                .data
-                .advise_range(memmap2::Advice::PopulateRead, r.start, r.len());
+        let (map, file_backed) = self.region(t.shard);
+        if file_backed && !r.is_empty() {
+            let _ = map.advise_range(memmap2::Advice::PopulateRead, r.start, r.len());
         }
     }
 
     /// The fraction of the tensor data's file pages in the page cache
-    /// (mincore), or None on the anonymous copy or if it can't be told.
-    /// ~1 ms for a 5 GB file.
+    /// (mincore), or None on the anonymous copy, for a safetensors
+    /// checkpoint, or if it can't be told. ~1 ms for a 5 GB file.
     pub fn resident_fraction(&self) -> Option<f64> {
-        if !self.file_backed || !cfg!(target_os = "linux") {
+        if !self.file_backed || !cfg!(target_os = "linux") || self.source != Source::Gguf {
             return None;
         }
         unsafe extern "C" {
@@ -627,19 +718,18 @@ impl Model {
     #[cfg(test)]
     pub fn is_released(&self, t: &Tensor) -> bool {
         let r = self.tensor_range(t);
-        self.released.lock().unwrap().contains(&r)
+        self.released.lock().unwrap().contains(&(t.shard, r))
     }
 
-    /// Whether bytes a..b of `data` (between two released tensors) belong
-    /// to no tensor.
-    fn unowned(&self, a: usize, b: usize) -> bool {
+    /// Whether bytes a..b of mapping `s` (between two released tensors)
+    /// belong to no tensor.
+    fn unowned(&self, s: u16, a: usize, b: usize) -> bool {
         a >= b
             || !self.tensors.iter().any(|t| {
                 let r = self.tensor_range(t);
-                !r.is_empty() && r.start < b && a < r.end
+                t.shard == s && !r.is_empty() && r.start < b && a < r.end
             })
     }
-
     pub fn meta_u32(&self, key: &str) -> Option<u32> {
         self.metadata
             .iter()
@@ -782,8 +872,25 @@ pub fn load(path: &str) -> io::Result<Model> {
     load_with(path, None)
 }
 
+/// A model's header for `axon info`: a GGUF mapped (`load_with`), a
+/// safetensors checkpoint without converting its tensors (their bytes
+/// can't be read from the result: `tensor_data` panics on one, so `axon
+/// info` must never read a converted tensor's bytes; computed ones, like
+/// `rope_freqs.weight`, are there).
+pub fn load_header(path: &str) -> io::Result<Model> {
+    match crate::safetensors::dir_of(path) {
+        Some(dir) => crate::safetensors::load(&dir, |_| CopyWish::MapOnly, false),
+        None => load_with(path, Some(false)),
+    }
+}
+
 /// `load`, with the copy-vs-map choice forced (`copy`: see `map_weights`).
+/// A directory (or a `.safetensors` file in one) is a Hugging Face
+/// checkpoint (`crate::safetensors::load`; `copy` doesn't apply).
 pub fn load_with(path: &str, copy: Option<bool>) -> io::Result<Model> {
+    if let Some(dir) = crate::safetensors::dir_of(path) {
+        return crate::safetensors::load(&dir, |_| CopyWish::MapOnly, true);
+    }
     let file = File::open(path)?;
     let len = file.metadata()?.len() as usize;
     let (data, file_backed) = map_weights(&file, copy)?;
@@ -816,6 +923,10 @@ pub fn load_to_run(
     copy: Option<bool>,
     wants_copy: impl FnOnce(&Model) -> CopyWish,
 ) -> io::Result<Model> {
+    if let Some(dir) = crate::safetensors::dir_of(path) {
+        // Checked before the weights are read, as below.
+        return crate::safetensors::load(&dir, wants_copy, true);
+    }
     let file = File::open(path)?;
     let len = file.metadata()?.len() as usize;
     // SAFETY: the file is opened read-only and not modified while mapped.
@@ -925,6 +1036,43 @@ impl Model {
 }
 
 impl Model {
+    /// A safetensors checkpoint's model (`crate::safetensors::load`):
+    /// shard 0 is `data` (offsets absolute, `data_offset` 0), the rest
+    /// `shards`; `aux` comes later (`set_aux`).
+    pub(crate) fn from_safetensors(
+        arch: String,
+        metadata: Vec<(String, Val)>,
+        tensors: Vec<Tensor>,
+        first: Shard,
+        rest: Vec<Shard>,
+        source: Source,
+    ) -> Model {
+        let h = Header {
+            arch,
+            metadata,
+            tensors,
+            data_offset: 0,
+        };
+        let mut m = Model::new(h, first.map, true);
+        m.file = Some(first.file);
+        m.shards = rest;
+        m.source = source;
+        m
+    }
+
+    /// The loader's filled arena (`Tensor::shard` == `AUX`).
+    pub(crate) fn set_aux(&mut self, aux: memmap2::Mmap) {
+        self.aux = Some(aux);
+    }
+
+    /// Every safetensors shard's file, in shard order (a GGUF: its file).
+    pub(crate) fn shard_files(&self) -> Vec<&File> {
+        self.file
+            .iter()
+            .chain(self.shards.iter().map(|s| &s.file))
+            .collect()
+    }
+
     fn new(h: Header, data: memmap2::Mmap, file_backed: bool) -> Model {
         Model {
             arch: h.arch,
@@ -938,6 +1086,9 @@ impl Model {
             side: Vec::new(),
             file: None,
             ahead: false,
+            shards: Vec::new(),
+            aux: None,
+            source: Source::Gguf,
         }
     }
 
@@ -1260,6 +1411,8 @@ fn parse(buf: &[u8]) -> io::Result<Header> {
             n_bytes,
             layer,
             kind,
+            shard: 0,
+            hf: None,
         });
     }
 
@@ -1337,6 +1490,9 @@ pub fn build_for_test_with(
         side: Vec::new(),
         file: None,
         ahead: false,
+        shards: Vec::new(),
+        aux: None,
+        source: Source::Gguf,
     }
 }
 
@@ -1472,6 +1628,8 @@ mod tests {
                     offset: 0,
                     layer: 0,
                     kind: "attn_q.weight".into(),
+                    shard: 0,
+                    hf: None,
                 };
                 unpermute_rows(&mut gguf, &t, heads, None);
                 assert_eq!(gguf, hf, "hd {hd} type {}", qt.name);

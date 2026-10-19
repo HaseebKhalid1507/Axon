@@ -447,6 +447,9 @@ impl<'a> Backend<'a> {
         if crate::model::moe_cpu_only(m) {
             return Err(crate::model::moe_gpu_refusal(m));
         }
+        if let Some(e) = crate::safetensors::gpu_refusal(m) {
+            return Err(e);
+        }
         // f32 isn't offered on the GPU: f16 there (as always).
         let ckv = match kv {
             KvType::Q8 => CacheKv::Q8 { group: 0 },

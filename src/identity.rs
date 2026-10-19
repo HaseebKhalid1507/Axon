@@ -453,10 +453,44 @@ const WINDOWS: u64 = 1024;
 /// file; it isn't a tamper seal). It reopens the file by path: a file
 /// replaced after loading is digested as the new one.
 pub fn model_digest(path: &Path, m: &Model) -> io::Result<String> {
+    if let crate::gguf::Source::Safetensors { files, .. } = &m.source {
+        return checkpoint_digest(files);
+    }
     let tensors: Vec<(u64, u64)> = (m.tensors.iter())
         .map(|t| (m.data_offset + t.offset, t.n_bytes))
         .collect();
     digest_file(path, m.data_offset, &tensors)
+}
+
+/// `model_digest` of a safetensors checkpoint: SHA-256 of
+/// "axon-model-digest/st1\0" and, per file (`Source::Safetensors::files`),
+/// its name and its `digest_file` digest: a shard's with its header and its
+/// tensors' edges, a config or tokenizer file's whole (its "header").
+fn checkpoint_digest(files: &[std::path::PathBuf]) -> io::Result<String> {
+    let mut h = Sha256::new();
+    h.update(b"axon-model-digest/st1\0");
+    for f in files {
+        let name = f.file_name().unwrap_or_default().to_string_lossy();
+        let (data, tensors) = match name.ends_with(".safetensors") {
+            true => {
+                let file = std::fs::File::open(f)?;
+                // SAFETY: read-only, only read here.
+                let map = unsafe { memmap2::Mmap::map(&file)? };
+                let hd = crate::safetensors::parse_header(&map)?;
+                let start = 8 + u64::from_le_bytes(map[..8].try_into().unwrap());
+                let ts: Vec<(u64, u64)> = (hd.tensors.iter())
+                    .map(|t| (t.begin, t.end - t.begin))
+                    .collect();
+                (start, ts)
+            }
+            // Config and tokenizer files: hashed whole (all "header").
+            false => (u64::MAX, Vec::new()),
+        };
+        h.update(name.as_bytes());
+        h.update(&[0]);
+        h.update(digest_file(f, data, &tensors)?.as_bytes());
+    }
+    Ok(hex(&h.finish()))
 }
 
 /// The ranges `digest_file` hashes, for a file of `len` bytes: sorted,
