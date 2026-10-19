@@ -1928,36 +1928,62 @@ mod tests {
         if !net.graphs || !km.mma() {
             return;
         }
-        let steps = 48;
+        let steps = 96; // ~30 to drain (a quarter of what is free each), then the halvings
         let (mut p, prompts, refs, _view, _, _) = oom_setup(&mut net, steps);
         let (_, eager0) = crate::cuda::qwen2::graph_oom_counts();
         let mut hist = prompts.clone();
         let mut held = Vec::new();
         let mut step = 0;
+        let mib = |b: u64| b as f64 / (1 << 20) as f64;
+        let free = || g.info().unwrap().free_bytes;
+        // A step after each allocation, every graph made anew (cleared), until
+        // one can't be instantiated. The driver hands out 2 MiB granules: once
+        // a chunk doesn't fit, smaller ones are tried (down to 64 KiB) before
+        // the memory counts as gone.
+        let mut chunk = (free() as usize / 4).max(64 << 10);
+        let mut failed_at = None;
         while step < steps {
             p.graphs.clear();
+            let before = free();
             oom_step(&net, &mut p, &mut hist, &refs, step);
             step += 1;
             if crate::cuda::qwen2::graph_oom_counts().1 > eager0 {
+                failed_at = Some(before);
+                eprintln!(
+                    "step {step}: the graph failed with {:.2} MiB free",
+                    mib(before)
+                );
                 break;
             }
-            let free = g.info().unwrap().free_bytes as usize;
-            let chunk = (free / 4).max(64 << 10);
-            match g.alloc(chunk) {
-                Ok(b) => held.push(b),
-                Err(_) => break,
+            chunk = chunk.min((free() as usize / 4).max(64 << 10));
+            loop {
+                match g.alloc(chunk) {
+                    Ok(b) => {
+                        held.push(b);
+                        break;
+                    }
+                    Err(_) if chunk > 64 << 10 => chunk /= 2,
+                    Err(_) => break,
+                }
             }
+            eprintln!(
+                "step {step}: graph made; {:.2} MiB free after taking {} KiB",
+                mib(free()),
+                chunk >> 10
+            );
         }
-        let free_mib = g.info().unwrap().free_bytes as f64 / (1 << 20) as f64;
-        // The rest of the steps, still under the pressure.
+        // The rest of a few steps, still under the pressure, each graph made
+        // anew: kernel by kernel while instantiation keeps failing.
         let end = (step + 4).min(steps);
         while step < end {
+            p.graphs.clear();
             oom_step(&net, &mut p, &mut hist, &refs, step);
             step += 1;
         }
+        let free_mib = failed_at.map_or(f64::NAN, mib);
         drop(held);
         let (_, eager1) = crate::cuda::qwen2::graph_oom_counts();
-        eprintln!("graph_oom_fill_vram: graphs failed with {free_mib:.1} MiB free");
+        eprintln!("graph_oom_fill_vram: the first graph failed with {free_mib:.2} MiB free");
         assert!(eager1 > eager0, "VRAM ran out without a graph failing");
     }
 
