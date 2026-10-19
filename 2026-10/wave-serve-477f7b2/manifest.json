@@ -1,0 +1,49 @@
+{
+ "label": "wave-serve-477f7b2",
+ "verdict": "FAIL (2 of 2)",
+ "jobs": [
+  {
+   "job": "1019-024956-d819",
+   "name": "wave-serve-477f7b2-fast-rel",
+   "rc": 125,
+   "verdict": "FAIL (rc 125)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.71.09",
+   "sha": "477f7b2",
+   "binary": "axon-test-477f7b2",
+   "started": 1792405033.8067625,
+   "ended": 1792409089.7519567,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "12d9aafa6ed349bec3e1699c2830a4485915f88beaa3cf39f2eb536c7bb31a8c",
+   "log_bytes": 43114
+  },
+  {
+   "job": "1019-024956-d3a2",
+   "name": "wave-serve-477f7b2-fast-dbg-cpu",
+   "rc": 137,
+   "verdict": "FAIL (rc 137)",
+   "host": "jade",
+   "hw": "hw-jade.txt",
+   "gpu": "CPU only (jade; GPU hidden)",
+   "driver": "580.159.04",
+   "sha": "477f7b2",
+   "binary": "axon-test-dbg-477f7b2",
+   "started": 1792398393.0752332,
+   "ended": 1792401882.8916755,
+   "attempts": 2,
+   "remote_job": "20261019-042707-axon-test-dbg-477f7b2-1306001",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "b49004dda94ab8668fef22c8884e3fa920760bec9cb11a843387fa2ee97b5036",
+   "log_bytes": 46640
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-19 07:24:53 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
