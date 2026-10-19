@@ -51,6 +51,7 @@ fn test_opts(path: &str, device: Device) -> Opts {
         parallel_set: false,
         slot_ctx: None,
         kv_pages: None,
+        kv_grow: None,
         prefill_chunk: super::engine::PREFILL_CHUNK,
         prefill_ms: super::engine::PREFILL_MS,
         rope: Default::default(),
@@ -1879,11 +1880,13 @@ fn serve_paged_cap_message() {
 }
 
 /// A paged pool squeezed to fewer pages than its requests need at once
-/// (`kv_pages`; 40 pages = 2560 positions for 6 requests of ~500-token
-/// prompts and up to 400 tokens each): admissions wait for pages, idle
-/// prefixes are reclaimed, prompts back off and the youngest running
-/// request is preempted (fed again): every request still gets a 200 with
-/// the reply it gets alone, /slots reports the pages, none leak.
+/// (`kv_pages` 40 = 2560 positions; `kv_grow` 0: admission reserves no
+/// generated tokens' pages): 6 counting completions (they don't stop early)
+/// of ~260-token prompts and 450 tokens each, started together, grow from
+/// ~5 to ~12 pages each while decoding side by side, past the free and the
+/// reclaimable pages, so requests are preempted (fed again) mid-decode.
+/// Every reply == the same request alone, greedy and seeded-sampled; the
+/// preemption counter in /slots is > 0; no page leaks.
 #[test]
 fn serve_paged_pressure() {
     let Some(_) = crate::testutil::gpu() else {
@@ -1896,6 +1899,7 @@ fn serve_paged_pressure() {
         o.parallel = 6;
         o.parallel_set = true;
         o.kv_pages = Some(40);
+        o.kv_grow = Some(0);
     });
     let a = s.addr;
     let sl = call(a, "GET", "/slots", "").json();
@@ -1903,12 +1907,44 @@ fn serve_paged_pressure() {
     assert_eq!(sl["page_tokens"], 64, "{sl}");
     let bodies: Vec<Value> = (0..6)
         .map(|i| {
-            let words = format!("{i} ") + &"the river runs past the old mill. ".repeat(60);
-            json!({"messages": [{"role": "user", "content": words}], "max_tokens": 300 + 20 * i,
-                   "temperature": if i % 2 == 0 { json!(0) } else { json!(0.8) }, "seed": i})
+            let prompt = format!("Note {i}. ")
+                + &"The river runs past the old mill and the bridge. ".repeat(24)
+                + "Count: 1, 2, 3, 4, 5,";
+            json!({"prompt": prompt, "max_tokens": 450,
+                   "temperature": if i % 2 == 0 { json!(0) } else { json!(0.3) }, "seed": i})
         })
         .collect();
-    batched_vs_solo(a, &bodies, "paged pool under pressure");
+    let reply = |r: &Resp| -> (String, u64) {
+        assert_eq!(r.status, 200, "{}", r.body);
+        let v = r.json();
+        (
+            v["choices"][0]["text"].to_string(),
+            v["usage"]["completion_tokens"].as_u64().unwrap(),
+        )
+    };
+    let solo: Vec<_> = bodies
+        .iter()
+        .map(|b| reply(&post(a, "/v1/completions", b.clone())))
+        .collect();
+    let generated: u64 = solo.iter().map(|r| r.1).sum();
+    assert!(generated >= 6 * 300, "the replies grow: {generated} tokens");
+    let start = std::sync::Barrier::new(bodies.len());
+    let together: Vec<_> = std::thread::scope(|sc| {
+        let hs: Vec<_> = bodies
+            .iter()
+            .map(|b| {
+                let start = &start;
+                sc.spawn(move || {
+                    start.wait();
+                    reply(&post(a, "/v1/completions", b.clone()))
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for (i, (t, s1)) in together.iter().zip(&solo).enumerate() {
+        assert_eq!(t, s1, "paged pool under pressure: request {i}");
+    }
     wait_for("the pool idle", || {
         call(a, "GET", "/slots", "").json()["slots"]
             .as_array()
@@ -1916,6 +1952,7 @@ fn serve_paged_pressure() {
             .iter()
             .all(|x| x["busy"] == false)
     });
+    // The counters are cumulative (never reset): read after the burst.
     let sl = call(a, "GET", "/slots", "").json();
     let held: u64 = sl["slots"]
         .as_array()
@@ -1924,6 +1961,7 @@ fn serve_paged_pressure() {
         .map(|x| x["pages_used"].as_u64().unwrap())
         .sum();
     assert_eq!(held + sl["pages_free"].as_u64().unwrap(), 40, "{sl}");
+    assert!(sl["preempted"].as_u64().unwrap() > 0, "no preemption: {sl}");
 }
 
 /// `plan_slots` over a model of the memory: s slots of c positions fit
@@ -3014,10 +3052,19 @@ fn serve_slot_idle_frees_a_stalled_stream() {
             idle.is_some() && m()["axon_slot_idle_evictions_total"] > 0.0
         };
         let mut last = (inq(&c), Instant::now(), s.generated.load(Ordering::Relaxed));
+        // The longest engine step seen (time between token counts, from the
+        // first token on): freeing the slot waits for engine steps (below).
+        let (mut step, mut tok) = (Duration::ZERO, (last.2, Instant::now()));
         let full = loop {
             std::thread::sleep(Duration::from_millis(10));
             let n = inq(&c);
             let g = s.generated.load(Ordering::Relaxed);
+            if g != tok.0 {
+                if tok.0 > 0 {
+                    step = step.max(tok.1.elapsed());
+                }
+                tok = (g, Instant::now());
+            }
             if n != last.0 {
                 last = (n, Instant::now(), g);
             } else if n > 0 && (g >= last.2 + 2 || evicted()) {
@@ -3029,14 +3076,33 @@ fn serve_slot_idle_frees_a_stalled_stream() {
         let what = format!("--slot-idle-ms {idle:?}");
         match idle {
             Some(n) => {
-                wait_for("the stalled stream to free its slot", || !busy());
+                // When the server evicted the stream, then when the slot is free.
+                let ev_at = std::cell::Cell::new(None);
+                wait_for("the stalled stream to free its slot", || {
+                    if ev_at.get().is_none() && evicted() {
+                        ev_at.set(Some(full.elapsed()));
+                    }
+                    !busy()
+                });
+                let ev_at = ev_at.get();
                 let took = full.elapsed();
-                eprintln!("{what}: freed {took:?} after the window filled");
-                // The stall time, a poll (n/4), a token step on a loaded
-                // machine, and the time spent seeing the window full.
+                eprintln!(
+                    "{what}: evicted {ev_at:?}, freed {took:?} after the window filled (longest \
+                     step {step:?})"
+                );
+                // The stall time, a poll (n/4) and the time spent seeing the
+                // window full, plus up to two engine steps: the stall check
+                // counts unacknowledged bytes, and after the fill there are
+                // none until the next token is written (one step); the cancel
+                // then lands in a step that has to finish before the next one
+                // reaps the slot (`Batch::reap`). Neither delays anyone: the
+                // engine can't run another request before that step ends
+                // anyway. Idle host: ~0.02-0.1 s per step; 8 pool threads
+                // among 64 spinning ones on a 6.8-vCPU pod: 2-6 s, freed at
+                // 4-12 s.
                 assert!(
-                    took < Duration::from_millis(n + 2500),
-                    "{what}: freed {took:?} after the window filled"
+                    took < Duration::from_millis(n + 2500) + 2 * step,
+                    "{what}: freed {took:?} after the window filled (longest step {step:?})"
                 );
                 assert!(took >= Duration::from_millis(n / 2), "{what}: {took:?}");
                 let m = prom_parse(&call(a, "GET", "/metrics", "").body);
@@ -4038,4 +4104,131 @@ fn serve_ollama_error_shapes() {
     let r = call(a, "POST", "/v1/responses", "{\"input\":\"x\"}");
     assert_eq!(r.status, 401);
     assert_eq!(r.json()["error"]["code"], "invalid_api_key");
+}
+
+/// A request is in /metrics by the time its response is on the wire, on
+/// every path: a response from `route` (whole, streamed, HEAD), a 401
+/// from the --api-key gate and a 413 answered before routing (both then
+/// linger), counted exactly once each. `Server::hold` stops every
+/// connection thread right after its response, so a count made after
+/// the response (the old order: the serve_api_key flake of jobs
+/// 1018-163238-d187 and 1018-014632-e746) is missing here every time.
+#[test]
+fn serve_counts_a_request_before_answering_it() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server_with(p.to_str().unwrap(), Device::Cpu, |o| {
+        o.api_key = Some("s3cret-key".into());
+    });
+    let a = s.addr;
+    let right = "Authorization: Bearer s3cret-key\r\n";
+    let probes = std::cell::Cell::new(0.0);
+    let requests = || {
+        let r = call_h(a, "GET", "/metrics", "", right);
+        assert_eq!(r.status, 200, "{}", r.body);
+        probes.set(probes.get() + 1.0);
+        prom_parse(&r.body)
+            .into_iter()
+            .filter(|(k, _)| k.starts_with("axon_requests_total{"))
+            .collect::<std::collections::BTreeMap<_, _>>()
+    };
+    let key = |route: &str, status: u16| {
+        format!("axon_requests_total{{route=\"{route}\",status=\"{status}\"}}")
+    };
+    // One raw exchange: `head` (+ `body`), the response (`head_only`: to
+    // a HEAD).
+    let raw = |head: String, body: &str, head_only: bool| {
+        let mut c = TcpStream::connect(a).unwrap();
+        c.set_read_timeout(Some(Duration::from_secs(300))).unwrap();
+        c.write_all(head.as_bytes()).unwrap();
+        c.write_all(body.as_bytes()).unwrap();
+        read_resp_to(&mut c, &mut Vec::new(), head_only).status
+    };
+    let one = json!({"prompt": "Hi", "max_tokens": 1, "temperature": 0}).to_string();
+    let stream =
+        json!({"prompt": "Hi", "max_tokens": 1, "temperature": 0, "stream": true}).to_string();
+    type Case<'a> = (&'a str, &'static str, u16, Box<dyn Fn() -> u16 + 'a>);
+    let cases: Vec<Case> = vec![
+        // `route`'s 401 (no body: past the gate).
+        (
+            "GET no key",
+            "/v1/models",
+            401,
+            Box::new(|| call_h(a, "GET", "/v1/models", "", "").status),
+        ),
+        // The gate's 401 (a body without the key): read_request's error path.
+        (
+            "POST no key",
+            "/v1/completions",
+            401,
+            Box::new(|| call_h(a, "POST", "/v1/completions", &one, "").status),
+        ),
+        // A 413 before routing: the error path, route "other".
+        (
+            "413",
+            "other",
+            413,
+            Box::new(|| {
+                let h = format!(
+                    "POST /v1/completions HTTP/1.1\r\nHost: x\r\n{right}Content-Length: {}\r\n\r\n",
+                    super::http::MAX_BODY + 1
+                );
+                raw(h, "", false)
+            }),
+        ),
+        (
+            "HEAD",
+            "/v1/models",
+            200,
+            Box::new(|| {
+                raw(
+                    format!(
+                        "HEAD /v1/models HTTP/1.1\r\nHost: x\r\n{right}Connection: close\r\n\r\n"
+                    ),
+                    "",
+                    true,
+                )
+            }),
+        ),
+        (
+            "404",
+            "other",
+            404,
+            Box::new(|| call_h(a, "GET", "/nope", "", right).status),
+        ),
+        (
+            "generation",
+            "/v1/completions",
+            200,
+            Box::new(|| call_h(a, "POST", "/v1/completions", &one, right).status),
+        ),
+        (
+            "stream",
+            "/v1/completions",
+            200,
+            Box::new(|| call_h(a, "POST", "/v1/completions", &stream, right).status),
+        ),
+    ];
+    let mut want = requests();
+    s.hold(true);
+    for (what, route, status, run) in &cases {
+        // Each probe of /metrics is a request too, counted no later than
+        // the next probe's answer.
+        *want.entry(key("/metrics", 200)).or_default() += 1.0;
+        assert_eq!(run(), *status, "{what}");
+        *want.entry(key(route, *status)).or_default() += 1.0;
+        assert_eq!(requests(), want, "{what}: answered, not yet counted");
+    }
+    s.hold(false);
+    // Once every connection is done (lingers included), nothing more was
+    // counted: each request exactly once.
+    let t = Instant::now();
+    while s.conns() > 0 {
+        assert!(t.elapsed() < Duration::from_secs(60), "connections left");
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    *want.entry(key("/metrics", 200)).or_default() += 1.0;
+    assert_eq!(requests(), want, "after the connections ended");
+    assert_eq!(probes.get(), cases.len() as f64 + 2.0);
 }

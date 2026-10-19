@@ -125,6 +125,9 @@ pub struct Opts {
     /// A paged pool's KV pages (None: as many as fit; tests squeeze the
     /// pool with it).
     pub kv_pages: Option<usize>,
+    /// Generated tokens a paged admission reserves pages for (None: the
+    /// engine's GROW_TOKENS; tests set 0 to force preemption).
+    pub kv_grow: Option<usize>,
     /// Prompt tokens a batched step feeds at least while requests decode
     /// (`--prefill-chunk`; 0: prompts fed whole): a long prompt prefills in
     /// chunks between the running requests' steps.
@@ -299,6 +302,33 @@ struct Shared {
     slot_idle: Option<Duration>,
     metrics: Arc<ops::Metrics>,
     log: bool,
+    /// Tests: `Server::hold`.
+    #[cfg(test)]
+    hold: Hold,
+}
+
+/// Tests (`Server::hold`): while on, a connection thread that has answered
+/// a request waits here, between its response and whatever follows it, so
+/// a test can look at the server (/metrics) at that instant.
+#[cfg(test)]
+#[derive(Default)]
+struct Hold(std::sync::Mutex<bool>, std::sync::Condvar);
+
+#[cfg(test)]
+impl Hold {
+    fn set(&self, on: bool) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = on;
+        self.1.notify_all();
+    }
+
+    /// Wait while on (at most 30 s: a test that fails while holding must
+    /// not wedge its threads forever).
+    fn here(&self) {
+        let g = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = self
+            .1
+            .wait_timeout_while(g, Duration::from_secs(30), |on| *on);
+    }
 }
 
 /// `Shared::waiting`: (connection id, a handle to shut it down), oldest first.
@@ -806,10 +836,12 @@ fn engine(
             .unwrap_or_else(|e| crate::fail(&format!("--draft-model {e}")))
     });
     // The Q6_K prefill copy waits for the cache and slots (below).
+    // AXON_PAGED_KV, read once for this server.
+    let paged_env = crate::cuda::qwen2::pages::paged_env();
     let place = crate::lm::Placing {
         split_ctx,
         defer_q6k8: true,
-        paged: paged_serve(device, o.parallel),
+        paged: paged_serve(device, o.parallel, paged_env),
     };
     let (mut net, drafter) = crate::backend_and_drafter(
         &model,
@@ -860,7 +892,7 @@ fn engine(
         _ => (ctx, why),
     };
     // (A paged pool plans its own context: below.)
-    if let Some(why) = why.filter(|_| o.log && !paged_serve(device, o.parallel)) {
+    if let Some(why) = why.filter(|_| o.log && !paged_serve(device, o.parallel, paged_env)) {
         eprintln!("axon serve: context {ctx} tokens: {why}");
     }
     let template = Template::new(tok, &model.arch);
@@ -894,7 +926,7 @@ fn engine(
     };
     // Paged KV (specs r11): a slot is a cap, the pool a page budget.
     let paged = match &net {
-        Backend::Cuda(n) if paged_serve(device, o.parallel) => {
+        Backend::Cuda(n) if paged_serve(device, o.parallel, paged_env) => {
             let slots = if o.parallel_set {
                 o.parallel
             } else {
@@ -1034,7 +1066,11 @@ fn engine(
             floor: o.prefill_chunk,
             ms: o.prefill_ms,
         };
-        Batch::new(&net, pool, n, slot_ctx, policy, o.log, e.generated.clone())
+        let mut b = Batch::new(&net, pool, n, slot_ctx, policy, o.log, e.generated.clone());
+        if let Some(g) = o.kv_grow {
+            b.set_grow_tokens(g);
+        }
+        b
     });
     let served = batch.as_ref().map_or(ctx, |b| b.ctx.min(ctx));
     let banner = match (&batch, &paged) {
@@ -1079,7 +1115,13 @@ fn engine(
     let mut waiting: VecDeque<Job> = VecDeque::new();
     loop {
         if let Some(b) = &batch {
-            let pages = b.pages().map(|p| (p.free, p.total, p.size));
+            let pages = b.pages().map(|p| ops::PagesView {
+                free: p.free,
+                total: p.total,
+                size: p.size,
+                preempted: b.preempted,
+                unfed: b.unfed,
+            });
             o.metrics.publish_pool(b.slot_states(), pages);
         }
         if batch.as_ref().is_none_or(Batch::idle) && waiting.is_empty() {
@@ -1114,7 +1156,7 @@ fn engine(
         // as does one that fits no slot, once the batch is idle.
         let first_fit = waiting.iter().position(|j| fits_slot(j, b.ctx));
         if let Some(i) = first_fit
-            && b.can_admit(&waiting[i].prompt)
+            && b.can_admit(&waiting[i])
             && (!b.idle() || waiting.len() > 1)
         {
             let job = waiting.remove(i).unwrap();
@@ -1197,9 +1239,10 @@ const PAGED_PARALLEL: usize = 16;
 /// Positions per KV page (cuda qwen2 pages.rs).
 const PAGE_TOKENS: usize = 64;
 
-/// Whether serve's pool is paged: the GPU, batching, AXON_PAGED_KV != 0.
-fn paged_serve(device: Device, parallel: usize) -> bool {
-    device == Device::Cuda && parallel > 1 && crate::cuda::qwen2::pages::paged_env()
+/// Whether serve's pool is paged: the GPU, batching, AXON_PAGED_KV != 0
+/// (`paged_env`, read once at serve's start).
+fn paged_serve(device: Device, parallel: usize, paged_env: bool) -> bool {
+    device == Device::Cuda && parallel > 1 && paged_env
 }
 
 /// A paged pool's shape: up to `slots` requests of up to `cap` positions
@@ -1470,6 +1513,7 @@ struct EngineOpts {
     parallel_set: bool,
     slot_ctx: Option<usize>,
     kv_pages: Option<usize>,
+    kv_grow: Option<usize>,
     prefill_chunk: usize,
     prefill_ms: usize,
     path: String,
@@ -1515,6 +1559,12 @@ impl Server {
     /// Open connections.
     pub fn conns(&self) -> usize {
         self.sh.conns.load(Ordering::Relaxed)
+    }
+
+    /// While on, every connection thread stops right after it has written
+    /// a response (`Hold`), until it is turned off.
+    pub fn hold(&self, on: bool) {
+        self.sh.hold.set(on);
     }
 }
 
@@ -1570,6 +1620,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
         parallel_set: o.parallel_set,
         slot_ctx: o.slot_ctx,
         kv_pages: o.kv_pages,
+        kv_grow: o.kv_grow,
         prefill_chunk: o.prefill_chunk,
         prefill_ms: o.prefill_ms,
         generated: generated.clone(),
@@ -1629,6 +1680,8 @@ pub fn start(o: Opts) -> io::Result<Server> {
         slot_idle: o.slot_idle_ms.map(Duration::from_millis),
         metrics,
         log: o.log,
+        #[cfg(test)]
+        hold: Hold::default(),
     });
     let sh2 = sh.clone();
     let accept = std::thread::Builder::new()
@@ -1757,6 +1810,8 @@ fn connection(s: TcpStream, sh: &Shared) {
                 let refused = c.refused.take();
                 c.head_only = refused.as_ref().is_some_and(|(_, m)| m == "HEAD");
                 let path = c.path.take();
+                let route = refused.map_or("other", |(p, _)| ops::route_label(&p));
+                c.on_status = Some(count(sh, route));
                 if e.status == 401 {
                     let _ = unauthorized(&mut c, false, path.as_deref());
                 } else {
@@ -1764,8 +1819,10 @@ fn connection(s: TcpStream, sh: &Shared) {
                     let body = error_body(path.as_deref(), &e);
                     let _ = c.respond(e.status, "application/json", body.as_bytes(), false, &[]);
                 }
-                let route = refused.map_or("other", |(p, _)| ops::route_label(&p));
-                sh.metrics.request(route, e.status);
+                // Counted (`on_status`): disarm it whatever happened.
+                c.on_status = None;
+                #[cfg(test)]
+                sh.hold.here();
                 // Evictable while it lingers: it serves nothing more.
                 sh.waiting.set(id, handle.as_ref());
                 linger(&c.s);
@@ -1774,11 +1831,13 @@ fn connection(s: TcpStream, sh: &Shared) {
             }
             Ok(Some(req)) => {
                 c.head_only = req.method == "HEAD";
-                c.status = 0;
+                // Counted as its response starts, before the client can
+                // read it (and so look at /metrics); not if none was sent.
+                c.on_status = Some(count(sh, ops::route_label(&req.path)));
                 let r = route(&mut c, &req, sh);
-                if c.status != 0 {
-                    sh.metrics.request(ops::route_label(&req.path), c.status);
-                }
+                c.on_status = None;
+                #[cfg(test)]
+                sh.hold.here();
                 match r {
                     Ok(true) if req.keep_alive => {}
                     _ => return,
@@ -1786,6 +1845,13 @@ fn connection(s: TcpStream, sh: &Shared) {
             }
         }
     }
+}
+
+/// `Conn::on_status` counting the response to a request on `route`
+/// (`Metrics::request`): once, before the client can read it.
+fn count(sh: &Shared, route: &'static str) -> http::OnStatus {
+    let m = sh.metrics.clone();
+    Box::new(move |status| m.request(route, status))
 }
 
 /// Before closing after an error answered mid-request (413, 431, ...):
@@ -2598,6 +2664,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         parallel_set: false,
         slot_ctx: None,
         kv_pages: None,
+        kv_grow: None,
         prefill_chunk: engine::PREFILL_CHUNK,
         prefill_ms: engine::PREFILL_MS,
         rope: Default::default(),

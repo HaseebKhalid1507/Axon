@@ -169,8 +169,21 @@ pub struct SlotsView {
     /// request running alone (`Engine::job`) runs in one of them: with a
     /// pool its cache is a view of a slot's rows (`Batch::lend_solo`).
     pub pool: Vec<SlotState>,
-    /// A paged pool's KV pages: (free, total, positions per page).
-    pub pages: Option<(usize, usize, usize)>,
+    /// A paged pool's KV pages and what gave way for them.
+    pub pages: Option<PagesView>,
+}
+
+/// A paged pool's pages for GET /slots.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PagesView {
+    pub free: usize,
+    pub total: usize,
+    /// Positions per page.
+    pub size: usize,
+    /// Requests preempted for pages so far.
+    pub preempted: u64,
+    /// Prompts being prefilled that gave their rows up so far.
+    pub unfed: u64,
 }
 
 impl SlotsView {
@@ -223,7 +236,7 @@ impl Metrics {
         *lock(&self.requests).entry((route, status)).or_insert(0) += 1;
     }
 
-    pub fn publish_pool(&self, pool: Vec<SlotState>, pages: Option<(usize, usize, usize)>) {
+    pub fn publish_pool(&self, pool: Vec<SlotState>, pages: Option<PagesView>) {
         let mut v = lock(&self.slots);
         v.pool = pool;
         v.pages = pages;
@@ -266,10 +279,17 @@ impl Metrics {
             "slots": pool,
             "queue_depth": self.queue_depth(busy),
         });
-        if let Some((free, total, size)) = v.pages {
-            j["pages_free"] = free.into();
-            j["pages_total"] = total.into();
-            j["page_tokens"] = size.into();
+        // Graphs given up / steps run kernel by kernel for lack of VRAM
+        // (process-wide: never fatal, the same bits).
+        let (evicted, eager) = crate::cuda::qwen2::graph_oom_counts();
+        j["graphs_evicted_oom"] = evicted.into();
+        j["steps_eager_oom"] = eager.into();
+        if let Some(p) = v.pages {
+            j["pages_free"] = p.free.into();
+            j["pages_total"] = p.total.into();
+            j["page_tokens"] = p.size.into();
+            j["preempted"] = p.preempted.into();
+            j["prefills_unfed"] = p.unfed.into();
         }
         j.to_string()
     }
@@ -531,7 +551,14 @@ mod tests {
         );
         assert_eq!(lock(&m.slots).counts(), (1, 1));
         assert_eq!(slot(&m)[0]["held_tokens"], 9);
-        m.publish_pool(vec![SlotState::default(); 3], Some((10, 12, 64)));
+        let pv = PagesView {
+            free: 10,
+            total: 12,
+            size: 64,
+            preempted: 2,
+            unfed: 1,
+        };
+        m.publish_pool(vec![SlotState::default(); 3], Some(pv));
         m.publish_slot(
             2,
             SlotState {
@@ -549,6 +576,8 @@ mod tests {
             (all["pages_free"].clone(), all["pages_total"].clone()),
             (10.into(), 12.into())
         );
+        assert_eq!(all["preempted"], 2);
+        assert_eq!(all["prefills_unfed"], 1);
         assert_eq!(lock(&m.slots).counts(), (3, 1));
     }
 }

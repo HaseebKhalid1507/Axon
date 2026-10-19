@@ -1,7 +1,9 @@
 # Engineering history
 
 A chronological log of what was built, why, how it was checked and what it measured, from the first
-commit to main `a591e17` (2026-10-16 16:22 EDT), plus the open PRs at that point. Sources: the PR
+commit to main `a591e17` (2026-10-16 16:22 EDT), plus the open PRs at that point. Phases 17 and 18 carry it on,
+more briefly, to main `4507c75` (2026-10-18 06:05 EDT); their numbers come only from the PR bodies, and each
+PR's log entry in [log/](log/README.md) has the detail. Sources: the PR
 bodies (`gh pr view`), `git log`, the foreman's log (PROGRESS.md), the round specs, the builders'
 NOTES.md and the scoreboards. None of those except the PRs and git history are in the repo. The method
 behind all of this is in [methodology.md](methodology.md); everything that was rejected is collected,
@@ -241,11 +243,13 @@ was revised to `specs/g4-offload.md`.
 - RTX 5090: hd-128 shapes 2.4–3.0 % *slower* per CTA; avante +2–5 %. NO-GO by the rule (< 2 % on the 5090).
   Nothing committed. See [rejected](experiments-rejected.md#gpu-attention).
 
-### r9 #1 lcdec: long-context decode attention — in flight (no PR at a591e17)
+### r9 #1 lcdec: long-context decode attention — in flight at a591e17; merged as #50 10-16 23:41 (Phase 17)
 - **Why:** r9-pick measured that axon loses decode at 32k: 7B 72.4 vs llama.cpp 76.7, 0.5B 413 vs 464.
 - **Status from the builder's NOTES (not on main):** 4-warp `attn_blk` plus a two-phase `attn_cmb`. Pod3 RTX 5090
   paired ratios at 32k: 7B f16 +12.0 %, 7B q8 +23.4 %, 0.5B +30 %, q3-8B +14.6 %; md5 40/40 equal. A −1.5 %
   regression at tg128 pos 8 on 0.5B was being fixed. **Not merged; numbers unconfirmed on bella.**
+- **Update:** #50 withdrew those pod3 numbers (its rounds shared the GPU with a test suite). The merged version's
+  bella numbers, and its missed 7B gate, are in Phase 17.
 
 ## Phase 9: sampling and speculation
 
@@ -295,7 +299,7 @@ Prompt-lookup drafting (`--draft K`) landed in #1 and stayed off by default: low
 | #26 tool calling | 10-16 04:11 | `tools`, `tool_choice`, `tool_calls` (streamed and whole) for Qwen3, Qwen2.5 Hermes, Llama 3.1 | agent harnesses got a 400 on `tools` | rendering == transformers' rendering of the GGUF templates; requests without tools byte-identical to main; crush, pi, Synaps answered a read-file loop on Qwen3-8B. opencode + Qwen3-8B didn't finish (cause unverified) |
 | #38 S2-lite continuous batching | 10-16 10:38 | decode rows of many requests in one step; per-row positions, cache rows and sampling; FIFO, whole-prompt prefill as its own step | r6-pick #2: estimated 7B at 8 clients ~5.5× | identity: batched == solo 6/6, md5 22/22. bella 7B C=16 355 vs 80 (4.4×), 0.5B 2978 vs 620 (4.5×). 4090 7B C=8 740, C=16 1017. Missed the 7B C=8 5× and 0.5B 3.5k targets |
 | #42 serve default ctx | 10-16 16:22 | default context = trained length where it fits; slot planning; deferred Q6_K copy | r9 #3a: agent prompts > 8k got a 400 | release/debug 415/0 (4090), md5 0/15 differ CUDA and CPU, ~20k-token requests answered. **Behaviour change:** bella 7B now serves one request at a time at 32k by default (was 8 × 8k). The 12 GB fit check on bella was pending at merge |
-| #45 chunked prefill | open | prompts fed in ≤ 512-token chunks between decode steps | r9 #3b: a 24k admit froze every other stream for 2.45 s (7B, 4090) | 4090: worst inter-token gap 2455 → 84 ms (7B), 354 → 21 ms (0.5B); admitted request's TTFT +21 % / +83 %. Single-user unchanged |
+| #45 chunked prefill | merged 10-16 20:43 | prompts fed in chunks between decode steps | r9 #3b: a 24k admit froze every other stream for 2.45 s (7B, 4090) | First revision (fixed 512-token chunks), 4090: worst inter-token gap 2455 → 84 ms (7B), 354 → 21 ms (0.5B); admitted request's TTFT +21 % / +83 %. As merged (60 ms time budget, depth-aware cost, shortest first): ITL p99 during the admit 2392 → 69.7 ms (7B), 342 → 62.5 ms (0.5B); TTFT +48 % / +19 %. Single-user unchanged |
 
 ## Phase 12: startup
 
@@ -337,7 +341,7 @@ Prompt-lookup drafting (`--draft K`) landed in #1 and stayed off by default: low
 | #37 hardening | 10-16 08:51 | roadmap item 2 (#29). GGUF fuzzer (~1800 mutants/model) and serve fuzzer (183 checks) found 9 bugs: an O(n²) BPE (1 MB pre-token: no answer in 120 s → 0.3 s), slow-loris 503s, disconnects not cancelling, overlapping tensors panic, metadata allocation abort, RST on early errors, TLS bytes held 30 s, non-UTF-8 argv panic, `gen -n` overflow. 1 h CPU soak: 5121 requests, 0 unexpected |
 | #39 old GPUs | 10-16 07:16 | with CUDA 13 + 12 NVRTCs installed, axon picked 13, which can't target sm_61 → fall back to an older NVRTC. The sm_61 llama test failure was the CPU reference misjudging a real near-tie (f64 check) → near-tie rule uses either side's margin |
 | #40, #43 | 10-16 10:39, 14:36 | GPU tests serialized on cards < 8 GiB, then < 16 GiB: concurrent tests ran out of VRAM (false failures on avante, then bella) |
-| #46 | open | `gpu_too_big_is_an_error` retries its free-VRAM checks when other processes share the GPU |
+| #46 | 10-16 17:19 | `gpu_too_big_is_an_error` retries its free-VRAM checks when other processes share the GPU |
 
 ## Phase 16: docs and tooling
 
@@ -355,3 +359,55 @@ Prompt-lookup drafting (`--draft K`) landed in #1 and stayed off by default: low
 From the research reports ([research/](research/README.md)): `spec32` (speculation on the 32B split), `fingerprint`
 (identity tuple, `system_fingerprint`, determinism doc), `kvsave` (exact KV save/restore, `chat --session`) and
 `yarn` (`--rope-scaling yarn`). Plus, still in flight: #45 chunked prefill, lcdec, and axon-run pod packing.
+
+**Update (main `4507c75`):** all four landed: kvsave as #48 + #54, yarn as #49, fingerprint as #51, spec32 as #52.
+#45 chunked prefill and lcdec (#50) landed too. Pod packing is still unsolved: #53 recorded the
+ILLEGAL_ADDRESS investigation as a NO-GO.
+
+## Phase 17: r10 lands, serve rounds, MoE and paged KV begin (2026-10-16 16:55 → 10-17 17:22, main a591e17 → d2e8eaf)
+
+Numbers are copied from each PR body, MEASURED there unless marked. "md5" is `gen` on main vs the PR, same host.
+
+| PR | merged | what | why | numbers |
+|---|---|---|---|---|
+| #47 | 10-16 16:55 | docs: methodology, this history, rejected experiments, results, research reports; the `docs/log/` convention | put the record in the repo | docs only |
+| #46 | 10-16 17:19 | test fix (Phase 15) | shared-GPU false failures | test only |
+| #53 | 10-16 18:41 | docs/log: ILLEGAL_ADDRESS on packed 4090 pods. **NO-GO, root cause not found** | 9 incidents on packed pods on 10-16 | reproduced on pod5 (4 hits in ~90 one-minute rounds), every hit in the decode loop of `prefill_with`; the one `CUDA_LAUNCH_BLOCKING=1` hit came from `cuGraphLaunch`; memcheck found no invalid access |
+| #48 kvsave stage A | 10-16 19:15 | exact KV save/restore (`AXKV` files), `chat --session`, `/save`, `/load`; a host page store, not wired in yet | research-kvmem P1: restart without re-prefilling | 4090, 7B, 29,840 positions: restore 408–451 ms (f16) / 223–234 ms (q8) vs re-prefill 3.16 s / 3.39 s; bella page-wise restore of a 32k 7B slot 67 ms. md5 30/30 |
+| #54 | 10-16 21:30 | kvsave: one writer per session file (sidecar `F.lock`); a save after another writer's rewrite does a full rewrite | review: a second process could cut the file at a stale length | correctness only |
+| #49 YaRN | 10-16 22:06 | `--rope-scaling yarn` (llama.cpp's flags), opt-in: Qwen 32k → 128k | research-longctx L2 | default md5 30/30 equal; needle 18/18 with it vs 9/18 without (7B, RTX 5090); perplexity +7.7–8.0 % at 2k–8k, so opt-in only |
+| #51 fingerprint | 10-16 23:38 | identity tuple, `system_fingerprint` on every serve response, `GET /identity`, docs/determinism.md | research-determinism P1: make exactness checkable | md5 0/15 + 0/15 twice; the model digest costs +~40 ms warm (7B, 4090), +~180 ms cold (Llama 1B, avante) at start |
+| #50 lcdec | 10-16 23:41 | long-context decode attention: a 64-output combine past 8192 positions, `attn_blk` at 4 warps per block | r9: 7B 72.4 vs llama.cpp 76.7 at 32k | bella tg@32512 vs main: 7B f16 +3.3 % / +3.5 % (**its +12 % gate not met**), 0.5B f16 +10.0 % / +12.1 % (borderline), 7B q8 +17.6 %, 0.5B q8 +25.7 %; short positions within noise. Bit-identical by construction |
+| #56 | 10-17 00:31 | prefill attention launch shape picked per GPU, long prompts in wave-filling passes | at long context the partial last wave decided the time | bella 7B pp16384 +5.5 %, pp32512 +3.4 %; q3-8B +2.8 % / +3.4 %; 4090 q3-8B +15.8 % / +17.0 %; 7B now ahead of llama.cpp at 8k/16k/32k. md5 60/60 on three GPUs |
+| #55 | 10-17 01:31 | #45 follow-ups: each prompt's chunk sized at its own depth, cost learned only from ≥ 128-token feeds, ~250 ms idle pieces | review of #45: a deeper prompt overshot ~3.5× | bella 7B: two 14.4k prompts on an idle server, first TTFT 4748 → 4471 ms (after fixing a +35 % regression the bench found in round 2). md5 0/15 + 0/15 |
+| #52 spec32 | 10-17 03:35 | draft-model speculation on the CPU/GPU split; greedy K=7 there; batched `verify_cands` on the split; `--draft-model auto`; `gen --ctx` | research-bigmodels P3: a verify pass reads the CPU layers once for K+1 rows | bella 32B greedy tg128 ~6 → 11.4–21.5 at K=7 (2–3.5×), sampled 1.7–3.3× (shared machine). md5 48/48 (earlier head). The r8 GEMM prefetch was dropped as unproven |
+| #58, #59 | 10-17 03:45, 04:12 | docs: drafting and `--ctx` can move an automatic split (and so the bits); the MoE section of the roadmap | review NIT on #52; MoE plan | docs only |
+| #57 | 10-17 04:17 | serve idle prefill: a fairness clock, idle pieces in whole pool passes | review of #55: a stream of short requests could starve a long prompt | bella 7B: no change (first / last TTFT 4906 / 9908 vs 4897 / 9898 ms). md5 0/15 + 0/15 |
+| #61 serve ops | 10-17 06:49 | `--api-key`, `GET /metrics`, `GET /slots`, `--max-prompt-tokens`, `--slot-idle-ms` | r10 M2 | md5 `gen` + `serve` 26/26; fuzz 226 / 183 checks, 0 findings. A stalled reader with default buffers is evicted only after ~500+ tokens (792 tokens, 6.3 s in its run) |
+| #63 MoE stages 0–1 | 10-17 10:46 | `qwen3moe` loads, `axon info` prints its experts, an exact CPU forward | r11 MoE spec | dev models vs llama.cpp CPU (bella, best threads): 4x0.6B tg128 118.6 vs 48.3, Pruned-2B 216.8 vs 101.3; logits within llama.cpp's own CPU/CUDA spread. Other models md5 0/18 + 0/18 |
+| #62 | 10-17 10:52 | serve ops follow-up: no body read without the key on any route, `AXON_API_KEY` via `var_os` | #61 review | md5 26/26; fuzz 232 / 183, 0 findings |
+| #65, #66 | 10-17 11:55, 12:11 | docs: frontier models (100B to 1T) on the roadmap; the mission statement and Kimi K2 as a long-term goal | planning | docs only |
+| #60 one cache | 10-17 13:22 | serve: no N+1 cache; the single-request path runs in a pool slot's view, picked by prefix (≥ half rule) else LRU | r10 C2: on 12 GB the extra cache cost a whole slot | bella 7B 32k f16 slots 1 → 2, q8 4 → 5; C=1 decode 101.4 → 102.8 (noise). No-solo-path variant measured −14 % and dropped. md5 0/15 × 3 |
+| #64 paged KV 0–1 | 10-17 15:17 | every cache kernel reads through a page table (null = identity); no production path makes a paged cache yet | r11 paged-KV spec, stages 0–1 | C=1 7B ratios 0.98–1.01 (pp560 0.998 on a 7-round rerun). A first version cost Gemma 3 1B decode 0.942×; fixed with plain-cache kernel twins (tg 0.997, prefill 1.031 / 1.006). md5 identical |
+| #68 | 10-17 17:01 | CUDA refuses gemma3 head sizes other than 256; attention args tied to the kernel choice | #64 review: `attn_blk` could launch one argument short | md5 identical; suites 513/0 |
+| #69 | 10-17 17:22 | docs: roadmap and README status brought up to 69adfa2 | 25 PRs had merged since the last refresh | docs only |
+
+## Phase 18: the night of 2026-10-17/18 (main 5a73f63 → 4507c75)
+
+Twelve merges between 18:46 and 06:05: MoE on the GPU, gpt-oss on the CPU, three new weight types, two new serve
+APIs, chat forgetting in halves, the contributor contract, and test-suite work.
+
+| PR | merged | what | why | numbers (from the PR body) |
+|---|---|---|---|---|
+| #73 | 10-17 18:46 | docs: DeepSeek-V4.1-Flash on the roadmap's frontier list | a new frontier target | docs only (sizes from its GGUF header; active bytes ESTIMATED) |
+| #67 MoE stage 2 | 10-18 01:02 | `qwen3moe --device cuda`: attention, norms, router and head on the GPU, experts on the CPU (llama.cpp's `--cpu-moe` layout) | r11 MoE stage 2 | bella vs llama.cpp `--cpu-moe`, best threads: tg128 4x0.6B 157 vs 101, Pruned-2B 674 vs 376; pp512 llama.cpp ahead (5316 vs 2080, 12621 vs 8613). Graded vs the CPU MoE at 96 steps (fails at the dense tests' 32 on the 3-layer Pruned-2B). Dense md5 identical. The real 30B not run (ESTIMATED 46–51 tok/s at 8k) |
+| #74 | 10-18 01:02 | AGENTS.md (the contract for contributors and their agents), PR template with required evidence, issue forms, labels | onboarding before the repo went public | docs, config and two bench scripts' paths |
+| #70 serve APIs | 10-18 01:22 | `POST /v1/responses` (what codex speaks) and ollama's native API, tool calling on both, translated into the chat-completions path | agent harnesses and ollama clients | md5 `gen` + `serve` 26/26; fuzz 117 / 349 / 300 checks, 0 findings; codex, pi and opencode completed a tool loop on Qwen3-8B (bella); the `ollama` CLI listed, showed and ran it |
+| #77 | 10-18 02:06 | CODE_OF_CONDUCT.md, SECURITY.md (private vulnerability reporting enabled) | GitHub's community checklist | docs only |
+| #78 gpt-oss stage 0 | 10-18 03:25 | gpt-oss-20b on the CPU: MXFP4 (bit-exact dequant vs llama.cpp), attention sinks, 128-token window, o200k tokenizer, harmony chat | MoE plan item 2 | bella, exclusive, 24 threads vs llama.cpp CPU: pp 130.0 vs 104.8 (1.24×; prompt lengths differ, neither run pinned, llama.cpp threads not swept), tg128 23.5 vs 11.2 (2.10×); top-1 1262/1274 vs llama.cpp CPU. md5 36/36 on 9 other models. `--device cuda` refused until stage 1 |
+| #80 | 10-18 04:58 | tests: one CPU reference pass per input, fast/full tiers (`scripts/test-tier.sh`, docs/testing.md), a deterministic slot-idle test | main's release suite took 2195.6 s on an exclusive 4090 | release suite −166 s (−7.6 %, exclusive 4090); the fast tier's release part ESTIMATED at 55 % of the full suite. Non-test binary byte-identical |
+| #72 | 10-18 05:08 | Q2_K, Q3_K and IQ4_NL on the CPU and CUDA (IQ4_NL: llama.cpp's fallback for rows not a multiple of 256) | every Q2_K and Q3_K_S/M/L GGUF was refused at load; these types make 14B/32B fit 12 GB and are what 2–3-bit frontier MoE files use | bella GPU vs llama.cpp: 7B Q2_K tg128 121.9 vs 111.2, Q3_K_M pp2100 +9 %, tg −3 %. CPU decode ~2× llama.cpp, but **CPU prefill up to −41 %** (no repacked layout yet; accepted as a follow-up). Existing kernels' SASS identical, md5 0/21 × 3 |
+| #76 | 10-18 05:21 | MoE stage 2 follow-ups: one-token paths return an Err on a MoE net instead of panicking, the split's RAM check counts only what the host holds | #67's final review | md5 0/18; the Pruned-2B split's RAM need 3.2 → 2.7 GB (the check's formula) |
+| #85 | 10-18 05:37 | docs: #80's slot-idle fix holds under 1-thread stress, not under 8 pool threads + 64 spinning (10/10 failed, freed 4.0–7.9 s after the fill) | an honest record for #80 | docs only |
+| #75 | 10-18 05:50 | `chat --forget-to F` (default 0.5): a full context forgets the oldest exchanges down to half, not just enough to make room | roadmap Scale 8: every turn after the fill paid a near-full re-prefill | 4090, 40 turns, `-n` unlimited: 7B ctx 8192 re-prefills every 4.14 turns instead of every turn, 6.5× fewer tokens, forgetting-turn TTFT 474.6 → 273.6 ms. `--forget-to min` == main's output; the default's differs once the context fills |
+| #87 | 10-18 06:05 | test: the slot-idle freeing bound counts the engine steps it waits for (idle + 2.5 s + 2 × the longest step) | #85: freeing takes idle plus up to two engine steps; under stress a step was 2–6 s | 8-thread stress 10/10 failed → 0/10. Test only, no server change |

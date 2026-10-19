@@ -39,6 +39,7 @@ use super::*;
 use crate::lm::{BatchLm, PoolPages, RowHead, RowOut, SeqRow, StepError};
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::sync::atomic::Ordering::Relaxed;
 
 /// sample.cu SP_PER_ROW: S[1] when each row has its own penalty.
 const SP_PER_ROW: u32 = u32::MAX;
@@ -54,6 +55,9 @@ pub struct CudaPool<'g> {
     pm: Option<PageMap>,
     /// Most rows per step (logits scratch rows).
     rows_max: usize,
+    /// Tokens per batched pass (the batch scratch's, kept here: the
+    /// scratch may be lent to a view, `lend_scratch`).
+    pass_max: usize,
     /// Captured steps by (rows, greedy rows, + device-sampled rows): a
     /// step's kernels and their arguments depend on nothing else (its
     /// tokens, places and S are copied in before the graph runs).
@@ -65,6 +69,20 @@ pub struct CudaPool<'g> {
 
 /// Captured steps kept at most.
 const MAX_GRAPHS: usize = 64;
+
+/// VRAM a captured step graph takes, about (MEASURED, bella sm_120,
+/// 1019-045116-c9d3 `pool_graph_bytes`: 8 step graphs of 1-16 rows took
+/// 4 MiB of the driver's 2 MiB-granular memory, a view's decode graph and a
+/// first kernel-by-kernel launch 0): the plan reserves it for the pool's
+/// MAX_GRAPHS and the view's 6, so graphs are made in memory set aside
+/// rather than out of POOL_SPARE (a capture that still runs out falls back
+/// to kernels: `step_checked`).
+const GRAPH_BYTES: usize = 512 << 10;
+
+/// Rows a bare view's sampling buffers are made for (`view_samp`): a
+/// verify pass of drafting K + 1 rows, K up to 63. More (--draft 64+ with
+/// sampling) grows them at the request (an allocation then).
+const VIEW_SAMP_ROWS: usize = 64;
 
 impl<'g> CudaQwen2<'g> {
     /// VRAM a pool of `slots` x `ctx` (`pool_bytes_kv`) and the
@@ -94,7 +112,23 @@ impl<'g> CudaQwen2<'g> {
     /// (`lend_scratch` .. `return_scratch`), as the pool and the view never
     /// run at once. A plain pool's view has its own (as before paging).
     pub fn slot_view_bare(&self, p: &CudaPool<'g>, slot: usize) -> Result<CudaCache<'g>, String> {
-        self.slot_view_with(p, slot, p.pm.is_none())
+        let mut c = self.slot_view_with(p, slot, p.pm.is_none())?;
+        if p.pm.is_some() {
+            // Its sampling buffers at their largest now (they'd grow on a
+            // sampled request otherwise: an allocation then, with the pages
+            // holding all but the plan's spare, could fail the engine).
+            let (need, rows) = self.view_samp(p.ctx);
+            self.samp_bufs(&mut c, need, rows)?;
+        }
+        Ok(c)
+    }
+
+    /// The bare view's sampling buffers (S u32s, rows): a verify pass of up
+    /// to VIEW_SAMP_ROWS rows (drafting K + 1) with a penalty window of the
+    /// whole context per row.
+    fn view_samp(&self, ctx: usize) -> (usize, usize) {
+        let rows = VIEW_SAMP_ROWS;
+        (8 + rows * (1 + ctx.min(self.vocab)), rows)
     }
 
     /// The pool's batch scratch, lent to `c` (its bare view: `slot_view_bare`;
@@ -178,9 +212,16 @@ impl<'g> CudaQwen2<'g> {
     /// `serve_bytes_kv` of a paged pool (`pool_paged_bytes`).
     /// (The view is bare: `slot_view_bare`, the pool's batch scratch lent.)
     pub fn serve_paged_bytes(&self, kv: CacheKv, slots: usize, ctx: usize, pages: usize) -> usize {
+        let (need, rows) = self.view_samp(ctx);
+        // The view's sampling buffers (S, host-pinned aside: out, part).
+        let samp = need * 4
+            + rows * CAND_MAX * 8
+            + batch::HEAD_SUB * self.vocab.div_ceil(TK_SLICE) * CAND_MAX * 8;
         self.cache_bytes_kv(kv, ctx)
             - self.kv_cache_bytes(kv, ctx)
             - self.batch_bytes(self.batch_for(ctx), ctx)
+            + samp
+            + (MAX_GRAPHS + 6) * GRAPH_BYTES
             + self.pool_paged_bytes(kv, slots, ctx, pages)
     }
 
@@ -261,12 +302,14 @@ impl<'g> CudaQwen2<'g> {
         // distinct tokens of a window of at most ctx), made up front: it is
         // never reallocated (the graphs hold its address).
         self.samp_bufs(&mut c, 8 + rows_max * (2 + ctx.min(self.vocab)), rows_max)?;
+        let pass_max = c.b.as_ref().map_or(1, |b| b.max);
         Ok(CudaPool {
             c,
             slots,
             ctx,
             pm,
             rows_max,
+            pass_max,
             graphs: HashMap::new(),
             steps: 0,
         })
@@ -349,7 +392,13 @@ impl<'g> CudaQwen2<'g> {
                 }
             }
         }
-        // Each row's page (a new one every PAGE positions).
+        // Each row's page (a new one every PAGE positions). A row short of
+        // pages refuses the whole step (StepError::Input, nothing run; rows
+        // before it may have taken their page, which they need anyway), and
+        // serve fails every request in a refused step (`Batch::step`'s
+        // fail_all), so serve's `Batch::grow` takes every row's page first:
+        // there this never fires. A page taken is one synchronous 4-byte
+        // table write (a stream sync), once per PAGE positions per slot.
         for r in rows {
             match self.reserve(p, r.slot, r.pos + 1) {
                 Ok(0) => {}
@@ -483,16 +532,38 @@ impl<'g> CudaQwen2<'g> {
                         .map(|(k, _)| *k);
                     p.graphs.remove(&lru.unwrap());
                 }
-                let g = self.gpu.capture(pass)?;
-                p.graphs.insert(key, (g, 0));
+                let mut made = self.gpu.capture(&mut pass);
+                // Out of memory instantiating it (graphs are made lazily, and
+                // other processes take VRAM after the pool was planned): the
+                // other graphs' execs go, one retry, else this step runs kernel
+                // by kernel (the same kernels in the same order: the same
+                // bits). Never fatal: the engine would exit on it.
+                if made.as_ref().is_err_and(|e| is_oom(e)) {
+                    GRAPH_EVICTED.fetch_add(p.graphs.len() as u64, Relaxed);
+                    p.graphs.clear();
+                    made = self.gpu.capture(&mut pass);
+                }
+                match made {
+                    Ok(g) => {
+                        p.graphs.insert(key, (g, 0));
+                    }
+                    Err(e) if is_oom(&e) => {
+                        GRAPH_EAGER.fetch_add(1, Relaxed);
+                    }
+                    Err(e) => return Err(e),
+                }
             }
-            let (g, used) = p.graphs.get_mut(&key).unwrap();
-            *used = p.steps;
-            // SAFETY: the graph's buffers are the pool's and the model's,
-            // both borrowed here; the pool owns the graph, and the buffers
-            // it captured are never reallocated while it lives (S is made
-            // at its largest in `pool`).
-            unsafe { g.launch()? };
+            match p.graphs.get_mut(&key) {
+                Some((g, used)) => {
+                    *used = p.steps;
+                    // SAFETY: the graph's buffers are the pool's and the
+                    // model's, both borrowed here; the pool owns the graph, and
+                    // the buffers it captured are never reallocated while it
+                    // lives (S is made at its largest in `pool`).
+                    unsafe { g.launch()? };
+                }
+                None => pass()?,
+            }
         } else {
             pass()?;
         }
@@ -830,7 +901,7 @@ impl CudaPool<'_> {
     /// `BatchLm::pass_max`: the batch scratch's tokens (PREFILL_BATCH, or
     /// PLAN_BATCH when the bigger passes don't fit; `feed_slot` splits by it).
     pub fn pass_max(&self) -> usize {
-        self.c.b.as_ref().expect("batch scratch").max
+        self.pass_max
     }
 }
 
@@ -1267,6 +1338,10 @@ mod tests {
 
     /// `slot_view_matches_a_cache`'s calls on cache `c`: its picks.
     fn run<'g>(net: &CudaQwen2<'g>, prompt: &[u32], c: &mut CudaCache<'g>) -> Vec<u32> {
+        assert!(
+            prompt.len() >= 90,
+            "run takes a prompt of at least 90 tokens"
+        );
         let mut out = Vec::new();
         net.feed_batch(&prompt[..60], 0, c);
         let mut h = prompt[..61].to_vec();
@@ -1691,6 +1766,371 @@ mod tests {
         }
     }
 
+    /// `oom_setup`'s: the pool, the prompts, their solo results (`solo`),
+    /// the bare view, its prompt and the picks `run` gives on a plain cache.
+    type OomSetup<'g> = (
+        CudaPool<'g>,
+        Vec<Vec<u32>>,
+        Vec<(Vec<RowOut>, Vec<u32>, Vec<u8>)>,
+        CudaCache<'g>,
+        Vec<u32>,
+        Vec<u32>,
+    );
+
+    /// The `graph_oom_*` tests' setup: a 0.5B with graphs, three requests
+    /// fed into a shuffled paged pool, their solo results for `steps`, and a
+    /// bare view (reserved) with the picks `run` gives on a plain cache.
+    /// Each kernel is launched once first (kernel by kernel), so nothing
+    /// is left to load when VRAM is short.
+    fn oom_setup<'g>(net: &mut CudaQwen2<'g>, steps: usize) -> OomSetup<'g> {
+        let ctx = 192;
+        let v = net.vocab;
+        let prompts: Vec<Vec<u32>> = (0..3).map(|i| ids(40 + 9 * i, 300 + i as u32, v)).collect();
+        let refs: Vec<_> = prompts
+            .iter()
+            .map(|p| solo(net, ctx, p, Kind::Greedy, steps))
+            .collect();
+        let solo_view = ids(90, 33, v); // `run` takes 90
+        let mut plain = net.new_cache(ctx);
+        let want_view = run(net, &solo_view, &mut plain);
+        net.graphs = false;
+        {
+            let mut w = pool_of(net, 4, ctx, Lay::Paged);
+            for (i, pr) in prompts.iter().enumerate() {
+                net.feed_slot(&mut w, i, &pr[..10], 0).unwrap();
+            }
+            let rows: Vec<SeqRow> = (0..3)
+                .map(|i| SeqRow {
+                    token: 5,
+                    pos: 10,
+                    slot: i,
+                    head: RowHead::Argmax,
+                })
+                .collect();
+            net.step_rows(&mut w, &rows).unwrap();
+        }
+        net.graphs = true;
+        let mut p = pool_of(net, 4, ctx, Lay::Shuffled(5));
+        for (i, pr) in prompts.iter().enumerate() {
+            net.feed_slot(&mut p, i, &pr[..pr.len() - 1], 0).unwrap();
+        }
+        let view = net.slot_view_bare(&p, 3).unwrap();
+        assert_eq!(net.reserve(&mut p, 3, ctx), Ok(0));
+        (p, prompts, refs, view, solo_view, want_view)
+    }
+
+    /// One greedy step of the three requests in `hist` (slots 0..3), checked
+    /// against their solo results at step `step`.
+    fn oom_step<'g>(
+        net: &CudaQwen2<'g>,
+        p: &mut CudaPool<'g>,
+        hist: &mut [Vec<u32>],
+        refs: &[(Vec<RowOut>, Vec<u32>, Vec<u8>)],
+        step: usize,
+    ) {
+        let rows: Vec<SeqRow> = (0..3)
+            .map(|i| SeqRow {
+                token: hist[i][hist[i].len() - 1],
+                pos: hist[i].len() - 1,
+                slot: i,
+                head: RowHead::Argmax,
+            })
+            .collect();
+        let outs = net.step_rows(p, &rows).unwrap();
+        for (i, o) in outs.into_iter().enumerate() {
+            assert_eq!(o, refs[i].0[step], "request {i} step {step}");
+            let RowOut::Pick(t) = o else { unreachable!() };
+            hist[i].push(t);
+        }
+    }
+
+    /// Resets the injected graph failures (`inject_graph_oom`) when dropped.
+    struct NoInject;
+    impl Drop for NoInject {
+        fn drop(&mut self) {
+            crate::cuda::inject_graph_oom(0);
+        }
+    }
+
+    /// Out of VRAM for a step's graph (the bella crash, 1018-233201-7bb1:
+    /// cuGraphInstantiateWithFlags out of memory, fatal to the engine),
+    /// injected (no real memory pressure: it runs on any host): one failed
+    /// instantiation is retried (the graph made), and when they keep
+    /// failing pool steps and a bare view's decode run kernel by kernel: the
+    /// same results and KV bytes as alone, the fallback counted.
+    #[test]
+    fn graph_oom_falls_back_to_kernels() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let Some(m) = crate::testutil::model() else {
+            return;
+        };
+        let km = Kernels::module(&g).unwrap();
+        if !km.mma() {
+            return;
+        }
+        let mut net = CudaQwen2::with_kv(&g, &km, &m, 192, CacheKv::F16, false).unwrap();
+        if !net.graphs {
+            return; // AXON_CUDA_GRAPHS=0: no graphs to fail
+        }
+        let (mut p, prompts, refs, mut view, solo_view, want_view) = oom_setup(&mut net, 4);
+        let _reset = NoInject;
+        let mut hist = prompts.clone();
+        // One failure: the retry makes the graph.
+        crate::cuda::inject_graph_oom(1);
+        oom_step(&net, &mut p, &mut hist, &refs, 0);
+        // Every instantiation fails: kernel by kernel.
+        let (_, eager0) = crate::cuda::qwen2::graph_oom_counts();
+        crate::cuda::inject_graph_oom(1 << 20);
+        p.graphs.clear();
+        for step in 1..4 {
+            oom_step(&net, &mut p, &mut hist, &refs, step);
+        }
+        for i in 0..3 {
+            assert!(
+                pool_bytes(&net, &p, i, hist[i].len() - 1) == refs[i].2,
+                "request {i}: KV"
+            );
+        }
+        net.lend_scratch(&mut p, &mut view).unwrap();
+        assert_eq!(
+            run(&net, &solo_view, &mut view),
+            want_view,
+            "the view's picks"
+        );
+        net.return_scratch(&mut p, &mut view).unwrap();
+        let (_, eager1) = crate::cuda::qwen2::graph_oom_counts();
+        assert!(eager1 > eager0, "no step fell back to kernels");
+    }
+
+    /// MEASURE (not a check of the fallback: `graph_oom_falls_back_to_kernels`
+    /// is, by injection): step graphs made under real memory pressure. VRAM
+    /// is taken a chunk at a time after the pool is made (a chunk that
+    /// doesn't fit halved down to 64 KiB), a step after each with every graph
+    /// made anew, the free memory printed each step, and whether any graph
+    /// failed (then that step ran kernel by kernel). Every step's results ==
+    /// running alone either way. MEASURED on avante (sm_89, the 0.5B,
+    /// 1019-121102-7106): free memory reached 2.56 MiB at step 25 and stayed
+    /// there while small allocations kept succeeding (sub-allocated inside
+    /// mapped 2 MiB granules), and every graph through step 96 instantiated:
+    /// a fill can't make one fail there. AXON_TEST_FILL_VRAM=1 only, never on
+    /// a GPU driving a desktop (it starves the display).
+    #[test]
+    #[ignore]
+    fn graph_oom_fill_vram() {
+        if std::env::var("AXON_TEST_FILL_VRAM").as_deref() != Ok("1") {
+            eprintln!("graph_oom_fill_vram: AXON_TEST_FILL_VRAM=1 to run (never on a desktop GPU)");
+            return;
+        }
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let Some(m) = crate::testutil::model() else {
+            return;
+        };
+        let km = Kernels::module(&g).unwrap();
+        let mut net = CudaQwen2::with_kv(&g, &km, &m, 192, CacheKv::F16, false).unwrap();
+        if !net.graphs || !km.mma() {
+            return;
+        }
+        let steps = 96; // ~30 to drain (a quarter of what is free each), then the halvings
+        let (mut p, prompts, refs, _view, _, _) = oom_setup(&mut net, steps);
+        let (_, eager0) = crate::cuda::qwen2::graph_oom_counts();
+        let mut hist = prompts.clone();
+        let mut held = Vec::new();
+        let mut step = 0;
+        let mib = |b: u64| b as f64 / (1 << 20) as f64;
+        let free = || g.info().unwrap().free_bytes;
+        // A step after each allocation, every graph made anew (cleared), until
+        // one can't be instantiated. The driver hands out 2 MiB granules: once
+        // a chunk doesn't fit, smaller ones are tried (down to 64 KiB) before
+        // the memory counts as gone.
+        let mut chunk = (free() as usize / 4).max(64 << 10);
+        let mut failed_at = None;
+        while step < steps {
+            p.graphs.clear();
+            let before = free();
+            oom_step(&net, &mut p, &mut hist, &refs, step);
+            step += 1;
+            if crate::cuda::qwen2::graph_oom_counts().1 > eager0 {
+                failed_at = Some(before);
+                eprintln!(
+                    "step {step}: the graph failed with {:.2} MiB free",
+                    mib(before)
+                );
+                break;
+            }
+            chunk = chunk.min((free() as usize / 4).max(64 << 10));
+            loop {
+                match g.alloc(chunk) {
+                    Ok(b) => {
+                        held.push(b);
+                        break;
+                    }
+                    Err(_) if chunk > 64 << 10 => chunk /= 2,
+                    Err(_) => break,
+                }
+            }
+            eprintln!(
+                "step {step}: graph made; {:.2} MiB free after taking {} KiB",
+                mib(free()),
+                chunk >> 10
+            );
+        }
+        // The rest of a few steps, still under the pressure, each graph made
+        // anew: kernel by kernel while instantiation keeps failing.
+        let end = (step + 4).min(steps);
+        while step < end {
+            p.graphs.clear();
+            oom_step(&net, &mut p, &mut hist, &refs, step);
+            step += 1;
+        }
+        drop(held);
+        let (_, eager1) = crate::cuda::qwen2::graph_oom_counts();
+        match failed_at {
+            Some(f) => eprintln!(
+                "graph_oom_fill_vram: the first graph failed with {:.2} MiB free; {} steps kernel by kernel",
+                mib(f),
+                eager1 - eager0
+            ),
+            None => eprintln!(
+                "graph_oom_fill_vram: every graph instantiated, down to {:.2} MiB free",
+                mib(free())
+            ),
+        }
+    }
+
+    /// MEASURE (not a check): VRAM one captured step graph takes, by key,
+    /// on `AXON_STEP_MODEL` (default the 0.5B): free memory before and after
+    /// the step that captures it (cuMemGetInfo), a pool of 16 slots of
+    /// 4096; and a slot view's decode graph. `--ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn pool_graph_bytes() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let m = match std::env::var("AXON_STEP_MODEL") {
+            Ok(p) => crate::gguf::load_with(&p, Some(false)).unwrap(),
+            Err(_) => match crate::testutil::model() {
+                Some(m) => m,
+                None => return,
+            },
+        };
+        g.sync().unwrap();
+        let (t0, f0) = (
+            std::time::Instant::now(),
+            g.info().unwrap().free_bytes as i64,
+        );
+        let km = Kernels::module(&g).unwrap();
+        let f1 = g.info().unwrap().free_bytes as i64;
+        eprintln!(
+            "kernel module load: {:.2} MiB, {:.1} ms",
+            (f0 - f1) as f64 / (1 << 20) as f64,
+            t0.elapsed().as_secs_f64() * 1e3
+        );
+        let ctx = 4096;
+        let mut net = CudaQwen2::new(&g, &km, &m, ctx).unwrap();
+        eprintln!(
+            "model: {} ({} layers, dim {}; AXON_STEP_MODEL {:?})",
+            m.arch,
+            net.layers.len(),
+            net.dim,
+            std::env::var("AXON_STEP_MODEL").ok()
+        );
+        let v = net.vocab;
+        let mut p = net.pool_with(16, ctx, Some(16 * 8), None).unwrap();
+        let prompt = ids(300, 7, v);
+        for s in 0..16 {
+            net.feed_slot(&mut p, s, &prompt, 0).unwrap();
+        }
+        let free = || g.info().unwrap().free_bytes as i64;
+        let mib = |b: i64| b as f64 / (1 << 20) as f64;
+        let spec = CandSpec {
+            k: 40,
+            penalty: 1.1,
+            last_n: 64,
+        };
+        let keys = [
+            (1, 1),
+            (2, 2),
+            (4, 4),
+            (8, 8),
+            (16, 16),
+            (1, 0),
+            (8, 4),
+            (16, 8),
+        ];
+        let mut total = 0;
+        // Every key once kernel by kernel first (lazily loaded modules take
+        // memory on a kernel's first launch), then with graphs: the delta is
+        // the graph's.
+        for with_graphs in [false, true] {
+            net.graphs = with_graphs;
+            // (rows, greedy rows, device-sampled rows): the step's graph key.
+            for (nb, ng) in keys {
+                let recent = prompt.clone();
+                let rows: Vec<SeqRow> = (0..nb)
+                    .map(|s| SeqRow {
+                        token: prompt[299],
+                        pos: 300,
+                        slot: s,
+                        head: if s < ng {
+                            RowHead::Argmax
+                        } else {
+                            RowHead::Sample {
+                                spec,
+                                recent: &recent[..],
+                            }
+                        },
+                    })
+                    .collect();
+                g.sync().unwrap();
+                let f0 = free();
+                net.step_rows(&mut p, &rows).unwrap();
+                g.sync().unwrap();
+                let d = f0 - free();
+                if with_graphs {
+                    total += d;
+                    eprintln!("{}: step graph nb {nb} ng {ng}: {:.2} MiB", m.arch, mib(d));
+                } else {
+                    // Kernels launched the first time (lazily loaded modules
+                    // would take memory here).
+                    eprintln!(
+                        "{}: first step nb {nb} ng {ng}, kernel by kernel: {:.2} MiB",
+                        m.arch,
+                        mib(d)
+                    );
+                }
+            }
+        }
+        eprintln!("{}: 8 step graphs: {:.2} MiB", m.arch, mib(total));
+        // The view's decode kernels loaded first, then its graph.
+        let mut w = net.slot_view_bare(&p, 1).unwrap();
+        net.lend_scratch(&mut p, &mut w).unwrap();
+        net.graphs = false;
+        g.sync().unwrap();
+        let f0 = free();
+        net.forward_argmax(prompt[299], 300, &mut w);
+        g.sync().unwrap();
+        eprintln!(
+            "{}: first decode step, kernel by kernel: {:.2} MiB",
+            m.arch,
+            mib(f0 - free())
+        );
+        net.graphs = true;
+        net.return_scratch(&mut p, &mut w).unwrap();
+        let mut view = net.slot_view_bare(&p, 0).unwrap();
+        net.lend_scratch(&mut p, &mut view).unwrap();
+        g.sync().unwrap();
+        let f0 = free();
+        net.forward_argmax(prompt[299], 300, &mut view);
+        g.sync().unwrap();
+        eprintln!("{}: view decode graph: {:.2} MiB", m.arch, mib(f0 - free()));
+        net.return_scratch(&mut p, &mut view).unwrap();
+    }
+
     /// A wide pool on a 128-wide-head model (qwen3 0.6B; Llama 3.2 1B
     /// too, hd 64): 20 slots of 1152 positions, prompts up to 1100 tokens,
     /// 20 rows per step (more than att_per_query, so the per-query
@@ -1798,69 +2238,318 @@ mod tests {
         }
     }
 
-    /// Step cost of a pool vs the decode step (MEASURE, not a check):
-    /// `AXON_STEP_MODEL=path` (default the 0.5B), ms per step for nb rows of
-    /// distinct slots at position ~600, greedy, graphs on and off, medians of 5
-    /// runs of 100 steps. `--ignored --nocapture` to see.
+    /// Pool steps of 9..64 rows (9..16: q|k|v and gate|up in one gemvmx
+    /// launch each, `bgemm_x`; past gemvm16: the products split between
+    /// gemvm32 and gemm2's partial tiles, `takes_gemvm`; the head in one
+    /// product over all rows; samp_tail in launches of HEAD_SUB rows), on
+    /// the 0.5B and Llama 1B, mixed greedy and sampled rows: every
+    /// request's results and tokens == running it alone, under each
+    /// gemvm routing (AXON_GEMVM_MAX 16, 32, by shape).
+    #[test]
+    fn pool_steps_past_gemvm16_match_solo() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let km = Kernels::module(&g).unwrap();
+        if !km.mma() {
+            return;
+        }
+        let ms: Vec<Model> = [crate::testutil::model(), crate::testutil::llama_model()]
+            .into_iter()
+            .flatten()
+            .collect();
+        let (slots, ctx, steps) = (64usize, 256usize, 2usize);
+        for m in ms {
+            let mut net = CudaQwen2::with_kv(&g, &km, &m, ctx, CacheKv::F16, false).unwrap();
+            let v = net.vocab;
+            let kinds: Vec<Kind> = (0..slots)
+                .map(|i| match i % 3 {
+                    0 => Kind::Greedy,
+                    1 => Kind::Sampled(40, 1.1, i as u64),
+                    _ => Kind::Sampled(5, 1.0, i as u64),
+                })
+                .collect();
+            let lens: Vec<usize> = (0..slots).map(|i| 20 + (i * 37) % 200).collect();
+            let prompts: Vec<Vec<u32>> = (0..slots)
+                .map(|i| ids(lens[i], 9000 + i as u32, v))
+                .collect();
+            let refs: Vec<_> = (0..slots)
+                .map(|i| solo(&net, ctx, &prompts[i], kinds[i], steps))
+                .collect();
+            for vm in [16usize, 32, 0] {
+                net.bf.vm_max = vm;
+                // nb 9..16: q|k|v and gate|up on gemvmx (the gemvm limit
+                // doesn't apply there, so once).
+                let nbs: &[usize] = match vm {
+                    0 => &[9, 12, 16, 17, 33, 48, 64],
+                    _ => &[17, 33, 48, 64],
+                };
+                for &nb in nbs {
+                    let mut p = net.pool(slots, ctx).unwrap();
+                    for (i, pr) in prompts.iter().enumerate().take(nb) {
+                        net.feed_slot(&mut p, i, &pr[..pr.len() - 1], 0).unwrap();
+                    }
+                    let mut hist: Vec<Vec<u32>> = prompts[..nb].to_vec();
+                    let mut sms: Vec<Option<Sampler>> = kinds[..nb]
+                        .iter()
+                        .map(|k| match *k {
+                            Kind::Greedy => None,
+                            Kind::Sampled(k, pen, seed) => Some(sampler(k, pen, seed)),
+                        })
+                        .collect();
+                    for step in 0..steps {
+                        let specs: Vec<Option<CandSpec>> = sms
+                            .iter()
+                            .map(|s| s.as_ref().map(|s| s.cfg.spec()))
+                            .collect();
+                        let rows: Vec<SeqRow> = (0..nb)
+                            .map(|i| {
+                                let h = &hist[i];
+                                SeqRow {
+                                    token: h[h.len() - 1],
+                                    pos: h.len() - 1,
+                                    slot: i,
+                                    head: match &specs[i] {
+                                        None => RowHead::Argmax,
+                                        Some(spec) => RowHead::Sample {
+                                            spec: *spec,
+                                            recent: &h[h.len() - spec.last_n.clamp(1, h.len())..],
+                                        },
+                                    },
+                                }
+                            })
+                            .collect();
+                        let outs = net.step_rows(&mut p, &rows).unwrap();
+                        for (i, o) in outs.into_iter().enumerate() {
+                            let what =
+                                format!("{} vm {vm} nb {nb} request {i} step {step}", m.arch);
+                            assert_eq!(o, refs[i].0[step], "{what}");
+                            let next = match (&o, sms[i].as_mut()) {
+                                (RowOut::Pick(t), None) => *t,
+                                (RowOut::Cands(cs), Some(s)) => s.pick(cs),
+                                _ => panic!("{what}: a result of another head"),
+                            };
+                            hist[i].push(next);
+                        }
+                    }
+                    for i in 0..nb {
+                        assert_eq!(hist[i], refs[i].1, "{} vm {vm} nb {nb} request {i}", m.arch);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Step cost of a pool vs the decode step, the C curve (MEASURE, not a
+    /// check; `--ignored --nocapture` to see). `AXON_STEP_MODEL=path`
+    /// (default the 0.5B); `AXON_STEP_DEPTHS` (default "600,4096"),
+    /// `AXON_STEP_NB` (default "1,2,4,8,16,24,32,48,64"), `AXON_STEP_PROF`
+    /// (the nb's profiled per kernel, default "1,8,16,32,64"; "" none),
+    /// `AXON_STEP_VM` (gemvm's batch limits `BatchFns::vm_max` to compare,
+    /// default the build's).
+    /// Per depth: one pool of max(nb) slots (fewer if it doesn't fit), every
+    /// slot fed `depth` tokens; then nb rows of distinct slots at position
+    /// `depth`, greedy, graphs on (as serve), ms per step = median of 5 runs
+    /// of 40 steps, against the decode step (forward_argmax) at that depth.
+    /// The profile: one pass without graphs, an event after each `on`
+    /// segment, summed per name over the layers (3rd of 3 rounds).
     #[test]
     #[ignore]
     fn pool_step_cost() {
         let Some(g) = crate::testutil::gpu() else {
             return;
         };
-        let m = match std::env::var("AXON_STEP_MODEL") {
-            Ok(p) => crate::gguf::load_with(&p, Some(false)).unwrap(),
-            Err(_) => match crate::testutil::model() {
-                Some(m) => m,
-                None => return,
-            },
+        // AXON_STEP_MODEL: one model file or several, comma-separated (one
+        // job for a whole round).
+        let paths: Vec<Option<String>> = match std::env::var("AXON_STEP_MODEL") {
+            Ok(v) => v.split(',').map(|p| Some(p.trim().to_string())).collect(),
+            Err(_) => vec![None],
         };
-        let km = Kernels::module(&g).unwrap();
-        let ctx = 1024;
-        let mut net = CudaQwen2::new(&g, &km, &m, ctx).unwrap();
-        let prompt: Vec<u32> = (0..600).map(|i| 1000 + (i * 7919) % 20000).collect();
-        let time = |f: &mut dyn FnMut()| {
-            let mut v: Vec<f64> = (0..5)
-                .map(|_| {
-                    let t = std::time::Instant::now();
-                    for _ in 0..100 {
-                        f();
+        for path in paths {
+            let m = match &path {
+                Some(p) => crate::gguf::load_with(p, Some(false)).unwrap(),
+                None => match crate::testutil::model() {
+                    Some(m) => m,
+                    None => return,
+                },
+            };
+            let list = |var: &str, def: &str| -> Vec<usize> {
+                std::env::var(var)
+                    .unwrap_or(def.into())
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.trim().parse().unwrap())
+                    .collect()
+            };
+            let depths = list("AXON_STEP_DEPTHS", "600,4096");
+            let nbs = list("AXON_STEP_NB", "1,2,4,8,16,24,32,48,64");
+            let profs = list("AXON_STEP_PROF", "1,8,16,32,64");
+            // gemvm's batch limits to compare (the last one profiled), default
+            // the build's.
+            let vms = match list("AXON_STEP_VM", "") {
+                v if v.is_empty() => vec![0],
+                v => v,
+            };
+            // AXON_STEP_X: bgemm_x on (1) / off (0), in turn (default 1).
+            let xs = list("AXON_STEP_X", "1");
+            // AXON_STEP_KM: the kernel builds to run in turn per depth, e.g.
+            // "plain,SOME_DEFINE,plain,SOME_DEFINE" (prefill.cu experiments).
+            let kms: Vec<String> = std::env::var("AXON_STEP_KM")
+                .unwrap_or("plain".into())
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
+            // Each entry "plain", or defines joined by '+' (e.g. "AXON_G2_ZFILL+FOO=1").
+            let mods: Vec<(String, crate::cuda::Module)> = kms
+                .iter()
+                .map(|k| {
+                    let mut opts = vec!["--std=c++17".to_string(), "--ftz=false".to_string()];
+                    if k != "plain" {
+                        opts.extend(k.split('+').map(|d| format!("-D{d}")));
                     }
-                    t.elapsed().as_secs_f64() * 1e3 / 100.0
+                    let o: Vec<&str> = opts.iter().map(|s| s.as_str()).collect();
+                    let m = crate::cuda::Module::load(&g, crate::cuda::KERNELS, &o)
+                        .unwrap()
+                        .0;
+                    (k.clone(), m)
                 })
                 .collect();
-            v.sort_by(f64::total_cmp);
-            v[2]
-        };
-        let mut c = net.new_cache(ctx);
-        net.feed_batch(&prompt, 0, &mut c);
-        let d = time(&mut || {
-            std::hint::black_box(net.forward_argmax(5, 600, &mut c));
-        });
-        eprintln!("{}: decode step (forward_argmax) {d:.3} ms", m.arch);
-        for graphs in [true, false] {
-            net.graphs = graphs;
-            let mut p = net.pool(16, ctx).unwrap();
-            for s in 0..16 {
-                net.feed_slot(&mut p, s, &prompt, 0).unwrap();
-            }
-            for nb in [1usize, 2, 4, 8, 16] {
-                let rows: Vec<SeqRow> = (0..nb)
-                    .map(|s| SeqRow {
-                        token: 5,
-                        pos: 600,
-                        slot: s,
-                        head: RowHead::Argmax,
+            let time = |f: &mut dyn FnMut()| {
+                f();
+                let mut v: Vec<f64> = (0..5)
+                    .map(|_| {
+                        let t = std::time::Instant::now();
+                        for _ in 0..40 {
+                            f();
+                        }
+                        t.elapsed().as_secs_f64() * 1e3 / 40.0
                     })
                     .collect();
-                let t = time(&mut || {
-                    std::hint::black_box(net.step_rows(&mut p, &rows).unwrap());
-                });
+                v.sort_by(f64::total_cmp);
+                v[2]
+            };
+            let name = path.as_deref().unwrap_or("default 0.5B");
+            let gi = g.info().unwrap();
+            eprintln!("C curve: {name} ({}), {} ({} SMs)", m.arch, gi.name, gi.sms);
+            for (&depth, kname) in depths.iter().flat_map(|d| kms.iter().map(move |k| (d, k))) {
+                let km = &mods.iter().find(|m| &m.0 == kname).unwrap().1;
+                eprintln!("kernels: {kname}");
+                let ctx = (depth + 64).next_multiple_of(64);
+                let mut net = CudaQwen2::new(&g, km, &m, ctx).unwrap();
+                net.graphs = true;
+                let prompt: Vec<u32> = (0..depth)
+                    .map(|i| 1000 + (i * 7919 % 20000) as u32)
+                    .collect();
+                let d = {
+                    let mut c = net.new_cache(ctx);
+                    net.feed_batch(&prompt, 0, &mut c);
+                    time(&mut || {
+                        std::hint::black_box(net.forward_argmax(5, depth, &mut c));
+                    })
+                };
+                let want = *nbs.iter().chain(&profs).max().unwrap();
+                let mut slots = want;
+                let mut p = loop {
+                    match net.pool(slots, ctx) {
+                        Ok(p) => break p,
+                        Err(e) if slots > 1 => {
+                            eprintln!("  pool of {slots} x {ctx}: {e}");
+                            slots /= 2;
+                        }
+                        Err(e) => panic!("{e}"),
+                    }
+                };
+                for s in 0..slots {
+                    net.feed_slot(&mut p, s, &prompt, 0).unwrap();
+                }
                 eprintln!(
-                    "  graphs {graphs}: nb {nb:2}: {t:.3} ms/step, {:.0} rows/s, {:.2}x the decode step",
-                    nb as f64 * 1e3 / t,
-                    t / d
+                    "depth {depth}: decode step (forward_argmax) {d:.3} ms; pool {slots} x {ctx}"
                 );
+                eprintln!("| depth | nb | gemvm max | ms/step | x solo | rows/s |");
+                let rows = |nb: usize| -> Vec<SeqRow> {
+                    (0..nb)
+                        .map(|s| SeqRow {
+                            token: 5,
+                            pos: depth,
+                            slot: s,
+                            head: RowHead::Argmax,
+                        })
+                        .collect()
+                };
+                for &nb in nbs.iter().filter(|&&nb| nb <= slots) {
+                    let rs = rows(nb);
+                    for (&vm, &x) in vms.iter().flat_map(|v| xs.iter().map(move |x| (v, x))) {
+                        net.bf.vm_max = vm;
+                        net.bf.gemvmx_on = x == 1;
+                        // (The graphs hold the kernels picked when made.)
+                        p.graphs.clear();
+                        let t = time(&mut || {
+                            std::hint::black_box(net.step_rows(&mut p, &rs).unwrap());
+                        });
+                        eprintln!(
+                            "| {depth} | {nb} | {vm} x{x} | {t:.3} | {:.2} | {:.0} |",
+                            t / d,
+                            nb as f64 * 1e3 / t
+                        );
+                    }
+                }
+                net.bf.vm_max = *vms.last().unwrap();
+                net.bf.gemvmx_on = *xs.last().unwrap() == 1;
+                for &nb in profs.iter().filter(|&&nb| nb <= slots) {
+                    let tokens = vec![5u32; nb];
+                    let at: Vec<RowAt> = (0..nb)
+                        .map(|s| RowAt {
+                            pos: depth as u32,
+                            base: p.base(s) as u32,
+                        })
+                        .collect();
+                    for round in 0..3 {
+                        let tab = p.c.tab.as_ref().map(|t| t.len() / 4);
+                        let b = p.c.b.as_mut().unwrap();
+                        net.load_input(b, BatchIn::Tokens(&tokens)).unwrap();
+                        b.upload_rows(&at, tab).unwrap();
+                        let mut evs = vec![("start", g.record().unwrap())];
+                        net.pass_at(
+                            &mut p.c,
+                            BatchIn::Loaded(nb),
+                            Place::Rows,
+                            Head::Sample,
+                            Some((nb, nb)),
+                            0,
+                            &mut |n| {
+                                evs.push((n, g.record()?));
+                                Ok(())
+                            },
+                        )
+                        .unwrap();
+                        g.sync().unwrap();
+                        if round < 2 {
+                            continue;
+                        }
+                        let mut agg: Vec<(&str, f64, usize)> = Vec::new();
+                        for i in 1..evs.len() {
+                            let ms = evs[i - 1].1.ms_to(&evs[i].1).unwrap() as f64;
+                            match agg.iter_mut().find(|a| a.0 == evs[i].0) {
+                                Some(a) => {
+                                    a.1 += ms;
+                                    a.2 += 1
+                                }
+                                None => agg.push((evs[i].0, ms, 1)),
+                            }
+                        }
+                        let total: f64 = agg.iter().map(|a| a.1).sum();
+                        let segs: Vec<String> = agg
+                            .iter()
+                            .filter(|a| a.1 >= 0.005)
+                            .map(|a| format!("{} {:.3}", a.0, a.1))
+                            .collect();
+                        eprintln!(
+                            "prof depth {depth} nb {nb}: {total:.3} ms (no graph, {} events): {}",
+                            evs.len() - 1,
+                            segs.join(", ")
+                        );
+                    }
+                }
             }
         }
     }
