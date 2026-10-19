@@ -1,0 +1,21 @@
+[axon-run 15:41:58] submitted 1019-154158-f0f6 by /home/haseeb/.cache/axon-wt-gptoss1: /home/haseeb/.cache/axon-gptoss1/axon-test-8541345 oss_gpu_contract_model oss_gpu_logits_graded_model oss_gpu_route_matches_cpu_twin gpt_oss_model_bits gpu_batched_attention_matches_decode_bits gpu_paged_split_and_batched_bits --test-threads=1 --nocapture
+[axon-run 15:41:58] scope axon-job-1019-154158-f0f6-1792438918.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 20068 MB): an OOM here kills only this job
+[axon-run 15:41:58] job 1019-154158-f0f6 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1019-154158-f0f6-1792438918 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-gptoss1/axon-test-8541345 oss_gpu_contract_model oss_gpu_logits_graded_model oss_gpu_route_matches_cpu_twin gpt_oss_model_bits gpu_batched_attention_matches_decode_bits gpu_paged_split_and_batched_bits --test-threads=1 --nocapture
+axon-q 15:41:58 start slot 16-23: /home/haseeb/.cache/axon-gptoss1/axon-test-8541345 oss_gpu_contract_model oss_gpu_logits_graded_model oss_gpu_route_matches_cpu_twin gpt_oss_model_bits gpu_batched_attention_matches_decode_bits gpu_pa
+
+running 6 tests
+test cuda::qwen2::paged_tests::gpu_paged_split_and_batched_bits ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+test cuda::qwen2::tests::gpu_batched_attention_matches_decode_bits ... ok
+test model::gptoss_tests::gpt_oss_model_bits ... ok
+test moe::oss_tests::oss_gpu_contract_model ... ok
+test moe::oss_tests::oss_gpu_logits_graded_model ... gpt-oss-20b moe gpu vs cpu: top-1 195/198 (98.5%), KL mean 2.63e-3 max 1.36e-1 (> 0.5: []), max |dlogit| 2.928, flip margins [0.04689598, 0.004049301, 0.059295654]
+gpt-oss-20b cpu rows vs cpu: top-1 195/198 (98.5%), KL mean 2.43e-3 max 1.27e-1 (> 0.5: []), max |dlogit| 3.144, flip margins [0.04689598, 0.021641731, 0.059295654]
+ok
+test moe::oss_tests::oss_gpu_route_matches_cpu_twin ... fixture: gpt-oss router GPU vs CPU twin on identical h: 900 routes, 0 differ (widest CPU k-th vs (k+1)-th probability gap there 0.00e0), same-set max |w| diff 1.07e-6
+gpt-oss-20b: gpt-oss router GPU vs CPU twin on identical h: 2472 routes, 0 differ (widest CPU k-th vs (k+1)-th probability gap there 0.00e0), same-set max |w| diff 1.61e-6
+ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 671 filtered out; finished in 299.76s
+
+[axon-run 15:46:58] exit 0 after 300.0s (host bella)

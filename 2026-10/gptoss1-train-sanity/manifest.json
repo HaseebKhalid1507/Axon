@@ -1,0 +1,29 @@
+{
+ "label": "gptoss1-train-sanity",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1019-154158-f0f6",
+   "name": "oss-train-sanity-8541345",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.71.09",
+   "sha": "8541345",
+   "binary": "axon-test-8541345",
+   "started": 1792438918.124062,
+   "ended": 1792439218.2423282,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "c7015016db6135d839cf3789742928acf0b3d7c51d5a7bfba88ac6180a3831ec",
+   "log_bytes": 2663
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-19 15:46:58 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
