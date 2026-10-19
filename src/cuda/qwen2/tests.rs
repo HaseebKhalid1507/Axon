@@ -3758,6 +3758,271 @@ fn batch_passes_equal_split() {
     }
 }
 
+/// A Q4_K_M model's batched products as `wave_gemms` lists them (fused
+/// gate + up): dim, q rows, k / v rows, ffn, layers, and how many layers
+/// have v and down in Q6_K (llama.cpp's Q4_K_M: half).
+fn wave_model(dim: usize, q: usize, kv: usize, ffn: usize, layers: usize) -> Vec<batch::Gemm> {
+    use batch::Gemm;
+    let one = |qt, rows, cols| Gemm::One { qt, rows, cols };
+    (0..layers)
+        .flat_map(|l| {
+            let t6 = if l % 2 == 0 { Q6_K } else { Q4_K };
+            [
+                one(Q4_K, q, dim),
+                one(Q4_K, kv, dim),
+                one(t6, kv, dim),
+                one(Q4_K, dim, q),
+                Gemm::GateUp { ffn, dim },
+                one(t6, dim, ffn),
+            ]
+        })
+        .collect()
+}
+
+/// `wave_passes`: as many passes as `passes`, none longer than max, all
+/// but the last whole 64-token tiles, never more modelled GEMM time; the
+/// equal split for one pass and where nothing beats it; r15's 4090 7B
+/// case (1050 + 1050 -> 1088 + 1012). Prints the wave table per GPU (the
+/// PR's): 64 x 64 x dim block-waves per layer, summed over the passes.
+#[test]
+fn wave_passes_shapes() {
+    use batch::{WaveGeom, gemm_cost, passes, wave_floor, wave_passes};
+    let models = [
+        (
+            "qwen2.5-7B",
+            wave_model(3584, 3584, 512, 18944, 28),
+            3584,
+            28,
+        ),
+        (
+            "qwen3-8B",
+            wave_model(4096, 4096, 1024, 12288, 36),
+            4096,
+            36,
+        ),
+        ("qwen2.5-0.5B", wave_model(896, 896, 128, 4864, 24), 896, 24),
+        (
+            "qwen2.5-1.5B",
+            wave_model(1536, 1536, 256, 8960, 28),
+            1536,
+            28,
+        ),
+    ];
+    // (GPU, SMs, sm_90a gemmh2)
+    let gpus = [
+        ("avante 4050L", 20, false),
+        ("bella 5070TiL", 46, false),
+        ("H100 PCIe", 114, true),
+        ("RTX 4090", 128, false),
+        ("H100 SXM", 132, true),
+        ("RTX 5090", 170, false),
+    ];
+    for (name, ps, dim, layers) in &models {
+        for &(gpu, sms, gemmh) in &gpus {
+            let g = WaveGeom {
+                sms,
+                gemmh,
+                gemmh_all: false,
+            };
+            let cost = |nb: usize| gemm_cost(ps, nb, g);
+            // 64 x 64 x dim blocks' full waves per layer.
+            let unit = (100 * sms * 64 * 64 * dim * layers) as f64;
+            let total =
+                |p: &[std::ops::Range<usize>]| -> u64 { p.iter().map(|r| cost(r.len())).sum() };
+            for max in [1152, 1000, 700, 256] {
+                for n in (1..4000).step_by(37).chain([1153, 1777, 2100, 2304, 3000]) {
+                    let base = passes(n, max);
+                    let Some(v) = wave_passes(n, max, cost) else {
+                        continue;
+                    };
+                    assert_eq!(v.len(), base.len(), "{n} {max}");
+                    assert_eq!((v[0].start, v.last().unwrap().end), (0, n));
+                    assert!(v.windows(2).all(|w| w[0].end == w[1].start));
+                    assert!(v.iter().all(|r| r.len() <= max && r.len() > batch::VM_MAX));
+                    assert!(
+                        v.iter().all(|r| r.len() >= wave_floor(max)),
+                        "{name} {gpu} {n} {max}: a pass under the floor: {v:?}"
+                    );
+                    assert!(v[..v.len() - 1].iter().all(|r| r.len() % 64 == 0));
+                    assert!(
+                        (total(&v) as f64) < 0.97 * total(&base) as f64,
+                        "{name} {gpu} {n} {max}"
+                    );
+                }
+                for n in [1, 2, 33, 500, max].into_iter().filter(|&n| n <= max) {
+                    assert_eq!(wave_passes(n, max, cost), None, "{n} {max}: one pass");
+                }
+            }
+            for n in [1153, 1777, 2100, 2304, 3000, 4000, 6000] {
+                let base = passes(n, 1152);
+                let v = wave_passes(n, 1152, cost).unwrap_or_else(|| base.clone());
+                let lens = |p: &[std::ops::Range<usize>]| -> Vec<usize> {
+                    p.iter().map(|r| r.len()).collect()
+                };
+                let (a, b) = (total(&base) as f64 / unit, total(&v) as f64 / unit);
+                eprintln!(
+                    "WAVES {name:<13} {gpu:<14} {sms:>3} SMs pp{n:<5} {:?} {a:7.1} -> {:?} {b:7.1} ({:+.1} %)",
+                    lens(&base),
+                    lens(&v),
+                    100.0 * (b / a - 1.0)
+                );
+            }
+        }
+    }
+    // Degenerate max: one tile per pass (64: every split the same cost)
+    // or none (63).
+    let ps = &models[0].1;
+    let g = WaveGeom {
+        sms: 128,
+        gemmh: false,
+        gemmh_all: false,
+    };
+    for n in 65..400 {
+        assert_eq!(
+            wave_passes(n, 64, |nb| gemm_cost(ps, nb, g)),
+            None,
+            "{n} / 64"
+        );
+        assert_eq!(
+            wave_passes(n, 63, |nb| gemm_cost(ps, nb, g)),
+            None,
+            "{n} / 63"
+        );
+    }
+    // Under the margin: no wave effect (cost by the token alone), or a
+    // split that saves 2 % (< 3 %) of a cost made up for it.
+    assert_eq!(wave_passes(2100, 1152, |nb| nb as u64), None);
+    let toy = |nb: usize| if nb == 1088 || nb == 1012 { 98 } else { 100 };
+    assert_eq!(wave_passes(2100, 1152, toy), None);
+    let toy = |nb: usize| if nb == 1088 || nb == 1012 { 96 } else { 100 };
+    assert_eq!(
+        wave_passes(2100, 1152, toy),
+        Some(vec![0..1088, 1088..2100])
+    );
+    // The RTX 4090 cells measured (#92): r15 pick 1's pp2100 split for 7B
+    // and Qwen3-8B (+3.0 % / +3.9 % e2e) stays; 7B pp1153 (704 + 449,
+    // -0.4 %), pp1777 (1024 + 753, +1.8 %) and pp3000 (1152 + 1152 + 696,
+    // +1.1 %) are under the margin now.
+    let at = |m: usize, n: usize| wave_passes(n, 1152, |nb| gemm_cost(&models[m].1, nb, g));
+    assert_eq!(at(0, 2100), Some(vec![0..1088, 1088..2100]));
+    assert_eq!(at(1, 2100), Some(vec![0..1088, 1088..2100]));
+    assert_eq!(at(0, 1153), None);
+    assert_eq!(at(0, 1777), None);
+    assert_eq!(at(0, 3000), None);
+}
+
+/// Batched prefill with AXON_WAVE_SPLIT's pass sizes == with the equal
+/// passes (main's), KV bytes and logit bits, at fixed prompt lengths plus
+/// the first two up to 4600 tokens whose split differs on this GPU
+/// (printed); one of those again from position 37 (after a fed prefix);
+/// and == per-token decode at 1777 tokens on 0.5B. It flips the
+/// `CudaQwen2::wave_split` field, not the environment: AXON_WAVE_SPLIT's
+/// parsing (a `map_or` at construction) isn't covered here. 0.5B and 1.5B;
+/// AXON_BIG_MODELS=1 adds qwen2.5 7B and qwen3 8B.
+///
+/// It fails as vacuous if no length up to 4600 splits differently on the
+/// GPU it runs on (a GPU whose SM count makes every equal split as good:
+/// widen the search before calling that a bug).
+#[test]
+fn gpu_prefill_wave_split_bits() {
+    use batch::passes;
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let mut files = vec![
+        "models/qwen2.5-0.5b-q4_k_m.gguf",
+        "models/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+    ];
+    if std::env::var("AXON_BIG_MODELS").is_ok_and(|v| v == "1") {
+        files.extend([
+            "models/Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+            "models/Qwen3-8B-Q4_K_M.gguf",
+        ]);
+    }
+    const FROM: usize = 37;
+    const LONGEST: usize = 4600;
+    for f in files {
+        let Some(m) = model_at(f) else {
+            continue;
+        };
+        let km = Kernels::module_for(&g, &m).unwrap();
+        let all = long_ids(&m, LONGEST + FROM);
+        let mut net = CudaQwen2::new(&g, &km, &m, all.len() + 1).unwrap();
+        let max = net.prefill_batch();
+        net.wave_split = true;
+        let mut lens = vec![1153, 1300, 1777, 2100, 2304, 2900];
+        let found: Vec<usize> = (max + 1..=LONGEST)
+            .filter(|n| !lens.contains(n) && net.wave_split_passes(*n, max).is_some())
+            .take(2)
+            .collect();
+        lens.extend(&found);
+        let mut differ = 0;
+        for &n in &lens {
+            let ids = &all[..n];
+            net.wave_split = true;
+            let split = net.wave_split_passes(n, max);
+            differ += split.is_some() as usize;
+            let mut a = net.new_cache(n + 1);
+            let la = net.prefill_logits(ids, 0, &mut a);
+            net.wave_split = false;
+            let mut b = net.new_cache(n + 1);
+            let lb = net.prefill_logits(ids, 0, &mut b);
+            assert_eq!(bits(&la), bits(&lb), "{f} {n}: logits, wave split vs equal");
+            assert!(
+                kv_bytes(&net, &a, n) == kv_bytes(&net, &b, n),
+                "{f} {n}: KV, wave split vs equal"
+            );
+            let lens = |p: &[std::ops::Range<usize>]| -> Vec<usize> {
+                p.iter().map(|r| r.len()).collect()
+            };
+            eprintln!(
+                "{f} pp{n} on {} SMs: equal {:?}, wave {:?}: identical",
+                net.bf.sms,
+                lens(&passes(n, max)),
+                split.as_deref().map(lens)
+            );
+            if n == 1777 && f.contains("0.5b") {
+                let mut d = net.new_cache(n + 1);
+                for (p, &t) in ids[..n - 1].iter().enumerate() {
+                    net.feed(&mut d, t, p).unwrap();
+                }
+                let dec = net.forward(ids[n - 1], n - 1, &mut d);
+                assert_eq!(
+                    bits(&la),
+                    bits(&dec),
+                    "{f} {n}: wave split vs per-token decode"
+                );
+                assert!(
+                    kv_bytes(&net, &a, n) == kv_bytes(&net, &d, n),
+                    "{f} {n}: KV vs decode"
+                );
+                eprintln!("{f} pp{n}: wave split == per-token decode");
+            }
+        }
+        // A multi-pass prompt after a fed prefix (start > 0).
+        if let Some(&n) = found.first() {
+            let ids = &all[..FROM + n];
+            let mut out = Vec::new();
+            for wave in [true, false] {
+                net.wave_split = wave;
+                let mut c = net.new_cache(FROM + n + 1);
+                net.feed_batch(&ids[..FROM], 0, &mut c);
+                let l = net.prefill_logits(&ids[FROM..], FROM, &mut c);
+                out.push((bits(&l), kv_bytes(&net, &c, FROM + n)));
+            }
+            assert!(out[0] == out[1], "{f} {n} at {FROM}: wave split vs equal");
+            eprintln!("{f} pp{n} at {FROM}: identical");
+        }
+        net.wave_split = true;
+        if net.wave_gemms().is_some() {
+            assert!(
+                differ > 0,
+                "{f}: no prompt length up to {LONGEST} splits differently here (test vacuous)"
+            );
+        }
+    }
+}
+
 /// `prefill_logits` (the last prompt token inside the final batched pass)
 /// == `feed_batch` + `forward`, bit for bit, on the big models present
 /// (AXON_BIG_MODELS=1: qwen2.5 7B and qwen3 8B, prompts of 2, 17, 559 and
