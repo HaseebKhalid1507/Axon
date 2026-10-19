@@ -513,7 +513,10 @@ fn tiny_metadata_and_tokenizer() {
     };
     assert!(matches!(&merges[1], Val::Str(s) if s == "l l"));
     let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
-    assert_eq!(tok.encode_special("hello<|im_start|>"), [259, 260, 111, 257]);
+    assert_eq!(
+        tok.encode_special("hello<|im_start|>"),
+        [259, 260, 111, 257]
+    );
     assert_eq!(tok.encode_special("hello<tool_call>"), [259, 260, 111, 258]);
 }
 
@@ -1044,5 +1047,93 @@ fn qwen25_tensors_match_gguf_f16() {
             "{}: bytes differ",
             t.name
         );
+    }
+}
+
+/// Gate 3: `check_supported` refuses a checkpoint exactly as it refuses
+/// the GGUF F16 of the same checkpoint (same message), for each of
+/// today's metadata refusals reachable from a config.json: the
+/// synthesized keys are the converter's, so the check can't tell them
+/// apart. (The new, loader-level refusals: `bad_checkpoints_are_clean_errors`.)
+#[test]
+fn check_supported_refuses_as_for_the_gguf() {
+    type Edit = fn(&mut Map<String, Value>);
+    let cases: &[(&str, Edit, &str)] = &[
+        (
+            "linear",
+            |c| {
+                c.insert(
+                    "rope_scaling".into(),
+                    json!({"type": "linear", "factor": 2.0}),
+                );
+            },
+            "RoPE scaling (factor 2)",
+        ),
+        (
+            "yarn-high",
+            |c| {
+                c.insert("rope_scaling".into(), json!({"rope_type": "yarn", "factor": 4.0, "original_max_position_embeddings": 32, "beta_fast": -1.0}));
+            },
+            "out of range",
+        ),
+        (
+            "kv-missing",
+            |c| {
+                c.remove("num_key_value_heads");
+            },
+            "head_count_kv is missing",
+        ),
+        (
+            "kv-3",
+            |c| {
+                c.insert("num_key_value_heads".into(), json!(3));
+            },
+            "not a multiple",
+        ),
+        (
+            "odd-head",
+            |c| {
+                c.insert("head_dim".into(), json!(33));
+            },
+            "odd",
+        ),
+        (
+            "heads-split",
+            |c| {
+                c.insert("num_attention_heads".into(), json!(3));
+                c.insert("num_key_value_heads".into(), json!(1));
+            },
+            "doesn't split",
+        ),
+        (
+            "layers-missing",
+            |c| {
+                c.remove("num_hidden_layers");
+            },
+            "block_count is missing",
+        ),
+        (
+            "layers-more",
+            |c| {
+                c.insert("num_hidden_layers".into(), json!(3));
+            },
+            "blk.2",
+        ),
+    ];
+    for (tag, edit, want) in cases {
+        let d = Dir::new(&format!("cs-{tag}"));
+        write_tiny(&d, 1);
+        let mut c = tiny_config();
+        edit(c.as_object_mut().unwrap());
+        d.json("config.json", &c);
+        let m = load_dir(&d.0).unwrap();
+        let g = tiny_gguf(&m.metadata);
+        let (a, b) = (
+            crate::model::check_supported(&m),
+            crate::model::check_supported(&g),
+        );
+        let (a, b) = (a.unwrap_err().to_string(), b.unwrap_err().to_string());
+        assert_eq!(a, b, "{tag}");
+        assert!(a.contains(want), "{tag}: {a}");
     }
 }
