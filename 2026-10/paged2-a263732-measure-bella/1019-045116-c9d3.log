@@ -1,0 +1,44 @@
+[axon-run 04:51:16] submitted 1019-045116-c9d3 by /home/haseeb/.cache/axon-paged2: /home/haseeb/.cache/axon-paged2/axon-test-a263732 pool_graph_bytes graph_oom_falls_back_to_kernels --include-ignored --nocapture
+[axon-run 10:53:31] VRAM: claiming the learned 8777 MB instead of --vram 11000 (bin:axon-test)
+[axon-run 10:53:31] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 10:53:31] scope axon-job-1019-045116-c9d3-1792421611.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 18119 MB): an OOM here kills only this job
+[axon-run 10:53:31] job 1019-045116-c9d3 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1019-045116-c9d3-1792421611 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-paged2/axon-test-a263732 pool_graph_bytes graph_oom_falls_back_to_kernels --include-ignored --nocapture --test-threads 6
+axon-q 10:53:31 start slot 16-23: /home/haseeb/.cache/axon-paged2/axon-test-a263732 pool_graph_bytes graph_oom_falls_back_to_kernels --include-ignored --nocapture --test-threads 6
+
+running 2 tests
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+kernel module load: 2.00 MiB, 52.9 ms
+qwen2: first step nb 1 ng 1, kernel by kernel: 0.00 MiB
+qwen2: first step nb 2 ng 2, kernel by kernel: 0.00 MiB
+qwen2: first step nb 4 ng 4, kernel by kernel: 0.00 MiB
+qwen2: first step nb 8 ng 8, kernel by kernel: 0.00 MiB
+qwen2: first step nb 16 ng 16, kernel by kernel: 0.00 MiB
+qwen2: first step nb 1 ng 0, kernel by kernel: 0.00 MiB
+qwen2: first step nb 8 ng 4, kernel by kernel: 0.00 MiB
+qwen2: first step nb 16 ng 8, kernel by kernel: 0.00 MiB
+qwen2: step graph nb 1 ng 1: 0.00 MiB
+qwen2: step graph nb 2 ng 2: 0.00 MiB
+qwen2: step graph nb 4 ng 4: 0.00 MiB
+qwen2: step graph nb 8 ng 8: 2.00 MiB
+qwen2: step graph nb 16 ng 16: 0.00 MiB
+qwen2: step graph nb 1 ng 0: 0.00 MiB
+qwen2: step graph nb 8 ng 4: 2.00 MiB
+qwen2: step graph nb 16 ng 8: 0.00 MiB
+qwen2: 8 step graphs: 4.00 MiB
+qwen2: first decode step, kernel by kernel: 0.00 MiB
+qwen2: view decode graph: 0.00 MiB
+test cuda::qwen2::slots::tests::pool_graph_bytes ... ok
+
+thread 'cuda::qwen2::slots::tests::graph_oom_falls_back_to_kernels' (2279169) panicked at src/cuda/qwen2/slots.rs:1351:31:
+range end index 89 out of range for slice of length 70
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test cuda::qwen2::slots::tests::graph_oom_falls_back_to_kernels ... FAILED
+
+failures:
+
+failures:
+    cuda::qwen2::slots::tests::graph_oom_falls_back_to_kernels
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 630 filtered out; finished in 3.51s
+
+[axon-run 10:53:35] exit 101 after 3.7s (host bella)

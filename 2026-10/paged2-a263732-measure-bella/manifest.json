@@ -1,0 +1,29 @@
+{
+ "label": "paged2-a263732-measure-bella",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1019-045116-c9d3",
+   "name": "paged2-a263732-graphbytes7b-inject",
+   "rc": 101,
+   "verdict": "FAIL (rc 101)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.71.09",
+   "sha": "a263732",
+   "binary": "axon-test-a263732",
+   "started": 1792421611.3616948,
+   "ended": 1792421616.3790672,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "d64045664f9161c93a41a1b33c760be150d88d23a17a971c53a75e386c48428a",
+   "log_bytes": 2993
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-19 10:53:37 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
