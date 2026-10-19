@@ -1,0 +1,29 @@
+{
+ "label": "paged2-b351c1a-fill",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1019-182247-4a79",
+   "name": "paged2-b351c1a-fill-oom-avante",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "avante",
+   "hw": "hw-avante.txt",
+   "gpu": "NVIDIA GeForce RTX 4050 Laptop GPU",
+   "driver": "610.43.02",
+   "sha": "b351c1a",
+   "binary": "axon-test-b351c1a",
+   "started": 1792448568.0378299,
+   "ended": 1792448581.3030245,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "044a319cc7d1deea51a8b738b08e7396f5852a999a6beaded4fcf7957084f321",
+   "log_bytes": 8225
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-19 18:23:02 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}

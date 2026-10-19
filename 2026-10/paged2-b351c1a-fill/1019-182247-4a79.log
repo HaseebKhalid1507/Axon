@@ -1,0 +1,142 @@
+[axon-run 18:22:47] submitted 1019-182247-4a79 by /home/haseeb/.cache/axon-paged2: /home/haseeb/.cache/axon-paged2/axon-test-b351c1a graph_oom_fill_vram graph_oom_falls_back_to_kernels pool_graph_bytes --include-ignored --nocapture
+[axon-run 18:22:51] job 1019-182247-4a79 -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 5500 --env AXON_NODE_PACK=1 --src /home/haseeb/.cache/axon-wt-paged2 /home/haseeb/.cache/axon-paged2/axon-test-b351c1a graph_oom_fill_vram graph_oom_falls_back_to_kernels pool_graph_bytes --include-ignored --nocapture
+axon-remote: uploading axon-test-b351c1a (500e1e2c1ea2a267e2803b78) + source of /home/haseeb/.cache/axon-wt-paged2
+
+sent 1,530,561 bytes  received 3,990 bytes  3,069,102.00 bytes/sec
+total size is 5,576,310  speedup is 3.63
+
+sent 6,161,065 bytes  received 35 bytes  4,107,400.00 bytes/sec
+total size is 19,423,624  speedup is 3.15
+axon-remote: job 20261019-182253-axon-test-b351c1a-3158539 on avante (GPU, 5500 MB)
+[axon-node 18:22:53] GPU slot taken; job wants 5500 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 44
+[axon-node 18:22:53] run axon-test-b351c1a (500e1e2c1ea2a267e2803b78) as /home/haseeb/.cache/axon-wt-paged2 on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 3 tests
+testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test cuda::qwen2::slots::tests::graph_oom_falls_back_to_kernels ... ok
+step 1: graph made; 3850.56 MiB free after taking 1314448 KiB
+step 2: graph made; 2886.56 MiB free after taking 985744 KiB
+step 3: graph made; 2164.56 MiB free after taking 738960 KiB
+step 4: graph made; 1622.56 MiB free after taking 554128 KiB
+step 5: graph made; 1216.56 MiB free after taking 415376 KiB
+step 6: graph made; 910.56 MiB free after taking 311440 KiB
+step 7: graph made; 682.56 MiB free after taking 233104 KiB
+step 8: graph made; 510.56 MiB free after taking 174736 KiB
+step 9: graph made; 382.56 MiB free after taking 130704 KiB
+step 10: graph made; 286.56 MiB free after taking 97936 KiB
+step 11: graph made; 214.56 MiB free after taking 73360 KiB
+step 12: graph made; 160.56 MiB free after taking 54928 KiB
+step 13: graph made; 118.56 MiB free after taking 41104 KiB
+step 14: graph made; 88.56 MiB free after taking 30352 KiB
+step 15: graph made; 64.56 MiB free after taking 22672 KiB
+step 16: graph made; 46.56 MiB free after taking 16528 KiB
+step 17: graph made; 34.56 MiB free after taking 11920 KiB
+step 18: graph made; 24.56 MiB free after taking 8848 KiB
+step 19: graph made; 16.56 MiB free after taking 6288 KiB
+step 20: graph made; 10.56 MiB free after taking 4240 KiB
+step 21: graph made; 6.56 MiB free after taking 2704 KiB
+step 22: graph made; 6.56 MiB free after taking 1680 KiB
+step 23: graph made; 4.56 MiB free after taking 1680 KiB
+step 24: graph made; 4.56 MiB free after taking 1168 KiB
+step 25: graph made; 2.56 MiB free after taking 1168 KiB
+step 26: graph made; 2.56 MiB free after taking 656 KiB
+step 27: graph made; 2.56 MiB free after taking 656 KiB
+step 28: graph made; 2.56 MiB free after taking 656 KiB
+step 29: graph made; 2.56 MiB free after taking 328 KiB
+step 30: graph made; 2.56 MiB free after taking 328 KiB
+step 31: graph made; 2.56 MiB free after taking 164 KiB
+step 32: graph made; 2.56 MiB free after taking 164 KiB
+step 33: graph made; 2.56 MiB free after taking 164 KiB
+step 34: graph made; 2.56 MiB free after taking 164 KiB
+step 35: graph made; 2.56 MiB free after taking 82 KiB
+step 36: graph made; 2.56 MiB free after taking 41 KiB
+step 37: graph made; 2.56 MiB free after taking 41 KiB
+step 38: graph made; 2.56 MiB free after taking 41 KiB
+step 39: graph made; 2.56 MiB free after taking 41 KiB
+step 40: graph made; 2.56 MiB free after taking 41 KiB
+step 41: graph made; 2.56 MiB free after taking 41 KiB
+step 42: graph made; 2.56 MiB free after taking 41 KiB
+step 43: graph made; 2.56 MiB free after taking 41 KiB
+step 44: graph made; 2.56 MiB free after taking 41 KiB
+step 45: graph made; 2.56 MiB free after taking 41 KiB
+step 46: graph made; 2.56 MiB free after taking 41 KiB
+step 47: graph made; 2.56 MiB free after taking 41 KiB
+step 48: graph made; 2.56 MiB free after taking 41 KiB
+step 49: graph made; 2.56 MiB free after taking 41 KiB
+step 50: graph made; 2.56 MiB free after taking 41 KiB
+step 51: graph made; 2.56 MiB free after taking 41 KiB
+step 52: graph made; 2.56 MiB free after taking 41 KiB
+step 53: graph made; 2.56 MiB free after taking 41 KiB
+step 54: graph made; 2.56 MiB free after taking 41 KiB
+step 55: graph made; 2.56 MiB free after taking 41 KiB
+step 56: graph made; 2.56 MiB free after taking 41 KiB
+step 57: graph made; 2.56 MiB free after taking 41 KiB
+step 58: graph made; 2.56 MiB free after taking 41 KiB
+step 59: graph made; 2.56 MiB free after taking 41 KiB
+step 60: graph made; 2.56 MiB free after taking 41 KiB
+step 61: graph made; 2.56 MiB free after taking 41 KiB
+step 62: graph made; 2.56 MiB free after taking 41 KiB
+step 63: graph made; 2.56 MiB free after taking 41 KiB
+step 64: graph made; 2.56 MiB free after taking 41 KiB
+step 65: graph made; 2.56 MiB free after taking 41 KiB
+step 66: graph made; 2.56 MiB free after taking 41 KiB
+step 67: graph made; 2.56 MiB free after taking 41 KiB
+step 68: graph made; 2.56 MiB free after taking 41 KiB
+step 69: graph made; 2.56 MiB free after taking 41 KiB
+step 70: graph made; 2.56 MiB free after taking 41 KiB
+step 71: graph made; 2.56 MiB free after taking 41 KiB
+step 72: graph made; 2.56 MiB free after taking 41 KiB
+step 73: graph made; 2.56 MiB free after taking 41 KiB
+step 74: graph made; 2.56 MiB free after taking 41 KiB
+step 75: graph made; 2.56 MiB free after taking 41 KiB
+step 76: graph made; 2.56 MiB free after taking 41 KiB
+step 77: graph made; 2.56 MiB free after taking 41 KiB
+step 78: graph made; 2.56 MiB free after taking 41 KiB
+step 79: graph made; 2.56 MiB free after taking 41 KiB
+step 80: graph made; 2.56 MiB free after taking 41 KiB
+step 81: graph made; 2.56 MiB free after taking 41 KiB
+step 82: graph made; 2.56 MiB free after taking 41 KiB
+step 83: graph made; 2.56 MiB free after taking 41 KiB
+step 84: graph made; 2.56 MiB free after taking 41 KiB
+step 85: graph made; 2.56 MiB free after taking 41 KiB
+step 86: graph made; 2.56 MiB free after taking 41 KiB
+step 87: graph made; 2.56 MiB free after taking 41 KiB
+step 88: graph made; 2.56 MiB free after taking 41 KiB
+step 89: graph made; 2.56 MiB free after taking 41 KiB
+step 90: graph made; 2.56 MiB free after taking 41 KiB
+step 91: graph made; 2.56 MiB free after taking 41 KiB
+step 92: graph made; 2.56 MiB free after taking 41 KiB
+step 93: graph made; 2.56 MiB free after taking 41 KiB
+step 94: graph made; 2.56 MiB free after taking 41 KiB
+step 95: graph made; 2.56 MiB free after taking 41 KiB
+step 96: graph made; 2.56 MiB free after taking 41 KiB
+graph_oom_fill_vram: every graph instantiated, down to 5134.56 MiB free
+test cuda::qwen2::slots::tests::graph_oom_fill_vram ... ok
+kernel module load: 2.00 MiB, 15.0 ms
+model: qwen2 (24 layers, dim 896; AXON_STEP_MODEL None)
+qwen2: first step nb 1 ng 1, kernel by kernel: 0.00 MiB
+qwen2: first step nb 2 ng 2, kernel by kernel: 0.00 MiB
+qwen2: first step nb 4 ng 4, kernel by kernel: 0.00 MiB
+qwen2: first step nb 8 ng 8, kernel by kernel: 0.00 MiB
+qwen2: first step nb 16 ng 16, kernel by kernel: 0.00 MiB
+qwen2: first step nb 1 ng 0, kernel by kernel: 0.00 MiB
+qwen2: first step nb 8 ng 4, kernel by kernel: 0.00 MiB
+qwen2: first step nb 16 ng 8, kernel by kernel: 0.00 MiB
+qwen2: step graph nb 1 ng 1: 0.00 MiB
+qwen2: step graph nb 2 ng 2: 2.00 MiB
+qwen2: step graph nb 4 ng 4: 2.00 MiB
+qwen2: step graph nb 8 ng 8: 2.00 MiB
+qwen2: step graph nb 16 ng 16: 2.00 MiB
+qwen2: step graph nb 1 ng 0: 2.00 MiB
+qwen2: step graph nb 8 ng 4: 2.00 MiB
+qwen2: step graph nb 16 ng 8: 2.00 MiB
+qwen2: 8 step graphs: 14.00 MiB
+qwen2: first decode step, kernel by kernel: 0.00 MiB
+qwen2: view decode graph: 2.00 MiB
+test cuda::qwen2::slots::tests::pool_graph_bytes ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 629 filtered out; finished in 2.87s
+
+[axon-node 18:22:56] exit 0 after 3.0s
+[axon-node 18:22:56] peak RSS 695 MB (job process tree PSS, 2 s samples x1)
+[axon-run 18:22:57] exit 0 after 5.8s (host avante)
