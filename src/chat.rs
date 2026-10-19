@@ -72,6 +72,26 @@
 //! <start_of_turn>model\n{reply}<end_of_turn>\n
 //! ```
 //!
+//! Kimi (Kimi K2, Moonlight: `<|im_user|>`, `<|im_assistant|>`,
+//! `<|im_system|>`, `<|im_middle|>`): ChatML with a start token per role and
+//! `<|im_middle|>` in place of the newline, no newlines between messages, no
+//! BOS. The GGUF's template inserts a default system message when the
+//! conversation has none (`template_default_system`: `axon chat` passes it):
+//!
+//! ```text
+//! <|im_system|>system<|im_middle|>{system}<|im_end|>
+//! <|im_user|>user<|im_middle|>{message}<|im_end|>
+//! <|im_assistant|>assistant<|im_middle|>{reply}<|im_end|>
+//! ```
+//!
+//! DeepSeek V3 / V3.1 (`<｜User｜>`, `<｜Assistant｜>`), the V3.1 template's
+//! non-thinking mode: BOS, the system text bare, then each user message after
+//! `<｜User｜>` and each reply after `<｜Assistant｜></think>`, ended by EOS:
+//!
+//! ```text
+//! <｜begin▁of▁sentence｜>{system}<｜User｜>{message}<｜Assistant｜></think>{reply}<｜end▁of▁sentence｜>
+//! ```
+//!
 //! gpt-oss's harmony format (a vocabulary with `<|start|>`, `<|message|>`,
 //! `<|channel|>`, `<|end|>` and `<|return|>`), its GGUF template without
 //! tools, with a fixed date (`HARMONY_DATE`, so a conversation's tokens
@@ -146,6 +166,24 @@ pub enum Format {
     /// BOS first if the model adds one, the system message in the first
     /// user message.
     Gemma { bos: Option<u32> },
+    /// Kimi's turns: a start token per role (`<|im_system|>`, `<|im_user|>`,
+    /// `<|im_assistant|>`), the role name, `<|im_middle|>`, the text, then
+    /// `<|im_end|>`.
+    Kimi {
+        system: u32,
+        user: u32,
+        assistant: u32,
+        middle: u32,
+    },
+    /// DeepSeek V3's: `<｜User｜>{msg}`, a reply opened by `<｜Assistant｜>`
+    /// and `</think>` (`think_end`: its tokens) and closed by EOS.
+    DeepSeek3 {
+        user: u32,
+        assistant: u32,
+        bos: Option<u32>,
+        think_end: [u32; 4],
+        n_think: usize,
+    },
     /// gpt-oss's harmony messages: `<|start|>{role}<|message|>{text}<|end|>`
     /// (`im_start` / `im_end`), assistant messages on a channel.
     Harmony { message: u32, channel: u32 },
@@ -184,9 +222,40 @@ impl Framing {
             special(tok, "<|channel|>"),
             special(tok, "<|return|>"),
         );
+        let kimi = (
+            special(tok, "<|im_system|>"),
+            special(tok, "<|im_user|>"),
+            special(tok, "<|im_assistant|>"),
+            special(tok, "<|im_middle|>"),
+            special(tok, "<|im_end|>"),
+        );
+        let ds3 = (special(tok, "<｜User｜>"), special(tok, "<｜Assistant｜>"));
         let (format, im_start, im_end) =
             if let (Some(st), Some(end), Some(message), Some(channel), Some(_)) = harmony {
                 (Format::Harmony { message, channel }, st, end)
+            } else if let (Some(system), Some(user), Some(assistant), Some(middle), Some(end)) =
+                kimi
+            {
+                let f = Format::Kimi {
+                    system,
+                    user,
+                    assistant,
+                    middle,
+                };
+                (f, user, end)
+            } else if let (Some(user), Some(assistant)) = ds3 {
+                let t = tok.encode_special("</think>");
+                let mut think_end = [0u32; 4];
+                let n_think = t.len().min(4);
+                think_end[..n_think].copy_from_slice(&t[..n_think]);
+                let f = Format::DeepSeek3 {
+                    user,
+                    assistant,
+                    bos: tok.bos(),
+                    think_end,
+                    n_think,
+                };
+                (f, user, tok.eos())
             } else if let (Some(start), Some(end), Some(eot)) = llama {
                 let bos = tok.bos();
                 (Format::Llama3 { start, end, bos }, start, eot)
@@ -233,6 +302,38 @@ impl Framing {
     /// message `[INST]{text}[/INST]`; the reply opening is empty. For a
     /// conversation's first message see `first_user`.
     pub fn frame(&self, tok: &Tokenizer, role: &str, text: &str, next: Option<&str>) -> Vec<u32> {
+        if let Format::Kimi { middle, .. } = self.format {
+            let mut t = vec![self.kimi_start(role)];
+            t.extend(tok.encode(role));
+            t.push(middle);
+            t.extend(tok.encode(text));
+            t.push(self.im_end);
+            if let Some(r) = next {
+                t.extend(self.opening(tok, r));
+            }
+            return t;
+        }
+        if let Format::DeepSeek3 { .. } = self.format {
+            // A reply: its text and EOS; a user message: after <｜User｜>;
+            // a system message: bare (`system`).
+            let mut t = match role {
+                "assistant" => {
+                    let mut t = tok.encode(text);
+                    t.push(self.im_end);
+                    t
+                }
+                "system" => tok.encode(text),
+                _ => {
+                    let mut t = vec![self.im_start];
+                    t.extend(tok.encode(text));
+                    t
+                }
+            };
+            if let Some(r) = next {
+                t.extend(self.opening(tok, r));
+            }
+            return t;
+        }
         if let Format::Mistral { end, .. } = self.format {
             if role == "assistant" {
                 let mut t = tok.encode(text.trim());
@@ -285,10 +386,27 @@ impl Framing {
         if let Format::Mistral { .. } = self.format {
             return Vec::new();
         }
+        if let Format::DeepSeek3 {
+            assistant,
+            think_end,
+            n_think,
+            ..
+        } = self.format
+        {
+            return match role {
+                "assistant" => [&[assistant], &think_end[..n_think]].concat(),
+                _ => vec![self.im_start],
+            };
+        }
         let mut t = vec![self.im_start];
         match self.format {
-            Format::Mistral { .. } => unreachable!(),
+            Format::Mistral { .. } | Format::DeepSeek3 { .. } => unreachable!(),
             Format::Harmony { .. } => t.extend(tok.encode(role)),
+            Format::Kimi { middle, .. } => {
+                t[0] = self.kimi_start(role);
+                t.extend(tok.encode(role));
+                t.push(middle);
+            }
             Format::ChatMl => t.extend(tok.encode(&format!("{role}\n"))),
             Format::Gemma { .. } => t.extend(tok.encode(&format!("{}\n", gemma_role(role)))),
             Format::Llama3 { end, .. } => {
@@ -308,7 +426,14 @@ impl Framing {
     pub fn system(&self, tok: &Tokenizer, system: Option<&str>) -> Vec<u32> {
         match self.format {
             Format::Mistral { bos, .. } | Format::Gemma { bos } => bos.into_iter().collect(),
-            Format::ChatMl => system.map_or(Vec::new(), |s| self.frame(tok, "system", s, None)),
+            Format::ChatMl | Format::Kimi { .. } => {
+                system.map_or(Vec::new(), |s| self.frame(tok, "system", s, None))
+            }
+            Format::DeepSeek3 { bos, .. } => {
+                let mut t: Vec<u32> = bos.into_iter().collect();
+                t.extend(system.map_or(Vec::new(), |s| tok.encode(s)));
+                t
+            }
             Format::Harmony { .. } => {
                 let mut t = self.frame(tok, "system", &harmony_system(), None);
                 if let Some(s) = system.filter(|s| !s.is_empty()) {
@@ -364,6 +489,24 @@ impl Framing {
                 frame(tok, s, e, gemma_role(role), &text, next.map(gemma_role))
             }
             _ => self.frame(tok, role, &text, next),
+        }
+    }
+
+    /// Kimi's start token of a `role` message (`<|im_system|>` for roles
+    /// other than user and assistant, as its template).
+    fn kimi_start(&self, role: &str) -> u32 {
+        match self.format {
+            Format::Kimi {
+                system,
+                user,
+                assistant,
+                ..
+            } => match role {
+                "user" => user,
+                "assistant" => assistant,
+                _ => system,
+            },
+            _ => self.im_start,
         }
     }
 
@@ -716,6 +859,25 @@ fn gemma_role(role: &str) -> &str {
     if role == "assistant" { "model" } else { role }
 }
 
+/// The system message a GGUF's chat template inserts when a conversation
+/// has none, if it is a fixed text in a Kimi-style system block
+/// (`<|im_system|>system<|im_middle|>TEXT<|im_end|>`): Moonlight's "You are
+/// a helpful assistant", Kimi K2's "You are Kimi, ...".
+pub fn template_default_system(m: &crate::gguf::Model) -> Option<String> {
+    let t = m
+        .metadata
+        .iter()
+        .find(|(k, _)| k == "tokenizer.chat_template")
+        .and_then(|(_, v)| match v {
+            crate::gguf::Val::Str(s) => Some(s.as_str()),
+            _ => None,
+        })?;
+    const OPEN: &str = "<|im_system|>system<|im_middle|>";
+    let rest = &t[t.find(OPEN)? + OPEN.len()..];
+    let text = &rest[..rest.find("<|im_end|>")?];
+    (!text.is_empty() && !text.contains(['{', '}'])).then(|| text.to_string())
+}
+
 /// The id of a special token, if the vocabulary has it as one.
 pub fn special(tok: &Tokenizer, s: &str) -> Option<u32> {
     match tok.encode_special(s)[..] {
@@ -749,7 +911,9 @@ impl<'a, M: Lm> Chat<'a, M> {
                     .into(),
             );
         };
+        // Qwen3's thinking blocks (DeepSeek V3.1's are its framing's).
         let think = match (special(tok, "<think>"), special(tok, "</think>")) {
+            _ if matches!(fr.format, Format::DeepSeek3 { .. } | Format::Kimi { .. }) => None,
             (Some(_), Some(end)) => Some((end, tok.encode_special("<think>\n\n</think>\n\n"))),
             _ => None,
         };
@@ -783,6 +947,12 @@ impl<'a, M: Lm> Chat<'a, M> {
     /// Positions in use, and the cache size.
     pub fn used(&self) -> (usize, usize) {
         (self.hist.len(), self.ctx)
+    }
+
+    /// Every token of the conversation (tests).
+    #[cfg(test)]
+    pub(crate) fn history_for_test(&self) -> &[u32] {
+        &self.hist
     }
 
     /// A message, then the opening of `next` if given (`Framing::frame`).

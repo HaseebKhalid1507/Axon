@@ -259,10 +259,13 @@ pub struct Qwen2<'a> {
     embd: &'a [u8],
     /// Empty, and `output` None, in a model of the first layers only
     /// (`new_layers`): the output head is another backend's.
-    output_norm: Vec<f32>,
+    /// (A boxed slice, as `freqs`.)
+    output_norm: Box<[f32]>,
     output: Option<Weight<'a>>,
-    /// Layers 0..layers.len() (all n_layers unless `new_layers`).
+    /// Layers 0..layers.len() (all n_layers unless `new_layers`); empty
+    /// on deepseek2, whose blocks are `ds2`'s.
     layers: Vec<Layer<'a>>,
+    ds2: Option<Box<deepseek2::Ds2<'a>>>,
 }
 
 /// Keys and values of every past position, per layer.
@@ -426,10 +429,24 @@ fn load_vec(m: &Model, t: &Tensor) -> Vec<f32> {
 /// a biased router, top-4 then softmax over the four, biased experts and
 /// the clamped SwiGLU (`vmath::swiglu_oai`); the pre-FFN norm is its
 /// `post_attention_norm`. Experts are MXFP4 (quant/mxfp4.rs). CPU only.
-pub const ARCHS: [&str; 6] = ["qwen2", "qwen3", "llama", "gemma3", "qwen3moe", "gpt-oss"];
+/// deepseek2 (DeepSeek V2/V3, Kimi K2, Moonlight: MLA attention, shared
+/// experts) is its own block (`deepseek2`), on the CPU only.
+pub const ARCHS: [&str; 7] = [
+    "qwen2",
+    "qwen3",
+    "llama",
+    "gemma3",
+    "qwen3moe",
+    "gpt-oss",
+    "deepseek2",
+];
 
+#[path = "model/deepseek2.rs"]
+mod deepseek2;
 #[path = "model/moe.rs"]
 mod moe;
+pub(crate) use deepseek2::info_lines as deepseek2_info;
+
 pub(crate) use moe::{
     MoeDims, MoeInfo, Route as MoeRoute, check_ram as moe_check_ram, cpu_only as moe_cpu_only,
     gpu_refusal as moe_gpu_refusal, is_moe, moe_dims,
@@ -547,6 +564,51 @@ const SUPPORTED_TYPES: [u32; 13] = [
 /// gpt-oss's expert matrices only (`check_supported`).
 const EXPERT_TYPES: [u32; 1] = [MXFP4];
 
+/// The refusal for a tensor of a type the kernels don't run: the type by
+/// name, what is supported, and which file to get instead.
+/// A mixed file (an "IQ2_M" is mostly IQ2_S/IQ3_S, with IQ4_NL where a
+/// row isn't whole 256-blocks) also gets every unsupported type it holds.
+fn unsupported_type(m: &Model, name: &str, q: crate::gguf::QType) -> String {
+    let mut seen: Vec<(&str, usize)> = Vec::new();
+    for t in m.tensors.iter().filter(|t| {
+        !(SUPPORTED_TYPES.contains(&t.qtype.id)
+            || m.arch == "gpt-oss" && EXPERT_TYPES.contains(&t.qtype.id))
+    }) {
+        match seen.iter_mut().find(|s| s.0 == t.qtype.name) {
+            Some(s) => s.1 += 1,
+            None => seen.push((t.qtype.name, 1)),
+        }
+    }
+    let all = if seen.len() > 1 {
+        let l: Vec<String> = seen.iter().map(|(n, c)| format!("{c} {n}")).collect();
+        format!(" (the file has unsupported tensors: {})", l.join(", "))
+    } else {
+        String::new()
+    };
+    let n = q.name;
+    let hint = if n.starts_with("Q4_0_") {
+        "; it is an ARM repacked layout that llama.cpp has dropped: use the Q4_0 file"
+    } else if n.starts_with("IQ4_NL_") {
+        "; it is an ARM repacked layout that llama.cpp has dropped: use the IQ4_NL file"
+    } else if n.starts_with("IQ") || n.starts_with("TQ") {
+        "; this i-quant or ternary type is not supported: use a K-quant file \
+         (Q4_K_M, Q5_K_M, Q6_K) or Q8_0"
+    } else if n == "BF16" {
+        "; use the F16 or Q8_0 file"
+    } else {
+        ""
+    };
+    let ok: Vec<&str> = SUPPORTED_TYPES
+        .iter()
+        .map(|&id| crate::gguf::qtype(id).name)
+        .collect();
+    format!(
+        "tensor {name}: type {n} ({}) is not supported (supported: {}){all}{hint}",
+        q.id,
+        ok.join(", ")
+    )
+}
+
 /// Whether `Qwen2::new` reads any weight matrix in place from the model's
 /// bytes on every token (AXON_REPACK=0, or a matrix with no r8/r8q form),
 /// so that the anonymous huge-page copy of the file pays (`gguf::load_then`).
@@ -589,9 +651,12 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
     let bad = |msg: String| std::io::Error::new(std::io::ErrorKind::InvalidData, msg);
     if !ARCHS.contains(&m.arch.as_str()) {
         return Err(bad(format!(
-            "architecture '{}' is not supported (qwen2, qwen3, llama, gemma3, qwen3moe, gpt-oss)",
+            "architecture '{}' is not supported (qwen2, qwen3, llama, gemma3, qwen3moe, gpt-oss, deepseek2)",
             if m.arch.is_empty() { "<none>" } else { &m.arch }
         )));
+    }
+    if m.arch == "deepseek2" {
+        return deepseek2::check(m).map(|_| ());
     }
     let need = |k: &str| -> std::io::Result<usize> {
         let key = format!("{}.{k}", m.arch);
@@ -806,10 +871,7 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
         let t = find_opt(m, name).ok_or_else(|| bad(format!("missing tensor {name}")))?;
         let q = t.qtype;
         if !SUPPORTED_TYPES.contains(&q.id) {
-            return Err(bad(format!(
-                "tensor {name}: type {} ({}) is not supported (F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL)",
-                q.name, q.id
-            )));
+            return Err(bad(unsupported_type(m, name, q)));
         }
         let ok = match rows {
             None => t.n_elements == cols as u64,
@@ -957,10 +1019,7 @@ pub fn check_supported(m: &Model) -> std::io::Result<()> {
             let t = find_opt(m, &name).ok_or_else(|| bad(format!("missing tensor {name}")))?;
             let q = t.qtype;
             if !(SUPPORTED_TYPES.contains(&q.id) || oss && EXPERT_TYPES.contains(&q.id)) {
-                return Err(bad(format!(
-                    "tensor {name}: type {} ({}) is not supported",
-                    q.name, q.id
-                )));
+                return Err(bad(unsupported_type(m, &name, q)));
             }
             let want = [cols as u64, rows as u64, d.n_expert as u64];
             if t.dims.len() < 3
@@ -1040,6 +1099,13 @@ impl<'a> Qwen2<'a> {
     fn build(m: &'a Model, repack: bool, tie: bool, keep: usize, experts: bool) -> Qwen2<'a> {
         if let Err(e) = check_supported(m) {
             panic!("{e}");
+        }
+        if m.arch == "deepseek2" {
+            assert!(
+                !tie && !experts && keep == usize::MAX,
+                "deepseek2: the whole model on the CPU only"
+            );
+            return deepseek2::build(m, repack);
         }
         let a = &m.arch;
         let key = |k: &str| format!("{a}.{k}");
@@ -1202,7 +1268,7 @@ impl<'a> Qwen2<'a> {
                         ws
                     });
                     let router = vals(t("ffn_gate_inp.weight"));
-                    let mut moe = moe::Moe::new(d, router, gate, up, down);
+                    let mut moe = moe::Moe::new(d, router, gate, up, down, moe::Gate::SOFTMAX_NORM);
                     if oss {
                         let [router, gate, up, down] = [
                             "ffn_gate_inp.bias",
@@ -1279,15 +1345,21 @@ impl<'a> Qwen2<'a> {
             gemma,
             token_embd,
             embd: m.tensor_data(token_embd),
-            output_norm,
+            output_norm: output_norm.into_boxed_slice(),
             output,
             layers,
+            ds2: None,
         }
     }
 
     /// Layer l's weights as the CPU holds them, for streaming them to the
-    /// GPU (`cuda::qwen2::stream`): repacked bytes or the file's.
+    /// GPU (`cuda::qwen2::stream`): repacked bytes or the file's. Not for
+    /// deepseek2 (its blocks are `ds2`'s; the split that streams is refused).
     pub(crate) fn host_layer(&self, l: usize) -> crate::cuda::qwen2::stream::HostLayer<'_> {
+        assert!(
+            !self.is_mla(),
+            "host_layer: deepseek2 has no streamable layers"
+        );
         use crate::cuda::qwen2::stream::{HostLayer, HostMat};
         fn mat<'s>(w: &'s Weight<'_>) -> HostMat<'s> {
             HostMat {
@@ -1334,7 +1406,14 @@ impl<'a> Qwen2<'a> {
         Some(&w.map[..])
     }
 
-    /// Layers here (0..k of the model).
+    /// A deepseek2 (MLA) model: K-only cache rows of `head_dim` (576).
+    pub(crate) fn is_mla(&self) -> bool {
+        self.ds2.is_some()
+    }
+
+    /// Layers here (0..k of the model): `Layer`s, so 0 on deepseek2, whose
+    /// blocks are `ds2`'s (`n_layers` counts them; only the refused split
+    /// and streaming paths call this).
     pub(crate) fn layer_count(&self) -> usize {
         self.layers.len()
     }
@@ -1346,6 +1425,9 @@ impl<'a> Qwen2<'a> {
     }
 
     pub fn new_cache(&self, max_ctx: usize) -> KvCache {
+        if self.ds2.is_some() {
+            return deepseek2::new_cache(self.n_layers, self.head_dim, max_ctx);
+        }
         let kv_dim = self.n_kv_heads * self.head_dim;
         let len = max_ctx * kv_dim;
         KvCache {
@@ -1950,6 +2032,9 @@ impl<'a> Qwen2<'a> {
         start: usize,
         cache: &mut KvCache,
     ) -> Vec<Vec<f32>> {
+        if self.ds2.is_some() {
+            return self.ds2_hidden_batch(tokens, start, cache);
+        }
         let nb = tokens.len();
         assert!(nb > 0, "feed_batch: empty batch");
         assert!(
@@ -2163,6 +2248,9 @@ impl<'a> Qwen2<'a> {
     /// Every layer for one token: store its keys and values in the cache and
     /// return the final hidden state (before the output norm).
     pub(crate) fn hidden(&self, token: u32, pos: usize, cache: &mut KvCache) -> Vec<f32> {
+        if self.ds2.is_some() {
+            return self.ds2_hidden(token, pos, cache);
+        }
         assert!(
             pos < cache.max_ctx,
             "position {pos} exceeds cache size {}",
@@ -3221,6 +3309,10 @@ pub(crate) mod gemma3_tests;
 mod moe_tests;
 
 #[cfg(test)]
+#[path = "model/deepseek2_tests.rs"]
+pub(crate) mod deepseek2_tests;
+
+#[cfg(test)]
 #[path = "model/gptoss_tests.rs"]
 mod gptoss_tests;
 
@@ -3436,6 +3528,47 @@ pub(crate) mod tests {
         rejects(
             set("blk.1.ffn_down.weight", vec![128, 64], 99),
             "?? (99) is not supported",
+        );
+        // Zoo sweep: i-quants and repacked types were "?? (23)" with no way out.
+        rejects(
+            set("blk.0.attn_q.weight", vec![64, 64], 23),
+            "type IQ4_XS (23) is not supported (supported: F32",
+        );
+        rejects(
+            set("blk.0.attn_q.weight", vec![64, 64], 19),
+            "type IQ1_S (19) is not supported",
+        );
+        rejects(
+            set("blk.0.attn_q.weight", vec![64, 64], 19),
+            "use a K-quant file (Q4_K_M, Q5_K_M, Q6_K) or Q8_0",
+        );
+        rejects(
+            |ts: &mut Vec<(String, Vec<u64>, u32)>| {
+                for (n, ty) in [("blk.0.attn_q.weight", 22), ("blk.1.attn_q.weight", 19)] {
+                    ts.iter_mut().find(|t| t.0 == n).unwrap().2 = ty;
+                }
+            },
+            "(the file has unsupported tensors: 1 IQ2_S, 1 IQ1_S); this i-quant",
+        );
+        let ok: Vec<&str> = SUPPORTED_TYPES
+            .iter()
+            .map(|&id| crate::gguf::qtype(id).name)
+            .collect();
+        rejects(
+            set("blk.0.attn_q.weight", vec![64, 64], 31),
+            &format!(
+                "Q4_0_4_4 (31) is not supported (supported: {}); it is an ARM repacked layout \
+                 that llama.cpp has dropped: use the Q4_0 file",
+                ok.join(", ")
+            ),
+        );
+        rejects(
+            set("blk.0.attn_q.weight", vec![64, 64], 36),
+            "IQ4_NL_4_4 (36) is not supported",
+        );
+        rejects(
+            set("blk.0.attn_q.weight", vec![64, 64], 36),
+            "dropped: use the IQ4_NL file",
         );
         rejects(
             set("blk.0.attn_k.weight", vec![64, 64], Q8_0),

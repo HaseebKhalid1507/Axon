@@ -126,6 +126,52 @@ pub(crate) fn mscale(m: &Model) -> f32 {
     yarn(m).map_or(1.0, |y| y.mscale)
 }
 
+/// deepseek2's (sin, cos) multiplier and attention scale, (rope_m, kq_scale),
+/// for query/key heads of `head_k` dims (`key_length_mla`, 192): the
+/// opposite of the rule above. llama.cpp reaches it through three
+/// cancellations (llama-context.cpp: yarn_attn_factor; ggml's rope_yarn
+/// multiplies its table by attn_factor (1 + 0.1 ln f); deepseek2.cpp:
+/// kq_scale = mscale² / sqrt(head_k) with mscale = attn_factor_org
+/// (1 + 0.1 mscale_all_dim ln f), the file's `yarn_log_multiplier` being
+/// 0.1 mscale_all_dim). The same f32 ops in the same order here, so the
+/// table's multiplier is 1 up to one rounding and the logits carry the
+/// whole mscale². Without YaRN: (1, 1 / sqrt(head_k)).
+pub(crate) fn deepseek2_scales(m: &Model, head_k: usize) -> (f32, f32) {
+    let sq = (head_k as f32).sqrt();
+    let Some(y) = yarn(m) else {
+        return (1.0, 1.0 / sq);
+    };
+    let num = |k: &str| meta_num(m, &key(m, k));
+    let freq_scale = 1.0f32 / y.factor as f32;
+    let factor = 1.0f32 / freq_scale;
+    // llama.cpp's hparams.rope_yarn_log_mul: the converter's 0.1 cancelled.
+    let log_mul = num("yarn_log_multiplier").map_or(0.0, |v| v as f32 / 0.1f32);
+    let get = |s: f32, ms: f32| {
+        if s <= 1.0 {
+            1.0
+        } else {
+            0.1 * ms * s.ln() + 1.0
+        }
+    };
+    let ext = y.ext != 0.0;
+    let mut af = 1.0f32;
+    if ext {
+        af = if log_mul != 0.0 {
+            let ms = if log_mul != 1.0 { log_mul } else { 1.0 };
+            get(factor, ms) / get(factor, log_mul)
+        } else {
+            get(factor, 1.0)
+        };
+        af *= 1.0 / (1.0 + 0.1 * factor.ln());
+    }
+    af *= num("attn_factor").map_or(1.0, |v| v as f32);
+    let l = (1.0 / freq_scale).ln();
+    let rope_m = if ext { af * (1.0 + 0.1 * l) } else { af };
+    let org = af * (1.0 + 0.1 * l);
+    let ms = org * (1.0 + 0.1 * log_mul * l);
+    (rope_m, 1.0 * ms * ms / sq)
+}
+
 /// `--rope-scaling`, `--rope-scale`, `--yarn-orig-ctx`, `--yarn-beta-fast`,
 /// `--yarn-beta-slow` (llama.cpp's names) and `--yarn-mscale` (Axon's: the
 /// whole (sin, cos) multiplier, not llama.cpp's `--yarn-attn-factor`, which

@@ -1798,69 +1798,318 @@ mod tests {
         }
     }
 
-    /// Step cost of a pool vs the decode step (MEASURE, not a check):
-    /// `AXON_STEP_MODEL=path` (default the 0.5B), ms per step for nb rows of
-    /// distinct slots at position ~600, greedy, graphs on and off, medians of 5
-    /// runs of 100 steps. `--ignored --nocapture` to see.
+    /// Pool steps of 9..64 rows (9..16: q|k|v and gate|up in one gemvmx
+    /// launch each, `bgemm_x`; past gemvm16: the products split between
+    /// gemvm32 and gemm2's partial tiles, `takes_gemvm`; the head in one
+    /// product over all rows; samp_tail in launches of HEAD_SUB rows), on
+    /// the 0.5B and Llama 1B, mixed greedy and sampled rows: every
+    /// request's results and tokens == running it alone, under each
+    /// gemvm routing (AXON_GEMVM_MAX 16, 32, by shape).
+    #[test]
+    fn pool_steps_past_gemvm16_match_solo() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let km = Kernels::module(&g).unwrap();
+        if !km.mma() {
+            return;
+        }
+        let ms: Vec<Model> = [crate::testutil::model(), crate::testutil::llama_model()]
+            .into_iter()
+            .flatten()
+            .collect();
+        let (slots, ctx, steps) = (64usize, 256usize, 2usize);
+        for m in ms {
+            let mut net = CudaQwen2::with_kv(&g, &km, &m, ctx, CacheKv::F16, false).unwrap();
+            let v = net.vocab;
+            let kinds: Vec<Kind> = (0..slots)
+                .map(|i| match i % 3 {
+                    0 => Kind::Greedy,
+                    1 => Kind::Sampled(40, 1.1, i as u64),
+                    _ => Kind::Sampled(5, 1.0, i as u64),
+                })
+                .collect();
+            let lens: Vec<usize> = (0..slots).map(|i| 20 + (i * 37) % 200).collect();
+            let prompts: Vec<Vec<u32>> = (0..slots)
+                .map(|i| ids(lens[i], 9000 + i as u32, v))
+                .collect();
+            let refs: Vec<_> = (0..slots)
+                .map(|i| solo(&net, ctx, &prompts[i], kinds[i], steps))
+                .collect();
+            for vm in [16usize, 32, 0] {
+                net.bf.vm_max = vm;
+                // nb 9..16: q|k|v and gate|up on gemvmx (the gemvm limit
+                // doesn't apply there, so once).
+                let nbs: &[usize] = match vm {
+                    0 => &[9, 12, 16, 17, 33, 48, 64],
+                    _ => &[17, 33, 48, 64],
+                };
+                for &nb in nbs {
+                    let mut p = net.pool(slots, ctx).unwrap();
+                    for (i, pr) in prompts.iter().enumerate().take(nb) {
+                        net.feed_slot(&mut p, i, &pr[..pr.len() - 1], 0).unwrap();
+                    }
+                    let mut hist: Vec<Vec<u32>> = prompts[..nb].to_vec();
+                    let mut sms: Vec<Option<Sampler>> = kinds[..nb]
+                        .iter()
+                        .map(|k| match *k {
+                            Kind::Greedy => None,
+                            Kind::Sampled(k, pen, seed) => Some(sampler(k, pen, seed)),
+                        })
+                        .collect();
+                    for step in 0..steps {
+                        let specs: Vec<Option<CandSpec>> = sms
+                            .iter()
+                            .map(|s| s.as_ref().map(|s| s.cfg.spec()))
+                            .collect();
+                        let rows: Vec<SeqRow> = (0..nb)
+                            .map(|i| {
+                                let h = &hist[i];
+                                SeqRow {
+                                    token: h[h.len() - 1],
+                                    pos: h.len() - 1,
+                                    slot: i,
+                                    head: match &specs[i] {
+                                        None => RowHead::Argmax,
+                                        Some(spec) => RowHead::Sample {
+                                            spec: *spec,
+                                            recent: &h[h.len() - spec.last_n.clamp(1, h.len())..],
+                                        },
+                                    },
+                                }
+                            })
+                            .collect();
+                        let outs = net.step_rows(&mut p, &rows).unwrap();
+                        for (i, o) in outs.into_iter().enumerate() {
+                            let what =
+                                format!("{} vm {vm} nb {nb} request {i} step {step}", m.arch);
+                            assert_eq!(o, refs[i].0[step], "{what}");
+                            let next = match (&o, sms[i].as_mut()) {
+                                (RowOut::Pick(t), None) => *t,
+                                (RowOut::Cands(cs), Some(s)) => s.pick(cs),
+                                _ => panic!("{what}: a result of another head"),
+                            };
+                            hist[i].push(next);
+                        }
+                    }
+                    for i in 0..nb {
+                        assert_eq!(hist[i], refs[i].1, "{} vm {vm} nb {nb} request {i}", m.arch);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Step cost of a pool vs the decode step, the C curve (MEASURE, not a
+    /// check; `--ignored --nocapture` to see). `AXON_STEP_MODEL=path`
+    /// (default the 0.5B); `AXON_STEP_DEPTHS` (default "600,4096"),
+    /// `AXON_STEP_NB` (default "1,2,4,8,16,24,32,48,64"), `AXON_STEP_PROF`
+    /// (the nb's profiled per kernel, default "1,8,16,32,64"; "" none),
+    /// `AXON_STEP_VM` (gemvm's batch limits `BatchFns::vm_max` to compare,
+    /// default the build's).
+    /// Per depth: one pool of max(nb) slots (fewer if it doesn't fit), every
+    /// slot fed `depth` tokens; then nb rows of distinct slots at position
+    /// `depth`, greedy, graphs on (as serve), ms per step = median of 5 runs
+    /// of 40 steps, against the decode step (forward_argmax) at that depth.
+    /// The profile: one pass without graphs, an event after each `on`
+    /// segment, summed per name over the layers (3rd of 3 rounds).
     #[test]
     #[ignore]
     fn pool_step_cost() {
         let Some(g) = crate::testutil::gpu() else {
             return;
         };
-        let m = match std::env::var("AXON_STEP_MODEL") {
-            Ok(p) => crate::gguf::load_with(&p, Some(false)).unwrap(),
-            Err(_) => match crate::testutil::model() {
-                Some(m) => m,
-                None => return,
-            },
+        // AXON_STEP_MODEL: one model file or several, comma-separated (one
+        // job for a whole round).
+        let paths: Vec<Option<String>> = match std::env::var("AXON_STEP_MODEL") {
+            Ok(v) => v.split(',').map(|p| Some(p.trim().to_string())).collect(),
+            Err(_) => vec![None],
         };
-        let km = Kernels::module(&g).unwrap();
-        let ctx = 1024;
-        let mut net = CudaQwen2::new(&g, &km, &m, ctx).unwrap();
-        let prompt: Vec<u32> = (0..600).map(|i| 1000 + (i * 7919) % 20000).collect();
-        let time = |f: &mut dyn FnMut()| {
-            let mut v: Vec<f64> = (0..5)
-                .map(|_| {
-                    let t = std::time::Instant::now();
-                    for _ in 0..100 {
-                        f();
+        for path in paths {
+            let m = match &path {
+                Some(p) => crate::gguf::load_with(p, Some(false)).unwrap(),
+                None => match crate::testutil::model() {
+                    Some(m) => m,
+                    None => return,
+                },
+            };
+            let list = |var: &str, def: &str| -> Vec<usize> {
+                std::env::var(var)
+                    .unwrap_or(def.into())
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.trim().parse().unwrap())
+                    .collect()
+            };
+            let depths = list("AXON_STEP_DEPTHS", "600,4096");
+            let nbs = list("AXON_STEP_NB", "1,2,4,8,16,24,32,48,64");
+            let profs = list("AXON_STEP_PROF", "1,8,16,32,64");
+            // gemvm's batch limits to compare (the last one profiled), default
+            // the build's.
+            let vms = match list("AXON_STEP_VM", "") {
+                v if v.is_empty() => vec![0],
+                v => v,
+            };
+            // AXON_STEP_X: bgemm_x on (1) / off (0), in turn (default 1).
+            let xs = list("AXON_STEP_X", "1");
+            // AXON_STEP_KM: the kernel builds to run in turn per depth, e.g.
+            // "plain,SOME_DEFINE,plain,SOME_DEFINE" (prefill.cu experiments).
+            let kms: Vec<String> = std::env::var("AXON_STEP_KM")
+                .unwrap_or("plain".into())
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .collect();
+            // Each entry "plain", or defines joined by '+' (e.g. "AXON_G2_ZFILL+FOO=1").
+            let mods: Vec<(String, crate::cuda::Module)> = kms
+                .iter()
+                .map(|k| {
+                    let mut opts = vec!["--std=c++17".to_string(), "--ftz=false".to_string()];
+                    if k != "plain" {
+                        opts.extend(k.split('+').map(|d| format!("-D{d}")));
                     }
-                    t.elapsed().as_secs_f64() * 1e3 / 100.0
+                    let o: Vec<&str> = opts.iter().map(|s| s.as_str()).collect();
+                    let m = crate::cuda::Module::load(&g, crate::cuda::KERNELS, &o)
+                        .unwrap()
+                        .0;
+                    (k.clone(), m)
                 })
                 .collect();
-            v.sort_by(f64::total_cmp);
-            v[2]
-        };
-        let mut c = net.new_cache(ctx);
-        net.feed_batch(&prompt, 0, &mut c);
-        let d = time(&mut || {
-            std::hint::black_box(net.forward_argmax(5, 600, &mut c));
-        });
-        eprintln!("{}: decode step (forward_argmax) {d:.3} ms", m.arch);
-        for graphs in [true, false] {
-            net.graphs = graphs;
-            let mut p = net.pool(16, ctx).unwrap();
-            for s in 0..16 {
-                net.feed_slot(&mut p, s, &prompt, 0).unwrap();
-            }
-            for nb in [1usize, 2, 4, 8, 16] {
-                let rows: Vec<SeqRow> = (0..nb)
-                    .map(|s| SeqRow {
-                        token: 5,
-                        pos: 600,
-                        slot: s,
-                        head: RowHead::Argmax,
+            let time = |f: &mut dyn FnMut()| {
+                f();
+                let mut v: Vec<f64> = (0..5)
+                    .map(|_| {
+                        let t = std::time::Instant::now();
+                        for _ in 0..40 {
+                            f();
+                        }
+                        t.elapsed().as_secs_f64() * 1e3 / 40.0
                     })
                     .collect();
-                let t = time(&mut || {
-                    std::hint::black_box(net.step_rows(&mut p, &rows).unwrap());
-                });
+                v.sort_by(f64::total_cmp);
+                v[2]
+            };
+            let name = path.as_deref().unwrap_or("default 0.5B");
+            let gi = g.info().unwrap();
+            eprintln!("C curve: {name} ({}), {} ({} SMs)", m.arch, gi.name, gi.sms);
+            for (&depth, kname) in depths.iter().flat_map(|d| kms.iter().map(move |k| (d, k))) {
+                let km = &mods.iter().find(|m| &m.0 == kname).unwrap().1;
+                eprintln!("kernels: {kname}");
+                let ctx = (depth + 64).next_multiple_of(64);
+                let mut net = CudaQwen2::new(&g, km, &m, ctx).unwrap();
+                net.graphs = true;
+                let prompt: Vec<u32> = (0..depth)
+                    .map(|i| 1000 + (i * 7919 % 20000) as u32)
+                    .collect();
+                let d = {
+                    let mut c = net.new_cache(ctx);
+                    net.feed_batch(&prompt, 0, &mut c);
+                    time(&mut || {
+                        std::hint::black_box(net.forward_argmax(5, depth, &mut c));
+                    })
+                };
+                let want = *nbs.iter().chain(&profs).max().unwrap();
+                let mut slots = want;
+                let mut p = loop {
+                    match net.pool(slots, ctx) {
+                        Ok(p) => break p,
+                        Err(e) if slots > 1 => {
+                            eprintln!("  pool of {slots} x {ctx}: {e}");
+                            slots /= 2;
+                        }
+                        Err(e) => panic!("{e}"),
+                    }
+                };
+                for s in 0..slots {
+                    net.feed_slot(&mut p, s, &prompt, 0).unwrap();
+                }
                 eprintln!(
-                    "  graphs {graphs}: nb {nb:2}: {t:.3} ms/step, {:.0} rows/s, {:.2}x the decode step",
-                    nb as f64 * 1e3 / t,
-                    t / d
+                    "depth {depth}: decode step (forward_argmax) {d:.3} ms; pool {slots} x {ctx}"
                 );
+                eprintln!("| depth | nb | gemvm max | ms/step | x solo | rows/s |");
+                let rows = |nb: usize| -> Vec<SeqRow> {
+                    (0..nb)
+                        .map(|s| SeqRow {
+                            token: 5,
+                            pos: depth,
+                            slot: s,
+                            head: RowHead::Argmax,
+                        })
+                        .collect()
+                };
+                for &nb in nbs.iter().filter(|&&nb| nb <= slots) {
+                    let rs = rows(nb);
+                    for (&vm, &x) in vms.iter().flat_map(|v| xs.iter().map(move |x| (v, x))) {
+                        net.bf.vm_max = vm;
+                        net.bf.gemvmx_on = x == 1;
+                        // (The graphs hold the kernels picked when made.)
+                        p.graphs.clear();
+                        let t = time(&mut || {
+                            std::hint::black_box(net.step_rows(&mut p, &rs).unwrap());
+                        });
+                        eprintln!(
+                            "| {depth} | {nb} | {vm} x{x} | {t:.3} | {:.2} | {:.0} |",
+                            t / d,
+                            nb as f64 * 1e3 / t
+                        );
+                    }
+                }
+                net.bf.vm_max = *vms.last().unwrap();
+                net.bf.gemvmx_on = *xs.last().unwrap() == 1;
+                for &nb in profs.iter().filter(|&&nb| nb <= slots) {
+                    let tokens = vec![5u32; nb];
+                    let at: Vec<RowAt> = (0..nb)
+                        .map(|s| RowAt {
+                            pos: depth as u32,
+                            base: (s * p.ctx) as u32,
+                        })
+                        .collect();
+                    for round in 0..3 {
+                        let tab = p.c.tab.as_ref().map(|t| t.len() / 4);
+                        let b = p.c.b.as_mut().unwrap();
+                        net.load_input(b, BatchIn::Tokens(&tokens)).unwrap();
+                        b.upload_rows(&at, tab).unwrap();
+                        let mut evs = vec![("start", g.record().unwrap())];
+                        net.pass_at(
+                            &mut p.c,
+                            BatchIn::Loaded(nb),
+                            Place::Rows,
+                            Head::Sample,
+                            Some((nb, nb)),
+                            0,
+                            &mut |n| {
+                                evs.push((n, g.record()?));
+                                Ok(())
+                            },
+                        )
+                        .unwrap();
+                        g.sync().unwrap();
+                        if round < 2 {
+                            continue;
+                        }
+                        let mut agg: Vec<(&str, f64, usize)> = Vec::new();
+                        for i in 1..evs.len() {
+                            let ms = evs[i - 1].1.ms_to(&evs[i].1).unwrap() as f64;
+                            match agg.iter_mut().find(|a| a.0 == evs[i].0) {
+                                Some(a) => {
+                                    a.1 += ms;
+                                    a.2 += 1
+                                }
+                                None => agg.push((evs[i].0, ms, 1)),
+                            }
+                        }
+                        let total: f64 = agg.iter().map(|a| a.1).sum();
+                        let segs: Vec<String> = agg
+                            .iter()
+                            .filter(|a| a.1 >= 0.005)
+                            .map(|a| format!("{} {:.3}", a.0, a.1))
+                            .collect();
+                        eprintln!(
+                            "prof depth {depth} nb {nb}: {total:.3} ms (no graph, {} events): {}",
+                            evs.len() - 1,
+                            segs.join(", ")
+                        );
+                    }
+                }
             }
         }
     }
