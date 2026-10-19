@@ -520,9 +520,6 @@ impl<'a> Backend<'a> {
         if gpu_layers == Some(0) {
             return Err("--gpu-layers 0 is --device cpu".into());
         }
-        if crate::model::moe_cpu_only(m) {
-            return Err(crate::model::moe_gpu_refusal(m));
-        }
         if let Some(e) = crate::safetensors::gpu_refusal(m) {
             return Err(e);
         }

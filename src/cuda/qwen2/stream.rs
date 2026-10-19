@@ -330,6 +330,8 @@ impl<'g> CudaQwen2<'g> {
                 post_attn: None,
                 post_ffn: None,
                 win: 0,
+                // A MoE never streams (dense layers only).
+                oss: None,
             });
         }
         let stage = Self::stage_for(src);

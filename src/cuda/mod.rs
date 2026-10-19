@@ -55,17 +55,30 @@ fn no_capture() -> RwLockWriteGuard<'static, ()> {
 /// Why `Gpu::open` fails off Linux.
 pub const LINUX_ONLY: &str = "CUDA support is Linux-only for now";
 
-/// kernels.cu, decode.cu, prefill.cu, stream.cu, sample.cu, hopper.cu and gemma.cu, compiled
-/// at run time as one module. hopper.cu is empty except for the sm_90a target (`Target::Cubin90a`).
-const KERNELS: &str = concat!(
-    include_str!("kernels.cu"),
-    include_str!("decode.cu"),
-    include_str!("prefill.cu"),
-    include_str!("stream.cu"),
-    include_str!("sample.cu"),
-    include_str!("hopper.cu"),
-    include_str!("gemma.cu")
-);
+/// kernels.cu, decode.cu, prefill.cu, stream.cu, sample.cu, hopper.cu and gemma.cu (then
+/// `$extra`), one source.
+macro_rules! kernels_src {
+    ($($extra:expr),*) => {
+        concat!(
+            include_str!("kernels.cu"),
+            include_str!("decode.cu"),
+            include_str!("prefill.cu"),
+            include_str!("stream.cu"),
+            include_str!("sample.cu"),
+            include_str!("hopper.cu"),
+            include_str!("gemma.cu")
+            $(, $extra)*
+        )
+    };
+}
+
+/// `kernels_src!()`, compiled at run time as one module. hopper.cu is empty except for the
+/// sm_90a target (`Target::Cubin90a`).
+const KERNELS: &str = kernels_src!();
+
+/// KERNELS + oss.cu (gpt-oss's windowed, sink attention): a module of its own, so the dense
+/// models' source, cache key and cubin stay as they are.
+const KERNELS_OSS: &str = kernels_src!(include_str!("oss.cu"));
 
 /// A CUDA device: its retained primary context and a stream to run on.
 /// Dropping it destroys the stream and releases the context; `DevBuf`s and
@@ -2041,9 +2054,15 @@ impl<'m> Kernels<'m> {
     }
 
     /// moe.cu (the MoE router, `crate::moe`) on its own: the dense
-    /// models' module stays as it is.
+    /// models' module stays as it is. Debug builds compile it with
+    /// MOE_DEBUG (moe_topk_oai's trap: a router with no non-NaN logit),
+    /// their own cache entry.
     pub fn moe_module(gpu: &Gpu) -> Result<Module<'_>, String> {
-        Ok(Module::load(gpu, include_str!("moe.cu"), &KERNEL_OPTS)?.0)
+        let mut opts = KERNEL_OPTS.to_vec();
+        if cfg!(debug_assertions) {
+            opts.push("-DMOE_DEBUG");
+        }
+        Ok(Module::load(gpu, include_str!("moe.cu"), &opts)?.0)
     }
 
     /// mla.cu (deepseek2's MLA attention and router, `cuda::qwen2::mla`)
@@ -2059,9 +2078,17 @@ impl<'m> Kernels<'m> {
         Ok(Module::load(gpu, MLA_KERNELS, &opts)?.0)
     }
 
-    /// The module model `m` needs: `module_ext` if it has an extra type.
+    /// The module model `m` needs: `module_ext` if it has an extra type;
+    /// gpt-oss's: KERNELS + oss.cu (`KERNELS_OSS`), with the extra types
+    /// too if it has one (e.g. a Q4_0 attention requant).
     pub fn module_for<'g>(gpu: &'g Gpu, m: &crate::gguf::Model) -> Result<Module<'g>, String> {
-        if needs_ext(m) {
+        if m.arch == "gpt-oss" {
+            let ext = needs_ext(m);
+            let opts: &[&str] = if ext { &KERNEL_OPTS_EXT } else { &KERNEL_OPTS };
+            let mut md = Module::load(gpu, KERNELS_OSS, opts)?.0;
+            md.ext = ext;
+            Ok(md)
+        } else if needs_ext(m) {
             Self::module_ext(gpu)
         } else {
             Self::module(gpu)

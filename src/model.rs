@@ -428,7 +428,8 @@ fn load_vec(m: &Model, t: &Tensor) -> Vec<f32> {
 /// ones (even layers local), YaRN on every layer, and MoE FFNs (`moe`) with
 /// a biased router, top-4 then softmax over the four, biased experts and
 /// the clamped SwiGLU (`vmath::swiglu_oai`); the pre-FFN norm is its
-/// `post_attention_norm`. Experts are MXFP4 (quant/mxfp4.rs). CPU only.
+/// `post_attention_norm`. Experts are MXFP4 (quant/mxfp4.rs), on the CPU;
+/// with --device cuda the rest runs on the GPU (`crate::moe`, cuda/oss.cu).
 /// deepseek2 (DeepSeek V2/V3, Kimi K2, Moonlight: MLA attention, shared
 /// experts) is its own block (`deepseek2`), on the CPU only.
 pub const ARCHS: [&str; 7] = [
@@ -449,7 +450,7 @@ pub(crate) use deepseek2::info_lines as deepseek2_info;
 pub(crate) use deepseek2::{GpuCfg as Ds2GpuCfg, gpu_cfg as deepseek2_gpu_cfg};
 
 pub(crate) use moe::{
-    MoeDims, MoeInfo, Route as MoeRoute, check_ram as moe_check_ram, cpu_only as moe_cpu_only,
+    MoeDims, MoeInfo, Route as MoeRoute, check_ram as moe_check_ram,
     gpu_refusal as moe_gpu_refusal, is_moe, moe_dims,
 };
 
@@ -3315,7 +3316,7 @@ pub(crate) mod deepseek2_tests;
 
 #[cfg(test)]
 #[path = "model/gptoss_tests.rs"]
-mod gptoss_tests;
+pub(crate) mod gptoss_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {

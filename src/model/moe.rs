@@ -118,13 +118,6 @@ pub(crate) fn is_moe(m: &Model) -> bool {
     matches!(m.arch.as_str(), "qwen3moe" | "gpt-oss" | "deepseek2")
 }
 
-/// gpt-oss: no GPU MoE path for its MXFP4 experts, sinks and biases yet:
-/// CPU only for now. (deepseek2 runs with `crate::moe`'s split, its MLA
-/// attention in `cuda::qwen2::mla`.)
-pub(crate) fn cpu_only(m: &Model) -> bool {
-    matches!(m.arch.as_str(), "gpt-oss")
-}
-
 pub(crate) fn moe_dims(m: &Model) -> Option<MoeDims> {
     if !is_moe(m) {
         return None;
@@ -183,8 +176,6 @@ pub(crate) struct MoeInfo {
     /// The experts' share of the anonymous r8 arena (`expert_held` when
     /// every expert repacks; 0 for experts read in place).
     pub expert_arena: u64,
-    /// `cpu_only`.
-    pub cpu_only: bool,
 }
 
 impl MoeInfo {
@@ -205,7 +196,6 @@ impl MoeInfo {
             active_held: 0,
             dense_bytes: 0,
             expert_arena: 0,
-            cpu_only: cpu_only(m),
         };
         for t in &m.tensors {
             if EXPS.iter().any(|s| t.name.ends_with(s)) && t.dims.len() >= 3 && t.dims[2] > 0 {
@@ -237,11 +227,7 @@ impl MoeInfo {
                 } else {
                     self.shared.to_string()
                 },
-                if self.cpu_only {
-                    "CPU only for now (--device cpu)"
-                } else {
-                    "--device cuda: attention and routers on the GPU, experts on the CPU"
-                }
+                "--device cuda: attention and routers on the GPU, experts on the CPU"
             ),
             format!(
                 "experts {} B ({}; r8 {}) | active/token {} B ({}; r8 {}) | non-expert {} B ({})",
@@ -307,12 +293,6 @@ fn check_ram_with(m: &Model, repack: bool, dense: bool, avail: Option<u64>) -> R
 
 /// The refusal of every GPU placement but `crate::moe`'s.
 pub(crate) fn gpu_refusal(m: &Model) -> String {
-    if cpu_only(m) {
-        return format!(
-            "{}: runs on the CPU only for now (--device cpu); its GPU path is the next stage",
-            m.arch
-        );
-    }
     format!(
         "{}: a mixture-of-experts model runs on the CPU (--device cpu) or with its attention \
          on one GPU and its experts on the CPU (--device cuda); it doesn't split by layers, \

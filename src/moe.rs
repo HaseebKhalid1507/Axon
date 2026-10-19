@@ -1,4 +1,4 @@
-//! A qwen3moe model with attention, norms, routers, embedding and head on the
+//! A MoE model (qwen3moe, gpt-oss) with attention, norms, routers, embedding and head on the
 //! GPU and the experts on the CPU (r11 stage 2; llama.cpp's `--cpu-moe`).
 //!
 //! The GPU half is a `CudaQwen2` without dense FFNs (`with_kv_moe`: its
@@ -14,6 +14,11 @@
 //! and verify give a token the same bits: chat's cache reuse equals a fresh
 //! prefill and drafting is lossless. Against the CPU-only model it is
 //! graded, as the GPU is (tests).
+//!
+//! gpt-oss runs the same way (stage 1): its windowed attention with sinks
+//! is cuda/oss.cu's (the model's module, `Kernels::module_for`), its biased
+//! router moe.cu's `moe_topk_oai`, and its MXFP4 experts are read in place
+//! from the mapping (`Qwen2::new_experts`: no repack, no copy).
 //!
 //! Threads: as the hybrid's, strictly sequential: the thread that opened
 //! the GPU drives the CPU pool for the experts between the GPU's segments.
@@ -115,7 +120,7 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
 
     /// One line for the banner.
     pub fn describe(&self, max_ctx: usize) -> String {
-        let d = self.gpu.moe.expect("qwen3moe");
+        let d = self.gpu.moe.expect("a mixture-of-experts model");
         format!(
             "attention + router on the GPU ({:.2} GiB, ctx {max_ctx}), {} experts x {} \
              layers on the CPU (top-{})",
@@ -277,3 +282,6 @@ impl<'g> Lm for MoeQwen3<'_, 'g> {
 mod ds2_tests;
 #[cfg(test)]
 pub(crate) mod tests;
+
+#[cfg(test)]
+mod oss_tests;

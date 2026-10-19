@@ -8,11 +8,11 @@ use super::tests::feed_batch_matches_feed_on;
 use super::*;
 
 /// A fixture's tensors: (name, dims, type, bytes).
-type Ts = Vec<(String, Vec<u64>, u32, Vec<u8>)>;
+pub(crate) type Ts = Vec<(String, Vec<u64>, u32, Vec<u8>)>;
 
 /// (layers, dim, q heads, kv heads, head dim, expert ffn, experts, top-k,
 /// vocab, window): a gpt-oss in miniature, 3 layers (local, global, local).
-const OSS: (
+pub(crate) type OssDims = (
     usize,
     usize,
     usize,
@@ -23,7 +23,8 @@ const OSS: (
     usize,
     usize,
     usize,
-) = (3, 64, 4, 2, 16, 64, 4, 2, 64, 4);
+);
+const OSS: OssDims = (3, 64, 4, 2, 16, 64, 4, 2, 64, 4);
 
 /// 32 values as one MXFP4 block (17 bytes): the scale 2^(e-128) from the
 /// largest magnitude, each value the nearest code.
@@ -74,7 +75,17 @@ pub(super) fn oss_fixture_with(
     edit: impl FnOnce(&mut Ts),
     edit_meta: impl FnOnce(&mut Vec<(&'static str, Val)>),
 ) -> Model {
-    let (nl, dim, nh, nkv, hd, ffn, ne, k, vocab, win) = OSS;
+    oss_fixture_dims(OSS, edit, edit_meta)
+}
+
+/// `oss_fixture_with` of other dimensions (`crate::moe`'s GPU tests: head
+/// size 64).
+pub(crate) fn oss_fixture_dims(
+    dims: OssDims,
+    edit: impl FnOnce(&mut Ts),
+    edit_meta: impl FnOnce(&mut Vec<(&'static str, Val)>),
+) -> Model {
+    let (nl, dim, nh, nkv, hd, ffn, ne, k, vocab, win) = dims;
     let (qd, kvd) = (nh * hd, nkv * hd);
     let mut st = 0x2545_f491_4f6c_dd1du64;
     let mut uni = move |lo: f32, hi: f32| {

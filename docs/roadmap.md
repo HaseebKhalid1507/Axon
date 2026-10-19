@@ -190,8 +190,11 @@ streaming the experts through the GPU for prefill (stage 3) is what's left of it
    type, and sinks in every attention kernel); gates as item 1. ESTIMATED ~45 tok/s decode with every expert on the
    CPU ([research-bigmodels](research/research-bigmodels.md) §4.3).
    **Stage 0 done** (CPU only, exact: MXFP4, sinks, the window, YaRN, o200k, harmony;
-   [log](log/2026-10-18-gpt-oss-s0.md)). Stage 1 next: #67's split (attention, sinks, router and head on the
-   GPU, experts on the CPU) for 12 GB cards, the whole model on 24 GB ones.
+   [log](log/2026-10-18-gpt-oss-s0.md)). **Stage 1 in review**: #67's split (attention, sinks, window, router and
+   head on the GPU, experts on the CPU; [log](log/2026-10-18-gpt-oss-s1.md)): bella tg128 46.6 tok/s, 1.99x
+   llama.cpp `-ot exps=CPU`, but prefill 0.27x (its experts run on the CPU; llama.cpp ships big-batch expert GEMMs
+   to the GPU). Next: an MXFP4 GPU kernel, bit-exact with the CPU's, for streamed-expert prefill and the whole model
+   on 24 GB cards.
 3. **Later:** the 100B–1T models (Qwen3-235B, Qwen3-Coder-480B, DeepSeek V3, Kimi K2). See
    [Frontier models](#frontier-models-100b-to-1t), below.
 
