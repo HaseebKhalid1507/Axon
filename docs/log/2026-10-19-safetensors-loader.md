@@ -1,4 +1,4 @@
-# safetensors stage A: native safetensors loader, BF16 run as the GGUF F16  (PR #TBD)
+# safetensors stage A: native safetensors loader, BF16 run as the GGUF F16  (PR #102)
 
 - Date: 2026-10-19. Branch: feat/safetensors-loader. Base: main 05fb70c. Status: open (draft)
 - Pick / design: the FP8 / NVFP4 plan (`specs/fp8-safetensors.md`, Zero, 2026-10-19), §2 and §5 stage A.
