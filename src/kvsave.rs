@@ -181,6 +181,15 @@ impl<R: Read> Read for HashR<'_, R> {
 /// ~/.cache/axon/model-ids by (path, length, modification time).
 pub fn model_id(path: &Path) -> io::Result<String> {
     let canon = std::fs::canonicalize(path)?;
+    // A safetensors checkpoint: its files' ids, in order.
+    if canon.is_dir() {
+        let mut h = Hasher::default();
+        for f in crate::safetensors::files(&canon)? {
+            h.update(model_id(&f)?.as_bytes());
+            h.update(b"\n");
+        }
+        return Ok(format!("{:016x}-st", h.finish()));
+    }
     let meta = std::fs::metadata(&canon)?;
     let mtime = meta
         .modified()

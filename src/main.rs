@@ -16,6 +16,7 @@ mod moe;
 mod pool;
 mod quant;
 mod rope;
+mod safetensors;
 mod sample;
 mod serve;
 mod spec;
@@ -239,7 +240,7 @@ fn fail(msg: &str) -> ! {
 /// Load a GGUF, exiting with code 2 and a one-line message if it can't be read.
 /// Mapped, not copied, nor read ahead: `info` reads the header only.
 fn open_model(path: &str, lm: bool) -> gguf::Model {
-    let m = gguf::load_with(path, Some(false)).unwrap_or_else(|e| load_failed(path, e));
+    let m = gguf::load_header(path).unwrap_or_else(|e| load_failed(path, e));
     if lm && let Err(e) = model::check_supported(&m) {
         fail(&format!("{path}: {e}"));
     }
@@ -336,7 +337,7 @@ fn run() -> std::io::Result<()> {
     // `axon info <model>`, or just `axon <model>`.
     let path = match args[1].as_str() {
         "info" if args.len() >= 3 => &args[2],
-        "info" => fail("usage: axon info <model.gguf> [rope flags]"),
+        "info" => fail("usage: axon info <model.gguf | checkpoint dir> [rope flags]"),
         f if f.starts_with('-') => fail(&format!("unknown flag '{f}'")),
         // A lone argument is a model to summarize, unless it can't be one.
         p if args.len() == 2 && (p.ends_with(".gguf") || std::path::Path::new(p).exists()) => {
@@ -384,6 +385,23 @@ fn run() -> std::io::Result<()> {
         model.total_params() as f64 / 1e9,
         human_bytes(model.total_bytes())
     );
+    if let gguf::Source::Safetensors { dir, files } = &model.source {
+        println!(
+            "safetensors checkpoint {} ({} files); tensors (HF name -> GGUF name, type, dims):",
+            dir.display(),
+            files.len()
+        );
+        for t in &model.tensors {
+            let (hf, from) = match &t.hf {
+                Some(h) if h.dtype != t.qtype.name => {
+                    (h.name.as_str(), format!(" (from {})", h.dtype))
+                }
+                Some(h) => (h.name.as_str(), String::new()),
+                None => ("(computed)", String::new()),
+            };
+            println!("  {hf} -> {} {}{from} {:?}", t.name, t.qtype.name, t.dims);
+        }
+    }
     if let Some(i) = model::MoeInfo::of(&model) {
         for l in i.lines() {
             println!("{l}");
