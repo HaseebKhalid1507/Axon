@@ -1,0 +1,29 @@
+{
+ "label": "mq-train-sanity",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1019-153059-d4b8",
+   "name": "mq-sanity-0af6a3a",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.71.09",
+   "sha": "0af6a3a",
+   "binary": "axon-test-0af6a3a",
+   "started": 1792438663.5029175,
+   "ended": 1792438791.098368,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "563b579f88ddd0804e2c5b4934aa44441fdeabe152f5cc50211b7f31d65d5e2f",
+   "log_bytes": 2313
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-19 15:39:51 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}

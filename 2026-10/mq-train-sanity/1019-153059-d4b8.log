@@ -1,0 +1,17 @@
+[axon-run 15:30:59] submitted 1019-153059-d4b8 by /home/haseeb/.cache/axon-wt-mq: /home/haseeb/.cache/axon-mq/axon-test-0af6a3a --exact cuda::qwen2::paged_tests::gpu_paged_split_and_batched_bits cuda::qwen2::tests::gpu_batched_attention_matches_decode_bits cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_0_5b cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_0_5b cuda::qwen2::tests::gpu_prompt_chunks_bits cuda::qwen2::tests::wave_passes_shapes --test-threads 1
+[axon-run 15:37:43] scope axon-job-1019-153059-d4b8-1792438663.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 15868 MB): an OOM here kills only this job
+[axon-run 15:37:43] job 1019-153059-d4b8 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1019-153059-d4b8-1792438663 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-mq/axon-test-0af6a3a --exact cuda::qwen2::paged_tests::gpu_paged_split_and_batched_bits cuda::qwen2::tests::gpu_batched_attention_matches_decode_bits cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_0_5b cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_0_5b cuda::qwen2::tests::gpu_prompt_chunks_bits cuda::qwen2::tests::wave_passes_shapes --test-threads 1
+axon-q 15:37:43 start slot 16-23: /home/haseeb/.cache/axon-mq/axon-test-0af6a3a --exact cuda::qwen2::paged_tests::gpu_paged_split_and_batched_bits cuda::qwen2::tests::gpu_batched_attention_matches_decode_bits cuda::qwen2::tests::gpu_p
+
+running 6 tests
+test cuda::qwen2::paged_tests::gpu_paged_split_and_batched_bits ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+test cuda::qwen2::tests::gpu_batched_attention_matches_decode_bits ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_0_5b ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_0_5b ... ok
+test cuda::qwen2::tests::gpu_prompt_chunks_bits ... ok
+test cuda::qwen2::tests::wave_passes_shapes ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 664 filtered out; finished in 126.56s
+
+[axon-run 15:39:50] exit 0 after 126.8s (host bella)
