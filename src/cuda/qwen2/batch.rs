@@ -65,6 +65,30 @@ pub(super) fn att_per_query(head_dim: usize) -> usize {
 /// Tokens per output-head launch in `verify_argmax` (sizes the logits).
 pub(super) const HEAD_SUB: usize = 16;
 
+/// Queries per block of decode.cu attn_mq_t (MQ_Q).
+pub(super) const MQ_Q: usize = 16;
+
+/// Batches of one sequence of up to this many queries take the per-query
+/// path when attn_blk_mq runs it (`CudaQwen2::att_mq`), not attn_fa_b,
+/// whatever the head size: cuda_attn_mq_sweep, 7B shape (hd 128) on an RTX
+/// 4090 and bella, 14 / 2 x 64 on an RTX 4050 Laptop (docs/log
+/// 2026-10-18-attn-mq). attn_blk_mq writes a 4 hd-byte partial per (query,
+/// head, block) that attn_cmb_b reads back, so it falls behind the flash
+/// kernel's in-register fold as queries grow (hd 64: 48 queries lose from
+/// 16k positions, 1.5-1.7x attn_fa_bs). AXON_ATT_MQ_MAX overrides.
+pub(super) const MQ_MAX: usize = 32;
+
+/// attn_mq_t's dynamic shared memory for head size hd and q8 scale group
+/// kg (0: the f16 cache): the K and V tiles, q8 also their raw rows and
+/// scales.
+pub(super) fn mq_smem(hd: usize, kg: usize) -> usize {
+    let tile = ATT_BLK * hd * 2;
+    match kg {
+        0 => 2 * tile,
+        _ => 2 * tile + 2 * ATT_BLK * hd + 2 * ATT_BLK * (hd / kg) * 4,
+    }
+}
+
 /// attn_fa_b's launch shapes (prefill.cu): `Full` attn_fa_b, `Small`
 /// attn_fa_bs (half the rows: short batches), `Kv` attn_fa_k (4 warps, 64
 /// rows, K and V copied apart, several blocks per SM). Each row's ops are
@@ -255,6 +279,48 @@ pub(super) struct WaveGeom {
     pub(super) sms: usize,
     pub(super) gemmh: bool,
     pub(super) gemmh_all: bool,
+    /// gemm2t (128 x 64) for Q4_K / Q5_K where `tile_t` picks it
+    /// (`BatchFns::gemm_t`).
+    pub(super) tile_t: bool,
+}
+
+/// gemm2t's time per MAC in percent of gemm2s's: what `tile_t` and
+/// `gemm_cost` weigh its fewer, bigger blocks' waves by. Measured
+/// (`cuda_gemm_tile_bench`, RTX 4050 Laptop sm_89, job 1019-011355-9ca0):
+/// 7B gate / down / gate+up at nb 1024 and 1088 78-82 %; q / wo 82 %; the
+/// 512-row k / v, whose grids are partly a wave either way, 88 %.
+pub(super) const TILE_T_TIME: usize = 82;
+
+/// The most tokens a product keeps gemm2s for whatever `tile_t`'s waves say
+/// (one 64-token tile; review of #100, MUST 1).
+pub(super) const TILE_T_MIN_NB: usize = 64;
+
+/// `gemm_cost`'s waves of `ctas` blocks of `macs` MACs each on sms SMs.
+fn wave_cost(ctas: usize, macs: usize, sms: usize) -> u64 {
+    let (full, rem) = (ctas / sms, ctas % sms);
+    let part = match rem {
+        0 => 0,
+        _ => PARTIAL_WAVE * sms + (100 - PARTIAL_WAVE) * rem,
+    };
+    ((100 * full * sms + part) * macs) as u64
+}
+
+/// Whether a Q4_K / Q5_K product of `rows` outputs (br rows per gemm2s
+/// block: 64, or 32 of each for the fused gate + up) over nb tokens takes
+/// the 128 x 64 tile (2 br rows per block): when its waves, at
+/// TILE_T_TIME per MAC, cost less than gemm2s's. It halves the blocks, so
+/// it loses where gemm2s's grid barely fills the GPU (the 7B's 512-row k /
+/// v on a 4090). Never at nb <= TILE_T_MIN_NB: one token tile (the decode
+/// pool's and verify's batches) is unmeasured with gemm2t (TILE_T_TIME is
+/// from nb 1024 / 1088), so those keep gemm2s.
+pub(super) fn tile_t(rows: usize, br: usize, nb: usize, sms: usize) -> bool {
+    if nb <= TILE_T_MIN_NB {
+        return false;
+    }
+    let tiles = nb.div_ceil(64);
+    let s = 100 * wave_cost(tiles * rows.div_ceil(br), br, sms);
+    let t = TILE_T_TIME as u64 * wave_cost(tiles * rows.div_ceil(2 * br), 2 * br, sms);
+    t < s
 }
 
 /// What a partial last wave costs, in percent of a full one: PARTIAL_WAVE
@@ -269,31 +335,37 @@ const PARTIAL_WAVE: usize = 30;
 /// The GEMM time of one pass of nb (> VM_MAX) tokens: per product the
 /// waves of its blocks (one block per SM: gemm2s, gemm2, gemmh2; a partial
 /// last wave as PARTIAL_WAVE says) times a block's MACs, with `bgemm`'s
-/// grids: Q4_K / Q5_K in 64 x 64 tiles (rows x tokens; gemmh2 128 x 64),
+/// grids: Q4_K / Q5_K in 64 x 64 tiles or where `tile_t` says 128 x 64
+/// (rows x tokens; gemmh2 128 x 64),
 /// the register-staged types in 64 x 128 given ~1.5 blocks per SM, the
-/// fused gate + up in 32 (gemmh2 64) rows of each x 64 tokens. In units of
-/// a percent of a wave per SM (comparable on one GPU only).
+/// fused gate + up in 32 (gemmh2, gemm2t 64) rows of each x 64 tokens. In
+/// units of a hundredth of a percent of a wave per SM of gemm2s time
+/// (comparable on one GPU only).
 pub(super) fn gemm_cost(ps: &[Gemm], nb: usize, g: WaveGeom) -> u64 {
-    let waves = |ctas: usize, macs: usize| {
-        let (full, rem) = (ctas / g.sms, ctas % g.sms);
-        let part = match rem {
-            0 => 0,
-            _ => PARTIAL_WAVE * g.sms + (100 - PARTIAL_WAVE) * rem,
-        };
-        ((100 * full * g.sms + part) * macs) as u64
-    };
+    // In gemm2s time (x 100): gemm2t's blocks at TILE_T_TIME per MAC.
+    let waves = |ctas: usize, macs: usize| 100 * wave_cost(ctas, macs, g.sms);
+    let waves_t = |ctas: usize, macs: usize| TILE_T_TIME as u64 * wave_cost(ctas, macs, g.sms);
     ps.iter()
         .map(|&p| match p {
             Gemm::One { qt, rows, cols } => {
                 if g.gemmh && qt == Q4_K && (g.gemmh_all || gemmh_plain(rows, nb, g.sms)) {
                     return waves(nb.div_ceil(64) * rows.div_ceil(128), 128 * 64 * cols);
                 }
+                if g.tile_t && matches!(qt, Q4_K | Q5_K) && tile_t(rows, G2_BM, nb, g.sms) {
+                    return waves_t(nb.div_ceil(64) * rows.div_ceil(G2T_BM), G2T_BM * 64 * cols);
+                }
                 let ctas = nb.div_ceil(128) * rows.div_ceil(G2_BM);
                 let big = !matches!(qt, Q4_K | Q5_K) && 2 * ctas >= 3 * g.sms && nb > 64;
                 let bn = if big { 128 } else { 64 };
                 waves(nb.div_ceil(bn) * rows.div_ceil(G2_BM), G2_BM * bn * cols)
             }
+            // Only the fused launch: with AXON_GATE_UP=0 (or a gate / up
+            // that can't fuse) `wave_gemms` lists gate and up as two
+            // `Gemm::One`s, priced as bgemm runs them (tile_t with 64 rows).
             Gemm::GateUp { ffn, dim } => {
+                if !g.gemmh && g.tile_t && tile_t(ffn, 32, nb, g.sms) {
+                    return waves_t(nb.div_ceil(64) * ffn.div_ceil(64), 2 * 64 * 64 * dim);
+                }
                 let br = if g.gemmh { 64 } else { 32 };
                 waves(nb.div_ceil(64) * ffn.div_ceil(br), 2 * br * 64 * dim)
             }
@@ -519,6 +591,9 @@ pub(super) struct BatchFns<'m> {
     /// fold: batches of at most att_per_query tokens.
     attn_blk: Func<'m>,
     attn_cmb: Func<'m>,
+    /// The same partials 16 queries of one sequence at a time (decode.cu
+    /// attn_mq_t): `mq_smem`.
+    attn_mq: Func<'m>,
     /// attn_fa_b's variants (`Fa`, indexed by it) for this head size
     /// (larger batches), then quantize_b.
     attn_fa: [Func<'m>; 3],
@@ -550,6 +625,11 @@ pub(super) struct BatchFns<'m> {
     /// gemm2s_q4_k_gu: gate and up (both Q4_K) in one launch, silu(gate) *
     /// up out (`CudaQwen2::gate_up_fused`).
     pub(super) gemm_gu: Option<Func<'m>>,
+    /// gemm2t_q4_k and gemm2t_q5_k (128 rows x 64 tokens, `tile_t`) and
+    /// gemm2t_q4_k_gu (64 rows of gate and of up): half gemm2s's
+    /// activation copies per MAC, the same bits. None without int8 tensor
+    /// cores or with AXON_GEMM_TILE=64 (gemm2s everywhere, as before).
+    pub(super) gemm_t: Option<([Func<'m>; 2], Func<'m>)>,
     pub(super) q6k_to_i8: Option<Func<'m>>,
     /// hopper.cu gemmh2_q4_k and gemmh2_q4_k_gu: the Q4_K products and the
     /// fused gate + up on wgmma (same bits); sm_90a modules only, off with
@@ -678,6 +758,13 @@ impl<'m> BatchFns<'m> {
                 "attn_blk_b_128"
             })?,
             attn_cmb: module.function("attn_cmb_b")?,
+            attn_mq: {
+                let f = module.function(&format!("attn_blk_mq_{head_dim}"))?;
+                if module.mma() {
+                    f.set_max_shared(mq_smem(head_dim, 0))?;
+                }
+                f
+            },
             attn_fa: {
                 let f = |n: &str, v: Fa| -> Result<Func<'m>, String> {
                     let f = module.function(&format!("{n}_{head_dim}"))?;
@@ -711,6 +798,21 @@ impl<'m> BatchFns<'m> {
                 let f = module.function("gemm2s_q4_k_gu")?;
                 f.set_max_shared(gemm2_smem(Q4_K, 64, 3))?;
                 Some(f)
+            } else {
+                None
+            },
+            // AXON_GEMM_TILE: "64" turns gemm2t off; any other value (or
+            // none) is the default, `tile_t`'s routing.
+            gemm_t: if module.mma() && std::env::var("AXON_GEMM_TILE").as_deref() != Ok("64") {
+                let (a, b, c) = (
+                    module.function("gemm2t_q4_k")?,
+                    module.function("gemm2t_q5_k")?,
+                    module.function("gemm2t_q4_k_gu")?,
+                );
+                a.set_max_shared(gemm2t_smem(Q4_K))?;
+                b.set_max_shared(gemm2t_smem(Q5_K))?;
+                c.set_max_shared(gemm2t_smem(Q4_K))?;
+                Some(([a, b], c))
             } else {
                 None
             },
@@ -788,6 +890,19 @@ impl<'g> CudaQwen2<'g> {
     /// Tokens per batched pass a cache of `max_ctx` positions gets scratch for.
     pub(super) fn batch_for(&self, max_ctx: usize) -> usize {
         self.batch.min(max_ctx).max(1)
+    }
+
+    /// Whether a one-sequence pass of nb queries takes the flash attention
+    /// (attn_fa_b) rather than the per-query path (attn_blk_mq or
+    /// attn_blk_b): more than `att_mq_max` queries when attn_blk_mq runs
+    /// the per-query path (whatever att_per_query), else more than
+    /// att_per_query. Every choice gives the same bits.
+    pub(super) fn att_flash(&self, nb: usize) -> bool {
+        let max = match self.att_mq {
+            true => self.att_mq_max,
+            false => att_per_query(self.head_dim),
+        };
+        self.tc_attn && nb > max
     }
 
     /// Partials (per head, hd + 2 floats each) of the batched attention:
@@ -958,6 +1073,18 @@ impl<'g> CudaQwen2<'g> {
                     // <= 64 tokens is half padding; the lm_head of a pool's
                     // 32 rows ran 2x slower in it, C-curve log.)
                     let big = !matches!(mt.qt, Q4_K | Q5_K) && 2 * ctas >= 3 * bf.sms && nb > 64;
+                    // Q4_K / Q5_K: 128 x 64 where it pays (`tile_t`).
+                    if let (Some((ft, _)), true) = (&bf.gemm_t, matches!(mt.qt, Q4_K | Q5_K))
+                        && tile_t(mt.rows, G2_BM, nb, bf.sms)
+                    {
+                        return self.gpu.launch(
+                            &ft[(mt.qt == Q5_K) as usize],
+                            (nb.div_ceil(64) as u32, mt.rows.div_ceil(G2T_BM) as u32, 1),
+                            (256, 1, 1),
+                            gemm2t_smem(mt.qt) as u32,
+                            &common,
+                        );
+                    }
                     let (bn, st) = if big { (128, 2) } else { (64, 3) };
                     let (f, smem) = match q8c {
                         Some((_, f8)) => (&f8[!big as usize], gemm2_smem(Q6_K, bn, st)),
@@ -1599,7 +1726,7 @@ impl<'g> CudaQwen2<'g> {
                 rows || start + nb <= b.nblk_max * ATT_BLK,
                 "batch past its cache"
             );
-            if self.tc_attn && nb > att_per_query(hd) && !rows {
+            if !rows && self.att_flash(nb) {
                 // Flash attention, every query of the pass in one launch,
                 // y in place of q; then act (the decode kernels' bits,
                 // prefill.cu attn_fa_bt), in the variant fa_pick takes for
@@ -1666,86 +1793,130 @@ impl<'g> CudaQwen2<'g> {
                     // partials' stride: blocks or splits, the arguments
                     // after rp: the kernel's own, picked with it).
                     let gemma = self.gemma.is_some();
+                    // gpt-oss: oss.cu's split kernels (sinks, windows); the
+                    // load turns tensor cores off for it (tc_attn), so the
+                    // flash and mq paths never take its layers.
                     let oss = l.oss.zip(self.f.oss.as_ref());
-                    let (f, grid, block, stride, tail) = match (tc, q8, gemma) {
-                        // gpt-oss: each query's window, the table (null:
-                        // plain) last (oss.cu).
-                        (false, false, false) if let Some((o, of)) = oss => (
-                            &of.attn_split_b,
-                            ms,
-                            ATT_TILE as u32,
-                            self.max_split,
-                            vec![Arg::I32(o.win as i32), tab],
-                        ),
-                        _ if oss.is_some() => {
-                            return Err("gpt-oss attention: f16 split kernels only (load \
-                                 refuses tensor cores and the q8 cache)"
-                                .into());
-                        }
-                        // gemma3: each query's window (0: a global layer);
-                        // its plain-cache kernel takes no table (gemma.cu).
-                        (false, false, true) => {
-                            let win = Arg::I32(l.win as i32);
-                            let (f, tail) = if paged {
-                                (&bf.attn_split_w_pg, vec![win, tab])
-                            } else {
-                                (&bf.attn_split_w, vec![win])
-                            };
-                            (f, ms, ATT_TILE as u32, self.max_split, tail)
-                        }
-                        (_, _, true) => {
-                            return Err("gemma3 attention: f16 split kernels only (load refuses \
+                    let stride = if tc { b.nblk_max } else { self.max_split };
+                    // One sequence on the tensor cores: attn_blk_b's
+                    // partials MQ_Q queries per block (attn_mq_t), each K /
+                    // V tile read once for them.
+                    if tc && !rows && !gemma && oss.is_none() && self.att_mq {
+                        let f = match q8 {
+                            false => &bf.attn_mq,
+                            true => &self.q8_fns(mode).attn_blk_mq,
+                        };
+                        let mut args = vec![b.q.arg()];
+                        args.extend_from_slice(kv);
+                        args.extend_from_slice(&[
+                            Arg::I32(start as i32),
+                            Arg::I32(z0 as i32),
+                            Arg::I32(self.n_heads as i32),
+                            Arg::I32(self.n_kv_heads as i32),
+                            pre,
+                            Arg::I32(b.nblk_max as i32),
+                            b.part_o.arg(),
+                            b.part_ml.arg(),
+                            tab,
+                            Arg::I32(nz as i32),
+                        ]);
+                        let group = self.n_heads / self.n_kv_heads;
+                        g.launch(
+                            f,
+                            (
+                                self.n_kv_heads as u32,
+                                gy_blk,
+                                (nz as usize).div_ceil(MQ_Q) as u32,
+                            ),
+                            (32 * group as u32, 1, 1),
+                            mq_smem(hd, kg) as u32,
+                            &args,
+                        )?;
+                    } else {
+                        let (f, grid, block, _, tail) = match (tc, q8, gemma) {
+                            // gpt-oss: each query's window, the table
+                            // (null: plain) last (oss.cu).
+                            (false, false, false) if let Some((o, of)) = oss => (
+                                &of.attn_split_b,
+                                ms,
+                                ATT_TILE as u32,
+                                self.max_split,
+                                vec![Arg::I32(o.win as i32), tab],
+                            ),
+                            _ if oss.is_some() => {
+                                return Err("gpt-oss attention: f16 split kernels only (load \
+                                     refuses tensor cores and the q8 cache)"
+                                    .into());
+                            }
+                            // gemma3: each query's window (0: a global layer);
+                            // its plain-cache kernel takes no table (gemma.cu).
+                            (false, false, true) => {
+                                let win = Arg::I32(l.win as i32);
+                                let (f, tail) = if paged {
+                                    (&bf.attn_split_w_pg, vec![win, tab])
+                                } else {
+                                    (&bf.attn_split_w, vec![win])
+                                };
+                                (f, ms, ATT_TILE as u32, self.max_split, tail)
+                            }
+                            (_, _, true) => {
+                                return Err(
+                                    "gemma3 attention: f16 split kernels only (load refuses \
                                  head sizes but 256, tensor cores and the q8 cache)"
-                                .into());
-                        }
-                        (true, false, false) => (&bf.attn_blk, gy_blk, 32, b.nblk_max, vec![tab]),
-                        (true, true, false) => (
-                            &self.q8_fns(mode).attn_blk_b,
-                            gy_blk,
-                            32,
-                            b.nblk_max,
-                            vec![tab],
-                        ),
-                        (false, false, false) => (
-                            &bf.attn_split,
-                            ms,
-                            ATT_TILE as u32,
-                            self.max_split,
-                            vec![tab],
-                        ),
-                        (false, true, false) => (
-                            &self.q8_fns(mode).attn_split_b,
-                            ms,
-                            ATT_TILE as u32,
-                            self.max_split,
-                            vec![tab],
-                        ),
-                    };
-                    let mut args = vec![b.q.arg()];
-                    args.extend_from_slice(kv);
-                    args.extend_from_slice(&[
-                        Arg::I32(start as i32),
-                        Arg::I32(z0 as i32),
-                        Arg::I32(self.n_heads as i32),
-                        Arg::I32(self.n_kv_heads as i32),
-                        if tc {
-                            pre
-                        } else {
-                            Arg::F32(1.0 / (hd as f32).sqrt())
-                        },
-                        Arg::I32(stride as i32),
-                        b.part_o.arg(),
-                        b.part_ml.arg(),
-                        rp,
-                    ]);
-                    args.extend(tail);
-                    g.launch(
-                        f,
-                        (self.n_kv_heads as u32, grid, nz),
-                        (block, 1, 1),
-                        0,
-                        &args,
-                    )?;
+                                        .into(),
+                                );
+                            }
+                            (true, false, false) => {
+                                (&bf.attn_blk, gy_blk, 32, b.nblk_max, vec![tab])
+                            }
+                            (true, true, false) => (
+                                &self.q8_fns(mode).attn_blk_b,
+                                gy_blk,
+                                32,
+                                b.nblk_max,
+                                vec![tab],
+                            ),
+                            (false, false, false) => (
+                                &bf.attn_split,
+                                ms,
+                                ATT_TILE as u32,
+                                self.max_split,
+                                vec![tab],
+                            ),
+                            (false, true, false) => (
+                                &self.q8_fns(mode).attn_split_b,
+                                ms,
+                                ATT_TILE as u32,
+                                self.max_split,
+                                vec![tab],
+                            ),
+                        };
+                        let mut args = vec![b.q.arg()];
+                        args.extend_from_slice(kv);
+                        args.extend_from_slice(&[
+                            Arg::I32(start as i32),
+                            Arg::I32(z0 as i32),
+                            Arg::I32(self.n_heads as i32),
+                            Arg::I32(self.n_kv_heads as i32),
+                            if tc {
+                                pre
+                            } else {
+                                Arg::F32(1.0 / (hd as f32).sqrt())
+                            },
+                            Arg::I32(stride as i32),
+                            b.part_o.arg(),
+                            b.part_ml.arg(),
+                            rp,
+                        ]);
+                        args.extend(tail);
+                        g.launch(
+                            f,
+                            (self.n_kv_heads as u32, grid, nz),
+                            (block, 1, 1),
+                            0,
+                            &args,
+                        )?;
+                    }
                     on("attn")?;
                     let mut cargs = vec![
                         b.part_o.arg(),
@@ -1941,12 +2112,17 @@ impl<'g> CudaQwen2<'g> {
                 )?;
             } else if let (Some(f), true) = (&bf.gemm_gu, fuse) {
                 // gate and up in one launch, hid = silu(gate) * up out
-                // (the same floats and ops as below), then quantize_b.
+                // (the same floats and ops as below), then quantize_b;
+                // gemm2t_q4_k_gu's 64 rows of each where `tile_t` says.
+                let (f, br, sm) = match &bf.gemm_t {
+                    Some((_, ft)) if tile_t(ffn, 32, nb, bf.sms) => (ft, 64, gemm2t_smem(Q4_K)),
+                    _ => (f, 32, gemm2_smem(Q4_K, 64, 3)),
+                };
                 g.launch(
                     f,
-                    (nb.div_ceil(64) as u32, ffn.div_ceil(32) as u32, 1),
+                    (nb.div_ceil(64) as u32, ffn.div_ceil(br) as u32, 1),
                     (256, 1, 1),
-                    gemm2_smem(Q4_K, 64, 3) as u32,
+                    sm as u32,
                     &[
                         wts.arg_at(gate.off),
                         wts.arg_at(up.off),
@@ -2201,6 +2377,7 @@ impl<'g> CudaQwen2<'g> {
             sms: self.bf.sms,
             gemmh: self.bf.gemmh.is_some(),
             gemmh_all: self.bf.gemmh_all,
+            tile_t: self.bf.gemm_t.is_some(),
         };
         wave_passes(n, max, |nb| gemm_cost(&ps, nb, g))
     }
@@ -2218,7 +2395,7 @@ impl<'g> CudaQwen2<'g> {
         let wave = (start + n < FA_LONG)
             .then(|| self.wave_split_passes(n, max))
             .flatten();
-        let v = match (wave, self.tc_attn && max > att_per_query(self.head_dim)) {
+        let v = match (wave, self.att_flash(max)) {
             (Some(v), _) => v,
             (None, true) => fa_passes(
                 n,

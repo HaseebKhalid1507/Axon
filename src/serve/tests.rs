@@ -50,6 +50,8 @@ fn test_opts(path: &str, device: Device) -> Opts {
         parallel: PARALLEL,
         parallel_set: false,
         slot_ctx: None,
+        kv_pages: None,
+        kv_grow: None,
         prefill_chunk: super::engine::PREFILL_CHUNK,
         prefill_ms: super::engine::PREFILL_MS,
         rope: Default::default(),
@@ -495,6 +497,59 @@ fn serve_cuda_matches_gen() {
         return;
     };
     serve_matches_gen_and_chat(p.to_str().unwrap(), Device::Cuda);
+}
+
+/// A ~2000-token greedy completion served one request at a time
+/// (`--parallel 1`: the real `Engine::job`, its prompt fed by
+/// `Lm::prompt_chunks`) == `axon gen`'s (one `prefill_logits`). The cut is
+/// asserted multi-pass and not the old fixed prefill_batch one on the
+/// reference net (same model and context as the server's).
+#[test]
+fn serve_cuda_long_prompt_matches_gen() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let path = p.to_str().unwrap();
+    let ctx = 4096;
+    let m = crate::gguf::load_with(path, crate::copy_for(Device::Cuda)).unwrap();
+    let tok = Tokenizer::from_gguf(&m);
+    let mut prompt = String::from("A log of river readings.\n");
+    let mut i = 0;
+    while tok.encode_prompt(&prompt).len() < 2000 {
+        prompt.push_str(&format!(
+            "Day {i}: level {} cm, {} water, {} birds counted.\n",
+            100 + i % 37,
+            ["clear", "muddy", "fast"][i % 3],
+            i % 11
+        ));
+        i += 1;
+    }
+    let n = tok.encode_prompt(&prompt).len();
+    let reference = {
+        let net =
+            crate::lm::Backend::new(&m, Device::Cuda, ctx, None, crate::kv::KvType::F16, false)
+                .unwrap();
+        let cache = net.new_cache(ctx);
+        let rs = net.prompt_chunks(n - 1, 0, &cache);
+        eprintln!("{n} tokens: job feeds {rs:?}");
+        assert!(rs.len() >= 2, "one pass: {rs:?}");
+        assert_ne!(rs, crate::lm::chunk_ranges(n - 1, net.prefill_batch()));
+        gen_text(&net, &tok, &prompt, 24)
+    };
+    drop(m);
+    let s = server_with(path, Device::Cuda, |o| {
+        o.parallel = 1;
+        o.ctx = Some(ctx);
+    });
+    let req = json!({"model": "alias", "prompt": prompt, "max_tokens": 24, "temperature": 0});
+    let r = post(s.addr, "/v1/completions", req);
+    assert_eq!(r.status, 200, "{}", r.body);
+    let v = r.json();
+    assert_eq!(v["usage"]["prompt_tokens"], n);
+    assert_eq!(v["choices"][0]["text"], reference.as_str());
 }
 
 /// A draft model changes nothing a client sees: completions and chat
@@ -1815,6 +1870,151 @@ fn serve_shrunk_pool() {
     assert_eq!(r.status, 400, "{}", r.body);
     assert_eq!(r.json()["error"]["code"], "context_length_exceeded");
     batched_vs_solo(a, &batch_bodies(false), "shrunk pool, no max_tokens");
+}
+
+/// `paged_plan_with` over a 14B-shaped model (q8 page 6.2 MiB, 0.6 GiB of
+/// scratch at a 32k cap, less at a shorter one): with --ctx 32768 the
+/// pages don't hold one full sequence, so no paged plan (reserved slots:
+/// --ctx is never shortened); without --ctx the cap shrinks to the pages';
+/// a 7B-shaped one holds the full 32k several times over.
+#[test]
+fn paged_plan_honours_ctx() {
+    const MIB: usize = 1 << 20;
+    let scratch = |cap: usize| 300 * MIB + cap * 9 * 1024;
+    let (page14, free14) = (6 * MIB + MIB / 5, 2560 * MIB);
+    assert!(super::paged_plan_with(32768, 16, free14, true, scratch, page14).is_none());
+    let p = super::paged_plan_with(32768, 16, free14, false, scratch, page14).unwrap();
+    assert!(
+        p.cap < 32768 && p.pages * 64 >= p.cap && p.cap % 64 == 0,
+        "{} {}",
+        p.cap,
+        p.pages
+    );
+    let p = super::paged_plan_with(p.cap, 16, free14, true, scratch, page14).unwrap();
+    assert!(p.pages * 64 >= p.cap);
+    let (page7, free7) = (7 * MIB / 2, 6400 * MIB);
+    let p = super::paged_plan_with(32768, 16, free7, true, scratch, page7).unwrap();
+    assert_eq!(p.cap, 32768);
+    assert!(p.pages >= 3 * 512, "{}", p.pages);
+}
+
+/// A paged pool whose pages hold less than the context (`kv_pages`: 16
+/// pages = 1024 tokens of a 2048 context): the context served is what the
+/// pages hold, and a longer prompt's 400 says why and what to do.
+#[test]
+fn serve_paged_cap_message() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server_with(p.to_str().unwrap(), Device::Cuda, |o| {
+        o.parallel = 2;
+        o.parallel_set = true;
+        o.kv_pages = Some(16);
+    });
+    let a = s.addr;
+    let v = call(a, "GET", "/v1/models", "").json();
+    assert_eq!(v["data"][0]["meta"]["n_ctx"], 1024, "{v}");
+    let r = post(
+        a,
+        "/v1/completions",
+        json!({"prompt": "word ".repeat(1500), "max_tokens": 4}),
+    );
+    assert_eq!(r.status, 400, "{}", r.body);
+    let e = &r.json()["error"];
+    assert_eq!(e["code"], "context_length_exceeded", "{e}");
+    let msg = e["message"].as_str().unwrap();
+    assert!(
+        msg.contains("KV pages") && msg.contains("shorter prompt") && msg.contains("--kv q8"),
+        "{msg}"
+    );
+}
+
+/// A paged pool squeezed to fewer pages than its requests need at once
+/// (`kv_pages` 40 = 2560 positions; `kv_grow` 0: admission reserves no
+/// generated tokens' pages): 6 counting completions (they don't stop early)
+/// of ~260-token prompts and 450 tokens each, started together, grow from
+/// ~5 to ~12 pages each while decoding side by side, past the free and the
+/// reclaimable pages, so requests are preempted (fed again) mid-decode.
+/// Every reply == the same request alone, greedy and seeded-sampled; the
+/// preemption counter in /slots is > 0; no page leaks.
+#[test]
+fn serve_paged_pressure() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server_with(p.to_str().unwrap(), Device::Cuda, |o| {
+        o.parallel = 6;
+        o.parallel_set = true;
+        o.kv_pages = Some(40);
+        o.kv_grow = Some(0);
+    });
+    let a = s.addr;
+    let sl = call(a, "GET", "/slots", "").json();
+    assert_eq!(sl["pages_total"], 40, "{sl}");
+    assert_eq!(sl["page_tokens"], 64, "{sl}");
+    let bodies: Vec<Value> = (0..6)
+        .map(|i| {
+            let prompt = format!("Note {i}. ")
+                + &"The river runs past the old mill and the bridge. ".repeat(24)
+                + "Count: 1, 2, 3, 4, 5,";
+            json!({"prompt": prompt, "max_tokens": 450,
+                   "temperature": if i % 2 == 0 { json!(0) } else { json!(0.3) }, "seed": i})
+        })
+        .collect();
+    let reply = |r: &Resp| -> (String, u64) {
+        assert_eq!(r.status, 200, "{}", r.body);
+        let v = r.json();
+        (
+            v["choices"][0]["text"].to_string(),
+            v["usage"]["completion_tokens"].as_u64().unwrap(),
+        )
+    };
+    let solo: Vec<_> = bodies
+        .iter()
+        .map(|b| reply(&post(a, "/v1/completions", b.clone())))
+        .collect();
+    let generated: u64 = solo.iter().map(|r| r.1).sum();
+    assert!(generated >= 6 * 300, "the replies grow: {generated} tokens");
+    let start = std::sync::Barrier::new(bodies.len());
+    let together: Vec<_> = std::thread::scope(|sc| {
+        let hs: Vec<_> = bodies
+            .iter()
+            .map(|b| {
+                let start = &start;
+                sc.spawn(move || {
+                    start.wait();
+                    reply(&post(a, "/v1/completions", b.clone()))
+                })
+            })
+            .collect();
+        hs.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    for (i, (t, s1)) in together.iter().zip(&solo).enumerate() {
+        assert_eq!(t, s1, "paged pool under pressure: request {i}");
+    }
+    wait_for("the pool idle", || {
+        call(a, "GET", "/slots", "").json()["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|x| x["busy"] == false)
+    });
+    // The counters are cumulative (never reset): read after the burst.
+    let sl = call(a, "GET", "/slots", "").json();
+    let held: u64 = sl["slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|x| x["pages_used"].as_u64().unwrap())
+        .sum();
+    assert_eq!(held + sl["pages_free"].as_u64().unwrap(), 40, "{sl}");
+    assert!(sl["preempted"].as_u64().unwrap() > 0, "no preemption: {sl}");
 }
 
 /// `plan_slots` over a model of the memory: s slots of c positions fit

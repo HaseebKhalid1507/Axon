@@ -74,6 +74,20 @@ Works today, honestly scoped:
   for their rows that aren't a multiple of 256, e.g. the 0.5B's 896), and MXFP4 for
   gpt-oss's experts (CPU only: the GPU gets gpt-oss's other tensors). On the GPU every weight matrix must be one of the eleven
   quantized types (F16/F32 matrices are refused there). Others load for `info` but can't run.
+- Model files: GGUF, or a Hugging Face checkpoint directory (`config.json`, `tokenizer.json`,
+  `tokenizer_config.json`, and `model.safetensors` or the shards of `model.safetensors.index.json`)
+  of a `qwen2`, `qwen3` or `llama` model with BF16, F16 or F32 weights, wherever a `.gguf` path is
+  taken (`axon info <dir>` lists each tensor's Hugging Face name, GGUF name and type). A BF16 or F16
+  checkpoint loads as the F16 GGUF `convert_hf_to_gguf.py --outtype f16` makes of the same weights:
+  BF16 matrices converted to F16 and vectors to F32 at load (numpy's rounding, checked for all 65536
+  values), the same metadata and tokenizer, and the same logits and greedy output bit for bit
+  (checked on Qwen2.5-0.5B-Instruct and Llama-3.2-1B-Instruct,
+  [log](docs/log/2026-10-19-safetensors-loader.md)). F32 matrices stay F32 (lossless, where
+  `--outtype f16` would round them). CPU only for now
+  (the GPU has no F16 matrix kernels); FP8 / NVFP4 checkpoints, MoE and the other architectures
+  are refused with a message, to come with the FP8 stages (roadmap). The pre-tokenizer must be one
+  Axon knows (Qwen2's or Llama 3's regex: recognized, never executed); SentencePiece-style
+  `tokenizer.json` files are refused (use the GGUF). Like llama.cpp, the NFC normalizer isn't applied.
 - Sampling: greedy, or temperature / top-k / top-p / min-p / repeat penalty with a seed
   (llama.cpp's order, ollama's defaults). `gen` continues raw text, greedy unless `--temp`
   is above 0 (reproducible output and benchmarks); `chat` talks to an Instruct model
@@ -128,14 +142,14 @@ Works today, honestly scoped:
   all of its tokens, so drafting pays far more there (`docs/design/spec-split.md`).
 - Serving: `axon serve`, an OpenAI-compatible HTTP server (below) with tool calling. On one GPU it
   batches the decode steps of concurrent requests (`--parallel N`) and feeds new prompts in chunks
-  between them, every slot one KV cache (no extra cache for a request running alone); elsewhere it
+  between them, over a paged KV cache (64-position pages shared by every slot: a slot holds only the
+  positions it has; no extra cache for a request running alone); elsewhere it
   runs one request at a time. Besides chat completions it speaks OpenAI's Responses API (what codex
   uses) and ollama's native API ([docs/serve-apis.md](docs/serve-apis.md)). Operations: `--api-key`,
   `GET /metrics` (Prometheus), `GET /slots`, `--max-prompt-tokens`, `--slot-idle-ms`.
 - Rust 1.89 or newer.
 
-Not on main yet: tensor parallel, paged KV in `serve` (the kernels read through a page table; the pool
-doesn't use it yet), saving and restoring `serve` slots, streaming MoE experts through the GPU for long
+Not on main yet: tensor parallel, saving and restoring `serve` slots, streaming MoE experts through the GPU for long
 prompts (stage 3), and gpt-oss's experts on the GPU. What's in flight and why: [docs/roadmap.md](docs/roadmap.md). How Axon is built and measured, and
 what was tried and dropped: [docs/methodology.md](docs/methodology.md),
 [docs/history.md](docs/history.md), [docs/experiments-rejected.md](docs/experiments-rejected.md).
@@ -166,6 +180,7 @@ curl -L -o models/qwen2.5-0.5b-q4_k_m.gguf \
 ```
 axon <model.gguf>                         same as axon info
 axon info <model.gguf>                    print a summary and exit
+                                          (everywhere: a checkpoint directory instead, CPU)
 axon gen <model.gguf> "<prompt>" [-n N] [--draft K] [--draft-model PATH] [--device D]
           [--ctx N] [--gpu-layers N] [--gpus L] [--kv T]
                                           generation (default 32 tokens; greedy unless --temp)
@@ -288,7 +303,7 @@ flags of `chat`, plus `--host` (default 127.0.0.1), `--port` (default 8080), `--
 default: up to the context), `--cors [ORIGIN]` (answer CORS preflights and allow ORIGIN,
 default `*`, to call the server from web pages; off by default, so an arbitrary page can't
 use your local model), `--max-conns N` / `--max-queue N` (defaults 256 / 128),
-`--parallel N` (requests decoded at once on the GPU, default 8; 1: one at a time),
+`--parallel N` (requests decoded at once on the GPU, default 16 with paged KV, 8 without; 1: one at a time),
 `--prefill-ms MS` / `--prefill-chunk N` (how much prompt a batched step feeds while others
 decode: up to what fits in MS ms beside their decode step, at least N tokens; defaults 60 /
 256; `--prefill-ms 0`: exactly N tokens; `--prefill-chunk 0`: whole prompts), `--quiet`
@@ -318,24 +333,39 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
   to whole prefill passes; 4096 tokens until the server has measured a chunk's cost); a
   prompt that 4 shorter, younger ones have finished ahead of goes first. A long prompt sent
   to an idle server alone takes the single-stream path below and is fed whole: a request
-  arriving during that prefill waits for it. Each slot is a KV cache as long as the context, and a
-  pool of N slots costs N caches (7B at 32768: 1.75 GiB each): the request running alone
-  runs in a slot's memory (its own scratch beside it, no cache of its own), picked as a
-  batched request's is: the slot holding the longest prefix of its prompt if that prefix is
-  at least half the slot's tokens or more than half the prompt's, else the one idle the
-  longest (a shared <bos> or system prompt doesn't evict a conversation).
-  Without `--ctx` or `--parallel` the context comes first: as many slots
-  (2 to 8) as fit with the whole context; if not even 2 do, 2 or more with the longest
-  context they fit with, down to 32768 (or the whole context, if shorter); below that, one
-  request at a time with the whole context, and stderr says at which context 2 would fit
-  (and how many `--kv q8` fits). Measured: Qwen2.5-7B Q4_K_M on a 12 GB laptop GPU serves 2
-  at once with 32768 (`--kv q8`: 5 at 32768), on a 24 GB RTX 4090 8 at once with 32768. `--parallel N` alone: N slots of the longest
-  context that fits them (down to 1024 positions). `--ctx N`: never shortened; the slots
-  that fit with it (up to `--parallel`), else one at a time. The server says on stderr what
-  it chose and why; the context it serves is a slot's (`/v1/models` `meta.n_ctx`; longer
-  prompts get a 400 `context_length_exceeded`). The Q6_K prefill copy (int8 Q6_K matrices
-  for prefill's tensor cores, same results; 1.02 GiB on 7B Q4_K_M) is made after the
-  caches and slots, only from the memory they leave (`AXON_Q6K8=0` never makes it).
+  arriving during that prefill waits for it. The KV cache is paged: a pool of 64-position
+  pages shared by every slot, a slot holding pages only for the positions it has, so the
+  context is a slot's cap, not memory reserved for it (`AXON_PAGED_KV=0`: the old pool of
+  slots reserved at the full context each). The pool is the GPU memory left beside the
+  weights and scratch (at most a page per position of every slot), up to 16 requests at once
+  by default (`--parallel N`: N); the context is the model's (or `--ctx N`), at most what the
+  pages hold. Placed automatically, the whole model stays on the GPU if it fits beside an
+  8192-token cache, whatever `--ctx` says (the pool takes what is left). A request starts
+  when a slot is free and the pages for its prompt are (with a page per running request to
+  grow into); else it waits in the queue. Idle slots keep their prefixes (a later request
+  sharing one reuses its rows) until their pages are needed, least recently used first.
+  When decode runs out of pages, the youngest prompt still being prefilled gives its pages
+  back, then the youngest running request is preempted (fed again later, the same output);
+  the oldest never is. The banner says the pool's shape (`KV: P pages x 64 = T tokens over
+  up to S slots (cap C)`), `GET /slots` each slot's `pages_used` and the pool's
+  `pages_free` / `pages_total`. Measured on a 12 GB laptop GPU at the default 32768: Qwen2.5-7B
+  Q4_K_M gets 1537 pages (98k tokens: 6 agents at 15k each; `--kv q8`: 2983 pages, 12), where
+  the reserved pool held 3 slots; Qwen2.5-14B Q4_K_M with `--kv q8 --ctx 32768` stays on the
+  GPU with ~15k tokens of pages instead of splitting. The request running alone runs in a slot's pages (its own
+  scratch beside it, no cache of its own), picked as a batched request's is: the slot
+  holding the longest prefix of its prompt if that prefix is at least half the slot's
+  tokens or more than half the prompt's, else the one idle the longest (a shared <bos> or
+  system prompt doesn't evict a conversation). With `AXON_PAGED_KV=0`, without `--ctx` or
+  `--parallel` the context comes first: as many slots (2 to 8) as fit with the whole
+  context; if not even 2 do, 2 or more with the longest context they fit with, down to
+  32768 (or the whole context, if shorter); below that, one request at a time with the
+  whole context. `--parallel N` alone: N slots of the longest context that fits them (down
+  to 1024 positions). `--ctx N`: never shortened; the slots that fit with it (up to
+  `--parallel`), else one at a time. The server says on stderr what it chose and why; the
+  context it serves is a slot's (`/v1/models` `meta.n_ctx`; longer prompts get a 400
+  `context_length_exceeded`). The Q6_K prefill copy (int8 Q6_K matrices for prefill's tensor
+  cores, same results; 1.02 GiB on 7B Q4_K_M) is made after the caches and slots, only from
+  the memory they leave (`AXON_Q6K8=0` never makes it).
   A request running alone takes the single-stream path (CUDA graphs, `--draft`), and
   moves into the batch when a second one arrives (its rows are already in its slot: nothing
   is copied). Every request's output is exactly what it
@@ -547,9 +577,12 @@ OLLAMA_HOST=http://127.0.0.1:8080 ollama run qwen3-8b
 | `AXON_CUDA_GRAPHS=0` | cuda: launch each token's kernels one by one instead of replaying a captured CUDA graph (same results, slower) |
 | `AXON_MOE_PROFILE=1` | cuda, mixture-of-experts model: every 64 decode steps, print per layer the GPU segment (attention + router; synced for the profile, so a little slower), the copy down, the CPU experts and the copy up |
 | `AXON_CUDA_PDL=0` | cuda: no programmatic dependent launch (used only on sm_90+ with a CUDA 12.3+ driver) |
+| `AXON_ATT_MQ=0` | cuda, tensor cores: a one-sequence batched pass of few queries (a prompt chunk, a draft verify) runs attention per query (`attn_blk_b`, ≤ 16 queries at head size 128, ≤ 48 at 64) and above that the flash kernel, instead of `attn_blk_mq` (16 queries per K/V tile read). Same output bits |
+| `AXON_ATT_MQ_MAX=N` | cuda, tensor cores: most queries of a one-sequence pass that `attn_blk_mq` takes before the flash kernel (default 32). Parsed as an integer; anything else, the default. Small values send passes of more than N queries to the flash kernel (0: all of them). Large values turn the flash kernel off for one-sequence passes of up to N tokens (and prompts are cut into the plain passes): slower past the crossover, same bits |
 | `AXON_WAVE_SPLIT=0` | cuda, `gen`/`logits`: split a prompt of several batched passes into equal passes (the old split) instead of sizing them to fill this GPU's GEMM waves (e.g. pp2100 on an RTX 4090: 1088 + 1012, not 1050 + 1050, +3 % prompt eval on 7B/8B; same bits). `AXON_PASS_TRACE=1` prints the pass sizes |
 | `AXON_GATE_UP=0` | cuda: run the FFN's gate and up products (both Q4_K) as two GEMMs instead of one fused launch in batched passes (same bits) |
 | `AXON_HOPPER=0` | cuda, H100/H200 (compute capability 9.0): compile the kernels for plain sm_90 instead of sm_90a, which turns the wgmma/TMA kernels off (same bits) |
+| `AXON_GEMM_TILE=64` | cuda, sm_80+: keep every batched Q4_K / Q5_K product (and the fused gate+up) on the 64 × 64 `gemm2s` tile. Default (unset or any other value): the 128 × 64 `gemm2t` tile where its waves cost less (`tile_t`: the big products at > 64 tokens; not batches of ≤ 64 tokens, nor, e.g., a 512-row k / v on a 128-SM GPU). Same bits either way |
 | `AXON_GEMMH=0\|1` | cuda, sm_90a: `0` keeps every batched Q4_K product on the mma.sync GEMMs; `1` sends every one of them to the wgmma kernel. Default: the fused gate+up and the large Q4_K products (>= 3584 rows, at least one full wave of blocks) use wgmma (same bits either way) |
 | `AXON_Q6K8=0\|1` | cuda: `0` never makes the int8 copy of Q6_K matrices that speeds up prefill (sm_80+); `1` makes it whenever it fits beside the cache. Default: only if 768 MiB stay free beside it and the cache, and never on a split (same bits either way) |
 | `AXON_SKIP_MODEL_TESTS=1` | tests: skip the ones that need the real model |

@@ -817,9 +817,9 @@ impl<M: KvIo> Chat<'_, M> {
         if !from_file {
             // The same rows by prefill (cache == fresh prefill).
             s.forget();
-            let pb = self.net.prefill_batch();
-            for (i, b) in self.hist[..fed].chunks(pb).enumerate() {
-                self.net.feed_batch(b, i * pb, &mut self.cache);
+            for r in self.net.prompt_chunks(fed, 0, &self.cache) {
+                self.net
+                    .feed_batch(&self.hist[r.clone()], r.start, &mut self.cache);
             }
             self.fed = fed;
         }
@@ -1163,18 +1163,22 @@ impl<'a, M: Lm> Chat<'a, M> {
         // between them); the last batch with the last token, for its logits
         // (`Lm::prefill_logits`: on the GPU in the batched pass).
         let t0 = Instant::now();
-        let pb = self.net.prefill_batch();
-        let chunks: Vec<&[u32]> = self.hist[self.fed..].chunks(pb).collect();
+        // In the backend's pieces (`Lm::prompt_chunks`: at most
+        // prefill_batch each; on the GPU its passes, sized to the GEMM waves).
+        let chunks = self
+            .net
+            .prompt_chunks(self.hist.len() - self.fed, self.fed, &self.cache);
         assert!(!chunks.is_empty(), "a turn adds tokens");
         let mut logits = Vec::new();
-        for (i, batch) in chunks.iter().enumerate() {
+        for (i, c) in chunks.iter().enumerate() {
             if cancel() {
                 self.hist.truncate(start);
                 self.undo_forget(before, dropped_fed, &mut r);
                 r.interrupted = true;
                 return Ok(r);
             }
-            let pos = self.fed + i * pb;
+            let (pos, end) = (self.fed + c.start, self.fed + c.end);
+            let batch = &self.hist[pos..end];
             if i + 1 < chunks.len() {
                 self.net.feed_batch(batch, pos, &mut self.cache);
             } else {
@@ -1673,6 +1677,76 @@ mod tests {
                 assert_eq!(r.ids, want, "{msg:?} max_reply {max_reply} k {k}");
             }
         }
+    }
+
+    /// A turn of ~1500 tokens then a short follow-up through the real
+    /// `Chat::reply` on the GPU: the long turn is fed in several passes cut
+    /// by `Lm::prompt_chunks` (asserted: more than one, and not the old fixed
+    /// prefill_batch cut), the follow-up after prefix reuse. Each reply ==
+    /// a fresh prefill's (`fresh`: prefill_batch chunks + forward), and the
+    /// cache image (`kv_save`, positions 0..fed) and the next logits ==
+    /// per-token decode of the same history.
+    #[test]
+    fn long_turn_matches_fresh_prefill_cuda() {
+        use crate::cuda::qwen2::CudaQwen2;
+        use crate::kvsave::KvIo;
+        use crate::lm::Lm;
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let Some(m) = crate::testutil::model() else {
+            return;
+        };
+        let km = crate::cuda::Kernels::module(&g).unwrap();
+        let tok = Tokenizer::from_gguf(&m);
+        let ctx = 4096;
+        let net = CudaQwen2::new(&g, &km, &m, ctx).unwrap();
+        let mut long = String::from("Summarize these notes in one sentence.\n");
+        let mut i = 0;
+        while tok.encode(&long).len() < 1500 {
+            long.push_str(&format!(
+                "Note {i}: the {} river flows past {} hills toward the sea.\n",
+                ["green", "slow", "cold", "wide"][i % 4],
+                ["seven", "low", "dry", "pine"][i % 4]
+            ));
+            i += 1;
+        }
+        let mut chat = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), ctx).unwrap();
+        chat.max_reply = 16;
+        for (t, msg) in [long.as_str(), "And in three words?"]
+            .into_iter()
+            .enumerate()
+        {
+            let before = chat.fed;
+            let r = chat.reply(msg, &|| false, &mut |_| Ok(())).unwrap();
+            assert!(!r.interrupted && r.dropped == 0);
+            let end = chat.hist.len() - r.ids.len() - 2;
+            let prompt = &chat.hist[..end];
+            let want = fresh(chat.net, prompt, chat.max_reply, &chat.fr.stop);
+            assert_eq!(r.ids, want, "turn {t}");
+            let n = end - before;
+            let rs = chat.net.prompt_chunks(n, before, &chat.cache);
+            eprintln!("turn {t}: {n} tokens fed from {before} in {rs:?}");
+            if t == 0 {
+                assert!(rs.len() >= 2, "turn 0: one pass ({rs:?})");
+                let old = crate::lm::chunk_ranges(n, chat.net.prefill_batch());
+                assert_ne!(rs, old, "turn 0: the old prefill_batch cut");
+            }
+        }
+        // The cache: per-token decode of the whole history.
+        let fed = chat.fed;
+        let mut d = net.new_cache(ctx);
+        for (p, &t) in chat.hist[..fed].iter().enumerate() {
+            net.forward(t, p, &mut d);
+        }
+        let mut want = Vec::new();
+        net.kv_save(&d, 0, fed, &mut want).unwrap();
+        assert!(cache_image(&chat) == want, "KV after the turns");
+        let probe = chat.hist[fed - 1];
+        let a = net.forward(probe, fed, &mut d);
+        let b = net.forward(probe, fed, &mut chat.cache);
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&a), bits(&b), "next logits");
     }
 
     /// A scratch session file path for a test (removed first).
