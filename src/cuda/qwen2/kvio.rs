@@ -16,11 +16,15 @@ const STAGE: usize = 64 << 20;
 /// arrays of `max_ctx` rows (`CudaCache::kv`'s layout); `base` is the
 /// row a sequence starts at (a pool slot's `slot * ctx`), and `len` its
 /// positions (a slot's ctx: its rows end there, the next slot's begin).
+/// Paged (`tab`, a sequence's page list): position t is at row
+/// `tab[t / PAGE] * PAGE + t % PAGE` (base 0), a page's rows contiguous in
+/// each array as before.
 pub(crate) struct Rows<'a, 'g> {
     pub kv: &'a DevBuf<'g>,
     pub max_ctx: usize,
     pub base: usize,
     pub len: usize,
+    pub tab: Option<Vec<u32>>,
     /// Bytes per row of each region.
     pub regions: Vec<usize>,
     pub arrays: usize,
@@ -43,9 +47,13 @@ impl Rows<'_, '_> {
         to_dev: bool,
     ) -> Result<(), String> {
         let n = hi - lo;
+        let first = match &self.tab {
+            None => self.base + lo,
+            Some(t) => t[lo / PAGE] as usize * PAGE + lo % PAGE,
+        };
         let (mut img, mut reg) = (at, 0);
         for &row in &self.regions {
-            let off = reg + (self.base + lo) * row;
+            let off = reg + first * row;
             let shape = (n * row, self.arrays);
             let pitch = self.max_ctx * row;
             if to_dev {
@@ -126,7 +134,16 @@ impl Rows<'_, '_> {
     }
 
     fn check(&self, lo: usize, hi: usize) -> io::Result<()> {
-        if lo > hi || hi > self.len || self.base + hi > self.max_ctx {
+        let rows_ok = match &self.tab {
+            None => self.base + hi <= self.max_ctx,
+            Some(t) => {
+                hi.div_ceil(PAGE) <= t.len()
+                    && t[..hi.div_ceil(PAGE)]
+                        .iter()
+                        .all(|&p| (p as usize + 1) * PAGE <= self.max_ctx)
+            }
+        };
+        if lo > hi || hi > self.len || !rows_ok {
             return Err(io::Error::other(format!(
                 "positions {lo}..{hi} of a {}-position sequence at row {} of a {}-row cache",
                 self.len, self.base, self.max_ctx
@@ -151,21 +168,38 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// `c`'s rows (a whole cache: base 0; a slot view: its slot's, and
-    /// no further). Plain rows only: a paged cache's positions are in its
-    /// table's pages (not yet supported here).
-    pub(crate) fn cache_rows<'a>(&self, c: &'a CudaCache<'g>) -> Rows<'a, 'g> {
-        assert!(
-            c.tab.is_none(),
-            "kv save/load of a paged cache: rows aren't positions"
-        );
-        Rows {
+    /// no further; a paged pool's slot view: through its table row, read
+    /// back from the device: only the pages the slot holds are its).
+    pub(crate) fn cache_rows<'a>(&self, c: &'a CudaCache<'g>) -> io::Result<Rows<'a, 'g>> {
+        let tab = match &c.tab {
+            None => None,
+            Some(t) => {
+                let all: Vec<u32> = t.read().map_err(io::Error::other)?;
+                let n = c.max_ctx.div_ceil(PAGE);
+                let row = all
+                    .get(c.tab0..(c.tab0 + n).min(all.len()))
+                    .ok_or_else(|| io::Error::other("a paged cache's table past the pool's"))?;
+                // A pool's slot view: the sink's entries (positions the slot
+                // holds no page for) end the list.
+                let sink = (c.rows / PAGE - 1) as u32;
+                let held = row.iter().copied().take_while(|&p| !c.view || p != sink);
+                Some(held.collect())
+            }
+        };
+        Ok(Rows {
             kv: &c.kv,
             max_ctx: c.rows,
-            base: c.row0,
+            base: if tab.is_some() { 0 } else { c.row0 },
             len: c.max_ctx,
+            tab,
             regions: self.kv_regions(c.mode),
             arrays: 2 * self.layers.len(),
-        }
+        })
+    }
+
+    /// Image bytes of one position of a `c` cache.
+    pub(crate) fn cache_row_bytes(&self, c: &CudaCache) -> usize {
+        2 * self.layers.len() * self.kv_regions(c.mode).iter().sum::<usize>()
     }
 
     /// The KV type `c` stores, as kvsave's identity names it.
@@ -197,12 +231,7 @@ impl<'g> CudaQwen2<'g> {
         if c.net != self.id {
             return Err(io::Error::other("a cache of another model"));
         }
-        if c.tab.is_some() {
-            return Err(io::Error::other(
-                "kv save/load of a paged cache isn't supported yet",
-            ));
-        }
-        self.cache_rows(c).save(self.gpu, lo, hi, out)
+        self.cache_rows(c)?.save(self.gpu, lo, hi, out)
     }
 
     /// Positions lo..hi of `c` from their image in `src`.
@@ -216,12 +245,7 @@ impl<'g> CudaQwen2<'g> {
         if c.net != self.id {
             return Err(io::Error::other("a cache of another model"));
         }
-        if c.tab.is_some() {
-            return Err(io::Error::other(
-                "kv save/load of a paged cache isn't supported yet",
-            ));
-        }
-        self.cache_rows(c).load(self.gpu, lo, hi, src)
+        self.cache_rows(c)?.load(self.gpu, lo, hi, src)
     }
 }
 
@@ -261,6 +285,7 @@ mod tests {
         let dev = g.alloc(total).unwrap();
         dev.write(&src).unwrap();
         let rows = |kv| Rows {
+            tab: None,
             kv,
             max_ctx,
             base,
@@ -343,6 +368,7 @@ mod tests {
         let s = time(&g, n, || host.copy_to(&dev, 0, bytes).unwrap());
         report("H2D contiguous", s);
         let rows = Rows {
+            tab: None,
             kv: &dev,
             max_ctx: ctx,
             base: 0,

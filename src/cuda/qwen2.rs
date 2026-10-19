@@ -549,8 +549,8 @@ pub struct CudaCache<'g> {
     /// The row position 0 is at (0, or a view's slot's first row).
     row0: usize,
     /// A view of a pool's rows (`slot_view`), whatever its row0 (slot 0's
-    /// view has row0 0): never paged (`set_tab`, `retarget_view`).
-    #[cfg_attr(not(test), allow(dead_code))] // read by set_tab (tests, until stage 2)
+    /// view has row0 0): `set_tab` refuses it (a paged pool's views share
+    /// its table: `slot_view`).
     view: bool,
     /// Q8: this token's keys and values, f32 [2][kv_dim], on their way into
     /// the cache (qkv_rope_f32 to attn_split_q8). Empty for F16.
@@ -592,14 +592,20 @@ pub struct CudaCache<'g> {
     /// Paged KV (specs r11): the page table, u32 entries (decode.cu
     /// pg_row; None: plain rows, the identity). A one-sequence pass reads
     /// the sequence's table from entry `Place::Seq` base on, a `Place::Rows`
-    /// token from its `RowAt::base`; the decode step from entry 0.
-    tab: Option<DevBuf<'g>>,
+    /// token from its `RowAt::base`; the decode step from entry 0. Shared
+    /// by a paged pool and its slot views (`slot_view`).
+    tab: Option<Rc<DevBuf<'g>>>,
+    /// The table entry this cache's position 0 is at (a paged pool's slot
+    /// view: its slot's first entry; else 0).
+    tab0: usize,
 }
 
 impl<'g> CudaCache<'g> {
     /// The page table from entry `e` on, as a kernel argument (null: none).
     fn tab_at(&self, e: usize) -> Arg {
-        self.tab.as_ref().map_or(Arg::Ptr(0), |t| t.arg_at(e * 4))
+        self.tab
+            .as_ref()
+            .map_or(Arg::Ptr(0), |t| t.arg_at((self.tab0 + e) * 4))
     }
 
     /// Debug builds: a sequence counted from `base` (paged: its first table
@@ -610,7 +616,7 @@ impl<'g> CudaCache<'g> {
     pub(super) fn debug_covers(&self, base: usize, end: usize) {
         match &self.tab {
             Some(t) => debug_assert!(
-                base + end.div_ceil(ATT_BLK) <= t.len() / 4,
+                self.tab0 + base + end.div_ceil(ATT_BLK) <= t.len() / 4,
                 "positions ..{end} from table entry {base}: the table has {} entries",
                 t.len() / 4
             ),
@@ -634,7 +640,8 @@ impl<'g> CudaCache<'g> {
             self.view || Rc::strong_count(&self.kv) == 1,
             "set_tab on a pool with live slot views"
         );
-        self.tab = tab;
+        self.tab = tab.map(Rc::new);
+        self.tab0 = 0;
         self.drop_graphs();
     }
 
@@ -1830,17 +1837,20 @@ impl<'g> CudaQwen2<'g> {
         mode: CacheKv,
         att_ctx: usize,
     ) -> Result<CudaCache<'g>, String> {
-        self.make_cache(max_ctx, mode, att_ctx, None)
+        self.make_cache(max_ctx, mode, att_ctx, None, true)
     }
 
     /// `try_cache_at`; with `shared` (a pool's KV, its rows per array and
     /// the view's first row) a view of those rows: no KV of its own.
+    /// Without `batch`, no batch scratch either (a paged pool's view
+    /// borrows the pool's: `lend_scratch`).
     pub(super) fn make_cache(
         &self,
         max_ctx: usize,
         mode: CacheKv,
         att_ctx: usize,
         shared: Option<(Rc<DevBuf<'g>>, usize, usize)>,
+        batch: bool,
     ) -> Result<CudaCache<'g>, String> {
         let g = self.gpu;
         let f = 4;
@@ -1865,8 +1875,13 @@ impl<'g> CudaQwen2<'g> {
             None => self.kv_cache_bytes(mode, max_ctx),
             Some(_) => 0,
         };
+        let no_batch = match batch {
+            true => 0,
+            false => self.batch_bytes(self.batch_for(att_ctx), att_ctx),
+        };
         let want = (self.cache_bytes_kv(mode, att_ctx) - self.kv_cache_bytes(mode, att_ctx)
-            + own_kv) as u64
+            + own_kv
+            - no_batch) as u64
             + CACHE_HEADROOM;
         let free = g.info()?.free_bytes;
         if want > free {
@@ -1934,9 +1949,13 @@ impl<'g> CudaQwen2<'g> {
             },
             graph: [[None, None, None], [None, None, None]],
             graph_gen: 0,
-            b: Some(self.batch_bufs(self.batch_for(att_ctx), att_ctx)?),
+            b: match batch {
+                true => Some(self.batch_bufs(self.batch_for(att_ctx), att_ctx)?),
+                false => None,
+            },
             samp: None,
             tab: None,
+            tab0: 0,
         };
         // Stale KV rows are never read (attention stops at pos), but zeroed
         // memory keeps a bug from reading NaNs (a view's pool zeroed its).
@@ -2632,10 +2651,29 @@ impl<'g> CudaQwen2<'g> {
         }
         let (long, slot) = (cmb64 as usize, head as usize);
         if c.graph[long][slot].is_none() {
-            let g = self
+            let mut made = self
                 .gpu
-                .capture(|| self.enqueue(c, head, cmb64, &mut |_, _| Ok(())))?;
-            c.graph[long][slot] = Some(g);
+                .capture(|| self.enqueue(c, head, cmb64, &mut |_, _| Ok(())));
+            // Out of memory instantiating it (other processes take VRAM after
+            // a server plans its pool): this cache's other graphs go, one retry,
+            // else this step runs kernel by kernel (the same kernels: the same
+            // bits). Never fatal.
+            if made.as_ref().is_err_and(|e| is_oom(e)) {
+                let n = c.graph.iter().flatten().filter(|g| g.is_some()).count();
+                GRAPH_EVICTED.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                c.drop_graphs();
+                made = self
+                    .gpu
+                    .capture(|| self.enqueue(c, head, cmb64, &mut |_, _| Ok(())));
+            }
+            match made {
+                Ok(g) => c.graph[long][slot] = Some(g),
+                Err(e) if is_oom(&e) => {
+                    GRAPH_EAGER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return self.enqueue(c, head, cmb64, &mut |_, _| Ok(()));
+                }
+                Err(e) => return Err(e),
+            }
         }
         // SAFETY: the graph's buffers are the cache's and the model's, both
         // borrowed for this call; the cache owns the graph, so it can't
@@ -3170,6 +3208,28 @@ pub(crate) mod mla;
 pub(crate) mod moe;
 #[cfg(test)]
 mod paged_tests;
+pub(crate) mod pages;
+
+/// Captured CUDA graphs given up when instantiating another ran out of
+/// memory (the step's graph cache emptied to make room, then one retry),
+/// and steps run kernel by kernel because even that failed: the same
+/// kernels in the same order, so the same bits. Process-wide (GET /slots
+/// reports them).
+pub(crate) static GRAPH_EVICTED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub(crate) static GRAPH_EAGER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether a CUDA error string is an out-of-memory (not sticky: the context
+/// is fine, the allocation failed).
+pub(crate) fn is_oom(e: &str) -> bool {
+    e.contains("CUDA_ERROR_OUT_OF_MEMORY")
+}
+
+/// (`GRAPH_EVICTED`, `GRAPH_EAGER`) so far.
+pub fn graph_oom_counts() -> (u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (GRAPH_EVICTED.load(Relaxed), GRAPH_EAGER.load(Relaxed))
+}
 pub mod pipeline;
 #[cfg(test)]
 mod sample_tests;

@@ -116,6 +116,25 @@ static PREINIT: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> =
 /// it). The context's retain is never released: the process keeps the
 /// primary context it's about to use anyway. Call `settle` before exiting
 /// without opening the GPU (exit mustn't race a thread inside the driver).
+/// Tests: the next `n` graph instantiations fail as out of memory
+/// (`inject_graph_oom`), so the fallback path runs on any host without
+/// starving the GPU.
+#[cfg(test)]
+static INJECT_GRAPH_OOM: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[cfg(test)]
+pub(crate) fn inject_graph_oom(n: usize) {
+    INJECT_GRAPH_OOM.store(n, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(test)]
+fn take_injected_graph_oom() -> bool {
+    use std::sync::atomic::Ordering::SeqCst;
+    INJECT_GRAPH_OOM
+        .fetch_update(SeqCst, SeqCst, |n| n.checked_sub(1))
+        .is_ok()
+}
+
 pub fn preinit() {
     if !cfg!(target_os = "linux") {
         return;
@@ -575,6 +594,14 @@ impl Gpu {
         drop(gate);
         check(self.d, r, "cuStreamEndCapture")?;
         let mut exec: ffi::CUgraphExec = std::ptr::null_mut();
+        #[cfg(test)]
+        if take_injected_graph_oom() {
+            // SAFETY: the captured graph, never instantiated.
+            unsafe { (self.d.cuGraphDestroy)(g) };
+            return Err(
+                "cuGraphInstantiateWithFlags: CUDA_ERROR_OUT_OF_MEMORY: injected (test)".into(),
+            );
+        }
         // SAFETY: g is the captured graph; writes the executable graph.
         let r = unsafe { (self.d.cuGraphInstantiateWithFlags)(&mut exec, g, 0) };
         // SAFETY: the graph itself isn't needed once instantiated (or failed).

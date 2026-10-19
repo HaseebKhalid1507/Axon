@@ -140,14 +140,14 @@ Works today, honestly scoped:
   all of its tokens, so drafting pays far more there (`docs/design/spec-split.md`).
 - Serving: `axon serve`, an OpenAI-compatible HTTP server (below) with tool calling. On one GPU it
   batches the decode steps of concurrent requests (`--parallel N`) and feeds new prompts in chunks
-  between them, every slot one KV cache (no extra cache for a request running alone); elsewhere it
+  between them, over a paged KV cache (64-position pages shared by every slot: a slot holds only the
+  positions it has; no extra cache for a request running alone); elsewhere it
   runs one request at a time. Besides chat completions it speaks OpenAI's Responses API (what codex
   uses) and ollama's native API ([docs/serve-apis.md](docs/serve-apis.md)). Operations: `--api-key`,
   `GET /metrics` (Prometheus), `GET /slots`, `--max-prompt-tokens`, `--slot-idle-ms`.
 - Rust 1.89 or newer.
 
-Not on main yet: tensor parallel, paged KV in `serve` (the kernels read through a page table; the pool
-doesn't use it yet), saving and restoring `serve` slots, streaming MoE experts through the GPU for long
+Not on main yet: tensor parallel, saving and restoring `serve` slots, streaming MoE experts through the GPU for long
 prompts (stage 3), and gpt-oss on the GPU. What's in flight and why: [docs/roadmap.md](docs/roadmap.md). How Axon is built and measured, and
 what was tried and dropped: [docs/methodology.md](docs/methodology.md),
 [docs/history.md](docs/history.md), [docs/experiments-rejected.md](docs/experiments-rejected.md).
@@ -301,7 +301,7 @@ flags of `chat`, plus `--host` (default 127.0.0.1), `--port` (default 8080), `--
 default: up to the context), `--cors [ORIGIN]` (answer CORS preflights and allow ORIGIN,
 default `*`, to call the server from web pages; off by default, so an arbitrary page can't
 use your local model), `--max-conns N` / `--max-queue N` (defaults 256 / 128),
-`--parallel N` (requests decoded at once on the GPU, default 8; 1: one at a time),
+`--parallel N` (requests decoded at once on the GPU, default 16 with paged KV, 8 without; 1: one at a time),
 `--prefill-ms MS` / `--prefill-chunk N` (how much prompt a batched step feeds while others
 decode: up to what fits in MS ms beside their decode step, at least N tokens; defaults 60 /
 256; `--prefill-ms 0`: exactly N tokens; `--prefill-chunk 0`: whole prompts), `--quiet`
@@ -331,24 +331,39 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
   to whole prefill passes; 4096 tokens until the server has measured a chunk's cost); a
   prompt that 4 shorter, younger ones have finished ahead of goes first. A long prompt sent
   to an idle server alone takes the single-stream path below and is fed whole: a request
-  arriving during that prefill waits for it. Each slot is a KV cache as long as the context, and a
-  pool of N slots costs N caches (7B at 32768: 1.75 GiB each): the request running alone
-  runs in a slot's memory (its own scratch beside it, no cache of its own), picked as a
-  batched request's is: the slot holding the longest prefix of its prompt if that prefix is
-  at least half the slot's tokens or more than half the prompt's, else the one idle the
-  longest (a shared <bos> or system prompt doesn't evict a conversation).
-  Without `--ctx` or `--parallel` the context comes first: as many slots
-  (2 to 8) as fit with the whole context; if not even 2 do, 2 or more with the longest
-  context they fit with, down to 32768 (or the whole context, if shorter); below that, one
-  request at a time with the whole context, and stderr says at which context 2 would fit
-  (and how many `--kv q8` fits). Measured: Qwen2.5-7B Q4_K_M on a 12 GB laptop GPU serves 2
-  at once with 32768 (`--kv q8`: 5 at 32768), on a 24 GB RTX 4090 8 at once with 32768. `--parallel N` alone: N slots of the longest
-  context that fits them (down to 1024 positions). `--ctx N`: never shortened; the slots
-  that fit with it (up to `--parallel`), else one at a time. The server says on stderr what
-  it chose and why; the context it serves is a slot's (`/v1/models` `meta.n_ctx`; longer
-  prompts get a 400 `context_length_exceeded`). The Q6_K prefill copy (int8 Q6_K matrices
-  for prefill's tensor cores, same results; 1.02 GiB on 7B Q4_K_M) is made after the
-  caches and slots, only from the memory they leave (`AXON_Q6K8=0` never makes it).
+  arriving during that prefill waits for it. The KV cache is paged: a pool of 64-position
+  pages shared by every slot, a slot holding pages only for the positions it has, so the
+  context is a slot's cap, not memory reserved for it (`AXON_PAGED_KV=0`: the old pool of
+  slots reserved at the full context each). The pool is the GPU memory left beside the
+  weights and scratch (at most a page per position of every slot), up to 16 requests at once
+  by default (`--parallel N`: N); the context is the model's (or `--ctx N`), at most what the
+  pages hold. Placed automatically, the whole model stays on the GPU if it fits beside an
+  8192-token cache, whatever `--ctx` says (the pool takes what is left). A request starts
+  when a slot is free and the pages for its prompt are (with a page per running request to
+  grow into); else it waits in the queue. Idle slots keep their prefixes (a later request
+  sharing one reuses its rows) until their pages are needed, least recently used first.
+  When decode runs out of pages, the youngest prompt still being prefilled gives its pages
+  back, then the youngest running request is preempted (fed again later, the same output);
+  the oldest never is. The banner says the pool's shape (`KV: P pages x 64 = T tokens over
+  up to S slots (cap C)`), `GET /slots` each slot's `pages_used` and the pool's
+  `pages_free` / `pages_total`. Measured on a 12 GB laptop GPU at the default 32768: Qwen2.5-7B
+  Q4_K_M gets 1537 pages (98k tokens: 6 agents at 15k each; `--kv q8`: 2983 pages, 12), where
+  the reserved pool held 3 slots; Qwen2.5-14B Q4_K_M with `--kv q8 --ctx 32768` stays on the
+  GPU with ~15k tokens of pages instead of splitting. The request running alone runs in a slot's pages (its own
+  scratch beside it, no cache of its own), picked as a batched request's is: the slot
+  holding the longest prefix of its prompt if that prefix is at least half the slot's
+  tokens or more than half the prompt's, else the one idle the longest (a shared <bos> or
+  system prompt doesn't evict a conversation). With `AXON_PAGED_KV=0`, without `--ctx` or
+  `--parallel` the context comes first: as many slots (2 to 8) as fit with the whole
+  context; if not even 2 do, 2 or more with the longest context they fit with, down to
+  32768 (or the whole context, if shorter); below that, one request at a time with the
+  whole context. `--parallel N` alone: N slots of the longest context that fits them (down
+  to 1024 positions). `--ctx N`: never shortened; the slots that fit with it (up to
+  `--parallel`), else one at a time. The server says on stderr what it chose and why; the
+  context it serves is a slot's (`/v1/models` `meta.n_ctx`; longer prompts get a 400
+  `context_length_exceeded`). The Q6_K prefill copy (int8 Q6_K matrices for prefill's tensor
+  cores, same results; 1.02 GiB on 7B Q4_K_M) is made after the caches and slots, only from
+  the memory they leave (`AXON_Q6K8=0` never makes it).
   A request running alone takes the single-stream path (CUDA graphs, `--draft`), and
   moves into the batch when a second one arrives (its rows are already in its slot: nothing
   is copied). Every request's output is exactly what it

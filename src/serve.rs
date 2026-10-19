@@ -122,6 +122,12 @@ pub struct Opts {
     /// Positions per slot at most (None: the context; tests shrink the pool
     /// with it).
     pub slot_ctx: Option<usize>,
+    /// A paged pool's KV pages (None: as many as fit; tests squeeze the
+    /// pool with it).
+    pub kv_pages: Option<usize>,
+    /// Generated tokens a paged admission reserves pages for (None: the
+    /// engine's GROW_TOKENS; tests set 0 to force preemption).
+    pub kv_grow: Option<usize>,
     /// Prompt tokens a batched step feeds at least while requests decode
     /// (`--prefill-chunk`; 0: prompts fed whole): a long prompt prefills in
     /// chunks between the running requests' steps.
@@ -568,6 +574,7 @@ impl<'a> Engine<'a> {
                 held: self.hist.len(),
                 busy: true,
                 request: Some((id, job.arrived)),
+                pages: None,
             },
         );
         let r = or_exit(&format!("request #{id}"), || self.job(job, ho));
@@ -763,6 +770,9 @@ struct Loaded {
     /// The longest token's bytes: a prompt of more than `ctx` times this
     /// many bytes is more than `ctx` tokens, refused before encoding it.
     max_token_bytes: usize,
+    /// Why the context is `ctx`, for a too-long prompt's error ("--ctx", or
+    /// what a paged pool's pages hold and how to get more).
+    ctx_why: String,
     banner: String,
     /// What decides the output bits (`crate::identity`): every response's
     /// `system_fingerprint`, GET /identity.
@@ -828,9 +838,12 @@ fn engine(
             .unwrap_or_else(|e| crate::fail(&format!("--draft-model {e}")))
     });
     // The Q6_K prefill copy waits for the cache and slots (below).
+    // AXON_PAGED_KV, read once for this server.
+    let paged_env = crate::cuda::qwen2::pages::paged_env();
     let place = crate::lm::Placing {
         split_ctx,
         defer_q6k8: true,
+        paged: paged_serve(device, o.parallel, paged_env),
     };
     let (mut net, drafter) = crate::backend_and_drafter(
         &model,
@@ -880,7 +893,8 @@ fn engine(
         }
         _ => (ctx, why),
     };
-    if let Some(why) = why.filter(|_| o.log) {
+    // (A paged pool plans its own context: below.)
+    if let Some(why) = why.filter(|_| o.log && !paged_serve(device, o.parallel, paged_env)) {
         eprintln!("axon serve: context {ctx} tokens: {why}");
     }
     let template = Template::new(tok, &model.arch);
@@ -908,15 +922,65 @@ fn engine(
     // The slots and their context (`plan_slots`), measured against the GPU
     // memory free now: a pool of N slots is N caches (the single-request
     // path runs in a slot, with scratch of its own: `serve_bytes_kv`).
+    let kv = match o.kv {
+        KvType::Q8 => CacheKv::Q8 { group: 0 },
+        _ => CacheKv::F16,
+    };
+    // Paged KV (specs r11): a slot is a cap, the pool a page budget.
+    let paged = match &net {
+        Backend::Cuda(n) if paged_serve(device, o.parallel, paged_env) => {
+            let slots = if o.parallel_set {
+                o.parallel
+            } else {
+                PAGED_PARALLEL
+            };
+            let plan = n
+                .free_bytes()
+                .ok()
+                .and_then(|free| paged_plan(n, kv, want.max(ctx), slots, free as usize, !fit));
+            if plan.is_none() && !fit && o.log {
+                eprintln!(
+                    "axon serve: KV pages for one {ctx}-token sequence (--ctx) don't fit beside \
+                     the model: slots reserved at the full context instead"
+                );
+            }
+            // Tests: fewer pages (the cap within them).
+            plan.map(|p| match o.kv_pages {
+                Some(k) => PagedPlan {
+                    pages: k.min(p.pages),
+                    cap: p.cap.min(k.min(p.pages) * PAGE_TOKENS),
+                    ..p
+                },
+                None => p,
+            })
+        }
+        _ => None,
+    };
     let plan = match &net {
+        _ if paged.is_some() => {
+            let p = paged.as_ref().expect("paged");
+            SlotPlan {
+                slots: p.slots,
+                ctx: p.cap,
+                note: (p.cap < want).then(|| {
+                    format!(
+                        "context {} tokens: the KV pages that fit in GPU memory hold {} tokens, \
+                         of the model's {want}{}",
+                        p.cap,
+                        p.pages * PAGE_TOKENS,
+                        if kv == CacheKv::F16 {
+                            " (--kv q8 holds twice as many)"
+                        } else {
+                            ""
+                        }
+                    )
+                }),
+            }
+        }
         Backend::Cuda(n) if o.parallel > 1 => match n.free_bytes() {
             Ok(free) => {
                 let free = free as usize;
                 let fits = |kv, s, c| n.serve_bytes_kv(kv, s, c) + POOL_SPARE <= free;
-                let kv = match o.kv {
-                    KvType::Q8 => CacheKv::Q8 { group: 0 },
-                    _ => CacheKv::F16,
-                };
                 let mut p =
                     plan_slots(ctx, !fit, o.parallel, o.parallel_set, |s, c| fits(kv, s, c));
                 // The q8 cache's slots at this context, for the note.
@@ -946,7 +1010,11 @@ fn engine(
         n => {
             // Tests shrink the slots below the context (`Opts::slot_ctx`).
             let slot_ctx = o.slot_ctx.map_or(ctx, |c| c.min(ctx));
-            match net.new_pool(n, slot_ctx) {
+            let made = match &paged {
+                Some(p) => net.new_pool_paged(n, slot_ctx, p.pages),
+                None => net.new_pool(n, slot_ctx),
+            };
+            match made {
                 Ok(pool) => Some((pool, n, slot_ctx)),
                 Err(why) => {
                     if o.log {
@@ -1000,12 +1068,25 @@ fn engine(
             floor: o.prefill_chunk,
             ms: o.prefill_ms,
         };
-        Batch::new(&net, pool, n, slot_ctx, policy, o.log, e.generated.clone())
+        let mut b = Batch::new(&net, pool, n, slot_ctx, policy, o.log, e.generated.clone());
+        if let Some(g) = o.kv_grow {
+            b.set_grow_tokens(g);
+        }
+        b
     });
     let served = batch.as_ref().map_or(ctx, |b| b.ctx.min(ctx));
-    let banner = match &batch {
-        Some(b) => format!("{kvs}, ctx {served}{drafts}, {} requests at once", b.slots),
-        None => format!("{kvs}, ctx {ctx}{drafts}, one request at a time"),
+    let banner = match (&batch, &paged) {
+        (Some(b), Some(p)) => format!(
+            "{kvs}, ctx {served}{drafts}, every layer on the GPU, KV: {} pages x {PAGE_TOKENS} = \
+             {} tokens ({} sequences of the full {served} at once) over up to {} slots \
+             (cap {served})",
+            p.pages,
+            p.pages * PAGE_TOKENS,
+            p.pages / served.div_ceil(PAGE_TOKENS).max(1),
+            b.slots
+        ),
+        (Some(b), None) => format!("{kvs}, ctx {served}{drafts}, {} requests at once", b.slots),
+        (None, _) => format!("{kvs}, ctx {ctx}{drafts}, one request at a time"),
     };
     let identity = crate::identity::of(&o.path, &model, &net);
     if ready
@@ -1014,6 +1095,16 @@ fn engine(
             template,
             ctx: served,
             max_token_bytes: tok.max_token_bytes(),
+            ctx_why: match &paged {
+                Some(p) if batch.is_some() && served < want => format!(
+                    "the KV pages that fit in GPU memory beside the model hold {} tokens: \
+                     send a shorter prompt, or start the server with {}a smaller model or \
+                     less else on the GPU",
+                    p.pages * PAGE_TOKENS,
+                    if kv == CacheKv::F16 { "--kv q8, " } else { "" }
+                ),
+                _ => "--ctx".into(),
+            },
             banner,
             identity,
             arch: model.arch.clone(),
@@ -1026,7 +1117,14 @@ fn engine(
     let mut waiting: VecDeque<Job> = VecDeque::new();
     loop {
         if let Some(b) = &batch {
-            o.metrics.publish_pool(b.slot_states());
+            let pages = b.pages().map(|p| ops::PagesView {
+                free: p.free,
+                total: p.total,
+                size: p.size,
+                preempted: b.preempted,
+                unfed: b.unfed,
+            });
+            o.metrics.publish_pool(b.slot_states(), pages);
         }
         if batch.as_ref().is_none_or(Batch::idle) && waiting.is_empty() {
             match jobs.recv_timeout(Duration::from_millis(100)) {
@@ -1060,12 +1158,15 @@ fn engine(
         // as does one that fits no slot, once the batch is idle.
         let first_fit = waiting.iter().position(|j| fits_slot(j, b.ctx));
         if let Some(i) = first_fit
-            && b.has_free()
+            && b.can_admit(&waiting[i])
             && (!b.idle() || waiting.len() > 1)
         {
             let job = waiting.remove(i).unwrap();
             let out = text_out(e.tok, &job);
-            b.admit(job, out);
+            let tx = job.tx.clone();
+            if let Err(err) = or_exit("an admission", || b.admit(job, out)) {
+                fatal(b, &err, Some(tx));
+            }
         } else if b.idle() {
             if let Some(job) = waiting.pop_front() {
                 let ho = Handover {
@@ -1079,7 +1180,7 @@ fn engine(
                 // least recently used): from the rows the slot holds, and
                 // the slot holds its rows after.
                 let lent = or_exit("a slot for a request alone", || {
-                    b.lend_solo(&job.prompt, &mut e.cache)
+                    b.lend_solo(&job.prompt, job.n_gen, &mut e.cache)
                 });
                 match lent {
                     Ok(hist) => e.hist = hist,
@@ -1089,11 +1190,15 @@ fn engine(
                 match e.run(job, Some(ho)) {
                     Some(seq) => {
                         let tx = seq.job.tx.clone();
-                        if let Err(err) = or_exit("a hand-over", || b.adopt(seq, &e.cache)) {
+                        if let Err(err) = or_exit("a hand-over", || b.adopt(seq, &mut e.cache)) {
                             fatal(b, &err, Some(tx));
                         }
                     }
-                    None => b.end_solo(std::mem::take(&mut e.hist)),
+                    None => {
+                        if let Err(err) = b.end_solo(std::mem::take(&mut e.hist), &mut e.cache) {
+                            fatal(b, &err, None);
+                        }
+                    }
                 }
             }
             continue;
@@ -1128,6 +1233,92 @@ pub const AGENT_CTX: usize = 32768;
 /// VRAM a pool leaves free beyond itself and the single-request path's
 /// scratch (transient buffers).
 const POOL_SPARE: usize = 256 << 20;
+
+/// Most requests at once with paged KV when --parallel isn't given: a
+/// slot costs a table row and its scratch, its KV only what it holds.
+const PAGED_PARALLEL: usize = 16;
+
+/// Positions per KV page (cuda qwen2 pages.rs).
+const PAGE_TOKENS: usize = 64;
+
+/// Whether serve's pool is paged: the GPU, batching, AXON_PAGED_KV != 0
+/// (`paged_env`, read once at serve's start).
+fn paged_serve(device: Device, parallel: usize, paged_env: bool) -> bool {
+    device == Device::Cuda && parallel > 1 && paged_env
+}
+
+/// A paged pool's shape: up to `slots` requests of up to `cap` positions
+/// over `pages` KV pages.
+#[derive(Clone, Copy)]
+struct PagedPlan {
+    slots: usize,
+    cap: usize,
+    pages: usize,
+}
+
+/// The paged pool for `free` bytes of GPU memory: every byte past the
+/// pool's scratch (sized by the cap), the single-request path's and
+/// POOL_SPARE in pages, at most a page per position of every slot (a
+/// smaller pool leaves room for the Q6_K prefill copy). The cap is the
+/// context `want`, at most the pages' tokens (a request alone always has
+/// its pages: idle prefixes give theirs up), a whole number of pages;
+/// under 1024, or 2 slots, no pool.
+fn paged_plan(
+    n: &crate::cuda::qwen2::CudaQwen2,
+    kv: CacheKv,
+    want: usize,
+    slots: usize,
+    free: usize,
+    exact: bool,
+) -> Option<PagedPlan> {
+    let fixed = |cap: usize| n.serve_paged_bytes(kv, slots, cap, 0);
+    paged_plan_with(want, slots, free, exact, fixed, n.page_bytes(kv))
+}
+
+/// `paged_plan` over a model of the memory: `fixed(cap)` the pool's and
+/// the view's bytes besides the pages at a cap, `page` a page's bytes.
+/// `exact` (--ctx given): the cap is `want` or there's no paged plan (the
+/// caller falls back to reserved slots, one request at a time at worst):
+/// at least one full sequence of --ctx always fits.
+fn paged_plan_with(
+    want: usize,
+    slots: usize,
+    free: usize,
+    exact: bool,
+    fixed: impl Fn(usize) -> usize,
+    page: usize,
+) -> Option<PagedPlan> {
+    if slots < 2 {
+        return None;
+    }
+    let pages = |cap: usize| {
+        let budget = free.checked_sub(fixed(cap) + POOL_SPARE)?;
+        Some((budget / page).min(slots * cap.div_ceil(PAGE_TOKENS)))
+    };
+    // The longest cap the pages hold (a longer cap's scratch leaves fewer
+    // pages): the whole context, else a whole number of pages.
+    let holds = |cap: usize| pages(cap).is_some_and(|p| p * PAGE_TOKENS >= cap);
+    let cap = match (holds(want), exact) {
+        (true, _) => want,
+        (false, true) => return None,
+        (false, false) => {
+            let (mut lo, mut hi) = (0, want / PAGE_TOKENS);
+            while lo < hi {
+                let mid = (lo + hi).div_ceil(2);
+                match holds(mid * PAGE_TOKENS) {
+                    true => lo = mid,
+                    false => hi = mid - 1,
+                }
+            }
+            lo * PAGE_TOKENS
+        }
+    };
+    (cap >= 1024).then(|| PagedPlan {
+        slots,
+        cap,
+        pages: pages(cap).expect("holds"),
+    })
+}
 
 /// RAM a CPU server's default context leaves free beyond its KV cache.
 const RAM_MARGIN: u64 = 1 << 30;
@@ -1323,6 +1514,8 @@ struct EngineOpts {
     parallel: usize,
     parallel_set: bool,
     slot_ctx: Option<usize>,
+    kv_pages: Option<usize>,
+    kv_grow: Option<usize>,
     prefill_chunk: usize,
     prefill_ms: usize,
     path: String,
@@ -1428,6 +1621,8 @@ pub fn start(o: Opts) -> io::Result<Server> {
         parallel: o.parallel,
         parallel_set: o.parallel_set,
         slot_ctx: o.slot_ctx,
+        kv_pages: o.kv_pages,
+        kv_grow: o.kv_grow,
         prefill_chunk: o.prefill_chunk,
         prefill_ms: o.prefill_ms,
         generated: generated.clone(),
@@ -1934,7 +2129,10 @@ fn run_request(
     let too_long = |n: String| {
         let mut e = ApiError::bad(
             out.prompt_param(&g),
-            format!("the prompt is {n}; the context is {} tokens (--ctx)", m.ctx),
+            format!(
+                "the prompt is {n}; the context is {} tokens ({})",
+                m.ctx, m.ctx_why
+            ),
         );
         e.code = Some("context_length_exceeded");
         e
@@ -2467,6 +2665,8 @@ pub fn run(args: &[String]) -> io::Result<()> {
         parallel: PARALLEL,
         parallel_set: false,
         slot_ctx: None,
+        kv_pages: None,
+        kv_grow: None,
         prefill_chunk: engine::PREFILL_CHUNK,
         prefill_ms: engine::PREFILL_MS,
         rope: Default::default(),
