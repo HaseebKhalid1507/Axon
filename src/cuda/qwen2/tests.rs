@@ -4184,16 +4184,29 @@ fn wave_passes_shapes() {
         wave_passes(2100, 1152, toy),
         Some(vec![0..1088, 1088..2100])
     );
-    // The RTX 4090 cells measured (#92): r15 pick 1's pp2100 split for 7B
-    // and Qwen3-8B (+3.0 % / +3.9 % e2e) stays; 7B pp1153 (704 + 449,
-    // -0.4 %), pp1777 (1024 + 753, +1.8 %) and pp3000 (1152 + 1152 + 696,
-    // +1.1 %) are under the margin now.
-    let at = |m: usize, n: usize| wave_passes(n, 1152, |nb| gemm_cost(&models[m].1, nb, g));
-    assert_eq!(at(0, 2100), Some(vec![0..1088, 1088..2100]));
-    assert_eq!(at(1, 2100), Some(vec![0..1088, 1088..2100]));
-    assert_eq!(at(0, 1153), None);
-    assert_eq!(at(0, 1777), None);
-    assert_eq!(at(0, 3000), None);
+    // The RTX 4090 cells measured (#92), with gemm2s (AXON_GEMM_TILE=64):
+    // r15 pick 1's pp2100 split for 7B and Qwen3-8B (+3.0 % / +3.9 % e2e)
+    // stays; 7B pp1153 (704 + 449, -0.4 %), pp1777 (1024 + 753, +1.8 %) and
+    // pp3000 (1152 + 1152 + 696, +1.1 %) are under the margin now.
+    let g64 = WaveGeom { tile_t: false, ..g };
+    let at =
+        |m: usize, n: usize, g: WaveGeom| wave_passes(n, 1152, |nb| gemm_cost(&models[m].1, nb, g));
+    for g in [g64, g] {
+        assert_eq!(at(0, 1153, g), None);
+        assert_eq!(at(0, 1777, g), None);
+        assert_eq!(at(0, 3000, g), None);
+    }
+    assert_eq!(at(0, 2100, g64), Some(vec![0..1088, 1088..2100]));
+    assert_eq!(at(1, 2100, g64), Some(vec![0..1088, 1088..2100]));
+    // With gemm2t (the default): 8B keeps 1088 + 1012. For 7B, 1152 + 948
+    // and 1088 + 1012 are both 33 token tiles and model the same within
+    // 0.01 %: per pass (gemm_cost, 1e15 units) 1050: 61.56, 1088: 61.56,
+    // 1012: 57.75, 1152: 64.13, 948: 55.18, so the equal 2 x 61.56 =
+    // 123.12, 1088 + 1012 = 119.311 (-3.09 %), 1152 + 948 = 119.305
+    // (-3.10 %), and the cheaper wins. Both beat the margin; neither is
+    // measured on a 4090 with gemm2t yet.
+    assert_eq!(at(0, 2100, g), Some(vec![0..1152, 1152..2100]));
+    assert_eq!(at(1, 2100, g), Some(vec![0..1088, 1088..2100]));
 }
 
 /// Batched prefill with AXON_WAVE_SPLIT's pass sizes == with the equal
