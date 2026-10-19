@@ -2060,7 +2060,7 @@ mod tests {
                     let at: Vec<RowAt> = (0..nb)
                         .map(|s| RowAt {
                             pos: depth as u32,
-                            base: (s * p.ctx) as u32,
+                            base: p.base(s) as u32,
                         })
                         .collect();
                     for round in 0..3 {
