@@ -1227,7 +1227,10 @@ pub fn load(
     let mut maps: Vec<Shard> = Vec::with_capacity(shard_list.len());
     let mut tensors: Vec<Tensor> = Vec::new();
     let mut jobs: Vec<Job> = Vec::new();
-    let mut aux_len = 0usize;
+    // Computed tensors (rope_freqs) first in `aux`: they're filled before
+    // `check` (which reads them: `model::rope_freqs`), and for a header-only load.
+    let freq_bytes = rope_freqs.as_ref().map_or(0, |f| f.len() * 4);
+    let mut aux_len = freq_bytes.next_multiple_of(64);
     let mut seen = std::collections::HashSet::new();
     let mut st_meta: Vec<(String, Val)> = Vec::new();
     for (si, (path, names)) in shard_list.iter().enumerate() {
@@ -1324,24 +1327,19 @@ pub fn load(
             "lm_head.weight is missing and tie_word_embeddings is false",
         ));
     }
-    let mut freq_vals = None;
-    if let Some(f) = rope_freqs {
-        let n_bytes = f.len() as u64 * 4;
-        let dst = aux_len;
-        aux_len = (aux_len + n_bytes as usize).next_multiple_of(64);
+    if let Some(f) = &rope_freqs {
         tensors.push(Tensor {
             name: "rope_freqs.weight".into(),
             dims: vec![f.len() as u64],
             qtype: crate::gguf::qtype(crate::quant::F32),
-            offset: dst as u64,
+            offset: 0,
             n_elements: f.len() as u64,
-            n_bytes,
+            n_bytes: freq_bytes as u64,
             layer: -1,
             kind: "rope_freqs.weight".into(),
             shard: AUX,
             hf: None,
         });
-        freq_vals = Some((dst, f));
     }
     metadata.extend(st_meta);
     // Tensors in GGUF order: globals, then by layer (stable within).
@@ -1354,21 +1352,30 @@ pub fn load(
     let mut maps = maps.into_iter();
     let first = maps.next().expect("at least one shard");
     let mut m = Model::from_safetensors(arch, metadata, tensors, first, maps.collect(), source);
+    // The arena: the computed tensors, then (`fill`) the converted ones.
+    // `check` sees the computed part only (a mapping of just those bytes,
+    // same offsets): every tensor it may read; converting waits for its answer.
+    let put_freqs = |aux: &mut [u8]| {
+        for (i, v) in rope_freqs.iter().flatten().enumerate() {
+            aux[4 * i..4 * i + 4].copy_from_slice(&v.to_le_bytes());
+        }
+    };
+    if freq_bytes > 0 {
+        let mut small = memmap2::MmapMut::map_anon(freq_bytes)?;
+        put_freqs(&mut small);
+        m.set_aux(small.make_read_only()?);
+    }
     let _ = check(&m);
-    if aux_len > 0 && fill {
+    if aux_len > freq_bytes.next_multiple_of(64) && fill {
         let mut aux = memmap2::MmapMut::map_anon(aux_len.next_multiple_of(2 << 20))?;
         #[cfg(target_os = "linux")]
         {
             // Before the first touch (as gguf::copy_file). Failure only costs speed.
             let _ = aux.advise(memmap2::Advice::HugePage);
         }
+        put_freqs(&mut aux);
         let files: Vec<&File> = m.shard_files();
         run_jobs(&files, &jobs, &mut aux)?;
-        if let Some((dst, f)) = freq_vals {
-            for (i, v) in f.iter().enumerate() {
-                aux[dst + 4 * i..dst + 4 * i + 4].copy_from_slice(&v.to_le_bytes());
-            }
-        }
         drop(files);
         m.set_aux(aux.make_read_only()?);
     }

@@ -562,6 +562,11 @@ impl Model {
             return &s.map[..r.len()];
         }
         let (map, file_backed) = self.region(t.shard);
+        assert!(
+            r.end <= map.len(),
+            "tensor {} was not converted (a header-only load: gguf::load_header)",
+            t.name
+        );
         if !file_backed && self.any_released.load(std::sync::atomic::Ordering::Acquire) {
             // Unlocked before the panic: a caught one leaves the lock usable.
             let gone = (self.released.lock().unwrap().iter())

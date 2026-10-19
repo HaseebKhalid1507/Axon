@@ -840,6 +840,7 @@ fn metadata_parity(dir: &Path, gguf_path: &Path, except: &[&str]) -> (Model, Mod
     let a = g.arch.clone();
     assert_eq!(meta.arch, a);
     let get = |m: &[(String, Val)], k: &str| m.iter().find(|x| x.0 == k).map(|x| x.1.clone());
+    let mut bad = Vec::new();
     for k in READ_KEYS {
         let k = k.replace("{a}", &a);
         if except.contains(&k.as_str()) {
@@ -847,10 +848,11 @@ fn metadata_parity(dir: &Path, gguf_path: &Path, except: &[&str]) -> (Model, Mod
         }
         match (get(&meta.keys, &k), get(&g.metadata, &k)) {
             (None, None) => {}
-            (Some(x), Some(y)) => assert!(same_val(&x, &y), "{}: {k}: {x} vs {y}", dir.display()),
-            (x, y) => panic!("{}: {k}: {x:?} vs {y:?}", dir.display()),
+            (Some(x), Some(y)) if same_val(&x, &y) => {}
+            (x, y) => bad.push(format!("{k}: {x:?} vs {y:?}")),
         }
     }
+    assert!(bad.is_empty(), "{}: {bad:#?}", dir.display());
     let kv: Vec<(&str, Val)> = meta
         .keys
         .iter()
@@ -997,7 +999,10 @@ fn qwen3_metadata_and_tokenizer_match_gguf() {
 
 /// Llama-3.2-1B-Instruct's files (unsloth's ungated copy) against the
 /// Q4_K_M GGUF: metadata, the tokenizer, and the computed Llama 3 RoPE
-/// factors against the GGUF's `rope_freqs.weight`, bit for bit.
+/// factors against the GGUF's `rope_freqs.weight`, bit for bit. That GGUF
+/// (bartowski's) predates the converter writing `add_bos_token`; Axon's
+/// default for llama-bpe is the `true` synthesized here, and
+/// `tokenizer_parity` checks the BOS both sides add.
 #[test]
 fn llama32_metadata_tokenizer_and_rope_freqs_match_gguf() {
     let (Some(d), Some(g)) = (
@@ -1006,7 +1011,8 @@ fn llama32_metadata_tokenizer_and_rope_freqs_match_gguf() {
     ) else {
         return;
     };
-    let (a, b) = metadata_parity(&d, &g, &["tokenizer.chat_template"]);
+    let except = ["tokenizer.chat_template", "tokenizer.ggml.add_bos_token"];
+    let (a, b) = metadata_parity(&d, &g, &except);
     tokenizer_parity(&a, &b);
     let (_, meta) = checkpoint_metadata(&d).unwrap();
     let f = meta.rope_freqs.unwrap();
@@ -1136,4 +1142,47 @@ fn check_supported_refuses_as_for_the_gguf() {
         assert_eq!(a, b, "{tag}");
         assert!(a.contains(want), "{tag}: {a}");
     }
+}
+
+/// Fuzz finding (1019-023221-b0fe, mutant `st-config-rope_scaling={'rope_type': 'llama3'}`):
+/// a computed `rope_freqs.weight` was read by `check` (`check_supported` ->
+/// `rope_freqs`) before the aux arena existed, and `gen` panicked. Now the
+/// computed tensors are in place before `check`, in a header-only load too,
+/// and the model runs or is refused, never panics.
+#[test]
+fn llama3_rope_on_a_checkpoint_is_readable_before_conversion() {
+    let d = Dir::new("llama3rope");
+    write_tiny(&d, 2);
+    let mut c = tiny_config();
+    c["rope_scaling"] = json!({"rope_type": "llama3"});
+    d.json("config.json", &c);
+    let mut seen = None;
+    let m = load(
+        &d.0,
+        |m| {
+            let ok = crate::model::check_supported(m).map_err(|e| e.to_string());
+            seen = Some((ok, crate::model::rope_freqs(m, 32)));
+            gguf::CopyWish::MapOnly
+        },
+        true,
+    )
+    .unwrap();
+    let (ok, freqs) = seen.unwrap();
+    assert_eq!(freqs, crate::model::rope_freqs(&m, 32));
+    assert_eq!(freqs.len(), 16);
+    let h = load(&d.0, |_| gguf::CopyWish::MapOnly, false).unwrap();
+    assert_eq!(freqs, crate::model::rope_freqs(&h, 32));
+    if ok.is_ok() {
+        let net = crate::model::Qwen2::new(&m);
+        let mut c = crate::Lm::new_cache(&net, 4);
+        assert_eq!(crate::Lm::forward(&net, 1, 0, &mut c).len(), 264);
+    }
+    // A header-only load's converted tensors are an error message, not garbage.
+    let t = h
+        .tensors
+        .iter()
+        .find(|t| t.name == "blk.0.ffn_up.weight")
+        .unwrap();
+    let e = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h.tensor_data(t).len()));
+    assert!(e.is_err());
 }
