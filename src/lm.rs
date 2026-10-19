@@ -419,9 +419,6 @@ impl<'a> Backend<'a> {
         if gpu_layers == Some(0) {
             return Err("--gpu-layers 0 is --device cpu".into());
         }
-        if crate::model::moe_cpu_only(m) {
-            return Err(crate::model::moe_gpu_refusal(m));
-        }
         // f32 isn't offered on the GPU: f16 there (as always).
         let ckv = match kv {
             KvType::Q8 => CacheKv::Q8 { group: 0 },
@@ -548,8 +545,13 @@ impl<'a> Backend<'a> {
         }
         let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open_device(ordinal)?));
         let module: &'static Module<'static> = Box::leak(Box::new(Kernels::module_for(gpu, m)?));
-        let mm: &'static Module<'static> = Box::leak(Box::new(Kernels::moe_module(gpu)?));
-        let n = MoeQwen3::new(gpu, module, mm, m, max_ctx, kv, fit, q6k8)?;
+        let n = if m.arch == "deepseek2" {
+            let ml: &'static Module<'static> = Box::leak(Box::new(Kernels::mla_module(gpu)?));
+            MoeQwen3::new_mla(gpu, module, ml, m, max_ctx, kv, fit, q6k8)?
+        } else {
+            let mm: &'static Module<'static> = Box::leak(Box::new(Kernels::moe_module(gpu)?));
+            MoeQwen3::new(gpu, module, mm, m, max_ctx, kv, fit, q6k8)?
+        };
         eprintln!("moe:         {}, kv {}", n.describe(n.ctx), n.kv_name());
         Ok(Backend::Moe(Box::new(n)))
     }

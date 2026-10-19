@@ -3426,6 +3426,27 @@ fn prefill_with(net: &CudaQwen2, ids: &[u32], sizes: &[usize]) -> (Vec<u16>, Vec
     (kv_bytes(net, &c, ids.len()), l)
 }
 
+/// `prefill_with` without the KV read-back: the logits only.
+fn prefill_with_nokv(net: &CudaQwen2, ids: &[u32], sizes: &[usize]) -> Vec<f32> {
+    let mut c = net.new_cache(ids.len() + 1);
+    let (&last, rest) = ids.split_last().unwrap();
+    let mut pos = 0;
+    for &s in sizes.iter().cycle() {
+        if pos == rest.len() {
+            break;
+        }
+        let e = (pos + s).min(rest.len());
+        if s == 0 {
+            net.feed(&mut c, rest[pos], pos).unwrap();
+            pos += 1;
+            continue;
+        }
+        net.feed_batch(&rest[pos..e], pos, &mut c);
+        pos = e;
+    }
+    net.forward(last, rest.len(), &mut c)
+}
+
 /// The batched prefill's contract: whatever the batching (1, 7, 64, the
 /// max, ragged, per-token decode steps), the KV cache bytes and the next
 /// token's logit bits are identical.
@@ -3733,6 +3754,271 @@ fn batch_passes_equal_split() {
                 p.iter().map(|r| r.len()).max().unwrap(),
             );
             assert!(hi <= max && hi - lo <= 1, "{n} {max}: {p:?}");
+        }
+    }
+}
+
+/// A Q4_K_M model's batched products as `wave_gemms` lists them (fused
+/// gate + up): dim, q rows, k / v rows, ffn, layers, and how many layers
+/// have v and down in Q6_K (llama.cpp's Q4_K_M: half).
+fn wave_model(dim: usize, q: usize, kv: usize, ffn: usize, layers: usize) -> Vec<batch::Gemm> {
+    use batch::Gemm;
+    let one = |qt, rows, cols| Gemm::One { qt, rows, cols };
+    (0..layers)
+        .flat_map(|l| {
+            let t6 = if l % 2 == 0 { Q6_K } else { Q4_K };
+            [
+                one(Q4_K, q, dim),
+                one(Q4_K, kv, dim),
+                one(t6, kv, dim),
+                one(Q4_K, dim, q),
+                Gemm::GateUp { ffn, dim },
+                one(t6, dim, ffn),
+            ]
+        })
+        .collect()
+}
+
+/// `wave_passes`: as many passes as `passes`, none longer than max, all
+/// but the last whole 64-token tiles, never more modelled GEMM time; the
+/// equal split for one pass and where nothing beats it; r15's 4090 7B
+/// case (1050 + 1050 -> 1088 + 1012). Prints the wave table per GPU (the
+/// PR's): 64 x 64 x dim block-waves per layer, summed over the passes.
+#[test]
+fn wave_passes_shapes() {
+    use batch::{WaveGeom, gemm_cost, passes, wave_floor, wave_passes};
+    let models = [
+        (
+            "qwen2.5-7B",
+            wave_model(3584, 3584, 512, 18944, 28),
+            3584,
+            28,
+        ),
+        (
+            "qwen3-8B",
+            wave_model(4096, 4096, 1024, 12288, 36),
+            4096,
+            36,
+        ),
+        ("qwen2.5-0.5B", wave_model(896, 896, 128, 4864, 24), 896, 24),
+        (
+            "qwen2.5-1.5B",
+            wave_model(1536, 1536, 256, 8960, 28),
+            1536,
+            28,
+        ),
+    ];
+    // (GPU, SMs, sm_90a gemmh2)
+    let gpus = [
+        ("avante 4050L", 20, false),
+        ("bella 5070TiL", 46, false),
+        ("H100 PCIe", 114, true),
+        ("RTX 4090", 128, false),
+        ("H100 SXM", 132, true),
+        ("RTX 5090", 170, false),
+    ];
+    for (name, ps, dim, layers) in &models {
+        for &(gpu, sms, gemmh) in &gpus {
+            let g = WaveGeom {
+                sms,
+                gemmh,
+                gemmh_all: false,
+            };
+            let cost = |nb: usize| gemm_cost(ps, nb, g);
+            // 64 x 64 x dim blocks' full waves per layer.
+            let unit = (100 * sms * 64 * 64 * dim * layers) as f64;
+            let total =
+                |p: &[std::ops::Range<usize>]| -> u64 { p.iter().map(|r| cost(r.len())).sum() };
+            for max in [1152, 1000, 700, 256] {
+                for n in (1..4000).step_by(37).chain([1153, 1777, 2100, 2304, 3000]) {
+                    let base = passes(n, max);
+                    let Some(v) = wave_passes(n, max, cost) else {
+                        continue;
+                    };
+                    assert_eq!(v.len(), base.len(), "{n} {max}");
+                    assert_eq!((v[0].start, v.last().unwrap().end), (0, n));
+                    assert!(v.windows(2).all(|w| w[0].end == w[1].start));
+                    assert!(v.iter().all(|r| r.len() <= max && r.len() > batch::VM_MAX));
+                    assert!(
+                        v.iter().all(|r| r.len() >= wave_floor(max)),
+                        "{name} {gpu} {n} {max}: a pass under the floor: {v:?}"
+                    );
+                    assert!(v[..v.len() - 1].iter().all(|r| r.len() % 64 == 0));
+                    assert!(
+                        (total(&v) as f64) < 0.97 * total(&base) as f64,
+                        "{name} {gpu} {n} {max}"
+                    );
+                }
+                for n in [1, 2, 33, 500, max].into_iter().filter(|&n| n <= max) {
+                    assert_eq!(wave_passes(n, max, cost), None, "{n} {max}: one pass");
+                }
+            }
+            for n in [1153, 1777, 2100, 2304, 3000, 4000, 6000] {
+                let base = passes(n, 1152);
+                let v = wave_passes(n, 1152, cost).unwrap_or_else(|| base.clone());
+                let lens = |p: &[std::ops::Range<usize>]| -> Vec<usize> {
+                    p.iter().map(|r| r.len()).collect()
+                };
+                let (a, b) = (total(&base) as f64 / unit, total(&v) as f64 / unit);
+                eprintln!(
+                    "WAVES {name:<13} {gpu:<14} {sms:>3} SMs pp{n:<5} {:?} {a:7.1} -> {:?} {b:7.1} ({:+.1} %)",
+                    lens(&base),
+                    lens(&v),
+                    100.0 * (b / a - 1.0)
+                );
+            }
+        }
+    }
+    // Degenerate max: one tile per pass (64: every split the same cost)
+    // or none (63).
+    let ps = &models[0].1;
+    let g = WaveGeom {
+        sms: 128,
+        gemmh: false,
+        gemmh_all: false,
+    };
+    for n in 65..400 {
+        assert_eq!(
+            wave_passes(n, 64, |nb| gemm_cost(ps, nb, g)),
+            None,
+            "{n} / 64"
+        );
+        assert_eq!(
+            wave_passes(n, 63, |nb| gemm_cost(ps, nb, g)),
+            None,
+            "{n} / 63"
+        );
+    }
+    // Under the margin: no wave effect (cost by the token alone), or a
+    // split that saves 2 % (< 3 %) of a cost made up for it.
+    assert_eq!(wave_passes(2100, 1152, |nb| nb as u64), None);
+    let toy = |nb: usize| if nb == 1088 || nb == 1012 { 98 } else { 100 };
+    assert_eq!(wave_passes(2100, 1152, toy), None);
+    let toy = |nb: usize| if nb == 1088 || nb == 1012 { 96 } else { 100 };
+    assert_eq!(
+        wave_passes(2100, 1152, toy),
+        Some(vec![0..1088, 1088..2100])
+    );
+    // The RTX 4090 cells measured (#92): r15 pick 1's pp2100 split for 7B
+    // and Qwen3-8B (+3.0 % / +3.9 % e2e) stays; 7B pp1153 (704 + 449,
+    // -0.4 %), pp1777 (1024 + 753, +1.8 %) and pp3000 (1152 + 1152 + 696,
+    // +1.1 %) are under the margin now.
+    let at = |m: usize, n: usize| wave_passes(n, 1152, |nb| gemm_cost(&models[m].1, nb, g));
+    assert_eq!(at(0, 2100), Some(vec![0..1088, 1088..2100]));
+    assert_eq!(at(1, 2100), Some(vec![0..1088, 1088..2100]));
+    assert_eq!(at(0, 1153), None);
+    assert_eq!(at(0, 1777), None);
+    assert_eq!(at(0, 3000), None);
+}
+
+/// Batched prefill with AXON_WAVE_SPLIT's pass sizes == with the equal
+/// passes (main's), KV bytes and logit bits, at fixed prompt lengths plus
+/// the first two up to 4600 tokens whose split differs on this GPU
+/// (printed); one of those again from position 37 (after a fed prefix);
+/// and == per-token decode at 1777 tokens on 0.5B. It flips the
+/// `CudaQwen2::wave_split` field, not the environment: AXON_WAVE_SPLIT's
+/// parsing (a `map_or` at construction) isn't covered here. 0.5B and 1.5B;
+/// AXON_BIG_MODELS=1 adds qwen2.5 7B and qwen3 8B.
+///
+/// It fails as vacuous if no length up to 4600 splits differently on the
+/// GPU it runs on (a GPU whose SM count makes every equal split as good:
+/// widen the search before calling that a bug).
+#[test]
+fn gpu_prefill_wave_split_bits() {
+    use batch::passes;
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let mut files = vec![
+        "models/qwen2.5-0.5b-q4_k_m.gguf",
+        "models/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+    ];
+    if std::env::var("AXON_BIG_MODELS").is_ok_and(|v| v == "1") {
+        files.extend([
+            "models/Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+            "models/Qwen3-8B-Q4_K_M.gguf",
+        ]);
+    }
+    const FROM: usize = 37;
+    const LONGEST: usize = 4600;
+    for f in files {
+        let Some(m) = model_at(f) else {
+            continue;
+        };
+        let km = Kernels::module_for(&g, &m).unwrap();
+        let all = long_ids(&m, LONGEST + FROM);
+        let mut net = CudaQwen2::new(&g, &km, &m, all.len() + 1).unwrap();
+        let max = net.prefill_batch();
+        net.wave_split = true;
+        let mut lens = vec![1153, 1300, 1777, 2100, 2304, 2900];
+        let found: Vec<usize> = (max + 1..=LONGEST)
+            .filter(|n| !lens.contains(n) && net.wave_split_passes(*n, max).is_some())
+            .take(2)
+            .collect();
+        lens.extend(&found);
+        let mut differ = 0;
+        for &n in &lens {
+            let ids = &all[..n];
+            net.wave_split = true;
+            let split = net.wave_split_passes(n, max);
+            differ += split.is_some() as usize;
+            let mut a = net.new_cache(n + 1);
+            let la = net.prefill_logits(ids, 0, &mut a);
+            net.wave_split = false;
+            let mut b = net.new_cache(n + 1);
+            let lb = net.prefill_logits(ids, 0, &mut b);
+            assert_eq!(bits(&la), bits(&lb), "{f} {n}: logits, wave split vs equal");
+            assert!(
+                kv_bytes(&net, &a, n) == kv_bytes(&net, &b, n),
+                "{f} {n}: KV, wave split vs equal"
+            );
+            let lens = |p: &[std::ops::Range<usize>]| -> Vec<usize> {
+                p.iter().map(|r| r.len()).collect()
+            };
+            eprintln!(
+                "{f} pp{n} on {} SMs: equal {:?}, wave {:?}: identical",
+                net.bf.sms,
+                lens(&passes(n, max)),
+                split.as_deref().map(lens)
+            );
+            if n == 1777 && f.contains("0.5b") {
+                let mut d = net.new_cache(n + 1);
+                for (p, &t) in ids[..n - 1].iter().enumerate() {
+                    net.feed(&mut d, t, p).unwrap();
+                }
+                let dec = net.forward(ids[n - 1], n - 1, &mut d);
+                assert_eq!(
+                    bits(&la),
+                    bits(&dec),
+                    "{f} {n}: wave split vs per-token decode"
+                );
+                assert!(
+                    kv_bytes(&net, &a, n) == kv_bytes(&net, &d, n),
+                    "{f} {n}: KV vs decode"
+                );
+                eprintln!("{f} pp{n}: wave split == per-token decode");
+            }
+        }
+        // A multi-pass prompt after a fed prefix (start > 0).
+        if let Some(&n) = found.first() {
+            let ids = &all[..FROM + n];
+            let mut out = Vec::new();
+            for wave in [true, false] {
+                net.wave_split = wave;
+                let mut c = net.new_cache(FROM + n + 1);
+                net.feed_batch(&ids[..FROM], 0, &mut c);
+                let l = net.prefill_logits(&ids[FROM..], FROM, &mut c);
+                out.push((bits(&l), kv_bytes(&net, &c, FROM + n)));
+            }
+            assert!(out[0] == out[1], "{f} {n} at {FROM}: wave split vs equal");
+            eprintln!("{f} pp{n} at {FROM}: identical");
+        }
+        net.wave_split = true;
+        if net.wave_gemms().is_some() {
+            assert!(
+                differ > 0,
+                "{f}: no prompt length up to {LONGEST} splits differently here (test vacuous)"
+            );
         }
     }
 }
@@ -7636,4 +7922,247 @@ fn cuda_decode_tg() {
         );
         pos = p + n + 1;
     }
+}
+
+/// Hunting aid: one child process of `gpu_concurrency_matrix_hunt`.
+/// Decode-heavy victims (per-token decode-step graphs, 1200 tokens, file-
+/// mapped models; each pass checked bit for bit against its own first)
+/// next to one aggressor thread doing AXON_HUNT_AGG for AXON_STRESS_SECS.
+#[test]
+#[ignore = "hunting aid: run by gpu_concurrency_matrix_hunt"]
+fn gpu_concurrency_hunt_child() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let agg = std::env::var("AXON_HUNT_AGG").unwrap_or_default();
+    let secs: u64 = std::env::var("AXON_STRESS_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+    let victims = std::env::var("AXON_HUNT_VICTIMS").unwrap_or_else(|_| {
+        format!(
+            "models/qwen2.5-1.5b-instruct-q4_k_m.gguf,{},{}",
+            crate::testutil::LLAMA_MODEL,
+            crate::testutil::MODEL
+        )
+    });
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    let stop = AtomicBool::new(false);
+    let live = || !stop.load(Ordering::Relaxed) && std::time::Instant::now() < end;
+    std::thread::scope(|sc| {
+        let mut hs = Vec::new();
+        for (w, rel) in victims.split(',').enumerate() {
+            let rel = rel.to_string();
+            let live = &live;
+            hs.push(sc.spawn(move || {
+                let m = model_at(&rel).unwrap();
+                let g = Gpu::open().unwrap();
+                let km = Kernels::module(&g).unwrap();
+                let ids = long_ids(&m, 1200);
+                let net = CudaQwen2::new(&g, &km, &m, ids.len() + 1).unwrap();
+                // AXON_HUNT_NOKV=1: no KV read-back (no pageable copy), the
+                // logits only (through the pinned host_out).
+                let nokv = std::env::var("AXON_HUNT_NOKV").is_ok_and(|v| v == "1");
+                let pw = |sizes: &[usize]| {
+                    if nokv {
+                        (Vec::new(), prefill_with_nokv(&net, &ids, sizes))
+                    } else {
+                        prefill_with(&net, &ids, sizes)
+                    }
+                };
+                let (kv0, l0) = pw(&[0]);
+                let mut n = 0;
+                while live() {
+                    let sizes: &[usize] = if n % 2 == 0 {
+                        &[0]
+                    } else {
+                        &[16, 0, 9, 0, 0, 200]
+                    };
+                    let (kv, l) = pw(sizes);
+                    assert!(kv == kv0, "victim {w} {rel}: KV differs");
+                    assert_eq!(bits(&l), bits(&l0), "victim {w} {rel}: logits");
+                    n += 1;
+                }
+                eprintln!("victim {w} {rel}: {n} passes ok");
+            }));
+        }
+        let live = &live;
+        let agg2 = agg.clone();
+        hs.push(sc.spawn(move || {
+            let small = crate::testutil::model_path().unwrap();
+            let small = small.to_str().unwrap().to_string();
+            let mut n = 0u64;
+            // Let the victims load and start decoding first.
+            std::thread::sleep(std::time::Duration::from_secs(8));
+            while live() {
+                match agg2.as_str() {
+                    "none" | "" => std::thread::sleep(std::time::Duration::from_millis(100)),
+                    // What a test's start and end do: a whole model made and dropped.
+                    "churn" => {
+                        let m = crate::gguf::load_with(&small, Some(false)).unwrap();
+                        let g = Gpu::open().unwrap();
+                        let km = Kernels::module(&g).unwrap();
+                        let net = CudaQwen2::new(&g, &km, &m, 64).unwrap();
+                        let mut c = net.new_cache(64);
+                        net.feed(&mut c, 1, 0).unwrap();
+                        let _ = net.forward(2, 1, &mut c);
+                    }
+                    "pin" => {
+                        let g = Gpu::open().unwrap();
+                        let map = memmap2::MmapMut::map_anon(64 << 20).unwrap();
+                        // SAFETY: map outlives the registration (dropped first).
+                        drop(unsafe { g.register(map.as_ptr(), map.len(), false) }.unwrap());
+                    }
+                    "alloc" => {
+                        let g = Gpu::open().unwrap();
+                        for _ in 0..8 {
+                            let b = g.alloc(256 << 20).unwrap();
+                            b.zero().unwrap();
+                        }
+                    }
+                    "module" => {
+                        let g = Gpu::open().unwrap();
+                        for _ in 0..4 {
+                            drop(Kernels::module(&g).unwrap());
+                        }
+                    }
+                    "ctx" => drop(Gpu::open().unwrap()),
+                    // Another process on the GPU (a packed pod's co-tenant):
+                    // short decode runs of the 0.5B, back to back.
+                    "proc" => {
+                        let out = std::process::Command::new(std::env::current_exe().unwrap())
+                            .args(["--exact", "--ignored", "--nocapture"])
+                            .arg("cuda::qwen2::tests::gpu_concurrency_hunt_child")
+                            .env("AXON_HUNT_AGG", "none")
+                            .env("AXON_HUNT_VICTIMS", crate::testutil::MODEL)
+                            .env("AXON_STRESS_SECS", "12")
+                            .output()
+                            .unwrap();
+                        assert!(out.status.success(), "co-tenant process failed");
+                    }
+                    // `churn` on a fresh thread that then exits, as libtest runs
+                    // each test on its own thread.
+                    "tchurn" => std::thread::scope(|t| {
+                        t.spawn(|| {
+                            let m = crate::gguf::load_with(&small, Some(false)).unwrap();
+                            let g = Gpu::open().unwrap();
+                            let km = Kernels::module(&g).unwrap();
+                            let net = CudaQwen2::new(&g, &km, &m, 64).unwrap();
+                            let mut c = net.new_cache(64);
+                            net.feed(&mut c, 1, 0).unwrap();
+                            let _ = net.forward(2, 1, &mut c);
+                        });
+                    }),
+                    // A thread that touches the context and exits.
+                    "texit" => std::thread::scope(|t| {
+                        t.spawn(|| {
+                            let g = Gpu::open().unwrap();
+                            let b = g.alloc(1 << 20).unwrap();
+                            b.zero().unwrap();
+                        });
+                    }),
+                    // Processes that never touch CUDA (fork/exec alone).
+                    "spawn" => {
+                        let out = std::process::Command::new("sh")
+                            .args(["-c", "sleep 0.2"])
+                            .output()
+                            .unwrap();
+                        assert!(out.status.success());
+                    }
+                    // Another process that only opens the GPU and loads the
+                    // kernels (a context made and torn down), no kernels run.
+                    "proc-ctx" => {
+                        let out = std::process::Command::new(std::env::current_exe().unwrap())
+                            .args(["--exact", "--nocapture", "testutil::gpu_lock_is_reentrant"])
+                            .output()
+                            .unwrap();
+                        assert!(out.status.success(), "co-tenant process failed");
+                    }
+                    // The real neighbour: a whole prefill_bits (0.5B) in this process.
+                    "bits" => {
+                        let m = crate::gguf::load_with(&small, Some(false)).unwrap();
+                        prefill_bits(&m, "0.5B", CacheKv::F16);
+                    }
+                    "hostbuf" => {
+                        let g = Gpu::open().unwrap();
+                        let mut h = g.host_alloc(64 << 20).unwrap();
+                        h.bytes_mut().unwrap()[0] = 1;
+                    }
+                    a => panic!("unknown AXON_HUNT_AGG {a}"),
+                }
+                n += 1;
+            }
+            eprintln!("aggressor {agg2}: {n} rounds");
+        }));
+        let mut panicked = None;
+        for h in hs {
+            if let Err(e) = h.join() {
+                stop.store(true, Ordering::Relaxed);
+                panicked.get_or_insert(e);
+            }
+        }
+        if let Some(e) = panicked {
+            std::panic::resume_unwind(e);
+        }
+    });
+}
+
+/// Hunting aid: `gpu_concurrency_hunt_child` in fresh processes, AXON_HUNT_ROUNDS
+/// (default 2) per aggressor of AXON_HUNT_AGGS (default all of them, the
+/// ones that faulted first), and a table of which ones poisoned the
+/// context.
+#[test]
+#[ignore = "hunting aid: --ignored --nocapture, AXON_HUNT_AGGS / AXON_HUNT_ROUNDS / AXON_STRESS_SECS"]
+fn gpu_concurrency_matrix_hunt() {
+    let aggs = std::env::var("AXON_HUNT_AGGS")
+        // spawn / proc / proc-ctx first: the only ones that ever faulted
+        // (docs/log/2026-10-18-cuda-concurrency.md); the rest are the
+        // in-process controls, all clean there.
+        .unwrap_or_else(|_| "spawn,proc,proc-ctx,none,churn,pin,alloc,module,ctx,hostbuf".into());
+    let rounds: usize = std::env::var("AXON_HUNT_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2);
+    let exe = std::env::current_exe().unwrap();
+    let mut table = Vec::new();
+    for r in 0..rounds {
+        for agg in aggs.split(',') {
+            let t = std::time::Instant::now();
+            let out = std::process::Command::new(&exe)
+                .args(["--exact", "--ignored", "--nocapture", "--test-threads", "1"])
+                .arg("cuda::qwen2::tests::gpu_concurrency_hunt_child")
+                .env("AXON_HUNT_AGG", agg)
+                .output()
+                .unwrap();
+            let s = String::from_utf8_lossy(&out.stdout).to_string()
+                + &String::from_utf8_lossy(&out.stderr);
+            let illegal = s.contains("ILLEGAL_ADDRESS");
+            let first = s
+                .lines()
+                .find(|l| l.contains("panicked at"))
+                .unwrap_or("")
+                .to_string();
+            let line = format!(
+                "round {r} agg {agg}: ok={} illegal={illegal} {:.0}s {first}",
+                out.status.success(),
+                t.elapsed().as_secs_f64()
+            );
+            eprintln!("HUNT {line}");
+            for l in s
+                .lines()
+                .filter(|l| l.starts_with("victim") || l.starts_with("aggressor"))
+            {
+                eprintln!("    {l}");
+            }
+            if !out.status.success() {
+                for l in s
+                    .lines()
+                    .filter(|l| l.contains("panicked") || l.contains("CUDA"))
+                    .take(6)
+                {
+                    eprintln!("    | {l}");
+                }
+            }
+            table.push(line);
+        }
+    }
+    eprintln!("HUNT TABLE\n{}", table.join("\n"));
 }

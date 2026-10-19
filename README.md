@@ -51,9 +51,12 @@ Works today, honestly scoped:
   ([roadmap](docs/roadmap.md#mixture-of-experts)). `deepseek2` (DeepSeek V2/V3/V3.1, Kimi K2,
   Moonlight: MLA attention in the absorbed form with a K-only 576-wide cache, sigmoid routing
   with `exp_probs_b` and shared experts, YaRN's DeepSeek attention scale; the `kimi-k2` and
-  `deepseek-v3` tokenizers and the Kimi and DeepSeek V3 chat formats) runs on the CPU only
-  (`--device cpu`), decode == batched prefill == verify bit for bit; checked on
-  Moonlight-16B-A3B ([log](docs/log/2026-10-18-deepseek2-s0.md)). Legacy non-MLA deepseek2
+  `deepseek-v3` tokenizers and the Kimi and DeepSeek V3 chat formats) runs on the CPU
+  (`--device cpu`, [log](docs/log/2026-10-18-deepseek2-s0.md)) or, with `--device cuda`, as
+  qwen3moe does: MLA attention (its own kernels, a 576-wide f16 latent cache), router, shared
+  experts and the dense lead layer on the GPU, the routed experts on the CPU (stage 1,
+  [log](docs/log/2026-10-18-deepseek2-s1.md); f16 KV only for now). Both: decode == batched
+  prefill == verify bit for bit; checked on Moonlight-16B-A3B. Legacy non-MLA deepseek2
   GGUFs (an unsplit `attn_kv_b`, e.g. the published DeepSeek-V2-Lite files) are refused with a
   re-convert message.
   `gpt-oss` (gpt-oss-20b, ggml-org's MXFP4
@@ -544,6 +547,7 @@ OLLAMA_HOST=http://127.0.0.1:8080 ollama run qwen3-8b
 | `AXON_CUDA_GRAPHS=0` | cuda: launch each token's kernels one by one instead of replaying a captured CUDA graph (same results, slower) |
 | `AXON_MOE_PROFILE=1` | cuda, mixture-of-experts model: every 64 decode steps, print per layer the GPU segment (attention + router; synced for the profile, so a little slower), the copy down, the CPU experts and the copy up |
 | `AXON_CUDA_PDL=0` | cuda: no programmatic dependent launch (used only on sm_90+ with a CUDA 12.3+ driver) |
+| `AXON_WAVE_SPLIT=0` | cuda, `gen`/`logits`: split a prompt of several batched passes into equal passes (the old split) instead of sizing them to fill this GPU's GEMM waves (e.g. pp2100 on an RTX 4090: 1088 + 1012, not 1050 + 1050, +3 % prompt eval on 7B/8B; same bits). `AXON_PASS_TRACE=1` prints the pass sizes |
 | `AXON_GATE_UP=0` | cuda: run the FFN's gate and up products (both Q4_K) as two GEMMs instead of one fused launch in batched passes (same bits) |
 | `AXON_HOPPER=0` | cuda, H100/H200 (compute capability 9.0): compile the kernels for plain sm_90 instead of sm_90a, which turns the wgmma/TMA kernels off (same bits) |
 | `AXON_GEMMH=0\|1` | cuda, sm_90a: `0` keeps every batched Q4_K product on the mma.sync GEMMs; `1` sends every one of them to the wgmma kernel. Default: the fused gate+up and the large Q4_K products (>= 3584 rows, at least one full wave of blocks) use wgmma (same bits either way) |
@@ -557,21 +561,26 @@ tokens, `tg128` decode over 128 tokens, `@1` one thread. Compare engines within 
 machine. Methods, ranges and more runs are in [BENCH.md](BENCH.md) (CPU, dev laptop GPU)
 and [docs/benchmarks-gpu.md](docs/benchmarks-gpu.md) (RunPod, RTX 4050 laptop, caveats).
 
-Datacenter and desktop GPUs (RunPod, main @ f8d8a86, 2026-10-15): axon ahead of both
-llama.cpp 4413a19 (`llama-bench -ngl 99`) and ollama 0.35.0 in all 45 cells (3 GPUs ×
+Datacenter and desktop GPUs (RunPod, main @ 7f42c02, 2026-10-18): axon ahead of both
+llama.cpp master ff5a233 (`llama-bench -ngl 99`) and ollama 0.40.6 in all 45 cells (3 GPUs ×
 Qwen2.5 0.5B/1.5B/3B/7B and Qwen3 8B Q4_K_M × pp560/pp2100/tg128). Qwen2.5 7B, axon /
 llama.cpp / ollama, and axon's range over llama.cpp across the five models:
 
 | GPU | 7B pp2100 | 7B tg128 | pp2100 vs llama.cpp | tg128 vs llama.cpp |
 |---|---|---|---|---|
-| RTX 4090 | 13842 / 11937 / 12313 | 185 / 176 / 174 | 1.09-1.90x | 1.05-1.31x |
-| RTX 5090 | 18609 / 15416 / 15832 | 308 / 280 / 279 | 1.21-1.94x | 1.10-1.46x |
-| H100 SXM | 12534 / 9691 / 9711 | 311 / 241 / 247 | 1.19-2.10x | 1.22-1.34x |
+| RTX 4090 | 13632 / 12064 / 11655 | 186 / 181 / 167 | 1.06-1.77x | 1.03-1.19x |
+| RTX 5090 | 18529 / 14633 / 14311 | 310 / 276 / 237 | 1.26-2.10x | 1.12-1.70x |
+| H100 SXM | 14413 / 9684 / 9742 | 314 / 264 / 218 | 1.32-2.16x | 1.13-1.30x |
 
-The H100's prefill trails the 4090's: in this run axon's int8 GEMMs used `mma.sync`, not Hopper's
-`wgmma`. Since #33 the fused gate+up and the large Q4_K products run on `wgmma` on sm_90a (+12 % on a
-7B prefill pass with `AXON_GEMMH=1`, H100 PCIe; the new default routing itself is not yet measured on an H100; [docs/design/hopper.md](docs/design/hopper.md)). pp560 gaps are wider (up to
-15x) but mostly measure the other engines' fixed per-request cost; quote pp2100.
+The margins are thin on the 4090: 7B and Qwen3 8B decode are only +3 % over llama.cpp (186 vs 181,
+170 vs 165; 7B is +2.5 % before rounding), and Qwen3 8B pp2100 is +6 % (12450 vs 11710). On the H100, 7B
+and 8B prefill now runs ahead of the 4090 (7B pp2100 14413 vs 13632, 8B 12754 vs 12450); 0.5B-3B
+pp2100 and every pp560 cell still trail it. This is the first H100 board with #33's default `wgmma`
+routing on sm_90a ([docs/design/hopper.md](docs/design/hopper.md)); axon's H100 pp2100 is +2 to +15 %
+over the 10-15 board, but the driver and host changed too, so that gain is not attributed to #33.
+pp560 gaps are wider (up to 5.3x vs llama.cpp, 12x vs ollama outside the four ollama cells with a
+cold first run) but mostly measure the other engines' fixed per-request cost; quote pp2100. Caveats (split ollama passes, prebuilt llama.cpp, a 5090
+prefill drop vs the 10-15 board that is not yet attributed): [docs/benchmarks-gpu.md](docs/benchmarks-gpu.md).
 
 Parabellum, the dev laptop (from BENCH.md): main @ 0851798 (`--device cuda`, whole model on the GPU) vs ollama 0.35.0
 and llama.cpp 4413a19 (CUDA build, `llama-bench -ngl 99`), same GGUF files, on an

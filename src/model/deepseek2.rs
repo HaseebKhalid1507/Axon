@@ -41,8 +41,8 @@
 use super::{
     F16, F32, Ffn, Kind, KvCache, KvData, KvElem, Layers, Model, Pool, QuantizedAct, Qwen2,
     SUPPORTED_TYPES, Tensor, Weight, add_assign, add_unbatched, dot_group, find, find_opt,
-    load_vec, meta_num, moe, par_map, pool, r8_arena, repacked_len, rope_head, unbatch, vmath,
-    vsum_rows, with_scores,
+    load_vec, meta_num, moe, par_map, pool, r8_arena, repacked_len, rope_head, unbatch,
+    unsupported_type, vmath, vsum_rows, with_scores,
 };
 use crate::gguf::Val;
 use std::io;
@@ -278,10 +278,7 @@ pub(super) fn check(m: &Model) -> io::Result<Dims> {
         let t = find_opt(m, name).ok_or_else(|| bad(format!("missing tensor {name}")))?;
         let q = t.qtype;
         if !SUPPORTED_TYPES.contains(&q.id) {
-            return Err(bad(format!(
-                "tensor {name}: type {} ({}) is not supported (F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL)",
-                q.name, q.id
-            )));
+            return Err(bad(unsupported_type(m, name, q)));
         }
         let ok = t.dims.len() >= want.len()
             && t.dims[..want.len()]
@@ -463,9 +460,45 @@ fn layer_items<'m>(
     v
 }
 
-/// `Qwen2::new_with` of a deepseek2 model: the whole model (no layer cut,
-/// no experts-only form; `lm` refuses the placements that would want them).
-pub(super) fn build<'a>(m: &'a Model, repack: bool) -> Qwen2<'a> {
+/// What the GPU backend (`cuda::qwen2::mla`) reads beyond the tensors: the
+/// MLA shapes and scales, the dense lead, the router's rule (`moe::Gate`
+/// less the per-layer bias).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct GpuCfg {
+    pub d: Dims,
+    pub lead: usize,
+    pub sigmoid: bool,
+    pub norm: bool,
+    pub scale: f32,
+}
+
+/// `GpuCfg` of a deepseek2 model (Err: `check`'s refusals).
+pub(crate) fn gpu_cfg(m: &Model) -> io::Result<GpuCfg> {
+    let d = check(m)?;
+    let n_layers = num(m, "block_count").map_or(0, |v| v as usize);
+    let vocab = find(m, "token_embd.weight").dims[1] as usize;
+    Ok(GpuCfg {
+        d,
+        lead: num(m, "leading_dense_block_count").map_or(0, |v| v as usize),
+        sigmoid: sigmoid_gating(m, n_layers, vocab)?,
+        norm: flag(m, "expert_weights_norm").unwrap_or(false),
+        scale: num(m, "expert_weights_scale")
+            .filter(|&v| v != 0.0)
+            .map_or(1.0, |v| v as f32),
+    })
+}
+
+/// Whether arena item `t` is a routed expert's matrix.
+fn is_expert(t: &Tensor) -> bool {
+    moe::EXPS.iter().any(|s| t.name.ends_with(s))
+}
+
+/// `Qwen2::new_with` of a deepseek2 model: the whole model (no layer cut;
+/// `lm` refuses the placements that would want one). `experts`: the routed
+/// experts only repacked (`Qwen2::new_experts`, the CPU half of
+/// `crate::moe`'s split); every other matrix stays in the mapping, never
+/// read here.
+pub(super) fn build<'a>(m: &'a Model, repack: bool, experts: bool) -> Qwen2<'a> {
     let num = |k: &str| self::num(m, k);
     let d = check(m).unwrap_or_else(|e| panic!("{e}"));
     let need = |k: &str| num(k).unwrap_or_else(|| panic!("missing metadata deepseek2.{k}"));
@@ -497,7 +530,11 @@ pub(super) fn build<'a>(m: &'a Model, repack: bool) -> Qwen2<'a> {
     let mut plan: Vec<Option<(usize, usize)>> = Vec::new();
     let mut total = 0;
     for t in std::iter::once(out_t).chain(items.iter().flatten().map(|(t, _)| *t)) {
-        let len = if repack { repacked_len(t) } else { None };
+        let len = if repack && (!experts || is_expert(t)) {
+            repacked_len(t)
+        } else {
+            None
+        };
         plan.push(len.map(|len| (total, len)));
         total += len.map_or(0, |l| l.next_multiple_of(64));
     }
@@ -701,6 +738,11 @@ multiversion! {
 impl<'a> Qwen2<'a> {
     fn ds2(&self) -> &Ds2<'a> {
         self.ds2.as_deref().expect("a deepseek2 model")
+    }
+
+    /// Layer l's FFN (`moe_layer`'s experts on a deepseek2 model).
+    pub(super) fn ds2_layer_ffn(&self, l: usize) -> &Ffn<'a> {
+        &self.ds2().layers[l].ffn
     }
 
     /// `heads[h] · xs[h]` for every head h (each its own input), in one

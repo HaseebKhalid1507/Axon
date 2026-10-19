@@ -35,7 +35,8 @@ models, cheaply and fast), so choices made along the way shouldn't close them of
   - experts on the GPU (MoE stages 2–3, already planned);
   - MLA attention and DeepSeek routing (the `deepseek2` architecture), tried first on a small DeepSeek-architecture
     model that fits Parabellum. **Stage 0 (CPU-only exact reference) is in** (2026-10-18, on Moonlight-16B-A3B,
-    K2's routing and tokenizer at 1/60 of its size; [log](log/2026-10-18-deepseek2-s0.md)); GPU attention is next;
+    K2's routing and tokenizer at 1/60 of its size; [log](log/2026-10-18-deepseek2-s0.md)); **stage 1 (GPU MLA
+    attention, router and shared experts, routed experts on the CPU) is in** ([log](log/2026-10-18-deepseek2-s1.md));
   - Kimi's tokenizer (`kimi-k2`): **in**, token for token with Hugging Face's on a varied corpus;
   - 2–3-bit weight types. At Q4_K_M the model is ≈ 600 GB; at 2–3 bits it is ≈ 250–380 GB. Q2_K and Q3_K (and
     IQ4_NL, their files' fallback type) run on the CPU and CUDA (feat/q2k-q3k, [log](log/2026-10-17-q2k-q3k.md));
@@ -66,7 +67,7 @@ Newest first, as of `69adfa2`; the numbers are the PRs' own MEASURED headlines.
 | # | item | why | status |
 |---|---|---|---|
 | 1 | **S2: continuous batching in `serve`.** Slot KV cache, per-row positions and sampling, a FIFO scheduler; whole-prompt prefill as its own step. | The largest product gap: ollama and llama-server already serve parallel requests, while `serve` ran one at a time. MEASURED (#38): 7B 4090 C=8 740 tok/s (4.3×), C=16 1017 (5.9×); bella C=16 355 (4.4×). Batched output is identical to solo. Why 4.3× and not the 5.5× estimate: whole-prompt prefill steps stall every row (the "Scale" section, C1). | done (#38) |
-| 2 | **Real-world hardening.** Fuzz the GGUF reader (truncated files, bad offsets, oversized dims, size overflow) and the HTTP API (malformed JSON, huge bodies, bad UTF-8, invalid params, clients that disconnect mid-stream, many idle connections). Edge prompts: empty, at and over the context limit, odd Unicode. A model-zoo sweep of GGUFs from different converters and quant mixes: each one either matches llama.cpp or is refused with a clear error. Multi-hour soak with many clients, watching RAM/VRAM for leaks. Clean failure on OOM and GPU errors. | Speed is measured; robustness is not. Axon has no users yet and has never served real traffic, while llama.cpp has years of edge cases behind it. Gate: no panic, no out-of-bounds, no hang on any fuzz input; every refusal is a clear error; the server stays up; the soak shows flat memory. Fuzz harness and soak script live in the repo. | fuzzers and the fuzz-found fixes done (#37: `scripts/fuzz_gguf.py`, `scripts/fuzz_serve.py`, 9 findings fixed); soak + model-zoo sweep **in flight** (builder running, branch feat/soak-zoo) |
+| 2 | **Real-world hardening.** Fuzz the GGUF reader (truncated files, bad offsets, oversized dims, size overflow) and the HTTP API (malformed JSON, huge bodies, bad UTF-8, invalid params, clients that disconnect mid-stream, many idle connections). Edge prompts: empty, at and over the context limit, odd Unicode. A model-zoo sweep of GGUFs from different converters and quant mixes: each one either matches llama.cpp or is refused with a clear error. Multi-hour soak with many clients, watching RAM/VRAM for leaks. Clean failure on OOM and GPU errors. | Speed is measured; robustness is not. Axon has no users yet and has never served real traffic, while llama.cpp has years of edge cases behind it. Gate: no panic, no out-of-bounds, no hang on any fuzz input; every refusal is a clear error; the server stays up; the soak shows flat memory. Fuzz harness and soak script live in the repo. | fuzzers and the fuzz-found fixes done (#37: `scripts/fuzz_gguf.py`, `scripts/fuzz_serve.py`, 9 findings fixed). Soak + model-zoo sweep: PR #83 (`scripts/soak.py`, `scripts/zoo.py`, [hardening.md](hardening.md)). Soaks: 1.5B 3.2 h ×2 on sm_89 and 7B 1.1 h on sm_120 pass; CPU 0.5B 4 h on bella passes and 2 h on jade fails the RSS slope on a single 8 MiB step. 0 failing requests in about 223k. Zoo: 18 files, 8 match llama.cpp, 1 within llama.cpp's CPU/CUDA spread, 9 clean refusals (unclear "??" refusals fixed). Left: OOM / GPU-error injection, multi-day runs |
 | 3 | **Startup round 2.** Pinned staging for the weight upload, upload/prefill overlap, faster tokenizer and GGUF parsing. | Time to first token. ESTIMATED 7B warm short-prompt TTFT 624 → ~480 ms, from the measured 25.4 GB/s pinned upload. No change to output bits. | done (#41) |
 | 4 | **Multi-GPU, pipeline parallel (stage 1).** | Models bigger than one card, and KV room for serving. Bit-identical to one GPU by construction (MEASURED on 2×4090: decode 1.00×, prefill 1.46–1.55×). Stage 1b (serve pool over the pipeline, ~2× aggregate ESTIMATED) is in the "Scale" section. | stage 1 done (#34) ([design](design/multi-gpu.md)) |
 | 5 | **Hopper wgmma/TMA prefill.** | H100 prefill trails the 4090 and 5090. ESTIMATED 7B pp2100 12.5k → 22–32k tok/s. Gated on a ~1-hour pod experiment. | first round done (#33): fused gate+up on wgmma, 7B prefill 9263 → 10376 tok/s (+12.0 %) on an H100 PCIe (MEASURED, `AXON_GEMMH=1`). The plain products reach 84 TMAC/s (issue-bound), so the 22–32k estimate is not reached; the default routing itself was not run on an H100 ([design](design/hopper.md)) |
@@ -116,7 +117,7 @@ token prefix, so a slot saved, restored, paged or chunked continues bit for bit.
 | 10 | **Batched speculative decoding.** Draft rows for every running request in one verify step, on while rows × (K+1) ≤ 16 (the weight-read-once regime), off above. | +30–50 % per stream at ≤ 4 clients with a draft model (ESTIMATED from the MEASURED solo gains), nothing lost at 16. Lossless by the verify contract. 30–50 h. | planned (item 1 is done) |
 
 Below the line: shared-prefix pages (copy-on-write over item 5: a swarm's 20k system prompt held once; the swarm's
-real memory win), fairness (aging for oversize requests, shortest-first admission), a batched-decode kernel profile
+real memory win; [Agent-harness workloads](#agent-harness-workloads-later-not-scheduled) item 2), fairness (aging for oversize requests, shortest-first admission), a batched-decode kernel profile
 (inside item 1's bench), q4 KV (under "Not planned", below).
 
 Also done, not yet in the table: **item 6, serve ops** (#61, #62: `--api-key`, `/metrics`, `/slots`,
@@ -130,6 +131,32 @@ cells sit next to item 7's, which PR #67 edits, so they are updated here until #
 
 Dependencies: 1 (done) → {4 stage B, 10}; 2 (done) → 5 (stages 0–1 done) → shared-prefix pages; 3 (done) and 4
 → the rest of 8; stage 1 (done) → 9; the streamer (done) → 7.
+
+## Agent-harness workloads (later: not scheduled)
+
+On the roadmap, not prioritised: nothing here jumps the queue above. Agent harnesses (Synaps, and others such as
+opencode, pi and codex) talk to `serve` through its OpenAI- or ollama-compatible API, and their load doesn't look
+like a chat benchmark. **Why:** several concurrent agent sessions on one consumer GPU, each with a ~15–20k-token
+system prompt plus tool definitions that the sessions share, long multi-turn histories, tool-call turns, and long
+idle gaps while the human reads. Everything below is ESTIMATED or unmeasured; no number in this section is MEASURED
+on this workload.
+
+What works today: OpenAI `tool_calls` (streamed), per-slot prefix reuse, continuous batching (#38), a long prompt's
+admission no longer stalls the other streams (Scale item 1), and paged KV (#71, once merged).
+
+| # | item | why | status |
+|---|---|---|---|
+| 1 | **Agent-workload benchmark.** N concurrent sessions, a shared ~20k system prompt, tool-call turns, idle gaps. Report TTFT, ITL p50/p99 and aggregate tok/s on 7B, Qwen3-8B, gpt-oss-20b and Qwen3-30B-A3B on bella (12 GB). | Nothing on this workload is measured yet, so this comes first: it sets the baseline the other items are judged against. | later: not scheduled |
+| 2 | **Shared prefix pages across sessions.** A radix/prefix cache over #71's paged pool (like vLLM's automatic prefix caching or SGLang's RadixAttention): the common system prompt is prefilled once and stored once, with copy-on-write at the point where a session diverges. | The biggest expected win for this workload (ESTIMATED): every session after the first skips a ~20k prefill and the pages it would have held. This is the "shared-prefix pages" entry below the line in [Scale](#scale-bigger-models-longer-sessions-multi-user-concurrent-requests). Depends on #71. | later: not scheduled |
+| 3 | **Idle-session KV offload to host RAM.** | This is Scale item 4 (KV save/restore, stage B: `--cache-ram`), not a separate project. The agent motivation: a session idles for minutes while the human reads, and its slot is better spent on a session that is generating. | later: not scheduled (tracked as Scale item 4) |
+| 4 | **Fast first turn for MoE models.** Stream the experts through the GPU for prefill. | Today's prefill with the experts on the CPU is ~265 tok/s on gpt-oss-20b (MEASURED, bella, job 1018-092300-3a16, pp486), so a 20k agent prompt is about a minute to first token (ESTIMATED from that rate). The plan is item 1 of the design note `specs/gptoss-prefill.md`, the same work as MoE stage 3 ([Mixture-of-experts](#mixture-of-experts)). | later: not scheduled (tracked under MoE stage 3) |
+
+Batched speculative decoding for the decode side is #90 (Scale item 10); it isn't repeated here.
+
+**Capacity on bella at ~25k context per session** (ESTIMATED: arithmetic from KV bytes per token, paged and
+`--kv q8`, against the VRAM left after the weights; not measured): a 14B ≈ 1 session, Qwen3-8B ≈ 3, Qwen2.5-7B ≈ 8,
+an MoE with the experts in RAM ≈ 6, with the slow first turn of item 4. These counts store each session's copy of
+the system prompt separately; item 2 is what changes them.
 
 ## Mixture-of-experts
 
@@ -222,8 +249,11 @@ trigger each step. Nothing here is scheduled.
    - **Status (2026-10-18): stage 0 done** ([log](log/2026-10-18-deepseek2-s0.md), design note
      `specs/r12-deepseek2.md`): the absorbed form on the CPU for decode, prefill and verify alike (bit for bit),
      a K-only 576-wide cache, DeepSeek V3 YaRN's attention scale, the `kimi-k2` and `deepseek-v3` tokenizers, the
-     Kimi and DeepSeek V3 chat formats. Next: stage 1, GPU MLA attention + router + shared experts with the routed
-     experts on the CPU (the #67 split).
+     Kimi and DeepSeek V3 chat formats. **Stage 1 done** ([log](log/2026-10-18-deepseek2-s1.md)): `--device cuda`
+     with MLA attention (own kernel module, latent cache, attention in 128-row splits), router, shared experts
+     and the dense lead on the GPU, the routed experts on the CPU (the #67 split), one code path for decode and
+     batched passes. Next: `--kv q8` for the latent cache, tensor-core attention for long prefills, then the
+     generic MoE stages (experts streamed through the GPU, experts resident in VRAM).
    - **Exactness:** the absorbed and expanded forms round differently, so decode, prefill and verify must pick one
      order and keep it, the same decode == prefill rule as every other kernel.
    - **Dev model that fits Parabellum:** Moonlight-16B-A3B-Instruct (Q4_K_M 10.54 GB): the current absorbed GGUF

@@ -97,6 +97,9 @@ impl Peer for std::net::TcpStream {
 /// `Conn::gate`.
 pub type Gate = Box<dyn Fn(&Request) -> bool + Send>;
 
+/// `Conn::on_status`.
+pub type OnStatus = Box<dyn FnOnce(u16) + Send>;
+
 /// One connection: its stream and the bytes read but not yet used.
 pub struct Conn<S> {
     pub s: S,
@@ -123,6 +126,11 @@ pub struct Conn<S> {
     pub path: Option<String>,
     /// The status of the last response started (0: none yet).
     pub status: u16,
+    /// Called once, with its status, when the next response starts: before
+    /// its first byte is written, so a client that has read the response
+    /// sees it counted (`axon serve` counts requests for /metrics with it).
+    /// Taken by that call; an interim `100 Continue` doesn't call it.
+    pub on_status: Option<OnStatus>,
     /// Bytes written so far.
     pub written: u64,
 }
@@ -313,7 +321,16 @@ impl<S: Read + Write> Conn<S> {
             refused: None,
             path: None,
             status: 0,
+            on_status: None,
             written: 0,
+        }
+    }
+
+    /// A response with `status` starts (nothing of it written yet).
+    fn start(&mut self, status: u16) {
+        self.status = status;
+        if let Some(f) = self.on_status.take() {
+            f(status);
         }
     }
 
@@ -496,7 +513,7 @@ impl<S: Read + Write> Conn<S> {
         keep_alive: bool,
         extra: &[(&str, &str)],
     ) -> io::Result<()> {
-        self.status = status;
+        self.start(status);
         let mut out = format!(
             "HTTP/1.1 {status} {}\r\nDate: {}\r\n{}",
             reason(status),
@@ -532,7 +549,7 @@ impl<S: Read + Write> Conn<S> {
         minor: u8,
         keep_alive: bool,
     ) -> io::Result<()> {
-        self.status = status;
+        self.start(status);
         self.chunked = minor == 1;
         let mut out = format!(
             "HTTP/1.1 {status} {}\r\nDate: {}\r\n{}Content-Type: {ctype}\r\nCache-Control: no-cache\r\n",
