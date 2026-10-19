@@ -69,6 +69,18 @@ Works today, honestly scoped:
   for their rows that aren't a multiple of 256, e.g. the 0.5B's 896), and MXFP4 for
   gpt-oss's experts (CPU only). On the GPU every weight matrix must be one of the eleven
   quantized types (F16/F32 matrices are refused there). Others load for `info` but can't run.
+- Model files: GGUF, or a Hugging Face checkpoint directory (`config.json`, `tokenizer.json`,
+  `tokenizer_config.json`, and `model.safetensors` or the shards of `model.safetensors.index.json`)
+  of a `qwen2`, `qwen3` or `llama` model with BF16, F16 or F32 weights, wherever a `.gguf` path is
+  taken (`axon info <dir>` lists each tensor's Hugging Face name, GGUF name and type). It loads as
+  the F16 GGUF `convert_hf_to_gguf.py --outtype f16` makes of the same weights: BF16 matrices
+  converted to F16 and vectors to F32 at load (numpy's rounding, checked for all 65536 values), the
+  same metadata and tokenizer, and the same logits and greedy output bit for bit (checked on
+  Qwen2.5-0.5B-Instruct, [log](docs/log/2026-10-19-safetensors-loader.md)). CPU only for now
+  (the GPU has no F16 matrix kernels); FP8 / NVFP4 checkpoints, MoE and the other architectures
+  are refused with a message, to come with the FP8 stages (roadmap). The pre-tokenizer must be one
+  Axon knows (Qwen2's or Llama 3's regex: recognized, never executed); SentencePiece-style
+  `tokenizer.json` files are refused (use the GGUF). Like llama.cpp, the NFC normalizer isn't applied.
 - Sampling: greedy, or temperature / top-k / top-p / min-p / repeat penalty with a seed
   (llama.cpp's order, ollama's defaults). `gen` continues raw text, greedy unless `--temp`
   is above 0 (reproducible output and benchmarks); `chat` talks to an Instruct model
@@ -161,6 +173,7 @@ curl -L -o models/qwen2.5-0.5b-q4_k_m.gguf \
 ```
 axon <model.gguf>                         same as axon info
 axon info <model.gguf>                    print a summary and exit
+                                          (everywhere: a checkpoint directory instead, CPU)
 axon gen <model.gguf> "<prompt>" [-n N] [--draft K] [--draft-model PATH] [--device D]
           [--ctx N] [--gpu-layers N] [--gpus L] [--kv T]
                                           generation (default 32 tokens; greedy unless --temp)

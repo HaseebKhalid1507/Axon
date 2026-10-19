@@ -212,7 +212,9 @@ environment:
   AXON_CUDA_GRAPHS=0         cuda: launch each token's kernels one by one instead of
                              replaying a captured CUDA graph (same results, slower)
 
-The model must be a qwen2, qwen3 or llama GGUF (e.g. Qwen2.5-0.5B-Instruct, Qwen3-4B or Llama-3.2-3B-Instruct, Q4_K_M).";
+The model must be a qwen2, qwen3 or llama GGUF (e.g. Qwen2.5-0.5B-Instruct, Qwen3-4B or Llama-3.2-3B-Instruct, Q4_K_M),
+or, on the CPU, a Hugging Face checkpoint directory of one (config.json, tokenizer.json and
+model.safetensors or its shards; BF16/F16/F32 weights, run as the GGUF F16 of the same weights).";
 
 /// Whether `net` is split across the CPU and the GPU (some layers on each):
 /// a drafter's default K is then `draft::SPLIT_MODEL_DRAFT`.

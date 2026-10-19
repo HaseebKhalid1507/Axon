@@ -86,6 +86,11 @@ Also open:
   Q3_K_M is 41% / 22% behind llama.cpp at pp2100, MEASURED) and gemvm small-batch kernels.
 - **MoE stage 2** (attention and router on the GPU, experts on the CPU). **In flight** (PR #67); its status
   lives in Scale item 7 and [Mixture-of-experts](#mixture-of-experts).
+- **Native safetensors, then FP8 / NVFP4 weights** (the FP8 plan, `specs/fp8-safetensors.md`).
+  Stage A, the loader (Hugging Face checkpoint directories of qwen2 / qwen3 / llama, BF16 run as the
+  GGUF F16, CPU only), is **in review** ([log](log/2026-10-19-safetensors-loader.md)). Next: B, FP8
+  per-channel dense on the GPU (sm_89 / sm_120); C, FP8 128×128 block scales (DeepSeek-style, MoE
+  experts from per-expert tensors); D, NVFP4.
 - **Qwen3 0.6B Q8_0 long prefill on sm_89.** The one cell Axon loses on the RTX 4050
   ([benchmarks-gpu.md](benchmarks-gpu.md)).
 - **Gemma 3 27B (head_dim 128) on CUDA.** Needs the head-128 windowed attention kernels and the
