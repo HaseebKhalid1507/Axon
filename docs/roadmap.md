@@ -35,7 +35,8 @@ models, cheaply and fast), so choices made along the way shouldn't close them of
   - experts on the GPU (MoE stages 2–3, already planned);
   - MLA attention and DeepSeek routing (the `deepseek2` architecture), tried first on a small DeepSeek-architecture
     model that fits Parabellum. **Stage 0 (CPU-only exact reference) is in** (2026-10-18, on Moonlight-16B-A3B,
-    K2's routing and tokenizer at 1/60 of its size; [log](log/2026-10-18-deepseek2-s0.md)); GPU attention is next;
+    K2's routing and tokenizer at 1/60 of its size; [log](log/2026-10-18-deepseek2-s0.md)); **stage 1 (GPU MLA
+    attention, router and shared experts, routed experts on the CPU) is in** ([log](log/2026-10-18-deepseek2-s1.md));
   - Kimi's tokenizer (`kimi-k2`): **in**, token for token with Hugging Face's on a varied corpus;
   - 2–3-bit weight types. At Q4_K_M the model is ≈ 600 GB; at 2–3 bits it is ≈ 250–380 GB. Q2_K and Q3_K (and
     IQ4_NL, their files' fallback type) run on the CPU and CUDA (feat/q2k-q3k, [log](log/2026-10-17-q2k-q3k.md));
@@ -245,8 +246,11 @@ trigger each step. Nothing here is scheduled.
    - **Status (2026-10-18): stage 0 done** ([log](log/2026-10-18-deepseek2-s0.md), design note
      `specs/r12-deepseek2.md`): the absorbed form on the CPU for decode, prefill and verify alike (bit for bit),
      a K-only 576-wide cache, DeepSeek V3 YaRN's attention scale, the `kimi-k2` and `deepseek-v3` tokenizers, the
-     Kimi and DeepSeek V3 chat formats. Next: stage 1, GPU MLA attention + router + shared experts with the routed
-     experts on the CPU (the #67 split).
+     Kimi and DeepSeek V3 chat formats. **Stage 1 done** ([log](log/2026-10-18-deepseek2-s1.md)): `--device cuda`
+     with MLA attention (own kernel module, latent cache, attention in 128-row splits), router, shared experts
+     and the dense lead on the GPU, the routed experts on the CPU (the #67 split), one code path for decode and
+     batched passes. Next: `--kv q8` for the latent cache, tensor-core attention for long prefills, then the
+     generic MoE stages (experts streamed through the GPU, experts resident in VRAM).
    - **Exactness:** the absorbed and expanded forms round differently, so decode, prefill and verify must pick one
      order and keep it, the same decode == prefill rule as every other kernel.
    - **Dev model that fits Parabellum:** Moonlight-16B-A3B-Instruct (Q4_K_M 10.54 GB): the current absorbed GGUF

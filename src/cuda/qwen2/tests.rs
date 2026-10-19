@@ -3682,6 +3682,27 @@ fn prefill_with(net: &CudaQwen2, ids: &[u32], sizes: &[usize]) -> (Vec<u16>, Vec
     (kv_bytes(net, &c, ids.len()), l)
 }
 
+/// `prefill_with` without the KV read-back: the logits only.
+fn prefill_with_nokv(net: &CudaQwen2, ids: &[u32], sizes: &[usize]) -> Vec<f32> {
+    let mut c = net.new_cache(ids.len() + 1);
+    let (&last, rest) = ids.split_last().unwrap();
+    let mut pos = 0;
+    for &s in sizes.iter().cycle() {
+        if pos == rest.len() {
+            break;
+        }
+        let e = (pos + s).min(rest.len());
+        if s == 0 {
+            net.feed(&mut c, rest[pos], pos).unwrap();
+            pos += 1;
+            continue;
+        }
+        net.feed_batch(&rest[pos..e], pos, &mut c);
+        pos = e;
+    }
+    net.forward(last, rest.len(), &mut c)
+}
+
 /// The batched prefill's contract: whatever the batching (1, 7, 64, the
 /// max, ragged, per-token decode steps), the KV cache bytes and the next
 /// token's logit bits are identical.
@@ -8207,4 +8228,247 @@ fn cuda_decode_tg() {
         );
         pos = p + n + 1;
     }
+}
+
+/// Hunting aid: one child process of `gpu_concurrency_matrix_hunt`.
+/// Decode-heavy victims (per-token decode-step graphs, 1200 tokens, file-
+/// mapped models; each pass checked bit for bit against its own first)
+/// next to one aggressor thread doing AXON_HUNT_AGG for AXON_STRESS_SECS.
+#[test]
+#[ignore = "hunting aid: run by gpu_concurrency_matrix_hunt"]
+fn gpu_concurrency_hunt_child() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let agg = std::env::var("AXON_HUNT_AGG").unwrap_or_default();
+    let secs: u64 = std::env::var("AXON_STRESS_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60);
+    let victims = std::env::var("AXON_HUNT_VICTIMS").unwrap_or_else(|_| {
+        format!(
+            "models/qwen2.5-1.5b-instruct-q4_k_m.gguf,{},{}",
+            crate::testutil::LLAMA_MODEL,
+            crate::testutil::MODEL
+        )
+    });
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    let stop = AtomicBool::new(false);
+    let live = || !stop.load(Ordering::Relaxed) && std::time::Instant::now() < end;
+    std::thread::scope(|sc| {
+        let mut hs = Vec::new();
+        for (w, rel) in victims.split(',').enumerate() {
+            let rel = rel.to_string();
+            let live = &live;
+            hs.push(sc.spawn(move || {
+                let m = model_at(&rel).unwrap();
+                let g = Gpu::open().unwrap();
+                let km = Kernels::module(&g).unwrap();
+                let ids = long_ids(&m, 1200);
+                let net = CudaQwen2::new(&g, &km, &m, ids.len() + 1).unwrap();
+                // AXON_HUNT_NOKV=1: no KV read-back (no pageable copy), the
+                // logits only (through the pinned host_out).
+                let nokv = std::env::var("AXON_HUNT_NOKV").is_ok_and(|v| v == "1");
+                let pw = |sizes: &[usize]| {
+                    if nokv {
+                        (Vec::new(), prefill_with_nokv(&net, &ids, sizes))
+                    } else {
+                        prefill_with(&net, &ids, sizes)
+                    }
+                };
+                let (kv0, l0) = pw(&[0]);
+                let mut n = 0;
+                while live() {
+                    let sizes: &[usize] = if n % 2 == 0 {
+                        &[0]
+                    } else {
+                        &[16, 0, 9, 0, 0, 200]
+                    };
+                    let (kv, l) = pw(sizes);
+                    assert!(kv == kv0, "victim {w} {rel}: KV differs");
+                    assert_eq!(bits(&l), bits(&l0), "victim {w} {rel}: logits");
+                    n += 1;
+                }
+                eprintln!("victim {w} {rel}: {n} passes ok");
+            }));
+        }
+        let live = &live;
+        let agg2 = agg.clone();
+        hs.push(sc.spawn(move || {
+            let small = crate::testutil::model_path().unwrap();
+            let small = small.to_str().unwrap().to_string();
+            let mut n = 0u64;
+            // Let the victims load and start decoding first.
+            std::thread::sleep(std::time::Duration::from_secs(8));
+            while live() {
+                match agg2.as_str() {
+                    "none" | "" => std::thread::sleep(std::time::Duration::from_millis(100)),
+                    // What a test's start and end do: a whole model made and dropped.
+                    "churn" => {
+                        let m = crate::gguf::load_with(&small, Some(false)).unwrap();
+                        let g = Gpu::open().unwrap();
+                        let km = Kernels::module(&g).unwrap();
+                        let net = CudaQwen2::new(&g, &km, &m, 64).unwrap();
+                        let mut c = net.new_cache(64);
+                        net.feed(&mut c, 1, 0).unwrap();
+                        let _ = net.forward(2, 1, &mut c);
+                    }
+                    "pin" => {
+                        let g = Gpu::open().unwrap();
+                        let map = memmap2::MmapMut::map_anon(64 << 20).unwrap();
+                        // SAFETY: map outlives the registration (dropped first).
+                        drop(unsafe { g.register(map.as_ptr(), map.len(), false) }.unwrap());
+                    }
+                    "alloc" => {
+                        let g = Gpu::open().unwrap();
+                        for _ in 0..8 {
+                            let b = g.alloc(256 << 20).unwrap();
+                            b.zero().unwrap();
+                        }
+                    }
+                    "module" => {
+                        let g = Gpu::open().unwrap();
+                        for _ in 0..4 {
+                            drop(Kernels::module(&g).unwrap());
+                        }
+                    }
+                    "ctx" => drop(Gpu::open().unwrap()),
+                    // Another process on the GPU (a packed pod's co-tenant):
+                    // short decode runs of the 0.5B, back to back.
+                    "proc" => {
+                        let out = std::process::Command::new(std::env::current_exe().unwrap())
+                            .args(["--exact", "--ignored", "--nocapture"])
+                            .arg("cuda::qwen2::tests::gpu_concurrency_hunt_child")
+                            .env("AXON_HUNT_AGG", "none")
+                            .env("AXON_HUNT_VICTIMS", crate::testutil::MODEL)
+                            .env("AXON_STRESS_SECS", "12")
+                            .output()
+                            .unwrap();
+                        assert!(out.status.success(), "co-tenant process failed");
+                    }
+                    // `churn` on a fresh thread that then exits, as libtest runs
+                    // each test on its own thread.
+                    "tchurn" => std::thread::scope(|t| {
+                        t.spawn(|| {
+                            let m = crate::gguf::load_with(&small, Some(false)).unwrap();
+                            let g = Gpu::open().unwrap();
+                            let km = Kernels::module(&g).unwrap();
+                            let net = CudaQwen2::new(&g, &km, &m, 64).unwrap();
+                            let mut c = net.new_cache(64);
+                            net.feed(&mut c, 1, 0).unwrap();
+                            let _ = net.forward(2, 1, &mut c);
+                        });
+                    }),
+                    // A thread that touches the context and exits.
+                    "texit" => std::thread::scope(|t| {
+                        t.spawn(|| {
+                            let g = Gpu::open().unwrap();
+                            let b = g.alloc(1 << 20).unwrap();
+                            b.zero().unwrap();
+                        });
+                    }),
+                    // Processes that never touch CUDA (fork/exec alone).
+                    "spawn" => {
+                        let out = std::process::Command::new("sh")
+                            .args(["-c", "sleep 0.2"])
+                            .output()
+                            .unwrap();
+                        assert!(out.status.success());
+                    }
+                    // Another process that only opens the GPU and loads the
+                    // kernels (a context made and torn down), no kernels run.
+                    "proc-ctx" => {
+                        let out = std::process::Command::new(std::env::current_exe().unwrap())
+                            .args(["--exact", "--nocapture", "testutil::gpu_lock_is_reentrant"])
+                            .output()
+                            .unwrap();
+                        assert!(out.status.success(), "co-tenant process failed");
+                    }
+                    // The real neighbour: a whole prefill_bits (0.5B) in this process.
+                    "bits" => {
+                        let m = crate::gguf::load_with(&small, Some(false)).unwrap();
+                        prefill_bits(&m, "0.5B", CacheKv::F16);
+                    }
+                    "hostbuf" => {
+                        let g = Gpu::open().unwrap();
+                        let mut h = g.host_alloc(64 << 20).unwrap();
+                        h.bytes_mut().unwrap()[0] = 1;
+                    }
+                    a => panic!("unknown AXON_HUNT_AGG {a}"),
+                }
+                n += 1;
+            }
+            eprintln!("aggressor {agg2}: {n} rounds");
+        }));
+        let mut panicked = None;
+        for h in hs {
+            if let Err(e) = h.join() {
+                stop.store(true, Ordering::Relaxed);
+                panicked.get_or_insert(e);
+            }
+        }
+        if let Some(e) = panicked {
+            std::panic::resume_unwind(e);
+        }
+    });
+}
+
+/// Hunting aid: `gpu_concurrency_hunt_child` in fresh processes, AXON_HUNT_ROUNDS
+/// (default 2) per aggressor of AXON_HUNT_AGGS (default all of them, the
+/// ones that faulted first), and a table of which ones poisoned the
+/// context.
+#[test]
+#[ignore = "hunting aid: --ignored --nocapture, AXON_HUNT_AGGS / AXON_HUNT_ROUNDS / AXON_STRESS_SECS"]
+fn gpu_concurrency_matrix_hunt() {
+    let aggs = std::env::var("AXON_HUNT_AGGS")
+        // spawn / proc / proc-ctx first: the only ones that ever faulted
+        // (docs/log/2026-10-18-cuda-concurrency.md); the rest are the
+        // in-process controls, all clean there.
+        .unwrap_or_else(|_| "spawn,proc,proc-ctx,none,churn,pin,alloc,module,ctx,hostbuf".into());
+    let rounds: usize = std::env::var("AXON_HUNT_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2);
+    let exe = std::env::current_exe().unwrap();
+    let mut table = Vec::new();
+    for r in 0..rounds {
+        for agg in aggs.split(',') {
+            let t = std::time::Instant::now();
+            let out = std::process::Command::new(&exe)
+                .args(["--exact", "--ignored", "--nocapture", "--test-threads", "1"])
+                .arg("cuda::qwen2::tests::gpu_concurrency_hunt_child")
+                .env("AXON_HUNT_AGG", agg)
+                .output()
+                .unwrap();
+            let s = String::from_utf8_lossy(&out.stdout).to_string()
+                + &String::from_utf8_lossy(&out.stderr);
+            let illegal = s.contains("ILLEGAL_ADDRESS");
+            let first = s
+                .lines()
+                .find(|l| l.contains("panicked at"))
+                .unwrap_or("")
+                .to_string();
+            let line = format!(
+                "round {r} agg {agg}: ok={} illegal={illegal} {:.0}s {first}",
+                out.status.success(),
+                t.elapsed().as_secs_f64()
+            );
+            eprintln!("HUNT {line}");
+            for l in s
+                .lines()
+                .filter(|l| l.starts_with("victim") || l.starts_with("aggressor"))
+            {
+                eprintln!("    {l}");
+            }
+            if !out.status.success() {
+                for l in s
+                    .lines()
+                    .filter(|l| l.contains("panicked") || l.contains("CUDA"))
+                    .take(6)
+                {
+                    eprintln!("    | {l}");
+                }
+            }
+            table.push(line);
+        }
+    }
+    eprintln!("HUNT TABLE\n{}", table.join("\n"));
 }
