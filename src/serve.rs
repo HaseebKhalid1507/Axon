@@ -606,8 +606,10 @@ impl<'a> Engine<'a> {
             .count()
             .min(last);
         self.hist.truncate(reuse);
-        let pb = self.net.prefill_batch();
-        for batch in p[reuse..last].chunks(pb) {
+        // The backend's cancellable pieces (each at most prefill_batch;
+        // on the GPU its passes, sized to the GEMM waves).
+        for r in self.net.prompt_chunks(last - reuse, reuse, &self.cache) {
+            let batch = &p[reuse + r.start..reuse + r.end];
             if cancelled() {
                 return None;
             }

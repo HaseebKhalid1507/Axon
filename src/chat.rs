@@ -817,9 +817,9 @@ impl<M: KvIo> Chat<'_, M> {
         if !from_file {
             // The same rows by prefill (cache == fresh prefill).
             s.forget();
-            let pb = self.net.prefill_batch();
-            for (i, b) in self.hist[..fed].chunks(pb).enumerate() {
-                self.net.feed_batch(b, i * pb, &mut self.cache);
+            for r in self.net.prompt_chunks(fed, 0, &self.cache) {
+                self.net
+                    .feed_batch(&self.hist[r.clone()], r.start, &mut self.cache);
             }
             self.fed = fed;
         }
@@ -1163,18 +1163,22 @@ impl<'a, M: Lm> Chat<'a, M> {
         // between them); the last batch with the last token, for its logits
         // (`Lm::prefill_logits`: on the GPU in the batched pass).
         let t0 = Instant::now();
-        let pb = self.net.prefill_batch();
-        let chunks: Vec<&[u32]> = self.hist[self.fed..].chunks(pb).collect();
+        // In the backend's pieces (`Lm::prompt_chunks`: at most
+        // prefill_batch each; on the GPU its passes, sized to the GEMM waves).
+        let chunks = self
+            .net
+            .prompt_chunks(self.hist.len() - self.fed, self.fed, &self.cache);
         assert!(!chunks.is_empty(), "a turn adds tokens");
         let mut logits = Vec::new();
-        for (i, batch) in chunks.iter().enumerate() {
+        for (i, c) in chunks.iter().enumerate() {
             if cancel() {
                 self.hist.truncate(start);
                 self.undo_forget(before, dropped_fed, &mut r);
                 r.interrupted = true;
                 return Ok(r);
             }
-            let pos = self.fed + i * pb;
+            let (pos, end) = (self.fed + c.start, self.fed + c.end);
+            let batch = &self.hist[pos..end];
             if i + 1 < chunks.len() {
                 self.net.feed_batch(batch, pos, &mut self.cache);
             } else {

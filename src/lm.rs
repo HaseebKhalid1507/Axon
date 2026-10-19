@@ -18,6 +18,14 @@ use crate::model::{KvCache, Qwen2};
 use crate::moe::{MoeCache, MoeQwen3};
 use crate::sample::{self, Cand, CandSpec};
 
+/// 0..n in chunks of pb (the last shorter).
+pub fn chunk_ranges(n: usize, pb: usize) -> Vec<std::ops::Range<usize>> {
+    (0..n)
+        .step_by(pb.max(1))
+        .map(|s| s..(s + pb).min(n))
+        .collect()
+}
+
 /// A causal language model with a KV cache of its own type. Positions are
 /// absolute: `pos` is the cache slot the token goes in; tokens before it
 /// must already be in the cache.
@@ -53,6 +61,23 @@ pub trait Lm {
     /// may pass any size: results don't depend on the batching).
     fn prefill_batch(&self) -> usize {
         crate::PREFILL_BATCH
+    }
+
+    /// How a caller that feeds a prompt in cancellable pieces (serve's
+    /// single stream, chat) should cut n tokens fed from `start` into the
+    /// cache: ranges of 0..n in order, each one `feed_batch` /
+    /// `prefill_logits` call of at most `prefill_batch` tokens. Results
+    /// don't depend on it. Default: `prefill_batch`-sized chunks; the GPU
+    /// model gives its own passes (`CudaQwen2::prompt_passes`: sized to the
+    /// GEMM waves, AXON_WAVE_SPLIT).
+    fn prompt_chunks(
+        &self,
+        n: usize,
+        start: usize,
+        cache: &Self::Cache,
+    ) -> Vec<std::ops::Range<usize>> {
+        let _ = (start, cache);
+        chunk_ranges(n, self.prefill_batch())
     }
 
     /// Run `tokens[b]` at `start + b` (non-empty) into the cache; the logits
@@ -697,6 +722,18 @@ impl Lm for Backend<'_> {
             Backend::Hybrid(n) => n.prefill_batch(),
             Backend::Pipeline(n) => n.prefill_batch(),
             Backend::Moe(n) => n.prefill_batch(),
+        }
+    }
+
+    fn prompt_chunks(
+        &self,
+        n: usize,
+        start: usize,
+        cache: &BackendCache,
+    ) -> Vec<std::ops::Range<usize>> {
+        match (self, cache) {
+            (Backend::Cuda(net), BackendCache::Cuda(c)) => net.prompt_chunks(n, start, c),
+            _ => chunk_ranges(n, self.prefill_batch()),
         }
     }
 }
