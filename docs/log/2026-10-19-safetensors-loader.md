@@ -115,21 +115,37 @@ queue is reserved for the merge train); the final round's gate D uses the warmed
 
 Final round (merge head 14ea340 = main ecb53b7 + this branch + the review fixes; base binary main ecb53b7):
 
-| gate | job ID | result |
+| gate | job id | result | label |
+|---|---|---|---|
+| gates.sh A: unit tests on real checkpoints (Qwen2.5 tensors + metadata + tokenizer, Qwen3, Llama 3.2 metadata/tokenizer/rope_freqs, Llama-3.2-1B 147/147 tensors byte-equal, q/k included, rope_freqs included) | 1019-040921-9ab5 | 5 passed / 0 failed | MEASURED |
+| gates.sh B: 50 prompts, all-vocab logits + gen 128 md5, dir == 2-shard == GGUF F16 (Qwen2.5-0.5B) | 1019-040921-9ab5 | 50/50 equal ×3, 0 nonzero rc | MEASURED |
+| gates.sh C: md5 vs main ecb53b7, GGUF gen -n 64, 4 models × 5 prompts, CPU | 1019-040921-9ab5 | 0/20 differ | MEASURED |
+| gates.sh D: load, `gen Hi -n 1`, all warmed, 15 interleaved reps: dir 0.458 s, 2-shard 0.477 s, GGUF 0.578 s | 1019-040921-9ab5 | both checkpoint forms faster than the GGUF (copy load) on this run | MEASURED, non-exclusive host |
+| gates.sh E: `--device cuda` refusal names stage B | 1019-040921-9ab5 | pass | MEASURED |
+| gate B on Llama-3.2-1B-Instruct weights: 50 prompts, all-vocab (128256) logits + gen 128, dir == GGUF F16 | 1019-040921-690d | 50/50 equal, 0 nonzero rc | MEASURED |
+| fuzz: 311 safetensors mutants (incl. `st-overlap-bomb`, `st-trailing`) × info + gen; GGUF 1762 mutants | 1019-040921-5f19 | 0 findings (st: 46 ok, 576 refused; gguf: 389 ok, 3135 refused) | MEASURED |
+| md5 vs main ecb53b7, GPU (bella), 6 GGUFs × 5 prompts, -n 64 | 1019-040922-90d2 | 0/30 differ | MEASURED |
+| full tier release, shard 1/3, 2/3, 3/3 | 1019-040926-9562 / -bfcc / -2620 | 188/0 (7 ign), 298/0 (9 ign), 118/0 (26 ign) | MEASURED |
+| full tier debug, shard 1/3, 3/3 | 1019-040926-6f97 / -7a09 | 188/0 (7 ign), 118/0 (26 ign) | MEASURED |
+| full tier debug, shard 2/3 | ~~1019-040926-5dcd~~ (rc 125: avante lost power mid-run, no test failed) superseded by 1019-112219-becb | 298/0 (9 ign) | MEASURED |
+| clippy -D warnings (bin + tests), rustfmt | local | pass | MEASURED |
+
+### Merge head b9d8364 (main 87ac27d, #97, merged in; textually clean)
+#102's only `src/lm.rs` change is the safetensors GPU refusal in `Backend::new_capped`; it adds no backend and no `Lm` impl, so `prompt_chunks` composes (a checkpoint runs as `Backend::Cpu` → `Qwen2`, the trait default). clippy -D warnings bin + tests, rustfmt: pass.
+
+| gate | job id | result |
 |---|---|---|
-| gates.sh A–E (unit incl. Llama tensors, 50-prompt md5 ×3, md5 vs main CPU 0/20, load time, GPU refusal) | 1019-040921-9ab5 | pending |
-| gate B on Llama-3.2-1B-Instruct weights: 50 prompts, dir == its GGUF F16 | 1019-040921-690d | pending |
-| fuzz, safetensors (incl. the arena-bomb and trailing-bytes mutants) + GGUF | 1019-040921-5f19 | pending |
-| md5 vs main, GPU (bella, 6 GGUFs × 5 prompts) | 1019-040922-90d2 | pending |
-| full tier release, --shard 3 | 1019-040926-9562, -bfcc, -2620 (group bf4c) | pending |
-| full tier debug, --shard 3 | 1019-040926-6f97, -5dcd, -7a09 (group fe27) | pending |
-| clippy -D warnings (bin + tests), rustfmt | local | pass |
+| gates.sh A (real-checkpoint unit tests) | 1019-130620-30fd | pending |
+| fast tier release | 1019-130620-f273 | pending |
+| fast tier debug (CPU) | 1019-130620-dca0 | pending |
 
 ## Results
 
-Bit-identical to the converter's GGUF F16 on Qwen2.5-0.5B-Instruct (one file and two shards), 50/50 prompts,
-all-vocab logits and 128 greedy tokens. Load time within noise of the GGUF's on a shared host. GGUF outputs
-unchanged (md5 0/20 vs main, CPU).
+Bit-identical to the converter's GGUF F16 on Qwen2.5-0.5B-Instruct (one file and two shards) and on
+Llama-3.2-1B-Instruct, 50/50 prompts each, all-vocab logits and 128 greedy tokens. Load time: the checkpoint
+loads no slower than the GGUF on a shared host (final round: dir 0.458 s, 2-shard 0.477 s, GGUF 0.578 s,
+medians of 15, warmed). GGUF outputs unchanged (md5 vs main: CPU 0/20, GPU 0/30). Fuzz: 0 findings in 311
+safetensors and 1762 GGUF mutants.
 
 ## What didn't work / notes
 
