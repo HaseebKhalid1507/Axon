@@ -243,6 +243,7 @@ impl<'a, 't> Batch<'a, 't> {
         self.held[slot].truncate(reuse);
         if let Some(dp) = self.dp.as_mut() {
             dp.alpha[slot] = dp.start_alpha();
+            dp.fresh[slot] = true;
         }
         let sampler = job.sample.map(Sampler::new);
         let now = Instant::now();
@@ -413,6 +414,7 @@ impl<'a, 't> Batch<'a, 't> {
         if let (Some(dp), Some(md)) = (self.dp.as_mut(), md) {
             dp.cached[slot] = std::mem::take(md.parts_mut().2);
             dp.alpha[slot] = dp.start_alpha();
+            dp.fresh[slot] = true;
         }
         self.busy[slot] = true;
         self.held[slot] = seq.hist[..n].to_vec();
@@ -451,8 +453,8 @@ impl<'a, 't> Batch<'a, 't> {
         if self.seqs.is_empty() {
             return Ok(());
         }
-        if let (Some(md), Some(ks)) = (md, self.gate())
-            && self.round(ks, md)?
+        if let (Some(md), Some((ks, pred))) = (md, self.gate())
+            && self.round(ks, pred, md)?
         {
             return Ok(());
         }
@@ -563,9 +565,11 @@ impl<'a, 't> Batch<'a, 't> {
         ))
     }
 
-    /// This round's guesses per running request (`DraftPool::choose`), or
-    /// None: no drafting, or none chosen (the plain step).
-    fn gate(&self) -> Option<Vec<usize>> {
+    /// This round's guesses per running request (`DraftPool::choose`, plus
+    /// a probe guess for a fresh request) and the round's predicted time
+    /// (its steps; 0 without a cost model), or None: no drafting, or none
+    /// chosen (the plain step).
+    fn gate(&self) -> Option<(Vec<usize>, f64)> {
         let dp = self.dp.as_ref()?;
         let ins: Vec<GateIn> = self
             .seqs
@@ -587,14 +591,23 @@ impl<'a, 't> Batch<'a, 't> {
                 }
             })
             .collect();
-        let ks = dp.choose(&ins);
-        ks.iter().any(|&k| k > 0).then_some(ks)
+        let mut ks = dp.choose(&ins);
+        for ((k, s), g) in ks.iter_mut().zip(&self.seqs).zip(&ins) {
+            if dp.fresh[s.slot] && g.cap > 0 {
+                *k = (*k).max(1);
+            }
+        }
+        let pred = dp
+            .costs
+            .as_ref()
+            .map_or(0.0, |c| super::drafting::round_ms(c, &ins, &ks));
+        ks.iter().any(|&k| k > 0).then_some((ks, pred))
     }
 
     /// A speculative round with `ks[i]` guesses for request i (see the
     /// module doc); false if the drafter refused its rows (nothing changed
     /// in the batch: the plain step runs instead).
-    fn round(&mut self, mut ks: Vec<usize>, md: &mut Md) -> Result<bool, String> {
+    fn round(&mut self, mut ks: Vec<usize>, pred: f64, md: &mut Md) -> Result<bool, String> {
         let t0 = Instant::now();
         let n = self.seqs.len();
         let dp = self.dp.as_mut().expect("a draft pool");
@@ -749,6 +762,7 @@ impl<'a, 't> Batch<'a, 't> {
         };
         if let Some(c) = dp.costs.as_mut() {
             c.saw_verify(nb, sd, verify_ms);
+            c.saw_round(kmax, pred, self.decode_ms);
         }
         let m = dp.metrics.clone();
         m.rounds[kmax.min(super::drafting::K_MAX)].fetch_add(1, Ordering::Relaxed);
@@ -765,6 +779,9 @@ impl<'a, 't> Batch<'a, 't> {
         for (i, s) in self.seqs.iter_mut().enumerate() {
             let k = ks[i];
             drafted += k as u64;
+            if k > 0 {
+                dp.fresh[s.slot] = false;
+            }
             let fed = s.hist.len();
             self.held[s.slot].push(s.hist[fed - 1]);
             let mut j = 0;

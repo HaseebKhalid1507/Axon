@@ -1003,6 +1003,7 @@ fn engine(
             ctx: dctx,
             cached: vec![Vec::new(); b.slots],
             alpha: vec![1.0; b.slots],
+            fresh: vec![false; b.slots],
             global: None,
             k: kd,
             costs: None,

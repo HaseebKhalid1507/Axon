@@ -108,6 +108,10 @@ pub struct Costs {
     /// many rows ran).
     vcorr: Vec<f64>,
     dcorr: Vec<f64>,
+    /// A drafted round's whole time (catch-up feeds and host work between
+    /// its steps included) / its steps' predicted time, per most guesses
+    /// (EMA; 1 until one ran): what the step fits don't see.
+    rcorr: [f64; K_MAX + 1],
 }
 
 impl Costs {
@@ -117,6 +121,7 @@ impl Costs {
             draft,
             vcorr: vec![1.0; rows + 1],
             dcorr: vec![1.0; rows + 1],
+            rcorr: [1.0; K_MAX + 1],
         }
     }
 
@@ -144,6 +149,27 @@ impl Costs {
 
     pub fn saw_draft(&mut self, nb: usize, sd: f64, ms: f64) {
         Self::learn(&mut self.dcorr, &self.draft, nb, sd, ms)
+    }
+
+    /// A drafted round of most guesses `km` predicted at `pred` ms (its
+    /// steps, `round_ms`) took `ms`.
+    pub fn saw_round(&mut self, km: usize, pred: f64, ms: f64) {
+        if let Some(c) = self.rcorr.get_mut(km)
+            && km > 0
+            && pred > 0.0
+            && ms.is_finite()
+        {
+            *c += CORR_BETA * ((ms / pred).clamp(0.5, 5.0) - *c);
+        }
+    }
+
+    /// `rcorr` of rounds of most guesses `km` (1 for the plain step).
+    pub fn round_corr(&self, km: usize) -> f64 {
+        if km == 0 {
+            1.0
+        } else {
+            self.rcorr.get(km).copied().unwrap_or(1.0)
+        }
     }
 }
 
@@ -204,8 +230,20 @@ pub fn choose(c: &Costs, seqs: &[GateIn], k_max: usize) -> Vec<usize> {
 }
 
 /// Expected tokens per predicted ms of a round giving request i ks[i]
-/// guesses (no guesses at all: the plain step).
+/// guesses (no guesses at all: the plain step): `round_ms` corrected by
+/// what drafted rounds of that many guesses took (`Costs::saw_round`).
 pub fn goodput(c: &Costs, seqs: &[GateIn], ks: &[usize]) -> f64 {
+    let km = ks.iter().copied().max().unwrap_or(0);
+    let e: f64 = seqs
+        .iter()
+        .zip(ks)
+        .map(|(s, &k)| expected(s.alpha, k))
+        .sum();
+    e / (round_ms(c, seqs, ks) * c.round_corr(km)).max(1e-6)
+}
+
+/// A round's predicted time, ms: its draft steps and its verify step.
+pub fn round_ms(c: &Costs, seqs: &[GateIn], ks: &[usize]) -> f64 {
     let km = ks.iter().copied().max().unwrap_or(0);
     let mut t = 0.0;
     for j in 1..=km {
@@ -218,14 +256,12 @@ pub fn goodput(c: &Costs, seqs: &[GateIn], ks: &[usize]) -> f64 {
         }
         t += c.t_draft(nb, sd);
     }
-    let (mut nb, mut sd, mut e) = (0, 0.0, 0.0);
+    let (mut nb, mut sd) = (0, 0.0);
     for (s, &k) in seqs.iter().zip(ks) {
         nb += k + 1;
         sd += (0..=k).map(|r| (s.depth + r) as f64).sum::<f64>();
-        e += expected(s.alpha, k);
     }
-    t += c.t_verify(nb, sd);
-    e / t.max(1e-6)
+    t + c.t_verify(nb, sd)
 }
 
 /// Counters for /metrics and the log.
@@ -252,6 +288,11 @@ pub struct DraftPool {
     pub cached: Vec<Vec<u32>>,
     /// Each slot's request's α.
     pub alpha: Vec<f64>,
+    /// Each slot's request hasn't had a guess verified yet: its first
+    /// round guesses once even if the gate says none (a probe: one row, so
+    /// α and the round correction keep being measured; else a server whose
+    /// gate turned drafting off would never see that it pays again).
+    pub fresh: Vec<bool>,
     /// The server's α (an EMA over every reached guess), None before any.
     pub global: Option<f64>,
     /// Guesses per request at most.
@@ -273,7 +314,11 @@ impl DraftPool {
     pub fn saw(&mut self, s: usize, kept: bool) {
         let x = if kept { 1.0 } else { 0.0 };
         self.alpha[s] += ALPHA_BETA * (x - self.alpha[s]);
-        let g = self.global.map_or(x, |g| g + ALPHA_BETA * (x - g));
+        // From a prior of 1 (as `start_alpha`), not from the first guess:
+        // one early rejection must not make every later request start at
+        // 0, which the gate never drafts for (nothing would ever lift it).
+        let g = self.global.unwrap_or(1.0);
+        let g = g + ALPHA_BETA * (x - g);
         self.global = Some(g);
         self.metrics
             .alpha_ppm
@@ -460,6 +505,39 @@ mod tests {
         let ks = choose(&c, &s, 3);
         assert_eq!((ks[1], ks[2]), (0, 0), "{ks:?}");
         assert!(ks[0] > 0 && ks[0] == ks[3], "{ks:?}");
+    }
+
+    /// Drafted rounds that take longer than their steps predict (catch-up
+    /// feeds, host work) turn the gate off where the margin was thin: C=4
+    /// at 16k on bella's measured fit (job 1018-101159-4afd: the steps
+    /// predicted +16 %, the rounds lost 1-2 %).
+    #[test]
+    fn gate_learns_round_overhead() {
+        let mut c = costs(11.7, 0.34, 1.3e-4, 2.5, 0.02, 2e-5);
+        let s = vec![
+            GateIn {
+                alpha: 0.9,
+                cap: 3,
+                depth: 16700,
+            };
+            4
+        ];
+        let ks = choose(&c, &s, 3);
+        assert!(ks.iter().any(|&k| k > 0), "{ks:?}");
+        // Each K the gate tries is measured (per most guesses) until none
+        // is left that pays.
+        for _ in 0..8 {
+            let ks = choose(&c, &s, 3);
+            let km = ks.iter().copied().max().unwrap();
+            if km == 0 {
+                break;
+            }
+            let pred = round_ms(&c, &s, &ks);
+            for _ in 0..40 {
+                c.saw_round(km, pred, pred * 1.35);
+            }
+        }
+        assert_eq!(choose(&c, &s, 3), vec![0; 4]);
     }
 
     /// When attention dominates (c x depth >> the rest) no guesses.
