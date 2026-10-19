@@ -1194,7 +1194,7 @@ __device__ __forceinline__ int gm_ubyte(u32 w, int j) { return __byte_perm(w, 0,
 // stages: [weight buffers | ST stages of activations]. Q4_K: a weight
 // buffer per stage (copied with it); the register-staged types: one, or
 // two with three or more stages (stored one stage ahead).
-template <int QT, int BN, int ST>
+template <int QT, int BN, int ST, int BM = G2_BM>
 struct G2L {
     static const bool Q2 = QT == QT_Q2_K;
     static const bool Q6 = QT == QT_Q6_K || QT == QT_Q6K8 || QT == QT_Q3_K || Q2;
@@ -1205,7 +1205,7 @@ struct G2L {
     // [64][16] and d [64], or Q8_0/Q5_0's d [64][8].
     // Q4_1 / Q5_1: d [64][8], then m [64][8].
     static const bool MIN1 = QT == QT_Q4_1 || QT == QT_Q5_1;
-    static const int W = RAW ? G2_BM * G2_Q4K_ROW
+    static const int W = RAW ? BM * G2_Q4K_ROW
                              : G2_BM * 256 + (Q2     ? G2_BM * 40
                                               : Q6     ? G2_BM * 20
                                               : MIN1 ? G2_BM * 64
@@ -1475,22 +1475,23 @@ __device__ __forceinline__ const u8* g2_row(const u8* act, u64 astride, int z, i
 
 // Start the copies of stage s: Q4_K weights (into wb), the activations of
 // tokens z0.. (past nb: zero-filled, g2_row) into st.
-template <int QT, int BN, int ST, int GU = 0>
+template <int QT, int BN, int ST, int GU = 0, int BM = G2_BM>
 __device__ __forceinline__ void g2_copy(u8* wb, u8* st, const u8* w, u64 rb, int rows, int r0,
                                         const u8* act, u64 astride, int n, int nb, int z0,
                                         int nblk, int s, const u8* w2 = nullptr) {
 #if __CUDA_ARCH__ >= 800
-    typedef G2L<QT, BN, ST> L;
+    typedef G2L<QT, BN, ST, BM> L;
     u64 np = act_np(n);
     int tid = threadIdx.x;
     if (L::RAW) {
         // 16-byte chunks per block: 9 (Q4_K, 144 bytes), 11 (Q5_K, 176).
         const int CH = GmType<QT>::BYTES / 16;
-        for (int id = tid; id < G2_BM * CH; id += G2_THREADS) {
+        for (int id = tid; id < BM * CH; id += G2_THREADS) {
             int rr = id / CH, ch = id - CH * rr;
-            // GU: rows 0..32 of the tile from w (gate), 32.. the same rows
-            // of w2 (up).
-            const u8* row = GU ? (rr < 32 ? w : w2) + (u64)min(r0 + (rr & 31), rows - 1) * rb
+            // GU: rows 0..BM / 2 of the tile from w (gate), BM / 2.. the
+            // same rows of w2 (up).
+            const int HB = BM / 2;
+            const u8* row = GU ? (rr < HB ? w : w2) + (u64)min(r0 + rr % HB, rows - 1) * rb
                                : w + (u64)min(r0 + rr, rows - 1) * rb;
             cp16(wb + rr * G2_Q4K_ROW + 16 * ch, row + (u64)s * GmType<QT>::BYTES + 16 * ch);
         }
@@ -1538,15 +1539,83 @@ __device__ __forceinline__ void g2_copy(u8* wb, u8* st, const u8* w, u64 rb, int
 #endif
 }
 
+// g2_copy's copies for a raw type (Q4_K, Q5_K) with the per-thread
+// addresses computed once per block (r17: the address arithmetic was half
+// the copy's instructions): a chunk is then one IMAD.WIDE and a cp.async.
+template <int QT, int BN, int BM, int GU>
+struct G2Fast {
+    static const int CH = GmType<QT>::BYTES / 16, KW = (BM * CH + G2_THREADS - 1) / G2_THREADS;
+    static const int KX = BN * 16 / G2_THREADS, KB = BN * 8 / G2_THREADS;
+    const u8* ws[KW];
+    u32 wd[KW];
+    const u8* xs[KX];
+    const u8* bs[KB];
+    const u8* ds;
+    u32 xok, bok, dok;
+    __device__ __forceinline__ void init(const u8* w, u64 rb, int rows, int r0, const u8* act,
+                                         u64 astride, int n, int nb, int z0, const u8* w2) {
+        int tid = threadIdx.x;
+        u64 np = act_np(n);
+#pragma unroll
+        for (int k = 0; k < KW; k++) {
+            int id = tid + k * G2_THREADS;
+            int idc = id < BM * CH ? id : 0;
+            int rr = idc / CH, ch = idc - CH * rr;
+            const int HB = BM / 2;
+            const u8* row = GU ? (rr < HB ? w : w2) + (u64)min(r0 + rr % HB, rows - 1) * rb
+                               : w + (u64)min(r0 + rr, rows - 1) * rb;
+            ws[k] = row + 16 * ch;
+            wd[k] = rr * G2_Q4K_ROW + 16 * ch;
+        }
+        xok = bok = 0;
+#pragma unroll
+        for (int k = 0; k < KX; k++) {
+            int z = z0 + (tid >> 4) + k * (G2_THREADS / 16);
+            xs[k] = g2_row(act, astride, z, nb) + 16 * (tid & 15);
+            xok |= (u32)(z < nb) << k;
+        }
+#pragma unroll
+        for (int k = 0; k < KB; k++) {
+            int z = z0 + (tid >> 3) + k * (G2_THREADS / 8);
+            bs[k] = g2_row(act, astride, z, nb) + 2 * np + np / 64 + 4 * (tid & 7);
+            bok |= (u32)(z < nb) << k;
+        }
+        int z = z0 + tid;
+        ds = g2_row(act, astride, z, nb) + 2 * np;
+        dok = z < nb;
+    }
+    // The copies of stage s (as g2_copy<QT, BN, ST, GU, BM>).
+    __device__ __forceinline__ void copy(u8* wb, u8* st, int s) const {
+        typedef G2L<QT, BN, 2, BM> L;
+        int tid = threadIdx.x;
+        u32 su = (u32)s;
+#pragma unroll
+        for (int k = 0; k < KW; k++)
+            if (k + 1 < KW || tid + k * G2_THREADS < BM * CH)
+                cp16(wb + wd[k], ws[k] + su * (u32)GmType<QT>::BYTES);
+        int c = tid & 15, tk0 = tid >> 4;
+#pragma unroll
+        for (int k = 0; k < KX; k++) {
+            int tk = tk0 + k * (G2_THREADS / 16);
+            cp16q(st + tk * 256 + 16 * (c ^ (tk & 7)), xs[k] + su * 256u, (xok >> k) & 1);
+        }
+#pragma unroll
+        for (int k = 0; k < KB; k++)
+            cp4q(st + L::X + ((tid >> 3) + k * (G2_THREADS / 8)) * 32 + 4 * (tid & 7),
+                 bs[k] + su * 32u, (bok >> k) & 1);
+        if (tid < BN) cp4q(st + L::X + L::XB + 4 * tid, ds + su * 4u, dok);
+    }
+};
+
 __device__ __forceinline__ u32 g2_ld(const u8* p) { return *(const u32*)p; }
 
 // One stage's products into the chains acc[mi][f][e] (row 32 wr + 16 mi +
 // g + 8 (e >> 1), token 8 NT wc + 8 f + 2t + (e & 1)).
-template <int QT, int NT, int ST>
+template <int QT, int NT, int ST, int BN = 32 * NT>
 __device__ __forceinline__ void g2_compute(const u8* wb, const u8* st, int nblk, int s, int wr,
                                            int wc, float (*acc)[NT][4]) {
 #if __CUDA_ARCH__ >= 800
-    typedef G2L<QT, 32 * NT, ST> L;
+    typedef G2L<QT, BN, ST> L;
     int lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
     const u8* xs = st;
     const u8* xb = st + L::X;
@@ -1864,13 +1933,15 @@ __device__ __forceinline__ void g2_compute(const u8* wb, const u8* st, int nblk,
 #endif
 }
 
-template <int QT, int NT, int ST, int GU = 0>
+template <int QT, int NT, int ST, int GU = 0, int WR = 2>
 __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, const u8* act,
                                         u64 astride, int nb, const float* bias, int mode,
                                         float* out, u64 ostride, const u8* w2 = nullptr) {
 #if __CUDA_ARCH__ >= 800
-    const int BN = 32 * NT;
-    typedef G2L<QT, BN, ST> L;
+    // WR warps along rows x 8 / WR along tokens, each 32 rows x 8 NT tokens.
+    const int WC = 8 / WR, BM = 32 * WR, BN = 8 * NT * WC;
+    typedef G2L<QT, BN, ST, BM> L;
+    static_assert(WR == 2 || L::RAW, "the register-staged types stage 64 rows (g2_item)");
     extern __shared__ uint4 g2_smem[];
     u8* sm = (u8*)g2_smem;
     u32 dsz;
@@ -1879,8 +1950,8 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
     u8* wbuf = sm;
     u8* stg = sm + L::NWB * L::W;
     int nblk = n / (L::KQ ? 256 : 32), nst = (n + 255) / 256;
-    int r0 = blockIdx.y * (GU ? 32 : G2_BM), z0 = blockIdx.x * BN;
-    int warp = threadIdx.x >> 5, wr = warp & 1, wc = warp >> 1;
+    int r0 = blockIdx.y * (GU ? BM / 2 : BM), z0 = blockIdx.x * BN;
+    int warp = threadIdx.x >> 5, wr = warp % WR, wc = warp / WR;
     float acc[2][NT][4];
 #pragma unroll
     for (int mi = 0; mi < 2; mi++)
@@ -1893,9 +1964,16 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
     // Stage s's buffers.
     auto wsl = [&](int s) { return wbuf + (L::RAW ? s % ST : (L::NWB == 2 ? s & 1 : 0)) * L::W; };
     auto xsl = [&](int s) { return stg + (s % ST) * L::STAGE; };
+    // The 128-row tile copies by G2Fast (64 rows: g2_copy, as measured).
+    const bool FAST = L::RAW && WR == 4;
+    G2Fast<QT, BN, BM, GU> F;
+    if constexpr (FAST) F.init(w, rb, rows, r0, act, astride, n, nb, z0, w2);
     auto copy = [&](int s) {
-        g2_copy<QT, BN, ST, GU>(wsl(s), xsl(s), w, rb, rows, r0, act, astride, n, nb, z0, nblk, s,
-                                w2);
+        if constexpr (FAST)
+            F.copy(wsl(s), xsl(s), s);
+        else
+            g2_copy<QT, BN, ST, GU, BM>(wsl(s), xsl(s), w, rb, rows, r0, act, astride, n, nb, z0,
+                                        nblk, s, w2);
     };
     if constexpr (!L::RAW) {
         g2_load_w<QT>(w, rb, rows, r0, nblk, 0, reg);
@@ -1915,7 +1993,7 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
                 cp_wait<0>();
             }
             __syncthreads();
-            g2_compute<QT, NT, ST>(wsl(s), xsl(s), nblk, s, wr, wc, acc);
+            g2_compute<QT, NT, ST, BN>(wsl(s), xsl(s), nblk, s, wr, wc, acc);
             __syncthreads();
             if constexpr (!L::RAW) {
                 if (s + 1 < nst) {
@@ -1944,7 +2022,7 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
                     if (s + 2 < nst) g2_load_w<QT>(w, rb, rows, r0, nblk, s + 2, reg);
                 }
             }
-            g2_compute<QT, NT, ST>(wsl(s), xsl(s), nblk, s, wr, wc, acc);
+            g2_compute<QT, NT, ST, BN>(wsl(s), xsl(s), nblk, s, wr, wc, acc);
         }
     }
     int lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
@@ -1954,9 +2032,10 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
         // once every warp is past its last stage); out = silu(gate) * up,
         // gm_store mode 2's ops on the same two floats.
         float* xch = (float*)sm;
-        const int ID = (threadIdx.x >> 6) * 32 + lane;
+        const int HW = WR / 2, ID = (wc * HW + wr % HW) * 32 + lane;
+        static_assert(2 * NT * 4 * 128 * 4 <= L::SMEM, "gu exchange fits the stage buffers");
         __syncthreads();
-        if (wr == 0) {
+        if (wr < HW) {
 #pragma unroll
             for (int mi = 0; mi < 2; mi++)
 #pragma unroll
@@ -1965,14 +2044,14 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
                     for (int e = 0; e < 4; e++) xch[((mi * NT + f) * 4 + e) * 128 + ID] = acc[mi][f][e];
         }
         __syncthreads();
-        if (wr == 1) {
+        if (wr >= HW) {
 #pragma unroll
             for (int mi = 0; mi < 2; mi++)
 #pragma unroll
                 for (int f = 0; f < NT; f++)
 #pragma unroll
                     for (int e = 0; e < 4; e++) {
-                        int r = r0 + 16 * mi + 8 * (e >> 1) + g;
+                        int r = r0 + 32 * (wr - HW) + 16 * mi + 8 * (e >> 1) + g;
                         int z = z0 + 8 * NT * wc + 8 * f + 2 * t + (e & 1);
                         float gv = xch[((mi * NT + f) * 4 + e) * 128 + ID];
                         if (r < rows && z < nb)
@@ -2038,6 +2117,17 @@ GEMM2(gemm2s_q6_k, QT_Q6_K, 2, 3)
 GEMM2(gemm2s_q8_0, QT_Q8_0, 2, 3)
 GEMM2(gemm2s_q5_0, QT_Q5_0, 2, 3)
 GEMM2(gemm2s_q5_k, QT_Q5_K, 2, 3)
+// gemm2t_*: 128 rows x 64 tokens (4 x 2 warps of 32 x 32), two stages
+// (three don't fit 99 KB): half gemm2s's activation copies per MAC.
+#define GEMM2T(NAME, QT)                                                                          \
+    extern "C" __global__ void __launch_bounds__(G2_THREADS, 1) NAME(                             \
+        const u8* __restrict__ w, u64 rb, int rows, int n, const u8* __restrict__ act,           \
+        u64 astride, int nb, const float* __restrict__ bias, int mode, float* __restrict__ out,  \
+        u64 ostride) {                                                                            \
+        gemm2_t<QT, 4, 2, 0, 4>(w, rb, rows, n, act, astride, nb, bias, mode, out, ostride);     \
+    }
+GEMM2T(gemm2t_q4_k, QT_Q4_K)
+GEMM2T(gemm2t_q5_k, QT_Q5_K)
 GEMM2(gemm2s_q4_0, QT_Q4_0, 2, 3)
 GEMM2(gemm2s_q4_1, QT_Q4_1, 2, 3)
 GEMM2(gemm2s_q5_1, QT_Q5_1, 2, 3)
@@ -2057,6 +2147,13 @@ extern "C" __global__ void __launch_bounds__(G2_THREADS, 1)
                    const u8* __restrict__ act, u64 astride, int nb, float* __restrict__ out,
                    u64 ostride) {
     gemm2_t<QT_Q4_K, 2, 3, 1>(wg, rb, rows, n, act, astride, nb, nullptr, 0, out, ostride, wu);
+}
+// gemm2t_q4_k_gu: as gemm2s_q4_k_gu in the 128 x 64 tile (64 rows of each).
+extern "C" __global__ void __launch_bounds__(G2_THREADS, 1)
+    gemm2t_q4_k_gu(const u8* __restrict__ wg, const u8* __restrict__ wu, u64 rb, int rows, int n,
+                   const u8* __restrict__ act, u64 astride, int nb, float* __restrict__ out,
+                   u64 ostride) {
+    gemm2_t<QT_Q4_K, 4, 2, 1, 4>(wg, rb, rows, n, act, astride, nb, nullptr, 0, out, ostride, wu);
 }
 
 GEMM2(gemm2_q6k8, QT_Q6K8, 4, 2)

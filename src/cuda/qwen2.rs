@@ -95,12 +95,25 @@ pub fn max_split(sms: usize, n_kv_heads: usize) -> usize {
 /// gemm2's dynamic shared memory for type qt, bn tokens per block and st
 /// stages (prefill.cu G2L::SMEM; the kernel traps if given less).
 fn gemm2_smem(qt: u32, bn: usize, st: usize) -> usize {
+    gemm2_smem_bm(qt, G2_BM, bn, st)
+}
+
+/// Rows per block of gemm2t_* (Q4_K / Q5_K; 64 tokens, two stages).
+const G2T_BM: usize = 128;
+
+/// gemm2t_*'s dynamic shared memory (type qt: Q4_K or Q5_K).
+fn gemm2t_smem(qt: u32) -> usize {
+    gemm2_smem_bm(qt, G2T_BM, 64, 2)
+}
+
+/// `gemm2_smem` for bm rows per block (bm != G2_BM: Q4_K / Q5_K only).
+fn gemm2_smem_bm(qt: u32, bm: usize, bn: usize, st: usize) -> usize {
     let (raw, kq) = (
         matches!(qt, Q4_K | Q5_K),
         matches!(qt, Q4_K | Q5_K | Q6_K | Q2_K | Q3_K),
     );
     let w = if raw {
-        G2_BM * 176
+        bm * 176
     } else {
         G2_BM * 256
             + G2_BM
