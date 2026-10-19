@@ -267,6 +267,10 @@ pub(super) struct WaveGeom {
 /// 512-row k / v, whose grids are partly a wave either way, 88 %.
 pub(super) const TILE_T_TIME: usize = 82;
 
+/// The most tokens a product keeps gemm2s for whatever `tile_t`'s waves say
+/// (one 64-token tile; review of #100, MUST 1).
+pub(super) const TILE_T_MIN_NB: usize = 64;
+
 /// `gemm_cost`'s waves of `ctas` blocks of `macs` MACs each on sms SMs.
 fn wave_cost(ctas: usize, macs: usize, sms: usize) -> u64 {
     let (full, rem) = (ctas / sms, ctas % sms);
@@ -282,8 +286,13 @@ fn wave_cost(ctas: usize, macs: usize, sms: usize) -> u64 {
 /// the 128 x 64 tile (2 br rows per block): when its waves, at
 /// TILE_T_TIME per MAC, cost less than gemm2s's. It halves the blocks, so
 /// it loses where gemm2s's grid barely fills the GPU (the 7B's 512-row k /
-/// v on a 4090).
+/// v on a 4090). Never at nb <= TILE_T_MIN_NB: one token tile (the decode
+/// pool's and verify's batches) is unmeasured with gemm2t (TILE_T_TIME is
+/// from nb 1024 / 1088), so those keep gemm2s.
 pub(super) fn tile_t(rows: usize, br: usize, nb: usize, sms: usize) -> bool {
+    if nb <= TILE_T_MIN_NB {
+        return false;
+    }
     let tiles = nb.div_ceil(64);
     let s = 100 * wave_cost(tiles * rows.div_ceil(br), br, sms);
     let t = TILE_T_TIME as u64 * wave_cost(tiles * rows.div_ceil(2 * br), 2 * br, sms);
@@ -326,6 +335,9 @@ pub(super) fn gemm_cost(ps: &[Gemm], nb: usize, g: WaveGeom) -> u64 {
                 let bn = if big { 128 } else { 64 };
                 waves(nb.div_ceil(bn) * rows.div_ceil(G2_BM), G2_BM * bn * cols)
             }
+            // Only the fused launch: with AXON_GATE_UP=0 (or a gate / up
+            // that can't fuse) `wave_gemms` lists gate and up as two
+            // `Gemm::One`s, priced as bgemm runs them (tile_t with 64 rows).
             Gemm::GateUp { ffn, dim } => {
                 if !g.gemmh && g.tile_t && tile_t(ffn, 32, nb, g.sms) {
                     return waves_t(nb.div_ceil(64) * ffn.div_ceil(64), 2 * 64 * 64 * dim);
@@ -755,6 +767,8 @@ impl<'m> BatchFns<'m> {
             } else {
                 None
             },
+            // AXON_GEMM_TILE: "64" turns gemm2t off; any other value (or
+            // none) is the default, `tile_t`'s routing.
             gemm_t: if module.mma() && std::env::var("AXON_GEMM_TILE").as_deref() != Ok("64") {
                 let (a, b, c) = (
                     module.function("gemm2t_q4_k")?,

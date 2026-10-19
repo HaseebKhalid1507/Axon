@@ -1542,6 +1542,9 @@ __device__ __forceinline__ void g2_copy(u8* wb, u8* st, const u8* w, u64 rb, int
 // g2_copy's copies for a raw type (Q4_K, Q5_K) with the per-thread
 // addresses computed once per block (r17: the address arithmetic was half
 // the copy's instructions): a chunk is then one IMAD.WIDE and a cp.async.
+// Used by gemm2t only and measured only as part of it: on its own it was
+// +3 % on gemm2s on sm_89 (r17) and -3 % on bella (G2Copy, 10-14,
+// experiments-rejected).
 template <int QT, int BN, int BM, int GU>
 struct G2Fast {
     static const int CH = GmType<QT>::BYTES / 16, KW = (BM * CH + G2_THREADS - 1) / G2_THREADS;
@@ -1586,6 +1589,8 @@ struct G2Fast {
     }
     // The copies of stage s (as g2_copy<QT, BN, ST, GU, BM>).
     __device__ __forceinline__ void copy(u8* wb, u8* st, int s) const {
+        // (Only L::X and L::XB, the offsets within a stage, which don't
+        // depend on the stage count.)
         typedef G2L<QT, BN, 2, BM> L;
         int tid = threadIdx.x;
         u32 su = (u32)s;

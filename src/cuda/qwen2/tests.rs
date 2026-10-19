@@ -3208,6 +3208,17 @@ fn cuda_gemm_tile_bench() {
         "{} sm_{}{} {} SMs",
         info.name, info.cc.0, info.cc.1, info.sms
     );
+    // The device's own (NVRTC) build: registers and local (spill) bytes.
+    for k in [
+        "gemm2s_q4_k",
+        "gemm2s_q4_k_gu",
+        "gemm2t_q4_k",
+        "gemm2t_q5_k",
+        "gemm2t_q4_k_gu",
+    ] {
+        let rl = km.function(k).unwrap().regs_local().unwrap();
+        eprintln!("REGS {k}: {} regs, {} local bytes", rl.0, rl.1);
+    }
     let nbs: Vec<usize> = std::env::var("AXON_BENCH_NB")
         .map(|v| v.split(',').map(|x| x.parse().unwrap()).collect())
         .unwrap_or(vec![1024, 1088]);
@@ -3229,8 +3240,18 @@ fn cuda_gemm_tile_bench() {
         ])
         .stdout(std::process::Stdio::piped())
         .spawn();
-    let mut child = child.ok();
-    if let Some(out) = child.as_mut().and_then(|c| c.stdout.take()) {
+    // Killed and reaped on drop, panic or not.
+    struct Smi(Option<std::process::Child>);
+    impl Drop for Smi {
+        fn drop(&mut self) {
+            if let Some(c) = self.0.as_mut() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
+    }
+    let mut child = Smi(child.ok());
+    if let Some(out) = child.0.as_mut().and_then(|c| c.stdout.take()) {
         let sm = samples.clone();
         std::thread::spawn(move || {
             for l in std::io::BufReader::new(out).lines() {
@@ -3391,9 +3412,7 @@ fn cuda_gemm_tile_bench() {
             mhz[ci].push(clock(t0, Instant::now()));
         }
     }
-    if let Some(c) = child.as_mut() {
-        let _ = c.kill();
-    }
+    drop(child);
     let med = |v: &[f64]| {
         let mut v = v.to_vec();
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
@@ -4062,6 +4081,17 @@ fn tile_t_picks() {
     assert!(tile_t(512, 64, 1024, 20));
     // A small batch's single partial wave: gemm2s.
     assert!(!tile_t(3584, 64, 64, 128));
+    // The floor: one token tile or less always keeps gemm2s, even where
+    // the waves alone would pick gemm2t (the 7B FFN on any GPU, the 3584-row
+    // products on 20 SMs), and the first nb past it may take gemm2t.
+    for sms in [20, 46, 70, 128, 170] {
+        for nb in 1..=batch::TILE_T_MIN_NB {
+            for (rows, br) in [(18944, 64), (3584, 64), (18944, 32), (12288, 32)] {
+                assert!(!tile_t(rows, br, nb, sms), "{rows}/{br} nb {nb} {sms} SMs");
+            }
+        }
+    }
+    assert!(tile_t(18944, 64, batch::TILE_T_MIN_NB + 1, 20));
 }
 
 #[test]
@@ -4198,15 +4228,24 @@ fn wave_passes_shapes() {
     }
     assert_eq!(at(0, 2100, g64), Some(vec![0..1088, 1088..2100]));
     assert_eq!(at(1, 2100, g64), Some(vec![0..1088, 1088..2100]));
-    // With gemm2t (the default): 8B keeps 1088 + 1012. For 7B, 1152 + 948
-    // and 1088 + 1012 are both 33 token tiles and model the same within
-    // 0.01 %: per pass (gemm_cost, 1e15 units) 1050: 61.56, 1088: 61.56,
-    // 1012: 57.75, 1152: 64.13, 948: 55.18, so the equal 2 x 61.56 =
-    // 123.12, 1088 + 1012 = 119.311 (-3.09 %), 1152 + 948 = 119.305
-    // (-3.10 %), and the cheaper wins. Both beat the margin; neither is
-    // measured on a 4090 with gemm2t yet.
-    assert_eq!(at(0, 2100, g), Some(vec![0..1152, 1152..2100]));
-    assert_eq!(at(1, 2100, g), Some(vec![0..1088, 1088..2100]));
+    // With gemm2t (the default), pp2100 still splits two ways under the
+    // margin, but which split is a coin flip of the model: for 7B,
+    // 1152 + 948 and 1088 + 1012 (both 33 token tiles) are 0.005 % apart
+    // (gemm_cost per pass, 1e15 units: 1088 61.56, 1012 57.75, 1152 64.13,
+    // 948 55.18; equal 2 x 61.56), far inside the error of PARTIAL_WAVE
+    // and TILE_T_TIME. So: assert a split, within 0.1 % of the cheapest
+    // of those two candidates, not the exact one.
+    for m in [0, 1] {
+        let ps = &models[m].1;
+        let c = |v: &[std::ops::Range<usize>]| -> f64 {
+            v.iter().map(|r| gemm_cost(ps, r.len(), g)).sum::<u64>() as f64
+        };
+        let v = at(m, 2100, g).expect("pp2100 splits with gemm2t");
+        assert_eq!(v.len(), 2);
+        let best = c(&[0..1088, 1088..2100]).min(c(&[0..1152, 1152..2100]));
+        assert!(c(&v) <= best * 1.001, "{m}: {v:?}");
+        assert!(c(&v) < 0.97 * c(&passes(2100, 1152)), "{m}: {v:?}");
+    }
 }
 
 /// Batched prefill with AXON_WAVE_SPLIT's pass sizes == with the equal
