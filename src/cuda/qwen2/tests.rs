@@ -6743,6 +6743,281 @@ fn gpu_gemmh_matches_reference_bits() {
 /// drift), each kernel's median / min / max TMAC/s of real MACs (rows x
 /// cols x nb). AXON_BENCH_NB (default 1050), AXON_BENCH_ROUNDS (default 7).
 /// Hopper only for gemmh; run with --ignored.
+/// r17 scratch: gemm2s_q4_k (gate, down) and gemm2s_q4_k_gu under ablation builds.
+/// AXON_BENCH_VARIANTS = "full;NO_MMA;NO_UNPACK+NO_SCALE;..." (each name X -> -DABL_X, one
+/// module per variant), rounds interleaved over variants. Results are not checked (wrong
+/// numbers by design).
+fn gemm_ablate(g: &Gpu, km: &Module, spec: &str) {
+    let nb: usize = std::env::var("AXON_BENCH_NB")
+        .ok()
+        .and_then(|v| v.split(',').next().and_then(|x| x.parse().ok()))
+        .unwrap_or(1024);
+    let rounds: usize = std::env::var("AXON_BENCH_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(7);
+    // mma ceiling for context.
+    {
+        let info = g.info().unwrap();
+        let f = km.function("mma_peak").unwrap();
+        let o = g.alloc(4 * 4096).unwrap();
+        let (blocks, iters) = (4 * info.sms as usize, 4096usize);
+        let mut best = f64::INFINITY;
+        for _ in 0..5 {
+            let e0 = g.record().unwrap();
+            // SAFETY: mma_peak's signature; o has a slot per block.
+            unsafe {
+                g.launch(&f, (blocks as u32, 1, 1), (256, 1, 1), 0, &[Arg::I32(iters as i32), o.arg()])
+                    .unwrap();
+            }
+            let e1 = g.record().unwrap();
+            best = best.min(e0.ms_to(&e1).unwrap() as f64);
+        }
+        let macs = (blocks * 8 * iters * 8 * 16 * 8 * 32) as f64;
+        eprintln!("mma_peak: {:.1} TMAC/s int8", macs / (best * 1e-3) / 1e12);
+    }
+    let names: Vec<String> = spec.split(';').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    let mut mods = Vec::new();
+    for n in &names {
+        let mut opts: Vec<String> = crate::cuda::KERNEL_OPTS_EXT.iter().map(|s| s.to_string()).collect();
+        if n != "full" {
+            opts.extend(n.split('+').map(|d| format!("-DABL_{d}")));
+        }
+        let o: Vec<&str> = opts.iter().map(|s| s.as_str()).collect();
+        let t0 = std::time::Instant::now();
+        let (m, st) = Module::load(g, crate::cuda::KERNELS, &o).unwrap();
+        let f = m.function("gemm2s_q4_k").unwrap();
+        let fg = m.function("gemm2s_q4_k_gu").unwrap();
+        eprintln!(
+            "variant {n}: {:?} in {:.1} s; gemm2s_q4_k regs/local {:?}, gu {:?}",
+            st,
+            t0.elapsed().as_secs_f64(),
+            f.regs_local().unwrap(),
+            fg.regs_local().unwrap()
+        );
+        mods.push(m);
+    }
+    let mut rng = Rng(7);
+    let shapes = [("gate", 3584usize, 18944usize), ("down", 18944, 3584)];
+    let mut bufs = Vec::new();
+    for &(_, cols, rows) in &shapes {
+        let w = g.upload(&synth_matrix(&mut rng, Q4_K, rows, cols)).unwrap();
+        let xs: Vec<Vec<f32>> = (0..nb).map(|_| rng.vec(cols, 1.0)).collect();
+        let act = quantize_batch(g, km, &xs, cols);
+        bufs.push((w, act));
+    }
+    let wu = g.upload(&synth_matrix(&mut rng, Q4_K, 18944, 3584)).unwrap();
+    let out = g.alloc(18944 * nb * 4).unwrap();
+    let sm = gemm2_smem(Q4_K, 64, 3);
+    // ms[variant][case]: case 0 gate, 1 down, 2 gu.
+    let mut ms = vec![vec![Vec::<f64>::new(); 3]; names.len()];
+    // Clock sampler: nvidia-smi every 50 ms, (arrival time, SM MHz, W).
+    use std::io::BufRead;
+    let samples: std::sync::Arc<std::sync::Mutex<Vec<(std::time::Instant, f64, f64)>>> =
+        Default::default();
+    let mut child = std::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=clocks.sm,power.draw",
+            "--format=csv,noheader,nounits",
+            "-lms",
+            "50",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    {
+        let out = child.stdout.take().unwrap();
+        let sm = samples.clone();
+        std::thread::spawn(move || {
+            for l in std::io::BufReader::new(out).lines() {
+                let Ok(l) = l else { break };
+                let v: Vec<f64> = l.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                if v.len() == 2 {
+                    sm.lock().unwrap().push((std::time::Instant::now(), v[0], v[1]));
+                }
+            }
+        });
+    }
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    let window = |t0: std::time::Instant, t1: std::time::Instant| {
+        let v = samples.lock().unwrap();
+        let w: Vec<_> = v.iter().filter(|x| x.0 >= t0 && x.0 <= t1).collect();
+        if w.is_empty() {
+            return (f64::NAN, f64::NAN);
+        }
+        let n = w.len() as f64;
+        (w.iter().map(|x| x.1).sum::<f64>() / n, w.iter().map(|x| x.2).sum::<f64>() / n)
+    };
+    let win_ms: f64 = std::env::var("AXON_BENCH_WIN_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(200.0);
+    // mma_peak per clock, in a window.
+    {
+        let info = g.info().unwrap();
+        let f = km.function("mma_peak").unwrap();
+        let o = g.alloc(4 * 4096).unwrap();
+        let (blocks, iters) = (4 * info.sms as usize, 4096usize);
+        let go = || unsafe {
+            // SAFETY: mma_peak's signature; o has a slot per block.
+            g.launch(&f, (blocks as u32, 1, 1), (256, 1, 1), 0, &[Arg::I32(iters as i32), o.arg()])
+                .unwrap();
+        };
+        let macs = (blocks * 8 * iters * 8 * 16 * 8 * 32) as f64;
+        for _ in 0..3 {
+            for _ in 0..20 {
+                go();
+            }
+            g.sync().unwrap();
+            let t0 = std::time::Instant::now();
+            let e0 = g.record().unwrap();
+            for _ in 0..40 {
+                go();
+            }
+            let e1 = g.record().unwrap();
+            let el = e0.ms_to(&e1).unwrap() as f64 / 40.0;
+            g.sync().unwrap();
+            let (mhz, w) = window(t0, std::time::Instant::now());
+            let r = macs / (el * 1e-3);
+            eprintln!(
+                "mma_peak window: {:.1} TMAC/s at {mhz:.0} MHz {w:.1} W -> {:.0} MAC/clk/SM",
+                r / 1e12,
+                r / (info.sms as f64 * mhz * 1e6)
+            );
+        }
+    }
+    // clk[variant][case]: (MHz, W) per sample.
+    let mut clk = vec![vec![Vec::<(f64, f64)>::new(); 3]; names.len()];
+    let mut reps = vec![vec![0usize; 3]; names.len()];
+    let nv = names.len();
+    for r in 0..rounds {
+        // A fixed per-round permutation of the variants (position effects: power boost credit).
+        let mut order: Vec<usize> = (0..nv).collect();
+        let mut st = 0x9e3779b97f4a7c15u64 ^ (r as u64 * 0x100000001b3);
+        for i in (1..nv).rev() {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            order.swap(i, (st % (i as u64 + 1)) as usize);
+        }
+        if r == 0 {
+            order = (0..nv).collect();
+        }
+        eprintln!("round {r} order {order:?}");
+        for &vi in &order {
+            let m = &mods[vi];
+            for case in 0..3 {
+                let (cols, rows): (usize, usize) = if case == 1 { (18944, 3584) } else { (3584, 18944) };
+                let (w, act) = &bufs[if case == 1 { 1 } else { 0 }];
+                let st = act_stride_t(cols);
+                let run = || {
+                    if case == 2 {
+                        let f2 = m.function("gemm2s_q4_k_gu").unwrap();
+                        f2.set_max_shared(sm).unwrap();
+                        // SAFETY: gemm2s_q4_k_gu's signature; buffers as above.
+                        unsafe {
+                            g.launch(
+                                &f2,
+                                (nb.div_ceil(64) as u32, rows.div_ceil(32) as u32, 1),
+                                (256, 1, 1),
+                                sm as u32,
+                                &[
+                                    w.arg(),
+                                    wu.arg(),
+                                    Arg::U64(quant::row_bytes(Q4_K, cols) as u64),
+                                    Arg::I32(rows as i32),
+                                    Arg::I32(cols as i32),
+                                    act.arg(),
+                                    Arg::U64(st as u64),
+                                    Arg::I32(nb as i32),
+                                    out.arg(),
+                                    Arg::U64(rows as u64),
+                                ],
+                            )
+                            .unwrap()
+                        };
+                    } else {
+                        let f = m.function("gemm2s_q4_k").unwrap();
+                        let common = [
+                            w.arg(),
+                            Arg::U64(quant::row_bytes(Q4_K, cols) as u64),
+                            Arg::I32(rows as i32),
+                            Arg::I32(cols as i32),
+                            act.arg(),
+                            Arg::U64(st as u64),
+                            Arg::I32(nb as i32),
+                            Arg::Ptr(0),
+                            Arg::I32(0),
+                            out.arg(),
+                            Arg::U64(rows as u64),
+                        ];
+                        // SAFETY: prefill.cu's gemm2 signature; buffers as above.
+                        unsafe { launch_product(g, &f, "gemm2s_q4_k", Q4_K, rows, nb, &common) };
+                    }
+                };
+                if reps[vi][case] == 0 {
+                    run();
+                    let e0 = g.record().unwrap();
+                    for _ in 0..3 {
+                        run();
+                    }
+                    let e1 = g.record().unwrap();
+                    let t = e0.ms_to(&e1).unwrap() as f64 / 3.0;
+                    reps[vi][case] = ((win_ms / t).ceil() as usize).max(3);
+                }
+                let k = reps[vi][case];
+                // Warm half a window (clocks settle to this variant's power), then time a window.
+                for _ in 0..k / 2 {
+                    run();
+                }
+                g.sync().unwrap();
+                let t0 = std::time::Instant::now();
+                let e0 = g.record().unwrap();
+                for _ in 0..k {
+                    run();
+                }
+                let e1 = g.record().unwrap();
+                let el = e0.ms_to(&e1).unwrap() as f64;
+                g.sync().unwrap();
+                let t1 = std::time::Instant::now();
+                ms[vi][case].push(el / k as f64);
+                clk[vi][case].push(window(t0, t1));
+            }
+        }
+    }
+    let _ = child.kill();
+    let sms = g.info().unwrap().sms as f64;
+    let cname = ["gate", "down", "gu"];
+    for (vi, n) in names.iter().enumerate() {
+        for case in 0..3 {
+            let macs = (3584.0 * 18944.0 * nb as f64) * if case == 2 { 2.0 } else { 1.0 };
+            let c = &clk[vi][case];
+            let mut pc: Vec<f64> = ms[vi][case]
+                .iter()
+                .zip(c.iter())
+                .map(|(x, k)| macs / (x * 1e-3) / (sms * k.0 * 1e6))
+                .collect();
+            pc.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let v = &mut ms[vi][case];
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let t = |x: f64| macs / (x * 1e-3) / 1e12;
+            let mut mhz: Vec<f64> = c.iter().map(|x| x.0).collect();
+            mhz.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let w = c.iter().map(|x| x.1).sum::<f64>() / c.len() as f64;
+            // Per-clock rate, per sample, median: MAC per SM-clock.
+            eprintln!(
+                "ABL {n:<40} {:<4} nb {nb}: median {:.2} TMAC/s (min {:.2} max {:.2}; {:.3} ms) clk {:.0} MHz {:.1} W -> {:.0} MAC/clk/SM (per-sample median {:.0})",
+                cname[case],
+                t(v[v.len() / 2]),
+                t(v[v.len() - 1]),
+                t(v[0]),
+                v[v.len() / 2],
+                mhz[mhz.len() / 2],
+                w,
+                t(v[v.len() / 2]) * 1e12 / (sms * mhz[mhz.len() / 2] * 1e6),
+                pc[pc.len() / 2]
+            );
+        }
+    }
+}
+
 #[test]
 #[ignore]
 fn cuda_gemmh_bench() {
@@ -6759,6 +7034,10 @@ fn cuda_gemmh_bench() {
         info.sms,
         km.hopper()
     );
+    if let Ok(v) = std::env::var("AXON_BENCH_VARIANTS") {
+        gemm_ablate(&g, &km, &v);
+        return;
+    }
     let nbs: Vec<usize> = std::env::var("AXON_BENCH_NB")
         .map(|v| v.split(',').map(|x| x.parse().unwrap()).collect())
         .unwrap_or(vec![1050]);

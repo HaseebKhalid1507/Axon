@@ -1850,6 +1850,10 @@ impl<'g> Module<'g> {
         let nv = ffi::nvrtc_version(n)?;
         let mut all = vec![format!("--gpu-architecture={target}")];
         all.extend(opts.iter().map(|s| s.to_string()));
+        // r17 scratch: extra -D defines for ablation builds (debug only; part of the cache key).
+        if let Ok(d) = std::env::var("AXON_NVRTC_DEFINES") {
+            all.extend(d.split_whitespace().map(|s| s.to_string()));
+        }
         let (joined, ver) = (all.join("\n"), format!("nvrtc {}.{}", nv.0, nv.1));
         let tname = target.to_string();
         let key = fnv128(&[

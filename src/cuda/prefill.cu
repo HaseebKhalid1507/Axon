@@ -1073,6 +1073,32 @@ __device__ __forceinline__ void mma32(int* d, u32 a0, u32 a1, u32 a2, u32 a3, u3
                  : "=r"(d[0]), "=r"(d[1]), "=r"(d[2]), "=r"(d[3])
                  : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1), "r"(0));
 }
+// r17 ablation switches (scratch/r17-ablate; all off by default; results are wrong when on).
+#ifdef ABL_NO_MMA
+// Cheap dependency-keeping stand-ins for the mma (one LOP3 per output register pair).
+#define G2_MMA32(d, a0, a1, a2, a3, b0, b1) \
+    do { (d)[0] = (int)((a0) ^ (a1) ^ (b0)); (d)[1] = (int)((a2) ^ (a3) ^ (b1)); \
+         (d)[2] = (int)((a0) ^ (a2) ^ (b1)); (d)[3] = (int)((a1) ^ (a3) ^ (b0)); } while (0)
+#define G2_MMA16(d, a0, a1, b0) \
+    do { (d)[0] = (int)((a0) ^ (b0)); (d)[1] = (int)((a1) ^ (b0)); \
+         (d)[2] = (int)((a0) + (b0)); (d)[3] = (int)((a1) + (b0)); } while (0)
+#else
+#define G2_MMA32(d, a0, a1, a2, a3, b0, b1) mma32(d, a0, a1, a2, a3, b0, b1)
+#define G2_MMA16(d, a0, a1, b0) mma16(d, a0, a1, b0)
+#endif
+// ABL_LDSM: four 8x16-byte rows-of-8 matrices in one ldmatrix (lane l: row address of matrix l >> 3).
+__device__ __forceinline__ void ldsm4(u32* r, u32 addr) {
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];"
+                 : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3])
+                 : "r"(addr));
+}
+// ABL_CHAIN: S accumulated by the mma itself (C = d), no scale IMADs.
+__device__ __forceinline__ void mma32c(int* d, u32 a0, u32 a1, u32 a2, u32 a3, u32 b0, u32 b1) {
+    asm("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, "
+                 "{%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
+                 : "+r"(d[0]), "+r"(d[1]), "+r"(d[2]), "+r"(d[3])
+                 : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "r"(b0), "r"(b1));
+}
 #endif
 
 // N words of the bytes at a 2-byte aligned p.
@@ -1486,6 +1512,7 @@ __device__ __forceinline__ void g2_copy(u8* wb, u8* st, const u8* w, u64 rb, int
     if (L::RAW) {
         // 16-byte chunks per block: 9 (Q4_K, 144 bytes), 11 (Q5_K, 176).
         const int CH = GmType<QT>::BYTES / 16;
+#ifndef ABL_NO_COPY_W
         for (int id = tid; id < G2_BM * CH; id += G2_THREADS) {
             int rr = id / CH, ch = id - CH * rr;
             // GU: rows 0..32 of the tile from w (gate), 32.. the same rows
@@ -1494,7 +1521,11 @@ __device__ __forceinline__ void g2_copy(u8* wb, u8* st, const u8* w, u64 rb, int
                                : w + (u64)min(r0 + rr, rows - 1) * rb;
             cp16(wb + rr * G2_Q4K_ROW + 16 * ch, row + (u64)s * GmType<QT>::BYTES + 16 * ch);
         }
+#endif
     }
+#ifdef ABL_NO_COPY_ACT
+    if (L::RAW) return;
+#endif
     u8* xs = st;
     u8* xb = st + L::X;
     u8* xd = st + L::X + L::XB;
@@ -1538,6 +1569,73 @@ __device__ __forceinline__ void g2_copy(u8* wb, u8* st, const u8* w, u64 rb, int
 #endif
 }
 
+#ifdef ABL_FAST_COPY
+// The same copies as g2_copy<QT_Q4_K, 64, 3, GU>, addresses precomputed (r17 prototype).
+struct G2Fast {
+    const u8* ws[3];  // weight chunk k: row + 16 ch (stage 0)
+    u32 wd[3];        // its smem offset in a weight buffer
+    const u8* xs[4];  // activation values chunk k (stage 0)
+    u32 xdst[4];
+    bool xok[4];
+    const u8* bs[2];  // block sums
+    u32 bdst[2];
+    bool bok[2];
+    const u8* ds;     // d (threads < 64)
+    bool dok;
+};
+template <int GU>
+__device__ __forceinline__ void g2f_init(G2Fast& F, const u8* w, u64 rb, int rows, int r0,
+                                         const u8* act, u64 astride, int n, int nb, int z0,
+                                         const u8* w2) {
+    int tid = threadIdx.x;
+    u64 np = act_np(n);
+#pragma unroll
+    for (int k = 0; k < 3; k++) {
+        int id = tid + k * G2_THREADS;
+        int idc = id < G2_BM * 9 ? id : 0;
+        int rr = idc / 9, ch = idc - 9 * rr;
+        const u8* row = GU ? (rr < 32 ? w : w2) + (u64)min(r0 + (rr & 31), rows - 1) * rb
+                           : w + (u64)min(r0 + rr, rows - 1) * rb;
+        F.ws[k] = row + 16 * ch;
+        F.wd[k] = rr * G2_Q4K_ROW + 16 * ch;
+    }
+    int c = tid & 15;
+#pragma unroll
+    for (int k = 0; k < 4; k++) {
+        int tk = (tid >> 4) + k * (G2_THREADS / 16), z = z0 + tk;
+        F.xs[k] = g2_row(act, astride, z, nb) + 16 * c;
+        F.xdst[k] = tk * 256 + 16 * (c ^ (tk & 7));
+        F.xok[k] = z < nb;
+    }
+    int j = tid & 7;
+#pragma unroll
+    for (int k = 0; k < 2; k++) {
+        int tk = (tid >> 3) + k * (G2_THREADS / 8), z = z0 + tk;
+        F.bs[k] = g2_row(act, astride, z, nb) + 2 * np + np / 64 + 4 * j;
+        F.bdst[k] = tk * 32 + 4 * j;
+        F.bok[k] = z < nb;
+    }
+    {
+        int z = z0 + (tid & 63);
+        F.ds = g2_row(act, astride, z, nb) + 2 * np;
+        F.dok = z < nb;
+    }
+}
+__device__ __forceinline__ void g2f_copy(const G2Fast& F, u8* wb, u8* st, int s) {
+    typedef G2L<QT_Q4_K, 64, 3> L;
+    int tid = threadIdx.x;
+    u32 su = (u32)s;
+    cp16(wb + F.wd[0], F.ws[0] + su * 144u);
+    cp16(wb + F.wd[1], F.ws[1] + su * 144u);
+    if (tid < G2_BM * 9 - 2 * G2_THREADS) cp16(wb + F.wd[2], F.ws[2] + su * 144u);
+#pragma unroll
+    for (int k = 0; k < 4; k++) cp16q(st + F.xdst[k], F.xs[k] + su * 256u, F.xok[k]);
+#pragma unroll
+    for (int k = 0; k < 2; k++) cp4q(st + L::X + F.bdst[k], F.bs[k] + su * 32u, F.bok[k]);
+    if (tid < 64) cp4q(st + L::X + L::XB + 4 * tid, F.ds + su * 4u, F.dok);
+}
+#endif
+
 __device__ __forceinline__ u32 g2_ld(const u8* p) { return *(const u32*)p; }
 
 // One stage's products into the chains acc[mi][f][e] (row 32 wr + 16 mi +
@@ -1573,12 +1671,19 @@ __device__ __forceinline__ void g2_compute(const u8* wb, const u8* st, int nblk,
             for (int h = 0; h < 2; h++) {
                 wrow[mi][h] = wb + (32 * wr + 16 * mi + 8 * h + g) * G2_Q4K_ROW;
                 uint4 hd = *(const uint4*)wrow[mi][h];
+#ifdef ABL_NO_HDR
+                d[mi][h] = __uint_as_float(hd.x);
+                dmin[mi][h] = __uint_as_float(hd.x ^ hd.w);
+                scw[mi][h][0] = hd.y, scw[mi][h][1] = hd.w;
+                mw[mi][h][0] = hd.z, mw[mi][h][1] = hd.w;
+#else
                 d[mi][h] = h2f(hd.x & 0xffff);
                 dmin[mi][h] = h2f(hd.x >> 16);
                 scw[mi][h][0] = hd.y & 0x3f3f3f3f;
                 scw[mi][h][1] = (hd.w & 0x0f0f0f0f) | ((hd.y >> 2) & 0x30303030);
                 mw[mi][h][0] = hd.z & 0x3f3f3f3f;
                 mw[mi][h][1] = ((hd.w >> 4) & 0x0f0f0f0f) | ((hd.z >> 2) & 0x30303030);
+#endif
             }
         u32 qhw[2][2][2];
 #pragma unroll
@@ -1595,54 +1700,15 @@ __device__ __forceinline__ void g2_compute(const u8* wb, const u8* st, int nblk,
             for (int f = 0; f < NT; f++)
 #pragma unroll
                 for (int e = 0; e < 4; e++) S[mi][f][e] = 0;
+#ifdef ABL_M_FIRST
+#ifdef ABL_NO_M
 #pragma unroll
-        for (int c = 0; c < 4; c++) {
-            // B: sub-blocks 2c (chunks 4c, 4c + 1) and 2c + 1 (4c + 2, 4c + 3).
-            u32 bf[NT][4];
+        for (int mi = 0; mi < 2; mi++)
 #pragma unroll
             for (int f = 0; f < NT; f++)
 #pragma unroll
-                for (int i = 0; i < 4; i++) bf[f][i] = G2_X(f, 4 * c + i);
-#pragma unroll
-            for (int mi = 0; mi < 2; mi++) {
-                // qs bytes 32c + 4t.. (chunk 1 + 2c) and 32c + 16 + 4t.. (2 + 2c).
-                u32 q[2][2];
-#pragma unroll
-                for (int h = 0; h < 2; h++) {
-                    q[h][0] = g2_ld(wrow[mi][h] + QS + 32 * c + 4 * t);
-                    q[h][1] = g2_ld(wrow[mi][h] + QS + 32 * c + 16 + 4 * t);
-                }
-                int sc1[2], sc2[2];
-#pragma unroll
-                for (int h = 0; h < 2; h++) {
-                    sc1[h] = gm_ubyte(scw[mi][h][c >> 1], 2 * c);
-                    sc2[h] = gm_ubyte(scw[mi][h][c >> 1], 2 * c + 1);
-                }
-                u32 lo0 = q[0][0] & 0x0f0f0f0f, lo1 = q[1][0] & 0x0f0f0f0f;
-                u32 lo2 = q[0][1] & 0x0f0f0f0f, lo3 = q[1][1] & 0x0f0f0f0f;
-                u32 hi0 = (q[0][0] >> 4) & 0x0f0f0f0f, hi1 = (q[1][0] >> 4) & 0x0f0f0f0f;
-                u32 hi2 = (q[0][1] >> 4) & 0x0f0f0f0f, hi3 = (q[1][1] >> 4) & 0x0f0f0f0f;
-                if (Q5) {
-#define G2_H5(w, sh) ((((w) >> (sh)) & 0x01010101) << 4)
-                    lo0 |= G2_H5(qhw[mi][0][0], 2 * c), lo1 |= G2_H5(qhw[mi][1][0], 2 * c);
-                    lo2 |= G2_H5(qhw[mi][0][1], 2 * c), lo3 |= G2_H5(qhw[mi][1][1], 2 * c);
-                    hi0 |= G2_H5(qhw[mi][0][0], 2 * c + 1), hi1 |= G2_H5(qhw[mi][1][0], 2 * c + 1);
-                    hi2 |= G2_H5(qhw[mi][0][1], 2 * c + 1), hi3 |= G2_H5(qhw[mi][1][1], 2 * c + 1);
-#undef G2_H5
-                }
-#pragma unroll
-                for (int f = 0; f < NT; f++) {
-                    int d1[4], d2[4];
-                    mma32(d1, lo0, lo1, lo2, lo3, bf[f][0], bf[f][1]);
-                    mma32(d2, hi0, hi1, hi2, hi3, bf[f][2], bf[f][3]);
-#pragma unroll
-                    for (int e = 0; e < 4; e++) {
-                        int h = e >> 1;
-                        S[mi][f][e] += sc1[h] * d1[e] + sc2[h] * d2[e];
-                    }
-                }
-            }
-        }
+                for (int e = 0; e < 4; e++) M[mi][f][e] = 0;
+#else
         {
             // M by mma: sum_j m_j bsum_j with bsum_j = lo_j + 64 hi_j (lo in
             // [0, 64), hi in [-64, 64): int8). B (k16) of token g: k < 8 the
@@ -1666,13 +1732,150 @@ __device__ __forceinline__ void g2_compute(const u8* wb, const u8* st, int nblk,
 #pragma unroll
                 for (int f = 0; f < NT; f++) {
                     int ml[4], mh[4];
-                    mma16(ml, alo0, alo1, bm[f]);
-                    mma16(mh, ahi0, ahi1, bm[f]);
+                    G2_MMA16(ml, alo0, alo1, bm[f]);
+                    G2_MMA16(mh, ahi0, ahi1, bm[f]);
 #pragma unroll
                     for (int e = 0; e < 4; e++) M[mi][f][e] = ml[e] + mh[e] * 64;
                 }
             }
         }
+#endif
+#endif
+#pragma unroll
+        for (int c = 0; c < 4; c++) {
+            // B: sub-blocks 2c (chunks 4c, 4c + 1) and 2c + 1 (4c + 2, 4c + 3).
+            u32 bf[NT][4];
+#pragma unroll
+            for (int f = 0; f < NT; f++)
+#if defined(ABL_LDSM) && !defined(ABL_NO_SMEM_ACT)
+            {
+                int lr = lane & 7, li = lane >> 3;
+                ldsm4(bf[f], (u32)__cvta_generic_to_shared(xs) +
+                                 (8 * NT * wc + 8 * f + lr) * 256 + 16 * ((4 * c + li) ^ lr));
+            }
+#else
+#pragma unroll
+                for (int i = 0; i < 4; i++)
+#ifdef ABL_NO_SMEM_ACT
+                    bf[f][i] = __float_as_uint(acc[0][f][i]);
+#else
+                    bf[f][i] = G2_X(f, 4 * c + i);
+#endif
+#endif
+#pragma unroll
+            for (int mi = 0; mi < 2; mi++) {
+                // qs bytes 32c + 4t.. (chunk 1 + 2c) and 32c + 16 + 4t.. (2 + 2c).
+                u32 q[2][2];
+#pragma unroll
+                for (int h = 0; h < 2; h++) {
+#ifdef ABL_NO_SMEM_W
+                    q[h][0] = bf[0][2 * h] ^ mw[mi][h][0];
+                    q[h][1] = bf[0][2 * h + 1] ^ mw[mi][h][1];
+#elif defined(ABL_LDSM)
+                    (void)h;
+#else
+                    q[h][0] = g2_ld(wrow[mi][h] + QS + 32 * c + 4 * t);
+                    q[h][1] = g2_ld(wrow[mi][h] + QS + 32 * c + 16 + 4 * t);
+#endif
+                }
+#if defined(ABL_LDSM) && !defined(ABL_NO_SMEM_W)
+                {
+                    int lr = lane & 7, li = lane >> 3;
+                    u32 qq[4];
+                    ldsm4(qq, (u32)__cvta_generic_to_shared(wb) +
+                                  (32 * wr + 16 * mi + 8 * (li & 1) + lr) * G2_Q4K_ROW + QS + 32 * c +
+                                  16 * (li >> 1));
+                    q[0][0] = qq[0], q[1][0] = qq[1], q[0][1] = qq[2], q[1][1] = qq[3];
+                }
+#endif
+                int sc1[2], sc2[2];
+#pragma unroll
+                for (int h = 0; h < 2; h++) {
+                    sc1[h] = gm_ubyte(scw[mi][h][c >> 1], 2 * c);
+                    sc2[h] = gm_ubyte(scw[mi][h][c >> 1], 2 * c + 1);
+                }
+#ifdef ABL_NO_UNPACK
+                u32 lo0 = q[0][0], lo1 = q[1][0], lo2 = q[0][1], lo3 = q[1][1];
+                u32 hi0 = q[1][1], hi1 = q[0][1], hi2 = q[1][0], hi3 = q[0][0];
+#else
+                u32 lo0 = q[0][0] & 0x0f0f0f0f, lo1 = q[1][0] & 0x0f0f0f0f;
+                u32 lo2 = q[0][1] & 0x0f0f0f0f, lo3 = q[1][1] & 0x0f0f0f0f;
+                u32 hi0 = (q[0][0] >> 4) & 0x0f0f0f0f, hi1 = (q[1][0] >> 4) & 0x0f0f0f0f;
+                u32 hi2 = (q[0][1] >> 4) & 0x0f0f0f0f, hi3 = (q[1][1] >> 4) & 0x0f0f0f0f;
+#endif
+                if (Q5) {
+#define G2_H5(w, sh) ((((w) >> (sh)) & 0x01010101) << 4)
+                    lo0 |= G2_H5(qhw[mi][0][0], 2 * c), lo1 |= G2_H5(qhw[mi][1][0], 2 * c);
+                    lo2 |= G2_H5(qhw[mi][0][1], 2 * c), lo3 |= G2_H5(qhw[mi][1][1], 2 * c);
+                    hi0 |= G2_H5(qhw[mi][0][0], 2 * c + 1), hi1 |= G2_H5(qhw[mi][1][0], 2 * c + 1);
+                    hi2 |= G2_H5(qhw[mi][0][1], 2 * c + 1), hi3 |= G2_H5(qhw[mi][1][1], 2 * c + 1);
+#undef G2_H5
+                }
+#pragma unroll
+                for (int f = 0; f < NT; f++) {
+#ifdef ABL_CHAIN
+                    mma32c(S[mi][f], lo0, lo1, lo2, lo3, bf[f][0], bf[f][1]);
+                    mma32c(S[mi][f], hi0, hi1, hi2, hi3, bf[f][2], bf[f][3]);
+                    (void)sc1, (void)sc2;
+#else
+                    int d1[4], d2[4];
+                    G2_MMA32(d1, lo0, lo1, lo2, lo3, bf[f][0], bf[f][1]);
+                    G2_MMA32(d2, hi0, hi1, hi2, hi3, bf[f][2], bf[f][3]);
+#pragma unroll
+                    for (int e = 0; e < 4; e++) {
+                        int h = e >> 1;
+#ifdef ABL_NO_SCALE
+                        S[mi][f][e] += d1[e] + d2[e];
+                        (void)h, (void)sc1, (void)sc2;
+#else
+                        S[mi][f][e] += sc1[h] * d1[e] + sc2[h] * d2[e];
+#endif
+                    }
+#endif
+                }
+            }
+        }
+#ifndef ABL_M_FIRST
+#ifdef ABL_NO_M
+#pragma unroll
+        for (int mi = 0; mi < 2; mi++)
+#pragma unroll
+            for (int f = 0; f < NT; f++)
+#pragma unroll
+                for (int e = 0; e < 4; e++) M[mi][f][e] = 0;
+#else
+        {
+            // M by mma: sum_j m_j bsum_j with bsum_j = lo_j + 64 hi_j (lo in
+            // [0, 64), hi in [-64, 64): int8). B (k16) of token g: k < 8 the
+            // lo_j, k >= 8 the hi_j; A rows: the mins at k < 8 (lo product)
+            // or k >= 8 (hi product), zeros elsewhere.
+            u32 bm[NT];
+#pragma unroll
+            for (int f = 0; f < NT; f++) {
+                int4 v = *(const int4*)(xb + (8 * NT * wc + 8 * f + g) * 32 + 16 * (t & 1));
+                int sh = t < 2 ? 0 : 6;
+                u32 p01 = __byte_perm((u32)(v.x >> sh), (u32)(v.y >> sh), 0x0040);
+                u32 p23 = __byte_perm((u32)(v.z >> sh), (u32)(v.w >> sh), 0x0040);
+                bm[f] = __byte_perm(p01, p23, 0x5410) & (t < 2 ? 0x3f3f3f3fu : 0xffffffffu);
+            }
+#pragma unroll
+            for (int mi = 0; mi < 2; mi++) {
+                u32 m0 = (t & 1) ? mw[mi][0][1] : mw[mi][0][0];
+                u32 m1 = (t & 1) ? mw[mi][1][1] : mw[mi][1][0];
+                u32 alo0 = t < 2 ? m0 : 0, alo1 = t < 2 ? m1 : 0;
+                u32 ahi0 = t < 2 ? 0 : m0, ahi1 = t < 2 ? 0 : m1;
+#pragma unroll
+                for (int f = 0; f < NT; f++) {
+                    int ml[4], mh[4];
+                    G2_MMA16(ml, alo0, alo1, bm[f]);
+                    G2_MMA16(mh, ahi0, ahi1, bm[f]);
+#pragma unroll
+                    for (int e = 0; e < 4; e++) M[mi][f][e] = ml[e] + mh[e] * 64;
+                }
+            }
+        }
+#endif
+#endif
         float dk[NT][2];
 #pragma unroll
         for (int f = 0; f < NT; f++)
@@ -1685,9 +1888,14 @@ __device__ __forceinline__ void g2_compute(const u8* wb, const u8* st, int nblk,
 #pragma unroll
                 for (int e = 0; e < 4; e++) {
                     int h = e >> 1;
+#ifdef ABL_NO_EPI
+                    acc[mi][f][e] = __int_as_float(__float_as_int(acc[mi][f][e]) + S[mi][f][e] - M[mi][f][e]);
+                    (void)h, (void)dk, (void)d, (void)dmin;
+#else
                     float v = __fsub_rn(__fmul_rn(d[mi][h], i2f_rn(S[mi][f][e])),
                                         __fmul_rn(dmin[mi][h], i2f_rn(M[mi][f][e])));
                     acc[mi][f][e] = __fmaf_rn(dk[f][e & 1], v, acc[mi][f][e]);
+#endif
                 }
     } else if constexpr (L::Q6) {
         const u8* meta = wb + G2_BM * 256;
@@ -1893,10 +2101,37 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
     // Stage s's buffers.
     auto wsl = [&](int s) { return wbuf + (L::RAW ? s % ST : (L::NWB == 2 ? s & 1 : 0)) * L::W; };
     auto xsl = [&](int s) { return stg + (s % ST) * L::STAGE; };
+#ifdef ABL_L2_ONLY
+    auto copy = [&](int s) {
+        g2_copy<QT, BN, ST, GU>(wsl(s), xsl(s), w, rb, rows, r0, act, astride, n, nb, z0, nblk,
+                                s & 1, w2);
+    };
+#elif defined(ABL_NO_GLOBAL)
+    // Every CTA copies from one of 2 x 2 fixed tiles and 2 stages: all L2 hits.
+    int r0c = (blockIdx.y & 1) * (GU ? 32 : G2_BM), z0c = (blockIdx.x & 1) * BN;
+    auto copy = [&](int s) {
+        g2_copy<QT, BN, ST, GU>(wsl(s), xsl(s), w, rb, rows, r0c, act, astride, n, nb, z0c, nblk,
+                                s & 1, w2);
+    };
+#else
+#ifdef ABL_FAST_COPY
+    G2Fast F;
+    if constexpr (QT == QT_Q4_K && ST == 3 && BN == 64)
+        g2f_init<GU>(F, w, rb, rows, r0, act, astride, n, nb, z0, w2);
+    auto copy = [&](int s) {
+        if constexpr (QT == QT_Q4_K && ST == 3 && BN == 64)
+            g2f_copy(F, wsl(s), xsl(s), s);
+        else
+            g2_copy<QT, BN, ST, GU>(wsl(s), xsl(s), w, rb, rows, r0, act, astride, n, nb, z0,
+                                    nblk, s, w2);
+    };
+#else
     auto copy = [&](int s) {
         g2_copy<QT, BN, ST, GU>(wsl(s), xsl(s), w, rb, rows, r0, act, astride, n, nb, z0, nblk, s,
                                 w2);
     };
+#endif
+#endif
     if constexpr (!L::RAW) {
         g2_load_w<QT>(w, rb, rows, r0, nblk, 0, reg);
         g2_store_w<QT>(wsl(0), nblk, 0, reg);
@@ -1934,9 +2169,15 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
             cp_commit();
         }
         for (int s = 0; s < nst; s++) {
+#ifndef ABL_NO_WAIT
             cp_wait<ST - 2>();
+#endif
+#ifndef ABL_NO_SYNC
             __syncthreads();
+#endif
+#ifndef ABL_NO_COPY
             if (s + ST - 1 < nst) copy(s + ST - 1);
+#endif
             cp_commit();
             if constexpr (!L::RAW) {
                 if (s + 1 < nst) {
