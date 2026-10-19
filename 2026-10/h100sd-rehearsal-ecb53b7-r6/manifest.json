@@ -1,0 +1,29 @@
+{
+ "label": "h100sd-rehearsal-ecb53b7-r6",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1019-151323-aa8b",
+   "name": "h100sd-rehearsal-sglang",
+   "rc": 5,
+   "verdict": "FAIL (rc 5)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.71.09",
+   "sha": "ecb53b7",
+   "binary": "bella-rehearsal.sh",
+   "started": 1792438102.2284284,
+   "ended": 1792438663.5029175,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "c4693ef7880a8ce4623551bc8ed39d9a1b7be73d79f7fabfdb8e107b2036f139",
+   "log_bytes": 2639
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-19 15:37:43 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}

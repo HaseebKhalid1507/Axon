@@ -1,0 +1,43 @@
+[axon-run 15:13:23] submitted 1019-151323-aa8b by /home/haseeb/.cache/axon-h100sd: /home/haseeb/Projects/axon-devstack/runbooks/h100sd/bella-rehearsal.sh reh6-sglang-ecb53b7 /home/haseeb/.cache/axon-h100sd/axon-ecb53b7 sglang
+[axon-run 15:28:22] scope axon-job-1019-151323-aa8b-1792438102.scope in app-axonjobs.slice: MemoryMax 19024 MB, MemoryHigh 17121 MB, no swap, oomd pressure kill 80% (claim 12000 MB): an OOM here kills only this job
+[axon-run 15:28:22] job 1019-151323-aa8b -> bella: systemd-run --user --scope --quiet --unit=axon-job-1019-151323-aa8b-1792438102 --slice=app-axonjobs.slice -p MemoryMax=19024M -p MemoryHigh=17121M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/Projects/axon-devstack/runbooks/h100sd/bella-rehearsal.sh reh6-sglang-ecb53b7 /home/haseeb/.cache/axon-h100sd/axon-ecb53b7 sglang
+axon-q 15:28:22 start slot 16-23: /home/haseeb/Projects/axon-devstack/runbooks/h100sd/bella-rehearsal.sh reh6-sglang-ecb53b7 /home/haseeb/.cache/axon-h100sd/axon-ecb53b7 sglang
+15:28:22 waiting for the rehearsal lock (one engine venv on bella at a time)
+15:28:22 installing sglang (pod_setup.sh, pinned) with 65 GB free
+[setup] uv: done before
+[setup] hf-awq05: done before
+[setup 15:28:22] venv-sgl: start
+[setup 15:37:12] venv-sgl: rc 0 after 530 s
+[setup 15:37:12] sgl-jit: start
+[setup 15:37:19] sgl-jit: rc 1 after 7 s
+[setup 15:37:19] all steps done, fail=1
+uv	0	3	02:35:27
+hf-awq05	0	20	02:49:47
+venv-sgl	0	530	15:37:12
+sgl-jit	1	7	15:37:19
+19G	/home/haseeb/.cache/axon-h100sd/rehearsal/venv-sgl
+708M	/home/haseeb/.cache/axon-h100sd/rehearsal/hf/qwen2.5-0.5b-awq
+4.0K	/home/haseeb/.cache/axon-h100sd/rehearsal/hf/qwen2.5-0.5b-awq.bytes
+INSTALL FAILED: sglang (see /home/haseeb/.cache/axon-h100sd/rehearsal/logs/venv-sgl.log)
+Downloading nvidia-nvvm (58.7MiB)
+Downloading nvidia-cuda-cccl (3.0MiB)
+Downloading nvidia-cuda-nvcc (35.7MiB)
+ Downloaded nvidia-cuda-cccl
+ Downloaded nvidia-cuda-nvcc
+ Downloaded nvidia-nvvm
+Prepared 4 packages in 5.85s
+Uninstalled 4 packages in 169ms
+Installed 4 packages in 55ms
+ - nvidia-cuda-cccl==13.3.4.3.1
+ + nvidia-cuda-cccl==13.0.85
+ - nvidia-cuda-crt==13.4.92
+ + nvidia-cuda-crt==13.0.88
+ - nvidia-cuda-nvcc==13.4.92
+ + nvidia-cuda-nvcc==13.0.88
+ - nvidia-nvvm==13.4.92
+ + nvidia-nvvm==13.0.88
+Cuda compilation tools, release 13.0, V13.0.88
+Build cuda_13.0.r13.0/compiler.36424714_0
+sglang layers import cleanly with the venv toolkit; ENABLE_JIT_DEEPGEMM = True
+15:37:40 cleaned: 1.1G in /home/haseeb/.cache/axon-h100sd, / 65G free
+[axon-run 15:37:40] exit 5 after 558.5s (host bella)
