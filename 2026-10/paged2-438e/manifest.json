@@ -1,0 +1,29 @@
+{
+ "label": "paged2-438e",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1019-105852-438e",
+   "name": "paged2-b35d3d5-graphbytes7b-inject",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.71.09",
+   "sha": "b35d3d5",
+   "binary": "axon-test-b35d3d5",
+   "started": 1792436321.8573961,
+   "ended": 1792436328.29595,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "2f60e19b4201c98ea0574619dc7399609e7d450852cfa8d1f68329d02519da9b",
+   "log_bytes": 2767
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-19 14:58:48 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
