@@ -81,7 +81,7 @@ tokenizer files, against `Qwen3-0.6B-Q8_0.gguf` and `Llama-3.2-1B-Instruct-Q4_K_
 |---|---|---|
 | (1) CPU `logits` (all 151936, 9 decimals) + greedy `gen -n 128` md5, dir == 2-shard dir == GGUF F16, 50 prompts | pending | |
 | (1) every converted tensor == the GGUF F16's (name, dims, type, bytes), 290/290 | pending | |
-| (2) tokenizer parity, 135 texts (50 gate prompts, tokens.json, natural_text, edge cases incl. decomposed accents), `encode_prompt` and `encode_special`, Qwen2.5 / Qwen3 / Llama 3.2 | pending | |
+| (2) tokenizer parity, 193 texts (50 gate prompts, tokens.json, natural_text, edge cases incl. decomposed accents), `encode_prompt` and `encode_special`, Qwen2.5 / Qwen3 / Llama 3.2 | pending | |
 | (2) metadata parity: every key Axon reads, same value (Qwen2.5 all; Qwen3 / Llama: chat template excluded, different file revisions) | pending | |
 | llama3 `rope_freqs.weight` computed == the GGUF's, bit for bit | pending | |
 | (3) `check_supported` refusal parity: 8 config edits, same message as the GGUF built from the same keys | pass (synthetic, in the suite) | `check_supported_refuses_as_for_the_gguf` |
@@ -101,4 +101,11 @@ Pending.
 ## What didn't work / notes
 
 - First draft quieted signalling NaNs (`quant::f32_to_f16`); numpy doesn't. Fixed before any gate (above).
+- Fuzz finding (1019-023221-b0fe, at 82f049b): a qwen2 config with `rope_scaling {rope_type: llama3}` made
+  `gen` panic. The computed `rope_freqs.weight` lived in the aux arena, which was only created after the
+  `check` callback, and `check_supported` reads it (`rope_freqs`). Fix (fe4c3ef): computed tensors sit first
+  in the arena and are mapped before `check` (and in a header-only load); the conversion fills the rest
+  after. Unit test `llama3_rope_on_a_checkpoint_is_readable_before_conversion`. GGUF mode: 1762 mutants, clean.
+- Llama 3.2 metadata parity failed on `add_bos_token` only: bartowski's Q4_K_M predates the converter writing
+  that key; Axon's llama-bpe default is the same `true` (the tokenizer test compares the BOS both add).
 - `encode_prompt` doesn't split special-token text; the parity test checks `encode_special` too.
