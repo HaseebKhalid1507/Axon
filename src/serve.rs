@@ -125,6 +125,9 @@ pub struct Opts {
     /// A paged pool's KV pages (None: as many as fit; tests squeeze the
     /// pool with it).
     pub kv_pages: Option<usize>,
+    /// Generated tokens a paged admission reserves pages for (None: the
+    /// engine's GROW_TOKENS; tests set 0 to force preemption).
+    pub kv_grow: Option<usize>,
     /// Prompt tokens a batched step feeds at least while requests decode
     /// (`--prefill-chunk`; 0: prompts fed whole): a long prompt prefills in
     /// chunks between the running requests' steps.
@@ -833,10 +836,12 @@ fn engine(
             .unwrap_or_else(|e| crate::fail(&format!("--draft-model {e}")))
     });
     // The Q6_K prefill copy waits for the cache and slots (below).
+    // AXON_PAGED_KV, read once for this server.
+    let paged_env = crate::cuda::qwen2::pages::paged_env();
     let place = crate::lm::Placing {
         split_ctx,
         defer_q6k8: true,
-        paged: paged_serve(device, o.parallel),
+        paged: paged_serve(device, o.parallel, paged_env),
     };
     let (mut net, drafter) = crate::backend_and_drafter(
         &model,
@@ -887,7 +892,7 @@ fn engine(
         _ => (ctx, why),
     };
     // (A paged pool plans its own context: below.)
-    if let Some(why) = why.filter(|_| o.log && !paged_serve(device, o.parallel)) {
+    if let Some(why) = why.filter(|_| o.log && !paged_serve(device, o.parallel, paged_env)) {
         eprintln!("axon serve: context {ctx} tokens: {why}");
     }
     let template = Template::new(tok, &model.arch);
@@ -921,7 +926,7 @@ fn engine(
     };
     // Paged KV (specs r11): a slot is a cap, the pool a page budget.
     let paged = match &net {
-        Backend::Cuda(n) if paged_serve(device, o.parallel) => {
+        Backend::Cuda(n) if paged_serve(device, o.parallel, paged_env) => {
             let slots = if o.parallel_set {
                 o.parallel
             } else {
@@ -1061,7 +1066,11 @@ fn engine(
             floor: o.prefill_chunk,
             ms: o.prefill_ms,
         };
-        Batch::new(&net, pool, n, slot_ctx, policy, o.log, e.generated.clone())
+        let mut b = Batch::new(&net, pool, n, slot_ctx, policy, o.log, e.generated.clone());
+        if let Some(g) = o.kv_grow {
+            b.set_grow_tokens(g);
+        }
+        b
     });
     let served = batch.as_ref().map_or(ctx, |b| b.ctx.min(ctx));
     let banner = match (&batch, &paged) {
@@ -1106,7 +1115,13 @@ fn engine(
     let mut waiting: VecDeque<Job> = VecDeque::new();
     loop {
         if let Some(b) = &batch {
-            let pages = b.pages().map(|p| (p.free, p.total, p.size));
+            let pages = b.pages().map(|p| ops::PagesView {
+                free: p.free,
+                total: p.total,
+                size: p.size,
+                preempted: b.preempted,
+                unfed: b.unfed,
+            });
             o.metrics.publish_pool(b.slot_states(), pages);
         }
         if batch.as_ref().is_none_or(Batch::idle) && waiting.is_empty() {
@@ -1224,9 +1239,10 @@ const PAGED_PARALLEL: usize = 16;
 /// Positions per KV page (cuda qwen2 pages.rs).
 const PAGE_TOKENS: usize = 64;
 
-/// Whether serve's pool is paged: the GPU, batching, AXON_PAGED_KV != 0.
-fn paged_serve(device: Device, parallel: usize) -> bool {
-    device == Device::Cuda && parallel > 1 && crate::cuda::qwen2::pages::paged_env()
+/// Whether serve's pool is paged: the GPU, batching, AXON_PAGED_KV != 0
+/// (`paged_env`, read once at serve's start).
+fn paged_serve(device: Device, parallel: usize, paged_env: bool) -> bool {
+    device == Device::Cuda && parallel > 1 && paged_env
 }
 
 /// A paged pool's shape: up to `slots` requests of up to `cap` positions
@@ -1497,6 +1513,7 @@ struct EngineOpts {
     parallel_set: bool,
     slot_ctx: Option<usize>,
     kv_pages: Option<usize>,
+    kv_grow: Option<usize>,
     prefill_chunk: usize,
     prefill_ms: usize,
     path: String,
@@ -1603,6 +1620,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
         parallel_set: o.parallel_set,
         slot_ctx: o.slot_ctx,
         kv_pages: o.kv_pages,
+        kv_grow: o.kv_grow,
         prefill_chunk: o.prefill_chunk,
         prefill_ms: o.prefill_ms,
         generated: generated.clone(),
@@ -2646,6 +2664,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         parallel_set: false,
         slot_ctx: None,
         kv_pages: None,
+        kv_grow: None,
         prefill_chunk: engine::PREFILL_CHUNK,
         prefill_ms: engine::PREFILL_MS,
         rope: Default::default(),

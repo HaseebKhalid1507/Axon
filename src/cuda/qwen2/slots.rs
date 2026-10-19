@@ -54,6 +54,9 @@ pub struct CudaPool<'g> {
     pm: Option<PageMap>,
     /// Most rows per step (logits scratch rows).
     rows_max: usize,
+    /// Tokens per batched pass (the batch scratch's, kept here: the
+    /// scratch may be lent to a view, `lend_scratch`).
+    pass_max: usize,
     /// Captured steps by (rows, greedy rows, + device-sampled rows): a
     /// step's kernels and their arguments depend on nothing else (its
     /// tokens, places and S are copied in before the graph runs).
@@ -261,12 +264,14 @@ impl<'g> CudaQwen2<'g> {
         // distinct tokens of a window of at most ctx), made up front: it is
         // never reallocated (the graphs hold its address).
         self.samp_bufs(&mut c, 8 + rows_max * (2 + ctx.min(self.vocab)), rows_max)?;
+        let pass_max = c.b.as_ref().map_or(1, |b| b.max);
         Ok(CudaPool {
             c,
             slots,
             ctx,
             pm,
             rows_max,
+            pass_max,
             graphs: HashMap::new(),
             steps: 0,
         })
@@ -349,7 +354,13 @@ impl<'g> CudaQwen2<'g> {
                 }
             }
         }
-        // Each row's page (a new one every PAGE positions).
+        // Each row's page (a new one every PAGE positions). A row short of
+        // pages refuses the whole step (StepError::Input, nothing run; rows
+        // before it may have taken their page, which they need anyway), and
+        // serve fails every request in a refused step (`Batch::step`'s
+        // fail_all), so serve's `Batch::grow` takes every row's page first:
+        // there this never fires. A page taken is one synchronous 4-byte
+        // table write (a stream sync), once per PAGE positions per slot.
         for r in rows {
             match self.reserve(p, r.slot, r.pos + 1) {
                 Ok(0) => {}
@@ -830,7 +841,7 @@ impl CudaPool<'_> {
     /// `BatchLm::pass_max`: the batch scratch's tokens (PREFILL_BATCH, or
     /// PLAN_BATCH when the bigger passes don't fit; `feed_slot` splits by it).
     pub fn pass_max(&self) -> usize {
-        self.c.b.as_ref().expect("batch scratch").max
+        self.pass_max
     }
 }
 

@@ -51,6 +51,7 @@ fn test_opts(path: &str, device: Device) -> Opts {
         parallel_set: false,
         slot_ctx: None,
         kv_pages: None,
+        kv_grow: None,
         prefill_chunk: super::engine::PREFILL_CHUNK,
         prefill_ms: super::engine::PREFILL_MS,
         rope: Default::default(),
@@ -1896,6 +1897,9 @@ fn serve_paged_pressure() {
         o.parallel = 6;
         o.parallel_set = true;
         o.kv_pages = Some(40);
+        // Admission reserves no generated tokens' pages: the requests' growth
+        // runs out of pages mid-decode, and the youngest are preempted.
+        o.kv_grow = Some(0);
     });
     let a = s.addr;
     let sl = call(a, "GET", "/slots", "").json();
@@ -1924,6 +1928,9 @@ fn serve_paged_pressure() {
         .map(|x| x["pages_used"].as_u64().unwrap())
         .sum();
     assert_eq!(held + sl["pages_free"].as_u64().unwrap(), 40, "{sl}");
+    // The preemption path ran (and every reply above was the request's
+    // alone: preempted requests were fed again and went on, the same bits).
+    assert!(sl["preempted"].as_u64().unwrap() > 0, "{sl}");
 }
 
 /// `plan_slots` over a model of the memory: s slots of c positions fit
