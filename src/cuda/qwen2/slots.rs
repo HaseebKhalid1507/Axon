@@ -70,6 +70,15 @@ pub struct CudaPool<'g> {
 /// Captured steps kept at most.
 const MAX_GRAPHS: usize = 64;
 
+/// VRAM a captured step graph takes, about (MEASURED, bella sm_120,
+/// 1019-045116-c9d3 `pool_graph_bytes`: 8 step graphs of 1-16 rows took
+/// 4 MiB of the driver's 2 MiB-granular memory, a view's decode graph and a
+/// first kernel-by-kernel launch 0): the plan reserves it for the pool's
+/// MAX_GRAPHS and the view's 6, so graphs are made in memory set aside
+/// rather than out of POOL_SPARE (a capture that still runs out falls back
+/// to kernels: `step_checked`).
+const GRAPH_BYTES: usize = 512 << 10;
+
 /// Rows a bare view's sampling buffers are made for (`view_samp`): a
 /// verify pass of drafting K + 1 rows, K up to 63. More (--draft 64+ with
 /// sampling) grows them at the request (an allocation then).
@@ -212,6 +221,7 @@ impl<'g> CudaQwen2<'g> {
             - self.kv_cache_bytes(kv, ctx)
             - self.batch_bytes(self.batch_for(ctx), ctx)
             + samp
+            + (MAX_GRAPHS + 6) * GRAPH_BYTES
             + self.pool_paged_bytes(kv, slots, ctx, pages)
     }
 
@@ -1328,6 +1338,10 @@ mod tests {
 
     /// `slot_view_matches_a_cache`'s calls on cache `c`: its picks.
     fn run<'g>(net: &CudaQwen2<'g>, prompt: &[u32], c: &mut CudaCache<'g>) -> Vec<u32> {
+        assert!(
+            prompt.len() >= 90,
+            "run takes a prompt of at least 90 tokens"
+        );
         let mut out = Vec::new();
         net.feed_batch(&prompt[..60], 0, c);
         let mut h = prompt[..61].to_vec();
@@ -1775,7 +1789,7 @@ mod tests {
             .iter()
             .map(|p| solo(net, ctx, p, Kind::Greedy, steps))
             .collect();
-        let solo_view = ids(70, 33, v);
+        let solo_view = ids(90, 33, v); // `run` takes 90
         let mut plain = net.new_cache(ctx);
         let want_view = run(net, &solo_view, &mut plain);
         net.graphs = false;
@@ -1977,6 +1991,13 @@ mod tests {
         );
         let ctx = 4096;
         let mut net = CudaQwen2::new(&g, &km, &m, ctx).unwrap();
+        eprintln!(
+            "model: {} ({} layers, dim {}; AXON_STEP_MODEL {:?})",
+            m.arch,
+            net.layers.len(),
+            net.dim,
+            std::env::var("AXON_STEP_MODEL").ok()
+        );
         let v = net.vocab;
         let mut p = net.pool_with(16, ctx, Some(16 * 8), None).unwrap();
         let prompt = ids(300, 7, v);
