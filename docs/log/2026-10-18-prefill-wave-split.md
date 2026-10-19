@@ -5,7 +5,7 @@
   fixed in 2e83f5a.
 - Host-only change: no kernel change, no numerics change, no `NUMERICS_VERSION` bump.
 - **Scope: `gen` / `logits` only.** `serve` and `chat` feed the prompt to the net in `prefill_batch` chunks. Each
-  chunk is one pass, so they see no change. The follow-up (stacked PR, feat/prefill-wave-split-serve) hands them the
+  chunk is one pass, so they see no change. The follow-up (stacked PR #97, feat/prefill-wave-split-serve) hands them the
   whole un-fed prompt.
 
 ## What changed
@@ -153,15 +153,31 @@ more than one pass.
 | big-model bits on bella | 1018-163242-49f2 | PASS |
 | md5 vs main 50cd609 | 1018-163243-9a15 | PASS |
 
-**At 2e83f5a** (main e1ce382 merged; host-only change, so the minimal set):
+**At 2e83f5a** (main e1ce382 merged; host-only change, so the minimal set): ALL PASS
 
 | gate | job | result |
 |---|---|---|
-| bit tests (`gpu_prefill bits wave_passes passes_ gpu_q8_ cuda::qwen2::moe::`), release | 1018-221436-9e33 | queued |
-| same, debug | 1018-221437-12e0 | queued |
-| big-model bits on bella (`AXON_BIG_MODELS=1`) | 1018-221437-c3f0 | queued |
-| md5 vs main e1ce382 | 1018-221437-1aa6 | queued |
+| bit tests (`gpu_prefill bits wave_passes passes_ gpu_q8_ cuda::qwen2::moe::`), release | 1018-221436-9e33 | PASS, 52/0 (avante) |
+| same, debug | 1018-221437-12e0 | PASS, 52/0 |
+| big-model bits on bella (`AXON_BIG_MODELS=1`) | 1018-221437-c3f0 | PASS, 2/0 (bella, 46 SMs; wave split == equal on 0.5B/1.5B/7B/8B, incl. start 37) |
+| md5 vs main e1ce382 | 1018-221437-1aa6 | PASS, 0 of 30 differ, 60/60 rc 0 (cand ran wave splits e.g. [1088, 1013] on the ~2100-token prompts) |
 | clippy (bin + tests), rustfmt | local | PASS |
 
-**4090 re-check of 2e83f5a:** `axon-2e83f5a`, READY-4090. Cells: 7B and Qwen3-8B at pp1153, 2100, 3000 and 6000,
-5 rounds. Run by Case if the pod is still up; otherwise it is pending.
+**4090 re-check of 2e83f5a (MEASURED, Case, RunPod 4090, `axon-2e83f5a` both arms, ab_wave.py 5 rounds
+interleaved, medians; pod4090-2e83f5a-ab.log): PASS.**
+
+| model | pp | old (equal) | new (wave) | Δ | splits |
+|---|---|---|---|---|---|
+| Qwen2.5-7B | 2100 | 13286.8 (13101–13359) | 13638.0 (13528–13695) | **+2.64 %** | [1050,1050] → [1088,1012] |
+| Qwen2.5-7B | 1153 | 12872.7 (12818–12880) | 12834.1 (12710–12860) | −0.30 % | same split (control) |
+| Qwen2.5-7B | 3000 | 13339.7 (13253–13359) | 13357.4 (13316–13368) | +0.13 % | same split (control) |
+| Qwen2.5-7B | 6000 | 12559.3 (12549–12601) | 12532.1 (12520–12581) | −0.22 % | same split (control) |
+| Qwen3-8B | 2100 | 12190.0 (12170–12245) | 12687.3 (12641–12857) | **+4.08 %** | [1050,1050] → [1088,1012] |
+| Qwen3-8B | 1153 | 11922.9 (11791–11960) | 11929.8 (11807–11968) | +0.06 % | same split (control) |
+| Qwen3-8B | 3000 | 12405.8 (12358–12425) | 12405.9 (12317–12474) | +0.00 % | same split (control) |
+| Qwen3-8B | 6000 | 11548.2 (11521–11576) | 11551.0 (11520–11567) | +0.02 % | same split (control) |
+
+As predicted: the pp2100 win holds, and every cell the fitted model now declines runs the same split in both arms
+(controls within ±0.3 %).
+
+gates: ALL PASS at 2e83f5a
