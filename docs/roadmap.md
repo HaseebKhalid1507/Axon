@@ -116,7 +116,7 @@ token prefix, so a slot saved, restored, paged or chunked continues bit for bit.
 | 10 | **Batched speculative decoding.** Draft rows for every running request in one verify step, on while rows × (K+1) ≤ 16 (the weight-read-once regime), off above. | +30–50 % per stream at ≤ 4 clients with a draft model (ESTIMATED from the MEASURED solo gains), nothing lost at 16. Lossless by the verify contract. 30–50 h. | planned (item 1 is done) |
 
 Below the line: shared-prefix pages (copy-on-write over item 5: a swarm's 20k system prompt held once; the swarm's
-real memory win), fairness (aging for oversize requests, shortest-first admission), a batched-decode kernel profile
+real memory win; [Agent-harness workloads](#agent-harness-workloads-later-not-scheduled) item 2), fairness (aging for oversize requests, shortest-first admission), a batched-decode kernel profile
 (inside item 1's bench), q4 KV (under "Not planned", below).
 
 Also done, not yet in the table: **item 6, serve ops** (#61, #62: `--api-key`, `/metrics`, `/slots`,
@@ -130,6 +130,32 @@ cells sit next to item 7's, which PR #67 edits, so they are updated here until #
 
 Dependencies: 1 (done) → {4 stage B, 10}; 2 (done) → 5 (stages 0–1 done) → shared-prefix pages; 3 (done) and 4
 → the rest of 8; stage 1 (done) → 9; the streamer (done) → 7.
+
+## Agent-harness workloads (later: not scheduled)
+
+On the roadmap, not prioritised: nothing here jumps the queue above. Agent harnesses (Synaps, and others such as
+opencode, pi and codex) talk to `serve` through its OpenAI- or ollama-compatible API, and their load doesn't look
+like a chat benchmark. **Why:** several concurrent agent sessions on one consumer GPU, each with a ~15–20k-token
+system prompt plus tool definitions that the sessions share, long multi-turn histories, tool-call turns, and long
+idle gaps while the human reads. Everything below is ESTIMATED or unmeasured; no number in this section is MEASURED
+on this workload.
+
+What works today: OpenAI `tool_calls` (streamed), per-slot prefix reuse, continuous batching (#38), a long prompt's
+admission no longer stalls the other streams (Scale item 1), and paged KV (#71, once merged).
+
+| # | item | why | status |
+|---|---|---|---|
+| 1 | **Agent-workload benchmark.** N concurrent sessions, a shared ~20k system prompt, tool-call turns, idle gaps. Report TTFT, ITL p50/p99 and aggregate tok/s on 7B, Qwen3-8B, gpt-oss-20b and Qwen3-30B-A3B on bella (12 GB). | Nothing on this workload is measured yet, so this comes first: it sets the baseline the other items are judged against. | later: not scheduled |
+| 2 | **Shared prefix pages across sessions.** A radix/prefix cache over #71's paged pool (like vLLM's automatic prefix caching or SGLang's RadixAttention): the common system prompt is prefilled once and stored once, with copy-on-write at the point where a session diverges. | The biggest expected win for this workload (ESTIMATED): every session after the first skips a ~20k prefill and the pages it would have held. This is the "shared-prefix pages" entry below the line in [Scale](#scale-bigger-models-longer-sessions-multi-user-concurrent-requests). Depends on #71. | later: not scheduled |
+| 3 | **Idle-session KV offload to host RAM.** | This is Scale item 4 (KV save/restore, stage B: `--cache-ram`), not a separate project. The agent motivation: a session idles for minutes while the human reads, and its slot is better spent on a session that is generating. | later: not scheduled (tracked as Scale item 4) |
+| 4 | **Fast first turn for MoE models.** Stream the experts through the GPU for prefill. | Today's prefill with the experts on the CPU is ~265 tok/s on gpt-oss-20b (MEASURED, bella, job 1018-092300-3a16, pp486), so a 20k agent prompt is about a minute to first token (ESTIMATED from that rate). The plan is item 1 of the design note `specs/gptoss-prefill.md`, the same work as MoE stage 3 ([Mixture-of-experts](#mixture-of-experts)). | later: not scheduled (tracked under MoE stage 3) |
+
+Batched speculative decoding for the decode side is #90 (Scale item 10); it isn't repeated here.
+
+**Capacity on bella at ~25k context per session** (ESTIMATED: arithmetic from KV bytes per token, paged and
+`--kv q8`, against the VRAM left after the weights; not measured): a 14B ≈ 1 session, Qwen3-8B ≈ 3, Qwen2.5-7B ≈ 8,
+an MoE with the experts in RAM ≈ 6, with the slow first turn of item 4. These counts store each session's copy of
+the system prompt separately; item 2 is what changes them.
 
 ## Mixture-of-experts
 
