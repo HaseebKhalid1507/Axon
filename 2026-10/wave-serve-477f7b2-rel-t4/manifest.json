@@ -1,0 +1,29 @@
+{
+ "label": "wave-serve-477f7b2-rel-t4",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1019-072531-1ef4",
+   "name": "wave-serve-477f7b2-fast-rel-t4",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "avante",
+   "hw": "hw-avante.txt",
+   "gpu": "NVIDIA GeForce RTX 4050 Laptop GPU",
+   "driver": "610.43.02",
+   "sha": "477f7b2",
+   "binary": "axon-test-477f7b2",
+   "started": 1792423854.582951,
+   "ended": 1792426128.5731773,
+   "attempts": 1,
+   "remote_job": "20261019-113102-axon-test-477f7b2-3215",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "50399152b8ac5f565b8069be7a6f001b7349a50f8662b5244ed1bf7810190c82",
+   "log_bytes": 42079
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-19 12:08:49 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
