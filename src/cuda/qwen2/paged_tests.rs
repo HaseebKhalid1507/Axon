@@ -384,7 +384,8 @@ fn q8_name(kg: usize, hd: usize) -> &'static str {
 /// norms: their K store at np - 1) and attn_split_q8 (this token's store),
 /// and per query the batched attn_split_b and attn_blk_b (sm_80+), one
 /// sequence (rp null, its table) and `Place::Rows` (rp: the sequence's
-/// first entry into a pool's table), through a page table.
+/// first entry into a pool's table), and attn_blk_mq (one sequence),
+/// through a page table.
 #[test]
 fn gpu_paged_split_and_batched_bits() {
     let Some(g) = crate::testutil::gpu() else {
@@ -400,6 +401,10 @@ fn gpu_paged_split_and_batched_bits() {
             let fs = km.function(&format!("attn_split_{q8n}{hd}")).unwrap();
             let fsb = km.function(&format!("attn_split_b_{q8n}{hd}")).unwrap();
             let fbb = km.function(&format!("attn_blk_b_{q8n}{hd}")).unwrap();
+            let fmq = km.function(&format!("attn_blk_mq_{q8n}{hd}")).unwrap();
+            if mma {
+                fmq.set_max_shared(batch::mq_smem(hd, kg)).unwrap();
+            }
             let scale = Arg::F32(1.0 / (hd as f32).sqrt());
             let pre = Arg::F32(att_pre(hd));
             for np in NPS {
@@ -489,6 +494,49 @@ fn gpu_paged_split_and_batched_bits() {
                             outs.push((format!("{tag} part_o"), po.read().unwrap()));
                             outs.push((format!("{tag} part_ml"), pm.read().unwrap()));
                         }
+                        // attn_blk_mq: one sequence only (its table).
+                        if rows_mode || !mma {
+                            continue;
+                        }
+                        let po = g.alloc(nz * nh * pages * hd * 4).unwrap();
+                        let pm = g.alloc(nz * nh * pages * 2 * 4).unwrap();
+                        po.zero().unwrap();
+                        pm.zero().unwrap();
+                        let args = [
+                            &[qb.arg()][..],
+                            &kva,
+                            &[
+                                Arg::I32(start as i32),
+                                Arg::I32(0),
+                                Arg::I32(nh as i32),
+                                Arg::I32(nkv as i32),
+                                pre,
+                                Arg::I32(pages as i32),
+                                po.arg(),
+                                pm.arg(),
+                                tra,
+                                Arg::I32(nz as i32),
+                            ],
+                        ]
+                        .concat();
+                        // SAFETY: decode.cu attn_blk_mq's signature; part_*
+                        // of nz queries, the table as described.
+                        unsafe {
+                            g.launch(
+                                &fmq,
+                                (
+                                    nkv as u32,
+                                    pages.min(23) as u32,
+                                    nz.div_ceil(batch::MQ_Q) as u32,
+                                ),
+                                (32 * (nh / nkv) as u32, 1, 1),
+                                batch::mq_smem(hd, kg) as u32,
+                                &args,
+                            )
+                            .unwrap();
+                        }
+                        outs.push(("attn_blk_mq part_o".into(), po.read().unwrap()));
+                        outs.push(("attn_blk_mq part_ml".into(), pm.read().unwrap()));
                     }
                     for norms in [false, true] {
                         let po = g.alloc(nh * ms * hd * 4).unwrap();

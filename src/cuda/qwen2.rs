@@ -309,6 +309,8 @@ struct Q8Fns<'m> {
     /// kernels (attn_fa_b, attn_fa_bs: `batch::fa_shape`).
     attn_blk: Func<'m>,
     attn_blk_b: Func<'m>,
+    /// attn_blk_b's partials, 16 queries per block (`batch::mq_smem`).
+    attn_blk_mq: Func<'m>,
     attn_fa: [Func<'m>; 2],
     /// Without tensor cores: the split attention, decode and per query.
     attn_split: Func<'m>,
@@ -323,7 +325,9 @@ impl<'m> Q8Fns<'m> {
         let q = if group == head_dim { "q8" } else { "q8g32" };
         let f = |s: &str| module.function(&format!("{s}_{q}_{head_dim}"));
         let fa = [f("attn_fa_b")?, f("attn_fa_bs")?];
+        let mq = f("attn_blk_mq")?;
         if module.mma() {
+            mq.set_max_shared(batch::mq_smem(head_dim, group))?;
             for (v, fa) in [batch::Fa::Full, batch::Fa::Small].into_iter().zip(&fa) {
                 fa.set_max_shared(batch::fa_shape(head_dim, v, group).2)?;
             }
@@ -331,6 +335,7 @@ impl<'m> Q8Fns<'m> {
         Ok(Q8Fns {
             attn_blk: f("attn_blk")?,
             attn_blk_b: f("attn_blk_b")?,
+            attn_blk_mq: mq,
             attn_fa: fa,
             attn_split: f("attn_split")?,
             attn_split_b: f("attn_split_b")?,
@@ -491,6 +496,13 @@ pub struct CudaQwen2<'g> {
     /// The attention runs on the tensor cores (decode.cu "Tensor-core
     /// attention"), decode and batched alike, either cache: sm_80+.
     tc_attn: bool,
+    /// The batched attention of one sequence's few queries by attn_blk_mq
+    /// (each tile read once per 16 queries), not attn_blk_b per query: the
+    /// same partials (AXON_ATT_MQ=0 turns it off).
+    att_mq: bool,
+    /// One sequence's passes of up to this many queries take the per-query
+    /// path when att_mq (`batch::MQ_MAX`; AXON_ATT_MQ_MAX).
+    att_mq_max: usize,
     /// Replay a captured graph per token (else launch kernel by kernel).
     pub graphs: bool,
     bf: batch::BatchFns<'g>,
@@ -1598,6 +1610,11 @@ impl<'g> CudaQwen2<'g> {
             max_split,
             att_gy: 0,
             tc_attn: module.mma() && head_dim != 256,
+            att_mq: std::env::var("AXON_ATT_MQ").map_or(true, |v| v != "0"),
+            att_mq_max: std::env::var("AXON_ATT_MQ_MAX")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(batch::MQ_MAX),
             graphs: std::env::var("AXON_CUDA_GRAPHS").map_or(true, |v| v != "0"),
             bf: batch::BatchFns::new(module, hdk, sms, {
                 let cc = gpu.info()?.cc;

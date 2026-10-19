@@ -3746,6 +3746,10 @@ fn prefill_bits(m: &Model, name: &str, kv: CacheKv) {
         &[false]
     };
     let own = net.max_split;
+    // Random chunk sizes of 1..48 tokens: one sequence's passes either side
+    // of att_per_query and MQ_MAX (attn_blk_b, attn_blk_mq, attn_fa_b).
+    let mut rng = Rng(4242);
+    let rand: Vec<usize> = (0..60).map(|_| 1 + (rng.next() % 48) as usize).collect();
     for (&tc, max_split) in paths.iter().flat_map(|t| [(t, own), (t, 8)]) {
         net.set_tc_attn(tc);
         net.max_split = max_split;
@@ -3757,6 +3761,8 @@ fn prefill_bits(m: &Model, name: &str, kv: CacheKv) {
             vec![max],
             vec![5, 100, 3, 17, 260, 1, 33],
             vec![16, 0, 9, 0, 0, 200],
+            vec![24, 32, 31, 2, 47],
+            rand.clone(),
         ] {
             let (kv, l) = prefill_with(&net, &ids, &sizes);
             let bad = kv.iter().zip(&kv0).position(|(a, b)| a != b);
@@ -5411,8 +5417,10 @@ fn gpu_mma_f16_is_deterministic() {
 /// Batched attention speed, 7B shape (28 heads, 4 kv heads, 128 wide) by
 /// default, AXON_ATT_NZ (64) queries at AXON_PROF_START (1536): the flash
 /// kernel (attn_fa_b) and its quantize_b, the per-query decode kernels
-/// (attn_blk_b, attn_cmb_b), and one decode step's attn_blk + attn_cmb at
-/// the last query's position. Interleaved rounds, best of each.
+/// (attn_blk_b, attn_cmb_b), one decode step's attn_blk + attn_cmb at the
+/// last query's position, attn_blk_mq, and the batched pass's per-query
+/// path over all the queries (attn_blk_mq or attn_blk_b, then attn_cmb_b,
+/// att_per_query at a time). Interleaved rounds, best of each.
 #[test]
 #[ignore]
 fn cuda_attn_bench() {
@@ -5426,9 +5434,61 @@ fn cuda_attn_bench() {
         .split(',')
         .map(|v| v.parse().unwrap())
         .collect();
-    let (nh, nkv, hd) = (shape[0], shape[1], shape[2]);
     let nz: usize = std::env::var("AXON_ATT_NZ").map_or(64, |v| v.parse().unwrap());
     let start: usize = std::env::var("AXON_PROF_START").map_or(1536, |v| v.parse().unwrap());
+    attn_bench(&g, &km, [shape[0], shape[1], shape[2]], nz, start);
+}
+
+/// cuda_attn_bench at AXON_MQ_SHAPE (n_heads,n_kv,hd; default the 7B's
+/// 28,4,128) over a grid, three interleaved rounds:
+/// AXON_MQ_NZ queries (default 4,8,16,24,32,48,64,96) at AXON_MQ_DEPTH
+/// positions (default 4096,8192,16384,24576). Per point a `SWEEP` line:
+/// depth, queries, then us of the per-query path over all of them with
+/// attn_blk_mq and with attn_blk_b (+ attn_cmb_b, att_per_query at a
+/// time), attn_fa_b + quantize_b, attn_fa_bs + quantize_b.
+#[test]
+#[ignore]
+fn cuda_attn_mq_sweep() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let list = |k: &str, d: &str| -> Vec<usize> {
+        std::env::var(k)
+            .unwrap_or(d.into())
+            .split(',')
+            .map(|v| v.parse().unwrap())
+            .collect()
+    };
+    let nzs = list("AXON_MQ_NZ", "4,8,16,24,32,48,64,96");
+    let depths = list("AXON_MQ_DEPTH", "4096,8192,16384,24576");
+    // AXON_MQ_SHAPE: n_heads,n_kv,hd (default the 7B's).
+    let sh = list("AXON_MQ_SHAPE", "28,4,128");
+    for r in 0..3 {
+        for &start in &depths {
+            for &nz in &nzs {
+                let b = attn_bench(&g, &km, [sh[0], sh[1], sh[2]], nz, start);
+                eprintln!(
+                    "SWEEP round {r} depth {start} nz {nz} mq {:.1} blk_b {:.1} fa_b {:.1} fa_bs {:.1}",
+                    b[8] * 1e3,
+                    b[9] * 1e3,
+                    (b[0] + b[1]) * 1e3,
+                    (b[6] + b[1]) * 1e3
+                );
+            }
+        }
+    }
+}
+
+/// One cuda_attn_bench point; the best ms of each entry.
+fn attn_bench(
+    g: &Gpu,
+    km: &crate::cuda::Module,
+    shape: [usize; 3],
+    nz: usize,
+    start: usize,
+) -> [f64; 10] {
+    let [nh, nkv, hd] = shape;
     let ctx = start + nz;
     let nblk_max = ctx.div_ceil(64);
     let max_split = (8 * g.info().unwrap().sms as usize / nkv).clamp(1, MAX_SPLIT);
@@ -5457,8 +5517,28 @@ fn cuda_attn_bench() {
         format!("attn_blk_{hd}"),
         "attn_cmb".to_string(),
         format!("attn_fa_bs_{hd}"),
+        format!("attn_blk_mq_{hd}"),
+        "mq+cmb_b (all)".to_string(),
+        "blk_b+cmb_b (all)".to_string(),
     ];
-    let fs: Vec<Func> = names.iter().map(|n| km.function(n).unwrap()).collect();
+    // 8, 9: the batched pass's per-query path over all nz queries,
+    // att_per_query at a time (batch.rs): attn_blk_mq or attn_blk_b, then
+    // attn_cmb_b.
+    let fs: Vec<Func> = names
+        .iter()
+        .enumerate()
+        .map(|(k, n)| match k {
+            8 => km.function(&format!("attn_blk_mq_{hd}")).unwrap(),
+            9 => km.function(&format!("attn_blk_b_{hd}")).unwrap(),
+            _ => km.function(n).unwrap(),
+        })
+        .collect();
+    let fcmb = km.function("attn_cmb_b").unwrap();
+    let group = nh / nkv;
+    let per = batch::att_per_query(hd);
+    for f in [&fs[7], &fs[8]] {
+        f.set_max_shared(batch::mq_smem(hd, 0)).unwrap();
+    }
     fs[0]
         .set_max_shared(batch::fa_shape(hd, batch::Fa::Full, 0).2)
         .unwrap();
@@ -5478,7 +5558,7 @@ fn cuda_attn_bench() {
     // The per-query kernels on at most 64 queries (SMALL sweeps).
     let nq = nz.min(64);
     let pre = Arg::F32(att_pre(hd));
-    let mut best = [f64::INFINITY; 7];
+    let mut best = [f64::INFINITY; 10];
     for _ in 0..6 {
         for (k, f) in fs.iter().enumerate() {
             let e0 = g.record().unwrap();
@@ -5588,6 +5668,81 @@ fn cuda_attn_bench() {
                             Arg::Ptr(0), // no page table
                         ],
                     ),
+                    7 => g.launch(
+                        f,
+                        (nkv as u32, gy, nq.div_ceil(batch::MQ_Q) as u32),
+                        (32 * group as u32, 1, 1),
+                        batch::mq_smem(hd, 0) as u32,
+                        &[
+                            q.arg(),
+                            kc.arg(),
+                            vc.arg(),
+                            Arg::I32((ctx - nq) as i32),
+                            Arg::I32(0),
+                            Arg::I32(nh as i32),
+                            Arg::I32(nkv as i32),
+                            pre,
+                            Arg::I32(nblk_max as i32),
+                            po.arg(),
+                            pm.arg(),
+                            Arg::Ptr(0), // no page table
+                            Arg::I32(nq as i32),
+                        ],
+                    ),
+                    8 | 9 => {
+                        for z0 in (0..nz).step_by(per) {
+                            let n = (nz - z0).min(per);
+                            let mut a = vec![
+                                q.arg(),
+                                kc.arg(),
+                                vc.arg(),
+                                Arg::I32(start as i32),
+                                Arg::I32(z0 as i32),
+                                Arg::I32(nh as i32),
+                                Arg::I32(nkv as i32),
+                                pre,
+                                Arg::I32(nblk_max as i32),
+                                po.arg(),
+                                pm.arg(),
+                            ];
+                            if k == 8 {
+                                a.extend([Arg::Ptr(0), Arg::I32(n as i32)]);
+                                g.launch(
+                                    f,
+                                    (nkv as u32, gy, n.div_ceil(batch::MQ_Q) as u32),
+                                    (32 * group as u32, 1, 1),
+                                    batch::mq_smem(hd, 0) as u32,
+                                    &a,
+                                )
+                                .unwrap();
+                            } else {
+                                a.extend([Arg::Ptr(0), Arg::Ptr(0)]);
+                                g.launch(f, (nkv as u32, gy, n as u32), (32, 1, 1), 0, &a)
+                                    .unwrap();
+                            }
+                            g.launch(
+                                &fcmb,
+                                (dim.div_ceil(256) as u32, n as u32, 1),
+                                (256, 1, 1),
+                                0,
+                                &[
+                                    po.arg(),
+                                    pm.arg(),
+                                    Arg::I32(start as i32),
+                                    Arg::I32(z0 as i32),
+                                    Arg::I32(dim as i32),
+                                    Arg::I32(hd as i32),
+                                    Arg::I32(nblk_max as i32),
+                                    Arg::I32(0),
+                                    act.arg(),
+                                    Arg::U64(ast as u64),
+                                    Arg::Ptr(0),
+                                ],
+                            )
+                            .unwrap();
+                        }
+                        Ok(())
+                    }
                     // attn_cmb: 64 outputs per block, y and the counters.
                     _ => g.launch(
                         f,
@@ -5619,8 +5774,8 @@ fn cuda_attn_bench() {
     };
     for (k, (n, b)) in names.iter().zip(best).enumerate() {
         let (qn, tf) = match k {
-            0 | 6 => (nz, flops(nz) / (b * 1e-3) / 1e12),
-            2 => (nq, flops(nq) / (b * 1e-3) / 1e12),
+            0 | 6 | 8 | 9 => (nz, flops(nz) / (b * 1e-3) / 1e12),
+            2 | 7 => (nq, flops(nq) / (b * 1e-3) / 1e12),
             4 => (1, flops(1) / (b * 1e-3) / 1e12),
             _ => (
                 if k == 1 {
@@ -5634,10 +5789,11 @@ fn cuda_attn_bench() {
             ),
         };
         eprintln!(
-            "{nh}/{nkv}x{hd} {n:<16} {qn:>4} queries up to {ctx}: {:>8.1} us {tf:>6.2} TFLOP/s",
+            "{nh}/{nkv}x{hd} {n:<18} {qn:>4} queries up to {ctx}: {:>8.1} us {tf:>6.2} TFLOP/s",
             b * 1e3
         );
     }
+    best
 }
 
 /// The flash attention kernels side by side, sustained (AXON_FA_LOOP
@@ -5797,6 +5953,8 @@ fn gpu_batched_attention_matches_decode_bits() {
         };
         let fd = km.function(&format!("attn_blk_{q8n}{hd}")).unwrap();
         let fb = km.function(&format!("attn_blk_b_{q8n}{hd}")).unwrap();
+        let fm = km.function(&format!("attn_blk_mq_{q8n}{hd}")).unwrap();
+        fm.set_max_shared(batch::mq_smem(hd, kg)).unwrap();
         // Every attn_fa_b variant of the cache format (batch::Fa).
         let mut ffs: Vec<(batch::Fa, Func)> = Vec::new();
         for (v, n) in [
@@ -5985,6 +6143,68 @@ fn gpu_batched_attention_matches_decode_bits() {
                 bpm.read().unwrap(),
                 bact.read().unwrap(),
             );
+            // attn_blk_mq: the same queries, MQ_Q per block (a partial last
+            // one), the same partials for attn_cmb_b.
+            let mpo = g.alloc(nz * po_n * 4).unwrap();
+            let mpm = g.alloc(nz * pm_n * 4).unwrap();
+            let mact = g.alloc(nb * ast).unwrap();
+            mact.zero().unwrap();
+            // SAFETY: decode.cu attn_blk_mq's signature; buffers as above.
+            unsafe {
+                g.launch(
+                    &fm,
+                    (
+                        nkv as u32,
+                        gy.min(nblk_max) as u32,
+                        nz.div_ceil(batch::MQ_Q) as u32,
+                    ),
+                    (32 * group as u32, 1, 1),
+                    batch::mq_smem(hd, kg) as u32,
+                    &[
+                        &[qb.arg()][..],
+                        &kva[..],
+                        &[
+                            Arg::I32(start as i32),
+                            Arg::I32(z0 as i32),
+                            Arg::I32(nh as i32),
+                            Arg::I32(nkv as i32),
+                            pre,
+                            Arg::I32(nblk_max as i32),
+                            mpo.arg(),
+                            mpm.arg(),
+                            Arg::Ptr(0), // no page table
+                            Arg::I32(nz as i32),
+                        ],
+                    ]
+                    .concat(),
+                )
+                .unwrap();
+                g.launch(
+                    &fcb,
+                    (dim.div_ceil(256) as u32, nz as u32, 1),
+                    (256, 1, 1),
+                    0,
+                    &[
+                        mpo.arg(),
+                        mpm.arg(),
+                        Arg::I32(start as i32),
+                        Arg::I32(z0 as i32),
+                        Arg::I32(dim as i32),
+                        Arg::I32(hd as i32),
+                        Arg::I32(nblk_max as i32),
+                        want_k,
+                        mact.arg(),
+                        Arg::U64(ast as u64),
+                        Arg::Ptr(0),
+                    ],
+                )
+                .unwrap();
+            }
+            let (mpo, mpm, mact): (Vec<f32>, Vec<f32>, Vec<u8>) = (
+                mpo.read().unwrap(),
+                mpm.read().unwrap(),
+                mact.read().unwrap(),
+            );
             // Decode, query by query (all nb, for the flash side).
             let po = g.alloc(po_n * 4).unwrap();
             let pm = g.alloc(pm_n * 4).unwrap();
@@ -6059,29 +6279,34 @@ fn gpu_batched_attention_matches_decode_bits() {
                 }
                 let zl = z - z0;
                 let (wpo, wpm): (Vec<f32>, Vec<f32>) = (po.read().unwrap(), pm.read().unwrap());
-                for h in 0..nh {
-                    for b in 0..np.div_ceil(64) {
-                        let o = (h * nblk_max + b) * hd;
-                        assert_eq!(
-                            bits(&bpo[zl * po_n + o..zl * po_n + o + hd]),
-                            bits(&wpo[o..o + hd]),
-                            "{}: head {h} block {b} sums",
-                            ctxs("attn_blk_b", z)
-                        );
-                        let m = (h * nblk_max + b) * 2;
-                        assert_eq!(
-                            bits(&bpm[zl * pm_n + m..zl * pm_n + m + 2]),
-                            bits(&wpm[m..m + 2]),
-                            "{}: head {h} block {b} m, l",
-                            ctxs("attn_blk_b", z)
-                        );
+                for (kname, po, pm, pact) in [
+                    ("attn_blk_b", &bpo, &bpm, &bact),
+                    ("attn_blk_mq", &mpo, &mpm, &mact),
+                ] {
+                    for h in 0..nh {
+                        for b in 0..np.div_ceil(64) {
+                            let o = (h * nblk_max + b) * hd;
+                            assert_eq!(
+                                bits(&po[zl * po_n + o..zl * po_n + o + hd]),
+                                bits(&wpo[o..o + hd]),
+                                "{}: head {h} block {b} sums",
+                                ctxs(kname, z)
+                            );
+                            let m = (h * nblk_max + b) * 2;
+                            assert_eq!(
+                                bits(&pm[zl * pm_n + m..zl * pm_n + m + 2]),
+                                bits(&wpm[m..m + 2]),
+                                "{}: head {h} block {b} m, l",
+                                ctxs(kname, z)
+                            );
+                        }
                     }
+                    assert!(
+                        pact[z * ast..z * ast + ab] == wact[..],
+                        "{}",
+                        ctxs(&format!("{kname} act"), z)
+                    );
                 }
-                assert!(
-                    bact[z * ast..z * ast + ab] == wact[..],
-                    "{}",
-                    ctxs("attn_blk_b act", z)
-                );
             }
         }
     }
