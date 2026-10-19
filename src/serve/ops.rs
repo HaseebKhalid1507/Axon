@@ -279,6 +279,11 @@ impl Metrics {
             "slots": pool,
             "queue_depth": self.queue_depth(busy),
         });
+        // Graphs given up / steps run kernel by kernel for lack of VRAM
+        // (process-wide: never fatal, the same bits).
+        let (evicted, eager) = crate::cuda::qwen2::graph_oom_counts();
+        j["graphs_evicted_oom"] = evicted.into();
+        j["steps_eager_oom"] = eager.into();
         if let Some(p) = v.pages {
             j["pages_free"] = p.free.into();
             j["pages_total"] = p.total.into();

@@ -2589,10 +2589,29 @@ impl<'g> CudaQwen2<'g> {
         }
         let (long, slot) = (cmb64 as usize, head as usize);
         if c.graph[long][slot].is_none() {
-            let g = self
+            let mut made = self
                 .gpu
-                .capture(|| self.enqueue(c, head, cmb64, &mut |_, _| Ok(())))?;
-            c.graph[long][slot] = Some(g);
+                .capture(|| self.enqueue(c, head, cmb64, &mut |_, _| Ok(())));
+            // Out of memory instantiating it (other processes take VRAM after
+            // a server plans its pool): this cache's other graphs go, one retry,
+            // else this step runs kernel by kernel (the same kernels: the same
+            // bits). Never fatal.
+            if made.as_ref().is_err_and(|e| is_oom(e)) {
+                let n = c.graph.iter().flatten().filter(|g| g.is_some()).count();
+                GRAPH_EVICTED.fetch_add(n as u64, std::sync::atomic::Ordering::Relaxed);
+                c.drop_graphs();
+                made = self
+                    .gpu
+                    .capture(|| self.enqueue(c, head, cmb64, &mut |_, _| Ok(())));
+            }
+            match made {
+                Ok(g) => c.graph[long][slot] = Some(g),
+                Err(e) if is_oom(&e) => {
+                    GRAPH_EAGER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return self.enqueue(c, head, cmb64, &mut |_, _| Ok(()));
+                }
+                Err(e) => return Err(e),
+            }
         }
         // SAFETY: the graph's buffers are the cache's and the model's, both
         // borrowed for this call; the cache owns the graph, so it can't
@@ -3112,6 +3131,27 @@ pub(crate) mod moe;
 #[cfg(test)]
 mod paged_tests;
 pub(crate) mod pages;
+
+/// Captured CUDA graphs given up when instantiating another ran out of
+/// memory (the step's graph cache emptied to make room, then one retry),
+/// and steps run kernel by kernel because even that failed: the same
+/// kernels in the same order, so the same bits. Process-wide (GET /slots
+/// reports them).
+pub(crate) static GRAPH_EVICTED: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+pub(crate) static GRAPH_EAGER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether a CUDA error string is an out-of-memory (not sticky: the context
+/// is fine, the allocation failed).
+pub(crate) fn is_oom(e: &str) -> bool {
+    e.contains("CUDA_ERROR_OUT_OF_MEMORY")
+}
+
+/// (`GRAPH_EVICTED`, `GRAPH_EAGER`) so far.
+pub fn graph_oom_counts() -> (u64, u64) {
+    use std::sync::atomic::Ordering::Relaxed;
+    (GRAPH_EVICTED.load(Relaxed), GRAPH_EAGER.load(Relaxed))
+}
 pub mod pipeline;
 #[cfg(test)]
 mod sample_tests;
