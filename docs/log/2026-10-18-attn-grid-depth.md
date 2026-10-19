@@ -1,4 +1,4 @@
-# Pool attention: grid y by the rows' depth, not the slot cap  (PR #N, gates pending)
+# Pool attention: grid y by the rows' depth, not the slot cap  (PR #95, gates pending)
 
 - Date: 2026-10-18. Branch: perf/attn-grid-depth. Base: origin/feat/paged-kv-pool 5d6be54 (#71) + origin/main
   2b89410 merged in (6fa800e; README conflict only). Stacked on #71. Status: open, gates pending.
