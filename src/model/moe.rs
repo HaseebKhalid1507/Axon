@@ -118,10 +118,11 @@ pub(crate) fn is_moe(m: &Model) -> bool {
     matches!(m.arch.as_str(), "qwen3moe" | "gpt-oss" | "deepseek2")
 }
 
-/// gpt-oss: no GPU MoE path for its MXFP4 experts, sinks and biases yet;
-/// deepseek2: its GPU MLA attention is stage 1. CPU only for now.
+/// gpt-oss: no GPU MoE path for its MXFP4 experts, sinks and biases yet:
+/// CPU only for now. (deepseek2 runs with `crate::moe`'s split, its MLA
+/// attention in `cuda::qwen2::mla`.)
 pub(crate) fn cpu_only(m: &Model) -> bool {
-    matches!(m.arch.as_str(), "gpt-oss" | "deepseek2")
+    matches!(m.arch.as_str(), "gpt-oss")
 }
 
 pub(crate) fn moe_dims(m: &Model) -> Option<MoeDims> {
@@ -596,7 +597,11 @@ impl<'a> Qwen2<'a> {
 
     /// Layer l's experts (a MoE layer).
     fn layer_moe(&self, l: usize) -> &Moe<'a> {
-        match &self.layers[l].ffn {
+        let ffn = match self.ds2 {
+            Some(_) => self.ds2_layer_ffn(l),
+            None => &self.layers[l].ffn,
+        };
+        match ffn {
             super::Ffn::Moe(m) => m,
             super::Ffn::Dense { .. } => panic!("layer {l} is not a mixture-of-experts layer"),
         }

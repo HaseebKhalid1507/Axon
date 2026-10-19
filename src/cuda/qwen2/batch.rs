@@ -262,6 +262,211 @@ pub(super) fn fa_passes(
     best.1
 }
 
+/// A batched product as `gemm_cost` sees it.
+#[derive(Clone, Copy, Debug)]
+pub(super) enum Gemm {
+    /// `bgemm` of a rows x cols matrix of type qt.
+    One { qt: u32, rows: usize, cols: usize },
+    /// gemm2s_q4_k_gu (gemmh2_q4_k_gu with `WaveGeom::gemmh`): gate and up,
+    /// ffn rows each, over dim.
+    GateUp { ffn: usize, dim: usize },
+}
+
+/// What the GEMMs' grids depend on: the SMs, and (sm_90a) gemmh2 for the
+/// Q4_K products (`BatchFns::gemmh`, `gemmh_all`).
+#[derive(Clone, Copy, Debug)]
+pub(super) struct WaveGeom {
+    pub(super) sms: usize,
+    pub(super) gemmh: bool,
+    pub(super) gemmh_all: bool,
+    /// gemm2t (128 x 64) for Q4_K / Q5_K where `tile_t` picks it
+    /// (`BatchFns::gemm_t`).
+    pub(super) tile_t: bool,
+}
+
+/// gemm2t's time per MAC in percent of gemm2s's: what `tile_t` and
+/// `gemm_cost` weigh its fewer, bigger blocks' waves by. Measured
+/// (`cuda_gemm_tile_bench`, RTX 4050 Laptop sm_89, job 1019-011355-9ca0):
+/// 7B gate / down / gate+up at nb 1024 and 1088 78-82 %; q / wo 82 %; the
+/// 512-row k / v, whose grids are partly a wave either way, 88 %.
+pub(super) const TILE_T_TIME: usize = 82;
+
+/// The most tokens a product keeps gemm2s for whatever `tile_t`'s waves say
+/// (one 64-token tile; review of #100, MUST 1).
+pub(super) const TILE_T_MIN_NB: usize = 64;
+
+/// `gemm_cost`'s waves of `ctas` blocks of `macs` MACs each on sms SMs.
+fn wave_cost(ctas: usize, macs: usize, sms: usize) -> u64 {
+    let (full, rem) = (ctas / sms, ctas % sms);
+    let part = match rem {
+        0 => 0,
+        _ => PARTIAL_WAVE * sms + (100 - PARTIAL_WAVE) * rem,
+    };
+    ((100 * full * sms + part) * macs) as u64
+}
+
+/// Whether a Q4_K / Q5_K product of `rows` outputs (br rows per gemm2s
+/// block: 64, or 32 of each for the fused gate + up) over nb tokens takes
+/// the 128 x 64 tile (2 br rows per block): when its waves, at
+/// TILE_T_TIME per MAC, cost less than gemm2s's. It halves the blocks, so
+/// it loses where gemm2s's grid barely fills the GPU (the 7B's 512-row k /
+/// v on a 4090). Never at nb <= TILE_T_MIN_NB: one token tile (the decode
+/// pool's and verify's batches) is unmeasured with gemm2t (TILE_T_TIME is
+/// from nb 1024 / 1088), so those keep gemm2s.
+pub(super) fn tile_t(rows: usize, br: usize, nb: usize, sms: usize) -> bool {
+    if nb <= TILE_T_MIN_NB {
+        return false;
+    }
+    let tiles = nb.div_ceil(64);
+    let s = 100 * wave_cost(tiles * rows.div_ceil(br), br, sms);
+    let t = TILE_T_TIME as u64 * wave_cost(tiles * rows.div_ceil(2 * br), 2 * br, sms);
+    t < s
+}
+
+/// What a partial last wave costs, in percent of a full one: PARTIAL_WAVE
+/// fixed plus the rest in proportion to the SMs it fills. Fitted (least
+/// squares, 0.87 GEMM share of the pass) to the 8 e2e cells measured on an
+/// RTX 4090 (7B and Qwen3-8B at pp1153/1777/2100/3000, #92): rms error of
+/// the predicted gain 1.82 points at 100 (r15's model, a partial wave costs
+/// a whole one), 0.97 at 60, 0.63 at 30, 0.99 at 0 (no wave effect, only
+/// the token tiles' padding).
+const PARTIAL_WAVE: usize = 30;
+
+/// The GEMM time of one pass of nb (> VM_MAX) tokens: per product the
+/// waves of its blocks (one block per SM: gemm2s, gemm2, gemmh2; a partial
+/// last wave as PARTIAL_WAVE says) times a block's MACs, with `bgemm`'s
+/// grids: Q4_K / Q5_K in 64 x 64 tiles or where `tile_t` says 128 x 64
+/// (rows x tokens; gemmh2 128 x 64),
+/// the register-staged types in 64 x 128 given ~1.5 blocks per SM, the
+/// fused gate + up in 32 (gemmh2, gemm2t 64) rows of each x 64 tokens. In
+/// units of a hundredth of a percent of a wave per SM of gemm2s time
+/// (comparable on one GPU only).
+pub(super) fn gemm_cost(ps: &[Gemm], nb: usize, g: WaveGeom) -> u64 {
+    // In gemm2s time (x 100): gemm2t's blocks at TILE_T_TIME per MAC.
+    let waves = |ctas: usize, macs: usize| 100 * wave_cost(ctas, macs, g.sms);
+    let waves_t = |ctas: usize, macs: usize| TILE_T_TIME as u64 * wave_cost(ctas, macs, g.sms);
+    ps.iter()
+        .map(|&p| match p {
+            Gemm::One { qt, rows, cols } => {
+                if g.gemmh && qt == Q4_K && (g.gemmh_all || gemmh_plain(rows, nb, g.sms)) {
+                    return waves(nb.div_ceil(64) * rows.div_ceil(128), 128 * 64 * cols);
+                }
+                if g.tile_t && matches!(qt, Q4_K | Q5_K) && tile_t(rows, G2_BM, nb, g.sms) {
+                    return waves_t(nb.div_ceil(64) * rows.div_ceil(G2T_BM), G2T_BM * 64 * cols);
+                }
+                let ctas = nb.div_ceil(128) * rows.div_ceil(G2_BM);
+                let big = !matches!(qt, Q4_K | Q5_K) && 2 * ctas >= 3 * g.sms && nb > 64;
+                let bn = if big { 128 } else { 64 };
+                waves(nb.div_ceil(bn) * rows.div_ceil(G2_BM), G2_BM * bn * cols)
+            }
+            // Only the fused launch: with AXON_GATE_UP=0 (or a gate / up
+            // that can't fuse) `wave_gemms` lists gate and up as two
+            // `Gemm::One`s, priced as bgemm runs them (tile_t with 64 rows).
+            Gemm::GateUp { ffn, dim } => {
+                if !g.gemmh && g.tile_t && tile_t(ffn, 32, nb, g.sms) {
+                    return waves_t(nb.div_ceil(64) * ffn.div_ceil(64), 2 * 64 * 64 * dim);
+                }
+                let br = if g.gemmh { 64 } else { 32 };
+                waves(nb.div_ceil(64) * ffn.div_ceil(br), 2 * br * 64 * dim)
+            }
+        })
+        .sum()
+}
+
+/// A wave split must model this much less GEMM time than the equal one
+/// (as FA_MARGIN): the fitted model's rms error is ~0.6 points of e2e
+/// gain, and the one 4090 cell it got most wrong (7B pp1153, 704 + 449)
+/// modelled +1.2 % and measured -0.4 %.
+const WAVE_MARGIN: f64 = 0.97;
+
+/// The shortest pass `wave_passes` makes: a quarter of the batch max (288
+/// tokens at 1152), and always over VM_MAX. The pass count is fixed, so a
+/// cost per pass would be the same for every split and can't steer it; what
+/// a short pass does cost that `gemm_cost` doesn't see is its latency-bound
+/// kernels (norms, quantize, RoPE, attention: time(nb) ~ max(latency,
+/// nb x rate), so a short pass pays the latency for less work). The
+/// shortest pass measured is 449 tokens (4090 pp1153, 704 + 449, -0.4 %);
+/// max / 4 keeps every pass within ~1.6x of that.
+pub(super) fn wave_floor(max: usize) -> usize {
+    (max / 4).max(VM_MAX + 1)
+}
+
+/// `passes`, resized for the GEMMs' waves (AXON_WAVE_SPLIT, default on):
+/// as many passes, none longer than max nor shorter than `wave_floor`, all
+/// but the last a whole number of 64-token tiles, with the least total
+/// `cost` (one pass of that many tokens). None (keep `passes`) for one
+/// pass, or when no such split costs WAVE_MARGIN less than the equal one.
+/// Results don't depend on it (determinism.md: pass boundaries are free).
+pub(super) fn wave_passes(
+    n: usize,
+    max: usize,
+    cost: impl Fn(usize) -> u64,
+) -> Option<Vec<std::ops::Range<usize>>> {
+    let base = passes(n, max);
+    let (np, t, floor) = (base.len(), max / 64, wave_floor(max));
+    // (Equal passes of at most VM_MAX tokens: only with a degenerate max
+    // under 2 * (VM_MAX + 1).)
+    if np < 2 || t == 0 || base.iter().any(|r| r.len() <= VM_MAX) {
+        return None;
+    }
+    let t0 = floor.div_ceil(64);
+    let ct: Vec<u64> = (0..=t).map(|i| cost(64 * i)).collect();
+    let stiles = n / 64;
+    // f[s]: (cost, largest tile count, tile counts) of k whole-tile passes
+    // of s tiles in all; ties keep the more even one.
+    type Best = Option<(u64, usize, Vec<usize>)>;
+    let mut f: Vec<Best> = vec![None; stiles + 1];
+    f[0] = Some((0, 0, Vec::new()));
+    for _ in 1..np {
+        let mut g: Vec<Best> = vec![None; stiles + 1];
+        for (s, fs) in f.iter().enumerate() {
+            let Some((c, m, v)) = fs else { continue };
+            for i in t0..=t.min(stiles - s) {
+                let cand = (c + ct[i], (*m).max(i));
+                if g[s + i].as_ref().is_none_or(|b| cand < (b.0, b.1)) {
+                    let mut w = v.clone();
+                    w.push(i);
+                    g[s + i] = Some((cand.0, cand.1, w));
+                }
+            }
+        }
+        f = g;
+    }
+    // Ties: fewer token tiles, then the more even, then the shorter last
+    // pass (the others full: 2100 -> 1088 + 1012, not 1024 + 1076).
+    type Key = (u64, usize, usize, usize);
+    let mut best: Option<(Key, Vec<usize>)> = None;
+    for (s, fs) in f.iter().enumerate() {
+        let (Some((c, m, v)), last) = (fs, n - 64 * s) else {
+            continue;
+        };
+        if last < floor || last > max {
+            continue;
+        }
+        let lt = last.div_ceil(64);
+        let key = (c + cost(last), s + lt, (*m).max(lt), last);
+        if best.as_ref().is_none_or(|b| key < b.0) {
+            best = Some((key, v.clone()));
+        }
+    }
+    let ((c, ..), mut v) = best?;
+    let c0: u64 = base.iter().map(|r| cost(r.len())).sum();
+    if c as f64 >= WAVE_MARGIN * c0 as f64 {
+        return None;
+    }
+    // Longest first, the remainder last (the remainder isn't always the
+    // shortest: 3000 on a 4090 is 1152 + 1152 + 696).
+    v.sort_unstable_by(|a, b| b.cmp(a));
+    let mut out = Vec::with_capacity(np);
+    let mut s = 0;
+    for i in v {
+        out.push(s..s + 64 * i);
+        s += 64 * i;
+    }
+    out.push(s..n);
+    Some(out)
+}
+
 /// Bytes per token of a batched activation buffer: a decode.cu Act, padded
 /// so every token's starts 256-byte aligned (the GEMMs' 16-byte copies).
 pub(super) fn act_stride(n: usize) -> usize {
@@ -420,6 +625,11 @@ pub(super) struct BatchFns<'m> {
     /// gemm2s_q4_k_gu: gate and up (both Q4_K) in one launch, silu(gate) *
     /// up out (`CudaQwen2::gate_up_fused`).
     pub(super) gemm_gu: Option<Func<'m>>,
+    /// gemm2t_q4_k and gemm2t_q5_k (128 rows x 64 tokens, `tile_t`) and
+    /// gemm2t_q4_k_gu (64 rows of gate and of up): half gemm2s's
+    /// activation copies per MAC, the same bits. None without int8 tensor
+    /// cores or with AXON_GEMM_TILE=64 (gemm2s everywhere, as before).
+    pub(super) gemm_t: Option<([Func<'m>; 2], Func<'m>)>,
     pub(super) q6k_to_i8: Option<Func<'m>>,
     /// hopper.cu gemmh2_q4_k and gemmh2_q4_k_gu: the Q4_K products and the
     /// fused gate + up on wgmma (same bits); sm_90a modules only, off with
@@ -432,7 +642,7 @@ pub(super) struct BatchFns<'m> {
     /// whatever its shape (else only those `gemmh_plain` picks).
     gemmh_all: bool,
     /// SMs of the GPU (the GEMM tile choice).
-    sms: usize,
+    pub(super) sms: usize,
     /// stream.cu: r8/r8q blocks back to GGUF rows.
     pub(super) unpermute: Func<'m>,
     /// gemma.cu (gemma3): the scaled embedding, the post-norm residual
@@ -588,6 +798,21 @@ impl<'m> BatchFns<'m> {
                 let f = module.function("gemm2s_q4_k_gu")?;
                 f.set_max_shared(gemm2_smem(Q4_K, 64, 3))?;
                 Some(f)
+            } else {
+                None
+            },
+            // AXON_GEMM_TILE: "64" turns gemm2t off; any other value (or
+            // none) is the default, `tile_t`'s routing.
+            gemm_t: if module.mma() && std::env::var("AXON_GEMM_TILE").as_deref() != Ok("64") {
+                let (a, b, c) = (
+                    module.function("gemm2t_q4_k")?,
+                    module.function("gemm2t_q5_k")?,
+                    module.function("gemm2t_q4_k_gu")?,
+                );
+                a.set_max_shared(gemm2t_smem(Q4_K))?;
+                b.set_max_shared(gemm2t_smem(Q5_K))?;
+                c.set_max_shared(gemm2t_smem(Q4_K))?;
+                Some(([a, b], c))
             } else {
                 None
             },
@@ -848,6 +1073,18 @@ impl<'g> CudaQwen2<'g> {
                     // <= 64 tokens is half padding; the lm_head of a pool's
                     // 32 rows ran 2x slower in it, C-curve log.)
                     let big = !matches!(mt.qt, Q4_K | Q5_K) && 2 * ctas >= 3 * bf.sms && nb > 64;
+                    // Q4_K / Q5_K: 128 x 64 where it pays (`tile_t`).
+                    if let (Some((ft, _)), true) = (&bf.gemm_t, matches!(mt.qt, Q4_K | Q5_K))
+                        && tile_t(mt.rows, G2_BM, nb, bf.sms)
+                    {
+                        return self.gpu.launch(
+                            &ft[(mt.qt == Q5_K) as usize],
+                            (nb.div_ceil(64) as u32, mt.rows.div_ceil(G2T_BM) as u32, 1),
+                            (256, 1, 1),
+                            gemm2t_smem(mt.qt) as u32,
+                            &common,
+                        );
+                    }
                     let (bn, st) = if big { (128, 2) } else { (64, 3) };
                     let (f, smem) = match q8c {
                         Some((_, f8)) => (&f8[!big as usize], gemm2_smem(Q6_K, bn, st)),
@@ -1852,12 +2089,17 @@ impl<'g> CudaQwen2<'g> {
                 )?;
             } else if let (Some(f), true) = (&bf.gemm_gu, fuse) {
                 // gate and up in one launch, hid = silu(gate) * up out
-                // (the same floats and ops as below), then quantize_b.
+                // (the same floats and ops as below), then quantize_b;
+                // gemm2t_q4_k_gu's 64 rows of each where `tile_t` says.
+                let (f, br, sm) = match &bf.gemm_t {
+                    Some((_, ft)) if tile_t(ffn, 32, nb, bf.sms) => (ft, 64, gemm2t_smem(Q4_K)),
+                    _ => (f, 32, gemm2_smem(Q4_K, 64, 3)),
+                };
                 g.launch(
                     f,
-                    (nb.div_ceil(64) as u32, ffn.div_ceil(32) as u32, 1),
+                    (nb.div_ceil(64) as u32, ffn.div_ceil(br) as u32, 1),
                     (256, 1, 1),
-                    gemm2_smem(Q4_K, 64, 3) as u32,
+                    sm as u32,
                     &[
                         wts.arg_at(gate.off),
                         wts.arg_at(up.off),
@@ -2060,7 +2302,65 @@ impl<'g> CudaQwen2<'g> {
         }
     }
 
-    /// The passes of n tokens at start for cache c (`fa_passes` when the
+    /// Every layer's batched products for passes of more than VM_MAX
+    /// tokens, as `layer` and `ffn_half` launch them; None without the
+    /// int8 tensor-core GEMMs or with a mixture-of-experts layer.
+    pub(super) fn wave_gemms(&self) -> Option<Vec<Gemm>> {
+        self.bf.gemm.as_ref()?;
+        let one = |m: &Mat| Gemm::One {
+            qt: m.qt,
+            rows: m.rows,
+            cols: m.cols,
+        };
+        let mut v = Vec::with_capacity(7 * self.layers.len());
+        for l in &self.layers {
+            let Ffn::Dense { gate, up, down } = &l.ffn else {
+                return None;
+            };
+            v.extend([one(&l.q), one(&l.k), one(&l.v), one(&l.o)]);
+            // ffn_half's `fuse` (takes_gemvm is false past VM_MAX).
+            let fuse = self.gate_up_fused
+                && self.gemma.is_none()
+                && self.bf.gemm_gu.is_some()
+                && gate.qt == Q4_K
+                && up.qt == Q4_K
+                && gate.cols == self.dim
+                && up.cols == self.dim;
+            if fuse {
+                v.push(Gemm::GateUp {
+                    ffn: self.ffn,
+                    dim: self.dim,
+                });
+            } else {
+                v.extend([one(gate), one(up)]);
+            }
+            v.push(one(down));
+        }
+        Some(v)
+    }
+
+    /// `wave_passes` for this model and GPU (None: AXON_WAVE_SPLIT=0, or
+    /// as `wave_passes` / `wave_gemms`).
+    pub(super) fn wave_split_passes(
+        &self,
+        n: usize,
+        max: usize,
+    ) -> Option<Vec<std::ops::Range<usize>>> {
+        if !self.wave_split || n <= max {
+            return None;
+        }
+        let ps = self.wave_gemms()?;
+        let g = WaveGeom {
+            sms: self.bf.sms,
+            gemmh: self.bf.gemmh.is_some(),
+            gemmh_all: self.bf.gemmh_all,
+            tile_t: self.bf.gemm_t.is_some(),
+        };
+        wave_passes(n, max, |nb| gemm_cost(&ps, nb, g))
+    }
+
+    /// The passes of n tokens at start for cache c (`wave_split_passes` for
+    /// prompts short of FA_LONG where it applies, else `fa_passes` when the
     /// flash attention runs them, else `passes`).
     pub(super) fn prompt_passes(
         &self,
@@ -2069,8 +2369,12 @@ impl<'g> CudaQwen2<'g> {
         start: usize,
     ) -> Vec<std::ops::Range<usize>> {
         let max = c.b.as_ref().expect("batch scratch").max;
-        match self.att_flash(max) {
-            true => fa_passes(
+        let wave = (start + n < FA_LONG)
+            .then(|| self.wave_split_passes(n, max))
+            .flatten();
+        let v = match (wave, self.att_flash(max)) {
+            (Some(v), _) => v,
+            (None, true) => fa_passes(
                 n,
                 max,
                 start,
@@ -2079,8 +2383,17 @@ impl<'g> CudaQwen2<'g> {
                     CacheKv::Q8 { group } => group,
                 }),
             ),
-            false => passes(n, max),
+            (None, false) => passes(n, max),
+        };
+        // AXON_PASS_TRACE: the pass sizes on stderr (A/B logs).
+        if self.pass_trace {
+            let lens: Vec<usize> = v.iter().map(|r| r.len()).collect();
+            eprintln!(
+                "passes: {n} tokens at {start}, max {max}, {} SMs, wave split {}: {lens:?}",
+                self.bf.sms, self.wave_split
+            );
         }
+        v
     }
 
     /// `feed_batch`: passes of up to the cache's batch max (`prompt_passes`),

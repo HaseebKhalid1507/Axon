@@ -446,6 +446,7 @@ mod deepseek2;
 #[path = "model/moe.rs"]
 mod moe;
 pub(crate) use deepseek2::info_lines as deepseek2_info;
+pub(crate) use deepseek2::{GpuCfg as Ds2GpuCfg, gpu_cfg as deepseek2_gpu_cfg};
 
 pub(crate) use moe::{
     MoeDims, MoeInfo, Route as MoeRoute, check_ram as moe_check_ram, cpu_only as moe_cpu_only,
@@ -1102,10 +1103,10 @@ impl<'a> Qwen2<'a> {
         }
         if m.arch == "deepseek2" {
             assert!(
-                !tie && !experts && keep == usize::MAX,
-                "deepseek2: the whole model on the CPU only"
+                !tie && keep == usize::MAX,
+                "deepseek2: the whole model (or its experts) only"
             );
-            return deepseek2::build(m, repack);
+            return deepseek2::build(m, repack, experts);
         }
         let a = &m.arch;
         let key = |k: &str| format!("{a}.{k}");

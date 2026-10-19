@@ -18,6 +18,7 @@
 //! Threads: as the hybrid's, strictly sequential: the thread that opened
 //! the GPU drives the CPU pool for the experts between the GPU's segments.
 
+use crate::cuda::qwen2::mla::{MlaBufs, MlaFns};
 use crate::cuda::qwen2::moe::{MoeBufs, MoeFns};
 use crate::cuda::qwen2::{CacheKv, CudaCache, CudaQwen2, Head};
 use crate::cuda::{Gpu, Module};
@@ -29,6 +30,9 @@ pub struct MoeQwen3<'m, 'g> {
     gpu: CudaQwen2<'g>,
     cpu: Qwen2<'m>,
     mf: MoeFns<'g>,
+    /// deepseek2: the MLA layers' kernels (`cuda::qwen2::mla`; the GPU
+    /// half's `mla`); None for qwen3moe.
+    xf: Option<MlaFns<'g>>,
     /// The context its caches are planned for (with `fit`, maybe less than
     /// asked).
     pub ctx: usize,
@@ -38,6 +42,8 @@ pub struct MoeQwen3<'m, 'g> {
 pub struct MoeCache<'g> {
     /// Before `c`: its graphs hold the cache's addresses.
     mb: MoeBufs<'g>,
+    /// deepseek2: the MLA layers' scratch (then `mb` is a one-token stub).
+    xb: Option<MlaBufs<'g>>,
     c: CudaCache<'g>,
 }
 
@@ -67,6 +73,34 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
             gpu: net,
             cpu,
             mf,
+            xf: None,
+        })
+    }
+
+    /// `new` for a deepseek2 model: `mla_module` is `Kernels::mla_module`
+    /// (MLA attention and router; moe.cu's add and logits with it).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_mla(
+        gpu: &'g Gpu,
+        module: &'g Module<'g>,
+        mla_module: &'g Module<'g>,
+        m: &'m Model,
+        max_ctx: usize,
+        kv: CacheKv,
+        fit: bool,
+        q6k8: bool,
+    ) -> Result<MoeQwen3<'m, 'g>, String> {
+        crate::model::moe_check_ram(m, false)?;
+        let net = CudaQwen2::with_kv_moe(gpu, module, m, max_ctx, kv, fit, q6k8)?;
+        let mf = MoeFns::new(mla_module)?;
+        let xf = MlaFns::new(mla_module, module)?;
+        let cpu = Qwen2::new_experts(m);
+        Ok(MoeQwen3 {
+            ctx: net.ctx,
+            gpu: net,
+            cpu,
+            mf,
+            xf: Some(xf),
         })
     }
 
@@ -87,7 +121,7 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
              layers on the CPU (top-{})",
             self.gpu.weight_bytes() as f64 / (1u64 << 30) as f64,
             d.n_expert,
-            self.gpu.n_layers,
+            self.gpu.mla_moe_layers().unwrap_or(self.gpu.n_layers),
             d.k
         )
     }
@@ -123,6 +157,12 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
     fn step(&self, token: u32, pos: usize, c: &mut MoeCache<'g>) {
         let mut ex =
             |l: usize, h: &[f32], i: &[i32], w: &[f32], y: &mut [f32]| self.experts(l, h, i, w, y);
+        if let (Some(xf), Some(xb)) = (&self.xf, &mut c.xb) {
+            return self
+                .gpu
+                .mla_step(xf, &mut c.c, xb, token, pos, &mut ex)
+                .unwrap_or_else(|e| Self::die(e));
+        }
         self.gpu
             .moe_step(
                 &self.mf,
@@ -145,6 +185,12 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
     ) -> (Vec<u32>, Vec<f32>) {
         let mut ex =
             |l: usize, h: &[f32], i: &[i32], w: &[f32], y: &mut [f32]| self.experts(l, h, i, w, y);
+        if let (Some(xf), Some(xb)) = (&self.xf, &mut c.xb) {
+            return self
+                .gpu
+                .mla_tokens(xf, &mut c.c, xb, tokens, start, head, &mut ex)
+                .unwrap_or_else(|e| Self::die(e));
+        }
         self.gpu
             .moe_tokens(&self.mf, &mut c.c, &mut c.mb, tokens, start, head, &mut ex)
             .unwrap_or_else(|e| Self::die(e))
@@ -181,11 +227,17 @@ impl<'g> Lm for MoeQwen3<'_, 'g> {
 
     fn new_cache(&self, max_ctx: usize) -> MoeCache<'g> {
         let c = Lm::new_cache(&self.gpu, max_ctx);
+        let max = CudaQwen2::batch_max(&c);
+        let xb = self.xf.as_ref().map(|_| {
+            self.gpu
+                .mla_bufs(max, max_ctx)
+                .unwrap_or_else(|e| Self::die(e))
+        });
         let mb = self
             .gpu
-            .moe_bufs(CudaQwen2::batch_max(&c))
+            .moe_bufs(if xb.is_some() { 1 } else { max })
             .unwrap_or_else(|e| Self::die(e));
-        MoeCache { mb, c }
+        MoeCache { mb, xb, c }
     }
 
     fn forward(&self, token: u32, pos: usize, c: &mut MoeCache<'g>) -> Vec<f32> {
@@ -221,5 +273,7 @@ impl<'g> Lm for MoeQwen3<'_, 'g> {
     }
 }
 
+#[cfg(test)]
+mod ds2_tests;
 #[cfg(test)]
 pub(crate) mod tests;

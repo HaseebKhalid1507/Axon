@@ -51,9 +51,12 @@ Works today, honestly scoped:
   ([roadmap](docs/roadmap.md#mixture-of-experts)). `deepseek2` (DeepSeek V2/V3/V3.1, Kimi K2,
   Moonlight: MLA attention in the absorbed form with a K-only 576-wide cache, sigmoid routing
   with `exp_probs_b` and shared experts, YaRN's DeepSeek attention scale; the `kimi-k2` and
-  `deepseek-v3` tokenizers and the Kimi and DeepSeek V3 chat formats) runs on the CPU only
-  (`--device cpu`), decode == batched prefill == verify bit for bit; checked on
-  Moonlight-16B-A3B ([log](docs/log/2026-10-18-deepseek2-s0.md)). Legacy non-MLA deepseek2
+  `deepseek-v3` tokenizers and the Kimi and DeepSeek V3 chat formats) runs on the CPU
+  (`--device cpu`, [log](docs/log/2026-10-18-deepseek2-s0.md)) or, with `--device cuda`, as
+  qwen3moe does: MLA attention (its own kernels, a 576-wide f16 latent cache), router, shared
+  experts and the dense lead layer on the GPU, the routed experts on the CPU (stage 1,
+  [log](docs/log/2026-10-18-deepseek2-s1.md); f16 KV only for now). Both: decode == batched
+  prefill == verify bit for bit; checked on Moonlight-16B-A3B. Legacy non-MLA deepseek2
   GGUFs (an unsplit `attn_kv_b`, e.g. the published DeepSeek-V2-Lite files) are refused with a
   re-convert message.
   `gpt-oss` (gpt-oss-20b, ggml-org's MXFP4
@@ -69,6 +72,20 @@ Works today, honestly scoped:
   for their rows that aren't a multiple of 256, e.g. the 0.5B's 896), and MXFP4 for
   gpt-oss's experts (CPU only). On the GPU every weight matrix must be one of the eleven
   quantized types (F16/F32 matrices are refused there). Others load for `info` but can't run.
+- Model files: GGUF, or a Hugging Face checkpoint directory (`config.json`, `tokenizer.json`,
+  `tokenizer_config.json`, and `model.safetensors` or the shards of `model.safetensors.index.json`)
+  of a `qwen2`, `qwen3` or `llama` model with BF16, F16 or F32 weights, wherever a `.gguf` path is
+  taken (`axon info <dir>` lists each tensor's Hugging Face name, GGUF name and type). A BF16 or F16
+  checkpoint loads as the F16 GGUF `convert_hf_to_gguf.py --outtype f16` makes of the same weights:
+  BF16 matrices converted to F16 and vectors to F32 at load (numpy's rounding, checked for all 65536
+  values), the same metadata and tokenizer, and the same logits and greedy output bit for bit
+  (checked on Qwen2.5-0.5B-Instruct and Llama-3.2-1B-Instruct,
+  [log](docs/log/2026-10-19-safetensors-loader.md)). F32 matrices stay F32 (lossless, where
+  `--outtype f16` would round them). CPU only for now
+  (the GPU has no F16 matrix kernels); FP8 / NVFP4 checkpoints, MoE and the other architectures
+  are refused with a message, to come with the FP8 stages (roadmap). The pre-tokenizer must be one
+  Axon knows (Qwen2's or Llama 3's regex: recognized, never executed); SentencePiece-style
+  `tokenizer.json` files are refused (use the GGUF). Like llama.cpp, the NFC normalizer isn't applied.
 - Sampling: greedy, or temperature / top-k / top-p / min-p / repeat penalty with a seed
   (llama.cpp's order, ollama's defaults). `gen` continues raw text, greedy unless `--temp`
   is above 0 (reproducible output and benchmarks); `chat` talks to an Instruct model
@@ -161,6 +178,7 @@ curl -L -o models/qwen2.5-0.5b-q4_k_m.gguf \
 ```
 axon <model.gguf>                         same as axon info
 axon info <model.gguf>                    print a summary and exit
+                                          (everywhere: a checkpoint directory instead, CPU)
 axon gen <model.gguf> "<prompt>" [-n N] [--draft K] [--draft-model PATH] [--device D]
           [--ctx N] [--gpu-layers N] [--gpus L] [--kv T]
                                           generation (default 32 tokens; greedy unless --temp)
@@ -559,8 +577,10 @@ OLLAMA_HOST=http://127.0.0.1:8080 ollama run qwen3-8b
 | `AXON_CUDA_PDL=0` | cuda: no programmatic dependent launch (used only on sm_90+ with a CUDA 12.3+ driver) |
 | `AXON_ATT_MQ=0` | cuda, tensor cores: a one-sequence batched pass of few queries (a prompt chunk, a draft verify) runs attention per query (`attn_blk_b`, ≤ 16 queries at head size 128, ≤ 48 at 64) and above that the flash kernel, instead of `attn_blk_mq` (16 queries per K/V tile read). Same output bits |
 | `AXON_ATT_MQ_MAX=N` | cuda, tensor cores: most queries of a one-sequence pass that `attn_blk_mq` takes before the flash kernel (default 32). Parsed as an integer; anything else, the default. Small values send passes of more than N queries to the flash kernel (0: all of them). Large values turn the flash kernel off for one-sequence passes of up to N tokens (and prompts are cut into the plain passes): slower past the crossover, same bits |
+| `AXON_WAVE_SPLIT=0` | cuda, `gen`/`logits`: split a prompt of several batched passes into equal passes (the old split) instead of sizing them to fill this GPU's GEMM waves (e.g. pp2100 on an RTX 4090: 1088 + 1012, not 1050 + 1050, +3 % prompt eval on 7B/8B; same bits). `AXON_PASS_TRACE=1` prints the pass sizes |
 | `AXON_GATE_UP=0` | cuda: run the FFN's gate and up products (both Q4_K) as two GEMMs instead of one fused launch in batched passes (same bits) |
 | `AXON_HOPPER=0` | cuda, H100/H200 (compute capability 9.0): compile the kernels for plain sm_90 instead of sm_90a, which turns the wgmma/TMA kernels off (same bits) |
+| `AXON_GEMM_TILE=64` | cuda, sm_80+: keep every batched Q4_K / Q5_K product (and the fused gate+up) on the 64 × 64 `gemm2s` tile. Default (unset or any other value): the 128 × 64 `gemm2t` tile where its waves cost less (`tile_t`: the big products at > 64 tokens; not batches of ≤ 64 tokens, nor, e.g., a 512-row k / v on a 128-SM GPU). Same bits either way |
 | `AXON_GEMMH=0\|1` | cuda, sm_90a: `0` keeps every batched Q4_K product on the mma.sync GEMMs; `1` sends every one of them to the wgmma kernel. Default: the fused gate+up and the large Q4_K products (>= 3584 rows, at least one full wave of blocks) use wgmma (same bits either way) |
 | `AXON_Q6K8=0\|1` | cuda: `0` never makes the int8 copy of Q6_K matrices that speeds up prefill (sm_80+); `1` makes it whenever it fits beside the cache. Default: only if 768 MiB stay free beside it and the cache, and never on a split (same bits either way) |
 | `AXON_SKIP_MODEL_TESTS=1` | tests: skip the ones that need the real model |

@@ -423,6 +423,27 @@ impl Gpu {
                 "launch of {} with {n} arguments: not its parameter count",
                 f.name
             );
+            // And each argument's size is its parameter's: a U32 where the
+            // kernel takes a pointer has the driver copy 8 bytes from a
+            // 4-byte value, so the pointer's high half is garbage. Each
+            // parameter is copied from its own address, so only that one
+            // is wrong. Sizes only: cuFuncGetParamInfo reports no types, so
+            // u32 / i32 / f32, and Ptr / U64, can't be told apart.
+            for (i, a) in args.iter().enumerate() {
+                // SAFETY: as above; i < the parameter count (checked).
+                let r = unsafe { info(f.f, i, &mut off, &mut size) };
+                check(
+                    self.d,
+                    r,
+                    &format!("cuFuncGetParamInfo {} param {i}", f.name),
+                )?;
+                assert!(
+                    size == a.size(),
+                    "launch of {}: argument {i} is {a:?}, {} bytes; the parameter has {size}",
+                    f.name,
+                    a.size()
+                );
+            }
         }
         // cuLaunchKernelEx copies each parameter from these addresses before returning.
         let mut ptrs: Vec<*mut c_void> = args.iter().map(Arg::addr).collect();
@@ -895,7 +916,6 @@ pub struct SyncEvent<'g> {
 
 impl SyncEvent<'_> {
     /// Block the host until the last record fired.
-    #[cfg_attr(not(test), allow(dead_code))] // tests
     pub fn sync(&self) -> Result<(), String> {
         self.gpu.bind()?;
         // SAFETY: our event.
@@ -1372,6 +1392,17 @@ pub enum Arg {
 }
 
 impl Arg {
+    /// Bytes of the value (the kernel parameter's size: debug builds check
+    /// it in `Gpu::launch_raw`).
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    fn size(&self) -> usize {
+        match self {
+            Arg::Ptr(_) | Arg::U64(_) => 8,
+            Arg::U32(_) | Arg::I32(_) | Arg::F32(_) => 4,
+            Arg::Blob128(_) => 128,
+        }
+    }
+
     /// Address of the value, as cuLaunchKernel's parameter array wants it.
     fn addr(&self) -> *mut c_void {
         match self {
@@ -1969,6 +2000,14 @@ pub struct Kernels<'m> {
     ext: bool,
 }
 
+/// `Kernels::mla_module`'s source: kernels.cu's dequantization, moe.cu's
+/// router logits and add, mla.cu.
+const MLA_KERNELS: &str = concat!(
+    include_str!("kernels.cu"),
+    include_str!("moe.cu"),
+    include_str!("mla.cu")
+);
+
 /// NVRTC options for kernels.cu beyond the architecture. Denormals kept,
 /// as on the CPU (the defaults, spelled out: they are part of the cache key).
 const KERNEL_OPTS: [&str; 2] = ["--std=c++17", "--ftz=false"];
@@ -2005,6 +2044,19 @@ impl<'m> Kernels<'m> {
     /// models' module stays as it is.
     pub fn moe_module(gpu: &Gpu) -> Result<Module<'_>, String> {
         Ok(Module::load(gpu, include_str!("moe.cu"), &KERNEL_OPTS)?.0)
+    }
+
+    /// mla.cu (deepseek2's MLA attention and router, `cuda::qwen2::mla`)
+    /// on its own, after kernels.cu's dequantization (every type) and
+    /// moe.cu's router logits: the other modules stay as they are.
+    /// Debug builds compile it with MLA_DEBUG (mla.cu's traps: a router
+    /// with no finite score), their own cache entry.
+    pub fn mla_module(gpu: &Gpu) -> Result<Module<'_>, String> {
+        let mut opts = KERNEL_OPTS_EXT.to_vec();
+        if cfg!(debug_assertions) {
+            opts.push("-DMLA_DEBUG");
+        }
+        Ok(Module::load(gpu, MLA_KERNELS, &opts)?.0)
     }
 
     /// The module model `m` needs: `module_ext` if it has an extra type.
