@@ -1,0 +1,29 @@
+{
+ "label": "wave-serve-477f7b2-dbg-t4",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1019-054844-6174",
+   "name": "wave-serve-477f7b2-fast-dbg-cpu-t4",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "CPU only (bella; GPU hidden)",
+   "driver": "615.71.09",
+   "sha": "477f7b2",
+   "binary": "axon-test-dbg-477f7b2",
+   "started": 1792422636.077854,
+   "ended": 1792423304.905003,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "4afbfe9e61cccbe74abc80f0336b8cf5ff44ea1b916df4e0e71b4bd29dc462ff",
+   "log_bytes": 38976
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-19 11:21:45 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
