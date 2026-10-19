@@ -3134,6 +3134,21 @@ impl<'g> Lm for CudaQwen2<'g> {
     fn prefill_batch(&self) -> usize {
         self.batch
     }
+
+    /// `prompt_passes` (each at most the cache's batch max), or
+    /// `prefill_batch` chunks for a cache without batch scratch.
+    fn prompt_chunks(
+        &self,
+        n: usize,
+        start: usize,
+        cache: &CudaCache<'g>,
+    ) -> Vec<std::ops::Range<usize>> {
+        match (n, &cache.b) {
+            (0, _) => Vec::new(),
+            (_, Some(_)) => self.prompt_passes(cache, n, start),
+            (_, None) => crate::lm::chunk_ranges(n, self.batch),
+        }
+    }
 }
 
 mod batch;
