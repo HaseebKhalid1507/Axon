@@ -1904,12 +1904,18 @@ mod tests {
         assert!(eager1 > eager0, "no step fell back to kernels");
     }
 
-    /// `graph_oom_falls_back_to_kernels` with real memory pressure: VRAM
-    /// taken a chunk at a time after the pool is made, a step after each,
-    /// until a step's graph can't be instantiated (then it runs kernel by
-    /// kernel, the same bits); never to zero beyond that point.
-    /// AXON_TEST_FILL_VRAM=1 only, and never on a GPU driving a desktop
-    /// (it starves the display: bella's session crashed on it once).
+    /// MEASURE (not a check of the fallback: `graph_oom_falls_back_to_kernels`
+    /// is, by injection): step graphs made under real memory pressure. VRAM
+    /// is taken a chunk at a time after the pool is made (a chunk that
+    /// doesn't fit halved down to 64 KiB), a step after each with every graph
+    /// made anew, the free memory printed each step, and whether any graph
+    /// failed (then that step ran kernel by kernel). Every step's results ==
+    /// running alone either way. MEASURED on avante (sm_89, the 0.5B,
+    /// 1019-121102-7106): free memory reached 2.56 MiB at step 25 and stayed
+    /// there while small allocations kept succeeding (sub-allocated inside
+    /// mapped 2 MiB granules), and every graph through step 96 instantiated:
+    /// a fill can't make one fail there. AXON_TEST_FILL_VRAM=1 only, never on
+    /// a GPU driving a desktop (it starves the display).
     #[test]
     #[ignore]
     fn graph_oom_fill_vram() {
@@ -1980,11 +1986,19 @@ mod tests {
             oom_step(&net, &mut p, &mut hist, &refs, step);
             step += 1;
         }
-        let free_mib = failed_at.map_or(f64::NAN, mib);
         drop(held);
         let (_, eager1) = crate::cuda::qwen2::graph_oom_counts();
-        eprintln!("graph_oom_fill_vram: the first graph failed with {free_mib:.2} MiB free");
-        assert!(eager1 > eager0, "VRAM ran out without a graph failing");
+        match failed_at {
+            Some(f) => eprintln!(
+                "graph_oom_fill_vram: the first graph failed with {:.2} MiB free; {} steps kernel by kernel",
+                mib(f),
+                eager1 - eager0
+            ),
+            None => eprintln!(
+                "graph_oom_fill_vram: every graph instantiated, down to {:.2} MiB free",
+                mib(free())
+            ),
+        }
     }
 
     /// MEASURE (not a check): VRAM one captured step graph takes, by key,
