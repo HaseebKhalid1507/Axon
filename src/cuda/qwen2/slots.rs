@@ -1766,22 +1766,23 @@ mod tests {
         }
     }
 
-    /// The `graph_oom_*` tests' setup: a 0.5B with graphs, three requests
-    /// fed into a shuffled paged pool, their solo results for `steps`, and a
-    /// bare view (reserved) with the picks `run` gives on a plain cache.
-    /// Each kernel is launched once first (kernel by kernel), so nothing
-    /// is left to load when VRAM is short.
-    fn oom_setup<'g>(
-        net: &mut CudaQwen2<'g>,
-        steps: usize,
-    ) -> (
+    /// `oom_setup`'s: the pool, the prompts, their solo results (`solo`),
+    /// the bare view, its prompt and the picks `run` gives on a plain cache.
+    type OomSetup<'g> = (
         CudaPool<'g>,
         Vec<Vec<u32>>,
         Vec<(Vec<RowOut>, Vec<u32>, Vec<u8>)>,
         CudaCache<'g>,
         Vec<u32>,
         Vec<u32>,
-    ) {
+    );
+
+    /// The `graph_oom_*` tests' setup: a 0.5B with graphs, three requests
+    /// fed into a shuffled paged pool, their solo results for `steps`, and a
+    /// bare view (reserved) with the picks `run` gives on a plain cache.
+    /// Each kernel is launched once first (kernel by kernel), so nothing
+    /// is left to load when VRAM is short.
+    fn oom_setup<'g>(net: &mut CudaQwen2<'g>, steps: usize) -> OomSetup<'g> {
         let ctx = 192;
         let v = net.vocab;
         let prompts: Vec<Vec<u32>> = (0..3).map(|i| ids(40 + 9 * i, 300 + i as u32, v)).collect();
@@ -1795,8 +1796,8 @@ mod tests {
         net.graphs = false;
         {
             let mut w = pool_of(net, 4, ctx, Lay::Paged);
-            for i in 0..3 {
-                net.feed_slot(&mut w, i, &prompts[i][..10], 0).unwrap();
+            for (i, pr) in prompts.iter().enumerate() {
+                net.feed_slot(&mut w, i, &pr[..10], 0).unwrap();
             }
             let rows: Vec<SeqRow> = (0..3)
                 .map(|i| SeqRow {
