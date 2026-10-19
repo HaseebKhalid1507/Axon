@@ -1,0 +1,178 @@
+[axon-run 20:57:35] submitted 1018-205735-6d3a by /home/haseeb/.cache/axon-wt-ds2s1: shard 3/3 of 1018-205735-79a6, 156 tests: /home/haseeb/.cache/axon-ds2s1/axon-test-dbg-f61c3f2 --skip hybrid:: --skip cuda::tests:: --skip quant:: --skip cuda::qwen2::slots:: --skip sample:: --skip cuda::qwen2::mla:: --skip tests::argmax_matches_max_by_including_ties --skip tests::argmax_multiversion_identical --skip tests::argmax_speed --skip tests::best_matches_argmax --skip tests::draft_k_rounds_to_full_slot_groups --skip tests::drafti
+[axon-run 20:59:46] job 1018-205735-6d3a -> jade: /home/haseeb/.local/bin/axon-remote --host jade --vram 0 --src /home/haseeb/.cache/axon-wt-ds2s1 --env AXON_THREADS=1 --env RUST_TEST_THREADS=1 /home/haseeb/.cache/axon-ds2s1/axon-test-dbg-f61c3f2 --skip hybrid:: --skip cuda::tests:: --skip quant:: --skip cuda::qwen2::slots:: --skip sample:: --skip cuda::qwen2::mla:: --skip tests::argmax_matches_max_by_including_ties --skip tests::argmax_multiversion_identical --skip tests::argmax_speed --skip tests::best_matches_argmax --skip tests::draft_k_rounds_to_full_slot_groups --skip tests::drafting_matches_greedy --skip tests::drafting_matches_greedy_cuda --skip tests::drafting_matches_greedy_hybrid --skip tests::gen_budget_caps_and_never_overflows --skip tests::generate_uses_the_lm_seam --skip tests::gpu_layers_zero_is_the_cpu --skip tests::non_utf8_argument_is_an_error --skip tests::verify_argmax_matches_forward_argmax --skip tests::verify_batch_matches_forward --skip cuda::qwen2::moe:: --skip identity:: --skip cuda::upload::tests::fill_copies_pieces_and_zeroes_gaps --skip kvstore:: --skip rope:: --skip serve:: --skip cuda::qwen2::tests::gpu_logits_match_cpu_natural_long_0_5b --skip cuda::qwen2::tests::gpu_logits_match_cpu_natural_long_1_5b --skip cuda::qwen2::tests::gpu_logits_match_cpu_q2k_q3k --skip cuda::qwen2::tests::gpu_logits_match_cpu_q5_k_m_q4_0 --skip cuda::qwen2::tests::gpu_logits_match_cpu_qwen3_0_6b --skip cuda::qwen2::tests::gpu_mma_f16_is_deterministic --skip cuda::qwen2::tests::gpu_pdl_on_off_identical --skip cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_0_5b --skip cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_1_5b --skip cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_llama --skip cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q2k_q3k --skip cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_0_5b --skip cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_1_5b --skip cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_qwen3 --skip cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_qwen3_4b --skip cuda::qwen2::tests::gpu_prefill_logits_match_forward_big --skip cuda::qwen2::tests::gpu_products_match_reference_bits --skip cuda::qwen2::tests::gpu_products_real_weights_q2k_q3k --skip cuda::qwen2::tests::gpu_q8_attention_matches_reference --skip cuda::qwen2::tests::gpu_q8_kv_close_to_f16_0_5b --skip cuda::qwen2::tests::gpu_q8_kv_close_to_f16_1_5b --skip cuda::qwen2::tests::gpu_q8_llama --skip cuda::qwen2::tests::gpu_q8_qwen3 --skip cuda::qwen2::tests::gpu_q8_qwen3_4b --skip cuda::qwen2::tests::gpu_q8_store_matches_rule --skip cuda::qwen2::tests::gpu_qkv_rope_matches_cpu --skip model:: --skip cuda::qwen2::pipeline:: --skip lineedit:: --skip pool:: --skip tokenizer:: --skip moe::tests::backend_places_moe --skip moe::tests::moe_gpu_feed_batch_matches_feed_pruned --skip moe::tests::moe_gpu_feed_batch_matches_feed_small --skip moe::tests::moe_gpu_logits_graded_pruned --skip moe::tests::moe_gpu_logits_graded_small --skip moe::tests::moe_gpu_paged_and_graph_generation --skip moe::tests::moe_gpu_route_matches_cpu_twin_pruned --skip moe::tests::moe_gpu_route_matches_cpu_twin_small --skip moe::tests::moe_gpu_step_refuses_head_no --skip moe::tests::moe_gpu_verify_matches_forward_pruned --skip moe::tests::moe_gpu_verify_matches_forward_small --skip moe::tests::moe_route_batch_invariant_and_ties --skip moe::tests::transpose_tiled_transposes --skip cuda::qwen2::kvio:: --skip cuda::qwen2::stream:: --skip spec:: --skip kv:: --skip testutil::gpu_lock_is_reentrant --test-threads 1
+axon-remote: uploading axon-test-dbg-f61c3f2 (aa582124027be0afc68809e5) + source of /home/haseeb/.cache/axon-wt-ds2s1
+
+sent 1,521,258 bytes  received 4,047 bytes  1,016,870.00 bytes/sec
+total size is 5,556,208  speedup is 3.64
+
+sent 6,539,930 bytes  received 35 bytes  13,079,930.00 bytes/sec
+total size is 20,424,248  speedup is 3.12
+axon-remote: job 20261018-205952-axon-test-dbg-f61c3f2-1003429 on jade (CPU-only)
+[axon-node 20:59:52] CPU-only job (GPU hidden, AXON_SKIP_GPU_TESTS=1)
+[axon-node 20:59:52] run axon-test-dbg-f61c3f2 (aa582124027be0afc68809e5) as /home/haseeb/.cache/axon-wt-ds2s1 on jade, AXON_THREADS=1 RUST_TEST_THREADS=1
+[axon-node 20:59:53] memory cap (scope MemoryMax) 2957 MB = MemAvailable - 1536 MB; swap off for the job
+[axon-node 20:59:53] MemAvailable 4492 MB, load ['0.74', '0.85', '0.73']; nice -n 19 ionice -c3 taskset -c 0-7
+
+running 156 tests
+test chat::tests::cancel_and_message_too_long ... ok
+test chat::tests::emit_error_keeps_the_exchange_exact ... ok
+test chat::tests::forget_bench ... ignored
+test chat::tests::forget_bench_7b ... ignored
+test chat::tests::framing_matches_template ... ok
+test chat::tests::full_context_drops_oldest ... ok
+test chat::tests::full_context_drops_oldest_cuda ... ok
+test chat::tests::gemma3_framing_and_replies ... ok
+test chat::tests::harmony_framing_and_channels ... ok
+test chat::tests::llama3_framing_and_replies ... ok
+test chat::tests::mistral_framing_and_replies ... ok
+test chat::tests::moe_gpu_turns_match_fresh_prefill ... ok
+test chat::tests::moe_turns_match_fresh_prefill ... ok
+test chat::tests::qwen3_thinking_turns ... ok
+test chat::tests::session_after_forgetting ... ok
+test chat::tests::session_continues_cpu ... ok
+test chat::tests::session_continues_cuda_f16_q8 ... ok
+test chat::tests::session_cpu_file_on_cuda ... ok
+test chat::tests::session_hostile_state ... ok
+test chat::tests::set_system_reuses_the_shared_prefix ... ok
+test chat::tests::turns_match_fresh_prefill ... ok
+test chat::tests::turns_match_fresh_prefill_cuda ... ok
+test chat::tests::turns_match_fresh_prefill_hybrid ... ok
+test chat::tests::turns_stream_graded_vs_fresh_prefill ... ok
+test chat::tests::user_text_cannot_forge_turns ... ok
+test cuda::qwen2::paged_tests::gpu_paged_attention_bits ... ok
+test cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_gemma3 ... ok
+test cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_llama ... ok
+test cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_qwen25 ... ok
+test cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_qwen3 ... ok
+test cuda::qwen2::paged_tests::gpu_paged_gemma_window_bits ... ok
+test cuda::qwen2::paged_tests::gpu_paged_split_and_batched_bits ... ok
+test cuda::qwen2::paged_tests::gpu_paged_store_bits ... ok
+test cuda::qwen2::sample_tests::cpu_and_gpu_differ_only_where_logits_do ... ok
+test cuda::qwen2::sample_tests::kernels_match_cpu_candidates ... ok
+test cuda::qwen2::sample_tests::model_candidates_match ... ok
+test cuda::qwen2::sample_tests::real_model_sampling_cuda ... ok
+test cuda::qwen2::sample_tests::real_model_sampling_cuda_llama ... ok
+test cuda::qwen2::sample_tests::real_model_sampling_cuda_q8 ... ok
+test cuda::qwen2::sample_tests::real_model_sampling_cuda_qwen3 ... ok
+test cuda::qwen2::sample_tests::samp_kernel_profile ... ignored
+test cuda::qwen2::sample_tests::step_cost_cuda ... ignored
+test cuda::qwen2::tests::batch_passes_equal_split ... ok
+test cuda::qwen2::tests::cuda_attn_bench ... ignored
+test cuda::qwen2::tests::cuda_decode_tg ... ignored
+test cuda::qwen2::tests::cuda_fa_bench ... ignored
+test cuda::qwen2::tests::cuda_gemm_bench ... ignored
+test cuda::qwen2::tests::cuda_gemm_sustained ... ignored
+test cuda::qwen2::tests::cuda_gemmh_bench ... ignored
+test cuda::qwen2::tests::cuda_gemv_bench ... ignored
+test cuda::qwen2::tests::cuda_kv_q8_accuracy ... ignored
+test cuda::qwen2::tests::cuda_prefill_profile ... ignored
+test cuda::qwen2::tests::cuda_profile ... ignored
+test cuda::qwen2::tests::dump_logits_positions ... ignored
+test cuda::qwen2::tests::fa_passes_shapes ... ok
+test cuda::qwen2::tests::fa_pick_never_slower_than_full_measured ... ok
+test cuda::qwen2::tests::fa_pick_rules ... ok
+test cuda::qwen2::tests::gemma3_cpu_probe ... ignored
+test cuda::qwen2::tests::gemma3_flip_probe ... ignored
+test cuda::qwen2::tests::gemma3_ref_walk_probe ... ignored
+test cuda::qwen2::tests::gemmh_plain_routing ... ok
+test cuda::qwen2::tests::gpu_argmax_matches_cpu_rule ... ok
+test cuda::qwen2::tests::gpu_attention_matches_cpu ... ok
+test cuda::qwen2::tests::gpu_batch_and_cache_contract ... ok
+test cuda::qwen2::tests::gpu_batched_attention_matches_decode_bits ... ok
+test cuda::qwen2::tests::gpu_batched_products_match_gemv_bits ... ok
+test cuda::qwen2::tests::gpu_bits_llama_3b_8b ... ok
+test cuda::qwen2::tests::gpu_continuations_match_cpu_0_5b ... ok
+test cuda::qwen2::tests::gpu_continuations_match_cpu_1_5b ... ok
+test cuda::qwen2::tests::gpu_continuations_match_cpu_llama_1b ... ok
+test cuda::qwen2::tests::gpu_continuations_match_cpu_qwen3_0_6b ... ok
+test cuda::qwen2::tests::gpu_decode_attention_long ... ok
+test cuda::qwen2::tests::gpu_decode_cache_size_same_bits ... ok
+test cuda::qwen2::tests::gpu_decode_norm2_gate_up4_identical ... ok
+test cuda::qwen2::tests::gpu_deterministic_graph_or_not ... ok
+test cuda::qwen2::tests::gpu_deterministic_graph_or_not_q8 ... ok
+test cuda::qwen2::tests::gpu_embed_matches_dequant ... ok
+test cuda::qwen2::tests::gpu_ext_module_same_bits_old_types ... ok
+test cuda::qwen2::tests::gpu_gate_up_mixed_types ... ok
+test cuda::qwen2::tests::gpu_gemma3_logits_match_cpu ... ok
+test cuda::qwen2::tests::gpu_gemma3_matches_reference_forward ... ok
+test cuda::qwen2::tests::gpu_gemma3_prefill_and_verify_bits ... ok
+test cuda::qwen2::tests::gpu_gemmh_gate_up_match_reference ... ok
+test cuda::qwen2::tests::gpu_gemmh_matches_reference_bits ... ok
+test cuda::qwen2::tests::gpu_gemv_matches_cpu_every_type ... ok
+test cuda::qwen2::tests::gpu_gemv_matches_cpu_new_types ... ok
+test cuda::qwen2::tests::gpu_head_sizes ... ok
+test cuda::qwen2::tests::gpu_hw_f16_scales_exact_in_products ... ok
+test cuda::qwen2::tests::gpu_llama_matches_reference_forward ... ok
+test cuda::qwen2::tests::gpu_logits_match_cpu_0_5b ... ok
+test cuda::qwen2::tests::gpu_logits_match_cpu_1_5b ... ok
+test cuda::qwen2::tests::gpu_logits_match_cpu_2000_tokens ... ok
+test cuda::qwen2::tests::gpu_logits_match_cpu_llama_1b ... ok
+test cuda::qwen2::tests::gpu_logits_match_cpu_long_context ... ok
+test cuda::qwen2::tests::gpu_qwen3_matches_reference_forward ... ok
+test cuda::qwen2::tests::gpu_rmsnorm_matches_cpu ... ok
+test cuda::qwen2::tests::gpu_split_attention_matches_decode_bits ... ok
+test cuda::qwen2::tests::gpu_swiglu_epilogue_and_gate_up_match_reference ... ok
+test cuda::qwen2::tests::gpu_tc_attention_close_to_f64 ... ok
+test cuda::qwen2::tests::gpu_too_big_is_an_error ... ok
+test cuda::qwen2::tests::gpu_verify_matches_forward_argmax_0_5b ... ok
+test cuda::qwen2::tests::gpu_verify_matches_forward_argmax_1_5b ... ok
+test cuda::qwen2::tests::gpu_verify_matches_forward_argmax_q8_0_5b ... ok
+test cuda::qwen2::tests::gpu_verify_matches_forward_argmax_q8_1_5b ... ok
+test cuda::qwen2::tests::gpu_verify_matches_forward_argmax_qwen3 ... ok
+test cuda::qwen2::tests::gpu_verify_matches_forward_argmax_qwen3_4b ... ok
+test cuda::qwen2::tests::gpu_yarn_matches_reference_and_keeps_bits ... ok
+test cuda::qwen2::tests::q6k8_never_costs_context ... ok
+test cuda::qwen2::tests::teacher_forced_dump ... ignored
+test cuda::qwen2::yarn_eval::yarn_needle ... ignored
+test cuda::qwen2::yarn_eval::yarn_short_ctx ... ignored
+test draft::tests::chat_with_draft_model_unchanged ... ok
+test draft::tests::draft_k_defaults ... ok
+test draft::tests::draft_model_output_unchanged_cpu ... ok
+test draft::tests::draft_model_output_unchanged_cuda ... ok
+test draft::tests::draft_model_output_unchanged_cuda_big ... ignored
+test draft::tests::drafter_follows_edited_histories ... ok
+test draft::tests::drafter_stops_before_eog ... ok
+test draft::tests::split_k_defaults ... ok
+test draft::tests::vocab_mismatch_is_refused ... ok
+test gguf::tests::bad_magic_and_version ... ok
+test gguf::tests::bad_tensors ... ok
+test gguf::tests::honours_general_alignment ... ok
+test gguf::tests::huge_lengths_and_counts ... ok
+test gguf::tests::load_to_run_map_only_never_copies ... ok
+test gguf::tests::metadata_element_budget ... ok
+test gguf::tests::overlapping_tensors_refused ... ok
+test gguf::tests::parses_a_long_string_array ... ok
+test gguf::tests::parses_a_valid_file ... ok
+test gguf::tests::release_small_anonymous_model ... ok
+test gguf::tests::release_span_unaligned_base ... ok
+test gguf::tests::resident_fraction_of_a_read_file ... ok
+test gguf::tests::truncated_files ... ok
+test gguf::tests::unpermute_rows_undoes_the_converter ... ok
+test gguf::tests::unsized_types_are_named_not_sized ... ok
+test kvsave::tests::canonical_names_one_session ... ok
+test kvsave::tests::file_appends_rewrites_and_checks ... ok
+test kvsave::tests::hasher_streams ... ok
+test kvsave::tests::hostile_headers ... ok
+test kvsave::tests::lock_refuses_a_second_holder ... ok
+test kvsave::tests::not_a_session_file ... ok
+test kvsave::tests::orphan_records_never_load ... ok
+test kvsave::tests::same_length_foreign_rewrite_never_restores_wrong_state ... ok
+test kvsave::tests::second_writer_then_save_rewrites ... ok
+test kvsave::tests::segments_split_at_pages ... ok
+test kvsave::tests::torn_tail_then_new_process_saves_on ... ok
+test moe::ds2_tests::ds2_fixture_graded_criterion_catches_bugs ... ok
+test moe::ds2_tests::ds2_gpu_fixture_bits ... ok
+test moe::ds2_tests::ds2_gpu_fixture_graded ... ok
+test moe::ds2_tests::ds2_gpu_moonlight_bits ... ok
+test vmath::tests::exp_accuracy ... ok
+test vmath::tests::exp_accuracy_every_float ... ignored, slow: full sweep, run with --ignored --nocapture
+test vmath::tests::geglu_paths ... ok
+test vmath::tests::simd_matches_scalar ... ok
+test vmath::tests::softmax_swiglu_match_scalar ... ok
+test vmath::tests::softmax_swiglu_paths ... ok
+
+test result: ok. 133 passed; 0 failed; 23 ignored; 0 measured; 467 filtered out; finished in 2249.78s
+
+[axon-node 21:37:23] exit 0 after 2250.8s; lowest MemAvailable seen 2760 MB
+[axon-node 21:37:23] peak RSS 1683 MB (job process tree PSS, 2 s samples x1117)
+[axon-run 21:37:24] exit 0 after 2257.5s (host jade)

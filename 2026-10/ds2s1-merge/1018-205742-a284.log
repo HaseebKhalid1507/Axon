@@ -1,0 +1,11 @@
+[axon-run 20:57:42] submitted 1018-205742-a284 by /home/haseeb/.cache/axon-ds2s1: /home/haseeb/.cache/axon-ds2s1/md5run-f61c3f2.sh f61c3f2
+[axon-run 22:52:13] VRAM: claiming the learned 2342 MB instead of --vram 3000 (name:ds2s1-md5)
+[axon-run 22:52:13] job 1018-205742-a284 -> bella: /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-ds2s1/md5run-f61c3f2.sh f61c3f2
+axon-q 22:52:13 start slot 8-15: /home/haseeb/.cache/axon-ds2s1/md5run-f61c3f2.sh f61c3f2
+md5-f61c3f2-cpu.out: 0 of 18 pairs differ; 0 nonzero rc
+md5-f61c3f2-cuda.out: 0 of 18 pairs differ; 0 nonzero rc
+md5-f61c3f2-moe-cpu.out: 0 of 6 pairs differ; 0 nonzero rc
+md5-f61c3f2-moe-cuda.out: 0 of 6 pairs differ; 0 nonzero rc
+md5-f61c3f2-oss-cpu.out: 0 of 3 pairs differ; 0 nonzero rc
+md5-f61c3f2-ds2-cpu.out: 0 of 3 pairs differ; 0 nonzero rc
+[axon-run 22:54:52] exit 0 after 158.7s (host bella)

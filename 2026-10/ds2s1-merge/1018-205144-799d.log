@@ -1,0 +1,50 @@
+[axon-run 20:51:44] submitted 1018-205144-799d by /home/haseeb/.cache/axon-wt-ds2s1: /home/haseeb/.cache/axon-ds2s1/axon-test-98fe83b ds2_fixture_graded_criterion mla_kernels_compile --test-threads 1 --nocapture
+[axon-run 21:04:31] job 1018-205144-799d -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 0 --src /home/haseeb/.cache/axon-wt-ds2s1 /home/haseeb/.cache/axon-ds2s1/axon-test-98fe83b ds2_fixture_graded_criterion mla_kernels_compile --test-threads 1 --nocapture
+axon-remote: uploading axon-test-98fe83b (7ec011bc7e15ada8036b8327) + source of /home/haseeb/.cache/axon-wt-ds2s1
+
+sent 1,521,234 bytes  received 4,047 bytes  3,050,562.00 bytes/sec
+total size is 5,556,208  speedup is 3.64
+
+sent 6,155,081 bytes  received 35 bytes  12,310,232.00 bytes/sec
+total size is 19,091,280  speedup is 3.10
+axon-remote: job 20261018-210433-axon-test-98fe83b-2863467 on avante (CPU-only)
+[axon-node 21:04:33] CPU-only job (GPU hidden, AXON_SKIP_GPU_TESTS=1)
+[axon-node 21:04:33] run axon-test-98fe83b (7ec011bc7e15ada8036b8327) as /home/haseeb/.cache/axon-wt-ds2s1 on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 2 tests
+test cuda::qwen2::mla::tests::mla_kernels_compile_for_archs ... mla sm_80: 228768 bytes of cubin
+mla sm_90: 240792 bytes of cubin
+ok
+test moe::ds2_tests::ds2_fixture_graded_criterion_catches_bugs ... Opt { q_lora: false, yarn: false } RopeWrongPart: top-1 5 (cpu 55), mean |dlogit| 0.7633 = 16.2x cpu's 0.0470, max 4.364
+Opt { q_lora: false, yarn: false } ScaleOfKeyRow: top-1 27 (cpu 55), mean |dlogit| 0.3627 = 7.7x cpu's 0.0470, max 3.378
+Opt { q_lora: false, yarn: false } BiasInWeights: top-1 44 (cpu 55), mean |dlogit| 0.1354 = 2.9x cpu's 0.0470, max 1.666
+Opt { q_lora: false, yarn: false } ScaleBeforeRenorm: top-1 25 (cpu 55), mean |dlogit| 0.3904 = 8.3x cpu's 0.0470, max 2.116
+Opt { q_lora: false, yarn: false } NormOverRow: top-1 43 (cpu 55), mean |dlogit| 0.2095 = 4.5x cpu's 0.0470, max 2.272
+Opt { q_lora: true, yarn: false } RopeWrongPart: top-1 10 (cpu 52), mean |dlogit| 0.8761 = 12.7x cpu's 0.0691, max 5.285
+Opt { q_lora: true, yarn: false } ScaleOfKeyRow: top-1 41 (cpu 52), mean |dlogit| 0.2900 = 4.2x cpu's 0.0691, max 2.610
+Opt { q_lora: true, yarn: false } BiasInWeights: top-1 47 (cpu 52), mean |dlogit| 0.1555 = 2.3x cpu's 0.0691, max 1.671
+Opt { q_lora: true, yarn: false } ScaleBeforeRenorm: top-1 31 (cpu 52), mean |dlogit| 0.3619 = 5.2x cpu's 0.0691, max 2.789
+Opt { q_lora: true, yarn: false } NormOverRow: top-1 48 (cpu 52), mean |dlogit| 0.2267 = 3.3x cpu's 0.0691, max 2.206
+Opt { q_lora: false, yarn: true } RopeWrongPart: top-1 20 (cpu 139), mean |dlogit| 0.8859 = 9.3x cpu's 0.0952, max 5.337
+Opt { q_lora: false, yarn: true } ScaleOfKeyRow: top-1 51 (cpu 139), mean |dlogit| 0.6034 = 6.3x cpu's 0.0952, max 3.797
+Opt { q_lora: false, yarn: true } BiasInWeights: top-1 124 (cpu 139), mean |dlogit| 0.1488 = 1.6x cpu's 0.0952, max 1.698
+Opt { q_lora: false, yarn: true } ScaleBeforeRenorm: top-1 72 (cpu 139), mean |dlogit| 0.4146 = 4.4x cpu's 0.0952, max 2.475
+Opt { q_lora: false, yarn: true } NormOverRow: top-1 84 (cpu 139), mean |dlogit| 0.3546 = 3.7x cpu's 0.0952, max 3.179
+Opt { q_lora: false, yarn: true } NoYarn: top-1 39 (cpu 139), mean |dlogit| 0.6869 = 7.2x cpu's 0.0952, max 4.965
+Opt { q_lora: false, yarn: true } MscaleOnTable: top-1 57 (cpu 139), mean |dlogit| 0.4945 = 5.2x cpu's 0.0952, max 3.519
+Opt { q_lora: false, yarn: true } NoMscale: top-1 72 (cpu 139), mean |dlogit| 0.4046 = 4.3x cpu's 0.0952, max 3.150
+Opt { q_lora: true, yarn: true } RopeWrongPart: top-1 13 (cpu 131), mean |dlogit| 0.9153 = 8.1x cpu's 0.1130, max 5.402
+Opt { q_lora: true, yarn: true } ScaleOfKeyRow: top-1 57 (cpu 131), mean |dlogit| 0.5413 = 4.8x cpu's 0.1130, max 4.980
+Opt { q_lora: true, yarn: true } BiasInWeights: top-1 118 (cpu 131), mean |dlogit| 0.1866 = 1.7x cpu's 0.1130, max 2.406
+Opt { q_lora: true, yarn: true } ScaleBeforeRenorm: top-1 66 (cpu 131), mean |dlogit| 0.3919 = 3.5x cpu's 0.1130, max 2.878
+Opt { q_lora: true, yarn: true } NormOverRow: top-1 76 (cpu 131), mean |dlogit| 0.3676 = 3.3x cpu's 0.1130, max 3.168
+Opt { q_lora: true, yarn: true } NoYarn: top-1 40 (cpu 131), mean |dlogit| 0.7210 = 6.4x cpu's 0.1130, max 4.823
+Opt { q_lora: true, yarn: true } MscaleOnTable: top-1 64 (cpu 131), mean |dlogit| 0.5549 = 4.9x cpu's 0.1130, max 4.237
+Opt { q_lora: true, yarn: true } NoMscale: top-1 97 (cpu 131), mean |dlogit| 0.3288 = 2.9x cpu's 0.1130, max 2.730
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 619 filtered out; finished in 3.59s
+
+[axon-node 21:04:37] exit 0 after 3.7s
+[axon-node 21:04:37] peak RSS 113 MB (job process tree PSS, 2 s samples x1)
+[axon-run 21:04:37] exit 0 after 6.4s (host avante)

@@ -1,0 +1,37 @@
+[axon-run 20:57:43] submitted 1018-205743-0276 by /home/haseeb/.cache/axon-ds2s1: /home/haseeb/.cache/axon-ds2s1/moongpu-f61c3f2.sh /home/haseeb/.cache/axon-ds2s1/axon-test-f61c3f2 /home/haseeb/.cache/axon-ds2s1/axon-f61c3f2 f61c3f2
+[axon-run 22:59:42] VRAM: claiming the learned 2489 MB instead of --vram 3000 (name:ds2s1-moongpu)
+[axon-run 22:59:42] job 1018-205743-0276 -> bella: /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-ds2s1/moongpu-f61c3f2.sh /home/haseeb/.cache/axon-ds2s1/axon-test-f61c3f2 /home/haseeb/.cache/axon-ds2s1/axon-f61c3f2 f61c3f2
+axon-q 22:59:42 start slot 8-15: /home/haseeb/.cache/axon-ds2s1/moongpu-f61c3f2.sh /home/haseeb/.cache/axon-ds2s1/axon-test-f61c3f2 /home/haseeb/.cache/axon-ds2s1/axon-f61c3f2 f61c3f2
+               total        used        free      shared  buff/cache   available
+Mem:              30          12           5           1          14          18
+
+running 1 test
+test moe::ds2_tests::ds2_gpu_moonlight_bits ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+moonlight gpu: next token 276 " the"
+moonlight gpu chat: "Sure! How about \"navy blue\"?" / "Certainly! How about \"emerald green\"?"
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 622 filtered out; finished in 50.85s
+
+moonlight bits test rc=0
+pKL@20: partial KL over the first file's top 20 (not a full KL; see pkl_top)
+pair                                                                      top1  pKL mean   pKL p99   pKL max max|dlp1|
+llama-cpu.json vs llama-cuda.json                                    988/1024   4.02e-03  4.95e-02  1.19e-01    0.7179
+llama-cpu.json vs axon-cpu.json                                      988/1024   2.51e-03  3.99e-02  1.15e-01    0.5687
+llama-cpu.json vs moon-axon-cuda-f61c3f2.json                        993/1024   2.29e-03  3.50e-02  1.33e-01    0.7989
+llama-cuda.json vs axon-cpu.json                                     993/1024   4.22e-03  5.33e-02  2.56e-01    0.9669
+llama-cuda.json vs moon-axon-cuda-f61c3f2.json                       991/1024   3.50e-03  4.44e-02  1.53e-01    0.4761
+axon-cpu.json vs moon-axon-cuda-f61c3f2.json                         987/1024   2.77e-03  3.68e-02  1.81e-01    0.4876
+top-1 misses against llama-cpu.json, and their overlap:
+  llama-cuda.json: 36, axon-cpu.json: 36, both: 21
+  llama-cuda.json: 36, moon-axon-cuda-f61c3f2.json: 31, both: 17
+  axon-cpu.json: 36, moon-axon-cuda-f61c3f2.json: 31, both: 15
+pKL@20: partial KL over the first file's top 20 (not a full KL; see pkl_top)
+pair                                                                      top1  pKL mean   pKL p99   pKL max max|dlp1|
+moon-long-llama-cpu.json vs moon-long-llama-cuda.json                354/368    3.04e-03  3.19e-02  6.35e-02    0.3788
+moon-long-llama-cpu.json vs moon-long-axon-cuda-f61c3f2.json         350/368    2.51e-03  2.82e-02  5.64e-02    0.2891
+moon-long-llama-cuda.json vs moon-long-axon-cuda-f61c3f2.json        349/368    4.31e-03  3.76e-02  5.16e-02    0.3607
+top-1 misses against moon-long-llama-cpu.json, and their overlap:
+  moon-long-llama-cuda.json: 14, moon-long-axon-cuda-f61c3f2.json: 18, both: 7
+72
+[axon-run 23:02:48] exit 0 after 186.3s (host bella)
