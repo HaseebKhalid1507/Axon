@@ -104,6 +104,9 @@ MEASURED at 323770d (pods show UTC; the dates/times here are EDT):
 | debug-assertion suite after merging main ac358d4 (097249f: gpt-oss, Q2_K/Q3_K/IQ4_NL, MoE launches under the size check) | d078 / d8d8 / fb0d (group 1018-054610-1375) | pod4 / pod1 / pod2 | 193+255+113 = 561 pass, 0 fail |
 | release suite at 097249f | 3516 / 7f8d / f487 (group 1018-054823-4c08) | pod1 / pod4 / pod3 | 561 pass, 0 fail |
 | clippy -D warnings bin + tests at 097249f | local | bella | rc 0 |
+| release + debug suites at a7fbed6 (review fixes, main 4507c75) | 042a / f356 / 15d2 / 3e83 / cdbc / 8d5f | bella | 6/6 rc 0, 0 poison; clippy rc 0 |
+| release + debug suites at 47b01fd (main 953b886) | 9d93 / 9a6b / d2d5 / 587b / 1620 / 6ca3 | bella | 6/6 rc 0, 0 poison; clippy rc 0 |
+| full debug suite + release fast tier at 2fb8043 (main 2b89410, #86 gemvmx launches) | see PR #82 (after2fb8043.done) | bella/avante | PENDING |
 | md5 of gen, main vs candidate (3 models x 3 prompts x cuda/cpu) | 4309 | bella | 18 same, 0 differ |
 | clippy -D warnings (bin + tests, debug cfg), rustfmt --check at 323770d | local | bella | clean |
 
