@@ -1507,12 +1507,12 @@ impl<'g> CudaQwen2<'g> {
                     let (f, grid, block, stride, tail) = match (tc, q8, gemma) {
                         // gpt-oss: each query's window, the table (null:
                         // plain) last (oss.cu).
-                        (false, false, false) if oss.is_some() => (
-                            &oss.unwrap().1.attn_split_b,
+                        (false, false, false) if let Some((o, of)) = oss => (
+                            &of.attn_split_b,
                             ms,
                             ATT_TILE as u32,
                             self.max_split,
-                            vec![Arg::I32(oss.unwrap().0.win as i32), tab],
+                            vec![Arg::I32(o.win as i32), tab],
                         ),
                         _ if oss.is_some() => {
                             return Err("gpt-oss attention: f16 split kernels only (load \

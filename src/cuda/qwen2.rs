@@ -1348,8 +1348,10 @@ impl<'g> CudaQwen2<'g> {
         }
         // gpt-oss's windows are oss.cu's (OssLayer); its local layers use
         // the global RoPE table.
-        let swa = crate::model::gemma_swa(m, n_layers).filter(|_| !oss);
-        let oss_swa = crate::model::gemma_swa(m, n_layers).filter(|_| oss);
+        let (swa, oss_swa) = match crate::model::gemma_swa(m, n_layers) {
+            s if oss => (None, s),
+            s => (s, None),
+        };
         let freq_swa = match &swa {
             Some(_) => crate::model::rope_freqs_swa(m, head_dim),
             None => Vec::new(),
@@ -2400,7 +2402,7 @@ impl<'g> CudaQwen2<'g> {
             args.extend_from_slice(&kva);
             let oss = l.oss.zip(f.oss.as_ref());
             let attn = match c.mode {
-                CacheKv::F16 if oss.is_some() => &oss.unwrap().1.attn_split,
+                CacheKv::F16 if let Some((_, of)) = oss => &of.attn_split,
                 CacheKv::F16 if self.gemma.is_some() && c.tab.is_some() => &f.attn_split_w_pg,
                 CacheKv::F16 if self.gemma.is_some() => &f.attn_split_w,
                 CacheKv::F16 if tc => &f.attn_blk,

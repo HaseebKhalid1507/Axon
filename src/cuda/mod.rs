@@ -1988,16 +1988,27 @@ impl<'m> Kernels<'m> {
     }
 
     /// moe.cu (the MoE router, `crate::moe`) on its own: the dense
-    /// models' module stays as it is.
+    /// models' module stays as it is. Debug builds compile it with
+    /// MOE_DEBUG (moe_topk_oai's trap: a router with no non-NaN logit),
+    /// their own cache entry.
     pub fn moe_module(gpu: &Gpu) -> Result<Module<'_>, String> {
-        Ok(Module::load(gpu, include_str!("moe.cu"), &KERNEL_OPTS)?.0)
+        let mut opts = KERNEL_OPTS.to_vec();
+        if cfg!(debug_assertions) {
+            opts.push("-DMOE_DEBUG");
+        }
+        Ok(Module::load(gpu, include_str!("moe.cu"), &opts)?.0)
     }
 
     /// The module model `m` needs: `module_ext` if it has an extra type;
-    /// gpt-oss's: KERNELS + oss.cu (`KERNELS_OSS`).
+    /// gpt-oss's: KERNELS + oss.cu (`KERNELS_OSS`), with the extra types
+    /// too if it has one (e.g. a Q4_0 attention requant).
     pub fn module_for<'g>(gpu: &'g Gpu, m: &crate::gguf::Model) -> Result<Module<'g>, String> {
-        if m.arch == "gpt-oss" && !needs_ext(m) {
-            Ok(Module::load(gpu, KERNELS_OSS, &KERNEL_OPTS)?.0)
+        if m.arch == "gpt-oss" {
+            let ext = needs_ext(m);
+            let opts: &[&str] = if ext { &KERNEL_OPTS_EXT } else { &KERNEL_OPTS };
+            let mut md = Module::load(gpu, KERNELS_OSS, opts)?.0;
+            md.ext = ext;
+            Ok(md)
         } else if needs_ext(m) {
             Self::module_ext(gpu)
         } else {

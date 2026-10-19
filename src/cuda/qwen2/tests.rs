@@ -6500,12 +6500,8 @@ fn teacher_forced_dump() {
     // AXON_TF_DEV=moe: the MoE backend (crate::moe: attention on the GPU,
     // experts on the CPU).
     if var("AXON_TF_DEV") == "moe" {
-        fn rows<L: Lm>(
-            net: &L,
-            seq: &[u32],
-            n: usize,
-            top: &dyn Fn(&[f32]) -> Vec<(usize, f64)>,
-        ) -> Vec<Vec<(usize, f64)>> {
+        type Top = Vec<(usize, f64)>;
+        fn rows<L: Lm>(net: &L, seq: &[u32], n: usize, top: &dyn Fn(&[f32]) -> Top) -> Vec<Top> {
             let mut c = net.new_cache(seq.len() + 1);
             net.feed_batch(&seq[..n - 1], 0, &mut c);
             let mut r = Vec::new();

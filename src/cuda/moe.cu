@@ -192,7 +192,15 @@ moe_topk_oai(const float* __restrict__ logits, const float* __restrict__ bias, i
             __syncthreads();
         }
         if (t == 0) {
-            int e = rid[0];
+#ifdef MOE_DEBUG
+            // No untaken non-NaN logit left (a NaN router): debug builds stop
+            // here; release ones route to expert 0 (a NaN weight), as
+            // mla.cu's mla_topk. (The CPU twin, Moe::route_oai, picks the
+            // first untaken expert instead: NaN routers differ, by design
+            // nothing to match.)
+            if (rid[0] == 0x7fffffff) __trap();
+#endif
+            int e = rid[0] == 0x7fffffff ? 0 : rid[0];
             ids[tok * k + r] = e;
             w[tok * k + r] = red[0];
             p[e] = __int_as_float(0x7fc00000);  // NaN: taken

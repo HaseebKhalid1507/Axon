@@ -133,7 +133,8 @@ fn script<'g>(
 }
 
 /// `script` on a plain cache == after drop_graphs == through a shuffled
-/// page table (oss.cu's kernels with a table).
+/// page table (oss.cu's kernels with a table): the same picks, then one
+/// more `forward` with the same logits, bit for bit.
 fn paged(g: &Gpu, net: &MoeQwen3, prompt: &[u32]) {
     const PAGE: usize = 64;
     let ctx = 640;
@@ -148,6 +149,19 @@ fn paged(g: &Gpu, net: &MoeQwen3, prompt: &[u32]) {
     let mut c1 = net.new_cache(phys * PAGE);
     c1.c.set_tab(Some(g.upload(&pool).unwrap()));
     assert_eq!(script(net, prompt, &mut c1, None), want, "paged cache");
+    // script leaves positions 0..275 written: one more step on each.
+    let next = want[want.len() - 1];
+    let l0 = net.forward(next, 275, &mut c0);
+    assert_eq!(
+        bits(&net.forward(next, 275, &mut c2)),
+        bits(&l0),
+        "drop_graphs logits"
+    );
+    assert_eq!(
+        bits(&net.forward(next, 275, &mut c1)),
+        bits(&l0),
+        "paged logits"
+    );
 }
 
 fn ids_mod(n: u64, v: u64) -> Vec<u32> {
