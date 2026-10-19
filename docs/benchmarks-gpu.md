@@ -10,7 +10,179 @@ board on the dev laptop, see [BENCH.md](../BENCH.md).
 - Models: Qwen2.5 0.5B / 1.5B / 3B / 7B Instruct Q4_K_M and Qwen3 8B Q4_K_M (`q3-8B`). They are the
   Hugging Face files, sha256-checked against the dev laptop's copies.
 
-## RunPod: RTX 4090, RTX 5090, H100 SXM (2026-10-15)
+## RunPod: RTX 4090, RTX 5090, H100 SXM (2026-10-18, current)
+
+Measured 2026-10-18 EDT: H100 14:11–14:19, RTX 5090 14:43–14:59, RTX 4090 15:02–15:08. Same protocol
+as the 10-15 board below. Raw logs: `sb.log` (plus `sb-axl.log` / `sb-oll.log` on the 4090) and
+`hw.txt` per GPU; they are not in the repo.
+
+### Method
+
+- **Axon:** main at commit `7f42c02`, one release binary built on the dev laptop with the rustc build
+  script (sha256 `98885da0ef7d2d0a…`), the same binary on all three GPUs. Run as `axon gen … --device cuda`
+  with `AXON_THREADS=4`. NVRTC came from the PyPI wheel that matches the pod's driver.
+- **llama.cpp:** upstream master `ff5a233` (2026-10-18), run as `llama-bench -ngl 99 -r 1` once per
+  round, other options at their defaults. On the 4090 only, the old pin `4413a19` ran on the same pod as
+  a 4th interleaved engine. Where the binaries were built differs by GPU (see caveats).
+- **ollama:** 0.40.6, raw generate, `num_gpu 99`, `num_ctx 4096`, `num_thread 8` from the start on all
+  three GPUs.
+- 3 interleaved rounds, medians. Prompts are salted, so no prompt-cache hits. The GPU was cooled before
+  each model. The five GGUFs were sha256-checked against the dev laptop's copies on every pod. Each pod
+  was terminated after its board.
+- **Secure cloud only:** community-cloud creates were refused.
+
+### Hardware
+
+From each pod's `hw.txt`; "observed under load" is the max of the 1 s GPU sampler, "host load" the
+1-minute load average over the pod's run (median / max).
+
+| GPU | $/h | driver / CUDA | power limit | max SM / mem clock | observed under load | host CPU | host load | NVRTC |
+|---|---:|---|---|---|---|---|---|---|
+| RTX 4090 24 GB | 0.89 | 570.195.03 / 12.8 | 450 W | 3105 / 10501 MHz | 2730 MHz, 365 W, 49 C | EPYC 75F3, 128 vCPU | 16 / 38 | 12.8 |
+| RTX 5090 32 GB | 1.19 | 580.159.04 / 13.0 | 575 W | 3090 / 14001 MHz | 2932 MHz, 430 W, 54 C | EPYC 7543, 120 vCPU | 14 / 236 (119 during the axon + llama.cpp board) | 13.0 |
+| H100 80GB HBM3 SXM | 3.99 | 595.91.07 / 13.2 | 700 W | 1980 / 2619 MHz | 1980 MHz, 446 W, 42 C | Xeon Platinum 8468, 160 vCPU | 21 / 35 | 13.2 |
+
+Image: `runpod/base:1.4.0-cuda1281-ubuntu2404` on all three.
+
+### Headline
+
+- **Axon leads both engines in all 45 cells** (3 GPUs × 5 models × 3 metrics), and llama.cpp
+  `4413a19` in all 15 extra 4090 cells.
+- **Decode (tg128):** 1.03–1.19× llama.cpp on the 4090, 1.12–1.70× on the 5090, 1.13–1.30× on the H100.
+  vs ollama: 1.11–1.55× / 1.30–2.08× / 1.44–1.85×.
+- **Prefill pp2100:** 1.06–1.77× llama.cpp on the 4090, 1.26–2.10× on the 5090, 1.32–2.16× on the H100.
+  vs ollama: 1.10–2.16× / 1.28–2.41× / 1.36–2.13×.
+- **The thinnest cells are all on the 4090:** 7B tg128 186 vs 181 and Qwen3 8B tg128 170 vs 165 (both
+  1.03×; the 7B is +2.5 % before rounding), Qwen3 8B pp2100 12,450 vs 11,710 (1.06×).
+- **Prefill pp560:** 1.48–5.34× llama.cpp. vs ollama 1.75–12.05× without the four † cells (with them, up
+  to 20.01×). Read the caveats before quoting these.
+- **H100 vs 4090:** the H100 now leads the 4090 on 7B and 8B pp2100 (14,413 vs 13,632 and 12,754 vs
+  12,450). It still trails it on 0.5B–3B pp2100 (0.5B: 95,522 vs 111,300) and on all five pp560 cells.
+
+† ollama pp560 cell whose 3 samples include a cold first run (see caveats). Unreliable.
+
+### RTX 4090
+
+"llama.cpp" is master `ff5a233`; "llama.cpp 4413a19" is the old pin on the same pod, interleaved.
+
+| model | test | axon | llama.cpp | ollama | axon/llama | axon/ollama | llama.cpp 4413a19 | axon/4413a19 |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| 0.5B | pp560 | 103,781 | 26,282 | 8,613 | 3.95× | 12.05× | 25,654 | 4.05× |
+| 0.5B | pp2100 | 111,300 | 62,816 | 51,584 | 1.77× | 2.16× | 62,911 | 1.77× |
+| 0.5B | tg128 | 1,042 | 875 | 671 | 1.19× | 1.55× | 842 | 1.24× |
+| 1.5B | pp560 | 51,326 | 18,398 | 12,435 | 2.79× | 4.13× | 18,726 | 2.74× |
+| 1.5B | pp2100 | 52,695 | 35,400 | 32,395 | 1.49× | 1.63× | 34,998 | 1.51× |
+| 1.5B | tg128 | 593 | 524 | 447 | 1.13× | 1.33× | 511 | 1.16× |
+| 3B | pp560 | 26,508 | 12,662 | 10,960 | 2.09× | 2.42× | 12,064 | 2.20× |
+| 3B | pp2100 | 27,442 | 21,593 | 20,128 | 1.27× | 1.36× | 21,297 | 1.29× |
+| 3B | tg128 | 349 | 327 | 282 | 1.07× | 1.23× | 321 | 1.09× |
+| 7B | pp560 | 13,849 | 9,158 | 7,898 | 1.51× | 1.75× | 9,100 | 1.52× |
+| 7B | pp2100 | 13,632 | 12,064 | 11,655 | 1.13× | 1.17× | 12,020 | 1.13× |
+| 7B | tg128 | 186 | 181 | 167 | 1.03× | 1.11× | 179 | 1.04× |
+| q3-8B | pp560 | 12,718 | 8,584 | 7,210 | 1.48× | 1.76× | 8,565 | 1.48× |
+| q3-8B | pp2100 | 12,450 | 11,710 | 11,340 | 1.06× | 1.10× | 11,568 | 1.08× |
+| q3-8B | tg128 | 170 | 165 | 153 | 1.03× | 1.11× | 163 | 1.05× |
+
+### RTX 5090
+
+ollama ran in its own pass after axon and llama.cpp (see caveats). Cross-pod drop vs the 10-15 board: see caveats.
+
+| model | test | axon | llama.cpp | ollama | axon/llama | axon/ollama |
+|---|---|---:|---:|---:|---:|---:|
+| 0.5B | pp560 | 109,562 | 20,530 | 5,520† | 5.34× | 19.85×† |
+| 0.5B | pp2100 | 130,896 | 62,389 | 54,234 | 2.10× | 2.41× |
+| 0.5B | tg128 | 1,503 | 959 | 724 | 1.57× | 2.08× |
+| 1.5B | pp560 | 55,884 | 16,616 | 5,622 | 3.36× | 9.94× |
+| 1.5B | pp2100 | 63,607 | 32,802 | 35,067 | 1.94× | 1.81× |
+| 1.5B | tg128 | 928 | 545 | 506 | 1.70× | 1.83× |
+| 3B | pp560 | 33,397 | 11,339 | 6,362 | 2.95× | 5.25× |
+| 3B | pp2100 | 35,110 | 22,864 | 20,995 | 1.54× | 1.67× |
+| 3B | tg128 | 569 | 420 | 376 | 1.36× | 1.51× |
+| 7B | pp560 | 17,982 | 9,731 | 5,243 | 1.85× | 3.43× |
+| 7B | pp2100 | 18,529 | 14,633 | 14,311 | 1.27× | 1.29× |
+| 7B | tg128 | 310 | 276 | 237 | 1.12× | 1.30× |
+| q3-8B | pp560 | 16,801 | 8,341 | 5,034† | 2.01× | 3.34×† |
+| q3-8B | pp2100 | 16,500 | 13,099 | 12,858 | 1.26× | 1.28× |
+| q3-8B | tg128 | 286 | 246 | 221 | 1.16× | 1.30× |
+
+### H100 SXM
+
+All three engines interleaved in one board.
+
+| model | test | axon | llama.cpp | ollama | axon/llama | axon/ollama |
+|---|---|---:|---:|---:|---:|---:|
+| 0.5B | pp560 | 84,470 | 16,526 | 4,222† | 5.11× | 20.01×† |
+| 0.5B | pp2100 | 95,522 | 44,186 | 44,935 | 2.16× | 2.13× |
+| 0.5B | tg128 | 1,162 | 892 | 630 | 1.30× | 1.85× |
+| 1.5B | pp560 | 45,480 | 12,968 | 7,433 | 3.51× | 6.12× |
+| 1.5B | pp2100 | 48,824 | 26,767 | 26,443 | 1.82× | 1.85× |
+| 1.5B | tg128 | 666 | 591 | 420 | 1.13× | 1.59× |
+| 3B | pp560 | 23,804 | 8,564 | 4,270 | 2.78× | 5.57× |
+| 3B | pp2100 | 25,853 | 15,713 | 15,300 | 1.65× | 1.69× |
+| 3B | tg128 | 451 | 384 | 300 | 1.18× | 1.50× |
+| 7B | pp560 | 13,628 | 6,912 | 4,783 | 1.97× | 2.85× |
+| 7B | pp2100 | 14,413 | 9,684 | 9,742 | 1.49× | 1.48× |
+| 7B | tg128 | 314 | 264 | 218 | 1.19× | 1.44× |
+| q3-8B | pp560 | 11,537 | 7,151 | 4,740† | 1.61× | 2.43×† |
+| q3-8B | pp2100 | 12,754 | 9,672 | 9,390 | 1.32× | 1.36× |
+| q3-8B | tg128 | 299 | 252 | 206 | 1.19× | 1.45× |
+
+### What changed since the 10-15 board
+
+Board to board, each GPU on a different pod (and, for the 5090, a different host CPU) unless stated.
+Percentages are medians, this board vs the 10-15 board.
+
+| | RTX 4090 | RTX 5090 | H100 SXM |
+|---|---|---|---|
+| axon f8d8a86 → 7f42c02, pp560 | −2.0 to +5.1 % | −8.5 to −2.1 % | +1.7 to +12.6 % |
+| axon, pp2100 | −3.1 to +0.7 % | −5.8 to −0.4 % | +2.2 to +15.0 % |
+| axon, tg128 | −1.0 to +4.1 % | −0.6 to +6.1 % | +0.9 to +9.0 % |
+| llama.cpp 4413a19 → master ff5a233, pp560 | +0.3 to +22.5 % | −44.2 to −24.1 % | −11.2 to +19.4 % |
+| llama.cpp, pp2100 | +1.1 to +8.2 % | −21.1 to −4.3 % | −0.9 to +0.2 % |
+| llama.cpp, tg128 | +1.5 to +8.7 % | −9.3 to −1.5 % | +9.3 to +17.5 % |
+| ollama 0.35.0 → 0.40.6, pp560 | +29.7 to +57.6 % | −58.6 to −39.7 % | −67.2 to −29.8 % |
+| ollama, pp2100 | −7.7 to −0.9 % | −25.9 to −9.6 % | −2.5 to +1.0 % |
+| ollama, tg128 | −6.1 to +3.9 % | −26.4 to −12.8 % | −11.7 to −4.7 % |
+
+- **4090, same pod, llama.cpp `4413a19` → master `ff5a233`** (the clean "llama.cpp moved" number):
+  tg128 +1.5 to +3.9 %, pp2100 −0.2 to +1.4 %, pp560 −1.8 to +4.9 %. Axon is flat on the 4090 vs
+  `f8d8a86`, so its narrower decode margin there comes mostly from llama.cpp's decode gain plus pod-to-pod noise.
+- **H100:** axon is up on every cell, most on prefill (7B pp2100 12,534 → 14,413, +15.0 %). This board
+  includes #33's default `wgmma` routing on sm_90a, but the host (Xeon 8468 vs 8470) and driver (595.91
+  vs 570.195) changed too, so the gain is not attributed to #33.
+- **5090:** see the caveat below. Not claimed as a regression or as noise.
+
+### Caveats (this board)
+
+- **Split ollama pass on the 5090 and 4090.** On those two GPUs ollama ran in its own 3-round pass on
+  the same pod, after the axon + llama.cpp board. On the 5090 the ollama download (~1 MB/s) was still
+  running during the axon + llama.cpp board. The H100 ran one board with all three engines interleaved.
+- **Where llama.cpp was built.** The 5090 and 4090 binaries were prebuilt on the dev laptop inside the
+  pod image (`runpod/base:1.4.0-cuda1281-ubuntu2404`): CUDA 12.8, `CMAKE_CUDA_ARCHITECTURES` 120 / 89,
+  static, `GGML_NATIVE=OFF` with generic AVX2/FMA/F16C CPU flags. The H100's was built on the pod
+  (sm_90, native CPU flags). With `-ngl 99` the CPU code path barely matters, but the builds are not
+  identical.
+- **ollama cold first runs (†).** On the H100 and the 5090 the round-0 ollama pp560 sample for 0.5B and
+  Qwen3 8B is a cold first request after a load: 15 and 66 tok/s on the H100, 14 and 64 tok/s on the
+  5090. The median of 3 is then the lower of the two warm samples. Those four cells, and their
+  axon/ollama ratios, are unreliable.
+- **5090 axon prefill is below the 10-15 board: unattributed.** pp560 −2.1 to −8.5 % (0.5B 119,797 →
+  109,562), pp2100 −0.4 to −5.8 %; decode −0.6 to +6.1 %. This is cross-pod: a different host CPU
+  (EPYC 7543 vs Ryzen 9 9950X), driver 580.159 vs 595.91, host load up to 119 during the board, and
+  llama.cpp is also lower on this pod (pp2100 −4.3 to −21.1 %). The H100 and 4090 show no drop. A bella A/B
+  of `f8d8a86` vs `7f42c02` (axon only, 5 interleaved rounds) is queued as job `1018-144942-8284`:
+  **pending**.
+- **4090:** axon is flat vs `f8d8a86` (−3.1 to +5.1 %); llama.cpp master is +1.5 to +3.9 % on decode vs
+  `4413a19` on the same pod.
+- **ollama changed version**, 0.35.0 → 0.40.6 (0.40.6 runs a bundled `llama-server` as its runner), so
+  the ollama deltas mix the version change with the pod change.
+- **pp560 ratios are inflated** the same way as on the 10-15 board (see the general caveats below);
+  quote pp2100 for prefill.
+- **One run per GPU**, medians of 3; small margins (the 4090's 7B/8B rows) are the least firm.
+
+## Previous board: RunPod RTX 4090, RTX 5090, H100 SXM (2026-10-15)
+
+Superseded by the 2026-10-18 board above; kept as it was.
 
 ### Method
 
@@ -104,6 +276,23 @@ Image: `runpod/base:1.4.0-cuda1281-ubuntu2404` on all three.
 | q3-8B | pp2100 | 11,539 | 9,700 | 9,633 | 1.19× | 1.20× |
 | q3-8B | tg128 | 287 | 230 | 227 | 1.25× | 1.27× |
 
+## Concurrency: RTX 4090, Qwen2.5-7B (2026-10-18)
+
+Closed-loop serving on one RunPod RTX 4090 (secure, driver 580.159.04). `scripts/serve_load.py`: C clients, each
+sending 2 requests one after the other; ~560-token prompts, 512-token outputs, greedy; aggregate = completion tokens
+/ wall. Two rounds per cell, medians. Detail, the per-step curve and methodology:
+[log/2026-10-18-c-curve.md](log/2026-10-18-c-curve.md).
+
+| engine | weights | C=1 | C=8 | C=16 | C=32 | C=64 |
+|---|---|---|---|---|---|---|
+| Axon (feat/c-curve), `--parallel 32` | Q4_K_M GGUF | 181 | 999 | 1542 | 2240 | – |
+| llama-server 4413a19, `-np 32 -fa on` | the same GGUF | 133 | 613 | 667 | 976 | – |
+| vLLM 0.31.0 (Marlin) | Qwen2.5-7B-Instruct-AWQ int4 | 166 | 1149 | 1958 | 2954 | 3609 |
+
+vLLM runs other weights (AWQ int4, group 128) with other kernels, so it isn't a bits-equal comparison. It is the
+datacenter bar on the same card. Axon leads at C=1 and is 2.3× llama-server at C=32. It trails vLLM by 13–24 % at
+C=8–32 because its batched step still grows with the rows (ITL p50 7.2 → 11.7 ms from C=8 to C=32, vLLM 6.2 → 8.0).
+
 ## Laptops
 
 ### Parabellum: RTX 5070 Ti Laptop (sm_120, 12 GB)
@@ -156,6 +345,8 @@ left out: the model didn't fit the memory cap and was re-read from disk, so its 
 disk, not the engines.
 
 ## Caveats
+
+Written for the 10-15 RunPod board and the laptop boards; the 10-18 board's own caveats are in its section.
 
 - **pp560 ratios are inflated.** The other engines' short-prompt rate is far below their long-prompt
   rate. For example, ollama on the 4090 0.5B ran 6,477 at pp560 and 55,863 at pp2100; Axon's pp560 is
