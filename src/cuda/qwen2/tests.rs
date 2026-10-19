@@ -3248,7 +3248,7 @@ fn gpu_gu_quant_matches_quantize_b_many_waves() {
     f.set_max_shared(gemm2_smem(Q4_K, 64, 3)).unwrap();
     let fq = km.function("quantize_b").unwrap();
     let mut first: Option<Vec<u32>> = None;
-    for i in 0..20 {
+    for i in 0..20usize {
         // 1000..1095: full and partial last tiles, 16 or 17 of them.
         let nb = 1000 + 5 * i;
         qact.zero().unwrap();

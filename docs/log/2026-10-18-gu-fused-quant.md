@@ -8,15 +8,19 @@
 ## What changed
 - **prefill.cu `gemm2s_q4_k_gu`** takes four new arguments: `qact`, `qstride`, `want_k` and `cnt`. When `cnt` is
   null the kernel behaves exactly as before. Otherwise `gu_quant_tail` runs after the hid stores:
-  - Each thread issues `__threadfence()`. Then comes a barrier, and thread 0 does `__threadfence()` followed by
-    `atomicAdd(cnt[x · ffn/256 + y/8], 1)`.
+  - Each thread issues `__threadfence()`; this is belt and braces, since the barrier plus thread 0's fence already
+    order the stores. Then comes a barrier, and thread 0 does `__threadfence()` followed by
+    `atomicInc(cnt[x · ffn/256 + y/8], 7)`, which wraps 7 → 0 on the 8th arrival.
   - The 8 blocks of one 256-row block (`blockIdx.y / 8`) and one 64-token tile (`blockIdx.x`) all hit the same
-    counter. The block that sees 7 is last: its thread 0 fences again (acquire) before the barrier.
+    counter. The block that sees 7 is last: its thread 0 fences again (acquire) before the barrier. Its
+    `atomicInc` has already put the counter back to 0.
   - That block's 8 warps then run `quant_warp` on the tile's ≤ 64 tokens × 256 values. They load with `__ldcg`
-    (L2, so never a stale L1 line), write into `qact`, and finally set the counter back to 0.
+    (L2, so never a stale L1 line), and write into `qact`.
   - This is the same function on the same floats as `quantize_b` (ffn % 256 == 0, so every value is valid). The
     atomic only decides which block does the computing.
-  - ptxas on sm_89: 193 registers before and after, 0 spills, +16 B of static shared memory.
+  - The kernel also checks rows % 256 == 0 on the device (`cnt && (rows & 255) == 0`). The host checks it too.
+  - `out` lost its `__restrict__`, because the tail reads it back. ptxas on sm_89 still reports 193 registers before
+    and after, with 0 spills, plus one shared int.
 - **batch.rs `ffn_half`**, fused branch (gemm2s path; the sm_90a gemmh2 path is unchanged):
   - With `gu_quant` on and ffn % 256 == 0, the kernel quantizes into **b.gate**. That buffer is free here, because
     the gate product never goes to memory in the fused launch, and nb × act_stride ≤ nb × ffn × 4.
@@ -24,8 +28,9 @@
   - It can't write into b.act: other blocks of the same launch are still reading the dim-wide input activations
     there, and the two layouts overlap.
 - **`BatchBufs::gu_cnt`**: one u32 per 64-token tile and 256 ffn rows, allocated and zeroed with the batch scratch
-  (counted in `batch_bytes`). Every launch leaves it zero again, so repeated launches and graph replays need no
-  reset.
+  (counted in `batch_bytes`). Every launch leaves it zero again, so repeated launches need no reset. Batched passes
+  aren't graph-captured. It assumes one launch uses the counters at a time: the scratch's passes run on one stream,
+  and `gemm2s_q4_k_gu` launches without PDL.
 - **`AXON_GU_QUANT=0`** (`CudaQwen2::gu_quant`) restores `quantize_b`, with no rebuild. Every other shape and path
   keeps today's code: ffn % 256 ≠ 0, the unfused products, the swiglu epilogue, gemmh2 and gemma.
 
@@ -41,6 +46,10 @@ Tests:
 - `gpu_swiglu_epilogue_and_gate_up_match_reference` adds 512×768 and 1024×256. In both, the kernel's own quantize
   must equal `quantize_b` of its f32 output byte for byte, over two launches, with every counter zero after each
   launch. nb runs 1–129, so it includes partial token tiles.
+- **`gpu_gu_quant_matches_quantize_b_many_waves`** (new, fast tier): 4096 × 1024 at nb 1000–1095. That is
+  128 × 16–17 blocks over many waves, so they finish genuinely out of order. It runs 20 launches, and after each:
+  qact == `quantize_b(out)` byte for byte, every counter is zero, and out has the same bits as launch 0. GPU
+  against GPU, with no `gemv_ref`.
 - `prefill_bits` (0.5B, 1.5B, Q8 KV, and the other models that call it) adds `prefill_logits` with `gu_quant` off
   from 0 and from 300. Every case must match the per-token reference's logits and KV.
 - `gpu_prefill_logits_match_forward_*` run with it on (the default).
@@ -53,6 +62,9 @@ is the same class). That's what the 200× stress on avante (sm_89) and bella (sm
 the spec isn't done: there are no pods for this round.
 
 ## Verification and measurement
+Review: Shady 8/10 MERGE-AFTER-GATES. SHOULD 1–4 and NITs 1–6 applied in b8c7d8c; SHOULD 5 is the follow-up below.
+The a17b7fd gate jobs were all cancelled before they started and resubmitted at the new head.
+
 Binaries are at a17b7fd. clippy `-D warnings` (bin + tests) and rustfmt: PASS, locally.
 
 | gate | job | status |
@@ -80,4 +92,8 @@ one evented pass, and reports medians of gate_up, swiglu, their sum, down and th
 ## What didn't work / open
 - Quantizing into b.act (as `quantize_b` does) is unsafe here: other blocks of the same launch still read the
   input activations from it. So it goes into b.gate instead.
+- Follow-up (review SHOULD 5): once #92's wave split lands, rerun `gpu_gu_quant_repeat_stress` on main. That
+  covers the 1088 + 1012 pass sizes, which put the partial tile in a different place.
+- Reading the A/B: in the ON arm the "swiglu" row is only the profile callback's event overhead. No kernel runs
+  there.
 - Not measured: the 4090 (spec step 0 share, A/B and the stress test). No pods this round.
