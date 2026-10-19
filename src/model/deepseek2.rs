@@ -41,8 +41,8 @@
 use super::{
     F16, F32, Ffn, Kind, KvCache, KvData, KvElem, Layers, Model, Pool, QuantizedAct, Qwen2,
     SUPPORTED_TYPES, Tensor, Weight, add_assign, add_unbatched, dot_group, find, find_opt,
-    load_vec, meta_num, moe, par_map, pool, r8_arena, repacked_len, rope_head, unbatch, vmath,
-    vsum_rows, with_scores,
+    load_vec, meta_num, moe, par_map, pool, r8_arena, repacked_len, rope_head, unbatch,
+    unsupported_type, vmath, vsum_rows, with_scores,
 };
 use crate::gguf::Val;
 use std::io;
@@ -278,10 +278,7 @@ pub(super) fn check(m: &Model) -> io::Result<Dims> {
         let t = find_opt(m, name).ok_or_else(|| bad(format!("missing tensor {name}")))?;
         let q = t.qtype;
         if !SUPPORTED_TYPES.contains(&q.id) {
-            return Err(bad(format!(
-                "tensor {name}: type {} ({}) is not supported (F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL)",
-                q.name, q.id
-            )));
+            return Err(bad(unsupported_type(m, name, q)));
         }
         let ok = t.dims.len() >= want.len()
             && t.dims[..want.len()]
