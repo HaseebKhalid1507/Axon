@@ -3158,7 +3158,7 @@ fn gpu_swiglu_epilogue_and_gate_up_match_reference() {
                                 Arg::U64(rows as u64),
                                 qact.arg(),
                                 Arg::U64(qst as u64),
-                                Arg::I32(1),
+                                Arg::I32(rows.is_multiple_of(256) as i32),
                                 if quant { cnt.arg() } else { Arg::Ptr(0) },
                             ],
                         )
@@ -3210,6 +3210,110 @@ fn gpu_swiglu_epilogue_and_gate_up_match_reference() {
             }
         }
         eprintln!("Q4_K {cols} x {rows}: mode 2 and the fused gate+up == gemv_ref");
+    }
+}
+
+/// gemm2s_q4_k_gu's own quantize (`gu_quant`) at a pass-sized grid, where
+/// blocks finish out of order over many waves (4096 rows x ~1050 tokens:
+/// 128 x 17 blocks): 20 launches at varying nb against quantize_b of the
+/// same launch's output, byte for byte, the counters zero after each, and
+/// the output the same bits every launch. GPU against GPU (no gemv_ref).
+#[test]
+fn gpu_gu_quant_matches_quantize_b_many_waves() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    if !km.mma() {
+        return;
+    }
+    let (cols, rows, nb_max) = (1024usize, 4096usize, 1100usize);
+    let mut rng = Rng(0x5eed_6a7e_0077);
+    let wg = g.upload(&synth_matrix(&mut rng, Q4_K, rows, cols)).unwrap();
+    let wu = g.upload(&synth_matrix(&mut rng, Q4_K, rows, cols)).unwrap();
+    let xs: Vec<Vec<f32>> = (0..nb_max)
+        .map(|i| rng.vec(cols, [1.0f32, 1e-2, 4.0][i % 3]))
+        .collect();
+    let act = quantize_batch(&g, &km, &xs, cols);
+    let (st, qst) = (act_stride_t(cols), act_stride_t(rows));
+    let rb = quant::row_bytes(Q4_K, cols) as u64;
+    let out = g.alloc(rows * nb_max * 4).unwrap();
+    let (qact, wq) = (
+        g.alloc(qst * nb_max).unwrap(),
+        g.alloc(qst * nb_max).unwrap(),
+    );
+    let cnt = g.alloc(nb_max.div_ceil(64) * (rows / 256) * 4).unwrap();
+    cnt.zero().unwrap();
+    let f = km.function("gemm2s_q4_k_gu").unwrap();
+    f.set_max_shared(gemm2_smem(Q4_K, 64, 3)).unwrap();
+    let fq = km.function("quantize_b").unwrap();
+    let mut first: Option<Vec<u32>> = None;
+    for i in 0..20 {
+        // 1000..1095: full and partial last tiles, 16 or 17 of them.
+        let nb = 1000 + 5 * i;
+        qact.zero().unwrap();
+        wq.zero().unwrap();
+        // SAFETY: gemm2s_q4_k_gu's and quantize_b's signatures; act holds
+        // nb_max tokens of st bytes, out nb_max x rows floats, qact and wq
+        // nb_max tokens of qst bytes, cnt a u32 per 64 tokens and 256 rows.
+        unsafe {
+            g.launch(
+                &f,
+                (nb.div_ceil(64) as u32, (rows / 32) as u32, 1),
+                (256, 1, 1),
+                gemm2_smem(Q4_K, 64, 3) as u32,
+                &[
+                    wg.arg(),
+                    wu.arg(),
+                    Arg::U64(rb),
+                    Arg::I32(rows as i32),
+                    Arg::I32(cols as i32),
+                    act.arg(),
+                    Arg::U64(st as u64),
+                    Arg::I32(nb as i32),
+                    out.arg(),
+                    Arg::U64(rows as u64),
+                    qact.arg(),
+                    Arg::U64(qst as u64),
+                    Arg::I32(1),
+                    cnt.arg(),
+                ],
+            )
+            .unwrap();
+            g.launch(
+                &fq,
+                ((rows / 256) as u32, nb as u32, 1),
+                (32, 1, 1),
+                0,
+                &[
+                    out.arg(),
+                    Arg::I32(rows as i32),
+                    Arg::I32(1),
+                    wq.arg(),
+                    Arg::U64(qst as u64),
+                ],
+            )
+            .unwrap();
+        }
+        g.sync().unwrap();
+        let (a, b): (Vec<u8>, Vec<u8>) = (qact.read().unwrap(), wq.read().unwrap());
+        let bad = a.iter().zip(&b).position(|(x, y)| x != y);
+        assert!(
+            bad.is_none(),
+            "launch {i} nb {nb}: byte {bad:?} of token {:?}",
+            bad.map(|k| k / qst)
+        );
+        let c: Vec<u32> = cnt.read().unwrap();
+        assert!(
+            c.iter().all(|&x| x == 0),
+            "launch {i} nb {nb}: counters left"
+        );
+        let o: Vec<f32> = out.read().unwrap();
+        let ob = bits(&o[..1000 * rows]);
+        match &first {
+            None => first = Some(ob),
+            Some(w) => assert!(*w == ob, "launch {i} nb {nb}: output bits changed"),
+        }
     }
 }
 

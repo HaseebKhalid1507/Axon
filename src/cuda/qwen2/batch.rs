@@ -612,7 +612,10 @@ pub(super) struct BatchBufs<'g> {
     pub(super) act: DevBuf<'g>,
     /// gemm2s_q4_k_gu's arrival counters (`CudaQwen2::gu_quant`): one u32
     /// per 64-token tile and 256 rows of ffn, zero between launches (empty
-    /// unless ffn % 256 == 0).
+    /// unless ffn % 256 == 0). Assumes one launch using them at a time: the
+    /// scratch's passes run on one stream, and gemm2s_q4_k_gu is launched
+    /// without PDL (no pdl_launch, so no overlap with the next layer's
+    /// launch); two in flight at once would share counts.
     pub(super) gu_cnt: DevBuf<'g>,
     rope: DevBuf<'g>,
     /// gemma3's local layers' table (empty otherwise).
