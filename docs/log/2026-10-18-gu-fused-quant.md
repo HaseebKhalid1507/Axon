@@ -65,16 +65,16 @@ the spec isn't done: there are no pods for this round.
 Review: Shady 8/10 MERGE-AFTER-GATES. SHOULD 1–4 and NITs 1–6 applied in b8c7d8c; SHOULD 5 is the follow-up below.
 The a17b7fd gate jobs were all cancelled before they started and resubmitted at the new head.
 
-Binaries are at a17b7fd. clippy `-D warnings` (bin + tests) and rustfmt: PASS, locally.
+Binaries are at d4c1a0d: b8c7d8c is the review, d4c1a0d types a test index. ptxas sm_89 at the new head: 193 regs, 0 spills. clippy `-D warnings` (bin + tests) and rustfmt: PASS, locally.
 
 | gate | job | status |
 |---|---|---|
-| fast tier, release, `--shard 2` | group 1018-195144-1610 (64fa, 792d) | PENDING |
-| full debug-assertion suite, GPU, `--shard 2` | group 1018-195148-1974 (0cc5, 8766) | PENDING |
-| bella: rel bit suite + 7B/8B `prefill_logits_match_forward_big` + 200× stress (3B) + md5 vs main 2b89410 (6 models × 5 prompts) | 1018-195152-9505 | PENDING |
-| avante: 200× stress (3B) | 1018-195152-495c | PENDING |
-| A/B avante 3B, `--timing avante`, nb 1050 at 0, 7 rounds interleaved | 1018-195159-357b | PENDING |
-| A/B bella 7B, `--timing bella` (waits for night mode), nb 1050 at 0, 7 rounds interleaved | 1018-195159-fc68 | PENDING |
+| fast tier, release, `--shard 2` | group 1018-200538-7dd3 (a723, adaa), including the new `gpu_gu_quant_matches_quantize_b_many_waves` | PENDING |
+| full debug-assertion suite, GPU, `--shard 2` | group 1018-200538-50ea (0c9d, 8d4e) | PENDING |
+| bella: rel bit suite + 7B/8B `prefill_logits_match_forward_big` + 200× stress (3B) + md5 vs main 2b89410 (6 models × 5 prompts) | 1018-200544-43b9 | PENDING |
+| avante: 200× stress (3B) | 1018-200545-ebd6 | PENDING |
+| A/B avante 3B, `--timing avante`, nb 1050 at 0, 7 rounds interleaved | 1018-200545-160f | PENDING |
+| A/B bella 7B, `--timing bella`, nb 1050 at 0, 7 rounds interleaved | 1018-200545-0da0 | PENDING |
 
 A/B method: `cuda_prefill_profile` with `AXON_PROF_GUQ_AB=7`. It uses the same process and the same cache. Each
 round runs off and on in alternating order, each with one warm-up pass, one callback-free pass (GPU events) and
