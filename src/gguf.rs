@@ -874,7 +874,9 @@ pub fn load(path: &str) -> io::Result<Model> {
 
 /// A model's header for `axon info`: a GGUF mapped (`load_with`), a
 /// safetensors checkpoint without converting its tensors (their bytes
-/// can't be read from the result).
+/// can't be read from the result: `tensor_data` panics on one, so `axon
+/// info` must never read a converted tensor's bytes; computed ones, like
+/// `rope_freqs.weight`, are there).
 pub fn load_header(path: &str) -> io::Result<Model> {
     match crate::safetensors::dir_of(path) {
         Some(dir) => crate::safetensors::load(&dir, |_| CopyWish::MapOnly, false),

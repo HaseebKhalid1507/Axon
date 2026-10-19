@@ -150,18 +150,94 @@ fn header_parses_and_checks_every_range() {
     assert!(e.contains("data_offsets"), "{e}");
     let e = err(&one(json!([1, 2]), &[0; 4]));
     assert!(e.contains("not an object"), "{e}");
-    // Overlapping ranges are legal.
-    let j = serde_json::to_vec(&json!({
-        "x": {"dtype": "U8", "shape": [4], "data_offsets": [0, 4]},
-        "y": {"dtype": "U8", "shape": [2], "data_offsets": [1, 3]},
-    }))
-    .unwrap();
+    // The ranges must tile the data exactly (the reference reader's
+    // `Metadata::validate`): overlaps, gaps, a nonzero start and trailing
+    // bytes are all refused.
+    let tiles = |t: Value, data: usize| {
+        let j = serde_json::to_vec(&t).unwrap();
+        parse_header(&raw(j.len() as u64, &j, &vec![0; data])).map(|h| h.tensors.len())
+    };
+    let u8s = |b: u64, e: u64| json!({"dtype": "U8", "shape": [e - b], "data_offsets": [b, e]});
     assert_eq!(
-        parse_header(&raw(j.len() as u64, &j, &[0; 4]))
-            .unwrap()
-            .tensors
-            .len(),
-        2
+        tiles(json!({"x": u8s(0, 4), "y": u8s(4, 6), "z": u8s(6, 6)}), 6).unwrap(),
+        3
+    );
+    assert_eq!(tiles(json!({}), 0).unwrap(), 0);
+    for (what, t, n) in [
+        ("overlap", json!({"x": u8s(0, 4), "y": u8s(1, 3)}), 4),
+        ("same range", json!({"x": u8s(0, 4), "y": u8s(0, 4)}), 4),
+        ("gap", json!({"x": u8s(0, 2), "y": u8s(3, 4)}), 4),
+        ("late start", json!({"x": u8s(1, 4)}), 4),
+        ("trailing", json!({"x": u8s(0, 4)}), 5),
+        ("no tensors, data", json!({}), 1),
+    ] {
+        let e = tiles(t, n).unwrap_err().to_string();
+        assert!(e.contains("tile") || e.contains("cover"), "{what}: {e}");
+    }
+}
+
+/// Review MUST 1 (#102): a small file can't ask for a big arena. Before the
+/// tiling check, N tensors sharing one range each got their own converted
+/// copy: a 1 GB file could ask for N x its size of anonymous memory. Now
+/// such a header is refused before anything is allocated.
+#[test]
+fn shared_ranges_cant_inflate_the_arena() {
+    let n = 5000;
+    let mut h = Map::new();
+    for l in 0..n {
+        h.insert(
+            format!("model.layers.{l}.mlp.up_proj.weight"),
+            json!({"dtype": "BF16", "shape": [64, 64], "data_offsets": [0, 8192]}),
+        );
+    }
+    let j = serde_json::to_vec(&Value::Object(h)).unwrap();
+    let e = parse_header(&raw(j.len() as u64, &j, &[0; 8192]))
+        .err()
+        .unwrap();
+    assert!(e.to_string().contains("without gaps or overlaps"), "{e}");
+    // And through the loader, as a checkpoint.
+    let d = Dir::new("bomb");
+    write_tiny(&d, 1);
+    d.put("model.safetensors", &raw(j.len() as u64, &j, &[0; 8192]));
+    let e = load_dir(&d.0).err().unwrap().to_string();
+    assert!(e.contains("without gaps or overlaps"), "{e}");
+}
+
+/// Review SHOULD 6 (#102): a checkpoint has one cache id however it's named
+/// (its directory or a shard in it), and it covers every file: a changed
+/// tokenizer.json or second shard changes it.
+#[test]
+fn model_id_covers_the_whole_checkpoint() {
+    let d = Dir::new("mid");
+    write_tiny(&d, 2);
+    let id = || crate::kvsave::model_id(&d.0).unwrap();
+    let a = id();
+    let b = crate::kvsave::model_id(&d.0.join("model-00001-of-00002.safetensors")).unwrap();
+    assert_eq!(a, b);
+    let mut t = tiny_tokenizer();
+    t["added_tokens"][2]["content"] = json!("<tool_call2>");
+    d.json("tokenizer.json", &t);
+    let c = id();
+    assert_ne!(a, c);
+    let f = d.0.join("model-00002-of-00002.safetensors");
+    let mut s2 = std::fs::read(&f).unwrap();
+    let last = s2.len() - 1;
+    s2[last] ^= 1;
+    std::fs::write(&f, &s2).unwrap();
+    assert_ne!(c, id());
+}
+
+/// Review SHOULD 5 (#102): the JSON files are capped like the header.
+#[test]
+fn oversized_json_is_refused() {
+    let d = Dir::new("bigjson");
+    write_tiny(&d, 1);
+    let f = std::fs::File::create(d.0.join("tokenizer.json")).unwrap();
+    f.set_len(MAX_JSON + 1).unwrap(); // sparse: no disk
+    let e = load_dir(&d.0).err().unwrap().to_string();
+    assert!(
+        e.contains("over the") && e.contains("tokenizer.json"),
+        "{e}"
     );
 }
 
@@ -626,6 +702,13 @@ fn bad_checkpoints_are_clean_errors() {
         "RoPE scaling type dynamic",
     );
     refused(
+        "linear-nofactor",
+        cfg(|c| {
+            c.insert("rope_scaling".into(), json!({"type": "linear"}));
+        }),
+        "RoPE scaling linear without a factor",
+    );
+    refused(
         "untied",
         cfg(|c| {
             c.insert("tie_word_embeddings".into(), json!(false));
@@ -760,6 +843,8 @@ fn names_map_to_gguf() {
     );
     assert!(gguf_name("model.layers.x.mlp.up_proj.weight").is_none());
     assert!(gguf_name("model.layers.+1.mlp.up_proj.weight").is_none());
+    assert!(gguf_name("model.layers.007.mlp.up_proj.weight").is_none());
+    assert!(gguf_name("model.layers.0.mlp.up_proj.weight").is_some());
     assert!(gguf_name("model.layers.1.mlp.up_proj.bias").is_none());
     assert!(gguf_name("model.vision_tower.weight").is_none());
 }
@@ -1013,6 +1098,13 @@ fn llama32_metadata_tokenizer_and_rope_freqs_match_gguf() {
     };
     let except = ["tokenizer.chat_template", "tokenizer.ggml.add_bos_token"];
     let (a, b) = metadata_parity(&d, &g, &except);
+    // Not compared with that GGUF (it lacks the key), but pinned: the
+    // converter's SpecialVocab sets it from the TemplateProcessing BOS.
+    let add_bos = a
+        .metadata
+        .iter()
+        .find(|x| x.0 == "tokenizer.ggml.add_bos_token");
+    assert!(matches!(add_bos, Some((_, Val::Bool(true)))), "{add_bos:?}");
     tokenizer_parity(&a, &b);
     let (_, meta) = checkpoint_metadata(&d).unwrap();
     let f = meta.rope_freqs.unwrap();
@@ -1027,9 +1119,28 @@ fn llama32_metadata_tokenizer_and_rope_freqs_match_gguf() {
     assert_eq!(f.iter().map(|x| x.to_bits()).collect::<Vec<_>>(), want);
 }
 
-/// Gate 1's premise on the real model: every tensor of the Qwen2.5-0.5B
-/// checkpoint, converted, is byte for byte the converter's GGUF F16 tensor
-/// of the same name (dims, type, bytes), and there are no others.
+/// Every tensor of checkpoint `d`, converted, is byte for byte the
+/// converter's GGUF F16 tensor of the same name (dims, type, bytes) as Axon
+/// loads it, and there are no others. For llama that's after Axon undoes
+/// the converter's q/k row permutation on the GGUF: the checkpoint's rows
+/// are taken as they are.
+fn tensors_match(d: &Path, g: &Path) {
+    let m = load_dir(d).unwrap();
+    let g = gguf::load_with(g.to_str().unwrap(), Some(false)).unwrap();
+    assert_eq!(m.tensors.len(), g.tensors.len());
+    for t in &g.tensors {
+        let s =
+            (m.tensors.iter().find(|x| x.name == t.name)).unwrap_or_else(|| panic!("{}", t.name));
+        assert_eq!((&s.dims, s.qtype.id), (&t.dims, t.qtype.id), "{}", t.name);
+        assert!(
+            m.tensor_data(s) == g.tensor_data(t),
+            "{}: bytes differ",
+            t.name
+        );
+    }
+}
+
+/// Gate 1's premise on Qwen2.5-0.5B-Instruct.
 #[test]
 fn qwen25_tensors_match_gguf_f16() {
     let (Some(d), Some(g)) = (
@@ -1038,22 +1149,21 @@ fn qwen25_tensors_match_gguf_f16() {
     ) else {
         return;
     };
-    let m = load_dir(&d).unwrap();
-    let g = gguf::load_with(g.to_str().unwrap(), Some(false)).unwrap();
-    assert_eq!(m.tensors.len(), g.tensors.len());
-    for t in &g.tensors {
-        let s = m
-            .tensors
-            .iter()
-            .find(|x| x.name == t.name)
-            .unwrap_or_else(|| panic!("{}", t.name));
-        assert_eq!((&s.dims, s.qtype.id), (&t.dims, t.qtype.id), "{}", t.name);
-        assert!(
-            m.tensor_data(s) == g.tensor_data(t),
-            "{}: bytes differ",
-            t.name
-        );
-    }
+    tensors_match(&d, &g);
+}
+
+/// The same on Llama-3.2-1B-Instruct's weights (review #102 SHOULD 4):
+/// attn_q / attn_k included, so taking a checkpoint's rows unpermuted is
+/// right; rope_freqs.weight computed == the converter's.
+#[test]
+fn llama32_tensors_match_gguf_f16() {
+    let (Some(d), Some(g)) = (
+        opt("hf/Llama-3.2-1B-Instruct"),
+        opt("Llama-3.2-1B-Instruct-F16.gguf"),
+    ) else {
+        return;
+    };
+    tensors_match(&d, &g);
 }
 
 /// Gate 3: `check_supported` refuses a checkpoint exactly as it refuses

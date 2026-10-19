@@ -168,8 +168,12 @@ pub struct Header {
 /// Every check is made before anything is sized from the file's numbers:
 /// the header fits (and is at most 100 MB), it's a JSON object of
 /// `{dtype, shape, data_offsets}` objects, each range lies inside the data
-/// and holds exactly shape x dtype bytes. Overlapping ranges are legal and
-/// accepted (nothing here writes through them).
+/// and holds exactly shape x dtype bytes, and the ranges tile the data
+/// exactly: sorted, each begins where the one before ends, from 0 to the end
+/// of the file, as the reference reader (the `safetensors` crate's
+/// `Metadata::validate`, which HF's Python package is) requires. So no file
+/// can describe more tensor bytes than it holds, and the converted arena is
+/// at most twice the shards (no overlapping ranges counted N times).
 pub fn parse_header(buf: &[u8]) -> io::Result<Header> {
     let Some(len) = buf.get(..8) else {
         return Err(bad(format!(
@@ -267,7 +271,27 @@ pub fn parse_header(buf: &[u8]) -> io::Result<Header> {
             end: data_start + end,
         });
     }
-    tensors.sort_by(|a, b| (a.begin, &a.name).cmp(&(b.begin, &b.name)));
+    tensors.sort_by(|a, b| (a.begin, a.end, &a.name).cmp(&(b.begin, b.end, &b.name)));
+    let mut at = data_start;
+    for t in &tensors {
+        if t.begin != at {
+            return Err(bad(format!(
+                "safetensors tensor {}: data_offsets begin at {} where the previous tensor \
+                 ends at {} (tensors must tile the data without gaps or overlaps)",
+                t.name,
+                t.begin - data_start,
+                at - data_start
+            )));
+        }
+        at = t.end;
+    }
+    if at != buf.len() as u64 {
+        return Err(bad(format!(
+            "safetensors tensors cover {} of the {data_len} data bytes; the file is \
+             truncated, padded or corrupt",
+            at - data_start
+        )));
+    }
     Ok(Header { tensors, metadata })
 }
 
@@ -287,9 +311,25 @@ pub fn dir_of(path: &str) -> Option<PathBuf> {
     None
 }
 
+/// The largest config / tokenizer / index / chat template file read (the
+/// biggest real tokenizer.json files are ~30 MB).
+const MAX_JSON: u64 = 256 << 20;
+
+/// `path` read whole, refused over `MAX_JSON` bytes.
+fn read_capped(path: &Path) -> io::Result<Vec<u8>> {
+    let ctx = |e: io::Error| io::Error::new(e.kind(), format!("{}: {e}", path.display()));
+    let n = std::fs::metadata(path).map_err(ctx)?.len();
+    if n > MAX_JSON {
+        return Err(bad(format!(
+            "{}: {n} bytes is over the {MAX_JSON}-byte limit",
+            path.display()
+        )));
+    }
+    std::fs::read(path).map_err(ctx)
+}
+
 fn read_json(path: &Path) -> io::Result<Value> {
-    let b = std::fs::read(path)
-        .map_err(|e| io::Error::new(e.kind(), format!("{}: {e}", path.display())))?;
+    let b = read_capped(path)?;
     serde_json::from_slice(&b).map_err(|e| bad(format!("{}: not valid JSON: {e}", path.display())))
 }
 
@@ -573,6 +613,9 @@ pub fn metadata(cfg: &Value, name: &str) -> Result<Meta, String> {
         (Some("llama3"), _) => {
             let dim = rope_dim.ok_or("RoPE scaling llama3 without a head size")?;
             freqs = Some(llama3_rope_factors(&rp, dim as usize)?);
+        }
+        (Some(t @ ("linear" | "yarn")), None) => {
+            return Err(format!("RoPE scaling {t} without a factor"));
         }
         (Some(t), _) => {
             return Err(format!("RoPE scaling type {t} is not supported"));
@@ -1002,7 +1045,8 @@ pub fn gguf_name(hf: &str) -> Option<String> {
     }
     let rest = hf.strip_prefix("model.layers.")?;
     let (n, rest) = rest.split_once('.')?;
-    let n: u32 = n.parse().ok().filter(|_| !n.starts_with('+'))?;
+    // Canonical decimal only: "007" and "+7" would alias layer 7.
+    let n: u32 = n.parse().ok().filter(|v: &u32| v.to_string() == n)?;
     if rest.ends_with("rotary_emb.inv_freq") {
         return Some(String::new());
     }
@@ -1044,9 +1088,13 @@ fn target(gguf: &str, t: &StTensor) -> Option<u32> {
 /// BF16 -> F16 for every BF16 bit pattern, as the converter makes it:
 /// torch's bf16 -> f32 (exact), then numpy's f32 -> f16 (`astype`): round
 /// to nearest even, overflow to infinity (`quant::f32_to_f16`), except
-/// that a NaN keeps its top ten payload bits unquieted (numpy's
-/// `npy_floatbits_to_halfbits`; a BF16 NaN always has one of them set).
-/// Checked against numpy for all 65536 patterns (`bf16_table_matches_numpy`).
+/// that a NaN keeps its top ten payload bits unquieted, as numpy's
+/// portable software path does (`npy_floatbits_to_halfbits`; a BF16 NaN
+/// always has one of them set). A numpy built to use F16C (`_mm_cvtps_ph`)
+/// or aarch64's `__fp16` quiets signalling NaNs instead (0x7e08, not
+/// 0x7c08): NaN payloads are platform-dependent on the converter's side;
+/// every non-NaN value is the same everywhere. Checked against numpy (x86-64,
+/// software path) for all 65536 patterns (`bf16_table_matches_numpy`).
 fn bf16_to_f16(h: u16) -> u16 {
     if h & 0x7f80 == 0x7f80 && h & 0x7f != 0 {
         return (h & 0x8000) | 0x7c00 | ((h & 0x7f) << 3);
@@ -1194,9 +1242,14 @@ pub fn checkpoint_metadata(dir: &Path) -> io::Result<(Value, Meta)> {
     let tf = TokFiles {
         tokenizer: read_json(&dir.join("tokenizer.json"))?,
         config: read_json_opt(&dir.join("tokenizer_config.json"))?,
-        chat_template: match std::fs::read_to_string(dir.join("chat_template.jinja")) {
-            Ok(s) => Some(Value::String(s)),
-            Err(_) => read_json_opt(&dir.join("chat_template.json"))?
+        chat_template: match dir.join("chat_template.jinja") {
+            j if j.is_file() => {
+                let b = read_capped(&j)?;
+                let s =
+                    String::from_utf8(b).map_err(|_| bad(format!("{}: not UTF-8", j.display())))?;
+                Some(Value::String(s))
+            }
+            _ => read_json_opt(&dir.join("chat_template.json"))?
                 .and_then(|v| v.get("chat_template").cloned()),
         },
     };
@@ -1283,7 +1336,8 @@ pub fn load(
                     (q, si as u16, t.begin, t.end - t.begin)
                 }
                 Some(q) => {
-                    let n_bytes = n_elements * bytes_per_q(q) as u64;
+                    let n_bytes = (n_elements.checked_mul(bytes_per_q(q) as u64))
+                        .ok_or_else(|| bad(format!("tensor {}: size overflows", t.name)))?;
                     let dst = aux_len;
                     aux_len = (aux_len + n_bytes as usize).next_multiple_of(64);
                     jobs.push(Job {
@@ -1374,7 +1428,9 @@ pub fn load(
             let _ = aux.advise(memmap2::Advice::HugePage);
         }
         put_freqs(&mut aux);
+        // Job `file` i is shard i: shard 0 is `m.file`, the rest `m.shards`.
         let files: Vec<&File> = m.shard_files();
+        debug_assert_eq!(files.len(), shard_list.len());
         run_jobs(&files, &jobs, &mut aux)?;
         drop(files);
         m.set_aux(aux.make_read_only()?);

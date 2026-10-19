@@ -75,11 +75,13 @@ Works today, honestly scoped:
 - Model files: GGUF, or a Hugging Face checkpoint directory (`config.json`, `tokenizer.json`,
   `tokenizer_config.json`, and `model.safetensors` or the shards of `model.safetensors.index.json`)
   of a `qwen2`, `qwen3` or `llama` model with BF16, F16 or F32 weights, wherever a `.gguf` path is
-  taken (`axon info <dir>` lists each tensor's Hugging Face name, GGUF name and type). It loads as
-  the F16 GGUF `convert_hf_to_gguf.py --outtype f16` makes of the same weights: BF16 matrices
-  converted to F16 and vectors to F32 at load (numpy's rounding, checked for all 65536 values), the
-  same metadata and tokenizer, and the same logits and greedy output bit for bit (checked on
-  Qwen2.5-0.5B-Instruct, [log](docs/log/2026-10-19-safetensors-loader.md)). CPU only for now
+  taken (`axon info <dir>` lists each tensor's Hugging Face name, GGUF name and type). A BF16 or F16
+  checkpoint loads as the F16 GGUF `convert_hf_to_gguf.py --outtype f16` makes of the same weights:
+  BF16 matrices converted to F16 and vectors to F32 at load (numpy's rounding, checked for all 65536
+  values), the same metadata and tokenizer, and the same logits and greedy output bit for bit
+  (checked on Qwen2.5-0.5B-Instruct and Llama-3.2-1B-Instruct,
+  [log](docs/log/2026-10-19-safetensors-loader.md)). F32 matrices stay F32 (lossless, where
+  `--outtype f16` would round them). CPU only for now
   (the GPU has no F16 matrix kernels); FP8 / NVFP4 checkpoints, MoE and the other architectures
   are refused with a message, to come with the FP8 stages (roadmap). The pre-tokenizer must be one
   Axon knows (Qwen2's or Llama 3's regex: recognized, never executed); SentencePiece-style

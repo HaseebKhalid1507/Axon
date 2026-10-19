@@ -685,6 +685,14 @@ def st_mutants(b):
     s0, s1 = H[small]["data_offsets"]
     hdr("st-overlap", set_t(small, data_offsets=[e0, e0 + (s1 - s0)]))
     hdr("st-overlap-same", set_t(big, data_offsets=[H[names[0]]["data_offsets"][0], H[names[0]]["data_offsets"][0] + (e1 - e0)]))
+    # Review #102 MUST 1: many tensors sharing one range (each would get its own converted copy) and
+    # trailing bytes. All refused by the tiling check before any allocation.
+    def bomb(h):
+        for l in range(20000):
+            h[f"model.layers.{l}.mlp.up_proj.weight"] = dict(H[big])
+    hdr("st-overlap-bomb", bomb)
+    # (a gap: st-entry-missing drops a tensor from the middle)
+    m("st-trailing", shards={"model.safetensors": lambda p: (b.shard(p), open(p, "ab").write(b"\0" * 16))})
     hdr("st-shape-bigger", set_t(big, shape=[x * 2 for x in H[big]["shape"]]))
     hdr("st-shape-overflow", set_t(big, shape=[1 << 62, 1 << 62]))
     hdr("st-shape-5d", set_t(big, shape=[1, 1, 1] + H[big]["shape"]))
