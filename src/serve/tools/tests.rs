@@ -880,24 +880,37 @@ fn harmony_parser() {
     // A `<|call|>` inside the arguments doesn't end them.
     let args = "{\"s\": \"<|call|> end\"}";
     every_split(h, &hframe(&[("functions.f", args)]), &[call("f", args)]);
-    // No arguments: `{}`; any JSON value goes as written.
-    every_split(h, &hframe(&[("functions.now", " ")]), &[call("now", "{}")]);
-    every_split(h, &hframe(&[("functions.f", " [1] ")]), &[call("f", "[1]")]);
+    // Arguments must be a JSON object: anything else (none, a number, an
+    // array, a string, null) is not a call; its text is content, and no
+    // text is nothing (never `{}`).
+    every_split(h, &hframe(&[("functions.now", " ")]), &[]);
+    every_split(h, &hframe(&[("functions.now", "{}")]), &[call("now", "{}")]);
+    for v in ["42", " [1] ", "\"x\"", "null", "true"] {
+        every_split(h, &hframe(&[("functions.f", v)]), &[text(v)]);
+    }
     // Malformed arguments: the model's arguments text, never axon's framing.
     every_split(
         h,
         &hframe(&[("functions.get_weather", r#"{"city": "#)]),
         &[text(r#"{"city": "#)],
     );
-    // Cut off: a call if what came parses, else its text.
-    every_split(
-        h,
-        &hframe(&[("open", "functions.f"), ("", "{\"a\": 1}")]),
-        &[call("f", "{\"a\": 1}")],
-    );
-    every_split(
-        h,
-        &hframe(&[("open", "functions.f"), ("", "{\"a\"")]),
-        &[text("{\"a\"")],
-    );
+    // Cut off before the closing marker (the token limit: the cut frame, or
+    // no end frame at all): never a call, even when what came is an object.
+    for args in ["{\"a\": 1}", "{\"a\"", ""] {
+        let want: Vec<Piece> = if args.is_empty() {
+            vec![]
+        } else {
+            vec![text(args)]
+        };
+        let open = hframe(&[("open", "functions.f"), ("", args)]);
+        every_split(h, &open, &want);
+        every_split(h, &format!("{open}{HARMONY_CALL_CUT}"), &want);
+        // ... also after content.
+        let w = [text(&format!("Hi. {args}"))];
+        every_split(
+            h,
+            &format!("{}{open}{HARMONY_CALL_CUT}", hframe(&[("", "Hi. ")])),
+            &w,
+        );
+    }
 }

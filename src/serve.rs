@@ -464,7 +464,16 @@ impl TextOut<'_> {
             return (c, String::new(), false);
         }
         if self.in_call && !now {
-            c.push_str(&self.call_close());
+            let end = if ch.ended() {
+                tools::HARMONY_CALL_END
+            } else {
+                tools::HARMONY_CALL_CUT
+            };
+            c.push_str(&self.call_close(end));
+        }
+        if ch.ended() {
+            // One call per reply: a closed call (or a `<|call|>`) ends it.
+            return (c, String::new(), true);
         }
         c.push_str(&self.call_open(ch));
         match part {
@@ -494,9 +503,9 @@ impl TextOut<'_> {
         }
     }
 
-    fn call_close(&mut self) -> String {
+    fn call_close(&mut self, end: &str) -> String {
         self.in_call = false;
-        tools::harmony_text(&self.utf8.finish()) + tools::HARMONY_CALL_END
+        tools::harmony_text(&self.utf8.finish()) + end
     }
 
     /// The end of the output: what was held back. With tools, a reply that
@@ -511,7 +520,8 @@ impl TextOut<'_> {
         }
         let mut c = self.call_open(&ch);
         if self.in_call {
-            c.push_str(&self.call_close());
+            // The reply ended inside the call (the token limit): cut off.
+            c.push_str(&self.call_close(tools::HARMONY_CALL_CUT));
         }
         let unheaded = ch.take_unheaded();
         self.channels = Some(ch);
@@ -2266,15 +2276,20 @@ fn run_request(
                         parser = r.parser;
                         // Harmony: calls are told apart by channel. With
                         // --think-inline the raw reply is the content.
+                        let mut stop = t.stop().to_vec();
                         if let Some(ch) = r.channels {
                             if sh.think_inline {
                                 parser = None;
                             } else {
+                                // `<|call|>` ends the reply through the
+                                // splitter, which must see it to tell a
+                                // closed call from a cut one.
+                                stop.retain(|&i| Some(i) != ch.call_token());
                                 channels = Some(ch);
                             }
                         }
                         let think = think.filter(|_| !r.no_reasoning);
-                        (r.ids, t.stop().to_vec(), think)
+                        (r.ids, stop, think)
                     }
                     Err(e) => return out.err(c, e, keep),
                 },

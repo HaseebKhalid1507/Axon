@@ -1130,8 +1130,11 @@ pub fn harmony_call_open(to: &str) -> String {
     format!("{ESC}1{}{ESC}2", harmony_text(to))
 }
 
-/// A call's end.
+/// A call's end, at its closing marker (`<|call|>` or `<|end|>`).
 pub const HARMONY_CALL_END: &str = "\u{1}3";
+
+/// A call cut off before its closing marker (the token limit): not a call.
+pub const HARMONY_CALL_CUT: &str = "\u{1}4";
 
 /// gpt-oss's template: tools as TypeScript in the developer message, a call
 /// as `<|start|>assistant to=functions.NAME<|channel|>commentary json
@@ -1245,7 +1248,8 @@ fn harmony(t: &Template, tok: &Tokenizer, r: &ToolReq) -> Result<Rendered, ApiEr
     let channels = match r.choice {
         Choice::None => None,
         _ => {
-            let mut ch = chat::Channels::new(&t.fr).map(chat::Channels::with_tools);
+            let call = chat::special(tok, "<|call|>");
+            let mut ch = chat::Channels::new(&t.fr).map(|c| c.with_tools(call));
             if let Some(ch) = &mut ch {
                 let at = ids.iter().rposition(|&i| i == t.fr.im_start).unwrap_or(0);
                 for &id in &ids[at..] {
@@ -1716,13 +1720,15 @@ impl Parser {
             match c {
                 '0' => self.harmony_part(&ESC.to_string(), out),
                 '1' => {
+                    debug_assert!(!self.inside, "TextOut opens one call at a time");
                     self.inside = true;
                     self.undecided = true;
                     self.hname.clear();
                     self.hargs.clear();
                 }
                 '2' => self.undecided = false,
-                '3' if self.inside => self.harmony_end(out),
+                '3' if self.inside => self.harmony_end(true, out),
+                '4' if self.inside => self.harmony_end(false, out),
                 _ => {}
             }
         }
@@ -1741,24 +1747,25 @@ impl Parser {
         }
     }
 
-    /// A call's end: a call if its arguments are JSON (none: `{}`), else
-    /// its arguments' text as content (never axon's framing).
-    fn harmony_end(&mut self, out: &mut Vec<Piece>) {
+    /// A call's end. A call iff it was `closed` by its marker and its
+    /// arguments are a JSON object (as OpenAI clients parse them); else its
+    /// arguments' text is content (never axon's framing), and blank
+    /// arguments are nothing (never `{}`).
+    fn harmony_end(&mut self, closed: bool, out: &mut Vec<Piece>) {
         self.inside = false;
         self.undecided = false;
         let name = std::mem::take(&mut self.hname);
         let args = std::mem::take(&mut self.hargs);
         let name = name.strip_prefix("functions.").unwrap_or(&name);
         let a = args.trim();
-        let a = if a.is_empty() { "{}" } else { a };
-        if !name.is_empty() && parse_json(a).is_some() {
+        if closed && !name.is_empty() && matches!(parse_json(a), Some(J::Obj(_))) {
             let c = Call {
                 id: call_id(),
                 name: name.to_string(),
                 args: a.to_string(),
             };
             self.call(c, out);
-        } else if !args.is_empty() {
+        } else if !a.is_empty() {
             let ws = std::mem::take(&mut self.ws);
             self.after_call = false;
             out.push(Piece::Text(ws + &args));
@@ -1774,8 +1781,8 @@ impl Parser {
                 self.buf = buf;
                 self.harmony(&mut out);
                 if self.inside {
-                    // Cut off mid-call (the token limit).
-                    self.harmony_end(&mut out);
+                    // No end frame: cut off.
+                    self.harmony_end(false, &mut out);
                 }
                 // A lone escape left at the end can't come from TextOut.
                 let rest = std::mem::take(&mut self.buf);

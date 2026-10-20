@@ -564,6 +564,11 @@ pub struct Channels {
     /// With tools: where the reply's own text starts in `role`, while no
     /// marker has come since the prompt (`primed`): a reply with no header.
     unheaded: Option<usize>,
+    /// With tools: `<|call|>` (not a stop then: the splitter sees it).
+    call_tok: Option<u32>,
+    /// With tools: a call was closed by `<|call|>` or `<|end|>`, or a
+    /// `<|call|>` came: the reply is over (one call per reply).
+    ended: bool,
 }
 
 /// The recipient in a harmony header: what follows `to=` (at the start or
@@ -610,13 +615,30 @@ impl Channels {
             role: None,
             to: None,
             unheaded: None,
+            call_tok: None,
+            ended: false,
         })
     }
 
     /// Tell calls apart (a request that offered tools).
-    pub fn with_tools(mut self) -> Channels {
+    /// `call` is the vocabulary's `<|call|>`.
+    pub fn with_tools(mut self, call: Option<u32>) -> Channels {
         self.tools = true;
+        self.call_tok = call;
         self
+    }
+
+    /// With tools: `<|call|>`, which the splitter must see (so it is not a
+    /// stop token of the request).
+    pub fn call_token(&self) -> Option<u32> {
+        self.call_tok
+    }
+
+    /// With tools: the reply is over: a call was closed by its marker
+    /// (`<|call|>`, or `<|end|>`), or a `<|call|>` came. A call that never
+    /// got here (cut off by the token limit) is not a call.
+    pub fn ended(&self) -> bool {
+        self.ended
     }
 
     /// Calls are told apart (`with_tools`).
@@ -674,10 +696,18 @@ impl Channels {
             };
             return Part::Hidden;
         }
+        if self.tools && Some(id) == self.call_tok {
+            self.to = None;
+            self.name = None;
+            self.ended = true;
+            self.part = Part::Hidden;
+            return Part::Hidden;
+        }
         if id == self.start || id == self.end {
             self.name = None;
             self.part = Part::Hidden;
             if self.tools {
+                self.ended |= id == self.end && self.to.is_some();
                 self.to = None;
                 self.role = (id == self.start).then(Vec::new);
             }
