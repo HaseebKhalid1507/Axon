@@ -1,0 +1,49 @@
+{
+ "label": "gradedref-r2",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1020-014803-a36f",
+   "name": "graded-repack0",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.71.09",
+   "sha": "f8e6b10",
+   "binary": "axon-test-f8e6b10",
+   "started": 1792475283.2817843,
+   "ended": 1792476084.92717,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "97321adf63df735509592c8170a26192a78faa374aeec6006e849c43e08a8c1a",
+   "log_bytes": 33783
+  },
+  {
+   "job": "1020-014803-4317",
+   "name": "graded-default-gemma",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.71.09",
+   "sha": "f8e6b10",
+   "binary": "axon-test-f8e6b10",
+   "started": 1792476084.92717,
+   "ended": 1792476410.0155706,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "746eece3fe82f423eea2f83a9dfad57a50d48c073369b0735a7add15ed5cc052",
+   "log_bytes": 4036
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-20 02:06:50 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}

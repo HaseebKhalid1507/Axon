@@ -1,0 +1,38 @@
+[axon-run 01:48:03] submitted 1020-014803-4317 by /home/haseeb/.cache/axon-gradedref: /home/haseeb/.cache/axon-gradedref/axon-test-f8e6b10 gpu_gemma3_logits_match_cpu gemma3_vs_ref gpu_gemma3 --nocapture
+[axon-run 02:01:24] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 02:01:25] scope axon-job-1020-014803-4317-1792476084.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 16295 MB): an OOM here kills only this job
+[axon-run 02:01:25] job 1020-014803-4317 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1020-014803-4317-1792476084 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-gradedref/axon-test-f8e6b10 gpu_gemma3_logits_match_cpu gemma3_vs_ref gpu_gemma3 --nocapture --test-threads 6
+axon-q 02:01:25 start slot 16-23: /home/haseeb/.cache/axon-gradedref/axon-test-f8e6b10 gpu_gemma3_logits_match_cpu gemma3_vs_ref gpu_gemma3 --nocapture --test-threads 6
+
+running 3 tests
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+gemma3 1B Q8_0 gpu vs cpu: top-1 195/198 (98.5%), KL mean 1.44e-2 max 6.57e-1 (> 0.5: [(118, 0.6565402569536266, 0.53206253, 0.03432622090854642), (119, 0.5446406097129608, 0.9006405, 0.6565402569536266)]), max |dlogit| 3.886, flip margins [0.22239208, 0.53206253, 0.014857292]
+gemma3 1B Q8_0 cpu rows vs cpu: top-1 196/198 (99.0%), KL mean 1.06e-2 max 4.71e-1 (> 0.5: []), max |dlogit| 7.317, flip margins [1.6057701, 0.53206253]
+gemma3 1B Q8_0 continuations: gpu 3/6 identical, 119 tokens, margins [0.22239208, 0.53206253, 0.014857292]; cpu rows 5, 160, margins [1.6057701] (tie 1.6057701)
+test cuda::qwen2::tests::gpu_gemma3_logits_match_cpu has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_gemma3_matches_reference_forward has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_gemma3_prefill_and_verify_bits has been running for over 60 seconds
+gemma3 1B Q4_K_M vs f64 ref: gpu mean KL 0.0201 max 0.8627 top-1 191/198; cpu 0.0151 0.5327 191; cpu rows 0.0124 0.4730 192
+gemma3 1B long gpu vs cpu: top-1 18/18 (100.0%), KL mean 2.00e-5 max 1.53e-4 (> 0.5: []), max |dlogit| 0.819, flip margins []
+gemma3 1B long cpu rows vs cpu: top-1 18/18 (100.0%), KL mean 1.75e-5 max 1.57e-4 (> 0.5: []), max |dlogit| 0.824, flip margins []
+test cuda::qwen2::tests::gpu_gemma3_logits_match_cpu ... ok
+gemma3 gpu window None graphs true vs reference: max |dlogit| 0.6151
+gemma3 gpu window None graphs false vs reference: max |dlogit| 0.6151
+gemma3 gpu window Some(6) graphs true vs reference: max |dlogit| 0.4717
+gemma3 gpu window Some(6) graphs false vs reference: max |dlogit| 0.4717
+test cuda::qwen2::tests::gpu_gemma3_matches_reference_forward ... ok
+gemma3 1B F16: prefill bit-identical over 7 batchings + 4 prefill_logits of 1200 tokens, 1 attention paths x 2 split counts
+gemma3 1B F16: 48 verify passes == per-token picks (logit bits up to 64)
+gemma3 1B Q4_K_M: with and without the Q6_K prefill copy
+gemma3 1B Q4_K_M: with and without the Q6_K prefill copy
+gemma3 1B Q4_K_M F16: prefill bit-identical over 7 batchings + 4 prefill_logits of 1200 tokens, 1 attention paths x 2 split counts
+gemma3 1B Q4_K_M F16: 48 verify passes == per-token picks (logit bits up to 64)
+gemma3 4B: with and without the Q6_K prefill copy
+gemma3 4B: with and without the Q6_K prefill copy
+gemma3 4B F16: prefill bit-identical over 7 batchings + 4 prefill_logits of 1200 tokens, 1 attention paths x 2 split counts
+gemma3 4B F16: 48 verify passes == per-token picks (logit bits up to 64)
+test cuda::qwen2::tests::gpu_gemma3_prefill_and_verify_bits ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 675 filtered out; finished in 321.97s
+
+[axon-run 02:06:47] exit 0 after 322.1s (host bella)
