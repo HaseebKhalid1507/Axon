@@ -79,24 +79,25 @@ moe_logits(const float* __restrict__ x, const float* __restrict__ g, float eps, 
 
 // The router after moe_logits, one token per block (MOE_THREADS threads;
 // grid = tokens): its n_e logits to the k experts in rank order and their
-// weights. The gate makes the probabilities p:
+// weights. The gate makes p from the logits:
 //   MOE_GATE_SOFTMAX (qwen3moe, deepseek2): softmax (max and sum by fixed
 //     trees, expf);
 //   MOE_GATE_SIGMOID (deepseek2): 1 / (1 + exp(-x));
-//   MOE_GATE_OAI (gpt-oss): the logits + bias themselves (the bias is the
-//     router's, required).
-// Selection by sel = p + bias (bias null, or OAI: p; deepseek2's
-// exp_probs_b: selection only), k rounds of tree argmax over the untaken
-// non-NaN scores (softmax/sigmoid: finite or +inf), ties to the lower
-// index; w_i = p[id_i]. Then OAI: the softmax over those k (max = the
-// first, e_i = exp(w_i - max), s = ((e_0 + e_1) + ..) + e_{k-1}, w_i = e_i *
+//   MOE_GATE_OAI (gpt-oss): the logits themselves.
+// Selection by sel = p + bias (bias null: p; deepseek2's exp_probs_b:
+// selection only; gpt-oss: the router's bias, required), k rounds of tree
+// argmax over the untaken non-NaN scores (softmax/sigmoid: finite or +inf;
+// OAI: -inf too), ties to the lower index; w_i = p[id_i] (OAI: sel[id_i],
+// the biased logit). Then OAI: the softmax over those k (max = the first,
+// e_i = exp(w_i - max), s = ((e_0 + e_1) + ..) + e_{k-1}, w_i = e_i *
 // (1 / s)); norm: s = max(((w_0 + w_1) + ..) + w_{k-1}, 6.103515625e-5),
 // w_i /= s (llama.cpp CPU); then times scale if not 1. qwen3moe: SOFTMAX,
 // no bias, norm, scale 1; gpt-oss: OAI, no norm, scale 1.
 // No eligible score left (a NaN router): expert 0, __trap() under
-// MOE_DEBUG (debug builds). (gpt-oss's CPU twin, Moe::route_oai, picks the
-// first untaken expert instead: NaN routers differ, by design nothing to
-// match.) Dynamic shared memory: 2 n_e floats.
+// MOE_DEBUG (debug builds; an unknown gate traps there too). (gpt-oss's
+// CPU twin, Moe::route_oai, picks the first untaken expert instead: NaN
+// routers differ, by design nothing to match.) Dynamic shared memory:
+// 2 n_e floats.
 #define MOE_GATE_SOFTMAX 0
 #define MOE_GATE_SIGMOID 1
 #define MOE_GATE_OAI 2
@@ -112,6 +113,9 @@ moe_router(const float* __restrict__ logits, int n_e, int k, int gate,
     const float ninf = __int_as_float(0xff800000), nan = __int_as_float(0x7fc00000);
     int t = threadIdx.x;
     size_t tok = blockIdx.x;
+#ifdef MOE_DEBUG
+    if (gate < MOE_GATE_SOFTMAX || gate > MOE_GATE_OAI) __trap();
+#endif
     for (int e = t; e < n_e; e += MOE_THREADS) p[e] = logits[tok * n_e + e];
     __syncthreads();
     if (gate == MOE_GATE_SIGMOID) {
@@ -142,10 +146,7 @@ moe_router(const float* __restrict__ logits, int n_e, int k, int gate,
     __syncthreads();
     for (int e = t; e < n_e; e += MOE_THREADS) {
         float s = bias ? __fadd_rn(p[e], bias[e]) : p[e];
-        if (gate == MOE_GATE_OAI)
-            p[e] = s;
-        else if (s == ninf)
-            s = nan;  // -inf: never selected
+        if (gate != MOE_GATE_OAI && s == ninf) s = nan;  // -inf: never selected
         sel[e] = s;
     }
     __syncthreads();
@@ -174,7 +175,8 @@ moe_router(const float* __restrict__ logits, int n_e, int k, int gate,
 #endif
             int e = rid[0] == 0x7fffffff ? 0 : rid[0];
             ids[tok * k + r] = e;
-            // OAI: the score (-inf if none left), else p (expert 0's).
+            // OAI: the selected score (-inf if none left), else p
+            // (expert 0's).
             w[tok * k + r] = gate == MOE_GATE_OAI ? red[0] : p[e];
             sel[e] = nan;
         }

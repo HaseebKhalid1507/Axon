@@ -3,6 +3,7 @@
 //! GPU-attention backend graded against the CPU-only one.
 
 use super::*;
+use crate::cuda::qwen2::moe::{GATE_SOFTMAX, launch_router};
 use crate::cuda::qwen2::tests::{Agree, PROMPTS, assert_graded, compare, report};
 use crate::cuda::{Arg, Kernels};
 
@@ -62,22 +63,16 @@ fn route_gpu(
             ],
         )
         .unwrap();
-        g.launch(
+        launch_router(
+            g,
             &ft,
-            (nb as u32, 1, 1),
-            (128, 1, 1),
-            (2 * n_e * 4) as u32,
-            &[
-                lg.arg(),
-                Arg::I32(n_e as i32),
-                Arg::I32(k as i32),
-                Arg::I32(0), // softmax
-                Arg::Ptr(0),
-                Arg::I32(1),
-                Arg::F32(1.0),
-                ids.arg(),
-                w.arg(),
-            ],
+            lg.arg(),
+            (n_e, k, nb),
+            GATE_SOFTMAX,
+            Arg::Ptr(0),
+            true,
+            1.0,
+            (ids.arg(), w.arg()),
         )
         .unwrap();
     }

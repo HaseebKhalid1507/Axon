@@ -271,3 +271,6 @@ pub(crate) mod tests;
 
 #[cfg(test)]
 mod oss_tests;
+
+#[cfg(test)]
+mod router_legacy_tests;

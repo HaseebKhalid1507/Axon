@@ -8,9 +8,9 @@
 
 use super::tests::moe_net;
 use super::*;
+use crate::cuda::Kernels;
 use crate::cuda::qwen2::tests::{Agree, PROMPTS, assert_graded_floor, compare, report};
 use crate::cuda::qwen2::{CacheKv, Head};
-use crate::cuda::{Arg, Kernels};
 use crate::gguf::Val;
 use crate::model::gptoss_tests::{OssDims, Ts, oss_fixture_dims};
 
@@ -388,22 +388,16 @@ fn oss_topk_batch_invariant_and_ties() {
         let (ids, w) = (g.alloc(nb * k * 4).unwrap(), g.alloc(nb * k * 4).unwrap());
         // SAFETY: moe_router's signature; buffers sized for nb tokens.
         unsafe {
-            g.launch(
+            crate::cuda::qwen2::moe::launch_router(
+                &g,
                 &f,
-                (nb as u32, 1, 1),
-                (128, 1, 1),
-                (2 * n_e * 4) as u32,
-                &[
-                    ld.arg(),
-                    Arg::I32(n_e as i32),
-                    Arg::I32(k as i32),
-                    Arg::I32(2), // OAI
-                    bd.arg(),
-                    Arg::I32(0),
-                    Arg::F32(1.0),
-                    ids.arg(),
-                    w.arg(),
-                ],
+                ld.arg(),
+                (n_e, k, nb),
+                crate::cuda::qwen2::moe::GATE_OAI,
+                bd.arg(),
+                false,
+                1.0,
+                (ids.arg(), w.arg()),
             )
             .unwrap();
         }

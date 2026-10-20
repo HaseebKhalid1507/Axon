@@ -277,24 +277,22 @@ fn mla_router_matches_cpu_rule() {
         let bd = g.upload(&bias).unwrap();
         let ids = g.alloc(nb * k * 4).unwrap();
         let w = g.alloc(nb * k * 4).unwrap();
-        // SAFETY: moe_router's signature (gate 1: sigmoid, 0: softmax); buffers sized for nb tokens.
+        // SAFETY: buffers sized for nb tokens, the bias n_e floats.
         unsafe {
-            g.launch(
+            super::super::moe::launch_router(
+                &g,
                 &f,
-                (nb as u32, 1, 1),
-                (128, 1, 1),
-                (2 * n_e * 4) as u32,
-                &[
-                    lgd.arg(),
-                    Arg::I32(n_e as i32),
-                    Arg::I32(k as i32),
-                    Arg::I32(sigm),
-                    if use_bias { bd.arg() } else { Arg::Ptr(0) },
-                    Arg::I32(norm),
-                    Arg::F32(scale),
-                    ids.arg(),
-                    w.arg(),
-                ],
+                lgd.arg(),
+                (n_e, k, nb),
+                if sigm == 1 {
+                    GATE_SIGMOID
+                } else {
+                    GATE_SOFTMAX
+                },
+                if use_bias { bd.arg() } else { Arg::Ptr(0) },
+                norm == 1,
+                scale,
+                (ids.arg(), w.arg()),
             )
             .unwrap();
         }

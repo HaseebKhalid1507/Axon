@@ -55,7 +55,8 @@ pub(crate) enum MoeKind<'m> {
 
 impl<'m> MoeKind<'m> {
     /// `m`'s kind: `router` is `Kernels::moe_module_for(m)`, `dense` the
-    /// model's module.
+    /// model's module. An arch without a kind is an Err (a new MoE family
+    /// gets its rule here, not qwen3moe's by default).
     pub(crate) fn new(
         m: &crate::gguf::Model,
         router: &'m Module<'m>,
@@ -64,7 +65,8 @@ impl<'m> MoeKind<'m> {
         Ok(match m.arch.as_str() {
             "deepseek2" => MoeKind::Mla(Box::new(super::mla::MlaFns::new(router, dense)?)),
             "gpt-oss" => MoeKind::Oai(MoeFns::new(router)?),
-            _ => MoeKind::Qwen3(MoeFns::new(router)?),
+            "qwen3moe" => MoeKind::Qwen3(MoeFns::new(router)?),
+            a => return Err(format!("{a}: no MoE router kind on the GPU")),
         })
     }
 
@@ -78,9 +80,9 @@ impl<'m> MoeKind<'m> {
 }
 
 /// moe.cu `moe_router`'s gates.
-pub(super) const GATE_SOFTMAX: i32 = 0;
-pub(super) const GATE_SIGMOID: i32 = 1;
-pub(super) const GATE_OAI: i32 = 2;
+pub(crate) const GATE_SOFTMAX: i32 = 0;
+pub(crate) const GATE_SIGMOID: i32 = 1;
+pub(crate) const GATE_OAI: i32 = 2;
 
 /// Enqueue moe.cu `moe_router` over nb tokens' logits `lg` ([nb][n_e])
 /// into ids and w ([nb][k] each): `gate`, the selection `bias` (n_e
@@ -89,7 +91,7 @@ pub(super) const GATE_OAI: i32 = 2;
 /// # Safety
 /// The buffers hold what they are said to.
 #[allow(clippy::too_many_arguments)]
-pub(super) unsafe fn launch_router(
+pub(crate) unsafe fn launch_router(
     g: &Gpu,
     f: &Func,
     lg: Arg,
@@ -275,6 +277,9 @@ impl<'g> CudaQwen2<'g> {
         assert!(nb <= mb.max);
         let (h, ids, w) = self.route_args(mb, nb);
         let mf = kind.fns();
+        // The kind and the layer's gpt-oss weights agree (both from the
+        // arch): a Qwen3 kind over gpt-oss layers would drop the bias.
+        debug_assert_eq!(l.oss.is_some(), matches!(kind, MoeKind::Oai(_)));
         let (gate, bias, norm) = match kind {
             MoeKind::Oai(_) => {
                 let o = l.oss.expect("a gpt-oss layer");
