@@ -916,3 +916,32 @@ fn harmony_parser() {
         every_split(h, &format!("{}{open}", hframe(&[("", "Hi. ")])), &w);
     }
 }
+
+/// The harmony argument scan closes exactly where the top-level object
+/// does, however the text is split: `}` and `]` inside strings, escaped
+/// quotes and backslashes, nesting, unicode. Not an object: never closes.
+#[test]
+fn arg_scan() {
+    let v = serde_json::json!({
+        "cmd": "echo }\"} \\\" \\\\ ]",
+        "o": {"a": {}, "b": [1, {"c": "]}\"{"}, []]},
+        "u": "é😀}\\\\",
+        "n": null
+    });
+    let s = v.to_string();
+    assert!(matches!(parse_json(&s), Some(J::Obj(_))));
+    let bounds: Vec<usize> = s.char_indices().map(|(i, _)| i).chain([s.len()]).collect();
+    for &a in &bounds {
+        for &b in bounds.iter().filter(|&&b| b >= a) {
+            let mut sc = ArgScan::default();
+            let got = [sc.feed(&s[..a]), sc.feed(&s[a..b]), sc.feed(&s[b..])];
+            let want = [a == s.len(), b == s.len() && a < s.len(), b < s.len()];
+            assert_eq!(got, want, "split at {a}, {b}");
+        }
+    }
+    // Leading blanks, then the object; after it, the parse decides.
+    assert!(ArgScan::default().feed(" \n{\"a\": [1]} x"));
+    for never in ["[1]", "42", "\"{}\"", "null", "{\"a\": \"}", "{\"a\": [}"] {
+        assert!(!ArgScan::default().feed(never), "{never}");
+    }
+}

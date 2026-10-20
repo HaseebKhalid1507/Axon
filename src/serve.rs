@@ -412,6 +412,8 @@ struct TextOut<'t> {
     stop: StopMatcher,
     /// Harmony with tools: the reply's call (`TextOut::harmony`).
     call: CallState,
+    /// Counts dropped calls (`axon_tool_calls_dropped_total`).
+    metrics: Option<Arc<ops::Metrics>>,
 }
 
 /// A harmony reply's call, as `TextOut` reads it.
@@ -419,8 +421,8 @@ struct TextOut<'t> {
 enum CallState {
     #[default]
     None,
-    /// Open: its recipient and its arguments' text so far.
-    Open(String, String),
+    /// Open: its recipient, its arguments' text so far and their scan.
+    Open(String, String, tools::ArgScan),
     /// Made: the reply is over.
     Done,
 }
@@ -478,20 +480,20 @@ impl TextOut<'_> {
         let now = ch.call().is_some();
         if was && now && matches!(self.call, CallState::Open(..)) {
             let t = self.utf8.push(&bytes);
-            let closes = t.contains('}');
-            if let CallState::Open(_, args) = &mut self.call {
-                args.push_str(&t);
-            }
-            if closes && let Some(f) = self.call_made() {
+            if self.call_push(&t)
+                && let Some(f) = self.call_made()
+            {
                 c.push_str(&f);
                 return (c, String::new(), true);
             }
             return (c, String::new(), false);
         }
         let mut r = String::new();
-        if !now && let CallState::Open(_, args) = &mut self.call {
-            args.push_str(&self.utf8.finish());
-            if let Some(f) = self.call_made() {
+        if !now && matches!(self.call, CallState::Open(..)) {
+            let t = self.utf8.finish();
+            if self.call_push(&t)
+                && let Some(f) = self.call_made()
+            {
                 c.push_str(&f);
                 return (c, r, true);
             }
@@ -525,20 +527,34 @@ impl TextOut<'_> {
     fn call_open(&mut self, ch: &chat::Channels) -> String {
         match ch.call() {
             Some(to) if matches!(self.call, CallState::None) => {
-                self.call = CallState::Open(to.to_string(), String::new());
+                self.call = CallState::Open(to.to_string(), String::new(), Default::default());
                 tools::harmony_text(&self.stop.finish())
             }
             _ => String::new(),
         }
     }
 
-    /// The open call's frame, if its arguments are a whole JSON object.
+    /// More of the open call's arguments: whether they may now be whole
+    /// (`ArgScan`: O(1) a byte, so a big argument costs one pass).
+    fn call_push(&mut self, t: &str) -> bool {
+        match &mut self.call {
+            CallState::Open(_, args, scan) => {
+                args.push_str(t);
+                scan.feed(t)
+            }
+            _ => false,
+        }
+    }
+
+    /// The open call's frame, if its arguments are a whole JSON object:
+    /// parsed once, when the scan closes the top-level object.
     fn call_made(&mut self) -> Option<String> {
-        let CallState::Open(to, args) = &self.call else {
+        let CallState::Open(to, args, scan) = &mut self.call else {
             return None;
         };
         let a = args.trim();
         if !matches!(tools::parse_json(a), Some(tools::J::Obj(_))) {
+            scan.kill();
             return None;
         }
         let f = tools::harmony_call_open(to) + &tools::harmony_text(a) + tools::HARMONY_CALL_END;
@@ -546,10 +562,24 @@ impl TextOut<'_> {
         Some(f)
     }
 
-    /// The open call isn't one: its text (reasoning).
+    /// The open call isn't one: its text (reasoning). Counted, and logged
+    /// with AXON_SERVE_DEBUG=1, so that "axon dropped it" can be told from
+    /// "the model didn't call".
     fn call_dropped(&mut self) -> String {
         match std::mem::take(&mut self.call) {
-            CallState::Open(_, args) => args,
+            CallState::Open(to, args, _) => {
+                if let Some(m) = &self.metrics {
+                    m.tool_calls_dropped.fetch_add(1, Ordering::Relaxed);
+                }
+                if debug() {
+                    eprintln!(
+                        "axon serve: a call to {to} dropped: its arguments ({} bytes) are not a \
+                         JSON object; returned as reasoning",
+                        args.len()
+                    );
+                }
+                args
+            }
             other => {
                 self.call = other;
                 String::new()
@@ -569,10 +599,15 @@ impl TextOut<'_> {
         }
         let mut c = self.call_open(&ch);
         let mut r = String::new();
-        if let CallState::Open(_, args) = &mut self.call {
+        if matches!(self.call, CallState::Open(..)) {
             // The reply ended inside the call (the token limit).
-            args.push_str(&self.utf8.finish());
-            match self.call_made() {
+            let t = self.utf8.finish();
+            let made = if self.call_push(&t) {
+                self.call_made()
+            } else {
+                None
+            };
+            match made {
                 Some(f) => c.push_str(&f),
                 None => r = self.call_dropped(),
             }
@@ -647,7 +682,7 @@ fn debug() -> bool {
 }
 
 /// The detokenizer and stop matcher of `job`'s reply.
-fn text_out<'t>(tok: &'t Tokenizer, job: &Job) -> TextOut<'t> {
+fn text_out<'t>(tok: &'t Tokenizer, job: &Job, metrics: &Arc<ops::Metrics>) -> TextOut<'t> {
     TextOut {
         tok,
         utf8: Utf8Stream::default(),
@@ -658,6 +693,7 @@ fn text_out<'t>(tok: &'t Tokenizer, job: &Job) -> TextOut<'t> {
         strip_nl: false,
         stop: StopMatcher::new(job.stops.clone()),
         call: CallState::None,
+        metrics: Some(metrics.clone()),
     }
 }
 
@@ -779,7 +815,7 @@ impl<'a> Engine<'a> {
             Some(d) => crate::draft::Drafter::Model(d),
             None => crate::draft::Drafter::Lookup(PromptLookup::new()),
         };
-        let mut out = text_out(self.tok, job);
+        let mut out = text_out(self.tok, job, &self.metrics);
         let mut ids = Vec::new();
         let generated = &self.generated;
         // A request that fits a slot may hand over to the batch.
@@ -1302,7 +1338,7 @@ fn engine(
             && (!b.idle() || waiting.len() > 1)
         {
             let job = waiting.remove(i).unwrap();
-            let out = text_out(e.tok, &job);
+            let out = text_out(e.tok, &job, &e.metrics);
             let tx = job.tx.clone();
             if let Err(err) = or_exit("an admission", || b.admit(job, out)) {
                 fatal(b, &err, Some(tx));

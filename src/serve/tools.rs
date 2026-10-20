@@ -54,8 +54,10 @@
 //!   (in its role section or its channel header) is a call. `TextOut` hands
 //!   the parser the content escaped and each call framed out of band
 //!   (`harmony_text`), so no text the model writes, the template's call
-//!   syntax included, can become a call. `<|call|>` ends the reply: one call
-//!   per reply. Arguments that aren't JSON come back as their text, content.
+//!   syntax included, can become a call. `TextOut` makes the call as soon as
+//!   its arguments are a whole JSON object (`ArgScan`), which ends the
+//!   reply: one call per reply. A call that ends otherwise is no call, and
+//!   its text is reasoning (never content).
 //!
 //! **Invalid JSON policy.** A block is a call only if it parses as a JSON
 //! object with a string `"name"`. Otherwise the whole block, tags included,
@@ -1129,6 +1131,74 @@ pub fn harmony_text(s: &str) -> String {
 /// The opening of a call to `to`.
 pub fn harmony_call_open(to: &str) -> String {
     format!("{ESC}1{}{ESC}2", harmony_text(to))
+}
+
+/// Where a harmony call's arguments stand as their text arrives: inside a
+/// string (and after a backslash), the nesting depth, whether they began
+/// with `{`. `feed` says when the top-level object has closed; only then is
+/// the text parsed, once, to confirm it (`TextOut::call_made`). O(1) a byte,
+/// so a call writing a big file costs one pass, not a parse per `}`.
+#[derive(Clone, Debug, Default)]
+pub struct ArgScan {
+    depth: u32,
+    in_str: bool,
+    esc: bool,
+    began: bool,
+    /// Not an object (or closed and refused): never parsed again.
+    dead: bool,
+}
+
+impl ArgScan {
+    /// More of the arguments: true if the top-level object closed in it.
+    pub fn feed(&mut self, s: &str) -> bool {
+        let mut closed = false;
+        for b in s.bytes() {
+            if self.dead {
+                return false;
+            }
+            if !self.began {
+                if b.is_ascii_whitespace() || b >= 0x80 {
+                    continue;
+                }
+                if b != b'{' {
+                    self.dead = true;
+                    return false;
+                }
+                self.began = true;
+                self.depth = 1;
+                continue;
+            }
+            if self.depth == 0 {
+                // Past the object (the parse decides on what follows).
+                continue;
+            }
+            if self.in_str {
+                if self.esc {
+                    self.esc = false;
+                } else if b == b'\\' {
+                    self.esc = true;
+                } else if b == b'"' {
+                    self.in_str = false;
+                }
+                continue;
+            }
+            match b {
+                b'"' => self.in_str = true,
+                b'{' | b'[' => self.depth += 1,
+                b'}' | b']' => {
+                    self.depth -= 1;
+                    closed |= self.depth == 0;
+                }
+                _ => {}
+            }
+        }
+        closed
+    }
+
+    /// The parse refused the closed object: stop scanning.
+    pub fn kill(&mut self) {
+        self.dead = true;
+    }
 }
 
 /// A call's end (`TextOut` frames a call once it is made).

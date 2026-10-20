@@ -1049,6 +1049,7 @@ fn text_out_reasoning_and_stops() {
             strip_nl: false,
             stop: super::StopMatcher::new(stops.iter().map(|s| s.to_string()).collect()),
             call: super::CallState::None,
+            metrics: None,
         };
         let (mut c, mut r) = (String::new(), String::new());
         for id in tok.encode_special(text) {
@@ -4326,6 +4327,7 @@ fn harmony_calls_from_channels() {
             strip_nl: false,
             stop: super::StopMatcher::new(stops.iter().map(|s| s.to_string()).collect()),
             call: super::CallState::None,
+            metrics: None,
         };
         let (mut c, mut r, mut stopped) = (Vec::new(), String::new(), None);
         for (i, &id) in ids.iter().enumerate() {
@@ -4406,7 +4408,10 @@ fn harmony_calls_from_channels() {
     }
     // The reply gpt-oss-20b gave for a forced call on "Tell me a joke."
     // (job 1020-093424-74a0, its tokens one by one): an object, then
-    // reasoning text, then a final answer. The object makes the call.
+    // reasoning text, then a final answer. The object makes the call. This
+    // replays the retired history-form prefill (variant A): its wrapped
+    // `{"name": ..., "params": ...}` is not a desired output, only proof
+    // that whatever object comes first ends the call (no schema check).
     let named = r#", "tool_choice": {"type": "function", "function": {"name": "get_weather"}}"#;
     let joke = [
         "{\"", "name", "\":\"", "get", "_weather", "\",\"", "params", "\":{\"", "city", "\":\"",
@@ -4425,6 +4430,37 @@ fn harmony_calls_from_channels() {
             ""
         )
     );
+    // Arguments with `}` and `]` in strings, escaped quotes and
+    // backslashes, nesting and unicode: the call is made at the token that
+    // closes the object, never earlier, however the text is tokenized (as
+    // the tokenizer splits it, or a token per character).
+    let v = json!({"cmd": "echo }\"} \\\" \\\\ ]", "o": {"a": {}, "b": [1, {"c": "]}\"{"}, []]},
+                   "u": "é😀}\\\\"});
+    let args = v.to_string();
+    let per_char: Vec<u32> = args
+        .chars()
+        .flat_map(|ch| tok.encode(&ch.to_string()))
+        .collect();
+    for body in [tok.encode(&args), per_char] {
+        let mut ids = tok.encode_special(head);
+        ids.extend(&body);
+        ids.extend(tok.encode_special("<|call|>"));
+        let (c, r, stopped) = run_ids(render(""), &ids, &[]);
+        assert_eq!(
+            stopped,
+            Some(ids.len() - 2),
+            "made at the object's last token"
+        );
+        assert_eq!(
+            (parse(&c), r.as_str()),
+            (vec![format!("call get_weather {args}")], "")
+        );
+        // One token short: no call, the text is reasoning.
+        let short = &ids[..ids.len() - 2];
+        let (c, r, _) = run_ids(render(""), short, &[]);
+        assert!(parse(&c).is_empty());
+        assert!(args.starts_with(&r) && r.len() < args.len(), "{r}");
+    }
     // Arguments that aren't a whole object when the call ends (its marker,
     // a header, the token limit): no call, and its text is reasoning, never
     // content; what follows goes where its channel says (analysis:
@@ -4446,6 +4482,26 @@ fn harmony_calls_from_channels() {
             assert_eq!(r, format!("{v}{more}"), "{v}{end}");
         }
     }
+    // A dropped call is counted (/metrics: axon_tool_calls_dropped_total).
+    let m = std::sync::Arc::new(super::ops::Metrics::default());
+    let mut out = super::TextOut {
+        tok: &tok,
+        utf8: Utf8Stream::default(),
+        think: None,
+        channels: render(""),
+        reasoning: false,
+        first: true,
+        strip_nl: false,
+        stop: super::StopMatcher::new(Vec::new()),
+        call: super::CallState::None,
+        metrics: Some(m.clone()),
+    };
+    for id in tok.encode_special(&format!("{head}[1]<|end|>")) {
+        out.push(id);
+    }
+    out.finish();
+    assert_eq!(m.tool_calls_dropped.load(Ordering::Relaxed), 1);
+    assert!(m.render(0).contains("axon_tool_calls_dropped_total 1"));
     // ... and the reply goes on after a call that wasn't one, unless it was
     // `<|call|>` (the reply's end).
     let (c, r, stopped) = run(

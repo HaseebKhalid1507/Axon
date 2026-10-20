@@ -69,8 +69,11 @@ runs a Synaps session with working tool calls.
 Functional change, no speed claim. Requests without tools keep their prompt, tokens and output (serve A/B
 above). Tool requests on the Qwen/Llama families are byte-identical to main. MEASURED on bella, e2e
 (Synaps, gpt-oss-20b, cuda + CPU experts): turn 1 prompt 1724 tok in 21.9 s, 55 tok at 30.7 tok/s; turn 2
-1200 of 1265 prompt tokens from the cache, 81 tok at 30.7 tok/s. (Turn 2 is shorter than turn 1, so it was not
-turn 1 with the result appended: see the review round below.)
+1200 of 1265 prompt tokens from the cache, 81 tok at 30.7 tok/s. Turn 2 is shorter than turn 1 because of what
+Synaps sends, not axon. Its request log (1020-094444-6662, a logging proxy in front of the server): turn 1 sent
+system 751 chars, user 1761 chars, 11 tools; turn 2 sent system 751, user **186**, the assistant call, the tool result
+(29 chars), and the same 11 tools. Synaps shrinks the earlier user turn (likely by stripping the ambient context it
+injected), so turn 2 is a different, shorter prompt that shares the first ~1200 tokens.
 
 ## What didn't work / not done
 - Built-in tools (`browser`, `python`) are not offered: the template's `builtin_tools` kwarg has no OpenAI
@@ -178,3 +181,17 @@ Fixes:
   - incomplete arguments then `<|end|>`, a header, `<|call|>` or the limit: no call, the text is reasoning;
   - analysis after a dropped call is reasoning;
   - the joke reply replayed token by token makes one call.
+
+## Review round 3 (shady, 8/10, on 7acbd59) → this commit
+- Docs: README says bad gpt-oss calls go to `reasoning_content`, a call ends at the whole object, and the
+  prefill strings. The PR body's What changed / Design notes are rewritten for the current code.
+- `ArgScan`: the arguments' JSON state (string, escape, depth) is tracked as tokens arrive, O(1) a byte. The text
+  is parsed once, when the top-level object closes, instead of after every `}`, which was quadratic on a big
+  file-writing call, inside the engine loop.
+- Tests:
+  - `arg_scan`: `}`/`]` in strings, `\"` and `\\`, nesting, unicode, at every two-point split;
+  - the same arguments through `TextOut`, tokenized normally and one token per character: the call is made at
+    the closing token, never earlier, and one token short is no call.
+- `axon_tool_calls_dropped_total` in /metrics, and a line on stderr with AXON_SERVE_DEBUG=1, for each dropped call.
+- Gates at 7acbd59: delta 1020-094441-ff27 (gpt-oss 38/0, `serve::` debug 120/0/2, md5 0 of 56 differ, serve A/B
+  17/17 ×5 and 7/7) and Synaps e2e 1020-094444-6662 (bash called, answer from its output), both pass.
