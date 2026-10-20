@@ -8403,7 +8403,7 @@ fn gemma3_vs_ref(m: &Model, name: &str) {
     let km = Kernels::module_for(&g, m).unwrap();
     let gpu = CudaQwen2::new(&g, &km, m, 256).unwrap();
     let rows = Qwen2::new_with(m, false);
-    let cpu = Qwen2::new(m);
+    let cpu = Qwen2::new_with(m, true);
     let [ag, ac, ar] = gemma3_ref_walk(m, &gpu, &cpu, &rows, 32);
     eprintln!(
         "{name} vs f64 ref: gpu mean KL {:.4} max {:.4} top-1 {}/{}; cpu {:.4} {:.4} {}; cpu rows \
@@ -8446,7 +8446,7 @@ fn gpu_gemma3_logits_match_cpu() {
     let km = Kernels::module(&g).unwrap();
     let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
     let rows = Qwen2::new_with(&m, false);
-    let cpu = Qwen2::new(&m);
+    let cpu = Qwen2::new_with(&m, true);
     let gpu = CudaQwen2::new(&g, &km, &m, 1300).unwrap();
     let (mut ag, mut ac) = (Agree::default(), Agree::default());
     for p in [PROMPTS[2], PROMPTS[1]] {
