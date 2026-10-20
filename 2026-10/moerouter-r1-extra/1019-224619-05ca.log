@@ -1,0 +1,15 @@
+[axon-run 22:46:19] submitted 1019-224619-05ca by /home/haseeb/.cache/axon-moerouter: /home/haseeb/.cache/axon-moerouter/axon-base-764792f gen models/Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M.gguf 'Write a short story about a robot who learns to paint. Once upon a time,' -n 256 --device cuda
+[axon-run 23:02:15] job 1019-224619-05ca -> avante: ionice -c3 nice -n 19 /home/haseeb/.local/bin/axon-remote --host avante --vram 3000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-moerouter/base-wt /home/haseeb/.cache/axon-moerouter/axon-base-764792f gen models/Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M.gguf 'Write a short story about a robot who learns to paint. Once upon a time,' -n 256 --device cuda
+axon-remote: job 20261019-230216-axon-base-764792f-3928755 on avante (GPU, 3000 MB)
+[axon-node 23:02:16] GPU lock taken; job wants 3000 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 57
+[axon-node 23:02:16] run axon-base-764792f (6dce4e0ad98e54417567ae70) as /home/haseeb/.cache/axon-moerouter/base-wt on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+moe:         attention + router on the GPU (0.30 GiB, ctx 274), 4 experts x 28 layers on the CPU (top-2), kv f16
+Write a short story about a robot who learns to paint. Once upon a time, there was a robot named Zara who was a bit of a genius in his own right. He was a robot with a lot of knowledge and skills, but he was also very curious and had a deep interest in the world around him. One day, while he was exploring a new area, he stumbled upon a painting that was on a wall. He was captivated by the colors and the details, and he decided to take a deep interest in the art world. He began to learn about the different techniques and the various styles of painting. As he learned more, he became more and more fascinated with the idea of art. He started to explore different techniques, including painting, but he also began to think about the emotional aspect of art. He realized that art is not just about the visual aspect, but also about the emotions and the stories that are told through it. As he continued to learn, he became more and more inspired to create his own art. He decided to start a small studio where he could share his knowledge with others. He was a bit of a dreamer, but he also had a deep sense of responsibility to others. He realized that his art could have a positive impact on the world around him. He began to create his own art, and it
+prompt eval: 17 tok in 0.05s (328.01 tok/s)
+decode:      256 tok, 255 passes in 2.53s (100.87 tok/s)
+identity:    fp_6895d6834bd514bc
+draft:       off
+[axon-node 23:02:19] exit 0 after 3.0s
+[axon-node 23:02:19] peak RSS 874 MB (job process tree PSS, 2 s samples x1)
+[axon-run 23:02:20] exit 0 after 4.7s (host avante)
+[axon-run 23:02:20] FOREIGN_GPU max=?% mean=?% samples=0 (not sampled: ran before the guard, or pmon unavailable)

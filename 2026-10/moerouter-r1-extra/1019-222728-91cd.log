@@ -1,0 +1,25 @@
+[axon-run 22:27:28] submitted 1019-222728-91cd by /home/haseeb/.cache/axon-moerouter: /home/haseeb/.cache/axon-moerouter/axon-legacy-0fac171 router_bits_match_legacy --nocapture
+[axon-run 22:27:28] job 1019-222728-91cd -> jade: ionice -c3 nice -n 19 /home/haseeb/.local/bin/axon-remote --host jade --vram 800 --src /home/haseeb/.cache/axon-wt-moerouter /home/haseeb/.cache/axon-moerouter/axon-legacy-0fac171 router_bits_match_legacy --nocapture
+axon-remote: uploading axon-legacy-0fac171 (f3944535661955c41e4812ea) + source of /home/haseeb/.cache/axon-wt-moerouter
+
+sent 1,681,580 bytes  received 4,321 bytes  259,369.38 bytes/sec
+total size is 6,081,369  speedup is 3.61
+
+sent 6,586,212 bytes  received 35 bytes  306,337.07 bytes/sec
+total size is 21,004,992  speedup is 3.19
+axon-remote: job 20261019-222800-axon-legacy-0fac171-315623 on jade (GPU, 800 MB)
+[axon-node 22:28:00] GPU lock taken; job wants 800 MB; nvidia-smi used/total/temp: 5 MiB, 3072 MiB, 43
+[axon-node 22:28:00] run axon-legacy-0fac171 (f3944535661955c41e4812ea) as /home/haseeb/.cache/axon-wt-moerouter on jade, AXON_THREADS=4 RUST_TEST_THREADS=2
+[axon-node 22:28:00] memory cap (scope MemoryMax) 2867 MB = MemAvailable - 1536 MB; swap off for the job
+[axon-node 22:28:00] MemAvailable 4402 MB, load ['5.58', '2.15', '1.24']; nice -n 19 ionice -c3 taskset -c 0-7
+
+running 1 test
+testutil: GPU has 2.94 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+router_bits_match_legacy: 280 configs, 2809856 slots, 0 differ
+test router_legacy_tests::router_bits_match_legacy ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 677 filtered out; finished in 7.21s
+
+[axon-node 22:28:09] exit 0 after 8.7s; lowest MemAvailable seen 4189 MB
+[axon-node 22:28:09] peak RSS 198 MB (job process tree PSS, 2 s samples x4)
+[axon-run 22:28:09] exit 0 after 41.1s (host jade)

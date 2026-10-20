@@ -1,0 +1,71 @@
+[axon-run 22:22:12] submitted 1019-222212-6a02 by /home/haseeb/.cache/axon-moerouter: /home/haseeb/.cache/axon-moerouter/axon-test-0fac171 moe:: mla:: oss_ gptoss deepseek2 chat::tests::moe --test-threads 1
+[axon-run 22:22:12] job 1019-222212-6a02 -> avante: ionice -c3 nice -n 19 /home/haseeb/.local/bin/axon-remote --host avante --vram 5000 --env AXON_NODE_PACK=1 --src /home/haseeb/.cache/axon-wt-moerouter /home/haseeb/.cache/axon-moerouter/axon-test-0fac171 moe:: mla:: oss_ gptoss deepseek2 chat::tests::moe --test-threads 1
+axon-remote: uploading axon-test-0fac171 (68576ed8c0299bcd9198a405) + source of /home/haseeb/.cache/axon-wt-moerouter
+
+sent 1,681,572 bytes  received 4,317 bytes  259,367.54 bytes/sec
+total size is 6,081,369  speedup is 3.61
+
+sent 6,633,207 bytes  received 35 bytes  294,810.76 bytes/sec
+total size is 21,084,688  speedup is 3.18
+axon-remote: job 20261019-222243-axon-test-0fac171-3193945 on avante (GPU, 5000 MB)
+[axon-node 22:22:43] GPU slot taken; job wants 5000 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 44
+[axon-node 22:22:43] run axon-test-0fac171 (68576ed8c0299bcd9198a405) as /home/haseeb/.cache/axon-wt-moerouter on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 50 tests
+test chat::tests::moe_gpu_turns_match_fresh_prefill ... testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+test chat::tests::moe_turns_match_fresh_prefill ... ok
+test cuda::qwen2::mla::tests::mla_attn_matches_reference_and_batch ... ok
+test cuda::qwen2::mla::tests::mla_heads_mv_matches_dequant ... ok
+test cuda::qwen2::mla::tests::mla_kernels_compile_for_archs ... ok
+test cuda::qwen2::mla::tests::mla_router_matches_cpu_rule ... ok
+test cuda::qwen2::moe::tests::moe_gpu_dense_pass_is_an_err ... ok
+test cuda::qwen2::moe::tests::moe_gpu_dense_step_is_an_err ... ok
+test model::deepseek2_tests::deepseek2_batch_matches_decode_bits ... ok
+test model::deepseek2_tests::deepseek2_cache_is_k_only ... ok
+test model::deepseek2_tests::deepseek2_check_supported ... ok
+test model::deepseek2_tests::deepseek2_fixture_vocab_is_whole ... ok
+test model::deepseek2_tests::deepseek2_long_batch_matches_decode_bits ... ok
+test model::deepseek2_tests::deepseek2_matches_expanded_reference ... ok
+test model::deepseek2_tests::deepseek2_moonlight_bits ... ok
+test model::deepseek2_tests::deepseek2_router_rule ... ok
+test model::deepseek2_tests::deepseek2_write_fixture ... ignored, writes a file; run with AXON_DS2_FIXTURE_OUT=path
+test model::deepseek2_tests::deepseek3_tokenizer_matches_hf ... ok
+test model::deepseek2_tests::kimi_tokenizer_matches_hf ... ok
+test model::gptoss_tests::check_supported_gpt_oss ... ok
+test model::gptoss_tests::gpt_oss_decode_batch_verify_bits ... ok
+test model::gptoss_tests::gpt_oss_matches_reference_forward ... ok
+test model::gptoss_tests::gpt_oss_model_bits ... ok
+test model::moe::tests::chunk_dividing_divides ... ok
+test model::moe::tests::ram_need_counts_the_arena_only_when_repacking ... ok
+test moe::ds2_tests::ds2_fixture_graded_criterion_catches_bugs ... ok
+test moe::ds2_tests::ds2_gpu_fixture_bits ... ok
+test moe::ds2_tests::ds2_gpu_fixture_graded ... ok
+test moe::ds2_tests::ds2_gpu_moonlight_bits ... ok
+test moe::oss_tests::backend_places_gpt_oss ... ok
+test moe::oss_tests::oss_gpu_contract_fixture ... ok
+test moe::oss_tests::oss_gpu_contract_model ... ok
+test moe::oss_tests::oss_gpu_logits_graded_model ... ok
+test moe::oss_tests::oss_gpu_matches_cpu_fixture ... ok
+test moe::oss_tests::oss_gpu_route_matches_cpu_twin ... ok
+test moe::oss_tests::oss_topk_batch_invariant_and_ties ... ok
+test moe::tests::backend_places_moe ... ok
+test moe::tests::moe_gpu_feed_batch_matches_feed_pruned ... ok
+test moe::tests::moe_gpu_feed_batch_matches_feed_small ... ok
+test moe::tests::moe_gpu_logits_graded_pruned ... ok
+test moe::tests::moe_gpu_logits_graded_small ... ok
+test moe::tests::moe_gpu_paged_and_graph_generation ... ok
+test moe::tests::moe_gpu_route_matches_cpu_twin_pruned ... ok
+test moe::tests::moe_gpu_route_matches_cpu_twin_small ... ok
+test moe::tests::moe_gpu_step_refuses_head_no ... ok
+test moe::tests::moe_gpu_verify_matches_forward_pruned ... ok
+test moe::tests::moe_gpu_verify_matches_forward_small ... ok
+test moe::tests::moe_route_batch_invariant_and_ties ... ok
+test moe::tests::transpose_tiled_transposes ... ok
+test tokenizer::tests::oracle_gptoss ... ok
+
+test result: ok. 49 passed; 0 failed; 1 ignored; 0 measured; 627 filtered out; finished in 168.35s
+
+[axon-node 22:25:31] exit 0 after 168.5s
+[axon-node 22:25:31] peak RSS 4162 MB (job process tree PSS, 2 s samples x83)
+[axon-run 22:25:31] exit 0 after 199.2s (host avante)
