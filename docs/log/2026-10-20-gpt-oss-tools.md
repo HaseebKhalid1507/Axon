@@ -104,3 +104,19 @@ turn 1 with the result appended: see the review round below.)
   - the e2e captures what Synaps sends (a logging proxy in front of the server).
 - Gates at 6bcb9a3: oss 1020-063226-3966, serve:: dbg 1020-063226-b46c, fast tier rel 1020-063227-51d9 (includes
   `serve::` release), fast tier dbg 1020-063228-e29d/e306/74b2, md5 + serve A/B 1020-063228-d66d, e2e 1020-063229-6424.
+
+## Review round 2 (shady, 8/10 APPROVE, on 6bcb9a3) → d916bf8
+- SHOULD 1, truncation. `<|call|>` is no longer a stop token for harmony tool requests (the splitter must
+  see it). A call is a call only when it is closed by its marker (`<|call|>`, or `<|end|>`). A call cut off by
+  the token limit is never one: its arguments' text is content, blank arguments are nothing, never `{}`.
+  TextOut writes a separate cut frame for it.
+- SHOULD 2, arguments must be a JSON object. `42`, `[1]`, strings and null are content.
+- SHOULD 3, one call per reply. The first closed call ends generation: TextOut reports it like a stop string,
+  so the engine stops exactly there on both the solo and the batched path. Why stop rather than demote later
+  calls to content: a model that keeps going after `<|end|>` usually hallucinates the tool's result
+  (`functions.x to=assistant ...`) and then answers from it. That text is wrong as content too, and it costs
+  tokens. Stopping also matches the history renderer (one call per assistant message), so the next turn's
+  prompt is the template's.
+- SHOULD 4 (edge cases of a reply with no header) is #114.
+- Gates (delta; 6bcb9a3's full set still covers everything else): unit (CPU) 1020-065333-b744; unit + gpt-oss
+  model tests + `serve_gptoss_tool_calls`, `serve::` debug, md5 + serve A/B in one bella job, 1020-065334-6933.
