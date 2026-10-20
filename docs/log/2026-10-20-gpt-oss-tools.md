@@ -69,7 +69,8 @@ runs a Synaps session with working tool calls.
 Functional change, no speed claim. Requests without tools keep their prompt, tokens and output (serve A/B
 above). Tool requests on the Qwen/Llama families are byte-identical to main. MEASURED on bella, e2e
 (Synaps, gpt-oss-20b, cuda + CPU experts): turn 1 prompt 1724 tok in 21.9 s, 55 tok at 30.7 tok/s; turn 2
-(the tool result appended) 1200 of 1265 prompt tokens from the cache, 81 tok at 30.7 tok/s.
+1200 of 1265 prompt tokens from the cache, 81 tok at 30.7 tok/s. (Turn 2 is shorter than turn 1, so it was not
+turn 1 with the result appended: see the review round below.)
 
 ## What didn't work / not done
 - Built-in tools (`browser`, `python`) are not offered: the template's `builtin_tools` kwarg has no OpenAI
@@ -78,3 +79,28 @@ above). Tool requests on the Qwen/Llama families are byte-identical to main. MEA
   calls in one message renders only the first, as the template does.
 - Malformed arguments return as content (the existing policy). They are not handed back as a raw-string
   `arguments`.
+
+## Review round 1 (shady, 7/10, on c39f7a4) → 6bcb9a3
+- **MUST 1, forgery.** The parser matched the call's text, so a final answer that spelled the call syntax with
+  ordinary tokens (a quoted web page, "repeat this") came out as a `tool_calls` entry. Calls now come only from
+  the special tokens: `TextOut` hands the parser one string with the text escaped (`\u{1}` → `\u{1}0`) and each
+  call framed out of band (`\u{1}1 recipient \u{1}2 args \u{1}3`), so nothing the model writes can frame one.
+  A `<|call|>` inside the arguments' text no longer ends a call. Tests: `harmony_parser` (forged text,
+  the escape char, every split), `harmony_calls_from_channels` (forged final text as plain tokens through the real
+  tokenizer and splitter, every split), `serve_gptoss_tool_calls` (gpt-oss-20b asked to repeat the call syntax:
+  no `bash` call on chat completions, Responses or `/api/chat`, streamed or whole).
+- **MUST 2, required.** The prompt ended `to=functions.`, but o200k splits `to=functions.get_weather` as ` to`,
+  `=functions`, `.get`, `_weather`, so a bare `.` token is off-distribution. It now ends `to=functions` and the
+  model writes `.NAME`. `render_harmony` checks the split with axon's tokenizer, and the real model must
+  call an offered tool for two `required` prompts.
+- SHOULDs:
+  - only an `assistant` message to `functions.NAME` is a call: a hallucinated `functions.x to=assistant` result,
+    `python` and `browser.*` stay reasoning;
+  - a named choice renders every tool, so the developer message, and the cache with it, matches auto's; the
+    prefill forces the call;
+  - a reply with no channel header is the answer, as without tools;
+  - a malformed call returns the model's arguments' text, never axon's framing;
+  - real-model `tools: []` with tool history;
+  - the e2e captures what Synaps sends (a logging proxy in front of the server).
+- Gates at 6bcb9a3: oss 1020-063226-3966, serve:: dbg 1020-063226-b46c, fast tier rel 1020-063227-51d9 (includes
+  `serve::` release), fast tier dbg 1020-063228-e29d/e306/74b2, md5 + serve A/B 1020-063228-d66d, e2e 1020-063229-6424.
