@@ -8,6 +8,31 @@ hardware, from a laptop to a datacenter: the most tokens per GPU, per watt and p
 to the hardware limit as the math allows, for one stream and for thousands. The best models means the frontier
 open models, not only the ones that fit a laptop. Every item below serves one of those three.
 
+## Mission and positioning
+
+Haseeb's words, in order: **"make inference cheap and fast"**, **"run the best models"**, and **"run at datacenters
+without wasting resources: squeeze every drop."**
+
+Two tiers serve those, under two numerics modes ([design/determinism-modes.md](design/determinism-modes.md), proposed):
+
+| tier | hardware | what "cheap and fast" means there | numerics | who it competes with |
+|---|---|---|---|---|
+| **Local and agent** | one consumer GPU, a laptop, a CPU box; one person or one agent swarm | the fastest single stream, lossless speculation, an exact cache that survives restarts, replies that don't change under load | `exact` (default) | llama.cpp, ollama. Axon's edge: measured single-stream speed on NVIDIA ([benchmarks-gpu.md](benchmarks-gpu.md)) and a contract nobody else ships by default ([determinism.md](determinism.md)) |
+| **Datacenter** | H100/B200 nodes, FP8 weights, tensor parallel, C ≥ 32 | tokens per dollar at goodput; TTFT and ITL p99 under load; frontier MoE models resident | `fast` (default under `--datacenter`), with `exact` available for eval and replay | vLLM, SGLang, TensorRT-LLM. Axon's edge is not yet measured there: the one concurrency cell (4090, int4) trails vLLM 13–24 % at C 8–32 ([log](log/2026-10-18-c-curve.md)), and no H100 board at C ≥ 8 exists. The first datacenter board is what makes this row honest |
+
+"Run the best models" is one list for both tiers (Qwen3-30B-A3B, gpt-oss, DeepSeek V3 / Kimi K2), but the first tier
+runs them split across CPU and GPU and the second runs them resident, at FP8 once that path exists. Both tiers share
+one engine, one tokenizer and one sampler; they differ in the kernel set the numerics flag selects and in what the gate
+measures: bits in `exact`, tolerance plus a board against vLLM/SGLang in `fast`. The bit-identity contract is the
+local tier's product and every tier's regression net; it is a cost only where FP8 and tensor parallel begin, and the
+mode is how it stops being a global constraint there without being dropped where it is free (ESTIMATED ≤ 2 % on
+today's GPU kernels; the ADR has the numbers).
+
+**What Axon refuses to build:** lossy approximations sold as the model (expert deferral, pre-gated routing, key
+skipping) under either mode; platforms it can't measure on (Metal, ROCm, NEON) until a machine exists; a third
+numerics tier. **What it will not claim:** "squeezes every drop" until a datacenter board is measured on the hardware
+the mission names.
+
 ## The thinking behind the order
 
 Single-stream decode on a 7B/8B model is near the hardware limit. On Parabellum (RTX 5070 Ti Laptop),
@@ -337,9 +362,10 @@ models. Item 3 matters for dense giants. Item 4 only matters past RAM.
 
 ## Not planned, and why
 
-- **Split-KV or f16-accumulate attention, NCCL-style ring all-reduce, atomics in reductions.** Each
-  would break the bit-identity contract (decode == prefill == verify, deterministic output). Multi-GPU
-  will use fixed-order reductions instead.
+- **Split-KV or f16-accumulate attention, NCCL-style ring all-reduce, atomics in reductions: not in `exact`
+  mode.** Each would break the bit-identity contract (decode == prefill == verify, deterministic output). Multi-GPU
+  in exact mode uses fixed-order reductions. Where they are allowed, and what they are measured to buy (little, on
+  today's kernels), is the subject of [design/determinism-modes.md](design/determinism-modes.md).
 - **More single-stream 7B GEMM tuning on consumer GPUs.** The kernels are at bandwidth or power limits
   (above). An earlier experimental GEMM ("gemm3") was a no-go. Hopper is the exception.
 - **AVX-512 and ARM/NEON CPU kernels.** No machine is available to measure them on. A
