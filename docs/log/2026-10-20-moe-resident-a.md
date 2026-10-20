@@ -1,7 +1,7 @@
-# Twin numerics primitives for resident MoE experts (PR #PRNUM)
+# Twin numerics primitives for resident MoE experts (PR #120)
 
 - Date: 2026-10-20. Branch: feat/moe-resident-a. Base: main ab5568c (merged in at a21b121; the work itself was
-  written on 05fb70c). Status: open.
+  written on 05fb70c). Status: open (all gates green at a21b121, 2026-10-20 17:26).
 - Pick / design: Fable's next-steps review 10-19, §3 #3 ("one MoE resident on the GPU"); spec
   `r16-pick4-moe-resident.md`, §6 PR A (step 0 in the same spec: S0.1, S0.3, S0.4 PASS).
 
@@ -46,13 +46,13 @@ any expert-layer kernel exists.
 
 | gate | result | job ID / log |
 |---|---|---|
-| twin tests, bella sm_120 | GATE_TWIN_BELLA | 1020-162850-7c8a |
-| twin tests, avante sm_89 | GATE_TWIN_AVANTE | 1020-162853-5647 |
+| twin tests, bella sm_120 | PASS 4/0/0 | 1020-162850-7c8a |
+| twin tests, avante sm_89 | PASS 4/0/0 | 1020-162853-5647 |
 | twin tests, jade sm_61 | PASS 4/4 (gemm2s skipped: sm < 8.0) | 1020-162900-ea13 |
-| fast tier release suite (2 shards) | GATE_REL | group 1020-162900-13eb (74db, 6eb0) |
-| fast tier debug-assertion suite, CPU queue (2 shards) | GATE_DBG | group 1020-162900-73f3 (75b7, 8b31) |
-| md5 of `gen`, main ab5568c vs a21b121, same job, cuda, 6 dense models × 5 prompts, -n 64 | GATE_MD5 | 1020-162854-8999 |
-| SASS: nvcc offline, NVRTC opts, main ab5568c's sources vs a21b121's (cuobjdump -sass, addresses stripped) | GATE_SASS | local, `~/.cache/axon-moeres/cu/a21/` |
+| fast tier release suite (2 shards) | PASS 289/0/31 (avante) + 342/0/16 (bella) | 1020-162900-74db, 1020-165512-1f8b (resubmit of 6eb0, OOM-killed twice by its scope during parallel chat:: tests) |
+| fast tier debug-assertion suite, CPU queue (2 shards) | PASS 381/0/18 + 266/0/29 | group 1020-162900-73f3 (75b7, 8b31) |
+| md5 of `gen`, main ab5568c vs a21b121, same job, cuda, 6 dense models × 5 prompts, -n 64 | 30/30 identical | 1020-162854-8999 |
+| SASS: nvcc offline, NVRTC opts, main ab5568c's sources vs a21b121's (cuobjdump -sass, addresses stripped) | existing kernels identical: 156/156 on sm_120 and sm_89 (plain and EXT) and on sm_75 (stand-in for jade: nvcc 13 has no sm_61); `KERNELS_OSS` 160/160 on sm_120; 8 new kernels | local, `~/.cache/axon-moeres/cu/a21/` |
 | clippy-driver -D warnings (lib, `--test`), rustfmt --check | clean | local |
 
 Earlier, on the 05fb70c base (wip3, before the merge), the twin tests passed 4/4 on jade (1019-013243-96dd),
