@@ -504,6 +504,7 @@ impl<'g> CudaQwen2<'g> {
                         &st.ring_buf,
                         &st.vecs,
                         &kvp,
+                        &[],
                         CacheKv::F16,
                         nb,
                         start,

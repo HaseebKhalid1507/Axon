@@ -550,6 +550,39 @@ pub(crate) struct RowAt {
     pub base: u32,
 }
 
+/// A hybrid step's run (serve, slots.rs `step_fused`): tokens z0..z0 + n
+/// of a `Place::Rows` pass are one sequence's positions start.. (its rows
+/// from table entry, or plain row, `base`), a prompt chunk: their
+/// attention is one flash launch (attn_fa_b), as `feed_slot` of the chunk
+/// runs it, and the per-query attention takes the rows after the runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct FaRun {
+    pub z0: usize,
+    pub n: usize,
+    pub start: usize,
+    pub base: usize,
+}
+
+/// A `Place::Rows` pass's hybrid layout (`BatchBufs::hyb`; default: none,
+/// a plain step): its flash runs, contiguous from token 0, and the first
+/// token with a head (rows before it are a chunk's: no logits).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Hybrid {
+    pub runs: Vec<FaRun>,
+    pub head0: usize,
+}
+
+/// A `FaRun` in one layer: its cache arguments (`kv_args_at` at its
+/// plain row base, or the paged arrays from row 0) and table (paged: from
+/// its entry base; plain: null).
+pub(super) struct RunAt {
+    z0: usize,
+    n: usize,
+    start: usize,
+    kv: Vec<Arg>,
+    tab: Arg,
+}
+
 /// Weight types of the tensor-core GEMMs (gemm2), in table order; the
 /// first `NTYPES_VM` have gemvm kernels too (Q4_1 / Q5_1 / Q2_K / Q3_K / IQ4_NL
 /// take gemvn).
@@ -857,6 +890,8 @@ pub(super) struct BatchBufs<'g> {
     /// `Place::Rows` of the pass: per token (position, cache row), u32s;
     /// a pool's scratch only (`slots.rs`).
     pub(super) rp: Option<(DevBuf<'g>, HostBuf<'g>)>,
+    /// A `Place::Rows` pass's hybrid layout (`Hybrid`), set before it.
+    pub(super) hyb: Hybrid,
     /// Incoming hidden states, [max][dim] (first > 0 only).
     host_x: Option<HostBuf<'g>>,
     /// Residual stream, [max][dim].
@@ -941,6 +976,7 @@ impl<'g> CudaQwen2<'g> {
             tokens: g.alloc(max * 4)?,
             host_tokens: g.host_alloc(max * 4)?,
             rp: None,
+            hyb: Hybrid::default(),
             host_x: match self.first {
                 0 => None,
                 _ => Some(g.host_alloc(max * self.dim * f)?),
@@ -1215,16 +1251,51 @@ impl<'g> CudaQwen2<'g> {
         let kvas: Vec<Vec<Arg>> = (0..self.layers.len())
             .map(|l| self.kv_args_at(c, l, base))
             .collect();
+        // A hybrid step's chunks (`Hybrid`): per layer, each run's cache.
+        let hyb = match (place, &c.b) {
+            (Place::Rows, Some(b)) => b.hyb.clone(),
+            _ => Hybrid::default(),
+        };
+        let mut z = 0;
+        for r in &hyb.runs {
+            assert!(r.z0 == z && r.n > 0, "hybrid runs: contiguous from token 0");
+            z += r.n;
+            c.debug_covers(r.base, r.start + r.n);
+        }
+        assert!(
+            z <= hyb.head0 && hyb.head0 < nb.max(1),
+            "hybrid: rows with a head"
+        );
+        let runs: Vec<Vec<RunAt>> = (0..self.layers.len())
+            .map(|l| {
+                (hyb.runs.iter())
+                    .map(|r| {
+                        let (row, tab) = match c.tab.is_some() {
+                            false => (r.base, Arg::Ptr(0)),
+                            true => (0, c.tab_at(r.base)),
+                        };
+                        RunAt {
+                            z0: r.z0,
+                            n: r.n,
+                            start: r.start,
+                            kv: self.kv_args_at(c, l, row),
+                            tab,
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
         let mode = c.mode;
         let b = c.b.as_mut().expect("a cache with batch scratch");
         assert!(nb > 0 && nb <= b.max);
         let (ng, ns) = match (head, split) {
             (Head::Sample, Some((ng, ns))) => {
-                assert!(ng <= ns && ns <= nb && (ns == nb || b.logits_rows));
+                let nh = nb - hyb.head0;
+                assert!(ng <= ns && ns <= nh && (ns == nh || b.logits_rows));
                 (ng, ns)
             }
-            (Head::Sample, None) => (0, nb),
-            (_, None) => (nb, nb),
+            (Head::Sample, None) => (0, nb - hyb.head0),
+            (_, None) => (nb - hyb.head0, nb - hyb.head0),
             _ => panic!("split rows: a sampling pass"),
         };
         self.load_input(b, input)?;
@@ -1295,6 +1366,7 @@ impl<'g> CudaQwen2<'g> {
                             &self.weights,
                             &self.vecs,
                             &kvas[li],
+                            &runs[li],
                             mode,
                             nb,
                             start,
@@ -1310,6 +1382,7 @@ impl<'g> CudaQwen2<'g> {
                         &self.weights,
                         &self.vecs,
                         &kvas[li],
+                        &runs[li],
                         mode,
                         nb,
                         start,
@@ -1338,15 +1411,18 @@ impl<'g> CudaQwen2<'g> {
                 )?;
                 on("head")?;
             } else if head != Head::No {
-                self.norm_b(b, &self.vecs, self.output_norm, nb)?;
+                // The rows from head0 (a hybrid step's: past its chunks;
+                // else all) into act rows 0.., z below counting from head0.
+                let nh = nb - hyb.head0;
+                self.norm_rows(b, &self.vecs, self.output_norm, hyb.head0, nh)?;
                 on("rmsnorm")?;
                 let v = self.vocab;
                 // Logits of every row (a pool's): the head in one product
                 // over all of them (the weights read once), each row's
                 // logits the same bits as in slices of HEAD_SUB.
-                let sub = if b.logits_rows { nb } else { HEAD_SUB };
-                for z0 in (0..nb).step_by(sub) {
-                    let nz = (nb - z0).min(sub);
+                let sub = if b.logits_rows { nh } else { HEAD_SUB };
+                for z0 in (0..nh).step_by(sub) {
+                    let nz = (nh - z0).min(sub);
                     let lg = b.logits.arg_at(if b.logits_rows { z0 * v * 4 } else { 0 });
                     self.bgemm(
                         &self.weights,
@@ -1515,6 +1591,87 @@ impl<'g> CudaQwen2<'g> {
         }
     }
 
+    /// The flash attention (attn_fa_b, the variant fa_pick takes) of the
+    /// pass's tokens z0..z0 + n, one sequence at positions start.. in the
+    /// cache `kv` / `tab` (`attn_half`'s), y in place of their q rows; then
+    /// their act rows (quantize_b).
+    ///
+    /// # Safety
+    /// As `attn_half`; the sequence's rows 0..start + n are written.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn attn_flash(
+        &self,
+        b: &BatchBufs,
+        mode: CacheKv,
+        kv: &[Arg],
+        tab: Arg,
+        z0: usize,
+        n: usize,
+        start: usize,
+        on: &mut dyn FnMut(&'static str) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let (g, bf) = (self.gpu, &self.bf);
+        let (hd, qd) = (self.head_dim, self.q_dim);
+        let want_k = |n: usize| Arg::I32(n.is_multiple_of(256) as i32);
+        let ast = act_stride(self.act_len());
+        let q8 = matches!(mode, CacheKv::Q8 { .. });
+        let pre = Arg::F32(att_pre(hd));
+        let kg = match mode {
+            CacheKv::F16 => 0,
+            CacheKv::Q8 { group } => group,
+        };
+        let q = b.q.arg_at(z0 * qd * 4);
+        let group = self.n_heads / self.n_kv_heads;
+        let v = fa_pick(self.fa_geom(kg), n);
+        let (rows, threads, smem) = fa_shape(hd, v, kg);
+        let f = match q8 {
+            false => &bf.attn_fa[v as usize],
+            // The q8 cache has attn_fa_b and attn_fa_bs only (fa_pick).
+            true => match v {
+                Fa::Full => &self.q8_fns(mode).attn_fa[0],
+                Fa::Small => &self.q8_fns(mode).attn_fa[1],
+                Fa::Kv => unreachable!("fa_pick: attn_fa_k is f16 only"),
+            },
+        };
+        let mut args = vec![q];
+        args.extend_from_slice(kv);
+        args.extend_from_slice(&[
+            Arg::I32(start as i32),
+            Arg::I32(n as i32),
+            Arg::I32(self.n_heads as i32),
+            Arg::I32(self.n_kv_heads as i32),
+            pre,
+            q,
+            tab,
+        ]);
+        // SAFETY: the caller's; attn_fa_b's and quantize_b's signatures,
+        // rows z0..z0 + n of b.q and b.act in the scratch.
+        unsafe {
+            g.launch(
+                f,
+                (self.n_kv_heads as u32, (n * group).div_ceil(rows) as u32, 1),
+                (threads as u32, 1, 1),
+                smem as u32,
+                &args,
+            )?;
+            on("attn")?;
+            g.launch(
+                &bf.quantize,
+                (qd.div_ceil(256) as u32, n as u32, 1),
+                (32, 1, 1),
+                0,
+                &[
+                    q,
+                    Arg::I32(qd as i32),
+                    want_k(qd),
+                    b.act.arg_at(z0 * ast),
+                    Arg::U64(ast as u64),
+                ],
+            )?;
+        }
+        on("combine")
+    }
+
     /// One layer over the nb tokens in b.x at positions start..: matrices
     /// at their offsets into `wts`, norms and biases at theirs into `vecs`,
     /// the layer's cache at `kv` (`kv_args`: F16 K and V rows of kv_dim
@@ -1539,6 +1696,7 @@ impl<'g> CudaQwen2<'g> {
         wts: &DevBuf,
         vecs: &DevBuf,
         kv: &[Arg],
+        runs: &[RunAt],
         mode: CacheKv,
         nb: usize,
         start: usize,
@@ -1548,7 +1706,7 @@ impl<'g> CudaQwen2<'g> {
     ) -> Result<(), String> {
         // SAFETY: the caller's contract (`attn_half`'s and `ffn_half`'s).
         unsafe {
-            self.attn_half(b, l, wts, vecs, kv, mode, nb, start, rp, tab, on)?;
+            self.attn_half(b, l, wts, vecs, kv, runs, mode, nb, start, rp, tab, on)?;
             self.ffn_half(b, l, wts, vecs, nb, on)
         }
     }
@@ -1566,6 +1724,7 @@ impl<'g> CudaQwen2<'g> {
         wts: &DevBuf,
         vecs: &DevBuf,
         kv: &[Arg],
+        runs: &[RunAt],
         mode: CacheKv,
         nb: usize,
         start: usize,
@@ -1731,63 +1890,21 @@ impl<'g> CudaQwen2<'g> {
                 // y in place of q; then act (the decode kernels' bits,
                 // prefill.cu attn_fa_bt), in the variant fa_pick takes for
                 // this GPU and batch.
-                let group = self.n_heads / self.n_kv_heads;
-                let v = fa_pick(self.fa_geom(kg), nb);
-                let (rows, threads, smem) = fa_shape(hd, v, kg);
-                let f = match q8 {
-                    false => &bf.attn_fa[v as usize],
-                    // The q8 cache has attn_fa_b and attn_fa_bs only (fa_pick).
-                    true => match v {
-                        Fa::Full => &self.q8_fns(mode).attn_fa[0],
-                        Fa::Small => &self.q8_fns(mode).attn_fa[1],
-                        Fa::Kv => unreachable!("fa_pick: attn_fa_k is f16 only"),
-                    },
-                };
-                let mut args = vec![b.q.arg()];
-                args.extend_from_slice(kv);
-                args.extend_from_slice(&[
-                    Arg::I32(start as i32),
-                    Arg::I32(nb as i32),
-                    Arg::I32(self.n_heads as i32),
-                    Arg::I32(self.n_kv_heads as i32),
-                    pre,
-                    b.q.arg(),
-                    tab,
-                ]);
-                g.launch(
-                    f,
-                    (
-                        self.n_kv_heads as u32,
-                        (nb * group).div_ceil(rows) as u32,
-                        1,
-                    ),
-                    (threads as u32, 1, 1),
-                    smem as u32,
-                    &args,
-                )?;
-                on("attn")?;
-                g.launch(
-                    &bf.quantize,
-                    (qd.div_ceil(256) as u32, nbu, 1),
-                    (32, 1, 1),
-                    0,
-                    &[
-                        b.q.arg(),
-                        Arg::I32(qd as i32),
-                        want_k(qd),
-                        b.act.arg(),
-                        Arg::U64(ast as u64),
-                    ],
-                )?;
-                on("combine")?;
+                self.attn_flash(b, mode, kv, tab, 0, nb, start, on)?;
             } else {
+                // A hybrid step's chunks: their flash launches, as
+                // `feed_slot` of each runs it (the same bits as per query).
+                for r in runs {
+                    self.attn_flash(b, mode, &r.kv, r.tab, r.z0, r.n, r.start, on)?;
+                }
+                let fa_end = runs.last().map_or(0, |r| r.z0 + r.n);
                 // A few queries (the verify pass), or no tensor cores: the
                 // decode kernels per query (the same code), attn_blk_t, or
                 // attn_split_t ATT_SUB queries per launch.
                 let tc = self.tc_attn;
                 let per = if tc { att_per_query(hd) } else { ATT_SUB };
                 let (gy_blk, ms) = (self.max_split.min(b.nblk_max) as u32, self.max_split as u32);
-                for z0 in (0..nb).step_by(per) {
+                for z0 in (fa_end..nb).step_by(per) {
                     let nz = (nb - z0).min(per) as u32;
                     // (kernel, blocks per kv head and query, threads, the
                     // partials' stride: blocks or splits, the arguments
@@ -2342,10 +2459,16 @@ impl<'g> CudaQwen2<'g> {
             if nb <= SMALL || self.bf.gemm.is_none() {
                 return "gemvn";
             }
-            if self.bf.gemmh.is_some() && qt == Q4_K && (self.bf.gemmh_all || gemmh_plain(rows, nb, self.bf.sms)) {
+            if self.bf.gemmh.is_some()
+                && qt == Q4_K
+                && (self.bf.gemmh_all || gemmh_plain(rows, nb, self.bf.sms))
+            {
                 return "gemmh2";
             }
-            if self.bf.gemm_t.is_some() && matches!(qt, Q4_K | Q5_K) && tile_t(rows, G2_BM, nb, self.bf.sms) {
+            if self.bf.gemm_t.is_some()
+                && matches!(qt, Q4_K | Q5_K)
+                && tile_t(rows, G2_BM, nb, self.bf.sms)
+            {
                 return "gemm2t";
             }
             "gemm2s"
@@ -2363,7 +2486,11 @@ impl<'g> CudaQwen2<'g> {
             true => self.wave_gemms().map(|ps| gemm_cost(&ps, nb, g)),
             false => None,
         };
-        let r = format!("q {} / gate {}", route(l.q.rows, l.q.qt), route(gate.rows, gate.qt));
+        let r = format!(
+            "q {} / gate {}",
+            route(l.q.rows, l.q.qt),
+            route(gate.rows, gate.qt)
+        );
         (r, tiles, pad, cost)
     }
 

@@ -54,6 +54,7 @@ fn test_opts(path: &str, device: Device) -> Opts {
         kv_grow: None,
         prefill_chunk: super::engine::PREFILL_CHUNK,
         prefill_ms: super::engine::PREFILL_MS,
+        hybrid: super::engine::hybrid_env(),
         rope: Default::default(),
         api_key: None,
         max_prompt_tokens: None,
@@ -2249,7 +2250,9 @@ fn serve_default_ctx() {
 /// chunks sized by a time budget (varying sizes), and the Gemma 3 model
 /// (sliding-window layers, prompts past their window) when present; then
 /// again with the long prompts extended, so their slots' rows are reused
-/// and only the rest is fed in chunks.
+/// and only the rest is fed in chunks. Hybrid steps (the chunks in the
+/// decode rows' pass: per-query attention at 16, flash runs at a 256
+/// budget), and the two-pass steps of AXON_HYBRID=0.
 #[test]
 fn serve_chunked_prefill_matches_solo() {
     let Some(_) = crate::testutil::gpu() else {
@@ -2259,14 +2262,17 @@ fn serve_chunked_prefill_matches_solo() {
         return;
     };
     use crate::kv::KvType::{F16, Q8};
-    // (model, kv, chunk floor, ms budget)
+    // (model, kv, chunk floor, ms budget, hybrid)
     let mut configs = vec![
-        (p.clone(), F16, 16, 0),
-        (p.clone(), Q8, 16, 0),
-        (p, F16, 16, 20),
+        (p.clone(), F16, 16, 0, true),
+        (p.clone(), Q8, 16, 0, true),
+        (p.clone(), F16, 256, 0, true),
+        (p.clone(), Q8, 256, 0, true),
+        (p.clone(), F16, 16, 0, false),
+        (p, F16, 16, 20, false),
     ];
     if let Some(g) = crate::testutil::gemma3_model_path() {
-        configs.push((g, F16, 16, 0));
+        configs.push((g, F16, 16, 0, true));
     }
     const N: u64 = 400;
     let decoders = [
@@ -2298,7 +2304,7 @@ fn serve_chunked_prefill_matches_solo() {
             v["usage"]["completion_tokens"].clone(),
         )
     };
-    for (path, kv, chunk, ms) in configs {
+    for (path, kv, chunk, ms, hybrid) in configs {
         let gemma = path.to_string_lossy().contains("gemma");
         let opts = |o: &mut Opts| {
             o.kv = kv;
@@ -2306,6 +2312,7 @@ fn serve_chunked_prefill_matches_solo() {
             o.max_draft = 3;
             o.prefill_chunk = chunk;
             o.prefill_ms = ms;
+            o.hybrid = hybrid;
         };
         let s = server_with(path.to_str().unwrap(), Device::Cuda, opts);
         let a = s.addr;
@@ -2336,7 +2343,7 @@ fn serve_chunked_prefill_matches_solo() {
                 .map(|b| completion(&post(ra, "/v1/completions", b.clone())))
                 .collect();
             let what = format!(
-                "{} {kv:?} chunk {chunk} ms {ms} round {round}",
+                "{} {kv:?} chunk {chunk} ms {ms} hybrid {hybrid} round {round}",
                 path.display()
             );
             std::thread::scope(|sc| {
@@ -2396,11 +2403,11 @@ fn serve_chunked_prefill_matches_solo() {
                     assert_eq!(&h.join().unwrap(), d, "{what}: decoding request {i}");
                 }
                 // Over 60 chunks of 16 for a prompt of over 1000 tokens,
-                // each followed by a step of the two decoding requests
-                // (round 1 feeds only the tail; a time budget's chunks
-                // are larger).
+                // each with (or followed by) a step of the two decoding
+                // requests (round 1 feeds only the tail; a time budget's
+                // chunks, and a 256 budget's, are larger).
                 assert!(
-                    round == 1 || ms > 0 || !running || during >= 40,
+                    round == 1 || ms > 0 || chunk > 16 || !running || during >= 40,
                     "{what}: {during} tokens decoded while a long prompt prefilled"
                 );
             });
