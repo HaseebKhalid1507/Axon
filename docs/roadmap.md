@@ -1,6 +1,7 @@
 # Roadmap
 
-Short and opinionated. "On main" means merged at `69adfa2` (2026-10-17). Everything else is planned or in flight.
+Short and opinionated. "On main" means merged at `764792f` (2026-10-19 22:05 EDT). Everything else is planned or in
+flight.
 Estimates come from the design notes and are labeled.
 
 **Mission: make LLM inference cheap and fast, and run the best open models.** Cheap means wasting no
@@ -18,7 +19,7 @@ Two tiers serve those, under two numerics modes ([design/determinism-modes.md](d
 | tier | hardware | what "cheap and fast" means there | numerics | who it competes with |
 |---|---|---|---|---|
 | **Local and agent** | one consumer GPU, a laptop, a CPU box; one person or one agent swarm | the fastest single stream, lossless speculation, an exact cache that survives restarts, replies that don't change under load | `exact` (default) | llama.cpp, ollama. Axon's edge: measured single-stream speed on NVIDIA ([benchmarks-gpu.md](benchmarks-gpu.md)) and a contract nobody else ships by default ([determinism.md](determinism.md)) |
-| **Datacenter** | H100/B200 nodes, FP8 weights, tensor parallel, C ≥ 32 | tokens per dollar at goodput; TTFT and ITL p99 under load; frontier MoE models resident | `fast` (default under `--datacenter`), with `exact` available for eval and replay | vLLM, SGLang, TensorRT-LLM. Axon's edge is not yet measured there: the one concurrency cell (4090, int4) trails vLLM 13–24 % at C 8–32 ([log](log/2026-10-18-c-curve.md)), and no H100 board at C ≥ 8 exists. The first datacenter board is what makes this row honest |
+| **Datacenter** | H100/B200 nodes, FP8 weights, tensor parallel, C ≥ 32 | tokens per dollar at goodput; TTFT and ITL p99 under load; frontier MoE models resident | `fast` (default under `--datacenter`), with `exact` available for eval and replay | vLLM, SGLang, TensorRT-LLM. **Measured, and behind.** The first H100 serving board (10-19, run h100-1019-2058, [log](log/2026-10-19-h100-showdown.md)): Axon is fastest only at C = 1 (287 vs 235–284 tok/s on the mix workload); at C = 128 it does 1,868 tok/s vs vLLM-AWQ 5,748 and vLLM-FP8 7,146, and keeps 26 % of requests inside the SLO. The 4090 cell trailed vLLM 13–24 % at C 8–32 ([log](log/2026-10-18-c-curve.md)). Closing it is [Next: proposed order](#next-proposed-order-outside-review-10-19-owner-decides) |
 
 "Run the best models" is one list for both tiers (Qwen3-30B-A3B, gpt-oss, DeepSeek V3 / Kimi K2), but the first tier
 runs them split across CPU and GPU and the second runs them resident, at FP8 once that path exists. Both tiers share
@@ -30,8 +31,8 @@ today's GPU kernels; the ADR has the numbers).
 
 **What Axon refuses to build:** lossy approximations sold as the model (expert deferral, pre-gated routing, key
 skipping) under either mode; platforms it can't measure on (Metal, ROCm, NEON) until a machine exists; a third
-numerics tier. **What it will not claim:** "squeezes every drop" until a datacenter board is measured on the hardware
-the mission names.
+numerics tier. **What it will not claim:** "squeezes every drop" until a datacenter board on the hardware the mission
+names says so. The first one (H100 SXM, 10-19) says the opposite at C ≥ 8: 2.0–3.8× behind vLLM / SGLang at C = 128.
 
 ## The thinking behind the order
 
@@ -48,6 +49,8 @@ hostile files, bad requests and long-running load comes right after batching (it
 
 The exception is the H100, where prefill was issue-bound at 7.6% of its int8 peak. A first wgmma round is on main
 (#33: +12 % 7B prefill on an H100 PCIe, MEASURED); the plain products are still issue-bound ([design/hopper.md](design/hopper.md)).
+Serving on the H100 is the other exception: single-stream decode is ahead of llama.cpp there, but the batched step
+at C ≥ 8 is 2–4× behind vLLM / SGLang (MEASURED 10-19, [Next: proposed order](#next-proposed-order-outside-review-10-19-owner-decides)).
 
 ## Long-term goals
 
@@ -72,7 +75,34 @@ models, cheaply and fast), so choices made along the way shouldn't close them of
 
 ## Recently landed
 
-Newest first, as of `69adfa2`; the numbers are the PRs' own MEASURED headlines.
+Newest first, as of `764792f`; the numbers are the PRs' own MEASURED headlines. Older entries (as of `69adfa2`)
+follow the first list.
+
+- **Determinism-modes ADR** (#101): `--numerics exact | fast`, merged as **PROPOSED**
+  ([design/determinism-modes.md](design/determinism-modes.md)); the decision is Haseeb's. Nothing built.
+- **gpt-oss stage 1** (#98): attention, sinks, windows, router and head on the GPU, MXFP4 experts on the CPU. bella
+  tg128 46.6 vs 23.4 tok/s (1.99× llama.cpp `-ot exps=CPU`), prefill 0.27× ([log](log/2026-10-18-gpt-oss-s1.md)).
+- **attn_blk_mq** (#84): one K/V tile load for 16 queries of one sequence, used for ≤ 32 queries. Its kill rule
+  failed at 128 queries (0.76×); at ≤ 32, serve admit TTFT −6.4 % and ITL p99 −8.6 % (bella, chunk 32), a drafted
+  21.7k-token gen +20.4 % ([log](log/2026-10-18-attn-mq.md)).
+- **Paged KV, stages 2–3** (#71): the pool allocates pages; serve plans, admits, reclaims and preempts by pages; an
+  OOM graph capture falls back to running kernel by kernel. bella 7B at 32k, 7 × 15k agents: aggregate ~+10 %
+  ([log](log/2026-10-17-paged-kv-s23.md)). #71, #84 and #98 landed as one train ([log](log/2026-10-19-merge-train.md)).
+- **gemm2t, a 128 × 64 Q4_K / Q5_K prefill tile** (#100): +22–28 % per MAC on sm_89, +21–26 % on sm_120; 7B pp1050
+  +17.3 % end to end on bella ([log](log/2026-10-19-gemm-128x64.md)).
+- **Safetensors stage A** (#102): Hugging Face checkpoint directories (qwen2 / qwen3 / llama) load natively; BF16
+  runs as the GGUF F16 of the same weights, bit for bit, CPU only ([log](log/2026-10-19-safetensors-loader.md)).
+- **Wave-sized prompt passes** (#92, then #97 for `serve` and `chat`): RTX 4090 pp2100 +3.0 % (7B), +3.9 % (Qwen3-8B),
+  same bits ([log](log/2026-10-18-prefill-wave-split.md)).
+- **deepseek2 stage 1** (#89): MLA attention, router, shared experts on the GPU, routed experts on the CPU.
+  Moonlight-16B-A3B decode 54.0 tok/s, 1.70× llama.cpp `-ot exps=CPU`; prefill 0.82× ([log](log/2026-10-18-deepseek2-s1.md)).
+- **C curve 1–2** (#81, #86): the batched-decode step at nb 1–64 on a 4090; 7B nb 32 −30 %, serve C=32 1,868 → 2,240
+  tok/s ([log](log/2026-10-18-c-curve.md), [log 2](log/2026-10-18-c-curve-2.md)).
+- **deepseek2 stage 0** (#79), **soak + GGUF zoo** (#83), **CUDA test-concurrency fix** (#82), serve metrics race (#93).
+- **Not landed:** batched speculative decoding (#90), closed by its kill rule
+  ([experiments-rejected.md](experiments-rejected.md#speculation)); Scale item 10.
+
+As of `69adfa2`:
 
 - **Paged KV, stages 0–1** (#64, #68): every cache kernel through a page table; same bits, same speed.
 - **One cache instead of N+1 in `serve`** (#60): bella 7B at 32k serves 2 slots instead of 1 (q8: 5 instead of 4).
@@ -87,6 +117,55 @@ Newest first, as of `69adfa2`; the numbers are the PRs' own MEASURED headlines.
 - **KV save/restore, stage A** (#48, #54): `chat --session`; a 29.8k-position session restores in 0.41–0.45 s vs 3.16 s.
 - **Gemma 3 1B/4B** (#35), CPU and CUDA.
 
+## Next: proposed order (outside review 10-19, owner decides)
+
+**Why this section leads.** The first H100 SXM serving board (run h100-1019-2058, 2026-10-19,
+[log](log/2026-10-19-h100-showdown.md), [tables](benchmarks-gpu.md#concurrency-h100-sxm-qwen25-7b-2026-10-19)) put Axon
+c15c90e (Q4_K_M) against vLLM 0.32.0 and SGLang 0.5.22 (AWQ int4 and FP8) on Qwen2.5-7B. MEASURED: fastest at C = 1
+(mix 287 vs 235–284 tok/s), then behind from C = 8 up; at C = 128, mix 1,868 vs 3,770–7,146 and classic 4,485 vs
+8,288–14,380; TPOT p50 57.9 ms (mix) vs 12.7–26.4; 26 % of mix requests inside the SLO; TTFT p99 14.5 s. On the 4090
+Axon was 0.76× vLLM-AWQ at C = 32; on the H100 it is 0.43×.
+
+The outside review that followed ([next steps](reviews/2026-10-19-outside-review-next-steps.md) §2) decomposes the gap
+from the run's per-request data: prefill GEMM 2.7× slower (13.8k vs 37.7k tok/s on a lone 7.6k prompt, ~10 % of the
+H100's int8 pipe; MEASURED + ESTIMATED), the nb = 128 decode step 3.3× slower (18.6 vs 5.1–5.7 ms, 6× its own 3.1 ms
+DRAM floor; q/wo/down launch 56 CTAs and k/v 8 CTAs on 132 SMs, CODE), and ~25 % of wall time that is neither kernel
+(two GPU passes per step, a 60 ms chunk budget, two concurrent prefills, FIFO admission; ESTIMATED). Its blame split
+(OPINION): kernel ≈ 65 %, scheduler ≈ 25 %, quant format ≈ 10 % (unmeasured on Hopper). Nothing was profiled on the
+pod, so item 1 starts by measuring.
+
+**The order below is the review's ranking, adopted here as a proposal; Haseeb decides.** Costs and gains are the
+review's ESTIMATES; the kill rules are written before building, as for every round.
+
+| # | item | expected gain (ESTIMATED) | cost | kill rule | unblocks |
+|---|---|---|---|---|---|
+| 1 | **H100 step anatomy + two scheduler fixes (exact mode).** (a) Measure: `pool_step_cost` on an H100 at nb 1–256, depth 600 / 4096, per kernel; `cuda_gemm_bench` on 7B shapes for gemm2s / gemm2t / gemmh2 plus one deliberately inexact gemmh2 without the per-256 drain (the upper bound of what the contract costs on Hopper); one serve step trace at mix C = 128. (b) Decode rows join the prefill chunk's pass (one pass per step; bit-compatible by identity A). (c) Shortest-first admission for short prompts, concurrent prefills scaled with slots. (d) The chunk budget as tokens per step at the measured cost, not a fixed 60 ms. After each fix, re-run only Axon's two C = 128 cells (~2 pod-minutes). | mix C = 128 +25–40 % (+15 % from the merged pass alone); short-prompt TTFT p50 2.5 s → < 0.3 s; slo_ok at C = 64 0.74 → ≥ 0.95. Still ~2.5× behind vLLM-FP8 | 2–3 builder-days; ~$5 of H100 (two 30-min sessions, prebuilt binaries); bits gates on bella / avante | the merged pass must give mix C = 64 aggregate ≥ +15 % on a 4090 with ITL p99 ≤ today's; else revert it and keep (c) / (d) | a per-kernel target for item 2; every later C ≥ 32 number |
+| 2 | **Hopper exact GEMM, round 2:** W4A8 wgmma with register dequant (RS, as Marlin does), an integer superblock reduce, TMA weights; plus the ADR's M6 fixed-chunk split-K for the narrow products (56 → 224+ CTAs for q/wo/down at nb ≤ 128). Exact: the per-256 drain is a fixed order. | ~200 TMAC/s (half of Marlin-class efficiency on the int8 pipe): prefill 13.8k → ~27k tok/s, the nb = 128 GEMM 8.4 → ~4.5 ms; with item 1, classic C = 128 4,485 → ~9–10k (vLLM-AWQ 12,190). M6 alone: −3 ms of the 18.6 ms step | 6–10 builder-days of one kernel builder (not a swarm); ~$40 of H100 in ~10 one-hour sessions; the M6 `NUMERICS_EXACT` bump and re-pinned md5s included | after 5 builder-days, gate 3,584 × 18,944 at nb 1,024 < 180 TMAC/s on the H100 (2× today's 84–93) → stop, record in experiments-rejected.md, go to item 4's fast kernel. M6 separately: H100 7B nb = 128 step −10 % or revert | every datacenter claim; resident-MoE prefill on the same GEMM; 32B / 70B on H100s |
+| 3 | **One MoE resident on the GPU:** Moonlight-16B-A3B now, Qwen3-30B-A3B as the headline (PR A → D of the r16 pick-4 spec; step 0 passed: CPU experts are 76 % of the Moonlight decode step, MEASURED; PR A exists, uncommitted). | Moonlight decode on bella ~6 ms per step → ~160 tok/s (today 54–62); prefill ×3–5; Qwen3-30B-A3B fully resident on a 24 GB card, the first ≥ 30B-class model with a number vs llama.cpp and vLLM | ~5 builder-days; ~$10 (one 32–48 GB pod session for 30B-A3B at 8k) | resident decode < 1.5× the CPU-expert decode on bella → stop at PR B; 30B-A3B pp2100 < llama.cpp `--cpu-moe` on the same pod → not a headline | the Kimi K2 / DeepSeek template (experts resident per layer); gpt-oss-20b on 24 GB; an honest "best models" row |
+| 4 | **FP8 on Hopper under `--numerics fast`, gated on item 2's verdict.** The ADR's mode scaffolding first (M1 flag + tuple line, M2 `--datacenter`, M3 graded-tolerance gates, M5 cache key + kvsave cross-mode test: under a week, no kernels), then an FP8 W8A8 wgmma GEMM. If item 2 hits its kill rule, this becomes the replacement kernel and moves up. Safetensors stage B on consumer cards (sm_89 / sm_120) is demoted: it serves no mission cell. | parity-class prefill with vLLM-FP8 (30–38k tok/s) if the kernel reaches their ~27 % of peak; DeepSeek V3 / Kimi K2 checkpoints load without a GGUF requant | 8–12 builder-days + ~$40 of H100 | FP8-fast GEMM < 1.5× item 2's exact int8 GEMM on the same shapes → not worth a second numerics for dense models; keep it only for block-scaled checkpoints | DeepSeek V3 / K2 stage 2 at FP8, an FP8 board |
+| 5 | **Adoption floor:** `lib.rs` (a split, not a rewrite), a tagged v0.1, the honest board on the README, one sentence for "why not vLLM". | the first external user; embedding without a subprocess | 3 builder-days, $0 | none (hygiene); outcome to check: one external issue or PR within 30 days | a second human reading the code |
+
+**The ADR, per the review (OPINION; [ADR](design/determinism-modes.md) is PROPOSED, the decision is Haseeb's):** adopt
+the mode scaffolding (M1–M3, M5) now; build no fast kernel until item 2 reports; not M4 (CPU fast prefill). Its one
+correction to the ADR: "nearly free on the GPU" should read "nearly free on sm_89 / sm_120; unmeasured on sm_90" until
+item 1's inexact-gemmh2 bound exists.
+
+**Re-running the board.** After items 1–2, the full showdown again on the same kit, on two pods so margins under
+~5 % settle (one pod, 2 rounds left the C = 1 lead over SGLang-AWQ, +1 % mix / +3 % classic, unsettled). ~$3–4 per pod
+(MEASURED $3.09 for the first). Not the problem: KV capacity (#71's pool held 128 full 8k sequences) and cold start
+(Axon 1.0 s, vLLM 58–71 s, SGLang 42–66 s).
+
+**Below the line, deliberately** (the review's list; any of them can jump the queue the day a named user asks):
+- batched speculative decoding, second attempt with a depth-aware gate (Scale item 10; #90 closed by its kill rule);
+- KV save/restore stage B (`--cache-ram`, Scale item 4) and shared-prefix pages (the agent workload is unmeasured, so
+  their payoff is too; [Agent-harness workloads](#agent-harness-workloads-later-not-scheduled));
+- big-model offload on the laptop; Gemma 3 27B, sm_61 and CPU fast prefill (the ADR's M4); other platforms.
+
+Process changes the review ties to this order (OPINION, [§5](reviews/2026-10-19-outside-review-next-steps.md#5-process-where-time-and-money-leak)):
+take timing and full-tier gates off the desktop gate host; gate the full tier per train, not per push; cap concurrent
+tracks at three, each naming the showdown cell it moves and its kill rule; pods keep state on a network volume and
+publish `cost.json` (target waste ≤ 20 %; the showdown's was 51 % of the driver's paid time).
+
 ## Priorities
 
 | # | item | why | status |
@@ -95,7 +174,7 @@ Newest first, as of `69adfa2`; the numbers are the PRs' own MEASURED headlines.
 | 2 | **Real-world hardening.** Fuzz the GGUF reader (truncated files, bad offsets, oversized dims, size overflow) and the HTTP API (malformed JSON, huge bodies, bad UTF-8, invalid params, clients that disconnect mid-stream, many idle connections). Edge prompts: empty, at and over the context limit, odd Unicode. A model-zoo sweep of GGUFs from different converters and quant mixes: each one either matches llama.cpp or is refused with a clear error. Multi-hour soak with many clients, watching RAM/VRAM for leaks. Clean failure on OOM and GPU errors. | Speed is measured; robustness is not. Axon has no users yet and has never served real traffic, while llama.cpp has years of edge cases behind it. Gate: no panic, no out-of-bounds, no hang on any fuzz input; every refusal is a clear error; the server stays up; the soak shows flat memory. Fuzz harness and soak script live in the repo. | fuzzers and the fuzz-found fixes done (#37: `scripts/fuzz_gguf.py`, `scripts/fuzz_serve.py`, 9 findings fixed). Soak + model-zoo sweep: PR #83 (`scripts/soak.py`, `scripts/zoo.py`, [hardening.md](hardening.md)). Soaks: 1.5B 3.2 h ×2 on sm_89 and 7B 1.1 h on sm_120 pass; CPU 0.5B 4 h on bella passes and 2 h on jade fails the RSS slope on a single 8 MiB step. 0 failing requests in about 223k. Zoo: 18 files, 8 match llama.cpp, 1 within llama.cpp's CPU/CUDA spread, 9 clean refusals (unclear "??" refusals fixed). Left: OOM / GPU-error injection, multi-day runs |
 | 3 | **Startup round 2.** Pinned staging for the weight upload, upload/prefill overlap, faster tokenizer and GGUF parsing. | Time to first token. ESTIMATED 7B warm short-prompt TTFT 624 → ~480 ms, from the measured 25.4 GB/s pinned upload. No change to output bits. | done (#41) |
 | 4 | **Multi-GPU, pipeline parallel (stage 1).** | Models bigger than one card, and KV room for serving. Bit-identical to one GPU by construction (MEASURED on 2×4090: decode 1.00×, prefill 1.46–1.55×). Stage 1b (serve pool over the pipeline, ~2× aggregate ESTIMATED) is in the "Scale" section. | stage 1 done (#34) ([design](design/multi-gpu.md)) |
-| 5 | **Hopper wgmma/TMA prefill.** | H100 prefill trails the 4090 and 5090. ESTIMATED 7B pp2100 12.5k → 22–32k tok/s. Gated on a ~1-hour pod experiment. | first round done (#33): fused gate+up on wgmma, 7B prefill 9263 → 10376 tok/s (+12.0 %) on an H100 PCIe (MEASURED, `AXON_GEMMH=1`). The plain products reach 84 TMAC/s (issue-bound), so the 22–32k estimate is not reached; the default routing itself was not run on an H100 ([design](design/hopper.md)) |
+| 5 | **Hopper wgmma/TMA prefill.** | H100 prefill trails the 4090 and 5090. ESTIMATED 7B pp2100 12.5k → 22–32k tok/s. Gated on a ~1-hour pod experiment. | first round done (#33): fused gate+up on wgmma, 7B prefill 9263 → 10376 tok/s (+12.0 %) on an H100 PCIe (MEASURED, `AXON_GEMMH=1`). The plain products reach 84 TMAC/s (issue-bound), so the 22–32k estimate is not reached; the default routing itself was not run on an H100 ([design](design/hopper.md)). Since then: the 10-18 H100 SXM board ran the default routing (7B pp2100 14,413, 1.49× llama.cpp); the decode side at C ≥ 8 is [Next: proposed order](#next-proposed-order-outside-review-10-19-owner-decides) |
 | 6 | **Gemma 3** (1B/4B/12B). | The most-requested missing family. Medium bit-identity risk: new attention variants (head dim 256, sliding window) must keep decode == batched. | 1B/4B done (#35); 27B refused |
 | 7 | **Old GPUs (sm_61, Pascal).** | Fixes for Pascal cards, tested on Jaded's GTX 1050. Main has no tested sm_61 path; it refuses a GPU the installed NVRTC can't target. | done (#39): with NVRTC 13 and 12.9 installed, jade's GTX 1050 (sm_61) now falls back to 12.9 and generates (main refused); 25/25 CUDA tests pass there (MEASURED) |
 | 8 | **SentencePiece tokenizer** (Mistral 7B v0.3, Llama 2, TinyLlama) on the existing `llama` path. | Cheap coverage, no kernel risk. A port of llama.cpp's SPM tokenizer, checked token for token against llama-server; Mistral's `[INST]` chat format included. | done (#32) |
@@ -107,14 +186,14 @@ Also open:
   (docs/serve-apis.md, log 2026-10-17-serve-responses-ollama). Left: `format` / structured
   output (needs grammar-constrained sampling), embeddings.
 - **Q2_K and Q3_K.** CPU and CUDA kernels for Q2_K, Q3_K and IQ4_NL (the fallback type in the same files);
-  the 2–3-bit frontier models need them ([Long-term goals](#long-term-goals)). **In review** (feat/q2k-q3k,
+  the 2–3-bit frontier models need them ([Long-term goals](#long-term-goals)). **Done** (#72,
   [log](log/2026-10-17-q2k-q3k.md)); follow-ups: a repacked (r8) CPU layout (CPU prefill on 7B Q2_K /
   Q3_K_M is 41% / 22% behind llama.cpp at pp2100, MEASURED) and gemvm small-batch kernels.
-- **MoE stage 2** (attention and router on the GPU, experts on the CPU). **In flight** (PR #67); its status
-  lives in Scale item 7 and [Mixture-of-experts](#mixture-of-experts).
+- **MoE stage 2** (attention and router on the GPU, experts on the CPU). **Done** (#67, #76; and the same split for
+  gpt-oss, #98, and deepseek2, #89); what's left lives in Scale item 7 and [Mixture-of-experts](#mixture-of-experts).
 - **Native safetensors, then FP8 / NVFP4 weights** (the FP8 plan, `specs/fp8-safetensors.md`).
   Stage A, the loader (Hugging Face checkpoint directories of qwen2 / qwen3 / llama, BF16 run as the
-  GGUF F16, CPU only), is **in review** ([log](log/2026-10-19-safetensors-loader.md)). Next: B, FP8
+  GGUF F16, CPU only), is **done** (#102, [log](log/2026-10-19-safetensors-loader.md)). Next: B, FP8
   per-channel dense on the GPU (sm_89 / sm_120); C, FP8 128×128 block scales (DeepSeek-style, MoE
   experts from per-expert tensors); D, NVFP4.
 - **Qwen3 0.6B Q8_0 long prefill on sm_89.** The one cell Axon loses on the RTX 4050
@@ -139,32 +218,31 @@ token prefix, so a slot saved, restored, paged or chunked continues bit for bit.
 | 2 | **Drop the N+1 cache.** A pool of N slots costs N+1 KV caches: the request running alone has its own (`serve.rs` `Engine.cache`). Alias it to slot 0's memory, or retire the solo path once a pool exists. | 7B f16 at 32k on 12 GB: 1 → 2–3 slots; `--kv q8` 4 → 5 (ESTIMATED from the cache sizes; 1 and 4 are MEASURED in #42). No bits change. 8–16 h. MEASURED on bella: f16 1 → 2, q8 4 → 5 (the solo path in a view of a slot; C=1 decode unchanged). | done (#60): bella 7B at 32k, f16 1 → 2 slots, `--kv q8` 4 → 5; C=1 decode 101.4 → 102.8 tok/s, within noise (MEASURED) ([log](log/2026-10-17-serve-one-cache.md)) |
 | 3 | **Long-context decode attention** (one KV block per warp, a wider combine, then the q8 path). | Decode at 32k is where the lead breaks (MEASURED 7B 72.4 vs llama.cpp 76.7), and attention is paid per row, so it is also the concurrency bottleneck for agents: 8 clients at 32k are ESTIMATED 150 tok/s aggregate today, 216–320 after. q8 tg@32k +13.8 % MEASURED on the branch. | done (#50): bella 7B tg@32k f16 +3.3 % (the +12 % gate not met: attention is near the DRAM ceiling), `--kv q8` +17.6 %, 0.5B f16 +10 % (MEASURED). Next (planned): fold the combine, ESTIMATED ≈ +4 % |
 | 4 | **KV save/restore.** Slot ↔ pinned host RAM (`--cache-ram`, LRU by prefix) on eviction, `POST /slots/:id?action=save\|restore` to files in llama-server's shape, `chat --session FILE`. | More conversations than slots is the swarm's normal state; eviction costs a 5–12 s re-prefill today and ESTIMATED ~0.1 s after (1.75 GiB at the MEASURED 25.4 GB/s). A restored slot continues bit for bit; llama-server can't promise that. 20–30 h. Gate: restored == uninterrupted, tokens and KV bytes. | stage A done (#48, #54): AXKV session files and `chat --session`, exact; a 29.8k-position 7B f16 session restores in 0.41–0.45 s vs a 3.16 s re-prefill (RTX 4090, MEASURED). Stage B (`serve`: `--cache-ram`, `/slots` save/restore) planned |
-| 5 | **Paged KV.** A slot takes 64-position pages as it grows; `--ctx` is a cap, not a reservation. | The widest payoff of the list: a 14B agent on 12 GB stays all-GPU at 10–25k used tokens (ESTIMATED 17 → ~55 tok/s), a 7B card holds ~7 agents at 15k instead of 1–2 slots, and requests that fit no slot stop starving. Bit-identical by construction: paging changes addresses, never order (`docs/design` to come; r4-serve §4.2). The broadest kernel touch since S2 — keep the old entry points as identity-table wrappers. 40–60 h. | stages 0–1 done (#64, #68): every cache kernel reads through a page table (null = identity); `gen` md5 identical, C=1 speed within noise on bella (tg128 0.997×, 30k-prefix decode 1.000×, MEASURED) ([log](log/2026-10-17-paged-kv-s01.md)). Stages 2–3 (the pool allocates pages; serve plans, admits, reclaims and preempts by pages) in review (#71, [log](log/2026-10-17-paged-kv-s23.md)); stage 4 (preempt-by-store, shared prefix pages) after item 4 |
-| 6 | **Serve ops: `--api-key`, `/metrics`, `/slots`, `--max-prompt-tokens`, idle-slot timeout.** | What exposing `serve` on a LAN needs; parity with llama-server's operational surface. No bits risk. 12–20 h. | planned |
-| 7 | **MoE with the experts on the CPU** (Qwen3-30B-A3B first): router, attention and shared weights on the GPU, experts on the CPU for decode, experts streamed through the GPU for prefill (the hybrid's streamer, per expert). | 30B-class quality on 12 GB. ESTIMATED decode 35–55 tok/s (1.0 GB of active experts per token over 75 GB/s RAM) and 3000+ tok/s prefill, where llama.cpp's `--cpu-moe` prefills on the CPU. Medium bits risk: a new architecture and an exact top-k. 80–120 h. Gate: logits within llama.cpp's own CPU/CUDA spread; cache reuse == fresh prefill. gpt-oss-20b (MXFP4, sinks) after. | stages 0–1 on main (CPU only, exact); stage 2 in review: GPU attention + router, CPU experts (exact, graded vs the CPU; 30B decode ESTIMATED 46–51 tok/s at 8k from the Pruned-2B's per-layer timings); streamed prefill (stage 3) next ([plan](#mixture-of-experts), [log 1](log/2026-10-17-moe-stage1.md), [log 2](log/2026-10-17-moe-stage2.md)) |
-| 8 | **YaRN RoPE as an override** (`--rope-scaling yarn --rope-scale 4 --yarn-orig-ctx N`, llama.cpp's names), plus `chat` forgetting in halves. | No Qwen2.5/Qwen3 GGUF carries scaling keys (checked): 128k is a flag in llama.cpp and a refusal here. A 7B at 128k q8 fits 12 GB (3.7 GiB) and decodes at ESTIMATED 34 tok/s today, 65 after item 3; the 2-minute prefill is why item 4 comes first. New bits only when on. 12–20 h. `chat` today re-prefills ~24k tokens on nearly every exchange once a 32k window is full (`drop_oldest` keeps the minimum): dropping to half is 2–4 h. | planned, after 3 and 4 |
+| 5 | **Paged KV.** A slot takes 64-position pages as it grows; `--ctx` is a cap, not a reservation. | The widest payoff of the list: a 14B agent on 12 GB stays all-GPU at 10–25k used tokens (ESTIMATED 17 → ~55 tok/s), a 7B card holds ~7 agents at 15k instead of 1–2 slots, and requests that fit no slot stop starving. Bit-identical by construction: paging changes addresses, never order (`docs/design` to come; r4-serve §4.2). The broadest kernel touch since S2 — keep the old entry points as identity-table wrappers. 40–60 h. | stages 0–1 done (#64, #68): every cache kernel reads through a page table (null = identity); `gen` md5 identical, C=1 speed within noise on bella (tg128 0.997×, 30k-prefix decode 1.000×, MEASURED) ([log](log/2026-10-17-paged-kv-s01.md)). **stages 2–3 done** (#71, merged 10-19, [log](log/2026-10-17-paged-kv-s23.md)): the pool allocates pages; serve plans, admits, reclaims and preempts by pages; an OOM graph capture falls back to kernel-by-kernel steps. bella 7B at 32k, 7 × 15k agents + 600: aggregate ~+10 % (72.6 / 70.4 → 79.1 / 79.2 tok/s), md5 0/45 (MEASURED). On the H100 the pool held 128 full 8k sequences. Stage 4 (preempt-by-store, shared prefix pages) after item 4 |
+| 6 | **Serve ops: `--api-key`, `/metrics`, `/slots`, `--max-prompt-tokens`, idle-slot timeout.** | What exposing `serve` on a LAN needs; parity with llama-server's operational surface. No bits risk. 12–20 h. | done (#61, #62; [log](log/2026-10-17-serve-ops.md)) |
+| 7 | **MoE with the experts on the CPU** (Qwen3-30B-A3B first): router, attention and shared weights on the GPU, experts on the CPU for decode, experts streamed through the GPU for prefill (the hybrid's streamer, per expert). | 30B-class quality on 12 GB. ESTIMATED decode 35–55 tok/s (1.0 GB of active experts per token over 75 GB/s RAM) and 3000+ tok/s prefill, where llama.cpp's `--cpu-moe` prefills on the CPU. Medium bits risk: a new architecture and an exact top-k. 80–120 h. Gate: logits within llama.cpp's own CPU/CUDA spread; cache reuse == fresh prefill. gpt-oss-20b (MXFP4, sinks) after. stages 0–2 done (#63, #67, #76): CPU, then GPU attention + router with CPU experts (exact, graded vs the CPU; 30B decode ESTIMATED 46–51 tok/s at 8k from the Pruned-2B's per-layer timings, not run). The same split for gpt-oss (#98) and deepseek2 (#89). Streamed prefill (stage 3) next ([plan](#mixture-of-experts), [log 1](log/2026-10-17-moe-stage1.md), [log 2](log/2026-10-17-moe-stage2.md)) |
+| 8 | **YaRN RoPE as an override** (`--rope-scaling yarn --rope-scale 4 --yarn-orig-ctx N`, llama.cpp's names), plus `chat` forgetting in halves. | No Qwen2.5/Qwen3 GGUF carries scaling keys (checked): 128k is a flag in llama.cpp and a refusal here. A 7B at 128k q8 fits 12 GB (3.7 GiB) and decodes at ESTIMATED 34 tok/s today, 65 after item 3; the 2-minute prefill is why item 4 comes first. New bits only when on. 12–20 h. `chat` today re-prefills ~24k tokens on nearly every exchange once a 32k window is full (`drop_oldest` keeps the minimum): dropping to half is 2–4 h. | done: the YaRN override (#49, [log](log/2026-10-16-yarn.md)) and `chat --forget-to` (#75, [log](log/2026-10-18-chat-halves.md)) |
 | 9 | **Multi-GPU stage 1b**: the pool over a pipeline, two step batches in flight; and a measured 70B on 2×24 GB. | 32B serve on 2×4090 ≈ 2× one GPU's aggregate (ESTIMATED, [design](design/multi-gpu.md) §3.1); 70B Q4_K_M already runs under PP (ESTIMATED ~21 tok/s on 2×4090, 12k f16 / 24k q8 of KV) but no one has measured it: a $5 pod. 40–60 h + 8. | design done |
-| 10 | **Batched speculative decoding.** Draft rows for every running request in one verify step, on while rows × (K+1) ≤ 16 (the weight-read-once regime), off above. | +30–50 % per stream at ≤ 4 clients with a draft model (ESTIMATED from the MEASURED solo gains), nothing lost at 16. Lossless by the verify contract. 30–50 h. | planned (item 1 is done) |
+| 10 | **Batched speculative decoding.** Draft rows for every running request in one verify step, on while rows × (K+1) ≤ 16 (the weight-read-once regime), off above. | +30–50 % per stream at ≤ 4 clients with a draft model (ESTIMATED from the MEASURED solo gains), nothing lost at 16. Lossless by the verify contract. 30–50 h. | **first attempt closed by its kill rule** (#90, 10-19; branch `feat/serve-batched-draft` kept). bella, 7B + 0.5B drafter, job 1019-013704-5285: C=4 +24.6 % (d600) and +19.8 % (d4k), C=8 +5.4 % / +1.4 %, but at d16k C=4 −3.2 % with ITL p99 +67.6 %: the goodput gate kept drafting where plain decoding was faster ([rejected](experiments-rejected.md#speculation)). **Second attempt:** a depth-aware gate (verify cost grows with the KV length, so the break-even acceptance rate rises with depth), re-run on the same kill matrix; below the line in the [proposed order](#next-proposed-order-outside-review-10-19-owner-decides) |
 
 Below the line: shared-prefix pages (copy-on-write over item 5: a swarm's 20k system prompt held once; the swarm's
 real memory win; [Agent-harness workloads](#agent-harness-workloads-later-not-scheduled) item 2), fairness (aging for oversize requests, shortest-first admission), a batched-decode kernel profile
 (inside item 1's bench), q4 KV (under "Not planned", below).
 
-Also done, not yet in the table: **item 6, serve ops** (#61, #62: `--api-key`, `/metrics`, `/slots`,
+Detail on items 6 and 8 (now in the table): **serve ops** (#61, #62: `--api-key`, `/metrics`, `/slots`,
 `--max-prompt-tokens`, `--slot-idle-ms`; [log](log/2026-10-17-serve-ops.md),
-[follow-up](log/2026-10-17-serve-ops-followup.md)), and **item 8's YaRN override** (#49: a pass-key needle 18/18 up to 128k
-with it, 9/18 without; +7.7–8.0 % perplexity at 2k–8k on 7B, so opt-in; [log](log/2026-10-16-yarn.md)). Item 8's other half,
-`chat` forgetting in halves, is in review (`chat --forget-to F`, default 0.5: once the window is full, the oldest
+[follow-up](log/2026-10-17-serve-ops-followup.md)); **the YaRN override** (#49: a pass-key needle 18/18 up to 128k
+with it, 9/18 without; +7.7–8.0 % perplexity at 2k–8k on 7B, so opt-in; [log](log/2026-10-16-yarn.md)); and
+`chat` forgetting in halves (#75, `chat --forget-to F`, default 0.5: once the window is full, the oldest
 exchanges go until the rest fills half of it, so the next turns append to the cache instead of each re-prefilling
-it; cache == fresh prefill of what's kept; [log](log/2026-10-18-chat-halves.md)). Both status
-cells sit next to item 7's, which PR #67 edits, so they are updated here until #67 merges.
+it; cache == fresh prefill of what's kept; [log](log/2026-10-18-chat-halves.md)).
 
-Dependencies: 1 (done) → {4 stage B, 10}; 2 (done) → 5 (stages 0–1 done) → shared-prefix pages; 3 (done) and 4
+Dependencies: 1 (done) → {4 stage B, 10}; 2 (done) → 5 (stages 0–3 done) → shared-prefix pages; 3 (done) and 4
 → the rest of 8; stage 1 (done) → 9; the streamer (done) → 7.
 
 ## Agent-harness workloads (later: not scheduled)
 
-On the roadmap, not prioritised: nothing here jumps the queue above. Agent harnesses (Synaps, and others such as
+On the roadmap, not prioritised, and below the line in the [proposed order](#next-proposed-order-outside-review-10-19-owner-decides): nothing here jumps the queue above. Agent harnesses (Synaps, and others such as
 opencode, pi and codex) talk to `serve` through its OpenAI- or ollama-compatible API, and their load doesn't look
 like a chat benchmark. **Why:** several concurrent agent sessions on one consumer GPU, each with a ~15–20k-token
 system prompt plus tool definitions that the sessions share, long multi-turn histories, tool-call turns, and long
@@ -172,7 +250,7 @@ idle gaps while the human reads. Everything below is ESTIMATED or unmeasured; no
 on this workload.
 
 What works today: OpenAI `tool_calls` (streamed), per-slot prefix reuse, continuous batching (#38), a long prompt's
-admission no longer stalls the other streams (Scale item 1), and paged KV (#71, once merged).
+admission no longer stalls the other streams (Scale item 1), and paged KV (#71, merged 10-19).
 
 | # | item | why | status |
 |---|---|---|---|
@@ -181,7 +259,8 @@ admission no longer stalls the other streams (Scale item 1), and paged KV (#71, 
 | 3 | **Idle-session KV offload to host RAM.** | This is Scale item 4 (KV save/restore, stage B: `--cache-ram`), not a separate project. The agent motivation: a session idles for minutes while the human reads, and its slot is better spent on a session that is generating. | later: not scheduled (tracked as Scale item 4) |
 | 4 | **Fast first turn for MoE models.** Stream the experts through the GPU for prefill. | Today's prefill with the experts on the CPU is ~265 tok/s on gpt-oss-20b (MEASURED, bella, job 1018-092300-3a16, pp486), so a 20k agent prompt is about a minute to first token (ESTIMATED from that rate). The plan is item 1 of the design note `specs/gptoss-prefill.md`, the same work as MoE stage 3 ([Mixture-of-experts](#mixture-of-experts)). | later: not scheduled (tracked under MoE stage 3) |
 
-Batched speculative decoding for the decode side is #90 (Scale item 10); it isn't repeated here.
+Batched speculative decoding for the decode side is Scale item 10 (first attempt #90 closed by its kill rule; a
+second attempt with a depth-aware gate); it isn't repeated here.
 
 **Capacity on bella at ~25k context per session** (ESTIMATED: arithmetic from KV bytes per token, paged and
 `--kv q8`, against the VRAM left after the weights; not measured): a 14B ≈ 1 session, Qwen3-8B ≈ 3, Qwen2.5-7B ≈ 8,
@@ -215,7 +294,7 @@ streaming the experts through the GPU for prefill (stage 3) is what's left of it
    type, and sinks in every attention kernel); gates as item 1. ESTIMATED ~45 tok/s decode with every expert on the
    CPU ([research-bigmodels](research/research-bigmodels.md) §4.3).
    **Stage 0 done** (CPU only, exact: MXFP4, sinks, the window, YaRN, o200k, harmony;
-   [log](log/2026-10-18-gpt-oss-s0.md)). **Stage 1 in review**: #67's split (attention, sinks, window, router and
+   [log](log/2026-10-18-gpt-oss-s0.md)). **Stage 1 done** (#98, merged 10-19): #67's split (attention, sinks, window, router and
    head on the GPU, experts on the CPU; [log](log/2026-10-18-gpt-oss-s1.md)): bella tg128 46.6 tok/s, 1.99x
    llama.cpp `-ot exps=CPU`, but prefill 0.27x (its experts run on the CPU; llama.cpp ships big-batch expert GEMMs
    to the GPU). Next: an MXFP4 GPU kernel, bit-exact with the CPU's, for streamed-expert prefill and the whole model
@@ -255,11 +334,11 @@ trigger each step. Nothing here is scheduled.
 
 | model | kind | Q4_K_M | read per token | in Axon today | missing |
 |---|---|---|---|---|---|
-| Qwen3-235B-A22B | MoE | ≈ 141 GB | ≈ 13 GB | `qwen3moe`, CPU only (#63) | experts on the GPU (MoE stages 2–3); a box with ≥ 160 GB RAM |
-| Qwen3-Coder-480B-A35B | MoE | ≈ 288 GB | ≈ 21 GB | `qwen3moe`, CPU only | as above, ≥ 320 GB RAM |
+| Qwen3-235B-A22B | MoE | ≈ 141 GB | ≈ 13 GB | `qwen3moe`: CPU (#63), or attention on the GPU with the experts on the CPU (#67) | experts streamed / resident on the GPU (MoE stage 3+); a box with ≥ 160 GB RAM |
+| Qwen3-Coder-480B-A35B | MoE | ≈ 288 GB | ≈ 21 GB | `qwen3moe`, as above | as above, ≥ 320 GB RAM |
 | Llama 3.1 405B | dense | ≈ 243 GB | ≈ 243 GB | `llama`; pipeline parallel (#34) should run it on a 4×80 GB pod (untested) | tensor parallel, to make it fast |
-| DeepSeek V3 / R1 (671B, 37B active) | MoE + MLA | ≈ 403 GB | ≈ 22 GB | refused | MLA attention, DeepSeek routing, ≥ 450 GB RAM or a GPU node |
-| Kimi K2 (1T, 32B active) | DeepSeek V3 architecture | ≈ 600 GB | ≈ 19 GB | refused | same as DeepSeek, plus Kimi's tokenizer and 2–3-bit types; ≥ 650 GB at Q4_K_M ([long-term goal](#long-term-goals)) |
+| DeepSeek V3 / R1 (671B, 37B active) | MoE + MLA | ≈ 403 GB | ≈ 22 GB | `deepseek2` on the CPU (#79) and with MLA on the GPU, routed experts on the CPU (#89); run only on Moonlight-16B-A3B. Grouped routing (`expert_group_count > 1`) is refused | experts on the GPU, ≥ 450 GB RAM or a GPU node |
+| Kimi K2 (1T, 32B active) | DeepSeek V3 architecture | ≈ 600 GB | ≈ 19 GB | as DeepSeek V3, plus the `kimi-k2` tokenizer and chat format (#79); Q2_K / Q3_K run (#72) | the hardware: ≥ 650 GB at Q4_K_M, ≈ 250–380 GB at 2–3 bits ([long-term goal](#long-term-goals)) |
 | DeepSeek V4.1 Flash (1017) | MoE + new attention, vision | 444.7 GB (MEASURED: published GGUF shards) | ≈ 9 GB | refused (`deepseek41`) | a new architecture ([below](#deepseek-v41-flash)), experts on the GPU, a ≥ 500 GB node |
 
 **What's missing, in build order.**

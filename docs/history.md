@@ -1,8 +1,8 @@
 # Engineering history
 
 A chronological log of what was built, why, how it was checked and what it measured, from the first
-commit to main `a591e17` (2026-10-16 16:22 EDT), plus the open PRs at that point. Phases 17 and 18 carry it on,
-more briefly, to main `4507c75` (2026-10-18 06:05 EDT); their numbers come only from the PR bodies, and each
+commit to main `a591e17` (2026-10-16 16:22 EDT), plus the open PRs at that point. Phases 17 to 19 carry it on,
+more briefly, to main `764792f` (2026-10-19 22:05 EDT); their numbers come only from the PR bodies, and each
 PR's log entry in [log/](log/README.md) has the detail. Sources: the PR
 bodies (`gh pr view`), `git log`, the foreman's log (PROGRESS.md), the round specs, the builders'
 NOTES.md and the scoreboards. None of those except the PRs and git history are in the repo. The method
@@ -411,3 +411,46 @@ APIs, chat forgetting in halves, the contributor contract, and test-suite work.
 | #85 | 10-18 05:37 | docs: #80's slot-idle fix holds under 1-thread stress, not under 8 pool threads + 64 spinning (10/10 failed, freed 4.0–7.9 s after the fill) | an honest record for #80 | docs only |
 | #75 | 10-18 05:50 | `chat --forget-to F` (default 0.5): a full context forgets the oldest exchanges down to half, not just enough to make room | roadmap Scale 8: every turn after the fill paid a near-full re-prefill | 4090, 40 turns, `-n` unlimited: 7B ctx 8192 re-prefills every 4.14 turns instead of every turn, 6.5× fewer tokens, forgetting-turn TTFT 474.6 → 273.6 ms. `--forget-to min` == main's output; the default's differs once the context fills |
 | #87 | 10-18 06:05 | test: the slot-idle freeing bound counts the engine steps it waits for (idle + 2.5 s + 2 × the longest step) | #85: freeing takes idle plus up to two engine steps; under stress a step was 2–6 s | 8-thread stress 10/10 failed → 0/10. Test only, no server change |
+
+## Phase 19: GPU MoE splits, the paged pool, prefill waves, and the first datacenter board (2026-10-18 06:36 → 10-19 22:05, main 4507c75 → 764792f)
+
+Eighteen merges, two merge trains ([log](log/2026-10-19-merge-train.md)), one closed PR and one H100 pod. Numbers are
+copied from each PR body, MEASURED there unless marked.
+
+| PR | merged | what | why | numbers (from the PR body) |
+|---|---|---|---|---|
+| #88 | 10-18 06:36 | docs: results.md, history.md and README brought up to 4507c75 | 36 merges since the last refresh | docs only |
+| #81 C curve | 10-18 06:56 | `pool_step_cost` harness (nb 1–64 × depth); gemm2 partial tiles load nothing past the batch; the head as one product; gemvm32 routed per product | r12 perf pick 1: the batched step grew too fast with the rows | RTX 4090: 7B step at nb 32 14.08 → 9.81 ms (−30 %); serve 7B C=32 1868 → 2240 tok/s; 2 of 4 spec gates (T_step(16) and T_step(32) missed). vLLM-AWQ on the same card: C=32 2954. md5 20/20 |
+| #79 deepseek2 stage 0 | 10-18 07:55 | `deepseek2` on the CPU: absorbed MLA, DeepSeek routing, YaRN's attention scale, the `kimi-k2` / `deepseek-v3` tokenizers and chat formats | the first step towards Kimi K2 | exact reference on Moonlight-16B-A3B vs llama.cpp and an expanded-form oracle; md5 0/51 |
+| #86 C curve 2 | 10-18 12:09 | q\|k\|v and gate\|up in one gemvm launch at ≤ 16 rows | the pool step at nb 1 was 1.22× the solo decode step | RTX 4090: 7B nb 1 / 8 / 16 −6.5 / −5.1 / −6.2 %, 0.5B −16 … −19.5 %; T_step(16) 1.50× (gate 1.4× still missed). md5 0/20 |
+| #83 soak + zoo | 10-18 13:20 | `scripts/soak.py` (hours of mixed serve load), `scripts/zoo.py` (GGUFs from the wild vs llama.cpp); unsupported types named in refusals | roadmap item 2 | the zoo's one bug: 6 of 18 files refused as `type ?? (20)`; now named, with what to download instead. md5 0/18 + 0/18 |
+| #91 | 10-18 15:27 | docs: RunPod scoreboard at 7f42c02 (4090 / 5090 / H100 SXM vs llama.cpp ff5a233, ollama 0.40.6) | the 10-15 board was stale | 45/45 cells ahead; 4090 7B/8B decode only +3 %; cost $2.79 |
+| #93 | 10-18 18:34 | serve counts a request before its response is written | the `serve_api_key` flake (2 of ~130 logs) | test-visible race only |
+| #96 | 10-18 22:01 | docs: roadmap section "Agent-harness workloads (later: not scheduled)" | Haseeb wants them listed, not prioritised | docs only, ESTIMATED |
+| #82 | 10-18 22:42 | every GPU test takes the process-wide lock on every card; debug builds check each launch argument's size | the 4090 pod CUDA poison (ILLEGAL_ADDRESS) under concurrent tests | 514 pass, no POISON-RERUN on pods; release non-test code unchanged; md5 18/18 |
+| #89 deepseek2 stage 1 | 10-19 02:34 | `--device cuda` for deepseek2: MLA kernels (`mla.cu`, 576-wide f16 latent cache), router, shared experts and the dense lead on the GPU, routed experts on the CPU | r12 §4 | Moonlight decode 54.0 tok/s, 1.70× llama.cpp `-ot exps=CPU`, prefill 0.82×; top-1 993/1024 vs llama.cpp CPU (its own CUDA: 988). md5 0 differ |
+| #92 wave split | 10-19 02:34 | prompt passes sized to the GEMM waves on the device's SM count (`AXON_WAVE_SPLIT=0` off) | r15 pick 1: equal passes left partial waves | RTX 4090 pp2100 7B +3.03 %, Qwen3-8B +3.85 % (7 rounds, ranges don't overlap); same bits. `gen` / `logits` only |
+| #97 | 10-19 12:54 | `serve`'s single stream and `chat` feed prompts by the same wave-sized passes (`Lm::prompt_chunks`) | review of #92: the split didn't reach them | same bits (new end-to-end tests); speed not timed separately |
+| #102 safetensors stage A | 10-19 14:18 | Hugging Face checkpoint directories (qwen2 / qwen3 / llama) load natively; BF16 runs as the GGUF F16 of the same weights; CPU only | FP8 plan stage A | logits and `gen` equal to the converter's F16 GGUF 50/50 ×3; load +3.0 % vs GGUF; fuzz 309 + 1762 mutants, 0 findings; GGUF md5 0/20 |
+| #100 gemm2t | 10-19 15:28 | a 128-row × 64-token Q4_K / Q5_K GEMM tile (fused gate+up too) for prefill passes > 64 tokens (`AXON_GEMM_TILE=64` off) | r17: the activation fill, not the mma, bounds gemm2s | per MAC +22–28 % (sm_89), +21–26 % (sm_120); 7B pp1050 +17.3 % (bella). 4090 not run (ESTIMATED +12–15 % pp2100). md5 0/35 |
+| #71 paged KV 2+3 | 10-19 18:49 | the pool allocates pages; serve plans, admits, reclaims and preempts by pages; OOM-safe graph capture | r11 paged-KV spec | bella 7B at 32k, 7 × 15k agents + 600: ~+10 % aggregate; C=1 / C=8 within spread; md5 0/45. An exclusive bench found and fixed a real OOM crash before landing |
+| #84 attn_blk_mq | 10-19 18:49 | multi-query block attention for ≤ 32 queries of one sequence | r12 pick 3 | kill rule **failed** at 128 queries (0.76×, [rejected](experiments-rejected.md#gpu-attention)); at chunk 32 serve admit TTFT −6.4 %, ITL p99 −8.6 %; drafted gen at 21.7k +20.4 %. md5 22/22 |
+| #98 gpt-oss stage 1 | 10-19 18:49 | gpt-oss attention (sinks, alternating window), router and head on the GPU; MXFP4 experts on the CPU | MoE plan item 2 | tg128 46.6 vs 23.4 (1.99× llama.cpp `-ot exps=CPU`), prefill 0.27×; logits inside llama.cpp's spread; md5 0/106 |
+| #101 | 10-19 22:05 | ADR: determinism modes (`--numerics exact` / `fast`) and the roadmap's mission section. **Merged as PROPOSED**; the decision is Haseeb's | the outside review's "product or dev tool?" question | docs only |
+
+**Closed, not merged:** #90 batched speculative decoding (10-19 22:06), by its kill rule: C=4 +24.6 % (d600) and
++19.8 % (d4k), but −3.2 % with ITL p99 +67.6 % at 16k. The branch stays for a depth-aware second attempt
+([experiments-rejected.md](experiments-rejected.md#speculation)).
+
+**The first datacenter board** (10-19 20:58–21:36, run h100-1019-2058, [log](log/2026-10-19-h100-showdown.md)): Axon
+c15c90e vs vLLM 0.32.0 and SGLang 0.5.22 (AWQ and FP8) on one H100 SXM, Qwen2.5-7B. Fastest at C = 1 (mix 287 vs
+235–284 tok/s); 2.0–3.8× behind at C = 128 (mix 1,868 vs 3,770–7,146). Cost $3.09. It set the roadmap's top
+datacenter item ([Next: proposed order](roadmap.md#next-proposed-order-outside-review-10-19-owner-decides)).
+
+**Outside reviews** (10-19 01:14 and ~23:00, [docs/reviews/](reviews/README.md)): the first asked for the mission
+benchmark and the determinism-cost ADR (both done the same day); the second decomposed the H100 gap (kernel ≈ 65 %,
+scheduler ≈ 25 %, quant ≈ 10 %, its OPINION) and ranked the next five, now the roadmap's
+[proposed order](roadmap.md#next-proposed-order-outside-review-10-19-owner-decides) (owner decides).
+
+Development was paused from 10-19 03:13 (Haseeb): from then on only landings, merges of main, gate fixes and review
+fixes, and the measurement above.
