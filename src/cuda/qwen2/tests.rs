@@ -196,7 +196,7 @@ fn agreement(m: &Model, steps: usize) -> (Agree, Agree) {
     // repacks.
     let gpu = CudaQwen2::new(&g, &km, m, 256).unwrap();
     let rows = Qwen2::new_with(m, false);
-    let cpu = Qwen2::new(m);
+    let cpu = Qwen2::new_with(m, true);
     let (mut ag, mut ac) = (Agree::default(), Agree::default());
     for p in PROMPTS {
         let ids = tok.encode(p);
@@ -256,10 +256,23 @@ pub(crate) fn assert_graded(ag: &Agree, ac: &Agree) {
     assert_graded_floor(ag, ac, 94);
 }
 
+/// The grades are relative to `ac`, the CPU's per-row kernels against its
+/// default (repacked) ones: a reference with no spread (identical logits
+/// everywhere) means both were the same model, and every relative bound
+/// would be 0. Fail on that by name, not on the first bound it breaks.
+pub(crate) fn assert_ref_spread(ac: &Agree) {
+    assert!(
+        ac.positions == 0 || ac.max_abs > 0.0,
+        "reference spread is 0: cpu and rows are the same model (AXON_REPACK=0? build the reference \
+         with Qwen2::new_with(m, true))"
+    );
+}
+
 /// `assert_graded` with top-1 at least `floor` % (natural text, prose and
 /// code, has more near-ties: the CPU agrees with itself on only 93.8 % of
 /// natural_long's 1.5B positions).
 pub(crate) fn assert_graded_floor(ag: &Agree, ac: &Agree, floor: usize) {
+    assert_ref_spread(ac);
     let n = ag.positions;
     // Top-1: at most 2% of positions behind the CPU's self-agreement.
     assert!(
@@ -1498,7 +1511,7 @@ fn continuations_match(m: &Model, name: &str) {
     let tok = crate::tokenizer::Tokenizer::from_gguf(m);
     let mut gpu = CudaQwen2::new(&g, &km, m, 256).unwrap();
     let rows = Qwen2::new_with(m, false);
-    let cpu = Qwen2::new(m);
+    let cpu = Qwen2::new_with(m, true);
     // The CPU's continuations (with logits), once for all the comparisons.
     let refs: Vec<_> = PROMPTS
         .iter()
@@ -2159,7 +2172,7 @@ fn gpu_logits_match_cpu_long_context() {
     let gpu = CudaQwen2::new(&g, &km, &m, 1300).unwrap();
     assert!(gpu.graphs || std::env::var_os("AXON_CUDA_GRAPHS").is_some());
     let rows = Qwen2::new_with(&m, false);
-    let cpu = Qwen2::new(&m);
+    let cpu = Qwen2::new_with(&m, true);
     let (mut ag, mut ac) = (Agree::default(), Agree::default());
     for p in [PROMPTS[2], PROMPTS[1]] {
         let one = tok.encode(&format!("{p} "));
@@ -2199,7 +2212,7 @@ fn gpu_logits_match_cpu_2000_tokens() {
     let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
     let gpu = CudaQwen2::new(&g, &km, &m, 2100).unwrap();
     let rows = Qwen2::new_with(&m, false);
-    let cpu = Qwen2::new(&m);
+    let cpu = Qwen2::new_with(&m, true);
     let (mut ag, mut ac) = (Agree::default(), Agree::default());
     let one = tok.encode(&format!("{} ", PROMPTS[4]));
     let ids: Vec<u32> = one.iter().copied().cycle().take(2000).collect();
@@ -2227,7 +2240,7 @@ fn natural_long(m: &Model, name: &str) {
     let km = Kernels::module(&g).unwrap();
     let gpu = CudaQwen2::new(&g, &km, m, 1600).unwrap();
     let rows = Qwen2::new_with(m, false);
-    let cpu = Qwen2::new(m);
+    let cpu = Qwen2::new_with(m, true);
     let ids = natural_ids(m, 1600);
     let (mut ag, mut ac) = (Agree::default(), Agree::default());
     compare_forced2(&cpu, &gpu, &rows, &ids, 1100, &mut ag, &mut ac);
@@ -7024,7 +7037,7 @@ fn cuda_kv_q8_accuracy() {
         return;
     }
     let rows = Qwen2::new_with(&m, false);
-    let cpu = Qwen2::new(&m);
+    let cpu = Qwen2::new_with(&m, true);
     continuations_with(
         &cpu,
         &rows,
@@ -8042,6 +8055,7 @@ fn gpu_gemma3_prefill_and_verify_bits() {
 /// independent f64 `gemma3_ref` on that prefix is at least as close to the
 /// GPU as (twice) to the CPU (`gemma3_ref_closer`).
 fn assert_graded_gemma(ag: &Agree, ac: &Agree, ref_ok: &dyn Fn(usize) -> bool) {
+    assert_ref_spread(ac);
     let n = ag.positions;
     assert!(
         ag.top1 * 100 + 2 * n >= ac.top1 * 100 && ag.top1 * 100 >= 94 * n,
@@ -8136,7 +8150,7 @@ fn gemma3_vs_cpu(m: &Model, name: &str) {
     let tok = crate::tokenizer::Tokenizer::from_gguf(m);
     let gpu = CudaQwen2::new(&g, &km, m, 256).unwrap();
     let rows = Qwen2::new_with(m, false);
-    let cpu = Qwen2::new(m);
+    let cpu = Qwen2::new_with(m, true);
     const STEPS: usize = 32;
     let (mut ag, mut ac) = (Agree::default(), Agree::default());
     let mut seqs = Vec::new();
@@ -8190,7 +8204,7 @@ fn gemma3_flip_probe() {
     let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
     let gpu = CudaQwen2::new(&g, &km, &m, 256).unwrap();
     let rows = Qwen2::new_with(&m, false);
-    let cpu = Qwen2::new(&m);
+    let cpu = Qwen2::new_with(&m, true);
     const STEPS: usize = 32;
     let mut ag = Agree::default();
     let mut seqs = Vec::new();
@@ -8303,7 +8317,7 @@ fn gemma3_ref_walk_probe() {
         let km = Kernels::module_for(&g, &m).unwrap();
         let gpu = CudaQwen2::new(&g, &km, &m, 256).unwrap();
         let rows = Qwen2::new_with(&m, false);
-        let cpu = Qwen2::new(&m);
+        let cpu = Qwen2::new_with(&m, true);
         let a = gemma3_ref_walk(&m, &gpu, &cpu, &rows, 32);
         for (name, (mean, mx, top, n)) in ["gpu", "cpu", "cpu rows"].iter().zip(a) {
             eprintln!("{path} {name} vs f64 ref: mean KL {mean:.4} max {mx:.4}, top-1 {top}/{n}");
@@ -8321,7 +8335,7 @@ fn gemma3_cpu_probe() {
     let m = model_at(GEMMA3_1B_Q4).unwrap();
     let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
     let rows = Qwen2::new_with(&m, false);
-    let cpu = Qwen2::new(&m);
+    let cpu = Qwen2::new_with(&m, true);
     for spec in std::env::var("AXON_PROBE").unwrap().split(',') {
         let (k, st) = spec.split_once(':').unwrap();
         let (k, st): (usize, usize) = (k.parse().unwrap(), st.parse().unwrap());
