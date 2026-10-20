@@ -523,7 +523,8 @@ impl Framing {
 /// Where a harmony reply's tokens go, as they arrive (`Channels::push`).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Part {
-    /// Markers and channel headers: nobody sees them.
+    /// Markers and channel headers: nobody sees them. With tools, also a
+    /// call's arguments (`Channels::call` says whose).
     Hidden,
     /// A message on the analysis (or commentary) channel.
     Reasoning,
@@ -535,6 +536,11 @@ pub enum Part {
 /// name `<|message|>`) is read as it comes, its text is `Answer` if the
 /// name is `final`, else `Reasoning`; `<|end|>` / `<|start|>` / `<|return|>`
 /// end it. A reply with no header at all is the answer.
+///
+/// With tools (`with_tools`), a message addressed to a recipient (`to=X` in
+/// its role section, `<|start|>assistant to=functions.f<|channel|>...`, or in
+/// its channel header, `<|channel|>commentary to=functions.f ...`) is a call:
+/// its text is `Hidden` and `call` gives the recipient while it lasts.
 #[derive(Clone, Debug)]
 pub struct Channels {
     start: u32,
@@ -544,6 +550,27 @@ pub struct Channels {
     /// The current header's text (inside `<|channel|>`..`<|message|>`).
     name: Option<Vec<u8>>,
     part: Part,
+    /// Calls are told apart (tools were offered).
+    tools: bool,
+    /// With tools: the role section's text (after `<|start|>`), until the
+    /// message opens.
+    role: Option<Vec<u8>>,
+    /// With tools: the open message's recipient, if it has one.
+    to: Option<String>,
+}
+
+/// The recipient in a harmony header: what follows `to=` (at the start or
+/// after whitespace), up to whitespace or a marker.
+fn recipient(head: &[u8]) -> Option<String> {
+    let at = (0..head.len()).find(|&i| {
+        head[i..].starts_with(b"to=") && (i == 0 || head[i - 1].is_ascii_whitespace())
+    })?;
+    let rest = &head[at + 3..];
+    let n = rest
+        .iter()
+        .position(|&b| b.is_ascii_whitespace() || b == b'<')
+        .unwrap_or(rest.len());
+    (n > 0).then(|| String::from_utf8_lossy(&rest[..n]).into_owned())
 }
 
 impl Channels {
@@ -559,7 +586,21 @@ impl Channels {
             channel,
             name: None,
             part: Part::Answer,
+            tools: false,
+            role: None,
+            to: None,
         })
+    }
+
+    /// Tell calls apart (a request that offered tools).
+    pub fn with_tools(mut self) -> Channels {
+        self.tools = true;
+        self
+    }
+
+    /// While a call's text arrives: its recipient (`functions.NAME`).
+    pub fn call(&self) -> Option<&str> {
+        self.to.as_deref()
     }
 
     /// Token `id` (`bytes`, its text): where it goes.
@@ -570,6 +611,17 @@ impl Channels {
             return Part::Hidden;
         }
         if id == self.message {
+            if self.tools {
+                let mut head = self.role.take().unwrap_or_default();
+                head.push(b' ');
+                head.extend(self.name.as_deref().unwrap_or_default());
+                if let Some(to) = recipient(&head) {
+                    self.to = Some(to);
+                    self.name = None;
+                    self.part = Part::Hidden;
+                    return Part::Hidden;
+                }
+            }
             self.part = match self.name.take() {
                 Some(n) if n.trim_ascii().starts_with(b"final") => Part::Answer,
                 Some(_) => Part::Reasoning,
@@ -580,10 +632,18 @@ impl Channels {
         if id == self.start || id == self.end {
             self.name = None;
             self.part = Part::Hidden;
+            if self.tools {
+                self.to = None;
+                self.role = (id == self.start).then(Vec::new);
+            }
             return Part::Hidden;
         }
         if let Some(n) = &mut self.name {
             n.extend_from_slice(bytes);
+            return Part::Hidden;
+        }
+        if let Some(r) = &mut self.role {
+            r.extend_from_slice(bytes);
             return Part::Hidden;
         }
         self.part

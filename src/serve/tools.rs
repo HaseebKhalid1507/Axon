@@ -16,6 +16,14 @@
 //!   and a result is an `ipython` turn whose content is JSON-encoded, as the
 //!   template's `tojson` does with a string. The template allows one call
 //!   per assistant message.
+//! - gpt-oss (harmony): the tools as TypeScript (`# Tools` / `## functions`
+//!   / `namespace functions { ... }`, the template's `render_typescript_type`
+//!   with its whitespace) in the developer message, and a line about them
+//!   in the system message. A call is `<|start|>assistant to=functions.NAME
+//!   <|channel|>commentary json<|message|>{args}<|call|>`, a result
+//!   `<|start|>functions.NAME to=assistant<|channel|>commentary<|message|>`
+//!   `{content as a JSON string}<|end|>`; the template's rules on which
+//!   reasoning stays are in `harmony`.
 //!
 //! The template's own markers (`<|im_start|>`, `<tool_call>`, ...) become
 //! their special tokens. Message text, tool schemas and arguments are
@@ -40,6 +48,13 @@
 //!   content from calls is dropped.
 //! - Llama: a reply whose first non-blank character is `{` is held whole and
 //!   decided at the end. Any other reply streams as content.
+//! - Harmony: the engine splits the reply by channel (`chat::Channels`, told
+//!   to look for calls): analysis goes to reasoning, final to content, and a
+//!   message addressed `to=` a recipient (in its role section or its channel
+//!   header, either form) is written into the content in its history form,
+//!   which the parser reads as Hermes blocks are read. `<|call|>` ends the
+//!   reply, so there is one call per reply. Arguments that aren't JSON: the
+//!   block is content, as for the other formats.
 //!
 //! **Invalid JSON policy.** A block is a call only if it parses as a JSON
 //! object with a string `"name"`. Otherwise the whole block, tags included,
@@ -63,6 +78,8 @@
 //! call: `<tool_call>\n{"name": "` (named: through `"arguments": `). The model
 //! then has to call, and for Qwen3 the reply skips reasoning (the empty
 //! `<think>` block comes first). A named choice renders only that tool.
+//! gpt-oss: the reply opens as `<|start|>assistant to=functions.` (named:
+//! through `<|message|>`), skipping the analysis.
 
 use super::Template;
 use super::api::{ApiError, Usage, quote};
@@ -698,9 +715,20 @@ const MARKERS: [&str; 14] = [
     "<|python_tag|>",
 ];
 
+/// Harmony's markers (gpt-oss).
+const HARMONY_MARKERS: [&str; 7] = [
+    "<|start|>",
+    "<|end|>",
+    "<|message|>",
+    "<|channel|>",
+    "<|call|>",
+    "<|constrain|>",
+    "<|return|>",
+];
+
 impl<'t> Toks<'t> {
-    fn new(tok: &'t Tokenizer) -> Toks<'t> {
-        let markers = MARKERS
+    fn new(tok: &'t Tokenizer, markers: &[&'static str]) -> Toks<'t> {
+        let markers = markers
             .iter()
             .filter_map(|&m| chat::special(tok, m).map(|id| (m, id)))
             .collect();
@@ -761,6 +789,8 @@ pub enum Family {
     Qwen3,
     Qwen25,
     Llama31,
+    /// gpt-oss.
+    Harmony,
 }
 
 pub fn family(t: &Template) -> Option<Family> {
@@ -772,6 +802,8 @@ pub fn family(t: &Template) -> Option<Family> {
         })
     } else if matches!(t.fr.format, Format::Llama3 { .. }) {
         Some(Family::Llama31)
+    } else if matches!(t.fr.format, Format::Harmony { .. }) {
+        Some(Family::Harmony)
     } else {
         None
     }
@@ -803,6 +835,9 @@ pub struct Rendered {
     pub parser: Option<Parser>,
     /// The reply was prefilled past where a Qwen3 reply would think.
     pub no_reasoning: bool,
+    /// Harmony: the reply's channel splitter, telling calls apart, in the
+    /// state the prompt leaves it (a call it opened, for tool_choice).
+    pub channels: Option<chat::Channels>,
 }
 
 /// The prompt for a tool request, as the model's template renders it.
@@ -818,6 +853,9 @@ pub fn render(
             "tool calling is not supported for this model's chat format",
         ));
     };
+    if fam == Family::Harmony {
+        return harmony(t, tok, r);
+    }
     let forced = match &r.choice {
         Choice::Required => Some("{\"name\": \"".to_string()),
         Choice::Named(n) => Some(match fam {
@@ -826,10 +864,11 @@ pub fn render(
         }),
         _ => None,
     };
-    let mut k = Toks::new(tok);
+    let mut k = Toks::new(tok, &MARKERS);
     match fam {
         Family::Qwen3 | Family::Qwen25 => hermes(&mut k, fam, r)?,
         Family::Llama31 => llama(&mut k, t, r)?,
+        Family::Harmony => unreachable!(),
     }
     let thinks = fam == Family::Qwen3;
     if thinks && (no_think || forced.is_some()) {
@@ -856,6 +895,7 @@ pub fn render(
         ids: k.done(),
         parser,
         no_reasoning,
+        channels: None,
     })
 }
 
@@ -1059,6 +1099,328 @@ fn llama(k: &mut Toks, t: &Template, r: &ToolReq) -> Result<(), ApiError> {
 }
 
 // ---------------------------------------------------------------------------
+// Harmony (gpt-oss).
+
+/// How a call opens in the content `TextOut` hands the parser: the
+/// template's history form, `<|start|>assistant to=functions.NAME<|channel|>
+/// commentary json<|message|>{args}<|call|>`.
+pub const HARMONY_CALL: &str = "<|start|>assistant to=";
+const HARMONY_CALL_HEAD_END: &str = "<|channel|>commentary json<|message|>";
+pub const HARMONY_CALL_END: &str = "<|call|>";
+
+/// `held` (content before the call), then the opening of a call to `to`.
+pub fn harmony_call_open(held: &str, to: &str) -> String {
+    format!("{held}{HARMONY_CALL}{to}{HARMONY_CALL_HEAD_END}")
+}
+
+/// gpt-oss's template: tools as TypeScript in the developer message, a call
+/// as `<|start|>assistant to=functions.NAME<|channel|>commentary json
+/// <|message|>{args}<|call|>`, its result as `<|start|>functions.NAME
+/// to=assistant<|channel|>commentary<|message|>{content|tojson}<|end|>`.
+/// The template's rules: only a message's first call is rendered (one call
+/// per message), and a result is named after the last call; a call's
+/// reasoning (`reasoning_content`, else its content) is kept as an analysis
+/// message unless a later assistant message has no calls (a final answer);
+/// other reasoning is dropped; a system message other than the first isn't
+/// rendered. Where the template raises, this is lenient: given both content
+/// and reasoning, the reasoning is kept; it does refuse a tool message with
+/// no call before it.
+fn harmony(t: &Template, tok: &Tokenizer, r: &ToolReq) -> Result<Rendered, ApiError> {
+    let mut k = Toks::new(tok, &HARMONY_MARKERS);
+    let tools = !r.tools.is_empty();
+    k.lit("<|start|>system<|message|>");
+    k.text(&chat::harmony_system());
+    if tools {
+        k.text("\nCalls to these tools must go to the commentary channel: 'functions'.");
+    }
+    k.lit("<|end|>");
+    let (dev, msgs) = match r.msgs.split_first() {
+        Some((s, rest)) if s.role == TRole::System => (s.content.as_str(), rest),
+        _ => ("", &r.msgs[..]),
+    };
+    if !dev.is_empty() || tools {
+        k.lit("<|start|>developer<|message|>");
+        if !dev.is_empty() {
+            k.text("# Instructions\n\n");
+            k.text(dev);
+            k.text("\n\n");
+        }
+        if tools {
+            k.text("# Tools\n\n");
+            k.text(&ts_namespace(&r.tools));
+        }
+        k.lit("<|end|>");
+    }
+    let mut last: Option<&str> = None;
+    for (i, m) in msgs.iter().enumerate() {
+        match m.role {
+            TRole::Assistant if !m.calls.is_empty() => {
+                let answered = msgs[i + 1..]
+                    .iter()
+                    .any(|x| x.role == TRole::Assistant && x.calls.is_empty());
+                let cot = match m.reasoning.as_deref() {
+                    Some(s) if !s.is_empty() => s,
+                    _ => &m.content,
+                };
+                if !answered && !cot.is_empty() {
+                    k.lit("<|start|>assistant<|channel|>analysis<|message|>");
+                    k.text(cot);
+                    k.lit("<|end|>");
+                }
+                let c = &m.calls[0];
+                k.lit("<|start|>assistant to=functions.");
+                k.text(&c.name);
+                k.lit("<|channel|>commentary json<|message|>");
+                k.text(&args_tojson(c));
+                k.lit("<|call|>");
+                last = Some(&c.name);
+            }
+            TRole::Assistant => {
+                k.lit("<|start|>assistant<|channel|>final<|message|>");
+                k.text(&m.content);
+                k.lit("<|end|>");
+                last = None;
+            }
+            TRole::Tool => {
+                let Some(name) = last else {
+                    return Err(bad(
+                        "messages",
+                        "a tool message must follow an assistant message with a tool call",
+                    ));
+                };
+                k.lit("<|start|>functions.");
+                k.text(name);
+                k.lit(" to=assistant<|channel|>commentary<|message|>");
+                k.text(&J::Str(m.content.clone()).dumps());
+                k.lit("<|end|>");
+            }
+            TRole::User => {
+                k.lit("<|start|>user<|message|>");
+                k.text(&m.content);
+                k.lit("<|end|>");
+            }
+            TRole::System => {}
+        }
+    }
+    k.lit("<|start|>assistant");
+    // tool_choice required / named: the reply opens a call (skipping the
+    // analysis), in the history form.
+    match &r.choice {
+        Choice::Required => k.text(" to=functions."),
+        Choice::Named(n) => {
+            k.text(" to=functions.");
+            k.text(n);
+            k.lit("<|channel|>commentary json<|message|>");
+        }
+        _ => {}
+    }
+    let ids = k.done();
+    let channels = match r.choice {
+        Choice::None => None,
+        _ => {
+            let mut ch = chat::Channels::new(&t.fr).map(chat::Channels::with_tools);
+            if let Some(ch) = &mut ch {
+                let at = ids.iter().rposition(|&i| i == t.fr.im_start).unwrap_or(0);
+                for &id in &ids[at..] {
+                    ch.push(id, &tok.decode_bytes(&[id]));
+                }
+            }
+            ch
+        }
+    };
+    Ok(Rendered {
+        ids,
+        parser: channels.as_ref().map(|_| Parser::new_harmony()),
+        no_reasoning: false,
+        channels,
+    })
+}
+
+/// Jinja's truth of a value (absent: false).
+fn truthy(v: Option<&J>) -> bool {
+    match v {
+        None | Some(J::Null) => false,
+        Some(J::Bool(b)) => *b,
+        Some(J::Num(n)) => n.parse::<f64>() != Ok(0.0),
+        Some(J::Str(s)) => !s.is_empty(),
+        Some(J::Arr(a)) => !a.is_empty(),
+        Some(J::Obj(o)) => !o.is_empty(),
+    }
+}
+
+/// A value as jinja prints it (Python's `str`); containers as JSON.
+fn py(v: &J) -> String {
+    match v {
+        J::Str(s) => s.clone(),
+        J::Bool(true) => "True".into(),
+        J::Bool(false) => "False".into(),
+        J::Null => "None".into(),
+        J::Num(n) => n.clone(),
+        _ => v.dumps(),
+    }
+}
+
+/// `name in (required or [])`, Python's `in`.
+fn listed(required: Option<&J>, name: &str) -> bool {
+    match required {
+        Some(J::Arr(a)) => a.iter().any(|x| x.str() == Some(name)),
+        Some(J::Str(s)) => s.contains(name),
+        Some(J::Obj(o)) => o.iter().any(|(k, _)| k == name),
+        _ => false,
+    }
+}
+
+/// The template's `render_typescript_type`: a JSON Schema as a TypeScript
+/// type, whitespace and quirks included (a nested object's members on
+/// separate lines, a oneOf's variants joined with " | \n"; its "any" for
+/// object variants never applies: the flag is set inside a loop, and
+/// jinja's scoping drops it).
+fn ts_type(p: &J) -> String {
+    let ty = p.get("type");
+    let is = |s: &str| ty.and_then(J::str) == Some(s);
+    let nullable = if truthy(p.get("nullable")) {
+        " | null"
+    } else {
+        ""
+    };
+    if is("array") {
+        let items = p.get("items").filter(|i| truthy(Some(i)));
+        let Some(it) = items else {
+            return format!("any[]{nullable}");
+        };
+        let t = match it.get("type").and_then(J::str) {
+            Some("string") => "string[]".to_string(),
+            Some("number" | "integer") => "number[]".to_string(),
+            Some("boolean") => "boolean[]".to_string(),
+            _ => {
+                let inner = ts_type(it);
+                if inner == "object | object" || inner.chars().count() > 50 {
+                    "any[]".to_string()
+                } else {
+                    inner + "[]"
+                }
+            }
+        };
+        return t + nullable;
+    }
+    if let Some(J::Arr(a)) = ty
+        && !a.is_empty()
+    {
+        return a.iter().map(py).collect::<Vec<_>>().join(" | ");
+    }
+    if truthy(p.get("oneOf")) {
+        let Some(J::Arr(vs)) = p.get("oneOf") else {
+            return "any".into();
+        };
+        let mut s = String::new();
+        for (i, v) in vs.iter().enumerate() {
+            s.push_str(&ts_type(v));
+            if let Some(d) = v.get("description").filter(|d| truthy(Some(d))) {
+                s.push_str("// ");
+                s.push_str(&py(d));
+            }
+            if let Some(d) = v.get("default") {
+                s.push_str("                    // default: ");
+                s.push_str(&d.dumps());
+            }
+            if i + 1 < vs.len() {
+                s.push_str(" | \n");
+            }
+        }
+        return s;
+    }
+    if is("string") {
+        return match p.get("enum") {
+            Some(J::Arr(e)) if !e.is_empty() => {
+                let e: Vec<String> = e.iter().map(py).collect();
+                format!("\"{}\"", e.join("\" | \""))
+            }
+            Some(e) if truthy(Some(e)) => format!("\"{}\"", py(e)),
+            _ => format!("string{nullable}"),
+        };
+    }
+    if is("number") || is("integer") {
+        return "number".into();
+    }
+    if is("boolean") {
+        return "boolean".into();
+    }
+    if is("object") {
+        return match p.get("properties") {
+            Some(J::Obj(props)) if !props.is_empty() => {
+                let req = p.get("required");
+                let mut s = "{\n".to_string();
+                for (i, (name, spec)) in props.iter().enumerate() {
+                    s.push_str(name);
+                    if !listed(req, name) {
+                        s.push('?');
+                    }
+                    s.push_str(": \n                ");
+                    s.push_str(&ts_type(spec));
+                    if i + 1 < props.len() {
+                        s.push_str(", ");
+                    }
+                }
+                s + "}"
+            }
+            _ => "object".into(),
+        };
+    }
+    "any".into()
+}
+
+/// The template's `render_tool_namespace("functions", tools)`.
+fn ts_namespace(tools: &[J]) -> String {
+    let mut s = "## functions\n\nnamespace functions {\n\n".to_string();
+    let none = J::Null;
+    for t in tools {
+        let f = t.get("function").unwrap_or(&none);
+        s.push_str("// ");
+        s.push_str(&f.get("description").map_or(String::new(), py));
+        s.push('\n');
+        s.push_str("type ");
+        s.push_str(&f.get("name").map_or(String::new(), py));
+        s.push_str(" = ");
+        let params = f.get("parameters").filter(|p| truthy(Some(p)));
+        match params.and_then(|p| p.get("properties")) {
+            Some(J::Obj(props)) if !props.is_empty() => {
+                let req = params.and_then(|p| p.get("required"));
+                s.push_str("(_: {\n");
+                for (name, spec) in props {
+                    if let Some(d) = spec.get("description").filter(|d| truthy(Some(d))) {
+                        s.push_str("// ");
+                        s.push_str(&py(d));
+                        s.push('\n');
+                    }
+                    s.push_str(name);
+                    if !listed(req, name) {
+                        s.push('?');
+                    }
+                    s.push_str(": ");
+                    s.push_str(&ts_type(spec));
+                    if let Some(d) = spec.get("default") {
+                        if truthy(spec.get("enum")) {
+                            s.push_str(", // default: ");
+                            s.push_str(&py(d));
+                        } else if truthy(spec.get("oneOf")) {
+                            s.push_str("// default: ");
+                            s.push_str(&py(d));
+                        } else {
+                            s.push_str(", // default: ");
+                            s.push_str(&d.dumps());
+                        }
+                    }
+                    s.push_str(",\n");
+                }
+                s.push_str("}) => any;\n\n");
+            }
+            _ => s.push_str("() => any;\n\n"),
+        }
+    }
+    s + "} // namespace functions"
+}
+
+// ---------------------------------------------------------------------------
 // The reply.
 
 /// A call the model made.
@@ -1082,6 +1444,9 @@ enum Kind {
     Hermes,
     /// A whole reply of `{"name": ..., "parameters": ...}` (Llama 3.1).
     Json,
+    /// Harmony: calls in their history form among the final text (as
+    /// `TextOut` writes them from the channels).
+    Harmony,
 }
 
 const OPEN: &str = "<tool_call>";
@@ -1134,6 +1499,33 @@ fn call_of(body: &str) -> Option<Call> {
     })
 }
 
+/// A call from a harmony block's text (after `<|start|>assistant to=`):
+/// `functions.NAME<|channel|>...<|message|>{args}`. The arguments must be
+/// JSON (none: `{}`), else the block is not a call.
+fn harmony_call(body: &str) -> Option<Call> {
+    let (head, args) = body.split_once("<|message|>")?;
+    let to = head
+        .split(|c: char| c.is_whitespace() || c == '<')
+        .next()
+        .unwrap_or_default();
+    let name = to.strip_prefix("functions.").unwrap_or(to);
+    if name.is_empty() {
+        return None;
+    }
+    let args = match args.trim() {
+        "" => "{}",
+        a => {
+            parse_json(a)?;
+            a
+        }
+    };
+    Some(Call {
+        id: call_id(),
+        name: name.to_string(),
+        args: args.to_string(),
+    })
+}
+
 /// Reads a reply into content and calls as its text arrives.
 pub struct Parser {
     kind: Kind,
@@ -1166,6 +1558,11 @@ impl Parser {
             calls: 0,
             after_call: false,
         }
+    }
+
+    /// A harmony reply's parser (`TextOut` writes the calls in its content).
+    pub fn new_harmony() -> Parser {
+        Parser::new(Kind::Harmony)
     }
 
     /// A reply prefilled with the start of a call (`seed`: the call's text
@@ -1212,12 +1609,20 @@ impl Parser {
         out.push(Piece::Call(c));
     }
 
+    /// The markers around a call's text (Hermes: `<tool_call>` ...).
+    fn tags(&self) -> (&'static str, &'static str) {
+        match self.kind {
+            Kind::Harmony => (HARMONY_CALL, HARMONY_CALL_END),
+            _ => (OPEN, CLOSE),
+        }
+    }
+
     /// More of the reply's text: what is decided now.
     pub fn push(&mut self, s: &str) -> Vec<Piece> {
         let mut out = Vec::new();
         self.buf.push_str(s);
         match self.kind {
-            Kind::Hermes => self.hermes(&mut out),
+            Kind::Hermes | Kind::Harmony => self.hermes(&mut out),
             Kind::Json => {
                 if self.undecided {
                     let t = self.buf.trim_start();
@@ -1240,11 +1645,12 @@ impl Parser {
     }
 
     fn hermes(&mut self, out: &mut Vec<Piece>) {
+        let (open, close) = self.tags();
         loop {
             if self.inside {
-                let Some(at) = self.buf[self.scan..].find(CLOSE).map(|a| a + self.scan) else {
+                let Some(at) = self.buf[self.scan..].find(close).map(|a| a + self.scan) else {
                     // The next search starts where a `</tool_call>` could still begin.
-                    let mut w = self.buf.len().saturating_sub(CLOSE.len() - 1);
+                    let mut w = self.buf.len().saturating_sub(close.len() - 1);
                     while !self.buf.is_char_boundary(w) {
                         w -= 1;
                     }
@@ -1252,20 +1658,20 @@ impl Parser {
                     return;
                 };
                 let body = self.buf[..at].to_string();
-                self.buf.drain(..at + CLOSE.len());
+                self.buf.drain(..at + close.len());
                 self.inside = false;
                 self.scan = 0;
                 self.block(&body, true, out);
-            } else if let Some(at) = self.buf.find(OPEN) {
+            } else if let Some(at) = self.buf.find(open) {
                 let text = self.buf[..at].to_string();
-                self.buf.drain(..at + OPEN.len());
+                self.buf.drain(..at + open.len());
                 self.content(&text, out);
                 self.inside = true;
             } else {
                 // Hold back a tail that may still become `<tool_call>`.
-                let keep = (1..OPEN.len())
+                let keep = (1..open.len())
                     .rev()
-                    .find(|&n| self.buf.ends_with(&OPEN[..n]))
+                    .find(|&n| self.buf.ends_with(&open[..n]))
                     .unwrap_or(0);
                 let cut = self.buf.len() - keep;
                 let text: String = self.buf.drain(..cut).collect();
@@ -1279,10 +1685,15 @@ impl Parser {
 
     /// A finished block (`closed`: by `</tool_call>`): a call, or content.
     fn block(&mut self, body: &str, closed: bool, out: &mut Vec<Piece>) {
-        match call_of(body) {
+        let (open, close) = self.tags();
+        let call = match self.kind {
+            Kind::Harmony => harmony_call(body),
+            _ => call_of(body),
+        };
+        match call {
             Some(c) => self.call(c, out),
             None => {
-                let raw = format!("{OPEN}{body}{}", if closed { CLOSE } else { "" });
+                let raw = format!("{open}{body}{}", if closed { close } else { "" });
                 let ws = std::mem::take(&mut self.ws);
                 self.after_call = false;
                 out.push(Piece::Text(ws + &raw));
@@ -1295,11 +1706,11 @@ impl Parser {
         let mut out = Vec::new();
         let buf = std::mem::take(&mut self.buf);
         match self.kind {
-            Kind::Hermes if self.inside => {
+            Kind::Hermes | Kind::Harmony if self.inside => {
                 self.inside = false;
                 self.block(&buf, false, &mut out);
             }
-            Kind::Hermes => {
+            Kind::Hermes | Kind::Harmony => {
                 if !buf.is_empty() {
                     self.content(&buf, &mut out);
                 }

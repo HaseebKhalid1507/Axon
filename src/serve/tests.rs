@@ -1048,6 +1048,7 @@ fn text_out_reasoning_and_stops() {
             first: true,
             strip_nl: false,
             stop: super::StopMatcher::new(stops.iter().map(|s| s.to_string()).collect()),
+            in_call: false,
         };
         let (mut c, mut r) = (String::new(), String::new());
         for id in tok.encode_special(text) {
@@ -4284,4 +4285,252 @@ fn serve_counts_a_request_before_answering_it() {
     *want.entry(key("/metrics", 200)).or_default() += 1.0;
     assert_eq!(requests(), want, "after the connections ended");
     assert_eq!(probes.get(), cases.len() as f64 + 2.0);
+}
+
+/// gpt-oss with tools: the engine's text split (`TextOut` over the channels
+/// `tools::render` primes) turns a reply's call message into its history
+/// form in the content, whichever header carries the recipient, the
+/// analysis into reasoning, with stop strings never cutting a call; a
+/// tool_choice prefill is announced; without tools nothing changes. The
+/// parser makes the call out of those pieces as they stream. Tokenizer only.
+#[test]
+fn harmony_calls_from_channels() {
+    use super::tools::{self, Piece};
+    let Some(m) = crate::testutil::gptoss_model() else {
+        return;
+    };
+    let tok = Tokenizer::from_gguf(&m);
+    let t = Template::new(&tok, &m.arch).unwrap();
+    let render = |extra: &str| {
+        let body = format!(
+            r#"{{"messages": [{{"role": "user", "content": "Weather in Paris?"}}], "tools": [{{"type": "function", "function": {{"name": "get_weather", "parameters": {{"type": "object", "properties": {{"city": {{"type": "string"}}}}}}}}}}]{extra}}}"#
+        );
+        let r = tools::parse(body.as_bytes()).unwrap().unwrap();
+        tools::render(&t, &tok, &r, false).ok().unwrap().channels
+    };
+    // (content pieces, reasoning) of `reply`, a token at a time.
+    let run = |ch: Option<crate::chat::Channels>, reply: &str, stops: &[&str]| {
+        let mut out = super::TextOut {
+            tok: &tok,
+            utf8: Utf8Stream::default(),
+            think: None,
+            channels: ch,
+            reasoning: false,
+            first: true,
+            strip_nl: false,
+            stop: super::StopMatcher::new(stops.iter().map(|s| s.to_string()).collect()),
+            in_call: false,
+        };
+        let (mut c, mut r) = (Vec::new(), String::new());
+        for id in tok.encode_special(reply) {
+            let (a, b, hit) = out.push(id);
+            c.push(a);
+            r.push_str(&b);
+            if hit {
+                break;
+            }
+        }
+        let (a, b) = out.finish();
+        c.push(a);
+        r.push_str(&b);
+        (c, r)
+    };
+    let parse = |pieces: &[String]| {
+        let mut p = tools::Parser::new_harmony();
+        let mut out: Vec<Piece> = pieces.iter().flat_map(|s| p.push(s)).collect();
+        out.extend(p.finish());
+        out.into_iter()
+            .map(|x| match x {
+                Piece::Call(c) => format!("call {} {}", c.name, c.args),
+                Piece::Text(t) => format!("text {t}"),
+            })
+            .collect::<Vec<_>>()
+    };
+    let call = r#"<|start|>assistant to=functions.get_weather<|channel|>commentary json<|message|>{"city":"Paris"}<|call|>"#;
+    let want = [r#"call get_weather {"city":"Paris"}"#];
+    // The model's usual form: the recipient in the channel header.
+    let usual = r#"<|channel|>analysis<|message|>Need weather.<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"Paris"}"#;
+    let (c, r) = run(render(""), usual, &["}", "Paris"]);
+    assert_eq!((c.concat().as_str(), r.as_str()), (call, "Need weather."));
+    assert!(c.len() > 4, "streamed: {c:?}");
+    assert_eq!(parse(&c), want);
+    // The recipient in the role section (the template's form); a call ended
+    // by <|end|> is closed there.
+    let role = r#"<|channel|>analysis<|message|>Need weather.<|end|><|start|>assistant to=functions.get_weather<|channel|>commentary json<|message|>{"city":"Paris"}<|end|>"#;
+    let (c, r) = run(render(""), role, &[]);
+    assert_eq!((c.concat().as_str(), r.as_str()), (call, "Need weather."));
+    // A final answer: content, stop strings apply.
+    let fin = "<|channel|>analysis<|message|>Easy.<|end|><|start|>assistant<|channel|>final<|message|>It is 18C. Bye now";
+    let (c, r) = run(render(""), fin, &["Bye"]);
+    assert_eq!((c.concat().as_str(), r.as_str()), ("It is 18C. ", "Easy."));
+    // tool_choice named: the prompt opened the call; the reply is its
+    // arguments (or nothing).
+    let named = r#", "tool_choice": {"type": "function", "function": {"name": "get_weather"}}"#;
+    let (c, r) = run(render(named), r#"{"city":"Paris"}"#, &[]);
+    assert_eq!((c.concat().as_str(), r.as_str()), (call, ""));
+    let (c, _) = run(render(named), "", &[]);
+    assert_eq!(parse(&c), ["call get_weather {}"]);
+    // required: the model names the function.
+    let (c, _) = run(
+        render(r#", "tool_choice": "required""#),
+        r#"get_weather<|channel|>commentary json<|message|>{"city":"Paris"}"#,
+        &[],
+    );
+    assert_eq!(c.concat(), call);
+    // Without tools: the same reply is reasoning, as on main.
+    let (c, r) = run(crate::chat::Channels::new(&t.fr), usual, &[]);
+    assert_eq!(
+        (c.concat().as_str(), r.as_str()),
+        ("", r#"Need weather.{"city":"Paris"}"#)
+    );
+    assert!(render(r#", "tool_choice": "none""#).is_none());
+}
+
+/// gpt-oss-20b calls a tool for real (CUDA, greedy): asked for the weather
+/// with a get_weather tool it calls it (OpenAI shape, streamed and whole the
+/// same: reasoning in `reasoning_content`, the call's id and name in its
+/// first delta, then its arguments, no call in the finish chunk); given the
+/// result, it answers with it; named tool_choice calls at once; Responses
+/// and ollama /api/chat call too.
+#[test]
+fn serve_gptoss_tool_calls() {
+    let Some(path) = crate::testutil::gptoss_model_path() else {
+        return;
+    };
+    if crate::testutil::gpu().is_none() {
+        return;
+    }
+    let s = server_with(path.to_str().unwrap(), Device::Cuda, |o| o.ctx = Some(4096));
+    let a = s.addr;
+    let params = json!({"type": "object", "properties": {"city": {"type": "string",
+        "description": "City name"}}, "required": ["city"]});
+    let tools = json!([{"type": "function", "function": {"name": "get_weather",
+        "description": "Get the current weather in a city", "parameters": params}}]);
+    let user = json!({"role": "user", "content": "What's the weather in Paris right now?"});
+    let req = json!({"messages": [user], "tools": tools, "temperature": 0, "max_tokens": 1024});
+    let v = post(a, "/v1/chat/completions", req.clone()).json();
+    let ch = &v["choices"][0];
+    let m = &ch["message"];
+    assert_eq!(ch["finish_reason"], "tool_calls", "{v}");
+    assert!(m["content"].is_null(), "{v}");
+    let reasoning = m["reasoning_content"].as_str().unwrap();
+    assert!(!reasoning.is_empty(), "{v}");
+    let calls = m["tool_calls"].as_array().unwrap();
+    assert_eq!(calls.len(), 1, "{v}");
+    assert_eq!(calls[0]["function"]["name"], "get_weather", "{v}");
+    let args = calls[0]["function"]["arguments"].as_str().unwrap();
+    let parsed: Value = serde_json::from_str(args).unwrap();
+    assert!(parsed["city"].as_str().unwrap().contains("Paris"), "{v}");
+
+    // Streamed: the same reply.
+    let mut sreq = req.clone();
+    sreq["stream"] = json!(true);
+    let ev = post(a, "/v1/chat/completions", sreq).events();
+    assert_eq!(ev.last().map(String::as_str), Some("[DONE]"));
+    let (mut sr, mut sc, mut sargs, mut deltas, mut finish) = (
+        String::new(),
+        String::new(),
+        String::new(),
+        Vec::new(),
+        None,
+    );
+    for (i, e) in ev.iter().filter(|e| *e != "[DONE]").enumerate() {
+        let v: Value = serde_json::from_str(e).unwrap();
+        let c = &v["choices"][0];
+        if i == 0 {
+            assert_eq!(c["delta"]["role"], "assistant", "{e}");
+        }
+        sr.push_str(c["delta"]["reasoning_content"].as_str().unwrap_or(""));
+        sc.push_str(c["delta"]["content"].as_str().unwrap_or(""));
+        if let Some(f) = c["finish_reason"].as_str() {
+            finish = Some(f.to_string());
+            assert!(c["delta"].get("tool_calls").is_none(), "{e}");
+        }
+        for tc in c["delta"]["tool_calls"].as_array().into_iter().flatten() {
+            assert_eq!(tc["index"], 0, "{e}");
+            sargs.push_str(tc["function"]["arguments"].as_str().unwrap_or(""));
+            deltas.push(tc.clone());
+        }
+    }
+    assert_eq!(finish.as_deref(), Some("tool_calls"));
+    assert_eq!(
+        (sr.as_str(), sc.as_str(), sargs.as_str()),
+        (reasoning, "", args)
+    );
+    assert_eq!(deltas.len(), 2, "{deltas:?}");
+    assert!(deltas[0]["id"].as_str().unwrap().starts_with("call_"));
+    assert_eq!(deltas[0]["type"], "function");
+    assert_eq!(deltas[0]["function"]["name"], "get_weather");
+    assert_eq!(deltas[0]["function"]["arguments"], "");
+
+    // The result goes back: the answer uses it, and the prompt reuses the cache.
+    let p1 = v["usage"]["prompt_tokens"].as_u64().unwrap();
+    let result = r#"{"city": "Paris", "temperature_c": 31, "conditions": "thunderstorms"}"#;
+    let msgs = json!([user,
+        {"role": "assistant", "content": null, "tool_calls": calls},
+        {"role": "tool", "tool_call_id": calls[0]["id"], "content": result}]);
+    let v2 = post(
+        a,
+        "/v1/chat/completions",
+        json!({"messages": msgs, "tools": tools, "temperature": 0, "max_tokens": 1024}),
+    )
+    .json();
+    let c2 = &v2["choices"][0];
+    assert_eq!(c2["finish_reason"], "stop", "{v2}");
+    assert!(c2["message"].get("tool_calls").is_none(), "{v2}");
+    let answer = c2["message"]["content"].as_str().unwrap();
+    assert!(answer.contains("31"), "{v2}");
+    let cached = v2["usage"]["prompt_tokens_details"]["cached_tokens"]
+        .as_u64()
+        .unwrap();
+    assert!(cached + 2 >= p1, "reused {cached} of {p1}: {v2}");
+
+    // Named tool_choice: the call, without reasoning.
+    let named = json!({"messages": [{"role": "user", "content": "Hi there"}], "tools": tools,
+        "tool_choice": {"type": "function", "function": {"name": "get_weather"}},
+        "temperature": 0, "max_tokens": 64});
+    let v3 = post(a, "/v1/chat/completions", named).json();
+    let c3 = &v3["choices"][0];
+    assert_eq!(c3["finish_reason"], "tool_calls", "{v3}");
+    assert!(c3["message"].get("reasoning_content").is_none(), "{v3}");
+    assert_eq!(
+        c3["message"]["tool_calls"][0]["function"]["name"],
+        "get_weather"
+    );
+
+    // /v1/responses and ollama /api/chat.
+    let rtools = json!([{"type": "function", "name": "get_weather",
+        "description": "Get the current weather in a city", "parameters": params}]);
+    let r = post(
+        a,
+        "/v1/responses",
+        json!({"input": "What's the weather in Paris right now?", "tools": rtools,
+               "temperature": 0, "max_output_tokens": 1024}),
+    )
+    .json();
+    let fc: Vec<&Value> = r["output"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|i| i["type"] == "function_call")
+        .collect();
+    assert_eq!(fc.len(), 1, "{r}");
+    assert_eq!(fc[0]["name"], "get_weather");
+    assert_eq!(fc[0]["arguments"], json!(args), "{r}");
+    let o = post(
+        a,
+        "/api/chat",
+        json!({"messages": [user], "tools": tools, "stream": false,
+               "options": {"temperature": 0, "num_predict": 1024}}),
+    )
+    .json();
+    assert_eq!(
+        o["message"]["tool_calls"][0]["function"]["name"], "get_weather",
+        "{o}"
+    );
+    assert_eq!(
+        o["message"]["tool_calls"][0]["function"]["arguments"], parsed,
+        "{o}"
+    );
+    assert_eq!(o["done_reason"], "stop", "{o}");
 }

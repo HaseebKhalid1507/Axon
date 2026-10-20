@@ -410,22 +410,18 @@ struct TextOut<'t> {
     /// Drop newlines until the next other character.
     strip_nl: bool,
     stop: StopMatcher,
+    /// Harmony with tools: a call's text is going out (`TextOut::harmony`).
+    in_call: bool,
 }
 
 impl TextOut<'_> {
     /// One more token: (content, reasoning, a stop string was hit).
     fn push(&mut self, id: u32) -> (String, String, bool) {
         let first = std::mem::replace(&mut self.first, false);
-        if let Some(ch) = &mut self.channels {
-            let bytes = self.tok.decode_bytes(&[id]);
-            return match ch.push(id, &bytes) {
-                chat::Part::Hidden => Default::default(),
-                chat::Part::Reasoning => (String::new(), self.utf8.push(&bytes), false),
-                chat::Part::Answer => {
-                    let (c, hit) = self.stop.push(&self.utf8.push(&bytes));
-                    (c, String::new(), hit)
-                }
-            };
+        if let Some(mut ch) = self.channels.take() {
+            let r = self.harmony(&mut ch, id);
+            self.channels = Some(ch);
+            return r;
         }
         if let Some((open, close)) = self.think {
             if first && id == open {
@@ -451,8 +447,71 @@ impl TextOut<'_> {
         (c, String::new(), hit)
     }
 
+    /// A harmony reply's token. With tools, a call goes into the content
+    /// as its history form, `<|start|>assistant to=functions.NAME<|channel|>
+    /// commentary json<|message|>{args}<|call|>` (stop strings don't apply to
+    /// it), for the tools parser.
+    fn harmony(&mut self, ch: &mut chat::Channels, id: u32) -> (String, String, bool) {
+        let bytes = self.tok.decode_bytes(&[id]);
+        // A call the prompt opened (tool_choice) is announced first.
+        let mut c = self.call_open(ch);
+        let was = ch.call().is_some();
+        let part = ch.push(id, &bytes);
+        let now = ch.call().is_some();
+        if was && now {
+            c.push_str(&self.utf8.push(&bytes));
+            return (c, String::new(), false);
+        }
+        if self.in_call && !now {
+            c.push_str(&self.call_close());
+        }
+        c.push_str(&self.call_open(ch));
+        match part {
+            chat::Part::Hidden => (c, String::new(), false),
+            chat::Part::Reasoning => (c, self.utf8.push(&bytes), false),
+            chat::Part::Answer => {
+                let (a, hit) = self.stop.push(&self.utf8.push(&bytes));
+                c.push_str(&a);
+                (c, String::new(), hit)
+            }
+        }
+    }
+
+    /// The opening of the call `ch` is in, once (with the content held for
+    /// stop strings before it).
+    fn call_open(&mut self, ch: &chat::Channels) -> String {
+        match ch.call() {
+            Some(to) if !self.in_call => {
+                self.in_call = true;
+                tools::harmony_call_open(&self.stop.finish(), to)
+            }
+            _ => String::new(),
+        }
+    }
+
+    fn call_close(&mut self) -> String {
+        self.in_call = false;
+        self.utf8.finish() + tools::HARMONY_CALL_END
+    }
+
     /// The end of the output: what was held back.
     fn finish(&mut self) -> (String, String) {
+        let mut call = String::new();
+        if let Some(ch) = self.channels.take() {
+            call = self.call_open(&ch);
+            self.channels = Some(ch);
+        }
+        if self.in_call {
+            call.push_str(&self.call_close());
+        }
+        if !call.is_empty() {
+            let (c, r) = self.finish_text();
+            return (call + &c, r);
+        }
+        self.finish_text()
+    }
+
+    fn finish_text(&mut self) -> (String, String) {
         let s = self.utf8.finish();
         if self.reasoning {
             return (self.stop.finish(), s);
@@ -521,6 +580,7 @@ fn text_out<'t>(tok: &'t Tokenizer, job: &Job) -> TextOut<'t> {
         first: true,
         strip_nl: false,
         stop: StopMatcher::new(job.stops.clone()),
+        in_call: false,
     }
 }
 
@@ -2191,6 +2251,15 @@ fn run_request(
                 Some(tr) => match tools::render(t, m.tok, tr, no_think) {
                     Ok(r) => {
                         parser = r.parser;
+                        // Harmony: calls are told apart by channel. With
+                        // --think-inline the raw reply is the content.
+                        if let Some(ch) = r.channels {
+                            if sh.think_inline {
+                                parser = None;
+                            } else {
+                                channels = Some(ch);
+                            }
+                        }
                         let think = think.filter(|_| !r.no_reasoning);
                         (r.ids, t.stop().to_vec(), think)
                     }

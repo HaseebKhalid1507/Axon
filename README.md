@@ -471,8 +471,12 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
   `<tool_call>{"name": ..., "arguments": ...}</tool_call>`, and see results as
   `<tool_response>` blocks. Llama 3.1/3.2 get the tools in the first user message, call with
   a JSON reply (`{"name": ..., "parameters": ...}`) and see results as `ipython` turns (one
-  call per message, as the template requires). Other chat formats answer a tool request
-  with a 400. A request without tools or tool turns is rendered exactly as before.
+  call per message, as the template requires). gpt-oss (harmony) gets the tools as
+  TypeScript in the developer message (`# Tools` / `namespace functions { ... }`), calls on
+  the commentary channel (`to=functions.NAME ... <|call|>`, one call per reply) and sees
+  results as `functions.NAME` messages; its analysis channel stays `reasoning_content`.
+  Other chat formats answer a tool request with a 400. A request without tools or tool
+  turns is rendered exactly as before.
 - The reply's calls come back as OpenAI `tool_calls`, with `finish_reason: "tool_calls"`.
   Streamed: a call is sent as soon as its block closes, as two `delta.tool_calls` chunks: the
   first carries `index`, `id`, `type` and `function.name`, the second `function.arguments`.
@@ -496,8 +500,8 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
 - `tool_choice`: `auto` (default); `none` (the tools are not shown to the model, and its
   reply is plain content); `required` or `{"type": "function", "function": {"name": ...}}`.
   The last two start the reply with the opening of a call (the named one: through its
-  `"arguments": `), so the model must call. Qwen3 then skips its reasoning. Without
-  `tools` they are a 400.
+  `"arguments": `), so the model must call. Qwen3 and gpt-oss then skip their reasoning.
+  Without `tools` they are a 400.
   `parallel_tool_calls`, `strict`, `store`, `reasoning_effort` and `prompt_cache_key` are
   accepted and ignored.
 - Context: an agent's system prompt and tool schemas can be 15-25k tokens; the default
