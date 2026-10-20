@@ -1,0 +1,49 @@
+{
+ "label": "adopt-b363695-gates",
+ "verdict": "FAIL (1 of 2)",
+ "jobs": [
+  {
+   "job": "1020-125035-23c4",
+   "name": "adopt-b363695-md5serve",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.71.09",
+   "sha": "b363695",
+   "binary": "md5serve3.sh",
+   "started": 1792515034.9979577,
+   "ended": 1792515310.6593876,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "e33d12439ddf1b42121b4ff995b49ada3cc72fcec56f6479ede585e2ee6ee34f",
+   "log_bytes": 8551
+  },
+  {
+   "job": "1020-125037-0756",
+   "name": "adopt-b363695-abspeed-avante",
+   "rc": 127,
+   "verdict": "FAIL (rc 127)",
+   "host": "avante",
+   "hw": "hw-avante.txt",
+   "gpu": "NVIDIA GeForce RTX 4050 Laptop GPU",
+   "driver": "610.43.02",
+   "sha": "b363695",
+   "binary": "bash",
+   "started": 1792515103.224261,
+   "ended": 1792515112.0292459,
+   "attempts": 1,
+   "remote_job": "20261020-125148-bash-3189253",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "b40bb6eeb374909c935b7172e5b035e2cde976aecd3e1454a593c2d91667a8ab",
+   "log_bytes": 1113
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-20 12:55:11 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
