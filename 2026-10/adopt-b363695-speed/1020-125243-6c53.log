@@ -1,0 +1,77 @@
+[axon-run 12:52:43] submitted 1020-125243-6c53 by /home/haseeb/.cache/axon-wt-adopt: /usr/bin/bash abspeed-node.sh axon-main-aecc49d axon-b363695 7
+[axon-run 12:53:25] job 1020-125243-6c53 -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 3000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-adopt/avab-b363695 /usr/bin/bash abspeed-node.sh axon-main-aecc49d axon-b363695 7
+axon-remote: uploading bash (742d57e8c8c8f9f06797029a) + source of /home/haseeb/.cache/axon-adopt/avab-b363695
+
+sent 7,138,098 bytes  received 106 bytes  14,276,408.00 bytes/sec
+total size is 22,779,468  speedup is 3.19
+
+sent 701,915 bytes  received 35 bytes  467,966.67 bytes/sec
+total size is 1,268,912  speedup is 1.81
+axon-remote: job 20261020-125327-bash-3189684 on avante (GPU, 3000 MB)
+[axon-node 12:53:27] GPU lock taken; job wants 3000 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 48
+[axon-node 12:53:27] run bash (742d57e8c8c8f9f06797029a) as /home/haseeb/.cache/axon-adopt/avab-b363695 on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+abspeed-node: avante NVIDIA GeForce RTX 4050 Laptop GPU, 610.43.02, 48 12 cpus
+d0ec868f2a28bd1b993f673e8427b936d43bbba1cca3c6c766528d1aaf53d950  /home/haseeb/.cache/axon-adopt/avab-b363695/axon-main-aecc49d
+83becf577eedfeb49e7befc2b8f48f05c615f0c37f4da9162fd70d25006ccf31  /home/haseeb/.cache/axon-adopt/avab-b363695/axon-b363695
+cuda	qwen2.5-1.5b-instruct-q4_k_m	warm-a	0	504	9356.87	159.94
+cuda	qwen2.5-1.5b-instruct-q4_k_m	warm-b	0	504	10970.42	162.38
+cuda	qwen2.5-1.5b-instruct-q4_k_m	base	1	504	10716.02	161.31
+cuda	qwen2.5-1.5b-instruct-q4_k_m	cand	1	504	10592.79	154.74
+cuda	qwen2.5-1.5b-instruct-q4_k_m	cand	2	504	10732.85	154.47
+cuda	qwen2.5-1.5b-instruct-q4_k_m	base	2	504	10782.23	160.95
+cuda	qwen2.5-1.5b-instruct-q4_k_m	base	3	504	10762.08	155.61
+cuda	qwen2.5-1.5b-instruct-q4_k_m	cand	3	504	10759.89	153.69
+cuda	qwen2.5-1.5b-instruct-q4_k_m	cand	4	504	10555.56	153.63
+cuda	qwen2.5-1.5b-instruct-q4_k_m	base	4	504	10937.83	161.32
+cuda	qwen2.5-1.5b-instruct-q4_k_m	base	5	504	10483.88	154.44
+cuda	qwen2.5-1.5b-instruct-q4_k_m	cand	5	504	10400.94	153.75
+cuda	qwen2.5-1.5b-instruct-q4_k_m	cand	6	504	10935.44	161.02
+cuda	qwen2.5-1.5b-instruct-q4_k_m	base	6	504	10549.67	160.77
+cuda	qwen2.5-1.5b-instruct-q4_k_m	base	7	504	10753.84	153.26
+cuda	qwen2.5-1.5b-instruct-q4_k_m	cand	7	504	10570.47	153.52
+cuda	qwen2.5-0.5b-q4_k_m	warm-a	0	504	22132.27	346.77
+cuda	qwen2.5-0.5b-q4_k_m	warm-b	0	504	22137.78	347.94
+cuda	qwen2.5-0.5b-q4_k_m	base	1	504	22108.02	346.77
+cuda	qwen2.5-0.5b-q4_k_m	cand	1	504	21338.51	330.60
+cuda	qwen2.5-0.5b-q4_k_m	cand	2	504	22108.82	348.20
+cuda	qwen2.5-0.5b-q4_k_m	base	2	504	22129.21	347.52
+cuda	qwen2.5-0.5b-q4_k_m	base	3	504	22120.61	350.54
+cuda	qwen2.5-0.5b-q4_k_m	cand	3	504	22133.68	349.01
+[axon-run 12:53:57] FOREIGN_GPU sample max=0% mean=0.0% n=1
+cuda	qwen2.5-0.5b-q4_k_m	cand	4	504	22119.29	346.25
+cuda	qwen2.5-0.5b-q4_k_m	base	4	504	22138.04	344.49
+cuda	qwen2.5-0.5b-q4_k_m	base	5	504	22120.89	346.17
+cuda	qwen2.5-0.5b-q4_k_m	cand	5	504	22131.61	345.23
+cuda	qwen2.5-0.5b-q4_k_m	cand	6	504	22134.07	345.90
+cuda	qwen2.5-0.5b-q4_k_m	base	6	504	22144.39	345.75
+cuda	qwen2.5-0.5b-q4_k_m	base	7	504	22122.18	345.82
+cuda	qwen2.5-0.5b-q4_k_m	cand	7	504	21944.36	347.30
+cpu	qwen2.5-1.5b-instruct-q4_k_m	warm-a	0	504	220.13	47.48
+cpu	qwen2.5-1.5b-instruct-q4_k_m	warm-b	0	504	216.54	47.92
+cpu	qwen2.5-1.5b-instruct-q4_k_m	base	1	504	216.45	47.59
+cpu	qwen2.5-1.5b-instruct-q4_k_m	cand	1	504	201.63	47.63
+cpu	qwen2.5-1.5b-instruct-q4_k_m	cand	2	504	219.74	47.64
+[axon-run 12:54:31] FOREIGN_GPU sample max=0% mean=0.0% n=1
+cpu	qwen2.5-1.5b-instruct-q4_k_m	base	2	504	197.54	47.61
+cpu	qwen2.5-1.5b-instruct-q4_k_m	base	3	504	220.50	47.47
+cpu	qwen2.5-1.5b-instruct-q4_k_m	cand	3	504	218.57	48.11
+cpu	qwen2.5-1.5b-instruct-q4_k_m	cand	4	504	215.72	47.50
+cpu	qwen2.5-1.5b-instruct-q4_k_m	base	4	504	211.68	48.01
+cpu	qwen2.5-1.5b-instruct-q4_k_m	base	5	504	214.50	40.69
+[axon-run 12:55:05] FOREIGN_GPU sample max=0% mean=0.0% n=1
+cpu	qwen2.5-1.5b-instruct-q4_k_m	cand	5	504	179.44	36.82
+cpu	qwen2.5-1.5b-instruct-q4_k_m	cand	6	504	178.51	38.12
+cpu	qwen2.5-1.5b-instruct-q4_k_m	base	6	504	180.32	38.79
+cpu	qwen2.5-1.5b-instruct-q4_k_m	base	7	504	183.06	38.27
+cpu	qwen2.5-1.5b-instruct-q4_k_m	cand	7	504	190.12	38.96
+== summary (median [min-max], ratio cand/base)
+cuda qwen2.5-1.5b-instruct-q4_k_m pp504: base 10753.8 [10483.9-10937.8] cand 10592.8 [10400.9-10935.4] ratio 0.9850 (n=7)
+cuda qwen2.5-1.5b-instruct-q4_k_m tg128: base 160.8 [153.3-161.3] cand 153.8 [153.5-161.0] ratio 0.9563 (n=7)
+cuda qwen2.5-0.5b-q4_k_m pp504: base 22122.2 [22108.0-22144.4] cand 22119.3 [21338.5-22134.1] ratio 0.9999 (n=7)
+cuda qwen2.5-0.5b-q4_k_m tg128: base 346.2 [344.5-350.5] cand 346.2 [330.6-349.0] ratio 1.0002 (n=7)
+cpu qwen2.5-1.5b-instruct-q4_k_m pp504: base 211.7 [180.3-220.5] cand 201.6 [178.5-219.7] ratio 0.9525 (n=7)
+cpu qwen2.5-1.5b-instruct-q4_k_m tg128: base 47.5 [38.3-48.0] cand 47.5 [36.8-48.1] ratio 1.0006 (n=7)
+[axon-node 12:55:32] exit 0 after 125.0s
+[axon-node 12:55:32] peak RSS 1055 MB (job process tree PSS, 2 s samples x62)
+[axon-run 12:55:33] exit 0 after 127.9s (host avante)
+[axon-run 12:55:37] FOREIGN_GPU max=0% mean=0.0% samples=3
