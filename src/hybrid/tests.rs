@@ -112,7 +112,7 @@ fn mixed_graded(rel: &str, name: &str) {
     let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
     let n = block_count(&m).unwrap();
     let rows = Qwen2::new_with(&m, false);
-    let cpu = Qwen2::new(&m);
+    let cpu = Qwen2::new_with(&m, true);
     // The CPU's reference pass over each prompt, once for all four
     // comparisons below.
     let refs: Vec<_> = PROMPTS
@@ -956,7 +956,7 @@ fn stream_graded(rel: &str, name: &str) {
     let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
     let n = block_count(&m).unwrap();
     let rows = Qwen2::new_with(&m, false);
-    let cpu = Qwen2::new(&m);
+    let cpu = Qwen2::new_with(&m, true);
     // The CPU's reference pass over each prompt, once (as `mixed_graded`).
     let refs: Vec<_> = PROMPTS
         .iter()

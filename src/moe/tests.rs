@@ -291,7 +291,7 @@ fn logits_graded(small: bool, name: &str) {
     // Per-row first: the repacked models release the bytes they repack.
     let rows = Qwen2::new_with(&m, false);
     let net = moe_net(&g, &km, &mm, &m, 256);
-    let cpu = Qwen2::new(&m);
+    let cpu = Qwen2::new_with(&m, true);
     let steps = std::env::var("AXON_TEST_MOE_STEPS").map_or(96, |v| v.parse().unwrap());
     let (mut ag, mut ac) = (Agree::default(), Agree::default());
     for p in PROMPTS {

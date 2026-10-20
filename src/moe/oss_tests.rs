@@ -292,7 +292,7 @@ fn oss_gpu_logits_graded_model() {
     let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
     let rows = crate::model::Qwen2::new_with(&m, false);
     let net = moe_net(&g, &km, &mm, &m, 256);
-    let cpu = crate::model::Qwen2::new(&m);
+    let cpu = crate::model::Qwen2::new_with(&m, true);
     let steps = std::env::var("AXON_TEST_MOE_STEPS").map_or(32, |v| v.parse().unwrap());
     let (mut ag, mut ac) = (Agree::default(), Agree::default());
     for p in PROMPTS {
