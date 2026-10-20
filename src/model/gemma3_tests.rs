@@ -237,12 +237,44 @@ fn gemma3_ref_probe() {
     println!("axon {:?}", top(&log_softmax(&l), 5));
 }
 
+/// Two logits closer than this in the reference are a tie for the top-token
+/// check. With max |dlogit| <= d enforced, a top-1 flip is only possible
+/// where the reference's top-2 gap is under 2d (< 2 at the 1.0 bound), so
+/// the band is set from data, not from the bound. Issue #106's
+/// measurements (Gemma 3 1B Q4_K_M; 4 prompts, every position, windows
+/// None and 6, 140 points per CPU build, job 1020-021440-ff16): every
+/// top-1 miss with d < 1 had a reference gap of at most 0.348 (0.348, 0.109,
+/// 0.062, all in place, window 6). Every miss at a larger gap had d > 1 and
+/// fails the bound. 0.5 sits just above 0.348. The 0.348 one is this test's
+/// last position at window 6: the reference has 7001 at 17.984 and 506 at
+/// 17.637, the in-place build (per-row kernels) picks 506 by 0.017 and the
+/// r8 build picks 7001. The two builds differ only in the matmul kernels'
+/// f32 accumulation order (docs/determinism.md), which rounding amplifies.
+/// Be clear what this costs: where the reference gap is under 0.5 (the last
+/// position in both window configs here) the top check accepts either of
+/// the top two. Telling the window apart is left to `NEIGHBOR_MIN`.
+const TOP_TIE: f64 = 0.5;
+
+/// At window 6, at least this far (max |dlogit|) from the window-5 and
+/// window-7 references wherever they differ from window 6's: an off-by-one
+/// window bound fails here even if its top token falls in the `TOP_TIE`
+/// band (the window-5 reference's top at the last position is 506, the
+/// in-place build's pick). Measured (#106, job 1020-031341-ba0c): both
+/// builds are 2.92-5.63 from the window-5 reference at positions 5-10 and
+/// 3.88-7.92 from the window-7 one at positions 6-10, against at most 0.885
+/// from window 6's.
+const NEIGHBOR_MIN: f64 = 2.0;
+
 /// The CPU model on the Gemma 3 1B file against `gemma3_ref`, one-token
 /// decode and batched prefill: |dlogit| bounded (8-bit activations), and
-/// the same top token. A window shorter than the prompt (the model's own
-/// 512 is set to 6 here via a metadata edit) checks the local layers'
-/// masking: the windowed reference and model agree, and differ from the
-/// full-attention ones.
+/// the same top token up to a reference near-tie (`TOP_TIE`). A window
+/// shorter than the prompt (the model's own 512 is set to 6 here via a
+/// metadata edit) checks the local layers' masking at every position from
+/// 5 on: the windowed reference and model agree, differ from the
+/// full-attention ones, and are `NEIGHBOR_MIN` away from windows 5 and 7.
+/// Both CPU builds run, whatever AXON_REPACK says: in place (per-row
+/// kernels) and repacked (r8/r8q), each from its own load (repacking
+/// releases the file's tensors).
 #[test]
 fn gemma3_matches_reference_forward() {
     let Some(path) = crate::testutil::gemma3_model_path() else {
@@ -250,9 +282,10 @@ fn gemma3_matches_reference_forward() {
     };
     let ids: Vec<u32> = vec![2, 818, 5279, 529, 7001, 563, 9079, 236761, 669, 5279, 529];
     let n = ids.len();
-    let at: Vec<usize> = vec![3, n - 1];
-    let mut full: Option<Vec<f64>> = None;
-    for window in [None, Some(6usize)] {
+    // Position 3 is inside any window here; 5..=10 are where window 6
+    // differs from window 5 (and 6..=10 from window 7 and None).
+    let at: Vec<usize> = vec![3, 5, 6, 7, 8, 9, n - 1];
+    let load = |window: Option<usize>| {
         let mut m = crate::gguf::load(path.to_str().unwrap()).unwrap();
         if let Some(w) = window {
             for (k, v) in m.metadata.iter_mut() {
@@ -261,51 +294,89 @@ fn gemma3_matches_reference_forward() {
                 }
             }
         }
-        let want = gemma3_ref(&m, &ids, &at);
+        m
+    };
+    let maxd = |a: &[f64], b: &[f64]| {
+        a.iter()
+            .zip(b)
+            .fold(0f64, |mx, (x, y)| mx.max((x - y).abs()))
+    };
+    let mut full: Option<Vec<f64>> = None;
+    for window in [None, Some(6usize)] {
+        let want = gemma3_ref(&load(window), &ids, &at);
         // The window must matter at the last position (it's past 6).
         match &full {
-            None => full = Some(want[1].clone()),
+            None => full = Some(want[at.len() - 1].clone()),
             Some(f) => {
-                let d = f
-                    .iter()
-                    .zip(&want[1])
-                    .fold(0f64, |mx, (a, b)| mx.max((a - b).abs()));
+                let d = maxd(f, &want[at.len() - 1]);
                 assert!(d > 3.0, "the window changed the reference by {d} only");
             }
         }
-        let net = Qwen2::new(&m);
-        // Decode, one token at a time.
-        let mut c = net.new_cache(n);
-        let mut dec = Vec::new();
-        for (p, &id) in ids.iter().enumerate() {
-            let l = net.forward(id, p, &mut c);
-            if at.contains(&p) {
-                dec.push(l);
+        // Window 6's neighbours, and the first position each differs from it at.
+        let neighbors: Vec<(usize, Vec<Vec<f64>>)> = match window {
+            Some(w) => [w - 1, w + 1]
+                .into_iter()
+                .map(|nw| (nw, gemma3_ref(&load(Some(nw)), &ids, &at)))
+                .collect(),
+            None => Vec::new(),
+        };
+        for repack in [false, true] {
+            let m = load(window);
+            let net = Qwen2::new_with(&m, repack);
+            let tag = format!("window {window:?}, repack {repack}");
+            // Decode, one token at a time.
+            let mut c = net.new_cache(n);
+            let mut dec = Vec::new();
+            for (p, &id) in ids.iter().enumerate() {
+                let l = net.forward(id, p, &mut c);
+                if at.contains(&p) {
+                    dec.push(l);
+                }
             }
-        }
-        // Batched prefill, then the logits of the last position.
-        let mut c2 = net.new_cache(n);
-        net.feed_batch(&ids[..n - 1], 0, &mut c2);
-        let last = net.forward(ids[n - 1], n - 1, &mut c2);
-        assert_eq!(
-            last.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-            dec[1].iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
-            "window {window:?}: batched prefill != decode"
-        );
-        for (got, want) in dec.iter().zip(&want) {
-            let d = got
-                .iter()
-                .zip(want)
-                .fold(0f64, |mx, (&g, &w)| mx.max((g as f64 - w).abs()));
-            let am = |v: &[f64]| top(v, 1)[0].0;
-            let g64: Vec<f64> = got.iter().map(|&v| v as f64).collect();
-            println!(
-                "window {window:?}: max |dlogit| {d:.4}, top {} vs {}",
-                am(&g64),
-                am(want)
+            // Batched prefill, then the logits of the last position.
+            let mut c2 = net.new_cache(n);
+            net.feed_batch(&ids[..n - 1], 0, &mut c2);
+            let last = net.forward(ids[n - 1], n - 1, &mut c2);
+            assert_eq!(
+                last.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+                dec[at.len() - 1]
+                    .iter()
+                    .map(|v| v.to_bits())
+                    .collect::<Vec<_>>(),
+                "{tag}: batched prefill != decode"
             );
-            assert!(d < 1.0, "window {window:?}: max |dlogit| {d}");
-            assert_eq!(am(&g64), am(want), "window {window:?}: top token");
+            for (i, (got, want)) in dec.iter().zip(&want).enumerate() {
+                let p = at[i];
+                let g64: Vec<f64> = got.iter().map(|&v| v as f64).collect();
+                let d = maxd(&g64, want);
+                let (tg, t2) = (top1(&g64), top(want, 2));
+                let (tw, gap) = (t2[0].0, t2[0].1 - t2[1].1);
+                println!(
+                    "{tag}, pos {p}: max |dlogit| {d:.4}, top {tg} vs {tw}, reference top-2 gap {gap:.4}"
+                );
+                assert!(d < 1.0, "{tag}, pos {p}: max |dlogit| {d}");
+                // The model's top token is the reference's, or within
+                // TOP_TIE of it in the reference, and the model scores the
+                // reference's top within TOP_TIE of its own.
+                assert!(
+                    tg == tw || (want[tw] - want[tg] < TOP_TIE && g64[tg] - g64[tw] < TOP_TIE),
+                    "{tag}, pos {p}: top token {tg} vs reference {tw}: reference gap {}, model gap {}",
+                    want[tw] - want[tg],
+                    g64[tg] - g64[tw]
+                );
+                // Far from the neighbouring windows' references wherever
+                // those differ from this window's (p >= min(nw, w)).
+                for (nw, r) in &neighbors {
+                    if p >= (*nw).min(window.unwrap()) {
+                        let dn = maxd(&g64, &r[i]);
+                        println!("{tag}, pos {p}: max |dlogit| vs window {nw} reference {dn:.4}");
+                        assert!(
+                            dn > NEIGHBOR_MIN,
+                            "{tag}, pos {p}: only {dn} from the window {nw} reference"
+                        );
+                    }
+                }
+            }
         }
     }
 }
