@@ -1,10 +1,15 @@
 # Where Axon stands
 
 The latest measured comparisons against ollama and llama.cpp, per host and model. Every number here is
-MEASURED unless marked otherwise, and comes from a scoreboard or a PR. Main is `4507c75` (2026-10-18 06:05 EDT).
+MEASURED unless marked otherwise, and comes from a scoreboard or a PR. Main is `764792f` (2026-10-19 22:05 EDT).
 
-> **None of the boards below was run on `4507c75`** (nor on `a591e17`, the main this page was first written
-> for). The newest full boards are from main `0851798` (bella GPU, 2026-10-15 13:06) and main `f8d8a86`
+**Newest result: the first datacenter serving board** (H100 SXM, main `c15c90e`, 2026-10-19, [below](#serving-runpod-h100-sxm-main-c15c90e-2026-10-19)).
+Axon is the fastest of five engine/weight rows at one stream and 2.0–3.8× behind vLLM / SGLang at 128 concurrent
+requests.
+
+> **No single-stream board below was run on `764792f`** (nor on `4507c75` or `a591e17`, the mains this page was
+> written for before). The newest single-stream board is RunPod at `7f42c02` (2026-10-18; see the exception at the
+> end of this box); the H100 serving board ran on `c15c90e`. The newest full boards are from main `0851798` (bella GPU, 2026-10-15 13:06) and main `f8d8a86`
 > (RunPod, avante, CPU, 2026-10-15/16). Merges since then that can change speed or output on some path (none
 > has been re-boarded). Each effect is copied from that PR's own body: **MEASURED** where the PR measured it
 > (host and A/B as stated there), **not measured** where it didn't. Nothing in this table was re-run for this page.
@@ -37,9 +42,22 @@ MEASURED unless marked otherwise, and comes from a scoreboard or a PR. Main is `
 > | a591e17 | #78 gpt-oss on the CPU | new path only (gpt-oss-20b, MXFP4); md5 36/36 on 9 other models. Numbers below |
 > | — | #54, #62, #68, #76 | code with no speed claim, output unchanged (md5): session-file lock (#54), auth before any body (#62), CUDA refuses gemma3 head sizes other than 256 (#68), MoE guards and a host-only RAM check (#76: a `qwen3moe` split's RAM need, from the check's formula, Pruned-2B 3.2 → 2.7 GB, 30B 20.5 → 19.5 GB) |
 > | — | #46, #47, #53, #58, #59, #65, #66, #69, #73, #74, #77, #80, #85, #87 | docs, tests and scripts only; no speed or output effect (#80's non-test release binary is byte-identical to main's) |
+> | 4507c75 | #81 C curve | serve batch only (the pool step). **MEASURED** (RTX 4090): 7B step at nb 32 14.08 → 9.81 ms (−30 %), nb 64 −12 %; serve 7B C=32 1868 → 2240 tok/s (an earlier build). Same bits (the zero-filled tile columns are never stored); md5 20/20 |
+> | 4507c75 | #86 C curve 2 | pool steps of ≤ 16 rows (q\|k\|v and gate\|up in one launch). **MEASURED** (RTX 4090): 7B nb 1 / 8 / 16 −6.5 / −5.1 / −6.2 %, 0.5B −16 … −19.5 %. Same bits by construction; md5 0/20 |
+> | 4507c75 | #79 deepseek2 stage 0, #83 soak / zoo | new path only (`deepseek2` on the CPU) and clearer refusal messages; md5 0/51 (#79) and 0/18 + 0/18 (#83) |
+> | 7f42c02 | #92 wave-sized prompt passes, #97 | `gen` / `logits` (#92), then `serve`'s single stream and `chat` (#97): multi-pass prompts split to fill the GEMM waves. **MEASURED** (RTX 4090, 7 rounds): pp2100 7B +3.03 %, Qwen3-8B +3.85 %; other lengths −0.4 … +1.8 %. Not measured on an H100 or a 5090; #97 not timed separately. Same bits (pass boundaries are outside the identity) |
+> | 7f42c02 | #100 gemm2t 128 × 64 tile | prefill passes of > 64 tokens, Q4_K / Q5_K products. **MEASURED** per MAC: sm_89 +22–28 % (avante), sm_120 +21–26 % (bella); end to end 7B pp1050 +17.3 % (bella), 3B pp1050 +15.4 % (avante). RTX 4090 pp2100 ESTIMATED +12–15 %, **not run**. md5 0/35 (bella) |
+> | 7f42c02 | #71 paged KV stages 2–3 | `serve` on one GPU (the pool now allocates pages; `AXON_PAGED_KV=0` = the old pool). **MEASURED** (bella exclusive): C=1 92.4 → 92.8, C=8 401.2 → 394.6 (inside the 383–404 round spread); 7B 32k, 7 × 15k agents + 600: aggregate ~+10 %. md5 0/45 |
+> | 7f42c02 | #84 attn_blk_mq | one-sequence passes of ≤ 32 queries (`AXON_ATT_MQ=0` off). **MEASURED** (bella): tg128 −0.3 % (within noise); serve admit at chunk 32 TTFT −6.4 %; gen + draft at 21.7k +20.4 %. md5 22/22 |
+> | 7f42c02 | #89 deepseek2 stage 1, #98 gpt-oss stage 1 | new paths only (`--device cuda` on those architectures); md5 vs main 0 differ (#89: dense, qwen3moe, gpt-oss rows; #98: 0/106). Numbers: [New models and types](#new-models-and-types-since-the-boards) |
+> | 7f42c02 | #102 safetensors stage A | new path only (Hugging Face directories, CPU); GGUF `gen` md5 0/20 |
+> | — | #82, #93 | tests and debug builds (#82: one GPU test at a time on every card, a debug-only launch-size check; release non-test code unchanged) and a serve metrics-ordering fix with no speed claim (#93) |
+> | — | #88, #91, #96, #101 | docs only (#101 is a PROPOSED ADR: nothing built) |
 >
 > **Exception:** the [RunPod board of 2026-10-18](#gpu-runpod-rtx-4090--rtx-5090--h100-sxm-main-7f42c02-2026-10-18-1411--1508)
-> ran on main `7f42c02` (which contains `4507c75` and every PR in this table), so the table does not apply to it.
+> ran on main `7f42c02`, which contains every row above marked `4507c75` or earlier; only the `7f42c02` rows apply to it
+> (for prefill, mainly #92 and #100). The [H100 serving board](#serving-runpod-h100-sxm-main-c15c90e-2026-10-19) ran on
+> `c15c90e`, which contains every code row in the table.
 >
 > Treat the tables as "at least this good on the default path", with the caveat that nobody has
 > re-measured that. The exceptions are start-up costs: #51's model digest and #72's one-time kernel compile come
@@ -47,6 +65,46 @@ MEASURED unless marked otherwise, and comes from a scoreboard or a PR. Main is `
 
 Method for all boards: [methodology.md](methodology.md#benchmark-protocol). Full raw tables:
 [benchmarks-gpu.md](benchmarks-gpu.md) and [../BENCH.md](../BENCH.md).
+
+## Serving: RunPod H100 SXM, main c15c90e, 2026-10-19
+
+Run `h100-1019-2058`. Qwen2.5-7B-Instruct on one H100 80GB HBM3 SXM: Axon `serve --parallel 128` (Q4_K_M GGUF) vs
+vLLM 0.32.0 and SGLang 0.5.22, each with AWQ int4 and with FP8. Closed loop, C = 1 … 128, two workloads (*classic*:
+519-token prompt, 512 out; *mix*: chat plus 2k–7.6k-token prompts), 2 rounds, engines interleaved per C, greedy.
+**The weights differ per row** (Q4_K_M vs AWQ vs FP8; Axon has no FP8 path), so this compares engines as deployed,
+not kernels on equal bits. Full tables: [benchmarks-gpu.md](benchmarks-gpu.md#concurrency-h100-sxm-qwen25-7b-2026-10-19);
+method, cost and what went wrong: [log](log/2026-10-19-h100-showdown.md).
+
+| aggregate tok/s | C=1 | C=8 | C=32 | C=128 |
+|---|---:|---:|---:|---:|
+| mix: Axon | **287** | 795 | 1,324 | 1,868 |
+| mix: best other (engine) | 284 (SGLang-AWQ) | 1,212 (SGLang-AWQ) | 3,448 (SGLang-FP8) | 7,146 (vLLM-FP8) |
+| mix: vLLM-AWQ (like-for-like 4-bit) | 235 | 1,096 | 3,012 | 5,748 |
+| classic: Axon | **304** | 1,278 | 2,466 | 4,485 |
+| classic: best other | 296 (SGLang-AWQ) | 2,015 (SGLang-AWQ) | 6,149 (SGLang-FP8) | 14,380 (SGLang-FP8) |
+| classic: vLLM-AWQ | 240 | 1,786 | 5,682 | 12,190 |
+
+| latency at C = 128, mix | Axon | the other four |
+|---|---:|---|
+| TPOT p50 | 57.9 ms | 12.7–26.4 ms |
+| ITL p50 / p99 | 58.0 / **77.5** ms | 5.2–10.8 / 126–320 ms |
+| TTFT p50 / p99 | 2,361 / 14,513 ms | 452–1,161 / 1,920–5,266 ms |
+| requests inside the SLO (TPOT ≤ 50 ms, TTFT ≤ 2 s + 0.25 s per 1k prompt tokens) | 0.256 | 0.668–0.99 |
+
+- **Ahead:** C = 1 throughput (+20–27 % over vLLM, but only +1 % / +3 % over SGLang-AWQ: inside one pod's
+  uncertainty), C = 1 mix TTFT p50 (14.6 vs 18.1–27.5 ms), ITL p99 at mix C = 128 (flat, slow steps rather than
+  spikes), and cold start (1.0 s with the shipped kernel cache vs 42–71 s).
+- **Behind:** throughput at every C ≥ 8, by 2.0–3.8× at C = 128 (1.8–3.2× on classic); ITL p50, TPOT and TTFT p99 at
+  C ≥ 32; on classic, also ITL p99 from C = 32 up (51.7–62.0 vs 5.2–39.7 ms).
+- **Why (ESTIMATED, not profiled):** the batched-decode step at 64–128 rows on sm_90 (tuned on sm_120 / sm_89; no
+  decode-shaped wgmma / Marlin-class GEMM) and admission / chunked prefill at high C. On the 4090 at C = 32 Axon was
+  0.76× vLLM-AWQ; on the H100 0.43×. Plan: [roadmap, proposed order](roadmap.md#next-proposed-order-outside-review-10-19-owner-decides).
+- **Cost:** $3.09 for the pod (46 min, secure, $3.99/h); of the driver's $2.96, $1.46 bought timed cells.
+- **Before the pod:** an exclusive avante A/B (job `1019-203211-9269`) showed the 10-19 merge train didn't regress
+  serve: ecb53b7 vs c15c90e, classic C=1/2/4 333/570/1,067 vs 333/571/1,067 tok/s, mix 306/482/793 vs 306/474/791.
+
+The earlier concurrency cell: RTX 4090, 10-18, Axon feat/c-curve vs vLLM 0.31.0 AWQ, classic shape: C=1 181 vs 166,
+C=8 999 vs 1,149, C=32 2,240 vs 2,954 ([benchmarks-gpu.md](benchmarks-gpu.md#concurrency-rtx-4090-qwen25-7b-2026-10-18)).
 
 ## GPU: bella (RTX 5070 Ti Laptop, sm_120, 12 GB), main 0851798, 2026-10-15 13:06
 
@@ -206,17 +264,27 @@ summary in [benchmarks-gpu.md](benchmarks-gpu.md#jaded-cpu-only-for-context).
 
 ## New models and types since the boards
 
-Each row is the PR's own run against llama.cpp 4413a19 (#63, #67, #78; #72 doesn't state its llama.cpp build). None of these models is on a scoreboard.
+Each row is the PR's own run against llama.cpp 4413a19 (#63, #67, #78, #89, #98; #72 doesn't state its llama.cpp build). None of these models is on a scoreboard.
 
 | path | PR | measured | host and caveats |
 |---|---|---|---|
 | `qwen3moe` on the CPU | #63 | 4x0.6B pp560 1542 vs 371, tg128 118.6 vs 48.3; Pruned-2B pp560 4811 vs 2209, tg128 216.8 vs 101.3 | bella CPU, each engine at its best thread count, 3 rounds. Dev models only: the real Qwen3-30B-A3B wasn't run |
 | `qwen3moe`, attention on the GPU, experts on the CPU | #67 | vs `llama-server --cpu-moe`: tg128 4x0.6B 157 vs 101, Pruned-2B 674 vs 376; **pp512 4x0.6B 2080 vs 5316, Pruned-2B 8613 vs 12621 (llama.cpp ahead)** | bella, best thread count each, 3 rounds. 30B not run |
+| gpt-oss-20b, attention on the GPU, MXFP4 experts on the CPU | #98 | tg128 46.6 vs 23.4 (1.99×, llama.cpp CUDA `-ot exps=CPU`, its best of 8/16/24 threads); **prefill 265 vs 995 (0.27×, llama.cpp ahead)** | bella, 3 rounds; llama.cpp decodes from an empty context, axon after a 486-token prompt. Warm only: a cold first request decoded at 29.5. Experts on the CPU for prefill too (the cause) |
+| deepseek2 (Moonlight-16B-A3B Q4_K_M), MLA on the GPU, routed experts on the CPU | #89 | decode 54.0 tok/s, 1.70× llama.cpp `-ot exps=CPU`; **prefill 0.82×** | bella, 3 interleaved rounds. The only deepseek2 model run; under the spec's 55–70 tok/s ESTIMATE |
 | gpt-oss-20b on the CPU | #78 | pp 130.0 (739-token prompt) vs 104.8 (pp512), 1.24×; tg128 23.5 vs 11.2, 2.10× | bella, exclusive, 24 threads both, neither pinned, llama.cpp's thread count not swept, prompt lengths differ |
 | Q2_K / Q3_K on the GPU | #72 | 7B Q3_K_M pp2100 3787 vs 3467 (+9 %), tg128 96.1 vs 98.9 (**−3 %**); 7B Q2_K pp560 2876 vs 3032 (**−5 %**), pp2100 +3 %, tg128 121.9 vs 111.2 (+10 %) | bella GPU vs `llama-bench -ngl 99`, 3 rounds |
 | Q2_K / Q3_K on the CPU | #72 | 7B Q2_K pp2100 57.2 vs 97.0 (**−41 %**), tg128 22.2 vs 10.4; 7B Q3_K_M pp2100 87.8 vs 112.2 (**−22 %**), tg128 18.8 vs 9.0 | bella CPU, 16 threads, 3 rounds, on a binary with the merged CPU kernels (0cb1e7a); a confirmation run on the final binary was queued, not a gate |
 
-## Known losses and gaps (as of 4507c75)
+## Known losses and gaps (as of 764792f)
+
+- **Datacenter serving (H100 SXM, 10-19):** 2.0–3.8× behind vLLM / SGLang on throughput at C = 128 (mix 1,868 vs
+  3,770–7,146 tok/s), behind from C = 8 up, TPOT p50 57.9 ms vs 12.7–26.4, 26 % of requests inside the SLO, TTFT p99
+  14.5 s. Different weights per row (Q4_K_M vs AWQ / FP8). [Above](#serving-runpod-h100-sxm-main-c15c90e-2026-10-19).
+- Serving on the RTX 4090 (10-18): 13–24 % behind vLLM-AWQ at C = 8–32 (since then #86 cut the ≤ 16-row step 5–6 %;
+  not re-served).
+- MoE prefill with the experts on the CPU: gpt-oss-20b 0.27× and Moonlight 0.82× llama.cpp (#98, #89); see also #67
+  below.
 
 - Long-context decode at 32k on 7B / 0.5B vs llama.cpp (above). #50 merged (+3.3–3.5 % on 7B f16, +10–12 % on 0.5B
   f16 in its own runs); nobody has re-boarded it against llama.cpp.
@@ -234,4 +302,6 @@ Each row is the PR's own run against llama.cpp 4413a19 (#63, #67, #78; #72 doesn
   layout yet. Q2_K pp560 and Q3_K_M tg128 on the GPU trail by 5 % and 3 %.
 - MoE prefill trails llama.cpp `--cpu-moe` 2.6× (4x0.6B) and 1.5× (Pruned-2B) at pp512 (#67): llama.cpp ships the
   big-batch expert products to the GPU (stage 3 here).
-- MoE and gpt-oss were measured on dev models or on the CPU only: no real Qwen3-30B-A3B run, no gpt-oss GPU path.
+- MoE was measured on dev models, gpt-oss-20b and Moonlight-16B-A3B only: no real Qwen3-30B-A3B run, nothing larger.
+- Batched speculative decoding in `serve` (#90) was closed by its kill rule: −3.2 % and ITL p99 +67.6 % at 16k
+  depth, though +20–25 % at C = 4 on short and 4k contexts ([experiments-rejected.md](experiments-rejected.md#speculation)).

@@ -1,7 +1,8 @@
 # Axon
 
 LLM inference for Qwen2, Qwen3, Llama 3 and Gemma 3 GGUF models on the CPU and on NVIDIA
-GPUs, plus Qwen3 MoE (Qwen3-30B-A3B's architecture) and gpt-oss-20b (attention on the GPU, experts on the CPU), written
+GPUs, plus Qwen3 MoE (Qwen3-30B-A3B's architecture), gpt-oss-20b and DeepSeek V2/V3 / Kimi K2's architecture
+(attention on the GPU, experts on the CPU), and Hugging Face safetensors checkpoints (CPU), written
 from scratch in Rust.
 
 **Mission: make LLM inference cheap and fast, and run the best open models.** Cheap means wasting no
@@ -15,7 +16,7 @@ No ggml, no BLAS, no binding crates, no CUDA toolkit at build time: a GGUF reade
 quantized integer dot-product kernels (scalar, AVX2, AVX-VNNI), a spinning worker
 pool and a transformer forward pass on the CPU; on the GPU, CUDA C++ kernels that
 NVRTC compiles at run time, launched through the driver API (both libraries loaded
-with dlopen). About 76k lines of Rust and 7k of CUDA, tests included.
+with dlopen). About 90k lines of Rust and 8k of CUDA, tests included (677 `#[test]`s in `src/`).
 
 Every optimized path is **bit-identical** to the plain reference path on its
 device: batched prefill produces exactly the logits that feeding one token at a
@@ -149,8 +150,9 @@ Works today, honestly scoped:
   `GET /metrics` (Prometheus), `GET /slots`, `--max-prompt-tokens`, `--slot-idle-ms`.
 - Rust 1.89 or newer.
 
-Not on main yet: tensor parallel, saving and restoring `serve` slots, streaming MoE experts through the GPU for long
-prompts (stage 3), and gpt-oss's experts on the GPU. What's in flight and why: [docs/roadmap.md](docs/roadmap.md). How Axon is built and measured, and
+Not on main yet: tensor parallel, FP8 weights, saving and restoring `serve` slots, streaming MoE experts through the
+GPU for long prompts (stage 3) or keeping them there, batched speculative decoding in `serve` (the first attempt, #90,
+was closed by its kill rule), and fast batched decode on Hopper (see Numbers: serving on an H100). What's in flight and why: [docs/roadmap.md](docs/roadmap.md). How Axon is built and measured, and
 what was tried and dropped: [docs/methodology.md](docs/methodology.md),
 [docs/history.md](docs/history.md), [docs/experiments-rejected.md](docs/experiments-rejected.md).
 
@@ -614,6 +616,30 @@ over the 10-15 board, but the driver and host changed too, so that gain is not a
 pp560 gaps are wider (up to 5.3x vs llama.cpp, 12x vs ollama outside the four ollama cells with a
 cold first run) but mostly measure the other engines' fixed per-request cost; quote pp2100. Caveats (split ollama passes, prebuilt llama.cpp, a 5090
 prefill drop vs the 10-15 board that is not yet attributed): [docs/benchmarks-gpu.md](docs/benchmarks-gpu.md).
+This board predates #92 and #100 (prefill: +3 % at pp2100 on a 4090, MEASURED; and a new 128 × 64 tile, +17 % at
+pp1050 on the dev laptop, MEASURED, the 4090 ESTIMATED +12–15 %), so its prefill columns are not current.
+
+**Serving on an H100 SXM** (main c15c90e, 2026-10-19, Qwen2.5-7B, closed loop, 2 rounds; run h100-1019-2058): Axon
+(Q4_K_M) against vLLM 0.32.0 and SGLang 0.5.22, each with AWQ int4 and with FP8. The weights differ per row (Axon has
+no FP8 path), so this compares engines as deployed. Aggregate tok/s on the *mix* workload (chat plus 2k–7.6k-token
+prompts):
+
+| engine | weights | C=1 | C=8 | C=32 | C=128 | TPOT p50 at C=128 | ITL p99 at C=128 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Axon | Q4_K_M | **287** | 795 | 1,324 | 1,868 | 57.9 ms | **77.5 ms** |
+| vLLM | AWQ | 235 | 1,096 | 3,012 | 5,748 | 16.7 ms | 205 ms |
+| SGLang | AWQ | 284 | **1,212** | 2,477 | 3,770 | 26.4 ms | 320 ms |
+| vLLM | FP8 | 239 | 1,103 | 3,328 | **7,146** | **12.7 ms** | 140 ms |
+| SGLang | FP8 | 246 | 1,172 | **3,448** | 7,135 | 12.9 ms | 126 ms |
+
+Honest reading: Axon is the fastest single stream (by 1 % over SGLang-AWQ, which one pod can't settle; +20 % over
+vLLM) and has the flattest ITL tail at C = 128, but it is **2.0–3.8× behind on throughput at C = 128** and behind from
+C = 8 up; only 26 % of its C = 128 requests meet the SLO (TTFT p99 14.5 s). On the *classic* workload (519 in, 512 out)
+it is 304 vs 240–296 at C = 1 and 4,485 vs 8,288–14,380 at C = 128. The cause is ESTIMATED to be the batched-decode
+step on sm_90 (tuned on consumer GPUs, no decode-shaped wgmma GEMM) and admission at high C; it is the top datacenter
+item on the [roadmap](docs/roadmap.md#next-proposed-order-outside-review-10-19-owner-decides). Full tables and method:
+[docs/benchmarks-gpu.md](docs/benchmarks-gpu.md#concurrency-h100-sxm-qwen25-7b-2026-10-19),
+[log](docs/log/2026-10-19-h100-showdown.md).
 
 Parabellum, the dev laptop (from BENCH.md): main @ 0851798 (`--device cuda`, whole model on the GPU) vs ollama 0.35.0
 and llama.cpp 4413a19 (CUDA build, `llama-bench -ngl 99`), same GGUF files, on an
@@ -706,14 +732,16 @@ The GPU, after that:
 - [docs/methodology.md](docs/methodology.md): how changes are picked, built, reviewed, gated and benchmarked
 - [docs/history.md](docs/history.md): the engineering log, round by round, with before/after numbers
 - [docs/experiments-rejected.md](docs/experiments-rejected.md): what was tried and didn't work, with numbers
-- [docs/results.md](docs/results.md): current standing vs ollama and llama.cpp, with dates and commits
+- [docs/results.md](docs/results.md): current standing vs ollama, llama.cpp, vLLM and SGLang, with dates and commits
 - [docs/testing.md](docs/testing.md): how the test suite is built, the fast and full tiers, what to run when
 - [docs/research/](docs/research/README.md): research reports behind the roadmap
+- [docs/reviews/](docs/reviews/README.md): outside reviews of the project (curated), behind the roadmap's order
 - [docs/log/](docs/log/README.md): one entry per PR (the convention for new work)
 - [docs/long-context.md](docs/long-context.md): YaRN (`--rope-scaling yarn`) past the trained
   context: when to use it, llama.cpp agreement, retrieval and short-context cost
 - [docs/design/](docs/design/): [multi-GPU](docs/design/multi-gpu.md) and
-  [Hopper](docs/design/hopper.md) designs
+  [Hopper](docs/design/hopper.md) designs, and the [determinism-modes ADR](docs/design/determinism-modes.md)
+  (`--numerics exact | fast`, proposed)
 
 ## Contributing
 
