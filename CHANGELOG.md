@@ -11,15 +11,21 @@ The first version: everything merged to `main` from the start of the project (20
 [docs/release-0.1.md](docs/release-0.1.md). The tag and the date are the maintainer's call.
 
 ### Library
-- The crate is now a library (`axon`) plus the `axon` binary on top of it: `src/lib.rs` is the crate root and the
-  public API (`load`, `Backend`, `Tokenizer`, `Lm`, `generate`, `GenOpts`, `serve`), the command line moved from
-  `src/main.rs` to `src/cli.rs` and the decode loop to `src/generate.rs`; `examples/embed.rs` shows the API.
-  No behaviour change: same greedy bits, same CLI, same tests (the old top-level `tests::*` are now `cli::tests::*`).
+- The crate is now a library (`axon`) plus the `axon` binary on top of it. `src/lib.rs` is the crate root and the
+  public API: `load`, `Model`, `Backend`, `BackendCache`, `Device`, `KvType`, `Tokenizer`, `Utf8Stream`, the `Lm`
+  trait, `generate`, `GenOpts` (`GenOpts::greedy`; sampling stays crate-internal in 0.1), `GenStats`, and `serve`.
+  The command line moved from `src/main.rs` to `src/cli.rs` (a new file: git doesn't track it as a rename) and the
+  decode loop and its tests to `src/generate.rs`; `examples/embed.rs` shows the API. No change for the CLI: same
+  greedy bits, same output, same tests (14 renamed: `tests::*` → `cli::tests::*` or `generate::tests::*`).
+- `Backend::new` refuses a KV type that conflicts with the process's f16/f32 cache choice (`KvType::F32` used to be
+  silently f16 through the library) and returns a bad `AXON_KV` as an error instead of panicking later.
+- Not hardened for embedders yet (stderr notes, env-only config, a CUDA leak per `Backend::new`, `serve` exits the
+  process): #118.
 
 ### Models and formats
-- Qwen2 / Qwen2.5 GGUFs on the CPU from the first commit; Qwen3 dense on the CPU and CUDA (#18); Llama 3.x (#22) with
-  its prompt framing in `serve` (#23); SentencePiece tokenizer and Mistral 7B's chat format (#32);
-  Gemma 3 1B / 4B on the CPU and CUDA (#35).
+- Qwen2 / Qwen2.5 GGUFs on the CPU from the first commit; Qwen3 dense on the CPU and CUDA (#18); Llama 3.x
+  (#22, which also carried the sm_89 capture fix) and its prompt framing in `serve` (#23); SentencePiece tokenizer
+  and Mistral 7B's chat format (#32); Gemma 3 1B / 4B on the CPU and CUDA (#35).
 - Mixture of experts: qwen3moe on the CPU (#63), then attention and router on the GPU with CPU experts (#67, #76);
   gpt-oss-20b with MXFP4, o200k and harmony on the CPU (#78), then on the GPU with CPU experts (#98);
   DeepSeek V2/V3 / Kimi K2 / Moonlight (MLA, DeepSeek routing) on the CPU (#79), then GPU MLA with CPU routed

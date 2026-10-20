@@ -9,7 +9,8 @@
 //! - [`Backend::new`]: place it on the CPU or a CUDA GPU, as an [`Lm`];
 //! - [`Tokenizer`]: the model's own tokenizer, from the same file;
 //! - [`Lm`]: caches, prefill and decode steps;
-//! - [`generate`]: the greedy (or sampled) decode loop behind `axon gen`,
+//! - [`generate`]: the greedy decode loop behind `axon gen` (sampling stays
+//!   the CLI's in 0.1), with optional lossless drafting,
 //!   streaming each token to a callback;
 //! - [`serve`]: the OpenAI-compatible HTTP server behind `axon serve`.
 //!
@@ -23,7 +24,8 @@
 //! let net = Backend::new(&model, Device::Cpu, ctx, None, KvType::F16, false)?;
 //! let mut cache = net.new_cache(ctx);
 //! let logits = net.prefill_logits(&ids, 0, &mut cache);
-//! let opts = GenOpts { n_gen: 16, stop: &tok.eog(), max_draft: 0, sample: None };
+//! let stop = tok.eog();
+//! let opts = GenOpts::greedy(16, &stop);
 //! let st = axon::generate(&net, &mut cache, &ids, logits, opts, &mut |_, _| Vec::new(), &mut |_| Ok(()))
 //!     .map_err(|e| e.to_string())?;
 //! println!("{}", tok.decode(&st.ids));
@@ -102,8 +104,33 @@ pub fn load(path: &str, device: Device) -> Result<Model, String> {
 
 /// Run `axon serve` in this process, until it's stopped: `args` is the
 /// command line, `["axon", "serve", "model.gguf", flags...]` (README,
-/// `axon serve --help`). Blocks. As on the command line, a usage error
-/// prints a message and exits the process.
+/// `axon serve --help`). Blocks. It behaves as the CLI does, process exits
+/// included: a usage error (flags, or a bad `AXON_DEVICE` / `AXON_KV` /
+/// `AXON_DRAFT`) prints a message and exits with code 2, and an engine
+/// failure (a panic in the engine thread) exits with code 70. Not yet
+/// safe to call from a process that must outlive the server.
 pub fn serve(args: &[String]) -> std::io::Result<()> {
     serve::run(args)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Backend, Device, KvType};
+
+    /// The CPU caches' f16/f32 choice is process-wide: once it's f16 (every
+    /// test makes f16 caches), asking for f32 is an error, not a silent f16.
+    #[test]
+    fn kv_f32_after_f16_is_an_error() {
+        crate::kv::set_f32(false);
+        assert!(!crate::kv::use_f32());
+        let m = crate::gguf::build_for_test(&[], &[]);
+        let e = Backend::new(&m, Device::Cpu, 64, None, KvType::F32, false)
+            .err()
+            .expect("f32 after f16");
+        assert!(e.contains("f32 KV cache"), "{e}");
+        let e = Backend::new(&m, Device::Cpu, 64, None, KvType::Q8, false)
+            .err()
+            .expect("q8 on the CPU");
+        assert!(e.contains("cuda-only"), "{e}");
+    }
 }

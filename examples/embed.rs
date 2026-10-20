@@ -38,12 +38,8 @@ fn main() -> Result<(), String> {
     print!("{prompt}");
     // A character can be split across tokens: the stream holds it back until whole.
     let mut text = Utf8Stream::default();
-    let opts = GenOpts {
-        n_gen: n,
-        stop: &tok.eog(),
-        max_draft: 0,
-        sample: None,
-    };
+    let stop = tok.eog();
+    let opts = GenOpts::greedy(n, &stop);
     let st = axon::generate(
         &net,
         &mut cache,

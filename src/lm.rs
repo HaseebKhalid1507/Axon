@@ -509,6 +509,21 @@ impl<'a> Backend<'a> {
     ) -> Result<Backend<'a>, String> {
         let split_ctx = p.split_ctx;
         let long = fit && split_ctx < max_ctx;
+        // The CPU caches' f16/f32 choice is process-wide, made once at the
+        // first cache (kv::use_f32): `kv` F32 makes it f32, F16/Q8 need it
+        // f16, and a conflict (e.g. AXON_KV=f32 with KvType::F16) or a bad
+        // AXON_KV is an error here, never a panic later. The CLI checks
+        // AXON_KV and passes the type it implies, so it never hits these.
+        crate::kv::kv_setting()?;
+        let want_f32 = kv == KvType::F32;
+        crate::kv::set_f32(want_f32);
+        if crate::kv::use_f32() != want_f32 {
+            return Err(format!(
+                "the {} KV cache: this process already makes {} caches (chosen once, at the first one)",
+                if want_f32 { "f32" } else { "f16" },
+                if want_f32 { "f16" } else { "f32" },
+            ));
+        }
         if device == Device::Cpu {
             // The CPU's f16/f32 choice is AXON_KV's (kv::use_f32).
             if kv == KvType::Q8 {

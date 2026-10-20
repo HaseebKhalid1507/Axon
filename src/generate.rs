@@ -29,7 +29,9 @@ pub struct GenStats {
     pub verify: Vec<(usize, f64)>,
 }
 
-/// `generate`'s settings.
+/// `generate`'s settings. Outside the crate, build them with
+/// [`GenOpts::greedy`]: in 0.1 the library decodes greedily only (plus
+/// lossless drafting); sampling is the CLI's (`--temp`).
 pub struct GenOpts<'a> {
     /// Stop after this many tokens.
     pub n_gen: usize,
@@ -37,11 +39,27 @@ pub struct GenOpts<'a> {
     pub stop: &'a [u32],
     /// Draft up to this many tokens per pass; 0 = plain greedy.
     pub max_draft: usize,
-    /// Sample (sample.rs) instead of picking greedily.
-    pub sample: Option<&'a mut sample::Sampler>,
+    /// Sample (sample.rs) instead of picking greedily: crate-internal in
+    /// 0.1 (the sampler's settings have no public, validated constructor yet).
+    pub(crate) sample: Option<&'a mut sample::Sampler>,
 }
 
-/// Greedy decoding of up to `o.n_gen` tokens, stopping before any of `o.stop`. `logits`
+impl<'a> GenOpts<'a> {
+    /// Greedy decoding of up to `n_gen` tokens, stopping before any of `stop`
+    /// (e.g. `Tokenizer::eog`), no drafting (`max_draft` 0; set it, and pass
+    /// a `draft` function to `generate`, to draft: the output is the same).
+    pub fn greedy(n_gen: usize, stop: &'a [u32]) -> GenOpts<'a> {
+        GenOpts {
+            n_gen,
+            stop,
+            max_draft: 0,
+            sample: None,
+        }
+    }
+}
+
+/// Greedy decoding of up to `o.n_gen` tokens, stopping before any of `o.stop`
+/// (sampled instead with `o.sample`, inside the crate). `logits`
 /// is the prediction after `prompt`, whose tokens fill cache positions
 /// 0..prompt.len(). Every token goes to `emit` as it's picked.
 ///
@@ -190,5 +208,237 @@ multiversion! {
             }
         }
         (l.len() - 1) as u32 // all NaN
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GenOpts, argmax, generate};
+
+    fn reference(l: &[f32]) -> u32 {
+        (0..l.len()).max_by(|&a, &b| l[a].total_cmp(&l[b])).unwrap() as u32
+    }
+
+    #[test]
+    fn argmax_matches_max_by_including_ties() {
+        let mut rng = 0x1357_9bdfu32;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            rng
+        };
+        for len in [1usize, 2, 7, 8, 9, 15, 16, 17, 100, 1000, 151_936] {
+            for _ in 0..20 {
+                // Few distinct values, so ties are common, all within one lane or across.
+                let l: Vec<f32> = (0..len).map(|_| (next() % 9) as f32 - 4.0).collect();
+                assert_eq!(argmax(&l), reference(&l), "len {len}");
+                let l: Vec<f32> = (0..len).map(|_| next() as f32 / 1e7 - 200.0).collect();
+                assert_eq!(argmax(&l), reference(&l), "len {len}");
+            }
+        }
+        assert_eq!(argmax(&[f32::NEG_INFINITY; 5]), 4);
+    }
+
+    /// argmax's portable and x86-64-v3 variants pick the same index.
+    #[test]
+    #[cfg(target_arch = "x86_64")]
+    fn argmax_multiversion_identical() {
+        use crate::model::tests::{can_v3, mixed};
+        if !can_v3() {
+            return;
+        }
+        for n in [1usize, 7, 8, 9, 64, 151_936] {
+            for (k, edgy) in [false, true].into_iter().enumerate() {
+                let mut l = mixed(n, 5 + k as u64, 9.0, edgy);
+                let a = super::argmax::portable(&l);
+                assert_eq!(a, unsafe { super::argmax::v3(&l) }, "n={n}");
+                l.iter_mut().for_each(|v| *v = v.round()); // ties
+                let a = super::argmax::portable(&l);
+                assert_eq!(a, unsafe { super::argmax::v3(&l) }, "ties n={n}");
+            }
+        }
+        let nan = [f32::NAN; 11];
+        assert_eq!(super::argmax::portable(&nan), unsafe {
+            super::argmax::v3(&nan)
+        });
+    }
+
+    #[test]
+    #[ignore = "timing, run with --ignored --nocapture"]
+    fn argmax_speed() {
+        let l: Vec<f32> = (0..151_936)
+            .map(|i| ((i * 7919) % 10007) as f32 * 0.01)
+            .collect();
+        for (name, f) in [
+            ("max_by", reference as fn(&[f32]) -> u32),
+            ("argmax", argmax),
+        ] {
+            let t = std::time::Instant::now();
+            let mut s = 0u64;
+            for _ in 0..200 {
+                s += f(std::hint::black_box(&l)) as u64;
+            }
+            eprintln!(
+                "{name}: {:.1} us ({s})",
+                t.elapsed().as_secs_f64() * 1e6 / 200.0
+            );
+        }
+    }
+
+    /// A weightless `Lm`: the pick after token t at position p is a hash of
+    /// t, p and the token cached at p - 1 (so a misused cache shows), and
+    /// its logits peak there. Counts the calls `generate` makes.
+    #[derive(Default)]
+    struct Toy {
+        forwards: std::cell::Cell<usize>,
+        argmaxes: std::cell::Cell<usize>,
+        verifies: std::cell::Cell<usize>,
+    }
+
+    impl Toy {
+        fn pick(t: u32, pos: usize, c: &mut [u32]) -> u32 {
+            c[pos] = t;
+            let prev = if pos > 0 { c[pos - 1] } else { 5 };
+            (t * 31 + pos as u32 * 7 + prev * 3) % 97
+        }
+    }
+
+    impl crate::Lm for Toy {
+        type Cache = Vec<u32>;
+        fn vocab(&self) -> usize {
+            97
+        }
+        fn new_cache(&self, max_ctx: usize) -> Vec<u32> {
+            vec![u32::MAX; max_ctx]
+        }
+        fn forward(&self, t: u32, pos: usize, c: &mut Vec<u32>) -> Vec<f32> {
+            self.forwards.set(self.forwards.get() + 1);
+            let mut l = vec![0.0; 97];
+            l[Toy::pick(t, pos, c) as usize] = 1.0;
+            l
+        }
+        fn forward_argmax(&self, t: u32, pos: usize, c: &mut Vec<u32>) -> u32 {
+            self.argmaxes.set(self.argmaxes.get() + 1);
+            Toy::pick(t, pos, c)
+        }
+        fn feed_batch(&self, ts: &[u32], start: usize, c: &mut Vec<u32>) {
+            c[start..start + ts.len()].copy_from_slice(ts);
+        }
+        fn verify_argmax(&self, ts: &[u32], start: usize, c: &mut Vec<u32>) -> Vec<u32> {
+            self.verifies.set(self.verifies.get() + 1);
+            (0..ts.len())
+                .map(|b| Toy::pick(ts[b], start + b, c))
+                .collect()
+        }
+    }
+
+    /// `generate` through the `Lm` seam on a backend that isn't Qwen2:
+    /// plain decode takes `forward_argmax` (never `forward`'s logits),
+    /// drafting `verify_argmax`, and both give the reference greedy output.
+    #[test]
+    fn generate_uses_the_lm_seam() {
+        use crate::Lm;
+        const N: usize = 20;
+        let prompt = [1u32, 2, 3];
+        let net = Toy::default();
+        let mut c = net.new_cache(prompt.len() + N + 1);
+        net.feed_batch(&prompt[..2], 0, &mut c);
+        let first = net.forward(3, 2, &mut c);
+        let mut want = vec![argmax(&first)];
+        while want.len() < N {
+            let pos = prompt.len() + want.len() - 1;
+            want.push(Toy::pick(*want.last().unwrap(), pos, &mut c));
+        }
+        for k in [0, 3] {
+            let net = Toy::default();
+            let mut cache = net.new_cache(prompt.len() + N + 1);
+            net.feed_batch(&prompt[..2], 0, &mut cache);
+            let logits = net.forward(3, 2, &mut cache);
+            let st = generate(
+                &net,
+                &mut cache,
+                &prompt,
+                logits,
+                GenOpts {
+                    n_gen: N,
+                    stop: &[],
+                    max_draft: k,
+                    sample: None,
+                },
+                &mut |h, max| {
+                    let at = h.len() - prompt.len();
+                    want[at..].iter().take(max).copied().collect()
+                },
+                &mut |_| Ok(()),
+            )
+            .unwrap();
+            assert_eq!(st.ids, want, "k {k}");
+            assert_eq!(net.forwards.get(), 1, "k {k}: only the prompt's forward");
+            if k == 0 {
+                assert_eq!((net.argmaxes.get(), net.verifies.get()), (N - 1, 0));
+            } else {
+                assert_eq!(net.argmaxes.get(), 0);
+                assert_eq!(net.verifies.get(), st.passes);
+                assert!(st.passes < N - 1);
+            }
+        }
+    }
+
+    /// `Best`, pushed in order or merged over consecutive ranges of any
+    /// size, must pick exactly `argmax`'s index: ties (last wins), -0.0 vs
+    /// +0.0, NaNs, -inf, all-NaN.
+    #[test]
+    fn best_matches_argmax() {
+        use crate::model::Best;
+        let mut rng = 0x2468_ace1u32;
+        let mut next = || {
+            rng ^= rng << 13;
+            rng ^= rng >> 17;
+            rng ^= rng << 5;
+            rng
+        };
+        let pick = |l: &[f32], chunk: usize| {
+            let mut acc = Best::NONE;
+            for (c, ch) in l.chunks(chunk).enumerate() {
+                let mut b = Best::NONE;
+                for (j, &v) in ch.iter().enumerate() {
+                    b.push(v, (c * chunk + j) as u32);
+                }
+                acc.merge(b);
+            }
+            acc.index(l.len())
+        };
+        let vals = [
+            0.0,
+            -0.0,
+            1.0,
+            -1.0,
+            2.5,
+            f32::NAN,
+            f32::NEG_INFINITY,
+            f32::INFINITY,
+        ];
+        for len in [1usize, 2, 7, 8, 9, 31, 100, 1000] {
+            for round in 0..200 {
+                // Few distinct values so ties are common, randomly negated;
+                // smaller pools leave out inf/NaN/2.5/±1 so the max varies.
+                let pool = [8, 6, 5, 4, 2][round % 5];
+                let l: Vec<f32> = (0..len)
+                    .map(|_| {
+                        let r = next() as usize;
+                        let v = vals[r % pool];
+                        if (r >> 8).is_multiple_of(7) { -v } else { v }
+                    })
+                    .collect();
+                for chunk in [1, 2, 3, 8, 64, len] {
+                    assert_eq!(pick(&l, chunk), argmax(&l), "{l:?} chunk {chunk}");
+                }
+            }
+            let nan = vec![f32::NAN; len];
+            assert_eq!(pick(&nan, 3), argmax(&nan));
+            let ninf = vec![f32::NEG_INFINITY; len];
+            assert_eq!(pick(&ninf, 3), argmax(&ninf));
+        }
     }
 }
