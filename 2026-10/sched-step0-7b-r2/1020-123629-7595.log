@@ -1,0 +1,28 @@
+[axon-run 12:36:29] submitted 1020-123629-7595 by /home/haseeb/.cache/axon-wt-sched: /home/haseeb/.cache/axon-sched/bin/axon-test-step0 cuda::qwen2::slots::tests::pool_hybrid_cost --exact --ignored --nocapture --test-threads 1
+[axon-run 12:55:10] scope axon-job-1020-123629-7595-1792515310.scope in app-axonjobs.slice: MemoryMax 10217 MB, MemoryHigh 9195 MB, no swap, oomd pressure kill 80% (claim 6129 MB): an OOM here kills only this job
+[axon-run 12:55:10] job 1020-123629-7595 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1020-123629-7595-1792515310 --slice=app-axonjobs.slice -p MemoryMax=10217M -p MemoryHigh=9195M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-sched/bin/axon-test-step0 cuda::qwen2::slots::tests::pool_hybrid_cost --exact --ignored --nocapture --test-threads 1
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_hybrid_cost ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+hybrid cost: /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA GeForce RTX 5070 Ti Laptop GPU (46 SMs), decoders at 768, chunk at 1024, pass max 1152
+[axon-run 12:55:42] FOREIGN_GPU sample max=18% mean=4.5% n=6 (kitty 1256581 9%, Xorg 1255685 9%)
+[axon-run 12:56:14] FOREIGN_GPU sample max=33% mean=15.4% n=7 (kitty 1256581 9%)
+| nb | chunk | dec ms | dec attn ms | chunk ms | two ms | fused est ms | saved % |
+| 4 | 128 | 10.777 | 0.727 | 29.064 | 39.841 | 38.143 | 4.3 |
+| 4 | 256 | 10.777 | 0.727 | 51.121 | 61.898 | 62.562 | -1.1 |
+| 4 | 512 | 10.777 | 0.727 | 111.994 | 122.771 | 126.831 | -3.3 |
+| 16 | 128 | 18.418 | 2.119 | 29.064 | 47.483 | 40.143 | 15.5 |
+| 16 | 256 | 18.418 | 2.119 | 51.121 | 69.539 | 74.455 | -7.1 |
+| 16 | 512 | 18.418 | 2.119 | 111.994 | 130.413 | 129.415 | 0.8 |
+| 32 | 128 | 21.252 | 3.772 | 29.064 | 50.317 | 42.589 | 15.4 |
+| 32 | 256 | 21.252 | 3.772 | 51.121 | 72.373 | 77.516 | -7.1 |
+| 32 | 512 | 21.252 | 3.772 | 111.994 | 133.247 | 132.198 | 0.8 |
+| 64 | 128 | 25.713 | 6.840 | 29.064 | 54.777 | 46.685 | 14.8 |
+| 64 | 256 | 25.713 | 6.840 | 51.121 | 76.834 | 82.591 | -7.5 |
+| 64 | 512 | 25.713 | 6.840 | 111.994 | 137.707 | 137.270 | 0.3 |
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 85.42s
+
+[axon-run 12:56:36] exit 0 after 85.5s (host bella)
+[axon-run 12:56:43] FOREIGN_GPU max=33% mean=7.9% samples=17 top: picom 1255867 22%, kitty 1256581 11%  TAINTED (mean > 5% or max > 25%): timing numbers not trustworthy, rerun
