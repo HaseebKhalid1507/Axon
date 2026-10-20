@@ -1,0 +1,74 @@
+[axon-run 00:24:31] submitted 1020-002431-81be by /home/haseeb/.cache/axon-moerouter: /home/haseeb/.cache/axon-moerouter/md5.sh /home/haseeb/.cache/axon-moerouter/axon-base-764792f /home/haseeb/.cache/axon-moerouter/axon-fdd7816 /home/haseeb/.cache/axon-moerouter/md5-fdd7816
+[axon-run 00:36:44] VRAM: claiming the learned 3329 MB instead of --vram 6000 (name:md5-moerouter)
+[axon-run 00:36:44] scope axon-job-1020-002431-81be-1792471004.scope in app-axonjobs.slice: MemoryMax 21790 MB, MemoryHigh 19611 MB, no swap, oomd pressure kill 80% (claim 13844 MB): an OOM here kills only this job
+[axon-run 00:36:44] job 1020-002431-81be -> bella: systemd-run --user --scope --quiet --unit=axon-job-1020-002431-81be-1792471004 --slice=app-axonjobs.slice -p MemoryMax=21790M -p MemoryHigh=19611M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-moerouter/md5.sh /home/haseeb/.cache/axon-moerouter/axon-base-764792f /home/haseeb/.cache/axon-moerouter/axon-fdd7816 /home/haseeb/.cache/axon-moerouter/md5-fdd7816
+axon-q 00:36:44 start slot 16-23: /home/haseeb/.cache/axon-moerouter/md5.sh /home/haseeb/.cache/axon-moerouter/axon-base-764792f /home/haseeb/.cache/axon-moerouter/axon-fdd7816 /home/haseeb/.cache/axon-moerouter/md5-fdd7816
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 615.71.09
+parabellum
+base	cuda	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M	p1	0f4c569a7ff1	rc=0
+cand	cuda	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M	p1	0f4c569a7ff1	rc=0
+base	cuda	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M	p2	2de5801aee77	rc=0
+cand	cuda	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M	p2	2de5801aee77	rc=0
+base	cuda	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M	p3	c9768ada4e89	rc=0
+cand	cuda	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M	p3	c9768ada4e89	rc=0
+base	cuda	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M	p4	545dd4eb4460	rc=0
+cand	cuda	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M	p4	545dd4eb4460	rc=0
+base	cuda	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M	p5	d1e1e8aaab17	rc=0
+cand	cuda	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M	p5	d1e1e8aaab17	rc=0
+base	cuda-q8	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M	p1	6653ce92492b	rc=0
+cand	cuda-q8	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M	p1	6653ce92492b	rc=0
+base	cuda-q8	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M	p3	e0953b338379	rc=0
+cand	cuda-q8	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M	p3	e0953b338379	rc=0
+base	cpu	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M	p1	0f4c569a7ff1	rc=0
+cand	cpu	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M	p1	0f4c569a7ff1	rc=0
+base	cpu	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M	p3	8dbc3d57194c	rc=0
+cand	cpu	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M	p3	8dbc3d57194c	rc=0
+base	cuda	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p1	55220a555343	rc=0
+cand	cuda	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p1	55220a555343	rc=0
+base	cuda	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p2	e9652796da6a	rc=0
+cand	cuda	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p2	e9652796da6a	rc=0
+base	cuda	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p3	e9be58c7e53f	rc=0
+cand	cuda	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p3	e9be58c7e53f	rc=0
+base	cuda	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p4	0b1d31f1299e	rc=0
+cand	cuda	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p4	0b1d31f1299e	rc=0
+base	cuda	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p5	dcbfc3082dd9	rc=0
+cand	cuda	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p5	dcbfc3082dd9	rc=0
+base	cuda-q8	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p1	3a84f9c5637d	rc=0
+cand	cuda-q8	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p1	3a84f9c5637d	rc=0
+base	cuda-q8	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p3	3b1598b58173	rc=0
+cand	cuda-q8	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p3	3b1598b58173	rc=0
+base	cpu	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p1	55220a555343	rc=0
+cand	cpu	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p1	55220a555343	rc=0
+base	cpu	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p3	ce52c9430a13	rc=0
+cand	cpu	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p3	ce52c9430a13	rc=0
+base	cuda	gpt-oss-20b-MXFP4	p1	1901c14ba2b8	rc=0
+cand	cuda	gpt-oss-20b-MXFP4	p1	1901c14ba2b8	rc=0
+base	cuda	gpt-oss-20b-MXFP4	p2	c5a1e04f3462	rc=0
+cand	cuda	gpt-oss-20b-MXFP4	p2	c5a1e04f3462	rc=0
+base	cuda	gpt-oss-20b-MXFP4	p3	55f41f33139d	rc=0
+cand	cuda	gpt-oss-20b-MXFP4	p3	55f41f33139d	rc=0
+base	cuda	gpt-oss-20b-MXFP4	p4	c787e5e8e666	rc=0
+cand	cuda	gpt-oss-20b-MXFP4	p4	c787e5e8e666	rc=0
+base	cuda	gpt-oss-20b-MXFP4	p5	af9cdab0a28a	rc=0
+cand	cuda	gpt-oss-20b-MXFP4	p5	af9cdab0a28a	rc=0
+base	cpu	gpt-oss-20b-MXFP4	p1	263e433e12b1	rc=0
+cand	cpu	gpt-oss-20b-MXFP4	p1	263e433e12b1	rc=0
+base	cpu	gpt-oss-20b-MXFP4	p3	55f41f33139d	rc=0
+cand	cpu	gpt-oss-20b-MXFP4	p3	55f41f33139d	rc=0
+base	cuda	Moonlight-16B-A3B-Instruct-Q4_K_M	p1	3de9f5607381	rc=0
+cand	cuda	Moonlight-16B-A3B-Instruct-Q4_K_M	p1	3de9f5607381	rc=0
+base	cuda	Moonlight-16B-A3B-Instruct-Q4_K_M	p2	df306c838f96	rc=0
+cand	cuda	Moonlight-16B-A3B-Instruct-Q4_K_M	p2	df306c838f96	rc=0
+base	cuda	Moonlight-16B-A3B-Instruct-Q4_K_M	p3	ce2a5a16c783	rc=0
+cand	cuda	Moonlight-16B-A3B-Instruct-Q4_K_M	p3	ce2a5a16c783	rc=0
+base	cuda	Moonlight-16B-A3B-Instruct-Q4_K_M	p4	545dd4eb4460	rc=0
+cand	cuda	Moonlight-16B-A3B-Instruct-Q4_K_M	p4	545dd4eb4460	rc=0
+base	cuda	Moonlight-16B-A3B-Instruct-Q4_K_M	p5	02ac22bd1ab0	rc=0
+cand	cuda	Moonlight-16B-A3B-Instruct-Q4_K_M	p5	02ac22bd1ab0	rc=0
+base	cpu	Moonlight-16B-A3B-Instruct-Q4_K_M	p1	d1b7cd4c0bc8	rc=0
+cand	cpu	Moonlight-16B-A3B-Instruct-Q4_K_M	p1	d1b7cd4c0bc8	rc=0
+base	cpu	Moonlight-16B-A3B-Instruct-Q4_K_M	p3	3c3582393934	rc=0
+cand	cpu	Moonlight-16B-A3B-Instruct-Q4_K_M	p3	3c3582393934	rc=0
+--- pairs differing:
+0 of 32 pairs differ; 0 nonzero rc
+[axon-run 00:42:14] exit 0 after 330.2s (host bella)

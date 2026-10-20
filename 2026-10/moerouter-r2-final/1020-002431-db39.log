@@ -1,0 +1,41 @@
+[axon-run 00:24:31] submitted 1020-002431-db39 by /home/haseeb/.cache/axon-moerouter: /home/haseeb/.cache/axon-moerouter/axon-test-fdd7816 ds2_gpu_moonlight_bits deepseek2_moonlight_bits oss_gpu_contract_model oss_gpu_logits_graded_model oss_gpu_route_matches_cpu_twin gpt_oss_model_bits moe_gpu_route_matches_cpu_twin --test-threads 1 --nocapture
+[axon-run 00:32:51] scope axon-job-1020-002431-db39-1792470771.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 15012 MB): an OOM here kills only this job
+[axon-run 00:32:51] job 1020-002431-db39 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1020-002431-db39-1792470771 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-moerouter/axon-test-fdd7816 ds2_gpu_moonlight_bits deepseek2_moonlight_bits oss_gpu_contract_model oss_gpu_logits_graded_model oss_gpu_route_matches_cpu_twin gpt_oss_model_bits moe_gpu_route_matches_cpu_twin --test-threads 1 --nocapture
+axon-q 00:32:51 start slot 16-23: /home/haseeb/.cache/axon-moerouter/axon-test-fdd7816 ds2_gpu_moonlight_bits deepseek2_moonlight_bits oss_gpu_contract_model oss_gpu_logits_graded_model oss_gpu_route_matches_cpu_twin gpt_oss_model_bit
+
+running 8 tests
+test model::deepseek2_tests::deepseek2_moonlight_bits ... moonlight: 101-token prompt, 0 non-finite decode logits
+moonlight: next token 19509 " Italy"
+moonlight chat: history 51 tokens, reply [97712, 0, 3653, 1215, 414, 426, 41546, 8372, 87240], 0 non-finite logits at the reply's start
+moonlight chat: "Sure! How about \"navy blue\"?" / "Absolutely! How about \"emerald green\"?"
+ok
+test model::gptoss_tests::gpt_oss_model_bits ... ok
+test moe::ds2_tests::ds2_gpu_moonlight_bits ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+note: model is 10052 MB, 16440 MB available; mapping the file instead of copying it (AXON_MMAP=0 forces the copy)
+moonlight gpu: next token 276 " the"
+moonlight gpu chat: "Sure! How about \"navy blue\"?" / "Certainly! How about \"emerald green\"?"
+ok
+test moe::oss_tests::oss_gpu_contract_model ... ok
+test moe::oss_tests::oss_gpu_logits_graded_model ... gpt-oss-20b moe gpu vs cpu: top-1 197/198 (99.5%), KL mean 1.20e-3 max 1.99e-2 (> 0.5: []), max |dlogit| 6.929, flip margins [0.106627464]
+gpt-oss-20b cpu rows vs cpu: top-1 198/198 (100.0%), KL mean 0.00e0 max 0.00e0 (> 0.5: []), max |dlogit| 0.000, flip margins []
+
+thread 'moe::oss_tests::oss_gpu_logits_graded_model' (978788) panicked at src/cuda/qwen2/tests.rs:287:5:
+mean KL
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test moe::oss_tests::oss_gpu_route_matches_cpu_twin ... fixture: gpt-oss router GPU vs CPU twin on identical h: 900 routes, 0 differ (widest CPU k-th vs (k+1)-th probability gap there 0.00e0), same-set max |w| diff 1.07e-6
+gpt-oss-20b: gpt-oss router GPU vs CPU twin on identical h: 2472 routes, 0 differ (widest CPU k-th vs (k+1)-th probability gap there 0.00e0), same-set max |w| diff 1.61e-6
+ok
+test moe::tests::moe_gpu_route_matches_cpu_twin_pruned ... Pruned-2B: router GPU vs CPU twin on identical h: 333 (layer, token) routes, expert sets differ 0 (0.000%), rank order only 0, max |w| diff (same set) 1.07e-6, widest CPU k-th vs (k+1)-th probability gap where the sets differ 0.00e0, most weight on a differing expert 0.00e0
+ok
+test moe::tests::moe_gpu_route_matches_cpu_twin_small ... 4x0.6B: router GPU vs CPU twin on identical h: 3108 (layer, token) routes, expert sets differ 46 (1.480%), rank order only 0, max |w| diff (same set) 3.24e-5, widest CPU k-th vs (k+1)-th probability gap where the sets differ 0.00e0, most weight on a differing expert 1.29e-38
+ok
+
+failures:
+
+failures:
+    moe::oss_tests::oss_gpu_logits_graded_model
+
+test result: FAILED. 7 passed; 1 failed; 0 ignored; 0 measured; 670 filtered out; finished in 232.12s
+
+[axon-run 00:36:43] exit 101 after 232.4s (host bella)
