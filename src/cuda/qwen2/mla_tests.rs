@@ -252,18 +252,18 @@ fn mla_heads_mv_matches_dequant() {
     }
 }
 
-/// mla_topk against the CPU router's rule (moe.rs `route` with a `Gate`):
+/// moe_router (sigmoid / softmax gates) against the CPU router's rule (moe.rs `route` with a `Gate`):
 /// sigmoid + bias selection, unbiased weights renormalized then scaled;
 /// softmax without bias. Selection on f32 values as the kernel's (ties,
 /// which a saturated sigmoid makes, to the lower index, as `route`); the
 /// same ids, weights within 1e-6 of f64.
 #[test]
-fn mla_topk_matches_cpu_rule() {
+fn mla_router_matches_cpu_rule() {
     let Some(g) = crate::testutil::gpu() else {
         return;
     };
     let ml = Kernels::mla_module(&g).unwrap();
-    let f = ml.function("mla_topk").unwrap();
+    let f = ml.function("moe_router").unwrap();
     let (n_e, k, nb) = (64, 6, 9);
     let mut r = Rng(5);
     let lg: Vec<f32> = (0..nb * n_e).map(|_| 4.0 * r.f()).collect();
@@ -277,24 +277,22 @@ fn mla_topk_matches_cpu_rule() {
         let bd = g.upload(&bias).unwrap();
         let ids = g.alloc(nb * k * 4).unwrap();
         let w = g.alloc(nb * k * 4).unwrap();
-        // SAFETY: mla_topk's signature; buffers sized for nb tokens.
+        // SAFETY: buffers sized for nb tokens, the bias n_e floats.
         unsafe {
-            g.launch(
+            super::super::moe::launch_router(
+                &g,
                 &f,
-                (nb as u32, 1, 1),
-                (128, 1, 1),
-                (2 * n_e * 4) as u32,
-                &[
-                    lgd.arg(),
-                    Arg::I32(n_e as i32),
-                    Arg::I32(k as i32),
-                    Arg::I32(sigm),
-                    if use_bias { bd.arg() } else { Arg::Ptr(0) },
-                    Arg::I32(norm),
-                    Arg::F32(scale),
-                    ids.arg(),
-                    w.arg(),
-                ],
+                lgd.arg(),
+                (n_e, k, nb),
+                if sigm == 1 {
+                    GATE_SIGMOID
+                } else {
+                    GATE_SOFTMAX
+                },
+                if use_bias { bd.arg() } else { Arg::Ptr(0) },
+                norm == 1,
+                scale,
+                (ids.arg(), w.arg()),
             )
             .unwrap();
         }
@@ -344,6 +342,7 @@ fn mla_topk_matches_cpu_rule() {
 /// Compiling is skipped without NVRTC.
 #[test]
 fn mla_kernels_compile_for_archs() {
+    use crate::cuda::qwen2::moe::{GATE_OAI, MOE_THREADS};
     use crate::cuda::{KERNEL_OPTS_EXT, MLA_KERNELS, Target, compile, ffi};
     // The constants mla.rs mirrors are the source's (a drift would launch
     // with the wrong shapes silently).
@@ -355,6 +354,9 @@ fn mla_kernels_compile_for_archs() {
         ("MLA_THREADS", 256),
         ("MOE_THREADS", MOE_THREADS as usize),
         ("MOE_LG_WARPS", MOE_LG_WARPS),
+        ("MOE_GATE_SOFTMAX", GATE_SOFTMAX as usize),
+        ("MOE_GATE_SIGMOID", GATE_SIGMOID as usize),
+        ("MOE_GATE_OAI", GATE_OAI as usize),
     ] {
         let d = format!("#define {name} {v}");
         assert!(

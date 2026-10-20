@@ -4,8 +4,8 @@
 //! Per layer the GPU runs the attention sub-block (`enqueue_attn` /
 //! `attn_half`, the dense kernels unchanged) and the router (`moe_route`:
 //! moe.cu `moe_logits`, the FFN norm and a warp per expert's logit, then
-//! `moe_topk`, softmax, exact top k, renorm; fixed op orders per token, so a
-//! token's bits don't depend on its batch). One copy brings the normed
+//! `moe_router`, the `MoeKind`'s rule and an exact top k; fixed op orders
+//! per token, so a token's bits don't depend on its batch). One copy brings the normed
 //! states, expert ids and weights to the host; the caller's CPU experts
 //! (`Qwen2::moe_layer[_batch]`) make y; one copy takes y back and `moe_add`
 //! adds it into the residual stream before the next layer. KV lives on the
@@ -28,9 +28,7 @@ use super::*;
 /// moe.cu's kernels (`Kernels::moe_module`).
 pub(crate) struct MoeFns<'m> {
     logits: Func<'m>,
-    topk: Func<'m>,
-    /// gpt-oss: the biased logits' top k, softmax over those k.
-    topk_oai: Func<'m>,
+    route: Func<'m>,
     add: Func<'m>,
 }
 
@@ -38,10 +36,91 @@ impl<'m> MoeFns<'m> {
     pub(crate) fn new(module: &'m Module<'m>) -> Result<MoeFns<'m>, String> {
         Ok(MoeFns {
             logits: module.function("moe_logits")?,
-            topk: module.function("moe_topk")?,
-            topk_oai: module.function("moe_topk_oai")?,
+            route: module.function("moe_router")?,
             add: module.function("moe_add")?,
         })
+    }
+}
+
+/// A MoE family on the GPU: its router rule and its pass. Decode and the
+/// batched passes dispatch on it in one place (`crate::moe::MoeQwen3`).
+pub(crate) enum MoeKind<'m> {
+    /// qwen3moe: softmax over every expert, the top k renormalized.
+    Qwen3(MoeFns<'m>),
+    /// gpt-oss: the biased logits' top k, softmax over those k.
+    Oai(MoeFns<'m>),
+    /// deepseek2: the MLA layers (`super::mla`), their own pass.
+    Mla(Box<super::mla::MlaFns<'m>>),
+}
+
+impl<'m> MoeKind<'m> {
+    /// `m`'s kind: `router` is `Kernels::moe_module_for(m)`, `dense` the
+    /// model's module. An arch without a kind is an Err (a new MoE family
+    /// gets its rule here, not qwen3moe's by default).
+    pub(crate) fn new(
+        m: &crate::gguf::Model,
+        router: &'m Module<'m>,
+        dense: &'m Module<'m>,
+    ) -> Result<MoeKind<'m>, String> {
+        Ok(match m.arch.as_str() {
+            "deepseek2" => MoeKind::Mla(Box::new(super::mla::MlaFns::new(router, dense)?)),
+            "gpt-oss" => MoeKind::Oai(MoeFns::new(router)?),
+            "qwen3moe" => MoeKind::Qwen3(MoeFns::new(router)?),
+            a => return Err(format!("{a}: no MoE router kind on the GPU")),
+        })
+    }
+
+    /// The qwen3moe-style pass's kernels (`moe_step`, `moe_tokens`).
+    fn fns(&self) -> &MoeFns<'m> {
+        match self {
+            MoeKind::Qwen3(f) | MoeKind::Oai(f) => f,
+            MoeKind::Mla(_) => panic!("an MLA model runs mla_step / mla_tokens"),
+        }
+    }
+}
+
+/// moe.cu `moe_router`'s gates.
+pub(crate) const GATE_SOFTMAX: i32 = 0;
+pub(crate) const GATE_SIGMOID: i32 = 1;
+pub(crate) const GATE_OAI: i32 = 2;
+
+/// Enqueue moe.cu `moe_router` over nb tokens' logits `lg` ([nb][n_e])
+/// into ids and w ([nb][k] each): `gate`, the selection `bias` (n_e
+/// floats, or null), the renorm and the scale.
+///
+/// # Safety
+/// The buffers hold what they are said to.
+#[allow(clippy::too_many_arguments)]
+pub(crate) unsafe fn launch_router(
+    g: &Gpu,
+    f: &Func,
+    lg: Arg,
+    (n_e, k, nb): (usize, usize, usize),
+    gate: i32,
+    bias: Arg,
+    norm: bool,
+    scale: f32,
+    (ids, w): (Arg, Arg),
+) -> Result<(), String> {
+    // SAFETY: moe_router's signature; dynamic shared memory 2 n_e floats.
+    unsafe {
+        g.launch(
+            f,
+            (nb as u32, 1, 1),
+            (MOE_THREADS, 1, 1),
+            (2 * n_e * 4) as u32,
+            &[
+                lg,
+                Arg::I32(n_e as i32),
+                Arg::I32(k as i32),
+                Arg::I32(gate),
+                bias,
+                Arg::I32(norm as i32),
+                Arg::F32(scale),
+                ids,
+                w,
+            ],
+        )
     }
 }
 
@@ -80,9 +159,9 @@ fn profile_report(p: &[Prof]) {
 /// experts, y's packing and copy up; then the steps.
 type Prof = [f64; 6];
 
-/// moe.cu MOE_THREADS (moe_topk) and MOE_LG_WARPS (moe_logits).
-const MOE_THREADS: u32 = 128;
-const MOE_LG_WARPS: usize = 8;
+/// moe.cu MOE_THREADS (moe_router) and MOE_LG_WARPS (moe_logits).
+pub(super) const MOE_THREADS: u32 = 128;
+pub(super) const MOE_LG_WARPS: usize = 8;
 
 /// A cache's MoE scratch: for up to `max` tokens the router's output
 /// (normed states [nb][dim] f32, then ids [nb][k] i32, then weights [nb][k]
@@ -177,13 +256,14 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// Enqueue the router of layer li over nb states at x into `mb.r`:
-    /// moe.cu `moe_logits` (the FFN norm and the logits) then `moe_topk`.
+    /// moe.cu `moe_logits` (the FFN norm and the logits) then `moe_router`
+    /// with `kind`'s rule.
     ///
     /// # Safety
     /// x holds nb rows of dim floats; nb <= mb.max.
     unsafe fn moe_route(
         &self,
-        mf: &MoeFns,
+        kind: &MoeKind,
         mb: &MoeBufs,
         li: usize,
         x: Arg,
@@ -196,10 +276,22 @@ impl<'g> CudaQwen2<'g> {
         };
         assert!(nb <= mb.max);
         let (h, ids, w) = self.route_args(mb, nb);
+        let mf = kind.fns();
+        // The kind and the layer's gpt-oss weights agree (both from the
+        // arch): a Qwen3 kind over gpt-oss layers would drop the bias.
+        debug_assert_eq!(l.oss.is_some(), matches!(kind, MoeKind::Oai(_)));
+        let (gate, bias, norm) = match kind {
+            MoeKind::Oai(_) => {
+                let o = l.oss.expect("a gpt-oss layer");
+                (GATE_OAI, self.vecs.arg_at(o.router_b * 4), false)
+            }
+            _ => (GATE_SOFTMAX, Arg::Ptr(0), true),
+        };
         // SAFETY: the kernels' signatures; the router is [n_e][dim] floats
-        // at `router` in vecs, the norm dim floats at ffn_norm; mb.r holds
-        // nb tokens' h, ids and w (route_args), mb.lg nb rows of n_e logits;
-        // dynamic shared memory dim (moe_logits) and n_e (moe_topk) floats.
+        // at `router` in vecs, the norm dim floats at ffn_norm, gpt-oss's
+        // router bias n_e at router_b; mb.r holds nb tokens' h, ids and w
+        // (route_args), mb.lg nb rows of n_e logits; dynamic shared memory
+        // dim floats (moe_logits).
         unsafe {
             self.gpu.launch(
                 &mf.logits,
@@ -217,35 +309,16 @@ impl<'g> CudaQwen2<'g> {
                     mb.lg.arg(),
                 ],
             )?;
-            if let Some(o) = l.oss {
-                // gpt-oss: the router's bias (n_e floats), moe_topk_oai.
-                return self.gpu.launch(
-                    &mf.topk_oai,
-                    (nb as u32, 1, 1),
-                    (MOE_THREADS, 1, 1),
-                    (n_e * 4) as u32,
-                    &[
-                        mb.lg.arg(),
-                        self.vecs.arg_at(o.router_b * 4),
-                        Arg::I32(n_e as i32),
-                        Arg::I32(k as i32),
-                        ids,
-                        w,
-                    ],
-                );
-            }
-            self.gpu.launch(
-                &mf.topk,
-                (nb as u32, 1, 1),
-                (MOE_THREADS, 1, 1),
-                (n_e * 4) as u32,
-                &[
-                    mb.lg.arg(),
-                    Arg::I32(n_e as i32),
-                    Arg::I32(k as i32),
-                    ids,
-                    w,
-                ],
+            launch_router(
+                self.gpu,
+                &mf.route,
+                mb.lg.arg(),
+                (n_e, k, nb),
+                gate,
+                bias,
+                norm,
+                1.0,
+                (ids, w),
             )
         }
     }
@@ -322,7 +395,7 @@ impl<'g> CudaQwen2<'g> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn moe_step(
         &self,
-        mf: &MoeFns,
+        kind: &MoeKind,
         c: &mut CudaCache<'g>,
         mb: &mut MoeBufs<'g>,
         token: u32,
@@ -347,6 +420,7 @@ impl<'g> CudaQwen2<'g> {
         c.host_params.copy_to(&c.params, 0, 8)?;
         let cmb64 = cmb64_at(pos);
         let n = self.layers.len();
+        let mf = kind.fns();
         if mb.graph_gen != c.graph_gen {
             mb.graphs.iter_mut().for_each(|g| *g = None);
             mb.graph_gen = c.graph_gen;
@@ -365,7 +439,7 @@ impl<'g> CudaQwen2<'g> {
                     }
                     if seg < n {
                         self.enqueue_attn(c, seg, params, cmb64, on)?;
-                        self.moe_route(mf, mb, seg, c.x.arg(), 1)?;
+                        self.moe_route(kind, mb, seg, c.x.arg(), 1)?;
                     } else {
                         self.enqueue_head(c, head, on)?;
                     }
@@ -422,7 +496,7 @@ impl<'g> CudaQwen2<'g> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn moe_tokens(
         &self,
-        mf: &MoeFns,
+        kind: &MoeKind,
         c: &mut CudaCache<'g>,
         mb: &mut MoeBufs<'g>,
         tokens: &[u32],
@@ -455,10 +529,10 @@ impl<'g> CudaQwen2<'g> {
             // FFN here: the router, the host round trip, x += y.
             let mut ffn = |li: usize, x: Arg, n: usize| -> Result<(), String> {
                 // SAFETY: x holds the pass's n <= mb.max rows.
-                unsafe { self.moe_route(mf, mb, li, x, n)? };
+                unsafe { self.moe_route(kind, mb, li, x, n)? };
                 self.moe_round_trip(mb, li, n, experts)?;
                 // SAFETY: as above.
-                unsafe { self.moe_add(mf, mb, x, n) }
+                unsafe { self.moe_add(kind.fns(), mb, x, n) }
             };
             let input = BatchIn::Tokens(&tokens[r.clone()]);
             let place = Place::Seq {
@@ -537,11 +611,11 @@ mod tests {
         let moe_err = |r: Result<(), String>| r.is_err_and(|e| e.contains("mixture-of-experts"));
         assert!(moe_err(net.step(&mut c, Input::Token(1), 0, true)));
         assert!(moe_err(net.profile(&mut c, 1, 0).map(|_| ())));
-        let mf = MoeFns::new(&mm).unwrap();
+        let kind = MoeKind::new(&m, &mm, &km).unwrap();
         let mut mb = net.moe_bufs(CudaQwen2::batch_max(&c)).unwrap();
         // Zero experts: only the stream's health is under test.
         let mut ex = |_: usize, _: &[f32], _: &[i32], _: &[f32], y: &mut [f32]| y.fill(0.0);
-        net.moe_step(&mf, &mut c, &mut mb, 1, 0, Head::Argmax, &mut ex)
+        net.moe_step(&kind, &mut c, &mut mb, 1, 0, Head::Argmax, &mut ex)
             .unwrap();
         assert!((net.moe_pick(&mut c).unwrap() as usize) < net.vocab);
     }

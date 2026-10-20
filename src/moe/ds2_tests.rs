@@ -43,7 +43,7 @@ fn ds2_net<'m, 'g>(
     m: &'m Model,
     ctx: usize,
 ) -> MoeQwen3<'m, 'g> {
-    MoeQwen3::new_mla(g, km, ml, m, ctx, CacheKv::F16, false, true).unwrap()
+    MoeQwen3::new(g, km, ml, m, ctx, CacheKv::F16, false, true).unwrap()
 }
 
 /// Token ids < v, spread.

@@ -17,14 +17,14 @@
 //!
 //! gpt-oss runs the same way (stage 1): its windowed attention with sinks
 //! is cuda/oss.cu's (the model's module, `Kernels::module_for`), its biased
-//! router moe.cu's `moe_topk_oai`, and its MXFP4 experts are read in place
+//! router moe.cu's `moe_router` (`MoeKind::Oai`), and its MXFP4 experts are read in place
 //! from the mapping (`Qwen2::new_experts`: no repack, no copy).
 //!
 //! Threads: as the hybrid's, strictly sequential: the thread that opened
 //! the GPU drives the CPU pool for the experts between the GPU's segments.
 
-use crate::cuda::qwen2::mla::{MlaBufs, MlaFns};
-use crate::cuda::qwen2::moe::{MoeBufs, MoeFns};
+use crate::cuda::qwen2::mla::MlaBufs;
+use crate::cuda::qwen2::moe::{MoeBufs, MoeKind};
 use crate::cuda::qwen2::{CacheKv, CudaCache, CudaQwen2, Head};
 use crate::cuda::{Gpu, Module};
 use crate::gguf::Model;
@@ -34,10 +34,7 @@ use crate::model::{MoeRoute, Qwen2};
 pub struct MoeQwen3<'m, 'g> {
     gpu: CudaQwen2<'g>,
     cpu: Qwen2<'m>,
-    mf: MoeFns<'g>,
-    /// deepseek2: the MLA layers' kernels (`cuda::qwen2::mla`; the GPU
-    /// half's `mla`); None for qwen3moe.
-    xf: Option<MlaFns<'g>>,
+    kind: MoeKind<'g>,
     /// The context its caches are planned for (with `fit`, maybe less than
     /// asked).
     pub ctx: usize,
@@ -46,23 +43,45 @@ pub struct MoeQwen3<'m, 'g> {
 /// The GPU cache and the experts' exchange scratch.
 pub struct MoeCache<'g> {
     /// Before `c`: its graphs hold the cache's addresses.
-    mb: MoeBufs<'g>,
-    /// deepseek2: the MLA layers' scratch (then `mb` is a one-token stub).
-    xb: Option<MlaBufs<'g>>,
+    s: Scratch<'g>,
     c: CudaCache<'g>,
 }
 
+/// A cache's scratch, by `MoeKind`: deepseek2's MLA layers have their own.
+enum Scratch<'g> {
+    Moe(MoeBufs<'g>),
+    Mla(Box<MlaBufs<'g>>),
+}
+
+/// A pass `MoeQwen3::run` dispatches: a decode step (token, pos) or
+/// `moe_tokens`' (tokens, start, head).
+enum Pass<'a> {
+    Step(u32, usize),
+    Tokens(&'a [u32], usize, Head),
+}
+
+#[cfg(test)]
+impl<'g> MoeCache<'g> {
+    /// The GPU cache and the qwen3moe-style scratch.
+    pub(crate) fn moe_parts(&mut self) -> (&mut CudaCache<'g>, &mut MoeBufs<'g>) {
+        match &mut self.s {
+            Scratch::Moe(mb) => (&mut self.c, mb),
+            Scratch::Mla(_) => panic!("an MLA cache"),
+        }
+    }
+}
+
 impl<'m, 'g> MoeQwen3<'m, 'g> {
-    /// `m` (a qwen3moe model) with its attention on `gpu` (a `max_ctx`
-    /// cache of type `kv`; with `fit` a shorter one if that doesn't fit)
-    /// and its experts on the CPU. `module` is the model's kernel module,
-    /// `moe_module` moe.cu's (`Kernels::moe_module`). `q6k8`: the Q6_K
-    /// prefill copy now (as `CudaQwen2::with_kv_q6k8`).
+    /// `m` (a qwen3moe, gpt-oss or deepseek2 model) with its attention on
+    /// `gpu` (a `max_ctx` cache of type `kv`; with `fit` a shorter one if
+    /// that doesn't fit) and its experts on the CPU. `module` is the
+    /// model's kernel module, `router` `Kernels::moe_module_for(m)`.
+    /// `q6k8`: the Q6_K prefill copy now (as `CudaQwen2::with_kv_q6k8`).
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         gpu: &'g Gpu,
         module: &'g Module<'g>,
-        moe_module: &'g Module<'g>,
+        router: &'g Module<'g>,
         m: &'m Model,
         max_ctx: usize,
         kv: CacheKv,
@@ -71,41 +90,13 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
     ) -> Result<MoeQwen3<'m, 'g>, String> {
         crate::model::moe_check_ram(m, false)?;
         let net = CudaQwen2::with_kv_moe(gpu, module, m, max_ctx, kv, fit, q6k8)?;
-        let mf = MoeFns::new(moe_module)?;
+        let kind = MoeKind::new(m, router, module)?;
         let cpu = Qwen2::new_experts(m);
         Ok(MoeQwen3 {
             ctx: net.ctx,
             gpu: net,
             cpu,
-            mf,
-            xf: None,
-        })
-    }
-
-    /// `new` for a deepseek2 model: `mla_module` is `Kernels::mla_module`
-    /// (MLA attention and router; moe.cu's add and logits with it).
-    #[allow(clippy::too_many_arguments)]
-    pub fn new_mla(
-        gpu: &'g Gpu,
-        module: &'g Module<'g>,
-        mla_module: &'g Module<'g>,
-        m: &'m Model,
-        max_ctx: usize,
-        kv: CacheKv,
-        fit: bool,
-        q6k8: bool,
-    ) -> Result<MoeQwen3<'m, 'g>, String> {
-        crate::model::moe_check_ram(m, false)?;
-        let net = CudaQwen2::with_kv_moe(gpu, module, m, max_ctx, kv, fit, q6k8)?;
-        let mf = MoeFns::new(mla_module)?;
-        let xf = MlaFns::new(mla_module, module)?;
-        let cpu = Qwen2::new_experts(m);
-        Ok(MoeQwen3 {
-            ctx: net.ctx,
-            gpu: net,
-            cpu,
-            mf,
-            xf: Some(xf),
+            kind,
         })
     }
 
@@ -159,26 +150,32 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
         transpose_tiled(&yc, nb, dim, y);
     }
 
-    fn step(&self, token: u32, pos: usize, c: &mut MoeCache<'g>) {
+    /// Every pass, by kind: the one dispatch. Steps return nothing.
+    fn run(&self, c: &mut MoeCache<'g>, p: Pass) -> (Vec<u32>, Vec<f32>) {
         let mut ex =
             |l: usize, h: &[f32], i: &[i32], w: &[f32], y: &mut [f32]| self.experts(l, h, i, w, y);
-        if let (Some(xf), Some(xb)) = (&self.xf, &mut c.xb) {
-            return self
-                .gpu
-                .mla_step(xf, &mut c.c, xb, token, pos, &mut ex)
-                .unwrap_or_else(|e| Self::die(e));
+        let g = &self.gpu;
+        let none = |r: Result<(), String>| r.map(|_| (Vec::new(), Vec::new()));
+        match (&self.kind, &mut c.s, p) {
+            (MoeKind::Mla(xf), Scratch::Mla(xb), Pass::Step(t, pos)) => {
+                none(g.mla_step(xf, &mut c.c, xb, t, pos, &mut ex))
+            }
+            (MoeKind::Mla(xf), Scratch::Mla(xb), Pass::Tokens(ts, start, head)) => {
+                g.mla_tokens(xf, &mut c.c, xb, ts, start, head, &mut ex)
+            }
+            (k, Scratch::Moe(mb), Pass::Step(t, pos)) => {
+                none(g.moe_step(k, &mut c.c, mb, t, pos, Head::Argmax, &mut ex))
+            }
+            (k, Scratch::Moe(mb), Pass::Tokens(ts, start, head)) => {
+                g.moe_tokens(k, &mut c.c, mb, ts, start, head, &mut ex)
+            }
+            _ => unreachable!("a cache of another kind"),
         }
-        self.gpu
-            .moe_step(
-                &self.mf,
-                &mut c.c,
-                &mut c.mb,
-                token,
-                pos,
-                Head::Argmax,
-                &mut ex,
-            )
-            .unwrap_or_else(|e| Self::die(e));
+        .unwrap_or_else(|e| Self::die(e))
+    }
+
+    fn step(&self, token: u32, pos: usize, c: &mut MoeCache<'g>) {
+        self.run(c, Pass::Step(token, pos));
     }
 
     fn tokens(
@@ -188,17 +185,7 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
         c: &mut MoeCache<'g>,
         head: Head,
     ) -> (Vec<u32>, Vec<f32>) {
-        let mut ex =
-            |l: usize, h: &[f32], i: &[i32], w: &[f32], y: &mut [f32]| self.experts(l, h, i, w, y);
-        if let (Some(xf), Some(xb)) = (&self.xf, &mut c.xb) {
-            return self
-                .gpu
-                .mla_tokens(xf, &mut c.c, xb, tokens, start, head, &mut ex)
-                .unwrap_or_else(|e| Self::die(e));
-        }
-        self.gpu
-            .moe_tokens(&self.mf, &mut c.c, &mut c.mb, tokens, start, head, &mut ex)
-            .unwrap_or_else(|e| Self::die(e))
+        self.run(c, Pass::Tokens(tokens, start, head))
     }
 }
 
@@ -233,16 +220,15 @@ impl<'g> Lm for MoeQwen3<'_, 'g> {
     fn new_cache(&self, max_ctx: usize) -> MoeCache<'g> {
         let c = Lm::new_cache(&self.gpu, max_ctx);
         let max = CudaQwen2::batch_max(&c);
-        let xb = self.xf.as_ref().map(|_| {
-            self.gpu
+        let s = match self.kind {
+            MoeKind::Mla(_) => self
+                .gpu
                 .mla_bufs(max, max_ctx)
-                .unwrap_or_else(|e| Self::die(e))
-        });
-        let mb = self
-            .gpu
-            .moe_bufs(if xb.is_some() { 1 } else { max })
-            .unwrap_or_else(|e| Self::die(e));
-        MoeCache { mb, xb, c }
+                .map(|b| Scratch::Mla(Box::new(b))),
+            _ => self.gpu.moe_bufs(max).map(Scratch::Moe),
+        }
+        .unwrap_or_else(|e| Self::die(e));
+        MoeCache { s, c }
     }
 
     fn forward(&self, token: u32, pos: usize, c: &mut MoeCache<'g>) -> Vec<f32> {
@@ -285,3 +271,6 @@ pub(crate) mod tests;
 
 #[cfg(test)]
 mod oss_tests;
+
+#[cfg(test)]
+mod router_legacy_tests;

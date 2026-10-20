@@ -3,6 +3,7 @@
 //! GPU-attention backend graded against the CPU-only one.
 
 use super::*;
+use crate::cuda::qwen2::moe::{GATE_SOFTMAX, launch_router};
 use crate::cuda::qwen2::tests::{Agree, PROMPTS, assert_graded, compare, report};
 use crate::cuda::{Arg, Kernels};
 
@@ -17,7 +18,7 @@ impl Rng {
     }
 }
 
-/// The GPU router (moe.cu `moe_logits` + `moe_topk`) over nb tokens x
+/// The GPU router (moe.cu `moe_logits` + `moe_router`, qwen3moe's rule) over nb tokens x
 /// [nb][dim], router `wr` [n_e][dim]: (h, ids, w).
 fn route_gpu(
     g: &Gpu,
@@ -32,7 +33,7 @@ fn route_gpu(
     let nb = x.len() / dim;
     let (fl, ft) = (
         mm.function("moe_logits").unwrap(),
-        mm.function("moe_topk").unwrap(),
+        mm.function("moe_router").unwrap(),
     );
     let (xd, gd, wd) = (
         g.upload(x).unwrap(),
@@ -62,18 +63,16 @@ fn route_gpu(
             ],
         )
         .unwrap();
-        g.launch(
+        launch_router(
+            g,
             &ft,
-            (nb as u32, 1, 1),
-            (128, 1, 1),
-            (n_e * 4) as u32,
-            &[
-                lg.arg(),
-                Arg::I32(n_e as i32),
-                Arg::I32(k as i32),
-                ids.arg(),
-                w.arg(),
-            ],
+            lg.arg(),
+            (n_e, k, nb),
+            GATE_SOFTMAX,
+            Arg::Ptr(0),
+            true,
+            1.0,
+            (ids.arg(), w.arg()),
         )
         .unwrap();
     }
@@ -332,8 +331,8 @@ fn moe_gpu_step_refuses_head_no() {
     let mut ex =
         |l: usize, h: &[f32], i: &[i32], w: &[f32], y: &mut [f32]| net.experts(l, h, i, w, y);
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        net.gpu
-            .moe_step(&net.mf, &mut c.c, &mut c.mb, 1, 0, Head::No, &mut ex)
+        let (cc, mb) = c.moe_parts();
+        net.gpu.moe_step(&net.kind, cc, mb, 1, 0, Head::No, &mut ex)
     }));
     let p = r.expect_err("Head::No must panic");
     let msg = p
@@ -404,14 +403,14 @@ fn moe_gpu_paged_and_graph_generation() {
         let mut tok = prompt[250];
         for i in 0..20 {
             if drop_at == Some(i) {
-                let held = c.mb.graphs_held();
+                let held = c.moe_parts().1.graphs_held();
                 assert!(held.0 > 0, "graphs captured by now");
                 c.c.drop_graphs();
             }
             tok = net.forward_argmax(tok, 250 + i, c);
             out.push(tok);
             if drop_at == Some(i) {
-                let (n, at) = c.mb.graphs_held();
+                let (n, at) = c.moe_parts().1.graphs_held();
                 assert!(
                     n > 0 && at == c.c.graph_gen,
                     "graphs remade for the new generation"
@@ -467,8 +466,9 @@ fn route_matches_cpu_twin(small: bool, name: &str) {
         seen.push((l, h.to_vec(), i.to_vec(), w.to_vec()));
         net.experts(l, h, i, w, y)
     };
+    let (cc, mb) = c.moe_parts();
     net.gpu
-        .moe_tokens(&net.mf, &mut c.c, &mut c.mb, &ids, 0, Head::No, &mut ex)
+        .moe_tokens(&net.kind, cc, mb, &ids, 0, Head::No, &mut ex)
         .unwrap();
     let dim = net.gpu.dim;
     // Per differing set: the CPU's own gap between its k-th and (k+1)-th

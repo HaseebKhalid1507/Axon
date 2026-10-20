@@ -8,9 +8,9 @@
 
 use super::tests::moe_net;
 use super::*;
+use crate::cuda::Kernels;
 use crate::cuda::qwen2::tests::{Agree, PROMPTS, assert_graded_floor, compare, report};
 use crate::cuda::qwen2::{CacheKv, Head};
-use crate::cuda::{Arg, Kernels};
 use crate::gguf::Val;
 use crate::model::gptoss_tests::{OssDims, Ts, oss_fixture_dims};
 
@@ -305,7 +305,7 @@ fn oss_gpu_logits_graded_model() {
     assert_graded_floor(&ag, &ac, 90);
 }
 
-/// The GPU router (moe_logits + moe_topk_oai) vs its CPU twin
+/// The GPU router (moe_logits + moe_router's OAI gate) vs its CPU twin
 /// (`Moe::route_oai`) on IDENTICAL normed states (those the GPU handed the
 /// CPU experts over a prefill): sets differ only at near-ties of the CPU's
 /// own k-th / (k+1)-th probabilities, same-set weights within 1e-5.
@@ -317,8 +317,9 @@ fn route_twin(net: &MoeQwen3, ids: &[u32], name: &str) {
         seen.push((l, h.to_vec(), i.to_vec(), w.to_vec()));
         net.experts(l, h, i, w, y)
     };
+    let (cc, mb) = c.moe_parts();
     net.gpu
-        .moe_tokens(&net.mf, &mut c.c, &mut c.mb, ids, 0, Head::No, &mut ex)
+        .moe_tokens(&net.kind, cc, mb, ids, 0, Head::No, &mut ex)
         .unwrap();
     let dim = net.gpu.dim;
     let (mut n, mut sets, mut wmax, mut gap_max) = (0, 0, 0f32, 0f32);
@@ -369,7 +370,7 @@ fn oss_gpu_route_matches_cpu_twin() {
     route_twin(&net, &ids, "gpt-oss-20b");
 }
 
-/// moe_topk_oai on its own: a token's ids and weights are the same bits
+/// moe_router's OAI gate on its own: a token's ids and weights are the same bits
 /// alone as in a batch of 512; ties (equal biased logits) go to the lower
 /// index first with equal weights; the weights are the softmax of the top
 /// k biased logits (to 1e-6) and sum to 1.
@@ -379,27 +380,24 @@ fn oss_topk_batch_invariant_and_ties() {
         return;
     };
     let mm = Kernels::moe_module(&g).unwrap();
-    let f = mm.function("moe_topk_oai").unwrap();
+    let f = mm.function("moe_router").unwrap();
     let run = |lg: &[f32], b: &[f32], k: usize| -> (Vec<i32>, Vec<f32>) {
         let n_e = b.len();
         let nb = lg.len() / n_e;
         let (ld, bd) = (g.upload(lg).unwrap(), g.upload(b).unwrap());
         let (ids, w) = (g.alloc(nb * k * 4).unwrap(), g.alloc(nb * k * 4).unwrap());
-        // SAFETY: moe_topk_oai's signature; buffers sized for nb tokens.
+        // SAFETY: moe_router's signature; buffers sized for nb tokens.
         unsafe {
-            g.launch(
+            crate::cuda::qwen2::moe::launch_router(
+                &g,
                 &f,
-                (nb as u32, 1, 1),
-                (128, 1, 1),
-                (n_e * 4) as u32,
-                &[
-                    ld.arg(),
-                    bd.arg(),
-                    Arg::I32(n_e as i32),
-                    Arg::I32(k as i32),
-                    ids.arg(),
-                    w.arg(),
-                ],
+                ld.arg(),
+                (n_e, k, nb),
+                crate::cuda::qwen2::moe::GATE_OAI,
+                bd.arg(),
+                false,
+                1.0,
+                (ids.arg(), w.arg()),
             )
             .unwrap();
         }
