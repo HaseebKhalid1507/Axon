@@ -77,52 +77,86 @@ moe_logits(const float* __restrict__ x, const float* __restrict__ g, float eps, 
     if (lane == 0) logits[tok * n_e + e] = acc;
 }
 
-// One token per block (MOE_THREADS threads; grid = tokens): its n_e
-// logits (moe_logits) to the k experts in rank order and their weights:
-//   p = softmax(logits) (max and sum by fixed trees, expf),
-//   k rounds of argmax (ties to the lower index), w_i = p[id_i] / s with
-//   s = max(((w_0 + w_1) + ..) + w_{k-1}, 6.103515625e-5) (llama.cpp CPU).
-// Dynamic shared memory: n_e floats.
+// The router after moe_logits, one token per block (MOE_THREADS threads;
+// grid = tokens): its n_e logits to the k experts in rank order and their
+// weights. The gate makes p from the logits:
+//   MOE_GATE_SOFTMAX (qwen3moe, deepseek2): softmax (max and sum by fixed
+//     trees, expf);
+//   MOE_GATE_SIGMOID (deepseek2): 1 / (1 + exp(-x));
+//   MOE_GATE_OAI (gpt-oss): the logits themselves.
+// Selection by sel = p + bias (bias null: p; deepseek2's exp_probs_b:
+// selection only; gpt-oss: the router's bias, required), k rounds of tree
+// argmax over the untaken non-NaN scores (softmax/sigmoid: finite or +inf;
+// OAI: -inf too), ties to the lower index; w_i = p[id_i] (OAI: sel[id_i],
+// the biased logit). Then OAI: the softmax over those k (max = the first,
+// e_i = exp(w_i - max), s = ((e_0 + e_1) + ..) + e_{k-1}, w_i = e_i *
+// (1 / s)); norm: s = max(((w_0 + w_1) + ..) + w_{k-1}, 6.103515625e-5),
+// w_i /= s (llama.cpp CPU); then times scale if not 1. qwen3moe: SOFTMAX,
+// no bias, norm, scale 1; gpt-oss: OAI, no norm, scale 1.
+// No eligible score left (a NaN router): expert 0, __trap() under
+// MOE_DEBUG (debug builds; an unknown gate traps there too). (gpt-oss's
+// CPU twin, Moe::route_oai, picks the first untaken expert instead: NaN
+// routers differ, by design nothing to match.) Dynamic shared memory:
+// 2 n_e floats.
+#define MOE_GATE_SOFTMAX 0
+#define MOE_GATE_SIGMOID 1
+#define MOE_GATE_OAI 2
 extern "C" __global__ void __launch_bounds__(MOE_THREADS)
-moe_topk(const float* __restrict__ logits, int n_e, int k, int* __restrict__ ids,
-         float* __restrict__ w) {
-    extern __shared__ float p[];
+moe_router(const float* __restrict__ logits, int n_e, int k, int gate,
+           const float* __restrict__ bias, int norm, float scale, int* __restrict__ ids,
+           float* __restrict__ w) {
+    extern __shared__ float sp[];
+    float* p = sp;
+    float* sel = sp + n_e;
     __shared__ float red[MOE_THREADS];
     __shared__ int rid[MOE_THREADS];
+    const float ninf = __int_as_float(0xff800000), nan = __int_as_float(0x7fc00000);
     int t = threadIdx.x;
     size_t tok = blockIdx.x;
+#ifdef MOE_DEBUG
+    if (gate < MOE_GATE_SOFTMAX || gate > MOE_GATE_OAI) __trap();
+#endif
     for (int e = t; e < n_e; e += MOE_THREADS) p[e] = logits[tok * n_e + e];
     __syncthreads();
-    // Softmax: the max and the sum, each thread's experts ascending, then
-    // the tree.
-    float mx = __int_as_float(0xff800000);  // -inf
-    for (int e = t; e < n_e; e += MOE_THREADS) mx = fmaxf(mx, p[e]);
-    red[t] = mx;
-    __syncthreads();
-    for (int s = MOE_THREADS / 2; s > 0; s >>= 1) {
-        if (t < s) red[t] = fmaxf(red[t], red[t + s]);
+    if (gate == MOE_GATE_SIGMOID) {
+        for (int e = t; e < n_e; e += MOE_THREADS)
+            p[e] = __fdiv_rn(1.0f, __fadd_rn(1.0f, expf(-p[e])));
+    } else if (gate == MOE_GATE_SOFTMAX) {
+        // The max and the sum, each thread's experts ascending, then the
+        // tree.
+        float mx = ninf;
+        for (int e = t; e < n_e; e += MOE_THREADS) mx = fmaxf(mx, p[e]);
+        red[t] = mx;
         __syncthreads();
+        for (int s = MOE_THREADS / 2; s > 0; s >>= 1) {
+            if (t < s) red[t] = fmaxf(red[t], red[t + s]);
+            __syncthreads();
+        }
+        mx = red[0];
+        __syncthreads();
+        float sum = 0.0f;
+        for (int e = t; e < n_e; e += MOE_THREADS) {
+            float v = expf(__fsub_rn(p[e], mx));
+            p[e] = v;
+            sum = __fadd_rn(sum, v);
+        }
+        sum = moe_tree_sum(sum, red);
+        for (int e = t; e < n_e; e += MOE_THREADS) p[e] = __fdiv_rn(p[e], sum);
     }
-    mx = red[0];
     __syncthreads();
-    float sum = 0.0f;
     for (int e = t; e < n_e; e += MOE_THREADS) {
-        float v = expf(__fsub_rn(p[e], mx));
-        p[e] = v;
-        sum = __fadd_rn(sum, v);
+        float s = bias ? __fadd_rn(p[e], bias[e]) : p[e];
+        if (gate != MOE_GATE_OAI && s == ninf) s = nan;  // -inf: never selected
+        sel[e] = s;
     }
-    sum = moe_tree_sum(sum, red);
-    for (int e = t; e < n_e; e += MOE_THREADS) p[e] = __fdiv_rn(p[e], sum);
     __syncthreads();
-
-    // Top k: each round the best untaken expert (taken ones are -1 < any
-    // probability), then it is taken.
     for (int r = 0; r < k; r++) {
-        float bv = -2.0f;
+        float bv = ninf;
         int bi = 0x7fffffff;
         for (int e = t; e < n_e; e += MOE_THREADS)
-            if (moe_beats(p[e], e, bv, bi)) {
-                bv = p[e];
+            // Non-NaN only: taken experts (NaN) never again.
+            if (sel[e] == sel[e] && moe_beats(sel[e], e, bv, bi)) {
+                bv = sel[e];
                 bi = e;
             }
         red[t] = bv;
@@ -136,18 +170,39 @@ moe_topk(const float* __restrict__ logits, int n_e, int k, int* __restrict__ ids
             __syncthreads();
         }
         if (t == 0) {
-            int e = rid[0];
+#ifdef MOE_DEBUG
+            if (rid[0] == 0x7fffffff) __trap();
+#endif
+            int e = rid[0] == 0x7fffffff ? 0 : rid[0];
             ids[tok * k + r] = e;
-            w[tok * k + r] = red[0];
-            p[e] = -1.0f;
+            // OAI: the selected score (-inf if none left), else p
+            // (expert 0's).
+            w[tok * k + r] = gate == MOE_GATE_OAI ? red[0] : p[e];
+            sel[e] = nan;
         }
         __syncthreads();
     }
     if (t == 0) {
-        float s = 0.0f;
-        for (int r = 0; r < k; r++) s = __fadd_rn(s, w[tok * k + r]);
-        s = fmaxf(s, 6.103515625e-5f);
-        for (int r = 0; r < k; r++) w[tok * k + r] = __fdiv_rn(w[tok * k + r], s);
+        float* wt = w + tok * k;
+        if (gate == MOE_GATE_OAI) {
+            float mx = wt[0];
+            float s = 0.0f;
+            for (int r = 0; r < k; r++) {
+                float v = expf(__fsub_rn(wt[r], mx));
+                wt[r] = v;
+                s = __fadd_rn(s, v);
+            }
+            float inv = __fdiv_rn(1.0f, s);
+            for (int r = 0; r < k; r++) wt[r] = __fmul_rn(wt[r], inv);
+        }
+        if (norm) {
+            float s = 0.0f;
+            for (int r = 0; r < k; r++) s = __fadd_rn(s, wt[r]);
+            s = fmaxf(s, 6.103515625e-5f);
+            for (int r = 0; r < k; r++) wt[r] = __fdiv_rn(wt[r], s);
+        }
+        if (scale != 1.0f)
+            for (int r = 0; r < k; r++) wt[r] = __fmul_rn(wt[r], scale);
     }
 }
 

@@ -198,7 +198,7 @@ fn agreement(m: &Model, steps: usize) -> (Agree, Agree) {
     // repacks.
     let gpu = CudaQwen2::new(&g, &km, m, 256).unwrap();
     let rows = Qwen2::new_with(m, false);
-    let cpu = Qwen2::new(m);
+    let cpu = Qwen2::new_with(m, true);
     let (mut ag, mut ac) = (Agree::default(), Agree::default());
     for p in PROMPTS {
         let ids = tok.encode(p);
@@ -258,10 +258,49 @@ pub(crate) fn assert_graded(ag: &Agree, ac: &Agree) {
     assert_graded_floor(ag, ac, 94);
 }
 
+/// The grades are relative to `ac`, the CPU's per-row kernels against its
+/// default (repacked) ones: a reference with no spread (identical logits
+/// everywhere) means both were the same model, and every relative bound
+/// would be 0. Fail on that by name, not on the first bound it breaks.
+pub(crate) fn assert_ref_spread(ac: &Agree) {
+    assert!(
+        ac.positions == 0 || ac.max_abs > 0.0,
+        "reference spread is 0: cpu and rows are the same model (AXON_REPACK=0? build the reference \
+         with Qwen2::new_with(m, true))"
+    );
+}
+
+/// A zero reference spread fails by name (AXON_REPACK=0 once made cpu ==
+/// rows and failed `mean KL` instead); an empty reference and a nonzero one
+/// pass.
+#[test]
+fn ref_spread_zero_fails_by_name() {
+    assert_ref_spread(&Agree::default());
+    assert_ref_spread(&Agree {
+        positions: 3,
+        max_abs: 0.1,
+        ..Agree::default()
+    });
+    let r = std::panic::catch_unwind(|| {
+        assert_ref_spread(&Agree {
+            positions: 3,
+            ..Agree::default()
+        })
+    });
+    let p = r.expect_err("a zero spread must fail");
+    let msg = p
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| p.downcast_ref::<&str>().copied())
+        .unwrap_or("");
+    assert!(msg.contains("reference spread is 0"), "{msg}");
+}
+
 /// `assert_graded` with top-1 at least `floor` % (natural text, prose and
 /// code, has more near-ties: the CPU agrees with itself on only 93.8 % of
 /// natural_long's 1.5B positions).
 pub(crate) fn assert_graded_floor(ag: &Agree, ac: &Agree, floor: usize) {
+    assert_ref_spread(ac);
     let n = ag.positions;
     // Top-1: at most 2% of positions behind the CPU's self-agreement.
     assert!(
@@ -1500,7 +1539,7 @@ fn continuations_match(m: &Model, name: &str) {
     let tok = crate::tokenizer::Tokenizer::from_gguf(m);
     let mut gpu = CudaQwen2::new(&g, &km, m, 256).unwrap();
     let rows = Qwen2::new_with(m, false);
-    let cpu = Qwen2::new(m);
+    let cpu = Qwen2::new_with(m, true);
     // The CPU's continuations (with logits), once for all the comparisons.
     let refs: Vec<_> = PROMPTS
         .iter()
@@ -2161,7 +2200,7 @@ fn gpu_logits_match_cpu_long_context() {
     let gpu = CudaQwen2::new(&g, &km, &m, 1300).unwrap();
     assert!(gpu.graphs || std::env::var_os("AXON_CUDA_GRAPHS").is_some());
     let rows = Qwen2::new_with(&m, false);
-    let cpu = Qwen2::new(&m);
+    let cpu = Qwen2::new_with(&m, true);
     let (mut ag, mut ac) = (Agree::default(), Agree::default());
     for p in [PROMPTS[2], PROMPTS[1]] {
         let one = tok.encode(&format!("{p} "));
@@ -2201,7 +2240,7 @@ fn gpu_logits_match_cpu_2000_tokens() {
     let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
     let gpu = CudaQwen2::new(&g, &km, &m, 2100).unwrap();
     let rows = Qwen2::new_with(&m, false);
-    let cpu = Qwen2::new(&m);
+    let cpu = Qwen2::new_with(&m, true);
     let (mut ag, mut ac) = (Agree::default(), Agree::default());
     let one = tok.encode(&format!("{} ", PROMPTS[4]));
     let ids: Vec<u32> = one.iter().copied().cycle().take(2000).collect();
@@ -2229,7 +2268,7 @@ fn natural_long(m: &Model, name: &str) {
     let km = Kernels::module(&g).unwrap();
     let gpu = CudaQwen2::new(&g, &km, m, 1600).unwrap();
     let rows = Qwen2::new_with(m, false);
-    let cpu = Qwen2::new(m);
+    let cpu = Qwen2::new_with(m, true);
     let ids = natural_ids(m, 1600);
     let (mut ag, mut ac) = (Agree::default(), Agree::default());
     compare_forced2(&cpu, &gpu, &rows, &ids, 1100, &mut ag, &mut ac);
@@ -2709,6 +2748,17 @@ unsafe fn launch_product(
         } else if kernel.starts_with("gemvm") {
             g.launch(f, (rows.div_ceil(16) as u32, 1, 1), (128, 1, 1), 0, common)
                 .unwrap();
+        } else if kernel.starts_with("gemm2t") {
+            let sm = gemm2t_smem(qt);
+            f.set_max_shared(sm).unwrap();
+            g.launch(
+                f,
+                (nb.div_ceil(64) as u32, rows.div_ceil(G2T_BM) as u32, 1),
+                (256, 1, 1),
+                sm as u32,
+                common,
+            )
+            .unwrap();
         } else if kernel.starts_with("gemm2") {
             let (bn, st) = if kernel.starts_with("gemm2s") {
                 (64, 3)
@@ -3119,17 +3169,23 @@ fn gpu_swiglu_epilogue_and_gate_up_match_reference() {
                 let got: Vec<f32> = run(k, &wu, gate.arg(), 2).read().unwrap();
                 assert_eq!(bits(&got), bits(&want), "mode 2 {k} {cols}x{rows} nb {nb}");
             }
-            if km.mma() {
+            for (k, br, sm) in [
+                ("gemm2s_q4_k_gu", 32, gemm2_smem(Q4_K, 64, 3)),
+                ("gemm2t_q4_k_gu", 64, gemm2t_smem(Q4_K)),
+            ] {
+                if !km.mma() {
+                    break;
+                }
                 let out = g.alloc(rows * nb * 4).unwrap();
-                let f = km.function("gemm2s_q4_k_gu").unwrap();
-                f.set_max_shared(gemm2_smem(Q4_K, 64, 3)).unwrap();
-                // SAFETY: gemm2s_q4_k_gu's signature; as above.
+                let f = km.function(k).unwrap();
+                f.set_max_shared(sm).unwrap();
+                // SAFETY: gemm2s_q4_k_gu's signature (gemm2t's is the same); as above.
                 unsafe {
                     g.launch(
                         &f,
-                        (nb.div_ceil(64) as u32, rows.div_ceil(32) as u32, 1),
+                        (nb.div_ceil(64) as u32, rows.div_ceil(br) as u32, 1),
                         (256, 1, 1),
-                        gemm2_smem(Q4_K, 64, 3) as u32,
+                        sm as u32,
                         &[
                             wg.arg(),
                             wu.arg(),
@@ -3147,11 +3203,7 @@ fn gpu_swiglu_epilogue_and_gate_up_match_reference() {
                 };
                 g.sync().unwrap();
                 let got: Vec<f32> = out.read().unwrap();
-                assert_eq!(
-                    bits(&got),
-                    bits(&want),
-                    "gemm2s_q4_k_gu {cols}x{rows} nb {nb}"
-                );
+                assert_eq!(bits(&got), bits(&want), "{k} {cols}x{rows} nb {nb}");
             }
         }
         eprintln!("Q4_K {cols} x {rows}: mode 2 and the fused gate+up == gemv_ref");
@@ -3166,7 +3218,269 @@ fn has_gemvm(qt: u32) -> bool {
 
 fn gemm2_names(qt: u32) -> Vec<String> {
     let tn = type_name(qt);
-    vec![format!("gemm2_{tn}"), format!("gemm2s_{tn}")]
+    let mut v = vec![format!("gemm2_{tn}"), format!("gemm2s_{tn}")];
+    if matches!(qt, Q4_K | Q5_K) {
+        v.push(format!("gemm2t_{tn}"));
+    }
+    v
+}
+
+/// gemm2s (64 x 64) vs gemm2t (128 x 64) Q4_K tiles, per MAC, the r17 way:
+/// per sample a ~AXON_BENCH_WIN_MS (200) window of back-to-back launches
+/// after half a window of warm-up (power-capped laptops boost on the
+/// previous kernel's credit), the cases in a shuffled order every round, and
+/// the SM clock sampled (nvidia-smi, 50 ms) over each window. 7B shapes at
+/// AXON_BENCH_NB (1024,1088), AXON_BENCH_ROUNDS (7). Results not checked
+/// (the bit tests do that).
+#[test]
+#[ignore]
+fn cuda_gemm_tile_bench() {
+    use std::io::BufRead;
+    use std::time::Instant;
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    if !km.mma() {
+        return;
+    }
+    let info = g.info().unwrap();
+    eprintln!(
+        "{} sm_{}{} {} SMs",
+        info.name, info.cc.0, info.cc.1, info.sms
+    );
+    // The device's own (NVRTC) build: registers and local (spill) bytes.
+    for k in [
+        "gemm2s_q4_k",
+        "gemm2s_q4_k_gu",
+        "gemm2t_q4_k",
+        "gemm2t_q5_k",
+        "gemm2t_q4_k_gu",
+    ] {
+        let rl = km.function(k).unwrap().regs_local().unwrap();
+        eprintln!("REGS {k}: {} regs, {} local bytes", rl.0, rl.1);
+    }
+    let nbs: Vec<usize> = std::env::var("AXON_BENCH_NB")
+        .map(|v| v.split(',').map(|x| x.parse().unwrap()).collect())
+        .unwrap_or(vec![1024, 1088]);
+    let rounds: usize = std::env::var("AXON_BENCH_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(7);
+    let win_ms: f64 = std::env::var("AXON_BENCH_WIN_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(200.0);
+    let samples: std::sync::Arc<std::sync::Mutex<Vec<(Instant, f64)>>> = Default::default();
+    let child = std::process::Command::new("nvidia-smi")
+        .args([
+            "--query-gpu=clocks.sm",
+            "--format=csv,noheader,nounits",
+            "-lms",
+            "50",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .spawn();
+    // Killed and reaped on drop, panic or not.
+    struct Smi(Option<std::process::Child>);
+    impl Drop for Smi {
+        fn drop(&mut self) {
+            if let Some(c) = self.0.as_mut() {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
+    }
+    let mut child = Smi(child.ok());
+    if let Some(out) = child.0.as_mut().and_then(|c| c.stdout.take()) {
+        let sm = samples.clone();
+        std::thread::spawn(move || {
+            for l in std::io::BufReader::new(out).lines() {
+                let Ok(l) = l else { break };
+                if let Ok(v) = l.trim().parse::<f64>() {
+                    sm.lock().unwrap().push((Instant::now(), v));
+                }
+            }
+        });
+    }
+    let clock = |t0: Instant, t1: Instant| {
+        let v = samples.lock().unwrap();
+        let w: Vec<f64> = v
+            .iter()
+            .filter(|x| x.0 >= t0 && x.0 <= t1)
+            .map(|x| x.1)
+            .collect();
+        if w.is_empty() {
+            f64::NAN
+        } else {
+            w.iter().sum::<f64>() / w.len() as f64
+        }
+    };
+    let mut rng = Rng(7);
+    // (name, cols, rows); gu = the fused gate + up of the gate shape.
+    let shapes = [
+        ("gate", 3584usize, 18944usize),
+        ("down", 18944, 3584),
+        ("q/wo", 3584, 3584),
+        ("kv", 3584, 512),
+    ];
+    let ws: Vec<DevBuf> = shapes
+        .iter()
+        .map(|&(_, c, r)| g.upload(&synth_matrix(&mut rng, Q4_K, r, c)).unwrap())
+        .collect();
+    let wu = g
+        .upload(&synth_matrix(&mut rng, Q4_K, 18944, 3584))
+        .unwrap();
+    let nbmax = *nbs.iter().max().unwrap();
+    let out = g.alloc(18944 * nbmax * 4).unwrap();
+    let acts: Vec<(usize, DevBuf, DevBuf)> = nbs
+        .iter()
+        .map(|&nb| {
+            let x1: Vec<Vec<f32>> = (0..nb).map(|_| rng.vec(3584, 1.0)).collect();
+            let x2: Vec<Vec<f32>> = (0..nb).map(|_| rng.vec(18944, 1.0)).collect();
+            (
+                nb,
+                quantize_batch(&g, &km, &x1, 3584),
+                quantize_batch(&g, &km, &x2, 18944),
+            )
+        })
+        .collect();
+    // Cases: (nb index, shape index or 4 = gu, kernel).
+    let mut cases: Vec<(usize, usize, &str)> = Vec::new();
+    for ni in 0..nbs.len() {
+        for si in 0..5 {
+            let ks: [&str; 2] = if si == 4 {
+                ["gemm2s_q4_k_gu", "gemm2t_q4_k_gu"]
+            } else {
+                ["gemm2s_q4_k", "gemm2t_q4_k"]
+            };
+            for k in ks {
+                cases.push((ni, si, k));
+            }
+        }
+    }
+    let run = |&(ni, si, k): &(usize, usize, &str)| {
+        let (nb, a1, a2) = &acts[ni];
+        let nb = *nb;
+        let f = km.function(k).unwrap();
+        if si == 4 {
+            let (br, sm) = if k.starts_with("gemm2t") {
+                (64, gemm2t_smem(Q4_K))
+            } else {
+                (32, gemm2_smem(Q4_K, 64, 3))
+            };
+            f.set_max_shared(sm).unwrap();
+            // SAFETY: gemm2s_q4_k_gu's signature; buffers as above.
+            unsafe {
+                g.launch(
+                    &f,
+                    (nb.div_ceil(64) as u32, 18944usize.div_ceil(br) as u32, 1),
+                    (256, 1, 1),
+                    sm as u32,
+                    &[
+                        ws[0].arg(),
+                        wu.arg(),
+                        Arg::U64(quant::row_bytes(Q4_K, 3584) as u64),
+                        Arg::I32(18944),
+                        Arg::I32(3584),
+                        a1.arg(),
+                        Arg::U64(act_stride_t(3584) as u64),
+                        Arg::I32(nb as i32),
+                        out.arg(),
+                        Arg::U64(18944),
+                    ],
+                )
+                .unwrap()
+            };
+        } else {
+            let (_, cols, rows) = shapes[si];
+            let act = if cols == 3584 { a1 } else { a2 };
+            let common = [
+                ws[si].arg(),
+                Arg::U64(quant::row_bytes(Q4_K, cols) as u64),
+                Arg::I32(rows as i32),
+                Arg::I32(cols as i32),
+                act.arg(),
+                Arg::U64(act_stride_t(cols) as u64),
+                Arg::I32(nb as i32),
+                Arg::Ptr(0),
+                Arg::I32(0),
+                out.arg(),
+                Arg::U64(rows as u64),
+            ];
+            // SAFETY: prefill.cu's gemm2 signature; buffers as above.
+            unsafe { launch_product(&g, &f, k, Q4_K, rows, nb, &common) };
+        }
+    };
+    let nc = cases.len();
+    let mut reps = vec![0usize; nc];
+    let mut ms = vec![Vec::<f64>::new(); nc];
+    let mut mhz = vec![Vec::<f64>::new(); nc];
+    for r in 0..rounds {
+        let mut order: Vec<usize> = (0..nc).collect();
+        let mut st = 0x9e37_79b9_7f4a_7c15u64 ^ (r as u64).wrapping_mul(0x1_0000_01b3);
+        for i in (1..nc).rev() {
+            st ^= st << 13;
+            st ^= st >> 7;
+            st ^= st << 17;
+            order.swap(i, (st % (i as u64 + 1)) as usize);
+        }
+        for &ci in &order {
+            if reps[ci] == 0 {
+                run(&cases[ci]);
+                let e0 = g.record().unwrap();
+                for _ in 0..3 {
+                    run(&cases[ci]);
+                }
+                let e1 = g.record().unwrap();
+                let t = e0.ms_to(&e1).unwrap() as f64 / 3.0;
+                reps[ci] = ((win_ms / t).ceil() as usize).max(3);
+            }
+            let k = reps[ci];
+            for _ in 0..k / 2 {
+                run(&cases[ci]);
+            }
+            g.sync().unwrap();
+            let t0 = Instant::now();
+            let e0 = g.record().unwrap();
+            for _ in 0..k {
+                run(&cases[ci]);
+            }
+            let e1 = g.record().unwrap();
+            let el = e0.ms_to(&e1).unwrap() as f64;
+            g.sync().unwrap();
+            ms[ci].push(el / k as f64);
+            mhz[ci].push(clock(t0, Instant::now()));
+        }
+    }
+    drop(child);
+    let med = |v: &[f64]| {
+        let mut v = v.to_vec();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    };
+    for (ci, &(ni, si, k)) in cases.iter().enumerate() {
+        let nb = acts[ni].0;
+        let (name, cols, rows) = if si == 4 {
+            ("gu", 3584, 2 * 18944)
+        } else {
+            shapes[si]
+        };
+        let tmac = (rows * cols * nb) as f64 / (med(&ms[ci]) * 1e-3) / 1e12;
+        let clk = med(&mhz[ci]);
+        let per: Vec<f64> = ms[ci]
+            .iter()
+            .map(|x| (rows * cols * nb) as f64 / (x * 1e-3) / 1e12)
+            .collect();
+        let mut p = per.clone();
+        p.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        eprintln!(
+            "TILE {name:<4} nb {nb:<5} {k:<15} median {tmac:6.2} TMAC/s (min {:.2} max {:.2}) clk {clk:.0} MHz -> {:.0} MAC/clk/SM",
+            p[0],
+            p[p.len() - 1],
+            tmac * 1e12 / (info.sms as f64 * clk * 1e6)
+        );
+    }
 }
 
 /// Batched products' speed (best of N, events): tensor-core GEMM for
@@ -3473,6 +3787,10 @@ fn prefill_bits(m: &Model, name: &str, kv: CacheKv) {
         &[false]
     };
     let own = net.max_split;
+    // Random chunk sizes of 1..48 tokens: one sequence's passes either side
+    // of att_per_query and MQ_MAX (attn_blk_b, attn_blk_mq, attn_fa_b).
+    let mut rng = Rng(4242);
+    let rand: Vec<usize> = (0..60).map(|_| 1 + (rng.next() % 48) as usize).collect();
     for (&tc, max_split) in paths.iter().flat_map(|t| [(t, own), (t, 8)]) {
         net.set_tc_attn(tc);
         net.max_split = max_split;
@@ -3484,6 +3802,8 @@ fn prefill_bits(m: &Model, name: &str, kv: CacheKv) {
             vec![max],
             vec![5, 100, 3, 17, 260, 1, 33],
             vec![16, 0, 9, 0, 0, 200],
+            vec![24, 32, 31, 2, 47],
+            rand.clone(),
         ] {
             let (kv, l) = prefill_with(&net, &ids, &sizes);
             let bad = kv.iter().zip(&kv0).position(|(a, b)| a != b);
@@ -3756,6 +4076,333 @@ fn batch_passes_equal_split() {
                 p.iter().map(|r| r.len()).max().unwrap(),
             );
             assert!(hi <= max && hi - lo <= 1, "{n} {max}: {p:?}");
+        }
+    }
+}
+
+/// A Q4_K_M model's batched products as `wave_gemms` lists them (fused
+/// gate + up): dim, q rows, k / v rows, ffn, layers, and how many layers
+/// have v and down in Q6_K (llama.cpp's Q4_K_M: half).
+fn wave_model(dim: usize, q: usize, kv: usize, ffn: usize, layers: usize) -> Vec<batch::Gemm> {
+    use batch::Gemm;
+    let one = |qt, rows, cols| Gemm::One { qt, rows, cols };
+    (0..layers)
+        .flat_map(|l| {
+            let t6 = if l % 2 == 0 { Q6_K } else { Q4_K };
+            [
+                one(Q4_K, q, dim),
+                one(Q4_K, kv, dim),
+                one(t6, kv, dim),
+                one(Q4_K, dim, q),
+                Gemm::GateUp { ffn, dim },
+                one(t6, dim, ffn),
+            ]
+        })
+        .collect()
+}
+
+/// `wave_passes`: as many passes as `passes`, none longer than max, all
+/// but the last whole 64-token tiles, never more modelled GEMM time; the
+/// equal split for one pass and where nothing beats it; r15's 4090 7B
+/// case (1050 + 1050 -> 1088 + 1012). Prints the wave table per GPU (the
+/// PR's): 64 x 64 x dim block-waves per layer, summed over the passes.
+/// gemm2t where its waves cost less: the big 7B products everywhere, not
+/// the 512-row k / v where halving gemm2s's blocks leaves SMs idle.
+#[test]
+fn tile_t_picks() {
+    use batch::tile_t;
+    for sms in [20, 46, 128, 170] {
+        for rows in [3584, 18944] {
+            assert!(tile_t(rows, 64, 1024, sms), "{rows} rows, {sms} SMs");
+            assert!(
+                tile_t(rows, 64, 2100, sms),
+                "{rows} rows nb 2100, {sms} SMs"
+            );
+        }
+        // gate + up: 32 rows of each per gemm2s block.
+        assert!(tile_t(18944, 32, 1024, sms), "gu {sms} SMs");
+    }
+    // 7B k / v at nb 1024 on a 4090: 128 gemm2s blocks, 64 gemm2t.
+    assert!(!tile_t(512, 64, 1024, 128));
+    // ... but on 20 SMs both grids are several waves.
+    assert!(tile_t(512, 64, 1024, 20));
+    // A small batch's single partial wave: gemm2s.
+    assert!(!tile_t(3584, 64, 64, 128));
+    // The floor: one token tile or less always keeps gemm2s, even where
+    // the waves alone would pick gemm2t (the 7B FFN on any GPU, the 3584-row
+    // products on 20 SMs), and the first nb past it may take gemm2t.
+    for sms in [20, 46, 70, 128, 170] {
+        for nb in 1..=batch::TILE_T_MIN_NB {
+            for (rows, br) in [(18944, 64), (3584, 64), (18944, 32), (12288, 32)] {
+                assert!(!tile_t(rows, br, nb, sms), "{rows}/{br} nb {nb} {sms} SMs");
+            }
+        }
+    }
+    assert!(tile_t(18944, 64, batch::TILE_T_MIN_NB + 1, 20));
+}
+
+#[test]
+fn wave_passes_shapes() {
+    use batch::{WaveGeom, gemm_cost, passes, wave_floor, wave_passes};
+    let models = [
+        (
+            "qwen2.5-7B",
+            wave_model(3584, 3584, 512, 18944, 28),
+            3584,
+            28,
+        ),
+        (
+            "qwen3-8B",
+            wave_model(4096, 4096, 1024, 12288, 36),
+            4096,
+            36,
+        ),
+        ("qwen2.5-0.5B", wave_model(896, 896, 128, 4864, 24), 896, 24),
+        (
+            "qwen2.5-1.5B",
+            wave_model(1536, 1536, 256, 8960, 28),
+            1536,
+            28,
+        ),
+    ];
+    // (GPU, SMs, sm_90a gemmh2)
+    let gpus = [
+        ("avante 4050L", 20, false),
+        ("bella 5070TiL", 46, false),
+        ("H100 PCIe", 114, true),
+        ("RTX 4090", 128, false),
+        ("H100 SXM", 132, true),
+        ("RTX 5090", 170, false),
+    ];
+    for (name, ps, dim, layers) in &models {
+        for (gpu, sms, gemmh, tile_t) in gpus
+            .iter()
+            .flat_map(|&(n, s, h)| [(n, s, h, false), (n, s, h, true)])
+        {
+            let g = WaveGeom {
+                sms,
+                gemmh,
+                gemmh_all: false,
+                tile_t,
+            };
+            let cost = |nb: usize| gemm_cost(ps, nb, g);
+            // 64 x 64 x dim blocks' full waves per layer.
+            let unit = (100 * sms * 64 * 64 * dim * layers) as f64;
+            let total =
+                |p: &[std::ops::Range<usize>]| -> u64 { p.iter().map(|r| cost(r.len())).sum() };
+            for max in [1152, 1000, 700, 256] {
+                for n in (1..4000).step_by(37).chain([1153, 1777, 2100, 2304, 3000]) {
+                    let base = passes(n, max);
+                    let Some(v) = wave_passes(n, max, cost) else {
+                        continue;
+                    };
+                    assert_eq!(v.len(), base.len(), "{n} {max}");
+                    assert_eq!((v[0].start, v.last().unwrap().end), (0, n));
+                    assert!(v.windows(2).all(|w| w[0].end == w[1].start));
+                    assert!(v.iter().all(|r| r.len() <= max && r.len() > batch::VM_MAX));
+                    assert!(
+                        v.iter().all(|r| r.len() >= wave_floor(max)),
+                        "{name} {gpu} {n} {max}: a pass under the floor: {v:?}"
+                    );
+                    assert!(v[..v.len() - 1].iter().all(|r| r.len() % 64 == 0));
+                    assert!(
+                        (total(&v) as f64) < 0.97 * total(&base) as f64,
+                        "{name} {gpu} {n} {max}"
+                    );
+                }
+                for n in [1, 2, 33, 500, max].into_iter().filter(|&n| n <= max) {
+                    assert_eq!(wave_passes(n, max, cost), None, "{n} {max}: one pass");
+                }
+            }
+            for n in [1153, 1777, 2100, 2304, 3000, 4000, 6000] {
+                let base = passes(n, 1152);
+                let v = wave_passes(n, 1152, cost).unwrap_or_else(|| base.clone());
+                let lens = |p: &[std::ops::Range<usize>]| -> Vec<usize> {
+                    p.iter().map(|r| r.len()).collect()
+                };
+                let (a, b) = (total(&base) as f64 / unit, total(&v) as f64 / unit);
+                eprintln!(
+                    "WAVES {name:<13} {gpu:<14} {sms:>3} SMs t {tile_t:<5} pp{n:<5} {:?} {a:7.1} -> {:?} {b:7.1} ({:+.1} %)",
+                    lens(&base),
+                    lens(&v),
+                    100.0 * (b / a - 1.0)
+                );
+            }
+        }
+    }
+    // Degenerate max: one tile per pass (64: every split the same cost)
+    // or none (63).
+    let ps = &models[0].1;
+    let g = WaveGeom {
+        sms: 128,
+        gemmh: false,
+        gemmh_all: false,
+        tile_t: true,
+    };
+    for n in 65..400 {
+        assert_eq!(
+            wave_passes(n, 64, |nb| gemm_cost(ps, nb, g)),
+            None,
+            "{n} / 64"
+        );
+        assert_eq!(
+            wave_passes(n, 63, |nb| gemm_cost(ps, nb, g)),
+            None,
+            "{n} / 63"
+        );
+    }
+    // Under the margin: no wave effect (cost by the token alone), or a
+    // split that saves 2 % (< 3 %) of a cost made up for it.
+    assert_eq!(wave_passes(2100, 1152, |nb| nb as u64), None);
+    let toy = |nb: usize| if nb == 1088 || nb == 1012 { 98 } else { 100 };
+    assert_eq!(wave_passes(2100, 1152, toy), None);
+    let toy = |nb: usize| if nb == 1088 || nb == 1012 { 96 } else { 100 };
+    assert_eq!(
+        wave_passes(2100, 1152, toy),
+        Some(vec![0..1088, 1088..2100])
+    );
+    // The RTX 4090 cells measured (#92), with gemm2s (AXON_GEMM_TILE=64):
+    // r15 pick 1's pp2100 split for 7B and Qwen3-8B (+3.0 % / +3.9 % e2e)
+    // stays; 7B pp1153 (704 + 449, -0.4 %), pp1777 (1024 + 753, +1.8 %) and
+    // pp3000 (1152 + 1152 + 696, +1.1 %) are under the margin now.
+    let g64 = WaveGeom { tile_t: false, ..g };
+    let at =
+        |m: usize, n: usize, g: WaveGeom| wave_passes(n, 1152, |nb| gemm_cost(&models[m].1, nb, g));
+    for g in [g64, g] {
+        assert_eq!(at(0, 1153, g), None);
+        assert_eq!(at(0, 1777, g), None);
+        assert_eq!(at(0, 3000, g), None);
+    }
+    assert_eq!(at(0, 2100, g64), Some(vec![0..1088, 1088..2100]));
+    assert_eq!(at(1, 2100, g64), Some(vec![0..1088, 1088..2100]));
+    // With gemm2t (the default), pp2100 still splits two ways under the
+    // margin, but which split is a coin flip of the model: for 7B,
+    // 1152 + 948 and 1088 + 1012 (both 33 token tiles) are 0.005 % apart
+    // (gemm_cost per pass, 1e15 units: 1088 61.56, 1012 57.75, 1152 64.13,
+    // 948 55.18; equal 2 x 61.56), far inside the error of PARTIAL_WAVE
+    // and TILE_T_TIME. So: assert a split, within 0.1 % of the cheapest
+    // of those two candidates, not the exact one.
+    for m in [0, 1] {
+        let ps = &models[m].1;
+        let c = |v: &[std::ops::Range<usize>]| -> f64 {
+            v.iter().map(|r| gemm_cost(ps, r.len(), g)).sum::<u64>() as f64
+        };
+        let v = at(m, 2100, g).expect("pp2100 splits with gemm2t");
+        assert_eq!(v.len(), 2);
+        let best = c(&[0..1088, 1088..2100]).min(c(&[0..1152, 1152..2100]));
+        assert!(c(&v) <= best * 1.001, "{m}: {v:?}");
+        assert!(c(&v) < 0.97 * c(&passes(2100, 1152)), "{m}: {v:?}");
+    }
+}
+
+/// Batched prefill with AXON_WAVE_SPLIT's pass sizes == with the equal
+/// passes (main's), KV bytes and logit bits, at fixed prompt lengths plus
+/// the first two up to 4600 tokens whose split differs on this GPU
+/// (printed); one of those again from position 37 (after a fed prefix);
+/// and == per-token decode at 1777 tokens on 0.5B. It flips the
+/// `CudaQwen2::wave_split` field, not the environment: AXON_WAVE_SPLIT's
+/// parsing (a `map_or` at construction) isn't covered here. 0.5B and 1.5B;
+/// AXON_BIG_MODELS=1 adds qwen2.5 7B and qwen3 8B.
+///
+/// It fails as vacuous if no length up to 4600 splits differently on the
+/// GPU it runs on (a GPU whose SM count makes every equal split as good:
+/// widen the search before calling that a bug).
+#[test]
+fn gpu_prefill_wave_split_bits() {
+    use batch::passes;
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let mut files = vec![
+        "models/qwen2.5-0.5b-q4_k_m.gguf",
+        "models/qwen2.5-1.5b-instruct-q4_k_m.gguf",
+    ];
+    if std::env::var("AXON_BIG_MODELS").is_ok_and(|v| v == "1") {
+        files.extend([
+            "models/Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+            "models/Qwen3-8B-Q4_K_M.gguf",
+        ]);
+    }
+    const FROM: usize = 37;
+    const LONGEST: usize = 4600;
+    for f in files {
+        let Some(m) = model_at(f) else {
+            continue;
+        };
+        let km = Kernels::module_for(&g, &m).unwrap();
+        let all = long_ids(&m, LONGEST + FROM);
+        let mut net = CudaQwen2::new(&g, &km, &m, all.len() + 1).unwrap();
+        let max = net.prefill_batch();
+        net.wave_split = true;
+        let mut lens = vec![1153, 1300, 1777, 2100, 2304, 2900];
+        let found: Vec<usize> = (max + 1..=LONGEST)
+            .filter(|n| !lens.contains(n) && net.wave_split_passes(*n, max).is_some())
+            .take(2)
+            .collect();
+        lens.extend(&found);
+        let mut differ = 0;
+        for &n in &lens {
+            let ids = &all[..n];
+            net.wave_split = true;
+            let split = net.wave_split_passes(n, max);
+            differ += split.is_some() as usize;
+            let mut a = net.new_cache(n + 1);
+            let la = net.prefill_logits(ids, 0, &mut a);
+            net.wave_split = false;
+            let mut b = net.new_cache(n + 1);
+            let lb = net.prefill_logits(ids, 0, &mut b);
+            assert_eq!(bits(&la), bits(&lb), "{f} {n}: logits, wave split vs equal");
+            assert!(
+                kv_bytes(&net, &a, n) == kv_bytes(&net, &b, n),
+                "{f} {n}: KV, wave split vs equal"
+            );
+            let lens = |p: &[std::ops::Range<usize>]| -> Vec<usize> {
+                p.iter().map(|r| r.len()).collect()
+            };
+            eprintln!(
+                "{f} pp{n} on {} SMs: equal {:?}, wave {:?}: identical",
+                net.bf.sms,
+                lens(&passes(n, max)),
+                split.as_deref().map(lens)
+            );
+            if n == 1777 && f.contains("0.5b") {
+                let mut d = net.new_cache(n + 1);
+                for (p, &t) in ids[..n - 1].iter().enumerate() {
+                    net.feed(&mut d, t, p).unwrap();
+                }
+                let dec = net.forward(ids[n - 1], n - 1, &mut d);
+                assert_eq!(
+                    bits(&la),
+                    bits(&dec),
+                    "{f} {n}: wave split vs per-token decode"
+                );
+                assert!(
+                    kv_bytes(&net, &a, n) == kv_bytes(&net, &d, n),
+                    "{f} {n}: KV vs decode"
+                );
+                eprintln!("{f} pp{n}: wave split == per-token decode");
+            }
+        }
+        // A multi-pass prompt after a fed prefix (start > 0).
+        if let Some(&n) = found.first() {
+            let ids = &all[..FROM + n];
+            let mut out = Vec::new();
+            for wave in [true, false] {
+                net.wave_split = wave;
+                let mut c = net.new_cache(FROM + n + 1);
+                net.feed_batch(&ids[..FROM], 0, &mut c);
+                let l = net.prefill_logits(&ids[FROM..], FROM, &mut c);
+                out.push((bits(&l), kv_bytes(&net, &c, FROM + n)));
+            }
+            assert!(out[0] == out[1], "{f} {n} at {FROM}: wave split vs equal");
+            eprintln!("{f} pp{n} at {FROM}: identical");
+        }
+        net.wave_split = true;
+        if net.wave_gemms().is_some() {
+            assert!(
+                differ > 0,
+                "{f}: no prompt length up to {LONGEST} splits differently here (test vacuous)"
+            );
         }
     }
 }
@@ -4462,11 +5109,59 @@ fn cuda_prefill_profile() {
     let nb: usize = std::env::var("AXON_PROF_NB").map_or(512, |v| v.parse().unwrap());
     let start: usize = std::env::var("AXON_PROF_START").map_or(0, |v| v.parse().unwrap());
     let km = Kernels::module(&g).unwrap();
-    let net = CudaQwen2::new(&g, &km, &m, start + nb + 8).unwrap();
+    let mut net = CudaQwen2::new(&g, &km, &m, start + nb + 8).unwrap();
     let mut c = net.new_cache(start + nb + 8);
     let ids = long_ids(&m, start + nb);
     if start > 0 {
         net.feed_batch(&ids[..start], 0, &mut c);
+    }
+    // AXON_PROF_TILE_AB=n: n rounds, each a pass with gemm2t (the default)
+    // and one with AXON_GEMM_TILE=64's gemm2s, in alternating order; per arm
+    // the median of 3 timed passes after a warm one, then the medians.
+    if let Ok(n) = std::env::var("AXON_PROF_TILE_AB") {
+        let n: usize = n.parse().unwrap();
+        let mut spare = net.bf.gemm_t.take();
+        assert!(spare.is_some(), "no gemm2t in this module");
+        let mut ms = [Vec::new(), Vec::new()];
+        for r in 0..n {
+            for arm in [r % 2, 1 - r % 2] {
+                if arm == 1 {
+                    if net.bf.gemm_t.is_none() {
+                        net.bf.gemm_t = spare.take();
+                    }
+                } else if net.bf.gemm_t.is_some() {
+                    spare = net.bf.gemm_t.take();
+                }
+                let mut one = || {
+                    let t = std::time::Instant::now();
+                    net.pass(
+                        &mut c,
+                        batch::BatchIn::Tokens(&ids[start..]),
+                        start,
+                        false,
+                        &mut |_| Ok(()),
+                    )
+                    .unwrap();
+                    g.sync().unwrap();
+                    t.elapsed().as_secs_f64() * 1e3
+                };
+                one();
+                let mut v = [one(), one(), one()];
+                v.sort_by(f64::total_cmp);
+                ms[arm].push(v[1]);
+            }
+        }
+        for v in &mut ms {
+            v.sort_by(f64::total_cmp);
+        }
+        let (a, b) = (ms[0][n / 2], ms[1][n / 2]);
+        eprintln!(
+            "TILE_AB {rel} nb {nb} at {start}: gemm2s {a:.2} ms ({:.0} tok/s), gemm2t {b:.2} ms ({:.0} tok/s): {:+.1} % tok/s ({n} rounds)",
+            nb as f64 / a * 1e3,
+            nb as f64 / b * 1e3,
+            100.0 * (a / b - 1.0)
+        );
+        return;
     }
     // AXON_PROF_LOOP=n: n back-to-back passes (sustained power/clocks: sample
     // nvidia-smi meanwhile), per-pass wall ms printed.
@@ -4763,8 +5458,10 @@ fn gpu_mma_f16_is_deterministic() {
 /// Batched attention speed, 7B shape (28 heads, 4 kv heads, 128 wide) by
 /// default, AXON_ATT_NZ (64) queries at AXON_PROF_START (1536): the flash
 /// kernel (attn_fa_b) and its quantize_b, the per-query decode kernels
-/// (attn_blk_b, attn_cmb_b), and one decode step's attn_blk + attn_cmb at
-/// the last query's position. Interleaved rounds, best of each.
+/// (attn_blk_b, attn_cmb_b), one decode step's attn_blk + attn_cmb at the
+/// last query's position, attn_blk_mq, and the batched pass's per-query
+/// path over all the queries (attn_blk_mq or attn_blk_b, then attn_cmb_b,
+/// att_per_query at a time). Interleaved rounds, best of each.
 #[test]
 #[ignore]
 fn cuda_attn_bench() {
@@ -4778,9 +5475,61 @@ fn cuda_attn_bench() {
         .split(',')
         .map(|v| v.parse().unwrap())
         .collect();
-    let (nh, nkv, hd) = (shape[0], shape[1], shape[2]);
     let nz: usize = std::env::var("AXON_ATT_NZ").map_or(64, |v| v.parse().unwrap());
     let start: usize = std::env::var("AXON_PROF_START").map_or(1536, |v| v.parse().unwrap());
+    attn_bench(&g, &km, [shape[0], shape[1], shape[2]], nz, start);
+}
+
+/// cuda_attn_bench at AXON_MQ_SHAPE (n_heads,n_kv,hd; default the 7B's
+/// 28,4,128) over a grid, three interleaved rounds:
+/// AXON_MQ_NZ queries (default 4,8,16,24,32,48,64,96) at AXON_MQ_DEPTH
+/// positions (default 4096,8192,16384,24576). Per point a `SWEEP` line:
+/// depth, queries, then us of the per-query path over all of them with
+/// attn_blk_mq and with attn_blk_b (+ attn_cmb_b, att_per_query at a
+/// time), attn_fa_b + quantize_b, attn_fa_bs + quantize_b.
+#[test]
+#[ignore]
+fn cuda_attn_mq_sweep() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let list = |k: &str, d: &str| -> Vec<usize> {
+        std::env::var(k)
+            .unwrap_or(d.into())
+            .split(',')
+            .map(|v| v.parse().unwrap())
+            .collect()
+    };
+    let nzs = list("AXON_MQ_NZ", "4,8,16,24,32,48,64,96");
+    let depths = list("AXON_MQ_DEPTH", "4096,8192,16384,24576");
+    // AXON_MQ_SHAPE: n_heads,n_kv,hd (default the 7B's).
+    let sh = list("AXON_MQ_SHAPE", "28,4,128");
+    for r in 0..3 {
+        for &start in &depths {
+            for &nz in &nzs {
+                let b = attn_bench(&g, &km, [sh[0], sh[1], sh[2]], nz, start);
+                eprintln!(
+                    "SWEEP round {r} depth {start} nz {nz} mq {:.1} blk_b {:.1} fa_b {:.1} fa_bs {:.1}",
+                    b[8] * 1e3,
+                    b[9] * 1e3,
+                    (b[0] + b[1]) * 1e3,
+                    (b[6] + b[1]) * 1e3
+                );
+            }
+        }
+    }
+}
+
+/// One cuda_attn_bench point; the best ms of each entry.
+fn attn_bench(
+    g: &Gpu,
+    km: &crate::cuda::Module,
+    shape: [usize; 3],
+    nz: usize,
+    start: usize,
+) -> [f64; 10] {
+    let [nh, nkv, hd] = shape;
     let ctx = start + nz;
     let nblk_max = ctx.div_ceil(64);
     let max_split = (8 * g.info().unwrap().sms as usize / nkv).clamp(1, MAX_SPLIT);
@@ -4809,8 +5558,28 @@ fn cuda_attn_bench() {
         format!("attn_blk_{hd}"),
         "attn_cmb".to_string(),
         format!("attn_fa_bs_{hd}"),
+        format!("attn_blk_mq_{hd}"),
+        "mq+cmb_b (all)".to_string(),
+        "blk_b+cmb_b (all)".to_string(),
     ];
-    let fs: Vec<Func> = names.iter().map(|n| km.function(n).unwrap()).collect();
+    // 8, 9: the batched pass's per-query path over all nz queries,
+    // att_per_query at a time (batch.rs): attn_blk_mq or attn_blk_b, then
+    // attn_cmb_b.
+    let fs: Vec<Func> = names
+        .iter()
+        .enumerate()
+        .map(|(k, n)| match k {
+            8 => km.function(&format!("attn_blk_mq_{hd}")).unwrap(),
+            9 => km.function(&format!("attn_blk_b_{hd}")).unwrap(),
+            _ => km.function(n).unwrap(),
+        })
+        .collect();
+    let fcmb = km.function("attn_cmb_b").unwrap();
+    let group = nh / nkv;
+    let per = batch::att_per_query(hd);
+    for f in [&fs[7], &fs[8]] {
+        f.set_max_shared(batch::mq_smem(hd, 0)).unwrap();
+    }
     fs[0]
         .set_max_shared(batch::fa_shape(hd, batch::Fa::Full, 0).2)
         .unwrap();
@@ -4830,7 +5599,7 @@ fn cuda_attn_bench() {
     // The per-query kernels on at most 64 queries (SMALL sweeps).
     let nq = nz.min(64);
     let pre = Arg::F32(att_pre(hd));
-    let mut best = [f64::INFINITY; 7];
+    let mut best = [f64::INFINITY; 10];
     for _ in 0..6 {
         for (k, f) in fs.iter().enumerate() {
             let e0 = g.record().unwrap();
@@ -4940,6 +5709,81 @@ fn cuda_attn_bench() {
                             Arg::Ptr(0), // no page table
                         ],
                     ),
+                    7 => g.launch(
+                        f,
+                        (nkv as u32, gy, nq.div_ceil(batch::MQ_Q) as u32),
+                        (32 * group as u32, 1, 1),
+                        batch::mq_smem(hd, 0) as u32,
+                        &[
+                            q.arg(),
+                            kc.arg(),
+                            vc.arg(),
+                            Arg::I32((ctx - nq) as i32),
+                            Arg::I32(0),
+                            Arg::I32(nh as i32),
+                            Arg::I32(nkv as i32),
+                            pre,
+                            Arg::I32(nblk_max as i32),
+                            po.arg(),
+                            pm.arg(),
+                            Arg::Ptr(0), // no page table
+                            Arg::I32(nq as i32),
+                        ],
+                    ),
+                    8 | 9 => {
+                        for z0 in (0..nz).step_by(per) {
+                            let n = (nz - z0).min(per);
+                            let mut a = vec![
+                                q.arg(),
+                                kc.arg(),
+                                vc.arg(),
+                                Arg::I32(start as i32),
+                                Arg::I32(z0 as i32),
+                                Arg::I32(nh as i32),
+                                Arg::I32(nkv as i32),
+                                pre,
+                                Arg::I32(nblk_max as i32),
+                                po.arg(),
+                                pm.arg(),
+                            ];
+                            if k == 8 {
+                                a.extend([Arg::Ptr(0), Arg::I32(n as i32)]);
+                                g.launch(
+                                    f,
+                                    (nkv as u32, gy, n.div_ceil(batch::MQ_Q) as u32),
+                                    (32 * group as u32, 1, 1),
+                                    batch::mq_smem(hd, 0) as u32,
+                                    &a,
+                                )
+                                .unwrap();
+                            } else {
+                                a.extend([Arg::Ptr(0), Arg::Ptr(0)]);
+                                g.launch(f, (nkv as u32, gy, n as u32), (32, 1, 1), 0, &a)
+                                    .unwrap();
+                            }
+                            g.launch(
+                                &fcmb,
+                                (dim.div_ceil(256) as u32, n as u32, 1),
+                                (256, 1, 1),
+                                0,
+                                &[
+                                    po.arg(),
+                                    pm.arg(),
+                                    Arg::I32(start as i32),
+                                    Arg::I32(z0 as i32),
+                                    Arg::I32(dim as i32),
+                                    Arg::I32(hd as i32),
+                                    Arg::I32(nblk_max as i32),
+                                    Arg::I32(0),
+                                    act.arg(),
+                                    Arg::U64(ast as u64),
+                                    Arg::Ptr(0),
+                                ],
+                            )
+                            .unwrap();
+                        }
+                        Ok(())
+                    }
                     // attn_cmb: 64 outputs per block, y and the counters.
                     _ => g.launch(
                         f,
@@ -4971,8 +5815,8 @@ fn cuda_attn_bench() {
     };
     for (k, (n, b)) in names.iter().zip(best).enumerate() {
         let (qn, tf) = match k {
-            0 | 6 => (nz, flops(nz) / (b * 1e-3) / 1e12),
-            2 => (nq, flops(nq) / (b * 1e-3) / 1e12),
+            0 | 6 | 8 | 9 => (nz, flops(nz) / (b * 1e-3) / 1e12),
+            2 | 7 => (nq, flops(nq) / (b * 1e-3) / 1e12),
             4 => (1, flops(1) / (b * 1e-3) / 1e12),
             _ => (
                 if k == 1 {
@@ -4986,10 +5830,11 @@ fn cuda_attn_bench() {
             ),
         };
         eprintln!(
-            "{nh}/{nkv}x{hd} {n:<16} {qn:>4} queries up to {ctx}: {:>8.1} us {tf:>6.2} TFLOP/s",
+            "{nh}/{nkv}x{hd} {n:<18} {qn:>4} queries up to {ctx}: {:>8.1} us {tf:>6.2} TFLOP/s",
             b * 1e3
         );
     }
+    best
 }
 
 /// The flash attention kernels side by side, sustained (AXON_FA_LOOP
@@ -5149,6 +5994,8 @@ fn gpu_batched_attention_matches_decode_bits() {
         };
         let fd = km.function(&format!("attn_blk_{q8n}{hd}")).unwrap();
         let fb = km.function(&format!("attn_blk_b_{q8n}{hd}")).unwrap();
+        let fm = km.function(&format!("attn_blk_mq_{q8n}{hd}")).unwrap();
+        fm.set_max_shared(batch::mq_smem(hd, kg)).unwrap();
         // Every attn_fa_b variant of the cache format (batch::Fa).
         let mut ffs: Vec<(batch::Fa, Func)> = Vec::new();
         for (v, n) in [
@@ -5337,6 +6184,68 @@ fn gpu_batched_attention_matches_decode_bits() {
                 bpm.read().unwrap(),
                 bact.read().unwrap(),
             );
+            // attn_blk_mq: the same queries, MQ_Q per block (a partial last
+            // one), the same partials for attn_cmb_b.
+            let mpo = g.alloc(nz * po_n * 4).unwrap();
+            let mpm = g.alloc(nz * pm_n * 4).unwrap();
+            let mact = g.alloc(nb * ast).unwrap();
+            mact.zero().unwrap();
+            // SAFETY: decode.cu attn_blk_mq's signature; buffers as above.
+            unsafe {
+                g.launch(
+                    &fm,
+                    (
+                        nkv as u32,
+                        gy.min(nblk_max) as u32,
+                        nz.div_ceil(batch::MQ_Q) as u32,
+                    ),
+                    (32 * group as u32, 1, 1),
+                    batch::mq_smem(hd, kg) as u32,
+                    &[
+                        &[qb.arg()][..],
+                        &kva[..],
+                        &[
+                            Arg::I32(start as i32),
+                            Arg::I32(z0 as i32),
+                            Arg::I32(nh as i32),
+                            Arg::I32(nkv as i32),
+                            pre,
+                            Arg::I32(nblk_max as i32),
+                            mpo.arg(),
+                            mpm.arg(),
+                            Arg::Ptr(0), // no page table
+                            Arg::I32(nz as i32),
+                        ],
+                    ]
+                    .concat(),
+                )
+                .unwrap();
+                g.launch(
+                    &fcb,
+                    (dim.div_ceil(256) as u32, nz as u32, 1),
+                    (256, 1, 1),
+                    0,
+                    &[
+                        mpo.arg(),
+                        mpm.arg(),
+                        Arg::I32(start as i32),
+                        Arg::I32(z0 as i32),
+                        Arg::I32(dim as i32),
+                        Arg::I32(hd as i32),
+                        Arg::I32(nblk_max as i32),
+                        want_k,
+                        mact.arg(),
+                        Arg::U64(ast as u64),
+                        Arg::Ptr(0),
+                    ],
+                )
+                .unwrap();
+            }
+            let (mpo, mpm, mact): (Vec<f32>, Vec<f32>, Vec<u8>) = (
+                mpo.read().unwrap(),
+                mpm.read().unwrap(),
+                mact.read().unwrap(),
+            );
             // Decode, query by query (all nb, for the flash side).
             let po = g.alloc(po_n * 4).unwrap();
             let pm = g.alloc(pm_n * 4).unwrap();
@@ -5411,29 +6320,34 @@ fn gpu_batched_attention_matches_decode_bits() {
                 }
                 let zl = z - z0;
                 let (wpo, wpm): (Vec<f32>, Vec<f32>) = (po.read().unwrap(), pm.read().unwrap());
-                for h in 0..nh {
-                    for b in 0..np.div_ceil(64) {
-                        let o = (h * nblk_max + b) * hd;
-                        assert_eq!(
-                            bits(&bpo[zl * po_n + o..zl * po_n + o + hd]),
-                            bits(&wpo[o..o + hd]),
-                            "{}: head {h} block {b} sums",
-                            ctxs("attn_blk_b", z)
-                        );
-                        let m = (h * nblk_max + b) * 2;
-                        assert_eq!(
-                            bits(&bpm[zl * pm_n + m..zl * pm_n + m + 2]),
-                            bits(&wpm[m..m + 2]),
-                            "{}: head {h} block {b} m, l",
-                            ctxs("attn_blk_b", z)
-                        );
+                for (kname, po, pm, pact) in [
+                    ("attn_blk_b", &bpo, &bpm, &bact),
+                    ("attn_blk_mq", &mpo, &mpm, &mact),
+                ] {
+                    for h in 0..nh {
+                        for b in 0..np.div_ceil(64) {
+                            let o = (h * nblk_max + b) * hd;
+                            assert_eq!(
+                                bits(&po[zl * po_n + o..zl * po_n + o + hd]),
+                                bits(&wpo[o..o + hd]),
+                                "{}: head {h} block {b} sums",
+                                ctxs(kname, z)
+                            );
+                            let m = (h * nblk_max + b) * 2;
+                            assert_eq!(
+                                bits(&pm[zl * pm_n + m..zl * pm_n + m + 2]),
+                                bits(&wpm[m..m + 2]),
+                                "{}: head {h} block {b} m, l",
+                                ctxs(kname, z)
+                            );
+                        }
                     }
+                    assert!(
+                        pact[z * ast..z * ast + ab] == wact[..],
+                        "{}",
+                        ctxs(&format!("{kname} act"), z)
+                    );
                 }
-                assert!(
-                    bact[z * ast..z * ast + ab] == wact[..],
-                    "{}",
-                    ctxs("attn_blk_b act", z)
-                );
             }
         }
     }
@@ -6151,7 +7065,7 @@ fn cuda_kv_q8_accuracy() {
         return;
     }
     let rows = Qwen2::new_with(&m, false);
-    let cpu = Qwen2::new(&m);
+    let cpu = Qwen2::new_with(&m, true);
     continuations_with(
         &cpu,
         &rows,
@@ -6520,6 +7434,33 @@ fn teacher_forced_dump() {
         o.sort_by(|&a, &b| lp[b].total_cmp(&lp[a]));
         o[..5].iter().map(|&i| (i, lp[i])).collect()
     };
+    // AXON_TF_DEV=moe: the MoE backend (crate::moe: attention on the GPU,
+    // experts on the CPU).
+    if var("AXON_TF_DEV") == "moe" {
+        type Top = Vec<(usize, f64)>;
+        fn rows<L: Lm>(net: &L, seq: &[u32], n: usize, top: &dyn Fn(&[f32]) -> Top) -> Vec<Top> {
+            let mut c = net.new_cache(seq.len() + 1);
+            net.feed_batch(&seq[..n - 1], 0, &mut c);
+            let mut r = Vec::new();
+            for (i, &id) in seq.iter().enumerate().skip(n - 1) {
+                r.push(top(&net.forward(id, i, &mut c)));
+            }
+            r
+        }
+        let g = crate::testutil::gpu().unwrap();
+        let km = Kernels::module_for(&g, &m).unwrap();
+        let mm = Kernels::moe_module(&g).unwrap();
+        let net = crate::moe::tests::moe_net(&g, &km, &mm, &m, max_ctx);
+        let out: Vec<_> = (inp["gens"].as_array().unwrap().iter())
+            .map(|gn| {
+                let (p, t) = (ids(&gn["prompt_ids"]), ids(&gn["tokens"]));
+                let seq: Vec<u32> = p.iter().chain(&t).copied().collect();
+                rows(&net, &seq, p.len(), &top)
+            })
+            .collect();
+        std::fs::write(var("AXON_TF_OUT"), serde_json::to_string(&out).unwrap()).unwrap();
+        return;
+    }
     let gpu = var("AXON_TF_DEV") == "cuda";
     let g = gpu.then(|| crate::testutil::gpu().unwrap());
     let km = g.as_ref().map(|g| Kernels::module(g).unwrap());
@@ -7142,6 +8083,7 @@ fn gpu_gemma3_prefill_and_verify_bits() {
 /// independent f64 `gemma3_ref` on that prefix is at least as close to the
 /// GPU as (twice) to the CPU (`gemma3_ref_closer`).
 fn assert_graded_gemma(ag: &Agree, ac: &Agree, ref_ok: &dyn Fn(usize) -> bool) {
+    assert_ref_spread(ac);
     let n = ag.positions;
     assert!(
         ag.top1 * 100 + 2 * n >= ac.top1 * 100 && ag.top1 * 100 >= 94 * n,
@@ -7236,7 +8178,7 @@ fn gemma3_vs_cpu(m: &Model, name: &str) {
     let tok = crate::tokenizer::Tokenizer::from_gguf(m);
     let gpu = CudaQwen2::new(&g, &km, m, 256).unwrap();
     let rows = Qwen2::new_with(m, false);
-    let cpu = Qwen2::new(m);
+    let cpu = Qwen2::new_with(m, true);
     const STEPS: usize = 32;
     let (mut ag, mut ac) = (Agree::default(), Agree::default());
     let mut seqs = Vec::new();
@@ -7290,7 +8232,7 @@ fn gemma3_flip_probe() {
     let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
     let gpu = CudaQwen2::new(&g, &km, &m, 256).unwrap();
     let rows = Qwen2::new_with(&m, false);
-    let cpu = Qwen2::new(&m);
+    let cpu = Qwen2::new_with(&m, true);
     const STEPS: usize = 32;
     let mut ag = Agree::default();
     let mut seqs = Vec::new();
@@ -7403,7 +8345,7 @@ fn gemma3_ref_walk_probe() {
         let km = Kernels::module_for(&g, &m).unwrap();
         let gpu = CudaQwen2::new(&g, &km, &m, 256).unwrap();
         let rows = Qwen2::new_with(&m, false);
-        let cpu = Qwen2::new(&m);
+        let cpu = Qwen2::new_with(&m, true);
         let a = gemma3_ref_walk(&m, &gpu, &cpu, &rows, 32);
         for (name, (mean, mx, top, n)) in ["gpu", "cpu", "cpu rows"].iter().zip(a) {
             eprintln!("{path} {name} vs f64 ref: mean KL {mean:.4} max {mx:.4}, top-1 {top}/{n}");
@@ -7421,7 +8363,7 @@ fn gemma3_cpu_probe() {
     let m = model_at(GEMMA3_1B_Q4).unwrap();
     let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
     let rows = Qwen2::new_with(&m, false);
-    let cpu = Qwen2::new(&m);
+    let cpu = Qwen2::new_with(&m, true);
     for spec in std::env::var("AXON_PROBE").unwrap().split(',') {
         let (k, st) = spec.split_once(':').unwrap();
         let (k, st): (usize, usize) = (k.parse().unwrap(), st.parse().unwrap());
@@ -7463,7 +8405,7 @@ fn gemma3_vs_ref(m: &Model, name: &str) {
     let km = Kernels::module_for(&g, m).unwrap();
     let gpu = CudaQwen2::new(&g, &km, m, 256).unwrap();
     let rows = Qwen2::new_with(m, false);
-    let cpu = Qwen2::new(m);
+    let cpu = Qwen2::new_with(m, true);
     let [ag, ac, ar] = gemma3_ref_walk(m, &gpu, &cpu, &rows, 32);
     eprintln!(
         "{name} vs f64 ref: gpu mean KL {:.4} max {:.4} top-1 {}/{}; cpu {:.4} {:.4} {}; cpu rows \
@@ -7506,7 +8448,7 @@ fn gpu_gemma3_logits_match_cpu() {
     let km = Kernels::module(&g).unwrap();
     let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
     let rows = Qwen2::new_with(&m, false);
-    let cpu = Qwen2::new(&m);
+    let cpu = Qwen2::new_with(&m, true);
     let gpu = CudaQwen2::new(&g, &km, &m, 1300).unwrap();
     let (mut ag, mut ac) = (Agree::default(), Agree::default());
     for p in [PROMPTS[2], PROMPTS[1]] {
@@ -7631,6 +8573,98 @@ fn cuda_decode_tg() {
             n as f64 / s
         );
         pos = p + n + 1;
+    }
+}
+
+/// `crate::lm::chunk_ranges`: 0..n in order, pieces of pb, the last shorter.
+#[test]
+fn lm_chunk_ranges() {
+    use crate::lm::chunk_ranges;
+    assert!(chunk_ranges(0, 4).is_empty());
+    assert_eq!(chunk_ranges(2100, 1152), vec![0..1152, 1152..2100]);
+    assert_eq!(chunk_ranges(5, 2), vec![0..2, 2..4, 4..5]);
+}
+
+/// `Lm::prompt_chunks` on the GPU (what serve's single stream and chat feed
+/// by): `prompt_passes`, contiguous, none over the batch max; and serve's
+/// way of feeding (all but the last token by those chunks, then `forward`)
+/// and chat's (the last chunk by `prefill_logits`), from 0 and after a
+/// prefix, give the bits of the prompt's per-token decode.
+#[test]
+fn gpu_prompt_chunks_bits() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = crate::testutil::model() else {
+        return;
+    };
+    let km = Kernels::module_for(&g, &m).unwrap();
+    let n = 2100;
+    let ids = long_ids(&m, n);
+    let net = CudaQwen2::new(&g, &km, &m, n + 1).unwrap();
+    let max = net.prefill_batch();
+    let mut d = net.new_cache(n + 1);
+    for (p, &t) in ids[..n - 1].iter().enumerate() {
+        net.feed(&mut d, t, p).unwrap();
+    }
+    let dec = net.forward(ids[n - 1], n - 1, &mut d);
+    for from in [0, 300] {
+        let mut c = net.new_cache(n + 1);
+        if from > 0 {
+            net.feed_batch(&ids[..from], 0, &mut c);
+        }
+        let rs = net.prompt_chunks(n - 1 - from, from, &c);
+        // Multi-pass and not the old fixed prefill_batch cut (equal or
+        // wave-sized passes: either differs from 1152 + the rest here).
+        assert!(rs.len() >= 2);
+        assert_ne!(rs, crate::lm::chunk_ranges(n - 1 - from, max));
+        assert_eq!((rs[0].start, rs.last().unwrap().end), (0, n - 1 - from));
+        assert!(rs.windows(2).all(|w| w[0].end == w[1].start));
+        assert!(rs.iter().all(|r| !r.is_empty() && r.len() <= max));
+        for r in &rs {
+            net.feed_batch(&ids[from + r.start..from + r.end], from + r.start, &mut c);
+        }
+        let l = net.forward(ids[n - 1], n - 1, &mut c);
+        assert_eq!(bits(&l), bits(&dec), "serve's way from {from}: logits");
+        assert!(
+            kv_bytes(&net, &c, n) == kv_bytes(&net, &d, n),
+            "serve's way from {from}: KV"
+        );
+        let mut c = net.new_cache(n + 1);
+        if from > 0 {
+            net.feed_batch(&ids[..from], 0, &mut c);
+        }
+        let rs = net.prompt_chunks(n - from, from, &c);
+        let mut l = Vec::new();
+        for (i, r) in rs.iter().enumerate() {
+            let b = &ids[from + r.start..from + r.end];
+            if i + 1 < rs.len() {
+                net.feed_batch(b, from + r.start, &mut c);
+            } else {
+                l = net.prefill_logits(b, from + r.start, &mut c);
+            }
+        }
+        assert_eq!(bits(&l), bits(&dec), "chat's way from {from}: logits");
+        assert!(
+            kv_bytes(&net, &c, n) == kv_bytes(&net, &d, n),
+            "chat's way from {from}: KV"
+        );
+        eprintln!(
+            "prompt_chunks from {from}: {:?} == per-token decode",
+            rs.iter().map(|r| r.len()).collect::<Vec<_>>()
+        );
+    }
+    // Exactly one pass (n == the batch max) and just under: one range,
+    // and its KV rows are the decode's.
+    for k in [max, max - 1] {
+        let mut c = net.new_cache(n + 1);
+        let rs = net.prompt_chunks(k, 0, &c);
+        assert_eq!(rs, vec![0..k], "{k} tokens: one pass");
+        net.feed_batch(&ids[..k], 0, &mut c);
+        assert!(
+            kv_bytes(&net, &c, k) == kv_bytes(&net, &d, k),
+            "{k} tokens: KV"
+        );
     }
 }
 

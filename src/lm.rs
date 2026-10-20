@@ -18,6 +18,14 @@ use crate::model::{KvCache, Qwen2};
 use crate::moe::{MoeCache, MoeQwen3};
 use crate::sample::{self, Cand, CandSpec};
 
+/// 0..n in chunks of pb (the last shorter).
+pub fn chunk_ranges(n: usize, pb: usize) -> Vec<std::ops::Range<usize>> {
+    (0..n)
+        .step_by(pb.max(1))
+        .map(|s| s..(s + pb).min(n))
+        .collect()
+}
+
 /// A causal language model with a KV cache of its own type. Positions are
 /// absolute: `pos` is the cache slot the token goes in; tokens before it
 /// must already be in the cache.
@@ -45,6 +53,15 @@ pub trait Lm {
     /// Run `tokens[b]` at `start + b` for the cache only (prefill).
     fn feed_batch(&self, tokens: &[u32], start: usize, cache: &mut Self::Cache);
 
+    /// Whether one-token steps (`forward`, `forward_argmax`) may take a
+    /// path `verify_argmax` never takes, so their picks can differ: a
+    /// CPU/GPU split built with AXON_STREAM_DECODE=1 streams decode steps,
+    /// verify passes never stream. Drafting is then not lossless, and
+    /// `generate` refuses `max_draft > 0`. Default: no.
+    fn decode_streams(&self) -> bool {
+        false
+    }
+
     /// The greedy pick after each `tokens[b]` at `start + b`, as
     /// `forward_argmax` on each in order would give (speculative verify).
     fn verify_argmax(&self, tokens: &[u32], start: usize, cache: &mut Self::Cache) -> Vec<u32>;
@@ -53,6 +70,23 @@ pub trait Lm {
     /// may pass any size: results don't depend on the batching).
     fn prefill_batch(&self) -> usize {
         crate::PREFILL_BATCH
+    }
+
+    /// How a caller that feeds a prompt in cancellable pieces (serve's
+    /// single stream, chat) should cut n tokens fed from `start` into the
+    /// cache: ranges of 0..n in order, each one `feed_batch` /
+    /// `prefill_logits` call of at most `prefill_batch` tokens. Results
+    /// don't depend on it. Default: `prefill_batch`-sized chunks; the GPU
+    /// model gives its own passes (`CudaQwen2::prompt_passes`: sized to the
+    /// GEMM waves, AXON_WAVE_SPLIT).
+    fn prompt_chunks(
+        &self,
+        n: usize,
+        start: usize,
+        cache: &Self::Cache,
+    ) -> Vec<std::ops::Range<usize>> {
+        let _ = (start, cache);
+        chunk_ranges(n, self.prefill_batch())
     }
 
     /// Run `tokens[b]` at `start + b` (non-empty) into the cache; the logits
@@ -160,6 +194,10 @@ pub trait BatchLm: Lm {
     /// there is none (no room, or a backend without one).
     fn new_pool(&self, slots: usize, ctx: usize) -> Result<Self::Pool, String>;
 
+    /// A paged pool (specs r11) of `pages` KV pages for up to `slots`
+    /// sequences of up to `ctx` positions each.
+    fn new_pool_paged(&self, slots: usize, ctx: usize, pages: usize) -> Result<Self::Pool, String>;
+
     /// `feed_batch` into slot `slot`: `tokens[b]` at `start + b`.
     fn feed_slot(
         &self,
@@ -199,6 +237,38 @@ pub trait BatchLm: Lm {
     /// Most tokens one of `feed_slot`'s passes takes: a longer feed is
     /// split into equal passes of at most this many.
     fn pass_max(&self, pool: &Self::Pool) -> usize;
+
+    /// KV pages for slot `slot`'s positions 0..hi (a paged pool, specs
+    /// r11): Ok(0) once it holds them, or how many pages are short (nothing
+    /// taken). `feed_slot` and `step` take them themselves; the `Lm` calls
+    /// on a `slot_cache` don't (infallible), so whoever runs those reserves
+    /// the positions they write first. A plain pool: Ok(0).
+    fn reserve(&self, pool: &mut Self::Pool, slot: usize, hi: usize) -> Result<usize, String>;
+
+    /// Slot `slot` keeps the pages of positions 0..lo; the rest are free.
+    fn release(&self, pool: &mut Self::Pool, slot: usize, lo: usize) -> Result<(), String>;
+
+    /// The pool's pages (None: plain, every slot its ctx rows).
+    fn pages(&self, pool: &Self::Pool) -> Option<PoolPages>;
+
+    /// Lend the pool's batch scratch to `cache` (its `slot_cache`, which
+    /// may have none of its own) for the `Lm` calls on it; the pool's
+    /// `feed_slot` / `step` wait for `return_scratch`.
+    fn lend_scratch(&self, pool: &mut Self::Pool, cache: &mut Self::Cache) -> Result<(), String>;
+
+    /// `lend_scratch` undone.
+    fn return_scratch(&self, pool: &mut Self::Pool, cache: &mut Self::Cache) -> Result<(), String>;
+}
+
+/// A paged pool's pages (`BatchLm::pages`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PoolPages {
+    /// Positions per page.
+    pub size: usize,
+    pub free: usize,
+    pub total: usize,
+    /// Pages each slot holds.
+    pub held: Vec<usize>,
 }
 
 impl Lm for Qwen2<'_> {
@@ -346,6 +416,45 @@ pub struct Placing {
     /// Leave the GPU model's Q6_K prefill copy to the caller
     /// (`CudaQwen2::make_q6k8_spare`, once serve's caches are made).
     pub defer_q6k8: bool,
+    /// A paged KV pool will hold the caches (`axon serve`, specs r11),
+    /// placed as main places it with --ctx (`paged_placement`).
+    pub paged: bool,
+}
+
+/// The shortest cache a paged serve keeps the whole model on the GPU for
+/// when no --ctx was given.
+pub const PAGED_FLOOR: usize = 8192;
+
+/// Where a paged serve's model goes, placed automatically, with `free`
+/// bytes of VRAM and `whole(c)` the whole model with one c-token cache.
+#[derive(Debug, PartialEq, Eq)]
+pub enum PagedPlace {
+    /// Every layer on the GPU, the cache planned at the longest that fits
+    /// (no --ctx: the context may be shorter than trained, as main's fit).
+    WholeShrunk,
+    /// main's rule (`choose_placement`), with this much VRAM: the same
+    /// placement main makes (every layer on the GPU whenever one cache of
+    /// the context fits; an explicit --ctx is never shortened). If the
+    /// pages then hold less than one full --ctx sequence, serve takes
+    /// main's plain plan (`serve::paged_plan`).
+    Main { free: u64 },
+}
+
+/// `PagedPlace` of a model: with --ctx (`!fit`) main's rule as is (a
+/// margin for the pool here cost the 14B at --ctx 16384 five layers on the
+/// CPU where main keeps all: 1018-044243-ceb5); without, the whole model
+/// on the GPU if it fits beside a `PAGED_FLOOR`-token cache (the pool's
+/// pages then cap the context).
+pub fn paged_placement(
+    free: u64,
+    max_ctx: usize,
+    fit: bool,
+    whole: impl Fn(usize) -> u64,
+) -> PagedPlace {
+    if fit && whole(max_ctx) > free && whole(PAGED_FLOOR.min(max_ctx)) <= free {
+        return PagedPlace::WholeShrunk;
+    }
+    PagedPlace::Main { free }
 }
 
 impl Placing {
@@ -354,6 +463,7 @@ impl Placing {
         Placing {
             split_ctx: max_ctx,
             defer_q6k8: false,
+            paged: false,
         }
     }
 }
@@ -363,7 +473,8 @@ impl<'a> Backend<'a> {
     /// of type `kv` (checked up front on the GPU). On CUDA, `gpu_layers`
     /// Some(g) splits the model, the last g layers on the GPU
     /// (`HybridQwen2`, its GPU half's cache of type `kv`, the CPU half's
-    /// f16/f32 as AXON_KV says), or with g >= n_layers is the GPU model;
+    /// f16, or f32 for `KvType::F32`; process-wide), or with g >= n_layers
+    /// is the GPU model;
     /// None puts it all on the GPU if it fits, else as many of the last
     /// layers as fit with a max_ctx cache of type `kv`
     /// (`hybrid::auto_gpu_layers`, told on stderr), but with `fit` a
@@ -397,7 +508,7 @@ impl<'a> Backend<'a> {
     /// pipeline) gets the longest context up to max_ctx that fits (a
     /// pipeline at least `KEEP_CTX_FLOOR`, else split_ctx); a CPU/GPU split
     /// (automatic or --gpu-layers) gets split_ctx.
-    pub fn new_capped(
+    pub(crate) fn new_capped(
         m: &'a Model,
         device: Device,
         max_ctx: usize,
@@ -408,8 +519,22 @@ impl<'a> Backend<'a> {
     ) -> Result<Backend<'a>, String> {
         let split_ctx = p.split_ctx;
         let long = fit && split_ctx < max_ctx;
+        // `kv` is the whole KV choice: this reads no AXON_KV (the CLI parses
+        // it and passes the type it names; an embedder passes its own). The
+        // CPU caches' f16/f32 choice is process-wide (kv::use_f32, fixed at
+        // the first cache): `kv` F32 fixes it f32, F16/Q8 f16, and a type
+        // that conflicts with an earlier Backend's is an error.
+        let want_f32 = kv == KvType::F32;
+        crate::kv::set_f32(want_f32);
+        if crate::kv::use_f32() != want_f32 {
+            return Err(format!(
+                "the {} KV cache: this process already makes {} caches (chosen once, at the first one)",
+                if want_f32 { "f32" } else { "f16" },
+                if want_f32 { "f16" } else { "f32" },
+            ));
+        }
         if device == Device::Cpu {
-            // The CPU's f16/f32 choice is AXON_KV's (kv::use_f32).
+            // The CPU's f16/f32 choice: `kv`, fixed above (kv::use_f32).
             if kv == KvType::Q8 {
                 return Err("the q8 KV cache is cuda-only (--device cuda)".into());
             }
@@ -419,8 +544,8 @@ impl<'a> Backend<'a> {
         if gpu_layers == Some(0) {
             return Err("--gpu-layers 0 is --device cpu".into());
         }
-        if crate::model::moe_cpu_only(m) {
-            return Err(crate::model::moe_gpu_refusal(m));
+        if let Some(e) = crate::safetensors::gpu_refusal(m) {
+            return Err(e);
         }
         // f32 isn't offered on the GPU: f16 there (as always).
         let ckv = match kv {
@@ -483,8 +608,14 @@ impl<'a> Backend<'a> {
                 g
             }
             None => {
-                let free = gpu.info()?.free_bytes;
+                let mut free = gpu.info()?.free_bytes;
                 let whole = CudaQwen2::vram_curve(gpu, module, m, ckv)?;
+                if p.paged {
+                    match paged_placement(free, max_ctx, fit, &whole) {
+                        PagedPlace::WholeShrunk => return whole_gpu(max_ctx, true),
+                        PagedPlace::Main { free: f } => free = f,
+                    }
+                }
                 // A streaming split's VRAM (its bigger batch scratch and the
                 // stream reserve) is what the split option is weighed by.
                 let split =
@@ -548,8 +679,9 @@ impl<'a> Backend<'a> {
         }
         let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open_device(ordinal)?));
         let module: &'static Module<'static> = Box::leak(Box::new(Kernels::module_for(gpu, m)?));
-        let mm: &'static Module<'static> = Box::leak(Box::new(Kernels::moe_module(gpu)?));
-        let n = MoeQwen3::new(gpu, module, mm, m, max_ctx, kv, fit, q6k8)?;
+        let router: &'static Module<'static> =
+            Box::leak(Box::new(Kernels::moe_module_for(gpu, m)?));
+        let n = MoeQwen3::new(gpu, module, router, m, max_ctx, kv, fit, q6k8)?;
         eprintln!("moe:         {}, kv {}", n.describe(n.ctx), n.kv_name());
         Ok(Backend::Moe(Box::new(n)))
     }
@@ -654,6 +786,10 @@ impl Lm for Backend<'_> {
         dispatch!(self, cache, |n, c| n.forward_argmax(token, pos, c))
     }
 
+    fn decode_streams(&self) -> bool {
+        matches!(self, Backend::Hybrid(h) if h.decode_streams())
+    }
+
     fn feed_batch(&self, tokens: &[u32], start: usize, cache: &mut BackendCache) {
         dispatch!(self, cache, |n, c| Lm::feed_batch(n, tokens, start, c))
     }
@@ -699,6 +835,22 @@ impl Lm for Backend<'_> {
             Backend::Moe(n) => n.prefill_batch(),
         }
     }
+
+    fn prompt_chunks(
+        &self,
+        n: usize,
+        start: usize,
+        cache: &BackendCache,
+    ) -> Vec<std::ops::Range<usize>> {
+        match (self, cache) {
+            (Backend::Cpu(net), BackendCache::Cpu(c)) => net.prompt_chunks(n, start, c),
+            (Backend::Cuda(net), BackendCache::Cuda(c)) => net.prompt_chunks(n, start, c),
+            (Backend::Hybrid(net), BackendCache::Hybrid(c)) => net.prompt_chunks(n, start, c),
+            (Backend::Pipeline(net), BackendCache::Pipeline(c)) => net.prompt_chunks(n, start, c),
+            (Backend::Moe(net), BackendCache::Moe(c)) => net.prompt_chunks(n, start, c),
+            _ => panic!("a cache of another backend"),
+        }
+    }
 }
 
 /// Continuous batching runs on the GPU model only: the CPU and a split
@@ -709,6 +861,20 @@ impl BatchLm for Backend<'_> {
     fn new_pool(&self, slots: usize, ctx: usize) -> Result<Self::Pool, String> {
         match self {
             Backend::Cuda(n) => n.pool(slots, ctx).map(Box::new),
+            _ => Err("batching many requests is GPU-only (--device cuda, every layer)".into()),
+        }
+    }
+
+    fn new_pool_paged(&self, slots: usize, ctx: usize, pages: usize) -> Result<Self::Pool, String> {
+        match self {
+            Backend::Cuda(n) => n
+                .pool_with(
+                    slots,
+                    ctx,
+                    Some(pages),
+                    crate::cuda::qwen2::pages::shuffle_env(),
+                )
+                .map(Box::new),
             _ => Err("batching many requests is GPU-only (--device cuda, every layer)".into()),
         }
     }
@@ -736,7 +902,7 @@ impl BatchLm for Backend<'_> {
     fn slot_cache(&self, pool: &Self::Pool, slot: usize) -> Result<BackendCache, String> {
         match self {
             Backend::Cuda(n) => n
-                .slot_view(pool, slot)
+                .slot_view_bare(pool, slot)
                 .map(|c| BackendCache::Cuda(Box::new(c))),
             _ => unreachable!("a pool is the GPU model's"),
         }
@@ -771,5 +937,127 @@ impl BatchLm for Backend<'_> {
 
     fn pass_max(&self, pool: &Self::Pool) -> usize {
         pool.pass_max()
+    }
+
+    fn reserve(&self, pool: &mut Self::Pool, slot: usize, hi: usize) -> Result<usize, String> {
+        match self {
+            Backend::Cuda(n) => n.reserve(pool, slot, hi),
+            _ => unreachable!("a pool is the GPU model's"),
+        }
+    }
+
+    fn release(&self, pool: &mut Self::Pool, slot: usize, lo: usize) -> Result<(), String> {
+        match self {
+            Backend::Cuda(n) => n.release(pool, slot, lo),
+            _ => unreachable!("a pool is the GPU model's"),
+        }
+    }
+
+    fn pages(&self, pool: &Self::Pool) -> Option<PoolPages> {
+        pool.page_info()
+    }
+
+    fn lend_scratch(&self, pool: &mut Self::Pool, cache: &mut BackendCache) -> Result<(), String> {
+        match (self, cache) {
+            (Backend::Cuda(n), BackendCache::Cuda(c)) => n.lend_scratch(pool, c),
+            _ => Err("lend_scratch: a cache of another backend".into()),
+        }
+    }
+
+    fn return_scratch(
+        &self,
+        pool: &mut Self::Pool,
+        cache: &mut BackendCache,
+    ) -> Result<(), String> {
+        match (self, cache) {
+            (Backend::Cuda(n), BackendCache::Cuda(c)) => n.return_scratch(pool, c),
+            _ => Err("return_scratch: a cache of another backend".into()),
+        }
+    }
+}
+
+#[cfg(test)]
+mod paged_place_tests {
+    use super::*;
+    use crate::hybrid::{Placement, choose_placement};
+
+    const GIB: u64 = 1 << 30;
+
+    /// A model of `w` GiB of weights, `kib` KiB of KV per position and
+    /// `scratch` GiB of scratch (+ HEADROOM-like 0.25 GiB).
+    fn curve(w: f64, kib: u64, scratch: f64) -> impl Fn(usize) -> u64 {
+        move |c| ((w + scratch + 0.25) * GIB as f64) as u64 + c as u64 * kib * 1024
+    }
+
+    /// Paged placement then main's rule: (on the GPU, its planned ctx) or a
+    /// split; `split_layers` what the split would put on the GPU.
+    fn place(free: u64, ctx: usize, fit: bool, w: &dyn Fn(usize) -> u64) -> Placement {
+        match paged_placement(free, ctx, fit, w) {
+            PagedPlace::WholeShrunk => Placement::Gpu { ctx: 0 },
+            PagedPlace::Main { free } => choose_placement(free, ctx, fit, w, || Ok(35)).unwrap(),
+        }
+    }
+
+    /// Qwen2.5-14B Q4_K_M, `--kv q8 --ctx 32768` on a 12 GB card with
+    /// 11.2 GiB free (the bella case): one full 32k sequence doesn't fit
+    /// beside the weights, so it splits as main does (no 400 for a prompt
+    /// main accepts); `--ctx 16384` fits whole.
+    #[test]
+    fn paged_placement_14b() {
+        let w = curve(8.37, 99, 0.6);
+        let free = (11.2 * GIB as f64) as u64;
+        assert!(matches!(
+            place(free, 32768, false, &w),
+            Placement::Split { .. }
+        ));
+        assert_eq!(place(free, 16384, false, &w), Placement::Gpu { ctx: 16384 });
+    }
+
+    /// Squeezed VRAM (another process holds 0.7 GiB more): --ctx 16384 isn't
+    /// shortened to what fits all-GPU, it splits; without --ctx the model
+    /// stays on the GPU with a shorter context (the pages cap it).
+    #[test]
+    fn paged_placement_squeezed_splits_rather_than_shrinks() {
+        let w = curve(8.37, 99, 0.6);
+        let free = (10.5 * GIB as f64) as u64;
+        assert!(matches!(
+            place(free, 16384, false, &w),
+            Placement::Split { .. }
+        ));
+        assert_eq!(
+            paged_placement(free, 32768, true, &w),
+            PagedPlace::WholeShrunk
+        );
+        // Past even the floor: main's rule (it shrinks or splits).
+        let tiny = (9.5 * GIB as f64) as u64;
+        assert!(matches!(
+            paged_placement(tiny, 32768, true, &w),
+            PagedPlace::Main { .. }
+        ));
+    }
+
+    /// Wherever main places every layer on the GPU with one --ctx cache, the
+    /// paged placement does too (and splits where main splits): 14B q8 at
+    /// --ctx 16384 and 32768 over a sweep of free VRAM.
+    #[test]
+    fn paged_placement_matches_main_with_ctx() {
+        let w = curve(8.37, 99, 0.6);
+        for ctx in [8192, 16384, 32768] {
+            for tenth in 90..=130 {
+                let free = (tenth as f64 / 10.0 * GIB as f64) as u64;
+                let main = choose_placement(free, ctx, false, &w, || Ok(35)).unwrap();
+                assert_eq!(place(free, ctx, false, &w), main, "ctx {ctx} free {tenth}");
+            }
+        }
+    }
+
+    /// Qwen2.5-7B Q4_K_M f16 at 32768 on the same card: the whole model
+    /// with the full context, with --ctx or without.
+    #[test]
+    fn paged_placement_all_gpu_kept() {
+        let w = curve(4.36, 56, 0.8);
+        let free = (11.2 * GIB as f64) as u64;
+        assert_eq!(place(free, 32768, false, &w), Placement::Gpu { ctx: 32768 });
+        assert_eq!(place(free, 32768, true, &w), Placement::Gpu { ctx: 32768 });
     }
 }

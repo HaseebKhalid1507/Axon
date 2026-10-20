@@ -1040,12 +1040,12 @@ pub(super) fn stream(
             }
             e = ev.try_next();
         }
-        c.send(sse.buf.as_bytes())?;
-        sse.buf.clear();
         if done {
-            c.end_stream()?;
+            c.end_stream(sse.buf.as_bytes())?;
             return Ok(keep_alive);
         }
+        c.send(sse.buf.as_bytes())?;
+        sse.buf.clear();
         e = ev.next(c, &mut checked);
         if e.is_none() {
             return Ok(false);
@@ -1089,6 +1089,7 @@ mod tests {
         let norm = |t: Option<tools::ToolReq>| {
             t.map(|mut t| {
                 t.tools = t.tools.iter().map(sorted).collect();
+                t.offered = t.offered.iter().map(sorted).collect();
                 t
             })
         };

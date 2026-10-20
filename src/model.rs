@@ -271,7 +271,7 @@ pub struct Qwen2<'a> {
 /// Keys and values of every past position, per layer.
 /// k[layer] is laid out as [ctx][n_kv_heads * head_dim], same for v.
 pub struct KvCache {
-    /// Per layer, [t][kv_dim] keys and values: f16 unless AXON_KV=f32.
+    /// Per layer, [t][kv_dim] keys and values: f16, or f32 for `KvType::F32` (kv::use_f32).
     data: KvData,
     kv_dim: usize,
     max_ctx: usize,
@@ -428,7 +428,8 @@ fn load_vec(m: &Model, t: &Tensor) -> Vec<f32> {
 /// ones (even layers local), YaRN on every layer, and MoE FFNs (`moe`) with
 /// a biased router, top-4 then softmax over the four, biased experts and
 /// the clamped SwiGLU (`vmath::swiglu_oai`); the pre-FFN norm is its
-/// `post_attention_norm`. Experts are MXFP4 (quant/mxfp4.rs). CPU only.
+/// `post_attention_norm`. Experts are MXFP4 (quant/mxfp4.rs), on the CPU;
+/// with --device cuda the rest runs on the GPU (`crate::moe`, cuda/oss.cu).
 /// deepseek2 (DeepSeek V2/V3, Kimi K2, Moonlight: MLA attention, shared
 /// experts) is its own block (`deepseek2`), on the CPU only.
 pub const ARCHS: [&str; 7] = [
@@ -446,9 +447,10 @@ mod deepseek2;
 #[path = "model/moe.rs"]
 mod moe;
 pub(crate) use deepseek2::info_lines as deepseek2_info;
+pub(crate) use deepseek2::{GpuCfg as Ds2GpuCfg, gpu_cfg as deepseek2_gpu_cfg};
 
 pub(crate) use moe::{
-    MoeDims, MoeInfo, Route as MoeRoute, check_ram as moe_check_ram, cpu_only as moe_cpu_only,
+    MoeDims, MoeInfo, Route as MoeRoute, check_ram as moe_check_ram,
     gpu_refusal as moe_gpu_refusal, is_moe, moe_dims,
 };
 
@@ -1102,10 +1104,10 @@ impl<'a> Qwen2<'a> {
         }
         if m.arch == "deepseek2" {
             assert!(
-                !tie && !experts && keep == usize::MAX,
-                "deepseek2: the whole model on the CPU only"
+                !tie && keep == usize::MAX,
+                "deepseek2: the whole model (or its experts) only"
             );
-            return deepseek2::build(m, repack);
+            return deepseek2::build(m, repack, experts);
         }
         let a = &m.arch;
         let key = |k: &str| format!("{a}.{k}");
@@ -1277,7 +1279,7 @@ impl<'a> Qwen2<'a> {
                             "ffn_down_exps.bias",
                         ]
                         .map(|s| vals(t(s)));
-                        moe.oai = Some(Box::new(moe::Oai {
+                        moe.rule = moe::Router::Oai(Box::new(moe::Oai {
                             router,
                             gate,
                             up,
@@ -3314,7 +3316,7 @@ pub(crate) mod deepseek2_tests;
 
 #[cfg(test)]
 #[path = "model/gptoss_tests.rs"]
-mod gptoss_tests;
+pub(crate) mod gptoss_tests;
 
 #[cfg(test)]
 pub(crate) mod tests {

@@ -33,7 +33,7 @@
 
 use super::api::Usage;
 use super::{Event, Job, TextOut};
-use crate::lm::{Backend, BatchLm, RowHead, RowOut, SeqRow, StepError};
+use crate::lm::{Backend, BatchLm, PoolPages, RowHead, RowOut, SeqRow, StepError};
 use crate::sample::Sampler;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -151,6 +151,68 @@ pub(super) struct Batch<'a, 't> {
     pass: usize,
     log: bool,
     generated: Arc<AtomicU64>,
+    /// Requests preempted for pages so far (`preempt`).
+    pub preempted: u64,
+    /// Prompts being prefilled that gave their rows up for pages so far
+    /// (`unfeed_youngest`; fed again from 0).
+    pub unfed: u64,
+    /// Generated tokens admission reserves pages for (`GROW_TOKENS`; tests
+    /// lower it to force preemption).
+    grow_tokens: usize,
+    /// Where the slots' state is shown (/slots, /metrics; `publish`).
+    pub metrics: Option<Arc<super::ops::Metrics>>,
+}
+
+/// What gives up pages for running request `growing`'s next page
+/// (`Batch::grow`): the youngest prompt being prefilled that holds rows and
+/// is younger than it (an older one keeps its rows: unfeeding it for a
+/// younger request would refeed it over and over, a priority inversion),
+/// else the youngest running request (maybe `growing` itself), never the
+/// oldest request of all (running or prefilling: it always progresses).
+#[derive(Debug, PartialEq, Eq)]
+enum Victim {
+    /// Index into the prefills.
+    Unfeed(usize),
+    /// Index into the running requests.
+    Preempt(usize),
+    /// Nothing may give way (the oldest request alone is short: never, as a
+    /// slot's cap is at most the pool's pages).
+    Stuck,
+}
+
+/// `Victim` from the running requests' ids and the prefills' (id, holds rows).
+fn victim(growing: u64, running: &[u64], prefills: &[(u64, bool)]) -> Victim {
+    let unfeed = (prefills.iter().enumerate())
+        .filter(|(_, (id, holds))| *holds && *id > growing)
+        .max_by_key(|(_, (id, _))| *id);
+    if let Some((j, _)) = unfeed {
+        return Victim::Unfeed(j);
+    }
+    let oldest = running
+        .iter()
+        .chain(prefills.iter().map(|(id, _)| id))
+        .min();
+    match (0..running.len()).max_by_key(|&k| running[k]) {
+        Some(y) if Some(&running[y]) != oldest => Victim::Preempt(y),
+        _ => Victim::Stuck,
+    }
+}
+
+/// Generated tokens a paged admission reserves pages for, per request (at
+/// most its n_gen): without it a request admitted on its prompt's pages
+/// alone gets preempted by the others' growth (a 15k prompt fed again:
+/// MEASURED in 1018-044243-ceb5, 1 preemption a round at 7 x 15k + 600).
+const GROW_TOKENS: usize = 1024;
+
+/// Prompts a paged pool prefills at once at most: more of them share each
+/// step's chunk and finish together, late (7 x 15k: mean TTFT 37 s vs 33 s
+/// fed in turn, ceb5); the rest wait in the queue, and start as each one
+/// finishes. A plain pool's slots bound it already.
+const MAX_PREFILLING: usize = 2;
+
+/// Pages of positions 0..n.
+fn pages_for(n: usize, size: usize) -> usize {
+    n.div_ceil(size)
 }
 
 impl<'a, 't> Batch<'a, 't> {
@@ -182,15 +244,86 @@ impl<'a, 't> Batch<'a, 't> {
             decode_ms: 0.0,
             log,
             generated,
+            preempted: 0,
+            unfed: 0,
+            grow_tokens: GROW_TOKENS,
+            metrics: None,
         }
+    }
+
+    /// Show the slots' state in `metrics`: every engine step, and before a
+    /// request's last event, so that a client that has its whole response
+    /// never sees its slot busy (#112).
+    pub fn publish(&self) {
+        let Some(m) = &self.metrics else {
+            return;
+        };
+        let pages = self.pages().map(|p| super::ops::PagesView {
+            free: p.free,
+            total: p.total,
+            size: p.size,
+            preempted: self.preempted,
+            unfed: self.unfed,
+        });
+        m.publish_pool(self.slot_states(), pages);
+    }
+
+    /// Tests: reserve pages for `n` generated tokens a request at admission
+    /// (GROW_TOKENS by default; 0 forces the preemption path under pressure).
+    pub fn set_grow_tokens(&mut self, n: usize) {
+        self.grow_tokens = n;
     }
 
     pub fn idle(&self) -> bool {
         self.seqs.is_empty() && self.pre.is_empty()
     }
 
-    pub fn has_free(&self) -> bool {
-        self.free() > 0
+    /// Whether `job` can start now: a free slot, and (a paged pool) fewer
+    /// than `MAX_PREFILLING` prompts being prefilled, and pages for its
+    /// prompt past the prefix the slot keeps and its first `GROW_TOKENS`
+    /// generated tokens, beside what the prompts being prefilled and the
+    /// running requests still need on the same terms; idle slots' prefixes
+    /// count, they give theirs up (`reclaim`). Otherwise it waits (never a
+    /// failure for pages).
+    pub fn can_admit(&self, job: &Job) -> bool {
+        let prompt = &job.prompt;
+        let Some((slot, common)) = self.free_slot(prompt) else {
+            return false;
+        };
+        let Some(pg) = self.pages() else {
+            return true;
+        };
+        if self.pre.len() >= MAX_PREFILLING {
+            return false;
+        }
+        // Pages a sequence of `at` positions needs to grow `left` more.
+        let grow = self.grow_tokens;
+        let need = |at: usize, left: usize| pages_for((at + left.min(grow)).min(self.ctx), pg.size);
+        let last = prompt.len() - 1;
+        let keep = pages_for(common.min(last), pg.size);
+        let want = need(last, job.n_gen).saturating_sub(keep);
+        let others: usize = (self.pre.iter().map(|f| &f.seq))
+            .chain(&self.seqs)
+            .map(|q| {
+                let left = q.job.n_gen.saturating_sub(q.ids.len());
+                need(q.hist.len(), left).saturating_sub(pg.held[q.slot])
+            })
+            .sum();
+        let have = pg.free + self.idle_pages(&pg, slot) + pg.held[slot].saturating_sub(keep);
+        have >= want + others
+    }
+
+    /// The pool's pages (None: plain).
+    pub fn pages(&self) -> Option<PoolPages> {
+        self.net.pages(&self.pool)
+    }
+
+    /// Pages idle slots other than `keep` hold (`reclaim`'s).
+    fn idle_pages(&self, pg: &PoolPages, keep: usize) -> usize {
+        (0..self.slots)
+            .filter(|&s| s != keep && !self.busy[s])
+            .map(|s| pg.held[s])
+            .sum()
     }
 
     /// Free slots.
@@ -213,7 +346,7 @@ impl<'a, 't> Batch<'a, 't> {
     /// its first row) is fed a chunk per step from the next step on, past
     /// the rows the slot already holds; it decodes from the step that feeds
     /// its last chunk.
-    pub fn admit(&mut self, job: Job, out: TextOut<'t>) {
+    pub fn admit(&mut self, job: Job, out: TextOut<'t>) -> Result<(), String> {
         let p = &job.prompt;
         let last = p.len() - 1;
         let (slot, common) = self.free_slot(p).expect("admit: a free slot");
@@ -229,6 +362,8 @@ impl<'a, 't> Batch<'a, 't> {
         self.busy[slot] = true;
         self.touch(slot);
         self.held[slot].truncate(reuse);
+        // The rest of the slot's pages are free (a paged pool).
+        self.net.release(&mut self.pool, slot, reuse)?;
         let sampler = job.sample.map(Sampler::new);
         let now = Instant::now();
         self.pre.push(Prefill {
@@ -248,6 +383,7 @@ impl<'a, 't> Batch<'a, 't> {
             starved: 0,
             t0: now,
         });
+        Ok(())
     }
 
     /// What this step may feed: everything without chunking; with
@@ -299,9 +435,19 @@ impl<'a, 't> Batch<'a, 't> {
         for (f, s) in self.pre.iter_mut().zip(starve(&plan, &rem, &starved, idle)) {
             f.starved = s;
         }
+        let mut moved = false;
         for (i, &n) in plan.iter().enumerate() {
             if n > 0 {
-                self.feed(i, n)?;
+                moved |= self.feed(i, n)? > 0;
+            }
+        }
+        // Nothing decodes and no prompt has the pages to go on: the
+        // youngest ones give theirs up, the oldest goes first.
+        if !moved && idle && plan.iter().any(|&n| n > 0) {
+            let oldest = (0..self.pre.len()).min_by_key(|&i| self.pre[i].seq.job.id);
+            if let Some(o) = oldest {
+                self.pre[o].starved = STARVE;
+                self.unfeed_youngest(Some(self.pre[o].seq.job.id))?;
             }
         }
         let mut i = 0;
@@ -309,8 +455,11 @@ impl<'a, 't> Batch<'a, 't> {
             let f = &self.pre[i];
             if f.fed == f.seq.hist.len() - 1 {
                 let mut f = self.pre.remove(i);
-                f.seq.prompt_ms = f.t0.elapsed().as_secs_f64() * 1e3;
-                f.seq.t1 = Instant::now();
+                // A preempted request (`preempt`) keeps its first timings.
+                if f.seq.ids.is_empty() {
+                    f.seq.prompt_ms = f.t0.elapsed().as_secs_f64() * 1e3;
+                    f.seq.t1 = Instant::now();
+                }
                 self.seqs.push(f.seq);
             } else {
                 i += 1;
@@ -319,8 +468,14 @@ impl<'a, 't> Batch<'a, 't> {
         Ok(())
     }
 
-    /// Feed the next `n` tokens of prefill `i`'s prompt into its slot.
-    fn feed(&mut self, i: usize, n: usize) -> Result<(), String> {
+    /// Feed the next `n` tokens of prefill `i`'s prompt into its slot (a
+    /// paged pool: as many as there are pages for, beside a page for each
+    /// running request's growth; none: it waits, decode first).
+    fn feed(&mut self, i: usize, n: usize) -> Result<usize, String> {
+        let n = self.feedable(i, n)?;
+        if n == 0 {
+            return Ok(0);
+        }
         let f = &mut self.pre[i];
         let s = f.seq.slot;
         let toks = &f.seq.hist[f.fed..f.fed + n];
@@ -335,7 +490,27 @@ impl<'a, 't> Batch<'a, 't> {
         if n >= LEARN_MIN {
             self.cost = Some(self.cost.map_or(c, |a| 0.5 * a + 0.5 * c));
         }
-        Ok(())
+        Ok(n)
+    }
+
+    /// How many of the next `n` tokens of prefill `i` have pages (taken
+    /// now): all of them, else up to the end of the pages that are free
+    /// once idle prefixes are reclaimed, less a page per running request.
+    fn feedable(&mut self, i: usize, n: usize) -> Result<usize, String> {
+        let (slot, fed) = (self.pre[i].seq.slot, self.pre[i].fed);
+        if self.pages().is_none() || self.make_room(slot, fed + n)? == 0 {
+            return Ok(n);
+        }
+        let pg = self.pages().expect("paged");
+        let spare = pg.free.saturating_sub(self.seqs.len());
+        let fit = ((pg.held[slot] + spare) * pg.size)
+            .saturating_sub(fed)
+            .min(n);
+        if fit > 0 {
+            let short = self.net.reserve(&mut self.pool, slot, fed + fit)?;
+            debug_assert_eq!(short, 0);
+        }
+        Ok(fit)
     }
 
     /// A slot for the S1 path to run `prompt` in, chosen as `admit`
@@ -343,9 +518,14 @@ impl<'a, 't> Batch<'a, 't> {
     /// recently used), `cache` (a `slot_cache` of the pool) pointed at it,
     /// and the tokens the slot holds (the engine reuses as many as the
     /// prompt shares); the slot holds nothing meanwhile. The batch is idle.
+    /// A paged pool: the slot holds pages for every position the request
+    /// may write (`n_gen` past its prompt, at most a slot's ctx), since the
+    /// `Lm` calls on the view take none; idle slots' prefixes give theirs
+    /// up for them, least recently used first.
     pub fn lend_solo(
         &mut self,
         prompt: &[u32],
+        n_gen: usize,
         cache: &mut <Backend<'a> as crate::lm::Lm>::Cache,
     ) -> Result<Vec<u32>, String> {
         assert!(self.idle(), "lend_solo: the batch is running");
@@ -353,7 +533,43 @@ impl<'a, 't> Batch<'a, 't> {
         self.net.move_slot_cache(&self.pool, cache, slot)?;
         self.solo = slot;
         self.touch(slot);
+        let want = prompt.len().saturating_add(n_gen).min(self.ctx);
+        let short = self.make_room(slot, want)?;
+        if short > 0 {
+            return Err(format!("{short} KV pages short for a request alone"));
+        }
+        // Its batched passes run on the pool's scratch (a paged pool's view
+        // has none of its own), back at `end_solo` / `adopt`.
+        self.net.lend_scratch(&mut self.pool, cache)?;
         Ok(std::mem::take(&mut self.held[slot]))
+    }
+
+    /// Free pages for slot `slot`'s positions 0..hi: idle prefixes give
+    /// theirs up as needed (`reclaim`). The pages still short (0: held).
+    fn make_room(&mut self, slot: usize, hi: usize) -> Result<usize, String> {
+        loop {
+            let short = self.net.reserve(&mut self.pool, slot, hi)?;
+            if short == 0 || !self.reclaim(slot)? {
+                return Ok(short);
+            }
+        }
+    }
+
+    /// The least recently used idle slot (not `keep`) holding pages gives
+    /// them all up (its prefix forgotten): whether there was one.
+    fn reclaim(&mut self, keep: usize) -> Result<bool, String> {
+        let Some(pages) = self.net.pages(&self.pool) else {
+            return Ok(false);
+        };
+        let victim = (0..self.slots)
+            .filter(|&s| s != keep && !self.busy[s] && pages.held[s] > 0)
+            .min_by_key(|&s| self.used[s]);
+        let Some(s) = victim else {
+            return Ok(false);
+        };
+        self.held[s].clear();
+        self.net.release(&mut self.pool, s, 0)?;
+        Ok(true)
     }
 
     /// The slot the S1 path runs in (`lend_solo`).
@@ -363,8 +579,16 @@ impl<'a, 't> Batch<'a, 't> {
 
     /// The S1 path ended (without a hand-over): its slot holds the rows of
     /// `hist`.
-    pub fn end_solo(&mut self, hist: Vec<u32>) {
+    pub fn end_solo(
+        &mut self,
+        hist: Vec<u32>,
+        cache: &mut <Backend<'a> as crate::lm::Lm>::Cache,
+    ) -> Result<(), String> {
+        self.net.return_scratch(&mut self.pool, cache)?;
+        // Pages past its rows (reserved for what it didn't generate) free.
+        self.net.release(&mut self.pool, self.solo, hist.len())?;
         self.held[self.solo] = hist;
+        Ok(())
     }
 
     /// Take over a request `generate` was running on `cache` (the S1 path,
@@ -373,12 +597,15 @@ impl<'a, 't> Batch<'a, 't> {
     pub fn adopt(
         &mut self,
         mut seq: Seq<'t>,
-        cache: &<Backend<'a> as crate::lm::Lm>::Cache,
+        cache: &mut <Backend<'a> as crate::lm::Lm>::Cache,
     ) -> Result<(), String> {
+        self.net.return_scratch(&mut self.pool, cache)?;
         let n = seq.hist.len() - 1;
         let slot = self.solo;
         assert!(!self.busy[slot], "adopt: the S1 slot is busy");
         self.net.adopt(&mut self.pool, slot, cache, n)?;
+        // Its pages past its rows free: the steps take each next one.
+        self.net.release(&mut self.pool, slot, n)?;
         self.busy[slot] = true;
         self.held[slot] = seq.hist[..n].to_vec();
         seq.slot = slot;
@@ -413,6 +640,7 @@ impl<'a, 't> Batch<'a, 't> {
     pub fn step(&mut self) -> Result<(), String> {
         self.reap();
         self.prefill()?;
+        self.grow()?;
         if self.seqs.is_empty() {
             return Ok(());
         }
@@ -489,13 +717,107 @@ impl<'a, 't> Batch<'a, 't> {
         Ok(())
     }
 
+    /// A paged pool: every running request's next row has its page, oldest
+    /// request first (so `step_rows` never refuses a step for pages). Short
+    /// of pages: idle prefixes go (`reclaim`), then `victim`: a younger
+    /// prompt being prefilled gives its rows up (fed again later: the same
+    /// rows), else the youngest running request is preempted (`preempt`:
+    /// its prompt and tokens fed again, then it goes on, the same bits).
+    /// The oldest request of all never gives way, so the server always
+    /// makes progress (a slot's cap is at most the pool's pages).
+    fn grow(&mut self) -> Result<(), String> {
+        if self.pages().is_none() {
+            return Ok(());
+        }
+        let mut ids: Vec<u64> = self.seqs.iter().map(|s| s.job.id).collect();
+        ids.sort_unstable();
+        for id in ids {
+            while let Some(i) = self.seqs.iter().position(|s| s.job.id == id) {
+                let (slot, hi) = (self.seqs[i].slot, self.seqs[i].hist.len());
+                if self.make_room(slot, hi)? == 0 {
+                    break;
+                }
+                let running: Vec<u64> = self.seqs.iter().map(|s| s.job.id).collect();
+                let prefills: Vec<(u64, bool)> =
+                    self.pre.iter().map(|f| (f.seq.job.id, f.fed > 0)).collect();
+                match victim(id, &running, &prefills) {
+                    Victim::Unfeed(j) => self.unfeed(j)?,
+                    Victim::Preempt(y) => self.preempt(y)?,
+                    Victim::Stuck => return Err("out of KV pages for the oldest request".into()),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The youngest prompt being prefilled that holds rows (not `keep`, a
+    /// request id) gives them up: it is fed from 0 again later (the same
+    /// rows). Whether there was one.
+    fn unfeed_youngest(&mut self, keep: Option<u64>) -> Result<bool, String> {
+        let young = (self.pre.iter().enumerate())
+            .filter(|(_, f)| f.fed > 0 && Some(f.seq.job.id) != keep)
+            .max_by_key(|(_, f)| f.seq.job.id)
+            .map(|(j, _)| j);
+        let Some(j) = young else {
+            return Ok(false);
+        };
+        self.unfeed(j)?;
+        Ok(true)
+    }
+
+    /// Prefill `j` gives its rows up: fed from 0 again later.
+    fn unfeed(&mut self, j: usize) -> Result<(), String> {
+        let f = &mut self.pre[j];
+        let s = f.seq.slot;
+        f.fed = 0;
+        f.seq.cached = 0;
+        self.held[s].clear();
+        self.net.release(&mut self.pool, s, 0)?;
+        self.unfed += 1;
+        Ok(())
+    }
+
+    /// Running request `i` gives up its pages and goes back to the
+    /// prompts being prefilled: its prompt and tokens so far are fed again
+    /// (cache reuse == fresh prefill), then it decodes on from where it
+    /// was, its sampler as it was.
+    fn preempt(&mut self, i: usize) -> Result<(), String> {
+        let mut seq = self.seqs.swap_remove(i);
+        // Its rows are fed again from 0: none of them is a cached prefix.
+        seq.cached = 0;
+        let s = seq.slot;
+        if self.log {
+            eprintln!(
+                "axon serve: #{} preempted after {} tokens (out of KV pages): fed again later",
+                seq.job.id,
+                seq.ids.len()
+            );
+        }
+        self.held[s].clear();
+        self.net.release(&mut self.pool, s, 0)?;
+        let at = self.pre.partition_point(|f| f.seq.job.id < seq.job.id);
+        self.pre.insert(
+            at,
+            Prefill {
+                seq,
+                fed: 0,
+                starved: STARVE,
+                t0: Instant::now(),
+            },
+        );
+        self.preempted += 1;
+        Ok(())
+    }
+
     /// Each slot's state, for GET /slots and /metrics (read only).
     pub fn slot_states(&self) -> Vec<super::ops::SlotState> {
+        let pg = self.pages();
         let mut v: Vec<super::ops::SlotState> = (0..self.slots)
             .map(|s| super::ops::SlotState {
                 held: self.held[s].len(),
                 busy: self.busy[s],
                 request: None,
+                pages: pg.as_ref().map(|p| p.held[s]),
             })
             .collect();
         for s in self.pre.iter().map(|f| &f.seq).chain(&self.seqs) {
@@ -507,8 +829,12 @@ impl<'a, 't> Batch<'a, 't> {
     /// Every running request gets error `e` and leaves (its slot freed).
     pub fn fail_all(&mut self, e: &str) {
         let pre = self.pre.drain(..).map(|f| f.seq);
-        for s in pre.chain(self.seqs.drain(..)).collect::<Vec<_>>() {
+        let failed: Vec<_> = pre.chain(self.seqs.drain(..)).collect();
+        for s in &failed {
             self.busy[s.slot] = false;
+        }
+        self.publish();
+        for s in failed {
             let _ = s.job.tx.send(Event::Error(e.to_string()));
         }
     }
@@ -561,6 +887,7 @@ impl<'a, 't> Batch<'a, 't> {
                 self.seqs.len() + 1
             );
         }
+        self.publish();
         let _ = s.job.tx.send(Event::Done { usage, finish });
     }
 }
@@ -1182,5 +1509,90 @@ mod plan_tests {
                 "the younger one cut in: {p:?}, {rem0} left"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod victim_tests {
+    use super::{Victim, victim};
+
+    /// The inversion case: an old long prompt L (id 1) still prefilling and
+    /// holding rows, a young request Z (id 2) decoding and short of a page:
+    /// Z gives way (preempted), L keeps its rows.
+    #[test]
+    fn older_prefill_keeps_its_rows() {
+        assert_eq!(victim(2, &[2], &[(1, true)]), Victim::Preempt(0));
+        // A younger prefill does give its rows up, for any older grower.
+        assert_eq!(victim(2, &[2], &[(1, true), (3, true)]), Victim::Unfeed(1));
+        assert_eq!(victim(1, &[1, 2], &[(3, true)]), Victim::Unfeed(0));
+        // A younger prefill holding nothing: the youngest running goes.
+        assert_eq!(victim(1, &[1, 4, 2], &[(3, false)]), Victim::Preempt(1));
+        // The oldest request of all never gives way.
+        assert_eq!(victim(1, &[1], &[(3, false)]), Victim::Stuck);
+        assert_eq!(victim(2, &[2], &[]), Victim::Stuck);
+    }
+
+    /// A pool of 25 pages (64 positions), an old 1200-token prompt L (id 1,
+    /// 19 pages) fed 64 a step, a young request Z (id 2) decoding a token a
+    /// step from a 600-token history (10 pages): (L's refeeds, L finished,
+    /// Z's tokens) after 400 steps, `rule` deciding who gives way.
+    fn simulate(rule: impl Fn(u64, &[u64], &[(u64, bool)]) -> Victim) -> (usize, bool, usize) {
+        let (total, need) = (25usize, |n: usize| n.div_ceil(64));
+        let (l_len, mut l_fed, mut l_done, mut refeeds) = (1200usize, 0usize, false, 0);
+        let (mut z_len, mut z_running, mut z_tokens) = (600usize, true, 0);
+        let used = |l_fed: usize, l_done: bool, z_len: usize, z_running: bool| {
+            (if l_done { 0 } else { need(l_fed) }) + if z_running { need(z_len) } else { 0 }
+        };
+        for _ in 0..400 {
+            if z_running && used(l_fed, l_done, z_len + 1, true) > total {
+                let pre = if l_done { vec![] } else { vec![(1, l_fed > 0)] };
+                match rule(2, &[2], &pre) {
+                    Victim::Unfeed(_) => {
+                        l_fed = 0;
+                        refeeds += 1;
+                    }
+                    Victim::Preempt(_) => z_running = false,
+                    Victim::Stuck => panic!("stuck"),
+                }
+            }
+            if z_running && used(l_fed, l_done, z_len + 1, true) <= total {
+                z_len += 1;
+                z_tokens += 1;
+            }
+            if !l_done {
+                let next = (l_fed + 64).min(l_len);
+                if used(next, false, z_len, z_running) <= total {
+                    l_fed = next;
+                }
+                // Fed whole: it decodes and finishes (its pages free).
+                l_done = l_fed == l_len;
+            }
+            if !z_running && used(l_fed, l_done, z_len, true) <= total {
+                z_running = true; // fed again, it goes on
+            }
+        }
+        (refeeds, l_done, z_tokens)
+    }
+
+    /// The rule: Z gives way, L is never fed again from 0 and finishes, then
+    /// Z goes on. The old rule (any prefill holding rows gives way) refeeds
+    /// L over and over and it never finishes.
+    #[test]
+    fn grow_rule_makes_progress_without_refeeding_the_old_prompt() {
+        let (refeeds, l_done, z_tokens) = simulate(victim);
+        assert_eq!(refeeds, 0, "L fed again");
+        assert!(l_done, "L finished");
+        assert!(z_tokens > 200, "Z went on: {z_tokens}");
+        let old = |_: u64, running: &[u64], pre: &[(u64, bool)]| match pre.iter().position(|p| p.1)
+        {
+            Some(j) => Victim::Unfeed(j),
+            None if running.len() > 1 => Victim::Preempt(running.len() - 1),
+            None => Victim::Stuck,
+        };
+        let (refeeds, l_done, _) = simulate(old);
+        assert!(
+            refeeds > 1 && !l_done,
+            "the old rule: {refeeds} refeeds, L done {l_done}"
+        );
     }
 }

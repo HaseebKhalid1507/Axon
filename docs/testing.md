@@ -6,7 +6,7 @@ below are the plain ones for a machine without those rules.
 
 ## The suite
 
-One libtest binary (`src/main.rs --test`, about 550 tests, 35 `#[ignore]`d benchmarks and measurements). Two
+One libtest binary (`src/lib.rs --test`: every unit test is in the library; the `axon` binary, `src/main.rs`, has none. About 690 tests, 35 `#[ignore]`d benchmarks and measurements). Two
 builds of it gate a PR:
 
 - **release**: `-C opt-level=3` (Cargo's `[profile.test]` does the same).

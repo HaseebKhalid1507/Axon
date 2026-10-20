@@ -122,6 +122,12 @@ pub struct Opts {
     /// Positions per slot at most (None: the context; tests shrink the pool
     /// with it).
     pub slot_ctx: Option<usize>,
+    /// A paged pool's KV pages (None: as many as fit; tests squeeze the
+    /// pool with it).
+    pub kv_pages: Option<usize>,
+    /// Generated tokens a paged admission reserves pages for (None: the
+    /// engine's GROW_TOKENS; tests set 0 to force preemption).
+    pub kv_grow: Option<usize>,
     /// Prompt tokens a batched step feeds at least while requests decode
     /// (`--prefill-chunk`; 0: prompts fed whole): a long prompt prefills in
     /// chunks between the running requests' steps.
@@ -404,22 +410,31 @@ struct TextOut<'t> {
     /// Drop newlines until the next other character.
     strip_nl: bool,
     stop: StopMatcher,
+    /// Harmony with tools: the reply's call (`TextOut::harmony`).
+    call: CallState,
+    /// Counts dropped calls (`axon_tool_calls_dropped_total`).
+    metrics: Option<Arc<ops::Metrics>>,
+}
+
+/// A harmony reply's call, as `TextOut` reads it.
+#[derive(Default)]
+enum CallState {
+    #[default]
+    None,
+    /// Open: its recipient, its arguments' text so far and their scan.
+    Open(String, String, tools::ArgScan),
+    /// Made: the reply is over.
+    Done,
 }
 
 impl TextOut<'_> {
     /// One more token: (content, reasoning, a stop string was hit).
     fn push(&mut self, id: u32) -> (String, String, bool) {
         let first = std::mem::replace(&mut self.first, false);
-        if let Some(ch) = &mut self.channels {
-            let bytes = self.tok.decode_bytes(&[id]);
-            return match ch.push(id, &bytes) {
-                chat::Part::Hidden => Default::default(),
-                chat::Part::Reasoning => (String::new(), self.utf8.push(&bytes), false),
-                chat::Part::Answer => {
-                    let (c, hit) = self.stop.push(&self.utf8.push(&bytes));
-                    (c, String::new(), hit)
-                }
-            };
+        if let Some(mut ch) = self.channels.take() {
+            let r = self.harmony(&mut ch, id);
+            self.channels = Some(ch);
+            return r;
         }
         if let Some((open, close)) = self.think {
             if first && id == open {
@@ -445,8 +460,170 @@ impl TextOut<'_> {
         (c, String::new(), hit)
     }
 
-    /// The end of the output: what was held back.
+    /// A harmony reply's token. With tools, the content goes out escaped
+    /// for the tools parser and the call framed out of band
+    /// (`tools::harmony_text`). A call is read from the special tokens that
+    /// delimit it (`Channels`) and held until it is decided: it is made as
+    /// soon as its arguments are a whole JSON object, which ends the reply
+    /// (one call per reply; nothing valid follows an object's `}`). Ended
+    /// any other way (its marker, a header, the token limit) with arguments
+    /// that aren't an object, it is no call, and its text is reasoning, as
+    /// the commentary channel's is without tools. Stop strings don't apply
+    /// to a call.
+    fn harmony(&mut self, ch: &mut chat::Channels, id: u32) -> (String, String, bool) {
+        let bytes = self.tok.decode_bytes(&[id]);
+        let tools = ch.tools();
+        // A call the prompt opened (tool_choice) opens first.
+        let mut c = self.call_open(ch);
+        let was = ch.call().is_some();
+        let part = ch.push(id, &bytes);
+        let now = ch.call().is_some();
+        if was && now && matches!(self.call, CallState::Open(..)) {
+            let t = self.utf8.push(&bytes);
+            if self.call_push(&t)
+                && let Some(f) = self.call_made()
+            {
+                c.push_str(&f);
+                return (c, String::new(), true);
+            }
+            return (c, String::new(), false);
+        }
+        let mut r = String::new();
+        if !now && matches!(self.call, CallState::Open(..)) {
+            let t = self.utf8.finish();
+            if self.call_push(&t)
+                && let Some(f) = self.call_made()
+            {
+                c.push_str(&f);
+                return (c, r, true);
+            }
+            r = self.call_dropped();
+        }
+        if ch.ended() {
+            // `<|call|>`: the reply is over.
+            return (c, r, true);
+        }
+        c.push_str(&self.call_open(ch));
+        match part {
+            chat::Part::Hidden => (c, r, false),
+            chat::Part::Reasoning => {
+                r.push_str(&self.utf8.push(&bytes));
+                (c, r, false)
+            }
+            chat::Part::Answer => {
+                let (a, hit) = self.stop.push(&self.utf8.push(&bytes));
+                if tools {
+                    c.push_str(&tools::harmony_text(&a));
+                } else {
+                    c.push_str(&a);
+                }
+                (c, r, hit)
+            }
+        }
+    }
+
+    /// Opens the call `ch` is in, once per reply; the content held for stop
+    /// strings goes out first.
+    fn call_open(&mut self, ch: &chat::Channels) -> String {
+        match ch.call() {
+            Some(to) if matches!(self.call, CallState::None) => {
+                self.call = CallState::Open(to.to_string(), String::new(), Default::default());
+                tools::harmony_text(&self.stop.finish())
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// More of the open call's arguments: whether they may now be whole
+    /// (`ArgScan`: O(1) a byte, so a big argument costs one pass).
+    fn call_push(&mut self, t: &str) -> bool {
+        match &mut self.call {
+            CallState::Open(_, args, scan) => {
+                args.push_str(t);
+                scan.feed(t)
+            }
+            _ => false,
+        }
+    }
+
+    /// The open call's frame, if its arguments are a whole JSON object:
+    /// parsed once, when the scan closes the top-level object.
+    fn call_made(&mut self) -> Option<String> {
+        let CallState::Open(to, args, scan) = &mut self.call else {
+            return None;
+        };
+        let a = args.trim();
+        if !matches!(tools::parse_json(a), Some(tools::J::Obj(_))) {
+            scan.kill();
+            return None;
+        }
+        let f = tools::harmony_call_open(to) + &tools::harmony_text(a) + tools::HARMONY_CALL_END;
+        self.call = CallState::Done;
+        Some(f)
+    }
+
+    /// The open call isn't one: its text (reasoning). Counted, and logged
+    /// with AXON_SERVE_DEBUG=1, so that "axon dropped it" can be told from
+    /// "the model didn't call".
+    fn call_dropped(&mut self) -> String {
+        match std::mem::take(&mut self.call) {
+            CallState::Open(to, args, _) => {
+                if let Some(m) = &self.metrics {
+                    m.tool_calls_dropped.fetch_add(1, Ordering::Relaxed);
+                }
+                if debug() {
+                    eprintln!(
+                        "axon serve: a call to {to} dropped: its arguments ({} bytes) are not a \
+                         JSON object; returned as reasoning",
+                        args.len()
+                    );
+                }
+                args
+            }
+            other => {
+                self.call = other;
+                String::new()
+            }
+        }
+    }
+
+    /// The end of the output: what was held back. With tools, a reply that
+    /// never opened a message (no channel header) is the answer, as without.
     fn finish(&mut self) -> (String, String) {
+        let Some(mut ch) = self.channels.take() else {
+            return self.finish_text();
+        };
+        if !ch.tools() {
+            self.channels = Some(ch);
+            return self.finish_text();
+        }
+        let mut c = self.call_open(&ch);
+        let mut r = String::new();
+        if matches!(self.call, CallState::Open(..)) {
+            // The reply ended inside the call (the token limit).
+            let t = self.utf8.finish();
+            let made = if self.call_push(&t) {
+                self.call_made()
+            } else {
+                None
+            };
+            match made {
+                Some(f) => c.push_str(&f),
+                None => r = self.call_dropped(),
+            }
+        }
+        let unheaded = ch.take_unheaded();
+        self.channels = Some(ch);
+        if let Some(u) = unheaded {
+            let (a, _) = self.stop.push(&String::from_utf8_lossy(&u));
+            c.push_str(&tools::harmony_text(&a));
+        }
+        let (t, r2) = self.finish_text();
+        c.push_str(&tools::harmony_text(&t));
+        (c, r + &r2)
+    }
+
+    fn finish_text(&mut self) -> (String, String) {
         let s = self.utf8.finish();
         if self.reasoning {
             return (self.stop.finish(), s);
@@ -505,7 +682,7 @@ fn debug() -> bool {
 }
 
 /// The detokenizer and stop matcher of `job`'s reply.
-fn text_out<'t>(tok: &'t Tokenizer, job: &Job) -> TextOut<'t> {
+fn text_out<'t>(tok: &'t Tokenizer, job: &Job, metrics: &Arc<ops::Metrics>) -> TextOut<'t> {
     TextOut {
         tok,
         utf8: Utf8Stream::default(),
@@ -515,6 +692,8 @@ fn text_out<'t>(tok: &'t Tokenizer, job: &Job) -> TextOut<'t> {
         first: true,
         strip_nl: false,
         stop: StopMatcher::new(job.stops.clone()),
+        call: CallState::None,
+        metrics: Some(metrics.clone()),
     }
 }
 
@@ -568,9 +747,18 @@ impl<'a> Engine<'a> {
                 held: self.hist.len(),
                 busy: true,
                 request: Some((id, job.arrived)),
+                pages: None,
             },
         );
         let r = or_exit(&format!("request #{id}"), || self.job(job, ho));
+        self.publish_free();
+        r
+    }
+
+    /// Its slot shown free (/slots, /metrics), holding the cache's rows:
+    /// also before a request's last event, so that a client that has its
+    /// whole response never sees the slot busy (#112).
+    fn publish_free(&self) {
         self.metrics.publish_slot(
             self.slot,
             ops::SlotState {
@@ -578,7 +766,6 @@ impl<'a> Engine<'a> {
                 ..Default::default()
             },
         );
-        r
     }
 
     /// Run `job` alone on the engine's cache (stage S1). With `ho`, it
@@ -606,8 +793,10 @@ impl<'a> Engine<'a> {
             .count()
             .min(last);
         self.hist.truncate(reuse);
-        let pb = self.net.prefill_batch();
-        for batch in p[reuse..last].chunks(pb) {
+        // The backend's cancellable pieces (each at most prefill_batch;
+        // on the GPU its passes, sized to the GEMM waves).
+        for r in self.net.prompt_chunks(last - reuse, reuse, &self.cache) {
+            let batch = &p[reuse + r.start..reuse + r.end];
             if cancelled() {
                 return None;
             }
@@ -626,7 +815,7 @@ impl<'a> Engine<'a> {
             Some(d) => crate::draft::Drafter::Model(d),
             None => crate::draft::Drafter::Lookup(PromptLookup::new()),
         };
-        let mut out = text_out(self.tok, job);
+        let mut out = text_out(self.tok, job, &self.metrics);
         let mut ids = Vec::new();
         let generated = &self.generated;
         // A request that fits a slot may hand over to the batch.
@@ -707,6 +896,7 @@ impl<'a> Engine<'a> {
             && !hit
             && !gone
         {
+            self.publish_free();
             let _ = job.tx.send(Event::Error(e.to_string()));
             return None;
         }
@@ -748,6 +938,7 @@ impl<'a> Engine<'a> {
                 }
             );
         }
+        self.publish_free();
         let _ = job.tx.send(Event::Done { usage, finish });
         None
     }
@@ -761,6 +952,9 @@ struct Loaded {
     /// The longest token's bytes: a prompt of more than `ctx` times this
     /// many bytes is more than `ctx` tokens, refused before encoding it.
     max_token_bytes: usize,
+    /// Why the context is `ctx`, for a too-long prompt's error ("--ctx", or
+    /// what a paged pool's pages hold and how to get more).
+    ctx_why: String,
     banner: String,
     /// What decides the output bits (`crate::identity`): every response's
     /// `system_fingerprint`, GET /identity.
@@ -826,9 +1020,12 @@ fn engine(
             .unwrap_or_else(|e| crate::fail(&format!("--draft-model {e}")))
     });
     // The Q6_K prefill copy waits for the cache and slots (below).
+    // AXON_PAGED_KV, read once for this server.
+    let paged_env = crate::cuda::qwen2::pages::paged_env();
     let place = crate::lm::Placing {
         split_ctx,
         defer_q6k8: true,
+        paged: paged_serve(device, o.parallel, paged_env),
     };
     let (mut net, drafter) = crate::backend_and_drafter(
         &model,
@@ -878,7 +1075,8 @@ fn engine(
         }
         _ => (ctx, why),
     };
-    if let Some(why) = why.filter(|_| o.log) {
+    // (A paged pool plans its own context: below.)
+    if let Some(why) = why.filter(|_| o.log && !paged_serve(device, o.parallel, paged_env)) {
         eprintln!("axon serve: context {ctx} tokens: {why}");
     }
     let template = Template::new(tok, &model.arch);
@@ -906,15 +1104,65 @@ fn engine(
     // The slots and their context (`plan_slots`), measured against the GPU
     // memory free now: a pool of N slots is N caches (the single-request
     // path runs in a slot, with scratch of its own: `serve_bytes_kv`).
+    let kv = match o.kv {
+        KvType::Q8 => CacheKv::Q8 { group: 0 },
+        _ => CacheKv::F16,
+    };
+    // Paged KV (specs r11): a slot is a cap, the pool a page budget.
+    let paged = match &net {
+        Backend::Cuda(n) if paged_serve(device, o.parallel, paged_env) => {
+            let slots = if o.parallel_set {
+                o.parallel
+            } else {
+                PAGED_PARALLEL
+            };
+            let plan = n
+                .free_bytes()
+                .ok()
+                .and_then(|free| paged_plan(n, kv, want.max(ctx), slots, free as usize, !fit));
+            if plan.is_none() && !fit && o.log {
+                eprintln!(
+                    "axon serve: KV pages for one {ctx}-token sequence (--ctx) don't fit beside \
+                     the model: slots reserved at the full context instead"
+                );
+            }
+            // Tests: fewer pages (the cap within them).
+            plan.map(|p| match o.kv_pages {
+                Some(k) => PagedPlan {
+                    pages: k.min(p.pages),
+                    cap: p.cap.min(k.min(p.pages) * PAGE_TOKENS),
+                    ..p
+                },
+                None => p,
+            })
+        }
+        _ => None,
+    };
     let plan = match &net {
+        _ if paged.is_some() => {
+            let p = paged.as_ref().expect("paged");
+            SlotPlan {
+                slots: p.slots,
+                ctx: p.cap,
+                note: (p.cap < want).then(|| {
+                    format!(
+                        "context {} tokens: the KV pages that fit in GPU memory hold {} tokens, \
+                         of the model's {want}{}",
+                        p.cap,
+                        p.pages * PAGE_TOKENS,
+                        if kv == CacheKv::F16 {
+                            " (--kv q8 holds twice as many)"
+                        } else {
+                            ""
+                        }
+                    )
+                }),
+            }
+        }
         Backend::Cuda(n) if o.parallel > 1 => match n.free_bytes() {
             Ok(free) => {
                 let free = free as usize;
                 let fits = |kv, s, c| n.serve_bytes_kv(kv, s, c) + POOL_SPARE <= free;
-                let kv = match o.kv {
-                    KvType::Q8 => CacheKv::Q8 { group: 0 },
-                    _ => CacheKv::F16,
-                };
                 let mut p =
                     plan_slots(ctx, !fit, o.parallel, o.parallel_set, |s, c| fits(kv, s, c));
                 // The q8 cache's slots at this context, for the note.
@@ -944,7 +1192,11 @@ fn engine(
         n => {
             // Tests shrink the slots below the context (`Opts::slot_ctx`).
             let slot_ctx = o.slot_ctx.map_or(ctx, |c| c.min(ctx));
-            match net.new_pool(n, slot_ctx) {
+            let made = match &paged {
+                Some(p) => net.new_pool_paged(n, slot_ctx, p.pages),
+                None => net.new_pool(n, slot_ctx),
+            };
+            match made {
                 Ok(pool) => Some((pool, n, slot_ctx)),
                 Err(why) => {
                     if o.log {
@@ -998,12 +1250,26 @@ fn engine(
             floor: o.prefill_chunk,
             ms: o.prefill_ms,
         };
-        Batch::new(&net, pool, n, slot_ctx, policy, o.log, e.generated.clone())
+        let mut b = Batch::new(&net, pool, n, slot_ctx, policy, o.log, e.generated.clone());
+        if let Some(g) = o.kv_grow {
+            b.set_grow_tokens(g);
+        }
+        b.metrics = Some(o.metrics.clone());
+        b
     });
     let served = batch.as_ref().map_or(ctx, |b| b.ctx.min(ctx));
-    let banner = match &batch {
-        Some(b) => format!("{kvs}, ctx {served}{drafts}, {} requests at once", b.slots),
-        None => format!("{kvs}, ctx {ctx}{drafts}, one request at a time"),
+    let banner = match (&batch, &paged) {
+        (Some(b), Some(p)) => format!(
+            "{kvs}, ctx {served}{drafts}, every layer on the GPU, KV: {} pages x {PAGE_TOKENS} = \
+             {} tokens ({} sequences of the full {served} at once) over up to {} slots \
+             (cap {served})",
+            p.pages,
+            p.pages * PAGE_TOKENS,
+            p.pages / served.div_ceil(PAGE_TOKENS).max(1),
+            b.slots
+        ),
+        (Some(b), None) => format!("{kvs}, ctx {served}{drafts}, {} requests at once", b.slots),
+        (None, _) => format!("{kvs}, ctx {ctx}{drafts}, one request at a time"),
     };
     let identity = crate::identity::of(&o.path, &model, &net);
     if ready
@@ -1012,6 +1278,16 @@ fn engine(
             template,
             ctx: served,
             max_token_bytes: tok.max_token_bytes(),
+            ctx_why: match &paged {
+                Some(p) if batch.is_some() && served < want => format!(
+                    "the KV pages that fit in GPU memory beside the model hold {} tokens: \
+                     send a shorter prompt, or start the server with {}a smaller model or \
+                     less else on the GPU",
+                    p.pages * PAGE_TOKENS,
+                    if kv == CacheKv::F16 { "--kv q8, " } else { "" }
+                ),
+                _ => "--ctx".into(),
+            },
             banner,
             identity,
             arch: model.arch.clone(),
@@ -1024,7 +1300,7 @@ fn engine(
     let mut waiting: VecDeque<Job> = VecDeque::new();
     loop {
         if let Some(b) = &batch {
-            o.metrics.publish_pool(b.slot_states());
+            b.publish();
         }
         if batch.as_ref().is_none_or(Batch::idle) && waiting.is_empty() {
             match jobs.recv_timeout(Duration::from_millis(100)) {
@@ -1058,12 +1334,15 @@ fn engine(
         // as does one that fits no slot, once the batch is idle.
         let first_fit = waiting.iter().position(|j| fits_slot(j, b.ctx));
         if let Some(i) = first_fit
-            && b.has_free()
+            && b.can_admit(&waiting[i])
             && (!b.idle() || waiting.len() > 1)
         {
             let job = waiting.remove(i).unwrap();
-            let out = text_out(e.tok, &job);
-            b.admit(job, out);
+            let out = text_out(e.tok, &job, &e.metrics);
+            let tx = job.tx.clone();
+            if let Err(err) = or_exit("an admission", || b.admit(job, out)) {
+                fatal(b, &err, Some(tx));
+            }
         } else if b.idle() {
             if let Some(job) = waiting.pop_front() {
                 let ho = Handover {
@@ -1077,7 +1356,7 @@ fn engine(
                 // least recently used): from the rows the slot holds, and
                 // the slot holds its rows after.
                 let lent = or_exit("a slot for a request alone", || {
-                    b.lend_solo(&job.prompt, &mut e.cache)
+                    b.lend_solo(&job.prompt, job.n_gen, &mut e.cache)
                 });
                 match lent {
                     Ok(hist) => e.hist = hist,
@@ -1087,11 +1366,15 @@ fn engine(
                 match e.run(job, Some(ho)) {
                     Some(seq) => {
                         let tx = seq.job.tx.clone();
-                        if let Err(err) = or_exit("a hand-over", || b.adopt(seq, &e.cache)) {
+                        if let Err(err) = or_exit("a hand-over", || b.adopt(seq, &mut e.cache)) {
                             fatal(b, &err, Some(tx));
                         }
                     }
-                    None => b.end_solo(std::mem::take(&mut e.hist)),
+                    None => {
+                        if let Err(err) = b.end_solo(std::mem::take(&mut e.hist), &mut e.cache) {
+                            fatal(b, &err, None);
+                        }
+                    }
                 }
             }
             continue;
@@ -1126,6 +1409,92 @@ pub const AGENT_CTX: usize = 32768;
 /// VRAM a pool leaves free beyond itself and the single-request path's
 /// scratch (transient buffers).
 const POOL_SPARE: usize = 256 << 20;
+
+/// Most requests at once with paged KV when --parallel isn't given: a
+/// slot costs a table row and its scratch, its KV only what it holds.
+const PAGED_PARALLEL: usize = 16;
+
+/// Positions per KV page (cuda qwen2 pages.rs).
+const PAGE_TOKENS: usize = 64;
+
+/// Whether serve's pool is paged: the GPU, batching, AXON_PAGED_KV != 0
+/// (`paged_env`, read once at serve's start).
+fn paged_serve(device: Device, parallel: usize, paged_env: bool) -> bool {
+    device == Device::Cuda && parallel > 1 && paged_env
+}
+
+/// A paged pool's shape: up to `slots` requests of up to `cap` positions
+/// over `pages` KV pages.
+#[derive(Clone, Copy)]
+struct PagedPlan {
+    slots: usize,
+    cap: usize,
+    pages: usize,
+}
+
+/// The paged pool for `free` bytes of GPU memory: every byte past the
+/// pool's scratch (sized by the cap), the single-request path's and
+/// POOL_SPARE in pages, at most a page per position of every slot (a
+/// smaller pool leaves room for the Q6_K prefill copy). The cap is the
+/// context `want`, at most the pages' tokens (a request alone always has
+/// its pages: idle prefixes give theirs up), a whole number of pages;
+/// under 1024, or 2 slots, no pool.
+fn paged_plan(
+    n: &crate::cuda::qwen2::CudaQwen2,
+    kv: CacheKv,
+    want: usize,
+    slots: usize,
+    free: usize,
+    exact: bool,
+) -> Option<PagedPlan> {
+    let fixed = |cap: usize| n.serve_paged_bytes(kv, slots, cap, 0);
+    paged_plan_with(want, slots, free, exact, fixed, n.page_bytes(kv))
+}
+
+/// `paged_plan` over a model of the memory: `fixed(cap)` the pool's and
+/// the view's bytes besides the pages at a cap, `page` a page's bytes.
+/// `exact` (--ctx given): the cap is `want` or there's no paged plan (the
+/// caller falls back to reserved slots, one request at a time at worst):
+/// at least one full sequence of --ctx always fits.
+fn paged_plan_with(
+    want: usize,
+    slots: usize,
+    free: usize,
+    exact: bool,
+    fixed: impl Fn(usize) -> usize,
+    page: usize,
+) -> Option<PagedPlan> {
+    if slots < 2 {
+        return None;
+    }
+    let pages = |cap: usize| {
+        let budget = free.checked_sub(fixed(cap) + POOL_SPARE)?;
+        Some((budget / page).min(slots * cap.div_ceil(PAGE_TOKENS)))
+    };
+    // The longest cap the pages hold (a longer cap's scratch leaves fewer
+    // pages): the whole context, else a whole number of pages.
+    let holds = |cap: usize| pages(cap).is_some_and(|p| p * PAGE_TOKENS >= cap);
+    let cap = match (holds(want), exact) {
+        (true, _) => want,
+        (false, true) => return None,
+        (false, false) => {
+            let (mut lo, mut hi) = (0, want / PAGE_TOKENS);
+            while lo < hi {
+                let mid = (lo + hi).div_ceil(2);
+                match holds(mid * PAGE_TOKENS) {
+                    true => lo = mid,
+                    false => hi = mid - 1,
+                }
+            }
+            lo * PAGE_TOKENS
+        }
+    };
+    (cap >= 1024).then(|| PagedPlan {
+        slots,
+        cap,
+        pages: pages(cap).expect("holds"),
+    })
+}
 
 /// RAM a CPU server's default context leaves free beyond its KV cache.
 const RAM_MARGIN: u64 = 1 << 30;
@@ -1321,6 +1690,8 @@ struct EngineOpts {
     parallel: usize,
     parallel_set: bool,
     slot_ctx: Option<usize>,
+    kv_pages: Option<usize>,
+    kv_grow: Option<usize>,
     prefill_chunk: usize,
     prefill_ms: usize,
     path: String,
@@ -1426,6 +1797,8 @@ pub fn start(o: Opts) -> io::Result<Server> {
         parallel: o.parallel,
         parallel_set: o.parallel_set,
         slot_ctx: o.slot_ctx,
+        kv_pages: o.kv_pages,
+        kv_grow: o.kv_grow,
         prefill_chunk: o.prefill_chunk,
         prefill_ms: o.prefill_ms,
         generated: generated.clone(),
@@ -1641,6 +2014,7 @@ fn connection(s: TcpStream, sh: &Shared) {
                 c.on_status = Some(count(sh, ops::route_label(&req.path)));
                 let r = route(&mut c, &req, sh);
                 c.on_status = None;
+                c.on_end = None;
                 #[cfg(test)]
                 sh.hold.here();
                 match r {
@@ -1932,7 +2306,10 @@ fn run_request(
     let too_long = |n: String| {
         let mut e = ApiError::bad(
             out.prompt_param(&g),
-            format!("the prompt is {n}; the context is {} tokens (--ctx)", m.ctx),
+            format!(
+                "the prompt is {n}; the context is {} tokens ({})",
+                m.ctx, m.ctx_why
+            ),
         );
         e.code = Some("context_length_exceeded");
         e
@@ -1991,8 +2368,22 @@ fn run_request(
                 Some(tr) => match tools::render(t, m.tok, tr, no_think) {
                     Ok(r) => {
                         parser = r.parser;
+                        // Harmony: calls are told apart by channel. With
+                        // --think-inline the raw reply is the content.
+                        let mut stop = t.stop().to_vec();
+                        if let Some(ch) = r.channels {
+                            if sh.think_inline {
+                                parser = None;
+                            } else {
+                                // `<|call|>` ends the reply through the
+                                // splitter, which must see it to tell a
+                                // closed call from a cut one.
+                                stop.retain(|&i| Some(i) != ch.call_token());
+                                channels = Some(ch);
+                            }
+                        }
                         let think = think.filter(|_| !r.no_reasoning);
-                        (r.ids, t.stop().to_vec(), think)
+                        (r.ids, stop, think)
                     }
                     Err(e) => return out.err(c, e, keep),
                 },
@@ -2057,7 +2448,11 @@ fn run_request(
     };
     let model = g.model.as_deref().unwrap_or(&sh.model_id);
     let model = (model, m.identity.fingerprint());
-    let _flight = InFlight::new(&sh.metrics.in_flight);
+    // Out of flight just before the response's last write (`on_end`): a
+    // client that has all of it never sees it counted (#112). Else (an
+    // error, a client gone) as the handler returns.
+    let flight = InFlight::new(sh.metrics.clone());
+    c.on_end = Some(Box::new(move || drop(flight)));
     let mut ev = Events::new(&rx, &sh.metrics, arrived);
     ev.log = sh.log;
     let r = if g.stream {
@@ -2107,22 +2502,27 @@ fn run_request(
     if !matches!(r, Ok(true)) {
         cancel.store(true, Ordering::Relaxed);
     }
+    // Tests (`Server::hold`): the response is written, the handler not yet
+    // returned.
+    #[cfg(test)]
+    sh.hold.here();
+    c.on_end = None;
     r
 }
 
-/// Counts a request in flight while it lives.
-struct InFlight<'a>(&'a AtomicUsize);
+/// Counts a request in flight (`Metrics::in_flight`) while it lives.
+struct InFlight(Arc<ops::Metrics>);
 
-impl<'a> InFlight<'a> {
-    fn new(n: &'a AtomicUsize) -> InFlight<'a> {
-        n.fetch_add(1, Ordering::Relaxed);
-        InFlight(n)
+impl InFlight {
+    fn new(m: Arc<ops::Metrics>) -> InFlight {
+        m.in_flight.fetch_add(1, Ordering::Relaxed);
+        InFlight(m)
     }
 }
 
-impl Drop for InFlight<'_> {
+impl Drop for InFlight {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Relaxed);
+        self.0.in_flight.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -2392,12 +2792,12 @@ fn stream(
             }
             ev = rx.try_next();
         }
-        c.send(buf.as_bytes())?;
-        buf.clear();
         if done {
-            c.end_stream()?;
+            c.end_stream(buf.as_bytes())?;
             return Ok(keep);
         }
+        c.send(buf.as_bytes())?;
+        buf.clear();
         ev = rx.next(c, &mut checked);
         if ev.is_none() {
             return Ok(false);
@@ -2465,6 +2865,8 @@ pub fn run(args: &[String]) -> io::Result<()> {
         parallel: PARALLEL,
         parallel_set: false,
         slot_ctx: None,
+        kv_pages: None,
+        kv_grow: None,
         prefill_chunk: engine::PREFILL_CHUNK,
         prefill_ms: engine::PREFILL_MS,
         rope: Default::default(),

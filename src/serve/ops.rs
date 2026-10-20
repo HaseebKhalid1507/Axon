@@ -142,16 +142,22 @@ pub struct SlotState {
     pub busy: bool,
     /// The request in it: its number (the `#n` of the log) and arrival.
     pub request: Option<(u64, Instant)>,
+    /// KV pages it holds (a paged pool).
+    pub pages: Option<usize>,
 }
 
 impl SlotState {
     fn json(&self, now: Instant) -> serde_json::Value {
-        serde_json::json!({
+        let mut j = serde_json::json!({
             "busy": self.busy,
             "held_tokens": self.held,
             "request_id": self.request.map(|r| r.0),
             "age_ms": self.request.map(|r| now.saturating_duration_since(r.1).as_millis() as u64),
-        })
+        });
+        if let Some(p) = self.pages {
+            j["pages_used"] = p.into();
+        }
+        j
     }
 }
 
@@ -163,6 +169,21 @@ pub struct SlotsView {
     /// request running alone (`Engine::job`) runs in one of them: with a
     /// pool its cache is a view of a slot's rows (`Batch::lend_solo`).
     pub pool: Vec<SlotState>,
+    /// A paged pool's KV pages and what gave way for them.
+    pub pages: Option<PagesView>,
+}
+
+/// A paged pool's pages for GET /slots.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct PagesView {
+    pub free: usize,
+    pub total: usize,
+    /// Positions per page.
+    pub size: usize,
+    /// Requests preempted for pages so far.
+    pub preempted: u64,
+    /// Prompts being prefilled that gave their rows up so far.
+    pub unfed: u64,
 }
 
 impl SlotsView {
@@ -185,6 +206,9 @@ pub struct Metrics {
     pub idle_evictions: AtomicU64,
     /// Prompts refused by `--max-prompt-tokens`.
     pub refused_prompts: AtomicU64,
+    /// gpt-oss tool calls begun but not finished as a JSON object
+    /// (returned as reasoning).
+    pub tool_calls_dropped: AtomicU64,
     pub ttft: Histogram,
     pub itl: Histogram,
     pub slots: Mutex<SlotsView>,
@@ -199,6 +223,7 @@ impl Default for Metrics {
             in_flight: AtomicUsize::new(0),
             idle_evictions: AtomicU64::new(0),
             refused_prompts: AtomicU64::new(0),
+            tool_calls_dropped: AtomicU64::new(0),
             ttft: Histogram::new(TTFT_BOUNDS),
             itl: Histogram::new(ITL_BOUNDS),
             slots: Mutex::default(),
@@ -215,8 +240,10 @@ impl Metrics {
         *lock(&self.requests).entry((route, status)).or_insert(0) += 1;
     }
 
-    pub fn publish_pool(&self, pool: Vec<SlotState>) {
-        lock(&self.slots).pool = pool;
+    pub fn publish_pool(&self, pool: Vec<SlotState>, pages: Option<PagesView>) {
+        let mut v = lock(&self.slots);
+        v.pool = pool;
+        v.pages = pages;
     }
 
     /// Slot `i`'s state: where a request running alone runs.
@@ -225,7 +252,9 @@ impl Metrics {
         if v.pool.len() <= i {
             v.pool.resize(i + 1, SlotState::default());
         }
-        v.pool[i] = s;
+        // A request alone doesn't know the pages: the pool's last word.
+        let pages = s.pages.or(v.pool[i].pages);
+        v.pool[i] = SlotState { pages, ..s };
     }
 
     /// Requests waiting for a slot: those in flight less those running.
@@ -249,12 +278,24 @@ impl Metrics {
                 j
             })
             .collect();
-        serde_json::json!({
+        let mut j = serde_json::json!({
             "ctx": ctx,
             "slots": pool,
             "queue_depth": self.queue_depth(busy),
-        })
-        .to_string()
+        });
+        // Graphs given up / steps run kernel by kernel for lack of VRAM
+        // (process-wide: never fatal, the same bits).
+        let (evicted, eager) = crate::cuda::qwen2::graph_oom_counts();
+        j["graphs_evicted_oom"] = evicted.into();
+        j["steps_eager_oom"] = eager.into();
+        if let Some(p) = v.pages {
+            j["pages_free"] = p.free.into();
+            j["pages_total"] = p.total.into();
+            j["page_tokens"] = p.size.into();
+            j["preempted"] = p.preempted.into();
+            j["prefills_unfed"] = p.unfed.into();
+        }
+        j.to_string()
     }
 
     /// GET /metrics: Prometheus text format 0.0.4.
@@ -303,6 +344,12 @@ impl Metrics {
             "axon_prompt_refused_total",
             "Prompts refused by --max-prompt-tokens.",
             self.refused_prompts.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut o,
+            "axon_tool_calls_dropped_total",
+            "gpt-oss tool calls begun but not finished as a JSON object (returned as reasoning).",
+            self.tool_calls_dropped.load(Ordering::Relaxed),
         );
         let (total, busy) = lock(&self.slots).counts();
         gauge(
@@ -509,21 +556,38 @@ mod tests {
                 held: 9,
                 busy: true,
                 request: None,
+                pages: None,
             },
         );
         assert_eq!(lock(&m.slots).counts(), (1, 1));
         assert_eq!(slot(&m)[0]["held_tokens"], 9);
-        m.publish_pool(vec![SlotState::default(); 3]);
+        let pv = PagesView {
+            free: 10,
+            total: 12,
+            size: 64,
+            preempted: 2,
+            unfed: 1,
+        };
+        m.publish_pool(vec![SlotState::default(); 3], Some(pv));
         m.publish_slot(
             2,
             SlotState {
                 held: 5,
                 busy: true,
-                request: None,
+                request: Some((7, Instant::now())),
+                pages: Some(2),
             },
         );
         assert_eq!(slot(&m).as_array().unwrap().len(), 3);
         assert_eq!(slot(&m)[2]["held_tokens"], 5);
+        assert_eq!(slot(&m)[2]["pages_used"], 2);
+        let all = serde_json::from_str::<serde_json::Value>(&m.slots_json(64)).unwrap();
+        assert_eq!(
+            (all["pages_free"].clone(), all["pages_total"].clone()),
+            (10.into(), 12.into())
+        );
+        assert_eq!(all["preempted"], 2);
+        assert_eq!(all["prefills_unfed"], 1);
         assert_eq!(lock(&m.slots).counts(), (3, 1));
     }
 }

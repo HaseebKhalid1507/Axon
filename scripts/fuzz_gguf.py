@@ -3,6 +3,7 @@
 
     scripts/fuzz_gguf.py <axon binary> <model.gguf> <work dir> [--jobs N] [--only SUBSTR]
                          [--keep] [--mem-mb MB] [--timeout S]
+    scripts/fuzz_gguf.py <axon binary> <checkpoint dir> <work dir> --safetensors [...]
 
 Takes a real GGUF, writes mutants of its header (metadata + tensor table) and
 of its byte layout, and runs `axon info` and `axon gen <m> Hello -n 1` (CPU)
@@ -17,6 +18,14 @@ the base copy is the model with a padding key so that its tensor data starts
 on a 4096-byte boundary, and every mutant pads its header the same way.
 Where the filesystem can't reflink, the kernel copies instead (slow, and
 the full model size per live mutant: run with --jobs 1 then).
+
+--safetensors: the model is a Hugging Face checkpoint directory (config.json,
+tokenizer files, model.safetensors). Each mutant is a directory: the JSON files
+copied (or mutated), the shard re-laid with its header padded to a block (data
+reflinked from one base copy) or mutated, and a synthetic 2-shard split for the
+index cases (truncated header, 2 GB header length, bad / overlapping offsets,
+non-object JSON, a missing shard, path traversal in the index, bad config and
+tokenizer values, every byte of the header flipped at sampled positions).
 
 Out of scope: a file truncated or rewritten while axon has it mapped (SIGBUS
 is the documented behaviour of any mmap'd file, see gguf.rs `load_to_run`).
@@ -546,6 +555,241 @@ def run1(cmd, mem_mb, timeout, env):
 BAD = {"PANIC", "ALLOC", "SIGNAL", "HANG", "SILENT"}
 
 
+# --- safetensors mode -------------------------------------------------------
+
+class StBase:
+    """The checkpoint's shard re-laid with its JSON padded so the data starts
+    on a block boundary (one base copy; mutants reflink its data)."""
+
+    def __init__(self, src, work):
+        import json
+        self.src = src
+        f = os.path.join(src, "model.safetensors")
+        with open(f, "rb") as fh:
+            n = struct.unpack("<Q", fh.read(8))[0]
+            self.header = json.loads(fh.read(n))
+        self.data_off0 = 8 + n
+        self.data_len = os.path.getsize(f) - self.data_off0
+        self.path = os.path.join(work, "base.safetensors")
+        j = self.hjson(self.header)
+        self.do = 8 + len(j)
+        if not (os.path.exists(self.path) and os.path.getsize(self.path) == self.do + self.data_len):
+            tmp = self.path + ".tmp"
+            with open(f, "rb") as s, open(tmp, "wb") as d:
+                d.write(struct.pack("<Q", len(j)) + j)
+                d.flush()
+                copy_range(s.fileno(), d.fileno(), self.data_len, self.data_off0, self.do)
+            os.replace(tmp, self.path)
+        self.files = {}
+        for name in ("config.json", "tokenizer.json", "tokenizer_config.json", "generation_config.json"):
+            p = os.path.join(src, name)
+            if os.path.exists(p):
+                with open(p, "rb") as fh:
+                    self.files[name] = fh.read()
+
+    @staticmethod
+    def hjson(h, pad_to=BLOCK):
+        import json
+        j = json.dumps(h, separators=(",", ":")).encode()
+        n = -(-(8 + len(j)) // pad_to) * pad_to - 8
+        return j + b" " * (n - len(j))
+
+    def shard(self, path, header=None, raw=None, data=None, data_at=None, data_len=None):
+        """A shard file: raw bytes, or `header` (dict, padded to a block) then
+        `data_len` bytes of the base's data from base offset `data_at`."""
+        with open(path, "wb") as d:
+            if raw is not None:
+                d.write(raw)
+                return
+            j = self.hjson(header if header is not None else self.header)
+            d.write(struct.pack("<Q", len(j)) + j)
+            at = 8 + len(j)
+            d.truncate(at)
+            d.flush()
+            n = self.data_len if data_len is None else data_len
+            if n:
+                with open(self.path, "rb") as s:
+                    copy_range(s.fileno(), d.fileno(), n, self.do + (data_at or 0), at)
+
+    def dir(self, path, files=None, shards=None):
+        """A checkpoint directory: `files` override the JSON files (None value:
+        left out), `shards` = {name: writer(path)} (default: the base shard)."""
+        os.makedirs(path, exist_ok=True)
+        fs = dict(self.files)
+        fs.update(files or {})
+        for name, b in fs.items():
+            if b is not None:
+                with open(os.path.join(path, name), "wb") as fh:
+                    fh.write(b if isinstance(b, bytes) else b.encode())
+        for name, w in (shards or {"model.safetensors": lambda p: self.shard(p)}).items():
+            w(os.path.join(path, name))
+
+
+def st_mutants(b):
+    import copy
+    import json
+    import random
+    out = []
+    H = b.header
+    names = sorted((k for k in H if k != "__metadata__"), key=lambda k: H[k]["data_offsets"][0])
+    big = max(names, key=lambda k: H[k]["data_offsets"][1] - H[k]["data_offsets"][0])
+    small = min(names, key=lambda k: H[k]["data_offsets"][1] - H[k]["data_offsets"][0])
+    cfg = json.loads(b.files["config.json"])
+    tok = json.loads(b.files["tokenizer.json"])
+
+    def m(name, **kw):
+        out.append((name, lambda p, kw=kw: b.dir(p, **kw)))
+
+    def hdr(name, f):
+        h = copy.deepcopy(H)
+        f(h)
+        m(name, shards={"model.safetensors": lambda p, h=h: b.shard(p, header=h)})
+
+    def rawshard(name, raw):
+        m(name, shards={"model.safetensors": lambda p: b.shard(p, raw=raw)})
+
+    def cfgm(name, f):
+        c = copy.deepcopy(cfg)
+        f(c)
+        m(name, files={"config.json": json.dumps(c)})
+
+    def tokm(name, f):
+        t = copy.deepcopy(tok)
+        f(t)
+        m(name, files={"tokenizer.json": json.dumps(t)})
+
+    m("st-base")
+    # Header length and truncation.
+    for n in [0, 1, 4, 7]:
+        rawshard(f"st-trunc-{n}", open(b.path, "rb").read(n))
+    for hl in [2 << 30, (1 << 64) - 1, 100_000_001, b.do, b.do - 8 + 1]:
+        rawshard(f"st-header-len-{hl}", struct.pack("<Q", hl) + b"{}")
+    m("st-data-trunc-half", shards={"model.safetensors": lambda p: b.shard(p, data_len=b.data_len // 2)})
+    m("st-data-trunc-1", shards={"model.safetensors": lambda p: b.shard(p, data_len=b.data_len - 1)})
+    for j in [b"[]", b"null", b'"x"', b"1", b"{", b"{\"a\":", b"\xff\xfe", b"{}" + b"x" * 10]:
+        rawshard(f"st-json-{j[:6]!r}", struct.pack("<Q", len(j)) + j)
+    # Offsets and entries.
+    def set_t(k, **f):
+        def g(h):
+            h[k].update(f)
+        return g
+    e0, e1 = H[big]["data_offsets"]
+    hdr("st-off-past-end", set_t(big, data_offsets=[e0, b.data_len + 2]))
+    hdr("st-off-reversed", set_t(big, data_offsets=[e1, e0]))
+    hdr("st-off-huge", set_t(big, data_offsets=[(1 << 64) - 2, (1 << 64) - 1]))
+    hdr("st-off-negative", set_t(big, data_offsets=[-1, e1]))
+    hdr("st-off-short", set_t(big, data_offsets=[e0, e1 - 2]))
+    hdr("st-off-float", set_t(big, data_offsets=[0.5, e1]))
+    hdr("st-off-one", set_t(big, data_offsets=[e0]))
+    hdr("st-off-str", set_t(big, data_offsets="0"))
+    s0, s1 = H[small]["data_offsets"]
+    hdr("st-overlap", set_t(small, data_offsets=[e0, e0 + (s1 - s0)]))
+    hdr("st-overlap-same", set_t(big, data_offsets=[H[names[0]]["data_offsets"][0], H[names[0]]["data_offsets"][0] + (e1 - e0)]))
+    # Review #102 MUST 1: many tensors sharing one range (each would get its own converted copy) and
+    # trailing bytes. All refused by the tiling check before any allocation.
+    def bomb(h):
+        for l in range(20000):
+            h[f"model.layers.{l}.mlp.up_proj.weight"] = dict(H[big])
+    hdr("st-overlap-bomb", bomb)
+    # (a gap: st-entry-missing drops a tensor from the middle)
+    m("st-trailing", shards={"model.safetensors": lambda p: (b.shard(p), open(p, "ab").write(b"\0" * 16))})
+    hdr("st-shape-bigger", set_t(big, shape=[x * 2 for x in H[big]["shape"]]))
+    hdr("st-shape-overflow", set_t(big, shape=[1 << 62, 1 << 62]))
+    hdr("st-shape-5d", set_t(big, shape=[1, 1, 1] + H[big]["shape"]))
+    hdr("st-shape-neg", set_t(big, shape=[-1] + H[big]["shape"][1:]))
+    hdr("st-shape-scalar", set_t(small, shape=[]))
+    hdr("st-dtype-unknown", set_t(big, dtype="Q4_K"))
+    hdr("st-dtype-int", set_t(big, dtype=5))
+    hdr("st-dtype-f8", set_t(big, dtype="F8_E4M3", shape=[H[big]["shape"][0] * 2] + H[big]["shape"][1:]))
+    hdr("st-dtype-f32", set_t(big, dtype="F32", shape=[H[big]["shape"][0] // 2] + H[big]["shape"][1:]))
+    hdr("st-dtype-f16", set_t(big, dtype="F16"))
+    hdr("st-entry-list", lambda h: h.__setitem__(big, [1, 2]))
+    hdr("st-entry-missing", lambda h: h.pop(big))
+    hdr("st-meta-list", lambda h: h.__setitem__("__metadata__", [1]))
+    hdr("st-name-unknown", lambda h: h.__setitem__("model.layers.0.mlp.zzz.weight", h.pop(small)))
+    hdr("st-name-layer-huge", lambda h: h.__setitem__("model.layers.99999999999.mlp.up_proj.weight", h.pop(small)))
+    # Two shards through an index, and its failures.
+    half = len(names) // 2
+    def split(missing=False, files=None, wm_edit=None):
+        h1 = {k: H[k] for k in names[:half]}
+        h2 = {k: H[k] for k in names[half:]}
+        wm = {k: "model-00001-of-00002.safetensors" for k in h1}
+        wm.update({k: "model-00002-of-00002.safetensors" for k in h2})
+        if wm_edit:
+            wm_edit(wm)
+        sh = {"model-00001-of-00002.safetensors": lambda p: b.shard(p, header=h1),
+              "model-00002-of-00002.safetensors": lambda p: b.shard(p, header=h2)}
+        if missing:
+            sh.pop("model-00002-of-00002.safetensors")
+        def w(p):
+            b.dir(p, files=dict(files or {}, **{"model.safetensors.index.json": json.dumps({"weight_map": wm})}),
+                  shards=sh)
+        return w
+    out.append(("st-2shard", split()))
+    out.append(("st-2shard-missing", split(missing=True)))
+    out.append(("st-index-traversal", split(wm_edit=lambda wm: wm.__setitem__(names[0], "../../etc/passwd"))))
+    out.append(("st-index-abs", split(wm_edit=lambda wm: wm.__setitem__(names[0], "/etc/passwd"))))
+    out.append(("st-index-wrong-shard", split(wm_edit=lambda wm: wm.__setitem__(names[0], "model-00002-of-00002.safetensors"))))
+    out.append(("st-index-nofile", split(wm_edit=lambda wm: wm.__setitem__(names[0], "nope.safetensors"))))
+    out.append(("st-index-int", split(wm_edit=lambda wm: wm.__setitem__(names[0], 3))))
+    m("st-index-notjson", files={"model.safetensors.index.json": "{"})
+    m("st-index-list", files={"model.safetensors.index.json": "{\"weight_map\": []}"})
+    m("st-index-empty", files={"model.safetensors.index.json": "{\"weight_map\": {}}"})
+    # config.json.
+    m("st-config-missing", files={"config.json": None})
+    m("st-config-list", files={"config.json": "[]"})
+    m("st-config-bad", files={"config.json": "{\"model_type\": "})
+    for k, v in [("model_type", "phi3"), ("model_type", 7), ("model_type", "qwen3_moe"),
+                 ("num_hidden_layers", 1 << 40), ("num_hidden_layers", 100000), ("num_hidden_layers", 0),
+                 ("num_hidden_layers", -1), ("num_hidden_layers", 1.5), ("hidden_size", 1 << 31),
+                 ("hidden_size", 0), ("num_attention_heads", 0), ("num_attention_heads", 3),
+                 ("num_key_value_heads", 0), ("num_key_value_heads", 5), ("vocab_size", 1 << 30),
+                 ("vocab_size", 10), ("vocab_size", -5), ("intermediate_size", 7), ("rms_norm_eps", "x"),
+                 ("rope_theta", -1), ("max_position_embeddings", 0), ("head_dim", 3), ("head_dim", 1 << 20),
+                 ("tie_word_embeddings", False), ("hidden_act", "gelu"), ("use_sliding_window", True),
+                 ("rope_scaling", {"type": "yarn", "factor": 4}), ("rope_scaling", {"rope_type": "llama3"}),
+                 ("rope_scaling", {"rope_type": "linear", "factor": 2.0}), ("rope_scaling", [1]),
+                 ("quantization_config", {"quant_method": "fp8"})]:
+        cfgm(f"st-config-{k}={str(v)[:24]}", lambda c, k=k, v=v: c.__setitem__(k, v))
+    for k in ["model_type", "num_hidden_layers", "hidden_size", "num_attention_heads", "num_key_value_heads",
+              "vocab_size", "rope_theta", "rms_norm_eps"]:
+        cfgm(f"st-config-del-{k}", lambda c, k=k: c.pop(k, None))
+    m("st-hf-quant-config", files={"hf_quant_config.json": "{}"})
+    # tokenizer files.
+    m("st-tokenizer-missing", files={"tokenizer.json": None})
+    m("st-tokenizer-bad", files={"tokenizer.json": "{"})
+    m("st-tokenizer-config-bad", files={"tokenizer_config.json": "["})
+    for name, f in [
+        ("model-none", lambda t: t.pop("model")),
+        ("vocab-list", lambda t: t["model"].__setitem__("vocab", [])),
+        ("vocab-empty", lambda t: t["model"].__setitem__("vocab", {})),
+        ("vocab-badid", lambda t: t["model"]["vocab"].__setitem__("!", "x")),
+        ("vocab-hugeid", lambda t: t["model"]["vocab"].__setitem__("!", 1 << 40)),
+        ("vocab-dupid", lambda t: t["model"]["vocab"].__setitem__("zz!zz", 5)),
+        ("merges-garbage", lambda t: t["model"].__setitem__("merges", [1, None, ["a"]])),
+        ("merges-unknown", lambda t: t["model"].__setitem__("merges", ["\u4e00\u4e01 \u4e02"] * 3)),
+        ("added-noid", lambda t: t["added_tokens"][0].pop("id")),
+        ("added-hugeid", lambda t: t["added_tokens"][0].__setitem__("id", 1 << 33)),
+        ("pre-none", lambda t: t.pop("pre_tokenizer")),
+        ("pre-regex", lambda t: t["pre_tokenizer"]["pretokenizers"][0]["pattern"].__setitem__("Regex", "(")),
+        ("decoder-metaspace", lambda t: t.__setitem__("decoder", {"type": "Metaspace"})),
+        ("byte-fallback", lambda t: t["model"].__setitem__("byte_fallback", True)),
+        ("normalizer-nfkc", lambda t: t.__setitem__("normalizer", {"type": "NFKC"})),
+        ("post-roberta", lambda t: t.__setitem__("post_processor", {"type": "RobertaProcessing"})),
+    ]:
+        tokm(f"st-tok-{name}", f)
+    # Single bytes of the shard's JSON header, at sampled positions.
+    j = b.hjson(H)
+    rng = random.Random(1)
+    end = len(j.rstrip(b" "))
+    for i in sorted(rng.sample(range(end), min(48, end))):
+        for x in [b"9", b"\"", b"}", b"-"]:
+            jj = j[:i] + x + j[i + 1:]
+            m(f"st-byte-{i}-{x!r}", shards={"model.safetensors": lambda p, jj=jj: b.shard(
+                p, raw=struct.pack("<Q", len(jj)) + jj + b"\0" * 64)})
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("axon")
@@ -557,10 +801,13 @@ def main():
     ap.add_argument("--mem-mb", type=int, default=4096)
     ap.add_argument("--timeout", type=float, default=10)
     ap.add_argument("--list", action="store_true")
+    ap.add_argument("--safetensors", action="store_true", help="the model is a checkpoint directory")
     a = ap.parse_args()
     os.makedirs(a.work, exist_ok=True)
-    base = Base(a.model, a.work)
-    ms = mutants(base)
+    if a.safetensors:
+        ms = st_mutants(StBase(a.model, a.work))
+    else:
+        ms = mutants(Base(a.model, a.work))
     if a.only:
         ms = [m for m in ms if a.only in m[0]]
     if a.list:
@@ -575,7 +822,7 @@ def main():
     def go(i_m):
         i, (name, w) = i_m
         safe = "".join(c if c.isalnum() or c in "._-=@+" else "_" for c in name)
-        p = os.path.join(a.work, f"m{i:04d}-{safe}.gguf")
+        p = os.path.join(a.work, f"m{i:04d}-{safe}" + ("" if a.safetensors else ".gguf"))
         try:
             w(p)
         except Exception as e:  # a harness bug, not an axon finding
@@ -588,7 +835,11 @@ def main():
             st, msg = run1(cmd, a.mem_mb, a.timeout, env)
             res.append((label, st, msg))
         if not a.keep:
-            os.unlink(p)
+            if os.path.isdir(p):
+                import shutil
+                shutil.rmtree(p)
+            else:
+                os.unlink(p)
         with lock:
             for label, st, msg in res:
                 counts[st] = counts.get(st, 0) + 1

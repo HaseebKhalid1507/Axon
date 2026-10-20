@@ -1,7 +1,7 @@
 # Engineering log
 
 One file per PR and per NO-GO experiment, written by whoever did the work. The long-form history up to
-2026-10-16 is in [../history.md](../history.md) (its last two phases summarize the merges to 2026-10-18); rejected experiments up to then are in
+2026-10-16 is in [../history.md](../history.md) (its last three phases summarize the merges to 2026-10-19); rejected experiments up to then are in
 [../experiments-rejected.md](../experiments-rejected.md). From now on, new entries go here, so parallel PRs
 never edit the same file.
 
@@ -13,6 +13,16 @@ never edit the same file.
 - **NO-GO experiments get an entry too**, in a docs-only PR or bundled with the next PR from the same
   track. A rejected idea with numbers is worth more than a merged one without them.
 - Entries don't replace the PR body. They are the durable, greppable version of it.
+- **Measurements and landings without a code PR get an entry too**, in the docs PR that publishes them: a
+  scoreboard (`2026-10-18-scoreboard-7f42c02.md`), a serving board (`2026-10-19-h100-showdown.md`), a merge train
+  (`2026-10-19-merge-train.md`), a docs refresh (`2026-10-19-docs-refresh.md`).
+
+## Where to start
+
+The newest standing is [../results.md](../results.md); the newest board is the H100 serving showdown
+([2026-10-19-h100-showdown.md](2026-10-19-h100-showdown.md)); what landed and when is
+[../history.md](../history.md) (Phase 19 for 10-18/19). Outside reviews of the project, which feed the roadmap's
+order, are in [../reviews/](../reviews/README.md).
 
 ## Template
 

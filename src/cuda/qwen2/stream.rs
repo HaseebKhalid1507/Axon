@@ -188,7 +188,7 @@ fn pin_read_only<'g>(_g: &'g Gpu, _a: &[u8]) -> Result<Pinned<'g>, String> {
 
 impl<'g> CudaQwen2<'g> {
     /// What `streamer` allocates for these layers with a `ring`-byte ring.
-    pub fn stream_bytes(&self, src: &[HostLayer], ring: usize) -> usize {
+    pub(crate) fn stream_bytes(&self, src: &[HostLayer], ring: usize) -> usize {
         let vecs: usize = src
             .iter()
             .map(|l| {
@@ -209,7 +209,7 @@ impl<'g> CudaQwen2<'g> {
     /// holds two of the biggest layer: layer i + 1 copies in while layer i
     /// computes. The smallest holds one layer and its biggest matrix (the
     /// next layer's first matrices then wait for this one's compute).
-    pub fn ring_bounds(src: &[HostLayer]) -> (usize, usize) {
+    pub(crate) fn ring_bounds(src: &[HostLayer]) -> (usize, usize) {
         let gguf = |m: &HostMat| (m.rows * quant::row_bytes(m.qt, m.cols)).next_multiple_of(256);
         let layer = |l: &HostLayer| l.mats.iter().map(gguf).sum::<usize>();
         let min = src
@@ -330,6 +330,8 @@ impl<'g> CudaQwen2<'g> {
                 post_attn: None,
                 post_ffn: None,
                 win: 0,
+                // A MoE never streams (dense layers only).
+                oss: None,
             });
         }
         let stage = Self::stage_for(src);

@@ -1,7 +1,8 @@
 # Axon
 
 LLM inference for Qwen2, Qwen3, Llama 3 and Gemma 3 GGUF models on the CPU and on NVIDIA
-GPUs, plus Qwen3 MoE (Qwen3-30B-A3B's architecture) and gpt-oss-20b (CPU only for now), written
+GPUs, plus Qwen3 MoE (Qwen3-30B-A3B's architecture), gpt-oss-20b and DeepSeek V2/V3 / Kimi K2's architecture
+(attention on the GPU, experts on the CPU), and Hugging Face safetensors checkpoints (CPU), written
 from scratch in Rust.
 
 **Mission: make LLM inference cheap and fast, and run the best open models.** Cheap means wasting no
@@ -15,7 +16,7 @@ No ggml, no BLAS, no binding crates, no CUDA toolkit at build time: a GGUF reade
 quantized integer dot-product kernels (scalar, AVX2, AVX-VNNI), a spinning worker
 pool and a transformer forward pass on the CPU; on the GPU, CUDA C++ kernels that
 NVRTC compiles at run time, launched through the driver API (both libraries loaded
-with dlopen). About 76k lines of Rust and 7k of CUDA, tests included.
+with dlopen). About 90k lines of Rust and 8k of CUDA, tests included (677 `#[test]`s in `src/`).
 
 Every optimized path is **bit-identical** to the plain reference path on its
 device: batched prefill produces exactly the logits that feeding one token at a
@@ -25,6 +26,57 @@ close to the CPU but not bit-identical to it (its float sums are split and order
 differently; `src/cuda/qwen2.rs`). The tests check this, and check against three
 independent oracles (gguf-py's dequantizer, Hugging Face's tokenizer, Ollama's
 greedy output).
+
+## Where it stands
+
+**Equal to the fastest int4 engines at one stream; the lowest ITL p99 on the mixed long-prompt workload at
+C = 128 (that cell only; worst on the short-prompt workload from C = 8 up); reproducible bits; 1.8–3.8× behind
+on throughput at C = 128 today.**
+
+Every clause is scoped to one board: Qwen2.5-7B-Instruct on one RunPod H100 SXM, main `c15c90e`, 2026-10-19, Axon
+`serve` (Q4_K_M) against vLLM 0.32.0 and SGLang 0.5.22 with AWQ int4 and with FP8, closed loop, greedy, 2 rounds,
+medians. *mix*: chat plus 2k–7.6k-token prompts; *classic*: 519-token prompts, 512 out. The weights differ per
+engine (Axon has no FP8 path), so this compares engines as deployed, not kernels on equal bits. No other GPU,
+model or workload is covered by these numbers.
+
+| aggregate tok/s | C=1 | C=8 | C=32 | C=128 |
+|---|---:|---:|---:|---:|
+| mix: Axon | **287** | 795 | 1,324 | 1,868 |
+| mix: best other (engine) | 284 (SGLang-AWQ) | 1,212 (SGLang-AWQ) | 3,448 (SGLang-FP8) | 7,146 (vLLM-FP8) |
+| mix: vLLM-AWQ (like-for-like 4-bit) | 235 | 1,096 | 3,012 | 5,748 |
+| classic: Axon | **304** | 1,278 | 2,466 | 4,485 |
+| classic: best other | 296 (SGLang-AWQ) | 2,015 (SGLang-AWQ) | 6,149 (SGLang-FP8) | 14,380 (SGLang-FP8) |
+| classic: vLLM-AWQ | 240 | 1,786 | 5,682 | 12,190 |
+
+| ITL p99, ms (rank of 5, 1 = lowest) | C=1 | C=8 | C=32 | C=64 | C=128 |
+|---|---:|---:|---:|---:|---:|
+| mix: Axon | 3.6 (1) | 58.2 (**5**) | 68.9 (2) | 74.0 (2) | **77.5 (1)** |
+| mix: the other four | 3.7–4.5 | 7.6–10.7 | 24.3–179.2 | 65.8–191.0 | 126.1–319.8 |
+| classic: Axon | 3.2 (1) | 6.3 (**5**) | 51.7 (**5**) | 53.6 (**5**) | 62.0 (**5**) |
+| classic: the other four | 3.6–4.5 | 4.1–4.9 | 5.2–6.9 | 8.7–9.9 | 20.2–39.7 |
+
+- **Ahead:** one stream (C = 1) on both workloads: throughput (the lead over SGLang-AWQ, +1 % / +3 %, is inside one
+  pod's uncertainty) and ITL p99; ITL p99 on *mix* at C = 128, where Axon's steps are slow (TPOT p50 57.9 ms) but
+  even, while the others spike; cold start, 1.0 s with the shipped kernel cache vs 42–71 s.
+- **Behind:** aggregate throughput at every C ≥ 8, by 2.0–3.8× on *mix* and 1.8–3.2× on *classic* at C = 128;
+  ITL p99 on *classic* from C = 8 up (at C = 128 62.0 vs 20.2–39.7 ms) and on *mix* at C = 8 (58.2 vs 7.6–10.7);
+  TPOT and TTFT at C ≥ 32 (*mix* C = 128: TPOT p50 57.9 vs 12.7–26.4 ms, TTFT p99 14.5 vs 1.9–5.3 s); only 26 % of
+  Axon's *mix* C = 128 requests meet the SLO (67–99 % for the others).
+
+Source: `cells.jsonl` of run `h100-1019-2058` (kept on the dev machine, not in the repo; every number above was
+re-derived from it, rounds 1–2, control round excluded), tables in
+[docs/results.md](docs/results.md#serving-runpod-h100-sxm-main-c15c90e-2026-10-19), method and cost in
+[the log](docs/log/2026-10-19-h100-showdown.md).
+
+**Why not vLLM?** If you serve many concurrent users on datacenter GPUs, use vLLM or SGLang: on that H100 board they
+push 1.8–3.8× Axon's tokens at C = 128 with lower per-token latency from C = 8 up, and they have FP8, far more
+models, multi-node, LoRA and years of production use; Axon has one maintainer and no external users yet. Axon is for
+the other end: one binary with no Python and no CUDA toolkit, a one-second start (with the shipped kernel cache),
+the CPU and consumer GPUs as first-class targets, one-stream speed equal to the best int4 engines (H100; ahead of
+llama.cpp and ollama on the consumer and datacenter GPU boards, [docs/results.md](docs/results.md)), and outputs
+that don't depend on batching, prompt chunking or speculative drafting (every response says which bits it is:
+`system_fingerprint`). It is also a library ([below](#as-a-library)), so a Rust program can run a model
+in-process.
 
 ## Status
 
@@ -51,24 +103,43 @@ Works today, honestly scoped:
   ([roadmap](docs/roadmap.md#mixture-of-experts)). `deepseek2` (DeepSeek V2/V3/V3.1, Kimi K2,
   Moonlight: MLA attention in the absorbed form with a K-only 576-wide cache, sigmoid routing
   with `exp_probs_b` and shared experts, YaRN's DeepSeek attention scale; the `kimi-k2` and
-  `deepseek-v3` tokenizers and the Kimi and DeepSeek V3 chat formats) runs on the CPU only
-  (`--device cpu`), decode == batched prefill == verify bit for bit; checked on
-  Moonlight-16B-A3B ([log](docs/log/2026-10-18-deepseek2-s0.md)). Legacy non-MLA deepseek2
+  `deepseek-v3` tokenizers and the Kimi and DeepSeek V3 chat formats) runs on the CPU
+  (`--device cpu`, [log](docs/log/2026-10-18-deepseek2-s0.md)) or, with `--device cuda`, as
+  qwen3moe does: MLA attention (its own kernels, a 576-wide f16 latent cache), router, shared
+  experts and the dense lead layer on the GPU, the routed experts on the CPU (stage 1,
+  [log](docs/log/2026-10-18-deepseek2-s1.md); f16 KV only for now). Both: decode == batched
+  prefill == verify bit for bit; checked on Moonlight-16B-A3B. Legacy non-MLA deepseek2
   GGUFs (an unsplit `attn_kv_b`, e.g. the published DeepSeek-V2-Lite files) are refused with a
   re-convert message.
   `gpt-oss` (gpt-oss-20b, ggml-org's MXFP4
-  GGUF) runs on the CPU only for now (stage 0, [log](docs/log/2026-10-18-gpt-oss-s0.md)): MXFP4
+  GGUF) runs on the CPU (stage 0, [log](docs/log/2026-10-18-gpt-oss-s0.md)) or, with
+  `--device cuda`, with its attention, norms, router and head on the GPU and its MXFP4 experts on
+  the CPU (stage 1, [log](docs/log/2026-10-18-gpt-oss-s1.md): f16 KV only): MXFP4
   experts read in place, attention sinks, the 128-token sliding window on alternate layers,
   YaRN, the o200k tokenizer and the harmony chat format (`axon chat` shows the `final`
   channel; `axon serve` returns the `analysis` channel as `reasoning_content`; no tools
-  yet); `--device cuda` is refused until stage 1. Other architectures, other
+  yet). Other architectures, other
   mixture-of-experts models and RoPE scaling (a factor other than 1; Gemma 3's linear
   scaling and YaRN, below, excepted) are refused with an error.
 - Tensor types: F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K and
   IQ4_NL on the CPU, so every Q2_K and Q3_K_S/M/L GGUF runs (IQ4_NL is llama.cpp's fallback
   for their rows that aren't a multiple of 256, e.g. the 0.5B's 896), and MXFP4 for
-  gpt-oss's experts (CPU only). On the GPU every weight matrix must be one of the eleven
+  gpt-oss's experts (CPU only: the GPU gets gpt-oss's other tensors). On the GPU every weight matrix must be one of the eleven
   quantized types (F16/F32 matrices are refused there). Others load for `info` but can't run.
+- Model files: GGUF, or a Hugging Face checkpoint directory (`config.json`, `tokenizer.json`,
+  `tokenizer_config.json`, and `model.safetensors` or the shards of `model.safetensors.index.json`)
+  of a `qwen2`, `qwen3` or `llama` model with BF16, F16 or F32 weights, wherever a `.gguf` path is
+  taken (`axon info <dir>` lists each tensor's Hugging Face name, GGUF name and type). A BF16 or F16
+  checkpoint loads as the F16 GGUF `convert_hf_to_gguf.py --outtype f16` makes of the same weights:
+  BF16 matrices converted to F16 and vectors to F32 at load (numpy's rounding, checked for all 65536
+  values), the same metadata and tokenizer, and the same logits and greedy output bit for bit
+  (checked on Qwen2.5-0.5B-Instruct and Llama-3.2-1B-Instruct,
+  [log](docs/log/2026-10-19-safetensors-loader.md)). F32 matrices stay F32 (lossless, where
+  `--outtype f16` would round them). CPU only for now
+  (the GPU has no F16 matrix kernels); FP8 / NVFP4 checkpoints, MoE and the other architectures
+  are refused with a message, to come with the FP8 stages (roadmap). The pre-tokenizer must be one
+  Axon knows (Qwen2's or Llama 3's regex: recognized, never executed); SentencePiece-style
+  `tokenizer.json` files are refused (use the GGUF). Like llama.cpp, the NFC normalizer isn't applied.
 - Sampling: greedy, or temperature / top-k / top-p / min-p / repeat penalty with a seed
   (llama.cpp's order, ollama's defaults). `gen` continues raw text, greedy unless `--temp`
   is above 0 (reproducible output and benchmarks); `chat` talks to an Instruct model
@@ -123,15 +194,16 @@ Works today, honestly scoped:
   all of its tokens, so drafting pays far more there (`docs/design/spec-split.md`).
 - Serving: `axon serve`, an OpenAI-compatible HTTP server (below) with tool calling. On one GPU it
   batches the decode steps of concurrent requests (`--parallel N`) and feeds new prompts in chunks
-  between them, every slot one KV cache (no extra cache for a request running alone); elsewhere it
+  between them, over a paged KV cache (64-position pages shared by every slot: a slot holds only the
+  positions it has; no extra cache for a request running alone); elsewhere it
   runs one request at a time. Besides chat completions it speaks OpenAI's Responses API (what codex
   uses) and ollama's native API ([docs/serve-apis.md](docs/serve-apis.md)). Operations: `--api-key`,
   `GET /metrics` (Prometheus), `GET /slots`, `--max-prompt-tokens`, `--slot-idle-ms`.
 - Rust 1.89 or newer.
 
-Not on main yet: tensor parallel, paged KV in `serve` (the kernels read through a page table; the pool
-doesn't use it yet), saving and restoring `serve` slots, streaming MoE experts through the GPU for long
-prompts (stage 3), and gpt-oss on the GPU. What's in flight and why: [docs/roadmap.md](docs/roadmap.md). How Axon is built and measured, and
+Not on main yet: tensor parallel, FP8 weights, saving and restoring `serve` slots, streaming MoE experts through the
+GPU for long prompts (stage 3) or keeping them there, batched speculative decoding in `serve` (the first attempt, #90,
+was closed by its kill rule), and fast batched decode on Hopper (see Numbers: serving on an H100). What's in flight and why: [docs/roadmap.md](docs/roadmap.md). How Axon is built and measured, and
 what was tried and dropped: [docs/methodology.md](docs/methodology.md),
 [docs/history.md](docs/history.md), [docs/experiments-rejected.md](docs/experiments-rejected.md).
 
@@ -156,11 +228,36 @@ curl -L -o models/qwen2.5-0.5b-q4_k_m.gguf \
 `gen` streams the text to stdout and prints prompt/decode speed to stderr.
 `chat` is a conversation: type a message, get a reply, keep going.
 
+## As a library
+
+`cargo build` builds the `axon` library and the `axon` command line on top of it. The library's API is small:
+`axon::load` a GGUF, `Backend::new` to place it on the CPU or a GPU, the model's own `Tokenizer`, the `Lm` trait
+(caches, prefill, decode steps), `axon::generate` (the greedy loop behind `axon gen`, streaming each token to a
+callback; sampling stays the CLI's in 0.1) and `axon::serve` (`axon serve`, in-process).
+[examples/embed.rs](examples/embed.rs) loads a model and decodes N tokens greedily, the same tokens `axon gen` prints.
+The API takes device, KV type and GPU layers as arguments and never reads `AXON_DEVICE` / `AXON_KV` /
+`AXON_GPU_LAYERS`; the example reads them as `axon gen` does (`scripts/embed_check.sh` checks the two agree):
+
+```bash
+cargo run --release --example embed -- models/qwen2.5-0.5b-q4_k_m.gguf "The capital of France is" 32
+```
+
+The API is 0.x and will change, and it isn't hardened for embedders yet
+([#118](https://github.com/HaseebKhalid1507/Axon/issues/118)): library calls print notes to stderr; engine
+tuning variables are read inside library calls, some once at first use (`AXON_SIMD`, `AXON_THREADS`, the decode
+config) and others again at every `load` / `Backend::new` (`AXON_MMAP`, `AXON_REPACK`, `AXON_Q6K8`,
+`AXON_GATE_UP`, `AXON_CUDA_GRAPHS`, `AXON_PP_CUTS`), so changing the environment between loads changes behaviour;
+`AXON_GPUS` is the only way to pick the GPU(s) in 0.1 (read at each `Backend::new`); a CUDA `Backend::new` leaks a
+little; and `axon::serve` exits the process on a
+usage error (2) or an engine failure (70). The crate's package name on crates.io isn't settled (`axon` is taken);
+it isn't published.
+
 ## Usage
 
 ```
 axon <model.gguf>                         same as axon info
 axon info <model.gguf>                    print a summary and exit
+                                          (everywhere: a checkpoint directory instead, CPU)
 axon gen <model.gguf> "<prompt>" [-n N] [--draft K] [--draft-model PATH] [--device D]
           [--ctx N] [--gpu-layers N] [--gpus L] [--kv T]
                                           generation (default 32 tokens; greedy unless --temp)
@@ -283,7 +380,7 @@ flags of `chat`, plus `--host` (default 127.0.0.1), `--port` (default 8080), `--
 default: up to the context), `--cors [ORIGIN]` (answer CORS preflights and allow ORIGIN,
 default `*`, to call the server from web pages; off by default, so an arbitrary page can't
 use your local model), `--max-conns N` / `--max-queue N` (defaults 256 / 128),
-`--parallel N` (requests decoded at once on the GPU, default 8; 1: one at a time),
+`--parallel N` (requests decoded at once on the GPU, default 16 with paged KV, 8 without; 1: one at a time),
 `--prefill-ms MS` / `--prefill-chunk N` (how much prompt a batched step feeds while others
 decode: up to what fits in MS ms beside their decode step, at least N tokens; defaults 60 /
 256; `--prefill-ms 0`: exactly N tokens; `--prefill-chunk 0`: whole prompts), `--quiet`
@@ -313,24 +410,39 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
   to whole prefill passes; 4096 tokens until the server has measured a chunk's cost); a
   prompt that 4 shorter, younger ones have finished ahead of goes first. A long prompt sent
   to an idle server alone takes the single-stream path below and is fed whole: a request
-  arriving during that prefill waits for it. Each slot is a KV cache as long as the context, and a
-  pool of N slots costs N caches (7B at 32768: 1.75 GiB each): the request running alone
-  runs in a slot's memory (its own scratch beside it, no cache of its own), picked as a
-  batched request's is: the slot holding the longest prefix of its prompt if that prefix is
-  at least half the slot's tokens or more than half the prompt's, else the one idle the
-  longest (a shared <bos> or system prompt doesn't evict a conversation).
-  Without `--ctx` or `--parallel` the context comes first: as many slots
-  (2 to 8) as fit with the whole context; if not even 2 do, 2 or more with the longest
-  context they fit with, down to 32768 (or the whole context, if shorter); below that, one
-  request at a time with the whole context, and stderr says at which context 2 would fit
-  (and how many `--kv q8` fits). Measured: Qwen2.5-7B Q4_K_M on a 12 GB laptop GPU serves 2
-  at once with 32768 (`--kv q8`: 5 at 32768), on a 24 GB RTX 4090 8 at once with 32768. `--parallel N` alone: N slots of the longest
-  context that fits them (down to 1024 positions). `--ctx N`: never shortened; the slots
-  that fit with it (up to `--parallel`), else one at a time. The server says on stderr what
-  it chose and why; the context it serves is a slot's (`/v1/models` `meta.n_ctx`; longer
-  prompts get a 400 `context_length_exceeded`). The Q6_K prefill copy (int8 Q6_K matrices
-  for prefill's tensor cores, same results; 1.02 GiB on 7B Q4_K_M) is made after the
-  caches and slots, only from the memory they leave (`AXON_Q6K8=0` never makes it).
+  arriving during that prefill waits for it. The KV cache is paged: a pool of 64-position
+  pages shared by every slot, a slot holding pages only for the positions it has, so the
+  context is a slot's cap, not memory reserved for it (`AXON_PAGED_KV=0`: the old pool of
+  slots reserved at the full context each). The pool is the GPU memory left beside the
+  weights and scratch (at most a page per position of every slot), up to 16 requests at once
+  by default (`--parallel N`: N); the context is the model's (or `--ctx N`), at most what the
+  pages hold. Placed automatically, the whole model stays on the GPU if it fits beside an
+  8192-token cache, whatever `--ctx` says (the pool takes what is left). A request starts
+  when a slot is free and the pages for its prompt are (with a page per running request to
+  grow into); else it waits in the queue. Idle slots keep their prefixes (a later request
+  sharing one reuses its rows) until their pages are needed, least recently used first.
+  When decode runs out of pages, the youngest prompt still being prefilled gives its pages
+  back, then the youngest running request is preempted (fed again later, the same output);
+  the oldest never is. The banner says the pool's shape (`KV: P pages x 64 = T tokens over
+  up to S slots (cap C)`), `GET /slots` each slot's `pages_used` and the pool's
+  `pages_free` / `pages_total`. Measured on a 12 GB laptop GPU at the default 32768: Qwen2.5-7B
+  Q4_K_M gets 1537 pages (98k tokens: 6 agents at 15k each; `--kv q8`: 2983 pages, 12), where
+  the reserved pool held 3 slots; Qwen2.5-14B Q4_K_M with `--kv q8 --ctx 32768` stays on the
+  GPU with ~15k tokens of pages instead of splitting. The request running alone runs in a slot's pages (its own
+  scratch beside it, no cache of its own), picked as a batched request's is: the slot
+  holding the longest prefix of its prompt if that prefix is at least half the slot's
+  tokens or more than half the prompt's, else the one idle the longest (a shared <bos> or
+  system prompt doesn't evict a conversation). With `AXON_PAGED_KV=0`, without `--ctx` or
+  `--parallel` the context comes first: as many slots (2 to 8) as fit with the whole
+  context; if not even 2 do, 2 or more with the longest context they fit with, down to
+  32768 (or the whole context, if shorter); below that, one request at a time with the
+  whole context. `--parallel N` alone: N slots of the longest context that fits them (down
+  to 1024 positions). `--ctx N`: never shortened; the slots that fit with it (up to
+  `--parallel`), else one at a time. The server says on stderr what it chose and why; the
+  context it serves is a slot's (`/v1/models` `meta.n_ctx`; longer prompts get a 400
+  `context_length_exceeded`). The Q6_K prefill copy (int8 Q6_K matrices for prefill's tensor
+  cores, same results; 1.02 GiB on 7B Q4_K_M) is made after the caches and slots, only from
+  the memory they leave (`AXON_Q6K8=0` never makes it).
   A request running alone takes the single-stream path (CUDA graphs, `--draft`), and
   moves into the batch when a second one arrives (its rows are already in its slot: nothing
   is copied). Every request's output is exactly what it
@@ -392,10 +504,14 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
   `axon_generated_tokens_total`, `axon_prompt_tokens_total`,
   `axon_prompt_cached_tokens_total` (prefix reuse), `axon_requests_in_flight`,
   `axon_queue_depth` (in flight, not in a slot), `axon_slots_busy` / `axon_slots_free`,
-  `axon_slot_idle_evictions_total`, `axon_prompt_refused_total`, and the histograms
+  `axon_slot_idle_evictions_total`, `axon_prompt_refused_total`,
+  `axon_tool_calls_dropped_total` (gpt-oss calls begun but not finished as a JSON object), and the histograms
   `axon_ttft_seconds` (from the request's body read, so tokenizing and queueing count, to
   its first text) and `axon_itl_seconds` (between a request's
   text events, about one token each). No host-RAM KV store hits yet: serve has no store.
+  A request is counted in `axon_requests_total` before its first byte is sent, and out of
+  `axon_requests_in_flight` and its slot before its last byte: a client that has the whole
+  response, then reads /metrics, never sees its own request still running.
 - `GET /slots`: JSON, `{"ctx", "slots": [{"id", "busy", "held_tokens", "request_id",
   "age_ms"}], "queue_depth"}`. `held_tokens`: the prefix whose KV rows the slot holds (what
   a later prompt can reuse); `request_id` is the `#n` of the stderr log. A request running
@@ -434,8 +550,17 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
   `<tool_call>{"name": ..., "arguments": ...}</tool_call>`, and see results as
   `<tool_response>` blocks. Llama 3.1/3.2 get the tools in the first user message, call with
   a JSON reply (`{"name": ..., "parameters": ...}`) and see results as `ipython` turns (one
-  call per message, as the template requires). Other chat formats answer a tool request
-  with a 400. A request without tools or tool turns is rendered exactly as before.
+  call per message, as the template requires). gpt-oss (harmony) gets the tools as
+  TypeScript in the developer message (`# Tools` / `namespace functions { ... }`), calls on
+  the commentary channel (`<|channel|>commentary to=functions.NAME <|constrain|>json
+  <|message|>{args}`), and sees results as `functions.NAME` messages; its analysis channel
+  stays `reasoning_content`. Its calls are read from the special tokens only: text the
+  model writes (say, quoting the call syntax) is never a call. A call is made as soon as
+  its arguments are a whole JSON object, and that ends the reply (one call per reply; the
+  model's `<|call|>` isn't waited for). Past calls are rendered in the template's history
+  form (`<|start|>assistant to=functions.NAME<|channel|>commentary json<|message|>{args}<|call|>`).
+  Other chat formats answer a tool request with a 400. A request without tools or tool
+  turns is rendered exactly as before.
 - The reply's calls come back as OpenAI `tool_calls`, with `finish_reason: "tool_calls"`.
   Streamed: a call is sent as soon as its block closes, as two `delta.tool_calls` chunks: the
   first carries `index`, `id`, `type` and `function.name`, the second `function.arguments`.
@@ -447,7 +572,10 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
   cut off mid-call) is not a call: it is returned as `content`, tags and all. So
   `arguments` is always valid JSON. A string `arguments` value is used as the arguments if
   it is itself JSON, else returned as its JSON string literal. Qwen3's reasoning still
-  comes as `reasoning_content`.
+  comes as `reasoning_content`. gpt-oss is stricter: arguments must be a JSON object, and a
+  call that ends without one (a header, its `<|call|>`, the token limit) is not a call. Its
+  text comes back as `reasoning_content` (it was on the commentary channel), never as
+  `content`, and is counted in `axon_tool_calls_dropped_total`.
 - The parser reads tags, not prose or JSON. `<tool_call>` written in ordinary text opens a
   block (which comes back as content if it isn't a call), and a `</tool_call>` inside a
   JSON string value ends the block early (the call then fails to parse and is returned
@@ -459,8 +587,12 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
 - `tool_choice`: `auto` (default); `none` (the tools are not shown to the model, and its
   reply is plain content); `required` or `{"type": "function", "function": {"name": ...}}`.
   The last two start the reply with the opening of a call (the named one: through its
-  `"arguments": `), so the model must call. Qwen3 then skips its reasoning. Without
-  `tools` they are a 400.
+  `"arguments": `), so the model must call. Qwen3 and gpt-oss then skip their reasoning.
+  gpt-oss: a named choice opens `<|channel|>commentary to=functions.NAME <|constrain|>json
+  <|message|>` (the form the model writes calls in) and keeps every tool in the prompt.
+  `required` with one tool is that tool's named choice; with several it is a 400, since a
+  prefill can't force one of them (constrained decoding: #116).
+  Without `tools` they are a 400.
   `parallel_tool_calls`, `strict`, `store`, `reasoning_effort` and `prompt_cache_key` are
   accepted and ignored.
 - Context: an agent's system prompt and tool schemas can be 15-25k tokens; the default
@@ -542,8 +674,12 @@ OLLAMA_HOST=http://127.0.0.1:8080 ollama run qwen3-8b
 | `AXON_CUDA_GRAPHS=0` | cuda: launch each token's kernels one by one instead of replaying a captured CUDA graph (same results, slower) |
 | `AXON_MOE_PROFILE=1` | cuda, mixture-of-experts model: every 64 decode steps, print per layer the GPU segment (attention + router; synced for the profile, so a little slower), the copy down, the CPU experts and the copy up |
 | `AXON_CUDA_PDL=0` | cuda: no programmatic dependent launch (used only on sm_90+ with a CUDA 12.3+ driver) |
+| `AXON_ATT_MQ=0` | cuda, tensor cores: a one-sequence batched pass of few queries (a prompt chunk, a draft verify) runs attention per query (`attn_blk_b`, ≤ 16 queries at head size 128, ≤ 48 at 64) and above that the flash kernel, instead of `attn_blk_mq` (16 queries per K/V tile read). Same output bits |
+| `AXON_ATT_MQ_MAX=N` | cuda, tensor cores: most queries of a one-sequence pass that `attn_blk_mq` takes before the flash kernel (default 32). Parsed as an integer; anything else, the default. Small values send passes of more than N queries to the flash kernel (0: all of them). Large values turn the flash kernel off for one-sequence passes of up to N tokens (and prompts are cut into the plain passes): slower past the crossover, same bits |
+| `AXON_WAVE_SPLIT=0` | cuda, `gen`/`logits`: split a prompt of several batched passes into equal passes (the old split) instead of sizing them to fill this GPU's GEMM waves (e.g. pp2100 on an RTX 4090: 1088 + 1012, not 1050 + 1050, +3 % prompt eval on 7B/8B; same bits). `AXON_PASS_TRACE=1` prints the pass sizes |
 | `AXON_GATE_UP=0` | cuda: run the FFN's gate and up products (both Q4_K) as two GEMMs instead of one fused launch in batched passes (same bits) |
 | `AXON_HOPPER=0` | cuda, H100/H200 (compute capability 9.0): compile the kernels for plain sm_90 instead of sm_90a, which turns the wgmma/TMA kernels off (same bits) |
+| `AXON_GEMM_TILE=64` | cuda, sm_80+: keep every batched Q4_K / Q5_K product (and the fused gate+up) on the 64 × 64 `gemm2s` tile. Default (unset or any other value): the 128 × 64 `gemm2t` tile where its waves cost less (`tile_t`: the big products at > 64 tokens; not batches of ≤ 64 tokens, nor, e.g., a 512-row k / v on a 128-SM GPU). Same bits either way |
 | `AXON_GEMMH=0\|1` | cuda, sm_90a: `0` keeps every batched Q4_K product on the mma.sync GEMMs; `1` sends every one of them to the wgmma kernel. Default: the fused gate+up and the large Q4_K products (>= 3584 rows, at least one full wave of blocks) use wgmma (same bits either way) |
 | `AXON_Q6K8=0\|1` | cuda: `0` never makes the int8 copy of Q6_K matrices that speeds up prefill (sm_80+); `1` makes it whenever it fits beside the cache. Default: only if 768 MiB stay free beside it and the cache, and never on a split (same bits either way) |
 | `AXON_SKIP_MODEL_TESTS=1` | tests: skip the ones that need the real model |
@@ -575,6 +711,31 @@ over the 10-15 board, but the driver and host changed too, so that gain is not a
 pp560 gaps are wider (up to 5.3x vs llama.cpp, 12x vs ollama outside the four ollama cells with a
 cold first run) but mostly measure the other engines' fixed per-request cost; quote pp2100. Caveats (split ollama passes, prebuilt llama.cpp, a 5090
 prefill drop vs the 10-15 board that is not yet attributed): [docs/benchmarks-gpu.md](docs/benchmarks-gpu.md).
+This board predates #92 and #100 (prefill: +3 % at pp2100 on a 4090, MEASURED; and a new 128 × 64 tile, +17 % at
+pp1050 on the dev laptop, MEASURED, the 4090 ESTIMATED +12–15 %), so its prefill columns are not current.
+
+**Serving on an H100 SXM** (main c15c90e, 2026-10-19, Qwen2.5-7B, closed loop, 2 rounds; run h100-1019-2058): Axon
+(Q4_K_M) against vLLM 0.32.0 and SGLang 0.5.22, each with AWQ int4 and with FP8. The weights differ per row (Axon has
+no FP8 path), so this compares engines as deployed. Aggregate tok/s on the *mix* workload (chat plus 2k–7.6k-token
+prompts):
+
+| engine | weights | C=1 | C=8 | C=32 | C=128 | TPOT p50 at C=128 | ITL p99 at C=128 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| Axon | Q4_K_M | **287** | 795 | 1,324 | 1,868 | 57.9 ms | **77.5 ms** |
+| vLLM | AWQ | 235 | 1,096 | 3,012 | 5,748 | 16.7 ms | 205 ms |
+| SGLang | AWQ | 284 | **1,212** | 2,477 | 3,770 | 26.4 ms | 320 ms |
+| vLLM | FP8 | 239 | 1,103 | 3,328 | **7,146** | **12.7 ms** | 140 ms |
+| SGLang | FP8 | 246 | 1,172 | **3,448** | 7,135 | 12.9 ms | 126 ms |
+
+Honest reading: Axon is the fastest single stream (by 1 % over SGLang-AWQ, which one pod can't settle; +20 % over
+vLLM) and has the lowest ITL p99 at C = 128 on this *mix* workload (on *classic* it has the highest from C = 8
+up: 62.0 vs 20.2–39.7 ms at C = 128), but it is **2.0–3.8× behind on throughput at C = 128** and behind from
+C = 8 up; only 26 % of its C = 128 requests meet the SLO (TTFT p99 14.5 s). On the *classic* workload (519 in, 512 out)
+it is 304 vs 240–296 at C = 1 and 4,485 vs 8,288–14,380 at C = 128. The cause is ESTIMATED to be the batched-decode
+step on sm_90 (tuned on consumer GPUs, no decode-shaped wgmma GEMM) and admission at high C; it is the top datacenter
+item on the [roadmap](docs/roadmap.md#next-proposed-order-outside-review-10-19-owner-decides). Full tables and method:
+[docs/benchmarks-gpu.md](docs/benchmarks-gpu.md#concurrency-h100-sxm-qwen25-7b-2026-10-19),
+[log](docs/log/2026-10-19-h100-showdown.md).
 
 Parabellum, the dev laptop (from BENCH.md): main @ 0851798 (`--device cuda`, whole model on the GPU) vs ollama 0.35.0
 and llama.cpp 4413a19 (CUDA build, `llama-bench -ngl 99`), same GGUF files, on an
@@ -633,8 +794,9 @@ Read in this order:
    numbered steps (norm, QKV, RoPE, KV cache, attention, output projection,
    SwiGLU FFN, residuals). Then `feed_batch`, the same math for 64 prompt
    tokens at once, reading each weight row once per batch.
-4. **`src/main.rs`, `run_lm`**: encode the prompt, prefill in batches, then
-   `generate`: `forward`, pick the next token (argmax, or `sample.rs`), repeat.
+4. **`src/cli.rs`, `run_lm`**: encode the prompt, prefill in batches, then
+   `generate` (`src/generate.rs`): `forward`, pick the next token (argmax, or `sample.rs`), repeat.
+   (`src/lib.rs` is the crate root and the public API; `src/main.rs` only calls `axon::cli::main`.)
 
 `pool.rs` (the worker pool) and `tokenizer.rs` (byte-level BPE) can be read
 any time.
@@ -667,14 +829,16 @@ The GPU, after that:
 - [docs/methodology.md](docs/methodology.md): how changes are picked, built, reviewed, gated and benchmarked
 - [docs/history.md](docs/history.md): the engineering log, round by round, with before/after numbers
 - [docs/experiments-rejected.md](docs/experiments-rejected.md): what was tried and didn't work, with numbers
-- [docs/results.md](docs/results.md): current standing vs ollama and llama.cpp, with dates and commits
+- [docs/results.md](docs/results.md): current standing vs ollama, llama.cpp, vLLM and SGLang, with dates and commits
 - [docs/testing.md](docs/testing.md): how the test suite is built, the fast and full tiers, what to run when
 - [docs/research/](docs/research/README.md): research reports behind the roadmap
+- [docs/reviews/](docs/reviews/README.md): outside reviews of the project (curated), behind the roadmap's order
 - [docs/log/](docs/log/README.md): one entry per PR (the convention for new work)
 - [docs/long-context.md](docs/long-context.md): YaRN (`--rope-scaling yarn`) past the trained
   context: when to use it, llama.cpp agreement, retrieval and short-context cost
 - [docs/design/](docs/design/): [multi-GPU](docs/design/multi-gpu.md) and
-  [Hopper](docs/design/hopper.md) designs
+  [Hopper](docs/design/hopper.md) designs, and the [determinism-modes ADR](docs/design/determinism-modes.md)
+  (`--numerics exact | fast`, proposed)
 
 ## Contributing
 

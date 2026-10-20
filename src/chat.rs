@@ -523,7 +523,8 @@ impl Framing {
 /// Where a harmony reply's tokens go, as they arrive (`Channels::push`).
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Part {
-    /// Markers and channel headers: nobody sees them.
+    /// Markers and channel headers: nobody sees them. With tools, also a
+    /// call's arguments (`Channels::call` says whose).
     Hidden,
     /// A message on the analysis (or commentary) channel.
     Reasoning,
@@ -535,6 +536,15 @@ pub enum Part {
 /// name `<|message|>`) is read as it comes, its text is `Answer` if the
 /// name is `final`, else `Reasoning`; `<|end|>` / `<|start|>` / `<|return|>`
 /// end it. A reply with no header at all is the answer.
+///
+/// With tools (`with_tools`), an assistant message addressed to a function
+/// (`to=functions.f` in its role section, `<|start|>assistant
+/// to=functions.f<|channel|>...`, or in its channel header,
+/// `<|channel|>commentary to=functions.f ...`) is a call: its text is
+/// `Hidden` and `call` gives the recipient while it lasts. Only the special
+/// tokens delimit it: text never opens or closes a call. Other recipients
+/// (a hallucinated `functions.f to=assistant` result, builtin tools) are
+/// reasoning, as without tools.
 #[derive(Clone, Debug)]
 pub struct Channels {
     start: u32,
@@ -544,6 +554,47 @@ pub struct Channels {
     /// The current header's text (inside `<|channel|>`..`<|message|>`).
     name: Option<Vec<u8>>,
     part: Part,
+    /// Calls are told apart (tools were offered).
+    tools: bool,
+    /// With tools: the role section's text (after `<|start|>`), until the
+    /// message opens.
+    role: Option<Vec<u8>>,
+    /// With tools: the open message's recipient, if it is a call.
+    to: Option<String>,
+    /// With tools: where the reply's own text starts in `role`, while no
+    /// marker has come since the prompt (`primed`): a reply with no header.
+    unheaded: Option<usize>,
+    /// With tools: `<|call|>` (not a stop then: the splitter sees it).
+    call_tok: Option<u32>,
+    /// With tools: a `<|call|>` came: the reply is over.
+    ended: bool,
+}
+
+/// The recipient in a harmony header: what follows `to=` (at the start or
+/// after whitespace), up to whitespace or a marker.
+fn recipient(head: &[u8]) -> Option<String> {
+    let at = (0..head.len()).find(|&i| {
+        head[i..].starts_with(b"to=") && (i == 0 || head[i - 1].is_ascii_whitespace())
+    })?;
+    let rest = &head[at + 3..];
+    let n = rest
+        .iter()
+        .position(|&b| b.is_ascii_whitespace() || b == b'<')
+        .unwrap_or(rest.len());
+    (n > 0).then(|| String::from_utf8_lossy(&rest[..n]).into_owned())
+}
+
+/// The recipient of a message with role section `role` and channel header
+/// `name`, if it is a call: the role is `assistant` and the recipient a
+/// function (`functions.NAME`).
+fn call_recipient(role: &[u8], name: &[u8]) -> Option<String> {
+    if !role.trim_ascii_start().starts_with(b"assistant") {
+        return None;
+    }
+    let f = |r: &String| r.len() > "functions.".len() && r.starts_with("functions.");
+    recipient(role)
+        .filter(f)
+        .or_else(|| recipient(name).filter(f))
 }
 
 impl Channels {
@@ -559,17 +610,88 @@ impl Channels {
             channel,
             name: None,
             part: Part::Answer,
+            tools: false,
+            role: None,
+            to: None,
+            unheaded: None,
+            call_tok: None,
+            ended: false,
         })
+    }
+
+    /// Tell calls apart (a request that offered tools).
+    /// `call` is the vocabulary's `<|call|>`.
+    pub fn with_tools(mut self, call: Option<u32>) -> Channels {
+        self.tools = true;
+        self.call_tok = call;
+        self
+    }
+
+    /// With tools: `<|call|>`, which the splitter must see (so it is not a
+    /// stop token of the request).
+    pub fn call_token(&self) -> Option<u32> {
+        self.call_tok
+    }
+
+    /// With tools: a `<|call|>` came, which ends the reply (whether its
+    /// call is one is the arguments' business: `TextOut::harmony`).
+    pub fn ended(&self) -> bool {
+        self.ended
+    }
+
+    /// Calls are told apart (`with_tools`).
+    pub fn tools(&self) -> bool {
+        self.tools
+    }
+
+    /// While a call's text arrives: its recipient (`functions.NAME`).
+    pub fn call(&self) -> Option<&str> {
+        self.to.as_deref()
+    }
+
+    /// The prompt's tokens are in (`push`ed): what comes next is the
+    /// reply's.
+    pub fn primed(&mut self) {
+        self.unheaded = self.role.as_ref().map(Vec::len);
+    }
+
+    /// The end of a reply that never opened a message (no `<|channel|>` or
+    /// `<|message|>` after the prompt): its text, which without tools would
+    /// have been the answer.
+    pub fn take_unheaded(&mut self) -> Option<Vec<u8>> {
+        let at = self.unheaded.take()?;
+        let r = self.role.as_ref()?;
+        (r.len() > at).then(|| r[at..].to_vec())
     }
 
     /// Token `id` (`bytes`, its text): where it goes.
     pub fn push(&mut self, id: u32, bytes: &[u8]) -> Part {
+        if self.tools
+            && (id == self.channel || id == self.message || id == self.start || id == self.end)
+        {
+            self.unheaded = None;
+        }
+        if self.tools && (id == self.channel || id == self.message) && self.to.is_some() {
+            // A header inside a call's arguments: the call is malformed
+            // (cut, not closed).
+            self.to = None;
+        }
         if id == self.channel {
             self.name = Some(Vec::new());
             self.part = Part::Hidden;
             return Part::Hidden;
         }
         if id == self.message {
+            if self.tools {
+                let role = self.role.take().unwrap_or_default();
+                let name = self.name.as_deref().unwrap_or_default();
+                if let Some(to) = call_recipient(&role, name) {
+                    self.to = Some(to);
+                    self.name = None;
+                    self.part = Part::Hidden;
+                    return Part::Hidden;
+                }
+            }
             self.part = match self.name.take() {
                 Some(n) if n.trim_ascii().starts_with(b"final") => Part::Answer,
                 Some(_) => Part::Reasoning,
@@ -577,13 +699,28 @@ impl Channels {
             };
             return Part::Hidden;
         }
+        if self.tools && Some(id) == self.call_tok {
+            self.to = None;
+            self.name = None;
+            self.ended = true;
+            self.part = Part::Hidden;
+            return Part::Hidden;
+        }
         if id == self.start || id == self.end {
             self.name = None;
             self.part = Part::Hidden;
+            if self.tools {
+                self.to = None;
+                self.role = (id == self.start).then(Vec::new);
+            }
             return Part::Hidden;
         }
         if let Some(n) = &mut self.name {
             n.extend_from_slice(bytes);
+            return Part::Hidden;
+        }
+        if let Some(r) = &mut self.role {
+            r.extend_from_slice(bytes);
             return Part::Hidden;
         }
         self.part
@@ -817,9 +954,9 @@ impl<M: KvIo> Chat<'_, M> {
         if !from_file {
             // The same rows by prefill (cache == fresh prefill).
             s.forget();
-            let pb = self.net.prefill_batch();
-            for (i, b) in self.hist[..fed].chunks(pb).enumerate() {
-                self.net.feed_batch(b, i * pb, &mut self.cache);
+            for r in self.net.prompt_chunks(fed, 0, &self.cache) {
+                self.net
+                    .feed_batch(&self.hist[r.clone()], r.start, &mut self.cache);
             }
             self.fed = fed;
         }
@@ -1163,18 +1300,22 @@ impl<'a, M: Lm> Chat<'a, M> {
         // between them); the last batch with the last token, for its logits
         // (`Lm::prefill_logits`: on the GPU in the batched pass).
         let t0 = Instant::now();
-        let pb = self.net.prefill_batch();
-        let chunks: Vec<&[u32]> = self.hist[self.fed..].chunks(pb).collect();
+        // In the backend's pieces (`Lm::prompt_chunks`: at most
+        // prefill_batch each; on the GPU its passes, sized to the GEMM waves).
+        let chunks = self
+            .net
+            .prompt_chunks(self.hist.len() - self.fed, self.fed, &self.cache);
         assert!(!chunks.is_empty(), "a turn adds tokens");
         let mut logits = Vec::new();
-        for (i, batch) in chunks.iter().enumerate() {
+        for (i, c) in chunks.iter().enumerate() {
             if cancel() {
                 self.hist.truncate(start);
                 self.undo_forget(before, dropped_fed, &mut r);
                 r.interrupted = true;
                 return Ok(r);
             }
-            let pos = self.fed + i * pb;
+            let (pos, end) = (self.fed + c.start, self.fed + c.end);
+            let batch = &self.hist[pos..end];
             if i + 1 < chunks.len() {
                 self.net.feed_batch(batch, pos, &mut self.cache);
             } else {
@@ -1675,6 +1816,76 @@ mod tests {
         }
     }
 
+    /// A turn of ~1500 tokens then a short follow-up through the real
+    /// `Chat::reply` on the GPU: the long turn is fed in several passes cut
+    /// by `Lm::prompt_chunks` (asserted: more than one, and not the old fixed
+    /// prefill_batch cut), the follow-up after prefix reuse. Each reply ==
+    /// a fresh prefill's (`fresh`: prefill_batch chunks + forward), and the
+    /// cache image (`kv_save`, positions 0..fed) and the next logits ==
+    /// per-token decode of the same history.
+    #[test]
+    fn long_turn_matches_fresh_prefill_cuda() {
+        use crate::cuda::qwen2::CudaQwen2;
+        use crate::kvsave::KvIo;
+        use crate::lm::Lm;
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let Some(m) = crate::testutil::model() else {
+            return;
+        };
+        let km = crate::cuda::Kernels::module(&g).unwrap();
+        let tok = Tokenizer::from_gguf(&m);
+        let ctx = 4096;
+        let net = CudaQwen2::new(&g, &km, &m, ctx).unwrap();
+        let mut long = String::from("Summarize these notes in one sentence.\n");
+        let mut i = 0;
+        while tok.encode(&long).len() < 1500 {
+            long.push_str(&format!(
+                "Note {i}: the {} river flows past {} hills toward the sea.\n",
+                ["green", "slow", "cold", "wide"][i % 4],
+                ["seven", "low", "dry", "pine"][i % 4]
+            ));
+            i += 1;
+        }
+        let mut chat = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), ctx).unwrap();
+        chat.max_reply = 16;
+        for (t, msg) in [long.as_str(), "And in three words?"]
+            .into_iter()
+            .enumerate()
+        {
+            let before = chat.fed;
+            let r = chat.reply(msg, &|| false, &mut |_| Ok(())).unwrap();
+            assert!(!r.interrupted && r.dropped == 0);
+            let end = chat.hist.len() - r.ids.len() - 2;
+            let prompt = &chat.hist[..end];
+            let want = fresh(chat.net, prompt, chat.max_reply, &chat.fr.stop);
+            assert_eq!(r.ids, want, "turn {t}");
+            let n = end - before;
+            let rs = chat.net.prompt_chunks(n, before, &chat.cache);
+            eprintln!("turn {t}: {n} tokens fed from {before} in {rs:?}");
+            if t == 0 {
+                assert!(rs.len() >= 2, "turn 0: one pass ({rs:?})");
+                let old = crate::lm::chunk_ranges(n, chat.net.prefill_batch());
+                assert_ne!(rs, old, "turn 0: the old prefill_batch cut");
+            }
+        }
+        // The cache: per-token decode of the whole history.
+        let fed = chat.fed;
+        let mut d = net.new_cache(ctx);
+        for (p, &t) in chat.hist[..fed].iter().enumerate() {
+            net.forward(t, p, &mut d);
+        }
+        let mut want = Vec::new();
+        net.kv_save(&d, 0, fed, &mut want).unwrap();
+        assert!(cache_image(&chat) == want, "KV after the turns");
+        let probe = chat.hist[fed - 1];
+        let a = net.forward(probe, fed, &mut d);
+        let b = net.forward(probe, fed, &mut chat.cache);
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&a), bits(&b), "next logits");
+    }
+
     /// A scratch session file path for a test (removed first).
     fn session_path(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("axon-kvsave-test-{}", std::process::id()));
@@ -2073,7 +2284,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let (cpu, rows) = (Qwen2::new(&m), Qwen2::new_with(&m, false));
+        let (cpu, rows) = (Qwen2::new_with(&m, true), Qwen2::new_with(&m, false));
         let (mut ag, mut ac) = (Agree::default(), Agree::default());
         for (max_reply, k) in [(12, 7), (64, 0)] {
             let mut chat = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();

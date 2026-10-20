@@ -59,10 +59,15 @@ pub(super) struct Moe<'a> {
     pub(super) gate: Vec<Weight<'a>>,
     pub(super) up: Vec<Weight<'a>>,
     pub(super) down: Vec<Weight<'a>>,
-    /// How router logits become selection scores and weights (`Gate`).
-    pub(super) gate_fn: Gate,
-    /// gpt-oss's router and expert biases (module doc); None on qwen3moe.
-    pub(super) oai: Option<Box<Oai>>,
+    /// How router logits become selection scores and weights.
+    pub(super) rule: Router,
+}
+
+/// A layer's router rule: a `Gate` (qwen3moe, deepseek2), or gpt-oss's
+/// (`Moe::route_oai`, with its biases).
+pub(super) enum Router {
+    Gate(Gate),
+    Oai(Box<Oai>),
 }
 
 /// gpt-oss's biases: the router's (n_expert), and per expert e its gate's
@@ -116,12 +121,6 @@ pub(crate) struct MoeDims {
 /// `leading_dense_block_count` layers dense, `deepseek2.rs`).
 pub(crate) fn is_moe(m: &Model) -> bool {
     matches!(m.arch.as_str(), "qwen3moe" | "gpt-oss" | "deepseek2")
-}
-
-/// gpt-oss: no GPU MoE path for its MXFP4 experts, sinks and biases yet;
-/// deepseek2: its GPU MLA attention is stage 1. CPU only for now.
-pub(crate) fn cpu_only(m: &Model) -> bool {
-    matches!(m.arch.as_str(), "gpt-oss" | "deepseek2")
 }
 
 pub(crate) fn moe_dims(m: &Model) -> Option<MoeDims> {
@@ -182,8 +181,6 @@ pub(crate) struct MoeInfo {
     /// The experts' share of the anonymous r8 arena (`expert_held` when
     /// every expert repacks; 0 for experts read in place).
     pub expert_arena: u64,
-    /// `cpu_only`.
-    pub cpu_only: bool,
 }
 
 impl MoeInfo {
@@ -204,7 +201,6 @@ impl MoeInfo {
             active_held: 0,
             dense_bytes: 0,
             expert_arena: 0,
-            cpu_only: cpu_only(m),
         };
         for t in &m.tensors {
             if EXPS.iter().any(|s| t.name.ends_with(s)) && t.dims.len() >= 3 && t.dims[2] > 0 {
@@ -236,11 +232,7 @@ impl MoeInfo {
                 } else {
                     self.shared.to_string()
                 },
-                if self.cpu_only {
-                    "CPU only for now (--device cpu)"
-                } else {
-                    "--device cuda: attention and routers on the GPU, experts on the CPU"
-                }
+                "--device cuda: attention and routers on the GPU, experts on the CPU"
             ),
             format!(
                 "experts {} B ({}; r8 {}) | active/token {} B ({}; r8 {}) | non-expert {} B ({})",
@@ -306,12 +298,6 @@ fn check_ram_with(m: &Model, repack: bool, dense: bool, avail: Option<u64>) -> R
 
 /// The refusal of every GPU placement but `crate::moe`'s.
 pub(crate) fn gpu_refusal(m: &Model) -> String {
-    if cpu_only(m) {
-        return format!(
-            "{}: runs on the CPU only for now (--device cpu); its GPU path is the next stage",
-            m.arch
-        );
-    }
     format!(
         "{}: a mixture-of-experts model runs on the CPU (--device cpu) or with its attention \
          on one GPU and its experts on the CPU (--device cuda); it doesn't split by layers, \
@@ -372,8 +358,16 @@ impl<'a> Moe<'a> {
             gate,
             up,
             down,
-            gate_fn,
-            oai: None,
+            rule: Router::Gate(gate_fn),
+        }
+    }
+
+    /// gpt-oss's biases, None for a `Gate` router.
+    #[inline]
+    fn oai(&self) -> Option<&Oai> {
+        match &self.rule {
+            Router::Oai(o) => Some(o),
+            Router::Gate(_) => None,
         }
     }
 
@@ -415,7 +409,6 @@ impl<'a> Moe<'a> {
     /// `W_SUM_MIN`) if the gate says so, then times its scale.
     pub(super) fn route(&self, h: &[f32], ids: &mut [usize], w: &mut [f32]) {
         let n = self.n_expert;
-        let g = &self.gate_fn;
         let mut p = vec![0f32; n];
         // logit_e = sum over c ascending of W[e][c] * h[c], multiply then
         // add (elementwise across e: the vector code gives the same bits).
@@ -425,9 +418,10 @@ impl<'a> Moe<'a> {
                 *l += wv * x;
             }
         }
-        if let Some(o) = &self.oai {
-            return Self::route_oai(&mut p, &o.router, ids, w);
-        }
+        let g = match &self.rule {
+            Router::Oai(o) => return Self::route_oai(&mut p, &o.router, ids, w),
+            Router::Gate(g) => g,
+        };
         if g.sigmoid {
             // ggml_sigmoid: 1 / (1 + exp(-x)).
             for v in p.iter_mut() {
@@ -518,7 +512,7 @@ impl Moe<'_> {
     /// if gpt-oss, then the activation into `g`.
     #[inline]
     fn act(&self, net: &Qwen2, e: usize, r0: usize, g: &mut [f32], u: &mut [f32]) {
-        if let Some(o) = &self.oai {
+        if let Some(o) = self.oai() {
             let at = e * self.ffn + r0;
             super::add_assign(g, &o.gate[at..at + g.len()]);
             super::add_assign(u, &o.up[at..at + u.len()]);
@@ -531,7 +525,7 @@ impl Moe<'_> {
     /// Expert e's down bias on its rows r0..r0 + d.len() (gpt-oss).
     #[inline]
     fn down_bias(&self, e: usize, dim: usize, r0: usize, d: &mut [f32]) {
-        if let Some(o) = &self.oai {
+        if let Some(o) = self.oai() {
             let at = e * dim + r0;
             super::add_assign(d, &o.down[at..at + d.len()]);
         }
@@ -566,7 +560,7 @@ impl<'a> Qwen2<'a> {
     }
 
     /// Layer l's router on the CPU (`Moe::route`, the twin of the GPU's
-    /// moe_logits + moe_topk) of h: its experts and weights.
+    /// moe_logits + moe_router) of h: its experts and weights.
     /// With `all`, every expert ranked (k = n_expert: the weights are then
     /// the probabilities, renormalized by their ~1 sum).
     #[cfg(test)]
@@ -596,7 +590,11 @@ impl<'a> Qwen2<'a> {
 
     /// Layer l's experts (a MoE layer).
     fn layer_moe(&self, l: usize) -> &Moe<'a> {
-        match &self.layers[l].ffn {
+        let ffn = match self.ds2 {
+            Some(_) => self.ds2_layer_ffn(l),
+            None => &self.layers[l].ffn,
+        };
+        match ffn {
             super::Ffn::Moe(m) => m,
             super::Ffn::Dense { .. } => panic!("layer {l} is not a mixture-of-experts layer"),
         }
@@ -747,7 +745,7 @@ impl<'a> Qwen2<'a> {
                 let (gs, us) = sc.split_at_mut(rows_a * slots);
                 self.rows_batch(gate, r0, &xr, n, gs);
                 self.rows_batch(up, r0, &xr, n, us);
-                if moe.oai.is_some() {
+                if moe.oai().is_some() {
                     // Per (row, token) the decode path's ops: biases, then
                     // the activation, on one token's values at a time.
                     let mut g1 = [0f32; 1];
@@ -798,7 +796,7 @@ impl<'a> Qwen2<'a> {
             let rows = rows_b.min(dim - r0);
             with_rows_scratch(rows * slots, |ds| {
                 self.rows_batch(down, r0, &xr, n, ds);
-                if moe.oai.is_some() {
+                if moe.oai().is_some() {
                     for (r, dr) in ds.chunks_mut(slots).enumerate() {
                         for v in &mut dr[..n] {
                             moe.down_bias(e, dim, r0 + r, std::slice::from_mut(v));

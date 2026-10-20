@@ -1,7 +1,10 @@
 # GPU benchmarks
 
-Single-stream throughput of Axon against llama.cpp and ollama on the same GGUF files. Every number on
-this page is MEASURED. tok/s, median of 3 interleaved rounds. These numbers come from a scoreboard
+Single-stream throughput of Axon against llama.cpp and ollama on the same GGUF files, and two serving
+(concurrency) sections against vLLM and SGLang: [RTX 4090](#concurrency-rtx-4090-qwen25-7b-2026-10-18) and
+[H100 SXM](#concurrency-h100-sxm-qwen25-7b-2026-10-19). Every number on
+this page is MEASURED unless labelled ESTIMATED. Single-stream boards: tok/s, median of 3 interleaved rounds; the
+concurrency sections state their own rounds. These numbers come from a scoreboard
 script that isn't in the repo. For the CPU numbers, the `scripts/bench.py` method, and the full GPU
 board on the dev laptop, see [BENCH.md](../BENCH.md).
 
@@ -292,6 +295,242 @@ sending 2 requests one after the other; ~560-token prompts, 512-token outputs, g
 vLLM runs other weights (AWQ int4, group 128) with other kernels, so it isn't a bits-equal comparison. It is the
 datacenter bar on the same card. Axon leads at C=1 and is 2.3× llama-server at C=32. It trails vLLM by 13–24 % at
 C=8–32 because its batched step still grows with the rows (ITL p50 7.2 → 11.7 ms from C=8 to C=32, vLLM 6.2 → 8.0).
+
+## Concurrency: H100 SXM, Qwen2.5-7B (2026-10-19)
+
+Closed-loop serving on one RunPod H100 80GB HBM3 SXM (secure, $3.99/h), run `h100-1019-2058`, 2026-10-19 20:58–21:36
+EDT. Axon main **c15c90e** (`serve --parallel 128 --ctx 8192`, #71's paged pool: 16,384 pages × 64 = 128 full 8192-token
+sequences, f16 KV; the sm_90a kernel cache compiled offline and shipped, so no compile on the pod) against **vLLM
+0.32.0** and **SGLang 0.5.22**, each with Qwen2.5-7B-Instruct **AWQ** int4 g128 (`awq_marlin`) and **FP8**
+(RedHatAI FP8-dynamic: W8 per-channel, A8 dynamic per-token), `--max-model-len` / `--context-length` 8192,
+`--gpu-memory-utilization` / `--mem-fraction-static` 0.80. Greedy everywhere. Method, cost, what went wrong and the
+pre-run A/B: [log/2026-10-19-h100-showdown.md](log/2026-10-19-h100-showdown.md). Runbook: axon-devstack
+`runbooks/h100-serving-showdown.md`.
+
+- **Weights differ per row.** Axon runs the Q4_K_M GGUF (it has no FP8 path); vLLM / SGLang run AWQ int4 (the
+  like-for-like 4-bit rows) and FP8 (their best on Hopper). Engines as deployed, not kernels on equal bits; quality
+  wasn't measured.
+- **Workloads.** *classic*: the [4090 cell](#concurrency-rtx-4090-qwen25-7b-2026-10-18)'s shape, a 519-token prompt
+  and 512 tokens out, N = 2C. *mix*: 104 short chat prompts (256 or 512 out) and 24 long-context prompts of
+  1,998–7,665 tokens (256 out), N = max(16, 2C), rotated by (round, C), so small-C mix cells vary round to round for
+  every engine. Each prompt starts with a unique salt: no prefix-cache hits on any engine.
+- **Rounds.** 2 rounds, engines interleaved per C with the order rotated. Axon ran in both phases (int4 and FP8), so
+  its cells are medians of 4, the others' of 2. 124 cells, 11,992 requests, 0 errors, 0 engine drops.
+- **SLO** for goodput: TPOT ≤ 50 ms and TTFT ≤ 2 s + 0.25 s per 1k prompt tokens.
+- **Cost:** pod $3.09 (46 min). The driver's split: $2.96 paid, $1.46 useful, $1.50 waste (setup 6.5 min, waiting on
+  installs 5.6, cold starts 5.25, control 2.55, park / wake 2.0, warm-ups 0.7).
+
+**Headline (MEASURED).** Axon is the fastest at C = 1 (mix 287 vs 235–284 tok/s, classic 304 vs 240–296), but only
+by 1 % and 3 % over SGLang-AWQ, which one pod can't settle. From C = 8 up it trails every engine on throughput: at
+C = 128, mix 1,868 vs 3,770–7,146 (2.0–3.8×) and classic 4,485 vs 8,288–14,380 (1.8–3.2×). Its ITL p99 is the lowest of
+the five only at mix C = 128 (77.5 vs 126–320 ms), because its steps are uniformly slow (ITL p50 58.0 ms vs
+5.2–10.8); on classic its ITL p99 is the highest from C = 32 up. Under the SLO it keeps 26 % of mix requests at C = 128
+(goodput 513 vs 2,645–7,129 tok/s), with TTFT p99 14.5 s.
+
+Why (ESTIMATED, not profiled on the pod): the batched-decode step at 64–128 rows was tuned on sm_120 / sm_89 and has
+no decode-shaped wgmma / Marlin-class kernels on sm_90 (#33's wgmma GEMM, measured for prefill, covers only the Q4_K
+products that fill a wave of its 128 × 64 tiles); TPOT p50 on classic grows 3.2 → 26.3 ms from C = 1 to 128 (vLLM-AWQ
+4.1 → 8.8). Second, admission and chunked prefill at high C (mix TPOT is 2.2× classic's; the TTFT p99 tail). On the 4090 at C = 32
+Axon was 0.76× vLLM-AWQ; here it is 0.43×: vLLM gained 1.9× from the H100, Axon 1.10×. Roadmap:
+[Next: proposed order](roadmap.md#next-proposed-order-outside-review-10-19-owner-decides).
+
+### Mix
+
+**mix: aggregate tok/s** (median of rounds; spread = max / min − 1)
+
+| engine | C=1 | C=8 | C=32 | C=64 | C=128 |
+|---|---|---|---|---|---|
+| Axon (Q4_K_M) | 287 (±1 %) | 795 (±23 %) | 1,324 (±7 %) | 1,695 (±1 %) | 1,868 (±2 %) |
+| vLLM-AWQ | 235 (±0 %) | 1,096 (±14 %) | 3,012 (±2 %) | 4,506 (±0 %) | 5,748 (±0 %) |
+| SGLang-AWQ | 284 (±1 %) | 1,212 (±22 %) | 2,477 (±5 %) | 3,252 (±2 %) | 3,770 (±1 %) |
+| vLLM-FP8 | 239 (±0 %) | 1,103 (±12 %) | 3,328 (±2 %) | 5,374 (±4 %) | 7,146 (±0 %) |
+| SGLang-FP8 | 246 (±1 %) | 1,172 (±3 %) | 3,448 (±4 %) | 5,421 (±2 %) | 7,135 (±1 %) |
+
+**mix: goodput tok/s** (tokens of requests inside the SLO / wall)
+
+| engine | C=1 | C=8 | C=32 | C=64 | C=128 |
+|---|---|---|---|---|---|
+| Axon (Q4_K_M) | 287 | 795 | 1,308 | 1,313 | 513 |
+| vLLM-AWQ | 235 | 1,096 | 3,012 | 4,503 | 4,953 |
+| SGLang-AWQ | 284 | 1,212 | 2,477 | 3,153 | 2,645 |
+| vLLM-FP8 | 239 | 1,103 | 3,328 | 5,374 | 7,057 |
+| SGLang-FP8 | 246 | 1,172 | 3,448 | 5,420 | 7,129 |
+
+**mix: fraction of requests inside the SLO**
+
+| engine | C=1 | C=8 | C=32 | C=64 | C=128 |
+|---|---|---|---|---|---|
+| Axon (Q4_K_M) | 1 | 1 | 0.961 | 0.742 | 0.256 |
+| vLLM-AWQ | 1 | 1 | 1 | 0.992 | 0.853 |
+| SGLang-AWQ | 1 | 1 | 1 | 0.961 | 0.668 |
+| vLLM-FP8 | 1 | 1 | 1 | 1 | 0.982 |
+| SGLang-FP8 | 1 | 1 | 1 | 0.996 | 0.99 |
+
+**mix: TTFT p50, ms**
+
+| engine | C=1 | C=8 | C=32 | C=64 | C=128 |
+|---|---|---|---|---|---|
+| Axon (Q4_K_M) | 14.6 | 43.8 | 204 | 464 | 2,361 |
+| vLLM-AWQ | 26.5 | 88.7 | 224 | 392 | 649 |
+| SGLang-AWQ | 18.1 | 39.5 | 169 | 564 | 1,161 |
+| vLLM-FP8 | 27.5 | 102 | 199 | 391 | 646 |
+| SGLang-FP8 | 20.0 | 42.7 | 83.3 | 250 | 452 |
+
+**mix: TTFT p99, ms**
+
+| engine | C=1 | C=8 | C=32 | C=64 | C=128 |
+|---|---|---|---|---|---|
+| Axon (Q4_K_M) | 556 | 780 | 3,345 | 5,867 | 14,513 |
+| vLLM-AWQ | 257 | 260 | 840 | 1,494 | 3,062 |
+| SGLang-AWQ | 389 | 414 | 1,473 | 2,548 | 5,266 |
+| vLLM-FP8 | 188 | 217 | 612 | 1,076 | 2,114 |
+| SGLang-FP8 | 170 | 181 | 553 | 984 | 1,920 |
+
+**mix: ITL p50, ms**
+
+| engine | C=1 | C=8 | C=32 | C=64 | C=128 |
+|---|---|---|---|---|---|
+| Axon (Q4_K_M) | 3.2 | 5.7 | 11.5 | 15.9 | 58.0 |
+| vLLM-AWQ | 4.1 | 4.2 | 5.1 | 6.1 | 8.4 |
+| SGLang-AWQ | 3.3 | 3.6 | 5.3 | 7.5 | 10.8 |
+| vLLM-FP8 | 4.0 | 4.2 | 5.1 | 5.6 | 8.0 |
+| SGLang-FP8 | 4.0 | 4.3 | 4.9 | 5.7 | 5.2 |
+
+**mix: ITL p99, ms**
+
+| engine | C=1 | C=8 | C=32 | C=64 | C=128 |
+|---|---|---|---|---|---|
+| Axon (Q4_K_M) | 3.6 | 58.2 | 68.9 | 74.0 | 77.5 |
+| vLLM-AWQ | 4.5 | 10.7 | 105 | 189 | 205 |
+| SGLang-AWQ | 3.7 | 7.8 | 179 | 191 | 320 |
+| vLLM-FP8 | 4.5 | 9.9 | 69.1 | 123 | 140 |
+| SGLang-FP8 | 4.2 | 7.6 | 24.3 | 65.8 | 126 |
+
+**mix: TPOT p50, ms**
+
+| engine | C=1 | C=8 | C=32 | C=64 | C=128 |
+|---|---|---|---|---|---|
+| Axon (Q4_K_M) | 3.2 | 7.6 | 21.1 | 32.4 | 57.9 |
+| vLLM-AWQ | 4.1 | 4.6 | 7.2 | 10.6 | 16.7 |
+| SGLang-AWQ | 3.3 | 4.7 | 9.9 | 15.7 | 26.4 |
+| vLLM-FP8 | 4.0 | 4.5 | 6.7 | 8.3 | 12.7 |
+| SGLang-FP8 | 3.9 | 4.7 | 6.6 | 9.0 | 12.9 |
+
+**mix: completion tokens per request, mean**
+
+| engine | C=1 | C=8 | C=32 | C=64 | C=128 |
+|---|---|---|---|---|---|
+| Axon (Q4_K_M) | 278 | 271 | 266 | 276 | 278 |
+| vLLM-AWQ | 278 | 270 | 256 | 273 | 273 |
+| SGLang-AWQ | 272 | 270 | 258 | 270 | 271 |
+| vLLM-FP8 | 285 | 274 | 262 | 278 | 278 |
+| SGLang-FP8 | 283 | 276 | 265 | 278 | 279 |
+
+**mix, control pass (restarted without the sleep / memory-saver flags; one cell each): aggregate tok/s**
+
+| engine | C=32 | C=128 |
+|---|---|---|
+| vLLM-AWQ | 2,886 | 5,741 |
+| SGLang-AWQ | 2,392 | 3,769 |
+
+**mix, control pass: ITL p50, ms**
+
+| engine | C=32 | C=128 |
+|---|---|---|
+| vLLM-AWQ | 5.3 | 8.4 |
+| SGLang-AWQ | 5.4 | 10.8 |
+
+### Classic
+
+**classic: aggregate tok/s** (median of rounds; spread = max / min − 1)
+
+| engine | C=1 | C=8 | C=32 | C=64 | C=128 |
+|---|---|---|---|---|---|
+| Axon (Q4_K_M) | 304 (±1 %) | 1,278 (±0 %) | 2,466 (±1 %) | 3,566 (±3 %) | 4,485 (±3 %) |
+| vLLM-AWQ | 240 (±0 %) | 1,786 (±0 %) | 5,682 (±0 %) | 8,699 (±0 %) | 12,190 (±0 %) |
+| SGLang-AWQ | 296 (±0 %) | 2,015 (±0 %) | 4,913 (±0 %) | 6,342 (±0 %) | 8,288 (±0 %) |
+| vLLM-FP8 | 242 (±0 %) | 1,798 (±1 %) | 5,856 (±0 %) | 10,047 (±1 %) | 14,205 (±1 %) |
+| SGLang-FP8 | 250 (±0 %) | 1,806 (±0 %) | 6,149 (±0 %) | 9,888 (±0 %) | 14,380 (±0 %) |
+
+**classic: goodput tok/s**
+
+| engine | C=1 | C=8 | C=32 | C=64 | C=128 |
+|---|---|---|---|---|---|
+| Axon (Q4_K_M) | 304 | 1,278 | 2,466 | 2,981 | 3,031 |
+| vLLM-AWQ | 240 | 1,786 | 5,682 | 8,699 | 12,190 |
+| SGLang-AWQ | 296 | 2,015 | 4,913 | 6,342 | 5,390 |
+| vLLM-FP8 | 242 | 1,798 | 5,856 | 10,047 | 14,205 |
+| SGLang-FP8 | 250 | 1,806 | 6,149 | 9,888 | 14,380 |
+
+**classic: fraction of requests inside the SLO**
+
+| engine | C=1 | C=8 | C=32 | C=64 | C=128 |
+|---|---|---|---|---|---|
+| Axon (Q4_K_M) | 1 | 1 | 1 | 0.836 | 0.676 |
+| vLLM-AWQ | 1 | 1 | 1 | 1 | 1 |
+| SGLang-AWQ | 1 | 1 | 1 | 1 | 0.651 |
+| vLLM-FP8 | 1 | 1 | 1 | 1 | 1 |
+| SGLang-FP8 | 1 | 1 | 1 | 1 | 1 |
+
+**classic: TTFT p50, ms**
+
+| engine | C=1 | C=8 | C=32 | C=64 | C=128 |
+|---|---|---|---|---|---|
+| Axon (Q4_K_M) | 48.2 | 113 | 101 | 102 | 115 |
+| vLLM-AWQ | 38.8 | 129 | 306 | 440 | 875 |
+| SGLang-AWQ | 35.5 | 160 | 578 | 930 | 1,525 |
+| vLLM-FP8 | 47.5 | 119 | 262 | 338 | 581 |
+| SGLang-FP8 | 24.7 | 67.8 | 175 | 308 | 554 |
+
+**classic: TTFT p99, ms**
+
+| engine | C=1 | C=8 | C=32 | C=64 | C=128 |
+|---|---|---|---|---|---|
+| Axon (Q4_K_M) | 48.2 | 360 | 1,544 | 3,123 | 6,570 |
+| vLLM-AWQ | 38.8 | 135 | 422 | 759 | 1,498 |
+| SGLang-AWQ | 35.5 | 198 | 702 | 1,409 | 2,811 |
+| vLLM-FP8 | 47.5 | 137 | 305 | 538 | 1,051 |
+| SGLang-FP8 | 24.7 | 81.4 | 261 | 486 | 956 |
+
+**classic: ITL p50, ms**
+
+| engine | C=1 | C=8 | C=32 | C=64 | C=128 |
+|---|---|---|---|---|---|
+| Axon (Q4_K_M) | 3.2 | 5.6 | 10.3 | 12.8 | 18.6 |
+| vLLM-AWQ | 4.1 | 4.2 | 4.8 | 5.8 | 5.1 |
+| SGLang-AWQ | 3.3 | 3.6 | 5.1 | 7.3 | 9.8 |
+| vLLM-FP8 | 4.1 | 4.2 | 4.9 | 5.3 | 5.7 |
+| SGLang-FP8 | 4.0 | 4.3 | 4.7 | 5.4 | 4.9 |
+
+**classic: ITL p99, ms**
+
+| engine | C=1 | C=8 | C=32 | C=64 | C=128 |
+|---|---|---|---|---|---|
+| Axon (Q4_K_M) | 3.2 | 6.3 | 51.7 | 53.6 | 62.0 |
+| vLLM-AWQ | 4.5 | 4.9 | 6.9 | 9.5 | 38.6 |
+| SGLang-AWQ | 3.6 | 4.1 | 6.2 | 9.0 | 20.2 |
+| vLLM-FP8 | 4.5 | 4.9 | 6.6 | 9.9 | 38.8 |
+| SGLang-FP8 | 4.2 | 4.7 | 5.2 | 8.7 | 39.7 |
+
+**classic: TPOT p50, ms**
+
+| engine | C=1 | C=8 | C=32 | C=64 | C=128 |
+|---|---|---|---|---|---|
+| Axon (Q4_K_M) | 3.2 | 6.0 | 12.6 | 17.2 | 26.3 |
+| vLLM-AWQ | 4.1 | 4.2 | 5.0 | 6.5 | 8.8 |
+| SGLang-AWQ | 3.3 | 3.7 | 5.4 | 8.3 | 12.4 |
+| vLLM-FP8 | 4.1 | 4.2 | 5.0 | 5.7 | 7.8 |
+| SGLang-FP8 | 4.0 | 4.3 | 4.9 | 5.8 | 7.8 |
+
+**classic: completion tokens per request, mean**
+
+| engine | C=1 | C=8 | C=32 | C=64 | C=128 |
+|---|---|---|---|---|---|
+| Axon (Q4_K_M) | 512 | 512 | 512 | 512 | 512 |
+| vLLM-AWQ | 512 | 512 | 512 | 512 | 512 |
+| SGLang-AWQ | 512 | 512 | 512 | 512 | 512 |
+| vLLM-FP8 | 512 | 512 | 512 | 512 | 512 |
+| SGLang-FP8 | 512 | 512 | 512 | 512 | 512 |
 
 ## Laptops
 

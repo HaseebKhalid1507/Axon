@@ -181,7 +181,24 @@ impl<R: Read> Read for HashR<'_, R> {
 /// ~/.cache/axon/model-ids by (path, length, modification time).
 pub fn model_id(path: &Path) -> io::Result<String> {
     let canon = std::fs::canonicalize(path)?;
-    let meta = std::fs::metadata(&canon)?;
+    // A safetensors checkpoint, named by its directory or by a shard in it
+    // (`safetensors::dir_of`): every file's id, in order, so a changed
+    // tokenizer.json or a second shard changes it too.
+    // (By the path as given: an HF cache's shard is a symlink to a blob.)
+    if let Some(dir) = path.to_str().and_then(crate::safetensors::dir_of) {
+        let mut h = Hasher::default();
+        for f in crate::safetensors::files(&std::fs::canonicalize(dir)?)? {
+            h.update(one_file_id(&std::fs::canonicalize(&f)?)?.as_bytes());
+            h.update(b"\n");
+        }
+        return Ok(format!("{:016x}-st", h.finish()));
+    }
+    one_file_id(&canon)
+}
+
+/// `model_id` of one file (`canon`: canonical).
+fn one_file_id(canon: &Path) -> io::Result<String> {
+    let meta = std::fs::metadata(canon)?;
     let mtime = meta
         .modified()
         .ok()
@@ -197,7 +214,7 @@ pub fn model_id(path: &Path) -> io::Result<String> {
     {
         return Ok(id.to_owned());
     }
-    let id = format!("{:016x}-{}", hash_file(&canon, meta.len())?, meta.len());
+    let id = format!("{:016x}-{}", hash_file(canon, meta.len())?, meta.len());
     if let Some(s) = &store {
         let _ = std::fs::create_dir_all(s.parent().expect("a parent"));
         if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -412,7 +429,7 @@ impl<'g> KvIo for CudaQwen2<'g> {
             "info": { "driver": driver },
             "kv": self.cache_kv_name(c),
             "layers": layers, "kv_dim": kvd, "head_dim": hd,
-            "row_bytes": self.cache_rows(c).row_bytes(),
+            "row_bytes": self.cache_row_bytes(c),
         }))
     }
 
