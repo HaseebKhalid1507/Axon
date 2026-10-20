@@ -1,6 +1,6 @@
 # serve: tool calling for gpt-oss (harmony)  (PR #111)
 
-- Date: 2026-10-20. Branch: feat/oss-tools. Base: main cb53181. Status: open
+- Date: 2026-10-20. Branch: feat/oss-tools. Base: main cb53181 (merged 6f1efb5 in, no code change). Status: open
 - Pick / design: issue #108 (agent harnesses on gpt-oss-20b got `400 tools: tool calling is not supported
   for this model's chat format`). Follows #26 (tool calling, Qwen/Llama) and #70 (Responses, ollama), on the
   harmony framing of [2026-10-18-gpt-oss-s0.md](2026-10-18-gpt-oss-s0.md).
@@ -53,18 +53,23 @@ runs a Synaps session with working tool calls.
 |---|---|---|
 | unit: tools + harmony (render fixtures byte-exact, TS types, parser every split, channels to calls) | 16 passed | 1020-030043-0780 (bella, CPU) |
 | real model: gpt-oss-20b serve tool loop (CUDA) | passed, 14.5 s | 1020-030102-6c02 (bella) |
-| fast tier, release | PENDING | |
-| fast tier, debug assertions (CPU, 3 shards) | PENDING | |
-| `serve::` suite, debug assertions, GPU | PENDING | |
-| gpt-oss model tests (`oss gptoss harmony chat::`) | PENDING | |
-| md5 of `gen`, main vs candidate, same host | PENDING | |
-| serve A/B with tools, main vs candidate (Qwen3-8B, Llama 3.1 8B, + 3 small, gpt-oss without tools) | PENDING | |
-| e2e: Synaps headless, profile axon-oss, gpt-oss-20b `--kv f16 --ctx 32768` | PENDING | |
+| fast tier, release (big-model skips as the fast tier), GPU | 619 passed, 0 failed, 47 ignored | 1020-044910-f145 (bella) |
+| fast tier, debug assertions, CPU, 3 shards | 637 passed, 0 failed, 47 ignored | group 1020-043143-a805 (avante) |
+| `serve::` suite, debug assertions, GPU | 116 passed, 1 failed (`serve_metrics_slots_max_prompt`, a pre-existing race: #112) | 1020-030717-aa65 (bella) |
+| that test alone x10, candidate and main debug, interleaved | 10/10 each | 1020-045611-6e9f |
+| `serve::` suite rerun, same binary | 117 passed, 0 failed, 2 ignored | 1020-045611-3396 |
+| gpt-oss model tests (`oss gptoss harmony chat::`), release, GPU | 43 passed, 0 failed, 2 ignored | 1020-030717-b206 |
+| md5 of `gen`, main cb53181 vs 231d34e, same host (8 models cuda f16 x 4 prompts, 4 cuda q8 x 3, 4 cpu x 3, one ~600-token prompt) | 56/56 equal | 1020-030718-7eaf |
+| serve A/B, main vs candidate, raw bodies (ids/times masked): 17 requests on Qwen3-8B, Llama 3.1 8B, qwen2.5-0.5b, Qwen3-0.6B, Llama 3.2 1B (with and without tools, every tool_choice, streamed, Responses, ollama); 7 without tools on gpt-oss | 17/17 x5, 7/7 | 1020-030718-7eaf |
+| merge of main 6f1efb5 (00b8a71): `axon` binary byte-identical to 231d34e; quick md5 (5 models cuda, q8, cpu) | identical binary; 29/29 equal | 1020-054115-f4d5 |
+| e2e: Synaps headless (`synaps chat --profile axon-oss`), gpt-oss-20b `--kv f16 --ctx 32768` on :18442 | ran `uname -sr && nproc && date +%Y` via its bash tool and answered from the output, correctly | 1020-030754-405a |
 | clippy -D warnings (bin + tests), rustfmt | clean | |
 
 ## Results
 Functional change, no speed claim. Requests without tools keep their prompt, tokens and output (serve A/B
-above). Tool requests on the Qwen/Llama families are byte-identical to main.
+above). Tool requests on the Qwen/Llama families are byte-identical to main. MEASURED on bella, e2e
+(Synaps, gpt-oss-20b, cuda + CPU experts): turn 1 prompt 1724 tok in 21.9 s, 55 tok at 30.7 tok/s; turn 2
+(the tool result appended) 1200 of 1265 prompt tokens from the cache, 81 tok at 30.7 tok/s.
 
 ## What didn't work / not done
 - Built-in tools (`browser`, `python`) are not offered: the template's `builtin_tools` kwarg has no OpenAI
