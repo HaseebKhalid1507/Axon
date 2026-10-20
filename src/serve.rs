@@ -2307,6 +2307,10 @@ fn run_request(
     if !matches!(r, Ok(true)) {
         cancel.store(true, Ordering::Relaxed);
     }
+    // Tests (`Server::hold`): the response is written, the handler not yet
+    // returned.
+    #[cfg(test)]
+    sh.hold.here();
     r
 }
 
