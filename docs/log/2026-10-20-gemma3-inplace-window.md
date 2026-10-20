@@ -25,7 +25,10 @@
 
 ## Why
 Diagnosis on bella, scratch probe job 1020-014608-3a07 (per-layer dumps of the residual stream and the
-attention output at the last position, decode, Gemma 3 1B Q4_K_M, prompt of #106, window 6):
+attention output at the last position, decode, Gemma 3 1B Q8_0 (the test file, `testutil::GEMMA3_MODEL`),
+prompt of #106, window 6). Correction: an earlier version of this entry said Q4_K_M, which was wrong. Every
+test and probe here loads the Q8_0 file. The `TOP_TIE` comment (src/model/gemma3_tests.rs:244) still says
+Q4_K_M: a one-word follow-up, kept out of this round so the gated code stays as gated.
 
 - Reference at the failing position: 7001 at 17.984, 506 at 17.637, a **0.348** logit margin. In place
   scores them 17.894 / 17.911 (picks 506, by 0.017). Repacked scores them 17.829 / 17.650 (picks 7001).
@@ -61,7 +64,10 @@ attention output at the last position, decode, Gemma 3 1B Q4_K_M, prompt of #106
   median (0.83). A 6-token window on a model trained with 512 raises both builds' drift from the f64
   reference (median 0.60 to 0.85). On a code prompt both builds go past the test's 1.0 bound, even with no
   window (up to 2.17 in place, 3.22 repacked), and both miss top-1 there at a 0.36 gap. The bound holds for
-  the test's own prompt only, for both builds. That's filed as **#110**, not widened here. The probe 3 source
+  the test's own prompt only, for both builds. That's filed as **#110**, not widened here. #110's first
+  diagnosis (jobs 1020-033210-873e and 1020-052517-b8ef): llama.cpp CPU, Axon GPU and an int8-emulating f64
+  reference drift as much as Axon CPU on that prompt (max |dlogit| 2.2-3.2, KL 1.8-5.5e-3), so it's
+  ordinary int8 activation rounding, not an Axon CPU bug. The probe 3 source
   was recreated and re-run, and its output is identical to the original's (job 1020-031340-bcbd).
 - Window bound: at the last position the reference at window 5 / 7 is 3.50 / 7.56 logits (max) from in
   place and 3.61 / 7.92 from repacked, against 0.88 / 0.57 at window 6. Probe 4 extends this to every
@@ -80,8 +86,8 @@ Final gates on 976e44f (review round: the neighbour check). md5 base: main cb531
 | gemma3 tests (`gemma3` filter, CPU + GPU), `AXON_REPACK=0` | 11 passed, 0 failed, 4 ignored (avante) | 1020-032930-c24d |
 | gemma3 tests, default env | 11 passed, 0 failed, 4 ignored (avante) | 1020-032931-631c |
 | fast tier, release | 614 passed, 0 failed, 47 ignored, 18 filtered (bella) | 1020-032935-3a34 |
-| fast tier, debug assertions (CPU queue) | pending | 1020-032935-905f |
-| md5 of `gen`, main cb53181 vs candidate, same host | pending | 1020-032934-c46b |
+| fast tier, debug assertions (CPU queue) | 632 passed, 0 failed, 47 ignored (bella CPU queue) | 1020-032935-905f |
+| md5 of `gen`, main cb53181 vs candidate, same host | 30/30 identical, 0 nonzero rc (bella) | 1020-032934-c46b |
 | clippy -D warnings (bin + test), rustfmt | clean | local, rustc 1.95.0 |
 
 The `AXON_REPACK=0` run is redundant for `gemma3_matches_reference_forward`, which builds both CPU models
