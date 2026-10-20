@@ -1,0 +1,151 @@
+[axon-run 11:46:35] submitted 1020-114635-4e40 by /home/haseeb/.cache/axon-wt-adopt: /home/haseeb/.cache/axon-adopt/md5serve.sh /home/haseeb/.cache/axon-adopt/axon-main-aecc49d /home/haseeb/.cache/axon-adopt/axon-7824294 /home/haseeb/.cache/axon-adopt/embed-7824294 /home/haseeb/.cache/axon-adopt/r2-7824294
+[axon-run 12:37:15] scope axon-job-1020-114635-4e40-1792514235.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 16000 MB): an OOM here kills only this job
+[axon-run 12:37:15] job 1020-114635-4e40 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1020-114635-4e40-1792514235 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-adopt/md5serve.sh /home/haseeb/.cache/axon-adopt/axon-main-aecc49d /home/haseeb/.cache/axon-adopt/axon-7824294 /home/haseeb/.cache/axon-adopt/embed-7824294 /home/haseeb/.cache/axon-adopt/r2-7824294
+axon-q 12:37:15 start slot 16-23: /home/haseeb/.cache/axon-adopt/md5serve.sh /home/haseeb/.cache/axon-adopt/axon-main-aecc49d /home/haseeb/.cache/axon-adopt/axon-7824294 /home/haseeb/.cache/axon-adopt/embed-7824294 /home/haseeb/.cache
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 615.71.09
+gen	cuda	qwen2.5-0.5b-q4_k_m-p1	base	c0dfbb1ca4f2	rc=0
+gen	cuda	qwen2.5-0.5b-q4_k_m-p1	cand	c0dfbb1ca4f2	rc=0
+gen	cuda	qwen2.5-0.5b-q4_k_m-p2	base	acd9c2d5e0aa	rc=0
+gen	cuda	qwen2.5-0.5b-q4_k_m-p2	cand	acd9c2d5e0aa	rc=0
+gen	cuda	qwen2.5-0.5b-q4_k_m-p3	base	35b4ed5d823a	rc=0
+gen	cuda	qwen2.5-0.5b-q4_k_m-p3	cand	35b4ed5d823a	rc=0
+gen	cuda	Qwen3-0.6B-Q8_0-p1	base	a21a6d55c9dc	rc=0
+gen	cuda	Qwen3-0.6B-Q8_0-p1	cand	a21a6d55c9dc	rc=0
+gen	cuda	Qwen3-0.6B-Q8_0-p2	base	8393d261ef12	rc=0
+gen	cuda	Qwen3-0.6B-Q8_0-p2	cand	8393d261ef12	rc=0
+gen	cuda	Qwen3-0.6B-Q8_0-p3	base	0b1ad272f80c	rc=0
+gen	cuda	Qwen3-0.6B-Q8_0-p3	cand	0b1ad272f80c	rc=0
+gen	cuda	Llama-3.2-1B-Instruct-Q4_K_M-p1	base	cc9424ad2c9b	rc=0
+gen	cuda	Llama-3.2-1B-Instruct-Q4_K_M-p1	cand	cc9424ad2c9b	rc=0
+gen	cuda	Llama-3.2-1B-Instruct-Q4_K_M-p2	base	955f73cf4e74	rc=0
+gen	cuda	Llama-3.2-1B-Instruct-Q4_K_M-p2	cand	955f73cf4e74	rc=0
+gen	cuda	Llama-3.2-1B-Instruct-Q4_K_M-p3	base	c27131a3ddf5	rc=0
+gen	cuda	Llama-3.2-1B-Instruct-Q4_K_M-p3	cand	c27131a3ddf5	rc=0
+gen	cuda	google_gemma-3-1b-it-Q8_0-p1	base	bf6526f0202a	rc=0
+gen	cuda	google_gemma-3-1b-it-Q8_0-p1	cand	bf6526f0202a	rc=0
+gen	cuda	google_gemma-3-1b-it-Q8_0-p2	base	98fc88d8d306	rc=0
+gen	cuda	google_gemma-3-1b-it-Q8_0-p2	cand	98fc88d8d306	rc=0
+gen	cuda	google_gemma-3-1b-it-Q8_0-p3	base	61bf75026756	rc=0
+gen	cuda	google_gemma-3-1b-it-Q8_0-p3	cand	61bf75026756	rc=0
+gen	cuda	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M-p1	base	0f4c569a7ff1	rc=0
+gen	cuda	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M-p1	cand	0f4c569a7ff1	rc=0
+gen	cuda	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M-p2	base	1237fddd131d	rc=0
+gen	cuda	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M-p2	cand	1237fddd131d	rc=0
+gen	cuda	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M-p3	base	f4da656083d3	rc=0
+gen	cuda	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M-p3	cand	f4da656083d3	rc=0
+gen	cuda	Qwen2.5-7B-Instruct-Q4_K_M-p1	base	0db9b9a9d122	rc=0
+gen	cuda	Qwen2.5-7B-Instruct-Q4_K_M-p1	cand	0db9b9a9d122	rc=0
+gen	cuda	Qwen2.5-7B-Instruct-Q4_K_M-p2	base	e8fa94e8d0bf	rc=0
+gen	cuda	Qwen2.5-7B-Instruct-Q4_K_M-p2	cand	e8fa94e8d0bf	rc=0
+gen	cuda	Qwen2.5-7B-Instruct-Q4_K_M-p3	base	c3e22f8d32bc	rc=0
+gen	cuda	Qwen2.5-7B-Instruct-Q4_K_M-p3	cand	c3e22f8d32bc	rc=0
+gen	cpu	qwen2.5-0.5b-q4_k_m-p1	base	de11b4bf48c9	rc=0
+gen	cpu	qwen2.5-0.5b-q4_k_m-p1	cand	de11b4bf48c9	rc=0
+gen	cpu	qwen2.5-0.5b-q4_k_m-p2	base	5281921aafb3	rc=0
+gen	cpu	qwen2.5-0.5b-q4_k_m-p2	cand	5281921aafb3	rc=0
+gen	cpu	qwen2.5-0.5b-q4_k_m-p3	base	1d02b95ac7c0	rc=0
+gen	cpu	qwen2.5-0.5b-q4_k_m-p3	cand	1d02b95ac7c0	rc=0
+gen	cpu	Qwen3-0.6B-Q8_0-p1	base	54381a7d049c	rc=0
+gen	cpu	Qwen3-0.6B-Q8_0-p1	cand	54381a7d049c	rc=0
+gen	cpu	Qwen3-0.6B-Q8_0-p2	base	17cf61b18afe	rc=0
+gen	cpu	Qwen3-0.6B-Q8_0-p2	cand	17cf61b18afe	rc=0
+gen	cpu	Qwen3-0.6B-Q8_0-p3	base	0b1ad272f80c	rc=0
+gen	cpu	Qwen3-0.6B-Q8_0-p3	cand	0b1ad272f80c	rc=0
+gen	cpu	Llama-3.2-1B-Instruct-Q4_K_M-p1	base	897464655057	rc=0
+gen	cpu	Llama-3.2-1B-Instruct-Q4_K_M-p1	cand	897464655057	rc=0
+gen	cpu	Llama-3.2-1B-Instruct-Q4_K_M-p2	base	fa27f6735533	rc=0
+gen	cpu	Llama-3.2-1B-Instruct-Q4_K_M-p2	cand	fa27f6735533	rc=0
+gen	cpu	Llama-3.2-1B-Instruct-Q4_K_M-p3	base	f29df487b2ca	rc=0
+gen	cpu	Llama-3.2-1B-Instruct-Q4_K_M-p3	cand	f29df487b2ca	rc=0
+gen	cpu	google_gemma-3-1b-it-Q8_0-p1	base	bf6526f0202a	rc=0
+gen	cpu	google_gemma-3-1b-it-Q8_0-p1	cand	bf6526f0202a	rc=0
+gen	cpu	google_gemma-3-1b-it-Q8_0-p2	base	98fc88d8d306	rc=0
+gen	cpu	google_gemma-3-1b-it-Q8_0-p2	cand	98fc88d8d306	rc=0
+gen	cpu	google_gemma-3-1b-it-Q8_0-p3	base	f612150f3ae0	rc=0
+gen	cpu	google_gemma-3-1b-it-Q8_0-p3	cand	f612150f3ae0	rc=0
+gen	cpu	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M-p1	base	0f4c569a7ff1	rc=0
+gen	cpu	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M-p1	cand	0f4c569a7ff1	rc=0
+gen	cpu	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M-p2	base	bcecf4a6f401	rc=0
+gen	cpu	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M-p2	cand	bcecf4a6f401	rc=0
+gen	cpu	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M-p3	base	20d17b929aaa	rc=0
+gen	cpu	Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M-p3	cand	20d17b929aaa	rc=0
+gen	cpu	qwen2.5-1.5b-instruct-q4_k_m-p1	base	eab0d6db5300	rc=0
+gen	cpu	qwen2.5-1.5b-instruct-q4_k_m-p1	cand	eab0d6db5300	rc=0
+gen	cpu	qwen2.5-1.5b-instruct-q4_k_m-p2	base	243251cf0ed1	rc=0
+gen	cpu	qwen2.5-1.5b-instruct-q4_k_m-p2	cand	243251cf0ed1	rc=0
+gen	cpu	qwen2.5-1.5b-instruct-q4_k_m-p3	base	2574bf9bf746	rc=0
+gen	cpu	qwen2.5-1.5b-instruct-q4_k_m-p3	cand	2574bf9bf746	rc=0
+logits	cuda	qwen2.5-0.5b	base	932858e606c7	rc=0
+logits	cuda	qwen2.5-0.5b	cand	932858e606c7	rc=0
+logits	cpu	qwen2.5-0.5b	base	a7f8bb22b6c4	rc=0
+logits	cpu	qwen2.5-0.5b	cand	a7f8bb22b6c4	rc=0
+info	-	7B	base	7de977e7dac3	rc=0
+info	-	7B	cand	7de977e7dac3	rc=0
+gen	cuda	qwen2.5-0.5b-q4_k_m-p1	embed	c0dfbb1ca4f2	rc=0
+gen	cuda	qwen2.5-0.5b-q4_k_m-p2	embed	acd9c2d5e0aa	rc=0
+gen	cuda	qwen2.5-0.5b-q4_k_m-p3	embed	35b4ed5d823a	rc=0
+gen	cuda	Qwen3-0.6B-Q8_0-p1	embed	a21a6d55c9dc	rc=0
+gen	cuda	Qwen3-0.6B-Q8_0-p2	embed	8393d261ef12	rc=0
+gen	cuda	Qwen3-0.6B-Q8_0-p3	embed	0b1ad272f80c	rc=0
+gen	cpu	qwen2.5-0.5b-q4_k_m-p1	embed	de11b4bf48c9	rc=0
+gen	cpu	qwen2.5-0.5b-q4_k_m-p2	embed	5281921aafb3	rc=0
+gen	cpu	qwen2.5-0.5b-q4_k_m-p3	embed	1d02b95ac7c0	rc=0
+gen	cpu	Qwen3-0.6B-Q8_0-p1	embed	54381a7d049c	rc=0
+gen	cpu	Qwen3-0.6B-Q8_0-p2	embed	17cf61b18afe	rc=0
+gen	cpu	Qwen3-0.6B-Q8_0-p3	embed	0b1ad272f80c	rc=0
+f32	cpu	qwen2.5-0.5b-p3	base	f65ecf98f629	rc=0
+f32	cpu	qwen2.5-0.5b-p3	cand	f65ecf98f629	rc=0
+f32	cpu	qwen2.5-0.5b-p3	embed	1d02b95ac7c0	rc=0
+f32 vs f16 output differs (expected, else f32 did nothing): yes
+bad AXON_KV: error, rc 1, no panic: OK (Error: "AXON_KV: unknown KV cache type 'bogus' (f16, f32 or q8)")
+--- pairs differing (base vs cand; embed vs cand):
+DIFF embed/cand f32	cpu	qwen2.5-0.5b-p3
+1 of 53 pairs differ; 0 nonzero rc
+MD5 GATE FAIL
+DIFF Qwen3-8B-Q4_K_M case 18 /v1/chat/completions: 200 vs 200
+  base {"id":"X","object":"chat.completion","created":0,"model":"Qwen3-8B-Q4_K_M","system_fingerprint":"X","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning_content":"Okay, the user asked for fact number 1 about the moon. Let me think. First, I need to recall some basic facts about the moon. The moon is Earth's only natural satellite. It's the fifth largest moon"},"logprobs":nul
+  cand {"id":"X","object":"chat.completion","created":0,"model":"Qwen3-8B-Q4_K_M","system_fingerprint":"X","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning_content":"Okay, the user asked for fact number 1 about the moon. Let me think. First, I need to recall some basic facts about the moon. The moon is Earth's only natural satellite. It's the fifth largest moon"},"logprobs":nul
+DIFF Qwen3-8B-Q4_K_M case 22 /v1/chat/completions: 200 vs 200
+  base {"id":"X","object":"chat.completion","created":0,"model":"Qwen3-8B-Q4_K_M","system_fingerprint":"X","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning_content":"Okay, the user is asking for fact number 5 about the moon. Let me think about the moon's facts. First, I need to recall some key points. The moon is Earth's only natural satellite. It's the"},"logprobs":null,"finis
+  cand {"id":"X","object":"chat.completion","created":0,"model":"Qwen3-8B-Q4_K_M","system_fingerprint":"X","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning_content":"Okay, the user is asking for fact number 5 about the moon. Let me think about the moon's facts. First, I need to recall some key points. The moon is Earth's only natural satellite. It's the"},"logprobs":null,"finis
+Qwen3-8B-Q4_K_M cuda: fingerprints base ['fp_54cc0e13b8c4cf6c'] cand ['fp_54cc0e13b8c4cf6c'] equal=True
+Qwen3-8B-Q4_K_M cuda: 21/23 identical (23 answered 200, 4 with calls)
+DIFF Meta-Llama-3.1-8B-Instruct-Q4_K_M case 18 /v1/chat/completions: 200 vs 200
+  base {"id":"X","object":"chat.completion","created":0,"model":"Meta-Llama-3.1-8B-Instruct-Q4_K_M","system_fingerprint":"X","choices":[{"index":0,"message":{"role":"assistant","content":"Fact number 1 about the moon: \n\nThe moon is in a synchronous rotation with Earth, which means it takes the moon the same amount of time to rotate on its axis as it takes to orbit Earth. This is why we see the"},"logpr
+  cand {"id":"X","object":"chat.completion","created":0,"model":"Meta-Llama-3.1-8B-Instruct-Q4_K_M","system_fingerprint":"X","choices":[{"index":0,"message":{"role":"assistant","content":"Fact number 1 about the moon: \n\nThe moon is in a synchronous rotation with Earth, which means it takes the moon the same amount of time to rotate on its axis as it takes to orbit Earth. This is why we see the"},"logpr
+DIFF Meta-Llama-3.1-8B-Instruct-Q4_K_M case 20 /v1/chat/completions: 200 vs 200
+  base {"id":"X","object":"chat.completion","created":0,"model":"Meta-Llama-3.1-8B-Instruct-Q4_K_M","system_fingerprint":"X","choices":[{"index":0,"message":{"role":"assistant","content":"The third fact about the moon is that it has no atmosphere. The moon's surface is exposed to the vacuum of space, which means there is no air, wind, or weather on the moon. This is because the moon's gravity is"},"logpr
+  cand {"id":"X","object":"chat.completion","created":0,"model":"Meta-Llama-3.1-8B-Instruct-Q4_K_M","system_fingerprint":"X","choices":[{"index":0,"message":{"role":"assistant","content":"The third fact about the moon is that it has no atmosphere. The moon's surface is exposed to the vacuum of space, which means there is no air, wind, or weather on the moon. This is because the moon's gravity is"},"logpr
+Meta-Llama-3.1-8B-Instruct-Q4_K_M cuda: fingerprints base ['fp_f0925815b0a879e8'] cand ['fp_f0925815b0a879e8'] equal=True
+Meta-Llama-3.1-8B-Instruct-Q4_K_M cuda: 21/23 identical (23 answered 200, 9 with calls)
+DIFF qwen2.5-0.5b-q4_k_m case 17 /v1/chat/completions: 200 vs 200
+  base {"id":"X","object":"chat.completion","created":0,"model":"qwen2.5-0.5b-q4_k_m","system_fingerprint":"X","choices":[{"index":0,"message":{"role":"assistant","content":"Fact number 0 about the moon is:\n\nThe moon is a natural satellite of the Earth, orbiting around it at an average distance of about 384,400 kilometers (238,855 miles)."},"logprobs":null,"finish_reason":"length"}],"usage":{"prompt_to
+  cand {"id":"X","object":"chat.completion","created":0,"model":"qwen2.5-0.5b-q4_k_m","system_fingerprint":"X","choices":[{"index":0,"message":{"role":"assistant","content":"Fact number 0 about the moon is:\n\nThe moon is a natural satellite of the Earth, orbiting around it at an average distance of about 384,400 kilometers (238,855 miles)."},"logprobs":null,"finish_reason":"length"}],"usage":{"prompt_to
+DIFF qwen2.5-0.5b-q4_k_m case 18 /v1/chat/completions: 200 vs 200
+  base {"id":"X","object":"chat.completion","created":0,"model":"qwen2.5-0.5b-q4_k_m","system_fingerprint":"X","choices":[{"index":0,"message":{"role":"assistant","content":"Fact number 1 about the moon is that it is a natural satellite of the Earth. The moon is a rocky planet with a diameter of about 3,474 kilometers and a mass of about 7.34 x "},"logprobs":null,"finish_reason":"length"}],"usage":{"prom
+  cand {"id":"X","object":"chat.completion","created":0,"model":"qwen2.5-0.5b-q4_k_m","system_fingerprint":"X","choices":[{"index":0,"message":{"role":"assistant","content":"Fact number 1 about the moon is that it is a natural satellite of the Earth. The moon is a rocky planet with a diameter of about 3,474 kilometers and a mass of about 7.34 x "},"logprobs":null,"finish_reason":"length"}],"usage":{"prom
+qwen2.5-0.5b-q4_k_m cuda: fingerprints base ['fp_8b9214b47eacb25b'] cand ['fp_8b9214b47eacb25b'] equal=True
+qwen2.5-0.5b-q4_k_m cuda: 21/23 identical (23 answered 200, 7 with calls)
+Qwen3-0.6B-Q8_0 cuda: fingerprints base ['fp_d9e7308e0f94fbab'] cand ['fp_d9e7308e0f94fbab'] equal=True
+Qwen3-0.6B-Q8_0 cuda: 23/23 identical (23 answered 200, 8 with calls)
+DIFF Llama-3.2-1B-Instruct-Q4_K_M case 17 /v1/chat/completions: 200 vs 200
+  base {"id":"X","object":"chat.completion","created":0,"model":"Llama-3.2-1B-Instruct-Q4_K_M","system_fingerprint":"X","choices":[{"index":0,"message":{"role":"assistant","content":"Fact number 0 about the moon is that it is not round in shape. The moon appears to be roughly spherical in appearance, but it is actually an ellipsoid shape."},"logprobs":null,"finish_reason":"stop"}],"usage":{"prompt_tokens
+  cand {"id":"X","object":"chat.completion","created":0,"model":"Llama-3.2-1B-Instruct-Q4_K_M","system_fingerprint":"X","choices":[{"index":0,"message":{"role":"assistant","content":"Fact number 0 about the moon is that it is not round in shape. The moon appears to be roughly spherical in appearance, but it is actually an ellipsoid shape."},"logprobs":null,"finish_reason":"stop"}],"usage":{"prompt_tokens
+DIFF Llama-3.2-1B-Instruct-Q4_K_M case 18 /v1/chat/completions: 200 vs 200
+  base {"id":"X","object":"chat.completion","created":0,"model":"Llama-3.2-1B-Instruct-Q4_K_M","system_fingerprint":"X","choices":[{"index":0,"message":{"role":"assistant","content":"Here's fact number 1 about the moon:\n\n1. The moon is the fifth-largest moon in the solar system, with a diameter of approximately 2,159 miles (3,475 kilometers)."},"logprobs":null,"finish_reason":"stop"}],"usage":{"prompt_
+  cand {"id":"X","object":"chat.completion","created":0,"model":"Llama-3.2-1B-Instruct-Q4_K_M","system_fingerprint":"X","choices":[{"index":0,"message":{"role":"assistant","content":"Here's fact number 1 about the moon:\n\n1. The moon is the fifth-largest moon in the solar system, with a diameter of approximately 2,159 miles (3,475 kilometers)."},"logprobs":null,"finish_reason":"stop"}],"usage":{"prompt_
+Llama-3.2-1B-Instruct-Q4_K_M cuda: fingerprints base ['fp_2b9914c36b037b52'] cand ['fp_2b9914c36b037b52'] equal=True
+Llama-3.2-1B-Instruct-Q4_K_M cuda: 21/23 identical (23 answered 200, 9 with calls)
+moe:         attention + router on the GPU (1.78 GiB, ctx 4096), 32 experts x 24 layers on the CPU (top-4), kv f16
+moe:         attention + router on the GPU (1.78 GiB, ctx 4096), 32 experts x 24 layers on the CPU (top-4), kv f16
+DIFF gpt-oss-20b-MXFP4 case 17 /v1/chat/completions: 200 vs 200
+  base {"id":"X","object":"chat.completion","created":0,"model":"gpt-oss-20b-MXFP4","system_fingerprint":"X","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning_content":"The user says: \"Tell me fact number 0 about the moon.\" They want a fact number 0. That is unusual: fact number 0? They might want a fact that is labeled as number 0."},"logprobs":null,"finish_reason":"length"}]
+  cand {"id":"X","object":"chat.completion","created":0,"model":"gpt-oss-20b-MXFP4","system_fingerprint":"X","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning_content":"The user says: \"Tell me fact number 0 about the moon.\" They want a fact number 0. That is unusual: fact number 0? They might want a fact that is labeled as number 0."},"logprobs":null,"finish_reason":"length"}]
+DIFF gpt-oss-20b-MXFP4 case 19 /v1/chat/completions: 200 vs 200
+  base {"id":"X","object":"chat.completion","created":0,"model":"gpt-oss-20b-MXFP4","system_fingerprint":"X","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning_content":"The user says: \"Tell me fact number 2 about the moon.\" They want a fact number 2 about the moon. They might want a specific fact, maybe from a list. But they didn't specify a list."},"logprobs":null,"finish_rea
+  cand {"id":"X","object":"chat.completion","created":0,"model":"gpt-oss-20b-MXFP4","system_fingerprint":"X","choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning_content":"The user says: \"Tell me fact number 2 about the moon.\" They want a fact number 2 about the moon. They might want a specific fact, maybe from a list. But they didn't specify a list."},"logprobs":null,"finish_rea
+gpt-oss-20b-MXFP4 cuda: fingerprints base ['fp_cbe4b60fb72b91d4'] cand ['fp_cbe4b60fb72b91d4'] equal=True
+gpt-oss-20b-MXFP4 cuda: 21/23 identical (22 answered 200, 7 with calls)
+SERVE AB DIFFERS
+md5 rc=1 serve rc=1
+[axon-run 12:42:01] exit 1 after 286.2s (host bella)
