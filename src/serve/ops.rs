@@ -206,6 +206,9 @@ pub struct Metrics {
     pub idle_evictions: AtomicU64,
     /// Prompts refused by `--max-prompt-tokens`.
     pub refused_prompts: AtomicU64,
+    /// gpt-oss tool calls begun but not finished as a JSON object
+    /// (returned as reasoning).
+    pub tool_calls_dropped: AtomicU64,
     pub ttft: Histogram,
     pub itl: Histogram,
     pub slots: Mutex<SlotsView>,
@@ -220,6 +223,7 @@ impl Default for Metrics {
             in_flight: AtomicUsize::new(0),
             idle_evictions: AtomicU64::new(0),
             refused_prompts: AtomicU64::new(0),
+            tool_calls_dropped: AtomicU64::new(0),
             ttft: Histogram::new(TTFT_BOUNDS),
             itl: Histogram::new(ITL_BOUNDS),
             slots: Mutex::default(),
@@ -340,6 +344,12 @@ impl Metrics {
             "axon_prompt_refused_total",
             "Prompts refused by --max-prompt-tokens.",
             self.refused_prompts.load(Ordering::Relaxed),
+        );
+        counter(
+            &mut o,
+            "axon_tool_calls_dropped_total",
+            "gpt-oss tool calls begun but not finished as a JSON object (returned as reasoning).",
+            self.tool_calls_dropped.load(Ordering::Relaxed),
         );
         let (total, busy) = lock(&self.slots).counts();
         gauge(

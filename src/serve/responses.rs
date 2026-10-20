@@ -1089,6 +1089,7 @@ mod tests {
         let norm = |t: Option<tools::ToolReq>| {
             t.map(|mut t| {
                 t.tools = t.tools.iter().map(sorted).collect();
+                t.offered = t.offered.iter().map(sorted).collect();
                 t
             })
         };

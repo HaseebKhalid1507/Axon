@@ -1,0 +1,702 @@
+{
+ "tools_weather": {
+  "request": {
+   "messages": [
+    {
+     "role": "user",
+     "content": "Weather in Paris?"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather in a city",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Paris"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ],
+         "default": "celsius"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "prompt": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2025-08-05\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.\nCalls to these tools must go to the commentary channel: 'functions'.<|end|><|start|>developer<|message|># Tools\n\n## functions\n\nnamespace functions {\n\n// Get the current weather in a city\ntype get_weather = (_: {\n// City name, e.g. Paris\ncity: string,\nunit?: \"celsius\" | \"fahrenheit\", // default: celsius,\n}) => any;\n\n} // namespace functions<|end|><|start|>user<|message|>Weather in Paris?<|end|><|start|>assistant"
+ },
+ "tools_rich": {
+  "request": {
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are helpful."
+    },
+    {
+     "role": "user",
+     "content": "Find it"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "search",
+      "description": "Search the index.\nReturns ranked hits.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "query": {
+         "type": "string",
+         "description": "What to look for"
+        },
+        "limit": {
+         "type": "integer",
+         "default": 10
+        },
+        "ratio": {
+         "type": "number",
+         "default": 0.5
+        },
+        "exact": {
+         "type": "boolean",
+         "default": false
+        },
+        "tags": {
+         "type": "array",
+         "items": {
+          "type": "string"
+         }
+        },
+        "scores": {
+         "type": "array",
+         "items": {
+          "type": "number"
+         },
+         "nullable": true
+        },
+        "ids": {
+         "type": "array",
+         "items": {
+          "type": "integer"
+         }
+        },
+        "flags": {
+         "type": "array",
+         "items": {
+          "type": "boolean"
+         }
+        },
+        "grid": {
+         "type": "array",
+         "items": {
+          "type": "array",
+          "items": {
+           "type": "string"
+          }
+         }
+        },
+        "modes": {
+         "type": "array",
+         "items": {
+          "type": "string",
+          "enum": [
+           "a",
+           "b"
+          ]
+         }
+        },
+        "anything": {
+         "type": "array"
+        },
+        "filters": {
+         "type": "object",
+         "description": "Narrow it down",
+         "properties": {
+          "lang": {
+           "type": "string",
+           "enum": [
+            "en",
+            "fr"
+           ]
+          },
+          "since": {
+           "type": "string",
+           "nullable": true
+          },
+          "deep": {
+           "type": "object",
+           "properties": {
+            "x": {
+             "type": "number"
+            }
+           },
+           "required": [
+            "x"
+           ]
+          }
+         },
+         "required": [
+          "lang"
+         ]
+        },
+        "docs": {
+         "type": "array",
+         "items": {
+          "type": "object",
+          "properties": {
+           "title": {
+            "type": "string"
+           },
+           "body": {
+            "type": "string"
+           },
+           "rank": {
+            "type": "number"
+           }
+          }
+         }
+        },
+        "pair": {
+         "type": "array",
+         "items": {
+          "type": "object",
+          "properties": {
+           "k": {
+            "type": "string"
+           }
+          }
+         }
+        },
+        "blob": {
+         "type": "object"
+        },
+        "kind": {
+         "type": [
+          "string",
+          "null"
+         ]
+        },
+        "one": {
+         "type": [
+          "number"
+         ]
+        },
+        "either": {
+         "oneOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "number"
+          }
+         ]
+        },
+        "objs": {
+         "oneOf": [
+          {
+           "type": "object"
+          },
+          {
+           "type": "string"
+          }
+         ]
+        },
+        "fancy": {
+         "oneOf": [
+          {
+           "type": "string",
+           "description": "a name"
+          },
+          {
+           "type": "integer",
+           "default": 3
+          }
+         ],
+         "default": "x"
+        },
+        "any_of": {
+         "anyOf": [
+          {
+           "type": "string"
+          },
+          {
+           "type": "integer"
+          }
+         ]
+        },
+        "untyped": {
+         "description": "no type at all"
+        },
+        "level": {
+         "type": "string",
+         "enum": [
+          "low",
+          "high"
+         ],
+         "default": "low",
+         "description": "How hard"
+        },
+        "maybe": {
+         "type": "string",
+         "default": null
+        },
+        "unicode": {
+         "type": "string",
+         "description": "ünï \"q\" 中文"
+        }
+       },
+       "required": [
+        "query",
+        "filters"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "now",
+      "description": "The time",
+      "parameters": {
+       "type": "object",
+       "properties": {}
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "ping",
+      "description": "Ping"
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "bash",
+      "description": "Run a shell command and return its output.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string",
+         "description": "The command to run"
+        },
+        "timeout": {
+         "type": "integer",
+         "description": "Seconds",
+         "default": 30
+        }
+       },
+       "required": [
+        "command"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "prompt": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2025-08-05\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.\nCalls to these tools must go to the commentary channel: 'functions'.<|end|><|start|>developer<|message|># Instructions\n\nYou are helpful.\n\n# Tools\n\n## functions\n\nnamespace functions {\n\n// Search the index.\nReturns ranked hits.\ntype search = (_: {\n// What to look for\nquery: string,\nlimit?: number, // default: 10,\nratio?: number, // default: 0.5,\nexact?: boolean, // default: false,\ntags?: string[],\nscores?: number[] | null,\nids?: number[],\nflags?: boolean[],\ngrid?: string[][],\nmodes?: string[],\nanything?: any[],\n// Narrow it down\nfilters: {\nlang: \n                \"en\" | \"fr\", since?: \n                string | null, deep?: \n                {\nx: \n                number}},\ndocs?: any[],\npair?: {\nk?: \n                string}[],\nblob?: object,\nkind?: string | null,\none?: number,\neither?: string | \nnumber,\nobjs?: object | \nstring,\nfancy?: string// a name | \nnumber                    // default: 3// default: x,\nany_of?: any,\n// no type at all\nuntyped?: any,\n// How hard\nlevel?: \"low\" | \"high\", // default: low,\nmaybe?: string, // default: null,\n// ünï \"q\" 中文\nunicode?: string,\n}) => any;\n\n// The time\ntype now = () => any;\n\n// Ping\ntype ping = () => any;\n\n// Run a shell command and return its output.\ntype bash = (_: {\n// The command to run\ncommand: string,\n// Seconds\ntimeout?: number, // default: 30,\n}) => any;\n\n} // namespace functions<|end|><|start|>user<|message|>Find it<|end|><|start|>assistant"
+ },
+ "one": {
+  "request": {
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are helpful."
+    },
+    {
+     "role": "user",
+     "content": "Weather in Paris?"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{\"city\":\"Paris\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "c1",
+     "content": "18C sunny"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather in a city",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Paris"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ],
+         "default": "celsius"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "prompt": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2025-08-05\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.\nCalls to these tools must go to the commentary channel: 'functions'.<|end|><|start|>developer<|message|># Instructions\n\nYou are helpful.\n\n# Tools\n\n## functions\n\nnamespace functions {\n\n// Get the current weather in a city\ntype get_weather = (_: {\n// City name, e.g. Paris\ncity: string,\nunit?: \"celsius\" | \"fahrenheit\", // default: celsius,\n}) => any;\n\n} // namespace functions<|end|><|start|>user<|message|>Weather in Paris?<|end|><|start|>assistant to=functions.get_weather<|channel|>commentary json<|message|>{\"city\": \"Paris\"}<|call|><|start|>functions.get_weather to=assistant<|channel|>commentary<|message|>\"18C sunny\"<|end|><|start|>assistant"
+ },
+ "thinking_kept": {
+  "request": {
+   "messages": [
+    {
+     "role": "user",
+     "content": "Weather in Paris?"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{\"city\":\"Paris\"}"
+       }
+      }
+     ],
+     "reasoning_content": "Need the weather tool."
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "c1",
+     "content": "{\"temp\": 18}"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather in a city",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Paris"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ],
+         "default": "celsius"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "prompt": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2025-08-05\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.\nCalls to these tools must go to the commentary channel: 'functions'.<|end|><|start|>developer<|message|># Tools\n\n## functions\n\nnamespace functions {\n\n// Get the current weather in a city\ntype get_weather = (_: {\n// City name, e.g. Paris\ncity: string,\nunit?: \"celsius\" | \"fahrenheit\", // default: celsius,\n}) => any;\n\n} // namespace functions<|end|><|start|>user<|message|>Weather in Paris?<|end|><|start|>assistant<|channel|>analysis<|message|>Need the weather tool.<|end|><|start|>assistant to=functions.get_weather<|channel|>commentary json<|message|>{\"city\": \"Paris\"}<|call|><|start|>functions.get_weather to=assistant<|channel|>commentary<|message|>\"{\\\"temp\\\": 18}\"<|end|><|start|>assistant"
+ },
+ "content_kept": {
+  "request": {
+   "messages": [
+    {
+     "role": "user",
+     "content": "Weather in Paris?"
+    },
+    {
+     "role": "assistant",
+     "content": "Checking.",
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{\"city\":\"Paris\",\"unit\":\"celsius\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "c1",
+     "content": "18C"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather in a city",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Paris"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ],
+         "default": "celsius"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "prompt": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2025-08-05\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.\nCalls to these tools must go to the commentary channel: 'functions'.<|end|><|start|>developer<|message|># Tools\n\n## functions\n\nnamespace functions {\n\n// Get the current weather in a city\ntype get_weather = (_: {\n// City name, e.g. Paris\ncity: string,\nunit?: \"celsius\" | \"fahrenheit\", // default: celsius,\n}) => any;\n\n} // namespace functions<|end|><|start|>user<|message|>Weather in Paris?<|end|><|start|>assistant<|channel|>analysis<|message|>Checking.<|end|><|start|>assistant to=functions.get_weather<|channel|>commentary json<|message|>{\"city\": \"Paris\", \"unit\": \"celsius\"}<|call|><|start|>functions.get_weather to=assistant<|channel|>commentary<|message|>\"18C\"<|end|><|start|>assistant"
+ },
+ "dropped_after_final": {
+  "request": {
+   "messages": [
+    {
+     "role": "user",
+     "content": "Weather in Paris?"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{\"city\":\"Paris\"}"
+       }
+      }
+     ],
+     "reasoning_content": "Need the weather tool."
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "c1",
+     "content": "18C"
+    },
+    {
+     "role": "assistant",
+     "content": "It is 18C in Paris."
+    },
+    {
+     "role": "user",
+     "content": "Thanks"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather in a city",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Paris"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ],
+         "default": "celsius"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "prompt": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2025-08-05\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.\nCalls to these tools must go to the commentary channel: 'functions'.<|end|><|start|>developer<|message|># Tools\n\n## functions\n\nnamespace functions {\n\n// Get the current weather in a city\ntype get_weather = (_: {\n// City name, e.g. Paris\ncity: string,\nunit?: \"celsius\" | \"fahrenheit\", // default: celsius,\n}) => any;\n\n} // namespace functions<|end|><|start|>user<|message|>Weather in Paris?<|end|><|start|>assistant to=functions.get_weather<|channel|>commentary json<|message|>{\"city\": \"Paris\"}<|call|><|start|>functions.get_weather to=assistant<|channel|>commentary<|message|>\"18C\"<|end|><|start|>assistant<|channel|>final<|message|>It is 18C in Paris.<|end|><|start|>user<|message|>Thanks<|end|><|start|>assistant"
+ },
+ "notools_history": {
+  "request": {
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are helpful."
+    },
+    {
+     "role": "user",
+     "content": "Weather in Paris?"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{\"city\":\"Paris\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "c1",
+     "content": "18C\nsunny \"warm\""
+    }
+   ]
+  },
+  "prompt": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2025-08-05\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.<|end|><|start|>developer<|message|># Instructions\n\nYou are helpful.\n\n<|end|><|start|>user<|message|>Weather in Paris?<|end|><|start|>assistant to=functions.get_weather<|channel|>commentary json<|message|>{\"city\": \"Paris\"}<|call|><|start|>functions.get_weather to=assistant<|channel|>commentary<|message|>\"18C\\nsunny \\\"warm\\\"\"<|end|><|start|>assistant"
+ },
+ "two_rounds": {
+  "request": {
+   "messages": [
+    {
+     "role": "user",
+     "content": "Paris then Rome"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{\"city\":\"Paris\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "c1",
+     "content": "18C"
+    },
+    {
+     "role": "assistant",
+     "content": null,
+     "tool_calls": [
+      {
+       "id": "c1",
+       "type": "function",
+       "function": {
+        "name": "get_weather",
+        "arguments": "{\"city\":\"Rome\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "tool_call_id": "c1",
+     "content": "25C"
+    }
+   ],
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "get_weather",
+      "description": "Get the current weather in a city",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "city": {
+         "type": "string",
+         "description": "City name, e.g. Paris"
+        },
+        "unit": {
+         "type": "string",
+         "enum": [
+          "celsius",
+          "fahrenheit"
+         ],
+         "default": "celsius"
+        }
+       },
+       "required": [
+        "city"
+       ]
+      }
+     }
+    },
+    {
+     "type": "function",
+     "function": {
+      "name": "bash",
+      "description": "Run a shell command and return its output.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "command": {
+         "type": "string",
+         "description": "The command to run"
+        },
+        "timeout": {
+         "type": "integer",
+         "description": "Seconds",
+         "default": 30
+        }
+       },
+       "required": [
+        "command"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "prompt": "<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\nCurrent date: 2025-08-05\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.\nCalls to these tools must go to the commentary channel: 'functions'.<|end|><|start|>developer<|message|># Tools\n\n## functions\n\nnamespace functions {\n\n// Get the current weather in a city\ntype get_weather = (_: {\n// City name, e.g. Paris\ncity: string,\nunit?: \"celsius\" | \"fahrenheit\", // default: celsius,\n}) => any;\n\n// Run a shell command and return its output.\ntype bash = (_: {\n// The command to run\ncommand: string,\n// Seconds\ntimeout?: number, // default: 30,\n}) => any;\n\n} // namespace functions<|end|><|start|>user<|message|>Paris then Rome<|end|><|start|>assistant to=functions.get_weather<|channel|>commentary json<|message|>{\"city\": \"Paris\"}<|call|><|start|>functions.get_weather to=assistant<|channel|>commentary<|message|>\"18C\"<|end|><|start|>assistant to=functions.get_weather<|channel|>commentary json<|message|>{\"city\": \"Rome\"}<|call|><|start|>functions.get_weather to=assistant<|channel|>commentary<|message|>\"25C\"<|end|><|start|>assistant"
+ }
+}

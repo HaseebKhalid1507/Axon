@@ -429,7 +429,8 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
   `axon_generated_tokens_total`, `axon_prompt_tokens_total`,
   `axon_prompt_cached_tokens_total` (prefix reuse), `axon_requests_in_flight`,
   `axon_queue_depth` (in flight, not in a slot), `axon_slots_busy` / `axon_slots_free`,
-  `axon_slot_idle_evictions_total`, `axon_prompt_refused_total`, and the histograms
+  `axon_slot_idle_evictions_total`, `axon_prompt_refused_total`,
+  `axon_tool_calls_dropped_total` (gpt-oss calls begun but not finished as a JSON object), and the histograms
   `axon_ttft_seconds` (from the request's body read, so tokenizing and queueing count, to
   its first text) and `axon_itl_seconds` (between a request's
   text events, about one token each). No host-RAM KV store hits yet: serve has no store.
@@ -474,8 +475,17 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
   `<tool_call>{"name": ..., "arguments": ...}</tool_call>`, and see results as
   `<tool_response>` blocks. Llama 3.1/3.2 get the tools in the first user message, call with
   a JSON reply (`{"name": ..., "parameters": ...}`) and see results as `ipython` turns (one
-  call per message, as the template requires). Other chat formats answer a tool request
-  with a 400. A request without tools or tool turns is rendered exactly as before.
+  call per message, as the template requires). gpt-oss (harmony) gets the tools as
+  TypeScript in the developer message (`# Tools` / `namespace functions { ... }`), calls on
+  the commentary channel (`<|channel|>commentary to=functions.NAME <|constrain|>json
+  <|message|>{args}`), and sees results as `functions.NAME` messages; its analysis channel
+  stays `reasoning_content`. Its calls are read from the special tokens only: text the
+  model writes (say, quoting the call syntax) is never a call. A call is made as soon as
+  its arguments are a whole JSON object, and that ends the reply (one call per reply; the
+  model's `<|call|>` isn't waited for). Past calls are rendered in the template's history
+  form (`<|start|>assistant to=functions.NAME<|channel|>commentary json<|message|>{args}<|call|>`).
+  Other chat formats answer a tool request with a 400. A request without tools or tool
+  turns is rendered exactly as before.
 - The reply's calls come back as OpenAI `tool_calls`, with `finish_reason: "tool_calls"`.
   Streamed: a call is sent as soon as its block closes, as two `delta.tool_calls` chunks: the
   first carries `index`, `id`, `type` and `function.name`, the second `function.arguments`.
@@ -487,7 +497,10 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
   cut off mid-call) is not a call: it is returned as `content`, tags and all. So
   `arguments` is always valid JSON. A string `arguments` value is used as the arguments if
   it is itself JSON, else returned as its JSON string literal. Qwen3's reasoning still
-  comes as `reasoning_content`.
+  comes as `reasoning_content`. gpt-oss is stricter: arguments must be a JSON object, and a
+  call that ends without one (a header, its `<|call|>`, the token limit) is not a call. Its
+  text comes back as `reasoning_content` (it was on the commentary channel), never as
+  `content`, and is counted in `axon_tool_calls_dropped_total`.
 - The parser reads tags, not prose or JSON. `<tool_call>` written in ordinary text opens a
   block (which comes back as content if it isn't a call), and a `</tool_call>` inside a
   JSON string value ends the block early (the call then fails to parse and is returned
@@ -499,8 +512,12 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
 - `tool_choice`: `auto` (default); `none` (the tools are not shown to the model, and its
   reply is plain content); `required` or `{"type": "function", "function": {"name": ...}}`.
   The last two start the reply with the opening of a call (the named one: through its
-  `"arguments": `), so the model must call. Qwen3 then skips its reasoning. Without
-  `tools` they are a 400.
+  `"arguments": `), so the model must call. Qwen3 and gpt-oss then skip their reasoning.
+  gpt-oss: a named choice opens `<|channel|>commentary to=functions.NAME <|constrain|>json
+  <|message|>` (the form the model writes calls in) and keeps every tool in the prompt.
+  `required` with one tool is that tool's named choice; with several it is a 400, since a
+  prefill can't force one of them (constrained decoding: #116).
+  Without `tools` they are a 400.
   `parallel_tool_calls`, `strict`, `store`, `reasoning_effort` and `prompt_cache_key` are
   accepted and ignored.
 - Context: an agent's system prompt and tool schemas can be 15-25k tokens; the default

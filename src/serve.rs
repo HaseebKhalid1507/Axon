@@ -410,22 +410,31 @@ struct TextOut<'t> {
     /// Drop newlines until the next other character.
     strip_nl: bool,
     stop: StopMatcher,
+    /// Harmony with tools: the reply's call (`TextOut::harmony`).
+    call: CallState,
+    /// Counts dropped calls (`axon_tool_calls_dropped_total`).
+    metrics: Option<Arc<ops::Metrics>>,
+}
+
+/// A harmony reply's call, as `TextOut` reads it.
+#[derive(Default)]
+enum CallState {
+    #[default]
+    None,
+    /// Open: its recipient, its arguments' text so far and their scan.
+    Open(String, String, tools::ArgScan),
+    /// Made: the reply is over.
+    Done,
 }
 
 impl TextOut<'_> {
     /// One more token: (content, reasoning, a stop string was hit).
     fn push(&mut self, id: u32) -> (String, String, bool) {
         let first = std::mem::replace(&mut self.first, false);
-        if let Some(ch) = &mut self.channels {
-            let bytes = self.tok.decode_bytes(&[id]);
-            return match ch.push(id, &bytes) {
-                chat::Part::Hidden => Default::default(),
-                chat::Part::Reasoning => (String::new(), self.utf8.push(&bytes), false),
-                chat::Part::Answer => {
-                    let (c, hit) = self.stop.push(&self.utf8.push(&bytes));
-                    (c, String::new(), hit)
-                }
-            };
+        if let Some(mut ch) = self.channels.take() {
+            let r = self.harmony(&mut ch, id);
+            self.channels = Some(ch);
+            return r;
         }
         if let Some((open, close)) = self.think {
             if first && id == open {
@@ -451,8 +460,170 @@ impl TextOut<'_> {
         (c, String::new(), hit)
     }
 
-    /// The end of the output: what was held back.
+    /// A harmony reply's token. With tools, the content goes out escaped
+    /// for the tools parser and the call framed out of band
+    /// (`tools::harmony_text`). A call is read from the special tokens that
+    /// delimit it (`Channels`) and held until it is decided: it is made as
+    /// soon as its arguments are a whole JSON object, which ends the reply
+    /// (one call per reply; nothing valid follows an object's `}`). Ended
+    /// any other way (its marker, a header, the token limit) with arguments
+    /// that aren't an object, it is no call, and its text is reasoning, as
+    /// the commentary channel's is without tools. Stop strings don't apply
+    /// to a call.
+    fn harmony(&mut self, ch: &mut chat::Channels, id: u32) -> (String, String, bool) {
+        let bytes = self.tok.decode_bytes(&[id]);
+        let tools = ch.tools();
+        // A call the prompt opened (tool_choice) opens first.
+        let mut c = self.call_open(ch);
+        let was = ch.call().is_some();
+        let part = ch.push(id, &bytes);
+        let now = ch.call().is_some();
+        if was && now && matches!(self.call, CallState::Open(..)) {
+            let t = self.utf8.push(&bytes);
+            if self.call_push(&t)
+                && let Some(f) = self.call_made()
+            {
+                c.push_str(&f);
+                return (c, String::new(), true);
+            }
+            return (c, String::new(), false);
+        }
+        let mut r = String::new();
+        if !now && matches!(self.call, CallState::Open(..)) {
+            let t = self.utf8.finish();
+            if self.call_push(&t)
+                && let Some(f) = self.call_made()
+            {
+                c.push_str(&f);
+                return (c, r, true);
+            }
+            r = self.call_dropped();
+        }
+        if ch.ended() {
+            // `<|call|>`: the reply is over.
+            return (c, r, true);
+        }
+        c.push_str(&self.call_open(ch));
+        match part {
+            chat::Part::Hidden => (c, r, false),
+            chat::Part::Reasoning => {
+                r.push_str(&self.utf8.push(&bytes));
+                (c, r, false)
+            }
+            chat::Part::Answer => {
+                let (a, hit) = self.stop.push(&self.utf8.push(&bytes));
+                if tools {
+                    c.push_str(&tools::harmony_text(&a));
+                } else {
+                    c.push_str(&a);
+                }
+                (c, r, hit)
+            }
+        }
+    }
+
+    /// Opens the call `ch` is in, once per reply; the content held for stop
+    /// strings goes out first.
+    fn call_open(&mut self, ch: &chat::Channels) -> String {
+        match ch.call() {
+            Some(to) if matches!(self.call, CallState::None) => {
+                self.call = CallState::Open(to.to_string(), String::new(), Default::default());
+                tools::harmony_text(&self.stop.finish())
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// More of the open call's arguments: whether they may now be whole
+    /// (`ArgScan`: O(1) a byte, so a big argument costs one pass).
+    fn call_push(&mut self, t: &str) -> bool {
+        match &mut self.call {
+            CallState::Open(_, args, scan) => {
+                args.push_str(t);
+                scan.feed(t)
+            }
+            _ => false,
+        }
+    }
+
+    /// The open call's frame, if its arguments are a whole JSON object:
+    /// parsed once, when the scan closes the top-level object.
+    fn call_made(&mut self) -> Option<String> {
+        let CallState::Open(to, args, scan) = &mut self.call else {
+            return None;
+        };
+        let a = args.trim();
+        if !matches!(tools::parse_json(a), Some(tools::J::Obj(_))) {
+            scan.kill();
+            return None;
+        }
+        let f = tools::harmony_call_open(to) + &tools::harmony_text(a) + tools::HARMONY_CALL_END;
+        self.call = CallState::Done;
+        Some(f)
+    }
+
+    /// The open call isn't one: its text (reasoning). Counted, and logged
+    /// with AXON_SERVE_DEBUG=1, so that "axon dropped it" can be told from
+    /// "the model didn't call".
+    fn call_dropped(&mut self) -> String {
+        match std::mem::take(&mut self.call) {
+            CallState::Open(to, args, _) => {
+                if let Some(m) = &self.metrics {
+                    m.tool_calls_dropped.fetch_add(1, Ordering::Relaxed);
+                }
+                if debug() {
+                    eprintln!(
+                        "axon serve: a call to {to} dropped: its arguments ({} bytes) are not a \
+                         JSON object; returned as reasoning",
+                        args.len()
+                    );
+                }
+                args
+            }
+            other => {
+                self.call = other;
+                String::new()
+            }
+        }
+    }
+
+    /// The end of the output: what was held back. With tools, a reply that
+    /// never opened a message (no channel header) is the answer, as without.
     fn finish(&mut self) -> (String, String) {
+        let Some(mut ch) = self.channels.take() else {
+            return self.finish_text();
+        };
+        if !ch.tools() {
+            self.channels = Some(ch);
+            return self.finish_text();
+        }
+        let mut c = self.call_open(&ch);
+        let mut r = String::new();
+        if matches!(self.call, CallState::Open(..)) {
+            // The reply ended inside the call (the token limit).
+            let t = self.utf8.finish();
+            let made = if self.call_push(&t) {
+                self.call_made()
+            } else {
+                None
+            };
+            match made {
+                Some(f) => c.push_str(&f),
+                None => r = self.call_dropped(),
+            }
+        }
+        let unheaded = ch.take_unheaded();
+        self.channels = Some(ch);
+        if let Some(u) = unheaded {
+            let (a, _) = self.stop.push(&String::from_utf8_lossy(&u));
+            c.push_str(&tools::harmony_text(&a));
+        }
+        let (t, r2) = self.finish_text();
+        c.push_str(&tools::harmony_text(&t));
+        (c, r + &r2)
+    }
+
+    fn finish_text(&mut self) -> (String, String) {
         let s = self.utf8.finish();
         if self.reasoning {
             return (self.stop.finish(), s);
@@ -511,7 +682,7 @@ fn debug() -> bool {
 }
 
 /// The detokenizer and stop matcher of `job`'s reply.
-fn text_out<'t>(tok: &'t Tokenizer, job: &Job) -> TextOut<'t> {
+fn text_out<'t>(tok: &'t Tokenizer, job: &Job, metrics: &Arc<ops::Metrics>) -> TextOut<'t> {
     TextOut {
         tok,
         utf8: Utf8Stream::default(),
@@ -521,6 +692,8 @@ fn text_out<'t>(tok: &'t Tokenizer, job: &Job) -> TextOut<'t> {
         first: true,
         strip_nl: false,
         stop: StopMatcher::new(job.stops.clone()),
+        call: CallState::None,
+        metrics: Some(metrics.clone()),
     }
 }
 
@@ -642,7 +815,7 @@ impl<'a> Engine<'a> {
             Some(d) => crate::draft::Drafter::Model(d),
             None => crate::draft::Drafter::Lookup(PromptLookup::new()),
         };
-        let mut out = text_out(self.tok, job);
+        let mut out = text_out(self.tok, job, &self.metrics);
         let mut ids = Vec::new();
         let generated = &self.generated;
         // A request that fits a slot may hand over to the batch.
@@ -1165,7 +1338,7 @@ fn engine(
             && (!b.idle() || waiting.len() > 1)
         {
             let job = waiting.remove(i).unwrap();
-            let out = text_out(e.tok, &job);
+            let out = text_out(e.tok, &job, &e.metrics);
             let tx = job.tx.clone();
             if let Err(err) = or_exit("an admission", || b.admit(job, out)) {
                 fatal(b, &err, Some(tx));
@@ -2195,8 +2368,22 @@ fn run_request(
                 Some(tr) => match tools::render(t, m.tok, tr, no_think) {
                     Ok(r) => {
                         parser = r.parser;
+                        // Harmony: calls are told apart by channel. With
+                        // --think-inline the raw reply is the content.
+                        let mut stop = t.stop().to_vec();
+                        if let Some(ch) = r.channels {
+                            if sh.think_inline {
+                                parser = None;
+                            } else {
+                                // `<|call|>` ends the reply through the
+                                // splitter, which must see it to tell a
+                                // closed call from a cut one.
+                                stop.retain(|&i| Some(i) != ch.call_token());
+                                channels = Some(ch);
+                            }
+                        }
                         let think = think.filter(|_| !r.no_reasoning);
-                        (r.ids, t.stop().to_vec(), think)
+                        (r.ids, stop, think)
                     }
                     Err(e) => return out.err(c, e, keep),
                 },
