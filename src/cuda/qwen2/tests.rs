@@ -3,6 +3,8 @@ use crate::cuda::Kernels;
 use crate::model::Qwen2;
 use std::path::PathBuf;
 
+mod twin;
+
 fn model_at(rel: &str) -> Option<Model> {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
     if !p.exists() {
@@ -2662,7 +2664,7 @@ fn gpu_batched(
     let f = km.function(kernel).unwrap();
     let st = act_stride_t(cols) as u64;
     // The Q6_K prefill copy's kernels take the copy (`q6k8_copy`).
-    let rb = match kernel.ends_with("q6k8") {
+    let rb = match kernel.contains("q6k8") {
         true => (cols / 256 * Q6K8_BYTES) as u64,
         false => quant::row_bytes(qt, cols) as u64,
     };
