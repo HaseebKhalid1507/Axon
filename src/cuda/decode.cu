@@ -227,6 +227,64 @@ extern "C" __global__ void rmsnorm_quant(const float* __restrict__ x, const floa
     rmsnorm_quant_dev(x, g, eps, n, want_k, act, y);
 }
 
+// rmsnorm_quant_dev's results (act only) computed by a block of fewer
+// threads (a multiple of 32 dividing 1024: the GEMV epilogues' 128), which
+// plays the 1024-thread block exactly: thread t runs the sum-of-squares
+// chains of threads t, t + blockDim.x, .. (each over x[v], x[v + 1024], ..
+// in order), warp w then holds whole warps w, w + nw, .. of the big block,
+// reduces each with the same warp_sum (same lanes, same tree) into its
+// slot of sh, and every warp finishes with block_sum's last warp_sum over
+// the 32 slots. Then the same per-256-block quantization, by fewer warps.
+// Same operations on the same operands: the same bits. x is read through
+// L2 (ld.cg): other blocks of the calling kernel wrote it.
+__device__ void rmsnorm_quant_1024(const float* x, const float* __restrict__ g, float eps, int n,
+                                   int want_k, u8* __restrict__ act) {
+    __shared__ float sh[32];
+    int lane = threadIdx.x & 31, w = threadIdx.x >> 5, nw = blockDim.x >> 5;
+    for (int v = threadIdx.x; v < 1024; v += blockDim.x) {
+        float ss = 0.0f;
+        for (int i = v; i < n; i += 1024) {
+            float xi = __ldcg(x + i);
+            ss = __fadd_rn(ss, __fmul_rn(xi, xi));
+        }
+        ss = warp_sum(ss);
+        if (lane == 0) sh[v >> 5] = ss;
+    }
+    __syncthreads();
+    float ss = warp_sum(sh[lane]);
+    float ms = __fdiv_rn(ss, (float)n);
+    float inv = __fdiv_rn(1.0f, __fsqrt_rn(__fadd_rn(ms, eps)));
+    for (int blk = w; blk * 256 < n; blk += nw) {
+        float v[8];
+        int e0 = blk * 256 + lane * 8;
+        for (int i = 0; i < 8; i++) {
+            int e = e0 + i;
+            v[i] = e < n ? __fmul_rn(__fmul_rn(__ldcg(x + e), inv), g[e]) : 0.0f;
+        }
+        quant_warp(v, n, blk, act, want_k);
+    }
+}
+
+// Whether this block is the last of `total` to get here (each block calls
+// it once, every thread): thread 0 publishes the block's stores (its
+// own: in the GEMVs it is the one that writes) and takes a ticket. The
+// last block resets the counter for the next launch (a captured graph
+// replays it) and sees every other block's stores.
+__device__ bool last_block(u32* tick, u32 total) {
+    __shared__ int last;
+    __syncthreads();
+    if (threadIdx.x == 0) {
+        __threadfence();
+        last = atomicAdd(tick, 1u) == total - 1;
+        if (last) {
+            *tick = 0;
+            __threadfence();
+        }
+    }
+    __syncthreads();
+    return last;
+}
+
 // x (n values) quantized into act. Grid: ceil(n / 256) blocks of 32 threads.
 extern "C" __global__ void quantize(const float* __restrict__ x, int n, int want_k,
                                     u8* __restrict__ act) {
@@ -605,45 +663,92 @@ __device__ __forceinline__ void dot_pair(int qt, const u8* w, u64 rb, int r0, in
     }
 }
 
-// y = W x for one matrix, two rows per block: out[r] = y[r] (+ bias[r]) for
-// mode 0, out[r] += y[r] (the residual add) for mode 1. Grid ceil(rows / 2).
-extern "C" __global__ void __launch_bounds__(GEMV_THREADS, GEMV_MIN_BLOCKS)
-gemv(int qt, const u8* __restrict__ w, u64 row_bytes, int rows, int n, const u8* __restrict__ act,
-     const float* __restrict__ bias, int mode, float* __restrict__ out) {
-    int r0 = 2 * blockIdx.x, r1 = min(r0 + 1, rows - 1);
+// Persistent row loop (decode GEMVs): a block takes work items blockIdx.x,
+// + gridDim.x, + 2 gridDim.x, .. (the host launches min(items, SMs x
+// GEMV_MIN_BLOCKS) blocks; one item per block is the same code with grid =
+// items), and pulls item i + gridDim.x's rows into L2 before computing item
+// i, so a block's next rows are in flight while it reduces the current ones
+// instead of every block paying a DRAM latency of its own. Which block
+// computes a row never enters the arithmetic: same bits for any grid.
+// Items after a block's first wait for the previous item's chains to be
+// done reading the shared pairs (GV_NEXT).
+#define GV_NEXT(it) \
+    if ((it) != (int)blockIdx.x) __syncthreads()
+// Items prefetched ahead: a block's first GEMV_PF_DEPTH items before
+// pdl_wait, then item i + GEMV_PF_DEPTH gridDim.x when starting item i.
+#ifndef GEMV_PF_DEPTH
+#define GEMV_PF_DEPTH 1
+#endif
+#define GV_PF_FIRST(PF)                                                    \
+    for (int k_ = 0; k_ < GEMV_PF_DEPTH; k_++) PF((int)blockIdx.x + k_ * (int)gridDim.x)
+#define GV_PF_NEXT(PF, it) PF((it) + GEMV_PF_DEPTH * (int)gridDim.x)
+
+// y = W x for one matrix, two rows per item: out[r] = y[r] (+ bias[r]) for
+// mode 0, out[r] += y[r] (the residual add) for mode 1. Items ceil(rows / 2).
+//
+// With ng non-null (mode 1, the residual stream x = out of rows values) the
+// next RMSNorm is fused in: the last block to finish (last_block on tick)
+// runs rmsnorm_quant_1024(out, ng, eps, rows, nwk) into nact (not act),
+// which is the rmsnorm_quant kernel's act.
+__device__ __forceinline__ void gemv_pf(const u8* w, u64 row_bytes, int rows, int it, int items,
+                                        int per) {
+    if (it >= items) return;
+    int r0 = per * it, r1 = min(r0 + per - 1, rows - 1);
     prefetch_l2(w + (u64)r0 * row_bytes, (u64)(r1 - r0 + 1) * row_bytes);
-    PDL_START();
-    float y[2];
-    dot_pair(qt, w, row_bytes, r0, r1, n, act, y);
-    if (threadIdx.x == 0) {
-        for (int i = 0; i < 1 + (r1 != r0); i++) {
-            int r = r0 + i;
-            float v = y[i];
-            if (bias) v = __fadd_rn(v, bias[r]);
-            out[r] = mode == 1 ? __fadd_rn(out[r], v) : v;
-        }
-    }
 }
 
-// `gemv` with one row per block (grid rows): twice the blocks, so the last
-// wave is a smaller share of the time. The host uses it for rows of 4 KiB
-// or more, which here means ffn_down (wide rows, few of them); every other
+extern "C" __global__ void __launch_bounds__(GEMV_THREADS, GEMV_MIN_BLOCKS)
+gemv(int qt, const u8* __restrict__ w, u64 row_bytes, int rows, int n, const u8* __restrict__ act,
+     const float* __restrict__ bias, int mode, float* __restrict__ out, const float* __restrict__ ng, float eps,
+     int nwk, u8* __restrict__ nact, u32* __restrict__ tick) {
+    int items = (rows + 1) >> 1;
+#define PF(i) gemv_pf(w, row_bytes, rows, i, items, 2)
+    GV_PF_FIRST(PF);
+    PDL_START();
+    for (int it = blockIdx.x; it < items; it += gridDim.x) {
+        GV_PF_NEXT(PF, it);
+#undef PF
+        GV_NEXT(it);
+        int r0 = 2 * it, r1 = min(r0 + 1, rows - 1);
+        float y[2];
+        dot_pair(qt, w, row_bytes, r0, r1, n, act, y);
+        if (threadIdx.x == 0) {
+            for (int i = 0; i < 1 + (r1 != r0); i++) {
+                int r = r0 + i;
+                float v = y[i];
+                if (bias) v = __fadd_rn(v, bias[r]);
+                out[r] = mode == 1 ? __fadd_rn(out[r], v) : v;
+            }
+        }
+    }
+    if (ng && last_block(tick, gridDim.x)) rmsnorm_quant_1024(out, ng, eps, rows, nwk, nact);
+}
+
+// `gemv` with one row per item: the host uses it for rows of 4 KiB or
+// more, which here means ffn_down (wide rows, few of them); every other
 // matrix goes through gemv.
 // Same bits as gemv (a row's sums don't depend on its block-mates).
 extern "C" __global__ void __launch_bounds__(GEMV_THREADS, GEMV_MIN_BLOCKS)
 gemv1(int qt, const u8* __restrict__ w, u64 row_bytes, int rows, int n, const u8* __restrict__ act,
-      const float* __restrict__ bias, int mode, float* __restrict__ out) {
-    int r = blockIdx.x;
-    prefetch_l2(w + (u64)r * row_bytes, row_bytes);
+      const float* __restrict__ bias, int mode, float* __restrict__ out, const float* __restrict__ ng, float eps,
+      int nwk, u8* __restrict__ nact, u32* __restrict__ tick) {
+#define PF(i) gemv_pf(w, row_bytes, rows, i, rows, 1)
+    GV_PF_FIRST(PF);
     PDL_START();
-    float y[1];
-    const u8* rr[1] = {w + (u64)r * row_bytes};
-    dot_rows<1>(qt, rr, n, act, y);
-    if (threadIdx.x == 0) {
-        float v = y[0];
-        if (bias) v = __fadd_rn(v, bias[r]);
-        out[r] = mode == 1 ? __fadd_rn(out[r], v) : v;
+    for (int r = blockIdx.x; r < rows; r += gridDim.x) {
+        GV_PF_NEXT(PF, r);
+#undef PF
+        GV_NEXT(r);
+        float y[1];
+        const u8* rr[1] = {w + (u64)r * row_bytes};
+        dot_rows<1>(qt, rr, n, act, y);
+        if (threadIdx.x == 0) {
+            float v = y[0];
+            if (bias) v = __fadd_rn(v, bias[r]);
+            out[r] = mode == 1 ? __fadd_rn(out[r], v) : v;
+        }
     }
+    if (ng && last_block(tick, gridDim.x)) rmsnorm_quant_1024(out, ng, eps, rows, nwk, nact);
 }
 
 // One head's RMSNorm (model.rs rmsnorm_heads: x * inv * g) then RoPE, by
@@ -673,7 +778,8 @@ __device__ __forceinline__ void warp_norm_rope(float* a, float* b, int hd,
 
 // Queries, keys and values for one token, with biases, RoPE and the cache
 // store fused. Work items, one per block: nq/2 query row pairs, nk/2 key
-// row pairs, nk/2 value row pairs (nk even). A query or key pair is rows
+// row pairs, nk/2 value row pairs (nk even), looped over by the blocks as
+// in the persistent GEMVs (GV_NEXT). A query or key pair is rows
 // (i, i + hd/2) of one head: the two halves RoPE rotates together
 // (model.rs rope_head, NEOX style), with (sin, cos) of P[pos] * freq[i]
 // from the rope_table kernel. Rotated queries go to q (f32); keys
@@ -688,15 +794,12 @@ __device__ __forceinline__ void warp_norm_rope(float* a, float* b, int hd,
 // kraw, f32: the q8 kernel passes kf; values as usual); the decode
 // attention then normalizes and rotates them as it loads them
 // (attn_split_t's QkNorm): no extra launch, no handshake between blocks.
-template <bool F32>
-__device__ __forceinline__ void
-qkv_rope_t(int qtq, const u8* __restrict__ wq, u64 rbq, int qtk, const u8* __restrict__ wk, u64 rbk,
-           int qtv, const u8* __restrict__ wv, u64 rbv, const float* __restrict__ bq,
-           const float* __restrict__ bk, const float* __restrict__ bv, int nq, int nk, int hd, int n,
-           const u8* __restrict__ act, const float2* __restrict__ rope, const u32* __restrict__ P,
-           float* __restrict__ q, void* __restrict__ kc, void* __restrict__ vc, float* kraw) {
-    int item = blockIdx.x;
+//
+// Pull item `item`'s rows into L2 (nothing past the last item).
+__device__ __forceinline__ void qkv_pf(const u8* wq, u64 rbq, const u8* wk, u64 rbk, const u8* wv,
+                                       u64 rbv, int nq, int nk, int hd, int item) {
     int half = hd >> 1, npq = nq >> 1, npk = nk >> 1;
+    if (item >= npq + npk + npk) return;
     if (item >= npq + npk) {
         prefetch_l2(wv + (u64)(2 * (item - npq - npk)) * rbv, 2 * rbv);
     } else {
@@ -708,8 +811,17 @@ qkv_rope_t(int qtq, const u8* __restrict__ wq, u64 rbq, int qtk, const u8* __res
         prefetch_l2(w + (u64)r0 * rb, rb);
         prefetch_l2(w + (u64)(r0 + half) * rb, rb);
     }
-    PDL_START();
-    u32 pos = P[P_POS];
+}
+
+// One item of qkv_rope_t (every thread of the block calls it).
+template <bool F32>
+__device__ __forceinline__ void
+qkv_item(int item, int qtq, const u8* __restrict__ wq, u64 rbq, int qtk, const u8* __restrict__ wk,
+         u64 rbk, int qtv, const u8* __restrict__ wv, u64 rbv, const float* __restrict__ bq,
+           const float* __restrict__ bk, const float* __restrict__ bv, int nq, int nk, int hd, int n,
+           const u8* __restrict__ act, const float2* __restrict__ rope, float* __restrict__ q,
+           void* __restrict__ kc, void* __restrict__ vc, float* kraw, u32 pos) {
+    int half = hd >> 1, npq = nq >> 1, npk = nk >> 1;
     float y[2];
     if (item >= npq + npk) {
         int r0 = 2 * (item - npq - npk);
@@ -758,6 +870,27 @@ qkv_rope_t(int qtq, const u8* __restrict__ wq, u64 rbq, int qtk, const u8* __res
     }
 }
 
+template <bool F32>
+__device__ __forceinline__ void
+qkv_rope_t(int qtq, const u8* __restrict__ wq, u64 rbq, int qtk, const u8* __restrict__ wk, u64 rbk,
+           int qtv, const u8* __restrict__ wv, u64 rbv, const float* __restrict__ bq,
+           const float* __restrict__ bk, const float* __restrict__ bv, int nq, int nk, int hd, int n,
+           const u8* __restrict__ act, const float2* __restrict__ rope, const u32* __restrict__ P,
+           float* __restrict__ q, void* __restrict__ kc, void* __restrict__ vc, float* kraw) {
+    int items = (nq >> 1) + (nk >> 1) * 2;
+#define PF(i) qkv_pf(wq, rbq, wk, rbk, wv, rbv, nq, nk, hd, i)
+    GV_PF_FIRST(PF);
+    PDL_START();
+    u32 pos = P[P_POS];
+    for (int it = blockIdx.x; it < items; it += gridDim.x) {
+        GV_PF_NEXT(PF, it);
+#undef PF
+        GV_NEXT(it);
+        qkv_item<F32>(it, qtq, wq, rbq, qtk, wk, rbk, qtv, wv, rbv, bq, bk, bv, nq, nk, hd, n, act,
+                      rope, q, kc, vc, kraw, pos);
+    }
+}
+
 #define QKV_ROPE_ARGS                                                                              \
     int qtq, const u8 *__restrict__ wq, u64 rbq, int qtk, const u8 *__restrict__ wk, u64 rbk,     \
         int qtv, const u8 *__restrict__ wv, u64 rbv, const float *__restrict__ bq,                 \
@@ -778,27 +911,59 @@ qkv_rope_f32(QKV_ROPE_ARGS, float* kf, float* __restrict__ vf, float* kraw) {
 }
 
 // out[r] = silu(gate_r . x) * (up_r . x) (vmath swiglu1's ops, expf for
-// exp). One row of each matrix per block (both loaded together when they
+// exp). One row of each matrix per item (both loaded together when they
 // have the same type).
+//
+// With tick non-null the quantize kernel is fused in: per 256-row group g a
+// counter tick[g] of rows done; the block finishing a group's last row runs
+// quant_warp on out[256 g ..] (read back through L2) into qact with one
+// warp, as `quantize` does, and resets the counter. qact must not be act.
 extern "C" __global__ void __launch_bounds__(GEMV_THREADS, GEMV_MIN_BLOCKS)
 gate_up(int qtg, const u8* __restrict__ wg, u64 rbg, int qtu, const u8* __restrict__ wu, u64 rbu,
-        int rows, int n, const u8* __restrict__ act, float* __restrict__ out) {
-    int r = blockIdx.x;
-    prefetch_l2(wg + (u64)r * rbg, rbg);
-    prefetch_l2(wu + (u64)r * rbu, rbu);
-    PDL_START();
-    float y[2];
-    if (qtg == qtu) {
-        const u8* rr[2] = {wg + (u64)r * rbg, wu + (u64)r * rbu};
-        dot_rows<2>(qtg, rr, n, act, y);
-    } else {
-        const u8* r0[1] = {wg + (u64)r * rbg};
-        const u8* r1[1] = {wu + (u64)r * rbu};
-        dot_rows<1>(qtg, r0, n, act, y);
-        dot_rows<1>(qtu, r1, n, act, y + 1, true);
+        int rows, int n, const u8* __restrict__ act, float* __restrict__ out, int want_k,
+        u8* __restrict__ qact, u32* __restrict__ tick) {
+#define PF(i)                                         \
+    if ((i) < rows) {                                 \
+        prefetch_l2(wg + (u64)(i) * rbg, rbg);         \
+        prefetch_l2(wu + (u64)(i) * rbu, rbu);         \
     }
-    if (threadIdx.x == 0)
-        out[r] = __fmul_rn(__fdiv_rn(y[0], __fadd_rn(1.0f, expf(-y[0]))), y[1]);
+    GV_PF_FIRST(PF);
+    PDL_START();
+    for (int r = blockIdx.x; r < rows; r += gridDim.x) {
+        GV_PF_NEXT(PF, r);
+#undef PF
+        GV_NEXT(r);
+        float y[2];
+        if (qtg == qtu) {
+            const u8* rr[2] = {wg + (u64)r * rbg, wu + (u64)r * rbu};
+            dot_rows<2>(qtg, rr, n, act, y);
+        } else {
+            const u8* r0[1] = {wg + (u64)r * rbg};
+            const u8* r1[1] = {wu + (u64)r * rbu};
+            dot_rows<1>(qtg, r0, n, act, y);
+            dot_rows<1>(qtu, r1, n, act, y + 1, true);
+        }
+        if (threadIdx.x < 32) {
+            int last = 0, g = r >> 8;
+            if (threadIdx.x == 0) {
+                out[r] = __fmul_rn(__fdiv_rn(y[0], __fadd_rn(1.0f, expf(-y[0]))), y[1]);
+                if (tick) {
+                    __threadfence();
+                    last = atomicAdd(tick + g, 1u) == (u32)min(256, rows - 256 * g) - 1;
+                }
+            }
+            if (tick && __shfl_sync(0xffffffffu, last, 0)) {
+                __threadfence();
+                float v[8];
+                for (int i = 0; i < 8; i++) {
+                    int e = g * 256 + threadIdx.x * 8 + i;
+                    v[i] = e < rows ? __ldcg(out + e) : 0.0f;
+                }
+                quant_warp(v, rows, g, qact, want_k);
+                if (threadIdx.x == 0) tick[g] = 0;
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

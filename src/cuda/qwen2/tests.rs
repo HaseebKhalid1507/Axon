@@ -312,6 +312,12 @@ fn gpu_gemv_epi(
     x: &[f32],
     epi: &Epi,
 ) -> Vec<f32> {
+    // "gemv@37": at most 37 blocks, looping over the rest (decode.cu
+    // "Persistent row loop").
+    let (kernel, cap) = match kernel.split_once('@') {
+        Some((k, c)) => (k, c.parse::<usize>().unwrap()),
+        None => (kernel, usize::MAX),
+    };
     let per = if kernel == "gemv" { 2 } else { 1 };
     let rows = w.len() / quant::row_bytes(qt, cols);
     let wb = g.upload(w).unwrap();
@@ -344,7 +350,7 @@ fn gpu_gemv_epi(
         .unwrap();
         g.launch(
             &fg,
-            (rows.div_ceil(per) as u32, 1, 1),
+            (rows.div_ceil(per).min(cap) as u32, 1, 1),
             (GEMV_THREADS, 1, 1),
             0,
             &[
@@ -357,6 +363,11 @@ fn gpu_gemv_epi(
                 bias_arg,
                 Arg::I32(epi.init.is_some() as i32),
                 out.arg(),
+                Arg::Ptr(0),
+                Arg::F32(0.0),
+                Arg::I32(0),
+                Arg::Ptr(0),
+                Arg::Ptr(0),
             ],
         )
         .unwrap();
@@ -401,6 +412,11 @@ fn gpu_gemv_matches_cpu_every_type() {
             // One row per block: the same sums.
             let got1 = gpu_gemv(&g, &km, "gemv1", qt, w, cols, &x);
             assert_eq!(bits(&got), bits(&got1), "{name}: gemv1 vs gemv");
+            // Blocks looping over several rows: the same sums.
+            for k in ["gemv@37", "gemv1@46", "gemv@1"] {
+                let got_p = gpu_gemv(&g, &km, k, qt, w, cols, &x);
+                assert_eq!(bits(&got), bits(&got_p), "{name}: {k} vs gemv");
+            }
             let xq = quant::QuantizedAct::for_types(&x, &[qt]);
             let (mut worst, mut worst_f) = (0f64, 0f64);
             let mut row = vec![0f32; cols];
@@ -962,6 +978,66 @@ fn qkv_rope_check(g: &Gpu, m: &Model) {
             let gq: Vec<f32> = q.read().unwrap();
             let gk: Vec<u16> = kc.read().unwrap();
             let gv: Vec<u16> = vc.read().unwrap();
+            // A looping grid (decode.cu "Persistent row loop"): the same bits.
+            {
+                let gk_raw: Vec<f32> = kraw.read().unwrap();
+                let q2 = g.alloc(qd * 4).unwrap();
+                let kc2 = g.alloc((pos + 1) * kvd * 2).unwrap();
+                let vc2 = g.alloc((pos + 1) * kvd * 2).unwrap();
+                let kraw2 = g.alloc(kvd * 4).unwrap();
+                for b in [&q2, &kc2, &vc2, &kraw2] {
+                    b.zero().unwrap();
+                }
+                // SAFETY: as the launch above, into same-sized buffers.
+                unsafe {
+                    g.launch(
+                        &f,
+                        (items.min(37) as u32, 1, 1),
+                        (GEMV_THREADS, 1, 1),
+                        0,
+                        &[
+                            Arg::I32(tq.qtype.id as i32),
+                            wb[0].arg(),
+                            rb(tq),
+                            Arg::I32(tk.qtype.id as i32),
+                            wb[1].arg(),
+                            rb(tk),
+                            Arg::I32(tv.qtype.id as i32),
+                            wb[2].arg(),
+                            rb(tv),
+                            arg(&bb[0]),
+                            arg(&bb[1]),
+                            arg(&bb[2]),
+                            Arg::I32(qd as i32),
+                            Arg::I32(kvd as i32),
+                            Arg::I32(hd as i32),
+                            Arg::I32(dim as i32),
+                            act.arg(),
+                            rope.arg(),
+                            params.arg(),
+                            q2.arg(),
+                            kc2.arg(),
+                            vc2.arg(),
+                            if norm { kraw2.arg() } else { Arg::Ptr(0) },
+                        ],
+                    )
+                    .unwrap();
+                }
+                let row = pos * kvd..(pos + 1) * kvd;
+                assert_eq!(bits(&gq), bits(&q2.read::<f32>().unwrap()), "q, 37 blocks");
+                // (qwen3: keys go to kraw, the cache row is left as it was.)
+                if !norm {
+                    assert_eq!(
+                        gk[row.clone()],
+                        kc2.read::<u16>().unwrap()[row.clone()],
+                        "k"
+                    );
+                }
+                assert_eq!(gv[row.clone()], vc2.read::<u16>().unwrap()[row], "v");
+                if norm {
+                    assert_eq!(bits(&gk_raw), bits(&kraw2.read::<f32>().unwrap()), "kraw");
+                }
+            }
             // CPU reference.
             let proj = |t: &Tensor, b: &Option<Vec<f32>>| -> Vec<f32> {
                 let xq = quant::QuantizedAct::for_types(&x, &[t.qtype.id]);
@@ -1337,7 +1413,10 @@ fn cuda_profile() {
     let km = Kernels::module(&g).unwrap();
     let net = CudaQwen2::new(&g, &km, &m, 4200).unwrap();
     let mut c = net.new_cache(4200);
-    for pos in [8usize, 1000, 4100] {
+    let poss: Vec<usize> = std::env::var("AXON_PROF_POS")
+        .map(|v| v.split(',').map(|x| x.parse().unwrap()).collect())
+        .unwrap_or_else(|_| vec![8usize, 1000, 4100]);
+    for pos in poss {
         // Warm up (and fill the cache up to pos, cheaply: positions past
         // what was written read zeros, which is fine for timing).
         let _ = net.profile(&mut c, 100, pos).unwrap();
@@ -1347,10 +1426,29 @@ fn cuda_profile() {
             .map(|_| net.profile(&mut c, 100, pos).unwrap())
             .collect();
         let mut k = runs[0].0.clone();
+        let mut kmed = runs[0].0.clone();
         for (i, row) in k.iter_mut().enumerate() {
             row.ms = runs.iter().map(|r| r.0[i].ms).fold(f64::INFINITY, f64::min);
+            let mut v: Vec<f64> = runs.iter().map(|r| r.0[i].ms).collect();
+            v.sort_by(f64::total_cmp);
+            kmed[i].ms = v[v.len() / 2];
         }
         let total: f64 = k.iter().map(|r| r.ms).sum();
+        let total_med: f64 = kmed.iter().map(|r| r.ms).sum();
+        let serial: Vec<f64> = runs.iter().map(|r| r.1).collect();
+        eprintln!(
+            "pos {pos}: serialized step (events between kernels) per run: {:?}; sum of per-kernel medians {total_med:.3} ms",
+            serial.iter().map(|x| format!("{x:.2}")).collect::<Vec<_>>()
+        );
+        for (a, b) in k.iter().zip(kmed.iter()) {
+            eprintln!(
+                "  median {:<10} {:>4} x {:>8.1} us = {:>7.3} ms",
+                a.name,
+                a.launches,
+                b.ms * 1e3 / a.launches as f64,
+                b.ms
+            );
+        }
         // The same step replayed as a graph, GPU time only (best, median of 20).
         let mut gt: Vec<f64> = (0..20)
             .map(|_| {
@@ -1361,6 +1459,10 @@ fn cuda_profile() {
             })
             .collect();
         gt.sort_by(f64::total_cmp);
+        eprintln!(
+            "pos {pos}: graph step p10 {:.3} p25 {:.3} p50 {:.3} p75 {:.3} p90 {:.3} max {:.3} ms",
+            gt[2], gt[5], gt[10], gt[15], gt[18], gt[19]
+        );
         // And through the Lm entry point, wall clock: what generation sees.
         let t = std::time::Instant::now();
         for i in 0..20 {
@@ -1465,6 +1567,8 @@ fn cuda_gemv_bench() {
     let mut rng = Rng(5);
     for (what, qt, cols, rows) in [
         ("q/wo  Q4_K", Q4_K, 3584, 3584),
+        ("3B q/wo Q4_K", Q4_K, 2048, 2048),
+        ("3B gate Q4_K", Q4_K, 2048, 11008),
         ("gate  Q4_K", Q4_K, 3584, 18944),
         ("down  Q4_K", Q4_K, 18944, 3584),
         ("down  Q6_K", Q6_K, 18944, 3584),
@@ -1501,8 +1605,17 @@ fn cuda_gemv_bench() {
             )
             .unwrap();
         }
-        for (kname, per) in [("gemv", 2), ("gemv1", 1)] {
+        let sms = g.info().unwrap().sms as usize;
+        // One block per item, then a resident grid looping (decode.cu
+        // "Persistent row loop").
+        for (kname, per, cap) in [
+            ("gemv", 2, usize::MAX),
+            ("gemv1", 1, usize::MAX),
+            ("gemv", 2, sms * 8),
+            ("gemv1", 1, sms * 8),
+        ] {
             let fg = km.function(kname).unwrap();
+            let grid = rows.div_ceil(per).min(cap);
             let mut best = f64::INFINITY;
             for i in 0..20.max(2 * copies) {
                 let wb = &wbs[i % copies];
@@ -1511,7 +1624,7 @@ fn cuda_gemv_bench() {
                 unsafe {
                     g.launch(
                         &fg,
-                        (rows.div_ceil(per) as u32, 1, 1),
+                        (grid as u32, 1, 1),
                         (GEMV_THREADS, 1, 1),
                         0,
                         &[
@@ -1524,6 +1637,11 @@ fn cuda_gemv_bench() {
                             Arg::Ptr(0),
                             Arg::I32(0),
                             out.arg(),
+                            Arg::Ptr(0),
+                            Arg::F32(0.0),
+                            Arg::I32(0),
+                            Arg::Ptr(0),
+                            Arg::Ptr(0),
                         ],
                     )
                     .unwrap();
@@ -1532,7 +1650,7 @@ fn cuda_gemv_bench() {
                 best = best.min(e0.ms_to(&e1).unwrap() as f64);
             }
             eprintln!(
-                "{what:<16} {kname:<6} {:>7.1} MB {:>8.1} us {:>6.0} GB/s",
+                "{what:<16} {kname:<6} {grid:>6} blk {:>7.1} MB {:>8.1} us {:>6.0} GB/s",
                 (rb * rows) as f64 / 1e6,
                 best * 1e3,
                 (rb * rows) as f64 / (best * 1e-3) / 1e9
@@ -1733,6 +1851,129 @@ fn pdl_on_off(g: &Gpu, m: &Model) {
     }
 }
 
+/// The GEMVs' fused RMSNorm epilogue (decode.cu rmsnorm_quant_1024 run by
+/// the last block): the same residual stream and the same quantized bytes
+/// as the GEMV followed by the 1024-thread rmsnorm_quant kernel, for
+/// vectors shorter and longer than 1024, with and without the Q8_K view,
+/// on a looping grid and one block per item, the ticket left at zero.
+#[test]
+fn gpu_gemv_norm_epilogue() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let (fq, fnorm) = (
+        km.function("quantize").unwrap(),
+        km.function("rmsnorm_quant").unwrap(),
+    );
+    let mut rng = Rng(4242);
+    for n in [896usize, 1024, 2560, 3584, 5120] {
+        // Square Q8_0 matrix, sane scales (f16 1/256), random int8 values.
+        let rb = quant::row_bytes(Q8_0, n);
+        let mut w = vec![0u8; rb * n];
+        for blk in w.chunks_mut(34) {
+            blk[0] = 0x00;
+            blk[1] = 0x1c;
+            for b in &mut blk[2..] {
+                *b = rng.next() as u8;
+            }
+        }
+        let wb = g.upload(&w).unwrap();
+        let xb = g.upload(&rng.vec(n, 1.0)).unwrap();
+        let init = rng.vec(n, 3.0);
+        let gam = g.upload(&rng.vec(n, 1.5)).unwrap();
+        let act = g.alloc(act_bytes(n)).unwrap();
+        let wk = Arg::I32(n.is_multiple_of(256) as i32);
+        let eps = 1e-6f32;
+        // SAFETY: decode.cu's signatures; buffers for n values.
+        unsafe {
+            g.launch(
+                &fq,
+                (n.div_ceil(256) as u32, 1, 1),
+                (32, 1, 1),
+                0,
+                &[xb.arg(), Arg::I32(n as i32), wk, act.arg()],
+            )
+            .unwrap();
+        }
+        let tick = g.alloc(4).unwrap();
+        tick.zero().unwrap();
+        let mut want: Option<(Vec<u32>, Vec<u8>)> = None;
+        for (kernel, per, fused, cap) in [
+            ("gemv", 2, false, usize::MAX),
+            ("gemv", 2, true, 37),
+            ("gemv", 2, true, usize::MAX),
+            ("gemv1", 1, true, 46),
+            ("gemv1", 1, true, 1),
+        ] {
+            let fg = km.function(kernel).unwrap();
+            let out = g.upload(&init).unwrap();
+            let nact = g.alloc(act_bytes(n)).unwrap();
+            nact.zero().unwrap();
+            let p = |b: &DevBuf, on: bool| if on { b.arg() } else { Arg::Ptr(0) };
+            // SAFETY: as above; nact for n values, tick one u32.
+            unsafe {
+                g.launch(
+                    &fg,
+                    (n.div_ceil(per).min(cap) as u32, 1, 1),
+                    (GEMV_THREADS, 1, 1),
+                    0,
+                    &[
+                        Arg::I32(Q8_0 as i32),
+                        wb.arg(),
+                        Arg::U64(rb as u64),
+                        Arg::I32(n as i32),
+                        Arg::I32(n as i32),
+                        act.arg(),
+                        Arg::Ptr(0),
+                        Arg::I32(1),
+                        out.arg(),
+                        p(&gam, fused),
+                        Arg::F32(eps),
+                        wk,
+                        p(&nact, fused),
+                        p(&tick, fused),
+                    ],
+                )
+                .unwrap();
+                if !fused {
+                    g.launch(
+                        &fnorm,
+                        (1, 1, 1),
+                        (1024, 1, 1),
+                        0,
+                        &[
+                            out.arg(),
+                            gam.arg(),
+                            Arg::F32(eps),
+                            Arg::I32(n as i32),
+                            wk,
+                            nact.arg(),
+                            Arg::Ptr(0),
+                        ],
+                    )
+                    .unwrap();
+                }
+            }
+            let got = (
+                bits(&out.read::<f32>().unwrap()),
+                nact.read::<u8>().unwrap(),
+            );
+            match &want {
+                None => want = Some(got),
+                Some(w) => {
+                    assert_eq!(w.0, got.0, "n {n} {kernel} grid cap {cap}: residual");
+                    assert!(
+                        w.1 == got.1,
+                        "n {n} {kernel} grid cap {cap}: quantized norm"
+                    );
+                }
+            }
+            assert_eq!(tick.read::<u32>().unwrap(), vec![0], "ticket reset");
+        }
+    }
+}
+
 /// gate_up with gate and up of different types (its two-pass branch) and
 /// of the same type (one pass), vs the CPU's row dots and SwiGLU in f64.
 #[test]
@@ -1755,13 +1996,15 @@ fn gpu_gate_up_mixed_types() {
     let q4 = *mats.iter().find(|t| t.qtype.id == Q4_K).unwrap();
     let q6 = *mats.iter().find(|t| t.qtype.id == Q6_K).unwrap();
     let n = q4.dims[0] as usize;
-    let rows = q4.dims[1] as usize;
+    let all = q4.dims[1] as usize;
     let mut rng = Rng(808);
     let x = rng.vec(n, 1.0);
     let xb = g.upload(&x).unwrap();
     let act = g.alloc(act_bytes(n)).unwrap();
     let xq = quant::QuantizedAct::for_types(&x, &[Q4_K]);
-    for (gt, ut) in [(q4, q6), (q6, q4), (q4, q4)] {
+    // 300 rows: the first rows only (a 44-row last group for the fused
+    // quantize).
+    for (gt, ut, rows) in [(q4, q6, all), (q6, q4, all), (q4, q4, all), (q4, q6, 300)] {
         let (wg, wu) = (
             g.upload(m.tensor_data(gt)).unwrap(),
             g.upload(m.tensor_data(ut)).unwrap(),
@@ -1794,11 +2037,71 @@ fn gpu_gate_up_mixed_types() {
                     Arg::I32(n as i32),
                     act.arg(),
                     out.arg(),
+                    Arg::I32(0),
+                    Arg::Ptr(0),
+                    Arg::Ptr(0),
                 ],
             )
             .unwrap();
         }
         let got: Vec<f32> = out.read().unwrap();
+        // The fused quantize (tickets per 256 rows; 896 and 300 rows: a
+        // partial last group, no Q8_K view), a looping grid: the same outputs, and
+        // the quantize kernel's bytes of them; and the loop without it.
+        {
+            let qa = g.alloc(act_bytes(rows)).unwrap();
+            let qb = g.alloc(act_bytes(rows)).unwrap();
+            qa.zero().unwrap();
+            qb.zero().unwrap();
+            let tick = g.alloc(4 * rows.div_ceil(256)).unwrap();
+            tick.zero().unwrap();
+            let out2 = g.alloc(rows * 4).unwrap();
+            let wk = Arg::I32(rows.is_multiple_of(256) as i32);
+            for (grid, fused) in [(37u32, true), (rows as u32, true), (37, false)] {
+                // SAFETY: as above; qa for rows inputs, a ticket per 256 rows.
+                unsafe {
+                    g.launch(
+                        &fgu,
+                        (grid, 1, 1),
+                        (GEMV_THREADS, 1, 1),
+                        0,
+                        &[
+                            Arg::I32(gt.qtype.id as i32),
+                            wg.arg(),
+                            Arg::U64(rb(gt) as u64),
+                            Arg::I32(ut.qtype.id as i32),
+                            wu.arg(),
+                            Arg::U64(rb(ut) as u64),
+                            Arg::I32(rows as i32),
+                            Arg::I32(n as i32),
+                            act.arg(),
+                            out2.arg(),
+                            wk,
+                            qa.arg(),
+                            if fused { tick.arg() } else { Arg::Ptr(0) },
+                        ],
+                    )
+                    .unwrap();
+                    g.launch(
+                        &fq,
+                        (rows.div_ceil(256) as u32, 1, 1),
+                        (32, 1, 1),
+                        0,
+                        &[out2.arg(), Arg::I32(rows as i32), wk, qb.arg()],
+                    )
+                    .unwrap();
+                }
+                let got2: Vec<f32> = out2.read().unwrap();
+                assert_eq!(bits(&got), bits(&got2), "gate_up grid {grid} fused {fused}");
+                if !fused {
+                    continue;
+                }
+                let (a, b): (Vec<u8>, Vec<u8>) = (qa.read().unwrap(), qb.read().unwrap());
+                assert!(a == b, "fused quantize grid {grid}");
+                let t: Vec<u32> = tick.read().unwrap();
+                assert!(t.iter().all(|&v| v == 0), "tickets reset");
+            }
+        }
         let dot = |t: &Tensor, r: usize| {
             let d = m.tensor_data(t);
             quant::dot_row_q8(t.qtype.id, &d[r * rb(t)..(r + 1) * rb(t)], &xq) as f64
