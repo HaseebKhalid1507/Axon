@@ -2340,6 +2340,222 @@ mod tests {
         }
     }
 
+    /// The hybrid step's kill test (MEASURE, not a check; `--ignored
+    /// --nocapture`): what fusing a prefill chunk and the decode rows into
+    /// one pass could save. `AXON_STEP_MODEL` (one path), `AXON_HYB_NB`
+    /// (decode rows, default "4,16,32,64"), `AXON_HYB_CHUNK` (default
+    /// "128,256,512"), `AXON_HYB_DEPTH` (the decoders' depth, default 768),
+    /// `AXON_HYB_AT` (the chunk's start, default 1024), `AXON_HYB_REPS`
+    /// (default 11), `AXON_HYB_K` (calls per timed op, default 3).
+    ///
+    /// Per (nb, c), each rep times four ops back to back in an order rotated
+    /// by the rep: dec + feed(c) (two passes), feed(c + nb), dec +
+    /// feed(c - nb), feed(c); `dec` the step of nb rows (graphs, as serve),
+    /// `feed` a `feed_slot` into the prefilling slot, and the decode rows'
+    /// attention (`att`: the step's "attn" + "combine" segments, profiled
+    /// without graphs) once per rep. The fused pass is estimated as one feed
+    /// of all its tokens (its GEMMs and elementwise work; its decode rows'
+    /// share of flash attention at the chunk's depth) + att. Two rows:
+    /// - same chunk: two = dec + feed(c), fused = feed(c + nb) + att;
+    /// - same budget (B = c tokens a step, as a token-budget scheduler):
+    ///   two = dec + feed(c - nb), fused = feed(c) + att.
+    ///
+    /// Saving = (two - fused) / two per rep; the median, min and max over
+    /// reps (not a difference of medians). µs per unit = the median time /
+    /// (prefill tokens + decode rows). Then each feed size's GEMM route
+    /// (`gemm_route`): kernels, 64-token tiles, padding, `gemm_cost`.
+    #[test]
+    #[ignore]
+    fn pool_hybrid_cost() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let m = match std::env::var("AXON_STEP_MODEL") {
+            Ok(p) => crate::gguf::load_with(&p, Some(false)).unwrap(),
+            Err(_) => match crate::testutil::model() {
+                Some(m) => m,
+                None => return,
+            },
+        };
+        let list = |var: &str, def: &str| -> Vec<usize> {
+            std::env::var(var)
+                .unwrap_or(def.into())
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.trim().parse().unwrap())
+                .collect()
+        };
+        let nbs = list("AXON_HYB_NB", "4,16,32,64");
+        let chunks = list("AXON_HYB_CHUNK", "128,256,512");
+        let depth = list("AXON_HYB_DEPTH", "768")[0];
+        let at = list("AXON_HYB_AT", "1024")[0];
+        let reps = list("AXON_HYB_REPS", "11")[0].max(1);
+        let k = list("AXON_HYB_K", "3")[0].max(1);
+        let nbm = *nbs.iter().max().unwrap();
+        let cm = *chunks.iter().max().unwrap();
+        let ctx = (at + cm + nbm).max(depth + 1).next_multiple_of(PAGE);
+        let km = Kernels::module_for(&g, &m).unwrap();
+        let mut net = CudaQwen2::new(&g, &km, &m, ctx).unwrap();
+        net.graphs = true;
+        let slots = nbm + 1;
+        let pages = nbm * (depth + 1).div_ceil(PAGE) + ctx / PAGE;
+        let mut p = net.pool_with(slots, ctx, Some(pages), None).unwrap();
+        let prompt: Vec<u32> = (0..ctx).map(|i| 1000 + (i * 7919 % 20000) as u32).collect();
+        for s in 0..nbm {
+            net.feed_slot(&mut p, s, &prompt[..depth], 0).unwrap();
+        }
+        // The prefilling slot: the last one, `at` positions in.
+        let ps = nbm;
+        net.feed_slot(&mut p, ps, &prompt[..at], 0).unwrap();
+        let gi = g.info().unwrap();
+        let name = std::env::var("AXON_STEP_MODEL").unwrap_or("default 0.5B".into());
+        eprintln!(
+            "hybrid cost: {name} ({}), {} ({} SMs), decoders at {depth}, chunk at {at}, \
+             pass max {}, {reps} reps x {k} calls per op",
+            m.arch,
+            gi.name,
+            gi.sms,
+            p.pass_max()
+        );
+        let med = |v: &[f64]| {
+            let mut v = v.to_vec();
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let mut sizes = std::collections::BTreeSet::new();
+        eprintln!(
+            "| nb | c | row | two ms | fused ms | saved % med | min | max | two µs/unit | fused µs/unit |"
+        );
+        for &nb in &nbs {
+            let rs: Vec<SeqRow> = (0..nb)
+                .map(|s| SeqRow {
+                    token: 5,
+                    pos: depth,
+                    slot: s,
+                    head: RowHead::Argmax,
+                })
+                .collect();
+            p.graphs.clear();
+            // Warm: the step's graph, every feed size.
+            net.step_rows(&mut p, &rs).unwrap();
+            for &c in &chunks {
+                for n in [c, c + nb, c.saturating_sub(nb)] {
+                    if n > 0 {
+                        net.feed_slot(&mut p, ps, &prompt[at..at + n], at).unwrap();
+                        sizes.insert(n);
+                    }
+                }
+            }
+            for &c in &chunks {
+                let budget = c > nb;
+                // Per rep: [dec+feed(c), feed(c+nb), dec+feed(c-nb), feed(c)] ms, att ms.
+                let mut t = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+                let mut att_v = Vec::new();
+                for r in 0..reps {
+                    let n_ops = if budget { 4 } else { 2 };
+                    for j in 0..n_ops {
+                        // Rotate the order, and reverse it every other rep.
+                        let i = match r % 2 {
+                            0 => (j + r / 2) % n_ops,
+                            _ => (n_ops - 1 - j + r / 2) % n_ops,
+                        };
+                        let t0 = std::time::Instant::now();
+                        for _ in 0..k {
+                            let p = &mut p;
+                            match i {
+                                0 => {
+                                    std::hint::black_box(net.step_rows(p, &rs).unwrap());
+                                    net.feed_slot(p, ps, &prompt[at..at + c], at).unwrap();
+                                }
+                                1 => net.feed_slot(p, ps, &prompt[at..at + c + nb], at).unwrap(),
+                                2 => {
+                                    std::hint::black_box(net.step_rows(p, &rs).unwrap());
+                                    net.feed_slot(p, ps, &prompt[at..at + c - nb], at).unwrap();
+                                }
+                                _ => net.feed_slot(p, ps, &prompt[at..at + c], at).unwrap(),
+                            }
+                        }
+                        let v = t0.elapsed().as_secs_f64() * 1e3 / k as f64;
+                        t[i].push(v);
+                    }
+                    // The decode rows' attention, profiled (no graph).
+                    let tokens = vec![5u32; nb];
+                    let ats: Vec<RowAt> = (0..nb)
+                        .map(|s| RowAt {
+                            pos: depth as u32,
+                            base: p.base(s) as u32,
+                        })
+                        .collect();
+                    let tab = p.c.tab.as_ref().map(|t| t.len() / 4);
+                    let b = p.c.b.as_mut().unwrap();
+                    net.load_input(b, BatchIn::Tokens(&tokens)).unwrap();
+                    b.upload_rows(&ats, tab).unwrap();
+                    let mut evs = vec![("start", g.record().unwrap())];
+                    net.pass_at(
+                        &mut p.c,
+                        BatchIn::Loaded(nb),
+                        Place::Rows,
+                        Head::Sample,
+                        Some((nb, nb)),
+                        0,
+                        &mut |n| {
+                            evs.push((n, g.record()?));
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+                    g.sync().unwrap();
+                    att_v.push(
+                        (1..evs.len())
+                            .filter(|&i| matches!(evs[i].0, "attn" | "combine"))
+                            .map(|i| evs[i - 1].1.ms_to(&evs[i].1).unwrap() as f64)
+                            .sum::<f64>(),
+                    );
+                }
+                let row = |what: &str, two_i: usize, fused_i: usize, units: usize| {
+                    let sv: Vec<f64> = (0..reps)
+                        .map(|r| {
+                            let two = t[two_i][r];
+                            let fused = t[fused_i][r] + att_v[r];
+                            100.0 * (two - fused) / two
+                        })
+                        .collect();
+                    let (two, fused) = (med(&t[two_i]), med(&t[fused_i]) + med(&att_v));
+                    let lo = sv.iter().copied().fold(f64::INFINITY, f64::min);
+                    let hi = sv.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                    eprintln!(
+                        "| {nb} | {c} | {what} | {two:.3} | {fused:.3} | {:.1} | {lo:.1} | {hi:.1} | {:.1} | {:.1} |",
+                        med(&sv),
+                        two * 1e3 / units as f64,
+                        fused * 1e3 / units as f64
+                    );
+                };
+                row("same chunk", 0, 1, c + nb);
+                if budget {
+                    row("same budget", 2, 3, c);
+                }
+                eprintln!(
+                    "|   |   | (dec+feed(c) {:.3}, feed(c+nb) {:.3}, att {:.3} ms) | | | | | | | |",
+                    med(&t[0]),
+                    med(&t[1]),
+                    med(&att_v)
+                );
+            }
+        }
+        eprintln!("| feed tokens | GEMM route | 64-token tiles | padding % | gemm_cost (rel.) |");
+        let base = sizes
+            .iter()
+            .find_map(|&n| net.gemm_route(n).3.map(|c| c as f64 / n as f64));
+        for &n in &sizes {
+            let (r, tiles, pad, cost) = net.gemm_route(n);
+            let cost = match (cost, base) {
+                (Some(c), Some(b)) => format!("{:.3} per token", c as f64 / n as f64 / b),
+                _ => "-".into(),
+            };
+            eprintln!("| {n} | {r} | {tiles} | {pad:.0} | {cost} |");
+        }
+    }
+
     /// Step cost of a pool vs the decode step, the C curve (MEASURE, not a
     /// check; `--ignored --nocapture` to see). `AXON_STEP_MODEL=path`
     /// (default the 0.5B); `AXON_STEP_DEPTHS` (default "600,4096"),

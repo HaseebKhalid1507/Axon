@@ -2325,6 +2325,48 @@ impl<'g> CudaQwen2<'g> {
         }
     }
 
+    /// Tests (`pool_hybrid_cost`): how a pass of nb tokens runs its
+    /// products, as `bgemm` routes them: the q product's and the gate's
+    /// kernel (gemvm / gemvn / gemmh2 / gemm2t / gemm2s; gate: the fused
+    /// gate + up's), the 64-token tiles and their padding, and `gemm_cost`
+    /// (None at nb <= VM_MAX, a weight-read-once batch).
+    #[cfg(test)]
+    pub(super) fn gemm_route(&self, nb: usize) -> (String, usize, f64, Option<u64>) {
+        let l = &self.layers[0];
+        let route = |rows: usize, qt: u32| -> &'static str {
+            let ti = type_index(qt);
+            let vm = self.bf.gemvm.is_some() && ti < NTYPES_VM && self.takes_gemvm(rows, nb);
+            if vm {
+                return "gemvm";
+            }
+            if nb <= SMALL || self.bf.gemm.is_none() {
+                return "gemvn";
+            }
+            if self.bf.gemmh.is_some() && qt == Q4_K && (self.bf.gemmh_all || gemmh_plain(rows, nb, self.bf.sms)) {
+                return "gemmh2";
+            }
+            if self.bf.gemm_t.is_some() && matches!(qt, Q4_K | Q5_K) && tile_t(rows, G2_BM, nb, self.bf.sms) {
+                return "gemm2t";
+            }
+            "gemm2s"
+        };
+        let (gate, _, _) = l.dense();
+        let tiles = nb.div_ceil(64);
+        let pad = 100.0 * (tiles * 64 - nb) as f64 / (tiles * 64) as f64;
+        let g = WaveGeom {
+            sms: self.bf.sms,
+            gemmh: self.bf.gemmh.is_some(),
+            gemmh_all: self.bf.gemmh_all,
+            tile_t: self.bf.gemm_t.is_some(),
+        };
+        let cost = match nb > VM_MAX {
+            true => self.wave_gemms().map(|ps| gemm_cost(&ps, nb, g)),
+            false => None,
+        };
+        let r = format!("q {} / gate {}", route(l.q.rows, l.q.qt), route(gate.rows, gate.qt));
+        (r, tiles, pad, cost)
+    }
+
     /// Every layer's batched products for passes of more than VM_MAX
     /// tokens, as `layer` and `ffn_half` launch them; None without the
     /// int8 tensor-core GEMMs or with a mixture-of-experts layer.
