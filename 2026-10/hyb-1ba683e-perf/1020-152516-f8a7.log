@@ -1,0 +1,36 @@
+[axon-run 15:25:16] submitted 1020-152516-f8a7 by /home/haseeb/.cache/axon-wt-sched: /home/haseeb/.cache/axon-sched/bin/axon-test-1ba683e serve::tests::serve_hybrid_ab --exact --ignored --nocapture
+[axon-run 15:29:37] job 1020-152516-f8a7 -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 5000 --env AXON_NODE_PACK=1 --src /home/haseeb/.cache/axon-wt-sched /home/haseeb/.cache/axon-sched/bin/axon-test-1ba683e serve::tests::serve_hybrid_ab --exact --ignored --nocapture
+axon-remote: uploading axon-test-1ba683e (965db845aa9d2b1a33ddb9a0) + source of /home/haseeb/.cache/axon-wt-sched
+
+sent 1,815,623 bytes  received 4,774 bytes  1,213,598.00 bytes/sec
+total size is 6,496,324  speedup is 3.57
+
+sent 6,736,163 bytes  received 35 bytes  13,472,396.00 bytes/sec
+total size is 21,431,264  speedup is 3.18
+axon-remote: job 20261020-152940-axon-test-1ba683e-46501 on avante (GPU, 5000 MB)
+[axon-node 15:29:42] GPU slot taken; job wants 5000 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 57
+[axon-node 15:29:42] run axon-test-1ba683e (965db845aa9d2b1a33ddb9a0) as /home/haseeb/.cache/axon-wt-sched on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 1 test
+testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+serve_hybrid_ab: /home/haseeb/.cache/axon-wt-sched/models/qwen2.5-0.5b-q4_k_m.gguf, budget 256, 1 rounds; admit 4 decoders + a 19816-token prompt (ctx 20480); loop C=8 x 2 reqs, 459 tokens of prompt at most, 128 tokens (ctx 1024)
+round 0 admit on: [3.34, 4.09, 27.04, 40.87, 40.89, 2157.62, 325.00, 1.00]
+round 0 admit off: [3.35, 3.49, 60.12, 65.61, 65.63, 2137.14, 154.00, 1.00]
+round 0 admit off-ms0: [3.36, 3.50, 30.00, 59.56, 59.67, 2397.63, 317.00, 1.00]
+round 0 loop on: [1480.16, 59.20, 224.95, 3.80, 17.09, 1.00]
+round 0 loop off: [1508.94, 53.62, 206.80, 3.78, 26.91, 1.00]
+medians over rounds (same_text: min):
+| admit | ITL before p50 | p99 | ITL during p50 | p99 | max | TTFT ms | tokens during | same_text |
+| on | 3.34 | 4.09 | 27.04 | 40.87 | 40.89 | 2157.62 | 325.00 | 1 |
+| off | 3.35 | 3.49 | 60.12 | 65.61 | 65.63 | 2137.14 | 154.00 | 1 |
+| off-ms0 | 3.36 | 3.50 | 30.00 | 59.56 | 59.67 | 2397.63 | 317.00 | 1 |
+| loop | agg tok/s | TTFT p50 | p99 | ITL p50 | p99 | same_text |
+| on | 1480.16 | 59.20 | 224.95 | 3.80 | 17.09 | 1 |
+| off | 1508.94 | 53.62 | 206.80 | 3.78 | 26.91 | 1 |
+test serve::tests::serve_hybrid_ab ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 692 filtered out; finished in 23.87s
+
+[axon-node 15:30:06] exit 0 after 24.0s
+[axon-node 15:30:06] peak RSS 449 MB (job process tree PSS, 2 s samples x11)
+[axon-run 15:30:06] exit 0 after 29.1s (host avante)

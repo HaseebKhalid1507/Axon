@@ -1,0 +1,46 @@
+[axon-run 15:25:17] submitted 1020-152517-f575 by /home/haseeb/.cache/axon-wt-sched: /home/haseeb/.cache/axon-sched/bin/axon-test-1ba683e serve::tests::serve_hybrid_ab --exact --ignored --nocapture
+[axon-run 16:35:28] scope axon-job-1020-152517-f575-1792528528.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 17032 MB): an OOM here kills only this job
+[axon-run 16:35:28] job 1020-152517-f575 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1020-152517-f575-1792528528 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-sched/bin/axon-test-1ba683e serve::tests::serve_hybrid_ab --exact --ignored --nocapture
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+serve_hybrid_ab: /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf, budget 256, 3 rounds; admit 4 decoders + a 19816-token prompt (ctx 20480); loop C=8 x 4 reqs, 459 tokens of prompt at most, 128 tokens (ctx 1024)
+round 0 admit on: [10.78, 14.11, 93.69, 126.48, 126.67, 7276.99, 322.00, 1.00]
+[axon-run 16:36:00] FOREIGN_GPU sample max=36% mean=15.7% n=6 (Xorg 1255685 19%)
+round 0 admit off: [13.39, 24.60, 104.54, 181.93, 182.57, 8211.01, 309.00, 1.00]
+test serve::tests::serve_hybrid_ab has been running for over 60 seconds
+[axon-run 16:36:31] FOREIGN_GPU sample max=42% mean=19.3% n=6 (picom 1255867 14%)
+round 0 admit off-ms0: [12.92, 25.54, 104.46, 184.01, 184.64, 8264.60, 315.00, 1.00]
+round 0 loop on: [370.47, 185.98, 1024.73, 15.17, 68.41, 1.00]
+[axon-run 16:37:03] FOREIGN_GPU sample max=45% mean=22.2% n=6 (Xorg 1255685 16%)
+round 0 loop off: [346.58, 223.03, 1149.47, 15.24, 78.89, 1.00]
+round 1 admit off: [13.94, 24.76, 109.53, 186.77, 187.23, 8359.54, 308.00, 1.00]
+[axon-run 16:37:35] FOREIGN_GPU sample max=46% mean=22.7% n=6 (picom 1255867 32%, Xorg 1255685 8%, kitty 1255876 6%)
+round 1 admit off-ms0: [14.04, 28.83, 108.38, 195.10, 195.32, 8501.41, 310.00, 1.00]
+[axon-run 16:38:06] FOREIGN_GPU sample max=44% mean=24.2% n=6 (picom 1255867 11%, kitty 1256581 11%, kitty 1255876 11%, Xorg 1255685 11%)
+round 1 admit on: [12.14, 16.32, 101.49, 135.92, 136.23, 8014.40, 320.00, 1.00]
+round 1 loop off: [336.87, 243.22, 1183.66, 15.31, 83.08, 1.00]
+[axon-run 16:38:38] FOREIGN_GPU sample max=40% mean=26.2% n=6 (picom 1255867 19%, kitty 1255876 17%, Xorg 1255685 4%)
+round 1 loop on: [355.31, 211.93, 1077.45, 15.28, 72.70, 1.00]
+[axon-run 16:39:10] FOREIGN_GPU sample max=48% mean=22.0% n=6 (Xorg 1255685 11%)
+round 2 admit off-ms0: [14.03, 27.85, 116.17, 214.60, 214.62, 9139.81, 312.00, 1.00]
+round 2 admit on: [12.26, 16.42, 107.03, 146.53, 146.54, 8584.36, 320.00, 1.00]
+[axon-run 16:39:42] FOREIGN_GPU sample max=43% mean=14.5% n=6 (Xorg 1255685 32%, picom 1255867 11%)
+round 2 admit off: [12.38, 24.28, 120.31, 210.58, 210.71, 9299.96, 307.00, 1.00]
+[axon-run 16:40:14] FOREIGN_GPU sample max=32% mean=6.8% n=6
+round 2 loop on: [346.43, 225.45, 1101.82, 15.15, 95.22, 1.00]
+round 2 loop off: [345.42, 224.98, 1196.58, 15.20, 77.67, 1.00]
+medians over rounds (same_text: min):
+| admit | ITL before p50 | p99 | ITL during p50 | p99 | max | TTFT ms | tokens during | same_text |
+| on | 12.14 | 16.32 | 101.49 | 135.92 | 136.23 | 8014.40 | 320.00 | 1 |
+| off | 13.39 | 24.60 | 109.53 | 186.77 | 187.23 | 8359.54 | 308.00 | 1 |
+| off-ms0 | 14.03 | 27.85 | 108.38 | 195.10 | 195.32 | 8501.41 | 312.00 | 1 |
+| loop | agg tok/s | TTFT p50 | p99 | ITL p50 | p99 | same_text |
+| on | 355.31 | 211.93 | 1077.45 | 15.17 | 72.70 | 1 |
+| off | 345.42 | 224.98 | 1183.66 | 15.24 | 78.89 | 1 |
+test serve::tests::serve_hybrid_ab ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 692 filtered out; finished in 319.55s
+
+[axon-run 16:40:48] exit 0 after 319.8s (host bella)
+[axon-run 16:40:48] FOREIGN_GPU max=48% mean=20.0% samples=63 top: picom 1255867 24%, kitty 1255876 12%, Xorg 1255685 12%  TAINTED (mean > 5% or max > 25%): timing numbers not trustworthy, rerun

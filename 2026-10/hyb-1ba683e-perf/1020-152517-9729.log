@@ -1,0 +1,53 @@
+[axon-run 15:25:17] submitted 1020-152517-9729 by /home/haseeb/.cache/axon-wt-sched: /home/haseeb/.cache/axon-sched/bin/axon-test-1ba683e serve::tests::serve_hybrid_ab --exact --ignored --nocapture
+[axon-run 15:26:02] job 1020-152517-9729 -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 5000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-wt-sched /home/haseeb/.cache/axon-sched/bin/axon-test-1ba683e serve::tests::serve_hybrid_ab --exact --ignored --nocapture
+axon-remote: uploading axon-test-1ba683e (daa9db0f1633b682403a9d95) + source of /home/haseeb/.cache/axon-wt-sched
+
+sent 1,813,255 bytes  received 4,747 bytes  1,212,001.33 bytes/sec
+total size is 6,490,812  speedup is 3.57
+
+sent 6,736,163 bytes  received 35 bytes  13,472,396.00 bytes/sec
+total size is 21,431,264  speedup is 3.18
+axon-remote: job 20261020-152605-axon-test-1ba683e-45290 on avante (GPU, 5000 MB)
+[axon-node 15:26:05] GPU lock taken; job wants 5000 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 52
+[axon-node 15:26:05] run axon-test-1ba683e (daa9db0f1633b682403a9d95) as /home/haseeb/.cache/axon-wt-sched on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 1 test
+testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+serve_hybrid_ab: /home/haseeb/Projects/axon/models/qwen2.5-1.5b-instruct-q4_k_m.gguf, budget 256, 3 rounds; admit 4 decoders + a 19816-token prompt (ctx 20480); loop C=8 x 4 reqs, 459 tokens of prompt at most, 128 tokens (ctx 1024)
+round 0 admit on: [7.16, 8.84, 55.99, 84.47, 84.53, 4437.16, 319.00, 1.00]
+round 0 admit off: [7.16, 14.38, 66.97, 100.81, 100.86, 4814.99, 280.00, 1.00]
+[axon-run 15:26:34] FOREIGN_GPU sample max=0% mean=0.0% n=1
+round 0 admit off-ms0: [7.20, 15.34, 62.21, 126.73, 126.78, 5014.06, 319.00, 1.00]
+round 0 loop on: [712.97, 93.46, 450.45, 8.15, 32.40, 1.00]
+round 0 loop off: [686.32, 127.97, 454.41, 8.16, 67.67, 1.00]
+test serve::tests::serve_hybrid_ab has been running for over 60 seconds
+[axon-run 15:27:06] FOREIGN_GPU sample max=0% mean=0.0% n=1
+round 1 admit off: [7.22, 14.46, 67.63, 128.56, 128.66, 5158.53, 288.00, 1.00]
+round 1 admit off-ms0: [7.20, 14.48, 66.15, 129.64, 129.85, 5305.30, 318.00, 1.00]
+[axon-run 15:27:38] FOREIGN_GPU sample max=0% mean=0.0% n=1
+round 1 admit on: [7.24, 8.38, 61.46, 99.20, 99.28, 5006.72, 324.00, 1.00]
+round 1 loop off: [677.07, 128.09, 482.65, 8.25, 65.33, 1.00]
+round 1 loop on: [691.53, 101.97, 476.92, 8.26, 35.17, 1.00]
+[axon-run 15:28:10] FOREIGN_GPU sample max=0% mean=0.0% n=1
+round 2 admit off-ms0: [7.27, 14.51, 67.86, 134.49, 134.56, 5418.86, 312.00, 1.00]
+round 2 admit on: [7.25, 8.53, 63.33, 96.78, 96.83, 5125.05, 328.00, 1.00]
+round 2 admit off: [7.34, 14.70, 70.17, 105.13, 105.18, 5476.58, 296.00, 1.00]
+[axon-run 15:28:43] FOREIGN_GPU sample max=0% mean=0.0% n=1
+round 2 loop on: [687.44, 101.83, 482.40, 8.29, 34.80, 1.00]
+round 2 loop off: [668.97, 134.75, 481.23, 8.32, 67.70, 1.00]
+medians over rounds (same_text: min):
+| admit | ITL before p50 | p99 | ITL during p50 | p99 | max | TTFT ms | tokens during | same_text |
+| on | 7.24 | 8.53 | 61.46 | 96.78 | 96.83 | 5006.72 | 324.00 | 1 |
+| off | 7.22 | 14.46 | 67.63 | 105.13 | 105.18 | 5158.53 | 288.00 | 1 |
+| off-ms0 | 7.20 | 14.51 | 66.15 | 129.64 | 129.85 | 5305.30 | 318.00 | 1 |
+| loop | agg tok/s | TTFT p50 | p99 | ITL p50 | p99 | same_text |
+| on | 691.53 | 101.83 | 476.92 | 8.26 | 34.80 | 1 |
+| off | 677.07 | 128.09 | 481.23 | 8.25 | 67.67 | 1 |
+test serve::tests::serve_hybrid_ab ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 692 filtered out; finished in 168.85s
+
+[axon-node 15:28:54] exit 0 after 169.0s
+[axon-node 15:28:54] peak RSS 785 MB (job process tree PSS, 2 s samples x84)
+[axon-run 15:28:54] exit 0 after 172.5s (host avante)
+[axon-run 15:28:58] FOREIGN_GPU max=0% mean=0.0% samples=5
