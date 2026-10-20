@@ -53,6 +53,15 @@ pub trait Lm {
     /// Run `tokens[b]` at `start + b` for the cache only (prefill).
     fn feed_batch(&self, tokens: &[u32], start: usize, cache: &mut Self::Cache);
 
+    /// Whether one-token steps (`forward`, `forward_argmax`) may take a
+    /// path `verify_argmax` never takes, so their picks can differ: a
+    /// CPU/GPU split built with AXON_STREAM_DECODE=1 streams decode steps,
+    /// verify passes never stream. Drafting is then not lossless, and
+    /// `generate` refuses `max_draft > 0`. Default: no.
+    fn decode_streams(&self) -> bool {
+        false
+    }
+
     /// The greedy pick after each `tokens[b]` at `start + b`, as
     /// `forward_argmax` on each in order would give (speculative verify).
     fn verify_argmax(&self, tokens: &[u32], start: usize, cache: &mut Self::Cache) -> Vec<u32>;
@@ -464,7 +473,8 @@ impl<'a> Backend<'a> {
     /// of type `kv` (checked up front on the GPU). On CUDA, `gpu_layers`
     /// Some(g) splits the model, the last g layers on the GPU
     /// (`HybridQwen2`, its GPU half's cache of type `kv`, the CPU half's
-    /// f16/f32 as AXON_KV says), or with g >= n_layers is the GPU model;
+    /// f16, or f32 for `KvType::F32`; process-wide), or with g >= n_layers
+    /// is the GPU model;
     /// None puts it all on the GPU if it fits, else as many of the last
     /// layers as fit with a max_ctx cache of type `kv`
     /// (`hybrid::auto_gpu_layers`, told on stderr), but with `fit` a
@@ -498,7 +508,7 @@ impl<'a> Backend<'a> {
     /// pipeline) gets the longest context up to max_ctx that fits (a
     /// pipeline at least `KEEP_CTX_FLOOR`, else split_ctx); a CPU/GPU split
     /// (automatic or --gpu-layers) gets split_ctx.
-    pub fn new_capped(
+    pub(crate) fn new_capped(
         m: &'a Model,
         device: Device,
         max_ctx: usize,
@@ -774,6 +784,10 @@ impl Lm for Backend<'_> {
 
     fn forward_argmax(&self, token: u32, pos: usize, cache: &mut BackendCache) -> u32 {
         dispatch!(self, cache, |n, c| n.forward_argmax(token, pos, c))
+    }
+
+    fn decode_streams(&self) -> bool {
+        matches!(self, Backend::Hybrid(h) if h.decode_streams())
     }
 
     fn feed_batch(&self, tokens: &[u32], start: usize, cache: &mut BackendCache) {

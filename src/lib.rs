@@ -36,9 +36,13 @@
 //! context) are never read from the environment: the CLI reads
 //! `AXON_DEVICE`, `AXON_KV` and `AXON_GPU_LAYERS` and passes them, and an
 //! embedder passes its own (`Device::from_env` and `KvType::parse` parse
-//! them as the CLI does; examples/embed.rs). Engine tuning variables
-//! (`AXON_THREADS`, `AXON_GPUS`, `AXON_MMAP`, `AXON_SIMD`, ...) are still
-//! read inside the library, once per process (README; #118).
+//! them as the CLI does; examples/embed.rs). Engine tuning variables are
+//! still read inside the library: some once, at first use (`AXON_SIMD`,
+//! `AXON_THREADS`, the decode config), others at every `load` /
+//! `Backend::new` (`AXON_MMAP`, `AXON_REPACK`, `AXON_Q6K8`, `AXON_GATE_UP`,
+//! `AXON_CUDA_GRAPHS`, `AXON_PP_CUTS`), so changing them between loads
+//! changes behaviour. `AXON_GPUS` picks the GPU(s): the only way in 0.1
+//! (read at each `Backend::new`). README; #118.
 
 #[macro_use]
 mod mv;

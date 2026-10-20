@@ -29,6 +29,11 @@ pub struct GenStats {
     pub verify: Vec<(usize, f64)>,
 }
 
+/// `generate`'s error for drafting on a backend whose decode steps stream
+/// (`Lm::decode_streams`): the CLI and `serve` refuse the same pair up front.
+pub(crate) const STREAM_DECODE_DRAFT: &str =
+    "AXON_STREAM_DECODE=1 can't be combined with drafting (max_draft > 0): not lossless";
+
 /// `generate`'s settings. Outside the crate, build them with
 /// [`GenOpts::greedy`]: in 0.1 the library decodes greedily only (plus
 /// lossless drafting); sampling is the CLI's (`--temp`).
@@ -69,7 +74,10 @@ impl<'a> GenOpts<'a> {
 /// `forward` would give (same logits bit for bit, same tie rule), and each
 /// guess is kept only while it equals the model's own pick: pick i is the
 /// right one exactly when guesses 0..i were the tokens emitted. So the output is the plain greedy output, whatever the drafts;
-/// they only change how many tokens one weight pass yields. A rejected
+/// they only change how many tokens one weight pass yields. That needs
+/// `verify_argmax` to pick as `forward_argmax` does: a backend whose decode
+/// steps stream (`Lm::decode_streams`, AXON_STREAM_DECODE=1 on a split)
+/// doesn't, so drafting there is an `InvalidInput` error. A rejected
 /// guess's cache slot is rewritten by the next pass before anything reads it.
 ///
 /// No low-acceptance gate: replaying the 5 bench prompts' exact greedy streams
@@ -85,6 +93,12 @@ pub fn generate<M: Lm>(
     draft: &mut dyn FnMut(&[u32], usize) -> Vec<u32>,
     emit: &mut dyn FnMut(u32) -> std::io::Result<()>,
 ) -> std::io::Result<GenStats> {
+    if o.max_draft > 0 && net.decode_streams() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            STREAM_DECODE_DRAFT,
+        ));
+    }
     if let Some(s) = o.sample {
         return sample::generate(
             net,
@@ -294,6 +308,8 @@ mod tests {
         forwards: std::cell::Cell<usize>,
         argmaxes: std::cell::Cell<usize>,
         verifies: std::cell::Cell<usize>,
+        /// Claims its decode steps stream (`Lm::decode_streams`).
+        streams: bool,
     }
 
     impl Toy {
@@ -306,6 +322,9 @@ mod tests {
 
     impl crate::Lm for Toy {
         type Cache = Vec<u32>;
+        fn decode_streams(&self) -> bool {
+            self.streams
+        }
         fn vocab(&self) -> usize {
             97
         }
@@ -439,6 +458,44 @@ mod tests {
             assert_eq!(pick(&nan, 3), argmax(&nan));
             let ninf = vec![f32::NEG_INFINITY; len];
             assert_eq!(pick(&ninf, 3), argmax(&ninf));
+        }
+    }
+
+    /// Drafting on a backend whose decode steps stream (AXON_STREAM_DECODE=1
+    /// on a split) isn't lossless: `generate` refuses it before any pass,
+    /// whatever the sampler; plain decode on it runs.
+    #[test]
+    fn generate_refuses_drafting_when_decode_streams() {
+        use crate::Lm;
+        let prompt = [1u32, 2, 3];
+        for k in [0, 3] {
+            let net = Toy {
+                streams: true,
+                ..Toy::default()
+            };
+            let mut cache = net.new_cache(16);
+            net.feed_batch(&prompt[..2], 0, &mut cache);
+            let logits = net.forward(3, 2, &mut cache);
+            let mut o = GenOpts::greedy(8, &[]);
+            o.max_draft = k;
+            let r = generate(
+                &net,
+                &mut cache,
+                &prompt,
+                logits,
+                o,
+                &mut |_, _| vec![5],
+                &mut |_| Ok(()),
+            );
+            match k {
+                0 => assert_eq!(r.unwrap().ids.len(), 8),
+                _ => {
+                    let e = r.err().expect("drafting refused");
+                    assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+                    assert!(e.to_string().contains("AXON_STREAM_DECODE"), "{e}");
+                    assert_eq!((net.argmaxes.get(), net.verifies.get()), (0, 0));
+                }
+            }
         }
     }
 }

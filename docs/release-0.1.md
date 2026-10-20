@@ -59,8 +59,11 @@ against three independent oracles (gguf-py, Hugging Face's tokenizer, Ollama's g
 - CUDA is Linux only. Built and tested on x86-64 Linux only (scalar, AVX2 and AVX-VNNI kernels picked at run
   time); other targets have scalar code paths but no CI.
 - The library API is 0.x, small, and not hardened for embedders
-  ([#118](https://github.com/HaseebKhalid1507/Axon/issues/118)): library calls print notes to stderr; `AXON_*`
-  variables are read once per process (the f16/f32 KV choice is process-wide); each CUDA `Backend::new` leaks its
+  ([#118](https://github.com/HaseebKhalid1507/Axon/issues/118)): library calls print notes to stderr; engine
+  tuning variables (`AXON_*`) are read inside library calls, some once at first use and others at every `load` /
+  `Backend::new`, so changing them between loads changes behaviour; `AXON_GPUS` is the only way to pick a GPU; the
+  f16/f32 KV choice is process-wide; drafting is refused on a split with `AXON_STREAM_DECODE=1`; each CUDA
+  `Backend::new` leaks its
   context and kernels; `axon::serve` exits the process on a usage error (2) or an engine failure (70); `generate` is
   greedy only.
 - One maintainer, no external users yet: please open issues.

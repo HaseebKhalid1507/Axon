@@ -237,9 +237,11 @@ pub fn kv_f32_setting() -> Result<bool, String> {
 
 static USE_F32: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-/// Whether new caches store f32 (AXON_KV=f32) rather than f16 (default,
-/// or AXON_KV=f16), unless `set_f32` said first. Read once; the CLI has
-/// already rejected bad values.
+/// Whether new caches store f32 rather than f16. `Backend::new` fixes it
+/// from its `kv` argument (`set_f32`) before any cache exists, so library
+/// paths never reach the fallback: AXON_KV=f32, read once, which only CLI
+/// paths that make no Backend use (`axon info`'s predicted fingerprints;
+/// the CLI has already rejected bad values).
 pub fn use_f32() -> bool {
     *USE_F32.get_or_init(|| kv_f32_setting().unwrap_or_else(|e| panic!("{e}")))
 }

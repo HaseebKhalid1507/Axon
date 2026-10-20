@@ -243,8 +243,12 @@ cargo run --release --example embed -- models/qwen2.5-0.5b-q4_k_m.gguf "The capi
 ```
 
 The API is 0.x and will change, and it isn't hardened for embedders yet
-([#118](https://github.com/HaseebKhalid1507/Axon/issues/118)): library calls print notes to stderr, read the
-engine tuning variables (`AXON_THREADS`, `AXON_GPUS`, `AXON_MMAP`, ...) once per process, leak a little per CUDA `Backend::new`, and `axon::serve` exits the process on a
+([#118](https://github.com/HaseebKhalid1507/Axon/issues/118)): library calls print notes to stderr; engine
+tuning variables are read inside library calls, some once at first use (`AXON_SIMD`, `AXON_THREADS`, the decode
+config) and others again at every `load` / `Backend::new` (`AXON_MMAP`, `AXON_REPACK`, `AXON_Q6K8`,
+`AXON_GATE_UP`, `AXON_CUDA_GRAPHS`, `AXON_PP_CUTS`), so changing the environment between loads changes behaviour;
+`AXON_GPUS` is the only way to pick the GPU(s) in 0.1 (read at each `Backend::new`); a CUDA `Backend::new` leaks a
+little; and `axon::serve` exits the process on a
 usage error (2) or an engine failure (70). The crate's package name on crates.io isn't settled (`axon` is taken);
 it isn't published.
 

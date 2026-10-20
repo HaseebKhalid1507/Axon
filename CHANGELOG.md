@@ -20,6 +20,13 @@ The first version: everything merged to `main` from the start of the project (20
 - The KV type is an argument: `Backend::new(…, kv, …)` reads no `AXON_KV` (the CLI and `examples/embed.rs` parse it
   with `KvType::parse` and pass it), `KvType::F32` takes effect on the CPU (it used to be silently f16 through the
   library), and a type that conflicts with the process's earlier f16/f32 choice is an error.
+- `Model` is read-only outside the crate: its fields and the methods that hand out or release weight bytes are
+  crate-private (a safe caller could zero weights a live `Backend` borrows); accessors `arch`, `meta_u32`,
+  `n_layers`, `embed_dim`, `n_heads`, `n_kv_heads`, `ctx_len`, `total_params`, `total_bytes`. No `memmap2` type in
+  the API.
+- `generate` refuses drafting (`max_draft > 0`) on a backend whose decode steps stream (`Lm::decode_streams`:
+  `AXON_STREAM_DECODE=1` on a CPU/GPU split), where drafting wouldn't be lossless; the CLI and `serve` already
+  refused the pair.
 - Not hardened for embedders yet (stderr notes, env-only config, a CUDA leak per `Backend::new`, `serve` exits the
   process): #118.
 

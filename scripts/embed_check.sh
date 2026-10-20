@@ -3,10 +3,11 @@
 # `axon gen` prints under the same environment: greedy, 32 tokens, 2 prompts, for each environment below.
 # Also: a bad AXON_KV is an error from both (embed: rc 1, a message naming AXON_KV, no panic), and AXON_KV=f32
 # changes the output on the CPU (else the setting was dropped somewhere). Run through axon-run (it loads a model).
-# Exit 1 on any mismatch. Written after the md5 gate caught embed ignoring AXON_KV=f32 (PR #117, round 3).
+# Each SAME line prints its md5, so which environments change the output is visible. Exit 1 on any mismatch. Written after the md5 gate caught embed ignoring AXON_KV=f32 (PR #117, round 3).
 set -u
 AX=$1; EM=$2; M=$3; DEVS=${4:-both}
-P1="The capital of France is"; P2="def fibonacci(n):"
+# P2 discriminates f16 from f32 on the 0.5B (round 3 md5 gate: different md5s); "def fibonacci(n):" did not.
+P1="The capital of France is"; P2="Write a short story about a robot who learns to paint. Once upon a time,"
 T=$(mktemp -d); trap 'rm -rf "$T"' EXIT
 fails=0; n=0
 pair() { # pair LABEL ENV...: gen vs embed stdout under ENV, both prompts
@@ -40,6 +41,7 @@ if [ $cuda = 1 ]; then
   pair "cuda AXON_KV=q8" AXON_DEVICE=cuda AXON_KV=q8
   pair "cuda AXON_GPU_LAYERS=0 (= cpu)" AXON_DEVICE=cuda AXON_GPU_LAYERS=0
   pair "cuda AXON_GPU_LAYERS=12 (split)" AXON_DEVICE=cuda AXON_GPU_LAYERS=12
+  pair "cuda AXON_KV=f32 split (CPU half f32)" AXON_DEVICE=cuda AXON_KV=f32 AXON_GPU_LAYERS=12
 fi
 env AXON_DEVICE=cpu AXON_KV=bogus "$EM" "$M" "$P1" 8 > /dev/null 2> "$T/bad"; rb=$?
 env AXON_DEVICE=cpu AXON_KV=bogus "$AX" gen "$M" "$P1" -n 8 > /dev/null 2> "$T/badg"; rg=$?

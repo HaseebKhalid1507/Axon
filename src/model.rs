@@ -271,7 +271,7 @@ pub struct Qwen2<'a> {
 /// Keys and values of every past position, per layer.
 /// k[layer] is laid out as [ctx][n_kv_heads * head_dim], same for v.
 pub struct KvCache {
-    /// Per layer, [t][kv_dim] keys and values: f16 unless AXON_KV=f32.
+    /// Per layer, [t][kv_dim] keys and values: f16, or f32 for `KvType::F32` (kv::use_f32).
     data: KvData,
     kv_dim: usize,
     max_ctx: usize,
