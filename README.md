@@ -381,9 +381,12 @@ default: up to the context), `--cors [ORIGIN]` (answer CORS preflights and allow
 default `*`, to call the server from web pages; off by default, so an arbitrary page can't
 use your local model), `--max-conns N` / `--max-queue N` (defaults 256 / 128),
 `--parallel N` (requests decoded at once on the GPU, default 16 with paged KV, 8 without; 1: one at a time),
-`--prefill-ms MS` / `--prefill-chunk N` (how much prompt a batched step feeds while others
-decode: up to what fits in MS ms beside their decode step, at least N tokens; defaults 60 /
-256; `--prefill-ms 0`: exactly N tokens; `--prefill-chunk 0`: whole prompts), `--quiet`
+`--prefill-chunk N` (while others decode, a batched step is one pass of their rows and
+new prompts' tokens, N in all, rounded up to whole 64-token tiles (under 64: N prompt
+tokens beside the rows); default 256;
+`--prefill-chunk 0`: whole prompts), `--prefill-ms MS` (with `AXON_HYBRID=0`, the two-pass
+steps of before: a chunk's own pass up to what fits in MS ms beside the decode step, at
+least N tokens; default 60; 0: exactly N tokens), `--quiet`
 (no per-request line on stderr). `GET /health` is 503 until the model is loaded.
 
 - Context (`--ctx N`, per request): by default the model's trained context (32768 for
@@ -401,8 +404,10 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
 - Many requests at once (`--device cuda`, the whole model on the GPU): up to `--parallel`
   requests decode together, one token each per step over the model's weights (continuous
   batching: a request joins as soon as a slot is free, and leaves when done). While others
-  decode, a new prompt is prefilled in chunks, up to `--prefill-ms` / `--prefill-chunk` worth
-  per step in between their steps (shortest remaining prompt first; one passed over 4
+  decode, a new prompt is prefilled in chunks that ride in their steps' passes (a hybrid
+  step: the decode rows and a chunk in one pass over the weights, `--prefill-chunk` tokens
+  in all; `AXON_HYBRID=0`: a chunk's own pass, up to `--prefill-ms` / `--prefill-chunk`
+  worth, then the decode step), shortest remaining prompt first (one passed over 4
   steps in a row goes first), so a long prompt doesn't stop the others' streams while it
   prefills (on a 4090, 7B, a 24k-token prompt: their worst token gap ~70 ms instead of
   2.4 s); with nothing decoding, prompts are fed one after another, shortest remaining

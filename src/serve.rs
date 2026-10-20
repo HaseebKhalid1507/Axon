@@ -128,13 +128,17 @@ pub struct Opts {
     /// Generated tokens a paged admission reserves pages for (None: the
     /// engine's GROW_TOKENS; tests set 0 to force preemption).
     pub kv_grow: Option<usize>,
-    /// Prompt tokens a batched step feeds at least while requests decode
-    /// (`--prefill-chunk`; 0: prompts fed whole): a long prompt prefills in
-    /// chunks between the running requests' steps.
+    /// A hybrid step's tokens, its rows and prompt chunks together, while
+    /// requests decode (`--prefill-chunk`; AXON_HYBRID=0: prompt tokens a
+    /// chunk's own pass feeds at least; 0: prompts fed whole): a long
+    /// prompt prefills in chunks beside the running requests' rows.
     pub prefill_chunk: usize,
-    /// A batched step's time budget for its chunk and decode, in ms
-    /// (`--prefill-ms`; 0: chunks of exactly `prefill_chunk`).
+    /// A two-pass step's time budget for its chunk and decode, in ms
+    /// (`--prefill-ms`, AXON_HYBRID=0 only; 0: chunks of exactly
+    /// `prefill_chunk`).
     pub prefill_ms: usize,
+    /// Hybrid steps (AXON_HYBRID, default on; `engine::plan_fused`).
+    pub hybrid: bool,
     /// `--rope-scaling yarn` and friends (rope.rs).
     pub rope: crate::rope::RopeArgs,
     /// `--api-key` / AXON_API_KEY: every route but /health (and CORS
@@ -1249,6 +1253,7 @@ fn engine(
         let policy = engine::ChunkPolicy {
             floor: o.prefill_chunk,
             ms: o.prefill_ms,
+            hybrid: o.hybrid,
         };
         let mut b = Batch::new(&net, pool, n, slot_ctx, policy, o.log, e.generated.clone());
         if let Some(g) = o.kv_grow {
@@ -1694,6 +1699,7 @@ struct EngineOpts {
     kv_grow: Option<usize>,
     prefill_chunk: usize,
     prefill_ms: usize,
+    hybrid: bool,
     path: String,
     device: Device,
     gpu_layers: Option<usize>,
@@ -1801,6 +1807,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
         kv_grow: o.kv_grow,
         prefill_chunk: o.prefill_chunk,
         prefill_ms: o.prefill_ms,
+        hybrid: o.hybrid,
         generated: generated.clone(),
         path: o.path.clone(),
         device: o.device,
@@ -2869,6 +2876,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         kv_grow: None,
         prefill_chunk: engine::PREFILL_CHUNK,
         prefill_ms: engine::PREFILL_MS,
+        hybrid: engine::hybrid_env(),
         rope: Default::default(),
         api_key: None,
         max_prompt_tokens: None,

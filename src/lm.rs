@@ -154,6 +154,16 @@ pub struct SeqRow<'a> {
     pub head: RowHead<'a>,
 }
 
+/// A prompt chunk of a hybrid step (`BatchLm::step_fused`): `tokens[b]`
+/// at `start + b` of the sequence in pool slot `slot`, as `feed_slot`
+/// feeds them (no results).
+#[derive(Clone, Copy, Debug)]
+pub struct FeedChunk<'a> {
+    pub slot: usize,
+    pub start: usize,
+    pub tokens: &'a [u32],
+}
+
 /// What a row of a step returns.
 #[derive(Clone, Copy, Debug)]
 pub enum RowHead<'a> {
@@ -211,6 +221,18 @@ pub trait BatchLm: Lm {
     /// its slot's earlier positions already in it, or earlier in `rows`):
     /// each row's keys and values into its slot, and its result.
     fn step(&self, pool: &mut Self::Pool, rows: &[SeqRow]) -> Result<Vec<RowOut>, StepError>;
+
+    /// `feed_slot` of each chunk and `step` of `rows` in one pass where the
+    /// backend can (the hybrid step: the rows ride the chunks' weight
+    /// reads), else one after the other; the same bits either way. The
+    /// chunks' slots are distinct; a row of a chunk's slot comes after the
+    /// chunk (its position at least the chunk's end).
+    fn step_fused(
+        &self,
+        pool: &mut Self::Pool,
+        chunks: &[FeedChunk],
+        rows: &[SeqRow],
+    ) -> Result<Vec<RowOut>, StepError>;
 
     /// A cache whose rows are slot `slot`'s (the same memory): what the
     /// `Lm` calls write there, the slot holds, and `adopt` of it into that
@@ -895,6 +917,18 @@ impl BatchLm for Backend<'_> {
     fn step(&self, pool: &mut Self::Pool, rows: &[SeqRow]) -> Result<Vec<RowOut>, StepError> {
         match self {
             Backend::Cuda(n) => n.step_rows(pool, rows),
+            _ => unreachable!("a pool is the GPU model's"),
+        }
+    }
+
+    fn step_fused(
+        &self,
+        pool: &mut Self::Pool,
+        chunks: &[FeedChunk],
+        rows: &[SeqRow],
+    ) -> Result<Vec<RowOut>, StepError> {
+        match self {
+            Backend::Cuda(n) => n.step_fused(pool, chunks, rows),
             _ => unreachable!("a pool is the GPU model's"),
         }
     }

@@ -119,10 +119,13 @@ flags:
               32768 (or the whole one, if less); if not even 2 fit, one request at a time.
               With --ctx N, the slots that fit with N; with --parallel N alone, N slots of
               the longest context that fits them
-  --prefill-ms MS  serve: while requests decode, a step feeds new prompts up to what fits in
-              MS ms beside their decode step (default 60; 0: exactly --prefill-chunk tokens)
-  --prefill-chunk N  serve: at least N prompt tokens per such step (default 256; 0: prompts
-              fed whole, the others' streams wait)
+  --prefill-chunk N  serve: while requests decode, a step is one pass of their rows and
+              new prompts' tokens, N tokens in all (rounded up to 64; under 64: N prompt tokens
+              beside the rows; default 256; 0: prompts
+              fed whole, the others' streams wait). AXON_HYBRID=0: a chunk's own pass then
+              the decode step, at least N prompt tokens per chunk
+  --prefill-ms MS  serve, AXON_HYBRID=0 only: such a chunk feeds up to what fits in MS ms
+              beside the decode step (default 60; 0: exactly --prefill-chunk tokens)
   --api-key KEY  serve: every route but /health (and CORS preflights) needs
               `Authorization: Bearer KEY` (else 401); AXON_API_KEY sets it too, out of `ps`
               (trimmed; set but blank is an error)

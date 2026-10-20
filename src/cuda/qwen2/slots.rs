@@ -33,10 +33,10 @@
 //! use (its inputs copied in before it runs), as the decode step's is, so
 //! a step costs one launch (AXON_CUDA_GRAPHS=0: kernel by kernel).
 
-use super::batch::{BatchIn, HEAD_SUB, Place, RowAt, passes};
+use super::batch::{BatchIn, FaRun, HEAD_SUB, Hybrid, Place, RowAt, passes};
 use super::pages::{self, NoPages, PAGE, PageMap};
 use super::*;
-use crate::lm::{BatchLm, PoolPages, RowHead, RowOut, SeqRow, StepError};
+use crate::lm::{BatchLm, FeedChunk, PoolPages, RowHead, RowOut, SeqRow, StepError};
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::atomic::Ordering::Relaxed;
@@ -365,10 +365,95 @@ impl<'g> CudaQwen2<'g> {
         p: &mut CudaPool<'g>,
         rows: &[SeqRow],
     ) -> Result<Vec<RowOut>, StepError> {
-        let nb = rows.len();
-        if nb == 0 {
+        if rows.is_empty() {
             return Ok(Vec::new());
         }
+        self.check_rows(p, rows)?;
+        #[cfg(debug_assertions)]
+        p.debug_tab();
+        self.step_checked(p, &[], rows).map_err(StepError::Device)
+    }
+
+    /// Whether `step_fused` runs its chunks and rows in one pass (a dense
+    /// model: the MoE and MLA layers have passes of their own).
+    fn fuses(&self) -> bool {
+        self.moe.is_none() && self.mla.is_none()
+    }
+
+    /// `BatchLm::step_fused`: the hybrid step. The chunks' tokens and the
+    /// rows in one `Place::Rows` pass (`Hybrid`): each chunk's attention
+    /// the flash launch `feed_slot` gives it (attn_fa_b, `att_flash`), or
+    /// per query as the rows' (a short chunk); the head on the rows alone.
+    /// No graph (its shape changes every step). The same bits as
+    /// `feed_slot` of each chunk then `step_rows`, which runs instead
+    /// without rows, or on a model whose layers have passes of their own.
+    pub fn step_fused(
+        &self,
+        p: &mut CudaPool<'g>,
+        chunks: &[FeedChunk],
+        rows: &[SeqRow],
+    ) -> Result<Vec<RowOut>, StepError> {
+        if chunks.is_empty() {
+            return self.step_rows(p, rows);
+        }
+        if rows.is_empty() || !self.fuses() {
+            for c in chunks {
+                // (A feed's error is the engine's, as `feed_slot`'s.)
+                (self.feed_slot(p, c.slot, c.tokens, c.start)).map_err(StepError::Device)?;
+            }
+            return self.step_rows(p, rows);
+        }
+        let bad = |e: String| Err(StepError::Input(e));
+        let nc: usize = chunks.iter().map(|c| c.tokens.len()).sum();
+        if nc + rows.len() > p.pass_max {
+            return bad(format!(
+                "{nc} chunk tokens and {} rows: more than a pass's {}",
+                rows.len(),
+                p.pass_max
+            ));
+        }
+        for (i, c) in chunks.iter().enumerate() {
+            if c.slot >= p.slots || c.tokens.is_empty() || c.start + c.tokens.len() > p.ctx {
+                return bad(format!(
+                    "chunk: slot {} positions {}..{} (pool {} x {})",
+                    c.slot,
+                    c.start,
+                    c.start + c.tokens.len(),
+                    p.slots,
+                    p.ctx
+                ));
+            }
+            if let Some(t) = c.tokens.iter().find(|&&t| t as usize >= self.vocab) {
+                return bad(format!("token {t} out of range"));
+            }
+            if chunks[..i].iter().any(|o| o.slot == c.slot) {
+                return bad(format!("two chunks of slot {}", c.slot));
+            }
+            let end = c.start + c.tokens.len();
+            if rows.iter().any(|r| r.slot == c.slot && r.pos < end) {
+                return bad(format!("a row of slot {} inside its chunk", c.slot));
+            }
+        }
+        self.check_rows(p, rows)?;
+        for c in chunks {
+            match self.reserve(p, c.slot, c.start + c.tokens.len()) {
+                Ok(0) => {}
+                Ok(short) => {
+                    return bad(format!("chunk of slot {}: {short} KV pages short", c.slot));
+                }
+                Err(e) => return Err(StepError::Device(e)),
+            }
+        }
+        #[cfg(debug_assertions)]
+        p.debug_tab();
+        self.step_checked(p, chunks, rows)
+            .map_err(StepError::Device)
+    }
+
+    /// `step_rows`' checks of `rows` (StepError::Input, nothing run), and
+    /// each row's page taken.
+    fn check_rows(&self, p: &mut CudaPool<'g>, rows: &[SeqRow]) -> Result<(), StepError> {
+        let nb = rows.len();
         let bad = |e: String| Err(StepError::Input(e));
         if nb > p.rows_max {
             return bad(format!("{nb} rows: the pool takes {}", p.rows_max));
@@ -411,9 +496,7 @@ impl<'g> CudaQwen2<'g> {
                 Err(e) => return Err(StepError::Device(e)),
             }
         }
-        #[cfg(debug_assertions)]
-        p.debug_tab();
-        self.step_checked(p, rows).map_err(StepError::Device)
+        Ok(())
     }
 
     /// Pages for slot `slot`'s positions 0..hi: Ok(0) once it holds them
@@ -470,8 +553,14 @@ impl<'g> CudaQwen2<'g> {
         Ok(())
     }
 
-    /// `step_rows` after its checks.
-    fn step_checked(&self, p: &mut CudaPool<'g>, rows: &[SeqRow]) -> Result<Vec<RowOut>, String> {
+    /// `step_rows` / `step_fused` after their checks: the chunks' tokens
+    /// (the flash ones first: `Hybrid`'s runs), then the rows.
+    fn step_checked(
+        &self,
+        p: &mut CudaPool<'g>,
+        chunks: &[FeedChunk],
+        rows: &[SeqRow],
+    ) -> Result<Vec<RowOut>, String> {
         let nb = rows.len();
         // Greedy rows first, then the ones sampled on the device, then
         // those selected on the host (the order changes no row's bits).
@@ -484,14 +573,34 @@ impl<'g> CudaQwen2<'g> {
         order.sort_by_key(|&i| kind(&rows[i]));
         let ng = rows.iter().filter(|r| kind(r) == 0).count();
         let ns = ng + rows.iter().filter(|r| kind(r) == 1).count();
-        let tokens: Vec<u32> = order.iter().map(|&i| rows[i].token).collect();
-        let at: Vec<RowAt> = order
-            .iter()
-            .map(|&i| RowAt {
-                pos: rows[i].pos as u32,
-                base: p.base(rows[i].slot) as u32,
-            })
-            .collect();
+        let mut cs: Vec<&FeedChunk> = chunks.iter().collect();
+        cs.sort_by_key(|c| !self.att_flash(c.tokens.len()));
+        let mut hyb = Hybrid::default();
+        let mut tokens = Vec::new();
+        let mut at = Vec::new();
+        for c in cs {
+            let n = c.tokens.len();
+            if self.att_flash(n) {
+                hyb.runs.push(FaRun {
+                    z0: tokens.len(),
+                    n,
+                    start: c.start,
+                    base: p.base(c.slot),
+                });
+            }
+            tokens.extend_from_slice(c.tokens);
+            at.extend((0..n).map(|z| RowAt {
+                pos: (c.start + z) as u32,
+                base: p.base(c.slot) as u32,
+            }));
+        }
+        hyb.head0 = tokens.len();
+        let np = hyb.head0 + nb;
+        tokens.extend(order.iter().map(|&i| rows[i].token));
+        at.extend(order.iter().map(|&i| RowAt {
+            pos: rows[i].pos as u32,
+            base: p.base(rows[i].slot) as u32,
+        }));
         let sampled: Vec<(CandSpec, &[u32])> = order[ng..ns]
             .iter()
             .map(|&i| match rows[i].head {
@@ -507,12 +616,15 @@ impl<'g> CudaQwen2<'g> {
         let b = p.c.b.as_mut().expect("batch scratch");
         self.load_input(b, BatchIn::Tokens(&tokens))?;
         b.upload_rows(&at, tab)?;
-        // The kernels: the step's graph (made on its first use).
+        let hybrid = !chunks.is_empty();
+        b.hyb = hyb;
+        // The kernels: the step's graph (made on its first use; a hybrid
+        // step's, kernel by kernel).
         let c = &mut p.c;
         let mut pass = || {
             self.pass_at(
                 c,
-                BatchIn::Loaded(nb),
+                BatchIn::Loaded(np),
                 Place::Rows,
                 Head::Sample,
                 Some((ng, ns)),
@@ -520,7 +632,7 @@ impl<'g> CudaQwen2<'g> {
                 &mut |_| Ok(()),
             )
         };
-        if self.graphs {
+        if self.graphs && !hybrid {
             let key = (nb, ng, ns);
             p.steps += 1;
             if !p.graphs.contains_key(&key) {
@@ -569,6 +681,7 @@ impl<'g> CudaQwen2<'g> {
         }
         let mut out: Vec<Option<RowOut>> = vec![None; nb];
         let b = p.c.b.as_mut().expect("batch scratch");
+        b.hyb = Hybrid::default();
         if ng > 0 {
             for (z, pick) in b.picks(ng)?.into_iter().enumerate() {
                 out[order[z]] = Some(RowOut::Pick(pick));
@@ -808,6 +921,15 @@ impl<'g> BatchLm for CudaQwen2<'g> {
 
     fn step(&self, pool: &mut CudaPool<'g>, rows: &[SeqRow]) -> Result<Vec<RowOut>, StepError> {
         self.step_rows(pool, rows)
+    }
+
+    fn step_fused(
+        &self,
+        pool: &mut CudaPool<'g>,
+        chunks: &[FeedChunk],
+        rows: &[SeqRow],
+    ) -> Result<Vec<RowOut>, StepError> {
+        CudaQwen2::step_fused(self, pool, chunks, rows)
     }
 
     fn slot_cache(&self, pool: &CudaPool<'g>, slot: usize) -> Result<CudaCache<'g>, String> {
@@ -1106,6 +1228,235 @@ mod tests {
                         pool_bytes(&net, &p, slot, start + nb) == want_kv,
                         "{what}: KV bytes after the greedy step"
                     );
+                }
+            }
+        }
+    }
+
+    /// The hybrid step (`step_fused`): two long prompts fed in chunks of
+    /// random sizes 16..512 (both in one pass sometimes, or one), each
+    /// pass with a random 1..7 of 7 other requests' decode rows (greedy and
+    /// sampled, top_k off among them: the host selects), each prompt's
+    /// first row in the pass of its last chunk: every request's results
+    /// and tokens == running it alone (`solo`: the prompt fed whole, then
+    /// the decode step), and every slot's KV bytes == its solo cache's;
+    /// three prompts per prefilling slot in turn; f16 and q8, plain and
+    /// paged pools, qwen2 and qwen3.
+    #[test]
+    fn pool_hybrid_steps_match_feed_whole() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let km = Kernels::module(&g).unwrap();
+        if !km.mma() {
+            return;
+        }
+        let kinds = [
+            Kind::Greedy,
+            Kind::Sampled(40, 1.1, 1),
+            Kind::Sampled(1, 1.0, 2),
+            Kind::Greedy,
+            Kind::Sampled(0, 1.05, 4),
+            Kind::Greedy,
+            Kind::Sampled(256, 1.3, 3),
+        ];
+        let lens = [5usize, 37, 70, 1, 100, 23, 300];
+        let nd = kinds.len();
+        // The long prompts: per prefilling slot, three in turn.
+        let longs = [[1500usize, 700, 1100], [900, 1300, 60]];
+        let after = 3;
+        for m in models() {
+            for kv in [CacheKv::F16, CacheKv::Q8 { group: 0 }] {
+                let ctx = 1600;
+                let net = CudaQwen2::with_kv(&g, &km, &m, ctx, kv, false).unwrap();
+                let v = net.vocab;
+                let prompts: Vec<Vec<u32>> =
+                    (0..nd).map(|i| ids(lens[i], 3000 + i as u32, v)).collect();
+                let long_p: Vec<Vec<Vec<u32>>> = (0..2)
+                    .map(|j| {
+                        (0..3)
+                            .map(|r| ids(longs[j][r], 4000 + 10 * j as u32 + r as u32, v))
+                            .collect()
+                    })
+                    .collect();
+                let long_ref: Vec<Vec<_>> = (0..2)
+                    .map(|j| {
+                        (0..3)
+                            .map(|r| solo(&net, ctx, &long_p[j][r], Kind::Greedy, after))
+                            .collect()
+                    })
+                    .collect();
+                for lay in LAYS {
+                    let what = format!("{} {kv:?} {lay:?}", m.arch);
+                    let mut rng = 0x2545_f491u32 ^ (kv == CacheKv::F16) as u32;
+                    let mut rnd = |n: usize| {
+                        rng ^= rng << 13;
+                        rng ^= rng >> 17;
+                        rng ^= rng << 5;
+                        rng as usize % n
+                    };
+                    // Slots: the decoders 0..nd, the prefilling ones nd, nd + 1.
+                    let mut p = pool_of(&net, nd + 2, ctx, lay);
+                    // Enough steps for the decoders to outlast the prefills.
+                    let steps = 60;
+                    let refs: Vec<_> = (0..nd)
+                        .map(|i| solo(&net, ctx, &prompts[i], kinds[i], steps))
+                        .collect();
+                    let mut hist = prompts.clone();
+                    let mut sms: Vec<Option<Sampler>> = kinds
+                        .iter()
+                        .map(|k| match *k {
+                            Kind::Greedy => None,
+                            Kind::Sampled(k, pen, seed) => Some(sampler(k, pen, seed)),
+                        })
+                        .collect();
+                    for (i, pr) in prompts.iter().enumerate() {
+                        if pr.len() > 1 {
+                            net.feed_slot(&mut p, i, &pr[..pr.len() - 1], 0).unwrap();
+                        }
+                    }
+                    // Per prefilling slot: (prompt index, fed, its tokens so far).
+                    let mut lp: Vec<(usize, usize, Vec<u32>)> =
+                        (0..2).map(|j| (0, 0, long_p[j][0].clone())).collect();
+                    let mut done = vec![0usize; nd];
+                    let mut fused = 0;
+                    for step in 0.. {
+                        assert!(step < 400, "{what}: no end");
+                        let pass_max = p.pass_max();
+                        // Decode rows: a random 1..7 of the live decoders.
+                        let mut live: Vec<usize> = (0..nd).filter(|&i| done[i] < steps).collect();
+                        for i in (1..live.len()).rev() {
+                            live.swap(i, rnd(i + 1));
+                        }
+                        live.truncate(1 + rnd(nd));
+                        // The chunks; a prefilling slot whose prompt is fed decodes.
+                        let mut chunks: Vec<(usize, usize, usize)> = Vec::new();
+                        let mut longs_dec: Vec<usize> = Vec::new();
+                        let mut left = pass_max - live.len() - 2;
+                        for (j, (r, fed, h)) in lp.iter().enumerate() {
+                            if *r >= 3 {
+                                continue;
+                            }
+                            let last = long_p[j][*r].len() - 1;
+                            if *fed < last {
+                                let n = (16 + rnd(497)).min(last - fed).min(left);
+                                if n == 0 || rnd(4) == 0 {
+                                    continue;
+                                }
+                                left -= n;
+                                chunks.push((nd + j, *fed, n));
+                                if fed + n == last {
+                                    longs_dec.push(j);
+                                }
+                            } else if h.len() - last <= after {
+                                longs_dec.push(j);
+                            }
+                        }
+                        let all_done = live.is_empty() && lp.iter().all(|l| l.0 >= 3);
+                        if all_done {
+                            break;
+                        }
+                        let specs: Vec<Option<CandSpec>> = live
+                            .iter()
+                            .map(|&i| sms[i].as_ref().map(|s| s.cfg.spec()))
+                            .collect();
+                        let mut rows: Vec<SeqRow> = live
+                            .iter()
+                            .zip(&specs)
+                            .map(|(&i, spec)| {
+                                let h = &hist[i];
+                                SeqRow {
+                                    token: h[h.len() - 1],
+                                    pos: h.len() - 1,
+                                    slot: i,
+                                    head: match spec {
+                                        None => RowHead::Argmax,
+                                        Some(spec) => RowHead::Sample {
+                                            spec: *spec,
+                                            recent: &h[h.len() - spec.last_n.clamp(1, h.len())..],
+                                        },
+                                    },
+                                }
+                            })
+                            .collect();
+                        for &j in &longs_dec {
+                            let h = &lp[j].2;
+                            rows.push(SeqRow {
+                                token: h[h.len() - 1],
+                                pos: h.len() - 1,
+                                slot: nd + j,
+                                head: RowHead::Argmax,
+                            });
+                        }
+                        // Rows in a random order.
+                        for i in (1..rows.len()).rev() {
+                            rows.swap(i, rnd(i + 1));
+                        }
+                        let fc: Vec<FeedChunk> = chunks
+                            .iter()
+                            .map(|&(slot, start, n)| FeedChunk {
+                                slot,
+                                start,
+                                tokens: &lp[slot - nd].2[start..start + n],
+                            })
+                            .collect();
+                        fused += (!fc.is_empty() && !rows.is_empty()) as usize;
+                        let outs = net.step_fused(&mut p, &fc, &rows).unwrap();
+                        let res: Vec<(usize, RowOut)> =
+                            rows.iter().map(|r| r.slot).zip(outs).collect();
+                        drop(rows);
+                        for &(slot, _, n) in &chunks {
+                            lp[slot - nd].1 += n;
+                        }
+                        for (slot, o) in res {
+                            if slot < nd {
+                                let i = slot;
+                                assert_eq!(o, refs[i].0[done[i]], "{what} step {step} request {i}");
+                                let next = match (o, sms[i].as_mut()) {
+                                    (RowOut::Pick(t), None) => t,
+                                    (RowOut::Cands(c), Some(s)) => s.pick(&c),
+                                    _ => panic!("{what}: a result of another head"),
+                                };
+                                hist[i].push(next);
+                                done[i] += 1;
+                                continue;
+                            }
+                            let j = slot - nd;
+                            let r = lp[j].0;
+                            let last = long_p[j][r].len() - 1;
+                            let k = lp[j].2.len() - 1 - last;
+                            assert_eq!(
+                                o, long_ref[j][r].0[k],
+                                "{what} step {step} long {j}.{r} row {k}"
+                            );
+                            let RowOut::Pick(t) = o else { unreachable!() };
+                            lp[j].2.push(t);
+                            if lp[j].2.len() - 1 - last == after {
+                                // Its KV, then the next prompt in that slot.
+                                let n = lp[j].2.len() - 1;
+                                assert_eq!(lp[j].2, long_ref[j][r].1, "{what} long {j}.{r} tokens");
+                                assert!(
+                                    pool_bytes(&net, &p, slot, n) == long_ref[j][r].2,
+                                    "{what}: long {j}.{r} KV bytes"
+                                );
+                                net.release(&mut p, slot, 0).unwrap();
+                                lp[j].0 += 1;
+                                lp[j].1 = 0;
+                                if lp[j].0 < 3 {
+                                    lp[j].2 = long_p[j][lp[j].0].clone();
+                                }
+                            }
+                        }
+                    }
+                    assert!(fused >= 10, "{what}: {fused} hybrid passes");
+                    for i in 0..nd {
+                        assert_eq!(hist[i], refs[i].1, "{what} request {i} tokens");
+                        let n = hist[i].len() - 1;
+                        assert!(
+                            pool_bytes(&net, &p, i, n) == refs[i].2,
+                            "{what}: request {i} KV bytes"
+                        );
+                    }
                 }
             }
         }
@@ -2337,6 +2688,222 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    /// The hybrid step's kill test (MEASURE, not a check; `--ignored
+    /// --nocapture`): what fusing a prefill chunk and the decode rows into
+    /// one pass could save. `AXON_STEP_MODEL` (one path), `AXON_HYB_NB`
+    /// (decode rows, default "4,16,32,64"), `AXON_HYB_CHUNK` (default
+    /// "128,256,512"), `AXON_HYB_DEPTH` (the decoders' depth, default 768),
+    /// `AXON_HYB_AT` (the chunk's start, default 1024), `AXON_HYB_REPS`
+    /// (default 11), `AXON_HYB_K` (calls per timed op, default 3).
+    ///
+    /// Per (nb, c), each rep times four ops back to back in an order rotated
+    /// by the rep: dec + feed(c) (two passes), feed(c + nb), dec +
+    /// feed(c - nb), feed(c); `dec` the step of nb rows (graphs, as serve),
+    /// `feed` a `feed_slot` into the prefilling slot, and the decode rows'
+    /// attention (`att`: the step's "attn" + "combine" segments, profiled
+    /// without graphs) once per rep. The fused pass is estimated as one feed
+    /// of all its tokens (its GEMMs and elementwise work; its decode rows'
+    /// share of flash attention at the chunk's depth) + att. Two rows:
+    /// - same chunk: two = dec + feed(c), fused = feed(c + nb) + att;
+    /// - same budget (B = c tokens a step, as a token-budget scheduler):
+    ///   two = dec + feed(c - nb), fused = feed(c) + att.
+    ///
+    /// Saving = (two - fused) / two per rep; the median, min and max over
+    /// reps (not a difference of medians). µs per unit = the median time /
+    /// (prefill tokens + decode rows). Then each feed size's GEMM route
+    /// (`gemm_route`): kernels, 64-token tiles, padding, `gemm_cost`.
+    #[test]
+    #[ignore]
+    fn pool_hybrid_cost() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let m = match std::env::var("AXON_STEP_MODEL") {
+            Ok(p) => crate::gguf::load_with(&p, Some(false)).unwrap(),
+            Err(_) => match crate::testutil::model() {
+                Some(m) => m,
+                None => return,
+            },
+        };
+        let list = |var: &str, def: &str| -> Vec<usize> {
+            std::env::var(var)
+                .unwrap_or(def.into())
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.trim().parse().unwrap())
+                .collect()
+        };
+        let nbs = list("AXON_HYB_NB", "4,16,32,64");
+        let chunks = list("AXON_HYB_CHUNK", "128,256,512");
+        let depth = list("AXON_HYB_DEPTH", "768")[0];
+        let at = list("AXON_HYB_AT", "1024")[0];
+        let reps = list("AXON_HYB_REPS", "11")[0].max(1);
+        let k = list("AXON_HYB_K", "3")[0].max(1);
+        let nbm = *nbs.iter().max().unwrap();
+        let cm = *chunks.iter().max().unwrap();
+        let ctx = (at + cm + nbm).max(depth + 1).next_multiple_of(PAGE);
+        let km = Kernels::module_for(&g, &m).unwrap();
+        let mut net = CudaQwen2::new(&g, &km, &m, ctx).unwrap();
+        net.graphs = true;
+        let slots = nbm + 1;
+        let pages = nbm * (depth + 1).div_ceil(PAGE) + ctx / PAGE;
+        let mut p = net.pool_with(slots, ctx, Some(pages), None).unwrap();
+        let prompt: Vec<u32> = (0..ctx).map(|i| 1000 + (i * 7919 % 20000) as u32).collect();
+        for s in 0..nbm {
+            net.feed_slot(&mut p, s, &prompt[..depth], 0).unwrap();
+        }
+        // The prefilling slot: the last one, `at` positions in.
+        let ps = nbm;
+        net.feed_slot(&mut p, ps, &prompt[..at], 0).unwrap();
+        let gi = g.info().unwrap();
+        let name = std::env::var("AXON_STEP_MODEL").unwrap_or("default 0.5B".into());
+        eprintln!(
+            "hybrid cost: {name} ({}), {} ({} SMs), decoders at {depth}, chunk at {at}, \
+             pass max {}, {reps} reps x {k} calls per op",
+            m.arch,
+            gi.name,
+            gi.sms,
+            p.pass_max()
+        );
+        let med = |v: &[f64]| {
+            let mut v = v.to_vec();
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let mut sizes = std::collections::BTreeSet::new();
+        eprintln!(
+            "| nb | c | row | two ms | fused ms | saved % med | min | max | two µs/unit | fused µs/unit |"
+        );
+        for &nb in &nbs {
+            let rs: Vec<SeqRow> = (0..nb)
+                .map(|s| SeqRow {
+                    token: 5,
+                    pos: depth,
+                    slot: s,
+                    head: RowHead::Argmax,
+                })
+                .collect();
+            p.graphs.clear();
+            // Warm: the step's graph, every feed size.
+            net.step_rows(&mut p, &rs).unwrap();
+            for &c in &chunks {
+                for n in [c, c + nb, c.saturating_sub(nb)] {
+                    if n > 0 {
+                        net.feed_slot(&mut p, ps, &prompt[at..at + n], at).unwrap();
+                        sizes.insert(n);
+                    }
+                }
+            }
+            for &c in &chunks {
+                let budget = c > nb;
+                // Per rep: [dec+feed(c), feed(c+nb), dec+feed(c-nb), feed(c)] ms, att ms.
+                let mut t = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+                let mut att_v = Vec::new();
+                for r in 0..reps {
+                    let n_ops = if budget { 4 } else { 2 };
+                    for j in 0..n_ops {
+                        // Rotate the order, and reverse it every other rep.
+                        let i = match r % 2 {
+                            0 => (j + r / 2) % n_ops,
+                            _ => (n_ops - 1 - j + r / 2) % n_ops,
+                        };
+                        let t0 = std::time::Instant::now();
+                        for _ in 0..k {
+                            let p = &mut p;
+                            match i {
+                                0 => {
+                                    std::hint::black_box(net.step_rows(p, &rs).unwrap());
+                                    net.feed_slot(p, ps, &prompt[at..at + c], at).unwrap();
+                                }
+                                1 => net.feed_slot(p, ps, &prompt[at..at + c + nb], at).unwrap(),
+                                2 => {
+                                    std::hint::black_box(net.step_rows(p, &rs).unwrap());
+                                    net.feed_slot(p, ps, &prompt[at..at + c - nb], at).unwrap();
+                                }
+                                _ => net.feed_slot(p, ps, &prompt[at..at + c], at).unwrap(),
+                            }
+                        }
+                        let v = t0.elapsed().as_secs_f64() * 1e3 / k as f64;
+                        t[i].push(v);
+                    }
+                    // The decode rows' attention, profiled (no graph).
+                    let tokens = vec![5u32; nb];
+                    let ats: Vec<RowAt> = (0..nb)
+                        .map(|s| RowAt {
+                            pos: depth as u32,
+                            base: p.base(s) as u32,
+                        })
+                        .collect();
+                    let tab = p.c.tab.as_ref().map(|t| t.len() / 4);
+                    let b = p.c.b.as_mut().unwrap();
+                    net.load_input(b, BatchIn::Tokens(&tokens)).unwrap();
+                    b.upload_rows(&ats, tab).unwrap();
+                    let mut evs = vec![("start", g.record().unwrap())];
+                    net.pass_at(
+                        &mut p.c,
+                        BatchIn::Loaded(nb),
+                        Place::Rows,
+                        Head::Sample,
+                        Some((nb, nb)),
+                        0,
+                        &mut |n| {
+                            evs.push((n, g.record()?));
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+                    g.sync().unwrap();
+                    att_v.push(
+                        (1..evs.len())
+                            .filter(|&i| matches!(evs[i].0, "attn" | "combine"))
+                            .map(|i| evs[i - 1].1.ms_to(&evs[i].1).unwrap() as f64)
+                            .sum::<f64>(),
+                    );
+                }
+                let row = |what: &str, two_i: usize, fused_i: usize, units: usize| {
+                    let sv: Vec<f64> = (0..reps)
+                        .map(|r| {
+                            let two = t[two_i][r];
+                            let fused = t[fused_i][r] + att_v[r];
+                            100.0 * (two - fused) / two
+                        })
+                        .collect();
+                    let (two, fused) = (med(&t[two_i]), med(&t[fused_i]) + med(&att_v));
+                    let lo = sv.iter().copied().fold(f64::INFINITY, f64::min);
+                    let hi = sv.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+                    eprintln!(
+                        "| {nb} | {c} | {what} | {two:.3} | {fused:.3} | {:.1} | {lo:.1} | {hi:.1} | {:.1} | {:.1} |",
+                        med(&sv),
+                        two * 1e3 / units as f64,
+                        fused * 1e3 / units as f64
+                    );
+                };
+                row("same chunk", 0, 1, c + nb);
+                if budget {
+                    row("same budget", 2, 3, c);
+                }
+                eprintln!(
+                    "|   |   | (dec+feed(c) {:.3}, feed(c+nb) {:.3}, att {:.3} ms) | | | | | | | |",
+                    med(&t[0]),
+                    med(&t[1]),
+                    med(&att_v)
+                );
+            }
+        }
+        eprintln!("| feed tokens | GEMM route | 64-token tiles | padding % | gemm_cost (rel.) |");
+        let base = sizes
+            .iter()
+            .find_map(|&n| net.gemm_route(n).3.map(|c| c as f64 / n as f64));
+        for &n in &sizes {
+            let (r, tiles, pad, cost) = net.gemm_route(n);
+            let cost = match (cost, base) {
+                (Some(c), Some(b)) => format!("{:.3} per token", c as f64 / n as f64 / b),
+                _ => "-".into(),
+            };
+            eprintln!("| {n} | {r} | {tiles} | {pad:.0} | {cost} |");
         }
     }
 

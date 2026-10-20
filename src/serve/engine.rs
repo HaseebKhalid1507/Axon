@@ -16,13 +16,17 @@
 //! arrives meanwhile, its rows are already in that slot (`BatchLm::adopt`
 //! copies nothing) and it carries on in the steps.
 //!
-//! So while requests decode, a long prompt is fed a chunk per step, in
-//! between their steps: they keep producing tokens while it prefills (a
-//! whole 20k-token prompt as one pass would stop them for seconds). A chunk
-//! is sized to a time budget (`--prefill-ms`: a step's chunk and decode
-//! together take about that long), at least `--prefill-chunk` tokens; with
-//! nothing decoding the prompt is fed whole. A chunk is a feed into its own
-//! slot at its position (`feed_slot`), as a cache reuse feeds the rest of a
+//! So while requests decode, a long prompt is fed a chunk per step: they
+//! keep producing tokens while it prefills (a whole 20k-token prompt as one
+//! pass would stop them for seconds). A hybrid step (`plan_fused`) is one
+//! pass of the decode rows and the chunks (`BatchLm::step_fused`), the rows
+//! riding the chunks' weight reads, `--prefill-chunk` tokens in all (whole
+//! 64-token tiles); with AXON_HYBRID=0 a chunk is its own pass, then the
+//! decode step, the chunk sized to a time budget (`--prefill-ms`: chunk and
+//! decode together take about that long), at least `--prefill-chunk`
+//! tokens. With nothing decoding the prompt is fed whole. A chunk is a feed
+//! into its own slot at its position (`feed_slot`, or its tokens in the
+//! hybrid pass: the same bits), as a cache reuse feeds the rest of a
 //! prompt, so its rows are the bits one feed of the whole prompt writes,
 //! whatever the chunk sizes.
 //!
@@ -33,7 +37,7 @@
 
 use super::api::Usage;
 use super::{Event, Job, TextOut};
-use crate::lm::{Backend, BatchLm, PoolPages, RowHead, RowOut, SeqRow, StepError};
+use crate::lm::{Backend, BatchLm, FeedChunk, PoolPages, RowHead, RowOut, SeqRow, StepError};
 use crate::sample::Sampler;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -93,6 +97,9 @@ const DEPTH_K: f64 = 8192.0;
 /// to twice it once rounded up to whole passes).
 const IDLE_CHUNK: usize = 4096;
 const IDLE_MS: f64 = 250.0;
+/// The GEMMs' token tile (gemm2s / gemm2t / gemmh2: 64 tokens a block):
+/// a hybrid pass is a whole number of them (`plan_fused`).
+const TILE: usize = 64;
 /// Feeds of at least this many tokens teach the cost (smaller ones are
 /// mostly a pass's fixed part).
 const LEARN_MIN: usize = 128;
@@ -109,8 +116,10 @@ enum Budget {
 pub struct ChunkPolicy {
     /// Tokens at least (0: no chunking).
     pub floor: usize,
-    /// The step's budget in ms (0: chunks of `floor`).
+    /// The step's budget in ms (0: chunks of `floor`; two-pass steps only).
     pub ms: usize,
+    /// Hybrid steps (`plan_fused`): the chunks in the decode step's pass.
+    pub hybrid: bool,
 }
 
 /// How a request ended.
@@ -161,6 +170,12 @@ pub(super) struct Batch<'a, 't> {
     grow_tokens: usize,
     /// Where the slots' state is shown (/slots, /metrics; `publish`).
     pub metrics: Option<Arc<super::ops::Metrics>>,
+}
+
+/// Whether steps are hybrid (AXON_HYBRID, default on; 0 turns them off: a
+/// chunk's own pass, then the decode step, as before).
+pub fn hybrid_env() -> bool {
+    std::env::var("AXON_HYBRID").map_or(true, |v| v != "0")
 }
 
 /// What gives up pages for running request `growing`'s next page
@@ -393,7 +408,7 @@ impl<'a, 't> Batch<'a, 't> {
     /// beside the last decode step at the measured cost (SEED_CHUNK before
     /// one is known).
     fn budget(&self) -> Budget {
-        let ChunkPolicy { floor, ms } = self.policy;
+        let ChunkPolicy { floor, ms, .. } = self.policy;
         if floor == 0 {
             return Budget::Tokens(usize::MAX);
         }
@@ -466,6 +481,112 @@ impl<'a, 't> Batch<'a, 't> {
             }
         }
         Ok(())
+    }
+
+    /// A hybrid step's prefill plan (requests decode, prompts wait): the
+    /// step is one pass of the decode rows and the prompts' chunks
+    /// (`BatchLm::step_fused`), `--prefill-chunk` tokens in all (the rows
+    /// count; rounded up to whole TILEs, and past the rows: a pass that
+    /// crosses a tile pays the tile, step-0 harness `pool_hybrid_cost`; a
+    /// floor under a tile is the chunk's tokens, the rows beside), shared as `plan` shares a token budget
+    /// (shortest remainder first, the starved first). Each chunk's pages
+    /// are taken now (`feedable`); a chunk that ends its prompt takes its
+    /// first row's page too (else it stops a token short). (job id, start,
+    /// tokens) per chunk; `join_fused` takes them after `grow`.
+    fn plan_fused(&mut self) -> Result<Vec<(u64, usize, usize)>, String> {
+        let (rows, floor) = (self.seqs.len(), self.policy.floor);
+        // Under a tile (tests' tiny chunks): exactly `floor` prompt tokens.
+        let share = match floor < TILE {
+            true => floor,
+            false => floor.max(rows + 1).next_multiple_of(TILE) - rows,
+        };
+        // (The prompts finishing in this pass add their rows.)
+        let cap = self.pass.saturating_sub(rows + self.pre.len()).max(1);
+        let share = share.min(cap);
+        let rem: Vec<usize> = (self.pre.iter())
+            .map(|f| f.seq.hist.len() - 1 - f.fed)
+            .collect();
+        let fed: Vec<usize> = self.pre.iter().map(|f| f.fed).collect();
+        let starved: Vec<usize> = self.pre.iter().map(|f| f.starved).collect();
+        let plan = plan(
+            Budget::Tokens(share),
+            share.min(16),
+            self.pass,
+            &fed,
+            &rem,
+            &starved,
+            false,
+        );
+        for (f, s) in self
+            .pre
+            .iter_mut()
+            .zip(starve(&plan, &rem, &starved, false))
+        {
+            f.starved = s;
+        }
+        let mut out = Vec::new();
+        for (i, &n) in plan.iter().enumerate() {
+            if n == 0 {
+                continue;
+            }
+            let mut n = self.feedable(i, n)?;
+            let f = &self.pre[i];
+            let (slot, last) = (f.seq.slot, f.seq.hist.len() - 1);
+            if n > 0 && f.fed + n == last && self.make_room(slot, last + 1)? > 0 {
+                n -= 1;
+            }
+            let f = &self.pre[i];
+            if n > 0 {
+                out.push((f.seq.job.id, f.fed, n));
+            }
+        }
+        Ok(out)
+    }
+
+    /// The chunks of `plan_fused` that still stand after `grow` (a prompt
+    /// that gave its rows up drops its chunk), as fed: (slot, start,
+    /// tokens) each, `held` and `fed` past them; prompts then whole join
+    /// the running requests (their first row in this pass), each with its
+    /// start (its timings are set once the pass ran: index in `seqs`, t0).
+    #[allow(clippy::type_complexity)]
+    fn join_fused(
+        &mut self,
+        plan: Vec<(u64, usize, usize)>,
+    ) -> (Vec<(usize, usize, usize)>, Vec<(usize, Instant)>) {
+        let mut chunks = Vec::new();
+        for (id, start, n) in plan {
+            let Some(i) = self.pre.iter().position(|f| f.seq.job.id == id) else {
+                continue;
+            };
+            let s = self.pre[i].seq.slot;
+            let pages = self.pages().map_or(usize::MAX, |p| p.held[s] * p.size);
+            if self.pre[i].fed != start || pages < start + n {
+                continue;
+            }
+            let f = &mut self.pre[i];
+            self.held[s].extend_from_slice(&f.seq.hist[start..start + n]);
+            f.fed += n;
+            chunks.push((s, start, n));
+        }
+        let mut joined = Vec::new();
+        if chunks.is_empty() {
+            return (chunks, joined);
+        }
+        let mut i = 0;
+        while i < self.pre.len() {
+            let f = &self.pre[i];
+            if f.fed == f.seq.hist.len() - 1 {
+                let f = self.pre.remove(i);
+                // A preempted request (`preempt`) keeps its first timings.
+                if f.seq.ids.is_empty() {
+                    joined.push((self.seqs.len(), f.t0));
+                }
+                self.seqs.push(f.seq);
+            } else {
+                i += 1;
+            }
+        }
+        (chunks, joined)
     }
 
     /// Feed the next `n` tokens of prefill `i`'s prompt into its slot (a
@@ -639,9 +760,20 @@ impl<'a, 't> Batch<'a, 't> {
     /// running request and each one's next token.
     pub fn step(&mut self) -> Result<(), String> {
         self.reap();
-        self.prefill()?;
+        // Hybrid (requests decode, prompts wait): the chunks ride in the
+        // decode step's pass; else the chunk's own pass first.
+        let fused = self.policy.hybrid && self.policy.floor > 0;
+        let fused = fused && !self.seqs.is_empty() && !self.pre.is_empty();
+        let plan = match fused {
+            true => self.plan_fused()?,
+            false => {
+                self.prefill()?;
+                Vec::new()
+            }
+        };
         self.grow()?;
-        if self.seqs.is_empty() {
+        let (chunks, joined) = self.join_fused(plan);
+        if self.seqs.is_empty() && chunks.is_empty() {
             return Ok(());
         }
         let specs: Vec<_> = self
@@ -671,9 +803,27 @@ impl<'a, 't> Batch<'a, 't> {
                 }
             })
             .collect();
+        let feeds: Vec<FeedChunk> = (chunks.iter())
+            .map(|&(slot, start, n)| FeedChunk {
+                slot,
+                start,
+                tokens: &self.held[slot][start..start + n],
+            })
+            .collect();
         let t = Instant::now();
-        let res = self.net.step(&mut self.pool, &rows);
-        self.decode_ms = t.elapsed().as_secs_f64() * 1e3;
+        let res = match feeds.is_empty() {
+            true => self.net.step(&mut self.pool, &rows),
+            false => self.net.step_fused(&mut self.pool, &feeds, &rows),
+        };
+        if feeds.is_empty() {
+            self.decode_ms = t.elapsed().as_secs_f64() * 1e3;
+        }
+        drop((rows, feeds));
+        for (k, t0) in joined {
+            let s = &mut self.seqs[k];
+            s.prompt_ms = t0.elapsed().as_secs_f64() * 1e3;
+            s.t1 = Instant::now();
+        }
         let outs = match res {
             Ok(o) => o,
             // Refused before any work: those requests fail, the rest of the

@@ -54,6 +54,7 @@ fn test_opts(path: &str, device: Device) -> Opts {
         kv_grow: None,
         prefill_chunk: super::engine::PREFILL_CHUNK,
         prefill_ms: super::engine::PREFILL_MS,
+        hybrid: super::engine::hybrid_env(),
         rope: Default::default(),
         api_key: None,
         max_prompt_tokens: None,
@@ -2249,7 +2250,9 @@ fn serve_default_ctx() {
 /// chunks sized by a time budget (varying sizes), and the Gemma 3 model
 /// (sliding-window layers, prompts past their window) when present; then
 /// again with the long prompts extended, so their slots' rows are reused
-/// and only the rest is fed in chunks.
+/// and only the rest is fed in chunks. Hybrid steps (the chunks in the
+/// decode rows' pass: per-query attention at 16, flash runs at a 256
+/// budget), and the two-pass steps of AXON_HYBRID=0.
 #[test]
 fn serve_chunked_prefill_matches_solo() {
     let Some(_) = crate::testutil::gpu() else {
@@ -2259,14 +2262,17 @@ fn serve_chunked_prefill_matches_solo() {
         return;
     };
     use crate::kv::KvType::{F16, Q8};
-    // (model, kv, chunk floor, ms budget)
+    // (model, kv, chunk floor, ms budget, hybrid)
     let mut configs = vec![
-        (p.clone(), F16, 16, 0),
-        (p.clone(), Q8, 16, 0),
-        (p, F16, 16, 20),
+        (p.clone(), F16, 16, 0, true),
+        (p.clone(), Q8, 16, 0, true),
+        (p.clone(), F16, 256, 0, true),
+        (p.clone(), Q8, 256, 0, true),
+        (p.clone(), F16, 16, 0, false),
+        (p, F16, 16, 20, false),
     ];
     if let Some(g) = crate::testutil::gemma3_model_path() {
-        configs.push((g, F16, 16, 0));
+        configs.push((g, F16, 16, 0, true));
     }
     const N: u64 = 400;
     let decoders = [
@@ -2298,7 +2304,7 @@ fn serve_chunked_prefill_matches_solo() {
             v["usage"]["completion_tokens"].clone(),
         )
     };
-    for (path, kv, chunk, ms) in configs {
+    for (path, kv, chunk, ms, hybrid) in configs {
         let gemma = path.to_string_lossy().contains("gemma");
         let opts = |o: &mut Opts| {
             o.kv = kv;
@@ -2306,6 +2312,7 @@ fn serve_chunked_prefill_matches_solo() {
             o.max_draft = 3;
             o.prefill_chunk = chunk;
             o.prefill_ms = ms;
+            o.hybrid = hybrid;
         };
         let s = server_with(path.to_str().unwrap(), Device::Cuda, opts);
         let a = s.addr;
@@ -2336,7 +2343,7 @@ fn serve_chunked_prefill_matches_solo() {
                 .map(|b| completion(&post(ra, "/v1/completions", b.clone())))
                 .collect();
             let what = format!(
-                "{} {kv:?} chunk {chunk} ms {ms} round {round}",
+                "{} {kv:?} chunk {chunk} ms {ms} hybrid {hybrid} round {round}",
                 path.display()
             );
             std::thread::scope(|sc| {
@@ -2396,11 +2403,11 @@ fn serve_chunked_prefill_matches_solo() {
                     assert_eq!(&h.join().unwrap(), d, "{what}: decoding request {i}");
                 }
                 // Over 60 chunks of 16 for a prompt of over 1000 tokens,
-                // each followed by a step of the two decoding requests
-                // (round 1 feeds only the tail; a time budget's chunks
-                // are larger).
+                // each with (or followed by) a step of the two decoding
+                // requests (round 1 feeds only the tail; a time budget's
+                // chunks, and a 256 budget's, are larger).
                 assert!(
-                    round == 1 || ms > 0 || !running || during >= 40,
+                    round == 1 || ms > 0 || chunk > 16 || !running || during >= 40,
                     "{what}: {during} tokens decoded while a long prompt prefilled"
                 );
             });
@@ -4935,4 +4942,305 @@ fn serve_gauges_settle_back_to_back() {
         bad.len(),
         bad.join("\n")
     );
+}
+
+/// A streamed /v1/completions request: each text event's arrival (the
+/// first after `t0`, the send), the text and its completion tokens.
+fn stream_times(addr: SocketAddr, body: &Value) -> (Instant, Vec<Instant>, String, u64) {
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(900))).unwrap();
+    let mut b = body.clone();
+    b["stream"] = json!(true);
+    b["stream_options"] = json!({"include_usage": true});
+    let t0 = Instant::now();
+    s.write_all(request("POST", "/v1/completions", &b.to_string(), true).as_bytes())
+        .unwrap();
+    let (mut raw, mut times, mut scan) = (Vec::new(), Vec::new(), 0);
+    loop {
+        let mut t = [0u8; 16384];
+        let n = s.read(&mut t).expect("read");
+        let now = Instant::now();
+        if n == 0 {
+            break;
+        }
+        raw.extend_from_slice(&t[..n]);
+        while let Some(p) = raw[scan..].windows(6).position(|w| w == b"data: ") {
+            let a = scan + p;
+            let Some(e) = raw[a..].iter().position(|&c| c == b'\n') else {
+                break;
+            };
+            let line = String::from_utf8_lossy(&raw[a..a + e]);
+            if line.contains("\"text\":\"") && !line.contains("\"text\":\"\"") {
+                times.push(now);
+            }
+            scan = a + e;
+        }
+    }
+    let r = read_resp(&mut &raw[..], &mut Vec::new());
+    assert_eq!(r.status, 200, "{}", r.body);
+    let (text, last) = streamed_text(&r, false);
+    let n = last["usage"]["completion_tokens"].as_u64();
+    let n = n.unwrap_or(times.len() as u64);
+    (t0, times, text, n)
+}
+
+/// The value at quantile q of `v` (nearest rank; NaN if empty).
+fn quant(v: &[f64], q: f64) -> f64 {
+    let mut v = v.to_vec();
+    v.sort_by(f64::total_cmp);
+    match v.len() {
+        0 => f64::NAN,
+        n => v[((q * (n - 1) as f64).round() as usize).min(n - 1)],
+    }
+}
+
+/// The hybrid step's serve A/B (MEASURE, not a check; `--ignored
+/// --nocapture`, under `axon-run --timing`). `AXON_AB_MODEL` (default the
+/// test model), `AXON_AB_ROUNDS` (3), `AXON_AB_PARTS` ("admit,loop"),
+/// `AXON_AB_BUDGET` (--prefill-chunk, 256). Modes per round, in an order
+/// rotated by the round: hybrid on; off (the two-pass steps of before,
+/// --prefill-ms 60: main's defaults); off with --prefill-ms 0 (chunks of
+/// exactly the budget: the chunk pass alone is its ITL minus the decode
+/// step's), admit only. A fresh server per mode and part.
+/// - admit: `AXON_AB_DEC` (4) streamed greedy decoders, then one prompt
+///   of at most `AXON_AB_LONG` (20000) tokens, counted by the model's
+///   tokenizer (the slots' context sized from the count; max_tokens
+///   16): the decoders' token gaps before it (ITL before) and those
+///   overlapping its send .. first token (ITL during), p50 / p99 / max,
+///   its TTFT.
+/// - loop: `AXON_AB_C` (8) clients, `AXON_AB_REQS` (4) requests each in
+///   turn, ~`AXON_AB_WORDS` (400) words of salted prompt, `AXON_AB_N`
+///   (128) tokens, greedy: aggregate tok/s (all tokens / wall), TTFT and
+///   ITL p50 / p99.
+///
+/// Every mode's texts must equal the round's first mode's (same_text).
+/// Smoke run (every part, the admit at full size): `AXON_AB_ROUNDS=1
+/// AXON_AB_REQS=2` on the test model.
+#[test]
+#[ignore]
+fn serve_hybrid_ab() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let path = match std::env::var("AXON_AB_MODEL") {
+        Ok(p) => p,
+        Err(_) => match crate::testutil::model_path() {
+            Some(p) => p.to_string_lossy().into_owned(),
+            None => return,
+        },
+    };
+    let env =
+        |k: &str, d: usize| -> usize { std::env::var(k).ok().map_or(d, |v| v.parse().unwrap()) };
+    let rounds = env("AXON_AB_ROUNDS", 3);
+    let budget = env("AXON_AB_BUDGET", 256);
+    let dec = env("AXON_AB_DEC", 4);
+    let long = env("AXON_AB_LONG", 20000);
+    let (c, reqs, words, n) = (
+        env("AXON_AB_C", 8),
+        env("AXON_AB_REQS", 4),
+        env("AXON_AB_WORDS", 400),
+        env("AXON_AB_N", 128),
+    );
+    let parts = std::env::var("AXON_AB_PARTS").unwrap_or("admit,loop".into());
+    let sent = "The quick brown fox jumps over the lazy dog near the river bank.";
+    // ~long tokens: sentences of ~16 tokens, sized by the model's own
+    // tokenizer (the context is sized from the real count below).
+    let tok = Tokenizer::from_gguf(&crate::gguf::load(&path).unwrap());
+    let text_of = |k: usize, salt: usize| {
+        let s: Vec<String> = (0..k).map(|j| format!("{j}. {sent}")).collect();
+        format!("{salt} {} Summary:", s.join(" "))
+    };
+    let mut k = long / 16;
+    while k > 1 && tok.encode_prompt(&text_of(k, 7000)).len() > long {
+        k = k * 99 / 100;
+    }
+    let long_prompt = |salt: usize| text_of(k, salt);
+    let long_toks = (0..rounds)
+        .map(|r| tok.encode_prompt(&long_prompt(7000 + r)).len())
+        .max()
+        .unwrap_or(0);
+    let loop_prompt = |r: usize, i: usize, q: usize| {
+        let w = [
+            "river", "stone", "garden", "engine", "violet", "harbor", "signal", "meadow",
+        ];
+        let p: Vec<&str> = (0..words).map(|x| w[(x * 7 + i + q) % 8]).collect();
+        format!("{r}-{i}-{q}: {}\nSummary:", p.join(" "))
+    };
+    let loop_toks = (0..rounds)
+        .flat_map(|r| (0..c).flat_map(move |i| (0..reqs).map(move |q| (r, i, q))))
+        .map(|(r, i, q)| tok.encode_prompt(&loop_prompt(r, i, q)).len())
+        .max()
+        .unwrap_or(0);
+    // Each slot's context: its longest prompt, its tokens (the decoders':
+    // 1200 on short prompts), 64 to spare, whole KiB.
+    let admit_ctx = (long_toks + 16 + 64).max(1300 + 64).next_multiple_of(1024);
+    let loop_ctx = (loop_toks + n + 64).next_multiple_of(1024);
+    eprintln!(
+        "serve_hybrid_ab: {path}, budget {budget}, {rounds} rounds; admit {dec} decoders + a \
+         {long_toks}-token prompt (ctx {admit_ctx}); loop C={c} x {reqs} reqs, {loop_toks} tokens \
+         of prompt at most, {n} tokens (ctx {loop_ctx})"
+    );
+    let modes: [(&str, bool, usize); 3] =
+        [("on", true, 60), ("off", false, 60), ("off-ms0", false, 0)];
+    // (part, mode) -> per-round stats rows.
+    let mut table: Vec<(String, String, Vec<f64>)> = Vec::new();
+    let mut put = |part: &str, mode: &str, v: Vec<f64>| {
+        table.push((part.into(), mode.into(), v));
+    };
+    for r in 0..rounds {
+        for part in parts.split(',') {
+            let ms: Vec<usize> = match part {
+                "admit" => vec![0, 1, 2],
+                _ => vec![0, 1],
+            };
+            let mut first_texts: Option<Vec<String>> = None;
+            for k in 0..ms.len() {
+                let (mode, hybrid, pms) = modes[ms[(k + r) % ms.len()]];
+                let ctx = match part {
+                    "admit" => admit_ctx,
+                    _ => loop_ctx,
+                };
+                let par = if part == "admit" { dec + 1 } else { c };
+                let s = server_with(&path, Device::Cuda, |o| {
+                    o.ctx = Some(ctx);
+                    o.parallel = par;
+                    o.parallel_set = true;
+                    o.prefill_chunk = budget;
+                    o.prefill_ms = pms;
+                    o.hybrid = hybrid;
+                });
+                let a = s.addr;
+                // Warm: a short request (kernels, graphs).
+                post(
+                    a,
+                    "/v1/completions",
+                    json!({"prompt": "Hello", "max_tokens": 8, "temperature": 0}),
+                );
+                let mut texts = Vec::new();
+                let row: Vec<f64> = if part == "admit" {
+                    let g = &s.generated;
+                    let res = std::thread::scope(|sc| {
+                        let hs: Vec<_> = (0..dec)
+                            .map(|i| {
+                                let b = json!({"prompt": format!("{} {r} The history of the Roman Empire", 100 + i),
+                                               "max_tokens": 1200, "temperature": 0});
+                                sc.spawn(move || stream_times(a, &b))
+                            })
+                            .collect();
+                        let g0 = g.load(Ordering::Relaxed);
+                        wait_for("the decoders", || {
+                            g.load(Ordering::Relaxed) >= g0 + 32 * dec as u64
+                        });
+                        std::thread::sleep(Duration::from_millis(500));
+                        let lb = json!({"prompt": long_prompt(7000 + r), "max_tokens": 16, "temperature": 0});
+                        let l = stream_times(a, &lb);
+                        let ds: Vec<_> = hs.into_iter().map(|h| h.join().unwrap()).collect();
+                        (l, ds)
+                    });
+                    let ((t_send, lt, ltext, _), ds) = res;
+                    let t_first = lt[0];
+                    let (mut before, mut during, mut made) = (Vec::new(), Vec::new(), 0usize);
+                    for (_, ts, text, _) in &ds {
+                        for w in ts.windows(2) {
+                            let gap = (w[1] - w[0]).as_secs_f64() * 1e3;
+                            if w[1] < t_send {
+                                before.push(gap);
+                            } else if w[0] < t_first {
+                                during.push(gap);
+                            }
+                        }
+                        made += ts.iter().filter(|&&t| t > t_send && t < t_first).count();
+                        texts.push(text.clone());
+                    }
+                    texts.push(ltext);
+                    let ttft = (t_first - t_send).as_secs_f64() * 1e3;
+                    vec![
+                        quant(&before, 0.5),
+                        quant(&before, 0.99),
+                        quant(&during, 0.5),
+                        quant(&during, 0.99),
+                        quant(&during, 1.0),
+                        ttft,
+                        made as f64,
+                    ]
+                } else {
+                    let t0 = Instant::now();
+                    let outs: Vec<Vec<_>> = std::thread::scope(|sc| {
+                        let hs: Vec<_> = (0..c)
+                            .map(|i| {
+                                sc.spawn(move || {
+                                    (0..reqs)
+                                        .map(|q| {
+                                            let b = json!({"prompt": loop_prompt(r, i, q),
+                                                           "max_tokens": n, "temperature": 0});
+                                            stream_times(a, &b)
+                                        })
+                                        .collect()
+                                })
+                            })
+                            .collect();
+                        hs.into_iter().map(|h| h.join().unwrap()).collect()
+                    });
+                    let wall = t0.elapsed().as_secs_f64();
+                    let (mut ttft, mut itl, mut toks) = (Vec::new(), Vec::new(), 0u64);
+                    for (t_send, ts, text, nt) in outs.iter().flatten() {
+                        if let Some(f) = ts.first() {
+                            ttft.push((*f - *t_send).as_secs_f64() * 1e3);
+                        }
+                        itl.extend(ts.windows(2).map(|w| (w[1] - w[0]).as_secs_f64() * 1e3));
+                        toks += nt;
+                        texts.push(text.clone());
+                    }
+                    vec![
+                        toks as f64 / wall,
+                        quant(&ttft, 0.5),
+                        quant(&ttft, 0.99),
+                        quant(&itl, 0.5),
+                        quant(&itl, 0.99),
+                    ]
+                };
+                drop(s);
+                let same = match &first_texts {
+                    None => {
+                        first_texts = Some(texts);
+                        1.0
+                    }
+                    Some(f) => (*f == texts) as u8 as f64,
+                };
+                let mut row = row;
+                row.push(same);
+                eprintln!("round {r} {part} {mode}: {row:.2?}");
+                put(part, mode, row);
+            }
+        }
+    }
+    eprintln!("medians over rounds (same_text: min):");
+    let cols = |part: &str| match part {
+        "admit" => {
+            "ITL before p50 | p99 | ITL during p50 | p99 | max | TTFT ms | tokens during | same_text"
+        }
+        _ => "agg tok/s | TTFT p50 | p99 | ITL p50 | p99 | same_text",
+    };
+    for part in parts.split(',') {
+        eprintln!("| {part} | {} |", cols(part));
+        for (mode, _, _) in modes {
+            let rows: Vec<&Vec<f64>> = (table.iter())
+                .filter(|t| t.0 == part && t.1 == mode)
+                .map(|t| &t.2)
+                .collect();
+            if rows.is_empty() {
+                continue;
+            }
+            let m: Vec<String> = (0..rows[0].len())
+                .map(|j| {
+                    let v: Vec<f64> = rows.iter().map(|r| r[j]).collect();
+                    match j == rows[0].len() - 1 {
+                        true => format!("{}", v.iter().copied().fold(1.0, f64::min)),
+                        false => format!("{:.2}", quant(&v, 0.5)),
+                    }
+                })
+                .collect();
+            eprintln!("| {mode} | {} |", m.join(" | "));
+        }
+    }
 }
