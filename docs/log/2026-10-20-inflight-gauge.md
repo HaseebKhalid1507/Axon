@@ -1,4 +1,4 @@
-# serve: a request leaves `axon_requests_in_flight` before its last byte  (PR #N, closes #112)
+# serve: a request leaves `axon_requests_in_flight` before its last byte  (PR #113, closes #112)
 
 - Date: 2026-10-20. Branch: fix/inflight-gauge. Base: main 6f1efb5. Status: open.
 - Pick / design: issue #112: `serve_metrics_slots_max_prompt` read `axon_requests_in_flight == 1` right after a
