@@ -55,6 +55,19 @@ fn att_pre(head_dim: usize) -> f32 {
 }
 /// Threads per GEMV block (decode.cu GEMV_THREADS).
 const GEMV_THREADS: u32 = 128;
+/// GEMV blocks resident per SM (decode.cu GEMV_MIN_BLOCKS).
+const GEMV_MIN_BLOCKS: usize = 8;
+/// AXON_DEC_FUSE (decode epilogue fusion bits, default 3).
+fn dec_fuse() -> u32 {
+    std::env::var("AXON_DEC_FUSE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3)
+}
+
+/// CudaCache::tick: [0] wo's norm epilogue, [1] down's, from here gate_up's
+/// per-group counters.
+const TICK_GROUPS: usize = 8;
 /// Rows per block of the gemm2 GEMMs (prefill.cu G2_BM); tokens per block
 /// and stages are 128 and 2 (gemm2_*) or 64 and 3 (gemm2s_*).
 const G2_BM: usize = 64;
@@ -335,6 +348,20 @@ pub struct CudaQwen2<'g> {
     /// The attention runs on the tensor cores (decode.cu "Tensor-core
     /// attention"), decode and batched alike, either cache: sm_80+.
     tc_attn: bool,
+    /// Most blocks of a decode GEMV launch (decode.cu "Persistent row
+    /// loop"): SMs x GEMV_MIN_BLOCKS, all resident at once; 0: a block per
+    /// work item (AXON_DEC_PERSIST=0, or N blocks per SM: tuning, A/B).
+    gemv_grid: usize,
+    /// Fuse the small per-layer kernels into the GEMVs' epilogues (decode.cu
+    /// last_block): the FFN's quantize into gate_up, the RMSNorms after the
+    /// attention and the FFN into wo and down. AXON_DEC_FUSE=0: separate
+    /// kernels (A/B). Same bits either way.
+    fuse: bool,
+    /// Fuse the FFN's quantize into gate_up (AXON_DEC_FUSE bit 2).
+    fuse_q: bool,
+    /// With a block per item: blocks also prefetch item + pfw (the next
+    /// wave's) before pdl_wait; SMs x GEMV_MIN_BLOCKS, AXON_DEC_PFW=0 off.
+    pfw: usize,
     /// Replay a captured graph per token (else launch kernel by kernel).
     pub graphs: bool,
     bf: batch::BatchFns<'g>,
@@ -379,6 +406,13 @@ pub struct CudaCache<'g> {
     att: DevBuf<'g>,
     hid: DevBuf<'g>,
     act: DevBuf<'g>,
+    /// With `fuse`: the RMSNorms' quantized outputs (the q/k/v, gate/up
+    /// and head inputs), fused into the GEMVs before them; the other
+    /// quantized vectors (attention out, FFN hidden) stay in act.
+    act2: DevBuf<'g>,
+    /// The fused epilogues' tickets (decode.cu last_block, gate_up): zero
+    /// between kernels.
+    tick: DevBuf<'g>,
     part_o: DevBuf<'g>,
     part_ml: DevBuf<'g>,
     /// qwen3's q/k norms: this token's raw keys (kv_dim floats), from
@@ -1004,6 +1038,19 @@ impl<'g> CudaQwen2<'g> {
             layers,
             max_split,
             tc_attn: module.mma(),
+            // AXON_DEC_PERSIST: blocks per SM (0: a block per item).
+            gemv_grid: sms
+                * std::env::var("AXON_DEC_PERSIST")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(GEMV_MIN_BLOCKS),
+            // AXON_DEC_FUSE: bit 1 the norms, bit 2 the quantize (default 3).
+            fuse: dec_fuse() & 1 != 0,
+            fuse_q: dec_fuse() & 2 != 0,
+            pfw: match std::env::var("AXON_DEC_PFW").as_deref() {
+                Ok("0") => 0,
+                _ => sms * GEMV_MIN_BLOCKS,
+            },
             graphs: std::env::var("AXON_CUDA_GRAPHS").map_or(true, |v| v != "0"),
             bf: batch::BatchFns::new(module, head_dim, sms)?,
             batch: if first > 0 { split_batch } else { PLAN_BATCH },
@@ -1130,6 +1177,12 @@ impl<'g> CudaQwen2<'g> {
         self.dim.max(self.q_dim).max(self.ffn)
     }
 
+    /// u32 tickets of a cache (CudaCache::tick): TICK_GROUPS.. per 256
+    /// FFN rows (gate_up), below it the norm epilogues'.
+    fn ticks(&self) -> usize {
+        TICK_GROUPS + self.ffn.div_ceil(256)
+    }
+
     /// Weight bytes in VRAM.
     pub fn weight_bytes(&self) -> usize {
         self.weights.len()
@@ -1170,7 +1223,7 @@ impl<'g> CudaQwen2<'g> {
         };
         let kv = self.kv_cache_bytes(kv, max_ctx) + kvf;
         let host_x = if self.first > 0 { self.dim * f } else { 0 };
-        let act = act_bytes(self.act_len());
+        let act = act_bytes(self.act_len()) + act_bytes(self.dim) + self.ticks() * 4;
         let parts = self.n_heads * self.att_parts(max_ctx) * (self.head_dim + 2) * f;
         kv + (self.dim + 2 * self.q_dim + self.kv_dim() + self.ffn + self.vocab + self.head_dim) * f
             + act
@@ -1236,6 +1289,12 @@ impl<'g> CudaQwen2<'g> {
             att: g.alloc(self.q_dim * f)?,
             hid: g.alloc(self.ffn * f)?,
             act: g.alloc(act_bytes(self.act_len()))?,
+            act2: g.alloc(act_bytes(self.dim))?,
+            tick: {
+                let t = g.alloc(self.ticks() * 4)?;
+                t.zero()?;
+                t
+            },
             part_o: g.alloc(self.n_heads * self.att_parts(max_ctx) * self.head_dim * f)?,
             part_ml: g.alloc(self.n_heads * self.att_parts(max_ctx) * 2 * f)?,
             kraw: g.alloc(self.kv_dim() * f)?,
@@ -1323,6 +1382,11 @@ impl<'g> CudaQwen2<'g> {
                 self.embd.is_some(),
             )?;
             on_launch("rope", 0)?;
+            // With `fuse`, the norms' outputs go to act2 and all but the
+            // first are the epilogue of the GEMV before them.
+            let (fuse, fuse_q) = (self.fuse, self.fuse_q);
+            let act_n = if fuse || fuse_q { &c.act2 } else { &c.act };
+            let tick = |i: usize| c.tick.arg_at(i * 4);
             for (li, l) in self.layers.iter().enumerate() {
                 let norm = |off: usize| {
                     self.run(
@@ -1336,13 +1400,15 @@ impl<'g> CudaQwen2<'g> {
                             Arg::F32(self.eps),
                             Arg::I32(dim as i32),
                             want_k(dim),
-                            c.act.arg(),
+                            act_n.arg(),
                             null,
                         ],
                     )
                 };
-                norm(l.attn_norm)?;
-                on_launch("rmsnorm", 0)?;
+                if !fuse || li == 0 {
+                    norm(l.attn_norm)?;
+                    on_launch("rmsnorm", 0)?;
+                }
                 // Row pairs: query and key RoPE pairs, value rows two by two.
                 let qd = self.q_dim;
                 let qk_norm = l.qn.is_some();
@@ -1360,7 +1426,7 @@ impl<'g> CudaQwen2<'g> {
                 };
                 self.run(
                     qkv_f,
-                    (items as u32, 1, 1),
+                    self.gemv_blocks(items),
                     gemv_block,
                     0,
                     &[
@@ -1380,7 +1446,7 @@ impl<'g> CudaQwen2<'g> {
                         Arg::I32(kvd as i32),
                         Arg::I32(hd as i32),
                         Arg::I32(dim as i32),
-                        c.act.arg(),
+                        act_n.arg(),
                         c.rope.arg(),
                         params,
                         c.q.arg(),
@@ -1389,6 +1455,7 @@ impl<'g> CudaQwen2<'g> {
                         // Raw q and k for the attention's norms (qwen3):
                         // kraw, or kvf's keys on the q8 cache.
                         if qk_norm { kraw } else { null },
+                        self.pfw_arg(items),
                     ],
                 )?;
                 on_launch("qkv", l.q.bytes() + l.k.bytes() + l.v.bytes())?;
@@ -1459,13 +1526,16 @@ impl<'g> CudaQwen2<'g> {
                     ],
                 )?;
                 on_launch("combine", 0)?;
-                self.gemv(&l.o, &c.act, null, 1, &c.x)?;
+                let epi = fuse.then(|| (l.ffn_norm, &c.act2, tick(0)));
+                self.gemv(&l.o, &c.act, null, 1, &c.x, epi)?;
                 on_launch("wo", l.o.bytes())?;
-                norm(l.ffn_norm)?;
-                on_launch("rmsnorm", 0)?;
+                if !fuse {
+                    norm(l.ffn_norm)?;
+                    on_launch("rmsnorm", 0)?;
+                }
                 self.run(
                     &f.gate_up,
-                    (self.ffn as u32, 1, 1),
+                    self.gemv_blocks(self.ffn),
                     gemv_block,
                     0,
                     &[
@@ -1477,28 +1547,41 @@ impl<'g> CudaQwen2<'g> {
                         Arg::U64(l.up.rb as u64),
                         Arg::I32(self.ffn as i32),
                         Arg::I32(dim as i32),
-                        c.act.arg(),
+                        act_n.arg(),
                         c.hid.arg(),
+                        // fuse: hid quantized into act by its last rows.
+                        want_k(self.ffn),
+                        c.act.arg(),
+                        if fuse_q { tick(TICK_GROUPS) } else { null },
+                        self.pfw_arg(self.ffn),
                     ],
                 )?;
                 on_launch("gate_up", l.gate.bytes() + l.up.bytes())?;
-                self.run(
-                    &f.quantize,
-                    blocks(self.ffn, 256),
-                    (32, 1, 1),
-                    0,
-                    &[
-                        c.hid.arg(),
-                        Arg::I32(self.ffn as i32),
-                        want_k(self.ffn),
-                        c.act.arg(),
-                    ],
-                )?;
-                on_launch("quantize", 0)?;
-                self.gemv(&l.down, &c.act, null, 1, &c.x)?;
+                if !fuse_q {
+                    self.run(
+                        &f.quantize,
+                        blocks(self.ffn, 256),
+                        (32, 1, 1),
+                        0,
+                        &[
+                            c.hid.arg(),
+                            Arg::I32(self.ffn as i32),
+                            want_k(self.ffn),
+                            c.act.arg(),
+                        ],
+                    )?;
+                    on_launch("quantize", 0)?;
+                }
+                // fuse: the next norm (the next layer's, or the head's).
+                let next = match self.layers.get(li + 1) {
+                    Some(n) => Some(n.attn_norm),
+                    None => (head != Head::No).then_some(self.output_norm),
+                };
+                let epi = next.filter(|_| fuse).map(|o| (o, &c.act2, tick(1)));
+                self.gemv(&l.down, &c.act, null, 1, &c.x, epi)?;
                 on_launch("down", l.down.bytes())?;
             }
-            if head != Head::No {
+            if head != Head::No && !fuse {
                 self.run(
                     &f.rmsnorm_quant,
                     (1, 1, 1),
@@ -1515,7 +1598,9 @@ impl<'g> CudaQwen2<'g> {
                     ],
                 )?;
                 on_launch("rmsnorm", 0)?;
-                self.gemv(&self.output, &c.act, null, 0, &c.logits)?;
+            }
+            if head != Head::No {
+                self.gemv(&self.output, act_n, null, 0, &c.logits, None)?;
                 on_launch("head", self.output.bytes())?;
                 if head == Head::Sample {
                     let s = c.samp.as_ref().expect("samp_upload before a sampling step");
@@ -1553,11 +1638,36 @@ impl<'g> CudaQwen2<'g> {
         unsafe { self.gpu.launch_with(f, grid, block, shared, args, true) }
     }
 
+    /// The grid of a decode GEMV of `items` work items (rows, row pairs):
+    /// they loop, so any count from 1 to `items` gives the same results.
+    fn gemv_blocks(&self, items: usize) -> (u32, u32, u32) {
+        let n = match self.gemv_grid {
+            0 => items,
+            g => items.min(g),
+        };
+        (n as u32, 1, 1)
+    }
+
+    /// The next-wave prefetch distance of a decode GEMV of `items` work
+    /// items: only with a block per item (no persistent loop).
+    fn pfw_arg(&self, items: usize) -> Arg {
+        let one_per_item = self.gemv_blocks(items).0 as usize == items;
+        Arg::I32(if one_per_item && items > self.pfw {
+            self.pfw as i32
+        } else {
+            0
+        })
+    }
+
     /// out = W act (mode 0, + bias if non-null) or out += W act (mode 1).
+    /// With `norm` = (gamma, nact, ticket), mode 1 on the residual stream:
+    /// then the RMSNorm of out with gamma (self.vecs offset) quantized
+    /// into nact, as the rmsnorm_quant kernel would.
     ///
     /// # Safety
     /// act holds W's input quantized (decode.cu Act for mt.cols values), out
-    /// has mt.rows floats, bias is null or has mt.rows floats.
+    /// has mt.rows floats, bias is null or has mt.rows floats; nact (not
+    /// act) holds act_bytes(mt.rows), the ticket is a zero u32 of the cache.
     unsafe fn gemv(
         &self,
         mt: &Mat,
@@ -1565,6 +1675,7 @@ impl<'g> CudaQwen2<'g> {
         bias: Arg,
         mode: i32,
         out: &DevBuf,
+        norm: Option<(usize, &DevBuf, Arg)>,
     ) -> Result<(), String> {
         // Rows of 4 KiB or more (ffn_down in every model here: 4864+
         // inputs; no other matrix is that wide) get one row per block, so
@@ -1579,7 +1690,7 @@ impl<'g> CudaQwen2<'g> {
         unsafe {
             self.run(
                 f,
-                (mt.rows.div_ceil(per) as u32, 1, 1),
+                self.gemv_blocks(mt.rows.div_ceil(per)),
                 (GEMV_THREADS, 1, 1),
                 0,
                 &[
@@ -1592,6 +1703,12 @@ impl<'g> CudaQwen2<'g> {
                     bias,
                     Arg::I32(mode),
                     out.arg(),
+                    norm.map_or(Arg::Ptr(0), |n| self.vecs.arg_at(n.0 * 4)),
+                    Arg::F32(self.eps),
+                    Arg::I32(mt.rows.is_multiple_of(256) as i32),
+                    norm.map_or(Arg::Ptr(0), |n| n.1.arg()),
+                    norm.map_or(Arg::Ptr(0), |n| n.2),
+                    self.pfw_arg(mt.rows.div_ceil(per)),
                 ],
             )
         }
