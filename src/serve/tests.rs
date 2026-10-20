@@ -1117,8 +1117,8 @@ fn http_overhead() {
             );
             c.send(api::sse(&j).as_bytes()).unwrap();
         }
-        c.send(api::SSE_DONE.as_bytes()).unwrap();
-        c.end_stream().unwrap();
+        // As `stream`: the last part with the end, one write.
+        c.end_stream(api::SSE_DONE.as_bytes()).unwrap();
         t.elapsed()
     });
     let mut s = TcpStream::connect(a).unwrap();

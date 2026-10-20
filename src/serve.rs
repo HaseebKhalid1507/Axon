@@ -578,6 +578,14 @@ impl<'a> Engine<'a> {
             },
         );
         let r = or_exit(&format!("request #{id}"), || self.job(job, ho));
+        self.publish_free();
+        r
+    }
+
+    /// Its slot shown free (/slots, /metrics), holding the cache's rows:
+    /// also before a request's last event, so that a client that has its
+    /// whole response never sees the slot busy (#112).
+    fn publish_free(&self) {
         self.metrics.publish_slot(
             self.slot,
             ops::SlotState {
@@ -585,7 +593,6 @@ impl<'a> Engine<'a> {
                 ..Default::default()
             },
         );
-        r
     }
 
     /// Run `job` alone on the engine's cache (stage S1). With `ho`, it
@@ -716,6 +723,7 @@ impl<'a> Engine<'a> {
             && !hit
             && !gone
         {
+            self.publish_free();
             let _ = job.tx.send(Event::Error(e.to_string()));
             return None;
         }
@@ -757,6 +765,7 @@ impl<'a> Engine<'a> {
                 }
             );
         }
+        self.publish_free();
         let _ = job.tx.send(Event::Done { usage, finish });
         None
     }
@@ -1072,6 +1081,7 @@ fn engine(
         if let Some(g) = o.kv_grow {
             b.set_grow_tokens(g);
         }
+        b.metrics = Some(o.metrics.clone());
         b
     });
     let served = batch.as_ref().map_or(ctx, |b| b.ctx.min(ctx));
@@ -1117,14 +1127,7 @@ fn engine(
     let mut waiting: VecDeque<Job> = VecDeque::new();
     loop {
         if let Some(b) = &batch {
-            let pages = b.pages().map(|p| ops::PagesView {
-                free: p.free,
-                total: p.total,
-                size: p.size,
-                preempted: b.preempted,
-                unfed: b.unfed,
-            });
-            o.metrics.publish_pool(b.slot_states(), pages);
+            b.publish();
         }
         if batch.as_ref().is_none_or(Batch::idle) && waiting.is_empty() {
             match jobs.recv_timeout(Duration::from_millis(100)) {
@@ -1838,6 +1841,7 @@ fn connection(s: TcpStream, sh: &Shared) {
                 c.on_status = Some(count(sh, ops::route_label(&req.path)));
                 let r = route(&mut c, &req, sh);
                 c.on_status = None;
+                c.on_end = None;
                 #[cfg(test)]
                 sh.hold.here();
                 match r {
@@ -2257,7 +2261,11 @@ fn run_request(
     };
     let model = g.model.as_deref().unwrap_or(&sh.model_id);
     let model = (model, m.identity.fingerprint());
-    let _flight = InFlight::new(&sh.metrics.in_flight);
+    // Out of flight just before the response's last write (`on_end`): a
+    // client that has all of it never sees it counted (#112). Else (an
+    // error, a client gone) as the handler returns.
+    let flight = InFlight::new(sh.metrics.clone());
+    c.on_end = Some(Box::new(move || drop(flight)));
     let mut ev = Events::new(&rx, &sh.metrics, arrived);
     ev.log = sh.log;
     let r = if g.stream {
@@ -2311,22 +2319,23 @@ fn run_request(
     // returned.
     #[cfg(test)]
     sh.hold.here();
+    c.on_end = None;
     r
 }
 
-/// Counts a request in flight while it lives.
-struct InFlight<'a>(&'a AtomicUsize);
+/// Counts a request in flight (`Metrics::in_flight`) while it lives.
+struct InFlight(Arc<ops::Metrics>);
 
-impl<'a> InFlight<'a> {
-    fn new(n: &'a AtomicUsize) -> InFlight<'a> {
-        n.fetch_add(1, Ordering::Relaxed);
-        InFlight(n)
+impl InFlight {
+    fn new(m: Arc<ops::Metrics>) -> InFlight {
+        m.in_flight.fetch_add(1, Ordering::Relaxed);
+        InFlight(m)
     }
 }
 
-impl Drop for InFlight<'_> {
+impl Drop for InFlight {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::Relaxed);
+        self.0.in_flight.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -2596,12 +2605,12 @@ fn stream(
             }
             ev = rx.try_next();
         }
-        c.send(buf.as_bytes())?;
-        buf.clear();
         if done {
-            c.end_stream()?;
+            c.end_stream(buf.as_bytes())?;
             return Ok(keep);
         }
+        c.send(buf.as_bytes())?;
+        buf.clear();
         ev = rx.next(c, &mut checked);
         if ev.is_none() {
             return Ok(false);

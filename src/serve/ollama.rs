@@ -753,12 +753,12 @@ pub(super) fn stream(
             }
             e = ev.try_next();
         }
-        c.send(buf.as_bytes())?;
-        buf.clear();
         if done {
-            c.end_stream()?;
+            c.end_stream(buf.as_bytes())?;
             return Ok(keep);
         }
+        c.send(buf.as_bytes())?;
+        buf.clear();
         e = ev.next(c, &mut checked);
         if e.is_none() {
             return Ok(false);
