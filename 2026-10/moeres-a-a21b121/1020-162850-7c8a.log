@@ -1,0 +1,16 @@
+[axon-run 16:28:50] submitted 1020-162850-7c8a by /home/haseeb/.cache/axon-wt-moeres: /home/haseeb/.cache/axon-moeres/axon-test-a21b121 cuda::qwen2::tests::twin:: --test-threads 1
+[axon-run 16:42:38] GPU test run without --vram: claiming 11000 MB (the whole card) on bella; pass --vram to override
+[axon-run 16:42:38] scope axon-job-1020-162850-7c8a-1792528958.scope in app-axonjobs.slice: MemoryMax 2740 MB, MemoryHigh 2466 MB, no swap, oomd pressure kill 80% (claim 1144 MB): an OOM here kills only this job
+[axon-run 16:42:38] job 1020-162850-7c8a -> bella: systemd-run --user --scope --quiet --unit=axon-job-1020-162850-7c8a-1792528958 --slice=app-axonjobs.slice -p MemoryMax=2740M -p MemoryHigh=2466M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-moeres/axon-test-a21b121 cuda::qwen2::tests::twin:: --test-threads 1
+axon-q 16:42:38 start slot 16-23: /home/haseeb/.cache/axon-moeres/axon-test-a21b121 cuda::qwen2::tests::twin:: --test-threads 1
+
+running 4 tests
+test cuda::qwen2::tests::twin::gpu_twin_exp_swiglu_match_cpu ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+test cuda::qwen2::tests::twin::gpu_twin_gemm2s_matches_cpu_r8 ... ok
+test cuda::qwen2::tests::twin::gpu_twin_gemv_matches_cpu_r8 ... ok
+test cuda::qwen2::tests::twin::gpu_twin_quant_matches_cpu ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 690 filtered out; finished in 58.62s
+
+[axon-run 16:43:37] exit 0 after 58.8s (host bella)

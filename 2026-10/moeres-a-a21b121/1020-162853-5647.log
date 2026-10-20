@@ -1,0 +1,25 @@
+[axon-run 16:28:53] submitted 1020-162853-5647 by /home/haseeb/.cache/axon-wt-moeres: /home/haseeb/.cache/axon-moeres/axon-test-a21b121 cuda::qwen2::tests::twin:: --test-threads 1
+[axon-run 16:28:54] job 1020-162853-5647 -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 5000 --env AXON_NODE_PACK=1 --src /home/haseeb/.cache/axon-wt-moeres /home/haseeb/.cache/axon-moeres/axon-test-a21b121 cuda::qwen2::tests::twin:: --test-threads 1
+axon-remote: uploading axon-test-a21b121 (bafccc98c8c05f9bddab70eb) + source of /home/haseeb/.cache/axon-wt-moeres
+
+sent 1,806,915 bytes  received 4,793 bytes  3,623,416.00 bytes/sec
+total size is 6,460,323  speedup is 3.57
+
+sent 6,657,007 bytes  received 35 bytes  4,438,028.00 bytes/sec
+total size is 20,809,328  speedup is 3.13
+axon-remote: job 20261020-162856-axon-test-a21b121-54776 on avante (GPU, 5000 MB)
+[axon-node 16:28:56] GPU slot taken; job wants 5000 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 47
+[axon-node 16:28:56] run axon-test-a21b121 (bafccc98c8c05f9bddab70eb) as /home/haseeb/.cache/axon-wt-moeres on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 4 tests
+test cuda::qwen2::tests::twin::gpu_twin_exp_swiglu_match_cpu ... testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+test cuda::qwen2::tests::twin::gpu_twin_gemm2s_matches_cpu_r8 ... ok
+test cuda::qwen2::tests::twin::gpu_twin_gemv_matches_cpu_r8 ... ok
+test cuda::qwen2::tests::twin::gpu_twin_quant_matches_cpu ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 690 filtered out; finished in 89.11s
+
+[axon-node 16:30:25] exit 0 after 89.2s
+[axon-node 16:30:25] peak RSS 646 MB (job process tree PSS, 2 s samples x44)
+[axon-run 16:30:26] exit 0 after 92.3s (host avante)

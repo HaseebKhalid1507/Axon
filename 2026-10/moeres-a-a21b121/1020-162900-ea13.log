@@ -1,0 +1,27 @@
+[axon-run 16:29:00] submitted 1020-162900-ea13 by /home/haseeb/.cache/axon-wt-moeres: /home/haseeb/.cache/axon-moeres/axon-test-a21b121 cuda::qwen2::tests::twin:: --test-threads 1
+[axon-run 16:29:00] job 1020-162900-ea13 -> jade: /home/haseeb/.local/bin/axon-remote --host jade --vram 2000 --src /home/haseeb/.cache/axon-wt-moeres /home/haseeb/.cache/axon-moeres/axon-test-a21b121 cuda::qwen2::tests::twin:: --test-threads 1
+axon-remote: uploading axon-test-a21b121 (bafccc98c8c05f9bddab70eb) + source of /home/haseeb/.cache/axon-wt-moeres
+
+sent 1,806,919 bytes  received 4,797 bytes  1,207,810.67 bytes/sec
+total size is 6,460,323  speedup is 3.57
+
+sent 6,657,007 bytes  received 35 bytes  4,438,028.00 bytes/sec
+total size is 20,809,328  speedup is 3.13
+axon-remote: job 20261020-162906-axon-test-a21b121-785736 on jade (GPU, 2000 MB)
+[axon-node 16:29:06] GPU lock taken; job wants 2000 MB; nvidia-smi used/total/temp: 5 MiB, 3072 MiB, 44
+[axon-node 16:29:06] run axon-test-a21b121 (bafccc98c8c05f9bddab70eb) as /home/haseeb/.cache/axon-wt-moeres on jade, AXON_THREADS=4 RUST_TEST_THREADS=2
+[axon-node 16:29:06] memory cap (scope MemoryMax) 2848 MB = MemAvailable - 1536 MB; swap off for the job
+[axon-node 16:29:06] MemAvailable 4390 MB, load ['0.32', '0.27', '0.32']; nice -n 19 ionice -c3 taskset -c 0-7
+
+running 4 tests
+test cuda::qwen2::tests::twin::gpu_twin_exp_swiglu_match_cpu ... testutil: GPU has 2.94 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+test cuda::qwen2::tests::twin::gpu_twin_gemm2s_matches_cpu_r8 ... ok
+test cuda::qwen2::tests::twin::gpu_twin_gemv_matches_cpu_r8 ... ok
+test cuda::qwen2::tests::twin::gpu_twin_quant_matches_cpu ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 690 filtered out; finished in 42.85s
+
+[axon-node 16:29:50] exit 0 after 44.1s; lowest MemAvailable seen 4101 MB
+[axon-node 16:29:50] peak RSS 384 MB (job process tree PSS, 2 s samples x21)
+[axon-run 16:29:51] exit 0 after 50.9s (host jade)
