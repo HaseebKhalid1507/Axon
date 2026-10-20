@@ -1,0 +1,37 @@
+[axon-run 17:32:32] submitted 1020-173232-6062 by /home/haseeb/.cache/axon-wt-moeres-b: /home/haseeb/.cache/axon-moeres/axon-test-dbg-59f2e2e cuda::qwen2::experts:: --test-threads 1 --nocapture
+[axon-run 17:33:41] job 1020-173232-6062 -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 2500 --env AXON_NODE_PACK=1 --src /home/haseeb/.cache/axon-wt-moeres-b /home/haseeb/.cache/axon-moeres/axon-test-dbg-59f2e2e cuda::qwen2::experts:: --test-threads 1 --nocapture
+axon-remote: uploading axon-test-dbg-59f2e2e (7d72b9931e02a87645cc997a) + source of /home/haseeb/.cache/axon-wt-moeres-b
+
+sent 1,817,826 bytes  received 4,865 bytes  1,215,127.33 bytes/sec
+total size is 6,499,639  speedup is 3.57
+
+sent 7,147,851 bytes  received 35 bytes  14,295,772.00 bytes/sec
+total size is 22,895,976  speedup is 3.20
+axon-remote: job 20261020-173344-axon-test-dbg-59f2e2e-984774 on avante (GPU, 2500 MB)
+[axon-node 17:33:44] GPU slot taken; job wants 2500 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 44
+[axon-node 17:33:44] run axon-test-dbg-59f2e2e (7d72b9931e02a87645cc997a) as /home/haseeb/.cache/axon-wt-moeres-b on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 3 tests
+test cuda::qwen2::experts::tests::cuda_experts_fixture_match_cpu ... testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+fixture layer 1 nb 1: 64 outputs equal the CPU
+fixture layer 1 nb 6: 384 outputs equal the CPU
+fixture layer 1 nb 48: 3072 outputs equal the CPU
+fixture layer 1 nb 510: 32640 outputs equal the CPU
+fixture layer 1 nb 1024: 65536 outputs equal the CPU
+fixture layer 1: types gate 8 / down 8, 4 experts, k 2, 0 never routed
+fixture layer 2 nb 1: 64 outputs equal the CPU
+fixture layer 2 nb 6: 384 outputs equal the CPU
+fixture layer 2 nb 48: 3072 outputs equal the CPU
+fixture layer 2 nb 510: 32640 outputs equal the CPU
+fixture layer 2 nb 1024: 65536 outputs equal the CPU
+fixture layer 2: types gate 8 / down 8, 4 experts, k 2, 0 never routed
+ok
+test cuda::qwen2::experts::tests::cuda_experts_moonlight_bench ... ignored
+test cuda::qwen2::experts::tests::cuda_experts_moonlight_match_cpu ... skipping: /home/haseeb/.cache/axon-wt-moeres-b/models/Moonlight-16B-A3B-Instruct-Q4_K_M.gguf not present (optional)
+ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 694 filtered out; finished in 0.40s
+
+[axon-node 17:33:44] exit 0 after 0.5s
+[axon-node 17:33:44] peak RSS 0 MB (job process tree PSS, 2 s samples x0)
+[axon-run 17:33:45] exit 0 after 3.5s (host avante)

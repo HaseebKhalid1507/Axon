@@ -1,0 +1,38 @@
+[axon-run 17:32:32] submitted 1020-173232-2a0d by /home/haseeb/.cache/axon-wt-moeres-b: /home/haseeb/.cache/axon-moeres/axon-test-59f2e2e cuda::qwen2::experts:: --test-threads 1 --nocapture
+[axon-run 17:32:32] job 1020-173232-2a0d -> jade: /home/haseeb/.local/bin/axon-remote --host jade --vram 1500 --src /home/haseeb/.cache/axon-wt-moeres-b /home/haseeb/.cache/axon-moeres/axon-test-59f2e2e cuda::qwen2::experts:: --test-threads 1 --nocapture
+axon-remote: uploading axon-test-59f2e2e (2708e76205f71176f88a6652) + source of /home/haseeb/.cache/axon-wt-moeres-b
+
+sent 1,817,849 bytes  received 4,869 bytes  1,215,145.33 bytes/sec
+total size is 6,499,639  speedup is 3.57
+
+sent 6,724,518 bytes  received 35 bytes  13,449,106.00 bytes/sec
+total size is 21,390,264  speedup is 3.18
+axon-remote: job 20261020-173236-axon-test-59f2e2e-812623 on jade (GPU, 1500 MB)
+[axon-node 17:32:36] GPU lock taken; job wants 1500 MB; nvidia-smi used/total/temp: 5 MiB, 3072 MiB, 43
+[axon-node 17:32:36] run axon-test-59f2e2e (2708e76205f71176f88a6652) as /home/haseeb/.cache/axon-wt-moeres-b on jade, AXON_THREADS=4 RUST_TEST_THREADS=2
+[axon-node 17:32:36] memory cap (scope MemoryMax) 2884 MB = MemAvailable - 1536 MB; swap off for the job
+[axon-node 17:32:36] MemAvailable 4420 MB, load ['0.34', '0.50', '0.58']; nice -n 19 ionice -c3 taskset -c 0-7
+
+running 3 tests
+test cuda::qwen2::experts::tests::cuda_experts_fixture_match_cpu ... testutil: GPU has 2.94 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+fixture layer 1 nb 1: 64 outputs equal the CPU
+fixture layer 1 nb 6: 384 outputs equal the CPU
+fixture layer 1 nb 48: 3072 outputs equal the CPU
+fixture layer 1 nb 510: 32640 outputs equal the CPU
+fixture layer 1 nb 1024: 65536 outputs equal the CPU
+fixture layer 1: types gate 8 / down 8, 4 experts, k 2, 0 never routed
+fixture layer 2 nb 1: 64 outputs equal the CPU
+fixture layer 2 nb 6: 384 outputs equal the CPU
+fixture layer 2 nb 48: 3072 outputs equal the CPU
+fixture layer 2 nb 510: 32640 outputs equal the CPU
+fixture layer 2 nb 1024: 65536 outputs equal the CPU
+fixture layer 2: types gate 8 / down 8, 4 experts, k 2, 0 never routed
+ok
+test cuda::qwen2::experts::tests::cuda_experts_moonlight_bench ... ignored
+test cuda::qwen2::experts::tests::cuda_experts_moonlight_match_cpu ... ok
+
+test result: ok. 2 passed; 0 failed; 1 ignored; 0 measured; 694 filtered out; finished in 0.42s
+
+[axon-node 17:32:38] exit 0 after 1.5s; lowest MemAvailable seen 4277 MB
+[axon-node 17:32:38] peak RSS 0 MB (job process tree PSS, 2 s samples x0)
+[axon-run 17:32:38] exit 0 after 5.9s (host jade)
