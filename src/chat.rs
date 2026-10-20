@@ -2147,7 +2147,7 @@ mod tests {
             false,
         )
         .unwrap();
-        let (cpu, rows) = (Qwen2::new(&m), Qwen2::new_with(&m, false));
+        let (cpu, rows) = (Qwen2::new_with(&m, true), Qwen2::new_with(&m, false));
         let (mut ag, mut ac) = (Agree::default(), Agree::default());
         for (max_reply, k) in [(12, 7), (64, 0)] {
             let mut chat = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), 2048).unwrap();
