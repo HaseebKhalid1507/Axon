@@ -49,12 +49,13 @@
 //! - Llama: a reply whose first non-blank character is `{` is held whole and
 //!   decided at the end. Any other reply streams as content.
 //! - Harmony: the engine splits the reply by channel (`chat::Channels`, told
-//!   to look for calls): analysis goes to reasoning, final to content, and a
-//!   message addressed `to=` a recipient (in its role section or its channel
-//!   header, either form) is written into the content in its history form,
-//!   which the parser reads as Hermes blocks are read. `<|call|>` ends the
-//!   reply, so there is one call per reply. Arguments that aren't JSON: the
-//!   block is content, as for the other formats.
+//!   to look for calls) on the special tokens: analysis goes to reasoning,
+//!   final to content, and an assistant message addressed to `functions.X`
+//!   (in its role section or its channel header) is a call. `TextOut` hands
+//!   the parser the content escaped and each call framed out of band
+//!   (`harmony_text`), so no text the model writes, the template's call
+//!   syntax included, can become a call. `<|call|>` ends the reply: one call
+//!   per reply. Arguments that aren't JSON come back as their text, content.
 //!
 //! **Invalid JSON policy.** A block is a call only if it parses as a JSON
 //! object with a string `"name"`. Otherwise the whole block, tags included,
@@ -78,8 +79,11 @@
 //! call: `<tool_call>\n{"name": "` (named: through `"arguments": `). The model
 //! then has to call, and for Qwen3 the reply skips reasoning (the empty
 //! `<think>` block comes first). A named choice renders only that tool.
-//! gpt-oss: the reply opens as `<|start|>assistant to=functions.` (named:
-//! through `<|message|>`), skipping the analysis.
+//! gpt-oss: the reply opens as `<|start|>assistant to=functions` (required:
+//! the model writes `.NAME`, the pretoken split it learned) or `... to=
+//! functions.NAME<|channel|>commentary json<|message|>` (named), skipping
+//! the analysis; a named choice still renders every tool, so the prompt's
+//! prefix stays the same as with auto.
 
 use super::Template;
 use super::api::{ApiError, Usage, quote};
@@ -467,8 +471,13 @@ pub enum Choice {
 /// The tool side of a chat request.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ToolReq {
-    /// The `tools` entries, whole, in request order.
+    /// The `tools` entries, whole, in request order (a named choice: that
+    /// one only; none: none).
     pub tools: Vec<J>,
+    /// Every `tools` entry, whatever the choice (harmony renders them all
+    /// for a named choice, so switching between it and auto keeps the
+    /// prompt's prefix).
+    pub offered: Vec<J>,
     pub choice: Choice,
     pub msgs: Vec<TMsg>,
 }
@@ -667,6 +676,7 @@ pub fn parse(body: &[u8]) -> Result<Option<ToolReq>, ApiError> {
             calls,
         });
     }
+    let offered = tools.clone();
     let tools = match &choice {
         Choice::None => Vec::new(),
         Choice::Named(n) => tools
@@ -679,6 +689,7 @@ pub fn parse(body: &[u8]) -> Result<Option<ToolReq>, ApiError> {
     };
     Ok(Some(ToolReq {
         tools,
+        offered,
         choice,
         msgs: out,
     }))
@@ -1101,17 +1112,26 @@ fn llama(k: &mut Toks, t: &Template, r: &ToolReq) -> Result<(), ApiError> {
 // ---------------------------------------------------------------------------
 // Harmony (gpt-oss).
 
-/// How a call opens in the content `TextOut` hands the parser: the
-/// template's history form, `<|start|>assistant to=functions.NAME<|channel|>
-/// commentary json<|message|>{args}<|call|>`.
-pub const HARMONY_CALL: &str = "<|start|>assistant to=";
-const HARMONY_CALL_HEAD_END: &str = "<|channel|>commentary json<|message|>";
-pub const HARMONY_CALL_END: &str = "<|call|>";
+/// How `TextOut` hands a harmony reply with tools to the parser: one
+/// string, its text escaped (`harmony_text`: every ESC becomes ESC '0') and
+/// each call framed out of band, `ESC '1' {recipient} ESC '2' {args} ESC
+/// '3'`, from the special tokens that delimit it. Text the model writes can
+/// never frame a call, whatever it spells (the template's call syntax
+/// included), and a `<|call|>` in the arguments' text doesn't end one.
+const ESC: char = '\u{1}';
 
-/// `held` (content before the call), then the opening of a call to `to`.
-pub fn harmony_call_open(held: &str, to: &str) -> String {
-    format!("{held}{HARMONY_CALL}{to}{HARMONY_CALL_HEAD_END}")
+/// Text (content, a recipient or arguments) as `TextOut` passes it on.
+pub fn harmony_text(s: &str) -> String {
+    s.replace(ESC, "\u{1}0")
 }
+
+/// The opening of a call to `to`.
+pub fn harmony_call_open(to: &str) -> String {
+    format!("{ESC}1{}{ESC}2", harmony_text(to))
+}
+
+/// A call's end.
+pub const HARMONY_CALL_END: &str = "\u{1}3";
 
 /// gpt-oss's template: tools as TypeScript in the developer message, a call
 /// as `<|start|>assistant to=functions.NAME<|channel|>commentary json
@@ -1127,7 +1147,12 @@ pub fn harmony_call_open(held: &str, to: &str) -> String {
 /// no call before it.
 fn harmony(t: &Template, tok: &Tokenizer, r: &ToolReq) -> Result<Rendered, ApiError> {
     let mut k = Toks::new(tok, &HARMONY_MARKERS);
-    let tools = !r.tools.is_empty();
+    // A named choice is forced by the prefill below, not by the tool list.
+    let listed = match r.choice {
+        Choice::Named(_) => &r.offered,
+        _ => &r.tools,
+    };
+    let tools = !listed.is_empty();
     k.lit("<|start|>system<|message|>");
     k.text(&chat::harmony_system());
     if tools {
@@ -1147,7 +1172,7 @@ fn harmony(t: &Template, tok: &Tokenizer, r: &ToolReq) -> Result<Rendered, ApiEr
         }
         if tools {
             k.text("# Tools\n\n");
-            k.text(&ts_namespace(&r.tools));
+            k.text(&ts_namespace(listed));
         }
         k.lit("<|end|>");
     }
@@ -1204,9 +1229,11 @@ fn harmony(t: &Template, tok: &Tokenizer, r: &ToolReq) -> Result<Rendered, ApiEr
     }
     k.lit("<|start|>assistant");
     // tool_choice required / named: the reply opens a call (skipping the
-    // analysis), in the history form.
+    // analysis), in the history form. Required stops before the `.`: o200k
+    // splits `to=functions.get_weather` as ` to`, `=functions`, `.get`,
+    // `_weather`, so the model writes `.name` as it learned to.
     match &r.choice {
-        Choice::Required => k.text(" to=functions."),
+        Choice::Required => k.text(" to=functions"),
         Choice::Named(n) => {
             k.text(" to=functions.");
             k.text(n);
@@ -1224,6 +1251,7 @@ fn harmony(t: &Template, tok: &Tokenizer, r: &ToolReq) -> Result<Rendered, ApiEr
                 for &id in &ids[at..] {
                     ch.push(id, &tok.decode_bytes(&[id]));
                 }
+                ch.primed();
             }
             ch
         }
@@ -1499,33 +1527,6 @@ fn call_of(body: &str) -> Option<Call> {
     })
 }
 
-/// A call from a harmony block's text (after `<|start|>assistant to=`):
-/// `functions.NAME<|channel|>...<|message|>{args}`. The arguments must be
-/// JSON (none: `{}`), else the block is not a call.
-fn harmony_call(body: &str) -> Option<Call> {
-    let (head, args) = body.split_once("<|message|>")?;
-    let to = head
-        .split(|c: char| c.is_whitespace() || c == '<')
-        .next()
-        .unwrap_or_default();
-    let name = to.strip_prefix("functions.").unwrap_or(to);
-    if name.is_empty() {
-        return None;
-    }
-    let args = match args.trim() {
-        "" => "{}",
-        a => {
-            parse_json(a)?;
-            a
-        }
-    };
-    Some(Call {
-        id: call_id(),
-        name: name.to_string(),
-        args: args.to_string(),
-    })
-}
-
 /// Reads a reply into content and calls as its text arrives.
 pub struct Parser {
     kind: Kind,
@@ -1544,6 +1545,9 @@ pub struct Parser {
     calls: usize,
     /// No content since the last call: leading blanks drop.
     after_call: bool,
+    /// Harmony, inside a call: its recipient and arguments so far.
+    hname: String,
+    hargs: String,
 }
 
 impl Parser {
@@ -1557,6 +1561,8 @@ impl Parser {
             ws: String::new(),
             calls: 0,
             after_call: false,
+            hname: String::new(),
+            hargs: String::new(),
         }
     }
 
@@ -1609,20 +1615,13 @@ impl Parser {
         out.push(Piece::Call(c));
     }
 
-    /// The markers around a call's text (Hermes: `<tool_call>` ...).
-    fn tags(&self) -> (&'static str, &'static str) {
-        match self.kind {
-            Kind::Harmony => (HARMONY_CALL, HARMONY_CALL_END),
-            _ => (OPEN, CLOSE),
-        }
-    }
-
     /// More of the reply's text: what is decided now.
     pub fn push(&mut self, s: &str) -> Vec<Piece> {
         let mut out = Vec::new();
         self.buf.push_str(s);
         match self.kind {
-            Kind::Hermes | Kind::Harmony => self.hermes(&mut out),
+            Kind::Hermes => self.hermes(&mut out),
+            Kind::Harmony => self.harmony(&mut out),
             Kind::Json => {
                 if self.undecided {
                     let t = self.buf.trim_start();
@@ -1645,12 +1644,11 @@ impl Parser {
     }
 
     fn hermes(&mut self, out: &mut Vec<Piece>) {
-        let (open, close) = self.tags();
         loop {
             if self.inside {
-                let Some(at) = self.buf[self.scan..].find(close).map(|a| a + self.scan) else {
+                let Some(at) = self.buf[self.scan..].find(CLOSE).map(|a| a + self.scan) else {
                     // The next search starts where a `</tool_call>` could still begin.
-                    let mut w = self.buf.len().saturating_sub(close.len() - 1);
+                    let mut w = self.buf.len().saturating_sub(CLOSE.len() - 1);
                     while !self.buf.is_char_boundary(w) {
                         w -= 1;
                     }
@@ -1658,20 +1656,20 @@ impl Parser {
                     return;
                 };
                 let body = self.buf[..at].to_string();
-                self.buf.drain(..at + close.len());
+                self.buf.drain(..at + CLOSE.len());
                 self.inside = false;
                 self.scan = 0;
                 self.block(&body, true, out);
-            } else if let Some(at) = self.buf.find(open) {
+            } else if let Some(at) = self.buf.find(OPEN) {
                 let text = self.buf[..at].to_string();
-                self.buf.drain(..at + open.len());
+                self.buf.drain(..at + OPEN.len());
                 self.content(&text, out);
                 self.inside = true;
             } else {
                 // Hold back a tail that may still become `<tool_call>`.
-                let keep = (1..open.len())
+                let keep = (1..OPEN.len())
                     .rev()
-                    .find(|&n| self.buf.ends_with(&open[..n]))
+                    .find(|&n| self.buf.ends_with(&OPEN[..n]))
                     .unwrap_or(0);
                 let cut = self.buf.len() - keep;
                 let text: String = self.buf.drain(..cut).collect();
@@ -1685,19 +1683,85 @@ impl Parser {
 
     /// A finished block (`closed`: by `</tool_call>`): a call, or content.
     fn block(&mut self, body: &str, closed: bool, out: &mut Vec<Piece>) {
-        let (open, close) = self.tags();
-        let call = match self.kind {
-            Kind::Harmony => harmony_call(body),
-            _ => call_of(body),
-        };
-        match call {
+        match call_of(body) {
             Some(c) => self.call(c, out),
             None => {
-                let raw = format!("{open}{body}{}", if closed { close } else { "" });
+                let raw = format!("{OPEN}{body}{}", if closed { CLOSE } else { "" });
                 let ws = std::mem::take(&mut self.ws);
                 self.after_call = false;
                 out.push(Piece::Text(ws + &raw));
             }
+        }
+    }
+
+    /// Harmony: decode `TextOut`'s escaped stream (`harmony_text`,
+    /// `harmony_call_open`): text is content, a framed call is a call.
+    fn harmony(&mut self, out: &mut Vec<Piece>) {
+        loop {
+            let Some(at) = self.buf.find(ESC) else {
+                let t = std::mem::take(&mut self.buf);
+                self.harmony_part(&t, out);
+                return;
+            };
+            let code = at + ESC.len_utf8();
+            let Some(c) = self.buf[code..].chars().next() else {
+                // The escape's code is still to come.
+                let t: String = self.buf.drain(..at).collect();
+                self.harmony_part(&t, out);
+                return;
+            };
+            let t: String = self.buf.drain(..at).collect();
+            self.harmony_part(&t, out);
+            self.buf.drain(..ESC.len_utf8() + c.len_utf8());
+            match c {
+                '0' => self.harmony_part(&ESC.to_string(), out),
+                '1' => {
+                    self.inside = true;
+                    self.undecided = true;
+                    self.hname.clear();
+                    self.hargs.clear();
+                }
+                '2' => self.undecided = false,
+                '3' if self.inside => self.harmony_end(out),
+                _ => {}
+            }
+        }
+    }
+
+    /// Text of the current place: content, a call's name (`undecided`) or
+    /// its arguments.
+    fn harmony_part(&mut self, t: &str, out: &mut Vec<Piece>) {
+        if t.is_empty() {
+            return;
+        }
+        match (self.inside, self.undecided) {
+            (false, _) => self.content(t, out),
+            (true, true) => self.hname.push_str(t),
+            (true, false) => self.hargs.push_str(t),
+        }
+    }
+
+    /// A call's end: a call if its arguments are JSON (none: `{}`), else
+    /// its arguments' text as content (never axon's framing).
+    fn harmony_end(&mut self, out: &mut Vec<Piece>) {
+        self.inside = false;
+        self.undecided = false;
+        let name = std::mem::take(&mut self.hname);
+        let args = std::mem::take(&mut self.hargs);
+        let name = name.strip_prefix("functions.").unwrap_or(&name);
+        let a = args.trim();
+        let a = if a.is_empty() { "{}" } else { a };
+        if !name.is_empty() && parse_json(a).is_some() {
+            let c = Call {
+                id: call_id(),
+                name: name.to_string(),
+                args: a.to_string(),
+            };
+            self.call(c, out);
+        } else if !args.is_empty() {
+            let ws = std::mem::take(&mut self.ws);
+            self.after_call = false;
+            out.push(Piece::Text(ws + &args));
         }
     }
 
@@ -1706,11 +1770,24 @@ impl Parser {
         let mut out = Vec::new();
         let buf = std::mem::take(&mut self.buf);
         match self.kind {
-            Kind::Hermes | Kind::Harmony if self.inside => {
+            Kind::Harmony => {
+                self.buf = buf;
+                self.harmony(&mut out);
+                if self.inside {
+                    // Cut off mid-call (the token limit).
+                    self.harmony_end(&mut out);
+                }
+                // A lone escape left at the end can't come from TextOut.
+                let rest = std::mem::take(&mut self.buf);
+                if !rest.is_empty() {
+                    self.content(&rest, &mut out);
+                }
+            }
+            Kind::Hermes if self.inside => {
                 self.inside = false;
                 self.block(&buf, false, &mut out);
             }
-            Kind::Hermes | Kind::Harmony => {
+            Kind::Hermes => {
                 if !buf.is_empty() {
                     self.content(&buf, &mut out);
                 }

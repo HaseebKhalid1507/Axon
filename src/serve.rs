@@ -447,19 +447,20 @@ impl TextOut<'_> {
         (c, String::new(), hit)
     }
 
-    /// A harmony reply's token. With tools, a call goes into the content
-    /// as its history form, `<|start|>assistant to=functions.NAME<|channel|>
-    /// commentary json<|message|>{args}<|call|>` (stop strings don't apply to
-    /// it), for the tools parser.
+    /// A harmony reply's token. With tools, the content goes out escaped
+    /// for the tools parser, and a call (delimited by the special tokens, as
+    /// `Channels` reads them) framed out of band (`tools::harmony_text`);
+    /// stop strings don't apply to a call.
     fn harmony(&mut self, ch: &mut chat::Channels, id: u32) -> (String, String, bool) {
         let bytes = self.tok.decode_bytes(&[id]);
+        let tools = ch.tools();
         // A call the prompt opened (tool_choice) is announced first.
         let mut c = self.call_open(ch);
         let was = ch.call().is_some();
         let part = ch.push(id, &bytes);
         let now = ch.call().is_some();
         if was && now {
-            c.push_str(&self.utf8.push(&bytes));
+            c.push_str(&tools::harmony_text(&self.utf8.push(&bytes)));
             return (c, String::new(), false);
         }
         if self.in_call && !now {
@@ -471,19 +472,23 @@ impl TextOut<'_> {
             chat::Part::Reasoning => (c, self.utf8.push(&bytes), false),
             chat::Part::Answer => {
                 let (a, hit) = self.stop.push(&self.utf8.push(&bytes));
-                c.push_str(&a);
+                if tools {
+                    c.push_str(&tools::harmony_text(&a));
+                } else {
+                    c.push_str(&a);
+                }
                 (c, String::new(), hit)
             }
         }
     }
 
-    /// The opening of the call `ch` is in, once (with the content held for
-    /// stop strings before it).
+    /// The opening of the call `ch` is in, once (after the content held
+    /// for stop strings).
     fn call_open(&mut self, ch: &chat::Channels) -> String {
         match ch.call() {
             Some(to) if !self.in_call => {
                 self.in_call = true;
-                tools::harmony_call_open(&self.stop.finish(), to)
+                tools::harmony_text(&self.stop.finish()) + &tools::harmony_call_open(to)
             }
             _ => String::new(),
         }
@@ -491,24 +496,32 @@ impl TextOut<'_> {
 
     fn call_close(&mut self) -> String {
         self.in_call = false;
-        self.utf8.finish() + tools::HARMONY_CALL_END
+        tools::harmony_text(&self.utf8.finish()) + tools::HARMONY_CALL_END
     }
 
-    /// The end of the output: what was held back.
+    /// The end of the output: what was held back. With tools, a reply that
+    /// never opened a message (no channel header) is the answer, as without.
     fn finish(&mut self) -> (String, String) {
-        let mut call = String::new();
-        if let Some(ch) = self.channels.take() {
-            call = self.call_open(&ch);
+        let Some(mut ch) = self.channels.take() else {
+            return self.finish_text();
+        };
+        if !ch.tools() {
             self.channels = Some(ch);
+            return self.finish_text();
         }
+        let mut c = self.call_open(&ch);
         if self.in_call {
-            call.push_str(&self.call_close());
+            c.push_str(&self.call_close());
         }
-        if !call.is_empty() {
-            let (c, r) = self.finish_text();
-            return (call + &c, r);
+        let unheaded = ch.take_unheaded();
+        self.channels = Some(ch);
+        if let Some(u) = unheaded {
+            let (a, _) = self.stop.push(&String::from_utf8_lossy(&u));
+            c.push_str(&tools::harmony_text(&a));
         }
-        self.finish_text()
+        let (t, r) = self.finish_text();
+        c.push_str(&tools::harmony_text(&t));
+        (c, r)
     }
 
     fn finish_text(&mut self) -> (String, String) {
