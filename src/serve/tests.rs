@@ -1117,8 +1117,8 @@ fn http_overhead() {
             );
             c.send(api::sse(&j).as_bytes()).unwrap();
         }
-        c.send(api::SSE_DONE.as_bytes()).unwrap();
-        c.end_stream().unwrap();
+        // As `stream`: the last part with the end, one write.
+        c.end_stream(api::SSE_DONE.as_bytes()).unwrap();
         t.elapsed()
     });
     let mut s = TcpStream::connect(a).unwrap();
@@ -4284,4 +4284,119 @@ fn serve_counts_a_request_before_answering_it() {
     *want.entry(key("/metrics", 200)).or_default() += 1.0;
     assert_eq!(requests(), want, "after the connections ended");
     assert_eq!(probes.get(), cases.len() as f64 + 2.0);
+}
+
+/// One body per generation route (the shortest reply), whole or streamed.
+fn gen_bodies(stream: bool) -> Vec<(&'static str, Value)> {
+    let msgs = json!([{"role": "user", "content": "Hi"}]);
+    let ol = json!({"temperature": 0, "num_predict": 1});
+    vec![
+        (
+            "/v1/completions",
+            json!({"prompt": "Hi", "max_tokens": 1, "temperature": 0, "stream": stream}),
+        ),
+        (
+            "/v1/chat/completions",
+            json!({"messages": msgs, "max_tokens": 1, "temperature": 0, "stream": stream}),
+        ),
+        (
+            "/v1/responses",
+            json!({"input": "Hi", "max_output_tokens": 1, "temperature": 0, "stream": stream}),
+        ),
+        (
+            "/api/generate",
+            json!({"prompt": "Hi", "options": ol, "stream": stream}),
+        ),
+        (
+            "/api/chat",
+            json!({"messages": msgs, "options": ol, "stream": stream}),
+        ),
+    ]
+}
+
+/// #112: a request has left `axon_requests_in_flight` by the time its
+/// client has the whole response, on every generation route, whole and
+/// streamed. `Server::hold` stops the handler right after its response is
+/// written, before it returns, so a count released when the handler
+/// returns (the old order: the serve_metrics_slots_max_prompt flake of job
+/// 1020-030717-aa65) reads 1 here every time.
+#[test]
+fn serve_in_flight_released_before_answering() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server(p.to_str().unwrap(), Device::Cpu);
+    let a = s.addr;
+    let in_flight = || prom_parse(&call(a, "GET", "/metrics", "").body)["axon_requests_in_flight"];
+    assert_eq!(in_flight(), 0.0);
+    s.hold(true);
+    for stream in [false, true] {
+        for (path, body) in gen_bodies(stream) {
+            let r = post(a, path, body);
+            assert_eq!(r.status, 200, "{path}: {}", r.body);
+            assert_eq!(
+                in_flight(),
+                0.0,
+                "{path} (stream {stream}): answered, still in flight"
+            );
+        }
+    }
+    s.hold(false);
+}
+
+/// #112, without hooks: back-to-back requests, each followed at once by a
+/// /metrics read on a connection already open (no accept in between, the
+/// smallest window): no request in flight, no slot busy, nothing queued.
+/// `AXON_TEST_GAUGE_ROUNDS` sets the rounds (default 20, each every route
+/// whole and streamed).
+#[test]
+fn serve_gauges_settle_back_to_back() {
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let s = server(p.to_str().unwrap(), Device::Cpu);
+    let a = s.addr;
+    let rounds: usize = std::env::var("AXON_TEST_GAUGE_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(20);
+    let mut m = TcpStream::connect(a).unwrap();
+    m.set_read_timeout(Some(Duration::from_secs(300))).unwrap();
+    let mut mbuf = Vec::new();
+    let get = "GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n";
+    let mut bad = Vec::new();
+    let mut n = 0;
+    for round in 0..rounds {
+        for stream in [false, true] {
+            for (path, body) in gen_bodies(stream) {
+                let mut c = TcpStream::connect(a).unwrap();
+                c.set_read_timeout(Some(Duration::from_secs(300))).unwrap();
+                c.write_all(request("POST", path, &body.to_string(), true).as_bytes())
+                    .unwrap();
+                let r = read_resp(&mut c, &mut Vec::new());
+                m.write_all(get.as_bytes()).unwrap();
+                let g = prom_parse(&read_resp(&mut m, &mut mbuf).body);
+                n += 1;
+                assert_eq!(r.status, 200, "{path}: {}", r.body);
+                for k in [
+                    "axon_requests_in_flight",
+                    "axon_slots_busy",
+                    "axon_queue_depth",
+                ] {
+                    if g[k] != 0.0 {
+                        bad.push(format!(
+                            "round {round} {path} stream {stream}: {k} {}",
+                            g[k]
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        bad.is_empty(),
+        "{} of {n} reads not settled:\n{}",
+        bad.len(),
+        bad.join("\n")
+    );
 }

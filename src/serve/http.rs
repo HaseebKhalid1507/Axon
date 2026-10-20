@@ -100,6 +100,9 @@ pub type Gate = Box<dyn Fn(&Request) -> bool + Send>;
 /// `Conn::on_status`.
 pub type OnStatus = Box<dyn FnOnce(u16) + Send>;
 
+/// `Conn::on_end`.
+pub type OnEnd = Box<dyn FnOnce() + Send>;
+
 /// One connection: its stream and the bytes read but not yet used.
 pub struct Conn<S> {
     pub s: S,
@@ -131,6 +134,11 @@ pub struct Conn<S> {
     /// sees it counted (`axon serve` counts requests for /metrics with it).
     /// Taken by that call; an interim `100 Continue` doesn't call it.
     pub on_status: Option<OnStatus>,
+    /// Called once, just before the last write of the next response (the
+    /// whole of `respond`, `end_stream`'s end): what must be over by the
+    /// time the client has all of it (`axon serve` releases the request's
+    /// in-flight count with it). Taken by that call.
+    pub on_end: Option<OnEnd>,
     /// Bytes written so far.
     pub written: u64,
 }
@@ -322,6 +330,7 @@ impl<S: Read + Write> Conn<S> {
             path: None,
             status: 0,
             on_status: None,
+            on_end: None,
             written: 0,
         }
     }
@@ -331,6 +340,13 @@ impl<S: Read + Write> Conn<S> {
         self.status = status;
         if let Some(f) = self.on_status.take() {
             f(status);
+        }
+    }
+
+    /// The response's last write comes next.
+    fn end(&mut self) {
+        if let Some(f) = self.on_end.take() {
+            f();
         }
     }
 
@@ -537,6 +553,7 @@ impl<S: Read + Write> Conn<S> {
         if !self.head_only && status != 204 {
             b.extend_from_slice(body);
         }
+        self.end();
         self.write_all(&b)
     }
 
@@ -572,23 +589,38 @@ impl<S: Read + Write> Conn<S> {
         if data.is_empty() {
             return Ok(());
         }
+        let b = self.framed(data);
+        self.write_all(&b)
+    }
+
+    /// The end of a streamed response, after `last`, its last part (maybe
+    /// empty): one write.
+    pub fn end_stream(&mut self, last: &[u8]) -> io::Result<()> {
+        self.end();
+        let mut b = if last.is_empty() {
+            Vec::new()
+        } else {
+            self.framed(last)
+        };
+        if self.chunked {
+            b.extend_from_slice(b"0\r\n\r\n");
+        }
+        if b.is_empty() {
+            return Ok(());
+        }
+        self.write_all(&b)
+    }
+
+    /// `data` (not empty) as the streamed body carries it.
+    fn framed(&self, data: &[u8]) -> Vec<u8> {
         if !self.chunked {
-            return self.write_all(data);
+            return data.to_vec();
         }
         let mut b = format!("{:x}\r\n", data.len()).into_bytes();
         b.reserve(data.len() + 2);
         b.extend_from_slice(data);
         b.extend_from_slice(b"\r\n");
-        self.write_all(&b)
-    }
-
-    /// The end of a streamed response.
-    pub fn end_stream(&mut self) -> io::Result<()> {
-        if self.chunked {
-            self.write_all(b"0\r\n\r\n")
-        } else {
-            Ok(())
-        }
+        b
     }
 }
 
@@ -946,10 +978,17 @@ mod tests {
         c.start_stream(200, "text/event-stream", 1, true).unwrap();
         c.send(b"data: x\n\n").unwrap();
         c.send(b"").unwrap();
-        c.end_stream().unwrap();
+        c.end_stream(b"").unwrap();
         assert_eq!(
             undated(&std::mem::take(&mut c.s.out)),
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nTransfer-Encoding: chunked\r\n\r\n9\r\ndata: x\n\n\r\n0\r\n\r\n"
+        );
+        // The last part and the end: the same bytes.
+        c.start_stream(200, "text/event-stream", 1, true).unwrap();
+        c.end_stream(b"data: x\n\n").unwrap();
+        assert!(
+            undated(&std::mem::take(&mut c.s.out))
+                .ends_with("\r\n\r\n9\r\ndata: x\n\n\r\n0\r\n\r\n")
         );
         // HEAD: the same headers, no body; 204: no body or content headers;
         // `extra` on everything.
@@ -970,10 +1009,39 @@ mod tests {
         c.extra.clear();
         c.start_stream(200, "text/event-stream", 0, false).unwrap();
         c.send(b"data: x\n\n").unwrap();
-        c.end_stream().unwrap();
+        c.end_stream(b"").unwrap();
         assert_eq!(
             undated(&std::mem::take(&mut c.s.out)),
             "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\ndata: x\n\n"
         );
+    }
+
+    /// `on_end` runs once, before the response's last write: nothing of
+    /// that write is out when it runs (#112).
+    #[test]
+    fn on_end_before_the_last_write() {
+        use std::sync::{Arc, Mutex};
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let arm = |c: &mut Conn<Mock>| {
+            let (seen, at) = (seen.clone(), c.written);
+            let before = c.s.out.len();
+            c.on_end = Some(Box::new(move || seen.lock().unwrap().push((at, before))));
+        };
+        let mut c = Conn::new(Mock::new(b"", 1));
+        arm(&mut c);
+        c.respond(200, "application/json", b"{}", true, &[])
+            .unwrap();
+        assert!(c.on_end.is_none());
+        let whole = c.s.out.len();
+        c.start_stream(200, "text/event-stream", 1, true).unwrap();
+        c.send(b"data: x\n\n").unwrap();
+        arm(&mut c);
+        let sent = c.s.out.len();
+        c.end_stream(b"data: [DONE]\n\n").unwrap();
+        assert!(c.s.out.len() > sent);
+        // Each ran with only what came before its response's last write
+        // out, once.
+        assert_eq!(*seen.lock().unwrap(), [(0, 0), (sent as u64, sent)]);
+        assert!(whole > 0);
     }
 }
