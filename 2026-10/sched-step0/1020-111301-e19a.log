@@ -1,0 +1,28 @@
+[axon-run 11:13:01] submitted 1020-111301-e19a by /home/haseeb/.cache/axon-wt-sched: /home/haseeb/.cache/axon-sched/bin/axon-test-step0 cuda::qwen2::slots::tests::pool_hybrid_cost --exact --ignored --nocapture --test-threads 1
+[axon-run 11:13:01] timing job waiting: foreign GPU load 29 % (Xorg 251490 16%, picom 251672 10%, zen-bin 268265 3%) (on bella; > 10 %)
+[axon-run 12:36:07] scope axon-job-1020-111301-e19a-1792514167.scope in app-axonjobs.slice: MemoryMax 10217 MB, MemoryHigh 9195 MB, no swap, oomd pressure kill 80% (claim 6129 MB): an OOM here kills only this job
+[axon-run 12:36:07] job 1020-111301-e19a -> bella: systemd-run --user --scope --quiet --unit=axon-job-1020-111301-e19a-1792514167 --slice=app-axonjobs.slice -p MemoryMax=10217M -p MemoryHigh=9195M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-sched/bin/axon-test-step0 cuda::qwen2::slots::tests::pool_hybrid_cost --exact --ignored --nocapture --test-threads 1
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_hybrid_cost ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+hybrid cost: /home/haseeb/Projects/axon/models/qwen2.5-3b-instruct-q4_k_m.gguf (qwen2), NVIDIA GeForce RTX 5070 Ti Laptop GPU (46 SMs), decoders at 768, chunk at 1024, pass max 1152
+[axon-run 12:36:42] FOREIGN_GPU sample max=14% mean=1.8% n=8
+| nb | chunk | dec ms | dec attn ms | chunk ms | two ms | fused est ms | saved % |
+| 4 | 128 | 5.187 | 0.665 | 17.526 | 22.714 | 24.694 | -8.7 |
+| 4 | 256 | 5.187 | 0.665 | 30.607 | 35.794 | 36.207 | -1.2 |
+| 4 | 512 | 5.187 | 0.665 | 54.052 | 59.239 | 62.112 | -4.9 |
+| 16 | 128 | 8.676 | 1.419 | 17.526 | 26.203 | 26.020 | 0.7 |
+| 16 | 256 | 8.676 | 1.419 | 30.607 | 39.283 | 37.622 | 4.2 |
+| 16 | 512 | 8.676 | 1.419 | 54.052 | 62.728 | 62.638 | 0.1 |
+| 32 | 128 | 10.746 | 2.508 | 17.526 | 28.272 | 27.768 | 1.8 |
+| 32 | 256 | 10.746 | 2.508 | 30.607 | 41.353 | 39.187 | 5.2 |
+| 32 | 512 | 10.746 | 2.508 | 54.052 | 64.798 | 56.102 | 13.4 |
+| 64 | 128 | 14.002 | 5.808 | 17.526 | 31.529 | 32.000 | -1.5 |
+| 64 | 256 | 14.002 | 5.808 | 30.607 | 44.609 | 43.260 | 3.0 |
+| 64 | 512 | 14.002 | 5.808 | 54.052 | 68.054 | 60.759 | 10.7 |
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 43.55s
+
+[axon-run 12:36:50] exit 0 after 43.6s (host bella)
+[axon-run 12:36:52] FOREIGN_GPU max=14% mean=1.6% samples=9 top: picom 1255867 14%
