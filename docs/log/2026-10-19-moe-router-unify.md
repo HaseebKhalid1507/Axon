@@ -1,7 +1,7 @@
 # One MoE router kernel + MoeKind enum  (PR #104)
 
-- Date: 2026-10-19. Branch: refactor/moe-router-kind. Base: main 764792f. Status: open (draft until the review-fix
-  gates pass).
+- Date: 2026-10-19. Branch: refactor/moe-router-kind. Base: main 764792f. Status: open; review-fix gates
+  (fdd7816) passed.
 - Pick / design: issue #99, the follow-up to Shady's review of #98 (three copies of the k-round tree argmax, two
   MoE dispatch styles in `MoeQwen3`).
 
