@@ -17,7 +17,7 @@
 //! Q_h = [Wk_b[h] q_nope_h | rope(q_pe_h)]                             (mla_heads_mv, mla_qrope)
 //! o_h = softmax(Q_h . K * kq_scale) . K[..lat]                        (mla_attn)
 //! x += Wo [Wv_b[h] o_h]                                               (mla_heads_mv, bgemm)
-//! FFN: dense (the lead layers), or router (moe_logits, mla_topk) + shared experts here,
+//! FFN: dense (the lead layers), or router (moe_logits, moe_router) + shared experts here,
 //!      routed experts on the CPU, x += y                              (moe_add)
 //! ```
 //!
@@ -30,6 +30,7 @@
 //! Against the CPU model (absorbed too, f32) it is graded (tests).
 
 use super::batch::{BatchIn, act_stride, passes};
+use super::moe::{GATE_SIGMOID, GATE_SOFTMAX, MOE_LG_WARPS, launch_router};
 use super::*;
 use crate::cuda::SyncEvent;
 use crate::model::{Ds2GpuCfg, MoeDims};
@@ -49,9 +50,6 @@ const MLA_PART_BUDGET: usize = 64 << 20;
 const MLA_MV_T: usize = 8;
 /// mla.cu MLA_MAXI: krow <= 64 * MLA_MAXI.
 const MLA_MAX_KROW: usize = 576;
-/// moe.cu MOE_THREADS / MOE_LG_WARPS.
-const MOE_THREADS: u32 = 128;
-const MOE_LG_WARPS: usize = 8;
 
 /// One MLA layer's matrices and vectors (offsets in floats into `vecs`).
 #[derive(Clone, Copy)]
@@ -253,7 +251,7 @@ pub(crate) struct MlaFns<'m> {
     heads_mv: Func<'m>,
     attn: Func<'m>,
     attn_cmb: Func<'m>,
-    topk: Func<'m>,
+    route: Func<'m>,
     logits: Func<'m>,
     add: Func<'m>,
     norm: Func<'m>,
@@ -270,7 +268,7 @@ impl<'m> MlaFns<'m> {
             heads_mv: mla.function("mla_heads_mv")?,
             attn: mla.function("mla_attn")?,
             attn_cmb: mla.function("mla_attn_cmb")?,
-            topk: mla.function("mla_topk")?,
+            route: mla.function("moe_router")?,
             logits: mla.function("moe_logits")?,
             add: mla.function("moe_add")?,
             norm: dense.function("rmsnorm_quant_b")?,
@@ -778,22 +776,20 @@ impl<'g> CudaQwen2<'g> {
                         ],
                     )?;
                     let cfg = &ml.cfg;
-                    g.launch(
-                        &mf.topk,
-                        (nbu, 1, 1),
-                        (MOE_THREADS, 1, 1),
-                        (2 * n_e * 4) as u32,
-                        &[
-                            mb.lg.arg(),
-                            Arg::I32(n_e as i32),
-                            Arg::I32(k as i32),
-                            Arg::I32(cfg.sigmoid as i32),
-                            bias.map_or(null, vec),
-                            Arg::I32(cfg.norm as i32),
-                            Arg::F32(cfg.scale),
-                            mb.r.arg_at(hb),
-                            mb.r.arg_at(hb + nb * k * 4),
-                        ],
+                    launch_router(
+                        g,
+                        &mf.route,
+                        mb.lg.arg(),
+                        (n_e, k, nb),
+                        if cfg.sigmoid {
+                            GATE_SIGMOID
+                        } else {
+                            GATE_SOFTMAX
+                        },
+                        bias.map_or(null, vec),
+                        cfg.norm,
+                        cfg.scale,
+                        (mb.r.arg_at(hb), mb.r.arg_at(hb + nb * k * 4)),
                     )?;
                 }
             }

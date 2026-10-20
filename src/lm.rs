@@ -655,13 +655,9 @@ impl<'a> Backend<'a> {
         }
         let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open_device(ordinal)?));
         let module: &'static Module<'static> = Box::leak(Box::new(Kernels::module_for(gpu, m)?));
-        let n = if m.arch == "deepseek2" {
-            let ml: &'static Module<'static> = Box::leak(Box::new(Kernels::mla_module(gpu)?));
-            MoeQwen3::new_mla(gpu, module, ml, m, max_ctx, kv, fit, q6k8)?
-        } else {
-            let mm: &'static Module<'static> = Box::leak(Box::new(Kernels::moe_module(gpu)?));
-            MoeQwen3::new(gpu, module, mm, m, max_ctx, kv, fit, q6k8)?
-        };
+        let router: &'static Module<'static> =
+            Box::leak(Box::new(Kernels::moe_module_for(gpu, m)?));
+        let n = MoeQwen3::new(gpu, module, router, m, max_ctx, kv, fit, q6k8)?;
         eprintln!("moe:         {}, kv {}", n.describe(n.ctx), n.kv_name());
         Ok(Backend::Moe(Box::new(n)))
     }

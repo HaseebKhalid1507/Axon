@@ -246,7 +246,7 @@ struct OssLayer {
     sinks: usize,
     /// The attention output's bias, dim floats.
     bo: usize,
-    /// The router's bias, n_expert floats (moe.cu `moe_topk_oai`).
+    /// The router's bias, n_expert floats (moe.cu `moe_router`).
     router_b: usize,
 }
 

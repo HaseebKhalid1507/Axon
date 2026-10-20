@@ -1279,7 +1279,7 @@ impl<'a> Qwen2<'a> {
                             "ffn_down_exps.bias",
                         ]
                         .map(|s| vals(t(s)));
-                        moe.oai = Some(Box::new(moe::Oai {
+                        moe.rule = moe::Router::Oai(Box::new(moe::Oai {
                             router,
                             gate,
                             up,

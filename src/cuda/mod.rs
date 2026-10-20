@@ -2055,7 +2055,7 @@ impl<'m> Kernels<'m> {
 
     /// moe.cu (the MoE router, `crate::moe`) on its own: the dense
     /// models' module stays as it is. Debug builds compile it with
-    /// MOE_DEBUG (moe_topk_oai's trap: a router with no non-NaN logit),
+    /// MOE_DEBUG (moe_router's trap: a router with no eligible score),
     /// their own cache entry.
     pub fn moe_module(gpu: &Gpu) -> Result<Module<'_>, String> {
         let mut opts = KERNEL_OPTS.to_vec();
@@ -2068,14 +2068,24 @@ impl<'m> Kernels<'m> {
     /// mla.cu (deepseek2's MLA attention and router, `cuda::qwen2::mla`)
     /// on its own, after kernels.cu's dequantization (every type) and
     /// moe.cu's router logits: the other modules stay as they are.
-    /// Debug builds compile it with MLA_DEBUG (mla.cu's traps: a router
-    /// with no finite score), their own cache entry.
+    /// Debug builds compile it with MOE_DEBUG (as `moe_module`), their
+    /// own cache entry.
     pub fn mla_module(gpu: &Gpu) -> Result<Module<'_>, String> {
         let mut opts = KERNEL_OPTS_EXT.to_vec();
         if cfg!(debug_assertions) {
-            opts.push("-DMLA_DEBUG");
+            opts.push("-DMOE_DEBUG");
         }
         Ok(Module::load(gpu, MLA_KERNELS, &opts)?.0)
+    }
+
+    /// The router module MoE model `m` needs (`crate::moe::MoeQwen3`):
+    /// `mla_module` for deepseek2, else `moe_module`.
+    pub fn moe_module_for<'g>(gpu: &'g Gpu, m: &crate::gguf::Model) -> Result<Module<'g>, String> {
+        if m.arch == "deepseek2" {
+            Self::mla_module(gpu)
+        } else {
+            Self::moe_module(gpu)
+        }
     }
 
     /// The module model `m` needs: `module_ext` if it has an extra type;
