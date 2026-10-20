@@ -1,0 +1,12 @@
+[axon-run 01:10:56] submitted 1020-011056-86b3 by /home/haseeb/.cache/axon-gradedref: /home/haseeb/.cache/axon-gradedref/axon-test-dbg-af34f3e ref_spread_zero_fails_by_name
+[axon-run 01:37:14] libtest without --test-threads: running it with --test-threads 4 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 01:37:14] scope axon-job-1020-011056-86b3-1792474634.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 14974 MB): an OOM here kills only this job
+[axon-run 01:37:14] job 1020-011056-86b3 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1020-011056-86b3-1792474634 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-gradedref/axon-test-dbg-af34f3e ref_spread_zero_fails_by_name --test-threads 4
+axon-q 01:37:14 start slot 16-23: /home/haseeb/.cache/axon-gradedref/axon-test-dbg-af34f3e ref_spread_zero_fails_by_name --test-threads 4
+
+running 1 test
+test cuda::qwen2::tests::ref_spread_zero_fails_by_name ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 677 filtered out; finished in 0.00s
+
+[axon-run 01:37:14] exit 0 after 0.1s (host bella)

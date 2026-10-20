@@ -1,0 +1,27 @@
+[axon-run 01:39:24] submitted 1020-013924-e8c8 by /home/haseeb/.cache/axon-moerouter: /home/haseeb/.cache/axon-moerouter/axon-test-base-764792f model::gemma3_tests::gemma3_matches_reference_forward --exact --nocapture
+[axon-run 01:39:24] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 01:39:24] scope axon-job-1020-013924-e8c8-1792474764.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 15621 MB): an OOM here kills only this job
+[axon-run 01:39:24] job 1020-013924-e8c8 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1020-013924-e8c8-1792474764 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-moerouter/axon-test-base-764792f model::gemma3_tests::gemma3_matches_reference_forward --exact --nocapture --test-threads 6
+axon-q 01:39:24 start slot 16-23: /home/haseeb/.cache/axon-moerouter/axon-test-base-764792f model::gemma3_tests::gemma3_matches_reference_forward --exact --nocapture --test-threads 6
+
+running 1 test
+window None: max |dlogit| 0.5127, top 506 vs 506
+window None: max |dlogit| 0.6324, top 9405 vs 9405
+window Some(6): max |dlogit| 0.5127, top 506 vs 506
+window Some(6): max |dlogit| 0.8846, top 506 vs 7001
+
+thread 'model::gemma3_tests::gemma3_matches_reference_forward' (2287580) panicked at src/model/gemma3_tests.rs:308:13:
+assertion `left == right` failed: window Some(6): top token
+  left: 506
+ right: 7001
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test model::gemma3_tests::gemma3_matches_reference_forward ... FAILED
+
+failures:
+
+failures:
+    model::gemma3_tests::gemma3_matches_reference_forward
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 676 filtered out; finished in 4.00s
+
+[axon-run 01:39:28] exit 101 after 4.1s (host bella)
