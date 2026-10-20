@@ -1,0 +1,49 @@
+[axon-run 06:29:35] submitted 1020-062935-df1f by /home/haseeb/.cache/axon-inflight: /home/haseeb/.cache/axon-inflight/md5.sh /home/haseeb/.cache/axon-inflight/bin/axon-6f1efb5 /home/haseeb/.cache/axon-inflight/bin/axon-59bd41c /home/haseeb/.cache/axon-inflight/md5-59bd41c
+[axon-run 06:33:56] scope axon-job-1020-062935-df1f-1792492436.scope in app-axonjobs.slice: MemoryMax 7024 MB, MemoryHigh 6321 MB, no swap, oomd pressure kill 80% (claim 4000 MB): an OOM here kills only this job
+[axon-run 06:33:56] job 1020-062935-df1f -> bella: systemd-run --user --scope --quiet --unit=axon-job-1020-062935-df1f-1792492436 --slice=app-axonjobs.slice -p MemoryMax=7024M -p MemoryHigh=6321M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-inflight/md5.sh /home/haseeb/.cache/axon-inflight/bin/axon-6f1efb5 /home/haseeb/.cache/axon-inflight/bin/axon-59bd41c /home/haseeb/.cache/axon-inflight/md5-59bd41c
+axon-q 06:33:56 start slot 0-7: /home/haseeb/.cache/axon-inflight/md5.sh /home/haseeb/.cache/axon-inflight/bin/axon-6f1efb5 /home/haseeb/.cache/axon-inflight/bin/axon-59bd41c /home/haseeb/.cache/axon-inflight/md5-59bd41c
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 615.71.09
+parabellum
+base	cuda	qwen2.5-0.5b-q4_k_m	p1	c0dfbb1ca4f2	rc=0
+cand	cuda	qwen2.5-0.5b-q4_k_m	p1	c0dfbb1ca4f2	rc=0
+base	cuda	qwen2.5-0.5b-q4_k_m	p2	acd9c2d5e0aa	rc=0
+cand	cuda	qwen2.5-0.5b-q4_k_m	p2	acd9c2d5e0aa	rc=0
+base	cuda	qwen2.5-0.5b-q4_k_m	p3	35b4ed5d823a	rc=0
+cand	cuda	qwen2.5-0.5b-q4_k_m	p3	35b4ed5d823a	rc=0
+base	cpu	qwen2.5-0.5b-q4_k_m	p1	de11b4bf48c9	rc=0
+cand	cpu	qwen2.5-0.5b-q4_k_m	p1	de11b4bf48c9	rc=0
+base	cpu	qwen2.5-0.5b-q4_k_m	p3	1d02b95ac7c0	rc=0
+cand	cpu	qwen2.5-0.5b-q4_k_m	p3	1d02b95ac7c0	rc=0
+base	cuda	Qwen3-0.6B-Q8_0	p1	a21a6d55c9dc	rc=0
+cand	cuda	Qwen3-0.6B-Q8_0	p1	a21a6d55c9dc	rc=0
+base	cuda	Qwen3-0.6B-Q8_0	p2	8393d261ef12	rc=0
+cand	cuda	Qwen3-0.6B-Q8_0	p2	8393d261ef12	rc=0
+base	cuda	Qwen3-0.6B-Q8_0	p3	0b1ad272f80c	rc=0
+cand	cuda	Qwen3-0.6B-Q8_0	p3	0b1ad272f80c	rc=0
+base	cpu	Qwen3-0.6B-Q8_0	p1	54381a7d049c	rc=0
+cand	cpu	Qwen3-0.6B-Q8_0	p1	54381a7d049c	rc=0
+base	cpu	Qwen3-0.6B-Q8_0	p3	0b1ad272f80c	rc=0
+cand	cpu	Qwen3-0.6B-Q8_0	p3	0b1ad272f80c	rc=0
+base	cuda	Llama-3.2-1B-Instruct-Q4_K_M	p1	cc9424ad2c9b	rc=0
+cand	cuda	Llama-3.2-1B-Instruct-Q4_K_M	p1	cc9424ad2c9b	rc=0
+base	cuda	Llama-3.2-1B-Instruct-Q4_K_M	p2	955f73cf4e74	rc=0
+cand	cuda	Llama-3.2-1B-Instruct-Q4_K_M	p2	955f73cf4e74	rc=0
+base	cuda	Llama-3.2-1B-Instruct-Q4_K_M	p3	c27131a3ddf5	rc=0
+cand	cuda	Llama-3.2-1B-Instruct-Q4_K_M	p3	c27131a3ddf5	rc=0
+base	cpu	Llama-3.2-1B-Instruct-Q4_K_M	p1	897464655057	rc=0
+cand	cpu	Llama-3.2-1B-Instruct-Q4_K_M	p1	897464655057	rc=0
+base	cpu	Llama-3.2-1B-Instruct-Q4_K_M	p3	f29df487b2ca	rc=0
+cand	cpu	Llama-3.2-1B-Instruct-Q4_K_M	p3	f29df487b2ca	rc=0
+base	cuda	google_gemma-3-1b-it-Q8_0	p1	bf6526f0202a	rc=0
+cand	cuda	google_gemma-3-1b-it-Q8_0	p1	bf6526f0202a	rc=0
+base	cuda	google_gemma-3-1b-it-Q8_0	p2	98fc88d8d306	rc=0
+cand	cuda	google_gemma-3-1b-it-Q8_0	p2	98fc88d8d306	rc=0
+base	cuda	google_gemma-3-1b-it-Q8_0	p3	61bf75026756	rc=0
+cand	cuda	google_gemma-3-1b-it-Q8_0	p3	61bf75026756	rc=0
+base	cpu	google_gemma-3-1b-it-Q8_0	p1	bf6526f0202a	rc=0
+cand	cpu	google_gemma-3-1b-it-Q8_0	p1	bf6526f0202a	rc=0
+base	cpu	google_gemma-3-1b-it-Q8_0	p3	f612150f3ae0	rc=0
+cand	cpu	google_gemma-3-1b-it-Q8_0	p3	f612150f3ae0	rc=0
+--- pairs differing:
+0 of 20 pairs differ; 0 nonzero rc
+[axon-run 06:35:28] exit 0 after 92.0s (host bella)

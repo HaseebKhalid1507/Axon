@@ -1,0 +1,624 @@
+[axon-run 06:29:35] submitted 1020-062935-fb1c by /home/haseeb/.cache/axon-inflight: /home/haseeb/.cache/axon-inflight/stress.sh /home/haseeb/.cache/axon-inflight/bin/axon-test-b760917 /home/haseeb/.cache/axon-inflight/bin/axon-test-59bd41c /home/haseeb/.cache/axon-inflight/bin/axon-test-dbg-b760917 /home/haseeb/.cache/axon-inflight/bin/axon-test-dbg-59bd41c 50
+[axon-run 06:35:32] scope axon-job-1020-062935-fb1c-1792492532.scope in app-axonjobs.slice: MemoryMax 5524 MB, MemoryHigh 4971 MB, no swap, oomd pressure kill 80% (claim 3000 MB): an OOM here kills only this job
+[axon-run 06:35:32] job 1020-062935-fb1c -> bella: systemd-run --user --scope --quiet --unit=axon-job-1020-062935-fb1c-1792492532 --slice=app-axonjobs.slice -p MemoryMax=5524M -p MemoryHigh=4971M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-inflight/stress.sh /home/haseeb/.cache/axon-inflight/bin/axon-test-b760917 /home/haseeb/.cache/axon-inflight/bin/axon-test-59bd41c /home/haseeb/.cache/axon-inflight/bin/axon-test-dbg-b760917 /home/haseeb/.cache/axon-inflight/bin/axon-test-dbg-59bd41c 50
+axon-q 06:35:32 start slot 16-23: /home/haseeb/.cache/axon-inflight/stress.sh /home/haseeb/.cache/axon-inflight/bin/axon-test-b760917 /home/haseeb/.cache/axon-inflight/bin/axon-test-59bd41c /home/haseeb/.cache/axon-inflight/bin/axon-t
+parabellum
+8
+ 06:35:32 up 12 days, 21:10,  2 users,  load average: 12.69, 9.64, 6.28
+HOLD base rc=101 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 680 filtered out; finished in 0.67s
+thread 'serve::tests::serve_in_flight_released_before_answering' (3093671) panicked at src/serve/tests.rs:4337:13:
+assertion `left == right` failed: /v1/completions (stream false): answered, still in flight
+HOLD cand rc=0 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 681 filtered out; finished in 0.68s
+HOLD base-dbg rc=101 test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 680 filtered out; finished in 0.57s
+thread 'serve::tests::serve_in_flight_released_before_answering' (3093877) panicked at src/serve/tests.rs:4337:13:
+assertion `left == right` failed: /v1/completions (stream false): answered, still in flight
+HOLD cand-dbg rc=0 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 681 filtered out; finished in 0.70s
+FAIL base-dbg iter 2 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3096849) panicked at src/serve/tests.rs:4396:5:
+4 of 200 reads not settled:
+round 0 /v1/chat/completions stream false: axon_requests_in_flight 1
+round 0 /v1/chat/completions stream false: axon_queue_depth 1
+round 18 /api/chat stream false: axon_requests_in_flight 1
+round 18 /api/chat stream false: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+FAIL base-dbg iter 4 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3117155) panicked at src/serve/tests.rs:4396:5:
+4 of 200 reads not settled:
+round 17 /api/generate stream true: axon_requests_in_flight 1
+round 17 /api/generate stream true: axon_queue_depth 1
+round 18 /v1/chat/completions stream true: axon_requests_in_flight 1
+round 18 /v1/chat/completions stream true: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+FAIL base iter 6 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3168227) panicked at src/serve/tests.rs:4396:5:
+2 of 200 reads not settled:
+round 5 /v1/completions stream false: axon_requests_in_flight 1
+round 5 /v1/completions stream false: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+FAIL base-dbg iter 6 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3169086) panicked at src/serve/tests.rs:4396:5:
+4 of 200 reads not settled:
+round 19 /v1/completions stream true: axon_requests_in_flight 1
+round 19 /v1/completions stream true: axon_queue_depth 1
+round 19 /api/chat stream true: axon_requests_in_flight 1
+round 19 /api/chat stream true: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+FAIL base iter 7 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3170022) panicked at src/serve/tests.rs:4396:5:
+2 of 200 reads not settled:
+round 18 /v1/responses stream false: axon_requests_in_flight 1
+round 18 /v1/responses stream false: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+FAIL base-dbg iter 7 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3170835) panicked at src/serve/tests.rs:4396:5:
+6 of 200 reads not settled:
+round 13 /api/chat stream true: axon_requests_in_flight 1
+round 13 /api/chat stream true: axon_queue_depth 1
+round 14 /v1/chat/completions stream false: axon_requests_in_flight 1
+round 14 /v1/chat/completions stream false: axon_queue_depth 1
+round 15 /api/generate stream false: axon_requests_in_flight 1
+round 15 /api/generate stream false: axon_queue_depth 1
+FAIL base iter 8 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3172011) panicked at src/serve/tests.rs:4396:5:
+10 of 200 reads not settled:
+round 2 /v1/chat/completions stream true: axon_requests_in_flight 1
+round 2 /v1/chat/completions stream true: axon_queue_depth 1
+round 3 /api/chat stream true: axon_requests_in_flight 1
+round 3 /api/chat stream true: axon_queue_depth 1
+round 4 /v1/chat/completions stream false: axon_requests_in_flight 1
+round 4 /v1/chat/completions stream false: axon_queue_depth 1
+FAIL base-dbg iter 8 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3172860) panicked at src/serve/tests.rs:4396:5:
+2 of 200 reads not settled:
+round 15 /v1/responses stream false: axon_requests_in_flight 1
+round 15 /v1/responses stream false: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+FAIL base iter 9 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3173819) panicked at src/serve/tests.rs:4396:5:
+10 of 200 reads not settled:
+round 4 /api/generate stream false: axon_requests_in_flight 1
+round 4 /api/generate stream false: axon_queue_depth 1
+round 6 /v1/chat/completions stream false: axon_requests_in_flight 1
+round 6 /v1/chat/completions stream false: axon_queue_depth 1
+round 16 /v1/completions stream false: axon_requests_in_flight 1
+round 16 /v1/completions stream false: axon_queue_depth 1
+FAIL base iter 10 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3175593) panicked at src/serve/tests.rs:4396:5:
+6 of 200 reads not settled:
+round 15 /api/generate stream true: axon_requests_in_flight 1
+round 15 /api/generate stream true: axon_queue_depth 1
+round 18 /v1/responses stream true: axon_requests_in_flight 1
+round 18 /v1/responses stream true: axon_queue_depth 1
+round 18 /api/chat stream true: axon_requests_in_flight 1
+round 18 /api/chat stream true: axon_queue_depth 1
+FAIL base-dbg iter 10 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3176480) panicked at src/serve/tests.rs:4396:5:
+6 of 200 reads not settled:
+round 0 /api/chat stream false: axon_requests_in_flight 1
+round 0 /api/chat stream false: axon_queue_depth 1
+round 6 /v1/responses stream true: axon_requests_in_flight 1
+round 6 /v1/responses stream true: axon_queue_depth 1
+round 13 /api/generate stream false: axon_requests_in_flight 1
+round 13 /api/generate stream false: axon_queue_depth 1
+FAIL base iter 11 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3177374) panicked at src/serve/tests.rs:4396:5:
+28 of 200 reads not settled:
+round 5 /api/chat stream true: axon_requests_in_flight 1
+round 5 /api/chat stream true: axon_queue_depth 1
+round 6 /v1/completions stream false: axon_requests_in_flight 1
+round 6 /v1/completions stream false: axon_queue_depth 1
+round 7 /v1/responses stream false: axon_requests_in_flight 1
+round 7 /v1/responses stream false: axon_queue_depth 1
+FAIL base-dbg iter 11 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3178282) panicked at src/serve/tests.rs:4396:5:
+16 of 200 reads not settled:
+round 0 /v1/responses stream false: axon_requests_in_flight 1
+round 0 /v1/responses stream false: axon_queue_depth 1
+round 0 /api/chat stream false: axon_requests_in_flight 1
+round 0 /api/chat stream false: axon_queue_depth 1
+round 6 /v1/chat/completions stream false: axon_requests_in_flight 1
+round 6 /v1/chat/completions stream false: axon_queue_depth 1
+FAIL base iter 12 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3179379) panicked at src/serve/tests.rs:4396:5:
+18 of 200 reads not settled:
+round 8 /v1/responses stream true: axon_requests_in_flight 1
+round 8 /v1/responses stream true: axon_queue_depth 1
+round 10 /v1/responses stream false: axon_requests_in_flight 1
+round 10 /v1/responses stream false: axon_queue_depth 1
+round 10 /api/chat stream false: axon_requests_in_flight 1
+round 10 /api/chat stream false: axon_queue_depth 1
+FAIL base-dbg iter 12 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3180233) panicked at src/serve/tests.rs:4396:5:
+6 of 200 reads not settled:
+round 0 /v1/responses stream true: axon_requests_in_flight 1
+round 0 /v1/responses stream true: axon_queue_depth 1
+round 9 /v1/chat/completions stream false: axon_requests_in_flight 1
+round 9 /v1/chat/completions stream false: axon_queue_depth 1
+round 17 /api/generate stream false: axon_requests_in_flight 1
+round 17 /api/generate stream false: axon_queue_depth 1
+FAIL base iter 13 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3181142) panicked at src/serve/tests.rs:4396:5:
+4 of 200 reads not settled:
+round 8 /api/chat stream false: axon_requests_in_flight 1
+round 8 /api/chat stream false: axon_queue_depth 1
+round 19 /api/chat stream true: axon_requests_in_flight 1
+round 19 /api/chat stream true: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+FAIL base-dbg iter 13 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3182054) panicked at src/serve/tests.rs:4396:5:
+4 of 200 reads not settled:
+round 3 /api/generate stream false: axon_requests_in_flight 1
+round 3 /api/generate stream false: axon_queue_depth 1
+round 5 /v1/chat/completions stream true: axon_requests_in_flight 1
+round 5 /v1/chat/completions stream true: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+FAIL base iter 14 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3182898) panicked at src/serve/tests.rs:4396:5:
+16 of 200 reads not settled:
+round 0 /v1/chat/completions stream false: axon_requests_in_flight 1
+round 0 /v1/chat/completions stream false: axon_queue_depth 1
+round 14 /api/chat stream true: axon_requests_in_flight 1
+round 14 /api/chat stream true: axon_queue_depth 1
+round 17 /api/generate stream false: axon_requests_in_flight 1
+round 17 /api/generate stream false: axon_queue_depth 1
+FAIL base-dbg iter 14 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3183802) panicked at src/serve/tests.rs:4396:5:
+8 of 200 reads not settled:
+round 2 /v1/chat/completions stream false: axon_requests_in_flight 1
+round 2 /v1/chat/completions stream false: axon_queue_depth 1
+round 2 /v1/responses stream false: axon_requests_in_flight 1
+round 2 /v1/responses stream false: axon_queue_depth 1
+round 10 /v1/completions stream true: axon_requests_in_flight 1
+round 10 /v1/completions stream true: axon_queue_depth 1
+FAIL base-dbg iter 15 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3185609) panicked at src/serve/tests.rs:4396:5:
+6 of 200 reads not settled:
+round 8 /v1/completions stream false: axon_requests_in_flight 1
+round 8 /v1/completions stream false: axon_queue_depth 1
+round 8 /v1/responses stream false: axon_requests_in_flight 1
+round 8 /v1/responses stream false: axon_queue_depth 1
+round 8 /v1/chat/completions stream true: axon_requests_in_flight 1
+round 8 /v1/chat/completions stream true: axon_queue_depth 1
+FAIL base iter 16 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3186816) panicked at src/serve/tests.rs:4396:5:
+8 of 200 reads not settled:
+round 0 /api/generate stream false: axon_requests_in_flight 1
+round 0 /api/generate stream false: axon_queue_depth 1
+round 7 /api/generate stream true: axon_requests_in_flight 1
+round 7 /api/generate stream true: axon_queue_depth 1
+round 7 /api/chat stream true: axon_requests_in_flight 1
+round 7 /api/chat stream true: axon_queue_depth 1
+FAIL base-dbg iter 17 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3189587) panicked at src/serve/tests.rs:4396:5:
+4 of 200 reads not settled:
+round 0 /v1/chat/completions stream true: axon_requests_in_flight 1
+round 0 /v1/chat/completions stream true: axon_queue_depth 1
+round 17 /v1/chat/completions stream true: axon_requests_in_flight 1
+round 17 /v1/chat/completions stream true: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+FAIL base iter 19 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3192272) panicked at src/serve/tests.rs:4396:5:
+2 of 200 reads not settled:
+round 6 /v1/completions stream false: axon_requests_in_flight 1
+round 6 /v1/completions stream false: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+FAIL base-dbg iter 19 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3193089) panicked at src/serve/tests.rs:4396:5:
+2 of 200 reads not settled:
+round 12 /api/generate stream false: axon_requests_in_flight 1
+round 12 /api/generate stream false: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+FAIL base iter 20 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3194224) panicked at src/serve/tests.rs:4396:5:
+6 of 200 reads not settled:
+round 3 /v1/chat/completions stream false: axon_requests_in_flight 1
+round 3 /v1/chat/completions stream false: axon_queue_depth 1
+round 3 /api/generate stream false: axon_requests_in_flight 1
+round 3 /api/generate stream false: axon_queue_depth 1
+round 11 /api/generate stream false: axon_requests_in_flight 1
+round 11 /api/generate stream false: axon_queue_depth 1
+FAIL base-dbg iter 20 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3195077) panicked at src/serve/tests.rs:4396:5:
+6 of 200 reads not settled:
+round 14 /v1/responses stream false: axon_requests_in_flight 1
+round 14 /v1/responses stream false: axon_queue_depth 1
+round 15 /v1/completions stream false: axon_requests_in_flight 1
+round 15 /v1/completions stream false: axon_queue_depth 1
+round 16 /api/chat stream false: axon_requests_in_flight 1
+round 16 /api/chat stream false: axon_queue_depth 1
+FAIL base iter 21 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3195993) panicked at src/serve/tests.rs:4396:5:
+8 of 200 reads not settled:
+round 0 /v1/completions stream false: axon_requests_in_flight 1
+round 0 /v1/completions stream false: axon_queue_depth 1
+round 0 /api/chat stream false: axon_requests_in_flight 1
+round 0 /api/chat stream false: axon_queue_depth 1
+round 2 /api/chat stream false: axon_requests_in_flight 1
+round 2 /api/chat stream false: axon_queue_depth 1
+FAIL base-dbg iter 21 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3196822) panicked at src/serve/tests.rs:4396:5:
+4 of 200 reads not settled:
+round 2 /api/chat stream false: axon_requests_in_flight 1
+round 2 /api/chat stream false: axon_queue_depth 1
+round 19 /api/generate stream true: axon_requests_in_flight 1
+round 19 /api/generate stream true: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+FAIL base iter 22 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3197762) panicked at src/serve/tests.rs:4396:5:
+4 of 200 reads not settled:
+round 0 /v1/chat/completions stream false: axon_requests_in_flight 1
+round 0 /v1/chat/completions stream false: axon_queue_depth 1
+round 8 /v1/completions stream false: axon_requests_in_flight 1
+round 8 /v1/completions stream false: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+FAIL base-dbg iter 22 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3198612) panicked at src/serve/tests.rs:4396:5:
+4 of 200 reads not settled:
+round 4 /v1/chat/completions stream true: axon_requests_in_flight 1
+round 4 /v1/chat/completions stream true: axon_queue_depth 1
+round 5 /v1/completions stream false: axon_requests_in_flight 1
+round 5 /v1/completions stream false: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+FAIL base-dbg iter 23 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3200408) panicked at src/serve/tests.rs:4396:5:
+2 of 200 reads not settled:
+round 18 /v1/completions stream true: axon_requests_in_flight 1
+round 18 /v1/completions stream true: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+FAIL base iter 24 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3201524) panicked at src/serve/tests.rs:4396:5:
+20 of 200 reads not settled:
+round 0 /api/chat stream false: axon_requests_in_flight 1
+round 0 /api/chat stream false: axon_queue_depth 1
+round 2 /v1/chat/completions stream false: axon_requests_in_flight 1
+round 2 /v1/chat/completions stream false: axon_queue_depth 1
+round 2 /api/generate stream false: axon_requests_in_flight 1
+round 2 /api/generate stream false: axon_queue_depth 1
+FAIL base-dbg iter 24 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3202370) panicked at src/serve/tests.rs:4396:5:
+8 of 200 reads not settled:
+round 5 /v1/chat/completions stream false: axon_requests_in_flight 1
+round 5 /v1/chat/completions stream false: axon_queue_depth 1
+round 5 /api/generate stream false: axon_requests_in_flight 1
+round 5 /api/generate stream false: axon_queue_depth 1
+round 18 /v1/responses stream false: axon_requests_in_flight 1
+round 18 /v1/responses stream false: axon_queue_depth 1
+FAIL base iter 25 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3203267) panicked at src/serve/tests.rs:4396:5:
+2 of 200 reads not settled:
+round 18 /v1/completions stream true: axon_requests_in_flight 1
+round 18 /v1/completions stream true: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+FAIL base-dbg iter 25 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3204114) panicked at src/serve/tests.rs:4396:5:
+14 of 200 reads not settled:
+round 1 /v1/completions stream true: axon_requests_in_flight 1
+round 1 /v1/completions stream true: axon_queue_depth 1
+round 3 /v1/chat/completions stream false: axon_requests_in_flight 1
+round 3 /v1/chat/completions stream false: axon_queue_depth 1
+round 10 /v1/chat/completions stream false: axon_requests_in_flight 1
+round 10 /v1/chat/completions stream false: axon_queue_depth 1
+FAIL base-dbg iter 27 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3207708) panicked at src/serve/tests.rs:4396:5:
+6 of 200 reads not settled:
+round 17 /v1/completions stream false: axon_requests_in_flight 1
+round 17 /v1/completions stream false: axon_queue_depth 1
+round 17 /api/chat stream false: axon_requests_in_flight 1
+round 17 /api/chat stream false: axon_queue_depth 1
+round 18 /api/chat stream false: axon_requests_in_flight 1
+round 18 /api/chat stream false: axon_queue_depth 1
+FAIL base iter 28 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3208825) panicked at src/serve/tests.rs:4396:5:
+18 of 200 reads not settled:
+round 0 /v1/chat/completions stream false: axon_requests_in_flight 1
+round 0 /v1/chat/completions stream false: axon_queue_depth 1
+round 7 /api/generate stream true: axon_requests_in_flight 1
+round 7 /api/generate stream true: axon_queue_depth 1
+round 8 /v1/chat/completions stream true: axon_requests_in_flight 1
+round 8 /v1/chat/completions stream true: axon_queue_depth 1
+FAIL base-dbg iter 28 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3209629) panicked at src/serve/tests.rs:4396:5:
+2 of 200 reads not settled:
+round 15 /api/generate stream true: axon_requests_in_flight 1
+round 15 /api/generate stream true: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+FAIL base-dbg iter 29 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3211395) panicked at src/serve/tests.rs:4396:5:
+8 of 200 reads not settled:
+round 13 /api/generate stream false: axon_requests_in_flight 1
+round 13 /api/generate stream false: axon_queue_depth 1
+round 18 /v1/chat/completions stream false: axon_requests_in_flight 1
+round 18 /v1/chat/completions stream false: axon_queue_depth 1
+round 18 /api/generate stream false: axon_requests_in_flight 1
+round 18 /api/generate stream false: axon_queue_depth 1
+FAIL base iter 34 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3220208) panicked at src/serve/tests.rs:4396:5:
+2 of 200 reads not settled:
+round 3 /v1/chat/completions stream true: axon_requests_in_flight 1
+round 3 /v1/chat/completions stream true: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+FAIL base-dbg iter 34 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3221178) panicked at src/serve/tests.rs:4396:5:
+2 of 200 reads not settled:
+round 17 /v1/completions stream true: axon_requests_in_flight 1
+round 17 /v1/completions stream true: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+FAIL base iter 35 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3222148) panicked at src/serve/tests.rs:4396:5:
+2 of 200 reads not settled:
+round 19 /v1/chat/completions stream true: axon_requests_in_flight 1
+round 19 /v1/chat/completions stream true: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+FAIL base-dbg iter 35 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3223251) panicked at src/serve/tests.rs:4396:5:
+2 of 200 reads not settled:
+round 10 /v1/responses stream true: axon_requests_in_flight 1
+round 10 /v1/responses stream true: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+FAIL base iter 36 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3224134) panicked at src/serve/tests.rs:4396:5:
+2 of 200 reads not settled:
+round 18 /api/chat stream false: axon_requests_in_flight 1
+round 18 /api/chat stream false: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+FAIL base-dbg iter 36 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3225015) panicked at src/serve/tests.rs:4396:5:
+22 of 200 reads not settled:
+round 0 /api/chat stream false: axon_requests_in_flight 1
+round 0 /api/chat stream false: axon_queue_depth 1
+round 1 /api/chat stream true: axon_requests_in_flight 1
+round 1 /api/chat stream true: axon_queue_depth 1
+round 5 /v1/responses stream true: axon_requests_in_flight 1
+round 5 /v1/responses stream true: axon_queue_depth 1
+FAIL base iter 37 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3225900) panicked at src/serve/tests.rs:4396:5:
+4 of 200 reads not settled:
+round 10 /api/chat stream false: axon_requests_in_flight 1
+round 10 /api/chat stream false: axon_queue_depth 1
+round 19 /v1/responses stream true: axon_requests_in_flight 1
+round 19 /v1/responses stream true: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+FAIL base-dbg iter 37 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3226762) panicked at src/serve/tests.rs:4396:5:
+6 of 200 reads not settled:
+round 8 /api/chat stream false: axon_requests_in_flight 1
+round 8 /api/chat stream false: axon_queue_depth 1
+round 10 /api/generate stream false: axon_requests_in_flight 1
+round 10 /api/generate stream false: axon_queue_depth 1
+round 10 /v1/chat/completions stream true: axon_requests_in_flight 1
+round 10 /v1/chat/completions stream true: axon_queue_depth 1
+FAIL base-dbg iter 38 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3228538) panicked at src/serve/tests.rs:4396:5:
+6 of 200 reads not settled:
+round 2 /api/chat stream true: axon_requests_in_flight 1
+round 2 /api/chat stream true: axon_queue_depth 1
+round 3 /v1/chat/completions stream false: axon_requests_in_flight 1
+round 3 /v1/chat/completions stream false: axon_queue_depth 1
+round 18 /v1/chat/completions stream true: axon_requests_in_flight 1
+round 18 /v1/chat/completions stream true: axon_queue_depth 1
+FAIL base iter 39 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3229408) panicked at src/serve/tests.rs:4396:5:
+14 of 200 reads not settled:
+round 4 /v1/chat/completions stream false: axon_requests_in_flight 1
+round 4 /v1/chat/completions stream false: axon_queue_depth 1
+round 8 /v1/completions stream false: axon_requests_in_flight 1
+round 8 /v1/completions stream false: axon_queue_depth 1
+round 9 /v1/completions stream false: axon_requests_in_flight 1
+round 9 /v1/completions stream false: axon_queue_depth 1
+FAIL base-dbg iter 39 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3230466) panicked at src/serve/tests.rs:4396:5:
+10 of 200 reads not settled:
+round 1 /api/generate stream false: axon_requests_in_flight 1
+round 1 /api/generate stream false: axon_queue_depth 1
+round 2 /api/chat stream true: axon_requests_in_flight 1
+round 2 /api/chat stream true: axon_queue_depth 1
+round 11 /v1/responses stream true: axon_requests_in_flight 1
+round 11 /v1/responses stream true: axon_queue_depth 1
+FAIL base iter 40 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3231359) panicked at src/serve/tests.rs:4396:5:
+4 of 200 reads not settled:
+round 1 /v1/completions stream true: axon_requests_in_flight 1
+round 1 /v1/completions stream true: axon_queue_depth 1
+round 8 /v1/chat/completions stream true: axon_requests_in_flight 1
+round 8 /v1/chat/completions stream true: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+FAIL base-dbg iter 40 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3232220) panicked at src/serve/tests.rs:4396:5:
+18 of 200 reads not settled:
+round 4 /api/chat stream true: axon_requests_in_flight 1
+round 4 /api/chat stream true: axon_queue_depth 1
+round 5 /api/generate stream false: axon_requests_in_flight 1
+round 5 /api/generate stream false: axon_queue_depth 1
+round 5 /v1/completions stream true: axon_requests_in_flight 1
+round 5 /v1/completions stream true: axon_queue_depth 1
+FAIL base iter 41 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3233095) panicked at src/serve/tests.rs:4396:5:
+4 of 200 reads not settled:
+round 11 /v1/chat/completions stream true: axon_requests_in_flight 1
+round 11 /v1/chat/completions stream true: axon_queue_depth 1
+round 13 /api/chat stream false: axon_requests_in_flight 1
+round 13 /api/chat stream false: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+FAIL base-dbg iter 41 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3233910) panicked at src/serve/tests.rs:4396:5:
+18 of 200 reads not settled:
+round 1 /api/generate stream false: axon_requests_in_flight 1
+round 1 /api/generate stream false: axon_queue_depth 1
+round 1 /v1/responses stream true: axon_requests_in_flight 1
+round 1 /v1/responses stream true: axon_queue_depth 1
+round 6 /v1/chat/completions stream true: axon_requests_in_flight 1
+round 6 /v1/chat/completions stream true: axon_queue_depth 1
+FAIL base iter 42 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3234833) panicked at src/serve/tests.rs:4396:5:
+6 of 200 reads not settled:
+round 2 /v1/completions stream true: axon_requests_in_flight 1
+round 2 /v1/completions stream true: axon_queue_depth 1
+round 6 /api/generate stream true: axon_requests_in_flight 1
+round 6 /api/generate stream true: axon_queue_depth 1
+round 7 /api/chat stream false: axon_requests_in_flight 1
+round 7 /api/chat stream false: axon_queue_depth 1
+FAIL base-dbg iter 42 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3235646) panicked at src/serve/tests.rs:4396:5:
+4 of 200 reads not settled:
+round 1 /v1/chat/completions stream true: axon_requests_in_flight 1
+round 1 /v1/chat/completions stream true: axon_queue_depth 1
+round 18 /v1/chat/completions stream false: axon_requests_in_flight 1
+round 18 /v1/chat/completions stream false: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+FAIL base-dbg iter 43 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3237399) panicked at src/serve/tests.rs:4396:5:
+2 of 200 reads not settled:
+round 10 /v1/completions stream false: axon_requests_in_flight 1
+round 10 /v1/completions stream false: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+FAIL base-dbg iter 44 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3239364) panicked at src/serve/tests.rs:4396:5:
+4 of 200 reads not settled:
+round 8 /v1/chat/completions stream false: axon_requests_in_flight 1
+round 8 /v1/chat/completions stream false: axon_queue_depth 1
+round 8 /v1/responses stream true: axon_requests_in_flight 1
+round 8 /v1/responses stream true: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+FAIL base iter 45 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3240275) panicked at src/serve/tests.rs:4396:5:
+4 of 200 reads not settled:
+round 16 /v1/chat/completions stream true: axon_requests_in_flight 1
+round 16 /v1/chat/completions stream true: axon_queue_depth 1
+round 16 /v1/responses stream true: axon_requests_in_flight 1
+round 16 /v1/responses stream true: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+FAIL base iter 46 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3242080) panicked at src/serve/tests.rs:4396:5:
+6 of 200 reads not settled:
+round 0 /v1/responses stream false: axon_requests_in_flight 1
+round 0 /v1/responses stream false: axon_queue_depth 1
+round 1 /v1/chat/completions stream true: axon_requests_in_flight 1
+round 1 /v1/chat/completions stream true: axon_queue_depth 1
+round 5 /v1/chat/completions stream true: axon_requests_in_flight 1
+round 5 /v1/chat/completions stream true: axon_queue_depth 1
+FAIL base iter 47 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3243861) panicked at src/serve/tests.rs:4396:5:
+2 of 200 reads not settled:
+round 0 /v1/responses stream true: axon_requests_in_flight 1
+round 0 /v1/responses stream true: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+FAIL base-dbg iter 47 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3244662) panicked at src/serve/tests.rs:4396:5:
+8 of 200 reads not settled:
+round 16 /v1/completions stream false: axon_requests_in_flight 1
+round 16 /v1/completions stream false: axon_queue_depth 1
+round 17 /api/chat stream false: axon_requests_in_flight 1
+round 17 /api/chat stream false: axon_queue_depth 1
+round 19 /api/chat stream false: axon_requests_in_flight 1
+round 19 /api/chat stream false: axon_queue_depth 1
+FAIL base iter 48 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3245817) panicked at src/serve/tests.rs:4396:5:
+4 of 200 reads not settled:
+round 17 /v1/chat/completions stream true: axon_requests_in_flight 1
+round 17 /v1/chat/completions stream true: axon_queue_depth 1
+round 18 /v1/completions stream false: axon_requests_in_flight 1
+round 18 /v1/completions stream false: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+FAIL base-dbg iter 48 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3246676) panicked at src/serve/tests.rs:4396:5:
+6 of 200 reads not settled:
+round 0 /v1/responses stream false: axon_requests_in_flight 1
+round 0 /v1/responses stream false: axon_queue_depth 1
+round 0 /api/chat stream false: axon_requests_in_flight 1
+round 0 /api/chat stream false: axon_queue_depth 1
+round 18 /v1/completions stream true: axon_requests_in_flight 1
+round 18 /v1/completions stream true: axon_queue_depth 1
+FAIL base iter 49 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3247610) panicked at src/serve/tests.rs:4396:5:
+12 of 200 reads not settled:
+round 0 /v1/chat/completions stream false: axon_requests_in_flight 1
+round 0 /v1/chat/completions stream false: axon_queue_depth 1
+round 6 /v1/chat/completions stream true: axon_requests_in_flight 1
+round 6 /v1/chat/completions stream true: axon_queue_depth 1
+round 14 /api/chat stream false: axon_requests_in_flight 1
+round 14 /api/chat stream false: axon_queue_depth 1
+FAIL base-dbg iter 49 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3248488) panicked at src/serve/tests.rs:4396:5:
+10 of 200 reads not settled:
+round 0 /api/generate stream true: axon_requests_in_flight 1
+round 0 /api/generate stream true: axon_queue_depth 1
+round 4 /v1/chat/completions stream true: axon_requests_in_flight 1
+round 4 /v1/chat/completions stream true: axon_queue_depth 1
+round 13 /v1/responses stream true: axon_requests_in_flight 1
+round 13 /v1/responses stream true: axon_queue_depth 1
+FAIL base-dbg iter 50 rc=101
+thread 'serve::tests::serve_gauges_settle_back_to_back' (3250262) panicked at src/serve/tests.rs:4396:5:
+4 of 200 reads not settled:
+round 3 /api/chat stream true: axon_requests_in_flight 1
+round 3 /api/chat stream true: axon_queue_depth 1
+round 14 /v1/chat/completions stream false: axon_requests_in_flight 1
+round 14 /v1/chat/completions stream false: axon_queue_depth 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+=== stress serve::tests::serve_gauges_settle_back_to_back x50
+base pass=20 fail=30
+cand pass=50 fail=0
+base-dbg pass=13 fail=37
+cand-dbg pass=50 fail=0
+[axon-run 06:48:46] exit 0 after 793.9s (host bella)
