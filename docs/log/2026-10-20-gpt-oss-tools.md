@@ -1,4 +1,4 @@
-# serve: tool calling for gpt-oss (harmony)  (PR #N)
+# serve: tool calling for gpt-oss (harmony)  (PR #111)
 
 - Date: 2026-10-20. Branch: feat/oss-tools. Base: main cb53181. Status: open
 - Pick / design: issue #108 (agent harnesses on gpt-oss-20b got `400 tools: tool calling is not supported
