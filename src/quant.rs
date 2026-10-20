@@ -583,6 +583,33 @@ impl QuantizedAct {
     }
 }
 
+/// The views as built, for the GPU twin's equality test
+/// (`cuda::qwen2::tests::twin`): Q8_0 (per-block scales, values) and Q8_K
+/// (per-block scales, values, sums of 16).
+#[cfg(test)]
+pub type Q8Views = (
+    Option<(Vec<f32>, Vec<i8>)>,
+    Option<(Vec<f32>, Vec<i8>, Vec<i16>)>,
+);
+
+#[cfg(test)]
+impl QuantizedAct {
+    pub fn views(&self) -> Q8Views {
+        let b32 = self
+            .b32
+            .as_ref()
+            .map(|b| (b.d.clone(), b.q.iter().flatten().copied().collect()));
+        let k = self.k.as_ref().map(|k| {
+            (
+                k.iter().map(|b| b.d).collect(),
+                k.iter().flat_map(|b| b.qs).collect(),
+                k.iter().flat_map(|b| b.bsums).collect(),
+            )
+        });
+        (b32, k)
+    }
+}
+
 #[allow(clippy::needless_range_loop)] // fixed-size arrays: indexing vectorizes cleanly
 #[inline(always)]
 fn dot_i8_32(a: &[i8; 32], b: &[i8; 32]) -> i32 {

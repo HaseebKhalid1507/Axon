@@ -419,8 +419,10 @@ __device__ __forceinline__ float i2f_rn(int i) { return __int2float_rn(i); }
 // Q4_K (quant.rs dot_q4_k_q8's integers): lane p of a group takes 16 bytes
 // of qs, 32 nibbles: 16 of sub-block 2c and 16 of 2c + 1 (c = p / 2), and
 // the min terms of sub-blocks 2c, 2c + 1 (even lanes). Token j's
-// activations at act + min(j, zmax) * astride.
-template <int R, int T, int CAP>
+// activations at act + min(j, zmax) * astride. TW (the CPU twin, r8.rs's
+// f32 step): the pair is ((d dk) S - (dmin dk) M, 1), which the twin chain
+// adds as is.
+template <int R, int T, int CAP, bool TW = false>
 __device__ __forceinline__ void blk_q4_k(const u8* const* rows, int base, int end, const u8* act,
                                          u64 astride, int n, int zmax, float2* sh) {
     int t = threadIdx.x, g = t >> 3, p = t & 7, c = p >> 1, hf = p & 1;
@@ -464,8 +466,14 @@ __device__ __forceinline__ void blk_q4_k(const u8* const* rows, int base, int en
                 }
                 if (p == 0) {
                     float d = h2f(h[r].x & 0xffff), dmin = h2f(h[r].x >> 16);
-                    float v = __fsub_rn(__fmul_rn(d, i2f_rn(S)), __fmul_rn(dmin, i2f_rn(M)));
-                    GV_PAIR(sh, CAP, r, j, T, b, base) = make_float2(dk, v);
+                    if (TW) {
+                        float v = __fsub_rn(__fmul_rn(__fmul_rn(d, dk), i2f_rn(S)),
+                                            __fmul_rn(__fmul_rn(dmin, dk), i2f_rn(M)));
+                        GV_PAIR(sh, CAP, r, j, T, b, base) = make_float2(v, 1.0f);
+                    } else {
+                        float v = __fsub_rn(__fmul_rn(d, i2f_rn(S)), __fmul_rn(dmin, i2f_rn(M)));
+                        GV_PAIR(sh, CAP, r, j, T, b, base) = make_float2(dk, v);
+                    }
                 }
             }
         }
@@ -933,13 +941,23 @@ __device__ __forceinline__ float gv_chain(const float2* c, int nb, float acc) {
     return acc;
 }
 
+// The CPU twin's chain (r8.rs / r8q.rs): acc = acc + c[b].x * c[b].y, a
+// multiply then an add, in order.
+__device__ __forceinline__ float gv_chain_tw(const float2* c, int nb, float acc) {
+    for (int b = 0; b < nb; b++) acc = __fadd_rn(acc, __fmul_rn(c[b].x, c[b].y));
+    return acc;
+}
+
 // rows[0..R) of a matrix of type qt and n columns times T tokens' (token j
 // at act + min(j, zmax) * astride): thread i < R T runs output i's chain
 // (r = i / T, j = i % T) and returns it; with T = 1 (decode) the lanes of
 // warp 0 also get every y[r] (shuffled from lane r). Every thread of the block must call it;
 // `again` if the kernel called it before (whose chains may still be
-// reading the pairs).
-template <int R, int T>
+// reading the pairs). TW: the CPU twin (Q4_K, Q6_K, Q5_0 and Q8_0 only;
+// Q6_K's pair (dk dw, S) already has the CPU's operands): the
+// r8/r8q kernels' f32 steps, so each output equals the CPU's bit for bit
+// (`gemv_tw`).
+template <int R, int T, bool TW = false>
 __device__ __forceinline__ float dot_rows_t(int qt, const u8* const* rows, int n, const u8* act,
                                             u64 astride, int zmax, float* y, bool again = false) {
     const int RT = R * T, CAP = GEMV_PAIRS / RT;
@@ -961,7 +979,7 @@ __device__ __forceinline__ float dot_rows_t(int qt, const u8* const* rows, int n
         if (base > 0) __syncthreads(); // the last chunk's chains are done
         int end = min(nb, base + CAP);
         switch (qt) {
-        case QT_Q4_K: blk_q4_k<R, T, CAP>(rows, base, end, act, astride, n, zmax, sh); break;
+        case QT_Q4_K: blk_q4_k<R, T, CAP, TW>(rows, base, end, act, astride, n, zmax, sh); break;
         case QT_Q6_K: blk_q6_k<R, T, CAP>(rows, base, end, act, astride, n, zmax, sh); break;
         case QT_Q8_0: blk_q8_0<R, T, CAP>(rows, base, end, act, astride, n, zmax, sh); break;
 #ifdef AXON_EXT_TYPES
@@ -976,7 +994,9 @@ __device__ __forceinline__ float dot_rows_t(int qt, const u8* const* rows, int n
         default: blk_q5_0<R, T, CAP>(rows, base, end, act, astride, n, zmax, sh); break; // QT_Q5_0
         }
         __syncthreads();
-        if (i < RT) acc = gv_chain(sh + i * CAP, end - base, acc);
+        if (i < RT)
+            acc = TW ? gv_chain_tw(sh + i * CAP, end - base, acc)
+                     : gv_chain(sh + i * CAP, end - base, acc);
     }
     if (T == 1 && y && i < 32) {
 #pragma unroll
@@ -1042,6 +1062,25 @@ gemv1(int qt, const u8* __restrict__ w, u64 row_bytes, int rows, int n, const u8
     dot_rows<1>(qt, rr, n, act, y);
     if (threadIdx.x == 0) {
         float v = y[0];
+        if (bias) v = __fadd_rn(v, bias[r]);
+        out[r] = mode == 1 ? __fadd_rn(out[r], v) : v;
+    }
+}
+
+// `gemv1` in the CPU twin's numerics (dot_rows_t's TW): out[r] = the r8 /
+// r8q kernels' row sum, bit for bit, for Q4_K, Q6_K, Q5_0 and Q8_0 (the host
+// refuses other types). Resident MoE experts' decode products.
+extern "C" __global__ void __launch_bounds__(GEMV_THREADS, GEMV_MIN_BLOCKS)
+gemv_tw(int qt, const u8* __restrict__ w, u64 row_bytes, int rows, int n,
+        const u8* __restrict__ act, const float* __restrict__ bias, int mode,
+        float* __restrict__ out) {
+    int r = blockIdx.x;
+    prefetch_l2(w + (u64)r * row_bytes, row_bytes);
+    PDL_START();
+    const u8* rr[1] = {w + (u64)r * row_bytes};
+    float y = dot_rows_t<1, 1, true>(qt, rr, n, act, 0, 0, nullptr);
+    if (threadIdx.x == 0) {
+        float v = y;
         if (bias) v = __fadd_rn(v, bias[r]);
         out[r] = mode == 1 ? __fadd_rn(out[r], v) : v;
     }

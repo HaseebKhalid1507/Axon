@@ -55,8 +55,8 @@ fn no_capture() -> RwLockWriteGuard<'static, ()> {
 /// Why `Gpu::open` fails off Linux.
 pub const LINUX_ONLY: &str = "CUDA support is Linux-only for now";
 
-/// kernels.cu, decode.cu, prefill.cu, stream.cu, sample.cu, hopper.cu and gemma.cu, compiled
-/// at run time as one module. hopper.cu is empty except for the sm_90a target (`Target::Cubin90a`).
+/// kernels.cu, decode.cu, prefill.cu, stream.cu, sample.cu, hopper.cu, gemma.cu and moe_twin.cu,
+/// compiled at run time as one module. hopper.cu is empty except for the sm_90a target (`Target::Cubin90a`).
 const KERNELS: &str = concat!(
     include_str!("kernels.cu"),
     include_str!("decode.cu"),
@@ -64,7 +64,8 @@ const KERNELS: &str = concat!(
     include_str!("stream.cu"),
     include_str!("sample.cu"),
     include_str!("hopper.cu"),
-    include_str!("gemma.cu")
+    include_str!("gemma.cu"),
+    include_str!("moe_twin.cu")
 );
 
 /// A CUDA device: its retained primary context and a stream to run on.

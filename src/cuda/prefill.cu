@@ -1542,7 +1542,11 @@ __device__ __forceinline__ u32 g2_ld(const u8* p) { return *(const u32*)p; }
 
 // One stage's products into the chains acc[mi][f][e] (row 32 wr + 16 mi +
 // g + 8 (e >> 1), token 8 NT wc + 8 f + 2t + (e & 1)).
-template <int QT, int NT, int ST>
+// TW: the CPU twin's f32 steps (r8.rs / r8q.rs; Q4_K, Q6_K (and its Q6K8
+// copy), Q5_0 and Q8_0 only): acc = acc + ((d dk) S - (dmin dk) M),
+// acc = acc + (d dk) isum, acc = acc + (dw d0) isum, a multiply then an
+// add, so each output equals the CPU's bit for bit.
+template <int QT, int NT, int ST, bool TW = false>
 __device__ __forceinline__ void g2_compute(const u8* wb, const u8* st, int nblk, int s, int wr,
                                            int wc, float (*acc)[NT][4]) {
 #if __CUDA_ARCH__ >= 800
@@ -1685,9 +1689,16 @@ __device__ __forceinline__ void g2_compute(const u8* wb, const u8* st, int nblk,
 #pragma unroll
                 for (int e = 0; e < 4; e++) {
                     int h = e >> 1;
-                    float v = __fsub_rn(__fmul_rn(d[mi][h], i2f_rn(S[mi][f][e])),
-                                        __fmul_rn(dmin[mi][h], i2f_rn(M[mi][f][e])));
-                    acc[mi][f][e] = __fmaf_rn(dk[f][e & 1], v, acc[mi][f][e]);
+                    if constexpr (TW) {
+                        float k = dk[f][e & 1];
+                        float v = __fsub_rn(__fmul_rn(__fmul_rn(d[mi][h], k), i2f_rn(S[mi][f][e])),
+                                            __fmul_rn(__fmul_rn(dmin[mi][h], k), i2f_rn(M[mi][f][e])));
+                        acc[mi][f][e] = __fadd_rn(acc[mi][f][e], v);
+                    } else {
+                        float v = __fsub_rn(__fmul_rn(d[mi][h], i2f_rn(S[mi][f][e])),
+                                            __fmul_rn(dmin[mi][h], i2f_rn(M[mi][f][e])));
+                        acc[mi][f][e] = __fmaf_rn(dk[f][e & 1], v, acc[mi][f][e]);
+                    }
                 }
     } else if constexpr (L::Q6) {
         const u8* meta = wb + G2_BM * 256;
@@ -1788,6 +1799,10 @@ __device__ __forceinline__ void g2_compute(const u8* wb, const u8* st, int nblk,
                         float v = __fsub_rn(__fmul_rn(dw[mi][e >> 1], i2f_rn(S[mi][f][e])),
                                             __fmul_rn(dmw[mi][e >> 1], i2f_rn(M[mi][f][e])));
                         acc[mi][f][e] = __fmaf_rn(dk[f][e & 1], v, acc[mi][f][e]);
+                    } else if constexpr (TW) {
+                        acc[mi][f][e] = __fadd_rn(
+                            acc[mi][f][e],
+                            __fmul_rn(__fmul_rn(dk[f][e & 1], dw[mi][e >> 1]), i2f_rn(S[mi][f][e])));
                     } else {
                         acc[mi][f][e] = __fmaf_rn(__fmul_rn(dk[f][e & 1], dw[mi][e >> 1]),
                                                   i2f_rn(S[mi][f][e]), acc[mi][f][e]);
@@ -1851,6 +1866,10 @@ __device__ __forceinline__ void g2_compute(const u8* wb, const u8* st, int nblk,
                             float v = __fadd_rn(__fmul_rn(dwr[e >> 1], gm_i2f(dd[e])),
                                                 __fmul_rn(mwr[e >> 1], gm_i2f(bsum[f][e & 1])));
                             acc[mi][f][e] = __fmaf_rn(d0[f][e & 1], v, acc[mi][f][e]);
+                        } else if constexpr (TW) {
+                            acc[mi][f][e] = __fadd_rn(
+                                acc[mi][f][e],
+                                __fmul_rn(__fmul_rn(dwr[e >> 1], d0[f][e & 1]), gm_i2f(dd[e])));
                         } else {
                             acc[mi][f][e] = __fmaf_rn(__fmul_rn(dwr[e >> 1], d0[f][e & 1]),
                                                       gm_i2f(dd[e]), acc[mi][f][e]);
@@ -1864,7 +1883,7 @@ __device__ __forceinline__ void g2_compute(const u8* wb, const u8* st, int nblk,
 #endif
 }
 
-template <int QT, int NT, int ST, int GU = 0>
+template <int QT, int NT, int ST, int GU = 0, bool TW = false>
 __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, const u8* act,
                                         u64 astride, int nb, const float* bias, int mode,
                                         float* out, u64 ostride, const u8* w2 = nullptr) {
@@ -1915,7 +1934,7 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
                 cp_wait<0>();
             }
             __syncthreads();
-            g2_compute<QT, NT, ST>(wsl(s), xsl(s), nblk, s, wr, wc, acc);
+            g2_compute<QT, NT, ST, TW>(wsl(s), xsl(s), nblk, s, wr, wc, acc);
             __syncthreads();
             if constexpr (!L::RAW) {
                 if (s + 1 < nst) {
@@ -1944,7 +1963,7 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
                     if (s + 2 < nst) g2_load_w<QT>(w, rb, rows, r0, nblk, s + 2, reg);
                 }
             }
-            g2_compute<QT, NT, ST>(wsl(s), xsl(s), nblk, s, wr, wc, acc);
+            g2_compute<QT, NT, ST, TW>(wsl(s), xsl(s), nblk, s, wr, wc, acc);
         }
     }
     int lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
@@ -2058,6 +2077,23 @@ extern "C" __global__ void __launch_bounds__(G2_THREADS, 1)
                    u64 ostride) {
     gemm2_t<QT_Q4_K, 2, 3, 1>(wg, rb, rows, n, act, astride, nb, nullptr, 0, out, ostride, wu);
 }
+
+// gemm2s_*_tw: gemm2s in the CPU twin's numerics (g2_compute's TW): each
+// output the r8 / r8q kernels' row sum for its token, bit for bit.
+// Resident MoE experts' prefill products, for every family: Q4_K gate/up
+// with Q5_0/Q8_0 down (deepseek2), Q6_K down (qwen3moe Q4_K_M).
+#define GEMM2TW(NAME, QT)                                                                         \
+    extern "C" __global__ void __launch_bounds__(G2_THREADS, 1) NAME(                             \
+        const u8* __restrict__ w, u64 rb, int rows, int n, const u8* __restrict__ act,           \
+        u64 astride, int nb, const float* __restrict__ bias, int mode, float* __restrict__ out,  \
+        u64 ostride) {                                                                            \
+        gemm2_t<QT, 2, 3, 0, true>(w, rb, rows, n, act, astride, nb, bias, mode, out, ostride);   \
+    }
+GEMM2TW(gemm2s_q4_k_tw, QT_Q4_K)
+GEMM2TW(gemm2s_q5_0_tw, QT_Q5_0)
+GEMM2TW(gemm2s_q8_0_tw, QT_Q8_0)
+GEMM2TW(gemm2s_q6_k_tw, QT_Q6_K)
+GEMM2TW(gemm2s_q6k8_tw, QT_Q6K8)
 
 GEMM2(gemm2_q6k8, QT_Q6K8, 4, 2)
 GEMM2(gemm2s_q6k8, QT_Q6K8, 2, 3)
