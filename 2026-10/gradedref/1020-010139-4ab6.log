@@ -1,0 +1,276 @@
+[axon-run 01:01:39] submitted 1020-010139-4ab6 by /home/haseeb/.cache/axon-gradedref: /home/haseeb/.cache/axon-gradedref/axon-test-97a99af logits_match_cpu continuations_match_cpu cuda_kv_q8_accuracy gemma3_ graded gpu_yarn_matches_reference --nocapture
+[axon-run 01:22:16] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 01:22:16] scope axon-job-1020-010139-4ab6-1792473736.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 15058 MB): an OOM here kills only this job
+[axon-run 01:22:16] job 1020-010139-4ab6 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1020-010139-4ab6-1792473736 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-gradedref/axon-test-97a99af logits_match_cpu continuations_match_cpu cuda_kv_q8_accuracy gemma3_ graded gpu_yarn_matches_reference --nocapture --test-threads 6
+axon-q 01:22:17 start slot 16-23: /home/haseeb/.cache/axon-gradedref/axon-test-97a99af logits_match_cpu continuations_match_cpu cuda_kv_q8_accuracy gemma3_ graded gpu_yarn_matches_reference --nocapture --test-threads 6
+
+running 42 tests
+test cuda::qwen2::tests::cuda_kv_q8_accuracy ... ignored
+test cuda::qwen2::tests::gemma3_cpu_probe ... ignored
+test cuda::qwen2::tests::gemma3_flip_probe ... ignored
+test cuda::qwen2::tests::gemma3_ref_walk_probe ... ignored
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test chat::tests::gemma3_framing_and_replies ... ok
+0.5B cpu rows vs cpu (chat histories): top-1 257/264 (97.3%), KL mean 4.70e-3 max 2.03e-1 (> 0.5: []), max |dlogit| 1.876, flip margins [0.4189396, 0.063420296, 0.07101917, 0.036535263, 0.067754745, 0.2435503, 0.028429985]
+0.5B streamed chat cache vs fresh streamed prefill: top-1 255/264 (96.6%), KL mean 6.36e-3 max 1.83e-1 (> 0.5: []), max |dlogit| 3.031, flip margins [0.0066776276, 0.16132545, 0.28995895, 0.24700165, 0.065966606, 0.1054554, 0.8572407, 0.014377594, 0.022209167]
+test chat::tests::turns_stream_graded_vs_fresh_prefill ... ok
+gemma3 gpu window None graphs true vs reference: max |dlogit| 0.6151
+gemma3 gpu window None graphs false vs reference: max |dlogit| 0.6151
+gemma3 gpu window Some(6) graphs true vs reference: max |dlogit| 0.4717
+gemma3 gpu window Some(6) graphs false vs reference: max |dlogit| 0.4717
+test cuda::qwen2::tests::gpu_gemma3_matches_reference_forward ... ok
+gemma3 1B F16: prefill bit-identical over 7 batchings + 4 prefill_logits of 1200 tokens, 1 attention paths x 2 split counts
+gemma3 1B F16: 48 verify passes == per-token picks (logit bits up to 64)
+gemma3 1B Q4_K_M: with and without the Q6_K prefill copy
+test cuda::qwen2::tests::gpu_continuations_match_cpu_0_5b has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_continuations_match_cpu_1_5b has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_continuations_match_cpu_llama_1b has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_continuations_match_cpu_qwen3_0_6b has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_gemma3_logits_match_cpu has been running for over 60 seconds
+gemma3 1B Q4_K_M: with and without the Q6_K prefill copy
+gemma3 1B Q4_K_M F16: prefill bit-identical over 7 batchings + 4 prefill_logits of 1200 tokens, 1 attention paths x 2 split counts
+gemma3 1B Q4_K_M F16: 48 verify passes == per-token picks (logit bits up to 64)
+test cuda::qwen2::tests::gpu_gemma3_prefill_and_verify_bits has been running for over 60 seconds
+gemma3 4B: with and without the Q6_K prefill copy
+gemma3 4B: with and without the Q6_K prefill copy
+gemma3 4B F16: prefill bit-identical over 7 batchings + 4 prefill_logits of 1200 tokens, 1 attention paths x 2 split counts
+gemma3 4B F16: 48 verify passes == per-token picks (logit bits up to 64)
+test cuda::qwen2::tests::gpu_gemma3_prefill_and_verify_bits ... ok
+0.5B gpu vs cpu: top-1 194/198 (98.0%), KL mean 3.27e-3 max 7.07e-2 (> 0.5: []), max |dlogit| 2.057, flip margins [0.028792381, 0.019294739, 0.036661148, 0.079473495]
+0.5B cpu rows vs cpu: top-1 192/198 (97.0%), KL mean 2.75e-3 max 2.97e-2 (> 0.5: []), max |dlogit| 1.505, flip margins [0.062402725, 0.028792381, 0.036661148, 0.011672974, 0.079473495, 0.01058197]
+test cuda::qwen2::tests::gpu_logits_match_cpu_0_5b ... ok
+1.5B gpu vs cpu: top-1 193/198 (97.5%), KL mean 7.88e-3 max 2.40e-1 (> 0.5: []), max |dlogit| 3.465, flip margins [0.05035782, 0.16342735, 0.31292725, 0.3193283, 0.15048599]
+1.5B cpu rows vs cpu: top-1 192/198 (97.0%), KL mean 7.84e-3 max 3.39e-1 (> 0.5: []), max |dlogit| 3.466, flip margins [0.05035782, 0.36210823, 0.13531494, 0.40297508, 0.3193283, 0.15048599]
+test cuda::qwen2::tests::gpu_logits_match_cpu_1_5b ... ok
+0.5B 2000 gpu vs cpu: top-1 7/7 (100.0%), KL mean 1.74e-5 max 7.93e-5 (> 0.5: []), max |dlogit| 0.690, flip margins []
+0.5B 2000 cpu rows vs cpu: top-1 7/7 (100.0%), KL mean 1.99e-5 max 8.93e-5 (> 0.5: []), max |dlogit| 0.533, flip margins []
+test cuda::qwen2::tests::gpu_logits_match_cpu_2000_tokens ... ok
+llama 1B gpu vs cpu: top-1 196/198 (99.0%), KL mean 2.84e-3 max 7.83e-2 (> 0.5: []), max |dlogit| 1.761, flip margins [0.1310997, 0.07985115]
+llama 1B cpu rows vs cpu: top-1 196/198 (99.0%), KL mean 2.77e-3 max 1.33e-1 (> 0.5: []), max |dlogit| 1.984, flip margins [0.07985115, 0.33208656]
+test cuda::qwen2::tests::gpu_logits_match_cpu_llama_1b ... ok
+llama 1B cpu rows: "fn add(a: i32, b: i32) -> i32 { a + b }\nfn sub(a: i32, b: i32) -> i32 {" diverges at token 9: " println" vs " let", reference margin 0.080
+llama 1B cpu rows: "<|im_start|>user\nWrite a haiku about autumn.<|im_end|>\n<|im_start|>assistant\n" diverges at token 27: "F" vs "<", reference margin 0.332
+llama 1B cpu rows: 4/6 continuations identical, 164/192 tokens before divergence
+llama 1B gpu tc true: "The capital of France is" diverges at token 19: " Japan" vs " Spain", reference margin 0.131
+llama 1B gpu tc true: "fn add(a: i32, b: i32) -> i32 { a + b }\nfn sub(a: i32, b: i32) -> i32 {" diverges at token 9: " println" vs " let", reference margin 0.080
+llama 1B gpu tc true: 4/6 continuations identical, 156/192 tokens before divergence
+llama 1B gpu tc false: "fn add(a: i32, b: i32) -> i32 { a + b }\nfn sub(a: i32, b: i32) -> i32 {" diverges at token 9: " println" vs " let", reference margin 0.080
+llama 1B gpu tc false: "Once upon a time, in a small village by the sea, there lived" diverges at token 7: " Ak" vs " She", reference margin 0.178
+llama 1B gpu tc false: "Q: What is 17 times 23?\nA:" diverges at token 30: "\u{a0}\n\n" vs "…\n\n", reference margin 0.938
+llama 1B gpu tc false: its own margin 0.122
+llama 1B gpu tc false: 3/6 continuations identical, 142/192 tokens before divergence
+test cuda::qwen2::tests::gpu_continuations_match_cpu_llama_1b ... ok
+0.5B long gpu vs cpu: top-1 18/18 (100.0%), KL mean 5.92e-7 max 4.19e-6 (> 0.5: []), max |dlogit| 0.588, flip margins []
+0.5B long cpu rows vs cpu: top-1 18/18 (100.0%), KL mean 3.97e-7 max 1.31e-6 (> 0.5: []), max |dlogit| 0.601, flip margins []
+test cuda::qwen2::tests::gpu_logits_match_cpu_long_context ... ok
+1.5B natural 1100..1600 gpu vs cpu: top-1 473/500 (94.6%), KL mean 7.17e-3 max 3.50e-2 (> 0.5: []), max |dlogit| 1.346, flip margins [0.006631851, 0.005563736, 0.0711689, 0.13281631, 0.4278164, 0.02736473, 0.23805428, 0.12947464, 0.1316185, 0.269207, 0.25823784, 0.08869171, 0.013399124, 0.20972252, 0.047380447, 0.07413864, 0.0305233, 0.027515411, 0.2187252, 0.12650108, 0.30235672, 0.07952309, 0.1591587, 0.025680542, 0.11144638, 0.119148254, 0.38435364]
+1.5B natural 1100..1600 cpu rows vs cpu: top-1 477/500 (95.4%), KL mean 7.22e-3 max 4.06e-2 (> 0.5: []), max |dlogit| 1.340, flip margins [0.1587658, 0.006631851, 0.005563736, 0.0711689, 0.02736473, 0.012792587, 0.12947464, 0.16392136, 0.055532455, 0.28355026, 0.14705658, 0.269207, 0.08869171, 0.0023727417, 0.047380447, 0.22835541, 0.0305233, 0.09058952, 0.53866005, 0.06229019, 0.07952309, 0.0017204285, 0.11144638]
+test cuda::qwen2::tests::gpu_logits_match_cpu_natural_long_1_5b ... ok
+0.5B Q2_K gpu vs cpu: top-1 193/198 (97.5%), KL mean 3.66e-3 max 7.39e-2 (> 0.5: []), max |dlogit| 2.019, flip margins [0.2833748, 0.15686703, 0.021661758, 0.9495239, 0.24882317]
+0.5B Q2_K cpu rows vs cpu: top-1 195/198 (98.5%), KL mean 2.23e-3 max 2.60e-2 (> 0.5: []), max |dlogit| 2.287, flip margins [0.021661758, 0.061868668, 0.015987396]
+0.5B Q3_K_M gpu vs cpu: top-1 194/198 (98.0%), KL mean 6.11e-3 max 2.72e-1 (> 0.5: []), max |dlogit| 3.935, flip margins [0.08554077, 0.060339928, 0.037000656, 0.12403679]
+0.5B Q3_K_M cpu rows vs cpu: top-1 191/198 (96.5%), KL mean 4.57e-3 max 1.57e-1 (> 0.5: []), max |dlogit| 3.482, flip margins [0.08554077, 0.10867119, 0.037000656, 0.06449795, 0.43099117, 0.13405418, 0.12403679]
+test cuda::qwen2::tests::gpu_logits_match_cpu_natural_long_0_5b has been running for over 60 seconds
+1.5B Q3_K_M gpu vs cpu: top-1 188/198 (94.9%), KL mean 1.13e-2 max 2.07e-1 (> 0.5: []), max |dlogit| 3.437, flip margins [0.19286537, 0.5529995, 0.06832504, 0.8126869, 0.118824005, 0.25213623, 0.09726524, 0.24823952, 0.7821293, 0.35865784]
+1.5B Q3_K_M cpu rows vs cpu: top-1 187/198 (94.4%), KL mean 1.23e-2 max 1.76e-1 (> 0.5: []), max |dlogit| 3.944, flip margins [0.20005608, 0.019111633, 0.305418, 0.19286537, 0.118824005, 0.4173107, 0.34746552, 0.25213623, 0.09726524, 0.09907913, 0.35865784]
+llama 1B Q3_K_L gpu vs cpu: top-1 198/198 (100.0%), KL mean 2.15e-3 max 3.49e-2 (> 0.5: []), max |dlogit| 1.147, flip margins []
+llama 1B Q3_K_L cpu rows vs cpu: top-1 198/198 (100.0%), KL mean 2.91e-13 max 3.73e-12 (> 0.5: []), max |dlogit| 0.000, flip margins []
+test cuda::qwen2::tests::gpu_logits_match_cpu_q2k_q3k has been running for over 60 seconds
+7B Q2_K gpu vs cpu: top-1 193/198 (97.5%), KL mean 4.92e-3 max 8.85e-2 (> 0.5: []), max |dlogit| 3.348, flip margins [0.22616005, 0.20786476, 0.15608788, 0.37729645, 0.11973572]
+7B Q2_K cpu rows vs cpu: top-1 195/198 (98.5%), KL mean 5.27e-3 max 7.33e-2 (> 0.5: []), max |dlogit| 2.413, flip margins [0.46006966, 0.37729645, 0.11973572]
+test cuda::qwen2::tests::gpu_logits_match_cpu_q2k_q3k ... ok
+qwen3 0.6B cpu rows: "The capital of France is" diverges at token 1: "," vs ".", reference margin 0.004
+qwen3 0.6B cpu rows: "Once upon a time, in a small village by the sea, there lived" diverges at token 6: " He" vs " Tom", reference margin 0.098
+qwen3 0.6B cpu rows: "The three laws of thermodynamics are" diverges at token 1: " principles" vs " to", reference margin 0.059
+qwen3 0.6B cpu rows: 3/6 continuations identical, 104/192 tokens before divergence
+qwen3 0.6B gpu tc true: "The capital of France is" diverges at token 1: "," vs ".", reference margin 0.004
+qwen3 0.6B gpu tc true: "Once upon a time, in a small village by the sea, there lived" diverges at token 6: " He" vs " Tom", reference margin 0.098
+qwen3 0.6B gpu tc true: 4/6 continuations identical, 135/192 tokens before divergence
+qwen3 0.6B gpu tc false: "The capital of France is" diverges at token 1: "," vs ".", reference margin 0.004
+qwen3 0.6B gpu tc false: "Once upon a time, in a small village by the sea, there lived" diverges at token 27: " bring" vs " help", reference margin 0.010
+qwen3 0.6B gpu tc false: "The three laws of thermodynamics are" diverges at token 1: " principles" vs " to", reference margin 0.059
+qwen3 0.6B gpu tc false: 3/6 continuations identical, 125/192 tokens before divergence
+test cuda::qwen2::tests::gpu_continuations_match_cpu_qwen3_0_6b ... ok
+qwen3 0.6B gpu vs cpu: top-1 195/198 (98.5%), KL mean 1.12e-3 max 1.71e-2 (> 0.5: []), max |dlogit| 1.327, flip margins [0.0036525726, 0.09848404, 0.010463715]
+qwen3 0.6B cpu rows vs cpu: top-1 193/198 (97.5%), KL mean 1.04e-3 max 1.31e-2 (> 0.5: []), max |dlogit| 1.177, flip margins [0.0036525726, 0.0056381226, 0.09848404, 0.010463715, 0.059230804]
+test cuda::qwen2::tests::gpu_logits_match_cpu_qwen3_0_6b ... ok
+gpu yarn test: plain reference vs yarn's: 6.158
+gpu yarn test: no mscale reference vs yarn's: 2.572
+gpu yarn F16 graphs true vs reference: max |dlogit| 0.2331
+gpu yarn F16 graphs false vs reference: max |dlogit| 0.2331
+gpu yarn Q8 { group: 0 } graphs true vs reference: max |dlogit| 0.3517
+gpu yarn Q8 { group: 0 } graphs false vs reference: max |dlogit| 0.3517
+qwen2.5 0.5B yarn: with and without the Q6_K prefill copy
+qwen2.5 0.5B yarn: with and without the Q6_K prefill copy
+qwen2.5 0.5B yarn: with and without the Q6_K prefill copy
+qwen2.5 0.5B yarn: with and without the Q6_K prefill copy
+qwen2.5 0.5B yarn F16: prefill bit-identical over 7 batchings + 4 prefill_logits of 1200 tokens, 2 attention paths x 2 split counts
+qwen2.5 0.5B yarn: with and without the Q6_K prefill copy
+qwen2.5 0.5B yarn: with and without the Q6_K prefill copy
+qwen2.5 0.5B yarn: with and without the Q6_K prefill copy
+qwen2.5 0.5B yarn: with and without the Q6_K prefill copy
+qwen2.5 0.5B yarn Q8 { group: 0 }: prefill bit-identical over 7 batchings + 4 prefill_logits of 1200 tokens, 2 attention paths x 2 split counts
+qwen2.5 0.5B yarn F16: 48 verify passes == per-token picks (logit bits up to 64)
+test cuda::qwen2::tests::gpu_logits_match_cpu_q5_k_m_q4_0 has been running for over 60 seconds
+qwen2.5 0.5B yarn gpu vs cpu: top-1 194/198 (98.0%), KL mean 3.67e-3 max 6.45e-2 (> 0.5: []), max |dlogit| 1.937, flip margins [0.031801224, 0.055030823, 0.005519867, 0.19741058]
+qwen2.5 0.5B yarn cpu rows vs cpu: top-1 195/198 (98.5%), KL mean 2.79e-3 max 2.32e-2 (> 0.5: []), max |dlogit| 2.183, flip margins [0.031801224, 0.005519867, 0.19741058]
+test cuda::qwen2::tests::gpu_yarn_matches_reference_and_keeps_bits ... ok
+0.5B cpu rows vs cpu: top-1 192/198 (97.0%), KL mean 2.75e-3 max 2.97e-2 (> 0.5: []), max |dlogit| 1.505, flip margins [0.062402725, 0.028792381, 0.036661148, 0.011672974, 0.079473495, 0.01058197]
+0.5B hybrid k=1 vs cpu: top-1 189/198 (95.5%), KL mean 2.45e-3 max 3.78e-2 (> 0.5: []), max |dlogit| 1.463, flip margins [0.07403946, 0.017389297, 0.1665678, 0.028792381, 0.019294739, 0.016563416, 0.011672974, 0.079473495, 0.01058197]
+0.5B hybrid k=12 vs cpu: top-1 191/198 (96.5%), KL mean 2.77e-3 max 4.99e-2 (> 0.5: []), max |dlogit| 1.652, flip margins [0.062402725, 0.07403946, 0.017389297, 0.028792381, 0.036661148, 0.011672974, 0.01058197]
+0.5B hybrid k=23 vs cpu: top-1 192/198 (97.0%), KL mean 2.69e-3 max 2.65e-2 (> 0.5: []), max |dlogit| 1.515, flip margins [0.062402725, 0.028792381, 0.036661148, 0.011672974, 0.079473495, 0.01058197]
+test hybrid::tests::hybrid_logits_match_cpu_0_5b ... ok
+gemma3 1B Q8_0 gpu vs cpu: top-1 195/198 (98.5%), KL mean 1.44e-2 max 6.57e-1 (> 0.5: [(118, 0.6565402569536266, 0.53206253, 0.03432622090854642), (119, 0.5446406097129608, 0.9006405, 0.6565402569536266)]), max |dlogit| 3.886, flip margins [0.22239208, 0.53206253, 0.014857292]
+gemma3 1B Q8_0 cpu rows vs cpu: top-1 196/198 (99.0%), KL mean 1.06e-2 max 4.71e-1 (> 0.5: []), max |dlogit| 7.317, flip margins [1.6057701, 0.53206253]
+gemma3 1B Q8_0 continuations: gpu 3/6 identical, 119 tokens, margins [0.22239208, 0.53206253, 0.014857292]; cpu rows 5, 160, margins [1.6057701] (tie 1.6057701)
+test hybrid::tests::hybrid_logits_match_cpu_1_5b has been running for over 60 seconds
+gemma3 1B Q4_K_M vs f64 ref: gpu mean KL 0.0115 max 0.2184 top-1 196/198; cpu 0.0074 0.0905 196; cpu rows 0.0074 0.0905 196
+gemma3 1B long gpu vs cpu: top-1 18/18 (100.0%), KL mean 5.19e-6 max 2.71e-5 (> 0.5: []), max |dlogit| 0.879, flip margins []
+gemma3 1B long cpu rows vs cpu: top-1 18/18 (100.0%), KL mean 0.00e0 max 0.00e0 (> 0.5: []), max |dlogit| 0.000, flip margins []
+
+thread 'cuda::qwen2::tests::gpu_gemma3_logits_match_cpu' (1707453) panicked at src/cuda/qwen2/tests.rs:264:5:
+reference spread is 0: cpu and rows are the same model (AXON_REPACK=0? build the reference with Qwen2::new_with(m, true))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test cuda::qwen2::tests::gpu_gemma3_logits_match_cpu ... FAILED
+llama 1B cpu rows vs cpu: top-1 196/198 (99.0%), KL mean 2.77e-3 max 1.33e-1 (> 0.5: []), max |dlogit| 1.984, flip margins [0.07985115, 0.33208656]
+llama 1B hybrid k=1 vs cpu: top-1 196/198 (99.0%), KL mean 2.39e-3 max 3.95e-2 (> 0.5: []), max |dlogit| 1.491, flip margins [0.07985115, 0.23312569]
+llama 1B hybrid k=8 vs cpu: top-1 197/198 (99.5%), KL mean 2.58e-3 max 1.16e-1 (> 0.5: []), max |dlogit| 1.254, flip margins [0.07985115]
+llama 1B hybrid k=15 vs cpu: top-1 197/198 (99.5%), KL mean 2.69e-3 max 1.27e-1 (> 0.5: []), max |dlogit| 2.058, flip margins [0.07985115]
+test hybrid::tests::hybrid_logits_match_cpu_llama ... ok
+qwen3 0.6B cpu rows vs cpu: top-1 193/198 (97.5%), KL mean 1.04e-3 max 1.31e-2 (> 0.5: []), max |dlogit| 1.177, flip margins [0.0036525726, 0.0056381226, 0.09848404, 0.010463715, 0.059230804]
+qwen3 0.6B hybrid k=1 vs cpu: top-1 194/198 (98.0%), KL mean 9.61e-4 max 2.67e-2 (> 0.5: []), max |dlogit| 1.146, flip margins [0.0036525726, 0.0056381226, 0.010463715, 0.059230804]
+qwen3 0.6B hybrid k=14 vs cpu: top-1 194/198 (98.0%), KL mean 1.05e-3 max 2.56e-2 (> 0.5: []), max |dlogit| 1.299, flip margins [0.0036525726, 0.0056381226, 0.010463715, 0.059230804]
+qwen3 0.6B hybrid k=27 vs cpu: top-1 193/198 (97.5%), KL mean 1.03e-3 max 1.32e-2 (> 0.5: []), max |dlogit| 1.157, flip margins [0.0036525726, 0.0056381226, 0.09848404, 0.010463715, 0.059230804]
+test hybrid::tests::hybrid_logits_match_cpu_qwen3 ... ok
+0.5B cpu rows vs cpu: top-1 192/198 (97.0%), KL mean 2.75e-3 max 2.97e-2 (> 0.5: []), max |dlogit| 1.505, flip margins [0.062402725, 0.028792381, 0.036661148, 0.011672974, 0.079473495, 0.01058197]
+0.5B streamed k=1 vs cpu: top-1 190/198 (96.0%), KL mean 3.31e-3 max 6.26e-2 (> 0.5: []), max |dlogit| 1.918, flip margins [0.12930107, 0.028792381, 0.019294739, 0.036661148, 0.016563416, 0.011672974, 0.079473495, 0.01058197]
+0.5B streamed k=12 vs cpu: top-1 192/198 (97.0%), KL mean 2.97e-3 max 6.08e-2 (> 0.5: []), max |dlogit| 2.268, flip margins [0.062402725, 0.017389297, 0.12930107, 0.028792381, 0.019294739, 0.01058197]
+0.5B streamed k=23 vs cpu: top-1 193/198 (97.5%), KL mean 3.13e-3 max 6.89e-2 (> 0.5: []), max |dlogit| 1.957, flip margins [0.017389297, 0.12930107, 0.028792381, 0.036661148, 0.01058197]
+test hybrid::tests::stream_logits_match_cpu_0_5b ... ok
+1.5B cpu rows vs cpu: top-1 192/198 (97.0%), KL mean 7.84e-3 max 3.39e-1 (> 0.5: []), max |dlogit| 3.466, flip margins [0.05035782, 0.36210823, 0.13531494, 0.40297508, 0.3193283, 0.15048599]
+1.5B streamed k=1 vs cpu: top-1 191/198 (96.5%), KL mean 8.17e-3 max 3.50e-1 (> 0.5: []), max |dlogit| 4.362, flip margins [0.16342735, 0.024425507, 0.0812912, 0.13531494, 0.40297508, 0.3193283, 0.15048599]
+1.5B streamed k=14 vs cpu: top-1 189/198 (95.5%), KL mean 8.06e-3 max 3.49e-1 (> 0.5: []), max |dlogit| 4.615, flip margins [0.05035782, 0.16342735, 0.2919464, 0.19369507, 0.024425507, 0.11466408, 0.40297508, 0.3193283, 0.15048599]
+1.5B streamed k=27 vs cpu: top-1 190/198 (96.0%), KL mean 8.88e-3 max 3.70e-1 (> 0.5: []), max |dlogit| 4.041, flip margins [0.05035782, 0.16342735, 0.19369507, 0.024425507, 0.11466408, 0.40297508, 0.3193283, 0.15048599]
+test hybrid::tests::stream_logits_match_cpu_1_5b ... ok
+llama 1B cpu rows vs cpu: top-1 196/198 (99.0%), KL mean 2.77e-3 max 1.33e-1 (> 0.5: []), max |dlogit| 1.984, flip margins [0.07985115, 0.33208656]
+llama 1B streamed k=1 vs cpu: top-1 196/198 (99.0%), KL mean 4.04e-3 max 1.91e-1 (> 0.5: []), max |dlogit| 1.468, flip margins [1.2273178, 0.23312569]
+llama 1B streamed k=8 vs cpu: top-1 197/198 (99.5%), KL mean 4.16e-3 max 2.86e-1 (> 0.5: []), max |dlogit| 1.897, flip margins [1.2273178]
+llama 1B streamed k=15 vs cpu: top-1 195/198 (98.5%), KL mean 4.74e-3 max 3.26e-1 (> 0.5: []), max |dlogit| 1.974, flip margins [0.9375973, 1.2273178, 0.23312569]
+test hybrid::tests::stream_logits_match_cpu_llama ... ok
+qwen3 0.6B cpu rows vs cpu: top-1 193/198 (97.5%), KL mean 1.04e-3 max 1.31e-2 (> 0.5: []), max |dlogit| 1.177, flip margins [0.0036525726, 0.0056381226, 0.09848404, 0.010463715, 0.059230804]
+qwen3 0.6B streamed k=1 vs cpu: top-1 194/198 (98.0%), KL mean 1.22e-3 max 2.62e-2 (> 0.5: []), max |dlogit| 1.679, flip margins [0.0036525726, 0.0056381226, 0.059230804, 0.18560791]
+qwen3 0.6B streamed k=14 vs cpu: top-1 195/198 (98.5%), KL mean 1.11e-3 max 2.10e-2 (> 0.5: []), max |dlogit| 1.359, flip margins [0.0036525726, 0.0056381226, 0.010463715]
+qwen3 0.6B streamed k=27 vs cpu: top-1 194/198 (98.0%), KL mean 1.14e-3 max 2.66e-2 (> 0.5: []), max |dlogit| 1.238, flip margins [0.0036525726, 0.09848404, 0.010463715, 0.18560791]
+test hybrid::tests::stream_logits_match_cpu_qwen3 ... ok
+window None: max |dlogit| 0.5127, top 506 vs 506
+window None: max |dlogit| 0.6324, top 9405 vs 9405
+window Some(6): max |dlogit| 0.5127, top 506 vs 506
+window Some(6): max |dlogit| 0.8846, top 506 vs 7001
+
+thread 'model::gemma3_tests::gemma3_matches_reference_forward' (2225971) panicked at src/model/gemma3_tests.rs:308:13:
+assertion `left == right` failed: window Some(6): top token
+  left: 506
+ right: 7001
+test model::gemma3_tests::gemma3_matches_reference_forward ... FAILED
+test model::gemma3_tests::gemma3_ref_probe ... ignored
+Opt { q_lora: false, yarn: false } RopeWrongPart: top-1 5 (cpu 54), mean |dlogit| 0.7633 = 16.2x cpu's 0.0471, max 4.364
+Opt { q_lora: false, yarn: false } ScaleOfKeyRow: top-1 27 (cpu 54), mean |dlogit| 0.3627 = 7.7x cpu's 0.0471, max 3.378
+Opt { q_lora: false, yarn: false } BiasInWeights: top-1 44 (cpu 54), mean |dlogit| 0.1354 = 2.9x cpu's 0.0471, max 1.666
+Opt { q_lora: false, yarn: false } ScaleBeforeRenorm: top-1 25 (cpu 54), mean |dlogit| 0.3904 = 8.3x cpu's 0.0471, max 2.116
+Opt { q_lora: false, yarn: false } NormOverRow: top-1 43 (cpu 54), mean |dlogit| 0.2095 = 4.5x cpu's 0.0471, max 2.272
+Opt { q_lora: true, yarn: false } RopeWrongPart: top-1 10 (cpu 50), mean |dlogit| 0.8761 = 12.1x cpu's 0.0721, max 5.285
+Opt { q_lora: true, yarn: false } ScaleOfKeyRow: top-1 41 (cpu 50), mean |dlogit| 0.2900 = 4.0x cpu's 0.0721, max 2.610
+Opt { q_lora: true, yarn: false } BiasInWeights: top-1 47 (cpu 50), mean |dlogit| 0.1555 = 2.2x cpu's 0.0721, max 1.671
+Opt { q_lora: true, yarn: false } ScaleBeforeRenorm: top-1 31 (cpu 50), mean |dlogit| 0.3619 = 5.0x cpu's 0.0721, max 2.789
+Opt { q_lora: true, yarn: false } NormOverRow: top-1 48 (cpu 50), mean |dlogit| 0.2267 = 3.1x cpu's 0.0721, max 2.206
+Opt { q_lora: false, yarn: true } RopeWrongPart: top-1 20 (cpu 139), mean |dlogit| 0.8859 = 9.3x cpu's 0.0950, max 5.337
+Opt { q_lora: false, yarn: true } ScaleOfKeyRow: top-1 51 (cpu 139), mean |dlogit| 0.6034 = 6.4x cpu's 0.0950, max 3.797
+Opt { q_lora: false, yarn: true } BiasInWeights: top-1 124 (cpu 139), mean |dlogit| 0.1488 = 1.6x cpu's 0.0950, max 1.698
+Opt { q_lora: false, yarn: true } ScaleBeforeRenorm: top-1 72 (cpu 139), mean |dlogit| 0.4146 = 4.4x cpu's 0.0950, max 2.475
+Opt { q_lora: false, yarn: true } NormOverRow: top-1 84 (cpu 139), mean |dlogit| 0.3546 = 3.7x cpu's 0.0950, max 3.179
+Opt { q_lora: false, yarn: true } NoYarn: top-1 39 (cpu 139), mean |dlogit| 0.6869 = 7.2x cpu's 0.0950, max 4.965
+Opt { q_lora: false, yarn: true } MscaleOnTable: top-1 57 (cpu 139), mean |dlogit| 0.4945 = 5.2x cpu's 0.0950, max 3.519
+Opt { q_lora: false, yarn: true } NoMscale: top-1 72 (cpu 139), mean |dlogit| 0.4046 = 4.3x cpu's 0.0950, max 3.150
+Opt { q_lora: true, yarn: true } RopeWrongPart: top-1 13 (cpu 133), mean |dlogit| 0.9153 = 8.4x cpu's 0.1096, max 5.402
+Opt { q_lora: true, yarn: true } ScaleOfKeyRow: top-1 57 (cpu 133), mean |dlogit| 0.5413 = 4.9x cpu's 0.1096, max 4.980
+Opt { q_lora: true, yarn: true } BiasInWeights: top-1 118 (cpu 133), mean |dlogit| 0.1866 = 1.7x cpu's 0.1096, max 2.406
+Opt { q_lora: true, yarn: true } ScaleBeforeRenorm: top-1 66 (cpu 133), mean |dlogit| 0.3919 = 3.6x cpu's 0.1096, max 2.878
+Opt { q_lora: true, yarn: true } NormOverRow: top-1 76 (cpu 133), mean |dlogit| 0.3676 = 3.4x cpu's 0.1096, max 3.168
+Opt { q_lora: true, yarn: true } NoYarn: top-1 40 (cpu 133), mean |dlogit| 0.7210 = 6.6x cpu's 0.1096, max 4.823
+Opt { q_lora: true, yarn: true } MscaleOnTable: top-1 64 (cpu 133), mean |dlogit| 0.5549 = 5.1x cpu's 0.1096, max 4.237
+Opt { q_lora: true, yarn: true } NoMscale: top-1 97 (cpu 133), mean |dlogit| 0.3288 = 3.0x cpu's 0.1096, max 2.730
+test moe::ds2_tests::ds2_fixture_graded_criterion_catches_bugs ... ok
+0.5B Q5_K_M gpu vs cpu: top-1 196/198 (99.0%), KL mean 3.47e-3 max 4.44e-2 (> 0.5: []), max |dlogit| 2.225, flip margins [0.056455612, 0.17354965]
+0.5B Q5_K_M cpu rows vs cpu: top-1 193/198 (97.5%), KL mean 3.92e-3 max 5.46e-2 (> 0.5: []), max |dlogit| 2.264, flip margins [0.056455612, 0.13080788, 0.16703606, 0.041007996, 0.08881569]
+0.5B Q4_0 gpu vs cpu: top-1 195/198 (98.5%), KL mean 1.52e-3 max 1.66e-2 (> 0.5: []), max |dlogit| 1.173, flip margins [0.10505295, 0.046159744, 0.054624557]
+0.5B Q4_0 cpu rows vs cpu: top-1 198/198 (100.0%), KL mean 5.50e-13 max 3.79e-12 (> 0.5: []), max |dlogit| 0.000, flip margins []
+1.5B Q5_K_M gpu vs cpu: top-1 191/198 (96.5%), KL mean 1.23e-2 max 2.15e-1 (> 0.5: []), max |dlogit| 4.694, flip margins [0.11517525, 0.22121811, 0.46307182, 0.029237747, 0.19322586, 0.41086197, 0.12534714]
+1.5B Q5_K_M cpu rows vs cpu: top-1 194/198 (98.0%), KL mean 7.11e-3 max 6.39e-2 (> 0.5: []), max |dlogit| 4.762, flip margins [0.22121811, 0.29906273, 0.2502842, 0.35879517]
+1.5B Q4_0 gpu vs cpu: top-1 193/198 (97.5%), KL mean 2.96e-3 max 3.96e-2 (> 0.5: []), max |dlogit| 1.729, flip margins [0.08947945, 0.07514763, 0.08529091, 0.2351017, 0.002981186]
+1.5B Q4_0 cpu rows vs cpu: top-1 198/198 (100.0%), KL mean 4.10e-13 max 3.27e-12 (> 0.5: []), max |dlogit| 0.000, flip margins []
+test cuda::qwen2::tests::gpu_logits_match_cpu_q5_k_m_q4_0 ... ok
+test moe::ds2_tests::ds2_gpu_fixture_graded has been running for over 60 seconds
+test moe::oss_tests::oss_gpu_logits_graded_model has been running for over 60 seconds
+gpt-oss-20b moe gpu vs cpu: top-1 195/198 (98.5%), KL mean 2.63e-3 max 1.36e-1 (> 0.5: []), max |dlogit| 2.928, flip margins [0.04689598, 0.004049301, 0.059295654]
+gpt-oss-20b cpu rows vs cpu: top-1 195/198 (98.5%), KL mean 2.43e-3 max 1.27e-1 (> 0.5: []), max |dlogit| 3.144, flip margins [0.04689598, 0.021641731, 0.059295654]
+test moe::oss_tests::oss_gpu_logits_graded_model ... ok
+Pruned-2B moe gpu vs cpu: top-1 567/582 (97.4%), KL mean 4.86e-3 max 1.70e-1 (> 0.5: []), max |dlogit| 2.291, flip margins [0.014263153, 0.10183239, 0.6135521, 0.312253, 0.010695457, 0.018129349, 0.07176685, 0.07987976, 0.10944462, 0.89009, 0.1764059, 0.1314764, 0.0059394836, 0.3570404, 0.12123203]
+Pruned-2B cpu rows vs cpu: top-1 568/582 (97.6%), KL mean 2.94e-3 max 1.08e-1 (> 0.5: []), max |dlogit| 2.063, flip margins [0.014263153, 0.1687622, 0.037220955, 0.17546654, 0.018129349, 0.16754627, 0.07176685, 0.11526394, 0.002152443, 0.0059394836, 0.059340477, 0.3570404, 0.0011882782, 0.026418686]
+test moe::tests::moe_gpu_logits_graded_pruned ... ok
+4x0.6B moe gpu vs cpu: top-1 565/582 (97.1%), KL mean 6.82e-3 max 9.01e-2 (> 0.5: []), max |dlogit| 3.558, flip margins [0.29473305, 0.41578293, 0.039684296, 0.22459412, 0.18231201, 0.019577026, 0.1811409, 0.1767044, 0.0033092499, 0.057079315, 0.013799667, 0.049612045, 0.050798416, 0.10025787, 0.07730484, 0.24366379, 0.24480629]
+4x0.6B cpu rows vs cpu: top-1 566/582 (97.3%), KL mean 6.56e-3 max 1.29e-1 (> 0.5: []), max |dlogit| 3.846, flip margins [0.29473305, 0.20351028, 0.49144173, 0.03759575, 0.34555435, 0.19452286, 0.019577026, 0.12591743, 0.11870384, 0.0033092499, 0.057079315, 0.21339226, 0.050798416, 0.10025787, 0.129076, 0.61514664]
+test moe::tests::moe_gpu_logits_graded_small ... ok
+test serve::tests::gemma3_template_matches_llama_cpp ... ok
+1.5B cpu rows: "The capital of France is" diverges at token 1: "," vs ".", reference margin 0.050
+1.5B cpu rows: "Q: What is 17 times 23?\nA:" diverges at token 12: ".\n" vs ".", reference margin 0.362
+1.5B cpu rows: "<|im_start|>user\nWrite a haiku about autumn.<|im_end|>\n<|im_start|>assistant\n" diverges at token 10: " golden" vs " warm", reference margin 0.135
+1.5B cpu rows: 3/6 continuations identical, 119/192 tokens before divergence
+1.5B gpu tc true: "The capital of France is" diverges at token 1: "," vs ".", reference margin 0.050
+1.5B gpu tc true: "fn add(a: i32, b: i32) -> i32 { a + b }\nfn sub(a: i32, b: i32) -> i32 {" diverges at token 5: " mul" vs " multiply", reference margin 0.313
+1.5B gpu tc true: "<|im_start|>user\nWrite a haiku about autumn.<|im_end|>\n<|im_start|>assistant\n" diverges at token 23: ">" vs "<|endoftext|>", reference margin 0.319
+1.5B gpu tc true: 3/6 continuations identical, 125/192 tokens before divergence
+1.5B gpu tc false: "The capital of France is" diverges at token 6: " France" vs " Italy", reference margin 0.163
+1.5B gpu tc false: "Q: What is 17 times 23?\nA:" diverges at token 15: " a" vs " an", reference margin 0.024
+1.5B gpu tc false: "The three laws of thermodynamics are" diverges at token 14: " Which" vs " They", reference margin 0.053
+1.5B gpu tc false: "<|im_start|>user\nWrite a haiku about autumn.<|im_end|>\n<|im_start|>assistant\n" diverges at token 10: " golden" vs " warm", reference margin 0.135
+1.5B gpu tc false: 2/6 continuations identical, 109/192 tokens before divergence
+test cuda::qwen2::tests::gpu_continuations_match_cpu_1_5b ... ok
+test serve::tests::serve_cpu_gemma3_matches_gen ... ok
+1.5B cpu rows vs cpu: top-1 192/198 (97.0%), KL mean 7.84e-3 max 3.39e-1 (> 0.5: []), max |dlogit| 3.466, flip margins [0.05035782, 0.36210823, 0.13531494, 0.40297508, 0.3193283, 0.15048599]
+1.5B hybrid k=1 vs cpu: top-1 190/198 (96.0%), KL mean 7.82e-3 max 1.72e-1 (> 0.5: []), max |dlogit| 4.121, flip margins [0.05035782, 0.16342735, 0.024425507, 0.11466408, 0.45232582, 0.40297508, 0.7102566, 0.15048599]
+1.5B hybrid k=14 vs cpu: top-1 192/198 (97.0%), KL mean 6.67e-3 max 1.72e-1 (> 0.5: []), max |dlogit| 4.165, flip margins [0.05035782, 0.31292725, 0.36210823, 0.0812912, 0.40297508, 0.15048599]
+1.5B hybrid k=27 vs cpu: top-1 191/198 (96.5%), KL mean 7.88e-3 max 3.29e-1 (> 0.5: []), max |dlogit| 3.562, flip margins [0.05035782, 0.16342735, 0.2695408, 0.36210823, 0.40297508, 0.3193283, 0.15048599]
+test hybrid::tests::hybrid_logits_match_cpu_1_5b ... ok
+0.5B cpu rows: "The capital of France is" diverges at token 19: " located" vs " also", reference margin 0.062
+0.5B cpu rows: "Once upon a time, in a small village by the sea, there lived" diverges at token 9: " kind" vs " good", reference margin 0.029
+0.5B cpu rows: "The three laws of thermodynamics are" diverges at token 0: " the" vs ":", reference margin 0.037
+0.5B cpu rows: "<|im_start|>user\nWrite a haiku about autumn.<|im_end|>\n<|im_start|>assistant\n" diverges at token 8: ",\n" vs " on", reference margin 0.012
+0.5B cpu rows: 2/6 continuations identical, 100/192 tokens before divergence
+0.5B gpu tc true: "Once upon a time, in a small village by the sea, there lived" diverges at token 9: " kind" vs " good", reference margin 0.029
+0.5B gpu tc true: "The three laws of thermodynamics are" diverges at token 0: " the" vs ":", reference margin 0.037
+0.5B gpu tc true: "<|im_start|>user\nWrite a haiku about autumn.<|im_end|>\n<|im_start|>assistant\n" diverges at token 17: " What" vs " Can", reference margin 0.079
+0.5B gpu tc true: 3/6 continuations identical, 122/192 tokens before divergence
+0.5B gpu tc false: "Once upon a time, in a small village by the sea, there lived" diverges at token 9: " kind" vs " good", reference margin 0.029
+0.5B gpu tc false: "The three laws of thermodynamics are" diverges at token 0: " the" vs ":", reference margin 0.037
+0.5B gpu tc false: "<|im_start|>user\nWrite a haiku about autumn.<|im_end|>\n<|im_start|>assistant\n" diverges at token 8: ",\n" vs " on", reference margin 0.012
+0.5B gpu tc false: 3/6 continuations identical, 113/192 tokens before divergence
+test cuda::qwen2::tests::gpu_continuations_match_cpu_0_5b ... ok
+ds2 fixture Opt { q_lora: false, yarn: false } vs the f64 reference (60 positions): gpu top-1 56, mean |dlogit| 0.0292, max 0.205; cpu top-1 54, mean 0.0471, max 1.066
+ds2 fixture Opt { q_lora: true, yarn: false } vs the f64 reference (60 positions): gpu top-1 56, mean |dlogit| 0.0524, max 1.244; cpu top-1 50, mean 0.0721, max 1.397
+ds2 fixture Opt { q_lora: false, yarn: true } vs the f64 reference (160 positions): gpu top-1 140, mean |dlogit| 0.0707, max 1.890; cpu top-1 139, mean 0.0950, max 3.246
+ds2 fixture Opt { q_lora: true, yarn: true } vs the f64 reference (160 positions): gpu top-1 136, mean |dlogit| 0.0877, max 2.277; cpu top-1 133, mean 0.1096, max 2.549
+test moe::ds2_tests::ds2_gpu_fixture_graded ... ok
+test serve::tests::serve_cuda_gemma3_matches_gen ... ok
+0.5B natural 1100..1600 gpu vs cpu: top-1 471/500 (94.2%), KL mean 2.58e-3 max 2.06e-2 (> 0.5: []), max |dlogit| 0.929, flip margins [0.0007247925, 0.037425995, 0.0889349, 0.13504028, 0.027235031, 0.0073928833, 0.008647919, 0.020573616, 0.09317112, 0.030237198, 0.05942726, 0.058324814, 0.06804657, 0.018057823, 0.046344757, 0.17598343, 0.41600037, 0.09494209, 0.017332077, 0.016619682, 0.04255867, 0.02980423, 0.012331009, 0.012918472, 0.346776, 0.053813934, 0.20529938, 0.16978073, 0.0826416]
+0.5B natural 1100..1600 cpu rows vs cpu: top-1 466/500 (93.2%), KL mean 2.43e-3 max 9.90e-3 (> 0.5: []), max |dlogit| 1.182, flip margins [0.0007247925, 0.037797928, 0.0889349, 0.04441738, 0.047475815, 0.13504028, 0.030658722, 0.032209396, 0.027235031, 0.0073928833, 0.008647919, 0.020573616, 0.07534313, 0.09317112, 0.030237198, 0.05942726, 0.079071045, 0.06804657, 0.022541046, 0.026088715, 0.035390854, 0.09494209, 0.017332077, 0.12524223, 0.016619682, 0.1288538, 0.032097816, 0.04255867, 0.02980423, 0.012331009, 0.012918472, 0.053813934, 0.037142754, 0.21156502]
+test cuda::qwen2::tests::gpu_logits_match_cpu_natural_long_0_5b ... ok
+
+failures:
+
+failures:
+    cuda::qwen2::tests::gpu_gemma3_logits_match_cpu
+    model::gemma3_tests::gemma3_matches_reference_forward
+
+test result: FAILED. 35 passed; 2 failed; 5 ignored; 0 measured; 635 filtered out; finished in 894.03s
+
+[axon-run 01:37:11] exit 101 after 894.4s (host bella)
