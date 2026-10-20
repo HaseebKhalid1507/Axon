@@ -1,0 +1,90 @@
+[axon-run 13:00:46] submitted 1020-130046-ecfa by /home/haseeb/.cache/axon-wt-sched: /home/haseeb/.cache/axon-sched/bin/axon-test-step0b cuda::qwen2::slots::tests::pool_hybrid_cost --exact --ignored --nocapture --test-threads 1
+[axon-run 13:02:12] job 1020-130046-ecfa -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 5000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-wt-sched /home/haseeb/.cache/axon-sched/bin/axon-test-step0b cuda::qwen2::slots::tests::pool_hybrid_cost --exact --ignored --nocapture --test-threads 1
+axon-remote: uploading axon-test-step0b (efa3cb7980bb40c1c3d996e8) + source of /home/haseeb/.cache/axon-wt-sched
+
+sent 1,780,906 bytes  received 4,599 bytes  3,571,010.00 bytes/sec
+total size is 6,390,438  speedup is 3.58
+
+sent 6,662,162 bytes  received 35 bytes  4,441,464.67 bytes/sec
+total size is 20,805,280  speedup is 3.12
+axon-remote: job 20261020-130214-axon-test-step0b-3195757 on avante (GPU, 5000 MB)
+[axon-node 13:02:14] GPU lock taken; job wants 5000 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 52
+[axon-node 13:02:14] run axon-test-step0b (efa3cb7980bb40c1c3d996e8) as /home/haseeb/.cache/axon-wt-sched on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_hybrid_cost ... testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+hybrid cost: /home/haseeb/Projects/axon/models/qwen2.5-1.5b-instruct-q4_k_m.gguf (qwen2), NVIDIA GeForce RTX 4050 Laptop GPU (20 SMs), decoders at 768, chunk at 1024, pass max 1152, 11 reps x 3 calls per op
+| nb | c | row | two ms | fused ms | saved % med | min | max | two µs/unit | fused µs/unit |
+| 4 | 128 | same chunk | 24.939 | 21.805 | 12.7 | 11.9 | 14.2 | 188.9 | 165.2 |
+| 4 | 128 | same budget | 24.917 | 17.992 | 28.0 | 26.8 | 28.2 | 194.7 | 140.6 |
+|   |   | (dec+feed(c) 24.939, feed(c+nb) 21.000, att 0.806 ms) | | | | | | | |
+| 4 | 256 | same chunk | 37.067 | 33.942 | 8.5 | 6.9 | 9.4 | 142.6 | 130.5 |
+| 4 | 256 | same budget | 37.040 | 30.263 | 18.3 | 17.5 | 20.8 | 144.7 | 118.2 |
+|   |   | (dec+feed(c) 37.067, feed(c+nb) 33.130, att 0.811 ms) | | | | | | | |
+| 4 | 512 | same chunk | 63.743 | 62.050 | 2.3 | -4.1 | 3.1 | 123.5 | 120.3 |
+| 4 | 512 | same budget | 63.237 | 57.240 | 9.8 | 7.0 | 12.7 | 123.5 | 111.8 |
+|   |   | (dec+feed(c) 63.743, feed(c+nb) 61.238, att 0.812 ms) | | | | | | | |
+| 16 | 128 | same chunk | 28.518 | 23.874 | 16.8 | 14.0 | 17.4 | 198.0 | 165.8 |
+| 16 | 128 | same budget | 28.112 | 19.691 | 29.5 | 29.3 | 31.6 | 219.6 | 153.8 |
+|   |   | (dec+feed(c) 28.518, feed(c+nb) 21.415, att 2.459 ms) | | | | | | | |
+[axon-run 13:02:43] FOREIGN_GPU sample max=0% mean=0.0% n=1
+| 16 | 256 | same chunk | 41.055 | 36.789 | 10.3 | 7.7 | 11.2 | 150.9 | 135.3 |
+| 16 | 256 | same budget | 40.558 | 32.476 | 20.2 | 17.8 | 21.0 | 158.4 | 126.9 |
+|   |   | (dec+feed(c) 41.055, feed(c+nb) 34.334, att 2.456 ms) | | | | | | | |
+| 16 | 512 | same chunk | 68.526 | 66.871 | 2.3 | -4.0 | 7.1 | 129.8 | 126.6 |
+| 16 | 512 | same budget | 68.157 | 60.524 | 11.2 | -0.1 | 14.0 | 133.1 | 118.2 |
+|   |   | (dec+feed(c) 68.526, feed(c+nb) 64.395, att 2.476 ms) | | | | | | | |
+| 32 | 128 | same chunk | 33.213 | 27.037 | 18.3 | 13.6 | 25.5 | 207.6 | 169.0 |
+| 32 | 128 | same budget | 31.598 | 22.350 | 29.1 | 28.1 | 33.6 | 246.9 | 174.6 |
+|   |   | (dec+feed(c) 33.213, feed(c+nb) 22.037, att 5.000 ms) | | | | | | | |
+| 32 | 256 | same chunk | 46.711 | 40.913 | 12.4 | 7.8 | 21.4 | 162.2 | 142.1 |
+| 32 | 256 | same budget | 45.745 | 35.950 | 21.5 | 17.4 | 23.8 | 178.7 | 140.4 |
+|   |   | (dec+feed(c) 46.711, feed(c+nb) 35.889, att 5.024 ms) | | | | | | | |
+| 32 | 512 | same chunk | 74.413 | 71.844 | 3.9 | -1.4 | 17.9 | 136.8 | 132.1 |
+| 32 | 512 | same budget | 74.722 | 64.944 | 12.5 | 9.1 | 19.1 | 145.9 | 126.8 |
+|   |   | (dec+feed(c) 74.413, feed(c+nb) 66.801, att 5.043 ms) | | | | | | | |
+[axon-run 13:03:14] FOREIGN_GPU sample max=0% mean=0.0% n=1
+| 64 | 128 | same chunk | 39.248 | 33.548 | 15.4 | 6.7 | 23.5 | 204.4 | 174.7 |
+| 64 | 128 | same budget | 32.985 | 27.671 | 15.8 | 11.9 | 21.4 | 257.7 | 216.2 |
+|   |   | (dec+feed(c) 39.248, feed(c+nb) 23.388, att 10.160 ms) | | | | | | | |
+| 64 | 256 | same chunk | 53.665 | 47.749 | 9.4 | 5.3 | 14.0 | 167.7 | 149.2 |
+| 64 | 256 | same budget | 46.702 | 41.197 | 9.2 | 0.1 | 17.3 | 182.4 | 160.9 |
+|   |   | (dec+feed(c) 53.665, feed(c+nb) 37.564, att 10.185 ms) | | | | | | | |
+| 64 | 512 | same chunk | 81.937 | 80.330 | 2.0 | -2.1 | 10.1 | 142.3 | 139.5 |
+| 64 | 512 | same budget | 75.503 | 70.396 | 8.1 | -5.2 | 18.4 | 147.5 | 137.5 |
+|   |   | (dec+feed(c) 81.937, feed(c+nb) 70.036, att 10.294 ms) | | | | | | | |
+| feed tokens | GEMM route | 64-token tiles | padding % | gemm_cost (rel.) |
+| 64 | q gemm2s / gate gemm2s | 1 | 0 | 1.000 per token |
+| 96 | q gemm2t / gate gemm2t | 2 | 25 | 1.102 per token |
+| 112 | q gemm2t / gate gemm2t | 2 | 12 | 0.945 per token |
+| 124 | q gemm2t / gate gemm2t | 2 | 3 | 0.853 per token |
+| 128 | q gemm2t / gate gemm2t | 2 | 0 | 0.827 per token |
+| 132 | q gemm2t / gate gemm2t | 3 | 31 | 1.222 per token |
+| 144 | q gemm2t / gate gemm2t | 3 | 25 | 1.120 per token |
+| 160 | q gemm2t / gate gemm2t | 3 | 17 | 1.008 per token |
+| 192 | q gemm2t / gate gemm2t | 3 | 0 | 0.840 per token |
+| 224 | q gemm2t / gate gemm2t | 4 | 12 | 0.912 per token |
+| 240 | q gemm2t / gate gemm2t | 4 | 6 | 0.851 per token |
+| 252 | q gemm2t / gate gemm2t | 4 | 2 | 0.811 per token |
+| 256 | q gemm2t / gate gemm2t | 4 | 0 | 0.798 per token |
+| 260 | q gemm2t / gate gemm2t | 5 | 19 | 0.991 per token |
+| 272 | q gemm2t / gate gemm2t | 5 | 15 | 0.947 per token |
+| 288 | q gemm2t / gate gemm2t | 5 | 10 | 0.894 per token |
+| 320 | q gemm2t / gate gemm2t | 5 | 0 | 0.805 per token |
+| 448 | q gemm2t / gate gemm2t | 7 | 0 | 0.804 per token |
+| 480 | q gemm2t / gate gemm2t | 8 | 6 | 0.827 per token |
+| 496 | q gemm2t / gate gemm2t | 8 | 3 | 0.801 per token |
+| 508 | q gemm2t / gate gemm2t | 8 | 1 | 0.782 per token |
+| 512 | q gemm2t / gate gemm2t | 8 | 0 | 0.776 per token |
+| 516 | q gemm2t / gate gemm2t | 9 | 10 | 0.884 per token |
+| 528 | q gemm2t / gate gemm2t | 9 | 8 | 0.864 per token |
+| 544 | q gemm2t / gate gemm2t | 9 | 6 | 0.839 per token |
+| 576 | q gemm2t / gate gemm2t | 9 | 0 | 0.792 per token |
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 78.18s
+
+[axon-node 13:03:33] exit 0 after 78.3s
+[axon-node 13:03:33] peak RSS 1256 MB (job process tree PSS, 2 s samples x38)
+[axon-run 13:03:33] exit 0 after 81.6s (host avante)
+[axon-run 13:03:35] FOREIGN_GPU max=0% mean=0.0% samples=2

@@ -1,0 +1,82 @@
+[axon-run 13:00:46] submitted 1020-130046-087c by /home/haseeb/.cache/axon-wt-sched: /home/haseeb/.cache/axon-sched/bin/axon-test-step0b cuda::qwen2::slots::tests::pool_hybrid_cost --exact --ignored --nocapture --test-threads 1
+[axon-run 13:03:46] job 1020-130046-087c -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 4000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-wt-sched /home/haseeb/.cache/axon-sched/bin/axon-test-step0b cuda::qwen2::slots::tests::pool_hybrid_cost --exact --ignored --nocapture --test-threads 1
+axon-remote: job 20261020-130347-axon-test-step0b-3196000 on avante (GPU, 4000 MB)
+[axon-node 13:03:47] GPU lock taken; job wants 4000 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 56
+[axon-node 13:03:47] run axon-test-step0b (efa3cb7980bb40c1c3d996e8) as /home/haseeb/.cache/axon-wt-sched on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_hybrid_cost ... testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+hybrid cost: /home/haseeb/Projects/axon/models/qwen2.5-0.5b-q4_k_m.gguf (qwen2), NVIDIA GeForce RTX 4050 Laptop GPU (20 SMs), decoders at 768, chunk at 1024, pass max 1152, 11 reps x 3 calls per op
+| nb | c | row | two ms | fused ms | saved % med | min | max | two µs/unit | fused µs/unit |
+| 4 | 128 | same chunk | 11.412 | 12.011 | -5.3 | -7.4 | -3.6 | 86.5 | 91.0 |
+| 4 | 128 | same budget | 11.326 | 8.392 | 26.1 | 25.3 | 27.3 | 88.5 | 65.6 |
+|   |   | (dec+feed(c) 11.412, feed(c+nb) 11.576, att 0.435 ms) | | | | | | | |
+| 4 | 256 | same chunk | 17.808 | 18.156 | -1.0 | -3.9 | -0.1 | 68.5 | 69.8 |
+| 4 | 256 | same budget | 17.761 | 14.620 | 17.4 | 16.1 | 19.3 | 69.4 | 57.1 |
+|   |   | (dec+feed(c) 17.808, feed(c+nb) 17.714, att 0.442 ms) | | | | | | | |
+| 4 | 512 | same chunk | 30.622 | 30.683 | -0.9 | -4.8 | 2.4 | 59.3 | 59.5 |
+| 4 | 512 | same budget | 30.526 | 27.491 | 9.9 | 7.8 | 11.7 | 59.6 | 53.7 |
+|   |   | (dec+feed(c) 30.622, feed(c+nb) 30.232, att 0.451 ms) | | | | | | | |
+| 16 | 128 | same chunk | 13.215 | 13.131 | 0.8 | 0.1 | 2.4 | 91.8 | 91.2 |
+| 16 | 128 | same budget | 12.955 | 9.257 | 28.5 | 28.0 | 28.9 | 101.2 | 72.3 |
+|   |   | (dec+feed(c) 13.215, feed(c+nb) 12.059, att 1.072 ms) | | | | | | | |
+| 16 | 256 | same chunk | 19.722 | 19.006 | 3.4 | 2.4 | 7.7 | 72.5 | 69.9 |
+| 16 | 256 | same budget | 19.471 | 15.739 | 19.2 | 16.7 | 19.9 | 76.1 | 61.5 |
+|   |   | (dec+feed(c) 19.722, feed(c+nb) 17.927, att 1.078 ms) | | | | | | | |
+| 16 | 512 | same chunk | 32.332 | 31.760 | 1.3 | 0.4 | 9.4 | 61.2 | 60.2 |
+| 16 | 512 | same budget | 31.764 | 28.176 | 11.3 | 6.4 | 11.9 | 62.0 | 55.0 |
+|   |   | (dec+feed(c) 32.332, feed(c+nb) 30.667, att 1.093 ms) | | | | | | | |
+| 32 | 128 | same chunk | 15.825 | 13.982 | 12.9 | 6.9 | 15.2 | 98.9 | 87.4 |
+| 32 | 128 | same budget | 15.687 | 10.056 | 35.8 | 34.3 | 36.2 | 122.6 | 78.6 |
+|   |   | (dec+feed(c) 15.825, feed(c+nb) 11.961, att 2.021 ms) | | | | | | | |
+| 32 | 256 | same chunk | 22.488 | 20.388 | 9.2 | 4.2 | 10.8 | 78.1 | 70.8 |
+| 32 | 256 | same budget | 21.855 | 16.567 | 24.5 | 20.5 | 27.2 | 85.4 | 64.7 |
+|   |   | (dec+feed(c) 22.488, feed(c+nb) 18.348, att 2.040 ms) | | | | | | | |
+| 32 | 512 | same chunk | 35.344 | 33.496 | 4.9 | 0.3 | 7.4 | 65.0 | 61.6 |
+| 32 | 512 | same budget | 34.411 | 29.263 | 14.9 | 12.6 | 17.7 | 67.2 | 57.2 |
+|   |   | (dec+feed(c) 35.344, feed(c+nb) 31.444, att 2.053 ms) | | | | | | | |
+[axon-run 13:04:17] FOREIGN_GPU sample max=0% mean=0.0% n=1
+| 64 | 128 | same chunk | 19.063 | 17.408 | 8.2 | 5.6 | 13.2 | 99.3 | 90.7 |
+| 64 | 128 | same budget | 16.552 | 12.618 | 23.7 | 22.1 | 25.6 | 129.3 | 98.6 |
+|   |   | (dec+feed(c) 19.063, feed(c+nb) 12.919, att 4.490 ms) | | | | | | | |
+| 64 | 256 | same chunk | 25.536 | 23.497 | 7.5 | 4.1 | 10.1 | 79.8 | 73.4 |
+| 64 | 256 | same budget | 24.197 | 18.945 | 21.9 | 19.7 | 23.9 | 94.5 | 74.0 |
+|   |   | (dec+feed(c) 25.536, feed(c+nb) 18.981, att 4.516 ms) | | | | | | | |
+| 64 | 512 | same chunk | 38.321 | 37.516 | 1.9 | -0.5 | 4.8 | 66.5 | 65.1 |
+| 64 | 512 | same budget | 36.263 | 31.521 | 12.8 | 8.5 | 15.8 | 70.8 | 61.6 |
+|   |   | (dec+feed(c) 38.321, feed(c+nb) 32.985, att 4.531 ms) | | | | | | | |
+| feed tokens | GEMM route | 64-token tiles | padding % | gemm_cost (rel.) |
+| 64 | q gemm2s / gate gemm2s | 1 | 0 | 1.000 per token |
+| 96 | q gemm2s / gate gemm2s | 2 | 25 | 1.270 per token |
+| 112 | q gemm2s / gate gemm2s | 2 | 12 | 1.088 per token |
+| 124 | q gemm2s / gate gemm2s | 2 | 3 | 0.983 per token |
+| 128 | q gemm2s / gate gemm2s | 2 | 0 | 0.952 per token |
+| 132 | q gemm2s / gate gemm2s | 3 | 31 | 1.659 per token |
+| 144 | q gemm2s / gate gemm2s | 3 | 25 | 1.520 per token |
+| 160 | q gemm2s / gate gemm2s | 3 | 17 | 1.368 per token |
+| 192 | q gemm2s / gate gemm2s | 3 | 0 | 1.140 per token |
+| 224 | q gemm2s / gate gemm2s | 4 | 12 | 1.048 per token |
+| 240 | q gemm2s / gate gemm2s | 4 | 6 | 0.978 per token |
+| 252 | q gemm2s / gate gemm2s | 4 | 2 | 0.932 per token |
+| 256 | q gemm2s / gate gemm2s | 4 | 0 | 0.917 per token |
+| 260 | q gemm2s / gate gemm2s | 5 | 19 | 1.342 per token |
+| 272 | q gemm2s / gate gemm2s | 5 | 15 | 1.282 per token |
+| 288 | q gemm2s / gate gemm2s | 5 | 10 | 1.211 per token |
+| 320 | q gemm2s / gate gemm2s | 5 | 0 | 1.090 per token |
+| 448 | q gemm2s / gate gemm2s | 7 | 0 | 1.016 per token |
+| 480 | q gemm2s / gate gemm2s | 8 | 6 | 0.960 per token |
+| 496 | q gemm2s / gate gemm2s | 8 | 3 | 0.929 per token |
+| 508 | q gemm2s / gate gemm2s | 8 | 1 | 0.907 per token |
+| 512 | q gemm2s / gate gemm2s | 8 | 0 | 0.900 per token |
+| 516 | q gemm2s / gate gemm2s | 9 | 10 | 1.103 per token |
+| 528 | q gemm2s / gate gemm2s | 9 | 8 | 1.078 per token |
+| 544 | q gemm2s / gate gemm2s | 9 | 6 | 1.046 per token |
+| 576 | q gemm2s / gate gemm2s | 9 | 0 | 0.988 per token |
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 37.58s
+
+[axon-node 13:04:25] exit 0 after 37.7s
+[axon-node 13:04:25] peak RSS 658 MB (job process tree PSS, 2 s samples x18)
+[axon-run 13:04:25] exit 0 after 39.1s (host avante)
+[axon-run 13:04:27] FOREIGN_GPU max=0% mean=0.0% samples=1

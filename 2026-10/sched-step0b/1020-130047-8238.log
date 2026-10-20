@@ -1,0 +1,79 @@
+[axon-run 13:00:47] submitted 1020-130047-8238 by /home/haseeb/.cache/axon-wt-sched: /home/haseeb/.cache/axon-sched/bin/axon-test-step0b cuda::qwen2::slots::tests::pool_hybrid_cost --exact --ignored --nocapture --test-threads 1
+[axon-run 13:01:38] scope axon-job-1020-130047-8238-1792515698.scope in app-axonjobs.slice: MemoryMax 10217 MB, MemoryHigh 9195 MB, no swap, oomd pressure kill 80% (claim 6129 MB): an OOM here kills only this job
+[axon-run 13:01:38] job 1020-130047-8238 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1020-130047-8238-1792515698 --slice=app-axonjobs.slice -p MemoryMax=10217M -p MemoryHigh=9195M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-sched/bin/axon-test-step0b cuda::qwen2::slots::tests::pool_hybrid_cost --exact --ignored --nocapture --test-threads 1
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_hybrid_cost ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+hybrid cost: /home/haseeb/Projects/axon/models/qwen2.5-3b-instruct-q4_k_m.gguf (qwen2), NVIDIA GeForce RTX 5070 Ti Laptop GPU (46 SMs), decoders at 768, chunk at 1024, pass max 1152, 11 reps x 3 calls per op
+| nb | c | row | two ms | fused ms | saved % med | min | max | two µs/unit | fused µs/unit |
+| 4 | 128 | same chunk | 23.270 | 24.216 | -5.3 | -9.6 | -0.6 | 176.3 | 183.5 |
+| 4 | 128 | same budget | 23.205 | 17.574 | 24.0 | 19.6 | 29.1 | 181.3 | 137.3 |
+|   |   | (dec+feed(c) 23.270, feed(c+nb) 23.576, att 0.640 ms) | | | | | | | |
+| 4 | 256 | same chunk | 35.606 | 35.483 | 1.5 | -1.7 | 3.8 | 136.9 | 136.5 |
+| 4 | 256 | same budget | 35.573 | 30.735 | 13.7 | 9.4 | 18.9 | 139.0 | 120.1 |
+|   |   | (dec+feed(c) 35.606, feed(c+nb) 34.837, att 0.647 ms) | | | | | | | |
+| 4 | 512 | same chunk | 59.587 | 61.361 | -3.6 | -5.9 | -0.5 | 115.5 | 118.9 |
+| 4 | 512 | same budget | 59.293 | 54.321 | 8.9 | 6.0 | 10.1 | 115.8 | 106.1 |
+|   |   | (dec+feed(c) 59.587, feed(c+nb) 60.688, att 0.674 ms) | | | | | | | |
+| 16 | 128 | same chunk | 27.464 | 25.814 | 4.9 | 1.0 | 10.8 | 190.7 | 179.3 |
+| 16 | 128 | same budget | 27.100 | 18.826 | 30.9 | 27.0 | 35.2 | 211.7 | 147.1 |
+|   |   | (dec+feed(c) 27.464, feed(c+nb) 24.277, att 1.537 ms) | | | | | | | |
+| 16 | 256 | same chunk | 39.884 | 36.238 | 8.9 | 5.5 | 13.2 | 146.6 | 133.2 |
+| 16 | 256 | same budget | 38.958 | 31.348 | 19.1 | 14.5 | 23.9 | 152.2 | 122.5 |
+|   |   | (dec+feed(c) 39.884, feed(c+nb) 34.918, att 1.320 ms) | | | | | | | |
+[axon-run 13:02:12] FOREIGN_GPU sample max=33% mean=11.5% n=6 (picom 1255867 16%)
+| 16 | 512 | same chunk | 63.415 | 62.411 | 1.5 | -1.6 | 3.3 | 120.1 | 118.2 |
+| 16 | 512 | same budget | 63.172 | 55.381 | 12.0 | 9.8 | 14.3 | 123.4 | 108.2 |
+|   |   | (dec+feed(c) 63.415, feed(c+nb) 60.785, att 1.626 ms) | | | | | | | |
+| 32 | 128 | same chunk | 29.904 | 27.924 | 5.6 | 3.6 | 11.5 | 186.9 | 174.5 |
+| 32 | 128 | same budget | 29.509 | 20.480 | 30.8 | 25.8 | 34.3 | 230.5 | 160.0 |
+|   |   | (dec+feed(c) 29.904, feed(c+nb) 24.745, att 3.179 ms) | | | | | | | |
+| 32 | 256 | same chunk | 42.247 | 38.074 | 9.3 | 5.0 | 13.8 | 146.7 | 132.2 |
+| 32 | 256 | same budget | 40.973 | 32.673 | 20.8 | 18.2 | 21.8 | 160.1 | 127.6 |
+|   |   | (dec+feed(c) 42.247, feed(c+nb) 35.231, att 2.843 ms) | | | | | | | |
+| 32 | 512 | same chunk | 65.431 | 63.792 | 0.9 | -0.4 | 5.9 | 120.3 | 117.3 |
+| 32 | 512 | same budget | 64.829 | 57.133 | 12.3 | 10.8 | 14.1 | 126.6 | 111.6 |
+|   |   | (dec+feed(c) 65.431, feed(c+nb) 60.808, att 2.984 ms) | | | | | | | |
+| 64 | 128 | same chunk | 33.953 | 32.664 | 5.2 | -0.1 | 12.3 | 176.8 | 170.1 |
+| 64 | 128 | same budget | 28.387 | 23.942 | 16.1 | 13.4 | 23.6 | 221.8 | 187.0 |
+|   |   | (dec+feed(c) 33.953, feed(c+nb) 25.886, att 6.778 ms) | | | | | | | |
+| 64 | 256 | same chunk | 46.130 | 43.233 | 6.9 | 3.1 | 12.4 | 144.2 | 135.1 |
+| 64 | 256 | same budget | 42.529 | 36.687 | 13.4 | 11.1 | 17.3 | 166.1 | 143.3 |
+|   |   | (dec+feed(c) 46.130, feed(c+nb) 36.469, att 6.764 ms) | | | | | | | |
+[axon-run 13:02:43] FOREIGN_GPU sample max=12% mean=7.7% n=6 (picom 1255867 11%)
+| 64 | 512 | same chunk | 69.645 | 69.234 | -0.2 | -3.1 | 3.0 | 120.9 | 120.2 |
+| 64 | 512 | same budget | 65.315 | 59.127 | 8.7 | 4.6 | 12.7 | 127.6 | 115.5 |
+|   |   | (dec+feed(c) 69.645, feed(c+nb) 63.230, att 6.005 ms) | | | | | | | |
+| feed tokens | GEMM route | 64-token tiles | padding % | gemm_cost (rel.) |
+| 64 | q gemm2s / gate gemm2s | 1 | 0 | 1.000 per token |
+| 96 | q gemm2t / gate gemm2t | 2 | 25 | 1.113 per token |
+| 112 | q gemm2t / gate gemm2t | 2 | 12 | 0.954 per token |
+| 124 | q gemm2t / gate gemm2t | 2 | 3 | 0.862 per token |
+| 128 | q gemm2t / gate gemm2t | 2 | 0 | 0.835 per token |
+| 132 | q gemm2t / gate gemm2t | 3 | 31 | 1.244 per token |
+| 144 | q gemm2t / gate gemm2t | 3 | 25 | 1.140 per token |
+| 160 | q gemm2t / gate gemm2t | 3 | 17 | 1.026 per token |
+| 192 | q gemm2t / gate gemm2t | 3 | 0 | 0.855 per token |
+| 224 | q gemm2t / gate gemm2t | 4 | 12 | 0.916 per token |
+| 240 | q gemm2t / gate gemm2t | 4 | 6 | 0.855 per token |
+| 252 | q gemm2t / gate gemm2t | 4 | 2 | 0.814 per token |
+| 256 | q gemm2t / gate gemm2t | 4 | 0 | 0.801 per token |
+| 260 | q gemm2t / gate gemm2t | 5 | 19 | 1.020 per token |
+| 272 | q gemm2t / gate gemm2t | 5 | 15 | 0.975 per token |
+| 288 | q gemm2t / gate gemm2t | 5 | 10 | 0.921 per token |
+| 320 | q gemm2t / gate gemm2t | 5 | 0 | 0.829 per token |
+| 448 | q gemm2t / gate gemm2t | 7 | 0 | 0.808 per token |
+| 480 | q gemm2t / gate gemm2t | 8 | 6 | 0.827 per token |
+| 496 | q gemm2t / gate gemm2t | 8 | 3 | 0.801 per token |
+| 508 | q gemm2t / gate gemm2t | 8 | 1 | 0.782 per token |
+| 512 | q gemm2t / gate gemm2t | 8 | 0 | 0.776 per token |
+| 516 | q gemm2t / gate gemm2t | 9 | 10 | 0.899 per token |
+| 528 | q gemm2t / gate gemm2t | 9 | 8 | 0.879 per token |
+| 544 | q gemm2t / gate gemm2t | 9 | 6 | 0.853 per token |
+| 576 | q gemm2t / gate gemm2t | 9 | 0 | 0.806 per token |
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 688 filtered out; finished in 73.04s
+
+[axon-run 13:02:51] exit 0 after 73.1s (host bella)
+[axon-run 13:02:53] FOREIGN_GPU max=33% mean=11.0% samples=13 top: picom 1255867 33%  TAINTED (mean > 5% or max > 25%): timing numbers not trustworthy, rerun
