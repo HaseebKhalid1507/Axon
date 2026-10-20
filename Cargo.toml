@@ -12,6 +12,18 @@ readme = "README.md"
 keywords = ["inference", "llm", "machine-learning", "quantization"]
 categories = ["science", "mathematics"]
 
+# The engine is the library; `axon` (src/main.rs) is its command line.
+[lib]
+name = "axon"
+path = "src/lib.rs"
+
+[[bin]]
+name = "axon"
+path = "src/main.rs"
+# Its tests live in the lib; one name for both docs would collide.
+test = false
+doc = false
+
 [dependencies]
 memmap2 = "0.9"
 crossterm = "0.28"

@@ -472,12 +472,17 @@ pub struct Shard {
     pub file: File,
 }
 
+/// A loaded model file (`axon::load`). Read-only outside the crate: its
+/// fields and the methods that hand out or release weight bytes are
+/// `pub(crate)` (the backends borrow the weights for their lifetime;
+/// `release` zeroes pages a live borrow may read), and what an embedder
+/// may read is the accessors (`arch`, `meta_u32`, `n_layers`, ...).
 pub struct Model {
-    pub arch: String,
-    pub metadata: Vec<(String, Val)>,
-    pub tensors: Vec<Tensor>,
-    pub data: memmap2::Mmap,
-    pub data_offset: u64,
+    pub(crate) arch: String,
+    pub(crate) metadata: Vec<(String, Val)>,
+    pub(crate) tensors: Vec<Tensor>,
+    pub(crate) data: memmap2::Mmap,
+    pub(crate) data_offset: u64,
     /// `data` maps the file (true) or is the anonymous copy (false).
     file_backed: bool,
     /// Byte ranges of the tensors handed back by `release`, sorted. On the
@@ -501,7 +506,7 @@ pub struct Model {
     /// converted to F16 / F32, misaligned ones copied. Anonymous, huge
     /// pages asked for, 64-byte aligned slots.
     aux: Option<memmap2::Mmap>,
-    pub source: Source,
+    pub(crate) source: Source,
 }
 
 /// A rewritten tensor's bytes outside a file mapping (`Model::side`).
@@ -554,7 +559,7 @@ impl Model {
 
     /// The tensor's bytes. Panics if they were `release`d from anonymous
     /// memory (they'd read as zeros).
-    pub fn tensor_data(&self, t: &Tensor) -> &[u8] {
+    pub(crate) fn tensor_data(&self, t: &Tensor) -> &[u8] {
         let r = self.tensor_range(t);
         if t.shard == 0
             && let Some(s) = self.side_of(&r)
@@ -592,7 +597,7 @@ impl Model {
     /// mapped file and the offset in it. None on the anonymous copy, for a
     /// rewritten tensor (its bytes are in a side copy, not the file) and
     /// for a converted one (`AUX`).
-    pub fn tensor_file(&self, t: &Tensor) -> Option<(&File, u64)> {
+    pub(crate) fn tensor_file(&self, t: &Tensor) -> Option<(&File, u64)> {
         let r = self.tensor_range(t);
         match t.shard {
             0 => {
@@ -606,7 +611,7 @@ impl Model {
 
     /// Whether `data` maps the file (vs the anonymous copy, see `map_weights`).
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn file_backed(&self) -> bool {
+    pub(crate) fn file_backed(&self) -> bool {
         self.file_backed
     }
 
@@ -620,7 +625,7 @@ impl Model {
     /// they come back as zeros, so `tensor_data` panics on a released tensor
     /// from then on. A tensor with a side copy (`side`) keeps it (see
     /// `Side`); only its untouched file pages go. Per mapping (`region`).
-    pub fn release(&self, t: &Tensor) {
+    pub(crate) fn release(&self, t: &Tensor) {
         let r = self.tensor_range(t);
         if r.is_empty() {
             return;
@@ -675,7 +680,7 @@ impl Model {
     /// (MADV_POPULATE_READ: from the page cache, reading the file where it
     /// isn't there), so a copy out of them doesn't stop at a page fault
     /// every 64 KB. Nothing on anonymous memory. Best effort.
-    pub fn prefault(&self, t: &Tensor) {
+    pub(crate) fn prefault(&self, t: &Tensor) {
         let r = self.tensor_range(t);
         let (map, file_backed) = self.region(t.shard);
         if file_backed && !r.is_empty() {
@@ -686,7 +691,7 @@ impl Model {
     /// The fraction of the tensor data's file pages in the page cache
     /// (mincore), or None on the anonymous copy, for a safetensors
     /// checkpoint, or if it can't be told. ~1 ms for a 5 GB file.
-    pub fn resident_fraction(&self) -> Option<f64> {
+    pub(crate) fn resident_fraction(&self) -> Option<f64> {
         if !self.file_backed || !cfg!(target_os = "linux") || self.source != Source::Gguf {
             return None;
         }
@@ -710,13 +715,13 @@ impl Model {
     }
 
     /// Whether the background read-ahead (`read_ahead`) was started.
-    pub fn reading_ahead(&self) -> bool {
+    pub(crate) fn reading_ahead(&self) -> bool {
         self.ahead
     }
 
     /// Whether `t` was handed back by `release`.
     #[cfg(test)]
-    pub fn is_released(&self, t: &Tensor) -> bool {
+    pub(crate) fn is_released(&self, t: &Tensor) -> bool {
         let r = self.tensor_range(t);
         self.released.lock().unwrap().contains(&(t.shard, r))
     }
@@ -730,6 +735,11 @@ impl Model {
                 t.shard == s && !r.is_empty() && r.start < b && a < r.end
             })
     }
+    /// The architecture (`general.architecture`: "qwen2", "llama", ...).
+    pub fn arch(&self) -> &str {
+        &self.arch
+    }
+    /// A u32 metadata value (e.g. "qwen2.block_count"), if the file has it.
     pub fn meta_u32(&self, key: &str) -> Option<u32> {
         self.metadata
             .iter()

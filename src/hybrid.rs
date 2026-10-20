@@ -327,7 +327,7 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
     /// on the GPU (`dev`, needed unless gpu_layers is 0), the rest on the
     /// CPU (repacked unless AXON_REPACK=0, as `Qwen2::new`), with room for
     /// a `max_ctx`-token cache (the GPU half's of type `kv`; the CPU half's
-    /// is f16 or f32 as AXON_KV says). Each half loads only its own weights, and
+    /// is f16, or f32 for `KvType::F32`, kv::use_f32). Each half loads only its own weights, and
     /// the GPU's are handed back to `m` once uploaded (`Model::release`;
     /// on a copy of the file they can't be read again). Streaming off (PR
     /// B's behavior); the CLI uses `new_with_stream`.
@@ -466,7 +466,7 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
         margin: usize,
     ) -> Result<Streaming<'g>, String> {
         if crate::kv::use_f32() {
-            return Err("the CPU's KV cache is f32 (AXON_KV=f32)".into());
+            return Err("the CPU half's KV cache is f32 (KvType::F32; the CLI's AXON_KV=f32): streaming needs f16".into());
         }
         let src: Vec<HostLayer> = (0..cpu.layer_count()).map(|l| cpu.host_layer(l)).collect();
         // Room for the cache `new_layers` planned for, its slots and
@@ -591,7 +591,7 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
     }
 
     /// The GPU layers' cache type (`CudaQwen2::kv_name`; the CPU layers'
-    /// is f16 or f32 as AXON_KV says).
+    /// is f16, or f32 for `KvType::F32`).
     pub fn kv_name(&self) -> &'static str {
         self.gpu.as_ref().map_or("f16", |g| g.kv_name())
     }
@@ -692,6 +692,10 @@ impl<'g> Lm for HybridQwen2<'_, 'g> {
             }
             (None, None) => unreachable!(),
         }
+    }
+
+    fn decode_streams(&self) -> bool {
+        self.stream.as_ref().is_some_and(|s| s.decode)
     }
 
     fn forward_argmax(&self, token: u32, pos: usize, c: &mut HybridCache<'g>) -> u32 {

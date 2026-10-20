@@ -30,6 +30,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --check
       - run: cargo clippy --all-targets
+      # The lib's unit tests and doc tests; also builds the binary and examples/embed.rs.
       - run: cargo test
       # The SIMD tests skip paths the runner's CPU lacks (GitHub runners usually
       # have AVX2 but not AVX-VNNI). Rerun them uncaptured so each skip shows
@@ -55,7 +56,8 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq qemu-user
           cargo test --release --no-run 2>&1 | tee no-run.log
-          bin=$(grep -oE 'target/release/deps/axon-[0-9a-f]+' no-run.log | head -1)
+          # The library's test harness (every unit test is in the lib; the binary has none).
+          bin=$(grep -oE 'unittests src/lib.rs \(target/release/deps/axon-[0-9a-f]+' no-run.log | grep -oE 'target/.*')
           test -x "$bin"
           # attend_matches_per_head sweeps ~300 context lengths x 16 shapes: 40 s on
           # the scalar path natively (the "scalar path" step above runs it), ~18 min

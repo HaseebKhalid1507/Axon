@@ -39,7 +39,7 @@ Axon is the fastest at one stream but 2.0–3.8× behind vLLM / SGLang at 128 co
 | Tensor types | CPU: F32, F16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ4_NL. GPU: every weight matrix must be one of the eleven quantized types. | `quant.rs`, `quant/k23.rs`, `quant/iq4nl.rs`, `cuda/kernels.cu` |
 | CPU SIMD | One baseline x86-64 binary. It picks scalar, AVX2 or AVX-VNNI kernels at run time with the same output bits as a `target-cpu` build (`AXON_SIMD` forces a set). Q4_K/Q6_K/Q5_0/Q8_0 are repacked into 8-row interleaved layouts. | `quant.rs`, `quant/r8.rs`, `quant/r8q.rs`, `mv.rs`, `vmath.rs` |
 | CUDA | `--device cuda`, Linux. Loads `libcuda.so.1` and NVRTC at run time, compiles the kernels for the GPU on first use and caches them. Int8 tensor-core GEMMs and attention need sm_80+; older GPUs fall back to dp4a decode kernels for batches. A GPU is refused if no installed NVRTC can target it (older NVRTCs are tried, #39). One token is a captured CUDA graph, replayed. On H100/H200 (sm_90a) the fused gate+up prefill GEMM runs on wgmma + TMA (#33). | `cuda/mod.rs`, `cuda/ffi.rs`, `cuda/qwen2.rs` |
-| Commands | `info`, `gen`, `logits` (top-K next-token logits), `chat` (terminal, chat template, KV reuse across turns), `serve` (OpenAI-compatible HTTP). | `main.rs`, `chat.rs`, `serve.rs` |
+| Commands | `info`, `gen`, `logits` (top-K next-token logits), `chat` (terminal, chat template, KV reuse across turns), `serve` (OpenAI-compatible HTTP). | `cli.rs`, `chat.rs`, `serve.rs` |
 | Sampling | Greedy, or temperature / top-k / top-p / min-p / repeat penalty with a seed (llama.cpp's order). On the GPU the penalty and top-k (k ≤ 256) run on the device. | `sample.rs`, `cuda/sample.cu` |
 | Speculative decoding | Prompt lookup (`--draft K`) and a draft model (`--draft-model small.gguf`). Both are lossless: same output with or without, greedy or seeded sampling. | `spec.rs`, `draft.rs` |
 | CPU + GPU split | A model too big for VRAM puts its first layers on the CPU and the rest plus the head on the GPU (`--gpu-layers N`). For prompts of ≥ 32 tokens the CPU layers' weights are streamed through the GPU. | `hybrid.rs`, `cuda/qwen2/stream.rs` |
@@ -93,11 +93,14 @@ Hugging Face's tokenizer, and Ollama's greedy output.
 
 ## Source map
 
-Suggested reading order: `gguf.rs` → `quant.rs` → `model.rs` → `main.rs`, then `lm.rs` → `cuda/`.
+Suggested reading order: `gguf.rs` → `quant.rs` → `model.rs` → `cli.rs` + `generate.rs`, then `lm.rs` → `cuda/`.
 
 | file | what it is |
 |---|---|
-| `src/main.rs` | CLI: argument parsing, backend choice, `run_lm` (prefill in batches, then generate). |
+| `src/lib.rs` | The crate root: module list and the public library API (`load`, `Backend`, `Tokenizer`, `Lm`, `generate`, `serve`; `examples/embed.rs`). |
+| `src/main.rs` | The `axon` binary: calls `axon::cli::main`, nothing else. |
+| `src/cli.rs` | CLI: argument parsing, backend choice, `run_lm` (prefill in batches, then generate). |
+| `src/generate.rs` | `generate`, the greedy / drafted decode loop (`sample.rs` for sampling), and `argmax`. |
 | `src/gguf.rs` | GGUF reader: header, metadata, tensor table. Treats the file as untrusted input. |
 | `src/quant.rs` | Block formats, dequantization, `dot_*_q8` kernels (scalar, AVX2, AVX-VNNI). |
 | `src/quant/r8.rs`, `r8q.rs` | 8-row interleaved repacks (Q4_K/Q6_K; Q5_0/Q8_0) with integer-first GEMV/GEMM kernels. |
