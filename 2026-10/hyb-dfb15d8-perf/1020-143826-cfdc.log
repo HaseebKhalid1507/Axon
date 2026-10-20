@@ -1,0 +1,35 @@
+[axon-run 14:38:26] submitted 1020-143826-cfdc by /home/haseeb/.cache/axon-wt-sched: /home/haseeb/.cache/axon-sched/bin/axon-test-dfb15d8 serve::tests::serve_hybrid_ab --exact --ignored --nocapture --test-threads 1
+[axon-run 15:19:59] job 1020-143826-cfdc -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 5000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-wt-sched /home/haseeb/.cache/axon-sched/bin/axon-test-dfb15d8 serve::tests::serve_hybrid_ab --exact --ignored --nocapture --test-threads 1
+axon-remote: uploading axon-test-dfb15d8 (6b1e959eb192f21e169b9413) + source of /home/haseeb/.cache/axon-wt-sched
+
+sent 1,812,826 bytes  received 4,755 bytes  3,635,162.00 bytes/sec
+total size is 6,489,432  speedup is 3.57
+
+sent 6,736,017 bytes  received 35 bytes  4,490,701.33 bytes/sec
+total size is 21,404,944  speedup is 3.18
+axon-remote: job 20261020-152001-axon-test-dfb15d8-41966 on avante (GPU, 5000 MB)
+[axon-node 15:20:01] GPU lock taken; job wants 5000 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 63
+[axon-node 15:20:01] run axon-test-dfb15d8 (6b1e959eb192f21e169b9413) as /home/haseeb/.cache/axon-wt-sched on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 1 test
+test serve::tests::serve_hybrid_ab ... testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+serve_hybrid_ab: models/qwen2.5-1.5b-instruct-q4_k_m.gguf, budget 256, 3 rounds; admit 4 decoders + 20000; loop C=8 x 4 reqs, 400 words, 128 tokens
+
+thread 'serve::tests::serve_hybrid_ab' (41979) panicked at src/serve/tests.rs:4980:5:
+assertion `left == right` failed: {"error":{"code":"context_length_exceeded","message":"the prompt is 23896 tokens; the context is 22528 tokens (--ctx)","param":"prompt","type":"invalid_request_error"}}
+  left: 400
+ right: 200
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    serve::tests::serve_hybrid_ab
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 692 filtered out; finished in 10.22s
+
+[axon-node 15:20:12] exit 101 after 10.4s
+[axon-node 15:20:12] peak RSS 262 MB (job process tree PSS, 2 s samples x5)
+[axon-run 15:20:12] exit 101 after 13.3s (host avante)
+[axon-run 15:20:14] FOREIGN_GPU max=?% mean=?% samples=0 (not sampled: ran before the guard, or pmon unavailable)
