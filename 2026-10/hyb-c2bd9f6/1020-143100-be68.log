@@ -1,0 +1,28 @@
+[axon-run 14:31:00] submitted 1020-143100-be68 by /home/haseeb/.cache/axon-wt-sched: /home/haseeb/.cache/axon-sched/bin/axon-test-dfb15d8 serve::tests::serve_hybrid_ab --exact --ignored --nocapture
+[axon-run 15:13:49] GPU test run without --vram: claiming 11000 MB (the whole card) on bella; pass --vram to override
+[axon-run 15:13:49] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 15:13:49] scope axon-job-1020-143100-be68-1792523629.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 17032 MB): an OOM here kills only this job
+[axon-run 15:13:49] job 1020-143100-be68 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1020-143100-be68-1792523629 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-sched/bin/axon-test-dfb15d8 serve::tests::serve_hybrid_ab --exact --ignored --nocapture --test-threads 6
+axon-q 15:13:49 start slot 16-23: /home/haseeb/.cache/axon-sched/bin/axon-test-dfb15d8 serve::tests::serve_hybrid_ab --exact --ignored --nocapture --test-threads 6
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+serve_hybrid_ab: /home/haseeb/.cache/axon-wt-sched/models/qwen2.5-0.5b-q4_k_m.gguf, budget 256, 1 rounds; admit 4 decoders + 4000; loop C=8 x 2 reqs, 400 words, 128 tokens
+round 0 admit on: [1.97, 2.79, 8.69, 10.73, 10.82, 170.27, 84.00, 1.00]
+round 0 admit off: [1.97, 2.75, 13.60, 54.96, 54.96, 118.88, 13.00, 1.00]
+round 0 admit off-ms0: [1.96, 2.82, 10.53, 14.31, 14.31, 193.95, 80.00, 1.00]
+round 0 loop on: [2705.23, 28.11, 111.71, 2.15, 7.98, 1.00]
+round 0 loop off: [2691.81, 26.45, 111.87, 2.15, 13.86, 1.00]
+medians over rounds (same_text: min):
+| admit | ITL before p50 | p99 | ITL during p50 | p99 | max | TTFT ms | tokens during | same_text |
+| on | 1.97 | 2.79 | 8.69 | 10.73 | 10.82 | 170.27 | 84.00 | 1 |
+| off | 1.97 | 2.75 | 13.60 | 54.96 | 54.96 | 118.88 | 13.00 | 1 |
+| off-ms0 | 1.96 | 2.82 | 10.53 | 14.31 | 14.31 | 193.95 | 80.00 | 1 |
+| loop | agg tok/s | TTFT p50 | p99 | ITL p50 | p99 | same_text |
+| on | 2705.23 | 28.11 | 111.71 | 2.15 | 7.98 | 1 |
+| off | 2691.81 | 26.45 | 111.87 | 2.15 | 13.86 | 1 |
+test serve::tests::serve_hybrid_ab ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 692 filtered out; finished in 11.22s
+
+[axon-run 15:14:00] exit 0 after 11.4s (host bella)
