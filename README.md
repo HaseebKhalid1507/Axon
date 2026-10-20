@@ -27,6 +27,41 @@ differently; `src/cuda/qwen2.rs`). The tests check this, and check against three
 independent oracles (gguf-py's dequantizer, Hugging Face's tokenizer, Ollama's
 greedy output).
 
+## Where it stands
+
+**Equal to the fastest int4 engines at batch 1, the best ITL tail under load, reproducible bits; 3× behind on
+throughput at C = 128 today.**
+
+That sentence comes from the first datacenter serving board: Qwen2.5-7B-Instruct on one RunPod H100 SXM, main
+`c15c90e`, 2026-10-19, Axon `serve` (Q4_K_M) against vLLM 0.32.0 and SGLang 0.5.22 with AWQ int4 and with FP8,
+closed loop, greedy, 2 rounds, medians. The weights differ per engine (Axon has no FP8 path), so this compares
+engines as deployed, not kernels on equal bits.
+
+| aggregate tok/s | C=1 | C=8 | C=32 | C=128 |
+|---|---:|---:|---:|---:|
+| mix: Axon | **287** | 795 | 1,324 | 1,868 |
+| mix: best other (engine) | 284 (SGLang-AWQ) | 1,212 (SGLang-AWQ) | 3,448 (SGLang-FP8) | 7,146 (vLLM-FP8) |
+| mix: vLLM-AWQ (like-for-like 4-bit) | 235 | 1,096 | 3,012 | 5,748 |
+| classic: Axon | **304** | 1,278 | 2,466 | 4,485 |
+| classic: best other | 296 (SGLang-AWQ) | 2,015 (SGLang-AWQ) | 6,149 (SGLang-FP8) | 14,380 (SGLang-FP8) |
+| classic: vLLM-AWQ | 240 | 1,786 | 5,682 | 12,190 |
+
+At C = 128 on *mix*, Axon's ITL p99 is **77.5 ms** against 126–320 ms for the other four, but its TPOT p50
+(57.9 ms vs 12.7–26.4) and TTFT p99 (14.5 s vs 1.9–5.3 s) are worse, and only 26 % of its requests meet the SLO
+(67–99 % for the others). The C = 1 lead over SGLang-AWQ (+1 % / +3 %) is inside one pod's uncertainty. Cold start:
+1.0 s vs 42–71 s. Source: `cells.jsonl` and `cost.json` of run `h100-1019-2058` (kept on the dev machine, not in the
+repo; the medians above were re-derived from `cells.jsonl`, control round excluded), tables in
+[docs/results.md](docs/results.md#serving-runpod-h100-sxm-main-c15c90e-2026-10-19), method and cost in
+[the log](docs/log/2026-10-19-h100-showdown.md).
+
+**Why not vLLM?** If you serve many concurrent users on datacenter GPUs, use vLLM or SGLang: today they push
+2–3.8× Axon's tokens at C = 128 on an H100, have FP8, far more models, multi-node, LoRA and years of production use;
+Axon has one maintainer and no external users yet. Axon is for the other end: one binary with no Python and no
+CUDA toolkit, a one-second start, the CPU and consumer GPUs as first-class targets, batch-1 speed equal to the
+best int4 engines, a flat latency tail under load, and outputs that don't depend on batching, prompt chunking or
+speculative drafting (every response says which bits it is: `system_fingerprint`). It is also a library
+(`axon` crate, [below](#as-a-library)), so a Rust program can run a model in-process.
+
 ## Status
 
 Works today, honestly scoped:
@@ -176,6 +211,20 @@ curl -L -o models/qwen2.5-0.5b-q4_k_m.gguf \
 
 `gen` streams the text to stdout and prints prompt/decode speed to stderr.
 `chat` is a conversation: type a message, get a reply, keep going.
+
+## As a library
+
+`cargo build` builds the `axon` library and the `axon` command line on top of it. The library's API is small:
+`axon::load` a GGUF, `Backend::new` to place it on the CPU or a GPU, the model's own `Tokenizer`, the `Lm` trait
+(caches, prefill, decode steps), `axon::generate` (the greedy or sampled loop behind `axon gen`, streaming each
+token to a callback) and `axon::serve` (`axon serve`, in-process). [examples/embed.rs](examples/embed.rs) loads a
+model and decodes N tokens greedily, the same tokens `axon gen` prints:
+
+```bash
+cargo run --release --example embed -- models/qwen2.5-0.5b-q4_k_m.gguf "The capital of France is" 32
+```
+
+The API is 0.x: it will change. Everything else in the crate is private.
 
 ## Usage
 
@@ -718,8 +767,9 @@ Read in this order:
    numbered steps (norm, QKV, RoPE, KV cache, attention, output projection,
    SwiGLU FFN, residuals). Then `feed_batch`, the same math for 64 prompt
    tokens at once, reading each weight row once per batch.
-4. **`src/main.rs`, `run_lm`**: encode the prompt, prefill in batches, then
-   `generate`: `forward`, pick the next token (argmax, or `sample.rs`), repeat.
+4. **`src/cli.rs`, `run_lm`**: encode the prompt, prefill in batches, then
+   `generate` (`src/generate.rs`): `forward`, pick the next token (argmax, or `sample.rs`), repeat.
+   (`src/lib.rs` is the crate root and the public API; `src/main.rs` only calls `axon::cli::main`.)
 
 `pool.rs` (the worker pool) and `tokenizer.rs` (byte-level BPE) can be read
 any time.
