@@ -1,4 +1,4 @@
-# Hybrid step: the prompt chunk and the decode rows in one pass  (PR #TBD)
+# Hybrid step: the prompt chunk and the decode rows in one pass  (PR #119)
 
 - Date: 2026-10-20. Branch: feat/hybrid-step. Base: main aecc49d, then ab5568c merged in (#117). Status: open (draft)
 - Pick / design: Fable's 10-19 next-steps review, §3 item 1 (b); research-sched.md P1 (Sarathi piggybacking).
