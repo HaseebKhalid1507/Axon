@@ -196,7 +196,12 @@ pub enum KvData {
 /// A KV cache element type, as AXON_KV or `--kv` names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum KvType {
+    /// The default, on the CPU and the GPU.
     F16,
+    /// f32 caches on the CPU (an A/B reference); a model's GPU layers stay
+    /// f16. Process-wide: `Backend::new` refuses f16 and f32 in one process.
+    /// The library never reads AXON_KV: parse it with `KvType::parse` (as
+    /// the CLI and examples/embed.rs do) and pass the type.
     F32,
     /// int8 with a scale per (position, kv head): the GPU only
     /// (cuda/decode.cu has the rule); the CPU has no q8 cache.
@@ -232,9 +237,11 @@ pub fn kv_f32_setting() -> Result<bool, String> {
 
 static USE_F32: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
-/// Whether new caches store f32 (AXON_KV=f32) rather than f16 (default,
-/// or AXON_KV=f16), unless `set_f32` said first. Read once; the CLI has
-/// already rejected bad values.
+/// Whether new caches store f32 rather than f16. `Backend::new` fixes it
+/// from its `kv` argument (`set_f32`) before any cache exists, so library
+/// paths never reach the fallback: AXON_KV=f32, read once, which only CLI
+/// paths that make no Backend use (`axon info`'s predicted fingerprints;
+/// the CLI has already rejected bad values).
 pub fn use_f32() -> bool {
     *USE_F32.get_or_init(|| kv_f32_setting().unwrap_or_else(|e| panic!("{e}")))
 }
