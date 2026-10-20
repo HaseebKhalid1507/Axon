@@ -1537,7 +1537,9 @@ __device__ __forceinline__ void g2_copy(u8* wb, u8* st, const u8* w, u64 rb, int
     for (int k = 0; k < BN * 16 / G2_THREADS; k++) {
         int tk = (tid >> 4) + k * (G2_THREADS / 16), z = z0 + tk;
         const u8* a = g2_row(act, astride, z, nb);
+#ifndef ABL_NO_COPY_VALS
         if (cvalid) cp16q(xs + tk * 256 + 16 * (c ^ (tk & 7)), a + voff + 16 * c, z < nb);
+#endif
     }
     if (L::RAW) {
         int j = tid & 7;
@@ -1545,14 +1547,18 @@ __device__ __forceinline__ void g2_copy(u8* wb, u8* st, const u8* w, u64 rb, int
         for (int k = 0; k < BN * 8 / G2_THREADS; k++) {
             int tk = (tid >> 3) + k * (G2_THREADS / 8), z = z0 + tk;
             const u8* a = g2_row(act, astride, z, nb);
+#ifndef ABL_NO_COPY_BSUM
             cp4q(xb + tk * 32 + 4 * j, a + 2 * np + np / 64 + 4 * ((u64)s * 8 + j), z < nb);
+#endif
         }
     }
     if (L::KQ) {
         for (int tk = tid; tk < BN; tk += G2_THREADS) {
             int z = z0 + tk;
             const u8* a = g2_row(act, astride, z, nb);
+#ifndef ABL_NO_COPY_BSUM
             cp4q(xd + 4 * tk, a + 2 * np + 4 * (u64)s, z < nb);
+#endif
         }
     } else {
         int e = tid & 7;
