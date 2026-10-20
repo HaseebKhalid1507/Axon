@@ -5002,16 +5002,20 @@ fn quant(v: &[f64], q: f64) -> f64 {
 /// --prefill-ms 60: main's defaults); off with --prefill-ms 0 (chunks of
 /// exactly the budget: the chunk pass alone is its ITL minus the decode
 /// step's), admit only. A fresh server per mode and part.
-/// - admit: `AXON_AB_DEC` (4) streamed greedy decoders, then one
-///   ~`AXON_AB_LONG` (20000) token prompt (max_tokens 16): the decoders'
-///   token gaps before it (ITL before) and those overlapping its send ..
-///   first token (ITL during), p50 / p99 / max, its TTFT.
+/// - admit: `AXON_AB_DEC` (4) streamed greedy decoders, then one prompt
+///   of at most `AXON_AB_LONG` (20000) tokens, counted by the model's
+///   tokenizer (the slots' context sized from the count; max_tokens
+///   16): the decoders' token gaps before it (ITL before) and those
+///   overlapping its send .. first token (ITL during), p50 / p99 / max,
+///   its TTFT.
 /// - loop: `AXON_AB_C` (8) clients, `AXON_AB_REQS` (4) requests each in
 ///   turn, ~`AXON_AB_WORDS` (400) words of salted prompt, `AXON_AB_N`
 ///   (128) tokens, greedy: aggregate tok/s (all tokens / wall), TTFT and
 ///   ITL p50 / p99.
 ///
 /// Every mode's texts must equal the round's first mode's (same_text).
+/// Smoke run (every part, the admit at full size): `AXON_AB_ROUNDS=1
+/// AXON_AB_REQS=2` on the test model.
 #[test]
 #[ignore]
 fn serve_hybrid_ab() {
@@ -5038,16 +5042,44 @@ fn serve_hybrid_ab() {
         env("AXON_AB_N", 128),
     );
     let parts = std::env::var("AXON_AB_PARTS").unwrap_or("admit,loop".into());
-    eprintln!(
-        "serve_hybrid_ab: {path}, budget {budget}, {rounds} rounds; admit {dec} decoders + {long}; \
-         loop C={c} x {reqs} reqs, {words} words, {n} tokens"
-    );
     let sent = "The quick brown fox jumps over the lazy dog near the river bank.";
-    let long_prompt = |salt: usize| {
-        let k = long / 16;
+    // ~long tokens: sentences of ~16 tokens, sized by the model's own
+    // tokenizer (the context is sized from the real count below).
+    let tok = Tokenizer::from_gguf(&crate::gguf::load(&path).unwrap());
+    let text_of = |k: usize, salt: usize| {
         let s: Vec<String> = (0..k).map(|j| format!("{j}. {sent}")).collect();
         format!("{salt} {} Summary:", s.join(" "))
     };
+    let mut k = long / 16;
+    while k > 1 && tok.encode_prompt(&text_of(k, 7000)).len() > long {
+        k = k * 99 / 100;
+    }
+    let long_prompt = |salt: usize| text_of(k, salt);
+    let long_toks = (0..rounds)
+        .map(|r| tok.encode_prompt(&long_prompt(7000 + r)).len())
+        .max()
+        .unwrap_or(0);
+    let loop_prompt = |r: usize, i: usize, q: usize| {
+        let w = [
+            "river", "stone", "garden", "engine", "violet", "harbor", "signal", "meadow",
+        ];
+        let p: Vec<&str> = (0..words).map(|x| w[(x * 7 + i + q) % 8]).collect();
+        format!("{r}-{i}-{q}: {}\nSummary:", p.join(" "))
+    };
+    let loop_toks = (0..rounds)
+        .flat_map(|r| (0..c).flat_map(move |i| (0..reqs).map(move |q| (r, i, q))))
+        .map(|(r, i, q)| tok.encode_prompt(&loop_prompt(r, i, q)).len())
+        .max()
+        .unwrap_or(0);
+    // Each slot's context: its longest prompt, its tokens (the decoders':
+    // 1200 on short prompts), 64 to spare, whole KiB.
+    let admit_ctx = (long_toks + 16 + 64).max(1300 + 64).next_multiple_of(1024);
+    let loop_ctx = (loop_toks + n + 64).next_multiple_of(1024);
+    eprintln!(
+        "serve_hybrid_ab: {path}, budget {budget}, {rounds} rounds; admit {dec} decoders + a \
+         {long_toks}-token prompt (ctx {admit_ctx}); loop C={c} x {reqs} reqs, {loop_toks} tokens \
+         of prompt at most, {n} tokens (ctx {loop_ctx})"
+    );
     let modes: [(&str, bool, usize); 3] =
         [("on", true, 60), ("off", false, 60), ("off-ms0", false, 0)];
     // (part, mode) -> per-round stats rows.
@@ -5065,8 +5097,8 @@ fn serve_hybrid_ab() {
             for k in 0..ms.len() {
                 let (mode, hybrid, pms) = modes[ms[(k + r) % ms.len()]];
                 let ctx = match part {
-                    "admit" => (long + 2048).next_multiple_of(1024),
-                    _ => 4096,
+                    "admit" => admit_ctx,
+                    _ => loop_ctx,
                 };
                 let par = if part == "admit" { dec + 1 } else { c };
                 let s = server_with(&path, Device::Cuda, |o| {
@@ -5139,8 +5171,7 @@ fn serve_hybrid_ab() {
                                 sc.spawn(move || {
                                     (0..reqs)
                                         .map(|q| {
-                                            let p: Vec<&str> = (0..words).map(|w| ["river", "stone", "garden", "engine", "violet", "harbor", "signal", "meadow"][(w * 7 + i + q) % 8]).collect();
-                                            let b = json!({"prompt": format!("{r}-{i}-{q}: {}\nSummary:", p.join(" ")),
+                                            let b = json!({"prompt": loop_prompt(r, i, q),
                                                            "max_tokens": n, "temperature": 0});
                                             stream_times(a, &b)
                                         })
