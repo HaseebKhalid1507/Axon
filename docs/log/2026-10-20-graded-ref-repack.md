@@ -1,6 +1,6 @@
 # Graded logit tests: the reference is built repacked explicitly  (PR #105)
 
-- Date: 2026-10-20. Branch: fix/graded-ref-repack. Base: main dc80363. Status: open
+- Date: 2026-10-20. Branch: fix/graded-ref-repack. Base: main dc80363. Status: open. `gemma3_matches_reference_forward` under AXON_REPACK=0 is #106 (separate)
 - Pick / design: found during #104's review gates. `oss_gpu_logits_graded_model` failed on main and on #104 alike
   when it was run with `AXON_REPACK=0`.
 
@@ -34,11 +34,13 @@ The two KLs move together because the reference itself changed: with the env set
 ## How it was verified
 | gate | result | job ID / log |
 |---|---|---|
-| affected tests, default env, bella | R_DEFAULT | 1020-010138-c875 |
-| affected tests, `AXON_REPACK=0`, bella | R_REPACK0 | 1020-010139-4ab6 |
-| fast tier (`scripts/test-tier.sh fast`, `TIER_SHARD=3`): release | R_FASTREL | 1020-010139-6bb9 / c8d0 / 5ec4 |
-| fast tier: debug assertions (CPU queue) | R_FASTDBG | 1020-010139-67fa / ccf9 / bc9b |
-| `ref_spread_zero_fails_by_name` at af34f3e | R_SPREAD | 1020-010631-de37 |
+| affected tests, default env, bella (97a99af) | 37 passed, 5 ignored | 1020-010138-c875 |
+| affected tests, `AXON_REPACK=0`, bella (97a99af) | 2 failed: an unconverted gemma3 ref (caught by the new check, fixed in f8e6b10) and #106 | 1020-010139-4ab6 |
+| affected tests, `AXON_REPACK=0`, f8e6b10, #106's test skipped | 36 passed, 5 ignored | 1020-014803-a36f |
+| gemma3 graded tests, default env, f8e6b10 | 3 passed | 1020-014803-4317 |
+| fast tier (`scripts/test-tier.sh fast`, `TIER_SHARD=3`): release | 202 + 225 + 186 passed | 1020-010139-6bb9 / c8d0 / 5ec4 |
+| fast tier: debug assertions (CPU queue) | 162 + 229 + 240 passed | 1020-010139-67fa / ccf9 / bc9b |
+| `ref_spread_zero_fails_by_name` at af34f3e | passed (release; debug 1020-011056-86b3) | 1020-010631-de37 |
 | md5 of `gen` | n/a: no non-test code changed | |
 | clippy -D warnings (bin + test), rustfmt | clean | (local) |
 
