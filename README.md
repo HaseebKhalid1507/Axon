@@ -433,6 +433,9 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
   `axon_ttft_seconds` (from the request's body read, so tokenizing and queueing count, to
   its first text) and `axon_itl_seconds` (between a request's
   text events, about one token each). No host-RAM KV store hits yet: serve has no store.
+  A request is counted in `axon_requests_total` before its first byte is sent, and out of
+  `axon_requests_in_flight` and its slot before its last byte: a client that has the whole
+  response, then reads /metrics, never sees its own request still running.
 - `GET /slots`: JSON, `{"ctx", "slots": [{"id", "busy", "held_tokens", "request_id",
   "age_ms"}], "queue_depth"}`. `held_tokens`: the prefix whose KV rows the slot holds (what
   a later prompt can reuse); `request_id` is the `#n` of the stderr log. A request running

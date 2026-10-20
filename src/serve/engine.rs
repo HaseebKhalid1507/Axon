@@ -159,6 +159,8 @@ pub(super) struct Batch<'a, 't> {
     /// Generated tokens admission reserves pages for (`GROW_TOKENS`; tests
     /// lower it to force preemption).
     grow_tokens: usize,
+    /// Where the slots' state is shown (/slots, /metrics; `publish`).
+    pub metrics: Option<Arc<super::ops::Metrics>>,
 }
 
 /// What gives up pages for running request `growing`'s next page
@@ -245,7 +247,25 @@ impl<'a, 't> Batch<'a, 't> {
             preempted: 0,
             unfed: 0,
             grow_tokens: GROW_TOKENS,
+            metrics: None,
         }
+    }
+
+    /// Show the slots' state in `metrics`: every engine step, and before a
+    /// request's last event, so that a client that has its whole response
+    /// never sees its slot busy (#112).
+    pub fn publish(&self) {
+        let Some(m) = &self.metrics else {
+            return;
+        };
+        let pages = self.pages().map(|p| super::ops::PagesView {
+            free: p.free,
+            total: p.total,
+            size: p.size,
+            preempted: self.preempted,
+            unfed: self.unfed,
+        });
+        m.publish_pool(self.slot_states(), pages);
     }
 
     /// Tests: reserve pages for `n` generated tokens a request at admission
@@ -809,8 +829,12 @@ impl<'a, 't> Batch<'a, 't> {
     /// Every running request gets error `e` and leaves (its slot freed).
     pub fn fail_all(&mut self, e: &str) {
         let pre = self.pre.drain(..).map(|f| f.seq);
-        for s in pre.chain(self.seqs.drain(..)).collect::<Vec<_>>() {
+        let failed: Vec<_> = pre.chain(self.seqs.drain(..)).collect();
+        for s in &failed {
             self.busy[s.slot] = false;
+        }
+        self.publish();
+        for s in failed {
             let _ = s.job.tx.send(Event::Error(e.to_string()));
         }
     }
@@ -863,6 +887,7 @@ impl<'a, 't> Batch<'a, 't> {
                 self.seqs.len() + 1
             );
         }
+        self.publish();
         let _ = s.job.tx.send(Event::Done { usage, finish });
     }
 }
