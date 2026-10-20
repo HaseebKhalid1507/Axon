@@ -79,9 +79,9 @@
 //! call: `<tool_call>\n{"name": "` (named: through `"arguments": `). The model
 //! then has to call, and for Qwen3 the reply skips reasoning (the empty
 //! `<think>` block comes first). A named choice renders only that tool.
-//! gpt-oss: the reply opens as `<|start|>assistant to=functions` (required:
-//! the model writes `.NAME`, the pretoken split it learned) or `... to=
-//! functions.NAME<|channel|>commentary json<|message|>` (named), skipping
+//! gpt-oss: the reply opens as `<|start|>assistant to=functions.` (required:
+//! the model writes the name; ending before the `.` let it skip the call)
+//! or `... to=functions.NAME<|channel|>commentary json<|message|>` (named), skipping
 //! the analysis; a named choice still renders every tool, so the prompt's
 //! prefix stays the same as with auto.
 
@@ -1232,11 +1232,14 @@ fn harmony(t: &Template, tok: &Tokenizer, r: &ToolReq) -> Result<Rendered, ApiEr
     }
     k.lit("<|start|>assistant");
     // tool_choice required / named: the reply opens a call (skipping the
-    // analysis), in the history form. Required stops before the `.`: o200k
-    // splits `to=functions.get_weather` as ` to`, `=functions`, `.get`,
-    // `_weather`, so the model writes `.name` as it learned to.
+    // analysis), in the history form. Required ends with the `.`: o200k
+    // splits `to=functions.get_weather` as ` to`, `=functions`, `.get`, so
+    // a lone `.` token is off the trained split, but without it the model
+    // takes `functions` as a whole recipient and goes on to `<|channel|>
+    // analysis` (gpt-oss-20b, greedy: "Hi there" got a greeting, no call;
+    // jobs 1020-063226-3966 and -b46c). The `.` leaves it only a name.
     match &r.choice {
-        Choice::Required => k.text(" to=functions"),
+        Choice::Required => k.text(" to=functions."),
         Choice::Named(n) => {
             k.text(" to=functions.");
             k.text(n);

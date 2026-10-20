@@ -503,7 +503,7 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
   reply is plain content); `required` or `{"type": "function", "function": {"name": ...}}`.
   The last two start the reply with the opening of a call (the named one: through its
   `"arguments": `), so the model must call. Qwen3 and gpt-oss then skip their reasoning
-  (gpt-oss: `required` opens `to=functions` and the model names the function; a named
+  (gpt-oss: `required` opens `to=functions.` and the model names the function; a named
   choice keeps every tool in the prompt).
   Without `tools` they are a 400.
   `parallel_tool_calls`, `strict`, `store`, `reasoning_effort` and `prompt_cache_key` are

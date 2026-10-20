@@ -774,30 +774,34 @@ fn render_harmony() {
     );
     assert!(r.parser.is_none() && r.channels.is_none());
     // required / named: the reply opens a call, in the history form.
-    // Required stops at a pretoken boundary: o200k gives `=functions` and
-    // `.get` in the history form, so the prompt ends before the `.`, and
-    // the model writes `.NAME` as it saw it in training.
+    // Required ends with `to=functions.`: the model can only write a name
+    // (ending before the `.`, on o200k's `=functions` | `.get` boundary, let
+    // gpt-oss-20b take `functions` as the recipient and skip the call). The
+    // prefill is the prompt's last tokens, the splitter primed on them: a
+    // name, a header and `<|call|>` make the call; a header with no name
+    // doesn't.
     let r = check(
         &tok,
         &t,
         &with(&weather, "\"tool_choice\": \"required\""),
         false,
-        &format!("{weather_prompt} to=functions"),
+        &format!("{weather_prompt} to=functions."),
     );
-    assert_eq!(r.channels.unwrap().call(), None);
-    let full = tok.encode("assistant to=functions.get_weather");
-    let head = tok.encode("assistant to=functions");
-    assert_eq!(full[..head.len()], head[..]);
-    assert!(
-        tok.decode(&full[head.len()..head.len() + 1])
-            .starts_with('.')
-    );
-    let dot = tok.encode("assistant to=functions.");
-    assert_ne!(
-        full[..dot.len()],
-        dot[..],
-        "a bare `.` is not a history token"
-    );
+    let tail = tok.encode_special("<|start|>assistant to=functions.");
+    assert_eq!(r.ids[r.ids.len() - tail.len()..], tail[..]);
+    let ch = r.channels.unwrap();
+    assert_eq!(ch.call(), None);
+    let feed = |reply: &str| {
+        let mut ch = ch.clone();
+        let mut called = false;
+        for id in tok.encode_special(reply) {
+            ch.push(id, &tok.decode_bytes(&[id]));
+            called |= ch.call() == Some("functions.get_weather");
+        }
+        called
+    };
+    assert!(feed("get_weather<|channel|>commentary json<|message|>{}"));
+    assert!(!feed("<|channel|>analysis<|message|>Hi."));
     // Named: every tool stays in the developer message (the prompt's
     // prefix is auto's), the prefill forces the call.
     let (_, rich, rich_prompt) = case("tools_rich");

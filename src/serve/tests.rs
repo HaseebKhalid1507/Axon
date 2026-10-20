@@ -4446,10 +4446,10 @@ fn harmony_calls_from_channels() {
         let (c, _, _) = run(render(named), reply, &[]);
         assert!(parse(&c).is_empty(), "{reply:?}");
     }
-    // required: the prompt ends at `to=functions`; the model writes `.NAME`.
+    // required: the prompt ends at `to=functions.`; the model writes the name.
     let (c, _, _) = run(
         render(r#", "tool_choice": "required""#),
-        r#".get_weather<|channel|>commentary json<|message|>{"city":"Paris"}<|call|>"#,
+        r#"get_weather<|channel|>commentary json<|message|>{"city":"Paris"}<|call|>"#,
         &[],
     );
     assert_eq!(parse(&c), want);
@@ -4608,10 +4608,15 @@ fn serve_gptoss_tool_calls() {
     );
 
     // Required: a call to one of the offered tools, even when the question
-    // doesn't need one (the prompt ends at `to=functions`).
+    // doesn't need one (the prompt ends at `to=functions.`).
     let two = json!([tools[0], {"type": "function", "function": {"name": "get_time",
         "description": "Get the current time in a city", "parameters": params}}]);
-    for ask in ["Hi there", "What time is it in Tokyo?"] {
+    for ask in [
+        "Hi there",
+        "What time is it in Tokyo?",
+        "Tell me a joke.",
+        "What is 2+2?",
+    ] {
         let req = json!({"messages": [{"role": "user", "content": ask}], "tools": two,
             "tool_choice": "required", "temperature": 0, "max_tokens": 128});
         let v = post(a, "/v1/chat/completions", req).json();

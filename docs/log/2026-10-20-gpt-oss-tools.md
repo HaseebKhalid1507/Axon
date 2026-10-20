@@ -120,3 +120,15 @@ turn 1 with the result appended: see the review round below.)
 - SHOULD 4 (edge cases of a reply with no header) is #114.
 - Gates (delta; 6bcb9a3's full set still covers everything else): unit (CPU) 1020-065333-b744; unit + gpt-oss
   model tests + `serve_gptoss_tool_calls`, `serve::` debug, md5 + serve A/B in one bella job, 1020-065334-6933.
+
+## Round 2 regression: `required` on gpt-oss-20b → fixed back to `to=functions.`
+Round 1's MUST 2 change (end the `required` prefill at `to=functions`, o200k's pretoken boundary) failed on the
+real model. With "Hi there" and `tool_choice: required`, gpt-oss-20b took `functions` as the whole recipient, went
+on to `<|channel|>analysis`, and greeted: `finish_reason: stop`, no call. MEASURED, `serve_gptoss_tool_calls` at
+6bcb9a3, release 1020-063226-3966 and debug 1020-063226-b46c, the same reply both times (prompt 155 tok, 112 from
+the cache). It is the model's choice, not the cache: the prompt is the rendered one, prefill included, and
+`render_harmony` checks those tokens.
+The prefill ends with the `.` again. The lone `.` token is off the trained split, but the model can only continue
+with a name. The real-model test now has four `required` prompts (a greeting, a time question, a joke, arithmetic),
+each of which must call an offered tool. `render_harmony` checks that the prompt ends with the prefill tokens and that
+the primed splitter makes a call from a name and finds none when a header follows directly.
