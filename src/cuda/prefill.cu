@@ -1960,9 +1960,12 @@ __device__ __forceinline__ void g2_compute(const u8* wb, const u8* st, int nblk,
 template <int QT, int NT, int ST, int GU = 0, int WR = 2, bool TW = false>
 __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, const u8* act,
                                         u64 astride, int nb, const float* bias, int mode,
-                                        float* out, u64 ostride, const u8* w2 = nullptr) {
+                                        float* out, u64 ostride, const u8* w2 = nullptr,
+                                        int zt = -1) {
 #if __CUDA_ARCH__ >= 800
     // WR warps along rows x 8 / WR along tokens, each 32 rows x 8 NT tokens.
+    // zt >= 0: the block's token tile is zt, not blockIdx.x (moe_res.cu's
+    // grouped expert GEMMs, whose blockIdx.x indexes a tile list).
     const int WC = 8 / WR, BM = 32 * WR, BN = 8 * NT * WC;
     typedef G2L<QT, BN, ST, BM> L;
     static_assert(WR == 2 || L::RAW, "the register-staged types stage 64 rows (g2_item)");
@@ -1974,7 +1977,7 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
     u8* wbuf = sm;
     u8* stg = sm + L::NWB * L::W;
     int nblk = n / (L::KQ ? 256 : 32), nst = (n + 255) / 256;
-    int r0 = blockIdx.y * (GU ? BM / 2 : BM), z0 = blockIdx.x * BN;
+    int r0 = blockIdx.y * (GU ? BM / 2 : BM), z0 = zt < 0 ? blockIdx.x * BN : zt * BN;
     int warp = threadIdx.x >> 5, wr = warp % WR, wc = warp / WR;
     float acc[2][NT][4];
 #pragma unroll

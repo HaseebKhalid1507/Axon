@@ -1085,6 +1085,14 @@ impl<'a> Qwen2<'a> {
         Self::build(m, repack, false, usize::MAX, true)
     }
 
+    /// `new_experts` of a deepseek2 model with only layers `layers`' experts
+    /// repacked (tests: a few layers' CPU experts without the whole arena).
+    #[cfg(test)]
+    pub(crate) fn new_experts_of(m: &'a Model, layers: &[usize]) -> Qwen2<'a> {
+        assert_eq!(m.arch, "deepseek2", "new_experts_of: deepseek2 only");
+        deepseek2::build_only(m, true, true, Some(layers))
+    }
+
     /// The embedding and layers 0..k only (all of them, and the output head,
     /// if k >= n_layers): the CPU half of a model split across devices
     /// (`hybrid`). Only these weights are read, repacked and released; the
