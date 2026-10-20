@@ -132,3 +132,16 @@ The prefill ends with the `.` again. The lone `.` token is off the trained split
 with a name. The real-model test now has four `required` prompts (a greeting, a time question, a joke, arithmetic),
 each of which must call an offered tool. `render_harmony` checks that the prompt ends with the prefill tokens and that
 the primed splitter makes a call from a name and finds none when a header follows directly.
+
+## `required` with several tools: a 400 (#116); one tool is the named choice
+The `.` didn't hold either. At 56fc0d1 (job 1020-081323-5660, MEASURED), gpt-oss-20b got "Hi there" with
+`get_weather` + `get_time` and `required`. It left `to=functions.` with `<|channel|>analysis`, decided "No function
+needed", and answered "Hello!" (finish `stop`). The rest of that job passed: md5 identical, serve A/B 17/17 ×5 and 7/7,
+`serve::` debug 119/1 (only this case failed). A text prefill can't force a choice among several tools: the model can
+always leave it with a special token.
+Forcing it needs constrained decoding: mask the logits after `to=functions.` to the offered names. Greedy picks are
+made inside the backends' step (`lm::RowOut::Pick`, a device argmax on the batched CUDA path) and in both generate
+loops, which is the shared hot path, so it is out of this PR's scope. Filed as #116. Until then:
+- `required` with one tool is that tool's named choice (its prefill: the arguments follow);
+- `required` with several tools on gpt-oss is a 400 (`tool_choice`), whose message points to naming the tool or `auto`.
+Also: a header token (`<|channel|>` / `<|message|>`) inside a call's arguments now cuts the call (not a call).

@@ -774,37 +774,33 @@ fn render_harmony() {
     );
     assert!(r.parser.is_none() && r.channels.is_none());
     // required / named: the reply opens a call, in the history form.
-    // Required ends with `to=functions.`: the model can only write a name
-    // (ending before the `.`, on o200k's `=functions` | `.get` boundary, let
-    // gpt-oss-20b take `functions` as the recipient and skip the call). The
-    // prefill is the prompt's last tokens, the splitter primed on them: a
-    // name, a header and `<|call|>` make the call; a header with no name
-    // doesn't.
+    // Required: with one tool, the named choice (its prefill); with several,
+    // a 400 (a prefill can't force one of them, #116).
+    let named_weather =
+        format!("{weather_prompt} to=functions.get_weather<|channel|>commentary json<|message|>");
     let r = check(
         &tok,
         &t,
         &with(&weather, "\"tool_choice\": \"required\""),
         false,
-        &format!("{weather_prompt} to=functions."),
+        &named_weather,
     );
-    let tail = tok.encode_special("<|start|>assistant to=functions.");
+    let tail = tok.encode_special(" to=functions.get_weather<|channel|>commentary json<|message|>");
     assert_eq!(r.ids[r.ids.len() - tail.len()..], tail[..]);
-    let ch = r.channels.unwrap();
-    assert_eq!(ch.call(), None);
-    let feed = |reply: &str| {
-        let mut ch = ch.clone();
-        let mut called = false;
-        for id in tok.encode_special(reply) {
-            ch.push(id, &tok.decode_bytes(&[id]));
-            called |= ch.call() == Some("functions.get_weather");
-        }
-        called
-    };
-    assert!(feed("get_weather<|channel|>commentary json<|message|>{}"));
-    assert!(!feed("<|channel|>analysis<|message|>Hi."));
+    assert_eq!(r.channels.unwrap().call(), Some("functions.get_weather"));
+    let (_, rich, _) = case("tools_rich");
+    let e = render(
+        &t,
+        &tok,
+        &with(&rich, "\"tool_choice\": \"required\""),
+        false,
+    )
+    .err()
+    .unwrap();
+    assert_eq!(e.param, Some("tool_choice"));
     // Named: every tool stays in the developer message (the prompt's
     // prefix is auto's), the prefill forces the call.
-    let (_, rich, rich_prompt) = case("tools_rich");
+    let (_, _, rich_prompt) = case("tools_rich");
     check(
         &tok,
         &t,

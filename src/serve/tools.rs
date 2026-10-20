@@ -79,11 +79,11 @@
 //! call: `<tool_call>\n{"name": "` (named: through `"arguments": `). The model
 //! then has to call, and for Qwen3 the reply skips reasoning (the empty
 //! `<think>` block comes first). A named choice renders only that tool.
-//! gpt-oss: the reply opens as `<|start|>assistant to=functions.` (required:
-//! the model writes the name; ending before the `.` let it skip the call)
-//! or `... to=functions.NAME<|channel|>commentary json<|message|>` (named), skipping
+//! gpt-oss: a named choice (or `required` with one tool) opens the reply as
+//! `<|start|>assistant to=functions.NAME<|channel|>commentary json<|message|>`, skipping
 //! the analysis; a named choice still renders every tool, so the prompt's
-//! prefix stays the same as with auto.
+//! prefix stays the same as with auto. `required` with several tools is a
+//! 400: a prefill can't force one of them (#116).
 
 use super::Template;
 use super::api::{ApiError, Usage, quote};
@@ -1149,6 +1149,31 @@ pub const HARMONY_CALL_CUT: &str = "\u{1}4";
 /// and reasoning, the reasoning is kept; it does refuse a tool message with
 /// no call before it.
 fn harmony(t: &Template, tok: &Tokenizer, r: &ToolReq) -> Result<Rendered, ApiError> {
+    // `required`: a prefill can't force one of several tools (the model
+    // leaves `to=functions.` with a special token: gpt-oss-20b, "Hi there",
+    // jobs 1020-063226-3966, 1020-081323-5660), and there is no constrained
+    // decoding (#116). One tool: it is the named choice.
+    let choice = match (&r.choice, &r.tools[..]) {
+        (Choice::Required, [one]) => {
+            let name = one
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .and_then(J::str);
+            Choice::Named(name.unwrap_or_default().to_string())
+        }
+        (Choice::Required, _) => {
+            return Err(bad(
+                "tool_choice",
+                "'required' with more than one tool is not supported for gpt-oss (#116): name \
+                 the tool ({\"type\": \"function\", \"function\": {\"name\": ...}}), or use 'auto'",
+            ));
+        }
+        (c, _) => c.clone(),
+    };
+    let r = &ToolReq {
+        choice,
+        ..r.clone()
+    };
     let mut k = Toks::new(tok, &HARMONY_MARKERS);
     // A named choice is forced by the prefill below, not by the tool list.
     let listed = match r.choice {
@@ -1231,21 +1256,12 @@ fn harmony(t: &Template, tok: &Tokenizer, r: &ToolReq) -> Result<Rendered, ApiEr
         }
     }
     k.lit("<|start|>assistant");
-    // tool_choice required / named: the reply opens a call (skipping the
-    // analysis), in the history form. Required ends with the `.`: o200k
-    // splits `to=functions.get_weather` as ` to`, `=functions`, `.get`, so
-    // a lone `.` token is off the trained split, but without it the model
-    // takes `functions` as a whole recipient and goes on to `<|channel|>
-    // analysis` (gpt-oss-20b, greedy: "Hi there" got a greeting, no call;
-    // jobs 1020-063226-3966 and -b46c). The `.` leaves it only a name.
-    match &r.choice {
-        Choice::Required => k.text(" to=functions."),
-        Choice::Named(n) => {
-            k.text(" to=functions.");
-            k.text(n);
-            k.lit("<|channel|>commentary json<|message|>");
-        }
-        _ => {}
+    // tool_choice named (and required with one tool): the reply opens the
+    // call (skipping the analysis), in the history form.
+    if let Choice::Named(n) = &r.choice {
+        k.text(" to=functions.");
+        k.text(n);
+        k.lit("<|channel|>commentary json<|message|>");
     }
     let ids = k.done();
     let channels = match r.choice {

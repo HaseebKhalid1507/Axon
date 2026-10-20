@@ -673,6 +673,11 @@ impl Channels {
         {
             self.unheaded = None;
         }
+        if self.tools && (id == self.channel || id == self.message) && self.to.is_some() {
+            // A header inside a call's arguments: the call is malformed
+            // (cut, not closed).
+            self.to = None;
+        }
         if id == self.channel {
             self.name = Some(Vec::new());
             self.part = Part::Hidden;
