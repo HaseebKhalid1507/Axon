@@ -1,0 +1,23 @@
+[axon-run 22:28:18] submitted 1019-222818-e4d6 by /home/haseeb/.cache/axon-moerouter: /home/haseeb/.cache/axon-moerouter/axon-legacy-0fac171 router_bits_match_legacy --nocapture
+[axon-run 00:04:05] job 1019-222818-e4d6 -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 800 --env AXON_NODE_PACK=1 --src /home/haseeb/.cache/axon-wt-moerouter /home/haseeb/.cache/axon-moerouter/axon-legacy-0fac171 router_bits_match_legacy --nocapture
+axon-remote: uploading axon-legacy-0fac171 (f3944535661955c41e4812ea) + source of /home/haseeb/.cache/axon-wt-moerouter
+
+sent 1,681,596 bytes  received 4,317 bytes  3,371,826.00 bytes/sec
+total size is 6,081,369  speedup is 3.61
+
+sent 6,586,212 bytes  received 35 bytes  4,390,831.33 bytes/sec
+total size is 21,004,992  speedup is 3.19
+axon-remote: job 20261020-000407-axon-legacy-0fac171-4032047 on avante (GPU, 800 MB)
+[axon-node 00:04:07] GPU slot taken; job wants 800 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 50
+[axon-node 00:04:07] run axon-legacy-0fac171 (f3944535661955c41e4812ea) as /home/haseeb/.cache/axon-wt-moerouter on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 1 test
+testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+router_bits_match_legacy: 280 configs, 2809856 slots, 0 differ
+test router_legacy_tests::router_bits_match_legacy ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 677 filtered out; finished in 1.20s
+
+[axon-node 00:04:09] exit 0 after 1.3s
+[axon-node 00:04:09] peak RSS 0 MB (job process tree PSS, 2 s samples x0)
+[axon-run 00:04:09] exit 0 after 4.4s (host avante)
