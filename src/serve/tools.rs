@@ -80,7 +80,8 @@
 //! then has to call, and for Qwen3 the reply skips reasoning (the empty
 //! `<think>` block comes first). A named choice renders only that tool.
 //! gpt-oss: a named choice (or `required` with one tool) opens the reply as
-//! `<|start|>assistant to=functions.NAME<|channel|>commentary json<|message|>`, skipping
+//! `<|start|>assistant<|channel|>commentary to=functions.NAME <|constrain|>json
+//! <|message|>` (the form the model writes calls in), skipping
 //! the analysis; a named choice still renders every tool, so the prompt's
 //! prefix stays the same as with auto. `required` with several tools is a
 //! 400: a prefill can't force one of them (#116).
@@ -1130,11 +1131,8 @@ pub fn harmony_call_open(to: &str) -> String {
     format!("{ESC}1{}{ESC}2", harmony_text(to))
 }
 
-/// A call's end, at its closing marker (`<|call|>` or `<|end|>`).
+/// A call's end (`TextOut` frames a call once it is made).
 pub const HARMONY_CALL_END: &str = "\u{1}3";
-
-/// A call cut off before its closing marker (the token limit): not a call.
-pub const HARMONY_CALL_CUT: &str = "\u{1}4";
 
 /// gpt-oss's template: tools as TypeScript in the developer message, a call
 /// as `<|start|>assistant to=functions.NAME<|channel|>commentary json
@@ -1257,11 +1255,17 @@ fn harmony(t: &Template, tok: &Tokenizer, r: &ToolReq) -> Result<Rendered, ApiEr
     }
     k.lit("<|start|>assistant");
     // tool_choice named (and required with one tool): the reply opens the
-    // call (skipping the analysis), in the history form.
+    // call, skipping the analysis, in the form the model writes its calls
+    // in (`<|channel|>commentary to=functions.NAME <|constrain|>json
+    // <|message|>`), not the template's history form (`assistant
+    // to=functions.NAME<|channel|>commentary json`): after that one,
+    // gpt-oss-20b wrote `{"name": NAME, "params": {...}}`, the tool's
+    // arguments wrapped, and on questions that need no tool reasoning text
+    // after them (job 1020-093636-b9e8, both forms side by side).
     if let Choice::Named(n) = &r.choice {
-        k.text(" to=functions.");
+        k.lit("<|channel|>commentary to=functions.");
         k.text(n);
-        k.lit("<|channel|>commentary json<|message|>");
+        k.lit(" <|constrain|>json<|message|>");
     }
     let ids = k.done();
     let channels = match r.choice {
@@ -1747,7 +1751,6 @@ impl Parser {
                 }
                 '2' => self.undecided = false,
                 '3' if self.inside => self.harmony_end(true, out),
-                '4' if self.inside => self.harmony_end(false, out),
                 _ => {}
             }
         }

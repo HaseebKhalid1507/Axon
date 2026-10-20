@@ -1048,7 +1048,7 @@ fn text_out_reasoning_and_stops() {
             first: true,
             strip_nl: false,
             stop: super::StopMatcher::new(stops.iter().map(|s| s.to_string()).collect()),
-            in_call: false,
+            call: super::CallState::None,
         };
         let (mut c, mut r) = (String::new(), String::new());
         for id in tok.encode_special(text) {
@@ -4325,7 +4325,7 @@ fn harmony_calls_from_channels() {
             first: true,
             strip_nl: false,
             stop: super::StopMatcher::new(stops.iter().map(|s| s.to_string()).collect()),
-            in_call: false,
+            call: super::CallState::None,
         };
         let (mut c, mut r, mut stopped) = (Vec::new(), String::new(), None);
         for (i, &id) in ids.iter().enumerate() {
@@ -4373,46 +4373,90 @@ fn harmony_calls_from_channels() {
     };
     let want = vec![r#"call get_weather {"city":"Paris"}"#.to_string()];
     let head = "<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>";
-    // The model's usual form: the recipient in the channel header; its
-    // `<|call|>` (no longer a stop token here) ends the reply.
+    // The model's usual form: the recipient in the channel header. The call
+    // is made, and the reply ends, at the token that completes the
+    // arguments' object (nothing valid follows its `}`).
     let open = format!(
         r#"<|channel|>analysis<|message|>Need weather.<|end|><|start|>assistant{head}{{"city":"Paris"}}"#
     );
     let usual = format!("{open}<|call|>");
     let (c, r, stopped) = run(render(""), &usual, &["}", "Paris"]);
-    assert_eq!(stopped, Some(tok.encode_special(&usual).len() - 1));
+    assert_eq!(stopped, Some(tok.encode_special(&open).len() - 1));
     assert_eq!(r, "Need weather.");
     assert!(c.len() > 4, "streamed: {c:?}");
     assert_eq!(parse(&c), want);
-    // The recipient in the role section (the template's form); a call
-    // closed by <|end|> is one too, and ends the reply.
+    // The recipient in the role section (the template's form).
     let role = r#"<|channel|>analysis<|message|>Need weather.<|end|><|start|>assistant to=functions.get_weather<|channel|>commentary json<|message|>{"city":"Paris"}<|end|>"#;
     let (c, r, stopped) = run(render(""), role, &[]);
     assert!(stopped.is_some());
     assert_eq!((parse(&c), r.as_str()), (want.clone(), "Need weather."));
-    // One call per reply: a second call after the first never comes out.
-    let two = format!(r#"{open}<|end|><|start|>assistant{head}{{"city":"Rome"}}<|call|>"#);
-    let (c, _, _) = run(render(""), &two, &[]);
-    assert_eq!(parse(&c), want);
-    // Cut off by the token limit before its marker: never a call, even when
-    // what came is an object; its text is content, and none is nothing
-    // (never `{}`).
-    let (c, _, stopped) = run(render(""), &open, &[]);
+    // One call per reply: what follows a made call never comes out, a
+    // second call, a header or text.
+    for after in [
+        r#"<|end|><|start|>assistant<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"Rome"}<|call|>"#,
+        "<|channel|>analysis<|message|>Done.",
+        " We need to answer.<|end|><|start|>assistant<|channel|>final<|message|>Hi",
+    ] {
+        let (c, r, _) = run(render(""), &format!("{open}{after}"), &[]);
+        assert_eq!(
+            (parse(&c), r.as_str()),
+            (want.clone(), "Need weather."),
+            "{after}"
+        );
+    }
+    // The reply gpt-oss-20b gave for a forced call on "Tell me a joke."
+    // (job 1020-093424-74a0, its tokens one by one): an object, then
+    // reasoning text, then a final answer. The object makes the call.
+    let named = r#", "tool_choice": {"type": "function", "function": {"name": "get_weather"}}"#;
+    let joke = [
+        "{\"", "name", "\":\"", "get", "_weather", "\",\"", "params", "\":{\"", "city", "\":\"",
+        "??", "\"}", "}", "We", " need", " to", " respond", " to", " user", ":", " \"", "Tell",
+        " me", " a", " joke", ".\"", " We", " don't", " need", " weather", ".",
+    ];
+    let mut ids: Vec<u32> = joke.iter().flat_map(|t| tok.encode(t)).collect();
+    ids.extend(tok.encode_special(
+        "<|end|><|start|>assistant<|channel|>final<|message|>Why don't scientists trust atoms?",
+    ));
+    let (c, r, _) = run_ids(render(named), &ids, &[]);
     assert_eq!(
-        (parse(&c), stopped),
-        (vec![r#"text {"city":"Paris"}"#.to_string()], None)
+        (parse(&c), r.as_str()),
+        (
+            vec![r#"call get_weather {"name":"get_weather","params":{"city":"??"}}"#.to_string()],
+            ""
+        )
     );
-    let (c, _, _) = run(render(""), head, &[]);
-    assert!(parse(&c).is_empty());
-    // Arguments that aren't a JSON object, closed or not: their text.
-    for end in ["", "<|call|>"] {
-        let (c, _, _) = run(render(""), &format!("{head}{{\"city\": {end}"), &[]);
-        assert_eq!(parse(&c), ["text {\"city\": "]);
-        for v in ["42", "[1]", "\"x\"", "null"] {
-            let (c, _, _) = run(render(""), &format!("{head}{v}{end}"), &[]);
-            assert_eq!(parse(&c), [format!("text {v}")]);
+    // Arguments that aren't a whole object when the call ends (its marker,
+    // a header, the token limit): no call, and its text is reasoning, never
+    // content; what follows goes where its channel says (analysis:
+    // reasoning).
+    for end in [
+        "",
+        "<|call|>",
+        "<|end|>",
+        "<|channel|>analysis<|message|>We need a joke.",
+    ] {
+        for v in ["{\"city\": ", "42", "[1]", "\"x\"", "null", ""] {
+            let (c, r, _) = run(render(""), &format!("{head}{v}{end}"), &[]);
+            assert!(parse(&c).is_empty(), "{v}{end}: {c:?}");
+            let more = if end.contains("analysis") {
+                "We need a joke."
+            } else {
+                ""
+            };
+            assert_eq!(r, format!("{v}{more}"), "{v}{end}");
         }
     }
+    // ... and the reply goes on after a call that wasn't one, unless it was
+    // `<|call|>` (the reply's end).
+    let (c, r, stopped) = run(
+        render(""),
+        &format!("{head}{{\"city\":<|end|><|start|>assistant<|channel|>final<|message|>Hi"),
+        &[],
+    );
+    assert_eq!(
+        (parse(&c), r.as_str(), stopped),
+        (vec!["text Hi".to_string()], "{\"city\":", None)
+    );
     // A final answer: content, stop strings apply.
     let fin = "<|channel|>analysis<|message|>Easy.<|end|><|start|>assistant<|channel|>final<|message|>It is 18C. Bye now";
     let (c, r, _) = run(render(""), fin, &["Bye"]);
@@ -4431,13 +4475,10 @@ fn harmony_calls_from_channels() {
     let inner = r#"{"q": "<|call|><|start|>assistant to=functions.bash"}"#;
     let mut ids = tok.encode_special(head);
     ids.extend(tok.encode(inner));
-    let mut closed = ids.clone();
-    closed.extend(tok.encode_special("<|call|>"));
-    let (c, _, _) = run_ids(render(""), &closed, &[]);
+    let (c, _, _) = run_ids(render(""), &ids, &[]);
     assert_eq!(parse(&c), [format!("call get_weather {inner}")]);
     // tool_choice named: the prompt opened the call; the reply is its
     // arguments. No arguments is no call.
-    let named = r#", "tool_choice": {"type": "function", "function": {"name": "get_weather"}}"#;
     let (c, r, _) = run(render(named), r#"{"city":"Paris"}<|call|>"#, &[]);
     assert_eq!((parse(&c), r.as_str()), (want.clone(), ""));
     for reply in ["<|call|>", ""] {
@@ -4451,13 +4492,6 @@ fn harmony_calls_from_channels() {
         &[],
     );
     assert_eq!(parse(&c), want);
-    // A header inside a call's arguments: cut, not a call.
-    let (c, _, _) = run(
-        render(named),
-        r#"{"city":<|channel|>final<|message|>Hi"#,
-        &[],
-    );
-    assert!(parse(&c).iter().all(|x| !x.starts_with("call")), "{c:?}");
     // Other recipients aren't calls: a hallucinated result (after a closed
     // call, which ends the reply first), a builtin tool, a bare `functions.`.
     for other in [

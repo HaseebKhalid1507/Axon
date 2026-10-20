@@ -145,3 +145,36 @@ loops, which is the shared hot path, so it is out of this PR's scope. Filed as #
 - `required` with one tool is that tool's named choice (its prefill: the arguments follow);
 - `required` with several tools on gpt-oss is a 400 (`tool_choice`), whose message points to naming the tool or `auto`.
 Also: a header token (`<|channel|>` / `<|message|>`) inside a call's arguments now cuts the call (not a call).
+
+## Forced calls: the model's call form, and a call is made when its object is whole
+b104d07's `required` (one tool) case failed on "Tell me a joke." (job 1020-084724-fd79); the rest passed: md5
+identical, serve A/B 17/17 ×5 and 7/7, `serve::` debug 119/1, and the Synaps e2e at 56fc0d1 (1020-081324-9a19).
+The raw tokens (`--think-inline`, streamed one token per chunk; job 1020-093424-74a0) after the named prefill
+`<|start|>assistant to=functions.get_weather<|channel|>commentary json<|message|>`:
+```text
+{" name ":" get _weather "," params ":{" city ":" ?? "} } We need to respond to user: "Tell me a joke." We don't need
+weather. Just a joke. <|end|> <|start|> assistant <|channel|> final <|message|> Why don’t scientists trust atoms? ...
+```
+That is a wrapped object, `{"name": ..., "params": {...}}`, then reasoning text **with no header**, then `<|end|>`.
+`<|end|>` closed the "call", whose arguments weren't JSON, and they came back as content: the reasoning leaked.
+In auto mode the model writes its calls as `<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>{"city":"Paris"}`.
+Prefill forms side by side (job 1020-093636-b9e8, 5 prompts, MEASURED):
+| prefill | arguments the model writes |
+|---|---|
+| A: `assistant to=functions.X<|channel|>commentary json<|message|>` (the template's history form) | `{"name":"get_weather","params"/"arguments"/"json":...}` every time, wrapped; on the haiku prompt, `??…` to the token limit |
+| B: `assistant<|channel|>commentary to=functions.X <|constrain|>json<|message|>` (the model's call form) | `{"city":"London"}` / `{"city":"Paris"}`, the tool's own schema, every time |
+| C: `assistant to=functions.X<|channel|>commentary <|constrain|>json<|message|>` | wrapped, like A |
+
+Fixes:
+- The named prefill (so `required` with one tool too) is B.
+- `TextOut` holds a call's arguments and makes the call as soon as they are a whole JSON object. Nothing valid follows
+  an object's `}`, so a well-formed call never needs its `<|call|>`, and the reply ends there (one call per reply).
+  On B the model's `{"city":"London"}?<|end|>...` makes the call at the `}`.
+- A call that ends any other way (its marker, a header, the token limit) with arguments that aren't a whole object is
+  no call. Its text is **reasoning** (it was on the commentary channel, which is reasoning without tools), never
+  content, and the reply goes on unless the token was `<|call|>`. What follows goes where its channel says.
+- Tests through the real tokenizer and splitter, at every split point:
+  - complete object then a header, text or a second call: one call;
+  - incomplete arguments then `<|end|>`, a header, `<|call|>` or the limit: no call, the text is reasoning;
+  - analysis after a dropped call is reasoning;
+  - the joke reply replayed token by token makes one call.

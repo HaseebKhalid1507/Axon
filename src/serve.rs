@@ -410,8 +410,19 @@ struct TextOut<'t> {
     /// Drop newlines until the next other character.
     strip_nl: bool,
     stop: StopMatcher,
-    /// Harmony with tools: a call's text is going out (`TextOut::harmony`).
-    in_call: bool,
+    /// Harmony with tools: the reply's call (`TextOut::harmony`).
+    call: CallState,
+}
+
+/// A harmony reply's call, as `TextOut` reads it.
+#[derive(Default)]
+enum CallState {
+    #[default]
+    None,
+    /// Open: its recipient and its arguments' text so far.
+    Open(String, String),
+    /// Made: the reply is over.
+    Done,
 }
 
 impl TextOut<'_> {
@@ -448,37 +459,55 @@ impl TextOut<'_> {
     }
 
     /// A harmony reply's token. With tools, the content goes out escaped
-    /// for the tools parser, and a call (delimited by the special tokens, as
-    /// `Channels` reads them) framed out of band (`tools::harmony_text`);
-    /// stop strings don't apply to a call.
+    /// for the tools parser and the call framed out of band
+    /// (`tools::harmony_text`). A call is read from the special tokens that
+    /// delimit it (`Channels`) and held until it is decided: it is made as
+    /// soon as its arguments are a whole JSON object, which ends the reply
+    /// (one call per reply; nothing valid follows an object's `}`). Ended
+    /// any other way (its marker, a header, the token limit) with arguments
+    /// that aren't an object, it is no call, and its text is reasoning, as
+    /// the commentary channel's is without tools. Stop strings don't apply
+    /// to a call.
     fn harmony(&mut self, ch: &mut chat::Channels, id: u32) -> (String, String, bool) {
         let bytes = self.tok.decode_bytes(&[id]);
         let tools = ch.tools();
-        // A call the prompt opened (tool_choice) is announced first.
+        // A call the prompt opened (tool_choice) opens first.
         let mut c = self.call_open(ch);
         let was = ch.call().is_some();
         let part = ch.push(id, &bytes);
         let now = ch.call().is_some();
-        if was && now {
-            c.push_str(&tools::harmony_text(&self.utf8.push(&bytes)));
+        if was && now && matches!(self.call, CallState::Open(..)) {
+            let t = self.utf8.push(&bytes);
+            let closes = t.contains('}');
+            if let CallState::Open(_, args) = &mut self.call {
+                args.push_str(&t);
+            }
+            if closes && let Some(f) = self.call_made() {
+                c.push_str(&f);
+                return (c, String::new(), true);
+            }
             return (c, String::new(), false);
         }
-        if self.in_call && !now {
-            let end = if ch.ended() {
-                tools::HARMONY_CALL_END
-            } else {
-                tools::HARMONY_CALL_CUT
-            };
-            c.push_str(&self.call_close(end));
+        let mut r = String::new();
+        if !now && let CallState::Open(_, args) = &mut self.call {
+            args.push_str(&self.utf8.finish());
+            if let Some(f) = self.call_made() {
+                c.push_str(&f);
+                return (c, r, true);
+            }
+            r = self.call_dropped();
         }
         if ch.ended() {
-            // One call per reply: a closed call (or a `<|call|>`) ends it.
-            return (c, String::new(), true);
+            // `<|call|>`: the reply is over.
+            return (c, r, true);
         }
         c.push_str(&self.call_open(ch));
         match part {
-            chat::Part::Hidden => (c, String::new(), false),
-            chat::Part::Reasoning => (c, self.utf8.push(&bytes), false),
+            chat::Part::Hidden => (c, r, false),
+            chat::Part::Reasoning => {
+                r.push_str(&self.utf8.push(&bytes));
+                (c, r, false)
+            }
             chat::Part::Answer => {
                 let (a, hit) = self.stop.push(&self.utf8.push(&bytes));
                 if tools {
@@ -486,26 +515,46 @@ impl TextOut<'_> {
                 } else {
                     c.push_str(&a);
                 }
-                (c, String::new(), hit)
+                (c, r, hit)
             }
         }
     }
 
-    /// The opening of the call `ch` is in, once (after the content held
-    /// for stop strings).
+    /// Opens the call `ch` is in, once per reply; the content held for stop
+    /// strings goes out first.
     fn call_open(&mut self, ch: &chat::Channels) -> String {
         match ch.call() {
-            Some(to) if !self.in_call => {
-                self.in_call = true;
-                tools::harmony_text(&self.stop.finish()) + &tools::harmony_call_open(to)
+            Some(to) if matches!(self.call, CallState::None) => {
+                self.call = CallState::Open(to.to_string(), String::new());
+                tools::harmony_text(&self.stop.finish())
             }
             _ => String::new(),
         }
     }
 
-    fn call_close(&mut self, end: &str) -> String {
-        self.in_call = false;
-        tools::harmony_text(&self.utf8.finish()) + end
+    /// The open call's frame, if its arguments are a whole JSON object.
+    fn call_made(&mut self) -> Option<String> {
+        let CallState::Open(to, args) = &self.call else {
+            return None;
+        };
+        let a = args.trim();
+        if !matches!(tools::parse_json(a), Some(tools::J::Obj(_))) {
+            return None;
+        }
+        let f = tools::harmony_call_open(to) + &tools::harmony_text(a) + tools::HARMONY_CALL_END;
+        self.call = CallState::Done;
+        Some(f)
+    }
+
+    /// The open call isn't one: its text (reasoning).
+    fn call_dropped(&mut self) -> String {
+        match std::mem::take(&mut self.call) {
+            CallState::Open(_, args) => args,
+            other => {
+                self.call = other;
+                String::new()
+            }
+        }
     }
 
     /// The end of the output: what was held back. With tools, a reply that
@@ -519,9 +568,14 @@ impl TextOut<'_> {
             return self.finish_text();
         }
         let mut c = self.call_open(&ch);
-        if self.in_call {
-            // The reply ended inside the call (the token limit): cut off.
-            c.push_str(&self.call_close(tools::HARMONY_CALL_CUT));
+        let mut r = String::new();
+        if let CallState::Open(_, args) = &mut self.call {
+            // The reply ended inside the call (the token limit).
+            args.push_str(&self.utf8.finish());
+            match self.call_made() {
+                Some(f) => c.push_str(&f),
+                None => r = self.call_dropped(),
+            }
         }
         let unheaded = ch.take_unheaded();
         self.channels = Some(ch);
@@ -529,9 +583,9 @@ impl TextOut<'_> {
             let (a, _) = self.stop.push(&String::from_utf8_lossy(&u));
             c.push_str(&tools::harmony_text(&a));
         }
-        let (t, r) = self.finish_text();
+        let (t, r2) = self.finish_text();
         c.push_str(&tools::harmony_text(&t));
-        (c, r)
+        (c, r + &r2)
     }
 
     fn finish_text(&mut self) -> (String, String) {
@@ -603,7 +657,7 @@ fn text_out<'t>(tok: &'t Tokenizer, job: &Job) -> TextOut<'t> {
         first: true,
         strip_nl: false,
         stop: StopMatcher::new(job.stops.clone()),
-        in_call: false,
+        call: CallState::None,
     }
 }
 

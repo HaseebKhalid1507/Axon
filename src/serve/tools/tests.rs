@@ -773,11 +773,12 @@ fn render_harmony() {
         &hist_prompt,
     );
     assert!(r.parser.is_none() && r.channels.is_none());
-    // required / named: the reply opens a call, in the history form.
+    // required / named: the reply opens a call, in the model's call form.
     // Required: with one tool, the named choice (its prefill); with several,
     // a 400 (a prefill can't force one of them, #116).
-    let named_weather =
-        format!("{weather_prompt} to=functions.get_weather<|channel|>commentary json<|message|>");
+    let named_weather = format!(
+        "{weather_prompt}<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>"
+    );
     let r = check(
         &tok,
         &t,
@@ -785,7 +786,9 @@ fn render_harmony() {
         false,
         &named_weather,
     );
-    let tail = tok.encode_special(" to=functions.get_weather<|channel|>commentary json<|message|>");
+    let tail = tok.encode_special(
+        "<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>",
+    );
     assert_eq!(r.ids[r.ids.len() - tail.len()..], tail[..]);
     assert_eq!(r.channels.unwrap().call(), Some("functions.get_weather"));
     let (_, rich, _) = case("tools_rich");
@@ -809,7 +812,9 @@ fn render_harmony() {
             r#""tool_choice": {"type": "function", "function": {"name": "bash"}}"#,
         ),
         false,
-        &format!("{rich_prompt} to=functions.bash<|channel|>commentary json<|message|>"),
+        &format!(
+            "{rich_prompt}<|channel|>commentary to=functions.bash <|constrain|>json<|message|>"
+        ),
     );
     let r = check(
         &tok,
@@ -819,7 +824,9 @@ fn render_harmony() {
             r#""tool_choice": {"type": "function", "function": {"name": "get_weather"}}"#,
         ),
         false,
-        &format!("{weather_prompt} to=functions.get_weather<|channel|>commentary json<|message|>"),
+        &format!(
+            "{weather_prompt}<|channel|>commentary to=functions.get_weather <|constrain|>json<|message|>"
+        ),
     );
     assert_eq!(r.channels.unwrap().call(), Some("functions.get_weather"));
     // Message text can't forge markers.
@@ -894,8 +901,8 @@ fn harmony_parser() {
         &hframe(&[("functions.get_weather", r#"{"city": "#)]),
         &[text(r#"{"city": "#)],
     );
-    // Cut off before the closing marker (the token limit: the cut frame, or
-    // no end frame at all): never a call, even when what came is an object.
+    // A frame with no end (TextOut never writes one: it frames only made
+    // calls): never a call, even when what came is an object.
     for args in ["{\"a\": 1}", "{\"a\"", ""] {
         let want: Vec<Piece> = if args.is_empty() {
             vec![]
@@ -904,13 +911,8 @@ fn harmony_parser() {
         };
         let open = hframe(&[("open", "functions.f"), ("", args)]);
         every_split(h, &open, &want);
-        every_split(h, &format!("{open}{HARMONY_CALL_CUT}"), &want);
         // ... also after content.
         let w = [text(&format!("Hi. {args}"))];
-        every_split(
-            h,
-            &format!("{}{open}{HARMONY_CALL_CUT}", hframe(&[("", "Hi. ")])),
-            &w,
-        );
+        every_split(h, &format!("{}{open}", hframe(&[("", "Hi. ")])), &w);
     }
 }

@@ -566,8 +566,7 @@ pub struct Channels {
     unheaded: Option<usize>,
     /// With tools: `<|call|>` (not a stop then: the splitter sees it).
     call_tok: Option<u32>,
-    /// With tools: a call was closed by `<|call|>` or `<|end|>`, or a
-    /// `<|call|>` came: the reply is over (one call per reply).
+    /// With tools: a `<|call|>` came: the reply is over.
     ended: bool,
 }
 
@@ -634,9 +633,8 @@ impl Channels {
         self.call_tok
     }
 
-    /// With tools: the reply is over: a call was closed by its marker
-    /// (`<|call|>`, or `<|end|>`), or a `<|call|>` came. A call that never
-    /// got here (cut off by the token limit) is not a call.
+    /// With tools: a `<|call|>` came, which ends the reply (whether its
+    /// call is one is the arguments' business: `TextOut::harmony`).
     pub fn ended(&self) -> bool {
         self.ended
     }
@@ -712,7 +710,6 @@ impl Channels {
             self.name = None;
             self.part = Part::Hidden;
             if self.tools {
-                self.ended |= id == self.end && self.to.is_some();
                 self.to = None;
                 self.role = (id == self.start).then(Vec::new);
             }
