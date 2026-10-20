@@ -509,12 +509,11 @@ impl<'a> Backend<'a> {
     ) -> Result<Backend<'a>, String> {
         let split_ctx = p.split_ctx;
         let long = fit && split_ctx < max_ctx;
-        // The CPU caches' f16/f32 choice is process-wide, made once at the
-        // first cache (kv::use_f32): `kv` F32 makes it f32, F16/Q8 need it
-        // f16, and a conflict (e.g. AXON_KV=f32 with KvType::F16) or a bad
-        // AXON_KV is an error here, never a panic later. The CLI checks
-        // AXON_KV and passes the type it implies, so it never hits these.
-        crate::kv::kv_setting()?;
+        // `kv` is the whole KV choice: this reads no AXON_KV (the CLI parses
+        // it and passes the type it names; an embedder passes its own). The
+        // CPU caches' f16/f32 choice is process-wide (kv::use_f32, fixed at
+        // the first cache): `kv` F32 fixes it f32, F16/Q8 f16, and a type
+        // that conflicts with an earlier Backend's is an error.
         let want_f32 = kv == KvType::F32;
         crate::kv::set_f32(want_f32);
         if crate::kv::use_f32() != want_f32 {
@@ -525,7 +524,7 @@ impl<'a> Backend<'a> {
             ));
         }
         if device == Device::Cpu {
-            // The CPU's f16/f32 choice is AXON_KV's (kv::use_f32).
+            // The CPU's f16/f32 choice: `kv`, fixed above (kv::use_f32).
             if kv == KvType::Q8 {
                 return Err("the q8 KV cache is cuda-only (--device cuda)".into());
             }

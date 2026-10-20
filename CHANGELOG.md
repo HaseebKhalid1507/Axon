@@ -17,8 +17,9 @@ The first version: everything merged to `main` from the start of the project (20
   The command line moved from `src/main.rs` to `src/cli.rs` (a new file: git doesn't track it as a rename) and the
   decode loop and its tests to `src/generate.rs`; `examples/embed.rs` shows the API. No change for the CLI: same
   greedy bits, same output, same tests (14 renamed: `tests::*` → `cli::tests::*` or `generate::tests::*`).
-- `Backend::new` refuses a KV type that conflicts with the process's f16/f32 cache choice (`KvType::F32` used to be
-  silently f16 through the library) and returns a bad `AXON_KV` as an error instead of panicking later.
+- The KV type is an argument: `Backend::new(…, kv, …)` reads no `AXON_KV` (the CLI and `examples/embed.rs` parse it
+  with `KvType::parse` and pass it), `KvType::F32` takes effect on the CPU (it used to be silently f16 through the
+  library), and a type that conflicts with the process's earlier f16/f32 choice is an error.
 - Not hardened for embedders yet (stderr notes, env-only config, a CUDA leak per `Backend::new`, `serve` exits the
   process): #118.
 

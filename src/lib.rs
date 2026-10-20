@@ -32,8 +32,13 @@
 //! # Ok::<(), String>(())
 //! ```
 //!
-//! Environment variables (`AXON_*`) tune the engine as they tune the CLI
-//! (README); the defaults are the CLI's.
+//! The choices the API takes as arguments (device, KV type, GPU layers,
+//! context) are never read from the environment: the CLI reads
+//! `AXON_DEVICE`, `AXON_KV` and `AXON_GPU_LAYERS` and passes them, and an
+//! embedder passes its own (`Device::from_env` and `KvType::parse` parse
+//! them as the CLI does; examples/embed.rs). Engine tuning variables
+//! (`AXON_THREADS`, `AXON_GPUS`, `AXON_MMAP`, `AXON_SIMD`, ...) are still
+//! read inside the library, once per process (README; #118).
 
 #[macro_use]
 mod mv;

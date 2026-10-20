@@ -200,6 +200,8 @@ pub enum KvType {
     F16,
     /// f32 caches on the CPU (an A/B reference); a model's GPU layers stay
     /// f16. Process-wide: `Backend::new` refuses f16 and f32 in one process.
+    /// The library never reads AXON_KV: parse it with `KvType::parse` (as
+    /// the CLI and examples/embed.rs do) and pass the type.
     F32,
     /// int8 with a scale per (position, kv head): the GPU only
     /// (cuda/decode.cu has the rule); the CPU has no q8 cache.

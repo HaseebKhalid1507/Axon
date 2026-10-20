@@ -234,7 +234,9 @@ curl -L -o models/qwen2.5-0.5b-q4_k_m.gguf \
 `axon::load` a GGUF, `Backend::new` to place it on the CPU or a GPU, the model's own `Tokenizer`, the `Lm` trait
 (caches, prefill, decode steps), `axon::generate` (the greedy loop behind `axon gen`, streaming each token to a
 callback; sampling stays the CLI's in 0.1) and `axon::serve` (`axon serve`, in-process).
-[examples/embed.rs](examples/embed.rs) loads a model and decodes N tokens greedily, the same tokens `axon gen` prints:
+[examples/embed.rs](examples/embed.rs) loads a model and decodes N tokens greedily, the same tokens `axon gen` prints.
+The API takes device, KV type and GPU layers as arguments and never reads `AXON_DEVICE` / `AXON_KV` /
+`AXON_GPU_LAYERS`; the example reads them as `axon gen` does (`scripts/embed_check.sh` checks the two agree):
 
 ```bash
 cargo run --release --example embed -- models/qwen2.5-0.5b-q4_k_m.gguf "The capital of France is" 32
@@ -242,7 +244,7 @@ cargo run --release --example embed -- models/qwen2.5-0.5b-q4_k_m.gguf "The capi
 
 The API is 0.x and will change, and it isn't hardened for embedders yet
 ([#118](https://github.com/HaseebKhalid1507/Axon/issues/118)): library calls print notes to stderr, read the
-`AXON_*` variables once per process, leak a little per CUDA `Backend::new`, and `axon::serve` exits the process on a
+engine tuning variables (`AXON_THREADS`, `AXON_GPUS`, `AXON_MMAP`, ...) once per process, leak a little per CUDA `Backend::new`, and `axon::serve` exits the process on a
 usage error (2) or an engine failure (70). The crate's package name on crates.io isn't settled (`axon` is taken);
 it isn't published.
 
