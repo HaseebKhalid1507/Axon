@@ -4943,3 +4943,273 @@ fn serve_gauges_settle_back_to_back() {
         bad.join("\n")
     );
 }
+
+/// A streamed /v1/completions request: each text event's arrival (the
+/// first after `t0`, the send), the text and its completion tokens.
+fn stream_times(addr: SocketAddr, body: &Value) -> (Instant, Vec<Instant>, String, u64) {
+    let mut s = TcpStream::connect(addr).unwrap();
+    s.set_read_timeout(Some(Duration::from_secs(900))).unwrap();
+    let mut b = body.clone();
+    b["stream"] = json!(true);
+    b["stream_options"] = json!({"include_usage": true});
+    let t0 = Instant::now();
+    s.write_all(request("POST", "/v1/completions", &b.to_string(), true).as_bytes())
+        .unwrap();
+    let (mut raw, mut times, mut scan) = (Vec::new(), Vec::new(), 0);
+    loop {
+        let mut t = [0u8; 16384];
+        let n = s.read(&mut t).expect("read");
+        let now = Instant::now();
+        if n == 0 {
+            break;
+        }
+        raw.extend_from_slice(&t[..n]);
+        while let Some(p) = raw[scan..].windows(6).position(|w| w == b"data: ") {
+            let a = scan + p;
+            let Some(e) = raw[a..].iter().position(|&c| c == b'\n') else {
+                break;
+            };
+            let line = String::from_utf8_lossy(&raw[a..a + e]);
+            if line.contains("\"text\":\"") && !line.contains("\"text\":\"\"") {
+                times.push(now);
+            }
+            scan = a + e;
+        }
+    }
+    let r = read_resp(&mut &raw[..], &mut Vec::new());
+    assert_eq!(r.status, 200, "{}", r.body);
+    let (text, last) = streamed_text(&r, false);
+    let n = last["usage"]["completion_tokens"].as_u64();
+    let n = n.unwrap_or(times.len() as u64);
+    (t0, times, text, n)
+}
+
+/// The value at quantile q of `v` (nearest rank; NaN if empty).
+fn quant(v: &[f64], q: f64) -> f64 {
+    let mut v = v.to_vec();
+    v.sort_by(f64::total_cmp);
+    match v.len() {
+        0 => f64::NAN,
+        n => v[((q * (n - 1) as f64).round() as usize).min(n - 1)],
+    }
+}
+
+/// The hybrid step's serve A/B (MEASURE, not a check; `--ignored
+/// --nocapture`, under `axon-run --timing`). `AXON_AB_MODEL` (default the
+/// test model), `AXON_AB_ROUNDS` (3), `AXON_AB_PARTS` ("admit,loop"),
+/// `AXON_AB_BUDGET` (--prefill-chunk, 256). Modes per round, in an order
+/// rotated by the round: hybrid on; off (the two-pass steps of before,
+/// --prefill-ms 60: main's defaults); off with --prefill-ms 0 (chunks of
+/// exactly the budget: the chunk pass alone is its ITL minus the decode
+/// step's), admit only. A fresh server per mode and part.
+/// - admit: `AXON_AB_DEC` (4) streamed greedy decoders, then one
+///   ~`AXON_AB_LONG` (20000) token prompt (max_tokens 16): the decoders'
+///   token gaps before it (ITL before) and those overlapping its send ..
+///   first token (ITL during), p50 / p99 / max, its TTFT.
+/// - loop: `AXON_AB_C` (8) clients, `AXON_AB_REQS` (4) requests each in
+///   turn, ~`AXON_AB_WORDS` (400) words of salted prompt, `AXON_AB_N`
+///   (128) tokens, greedy: aggregate tok/s (all tokens / wall), TTFT and
+///   ITL p50 / p99.
+///
+/// Every mode's texts must equal the round's first mode's (same_text).
+#[test]
+#[ignore]
+fn serve_hybrid_ab() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let path = match std::env::var("AXON_AB_MODEL") {
+        Ok(p) => p,
+        Err(_) => match crate::testutil::model_path() {
+            Some(p) => p.to_string_lossy().into_owned(),
+            None => return,
+        },
+    };
+    let env =
+        |k: &str, d: usize| -> usize { std::env::var(k).ok().map_or(d, |v| v.parse().unwrap()) };
+    let rounds = env("AXON_AB_ROUNDS", 3);
+    let budget = env("AXON_AB_BUDGET", 256);
+    let dec = env("AXON_AB_DEC", 4);
+    let long = env("AXON_AB_LONG", 20000);
+    let (c, reqs, words, n) = (
+        env("AXON_AB_C", 8),
+        env("AXON_AB_REQS", 4),
+        env("AXON_AB_WORDS", 400),
+        env("AXON_AB_N", 128),
+    );
+    let parts = std::env::var("AXON_AB_PARTS").unwrap_or("admit,loop".into());
+    eprintln!(
+        "serve_hybrid_ab: {path}, budget {budget}, {rounds} rounds; admit {dec} decoders + {long}; \
+         loop C={c} x {reqs} reqs, {words} words, {n} tokens"
+    );
+    let sent = "The quick brown fox jumps over the lazy dog near the river bank.";
+    let long_prompt = |salt: usize| {
+        let k = long / 16;
+        let s: Vec<String> = (0..k).map(|j| format!("{j}. {sent}")).collect();
+        format!("{salt} {} Summary:", s.join(" "))
+    };
+    let modes: [(&str, bool, usize); 3] =
+        [("on", true, 60), ("off", false, 60), ("off-ms0", false, 0)];
+    // (part, mode) -> per-round stats rows.
+    let mut table: Vec<(String, String, Vec<f64>)> = Vec::new();
+    let mut put = |part: &str, mode: &str, v: Vec<f64>| {
+        table.push((part.into(), mode.into(), v));
+    };
+    for r in 0..rounds {
+        for part in parts.split(',') {
+            let ms: Vec<usize> = match part {
+                "admit" => vec![0, 1, 2],
+                _ => vec![0, 1],
+            };
+            let mut first_texts: Option<Vec<String>> = None;
+            for k in 0..ms.len() {
+                let (mode, hybrid, pms) = modes[ms[(k + r) % ms.len()]];
+                let ctx = match part {
+                    "admit" => (long + 2048).next_multiple_of(1024),
+                    _ => 4096,
+                };
+                let par = if part == "admit" { dec + 1 } else { c };
+                let s = server_with(&path, Device::Cuda, |o| {
+                    o.ctx = Some(ctx);
+                    o.parallel = par;
+                    o.parallel_set = true;
+                    o.prefill_chunk = budget;
+                    o.prefill_ms = pms;
+                    o.hybrid = hybrid;
+                });
+                let a = s.addr;
+                // Warm: a short request (kernels, graphs).
+                post(
+                    a,
+                    "/v1/completions",
+                    json!({"prompt": "Hello", "max_tokens": 8, "temperature": 0}),
+                );
+                let mut texts = Vec::new();
+                let row: Vec<f64> = if part == "admit" {
+                    let g = &s.generated;
+                    let res = std::thread::scope(|sc| {
+                        let hs: Vec<_> = (0..dec)
+                            .map(|i| {
+                                let b = json!({"prompt": format!("{} {r} The history of the Roman Empire", 100 + i),
+                                               "max_tokens": 1200, "temperature": 0});
+                                sc.spawn(move || stream_times(a, &b))
+                            })
+                            .collect();
+                        let g0 = g.load(Ordering::Relaxed);
+                        wait_for("the decoders", || {
+                            g.load(Ordering::Relaxed) >= g0 + 32 * dec as u64
+                        });
+                        std::thread::sleep(Duration::from_millis(500));
+                        let lb = json!({"prompt": long_prompt(7000 + r), "max_tokens": 16, "temperature": 0});
+                        let l = stream_times(a, &lb);
+                        let ds: Vec<_> = hs.into_iter().map(|h| h.join().unwrap()).collect();
+                        (l, ds)
+                    });
+                    let ((t_send, lt, ltext, _), ds) = res;
+                    let t_first = lt[0];
+                    let (mut before, mut during, mut made) = (Vec::new(), Vec::new(), 0usize);
+                    for (_, ts, text, _) in &ds {
+                        for w in ts.windows(2) {
+                            let gap = (w[1] - w[0]).as_secs_f64() * 1e3;
+                            if w[1] < t_send {
+                                before.push(gap);
+                            } else if w[0] < t_first {
+                                during.push(gap);
+                            }
+                        }
+                        made += ts.iter().filter(|&&t| t > t_send && t < t_first).count();
+                        texts.push(text.clone());
+                    }
+                    texts.push(ltext);
+                    let ttft = (t_first - t_send).as_secs_f64() * 1e3;
+                    vec![
+                        quant(&before, 0.5),
+                        quant(&before, 0.99),
+                        quant(&during, 0.5),
+                        quant(&during, 0.99),
+                        quant(&during, 1.0),
+                        ttft,
+                        made as f64,
+                    ]
+                } else {
+                    let t0 = Instant::now();
+                    let outs: Vec<Vec<_>> = std::thread::scope(|sc| {
+                        let hs: Vec<_> = (0..c)
+                            .map(|i| {
+                                sc.spawn(move || {
+                                    (0..reqs)
+                                        .map(|q| {
+                                            let p: Vec<&str> = (0..words).map(|w| ["river", "stone", "garden", "engine", "violet", "harbor", "signal", "meadow"][(w * 7 + i + q) % 8]).collect();
+                                            let b = json!({"prompt": format!("{r}-{i}-{q}: {}\nSummary:", p.join(" ")),
+                                                           "max_tokens": n, "temperature": 0});
+                                            stream_times(a, &b)
+                                        })
+                                        .collect()
+                                })
+                            })
+                            .collect();
+                        hs.into_iter().map(|h| h.join().unwrap()).collect()
+                    });
+                    let wall = t0.elapsed().as_secs_f64();
+                    let (mut ttft, mut itl, mut toks) = (Vec::new(), Vec::new(), 0u64);
+                    for (t_send, ts, text, nt) in outs.iter().flatten() {
+                        if let Some(f) = ts.first() {
+                            ttft.push((*f - *t_send).as_secs_f64() * 1e3);
+                        }
+                        itl.extend(ts.windows(2).map(|w| (w[1] - w[0]).as_secs_f64() * 1e3));
+                        toks += nt;
+                        texts.push(text.clone());
+                    }
+                    vec![
+                        toks as f64 / wall,
+                        quant(&ttft, 0.5),
+                        quant(&ttft, 0.99),
+                        quant(&itl, 0.5),
+                        quant(&itl, 0.99),
+                    ]
+                };
+                drop(s);
+                let same = match &first_texts {
+                    None => {
+                        first_texts = Some(texts);
+                        1.0
+                    }
+                    Some(f) => (*f == texts) as u8 as f64,
+                };
+                let mut row = row;
+                row.push(same);
+                eprintln!("round {r} {part} {mode}: {row:.2?}");
+                put(part, mode, row);
+            }
+        }
+    }
+    eprintln!("medians over rounds (same_text: min):");
+    let cols = |part: &str| match part {
+        "admit" => {
+            "ITL before p50 | p99 | ITL during p50 | p99 | max | TTFT ms | tokens during | same_text"
+        }
+        _ => "agg tok/s | TTFT p50 | p99 | ITL p50 | p99 | same_text",
+    };
+    for part in parts.split(',') {
+        eprintln!("| {part} | {} |", cols(part));
+        for (mode, _, _) in modes {
+            let rows: Vec<&Vec<f64>> = (table.iter())
+                .filter(|t| t.0 == part && t.1 == mode)
+                .map(|t| &t.2)
+                .collect();
+            if rows.is_empty() {
+                continue;
+            }
+            let m: Vec<String> = (0..rows[0].len())
+                .map(|j| {
+                    let v: Vec<f64> = rows.iter().map(|r| r[j]).collect();
+                    match j == rows[0].len() - 1 {
+                        true => format!("{}", v.iter().copied().fold(1.0, f64::min)),
+                        false => format!("{:.2}", quant(&v, 0.5)),
+                    }
+                })
+                .collect();
+            eprintln!("| {mode} | {} |", m.join(" | "));
+        }
+    }
+}
