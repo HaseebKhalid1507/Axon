@@ -268,6 +268,32 @@ pub(crate) fn assert_ref_spread(ac: &Agree) {
     );
 }
 
+/// A zero reference spread fails by name (AXON_REPACK=0 once made cpu ==
+/// rows and failed `mean KL` instead); an empty reference and a nonzero one
+/// pass.
+#[test]
+fn ref_spread_zero_fails_by_name() {
+    assert_ref_spread(&Agree::default());
+    assert_ref_spread(&Agree {
+        positions: 3,
+        max_abs: 0.1,
+        ..Agree::default()
+    });
+    let r = std::panic::catch_unwind(|| {
+        assert_ref_spread(&Agree {
+            positions: 3,
+            ..Agree::default()
+        })
+    });
+    let p = r.expect_err("a zero spread must fail");
+    let msg = p
+        .downcast_ref::<String>()
+        .map(String::as_str)
+        .or_else(|| p.downcast_ref::<&str>().copied())
+        .unwrap_or("");
+    assert!(msg.contains("reference spread is 0"), "{msg}");
+}
+
 /// `assert_graded` with top-1 at least `floor` % (natural text, prose and
 /// code, has more near-ties: the CPU agrees with itself on only 93.8 % of
 /// natural_long's 1.5B positions).
