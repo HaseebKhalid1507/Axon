@@ -1,0 +1,29 @@
+{
+ "label": "adopt-b363695-speed-r2",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1020-125606-0a53",
+   "name": "adopt-b363695-abspeed-avante",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "avante",
+   "hw": "hw-avante.txt",
+   "gpu": "NVIDIA GeForce RTX 4050 Laptop GPU",
+   "driver": "610.43.02",
+   "sha": "b363695",
+   "binary": "bash",
+   "started": 1792515433.4073467,
+   "ended": 1792515703.448953,
+   "attempts": 1,
+   "remote_job": "20261020-125717-bash-3191844",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "8f6ef5e77305f4a4f1ad41c291cbf187ae3f41d5f0185f27648e620c071af41b",
+   "log_bytes": 7972
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-20 13:01:44 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
