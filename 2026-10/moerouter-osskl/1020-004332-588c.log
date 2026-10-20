@@ -1,0 +1,9 @@
+[axon-run 00:43:32] submitted 1020-004332-588c by /home/haseeb/.cache/axon-moerouter: /home/haseeb/.cache/axon-moerouter/axon-test-0fac171 moe::oss_tests::oss_gpu_logits_graded_model --exact --test-threads 1 --nocapture
+[axon-run 00:45:29] scope axon-job-1020-004332-588c-1792471529.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 15599 MB): an OOM here kills only this job
+[axon-run 00:45:29] job 1020-004332-588c -> bella: systemd-run --user --scope --quiet --unit=axon-job-1020-004332-588c-1792471529 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-moerouter/axon-test-0fac171 moe::oss_tests::oss_gpu_logits_graded_model --exact --test-threads 1 --nocapture
+axon-q 00:45:29 start slot 16-23: /home/haseeb/.cache/axon-moerouter/axon-test-0fac171 moe::oss_tests::oss_gpu_logits_graded_model --exact --test-threads 1 --nocapture
+
+running 1 test
+test moe::oss_tests::oss_gpu_logits_graded_model ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+[axon-run 00:45:47] signal 15: stopping the job
+[axon-run 00:45:48] exit 143 after 19.4s (host bella)

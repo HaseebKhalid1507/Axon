@@ -1,0 +1,23 @@
+[axon-run 00:43:32] submitted 1020-004332-e3d1 by /home/haseeb/.cache/axon-moerouter: /home/haseeb/.cache/axon-moerouter/axon-test-base-764792f moe::oss_tests::oss_gpu_logits_graded_model --exact --test-threads 1 --nocapture
+[axon-run 00:43:32] scope axon-job-1020-004332-e3d1-1792471412.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 15144 MB): an OOM here kills only this job
+[axon-run 00:43:32] job 1020-004332-e3d1 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1020-004332-e3d1-1792471412 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-moerouter/axon-test-base-764792f moe::oss_tests::oss_gpu_logits_graded_model --exact --test-threads 1 --nocapture
+axon-q 00:43:32 start slot 16-23: /home/haseeb/.cache/axon-moerouter/axon-test-base-764792f moe::oss_tests::oss_gpu_logits_graded_model --exact --test-threads 1 --nocapture
+
+running 1 test
+test moe::oss_tests::oss_gpu_logits_graded_model ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+gpt-oss-20b moe gpu vs cpu: top-1 197/198 (99.5%), KL mean 1.20e-3 max 1.99e-2 (> 0.5: []), max |dlogit| 6.929, flip margins [0.106627464]
+gpt-oss-20b cpu rows vs cpu: top-1 198/198 (100.0%), KL mean 0.00e0 max 0.00e0 (> 0.5: []), max |dlogit| 0.000, flip margins []
+
+thread 'moe::oss_tests::oss_gpu_logits_graded_model' (1009742) panicked at src/cuda/qwen2/tests.rs:287:5:
+mean KL
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    moe::oss_tests::oss_gpu_logits_graded_model
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 676 filtered out; finished in 58.39s
+
+[axon-run 00:44:30] exit 101 after 58.6s (host bella)

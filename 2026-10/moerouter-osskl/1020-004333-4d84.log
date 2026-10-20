@@ -1,0 +1,14 @@
+[axon-run 00:43:33] submitted 1020-004333-4d84 by /home/haseeb/.cache/axon-moerouter: /home/haseeb/.cache/axon-moerouter/axon-test-fdd7816 moe::oss_tests::oss_gpu_logits_graded_model --exact --test-threads 1 --nocapture
+[axon-run 00:45:49] scope axon-job-1020-004333-4d84-1792471549.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 15621 MB): an OOM here kills only this job
+[axon-run 00:45:49] job 1020-004333-4d84 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1020-004333-4d84-1792471549 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-moerouter/axon-test-fdd7816 moe::oss_tests::oss_gpu_logits_graded_model --exact --test-threads 1 --nocapture
+axon-q 00:45:49 start slot 16-23: /home/haseeb/.cache/axon-moerouter/axon-test-fdd7816 moe::oss_tests::oss_gpu_logits_graded_model --exact --test-threads 1 --nocapture
+
+running 1 test
+test moe::oss_tests::oss_gpu_logits_graded_model ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+gpt-oss-20b moe gpu vs cpu: top-1 195/198 (98.5%), KL mean 2.63e-3 max 1.36e-1 (> 0.5: []), max |dlogit| 2.928, flip margins [0.04689598, 0.004049301, 0.059295654]
+gpt-oss-20b cpu rows vs cpu: top-1 195/198 (98.5%), KL mean 2.43e-3 max 1.27e-1 (> 0.5: []), max |dlogit| 3.144, flip margins [0.04689598, 0.021641731, 0.059295654]
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 677 filtered out; finished in 49.84s
+
+[axon-run 00:46:39] exit 0 after 50.0s (host bella)
