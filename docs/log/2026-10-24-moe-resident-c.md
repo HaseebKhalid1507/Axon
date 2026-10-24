@@ -1,4 +1,4 @@
-# Resident MoE experts in the model: `--gpu-experts N|auto|0` (PR #PRNUM)
+# Resident MoE experts in the model: `--gpu-experts N|auto|0` (PR #127)
 
 - Date: 2026-10-24. Branch: feat/moe-resident-c, stacked on PR B (#122, feat/moe-resident-b; merged in at 73f5c79).
   Status: open, draft (gates and the kill-rule bench pending: bella held).
