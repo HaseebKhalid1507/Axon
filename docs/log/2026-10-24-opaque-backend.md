@@ -1,6 +1,7 @@
-# lib: opaque `Backend`, sealed `Lm`, env errors instead of panics  (PR #TBD)
+# lib: opaque `Backend`, sealed `Lm`, `BackendOptions`, env errors instead of panics  (PR #124)
 
-- Date: 2026-10-24. Branch: feat/opaque-backend. Base: main 6e3b19c. Status: open; gates at daada6f (code), pending.
+- Date: 2026-10-24. Branch: feat/opaque-backend (PR #124). Base: main 6e3b19c. Status: open. Round 1 code daada6f; round 2
+  (Shady 8/10 APPROVE, the SHOULDs below) is the gated head.
 - Pick / design: issue #118 items A and B, the v0.1.0 blockers from Shady's round-2 review of #117
   (https://github.com/HaseebKhalid1507/Axon/pull/117#issuecomment-6296699905).
 
@@ -34,6 +35,23 @@
   and CUDA, `generate` == `feed_batch` + `forward_argmax` steps), `quant::tests::decode_cfg_parse`, and
   `simd_choice_rejects_unknown` (was `#[should_panic]`, now checks the `Err`).
 
+## Round 2 (review: Shady 8/10 APPROVE, no MUSTs; the SHOULDs, decided by the foreman)
+- `Backend::new(&model, BackendOptions)`. `BackendOptions` is `#[non_exhaustive]` with private fields, `Default`
+  (CPU, 4096-token context, no split, f16, no fit) and chainable setters `device`, `max_ctx`,
+  `gpu_layers(impl Into<Option<usize>>)`, `kv`, `fit`. #118 item 2's settings become fields of it later without a
+  break. All 19 callers moved (the crate's tests, draft.rs, lib.rs, examples/embed.rs, tests/public_api.rs).
+  `new` maps it to `new_capped` field for field, so nothing it does changes.
+- `#[doc(hidden)]` on `Lm::forward_cands` / `verify_cands` and on `sample::Cand` / `CandSpec`, until item 8.
+- `env_check` prints nothing. `choose_simd` used to print the "AVX2 but not fma/f16c" notice while choosing.
+  Now it only chooses; `simd()` prints the notice at the kernels' first use, as main did, so a pure-GPU `load`
+  doesn't print it (`scalar_notice`, tested).
+- `tests/public_api.rs` gains `second_backend_{cpu,cuda}`, the embedder's model swap: qwen2.5-0.5b, dropped; then
+  Qwen3-0.6B (a second `Backend::new` in one process), which generates; then the 0.5B again, which must give
+  the first run's tokens.
+- CI checks `compile_fail` error codes. `scripts/compile_fail_check.py` finds every `compile_fail` block under
+  src/, requires an error code on each, compiles it alone against `target/debug/libaxon.rlib` and checks that the
+  first error has that code. It's a step after `cargo test` in ci.yml. Stable rustdoc doesn't check the code.
+
 ## Other environment parses (the B grep)
 Every `std::env::var` in non-test library code was read (cli.rs's are CLI-only). Only the three above could
 panic inside a library call. The rest either return an error already (`AXON_KV`, `AXON_DEVICE`, `AXON_GPUS`,
@@ -52,9 +70,9 @@ change) and every `pub` field of five model types. #118 B: the same class as #11
 ## How it was verified
 | gate | result | job ID / log |
 |---|---|---|
-| fast tier, release (2 shards) | pending | 1024-171219-bdcb, 1024-171219-da22 |
-| fast tier, debug assertions + overflow checks (2 shards) | pending | 1024-171219-a517, 1024-171219-bb9b |
-| md5 of `gen`, main 6e3b19c vs candidate, bella: standard set (md5-gen.sh) + md5ext + serve A/B + public_api | pending | 1024-171216-7030 |
+| fast tier, release (2 shards) | round 2: pending | (round 1 daada6f: 1024-171219-bdcb ran; da22 dropped) |
+| fast tier, debug assertions + overflow checks (2 shards) | round 2: pending | (round 1: 1024-171219-a517 PASS, 1024-171219-bb9b ran) |
+| md5 of `gen`, main 6e3b19c vs candidate, bella: standard set (md5-gen.sh) + md5ext + serve A/B + public_api | round 2: pending | (round 1 1024-171216-7030 dropped before it ran) |
 | `compile_fail` doc tests (rustdoc --test) | 7/7 + the crate example compile | local |
 | each snippet's first error vs main | as annotated, see below | local (`snipcheck.sh`) |
 | clippy -D warnings (lib, lib tests, bin, examples/embed, tests/public_api), rustfmt | clean | local |
