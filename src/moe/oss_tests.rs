@@ -460,11 +460,29 @@ fn backend_places_gpt_oss() {
     }
     let m = fixture();
     use crate::lm::{Backend, Device, Inner};
-    let b = Backend::new(&m, Device::Cuda, 64, None, crate::kv::KvType::F16, false).unwrap();
+    let b = Backend::new(
+        &m,
+        crate::lm::BackendOptions::default()
+            .device(Device::Cuda)
+            .max_ctx(64),
+    )
+    .unwrap();
     assert!(matches!(b.0, Inner::Moe(_)));
-    let e = Backend::new(&m, Device::Cuda, 64, Some(1), crate::kv::KvType::F16, false);
+    let e = Backend::new(
+        &m,
+        crate::lm::BackendOptions::default()
+            .device(Device::Cuda)
+            .max_ctx(64)
+            .gpu_layers(Some(1)),
+    );
     assert!(e.is_err_and(|e| e.contains("doesn't split by layers")));
-    let e = Backend::new(&m, Device::Cuda, 64, None, crate::kv::KvType::Q8, false);
+    let e = Backend::new(
+        &m,
+        crate::lm::BackendOptions::default()
+            .device(Device::Cuda)
+            .max_ctx(64)
+            .kv(crate::kv::KvType::Q8),
+    );
     assert!(e.is_err_and(|e| e.contains("q8")));
     // The plain qwen2 path (CudaQwen2::with_kv) refuses it too.
     let g = crate::testutil::gpu().unwrap();

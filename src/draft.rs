@@ -398,7 +398,13 @@ impl DraftModel {
         kv: KvType,
     ) -> Result<ModelDrafter<Backend<'static>>, String> {
         let net = match reserve {
-            None => Backend::new(self.model, Device::Cpu, ctx, None, kv, false)?,
+            None => Backend::new(
+                self.model,
+                crate::lm::BackendOptions::default()
+                    .device(Device::Cpu)
+                    .max_ctx(ctx)
+                    .kv(kv),
+            )?,
             Some(r) => {
                 debug_assert_eq!(device, Device::Cuda);
                 let (gpu, module) = (r.gpu, r.module);

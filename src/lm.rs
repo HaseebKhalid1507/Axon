@@ -123,6 +123,9 @@ pub trait Lm: Sealed {
         self.forward(last, start + rest.len(), cache)
     }
 
+    // Hidden until the sampler is public (#118 item 8): `Cand` and
+    // `CandSpec` are crate types, so these two are not 0.1 API.
+    #[doc(hidden)]
     /// Run `token` at `pos`; the sampling candidates of its logits,
     /// `sample::cands` (repeat penalty over the tail of `recent`, which ends
     /// with `token`, then the `spec.k` best, best first). Backends that keep
@@ -140,6 +143,8 @@ pub trait Lm: Sealed {
         sample::cands(&mut l, spec, recent)
     }
 
+    // Hidden with `forward_cands` (#118 item 8).
+    #[doc(hidden)]
     /// `forward_cands` on each `tokens[b]` at `start + b` in order
     /// (speculative verify): `recent` ends with `tokens`, and row b's
     /// penalty window ends at `tokens[b]`.
@@ -534,13 +539,90 @@ impl Placing {
     }
 }
 
+/// How `Backend::new` places a model: device, context, GPU layers, KV type,
+/// fit. Build it from `BackendOptions::default()` with the setters, each
+/// returning the options:
+///
+/// ```no_run
+/// use axon::{Backend, BackendOptions, Device, KvType};
+/// let model = axon::load("models/qwen2.5-0.5b-instruct-q4_k_m.gguf", Device::Cuda)?;
+/// let o = BackendOptions::default().device(Device::Cuda).max_ctx(8192).kv(KvType::Q8);
+/// let net = Backend::new(&model, o)?;
+/// # Ok::<(), String>(())
+/// ```
+///
+/// Non-exhaustive, with private fields: options are added (#118 item 2:
+/// the engine settings still read from the environment) without breaking
+/// callers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct BackendOptions {
+    pub(crate) device: Device,
+    pub(crate) max_ctx: usize,
+    pub(crate) gpu_layers: Option<usize>,
+    pub(crate) kv: KvType,
+    pub(crate) fit: bool,
+}
+
+impl Default for BackendOptions {
+    /// The CPU, a 4096-token context, no layer split, f16 KV, no fit.
+    fn default() -> BackendOptions {
+        BackendOptions {
+            device: Device::Cpu,
+            max_ctx: 4096,
+            gpu_layers: None,
+            kv: KvType::F16,
+            fit: false,
+        }
+    }
+}
+
+impl BackendOptions {
+    /// Where the model runs (default: the CPU).
+    pub fn device(mut self, device: Device) -> BackendOptions {
+        self.device = device;
+        self
+    }
+
+    /// Room for a `max_ctx`-token cache (default 4096): what the GPU's
+    /// memory is planned for, and the most `Lm::new_cache` should be asked
+    /// for (`Backend::ctx` says what was planned).
+    pub fn max_ctx(mut self, max_ctx: usize) -> BackendOptions {
+        self.max_ctx = max_ctx;
+        self
+    }
+
+    /// On CUDA, a CPU/GPU split: the last g layers on the GPU (`g` or
+    /// `Some(g)`); g >= the layer count is the whole GPU model; None
+    /// (the default) places it automatically (`Backend::new`). Some(0) is
+    /// an error: that's `Device::Cpu`.
+    pub fn gpu_layers(mut self, g: impl Into<Option<usize>>) -> BackendOptions {
+        self.gpu_layers = g.into();
+        self
+    }
+
+    /// The KV cache type (default f16; q8 is CUDA-only; f32 is the CPU's
+    /// and process-wide, see `KvType::F32`).
+    pub fn kv(mut self, kv: KvType) -> BackendOptions {
+        self.kv = kv;
+        self
+    }
+
+    /// Placed automatically on CUDA, whether a shorter all-GPU context may
+    /// win over a CPU/GPU split (default no; `Backend::new`).
+    pub fn fit(mut self, fit: bool) -> BackendOptions {
+        self.fit = fit;
+        self
+    }
+}
+
 impl<'a> Backend<'a> {
-    /// The model of `m` on `device`, with room for a `max_ctx`-token cache
-    /// of type `kv` (checked up front on the GPU). On CUDA, `gpu_layers`
-    /// Some(g) splits the model, the last g layers on the GPU
-    /// (`HybridQwen2`, its GPU half's cache of type `kv`, the CPU half's
-    /// f16, or f32 for `KvType::F32`; process-wide), or with g >= n_layers
-    /// is the GPU model;
+    /// The model of `m`, placed as `o` says: on `o.device`, with room for
+    /// a `max_ctx`-token cache of type `kv` (checked up front on the GPU).
+    /// On CUDA, `gpu_layers` Some(g) splits the model, the last g layers on
+    /// the GPU (`HybridQwen2`, its GPU half's cache of type `kv`, the CPU
+    /// half's f16, or f32 for `KvType::F32`; process-wide), or with g >=
+    /// n_layers is the GPU model;
     /// None puts it all on the GPU if it fits, else as many of the last
     /// layers as fit with a max_ctx cache of type `kv`
     /// (`hybrid::auto_gpu_layers`, told on stderr), but with `fit` a
@@ -551,22 +633,15 @@ impl<'a> Backend<'a> {
     /// AXON_PREFETCH; `load` checks them too). Some(0) is not a split: the
     /// CLI maps it to `Device::Cpu` before loading (a GPU model maps the
     /// file, a CPU one copies it only if it reads matrices in place).
-    pub fn new(
-        m: &'a Model,
-        device: Device,
-        max_ctx: usize,
-        gpu_layers: Option<usize>,
-        kv: KvType,
-        fit: bool,
-    ) -> Result<Backend<'a>, String> {
+    pub fn new(m: &'a Model, o: BackendOptions) -> Result<Backend<'a>, String> {
         Self::new_capped(
             m,
-            device,
-            max_ctx,
-            gpu_layers,
-            kv,
-            fit,
-            Placing::of(max_ctx),
+            o.device,
+            o.max_ctx,
+            o.gpu_layers,
+            o.kv,
+            o.fit,
+            Placing::of(o.max_ctx),
         )
     }
 

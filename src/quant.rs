@@ -857,23 +857,54 @@ enum Simd {
 /// The kernel set, picked on first use: the best the CPU supports, or
 /// `AXON_SIMD=scalar|avx2|vnni`. A bad or unavailable AXON_SIMD panics
 /// here, so the library's entry points check it first (`env_check`).
+/// Here, at the first use of the kernels (as before `env_check`), it
+/// prints the notice of an AVX2 CPU without fma/f16c on the default path.
 fn simd() -> Simd {
     static SIMD: std::sync::OnceLock<Simd> = std::sync::OnceLock::new();
-    *SIMD.get_or_init(|| simd_setting().unwrap_or_else(|e| panic!("{e}")))
+    *SIMD.get_or_init(|| {
+        let (s, notice) = simd_setting().unwrap_or_else(|e| panic!("{e}"));
+        if notice {
+            eprintln!(
+                "axon: CPU has AVX2 but not fma/f16c: using the scalar kernels \
+                 (much slower; results within tolerance of the SIMD ones)"
+            );
+        }
+        s
+    })
 }
 
-/// AXON_SIMD's kernel set (`choose_simd`), read once; Err says why it
-/// can't be used.
-fn simd_setting() -> Result<Simd, String> {
-    static SET: std::sync::OnceLock<Result<Simd, String>> = std::sync::OnceLock::new();
-    SET.get_or_init(|| choose_simd(std::env::var("AXON_SIMD").ok().as_deref()))
-        .clone()
+/// AXON_SIMD's kernel set (`choose_simd`), read once, and whether `simd()`
+/// prints the scalar-fallback notice (`scalar_notice`); Err says why it
+/// can't be used. Prints nothing: `env_check` runs it on every load, a
+/// pure-GPU one included.
+fn simd_setting() -> Result<(Simd, bool), String> {
+    static SET: std::sync::OnceLock<Result<(Simd, bool), String>> = std::sync::OnceLock::new();
+    SET.get_or_init(|| {
+        let req = std::env::var("AXON_SIMD").ok();
+        choose_simd(req.as_deref()).map(|s| (s, scalar_notice(req.as_deref(), s)))
+    })
+    .clone()
+}
+
+/// Whether the default choice (`req` unset or empty) fell back to the
+/// scalar kernels on a CPU that has AVX2 but not fma/f16c: `simd()` says so.
+fn scalar_notice(req: Option<&str>, s: Simd) -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        matches!(req, None | Some("")) && s == Simd::Scalar && is_x86_feature_detected!("avx2")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        let _ = (req, s);
+        false
+    }
 }
 
 /// The CPU kernels' environment (AXON_SIMD, AXON_DECODE_ROWS,
 /// AXON_PREFETCH), read once at first use: Err names the variable and the
 /// bad value. `load` and `Backend::new` call it first, so a bad value is
 /// their error instead of a panic inside a later call.
+/// Prints nothing (the kernels' notices come at their first use, as before).
 pub(crate) fn env_check() -> Result<(), String> {
     simd_setting()?;
     DecodeCfg::setting()?;
@@ -970,13 +1001,9 @@ fn choose_simd(req: Option<&str>) -> Result<Simd, String> {
                 if avx2 {
                     return Ok(Simd::Avx2);
                 }
-                if is_x86_feature_detected!("avx2") {
-                    eprintln!(
-                        "axon: CPU has AVX2 but not fma/f16c: using the scalar kernels \
-                         (much slower; results within tolerance of the SIMD ones)"
-                    );
-                }
             }
+            // An AVX2 CPU without fma/f16c lands here: `simd()` says so
+            // (`scalar_notice`), not this pure choice.
             Ok(Simd::Scalar)
         }
         Some(other) => Err(format!("AXON_SIMD={other}: expected scalar, avx2 or vnni")),
@@ -5209,6 +5236,21 @@ mod tests {
             }
         }
         println!("default SIMD path: {best:?}");
+    }
+
+    /// The scalar-fallback notice is for the default choice only, and only
+    /// when it fell back to scalar (#124: `env_check` prints nothing).
+    #[test]
+    fn scalar_notice_only_on_default_fallback() {
+        assert!(!scalar_notice(Some("scalar"), Simd::Scalar));
+        #[cfg(target_arch = "x86_64")]
+        {
+            assert!(!scalar_notice(None, Simd::Avx2));
+            assert!(!scalar_notice(Some(""), Simd::Vnni));
+            let avx2 = is_x86_feature_detected!("avx2");
+            assert_eq!(scalar_notice(None, Simd::Scalar), avx2);
+            assert_eq!(scalar_notice(Some(""), Simd::Scalar), avx2);
+        }
     }
 
     /// A bad AXON_SIMD is an error that names it, not a panic (#118 B).

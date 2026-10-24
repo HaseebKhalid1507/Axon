@@ -354,16 +354,21 @@ fn backend_places_moe() {
         return;
     };
     use crate::lm::{Backend, Device, Inner};
-    let b = Backend::new(&m, Device::Cuda, 512, None, crate::kv::KvType::F16, false).unwrap();
+    let b = Backend::new(
+        &m,
+        crate::lm::BackendOptions::default()
+            .device(Device::Cuda)
+            .max_ctx(512),
+    )
+    .unwrap();
     assert!(matches!(b.0, Inner::Moe(_)));
     assert_eq!(b.ctx(512), 512);
     let e = Backend::new(
         &m,
-        Device::Cuda,
-        512,
-        Some(3),
-        crate::kv::KvType::F16,
-        false,
+        crate::lm::BackendOptions::default()
+            .device(Device::Cuda)
+            .max_ctx(512)
+            .gpu_layers(Some(3)),
     );
     assert!(e.is_err_and(|e| e.contains("doesn't split by layers")));
 }

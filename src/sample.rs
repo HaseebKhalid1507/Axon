@@ -43,6 +43,9 @@ pub const CAND_MAX: usize = 256;
 pub const ALL: usize = usize::MAX;
 
 /// One sampling candidate: a (penalized) logit and its token id.
+// doc(hidden): reachable through `Lm::forward_cands`, not 0.1 API until
+// the sampler is exported (#118 item 8).
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Cand {
     pub logit: f32,
@@ -51,6 +54,8 @@ pub struct Cand {
 
 /// What a backend selects per position: the `k` best candidates of the
 /// logits after the repeat penalty over the last `last_n` tokens.
+// doc(hidden), as `Cand` (#118 item 8).
+#[doc(hidden)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CandSpec {
     pub k: usize,

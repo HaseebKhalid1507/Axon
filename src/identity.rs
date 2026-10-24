@@ -891,7 +891,15 @@ mod tests {
         let m = crate::gguf::load_with(path, Some(false)).unwrap();
         let n = crate::hybrid::block_count(&m).unwrap();
         let kv = crate::kv::KvType::F16;
-        let net = Backend::new(&m, crate::lm::Device::Cuda, 256, Some(n / 2), kv, false).unwrap();
+        let net = Backend::new(
+            &m,
+            crate::lm::BackendOptions::default()
+                .device(crate::lm::Device::Cuda)
+                .max_ctx(256)
+                .gpu_layers(Some(n / 2))
+                .kv(kv),
+        )
+        .unwrap();
         let Inner::Hybrid(h) = &net.0 else {
             panic!("not a split")
         };
@@ -947,7 +955,14 @@ mod tests {
         let path = gp.to_str().unwrap();
         let m = crate::gguf::load_with(path, Some(false)).unwrap();
         let kv = crate::kv::KvType::F16;
-        let net = Backend::new(&m, crate::lm::Device::Cuda, 256, None, kv, false).unwrap();
+        let net = Backend::new(
+            &m,
+            crate::lm::BackendOptions::default()
+                .device(crate::lm::Device::Cuda)
+                .max_ctx(256)
+                .kv(kv),
+        )
+        .unwrap();
         let Inner::Cuda(n) = &net.0 else {
             panic!("not on the GPU")
         };
@@ -977,7 +992,14 @@ mod tests {
         let run = |r: crate::rope::RopeArgs| {
             let mut m = crate::gguf::load_with(path, Some(false)).unwrap();
             r.apply(&mut m).unwrap();
-            let net = Backend::new(&m, crate::lm::Device::Cpu, 64, None, kv, false).unwrap();
+            let net = Backend::new(
+                &m,
+                crate::lm::BackendOptions::default()
+                    .device(crate::lm::Device::Cpu)
+                    .max_ctx(64)
+                    .kv(kv),
+            )
+            .unwrap();
             let id = of(path, &m, &net);
             let p = predicted(path, &m).unwrap().remove(0);
             assert_eq!(p.0, "cpu");

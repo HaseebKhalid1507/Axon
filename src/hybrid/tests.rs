@@ -1324,11 +1324,10 @@ fn all_gpu_layers_is_the_cuda_backend() {
     for gl in [n, n + 3] {
         let b = Backend::new(
             &m,
-            Device::Cuda,
-            128,
-            Some(gl),
-            crate::kv::KvType::F16,
-            false,
+            crate::lm::BackendOptions::default()
+                .device(Device::Cuda)
+                .max_ctx(128)
+                .gpu_layers(Some(gl)),
         )
         .unwrap();
         assert!(matches!(b.0, Inner::Cuda(_)), "--gpu-layers {gl}");

@@ -9,23 +9,26 @@
 //! `AXON_SKIP_MODEL_TESTS=1` skips them, `AXON_SKIP_GPU_TESTS=1` the CUDA one.
 
 use axon::{
-    Backend, BackendCache, Device, GenOpts, GenStats, KvType, Lm, Model, Tokenizer, Utf8Stream,
+    Backend, BackendCache, BackendOptions, Device, GenOpts, GenStats, KvType, Lm, Model, Tokenizer,
+    Utf8Stream,
 };
 
 const MODEL: &str = "models/qwen2.5-0.5b-q4_k_m.gguf";
+/// The second model of the swap test (another architecture: qwen3).
+const MODEL2: &str = "models/Qwen3-0.6B-Q8_0.gguf";
 const PROMPT: &str = "The capital of France is";
 const N: usize = 12;
 
-fn model_path() -> Option<String> {
-    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(MODEL);
+fn model_path(model: &str) -> Option<String> {
+    let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(model);
     if p.exists() {
         return Some(p.to_str().expect("utf-8 path").to_string());
     }
     if std::env::var_os("AXON_SKIP_MODEL_TESTS").is_some() {
-        eprintln!("skipping: {MODEL} not present and AXON_SKIP_MODEL_TESTS is set");
+        eprintln!("skipping: {model} not present and AXON_SKIP_MODEL_TESTS is set");
         return None;
     }
-    panic!("{MODEL} is missing (CONTRIBUTING.md), or set AXON_SKIP_MODEL_TESTS=1");
+    panic!("{model} is missing (CONTRIBUTING.md), or set AXON_SKIP_MODEL_TESTS=1");
 }
 
 /// The names an embedder needs, with their types as the API gives them
@@ -33,7 +36,16 @@ fn model_path() -> Option<String> {
 #[allow(dead_code)]
 fn surface(m: &Model, net: &Backend, cache: &mut BackendCache, tok: &Tokenizer) {
     let _: Result<Model, String> = axon::load("x.gguf", Device::Cpu);
-    let _: Result<Backend, String> = Backend::new(m, Device::Cpu, 64, None, KvType::F16, false);
+    let _: Result<Backend, String> = Backend::new(m, BackendOptions::default());
+    let o: BackendOptions = BackendOptions::default()
+        .device(Device::Cuda)
+        .max_ctx(64)
+        .gpu_layers(12)
+        .gpu_layers(None)
+        .gpu_layers(Some(3))
+        .kv(KvType::Q8)
+        .fit(true);
+    let _: Result<Backend, String> = Backend::new(m, o);
     let _: usize = net.ctx(64);
     let _: usize = net.vocab();
     let _: usize = net.prefill_batch();
@@ -82,19 +94,22 @@ fn device_and_kv_parse() {
     assert_eq!(bytes(KvType::F32), 4);
 }
 
-/// examples/embed.rs's path (load, tokenize, prefill, `generate`) on one
-/// device, and the same tokens from a decode loop over `Lm`'s own calls.
-fn gen_on(device: Device) {
-    let Some(path) = model_path() else { return };
+/// examples/embed.rs's path (load, tokenize, prefill, `generate`) of
+/// `model` on one device, and the same tokens from a decode loop over
+/// `Lm`'s own calls: the generated ids, or None (skipped). The model and
+/// its backend are dropped on return.
+fn gen_on(model: &str, device: Device) -> Option<Vec<u32>> {
+    let path = model_path(model)?;
     let model = axon::load(&path, device).expect("load");
     let tok = Tokenizer::from_gguf(&model);
     let ids = tok.encode_prompt(PROMPT);
     let ctx = ids.len() + N + 1;
-    let net = match Backend::new(&model, device, ctx, None, KvType::F16, false) {
+    let o = BackendOptions::default().device(device).max_ctx(ctx);
+    let net = match Backend::new(&model, o) {
         Ok(n) => n,
         Err(e) if device == Device::Cuda && std::env::var_os("AXON_SKIP_GPU_TESTS").is_some() => {
             eprintln!("skipping: no usable GPU ({e}) and AXON_SKIP_GPU_TESTS is set");
-            return;
+            return None;
         }
         Err(e) => panic!("Backend::new: {e}"),
     };
@@ -136,15 +151,44 @@ fn gen_on(device: Device) {
     );
     let text = tok.decode(&st.ids);
     assert!(!text.is_empty());
-    eprintln!("{device:?}: {PROMPT}{text}");
+    eprintln!("{device:?} {}: {PROMPT}{text}", model.arch());
+    Some(st.ids)
+}
+
+/// An embedder's model swap: a backend, dropped, then a second
+/// `Backend::new` (another model) in the same process, which generates;
+/// then the first model again, which must give the same tokens as the
+/// first time.
+fn swap_on(device: Device) {
+    let Some(first) = gen_on(MODEL, device) else {
+        return;
+    };
+    if gen_on(MODEL2, device).is_none() {
+        return;
+    }
+    let again = gen_on(MODEL, device).expect("the first model, loaded again");
+    assert_eq!(
+        again, first,
+        "a reload after a swap gives the same tokens ({device:?})"
+    );
 }
 
 #[test]
 fn gen_cpu() {
-    gen_on(Device::Cpu);
+    gen_on(MODEL, Device::Cpu);
 }
 
 #[test]
 fn gen_cuda() {
-    gen_on(Device::Cuda);
+    gen_on(MODEL, Device::Cuda);
+}
+
+#[test]
+fn second_backend_cpu() {
+    swap_on(Device::Cpu);
+}
+
+#[test]
+fn second_backend_cuda() {
+    swap_on(Device::Cuda);
 }
