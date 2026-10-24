@@ -5448,12 +5448,141 @@ fn hist_p50(m: &std::collections::BTreeMap<String, f64>, fam: &str) -> f64 {
     f64::NAN
 }
 
-/// One arm of the mix part of `serve_hybrid_ab`: a fresh server (`arm`:
-/// roll = `--admit-order fifo --prefill-lanes 2 --step-ms 60` with
-/// AXON_STEP_COST=legacy, #119's scheduling exactly (with AXON_HYBRID=0,
-/// main's); fifo60 / fifo50 = the step cost model with fifo admission;
-/// sjf60 / sjf50 = both (sjf50: the defaults); sjf50age0: no age bound),
-/// `c` closed-loop clients pulling 2c requests from one counter, 3 in 16
+/// An A/B arm's scheduler settings: roll = `--admit-order fifo
+/// --prefill-lanes 2 --step-ms 60` with AXON_STEP_COST=legacy, #119's
+/// scheduling exactly (with AXON_HYBRID=0, main's); fifo60 / fifo50 = the
+/// step cost model with fifo admission; sjf60 / sjf50 = both (sjf50: the
+/// defaults); sjf50age0: no age bound.
+fn arm_opts(arm: &str, o: &mut Opts) {
+    use super::engine::AdmitOrder::{Fifo, Sjf};
+    let (order, lanes, step_ms, legacy, age) = match arm {
+        "roll" => (Fifo, 2, 60, true, 3000),
+        "fifo60" => (Fifo, 0, 60, false, 3000),
+        "fifo50" => (Fifo, 0, 50, false, 3000),
+        "sjf60" => (Sjf, 0, 60, false, 3000),
+        "sjf50" => (Sjf, 0, 50, false, 3000),
+        "sjf50age0" => (Sjf, 0, 50, false, 0),
+        _ => panic!("unknown A/B arm {arm}"),
+    };
+    o.step_ms = step_ms;
+    o.sched.order = order;
+    o.sched.lanes = lanes;
+    o.sched.legacy = legacy;
+    o.sched.age_ms = age;
+}
+
+/// The showdown's own client against in-process servers (MEASURE; for
+/// hosts that run only test binaries): per round, per C, per arm (order
+/// rotated by round; `arm_opts`, AXON_AB_ARMS, default
+/// roll,fifo60,sjf60,sjf50) a fresh server (`AXON_SD_MODEL`, default the
+/// test model; `--parallel AXON_SD_PAR` 32, `--ctx AXON_SD_CTX` 8192),
+/// `sd_client.py warm` then `sd_client.py cell --workload mix --c C
+/// --round R --tag ARM` (`AXON_SD_DIR`, default `.sd` in the source
+/// tree: sd_client.py and prompts-mix-v2.jsonl from axon-devstack
+/// runbooks/h100sd). Prints each cell's JSON as `SDCELL {...}` (feed the
+/// lines to sd_table.py as cells.jsonl) and the step histogram's p50.
+/// `AXON_SD_C` ("16,32"), `AXON_SD_ROUNDS` (2).
+#[test]
+#[ignore]
+fn serve_sd_ab() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let path = match std::env::var("AXON_SD_MODEL") {
+        Ok(p) => p,
+        Err(_) => match crate::testutil::model_path() {
+            Some(p) => p.to_string_lossy().into_owned(),
+            None => return,
+        },
+    };
+    let env = |k: &str, d: &str| std::env::var(k).unwrap_or(d.into());
+    let dir = env("AXON_SD_DIR", concat!(env!("CARGO_MANIFEST_DIR"), "/.sd"));
+    let client = format!("{dir}/sd_client.py");
+    assert!(std::path::Path::new(&client).exists(), "{client}: missing");
+    let arms: Vec<String> = env("AXON_AB_ARMS", "roll,fifo60,sjf60,sjf50")
+        .split(',')
+        .map(String::from)
+        .collect();
+    let cs: Vec<usize> = env("AXON_SD_C", "16,32")
+        .split(',')
+        .map(|v| v.parse().unwrap())
+        .collect();
+    let rounds: usize = env("AXON_SD_ROUNDS", "2").parse().unwrap();
+    let par: usize = env("AXON_SD_PAR", "32").parse().unwrap();
+    let ctx: usize = env("AXON_SD_CTX", "8192").parse().unwrap();
+    eprintln!(
+        "serve_sd_ab: {path}, --parallel {par} --ctx {ctx}, C {cs:?}, {rounds} rounds, arms \
+         {arms:?}, AXON_HYBRID {}",
+        super::engine::hybrid_env()
+    );
+    let py = |args: &[&str]| {
+        let o = std::process::Command::new("python3")
+            .arg(&client)
+            .args(args)
+            .output()
+            .expect("python3");
+        (
+            o.status.success(),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        )
+    };
+    for r in 1..=rounds {
+        for &c in &cs {
+            for k in 0..arms.len() {
+                let arm = &arms[(k + r) % arms.len()];
+                let s = server_with(&path, Device::Cuda, |o| {
+                    o.ctx = Some(ctx);
+                    o.parallel = par;
+                    o.parallel_set = true;
+                    o.log = false;
+                    arm_opts(arm, o);
+                });
+                let url = format!("http://{}", s.addr);
+                let (cs_, ct) = (c.to_string(), ctx.to_string());
+                let (ok, _, err) = py(&["warm", &url, "--c", "4", "--n", "8", "--ctx", &ct]);
+                assert!(ok, "warm: {err}");
+                let rs = r.to_string();
+                let out = format!("{dir}/res");
+                let (ok, so, err) = py(&[
+                    "cell",
+                    &url,
+                    "--workload",
+                    "mix",
+                    "--c",
+                    &cs_,
+                    "--round",
+                    &rs,
+                    "--tag",
+                    arm,
+                    "--out",
+                    &out,
+                    "--ctx",
+                    &ct,
+                ]);
+                assert!(ok, "cell: {err}");
+                let line = so
+                    .lines()
+                    .rev()
+                    .find(|l| l.starts_with('{'))
+                    .unwrap_or("{}");
+                eprintln!("SDCELL {line}");
+                let m = prom_parse(&call(s.addr, "GET", "/metrics", "").body);
+                eprintln!(
+                    "round {r} C={c} {arm}: step p50 {:.1} ms (rows>=16 {:.1}), steps {}",
+                    hist_p50(&m, "axon_step_seconds"),
+                    hist_p50(&m, "axon_step_seconds_rows16"),
+                    m.get("axon_step_seconds_count").copied().unwrap_or(0.0)
+                );
+                drop(s);
+                std::thread::sleep(Duration::from_secs(5));
+            }
+        }
+    }
+}
+
+/// One arm of the mix part of `serve_hybrid_ab` (`arm_opts`): a fresh
+/// server, `c` closed-loop clients pulling 2c requests from one counter, 3 in 16
 /// of them long (`longs` tokens in turn, by the model's tokenizer), the
 /// rest ~40-token questions, `n` tokens each, greedy, every prompt salted
 /// by round and request. The row (MIX_COLS less same_text) and the texts
@@ -5468,16 +5597,6 @@ fn mix_cell(
     n: usize,
     longs: &[usize],
 ) -> (Vec<f64>, Vec<String>) {
-    use super::engine::AdmitOrder::{Fifo, Sjf};
-    let (order, lanes, step_ms, legacy, age) = match arm {
-        "roll" => (Fifo, 2, 60, true, 3000),
-        "fifo60" => (Fifo, 0, 60, false, 3000),
-        "fifo50" => (Fifo, 0, 50, false, 3000),
-        "sjf60" => (Sjf, 0, 60, false, 3000),
-        "sjf50" => (Sjf, 0, 50, false, 3000),
-        "sjf50age0" => (Sjf, 0, 50, false, 0),
-        _ => panic!("AXON_AB_ARMS: unknown arm {arm}"),
-    };
     let reqs = 2 * c;
     let n_long = (reqs * 3).div_ceil(16);
     let is_long = |g: usize| (g * n_long) % reqs < n_long;
@@ -5515,11 +5634,7 @@ fn mix_cell(
         o.ctx = Some(ctx);
         o.parallel = c;
         o.parallel_set = true;
-        o.step_ms = step_ms;
-        o.sched.order = order;
-        o.sched.lanes = lanes;
-        o.sched.legacy = legacy;
-        o.sched.age_ms = age;
+        arm_opts(arm, o);
     });
     let a = s.addr;
     post(
