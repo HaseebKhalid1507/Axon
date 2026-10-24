@@ -110,6 +110,16 @@ fn check_layer(g: &Gpu, ex: &CudaExperts, cpu: &Qwen2, l: usize, what: &str) {
             "{what} layer {l} nb {nb}: {n} of {} outputs differ from the CPU, e.g. {first:?}",
             nb * dim
         );
+        if nb == 1 && mma {
+            // `layer` sends nb 1 to the decode GEMV: the grouped kernels
+            // (moe_sort, moe_gemm_tw_*, moe_sum) at one token, forced.
+            let (b1, _) = ex.batched(&h, &ids, &ws, 1).unwrap();
+            let (n, first) = diffs(&b1, &cpu_t);
+            assert_eq!(
+                n, 0,
+                "{what} layer {l}: batched path at nb 1 differs: {first:?}"
+            );
+        }
         if nb == 1024 && mma {
             // nb invariance: tokens alone (decode GEMV) == their batch columns.
             let pick: Vec<usize> = (0..8).chain([511, 512, 1023]).collect();
@@ -155,12 +165,44 @@ fn upload_all<'g>(
     m: &Model,
     layers: &[usize],
 ) -> Vec<CudaExperts<'g>> {
-    let k = crate::model::meta_num(m, "deepseek2.expert_used_count").expect("expert_used_count")
-        as usize;
+    let key = format!("{}.expert_used_count", m.arch);
+    let k = crate::model::meta_num(m, &key).expect("expert_used_count") as usize;
     layers
         .iter()
         .map(|&l| CudaExperts::upload(g, km, m, l, k).unwrap())
         .collect()
+}
+
+/// qwen3moe's Q4_K_M experts, Q6_K down included (#122 review): the
+/// pruned Qwen3-30B-A3B (128 experts, top-8, the 30B's shapes; layer 2's
+/// down Q6_K), all 3 layers; and Qwen3-MOE-4x0.6B (4 experts, top-2) layer
+/// 0 (Q6_K down) and 3 (Q4_K down). Skipped if the files are missing.
+#[test]
+fn cuda_experts_qwen3moe_match_cpu() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    for (small, layers) in [(false, vec![0, 1, 2]), (true, vec![0, 3])] {
+        let Some(m) = crate::testutil::moe_model(small) else {
+            continue;
+        };
+        let km = Kernels::module_for(&g, &m).unwrap();
+        let exs = upload_all(&g, &km, &m, &layers);
+        let cpu = Qwen2::new_experts(&m);
+        for (ex, &l) in exs.iter().zip(&layers) {
+            check_layer(
+                &g,
+                ex,
+                &cpu,
+                l,
+                if small {
+                    "qwen3moe-4x0.6b"
+                } else {
+                    "qwen3moe-pruned"
+                },
+            );
+        }
+    }
 }
 
 /// The fixture (deepseek2, Q8_0 experts, 4 experts, k 2): layers 1 and 2.

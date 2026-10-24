@@ -12,38 +12,9 @@ use super::batch::act_stride;
 use super::gemm2_smem;
 use crate::cuda::{Arg, DevBuf, Gpu, Module};
 use crate::gguf::{Model, Tensor};
-use crate::quant::{self, Q4_K, Q5_0, Q6_K, Q8_0};
+use crate::quant::{self, Q4_K, Q5_0, Q8_0};
 
-/// The weight types the twins cover: the TW chains of decode.cu's
-/// `dot_rows_t` and prefill.cu's `g2_compute` are the r8 / r8q kernels' f32
-/// steps for these four only (`gemm2_t<..., TW>` static_asserts it; `gemv_tw`
-/// takes a runtime type, so the host refuses the rest: `twin_type`).
-pub(crate) const TWIN_TYPES: [u32; 4] = [Q4_K, Q5_0, Q8_0, Q6_K];
-
-/// Ok if weight type qt has a GPU twin.
-pub(crate) fn twin_type(qt: u32) -> Result<(), String> {
-    match TWIN_TYPES.contains(&qt) {
-        true => Ok(()),
-        false => Err(format!(
-            "weight type {qt} has no GPU twin (Q4_K, Q5_0, Q8_0, Q6_K only)"
-        )),
-    }
-}
-
-/// Ok if a device of compute capability cc runs the twin GEMMs
-/// (`gemm2s_*_tw`, `moe_gemm_tw_*`): tensor cores, sm_80+. Below, the gemm2
-/// family's body is `__trap()`, which would poison the CUDA context, so the
-/// host refuses them there; the decode GEMV (`gemv_tw`, `moe_gemv_tw`) runs
-/// on every arch.
-pub(crate) fn twin_gemm_ok(cc: (u32, u32)) -> Result<(), String> {
-    match cc.0 >= 8 {
-        true => Ok(()),
-        false => Err(format!(
-            "twin GEMMs need sm_80+ (tensor cores); this GPU is sm_{}{}",
-            cc.0, cc.1
-        )),
-    }
-}
+pub(crate) use super::{twin_gemm_ok, twin_type};
 
 /// moe_res.cu's MOE_BN (tokens per grouped-GEMM tile).
 const MOE_BN: usize = 64;
@@ -127,6 +98,16 @@ impl<'g> CudaExperts<'g> {
                 .find(|t| t.name == name)
                 .ok_or_else(|| format!("{name}: missing"))
         };
+        // Expert biases (gpt-oss): the CPU adds them (`Moe::act`,
+        // `down_bias`); the expert kernels have no bias epilogue yet.
+        for p in ["gate", "up", "down"] {
+            let name = format!("blk.{l}.ffn_{p}_exps.bias");
+            if m.tensors.iter().any(|t| t.name == name) {
+                return Err(format!(
+                    "{name}: expert biases aren't supported on the GPU yet"
+                ));
+            }
+        }
         let tg = t("gate")?;
         let n_e = tg.dims.get(2).copied().unwrap_or(0) as usize;
         let gate = Mats::upload(g, m, tg, n_e)?;
@@ -199,6 +180,27 @@ impl<'g> CudaExperts<'g> {
         nb: usize,
         y: Arg,
     ) -> Result<(), String> {
+        // SAFETY: the caller's.
+        unsafe { self.enqueue_path(rb, h, ids, w, nb, y, nb > 1) }
+    }
+
+    /// `enqueue`, the grouped GEMMs if `grouped` (any nb), else the decode
+    /// GEMV (nb = 1).
+    ///
+    /// # Safety
+    /// As `enqueue`.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn enqueue_path(
+        &self,
+        rb: &ResBufs,
+        h: Arg,
+        ids: Arg,
+        w: Arg,
+        nb: usize,
+        y: Arg,
+        grouped: bool,
+    ) -> Result<(), String> {
+        assert!(grouped || nb == 1, "the decode GEMV takes one token");
         assert!(
             nb >= 1 && nb <= rb.max,
             "CudaExperts: nb {nb} of {}",
@@ -209,7 +211,7 @@ impl<'g> CudaExperts<'g> {
         let (ast, ast2) = (act_stride(dim), act_stride(ffn));
         let f = |n: &str| km.function(n);
         let fused = Arg::I32(self.fused as i32);
-        if nb == 1 {
+        if !grouped {
             // SAFETY (every launch): decode.cu's / moe_res.cu's signatures;
             // rb holds max >= 1 token's scratch, k slots of each.
             unsafe {
@@ -416,10 +418,10 @@ impl<'g> CudaExperts<'g> {
     #[cfg(test)]
     pub(crate) fn layer(&self, h: &[f32], ids: &[i32], w: &[f32]) -> Result<Vec<f32>, String> {
         let nb = self.check(h, ids, w)?;
-        Ok(self.run_host(h, ids, w, nb, 1)?.0)
+        Ok(self.run_host(h, ids, w, nb, 1, nb > 1)?.0)
     }
 
-    /// `layer`'s batched path (nb > 1), its kernels enqueued `reps` times
+    /// `layer`'s grouped path (any nb, 1 too), its kernels enqueued `reps` times
     /// back to back: y and the GPU time per run in ms (events around the
     /// kernels; uploads and allocations excluded).
     #[cfg(test)]
@@ -431,8 +433,7 @@ impl<'g> CudaExperts<'g> {
         reps: usize,
     ) -> Result<(Vec<f32>, f32), String> {
         let nb = self.check(h, ids, w)?;
-        assert!(nb > 1, "batched: nb > 1");
-        self.run_host(h, ids, w, nb, reps)
+        self.run_host(h, ids, w, nb, reps, true)
     }
 
     /// Upload, `enqueue` reps times (timed), read y back.
@@ -444,6 +445,7 @@ impl<'g> CudaExperts<'g> {
         w: &[f32],
         nb: usize,
         reps: usize,
+        grouped: bool,
     ) -> Result<(Vec<f32>, f32), String> {
         let g = self.g;
         let rb = ResBufs::new(g, nb, self.dim, self.ffn, self.k)?;
@@ -453,7 +455,9 @@ impl<'g> CudaExperts<'g> {
         let t0 = g.record()?;
         for _ in 0..reps {
             // SAFETY: the buffers above hold nb tokens; ids checked.
-            unsafe { self.enqueue(&rb, hb.arg(), idb.arg(), wb.arg(), nb, yb.arg())? };
+            unsafe {
+                self.enqueue_path(&rb, hb.arg(), idb.arg(), wb.arg(), nb, yb.arg(), grouped)?
+            };
         }
         let t1 = g.record()?;
         g.sync()?;
@@ -475,6 +479,7 @@ impl<'g> CudaExperts<'g> {
                 &w[t * k..(t + 1) * k],
                 1,
                 1,
+                false,
             )?;
             y.extend(r.0);
         }
