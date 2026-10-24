@@ -1,0 +1,1 @@
+[axon-run 17:53:24] submitted 1024-175324-eac6 by /home/haseeb/.cache/axon-wt-moeres-c: /home/haseeb/.cache/axon-moeres/axon-test-73f5c79 cuda::qwen2::experts:: cuda::qwen2::tests::twin:: moe::ds2_tests::ds2_resident moe::ds2_tests::ds2_gpu_fixture_bits --test-threads 1 --nocapture
