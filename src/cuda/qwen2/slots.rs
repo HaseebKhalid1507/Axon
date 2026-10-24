@@ -2553,4 +2553,89 @@ mod tests {
             }
         }
     }
+
+    /// `feed_slot`'s per-pass fixed cost t0 (spec sched-sjf-token-budget
+    /// §10 risk 1; MEASURE, `--ignored --nocapture`): a prompt chunk of n
+    /// tokens fed into one slot at position `depth` (the slot holds `depth`
+    /// tokens first; the same rows rewritten each time), wall clock per call
+    /// with a sync after it (what serve's `feed` sees), median of
+    /// AXON_FEED_REPS (15) after 2 warm-ups, then a least-squares line
+    /// t(n) = t0 + c n over the sizes. `AXON_STEP_MODEL` (the 0.5B by
+    /// default), `AXON_FEED_N` ("1,16,64,128,256,512"), `AXON_FEED_DEPTHS`
+    /// ("0,600,4096").
+    #[test]
+    #[ignore]
+    fn pool_feed_cost() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let m = match std::env::var("AXON_STEP_MODEL") {
+            Ok(p) => crate::gguf::load_with(&p, Some(false)).unwrap(),
+            Err(_) => match crate::testutil::model() {
+                Some(m) => m,
+                None => return,
+            },
+        };
+        let list = |var: &str, def: &str| -> Vec<usize> {
+            std::env::var(var)
+                .unwrap_or(def.into())
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.trim().parse().unwrap())
+                .collect()
+        };
+        let ns = list("AXON_FEED_N", "1,16,64,128,256,512");
+        let depths = list("AXON_FEED_DEPTHS", "0,600,4096");
+        let reps = list("AXON_FEED_REPS", "15")[0];
+        let km = Kernels::module(&g).unwrap();
+        let nmax = *ns.iter().max().unwrap();
+        let ctx = (depths.iter().max().unwrap() + nmax + 64).next_multiple_of(64);
+        let mut net = CudaQwen2::new(&g, &km, &m, ctx).unwrap();
+        net.graphs = true;
+        let mut p = net.pool(1, ctx).unwrap();
+        let gi = g.info().unwrap();
+        eprintln!(
+            "feed cost: {} ({}), {} ({} SMs), pass max {}",
+            std::env::var("AXON_STEP_MODEL").unwrap_or("default 0.5B".into()),
+            m.arch,
+            gi.name,
+            gi.sms,
+            p.pass_max()
+        );
+        let toks: Vec<u32> = (0..ctx).map(|i| 1000 + (i * 7919 % 20000) as u32).collect();
+        eprintln!("| depth | n | ms | us/token |");
+        for &depth in &depths {
+            if depth > 0 {
+                net.feed_slot(&mut p, 0, &toks[..depth], 0).unwrap();
+            }
+            let mut pts = Vec::new();
+            for &n in &ns {
+                let chunk = &toks[depth..depth + n];
+                let mut v: Vec<f64> = (0..reps + 2)
+                    .map(|_| {
+                        let t = std::time::Instant::now();
+                        net.feed_slot(&mut p, 0, chunk, depth).unwrap();
+                        g.sync().unwrap();
+                        t.elapsed().as_secs_f64() * 1e3
+                    })
+                    .skip(2)
+                    .collect();
+                v.sort_by(f64::total_cmp);
+                let ms = v[v.len() / 2];
+                eprintln!("| {depth} | {n} | {ms:.3} | {:.1} |", ms * 1e3 / n as f64);
+                pts.push((n as f64, ms));
+            }
+            let k = pts.len() as f64;
+            let (sx, sy) = pts.iter().fold((0.0, 0.0), |a, p| (a.0 + p.0, a.1 + p.1));
+            let sxx: f64 = pts.iter().map(|p| p.0 * p.0).sum();
+            let sxy: f64 = pts.iter().map(|p| p.0 * p.1).sum();
+            let c = (k * sxy - sx * sy) / (k * sxx - sx * sx);
+            let t0 = (sy - c * sx) / k;
+            eprintln!(
+                "feed fit depth {depth}: t0 {t0:.3} ms + {:.2} us/token (n {:?})",
+                c * 1e3,
+                ns
+            );
+        }
+    }
 }
