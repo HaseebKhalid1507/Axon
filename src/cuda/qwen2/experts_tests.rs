@@ -38,6 +38,25 @@ fn diffs(a: &[f32], b: &[f32]) -> (usize, Vec<(usize, f32, f32)>) {
     )
 }
 
+/// The host-side refusals (#121 items 1, 2): no GPU needed.
+#[test]
+fn twin_refusals() {
+    for cc in [(6, 1), (7, 0), (7, 5)] {
+        let e = twin_gemm_ok(cc).unwrap_err();
+        assert!(e.contains("sm_80"), "{e}");
+    }
+    for cc in [(8, 0), (8, 6), (8, 9), (9, 0), (12, 0)] {
+        twin_gemm_ok(cc).unwrap();
+    }
+    use crate::quant::*;
+    for qt in [Q4_K, Q5_0, Q8_0, Q6_K] {
+        twin_type(qt).unwrap();
+    }
+    for qt in [Q4_0, Q4_1, Q5_1, Q2_K, Q3_K, Q5_K, IQ4_NL, F16, F32] {
+        assert!(twin_type(qt).is_err(), "type {qt} must be refused");
+    }
+}
+
 /// The batch sizes of the gate.
 const NBS: [usize; 5] = [1, 6, 48, 510, 1024];
 
@@ -49,7 +68,8 @@ const NBS: [usize; 5] = [1, 6, 48, 510, 1024];
 fn check_layer(g: &Gpu, ex: &CudaExperts, cpu: &Qwen2, l: usize, what: &str) {
     let mut rng = Rng(0x6d6f_6572_6573_0000 ^ l as u64);
     let (dim, k) = (cpu.dim, ex.k);
-    let mma = g.info().unwrap().cc.0 >= 8;
+    let mma = twin_gemm_ok(g.info().unwrap().cc).is_ok();
+    assert_eq!(ex.fused(), crate::vmath::fused(), "one F: the host CPU's");
     let mut used = vec![0usize; ex.n_e];
     for nb in NBS {
         let h: Vec<f32> = (0..nb * dim)

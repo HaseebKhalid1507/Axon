@@ -3,6 +3,7 @@
 //! `swiglu1_f::<F>`, and the r8 / r8q kernels' row sums.
 
 use super::*;
+use crate::cuda::qwen2::experts::twin_gemm_ok;
 use crate::quant::{QuantizedAct, r8, r8q};
 use crate::vmath;
 
@@ -351,8 +352,12 @@ fn gpu_twin_gemm2s_matches_cpu_r8() {
     let Some(g) = crate::testutil::gpu() else {
         return;
     };
-    if g.info().unwrap().cc.0 < 8 {
-        eprintln!("skipping: gemm2s needs sm_80+ (twin GEMMs are refused below)");
+    let cc = g.info().unwrap().cc;
+    if let Err(e) = twin_gemm_ok(cc) {
+        // Not launched (its body would __trap()): the host refusal is what
+        // this arch checks.
+        assert!(e.contains("sm_80"), "{e}");
+        eprintln!("SKIPPED (refused, as designed): {e}");
         return;
     }
     let km = Kernels::module(&g).unwrap();
@@ -442,4 +447,70 @@ fn gpu_twin_gemm2s_matches_cpu_r8() {
         "the plain gemm2s equals the CPU everywhere: no teeth"
     );
     eprintln!("twin gemm2s: equal for every shape and batch; plain gemm2s differs on {plain_diff}");
+}
+
+/// The twins' epilogues (#121 item 3): bias and mode 1 (out = init + (W x +
+/// bias)) give the CPU's `init + (row sum + bias)` bit for bit, on gemv_tw
+/// and every gemm2s_*_tw (the resident experts launch mode 0 without a bias;
+/// gpt-oss's expert biases will take this path).
+#[test]
+fn gpu_twin_epilogues_match_cpu() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let gemm = twin_gemm_ok(g.info().unwrap().cc).is_ok();
+    let mut rng = Rng(0x7a1e_0000_0000_0005);
+    for (qt, rows, cols) in TWIN_SHAPES {
+        let w = synth_matrix(&mut rng, qt, rows, cols);
+        let bias = rng.vec(rows, 3.0);
+        let init = rng.vec(rows, 3.0);
+        for (b, i) in [(true, false), (false, true), (true, true)] {
+            let epi = Epi {
+                bias: b.then(|| bias.clone()),
+                init: i.then(|| init.clone()),
+            };
+            let want = |r: usize, y: f32| {
+                let v = if b { y + bias[r] } else { y };
+                if i { init[r] + v } else { v }
+            };
+            let x = rng.vec(cols, 4.0);
+            let qa = QuantizedAct::for_types(&x, &[qt]);
+            let cpu: Vec<f32> = cpu_row1(qt, &w, rows, cols, &qa)
+                .into_iter()
+                .enumerate()
+                .map(|(r, y)| want(r, y))
+                .collect();
+            let got = gpu_gemv_epi(&g, &km, "gemv_tw", qt, &w, cols, &x, &epi);
+            let (n, first) = diffs(&got, &cpu);
+            assert_eq!(
+                n, 0,
+                "gemv_tw {qt} {rows}x{cols} bias {b} mode1 {i}: {first:?}"
+            );
+            if !gemm {
+                continue;
+            }
+            let nb = 7;
+            let xs: Vec<Vec<f32>> = (0..nb).map(|_| rng.vec(cols, 4.0)).collect();
+            let qs: Vec<QuantizedAct> = xs
+                .iter()
+                .map(|x| QuantizedAct::for_types(x, &[qt]))
+                .collect();
+            let c = cpu_rows(qt, &w, rows, cols, &qs);
+            let act = quantize_batch(&g, &km, &xs, cols);
+            let wb = g.upload(&w).unwrap();
+            let kernel = format!("gemm2s_{}_tw", type_name(qt));
+            let out = gpu_batched(&g, &km, &kernel, qt, &wb, rows, cols, &act, nb, &epi);
+            let gt: Vec<f32> = (0..rows * nb)
+                .map(|j| out[(j % nb) * rows + j / nb])
+                .collect();
+            let cw: Vec<f32> = (0..rows * nb).map(|j| want(j / nb, c[j])).collect();
+            let (n, first) = diffs(&gt, &cw);
+            assert_eq!(n, 0, "{kernel} {rows}x{cols} bias {b} mode1 {i}: {first:?}");
+        }
+    }
+    eprintln!(
+        "twin epilogues: bias and mode 1 equal the CPU (gemv_tw{})",
+        if gemm { ", gemm2s_*_tw" } else { "" }
+    );
 }

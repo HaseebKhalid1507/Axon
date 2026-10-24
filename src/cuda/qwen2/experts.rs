@@ -12,8 +12,36 @@ use crate::cuda::{Arg, DevBuf, Gpu, Module};
 use crate::gguf::{Model, Tensor};
 use crate::quant::{self, Q4_K, Q5_0, Q6_K, Q8_0};
 
-/// The weight types the twins cover.
-const TWIN_TYPES: [u32; 4] = [Q4_K, Q5_0, Q8_0, Q6_K];
+/// The weight types the twins cover: the TW chains of decode.cu's
+/// `dot_rows_t` and prefill.cu's `g2_compute` are the r8 / r8q kernels' f32
+/// steps for these four only (`gemm2_t<..., TW>` static_asserts it; `gemv_tw`
+/// takes a runtime type, so the host refuses the rest: `twin_type`).
+pub(crate) const TWIN_TYPES: [u32; 4] = [Q4_K, Q5_0, Q8_0, Q6_K];
+
+/// Ok if weight type qt has a GPU twin.
+pub(crate) fn twin_type(qt: u32) -> Result<(), String> {
+    match TWIN_TYPES.contains(&qt) {
+        true => Ok(()),
+        false => Err(format!(
+            "weight type {qt} has no GPU twin (Q4_K, Q5_0, Q8_0, Q6_K only)"
+        )),
+    }
+}
+
+/// Ok if a device of compute capability cc runs the twin GEMMs
+/// (`gemm2s_*_tw`, `moe_gemm_tw_*`): tensor cores, sm_80+. Below, the gemm2
+/// family's body is `__trap()`, which would poison the CUDA context, so the
+/// host refuses them there; the decode GEMV (`gemv_tw`, `moe_gemv_tw`) runs
+/// on every arch.
+pub(crate) fn twin_gemm_ok(cc: (u32, u32)) -> Result<(), String> {
+    match cc.0 >= 8 {
+        true => Ok(()),
+        false => Err(format!(
+            "twin GEMMs need sm_80+ (tensor cores); this GPU is sm_{}{}",
+            cc.0, cc.1
+        )),
+    }
+}
 
 /// moe_res.cu's MOE_BN (tokens per grouped-GEMM tile).
 const MOE_BN: usize = 64;
@@ -43,9 +71,7 @@ struct Mats<'g> {
 impl<'g> Mats<'g> {
     fn upload(g: &'g Gpu, m: &Model, t: &Tensor, n_e: usize) -> Result<Mats<'g>, String> {
         let qt = t.qtype.id;
-        if !TWIN_TYPES.contains(&qt) {
-            return Err(format!("{}: type {qt} has no GPU twin", t.name));
-        }
+        twin_type(qt).map_err(|e| format!("{}: {e}", t.name))?;
         let (cols, rows) = (t.dims[0] as usize, t.dims[1] as usize);
         if t.dims.len() != 3 || t.dims[2] as usize != n_e {
             return Err(format!("{}: not {n_e} experts ({:?})", t.name, t.dims));
@@ -75,8 +101,12 @@ pub(crate) struct CudaExperts<'g> {
     gate: Mats<'g>,
     up: Mats<'g>,
     down: Mats<'g>,
-    /// The batched path's twin GEMMs (sm_80+).
-    mma: bool,
+    /// The batched path's twin GEMMs: `twin_gemm_ok` of the device.
+    mma: Result<(), String>,
+    /// F of every swiglu_twin launch of the layer, read once at upload: the
+    /// host CPU's `vmath::fused()`, the F its `moe_layer_batch` runs with.
+    /// One field, so no launch can pass another (#121 item 4).
+    fused: bool,
 }
 
 impl<'g> CudaExperts<'g> {
@@ -120,7 +150,8 @@ impl<'g> CudaExperts<'g> {
             gate,
             up,
             down,
-            mma: g.info()?.cc.0 >= 8,
+            mma: twin_gemm_ok(g.info()?.cc),
+            fused: crate::vmath::fused(),
         })
     }
 
@@ -159,9 +190,7 @@ impl<'g> CudaExperts<'g> {
         reps: usize,
     ) -> Result<(Vec<f32>, f32), String> {
         let nb = self.check(h, ids, w)?;
-        if !self.mma {
-            return Err("CudaExperts: twin GEMMs need sm_80+ (tensor cores)".into());
-        }
+        self.mma.clone().map_err(|e| format!("CudaExperts: {e}"))?;
         let (g, km, k, dim, ffn) = (self.g, self.km, self.k, self.dim, self.ffn);
         let np = nb * k;
         let (ast, ast2) = (act_stride(dim), act_stride(ffn));
@@ -244,7 +273,7 @@ impl<'g> CudaExperts<'g> {
                         gb.arg(),
                         ub.arg(),
                         Arg::I32(ffn as i32),
-                        Arg::I32(crate::vmath::fused() as i32),
+                        Arg::I32(self.fused as i32),
                         Arg::I32(ffn.is_multiple_of(256) as i32),
                         act2.arg(),
                         Arg::U64(ast2 as u64),
@@ -400,7 +429,7 @@ impl<'g> CudaExperts<'g> {
                         gb.arg(),
                         ub.arg(),
                         Arg::I32(ffn as i32),
-                        Arg::I32(crate::vmath::fused() as i32),
+                        Arg::I32(self.fused as i32),
                         Arg::I32(ffn.is_multiple_of(256) as i32),
                         act2.arg(),
                         Arg::U64(ast2 as u64),
@@ -429,6 +458,11 @@ impl<'g> CudaExperts<'g> {
             y.extend(yb.read::<f32>()?);
         }
         Ok(y)
+    }
+
+    /// The F the layer's swiglu_twin launches pass.
+    pub(crate) fn fused(&self) -> bool {
+        self.fused
     }
 }
 

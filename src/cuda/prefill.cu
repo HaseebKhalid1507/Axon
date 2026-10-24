@@ -1969,6 +1969,11 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
     const int WC = 8 / WR, BM = 32 * WR, BN = 8 * NT * WC;
     typedef G2L<QT, BN, ST, BM> L;
     static_assert(WR == 2 || L::RAW, "the register-staged types stage 64 rows (g2_item)");
+    // The twinned types (r8.rs / r8q.rs's f32 steps in g2_compute's TW
+    // branches); Q2_K / MIN1 types would silently take the plain epilogue.
+    static_assert(!TW || QT == QT_Q4_K || QT == QT_Q5_0 || QT == QT_Q8_0 || QT == QT_Q6_K ||
+                      QT == QT_Q6K8,
+                  "TW: Q4_K, Q5_0, Q8_0, Q6_K (Q6K8) only");
     extern __shared__ uint4 g2_smem[];
     u8* sm = (u8*)g2_smem;
     u32 dsz;
