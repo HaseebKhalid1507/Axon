@@ -161,6 +161,76 @@ pub(super) struct Batch<'a, 't> {
     grow_tokens: usize,
     /// Where the slots' state is shown (/slots, /metrics; `publish`).
     pub metrics: Option<Arc<super::ops::Metrics>>,
+    /// AXON_SERVE_TRACE's per-step log (`StepTrace`; None: off, the
+    /// default, and then nothing below is measured).
+    trace: Option<StepTrace>,
+}
+
+/// AXON_SERVE_TRACE=FILE: one JSON line per engine step appended to FILE
+/// (a measurement aid, default off; it changes no output bits): `t_ms`
+/// since the trace opened, the step's wall `ms`, its prompt feeds (`feeds`
+/// passes, `fed` tokens, `feed_ms`), its decode pass (`rows`, mean
+/// `depth`, `dec_ms`; null without one), then the requests `prefilling`
+/// and `running`. Wall clock on the host: `feed_slot` and `step` return
+/// once the GPU is done, so a pass's time is its kernels plus launches;
+/// `ms` less both is the step's host work.
+struct StepTrace {
+    out: std::io::LineWriter<std::fs::File>,
+    t0: Instant,
+    /// This step's feeds so far: passes, tokens, ms.
+    feeds: usize,
+    fed: usize,
+    feed_ms: f64,
+    /// This step's decode pass: rows, the sum of their positions, ms.
+    dec: Option<(usize, usize, f64)>,
+}
+
+impl StepTrace {
+    /// The trace AXON_SERVE_TRACE names, if any (a file that won't open:
+    /// said on stderr, no trace).
+    fn from_env() -> Option<StepTrace> {
+        let path = std::env::var_os("AXON_SERVE_TRACE").filter(|p| !p.is_empty())?;
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path);
+        match f {
+            Ok(f) => {
+                eprintln!("axon serve: step trace to {}", path.to_string_lossy());
+                Some(StepTrace {
+                    out: std::io::LineWriter::new(f),
+                    t0: Instant::now(),
+                    feeds: 0,
+                    fed: 0,
+                    feed_ms: 0.0,
+                    dec: None,
+                })
+            }
+            Err(e) => {
+                eprintln!(
+                    "axon serve: AXON_SERVE_TRACE {}: {e}",
+                    path.to_string_lossy()
+                );
+                None
+            }
+        }
+    }
+
+    /// The JSON line of a step that started `t_ms` after the trace opened
+    /// and took `ms`, from what the step recorded.
+    fn line(&self, t_ms: f64, ms: f64, prefilling: usize, running: usize) -> String {
+        let dec = match self.dec {
+            Some((rows, pos, ms)) => format!(
+                "\"rows\":{rows},\"depth\":{:.1},\"dec_ms\":{ms:.3}",
+                pos as f64 / rows.max(1) as f64
+            ),
+            None => "\"rows\":0,\"depth\":null,\"dec_ms\":null".into(),
+        };
+        format!(
+            "{{\"t_ms\":{t_ms:.3},\"ms\":{ms:.3},\"feeds\":{},\"fed\":{},\"feed_ms\":{:.3},{dec},\"prefilling\":{prefilling},\"running\":{running}}}",
+            self.feeds, self.fed, self.feed_ms
+        )
+    }
 }
 
 /// What gives up pages for running request `growing`'s next page
@@ -248,6 +318,7 @@ impl<'a, 't> Batch<'a, 't> {
             unfed: 0,
             grow_tokens: GROW_TOKENS,
             metrics: None,
+            trace: StepTrace::from_env(),
         }
     }
 
@@ -482,7 +553,13 @@ impl<'a, 't> Batch<'a, 't> {
         let t = Instant::now();
         self.net.feed_slot(&mut self.pool, s, toks, f.fed)?;
         let mid = f.fed as f64 + n as f64 / 2.0 + DEPTH_K;
-        let c = t.elapsed().as_secs_f64() * 1e6 / (n as f64 * mid);
+        let us = t.elapsed().as_secs_f64() * 1e6;
+        let c = us / (n as f64 * mid);
+        if let Some(tr) = self.trace.as_mut() {
+            tr.feeds += 1;
+            tr.fed += n;
+            tr.feed_ms += us / 1e3;
+        }
         self.held[s].extend_from_slice(toks);
         f.fed += n;
         // Only long enough feeds teach the cost (a short one costs more per
@@ -636,8 +713,34 @@ impl<'a, 't> Batch<'a, 't> {
     }
 
     /// One step: a chunk of the prompts being prefilled, then a row per
-    /// running request and each one's next token.
+    /// running request and each one's next token. With a `StepTrace`, a
+    /// line about it once it did any work.
     pub fn step(&mut self) -> Result<(), String> {
+        if self.trace.is_none() {
+            return self.step_inner();
+        }
+        let t = Instant::now();
+        let res = self.step_inner();
+        let ms = t.elapsed().as_secs_f64() * 1e3;
+        let (prefilling, running) = (self.pre.len(), self.seqs.len());
+        let tr = self.trace.as_mut().expect("tracing");
+        if tr.feeds > 0 || tr.dec.is_some() {
+            let t_ms = (t - tr.t0).as_secs_f64() * 1e3;
+            let line = tr.line(t_ms, ms, prefilling, running);
+            use std::io::Write;
+            if let Err(e) = writeln!(tr.out, "{line}") {
+                eprintln!("axon serve: step trace: {e}; tracing stops");
+                self.trace = None;
+            }
+        }
+        if let Some(tr) = self.trace.as_mut() {
+            (tr.feeds, tr.fed, tr.feed_ms, tr.dec) = (0, 0, 0.0, None);
+        }
+        res
+    }
+
+    /// `step`'s work.
+    fn step_inner(&mut self) -> Result<(), String> {
         self.reap();
         self.prefill()?;
         self.grow()?;
@@ -674,6 +777,10 @@ impl<'a, 't> Batch<'a, 't> {
         let t = Instant::now();
         let res = self.net.step(&mut self.pool, &rows);
         self.decode_ms = t.elapsed().as_secs_f64() * 1e3;
+        if let Some(tr) = self.trace.as_mut() {
+            let pos = rows.iter().map(|r| r.pos).sum();
+            tr.dec = Some((rows.len(), pos, self.decode_ms));
+        }
         let outs = match res {
             Ok(o) => o,
             // Refused before any work: those requests fail, the rest of the
@@ -1594,5 +1701,42 @@ mod victim_tests {
             refeeds > 1 && !l_done,
             "the old rule: {refeeds} refeeds, L done {l_done}"
         );
+    }
+}
+
+#[cfg(test)]
+mod trace_tests {
+    use super::StepTrace;
+    use std::time::Instant;
+
+    /// AXON_SERVE_TRACE's lines are JSON with every field, a step without
+    /// a decode pass has nulls for its decode fields.
+    #[test]
+    fn step_trace_lines_are_json() {
+        let path = std::env::temp_dir().join(format!("axon-trace-{}.jsonl", std::process::id()));
+        let f = std::fs::File::create(&path).unwrap();
+        let mut tr = StepTrace {
+            out: std::io::LineWriter::new(f),
+            t0: Instant::now(),
+            feeds: 2,
+            fed: 700,
+            feed_ms: 31.25,
+            dec: Some((128, 128 * 790 + 64, 18.6)),
+        };
+        let v: serde_json::Value = serde_json::from_str(&tr.line(5.0, 52.5, 2, 128)).unwrap();
+        assert_eq!(v["fed"], 700);
+        assert_eq!(v["feeds"], 2);
+        assert_eq!(v["rows"], 128);
+        assert_eq!(v["depth"], 790.5);
+        assert_eq!(v["dec_ms"], 18.6);
+        assert_eq!(v["ms"], 52.5);
+        assert_eq!(v["running"], 128);
+        tr.dec = None;
+        let v: serde_json::Value = serde_json::from_str(&tr.line(5.0, 30.0, 1, 0)).unwrap();
+        assert_eq!(v["rows"], 0);
+        assert!(v["dec_ms"].is_null() && v["depth"].is_null());
+        assert_eq!(v["prefilling"], 1);
+        drop(tr);
+        std::fs::remove_file(&path).unwrap();
     }
 }

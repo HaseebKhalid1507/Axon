@@ -7682,10 +7682,87 @@ fn gpu_gemmh_matches_reference_bits() {
     }
 }
 
+/// TEST-ONLY, DELIBERATELY INEXACT: the kernel source with hopper.cu's
+/// gemmh2_t (gemmh2_q4_k and gemmh2_q4_k_gu) patched to drop the per-256
+/// drain: the S (dlo / dhi) wgmma chains accumulate over the whole K in
+/// int32 (scale-d 0 only on block 0's first k32), M by dp4a likewise, and
+/// the float epilogue (d S - dmin M, the fma into acc) runs once, on the
+/// last block's scales. Its results are wrong by design; its speed is the
+/// upper bound of what the drain (the bit-identity contract's only
+/// Hopper-specific cost, outside review 10-19 §2.3) costs. It still waits
+/// for each block's wgmmas (the A fragments' registers are refilled for
+/// the next block), so it bounds the drain's arithmetic, not the wait.
+/// Lives only here (`#[cfg(test)]`): no product path builds this source,
+/// and the kernel cache is keyed by the source, so its cubin can never be
+/// loaded for the real one. Panics if hopper.cu no longer has the patched
+/// lines exactly once (`gemmh2_nodrain_patch_applies` catches that on any
+/// machine).
+fn gemmh2_nodrain_src() -> String {
+    let src = crate::cuda::KERNELS;
+    let a = src
+        .find("__device__ __forceinline__ void gemmh2_t(")
+        .expect("hopper.cu: gemmh2_t");
+    let b = a + src[a..]
+        .find("gemmh2_q4_k(const __grid_constant__")
+        .expect("hopper.cu: gemmh2_q4_k");
+    let mut body = src[a..b].to_string();
+    for (from, to) in [
+        (
+            "wg_mma_rs_n64_u8(dlo, alo[j], wg_desc(b0 + (j >> 2) * 8192) + 2 * (j & 3), j);",
+            "wg_mma_rs_n64_u8(dlo, alo[j], wg_desc(b0 + (j >> 2) * 8192) + 2 * (j & 3), (b | j) != 0);",
+        ),
+        (
+            "wg_mma_rs_n64_u8(dhi, ahi[j], wg_desc(b0 + (j >> 2) * 8192) + 2 * (j & 3), j);",
+            "wg_mma_rs_n64_u8(dhi, ahi[j], wg_desc(b0 + (j >> 2) * 8192) + 2 * (j & 3), (b | j) != 0);",
+        ),
+        (
+            "acc[i] = 0.0f, dlo[i] = 0, dhi[i] = 0;",
+            "acc[i] = 0.0f, dlo[i] = 0, dhi[i] = 0, M[i] = 0;",
+        ),
+        (
+            "M[4 * i + e] = ml + 64 * mh;",
+            "M[4 * i + e] += ml + 64 * mh;",
+        ),
+        (
+            "int h = e >> 1;\n                int S = 16 * dhi",
+            "if (b != nblk - 1) continue; // NODRAIN: one epilogue\n                int h = e >> 1;\n                int S = 16 * dhi",
+        ),
+    ] {
+        assert_eq!(body.matches(from).count(), 1, "hopper.cu gemmh2_t: {from}");
+        body = body.replacen(from, to, 1);
+    }
+    format!(
+        "{}// AXON TEST-ONLY: gemmh2_t without the per-256 drain (inexact)\n{body}{}",
+        &src[..a],
+        &src[b..]
+    )
+}
+
+/// The nodrain patch still applies to hopper.cu (no GPU needed), and
+/// changes only gemmh2_t. AXON_NODRAIN_SRC_OUT=FILE writes the patched
+/// source there (the H100 kit compiles it offline into the pod's kernel
+/// cache).
+#[test]
+fn gemmh2_nodrain_patch_applies() {
+    let p = gemmh2_nodrain_src();
+    if let Some(out) = std::env::var_os("AXON_NODRAIN_SRC_OUT") {
+        std::fs::write(out, &p).unwrap();
+    }
+    assert_ne!(p, crate::cuda::KERNELS);
+    let a = crate::cuda::KERNELS
+        .find("__device__ __forceinline__ void gemmh2_t(")
+        .unwrap();
+    assert_eq!(&p[..a], &crate::cuda::KERNELS[..a]);
+    assert_eq!(p.matches("(b | j) != 0").count(), 2);
+}
+
 /// gemmh vs gemm2 on the 7B's Q4_K shapes: interleaved rounds (clocks
 /// drift), each kernel's median / min / max TMAC/s of real MACs (rows x
 /// cols x nb). AXON_BENCH_NB (default 1050), AXON_BENCH_ROUNDS (default 7).
-/// Hopper only for gemmh; run with --ignored.
+/// gemm2s, gemm2, gemm2t everywhere; on Hopper (sm_90a) the gemmh kernels
+/// too and `gemmh2_q4_k!nodrain` / `gemmh2_q4_k_gu!nodrain`, the inexact
+/// upper bound (`gemmh2_nodrain_src`; AXON_BENCH_NODRAIN=0 skips it).
+/// Run with --ignored.
 #[test]
 #[ignore]
 fn cuda_gemmh_bench() {
@@ -7701,6 +7778,18 @@ fn cuda_gemmh_bench() {
         info.cc.1,
         info.sms,
         km.hopper()
+    );
+    // The inexact module (Hopper only): the same options as module_ext.
+    let kx = (km.hopper() && std::env::var("AXON_BENCH_NODRAIN").map_or(true, |v| v != "0")).then(
+        || {
+            let src = gemmh2_nodrain_src();
+            let m = Module::load(&g, &src, &crate::cuda::KERNEL_OPTS_EXT)
+                .unwrap()
+                .0;
+            assert!(m.hopper(), "the nodrain module isn't sm_90a");
+            eprintln!("nodrain module: gemmh2_t without the per-256 drain (INEXACT, bench only)");
+            m
+        },
     );
     let nbs: Vec<usize> = std::env::var("AXON_BENCH_NB")
         .map(|v| v.split(',').map(|x| x.parse().unwrap()).collect())
@@ -7722,20 +7811,28 @@ fn cuda_gemmh_bench() {
             let act = quantize_batch(&g, &km, &xs, cols);
             let st = act_stride_t(cols);
             let out = g.alloc(rows * nb * 4).unwrap();
-            let mut kernels = vec!["gemm2s_q4_k", "gemm2_q4_k"];
+            let mut kernels = vec!["gemm2s_q4_k", "gemm2_q4_k", "gemm2t_q4_k"];
             if km.hopper() {
                 kernels.extend(["gemmh_q4_k", "gemmh1_q4_k", "gemmh2_q4_k"]);
+            }
+            if kx.is_some() {
+                kernels.push("gemmh2_q4_k!nodrain");
             }
             let mut ms: Vec<Vec<f64>> = vec![Vec::new(); kernels.len()];
             for _ in 0..rounds {
                 for (ki, k) in kernels.iter().enumerate() {
                     let run = || {
                         if k.starts_with("gemmh") {
+                            // `name!nodrain`: kernel `name` of the inexact module.
+                            let (m, k) = match k.split_once('!') {
+                                Some((k, _)) => (kx.as_ref().unwrap(), k),
+                                None => (&km, *k),
+                            };
                             // SAFETY: as in gpu_gemmh_matches_reference_bits.
                             unsafe {
                                 launch_gemmh(
                                     &g,
-                                    &km,
+                                    m,
                                     k,
                                     &w,
                                     rows,
@@ -7804,6 +7901,9 @@ fn cuda_gemmh_bench() {
         if km.hopper() {
             kernels.push("gemmh2_q4_k_gu");
         }
+        if kx.is_some() {
+            kernels.push("gemmh2_q4_k_gu!nodrain");
+        }
         let f2 = km.function("gemm2s_q4_k_gu").unwrap();
         f2.set_max_shared(gemm2_smem(Q4_K, 64, 3)).unwrap();
         let mut ms: Vec<Vec<f64>> = vec![Vec::new(); kernels.len()];
@@ -7811,10 +7911,12 @@ fn cuda_gemmh_bench() {
             for (ki, k) in kernels.iter().enumerate() {
                 let run = || {
                     if k.starts_with("gemmh") {
-                        // SAFETY: as in gpu_gemmh_gate_up_match_reference.
-                        unsafe {
-                            launch_gemmh_gu(&g, &km, &wg, &wu, rows, cols, &act, st, nb, &out)
+                        let m = match k.ends_with("!nodrain") {
+                            true => kx.as_ref().unwrap(),
+                            false => &km,
                         };
+                        // SAFETY: as in gpu_gemmh_gate_up_match_reference.
+                        unsafe { launch_gemmh_gu(&g, m, &wg, &wu, rows, cols, &act, st, nb, &out) };
                     } else {
                         // SAFETY: gemm2s_q4_k_gu's signature; buffers as above.
                         unsafe {
