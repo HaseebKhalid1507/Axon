@@ -148,14 +148,14 @@ Q5_K). Bounds: `|sumi_j| ≤ 32·15·127 = 60,960`, so `|D_lo|, |D_hi| ≤ 8·7�
 
 ```
 flo  = __fsub_rn(__int_as_float(0x4B400000 + D_lo),  12582912.0f);   // 1.5·2^23 magic, exact for |x| < 2^22
-f8hi = __fsub_rn(__int_as_float(0x4D400000 + D_hi), 100663296.0f);   // 1.5·2^26 magic, ulp 8: exact 8·D_hi
+f8hi = __fsub_rn(__int_as_float(0x4CC00000 + D_hi), 100663296.0f);   // 1.5·2^26 magic, ulp 8: exact 8·D_hi
 fS   = __fadd_rn(f8hi, flo);                                          // == i2f_rn(S), S = 8·D_hi + D_lo
 ```
 
 `flo` and `f8hi` are exact floats (both integers are below 2²², and 8·D_hi is a float with ulp 8 in [2²⁶, 2²⁷)); the
 real sum is exactly `S`, so one correctly-rounded `fadd` returns `rn(S)`, which is by definition what `cvt.rn.f32.s32`
 returns. **Bit-identical to `i2f_rn(S)` for every input the format can produce**, including |S| ≥ 2²⁴ where the
-conversion rounds. Cost: 2 IADD + 3 FADD at full rate instead of 1 IMAD + 1 I2F at 1/8 rate. This adds float ops to
+conversion rounds. *(Erratum 10-24, found by case building the PR #125 bit test: the first version of this doc had `0x4D400000`, which is 1.5·2²⁷, not 1.5·2²⁶, and gives wrong results; `0x4CC00000` is correct. #125's host test asserts the old form fails.)* Cost: 2 IADD + 3 FADD at full rate instead of 1 IMAD + 1 I2F at 1/8 rate. This adds float ops to
 the code but not to the *result*; hopper.md §4's "no float op added" is a sufficient condition, not the contract. Gate
 it with `gpu_products_match_reference_bits` plus one adversarial fixture at the bounds (`sc = 63`, `q = 15`,
 `x = ±127` everywhere) so the proof is exercised, not trusted. CODE precedent: `gm_i2f` has been on main for M.
