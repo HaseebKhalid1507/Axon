@@ -1026,6 +1026,7 @@ fn engine(
         split_ctx,
         defer_q6k8: true,
         paged: paged_serve(device, o.parallel, paged_env),
+        gpu_experts: None,
     };
     let (mut net, drafter) = crate::backend_and_drafter(
         &model,

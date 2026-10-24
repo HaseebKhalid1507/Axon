@@ -23,6 +23,7 @@
 //! Threads: as the hybrid's, strictly sequential: the thread that opened
 //! the GPU drives the CPU pool for the experts between the GPU's segments.
 
+use crate::cuda::qwen2::experts::{self, GpuExperts, ResBufs, Resident};
 use crate::cuda::qwen2::mla::MlaBufs;
 use crate::cuda::qwen2::moe::{MoeBufs, MoeKind};
 use crate::cuda::qwen2::{CacheKv, CudaCache, CudaQwen2, Head};
@@ -38,6 +39,12 @@ pub struct MoeQwen3<'m, 'g> {
     /// The context its caches are planned for (with `fit`, maybe less than
     /// asked).
     pub ctx: usize,
+    /// The MoE layers whose experts are resident on the GPU
+    /// (`--gpu-experts`; deepseek2 only for now), and why there are none if
+    /// some were asked for.
+    res: Option<Resident<'g>>,
+    res_note: Option<String>,
+    dev: &'g Gpu,
 }
 
 /// The GPU cache and the experts' exchange scratch.
@@ -50,7 +57,8 @@ pub struct MoeCache<'g> {
 /// A cache's scratch, by `MoeKind`: deepseek2's MLA layers have their own.
 enum Scratch<'g> {
     Moe(MoeBufs<'g>),
-    Mla(Box<MlaBufs<'g>>),
+    /// With the resident experts' scratch if any are.
+    Mla(Box<MlaBufs<'g>>, Option<ResBufs<'g>>),
 }
 
 /// A pass `MoeQwen3::run` dispatches: a decode step (token, pos) or
@@ -66,7 +74,7 @@ impl<'g> MoeCache<'g> {
     pub(crate) fn moe_parts(&mut self) -> (&mut CudaCache<'g>, &mut MoeBufs<'g>) {
         match &mut self.s {
             Scratch::Moe(mb) => (&mut self.c, mb),
-            Scratch::Mla(_) => panic!("an MLA cache"),
+            Scratch::Mla(..) => panic!("an MLA cache"),
         }
     }
 }
@@ -88,16 +96,124 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
         fit: bool,
         q6k8: bool,
     ) -> Result<MoeQwen3<'m, 'g>, String> {
-        crate::model::moe_check_ram(m, false)?;
+        Self::new_with(
+            gpu,
+            module,
+            router,
+            m,
+            max_ctx,
+            kv,
+            fit,
+            q6k8,
+            GpuExperts::from_env()?,
+        )
+    }
+
+    /// `new` with `want` MoE layers' experts resident on the GPU (deepseek2;
+    /// the default `N(0)` is `new`'s behaviour). Residency never changes
+    /// a bit (the twins: `cuda::qwen2::experts`); where it couldn't keep
+    /// them, it falls back to none and says why (`describe`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with(
+        gpu: &'g Gpu,
+        module: &'g Module<'g>,
+        router: &'g Module<'g>,
+        m: &'m Model,
+        max_ctx: usize,
+        kv: CacheKv,
+        fit: bool,
+        q6k8: bool,
+        want: GpuExperts,
+    ) -> Result<MoeQwen3<'m, 'g>, String> {
+        if want == GpuExperts::N(0) {
+            crate::model::moe_check_ram(m, false)?;
+        }
         let net = CudaQwen2::with_kv_moe(gpu, module, m, max_ctx, kv, fit, q6k8)?;
         let kind = MoeKind::new(m, router, module)?;
-        let cpu = Qwen2::new_experts(m);
-        Ok(MoeQwen3 {
+        // With residency asked for, a placeholder CPU half that repacks
+        // nothing (the experts are uploaded from the mapping first; the
+        // repack may release an in-memory model's bytes), rebuilt below.
+        let all: Vec<usize> = expert_layers(m).iter().map(|e| e.0).collect();
+        let cpu = match want {
+            GpuExperts::N(0) => Qwen2::new_experts(m),
+            _ => Qwen2::new_experts_except(m, &all),
+        };
+        let mut me = MoeQwen3 {
             ctx: net.ctx,
             gpu: net,
             cpu,
             kind,
-        })
+            res: None,
+            res_note: None,
+            dev: gpu,
+        };
+        if want == GpuExperts::N(0) {
+            return Ok(me);
+        }
+        match me.place_resident(gpu, module, m, want) {
+            Ok(r) => {
+                let skip = r.which();
+                let moe_n = expert_layers(m).len();
+                crate::model::moe_check_ram_keep(m, moe_n - skip.len(), moe_n)?;
+                me.cpu = Qwen2::new_experts_except(m, &skip);
+                me.res = (!skip.is_empty()).then_some(r);
+            }
+            Err(e) => {
+                crate::model::moe_check_ram(m, false)?;
+                me.cpu = Qwen2::new_experts(m);
+                me.res_note = Some(e);
+            }
+        }
+        Ok(me)
+    }
+
+    /// The resident layers `want` asks for that fit after a cache of the
+    /// planned context (ctx first), smallest first; Err if residency can't
+    /// keep the CPU's bits here or isn't supported.
+    fn place_resident(
+        &self,
+        gpu: &'g Gpu,
+        module: &'g Module<'g>,
+        m: &Model,
+        want: GpuExperts,
+    ) -> Result<Resident<'g>, String> {
+        if !matches!(self.kind, MoeKind::Mla(_)) {
+            return Err(format!(
+                "resident experts: deepseek2 only for now ({})",
+                m.arch
+            ));
+        }
+        let repack = std::env::var("AXON_REPACK").map_or(true, |v| v != "0");
+        experts::twin_identity(repack, crate::vmath::fused(), crate::vmath::fused())?;
+        experts::twin_gemm_ok(gpu.info()?.cc)?;
+        let layers = expert_layers(m);
+        let d = self.gpu.moe.expect("a mixture-of-experts model");
+        let dim = self.gpu.dim;
+        // ctx first: the free memory with one cache of the planned context.
+        let free = {
+            let probe = Lm::new_cache(self, self.ctx);
+            let max = CudaQwen2::batch_max(&probe.c);
+            let f = gpu.info()?.free_bytes as usize;
+            f.saturating_sub(ResBufs::bytes(max, dim, d.ffn, d.k))
+        };
+        let budget = free.saturating_sub(RESIDENT_HEADROOM);
+        let pick = experts::place(&layers, want, budget);
+        if let GpuExperts::N(n) = want
+            && pick.len() < n
+        {
+            eprintln!(
+                "moe:         --gpu-experts {n}: {} fit after a ctx-{} cache",
+                pick.len(),
+                self.ctx
+            );
+        }
+        let n_layers = self.gpu.n_layers;
+        let r = Resident::upload(gpu, module, m, n_layers, &pick, d.k)?;
+        for l in r.which() {
+            let f = r.get(l).expect("resident").fused();
+            experts::twin_identity(repack, crate::vmath::fused(), f)?;
+        }
+        Ok(r)
     }
 
     /// The GPU half (identity, profiles).
@@ -112,14 +228,29 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
     /// One line for the banner.
     pub fn describe(&self, max_ctx: usize) -> String {
         let d = self.gpu.moe.expect("a mixture-of-experts model");
+        let n = self.gpu.mla_moe_layers().unwrap_or(self.gpu.n_layers);
+        let res = match (&self.res, &self.res_note) {
+            (Some(r), _) => format!(
+                "; {} of {n} expert layers resident on the GPU ({:.2} GiB)",
+                r.which().len(),
+                r.bytes() as f64 / (1u64 << 30) as f64
+            ),
+            (None, Some(e)) => format!("; no experts resident: {e}"),
+            _ => String::new(),
+        };
         format!(
             "attention + router on the GPU ({:.2} GiB, ctx {max_ctx}), {} experts x {} \
-             layers on the CPU (top-{})",
+             layers on the CPU (top-{}){res}",
             self.gpu.weight_bytes() as f64 / (1u64 << 30) as f64,
             d.n_expert,
-            self.gpu.mla_moe_layers().unwrap_or(self.gpu.n_layers),
+            n - self.resident_layers().len(),
             d.k
         )
+    }
+
+    /// The resident layers (`--gpu-experts`).
+    pub fn resident_layers(&self) -> Vec<usize> {
+        self.res.as_ref().map_or(Vec::new(), |r| r.which())
     }
 
     fn die(e: String) -> ! {
@@ -157,11 +288,13 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
         let g = &self.gpu;
         let none = |r: Result<(), String>| r.map(|_| (Vec::new(), Vec::new()));
         match (&self.kind, &mut c.s, p) {
-            (MoeKind::Mla(xf), Scratch::Mla(xb), Pass::Step(t, pos)) => {
-                none(g.mla_step(xf, &mut c.c, xb, t, pos, &mut ex))
+            (MoeKind::Mla(xf), Scratch::Mla(xb, rb), Pass::Step(t, pos)) => {
+                let res = self.res.as_ref().zip(rb.as_ref());
+                none(g.mla_step(xf, &mut c.c, xb, t, pos, &mut ex, res))
             }
-            (MoeKind::Mla(xf), Scratch::Mla(xb), Pass::Tokens(ts, start, head)) => {
-                g.mla_tokens(xf, &mut c.c, xb, ts, start, head, &mut ex)
+            (MoeKind::Mla(xf), Scratch::Mla(xb, rb), Pass::Tokens(ts, start, head)) => {
+                let res = self.res.as_ref().zip(rb.as_ref());
+                g.mla_tokens(xf, &mut c.c, xb, ts, start, head, &mut ex, res)
             }
             (k, Scratch::Moe(mb), Pass::Step(t, pos)) => {
                 none(g.moe_step(k, &mut c.c, mb, t, pos, Head::Argmax, &mut ex))
@@ -187,6 +320,27 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
     ) -> (Vec<u32>, Vec<f32>) {
         self.run(c, Pass::Tokens(tokens, start, head))
     }
+}
+
+/// VRAM left free after the resident experts (the driver, graphs, the
+/// batch passes' transient buffers).
+const RESIDENT_HEADROOM: usize = 512 << 20;
+
+/// Each MoE layer's routed experts: (layer, bytes of its three tensors).
+fn expert_layers(m: &Model) -> Vec<(usize, usize)> {
+    let mut v: Vec<(usize, usize)> = Vec::new();
+    for t in &m.tensors {
+        if crate::model::MOE_EXPS.iter().any(|s| t.name.ends_with(s))
+            && let Ok(l) = usize::try_from(t.layer)
+        {
+            match v.iter_mut().find(|e| e.0 == l) {
+                Some(e) => e.1 += t.n_bytes as usize,
+                None => v.push((l, t.n_bytes as usize)),
+            }
+        }
+    }
+    v.sort();
+    v
 }
 
 /// y[t][r] = yc[r][t] (yc: dim rows of nb, y: nb rows of dim), in
@@ -221,10 +375,13 @@ impl<'g> Lm for MoeQwen3<'_, 'g> {
         let c = Lm::new_cache(&self.gpu, max_ctx);
         let max = CudaQwen2::batch_max(&c);
         let s = match self.kind {
-            MoeKind::Mla(_) => self
-                .gpu
-                .mla_bufs(max, max_ctx)
-                .map(|b| Scratch::Mla(Box::new(b))),
+            MoeKind::Mla(_) => self.gpu.mla_bufs(max, max_ctx).and_then(|b| {
+                let rb = match self.res.as_ref().and_then(|r| r.dims()) {
+                    Some((dim, ffn, k)) => Some(ResBufs::new(self.dev, max, dim, ffn, k)?),
+                    None => None,
+                };
+                Ok(Scratch::Mla(Box::new(b), rb))
+            }),
             _ => self.gpu.moe_bufs(max).map(Scratch::Moe),
         }
         .unwrap_or_else(|e| Self::die(e));

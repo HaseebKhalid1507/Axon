@@ -3322,8 +3322,7 @@ impl<'g> Lm for CudaQwen2<'g> {
 }
 
 mod batch;
-#[cfg(test)]
-pub(crate) mod experts;
+pub mod experts;
 pub(crate) mod kvio;
 pub(crate) mod mla;
 pub(crate) mod moe;

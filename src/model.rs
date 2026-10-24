@@ -449,9 +449,12 @@ mod moe;
 pub(crate) use deepseek2::info_lines as deepseek2_info;
 pub(crate) use deepseek2::{GpuCfg as Ds2GpuCfg, gpu_cfg as deepseek2_gpu_cfg};
 
+/// The routed experts' tensor names (per layer).
+pub(crate) const MOE_EXPS: [&str; 3] = moe::EXPS;
+
 pub(crate) use moe::{
     MoeDims, MoeInfo, Route as MoeRoute, check_ram as moe_check_ram,
-    gpu_refusal as moe_gpu_refusal, is_moe, moe_dims,
+    check_ram_keep as moe_check_ram_keep, gpu_refusal as moe_gpu_refusal, is_moe, moe_dims,
 };
 
 /// Gemma 3's layer layout: local (sliding-window) layers attend to the last
@@ -1083,6 +1086,19 @@ impl<'a> Qwen2<'a> {
     pub(crate) fn new_experts(m: &'a Model) -> Qwen2<'a> {
         let repack = std::env::var("AXON_REPACK").map_or(true, |v| v != "0");
         Self::build(m, repack, false, usize::MAX, true)
+    }
+
+    /// `new_experts` of a deepseek2 model, every layer's experts repacked but
+    /// those of `skip` (resident on the GPU: left in the mapping, never read).
+    pub(crate) fn new_experts_except(m: &'a Model, skip: &[usize]) -> Qwen2<'a> {
+        if skip.is_empty() {
+            return Self::new_experts(m);
+        }
+        assert_eq!(m.arch, "deepseek2", "new_experts_except: deepseek2 only");
+        let repack = std::env::var("AXON_REPACK").map_or(true, |v| v != "0");
+        let n = crate::model::meta_num(m, "deepseek2.block_count").unwrap_or(0.0) as usize;
+        let keep: Vec<usize> = (0..n).filter(|l| !skip.contains(l)).collect();
+        deepseek2::build_only(m, repack, true, Some(&keep))
     }
 
     /// `new_experts` of a deepseek2 model with only layers `layers`' experts

@@ -319,3 +319,182 @@ fn ds2_gpu_moonlight_bits() {
         tok.decode(&r2.ids)
     );
 }
+
+/// The logits of `net` over `ids`: decode one by one, then the same
+/// prompt fed in passes of `splits` and its last logits (prefill_logits),
+/// then a greedy continuation of `ngen` tokens from there (decode).
+fn resident_trace(net: &MoeQwen3, ids: &[u32], splits: &[usize], ngen: usize) -> Vec<Vec<f32>> {
+    let n = ids.len();
+    let mut out = Vec::new();
+    let mut a = net.new_cache(n + ngen + 1);
+    for (pos, &id) in ids.iter().enumerate() {
+        out.push(net.forward(id, pos, &mut a));
+    }
+    let mut b = net.new_cache(n + ngen + 1);
+    let mut s = 0;
+    for &k in splits.iter().cycle() {
+        if s + 1 >= n {
+            break;
+        }
+        let k = k.min(n - 1 - s);
+        net.feed_batch(&ids[s..s + k], s, &mut b);
+        s += k;
+    }
+    let mut last = net.prefill_logits(&ids[s..], s, &mut b);
+    out.push(last.clone());
+    for i in 0..ngen {
+        let t = crate::argmax(&last);
+        last = net.forward(t, n + i, &mut b);
+        out.push(last.clone());
+    }
+    out
+}
+
+/// PR C's key gate on the fixture: every `--gpu-experts` placement (none,
+/// one MoE layer, both, auto) gives the same bits, decode and batched
+/// (every option set; YaRN's crosses an attention split).
+#[test]
+fn ds2_resident_fixture_bits() {
+    use crate::cuda::qwen2::experts::GpuExperts;
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    if crate::cuda::qwen2::experts::twin_gemm_ok(g.info().unwrap().cc).is_err() {
+        // Residency falls back to none below sm_80 (and says so).
+        let (m, _) = ds2_fixture(OPTS[0], crate::quant::Q8_0);
+        let km = Kernels::module(&g).unwrap();
+        let ml = Kernels::mla_module(&g).unwrap();
+        let net = MoeQwen3::new_with(
+            &g,
+            &km,
+            &ml,
+            &m,
+            64,
+            CacheKv::F16,
+            false,
+            true,
+            GpuExperts::Auto,
+        )
+        .unwrap();
+        assert!(net.resident_layers().is_empty());
+        assert!(net.describe(64).contains("sm_80"), "{}", net.describe(64));
+        eprintln!("SKIPPED (fell back, as designed): {}", net.describe(64));
+        return;
+    }
+    let km = Kernels::module(&g).unwrap();
+    let ml = Kernels::mla_module(&g).unwrap();
+    for o in OPTS {
+        let n = if o.yarn { 150 } else { 60 };
+        let mut base: Option<Vec<Vec<f32>>> = None;
+        for want in [
+            GpuExperts::N(0),
+            GpuExperts::N(1),
+            GpuExperts::N(2),
+            GpuExperts::Auto,
+        ] {
+            let (m, _) = ds2_fixture(o, crate::quant::Q8_0);
+            let net = MoeQwen3::new_with(&g, &km, &ml, &m, n + 40, CacheKv::F16, false, true, want)
+                .unwrap();
+            let r = net.resident_layers();
+            let expect = match want {
+                GpuExperts::N(k) => k,
+                GpuExperts::Auto => 2,
+            };
+            assert_eq!(r.len(), expect, "{o:?} {want:?}: {}", net.describe(n));
+            let ids = ids_for(n, net.vocab(), 5);
+            let tr = resident_trace(&net, &ids, &[1, 7, 13, 2, 33], 24);
+            assert!(tr.iter().flatten().all(|v| v.is_finite()));
+            match &base {
+                None => base = Some(tr),
+                Some(b) => {
+                    for (i, (x, y)) in b.iter().zip(&tr).enumerate() {
+                        assert!(
+                            bits(x) == bits(y),
+                            "{o:?} {want:?} (resident {r:?}): logits {i} differ from none resident"
+                        );
+                    }
+                }
+            }
+            eprintln!("fixture {o:?} {want:?}: resident {r:?}, bits equal");
+        }
+    }
+}
+
+/// PR C's key gate on Moonlight (AXON_TEST_DS2=1): `--gpu-experts` 0, 6,
+/// 12 and auto give the same bits on a 400-token prompt (3 attention
+/// splits; fed in passes) and a 64-token greedy continuation, and on the
+/// prompt's first 40 positions decoded one by one.
+#[test]
+fn ds2_resident_moonlight_bits() {
+    use crate::cuda::qwen2::experts::GpuExperts;
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = crate::testutil::ds2_model() else {
+        return;
+    };
+    if crate::cuda::qwen2::experts::twin_gemm_ok(g.info().unwrap().cc).is_err() {
+        eprintln!("SKIPPED: resident experts need sm_80+");
+        return;
+    }
+    let km = Kernels::module_for(&g, &m).unwrap();
+    let ml = Kernels::mla_module(&g).unwrap();
+    let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
+    let text = "Mixture-of-experts models route each token to a few experts. ".repeat(40);
+    let mut ids = tok.encode(&text);
+    ids.truncate(400);
+    type Logits = Vec<Vec<f32>>;
+    let mut base: Option<(Logits, Logits)> = None;
+    for want in [
+        GpuExperts::N(0),
+        GpuExperts::N(6),
+        GpuExperts::N(12),
+        GpuExperts::Auto,
+    ] {
+        let net =
+            MoeQwen3::new_with(&g, &km, &ml, &m, 512, CacheKv::F16, false, true, want).unwrap();
+        let r = net.resident_layers();
+        eprintln!("moonlight {want:?}: {}", net.describe(512));
+        if let GpuExperts::N(k) = want {
+            assert!(r.len() <= k);
+        }
+        // The prompt fed (passes of 100, 37, 263) + the continuation.
+        let fed = {
+            let mut c = net.new_cache(512);
+            net.feed_batch(&ids[..100], 0, &mut c);
+            net.feed_batch(&ids[100..137], 100, &mut c);
+            let mut last = net.prefill_logits(&ids[137..], 137, &mut c);
+            let mut out = vec![last.clone()];
+            for i in 0..64 {
+                let t = crate::argmax(&last);
+                last = net.forward(t, 400 + i, &mut c);
+                out.push(last.clone());
+            }
+            out
+        };
+        let mut c = net.new_cache(64);
+        let dec: Vec<Vec<f32>> = ids[..40]
+            .iter()
+            .enumerate()
+            .map(|(p, &t)| net.forward(t, p, &mut c))
+            .collect();
+        match &base {
+            None => base = Some((fed, dec)),
+            Some((bf, bd)) => {
+                for (i, (x, y)) in bf.iter().zip(&fed).enumerate() {
+                    assert!(
+                        bits(x) == bits(y),
+                        "{want:?} (resident {r:?}): fed logits {i} differ"
+                    );
+                }
+                for (i, (x, y)) in bd.iter().zip(&dec).enumerate() {
+                    assert!(
+                        bits(x) == bits(y),
+                        "{want:?} (resident {r:?}): decode logits {i} differ"
+                    );
+                }
+            }
+        }
+        eprintln!("moonlight {want:?}: resident {r:?}: bits equal");
+    }
+}

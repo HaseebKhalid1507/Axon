@@ -1,10 +1,12 @@
-//! One MoE layer's routed experts resident on the GPU (specs r16 pick 4, PR
-//! B): moe_res.cu's kernels, bit for bit the CPU's `moe_layer_batch`. Test
-//! only for now (`CudaExperts::layer`); the placement and the model's use of
-//! it are PR C.
+//! MoE layers' routed experts resident on the GPU (specs r16 pick 4, PRs B
+//! and C): moe_res.cu's kernels, bit for bit the CPU's `moe_layer` /
+//! `moe_layer_batch`, so which layers are resident never changes a result.
 //!
-//! The batched path needs the twin GEMMs (tensor cores, sm_80+) and refuses
-//! below; the decode path (`moe_gemv_tw`) runs on every arch.
+//! `CudaExperts::enqueue` runs one layer on the stream from device inputs
+//! (the router's normed states, ids and weights) into device outputs, with
+//! no host sync and no allocation (`ResBufs`, per cache): graph-capturable.
+//! nb = 1 takes the decode GEMV (`moe_gemv_tw`, any arch); more, the grouped
+//! twin GEMMs (sm_80+). `place` picks the resident layers (`--gpu-experts`).
 
 use super::batch::act_stride;
 use super::gemm2_smem;
@@ -156,6 +158,7 @@ impl<'g> CudaExperts<'g> {
     }
 
     /// Check a batch's shapes and expert ids; nb.
+    #[cfg(test)]
     fn check(&self, h: &[f32], ids: &[i32], w: &[f32]) -> Result<usize, String> {
         let nb = h.len() / self.dim;
         if nb == 0 || h.len() != nb * self.dim || ids.len() != nb * self.k || w.len() != ids.len() {
@@ -167,155 +170,214 @@ impl<'g> CudaExperts<'g> {
         Ok(nb)
     }
 
-    /// The layer's experts of nb tokens: h (nb x dim, token major), each
-    /// token's k expert ids (rank order) and weights; y token major. nb = 1:
-    /// the decode GEMV (any arch); more: the grouped twin GEMMs (sm_80+;
-    /// refused below).
-    #[cfg(test)]
-    pub(crate) fn layer(&self, h: &[f32], ids: &[i32], w: &[f32]) -> Result<Vec<f32>, String> {
-        if self.check(h, ids, w)? == 1 {
-            return self.layer_gemv(h, ids, w);
-        }
-        Ok(self.batched(h, ids, w, 1)?.0)
+    /// The layer's device bytes (its three expert tensors).
+    pub(crate) fn bytes(&self) -> usize {
+        self.gate.buf.len() + self.up.buf.len() + self.down.buf.len()
     }
 
-    /// `layer`'s batched path, its kernels run `reps` times back to back
-    /// (the same outputs each time): y and the GPU time per run in ms
-    /// (events around the kernels; uploads and allocations excluded).
-    pub(crate) fn batched(
+    /// The F the layer's swiglu_twin launches pass.
+    pub(crate) fn fused(&self) -> bool {
+        self.fused
+    }
+
+    /// Enqueue the layer's experts of nb tokens: h at `h` (nb x dim f32,
+    /// token major), each token's k ids (i32, rank order) at `ids` and
+    /// weights (f32) at `w`; y (nb x dim f32, token major) at `y`. nb = 1:
+    /// the decode GEMV; more: the grouped twin GEMMs (refused below sm_80).
+    /// No sync, no allocation: capturable.
+    ///
+    /// # Safety
+    /// h, ids, w and y hold nb tokens' values, ids in 0..n_e; nb <= rb.max;
+    /// rb is this model's (`ResBufs::new` of the same dims), not in use by
+    /// another stream.
+    pub(crate) unsafe fn enqueue(
         &self,
-        h: &[f32],
-        ids: &[i32],
-        w: &[f32],
-        reps: usize,
-    ) -> Result<(Vec<f32>, f32), String> {
-        let nb = self.check(h, ids, w)?;
-        self.mma.clone().map_err(|e| format!("CudaExperts: {e}"))?;
+        rb: &ResBufs,
+        h: Arg,
+        ids: Arg,
+        w: Arg,
+        nb: usize,
+        y: Arg,
+    ) -> Result<(), String> {
+        assert!(
+            nb >= 1 && nb <= rb.max,
+            "CudaExperts: nb {nb} of {}",
+            rb.max
+        );
+        assert!(rb.dim == self.dim && rb.ffn == self.ffn && rb.k == self.k);
         let (g, km, k, dim, ffn) = (self.g, self.km, self.k, self.dim, self.ffn);
-        let np = nb * k;
         let (ast, ast2) = (act_stride(dim), act_stride(ffn));
-        let hb = g.upload(h)?;
-        let idb = g.upload(ids)?;
-        let wb = g.upload(w)?;
-        let act = g.alloc(nb * ast)?;
-        act.zero()?;
-        let acts = g.alloc(np * ast)?;
-        let off = g.alloc((self.n_e + 1) * 4)?;
-        let pair_at = g.alloc(np * 4)?;
-        let pos_of = g.alloc(np * 4)?;
-        let max_tiles = np.div_ceil(MOE_BN) + self.n_e;
-        let tiles = g.alloc(max_tiles * 16)?;
-        let ntiles = g.alloc(4)?;
-        let gb = g.alloc(np * ffn * 4)?;
-        let ub = g.alloc(np * ffn * 4)?;
-        let act2 = g.alloc(np * ast2)?;
-        act2.zero()?;
-        let db = g.alloc(np * dim * 4)?;
-        let yb = g.alloc(nb * dim * 4)?;
         let f = |n: &str| km.function(n);
-        let reps = reps.max(1);
-        let t0 = g.record()?;
-        for _ in 0..reps {
-            // SAFETY: moe_res.cu's / prefill.cu's signatures; every buffer is
-            // sized above for nb tokens and np pairs, and lives past the sync.
+        let fused = Arg::I32(self.fused as i32);
+        if nb == 1 {
+            // SAFETY (every launch): decode.cu's / moe_res.cu's signatures;
+            // rb holds max >= 1 token's scratch, k slots of each.
             unsafe {
                 g.launch(
-                    &f("quantize_b")?,
-                    (dim.div_ceil(256) as u32, nb as u32, 1),
+                    &f("quantize")?,
+                    (dim.div_ceil(256) as u32, 1, 1),
                     (32, 1, 1),
                     0,
                     &[
-                        hb.arg(),
+                        h,
                         Arg::I32(dim as i32),
                         Arg::I32(dim.is_multiple_of(256) as i32),
-                        act.arg(),
-                        Arg::U64(ast as u64),
+                        rb.act.arg(),
                     ],
                 )?;
-                g.launch(
-                    &f("moe_sort")?,
-                    (1, 1, 1),
-                    (1024, 1, 1),
-                    ((self.n_e + 1) * 4) as u32,
-                    &[
-                        idb.arg(),
-                        Arg::I32(np as i32),
-                        Arg::I32(self.n_e as i32),
-                        off.arg(),
-                        pair_at.arg(),
-                        pos_of.arg(),
-                        tiles.arg(),
-                        ntiles.arg(),
-                    ],
-                )?;
-                g.launch(
-                    &f("moe_gather")?,
-                    (np as u32, 1, 1),
-                    (128, 1, 1),
-                    0,
-                    &[
-                        act.arg(),
-                        Arg::U64(ast as u64),
-                        pair_at.arg(),
-                        Arg::I32(k as i32),
-                        acts.arg(),
-                    ],
-                )?;
-                for (mats, out) in [(&self.gate, &gb), (&self.up, &ub)] {
-                    self.grouped(mats, &acts, ast, &tiles, &ntiles, max_tiles, out)?;
-                }
+                let fv = f("moe_gemv_tw")?;
+                let gemv = |mats: &Mats, a: Arg, aslot: usize, out: Arg| {
+                    g.launch(
+                        &fv,
+                        (mats.rows as u32, k as u32, 1),
+                        (128, 1, 1),
+                        0,
+                        &[
+                            Arg::I32(mats.qt as i32),
+                            mats.buf.arg(),
+                            Arg::U64(mats.estride as u64),
+                            Arg::U64(mats.rb as u64),
+                            Arg::I32(mats.rows as i32),
+                            Arg::I32(mats.cols as i32),
+                            ids,
+                            a,
+                            Arg::U64(aslot as u64),
+                            out,
+                            Arg::U64(mats.rows as u64),
+                        ],
+                    )
+                };
+                gemv(&self.gate, rb.act.arg(), 0, rb.gb.arg())?;
+                gemv(&self.up, rb.act.arg(), 0, rb.ub.arg())?;
                 g.launch(
                     &f("swiglu_quant_tw")?,
-                    (ffn.div_ceil(256) as u32, np as u32, 1),
+                    (ffn.div_ceil(256) as u32, k as u32, 1),
                     (32, 1, 1),
                     0,
                     &[
-                        gb.arg(),
-                        ub.arg(),
+                        rb.gb.arg(),
+                        rb.ub.arg(),
                         Arg::I32(ffn as i32),
-                        Arg::I32(self.fused as i32),
+                        fused,
                         Arg::I32(ffn.is_multiple_of(256) as i32),
-                        act2.arg(),
+                        rb.act2.arg(),
                         Arg::U64(ast2 as u64),
                     ],
                 )?;
-                self.grouped(&self.down, &act2, ast2, &tiles, &ntiles, max_tiles, &db)?;
+                gemv(&self.down, rb.act2.arg(), ast2, rb.db.arg())?;
                 g.launch(
                     &f("moe_sum")?,
-                    (dim.div_ceil(128) as u32, nb as u32, 1),
+                    (dim.div_ceil(128) as u32, 1, 1),
                     (128, 1, 1),
                     0,
                     &[
-                        db.arg(),
-                        pos_of.arg(),
-                        wb.arg(),
+                        rb.db.arg(),
+                        rb.pos_id.arg(),
+                        w,
                         Arg::I32(k as i32),
                         Arg::I32(dim as i32),
-                        yb.arg(),
+                        y,
                     ],
                 )?;
             }
+            return Ok(());
         }
-        let t1 = g.record()?;
-        g.sync()?;
-        let ms = t0.ms_to(&t1)? / reps as f32;
-        Ok((yb.read()?, ms))
+        self.mma.clone().map_err(|e| format!("CudaExperts: {e}"))?;
+        let np = nb * k;
+        let max_tiles = np.div_ceil(MOE_BN) + self.n_e;
+        // SAFETY (every launch): moe_res.cu's / prefill.cu's signatures; rb
+        // holds max >= nb tokens' and max * k pairs' scratch.
+        unsafe {
+            g.launch(
+                &f("quantize_b")?,
+                (dim.div_ceil(256) as u32, nb as u32, 1),
+                (32, 1, 1),
+                0,
+                &[
+                    h,
+                    Arg::I32(dim as i32),
+                    Arg::I32(dim.is_multiple_of(256) as i32),
+                    rb.act.arg(),
+                    Arg::U64(ast as u64),
+                ],
+            )?;
+            g.launch(
+                &f("moe_sort")?,
+                (1, 1, 1),
+                (1024, 1, 1),
+                ((self.n_e + 1) * 4) as u32,
+                &[
+                    ids,
+                    Arg::I32(np as i32),
+                    Arg::I32(self.n_e as i32),
+                    rb.off.arg(),
+                    rb.pair_at.arg(),
+                    rb.pos_of.arg(),
+                    rb.tiles.arg(),
+                    rb.ntiles.arg(),
+                ],
+            )?;
+            g.launch(
+                &f("moe_gather")?,
+                (np as u32, 1, 1),
+                (128, 1, 1),
+                0,
+                &[
+                    rb.act.arg(),
+                    Arg::U64(ast as u64),
+                    rb.pair_at.arg(),
+                    Arg::I32(k as i32),
+                    rb.acts.arg(),
+                ],
+            )?;
+            for (mats, out) in [(&self.gate, &rb.gb), (&self.up, &rb.ub)] {
+                self.grouped(mats, &rb.acts, ast, rb, max_tiles, out)?;
+            }
+            g.launch(
+                &f("swiglu_quant_tw")?,
+                (ffn.div_ceil(256) as u32, np as u32, 1),
+                (32, 1, 1),
+                0,
+                &[
+                    rb.gb.arg(),
+                    rb.ub.arg(),
+                    Arg::I32(ffn as i32),
+                    fused,
+                    Arg::I32(ffn.is_multiple_of(256) as i32),
+                    rb.act2.arg(),
+                    Arg::U64(ast2 as u64),
+                ],
+            )?;
+            self.grouped(&self.down, &rb.act2, ast2, rb, max_tiles, &rb.db)?;
+            g.launch(
+                &f("moe_sum")?,
+                (dim.div_ceil(128) as u32, nb as u32, 1),
+                (128, 1, 1),
+                0,
+                &[
+                    rb.db.arg(),
+                    rb.pos_of.arg(),
+                    w,
+                    Arg::I32(k as i32),
+                    Arg::I32(dim as i32),
+                    y,
+                ],
+            )
+        }
     }
 
     /// moe_gemm_tw_* of `mats` over the tile list: out row s (rows floats)
     /// = its expert times act row s (astride bytes).
     ///
     /// # Safety
-    /// act holds every sorted pair's row, tiles / ntiles moe_sort's, out
-    /// np * mats.rows floats.
-    #[allow(clippy::too_many_arguments)]
+    /// act holds every sorted pair's row, rb's tiles / ntiles moe_sort's,
+    /// out np * mats.rows floats.
     unsafe fn grouped(
         &self,
         mats: &Mats,
         act: &DevBuf,
         astride: usize,
-        tiles: &DevBuf,
-        ntiles: &DevBuf,
+        rb: &ResBufs,
         max_tiles: usize,
         out: &DevBuf,
     ) -> Result<(), String> {
@@ -339,8 +401,8 @@ impl<'g> CudaExperts<'g> {
                     Arg::I32(mats.cols as i32),
                     act.arg(),
                     Arg::U64(astride as u64),
-                    tiles.arg(),
-                    ntiles.arg(),
+                    rb.tiles.arg(),
+                    rb.ntiles.arg(),
                     out.arg(),
                     Arg::U64(mats.rows as u64),
                 ],
@@ -348,122 +410,267 @@ impl<'g> CudaExperts<'g> {
         }
     }
 
-    /// `layer` of each token on its own by the decode GEMV (moe_gemv_tw),
-    /// any arch: the decode path, and nb invariance's reference.
+    /// The layer's experts of nb tokens from host slices (tests): h (nb x
+    /// dim, token major), each token's k expert ids (rank order) and
+    /// weights; y token major. nb = 1: the decode GEMV; more: grouped.
+    #[cfg(test)]
+    pub(crate) fn layer(&self, h: &[f32], ids: &[i32], w: &[f32]) -> Result<Vec<f32>, String> {
+        let nb = self.check(h, ids, w)?;
+        Ok(self.run_host(h, ids, w, nb, 1)?.0)
+    }
+
+    /// `layer`'s batched path (nb > 1), its kernels enqueued `reps` times
+    /// back to back: y and the GPU time per run in ms (events around the
+    /// kernels; uploads and allocations excluded).
+    #[cfg(test)]
+    pub(crate) fn batched(
+        &self,
+        h: &[f32],
+        ids: &[i32],
+        w: &[f32],
+        reps: usize,
+    ) -> Result<(Vec<f32>, f32), String> {
+        let nb = self.check(h, ids, w)?;
+        assert!(nb > 1, "batched: nb > 1");
+        self.run_host(h, ids, w, nb, reps)
+    }
+
+    /// Upload, `enqueue` reps times (timed), read y back.
+    #[cfg(test)]
+    fn run_host(
+        &self,
+        h: &[f32],
+        ids: &[i32],
+        w: &[f32],
+        nb: usize,
+        reps: usize,
+    ) -> Result<(Vec<f32>, f32), String> {
+        let g = self.g;
+        let rb = ResBufs::new(g, nb, self.dim, self.ffn, self.k)?;
+        let (hb, idb, wb) = (g.upload(h)?, g.upload(ids)?, g.upload(w)?);
+        let yb = g.alloc(nb * self.dim * 4)?;
+        let reps = reps.max(1);
+        let t0 = g.record()?;
+        for _ in 0..reps {
+            // SAFETY: the buffers above hold nb tokens; ids checked.
+            unsafe { self.enqueue(&rb, hb.arg(), idb.arg(), wb.arg(), nb, yb.arg())? };
+        }
+        let t1 = g.record()?;
+        g.sync()?;
+        let ms = t0.ms_to(&t1)? / reps as f32;
+        Ok((yb.read()?, ms))
+    }
+
+    /// `layer` of each token on its own by the decode GEMV, any arch: the
+    /// decode path, and nb invariance's reference.
     #[cfg(test)]
     pub(crate) fn layer_gemv(&self, h: &[f32], ids: &[i32], w: &[f32]) -> Result<Vec<f32>, String> {
         let nb = self.check(h, ids, w)?;
-        let (g, km, k, dim, ffn) = (self.g, self.km, self.k, self.dim, self.ffn);
-        let (ast, ast2) = (act_stride(dim), act_stride(ffn));
-        let act = g.alloc(ast)?;
-        let act2 = g.alloc(k * ast2)?;
-        let gb = g.alloc(k * ffn * 4)?;
-        let ub = g.alloc(k * ffn * 4)?;
-        let db = g.alloc(k * dim * 4)?;
-        let yb = g.alloc(dim * 4)?;
-        let pos = g.upload(&(0..k as i32).collect::<Vec<i32>>())?;
-        let (fq, fv, fs, fy) = (
-            km.function("quantize")?,
-            km.function("moe_gemv_tw")?,
-            km.function("swiglu_quant_tw")?,
-            km.function("moe_sum")?,
-        );
+        let (dim, k) = (self.dim, self.k);
         let mut y = Vec::with_capacity(nb * dim);
         for t in 0..nb {
-            let hb = g.upload(&h[t * dim..(t + 1) * dim])?;
-            let idb = g.upload(&ids[t * k..(t + 1) * k])?;
-            let wb = g.upload(&w[t * k..(t + 1) * k])?;
-            act.zero()?;
-            act2.zero()?;
-            let gemv = |mats: &Mats, a: &DevBuf, aslot: usize, out: &DevBuf| {
-                // SAFETY: moe_gemv_tw's signature; a holds k slots (or one,
-                // aslot 0) of mats.cols inputs, out k * mats.rows floats.
-                unsafe {
-                    g.launch(
-                        &fv,
-                        (mats.rows as u32, k as u32, 1),
-                        (128, 1, 1),
-                        0,
-                        &[
-                            Arg::I32(mats.qt as i32),
-                            mats.buf.arg(),
-                            Arg::U64(mats.estride as u64),
-                            Arg::U64(mats.rb as u64),
-                            Arg::I32(mats.rows as i32),
-                            Arg::I32(mats.cols as i32),
-                            idb.arg(),
-                            a.arg(),
-                            Arg::U64(aslot as u64),
-                            out.arg(),
-                            Arg::U64(mats.rows as u64),
-                        ],
-                    )
-                }
-            };
-            // SAFETY: decode.cu's / moe_res.cu's signatures; the buffers
-            // above, one token.
-            unsafe {
-                g.launch(
-                    &fq,
-                    (dim.div_ceil(256) as u32, 1, 1),
-                    (32, 1, 1),
-                    0,
-                    &[
-                        hb.arg(),
-                        Arg::I32(dim as i32),
-                        Arg::I32(dim.is_multiple_of(256) as i32),
-                        act.arg(),
-                    ],
-                )?;
-            }
-            gemv(&self.gate, &act, 0, &gb)?;
-            gemv(&self.up, &act, 0, &ub)?;
-            // SAFETY: as above.
-            unsafe {
-                g.launch(
-                    &fs,
-                    (ffn.div_ceil(256) as u32, k as u32, 1),
-                    (32, 1, 1),
-                    0,
-                    &[
-                        gb.arg(),
-                        ub.arg(),
-                        Arg::I32(ffn as i32),
-                        Arg::I32(self.fused as i32),
-                        Arg::I32(ffn.is_multiple_of(256) as i32),
-                        act2.arg(),
-                        Arg::U64(ast2 as u64),
-                    ],
-                )?;
-            }
-            gemv(&self.down, &act2, ast2, &db)?;
-            // SAFETY: as above.
-            unsafe {
-                g.launch(
-                    &fy,
-                    (dim.div_ceil(128) as u32, 1, 1),
-                    (128, 1, 1),
-                    0,
-                    &[
-                        db.arg(),
-                        pos.arg(),
-                        wb.arg(),
-                        Arg::I32(k as i32),
-                        Arg::I32(dim as i32),
-                        yb.arg(),
-                    ],
-                )?;
-            }
-            g.sync()?;
-            y.extend(yb.read::<f32>()?);
+            let r = self.run_host(
+                &h[t * dim..(t + 1) * dim],
+                &ids[t * k..(t + 1) * k],
+                &w[t * k..(t + 1) * k],
+                1,
+                1,
+            )?;
+            y.extend(r.0);
         }
         Ok(y)
     }
+}
 
-    /// The F the layer's swiglu_twin launches pass.
-    pub(crate) fn fused(&self) -> bool {
-        self.fused
+/// The model's resident layers' experts, by layer.
+pub(crate) struct Resident<'g> {
+    layers: Vec<Option<CudaExperts<'g>>>,
+}
+
+impl<'g> Resident<'g> {
+    /// `layers` uploaded (global layer indices of a model of n layers).
+    pub(crate) fn upload(
+        g: &'g Gpu,
+        km: &'g Module<'g>,
+        m: &Model,
+        n: usize,
+        layers: &[usize],
+        k: usize,
+    ) -> Result<Resident<'g>, String> {
+        let mut v: Vec<Option<CudaExperts<'g>>> = (0..n).map(|_| None).collect();
+        for &l in layers {
+            v[l] = Some(CudaExperts::upload(g, km, m, l, k)?);
+        }
+        Ok(Resident { layers: v })
     }
+
+    pub(crate) fn get(&self, l: usize) -> Option<&CudaExperts<'g>> {
+        self.layers.get(l)?.as_ref()
+    }
+
+    /// The resident layers.
+    pub(crate) fn which(&self) -> Vec<usize> {
+        (0..self.layers.len())
+            .filter(|&l| self.layers[l].is_some())
+            .collect()
+    }
+
+    /// Device bytes of the resident experts.
+    pub(crate) fn bytes(&self) -> usize {
+        self.layers.iter().flatten().map(|e| e.bytes()).sum()
+    }
+
+    /// A resident layer's (dim, ffn, k), if any (the scratch's shapes).
+    pub(crate) fn dims(&self) -> Option<(usize, usize, usize)> {
+        let e = self.layers.iter().flatten().next()?;
+        Some((e.dim, e.ffn, e.k))
+    }
+}
+
+/// `CudaExperts::enqueue`'s scratch for up to `max` tokens of one model's
+/// expert shapes (every resident layer of it shares one: they run in order
+/// on the stream). Zeroed once: the kernels write the same parts of it on
+/// every run, so the padding stays zero.
+pub(crate) struct ResBufs<'g> {
+    max: usize,
+    dim: usize,
+    ffn: usize,
+    k: usize,
+    act: DevBuf<'g>,
+    acts: DevBuf<'g>,
+    off: DevBuf<'g>,
+    pair_at: DevBuf<'g>,
+    pos_of: DevBuf<'g>,
+    tiles: DevBuf<'g>,
+    ntiles: DevBuf<'g>,
+    gb: DevBuf<'g>,
+    ub: DevBuf<'g>,
+    act2: DevBuf<'g>,
+    db: DevBuf<'g>,
+    /// 0..k (moe_sum's positions for one token).
+    pos_id: DevBuf<'g>,
+}
+
+/// Most experts per layer the scratch's tile list allows for (moe_sort's
+/// worst case adds one partial tile per expert).
+const MAX_EXPERTS: usize = 1024;
+
+impl<'g> ResBufs<'g> {
+    pub(crate) fn new(
+        g: &'g Gpu,
+        max: usize,
+        dim: usize,
+        ffn: usize,
+        k: usize,
+    ) -> Result<ResBufs<'g>, String> {
+        let np = max * k;
+        let (ast, ast2) = (act_stride(dim), act_stride(ffn));
+        let z = |n: usize| -> Result<DevBuf<'g>, String> {
+            let b = g.alloc(n.max(4))?;
+            b.zero()?;
+            Ok(b)
+        };
+        Ok(ResBufs {
+            max,
+            dim,
+            ffn,
+            k,
+            act: z(max * ast)?,
+            acts: z(np * ast)?,
+            off: z((MAX_EXPERTS + 1) * 4)?,
+            pair_at: z(np * 4)?,
+            pos_of: z(np * 4)?,
+            tiles: z((np.div_ceil(MOE_BN) + MAX_EXPERTS) * 16)?,
+            ntiles: z(4)?,
+            gb: z(np * ffn * 4)?,
+            ub: z(np * ffn * 4)?,
+            act2: z(np * ast2)?,
+            db: z(np * dim * 4)?,
+            pos_id: g.upload(&(0..k as i32).collect::<Vec<i32>>())?,
+        })
+    }
+
+    /// `new`'s device bytes.
+    pub(crate) fn bytes(max: usize, dim: usize, ffn: usize, k: usize) -> usize {
+        let np = max * k;
+        max * act_stride(dim)
+            + np * act_stride(dim)
+            + np * (8 + 8 * ffn + act_stride(ffn) + 4 * dim)
+            + (np.div_ceil(MOE_BN) + MAX_EXPERTS) * 16
+            + (MAX_EXPERTS + 1) * 4
+    }
+}
+
+/// `--gpu-experts`: how many MoE layers' experts to keep on the GPU.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum GpuExperts {
+    /// Exactly this many (0: none, today's behaviour; fewer if they don't fit).
+    N(usize),
+    /// As many as fit after the context's cache (ctx first).
+    Auto,
+}
+
+impl GpuExperts {
+    /// "auto", or a count.
+    pub fn parse(s: &str) -> Result<GpuExperts, String> {
+        match s {
+            "auto" => Ok(GpuExperts::Auto),
+            n => n
+                .parse()
+                .map(GpuExperts::N)
+                .map_err(|_| format!("--gpu-experts {n}: a count or auto")),
+        }
+    }
+
+    /// $AXON_GPU_EXPERTS, else 0 (the default until the kill-rule bench
+    /// passes: today's behaviour).
+    pub fn from_env() -> Result<GpuExperts, String> {
+        match std::env::var("AXON_GPU_EXPERTS") {
+            Ok(v) if !v.is_empty() => Self::parse(&v),
+            _ => Ok(GpuExperts::N(0)),
+        }
+    }
+}
+
+/// The resident layers: of `layers` (layer, device bytes), smallest first
+/// (ties: the lower layer), as many as `want` asks that fit in `budget`
+/// bytes. Sorted by layer.
+pub(crate) fn place(layers: &[(usize, usize)], want: GpuExperts, budget: usize) -> Vec<usize> {
+    let cap = match want {
+        GpuExperts::N(n) => n,
+        GpuExperts::Auto => usize::MAX,
+    };
+    let mut by: Vec<(usize, usize)> = layers.to_vec();
+    by.sort_by_key(|&(l, b)| (b, l));
+    let mut used = 0;
+    let mut out = Vec::new();
+    for (l, b) in by {
+        if out.len() == cap || used + b > budget {
+            break;
+        }
+        used += b;
+        out.push(l);
+    }
+    out.sort();
+    out
+}
+
+/// Whether resident experts give the CPU experts' bits here (#121 item 5):
+/// the twins are the r8 / r8q kernels' numerics, so the CPU must repack
+/// (`AXON_REPACK=0` reads the file's rows in place, other sums), and the
+/// twins' F must be the host's `vmath::fused()`. Err says why not.
+pub(crate) fn twin_identity(repack: bool, cpu_fused: bool, twin_fused: bool) -> Result<(), String> {
+    if !repack {
+        return Err(
+            "AXON_REPACK=0: the CPU experts aren't the r8 kernels the GPU twins match".into(),
+        );
+    }
+    if cpu_fused != twin_fused {
+        return Err(format!(
+            "the twins' F ({twin_fused}) isn't the host CPU's vmath::fused() ({cpu_fused})"
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

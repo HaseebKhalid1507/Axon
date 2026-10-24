@@ -419,6 +419,9 @@ pub struct Placing {
     /// A paged KV pool will hold the caches (`axon serve`, specs r11),
     /// placed as main places it with --ctx (`paged_placement`).
     pub paged: bool,
+    /// A MoE model's experts resident on the GPU (`--gpu-experts`; None:
+    /// $AXON_GPU_EXPERTS, else 0).
+    pub gpu_experts: Option<crate::cuda::qwen2::experts::GpuExperts>,
 }
 
 /// The shortest cache a paged serve keeps the whole model on the GPU for
@@ -464,6 +467,7 @@ impl Placing {
             split_ctx: max_ctx,
             defer_q6k8: false,
             paged: false,
+            gpu_experts: None,
         }
     }
 }
@@ -579,6 +583,7 @@ impl<'a> Backend<'a> {
                 ckv,
                 fit,
                 !p.defer_q6k8,
+                p.gpu_experts,
             );
         }
         let gpu: &'static Gpu = Box::leak(Box::new(Gpu::open_device(ordinal)?));
@@ -660,6 +665,7 @@ impl<'a> Backend<'a> {
     /// experts on the CPU. There's no layer split: --gpu-layers below the
     /// layer count is refused. `q6k8`: make the Q6_K prefill copy now
     /// (`Placing::defer_q6k8` off), as the whole-GPU model.
+    #[allow(clippy::too_many_arguments)]
     fn moe(
         m: &'a Model,
         ordinal: usize,
@@ -668,6 +674,7 @@ impl<'a> Backend<'a> {
         kv: CacheKv,
         fit: bool,
         q6k8: bool,
+        gpu_experts: Option<crate::cuda::qwen2::experts::GpuExperts>,
     ) -> Result<Backend<'a>, String> {
         let n = crate::hybrid::block_count(m)?;
         if gpu_layers.is_some_and(|g| g < n) {
@@ -681,7 +688,11 @@ impl<'a> Backend<'a> {
         let module: &'static Module<'static> = Box::leak(Box::new(Kernels::module_for(gpu, m)?));
         let router: &'static Module<'static> =
             Box::leak(Box::new(Kernels::moe_module_for(gpu, m)?));
-        let n = MoeQwen3::new(gpu, module, router, m, max_ctx, kv, fit, q6k8)?;
+        let want = match gpu_experts {
+            Some(w) => w,
+            None => crate::cuda::qwen2::experts::GpuExperts::from_env()?,
+        };
+        let n = MoeQwen3::new_with(gpu, module, router, m, max_ctx, kv, fit, q6k8, want)?;
         eprintln!("moe:         {}, kv {}", n.describe(n.ctx), n.kv_name());
         Ok(Backend::Moe(Box::new(n)))
     }

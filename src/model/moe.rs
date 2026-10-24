@@ -277,6 +277,27 @@ pub(crate) fn check_ram(m: &Model, dense: bool) -> Result<(), String> {
     check_ram_with(m, repack, dense, crate::gguf::mem_available())
 }
 
+/// `check_ram` of `crate::moe`'s split with `keep` of every n MoE layers'
+/// experts on the CPU (the rest resident on the GPU, never repacked).
+pub(crate) fn check_ram_keep(m: &Model, keep: usize, n: usize) -> Result<(), String> {
+    let repack = std::env::var("AXON_REPACK").map_or(true, |v| v != "0");
+    let Some(i) = MoeInfo::of_with(m, repack) else {
+        return Ok(());
+    };
+    let want = ram_need(&i, repack, false) - RAM_HEADROOM;
+    let want = want / n.max(1) as u64 * keep as u64 + RAM_HEADROOM;
+    match crate::gguf::mem_available() {
+        Some(avail) if avail < want => Err(format!(
+            "{}: the CPU experts of {keep} layers need about {:.1} GB of RAM and only {:.1} GB \
+             is available",
+            m.arch,
+            want as f64 / 1e9,
+            avail as f64 / 1e9
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn check_ram_with(m: &Model, repack: bool, dense: bool, avail: Option<u64>) -> Result<(), String> {
     let Some(i) = MoeInfo::of_with(m, repack) else {
         return Ok(());
