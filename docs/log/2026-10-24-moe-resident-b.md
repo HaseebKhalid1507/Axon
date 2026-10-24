@@ -1,4 +1,4 @@
-# One MoE layer's experts on the GPU, CPU-exact (PR #PRNUM)
+# One MoE layer's experts on the GPU, CPU-exact (PR #122)
 
 - Date: 2026-10-24. Branch: feat/moe-resident-b (stacked on PR A #120, merged as 6e3b19c, which is merged in
   at 45888a5). Status: open (gates pending).
@@ -47,11 +47,33 @@ make the model use it.
 
 ## How it was verified
 
-GATES
+| check | where (device / arch) | job | passed / failed / ignored |
+|---|---|---|---|
+| experts + twin tests, release, **Moonlight layers 1 / 3 / 26** + fixture, nb 1/6/48/510/1024 + nb invariance | bella sm_120 (AXON_TEST_DS2=1) | **1024-164652-4105** | PASS 8 / 0 / 1 (the bench is ignored) |
+| same, debug assertions + overflow checks | bella sm_120 (AXON_TEST_DS2=1) | **1024-164653-b997** | PASS 8 / 0 / 1 |
+| same, release (fixture; Moonlight skips: no models link on the node) | avante sm_89 | **1024-164730-8d37** | PASS 8 / 0 / 1 |
+| same, release (fixture via decode GEMV; batched refused; gemm2s twin test prints `SKIPPED (refused, as designed)`) | jade sm_61 | **1024-164653-5c02** | PASS 8 / 0 / 1 |
+| fast tier, release, shard 1/2 | avante sm_89 | **1024-165504-4b95** | PASS 270 / 0 / 30 |
+| fast tier, release, shard 2/2 | bella sm_120 | **1024-165504-06d5** | pending (bella held) |
+| fast tier, debug, CPU queue, shard 1/2 | bella | **1024-164654-6c2b** | PASS 367 / 0 / 18 |
+| fast tier, debug, CPU queue, shard 2/2 | bella | **1024-164654-8e2c** | PASS 284 / 0 / 30 |
+| `twin_refusals` (host refusals, no GPU) | every run above | | PASS |
+| `AXON_SIMD=scalar` | n/a: no CPU kernel changed | | |
+
+SASS of the existing kernels vs main 6e3b19c (nvcc 13 offline with the NVRTC opts; cuobjdump -sass per function, addresses stripped):
+
+| target | existing identical | new |
+|---|---|---|
+| sm_120 plain / ext | 164 / 164, both | 9 |
+| sm_89 plain / ext | 164 / 164, both | 9 |
+| sm_75 plain / ext (jade's sm_61 isn't in this nvcc) | 164 / 164, both | 9 |
+| sm_120 `KERNELS_OSS` ext | 168 / 168 | 9 |
+
+New: `moe_sort`, `moe_gather`, `moe_gemm_tw_{q4_k,q5_0,q8_0,q6_k}`, `swiglu_quant_tw`, `moe_sum`, `moe_gemv_tw`.
 
 ## Results
 
-BENCH
+Pending: bella was held at 17:21 with the bench queued (exclusive 1024-164700-b533; non-exclusive fallback 1024-171406-2860). Gate: ≤ 5 ms per layer at nb 510.
 
 ## What didn't work / notes
 
