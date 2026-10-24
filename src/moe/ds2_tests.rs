@@ -498,3 +498,108 @@ fn ds2_resident_moonlight_bits() {
         eprintln!("moonlight {want:?}: resident {r:?}: bits equal");
     }
 }
+
+/// Every refusal falls back to CPU experts cleanly, on in-memory models
+/// (whose bytes a CPU build releases: #127's jade failure, a second build of
+/// the CPU half after the placement): AXON_REPACK=0, a twin F that isn't the
+/// host's (both forced through `new_inner`, on any GPU), sm < 8.0 (where
+/// the GPU is one), and a non-deepseek2 model (qwen3moe fixture). Each
+/// falls back to none resident, says why, and gives the bits of `N(0)`.
+#[test]
+fn ds2_resident_fallbacks_build_once() {
+    use super::TwinEnv;
+    use crate::cuda::qwen2::experts::GpuExperts;
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let ml = Kernels::mla_module(&g).unwrap();
+    let f = crate::vmath::fused();
+    let mma = crate::cuda::qwen2::experts::twin_gemm_ok(g.info().unwrap().cc).is_ok();
+    let ids = ids_for(20, FX_VOCAB, 9);
+    let run = |net: &MoeQwen3| -> Vec<Vec<f32>> {
+        let mut c = net.new_cache(32);
+        ids.iter()
+            .enumerate()
+            .map(|(p, &t)| net.forward(t, p, &mut c))
+            .collect()
+    };
+    let (m0, _) = ds2_fixture(OPTS[0], crate::quant::Q8_0);
+    let base = run(&ds2_net(&g, &km, &ml, &m0, 32));
+    let mut cases = vec![
+        (
+            TwinEnv {
+                repack: false,
+                cpu_fused: f,
+            },
+            "AXON_REPACK=0",
+        ),
+        (
+            TwinEnv {
+                repack: true,
+                cpu_fused: !f,
+            },
+            "fused",
+        ),
+    ];
+    if !mma {
+        cases.push((
+            TwinEnv {
+                repack: true,
+                cpu_fused: f,
+            },
+            "sm_80",
+        ));
+    }
+    for (env, why) in cases {
+        let (m, _) = ds2_fixture(OPTS[0], crate::quant::Q8_0);
+        let net = MoeQwen3::new_inner(
+            &g,
+            &km,
+            &ml,
+            &m,
+            32,
+            CacheKv::F16,
+            false,
+            true,
+            GpuExperts::Auto,
+            env,
+        )
+        .unwrap();
+        let d = net.describe(32);
+        assert!(net.resident_layers().is_empty(), "{why}: {d}");
+        assert!(
+            d.contains("no experts resident") && d.contains(why),
+            "{why}: {d}"
+        );
+        let got = run(&net);
+        for (i, (x, y)) in base.iter().zip(&got).enumerate() {
+            assert!(bits(x) == bits(y), "{why}: logits {i} differ from N(0)");
+        }
+        eprintln!("fallback ({why}): {d}");
+    }
+    // qwen3moe: residency is deepseek2-only for now.
+    let (q, _) = crate::model::tests::dense_fixture("qwen3moe", crate::quant::Q8_0);
+    let qk = Kernels::module_for(&g, &q).unwrap();
+    let qm = Kernels::moe_module_for(&g, &q).unwrap();
+    let net = MoeQwen3::new_with(
+        &g,
+        &qk,
+        &qm,
+        &q,
+        32,
+        CacheKv::F16,
+        false,
+        true,
+        GpuExperts::Auto,
+    )
+    .unwrap();
+    let d = net.describe(32);
+    assert!(
+        net.resident_layers().is_empty() && d.contains("deepseek2 only"),
+        "{d}"
+    );
+    let mut c = net.new_cache(32);
+    assert!(net.forward(1, 0, &mut c).iter().all(|v| v.is_finite()));
+    eprintln!("fallback (qwen3moe): {d}");
+}

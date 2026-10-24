@@ -125,74 +125,99 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
         q6k8: bool,
         want: GpuExperts,
     ) -> Result<MoeQwen3<'m, 'g>, String> {
-        if want == GpuExperts::N(0) {
-            crate::model::moe_check_ram(m, false)?;
-        }
+        let repack = std::env::var("AXON_REPACK").map_or(true, |v| v != "0");
+        let env = TwinEnv {
+            repack,
+            cpu_fused: crate::vmath::fused(),
+        };
+        Self::new_inner(gpu, module, router, m, max_ctx, kv, fit, q6k8, want, env)
+    }
+
+    /// `new_with` under `env` (tests force the refusals with it). The CPU
+    /// half is built exactly once, after the placement: a build releases an
+    /// in-memory model's bytes (`Model::release`), so neither a second build
+    /// nor an upload may come after it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_inner(
+        gpu: &'g Gpu,
+        module: &'g Module<'g>,
+        router: &'g Module<'g>,
+        m: &'m Model,
+        max_ctx: usize,
+        kv: CacheKv,
+        fit: bool,
+        q6k8: bool,
+        want: GpuExperts,
+        env: TwinEnv,
+    ) -> Result<MoeQwen3<'m, 'g>, String> {
         let net = CudaQwen2::with_kv_moe(gpu, module, m, max_ctx, kv, fit, q6k8)?;
         let kind = MoeKind::new(m, router, module)?;
-        // With residency asked for, a placeholder CPU half that repacks
-        // nothing (the experts are uploaded from the mapping first; the
-        // repack may release an in-memory model's bytes), rebuilt below.
-        let all: Vec<usize> = expert_layers(m).iter().map(|e| e.0).collect();
-        let cpu = match want {
-            GpuExperts::N(0) => Qwen2::new_experts(m),
-            _ => Qwen2::new_experts_except(m, &all),
+        let (res, res_note) = match want {
+            GpuExperts::N(0) => (None, None),
+            _ => match place_resident(&net, &kind, gpu, module, m, want, env) {
+                Ok(r) if !r.which().is_empty() => (Some(r), None),
+                Ok(_) => (None, Some("none fit".to_string())),
+                Err(e) => (None, Some(e)),
+            },
         };
-        let mut me = MoeQwen3 {
+        let skip = res.as_ref().map_or(Vec::new(), |r| r.which());
+        let moe_n = expert_layers(m).len();
+        match skip.is_empty() {
+            true => crate::model::moe_check_ram(m, false)?,
+            false => crate::model::moe_check_ram_keep(m, moe_n - skip.len(), moe_n)?,
+        }
+        let cpu = Qwen2::new_experts_except(m, &skip);
+        Ok(MoeQwen3 {
             ctx: net.ctx,
             gpu: net,
             cpu,
             kind,
-            res: None,
-            res_note: None,
+            res,
+            res_note,
             dev: gpu,
-        };
-        if want == GpuExperts::N(0) {
-            return Ok(me);
-        }
-        match me.place_resident(gpu, module, m, want) {
-            Ok(r) => {
-                let skip = r.which();
-                let moe_n = expert_layers(m).len();
-                crate::model::moe_check_ram_keep(m, moe_n - skip.len(), moe_n)?;
-                me.cpu = Qwen2::new_experts_except(m, &skip);
-                me.res = (!skip.is_empty()).then_some(r);
-            }
-            Err(e) => {
-                crate::model::moe_check_ram(m, false)?;
-                me.cpu = Qwen2::new_experts(m);
-                me.res_note = Some(e);
-            }
-        }
-        Ok(me)
+        })
     }
+}
 
-    /// The resident layers `want` asks for that fit after a cache of the
-    /// planned context (ctx first), smallest first; Err if residency can't
-    /// keep the CPU's bits here or isn't supported.
-    fn place_resident(
-        &self,
-        gpu: &'g Gpu,
-        module: &'g Module<'g>,
-        m: &Model,
-        want: GpuExperts,
-    ) -> Result<Resident<'g>, String> {
-        if !matches!(self.kind, MoeKind::Mla(_)) {
+/// What residency's bit identity depends on (#121 item 5): whether the CPU
+/// experts repack (AXON_REPACK) and the host's `vmath::fused()`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TwinEnv {
+    pub repack: bool,
+    pub cpu_fused: bool,
+}
+
+/// The resident layers `want` asks for that fit after a cache of `net`'s
+/// planned context (ctx first), smallest first, uploaded from the mapping;
+/// Err if residency can't keep the CPU's bits here or isn't supported. Reads
+/// the model before any CPU build (which may release its bytes).
+fn place_resident<'g>(
+    net: &CudaQwen2<'g>,
+    kind: &MoeKind<'g>,
+    gpu: &'g Gpu,
+    module: &'g Module<'g>,
+    m: &Model,
+    want: GpuExperts,
+    env: TwinEnv,
+) -> Result<Resident<'g>, String> {
+    {
+        if !matches!(kind, MoeKind::Mla(_)) {
             return Err(format!(
                 "resident experts: deepseek2 only for now ({})",
                 m.arch
             ));
         }
-        let repack = std::env::var("AXON_REPACK").map_or(true, |v| v != "0");
-        experts::twin_identity(repack, crate::vmath::fused(), crate::vmath::fused())?;
+        experts::twin_identity(env.repack, env.cpu_fused, crate::vmath::fused())?;
         experts::twin_gemm_ok(gpu.info()?.cc)?;
         let layers = expert_layers(m);
-        let d = self.gpu.moe.expect("a mixture-of-experts model");
-        let dim = self.gpu.dim;
-        // ctx first: the free memory with one cache of the planned context.
+        let d = net.moe.expect("a mixture-of-experts model");
+        let dim = net.dim;
+        // ctx first: the free memory with one cache of the planned context
+        // (the GPU cache and the MLA scratch, as `new_cache` makes).
         let free = {
-            let probe = Lm::new_cache(self, self.ctx);
-            let max = CudaQwen2::batch_max(&probe.c);
+            let probe = Lm::new_cache(net, net.ctx);
+            let max = CudaQwen2::batch_max(&probe);
+            let _mb = net.mla_bufs(max, net.ctx)?;
             let f = gpu.info()?.free_bytes as usize;
             f.saturating_sub(ResBufs::bytes(max, dim, d.ffn, d.k))
         };
@@ -204,18 +229,19 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
             eprintln!(
                 "moe:         --gpu-experts {n}: {} fit after a ctx-{} cache",
                 pick.len(),
-                self.ctx
+                net.ctx
             );
         }
-        let n_layers = self.gpu.n_layers;
-        let r = Resident::upload(gpu, module, m, n_layers, &pick, d.k)?;
+        let r = Resident::upload(gpu, module, m, net.n_layers, &pick, d.k)?;
         for l in r.which() {
             let f = r.get(l).expect("resident").fused();
-            experts::twin_identity(repack, crate::vmath::fused(), f)?;
+            experts::twin_identity(env.repack, env.cpu_fused, f)?;
         }
         Ok(r)
     }
+}
 
+impl<'g> MoeQwen3<'_, 'g> {
     /// The GPU half (identity, profiles).
     pub fn gpu_net(&self) -> &CudaQwen2<'g> {
         &self.gpu
