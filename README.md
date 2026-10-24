@@ -249,7 +249,9 @@ config) and others again at every `load` / `Backend::new` (`AXON_MMAP`, `AXON_RE
 `AXON_GATE_UP`, `AXON_CUDA_GRAPHS`, `AXON_PP_CUTS`), so changing the environment between loads changes behaviour;
 `AXON_GPUS` is the only way to pick the GPU(s) in 0.1 (read at each `Backend::new`); a CUDA `Backend::new` leaks a
 little; and `axon::serve` exits the process on a
-usage error (2) or an engine failure (70). The crate's package name on crates.io isn't settled (`axon` is taken);
+usage error (2) or an engine failure (70). A bad `AXON_SIMD`, `AXON_DECODE_ROWS` or `AXON_PREFETCH` is an error
+from `load` / `Backend::new`, not a panic. `Backend` and `BackendCache` are opaque, `Lm` is sealed, and `Device`,
+`KvType` and `GenStats` are non-exhaustive, so new backends, devices and stats don't break 0.1.x callers. The crate's package name on crates.io isn't settled (`axon` is taken);
 it isn't published.
 
 ## Usage

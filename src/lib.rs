@@ -42,7 +42,13 @@
 //! `Backend::new` (`AXON_MMAP`, `AXON_REPACK`, `AXON_Q6K8`, `AXON_GATE_UP`,
 //! `AXON_CUDA_GRAPHS`, `AXON_PP_CUTS`), so changing them between loads
 //! changes behaviour. `AXON_GPUS` picks the GPU(s): the only way in 0.1
-//! (read at each `Backend::new`). README; #118.
+//! (read at each `Backend::new`). A value the engine can't use for
+//! `AXON_SIMD`, `AXON_DECODE_ROWS` or `AXON_PREFETCH` is an error from
+//! `load` and `Backend::new`. README; #118.
+//!
+//! [`Backend`] and [`BackendCache`] are opaque, [`Lm`] is sealed, and
+//! [`Device`], [`KvType`] and [`GenStats`] are non-exhaustive: a new
+//! backend, device, KV type or statistic is not a breaking change.
 
 #[macro_use]
 mod mv;

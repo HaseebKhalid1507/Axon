@@ -27,6 +27,13 @@ The first version: everything merged to `main` from the start of the project (20
 - `generate` refuses drafting (`max_draft > 0`) on a backend whose decode steps stream (`Lm::decode_streams`:
   `AXON_STREAM_DECODE=1` on a CPU/GPU split), where drafting wouldn't be lossless; the CLI and `serve` already
   refused the pair.
+- `Backend` and `BackendCache` are opaque (#118 A): no variants to match and no fields, so the model types inside
+  (CPU, GPU, split, pipeline, mixture-of-experts) and their geometry can't be reached or written from outside the
+  crate, and a new kind is not a breaking change. `Lm` is sealed (implemented by the crate's models only).
+  `Device`, `KvType` and `GenStats` are `#[non_exhaustive]` (a match outside the crate needs a `_` arm;
+  `GenStats::default` stays).
+- A bad `AXON_SIMD` (unknown, or a kernel set the CPU lacks), `AXON_DECODE_ROWS` or `AXON_PREFETCH` is an error
+  from `load` and `Backend::new` (the CLI: its usual message, exit 2) instead of a panic inside a later call (#118 B).
 - Not hardened for embedders yet (stderr notes, env-only config, a CUDA leak per `Backend::new`, `serve` exits the
   process): #118.
 
