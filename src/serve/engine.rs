@@ -107,6 +107,10 @@ const TILE: usize = 64;
 const LEARN_MIN: usize = 128;
 /// Feeds of fewer tokens than this teach a pass's fixed part (`StepCost`).
 const PASS_FIXED_MAX: usize = 64;
+/// A short feed's fixed-part sample is at most this many times the
+/// estimate (`StepCost::learn_feed`): a stalled feed (a graph capture, a
+/// page allocation, a foreign GPU) is one sample, not a new level.
+const PASS_JUMP: f64 = 4.0;
 /// Decode-only step times are kept per row count bucket: 1, 2, 3-4, ...,
 /// 129-256 rows (`StepCost::dec`).
 const DEC_BUCKETS: usize = 9;
@@ -202,9 +206,13 @@ pub(super) struct StepCost {
     /// µs per prompt token per (depth + DEPTH_K), the fixed part out:
     /// two-pass feeds of at least LEARN_MIN tokens.
     tok: Option<f64>,
-    /// A pass's fixed µs: feeds of fewer than PASS_FIXED_MAX tokens (0
-    /// until one ran: a short feed teaches it at once).
+    /// A pass's fixed µs: feeds of fewer than PASS_FIXED_MAX tokens, each
+    /// sample at most PASS_JUMP x the estimate and `pass_cap_us`; read
+    /// through `pass` (bounded by the fastest decode step).
     pass_us: Option<f64>,
+    /// The most a fixed-part sample may be (half a step: `Batch::new`
+    /// sets it from `--step-ms`; 0: no cap).
+    pass_cap_us: f64,
     /// Decode-only step ms per row count bucket (`bucket`).
     dec_ms: [Option<f64>; DEC_BUCKETS],
     /// The last decode-only step's ms.
@@ -231,9 +239,26 @@ fn units(d: usize, n: usize) -> f64 {
 }
 
 impl StepCost {
-    /// A pass's fixed µs (0 until measured).
+    /// The fastest decode-only step seen, µs: one pass over the weights
+    /// with next to no token work, so about a pass's fixed part.
+    fn pass_proxy(&self) -> Option<f64> {
+        let min = self.dec_ms.iter().flatten().copied().reduce(f64::min);
+        min.map(|ms| ms * 1e3)
+    }
+
+    /// A pass's fixed µs: the learned one, at most twice the fastest
+    /// decode step (so an outlier the short feeds haven't corrected yet
+    /// can't pin the budget: decode-only steps run whenever no prompt
+    /// waits, in hybrid mode too); before a short feed taught it, the
+    /// fastest decode step (a cold wave of short prompts is charged a pass
+    /// each, not fed all in one step); 0 before either.
     fn pass(&self) -> f64 {
-        self.pass_us.unwrap_or(0.0)
+        match (self.pass_us, self.pass_proxy()) {
+            (Some(p), Some(d)) => p.min(2.0 * d),
+            (Some(p), None) => p,
+            (None, Some(d)) => d,
+            (None, None) => 0.0,
+        }
     }
 
     /// A feed of `n` tokens from depth `d` took `us`.
@@ -244,7 +269,13 @@ impl StepCost {
             self.legacy_tok = ema(self.legacy_tok, us / u);
             self.tok = ema(self.tok, (us - self.pass()).max(0.25 * us) / u);
         } else if n < PASS_FIXED_MAX {
-            let fixed = (us - self.tok.unwrap_or(0.0) * u).max(0.0);
+            let mut fixed = (us - self.tok.unwrap_or(0.0) * u).max(0.0);
+            if let Some(p) = self.pass_us {
+                fixed = fixed.min(PASS_JUMP * p);
+            }
+            if self.pass_cap_us > 0.0 {
+                fixed = fixed.min(self.pass_cap_us);
+            }
             self.pass_us = ema(self.pass_us, fixed);
         }
     }
@@ -267,7 +298,8 @@ impl StepCost {
 
     /// A decode step's ms at `rows` rows: its bucket's, else the nearest
     /// seen bucket's scaled by the square root of the row ratio, else the
-    /// last decode step's.
+    /// last decode step's. Past 256 rows: the last bucket's, unscaled
+    /// (under-budgets a `--parallel` over 256; none is served today).
     fn dec(&self, rows: usize) -> f64 {
         let b = bucket(rows);
         if let Some(ms) = self.dec_ms[b] {
@@ -318,6 +350,51 @@ fn two_pass_budget(p: &ChunkPolicy, cost: &StepCost, rows: usize) -> (Budget, f6
             let left = (ms as f64 - cost.dec(rows)).max(0.0) * 1e3;
             (Budget::Micros(left, c), cost.pass())
         }
+    }
+}
+
+/// A two-pass step's prompt tokens for one prompt at depth 0
+/// (`two_pass_budget` less a pass's fixed part): `Batch::capacity`.
+fn two_pass_capacity(p: &ChunkPolicy, cost: &StepCost, rows: usize) -> usize {
+    match two_pass_budget(p, cost, rows) {
+        (Budget::Tokens(t), _) => t,
+        (Budget::Micros(us, c), pass) => {
+            let us = (us - pass).max(0.0);
+            ((DEPTH_K * DEPTH_K + 2.0 * us / c).sqrt() - DEPTH_K) as usize
+        }
+    }
+}
+
+/// A hybrid pass's capacity (`Batch::capacity`): `fused_share` for one
+/// endless prompt at depth 0, whatever is prefilling.
+fn fused_capacity(
+    p: &ChunkPolicy,
+    cost: &StepCost,
+    rows: usize,
+    row_units: f64,
+    pass: usize,
+) -> usize {
+    fused_share(
+        p,
+        cost,
+        rows,
+        row_units,
+        pass,
+        &[0],
+        &[usize::MAX / 4],
+        &[0],
+    )
+}
+
+/// `Batch::short_passes` for two-pass steps: the passes of a 64-token
+/// prompt the µs budget fits (at least 1); a token budget: no bound.
+fn two_pass_short_passes(p: &ChunkPolicy, cost: &StepCost, rows: usize) -> usize {
+    match two_pass_budget(p, cost, rows) {
+        (Budget::Micros(us, c), pass) => {
+            let one = pass + c * units(0, PASS_FIXED_MAX);
+            ((us / one) as usize).max(1)
+        }
+        (Budget::Tokens(_), _) => usize::MAX / 4,
     }
 }
 
@@ -380,16 +457,20 @@ pub(super) enum Admit {
 
 /// A paged pool's admission by prompt class, before the pages test:
 /// `want` the job's prompt tokens to feed, `pre_rem` the prompts being
-/// prefilled's remainders, `short` a step's chunk tokens. Fifo: at most
-/// `lanes` prompts prefilling (the rule before, `lanes` 2). Sjf: a prompt
-/// longer than `short` takes one of `lanes` lanes; a short one (fed whole
-/// in one step) never waits for a lane, only until the short prompts
-/// prefilling already fill about two steps (more only lengthens the
-/// youngest's wait: `plan` feeds shortest remainder first).
+/// prefilled's remainders, `short` a step's chunk tokens (its capacity:
+/// `Batch::short_tokens`), `passes` the short prompts a step feeds at most
+/// (two-pass steps: one pass each, `Batch::short_passes`; hybrid: all in
+/// one pass). Fifo: at most `lanes` prompts prefilling (the rule before,
+/// `lanes` 2). Sjf: a prompt longer than `short` takes one of `lanes`
+/// lanes; a short one (fed whole in one step) never waits for a lane,
+/// only until the short prompts prefilling already fill about two steps,
+/// by tokens and by passes (more only lengthens the youngest's wait:
+/// `plan` feeds shortest remainder first).
 fn admit_gate(
     order: AdmitOrder,
     lanes: usize,
     short: usize,
+    passes: usize,
     pre_rem: &[usize],
     want: usize,
 ) -> bool {
@@ -397,9 +478,10 @@ fn admit_gate(
         AdmitOrder::Fifo => pre_rem.len() < lanes,
         AdmitOrder::Sjf => {
             let longs = pre_rem.iter().filter(|&&r| r > short).count();
-            let shorts: usize = pre_rem.iter().filter(|&&r| r <= short).sum();
+            let shorts = pre_rem.iter().filter(|&&r| r <= short);
+            let (n, toks) = shorts.fold((0, 0), |(n, t), &r| (n + 1, t + r));
             match want <= short {
-                true => shorts + want <= 2 * short,
+                true => toks + want <= 2 * short && n < 2 * passes.max(1),
                 false => longs < lanes,
             }
         }
@@ -550,8 +632,13 @@ impl<'a, 't> Batch<'a, 't> {
             seqs: Vec::new(),
             pre: Vec::new(),
             policy,
+            // From the environment (AXON_ADMIT, AXON_STEP_COST: `Sched`'s
+            // Default); the server sets it from its flags after `new`.
             sched: Sched::default(),
-            cost: StepCost::default(),
+            cost: StepCost {
+                pass_cap_us: policy.step_ms as f64 * 0.5e3,
+                ..StepCost::default()
+            },
             fed_now: 0,
             log,
             generated,
@@ -592,6 +679,7 @@ impl<'a, 't> Batch<'a, 't> {
             pass_us: c.pass_us,
             fused_tok_us: c.fused_tok,
             dec_ms: c.dec_ms.to_vec(),
+            legacy: self.policy.legacy,
         });
     }
 
@@ -630,14 +718,15 @@ impl<'a, 't> Batch<'a, 't> {
         let rem: Vec<usize> = (self.pre.iter())
             .map(|f| f.seq.hist.len() - 1 - f.fed)
             .collect();
-        let short = match self.sched.order {
-            AdmitOrder::Fifo => 0,
-            AdmitOrder::Sjf => self.short_tokens(),
+        let (short, passes) = match self.sched.order {
+            AdmitOrder::Fifo => (0, 0),
+            AdmitOrder::Sjf => (self.short_tokens(), self.short_passes()),
         };
         if !admit_gate(
             self.sched.order,
             self.lanes(),
             short,
+            passes,
             &rem,
             last - common.min(last),
         ) {
@@ -672,36 +761,57 @@ impl<'a, 't> Batch<'a, 't> {
         }
     }
 
-    /// A short prompt's most tokens: what one step feeds (`budget_tokens`),
+    /// A short prompt's most tokens: what one step can feed (`capacity`),
     /// at least the floor.
     fn short_tokens(&self) -> usize {
-        self.budget_tokens().max(self.policy.floor)
+        self.capacity().max(self.policy.floor)
     }
 
-    /// About the prompt tokens this step feeds: a hybrid pass's beside its
-    /// rows (`fused_share`), else the two-pass budget at depth 0 less a
-    /// pass's fixed part (everything when chunking is off).
-    fn budget_tokens(&self) -> usize {
+    /// Whether `job`'s prompt (past the free slot's prefix) is short.
+    pub(super) fn is_short(&self, job: &Job) -> bool {
+        let n = self.uncached(&job.prompt);
+        n.is_some_and(|n| n <= self.short_tokens())
+    }
+
+    /// The prompt tokens a step can feed (its capacity), from the rows and
+    /// the cost alone, never from the prompts already prefilling (so a
+    /// prompt's class can't change as an admission round fills `pre`): a
+    /// hybrid pass's beside its rows for one endless prompt at depth 0
+    /// (`fused_share`), else the two-pass budget at depth 0 less a pass's
+    /// fixed part (everything when chunking is off).
+    fn capacity(&self) -> usize {
         if self.policy.floor == 0 {
             return usize::MAX / 4;
         }
+        let rows = self.seqs.len();
+        if self.policy.hybrid && rows > 0 {
+            let ru = self.row_units();
+            return fused_capacity(&self.policy, &self.cost, rows, ru, self.pass);
+        }
+        two_pass_capacity(&self.policy, &self.cost, rows)
+    }
+
+    /// Short prompts a step feeds at most: two-pass steps feed each in its
+    /// own pass, as many as `step_ms` fits at a pass's fixed part plus a
+    /// 64-token chunk each (at least 1); hybrid steps, token budgets: no
+    /// bound but the tokens.
+    fn short_passes(&self) -> usize {
         if self.policy.hybrid && !self.seqs.is_empty() {
-            return self.fused_share();
+            return usize::MAX / 4;
         }
-        match two_pass_budget(&self.policy, &self.cost, self.seqs.len()) {
-            (Budget::Tokens(t), _) => t,
-            (Budget::Micros(us, c), pass) => {
-                let us = (us - pass).max(0.0);
-                ((DEPTH_K * DEPTH_K + 2.0 * us / c).sqrt() - DEPTH_K) as usize
-            }
-        }
+        two_pass_short_passes(&self.policy, &self.cost, self.seqs.len())
+    }
+
+    /// The running rows' token units (each at its depth).
+    fn row_units(&self) -> f64 {
+        (self.seqs.iter())
+            .map(|q| (q.hist.len() - 1) as f64 + DEPTH_K)
+            .sum()
     }
 
     /// `fused_share` for this step's rows and prompts.
     fn fused_share(&self) -> usize {
-        let row_units: f64 = (self.seqs.iter())
-            .map(|q| (q.hist.len() - 1) as f64 + DEPTH_K)
-            .sum();
+        let row_units = self.row_units();
         let rem: Vec<usize> = (self.pre.iter())
             .map(|f| f.seq.hist.len() - 1 - f.fed)
             .collect();
@@ -2081,7 +2191,8 @@ mod plan_tests {
 mod sched_tests {
     use super::{
         AdmitOrder, Budget, ChunkPolicy, DEPTH_K, STARVE, StepCost, TILE, admit_gate, admit_key,
-        bucket, fused_share, plan, plan_charged, starve, two_pass_budget,
+        bucket, fused_capacity, fused_share, plan, plan_charged, starve, two_pass_budget,
+        two_pass_short_passes, units,
     };
 
     const PASS: usize = 1152;
@@ -2131,25 +2242,167 @@ mod sched_tests {
     /// prefilling at most, whatever their length).
     #[test]
     fn can_admit_lanes_and_short_budget() {
+        // Hybrid: no bound on short prompts' passes but their tokens.
+        const ALL: usize = usize::MAX / 4;
         let b = 256;
         // Two long prefills, lanes 2: a 60-token job starts, a 3000 doesn't.
         let longs = [5000, 7000];
-        assert!(admit_gate(AdmitOrder::Sjf, 2, b, &longs, 60));
-        assert!(!admit_gate(AdmitOrder::Sjf, 2, b, &longs, 3000));
-        assert!(admit_gate(AdmitOrder::Sjf, 3, b, &longs, 3000));
+        assert!(admit_gate(AdmitOrder::Sjf, 2, b, ALL, &longs, 60));
+        assert!(!admit_gate(AdmitOrder::Sjf, 2, b, ALL, &longs, 3000));
+        assert!(admit_gate(AdmitOrder::Sjf, 3, b, ALL, &longs, 3000));
         // Short remainders summing to 2b: no more short ones; a long one
         // still gets a free lane.
         let shorts = [200, 156, 156];
         assert_eq!(shorts.iter().sum::<usize>(), 2 * b);
-        assert!(!admit_gate(AdmitOrder::Sjf, 2, b, &shorts, 1));
-        assert!(admit_gate(AdmitOrder::Sjf, 2, b, &shorts, 3000));
-        assert!(admit_gate(AdmitOrder::Sjf, 2, b, &shorts[1..], 200));
+        assert!(!admit_gate(AdmitOrder::Sjf, 2, b, ALL, &shorts, 1));
+        assert!(admit_gate(AdmitOrder::Sjf, 2, b, ALL, &shorts, 3000));
+        assert!(admit_gate(AdmitOrder::Sjf, 2, b, ALL, &shorts[1..], 200));
         // Fifo: two prompts prefilling of any length block everything.
-        assert!(!admit_gate(AdmitOrder::Fifo, 2, 0, &[60, 70], 10));
-        assert!(!admit_gate(AdmitOrder::Fifo, 2, 0, &longs, 60));
-        assert!(admit_gate(AdmitOrder::Fifo, 2, 0, &[5000], 60));
-        assert!(admit_gate(AdmitOrder::Fifo, 3, 0, &longs, 60));
+        assert!(!admit_gate(AdmitOrder::Fifo, 2, 0, 0, &[60, 70], 10));
+        assert!(!admit_gate(AdmitOrder::Fifo, 2, 0, 0, &longs, 60));
+        assert!(admit_gate(AdmitOrder::Fifo, 2, 0, 0, &[5000], 60));
+        assert!(admit_gate(AdmitOrder::Fifo, 3, 0, 0, &longs, 60));
+        // Two-pass: at most two steps' passes of short prompts (here 3 a
+        // step): five queued, a sixth goes; six queued, no seventh.
+        assert!(admit_gate(AdmitOrder::Sjf, 2, b, 3, &[60; 5], 60));
+        assert!(!admit_gate(AdmitOrder::Sjf, 2, b, 3, &[60; 6], 60));
+        // ... and a long one still gets its lane.
+        assert!(admit_gate(AdmitOrder::Sjf, 2, b, 3, &[60; 6], 3000));
         // (A plain pool returns before the gate: `admit_check`.)
+    }
+
+    /// The pass cost a two-pass step charges: 40 ms left beside the decode
+    /// step, a pass's fixed part 8 ms, 512 tokens 30 ms: 3 short prompts
+    /// a step (`fed`), and `two_pass_short_passes` agrees.
+    fn shorts_fed(cost: &StepCost) -> usize {
+        let p = policy(256, 50, false);
+        let (b, pass) = two_pass_budget(&p, cost, 8);
+        let (n, rem) = ([0; 10], [60; 10]);
+        let plan = plan_charged(b, pass, 256, PASS, &n, &rem, &n, false);
+        plan.iter().filter(|&&x| x > 0).count()
+    }
+
+    /// A warm model: decode steps of 10 ms, a 512-token feed, then short
+    /// feeds whose fixed part is 8 ms; and that short feed's time.
+    fn warm_cost() -> (StepCost, f64) {
+        let mut c = StepCost {
+            pass_cap_us: 25_000.0,
+            ..Default::default()
+        };
+        c.learn_decode(8, 10.0);
+        c.learn_feed(0, 512, 30_000.0);
+        let short = 8000.0 + c.tok.unwrap() * units(0, 59);
+        for _ in 0..3 {
+            c.learn_feed(0, 59, short);
+        }
+        (c, short)
+    }
+
+    /// Normal short feeds (`us` each) until `shorts_fed` is what 50 of
+    /// them give: how many it took.
+    fn recover(c: &mut StepCost, us: f64) -> usize {
+        let mut t = c.clone();
+        for _ in 0..50 {
+            t.learn_feed(0, 59, us);
+        }
+        let target = shorts_fed(&t);
+        let mut steps = 0;
+        while shorts_fed(c) != target {
+            c.learn_feed(0, 59, us);
+            steps += 1;
+            assert!(steps < 50, "never back: pass {}", c.pass());
+        }
+        steps
+    }
+
+    /// MUST 1 (review of #126): one stalled short feed (10x) can't pin
+    /// two-pass prefill: its sample is capped (4x the estimate, half the
+    /// step), the estimate is bounded by twice the fastest decode step,
+    /// and normal feeds bring the budget back within 3 steps. A first
+    /// sample that is an outlier (nothing to cap it against) is bounded
+    /// the same way and recovers within 5 (EMA 1/2 from 20 ms to 8.5).
+    #[test]
+    fn pass_us_outlier_recovers() {
+        let (warm, short) = warm_cost();
+        assert_eq!((warm.pass(), shorts_fed(&warm)), (8000.0, 3));
+        let p = policy(256, 50, false);
+        assert_eq!(two_pass_short_passes(&p, &warm, 8), 3);
+        let mut c = warm.clone();
+        c.learn_feed(0, 59, 10.0 * short);
+        assert!(c.pass() <= 25_000.0, "{}", c.pass());
+        assert!(shorts_fed(&c) < 3, "the outlier is felt");
+        assert!(recover(&mut c, short) <= 3);
+        assert_eq!(shorts_fed(&c), 3);
+        // A first sample of 80 ms: at most half the step, and twice the
+        // fastest decode step.
+        let mut c = StepCost {
+            pass_cap_us: 25_000.0,
+            ..Default::default()
+        };
+        c.learn_decode(8, 10.0);
+        c.learn_feed(0, 59, 80_000.0);
+        assert_eq!(c.pass(), 20_000.0);
+        c.learn_feed(0, 512, 30_000.0);
+        let us = 8000.0 + c.tok.unwrap() * units(0, 59);
+        assert!(recover(&mut c, us) <= 5);
+        // Hybrid (no short feeds at all): the decode-step bound alone.
+        let mut h = warm.clone();
+        h.learn_feed(0, 59, 10.0 * short);
+        h.learn_decode(1, 4.0);
+        assert!(h.pass() <= 8000.0, "{}", h.pass());
+    }
+
+    /// SHOULD (c): before any short feed, a pass is charged the fastest
+    /// decode step (measured, no fixed seed): a cold wave of short prompts
+    /// is fed a few a step, not all in one.
+    #[test]
+    fn cold_pass_cost_is_the_decode_step() {
+        let mut c = StepCost::default();
+        c.learn_feed(0, 512, 30_000.0);
+        assert_eq!(c.pass(), 0.0);
+        assert_eq!(shorts_fed(&c), 10, "nothing measured: no charge");
+        c.learn_decode(8, 10.0);
+        assert_eq!(c.pass(), 10_000.0);
+        assert!(shorts_fed(&c) <= 4, "{}", shorts_fed(&c));
+    }
+
+    /// MUST 2: a prompt's class doesn't depend on what is prefilling. On
+    /// the H100's numbers (128 rows), a 300-token prompt was long with
+    /// nothing prefilling and short once long prompts were (the share of
+    /// the current plan); the capacity is the same all round.
+    #[test]
+    fn short_class_stable_across_a_round() {
+        let cost = StepCost {
+            fused_tok: Some(0.006),
+            ..Default::default()
+        };
+        let p = policy(256, 50, true);
+        let (rows, ru) = (128, 128.0 * (790.0 + DEPTH_K));
+        let old = |rem: &[usize]| {
+            let z = vec![0; rem.len()];
+            fused_share(&p, &cost, rows, ru, PASS, &z, rem, &z).max(256)
+        };
+        assert!(
+            300 > old(&[]) && 300 <= old(&[7600, 6000]),
+            "{} {}",
+            old(&[]),
+            old(&[7600, 6000])
+        );
+        let cap = fused_capacity(&p, &cost, rows, ru, PASS).max(256);
+        assert!(cap >= 512, "{cap}");
+        // A round: candidates admitted one after another, `pre` filling.
+        let mut pre: Vec<usize> = Vec::new();
+        let mut classes = Vec::new();
+        for want in [300, 60, 7600, 300, 6000, 60, 300] {
+            let short = fused_capacity(&p, &cost, rows, ru, PASS).max(256);
+            assert_eq!(short, cap);
+            classes.push((want, want <= short));
+            if admit_gate(AdmitOrder::Sjf, 2, short, usize::MAX / 4, &pre, want) {
+                pre.push(want);
+            }
+        }
+        assert!(classes.iter().all(|&(w, s)| s == (w <= 300)), "{classes:?}");
+        assert!(pre.contains(&7600) && pre.contains(&6000), "{pre:?}");
     }
 
     /// Two-pass steps charge a pass's fixed part per prompt fed: with 40
@@ -2502,7 +2755,7 @@ mod sched_tests {
             assert_eq!(starve(&a, &rem, &st, idle).len(), n);
             let pre: Vec<usize> = (0..rnd(4)).map(|_| rnd(9000) as usize).collect();
             assert_eq!(
-                admit_gate(AdmitOrder::Fifo, 2, 0, &pre, rnd(9000) as usize),
+                admit_gate(AdmitOrder::Fifo, 2, 0, 0, &pre, rnd(9000) as usize),
                 pre.len() < 2
             );
         }

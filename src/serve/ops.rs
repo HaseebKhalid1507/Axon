@@ -219,6 +219,8 @@ pub struct SchedView {
     pub pass_us: Option<f64>,
     pub fused_tok_us: Option<f64>,
     pub dec_ms: Vec<Option<f64>>,
+    /// AXON_STEP_COST=legacy (the rollback's budgets).
+    pub legacy: bool,
 }
 
 /// Counters the connection threads and the engine feed.
@@ -469,6 +471,12 @@ impl Metrics {
             "axon_prefill_lanes_busy",
             "Long prompts prefilling (--prefill-lanes).",
             s.lanes_busy,
+        );
+        gauge(
+            &mut o,
+            "axon_step_cost_legacy",
+            "1: AXON_STEP_COST=legacy (the budgets before the step cost model).",
+            s.legacy as usize,
         );
         gauge(
             &mut o,

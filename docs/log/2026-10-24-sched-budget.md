@@ -1,4 +1,4 @@
-# Shortest-first admission and a measured step budget for `axon serve` (PR #TBD)
+# Shortest-first admission and a measured step budget for `axon serve` (PR #126)
 
 - Date: 2026-10-24. Branch: feat/sched-budget. Base: feat/hybrid-step (#119) ecdb1d0 (stacked; main 6e3b19c below it).
   Status: open (draft, gates pending)
@@ -34,10 +34,27 @@ to a frozen copy of #119's code).
 ## Results
 Pending (PR body §5 and an Update line here).
 
+## Review fixes (shady 7/10, 10-24)
+- `pass_us` was an unguarded EMA: one stalled short feed could pin two-pass prefill at `floor` tokens a step until
+  the next short feed (in hybrid, maybe never). Now a sample is at most 4x the estimate and half a step, and the
+  estimate is read bounded by twice the fastest decode-only step (one pass over the weights, almost no token
+  work); decode-only steps run whenever no prompt waits, so the bound holds in hybrid too. Test
+  `pass_us_outlier_recovers`: a 10x sample, then normal ones; the step's short-prompt count is back within 3
+  (within 5 when the outlier is the first sample, nothing to cap it against).
+- The short/long class came from the current plan (`fused_share` over `pre`), so it flipped as a round admitted
+  prompts (on the H100's numbers a 300-token prompt: long with nothing prefilling, short with two long ones).
+  Now from the step's capacity (one endless prompt at depth 0). Test `short_class_stable_across_a_round`.
+- Two-pass steps feed one pass per short prompt; the short gate now counts passes too (2 steps' worth).
+- A pages refusal no longer ends the round at once: short prompts that fit the pages left still start, until the
+  refused request has waited 2x `--admit-age-ms` (then it ends the round). `pages_block_bounds_the_wait`.
+- Cold start: before any short feed, a pass is charged the fastest decode step (measured; still no fixed seed),
+  so a cold wave of short prompts isn't fed in one long step. `cold_pass_cost_is_the_decode_step`.
+- `axon_step_cost_legacy` gauge; `serve_rollback_flags_reach_the_engine` checks the rollback arm's lanes and
+  legacy flag on /metrics.
+
 ## What didn't work
 - A 6 ms seed for the pass's fixed part (the spec's): on a 0.5B a 512-token feed is ~15 ms, so the seed would skew
-  the learned per-token cost by ~40 %. The fixed part is 0 until a < 64-token feed teaches it (one does, in the
-  first step that feeds a short prompt).
+  the learned per-token cost by ~40 %. Unmeasured, it is the fastest decode step (above).
 - The spec's "first refusal ends the round": an aged long prompt refused for a lane would then block every short
   prompt behind it. A refusal by class (lane / short budget) skips to the next candidate; a refusal for a slot or
   pages still ends the round, so nothing overtakes on pages.

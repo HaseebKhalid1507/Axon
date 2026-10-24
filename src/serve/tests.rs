@@ -2422,6 +2422,52 @@ fn serve_chunked_prefill_matches_solo() {
     }
 }
 
+/// SHOULD (b) of #126's review: a request refused for pages lets short
+/// prompts start past it until it has waited twice the age bound; then it
+/// ends the round (nothing takes its pages). Bound 0 (no aging): never.
+#[test]
+fn pages_block_bounds_the_wait() {
+    use super::pages_block;
+    assert!(!pages_block(0, 3000));
+    assert!(!pages_block(5999, 3000));
+    assert!(pages_block(6000, 3000));
+    assert!(!pages_block(1_000_000, 0));
+}
+
+/// The rollback flags reach the engine: `--admit-order fifo
+/// --prefill-lanes 2 --step-ms 60` with AXON_STEP_COST=legacy (the A/B's
+/// `roll` arm) shows lanes 2 and the legacy budgets on /metrics; the
+/// defaults at 32 slots show lanes 2, the model's budgets; 128 slots, 8.
+#[test]
+fn serve_rollback_flags_reach_the_engine() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    for (arm, par, lanes, legacy) in [
+        ("roll", 32, 2.0, 1.0),
+        ("sjf50", 32, 2.0, 0.0),
+        ("sjf50", 128, 8.0, 0.0),
+    ] {
+        let s = server_with(p.to_str().unwrap(), Device::Cuda, |o| {
+            o.parallel = par;
+            o.parallel_set = true;
+            o.kv_pages = Some(64);
+            arm_opts(arm, o);
+        });
+        let a = s.addr;
+        let m = || prom_parse(&call(a, "GET", "/metrics", "").body);
+        wait_for("the engine's gauges", || {
+            m().contains_key("axon_prefill_lanes")
+        });
+        let g = m();
+        assert_eq!(g["axon_prefill_lanes"], lanes, "{arm} {par}");
+        assert_eq!(g["axon_step_cost_legacy"], legacy, "{arm} {par}");
+    }
+}
+
 /// Shortest-first admission (`--admit-order sjf`, the default): with 4
 /// requests decoding and two long prompts prefilling (both lanes of a
 /// paged pool of 8 slots), a short prompt sent next starts at once and is

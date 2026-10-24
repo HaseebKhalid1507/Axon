@@ -1377,6 +1377,11 @@ fn engine(
                     }
                 }
                 let mut n = 0;
+                // After a refusal for pages only short prompts go on (fed in
+                // a step, they don't hold up the refused one long), until it
+                // has waited twice the age bound: then it ends the round, so
+                // nothing takes the pages it waits for (its wait is bounded).
+                let mut paged_out = false;
                 for id in admit_order(b, &waiting, sched.age_ms) {
                     let i = waiting.iter().position(|j| j.id == id).expect("waiting");
                     // One alone (nothing runs, nothing else waits) runs the
@@ -1384,14 +1389,24 @@ fn engine(
                     if b.idle() && waiting.len() < 2 {
                         break;
                     }
+                    if paged_out && !b.is_short(&waiting[i]) {
+                        continue;
+                    }
                     match b.admit_check(&waiting[i]) {
                         engine::Admit::Yes => {}
                         // Its class (long: lanes; short: two steps' worth)
                         // is full: the other class may still start.
                         engine::Admit::Lane => continue,
-                        // No slot, or pages: younger or longer requests
-                        // don't overtake it.
-                        engine::Admit::Slot | engine::Admit::Pages => break,
+                        // No slot: nobody else starts either.
+                        engine::Admit::Slot => break,
+                        engine::Admit::Pages => {
+                            let age = waiting[i].arrived.elapsed().as_millis() as u64;
+                            if pages_block(age, sched.age_ms) {
+                                break;
+                            }
+                            paged_out = true;
+                            continue;
+                        }
                     }
                     let job = waiting.remove(i).unwrap();
                     let out = text_out(e.tok, &job, &e.metrics);
@@ -1448,6 +1463,14 @@ fn engine(
             fatal(b, &err, None);
         }
     }
+}
+
+/// Whether a request refused for pages, waiting `age` ms, ends the
+/// admission round (nobody else starts this iteration): once it has
+/// waited twice the age bound (`bound` > 0). Before that, short prompts
+/// that fit the pages left may still start.
+fn pages_block(age: u64, bound: u64) -> bool {
+    bound > 0 && age >= 2 * bound
 }
 
 /// The ids of the waiting requests that fit a slot, in admission order
