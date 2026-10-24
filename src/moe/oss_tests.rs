@@ -459,9 +459,9 @@ fn backend_places_gpt_oss() {
         return;
     }
     let m = fixture();
-    use crate::lm::{Backend, Device};
+    use crate::lm::{Backend, Device, Inner};
     let b = Backend::new(&m, Device::Cuda, 64, None, crate::kv::KvType::F16, false).unwrap();
-    assert!(matches!(b, Backend::Moe(_)));
+    assert!(matches!(b.0, Inner::Moe(_)));
     let e = Backend::new(&m, Device::Cuda, 64, Some(1), crate::kv::KvType::F16, false);
     assert!(e.is_err_and(|e| e.contains("doesn't split by layers")));
     let e = Backend::new(&m, Device::Cuda, 64, None, crate::kv::KvType::Q8, false);

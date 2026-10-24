@@ -48,7 +48,7 @@
 //! bytes alone.
 
 use crate::gguf::Model;
-use crate::lm::Backend;
+use crate::lm::{Backend, Inner};
 use std::io;
 use std::path::Path;
 
@@ -196,24 +196,24 @@ pub fn of(path: &str, m: &Model, net: &Backend) -> Identity {
         gpu_ok &= ok;
         g
     };
-    let id = match net {
-        Backend::Cpu(_) => Identity::new(&d, &types, "cpu", None, Some(&cpu()), cpu_kv),
-        Backend::Cuda(n) => {
+    let id = match &net.0 {
+        Inner::Cpu(_) => Identity::new(&d, &types, "cpu", None, Some(&cpu()), cpu_kv),
+        Inner::Cuda(n) => {
             let g = gpu(n);
             Identity::new(&d, &types, "cuda", Some(&g), None, n.kv_name())
         }
-        Backend::Hybrid(n) => {
+        Inner::Hybrid(n) => {
             let g = n.gpu_net().map(&mut gpu);
             let b = hybrid_backend(n.gpu_layers, n.n_layers, n.streams());
             let kv = format!("{} (cpu layers {cpu_kv})", n.kv_name());
             Identity::new(&d, &types, &b, g.as_deref(), Some(&cpu()), &kv)
         }
-        Backend::Moe(n) => {
+        Inner::Moe(n) => {
             let g = gpu(n.gpu_net());
             let kv = format!("{} (experts on the cpu)", n.kv_name());
             Identity::new(&d, &types, "cuda+cpu experts", Some(&g), Some(&cpu()), &kv)
         }
-        Backend::Pipeline(n) => {
+        Inner::Pipeline(n) => {
             let gs: Vec<String> = n.stages().into_iter().map(&mut gpu).collect();
             let b = pipeline_backend(&n.cuts);
             Identity::new(&d, &types, &b, Some(&gs.join("; ")), None, n.kv_name())
@@ -892,7 +892,7 @@ mod tests {
         let n = crate::hybrid::block_count(&m).unwrap();
         let kv = crate::kv::KvType::F16;
         let net = Backend::new(&m, crate::lm::Device::Cuda, 256, Some(n / 2), kv, false).unwrap();
-        let Backend::Hybrid(h) = &net else {
+        let Inner::Hybrid(h) = &net.0 else {
             panic!("not a split")
         };
         let id = of(path, &m, &net);
@@ -921,7 +921,7 @@ mod tests {
             Some(cuts.clone()),
         )
         .unwrap();
-        let net = Backend::Pipeline(Box::new(p));
+        let net = Backend(Inner::Pipeline(Box::new(p)));
         let id = of(path, &m, &net);
         assert_eq!(get(&id, "backend").unwrap(), pipeline_backend(&cuts));
         let g = get(&id, "gpu").unwrap();
@@ -948,7 +948,7 @@ mod tests {
         let m = crate::gguf::load_with(path, Some(false)).unwrap();
         let kv = crate::kv::KvType::F16;
         let net = Backend::new(&m, crate::lm::Device::Cuda, 256, None, kv, false).unwrap();
-        let Backend::Cuda(n) = &net else {
+        let Inner::Cuda(n) = &net.0 else {
             panic!("not on the GPU")
         };
         let k = crate::cuda::qwen2::max_split(sms, m.n_kv_heads() as usize);

@@ -31,17 +31,17 @@ use crate::gguf::Model;
 use crate::lm::Lm;
 use crate::model::{MoeRoute, Qwen2};
 
-pub struct MoeQwen3<'m, 'g> {
+pub(crate) struct MoeQwen3<'m, 'g> {
     gpu: CudaQwen2<'g>,
     cpu: Qwen2<'m>,
     kind: MoeKind<'g>,
     /// The context its caches are planned for (with `fit`, maybe less than
     /// asked).
-    pub ctx: usize,
+    pub(crate) ctx: usize,
 }
 
 /// The GPU cache and the experts' exchange scratch.
-pub struct MoeCache<'g> {
+pub(crate) struct MoeCache<'g> {
     /// Before `c`: its graphs hold the cache's addresses.
     s: Scratch<'g>,
     c: CudaCache<'g>,
@@ -78,7 +78,7 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
     /// model's kernel module, `router` `Kernels::moe_module_for(m)`.
     /// `q6k8`: the Q6_K prefill copy now (as `CudaQwen2::with_kv_q6k8`).
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         gpu: &'g Gpu,
         module: &'g Module<'g>,
         router: &'g Module<'g>,
@@ -101,16 +101,16 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
     }
 
     /// The GPU half (identity, profiles).
-    pub fn gpu_net(&self) -> &CudaQwen2<'g> {
+    pub(crate) fn gpu_net(&self) -> &CudaQwen2<'g> {
         &self.gpu
     }
 
-    pub fn kv_name(&self) -> &'static str {
+    pub(crate) fn kv_name(&self) -> &'static str {
         self.gpu.kv_name()
     }
 
     /// One line for the banner.
-    pub fn describe(&self, max_ctx: usize) -> String {
+    pub(crate) fn describe(&self, max_ctx: usize) -> String {
         let d = self.gpu.moe.expect("a mixture-of-experts model");
         format!(
             "attention + router on the GPU ({:.2} GiB, ctx {max_ctx}), {} experts x {} \
@@ -210,6 +210,7 @@ fn transpose_tiled(yc: &[f32], nb: usize, dim: usize, y: &mut [f32]) {
     });
 }
 
+impl<'g> crate::lm::Sealed for MoeQwen3<'_, 'g> {}
 impl<'g> Lm for MoeQwen3<'_, 'g> {
     type Cache = MoeCache<'g>;
 

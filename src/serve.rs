@@ -42,7 +42,7 @@ pub mod tools;
 use crate::chat::{self, Framing, special};
 use crate::cuda::qwen2::CacheKv;
 use crate::kv::KvType;
-use crate::lm::{Backend, BackendCache, BatchLm, Device, Lm};
+use crate::lm::{Backend, BackendCache, BatchLm, Device, Inner, Lm};
 use crate::sample::{SampleArgs, SampleCfg, Sampler};
 use crate::spec::PromptLookup;
 use crate::tokenizer::{Tokenizer, Utf8Stream};
@@ -1039,10 +1039,10 @@ fn engine(
         draft_ctx,
     );
     let ctx = net.ctx(want);
-    let why = match &net {
+    let why = match &net.0 {
         _ if ctx >= want => None,
-        Backend::Cuda(_) => Some(gpu_fit_note(ctx, want, o.kv, gpu_layers.is_some())),
-        Backend::Pipeline(_) => Some(format!(
+        Inner::Cuda(_) => Some(gpu_fit_note(ctx, want, o.kv, gpu_layers.is_some())),
+        Inner::Pipeline(_) => Some(format!(
             "{ctx} fit on the GPUs beside the weights, of the model's {want} \
              (--ctx N for another{})",
             if o.kv == KvType::Q8 {
@@ -1051,19 +1051,19 @@ fn engine(
                 "; --kv q8 halves the KV cache"
             }
         )),
-        Backend::Hybrid(_) => Some(format!(
+        Inner::Hybrid(_) => Some(format!(
             "the default for a CPU/GPU split (automatic or --gpu-layers): a cache for the \
              model's {want} tokens would take GPU memory from its layers \
              (--ctx N for another)"
         )),
-        Backend::Moe(_) => Some(format!(
+        Inner::Moe(_) => Some(format!(
             "{ctx} fit on the GPU beside the attention weights, of the model's {want} \
              (--ctx N for another)"
         )),
-        Backend::Cpu(_) => None,
+        Inner::Cpu(_) => None,
     };
-    let (ctx, why) = match &net {
-        Backend::Cpu(n) if fit => {
+    let (ctx, why) = match &net.0 {
+        Inner::Cpu(n) if fit => {
             let elem = if crate::kv::use_f32() { 4 } else { 2 };
             let per_pos = (n.n_layers * 2 * n.n_kv_heads * n.head_dim * elem) as u64;
             // A mapped model's pages must stay in memory too.
@@ -1080,12 +1080,12 @@ fn engine(
         eprintln!("axon serve: context {ctx} tokens: {why}");
     }
     let template = Template::new(tok, &model.arch);
-    let kvs = match &net {
-        Backend::Cuda(n) => format!("cuda, kv {}", n.kv_name()),
-        Backend::Hybrid(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
-        Backend::Pipeline(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
-        Backend::Moe(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
-        Backend::Cpu(_) => "cpu".into(),
+    let kvs = match &net.0 {
+        Inner::Cuda(n) => format!("cuda, kv {}", n.kv_name()),
+        Inner::Hybrid(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
+        Inner::Pipeline(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
+        Inner::Moe(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
+        Inner::Cpu(_) => "cpu".into(),
     };
     let drafts = dm.as_ref().map_or(String::new(), |d| {
         format!(", draft model {} K={}", d.name(), o.max_draft)
@@ -1093,7 +1093,7 @@ fn engine(
     // Continuous batching runs on one GPU holding every layer: the CPU, a
     // CPU/GPU split and a multi-GPU pipeline (AXON_GPUS) serve one request
     // at a time, and an explicit --parallel N there is refused.
-    if o.parallel > 1 && o.parallel_set && !matches!(net, Backend::Cuda(_)) {
+    if o.parallel > 1 && o.parallel_set && !matches!(&net.0, Inner::Cuda(_)) {
         crate::fail(&format!(
             "--parallel {}: batching many requests needs the whole model on one GPU \
              (--device cuda; not with --gpu-layers or several AXON_GPUS); this backend \
@@ -1109,8 +1109,8 @@ fn engine(
         _ => CacheKv::F16,
     };
     // Paged KV (specs r11): a slot is a cap, the pool a page budget.
-    let paged = match &net {
-        Backend::Cuda(n) if paged_serve(device, o.parallel, paged_env) => {
+    let paged = match &net.0 {
+        Inner::Cuda(n) if paged_serve(device, o.parallel, paged_env) => {
             let slots = if o.parallel_set {
                 o.parallel
             } else {
@@ -1138,7 +1138,7 @@ fn engine(
         }
         _ => None,
     };
-    let plan = match &net {
+    let plan = match &net.0 {
         _ if paged.is_some() => {
             let p = paged.as_ref().expect("paged");
             SlotPlan {
@@ -1159,7 +1159,7 @@ fn engine(
                 }),
             }
         }
-        Backend::Cuda(n) if o.parallel > 1 => match n.free_bytes() {
+        Inner::Cuda(n) if o.parallel > 1 => match n.free_bytes() {
             Ok(free) => {
                 let free = free as usize;
                 let fits = |kv, s, c| n.serve_bytes_kv(kv, s, c) + POOL_SPARE <= free;
@@ -1221,7 +1221,7 @@ fn engine(
     };
     // The Q6_K prefill copy only out of what the cache and slots leave
     // (prefill-only: the same products without it, slower).
-    if let Backend::Cuda(n) = &mut net {
+    if let Inner::Cuda(n) = &mut net.0 {
         match n.make_q6k8_spare() {
             Ok(Some(false)) if o.log => eprintln!(
                 "axon serve: no Q6_K prefill copy ({:.2} GiB free beside the caches; it \

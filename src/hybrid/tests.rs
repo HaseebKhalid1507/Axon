@@ -1311,7 +1311,7 @@ fn placement_q8_changes_the_decision() {
 /// CPU half: same bits.
 #[test]
 fn all_gpu_layers_is_the_cuda_backend() {
-    use crate::lm::{Backend, Device};
+    use crate::lm::{Backend, Device, Inner};
     let Some(g) = crate::testutil::gpu() else {
         return;
     };
@@ -1331,7 +1331,7 @@ fn all_gpu_layers_is_the_cuda_backend() {
             false,
         )
         .unwrap();
-        assert!(matches!(b, Backend::Cuda(_)), "--gpu-layers {gl}");
+        assert!(matches!(b.0, Inner::Cuda(_)), "--gpu-layers {gl}");
         assert_eq!(b.ctx(128), 128);
         let got = trace(&b, &m, 8);
         assert!(

@@ -374,7 +374,7 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// VRAM `stream_kv(max_ctx, ..)` takes.
-    pub fn stream_kv_bytes(&self, max_ctx: usize) -> usize {
+    pub(crate) fn stream_kv_bytes(&self, max_ctx: usize) -> usize {
         2 * 2 * max_ctx * self.kv_dim() * 2
     }
 

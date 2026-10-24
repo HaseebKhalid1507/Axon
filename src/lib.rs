@@ -91,8 +91,11 @@ pub(crate) use generate::{PREFILL_BATCH, argmax};
 /// Load the GGUF (or safetensors directory) at `path` to run on `device`:
 /// mapped for the GPU; for the CPU, copied into huge pages when the model
 /// reads its weights in place (AXON_MMAP overrides). An error names the
-/// file and says why it can't be read or run.
+/// file and says why it can't be read or run, or names an engine variable
+/// with a value Axon can't use (AXON_SIMD, AXON_DECODE_ROWS,
+/// AXON_PREFETCH: checked before anything is read).
 pub fn load(path: &str, device: Device) -> Result<Model, String> {
+    quant::env_check()?;
     let mut unsupported = None;
     let m = gguf::load_to_run(path, (device == Device::Cuda).then_some(false), |m| {
         if let Err(e) = model::check_supported(m) {

@@ -32,7 +32,7 @@
 //! (`kvstore`) keeps, and one strided copy per region moves it.
 
 use crate::cuda::qwen2::{CudaCache, CudaQwen2};
-use crate::lm::{Backend, BackendCache, Lm};
+use crate::lm::{Backend, BackendCache, CacheInner, Inner, Lm};
 use crate::model::{KvCache, Qwen2};
 use serde_json::{Value, json};
 use std::fs::File;
@@ -460,9 +460,9 @@ impl<'g> KvIo for CudaQwen2<'g> {
 
 impl KvIo for Backend<'_> {
     fn kv_ident(&self, cache: &BackendCache) -> Option<Value> {
-        match (self, cache) {
-            (Backend::Cpu(n), BackendCache::Cpu(c)) => n.kv_ident(c),
-            (Backend::Cuda(n), BackendCache::Cuda(c)) => n.kv_ident(c),
+        match (&self.0, &cache.0) {
+            (Inner::Cpu(n), CacheInner::Cpu(c)) => n.kv_ident(c),
+            (Inner::Cuda(n), CacheInner::Cuda(c)) => n.kv_ident(c),
             _ => None,
         }
     }
@@ -474,9 +474,9 @@ impl KvIo for Backend<'_> {
         hi: usize,
         out: &mut dyn Write,
     ) -> io::Result<()> {
-        match (self, cache) {
-            (Backend::Cpu(n), BackendCache::Cpu(c)) => n.kv_save(c, lo, hi, out),
-            (Backend::Cuda(n), BackendCache::Cuda(c)) => n.kv_save(c, lo, hi, out),
+        match (&self.0, &cache.0) {
+            (Inner::Cpu(n), CacheInner::Cpu(c)) => n.kv_save(c, lo, hi, out),
+            (Inner::Cuda(n), CacheInner::Cuda(c)) => n.kv_save(c, lo, hi, out),
             _ => Err(io::Error::other("this backend has no cache image")),
         }
     }
@@ -488,21 +488,21 @@ impl KvIo for Backend<'_> {
         hi: usize,
         src: &mut dyn Read,
     ) -> io::Result<()> {
-        match (self, cache) {
-            (Backend::Cpu(n), BackendCache::Cpu(c)) => n.kv_load(c, lo, hi, src),
-            (Backend::Cuda(n), BackendCache::Cuda(c)) => n.kv_load(c, lo, hi, src),
+        match (&self.0, &mut cache.0) {
+            (Inner::Cpu(n), CacheInner::Cpu(c)) => n.kv_load(c, lo, hi, src),
+            (Inner::Cuda(n), CacheInner::Cuda(c)) => n.kv_load(c, lo, hi, src),
             _ => Err(io::Error::other("this backend has no cache image")),
         }
     }
 
     fn kv_shape(&self) -> (usize, usize, usize) {
-        match self {
-            Backend::Cpu(n) => n.kv_shape(),
-            Backend::Cuda(n) => n.kv_shape(),
+        match &self.0 {
+            Inner::Cpu(n) => n.kv_shape(),
+            Inner::Cuda(n) => n.kv_shape(),
             // No image (`kv_ident` is None): nothing depends on the shape.
             // A MoE model (attention on the GPU, experts on the CPU) has no
             // cache image yet either: chat's session save/restore is off.
-            Backend::Hybrid(_) | Backend::Pipeline(_) | Backend::Moe(_) => (0, 0, 0),
+            Inner::Hybrid(_) | Inner::Pipeline(_) | Inner::Moe(_) => (0, 0, 0),
         }
     }
 }

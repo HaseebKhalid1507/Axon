@@ -26,10 +26,30 @@ pub fn chunk_ranges(n: usize, pb: usize) -> Vec<std::ops::Range<usize>> {
         .collect()
 }
 
+/// Seals `Lm`: only the crate's models implement it, so a method added to
+/// it is not a breaking change (#118).
+mod sealed {
+    pub trait Sealed {}
+}
+pub(crate) use sealed::Sealed;
+
 /// A causal language model with a KV cache of its own type. Positions are
 /// absolute: `pos` is the cache slot the token goes in; tokens before it
-/// must already be in the cache.
-pub trait Lm {
+/// must already be in the cache. Sealed: implemented by the crate's
+/// models (`Backend` among them), not by other crates.
+///
+/// ```compile_fail,E0277
+/// struct Mine;
+/// impl axon::Lm for Mine {
+///     type Cache = ();
+///     fn vocab(&self) -> usize { 0 }
+///     fn new_cache(&self, _: usize) {}
+///     fn forward(&self, _: u32, _: usize, _: &mut ()) -> Vec<f32> { Vec::new() }
+///     fn feed_batch(&self, _: &[u32], _: usize, _: &mut ()) {}
+///     fn verify_argmax(&self, _: &[u32], _: usize, _: &mut ()) -> Vec<u32> { Vec::new() }
+/// }
+/// ```
+pub trait Lm: Sealed {
     /// Keys and values of past positions (on the model's device).
     type Cache;
 
@@ -271,6 +291,7 @@ pub struct PoolPages {
     pub held: Vec<usize>,
 }
 
+impl Sealed for Qwen2<'_> {}
 impl Lm for Qwen2<'_> {
     type Cache = KvCache;
 
@@ -316,8 +337,19 @@ impl Lm for Qwen2<'_> {
     }
 }
 
-/// Where `axon gen` / `axon chat` run the model.
+/// Where `axon gen` / `axon chat` run the model. Non-exhaustive: more
+/// devices may come, so a match outside the crate needs a `_` arm.
+///
+/// ```compile_fail,E0004
+/// fn name(d: axon::Device) -> &'static str {
+///     match d {
+///         axon::Device::Cpu => "cpu",
+///         axon::Device::Cuda => "cuda",
+///     }
+/// }
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Device {
     Cpu,
     Cuda,
@@ -383,8 +415,32 @@ pub fn head_gpu() -> Result<usize, String> {
 }
 
 /// The model on the device the command line picked: the CLI's one `Lm`.
-/// Each call is a match away from the backend's own.
-pub enum Backend<'a> {
+/// Each call is a match away from the backend's own. Opaque: which model
+/// runs where (CPU, GPU, a split, a pipeline, mixture-of-experts) is the
+/// crate's, so a new kind is not a breaking change, and the models'
+/// geometry (which sizes raw device launches) can't be written from
+/// outside the crate (#118).
+///
+/// Outside the crate there is no variant to match on and no field to
+/// reach a model through, so this (which compiled in #117) doesn't:
+///
+/// ```compile_fail,E0599
+/// fn f(b: &mut axon::Backend) {
+///     if let axon::Backend::Cuda(c) = b {
+///         c.vocab = 0;
+///     }
+/// }
+/// ```
+///
+/// ```compile_fail,E0616
+/// fn f(b: &mut axon::Backend) {
+///     let _ = &mut b.0;
+/// }
+/// ```
+pub struct Backend<'a>(pub(crate) Inner<'a>);
+
+/// What a `Backend` holds.
+pub(crate) enum Inner<'a> {
     Cpu(Qwen2<'a>),
     /// Its `Gpu` and kernel module are leaked: they live as long as the
     /// process, which is as long as the CLI needs them (the weights and
@@ -399,7 +455,17 @@ pub enum Backend<'a> {
     Moe(Box<MoeQwen3<'a, 'static>>),
 }
 
-pub enum BackendCache {
+/// A `Backend`'s KV cache (`Lm::new_cache`): opaque, as `Backend`.
+///
+/// ```compile_fail,E0616
+/// fn f(c: &mut axon::BackendCache) {
+///     let _ = &mut c.0;
+/// }
+/// ```
+pub struct BackendCache(pub(crate) CacheInner);
+
+/// What a `BackendCache` holds: the cache of its `Backend`'s `Inner`.
+pub(crate) enum CacheInner {
     Cpu(KvCache),
     Cuda(Box<CudaCache<'static>>),
     Hybrid(Box<HybridCache<'static>>),
@@ -480,7 +546,9 @@ impl<'a> Backend<'a> {
     /// (`hybrid::auto_gpu_layers`, told on stderr), but with `fit` a
     /// shorter all-GPU context (`ctx`) may win over the split
     /// (`hybrid::choose_placement` says when). Err says why CUDA can't
-    /// be used, or that the CPU has no q8 cache. Some(0) is not a split: the
+    /// be used, or that the CPU has no q8 cache, or names an engine variable
+    /// with a value Axon can't use (AXON_SIMD, AXON_DECODE_ROWS,
+    /// AXON_PREFETCH; `load` checks them too). Some(0) is not a split: the
     /// CLI maps it to `Device::Cpu` before loading (a GPU model maps the
     /// file, a CPU one copies it only if it reads matrices in place).
     pub fn new(
@@ -517,6 +585,9 @@ impl<'a> Backend<'a> {
         fit: bool,
         p: Placing,
     ) -> Result<Backend<'a>, String> {
+        // A bad AXON_SIMD / AXON_DECODE_ROWS / AXON_PREFETCH is this call's
+        // error, not a panic in a later forward pass.
+        crate::quant::env_check()?;
         let split_ctx = p.split_ctx;
         let long = fit && split_ctx < max_ctx;
         // `kv` is the whole KV choice: this reads no AXON_KV (the CLI parses
@@ -539,7 +610,7 @@ impl<'a> Backend<'a> {
                 return Err("the q8 KV cache is cuda-only (--device cuda)".into());
             }
             crate::model::moe_check_ram(m, true)?;
-            return Ok(Backend::Cpu(Qwen2::new(m)));
+            return Ok(Backend(Inner::Cpu(Qwen2::new(m))));
         }
         if gpu_layers == Some(0) {
             return Err("--gpu-layers 0 is --device cpu".into());
@@ -585,7 +656,7 @@ impl<'a> Backend<'a> {
         let module: &'static Module<'static> = Box::leak(Box::new(Kernels::module_for(gpu, m)?));
         let whole_gpu = |ctx: usize, fit: bool| {
             CudaQwen2::with_kv_q6k8(gpu, module, m, ctx, ckv, fit, !p.defer_q6k8)
-                .map(|n| Backend::Cuda(Box::new(n)))
+                .map(|n| Backend(Inner::Cuda(Box::new(n))))
         };
         let auto = gpu_layers.is_none();
         let stream = crate::hybrid::stream_setting();
@@ -652,7 +723,7 @@ impl<'a> Backend<'a> {
         let h =
             HybridQwen2::new_with_stream(Some((gpu, module)), m, split_ctx, g, ckv, stream, auto)?;
         eprintln!("split:       {}", h.describe(split_ctx));
-        Ok(Backend::Hybrid(Box::new(h)))
+        Ok(Backend(Inner::Hybrid(Box::new(h))))
     }
 
     /// A qwen3moe model on GPU `ordinal`: attention, routers and head there
@@ -683,7 +754,7 @@ impl<'a> Backend<'a> {
             Box::leak(Box::new(Kernels::moe_module_for(gpu, m)?));
         let n = MoeQwen3::new(gpu, module, router, m, max_ctx, kv, fit, q6k8)?;
         eprintln!("moe:         {}, kv {}", n.describe(n.ctx), n.kv_name());
-        Ok(Backend::Moe(Box::new(n)))
+        Ok(Backend(Inner::Moe(Box::new(n))))
     }
 
     /// The model's layers over the GPUs `ordinals` (in order), a
@@ -713,40 +784,40 @@ impl<'a> Backend<'a> {
         };
         let p = PipelineQwen2::new(&devs, m, ctx, kv, None)?;
         eprintln!("pipeline:    {}", p.describe(ctx));
-        Ok(Backend::Pipeline(Box::new(p)))
+        Ok(Backend(Inner::Pipeline(Box::new(p))))
     }
 
     /// The context the cache was planned for: the GPU's, the split's or
     /// the pipeline's own (max_ctx, or less with `fit`, or `Placing`'s
     /// split_ctx); the CPU's is max_ctx (it plans nothing).
     pub fn ctx(&self, max_ctx: usize) -> usize {
-        match self {
-            Backend::Cpu(_) => max_ctx,
-            Backend::Cuda(n) => n.ctx,
-            Backend::Hybrid(n) => n.ctx,
-            Backend::Pipeline(n) => n.ctx(),
-            Backend::Moe(n) => n.ctx,
+        match &self.0 {
+            Inner::Cpu(_) => max_ctx,
+            Inner::Cuda(n) => n.ctx,
+            Inner::Hybrid(n) => n.ctx,
+            Inner::Pipeline(n) => n.ctx(),
+            Inner::Moe(n) => n.ctx,
         }
     }
 }
 
 macro_rules! dispatch {
     ($self:expr, $cache:expr, |$n:ident, $c:ident| $body:expr) => {
-        match ($self, $cache) {
-            (Backend::Cpu($n), BackendCache::Cpu($c)) => $body,
-            (Backend::Cuda($n), BackendCache::Cuda($c)) => {
+        match (&$self.0, &mut $cache.0) {
+            (Inner::Cpu($n), CacheInner::Cpu($c)) => $body,
+            (Inner::Cuda($n), CacheInner::Cuda($c)) => {
                 let ($n, $c) = (&**$n, &mut **$c);
                 $body
             }
-            (Backend::Hybrid($n), BackendCache::Hybrid($c)) => {
+            (Inner::Hybrid($n), CacheInner::Hybrid($c)) => {
                 let ($n, $c) = (&**$n, &mut **$c);
                 $body
             }
-            (Backend::Pipeline($n), BackendCache::Pipeline($c)) => {
+            (Inner::Pipeline($n), CacheInner::Pipeline($c)) => {
                 let ($n, $c) = (&**$n, &mut **$c);
                 $body
             }
-            (Backend::Moe($n), BackendCache::Moe($c)) => {
+            (Inner::Moe($n), CacheInner::Moe($c)) => {
                 let ($n, $c) = (&**$n, &mut **$c);
                 $body
             }
@@ -755,27 +826,28 @@ macro_rules! dispatch {
     };
 }
 
+impl Sealed for Backend<'_> {}
 impl Lm for Backend<'_> {
     type Cache = BackendCache;
 
     fn vocab(&self) -> usize {
-        match self {
-            Backend::Cpu(n) => n.vocab(),
-            Backend::Cuda(n) => n.vocab(),
-            Backend::Hybrid(n) => n.vocab(),
-            Backend::Pipeline(n) => n.vocab(),
-            Backend::Moe(n) => n.vocab(),
+        match &self.0 {
+            Inner::Cpu(n) => n.vocab(),
+            Inner::Cuda(n) => n.vocab(),
+            Inner::Hybrid(n) => n.vocab(),
+            Inner::Pipeline(n) => n.vocab(),
+            Inner::Moe(n) => n.vocab(),
         }
     }
 
     fn new_cache(&self, max_ctx: usize) -> BackendCache {
-        match self {
-            Backend::Cpu(n) => BackendCache::Cpu(Lm::new_cache(n, max_ctx)),
-            Backend::Cuda(n) => BackendCache::Cuda(Box::new(n.new_cache(max_ctx))),
-            Backend::Hybrid(n) => BackendCache::Hybrid(Box::new(n.new_cache(max_ctx))),
-            Backend::Pipeline(n) => BackendCache::Pipeline(Box::new(n.new_cache(max_ctx))),
-            Backend::Moe(n) => BackendCache::Moe(Box::new(n.new_cache(max_ctx))),
-        }
+        BackendCache(match &self.0 {
+            Inner::Cpu(n) => CacheInner::Cpu(Lm::new_cache(n, max_ctx)),
+            Inner::Cuda(n) => CacheInner::Cuda(Box::new(n.new_cache(max_ctx))),
+            Inner::Hybrid(n) => CacheInner::Hybrid(Box::new(n.new_cache(max_ctx))),
+            Inner::Pipeline(n) => CacheInner::Pipeline(Box::new(n.new_cache(max_ctx))),
+            Inner::Moe(n) => CacheInner::Moe(Box::new(n.new_cache(max_ctx))),
+        })
     }
 
     fn forward(&self, token: u32, pos: usize, cache: &mut BackendCache) -> Vec<f32> {
@@ -787,7 +859,7 @@ impl Lm for Backend<'_> {
     }
 
     fn decode_streams(&self) -> bool {
-        matches!(self, Backend::Hybrid(h) if h.decode_streams())
+        matches!(&self.0, Inner::Hybrid(h) if h.decode_streams())
     }
 
     fn feed_batch(&self, tokens: &[u32], start: usize, cache: &mut BackendCache) {
@@ -827,12 +899,12 @@ impl Lm for Backend<'_> {
     }
 
     fn prefill_batch(&self) -> usize {
-        match self {
-            Backend::Cpu(n) => n.prefill_batch(),
-            Backend::Cuda(n) => n.prefill_batch(),
-            Backend::Hybrid(n) => n.prefill_batch(),
-            Backend::Pipeline(n) => n.prefill_batch(),
-            Backend::Moe(n) => n.prefill_batch(),
+        match &self.0 {
+            Inner::Cpu(n) => n.prefill_batch(),
+            Inner::Cuda(n) => n.prefill_batch(),
+            Inner::Hybrid(n) => n.prefill_batch(),
+            Inner::Pipeline(n) => n.prefill_batch(),
+            Inner::Moe(n) => n.prefill_batch(),
         }
     }
 
@@ -842,12 +914,12 @@ impl Lm for Backend<'_> {
         start: usize,
         cache: &BackendCache,
     ) -> Vec<std::ops::Range<usize>> {
-        match (self, cache) {
-            (Backend::Cpu(net), BackendCache::Cpu(c)) => net.prompt_chunks(n, start, c),
-            (Backend::Cuda(net), BackendCache::Cuda(c)) => net.prompt_chunks(n, start, c),
-            (Backend::Hybrid(net), BackendCache::Hybrid(c)) => net.prompt_chunks(n, start, c),
-            (Backend::Pipeline(net), BackendCache::Pipeline(c)) => net.prompt_chunks(n, start, c),
-            (Backend::Moe(net), BackendCache::Moe(c)) => net.prompt_chunks(n, start, c),
+        match (&self.0, &cache.0) {
+            (Inner::Cpu(net), CacheInner::Cpu(c)) => net.prompt_chunks(n, start, c),
+            (Inner::Cuda(net), CacheInner::Cuda(c)) => net.prompt_chunks(n, start, c),
+            (Inner::Hybrid(net), CacheInner::Hybrid(c)) => net.prompt_chunks(n, start, c),
+            (Inner::Pipeline(net), CacheInner::Pipeline(c)) => net.prompt_chunks(n, start, c),
+            (Inner::Moe(net), CacheInner::Moe(c)) => net.prompt_chunks(n, start, c),
             _ => panic!("a cache of another backend"),
         }
     }
@@ -859,15 +931,15 @@ impl BatchLm for Backend<'_> {
     type Pool = Box<CudaPool<'static>>;
 
     fn new_pool(&self, slots: usize, ctx: usize) -> Result<Self::Pool, String> {
-        match self {
-            Backend::Cuda(n) => n.pool(slots, ctx).map(Box::new),
+        match &self.0 {
+            Inner::Cuda(n) => n.pool(slots, ctx).map(Box::new),
             _ => Err("batching many requests is GPU-only (--device cuda, every layer)".into()),
         }
     }
 
     fn new_pool_paged(&self, slots: usize, ctx: usize, pages: usize) -> Result<Self::Pool, String> {
-        match self {
-            Backend::Cuda(n) => n
+        match &self.0 {
+            Inner::Cuda(n) => n
                 .pool_with(
                     slots,
                     ctx,
@@ -886,24 +958,24 @@ impl BatchLm for Backend<'_> {
         tokens: &[u32],
         start: usize,
     ) -> Result<(), String> {
-        match self {
-            Backend::Cuda(n) => n.feed_slot(pool, slot, tokens, start),
+        match &self.0 {
+            Inner::Cuda(n) => n.feed_slot(pool, slot, tokens, start),
             _ => unreachable!("a pool is the GPU model's"),
         }
     }
 
     fn step(&self, pool: &mut Self::Pool, rows: &[SeqRow]) -> Result<Vec<RowOut>, StepError> {
-        match self {
-            Backend::Cuda(n) => n.step_rows(pool, rows),
+        match &self.0 {
+            Inner::Cuda(n) => n.step_rows(pool, rows),
             _ => unreachable!("a pool is the GPU model's"),
         }
     }
 
     fn slot_cache(&self, pool: &Self::Pool, slot: usize) -> Result<BackendCache, String> {
-        match self {
-            Backend::Cuda(n) => n
+        match &self.0 {
+            Inner::Cuda(n) => n
                 .slot_view_bare(pool, slot)
-                .map(|c| BackendCache::Cuda(Box::new(c))),
+                .map(|c| BackendCache(CacheInner::Cuda(Box::new(c)))),
             _ => unreachable!("a pool is the GPU model's"),
         }
     }
@@ -914,8 +986,8 @@ impl BatchLm for Backend<'_> {
         cache: &mut BackendCache,
         slot: usize,
     ) -> Result<(), String> {
-        match (self, cache) {
-            (Backend::Cuda(n), BackendCache::Cuda(c)) => n.retarget_view(pool, c, slot),
+        match (&self.0, &mut cache.0) {
+            (Inner::Cuda(n), CacheInner::Cuda(c)) => n.retarget_view(pool, c, slot),
             _ => Err("move_slot_cache: a cache of another backend".into()),
         }
     }
@@ -927,10 +999,8 @@ impl BatchLm for Backend<'_> {
         cache: &BackendCache,
         n: usize,
     ) -> Result<(), String> {
-        match (self, cache) {
-            (Backend::Cuda(m), BackendCache::Cuda(c)) => {
-                m.adopt_cache(pool, slot, c, n).map(|_| ())
-            }
+        match (&self.0, &cache.0) {
+            (Inner::Cuda(m), CacheInner::Cuda(c)) => m.adopt_cache(pool, slot, c, n).map(|_| ()),
             _ => Err("adopt: a cache of another backend".into()),
         }
     }
@@ -940,15 +1010,15 @@ impl BatchLm for Backend<'_> {
     }
 
     fn reserve(&self, pool: &mut Self::Pool, slot: usize, hi: usize) -> Result<usize, String> {
-        match self {
-            Backend::Cuda(n) => n.reserve(pool, slot, hi),
+        match &self.0 {
+            Inner::Cuda(n) => n.reserve(pool, slot, hi),
             _ => unreachable!("a pool is the GPU model's"),
         }
     }
 
     fn release(&self, pool: &mut Self::Pool, slot: usize, lo: usize) -> Result<(), String> {
-        match self {
-            Backend::Cuda(n) => n.release(pool, slot, lo),
+        match &self.0 {
+            Inner::Cuda(n) => n.release(pool, slot, lo),
             _ => unreachable!("a pool is the GPU model's"),
         }
     }
@@ -958,8 +1028,8 @@ impl BatchLm for Backend<'_> {
     }
 
     fn lend_scratch(&self, pool: &mut Self::Pool, cache: &mut BackendCache) -> Result<(), String> {
-        match (self, cache) {
-            (Backend::Cuda(n), BackendCache::Cuda(c)) => n.lend_scratch(pool, c),
+        match (&self.0, &mut cache.0) {
+            (Inner::Cuda(n), CacheInner::Cuda(c)) => n.lend_scratch(pool, c),
             _ => Err("lend_scratch: a cache of another backend".into()),
         }
     }
@@ -969,8 +1039,8 @@ impl BatchLm for Backend<'_> {
         pool: &mut Self::Pool,
         cache: &mut BackendCache,
     ) -> Result<(), String> {
-        match (self, cache) {
-            (Backend::Cuda(n), BackendCache::Cuda(c)) => n.return_scratch(pool, c),
+        match (&self.0, &mut cache.0) {
+            (Inner::Cuda(n), CacheInner::Cuda(c)) => n.return_scratch(pool, c),
             _ => Err("return_scratch: a cache of another backend".into()),
         }
     }

@@ -1095,6 +1095,7 @@ pub(crate) mod tests {
         }
     }
 
+    impl crate::lm::Sealed for Soft {}
     impl Lm for Soft {
         type Cache = Vec<u32>;
         fn vocab(&self) -> usize {

@@ -89,7 +89,7 @@ impl<'g> CudaQwen2<'g> {
     /// single-request cache, a view of a slot (`slot_view`: its scratch,
     /// no KV of its own), take with caches of type `kv` (the model's, or
     /// serve's `--kv q8` hint).
-    pub fn serve_bytes_kv(&self, kv: CacheKv, slots: usize, ctx: usize) -> usize {
+    pub(crate) fn serve_bytes_kv(&self, kv: CacheKv, slots: usize, ctx: usize) -> usize {
         self.cache_bytes_kv(kv, ctx) - self.kv_cache_bytes(kv, ctx)
             + self.pool_bytes_kv(kv, slots, ctx)
     }
@@ -102,7 +102,7 @@ impl<'g> CudaQwen2<'g> {
     /// its rows are the slot's for the batch to take over (`adopt_cache`
     /// copies nothing).
     #[cfg_attr(not(test), allow(dead_code))] // serve takes `slot_view_bare`
-    pub fn slot_view(&self, p: &CudaPool<'g>, slot: usize) -> Result<CudaCache<'g>, String> {
+    pub(crate) fn slot_view(&self, p: &CudaPool<'g>, slot: usize) -> Result<CudaCache<'g>, String> {
         self.slot_view_with(p, slot, true)
     }
 
@@ -111,7 +111,11 @@ impl<'g> CudaQwen2<'g> {
     /// (prefill, verify) run on the pool's, lent while it runs
     /// (`lend_scratch` .. `return_scratch`), as the pool and the view never
     /// run at once. A plain pool's view has its own (as before paging).
-    pub fn slot_view_bare(&self, p: &CudaPool<'g>, slot: usize) -> Result<CudaCache<'g>, String> {
+    pub(crate) fn slot_view_bare(
+        &self,
+        p: &CudaPool<'g>,
+        slot: usize,
+    ) -> Result<CudaCache<'g>, String> {
         let mut c = self.slot_view_with(p, slot, p.pm.is_none())?;
         if p.pm.is_some() {
             // Its sampling buffers at their largest now (they'd grow on a
@@ -135,7 +139,11 @@ impl<'g> CudaQwen2<'g> {
     /// a view with scratch of its own: nothing to do). The pool's own passes
     /// can't run until `return_scratch`. The buffers move, their addresses
     /// don't: the pool's captured steps hold them still.
-    pub fn lend_scratch(&self, p: &mut CudaPool<'g>, c: &mut CudaCache<'g>) -> Result<(), String> {
+    pub(crate) fn lend_scratch(
+        &self,
+        p: &mut CudaPool<'g>,
+        c: &mut CudaCache<'g>,
+    ) -> Result<(), String> {
         if c.b.is_some() {
             return Ok(());
         }
@@ -153,7 +161,7 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// `lend_scratch` undone (a no-op for a view with scratch of its own).
-    pub fn return_scratch(
+    pub(crate) fn return_scratch(
         &self,
         p: &mut CudaPool<'g>,
         c: &mut CudaCache<'g>,
@@ -211,7 +219,13 @@ impl<'g> CudaQwen2<'g> {
 
     /// `serve_bytes_kv` of a paged pool (`pool_paged_bytes`).
     /// (The view is bare: `slot_view_bare`, the pool's batch scratch lent.)
-    pub fn serve_paged_bytes(&self, kv: CacheKv, slots: usize, ctx: usize, pages: usize) -> usize {
+    pub(crate) fn serve_paged_bytes(
+        &self,
+        kv: CacheKv,
+        slots: usize,
+        ctx: usize,
+        pages: usize,
+    ) -> usize {
         let (need, rows) = self.view_samp(ctx);
         // The view's sampling buffers (S, host-pinned aside: out, part).
         let samp = need * 4
@@ -226,13 +240,19 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// Bytes of one page (PAGE positions of every layer) of a `kv` cache.
-    pub fn page_bytes(&self, kv: CacheKv) -> usize {
+    pub(crate) fn page_bytes(&self, kv: CacheKv) -> usize {
         self.kv_cache_bytes(kv, PAGE)
     }
 
     /// VRAM a paged pool of `pages` pages for `slots` slots of up to `ctx`
     /// positions takes (`pool_paged`; its scratch is sized by `ctx`).
-    pub fn pool_paged_bytes(&self, kv: CacheKv, slots: usize, ctx: usize, pages: usize) -> usize {
+    pub(crate) fn pool_paged_bytes(
+        &self,
+        kv: CacheKv,
+        slots: usize,
+        ctx: usize,
+        pages: usize,
+    ) -> usize {
         self.cache_bytes_kv(kv, ctx) - self.kv_cache_bytes(kv, ctx)
             + self.kv_cache_bytes(kv, (pages + 1) * PAGE)
             + slots * ctx.div_ceil(PAGE) * 4
@@ -244,7 +264,7 @@ impl<'g> CudaQwen2<'g> {
     /// KV type, or why there's no room for it: paged with a page for every
     /// position of every slot (AXON_PAGE_SHUFFLE: in a shuffled order), or
     /// plain with AXON_PAGED_KV=0.
-    pub fn pool(&self, slots: usize, ctx: usize) -> Result<CudaPool<'g>, String> {
+    pub(crate) fn pool(&self, slots: usize, ctx: usize) -> Result<CudaPool<'g>, String> {
         let pages = pages::paged_env().then(|| slots.saturating_mul(ctx.div_ceil(PAGE)));
         self.pool_with(slots, ctx, pages, pages::shuffle_env())
     }
@@ -252,7 +272,7 @@ impl<'g> CudaQwen2<'g> {
     /// A paged pool of `pages` pages for `slots` slots of up to `ctx`
     /// positions each (`pages` None: plain, every slot its ctx rows);
     /// `shuffle`: pages handed out in a seeded random order.
-    pub fn pool_with(
+    pub(crate) fn pool_with(
         &self,
         slots: usize,
         ctx: usize,
@@ -316,7 +336,7 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// `BatchLm::feed_slot`: the passes of `feed_batch`, into the slot.
-    pub fn feed_slot(
+    pub(crate) fn feed_slot(
         &self,
         p: &mut CudaPool<'g>,
         slot: usize,
@@ -360,7 +380,7 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// `BatchLm::step`.
-    pub fn step_rows(
+    pub(crate) fn step_rows(
         &self,
         p: &mut CudaPool<'g>,
         rows: &[SeqRow],
@@ -420,7 +440,12 @@ impl<'g> CudaQwen2<'g> {
     /// (its new table entries copied to the device, ordered before any
     /// later work), or the pages short (nothing taken). A plain pool holds
     /// every slot's ctx rows: Ok(0).
-    pub fn reserve(&self, p: &mut CudaPool<'g>, slot: usize, hi: usize) -> Result<usize, String> {
+    pub(crate) fn reserve(
+        &self,
+        p: &mut CudaPool<'g>,
+        slot: usize,
+        hi: usize,
+    ) -> Result<usize, String> {
         if slot >= p.slots || hi > p.ctx {
             return Err(format!(
                 "reserve: slot {slot} positions ..{hi} (pool {} x {})",
@@ -450,7 +475,12 @@ impl<'g> CudaQwen2<'g> {
     /// Slot `slot` keeps the pages of positions 0..lo (a paged pool; plain:
     /// nothing changes): the others are free once no work in flight can
     /// read them, and their table entries point at the sink.
-    pub fn release(&self, p: &mut CudaPool<'g>, slot: usize, lo: usize) -> Result<(), String> {
+    pub(crate) fn release(
+        &self,
+        p: &mut CudaPool<'g>,
+        slot: usize,
+        lo: usize,
+    ) -> Result<(), String> {
         if slot >= p.slots {
             return Err(format!("release: slot {slot} of {}", p.slots));
         }
@@ -658,7 +688,7 @@ impl<'g> CudaQwen2<'g> {
     /// Point `c`, a view of `p` (`slot_view`), at slot `slot`'s rows. Its
     /// captured steps hold the old slot's addresses: they go (the next
     /// steps are captured again; the same kernels, so the same bits).
-    pub fn retarget_view(
+    pub(crate) fn retarget_view(
         &self,
         p: &CudaPool<'g>,
         c: &mut CudaCache<'g>,
@@ -686,7 +716,7 @@ impl<'g> CudaQwen2<'g> {
     /// `BatchLm::adopt`: positions 0..n of `src` (a cache of this model,
     /// the pool's KV type) into slot `slot`, enqueued; the bytes copied (0:
     /// `src` is that slot's view).
-    pub fn adopt_cache(
+    pub(crate) fn adopt_cache(
         &self,
         p: &mut CudaPool<'g>,
         slot: usize,

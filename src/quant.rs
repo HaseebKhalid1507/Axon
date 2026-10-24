@@ -855,10 +855,29 @@ enum Simd {
 }
 
 /// The kernel set, picked on first use: the best the CPU supports, or
-/// `AXON_SIMD=scalar|avx2|vnni` (panics if the requested path is unavailable).
+/// `AXON_SIMD=scalar|avx2|vnni`. A bad or unavailable AXON_SIMD panics
+/// here, so the library's entry points check it first (`env_check`).
 fn simd() -> Simd {
     static SIMD: std::sync::OnceLock<Simd> = std::sync::OnceLock::new();
-    *SIMD.get_or_init(|| choose_simd(std::env::var("AXON_SIMD").ok().as_deref()))
+    *SIMD.get_or_init(|| simd_setting().unwrap_or_else(|e| panic!("{e}")))
+}
+
+/// AXON_SIMD's kernel set (`choose_simd`), read once; Err says why it
+/// can't be used.
+fn simd_setting() -> Result<Simd, String> {
+    static SET: std::sync::OnceLock<Result<Simd, String>> = std::sync::OnceLock::new();
+    SET.get_or_init(|| choose_simd(std::env::var("AXON_SIMD").ok().as_deref()))
+        .clone()
+}
+
+/// The CPU kernels' environment (AXON_SIMD, AXON_DECODE_ROWS,
+/// AXON_PREFETCH), read once at first use: Err names the variable and the
+/// bad value. `load` and `Backend::new` call it first, so a bad value is
+/// their error instead of a panic inside a later call.
+pub(crate) fn env_check() -> Result<(), String> {
+    simd_setting()?;
+    DecodeCfg::setting()?;
+    Ok(())
 }
 
 /// What the SIMD kernels need: every `x86` kernel and the `_v3` glue entry
@@ -915,28 +934,30 @@ fn has_vnni() -> bool {
     has_avx2() && is_x86_feature_detected!("avxvnni")
 }
 
-fn simd_unavailable(p: &str, avx2: bool, vnni: bool) -> ! {
-    panic!("AXON_SIMD={p}: this CPU/target doesn't support it (avx2={avx2}, vnni={vnni})")
+fn simd_unavailable(p: &str, avx2: bool, vnni: bool) -> Result<Simd, String> {
+    Err(format!(
+        "AXON_SIMD={p}: this CPU/target doesn't support it (avx2={avx2}, vnni={vnni})"
+    ))
 }
 
-fn choose_simd(req: Option<&str>) -> Simd {
+fn choose_simd(req: Option<&str>) -> Result<Simd, String> {
     #[cfg(target_arch = "x86_64")]
     let (avx2, vnni) = (has_avx2(), has_vnni());
     #[cfg(not(target_arch = "x86_64"))]
     let (avx2, vnni) = (false, false);
     match req {
-        Some("scalar") => Simd::Scalar,
+        Some("scalar") => Ok(Simd::Scalar),
         Some("avx2") => {
             #[cfg(target_arch = "x86_64")]
             if avx2 {
-                return Simd::Avx2;
+                return Ok(Simd::Avx2);
             }
             simd_unavailable("avx2", avx2, vnni)
         }
         Some("vnni") => {
             #[cfg(target_arch = "x86_64")]
             if vnni {
-                return Simd::Vnni;
+                return Ok(Simd::Vnni);
             }
             simd_unavailable("vnni", avx2, vnni)
         }
@@ -944,10 +965,10 @@ fn choose_simd(req: Option<&str>) -> Simd {
             #[cfg(target_arch = "x86_64")]
             {
                 if vnni {
-                    return Simd::Vnni;
+                    return Ok(Simd::Vnni);
                 }
                 if avx2 {
-                    return Simd::Avx2;
+                    return Ok(Simd::Avx2);
                 }
                 if is_x86_feature_detected!("avx2") {
                     eprintln!(
@@ -956,9 +977,9 @@ fn choose_simd(req: Option<&str>) -> Simd {
                     );
                 }
             }
-            Simd::Scalar
+            Ok(Simd::Scalar)
         }
-        Some(other) => panic!("AXON_SIMD={other}: expected scalar, avx2 or vnni"),
+        Some(other) => Err(format!("AXON_SIMD={other}: expected scalar, avx2 or vnni")),
     }
 }
 
@@ -2846,25 +2867,42 @@ pub struct DecodeCfg {
 }
 
 impl DecodeCfg {
+    /// `setting`'s; a bad value panics here, so the library's entry points
+    /// check it first (`env_check`).
     pub fn get() -> DecodeCfg {
         static CFG: std::sync::OnceLock<DecodeCfg> = std::sync::OnceLock::new();
-        *CFG.get_or_init(|| {
-            let var = |k: &str, d: usize| match std::env::var(k) {
-                Ok(s) if !s.trim().is_empty() => s
-                    .trim()
-                    .parse()
-                    .unwrap_or_else(|_| panic!("{k}={s}: expected a number")),
-                _ => d,
-            };
-            let max_rows = var("AXON_DECODE_ROWS", 4);
-            assert!(
-                matches!(max_rows, 1 | 2 | 4),
-                "AXON_DECODE_ROWS={max_rows}: expected 1, 2 or 4"
-            );
-            DecodeCfg {
-                prefetch: var("AXON_PREFETCH", DEFAULT_PREFETCH).min(1 << 20),
-                max_rows,
-            }
+        *CFG.get_or_init(|| DecodeCfg::setting().unwrap_or_else(|e| panic!("{e}")))
+    }
+
+    /// The settings from the environment, read once; Err names the bad one.
+    fn setting() -> Result<DecodeCfg, String> {
+        static SET: std::sync::OnceLock<Result<DecodeCfg, String>> = std::sync::OnceLock::new();
+        SET.get_or_init(|| {
+            DecodeCfg::parse(
+                std::env::var("AXON_DECODE_ROWS").ok().as_deref(),
+                std::env::var("AXON_PREFETCH").ok().as_deref(),
+            )
+        })
+        .clone()
+    }
+
+    /// AXON_DECODE_ROWS and AXON_PREFETCH's values (None or blank: the
+    /// default).
+    fn parse(rows: Option<&str>, prefetch: Option<&str>) -> Result<DecodeCfg, String> {
+        let var = |k: &str, v: Option<&str>, d: usize| match v {
+            Some(s) if !s.trim().is_empty() => s
+                .trim()
+                .parse::<usize>()
+                .map_err(|_| format!("{k}={s}: expected a number")),
+            _ => Ok(d),
+        };
+        let max_rows = var("AXON_DECODE_ROWS", rows, 4)?;
+        if !matches!(max_rows, 1 | 2 | 4) {
+            return Err(format!("AXON_DECODE_ROWS={max_rows}: expected 1, 2 or 4"));
+        }
+        Ok(DecodeCfg {
+            prefetch: var("AXON_PREFETCH", prefetch, DEFAULT_PREFETCH)?.min(1 << 20),
+            max_rows,
         })
     }
 }
@@ -5153,28 +5191,56 @@ mod tests {
 
     #[test]
     fn simd_choice() {
-        assert_eq!(choose_simd(Some("scalar")), Simd::Scalar);
-        let best = choose_simd(None);
-        assert_eq!(choose_simd(Some("")), best);
+        assert_eq!(choose_simd(Some("scalar")), Ok(Simd::Scalar));
+        let best = choose_simd(None).unwrap();
+        assert_eq!(choose_simd(Some("")), Ok(best));
         #[cfg(target_arch = "x86_64")]
         {
             if has_vnni() {
                 assert_eq!(best, Simd::Vnni);
-                assert_eq!(choose_simd(Some("vnni")), Simd::Vnni);
+                assert_eq!(choose_simd(Some("vnni")), Ok(Simd::Vnni));
             } else if has_avx2() {
                 assert_eq!(best, Simd::Avx2);
+                let e = choose_simd(Some("vnni")).unwrap_err();
+                assert!(e.contains("doesn't support it"), "{e}");
             }
             if has_avx2() {
-                assert_eq!(choose_simd(Some("avx2")), Simd::Avx2);
+                assert_eq!(choose_simd(Some("avx2")), Ok(Simd::Avx2));
             }
         }
         println!("default SIMD path: {best:?}");
     }
 
+    /// A bad AXON_SIMD is an error that names it, not a panic (#118 B).
     #[test]
-    #[should_panic(expected = "expected scalar, avx2 or vnni")]
     fn simd_choice_rejects_unknown() {
-        choose_simd(Some("sse9"));
+        let e = choose_simd(Some("sse9")).unwrap_err();
+        assert!(
+            e.contains("AXON_SIMD=sse9: expected scalar, avx2 or vnni"),
+            "{e}"
+        );
+    }
+
+    /// AXON_DECODE_ROWS / AXON_PREFETCH: the defaults, the values main
+    /// took, and bad values as errors that name the variable (#118 B).
+    #[test]
+    fn decode_cfg_parse() {
+        let ok = |r, p| DecodeCfg::parse(r, p).map(|c| (c.max_rows, c.prefetch));
+        assert_eq!(ok(None, None), Ok((4, DEFAULT_PREFETCH)));
+        assert_eq!(ok(Some(" "), Some("")), Ok((4, DEFAULT_PREFETCH)));
+        assert_eq!(ok(Some("2"), Some(" 0 ")), Ok((2, 0)));
+        assert_eq!(ok(Some("1"), Some("99999999")), Ok((1, 1 << 20)));
+        let err = |r, p| DecodeCfg::parse(r, p).unwrap_err();
+        assert_eq!(
+            err(Some("3"), None),
+            "AXON_DECODE_ROWS=3: expected 1, 2 or 4"
+        );
+        assert_eq!(
+            err(Some("x"), None),
+            "AXON_DECODE_ROWS=x: expected a number"
+        );
+        assert_eq!(err(None, Some("x")), "AXON_PREFETCH=x: expected a number");
+        assert_eq!(err(None, Some("-1")), "AXON_PREFETCH=-1: expected a number");
     }
 
     // ---- r8 (8-row interleaved K-quant) kernels ----

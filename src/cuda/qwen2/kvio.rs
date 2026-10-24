@@ -221,7 +221,7 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// `c`'s image of positions lo..hi to `out`.
-    pub fn save_kv(
+    pub(crate) fn save_kv(
         &self,
         c: &CudaCache<'g>,
         lo: usize,
@@ -235,7 +235,7 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// Positions lo..hi of `c` from their image in `src`.
-    pub fn load_kv(
+    pub(crate) fn load_kv(
         &self,
         c: &mut CudaCache<'g>,
         lo: usize,
