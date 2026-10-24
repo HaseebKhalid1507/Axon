@@ -10,38 +10,9 @@ use super::batch::act_stride;
 use super::gemm2_smem;
 use crate::cuda::{Arg, DevBuf, Gpu, Module};
 use crate::gguf::{Model, Tensor};
-use crate::quant::{self, Q4_K, Q5_0, Q6_K, Q8_0};
+use crate::quant::{self, Q4_K, Q5_0, Q8_0};
 
-/// The weight types the twins cover: the TW chains of decode.cu's
-/// `dot_rows_t` and prefill.cu's `g2_compute` are the r8 / r8q kernels' f32
-/// steps for these four only (`gemm2_t<..., TW>` static_asserts it; `gemv_tw`
-/// takes a runtime type, so the host refuses the rest: `twin_type`).
-pub(crate) const TWIN_TYPES: [u32; 4] = [Q4_K, Q5_0, Q8_0, Q6_K];
-
-/// Ok if weight type qt has a GPU twin.
-pub(crate) fn twin_type(qt: u32) -> Result<(), String> {
-    match TWIN_TYPES.contains(&qt) {
-        true => Ok(()),
-        false => Err(format!(
-            "weight type {qt} has no GPU twin (Q4_K, Q5_0, Q8_0, Q6_K only)"
-        )),
-    }
-}
-
-/// Ok if a device of compute capability cc runs the twin GEMMs
-/// (`gemm2s_*_tw`, `moe_gemm_tw_*`): tensor cores, sm_80+. Below, the gemm2
-/// family's body is `__trap()`, which would poison the CUDA context, so the
-/// host refuses them there; the decode GEMV (`gemv_tw`, `moe_gemv_tw`) runs
-/// on every arch.
-pub(crate) fn twin_gemm_ok(cc: (u32, u32)) -> Result<(), String> {
-    match cc.0 >= 8 {
-        true => Ok(()),
-        false => Err(format!(
-            "twin GEMMs need sm_80+ (tensor cores); this GPU is sm_{}{}",
-            cc.0, cc.1
-        )),
-    }
-}
+pub(crate) use super::{twin_gemm_ok, twin_type};
 
 /// moe_res.cu's MOE_BN (tokens per grouped-GEMM tile).
 const MOE_BN: usize = 64;
@@ -125,6 +96,16 @@ impl<'g> CudaExperts<'g> {
                 .find(|t| t.name == name)
                 .ok_or_else(|| format!("{name}: missing"))
         };
+        // Expert biases (gpt-oss): the CPU adds them (`Moe::act`,
+        // `down_bias`); the expert kernels have no bias epilogue yet.
+        for p in ["gate", "up", "down"] {
+            let name = format!("blk.{l}.ffn_{p}_exps.bias");
+            if m.tensors.iter().any(|t| t.name == name) {
+                return Err(format!(
+                    "{name}: expert biases aren't supported on the GPU yet"
+                ));
+            }
+        }
         let tg = t("gate")?;
         let n_e = tg.dims.get(2).copied().unwrap_or(0) as usize;
         let gate = Mats::upload(g, m, tg, n_e)?;

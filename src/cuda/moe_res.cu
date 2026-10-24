@@ -142,6 +142,9 @@ extern "C" __global__ void __launch_bounds__(GEMV_THREADS, GEMV_MIN_BLOCKS)
 moe_gemv_tw(int qt, const u8* __restrict__ w, u64 estride, u64 row_bytes, int rows, int n,
             const int* __restrict__ ids, const u8* __restrict__ act, u64 aslot,
             float* __restrict__ out, u64 ostride) {
+    // Before reading ids and act (the router's and the quantizer's outputs):
+    // under programmatic dependent launch it waits for them, as gemv_tw.
+    PDL_START();
     int r = blockIdx.x, i = blockIdx.y;
     const u8* we = w + (u64)ids[i] * estride;
     prefetch_l2(we + (u64)r * row_bytes, row_bytes);
