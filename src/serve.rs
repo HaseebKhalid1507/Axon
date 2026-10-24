@@ -133,10 +133,15 @@ pub struct Opts {
     /// chunk's own pass feeds at least; 0: prompts fed whole): a long
     /// prompt prefills in chunks beside the running requests' rows.
     pub prefill_chunk: usize,
-    /// A two-pass step's time budget for its chunk and decode, in ms
-    /// (`--prefill-ms`, AXON_HYBRID=0 only; 0: chunks of exactly
-    /// `prefill_chunk`).
-    pub prefill_ms: usize,
+    /// A step's target wall time while requests decode, in ms
+    /// (`--step-ms`, alias `--prefill-ms`; 0: `prefill_chunk` tokens): the
+    /// chunk tokens are what fits beside the rows at the measured cost
+    /// (`engine::StepCost`).
+    pub step_ms: usize,
+    /// Admission order, age bound, lanes, pinned step tokens, legacy
+    /// budgets (`--admit-order`, `--admit-age-ms`, `--prefill-lanes`,
+    /// `--step-tokens`, AXON_STEP_COST).
+    pub sched: engine::Sched,
     /// Hybrid steps (AXON_HYBRID, default on; `engine::plan_fused`).
     pub hybrid: bool,
     /// `--rope-scaling yarn` and friends (rope.rs).
@@ -1252,10 +1257,13 @@ fn engine(
     let mut batch = pool.map(|(pool, n, slot_ctx)| {
         let policy = engine::ChunkPolicy {
             floor: o.prefill_chunk,
-            ms: o.prefill_ms,
+            step_ms: o.step_ms,
+            step_tokens: o.sched.step_tokens,
             hybrid: o.hybrid,
+            legacy: o.sched.legacy,
         };
         let mut b = Batch::new(&net, pool, n, slot_ctx, policy, o.log, e.generated.clone());
+        b.sched = o.sched;
         if let Some(g) = o.kv_grow {
             b.set_grow_tokens(g);
         }
@@ -1320,35 +1328,87 @@ fn engine(
             }
             continue;
         };
-        // Take requests off the channel only as far as slots can start
-        // them (and a few that can't, which wait to run alone): the bounded
-        // channel stays the queue (full: a 503).
         waiting.retain(|j| !j.cancel.load(Ordering::Relaxed));
-        loop {
-            let fit = waiting.iter().filter(|j| fits_slot(j, b.ctx)).count();
-            if fit > b.free() || waiting.len() > b.slots {
-                break;
+        let sched = b.sched;
+        let admitted = match sched.order {
+            engine::AdmitOrder::Fifo => {
+                // Take requests off the channel only as far as slots can
+                // start them (and a few that can't, which wait to run
+                // alone): the bounded channel stays the queue (full: a 503).
+                loop {
+                    let fit = waiting.iter().filter(|j| fits_slot(j, b.ctx)).count();
+                    if fit > b.free() || waiting.len() > b.slots {
+                        break;
+                    }
+                    match jobs.try_recv() {
+                        Ok(job) => waiting.push_back(job),
+                        Err(_) => break,
+                    }
+                }
+                // Admit the first request that fits a slot (its prompt then
+                // fed a chunk per step) if others run or wait; one alone runs
+                // the S1 way, as does one that fits no slot, once the batch
+                // is idle.
+                let first_fit = waiting.iter().position(|j| fits_slot(j, b.ctx));
+                if let Some(i) = first_fit
+                    && b.can_admit(&waiting[i])
+                    && (!b.idle() || waiting.len() > 1)
+                {
+                    let job = waiting.remove(i).unwrap();
+                    let out = text_out(e.tok, &job, &e.metrics);
+                    let tx = job.tx.clone();
+                    if let Err(err) = or_exit("an admission", || b.admit(job, out)) {
+                        fatal(b, &err, Some(tx));
+                    }
+                    1
+                } else {
+                    0
+                }
             }
-            match jobs.try_recv() {
-                Ok(job) => waiting.push_back(job),
-                Err(_) => break,
+            engine::AdmitOrder::Sjf => {
+                // Shortest first needs to see the queue: take requests off
+                // the channel up to max(slots, 16) held here (the channel,
+                // `--max-queue`, still bounds the rest: a 503 past
+                // max_queue + that many).
+                while waiting.len() < b.slots.max(16) {
+                    match jobs.try_recv() {
+                        Ok(job) => waiting.push_back(job),
+                        Err(_) => break,
+                    }
+                }
+                let mut n = 0;
+                for id in admit_order(b, &waiting, sched.age_ms) {
+                    let i = waiting.iter().position(|j| j.id == id).expect("waiting");
+                    // One alone (nothing runs, nothing else waits) runs the
+                    // S1 way.
+                    if b.idle() && waiting.len() < 2 {
+                        break;
+                    }
+                    match b.admit_check(&waiting[i]) {
+                        engine::Admit::Yes => {}
+                        // Its class (long: lanes; short: two steps' worth)
+                        // is full: the other class may still start.
+                        engine::Admit::Lane => continue,
+                        // No slot, or pages: younger or longer requests
+                        // don't overtake it.
+                        engine::Admit::Slot | engine::Admit::Pages => break,
+                    }
+                    let job = waiting.remove(i).unwrap();
+                    let out = text_out(e.tok, &job, &e.metrics);
+                    let tx = job.tx.clone();
+                    if let Err(err) = or_exit("an admission", || b.admit(job, out)) {
+                        fatal(b, &err, Some(tx));
+                    }
+                    n += 1;
+                }
+                n
             }
+        };
+        if let Some(m) = &b.metrics {
+            let w = waiting.iter().map(|j| (j.id, j.prompt.len(), j.arrived));
+            m.publish_waiting(w.collect());
         }
-        // Admit the first request that fits a slot (its prompt then fed a
-        // chunk per step) if others run or wait; one alone runs the S1 way,
-        // as does one that fits no slot, once the batch is idle.
-        let first_fit = waiting.iter().position(|j| fits_slot(j, b.ctx));
-        if let Some(i) = first_fit
-            && b.can_admit(&waiting[i])
-            && (!b.idle() || waiting.len() > 1)
-        {
-            let job = waiting.remove(i).unwrap();
-            let out = text_out(e.tok, &job, &e.metrics);
-            let tx = job.tx.clone();
-            if let Err(err) = or_exit("an admission", || b.admit(job, out)) {
-                fatal(b, &err, Some(tx));
-            }
-        } else if b.idle() {
+        if admitted == 0 && b.idle() {
             if let Some(job) = waiting.pop_front() {
                 let ho = Handover {
                     jobs: &jobs,
@@ -1388,6 +1448,33 @@ fn engine(
             fatal(b, &err, None);
         }
     }
+}
+
+/// The ids of the waiting requests that fit a slot, in admission order
+/// (`engine::admit_key`: aged ones first, then the shortest uncached
+/// prompt, then arrival). The uncached length (a walk over every free
+/// slot's prefix, `Batch::uncached`) is taken for the 2 x lanes shortest
+/// prompts only; the rest are keyed on their length (128 waiting x 128
+/// slots of walks per iteration otherwise).
+fn admit_order(b: &Batch, waiting: &VecDeque<Job>, age_ms: u64) -> Vec<u64> {
+    let now = Instant::now();
+    let mut fits: Vec<&Job> = waiting.iter().filter(|j| fits_slot(j, b.ctx)).collect();
+    fits.sort_by_key(|j| (j.prompt.len(), j.id));
+    let probe = 2 * b.lanes();
+    let mut keys: Vec<_> = (fits.iter().enumerate())
+        .map(|(r, j)| {
+            let age = now.saturating_duration_since(j.arrived).as_millis() as u64;
+            let len = j.prompt.len().saturating_sub(1);
+            let aged = age_ms > 0 && age >= age_ms;
+            let un = match r < probe && !aged {
+                true => b.uncached(&j.prompt).unwrap_or(len),
+                false => len,
+            };
+            (engine::admit_key(un, age, age_ms, j.id), j.id)
+        })
+        .collect();
+    keys.sort_unstable();
+    keys.into_iter().map(|(_, id)| id).collect()
 }
 
 /// A device error in the batch: every request in it (and `tx`'s) gets it,
@@ -1698,7 +1785,8 @@ struct EngineOpts {
     kv_pages: Option<usize>,
     kv_grow: Option<usize>,
     prefill_chunk: usize,
-    prefill_ms: usize,
+    step_ms: usize,
+    sched: engine::Sched,
     hybrid: bool,
     path: String,
     device: Device,
@@ -1806,7 +1894,8 @@ pub fn start(o: Opts) -> io::Result<Server> {
         kv_pages: o.kv_pages,
         kv_grow: o.kv_grow,
         prefill_chunk: o.prefill_chunk,
-        prefill_ms: o.prefill_ms,
+        step_ms: o.step_ms,
+        sched: o.sched,
         hybrid: o.hybrid,
         generated: generated.clone(),
         path: o.path.clone(),
@@ -2875,7 +2964,8 @@ pub fn run(args: &[String]) -> io::Result<()> {
         kv_pages: None,
         kv_grow: None,
         prefill_chunk: engine::PREFILL_CHUNK,
-        prefill_ms: engine::PREFILL_MS,
+        step_ms: engine::STEP_MS,
+        sched: engine::Sched::default(),
         hybrid: engine::hybrid_env(),
         rope: Default::default(),
         api_key: None,
@@ -2940,6 +3030,11 @@ pub fn run(args: &[String]) -> io::Result<()> {
             | "--parallel"
             | "--prefill-chunk"
             | "--prefill-ms"
+            | "--step-ms"
+            | "--step-tokens"
+            | "--admit-order"
+            | "--admit-age-ms"
+            | "--prefill-lanes"
             | "--api-key"
             | "--max-prompt-tokens"
             | "--slot-idle-ms" => {}
@@ -2972,7 +3067,18 @@ pub fn run(args: &[String]) -> io::Result<()> {
             "--max-conns" => o.max_conns = whole(true),
             "--max-queue" => o.max_queue = whole(true),
             "--prefill-chunk" => o.prefill_chunk = whole(false),
-            "--prefill-ms" => o.prefill_ms = whole(false),
+            // --prefill-ms: the old name of --step-ms (one release).
+            "--step-ms" | "--prefill-ms" => o.step_ms = whole(false),
+            "--step-tokens" => o.sched.step_tokens = whole(false),
+            "--admit-age-ms" => o.sched.age_ms = whole(false) as u64,
+            "--prefill-lanes" => o.sched.lanes = whole(false),
+            "--admit-order" => {
+                o.sched.order = match v.as_str() {
+                    "sjf" => engine::AdmitOrder::Sjf,
+                    "fifo" => engine::AdmitOrder::Fifo,
+                    _ => crate::fail(&format!("--admit-order needs sjf or fifo, got '{v}'")),
+                }
+            }
             "--api-key" if v.trim().is_empty() || v.trim() != v => {
                 crate::fail("--api-key needs a key (no spaces around it)")
             }

@@ -382,11 +382,19 @@ default `*`, to call the server from web pages; off by default, so an arbitrary 
 use your local model), `--max-conns N` / `--max-queue N` (defaults 256 / 128),
 `--parallel N` (requests decoded at once on the GPU, default 16 with paged KV, 8 without; 1: one at a time),
 `--prefill-chunk N` (while others decode, a batched step is one pass of their rows and
-new prompts' tokens, N in all, rounded up to whole 64-token tiles (under 64: N prompt
+new prompts' tokens, at least N in all, rounded up to whole 64-token tiles (under 64: N prompt
 tokens beside the rows); default 256;
-`--prefill-chunk 0`: whole prompts), `--prefill-ms MS` (with `AXON_HYBRID=0`, the two-pass
-steps of before: a chunk's own pass up to what fits in MS ms beside the decode step, at
-least N tokens; default 60; 0: exactly N tokens), `--quiet`
+`--prefill-chunk 0`: whole prompts), `--step-ms MS` (a step's target time while requests
+decode, default 50: its prompt tokens are what fits beside the rows at the cost the server
+measures as steps run, per pass, per prompt token and per decode row count; 0: exactly N
+tokens; `--prefill-ms` is its old name), `--step-tokens N` (pin a step's prompt tokens),
+`--admit-order sjf|fifo` (waiting requests start shortest prompt first, several per step,
+default; `fifo`: first come first served, one per step, as before; `AXON_ADMIT=fifo`),
+`--admit-age-ms MS` (a request waiting this long starts before shorter ones, default 3000;
+0: never), `--prefill-lanes N` (prompts longer than a step's chunk prefilling at once,
+default parallel/16 within 2..8; short ones never wait for a lane). The scheduling of
+before: `--admit-order fifo --step-ms 60 --prefill-lanes 2` with `AXON_STEP_COST=legacy`.
+`--quiet`
 (no per-request line on stderr). `GET /health` is 503 until the model is loaded.
 
 - Context (`--ctx N`, per request): by default the model's trained context (32768 for
@@ -405,8 +413,8 @@ least N tokens; default 60; 0: exactly N tokens), `--quiet`
   requests decode together, one token each per step over the model's weights (continuous
   batching: a request joins as soon as a slot is free, and leaves when done). While others
   decode, a new prompt is prefilled in chunks that ride in their steps' passes (a hybrid
-  step: the decode rows and a chunk in one pass over the weights, `--prefill-chunk` tokens
-  in all; `AXON_HYBRID=0`: a chunk's own pass, up to `--prefill-ms` / `--prefill-chunk`
+  step: the decode rows and a chunk in one pass over the weights, sized to `--step-ms`;
+  `AXON_HYBRID=0`: a chunk's own pass, up to `--step-ms` / `--prefill-chunk`
   worth, then the decode step), shortest remaining prompt first (one passed over 4
   steps in a row goes first), so a long prompt doesn't stop the others' streams while it
   prefills (on a 4090, 7B, a 24k-token prompt: their worst token gap ~70 ms instead of

@@ -82,9 +82,11 @@ const STARVE: usize = 4;
 /// Prompt tokens a step feeds at least while requests decode (default,
 /// `--prefill-chunk`; 0: no chunks, every prompt fed whole).
 pub const PREFILL_CHUNK: usize = 256;
-/// A step's time budget for its prefill chunk and decode together, in ms
-/// (default, `--prefill-ms`; 0: chunks of exactly `--prefill-chunk`).
-pub const PREFILL_MS: usize = 60;
+/// A step's target wall time while requests decode, in ms (default,
+/// `--step-ms`, alias `--prefill-ms`; 0: no time budget, exactly
+/// `--prefill-chunk` tokens): the time between a running request's tokens
+/// the server aims at (the showdown's ITL SLO is 50 ms).
+pub const STEP_MS: usize = 50;
 /// The first chunk with a time budget, before a chunk's cost is known.
 const SEED_CHUNK: usize = 512;
 /// The prefill cost model: a token at depth d costs cost * (d + DEPTH_K)
@@ -103,6 +105,11 @@ const TILE: usize = 64;
 /// Feeds of at least this many tokens teach the cost (smaller ones are
 /// mostly a pass's fixed part).
 const LEARN_MIN: usize = 128;
+/// Feeds of fewer tokens than this teach a pass's fixed part (`StepCost`).
+const PASS_FIXED_MAX: usize = 64;
+/// Decode-only step times are kept per row count bucket: 1, 2, 3-4, ...,
+/// 129-256 rows (`StepCost::dec`).
+const DEC_BUCKETS: usize = 9;
 
 /// What a step may feed: tokens, or µs at the measured cost.
 #[derive(Clone, Copy)]
@@ -114,12 +121,302 @@ enum Budget {
 /// How much prompt a step feeds while requests decode.
 #[derive(Clone, Copy)]
 pub struct ChunkPolicy {
-    /// Tokens at least (0: no chunking).
+    /// Tokens at least (0: no chunking); a hybrid pass's tokens at least,
+    /// its rows included.
     pub floor: usize,
-    /// The step's budget in ms (0: chunks of `floor`; two-pass steps only).
-    pub ms: usize,
+    /// The step's target wall time in ms (`STEP_MS`; 0: `floor` tokens).
+    pub step_ms: usize,
+    /// A step's prompt tokens, pinned (0: from the cost model and
+    /// `step_ms`): `--step-tokens`.
+    pub step_tokens: usize,
     /// Hybrid steps (`plan_fused`): the chunks in the decode step's pass.
     pub hybrid: bool,
+    /// AXON_STEP_COST=legacy: the budgets before `StepCost` (two-pass:
+    /// `step_ms` less the last decode step at a cost per token with the
+    /// pass's fixed part in it; hybrid: `floor` tokens in all, whatever
+    /// `step_ms`). With `--admit-order fifo --prefill-lanes 2` the
+    /// scheduling of #119 exactly (the rollback).
+    pub legacy: bool,
+}
+
+/// The admission order of waiting requests (`--admit-order`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AdmitOrder {
+    /// Shortest uncached prompt first, aged requests (`admit_age_ms`)
+    /// before all of them, several admissions per engine iteration.
+    Sjf,
+    /// The first waiting request that fits a slot, one per iteration, at
+    /// most `lanes` prompts prefilling (the order before; the rollback).
+    Fifo,
+}
+
+/// The scheduler's knobs (`axon serve` flags; defaults from the
+/// environment for A/B jobs that can't change a command line).
+#[derive(Clone, Copy, Debug)]
+pub struct Sched {
+    pub order: AdmitOrder,
+    /// A waiting request this old goes before shorter ones (0: never).
+    pub age_ms: u64,
+    /// Prompts longer than a step's chunk prefilling at once at most (0:
+    /// `slots / 16` within 2..=8; `Batch::lanes`).
+    pub lanes: usize,
+    /// `ChunkPolicy::step_tokens`.
+    pub step_tokens: usize,
+    /// `ChunkPolicy::legacy`.
+    pub legacy: bool,
+}
+
+/// `Sched::age_ms` by default: the showdown's TTFT SLO for a 7.6k prompt
+/// is 2000 + 250 x 7.6 ms; 3 s of age plus about a second of chunked
+/// prefill lands at its edge.
+pub const ADMIT_AGE_MS: u64 = 3000;
+
+impl Default for Sched {
+    /// SJF unless AXON_ADMIT=fifo; the cost model unless
+    /// AXON_STEP_COST=legacy.
+    fn default() -> Sched {
+        let env = |k: &str, v: &str| std::env::var(k).is_ok_and(|x| x == v);
+        Sched {
+            order: match env("AXON_ADMIT", "fifo") {
+                true => AdmitOrder::Fifo,
+                false => AdmitOrder::Sjf,
+            },
+            age_ms: ADMIT_AGE_MS,
+            lanes: 0,
+            step_tokens: 0,
+            legacy: env("AXON_STEP_COST", "legacy"),
+        }
+    }
+}
+
+/// What a step costs, learned from the steps that ran (`--step-ms` turns
+/// it into tokens). A prompt token at depth d costs tok * (d + DEPTH_K)
+/// µs on top of a pass's fixed part (launches and one read of the
+/// weights), so eight short prompts in their own passes cost eight fixed
+/// parts; a decode step's time is known per row count, for the step about
+/// to run; a hybrid pass costs its fixed part and fused_tok per token
+/// unit, rows and prompt tokens each at their own depth. Exponential
+/// moving averages; None until measured.
+#[derive(Clone, Debug, Default)]
+pub(super) struct StepCost {
+    /// µs per prompt token per (depth + DEPTH_K), the fixed part out:
+    /// two-pass feeds of at least LEARN_MIN tokens.
+    tok: Option<f64>,
+    /// A pass's fixed µs: feeds of fewer than PASS_FIXED_MAX tokens (0
+    /// until one ran: a short feed teaches it at once).
+    pass_us: Option<f64>,
+    /// Decode-only step ms per row count bucket (`bucket`).
+    dec_ms: [Option<f64>; DEC_BUCKETS],
+    /// The last decode-only step's ms.
+    last_dec_ms: f64,
+    /// µs per token unit of a hybrid pass (fixed part out).
+    fused_tok: Option<f64>,
+    /// The cost before StepCost (fixed part in, AXON_STEP_COST=legacy and
+    /// idle steps): t / (n (d + n/2 + DEPTH_K)) over feeds of at least
+    /// LEARN_MIN tokens.
+    legacy_tok: Option<f64>,
+}
+
+/// The row count bucket of `rows` (`StepCost::dec_ms`): ceil(log2 rows).
+fn bucket(rows: usize) -> usize {
+    match rows {
+        0 | 1 => 0,
+        r => ((usize::BITS - (r - 1).leading_zeros()) as usize).min(DEC_BUCKETS - 1),
+    }
+}
+
+/// Token units of `n` prompt tokens fed from depth `d`.
+fn units(d: usize, n: usize) -> f64 {
+    n as f64 * (d as f64 + n as f64 / 2.0 + DEPTH_K)
+}
+
+impl StepCost {
+    /// A pass's fixed µs (0 until measured).
+    fn pass(&self) -> f64 {
+        self.pass_us.unwrap_or(0.0)
+    }
+
+    /// A feed of `n` tokens from depth `d` took `us`.
+    fn learn_feed(&mut self, d: usize, n: usize, us: f64) {
+        let u = units(d, n);
+        let ema = |a: Option<f64>, x: f64| Some(a.map_or(x, |a| 0.5 * a + 0.5 * x));
+        if n >= LEARN_MIN {
+            self.legacy_tok = ema(self.legacy_tok, us / u);
+            self.tok = ema(self.tok, (us - self.pass()).max(0.25 * us) / u);
+        } else if n < PASS_FIXED_MAX {
+            let fixed = (us - self.tok.unwrap_or(0.0) * u).max(0.0);
+            self.pass_us = ema(self.pass_us, fixed);
+        }
+    }
+
+    /// A decode-only step of `rows` rows took `ms`.
+    fn learn_decode(&mut self, rows: usize, ms: f64) {
+        let b = &mut self.dec_ms[bucket(rows)];
+        *b = Some(b.map_or(ms, |a| 0.75 * a + 0.25 * ms));
+        self.last_dec_ms = ms;
+    }
+
+    /// A hybrid pass of `units` token units, `prompt` of them prompt
+    /// tokens, took `us`.
+    fn learn_fused(&mut self, units: f64, prompt: usize, us: f64) {
+        if prompt >= LEARN_MIN && units > 0.0 {
+            let x = (us - self.pass()).max(0.25 * us) / units;
+            self.fused_tok = Some(self.fused_tok.map_or(x, |a| 0.5 * a + 0.5 * x));
+        }
+    }
+
+    /// A decode step's ms at `rows` rows: its bucket's, else the nearest
+    /// seen bucket's scaled by the square root of the row ratio, else the
+    /// last decode step's.
+    fn dec(&self, rows: usize) -> f64 {
+        let b = bucket(rows);
+        if let Some(ms) = self.dec_ms[b] {
+            return ms;
+        }
+        let near = (0..DEC_BUCKETS)
+            .filter_map(|k| self.dec_ms[k].map(|ms| (k, ms)))
+            .min_by_key(|&(k, _)| (k.abs_diff(b), k));
+        match near {
+            Some((k, ms)) => ms * (rows.max(1) as f64 / (1usize << k) as f64).sqrt(),
+            None => self.last_dec_ms,
+        }
+    }
+}
+
+/// A two-pass step's budget (`Batch::budget`) for policy `p` with `rows`
+/// requests decoding: everything without chunking; with nothing decoding
+/// (nobody to stall) IDLE_MS worth (IDLE_CHUNK before a cost is known),
+/// so requests arriving meanwhile still start soon; else `step_tokens`
+/// if pinned, `floor` tokens without a time budget, or what fits in
+/// `step_ms` beside the modelled decode step (SEED_CHUNK before a cost
+/// is known), a pass's fixed part charged per prompt fed (the µs is
+/// returned with it). Legacy: the last decode step and the old cost.
+fn two_pass_budget(p: &ChunkPolicy, cost: &StepCost, rows: usize) -> (Budget, f64) {
+    let (floor, ms) = (p.floor, p.step_ms);
+    if floor == 0 {
+        return (Budget::Tokens(usize::MAX), 0.0);
+    }
+    let idle = rows == 0;
+    let old = cost.legacy_tok.filter(|&c| c > 0.0);
+    if idle || p.legacy {
+        let b = match (old, idle, ms) {
+            (_, true, 0) | (None, true, _) => Budget::Tokens(IDLE_CHUNK.max(floor)),
+            (Some(c), true, _) => Budget::Micros(IDLE_MS * 1e3, c),
+            (_, false, 0) => Budget::Tokens(floor),
+            (None, false, _) => Budget::Tokens(SEED_CHUNK.max(floor)),
+            (Some(c), false, _) => Budget::Micros((ms as f64 - cost.last_dec_ms).max(0.0) * 1e3, c),
+        };
+        return (b, 0.0);
+    }
+    if p.step_tokens > 0 {
+        return (Budget::Tokens(p.step_tokens), 0.0);
+    }
+    match (cost.tok.filter(|&c| c > 0.0), ms) {
+        (_, 0) => (Budget::Tokens(floor), 0.0),
+        (None, _) => (Budget::Tokens(SEED_CHUNK.max(floor)), 0.0),
+        (Some(c), _) => {
+            let left = (ms as f64 - cost.dec(rows)).max(0.0) * 1e3;
+            (Budget::Micros(left, c), cost.pass())
+        }
+    }
+}
+
+/// A hybrid pass's prompt tokens (`plan_fused`) for policy `p`, `rows`
+/// decode rows of `row_units` token units in all, pool passes of at most
+/// `pass` tokens, and the prompts being prefilled (`fed`, `rem`,
+/// `starved` as `plan`'s). Without a time budget (or legacy): the pass
+/// is `floor` tokens in all, rows included; else `step_tokens` beside the
+/// rows if pinned, else the prompt tokens the time left after the pass's
+/// fixed part and the rows buys at each prompt's depth (`plan`; SEED_CHUNK
+/// before a cost is known). Then at least `floor` (and a token past the
+/// rows) in all, rounded up to whole TILEs (a pass that crosses a tile
+/// pays the tile, step-0 harness `pool_hybrid_cost`), capped by the pass
+/// (the prompts finishing in it add their rows). A floor under a tile
+/// (tests' tiny chunks) is exactly the chunk's tokens, the rows beside.
+#[allow(clippy::too_many_arguments)]
+fn fused_share(
+    p: &ChunkPolicy,
+    cost: &StepCost,
+    rows: usize,
+    row_units: f64,
+    pass: usize,
+    fed: &[usize],
+    rem: &[usize],
+    starved: &[usize],
+) -> usize {
+    let floor = p.floor;
+    let cap = pass.saturating_sub(rows + rem.len()).max(1);
+    if floor < TILE {
+        return floor.min(cap);
+    }
+    let total = match (p.legacy || p.step_ms == 0, p.step_tokens, cost.fused_tok) {
+        (true, _, _) => floor,
+        (false, n, _) if n > 0 => n + rows,
+        (false, _, None) => SEED_CHUNK + rows,
+        (false, _, Some(f)) => {
+            let left = p.step_ms as f64 * 1e3 - cost.pass() - f * row_units;
+            let b = Budget::Micros(left.max(0.0), f);
+            plan(b, 0, pass, fed, rem, starved, false)
+                .iter()
+                .sum::<usize>()
+                + rows
+        }
+    };
+    let total = total.max(floor.max(rows + 1)).next_multiple_of(TILE);
+    (total - rows).min(cap)
+}
+
+/// Why a waiting request can't start now (`Batch::admit_check`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Admit {
+    Yes,
+    /// No free slot.
+    Slot,
+    /// Its class is full (`admit_gate`): another request may still start.
+    Lane,
+    /// Not enough KV pages.
+    Pages,
+}
+
+/// A paged pool's admission by prompt class, before the pages test:
+/// `want` the job's prompt tokens to feed, `pre_rem` the prompts being
+/// prefilled's remainders, `short` a step's chunk tokens. Fifo: at most
+/// `lanes` prompts prefilling (the rule before, `lanes` 2). Sjf: a prompt
+/// longer than `short` takes one of `lanes` lanes; a short one (fed whole
+/// in one step) never waits for a lane, only until the short prompts
+/// prefilling already fill about two steps (more only lengthens the
+/// youngest's wait: `plan` feeds shortest remainder first).
+fn admit_gate(
+    order: AdmitOrder,
+    lanes: usize,
+    short: usize,
+    pre_rem: &[usize],
+    want: usize,
+) -> bool {
+    match order {
+        AdmitOrder::Fifo => pre_rem.len() < lanes,
+        AdmitOrder::Sjf => {
+            let longs = pre_rem.iter().filter(|&&r| r > short).count();
+            let shorts: usize = pre_rem.iter().filter(|&&r| r <= short).sum();
+            match want <= short {
+                true => shorts + want <= 2 * short,
+                false => longs < lanes,
+            }
+        }
+    }
+}
+
+/// A waiting request's admission key (smallest first): aged ones (waited
+/// at least `bound_ms`, if not 0) first, oldest first; then the shortest
+/// `uncached` prompt (what admission would feed); then arrival (`id`).
+pub(super) fn admit_key(
+    uncached: usize,
+    age_ms: u64,
+    bound_ms: u64,
+    id: u64,
+) -> (bool, usize, u64) {
+    let aged = bound_ms > 0 && age_ms >= bound_ms;
+    (!aged, if aged { 0 } else { uncached }, id)
 }
 
 /// How a request ended.
@@ -149,12 +446,12 @@ pub(super) struct Batch<'a, 't> {
     /// Requests being prefilled, oldest first.
     pre: Vec<Prefill<'t>>,
     policy: ChunkPolicy,
-    /// Prefill cost per token per position attended (+ DEPTH_K), µs:
-    /// a moving average over feeds of at least LEARN_MIN tokens, once
-    /// measured.
-    cost: Option<f64>,
-    /// The last decode step's time.
-    decode_ms: f64,
+    /// Admission order and lanes (`Sched`; the serve loop reads the rest).
+    pub sched: Sched,
+    /// What steps cost (`StepCost`), learned as they run.
+    cost: StepCost,
+    /// Prompt tokens the step running fed (two-pass `feed`s; `step`).
+    fed_now: usize,
     /// Most tokens of one of `feed_slot`'s passes (`BatchLm::pass_max`):
     /// an idle piece is a whole number of them (no extra partial passes).
     pass: usize,
@@ -219,11 +516,9 @@ fn victim(growing: u64, running: &[u64], prefills: &[(u64, bool)]) -> Victim {
 /// MEASURED in 1018-044243-ceb5, 1 preemption a round at 7 x 15k + 600).
 const GROW_TOKENS: usize = 1024;
 
-/// Prompts a paged pool prefills at once at most: more of them share each
-/// step's chunk and finish together, late (7 x 15k: mean TTFT 37 s vs 33 s
-/// fed in turn, ceb5); the rest wait in the queue, and start as each one
-/// finishes. A plain pool's slots bound it already.
-const MAX_PREFILLING: usize = 2;
+// Prompts a paged pool prefills at once: `Batch::lanes` (was a constant 2:
+// more of them share each step's chunk and finish together, late; 7 x 15k:
+// mean TTFT 37 s vs 33 s fed in turn, ceb5). A plain pool's slots bound it.
 
 /// Pages of positions 0..n.
 fn pages_for(n: usize, size: usize) -> usize {
@@ -255,8 +550,9 @@ impl<'a, 't> Batch<'a, 't> {
             seqs: Vec::new(),
             pre: Vec::new(),
             policy,
-            cost: None,
-            decode_ms: 0.0,
+            sched: Sched::default(),
+            cost: StepCost::default(),
+            fed_now: 0,
             log,
             generated,
             preempted: 0,
@@ -281,6 +577,22 @@ impl<'a, 't> Batch<'a, 't> {
             unfed: self.unfed,
         });
         m.publish_pool(self.slot_states(), pages);
+        let short = match self.sched.order {
+            AdmitOrder::Fifo => 0,
+            AdmitOrder::Sjf => self.short_tokens(),
+        };
+        let c = &self.cost;
+        m.publish_sched(super::ops::SchedView {
+            waiting: Vec::new(),
+            lanes_busy: (self.pre.iter())
+                .filter(|f| f.seq.hist.len() - 1 - f.fed > short)
+                .count(),
+            lanes: self.lanes(),
+            tok_us: c.tok,
+            pass_us: c.pass_us,
+            fused_tok_us: c.fused_tok,
+            dec_ms: c.dec_ms.to_vec(),
+        });
     }
 
     /// Tests: reserve pages for `n` generated tokens a request at admission
@@ -293,28 +605,47 @@ impl<'a, 't> Batch<'a, 't> {
         self.seqs.is_empty() && self.pre.is_empty()
     }
 
-    /// Whether `job` can start now: a free slot, and (a paged pool) fewer
-    /// than `MAX_PREFILLING` prompts being prefilled, and pages for its
-    /// prompt past the prefix the slot keeps and its first `GROW_TOKENS`
-    /// generated tokens, beside what the prompts being prefilled and the
-    /// running requests still need on the same terms; idle slots' prefixes
-    /// count, they give theirs up (`reclaim`). Otherwise it waits (never a
-    /// failure for pages).
+    /// Whether `job` can start now (`admit_check`).
     pub fn can_admit(&self, job: &Job) -> bool {
+        self.admit_check(job) == Admit::Yes
+    }
+
+    /// Whether `job` can start now: a free slot, and (a paged pool) a
+    /// place in its class (`admit_gate`: lanes for long prompts, about two
+    /// steps' worth of short ones; fifo: `lanes` prompts prefilling at
+    /// most), and pages for its prompt past the prefix the slot keeps and
+    /// its first `GROW_TOKENS` generated tokens, beside what the prompts
+    /// being prefilled and the running requests still need on the same
+    /// terms; idle slots' prefixes count, they give theirs up (`reclaim`).
+    /// Otherwise it waits (never a failure for pages).
+    pub(super) fn admit_check(&self, job: &Job) -> Admit {
         let prompt = &job.prompt;
         let Some((slot, common)) = self.free_slot(prompt) else {
-            return false;
+            return Admit::Slot;
         };
         let Some(pg) = self.pages() else {
-            return true;
+            return Admit::Yes;
         };
-        if self.pre.len() >= MAX_PREFILLING {
-            return false;
+        let last = prompt.len() - 1;
+        let rem: Vec<usize> = (self.pre.iter())
+            .map(|f| f.seq.hist.len() - 1 - f.fed)
+            .collect();
+        let short = match self.sched.order {
+            AdmitOrder::Fifo => 0,
+            AdmitOrder::Sjf => self.short_tokens(),
+        };
+        if !admit_gate(
+            self.sched.order,
+            self.lanes(),
+            short,
+            &rem,
+            last - common.min(last),
+        ) {
+            return Admit::Lane;
         }
         // Pages a sequence of `at` positions needs to grow `left` more.
         let grow = self.grow_tokens;
         let need = |at: usize, left: usize| pages_for((at + left.min(grow)).min(self.ctx), pg.size);
-        let last = prompt.len() - 1;
         let keep = pages_for(common.min(last), pg.size);
         let want = need(last, job.n_gen).saturating_sub(keep);
         let others: usize = (self.pre.iter().map(|f| &f.seq))
@@ -325,7 +656,75 @@ impl<'a, 't> Batch<'a, 't> {
             })
             .sum();
         let have = pg.free + self.idle_pages(&pg, slot) + pg.held[slot].saturating_sub(keep);
-        have >= want + others
+        match have >= want + others {
+            true => Admit::Yes,
+            false => Admit::Pages,
+        }
+    }
+
+    /// Prompts longer than a step's chunk prefilling at once at most
+    /// (`Sched::lanes`; 0: `slots / 16` within 2..=8: 2 at up to 32 slots,
+    /// the rule before, 8 at 128).
+    pub fn lanes(&self) -> usize {
+        match self.sched.lanes {
+            0 => (self.slots / 16).clamp(2, 8),
+            n => n,
+        }
+    }
+
+    /// A short prompt's most tokens: what one step feeds (`budget_tokens`),
+    /// at least the floor.
+    fn short_tokens(&self) -> usize {
+        self.budget_tokens().max(self.policy.floor)
+    }
+
+    /// About the prompt tokens this step feeds: a hybrid pass's beside its
+    /// rows (`fused_share`), else the two-pass budget at depth 0 less a
+    /// pass's fixed part (everything when chunking is off).
+    fn budget_tokens(&self) -> usize {
+        if self.policy.floor == 0 {
+            return usize::MAX / 4;
+        }
+        if self.policy.hybrid && !self.seqs.is_empty() {
+            return self.fused_share();
+        }
+        match two_pass_budget(&self.policy, &self.cost, self.seqs.len()) {
+            (Budget::Tokens(t), _) => t,
+            (Budget::Micros(us, c), pass) => {
+                let us = (us - pass).max(0.0);
+                ((DEPTH_K * DEPTH_K + 2.0 * us / c).sqrt() - DEPTH_K) as usize
+            }
+        }
+    }
+
+    /// `fused_share` for this step's rows and prompts.
+    fn fused_share(&self) -> usize {
+        let row_units: f64 = (self.seqs.iter())
+            .map(|q| (q.hist.len() - 1) as f64 + DEPTH_K)
+            .sum();
+        let rem: Vec<usize> = (self.pre.iter())
+            .map(|f| f.seq.hist.len() - 1 - f.fed)
+            .collect();
+        let fed: Vec<usize> = self.pre.iter().map(|f| f.fed).collect();
+        let starved: Vec<usize> = self.pre.iter().map(|f| f.starved).collect();
+        let (rows, pass) = (self.seqs.len(), self.pass);
+        fused_share(
+            &self.policy,
+            &self.cost,
+            rows,
+            row_units,
+            pass,
+            &fed,
+            &rem,
+            &starved,
+        )
+    }
+
+    /// The prompt tokens `admit` would feed for `prompt` (past the prefix
+    /// the free slot it would get holds), None without a free slot.
+    pub fn uncached(&self, prompt: &[u32]) -> Option<usize> {
+        let last = prompt.len().checked_sub(1)?;
+        self.free_slot(prompt).map(|(_, c)| last - c.min(last))
     }
 
     /// The pool's pages (None: plain).
@@ -401,26 +800,10 @@ impl<'a, 't> Batch<'a, 't> {
         Ok(())
     }
 
-    /// What this step may feed: everything without chunking; with
-    /// nothing decoding (nobody to stall) IDLE_MS worth (IDLE_CHUNK before
-    /// a cost is known), so requests arriving meanwhile still start soon;
-    /// else `floor` tokens (no time budget), or what fits in the budget
-    /// beside the last decode step at the measured cost (SEED_CHUNK before
-    /// one is known).
-    fn budget(&self) -> Budget {
-        let ChunkPolicy { floor, ms, .. } = self.policy;
-        if floor == 0 {
-            return Budget::Tokens(usize::MAX);
-        }
-        let idle = self.seqs.is_empty();
-        let cost = self.cost.filter(|&c| c > 0.0);
-        match (cost, idle, ms) {
-            (_, true, 0) | (None, true, _) => Budget::Tokens(IDLE_CHUNK.max(floor)),
-            (Some(c), true, _) => Budget::Micros(IDLE_MS * 1e3, c),
-            (_, false, 0) => Budget::Tokens(floor),
-            (None, false, _) => Budget::Tokens(SEED_CHUNK.max(floor)),
-            (Some(c), false, _) => Budget::Micros((ms as f64 - self.decode_ms).max(0.0) * 1e3, c),
-        }
+    /// What this step may feed (`two_pass_budget`), and the µs a pass's
+    /// fixed part costs (charged per prompt fed).
+    fn budget(&self) -> (Budget, f64) {
+        two_pass_budget(&self.policy, &self.cost, self.seqs.len())
     }
 
     /// Feed this step's prompt (`budget`, split by `plan`); prompts then
@@ -429,7 +812,7 @@ impl<'a, 't> Batch<'a, 't> {
         if self.pre.is_empty() {
             return Ok(());
         }
-        let budget = self.budget();
+        let (budget, pass_us) = self.budget();
         let rem: Vec<usize> = self
             .pre
             .iter()
@@ -438,8 +821,9 @@ impl<'a, 't> Batch<'a, 't> {
         let fed: Vec<usize> = self.pre.iter().map(|f| f.fed).collect();
         let starved: Vec<usize> = self.pre.iter().map(|f| f.starved).collect();
         let idle = self.seqs.is_empty();
-        let plan = plan(
+        let plan = plan_charged(
             budget,
+            pass_us,
             self.policy.floor,
             self.pass,
             &fed,
@@ -485,24 +869,15 @@ impl<'a, 't> Batch<'a, 't> {
 
     /// A hybrid step's prefill plan (requests decode, prompts wait): the
     /// step is one pass of the decode rows and the prompts' chunks
-    /// (`BatchLm::step_fused`), `--prefill-chunk` tokens in all (the rows
-    /// count; rounded up to whole TILEs, and past the rows: a pass that
-    /// crosses a tile pays the tile, step-0 harness `pool_hybrid_cost`; a
-    /// floor under a tile is the chunk's tokens, the rows beside), shared as `plan` shares a token budget
-    /// (shortest remainder first, the starved first). Each chunk's pages
+    /// (`BatchLm::step_fused`), the prompt tokens `fused_share` sizes from
+    /// `--step-ms` and the measured cost (whole TILEs in all), shared as
+    /// `plan` shares a token budget (shortest remainder first, the starved
+    /// first). Each chunk's pages
     /// are taken now (`feedable`); a chunk that ends its prompt takes its
     /// first row's page too (else it stops a token short). (job id, start,
     /// tokens) per chunk; `join_fused` takes them after `grow`.
     fn plan_fused(&mut self) -> Result<Vec<(u64, usize, usize)>, String> {
-        let (rows, floor) = (self.seqs.len(), self.policy.floor);
-        // Under a tile (tests' tiny chunks): exactly `floor` prompt tokens.
-        let share = match floor < TILE {
-            true => floor,
-            false => floor.max(rows + 1).next_multiple_of(TILE) - rows,
-        };
-        // (The prompts finishing in this pass add their rows.)
-        let cap = self.pass.saturating_sub(rows + self.pre.len()).max(1);
-        let share = share.min(cap);
+        let share = self.fused_share();
         let rem: Vec<usize> = (self.pre.iter())
             .map(|f| f.seq.hist.len() - 1 - f.fed)
             .collect();
@@ -602,15 +977,12 @@ impl<'a, 't> Batch<'a, 't> {
         let toks = &f.seq.hist[f.fed..f.fed + n];
         let t = Instant::now();
         self.net.feed_slot(&mut self.pool, s, toks, f.fed)?;
-        let mid = f.fed as f64 + n as f64 / 2.0 + DEPTH_K;
-        let c = t.elapsed().as_secs_f64() * 1e6 / (n as f64 * mid);
+        let us = t.elapsed().as_secs_f64() * 1e6;
+        // Long feeds teach the cost per token, short ones a pass's fixed part.
+        self.cost.learn_feed(f.fed, n, us);
         self.held[s].extend_from_slice(toks);
         f.fed += n;
-        // Only long enough feeds teach the cost (a short one costs more per
-        // token: a pass's fixed part).
-        if n >= LEARN_MIN {
-            self.cost = Some(self.cost.map_or(c, |a| 0.5 * a + 0.5 * c));
-        }
+        self.fed_now += n;
         Ok(n)
     }
 
@@ -759,6 +1131,8 @@ impl<'a, 't> Batch<'a, 't> {
     /// One step: a chunk of the prompts being prefilled, then a row per
     /// running request and each one's next token.
     pub fn step(&mut self) -> Result<(), String> {
+        let t_step = Instant::now();
+        self.fed_now = 0;
         self.reap();
         // Hybrid (requests decode, prompts wait): the chunks ride in the
         // decode step's pass; else the chunk's own pass first.
@@ -815,8 +1189,25 @@ impl<'a, 't> Batch<'a, 't> {
             true => self.net.step(&mut self.pool, &rows),
             false => self.net.step_fused(&mut self.pool, &feeds, &rows),
         };
-        if feeds.is_empty() {
-            self.decode_ms = t.elapsed().as_secs_f64() * 1e3;
+        let secs = t.elapsed().as_secs_f64();
+        let us = secs * 1e6;
+        match feeds.is_empty() {
+            true => self.cost.learn_decode(rows.len(), secs * 1e3),
+            false => {
+                let row_units: f64 = (rows.iter()).map(|r| r.pos as f64 + DEPTH_K).sum();
+                let fed: usize = feeds.iter().map(|f| f.tokens.len()).sum();
+                let u = row_units
+                    + (feeds.iter())
+                        .map(|f| units(f.start, f.tokens.len()))
+                        .sum::<f64>();
+                self.cost.learn_fused(u, fed, us);
+                self.fed_now += fed;
+            }
+        }
+        // A step that fed prompt beside running rows: what `--step-ms`
+        // aims at (/metrics `axon_step_seconds`).
+        if let Some(m) = (self.metrics.as_ref()).filter(|_| self.fed_now > 0 && !rows.is_empty()) {
+            m.observe_step(t_step.elapsed(), rows.len(), self.fed_now);
         }
         drop((rows, feeds));
         for (k, t0) in joined {
@@ -1064,6 +1455,25 @@ fn plan(
     starved: &[usize],
     idle: bool,
 ) -> Vec<usize> {
+    plan_charged(budget, 0.0, floor, pass, fed, rem, starved, idle)
+}
+
+/// `plan`, each prompt fed on a µs budget also charged `pass_us`, a
+/// pass's fixed part (two-pass steps feed each prompt in its own pass):
+/// its share is what the time left after that buys, and a later prompt
+/// is fed only if all of it fits (no half-floor slack), so a step of
+/// short prompts feeds as many as their passes fit, not all of them.
+#[allow(clippy::too_many_arguments)]
+fn plan_charged(
+    budget: Budget,
+    pass_us: f64,
+    floor: usize,
+    pass: usize,
+    fed: &[usize],
+    rem: &[usize],
+    starved: &[usize],
+    idle: bool,
+) -> Vec<usize> {
     let mut plan = vec![0; rem.len()];
     let mut order: Vec<usize> = (0..rem.len()).collect();
     order.sort_by_key(|&i| {
@@ -1080,6 +1490,7 @@ fn plan(
             Budget::Tokens(t) => t,
             Budget::Micros(us, c) => {
                 let dk = fed[i] as f64 + DEPTH_K;
+                let us = (us - pass_us).max(0.0);
                 let n = ((dk * dk + 2.0 * us / c).sqrt() - dk) as usize;
                 match (first, idle) {
                     (true, true) => n.max(floor).div_ceil(pass).saturating_mul(pass),
@@ -1089,7 +1500,11 @@ fn plan(
             }
         };
         let want = rem[i];
-        let n = if want <= share.saturating_add(floor / 2) {
+        let slack = match pass_us > 0.0 && !first {
+            true => 0,
+            false => floor / 2,
+        };
+        let n = if want <= share.saturating_add(slack) {
             want
         } else if first || share >= floor {
             share
@@ -1104,7 +1519,7 @@ fn plan(
         budget = match budget {
             Budget::Tokens(t) => Budget::Tokens(t.saturating_sub(n)),
             Budget::Micros(us, c) => {
-                let spent = c * n as f64 * (fed[i] as f64 + n as f64 / 2.0 + DEPTH_K);
+                let spent = pass_us + c * n as f64 * (fed[i] as f64 + n as f64 / 2.0 + DEPTH_K);
                 Budget::Micros((us - spent).max(0.0), c)
             }
         };
@@ -1657,6 +2072,438 @@ mod plan_tests {
             assert!(
                 rem0 == 0 || p[1] == 0,
                 "the younger one cut in: {p:?}, {rem0} left"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod sched_tests {
+    use super::{
+        AdmitOrder, Budget, ChunkPolicy, DEPTH_K, STARVE, StepCost, TILE, admit_gate, admit_key,
+        bucket, fused_share, plan, plan_charged, starve, two_pass_budget,
+    };
+
+    const PASS: usize = 1152;
+
+    fn policy(floor: usize, step_ms: usize, hybrid: bool) -> ChunkPolicy {
+        ChunkPolicy {
+            floor,
+            step_ms,
+            step_tokens: 0,
+            hybrid,
+            legacy: false,
+        }
+    }
+
+    /// Shortest uncached prompt first, ties by arrival; a request aged
+    /// past the bound goes before all of them (aged ones oldest first);
+    /// a bound of 0 never ages.
+    #[test]
+    fn admit_key_sjf_then_age() {
+        // (uncached, age ms, id): 7000 / 60 / 2000 tokens, arrived in order.
+        let jobs = [(7000, 900, 1u64), (60, 500, 2), (2000, 100, 3)];
+        let order = |bound: u64, jobs: &[(usize, u64, u64)]| {
+            let mut v: Vec<_> = jobs
+                .iter()
+                .map(|&(u, a, id)| (admit_key(u, a, bound, id), id))
+                .collect();
+            v.sort();
+            v.into_iter().map(|x| x.1).collect::<Vec<_>>()
+        };
+        assert_eq!(order(0, &jobs), [2, 3, 1]);
+        assert_eq!(order(3000, &jobs), [2, 3, 1]);
+        // The 7000 aged past the bound: first.
+        let aged = [(7000, 3100, 1u64), (60, 500, 2), (2000, 100, 3)];
+        assert_eq!(order(3000, &aged), [1, 2, 3]);
+        // Bound 0: never aged.
+        assert_eq!(order(0, &aged), [2, 3, 1]);
+        // Two aged: oldest (lowest id) first, whatever their length.
+        let two = [(100, 4000, 5u64), (9000, 5000, 4), (50, 10, 6)];
+        assert_eq!(order(3000, &two), [4, 5, 6]);
+        // Equal lengths: arrival order.
+        let eq = [(300, 10, 9u64), (300, 20, 8), (300, 30, 7)];
+        assert_eq!(order(3000, &eq), [7, 8, 9]);
+    }
+
+    /// Lanes bound long prompts, never short ones; short ones stop at
+    /// about two steps' worth; fifo is the old rule (`lanes` prompts
+    /// prefilling at most, whatever their length).
+    #[test]
+    fn can_admit_lanes_and_short_budget() {
+        let b = 256;
+        // Two long prefills, lanes 2: a 60-token job starts, a 3000 doesn't.
+        let longs = [5000, 7000];
+        assert!(admit_gate(AdmitOrder::Sjf, 2, b, &longs, 60));
+        assert!(!admit_gate(AdmitOrder::Sjf, 2, b, &longs, 3000));
+        assert!(admit_gate(AdmitOrder::Sjf, 3, b, &longs, 3000));
+        // Short remainders summing to 2b: no more short ones; a long one
+        // still gets a free lane.
+        let shorts = [200, 156, 156];
+        assert_eq!(shorts.iter().sum::<usize>(), 2 * b);
+        assert!(!admit_gate(AdmitOrder::Sjf, 2, b, &shorts, 1));
+        assert!(admit_gate(AdmitOrder::Sjf, 2, b, &shorts, 3000));
+        assert!(admit_gate(AdmitOrder::Sjf, 2, b, &shorts[1..], 200));
+        // Fifo: two prompts prefilling of any length block everything.
+        assert!(!admit_gate(AdmitOrder::Fifo, 2, 0, &[60, 70], 10));
+        assert!(!admit_gate(AdmitOrder::Fifo, 2, 0, &longs, 60));
+        assert!(admit_gate(AdmitOrder::Fifo, 2, 0, &[5000], 60));
+        assert!(admit_gate(AdmitOrder::Fifo, 3, 0, &longs, 60));
+        // (A plain pool returns before the gate: `admit_check`.)
+    }
+
+    /// Two-pass steps charge a pass's fixed part per prompt fed: with 40
+    /// ms left beside the decode step and 8 ms per pass, 60-token prompts
+    /// costing ~1 ms each are fed four at a time (40 / 9), not all of them.
+    #[test]
+    fn plan_two_pass_charges_pass_fixed() {
+        let (pass_us, floor) = (8000.0, 256);
+        let c = 1000.0 / (60.0 * (30.0 + DEPTH_K));
+        let rem = [60; 10];
+        for (dec_ms, want) in [(10.0, 4), (6.0, 4), (14.0, 4), (30.0, 2), (49.0, 1)] {
+            let left = (50.0 - dec_ms) * 1e3;
+            let p = plan_charged(
+                Budget::Micros(left, c),
+                pass_us,
+                floor,
+                PASS,
+                &[0; 10],
+                &rem,
+                &[0; 10],
+                false,
+            );
+            let fed = p.iter().filter(|&&n| n > 0).count();
+            assert!(
+                fed <= ((50.0 - dec_ms) / 9.0).floor().max(1.0) as usize,
+                "{dec_ms}: {p:?}"
+            );
+            assert_eq!(fed, want, "{dec_ms}: {p:?}");
+            assert!(p.iter().all(|&n| n == 0 || n == 60), "{p:?}");
+        }
+        // Without the charge (the old rule): every short prompt fits.
+        let p = plan(
+            Budget::Micros(40e3, c),
+            floor,
+            PASS,
+            &[0; 10],
+            &rem,
+            &[0; 10],
+            false,
+        );
+        assert_eq!(p, [60; 10]);
+        // The budget: step_ms less the modelled decode step, the pass's
+        // fixed part handed to plan.
+        let mut cost = StepCost::default();
+        cost.learn_decode(8, 10.0);
+        // A short feed first: all of it is the fixed part (no cost per
+        // token yet); the long feed's per-token cost is learned past it.
+        cost.learn_feed(0, 59, 9000.0);
+        cost.learn_feed(0, 512, 30_000.0);
+        let (b, pass) = two_pass_budget(&policy(256, 50, false), &cost, 8);
+        assert_eq!(pass, 9000.0);
+        let tok = cost.tok.unwrap();
+        assert!(
+            (tok * 512.0 * (256.0 + DEPTH_K) - 21_000.0).abs() < 1e-6,
+            "{tok}"
+        );
+        match b {
+            Budget::Micros(us, _) => assert_eq!(us, 40_000.0),
+            Budget::Tokens(t) => panic!("{t}"),
+        }
+    }
+
+    /// The hybrid pass grows with the rows and the step's time at the
+    /// measured cost (the H100's numbers: 128 rows, 0.006 µs per unit),
+    /// within the pool's pass; a few rows round to a tile; step_tokens pins it.
+    #[test]
+    fn plan_fused_budget_scales_with_rows() {
+        let cost = StepCost {
+            fused_tok: Some(0.006),
+            ..Default::default()
+        };
+        let p = policy(256, 50, true);
+        let rows = 128;
+        let row_units = rows as f64 * (790.0 + DEPTH_K);
+        let (fed, rem, st) = ([0, 0], [7600, 2000], [0, 0]);
+        let share = fused_share(&p, &cost, rows, row_units, PASS, &fed, &rem, &st);
+        assert!(share >= 512, "{share}");
+        assert!(share + rows <= PASS, "{share}");
+        assert_eq!((share + rows) % TILE, 0, "{share}");
+        // #119's rule at the same rows: 128 prompt tokens.
+        let old = fused_share(
+            &policy(256, 0, true),
+            &cost,
+            rows,
+            row_units,
+            PASS,
+            &fed,
+            &rem,
+            &st,
+        );
+        assert_eq!(old, 128);
+        // 4 rows: a whole tile count in all; at least the floor.
+        let share4 = fused_share(&p, &cost, 4, 4.0 * (100.0 + DEPTH_K), PASS, &fed, &rem, &st);
+        assert_eq!((share4 + 4) % TILE, 0, "{share4}");
+        assert!(share4 + 4 >= 256 && share4 > share, "{share4}");
+        // A slower model: the floor binds (the bella 7B case at C <= 8).
+        let mut slow = cost.clone();
+        slow.fused_tok = Some(0.04);
+        let s = fused_share(&p, &slow, 8, 8.0 * (100.0 + DEPTH_K), PASS, &fed, &rem, &st);
+        assert_eq!(s, 256 - 8);
+        // Pinned: step_tokens beside the rows, rounded up to a tile.
+        let pin = ChunkPolicy {
+            step_tokens: 300,
+            ..p
+        };
+        assert_eq!(
+            fused_share(&pin, &cost, rows, row_units, PASS, &fed, &rem, &st),
+            448 - rows
+        );
+        // Before a cost: SEED_CHUNK beside the rows.
+        let seed = fused_share(
+            &p,
+            &StepCost::default(),
+            rows,
+            row_units,
+            PASS,
+            &fed,
+            &rem,
+            &st,
+        );
+        assert_eq!(seed, 640 - 128);
+        // Capped by the pass (the finishing prompts' rows counted).
+        let big = ChunkPolicy {
+            step_tokens: 5000,
+            ..p
+        };
+        assert_eq!(
+            fused_share(&big, &cost, rows, row_units, PASS, &fed, &rem, &st),
+            PASS - rows - 2
+        );
+        // A floor under a tile: exactly the floor (tests' tiny chunks).
+        assert_eq!(
+            fused_share(
+                &policy(16, 50, true),
+                &cost,
+                rows,
+                row_units,
+                PASS,
+                &fed,
+                &rem,
+                &st
+            ),
+            16
+        );
+    }
+
+    /// dec(rows): a seen bucket's own value; an unseen bucket from the
+    /// nearest seen one scaled by sqrt(rows ratio); nothing seen: the last
+    /// decode step.
+    #[test]
+    fn step_cost_buckets() {
+        assert_eq!(
+            [1, 2, 3, 4, 5, 8, 9, 16, 128, 129, 256, 1000].map(bucket),
+            [0, 1, 2, 2, 3, 3, 4, 4, 7, 8, 8, 8]
+        );
+        let mut c = StepCost::default();
+        assert_eq!(c.dec(16), 0.0);
+        c.last_dec_ms = 12.0;
+        assert_eq!(c.dec(16), 12.0);
+        c.learn_decode(16, 20.0);
+        assert_eq!(c.dec(16), 20.0);
+        assert_eq!(c.dec(9), 20.0);
+        // 64 rows: bucket 6 unseen, nearest seen bucket 4 (16 rows): x2.
+        assert!((c.dec(64) - 40.0).abs() < 1e-9, "{}", c.dec(64));
+        // Learning: an EMA of 1/4.
+        c.learn_decode(16, 24.0);
+        assert_eq!(c.dec(16), 21.0);
+        // The last step's time follows every decode step.
+        assert_eq!(c.last_dec_ms, 24.0);
+        // A pass's fixed part: from short feeds, the per-token part out.
+        let mut f = StepCost::default();
+        f.learn_feed(0, 512, 51_200.0);
+        f.learn_feed(0, 40, 9_000.0);
+        let tok = f.tok.unwrap();
+        let fixed = 9000.0 - tok * 40.0 * (20.0 + DEPTH_K);
+        assert!((f.pass_us.unwrap() - fixed).abs() < 1e-6);
+        // Feeds 64..128: teach nothing.
+        let g = f.clone();
+        f.learn_feed(0, 100, 1e9);
+        assert_eq!(
+            (f.tok, f.pass_us, f.legacy_tok),
+            (g.tok, g.pass_us, g.legacy_tok)
+        );
+    }
+
+    fn plan_119(
+        budget: Budget,
+        floor: usize,
+        pass: usize,
+        fed: &[usize],
+        rem: &[usize],
+        starved: &[usize],
+        idle: bool,
+    ) -> Vec<usize> {
+        let mut plan = vec![0; rem.len()];
+        let mut order: Vec<usize> = (0..rem.len()).collect();
+        order.sort_by_key(|&i| {
+            if starved[i] >= STARVE {
+                (false, 0, i)
+            } else {
+                (true, rem[i], i)
+            }
+        });
+        let mut budget = budget;
+        let mut first = true;
+        for i in order {
+            let share = match budget {
+                Budget::Tokens(t) => t,
+                Budget::Micros(us, c) => {
+                    let dk = fed[i] as f64 + DEPTH_K;
+                    let n = ((dk * dk + 2.0 * us / c).sqrt() - dk) as usize;
+                    match (first, idle) {
+                        (true, true) => n.max(floor).div_ceil(pass).saturating_mul(pass),
+                        (true, false) => n.max(floor),
+                        _ => n,
+                    }
+                }
+            };
+            let want = rem[i];
+            let n = if want <= share.saturating_add(floor / 2) {
+                want
+            } else if first || share >= floor {
+                share
+            } else {
+                0
+            };
+            if n == 0 || share == 0 {
+                continue;
+            }
+            first = false;
+            plan[i] = n;
+            budget = match budget {
+                Budget::Tokens(t) => Budget::Tokens(t.saturating_sub(n)),
+                Budget::Micros(us, c) => {
+                    let spent = c * n as f64 * (fed[i] as f64 + n as f64 / 2.0 + DEPTH_K);
+                    Budget::Micros((us - spent).max(0.0), c)
+                }
+            };
+        }
+        plan
+    }
+
+    /// #119's two-pass budget (engine.rs `budget` at 1ba683e).
+    fn budget_119(
+        floor: usize,
+        ms: usize,
+        cost: Option<f64>,
+        decode_ms: f64,
+        idle: bool,
+    ) -> Budget {
+        if floor == 0 {
+            return Budget::Tokens(usize::MAX);
+        }
+        let cost = cost.filter(|&c| c > 0.0);
+        match (cost, idle, ms) {
+            (_, true, 0) | (None, true, _) => Budget::Tokens(super::IDLE_CHUNK.max(floor)),
+            (Some(c), true, _) => Budget::Micros(super::IDLE_MS * 1e3, c),
+            (_, false, 0) => Budget::Tokens(floor),
+            (None, false, _) => Budget::Tokens(super::SEED_CHUNK.max(floor)),
+            (Some(c), false, _) => Budget::Micros((ms as f64 - decode_ms).max(0.0) * 1e3, c),
+        }
+    }
+
+    /// #119's hybrid share (`plan_fused` at 1ba683e).
+    fn share_119(floor: usize, rows: usize, pass: usize, pre: usize) -> usize {
+        let share = match floor < TILE {
+            true => floor,
+            false => floor.max(rows + 1).next_multiple_of(TILE) - rows,
+        };
+        let cap = pass.saturating_sub(rows + pre).max(1);
+        share.min(cap)
+    }
+
+    fn same(a: Budget, b: Budget) -> bool {
+        match (a, b) {
+            (Budget::Tokens(x), Budget::Tokens(y)) => x == y,
+            (Budget::Micros(u, c), Budget::Micros(v, d)) => {
+                u.to_bits() == v.to_bits() && c.to_bits() == d.to_bits()
+            }
+            _ => false,
+        }
+    }
+
+    /// The rollback: with AXON_STEP_COST=legacy (and `--admit-order fifo
+    /// --prefill-lanes 2` on the admission side, `admit_gate`'s fifo arm)
+    /// every scheduling decision is #119's, bit for bit, over 20,000
+    /// random states: the two-pass budget (the same timings fed through
+    /// `StepCost` as through #119's `cost` / `decode_ms`), the hybrid
+    /// share, and the plan (pass charge 0); the fifo admission gate is
+    /// `pre.len() < 2`, #119's `MAX_PREFILLING`.
+    #[test]
+    fn legacy_reproduces_119_decisions() {
+        let mut x = 0x9e37_79b9_7f4a_7c15u64;
+        let mut rnd = |n: u64| {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            x % n.max(1)
+        };
+        for it in 0..20_000 {
+            let floor = [0, 1, 16, 64, 256, 512][rnd(6) as usize];
+            let ms = [0, 20, 50, 60, 100][rnd(5) as usize];
+            let p = ChunkPolicy {
+                floor,
+                step_ms: ms,
+                step_tokens: [0, 300][rnd(2) as usize],
+                hybrid: rnd(2) == 0,
+                legacy: true,
+            };
+            // A history of feeds and decode steps, through both models.
+            let (mut cost, mut old, mut dec) = (StepCost::default(), None::<f64>, 0.0);
+            for _ in 0..rnd(6) {
+                let (d, n) = (rnd(30_000) as usize, 1 + rnd(2000) as usize);
+                let us = 100.0 + rnd(200_000) as f64 / 7.0;
+                cost.learn_feed(d, n, us);
+                let mid = d as f64 + n as f64 / 2.0 + DEPTH_K;
+                let c = us / (n as f64 * mid);
+                if n >= super::LEARN_MIN {
+                    old = Some(old.map_or(c, |a| 0.5 * a + 0.5 * c));
+                }
+                let (r, secs) = (1 + rnd(200) as usize, rnd(90_000) as f64 / 1e6);
+                cost.learn_decode(r, secs * 1e3);
+                dec = secs * 1e3;
+            }
+            let rows = rnd(4) as usize * rnd(150) as usize;
+            let (b, pass_us) = two_pass_budget(&p, &cost, rows);
+            assert_eq!(pass_us, 0.0);
+            assert!(
+                same(b, budget_119(floor, ms, old, dec, rows == 0)),
+                "it {it}"
+            );
+            let n = 1 + rnd(4) as usize;
+            let fed: Vec<usize> = (0..n).map(|_| rnd(20_000) as usize).collect();
+            let rem: Vec<usize> = (0..n).map(|_| 1 + rnd(9000) as usize).collect();
+            let st: Vec<usize> = (0..n).map(|_| rnd(STARVE as u64 + 2) as usize).collect();
+            let pass = [1024, 1152][rnd(2) as usize];
+            let ru = rows as f64 * 9000.0;
+            assert_eq!(
+                fused_share(&p, &cost, rows, ru, pass, &fed, &rem, &st),
+                share_119(floor, rows, pass, n),
+                "it {it}"
+            );
+            let idle = rows == 0;
+            let a = plan_charged(b, pass_us, floor, pass, &fed, &rem, &st, idle);
+            assert_eq!(
+                a,
+                plan_119(b, floor, pass, &fed, &rem, &st, idle),
+                "it {it}"
+            );
+            assert_eq!(starve(&a, &rem, &st, idle).len(), n);
+            let pre: Vec<usize> = (0..rnd(4)).map(|_| rnd(9000) as usize).collect();
+            assert_eq!(
+                admit_gate(AdmitOrder::Fifo, 2, 0, &pre, rnd(9000) as usize),
+                pre.len() < 2
             );
         }
     }

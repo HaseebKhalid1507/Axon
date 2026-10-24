@@ -47,7 +47,8 @@ usage:
                                             talk to an instruct model (sampled; --temp 0: greedy)
   axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--draft K] [--draft-model PATH]
             [--device D] [--gpu-layers N] [--kv T] [--alias NAME] [--max-tokens N] [--cors [ORIGIN]]
-            [--max-conns N] [--max-queue N] [--parallel N] [--prefill-chunk N] [--prefill-ms MS]
+            [--max-conns N] [--max-queue N] [--parallel N] [--prefill-chunk N] [--step-ms MS]
+            [--step-tokens N] [--admit-order sjf|fifo] [--admit-age-ms MS] [--prefill-lanes N]
             [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS]
             [--no-think] [--think-inline] [--quiet] [sampling flags; the repeat penalty defaults to 1 (off)]
                                             an OpenAI-compatible HTTP server (/v1/models,
@@ -120,12 +121,24 @@ flags:
               With --ctx N, the slots that fit with N; with --parallel N alone, N slots of
               the longest context that fits them
   --prefill-chunk N  serve: while requests decode, a step is one pass of their rows and
-              new prompts' tokens, N tokens in all (rounded up to 64; under 64: N prompt tokens
-              beside the rows; default 256; 0: prompts
-              fed whole, the others' streams wait). AXON_HYBRID=0: a chunk's own pass then
-              the decode step, at least N prompt tokens per chunk
-  --prefill-ms MS  serve, AXON_HYBRID=0 only: such a chunk feeds up to what fits in MS ms
-              beside the decode step (default 60; 0: exactly --prefill-chunk tokens)
+              new prompts' tokens, at least N tokens in all (rounded up to 64; under 64: N
+              prompt tokens beside the rows; default 256; 0: prompts fed whole, the others'
+              streams wait). AXON_HYBRID=0: a chunk's own pass then the decode step, at
+              least N prompt tokens per chunk
+  --step-ms MS  serve: a step's target time while requests decode (default 50): its prompt
+              tokens are what fits beside the rows at the cost measured as steps run (0:
+              exactly --prefill-chunk tokens). --prefill-ms is its old name.
+              AXON_STEP_COST=legacy: the budgets before (hybrid: --prefill-chunk tokens)
+  --step-tokens N  serve: pin a step's prompt tokens beside the rows (default 0: --step-ms)
+  --admit-order sjf|fifo  serve: waiting requests start shortest prompt first, several per
+              step (sjf, default), or first come first served, one per step (fifo, the order
+              before; AXON_ADMIT=fifo sets it too)
+  --admit-age-ms MS  serve: a request waiting this long starts before shorter ones (default
+              3000; 0: never)
+  --prefill-lanes N  serve: prompts longer than a step's chunk prefilling at once (default
+              0: parallel/16 within 2..8); with fifo: all prompts prefilling at once.
+              The order before: --admit-order fifo --step-ms 60 --prefill-lanes 2 with
+              AXON_STEP_COST=legacy
   --api-key KEY  serve: every route but /health (and CORS preflights) needs
               `Authorization: Bearer KEY` (else 401); AXON_API_KEY sets it too, out of `ps`
               (trimmed; set but blank is an error)

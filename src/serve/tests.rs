@@ -53,7 +53,8 @@ fn test_opts(path: &str, device: Device) -> Opts {
         kv_pages: None,
         kv_grow: None,
         prefill_chunk: super::engine::PREFILL_CHUNK,
-        prefill_ms: super::engine::PREFILL_MS,
+        step_ms: super::engine::STEP_MS,
+        sched: super::engine::Sched::default(),
         hybrid: super::engine::hybrid_env(),
         rope: Default::default(),
         api_key: None,
@@ -2261,18 +2262,23 @@ fn serve_chunked_prefill_matches_solo() {
     let Some(p) = crate::testutil::model_path() else {
         return;
     };
+    use super::engine::AdmitOrder::{Fifo, Sjf};
     use crate::kv::KvType::{F16, Q8};
-    // (model, kv, chunk floor, ms budget, hybrid)
+    // (model, kv, chunk floor, ms budget, hybrid, admission order): ms 50
+    // at a 256 floor sizes the hybrid pass by the step cost model.
     let mut configs = vec![
-        (p.clone(), F16, 16, 0, true),
-        (p.clone(), Q8, 16, 0, true),
-        (p.clone(), F16, 256, 0, true),
-        (p.clone(), Q8, 256, 0, true),
-        (p.clone(), F16, 16, 0, false),
-        (p, F16, 16, 20, false),
+        (p.clone(), F16, 16, 0, true, Sjf),
+        (p.clone(), Q8, 16, 0, true, Sjf),
+        (p.clone(), F16, 256, 0, true, Sjf),
+        (p.clone(), Q8, 256, 0, true, Sjf),
+        (p.clone(), F16, 256, 50, true, Sjf),
+        (p.clone(), F16, 256, 50, true, Fifo),
+        (p.clone(), F16, 16, 0, false, Sjf),
+        (p.clone(), F16, 16, 20, false, Fifo),
+        (p, F16, 16, 20, false, Sjf),
     ];
     if let Some(g) = crate::testutil::gemma3_model_path() {
-        configs.push((g, F16, 16, 0, true));
+        configs.push((g, F16, 16, 0, true, Sjf));
     }
     const N: u64 = 400;
     let decoders = [
@@ -2304,15 +2310,16 @@ fn serve_chunked_prefill_matches_solo() {
             v["usage"]["completion_tokens"].clone(),
         )
     };
-    for (path, kv, chunk, ms, hybrid) in configs {
+    for (path, kv, chunk, ms, hybrid, order) in configs {
         let gemma = path.to_string_lossy().contains("gemma");
         let opts = |o: &mut Opts| {
             o.kv = kv;
             o.parallel = 4;
             o.max_draft = 3;
             o.prefill_chunk = chunk;
-            o.prefill_ms = ms;
+            o.step_ms = ms;
             o.hybrid = hybrid;
+            o.sched.order = order;
         };
         let s = server_with(path.to_str().unwrap(), Device::Cuda, opts);
         let a = s.addr;
@@ -2415,6 +2422,122 @@ fn serve_chunked_prefill_matches_solo() {
     }
 }
 
+/// Shortest-first admission (`--admit-order sjf`, the default): with 4
+/// requests decoding and two long prompts prefilling (both lanes of a
+/// paged pool of 8 slots), a short prompt sent next starts at once and is
+/// done before either long prompt's first token; with `--admit-order fifo`
+/// (the order before: two prompts prefilling at most) it waits for a long
+/// one to finish prefilling, so its first token comes after that one's.
+/// A step's prompt tokens are pinned (`--step-tokens 256`), so the long
+/// prompts take ~16 steps each on any GPU. Every text equals the same
+/// request's alone (a second server), in both orders.
+#[test]
+fn serve_sjf_short_ahead_of_long() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let path = p.to_str().unwrap();
+    let tok = Tokenizer::from_gguf(&crate::gguf::load(path).unwrap());
+    let sent = "The quick brown fox jumps over the lazy dog near the river bank.";
+    let long_text = |salt: usize, toks: usize| {
+        let mut k = toks / 12;
+        loop {
+            let s: Vec<String> = (0..k).map(|j| format!("{j}. {sent}")).collect();
+            let t = format!("{salt} {} Summary:", s.join(" "));
+            if tok.encode_prompt(&t).len() <= toks {
+                return t;
+            }
+            k = k * 97 / 100;
+        }
+    };
+    let longs: Vec<Value> = (0..2)
+        .map(|i| json!({"prompt": long_text(70 + i, 5000), "max_tokens": 8, "temperature": 0}))
+        .collect();
+    let short = json!({"prompt": "Name three colours of the rainbow:", "max_tokens": 4,
+                       "temperature": 0});
+    let decoders: Vec<Value> = (0..4)
+        .map(|i| json!({"prompt": format!("{i}. The history of the Roman Empire"),
+                        "max_tokens": 160, "temperature": if i % 2 == 0 { json!(0) } else { json!(0.7) },
+                        "seed": i}))
+        .collect();
+    let opts = |order| {
+        move |o: &mut Opts| {
+            o.ctx = Some(8192);
+            o.parallel = 8;
+            o.parallel_set = true;
+            o.sched.order = order;
+            o.sched.lanes = 2;
+            o.sched.step_tokens = 256;
+        }
+    };
+    use super::engine::AdmitOrder::{Fifo, Sjf};
+    let refs = server_with(path, Device::Cuda, opts(Sjf));
+    let solo: Vec<String> = (decoders.iter().chain(&longs).chain([&short]))
+        .map(|b| stream_times(refs.addr, b).2)
+        .collect();
+    drop(refs);
+    let busy = |a: SocketAddr| {
+        call(a, "GET", "/slots", "").json()["slots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|x| x["busy"] == true)
+            .count()
+    };
+    for order in [Sjf, Fifo] {
+        let s = server_with(path, Device::Cuda, opts(order));
+        let a = s.addr;
+        let paged = call(a, "GET", "/slots", "").json()["pages_total"].is_number();
+        let g = &s.generated;
+        let (ds, ls, sh) = std::thread::scope(|sc| {
+            let ds: Vec<_> = (decoders.iter())
+                .map(|b| sc.spawn(move || stream_times(a, b)))
+                .collect();
+            let g0 = g.load(Ordering::Relaxed);
+            wait_for("the decoders", || g.load(Ordering::Relaxed) >= g0 + 4 * 8);
+            let mut ls = Vec::new();
+            for (k, b) in longs.iter().enumerate() {
+                ls.push(sc.spawn(move || stream_times(a, b)));
+                wait_for("a long prompt admitted", || busy(a) >= 5 + k);
+            }
+            // A step or two later: the short one.
+            std::thread::sleep(Duration::from_millis(30));
+            let sh = stream_times(a, &short);
+            let ls: Vec<_> = ls.into_iter().map(|h| h.join().unwrap()).collect();
+            let ds: Vec<_> = ds.into_iter().map(|h| h.join().unwrap()).collect();
+            (ds, ls, sh)
+        });
+        let texts: Vec<String> = (ds.iter().chain(&ls).chain([&sh]))
+            .map(|r| r.2.clone())
+            .collect();
+        assert_eq!(
+            texts, solo,
+            "{order:?}: a text differs from the request alone"
+        );
+        let long_first = ls.iter().map(|l| l.1[0]).min().unwrap();
+        let (short_first, short_done) = (sh.1[0], *sh.1.last().unwrap());
+        eprintln!(
+            "{order:?}: short first token {:.0} ms, done {:.0} ms after its send; the first \
+             long first token {:.0} ms after the short's send (paged {paged})",
+            (short_first - sh.0).as_secs_f64() * 1e3,
+            (short_done - sh.0).as_secs_f64() * 1e3,
+            long_first.saturating_duration_since(sh.0).as_secs_f64() * 1e3
+        );
+        match order {
+            Sjf => assert!(
+                short_done < long_first,
+                "sjf: the short one waited behind a long one"
+            ),
+            // Lanes bind a paged pool only (a plain one: its slots).
+            Fifo if paged => assert!(short_first > long_first, "fifo: the short one overtook"),
+            Fifo => {}
+        }
+    }
+}
+
 /// A request cancelled while its prompt is being fed in chunks frees its
 /// slot with the rows fed so far, and the next prompt sharing that prefix
 /// reuses them (cached_tokens) and gets the reply it gets alone.
@@ -2431,7 +2554,7 @@ fn serve_cancel_mid_prefill_reuses_rows() {
     let opts = |o: &mut Opts| {
         o.parallel = 4;
         o.prefill_chunk = 1;
-        o.prefill_ms = 0;
+        o.step_ms = 0;
     };
     let s = server_with(p.to_str().unwrap(), Device::Cuda, opts);
     let a = s.addr;
@@ -5087,8 +5210,44 @@ fn serve_hybrid_ab() {
     let mut put = |part: &str, mode: &str, v: Vec<f64>| {
         table.push((part.into(), mode.into(), v));
     };
+    let arms: Vec<String> = std::env::var("AXON_AB_ARMS")
+        .unwrap_or("roll,fifo60,sjf60,sjf50".into())
+        .split(',')
+        .map(String::from)
+        .collect();
+    let mix_c = env("AXON_AB_MIXC", 16);
+    let mix_longs: Vec<usize> = std::env::var("AXON_AB_MIXLONG")
+        .unwrap_or("2000,4000,6000".into())
+        .split(',')
+        .map(|v| v.parse().unwrap())
+        .collect();
+    if parts.split(',').any(|p| p == "mix") {
+        eprintln!(
+            "mix: C={mix_c} x 2 requests (3/16 long: {mix_longs:?} tokens), {n} tokens, arms \
+             {arms:?}, AXON_HYBRID {}",
+            super::engine::hybrid_env()
+        );
+    }
     for r in 0..rounds {
         for part in parts.split(',') {
+            if part == "mix" {
+                let mut first_texts: Option<Vec<String>> = None;
+                for k in 0..arms.len() {
+                    let arm = &arms[(k + r) % arms.len()];
+                    let (mut row, texts) = mix_cell(&path, &tok, r, arm, mix_c, n, &mix_longs);
+                    let same = match &first_texts {
+                        None => {
+                            first_texts = Some(texts);
+                            1.0
+                        }
+                        Some(f) => (*f == texts) as u8 as f64,
+                    };
+                    row.push(same);
+                    eprintln!("round {r} mix {arm}: {row:.2?}");
+                    put(part, arm, row);
+                }
+                continue;
+            }
             let ms: Vec<usize> = match part {
                 "admit" => vec![0, 1, 2],
                 _ => vec![0, 1],
@@ -5106,7 +5265,7 @@ fn serve_hybrid_ab() {
                     o.parallel = par;
                     o.parallel_set = true;
                     o.prefill_chunk = budget;
-                    o.prefill_ms = pms;
+                    o.step_ms = pms;
                     o.hybrid = hybrid;
                 });
                 let a = s.addr;
@@ -5219,11 +5378,16 @@ fn serve_hybrid_ab() {
         "admit" => {
             "ITL before p50 | p99 | ITL during p50 | p99 | max | TTFT ms | tokens during | same_text"
         }
+        "mix" => MIX_COLS,
         _ => "agg tok/s | TTFT p50 | p99 | ITL p50 | p99 | same_text",
     };
     for part in parts.split(',') {
         eprintln!("| {part} | {} |", cols(part));
-        for (mode, _, _) in modes {
+        let names: Vec<&str> = match part {
+            "mix" => arms.iter().map(String::as_str).collect(),
+            _ => modes.iter().map(|m| m.0).collect(),
+        };
+        for mode in names {
             let rows: Vec<&Vec<f64>> = (table.iter())
                 .filter(|t| t.0 == part && t.1 == mode)
                 .map(|t| &t.2)
@@ -5243,4 +5407,187 @@ fn serve_hybrid_ab() {
             eprintln!("| {mode} | {} |", m.join(" | "));
         }
     }
+}
+
+/// A streamed request (`stream_times`): send time, text event times, text,
+/// completion tokens.
+type Streamed = (Instant, Vec<Instant>, String, u64);
+
+/// The mix part's columns (`mix_cell`).
+const MIX_COLS: &str = "agg tok/s | short TTFT p50 | p90 | max | long TTFT p50 | max | TPOT p50 | \
+    ITL p99 | slo_ok | step p50 ms (rows>=16) | step p50 ms (all) | preempted+unfed | same_text";
+
+/// The p50 of histogram `fam` in `/metrics` samples (linear within the
+/// bucket; NaN if empty).
+fn hist_p50(m: &std::collections::BTreeMap<String, f64>, fam: &str) -> f64 {
+    let mut b: Vec<(f64, f64)> = (m.iter())
+        .filter_map(|(k, v)| {
+            let le = k.strip_prefix(&format!("{fam}_bucket{{le=\""))?;
+            let le = le.trim_end_matches("\"}");
+            Some((le.parse().unwrap_or(f64::INFINITY), *v))
+        })
+        .collect();
+    b.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let total = b.last().map_or(0.0, |x| x.1);
+    if total == 0.0 {
+        return f64::NAN;
+    }
+    let (mut lo, mut below) = (0.0, 0.0);
+    for (le, c) in b {
+        if c >= total / 2.0 {
+            let hi = if le.is_finite() { le } else { lo };
+            let f = if c > below {
+                (total / 2.0 - below) / (c - below)
+            } else {
+                0.0
+            };
+            return (lo + f * (hi - lo)) * 1e3;
+        }
+        (lo, below) = (le, c);
+    }
+    f64::NAN
+}
+
+/// One arm of the mix part of `serve_hybrid_ab`: a fresh server (`arm`:
+/// roll = `--admit-order fifo --prefill-lanes 2 --step-ms 60` with
+/// AXON_STEP_COST=legacy, #119's scheduling exactly (with AXON_HYBRID=0,
+/// main's); fifo60 / fifo50 = the step cost model with fifo admission;
+/// sjf60 / sjf50 = both (sjf50: the defaults); sjf50age0: no age bound),
+/// `c` closed-loop clients pulling 2c requests from one counter, 3 in 16
+/// of them long (`longs` tokens in turn, by the model's tokenizer), the
+/// rest ~40-token questions, `n` tokens each, greedy, every prompt salted
+/// by round and request. The row (MIX_COLS less same_text) and the texts
+/// in request order. slo_ok: the showdown's SLO (TPOT <= 50 ms and TTFT
+/// <= 2000 + 250 ms per 1000 prompt tokens).
+fn mix_cell(
+    path: &str,
+    tok: &Tokenizer,
+    r: usize,
+    arm: &str,
+    c: usize,
+    n: usize,
+    longs: &[usize],
+) -> (Vec<f64>, Vec<String>) {
+    use super::engine::AdmitOrder::{Fifo, Sjf};
+    let (order, lanes, step_ms, legacy, age) = match arm {
+        "roll" => (Fifo, 2, 60, true, 3000),
+        "fifo60" => (Fifo, 0, 60, false, 3000),
+        "fifo50" => (Fifo, 0, 50, false, 3000),
+        "sjf60" => (Sjf, 0, 60, false, 3000),
+        "sjf50" => (Sjf, 0, 50, false, 3000),
+        "sjf50age0" => (Sjf, 0, 50, false, 0),
+        _ => panic!("AXON_AB_ARMS: unknown arm {arm}"),
+    };
+    let reqs = 2 * c;
+    let n_long = (reqs * 3).div_ceil(16);
+    let is_long = |g: usize| (g * n_long) % reqs < n_long;
+    let sent = "The quick brown fox jumps over the lazy dog near the river bank.";
+    let qs = [
+        "Explain recursion with a simple example a beginner could follow.",
+        "Write a short poem about the sea at night, four lines.",
+        "What are three good habits for writing maintainable code?",
+        "Summarise the causes of the French Revolution in a paragraph.",
+        "Give me a recipe for a quick vegetable soup.",
+        "How does a hash map work? Keep it brief.",
+        "List five interesting facts about octopuses.",
+        "Describe the water cycle to a ten year old.",
+    ];
+    let prompts: Vec<String> = (0..reqs)
+        .map(|g| {
+            if !is_long(g) {
+                return format!("[{r} {g}] {}", qs[g % qs.len()]);
+            }
+            let target = longs[(g * n_long / reqs) % longs.len()];
+            let mut k = target / 12;
+            loop {
+                let s: Vec<String> = (0..k).map(|j| format!("{j}. {sent}")).collect();
+                let t = format!("[{r} {g}] {} Summary:", s.join(" "));
+                if tok.encode_prompt(&t).len() <= target {
+                    return t;
+                }
+                k = k * 97 / 100;
+            }
+        })
+        .collect();
+    let ptoks: Vec<usize> = prompts.iter().map(|p| tok.encode_prompt(p).len()).collect();
+    let ctx = (ptoks.iter().max().unwrap() + n + 64).next_multiple_of(1024);
+    let s = server_with(path, Device::Cuda, |o| {
+        o.ctx = Some(ctx);
+        o.parallel = c;
+        o.parallel_set = true;
+        o.step_ms = step_ms;
+        o.sched.order = order;
+        o.sched.lanes = lanes;
+        o.sched.legacy = legacy;
+        o.sched.age_ms = age;
+    });
+    let a = s.addr;
+    post(
+        a,
+        "/v1/completions",
+        json!({"prompt": "Hello", "max_tokens": 8, "temperature": 0}),
+    );
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let t0 = Instant::now();
+    let mut outs: Vec<(usize, Streamed)> = std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..c)
+            .map(|_| {
+                let (next, prompts) = (&next, &prompts);
+                sc.spawn(move || {
+                    let mut v = Vec::new();
+                    loop {
+                        let g = next.fetch_add(1, Ordering::Relaxed);
+                        if g >= reqs {
+                            return v;
+                        }
+                        let b = json!({"prompt": prompts[g], "max_tokens": n, "temperature": 0});
+                        v.push((g, stream_times(a, &b)));
+                    }
+                })
+            })
+            .collect();
+        hs.into_iter().flat_map(|h| h.join().unwrap()).collect()
+    });
+    let wall = t0.elapsed().as_secs_f64();
+    outs.sort_by_key(|o| o.0);
+    let (mut st, mut lt, mut tpot, mut itl) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+    let (mut toks, mut ok) = (0u64, 0usize);
+    for (g, (t_send, ts, _, nt)) in &outs {
+        toks += nt;
+        let Some(f) = ts.first() else {
+            continue;
+        };
+        let ttft = (*f - *t_send).as_secs_f64() * 1e3;
+        let tp = match ts.len() > 1 {
+            true => (*ts.last().unwrap() - *f).as_secs_f64() * 1e3 / (ts.len() - 1) as f64,
+            false => 0.0,
+        };
+        itl.extend(ts.windows(2).map(|w| (w[1] - w[0]).as_secs_f64() * 1e3));
+        tpot.push(tp);
+        match is_long(*g) {
+            true => lt.push(ttft),
+            false => st.push(ttft),
+        }
+        ok += (tp <= 50.0 && ttft <= 2000.0 + 0.25 * ptoks[*g] as f64) as usize;
+    }
+    let m = prom_parse(&call(a, "GET", "/metrics", "").body);
+    let sl = call(a, "GET", "/slots", "").json();
+    let lost =
+        sl["preempted"].as_f64().unwrap_or(0.0) + sl["prefills_unfed"].as_f64().unwrap_or(0.0);
+    drop(s);
+    let row = vec![
+        toks as f64 / wall,
+        quant(&st, 0.5),
+        quant(&st, 0.9),
+        quant(&st, 1.0),
+        quant(&lt, 0.5),
+        quant(&lt, 1.0),
+        quant(&tpot, 0.5),
+        quant(&itl, 0.99),
+        ok as f64 / reqs as f64,
+        hist_p50(&m, "axon_step_seconds_rows16"),
+        hist_p50(&m, "axon_step_seconds"),
+        lost,
+    ];
+    (row, outs.into_iter().map(|o| o.1.2).collect())
 }
