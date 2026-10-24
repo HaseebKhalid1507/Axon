@@ -1,0 +1,55 @@
+[axon-run 16:46:53] submitted 1024-164653-b997 by /home/haseeb/.cache/axon-wt-moeres-b: /home/haseeb/.cache/axon-moeres/axon-test-dbg-9d85b1f cuda::qwen2::experts:: cuda::qwen2::tests::twin:: --test-threads 1 --nocapture
+[axon-run 17:01:22] scope axon-job-1024-164653-b997-1792875682.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 7470 MB): an OOM here kills only this job
+[axon-run 17:01:22] job 1024-164653-b997 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1024-164653-b997-1792875682 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-moeres/axon-test-dbg-9d85b1f cuda::qwen2::experts:: cuda::qwen2::tests::twin:: --test-threads 1 --nocapture
+axon-q 17:01:22 start slot 16-23: /home/haseeb/.cache/axon-moeres/axon-test-dbg-9d85b1f cuda::qwen2::experts:: cuda::qwen2::tests::twin:: --test-threads 1 --nocapture
+
+running 9 tests
+test cuda::qwen2::experts::tests::cuda_experts_fixture_match_cpu ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+fixture layer 1 nb 1: 64 outputs equal the CPU
+fixture layer 1 nb 6: 384 outputs equal the CPU
+fixture layer 1 nb 48: 3072 outputs equal the CPU
+fixture layer 1 nb 510: 32640 outputs equal the CPU
+fixture layer 1 nb 1024: 65536 outputs equal the CPU
+fixture layer 1: types gate 8 / down 8, 4 experts, k 2, 0 never routed
+fixture layer 2 nb 1: 64 outputs equal the CPU
+fixture layer 2 nb 6: 384 outputs equal the CPU
+fixture layer 2 nb 48: 3072 outputs equal the CPU
+fixture layer 2 nb 510: 32640 outputs equal the CPU
+fixture layer 2 nb 1024: 65536 outputs equal the CPU
+fixture layer 2: types gate 8 / down 8, 4 experts, k 2, 0 never routed
+ok
+test cuda::qwen2::experts::tests::cuda_experts_moonlight_bench ... ignored
+test cuda::qwen2::experts::tests::cuda_experts_moonlight_match_cpu ... moonlight layer 1 nb 1: 2048 outputs equal the CPU
+moonlight layer 1 nb 6: 12288 outputs equal the CPU
+moonlight layer 1 nb 48: 98304 outputs equal the CPU
+moonlight layer 1 nb 510: 1044480 outputs equal the CPU
+moonlight layer 1 nb 1024: 2097152 outputs equal the CPU
+moonlight layer 1: types gate 12 / down 8, 64 experts, k 6, 0 never routed
+moonlight layer 3 nb 1: 2048 outputs equal the CPU
+moonlight layer 3 nb 6: 12288 outputs equal the CPU
+moonlight layer 3 nb 48: 98304 outputs equal the CPU
+moonlight layer 3 nb 510: 1044480 outputs equal the CPU
+moonlight layer 3 nb 1024: 2097152 outputs equal the CPU
+moonlight layer 3: types gate 12 / down 6, 64 experts, k 6, 0 never routed
+moonlight layer 26 nb 1: 2048 outputs equal the CPU
+moonlight layer 26 nb 6: 12288 outputs equal the CPU
+moonlight layer 26 nb 48: 98304 outputs equal the CPU
+moonlight layer 26 nb 510: 1044480 outputs equal the CPU
+moonlight layer 26 nb 1024: 2097152 outputs equal the CPU
+moonlight layer 26: types gate 12 / down 8, 64 experts, k 6, 0 never routed
+ok
+test cuda::qwen2::experts::tests::twin_refusals ... ok
+test cuda::qwen2::tests::twin::gpu_twin_epilogues_match_cpu ... twin epilogues: bias and mode 1 equal the CPU (gemv_tw, gemm2s_*_tw)
+ok
+test cuda::qwen2::tests::twin::gpu_twin_exp_swiglu_match_cpu ... twin exp/swiglu: 1248266 inputs, F true and false, equal (host fused true)
+ok
+test cuda::qwen2::tests::twin::gpu_twin_gemm2s_matches_cpu_r8 ... twin gemm2s: equal for every shape and batch; plain gemm2s differs on 252574
+ok
+test cuda::qwen2::tests::twin::gpu_twin_gemv_matches_cpu_r8 ... twin gemv: equal on every shape; plain gemv1 differs on 10529 rows
+ok
+test cuda::qwen2::tests::twin::gpu_twin_quant_matches_cpu ... twin quant: 60 vectors, every view equal
+ok
+
+test result: ok. 8 passed; 0 failed; 1 ignored; 0 measured; 690 filtered out; finished in 9.84s
+
+[axon-run 17:01:32] exit 0 after 10.0s (host bella)
