@@ -1,0 +1,304 @@
+[axon-run 10:50:40] submitted 1025-105040-8495 by /home/haseeb/.cache/axon-wt-moeres-c: /home/haseeb/.cache/axon-moeres/axon-test-93a53b3 cuda::qwen2::experts:: cuda::qwen2::tests::twin:: moe::ds2_tests::ds2_resident moe::ds2_tests::ds2_gpu_fixture_bits testutil::load_tests model::moe::tests::ram_keep_counts_the_kept_layers serve::tests::moe_parallel_refusal_predicate --test-threads 1 --nocapture
+[axon-run 12:55:54] scope axon-job-1025-105040-8495-1792947354.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 20019 MB): an OOM here kills only this job
+[axon-run 12:55:54] job 1025-105040-8495 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1025-105040-8495-1792947354 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-moeres/axon-test-93a53b3 cuda::qwen2::experts:: cuda::qwen2::tests::twin:: moe::ds2_tests::ds2_resident moe::ds2_tests::ds2_gpu_fixture_bits testutil::load_tests model::moe::tests::ram_keep_counts_the_kept_layers serve::tests::moe_parallel_refusal_predicate --test-threads 1 --nocapture
+axon-q 12:55:54 start slot 16-23: /home/haseeb/.cache/axon-moeres/axon-test-93a53b3 cuda::qwen2::experts:: cuda::qwen2::tests::twin:: moe::ds2_tests::ds2_resident moe::ds2_tests::ds2_gpu_fixture_bits testutil::load_tests model::moe::t
+
+running 20 tests
+test cuda::qwen2::experts::tests::cuda_experts_fixture_match_cpu ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+fixture layer 1 nb 1: 64 outputs equal the CPU
+fixture layer 1 nb 6: 384 outputs equal the CPU
+fixture layer 1 nb 48: 3072 outputs equal the CPU
+fixture layer 1 nb 510: 32640 outputs equal the CPU
+fixture layer 1 nb 1024: 65536 outputs equal the CPU
+fixture layer 1: types gate 8 / down 8, 4 experts, k 2, 0 never routed
+fixture layer 2 nb 1: 64 outputs equal the CPU
+fixture layer 2 nb 6: 384 outputs equal the CPU
+fixture layer 2 nb 48: 3072 outputs equal the CPU
+fixture layer 2 nb 510: 32640 outputs equal the CPU
+fixture layer 2 nb 1024: 65536 outputs equal the CPU
+fixture layer 2: types gate 8 / down 8, 4 experts, k 2, 0 never routed
+ok
+test cuda::qwen2::experts::tests::cuda_experts_moonlight_bench ... ignored
+test cuda::qwen2::experts::tests::cuda_experts_moonlight_match_cpu ... moonlight layer 1 nb 1: 2048 outputs equal the CPU
+moonlight layer 1 nb 6: 12288 outputs equal the CPU
+moonlight layer 1 nb 48: 98304 outputs equal the CPU
+moonlight layer 1 nb 510: 1044480 outputs equal the CPU
+moonlight layer 1 nb 1024: 2097152 outputs equal the CPU
+moonlight layer 1: types gate 12 / down 8, 64 experts, k 6, 0 never routed
+moonlight layer 3 nb 1: 2048 outputs equal the CPU
+moonlight layer 3 nb 6: 12288 outputs equal the CPU
+moonlight layer 3 nb 48: 98304 outputs equal the CPU
+moonlight layer 3 nb 510: 1044480 outputs equal the CPU
+moonlight layer 3 nb 1024: 2097152 outputs equal the CPU
+moonlight layer 3: types gate 12 / down 6, 64 experts, k 6, 0 never routed
+moonlight layer 26 nb 1: 2048 outputs equal the CPU
+moonlight layer 26 nb 6: 12288 outputs equal the CPU
+moonlight layer 26 nb 48: 98304 outputs equal the CPU
+moonlight layer 26 nb 510: 1044480 outputs equal the CPU
+moonlight layer 26 nb 1024: 2097152 outputs equal the CPU
+moonlight layer 26: types gate 12 / down 8, 64 experts, k 6, 0 never routed
+ok
+test cuda::qwen2::experts::tests::cuda_experts_qwen3moe_match_cpu ... qwen3moe-pruned layer 0 nb 1: 2048 outputs equal the CPU
+qwen3moe-pruned layer 0 nb 6: 12288 outputs equal the CPU
+qwen3moe-pruned layer 0 nb 48: 98304 outputs equal the CPU
+qwen3moe-pruned layer 0 nb 510: 1044480 outputs equal the CPU
+qwen3moe-pruned layer 0 nb 1024: 2097152 outputs equal the CPU
+qwen3moe-pruned layer 0: types gate 12 / down 12, 128 experts, k 8, 0 never routed
+qwen3moe-pruned layer 1 nb 1: 2048 outputs equal the CPU
+qwen3moe-pruned layer 1 nb 6: 12288 outputs equal the CPU
+qwen3moe-pruned layer 1 nb 48: 98304 outputs equal the CPU
+qwen3moe-pruned layer 1 nb 510: 1044480 outputs equal the CPU
+qwen3moe-pruned layer 1 nb 1024: 2097152 outputs equal the CPU
+qwen3moe-pruned layer 1: types gate 12 / down 12, 128 experts, k 8, 0 never routed
+qwen3moe-pruned layer 2 nb 1: 2048 outputs equal the CPU
+qwen3moe-pruned layer 2 nb 6: 12288 outputs equal the CPU
+qwen3moe-pruned layer 2 nb 48: 98304 outputs equal the CPU
+qwen3moe-pruned layer 2 nb 510: 1044480 outputs equal the CPU
+qwen3moe-pruned layer 2 nb 1024: 2097152 outputs equal the CPU
+qwen3moe-pruned layer 2: types gate 12 / down 14, 128 experts, k 8, 0 never routed
+qwen3moe-4x0.6b layer 0 nb 1: 1024 outputs equal the CPU
+qwen3moe-4x0.6b layer 0 nb 6: 6144 outputs equal the CPU
+qwen3moe-4x0.6b layer 0 nb 48: 49152 outputs equal the CPU
+qwen3moe-4x0.6b layer 0 nb 510: 522240 outputs equal the CPU
+qwen3moe-4x0.6b layer 0 nb 1024: 1048576 outputs equal the CPU
+qwen3moe-4x0.6b layer 0: types gate 12 / down 14, 4 experts, k 2, 0 never routed
+qwen3moe-4x0.6b layer 3 nb 1: 1024 outputs equal the CPU
+qwen3moe-4x0.6b layer 3 nb 6: 6144 outputs equal the CPU
+qwen3moe-4x0.6b layer 3 nb 48: 49152 outputs equal the CPU
+qwen3moe-4x0.6b layer 3 nb 510: 522240 outputs equal the CPU
+qwen3moe-4x0.6b layer 3 nb 1024: 1048576 outputs equal the CPU
+qwen3moe-4x0.6b layer 3: types gate 12 / down 12, 4 experts, k 2, 0 never routed
+ok
+test cuda::qwen2::experts::tests::expert_biases_refused_before_upload ... ok
+test cuda::qwen2::experts::tests::resident_placement_and_identity ... ok
+test cuda::qwen2::experts::tests::twin_refusals ... ok
+test cuda::qwen2::tests::twin::gpu_twin_epilogues_match_cpu ... twin epilogues: bias and mode 1 equal the CPU (gemv_tw, gemm2s_*_tw)
+ok
+test cuda::qwen2::tests::twin::gpu_twin_exp_swiglu_match_cpu ... twin exp/swiglu: 1248266 inputs, F true and false, equal (host fused true)
+ok
+test cuda::qwen2::tests::twin::gpu_twin_gemm2s_matches_cpu_r8 ... twin gemm2s: equal for every shape and batch; plain gemm2s differs on 252574
+ok
+test cuda::qwen2::tests::twin::gpu_twin_gemv_matches_cpu_r8 ... twin gemv: equal on every shape; plain gemv1 differs on 10529 rows
+ok
+test cuda::qwen2::tests::twin::gpu_twin_quant_matches_cpu ... twin quant: 60 vectors, every view equal
+ok
+test model::moe::tests::ram_keep_counts_the_kept_layers ... ok
+test moe::ds2_tests::ds2_gpu_fixture_bits ... ok
+test moe::ds2_tests::ds2_resident_fallbacks_build_once ... fallback (AXON_REPACK=0): attention + router on the GPU (0.00 GiB, ctx 32), 4 experts x 2 layers on the CPU (top-2); no experts resident: AXON_REPACK=0: the CPU experts aren't the r8 kernels the GPU twins match
+fallback (fused): attention + router on the GPU (0.00 GiB, ctx 32), 4 experts x 2 layers on the CPU (top-2); no experts resident: the twins' F (true) isn't the host CPU's vmath::fused() (false)
+fallback (qwen3moe): attention + router on the GPU (0.00 GiB, ctx 32), 4 experts x 2 layers on the CPU (top-2); no experts resident: resident experts: deepseek2 only for now (qwen3moe)
+ok
+test moe::ds2_tests::ds2_resident_fixture_bits ... fixture Opt { q_lora: false, yarn: false } N(0): resident [], bits equal
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_gate_exps.weight was released after repacking; load the model again to read it
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_down_exps.weight was released after repacking; load the model again to read it
+fixture Opt { q_lora: false, yarn: false } N(1): resident [1], bits equal
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_gate_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_down_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.2.ffn_gate_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.2.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.2.ffn_down_exps.weight was released after repacking; load the model again to read it
+fixture Opt { q_lora: false, yarn: false } N(2): resident [1, 2], bits equal
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_gate_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_down_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.2.ffn_gate_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.2.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.2.ffn_down_exps.weight was released after repacking; load the model again to read it
+fixture Opt { q_lora: false, yarn: false } Auto: resident [1, 2], bits equal
+fixture Opt { q_lora: true, yarn: false } N(0): resident [], bits equal
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_gate_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_down_exps.weight was released after repacking; load the model again to read it
+fixture Opt { q_lora: true, yarn: false } N(1): resident [1], bits equal
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_gate_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_down_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.2.ffn_gate_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.2.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.2.ffn_down_exps.weight was released after repacking; load the model again to read it
+fixture Opt { q_lora: true, yarn: false } N(2): resident [1, 2], bits equal
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_gate_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_down_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.2.ffn_gate_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.2.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.2.ffn_down_exps.weight was released after repacking; load the model again to read it
+fixture Opt { q_lora: true, yarn: false } Auto: resident [1, 2], bits equal
+fixture Opt { q_lora: false, yarn: true } N(0): resident [], bits equal
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_gate_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_down_exps.weight was released after repacking; load the model again to read it
+fixture Opt { q_lora: false, yarn: true } N(1): resident [1], bits equal
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_gate_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_down_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.2.ffn_gate_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.2.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.2.ffn_down_exps.weight was released after repacking; load the model again to read it
+fixture Opt { q_lora: false, yarn: true } N(2): resident [1, 2], bits equal
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_gate_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_down_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.2.ffn_gate_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.2.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.2.ffn_down_exps.weight was released after repacking; load the model again to read it
+fixture Opt { q_lora: false, yarn: true } Auto: resident [1, 2], bits equal
+fixture Opt { q_lora: true, yarn: true } N(0): resident [], bits equal
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_gate_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_down_exps.weight was released after repacking; load the model again to read it
+fixture Opt { q_lora: true, yarn: true } N(1): resident [1], bits equal
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_gate_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_down_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.2.ffn_gate_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.2.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.2.ffn_down_exps.weight was released after repacking; load the model again to read it
+fixture Opt { q_lora: true, yarn: true } N(2): resident [1, 2], bits equal
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_gate_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.1.ffn_down_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.2.ffn_gate_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.2.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::ds2_tests::ds2_resident_fixture_bits' (1730446) panicked at src/gguf.rs:581:13:
+tensor blk.2.ffn_down_exps.weight was released after repacking; load the model again to read it
+fixture Opt { q_lora: true, yarn: true } Auto: resident [1, 2], bits equal
+ok
+test moe::ds2_tests::ds2_resident_moonlight_bits ... moonlight N(0): attention + router on the GPU (0.92 GiB, ctx 512), 64 experts x 26 layers on the CPU (top-6)
+moonlight N(0): resident []: bits equal
+moonlight N(6): attention + router on the GPU (0.92 GiB, ctx 512), 64 experts x 20 layers on the CPU (top-6); 6 of 26 expert layers resident on the GPU (1.87 GiB)
+moonlight N(6): resident [3, 4, 6, 7, 9, 10]: bits equal
+moonlight N(12): attention + router on the GPU (0.92 GiB, ctx 512), 64 experts x 14 layers on the CPU (top-6); 12 of 26 expert layers resident on the GPU (3.74 GiB)
+moonlight N(12): resident [3, 4, 6, 7, 9, 10, 12, 13, 15, 16, 18, 19]: bits equal
+moonlight Auto: attention + router on the GPU (0.92 GiB, ctx 512), 64 experts x 1 layers on the CPU (top-6); 25 of 26 expert layers resident on the GPU (8.50 GiB)
+moonlight Auto: resident [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]: bits equal
+ok
+test moe::ds2_tests::ds2_resident_ram_refusal_releases_nothing ... ok
+test serve::tests::moe_parallel_refusal_predicate ... ok
+test testutil::load_tests::moe_test_models_are_mapped ... ok
+
+test result: ok. 19 passed; 0 failed; 1 ignored; 0 measured; 701 filtered out; finished in 35.34s
+
+[axon-run 12:56:29] exit 0 after 35.5s (host bella)
