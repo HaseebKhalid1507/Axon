@@ -1,0 +1,2 @@
+[axon-run 04:59:45] submitted 1025-045945-8657 by /home/haseeb/.cache/axon-wt-budget-main: /home/haseeb/.cache/axon-budget/sdab.sh /home/haseeb/.cache/axon-budget/sdab15-a18ff8d-r3 /home/haseeb/.cache/axon-budget/bin/axon-main-d6b7051 /home/haseeb/.cache/axon-budget/bin/axon-a18ff8d /home/haseeb/Projects/axon/models/qwen2.5-1.5b-instruct-q4_k_m.gguf 32 8192 16_32 2
+[axon-run 04:59:45] timing job waiting: foreign GPU load 39 % (zen-bin 2155577 39%), quiet 0 s of the 120 s needed (on bella; > 10 %)

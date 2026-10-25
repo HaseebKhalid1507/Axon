@@ -1,0 +1,54 @@
+[axon-run 04:59:44] submitted 1025-045944-27ab by /home/haseeb/.cache/axon-wt-budget-main: /home/haseeb/.cache/axon-budget/bin/axon-test-a18ff8d serve::tests::serve_sched_ab --exact --ignored --nocapture --test-threads 1
+[axon-run 05:07:57] scope axon-job-1025-045944-27ab-1792919277.scope in app-axonjobs.slice: MemoryMax 4444 MB, MemoryHigh 3999 MB, no swap, oomd pressure kill 80% (claim 2280 MB): an OOM here kills only this job
+[axon-run 05:07:57] job 1025-045944-27ab -> bella: systemd-run --user --scope --quiet --unit=axon-job-1025-045944-27ab-1792919277 --slice=app-axonjobs.slice -p MemoryMax=4444M -p MemoryHigh=3999M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-budget/bin/axon-test-a18ff8d serve::tests::serve_sched_ab --exact --ignored --nocapture --test-threads 1
+
+running 1 test
+test serve::tests::serve_sched_ab ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+[axon-run 05:08:30] FOREIGN_GPU sample max=11% mean=5.2% n=6
+[axon-run 05:09:03] FOREIGN_GPU sample max=14% mean=5.0% n=6 (Xorg 1601 5%, zen-bin 2155577 2%)
+[axon-run 05:09:37] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:10:10] FOREIGN_GPU sample max=26% mean=7.3% n=6
+[axon-run 05:10:43] FOREIGN_GPU sample max=12% mean=3.8% n=6
+[axon-run 05:11:16] FOREIGN_GPU sample max=25% mean=18.2% n=6 (Xorg 1601 23%)
+[axon-run 05:11:50] FOREIGN_GPU sample max=26% mean=13.7% n=6 (kitty 2242904 3%)
+[axon-run 05:12:23] FOREIGN_GPU sample max=53% mean=16.7% n=6 (Xorg 1601 53%)
+[axon-run 05:12:57] FOREIGN_GPU sample max=32% mean=14.2% n=6
+[axon-run 05:13:30] FOREIGN_GPU sample max=32% mean=9.0% n=6 (Xorg 1601 13%, kitty 1671629 1%)
+[axon-run 05:14:04] FOREIGN_GPU sample max=44% mean=11.8% n=6 (Xorg 1601 1%)
+[axon-run 05:14:37] FOREIGN_GPU sample max=9% mean=2.0% n=6 (Xorg 1601 9%)
+[axon-run 05:15:11] FOREIGN_GPU sample max=26% mean=7.0% n=6
+[axon-run 05:15:44] FOREIGN_GPU sample max=25% mean=4.2% n=6
+[axon-run 05:16:18] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:16:51] FOREIGN_GPU sample max=28% mean=4.7% n=6
+[axon-run 05:17:25] FOREIGN_GPU sample max=31% mean=5.2% n=6
+[axon-run 05:17:58] FOREIGN_GPU sample max=28% mean=11.8% n=6 (kitty 1671629 19%)
+[axon-run 05:18:32] FOREIGN_GPU sample max=43% mean=7.2% n=6 (zen-bin 2155577 34%, Xorg 1601 9%)
+[axon-run 05:19:06] FOREIGN_GPU sample max=25% mean=9.7% n=6 (Xorg 1601 20%)
+[axon-run 05:19:39] FOREIGN_GPU sample max=20% mean=3.7% n=6
+[axon-run 05:20:12] FOREIGN_GPU sample max=28% mean=13.2% n=6
+[axon-run 05:20:46] FOREIGN_GPU sample max=14% mean=5.2% n=6 (kitty 2242904 2%, Xorg 1601 1%)
+[axon-run 05:21:20] FOREIGN_GPU sample max=12% mean=6.0% n=6
+[axon-run 05:21:53] FOREIGN_GPU sample max=15% mean=7.7% n=6 (zen-bin 2155577 12%)
+[axon-run 05:22:26] FOREIGN_GPU sample max=33% mean=10.5% n=6 (Xorg 1601 33%)
+[axon-run 05:23:00] FOREIGN_GPU sample max=13% mean=2.7% n=6
+[axon-run 05:23:33] FOREIGN_GPU sample max=13% mean=4.5% n=6 (Xorg 1601 8%, kitty 2242904 3%, kitty 99200 2%)
+[axon-run 05:24:06] FOREIGN_GPU sample max=32% mean=6.0% n=6 (Xorg 1601 1%)
+[axon-run 05:24:39] FOREIGN_GPU sample max=56% mean=20.7% n=6 (zen-bin 2155577 13%)
+[axon-run 05:25:13] FOREIGN_GPU sample max=33% mean=23.5% n=6 (Xorg 1601 11%, zen-bin 2155577 10%)
+[axon-run 05:25:47] FOREIGN_GPU sample max=36% mean=16.0% n=6
+[axon-run 05:26:20] FOREIGN_GPU sample max=34% mean=13.8% n=6
+[axon-run 05:26:54] FOREIGN_GPU sample max=18% mean=3.0% n=6
+[axon-run 05:27:27] FOREIGN_GPU sample max=35% mean=14.0% n=6 (Xorg 1601 32%, zen-bin 2155577 3%)
+[axon-run 05:28:01] FOREIGN_GPU sample max=18% mean=10.5% n=6 (Xorg 1601 9%)
+[axon-run 05:28:34] FOREIGN_GPU sample max=13% mean=4.5% n=6
+[axon-run 05:29:08] FOREIGN_GPU sample max=25% mean=6.7% n=6
+[axon-run 05:29:41] FOREIGN_GPU sample max=24% mean=6.7% n=6
+[axon-run 05:30:14] FOREIGN_GPU sample max=23% mean=5.5% n=6 (zen-bin 2155577 4%)
+[axon-run 05:30:48] FOREIGN_GPU sample max=27% mean=7.8% n=6 (zen-bin 2155577 3%, kitty 1671629 3%)
+[axon-run 05:31:21] FOREIGN_GPU sample max=9% mean=6.2% n=6 (zen-bin 2155577 9%)
+[axon-run 05:31:55] FOREIGN_GPU sample max=17% mean=6.3% n=6 (kitty 1671629 3%)
+[axon-run 05:32:28] FOREIGN_GPU sample max=4% mean=1.8% n=6 (zen-bin 2155577 4%)
+[axon-run 05:32:41] SCOPE OOM-KILLED: systemd: axon-job-1025-045944-27ab-1792919277.scope Result=oom-kill; systemd-oomd: Marked /user.slice/user-1000.slice/user@1000.service/app.slice/app-axonjobs.slice/axon-job-1025-045944-27ab-1792919277.scope for killing due to memory pressure  (MemoryMax 4444 MB)
+[axon-run 05:32:41] exit 137 after 1484.2s (host bella)
+[axon-run 05:32:46] FOREIGN_GPU max=56% mean=8.2% samples=266 top: Xorg 1601 56%  TAINTED (mean > 5% or max > 25%): timing numbers not trustworthy, rerun
+[axon-run 05:32:46] timing job waiting: foreign GPU load 17 % 67 s ago (Xorg 1601 8%, kitty 2242904 5%, zen-bin 2155577 3%, kitty 99), quiet 67 s of the 120 s needed (on bella; > 10 %)
