@@ -203,7 +203,13 @@ pub fn ds2_model() -> Option<Model> {
         eprintln!("skipping: {} not present (optional)", path.display());
         return None;
     }
-    Some(load_moe(&path).expect("load deepseek2 model"))
+    // The default loader: mapped (a MoE model is `MapOnly`, as `load_moe`)
+    // and under the strict release guard (`Model::strict_release`), so a
+    // read of a released tensor (residency releases what it uploaded) fails
+    // here as it would on a copy.
+    let m = gguf::load(path.to_str().expect("utf-8 path")).expect("load deepseek2 model");
+    assert!(m.file_backed(), "a MoE model is mapped");
+    Some(m)
 }
 
 /// A MoE test model loaded as `axon` runs one: the file mapped, never
