@@ -1,0 +1,29 @@
+{
+ "label": "budgetm-a18ff8d-mix15-r2",
+ "verdict": "ALL PASS; TAINTED timing",
+ "jobs": [
+  {
+   "job": "1025-021947-c34f",
+   "name": "budgetm-a18ff8d-mix15-bella-r2",
+   "rc": 0,
+   "verdict": "PASS TAINTED (FOREIGN_GPU max=44% mean=17.8%)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "a18ff8d",
+   "binary": "axon-test-a18ff8d",
+   "started": 1792909588.247928,
+   "ended": 1792909664.456505,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": "FOREIGN_GPU max=44% mean=17.8%",
+   "redactions": {},
+   "log_sha256": "2083b6ed9d782debb6c02a46e406a11c790ab924945078252d886b993a087d67",
+   "log_bytes": 3995
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-25 02:27:45 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
