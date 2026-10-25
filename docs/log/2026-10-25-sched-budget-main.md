@@ -1,29 +1,35 @@
 # A measured step budget for `axon serve` (shipped), shortest-first admission (opt-in), on main (PR #131)
 
-- Date: 2026-10-25. Branch: feat/sched-budget-main. Base: main d6b7051. Status: open (draft, gates pending)
+- Date: 2026-10-25. Branch: feat/sched-budget-main. Base: main fcde887 (first built on d6b7051; main merged in
+  375ce65). Code head e76c01f. Status: open; review shady 9/10 APPROVE conditional on the e76c01f gates.
 - Pick / design: roadmap "Next" item 1 (c) and (d); spec `specs/sched-sjf-token-budget.md` (Okarin, 10-20).
 - Supersedes #126 (the same work stacked on #119's hybrid step; #119 failed its kill rules and was closed: the
-  roadmap's "else revert it and keep (c)/(d)"). This is (c)+(d) in the two-pass path only: no fused pass, no
-  `fused_share`, no `AXON_HYBRID`.
+  roadmap's "else revert it and keep (c)/(d)"). Two-pass path only: no fused pass, no `fused_share`, no
+  `AXON_HYBRID`.
 
-## What changed
-- `src/serve/engine.rs`: `StepCost` (a pass's fixed µs, µs per prompt-token unit, decode-only ms per row-count
-  bucket; learned from the steps that run). `--step-ms` (default 50; `--prefill-ms` kept as its alias) turns it
-  into the chunk (`two_pass_budget`: the modelled decode step at this row count instead of the last step's time;
-  `plan_charged` charges a pass per prompt fed). `--step-tokens N` pins it.
-- Admission: `admit_gate` (long prompts take one of `--prefill-lanes` lanes, default slots/16 in 2..8; short ones,
-  fed whole in a step, never wait for a lane, only for about two steps' worth of short prompts already queued, by
-  tokens and by passes), `admit_key` (aged past `--admit-age-ms` 3000 first, then the shortest uncached prompt,
-  then arrival). The short bound is the step's capacity (`two_pass_capacity`), not the current plan.
-- `src/serve.rs`: `--admit-order sjf` (default) pulls up to max(slots, 16) requests off the channel and admits
-  several per engine iteration; `fifo` runs main's loop verbatim. `AXON_ADMIT=fifo` sets it from the environment.
-  After a refusal for pages, short prompts that fit still start until the refused request has waited 2x the age
-  bound (`pages_block`).
-- `/metrics`: `axon_step_seconds`, `axon_step_seconds_rows16` (steps that fed prompt beside rows), cost gauges,
+## What changed (what ships)
+- **(d), on by default.** `src/serve/engine.rs` `StepCost`: a pass's fixed µs, µs per prompt-token unit and
+  decode-only ms per row-count bucket, learned from the steps that run. `--step-ms` (**default 60**, main's
+  `--prefill-ms`, kept as an alias) sizes each step's chunk beside the modelled decode step at this row count
+  (`two_pass_budget`), charging a pass per prompt fed (`plan_charged`). A step feeds at most the prompts that budget
+  fits (`step_prompts`; 1 before anything is measured). `--step-tokens N` pins a step's prompt tokens and lifts that
+  bound.
+- **Admission: main's, by default.** `--admit-order fifo` (default) runs main's loop verbatim, with 2 prefill lanes
+  at any slot count (main's `MAX_PREFILLING`).
+- **(c), opt-in:** `--admit-order sjf` / `AXON_ADMIT=sjf`. It pulls up to max(slots, 16) waiting requests and
+  admits several per iteration:
+  - `admit_key`: aged past `--admit-age-ms` (3000) first, then the shortest uncached prompt, then arrival;
+  - `admit_gate`: long prompts take one of `--prefill-lanes` lanes (default slots/16 in 2..8); shorts, sized by the
+    step's capacity, never wait for a lane, only for about two steps' worth by tokens and by passes;
+  - after a pages refusal, short prompts still start until the refused request has waited 2× the age bound
+    (`pages_block`).
+- `/metrics`: `axon_step_seconds`, `axon_step_seconds_rows16`, `axon_step_prompt_tokens`, cost gauges,
   `axon_step_cost_legacy`, lanes, waiting count; `/slots` lists the waiting requests.
-- Rollback without a revert: `--admit-order fifo` with `AXON_STEP_COST=legacy` (`--step-ms 60`, main's default
-  budget, and `--prefill-lanes 2` past 32 slots) = main's decisions, bit for bit
-  (`legacy_reproduces_main_decisions`, 20,000 random states against frozen copies of main's `budget` and `plan`).
+- **Rollback without a revert:** `AXON_STEP_COST=legacy` alone (without `AXON_ADMIT=sjf`) = main's decisions, bit
+  for bit: `legacy_reproduces_main_decisions` (20,000 random states against frozen copies of main's `budget` and
+  `plan`) and `legacy_alone_is_main_admission` (fifo, 2 lanes, 1–256 slots).
+- As first built (a18ff8d, d6b7051): sjf was the default with slots/16 lanes and `--step-ms 50`. The kill rule
+  failed (c) and (d)@50, so 6cb98fc set the defaults above (see Outcome).
 
 ## Why
 The spec's reading of the H100 showdown (run h100-1019-2058): the mix C=128 short-prompt TTFT (p50 2.4-2.9 s, max
@@ -31,6 +37,21 @@ The spec's reading of the H100 showdown (run h100-1019-2058): the mix C=128 shor
 speed; and main's step lands 8 ms over the 50 ms ITL SLO (`--prefill-ms 60`). See the spec §0-§1.
 
 ## How it was verified
+Gates of record, at the code head e76c01f (base fcde887):
+
+| gate | result | job ID |
+|---|---|---|
+| fast tier, release | GATE_9BD9 | avante 1025-192359-9bd9 |
+| debug `serve::` + `cuda::qwen2::slots::`, GPU | GATE_D13B | avante 1025-192400-d13b |
+| `serve::` release, `AXON_ADMIT=sjf` | GATE_915C | avante 1025-192400-915c |
+| `serve::` release, `AXON_STEP_COST=legacy` alone | GATE_D94A | avante 1025-192401-d94a |
+| md5 of `gen`, main fcde887 vs e76c01f, same host | GATE_15DD | bella 1025-192401-15dd |
+| serve digests (main, defaults, legacy, sjf 50, sjf lanes 8 / age 0, step-tokens 64; 0.5B, 1.5B) | GATE_3B4D | bella 1025-192402-3b4d |
+| clippy -D warnings (bin + test), rustfmt | clean | local |
+| pure engine tests (incl. `legacy_reproduces_main_decisions`, `legacy_alone_is_main_admission`) | 25 passed | local |
+
+Earlier gates (history):
+
 | gate | result | job ID |
 |---|---|---|
 | fast tier, release (a18ff8d) | 642 passed, 0 failed, 49 ignored | avante 1025-011101-7b35 |
@@ -96,8 +117,11 @@ sdab15 1025-183047-34df; avante 1.5B 1025-174837-1554, 0.5B sd 1025-174837-bf3d.
 - (d) @50 was measured on the sjf50 arm (no fifo50 run); the step histogram has 5 ms buckets, so 60.0 ms is one bucket
   past the 57.5 limit.
 - The sdab15 C=16 −6 % aggregate is confounded: sd_client salts each cell randomly, so arms ran different prompts and
-  output lengths (fifo60 6,927 vs main 7,783 tokens in one round). For #139, `sdab.sh` fixes the salt per (round, C)
-  and adds a same-binary `roll` arm.
+  output lengths (fifo60 6,927 vs main 7,783 tokens in one round). For #139, `sdab.sh` (out of repo, gist
+  https://gist.github.com/HaseebKhalid1507/dcf2adeb13686b219d81ab41e13d3d4a) fixes the salt per (round, C), adds a
+  same-binary `roll` arm and a `shipped` arm with no scheduling flags, runs every server under `env -u AXON_ADMIT -u
+  AXON_STEP_COST`, fails loudly if a server doesn't come up, and checks, rather than assumes, that `text_sha` and
+  `completion_tokens` are equal across all six arms per (round, C, request): a `BITS` line, exit 2 if not.
 - Review (shady 8/10 on #131): M1 the defaults test followed no env under the AXON_ADMIT=sjf gate; fixed (whole-`Sched`
   compare, `Sched::from_env`, `lanes_for`, `legacy_alone_is_main_admission`). Main fcde887 merged (375ce65). Gates of
   record at e76c01f (PR §6). The 6cb98fc gate jobs were superseded before they ran.
