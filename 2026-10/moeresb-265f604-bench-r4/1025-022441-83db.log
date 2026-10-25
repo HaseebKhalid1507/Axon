@@ -1,0 +1,18 @@
+[axon-run 02:24:41] submitted 1025-022441-83db by /home/haseeb/.cache/axon-wt-moeres-b: /home/haseeb/.cache/axon-moeres/axon-test-265f604 cuda::qwen2::experts::tests::cuda_experts_moonlight_bench --ignored --exact --test-threads 1 --nocapture
+[axon-run 02:35:47] scope axon-job-1025-022441-83db-1792910147.scope in app-axonjobs.slice: MemoryMax 20390 MB, MemoryHigh 18351 MB, no swap, oomd pressure kill 80% (claim 12911 MB): an OOM here kills only this job
+[axon-run 02:35:47] job 1025-022441-83db -> bella: systemd-run --user --scope --quiet --unit=axon-job-1025-022441-83db-1792910147 --slice=app-axonjobs.slice -p MemoryMax=20390M -p MemoryHigh=18351M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-moeres/axon-test-265f604 cuda::qwen2::experts::tests::cuda_experts_moonlight_bench --ignored --exact --test-threads 1 --nocapture
+
+running 1 test
+test cuda::qwen2::experts::tests::cuda_experts_moonlight_bench ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+BENCH moonlight layer 1 (down type 8) nb 48: gpu 1.612 ms, cpu 6.16 ms, x3.8
+BENCH moonlight layer 1 (down type 8) nb 510: gpu 2.283 ms, cpu 22.31 ms, x9.8
+BENCH moonlight layer 1 (down type 8) nb 1024: gpu 3.672 ms, cpu 46.07 ms, x12.5
+BENCH moonlight layer 3 (down type 6) nb 48: gpu 1.350 ms, cpu 4.84 ms, x3.6
+BENCH moonlight layer 3 (down type 6) nb 510: gpu 2.126 ms, cpu 22.91 ms, x10.8
+BENCH moonlight layer 3 (down type 6) nb 1024: gpu 3.456 ms, cpu 44.23 ms, x12.8
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 699 filtered out; finished in 7.61s
+
+[axon-run 02:35:54] exit 0 after 7.7s (host bella)
+[axon-run 02:35:57] FOREIGN_GPU max=0% mean=0.0% samples=1
