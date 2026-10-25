@@ -1,0 +1,29 @@
+{
+ "label": "testmap-43bc8b7-fast-rel-r2",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1025-061646-1db1",
+   "name": "testmap-43bc8b7-fast-rel-r2",
+   "rc": 130,
+   "verdict": "FAIL (rc 130)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "43bc8b7",
+   "binary": "axon-test-43bc8b7",
+   "started": null,
+   "ended": 1792924082.1316037,
+   "attempts": null,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "8ca2b917763d39e8a692a4b345b968bfe8a3521dc1cacbc9d59de63707f4c9fc",
+   "log_bytes": 1215
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-25 06:28:02 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
