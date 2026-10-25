@@ -502,9 +502,11 @@ pub(super) fn build<'a>(m: &'a Model, repack: bool, experts: bool) -> Qwen2<'a> 
     build_only(m, repack, experts, None)
 }
 
-/// `build`, repacking only the matrices of layers `only` if given (the rest
-/// stay in the mapping, read in place): tests that run a few layers'
-/// experts on the CPU without the whole model's r8 arena.
+/// `build`, repacking only the matrices of layers `only` if given: the
+/// other layers' routed experts aren't built (`Weight::absent`: never read,
+/// so the GPU-resident layers' bytes may be released), their other matrices
+/// stay in the mapping. `crate::moe`'s residency, and tests that run a few
+/// layers' experts on the CPU without the whole model's r8 arena.
 pub(super) fn build_only<'a>(
     m: &'a Model,
     repack: bool,
@@ -596,6 +598,9 @@ pub(super) fn build_only<'a>(
             let dst = dst.next().unwrap();
             match slice {
                 None => Weight::load(m, t, dst, true),
+                Some(_) if only.is_some_and(|o| !o.contains(&i)) && is_expert(t) => {
+                    Weight::absent(t)
+                }
                 Some(e) => {
                     let repacked = dst.is_some();
                     let w = Weight::load_bytes(t, moe::expert_bytes(m, t, e), dst);

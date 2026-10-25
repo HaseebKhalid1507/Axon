@@ -167,6 +167,17 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
             },
         };
         let skip = res.as_ref().map_or(Vec::new(), |r| r.which());
+        // The resident layers' experts live on the GPU now: hand their host
+        // bytes back (the page cache of a mapped file, the memory of a copy).
+        // Nothing reads them again: the CPU half doesn't build them
+        // (`new_experts_except`), and residency is final here.
+        for t in &m.tensors {
+            if crate::model::MOE_EXPS.iter().any(|s| t.name.ends_with(s))
+                && usize::try_from(t.layer).is_ok_and(|l| skip.contains(&l))
+            {
+                m.release(t);
+            }
+        }
         if want != GpuExperts::N(0) {
             crate::model::moe_check_ram_keep(m, &skip)?;
         }

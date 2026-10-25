@@ -93,6 +93,17 @@ impl<'a> Weight<'a> {
         w
     }
 
+    /// A matrix the CPU never runs (a routed expert resident on the GPU):
+    /// no bytes, no repack; never reads `t`'s data, which may be released.
+    /// Any use panics (`bytes`: no raw bytes; no `r8`).
+    fn absent(t: &'a Tensor) -> Weight<'a> {
+        Weight {
+            t,
+            data: None,
+            r8: None,
+        }
+    }
+
     /// `load` of the matrix whose bytes are `data` (all of `t`, or one
     /// expert's slice of a 3-D `t`: a dims[1] x dims[0] matrix either way),
     /// releasing nothing.
@@ -1089,7 +1100,9 @@ impl<'a> Qwen2<'a> {
     }
 
     /// `new_experts` of a deepseek2 model, every layer's experts repacked but
-    /// those of `skip` (resident on the GPU: left in the mapping, never read).
+    /// those of `skip` (resident on the GPU): those aren't built at all
+    /// (`Weight::absent`), so their bytes are never read and may be released
+    /// (`crate::moe` releases them after the upload).
     pub(crate) fn new_experts_except(m: &'a Model, skip: &[usize]) -> Qwen2<'a> {
         if skip.is_empty() {
             return Self::new_experts(m);
@@ -1102,7 +1115,8 @@ impl<'a> Qwen2<'a> {
     }
 
     /// `new_experts` of a deepseek2 model with only layers `layers`' experts
-    /// repacked (tests: a few layers' CPU experts without the whole arena).
+    /// built (tests: a few layers' CPU experts without the whole arena; the
+    /// other layers' are absent).
     #[cfg(test)]
     pub(crate) fn new_experts_of(m: &'a Model, layers: &[usize]) -> Qwen2<'a> {
         assert_eq!(m.arch, "deepseek2", "new_experts_of: deepseek2 only");

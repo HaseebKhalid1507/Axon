@@ -401,6 +401,18 @@ fn ds2_resident_fixture_bits() {
                 GpuExperts::Auto => 2,
             };
             assert_eq!(r.len(), expect, "{o:?} {want:?}: {}", net.describe(n));
+            // The resident layers' host bytes were handed back (the fixture is
+            // anonymous memory: reading them now panics), and nothing below
+            // reads them: the CPU half doesn't build those experts.
+            for t in m.tensors.iter().filter(|t| {
+                crate::model::MOE_EXPS.iter().any(|s| t.name.ends_with(s))
+                    && usize::try_from(t.layer).is_ok_and(|l| r.contains(&l))
+            }) {
+                let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    m.tensor_data(t).len()
+                }));
+                assert!(read.is_err(), "{o:?} {want:?}: {} not released", t.name);
+            }
             let ids = ids_for(n, net.vocab(), 5);
             let tr = resident_trace(&net, &ids, &[1, 7, 13, 2, 33], 24);
             assert!(tr.iter().flatten().all(|v| v.is_finite()));
@@ -451,8 +463,11 @@ fn ds2_resident_moonlight_bits() {
         GpuExperts::N(12),
         GpuExperts::Auto,
     ] {
+        // A fresh mapping per placement, as each `axon` process has: a build
+        // releases what it repacked or uploaded (`Model::release`).
+        let mi = crate::testutil::ds2_model().unwrap();
         let net =
-            MoeQwen3::new_with(&g, &km, &ml, &m, 512, CacheKv::F16, false, true, want).unwrap();
+            MoeQwen3::new_with(&g, &km, &ml, &mi, 512, CacheKv::F16, false, true, want).unwrap();
         let r = net.resident_layers();
         eprintln!("moonlight {want:?}: {}", net.describe(512));
         // Not vacuous (#127 review): every N > 0 places exactly N layers and
