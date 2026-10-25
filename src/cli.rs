@@ -126,7 +126,8 @@ flags:
               tokens it feeds beside their decode step are what fits at the cost measured as
               steps run (0: exactly --prefill-chunk tokens). --prefill-ms is its old name.
               AXON_STEP_COST=legacy: the budget before (MS less the last decode step)
-  --step-tokens N  serve: pin a step's prompt tokens (default 0: --step-ms)
+  --step-tokens N  serve: pin a step's prompt tokens (default 0: --step-ms; AXON_STEP_COST=legacy
+              ignores it: main's budget)
   --admit-order sjf|fifo  serve: waiting requests start shortest prompt first, several per
               step (sjf, default), or first come first served, one per step (fifo, the order
               before; AXON_ADMIT=fifo sets it too)

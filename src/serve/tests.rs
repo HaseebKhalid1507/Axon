@@ -2481,9 +2481,15 @@ fn serve_rollback_flags_reach_the_engine() {
 /// done before either long prompt's first token; with `--admit-order fifo`
 /// (the order before: two prompts prefilling at most) it waits for a long
 /// one to finish prefilling, so its first token comes after that one's.
-/// A step's prompt tokens are pinned (`--step-tokens 256`), so the long
-/// prompts take ~16 steps each on any GPU. Every text equals the same
-/// request's alone (a second server), in both orders.
+/// A step's prompt tokens are pinned (`--step-tokens 256`, and the step
+/// cost model on: AXON_STEP_COST=legacy is main's time budget, which
+/// ignores the pin), so the margin is counted in steps, not milliseconds:
+/// a long prompt of ~7000 tokens needs ~27 steps of prefill, the short one
+/// 1 step of prefill and 4 of decode, on any GPU. (With the legacy budget
+/// leaking in from the environment, a 0.5B fed the long prompts in a few
+/// big chunks and the short one won by 1 ms or lost by 1 ms: avante job
+/// 1025-011103-2a37.) Every text equals the same request's alone (a
+/// second server), in both orders.
 #[test]
 fn serve_sjf_short_ahead_of_long() {
     let Some(_) = crate::testutil::gpu() else {
@@ -2507,7 +2513,7 @@ fn serve_sjf_short_ahead_of_long() {
         }
     };
     let longs: Vec<Value> = (0..2)
-        .map(|i| json!({"prompt": long_text(70 + i, 5000), "max_tokens": 8, "temperature": 0}))
+        .map(|i| json!({"prompt": long_text(70 + i, 7000), "max_tokens": 8, "temperature": 0}))
         .collect();
     let short = json!({"prompt": "Name three colours of the rainbow:", "max_tokens": 4,
                        "temperature": 0});
@@ -2524,6 +2530,7 @@ fn serve_sjf_short_ahead_of_long() {
             o.sched.order = order;
             o.sched.lanes = 2;
             o.sched.step_tokens = 256;
+            o.sched.legacy = false;
         }
     };
     use super::engine::AdmitOrder::{Fifo, Sjf};
@@ -2544,6 +2551,18 @@ fn serve_sjf_short_ahead_of_long() {
         let s = server_with(path, Device::Cuda, opts(order));
         let a = s.addr;
         let paged = call(a, "GET", "/slots", "").json()["pages_total"].is_number();
+        // The pin holds only with the step cost model (not legacy).
+        let legacy = || {
+            prom_parse(&call(a, "GET", "/metrics", "").body)
+                .get("axon_step_cost_legacy")
+                .copied()
+        };
+        wait_for("the engine's gauges", || legacy().is_some());
+        assert_eq!(
+            legacy(),
+            Some(0.0),
+            "{order:?}: the step pin needs the cost model"
+        );
         let g = &s.generated;
         let (ds, ls, sh) = std::thread::scope(|sc| {
             let ds: Vec<_> = (decoders.iter())
@@ -2556,8 +2575,7 @@ fn serve_sjf_short_ahead_of_long() {
                 ls.push(sc.spawn(move || stream_times(a, b)));
                 wait_for("a long prompt admitted", || busy(a) >= 5 + k);
             }
-            // A step or two later: the short one.
-            std::thread::sleep(Duration::from_millis(30));
+            // The short one, as soon as both long ones hold a lane.
             let sh = stream_times(a, &short);
             let ls: Vec<_> = ls.into_iter().map(|h| h.join().unwrap()).collect();
             let ds: Vec<_> = ds.into_iter().map(|h| h.join().unwrap()).collect();
