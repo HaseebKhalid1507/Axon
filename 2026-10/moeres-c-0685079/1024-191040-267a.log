@@ -1,0 +1,17 @@
+[axon-run 19:10:40] submitted 1024-191040-267a by /home/haseeb/.cache/axon-wt-moeres-c: /home/haseeb/.cache/axon-moeres/killrule.sh /home/haseeb/.cache/axon-moeres/axon-0685079 3
+[axon-run 00:46:40] scope axon-job-1024-191040-267a-1792903600.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 14000 MB): an OOM here kills only this job
+[axon-run 00:46:40] job 1024-191040-267a -> bella: systemd-run --user --scope --quiet --unit=axon-job-1024-191040-267a-1792903600 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-moeres/killrule.sh /home/haseeb/.cache/axon-moeres/axon-0685079 3
+1	0	pp=308.72	tg=51.97	ntok=128	rc=0	md5=f96ca95d4c61
+1	auto	pp=860.39	tg=108.95	ntok=128	rc=0	md5=f96ca95d4c61
+2	0	pp=314.60	tg=54.17	ntok=128	rc=0	md5=f96ca95d4c61
+2	auto	pp=862.04	tg=110.72	ntok=128	rc=0	md5=f96ca95d4c61
+3	0	pp=299.24	tg=50.62	ntok=128	rc=0	md5=f96ca95d4c61
+3	auto	pp=893.65	tg=108.76	ntok=128	rc=0	md5=f96ca95d4c61
+moe:         attention + router on the GPU (0.92 GiB, ctx 4096), 64 experts x 26 layers on the CPU (top-6), kv f16
+moe:         attention + router on the GPU (0.92 GiB, ctx 4096), 64 experts x 2 layers on the CPU (top-6); 24 of 26 expert layers resident on the GPU (8.12 GiB), kv f16
+auto tg: 108.95 110.72 108.76 pp: 860.39 862.04 893.65  md5=f96ca95d4c61 md5=f96ca95d4c61 md5=f96ca95d4c61
+0 tg: 51.97 54.17 50.62 pp: 308.72 314.60 299.24  md5=f96ca95d4c61 md5=f96ca95d4c61 md5=f96ca95d4c61
+KILLRULE tg median: 0 51.97 auto 108.95 tok/s = x2.10 (PASS: >= 1.5x); pp: 0 308.7 auto 862.0 = x2.79
+TEXT identical 0 vs auto: True {'0': {'md5=f96ca95d4c61'}, 'auto': {'md5=f96ca95d4c61'}}
+[axon-run 00:47:04] exit 0 after 24.3s (host bella)
+[axon-run 00:47:08] FOREIGN_GPU max=16% mean=9.2% samples=4 top: Xorg 1601 11%, kitty 83347 5%  TAINTED (mean > 5% or max > 25%): timing numbers not trustworthy, rerun
