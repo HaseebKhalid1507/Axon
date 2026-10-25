@@ -175,7 +175,7 @@ pub fn moe_model_path(small: bool) -> Option<PathBuf> {
 /// The qwen3moe test model (`moe_model_path`), or None to skip.
 pub fn moe_model(small: bool) -> Option<Model> {
     let path = moe_model_path(small)?;
-    Some(gguf::load(path.to_str().expect("utf-8 path")).expect("load moe model"))
+    Some(load_moe(&path).expect("load moe model"))
 }
 
 /// deepseek2's real-model test file: Moonlight-16B-A3B-Instruct Q4_K_M
@@ -195,7 +195,18 @@ pub fn ds2_model() -> Option<Model> {
         eprintln!("skipping: {} not present (optional)", path.display());
         return None;
     }
-    Some(gguf::load(path.to_str().expect("utf-8 path")).expect("load deepseek2 model"))
+    Some(load_moe(&path).expect("load deepseek2 model"))
+}
+
+/// A MoE test model loaded as `axon` runs one: the file mapped, never
+/// copied (`load_to_run`'s `CopyWish::MapOnly` for MoE models). `gguf::load`
+/// copies a file under 60% of `MemAvailable` into anonymous memory, and then
+/// `moe::check_ram`, which counts the r8 arena against `MemAvailable`, sees
+/// the copy as used RAM: Moonlight (10.5 GB) copied on a host with 18 GB
+/// available leaves ~10 GB and the 11.3 GB check refuses, while the same
+/// host with less free memory maps the file and passes.
+pub fn load_moe(path: &Path) -> std::io::Result<Model> {
+    gguf::load_with(path.to_str().expect("utf-8 path"), Some(false))
 }
 
 pub fn read_json(rel: &str) -> serde_json::Value {
@@ -380,4 +391,27 @@ pub fn gptoss_model_path() -> Option<PathBuf> {
 pub fn gptoss_model() -> Option<Model> {
     let path = gptoss_model_path()?;
     Some(gguf::load_with(path.to_str().expect("utf-8 path"), Some(false)).expect("load gpt-oss"))
+}
+
+#[cfg(test)]
+mod load_tests {
+    /// MoE test models are mapped (file-backed) whatever `gguf::load` would
+    /// choose for the file: a small model `load` copies is mapped here.
+    #[test]
+    fn moe_test_models_are_mapped() {
+        let Some(p) = super::model_path() else {
+            return;
+        };
+        let m = super::load_moe(&p).unwrap();
+        assert!(m.file_backed(), "{}: copied, not mapped", p.display());
+        if std::env::var_os("AXON_MMAP").is_none()
+            && crate::gguf::mem_available().is_some_and(|a| a > 4 << 30)
+        {
+            let c = crate::gguf::load(p.to_str().unwrap()).unwrap();
+            assert!(
+                !c.file_backed(),
+                "the contrast: gguf::load copies a small file"
+            );
+        }
+    }
 }
