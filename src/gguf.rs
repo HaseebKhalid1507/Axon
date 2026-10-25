@@ -9,6 +9,13 @@ use std::fs::File;
 use std::io::{self, Read};
 
 const GGUF_MAGIC: u32 = 0x46554747;
+/// Whether `Model::tensor_data` refuses a released tensor on a file mapping
+/// too (tests and debug builds). There the read is harmless (the pages fault
+/// back in from the file), but the same read on the anonymous copy
+/// (AXON_MMAP=0, or a model that reads in place) gets zeros: so a bug that
+/// reads after `release` fails in every test, whichever way its model was
+/// loaded. Release builds keep the anonymous-only check.
+const STRICT_RELEASE: bool = cfg!(any(test, debug_assertions));
 /// GGML_MAX_DIMS.
 const MAX_DIMS: u32 = 4;
 /// `general.alignment` when the file doesn't set it.
@@ -558,7 +565,8 @@ impl Model {
     }
 
     /// The tensor's bytes. Panics if they were `release`d from anonymous
-    /// memory (they'd read as zeros).
+    /// memory (they'd read as zeros), and, in tests and debug builds
+    /// (`STRICT_RELEASE`), from a file mapping too.
     pub(crate) fn tensor_data(&self, t: &Tensor) -> &[u8] {
         let r = self.tensor_range(t);
         if t.shard == 0
@@ -572,7 +580,9 @@ impl Model {
             "tensor {} was not converted (a header-only load: gguf::load_header)",
             t.name
         );
-        if !file_backed && self.any_released.load(std::sync::atomic::Ordering::Acquire) {
+        if (!file_backed || STRICT_RELEASE)
+            && self.any_released.load(std::sync::atomic::Ordering::Acquire)
+        {
             // Unlocked before the panic: a caught one leaves the lock usable.
             let gone = (self.released.lock().unwrap().iter())
                 .any(|(s, x)| *s == t.shard && x.start < r.end && r.start < x.end);
@@ -638,7 +648,7 @@ impl Model {
         }
         rel.insert(i, (s, r));
         let (map, file_backed) = self.region(s);
-        if !file_backed {
+        if !file_backed || STRICT_RELEASE {
             self.any_released
                 .store(true, std::sync::atomic::Ordering::Release);
         }
@@ -889,10 +899,7 @@ pub(crate) fn mem_available() -> Option<u64> {
 /// None: copy unless over 60%) is the copy path, for the tests that want it.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn load(path: &str) -> io::Result<Model> {
-    load_to_run(path, None, |m| match crate::model::is_moe(m) {
-        true => CopyWish::MapOnly,
-        false => CopyWish::Want(crate::model::reads_matrices_in_place(m)),
-    })
+    load_to_run(path, None, crate::model::cpu_copy_wish)
 }
 
 /// A model's header for `axon info`: a GGUF mapped (`load_with`), a

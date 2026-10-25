@@ -621,6 +621,17 @@ fn unsupported_type(m: &Model, name: &str, q: crate::gguf::QType) -> String {
 ///
 /// A MoE file is always mapped: its experts are most of it, and a copy
 /// beside the r8 arena would hold them twice (the 30B: 18.6 + 17.9 GB).
+/// The CPU's copy-vs-map wish of a model (`gguf::load_to_run`): a MoE model
+/// always mapped, else a copy only when it reads its matrices in place. The
+/// one policy `crate::load`, `cli::open_model_with` and the tests'
+/// `gguf::load` share.
+pub fn cpu_copy_wish(m: &Model) -> crate::gguf::CopyWish {
+    match moe::is_moe(m) {
+        true => crate::gguf::CopyWish::MapOnly,
+        false => crate::gguf::CopyWish::Want(reads_matrices_in_place(m)),
+    }
+}
+
 pub fn reads_matrices_in_place(m: &Model) -> bool {
     !moe::is_moe(m)
         && reads_in_place_with(m, std::env::var("AXON_REPACK").map_or(true, |v| v != "0"))

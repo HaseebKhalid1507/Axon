@@ -406,31 +406,38 @@ pub fn gptoss_model() -> Option<Model> {
 #[cfg(test)]
 mod load_tests {
     /// The test loaders follow the product's CPU load policy
-    /// (`gguf::load`): the dense test models repack, so they're mapped, and
-    /// a MoE model is always mapped. Then the one explicit test of the copy
-    /// path the tests no longer take by default: `load_with(_, Some(true))`
-    /// copies, and `load_with(_, None)` copies a small file (under 60% of
-    /// the RAM available); both hold the mapped model's bytes.
+    /// (`gguf::load`, `model::cpu_copy_wish`): the dense test models repack,
+    /// so they're mapped, and a MoE model is always mapped. Then the one
+    /// explicit test of the copy path the tests no longer take by default:
+    /// `load_with(_, Some(true))` copies, and `load_with(_, None)` copies a
+    /// small file (under 60% of the RAM available); each holds the mapped
+    /// model's bytes. `mistral_model()` (4.4 GB, optional) isn't loaded
+    /// here: it goes through the same `gguf::load`.
     #[test]
-    fn test_loaders_map_as_the_product_does() {
+    fn loaders_map_as_the_product_does() {
         let Some(p) = super::model_path() else {
             return;
         };
         // A model that reads its matrices in place is copied by the product
         // too (when it fits): only the ones that repack must be mapped.
-        let dense = |m: Option<crate::gguf::Model>, what: &str| {
-            if let Some(m) = m
-                && std::env::var_os("AXON_MMAP").is_none()
-                && !crate::model::reads_matrices_in_place(&m)
-            {
-                assert!(m.file_backed(), "{what}: copied, not mapped");
+        let dense = |m: Option<crate::gguf::Model>, what: &str| match m {
+            None => eprintln!("{what}: model not present, not checked"),
+            Some(_) if std::env::var_os("AXON_MMAP").is_some() => {
+                eprintln!("{what}: AXON_MMAP is set, not checked")
             }
+            Some(m) if crate::model::reads_matrices_in_place(&m) => {
+                eprintln!("{what}: reads in place (the product copies it too), not checked")
+            }
+            Some(m) => assert!(m.file_backed(), "{what}: copied, not mapped"),
         };
         dense(super::model(), "model()");
         dense(super::model_with(None), "model_with(None)");
         dense(super::qwen3_model(), "qwen3_model()");
         dense(super::llama_model(), "llama_model()");
         dense(super::gemma3_model(), "gemma3_model()");
+        // load_moe maps whatever it's given (the 0.5B: a file the copy path
+        // would copy), and gguf::load maps a MoE model.
+        assert!(super::load_moe(&p).unwrap().file_backed());
         if let Some(mp) = super::moe_model_path(false) {
             for m in [
                 super::load_moe(&mp),
@@ -439,17 +446,23 @@ mod load_tests {
                 assert!(m.unwrap().file_backed(), "{}: copied", mp.display());
             }
         }
-        // The copy path, explicitly.
+        // The copy path, explicitly, one copy at a time.
         let path = p.to_str().unwrap();
         let mapped = crate::gguf::load(path).unwrap();
-        let mut copies = vec![crate::gguf::load_with(path, Some(true)).unwrap()];
-        if std::env::var_os("AXON_MMAP").is_none()
-            && crate::gguf::mem_available().is_some_and(|a| a > 4 << 30)
-        {
-            copies.push(crate::gguf::load_with(path, None).unwrap());
+        let mut copies: Vec<Option<bool>> = vec![Some(true)];
+        if std::env::var_os("AXON_MMAP").is_some() {
+            eprintln!("load_with(_, None): AXON_MMAP is set, not checked");
+        } else if crate::gguf::mem_available().is_some_and(|a| a > 4 << 30) {
+            copies.push(None);
+        } else {
+            eprintln!("load_with(_, None): 4 GB or less available, not checked");
         }
-        for c in &copies {
-            assert!(!c.file_backed(), "the copy path copies a small file");
+        for copy in copies {
+            let c = crate::gguf::load_with(path, copy).unwrap();
+            assert!(
+                !c.file_backed(),
+                "{copy:?}: the copy path copies a small file"
+            );
             assert_eq!(c.tensors.len(), mapped.tensors.len());
             for t in &mapped.tensors {
                 assert!(
@@ -459,5 +472,28 @@ mod load_tests {
                 );
             }
         }
+    }
+
+    /// In tests (and debug builds) a released tensor is refused on a file
+    /// mapping too, as on the anonymous copy (`gguf::STRICT_RELEASE`): a
+    /// read after `release` fails whichever way the test loaded its model.
+    #[test]
+    fn released_tensor_refused_on_a_mapping() {
+        let Some(p) = super::model_path() else {
+            return;
+        };
+        let m = crate::gguf::load(p.to_str().unwrap()).unwrap();
+        assert!(m.file_backed());
+        let t = (m.tensors.iter())
+            .find(|t| t.name == "blk.0.ffn_down.weight")
+            .unwrap();
+        m.release(t);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| m.tensor_data(t).len()));
+        assert!(r.is_err(), "a released tensor was readable on the mapping");
+        // Its neighbours are not refused.
+        let u = (m.tensors.iter())
+            .find(|t| t.name == "blk.0.attn_q.weight")
+            .unwrap();
+        assert!(!m.tensor_data(u).is_empty());
     }
 }
