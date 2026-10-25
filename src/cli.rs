@@ -47,7 +47,8 @@ usage:
                                             talk to an instruct model (sampled; --temp 0: greedy)
   axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--draft K] [--draft-model PATH]
             [--device D] [--gpu-layers N] [--kv T] [--alias NAME] [--max-tokens N] [--cors [ORIGIN]]
-            [--max-conns N] [--max-queue N] [--parallel N] [--prefill-chunk N] [--prefill-ms MS]
+            [--max-conns N] [--max-queue N] [--parallel N] [--prefill-chunk N] [--step-ms MS]
+            [--step-tokens N] [--admit-order sjf|fifo] [--admit-age-ms MS] [--prefill-lanes N]
             [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS]
             [--no-think] [--think-inline] [--quiet] [sampling flags; the repeat penalty defaults to 1 (off)]
                                             an OpenAI-compatible HTTP server (/v1/models,
@@ -119,10 +120,22 @@ flags:
               32768 (or the whole one, if less); if not even 2 fit, one request at a time.
               With --ctx N, the slots that fit with N; with --parallel N alone, N slots of
               the longest context that fits them
-  --prefill-ms MS  serve: while requests decode, a step feeds new prompts up to what fits in
-              MS ms beside their decode step (default 60; 0: exactly --prefill-chunk tokens)
-  --prefill-chunk N  serve: at least N prompt tokens per such step (default 256; 0: prompts
-              fed whole, the others' streams wait)
+  --prefill-chunk N  serve: at least N prompt tokens per step while requests decode (default
+              256; 0: prompts fed whole, the others' streams wait)
+  --step-ms MS  serve: a step's target time while requests decode (default 50): the prompt
+              tokens it feeds beside their decode step are what fits at the cost measured as
+              steps run (0: exactly --prefill-chunk tokens). --prefill-ms is its old name.
+              AXON_STEP_COST=legacy: the budget before (MS less the last decode step)
+  --step-tokens N  serve: pin a step's prompt tokens (default 0: --step-ms)
+  --admit-order sjf|fifo  serve: waiting requests start shortest prompt first, several per
+              step (sjf, default), or first come first served, one per step (fifo, the order
+              before; AXON_ADMIT=fifo sets it too)
+  --admit-age-ms MS  serve: a request waiting this long starts before shorter ones (default
+              3000; 0: never)
+  --prefill-lanes N  serve: prompts longer than a step's chunk prefilling at once (default
+              0: parallel/16 within 2..8); with fifo: all prompts prefilling at once.
+              The order before: --admit-order fifo --step-ms 60 with AXON_STEP_COST=legacy
+              (lanes 2 up to 32 slots; --prefill-lanes 2 past that)
   --api-key KEY  serve: every route but /health (and CORS preflights) needs
               `Authorization: Bearer KEY` (else 401); AXON_API_KEY sets it too, out of `ps`
               (trimmed; set but blank is an error)

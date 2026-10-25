@@ -85,6 +85,13 @@ const ITL_BOUNDS: &[f64] = &[
     0.001, 0.0025, 0.005, 0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56,
 ];
 
+/// A batched step that fed prompt beside running rows (what `--step-ms`
+/// aims at), seconds: 5 ms apart to 60, then coarser.
+const STEP_BOUNDS: &[f64] = &[
+    0.005, 0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.045, 0.05, 0.055, 0.06, 0.07, 0.08, 0.1,
+    0.13, 0.16, 0.2, 0.32, 0.64,
+];
+
 /// A Prometheus histogram over fixed bounds.
 pub struct Histogram {
     bounds: &'static [f64],
@@ -195,6 +202,26 @@ impl SlotsView {
     }
 }
 
+/// The scheduler's state for /metrics and GET /slots (`Batch::publish`,
+/// the engine loop's waiting requests).
+#[derive(Clone, Debug, Default)]
+pub struct SchedView {
+    /// Requests the engine took off the queue that wait for a slot: id,
+    /// prompt tokens, arrival.
+    pub waiting: Vec<(u64, usize, Instant)>,
+    /// Long prompts prefilling, and the most at once (`Batch::lanes`).
+    pub lanes_busy: usize,
+    pub lanes: usize,
+    /// The step cost model (`engine::StepCost`): µs per prompt token per
+    /// (depth + 8192), a pass's fixed µs, decode-only step ms per row
+    /// bucket (1, 2, 3-4, ..., 129-256).
+    pub tok_us: Option<f64>,
+    pub pass_us: Option<f64>,
+    pub dec_ms: Vec<Option<f64>>,
+    /// AXON_STEP_COST=legacy (the rollback's budgets).
+    pub legacy: bool,
+}
+
 /// Counters the connection threads and the engine feed.
 pub struct Metrics {
     requests: Mutex<BTreeMap<(&'static str, u16), u64>>,
@@ -211,7 +238,14 @@ pub struct Metrics {
     pub tool_calls_dropped: AtomicU64,
     pub ttft: Histogram,
     pub itl: Histogram,
+    /// Batched steps that fed prompt beside running rows, and those with
+    /// at least 16 rows.
+    pub step: Histogram,
+    pub step16: Histogram,
+    /// The last such step's prompt tokens.
+    pub step_prompt_tokens: AtomicUsize,
     pub slots: Mutex<SlotsView>,
+    pub sched: Mutex<SchedView>,
 }
 
 impl Default for Metrics {
@@ -226,7 +260,11 @@ impl Default for Metrics {
             tool_calls_dropped: AtomicU64::new(0),
             ttft: Histogram::new(TTFT_BOUNDS),
             itl: Histogram::new(ITL_BOUNDS),
+            step: Histogram::new(STEP_BOUNDS),
+            step16: Histogram::new(STEP_BOUNDS),
+            step_prompt_tokens: AtomicUsize::new(0),
             slots: Mutex::default(),
+            sched: Mutex::default(),
         }
     }
 }
@@ -244,6 +282,27 @@ impl Metrics {
         let mut v = lock(&self.slots);
         v.pool = pool;
         v.pages = pages;
+    }
+
+    /// A batched step of `rows` rows that fed `prompt` prompt tokens took `d`.
+    pub fn observe_step(&self, d: Duration, rows: usize, prompt: usize) {
+        self.step.observe(d);
+        if rows >= 16 {
+            self.step16.observe(d);
+        }
+        self.step_prompt_tokens.store(prompt, Ordering::Relaxed);
+    }
+
+    /// The engine's scheduler state (its waiting list kept: `publish_waiting`).
+    pub fn publish_sched(&self, v: SchedView) {
+        let mut s = lock(&self.sched);
+        let waiting = std::mem::take(&mut s.waiting);
+        *s = SchedView { waiting, ..v };
+    }
+
+    /// The requests the engine loop holds, waiting for a slot.
+    pub fn publish_waiting(&self, w: Vec<(u64, usize, Instant)>) {
+        lock(&self.sched).waiting = w;
     }
 
     /// Slot `i`'s state: where a request running alone runs.
@@ -278,10 +337,17 @@ impl Metrics {
                 j
             })
             .collect();
+        let waiting: Vec<_> = (lock(&self.sched).waiting.iter())
+            .map(|&(id, toks, t)| {
+                serde_json::json!({"id": id, "prompt_tokens": toks,
+                    "age_ms": now.saturating_duration_since(t).as_millis() as u64})
+            })
+            .collect();
         let mut j = serde_json::json!({
             "ctx": ctx,
             "slots": pool,
             "queue_depth": self.queue_depth(busy),
+            "waiting": waiting,
         });
         // Graphs given up / steps run kernel by kernel for lack of VRAM
         // (process-wide: never fatal, the same bits).
@@ -376,6 +442,80 @@ impl Metrics {
             "axon_itl_seconds",
             "Time between a request's text events (about one token each).",
         );
+        self.step.render(
+            &mut o,
+            "axon_step_seconds",
+            "Batched steps that fed prompt beside running rows (--step-ms aims at it).",
+        );
+        self.step16.render(
+            &mut o,
+            "axon_step_seconds_rows16",
+            "axon_step_seconds, steps of at least 16 rows.",
+        );
+        gauge(
+            &mut o,
+            "axon_step_prompt_tokens",
+            "Prompt tokens of the last batched step that fed prompt beside running rows.",
+            self.step_prompt_tokens.load(Ordering::Relaxed),
+        );
+        let s = lock(&self.sched).clone();
+        gauge(
+            &mut o,
+            "axon_waiting_requests",
+            "Requests the engine holds, waiting for a slot.",
+            s.waiting.len(),
+        );
+        gauge(
+            &mut o,
+            "axon_prefill_lanes_busy",
+            "Long prompts prefilling (--prefill-lanes).",
+            s.lanes_busy,
+        );
+        gauge(
+            &mut o,
+            "axon_step_cost_legacy",
+            "1: AXON_STEP_COST=legacy (the budgets before the step cost model).",
+            s.legacy as usize,
+        );
+        gauge(
+            &mut o,
+            "axon_prefill_lanes",
+            "Long prompts prefilling at once at most.",
+            s.lanes,
+        );
+        let fgauge = |o: &mut String, name: &str, help: &str, v: Option<f64>| {
+            if let Some(v) = v {
+                let _ = writeln!(o, "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {v}");
+            }
+        };
+        fgauge(
+            &mut o,
+            "axon_step_cost_tok_us",
+            "Step cost model: us per prompt token per (depth + 8192), two-pass.",
+            s.tok_us,
+        );
+        fgauge(
+            &mut o,
+            "axon_step_cost_pass_us",
+            "Step cost model: a pass's fixed us.",
+            s.pass_us,
+        );
+        if s.dec_ms.iter().any(Option::is_some) {
+            let _ = writeln!(
+                o,
+                "# HELP axon_step_cost_dec_ms Step cost model: decode-only step ms by rows bucket (upper bound).\n\
+                 # TYPE axon_step_cost_dec_ms gauge"
+            );
+            for (k, v) in s.dec_ms.iter().enumerate() {
+                if let Some(v) = v {
+                    let _ = writeln!(
+                        o,
+                        "axon_step_cost_dec_ms{{rows_le=\"{}\"}} {v}",
+                        1usize << k
+                    );
+                }
+            }
+        }
         o
     }
 }
