@@ -14,7 +14,8 @@ use axon::{
 };
 
 const MODEL: &str = "models/qwen2.5-0.5b-q4_k_m.gguf";
-/// The second model of the swap test (another architecture: qwen3).
+/// The second model of the swap test (another architecture: qwen3);
+/// `AXON_TEST_QWEN3` overrides it, as for the crate's qwen3 tests.
 const MODEL2: &str = "models/Qwen3-0.6B-Q8_0.gguf";
 const PROMPT: &str = "The capital of France is";
 const N: usize = 12;
@@ -94,17 +95,21 @@ fn device_and_kv_parse() {
     assert_eq!(bytes(KvType::F32), 4);
 }
 
-/// examples/embed.rs's path (load, tokenize, prefill, `generate`) of
-/// `model` on one device, and the same tokens from a decode loop over
-/// `Lm`'s own calls: the generated ids, or None (skipped). The model and
-/// its backend are dropped on return.
-fn gen_on(model: &str, device: Device) -> Option<Vec<u32>> {
-    let path = model_path(model)?;
+/// examples/embed.rs's path (load, tokenize, prefill, `generate`) of the
+/// model at `file` on one device, and the same tokens from a decode loop
+/// over `Lm`'s own calls: the generated ids, or None (skipped). `extra`
+/// context beyond what the run needs and the KV type are the backend's
+/// options. The model and its backend are dropped on return.
+fn gen_on(file: &str, device: Device, extra: usize, kv: KvType) -> Option<Vec<u32>> {
+    let path = model_path(file)?;
     let model = axon::load(&path, device).expect("load");
     let tok = Tokenizer::from_gguf(&model);
     let ids = tok.encode_prompt(PROMPT);
     let ctx = ids.len() + N + 1;
-    let o = BackendOptions::default().device(device).max_ctx(ctx);
+    let o = BackendOptions::default()
+        .device(device)
+        .max_ctx(ctx + extra)
+        .kv(kv);
     let net = match Backend::new(&model, o) {
         Ok(n) => n,
         Err(e) if device == Device::Cuda && std::env::var_os("AXON_SKIP_GPU_TESTS").is_some() => {
@@ -155,18 +160,28 @@ fn gen_on(model: &str, device: Device) -> Option<Vec<u32>> {
     Some(st.ids)
 }
 
-/// An embedder's model swap: a backend, dropped, then a second
-/// `Backend::new` (another model) in the same process, which generates;
-/// then the first model again, which must give the same tokens as the
-/// first time.
+/// An embedder's model swap, as a determinism check (not a leak test:
+/// nothing here measures memory): a backend, dropped, then a second
+/// `Backend::new` with another model and other options (a longer context;
+/// on CUDA a q8 cache) in the same process, which generates; then the
+/// first model again with its first options, which must give the same
+/// tokens as the first time, so nothing the second load set process-wide
+/// changed it.
 fn swap_on(device: Device) {
-    let Some(first) = gen_on(MODEL, device) else {
+    let Some(first) = gen_on(MODEL, device, 0, KvType::F16) else {
         return;
     };
-    if gen_on(MODEL2, device).is_none() {
+    let second = std::env::var("AXON_TEST_QWEN3").unwrap_or_else(|_| MODEL2.to_string());
+    // q8 is CUDA-only; the CPU's f16/f32 choice is process-wide (f16 here).
+    let kv = if device == Device::Cuda {
+        KvType::Q8
+    } else {
+        KvType::F16
+    };
+    if gen_on(&second, device, 1000, kv).is_none() {
         return;
     }
-    let again = gen_on(MODEL, device).expect("the first model, loaded again");
+    let again = gen_on(MODEL, device, 0, KvType::F16).expect("the first model, loaded again");
     assert_eq!(
         again, first,
         "a reload after a swap gives the same tokens ({device:?})"
@@ -175,12 +190,12 @@ fn swap_on(device: Device) {
 
 #[test]
 fn gen_cpu() {
-    gen_on(MODEL, Device::Cpu);
+    gen_on(MODEL, Device::Cpu, 0, KvType::F16);
 }
 
 #[test]
 fn gen_cuda() {
-    gen_on(MODEL, Device::Cuda);
+    gen_on(MODEL, Device::Cuda, 0, KvType::F16);
 }
 
 #[test]

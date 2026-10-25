@@ -554,8 +554,31 @@ impl Placing {
 /// Non-exhaustive, with private fields: options are added (#118 item 2:
 /// the engine settings still read from the environment) without breaking
 /// callers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// Outside the crate it is built only through `default()` and the setters:
+///
+/// ```compile_fail,E0639
+/// let o = axon::BackendOptions {
+///     device: axon::Device::Cpu,
+///     max_ctx: 4096,
+///     gpu_layers: None,
+///     kv: axon::KvType::F16,
+///     fit: false,
+/// };
+/// ```
+///
+/// and its fields aren't readable:
+///
+/// ```compile_fail,E0616
+/// let o = axon::BackendOptions::default();
+/// let _ = o.max_ctx;
+/// ```
+// Not `Copy` or `Eq`: options to come (#118 item 2) include lists
+// (AXON_GPUS, AXON_PP_CUTS) and may include floats, and dropping a derive
+// later would be a breaking change.
+#[derive(Clone, Debug, PartialEq)]
 #[non_exhaustive]
+#[must_use]
 pub struct BackendOptions {
     pub(crate) device: Device,
     pub(crate) max_ctx: usize,
@@ -565,7 +588,8 @@ pub struct BackendOptions {
 }
 
 impl Default for BackendOptions {
-    /// The CPU, a 4096-token context, no layer split, f16 KV, no fit.
+    /// The CPU, a 4096-token context (flat, not model-derived: see
+    /// `max_ctx`), no layer split, f16 KV, no fit.
     fn default() -> BackendOptions {
         BackendOptions {
             device: Device::Cpu,
@@ -579,6 +603,7 @@ impl Default for BackendOptions {
 
 impl BackendOptions {
     /// Where the model runs (default: the CPU).
+    #[must_use = "the setters return the new options (they don't change `self` in place)"]
     pub fn device(mut self, device: Device) -> BackendOptions {
         self.device = device;
         self
@@ -586,7 +611,11 @@ impl BackendOptions {
 
     /// Room for a `max_ctx`-token cache (default 4096): what the GPU's
     /// memory is planned for, and the most `Lm::new_cache` should be asked
-    /// for (`Backend::ctx` says what was planned).
+    /// for (`Backend::ctx` says what was planned). On the CPU it plans
+    /// nothing. The default is a flat 4096, not the CLI's choice (`axon
+    /// chat` / `serve` take the model's trained context, at most 8192, or
+    /// what fits): set it from the model (`Model::ctx_len`) and your use.
+    #[must_use = "the setters return the new options (they don't change `self` in place)"]
     pub fn max_ctx(mut self, max_ctx: usize) -> BackendOptions {
         self.max_ctx = max_ctx;
         self
@@ -596,6 +625,7 @@ impl BackendOptions {
     /// `Some(g)`); g >= the layer count is the whole GPU model; None
     /// (the default) places it automatically (`Backend::new`). Some(0) is
     /// an error: that's `Device::Cpu`.
+    #[must_use = "the setters return the new options (they don't change `self` in place)"]
     pub fn gpu_layers(mut self, g: impl Into<Option<usize>>) -> BackendOptions {
         self.gpu_layers = g.into();
         self
@@ -603,6 +633,7 @@ impl BackendOptions {
 
     /// The KV cache type (default f16; q8 is CUDA-only; f32 is the CPU's
     /// and process-wide, see `KvType::F32`).
+    #[must_use = "the setters return the new options (they don't change `self` in place)"]
     pub fn kv(mut self, kv: KvType) -> BackendOptions {
         self.kv = kv;
         self
@@ -610,6 +641,7 @@ impl BackendOptions {
 
     /// Placed automatically on CUDA, whether a shorter all-GPU context may
     /// win over a CPU/GPU split (default no; `Backend::new`).
+    #[must_use = "the setters return the new options (they don't change `self` in place)"]
     pub fn fit(mut self, fit: bool) -> BackendOptions {
         self.fit = fit;
         self

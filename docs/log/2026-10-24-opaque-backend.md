@@ -52,6 +52,19 @@
   src/, requires an error code on each, compiles it alone against `target/debug/libaxon.rlib` and checks that the
   first error has that code. It's a step after `cargo test` in ci.yml. Stable rustdoc doesn't check the code.
 
+## Round 3 (review: Shady round 2, 8/10 APPROVE, one MUST)
+- MUST: `BackendOptions` derives `Clone, Debug, PartialEq`, no longer `Copy` or `Eq`. #118 item 2's options
+  include lists (`AXON_GPUS`, `AXON_PP_CUTS`) and maybe floats, and dropping a derive later would be a break.
+  Nothing copied it.
+- `#[must_use]` on `BackendOptions` and, with a message, on each setter (`o.max_ctx(8192);` alone now warns).
+- Two `compile_fail` blocks for the new surface: a struct literal (E0639) and a field read (E0616), so
+  `compile_fail_check.py` guards it too (9 blocks).
+- `max_ctx` / `Default` docs: the library's default is a flat 4096, not the CLI's model-derived context, and on
+  the CPU it plans nothing.
+- The swap test honours `AXON_TEST_QWEN3`. The middle load uses other options: a context 1000 longer, and q8 on
+  CUDA. It's described as a determinism-after-swap check, not a leak test. `gen_on`'s path argument is `file`, so
+  it no longer shadows the loaded `model`.
+
 ## Other environment parses (the B grep)
 Every `std::env::var` in non-test library code was read (cli.rs's are CLI-only). Only the three above could
 panic inside a library call. The rest either return an error already (`AXON_KV`, `AXON_DEVICE`, `AXON_GPUS`,
