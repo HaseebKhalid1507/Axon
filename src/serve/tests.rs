@@ -4680,9 +4680,25 @@ fn harmony_calls_from_channels() {
         "to=functions.get_weather<|channel|>commentary json<|message|>{}<|call|>",
         " hi to=functions.get_weather<|channel|>commentary json<|message|>{}<|call|>",
         "<|channel|>analysis<|message|>Hm.<|end|><|start|>assistant hi to=functions.get_weather<|channel|>commentary json<|message|>{}<|call|>",
+        // Not the role `assistant`: no call, even from the channel header.
+        "<|channel|>analysis<|message|>Hm.<|end|><|start|>assistantx<|channel|>commentary to=functions.get_weather json<|message|>{}<|call|>",
     ] {
         let (c, _, _) = run(render(""), reply, &[]);
         assert!(parse(&c).iter().all(|x| x.starts_with("text")), "{reply}");
+    }
+    // A role section shaped like ` to=RECIPIENT` is held only while what
+    // follows the recipient's word can still be ` <|constrain|>json` /
+    // ` json` (the forms the model writes); then it streams.
+    let explain = " to=functions.get_weather but I'd rather explain why it is so.";
+    let (c, _, _) = run(render(""), explain, &[]);
+    assert_eq!(parse(&c), text(explain));
+    let early = c.iter().position(|x| !x.is_empty()).unwrap();
+    assert!(early + 3 < c.len(), "streamed before the end: {c:?}");
+    for mid in [" <|constrain|>json", " json", " ", ""] {
+        let reply =
+            format!(" to=functions.get_weather{mid}<|message|>{{\"city\":\"Paris\"}}<|call|>");
+        let (c, r, _) = run(render(""), &reply, &[]);
+        assert_eq!((parse(&c), r.as_str()), (want.clone(), ""), "{reply:?}");
     }
     // A role section held to its cap is text: a recipient past it is none.
     let long = format!(" to=functions.{}", "x".repeat(600));

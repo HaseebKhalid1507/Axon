@@ -605,6 +605,13 @@ fn recipient(head: &[u8]) -> Option<String> {
 /// form), not anywhere in it.
 fn call_recipient(role: &[u8], name: &[u8]) -> Option<String> {
     let rest = role.trim_ascii_start().strip_prefix(b"assistant")?;
+    if rest
+        .first()
+        .is_some_and(|&b| !b.is_ascii_whitespace() && b != b'<')
+    {
+        // Not the role `assistant` (`assistantfoo`).
+        return None;
+    }
     let f = |r: &String| r.len() > "functions.".len() && r.starts_with("functions.");
     let to = rest.trim_ascii_start();
     let in_role = (to.len() < rest.len() && to.starts_with(b"to="))
@@ -619,9 +626,11 @@ const MAX_HEAD: usize = 512;
 
 /// Whether `t`, the reply's own text in its first role section (after the
 /// prompt's `assistant`, no marker since), may still be the rest of a role
-/// section: blank, or blank then (a prefix of) `to=` (a recipient) or
-/// `<|constrain|>`, at most `MAX_HEAD` bytes. Anything else is text, the
-/// answer, as it is without tools (where it streams from the first byte).
+/// section as the template and the model write it: blank, then (a prefix
+/// of) `to=RECIPIENT` and, after the recipient's word, only blank and (a
+/// prefix of) `<|constrain|>json` or `json`; or blank then `<|constrain|>json`.
+/// At most `MAX_HEAD` bytes. Anything else is text, the answer, as it is
+/// without tools (where it streams from the first byte).
 fn maybe_header(t: &[u8]) -> bool {
     if t.len() > MAX_HEAD {
         return false;
@@ -634,9 +643,26 @@ fn maybe_header(t: &[u8]) -> bool {
         // Glued to `assistant`: not a role section the template writes.
         return false;
     }
-    [&b"to="[..], b"<|constrain|>"]
-        .iter()
-        .any(|w| rest.starts_with(w) || w.starts_with(rest))
+    // Blank, then (a prefix of) one of `words`, then only blank.
+    let tail = |x: &[u8], words: &[&[u8]]| {
+        let x = x.trim_ascii_start();
+        words.iter().any(|w| {
+            w.starts_with(x)
+                || x.strip_prefix(*w)
+                    .is_some_and(|r| r.iter().all(u8::is_ascii_whitespace))
+        })
+    };
+    match rest.strip_prefix(b"to=") {
+        None => b"to=".starts_with(rest) || tail(rest, &[b"<|constrain|>json"]),
+        Some(r) => {
+            // The recipient's word, then what may follow it.
+            let n = r
+                .iter()
+                .position(|&b| b.is_ascii_whitespace() || b == b'<')
+                .unwrap_or(r.len());
+            tail(&r[n..], &[b"<|constrain|>json", b"json"])
+        }
+    }
 }
 
 impl Channels {
