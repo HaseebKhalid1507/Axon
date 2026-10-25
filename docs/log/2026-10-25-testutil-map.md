@@ -1,6 +1,6 @@
 # testutil: test loaders map as the product does  (PR #134)
 
-- Date: 2026-10-25. Branch: fix/testutil-map. Base: main b2068e7. Status: open
+- Date: 2026-10-25. Branch: fix/testutil-map. Base: main b2068e7 (merged up to main 5bd21c3). Status: open
 - Pick / design: issue #132 (Shady's review of #128).
 
 ## What changed
@@ -43,11 +43,14 @@ scopes, jade's cap) and RAM the scheduler has to claim for nothing.
 | release suite @5583215 | FAIL 616 / 23: GPU tests that load mapped explicitly and build several nets from one Model hit the global STRICT_RELEASE; repro 1025-085554-48d3 | 1025-065721-7ada |
 | debug suite @5583215 (CPU; the GPU tests skip) | PASS 656 / 0 / 48 | 1025-065721-1c4a |
 | md5 @6fa7533 | 24/24 identical | 1025-063401-9f19 |
-| product check, main fb749cc, GPU paths with AXON_MMAP=0 | pending | 1025-085708-49c2 |
-| focused @942dc0c (4 of the failing GPU tests + release_ + load_tests) | PASS 9 / 0 / 0 release; debug pending | 1025-090053-8d97, 1025-090056-922c |
-| release suite @942dc0c | pending | 1025-090159-950b (bella, --ram 16000) |
-| debug suite @942dc0c | pending | 1025-090159-a17c (avante, --ram 16000) |
-| md5 @942dc0c | pending | 1025-090158-53fc (bella) |
+| product check, main fb749cc, GPU paths with AXON_MMAP=0 | 10/10 rc 0, no panic, md5 identical with and without per model | 1025-085708-49c2 |
+| focused @942dc0c (4 of the failing GPU tests + release_ + load_tests) | PASS 9 / 0 / 0 release and debug | 1025-090053-8d97, 1025-090056-922c |
+| release suite @942dc0c | not finished: superseded by the 1ca1703 round | 1025-090159-950b |
+| debug suite @942dc0c | PASS 657 / 0 / 48 | 1025-090159-a17c (avante, --ram 16000) |
+| md5 @942dc0c | not finished: superseded by the 1ca1703 round | 1025-090158-53fc |
+| **full release suite @1ca1703** (942dc0c + bdc80f8 = main fb749cc + #136), 2 shards, bella | **PASS 667 / 0 / 48** | [1025-130813-29e9](https://github.com/HaseebKhalid1507/Axon/blob/81011aced49ba7f650a4a9b9f6a92c9de2e90505/2026-10/testmap-main2/1025-130813-29e9.log), [1025-130813-433b](https://github.com/HaseebKhalid1507/Axon/blob/81011aced49ba7f650a4a9b9f6a92c9de2e90505/2026-10/testmap-main2/1025-130813-433b.log) |
+| **full debug suite @1ca1703**, 2 shards, bella | **PASS 667 / 0 / 48** | [1025-130813-3108](https://github.com/HaseebKhalid1507/Axon/blob/81011aced49ba7f650a4a9b9f6a92c9de2e90505/2026-10/testmap-main2/1025-130813-3108.log), [1025-130813-d72c](https://github.com/HaseebKhalid1507/Axon/blob/81011aced49ba7f650a4a9b9f6a92c9de2e90505/2026-10/testmap-main2/1025-130813-d72c.log) |
+| **md5 @1ca1703 vs bdc80f8**, bella | **24/24 identical** | [1025-130814-e600](https://github.com/HaseebKhalid1507/Axon/blob/81011aced49ba7f650a4a9b9f6a92c9de2e90505/2026-10/testmap-main2/1025-130814-e600.log) |
 
 Final guard (942dc0c): a per-Model `#[cfg(test)]` `strict_release` flag set by `gguf::load`, the tests' default
 loader (the loads that used to copy). Explicit mapped loads keep main's copy-only check (they reuse one Model across
