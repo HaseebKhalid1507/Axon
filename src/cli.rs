@@ -255,10 +255,7 @@ pub(crate) fn open_model_with(
             fail(&format!("{path}: {e}"));
         }
         // A MoE file is always mapped (`reads_matrices_in_place`'s note).
-        match model::is_moe(m) {
-            true => gguf::CopyWish::MapOnly,
-            false => gguf::CopyWish::Want(model::reads_matrices_in_place(m)),
-        }
+        model::cpu_copy_wish(m)
     })
     .unwrap_or_else(|e| load_failed(path, e));
     if !rope.is_empty() {
