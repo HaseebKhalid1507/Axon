@@ -152,6 +152,10 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
         want: GpuExperts,
         env: TwinEnv,
     ) -> Result<MoeQwen3<'m, 'g>, String> {
+        // No residency asked: refuse on RAM before touching VRAM, as before.
+        if want == GpuExperts::N(0) {
+            crate::model::moe_check_ram(m, false)?;
+        }
         let net = CudaQwen2::with_kv_moe(gpu, module, m, max_ctx, kv, fit, q6k8)?;
         let kind = MoeKind::new(m, router, module)?;
         let (res, res_note) = match want {
@@ -163,10 +167,8 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
             },
         };
         let skip = res.as_ref().map_or(Vec::new(), |r| r.which());
-        let moe_n = expert_layers(m).len();
-        match skip.is_empty() {
-            true => crate::model::moe_check_ram(m, false)?,
-            false => crate::model::moe_check_ram_keep(m, moe_n - skip.len(), moe_n)?,
+        if want != GpuExperts::N(0) {
+            crate::model::moe_check_ram_keep(m, &skip)?;
         }
         let cpu = Qwen2::new_experts_except(m, &skip);
         Ok(MoeQwen3 {
