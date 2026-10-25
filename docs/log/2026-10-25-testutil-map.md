@@ -38,9 +38,11 @@ scopes, jade's cap) and RAM the scheduler has to claim for nothing.
 | debug-assertion suite (fast tier, CPU) @43bc8b7 | PASS 656 / 0 / 48 | 1025-054658-1dcb (bella, CPU queue) |
 | release suite (fast tier) @43bc8b7 | not a result: killed (rc 143) at 1009 s by the lead, for bella memory starvation (per the review), not a test failure; its rerun 1025-061646-1db1 was dropped from the queue unstarted when the review round changed test code | 1025-054658-c346 |
 | md5 of `gen`, main vs candidate, same host @43bc8b7 | 24/24 identical (4 models × 3 prompts × cpu, cuda f16) | 1025-054657-ad4c (bella) |
-| release suite (fast tier) @6fa7533 | pending | 1025-063402-4bbe (bella, --ram 16000) |
-| debug-assertion suite (fast tier, CPU) @6fa7533 | pending | 1025-063402-cf93 (avante, CPU, --ram 16000) |
-| md5 @6fa7533 | pending | 1025-063401-9f19 (bella) |
+| debug-assertion suite @6fa7533 | FAIL 656 / 1: `release_keeps_embedding_on_copy_and_mmap` read a released tensor on the mapping on purpose (the new guard's first catch); release job 1025-063402-4bbe dropped | 1025-063402-cf93 (avante) |
+| focused `release_` + `testutil::load_tests` @5583215 (the test fixed, `#[cfg(test)] tensor_data_unchecked`) | PASS 6 / 0 / 0 release and debug | 1025-065516-bfea, 1025-065517-03c0 |
+| release suite (fast tier) @5583215 | pending | 1025-065721-7ada (bella, --ram 16000) |
+| debug-assertion suite (fast tier, CPU) @5583215 | pending | 1025-065721-1c4a (avante, --ram 16000) |
+| md5 @6fa7533 (valid for 5583215: test-only commit) | pending | 1025-063401-9f19 (bella) |
 | clippy -D warnings (lib, tests, bin), rustfmt | clean | local |
 
 ## Results
