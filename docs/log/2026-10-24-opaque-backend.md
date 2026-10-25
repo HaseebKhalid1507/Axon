@@ -1,7 +1,7 @@
 # lib: opaque `Backend`, sealed `Lm`, `BackendOptions`, env errors instead of panics  (PR #124)
 
-- Date: 2026-10-24. Branch: feat/opaque-backend (PR #124). Base: main 6e3b19c. Status: open. Round 1 code daada6f; round 2
-  (Shady 8/10 APPROVE, the SHOULDs below) is the gated head.
+- Date: 2026-10-24. Branch: feat/opaque-backend (PR #124). Base: main 6e3b19c. Status: open, gates green at eaf025f. Round 1 code daada6f;
+  round 2 (Shady 8/10 APPROVE, the SHOULDs below) is eaf025f, the gated head.
 - Pick / design: issue #118 items A and B, the v0.1.0 blockers from Shady's round-2 review of #117
   (https://github.com/HaseebKhalid1507/Axon/pull/117#issuecomment-6296699905).
 
@@ -70,10 +70,17 @@ change) and every `pub` field of five model types. #118 B: the same class as #11
 ## How it was verified
 | gate | result | job ID / log |
 |---|---|---|
-| fast tier, release (2 shards) | round 2: pending | (round 1 daada6f: 1024-171219-bdcb ran; da22 dropped) |
-| fast tier, debug assertions + overflow checks (2 shards) | round 2: pending | (round 1: 1024-171219-a517 PASS, 1024-171219-bb9b ran) |
-| md5 of `gen`, main 6e3b19c vs candidate, bella: standard set (md5-gen.sh) + md5ext + serve A/B + public_api | round 2: pending | (round 1 1024-171216-7030 dropped before it ran) |
-| `compile_fail` doc tests (rustdoc --test) | 7/7 + the crate example compile | local |
+| fast tier, release (2 shards), eaf025f | PASS 265/0/28 + 366/0/19 (631 passed, 47 ignored), avante sm_89 | 1024-175057-f729, 1024-175057-876b |
+| fast tier, debug assertions + overflow checks (2 shards), eaf025f | PASS 267/0/29 + 382/0/18 (649 passed, 47 ignored) | 1024-175057-b892, 1024-175057-2cee |
+| md5 of `gen`, main 6e3b19c vs eaf025f, bella sm_120: standard set (md5-gen.sh) | 30/30 identical | 1024-175057-6dc8 |
+| md5ext: gemma3 + MoE cuda 8, `--kv q8` 12, CPU/GPU splits 7, cpu 24, logits/info/f32 4 | 55/55 identical, 0 nonzero rc | 1024-175057-6dc8 |
+| embed_check (embed == gen), 2 models × 16 | 32/32 SAME | 1024-175057-6dc8 |
+| serve A/B (serve_ab2), 6 models × 23 cases, cuda | 138/138 identical, fingerprints equal | 1024-175057-6dc8 |
+| tests/public_api.rs incl. second_backend_cpu / _cuda | 5/0/0 | 1024-175057-6dc8 |
+| B cases (5 bad values × cpu, cuda) | candidate rc 2 + message, embed rc 1, no panic; main panics on cpu (and AXON_SIMD on cuda) | 1024-175057-6dc8 |
+| CI at eaf025f, incl. scripts/compile_fail_check.py | pass, 7 of 7 as annotated | GitHub run 40136125877 |
+| round 1 (daada6f) | rel 1/2 PASS 263/0/32 (1024-171219-bdcb), dbg 1/2 PASS 271/0/33 (1024-171219-a517); the rest superseded | |
+| `compile_fail` doc tests (rustdoc --test) | 7/7 + 2 compile-only examples | local, eaf025f |
 | each snippet's first error vs main | as annotated, see below | local (`snipcheck.sh`) |
 | clippy -D warnings (lib, lib tests, bin, examples/embed, tests/public_api), rustfmt | clean | local |
 
@@ -91,7 +98,8 @@ against main's lib and against the candidate's:
 | `GenStats { .. }` literal | compiles | E0639 non-exhaustive struct |
 
 ## Results
-No behaviour change for valid settings: same code paths, same kernels, same bits (md5 gate above). No speed
+No behaviour change for valid settings: same code paths, same kernels, same bits (MEASURED: 85/85 md5 pairs,
+138/138 serve bodies, bella sm_120, eaf025f vs main 6e3b19c). No speed
 claim. `Inner` has the same layout as the old enum, so there's no extra indirection: `&self.0` is the same
 address.
 
