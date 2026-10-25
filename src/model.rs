@@ -611,6 +611,17 @@ fn unsupported_type(m: &Model, name: &str, q: crate::gguf::QType) -> String {
     )
 }
 
+/// The CPU's copy-vs-map wish of a model (`gguf::load_to_run`): a MoE model
+/// always mapped, else a copy only when it reads its matrices in place. The
+/// one policy `crate::load`, `cli::open_model_with` and the tests'
+/// `gguf::load` share.
+pub fn cpu_copy_wish(m: &Model) -> crate::gguf::CopyWish {
+    match moe::is_moe(m) {
+        true => crate::gguf::CopyWish::MapOnly,
+        false => crate::gguf::CopyWish::Want(reads_matrices_in_place(m)),
+    }
+}
+
 /// Whether `Qwen2::new` reads any weight matrix in place from the model's
 /// bytes on every token (AXON_REPACK=0, or a matrix with no r8/r8q form),
 /// so that the anonymous huge-page copy of the file pays (`gguf::load_then`).
@@ -1083,6 +1094,14 @@ impl<'a> Qwen2<'a> {
     pub(crate) fn new_experts(m: &'a Model) -> Qwen2<'a> {
         let repack = std::env::var("AXON_REPACK").map_or(true, |v| v != "0");
         Self::build(m, repack, false, usize::MAX, true)
+    }
+
+    /// `new_experts` of a deepseek2 model with only layers `layers`' experts
+    /// repacked (tests: a few layers' CPU experts without the whole arena).
+    #[cfg(test)]
+    pub(crate) fn new_experts_of(m: &'a Model, layers: &[usize]) -> Qwen2<'a> {
+        assert_eq!(m.arch, "deepseek2", "new_experts_of: deepseek2 only");
+        deepseek2::build_only(m, true, true, Some(layers))
     }
 
     /// The embedding and layers 0..k only (all of them, and the output head,

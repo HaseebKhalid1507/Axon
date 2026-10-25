@@ -47,10 +47,18 @@ pub fn model() -> Option<Model> {
 }
 
 /// `model`, copied into anonymous memory (Some(true)) or file-mapped
-/// (Some(false)); None picks as `gguf::load` does.
+/// (Some(false)); None loads it as `axon` does for the CPU (`gguf::load`:
+/// mapped, the product's policy for a model that repacks).
 pub fn model_with(copy: Option<bool>) -> Option<Model> {
     let path = model_path()?;
-    Some(gguf::load_with(path.to_str().expect("utf-8 path"), copy).expect("load model"))
+    let path = path.to_str().expect("utf-8 path");
+    Some(
+        match copy {
+            None => gguf::load(path),
+            Some(_) => gguf::load_with(path, copy),
+        }
+        .expect("load model"),
+    )
 }
 
 /// The qwen3 test model, or None to skip (`AXON_SKIP_MODEL_TESTS`, as
@@ -175,7 +183,7 @@ pub fn moe_model_path(small: bool) -> Option<PathBuf> {
 /// The qwen3moe test model (`moe_model_path`), or None to skip.
 pub fn moe_model(small: bool) -> Option<Model> {
     let path = moe_model_path(small)?;
-    Some(gguf::load(path.to_str().expect("utf-8 path")).expect("load moe model"))
+    Some(load_moe(&path).expect("load moe model"))
 }
 
 /// deepseek2's real-model test file: Moonlight-16B-A3B-Instruct Q4_K_M
@@ -195,7 +203,20 @@ pub fn ds2_model() -> Option<Model> {
         eprintln!("skipping: {} not present (optional)", path.display());
         return None;
     }
-    Some(gguf::load(path.to_str().expect("utf-8 path")).expect("load deepseek2 model"))
+    Some(load_moe(&path).expect("load deepseek2 model"))
+}
+
+/// A MoE test model loaded as `axon` runs one: the file mapped, never
+/// copied (`load_to_run`'s `CopyWish::MapOnly` for MoE models; `gguf::load`
+/// does the same now). The copy path (`gguf::load_with(_, None)`) copies a
+/// file under 60% of `MemAvailable` into anonymous memory, and then
+/// `moe::check_ram`, which counts the r8 arena against `MemAvailable`, sees
+/// the copy as used RAM: Moonlight (10.5 GB) copied on a host with 18 GB
+/// available leaves ~10 GB and the 11.3 GB check refuses, while the same
+/// host with less free memory maps the file and passes. Forced mapped here
+/// whatever AXON_MMAP says, as `MapOnly` is.
+pub fn load_moe(path: &Path) -> std::io::Result<Model> {
+    gguf::load_with(path.to_str().expect("utf-8 path"), Some(false))
 }
 
 pub fn read_json(rel: &str) -> serde_json::Value {
@@ -380,4 +401,126 @@ pub fn gptoss_model_path() -> Option<PathBuf> {
 pub fn gptoss_model() -> Option<Model> {
     let path = gptoss_model_path()?;
     Some(gguf::load_with(path.to_str().expect("utf-8 path"), Some(false)).expect("load gpt-oss"))
+}
+
+#[cfg(test)]
+mod load_tests {
+    /// The test loaders follow the product's CPU load policy
+    /// (`gguf::load`, `model::cpu_copy_wish`): the dense test models repack,
+    /// so they're mapped, and a MoE model is always mapped. Then the one
+    /// explicit test of the copy path the tests no longer take by default:
+    /// `load_with(_, Some(true))` copies, and `load_with(_, None)` copies a
+    /// small file (under 60% of the RAM available); each holds the mapped
+    /// model's bytes. `mistral_model()` (4.4 GB, optional) isn't loaded
+    /// here: it goes through the same `gguf::load`.
+    #[test]
+    fn loaders_map_as_the_product_does() {
+        let Some(p) = super::model_path() else {
+            return;
+        };
+        // A model that reads its matrices in place is copied by the product
+        // too (when it fits): only the ones that repack must be mapped.
+        let dense = |m: Option<crate::gguf::Model>, what: &str| match m {
+            None => eprintln!("{what}: model not present, not checked"),
+            Some(_) if std::env::var_os("AXON_MMAP").is_some() => {
+                eprintln!("{what}: AXON_MMAP is set, not checked")
+            }
+            Some(m) if crate::model::reads_matrices_in_place(&m) => {
+                eprintln!("{what}: reads in place (the product copies it too), not checked")
+            }
+            Some(m) => assert!(m.file_backed(), "{what}: copied, not mapped"),
+        };
+        dense(super::model(), "model()");
+        dense(super::model_with(None), "model_with(None)");
+        dense(super::qwen3_model(), "qwen3_model()");
+        dense(super::llama_model(), "llama_model()");
+        dense(super::gemma3_model(), "gemma3_model()");
+        // load_moe maps whatever it's given (the 0.5B: a file the copy path
+        // would copy), and gguf::load maps a MoE model.
+        assert!(super::load_moe(&p).unwrap().file_backed());
+        if let Some(mp) = super::moe_model_path(false) {
+            for m in [
+                super::load_moe(&mp),
+                crate::gguf::load(mp.to_str().unwrap()),
+            ] {
+                assert!(m.unwrap().file_backed(), "{}: copied", mp.display());
+            }
+        }
+        // The copy path, explicitly, one copy at a time.
+        let path = p.to_str().unwrap();
+        let mapped = crate::gguf::load(path).unwrap();
+        let mut copies: Vec<Option<bool>> = vec![Some(true)];
+        if std::env::var_os("AXON_MMAP").is_some() {
+            eprintln!("load_with(_, None): AXON_MMAP is set, not checked");
+        } else if crate::gguf::mem_available().is_some_and(|a| a > 4 << 30) {
+            copies.push(None);
+        } else {
+            eprintln!("load_with(_, None): 4 GB or less available, not checked");
+        }
+        for copy in copies {
+            let c = crate::gguf::load_with(path, copy).unwrap();
+            assert!(
+                !c.file_backed(),
+                "{copy:?}: the copy path copies a small file"
+            );
+            assert_eq!(c.tensors.len(), mapped.tensors.len());
+            for t in &mapped.tensors {
+                assert!(
+                    c.tensor_data(t) == mapped.tensor_data(t),
+                    "{}: copy != mapping",
+                    t.name
+                );
+            }
+        }
+    }
+
+    /// A test model from the default loader (`gguf::load`, which maps it
+    /// now) refuses a released tensor on its file mapping too, as the copy
+    /// it used to be did (`Model::strict_release`); an explicit mapped load
+    /// (`load_with(_, Some(false))`) reads it back, as before.
+    #[test]
+    fn released_tensor_refused_on_a_mapping() {
+        let Some(p) = super::model_path() else {
+            return;
+        };
+        let m = crate::gguf::load(p.to_str().unwrap()).unwrap();
+        assert!(m.file_backed());
+        let t = (m.tensors.iter())
+            .find(|t| t.name == "blk.0.ffn_down.weight")
+            .unwrap();
+        m.release(t);
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| m.tensor_data(t).len()));
+        assert!(r.is_err(), "a released tensor was readable on the mapping");
+        let explicit = crate::gguf::load_with(p.to_str().unwrap(), Some(false)).unwrap();
+        let before = explicit.tensor_data(t).to_vec();
+        explicit.release(t);
+        assert_eq!(
+            explicit.tensor_data(t),
+            &before[..],
+            "explicit mapping reads it back"
+        );
+        // A rewritten tensor (llama's q/k rows, reordered into a side copy
+        // at load): readable after load, refused once released, as on the
+        // copy (where it was rewritten in place and reads zeros).
+        if let Some(l) = super::llama_model() {
+            assert!(l.file_backed());
+            let q = (l.tensors.iter())
+                .find(|t| t.name == "blk.0.attn_q.weight")
+                .unwrap();
+            assert!(!l.tensor_data(q).is_empty(), "q before release");
+            l.release(q);
+            let r =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| l.tensor_data(q).len()));
+            assert!(r.is_err(), "a released rewritten tensor was readable");
+            let k = (l.tensors.iter())
+                .find(|t| t.name == "blk.0.attn_k.weight")
+                .unwrap();
+            assert!(!l.tensor_data(k).is_empty(), "k untouched");
+        }
+        // Its neighbours are not refused.
+        let u = (m.tensors.iter())
+            .find(|t| t.name == "blk.0.attn_q.weight")
+            .unwrap();
+        assert!(!m.tensor_data(u).is_empty());
+    }
 }
