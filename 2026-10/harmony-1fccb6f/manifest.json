@@ -1,0 +1,29 @@
+{
+ "label": "harmony-1fccb6f",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1025-055425-82ff",
+   "name": "harmony-1fccb6f-delta",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "1fccb6f",
+   "binary": "delta.sh",
+   "started": 1792923406.5019822,
+   "ended": 1792924072.0199375,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "81da71075eb76dce711a7d85e8a1e4f567714950cb17c36e52d6f242bb9577e6",
+   "log_bytes": 18144
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-25 06:27:52 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
