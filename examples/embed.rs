@@ -13,7 +13,7 @@
 //! (AXON_THREADS, AXON_GPUS, AXON_MMAP, ...) are read inside the library,
 //! for both. scripts/embed_check.sh checks the two agree.
 
-use axon::{Backend, Device, GenOpts, KvType, Lm, Tokenizer, Utf8Stream};
+use axon::{Backend, BackendOptions, Device, GenOpts, KvType, Lm, Tokenizer, Utf8Stream};
 use std::io::Write;
 
 fn main() -> Result<(), String> {
@@ -49,7 +49,14 @@ fn main() -> Result<(), String> {
     }
     // The cache holds the prompt, the generated tokens and one more.
     let ctx = ids.len() + n + 1;
-    let net = Backend::new(&model, device, ctx, gpu_layers, kv, false)?;
+    let net = Backend::new(
+        &model,
+        BackendOptions::default()
+            .device(device)
+            .max_ctx(ctx)
+            .gpu_layers(gpu_layers)
+            .kv(kv),
+    )?;
     let mut cache = net.new_cache(ctx);
     let logits = net.prefill_logits(&ids, 0, &mut cache);
 

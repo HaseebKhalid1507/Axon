@@ -232,15 +232,15 @@ impl<'a> Layer<'a> {
     }
 }
 
-pub struct Qwen2<'a> {
-    pub n_layers: usize,
-    pub dim: usize,
-    pub n_heads: usize,
-    pub n_kv_heads: usize,
-    pub head_dim: usize,
+pub(crate) struct Qwen2<'a> {
+    pub(crate) n_layers: usize,
+    pub(crate) dim: usize,
+    pub(crate) n_heads: usize,
+    pub(crate) n_kv_heads: usize,
+    pub(crate) head_dim: usize,
     /// n_heads * head_dim: the attention width (qwen3 can differ from dim).
-    pub q_dim: usize,
-    pub vocab: usize,
+    pub(crate) q_dim: usize,
+    pub(crate) vocab: usize,
     eps: f32,
     /// RoPE frequency per pair (`rope_freqs`), head_dim / 2 of them; on
     /// gemma3 with local layers, then theirs (`rope_freqs_swa`).
@@ -270,7 +270,7 @@ pub struct Qwen2<'a> {
 
 /// Keys and values of every past position, per layer.
 /// k[layer] is laid out as [ctx][n_kv_heads * head_dim], same for v.
-pub struct KvCache {
+pub(crate) struct KvCache {
     /// Per layer, [t][kv_dim] keys and values: f16, or f32 for `KvType::F32` (kv::use_f32).
     data: KvData,
     kv_dim: usize,
@@ -1070,11 +1070,11 @@ impl<'a> Qwen2<'a> {
     /// The model, with Q4_K/Q6_K and Q5_0/Q8_0 matrices repacked for the r8
     /// and r8q kernels unless AXON_REPACK=0 (the per-row kernels only: the
     /// branch's bits).
-    pub fn new(m: &'a Model) -> Qwen2<'a> {
+    pub(crate) fn new(m: &'a Model) -> Qwen2<'a> {
         Self::new_with(m, std::env::var("AXON_REPACK").map_or(true, |v| v != "0"))
     }
 
-    pub fn new_with(m: &'a Model, repack: bool) -> Qwen2<'a> {
+    pub(crate) fn new_with(m: &'a Model, repack: bool) -> Qwen2<'a> {
         Self::build(m, repack, false, usize::MAX, false)
     }
 
@@ -1114,7 +1114,7 @@ impl<'a> Qwen2<'a> {
     /// (`hybrid`). Only these weights are read, repacked and released; the
     /// rest of the mapping is never touched. Without the head it runs
     /// `hidden` / `hidden_batch` only; its cache holds k layers.
-    pub fn new_layers(m: &'a Model, repack: bool, k: usize) -> Qwen2<'a> {
+    pub(crate) fn new_layers(m: &'a Model, repack: bool, k: usize) -> Qwen2<'a> {
         Self::build(m, repack, false, k, false)
     }
 
@@ -1450,7 +1450,7 @@ impl<'a> Qwen2<'a> {
         rows.concat()
     }
 
-    pub fn new_cache(&self, max_ctx: usize) -> KvCache {
+    pub(crate) fn new_cache(&self, max_ctx: usize) -> KvCache {
         if self.ds2.is_some() {
             return deepseek2::new_cache(self.n_layers, self.head_dim, max_ctx);
         }
@@ -1968,7 +1968,7 @@ impl<'a> Qwen2<'a> {
     }
 
     /// Run one token at position `pos` and return logits (len vocab).
-    pub fn forward(&self, token: u32, pos: usize, cache: &mut KvCache) -> Vec<f32> {
+    pub(crate) fn forward(&self, token: u32, pos: usize, cache: &mut KvCache) -> Vec<f32> {
         let x = self.hidden(token, pos, cache);
         // 9. Final norm, then the output head scores every vocab entry.
         let h = self.rmsnorm(&x, &self.output_norm);
@@ -1980,7 +1980,7 @@ impl<'a> Qwen2<'a> {
     /// biggest matrix in the model (37% of a token's weight reads here).
     /// Prompts go through `feed_batch`; this is its reference in the tests.
     #[cfg_attr(not(test), allow(dead_code))]
-    pub fn feed(&self, token: u32, pos: usize, cache: &mut KvCache) {
+    pub(crate) fn feed(&self, token: u32, pos: usize, cache: &mut KvCache) {
         self.hidden(token, pos, cache);
     }
 
@@ -2008,7 +2008,7 @@ impl<'a> Qwen2<'a> {
     /// Run `tokens[b]` at position `start + b` for every b, for the cache only.
     /// Same result, bit for bit, as `feed` on each token in order, but every
     /// weight row is read once per batch instead of once per token.
-    pub fn feed_batch(&self, tokens: &[u32], start: usize, cache: &mut KvCache) {
+    pub(crate) fn feed_batch(&self, tokens: &[u32], start: usize, cache: &mut KvCache) {
         self.hidden_batch(tokens, start, cache);
     }
 
@@ -2020,7 +2020,12 @@ impl<'a> Qwen2<'a> {
     /// `matmul_many`, whose per-row dots equal `matvec`'s. Cache slots
     /// `start..start + len` are overwritten; slots past the accepted prefix
     /// are simply rewritten by the next call (attention reads only 0..=pos).
-    pub fn verify_batch(&self, tokens: &[u32], start: usize, cache: &mut KvCache) -> Vec<Vec<f32>> {
+    pub(crate) fn verify_batch(
+        &self,
+        tokens: &[u32],
+        start: usize,
+        cache: &mut KvCache,
+    ) -> Vec<Vec<f32>> {
         let hs = self.final_norm_batch(tokens, start, cache);
         let [logits] = self.matmul_many([self.head()], &hs);
         logits
@@ -2030,7 +2035,12 @@ impl<'a> Qwen2<'a> {
     /// argmax(verify_batch(..)[b]), same index on ties (the last of equal
     /// maxima, never a NaN unless all are: `Best`), without materializing
     /// any logits (`matmul_argmax`).
-    pub fn verify_argmax(&self, tokens: &[u32], start: usize, cache: &mut KvCache) -> Vec<u32> {
+    pub(crate) fn verify_argmax(
+        &self,
+        tokens: &[u32],
+        start: usize,
+        cache: &mut KvCache,
+    ) -> Vec<u32> {
         let hs = self.final_norm_batch(tokens, start, cache);
         self.matmul_argmax(self.head(), &hs)
     }

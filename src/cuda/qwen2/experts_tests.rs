@@ -371,3 +371,50 @@ fn resident_placement_and_identity() {
     );
     assert!(twin_identity(true, false, true).is_err());
 }
+
+/// The fixture with an extra F32 tensor `name` of `dims` (zeros).
+fn fixture_plus(name: &str, dims: &[u64]) -> Model {
+    let o = Opt {
+        q_lora: false,
+        yarn: false,
+    };
+    let (meta, mut list, mut data) =
+        crate::model::deepseek2_tests::fixture_tensors(o, crate::quant::Q8_0);
+    list.push((name.to_string(), dims.to_vec(), crate::quant::F32));
+    data.push(vec![0u8; 4 * dims.iter().product::<u64>() as usize]);
+    let l: Vec<(&str, &[u64], u32)> = list.iter().map(|t| (t.0.as_str(), &t.1[..], t.2)).collect();
+    crate::gguf::build_for_test_with(&meta, &l, &data)
+}
+
+/// Expert biases are refused, with the tensor named, by the check `upload`
+/// runs before any upload (#122 review): on the fixture with a synthetic
+/// `ffn_{gate,up,down}_exps.bias` (gpt-oss's shapes: [rows, n_e]) in layer
+/// 1; layer 2 and the plain fixture pass. No GPU needed; with one,
+/// `CudaExperts::upload` itself refuses.
+#[test]
+fn expert_biases_refused_before_upload() {
+    use crate::model::deepseek2_tests::FX;
+    let (plain, _) = ds2_fixture(
+        Opt {
+            q_lora: false,
+            yarn: false,
+        },
+        crate::quant::Q8_0,
+    );
+    refuse_expert_biases(&plain, 1).unwrap();
+    for (p, rows) in [("gate", FX.ffe), ("up", FX.ffe), ("down", FX.dim)] {
+        let name = format!("blk.1.ffn_{p}_exps.bias");
+        let m = fixture_plus(&name, &[rows as u64, FX.n_exp as u64]);
+        let e = refuse_expert_biases(&m, 1).unwrap_err();
+        assert!(e.contains(&name) && e.contains("expert biases"), "{e}");
+        refuse_expert_biases(&m, 2).unwrap();
+        if let Some(g) = crate::testutil::gpu() {
+            let km = Kernels::module_for(&g, &m).unwrap();
+            let e = CudaExperts::upload(&g, &km, &m, 1, FX.k_exp)
+                .err()
+                .expect("refused");
+            assert!(e.contains(&name), "{e}");
+            CudaExperts::upload(&g, &km, &m, 2, FX.k_exp).unwrap();
+        }
+    }
+}

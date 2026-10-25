@@ -46,7 +46,7 @@ pub const DESKTOP_MARGIN: u64 = 640 << 20;
 
 const GIB: f64 = (1u64 << 30) as f64;
 
-pub struct HybridQwen2<'m, 'g> {
+pub(crate) struct HybridQwen2<'m, 'g> {
     /// Streaming the CPU layers through the GPU for big prefill batches
     /// (None: off, or no room). First, so it drops (unpinning the CPU's
     /// weights) before them.
@@ -56,10 +56,10 @@ pub struct HybridQwen2<'m, 'g> {
     /// Layers k..n and the head (and the embedding if k == 0); None if k == n.
     gpu: Option<CudaQwen2<'g>>,
     /// Layers on the GPU, of `n_layers`.
-    pub gpu_layers: usize,
-    pub n_layers: usize,
+    pub(crate) gpu_layers: usize,
+    pub(crate) n_layers: usize,
     /// The context its caches are planned for (`build`'s max_ctx).
-    pub ctx: usize,
+    pub(crate) ctx: usize,
 }
 
 /// PR A's state: the streamer and when to use it.
@@ -101,7 +101,7 @@ pub fn stream_setting() -> bool {
 }
 
 /// Each half's cache: KV of layers 0..k on the CPU, k..n on the GPU.
-pub struct HybridCache<'g> {
+pub(crate) struct HybridCache<'g> {
     /// The streamed layers' VRAM slots, with the CPU cache's buffers
     /// pinned: dropped first, before `cpu`'s memory goes.
     skv: Option<StreamKv<'g>>,
@@ -332,7 +332,7 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
     /// on a copy of the file they can't be read again). Streaming off (PR
     /// B's behavior); the CLI uses `new_with_stream`.
     #[cfg_attr(not(test), allow(dead_code))] // tests and PR B's exact path
-    pub fn new(
+    pub(crate) fn new(
         dev: Option<(&'g Gpu, &'g Module<'g>)>,
         m: &'m Model,
         max_ctx: usize,
@@ -350,7 +350,7 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
     /// `auto`: the split came from `auto_gpu_layers`, so streaming keeps
     /// `DESKTOP_MARGIN` free too (an explicit --gpu-layers only keeps
     /// STREAM_HEADROOM).
-    pub fn new_with_stream(
+    pub(crate) fn new_with_stream(
         dev: Option<(&'g Gpu, &'g Module<'g>)>,
         m: &'m Model,
         max_ctx: usize,
@@ -558,7 +558,7 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
     }
 
     /// VRAM the GPU half holds with a `max_ctx`-token cache (0 if none).
-    pub fn vram_bytes(&self, max_ctx: usize) -> usize {
+    pub(crate) fn vram_bytes(&self, max_ctx: usize) -> usize {
         self.gpu
             .as_ref()
             .map_or(0, |g| g.weight_bytes() + g.cache_bytes(max_ctx))
@@ -566,7 +566,7 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
 
     /// "gpu layers 30/64, 9.10 GiB on GPU" (with a `max_ctx` cache), and
     /// whether prefill streams.
-    pub fn describe(&self, max_ctx: usize) -> String {
+    pub(crate) fn describe(&self, max_ctx: usize) -> String {
         let st = match &self.stream {
             Some(s) => format!(", prefill streams the CPU layers (batches >= {})", s.min),
             None => String::new(),
@@ -580,19 +580,19 @@ impl<'m, 'g> HybridQwen2<'m, 'g> {
     }
 
     /// The GPU half, if it has GPU layers.
-    pub fn gpu_net(&self) -> Option<&CudaQwen2<'g>> {
+    pub(crate) fn gpu_net(&self) -> Option<&CudaQwen2<'g>> {
         self.gpu.as_ref()
     }
 
     /// With streaming: the smallest prefill batch streamed, and whether
     /// one-token steps stream too (AXON_STREAM_DECODE).
-    pub fn streams(&self) -> Option<(usize, bool)> {
+    pub(crate) fn streams(&self) -> Option<(usize, bool)> {
         self.stream.as_ref().map(|s| (s.min, s.decode))
     }
 
     /// The GPU layers' cache type (`CudaQwen2::kv_name`; the CPU layers'
     /// is f16, or f32 for `KvType::F32`).
-    pub fn kv_name(&self) -> &'static str {
+    pub(crate) fn kv_name(&self) -> &'static str {
         self.gpu.as_ref().map_or("f16", |g| g.kv_name())
     }
 
@@ -650,6 +650,7 @@ fn flat(xs: Vec<Vec<f32>>) -> Vec<f32> {
     xs.concat()
 }
 
+impl<'g> crate::lm::Sealed for HybridQwen2<'_, 'g> {}
 impl<'g> Lm for HybridQwen2<'_, 'g> {
     type Cache = HybridCache<'g>;
 

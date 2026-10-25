@@ -8,7 +8,7 @@ use crate::{
     chat, cuda, draft, gguf, hybrid, identity, kv, kvsave, lineedit, lm, model, pool, rope, sample,
     serve, spec, tokenizer,
 };
-use lm::{Backend, Device, Lm};
+use lm::{Backend, Device, Inner, Lm};
 use std::env;
 
 /// Draft tokens per speculative step unless --draft / AXON_DRAFT say
@@ -201,7 +201,7 @@ model.safetensors or its shards; BF16/F16/F32 weights, run as the GGUF F16 of th
 /// Whether `net` is split across the CPU and the GPU (some layers on each):
 /// a drafter's default K is then `draft::SPLIT_MODEL_DRAFT`.
 fn is_split(net: &Backend) -> bool {
-    matches!(net, Backend::Hybrid(h) if h.gpu_layers > 0 && h.gpu_layers < h.n_layers)
+    matches!(&net.0, Inner::Hybrid(h) if h.gpu_layers > 0 && h.gpu_layers < h.n_layers)
 }
 
 /// AXON_STREAM_DECODE=1 with drafting: refused (drafting's picks come
@@ -243,6 +243,10 @@ pub(crate) fn open_model_with(
     copy: Option<bool>,
     rope: &rope::RopeArgs,
 ) -> gguf::Model {
+    // The CPU kernels' environment, before anything is read (as `load`).
+    if let Err(e) = crate::quant::env_check() {
+        fail(&e);
+    }
     let mut m = gguf::load_to_run(path, copy, |m| {
         // With rope flags the check waits for them (below).
         if rope.is_empty()
@@ -978,7 +982,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             0.0
         }
     );
-    if let Backend::Cuda(n) = &net {
+    if let Inner::Cuda(n) = &net.0 {
         eprintln!(
             "device:      cuda, {} of weights in VRAM ({} read per token), KV cache {} {}, \
              CUDA graphs {}",
@@ -995,21 +999,21 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             );
         }
     }
-    if let Backend::Hybrid(n) = &net {
+    if let Inner::Hybrid(n) = &net.0 {
         eprintln!(
             "device:      cuda + cpu, {}, kv {}",
             n.describe(cache_ctx),
             n.kv_name()
         );
     }
-    if let Backend::Pipeline(n) = &net {
+    if let Inner::Pipeline(n) = &net.0 {
         eprintln!(
             "device:      cuda, {}, kv {}",
             n.describe(cache_ctx),
             n.kv_name()
         );
     }
-    // Backend::Moe: its one banner line is `moe:` at load (lm.rs).
+    // Inner::Moe: its one banner line is `moe:` at load (lm.rs).
     let id = identity::of(path, &model, &net);
     match verbose {
         true => eprint!("identity:    {}\n{}", id.fingerprint(), id.canonical()),
@@ -1070,7 +1074,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             eprintln!("drafter:     {}", draft::describe(&dm.name(), d));
         }
     }
-    if !matches!(net, Backend::Cpu(_)) {
+    if !matches!(&net.0, Inner::Cpu(_)) {
         // Everything's written: skip tearing the CUDA context down (freeing
         // each buffer, the driver's exit handlers: ~0.15-0.2 s); the kernel
         // drops the process's GPU memory with it.
@@ -1338,12 +1342,12 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     let name = std::path::Path::new(path)
         .file_name()
         .map_or(path.as_str().into(), |n| n.to_string_lossy());
-    let kvs = match &net {
-        Backend::Cuda(n) => format!(" | kv {}", n.kv_name()),
-        Backend::Hybrid(n) => format!(" | {} | kv {}", n.describe(ctx), n.kv_name()),
-        Backend::Pipeline(n) => format!(" | {} | kv {}", n.describe(ctx), n.kv_name()),
-        Backend::Moe(n) => format!(" | {} | kv {}", n.describe(ctx), n.kv_name()),
-        Backend::Cpu(_) => String::new(),
+    let kvs = match &net.0 {
+        Inner::Cuda(n) => format!(" | kv {}", n.kv_name()),
+        Inner::Hybrid(n) => format!(" | {} | kv {}", n.describe(ctx), n.kv_name()),
+        Inner::Pipeline(n) => format!(" | {} | kv {}", n.describe(ctx), n.kv_name()),
+        Inner::Moe(n) => format!(" | {} | kv {}", n.describe(ctx), n.kv_name()),
+        Inner::Cpu(_) => String::new(),
     };
     let seed = conv
         .sampler
