@@ -1,0 +1,29 @@
+{
+ "label": "oss136-diag",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1025-113602-01d8",
+   "name": "oss136-bdc80f8-diagpaged2",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "bdc80f8",
+   "binary": "diagjob2.sh",
+   "started": 1792947543.3411124,
+   "ended": 1792947625.0694404,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "8faa08a4c1877e0e94ccaace3bce4d983ea1d15fe6f2f535b2eb9a9d38c98abf",
+   "log_bytes": 4668
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-25 13:00:28 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
