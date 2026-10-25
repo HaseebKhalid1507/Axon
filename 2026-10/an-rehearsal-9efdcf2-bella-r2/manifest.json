@@ -1,0 +1,29 @@
+{
+ "label": "an-rehearsal-9efdcf2-bella-r2",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1025-045950-0757",
+   "name": "an-rehearsal-9efdcf2-bella-r2",
+   "rc": 130,
+   "verdict": "FAIL (rc 130)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "9efdcf2",
+   "binary": "rehearse.sh",
+   "started": null,
+   "ended": 1792929610.184022,
+   "attempts": null,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "0d55d577b40327d03f5cd389dda486ff2a7b42112cf31d8896479f6d23e18596",
+   "log_bytes": 296
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-25 08:00:10 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
