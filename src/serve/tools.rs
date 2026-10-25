@@ -51,7 +51,9 @@
 //! - Harmony: the engine splits the reply by channel (`chat::Channels`, told
 //!   to look for calls) on the special tokens: analysis goes to reasoning,
 //!   final to content, and an assistant message addressed to `functions.X`
-//!   (in its role section or its channel header) is a call. `TextOut` hands
+//!   (right after the role, `assistant to=functions.X`, or in its channel
+//!   header) is a call. A reply that opens no header is content, streamed
+//!   as soon as its text can't be the rest of a role section. `TextOut` hands
 //!   the parser the content escaped and each call framed out of band
 //!   (`harmony_text`), so no text the model writes, the template's call
 //!   syntax included, can become a call. `TextOut` makes the call as soon as
