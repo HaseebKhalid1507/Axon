@@ -352,6 +352,28 @@ fn two_pass_short_passes(p: &ChunkPolicy, cost: &StepCost, rows: usize) -> usize
     }
 }
 
+/// Prompts a step feeds at most (each is its own pass): as many as
+/// `step_ms` fits beside the modelled decode step at a pass's fixed part
+/// plus a 64-token chunk each (at least 1); nothing measured yet (the
+/// first step of a fresh server): 1, which teaches a pass's cost. Without
+/// it an idle or cold step (a token budget, no pass charge) fed a whole
+/// wave of short prompts in one step and every one of them waited for all
+/// their passes (bella 1025-153024-9998: wave-1 short TTFT 57-62 ms each
+/// at C=16, 144-160 at C=32; 7B ~275 ms). No bound with legacy (main's
+/// plan), `--step-ms 0`, `--step-tokens` or no chunking.
+fn step_prompts(p: &ChunkPolicy, cost: &StepCost, rows: usize) -> usize {
+    if p.legacy || p.floor == 0 || p.step_ms == 0 || p.step_tokens > 0 {
+        return usize::MAX;
+    }
+    let pass = cost.pass();
+    if pass <= 0.0 {
+        return 1;
+    }
+    let one = pass + cost.tok.unwrap_or(0.0) * units(0, PASS_FIXED_MAX);
+    let dec = if rows > 0 { cost.dec(rows) * 1e3 } else { 0.0 };
+    (((p.step_ms as f64 * 1e3 - dec) / one) as usize).max(1)
+}
+
 /// Why a waiting request can't start now (`Batch::admit_check`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Admit {
@@ -690,7 +712,9 @@ impl<'a, 't> Batch<'a, 't> {
     /// as `step_ms` fits at a pass's fixed part plus a 64-token chunk each
     /// (at least 1); a token budget: no bound but the tokens.
     fn short_passes(&self) -> usize {
-        two_pass_short_passes(&self.policy, &self.cost, self.seqs.len())
+        let rows = self.seqs.len();
+        let n = two_pass_short_passes(&self.policy, &self.cost, rows);
+        n.min(step_prompts(&self.policy, &self.cost, rows))
     }
 
     /// The prompt tokens `admit` would feed for `prompt` (past the prefix
@@ -794,9 +818,11 @@ impl<'a, 't> Batch<'a, 't> {
         let fed: Vec<usize> = self.pre.iter().map(|f| f.fed).collect();
         let starved: Vec<usize> = self.pre.iter().map(|f| f.starved).collect();
         let idle = self.seqs.is_empty();
+        let most = step_prompts(&self.policy, &self.cost, self.seqs.len());
         let plan = plan_charged(
             budget,
             pass_us,
+            most,
             self.policy.floor,
             self.pass,
             &fed,
@@ -1294,10 +1320,20 @@ fn plan(
     starved: &[usize],
     idle: bool,
 ) -> Vec<usize> {
-    plan_charged(budget, 0.0, floor, pass, fed, rem, starved, idle)
+    plan_charged(
+        budget,
+        0.0,
+        usize::MAX,
+        floor,
+        pass,
+        fed,
+        rem,
+        starved,
+        idle,
+    )
 }
 
-/// `plan`, each prompt fed on a µs budget also charged `pass_us`, a
+/// `plan`, at most `most` prompts fed (`step_prompts`), each prompt fed on a µs budget also charged `pass_us`, a
 /// pass's fixed part (two-pass steps feed each prompt in its own pass):
 /// its share is what the time left after that buys, and a later prompt
 /// is fed only if all of it fits (no half-floor slack), so a step of
@@ -1306,6 +1342,7 @@ fn plan(
 fn plan_charged(
     budget: Budget,
     pass_us: f64,
+    most: usize,
     floor: usize,
     pass: usize,
     fed: &[usize],
@@ -1324,7 +1361,11 @@ fn plan_charged(
     });
     let mut budget = budget;
     let mut first = true;
+    let mut n_fed = 0;
     for i in order {
+        if n_fed >= most {
+            break;
+        }
         let share = match budget {
             Budget::Tokens(t) => t,
             Budget::Micros(us, c) => {
@@ -1354,6 +1395,7 @@ fn plan_charged(
             continue;
         }
         first = false;
+        n_fed += 1;
         plan[i] = n;
         budget = match budget {
             Budget::Tokens(t) => Budget::Tokens(t.saturating_sub(n)),
@@ -1920,8 +1962,8 @@ mod plan_tests {
 mod sched_tests {
     use super::{
         AdmitOrder, Budget, ChunkPolicy, DEPTH_K, STARVE, StepCost, admit_gate, admit_key, bucket,
-        plan, plan_charged, starve, two_pass_budget, two_pass_capacity, two_pass_short_passes,
-        units,
+        plan, plan_charged, starve, step_prompts, two_pass_budget, two_pass_capacity,
+        two_pass_short_passes, units,
     };
 
     const PASS: usize = 1152;
@@ -2006,7 +2048,7 @@ mod sched_tests {
         let p = policy(256, 50);
         let (b, pass) = two_pass_budget(&p, cost, 8);
         let (n, rem) = ([0; 10], [60; 10]);
-        let plan = plan_charged(b, pass, 256, PASS, &n, &rem, &n, false);
+        let plan = plan_charged(b, pass, usize::MAX, 256, PASS, &n, &rem, &n, false);
         plan.iter().filter(|&&x| x > 0).count()
     }
 
@@ -2080,6 +2122,53 @@ mod sched_tests {
         assert!(h.pass() <= 8000.0, "{}", h.pass());
     }
 
+    /// The first wave on a fresh, idle server (bella 1025-153024-9998):
+    /// a token budget, nothing measured. Before, all of a wave's short
+    /// prompts were fed in one step, each in its own pass, and all their
+    /// first tokens waited for the whole step; now the first step feeds 1
+    /// (teaching a pass's cost), then as many as `step_ms` fits: with 8 ms
+    /// passes (~10.4 ms with a 64-token chunk) and 10 ms decode steps, 3 a
+    /// step at 50 ms (idle: 4). Shortest
+    /// first and starved first still hold; legacy, a pinned step and
+    /// `--step-ms 0` keep no bound.
+    #[test]
+    fn idle_wave_fed_a_step_at_a_time() {
+        let p = policy(256, 50);
+        let cold = StepCost::default();
+        let (b, pass) = two_pass_budget(&p, &cold, 0);
+        assert!(matches!(b, Budget::Tokens(_)));
+        let rem = [40, 60, 50, 9000, 45, 55, 70, 65];
+        let z = [0; 8];
+        // Before (no bound): every short and the long one, one step.
+        let all = plan_charged(b, pass, usize::MAX, 256, PASS, &z, &rem, &z, true);
+        assert_eq!(all.iter().filter(|&&n| n > 0).count(), 8, "{all:?}");
+        // Now: the shortest alone.
+        assert_eq!(step_prompts(&p, &cold, 0), 1);
+        let one = plan_charged(b, pass, 1, 256, PASS, &z, &rem, &z, true);
+        assert_eq!(one, [40, 0, 0, 0, 0, 0, 0, 0]);
+        // Warm: 8 ms passes, 10 ms decode steps.
+        let (warm, _) = warm_cost();
+        assert_eq!(step_prompts(&p, &warm, 8), 3);
+        assert_eq!(step_prompts(&p, &warm, 0), 4);
+        // A starved long prompt still goes first (idle: it takes the step).
+        let st = [0, 0, 0, super::STARVE, 0, 0, 0, 0];
+        let k = plan_charged(b, pass, 2, 256, PASS, &z, &rem, &st, true);
+        assert_eq!(k, [0, 0, 0, 4096, 0, 0, 0, 0]);
+        // The admission gate follows (twice the step's prompts).
+        assert!(step_prompts(&p, &warm, 8) <= two_pass_short_passes(&p, &warm, 8));
+        // No bound: legacy, a pinned step, --step-ms 0.
+        for q in [
+            ChunkPolicy { legacy: true, ..p },
+            ChunkPolicy {
+                step_tokens: 256,
+                ..p
+            },
+            policy(256, 0),
+        ] {
+            assert_eq!(step_prompts(&q, &warm, 8), usize::MAX);
+        }
+    }
+
     /// SHOULD (c): before any short feed, a pass is charged the fastest
     /// decode step (measured, no fixed seed): a cold wave of short prompts
     /// is fed a few a step, not all in one.
@@ -2136,6 +2225,7 @@ mod sched_tests {
             let p = plan_charged(
                 Budget::Micros(left, c),
                 pass_us,
+                usize::MAX,
                 floor,
                 PASS,
                 &[0; 10],
@@ -2365,7 +2455,9 @@ mod sched_tests {
             let st: Vec<usize> = (0..n).map(|_| rnd(STARVE as u64 + 2) as usize).collect();
             let pass = [1024, 1152][rnd(2) as usize];
             let idle = rows == 0;
-            let a = plan_charged(b, pass_us, floor, pass, &fed, &rem, &st, idle);
+            let most = step_prompts(&p, &cost, rows);
+            assert_eq!(most, usize::MAX, "legacy: no bound on prompts a step");
+            let a = plan_charged(b, pass_us, most, floor, pass, &fed, &rem, &st, idle);
             assert_eq!(
                 a,
                 plan_main(b, floor, pass, &fed, &rem, &st, idle),
