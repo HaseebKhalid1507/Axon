@@ -1,0 +1,23 @@
+[axon-run 01:22:58] submitted 1025-012258-d4c6 by /home/haseeb/.cache/axon-wt-moeres-b: /home/haseeb/.cache/axon-moeres/axon-test-b2f714e cuda::qwen2::experts::tests::expert_biases_refused_before_upload cuda::qwen2::experts::tests::twin_refusals --nocapture
+[axon-run 02:20:21] job 1025-012258-d4c6 -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 1500 --env AXON_NODE_PACK=1 --src /home/haseeb/.cache/axon-wt-moeres-b /home/haseeb/.cache/axon-moeres/axon-test-b2f714e cuda::qwen2::experts::tests::expert_biases_refused_before_upload cuda::qwen2::experts::tests::twin_refusals --nocapture
+axon-remote: uploading axon-test-b2f714e (a854b623d1a80c4c90f42429) + source of /home/haseeb/.cache/axon-wt-moeres-b
+
+sent 1,823,196 bytes  received 4,888 bytes  3,656,168.00 bytes/sec
+total size is 6,515,646  speedup is 3.56
+
+sent 6,750,329 bytes  received 35 bytes  4,500,242.67 bytes/sec
+total size is 21,526,304  speedup is 3.19
+axon-remote: job 20261025-022023-axon-test-b2f714e-3812114 on avante (GPU, 1500 MB)
+[axon-node 02:20:23] GPU slot taken; job wants 1500 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 62
+[axon-node 02:20:23] run axon-test-b2f714e (a854b623d1a80c4c90f42429) as /home/haseeb/.cache/axon-wt-moeres-b on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 2 tests
+test cuda::qwen2::experts::tests::twin_refusals ... ok
+testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test cuda::qwen2::experts::tests::expert_biases_refused_before_upload ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 699 filtered out; finished in 0.46s
+
+[axon-node 02:20:24] exit 0 after 0.5s
+[axon-node 02:20:24] peak RSS 0 MB (job process tree PSS, 2 s samples x0)
+[axon-run 02:20:24] exit 0 after 3.3s (host avante)

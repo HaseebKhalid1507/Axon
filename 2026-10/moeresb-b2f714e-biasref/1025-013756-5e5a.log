@@ -1,0 +1,16 @@
+[axon-run 01:37:56] submitted 1025-013756-5e5a by /home/haseeb/.cache/axon-wt-moeres-b: /home/haseeb/.cache/axon-moeres/axon-test-b2f714e cuda::qwen2::experts::tests::expert_biases_refused_before_upload cuda::qwen2::experts::tests::twin_refusals --nocapture
+[axon-run 02:10:31] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 02:10:31] scope axon-job-1025-013756-5e5a-1792908631.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 17696 MB): an OOM here kills only this job
+[axon-run 02:10:31] job 1025-013756-5e5a -> bella: systemd-run --user --scope --quiet --unit=axon-job-1025-013756-5e5a-1792908631 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-moeres/axon-test-b2f714e cuda::qwen2::experts::tests::expert_biases_refused_before_upload cuda::qwen2::experts::tests::twin_refusals --nocapture --test-threads 6
+axon-q 02:10:31 start slot 16-23: /home/haseeb/.cache/axon-moeres/axon-test-b2f714e cuda::qwen2::experts::tests::expert_biases_refused_before_upload cuda::qwen2::experts::tests::twin_refusals --nocapture --test-threads 6
+
+running 2 tests
+test cuda::qwen2::experts::tests::twin_refusals ... ok
+skipping: no usable GPU (cuInit: CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected) and AXON_SKIP_GPU_TESTS is set
+skipping: no usable GPU (cuInit: CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected) and AXON_SKIP_GPU_TESTS is set
+skipping: no usable GPU (cuInit: CUDA_ERROR_NO_DEVICE: no CUDA-capable device is detected) and AXON_SKIP_GPU_TESTS is set
+test cuda::qwen2::experts::tests::expert_biases_refused_before_upload ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 699 filtered out; finished in 0.03s
+
+[axon-run 02:10:31] exit 0 after 0.1s (host bella)

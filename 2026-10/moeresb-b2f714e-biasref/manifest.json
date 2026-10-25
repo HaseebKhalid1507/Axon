@@ -1,0 +1,49 @@
+{
+ "label": "moeresb-b2f714e-biasref",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1025-012258-d4c6",
+   "name": "moeresb-b2f714e-biasref",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "avante",
+   "hw": "hw-avante.txt",
+   "gpu": "NVIDIA GeForce RTX 4050 Laptop GPU",
+   "driver": "610.43.02",
+   "sha": "b2f714e",
+   "binary": "axon-test-b2f714e",
+   "started": 1792909221.075711,
+   "ended": 1792909226.2007532,
+   "attempts": 1,
+   "remote_job": "20261025-022023-axon-test-b2f714e-3812114",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "6d14a1d7f0e0329ab5412fac16af0d0b0e5b0cf61b8d7870e4766669767b5f34",
+   "log_bytes": 1783
+  },
+  {
+   "job": "1025-013756-5e5a",
+   "name": "moeresb-biasref-cpu",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "CPU only (bella; GPU hidden)",
+   "driver": "615.78.08",
+   "sha": "b2f714e",
+   "binary": "axon-test-b2f714e",
+   "started": 1792908630.9050703,
+   "ended": 1792908635.9843404,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "c1ef55ea1cd829b186a742583eb52037123f378875d0bd41038b661b17f30fdc",
+   "log_bytes": 2043
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-25 02:20:27 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
