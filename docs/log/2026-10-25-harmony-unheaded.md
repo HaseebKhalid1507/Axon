@@ -1,4 +1,4 @@
-# gpt-oss with tools: a reply with no header streams as the answer  (PR #TBD)
+# gpt-oss with tools: a reply with no header streams as the answer  (PR #136)
 
 - Date: 2026-10-25. Branch: fix/harmony-unheaded. Base: main b2068e7. Status: open
 - Pick / design: issue #114 (from #111's round-2 review, SHOULD 4) and its comment (#111 round 3, SHOULD 6).
