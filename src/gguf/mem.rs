@@ -9,7 +9,18 @@
 //! root, `memory.max` (`max`: no limit) less what the cgroup uses that
 //! can't be reclaimed: `memory.current` less its file pages (`memory.stat`
 //! `inactive_file` + `active_file`, page cache the kernel drops before it
-//! OOM-kills). The tightest level wins. `memory.high` is not counted: over
+//! OOM-kills). The tightest level wins.
+//!
+//! All of the file LRU counts as room, active pages too: that is what the
+//! kernel's own `MemAvailable` does (`si_mem_available`: page cache less
+//! min(half of it, the low watermark), a few hundred MB at most), so the
+//! two figures compete on the same terms, and it's the right question for
+//! "will this load be OOM-killed". It is optimistic about speed, not about
+//! the kill: pages of a mapped model another process in the same cgroup
+//! reads every token count as room, and taking them makes that process
+//! refault them. Counting half of `active_file` (a stricter figure) was
+//! considered and not taken: an axon-run job's own mapped model is charged
+//! to its scope, so the stricter figure would refuse loads that fit. `memory.high` is not counted: over
 //! it the kernel throttles and reclaims, it doesn't kill. Swap
 //! (`memory.swap.max`) isn't counted either, as `MemAvailable` doesn't.
 //!
@@ -17,12 +28,17 @@
 //! `memory.limit_in_bytes` (a value of 2^62 or more: no limit),
 //! `memory.usage_in_bytes` and `memory.stat`'s `total_inactive_file` +
 //! `total_active_file` (else the cgroup's own `inactive_file` +
-//! `active_file`). Every ancestor's limit is counted, as kernels since 5.x
-//! always account hierarchically (`use_hierarchy` is gone).
+//! `active_file`). Every ancestor's limit is counted: hierarchical
+//! accounting is the only mode since Linux 5.11, when
+//! `memory.use_hierarchy = 0` was deprecated (earlier kernels with it off
+//! ignore the parents' limits, so this figure is the stricter one there).
 //!
 //! Anything unreadable is skipped: no cgroupfs, no memory controller, a
 //! level without the files (the v2 root has no `memory.max`) leaves the
-//! host's figure. Paths are read under `root` so the tests run against
+//! host's figure. So is a cgroup path that doesn't name a directory: one
+//! with a ` (deleted)` suffix, or `/..` segments when the process sits
+//! outside its cgroup namespace's root (the reads fail, the level is
+//! skipped). Paths are read under `root` so the tests run against
 //! synthetic trees.
 
 use std::fmt;
@@ -109,9 +125,12 @@ struct Hier {
 /// The memory controller's hierarchy of this process, from
 /// `root`/proc/self/cgroup and `root`/proc/self/mountinfo. A v1 line with
 /// the memory controller wins (on a hybrid system the v2 hierarchy has no
-/// memory controller then); else the v2 line (`0::path`). Without
-/// mountinfo, or no matching mount in it, the usual mount points:
-/// /sys/fs/cgroup (v2), /sys/fs/cgroup/memory (v1).
+/// memory controller then); else the v2 line (`0::path`). Of the matching
+/// mounts in mountinfo (cgroup2; cgroup with the memory option), the first
+/// whose root is the process's cgroup or an ancestor of it (a host's
+/// cgroupfs can be bind-mounted beside a container's own); else the first
+/// one. Without mountinfo, or no matching mount in it, the usual mount
+/// points: /sys/fs/cgroup (v2), /sys/fs/cgroup/memory (v1).
 fn hierarchy(root: &Path) -> Option<Hier> {
     let cg = std::fs::read_to_string(root.join("proc/self/cgroup")).ok()?;
     let mut v2 = None;
@@ -133,19 +152,25 @@ fn hierarchy(root: &Path) -> Option<Hier> {
         (None, None) => return None,
     };
     let mi = std::fs::read_to_string(root.join("proc/self/mountinfo")).unwrap_or_default();
-    let found = mi.lines().find_map(|l| {
-        // id parent maj:min root mountpoint opts [optional...] - fstype source superopts
-        let (pre, post) = l.split_once(" - ")?;
-        let pre: Vec<&str> = pre.split(' ').collect();
-        let post: Vec<&str> = post.split(' ').collect();
-        let (mroot, mpoint) = (*pre.get(3)?, *pre.get(4)?);
-        let fstype = *post.first()?;
-        let ok = match is_v1 {
-            false => fstype == "cgroup2",
-            true => fstype == "cgroup" && post.get(2)?.split(',').any(|o| o == "memory"),
-        };
-        ok.then(|| (unescape(mpoint), unescape(mroot)))
-    });
+    let mounts: Vec<(String, String)> = (mi.lines())
+        .filter_map(|l| {
+            // id parent maj:min root mountpoint opts [optional...] - fstype source superopts
+            let (pre, post) = l.split_once(" - ")?;
+            let pre: Vec<&str> = pre.split(' ').collect();
+            let post: Vec<&str> = post.split(' ').collect();
+            let (mroot, mpoint) = (*pre.get(3)?, *pre.get(4)?);
+            let fstype = *post.first()?;
+            let ok = match is_v1 {
+                false => fstype == "cgroup2",
+                true => fstype == "cgroup" && post.get(2)?.split(',').any(|o| o == "memory"),
+            };
+            ok.then(|| (unescape(mpoint), unescape(mroot)))
+        })
+        .collect();
+    let found = (mounts.iter())
+        .find(|(_, r)| is_below(&path, r))
+        .or(mounts.first())
+        .cloned();
     let (mount, mount_root) = found.unwrap_or_else(|| {
         let p = if is_v1 {
             "/sys/fs/cgroup/memory"
@@ -160,6 +185,13 @@ fn hierarchy(root: &Path) -> Option<Hier> {
         mount: root.join(mount.trim_start_matches('/')),
         mount_root,
     })
+}
+
+/// Whether cgroup `path` is `anc` or below it.
+fn is_below(path: &str, anc: &str) -> bool {
+    let anc = anc.trim_end_matches('/');
+    path.strip_prefix(anc)
+        .is_some_and(|r| r.is_empty() || r.starts_with('/'))
 }
 
 /// mountinfo's octal escapes (`\040` for a space and so on).
@@ -507,13 +539,61 @@ mod tests {
         assert_eq!(unescape(r"/x\04"), r"/x\04");
     }
 
-    /// The real machine: whatever it is, the figure is at most the host's.
+    /// A container with its own cgroup namespace: /proc/self/cgroup says
+    /// `0::/`, cgroup2 is mounted at /sys/fs/cgroup with root `/`, and the
+    /// limit is the top directory's memory.max (the container's cgroup, the
+    /// namespace's root). With no limit there, the host's figure.
     #[test]
-    fn real_avail_at_most_host() {
-        let (Some(a), Some(h)) = (avail(), host_available(Path::new("/"))) else {
-            return;
-        };
-        assert!(a.bytes <= h, "{a:?} > host {h}");
-        eprintln!("mem avail: {} MB ({a})", a.bytes >> 20);
+    fn v2_cgroupns_private_root() {
+        let r = Root::new("v2cgns");
+        r.put("proc/meminfo", MEMINFO_16G)
+            .put("proc/self/cgroup", "0::/\n")
+            .put(
+                "proc/self/mountinfo",
+                "1 0 0:1 / / rw - overlay overlay rw\n\
+                 9 1 0:29 / /sys/fs/cgroup ro,nosuid - cgroup2 cgroup rw\n",
+            );
+        r.v2("", &(GB).to_string(), 300 * MB, (50 * MB, 50 * MB));
+        let a = r.avail().unwrap();
+        assert_eq!(a.bytes, GB - 200 * MB);
+        assert_eq!(a.bound, cg("/", GB, false));
+        assert_eq!(a.to_string(), "cgroup / memory.max 1024 MB");
+        r.put("sys/fs/cgroup/memory.max", "max\n");
+        assert_eq!(r.avail().unwrap().bound, Bound::Host);
+    }
+
+    /// Two cgroup2 mounts (the host's cgroupfs bind-mounted beside the
+    /// container's own subtree mount): the one whose root is above the
+    /// process's cgroup is read, whatever the order.
+    #[test]
+    fn v2_picks_the_mount_above_the_cgroup() {
+        let r = Root::new("v2two");
+        r.put("proc/meminfo", MEMINFO_16G)
+            .put("proc/self/cgroup", "0::/system.slice/docker-1.scope\n")
+            .put(
+                "proc/self/mountinfo",
+                "8 1 0:29 /other.slice /host/cg ro - cgroup2 cgroup rw\n\
+                 9 1 0:29 /system.slice/docker-1.scope /sys/fs/cgroup ro - cgroup2 cgroup rw\n",
+            );
+        r.v2("", &(512 * MB).to_string(), 0, (0, 0));
+        r.put("host/cg/memory.max", &format!("{}\n", 64 * MB));
+        let a = r.avail().unwrap();
+        assert_eq!(a.bound, cg("/system.slice/docker-1.scope", 512 * MB, false));
+        assert!(is_below("/a/b", "/a") && is_below("/a", "/a/") && is_below("/a", "/"));
+        assert!(!is_below("/ab", "/a") && !is_below("/a", "/a/b"));
+    }
+
+    /// The real machine: a figure is found (Linux has /proc/meminfo).
+    /// Printed, not compared with a second read of the host's: memory moves
+    /// between two reads (the comparison is `avail_at`'s, tested above).
+    #[test]
+    fn real_avail_is_found() {
+        let a = avail();
+        if cfg!(target_os = "linux") {
+            assert!(a.is_some(), "no /proc/meminfo?");
+        }
+        if let Some(a) = a {
+            eprintln!("mem avail: {} MB ({a})", a.bytes >> 20);
+        }
     }
 }
