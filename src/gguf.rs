@@ -877,9 +877,22 @@ pub(crate) fn mem_available() -> Option<u64> {
     Some(kb * 1024)
 }
 
+/// Load a model as `axon` loads it for the CPU (`crate::load`,
+/// `load_to_run`): mapped, unless it reads its matrices in place
+/// (`model::reads_matrices_in_place`: AXON_REPACK=0, or types that don't
+/// repack), when the copy into huge pages pays and is taken as `copy_choice`
+/// says (60% of the RAM available, AXON_MMAP); a MoE model is always mapped.
+/// The tests' default loader, so they hold what the product holds: a dense
+/// model that repacks is not copied into anonymous memory beside its r8
+/// arena (Mistral-7B: 4.4 GB more), which in a memory-capped test job is an
+/// OOM kill the product never risks. `load_with(path, Some(true))` (or
+/// None: copy unless over 60%) is the copy path, for the tests that want it.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn load(path: &str) -> io::Result<Model> {
-    load_with(path, None)
+    load_to_run(path, None, |m| match crate::model::is_moe(m) {
+        true => CopyWish::MapOnly,
+        false => CopyWish::Want(crate::model::reads_matrices_in_place(m)),
+    })
 }
 
 /// A model's header for `axon info`: a GGUF mapped (`load_with`), a

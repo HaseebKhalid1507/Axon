@@ -47,10 +47,18 @@ pub fn model() -> Option<Model> {
 }
 
 /// `model`, copied into anonymous memory (Some(true)) or file-mapped
-/// (Some(false)); None picks as `gguf::load` does.
+/// (Some(false)); None loads it as `axon` does for the CPU (`gguf::load`:
+/// mapped, the product's policy for a model that repacks).
 pub fn model_with(copy: Option<bool>) -> Option<Model> {
     let path = model_path()?;
-    Some(gguf::load_with(path.to_str().expect("utf-8 path"), copy).expect("load model"))
+    let path = path.to_str().expect("utf-8 path");
+    Some(
+        match copy {
+            None => gguf::load(path),
+            Some(_) => gguf::load_with(path, copy),
+        }
+        .expect("load model"),
+    )
 }
 
 /// The qwen3 test model, or None to skip (`AXON_SKIP_MODEL_TESTS`, as
@@ -199,12 +207,14 @@ pub fn ds2_model() -> Option<Model> {
 }
 
 /// A MoE test model loaded as `axon` runs one: the file mapped, never
-/// copied (`load_to_run`'s `CopyWish::MapOnly` for MoE models). `gguf::load`
-/// copies a file under 60% of `MemAvailable` into anonymous memory, and then
+/// copied (`load_to_run`'s `CopyWish::MapOnly` for MoE models; `gguf::load`
+/// does the same now). The copy path (`gguf::load_with(_, None)`) copies a
+/// file under 60% of `MemAvailable` into anonymous memory, and then
 /// `moe::check_ram`, which counts the r8 arena against `MemAvailable`, sees
 /// the copy as used RAM: Moonlight (10.5 GB) copied on a host with 18 GB
 /// available leaves ~10 GB and the 11.3 GB check refuses, while the same
-/// host with less free memory maps the file and passes.
+/// host with less free memory maps the file and passes. Forced mapped here
+/// whatever AXON_MMAP says, as `MapOnly` is.
 pub fn load_moe(path: &Path) -> std::io::Result<Model> {
     gguf::load_with(path.to_str().expect("utf-8 path"), Some(false))
 }
@@ -395,23 +405,59 @@ pub fn gptoss_model() -> Option<Model> {
 
 #[cfg(test)]
 mod load_tests {
-    /// MoE test models are mapped (file-backed) whatever `gguf::load` would
-    /// choose for the file: a small model `load` copies is mapped here.
+    /// The test loaders follow the product's CPU load policy
+    /// (`gguf::load`): the dense test models repack, so they're mapped, and
+    /// a MoE model is always mapped. Then the one explicit test of the copy
+    /// path the tests no longer take by default: `load_with(_, Some(true))`
+    /// copies, and `load_with(_, None)` copies a small file (under 60% of
+    /// the RAM available); both hold the mapped model's bytes.
     #[test]
-    fn moe_test_models_are_mapped() {
+    fn test_loaders_map_as_the_product_does() {
         let Some(p) = super::model_path() else {
             return;
         };
-        let m = super::load_moe(&p).unwrap();
-        assert!(m.file_backed(), "{}: copied, not mapped", p.display());
+        // A model that reads its matrices in place is copied by the product
+        // too (when it fits): only the ones that repack must be mapped.
+        let dense = |m: Option<crate::gguf::Model>, what: &str| {
+            if let Some(m) = m
+                && std::env::var_os("AXON_MMAP").is_none()
+                && !crate::model::reads_matrices_in_place(&m)
+            {
+                assert!(m.file_backed(), "{what}: copied, not mapped");
+            }
+        };
+        dense(super::model(), "model()");
+        dense(super::model_with(None), "model_with(None)");
+        dense(super::qwen3_model(), "qwen3_model()");
+        dense(super::llama_model(), "llama_model()");
+        dense(super::gemma3_model(), "gemma3_model()");
+        if let Some(mp) = super::moe_model_path(false) {
+            for m in [
+                super::load_moe(&mp),
+                crate::gguf::load(mp.to_str().unwrap()),
+            ] {
+                assert!(m.unwrap().file_backed(), "{}: copied", mp.display());
+            }
+        }
+        // The copy path, explicitly.
+        let path = p.to_str().unwrap();
+        let mapped = crate::gguf::load(path).unwrap();
+        let mut copies = vec![crate::gguf::load_with(path, Some(true)).unwrap()];
         if std::env::var_os("AXON_MMAP").is_none()
             && crate::gguf::mem_available().is_some_and(|a| a > 4 << 30)
         {
-            let c = crate::gguf::load(p.to_str().unwrap()).unwrap();
-            assert!(
-                !c.file_backed(),
-                "the contrast: gguf::load copies a small file"
-            );
+            copies.push(crate::gguf::load_with(path, None).unwrap());
+        }
+        for c in &copies {
+            assert!(!c.file_backed(), "the copy path copies a small file");
+            assert_eq!(c.tensors.len(), mapped.tensors.len());
+            for t in &mapped.tensors {
+                assert!(
+                    c.tensor_data(t) == mapped.tensor_data(t),
+                    "{}: copy != mapping",
+                    t.name
+                );
+            }
         }
     }
 }
