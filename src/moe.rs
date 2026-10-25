@@ -85,6 +85,8 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
     /// that doesn't fit) and its experts on the CPU. `module` is the
     /// model's kernel module, `router` `Kernels::moe_module_for(m)`.
     /// `q6k8`: the Q6_K prefill copy now (as `CudaQwen2::with_kv_q6k8`).
+    /// The tests'; the product passes `--gpu-experts` (`new_with`).
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         gpu: &'g Gpu,
@@ -114,7 +116,7 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
     /// a bit (the twins: `cuda::qwen2::experts`); where it couldn't keep
     /// them, it falls back to none and says why (`describe`).
     #[allow(clippy::too_many_arguments)]
-    pub fn new_with(
+    pub(crate) fn new_with(
         gpu: &'g Gpu,
         module: &'g Module<'g>,
         router: &'g Module<'g>,
