@@ -32,6 +32,12 @@ jobs:
       - run: cargo clippy --all-targets
       # The lib's unit tests and doc tests; also builds the binary and examples/embed.rs.
       - run: cargo test
+      # rustdoc passes a compile_fail block on any error; this checks each
+      # fails with the error code it names (scripts/compile_fail_check.py).
+      - name: compile_fail doc tests fail for their stated reason
+        run: |
+          cargo build --lib
+          python3 scripts/compile_fail_check.py target/debug/libaxon.rlib target/debug/deps
       # The SIMD tests skip paths the runner's CPU lacks (GitHub runners usually
       # have AVX2 but not AVX-VNNI). Rerun them uncaptured so each skip shows
       # up as a ::warning:: annotation instead of passing silently.

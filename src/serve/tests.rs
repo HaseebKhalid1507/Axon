@@ -263,8 +263,13 @@ fn serve_matches_gen_and_chat(path: &str, device: Device) {
     let (gen_ref, chat_ref) = {
         let m = crate::gguf::load_with(path, crate::copy_for(device)).unwrap();
         let tok = Tokenizer::from_gguf(&m);
-        let net =
-            crate::lm::Backend::new(&m, device, 256, None, crate::kv::KvType::F16, false).unwrap();
+        let net = crate::lm::Backend::new(
+            &m,
+            crate::lm::BackendOptions::default()
+                .device(device)
+                .max_ctx(256),
+        )
+        .unwrap();
         (
             gen_text(&net, &tok, PROMPT, 32),
             chat_text(&net, &tok, &m.arch, CHAT_MSG, 24),
@@ -529,9 +534,13 @@ fn serve_cuda_long_prompt_matches_gen() {
     }
     let n = tok.encode_prompt(&prompt).len();
     let reference = {
-        let net =
-            crate::lm::Backend::new(&m, Device::Cuda, ctx, None, crate::kv::KvType::F16, false)
-                .unwrap();
+        let net = crate::lm::Backend::new(
+            &m,
+            crate::lm::BackendOptions::default()
+                .device(Device::Cuda)
+                .max_ctx(ctx),
+        )
+        .unwrap();
         let cache = net.new_cache(ctx);
         let rs = net.prompt_chunks(n - 1, 0, &cache);
         eprintln!("{n} tokens: job feeds {rs:?}");
@@ -1556,8 +1565,13 @@ fn prefill_vs_cache_size() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
     let m = crate::gguf::load_with(path.to_str().unwrap(), Some(false)).unwrap();
     let tok = Tokenizer::from_gguf(&m);
-    let net = crate::lm::Backend::new(&m, Device::Cuda, 8192, None, crate::kv::KvType::F16, false)
-        .unwrap();
+    let net = crate::lm::Backend::new(
+        &m,
+        crate::lm::BackendOptions::default()
+            .device(Device::Cuda)
+            .max_ctx(8192),
+    )
+    .unwrap();
     let sent = "The quick brown fox jumps over the lazy dog near the river bank. ";
     let ctxs = [600usize, 4096, 8192];
     let mut caches: Vec<_> = ctxs.iter().map(|&c| net.new_cache(c)).collect();

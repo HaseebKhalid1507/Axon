@@ -39,18 +39,18 @@ struct Stage<'g> {
     done: SyncEvent<'g>,
 }
 
-pub struct PipelineQwen2<'g> {
+pub(crate) struct PipelineQwen2<'g> {
     stages: Vec<Stage<'g>>,
     /// Layer boundaries: stage s holds layers cuts[s]..cuts[s + 1]
     /// (cuts[0] = 0, the last = n_layers).
-    pub cuts: Vec<usize>,
+    pub(crate) cuts: Vec<usize>,
     /// Per boundary s -> s + 1: whether the copy goes peer to peer (else
     /// the driver stages it through host memory).
-    pub p2p: Vec<bool>,
+    pub(crate) p2p: Vec<bool>,
 }
 
 /// Each stage's cache (its layers' KV and scratch).
-pub struct PipelineCache<'g> {
+pub(crate) struct PipelineCache<'g> {
     c: Vec<CudaCache<'g>>,
 }
 
@@ -193,7 +193,7 @@ impl<'g> PipelineQwen2<'g> {
     /// AXON_PP_CUTS, else `pipeline_cuts` over each device's free VRAM (a
     /// device listed twice shares it evenly). Peer access is turned on
     /// between neighbors where the devices allow it.
-    pub fn new(
+    pub(crate) fn new(
         devs: &[(&'g Gpu, &'g Module<'g>)],
         m: &Model,
         max_ctx: usize,
@@ -249,7 +249,7 @@ impl<'g> PipelineQwen2<'g> {
     }
 
     /// The context the stages' caches are planned for (`new`'s max_ctx).
-    pub fn ctx(&self) -> usize {
+    pub(crate) fn ctx(&self) -> usize {
         self.stages[0].net.ctx
     }
 
@@ -257,7 +257,7 @@ impl<'g> PipelineQwen2<'g> {
     /// if it fits, else the most (a multiple of 256) down to `min_ctx`;
     /// None if not even that. The same placement (AXON_PP_CUTS, else
     /// `pipeline_cuts`) and needs (`stage_need`), nothing allocated.
-    pub fn fit_ctx(
+    pub(crate) fn fit_ctx(
         devs: &[(&'g Gpu, &'g Module<'g>)],
         m: &Model,
         max_ctx: usize,
@@ -296,7 +296,7 @@ impl<'g> PipelineQwen2<'g> {
 
     /// "pipeline 2 GPUs: layers 0..33 on 0 (11.20 GiB), 33..64 on 1 (...)"
     /// with a `max_ctx` cache, and how the hops go.
-    pub fn describe(&self, max_ctx: usize) -> String {
+    pub(crate) fn describe(&self, max_ctx: usize) -> String {
         let parts: Vec<String> = self
             .stages
             .iter()
@@ -332,12 +332,12 @@ impl<'g> PipelineQwen2<'g> {
     }
 
     /// Each stage's model, in order (its device: `CudaQwen2::gpu`).
-    pub fn stages(&self) -> Vec<&CudaQwen2<'g>> {
+    pub(crate) fn stages(&self) -> Vec<&CudaQwen2<'g>> {
         self.stages.iter().map(|s| &s.net).collect()
     }
 
     /// The cache type (`CudaQwen2::kv_name`; every stage's is the same).
-    pub fn kv_name(&self) -> &'static str {
+    pub(crate) fn kv_name(&self) -> &'static str {
         self.stages[0].net.kv_name()
     }
 
@@ -606,6 +606,7 @@ pub(crate) fn layer_kv(net: &CudaQwen2, c: &CudaCache) -> Vec<Vec<u8>> {
     }
 }
 
+impl<'g> crate::lm::Sealed for PipelineQwen2<'g> {}
 impl<'g> Lm for PipelineQwen2<'g> {
     type Cache = PipelineCache<'g>;
 

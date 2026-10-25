@@ -17,7 +17,7 @@ The first version: everything merged to `main` from the start of the project (20
   The command line moved from `src/main.rs` to `src/cli.rs` (a new file: git doesn't track it as a rename) and the
   decode loop and its tests to `src/generate.rs`; `examples/embed.rs` shows the API. No change for the CLI: same
   greedy bits, same output, same tests (14 renamed: `tests::*` → `cli::tests::*` or `generate::tests::*`).
-- The KV type is an argument: `Backend::new(…, kv, …)` reads no `AXON_KV` (the CLI and `examples/embed.rs` parse it
+- The KV type is an argument: `Backend::new` (its `BackendOptions::kv`) reads no `AXON_KV` (the CLI and `examples/embed.rs` parse it
   with `KvType::parse` and pass it), `KvType::F32` takes effect on the CPU (it used to be silently f16 through the
   library), and a type that conflicts with the process's earlier f16/f32 choice is an error.
 - `Model` is read-only outside the crate: its fields and the methods that hand out or release weight bytes are
@@ -27,6 +27,17 @@ The first version: everything merged to `main` from the start of the project (20
 - `generate` refuses drafting (`max_draft > 0`) on a backend whose decode steps stream (`Lm::decode_streams`:
   `AXON_STREAM_DECODE=1` on a CPU/GPU split), where drafting wouldn't be lossless; the CLI and `serve` already
   refused the pair.
+- `Backend` and `BackendCache` are opaque (#118 A): no variants to match and no fields, so the model types inside
+  (CPU, GPU, split, pipeline, mixture-of-experts) and their geometry can't be reached or written from outside the
+  crate, and a new kind is not a breaking change. `Lm` is sealed (implemented by the crate's models only).
+  `Device`, `KvType` and `GenStats` are `#[non_exhaustive]` (a match outside the crate needs a `_` arm;
+  `GenStats::default` stays).
+- `Backend::new(&model, BackendOptions)`: device, context, GPU layers, KV type and fit are a `#[non_exhaustive]`
+  options struct with `Default` and chainable setters (`BackendOptions::default().device(Device::Cuda).max_ctx(8192)`),
+  not six positional arguments, so new options (#118 item 2) aren't breaking. `Lm::forward_cands` / `verify_cands`
+  are `#[doc(hidden)]` until the sampler is exported (#118 item 8).
+- A bad `AXON_SIMD` (unknown, or a kernel set the CPU lacks), `AXON_DECODE_ROWS` or `AXON_PREFETCH` is an error
+  from `load` and `Backend::new` (the CLI: its usual message, exit 2) instead of a panic inside a later call (#118 B).
 - Not hardened for embedders yet (stderr notes, env-only config, a CUDA leak per `Backend::new`, `serve` exits the
   process): #118.
 
