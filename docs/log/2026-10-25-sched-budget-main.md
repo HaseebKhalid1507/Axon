@@ -38,7 +38,7 @@ speed; and main's step lands 8 ms over the 50 ms ITL SLO (`--prefill-ms 60`). Se
 | debug `serve::` + `cuda::qwen2::slots::`, GPU (a18ff8d) | 142 passed, 0 failed, 7 ignored | avante 1025-011102-6e5e |
 | `serve::` release, rollback env (a18ff8d) | 131 passed, 1 failed (`serve_sjf_short_ahead_of_long`: test bug, below) | avante 1025-011103-2a37 |
 | `serve::` release, rollback env (38bca6d) | **132 passed, 0 failed, 4 ignored** | avante 1025-024210-ace4 |
-| debug `serve::` + `slots::`, GPU (38bca6d) | pending (queued) | avante 1025-024210-b160 |
+| debug `serve::` + `slots::`, GPU (38bca6d) | PASS | avante 1025-024210-b160 |
 | md5 of `gen`, main d6b7051 vs a18ff8d, same host | 0 of 20 pairs differ | bella 1025-011103-bbeb |
 | serve digests (main, cand, rollback, lanes 8 / age 0, step-tokens 64; 0.5B, 1.5B) | 1 distinct digest over 10 runs, each model | bella 1025-011104-fadf |
 | clippy -D warnings (bin + test), rustfmt | clean | local |
@@ -51,7 +51,29 @@ MEASURED, avante (RTX 4050 Laptop), clean (foreign GPU 0 %), at a18ff8d. roll = 
 - `serve_sched_ab` mix, C=32, 3 rounds (0.5B 1025-012508-948a, 1.5B 1025-012609-5381). Short TTFT p90: main 226.6 / 1602.8 ms, sjf50 135.5 / 386.4 ms. Aggregate is within ±3 % everywhere (sjf50 vs main: +0.0 % / +2.8 %). slo_ok at 1.5B: 0.55 (main) → 0.92 (sjf50).
 - sd_client mix, 0.5B, 2 rounds (1025-022130-32ae). Short TTFT p99 at C=16 / 32: main 712 / 1462 ms, sjf60 120 / 146 ms. Short p50 32–42 → 56–58 ms. Aggregate within ±2 %.
 - Watch: at 1.5B, `--step-ms 50` has ITL p99 91.7 vs 75.6 ms (main) and step p50 58 ms (+16 % over target). The `--prefill-chunk 256` floor binds there.
-- Kill-rule verdict: waits for the spec's bella cells (7B C=16, 1.5B C=32). They keep coming back TAINTED by the desktop and are deferred.
+- Kill-rule verdict: see the section below.
+
+## Kill rule (spec §8.2), clean bella cells at a18ff8d
+MEASURED, bella sm_120, `--timing bella`, not TAINTED: 7B C=16 (1025-153024-9a7f), 1.5B C=32 (1025-153021-7de9),
+sdab15 1.5B with the main binary (1025-153024-9998). roll = main's scheduling.
+- Bits: PASS (same_text 1 every round; md5 0/20; digests 1 per model).
+- (d) at 60 (fifo60 vs roll): PASS. ITL p99 −0.6 % / +0.3 %, aggregate +1.2 % / −0.3 %, step p50 (rows ≥ 16) 55.0 /
+  57.3 ms against 60. At 50: 57.5 ms on the 7B (+15 %, the edge; the 256 floor binds) and 49.5 on the 1.5B. The H100
+  sub-clause is pending (pod, not booked).
+- (c): **FAIL** on short TTFT p50 ≤ 0.5× fifo: 7B 273 vs 197 ms (1.39×, also over 3 steps), 1.5B 111 vs 139
+  (0.80×). Long max (0.97× / 0.95×) and aggregate (+0.9 % / +2.2 %) pass. The tails improve: short p90 0.55× /
+  0.46×, max 0.34× / 0.14×; sdab15 short p99 0.15× / 0.10× of fifo60.
+- Diagnosis (requests.jsonl of 9998, split by wave). fifo's wave-1 short TTFTs spread from 8, 16, 24 ms to 0.5–2 s;
+  sjf's cluster at 57–62 ms (C=16) and 144–160 ms (C=32), one request excepted; later waves are equal in every arm.
+  The first wave hits an idle, cold server: a token budget with no pass charge and no bound on prompts, so SJF's whole
+  admitted wave was fed in one step, each short in its own pass, and every first token waited for all of them. Not
+  the short gate holding shorts back, nor the pull depth or lanes. Fixed in 722139a (`step_prompts`: at most what
+  `--step-ms` fits at the measured pass cost, 1 before anything is measured). Re-gating and re-measuring the three
+  bella cells. Pre-registered: if sjf60's short p50 is still above 0.5× fifo60's on either bella harness-1 cell,
+  (c) has failed and `--admit-order fifo` becomes the default (sjf opt-in); (d) ships either way.
+- Raw logs: https://gist.github.com/HaseebKhalid1507/bddc842182269929cde899d29d35daa0 (per-request:
+  https://gist.github.com/HaseebKhalid1507/5de9bd0da4f0b3ac71759d11d68727d0; scripts:
+  https://gist.github.com/HaseebKhalid1507/6f8caa702c433927ff2f205a2abfcd11).
 
 ## Review fixes carried over (shady 7/10 on #126)
 - `pass_us` bounded: a sample is at most 4x the estimate and half a step; the estimate is read bounded by twice
