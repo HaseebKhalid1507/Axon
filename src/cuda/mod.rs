@@ -55,8 +55,8 @@ fn no_capture() -> RwLockWriteGuard<'static, ()> {
 /// Why `Gpu::open` fails off Linux.
 pub const LINUX_ONLY: &str = "CUDA support is Linux-only for now";
 
-/// kernels.cu, decode.cu, prefill.cu, stream.cu, sample.cu, hopper.cu, gemma.cu and moe_twin.cu
-/// (then `$extra`), one source.
+/// kernels.cu, decode.cu, prefill.cu, stream.cu, sample.cu, hopper.cu, gemma.cu, moe_twin.cu and
+/// moe_res.cu (then `$extra`), one source.
 macro_rules! kernels_src {
     ($($extra:expr),*) => {
         concat!(
@@ -67,7 +67,8 @@ macro_rules! kernels_src {
             include_str!("sample.cu"),
             include_str!("hopper.cu"),
             include_str!("gemma.cu"),
-            include_str!("moe_twin.cu")
+            include_str!("moe_twin.cu"),
+            include_str!("moe_res.cu")
             $(, $extra)*
         )
     };
