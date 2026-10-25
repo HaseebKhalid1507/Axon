@@ -499,6 +499,24 @@ mod load_tests {
             &before[..],
             "explicit mapping reads it back"
         );
+        // A rewritten tensor (llama's q/k rows, reordered into a side copy
+        // at load): readable after load, refused once released, as on the
+        // copy (where it was rewritten in place and reads zeros).
+        if let Some(l) = super::llama_model() {
+            assert!(l.file_backed());
+            let q = (l.tensors.iter())
+                .find(|t| t.name == "blk.0.attn_q.weight")
+                .unwrap();
+            assert!(!l.tensor_data(q).is_empty(), "q before release");
+            l.release(q);
+            let r =
+                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| l.tensor_data(q).len()));
+            assert!(r.is_err(), "a released rewritten tensor was readable");
+            let k = (l.tensors.iter())
+                .find(|t| t.name == "blk.0.attn_k.weight")
+                .unwrap();
+            assert!(!l.tensor_data(k).is_empty(), "k untouched");
+        }
         // Its neighbours are not refused.
         let u = (m.tensors.iter())
             .find(|t| t.name == "blk.0.attn_q.weight")

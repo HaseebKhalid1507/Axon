@@ -496,6 +496,11 @@ pub struct Model {
     /// the copy (`strict_release`).
     #[cfg(test)]
     strict_release: bool,
+    /// Tests only, with `strict_release`: the tensors `release`d since the
+    /// flag was set (after `load`, so not the rewritten q/k whose file pages
+    /// `unpermute_rope` handed back: their side copies are their bytes).
+    #[cfg(test)]
+    strict_released: std::sync::Mutex<Vec<(u16, std::ops::Range<usize>)>>,
     /// Tensors `load` rewrote (llama's reordered q/k rows) when `data` maps
     /// the file: their bytes live here, each in its own anonymous mapping,
     /// and `tensor_data` reads them from it (the mapping stays the file's,
@@ -568,6 +573,18 @@ impl Model {
     /// model loaded by `load` (`strict_release`).
     pub(crate) fn tensor_data(&self, t: &Tensor) -> &[u8] {
         let r = self.tensor_range(t);
+        // Before the side copy: a rewritten tensor (llama's q/k) released
+        // after repacking is zeros on the copy too.
+        #[cfg(test)]
+        if self.strict_release {
+            let gone = (self.strict_released.lock().unwrap().iter())
+                .any(|(s, x)| *s == t.shard && x.start < r.end && r.start < x.end);
+            assert!(
+                !gone,
+                "tensor {} was released after repacking; load the model again to read it",
+                t.name
+            );
+        }
         if t.shard == 0
             && let Some(s) = self.side_of(&r)
         {
@@ -654,6 +671,12 @@ impl Model {
             return;
         }
         let s = t.shard;
+        // Before the duplicate check: a rewritten tensor is in `released`
+        // already (its file pages, from `unpermute_rope`).
+        #[cfg(test)]
+        if self.strict_release {
+            self.strict_released.lock().unwrap().push((s, r.clone()));
+        }
         let mut rel = self.released.lock().unwrap();
         let i = rel.partition_point(|x| (x.0, x.1.start) < (s, r.start));
         if rel.get(i) == Some(&(s, r.clone())) {
@@ -911,14 +934,13 @@ pub(crate) fn mem_available() -> Option<u64> {
 /// None: copy unless over 60%) is the copy path, for the tests that want it.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn load(path: &str) -> io::Result<Model> {
+    #[cfg_attr(not(test), allow(unused_mut))]
+    let mut m = load_to_run(path, None, crate::model::cpu_copy_wish)?;
     #[cfg(test)]
     {
-        let mut m = load_to_run(path, None, crate::model::cpu_copy_wish)?;
         m.strict_release = true;
-        Ok(m)
     }
-    #[cfg(not(test))]
-    load_to_run(path, None, crate::model::cpu_copy_wish)
+    Ok(m)
 }
 
 /// A model's header for `axon info`: a GGUF mapped (`load_with`), a
@@ -1134,6 +1156,8 @@ impl Model {
             any_released: Default::default(),
             #[cfg(test)]
             strict_release: false,
+            #[cfg(test)]
+            strict_released: Default::default(),
             side: Vec::new(),
             file: None,
             ahead: false,
@@ -1540,6 +1564,8 @@ pub fn build_for_test_with(
         any_released: Default::default(),
         #[cfg(test)]
         strict_release: false,
+        #[cfg(test)]
+        strict_released: Default::default(),
         side: Vec::new(),
         file: None,
         ahead: false,

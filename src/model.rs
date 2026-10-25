@@ -611,16 +611,6 @@ fn unsupported_type(m: &Model, name: &str, q: crate::gguf::QType) -> String {
     )
 }
 
-/// Whether `Qwen2::new` reads any weight matrix in place from the model's
-/// bytes on every token (AXON_REPACK=0, or a matrix with no r8/r8q form),
-/// so that the anonymous huge-page copy of the file pays (`gguf::load_then`).
-/// Otherwise every matrix, the output head included, is repacked into the
-/// r8 arena (huge pages itself) and the file is read once: the embedding
-/// (one row per token) and the norm/bias vectors (copied out) are all
-/// that's left in the mapping.
-///
-/// A MoE file is always mapped: its experts are most of it, and a copy
-/// beside the r8 arena would hold them twice (the 30B: 18.6 + 17.9 GB).
 /// The CPU's copy-vs-map wish of a model (`gguf::load_to_run`): a MoE model
 /// always mapped, else a copy only when it reads its matrices in place. The
 /// one policy `crate::load`, `cli::open_model_with` and the tests'
@@ -632,6 +622,16 @@ pub fn cpu_copy_wish(m: &Model) -> crate::gguf::CopyWish {
     }
 }
 
+/// Whether `Qwen2::new` reads any weight matrix in place from the model's
+/// bytes on every token (AXON_REPACK=0, or a matrix with no r8/r8q form),
+/// so that the anonymous huge-page copy of the file pays (`gguf::load_then`).
+/// Otherwise every matrix, the output head included, is repacked into the
+/// r8 arena (huge pages itself) and the file is read once: the embedding
+/// (one row per token) and the norm/bias vectors (copied out) are all
+/// that's left in the mapping.
+///
+/// A MoE file is always mapped: its experts are most of it, and a copy
+/// beside the r8 arena would hold them twice (the 30B: 18.6 + 17.9 GB).
 pub fn reads_matrices_in_place(m: &Model) -> bool {
     !moe::is_moe(m)
         && reads_in_place_with(m, std::env::var("AXON_REPACK").map_or(true, |v| v != "0"))
