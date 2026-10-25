@@ -1,6 +1,6 @@
 # lib: opaque `Backend`, sealed `Lm`, `BackendOptions`, env errors instead of panics  (PR #124)
 
-- Date: 2026-10-24. Branch: feat/opaque-backend (PR #124). Base: main 6e3b19c. Status: open, gates green at eaf025f. Round 1 code daada6f;
+- Date: 2026-10-24. Branch: feat/opaque-backend (PR #124). Base: main 6e3b19c. Status: open, gates green (full set at eaf025f, focused at b7e967e). Round 1 code daada6f;
   round 2 (Shady 8/10 APPROVE, the SHOULDs below) is eaf025f, the gated head.
 - Pick / design: issue #118 items A and B, the v0.1.0 blockers from Shady's round-2 review of #117
   (https://github.com/HaseebKhalid1507/Axon/pull/117#issuecomment-6296699905).
@@ -92,6 +92,9 @@ change) and every `pub` field of five model types. #118 B: the same class as #11
 | tests/public_api.rs incl. second_backend_cpu / _cuda | 5/0/0 | 1024-175057-6dc8 |
 | B cases (5 bad values × cpu, cuda) | candidate rc 2 + message, embed rc 1, no panic; main panics on cpu (and AXON_SIMD on cuda) | 1024-175057-6dc8 |
 | CI at eaf025f, incl. scripts/compile_fail_check.py | pass, 7 of 7 as annotated | GitHub run 40136125877 |
+| round 3 (b7e967e, derives/attributes/docs/tests only): all targets build, clippy -D warnings, rustdoc --test 11/11, compile_fail_check 9/9 | clean | local |
+| round 3: tests/public_api.rs (CPU + CUDA, incl. second_backend_*) | 5/0/0 | 1025-003350-1061 (avante sm_89) |
+| CI at b7e967e | pass: lib 649/0/47, public_api 5/0/0, compile_fail_check 9/9 | GitHub run 40161744389 |
 | round 1 (daada6f) | rel 1/2 PASS 263/0/32 (1024-171219-bdcb), dbg 1/2 PASS 271/0/33 (1024-171219-a517); the rest superseded | |
 | `compile_fail` doc tests (rustdoc --test) | 7/7 + 2 compile-only examples | local, eaf025f |
 | each snippet's first error vs main | as annotated, see below | local (`snipcheck.sh`) |
