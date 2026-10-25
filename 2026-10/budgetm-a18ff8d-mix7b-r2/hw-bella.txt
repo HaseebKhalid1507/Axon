@@ -1,0 +1,6 @@
+# bella: captured 2026-10-25 00:07:00 EDT by axon-gatelogs (at upload time, not at job time)
+name, driver_version, memory.total [MiB], power.limit [W], clocks.max.sm [MHz], clocks.max.memory [MHz]
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 615.78.08, 12227 MiB, [N/A], 3090 MHz, 14001 MHz
+| NVIDIA-SMI 615.78.08              KMD Version: 615.78.08     CUDA UMD Version: 13.4     |
+cpu: Intel(R) Core(TM) Ultra 9 275HX x 24
+kernel: 7.2.11-1-cachyos
