@@ -545,6 +545,13 @@ pub enum Part {
 /// tokens delimit it: text never opens or closes a call. Other recipients
 /// (a hallucinated `functions.f to=assistant` result, builtin tools) are
 /// reasoning, as without tools.
+///
+/// With tools, the reply's first role section (after the prompt's
+/// `<|start|>assistant`) is held while it may still be a header
+/// (`maybe_header`: blank, then ` to=...`). Once it can't be, it is the
+/// answer, released (`take_released`) and streamed from then on, as
+/// without tools; so is held text that `<|end|>` / `<|start|>` cuts, and
+/// (`take_unheaded`) held text the reply ends on.
 #[derive(Clone, Debug)]
 pub struct Channels {
     start: u32,
@@ -562,8 +569,15 @@ pub struct Channels {
     /// With tools: the open message's recipient, if it is a call.
     to: Option<String>,
     /// With tools: where the reply's own text starts in `role`, while no
-    /// marker has come since the prompt (`primed`): a reply with no header.
+    /// marker has come since the prompt (`primed`) and that text may still
+    /// be the rest of a role section (`maybe_header`).
     unheaded: Option<usize>,
+    /// With tools: the reply's first role section turned out to be text
+    /// (`maybe_header` said no): it is the answer, as it is without tools,
+    /// and streams as `Answer` until the next marker.
+    prose: bool,
+    /// With tools: held text that is now the answer (`take_released`).
+    released: Option<Vec<u8>>,
     /// With tools: `<|call|>` (not a stop then: the splitter sees it).
     call_tok: Option<u32>,
     /// With tools: a `<|call|>` came: the reply is over.
@@ -586,15 +600,43 @@ fn recipient(head: &[u8]) -> Option<String> {
 
 /// The recipient of a message with role section `role` and channel header
 /// `name`, if it is a call: the role is `assistant` and the recipient a
-/// function (`functions.NAME`).
+/// function (`functions.NAME`). In the role section the recipient counts
+/// only right after the role (`assistant to=functions.NAME`, the template's
+/// form), not anywhere in it.
 fn call_recipient(role: &[u8], name: &[u8]) -> Option<String> {
-    if !role.trim_ascii_start().starts_with(b"assistant") {
-        return None;
-    }
+    let rest = role.trim_ascii_start().strip_prefix(b"assistant")?;
     let f = |r: &String| r.len() > "functions.".len() && r.starts_with("functions.");
-    recipient(role)
-        .filter(f)
-        .or_else(|| recipient(name).filter(f))
+    let to = rest.trim_ascii_start();
+    let in_role = (to.len() < rest.len() && to.starts_with(b"to="))
+        .then(|| recipient(to))
+        .flatten();
+    in_role.filter(f).or_else(|| recipient(name).filter(f))
+}
+
+/// The most text a reply's first role section is held for (no marker yet)
+/// while it may still be a header: then it is the answer.
+const MAX_HEAD: usize = 512;
+
+/// Whether `t`, the reply's own text in its first role section (after the
+/// prompt's `assistant`, no marker since), may still be the rest of a role
+/// section: blank, or blank then (a prefix of) `to=` (a recipient) or
+/// `<|constrain|>`, at most `MAX_HEAD` bytes. Anything else is text, the
+/// answer, as it is without tools (where it streams from the first byte).
+fn maybe_header(t: &[u8]) -> bool {
+    if t.len() > MAX_HEAD {
+        return false;
+    }
+    let rest = t.trim_ascii_start();
+    if rest.is_empty() {
+        return true;
+    }
+    if rest.len() == t.len() {
+        // Glued to `assistant`: not a role section the template writes.
+        return false;
+    }
+    [&b"to="[..], b"<|constrain|>"]
+        .iter()
+        .any(|w| rest.starts_with(w) || w.starts_with(rest))
 }
 
 impl Channels {
@@ -614,6 +656,8 @@ impl Channels {
             role: None,
             to: None,
             unheaded: None,
+            prose: false,
+            released: None,
             call_tok: None,
             ended: false,
         })
@@ -656,20 +700,37 @@ impl Channels {
     }
 
     /// The end of a reply that never opened a message (no `<|channel|>` or
-    /// `<|message|>` after the prompt): its text, which without tools would
-    /// have been the answer.
+    /// `<|message|>` after the prompt) and whose text was still held (it
+    /// may have been a header): that text, which without tools would have
+    /// been the answer.
     pub fn take_unheaded(&mut self) -> Option<Vec<u8>> {
         let at = self.unheaded.take()?;
         let r = self.role.as_ref()?;
         (r.len() > at).then(|| r[at..].to_vec())
     }
 
+    /// Held text that the last `push` made the answer: the reply's first
+    /// role section, once it is clearly not a header (that `push` returned
+    /// `Answer`, and this includes its token's bytes), or cut by
+    /// `<|end|>` / `<|start|>` (that `push` returned `Hidden`).
+    pub fn take_released(&mut self) -> Option<Vec<u8>> {
+        self.released.take()
+    }
+
     /// Token `id` (`bytes`, its text): where it goes.
     pub fn push(&mut self, id: u32, bytes: &[u8]) -> Part {
+        if self.tools && (id == self.start || id == self.end) {
+            // A marker cuts the first role section: text held in it is the
+            // answer (`take_released`), as it is without tools.
+            if let Some(t) = self.take_unheaded() {
+                self.released = Some(t);
+            }
+        }
         if self.tools
             && (id == self.channel || id == self.message || id == self.start || id == self.end)
         {
             self.unheaded = None;
+            self.prose = false;
         }
         if self.tools && (id == self.channel || id == self.message) && self.to.is_some() {
             // A header inside a call's arguments: the call is malformed
@@ -719,8 +780,24 @@ impl Channels {
             n.extend_from_slice(bytes);
             return Part::Hidden;
         }
+        if self.prose {
+            return Part::Answer;
+        }
         if let Some(r) = &mut self.role {
             r.extend_from_slice(bytes);
+            if let Some(at) = self.unheaded
+                && !maybe_header(&r[at..])
+            {
+                // Not a header: the reply's text so far is the answer, and
+                // so is what follows, until a marker. The role stays
+                // `assistant` (a channel header may still follow and name
+                // a call; the text never does).
+                self.released = Some(r.split_off(at));
+                self.unheaded = None;
+                self.prose = true;
+                self.part = Part::Answer;
+                return Part::Answer;
+            }
             return Part::Hidden;
         }
         self.part

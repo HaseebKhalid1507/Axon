@@ -477,6 +477,8 @@ impl TextOut<'_> {
         let mut c = self.call_open(ch);
         let was = ch.call().is_some();
         let part = ch.push(id, &bytes);
+        // The reply's first role section, once it is the answer (no header).
+        let released = ch.take_released();
         let now = ch.call().is_some();
         if was && now && matches!(self.call, CallState::Open(..)) {
             let t = self.utf8.push(&bytes);
@@ -505,13 +507,26 @@ impl TextOut<'_> {
         }
         c.push_str(&self.call_open(ch));
         match part {
-            chat::Part::Hidden => (c, r, false),
+            chat::Part::Hidden => match released {
+                // Cut by `<|end|>` / `<|start|>`: the answer, whole.
+                Some(u) => {
+                    let mut t = self.utf8.push(&u);
+                    t.push_str(&self.utf8.finish());
+                    let (a, hit) = self.stop.push(&t);
+                    c.push_str(&tools::harmony_text(&a));
+                    (c, r, hit)
+                }
+                None => (c, r, false),
+            },
             chat::Part::Reasoning => {
                 r.push_str(&self.utf8.push(&bytes));
                 (c, r, false)
             }
             chat::Part::Answer => {
-                let (a, hit) = self.stop.push(&self.utf8.push(&bytes));
+                // Text held while it might have been a header comes out
+                // with the token that showed it isn't.
+                let b = released.unwrap_or(bytes);
+                let (a, hit) = self.stop.push(&self.utf8.push(&b));
                 if tools {
                     c.push_str(&tools::harmony_text(&a));
                 } else {
@@ -588,7 +603,9 @@ impl TextOut<'_> {
     }
 
     /// The end of the output: what was held back. With tools, a reply that
-    /// never opened a message (no channel header) is the answer, as without.
+    /// never opened a message (no channel header) and was still held (it
+    /// might have been a header: `Channels::take_unheaded`) is the answer,
+    /// as without.
     fn finish(&mut self) -> (String, String) {
         let Some(mut ch) = self.channels.take() else {
             return self.finish_text();

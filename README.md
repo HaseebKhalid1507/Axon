@@ -562,7 +562,9 @@ axon serve models/Qwen3-8B-Q4_K_M.gguf --device cuda --ctx 32768 --kv q8 --alias
   stays `reasoning_content`. Its calls are read from the special tokens only: text the
   model writes (say, quoting the call syntax) is never a call. A call is made as soon as
   its arguments are a whole JSON object, and that ends the reply (one call per reply; the
-  model's `<|call|>` isn't waited for). Past calls are rendered in the template's history
+  model's `<|call|>` isn't waited for). A recipient in the role section counts only right
+  after the role (`assistant to=functions.NAME`). A reply that opens no channel header is
+  the answer, streamed and cut by `stop` strings as without tools. Past calls are rendered in the template's history
   form (`<|start|>assistant to=functions.NAME<|channel|>commentary json<|message|>{args}<|call|>`).
   Other chat formats answer a tool request with a 400. A request without tools or tool
   turns is rendered exactly as before.
