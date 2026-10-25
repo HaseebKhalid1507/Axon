@@ -645,6 +645,8 @@ fn ds2_resident_ram_refusal_releases_nothing() {
     let km = Kernels::module(&g).unwrap();
     let ml = Kernels::mla_module(&g).unwrap();
     let (m, _) = ds2_fixture(OPTS[0], crate::quant::Q8_0);
+    // The proof below needs anonymous memory (a released tensor panics).
+    assert!(!m.file_backed());
     let env = TwinEnv {
         repack: true,
         cpu_fused: crate::vmath::fused(),
@@ -680,4 +682,69 @@ fn ds2_resident_ram_refusal_releases_nothing() {
     // The CPU retry builds from intact bytes.
     let cpu = crate::model::Qwen2::new_experts(&m);
     drop(cpu);
+}
+
+/// The fixture with layer `l`'s routed experts F32 (no GPU twin: only
+/// Q4_K/Q5_0/Q8_0/Q6_K have one), the rest Q8_0.
+fn fixture_untwinnable(o: Opt, l: usize) -> crate::gguf::Model {
+    use crate::model::deepseek2_tests::fixture_tensors;
+    let (meta, mut list, mut data) = fixture_tensors(o, crate::quant::Q8_0);
+    let (_, fl, fd) = fixture_tensors(o, crate::quant::F32);
+    let pre = format!("blk.{l}.");
+    for i in 0..list.len() {
+        if list[i].0.starts_with(&pre)
+            && crate::model::MOE_EXPS
+                .iter()
+                .any(|s| list[i].0.ends_with(s))
+        {
+            list[i] = fl[i].clone();
+            data[i] = fd[i].clone();
+        }
+    }
+    let v: Vec<(&str, &[u64], u32)> = list.iter().map(|t| (t.0.as_str(), &t.1[..], t.2)).collect();
+    crate::gguf::build_for_test_with(&meta, &v, &data)
+}
+
+/// A layer whose expert type has no GPU twin stays on the CPU while the
+/// others are still placed (#127 review round 3): on the fixture with layer
+/// 2's experts F32, auto and N(2) place layer 1 only, and the logits equal
+/// N(0)'s (all CPU experts) bit for bit.
+#[test]
+fn ds2_resident_untwinnable_layer_stays_on_cpu() {
+    use crate::cuda::qwen2::experts::GpuExperts;
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    if crate::cuda::qwen2::experts::twin_gemm_ok(g.info().unwrap().cc).is_err() {
+        eprintln!("SKIPPED: resident experts need sm_80+");
+        return;
+    }
+    let km = Kernels::module(&g).unwrap();
+    let ml = Kernels::mla_module(&g).unwrap();
+    let o = OPTS[0];
+    let n = 60;
+    let ids = ids_for(n, FX_VOCAB, 5);
+    let mut base: Option<Vec<Vec<f32>>> = None;
+    for want in [GpuExperts::N(0), GpuExperts::N(2), GpuExperts::Auto] {
+        let m = fixture_untwinnable(o, 2);
+        let net =
+            MoeQwen3::new_with(&g, &km, &ml, &m, n + 40, CacheKv::F16, false, true, want).unwrap();
+        let r = net.resident_layers();
+        let want_r: Vec<usize> = match want {
+            GpuExperts::N(0) => vec![],
+            _ => vec![1],
+        };
+        assert_eq!(r, want_r, "{want:?}: {}", net.describe(n));
+        let tr = resident_trace(&net, &ids, &[1, 7, 13, 2, 33], 24);
+        assert!(tr.iter().flatten().all(|v| v.is_finite()));
+        match &base {
+            None => base = Some(tr),
+            Some(b) => {
+                for (i, (x, y)) in b.iter().zip(&tr).enumerate() {
+                    assert!(bits(x) == bits(y), "{want:?}: logits {i} differ from N(0)");
+                }
+            }
+        }
+        eprintln!("untwinnable layer 2, {want:?}: resident {r:?}, bits equal");
+    }
 }
