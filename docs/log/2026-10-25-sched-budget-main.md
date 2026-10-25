@@ -1,4 +1,4 @@
-# Shortest-first admission and a measured step budget for `axon serve`, on main (PR #131)
+# A measured step budget for `axon serve` (shipped), shortest-first admission (opt-in), on main (PR #131)
 
 - Date: 2026-10-25. Branch: feat/sched-budget-main. Base: main d6b7051. Status: open (draft, gates pending)
 - Pick / design: roadmap "Next" item 1 (c) and (d); spec `specs/sched-sjf-token-budget.md` (Okarin, 10-20).
@@ -74,6 +74,25 @@ sdab15 1.5B with the main binary (1025-153024-9998). roll = main's scheduling.
 - Raw logs: https://gist.github.com/HaseebKhalid1507/bddc842182269929cde899d29d35daa0 (per-request:
   https://gist.github.com/HaseebKhalid1507/5de9bd0da4f0b3ac71759d11d68727d0; scripts:
   https://gist.github.com/HaseebKhalid1507/6f8caa702c433927ff2f205a2abfcd11).
+
+## Outcome (722139a cells; code head 6cb98fc)
+The decisive clean bella cells, after the `step_prompts` fix: 7B C=16 1025-174838-bb0d, 1.5B C=32 1025-180241-7dac,
+sdab15 1025-183047-34df; avante 1.5B 1025-174837-1554, 0.5B sd 1025-174837-bf3d.
+- (c) short TTFT p50 ≤ 0.5× fifo: 7B 0.37× pass, **1.5B 0.56× fail, sdab15 C=32 0.79× fail** (C=16 2.18×). Long max,
+  aggregate and ≤ 3 steps pass. By the rule pre-registered in the PR before these runs, (c) failed:
+  `--admit-order fifo` is the default (with lanes 2, main's), sjf opt-in. It keeps the tail and SLO wins for whoever
+  opts in: short p90 0.24–0.56×, max 0.19–0.59× of fifo; avante 1.5B slo_ok 0.64 → 0.94. #139 re-decides the default
+  on the H100 C=64/128 cells, the spec's design target (pod not booked).
+- (d) at 60: every clause passes (ITL p99 −3.8 % / −0.3 % / 0 %, aggregate +0.8 % / −0.4 % / −1.6 %, step p50 55.0 /
+  56.0 ms). At 50 the 7B step ran at 60.0 ms p50 (+20 %, outside ±15 %; the 256 floor binds) and the avante 1.5B ITL
+  p99 rose 17 % over main, so the default is `--step-ms 60`.
+- The shipped defaults are the measured `fifo60` arm (same code). Rollback: `AXON_STEP_COST=legacy` alone.
+- Watch: sdab15 C=16 aggregate −6 % for fifo60 vs the main binary in both bella runs (round spread ±3–7 %; not one of
+  the spec's cells, which is C=32 at −1.6 %).
+- Raw logs: https://gist.github.com/HaseebKhalid1507/b439d3907e42da8cbb110d762936ffe8, per-request
+  https://gist.github.com/HaseebKhalid1507/d6a48a76f394dd0a8ec59473bf3950d1.
+- Gates at 6cb98fc: fast 1025-190641-2b91, debug serve+slots 1025-190644-c162, `serve::` with sjf 1025-190644-185a,
+  md5 1025-190645-7c81, digests 1025-190645-ec75 (results in the PR, Update line here when green).
 
 ## Review fixes carried over (shady 7/10 on #126)
 - `pass_us` bounded: a sample is at most 4x the estimate and half a step; the estimate is read bounded by twice
