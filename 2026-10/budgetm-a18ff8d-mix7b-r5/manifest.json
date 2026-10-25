@@ -1,0 +1,29 @@
+{
+ "label": "budgetm-a18ff8d-mix7b-r5",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1025-053334-3e5d",
+   "name": "budgetm-a18ff8d-mix7b-r5",
+   "rc": 130,
+   "verdict": "FAIL (rc 130)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "a18ff8d",
+   "binary": "axon-test-a18ff8d",
+   "started": null,
+   "ended": 1792929610.231281,
+   "attempts": null,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "e625677bf80fb417f8fc48e3778bd0bc967ec5450e906f06e86b71a35d5108a9",
+   "log_bytes": 221
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-25 08:00:14 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
