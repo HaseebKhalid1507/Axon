@@ -1424,8 +1424,6 @@ const PAGED_PARALLEL: usize = 16;
 /// Positions per KV page (cuda qwen2 pages.rs).
 const PAGE_TOKENS: usize = 64;
 
-/// Whether serve's pool is paged: the GPU, batching, AXON_PAGED_KV != 0
-/// (`paged_env`, read once at serve's start).
 /// A mixture-of-experts model serves one request at a time (no slot pool:
 /// its backend isn't `Inner::Cuda`), so its placement, `--gpu-experts auto`
 /// included, budgets one cache. An explicit --parallel N > 1 is refused
@@ -1440,6 +1438,8 @@ fn moe_parallel_refusal(moe: bool, parallel: usize, parallel_set: bool) -> Optio
     })
 }
 
+/// Whether serve's pool is paged: the GPU, batching, AXON_PAGED_KV != 0
+/// (`paged_env`, read once at serve's start).
 fn paged_serve(device: Device, parallel: usize, paged_env: bool) -> bool {
     device == Device::Cuda && parallel > 1 && paged_env
 }

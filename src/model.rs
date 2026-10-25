@@ -153,7 +153,13 @@ impl<'a> Weight<'a> {
 
     /// The tensor's bytes (not repacked).
     fn bytes(&self) -> &'a [u8] {
-        self.data.expect("repacked weight has no raw bytes")
+        self.data.unwrap_or_else(|| match self.r8 {
+            Some(_) => panic!("{}: repacked weight has no raw bytes", self.t.name),
+            None => panic!(
+                "{}: not built on the CPU (an expert resident on the GPU: Weight::absent)",
+                self.t.name
+            ),
+        })
     }
 
     /// Rows r0..r0 + k of a repacked matrix as whole r8 groups, plus the

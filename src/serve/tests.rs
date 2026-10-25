@@ -4952,11 +4952,11 @@ fn serve_gauges_settle_back_to_back() {
 }
 
 /// A MoE model's serve is one request at a time, so `--gpu-experts auto`
-/// budgets one cache: an explicit --parallel N > 1 is refused up front (not
-/// after the experts are uploaded, nor as an out-of-memory panic on a
-/// second slot's cache); the default --parallel and dense models pass.
+/// budgets one cache: the predicate that refuses an explicit --parallel
+/// N > 1 (the default --parallel and dense models pass). That it runs
+/// before the placement is the call site in `serve::run`, not tested here.
 #[test]
-fn moe_parallel_refused_before_placement() {
+fn moe_parallel_refusal_predicate() {
     let e = super::moe_parallel_refusal(true, 4, true).expect("refused");
     assert!(
         e.contains("--parallel 4") && e.contains("one request at a time"),

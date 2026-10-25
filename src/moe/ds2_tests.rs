@@ -550,6 +550,7 @@ fn ds2_resident_fallbacks_build_once() {
             TwinEnv {
                 repack: false,
                 cpu_fused: f,
+                ram: None,
             },
             "AXON_REPACK=0",
         ),
@@ -557,6 +558,7 @@ fn ds2_resident_fallbacks_build_once() {
             TwinEnv {
                 repack: true,
                 cpu_fused: !f,
+                ram: None,
             },
             "fused",
         ),
@@ -566,6 +568,7 @@ fn ds2_resident_fallbacks_build_once() {
             TwinEnv {
                 repack: true,
                 cpu_fused: f,
+                ram: None,
             },
             "sm_80",
         ));
@@ -621,4 +624,60 @@ fn ds2_resident_fallbacks_build_once() {
     let mut c = net.new_cache(32);
     assert!(net.forward(1, 0, &mut c).iter().all(|v| v.is_finite()));
     eprintln!("fallback (qwen3moe): {d}");
+}
+
+/// A RAM refusal after the placement (`--gpu-experts` > 0) leaves the model
+/// whole (#127 review round 2): the kept-layers check runs before the
+/// resident layers' bytes are released, so a caller can retry on the CPU
+/// with the same `Model`. The fixture is anonymous memory: a released
+/// tensor would panic on read.
+#[test]
+fn ds2_resident_ram_refusal_releases_nothing() {
+    use super::TwinEnv;
+    use crate::cuda::qwen2::experts::GpuExperts;
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    if crate::cuda::qwen2::experts::twin_gemm_ok(g.info().unwrap().cc).is_err() {
+        eprintln!("SKIPPED: resident experts need sm_80+");
+        return;
+    }
+    let km = Kernels::module(&g).unwrap();
+    let ml = Kernels::mla_module(&g).unwrap();
+    let (m, _) = ds2_fixture(OPTS[0], crate::quant::Q8_0);
+    let env = TwinEnv {
+        repack: true,
+        cpu_fused: crate::vmath::fused(),
+        ram: Some(1),
+    };
+    let r = MoeQwen3::new_inner(
+        &g,
+        &km,
+        &ml,
+        &m,
+        32,
+        CacheKv::F16,
+        false,
+        true,
+        GpuExperts::Auto,
+        env,
+    );
+    let e = match r {
+        Ok(_) => panic!("1 byte of RAM: refused"),
+        Err(e) => e,
+    };
+    assert!(
+        e.contains("beside 2 resident layers"),
+        "placed, then refused: {e}"
+    );
+    for t in m
+        .tensors
+        .iter()
+        .filter(|t| crate::model::MOE_EXPS.iter().any(|s| t.name.ends_with(s)))
+    {
+        assert!(!m.tensor_data(t).is_empty(), "{}", t.name);
+    }
+    // The CPU retry builds from intact bytes.
+    let cpu = crate::model::Qwen2::new_experts(&m);
+    drop(cpu);
 }

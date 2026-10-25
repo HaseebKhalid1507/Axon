@@ -131,6 +131,7 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
         let env = TwinEnv {
             repack,
             cpu_fused: crate::vmath::fused(),
+            ram: None,
         };
         Self::new_inner(gpu, module, router, m, max_ctx, kv, fit, q6k8, want, env)
     }
@@ -167,9 +168,15 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
             },
         };
         let skip = res.as_ref().map_or(Vec::new(), |r| r.which());
-        // The resident layers' experts live on the GPU now: hand their host
-        // bytes back (the page cache of a mapped file, the memory of a copy).
-        // Nothing reads them again: the CPU half doesn't build them
+        // The RAM check first (metadata only): a refusal leaves `m` whole, so
+        // a caller can still build it on the CPU.
+        if want != GpuExperts::N(0) {
+            crate::model::moe_check_ram_keep(m, env.repack, &skip, env.ram)?;
+        }
+        // The resident layers' experts live on the GPU now: release their
+        // host bytes (on a mapped file that drops this process's resident
+        // pages, the page cache stays reclaimable; on a copy it frees the
+        // memory). Nothing reads them again: the CPU half doesn't build them
         // (`new_experts_except`), and residency is final here.
         for t in &m.tensors {
             if crate::model::MOE_EXPS.iter().any(|s| t.name.ends_with(s))
@@ -177,9 +184,6 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
             {
                 m.release(t);
             }
-        }
-        if want != GpuExperts::N(0) {
-            crate::model::moe_check_ram_keep(m, &skip)?;
         }
         let cpu = Qwen2::new_experts_except(m, &skip);
         Ok(MoeQwen3 {
@@ -200,6 +204,9 @@ impl<'m, 'g> MoeQwen3<'m, 'g> {
 pub(crate) struct TwinEnv {
     pub repack: bool,
     pub cpu_fused: bool,
+    /// Tests: the RAM available to the kept-layers check (None: the live
+    /// figure, `gguf::mem::avail`).
+    pub ram: Option<u64>,
 }
 
 /// The resident layers `want` asks for that fit after a cache of `net`'s
@@ -224,7 +231,18 @@ fn place_resident<'g>(
         }
         experts::twin_identity(env.repack, env.cpu_fused, crate::vmath::fused())?;
         experts::twin_gemm_ok(gpu.info()?.cc)?;
-        let layers = expert_layers(m);
+        let all = expert_layers(m);
+        // Layers with a weight type the twins don't cover stay on the CPU
+        // (rather than refusing every layer at that one's upload).
+        let layers: Vec<(usize, usize)> = (all.iter().copied())
+            .filter(|&(l, _)| {
+                m.tensors.iter().all(|t| {
+                    t.layer != l as i32
+                        || !crate::model::MOE_EXPS.iter().any(|s| t.name.ends_with(s))
+                        || crate::cuda::qwen2::twin_type(t.qtype.id).is_ok()
+                })
+            })
+            .collect();
         let d = net.moe.expect("a mixture-of-experts model");
         let dim = net.dim;
         // ctx first: the free memory with one cache of the planned context
@@ -241,11 +259,20 @@ fn place_resident<'g>(
         if let GpuExperts::N(n) = want
             && pick.len() < n
         {
-            eprintln!(
-                "moe:         --gpu-experts {n}: {} fit after a ctx-{} cache",
-                pick.len(),
-                net.ctx
-            );
+            match n > all.len() {
+                true => eprintln!(
+                    "moe:         --gpu-experts {n}: the model has {} MoE layers; {} fit after \
+                     a ctx-{} cache",
+                    all.len(),
+                    pick.len(),
+                    net.ctx
+                ),
+                false => eprintln!(
+                    "moe:         --gpu-experts {n}: {} fit after a ctx-{} cache",
+                    pick.len(),
+                    net.ctx
+                ),
+            }
         }
         let r = Resident::upload(gpu, module, m, net.n_layers, &pick, d.k)?;
         for l in r.which() {

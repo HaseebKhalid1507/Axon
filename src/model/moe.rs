@@ -282,10 +282,22 @@ pub(crate) fn check_ram(m: &Model, dense: bool) -> Result<(), String> {
 /// `check_ram` of `crate::moe`'s split with the experts of the MoE layers
 /// in `skip` resident on the GPU (never repacked: no arena on the host).
 /// Sums the kept layers' own arena bytes: placement moves the smallest
-/// layers, so an average over all would under-count the kept ones.
-pub(crate) fn check_ram_keep(m: &Model, skip: &[usize]) -> Result<(), String> {
-    let repack = std::env::var("AXON_REPACK").map_or(true, |v| v != "0");
-    check_ram_keep_with(m, repack, skip, crate::gguf::mem::avail())
+/// layers, so an average over all would under-count the kept ones. Reads
+/// metadata only. `avail`: the RAM available (tests), else the live figure.
+pub(crate) fn check_ram_keep(
+    m: &Model,
+    repack: bool,
+    skip: &[usize],
+    avail: Option<u64>,
+) -> Result<(), String> {
+    let avail = match avail {
+        Some(bytes) => Some(crate::gguf::mem::Avail {
+            bytes,
+            bound: crate::gguf::mem::Bound::Host,
+        }),
+        None => crate::gguf::mem::avail(),
+    };
+    check_ram_keep_with(m, repack, skip, avail)
 }
 
 /// The kept MoE layers' expert arena bytes (`check_ram_keep`).
