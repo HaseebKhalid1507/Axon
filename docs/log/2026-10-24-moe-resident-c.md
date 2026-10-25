@@ -2,8 +2,9 @@
 
 - Date: 2026-10-24 (updated 10-25). Branch: feat/moe-resident-c, base `main`. PR B (#122) is merged to main as b2068e7;
   main was merged into this branch at c3cce85 (b2068e7) and 3c7ca02 (fb749cc). No rebase.
-  Status: open, draft. Gates 8/8 PASS at 18427b2; review round 1 fixes at b20c301 (gates pending); **the kill-rule
-  bench has no clean measurement yet** (the clean run c579 was parked for desktop GPU taint).
+  Status: open, draft. Gates 8/8 PASS at 18427b2. Review round 1 fixes at b20c301: 7/7 correctness PASS (one job
+  dropped by the lead). Review round 2 at 93a53b3: gates pending. **The kill-rule bench has no clean measurement
+  yet**: the clean run c579 was parked for desktop GPU taint.
 - Pick / design: Fable 10-19 §3 #3; spec `r16-pick4-moe-resident.md` §6 PR C; #121 item 5.
 
 Labels: **MEASURED** (job cited), **CODE**, **ESTIMATED**.
@@ -19,7 +20,7 @@ Labels: **MEASURED** (job cited), **CODE**, **ESTIMATED**.
   - Smallest layers first, ties to the lower layer (`experts::place`).
 - **CPU arena:** built without the resident layers (`Qwen2::new_experts_except`: their experts are `Weight::absent`,
   never read). Their tensors are uploaded from the mapping before the build, then released (b20c301). The RAM check
-  (`check_ram_keep`) sums the kept layers' own repacked bytes.
+  (`check_ram_keep`, metadata only, before the release) sums the kept layers' own repacked bytes.
 - **Decode (`mla_step`):** a resident layer skips the host round trip. Its experts (`CudaExperts::enqueue`: no sync,
   no allocation) go into the same per-layer graph as the shared experts. They read the router's output in `mb.r`
   and write `mb.y`, which the next segment adds, exactly where the CPU's `y` was added. So the float ops on `x` are
@@ -61,8 +62,33 @@ Review round 1 (shady 8/10, at 18427b2). Fixes at **b20c301**:
 - serve refuses `--parallel N > 1` for MoE before the placement. A MoE backend serves one request at a time, so the
   refusal used to come only after GBs of experts were uploaded.
 
-Gates at b20c301: res bella 1025-083916-0d50; full release (group 2f06) and debug (group 596a); md5 vs main fb749cc
-(8b7a); the res suite with #134 merged (strict release) on bella d1d2 and avante b482. Pending when this was written.
+Gates at **b20c301**: 7/7 correctness PASS (MEASURED; [logs](https://github.com/HaseebKhalid1507/Axon/tree/1a02e863b55cdb937ffe24ccbda8c75f5e649abd/2026-10/moeresc-b20c301)). One job was dropped by the lead.
+
+| check | host | job | result |
+|---|---|---|---|
+| res suite + the two new unit tests, Moonlight | bella | 1025-083916-0d50 | PASS 18/0/1; N(6)/N(12) place N, auto 26 of 26, bits equal |
+| full release, 2 shards | bella | group 1025-083916-2f06 (e9da, 367a) | PASS 672/0/48 |
+| full debug assertions, 2 shards | bella | group 1025-083916-596a (8891, 34b7) | PASS 672/0/48 |
+| md5 vs main fb749cc | bella | 1025-083916-8b7a | 30/30 dense; Moonlight 3/3 main = 0 = auto |
+| res suite with #134 merged (old global strict release), fixture | avante | 1025-083917-b482 | PASS 19/0/1 |
+| same, Moonlight | bella | 1025-083917-d1d2 | FAIL rc 130: dropped by the lead (built against #134's old global strict check, since replaced by a per-Model flag, 942dc0c) |
+
+What this does and doesn't prove about #134: only the fixture strict run passed. The fixture is anonymous memory, so
+a read of a released tensor panics there even without strict, and the logic is covered: resident tensors are
+released and never read. **Moonlight under strict release (a file mapping) is unproven** until #127 is regated on a
+main that has #134.
+
+Review round 2 (shady 9/10, at b20c301). Fixes at **93a53b3**:
+- The kept-layers RAM check now runs before the resident layers' bytes are released. A refusal at N > 0 leaves the
+  `Model` whole, so a caller can retry on the CPU (test `ds2_resident_ram_refusal_releases_nothing`).
+- Smaller fixes:
+  - an absent CPU weight panics with its own message;
+  - `--gpu-experts N` above the layer count says so;
+  - layers whose expert weight type has no twin are left out of the placement, instead of failing every layer's
+    residency at upload.
+
+Gates at 93a53b3: res suite release 1025-105040-8495, debug 1025-105040-55ae, md5 vs fb749cc 1025-105041-bb49.
+Pending when this was written.
 
 ## Results: the kill-rule bench
 
