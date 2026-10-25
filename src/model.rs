@@ -611,6 +611,17 @@ fn unsupported_type(m: &Model, name: &str, q: crate::gguf::QType) -> String {
     )
 }
 
+/// The CPU's copy-vs-map wish of a model (`gguf::load_to_run`): a MoE model
+/// always mapped, else a copy only when it reads its matrices in place. The
+/// one policy `crate::load`, `cli::open_model_with` and the tests'
+/// `gguf::load` share.
+pub fn cpu_copy_wish(m: &Model) -> crate::gguf::CopyWish {
+    match moe::is_moe(m) {
+        true => crate::gguf::CopyWish::MapOnly,
+        false => crate::gguf::CopyWish::Want(reads_matrices_in_place(m)),
+    }
+}
+
 /// Whether `Qwen2::new` reads any weight matrix in place from the model's
 /// bytes on every token (AXON_REPACK=0, or a matrix with no r8/r8q form),
 /// so that the anonymous huge-page copy of the file pays (`gguf::load_then`).

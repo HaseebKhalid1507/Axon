@@ -109,10 +109,7 @@ pub fn load(path: &str, device: Device) -> Result<Model, String> {
             unsupported = Some(e);
             return gguf::CopyWish::MapOnly;
         }
-        match model::is_moe(m) {
-            true => gguf::CopyWish::MapOnly,
-            false => gguf::CopyWish::Want(model::reads_matrices_in_place(m)),
-        }
+        model::cpu_copy_wish(m)
     })
     .map_err(|e| format!("{path}: {e}"))?;
     match unsupported {
