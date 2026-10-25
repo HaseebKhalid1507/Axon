@@ -3,7 +3,8 @@
 - Date: 2026-10-24 (updated 10-25). Branch: feat/moe-resident-c, base `main`. PR B (#122) is merged to main as b2068e7;
   main was merged into this branch at c3cce85 (b2068e7) and 3c7ca02 (fb749cc). No rebase.
   Status: open, draft. Gates 8/8 PASS at 18427b2. Review round 1 fixes at b20c301: 7/7 correctness PASS (one job
-  dropped by the lead). Review round 2 at 93a53b3: gates pending. **The kill-rule bench has no clean measurement
+  dropped by the lead). Review round 2 at 93a53b3: 3/3 PASS. Review round 3:
+  9.5/10 APPROVE; its test-only SHOULDs are at 743c5a3. **The kill-rule bench has no clean measurement
   yet**: the clean run c579 was parked for desktop GPU taint.
 - Pick / design: Fable 10-19 §3 #3; spec `r16-pick4-moe-resident.md` §6 PR C; #121 item 5.
 
@@ -87,8 +88,18 @@ Review round 2 (shady 9/10, at b20c301). Fixes at **93a53b3**:
   - layers whose expert weight type has no twin are left out of the placement, instead of failing every layer's
     residency at upload.
 
-Gates at 93a53b3: res suite release 1025-105040-8495, debug 1025-105040-55ae, md5 vs fb749cc 1025-105041-bb49.
-Pending when this was written.
+Gates at 93a53b3 (MEASURED), all on bella:
+- res suite release, 1025-105040-8495: PASS 19/0/1
+- res suite debug, 1025-105040-55ae: PASS 19/0/1
+- md5 vs fb749cc, 1025-105041-bb49: all identical (dense 30/30, Moonlight 3/3 main = 0 = auto)
+
+Review round 3 (shady 9.5/10 APPROVE, no MUSTs, at 93a53b3). Two test-only SHOULDs, at **743c5a3**:
+- The RAM-refusal test asserts that its fixture is anonymous memory.
+- `ds2_resident_untwinnable_layer_stays_on_cpu` uses the fixture with layer 2's experts F32 (no GPU twin). N(2) and
+  auto place layer 1 only; the logits are bit-equal to N(0).
+
+Gated as the two tests only, by agreement: release 1025-131034-f2a6 and debug 1025-131035-0587 on bella, pending
+when this was written. #127 gets one full regate once #136 and #134 are on main. The kill-rule bench stays parked.
 
 ## Results: the kill-rule bench
 
