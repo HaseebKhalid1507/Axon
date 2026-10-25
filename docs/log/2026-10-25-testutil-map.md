@@ -26,9 +26,9 @@ scopes, jade's cap) and RAM the scheduler has to claim for nothing.
 ## How it was verified
 | gate | result | job ID / log |
 |---|---|---|
-| release suite (fast tier) | REL | 1025-054658-1dcb (bella) |
-| debug-assertion suite (fast tier, CPU) | DBG | 1025-054658-c346 (CPU) |
-| md5 of `gen`, main vs candidate, same host | MD5 | 1025-054657-ad4c (bella) |
+| release suite (fast tier) | REL | 1025-054658-c346 (bella) |
+| debug-assertion suite (fast tier, CPU) | DBG | 1025-054658-1dcb (bella, CPU queue) |
+| md5 of `gen`, main vs candidate, same host | 24/24 identical (4 models × 3 prompts × cpu, cuda f16) | 1025-054657-ad4c (bella) |
 | clippy -D warnings (lib, tests, bin), rustfmt | clean | local |
 
 ## Results
