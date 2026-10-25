@@ -36,8 +36,8 @@ memory.max 23552 MB)` from a bash shell there.
 | gate | result | job ID / log |
 |---|---|---|
 | refusal demo, bella, MoE at `MemoryMax=1000M` | main: OOM-killed (rc 137, scope Result=oom-kill); candidate: clean refusal (rc 2) naming the scope | 1025-053958-9d5b, 1025-054020-70da, 1025-054259-1d9c (adds a 4500M fits case) |
-| release suite (fast tier) | REL | 1025-054002-f395 (bella) |
-| debug-assertion suite (fast tier, CPU) | DBG | 1025-054002-957f (avante, CPU) |
+| release suite (fast tier) | REL | 1025-054002-957f (avante sm_89) |
+| debug-assertion suite (fast tier, CPU) | DBG | 1025-054002-f395 (bella, CPU queue) |
 | md5 of `gen`, main b2068e7 vs candidate, same host | 24/24 identical (4 models × 3 prompts × cpu, cuda f16) | 1025-053959-b9a6 |
 | clippy -D warnings (lib, lib tests, bin), rustfmt | clean | local |
 | unit tests on synthetic trees | 7 in `gguf::mem::tests`, `moe::tests::ram_refusal_names_the_bound` | in the suites |
