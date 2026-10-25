@@ -38,6 +38,13 @@ function, followed by a real `<|message|>` token, made a call.
 | `harmony serve::tools:: serve_gptoss`, release + debug, bella | 3b4f95f | 18 / 0 / 0 release, 18 / 0 / 0 debug | 1025-063406-aa1a §1-2 |
 | serve A/B main vs candidate, gpt-oss-20b, 17 + 6 cases | 3b4f95f | **23/23 identical** (22 × 200 + the same #116 400 on both; fingerprints and concurrent cached_tokens equal) | 1025-063406-aa1a §3 |
 | clippy -D warnings (lib, lib tests, bin, example, integration test), rustfmt | 3b4f95f | clean | local |
+| release suite, 2 shards | bdc80f8 (main fb749cc merged) | 337/0/29; shard 2 FAILED 328/1/19 (`serve_paged_pressure`, 1 slot), rerun **PASS 329 / 0 / 19** ([log](https://gist.github.com/HaseebKhalid1507/90a3a6eeb07ffc65efd7f638b0cae386)) | fa9c; ee61; rerun 1025-130206-ce61 |
+| debug suite, 2 shards | bdc80f8 | 337/0/29, 329/0/19 | 1025-085841-30f9, -8feb |
+| focused + serve A/B (6 models) + `gen` md5 vs fb749cc (all local models but 32B) | bdc80f8 | 18/0; 23/23 × 6; md5 132/132 cuda, 66/66 q8, 90/90 cpu (22 pairs refused by both, same rc) | 1025-085841-e50c |
+
+ee61: free VRAM short at that server start (the CUDA pool plan reads only GPU free bytes; the fallback to one slot is
+silent with logging off: #137). Diag 1025-113602-01d8 on bdc80f8: 3/3 alone + after gpt-oss, ~10.74 GB free, 6 paged
+slots. Its fb749cc arm is INVALID (no `models` symlink in that worktree). Logs: [gates](https://gist.github.com/HaseebKhalid1507/304a793616cfbd4beca1eb669fe0c6b2), [ee61/01d8/ce61](https://gist.github.com/HaseebKhalid1507/90a3a6eeb07ffc65efd7f638b0cae386).
 
 Raw logs: [82ff](https://gist.github.com/HaseebKhalid1507/167f3b86d00baf6ac53505ff502398fe); round 2: [aa1a](https://gist.github.com/HaseebKhalid1507/4b2fe80e4a3424f9621eb3675d4cb484). Review: shady 8/10 APPROVE (round 1); round 2 (3b4f95f) applies
 its SHOULD 1 (below) and the `assistant`-exact NIT.
