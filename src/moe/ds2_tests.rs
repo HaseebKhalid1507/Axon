@@ -455,8 +455,12 @@ fn ds2_resident_moonlight_bits() {
             MoeQwen3::new_with(&g, &km, &ml, &m, 512, CacheKv::F16, false, true, want).unwrap();
         let r = net.resident_layers();
         eprintln!("moonlight {want:?}: {}", net.describe(512));
-        if let GpuExperts::N(k) = want {
-            assert!(r.len() <= k);
+        // Not vacuous (#127 review): every N > 0 places exactly N layers and
+        // auto at least one (12 of Moonlight's take ~4.4 GiB; auto places
+        // 24 or 25 on a 12 GB card), else all four runs would be N(0)'s.
+        match want {
+            GpuExperts::N(k) => assert_eq!(r.len(), k, "{want:?}: {}", net.describe(512)),
+            GpuExperts::Auto => assert!(!r.is_empty(), "auto: {}", net.describe(512)),
         }
         // The prompt fed (passes of 100, 37, 263) + the continuation.
         let fed = {
