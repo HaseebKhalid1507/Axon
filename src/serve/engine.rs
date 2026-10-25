@@ -130,8 +130,9 @@ pub struct ChunkPolicy {
     pub step_tokens: usize,
     /// AXON_STEP_COST=legacy: the budget before `StepCost` (`step_ms`
     /// less the last decode step, at a cost per token with the pass's
-    /// fixed part in it). With `--admit-order fifo` (and `--prefill-lanes
-    /// 2` past 32 slots) main's scheduling exactly (the rollback).
+    /// fixed part in it). With the default fifo admission (2 lanes at any
+    /// slot count) main's scheduling exactly: the rollback, AXON_STEP_COST=
+    /// legacy alone (without AXON_ADMIT=sjf).
     pub legacy: bool,
 }
 
@@ -148,7 +149,7 @@ pub enum AdmitOrder {
 
 /// The scheduler's knobs (`axon serve` flags; defaults from the
 /// environment for A/B jobs that can't change a command line).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Sched {
     pub order: AdmitOrder,
     /// A waiting request this old goes before shorter ones (0: never).
@@ -173,17 +174,39 @@ impl Default for Sched {
     /// 0.79x on the showdown client, against <= 0.5x; it stays opt-in until
     /// the H100 cells decide it); the cost model unless AXON_STEP_COST=legacy.
     fn default() -> Sched {
-        let env = |k: &str, v: &str| std::env::var(k).is_ok_and(|x| x == v);
+        let admit = std::env::var("AXON_ADMIT").ok();
+        let cost = std::env::var("AXON_STEP_COST").ok();
+        Sched::from_env(admit.as_deref(), cost.as_deref())
+    }
+}
+
+impl Sched {
+    /// The defaults for AXON_ADMIT = `admit` and AXON_STEP_COST = `cost`
+    /// (`Default` reads them; tests pass them). Note: "AXON_STEP_COST=legacy
+    /// alone is main's scheduling" holds only without AXON_ADMIT=sjf.
+    pub fn from_env(admit: Option<&str>, cost: Option<&str>) -> Sched {
         Sched {
-            order: match env("AXON_ADMIT", "sjf") {
+            order: match admit == Some("sjf") {
                 true => AdmitOrder::Sjf,
                 false => AdmitOrder::Fifo,
             },
             age_ms: ADMIT_AGE_MS,
             lanes: 0,
             step_tokens: 0,
-            legacy: env("AXON_STEP_COST", "legacy"),
+            legacy: cost == Some("legacy"),
         }
+    }
+}
+
+/// Prompts prefilling at once at most for `sched` with `slots` slots
+/// (`Batch::lanes`): `sched.lanes`, else sjf `slots / 16` within 2..=8 (2
+/// at up to 32 slots, 8 at 128), fifo 2 (main's `MAX_PREFILLING`: the
+/// lane scaling is part of shortest-first, opt-in with it).
+pub(super) fn lanes_for(sched: &Sched, slots: usize) -> usize {
+    match (sched.lanes, sched.order) {
+        (0, AdmitOrder::Sjf) => (slots / 16).clamp(2, 8),
+        (0, AdmitOrder::Fifo) => 2,
+        (n, _) => n,
     }
 }
 
@@ -679,16 +702,9 @@ impl<'a, 't> Batch<'a, 't> {
         }
     }
 
-    /// Prompts longer than a step's chunk prefilling at once at most
-    /// (`Sched::lanes`; 0: sjf `slots / 16` within 2..=8, 2 at up to 32
-    /// slots, 8 at 128; fifo 2, main's `MAX_PREFILLING`: the lane scaling
-    /// is part of shortest-first, opt-in with it).
+    /// Prompts prefilling at once at most (`lanes_for`).
     pub fn lanes(&self) -> usize {
-        match (self.sched.lanes, self.sched.order) {
-            (0, AdmitOrder::Sjf) => (self.slots / 16).clamp(2, 8),
-            (0, AdmitOrder::Fifo) => 2,
-            (n, _) => n,
-        }
+        lanes_for(&self.sched, self.slots)
     }
 
     /// A short prompt's most tokens: what one step can feed (`capacity`),
@@ -1968,10 +1984,32 @@ mod plan_tests {
 #[cfg(test)]
 mod sched_tests {
     use super::{
-        AdmitOrder, Budget, ChunkPolicy, DEPTH_K, STARVE, StepCost, admit_gate, admit_key, bucket,
-        plan, plan_charged, starve, step_prompts, two_pass_budget, two_pass_capacity,
-        two_pass_short_passes, units,
+        AdmitOrder, Budget, ChunkPolicy, DEPTH_K, STARVE, Sched, StepCost, admit_gate, admit_key,
+        bucket, lanes_for, plan, plan_charged, starve, step_prompts, two_pass_budget,
+        two_pass_capacity, two_pass_short_passes, units,
     };
+
+    /// The rollback's admission side (shady S2 on #131): AXON_STEP_COST=
+    /// legacy alone (no AXON_ADMIT, or AXON_ADMIT=fifo from older configs)
+    /// is fifo with 2 lanes at any slot count, main's `MAX_PREFILLING`;
+    /// AXON_ADMIT=sjf breaks the "alone" (sjf's lanes scale with slots).
+    #[test]
+    fn legacy_alone_is_main_admission() {
+        for admit in [None, Some("fifo"), Some("anything")] {
+            let s = Sched::from_env(admit, Some("legacy"));
+            assert!(s.legacy && s.order == AdmitOrder::Fifo, "{admit:?}");
+            for slots in [1, 8, 16, 32, 64, 128, 256] {
+                assert_eq!(lanes_for(&s, slots), 2, "{admit:?} {slots}");
+            }
+        }
+        let sjf = Sched::from_env(Some("sjf"), Some("legacy"));
+        assert_eq!(sjf.order, AdmitOrder::Sjf);
+        let l: Vec<usize> = [16, 32, 64, 128, 256].map(|n| lanes_for(&sjf, n)).to_vec();
+        assert_eq!(l, [2, 2, 4, 8, 8]);
+        // No env at all: the model's budgets, fifo, 2 lanes.
+        let d = Sched::from_env(None, None);
+        assert!(!d.legacy && d.order == AdmitOrder::Fifo && lanes_for(&d, 128) == 2);
+    }
 
     const PASS: usize = 1152;
 
@@ -2409,9 +2447,10 @@ mod sched_tests {
         }
     }
 
-    /// The rollback: with AXON_STEP_COST=legacy (and `--admit-order fifo`
-    /// on the admission side, `admit_gate`'s fifo arm, lanes 2 up to 32
-    /// slots) every scheduling decision is main's (d6b7051), bit for bit,
+    /// The rollback: with AXON_STEP_COST=legacy (and the default fifo
+    /// admission, `admit_gate`'s fifo arm with 2 lanes at any slot count:
+    /// `legacy_alone_is_main_admission`) every scheduling decision is
+    /// main's (d6b7051, unchanged at fcde887), bit for bit,
     /// over 20,000 random states: the budget (the same timings fed through
     /// `StepCost` as through main's `cost` / `decode_ms`) and the plan
     /// (pass charge 0), against frozen copies of main's code; the fifo

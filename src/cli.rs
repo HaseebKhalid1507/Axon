@@ -48,7 +48,7 @@ usage:
   axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--draft K] [--draft-model PATH]
             [--device D] [--gpu-layers N] [--kv T] [--alias NAME] [--max-tokens N] [--cors [ORIGIN]]
             [--max-conns N] [--max-queue N] [--parallel N] [--prefill-chunk N] [--step-ms MS]
-            [--step-tokens N] [--admit-order sjf|fifo] [--admit-age-ms MS] [--prefill-lanes N]
+            [--step-tokens N] [--admit-order fifo|sjf] [--admit-age-ms MS] [--prefill-lanes N]
             [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS]
             [--no-think] [--think-inline] [--quiet] [sampling flags; the repeat penalty defaults to 1 (off)]
                                             an OpenAI-compatible HTTP server (/v1/models,
@@ -127,7 +127,8 @@ flags:
               steps run (0: exactly --prefill-chunk tokens). --prefill-ms is its old name.
               AXON_STEP_COST=legacy: the budget before (MS less the last decode step)
   --step-tokens N  serve: pin a step's prompt tokens (default 0: --step-ms; AXON_STEP_COST=legacy
-              ignores it: main's budget)
+              ignores it: main's budget; it also lifts the bound on prompts per step, so with
+              sjf a cold wave of short prompts is fed in one step again)
   --admit-order fifo|sjf  serve: waiting requests start first come first served, one per
               step (fifo, default), or shortest prompt first, several per step (sjf, opt-in:
               much lower tail TTFT for short prompts under load, not yet the median it was

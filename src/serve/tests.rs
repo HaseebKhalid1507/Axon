@@ -2445,9 +2445,11 @@ fn pages_block_bounds_the_wait() {
 /// --prefill-lanes 2 --step-ms 60` with AXON_STEP_COST=legacy (the A/B's
 /// `roll` arm) shows lanes 2 and the legacy budgets on /metrics; sjf at
 /// 32 slots lanes 2, at 128 slots 8, the model's budgets. The shipped
-/// defaults (no flags) are the A/B's measured `fifo60` arm: fifo, lanes 2
-/// at any slot count, `--step-ms 60`, the cost model (legacy only if the
-/// job's environment asks for it).
+/// defaults (no flags, no environment) are the A/B's measured `fifo60`
+/// arm, the whole `Sched` and the step: fifo, lanes 2 at any slot count,
+/// `--step-ms 60`, the cost model. The live "default" row follows the
+/// job's environment (AXON_ADMIT=sjf: 8 lanes at 128 slots; legacy if
+/// AXON_STEP_COST=legacy).
 #[test]
 fn serve_rollback_flags_reach_the_engine() {
     let Some(_) = crate::testutil::gpu() else {
@@ -2462,18 +2464,22 @@ fn serve_rollback_flags_reach_the_engine() {
         ("sjf50", 128, 8.0, 0.0),
         ("default", 128, 2.0, -1.0),
     ] {
+        // The job's environment decides the "default" row (axon-run passes
+        // AXON_*: the sjf and rollback gates run this test too).
+        let fifo = std::env::var("AXON_ADMIT").map_or(true, |v| v != "sjf");
         if arm == "default" {
+            // With no environment, the defaults are the measured fifo60 arm,
+            // whole (shady M1/S1 on #131).
+            let none = super::engine::Sched::from_env(None, None);
+            assert_eq!((none, super::engine::STEP_MS), arm_sched("fifo60"));
             let o = test_opts("x", Device::Cuda);
-            let fifo = std::env::var("AXON_ADMIT").map_or(true, |v| v != "sjf");
             assert_eq!(o.step_ms, 60, "the default step");
             assert_eq!(o.sched.order == super::engine::AdmitOrder::Fifo, fifo);
-            let mut f = test_opts("x", Device::Cuda);
-            arm_opts("fifo60", &mut f);
-            assert_eq!(
-                (f.step_ms, f.sched.lanes, f.sched.age_ms),
-                (o.step_ms, o.sched.lanes, o.sched.age_ms)
-            );
         }
+        let lanes = match (arm, fifo) {
+            ("default", false) => 8.0,
+            _ => lanes,
+        };
         let legacy = match legacy < 0.0 {
             true => std::env::var("AXON_STEP_COST").is_ok_and(|v| v == "legacy") as u8 as f64,
             false => legacy,
@@ -5460,14 +5466,17 @@ fn hist_p50(m: &std::collections::BTreeMap<String, f64>, fam: &str) -> f64 {
     f64::NAN
 }
 
-/// An A/B arm's scheduler settings: roll = `--admit-order fifo
-/// --prefill-lanes 2 --step-ms 60` with AXON_STEP_COST=legacy, main's
-/// scheduling exactly (`legacy_reproduces_main_decisions`); fifo60 / fifo50 = the
-/// step cost model with fifo admission; sjf60 / sjf50 = both (sjf50: the
-/// defaults); sjf50age0: no age bound.
-fn arm_opts(arm: &str, o: &mut Opts) {
+/// An A/B arm's scheduler and step target (whole: nothing from the
+/// environment). roll = `--admit-order fifo --prefill-lanes 2 --step-ms
+/// 60` with AXON_STEP_COST=legacy, main's scheduling exactly
+/// (`legacy_reproduces_main_decisions`); fifo60 = the step cost model with
+/// fifo admission, **the shipped defaults** (`serve_rollback_flags_reach_
+/// the_engine`); fifo50 = the same at 50 ms (never run); sjf60 / sjf50 =
+/// shortest-first (opt-in) with the cost model; sjf50age0: no age bound.
+/// (Until 6cb98fc sjf50 was the default.)
+fn arm_sched(arm: &str) -> (super::engine::Sched, usize) {
     use super::engine::AdmitOrder::{Fifo, Sjf};
-    let (order, lanes, step_ms, legacy, age) = match arm {
+    let (order, lanes, step_ms, legacy, age_ms) = match arm {
         "roll" => (Fifo, 2, 60, true, 3000),
         "fifo60" => (Fifo, 0, 60, false, 3000),
         "fifo50" => (Fifo, 0, 50, false, 3000),
@@ -5476,11 +5485,19 @@ fn arm_opts(arm: &str, o: &mut Opts) {
         "sjf50age0" => (Sjf, 0, 50, false, 0),
         _ => panic!("unknown A/B arm {arm}"),
     };
-    o.step_ms = step_ms;
-    o.sched.order = order;
-    o.sched.lanes = lanes;
-    o.sched.legacy = legacy;
-    o.sched.age_ms = age;
+    let sched = super::engine::Sched {
+        order,
+        age_ms,
+        lanes,
+        step_tokens: 0,
+        legacy,
+    };
+    (sched, step_ms)
+}
+
+/// `arm_sched` applied to `o`.
+fn arm_opts(arm: &str, o: &mut Opts) {
+    (o.sched, o.step_ms) = arm_sched(arm);
 }
 
 /// The showdown's own client against in-process servers (MEASURE; for
