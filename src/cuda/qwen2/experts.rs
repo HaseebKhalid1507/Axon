@@ -14,6 +14,21 @@ use crate::quant::{self, Q4_K, Q5_0, Q8_0};
 
 pub(crate) use super::{twin_gemm_ok, twin_type};
 
+/// Err if layer l of `m` has expert biases (gpt-oss): the CPU adds them
+/// (`Moe::act`, `down_bias`); the expert kernels have no bias epilogue yet.
+/// `CudaExperts::upload` checks it before uploading anything.
+fn refuse_expert_biases(m: &Model, l: usize) -> Result<(), String> {
+    for p in ["gate", "up", "down"] {
+        let name = format!("blk.{l}.ffn_{p}_exps.bias");
+        if m.tensors.iter().any(|t| t.name == name) {
+            return Err(format!(
+                "{name}: expert biases aren't supported on the GPU yet"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// moe_res.cu's MOE_BN (tokens per grouped-GEMM tile).
 const MOE_BN: usize = 64;
 
@@ -96,16 +111,7 @@ impl<'g> CudaExperts<'g> {
                 .find(|t| t.name == name)
                 .ok_or_else(|| format!("{name}: missing"))
         };
-        // Expert biases (gpt-oss): the CPU adds them (`Moe::act`,
-        // `down_bias`); the expert kernels have no bias epilogue yet.
-        for p in ["gate", "up", "down"] {
-            let name = format!("blk.{l}.ffn_{p}_exps.bias");
-            if m.tensors.iter().any(|t| t.name == name) {
-                return Err(format!(
-                    "{name}: expert biases aren't supported on the GPU yet"
-                ));
-            }
-        }
+        refuse_expert_biases(m, l)?;
         let tg = t("gate")?;
         let n_e = tg.dims.get(2).copied().unwrap_or(0) as usize;
         let gate = Mats::upload(g, m, tg, n_e)?;
