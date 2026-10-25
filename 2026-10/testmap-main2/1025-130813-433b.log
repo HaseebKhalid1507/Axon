@@ -1,0 +1,395 @@
+[axon-run 13:08:13] submitted 1025-130813-433b by /home/haseeb/.cache/axon-wt-testmap: shard 2/2 of 1025-130813-9ac3, 348 tests: /home/haseeb/.cache/axon-memcg/tm/axon-test-1ca1703 --skip cuda::qwen2::tests::batch_passes_equal_split --skip cuda::qwen2::tests::cuda_attn_bench --skip cuda::qwen2::tests::cuda_attn_mq_sweep --skip cuda::qwen2::tests::cuda_decode_tg --skip cuda::qwen2::tests::cuda_fa_bench --skip cuda::qwen2::tests::cuda_gemm_bench --skip cuda::qwen2::tests::cuda_gemm_sustained --skip cuda::qwen2::tests::cuda_ge
+[axon-run 13:56:49] GPU test run without --vram: claiming 11000 MB (the whole card) on bella; pass --vram to override
+[axon-run 13:56:49] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 13:56:49] scope axon-job-1025-130813-433b-1792951009.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 21566 MB): an OOM here kills only this job
+[axon-run 13:56:49] job 1025-130813-433b -> bella: systemd-run --user --scope --quiet --unit=axon-job-1025-130813-433b-1792951009 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-memcg/tm/axon-test-1ca1703 --skip cuda::qwen2::tests::batch_passes_equal_split --skip cuda::qwen2::tests::cuda_attn_bench --skip cuda::qwen2::tests::cuda_attn_mq_sweep --skip cuda::qwen2::tests::cuda_decode_tg --skip cuda::qwen2::tests::cuda_fa_bench --skip cuda::qwen2::tests::cuda_gemm_bench --skip cuda::qwen2::tests::cuda_gemm_sustained --skip cuda::qwen2::tests::cuda_gemm_tile_bench --skip cuda::qwen2::tests::cuda_gemmh_bench --skip cuda::qwen2::tests::cuda_gemv_bench --skip cuda::qwen2::tests::cuda_kv_q8_accuracy --skip cuda::qwen2::tests::cuda_prefill_profile --skip cuda::qwen2::tests::cuda_profile --skip cuda::qwen2::tests::dump_logits_positions --skip cuda::qwen2::tests::fa_passes_shapes --skip cuda::qwen2::tests::fa_pick_never_slower_than_full_measured --skip cuda::qwen2::tests::fa_pick_rules --skip cuda::qwen2::tests::gemma3_cpu_probe --skip cuda::qwen2::tests::gemma3_flip_probe --skip cuda::qwen2::tests::gemma3_ref_walk_probe --skip cuda::qwen2::tests::gemmh_plain_routing --skip cuda::qwen2::tests::gpu_argmax_matches_cpu_rule --skip cuda::qwen2::tests::gpu_attention_matches_cpu --skip cuda::qwen2::tests::gpu_batch_and_cache_contract --skip cuda::qwen2::tests::gpu_batched_attention_matches_decode_bits --skip cuda::qwen2::tests::gpu_batched_products_match_gemv_bits --skip cuda::qwen2::tests::gpu_bits_llama_3b_8b --skip cuda::qwen2::tests::gpu_concurrency_hunt_child --skip cuda::qwen2::tests::gpu_concurrency_matrix_hunt --skip cuda::qwen2::tests::gpu_continuations_match_cpu_0_5b --skip cuda::qwen2::tests::gpu_continuations_match_cpu_1_5b --skip cuda::qwen2::tests::gpu_continuations_match_cpu_llama_1b --skip cuda::qwen2::tests::gpu_continuations_match_cpu_qwen3_0_6b --skip cuda::qwen2::tests::gpu_decode_attention_long --skip cuda::qwen2::tests::gpu_decode_cache_size_same_bits --skip cuda::qwen2::tests::gpu_decode_norm2_gate_up4_identical --skip cuda::qwen2::tests::gpu_deterministic_graph_or_not --skip cuda::qwen2::tests::gpu_deterministic_graph_or_not_q8 --skip cuda::qwen2::tests::gpu_embed_matches_dequant --skip cuda::qwen2::tests::gpu_ext_module_same_bits_old_types --skip cuda::qwen2::tests::gpu_gate_up_mixed_types --skip cuda::qwen2::tests::gpu_gemma3_logits_match_cpu --skip cuda::qwen2::tests::gpu_gemma3_matches_reference_forward --skip cuda::qwen2::tests::gpu_gemma3_prefill_and_verify_bits --skip cuda::qwen2::tests::gpu_gemmh_gate_up_match_reference --skip hybrid:: --skip model:: --skip cuda::qwen2::slots:: --skip quant:: --skip cuda::qwen2::paged_tests:: --skip lineedit:: --skip gguf:: --skip safetensors:: --skip pool:: --skip cuda::qwen2::mla:: --skip moe::tests::backend_places_moe --skip moe::tests::moe_gpu_feed_batch_matches_feed_pruned --skip moe::tests::moe_gpu_feed_batch_matches_feed_small --skip moe::tests::moe_gpu_logits_graded_pruned --skip moe::tests::moe_gpu_logits_graded_small --skip moe::tests::moe_gpu_paged_and_graph_generation --skip moe::tests::moe_gpu_route_matches_cpu_twin_pruned --skip moe::tests::moe_gpu_route_matches_cpu_twin_small --skip moe::tests::moe_gpu_step_refuses_head_no --skip moe::tests::moe_gpu_verify_matches_forward_pruned --skip moe::tests::moe_gpu_verify_matches_forward_small --skip moe::tests::moe_route_batch_invariant_and_ties --skip moe::tests::transpose_tiled_transposes --skip draft:: --skip cuda::qwen2::moe:: --skip cuda::qwen2::stream:: --skip identity:: --skip moe::oss_tests:: --skip vmath:: --skip kvstore:: --skip moe::ds2_tests:: --skip kv:: --skip rope:: --skip tests::kv_f32_after_f16_is_an_error --test-threads 6
+axon-q 13:56:49 start slot 16-23: /home/haseeb/.cache/axon-memcg/tm/axon-test-1ca1703 --skip cuda::qwen2::tests::batch_passes_equal_split --skip cuda::qwen2::tests::cuda_attn_bench --skip cuda::qwen2::tests::cuda_attn_mq_sweep --skip 
+
+running 348 tests
+test chat::tests::forget_bench ... ignored
+test chat::tests::forget_bench_7b ... ignored
+test chat::tests::framing_matches_template ... ok
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test chat::tests::harmony_framing_and_channels ... ok
+test chat::tests::llama3_framing_and_replies ... ok
+test chat::tests::emit_error_keeps_the_exchange_exact ... ok
+test chat::tests::full_context_drops_oldest_cuda ... ok
+test chat::tests::cancel_and_message_too_long ... ok
+test chat::tests::gemma3_framing_and_replies ... ok
+test chat::tests::full_context_drops_oldest has been running for over 60 seconds
+test chat::tests::long_turn_matches_fresh_prefill_cuda has been running for over 60 seconds
+test chat::tests::mistral_framing_and_replies has been running for over 60 seconds
+test chat::tests::moe_gpu_turns_match_fresh_prefill ... ok
+test chat::tests::moe_turns_match_fresh_prefill has been running for over 60 seconds
+test chat::tests::long_turn_matches_fresh_prefill_cuda ... ok
+test chat::tests::qwen3_thinking_turns has been running for over 60 seconds
+test chat::tests::moe_turns_match_fresh_prefill ... ok
+test chat::tests::session_continues_cuda_f16_q8 ... ok
+test chat::tests::session_cpu_file_on_cuda ... ok
+test chat::tests::session_after_forgetting ... ok
+test chat::tests::mistral_framing_and_replies ... ok
+test chat::tests::set_system_reuses_the_shared_prefix ... ok
+test chat::tests::turns_match_fresh_prefill_cuda ... ok
+test chat::tests::session_hostile_state ... ok
+test chat::tests::session_continues_cpu has been running for over 60 seconds
+test chat::tests::session_continues_cpu ... ok
+test chat::tests::user_text_cannot_forge_turns ... ok
+test cli::tests::draft_k_rounds_to_full_slot_groups ... ok
+test chat::tests::turns_match_fresh_prefill_hybrid ... ok
+test chat::tests::qwen3_thinking_turns ... ok
+test cli::tests::drafting_matches_greedy_cuda ... ok
+test cli::tests::gen_budget_caps_and_never_overflows ... ok
+test cli::tests::gpu_layers_zero_is_the_cpu ... ok
+test cli::tests::non_utf8_argument_is_an_error ... ok
+test cli::tests::verify_argmax_matches_forward_argmax ... ok
+test cli::tests::verify_batch_matches_forward ... ok
+test chat::tests::turns_match_fresh_prefill ... ok
+test cuda::qwen2::experts::tests::cuda_experts_moonlight_bench ... ignored
+test cli::tests::drafting_matches_greedy_hybrid ... ok
+test cuda::qwen2::experts::tests::cuda_experts_qwen3moe_match_cpu ... ok
+test cuda::qwen2::experts::tests::expert_biases_refused_before_upload ... ok
+test cuda::qwen2::experts::tests::twin_refusals ... ok
+test cuda::qwen2::kvio::tests::bandwidth ... ignored
+test cuda::qwen2::kvio::tests::rows_round_trip_multi_round ... ok
+test cuda::qwen2::experts::tests::cuda_experts_moonlight_match_cpu ... ok
+test cuda::qwen2::pages::tests::pagemap_orders ... ok
+test cuda::qwen2::pages::tests::pagemap_fuzz ... ok
+test cuda::qwen2::pipeline::tests::pipeline_cuts_balance ... ok
+test cuda::qwen2::pipeline::tests::pipeline_cands_match_cuda ... ok
+test cuda::qwen2::pipeline::tests::pipeline_one_stage_is_cuda ... ok
+test cuda::qwen2::pipeline::tests::pipeline_parse_cuts ... ok
+test cuda::qwen2::pipeline::tests::pipeline_same_device_matches_cuda ... ok
+test cuda::qwen2::pipeline::tests::pipeline_feed_batch_matches_feed ... ok
+test cuda::qwen2::experts::tests::cuda_experts_fixture_match_cpu ... ok
+test cli::tests::drafting_matches_greedy ... ok
+test chat::tests::turns_stream_graded_vs_fresh_prefill has been running for over 60 seconds
+test chat::tests::turns_stream_graded_vs_fresh_prefill ... ok
+test cuda::qwen2::pipeline::tests::pp_probe ... ignored
+test cuda::qwen2::sample_tests::cpu_and_gpu_differ_only_where_logits_do ... ok
+test cuda::qwen2::sample_tests::kernels_match_cpu_candidates ... ok
+test cuda::qwen2::sample_tests::model_candidates_match ... ok
+test cuda::qwen2::sample_tests::real_model_sampling_cuda ... ok
+test cuda::qwen2::pipeline::tests::pipeline_same_device_matches_cuda_1_5b has been running for over 60 seconds
+test chat::tests::full_context_drops_oldest ... ok
+test cuda::qwen2::pipeline::tests::pipeline_same_device_matches_cuda_q8 has been running for over 60 seconds
+test cuda::qwen2::pipeline::tests::pipeline_same_device_matches_cuda_qwen3 has been running for over 60 seconds
+test cuda::qwen2::pipeline::tests::pipeline_verify_matches_forward_argmax has been running for over 60 seconds
+test cuda::qwen2::sample_tests::real_model_sampling_cuda_llama ... ok
+test cuda::qwen2::sample_tests::real_model_sampling_cuda_qwen3 ... ok
+test cuda::qwen2::sample_tests::samp_kernel_profile ... ignored
+test cuda::qwen2::sample_tests::step_cost_cuda ... ignored
+test cuda::qwen2::sample_tests::real_model_sampling_cuda_q8 ... ok
+test cuda::qwen2::pipeline::tests::pipeline_same_device_matches_cuda_qwen3 ... ok
+test cuda::qwen2::pipeline::tests::pipeline_same_device_matches_cuda_q8 ... ok
+test cuda::qwen2::tests::gpu_head_sizes ... ok
+test cuda::qwen2::tests::gpu_hw_f16_scales_exact_in_products ... ok
+test cuda::qwen2::tests::gpu_llama_matches_reference_forward ... ok
+test cuda::qwen2::pipeline::tests::pipeline_same_device_matches_cuda_1_5b ... ok
+test cuda::qwen2::tests::gpu_logits_match_cpu_1_5b ... ok
+test cuda::qwen2::tests::gpu_logits_match_cpu_2000_tokens ... ok
+test cuda::qwen2::tests::gpu_logits_match_cpu_llama_1b ... ok
+test cuda::qwen2::tests::gpu_gemmh_matches_reference_bits has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_gemv_matches_cpu_every_type has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_logits_match_cpu_long_context ... ok
+test cuda::qwen2::tests::gpu_gemv_matches_cpu_new_types has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_logits_match_cpu_0_5b has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_logits_match_cpu_natural_long_0_5b ... ok
+test cuda::qwen2::tests::gpu_logits_match_cpu_natural_long_1_5b ... ok
+test cuda::qwen2::tests::gpu_logits_match_cpu_q2k_q3k has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_logits_match_cpu_q2k_q3k ... ok
+test cuda::qwen2::tests::gpu_logits_match_cpu_q5_k_m_q4_0 ... ok
+test cuda::qwen2::tests::gpu_logits_match_cpu_qwen3_0_6b ... ok
+test cuda::qwen2::tests::gpu_mma_f16_is_deterministic ... ok
+test cuda::qwen2::tests::gpu_pdl_on_off_identical ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_0_5b ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_1_5b ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_llama ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q2k_q3k has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q2k_q3k ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_0_5b ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_1_5b has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_1_5b ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_qwen3 ... ok
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_qwen3_4b has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_qwen3_4b ... ok
+test cuda::qwen2::tests::gpu_prefill_logits_match_forward_big ... ok
+test cuda::qwen2::tests::gpu_prefill_wave_split_bits ... ok
+test cuda::qwen2::tests::gpu_products_match_reference_bits ... ok
+test cuda::qwen2::tests::gpu_products_real_weights_q2k_q3k ... ok
+test cuda::qwen2::tests::gpu_gemmh_matches_reference_bits ... ok
+test cuda::qwen2::tests::gpu_q8_attention_matches_reference ... ok
+test cuda::qwen2::tests::gpu_gemv_matches_cpu_new_types ... ok
+test cuda::qwen2::tests::gpu_q8_kv_close_to_f16_1_5b ... ok
+test cuda::qwen2::tests::gpu_prompt_chunks_bits has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_q8_kv_close_to_f16_0_5b has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_q8_llama ... ok
+test cuda::qwen2::tests::gpu_q8_qwen3 has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_q8_qwen3 ... ok
+test cuda::qwen2::tests::gpu_q8_qwen3_4b has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_q8_qwen3_4b ... ok
+test cuda::qwen2::tests::gpu_q8_store_matches_rule ... ok
+test cuda::qwen2::tests::gpu_qkv_rope_matches_cpu ... ok
+test cuda::qwen2::tests::gpu_qwen3_matches_reference_forward ... ok
+test cuda::qwen2::tests::gpu_rmsnorm_matches_cpu ... ok
+test cuda::qwen2::tests::gpu_split_attention_matches_decode_bits ... ok
+test cuda::qwen2::pipeline::tests::pipeline_verify_matches_forward_argmax ... ok
+test cuda::qwen2::tests::gpu_tc_attention_close_to_f64 ... ok
+test cuda::qwen2::tests::gpu_too_big_is_an_error ... ok
+test cuda::qwen2::tests::gpu_verify_matches_forward_argmax_0_5b ... ok
+test cuda::qwen2::tests::gpu_verify_matches_forward_argmax_1_5b ... ok
+test cuda::qwen2::tests::gpu_verify_matches_forward_argmax_q8_0_5b ... ok
+test cuda::qwen2::tests::gpu_logits_match_cpu_0_5b ... ok
+test cuda::qwen2::tests::gpu_verify_matches_forward_argmax_qwen3 ... ok
+test cuda::qwen2::tests::gpu_verify_matches_forward_argmax_qwen3_4b ... ok
+test cuda::qwen2::tests::gpu_swiglu_epilogue_and_gate_up_match_reference has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_yarn_matches_reference_and_keeps_bits ... ok
+test cuda::qwen2::tests::lm_chunk_ranges ... ok
+test cuda::qwen2::tests::q6k8_never_costs_context ... ok
+test cuda::qwen2::tests::ref_spread_zero_fails_by_name ... ok
+test cuda::qwen2::tests::teacher_forced_dump ... ignored
+test cuda::qwen2::tests::tile_t_picks ... ok
+test cuda::qwen2::tests::twin::gpu_twin_epilogues_match_cpu ... ok
+test cuda::qwen2::tests::twin::gpu_twin_exp_swiglu_match_cpu ... ok
+test cuda::qwen2::tests::gpu_verify_matches_forward_argmax_q8_1_5b has been running for over 60 seconds
+test cuda::qwen2::tests::twin::gpu_twin_gemm2s_matches_cpu_r8 ... ok
+test cuda::qwen2::tests::twin::gpu_twin_gemv_matches_cpu_r8 ... ok
+test cuda::qwen2::tests::twin::gpu_twin_quant_matches_cpu ... ok
+test cuda::qwen2::tests::wave_passes_shapes ... ok
+test cuda::qwen2::yarn_eval::yarn_needle ... ignored
+test cuda::qwen2::yarn_eval::yarn_short_ctx ... ignored
+test cuda::tests::cuda_hopper_bench ... ignored
+test cuda::qwen2::tests::gpu_prompt_chunks_bits ... ok
+test cuda::tests::gpu_cache_dir_follows_xdg ... ok
+test cuda::tests::gpu_cache_store_hygiene ... ok
+test cuda::tests::gpu_capture_survives_pinning_elsewhere ... ok
+test cuda::tests::gpu_capture_unwinds_cleanly ... ok
+test cuda::tests::gpu_compile_error_shows_log ... ok
+test cuda::tests::gpu_dequant_bitwise_every_tensor ... ok
+test cuda::tests::gpu_dequant_bitwise_every_tensor_1_5b ... ok
+test cuda::qwen2::tests::gpu_swiglu_epilogue_and_gate_up_match_reference ... ok
+test cuda::tests::gpu_dequant_bitwise_synthetic ... ok
+test cuda::tests::gpu_dequant_rejects_bad_requests ... ok
+test cuda::tests::gpu_hopper_tma_wgmma ... ok
+test cuda::tests::gpu_info_is_sane ... ok
+test cuda::tests::gpu_kernel_cache_hit_miss_corrupt ... ok
+test cuda::tests::gpu_launch_checks_owner_and_drop_unbinds ... ok
+test cuda::tests::gpu_only_loadable_code_is_cached ... ok
+test cuda::tests::gpu_open_errors_are_graceful ... ok
+test cuda::tests::gpu_pdl_gating ... ok
+test cuda::tests::gpu_target_choice ... ok
+test cuda::tests::h2d_bandwidth ... ignored
+test cuda::tests::h2d_bench ... ignored, benchmark: cargo test --release h2d_bench -- --ignored --nocapture
+test cuda::tests::gpu_buffers_round_trip ... ok
+test cuda::qwen2::tests::gpu_q8_kv_close_to_f16_0_5b ... ok
+test cuda::tests::ring_upload_matches_write_at ... ok
+test cuda::upload::tests::fill_copies_pieces_and_zeroes_gaps ... ok
+test generate::tests::argmax_matches_max_by_including_ties ... ok
+test generate::tests::argmax_multiversion_identical ... ok
+test generate::tests::argmax_speed ... ignored, timing, run with --ignored --nocapture
+test generate::tests::best_matches_argmax ... ok
+test generate::tests::generate_refuses_drafting_when_decode_streams ... ok
+test generate::tests::generate_uses_the_lm_seam ... ok
+test kvsave::tests::canonical_names_one_session ... ok
+test kvsave::tests::file_appends_rewrites_and_checks ... ok
+test kvsave::tests::hasher_streams ... ok
+test kvsave::tests::hostile_headers ... ok
+test kvsave::tests::lock_refuses_a_second_holder ... ok
+test kvsave::tests::not_a_session_file ... ok
+test kvsave::tests::orphan_records_never_load ... ok
+test kvsave::tests::same_length_foreign_rewrite_never_restores_wrong_state ... ok
+test kvsave::tests::second_writer_then_save_rewrites ... ok
+test kvsave::tests::segments_split_at_pages ... ok
+test kvsave::tests::torn_tail_then_new_process_saves_on ... ok
+test lm::paged_place_tests::paged_placement_14b ... ok
+test lm::paged_place_tests::paged_placement_all_gpu_kept ... ok
+test lm::paged_place_tests::paged_placement_matches_main_with_ctx ... ok
+test lm::paged_place_tests::paged_placement_squeezed_splits_rather_than_shrinks ... ok
+test moe::router_legacy_tests::router_bits_match_legacy ... ignored, GPU + legacy kernels; release builds: --ignored router_bits_match_legacy
+test sample::tests::defaults_are_ollamas ... ok
+test sample::tests::drafting_distribution_chi_square ... ok
+test sample::tests::drafting_matches_plain_sampling ... ok
+test sample::tests::draw_skips_zero_weights ... ok
+test sample::tests::draws_follow_dist ... ok
+test sample::tests::filters_by_hand ... ok
+test sample::tests::flags_parse_and_reject ... ok
+test sample::tests::inverse_cdf_shares ... ok
+test sample::tests::key_orders_like_argmax ... ok
+test cuda::qwen2::tests::gpu_verify_matches_forward_argmax_q8_1_5b ... ok
+test cuda::qwen2::tests::gpu_gemv_matches_cpu_every_type ... ok
+test cuda::tests::gpu_dequant_bitwise_every_tensor_q5k_q4_0 ... ok
+test sample::tests::repeat_penalty ... ok
+test sample::tests::rng_is_seeded ... ok
+test sample::tests::top_k_matches_reference ... ok
+test sample::tests::top_k_multiversion_identical ... ok
+test sample::tests::top_k_off_is_whole_vocab ... ok
+test sample::tests::top_k_speed ... ignored
+test serve::api::tests::chat_request ... ok
+test serve::api::tests::completion_request ... ok
+test serve::api::tests::refused_requests ... ok
+test serve::api::tests::sampling_maps_onto_sample_rs ... ok
+test serve::api::tests::sse_framing ... ok
+test serve::api::tests::stop_strings ... ok
+test serve::engine::plan_tests::idle_feeds_the_head_in_whole_passes ... ok
+test serve::engine::plan_tests::idle_misses_count_only_behind_a_younger_prompt_that_finished ... ok
+test serve::engine::plan_tests::idle_round_up_is_capped_and_floor_applies_first ... ok
+test serve::engine::plan_tests::idle_short_prompts_finishing_in_their_step_cant_starve_a_long_one ... ok
+test serve::engine::plan_tests::idle_two_long_prompts_go_one_after_another ... ok
+test serve::engine::plan_tests::idle_unequal_long_prompts_go_one_after_another ... ok
+test serve::engine::plan_tests::idle_younger_shorter_long_prompt_runs_to_its_end ... ok
+test serve::engine::plan_tests::micros_first_gets_the_floor ... ok
+test serve::engine::plan_tests::micros_shares_follow_each_prompts_depth ... ok
+test serve::engine::plan_tests::starved_prompts_go_oldest_first ... ok
+test serve::engine::plan_tests::tokens_shortest_first_and_no_sliver ... ok
+test serve::engine::slot_tests::best_slot_ignores_a_trivial_prefix ... ok
+test serve::engine::slot_tests::best_slot_prefers_prefix_then_least_recent ... ok
+test serve::engine::victim_tests::grow_rule_makes_progress_without_refeeding_the_old_prompt ... ok
+test serve::engine::victim_tests::older_prefill_keeps_its_rows ... ok
+test serve::http::tests::absolute_form_targets ... ok
+test serve::http::tests::bare_lf_and_leading_blank_lines ... ok
+test serve::http::tests::chunked_bodies ... ok
+test serve::http::tests::dates ... ok
+test serve::http::tests::expect_continue_is_answered_before_the_body ... ok
+test serve::http::tests::head_timeout ... ok
+test serve::http::tests::malformed_requests ... ok
+test serve::http::tests::non_http_bytes_rejected_at_once ... ok
+test serve::http::tests::on_end_before_the_last_write ... ok
+test serve::http::tests::oversized_heads ... ok
+test serve::http::tests::parses_a_post_with_a_body_in_any_read_size ... ok
+test serve::http::tests::pipelined_requests_come_out_in_order ... ok
+test serve::http::tests::responses ... ok
+test serve::ollama::tests::bad_shapes_are_400 ... ok
+test serve::ollama::tests::chat_translates ... ok
+test serve::ollama::tests::generate_translates ... ok
+test serve::ollama::tests::shapes ... ok
+test serve::ops::tests::ct_eq_and_bearer ... ok
+test serve::ops::tests::histogram_is_cumulative ... ok
+test serve::ops::tests::slot_counts ... ok
+test serve::ops::tests::stall_needs_waiting_bytes_and_no_progress ... ok
+test serve::responses::tests::bad_shapes_are_400 ... ok
+test serve::responses::tests::ids_are_unique_per_process ... ok
+test serve::responses::tests::previous_response_id_continues ... ok
+test serve::responses::tests::response_shapes ... ok
+test serve::responses::tests::store_is_bounded ... ok
+test serve::responses::tests::tool_key_order_survives ... ok
+test serve::responses::tests::translates_to_chat ... ok
+test serve::tests::api_key_env_and_empty ... ok
+test serve::tests::api_key_flag_wins_over_bad_env ... ok
+test serve::tests::chat_template_matches_chat ... ok
+test serve::tests::cpu_ctx_mem_available ... ok
+test serve::tests::error_body_shape_follows_the_path ... ok
+test serve::tests::gemma3_template_matches_llama_cpp ... ok
+test serve::tests::harmony_calls_from_channels ... ok
+test serve::tests::http_overhead ... ignored
+test serve::tests::paged_plan_honours_ctx ... ok
+test serve::tests::plan_slots_default ... ok
+test serve::tests::plan_slots_explicit ... ok
+test serve::tests::plan_slots_note_names_the_fit ... ok
+test serve::tests::prefill_vs_cache_size ... ignored
+test serve::tests::prom_parse_rejects_bad_text ... ok
+test serve::tests::ram_ctx_fits ... ok
+test serve::tests::serve_api_key ... ok
+test serve::tests::serve_api_key_before_100_continue ... ok
+test serve::tests::serve_api_key_error_after_head ... ok
+test serve::tests::serve_api_key_no_body_without_the_key ... ok
+test serve::tests::serve_apis_match_chat_completions ... ok
+test serve::tests::serve_batched_matches_solo ... ok
+test serve::tests::serve_cancel_mid_prefill_reuses_rows ... ok
+test cuda::tests::nvrtc_kernels_compile_for_old_archs has been running for over 60 seconds
+test cuda::tests::nvrtc_kernels_compile_for_sm90a has been running for over 60 seconds
+test sample::tests::real_model_sampling_cpu ... ok
+test serve::tests::serve_caps_and_slow_reader ... ok
+test serve::tests::serve_counts_a_request_before_answering_it ... ok
+test sample::tests::real_model_sampling_cpu_llama ... ok
+test sample::tests::real_model_sampling_cpu_qwen3 has been running for over 60 seconds
+test serve::tests::serve_cpu_llama_matches_gen ... ok
+test serve::tests::serve_chunked_prefill_matches_solo ... ok
+test serve::tests::serve_cpu_gemma3_matches_gen ... ok
+test serve::tests::serve_cuda_apis_match_chat_completions ... ok
+test cuda::tests::nvrtc_kernels_compile_for_old_archs ... ok
+test serve::tests::serve_cuda_gemma3_matches_gen ... ok
+test serve::tests::serve_cuda_long_prompt_matches_gen ... ok
+test serve::tests::serve_cuda_matches_gen ... ok
+test serve::tests::serve_cuda_slots ... ok
+test serve::tests::serve_cuda_with_draft_model ... ok
+test sample::tests::real_model_sampling_cpu_qwen3 ... ok
+test serve::tests::serve_error_mid_upload_is_not_a_reset ... ok
+test serve::tests::serve_evicts_waiting_connections ... ok
+test serve::tests::serve_cuda_llama_matches_gen ... ok
+test serve::tests::serve_cpu_matches_gen ... ok
+test cuda::tests::nvrtc_kernels_compile_for_sm90a ... ok
+test serve::tests::serve_http_behaviour ... ok
+test serve::tests::serve_cpu_with_draft_model ... ok
+test serve::tests::serve_gauges_settle_back_to_back ... ok
+test serve::tests::serve_in_flight_released_before_answering ... ok
+test serve::tests::serve_metrics_slots_max_prompt ... ok
+test serve::tests::serve_ollama_and_responses_routes ... ok
+test serve::tests::serve_ollama_error_shapes ... ok
+test serve::tests::serve_default_ctx has been running for over 60 seconds
+test serve::tests::serve_gptoss_tool_calls has been running for over 60 seconds
+test serve::tests::serve_identity_cpu ... ok
+test serve::tests::serve_identity has been running for over 60 seconds
+test serve::tests::serve_qwen3_reasoning ... ok
+test serve::tests::serve_responses_tool_loop ... ok
+test serve::tests::serve_paged_cap_message has been running for over 60 seconds
+test serve::tests::serve_gptoss_tool_calls ... ok
+test serve::tests::serve_paged_pressure has been running for over 60 seconds
+test serve::tests::serve_slot_idle_frees_a_stalled_stream ... ok
+test serve::tests::serve_shrunk_pool ... ok
+test serve::tests::serve_tool_calls ... ok
+test serve::tests::serve_paged_pressure ... ok
+test serve::tests::text_out_reasoning_and_stops ... ok
+test serve::tests::wait_list_take_decides_the_race ... ok
+test serve::tools::tests::api_parse_with_tools ... ok
+test serve::tools::tests::arg_scan ... ok
+test serve::tools::tests::forced_and_ids ... ok
+test serve::tools::tests::harmony_parser ... ok
+test serve::tools::tests::harmony_typescript_tools ... ok
+test serve::tools::tests::hermes_parser ... ok
+test serve::tools::tests::json_keeps_order_and_prints_like_python ... ok
+test serve::tools::tests::json_parser_llama ... ok
+test serve::tools::tests::long_block_bytewise ... ok
+test serve::tools::tests::render_harmony ... ok
+test serve::tools::tests::render_llama31 ... ok
+test serve::tools::tests::render_qwen25 ... ok
+test serve::tools::tests::render_qwen3 ... ok
+test serve::tools::tests::requests ... ok
+test serve::tools::tests::response_json ... ok
+test spec::tests::copies_what_followed ... ok
+test spec::tests::incremental_matches_brute_force ... ok
+test spec::tests::lookup_reports_match_length_uncapped ... ok
+test spec::tests::nothing_to_copy ... ok
+test spec::tests::prefers_longest_then_latest ... ok
+test spec::tests::repeats_overlap ... ok
+test spec::tests::short_match_drafts_at_most_3 ... ok
+test spec::tests::single_token_match_is_not_enough ... ok
+test serve::tests::serve_solo_and_batch_share_slots ... ok
+test testutil::gpu_tests_never_overlap ... ok
+test testutil::gpu_lock_is_reentrant ... ok
+test testutil::load_tests::released_tensor_refused_on_a_mapping ... ok
+test tokenizer::tests::bpe_heap_matches_scan ... ok
+test tokenizer::tests::byte_table_roundtrip ... ok
+test serve::tests::serve_paged_cap_message ... ok
+test tokenizer::tests::llama3_ignore_merges_matters ... ok
+test tokenizer::tests::oracle ... ok
+test tokenizer::tests::oracle_gemma3 ... ok
+test tokenizer::tests::oracle_gptoss ... ok
+test testutil::load_tests::loaders_map_as_the_product_does ... ok
+test tokenizer::tests::oracle_llama3 ... ok
+test tokenizer::tests::oracle_spm_llama_cpp_vectors ... ok
+test tokenizer::tests::plain_encode_ignores_specials ... ok
+test tokenizer::tests::roundtrip ... ok
+test tokenizer::tests::specials_single_ids ... ok
+test tokenizer::tests::startup_parse_and_build_times ... ignored
+test tokenizer::tests::utf8_stream_matches_lossy_over_any_split ... ok
+test tokenizer::tests::oracle_mistral ... ok
+test tokenizer::tests::vocab_and_merges_match_plain_maps_synthetic ... ok
+test tokenizer::tests::long_pretoken_encodes_fast ... ok
+test tokenizer::tests::vocab_and_merges_match_plain_maps ... ok
+test serve::tests::serve_whole_response_cancelled_on_disconnect ... ok
+test serve::tests::serve_default_ctx ... ok
+test serve::tests::serve_identity ... ok
+
+test result: ok. 329 passed; 0 failed; 19 ignored; 0 measured; 367 filtered out; finished in 1730.54s
+
+[axon-run 14:25:39] exit 0 after 1730.8s (host bella)
+[axon-run 14:25:43] EXPECT ok: output matches /test result: ok/
