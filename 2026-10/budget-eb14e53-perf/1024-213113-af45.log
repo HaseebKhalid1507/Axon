@@ -1,0 +1,41 @@
+[axon-run 21:31:13] submitted 1024-213113-af45 by /home/haseeb/.cache/axon-wt-budget: /home/haseeb/.cache/axon-budget/bin/axon-test-eb14e53 serve::tests::serve_hybrid_ab --exact --ignored --nocapture --test-threads 1
+[axon-run 21:32:24] job 1024-213113-af45 -> avante: ionice -c3 nice -n 19 /home/haseeb/.local/bin/axon-remote --host avante --vram 5500 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-wt-budget /home/haseeb/.cache/axon-budget/bin/axon-test-eb14e53 serve::tests::serve_hybrid_ab --exact --ignored --nocapture --test-threads 1
+axon-remote: job 20261024-213225-axon-test-eb14e53-261523 on avante (GPU, 5500 MB)
+[axon-node 21:32:25] GPU lock taken; job wants 5500 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 62
+[axon-node 21:32:25] run axon-test-eb14e53 (3336d2a434b7a6a65eef1766) as /home/haseeb/.cache/axon-wt-budget on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 1 test
+test serve::tests::serve_hybrid_ab ... testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+serve_hybrid_ab: models/qwen2.5-1.5b-instruct-q4_k_m.gguf, budget 256, 3 rounds; admit 4 decoders + a 19816-token prompt (ctx 20480); loop C=8 x 4 reqs, 459 tokens of prompt at most, 128 tokens (ctx 1024)
+mix: C=32 x 2 requests (3/16 long: [2000, 4000, 6000] tokens), 128 tokens, arms ["roll", "fifo60", "sjf60", "sjf50"], AXON_HYBRID true
+round 0 mix roll: [705.26, 369.67, 1355.58, 2910.40, 1573.19, 4565.35, 37.76, 58.21, 0.91, 45.25, 44.56, 0.00, 1.00]
+round 0 mix fifo60: [700.99, 177.84, 911.34, 1374.81, 2090.84, 4379.47, 41.84, 72.50, 0.98, 64.15, 63.48, 0.00, 1.00]
+[axon-run 21:32:54] FOREIGN_GPU sample max=0% mean=0.0% n=1
+round 0 mix sjf60: [709.51, 119.91, 120.99, 139.35, 2096.26, 4178.04, 40.99, 75.33, 0.95, 64.86, 64.81, 0.00, 1.00]
+round 0 mix sjf50: [691.87, 319.67, 320.97, 321.09, 2135.16, 4523.03, 39.76, 65.67, 0.95, 54.92, 54.88, 0.00, 1.00]
+[axon-run 21:33:25] FOREIGN_GPU sample max=0% mean=0.0% n=1
+round 1 mix fifo60: [677.35, 179.57, 1051.67, 1525.06, 2216.17, 4603.72, 42.86, 76.73, 0.86, 64.60, 63.98, 0.00, 1.00]
+round 1 mix sjf60: [692.64, 124.78, 126.18, 141.05, 2152.05, 4341.51, 42.10, 75.13, 0.95, 64.90, 64.85, 0.00, 1.00]
+round 1 mix sjf50: [679.09, 101.81, 103.06, 163.00, 2253.63, 4648.37, 42.19, 65.81, 0.94, 54.60, 54.56, 0.00, 1.00]
+[axon-run 21:33:56] FOREIGN_GPU sample max=0% mean=0.0% n=1
+round 1 mix roll: [654.42, 434.39, 1448.18, 2134.52, 2591.14, 5142.78, 42.84, 62.04, 0.88, 48.38, 47.88, 0.00, 1.00]
+round 2 mix sjf60: [685.27, 117.54, 143.65, 205.40, 2198.94, 4442.92, 42.53, 76.21, 0.95, 65.14, 65.09, 0.00, 1.00]
+[axon-run 21:34:27] FOREIGN_GPU sample max=0% mean=0.0% n=1
+round 2 mix sjf50: [672.59, 101.81, 102.78, 168.54, 2244.73, 4660.53, 42.38, 66.21, 0.94, 55.18, 55.15, 0.00, 1.00]
+round 2 mix roll: [648.24, 293.08, 1408.14, 2138.21, 2636.14, 5240.27, 43.26, 62.42, 0.88, 49.23, 48.55, 0.00, 1.00]
+[axon-run 21:34:58] FOREIGN_GPU sample max=0% mean=0.0% n=1
+round 2 mix fifo60: [662.98, 193.20, 1041.83, 1688.10, 2375.33, 4698.14, 43.91, 76.26, 0.91, 64.36, 63.68, 0.00, 1.00]
+medians over rounds (same_text: min):
+| mix | agg tok/s | short TTFT p50 | p90 | max | long TTFT p50 | max | TPOT p50 | ITL p99 | slo_ok | step p50 ms (rows>=16) | step p50 ms (all) | preempted+unfed | same_text |
+| roll | 654.42 | 369.67 | 1408.14 | 2138.21 | 2591.14 | 5142.78 | 42.84 | 62.04 | 0.88 | 48.38 | 47.88 | 0.00 | 1 |
+| fifo60 | 677.35 | 179.57 | 1041.83 | 1525.06 | 2216.17 | 4603.72 | 42.86 | 76.26 | 0.91 | 64.36 | 63.68 | 0.00 | 1 |
+| sjf60 | 692.64 | 119.91 | 126.18 | 141.05 | 2152.05 | 4341.51 | 42.10 | 75.33 | 0.95 | 64.90 | 64.85 | 0.00 | 1 |
+| sjf50 | 679.09 | 101.81 | 103.06 | 168.54 | 2244.73 | 4648.37 | 42.19 | 65.81 | 0.94 | 54.92 | 54.88 | 0.00 | 1 |
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 705 filtered out; finished in 154.33s
+
+[axon-node 21:34:59] exit 0 after 154.5s
+[axon-node 21:34:59] peak RSS 754 MB (job process tree PSS, 2 s samples x77)
+[axon-run 21:35:00] exit 0 after 156.2s (host avante)
+[axon-run 21:35:03] FOREIGN_GPU max=0% mean=0.0% samples=5
