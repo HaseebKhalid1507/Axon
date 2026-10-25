@@ -1,0 +1,40 @@
+[axon-run 01:26:09] submitted 1025-012609-5381 by /home/haseeb/.cache/axon-wt-budget-main: /home/haseeb/.cache/axon-budget/bin/axon-test-a18ff8d serve::tests::serve_sched_ab --exact --ignored --nocapture --test-threads 1
+[axon-run 02:16:55] job 1025-012609-5381 -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 5500 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-wt-budget-main /home/haseeb/.cache/axon-budget/bin/axon-test-a18ff8d serve::tests::serve_sched_ab --exact --ignored --nocapture --test-threads 1
+axon-remote: job 20261025-021656-axon-test-a18ff8d-3810098 on avante (GPU, 5500 MB)
+[axon-node 02:16:56] GPU lock taken; job wants 5500 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 62
+[axon-node 02:16:56] run axon-test-a18ff8d (046f7e09011fd09d6b816df0) as /home/haseeb/.cache/axon-wt-budget-main on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 1 test
+test serve::tests::serve_sched_ab ... testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+serve_sched_ab mix: models/qwen2.5-1.5b-instruct-q4_k_m.gguf, C=32 x 2 requests (3/16 long: [2000, 4000, 6000] tokens), 128 tokens, 3 rounds, arms ["roll", "fifo60", "sjf60", "sjf50"]
+round 0 mix roll: [638.84, 449.20, 2479.50, 2817.08, 1980.06, 4898.67, 44.65, 75.60, 0.88, 61.72, 61.26, 0.00, 1.00]
+round 0 mix fifo60: [605.85, 330.03, 1657.88, 2550.30, 2586.76, 5446.92, 46.48, 77.02, 0.75, 60.81, 60.05, 0.00, 1.00]
+[axon-run 02:17:30] FOREIGN_GPU sample max=0% mean=0.0% n=1
+round 0 mix sjf60: [604.53, 228.43, 229.70, 372.63, 2683.68, 5350.94, 46.64, 78.64, 0.92, 62.50, 62.36, 0.00, 1.00]
+round 0 mix sjf50: [600.98, 227.52, 380.67, 413.81, 2787.51, 5511.63, 46.83, 91.52, 0.92, 57.75, 57.64, 0.00, 1.00]
+[axon-run 02:18:04] FOREIGN_GPU sample max=0% mean=0.0% n=1
+round 1 mix fifo60: [580.36, 447.72, 1651.30, 2562.86, 2597.71, 5782.89, 48.75, 80.07, 0.50, 61.43, 61.13, 0.00, 1.00]
+round 1 mix sjf60: [589.65, 227.79, 276.73, 430.61, 2882.03, 5609.16, 48.21, 75.55, 0.78, 62.62, 62.55, 0.00, 1.00]
+[axon-run 02:18:36] FOREIGN_GPU sample max=0% mean=0.0% n=1
+round 1 mix sjf50: [594.02, 236.31, 386.66, 463.69, 2828.47, 5590.44, 47.44, 91.68, 0.92, 58.06, 57.91, 0.00, 1.00]
+round 1 mix roll: [578.10, 605.33, 1518.53, 2515.03, 2549.72, 5839.55, 49.19, 82.19, 0.55, 62.78, 62.57, 0.00, 1.00]
+round 2 mix sjf60: [583.58, 225.06, 225.69, 366.22, 2988.02, 5723.71, 48.75, 72.24, 0.62, 63.04, 62.91, 0.00, 1.00]
+[axon-run 02:19:09] FOREIGN_GPU sample max=0% mean=0.0% n=1
+round 2 mix sjf50: [591.74, 227.96, 386.39, 452.55, 2805.79, 5564.30, 47.45, 92.28, 0.81, 58.65, 58.50, 0.00, 1.00]
+round 2 mix roll: [574.85, 335.10, 1602.76, 2638.08, 3131.94, 5950.67, 50.36, 74.95, 0.38, 62.21, 61.58, 0.00, 1.00]
+[axon-run 02:19:42] FOREIGN_GPU sample max=0% mean=0.0% n=1
+round 2 mix fifo60: [574.29, 569.99, 1884.10, 2814.51, 2781.90, 5831.95, 48.45, 74.29, 0.59, 61.34, 61.24, 0.00, 1.00]
+medians over rounds (same_text: min):
+| mix | agg tok/s | short TTFT p50 | p90 | max | long TTFT p50 | max | TPOT p50 | ITL p99 | slo_ok | step p50 ms (rows>=16) | step p50 ms (all) | preempted+unfed | same_text |
+| roll | 578.10 | 449.20 | 1602.76 | 2638.08 | 2549.72 | 5839.55 | 49.19 | 75.60 | 0.55 | 62.21 | 61.58 | 0.00 | 1 |
+| fifo60 | 580.36 | 447.72 | 1657.88 | 2562.86 | 2597.71 | 5782.89 | 48.45 | 77.02 | 0.59 | 61.34 | 61.13 | 0.00 | 1 |
+| sjf60 | 589.65 | 227.79 | 229.70 | 372.63 | 2882.03 | 5609.16 | 48.21 | 75.55 | 0.78 | 62.62 | 62.55 | 0.00 | 1 |
+| sjf50 | 594.02 | 227.96 | 386.39 | 452.55 | 2805.79 | 5564.30 | 47.44 | 91.68 | 0.92 | 58.06 | 57.91 | 0.00 | 1 |
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 708 filtered out; finished in 176.23s
+
+[axon-node 02:19:52] exit 0 after 176.4s
+[axon-node 02:19:52] peak RSS 788 MB (job process tree PSS, 2 s samples x87)
+[axon-run 02:19:53] exit 0 after 178.2s (host avante)
+[axon-run 02:19:57] FOREIGN_GPU max=0% mean=0.0% samples=5

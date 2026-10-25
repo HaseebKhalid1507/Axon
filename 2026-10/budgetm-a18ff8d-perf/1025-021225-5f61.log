@@ -1,0 +1,34 @@
+[axon-run 02:12:25] submitted 1025-021225-5f61 by /home/haseeb/.cache/axon-wt-budget-main: /home/haseeb/.cache/axon-budget/bin/axon-test-a18ff8d serve::tests::serve_sched_ab --exact --ignored --nocapture --test-threads 1
+[axon-run 02:16:13] scope axon-job-1025-021225-5f61-1792908973.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 16779 MB): an OOM here kills only this job
+[axon-run 02:16:13] job 1025-021225-5f61 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1025-021225-5f61-1792908973 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-budget/bin/axon-test-a18ff8d serve::tests::serve_sched_ab --exact --ignored --nocapture --test-threads 1
+
+running 1 test
+test serve::tests::serve_sched_ab ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+serve_sched_ab mix: /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf, C=16 x 2 requests (3/16 long: [2000] tokens), 128 tokens, 3 rounds, arms ["roll", "fifo60", "sjf60", "sjf50"]
+round 0 mix roll: [484.77, 340.10, 571.14, 1045.82, 1248.84, 2187.40, 30.31, 80.40, 1.00, 70.00, 71.14, 0.00, 1.00]
+round 0 mix fifo60: [485.68, 196.03, 583.29, 1045.74, 1634.54, 2193.44, 30.26, 85.17, 1.00, 65.00, 71.67, 0.00, 1.00]
+round 0 mix sjf60: [477.49, 630.58, 631.27, 664.00, 1590.06, 2112.98, 26.63, 87.30, 1.00, 70.00, 73.70, 0.00, 1.00]
+[axon-run 02:16:47] FOREIGN_GPU sample max=29% mean=14.6% n=9 (zen-bin 2155577 12%, kitty 99200 12%)
+round 0 mix sjf50: [469.63, 316.00, 447.93, 532.24, 1744.17, 2199.46, 29.09, 84.84, 1.00, 65.00, 74.29, 0.00, 1.00]
+round 1 mix fifo60: [453.12, 138.38, 1153.12, 2029.54, 1319.57, 2596.11, 31.63, 97.04, 0.94, 70.00, 72.94, 0.00, 1.00]
+round 1 mix sjf60: [505.73, 189.33, 295.69, 407.66, 1613.35, 2049.30, 28.35, 83.27, 1.00, 65.00, 70.83, 0.00, 1.00]
+round 1 mix sjf50: [508.54, 302.35, 342.49, 374.18, 1524.48, 2032.81, 27.93, 83.03, 1.00, 70.00, 71.00, 0.00, 1.00]
+[axon-run 02:17:21] FOREIGN_GPU sample max=56% mean=12.0% n=6
+round 1 mix roll: [489.24, 200.15, 590.89, 994.74, 1542.88, 2092.65, 30.46, 86.71, 1.00, 70.00, 68.33, 0.00, 1.00]
+round 2 mix sjf60: [519.65, 289.48, 290.33, 422.67, 1548.73, 1966.98, 27.36, 81.66, 1.00, 70.00, 67.95, 0.00, 1.00]
+round 2 mix sjf50: [505.11, 288.49, 364.46, 393.43, 1576.07, 2077.32, 27.90, 82.04, 1.00, 65.00, 69.71, 0.00, 1.00]
+round 2 mix roll: [500.12, 193.63, 534.44, 882.74, 1538.99, 2064.72, 29.52, 81.81, 1.00, 70.00, 65.33, 0.00, 1.00]
+[axon-run 02:17:55] FOREIGN_GPU sample max=28% mean=13.3% n=6 (Xorg 1601 22%)
+round 2 mix fifo60: [512.97, 289.27, 587.46, 716.41, 1360.54, 2064.42, 28.71, 80.88, 1.00, 65.00, 66.82, 0.00, 1.00]
+medians over rounds (same_text: min):
+| mix | agg tok/s | short TTFT p50 | p90 | max | long TTFT p50 | max | TPOT p50 | ITL p99 | slo_ok | step p50 ms (rows>=16) | step p50 ms (all) | preempted+unfed | same_text |
+| roll | 489.24 | 200.15 | 571.14 | 994.74 | 1538.99 | 2092.65 | 30.31 | 81.81 | 1.00 | 70.00 | 68.33 | 0.00 | 1 |
+| fifo60 | 485.68 | 196.03 | 587.46 | 1045.74 | 1360.54 | 2193.44 | 30.26 | 85.17 | 1.00 | 65.00 | 71.67 | 0.00 | 1 |
+| sjf60 | 505.73 | 289.48 | 295.69 | 422.67 | 1590.06 | 2049.30 | 27.36 | 83.27 | 1.00 | 70.00 | 70.83 | 0.00 | 1 |
+| sjf50 | 505.11 | 302.35 | 364.46 | 393.43 | 1576.07 | 2077.32 | 27.93 | 83.03 | 1.00 | 65.00 | 71.00 | 0.00 | 1 |
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 708 filtered out; finished in 109.70s
+
+[axon-run 02:18:03] exit 0 after 109.9s (host bella)
+[axon-run 02:18:04] FOREIGN_GPU max=56% mean=13.5% samples=21 top: zen-bin 2155577 56%  TAINTED (mean > 5% or max > 25%): timing numbers not trustworthy, rerun

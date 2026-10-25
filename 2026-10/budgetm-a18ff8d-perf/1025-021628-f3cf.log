@@ -1,0 +1,86 @@
+[axon-run 02:16:28] submitted 1025-021628-f3cf by /home/haseeb/.cache/axon-wt-budget-main: /home/haseeb/.cache/axon-budget/sdab.sh /home/haseeb/.cache/axon-budget/sdab15-a18ff8d /home/haseeb/.cache/axon-budget/bin/axon-main-d6b7051 /home/haseeb/.cache/axon-budget/bin/axon-a18ff8d /home/haseeb/Projects/axon/models/qwen2.5-1.5b-instruct-q4_k_m.gguf 32 8192 16_32 2
+[axon-run 02:20:08] scope axon-job-1025-021628-f3cf-1792909208.scope in app-axonjobs.slice: MemoryMax 5402 MB, MemoryHigh 4861 MB, no swap, oomd pressure kill 80% (claim 1854 MB): an OOM here kills only this job
+[axon-run 02:20:08] job 1025-021628-f3cf -> bella: systemd-run --user --scope --quiet --unit=axon-job-1025-021628-f3cf-1792909208 --slice=app-axonjobs.slice -p MemoryMax=5402M -p MemoryHigh=4861M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-budget/sdab.sh /home/haseeb/.cache/axon-budget/sdab15-a18ff8d /home/haseeb/.cache/axon-budget/bin/axon-main-d6b7051 /home/haseeb/.cache/axon-budget/bin/axon-a18ff8d /home/haseeb/Projects/axon/models/qwen2.5-1.5b-instruct-q4_k_m.gguf 32 8192 16_32 2
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 615.78.08
+parabellum
+Sun Oct 25 02:20:08 AM EDT 2026
+{"tag": "fifo60", "workload": "mix", "round": 1, "url": "http://127.0.0.1:18791", "salt": "r1 c16 md4944f", "set": "prompts-mix-v2.jsonl", "ts": 1792909214.856, "c": 16, "requests": 32, "ok": 32, "errors": 0, "error_sample": [], "wall_s": 5.221, "completion_tokens": 6752, "prompt_tokens": 31168, "agg_tok_s": 1293.2, "in_tok_s": 5969.5, "ttft_ms_p50": 24.9, "ttft_ms_p99": 1180.4, "ttft_short_ms_p50": 17.9, "ttft_short_ms_p99": 692.2, "ttft_long_ms_p50": 545.1, "ttft_long_ms_p99": 1180.4, "itl_ms_p50": 6.04, "itl_ms_p99": 64.79, "tpot_ms_p50": 9.85, "tpot_ms_p99": 20.51, "goodput_tok_s": 1293.2, "slo_ok": 1.0, "slo": {"itl_ms": 50.0, "ttft_ms": 2000.0, "ttft_ms_per_ktok": 250.0}, "tok_per_chunk": 1.0, "completion_tokens_mean": 211, "completion_tokens_min": 49, "finish": {"stop": 24, "length": 8}}
+{"tag": "sjf60", "workload": "mix", "round": 1, "url": "http://127.0.0.1:18792", "salt": "r1 c16 m617e86", "set": "prompts-mix-v2.jsonl", "ts": 1792909226.775, "c": 16, "requests": 32, "ok": 32, "errors": 0, "error_sample": [], "wall_s": 5.43, "completion_tokens": 6837, "prompt_tokens": 31200, "agg_tok_s": 1259.1, "in_tok_s": 5745.8, "ttft_ms_p50": 70.4, "ttft_ms_p99": 1181.3, "ttft_short_ms_p50": 69.7, "ttft_short_ms_p99": 121.9, "ttft_long_ms_p50": 605.3, "ttft_long_ms_p99": 1181.3, "itl_ms_p50": 6.31, "itl_ms_p99": 65.02, "tpot_ms_p50": 11.47, "tpot_ms_p99": 20.57, "goodput_tok_s": 1259.1, "slo_ok": 1.0, "slo": {"itl_ms": 50.0, "ttft_ms": 2000.0, "ttft_ms_per_ktok": 250.0}, "tok_per_chunk": 1.0, "completion_tokens_mean": 213.7, "completion_tokens_min": 40, "finish": {"stop": 23, "length": 9}}
+{"tag": "sjf50", "workload": "mix", "round": 1, "url": "http://127.0.0.1:18793", "salt": "r1 c16 m1c960b", "set": "prompts-mix-v2.jsonl", "ts": 1792909239.007, "c": 16, "requests": 32, "ok": 32, "errors": 0, "error_sample": [], "wall_s": 5.692, "completion_tokens": 7086, "prompt_tokens": 31200, "agg_tok_s": 1245.0, "in_tok_s": 5481.8, "ttft_ms_p50": 63.6, "ttft_ms_p99": 1211.9, "ttft_short_ms_p50": 62.7, "ttft_short_ms_p99": 102.8, "ttft_long_ms_p50": 598.0, "ttft_long_ms_p99": 1211.9, "itl_ms_p50": 5.87, "itl_ms_p99": 53.92, "tpot_ms_p50": 11.25, "tpot_ms_p99": 21.02, "goodput_tok_s": 1245.0, "slo_ok": 1.0, "slo": {"itl_ms": 50.0, "ttft_ms": 2000.0, "ttft_ms_per_ktok": 250.0}, "tok_per_chunk": 1.0, "completion_tokens_mean": 221.4, "completion_tokens_min": 37, "finish": {"stop": 21, "length": 11}}
+[axon-run 02:20:41] FOREIGN_GPU sample max=18% mean=12.0% n=6 (Xorg 1601 9%)
+{"tag": "main", "workload": "mix", "round": 1, "url": "http://127.0.0.1:18794", "salt": "r1 c16 mb729a2", "set": "prompts-mix-v2.jsonl", "ts": 1792909251.02, "c": 16, "requests": 32, "ok": 32, "errors": 0, "error_sample": [], "wall_s": 5.51, "completion_tokens": 7085, "prompt_tokens": 31168, "agg_tok_s": 1285.9, "in_tok_s": 5657.0, "ttft_ms_p50": 126.2, "ttft_ms_p99": 1175.1, "ttft_short_ms_p50": 48.0, "ttft_short_ms_p99": 629.1, "ttft_long_ms_p50": 569.0, "ttft_long_ms_p99": 1175.1, "itl_ms_p50": 5.76, "itl_ms_p99": 64.88, "tpot_ms_p50": 10.1, "tpot_ms_p99": 19.96, "goodput_tok_s": 1285.9, "slo_ok": 1.0, "slo": {"itl_ms": 50.0, "ttft_ms": 2000.0, "ttft_ms_per_ktok": 250.0}, "tok_per_chunk": 1.0, "completion_tokens_mean": 221.4, "completion_tokens_min": 43, "finish": {"stop": 19, "length": 13}}
+{"tag": "fifo60", "workload": "mix", "round": 1, "url": "http://127.0.0.1:18795", "salt": "r1 c32 m4a5979", "set": "prompts-mix-v2.jsonl", "ts": 1792909267.383, "c": 32, "requests": 64, "ok": 64, "errors": 0, "error_sample": [], "wall_s": 9.855, "completion_tokens": 15511, "prompt_tokens": 72777, "agg_tok_s": 1573.9, "in_tok_s": 7384.7, "ttft_ms_p50": 369.7, "ttft_ms_p99": 2726.5, "ttft_short_ms_p50": 106.5, "ttft_short_ms_p99": 2087.6, "ttft_long_ms_p50": 658.0, "ttft_long_ms_p99": 2726.5, "itl_ms_p50": 8.65, "itl_ms_p99": 63.32, "tpot_ms_p50": 16.62, "tpot_ms_p99": 55.09, "goodput_tok_s": 1543.9, "slo_ok": 0.969, "slo": {"itl_ms": 50.0, "ttft_ms": 2000.0, "ttft_ms_per_ktok": 250.0}, "tok_per_chunk": 1.0, "completion_tokens_mean": 242.4, "completion_tokens_min": 39, "finish": {"stop": 40, "length": 24}}
+[axon-run 02:21:15] FOREIGN_GPU sample max=27% mean=8.5% n=6
+{"tag": "sjf60", "workload": "mix", "round": 1, "url": "http://127.0.0.1:18796", "salt": "r1 c32 m041f21", "set": "prompts-mix-v2.jsonl", "ts": 1792909283.782, "c": 32, "requests": 64, "ok": 64, "errors": 0, "error_sample": [], "wall_s": 9.881, "completion_tokens": 15676, "prompt_tokens": 72777, "agg_tok_s": 1586.5, "in_tok_s": 7365.2, "ttft_ms_p50": 81.7, "ttft_ms_p99": 2713.4, "ttft_short_ms_p50": 65.0, "ttft_short_ms_p99": 162.6, "ttft_long_ms_p50": 590.4, "ttft_long_ms_p99": 2713.4, "itl_ms_p50": 8.93, "itl_ms_p99": 65.67, "tpot_ms_p50": 18.63, "tpot_ms_p99": 58.51, "goodput_tok_s": 1582.7, "slo_ok": 0.984, "slo": {"itl_ms": 50.0, "ttft_ms": 2000.0, "ttft_ms_per_ktok": 250.0}, "tok_per_chunk": 1.0, "completion_tokens_mean": 244.9, "completion_tokens_min": 37, "finish": {"stop": 36, "length": 28}}
+{"tag": "sjf50", "workload": "mix", "round": 1, "url": "http://127.0.0.1:18797", "salt": "r1 c32 m6e51f5", "set": "prompts-mix-v2.jsonl", "ts": 1792909299.872, "c": 32, "requests": 64, "ok": 64, "errors": 0, "error_sample": [], "wall_s": 9.572, "completion_tokens": 14500, "prompt_tokens": 72777, "agg_tok_s": 1514.9, "in_tok_s": 7603.3, "ttft_ms_p50": 99.6, "ttft_ms_p99": 2761.5, "ttft_short_ms_p50": 66.0, "ttft_short_ms_p99": 161.6, "ttft_long_ms_p50": 587.2, "ttft_long_ms_p99": 2761.5, "itl_ms_p50": 8.79, "itl_ms_p99": 55.58, "tpot_ms_p50": 19.03, "tpot_ms_p99": 50.1, "goodput_tok_s": 1510.7, "slo_ok": 0.984, "slo": {"itl_ms": 50.0, "ttft_ms": 2000.0, "ttft_ms_per_ktok": 250.0}, "tok_per_chunk": 1.0, "completion_tokens_mean": 226.6, "completion_tokens_min": 40, "finish": {"stop": 40, "length": 24}}
+[axon-run 02:21:46] FOREIGN_GPU sample max=20% mean=12.0% n=7 (Xorg 1601 20%)
+{"tag": "main", "workload": "mix", "round": 1, "url": "http://127.0.0.1:18798", "salt": "r1 c32 m7229ea", "set": "prompts-mix-v2.jsonl", "ts": 1792909316.247, "c": 32, "requests": 64, "ok": 64, "errors": 0, "error_sample": [], "wall_s": 9.867, "completion_tokens": 15019, "prompt_tokens": 72713, "agg_tok_s": 1522.1, "in_tok_s": 7369.1, "ttft_ms_p50": 281.0, "ttft_ms_p99": 2690.2, "ttft_short_ms_p50": 72.8, "ttft_short_ms_p99": 1981.8, "ttft_long_ms_p50": 598.3, "ttft_long_ms_p99": 2690.2, "itl_ms_p50": 9.01, "itl_ms_p99": 65.93, "tpot_ms_p50": 17.19, "tpot_ms_p99": 52.27, "goodput_tok_s": 1518.1, "slo_ok": 0.984, "slo": {"itl_ms": 50.0, "ttft_ms": 2000.0, "ttft_ms_per_ktok": 250.0}, "tok_per_chunk": 1.0, "completion_tokens_mean": 234.7, "completion_tokens_min": 40, "finish": {"stop": 40, "length": 24}}
+{"tag": "sjf60", "workload": "mix", "round": 2, "url": "http://127.0.0.1:18799", "salt": "r2 c16 m4def27", "set": "prompts-mix-v2.jsonl", "ts": 1792909328.394, "c": 16, "requests": 32, "ok": 32, "errors": 0, "error_sample": [], "wall_s": 5.668, "completion_tokens": 7366, "prompt_tokens": 37587, "agg_tok_s": 1299.5, "in_tok_s": 6631.2, "ttft_ms_p50": 66.8, "ttft_ms_p99": 1433.7, "ttft_short_ms_p50": 64.4, "ttft_short_ms_p99": 121.8, "ttft_long_ms_p50": 574.1, "ttft_long_ms_p99": 1433.7, "itl_ms_p50": 5.96, "itl_ms_p99": 63.68, "tpot_ms_p50": 11.17, "tpot_ms_p99": 21.32, "goodput_tok_s": 1299.5, "slo_ok": 1.0, "slo": {"itl_ms": 50.0, "ttft_ms": 2000.0, "ttft_ms_per_ktok": 250.0}, "tok_per_chunk": 1.0, "completion_tokens_mean": 230.2, "completion_tokens_min": 73, "finish": {"stop": 14, "length": 18}}
+[axon-run 02:22:18] FOREIGN_GPU sample max=75% mean=22.2% n=6 (zen-bin 2155577 19%)
+{"tag": "sjf50", "workload": "mix", "round": 2, "url": "http://127.0.0.1:18800", "salt": "r2 c16 m18812b", "set": "prompts-mix-v2.jsonl", "ts": 1792909340.329, "c": 16, "requests": 32, "ok": 32, "errors": 0, "error_sample": [], "wall_s": 5.454, "completion_tokens": 7110, "prompt_tokens": 37651, "agg_tok_s": 1303.6, "in_tok_s": 6903.0, "ttft_ms_p50": 65.0, "ttft_ms_p99": 1413.8, "ttft_short_ms_p50": 63.1, "ttft_short_ms_p99": 106.6, "ttft_long_ms_p50": 658.9, "ttft_long_ms_p99": 1413.8, "itl_ms_p50": 5.94, "itl_ms_p99": 54.05, "tpot_ms_p50": 11.11, "tpot_ms_p99": 32.36, "goodput_tok_s": 1303.6, "slo_ok": 1.0, "slo": {"itl_ms": 50.0, "ttft_ms": 2000.0, "ttft_ms_per_ktok": 250.0}, "tok_per_chunk": 1.0, "completion_tokens_mean": 222.2, "completion_tokens_min": 46, "finish": {"stop": 19, "length": 13}}
+{"tag": "main", "workload": "mix", "round": 2, "url": "http://127.0.0.1:18801", "salt": "r2 c16 mb0b04e", "set": "prompts-mix-v2.jsonl", "ts": 1792909352.476, "c": 16, "requests": 32, "ok": 32, "errors": 0, "error_sample": [], "wall_s": 5.616, "completion_tokens": 7085, "prompt_tokens": 37619, "agg_tok_s": 1261.6, "in_tok_s": 6698.8, "ttft_ms_p50": 124.1, "ttft_ms_p99": 1384.5, "ttft_short_ms_p50": 38.7, "ttft_short_ms_p99": 816.7, "ttft_long_ms_p50": 688.9, "ttft_long_ms_p99": 1384.5, "itl_ms_p50": 6.14, "itl_ms_p99": 65.18, "tpot_ms_p50": 10.87, "tpot_ms_p99": 39.59, "goodput_tok_s": 1261.6, "slo_ok": 1.0, "slo": {"itl_ms": 50.0, "ttft_ms": 2000.0, "ttft_ms_per_ktok": 250.0}, "tok_per_chunk": 1.0, "completion_tokens_mean": 221.4, "completion_tokens_min": 37, "finish": {"stop": 19, "length": 13}}
+{"tag": "fifo60", "workload": "mix", "round": 2, "url": "http://127.0.0.1:18802", "salt": "r2 c16 ma32aa1", "set": "prompts-mix-v2.jsonl", "ts": 1792909364.483, "c": 16, "requests": 32, "ok": 32, "errors": 0, "error_sample": [], "wall_s": 5.558, "completion_tokens": 7135, "prompt_tokens": 37587, "agg_tok_s": 1283.7, "in_tok_s": 6762.6, "ttft_ms_p50": 61.1, "ttft_ms_p99": 1458.0, "ttft_short_ms_p50": 24.4, "ttft_short_ms_p99": 339.0, "ttft_long_ms_p50": 573.7, "ttft_long_ms_p99": 1458.0, "itl_ms_p50": 6.0, "itl_ms_p99": 62.77, "tpot_ms_p50": 12.25, "tpot_ms_p99": 34.17, "goodput_tok_s": 1283.7, "slo_ok": 1.0, "slo": {"itl_ms": 50.0, "ttft_ms": 2000.0, "ttft_ms_per_ktok": 250.0}, "tok_per_chunk": 1.0, "completion_tokens_mean": 223.0, "completion_tokens_min": 46, "finish": {"stop": 17, "length": 15}}
+[axon-run 02:22:52] FOREIGN_GPU sample max=37% mean=19.5% n=6 (zen-bin 2155577 21%)
+{"tag": "sjf60", "workload": "mix", "round": 2, "url": "http://127.0.0.1:18803", "salt": "r2 c32 ma3f96b", "set": "prompts-mix-v2.jsonl", "ts": 1792909379.884, "c": 32, "requests": 64, "ok": 64, "errors": 0, "error_sample": [], "wall_s": 8.834, "completion_tokens": 14583, "prompt_tokens": 59122, "agg_tok_s": 1650.8, "in_tok_s": 6692.6, "ttft_ms_p50": 84.7, "ttft_ms_p99": 1891.2, "ttft_short_ms_p50": 52.3, "ttft_short_ms_p99": 158.0, "ttft_long_ms_p50": 620.1, "ttft_long_ms_p99": 1891.2, "itl_ms_p50": 8.84, "itl_ms_p99": 67.28, "tpot_ms_p50": 17.21, "tpot_ms_p99": 60.31, "goodput_tok_s": 1648.9, "slo_ok": 0.984, "slo": {"itl_ms": 50.0, "ttft_ms": 2000.0, "ttft_ms_per_ktok": 250.0}, "tok_per_chunk": 1.0, "completion_tokens_mean": 227.9, "completion_tokens_min": 17, "finish": {"stop": 42, "length": 22}}
+{"tag": "sjf50", "workload": "mix", "round": 2, "url": "http://127.0.0.1:18804", "salt": "r2 c32 m562c0c", "set": "prompts-mix-v2.jsonl", "ts": 1792909395.335, "c": 32, "requests": 64, "ok": 64, "errors": 0, "error_sample": [], "wall_s": 8.924, "completion_tokens": 14457, "prompt_tokens": 59186, "agg_tok_s": 1620.0, "in_tok_s": 6632.0, "ttft_ms_p50": 98.7, "ttft_ms_p99": 2013.7, "ttft_short_ms_p50": 72.9, "ttft_short_ms_p99": 169.3, "ttft_long_ms_p50": 642.9, "ttft_long_ms_p99": 2013.7, "itl_ms_p50": 8.89, "itl_ms_p99": 53.17, "tpot_ms_p50": 18.57, "tpot_ms_p99": 48.34, "goodput_tok_s": 1620.0, "slo_ok": 1.0, "slo": {"itl_ms": 50.0, "ttft_ms": 2000.0, "ttft_ms_per_ktok": 250.0}, "tok_per_chunk": 1.0, "completion_tokens_mean": 225.9, "completion_tokens_min": 17, "finish": {"stop": 41, "length": 23}}
+[axon-run 02:23:25] FOREIGN_GPU sample max=79% mean=17.8% n=6 (zen-bin 2155577 9%, Xorg 1601 9%)
+{"tag": "main", "workload": "mix", "round": 2, "url": "http://127.0.0.1:18805", "salt": "r2 c32 macaea0", "set": "prompts-mix-v2.jsonl", "ts": 1792909411.037, "c": 32, "requests": 64, "ok": 64, "errors": 0, "error_sample": [], "wall_s": 9.178, "completion_tokens": 14773, "prompt_tokens": 58930, "agg_tok_s": 1609.6, "in_tok_s": 6420.9, "ttft_ms_p50": 329.8, "ttft_ms_p99": 2180.1, "ttft_short_ms_p50": 122.0, "ttft_short_ms_p99": 1481.2, "ttft_long_ms_p50": 652.2, "ttft_long_ms_p99": 2180.1, "itl_ms_p50": 8.95, "itl_ms_p99": 64.28, "tpot_ms_p50": 17.53, "tpot_ms_p99": 38.83, "goodput_tok_s": 1609.6, "slo_ok": 1.0, "slo": {"itl_ms": 50.0, "ttft_ms": 2000.0, "ttft_ms_per_ktok": 250.0}, "tok_per_chunk": 1.0, "completion_tokens_mean": 230.8, "completion_tokens_min": 18, "finish": {"stop": 41, "length": 23}}
+{"tag": "fifo60", "workload": "mix", "round": 2, "url": "http://127.0.0.1:18806", "salt": "r2 c32 m80799c", "set": "prompts-mix-v2.jsonl", "ts": 1792909426.497, "c": 32, "requests": 64, "ok": 64, "errors": 0, "error_sample": [], "wall_s": 8.939, "completion_tokens": 15701, "prompt_tokens": 59186, "agg_tok_s": 1756.5, "in_tok_s": 6621.1, "ttft_ms_p50": 194.3, "ttft_ms_p99": 2146.2, "ttft_short_ms_p50": 43.3, "ttft_short_ms_p99": 1052.6, "ttft_long_ms_p50": 578.2, "ttft_long_ms_p99": 2146.2, "itl_ms_p50": 8.67, "itl_ms_p99": 63.19, "tpot_ms_p50": 16.36, "tpot_ms_p99": 37.85, "goodput_tok_s": 1756.5, "slo_ok": 1.0, "slo": {"itl_ms": 50.0, "ttft_ms": 2000.0, "ttft_ms_per_ktok": 250.0}, "tok_per_chunk": 1.0, "completion_tokens_mean": 245.3, "completion_tokens_min": 17, "finish": {"stop": 34, "length": 30}}
+## workload mix: 16 cells, rounds [1, 2]
+
+**mix: agg_tok_s** (median of rounds; spread = max/min - 1)
+
+| engine | C=16 | C=32 |
+|---|---|---|
+| fifo60 | 1,288 (±1 %) | 1,665 (±12 %) |
+| sjf60 | 1,279 (±3 %) | 1,619 (±4 %) |
+| sjf50 | 1,274 (±5 %) | 1,567 (±7 %) |
+| main | 1,274 (±2 %) | 1,566 (±6 %) |
+
+**mix: slo_ok** (median of rounds)
+
+| engine | C=16 | C=32 |
+|---|---|---|
+| fifo60 | 1 | 0.984 |
+| sjf60 | 1 | 0.984 |
+| sjf50 | 1 | 0.992 |
+| main | 1 | 0.992 |
+
+**mix: ttft_short_ms_p50** (median of rounds)
+
+| engine | C=16 | C=32 |
+|---|---|---|
+| fifo60 | 21.1 | 74.9 |
+| sjf60 | 67.1 | 58.6 |
+| sjf50 | 62.9 | 69.5 |
+| main | 43.4 | 97.4 |
+
+**mix: ttft_long_ms_p99** (median of rounds)
+
+| engine | C=16 | C=32 |
+|---|---|---|
+| fifo60 | 1,319 | 2,436 |
+| sjf60 | 1,308 | 2,302 |
+| sjf50 | 1,313 | 2,388 |
+| main | 1,280 | 2,435 |
+
+**mix: itl_ms_p99** (median of rounds)
+
+| engine | C=16 | C=32 |
+|---|---|---|
+| fifo60 | 63.8 | 63.3 |
+| sjf60 | 64.3 | 66.5 |
+| sjf50 | 54.0 | 54.4 |
+| main | 65.0 | 65.1 |
+
+**mix: tpot_ms_p50** (median of rounds)
+
+| engine | C=16 | C=32 |
+|---|---|---|
+| fifo60 | 11.1 | 16.5 |
+| sjf60 | 11.3 | 17.9 |
+| sjf50 | 11.2 | 18.8 |
+| main | 10.5 | 17.4 |
+
+[axon-run 02:23:51] exit 0 after 223.5s (host bella)
+[axon-run 02:23:52] FOREIGN_GPU max=79% mean=15.2% samples=41 top: zen-bin 2155577 49%, Xorg 1601 30%  TAINTED (mean > 5% or max > 25%): timing numbers not trustworthy, rerun
