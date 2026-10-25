@@ -1,0 +1,202 @@
+[axon-run 15:30:25] submitted 1025-153025-5e47 by /home/haseeb/.cache/axon-h100-anatomy: /home/haseeb/Projects/axon-devstack/runbooks/h100-anatomy/rehearse.sh 7b
+[axon-run 15:30:25] timing job waiting: foreign GPU load 14 % (Xorg 1601 11%, kitty 1945559 3%), quiet 0 s of the 120 s needed (on bella; > 10 %)
+[axon-run 17:30:14] scope axon-job-1025-153025-5e47-1792963814.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 14000 MB): an OOM here kills only this job
+[axon-run 17:30:14] job 1025-153025-5e47 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1025-153025-5e47-1792963814 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/Projects/axon-devstack/runbooks/h100-anatomy/rehearse.sh 7b
+rehearsal: parabellum kit /home/haseeb/.cache/axon-h100-anatomy/kit-9efdcf2 -> /home/haseeb/.cache/axon-h100-anatomy/rehearsal/parabellum-7b-1025-173014
+[an 17:30:14 +0s] start: parabellum, budget 4800s, out /home/haseeb/.cache/axon-h100-anatomy/rehearsal/parabellum-7b-1025-173014
+[an 17:30:14 +0s] meta: start (limit 80s)
+[an 17:30:16 +2s] meta: rc 0 after 1s, kernel cache 244 entries
+[an 17:30:16 +2s] gemm: start (limit 720s)
+[an 17:30:18 +4s] gemm: rc 0 after 2s, kernel cache 244 entries
+[an 17:30:18 +4s] gemm7b: start (limit 320s)
+[an 17:30:19 +5s] gemm7b: rc 0 after 1s, kernel cache 244 entries
+[an 17:30:19 +5s] step: start (limit 1320s)
+[axon-run 17:30:47] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 17:31:20] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[an 17:31:21 +67s] step: rc 0 after 62s, kernel cache 244 entries
+[an 17:31:21 +67s] feed: start (limit 400s)
+[an 17:31:34 +80s] feed: rc 0 after 13s, kernel cache 244 entries
+[an 17:31:34 +80s] serve: start (limit 960s)
+[axon-run 17:31:54] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 17:32:27] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 17:33:00] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[an 17:33:30 +196s] serve: rc 0 after 116s, kernel cache 244 entries
+[an 17:33:30 +196s] hyb: start (limit 400s)
+[axon-run 17:33:34] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 17:34:07] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 17:34:40] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[an 17:34:41 +267s] hyb: rc 0 after 71s, kernel cache 244 entries
+[an 17:34:41 +267s] serve119: start (limit 640s)
+[axon-run 17:35:13] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 17:35:46] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 17:36:20] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[an 17:36:25 +371s] serve119: rc 0 after 104s, kernel cache 244 entries
+[an 17:36:25 +371s] i2f: start (limit 120s)
+[an 17:36:25 +371s] i2f: rc 0 after 0s, kernel cache 244 entries
+[an 17:36:25 +371s] e0bits: start (limit 320s)
+[an 17:36:26 +372s] e0bits: rc 0 after 1s, kernel cache 244 entries
+[an 17:36:26 +372s] ncu: start (limit 720s)
+[an 17:36:26 +372s] ncu: rc 0 after 0s, kernel cache 244 entries
+{"rate_per_h": 0.0, "pod_t0": 1792963814, "driver_t0": 1792963814, "end": 1792964186, "paid_min": 6.21, "useful_min": 6.18, "setup_min": 0.0, "waste_min": 0.02, "usd_paid": 0.0, "usd_waste": 0.0, "waste_frac": 0.004, "stages": [{"stage": "meta", "rc": "0", "s": 1}, {"stage": "gemm", "rc": "0", "s": 2}, {"stage": "gemm7b", "rc": "0", "s": 1}, {"stage": "step", "rc": "0", "s": 62}, {"stage": "feed", "rc": "0", "s": 13}, {"stage": "serve", "rc": "0", "s": 116}, {"stage": "hyb", "rc": "0", "s": 71}, {"stage": "serve119", "rc": "0", "s": 104}, {"stage": "i2f", "rc": "0", "s": 0}, {"stage": "e0bits", "rc": "0", "s": 1}, {"stage": "ncu", "rc": "0", "s": 0}]}
+[an 17:36:26 +372s] END ok, 349 cells
+an_check /home/haseeb/.cache/axon-h100-anatomy/rehearsal/parabellum-7b-1025-173014: 349 cells, ncu unavailable, gpu NVIDIA GeForce RTX 5070 Ti Laptop GPU sm_120, stages meta:0 gemm:0 gemm7b:0 step:0 feed:0 serve:0 hyb:0 serve119:0 i2f:0 e0bits:0 ncu:0
+an_check: PASS
+# NVIDIA GeForce RTX 5070 Ti Laptop GPU sm_120 46 SMs (hopper module false)
+
+## GEMM (cuda_gemmh_bench, median TMAC/s of real MACs; gemmh2nd = no drain, INEXACT upper bound; gemmh2mg = magic S, exact iff e0bits passed)
+
+### gate  Q4_K 3584x18944
+
+| nb | gemm2s_q4_k | gemm2_q4_k | gemm2t_q4_k | exact / nodrain | magic / exact |
+|---|---|---|---|---|---|
+| 1 | 0.2 | 0.1 | 0.2 | - | - |
+| 8 | 0.7 | 0.7 | 0.8 | - | - |
+| 32 | 1.6 | 1.6 | 1.7 | - | - |
+| 64 | 34.7 | 23.3 | 37.6 | - | - |
+| 128 | 38.9 | 35.3 | 44.4 | - | - |
+| 256 | 39.8 | 38.7 | 48.5 | - | - |
+| 512 | 38.9 | 38.4 | 47.3 | - | - |
+| 1024 | 37.9 | 37.4 | 47.0 | - | - |
+
+### q/wo  Q4_K 3584x3584
+
+| nb | gemm2s_q4_k | gemm2_q4_k | gemm2t_q4_k | exact / nodrain | magic / exact |
+|---|---|---|---|---|---|
+| 1 | 0.4 | 0.2 | 0.4 | - | - |
+| 8 | 2.8 | 1.8 | 3.5 | - | - |
+| 32 | 11.2 | 7.1 | 14.0 | - | - |
+| 64 | 23.2 | 15.1 | 29.4 | - | - |
+| 128 | 30.9 | 25.1 | 29.4 | - | - |
+| 256 | 37.9 | 33.5 | 39.5 | - | - |
+| 512 | 39.0 | 40.0 | 48.2 | - | - |
+| 1024 | 39.6 | 40.2 | 49.2 | - | - |
+
+### down  Q4_K 18944x3584
+
+| nb | gemm2s_q4_k | gemm2_q4_k | gemm2t_q4_k | exact / nodrain | magic / exact |
+|---|---|---|---|---|---|
+| 1 | 0.4 | 0.2 | 0.5 | - | - |
+| 8 | 3.2 | 2.0 | 4.2 | - | - |
+| 32 | 12.8 | 8.0 | 16.4 | - | - |
+| 64 | 24.7 | 15.7 | 31.8 | - | - |
+| 128 | 33.6 | 23.8 | 31.2 | - | - |
+| 256 | 41.7 | 32.8 | 42.5 | - | - |
+| 512 | 38.6 | 36.7 | 47.8 | - | - |
+| 1024 | 39.3 | 37.2 | 48.5 | - | - |
+
+### kv    Q4_K 3584x512
+
+| nb | gemm2s_q4_k | gemm2_q4_k | gemm2t_q4_k | exact / nodrain | magic / exact |
+|---|---|---|---|---|---|
+| 1 | 0.1 | 0.1 | 0.1 | - | - |
+| 8 | 0.8 | 0.5 | 0.5 | - | - |
+| 32 | 3.2 | 2.0 | 2.0 | - | - |
+| 64 | 6.1 | 4.0 | 4.0 | - | - |
+| 128 | 12.7 | 7.2 | 8.4 | - | - |
+| 256 | 24.6 | 14.0 | 16.4 | - | - |
+| 512 | 26.0 | 26.5 | 32.8 | - | - |
+| 1024 | 35.7 | 28.7 | 33.6 | - | - |
+
+### gate+up 3584x2x18944
+
+| nb | gemm2s_q4_k_gu | exact / nodrain | magic / exact |
+|---|---|---|---|
+| 1 | 0.6 | - | - |
+| 8 | 4.9 | - | - |
+| 32 | 17.9 | - | - |
+| 64 | 34.9 | - | - |
+| 128 | 35.1 | - | - |
+| 256 | 37.5 | - | - |
+| 512 | 38.3 | - | - |
+| 1024 | 36.1 | - | - |
+
+## Pool step (pool_step_cost, graphs on, median ms/step)
+
+- depth 600: decode step 9.558 ms; pool 128 x 704
+- depth 4096: decode step 11.596 ms; pool 16 x 4160
+
+| depth | nb | ms/step | x solo | rows/s |
+|---|---|---|---|---|
+| 600 | 1 | 10.699 | 1.12 | 93 |
+| 600 | 8 | 11.700 | 1.22 | 684 |
+| 600 | 32 | 20.444 | 2.14 | 1565 |
+| 600 | 64 | 24.370 | 2.55 | 2626 |
+| 600 | 128 | 40.012 | 4.19 | 3199 |
+| 4096 | 1 | 11.287 | 0.97 | 89 |
+| 4096 | 8 | 18.358 | 1.58 | 436 |
+
+## Per-kernel profile (no graphs, events per segment; ms per step)
+
+| depth | nb | total | gemm | attn | norm_elem | head | sample | other | top segments |
+|---|---|---|---|---|---|---|---|---|---|
+| 600 | 1 | 10.141 | 8.006 | 0.495 | 0.583 | 0.858 | 0.000 | 0.196 | gate 3.79, down6 1.97, down4 1.03, head 0.86, wo 0.52 |
+| 600 | 8 | 12.246 | 9.493 | 1.033 | 0.595 | 0.911 | 0.000 | 0.208 | gate 4.66, down6 2.07, down4 1.35, head 0.91, attn 0.73 |
+| 600 | 32 | 21.511 | 15.820 | 2.892 | 0.564 | 1.750 | 0.000 | 0.483 | gate_up 7.08, down6 3.43, down4 2.53, attn 2.33, head 1.75 |
+| 600 | 64 | 25.601 | 16.534 | 5.775 | 0.731 | 1.840 | 0.000 | 0.720 | gate_up 7.25, attn 4.80, down6 3.59, down4 2.56, head 1.84 |
+| 600 | 128 | 41.104 | 24.922 | 11.639 | 0.927 | 2.895 | 0.000 | 0.721 | gate_up 11.42, attn 9.81, down6 5.10, down4 4.06, head 2.90 |
+| 4096 | 1 | 14.128 | 11.031 | 1.167 | 0.560 | 1.163 | 0.000 | 0.202 | gate 5.50, down6 2.50, down4 1.45, head 1.16, attn 0.81 |
+| 4096 | 8 | 19.228 | 11.735 | 5.502 | 0.590 | 1.189 | 0.000 | 0.209 | gate 5.87, attn 4.91, down6 2.57, down4 1.57, head 1.19 |
+
+- pool of 256 x 704 did not fit: a 180288-token cache needs 9.86 GiB of GPU memory (KV cache and scratch), 5.60 GiB is free; try a smaller --ctx (or -n), --kv q8 or the CPU
+- pool of 256 x 4160 did not fit: a 1065024-token cache needs 57.23 GiB of GPU memory (KV cache and scratch), 5.60 GiB is free; try a smaller --ctx (or -n), --kv q8 or the CPU
+- pool of 128 x 4160 did not fit: a 532544-token cache needs 28.79 GiB of GPU memory (KV cache and scratch), 5.60 GiB is free; try a smaller --ctx (or -n), --kv q8 or the CPU
+- pool of 64 x 4160 did not fit: a 266304-token cache needs 14.57 GiB of GPU memory (KV cache and scratch), 5.60 GiB is free; try a smaller --ctx (or -n), --kv q8 or the CPU
+- pool of 32 x 4160 did not fit: a 133184-token cache needs 7.46 GiB of GPU memory (KV cache and scratch), 5.60 GiB is free; try a smaller --ctx (or -n), --kv q8 or the CPU
+## Serve (sd_client mix cells)
+
+| tag | C | agg tok/s | TTFT p50/p99 ms | ITL p50/p99 ms | TPOT p50 | goodput | slo_ok | errors |
+|---|---|---|---|---|---|---|---|---|
+| axon | 128 | 705.4 | 24903.4/43618.8 | 85.16/107.35 | 81.28 | 0.0 | 0.0 | 0 |
+| axon-119 | 128 | 777.6 | 24720.9/37543.9 | 66.98/85.28 | 68.59 | 0.0 | 0.0 | 0 |
+
+## Serve step trace (AXON_SERVE_TRACE, the timed cell only)
+
+| steps | wall_s | step_s | idle_s | feed_s | dec_s | host_s | two_pass_steps | decode_only_steps | prefill_only_steps | two_pass_feed_s | two_pass_dec_s | fed_tokens | rows_p50 | dec_ms_p50 | dec_ms_p50_full | depth_p50 | fed_per_feed_step_p50 | step_ms_p50 | step_ms_p99 | prefilling_max |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 1632 | 100.673 | 100.658 | 0.015 | 57.953 | 42.547 | 0.158 | 1143 | 489 | 0 | 57.953 | 33.941 | 244883 | 53 | 28.625 | None | 929.7 | 256 | 80.363 | 104.718 | 2 |
+
+## #119 pool_hybrid_cost (saved = (two - fused) / two, median over reps)
+
+| nb | c | row | two ms | fused ms | saved % (min..max) |
+|---|---|---|---|---|---|
+| 32 | 128 | same chunk | 50.854 | 42.771 | 16.1 (13.6..18.3) |
+| 32 | 128 | same budget | 49.453 | 33.174 | 33.1 (32.0..34.2) |
+| 32 | 256 | same chunk | 72.927 | 66.953 | 8.1 (7.0..8.7) |
+| 32 | 256 | same budget | 71.559 | 55.111 | 22.8 (22.4..23.2) |
+| 32 | 512 | same chunk | 117.796 | 113.432 | 3.4 (2.8..3.9) |
+| 32 | 512 | same budget | 116.194 | 99.812 | 14.2 (13.3..15.4) |
+| 64 | 128 | same chunk | 55.776 | 47.930 | 14.6 (12.6..16.2) |
+| 64 | 128 | same budget | 45.952 | 36.829 | 19.8 (18.1..22.4) |
+| 64 | 256 | same chunk | 77.730 | 72.593 | 6.7 (6.0..7.3) |
+| 64 | 256 | same budget | 66.681 | 59.148 | 11.3 (10.6..11.9) |
+| 64 | 512 | same chunk | 121.974 | 118.877 | 2.7 (2.3..3.4) |
+| 64 | 512 | same budget | 113.847 | 103.393 | 9.3 (8.5..10.7) |
+
+## E0' magic-S bits: 4 cases bit-identical, 0 FAILED
+
+- ok   test cuda::qwen2::tests::cuda_i2f_bench 
+- SKIP gemmh2 magic: skipped (not sm_90a) 
+- ok   test cuda::qwen2::tests::gpu_gemmh2_magic_matches_reference_bits 
+- ok   device I2F check, 134217728 pairs 
+- ok   test cuda::qwen2::tests::gpu_magic_i2f_is_cvt_rn 
+
+- I2F bench NVIDIA GeForce RTX 5070 Ti Laptop GPU sm_120: I2F 59.0 results/clk/SM
+- I2F bench NVIDIA GeForce RTX 5070 Ti Laptop GPU sm_120: magic 57.2 results/clk/SM
+
+## ncu (gemmh2 variants, gate 3584x18944 nb 1024)
+
+- status: unavailable (no sm_90a module on this GPU: nothing of gemmh2 to profile)
+
+## feed_slot fixed cost (pool_feed_cost)
+
+| depth | t0 ms | us/token | n=16 | n=64 | n=128 |
+|---|---|---|---|---|---|
+| 0 | 9.081 | 155.70 | 13.694 | 17.497 | 30.444 |
+| 600 | 9.406 | 163.36 | 15.332 | 18.631 | 29.391 |
+| 4096 | 10.659 | 190.48 | 16.213 | 22.865 | 34.352 |
+
+cost: paid 6.21 min $0.0, useful 6.18 min, setup 0.0 min, waste 0.004
+rehearsal rc 0
+[axon-run 17:36:26] exit 0 after 372.4s (host bella)
+[axon-run 17:36:30] EXPECT ok: output matches /^rehearsal rc/
+[axon-run 17:36:30] FOREIGN_GPU max=0% mean=0.0% samples=67

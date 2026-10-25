@@ -1,0 +1,19 @@
+[axon-run 15:30:24] submitted 1025-153024-c92e by /home/haseeb/.cache/axon-wt-moeres-c: /home/haseeb/.cache/axon-moeres/killrule2.sh /home/haseeb/.cache/axon-moeres/axon-93a53b3 3
+[axon-run 15:30:24] timing job waiting: foreign GPU load 14 % (Xorg 1601 11%, kitty 1945559 3%), quiet 0 s of the 120 s needed (on bella; > 10 %)
+[axon-run 17:02:57] scope axon-job-1025-153024-c92e-1792962177.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 12183 MB): an OOM here kills only this job
+[axon-run 17:02:57] job 1025-153024-c92e -> bella: systemd-run --user --scope --quiet --unit=axon-job-1025-153024-c92e-1792962177 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-moeres/killrule2.sh /home/haseeb/.cache/axon-moeres/axon-93a53b3 3
+1	0	pp=220.36	tg=57.84	ntok=128	rc=0	md5=f96ca95d4c61
+1	auto	pp=957.84	tg=118.18	ntok=128	rc=0	md5=f96ca95d4c61
+2	0	pp=317.16	tg=62.56	ntok=128	rc=0	md5=f96ca95d4c61
+2	auto	pp=1076.93	tg=127.68	ntok=128	rc=0	md5=f96ca95d4c61
+3	0	pp=341.22	tg=61.84	ntok=128	rc=0	md5=f96ca95d4c61
+3	auto	pp=1092.72	tg=129.01	ntok=128	rc=0	md5=f96ca95d4c61
+moe:         attention + router on the GPU (0.92 GiB, ctx 4096), 64 experts x 26 layers on the CPU (top-6), kv f16
+moe:         attention + router on the GPU (0.92 GiB, ctx 4096), 64 experts x 1 layers on the CPU (top-6); 25 of 26 expert layers resident on the GPU (8.50 GiB), kv f16
+auto tg: 118.18 127.68 129.01 pp: 957.84 1076.93 1092.72  md5=f96ca95d4c61 md5=f96ca95d4c61 md5=f96ca95d4c61
+0 tg: 57.84 62.56 61.84 pp: 220.36 317.16 341.22  md5=f96ca95d4c61 md5=f96ca95d4c61 md5=f96ca95d4c61
+KILLRULE tg median: 0 61.84 auto 127.68 tok/s = x2.06 (PASS: >= 1.5x); pp: 0 317.2 auto 1076.9 = x3.40
+TEXT identical 0 vs auto: True {'0': {'md5=f96ca95d4c61'}, 'auto': {'md5=f96ca95d4c61'}}
+[axon-run 17:03:19] exit 0 after 21.8s (host bella)
+[axon-run 17:03:23] EXPECT ok: output matches /KILLRULE tg median: 0 [0-9.]+ auto [0-9.]+ tok/s = x[0-9.]+/
+[axon-run 17:03:23] FOREIGN_GPU max=31% mean=7.8% samples=4 top: Xorg 1601 31%  TAINTED (mean > 5% or max > 25%): timing numbers not trustworthy, rerun
