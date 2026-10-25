@@ -1,6 +1,6 @@
 # testutil: MoE test models mapped, as axon runs them  
 
-- Date: 2026-10-25. Branch: fix/testutil-moe-mapped. Base: main 2a6d8fd. Status: open.
+- Date: 2026-10-25. Branch: fix/testutil-moe-mapped. Base: main 2a6d8fd. Status: merged.
 - Found by: #127's bella gate (`ds2_resident_moonlight_bits`), jobs 1024-191039-2c90 and 1025-001953-7566.
 
 ## What changed
@@ -22,7 +22,7 @@ Some(false))` (mapped) instead of `gguf::load`. New CPU-only unit test `moe_test
 ## How it was verified
 | gate | result | job |
 |---|---|---|
-| `testutil::load_tests` (CPU) | UNIT | 1025-002904-8d5e |
-| `moe::` suite, release (jade) | MOEJ | 1025-002904-23e1 |
-| `moe::` + `testutil::` debug (CPU) | DBG | 1025-002905-73a5 |
-| the failing gate, via #127 (merges this branch) | BELLA | see #127 |
+| `testutil::load_tests` (CPU) | PASS 1 / 0 / 0 | 1025-002904-8d5e |
+| `moe::` + `testutil::` suite, release | PASS 31 / 0 / 1 on avante | 1025-005852-c633 (replaces jade 1025-002904-23e1: OOM-killed by jade's memory cap, the requeue crawled; dropped. Loader-only change, so the host doesn't matter) |
+| `moe::` + `testutil::` debug (CPU) | PASS 31 / 0 / 1 | 1025-002905-73a5 |
+| the failing gate, via #127 0b789e3 (merges this branch) | PASS 15 / 0 / 1: Moonlight bits identical at --gpu-experts 0 / 6 / 12 / auto | 1025-003357-f54e (bella) |
