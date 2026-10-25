@@ -1,0 +1,65 @@
+[axon-run 06:34:06] submitted 1025-063406-aa1a by /home/haseeb/.cache/axon-wt-harmony: /home/haseeb/.cache/axon-harmony/delta2.sh 3b4f95f
+[axon-run 08:20:30] scope axon-job-1025-063406-aa1a-1792930830.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 17320 MB): an OOM here kills only this job
+[axon-run 08:20:30] job 1025-063406-aa1a -> bella: systemd-run --user --scope --quiet --unit=axon-job-1025-063406-aa1a-1792930830 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-harmony/delta2.sh 3b4f95f
+axon-q 08:20:30 start slot 16-23: /home/haseeb/.cache/axon-harmony/delta2.sh 3b4f95f
+=== 1 release
+
+running 18 tests
+test serve::tools::tests::api_parse_with_tools ... ok
+test serve::tools::tests::arg_scan ... ok
+test serve::tools::tests::forced_and_ids ... ok
+test serve::tools::tests::harmony_parser ... ok
+test serve::tools::tests::harmony_typescript_tools ... ok
+test serve::tools::tests::hermes_parser ... ok
+test serve::tools::tests::json_keeps_order_and_prints_like_python ... ok
+test serve::tools::tests::json_parser_llama ... ok
+test serve::tools::tests::long_block_bytewise ... ok
+test serve::tests::harmony_calls_from_channels ... ok
+test chat::tests::harmony_framing_and_channels ... ok
+test serve::tools::tests::render_harmony ... ok
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test serve::tools::tests::render_qwen25 ... ok
+test serve::tools::tests::requests ... ok
+test serve::tools::tests::response_json ... ok
+test serve::tools::tests::render_llama31 ... ok
+test serve::tools::tests::render_qwen3 ... ok
+test serve::tests::serve_gptoss_tool_calls ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 686 filtered out; finished in 52.60s
+
+=== 2 debug
+
+running 18 tests
+test serve::tools::tests::api_parse_with_tools ... ok
+test serve::tools::tests::arg_scan ... ok
+test serve::tools::tests::forced_and_ids ... ok
+test serve::tools::tests::harmony_parser ... ok
+test serve::tools::tests::harmony_typescript_tools ... ok
+test serve::tools::tests::hermes_parser ... ok
+test serve::tools::tests::json_keeps_order_and_prints_like_python ... ok
+test serve::tools::tests::json_parser_llama ... ok
+test serve::tools::tests::long_block_bytewise ... ok
+test chat::tests::harmony_framing_and_channels ... ok
+test serve::tests::harmony_calls_from_channels ... ok
+test serve::tools::tests::render_harmony ... ok
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test serve::tools::tests::render_qwen25 ... ok
+test serve::tools::tests::requests ... ok
+test serve::tools::tests::response_json ... ok
+test serve::tools::tests::render_qwen3 ... ok
+test serve::tools::tests::render_llama31 ... ok
+test serve::tests::serve_gptoss_tool_calls ... ok
+
+test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 686 filtered out; finished in 52.59s
+
+=== 3 serve A/B gpt-oss
+moe:         attention + router on the GPU (1.78 GiB, ctx 4096), 32 experts x 24 layers on the CPU (top-4), kv f16
+moe:         attention + router on the GPU (1.78 GiB, ctx 4096), 32 experts x 24 layers on the CPU (top-4), kv f16
+gpt-oss-20b-MXFP4 cuda: concurrent cached_tokens multiset equal [59, 69, 69, 69, 69, 69]
+gpt-oss-20b-MXFP4 cuda: fingerprints base ['fp_cbe4b60fb72b91d4'] cand ['fp_cbe4b60fb72b91d4'] equal=True
+gpt-oss-20b-MXFP4 cuda: 23/23 identical (22 answered 200, 7 with calls)
+SERVE AB IDENTICAL
+SECTIONS rel=0 dbg=0 serveab=0
+DELTA2 rc=0
+[axon-run 08:23:38] exit 0 after 188.0s (host bella)
+[axon-run 08:23:42] EXPECT ok: output matches /^DELTA2 rc=/
