@@ -38,7 +38,7 @@ Also MEASURED, 7B loop C = 8 on a clean A5000:
 - **Lost:**
   - throughput is flat (+0.65 %);
   - TTFT p50 is 3.6× worse at C = 64;
-  - ITL p50 is higher (26.6 vs 16.1 ms), because every decode row now waits for a pass that includes a chunk.
+  - ITL p50 is higher (26.6 vs 16.1 ms). The likely reason (ESTIMATED) is that every decode row now waits for a pass that includes a chunk.
 - **Why (ESTIMATED, not profiled):**
   - At C = 64 the step isn't bound by the second weight read that the merge saves.
   - With the rows counted in the budget, 64 rows leave a 256-token pass about 192 prompt tokens, so prompts are
