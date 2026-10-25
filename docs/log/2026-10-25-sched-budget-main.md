@@ -1,4 +1,4 @@
-# Shortest-first admission and a measured step budget for `axon serve`, on main (PR #TBD)
+# Shortest-first admission and a measured step budget for `axon serve`, on main (PR #131)
 
 - Date: 2026-10-25. Branch: feat/sched-budget-main. Base: main d6b7051. Status: open (draft, gates pending)
 - Pick / design: roadmap "Next" item 1 (c) and (d); spec `specs/sched-sjf-token-budget.md` (Okarin, 10-20).
