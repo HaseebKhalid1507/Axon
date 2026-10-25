@@ -1,0 +1,25 @@
+[axon-run 05:46:58] submitted 1025-054658-c346 by /home/haseeb/.cache/axon-wt-testmap: /home/haseeb/.cache/axon-memcg/tm/axon-test-43bc8b7 --skip cuda::qwen2::tests::gpu_bits_llama_3b_8b --skip cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_qwen3_4b --skip cuda::qwen2::tests::gpu_q8_qwen3_4b --skip cuda::qwen2::tests::gpu_verify_matches_forward_argmax_qwen3_4b --skip cuda::qwen2::tests::gpu_logits_match_cpu_natural_long_1_5b --skip cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_1_5b --skip cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_1_5b --skip cuda::qwen2::tests::gpu_continuations_match_cpu_1_5b --skip cuda::qwen2::tests::gpu_logits_match_cpu_1_5b --skip hybrid::tests::hybrid_logits_match_cpu_1_5b --skip hybrid::tests::stream_logits_match_cpu_1_5b --skip hybrid::tests::hybrid_q8_close_to_f16_1_5b --skip hybrid::tests::hybrid_prefill_batchings_bit_identical_1_5b --skip hybrid::tests::hybrid_prefill_batchings_bit_identical_q8_1_5b --skip hybrid::tests::stream_prefill_is_gpu_bits_1_5b --skip cuda::qwen2::pipeline::tests::pipeline_same_device_matches_cuda_1_5b --skip cuda::tests::nvrtc_kernels_compile_for_old_archs --skip cuda::tests::nvrtc_kernels_compile_for_sm90a
+[axon-run 05:59:54] GPU test run without --vram: claiming 11000 MB (the whole card) on bella; pass --vram to override
+[axon-run 05:59:54] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 05:59:54] scope axon-job-1025-054658-c346-1792922394.scope in app-axonjobs.slice: MemoryMax 7024 MB, MemoryHigh 6321 MB, no swap, oomd pressure kill 80% (claim 4000 MB): an OOM here kills only this job
+[axon-run 05:59:54] job 1025-054658-c346 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1025-054658-c346-1792922394 --slice=app-axonjobs.slice -p MemoryMax=7024M -p MemoryHigh=6321M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-memcg/tm/axon-test-43bc8b7 --skip cuda::qwen2::tests::gpu_bits_llama_3b_8b --skip cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_qwen3_4b --skip cuda::qwen2::tests::gpu_q8_qwen3_4b --skip cuda::qwen2::tests::gpu_verify_matches_forward_argmax_qwen3_4b --skip cuda::qwen2::tests::gpu_logits_match_cpu_natural_long_1_5b --skip cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_q8_1_5b --skip cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_1_5b --skip cuda::qwen2::tests::gpu_continuations_match_cpu_1_5b --skip cuda::qwen2::tests::gpu_logits_match_cpu_1_5b --skip hybrid::tests::hybrid_logits_match_cpu_1_5b --skip hybrid::tests::stream_logits_match_cpu_1_5b --skip hybrid::tests::hybrid_q8_close_to_f16_1_5b --skip hybrid::tests::hybrid_prefill_batchings_bit_identical_1_5b --skip hybrid::tests::hybrid_prefill_batchings_bit_identical_q8_1_5b --skip hybrid::tests::stream_prefill_is_gpu_bits_1_5b --skip cuda::qwen2::pipeline::tests::pipeline_same_device_matches_cuda_1_5b --skip cuda::tests::nvrtc_kernels_compile_for_old_archs --skip cuda::tests::nvrtc_kernels_compile_for_sm90a --test-threads 6
+axon-q 05:59:54 start slot 16-23: /home/haseeb/.cache/axon-memcg/tm/axon-test-43bc8b7 --skip cuda::qwen2::tests::gpu_bits_llama_3b_8b --skip cuda::qwen2::tests::gpu_prefill_batchings_bit_identical_qwen3_4b --skip cuda::qwen2::tests::g
+
+running 686 tests
+test chat::tests::forget_bench ... ignored
+test chat::tests::forget_bench_7b ... ignored
+test chat::tests::framing_matches_template ... ok
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test chat::tests::harmony_framing_and_channels ... ok
+test chat::tests::llama3_framing_and_replies ... ok
+test chat::tests::emit_error_keeps_the_exchange_exact ... ok
+test chat::tests::cancel_and_message_too_long ... ok
+test chat::tests::full_context_drops_oldest_cuda ... ok
+test chat::tests::full_context_drops_oldest has been running for over 60 seconds
+test chat::tests::gemma3_framing_and_replies has been running for over 60 seconds
+test chat::tests::long_turn_matches_fresh_prefill_cuda has been running for over 60 seconds
+test chat::tests::mistral_framing_and_replies has been running for over 60 seconds
+test chat::tests::moe_gpu_turns_match_fresh_prefill has been running for over 60 seconds
+test chat::tests::moe_turns_match_fresh_prefill has been running for over 60 seconds
+[axon-run 06:16:43] signal 15: stopping the job
+[axon-run 06:16:43] exit 143 after 1009.2s (host bella)
