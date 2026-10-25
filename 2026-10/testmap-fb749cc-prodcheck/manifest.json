@@ -1,0 +1,29 @@
+{
+ "label": "testmap-fb749cc-prodcheck",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1025-085708-49c2",
+   "name": "testmap-fb749cc-prodcheck",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "fb749cc",
+   "binary": "prodcheck.sh",
+   "started": 1792939133.2464747,
+   "ended": 1792939143.3390942,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "ed28ce59bd616172c89c4cbb64a591a8f29bb0dd9dbfffb4ed881962640a6843",
+   "log_bytes": 1793
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-25 10:39:04 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}

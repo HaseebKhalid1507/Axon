@@ -1,0 +1,17 @@
+[axon-run 08:57:08] submitted 1025-085708-49c2 by /home/haseeb/.cache/axon-memcg: /home/haseeb/.cache/axon-memcg/prodcheck.sh /home/haseeb/.cache/axon-memcg/axon-main-fb749cc
+[axon-run 10:38:53] scope axon-job-1025-085708-49c2-1792939133.scope in app-axonjobs.slice: MemoryMax 8524 MB, MemoryHigh 7671 MB, no swap, oomd pressure kill 80% (claim 5000 MB): an OOM here kills only this job
+[axon-run 10:38:53] job 1025-085708-49c2 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1025-085708-49c2-1792939133 --slice=app-axonjobs.slice -p MemoryMax=8524M -p MemoryHigh=7671M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-memcg/prodcheck.sh /home/haseeb/.cache/axon-memcg/axon-main-fb749cc
+axon-q 10:38:53 start slot 16-23: /home/haseeb/.cache/axon-memcg/prodcheck.sh /home/haseeb/.cache/axon-memcg/axon-main-fb749cc
+[] 0.5B --gpu-layers 12 (hybrid) rc=0 md5=85695b017323 0 panic-lines
+[] qwen3 --gpu-layers 14 (hybrid) rc=0 md5=6677358b63b4 0 panic-lines
+[] llama --gpu-layers 8 (hybrid) rc=0 md5=5764caa56df1 0 panic-lines
+[] gemma3 cuda rc=0 md5=f16737979df7 0 panic-lines
+[] MoE pruned cuda (GPU attn + CPU experts) rc=0 md5=3df836fcc4ec 0 panic-lines
+[AXON_MMAP=0] 0.5B --gpu-layers 12 (hybrid) rc=0 md5=85695b017323 0 panic-lines
+[AXON_MMAP=0] qwen3 --gpu-layers 14 (hybrid) rc=0 md5=6677358b63b4 0 panic-lines
+[AXON_MMAP=0] llama --gpu-layers 8 (hybrid) rc=0 md5=5764caa56df1 0 panic-lines
+[AXON_MMAP=0] gemma3 cuda rc=0 md5=f16737979df7 0 panic-lines
+[AXON_MMAP=0] MoE pruned cuda (GPU attn + CPU experts) rc=0 md5=3df836fcc4ec 0 panic-lines
+PRODCHECK-DONE
+[axon-run 10:39:00] exit 0 after 6.8s (host bella)
+[axon-run 10:39:03] EXPECT ok: output matches /PRODCHECK-DONE/
