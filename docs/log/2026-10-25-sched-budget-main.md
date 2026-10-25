@@ -91,8 +91,16 @@ sdab15 1025-183047-34df; avante 1.5B 1025-174837-1554, 0.5B sd 1025-174837-bf3d.
   the spec's cells, which is C=32 at −1.6 %).
 - Raw logs: https://gist.github.com/HaseebKhalid1507/b439d3907e42da8cbb110d762936ffe8, per-request
   https://gist.github.com/HaseebKhalid1507/d6a48a76f394dd0a8ec59473bf3950d1.
-- Gates at 6cb98fc: fast 1025-190641-2b91, debug serve+slots 1025-190644-c162, `serve::` with sjf 1025-190644-185a,
-  md5 1025-190645-7c81, digests 1025-190645-ec75 (results in the PR, Update line here when green).
+- sjf's costs, for anyone who opts in: long-prompt TTFT p50 +67 % on the 1.5B H1 cell (738.6 vs 441.4 ms; only the
+  long max is in the clause, 0.96×); the short median at moderate load too (avante 0.5B sd C=32 59.7 vs 41.9 ms, 1.43×).
+- (d) @50 was measured on the sjf50 arm (no fifo50 run); the step histogram has 5 ms buckets, so 60.0 ms is one bucket
+  past the 57.5 limit.
+- The sdab15 C=16 −6 % aggregate is confounded: sd_client salts each cell randomly, so arms ran different prompts and
+  output lengths (fifo60 6,927 vs main 7,783 tokens in one round). For #139, `sdab.sh` fixes the salt per (round, C)
+  and adds a same-binary `roll` arm.
+- Review (shady 8/10 on #131): M1 the defaults test followed no env under the AXON_ADMIT=sjf gate; fixed (whole-`Sched`
+  compare, `Sched::from_env`, `lanes_for`, `legacy_alone_is_main_admission`). Main fcde887 merged (375ce65). Gates of
+  record at e76c01f (PR §6). The 6cb98fc gate jobs were superseded before they ran.
 
 ## Review fixes carried over (shady 7/10 on #126)
 - `pass_us` bounded: a sample is at most 4x the estimate and half a step; the estimate is read bounded by twice
