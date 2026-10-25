@@ -1,0 +1,34 @@
+[axon-run 20:25:02] submitted 1024-202502-cab2 by /home/haseeb/.cache/axon-wt-budget: /home/haseeb/.cache/axon-budget/servab.sh /home/haseeb/.cache/axon-budget/servab-eb14e53 /home/haseeb/.cache/axon-budget/bin/axon-main-6e3b19c /home/haseeb/.cache/axon-budget/bin/axon-hyb-c2bd9f6 /home/haseeb/.cache/axon-budget/bin/axon-eb14e53 /home/haseeb/Projects/axon/models/qwen2.5-0.5b-q4_k_m.gguf /home/haseeb/Projects/axon/models/qwen2.5-1.5b-instruct-q4_k_m.gguf
+[axon-run 00:19:28] scope axon-job-1024-202502-cab2-1792901968.scope in app-axonjobs.slice: MemoryMax 6634 MB, MemoryHigh 5970 MB, no swap, oomd pressure kill 80% (claim 2207 MB): an OOM here kills only this job
+[axon-run 00:19:28] job 1024-202502-cab2 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1024-202502-cab2-1792901968 --slice=app-axonjobs.slice -p MemoryMax=6634M -p MemoryHigh=5970M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-budget/servab.sh /home/haseeb/.cache/axon-budget/servab-eb14e53 /home/haseeb/.cache/axon-budget/bin/axon-main-6e3b19c /home/haseeb/.cache/axon-budget/bin/axon-hyb-c2bd9f6 /home/haseeb/.cache/axon-budget/bin/axon-eb14e53 /home/haseeb/Projects/axon/models/qwen2.5-0.5b-q4_k_m.gguf /home/haseeb/Projects/axon/models/qwen2.5-1.5b-instruct-q4_k_m.gguf
+axon-q 00:19:28 start slot 16-23: /home/haseeb/.cache/axon-budget/servab.sh /home/haseeb/.cache/axon-budget/servab-eb14e53 /home/haseeb/.cache/axon-budget/bin/axon-main-6e3b19c /home/haseeb/.cache/axon-budget/bin/axon-hyb-c2bd9f6 /hom
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0
+parabellum
+qwen2.5-0.5b-q4_k_m main r1 {"digest": "8e7057ca3c8daff5"}
+qwen2.5-0.5b-q4_k_m main r2 {"digest": "8e7057ca3c8daff5"}
+qwen2.5-0.5b-q4_k_m hyb r1 {"digest": "8e7057ca3c8daff5"}
+qwen2.5-0.5b-q4_k_m hyb r2 {"digest": "8e7057ca3c8daff5"}
+qwen2.5-0.5b-q4_k_m cand r1 {"digest": "8e7057ca3c8daff5"}
+qwen2.5-0.5b-q4_k_m cand r2 {"digest": "8e7057ca3c8daff5"}
+qwen2.5-0.5b-q4_k_m cand-h0 r1 {"digest": "8e7057ca3c8daff5"}
+qwen2.5-0.5b-q4_k_m cand-h0 r2 {"digest": "8e7057ca3c8daff5"}
+qwen2.5-0.5b-q4_k_m cand-roll r1 {"digest": "8e7057ca3c8daff5"}
+qwen2.5-0.5b-q4_k_m cand-roll r2 {"digest": "8e7057ca3c8daff5"}
+qwen2.5-0.5b-q4_k_m cand-lanes8 r1 {"digest": "8e7057ca3c8daff5"}
+qwen2.5-0.5b-q4_k_m cand-lanes8 r2 {"digest": "8e7057ca3c8daff5"}
+qwen2.5-0.5b-q4_k_m: 1 distinct digest(s) over 12 runs
+qwen2.5-1.5b-instruct-q4_k_m main r1 {"digest": "a95eb05ba286ed0d"}
+qwen2.5-1.5b-instruct-q4_k_m main r2 {"digest": "a95eb05ba286ed0d"}
+qwen2.5-1.5b-instruct-q4_k_m hyb r1 {"digest": "a95eb05ba286ed0d"}
+qwen2.5-1.5b-instruct-q4_k_m hyb r2 {"digest": "a95eb05ba286ed0d"}
+qwen2.5-1.5b-instruct-q4_k_m cand r1 {"digest": "a95eb05ba286ed0d"}
+qwen2.5-1.5b-instruct-q4_k_m cand r2 {"digest": "a95eb05ba286ed0d"}
+qwen2.5-1.5b-instruct-q4_k_m cand-h0 r1 {"digest": "a95eb05ba286ed0d"}
+qwen2.5-1.5b-instruct-q4_k_m cand-h0 r2 {"digest": "a95eb05ba286ed0d"}
+qwen2.5-1.5b-instruct-q4_k_m cand-roll r1 {"digest": "a95eb05ba286ed0d"}
+qwen2.5-1.5b-instruct-q4_k_m cand-roll r2 {"digest": "a95eb05ba286ed0d"}
+qwen2.5-1.5b-instruct-q4_k_m cand-lanes8 r1 {"digest": "a95eb05ba286ed0d"}
+qwen2.5-1.5b-instruct-q4_k_m cand-lanes8 r2 {"digest": "a95eb05ba286ed0d"}
+qwen2.5-1.5b-instruct-q4_k_m: 1 distinct digest(s) over 12 runs
+servab rc=0
+[axon-run 00:20:57] exit 0 after 88.7s (host bella)
