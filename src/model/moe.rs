@@ -269,28 +269,35 @@ fn ram_need(i: &MoeInfo, repack: bool, dense: bool) -> u64 {
 }
 
 /// The CPU model's RAM beyond the file: refuse a MoE model that wouldn't fit
-/// in `MemAvailable` (`ram_need`) instead of swapping. `repack` as
-/// `Qwen2::new` (AXON_REPACK). `dense` false: `crate::moe`'s split (the
-/// host holds the experts only).
+/// in the RAM available (`ram_need`) instead of swapping or being OOM-killed.
+/// Available: the host's `MemAvailable`, or a tighter cgroup limit's room (a
+/// container, a systemd scope: `gguf::mem`), and the refusal says which.
+/// `repack` as `Qwen2::new` (AXON_REPACK). `dense` false: `crate::moe`'s
+/// split (the host holds the experts only).
 pub(crate) fn check_ram(m: &Model, dense: bool) -> Result<(), String> {
     let repack = std::env::var("AXON_REPACK").map_or(true, |v| v != "0");
-    check_ram_with(m, repack, dense, crate::gguf::mem_available())
+    check_ram_with(m, repack, dense, crate::gguf::mem::avail())
 }
 
-fn check_ram_with(m: &Model, repack: bool, dense: bool, avail: Option<u64>) -> Result<(), String> {
+fn check_ram_with(
+    m: &Model,
+    repack: bool,
+    dense: bool,
+    avail: Option<crate::gguf::mem::Avail>,
+) -> Result<(), String> {
     let Some(i) = MoeInfo::of_with(m, repack) else {
         return Ok(());
     };
     let want = ram_need(&i, repack, dense);
     match avail {
-        Some(avail) if avail < want => Err(format!(
+        Some(avail) if avail.bytes < want => Err(format!(
             "{}: the {} needs about {:.1} GB of RAM (its repacked experts {:.1} GB) and \
-             only {:.1} GB is available",
+             only {:.1} GB is available (bound by {avail})",
             m.arch,
             if dense { "CPU model" } else { "CPU experts" },
             want as f64 / 1e9,
             i.expert_arena as f64 / 1e9,
-            avail as f64 / 1e9
+            avail.bytes as f64 / 1e9
         )),
         _ => Ok(()),
     }
@@ -831,6 +838,7 @@ impl<'a> Qwen2<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gguf::mem::{Avail, Bound};
 
     /// `check_ram`'s need: the r8 arena with the repack, none without it
     /// (AXON_REPACK=0 reads the mapped file in place); the split's, the
@@ -850,15 +858,50 @@ mod tests {
         assert_eq!(on.expert_arena, on.expert_held, "every Q8_0 expert repacks");
         assert_eq!(ram_need(&on, true, false), on.expert_arena + RAM_HEADROOM);
         assert_eq!(ram_need(&off, false, false), RAM_HEADROOM);
+        let host = |bytes| {
+            Some(Avail {
+                bytes,
+                bound: Bound::Host,
+            })
+        };
         // Room for the headroom only: refused with the repack, fine without.
-        let avail = Some(RAM_HEADROOM + 1);
-        assert!(check_ram_with(&m, true, true, avail).is_err());
+        let avail = host(RAM_HEADROOM + 1);
+        assert!(check_ram_with(&m, true, true, avail.clone()).is_err());
         assert!(check_ram_with(&m, false, true, avail).is_ok());
         assert!(check_ram_with(&m, true, true, None).is_ok());
         // Room for the experts but not the dense weights: the split fits.
-        let avail = Some(on.expert_arena + RAM_HEADROOM);
-        assert!(check_ram_with(&m, true, true, avail).is_err());
+        let avail = host(on.expert_arena + RAM_HEADROOM);
+        assert!(check_ram_with(&m, true, true, avail.clone()).is_err());
         assert!(check_ram_with(&m, true, false, avail).is_ok());
+    }
+
+    /// The refusal names what bound the figure: the host's MemAvailable,
+    /// or the cgroup (path and limit) whose room is tighter.
+    #[test]
+    fn ram_refusal_names_the_bound() {
+        let (m, _) = crate::model::tests::dense_fixture("qwen3moe", crate::quant::Q8_0);
+        let host = Avail {
+            bytes: 1,
+            bound: Bound::Host,
+        };
+        let e = check_ram_with(&m, true, true, Some(host)).unwrap_err();
+        assert!(
+            e.ends_with("is available (bound by host MemAvailable)"),
+            "{e}"
+        );
+        let cg = Avail {
+            bytes: 1,
+            bound: Bound::Cgroup {
+                path: "/app.slice/job.scope".into(),
+                limit: 1000 << 20,
+                v1: false,
+            },
+        };
+        let e = check_ram_with(&m, true, true, Some(cg)).unwrap_err();
+        assert!(
+            e.ends_with("(bound by cgroup /app.slice/job.scope memory.max 1000 MB)"),
+            "{e}"
+        );
     }
 
     #[test]
