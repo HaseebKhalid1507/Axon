@@ -81,8 +81,11 @@ pub const PREFILL_CHUNK: usize = 256;
 /// A step's target wall time while requests decode, in ms (default,
 /// `--step-ms`, alias `--prefill-ms`; 0: no time budget, exactly
 /// `--prefill-chunk` tokens): the time between a running request's tokens
-/// the server aims at (the showdown's ITL SLO is 50 ms).
-pub const STEP_MS: usize = 50;
+/// the server aims at. 60, main's `--prefill-ms`: at 50 the bella 7B C=16
+/// mix step ran at 60.0 ms p50 (+20 %, outside the spec's ±15 %: the 256
+/// floor binds) and the avante 1.5B ITL p99 rose 17 % over main (jobs
+/// 1025-174838-bb0d, 1025-174837-1554); 50 is `--step-ms 50`.
+pub const STEP_MS: usize = 60;
 /// The first chunk with a time budget, before a chunk's cost is known.
 const SEED_CHUNK: usize = 512;
 /// The prefill cost model: a token at depth d costs cost * (d + DEPTH_K)
@@ -151,7 +154,7 @@ pub struct Sched {
     /// A waiting request this old goes before shorter ones (0: never).
     pub age_ms: u64,
     /// Prompts longer than a step's chunk prefilling at once at most (0:
-    /// `slots / 16` within 2..=8; `Batch::lanes`).
+    /// sjf `slots / 16` within 2..=8, fifo 2; `Batch::lanes`).
     pub lanes: usize,
     /// `ChunkPolicy::step_tokens`.
     pub step_tokens: usize,
@@ -165,14 +168,16 @@ pub struct Sched {
 pub const ADMIT_AGE_MS: u64 = 3000;
 
 impl Default for Sched {
-    /// SJF unless AXON_ADMIT=fifo; the cost model unless
-    /// AXON_STEP_COST=legacy.
+    /// FIFO unless AXON_ADMIT=sjf (shortest-first missed its kill-rule
+    /// clause on the bella cells: short TTFT p50 0.56x fifo's at 1.5B C=32,
+    /// 0.79x on the showdown client, against <= 0.5x; it stays opt-in until
+    /// the H100 cells decide it); the cost model unless AXON_STEP_COST=legacy.
     fn default() -> Sched {
         let env = |k: &str, v: &str| std::env::var(k).is_ok_and(|x| x == v);
         Sched {
-            order: match env("AXON_ADMIT", "fifo") {
-                true => AdmitOrder::Fifo,
-                false => AdmitOrder::Sjf,
+            order: match env("AXON_ADMIT", "sjf") {
+                true => AdmitOrder::Sjf,
+                false => AdmitOrder::Fifo,
             },
             age_ms: ADMIT_AGE_MS,
             lanes: 0,
@@ -675,12 +680,14 @@ impl<'a, 't> Batch<'a, 't> {
     }
 
     /// Prompts longer than a step's chunk prefilling at once at most
-    /// (`Sched::lanes`; 0: `slots / 16` within 2..=8: 2 at up to 32 slots,
-    /// the rule before, 8 at 128).
+    /// (`Sched::lanes`; 0: sjf `slots / 16` within 2..=8, 2 at up to 32
+    /// slots, 8 at 128; fifo 2, main's `MAX_PREFILLING`: the lane scaling
+    /// is part of shortest-first, opt-in with it).
     pub fn lanes(&self) -> usize {
-        match self.sched.lanes {
-            0 => (self.slots / 16).clamp(2, 8),
-            n => n,
+        match (self.sched.lanes, self.sched.order) {
+            (0, AdmitOrder::Sjf) => (self.slots / 16).clamp(2, 8),
+            (0, AdmitOrder::Fifo) => 2,
+            (n, _) => n,
         }
     }
 

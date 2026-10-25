@@ -2443,8 +2443,11 @@ fn pages_block_bounds_the_wait() {
 
 /// The rollback flags reach the engine: `--admit-order fifo
 /// --prefill-lanes 2 --step-ms 60` with AXON_STEP_COST=legacy (the A/B's
-/// `roll` arm) shows lanes 2 and the legacy budgets on /metrics; the
-/// defaults at 32 slots show lanes 2, the model's budgets; 128 slots, 8.
+/// `roll` arm) shows lanes 2 and the legacy budgets on /metrics; sjf at
+/// 32 slots lanes 2, at 128 slots 8, the model's budgets. The shipped
+/// defaults (no flags) are the A/B's measured `fifo60` arm: fifo, lanes 2
+/// at any slot count, `--step-ms 60`, the cost model (legacy only if the
+/// job's environment asks for it).
 #[test]
 fn serve_rollback_flags_reach_the_engine() {
     let Some(_) = crate::testutil::gpu() else {
@@ -2457,12 +2460,31 @@ fn serve_rollback_flags_reach_the_engine() {
         ("roll", 32, 2.0, 1.0),
         ("sjf50", 32, 2.0, 0.0),
         ("sjf50", 128, 8.0, 0.0),
+        ("default", 128, 2.0, -1.0),
     ] {
+        if arm == "default" {
+            let o = test_opts("x", Device::Cuda);
+            let fifo = std::env::var("AXON_ADMIT").map_or(true, |v| v != "sjf");
+            assert_eq!(o.step_ms, 60, "the default step");
+            assert_eq!(o.sched.order == super::engine::AdmitOrder::Fifo, fifo);
+            let mut f = test_opts("x", Device::Cuda);
+            arm_opts("fifo60", &mut f);
+            assert_eq!(
+                (f.step_ms, f.sched.lanes, f.sched.age_ms),
+                (o.step_ms, o.sched.lanes, o.sched.age_ms)
+            );
+        }
+        let legacy = match legacy < 0.0 {
+            true => std::env::var("AXON_STEP_COST").is_ok_and(|v| v == "legacy") as u8 as f64,
+            false => legacy,
+        };
         let s = server_with(p.to_str().unwrap(), Device::Cuda, |o| {
             o.parallel = par;
             o.parallel_set = true;
             o.kv_pages = Some(64);
-            arm_opts(arm, o);
+            if arm != "default" {
+                arm_opts(arm, o);
+            }
         });
         let a = s.addr;
         let m = || prom_parse(&call(a, "GET", "/metrics", "").body);
@@ -2475,7 +2497,7 @@ fn serve_rollback_flags_reach_the_engine() {
     }
 }
 
-/// Shortest-first admission (`--admit-order sjf`, the default): with 4
+/// Shortest-first admission (`--admit-order sjf`, opt-in): with 4
 /// requests decoding and two long prompts prefilling (both lanes of a
 /// paged pool of 8 slots), a short prompt sent next starts at once and is
 /// done before either long prompt's first token; with `--admit-order fifo`

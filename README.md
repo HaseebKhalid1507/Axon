@@ -388,16 +388,16 @@ use your local model), `--max-conns N` / `--max-queue N` (defaults 256 / 128),
 `--parallel N` (requests decoded at once on the GPU, default 16 with paged KV, 8 without; 1: one at a time),
 `--prefill-chunk N` (at least N prompt tokens a batched step feeds while others decode;
 default 256; `--prefill-chunk 0`: whole prompts), `--step-ms MS` (a step's target time
-while requests decode, default 50: the prompt tokens it feeds beside their decode step are
+while requests decode, default 60: the prompt tokens it feeds beside their decode step are
 what fits at the cost the server measures as steps run, per pass, per prompt token and per
 decode row count; 0: exactly N tokens; `--prefill-ms` is its old name), `--step-tokens N`
-(pin a step's prompt tokens), `--admit-order sjf|fifo` (waiting requests start shortest
-prompt first, several per step, default; `fifo`: first come first served, one per step, as
-before; `AXON_ADMIT=fifo`), `--admit-age-ms MS` (a request waiting this long starts before
-shorter ones, default 3000; 0: never), `--prefill-lanes N` (prompts longer than a step's
-chunk prefilling at once, default parallel/16 within 2..8; short ones never wait for a
-lane). The scheduling of before: `--admit-order fifo --step-ms 60` with
-`AXON_STEP_COST=legacy` (and `--prefill-lanes 2` past 32 slots). `--quiet`
+(pin a step's prompt tokens), `--admit-order fifo|sjf` (`fifo`, default: first come first
+served, one per step; `sjf`, opt-in, `AXON_ADMIT=sjf`: shortest prompt first, several per
+step, which cuts short prompts' tail TTFT under load), `--admit-age-ms MS` (sjf: a request
+waiting this long starts before shorter ones, default 3000; 0: never), `--prefill-lanes N`
+(prompts prefilling at once, default 2; with sjf only prompts longer than a step's chunk
+count, default parallel/16 within 2..8, and short ones never wait for a lane). The
+scheduling of before: `AXON_STEP_COST=legacy`. `--quiet`
 (no per-request line on stderr). `GET /health` is 503 until the model is loaded.
 
 - Context (`--ctx N`, per request): by default the model's trained context (32768 for

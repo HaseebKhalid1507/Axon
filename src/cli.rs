@@ -122,21 +122,21 @@ flags:
               the longest context that fits them
   --prefill-chunk N  serve: at least N prompt tokens per step while requests decode (default
               256; 0: prompts fed whole, the others' streams wait)
-  --step-ms MS  serve: a step's target time while requests decode (default 50): the prompt
+  --step-ms MS  serve: a step's target time while requests decode (default 60): the prompt
               tokens it feeds beside their decode step are what fits at the cost measured as
               steps run (0: exactly --prefill-chunk tokens). --prefill-ms is its old name.
               AXON_STEP_COST=legacy: the budget before (MS less the last decode step)
   --step-tokens N  serve: pin a step's prompt tokens (default 0: --step-ms; AXON_STEP_COST=legacy
               ignores it: main's budget)
-  --admit-order sjf|fifo  serve: waiting requests start shortest prompt first, several per
-              step (sjf, default), or first come first served, one per step (fifo, the order
-              before; AXON_ADMIT=fifo sets it too)
-  --admit-age-ms MS  serve: a request waiting this long starts before shorter ones (default
-              3000; 0: never)
-  --prefill-lanes N  serve: prompts longer than a step's chunk prefilling at once (default
-              0: parallel/16 within 2..8); with fifo: all prompts prefilling at once.
-              The order before: --admit-order fifo --step-ms 60 with AXON_STEP_COST=legacy
-              (lanes 2 up to 32 slots; --prefill-lanes 2 past that)
+  --admit-order fifo|sjf  serve: waiting requests start first come first served, one per
+              step (fifo, default), or shortest prompt first, several per step (sjf, opt-in:
+              much lower tail TTFT for short prompts under load, not yet the median it was
+              meant to halve; AXON_ADMIT=sjf sets it too)
+  --admit-age-ms MS  serve, sjf: a request waiting this long starts before shorter ones
+              (default 3000; 0: never)
+  --prefill-lanes N  serve: prompts prefilling at once; with sjf only prompts longer than a
+              step's chunk count (default 0: fifo 2, sjf parallel/16 within 2..8).
+              The scheduling of before: AXON_STEP_COST=legacy (the defaults otherwise)
   --api-key KEY  serve: every route but /health (and CORS preflights) needs
               `Authorization: Bearer KEY` (else 401); AXON_API_KEY sets it too, out of `ps`
               (trimmed; set but blank is an error)
