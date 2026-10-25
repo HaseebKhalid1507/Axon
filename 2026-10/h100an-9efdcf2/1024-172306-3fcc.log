@@ -1,0 +1,94 @@
+[axon-run 17:23:06] submitted 1024-172306-3fcc by /home/haseeb/.cache/axon-wt-h100-anatomy: /home/haseeb/.cache/axon-h100-anatomy/bin/axon-test-9efdcf2 cuda::qwen2::tests::cuda_gemmh_bench cuda::qwen2::tests::cuda_i2f_bench cuda::qwen2::tests::gpu_magic_i2f_is_cvt_rn cuda::qwen2::slots::tests::pool_feed_cost cuda::qwen2::slots::tests::pool_step_cost --exact --include-ignored --nocapture --test-threads 1
+[axon-run 20:12:04] job 1024-172306-3fcc -> avante: ionice -c3 nice -n 19 /home/haseeb/.local/bin/axon-remote --host avante --vram 4500 --env AXON_NODE_PACK=1 --src /home/haseeb/.cache/axon-wt-h100-anatomy /home/haseeb/.cache/axon-h100-anatomy/bin/axon-test-9efdcf2 cuda::qwen2::tests::cuda_gemmh_bench cuda::qwen2::tests::cuda_i2f_bench cuda::qwen2::tests::gpu_magic_i2f_is_cvt_rn cuda::qwen2::slots::tests::pool_feed_cost cuda::qwen2::slots::tests::pool_step_cost --exact --include-ignored --nocapture --test-threads 1
+axon-remote: job 20261024-201207-axon-test-9efdcf2-3417302 on avante (GPU, 4500 MB)
+[axon-node 20:12:07] GPU slot taken; job wants 4500 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 65
+[axon-node 20:12:07] run axon-test-9efdcf2 (c2ede1aaf7a6590eff754940) as /home/haseeb/.cache/axon-wt-h100-anatomy on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 5 tests
+test cuda::qwen2::slots::tests::pool_feed_cost ... testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+feed cost: models/qwen2.5-1.5b-instruct-q4_k_m.gguf (qwen2), NVIDIA GeForce RTX 4050 Laptop GPU (20 SMs), pass max 1152
+| depth | n | ms | us/token |
+| 0 | 1 | 6.617 | 6616.6 |
+| 0 | 16 | 7.411 | 463.2 |
+| 0 | 64 | 9.981 | 156.0 |
+| 0 | 128 | 15.315 | 119.6 |
+| 0 | 256 | 29.148 | 113.9 |
+| 0 | 512 | 58.236 | 113.7 |
+feed fit depth 0: t0 4.458 ms + 102.31 us/token (n [1, 16, 64, 128, 256, 512])
+| 600 | 1 | 6.247 | 6246.9 |
+| 600 | 16 | 8.167 | 510.4 |
+| 600 | 64 | 11.443 | 178.8 |
+| 600 | 128 | 19.419 | 151.7 |
+| 600 | 256 | 32.607 | 127.4 |
+| 600 | 512 | 65.183 | 127.3 |
+feed fit depth 600: t0 5.112 ms + 115.04 us/token (n [1, 16, 64, 128, 256, 512])
+| 4096 | 1 | 7.077 | 7077.1 |
+| 4096 | 16 | 9.894 | 618.4 |
+| 4096 | 64 | 16.555 | 258.7 |
+| 4096 | 128 | 27.502 | 214.9 |
+| 4096 | 256 | 46.720 | 182.5 |
+| 4096 | 512 | 87.980 | 171.8 |
+feed fit depth 4096: t0 6.923 ms + 157.82 us/token (n [1, 16, 64, 128, 256, 512])
+ok
+test cuda::qwen2::slots::tests::pool_step_cost ... C curve: models/qwen2.5-1.5b-instruct-q4_k_m.gguf (qwen2), NVIDIA GeForce RTX 4050 Laptop GPU (20 SMs)
+kernels: plain
+depth 600: decode step (forward_argmax) 6.738 ms; pool 64 x 704
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 600 | 1 | 0 x1 | 7.271 | 1.08 | 138 |
+| 600 | 8 | 0 x1 | 8.507 | 1.26 | 940 |
+| 600 | 32 | 0 x1 | 15.883 | 2.36 | 2015 |
+| 600 | 64 | 0 x1 | 20.847 | 3.09 | 3070 |
+prof depth 600 nb 1: 8.104 ms (no graph, 368 events): embed 0.008, rmsnorm 0.329, k 0.202, v6 0.134, qkv 0.236, rope_kv 0.109, attn 0.283, combine 0.150, wo 0.343, gate 2.491, gate_up 0.034, swiglu 0.133, down6 1.587, down 0.037, down4 0.705, head 1.319
+prof depth 600 nb 8: 9.251 ms (no graph, 368 events): embed 0.007, rmsnorm 0.318, k 0.232, v6 0.132, qkv 0.259, rope_kv 0.113, attn 0.973, combine 0.156, wo 0.368, gate 2.690, gate_up 0.040, swiglu 0.150, down6 1.655, down 0.038, down4 0.762, head 1.354
+prof depth 600 nb 32: 16.561 ms (no graph, 480 events): embed 0.009, rmsnorm 0.347, q 0.697, k 0.288, v6 0.183, qkv 0.037, rope_kv 0.139, attn 3.663, combine 0.474, wo 0.654, gate 0.033, gate_up 4.222, swiglu 0.197, down6 1.957, down 0.038, v4 0.138, down4 1.466, head 2.014
+prof depth 600 nb 64: 21.774 ms (no graph, 592 events): embed 0.011, rope 0.006, rmsnorm 0.415, q 0.723, k 0.382, v6 0.214, qkv 0.040, rope_kv 0.180, attn 7.560, combine 0.953, wo 0.695, gate 0.041, gate_up 4.381, swiglu 0.293, down6 1.993, down 0.037, v4 0.190, down4 1.490, head 2.171
+kernels: plain
+  pool of 64 x 4160: a 266304-token cache needs 7.31 GiB of GPU memory (KV cache and scratch), 4.32 GiB is free; try a smaller --ctx (or -n), --kv q8 or the CPU
+depth 4096: decode step (forward_argmax) 7.502 ms; pool 32 x 4160
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 4096 | 1 | 0 x1 | 8.111 | 1.08 | 123 |
+| 4096 | 8 | 0 x1 | 13.484 | 1.80 | 593 |
+| 4096 | 32 | 0 x1 | 36.093 | 4.81 | 887 |
+prof depth 4096 nb 1: 8.713 ms (no graph, 368 events): embed 0.007, rmsnorm 0.306, k 0.197, v6 0.127, qkv 0.233, rope_kv 0.101, attn 0.896, combine 0.208, wo 0.338, gate 2.487, gate_up 0.038, swiglu 0.121, down6 1.594, down 0.037, down4 0.721, head 1.298
+prof depth 4096 nb 8: 14.112 ms (no graph, 368 events): embed 0.007, rmsnorm 0.312, k 0.226, v6 0.128, qkv 0.256, rope_kv 0.109, attn 5.610, combine 0.344, wo 0.370, gate 2.570, gate_up 0.029, swiglu 0.145, down6 1.751, down 0.039, down4 0.872, head 1.341
+prof depth 4096 nb 32: 36.685 ms (no graph, 480 events): embed 0.008, rmsnorm 0.334, q 0.670, k 0.282, v6 0.175, qkv 0.036, rope_kv 0.137, attn 23.000, combine 1.634, wo 0.646, gate 0.036, gate_up 4.067, swiglu 0.185, down6 1.947, down 0.037, v4 0.132, down4 1.421, head 1.934
+ok
+test cuda::qwen2::tests::cuda_gemmh_bench ... NVIDIA GeForce RTX 4050 Laptop GPU sm_89 20 SMs, hopper module false
+gate  Q4_K 3584x18944 nb 64 gemm2s_q4_k: median 16.4 TMAC/s (min 16.4 max 16.4; 0.265 ms)
+gate  Q4_K 3584x18944 nb 64 gemm2_q4_k: median 10.0 TMAC/s (min 10.0 max 10.0; 0.434 ms)
+gate  Q4_K 3584x18944 nb 64 gemm2t_q4_k: median 17.5 TMAC/s (min 17.5 max 17.5; 0.248 ms)
+gate  Q4_K 3584x18944 nb 1024 gemm2s_q4_k: median 11.2 TMAC/s (min 10.6 max 17.1; 6.218 ms)
+gate  Q4_K 3584x18944 nb 1024 gemm2_q4_k: median 12.1 TMAC/s (min 11.5 max 16.5; 5.756 ms)
+gate  Q4_K 3584x18944 nb 1024 gemm2t_q4_k: median 14.5 TMAC/s (min 12.9 max 16.3; 4.781 ms)
+q/wo  Q4_K 3584x3584 nb 64 gemm2s_q4_k: median 13.5 TMAC/s (min 13.5 max 13.5; 0.061 ms)
+q/wo  Q4_K 3584x3584 nb 64 gemm2_q4_k: median 8.2 TMAC/s (min 8.2 max 8.2; 0.100 ms)
+q/wo  Q4_K 3584x3584 nb 64 gemm2t_q4_k: median 12.4 TMAC/s (min 12.4 max 12.4; 0.067 ms)
+q/wo  Q4_K 3584x3584 nb 1024 gemm2s_q4_k: median 12.1 TMAC/s (min 12.1 max 12.2; 1.084 ms)
+q/wo  Q4_K 3584x3584 nb 1024 gemm2_q4_k: median 12.0 TMAC/s (min 11.9 max 12.0; 1.096 ms)
+q/wo  Q4_K 3584x3584 nb 1024 gemm2t_q4_k: median 14.6 TMAC/s (min 14.5 max 14.6; 0.903 ms)
+down  Q4_K 18944x3584 nb 64 gemm2s_q4_k: median 15.8 TMAC/s (min 15.8 max 15.9; 0.275 ms)
+down  Q4_K 18944x3584 nb 64 gemm2_q4_k: median 9.7 TMAC/s (min 9.7 max 9.7; 0.449 ms)
+down  Q4_K 18944x3584 nb 64 gemm2t_q4_k: median 13.4 TMAC/s (min 13.3 max 13.4; 0.325 ms)
+down  Q4_K 18944x3584 nb 1024 gemm2s_q4_k: median 15.2 TMAC/s (min 14.2 max 17.7; 4.587 ms)
+down  Q4_K 18944x3584 nb 1024 gemm2_q4_k: median 13.4 TMAC/s (min 13.2 max 16.1; 5.174 ms)
+down  Q4_K 18944x3584 nb 1024 gemm2t_q4_k: median 17.0 TMAC/s (min 14.4 max 18.6; 4.081 ms)
+kv    Q4_K 3584x512 nb 64 gemm2s_q4_k: median 4.4 TMAC/s (min 4.4 max 4.4; 0.027 ms)
+kv    Q4_K 3584x512 nb 64 gemm2_q4_k: median 2.7 TMAC/s (min 2.6 max 2.7; 0.044 ms)
+kv    Q4_K 3584x512 nb 64 gemm2t_q4_k: median 2.8 TMAC/s (min 2.7 max 2.8; 0.043 ms)
+kv    Q4_K 3584x512 nb 1024 gemm2s_q4_k: median 11.6 TMAC/s (min 11.6 max 11.6; 0.162 ms)
+kv    Q4_K 3584x512 nb 1024 gemm2_q4_k: median 10.3 TMAC/s (min 10.3 max 10.3; 0.182 ms)
+kv    Q4_K 3584x512 nb 1024 gemm2t_q4_k: median 12.4 TMAC/s (min 12.4 max 12.4; 0.152 ms)
+gate+up 3584x2x18944 nb 64 gemm2s_q4_k_gu: median 16.0 TMAC/s (min 16.0 max 16.0; 0.543 ms)
+gate+up 3584x2x18944 nb 1024 gemm2s_q4_k_gu: median 13.2 TMAC/s (min 11.3 max 16.0; 10.530 ms)
+ok
+test cuda::qwen2::tests::cuda_i2f_bench ... I2FBENCH NVIDIA GeForce RTX 4050 Laptop GPU sm_89 I2F: 30.8 results/clk/SM (median of 5; + 1 FADD and 1 IADD each)
+I2FBENCH NVIDIA GeForce RTX 4050 Laptop GPU sm_89 magic: 35.4 results/clk/SM (median of 5; + 1 FADD and 1 IADD each)
+ok
+test cuda::qwen2::tests::gpu_magic_i2f_is_cvt_rn ... magic I2F == __int2float_rn on 134217728 pairs (device)
+ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 696 filtered out; finished in 61.49s
+
+[axon-node 20:13:08] exit 0 after 61.6s
+[axon-node 20:13:08] peak RSS 235 MB (job process tree PSS, 2 s samples x30)
+[axon-run 20:13:09] exit 0 after 64.5s (host avante)
