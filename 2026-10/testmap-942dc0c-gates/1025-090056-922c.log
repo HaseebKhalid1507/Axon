@@ -1,0 +1,32 @@
+[axon-run 09:00:56] submitted 1025-090056-922c by /home/haseeb/.cache/axon-memcg: /home/haseeb/.cache/axon-memcg/tm/axon-test-dbg-942dc0c hybrid::tests::hybrid_logits_match_cpu_0_5b hybrid::tests::stream_logits_match_cpu_qwen3 identity::tests::of_split_and_pipeline moe::tests::moe_gpu_logits_graded_pruned model::tests::release_ gguf::tests::release_ testutil::load_tests
+[axon-run 09:01:42] job 1025-090056-922c -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 5000 --env AXON_NODE_PACK=1 --src /home/haseeb/.cache/axon-wt-testmap /home/haseeb/.cache/axon-memcg/tm/axon-test-dbg-942dc0c hybrid::tests::hybrid_logits_match_cpu_0_5b hybrid::tests::stream_logits_match_cpu_qwen3 identity::tests::of_split_and_pipeline moe::tests::moe_gpu_logits_graded_pruned model::tests::release_ gguf::tests::release_ testutil::load_tests
+axon-remote: uploading axon-test-dbg-942dc0c (8fd750b7256391ef076cb7e8) + source of /home/haseeb/.cache/axon-wt-testmap
+
+sent 1,894,827 bytes  received 5,059 bytes  3,799,772.00 bytes/sec
+total size is 6,696,638  speedup is 3.52
+
+sent 7,182,732 bytes  received 35 bytes  4,788,511.33 bytes/sec
+total size is 23,295,192  speedup is 3.24
+axon-remote: job 20261025-090145-axon-test-dbg-942dc0c-716473 on avante (GPU, 5000 MB)
+[axon-node 09:01:45] GPU slot taken; job wants 5000 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 51
+[axon-node 09:01:45] run axon-test-dbg-942dc0c (8fd750b7256391ef076cb7e8) as /home/haseeb/.cache/axon-wt-testmap on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 9 tests
+test gguf::tests::release_small_anonymous_model ... ok
+test gguf::tests::release_span_unaligned_base ... ok
+testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test model::tests::release_keeps_embedding_on_copy_and_mmap ... ok
+test hybrid::tests::stream_logits_match_cpu_qwen3 ... ok
+test identity::tests::of_split_and_pipeline ... ok
+test testutil::load_tests::released_tensor_refused_on_a_mapping ... ok
+test testutil::load_tests::loaders_map_as_the_product_does ... ok
+test moe::tests::moe_gpu_logits_graded_pruned ... ok
+test hybrid::tests::hybrid_logits_match_cpu_0_5b has been running for over 60 seconds
+test hybrid::tests::hybrid_logits_match_cpu_0_5b ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 696 filtered out; finished in 62.54s
+
+[axon-node 09:02:48] exit 0 after 62.7s
+[axon-node 09:02:48] peak RSS 4202 MB (job process tree PSS, 2 s samples x31)
+[axon-run 09:02:48] exit 0 after 66.2s (host avante)
+[axon-run 09:02:51] EXPECT ok: output matches /test result: ok/
