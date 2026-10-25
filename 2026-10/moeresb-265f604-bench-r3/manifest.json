@@ -1,0 +1,29 @@
+{
+ "label": "moeresb-265f604-bench-r3",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1025-021642-5e98",
+   "name": "moeresb-265f604-bench-r3",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "265f604",
+   "binary": "axon-test-265f604",
+   "started": 1792909448.3095276,
+   "ended": 1792909453.380122,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "4394ee1791a6b1819545d0c85cf6b9453bcd4aea5d2139bc07dc66e869de7adf",
+   "log_bytes": 1374
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-25 02:24:14 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}

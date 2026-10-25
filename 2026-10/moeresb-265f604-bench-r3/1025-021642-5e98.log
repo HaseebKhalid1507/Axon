@@ -1,0 +1,12 @@
+[axon-run 02:16:42] submitted 1025-021642-5e98 by /home/haseeb/.cache/axon-wt-moeres-b: /home/haseeb/.cache/axon-moeres/axon-test-265f604 cuda::qwen2::experts::tests::cuda_experts_moonlight_bench --ignored --exact --test-threads 1 --nocapture
+[axon-run 02:24:08] scope axon-job-1025-021642-5e98-1792909448.scope in app-axonjobs.slice: MemoryMax 20390 MB, MemoryHigh 18351 MB, no swap, oomd pressure kill 80% (claim 12911 MB): an OOM here kills only this job
+[axon-run 02:24:08] job 1025-021642-5e98 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1025-021642-5e98-1792909448 --slice=app-axonjobs.slice -p MemoryMax=20390M -p MemoryHigh=18351M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-moeres/axon-test-265f604 cuda::qwen2::experts::tests::cuda_experts_moonlight_bench --ignored --exact --test-threads 1 --nocapture
+
+running 1 test
+test cuda::qwen2::experts::tests::cuda_experts_moonlight_bench ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 699 filtered out; finished in 0.30s
+
+[axon-run 02:24:08] exit 0 after 0.4s (host bella)
+[axon-run 02:24:13] FOREIGN_GPU max=?% mean=?% samples=0 (not sampled: ran before the guard, or pmon unavailable)
