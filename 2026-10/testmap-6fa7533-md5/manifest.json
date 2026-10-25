@@ -1,0 +1,29 @@
+{
+ "label": "testmap-6fa7533-md5",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1025-063401-9f19",
+   "name": "testmap-6fa7533-md5",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "6fa7533",
+   "binary": "md5.sh",
+   "started": 1792930787.295434,
+   "ended": 1792930830.563622,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "af6334560101155f3699c4bddf8b04d09b528602c10df6469312017f5e479d0f",
+   "log_bytes": 5134
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-25 08:20:30 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
