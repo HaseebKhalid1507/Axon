@@ -5006,16 +5006,16 @@ pub(crate) mod tests {
                     x
                 });
             }
-            // A released original: the copy refuses it; so does the file
-            // map in tests and debug builds (`gguf::STRICT_RELEASE`), while
-            // its pages (what a release build reads) fault the same bytes
-            // back in.
+            // A released original: the copy refuses it, the file map faults
+            // the same bytes back in.
             let t = repacked[0];
-            let r =
-                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| m.tensor_data(t).len()));
-            assert!(r.is_err(), "released tensor readable (copy {copy})");
-            if !copy {
-                assert_eq!(m.tensor_data_unchecked(t), fresh.tensor_data(t));
+            if copy {
+                let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    m.tensor_data(t).len()
+                }));
+                assert!(r.is_err(), "released tensor readable on the anonymous copy");
+            } else {
+                assert_eq!(m.tensor_data(t), fresh.tensor_data(t));
             }
             let mut c = net.new_cache(ids.len());
             net.feed_batch(&ids[..ids.len() - 1], 0, &mut c);

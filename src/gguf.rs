@@ -9,13 +9,6 @@ use std::fs::File;
 use std::io::{self, Read};
 
 const GGUF_MAGIC: u32 = 0x46554747;
-/// Whether `Model::tensor_data` refuses a released tensor on a file mapping
-/// too (tests and debug builds). There the read is harmless (the pages fault
-/// back in from the file), but the same read on the anonymous copy
-/// (AXON_MMAP=0, or a model that reads in place) gets zeros: so a bug that
-/// reads after `release` fails in every test, whichever way its model was
-/// loaded. Release builds keep the anonymous-only check.
-const STRICT_RELEASE: bool = cfg!(any(test, debug_assertions));
 /// GGML_MAX_DIMS.
 const MAX_DIMS: u32 = 4;
 /// `general.alignment` when the file doesn't set it.
@@ -497,6 +490,10 @@ pub struct Model {
     /// overlap one.
     released: std::sync::Mutex<Vec<(u16, std::ops::Range<usize>)>>,
     any_released: std::sync::atomic::AtomicBool,
+    /// Tests only: refuse a released tensor on a file mapping too, as on
+    /// the copy (`strict_release`).
+    #[cfg(test)]
+    strict_release: bool,
     /// Tensors `load` rewrote (llama's reordered q/k rows) when `data` maps
     /// the file: their bytes live here, each in its own anonymous mapping,
     /// and `tensor_data` reads them from it (the mapping stays the file's,
@@ -565,8 +562,8 @@ impl Model {
     }
 
     /// The tensor's bytes. Panics if they were `release`d from anonymous
-    /// memory (they'd read as zeros), and, in tests and debug builds
-    /// (`STRICT_RELEASE`), from a file mapping too.
+    /// memory (they'd read as zeros), and from a file mapping too on a test
+    /// model loaded by `load` (`strict_release`).
     pub(crate) fn tensor_data(&self, t: &Tensor) -> &[u8] {
         let r = self.tensor_range(t);
         if t.shard == 0
@@ -580,7 +577,7 @@ impl Model {
             "tensor {} was not converted (a header-only load: gguf::load_header)",
             t.name
         );
-        if (!file_backed || STRICT_RELEASE)
+        if (!file_backed || self.strict_release())
             && self.any_released.load(std::sync::atomic::Ordering::Acquire)
         {
             // Unlocked before the panic: a caught one leaves the lock usable.
@@ -595,19 +592,18 @@ impl Model {
         &map[r]
     }
 
-    /// `tensor_data` without the released-tensor check, for tests of what a
-    /// release build reads (`STRICT_RELEASE` is off there): on a file
-    /// mapping a released tensor's pages fault back in with the file's
-    /// bytes. Never in non-test code.
-    #[cfg(test)]
-    pub(crate) fn tensor_data_unchecked(&self, t: &Tensor) -> &[u8] {
-        let r = self.tensor_range(t);
-        if t.shard == 0
-            && let Some(s) = self.side_of(&r)
-        {
-            return &s.map[..r.len()];
-        }
-        &self.region(t.shard).0[r]
+    /// Whether released tensors are refused on a file mapping too: a test
+    /// model loaded by `load`, the tests' default loader, which used to copy
+    /// the file (where a released tensor reads as zeros and is refused). A
+    /// read after `release` stays a failure in those tests now that they map
+    /// the file. Never outside tests; explicit `load_with(_, Some(false))`
+    /// loads, which build several nets from one mapping on purpose (a mapped
+    /// file reads back what's been released), keep the copy-only check.
+    fn strict_release(&self) -> bool {
+        #[cfg(test)]
+        return self.strict_release;
+        #[cfg(not(test))]
+        false
     }
 
     /// The side copy holding bytes `r` of `data`, if any.
@@ -663,7 +659,7 @@ impl Model {
         }
         rel.insert(i, (s, r));
         let (map, file_backed) = self.region(s);
-        if !file_backed || STRICT_RELEASE {
+        if !file_backed || self.strict_release() {
             self.any_released
                 .store(true, std::sync::atomic::Ordering::Release);
         }
@@ -914,6 +910,13 @@ pub(crate) fn mem_available() -> Option<u64> {
 /// None: copy unless over 60%) is the copy path, for the tests that want it.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn load(path: &str) -> io::Result<Model> {
+    #[cfg(test)]
+    {
+        let mut m = load_to_run(path, None, crate::model::cpu_copy_wish)?;
+        m.strict_release = true;
+        Ok(m)
+    }
+    #[cfg(not(test))]
     load_to_run(path, None, crate::model::cpu_copy_wish)
 }
 
@@ -1128,6 +1131,8 @@ impl Model {
             file_backed,
             released: Default::default(),
             any_released: Default::default(),
+            #[cfg(test)]
+            strict_release: false,
             side: Vec::new(),
             file: None,
             ahead: false,
@@ -1532,6 +1537,8 @@ pub fn build_for_test_with(
         file_backed: false,
         released: Default::default(),
         any_released: Default::default(),
+        #[cfg(test)]
+        strict_release: false,
         side: Vec::new(),
         file: None,
         ahead: false,

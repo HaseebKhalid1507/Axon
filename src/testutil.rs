@@ -474,9 +474,10 @@ mod load_tests {
         }
     }
 
-    /// In tests (and debug builds) a released tensor is refused on a file
-    /// mapping too, as on the anonymous copy (`gguf::STRICT_RELEASE`): a
-    /// read after `release` fails whichever way the test loaded its model.
+    /// A test model from the default loader (`gguf::load`, which maps it
+    /// now) refuses a released tensor on its file mapping too, as the copy
+    /// it used to be did (`Model::strict_release`); an explicit mapped load
+    /// (`load_with(_, Some(false))`) reads it back, as before.
     #[test]
     fn released_tensor_refused_on_a_mapping() {
         let Some(p) = super::model_path() else {
@@ -490,6 +491,14 @@ mod load_tests {
         m.release(t);
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| m.tensor_data(t).len()));
         assert!(r.is_err(), "a released tensor was readable on the mapping");
+        let explicit = crate::gguf::load_with(p.to_str().unwrap(), Some(false)).unwrap();
+        let before = explicit.tensor_data(t).to_vec();
+        explicit.release(t);
+        assert_eq!(
+            explicit.tensor_data(t),
+            &before[..],
+            "explicit mapping reads it back"
+        );
         // Its neighbours are not refused.
         let u = (m.tensors.iter())
             .find(|t| t.name == "blk.0.attn_q.weight")
