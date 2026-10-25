@@ -8,6 +8,8 @@
 use std::fs::File;
 use std::io::{self, Read};
 
+pub(crate) mod mem;
+
 const GGUF_MAGIC: u32 = 0x46554747;
 /// GGML_MAX_DIMS.
 const MAX_DIMS: u32 = 4;
@@ -780,7 +782,8 @@ impl Model {
 ///
 /// The copy is not shared between processes and can't be dropped under memory
 /// pressure the way page cache can, so it's skipped (file mmap instead) when the file
-/// is over 60% of `MemAvailable`. `AXON_MMAP=1` always maps the file, `AXON_MMAP=0`
+/// is over 60% of `MemAvailable` (or of a tighter cgroup limit's room:
+/// `mem_available`). `AXON_MMAP=1` always maps the file, `AXON_MMAP=0`
 /// always copies.
 ///
 /// Assumes Linux >= 6.7 for 2 MB-aligned anonymous mappings; on older kernels the
@@ -820,13 +823,13 @@ fn copy_choice(copy: Option<bool>, len: usize, wanted: bool) -> bool {
         (None, Ok("0")) => true,
         (None, Ok(_)) => false,
         (None, Err(_)) if !wanted => false,
-        (None, Err(_)) => match mem_available() {
-            Some(avail) if len as u64 > avail / 10 * 6 => {
+        (None, Err(_)) => match mem::avail() {
+            Some(avail) if len as u64 > avail.bytes / 10 * 6 => {
                 eprintln!(
-                    "note: model is {} MB, {} MB available; mapping the file instead of \
-                     copying it (AXON_MMAP=0 forces the copy)",
+                    "note: model is {} MB, {} MB available ({avail}); mapping the file instead \
+                     of copying it (AXON_MMAP=0 forces the copy)",
                     len >> 20,
-                    avail >> 20
+                    avail.bytes >> 20
                 );
                 false
             }
@@ -869,12 +872,10 @@ fn page_size() -> usize {
     if p > 0 { p as usize } else { 4096 }
 }
 
-/// `MemAvailable` from /proc/meminfo, in bytes.
+/// RAM available to this process, in bytes: /proc/meminfo's `MemAvailable`,
+/// or less under a tighter cgroup memory limit (`mem::avail`).
 pub(crate) fn mem_available() -> Option<u64> {
-    let s = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let line = s.lines().find(|l| l.starts_with("MemAvailable:"))?;
-    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
-    Some(kb * 1024)
+    mem::avail().map(|a| a.bytes)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]

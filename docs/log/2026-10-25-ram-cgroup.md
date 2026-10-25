@@ -1,0 +1,87 @@
+# RAM available honours cgroup memory limits  (PR #133)
+
+- Date: 2026-10-25. Branch: fix/ram-cgroup. Base: main b2068e7. Status: open
+- Pick / design: issue #129 (found while diagnosing #127's bella gate, #128).
+
+## What changed
+- New `src/gguf/mem.rs`: `mem::avail()` = the smaller of the host's `/proc/meminfo` `MemAvailable` and the
+  tightest memory cgroup level from the process's cgroup up to the hierarchy's mount root, plus what bound it
+  (`Bound::Host` or `Bound::Cgroup { path, limit, v1 }`).
+  - cgroup v2, per level: `memory.max − (memory.current − inactive_file − active_file)` (`memory.stat`; file pages
+    are page cache the kernel reclaims before it OOM-kills). `max` = no limit; the v2 root has no `memory.max`.
+  - cgroup v1 (memory controller on a v1 hierarchy, which wins on a hybrid system): the same walk with
+    `memory.limit_in_bytes` (≥ 2^62 = no limit: the kernel's PAGE_COUNTER_MAX), `memory.usage_in_bytes`,
+    `total_inactive_file + total_active_file` (else the cgroup's own `inactive_file + active_file`). Every ancestor
+    counts (kernels ≥ 5.x always account hierarchically).
+  - The process's cgroup from `/proc/self/cgroup`, the mount from `/proc/self/mountinfo` (`cgroup2`, or `cgroup`
+    with `memory` in the super options), else `/sys/fs/cgroup` (v2) / `/sys/fs/cgroup/memory` (v1). A mount whose
+    root is a subtree (a container without its own cgroup namespace) is mapped by stripping that prefix.
+  - Anything unreadable or unparsable is "no limit at that level"; no cgroupfs at all leaves the host's figure,
+    as before. Everything is read under a `root` path, so the tests build synthetic v1/v2 trees.
+  - Not counted: `memory.high` (throttles, doesn't kill), swap (`MemAvailable` doesn't count it either).
+- `gguf::mem_available()` returns `mem::avail()`'s bytes, so every caller follows the limit: `moe::check_ram`,
+  the copy-vs-map choice (`copy_choice`), the read-ahead guard, `axon serve`'s CPU context plan (`cpu_ctx`).
+- `moe::check_ram`'s refusal now ends `(bound by host MemAvailable)` or
+  `(bound by cgroup <path> memory.max <N> MB)`; the map-instead-of-copy note names the bound too.
+
+## Why
+Inside a container or a systemd scope whose memory limit is below the host's `MemAvailable`, Axon accepted a MoE
+load it couldn't fit and the kernel OOM-killed it, instead of the clean "needs N GB, M GB available" refusal.
+Datacenter / Docker / K8s deployments almost always run under a memory limit. On bella every agent process already
+runs under `app.slice` (MemoryMax 23 GB) on a 30 GB host, and every axon-run job in its own scope below that: the
+real-machine unit test prints `mem avail: 17765 MB (cgroup /user.slice/user-1000.slice/user@1000.service/app.slice
+memory.max 23552 MB)` from a bash shell there.
+
+## How it was verified
+| gate | result | job ID / log |
+|---|---|---|
+| refusal demo, bella, MoE at `MemoryMax=1000M` | main: OOM-killed (rc 137, scope Result=oom-kill); candidate: clean refusal (rc 2) naming the scope | 1025-053958-9d5b, 1025-054020-70da, 1025-054259-1d9c (adds a 4500M fits case) |
+| release suite (fast tier) | PASS 646 / 0 / 48 (18 filtered: fast tier) | 1025-054002-957f (avante sm_89) |
+| debug-assertion suite (fast tier, CPU) | PASS 664 / 0 / 48 | 1025-054002-f395 (bella, CPU queue) |
+| md5 of `gen`, main b2068e7 vs candidate, same host | 24/24 identical (4 models × 3 prompts × cpu, cuda f16) | 1025-053959-b9a6 |
+| clippy -D warnings (lib, lib tests, bin), rustfmt | clean | local |
+| unit tests on synthetic trees | 7 in `gguf::mem::tests`, `moe::tests::ram_refusal_names_the_bound` | in the suites |
+| CI (`check`) | pass | GitHub Actions run 40182151785 |
+| review fixes (b9fa9f7, test + doc changes in `gguf/mem.rs` only): focused unit tests, clippy, rustfmt | PASS 11 / 0 / 0 (9 `gguf::mem`, 2 `moe` ram tests); clippy (lib, tests, bin) and rustfmt clean | 1025-062654-89ff (avante, CPU) |
+
+## Results
+MEASURED, bella (Core Ultra 9 275HX, 30 GB, Linux 7.2.11 CachyOS, systemd 262, cgroup v2), job 1025-054020-70da: each binary
+runs `gen <model> "The capital of France is" -n 8 --device cpu` in its own `systemd-run --user --scope
+-p MemoryMax=… -p MemorySwapMax=0`, host MemAvailable ~21 GB.
+
+| case | cap | main b2068e7 | candidate |
+|---|---|---|---|
+| Qwen3-30B-A3B-Pruned-2B Q4_K_M (MoE, 1.5 GB file; check needs 3.2 GB) | 1000M | OOM-killed, rc 137, no message | refused, rc 2: `qwen3moe: the CPU model needs about 3.2 GB of RAM (its repacked experts 1.1 GB) and only 1.0 GB is available (bound by cgroup /user.slice/…/memcg-demo-…-moe-cand.scope memory.max 1000 MB)` |
+| same MoE | 4500M | rc 0, md5 55b6eced… | rc 0, md5 55b6eced… (fits: no false refusal; job 1025-054259-1d9c) |
+| qwen2.5-0.5b Q4_K_M (dense, 491 MB) | 400M | OOM-killed, rc 137 | OOM-killed, rc 137 (unchanged: see below) |
+| qwen2.5-0.5b Q4_K_M | none | rc 0, md5 8df6a47e… | rc 0, md5 8df6a47e… |
+
+What the md5 gate shows: on bella every process runs under a cgroup limit (app.slice 23 GB, and each axon-run
+job's scope below it), so the 24/24 md5 set ran the *cgroup-bound* path, and it shows map vs copy under a limit
+gives the same bytes. "Unchanged without any limit" rests on reading the code: no limited level, or room ≥ the
+host's, returns `Bound::Host` with the bytes of the same `/proc/meminfo` parse as before.
+
+No speed claim; pp/tg n/a (a few small file reads per load; no kernel or numerics change).
+
+## What didn't work / gaps
+- **Dense CPU models have no RAM check at all** (main and candidate alike): `check_ram` only runs for MoE models.
+  Under a cap below the dense model's repacked r8 arena the load is still OOM-killed (the 0.5B at 400M above). With
+  this change a dense model that reads in place now maps instead of copying under a tight cgroup, but nothing
+  refuses a dense load that can't fit. Follow-up issue: a `check_ram` for dense CPU models.
+- `memory.high` could be added as a softer bound (a load over it is throttled hard, without swap nearly stalled);
+  left out to keep the issue's "will be OOM-killed" semantics.
+
+## Review round (shady 7/10, b9fa9f7)
+- `real_avail_at_most_host` read `MemAvailable` twice (via `avail()` and again directly) and could fail when the
+  host binds and memory drops between the reads; replaced by `real_avail_is_found` (a figure exists on Linux,
+  printed). The min itself is `avail_at`'s, covered by the synthetic trees.
+- New tests: `v2_cgroupns_private_root` (`0::/`, cgroup2 mounted with root `/`, the top directory's `memory.max`),
+  `v2_picks_the_mount_above_the_cgroup` (two cgroup2 mounts: the one whose root is above the process's cgroup is
+  read; it was the first match before).
+- `active_file`: kept counting all of the file LRU as room. The kernel's `MemAvailable` (`si_mem_available`)
+  counts page cache less min(half, the low watermark), so the two figures compete on the same terms, and it's the
+  right question for "OOM-killed or not". Half of `active_file` was considered and dropped: an axon-run job's own
+  mapped model is charged to its scope, so the stricter figure would refuse loads that fit. Documented in the
+  module docs, with the cost (a sibling's hot mapped pages count as room: a refault, not a kill).
+- Not changed: the label says "MB" for `limit >> 20` (MiB), as the rest of Axon's messages do; the demo quotes it.
+
