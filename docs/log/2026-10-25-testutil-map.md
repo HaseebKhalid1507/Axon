@@ -40,9 +40,18 @@ scopes, jade's cap) and RAM the scheduler has to claim for nothing.
 | md5 of `gen`, main vs candidate, same host @43bc8b7 | 24/24 identical (4 models × 3 prompts × cpu, cuda f16) | 1025-054657-ad4c (bella) |
 | debug-assertion suite @6fa7533 | FAIL 656 / 1: `release_keeps_embedding_on_copy_and_mmap` read a released tensor on the mapping on purpose (the new guard's first catch); release job 1025-063402-4bbe dropped | 1025-063402-cf93 (avante) |
 | focused `release_` + `testutil::load_tests` @5583215 (the test fixed, `#[cfg(test)] tensor_data_unchecked`) | PASS 6 / 0 / 0 release and debug | 1025-065516-bfea, 1025-065517-03c0 |
-| release suite (fast tier) @5583215 | pending | 1025-065721-7ada (bella, --ram 16000) |
-| debug-assertion suite (fast tier, CPU) @5583215 | pending | 1025-065721-1c4a (avante, --ram 16000) |
-| md5 @6fa7533 (valid for 5583215: test-only commit) | pending | 1025-063401-9f19 (bella) |
+| release suite @5583215 | FAIL 616 / 23: GPU tests that load mapped explicitly and build several nets from one Model hit the global STRICT_RELEASE; repro 1025-085554-48d3 | 1025-065721-7ada |
+| debug suite @5583215 (CPU; the GPU tests skip) | PASS 656 / 0 / 48 | 1025-065721-1c4a |
+| md5 @6fa7533 | 24/24 identical | 1025-063401-9f19 |
+| product check, main fb749cc, GPU paths with AXON_MMAP=0 | pending | 1025-085708-49c2 |
+| focused @942dc0c (4 of the failing GPU tests + release_ + load_tests) | PASS 9 / 0 / 0 release; debug pending | 1025-090053-8d97, 1025-090056-922c |
+| release suite @942dc0c | pending | 1025-090159-950b (bella, --ram 16000) |
+| debug suite @942dc0c | pending | 1025-090159-a17c (avante, --ram 16000) |
+| md5 @942dc0c | pending | 1025-090158-53fc (bella) |
+
+Final guard (942dc0c): a per-Model `#[cfg(test)]` `strict_release` flag set by `gguf::load`, the tests' default
+loader (the loads that used to copy). Explicit mapped loads keep main's copy-only check (they reuse one Model across
+several builds by design), and so do all non-test builds. The global `STRICT_RELEASE` of 6fa7533/5583215 is gone.
 | clippy -D warnings (lib, tests, bin), rustfmt | clean | local |
 
 ## Results
