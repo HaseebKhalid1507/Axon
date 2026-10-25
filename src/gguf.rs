@@ -595,6 +595,21 @@ impl Model {
         &map[r]
     }
 
+    /// `tensor_data` without the released-tensor check, for tests of what a
+    /// release build reads (`STRICT_RELEASE` is off there): on a file
+    /// mapping a released tensor's pages fault back in with the file's
+    /// bytes. Never in non-test code.
+    #[cfg(test)]
+    pub(crate) fn tensor_data_unchecked(&self, t: &Tensor) -> &[u8] {
+        let r = self.tensor_range(t);
+        if t.shard == 0
+            && let Some(s) = self.side_of(&r)
+        {
+            return &s.map[..r.len()];
+        }
+        &self.region(t.shard).0[r]
+    }
+
     /// The side copy holding bytes `r` of `data`, if any.
     fn side_of(&self, r: &std::ops::Range<usize>) -> Option<&Side> {
         if self.side.is_empty() || r.is_empty() {
