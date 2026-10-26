@@ -104,8 +104,9 @@ const MLA_MM_SC: usize = 32;
 /// - k_b (128 columns) crosses at 32 tokens on both: 32.
 /// - v_b (512) costs ~85 µs per tile against ~1.53 µs per token (sm_120;
 ///   sm_89: ~188 against ~3.85), so it needs > ~56 (> ~49) tokens per tile:
-///   58. That takes 64, 116 .. 128, 174 .., and keeps mla_heads_mv for 65 ..
+///   58. That takes 58 .. 64, 116 .. 128, 174 .., and keeps mla_heads_mv for 65 ..
 ///   115 (sm_120 at 96: 146 µs vs 165).
+///
 /// Not part of the bits.
 fn mm_fill(cols: usize) -> usize {
     if cols <= MLA_MM_NARROW {

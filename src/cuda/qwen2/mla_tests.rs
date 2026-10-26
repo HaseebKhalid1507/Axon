@@ -1122,13 +1122,13 @@ fn mla_decode_kernel_bench() {
 }
 
 /// The dispatch rule (`mm_fits`) at the measured points: k_b from 32 tokens
-/// on, v_b at 64 and from 116, not at 65 .. 115.
+/// on, v_b at 58 .. 64 and from 116, not at 65 .. 115.
 #[test]
 fn heads_mm_dispatch() {
     let k_b = |nb| mm_fits(nb, 512, 128);
     let v_b = |nb| mm_fits(nb, 128, 512);
     assert!(!k_b(31) && k_b(32) && k_b(64) && k_b(96) && k_b(2100));
-    assert!(!v_b(63) && v_b(64) && !v_b(65) && !v_b(96) && !v_b(115));
+    assert!(!v_b(57) && v_b(58) && v_b(64) && !v_b(65) && !v_b(96) && !v_b(115));
     assert!(v_b(116) && v_b(128) && !v_b(130) && v_b(2100));
 }
 
