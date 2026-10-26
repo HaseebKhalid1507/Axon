@@ -1,0 +1,29 @@
+{
+ "label": "mlapf-2852486-perf",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1026-091356-73bb",
+   "name": "mlapf-2852486-perf",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "3f04dbc",
+   "binary": "perfpf.sh",
+   "started": 1793020959.4409044,
+   "ended": 1793021051.3963215,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "6882a5a98df61165a28782aa291130a48a7463e2a9cc547bf7c05fe5110111bb",
+   "log_bytes": 2007
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-26 09:24:14 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}

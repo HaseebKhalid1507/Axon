@@ -1,0 +1,20 @@
+[axon-run 09:13:56] submitted 1026-091356-73bb by /home/haseeb/.cache/axon-wt-mlapf: /home/haseeb/.cache/axon-mlapf/perfpf.sh /home/haseeb/.cache/axon-mlapf/axon-base-3f04dbc /home/haseeb/.cache/axon-mlapf/axon-2852486 3
+[axon-run 09:22:39] scope axon-job-1026-091356-73bb-1793020959.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 16000 MB): an OOM here kills only this job
+[axon-run 09:22:39] job 1026-091356-73bb -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-091356-73bb-1793020959 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-mlapf/perfpf.sh /home/haseeb/.cache/axon-mlapf/axon-base-3f04dbc /home/haseeb/.cache/axon-mlapf/axon-2852486 3
+PERF out /home/haseeb/.cache/axon-mlapf/perfpf-1026-092239
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 615.78.08, 47
+resident 26 of 26 -> llama.cpp -ncmoe 0
+R	1	axon-base	pp509	3415.88	tg128	158.83	pp2105	2129.36	d163d7f5237d	09:22:48
+R	1	axon-cand	pp509	4242.92	tg128	157.75	pp2105	3212.55	d163d7f5237d	09:22:57
+R	1	llama-t8	pp512	5017.8	tg128	193.71	pp2100	4988.1			09:23:06
+[axon-run 09:23:12] FOREIGN_GPU sample max=0% mean=0.0% n=6
+R	2	axon-cand	pp509	4248.29	tg128	158.01	pp2105	3211.69	ee96c92b7216	09:23:16
+R	2	llama-t8	pp512	5252.3	tg128	170.69	pp2100	4703.9			09:23:25
+R	2	axon-base	pp509	3423.71	tg128	148.99	pp2105	2130.35	ee96c92b7216	09:23:35
+R	3	llama-t8	pp512	5226.3	tg128	183.56	pp2100	4709.5			09:23:43
+[axon-run 09:23:45] FOREIGN_GPU sample max=0% mean=0.0% n=6
+R	3	axon-base	pp509	3421.53	tg128	156.73	pp2105	2136.58	d63e13105dfe	09:23:52
+R	3	axon-cand	pp509	4327.43	tg128	158.09	pp2105	3168.50	d63e13105dfe	09:24:02
+PERF DONE /home/haseeb/.cache/axon-mlapf/perfpf-1026-092239
+[axon-run 09:24:07] exit 0 after 87.6s (host bella)
+[axon-run 09:24:14] FOREIGN_GPU max=0% mean=0.0% samples=16
