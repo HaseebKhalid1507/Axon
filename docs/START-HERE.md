@@ -169,8 +169,8 @@ As of main `39624db` (2026-10-25). None of these is on main; each is open work:
   - the **Moonlight bench of record** against llama.cpp (`--n-cpu-moe`), since #127's ×2.06 / ×3.40 was against
     Axon's own CPU-expert path and TAINTED;
   - **Qwen3-30B-A3B step 0**: the resident path for `qwen3moe`, which has none yet.
-- **Hardening:** #135 (a dense CPU load under a memory limit is OOM-killed instead of refused) and #137 (an
-  explicit `--parallel N` can silently come up serving one request at a time when VRAM is short).
+- **Hardening:** #135 (a dense CPU load under a memory limit is OOM-killed instead of refused). #137 (an explicit
+  `--parallel N` silently serving fewer slots) is fixed by #141: it's refused at start.
 - **Library API for embedders:** the rest of #118 (stderr from library code, env-only config, leaks, `serve`'s
   exits). The v0.1.0 tag is Haseeb's call.
 - **Determinism modes** (`--numerics exact | fast`): an ADR merged as PROPOSED

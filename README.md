@@ -400,7 +400,8 @@ flags of `chat`, plus `--host` (default 127.0.0.1), `--port` (default 8080), `--
 default: up to the context), `--cors [ORIGIN]` (answer CORS preflights and allow ORIGIN,
 default `*`, to call the server from web pages; off by default, so an arbitrary page can't
 use your local model), `--max-conns N` / `--max-queue N` (defaults 256 / 128),
-`--parallel N` (requests decoded at once on the GPU, default 16 with paged KV, 8 without; 1: one at a time),
+`--parallel N` (requests decoded at once on the GPU, default 16 with paged KV, 8 without; 1: one at a time;
+an explicit N that doesn't fit in GPU memory at start is refused, the automatic sizing falls back and says so),
 `--prefill-chunk N` (at least N prompt tokens a batched step feeds while others decode;
 default 256; `--prefill-chunk 0`: whole prompts), `--step-ms MS` (a step's target time
 while requests decode, default 60: the prompt tokens it feeds beside their decode step are
