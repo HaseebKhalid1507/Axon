@@ -692,12 +692,13 @@ const DENSE_MATS: [&str; 7] = [
 /// dense CPU load is refused, before the per-CPU part (`dense_tolerance`).
 /// The check reads the cgroup's (or host's) use at one moment, before the
 /// load, and some of what's in use then is given back before the load's
-/// peak. Measured on bella (6 pool threads, cgroup v2; docs/log
-/// 2026-10-26-ram-dense.md, job 1025-234700-f438): at the smallest
-/// MemoryMax a 9-token `gen` survives with AXON_MMAP=0, the estimate
-/// exceeded the figure read by up to ~25 MiB (the 3B); mapped, it fell
-/// short of it by 10-20 MiB. Within the tolerance a load isn't refused: it
-/// may then still be OOM-killed.
+/// peak. Measured on bella, cgroup v2 (docs/log 2026-10-26-ram-dense.md):
+/// at the smallest MemoryMax a 9-token `gen` survives with AXON_MMAP=0, the
+/// estimate exceeded the figure read by up to ~25 MiB (the 3B, 6 pool
+/// threads on 8 CPUs: tolerance 34 MiB; job 1026-021417-49d0) and fell
+/// below it at 18 threads on 24 CPUs (tolerance 38 MiB; job
+/// 1026-021417-daf4); mapped, it fell short of it by 10-20 MiB. Within the
+/// tolerance a load isn't refused: it may then still be OOM-killed.
 const DENSE_CHECK_TOLERANCE: u64 = 32 << 20;
 
 /// A memory cgroup's per-CPU charge batch (the kernel's MEMCG_CHARGE_BATCH,
@@ -859,8 +860,9 @@ pub(crate) fn check_ram_dense(m: &Model, ctx: usize) -> Result<Option<String>, S
 /// chunk's matrices one after another). How many matrices are in flight at
 /// the peak depends on the threads' timing, so only one is counted: on
 /// bella with AXON_MMAP=0 the 3B's smallest working cap grew 47 MiB from 6
-/// to 18 threads, 3.9 MiB a thread against 6 MiB a matrix (docs/log
-/// 2026-10-26-ram-dense.md), and counting them all false-refused it. So the
+/// to 18 threads, 3.9 MiB a thread against its ~19 MiB largest matrix
+/// (docs/log 2026-10-26-ram-dense.md), and counting 18 of them
+/// false-refused it. So the
 /// peak counted is the growth (repacked minus replaced bytes, without a
 /// tied head's), a tied head, and the larger of an untied head and one
 /// layer matrix, at most the arena. More threads in flight is the OOM
