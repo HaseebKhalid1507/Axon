@@ -33,16 +33,21 @@ allowance window.
 The full table (nb 1 … 1024, every kernel) is in the gist. Reference ceilings, `cuda_gemm_bench`: `mma.sync` int8
 peak 325 TMAC/s, f16 279.
 
-- **Exact vs no drain:** 0.94–1.00 at every shape for nb ≥ 128, except two cells at 0.906 / 0.908 (q/wo nb 256,
-  kv nb 1024).
-  - Those two are the same cells where the magic variant beat the exact kernel by 10–11 %, so they look like slow
-    samples of the exact kernel rather than a drain cost.
-  - The lowest overall is down nb 8 at 0.878, a size the product runs on gemv/gemvm, not gemmh2.
+- **Exact vs no drain:** the pre-registered rule is "within 10 %", with no nb scope. Measured over every cell:
+  - 0.94–1.00 at nb ≥ 128, except 0.906 (kv nb 1024) and 0.908 (q/wo nb 256). q/wo nb 512 is 0.945.
+  - The lowest is **0.878 at down nb 8**, outside 10 %.
+  - Restricting the verdict to nb ≥ 128 (the sizes that route to gemmh2; nb 8 runs on gemv/gemvm) is a **scope
+    chosen after the data**, stated here as such.
+  - On q/wo at nb 256–512 and kv at nb 1024, both the no-drain and the magic variant beat the exact kernel, which
+    looks systematic, not like noise. It is **unexplained and needs a rerun** of those cells.
   - The no-drain variant still waits per block, so this bounds the drain's arithmetic, not that wait.
 - **The no-drain GEMM is itself 119.4 TMAC/s** at gate nb 1024, the same as the exact kernel and as `gemm2t`
   (mma.sync).
-- **Magic-S:** bit-identical in all 12 kernel cases (4 adversarial, including the fused gate+up) and on 134 M
-  device pairs. Speed vs exact is 0.97–1.06 everywhere except those same two outlier cells.
+- **Magic-S:** bit-identical in all 12 kernel cases (3 of them adversarial: 3584×192, 18944×128 and the fused
+  gate+up 3584×256) and on 134 M device pairs. Speed vs exact:
+  - 0.97–1.06 on gate / down / gate+up at nb ≥ 128, and 0.999 at gate nb 1024;
+  - **1.06–1.11 on q/wo at nb 256–512 and kv at nb 1024**, plus 1.083 at down nb 8.
+  - It may be a free exact win of 6–11 % on the narrow shapes: **open, untested** until those cells are rerun.
 - **I2F throughput:** I2F 33.8 results/clk/SM, magic 38.1. The research note cited 16.
 
 ## Decode step (`pool_step_cost`, 7B, graphs on, ms per step)
@@ -55,7 +60,11 @@ peak 325 TMAC/s, f16 279.
 The solo decode step (forward_argmax) is 3.23 / 3.32 ms. The review's showdown figure was 18.6 ms at nb 128 and
 depth ~790, which falls between the two rows.
 
-Per kernel (events, no graphs, so totals are about 20 % above the graphed step), nb 128:
+Per kernel, nb 128 (events, no graphs). Caveats:
+- The totals are above the graphed step: +24 % at depth 600 (19.47 vs 15.72 ms), +12 % at depth 4096.
+- The segments include quantize work that the class split counts as "other": gate_up 5.21 + narrow 6.30 =
+  11.51 ms, above the GEMM class's 10.97.
+- "attention" below is attn + combine. The attention class including rope_kv is 5.70 / 18.93 ms.
 
 | depth | total | GEMM | attention (attn + combine) | norms / elementwise | head | narrow products (q, k, v, wo, down) |
 |---|---|---|---|---|---|---|
@@ -63,6 +72,9 @@ Per kernel (events, no graphs, so totals are about 20 % above the graphed step),
 | 4096 | 32.62 | 10.91 (33 %) | 18.70 (57 %) | 0.91 | 1.09 | 6.30 |
 
 At nb 256, depth 4096, attention is 37.4 of 59.7 ms (63 %).
+
+For M6's size: at nb 128 on the narrow shapes, `gemm2s` (64 × 64 tiles, more CTAs) beats gemmh2 by 1.5–1.6×:
+q/wo 70.1 vs 46.4, down 81.6 vs 51.3 TMAC/s. On kv at nb 1024 it is 1.66× (78.8 vs 47.5).
 
 ## Serve, mix C = 128 (sd_client, the showdown's prompt set and SLO)
 
@@ -72,6 +84,11 @@ At nb 256, depth 4096, attention is 37.4 of 59.7 ms (63 %).
 | #119 hybrid step (ecdb1d0) | 1,822 (−3 %) | 10,222 / 15,679 | 28.2 / 40.5 | 211 | 0.11 |
 
 The first row reproduces the 10-19 showdown cell (1,868 tok/s, ITL p50 57.9).
+
+Caveats on the comparison:
+- #119 was **closed NO-GO on 10-25** (`2026-10-25-reject-hybrid-step.md`). This cell is consistent with that verdict.
+- Only one run per arm, the arms are on different bases (9efdcf2 vs ecdb1d0), and only the first arm was traced.
+- So "−3 %" is within single-run noise at C = 128. TTFT ×5.5 and goodput −70 % are large enough to stand.
 
 Step trace of the first row, 1,047 steps, 38.04 s wall:
 
@@ -85,6 +102,15 @@ Step trace of the first row, 1,047 steps, 38.04 s wall:
 - 524 of the 1,047 steps ran two passes (a feed plus a decode).
 - Their decode passes cost 9.73 s. The decode step at ≥ 0.9 × C rows is 20.9 ms at p50.
 
+Against the outside review's model (§2.2):
+- Its model: 251k prompt tokens at a lone prompt's 13.8k tok/s = 18.2 s, plus 556 ideal decode steps × 18.6 ms =
+  10.3 s.
+- Measured: feeds 21.87 s and decode 15.69 s, **≈ 9.1 s (24 %) above that model**.
+- The excess is inside the GPU passes, through the mechanisms the review named: two passes per step (524 of them)
+  and small chunks (feeds at 11.2k tok/s vs 13.8k).
+- This **confirms the review's ~25 % in size and cause**. Host work is negligible (1.2 %); the review didn't claim
+  otherwise.
+
 #119's `pool_hybrid_cost`: at the same token budget, fusing saves 30–35 % at chunk 128 (nb 32 / 64), 10–26 % at 256, 11–17 % at
 512. At the same chunk the saving is −4.5 to +15.7 %: negative at chunk 256 for nb 64 and 128, and at 512 for nb 128.
 
@@ -96,23 +122,29 @@ Step trace of the first row, 1,047 steps, 38.04 s wall:
 | 600 | 5.69 ms | 58.2 µs |
 | 4096 | 7.35 ms | 64.7 µs |
 
-The shortest-first spec estimated t0 at 8–10 ms on an H100, derived from the C = 1 short-prompt TTFT, so it is the
-cost of a whole short-prompt pass. Measured, a 64-token pass costs 9.96 ms (depth 0), which is inside that range.
-The spec's ~1 s per 104-short wave in two-pass mode therefore stands, and so does its "on the edge without #119" note.
+**Correction to 7643217:** that commit read "t0 is under the estimate, so 1(c) doesn't need #119". It compared the
+wrong quantity.
+- The spec derived its "t0 ≈ 8–10 ms" from a 14 ms short-prompt TTFT and used it as the cost of a whole
+  short-prompt pass (104 × t0 ≈ 1 s per wave, spec §4.5).
+- Measured: a 64-token pass costs 9.96 ms (depth 0). In the serve trace, the 25 single-feed steps of ≤ 80 tokens
+  took a median **9.79 ms** of feed.
+- So the spec's estimate holds. About 1 s per 104-short wave sits between the rule's two outcomes (0.5 vs 1.5 s);
+  short TTFT p50 ~0.3 s is on the edge.
 
 ## What the numbers decide
 
 Read against the pre-registered rules in the kit's PLAN.md (axon-devstack `runbooks/h100-anatomy`), filled there.
-In short:
 
-- **Exactness contract:** cleared on Hopper (within 10 %).
-- **Item 2, E0'(b):** the no-drain kernel is under 180 TMAC/s, so the restructure comes first.
-- **M6 split-K:** the narrow products are 6.3 ms of the nb 128 step (≥ 3 ms), so M6 goes before the round-2 GEMM.
-- **Attention at depth:** it is now the largest term at depth 4,096, which the review's ranking didn't have.
-- **The review's "~25 % is neither kernel" is wrong as stated:** host time is 1.2 %. The scheduler cost is real, but
-  it sits inside the passes: 524 two-pass steps and 467-token chunks.
-- **#119 as configured doesn't pay at C = 128 on Hopper:** −3 % aggregate, TTFT ×5.5, goodput −70 %, against
-  ITL ÷2.
-- **Shortest-first:** a short pass costs ~10 ms, which confirms the spec's estimate. A wave of shorts in two-pass
-  mode takes ~1 s, and short TTFT p50 ~0.3 s is on the edge. #119 as configured doesn't help at C = 128, so 1(c) goes
-  ahead without waiting for it and is judged by its own A/B.
+- **Exactness contract:** cleared on Hopper within 10 % for nb ≥ 128. That scope was chosen after the data: down
+  nb 8 is 0.878, and q/wo / kv need a rerun.
+- **Item 2, E0'(b):** the kill trigger **fired** (no-drain 119.4 < 180). The rule's two branches were "structure
+  first" or "go to item 4". **Owner's choice after the trigger (Jawz, lead): item 2 continues structure-first.**
+  Reason: no-drain equals exact (119.4 vs 118.9), so dropping exactness (item 4) recovers nothing at nb 1024.
+- **M6 split-K:** the narrow products are 6.3 ms of the nb 128 step (≥ 3 ms, robust to the event and quantize
+  overheads), so M6 goes before the round-2 GEMM. gemm2s's 1.5–1.66× on narrow shapes says more CTAs pay there.
+- **Attention at depth:** it is the largest term at depth 4,096 (57 %), which the review's ranking didn't have.
+- **The review's ~25 % scheduler term is confirmed** (≈ 24 %, inside the passes: two passes per step and small
+  chunks). Host work is 1.2 %.
+- **#119:** closed NO-GO on 10-25, and this cell is consistent with that. Reopening it would need its own proposal.
+- **Shortest-first (1(c)):** the spec's ~10 ms per short pass holds, which puts ~1 s per wave on the edge.
+  Independently of t0, 1(c) doesn't wait for #119 because #119 is closed.
