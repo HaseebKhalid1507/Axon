@@ -676,14 +676,6 @@ fn reads_in_place_with(m: &Model, repack: bool) -> bool {
         .any(|t| repacked_len(t).is_none())
 }
 
-/// Headroom the dense CPU RAM check wants beyond the r8 arena and the KV
-/// cache (the forward pass's scratch, the side copies). Deliberately small:
-/// the check refuses what can't fit, never a load that could. Measured on
-/// bella (docs/log/2026-10-26-ram-dense.md): the smallest cgroup limit a
-/// 9-token `gen` survives is the arena plus 72-118 MB (0.5B to 1B), of
-/// which the process already uses some when this runs.
-const DENSE_RAM_HEADROOM: u64 = 32 << 20;
-
 /// What a dense model on the CPU (`Qwen2::new`) takes in anonymous memory
 /// beyond the file (`check_ram_dense`): the r8 arena (with `repack`: the
 /// output head and every layer matrix with an r8/r8q form, as `build`
@@ -728,11 +720,16 @@ pub(crate) fn dense_ram_need(m: &Model, repack: bool, ctx: usize, kv_elem: u64) 
     (arena, kv)
 }
 
-/// Refuse a dense model the CPU can't hold (#135): its r8 arena, its KV
-/// cache for `ctx` positions and `DENSE_RAM_HEADROOM` against the RAM
-/// available (`gguf::mem::avail`: the host's `MemAvailable`, or a tighter
-/// cgroup limit's room), naming the bound, instead of an OOM kill. A MoE
-/// model has its own check (`moe_check_ram`). Reads metadata only.
+/// Refuse a dense model the CPU can't hold (#135): its r8 arena and its KV
+/// cache for `ctx` positions against the RAM available (`gguf::mem::avail`:
+/// the host's `MemAvailable`, or a tighter cgroup limit's room), naming the
+/// bound, instead of an OOM kill. No headroom on top, on purpose: both are
+/// anonymous memory the run touches, so a load that fits has at least that
+/// much available here, and the check never refuses one. The forward pass's
+/// scratch (tens of MB) isn't counted: a limit within it of the arena is
+/// still an OOM kill, not a refusal (measured: docs/log
+/// 2026-10-26-ram-dense.md). A MoE model has its own check
+/// (`moe_check_ram`). Reads metadata only.
 pub(crate) fn check_ram_dense(m: &Model, ctx: usize) -> Result<(), String> {
     let repack = std::env::var("AXON_REPACK").map_or(true, |v| v != "0");
     let elem = if crate::kv::use_f32() { 4 } else { 2 };
@@ -750,7 +747,7 @@ fn check_ram_dense_with(
         return Ok(());
     }
     let (arena, kv) = dense_ram_need(m, repack, ctx, kv_elem);
-    let want = arena + kv + DENSE_RAM_HEADROOM;
+    let want = arena + kv;
     match avail {
         Some(avail) if avail.bytes < want => Err(format!(
             "{}: the CPU model needs about {:.2} GB of RAM (its repacked weights {:.2} GB, a \
@@ -5888,7 +5885,7 @@ mod ram_dense_tests {
         let (arena, kv) = dense_ram_need(&m, true, 1000, 2);
         assert_eq!(kv, nl * 2 * kvd * 1000 * 2);
         assert_eq!(dense_ram_need(&m, true, 1000, 4).1, 2 * kv);
-        let want = arena + kv + DENSE_RAM_HEADROOM;
+        let want = arena + kv;
         assert!(check_ram_dense_with(&m, true, 1000, 2, host(want)).is_ok());
         assert!(check_ram_dense_with(&m, true, 1000, 2, None).is_ok());
         let cg = Avail {
