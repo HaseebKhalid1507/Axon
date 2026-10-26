@@ -701,8 +701,15 @@ pub(crate) struct DenseNeed {
     /// with an r8/r8q form, laid out as `build` does (64-byte offsets, 2 MB
     /// pages); 0 without the repack.
     pub arena: u64,
-    /// The largest single matrix's share of it.
+    /// The output head's share of it, and whether the head is the tied
+    /// embedding (then its copied bytes stay: `embed` reads them).
+    pub head: u64,
+    pub tied: bool,
+    /// The largest layer matrix's share.
     pub largest: u64,
+    /// What the repacked forms take beyond the bytes they replace, summed
+    /// (a copy hands the replaced bytes back).
+    pub growth: u64,
     /// KV cache bytes a position (K and V rows of every layer).
     pub kv_per_pos: u64,
 }
@@ -713,35 +720,46 @@ pub(crate) struct DenseNeed {
 pub(crate) fn dense_ram_need(m: &Model, repack: bool, kv_elem: u64) -> DenseNeed {
     let layers = m.n_layers() as i32;
     let ours = |t: &&Tensor| t.layer >= 0 && t.layer < layers;
-    let out = match find_opt(m, "output.weight") {
-        Some(_) => "output.weight",
-        None => "token_embd.weight",
+    let tied = find_opt(m, "output.weight").is_none();
+    let out = if tied {
+        "token_embd.weight"
+    } else {
+        "output.weight"
     };
-    let lens: Vec<u64> = match repack {
-        false => Vec::new(),
-        true => (m.tensors.iter())
+    let mut need = DenseNeed {
+        arena: 0,
+        head: 0,
+        tied,
+        largest: 0,
+        growth: 0,
+        kv_per_pos: (m.tensors.iter())
+            .filter(ours)
+            .filter(|t| t.name.ends_with(".attn_k.weight") || t.name.ends_with(".attn_v.weight"))
             .filter(|t| t.dims.len() >= 2)
-            .filter(|t| {
-                t.name == out
-                    || (ours(t)
-                        && t.name.starts_with("blk.")
-                        && DENSE_MATS.iter().any(|s| t.name.ends_with(s)))
-            })
-            .filter_map(repacked_len)
-            .map(|l| l.next_multiple_of(64) as u64)
-            .collect(),
+            .map(|t| t.dims[1] * kv_elem)
+            .sum(),
     };
-    let kv_per_pos = (m.tensors.iter())
-        .filter(ours)
-        .filter(|t| t.name.ends_with(".attn_k.weight") || t.name.ends_with(".attn_v.weight"))
-        .filter(|t| t.dims.len() >= 2)
-        .map(|t| t.dims[1] * kv_elem)
-        .sum();
-    DenseNeed {
-        arena: lens.iter().sum::<u64>().next_multiple_of(2 << 20),
-        largest: lens.iter().copied().max().unwrap_or(0),
-        kv_per_pos,
+    if !repack {
+        return need;
     }
+    for t in (m.tensors.iter()).filter(|t| t.dims.len() >= 2) {
+        let head = t.name == out;
+        let layer = ours(&t)
+            && t.name.starts_with("blk.")
+            && DENSE_MATS.iter().any(|s| t.name.ends_with(s));
+        let Some(len) = repacked_len(t).filter(|_| head || layer) else {
+            continue;
+        };
+        let len = len.next_multiple_of(64) as u64;
+        need.arena += len;
+        match head {
+            true => need.head = len,
+            false => need.largest = need.largest.max(len),
+        }
+        need.growth += len.saturating_sub(t.n_bytes);
+    }
+    need.arena = need.arena.next_multiple_of(2 << 20);
+    need
 }
 
 /// Refuse a dense model the CPU can't hold (#135), before it's built, with
@@ -780,18 +798,21 @@ pub(crate) fn check_ram_dense(m: &Model, ctx: usize) -> Result<Option<String>, S
 /// The anonymous memory a dense CPU load commits on top of what's in use
 /// when `check_ram_dense` runs. Mapped: the whole arena (the file's pages
 /// are page cache the kernel reclaims; #128). Copied: the copy is already in
-/// use, and each repacked matrix's copied bytes are handed back right after
-/// its repack (`Weight::load`, release), so the peak adds only the matrices
-/// being repacked at once (one per pool thread, plus the release
-/// granularity), at most the arena.
+/// use, and `build` hands each repacked matrix's copied bytes back right
+/// after its repack (`Weight::load`, release). The head goes first, alone,
+/// then the layers, a matrix per pool thread at a time; a tied head keeps
+/// its copied bytes (the embedding reads them). So the peak adds what the
+/// repacked forms take beyond the bytes they replace (`growth`), a tied
+/// head, and the larger of an untied head's own repack and the matrices in
+/// flight (each with the release granularity), at most the arena.
 pub(crate) fn dense_load_bytes(need: DenseNeed, copied: bool, threads: u64) -> u64 {
-    match copied {
-        false => need.arena,
-        true => match need.arena {
-            0 => 0,
-            a => a.min(threads.max(1) * (need.largest + COPY_RELEASE_SLOP)),
-        },
+    if !copied || need.arena == 0 {
+        return need.arena;
     }
+    let tied = if need.tied { need.head } else { 0 };
+    let untied = if need.tied { 0 } else { need.head };
+    let flight = threads.max(1) * (need.largest + COPY_RELEASE_SLOP);
+    need.arena.min(need.growth + tied + untied.max(flight))
 }
 
 /// `check_ram_dense`'s decision (pure): Err to refuse, Ok(Some(warning))
@@ -5928,9 +5949,13 @@ mod ram_dense_tests {
                 "{what}: no repack, no arena"
             );
             eprintln!(
-                "{what}: r8 arena {} MiB (largest matrix {} MiB), KV {} KiB a position, file {} MiB",
+                "{what}: r8 arena {} MiB (head {} MiB{}, largest layer matrix {} MiB, growth {} \
+                 MiB), KV {} KiB a position, file {} MiB",
                 need.arena >> 20,
+                need.head >> 20,
+                if need.tied { " tied" } else { "" },
                 need.largest >> 20,
+                need.growth >> 20,
                 need.kv_per_pos >> 10,
                 m.data.len() >> 20
             );
@@ -5990,20 +6015,26 @@ mod ram_dense_tests {
         assert!(check_ram_dense(&moe, 1000).is_ok());
     }
 
+    /// llama-3.1-8B-like: a 4.6 GiB arena, an untied 500 MiB head, 56 MiB
+    /// FFN matrices, 128 KiB of f16 KV a position (32 layers x 8 KV heads x
+    /// 128 x 2), the repack taking 1% more than it replaces.
+    const L8: DenseNeed = DenseNeed {
+        arena: 4710 * MIB,
+        head: 500 * MIB,
+        tied: false,
+        largest: 56 * MIB,
+        growth: 47 * MIB,
+        kv_per_pos: 128 << 10,
+    };
+
     /// #142 review MUST 1: an explicit long context isn't refused for KV it
-    /// may never touch (the CPU cache is a lazy mapping): llama-3.1-8B-like
-    /// shapes (4.6 GiB arena, 32 layers x 8 KV heads x 128 x f16 = 128 KiB
-    /// a position) at --ctx 131072 (a 16 GiB full cache) under a 6 GiB
-    /// limit load, with a warning; only the weights plus the floor's KV
-    /// (8192 positions, 1 GiB) not fitting is refused.
+    /// may never touch (the CPU cache is a lazy mapping): at --ctx 131072 (a
+    /// 16 GiB full cache) under a 6 GiB limit the load goes ahead with a
+    /// warning; only the weights plus the floor's KV (8192 positions, 1 GiB)
+    /// not fitting is refused.
     #[test]
     fn long_ctx_warns_not_refuses() {
-        let need = DenseNeed {
-            arena: 4710 * MIB,
-            largest: 56 * MIB,
-            kv_per_pos: 128 << 10,
-        };
-        let w = dense_verdict("llama", need, false, 24, 131072, host(6 * GIB))
+        let w = dense_verdict("llama", L8, false, 24, 131072, host(6 * GIB))
             .expect("refused a load whose weights and floor KV fit");
         let w = w.expect("no warning for a 16 GiB cache beside 6 GiB");
         assert!(
@@ -6012,43 +6043,56 @@ mod ram_dense_tests {
         );
         // Short enough to fit whole: no warning.
         assert_eq!(
-            dense_verdict("llama", need, false, 24, 4096, host(6 * GIB)),
+            dense_verdict("llama", L8, false, 24, 4096, host(6 * GIB)),
             Ok(None)
         );
         // The weights and the floor don't fit: refused.
-        let e = dense_verdict("llama", need, false, 24, 131072, host(5 * GIB)).unwrap_err();
+        let e = dense_verdict("llama", L8, false, 24, 131072, host(5 * GIB)).unwrap_err();
         assert!(e.contains("the KV cache of 8192 tokens 1.00 GiB"), "{e}");
     }
 
-    /// #142 review MUST 2: the copied model is already in use at the check,
-    /// and each repacked matrix's copied bytes go back after its repack, so
-    /// a copy commits only the matrices in flight (a pool thread each, plus
-    /// 4 MiB of release granularity), at most the arena; the mapping
-    /// commits the whole arena.
+    /// #142 review MUST 2: a copied model is already in use at the check, and
+    /// each repacked matrix's copied bytes go back after its repack: the copy
+    /// commits the growth, a tied head, and the larger of an untied head and
+    /// the matrices in flight (a pool thread each, plus 4 MiB), at most the
+    /// arena; the mapping commits the whole arena.
     #[test]
     fn copied_load_commits_the_matrices_in_flight() {
-        let need = DenseNeed {
-            arena: 4710 * MIB,
-            largest: 56 * MIB,
-            kv_per_pos: 0,
-        };
-        assert_eq!(dense_load_bytes(need, false, 24), 4710 * MIB);
-        assert_eq!(dense_load_bytes(need, true, 24), 24 * 60 * MIB);
+        assert_eq!(dense_load_bytes(L8, false, 24), 4710 * MIB);
+        assert_eq!(dense_load_bytes(L8, true, 24), (47 + 24 * 60) * MIB);
         assert_eq!(
-            dense_load_bytes(need, true, 1000),
+            dense_load_bytes(L8, true, 4),
+            (47 + 500) * MIB,
+            "the head's own repack"
+        );
+        let tied = DenseNeed { tied: true, ..L8 };
+        assert_eq!(dense_load_bytes(tied, true, 4), (47 + 500 + 4 * 60) * MIB);
+        assert_eq!(
+            dense_load_bytes(L8, true, 1000),
             4710 * MIB,
             "at most the arena"
         );
-        let none = DenseNeed { arena: 0, ..need };
+        let none = DenseNeed { arena: 0, ..L8 };
         assert_eq!(
             dense_load_bytes(none, true, 24),
             0,
             "reads in place: nothing repacked"
         );
-        // A copy the arena wouldn't fit beside, but the in-flight matrices do.
-        assert!(dense_verdict("llama", need, true, 24, 16, host(2 * GIB)).is_ok());
-        assert!(dense_verdict("llama", need, false, 24, 16, host(2 * GIB)).is_err());
-        let e = dense_verdict("llama", need, true, 24, 16, host(GIB)).unwrap_err();
-        assert!(e.contains("(repacking the copy 1.41 GiB"), "{e}");
+        // A copy the arena wouldn't fit beside, but its repack does.
+        assert!(dense_verdict("llama", L8, true, 24, 16, host(2 * GIB)).is_ok());
+        assert!(dense_verdict("llama", L8, false, 24, 16, host(2 * GIB)).is_err());
+        let e = dense_verdict("llama", L8, true, 24, 16, host(GIB)).unwrap_err();
+        assert!(e.contains("(repacking the copy 1.45 GiB"), "{e}");
+    }
+
+    /// The real models' growth and head: the head is the tied embedding
+    /// when there's no output.weight; growth is at most the arena.
+    #[test]
+    fn dense_need_head_and_growth() {
+        let (m, _) = tests::dense_fixture("qwen3", crate::quant::Q8_0);
+        let n = dense_ram_need(&m, true, 2);
+        assert_eq!(n.tied, find_opt(&m, "output.weight").is_none());
+        assert!(n.head > 0 && n.growth <= n.arena && n.largest <= n.arena);
+        assert_eq!(dense_ram_need(&m, false, 2).head, 0);
     }
 }
