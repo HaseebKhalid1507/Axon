@@ -1,0 +1,38 @@
+[axon-run 07:04:01] submitted 1026-070401-8039 by /home/haseeb/.cache/axon-wt-mlapf: /home/haseeb/.cache/axon-mlapf/axon-test-d87ab20 cuda::qwen2::mla::tests::mla_prefill_kernel_bench cuda::qwen2::mla::tests::mla_attn_b_equals_main_128_heads --include-ignored --nocapture --test-threads 1
+[axon-run 09:00:02] scope axon-job-1026-070401-8039-1793019602.scope in app-axonjobs.slice: MemoryMax 11524 MB, MemoryHigh 10371 MB, no swap, oomd pressure kill 80% (claim 7000 MB): an OOM here kills only this job
+[axon-run 09:00:02] job 1026-070401-8039 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-070401-8039-1793019602 --slice=app-axonjobs.slice -p MemoryMax=11524M -p MemoryHigh=10371M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-mlapf/axon-test-d87ab20 cuda::qwen2::mla::tests::mla_prefill_kernel_bench cuda::qwen2::mla::tests::mla_attn_b_equals_main_128_heads --include-ignored --nocapture --test-threads 1
+axon-q 09:00:02 waiting: stagger
+axon-q 09:00:08 start slot 16-23: /home/haseeb/.cache/axon-mlapf/axon-test-d87ab20 cuda::qwen2::mla::tests::mla_prefill_kernel_bench cuda::qwen2::mla::tests::mla_attn_b_equals_main_128_heads --include-ignored --nocapture --test-thread
+
+running 2 tests
+test cuda::qwen2::mla::tests::mla_attn_b_equals_main_128_heads ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+test cuda::qwen2::mla::tests::mla_prefill_kernel_bench ... bench on NVIDIA GeForce RTX 5070 Ti Laptop GPU (sm_120, 46 SMs)
+heads k_b nb 8: main 18.7 [18.7-18.7] us | cand mm 54.5 [54.4-54.6] us
+heads k_b nb 16: main 34.1 [34.1-34.1] us | cand mm 55.3 [55.3-55.3] us
+heads k_b nb 24: main 47.1 [47.1-47.1] us | cand mm 56.2 [56.2-56.2] us
+heads k_b nb 32: main 62.4 [62.4-62.4] us | cand mm 57.9 [57.9-58.6] us
+heads k_b nb 48: main 91.0 [91.0-91.0] us | cand mm 61.7 [61.2-61.8] us
+heads k_b nb 64: main 119.9 [119.4-120.1] us | cand mm 63.5 [63.3-63.8] us
+heads k_b nb 96: main 177.3 [177.3-177.4] us | cand mm 120.1 [119.5-120.1] us
+heads k_b nb 128: main 236.2 [235.8-236.6] us | cand mm 124.6 [124.2-124.8] us
+heads k_b nb 512: main 930.4 [929.5-932.3] us | cand mm 484.5 [480.3-484.8] us
+heads k_b nb 2100: main 3929.7 [3850.2-4017.4] us | cand mm 1964.0 [1953.2-1984.5] us
+heads v_b nb 8: main 15.8 [15.8-15.9] us | cand mm 68.4 [68.4-68.7] us
+heads v_b nb 16: main 27.4 [27.4-27.4] us | cand mm 69.4 [69.4-69.4] us
+heads v_b nb 24: main 41.2 [41.2-41.2] us | cand mm 70.5 [70.5-70.7] us
+heads v_b nb 32: main 53.6 [53.6-53.6] us | cand mm 82.1 [82.1-82.1] us
+heads v_b nb 48: main 75.2 [75.2-75.3] us | cand mm 84.0 [84.0-84.1] us
+heads v_b nb 64: main 100.0 [99.9-100.0] us | cand mm 85.6 [85.6-85.7] us
+heads v_b nb 96: main 146.1 [146.1-146.2] us | cand mm 164.5 [164.4-164.6] us
+heads v_b nb 128: main 192.4 [192.3-192.5] us | cand mm 170.1 [170.0-170.2] us
+heads v_b nb 512: main 752.9 [751.9-753.0] us | cand mm 504.5 [504.5-504.5] us
+heads v_b nb 2100: main 3272.6 [3271.5-3378.9] us | cand mm 2046.4 [2046.0-2046.5] us
+attn batch 64 from 0: main 31.5 [31.5-31.6] us | cand attn_b (512 threads) 29.8 [29.8-29.8] us
+attn batch 512 from 0: main 1144.0 [1138.1-1149.3] us | cand attn_b (512 threads) 670.5 [668.6-671.0] us
+attn batch 2100 from 0: main 19576.1 [18692.7-20633.7] us | cand attn_b (512 threads) 11223.2 [10808.6-11543.4] us
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 754 filtered out; finished in 6.22s
+
+[axon-run 09:00:14] exit 0 after 12.3s (host bella)

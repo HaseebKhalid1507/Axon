@@ -1,0 +1,47 @@
+[axon-run 07:04:00] submitted 1026-070400-1745 by /home/haseeb/.cache/axon-wt-mlapf: /home/haseeb/.cache/axon-mlapf/axon-test-d87ab20 cuda::qwen2::mla::tests::mla_prefill_kernel_bench cuda::qwen2::mla::tests::mla_attn_b_equals_main_128_heads --include-ignored --nocapture --test-threads 1
+[axon-run 07:10:16] job 1026-070400-1745 -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 3500 --env AXON_NODE_PACK=1 --src /home/haseeb/.cache/axon-wt-mlapf /home/haseeb/.cache/axon-mlapf/axon-test-d87ab20 cuda::qwen2::mla::tests::mla_prefill_kernel_bench cuda::qwen2::mla::tests::mla_attn_b_equals_main_128_heads --include-ignored --nocapture --test-threads 1
+axon-remote: uploading axon-test-d87ab20 (6c9949dac48b2bfad0d87809) + source of /home/haseeb/.cache/axon-wt-mlapf
+
+sent 2,036,504 bytes  received 5,398 bytes  1,361,268.00 bytes/sec
+total size is 7,581,066  speedup is 3.71
+
+sent 6,977,686 bytes  received 35 bytes  4,651,814.00 bytes/sec
+total size is 21,881,048  speedup is 3.14
+axon-remote: job 20261026-071021-axon-test-d87ab20-2068066 on avante (GPU, 3500 MB)
+[axon-node 07:10:21] GPU slot taken; job wants 3500 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 54
+[axon-node 07:10:21] run axon-test-d87ab20 (6c9949dac48b2bfad0d87809) as /home/haseeb/.cache/axon-wt-mlapf on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 2 tests
+test cuda::qwen2::mla::tests::mla_attn_b_equals_main_128_heads ... testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+test cuda::qwen2::mla::tests::mla_prefill_kernel_bench ... bench on NVIDIA GeForce RTX 4050 Laptop GPU (sm_89, 20 SMs)
+heads k_b nb 8: main 50.6 [48.9-50.6] us | cand mm 163.1 [162.3-168.0] us
+heads k_b nb 16: main 81.4 [81.3-92.3] us | cand mm 145.3 [145.2-153.5] us
+heads k_b nb 24: main 119.9 [119.8-119.9] us | cand mm 150.4 [149.9-153.4] us
+heads k_b nb 32: main 160.2 [158.0-160.8] us | cand mm 153.1 [152.5-154.3] us
+heads k_b nb 48: main 238.6 [233.2-238.7] us | cand mm 159.5 [156.6-160.1] us
+heads k_b nb 64: main 319.0 [316.3-323.7] us | cand mm 168.9 [166.6-169.8] us
+heads k_b nb 96: main 482.6 [482.0-483.2] us | cand mm 301.6 [299.1-302.6] us
+heads k_b nb 128: main 645.3 [641.9-650.3] us | cand mm 314.7 [314.6-321.2] us
+heads k_b nb 512: main 2622.3 [2621.3-2633.9] us | cand mm 1280.5 [1277.3-1280.8] us
+heads k_b nb 2100: main 11129.7 [10942.3-11415.2] us | cand mm 5162.6 [5144.4-5850.8] us
+heads v_b nb 8: main 36.7 [36.7-36.7] us | cand mm 155.1 [155.1-155.1] us
+heads v_b nb 16: main 65.4 [65.4-65.4] us | cand mm 157.7 [157.1-157.8] us
+heads v_b nb 24: main 97.0 [97.0-97.1] us | cand mm 163.7 [163.5-164.4] us
+heads v_b nb 32: main 125.7 [125.6-125.9] us | cand mm 177.8 [177.5-177.9] us
+heads v_b nb 48: main 187.5 [184.6-187.6] us | cand mm 182.6 [181.7-185.3] us
+heads v_b nb 64: main 248.7 [248.6-250.1] us | cand mm 187.5 [187.3-188.9] us
+heads v_b nb 96: main 368.8 [361.8-387.8] us | cand mm 362.4 [359.0-384.7] us
+heads v_b nb 128: main 488.0 [486.4-488.1] us | cand mm 365.7 [365.6-377.9] us
+heads v_b nb 512: main 2016.1 [1927.0-2151.9] us | cand mm 1215.7 [1203.7-1335.1] us
+heads v_b nb 2100: main 8448.2 [8194.8-9054.1] us | cand mm 5444.8 [5152.8-5613.6] us
+attn batch 64 from 0: main 64.1 [63.2-66.6] us | cand attn_b (512 threads) 52.7 [50.6-53.8] us
+attn batch 512 from 0: main 3227.9 [2937.4-3359.4] us | cand attn_b (512 threads) 2038.6 [2015.2-2089.2] us
+attn batch 2100 from 0: main 54747.9 [53337.5-55025.7] us | cand attn_b (512 threads) 33018.3 [32374.2-33321.0] us
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 754 filtered out; finished in 13.62s
+
+[axon-node 07:10:35] exit 0 after 13.7s
+[axon-node 07:10:35] peak RSS 248 MB (job process tree PSS, 2 s samples x6)
+[axon-run 07:10:35] exit 0 after 19.1s (host avante)
