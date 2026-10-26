@@ -676,6 +676,95 @@ fn reads_in_place_with(m: &Model, repack: bool) -> bool {
         .any(|t| repacked_len(t).is_none())
 }
 
+/// Headroom the dense CPU RAM check wants beyond the r8 arena and the KV
+/// cache: the process itself, the forward pass's scratch (a prefill batch's
+/// activations and logits), the tokenizer and the side copies. Calibrated
+/// against the smallest cgroup limit `gen` survives (docs/log
+/// 2026-10-26-ram-dense.md).
+const DENSE_RAM_HEADROOM: u64 = 256 << 20;
+
+/// What a dense model on the CPU (`Qwen2::new`) takes in anonymous memory
+/// beyond the file (`check_ram_dense`): the r8 arena (with `repack`: the
+/// output head and every layer matrix with an r8/r8q form, as `build`
+/// lays it out), and the KV cache for `ctx` positions (`kv_elem` bytes an
+/// element: f16 2, f32 4), both in bytes. The file itself isn't counted:
+/// mapped, its pages are page cache the kernel reclaims (after the repack
+/// little of it is read again); copied (a model that reads in place),
+/// it's already in use when this runs, so the RAM available excludes it.
+pub(crate) fn dense_ram_need(m: &Model, repack: bool, ctx: usize, kv_elem: u64) -> (u64, u64) {
+    const MATS: [&str; 7] = [
+        "attn_q.weight",
+        "attn_k.weight",
+        "attn_v.weight",
+        "attn_output.weight",
+        "ffn_gate.weight",
+        "ffn_up.weight",
+        "ffn_down.weight",
+    ];
+    let out = match find_opt(m, "output.weight") {
+        Some(_) => "output.weight",
+        None => "token_embd.weight",
+    };
+    let arena: u64 = match repack {
+        false => 0,
+        true => (m.tensors.iter())
+            .filter(|t| t.dims.len() >= 2)
+            .filter(|t| {
+                t.name == out
+                    || (t.name.starts_with("blk.") && MATS.iter().any(|s| t.name.ends_with(s)))
+            })
+            .filter_map(repacked_len)
+            .map(|l| l.next_multiple_of(64) as u64)
+            .sum::<u64>()
+            .next_multiple_of(2 << 20),
+    };
+    // A layer's K and V rows: its attn_k / attn_v output width.
+    let kv: u64 = (m.tensors.iter())
+        .filter(|t| t.name.ends_with(".attn_k.weight") || t.name.ends_with(".attn_v.weight"))
+        .filter(|t| t.dims.len() >= 2)
+        .map(|t| t.dims[1] * ctx as u64 * kv_elem)
+        .sum();
+    (arena, kv)
+}
+
+/// Refuse a dense model the CPU can't hold (#135): its r8 arena, its KV
+/// cache for `ctx` positions and `DENSE_RAM_HEADROOM` against the RAM
+/// available (`gguf::mem::avail`: the host's `MemAvailable`, or a tighter
+/// cgroup limit's room), naming the bound, instead of an OOM kill. A MoE
+/// model has its own check (`moe_check_ram`). Reads metadata only.
+pub(crate) fn check_ram_dense(m: &Model, ctx: usize) -> Result<(), String> {
+    let repack = std::env::var("AXON_REPACK").map_or(true, |v| v != "0");
+    let elem = if crate::kv::use_f32() { 4 } else { 2 };
+    check_ram_dense_with(m, repack, ctx, elem, crate::gguf::mem::avail())
+}
+
+fn check_ram_dense_with(
+    m: &Model,
+    repack: bool,
+    ctx: usize,
+    kv_elem: u64,
+    avail: Option<crate::gguf::mem::Avail>,
+) -> Result<(), String> {
+    if moe::is_moe(m) {
+        return Ok(());
+    }
+    let (arena, kv) = dense_ram_need(m, repack, ctx, kv_elem);
+    let want = arena + kv + DENSE_RAM_HEADROOM;
+    match avail {
+        Some(avail) if avail.bytes < want => Err(format!(
+            "{}: the CPU model needs about {:.2} GB of RAM (its repacked weights {:.2} GB, a \
+             {ctx}-token KV cache {:.2} GB) and only {:.2} GB is available (bound by {avail}); \
+             a smaller --ctx, a smaller model or more memory",
+            m.arch,
+            want as f64 / 1e9,
+            arena as f64 / 1e9,
+            kv as f64 / 1e9,
+            avail.bytes as f64 / 1e9
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Everything `Qwen2::new` and `Tokenizer::from_gguf` rely on, checked up front
 /// so a bad or unsupported model is an error instead of a panic: the
 /// architecture, the hyperparameters, every tensor's presence, type and shape,
@@ -5735,5 +5824,90 @@ pub(crate) mod tests {
             }
             println!("{name}: {} steps, max |dlogprob| {worst:.3}", steps.len());
         }
+    }
+}
+
+#[cfg(test)]
+mod ram_dense_tests {
+    use super::*;
+    use crate::gguf::mem::{Avail, Bound};
+
+    fn host(bytes: u64) -> Option<Avail> {
+        Some(Avail {
+            bytes,
+            bound: Bound::Host,
+        })
+    }
+
+    /// The estimate's arena is the arena `Qwen2::new` makes (2 MB pages),
+    /// on the fixtures and on every test model present (mapped, as `axon`
+    /// loads them): the check can't drift from the layout.
+    #[test]
+    fn dense_arena_matches_the_built_arena() {
+        let real = |m: &Model, what: &str| {
+            let (est, _) = dense_ram_need(m, true, 0, 2);
+            let net = Qwen2::new_with(m, true);
+            let built = net.r8_arena().map_or(0, |a| a.len() as u64);
+            assert_eq!(est, built.next_multiple_of(2 << 20), "{what}");
+            eprintln!(
+                "{what}: r8 arena {} MB, file {} MB",
+                est >> 20,
+                m.data.len() >> 20
+            );
+            assert!(est > 0, "{what}: nothing repacked");
+            assert_eq!(
+                dense_ram_need(m, false, 0, 2).0,
+                0,
+                "{what}: no repack, no arena"
+            );
+        };
+        for (arch, mt) in [("qwen3", crate::quant::Q8_0), ("llama", crate::quant::Q4_0)] {
+            real(&tests::dense_fixture(arch, mt).0, arch);
+        }
+        for (m, what) in [
+            (crate::testutil::model(), "qwen2.5-0.5b"),
+            (crate::testutil::qwen3_model(), "qwen3-0.6b"),
+            (crate::testutil::llama_model(), "llama-3.2-1b"),
+            (crate::testutil::gemma3_model(), "gemma3-1b"),
+        ] {
+            match m {
+                Some(m) => real(&m, what),
+                None => eprintln!("{what}: not present, not checked"),
+            }
+        }
+    }
+
+    /// The KV term: K and V rows of every layer, for `ctx` positions, at
+    /// the element size; the refusal names the bound and the parts; a MoE
+    /// model is left to its own check; enough room passes.
+    #[test]
+    fn dense_check_refuses_and_names_the_bound() {
+        let (m, _) = tests::dense_fixture("qwen3", crate::quant::Q8_0);
+        let (nl, kvd) = (2u64, 2 * 64u64);
+        let (arena, kv) = dense_ram_need(&m, true, 1000, 2);
+        assert_eq!(kv, nl * 2 * kvd * 1000 * 2);
+        assert_eq!(dense_ram_need(&m, true, 1000, 4).1, 2 * kv);
+        let want = arena + kv + DENSE_RAM_HEADROOM;
+        assert!(check_ram_dense_with(&m, true, 1000, 2, host(want)).is_ok());
+        assert!(check_ram_dense_with(&m, true, 1000, 2, None).is_ok());
+        let cg = Avail {
+            bytes: want - 1,
+            bound: Bound::Cgroup {
+                path: "/app.slice/job.scope".into(),
+                limit: 400 << 20,
+                v1: false,
+            },
+        };
+        let e = check_ram_dense_with(&m, true, 1000, 2, Some(cg)).unwrap_err();
+        for s in [
+            "qwen3: the CPU model needs about",
+            "1000-token KV cache",
+            "(bound by cgroup /app.slice/job.scope memory.max 400 MB)",
+            "a smaller --ctx",
+        ] {
+            assert!(e.contains(s), "{s:?} not in {e}");
+        }
+        let (moe, _) = tests::dense_fixture("qwen3moe", crate::quant::Q8_0);
+        assert!(check_ram_dense_with(&moe, true, 1000, 2, host(1)).is_ok());
     }
 }

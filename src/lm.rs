@@ -721,6 +721,14 @@ impl<'a> Backend<'a> {
                 return Err("the q8 KV cache is cuda-only (--device cuda)".into());
             }
             crate::model::moe_check_ram(m, true)?;
+            // With the context left to fit (serve: `cpu_ctx` shrinks it to
+            // the RAM, down to DEFAULT_CHAT_CTX), the KV counted is the
+            // floor it may shrink to; an explicit one counts whole.
+            let kv_ctx = match fit {
+                true => max_ctx.min(crate::DEFAULT_CHAT_CTX),
+                false => max_ctx,
+            };
+            crate::model::check_ram_dense(m, kv_ctx)?;
             return Ok(Backend(Inner::Cpu(Qwen2::new(m))));
         }
         if gpu_layers == Some(0) {
