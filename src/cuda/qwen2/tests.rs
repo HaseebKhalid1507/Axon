@@ -42,6 +42,9 @@ pub(crate) struct Agree {
     last_kl: f64,
     pub(crate) sum_kl: f64,
     max_abs: f32,
+    /// Positions whose max |dlogit| reaches 6 (`assert_graded_gemma`):
+    /// (position index, max |dlogit| there).
+    over_six: Vec<(usize, f32)>,
     /// Reference logit margin of each top-1 disagreement.
     flips: Vec<f32>,
 }
@@ -155,8 +158,13 @@ impl Agree {
         }
         self.last_kl = k;
         self.sum_kl += k;
-        for (x, y) in lr.iter().zip(lo) {
-            self.max_abs = self.max_abs.max((x - y).abs());
+        let pa = lr
+            .iter()
+            .zip(lo)
+            .fold(0f32, |m, (x, y)| m.max((x - y).abs()));
+        self.max_abs = self.max_abs.max(pa);
+        if pa >= 6.0 {
+            self.over_six.push((self.positions, pa));
         }
         if ar != ao {
             // How close a call it was, in the reference's logits.
@@ -8756,7 +8764,8 @@ fn gpu_gemma3_prefill_and_verify_bits() {
 /// (mean KL 0.0093 -> 0.0054, max 0.63 -> 0.14, top-1 194 -> 195 / 198;
 /// the CPU 0.0103, 195) and further from the CPU's own rounding (top-1
 /// vs CPU 195 -> 192): a GPU-vs-CPU bar alone then fails the more
-/// accurate GPU.
+/// accurate GPU. Positions with max |dlogit| 6 or more (`Agree::over_six`)
+/// pass the same way, by `flip_ok`, else fail as before.
 fn assert_graded_gemma(
     ag: &Agree,
     ac: &Agree,
@@ -8804,7 +8813,25 @@ fn assert_graded_gemma(
              isn't as close to the GPU as to the CPU there"
         );
     }
-    assert!(ag.max_abs < 6.0, "max logit difference");
+    // Max |dlogit| (the bar 6.0, as `assert_graded`): a position at 6 or
+    // more passes only where the f64 reference is at least as close to the
+    // GPU as to the CPU (`flip_ok`, no slack): there the gap is the CPU's
+    // error as much as the GPU's. Why (M6, NUMERICS_VERSION 2): the 1B
+    // Q8_0's largest GPU-vs-CPU gap went 3.9 -> 6.8 at a position where
+    // KL(ref || gpu) is far below KL(ref || cpu) (the CPU's own two kernel
+    // sets differ by 7.3 on this walk).
+    for &(i, d) in &ag.over_six {
+        assert!(
+            flip_ok(i),
+            "max |dlogit| {d} at position {i}, and the f64 reference isn't at least as close to \
+             the GPU as to the CPU there"
+        );
+    }
+    eprintln!(
+        "max |dlogit| vs cpu {:.3}: {} position(s) at >= 6, all reference-justified",
+        ag.max_abs,
+        ag.over_six.len()
+    );
 }
 
 /// KL(p || q) of f64 logits p and f32 logits q.
