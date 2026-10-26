@@ -1,7 +1,7 @@
 # A measured step budget for `axon serve` (shipped), shortest-first admission (opt-in), on main (PR #131)
 
-- Date: 2026-10-25. Branch: feat/sched-budget-main. Base: main fcde887 (first built on d6b7051; main merged in
-  375ce65). Code head e76c01f. Status: open; review shady 9/10 APPROVE conditional on the e76c01f gates.
+- Date: 2026-10-25. Branch: feat/sched-budget-main. Base: main 841ef9c (first built on d6b7051; main merged in
+  375ce65 (fcde887) and 4fbfd5c (841ef9c, #127; a test-file conflict resolved by hand)). Code head e76c01f + the merge. Status: open; review shady 9/10 APPROVE conditional on the e76c01f gates.
 - Pick / design: roadmap "Next" item 1 (c) and (d); spec `specs/sched-sjf-token-budget.md` (Okarin, 10-20).
 - Supersedes #126 (the same work stacked on #119's hybrid step; #119 failed its kill rules and was closed: the
   roadmap's "else revert it and keep (c)/(d)"). Two-pass path only: no fused pass, no `fused_share`, no
@@ -37,18 +37,23 @@ The spec's reading of the H100 showdown (run h100-1019-2058): the mix C=128 shor
 speed; and main's step lands 8 ms over the 50 ms ITL SLO (`--prefill-ms 60`). See the spec §0-§1.
 
 ## How it was verified
-Gates of record, at the code head e76c01f (base fcde887):
+Gates of record, at the merge head 4fbfd5c (base main 841ef9c):
 
 | gate | result | job ID |
 |---|---|---|
-| fast tier, release | GATE_9BD9 | avante 1025-192359-9bd9 |
-| debug `serve::` + `cuda::qwen2::slots::`, GPU | GATE_D13B | avante 1025-192400-d13b |
-| `serve::` release, `AXON_ADMIT=sjf` | GATE_915C | avante 1025-192400-915c |
-| `serve::` release, `AXON_STEP_COST=legacy` alone | GATE_D94A | avante 1025-192401-d94a |
-| md5 of `gen`, main fcde887 vs e76c01f, same host | GATE_15DD | bella 1025-192401-15dd |
-| serve digests (main, defaults, legacy, sjf 50, sjf lanes 8 / age 0, step-tokens 64; 0.5B, 1.5B) | GATE_3B4D | bella 1025-192402-3b4d |
+| fast tier, release | RES_FAST | bella 1025-202635-4390 |
+| debug `serve::` + `cuda::qwen2::slots::`, GPU | RES_DBG | bella 1025-202635-da07 |
+| `serve::` release, `AXON_ADMIT=sjf` | RES_SJF | avante 1025-202636-80d5 |
+| `serve::` release, `AXON_STEP_COST=legacy` alone | RES_ROLL | avante 1025-202636-7818 |
+| md5 of `gen`, main 841ef9c vs 4fbfd5c, same host | RES_MD5 | bella 1025-202637-1989 |
+| serve digests (main, defaults, legacy, sjf 50, sjf lanes 8 / age 0, step-tokens 64; 0.5B, 1.5B) | RES_SERVAB | bella 1025-202637-b580 |
 | clippy -D warnings (bin + test), rustfmt | clean | local |
 | pure engine tests (incl. `legacy_reproduces_main_decisions`, `legacy_alone_is_main_admission`) | 25 passed | local |
+
+At e76c01f (base fcde887): md5 0 of 20 pairs differ (bella 1025-192401-15dd), digests 1 per model over 12 runs
+(bella 1025-192402-3b4d); its `serve::` jobs were dropped unrun when main moved to 841ef9c. #127 doesn't interact
+with the scheduler: a MoE model has no slot pool (`new_pool` is `Inner::Cuda` only), so serve runs it one request at
+a time and `Batch` / `Sched` / `StepCost` never run for it.
 
 Earlier gates (history):
 
