@@ -149,6 +149,6 @@ moe_gemv_tw(int qt, const u8* __restrict__ w, u64 estride, u64 row_bytes, int ro
     const u8* we = w + (u64)ids[i] * estride;
     prefetch_l2(we + (u64)r * row_bytes, row_bytes);
     const u8* rr[1] = {we + (u64)r * row_bytes};
-    float y = dot_rows_t<1, 1, true>(qt, rr, n, act + (u64)i * aslot, 0, 0, nullptr);
+    float y = dot_rows_t<1, 1, true>(qt, rr, 0, n, act + (u64)i * aslot, 0, 0, nullptr);
     if (threadIdx.x == 0) out[(u64)i * ostride + r] = y;
 }

@@ -337,8 +337,16 @@ extern "C" __global__ void rope_table(const double* __restrict__ freq, int half,
 
 // ---------------------------------------------------------------------------
 // Row dot products, in the canonical order every GPU product follows
-// (decode GEMV, the batched gemvn / gemvm / gemm2, the gemv_ref reference):
-// per output, per block b of the row, in order b = 0, 1, ..:
+// (decode GEMV, the batched gemvn / gemvm / gemm2 / gemm2t / gemmh2, the
+// gemv_ref reference). NUMERICS_VERSION 2 (M6): the chain is two-level, in
+// fixed chunks of K (kchunk_vals: a function of the matrix's shape only,
+// never of the batch, the kernel or the GPU): per output, per chunk c, the
+// chain below over the chunk's blocks in order from +0 gives p_c; the
+// output is ((p_0 + p_1) + p_2) + .. (fadd, chunk order). One chunk (K <=
+// the chunk): the output is p_0, the single chain of version 1. A kernel
+// may run a row's chunks in one block (in order) or each in its own block,
+// summed in order by gemm_kcombine: the same floats either way. Within a
+// chunk, per output, per block b of the row, in order:
 //   Q4_K: S = sum_j sc_j sumi_j, M = sum_j m_j bsum_j (integers, exact:
 //         sumi_j the integer dot of 32-value sub-block j with the Q8_K
 //         values, bsum_j the sum of those 32 values), then
@@ -363,6 +371,44 @@ extern "C" __global__ void rope_table(const double* __restrict__ freq, int half,
 // (scale, value) pair to shared memory; then one thread per output runs
 // the fma chain over the blocks in order. Rows of more blocks than the
 // buffer holds go in chunks.
+
+// The chunk of the two-level chain, in K values (a multiple of 256; one
+// rule for every product kernel): 512 for matrices of at most 1024 output
+// rows (k / v projections: more chunks, so more blocks where a product
+// splits K), else 1024. AXON_KCHUNK (a -D compile option: tests and the
+// H100 kit only) forces one chunk for every matrix.
+#ifndef AXON_KCHUNK
+#define AXON_KCHUNK 0
+#endif
+__device__ __forceinline__ int kchunk_vals(int rows) {
+    return AXON_KCHUNK ? AXON_KCHUNK : (rows <= 1024 ? 512 : 1024);
+}
+
+// Blocks of vb values (256 or 32) per chunk: a power of two.
+__device__ __forceinline__ int kchunk_blocks(int rows, int vb) { return kchunk_vals(rows) / vb; }
+
+// Chunk c's chain value acc folded into the output's total (c = 0: it is
+// the total), and the chain restarted.
+__device__ __forceinline__ void kfold(float& tot, float& acc, int c) {
+    tot = c == 0 ? acc : __fadd_rn(tot, acc);
+    acc = 0.0f;
+}
+
+// The output of a row of nb blocks whose complete chunks are folded into
+// tot and whose open chunk's chain is acc (cb blocks per chunk).
+__device__ __forceinline__ float kfinish(float tot, float acc, int nb, int cb) {
+    if ((nb & (cb - 1)) == 0) return tot;
+    return nb < cb ? acc : __fadd_rn(tot, acc);
+}
+
+// Kernels with many outputs per thread (the GEMMs) keep their chunk totals
+// in local memory (an index the compiler can't resolve: n >> 30 is 0 for
+// every row width, n < 2^30): a fold touches them once per chunk, and the
+// registers stay the chains' (in registers they cost the hot loop spills).
+#define KTOT_DECL(N, n) \
+    float ktot_[N];     \
+    const int kz_ = (n) >> 30
+#define KTOT(i) ktot_[(i) ^ kz_]
 
 #define GEMV_THREADS 128
 // Blocks per SM the GEMV kernels are compiled for (registers capped so
@@ -927,18 +973,26 @@ __device__ __forceinline__ void blk_q_1(const u8* const* rows, int base, int end
 // call of a kernel).
 __shared__ float2 gv_pairs[GEMV_PAIRS];
 
-// acc = fma(c[b].x, c[b].y, acc) for b = 0..nb-1, in order (loads ahead).
-__device__ __forceinline__ float gv_chain(const float2* c, int nb, float acc) {
-    int b = 0;
-    for (; b + 4 <= nb; b += 4) {
-        float2 e0 = c[b], e1 = c[b + 1], e2 = c[b + 2], e3 = c[b + 3];
-        acc = __fmaf_rn(e0.x, e0.y, acc);
-        acc = __fmaf_rn(e1.x, e1.y, acc);
-        acc = __fmaf_rn(e2.x, e2.y, acc);
-        acc = __fmaf_rn(e3.x, e3.y, acc);
+// The chain over the pairs c[0..cnt) of blocks base, base + 1, ..: acc =
+// fma(c.x, c.y, acc), each chunk of cb blocks (a power of two) folded into
+// tot at its last block (kfold).
+__device__ __forceinline__ void gv_chain(const float2* c, int base, int cnt, int cb, float& tot,
+                                         float& acc) {
+    for (int i = 0; i < cnt;) {
+        // Up to the end of the chunk block base + i is in.
+        int b = base + i, ce = min(cnt, (b | (cb - 1)) + 1 - base);
+        int k = i;
+        for (; k + 4 <= ce; k += 4) {
+            float2 e0 = c[k], e1 = c[k + 1], e2 = c[k + 2], e3 = c[k + 3];
+            acc = __fmaf_rn(e0.x, e0.y, acc);
+            acc = __fmaf_rn(e1.x, e1.y, acc);
+            acc = __fmaf_rn(e2.x, e2.y, acc);
+            acc = __fmaf_rn(e3.x, e3.y, acc);
+        }
+        for (; k < ce; k++) acc = __fmaf_rn(c[k].x, c[k].y, acc);
+        if (((base + ce) & (cb - 1)) == 0) kfold(tot, acc, (base + ce) / cb - 1);
+        i = ce;
     }
-    for (; b < nb; b++) acc = __fmaf_rn(c[b].x, c[b].y, acc);
-    return acc;
 }
 
 // The CPU twin's chain (r8.rs / r8q.rs): acc = acc + c[b].x * c[b].y, a
@@ -948,7 +1002,8 @@ __device__ __forceinline__ float gv_chain_tw(const float2* c, int nb, float acc)
     return acc;
 }
 
-// rows[0..R) of a matrix of type qt and n columns times T tokens' (token j
+// rows[0..R) of a matrix of type qt, N rows (its chunk: kchunk_vals) and n
+// columns times T tokens' (token j
 // at act + min(j, zmax) * astride): thread i < R T runs output i's chain
 // (r = i / T, j = i % T) and returns it; with T = 1 (decode) the lanes of
 // warp 0 also get every y[r] (shuffled from lane r). Every thread of the block must call it;
@@ -958,8 +1013,9 @@ __device__ __forceinline__ float gv_chain_tw(const float2* c, int nb, float acc)
 // r8/r8q kernels' f32 steps, so each output equals the CPU's bit for bit
 // (`gemv_tw`).
 template <int R, int T, bool TW = false>
-__device__ __forceinline__ float dot_rows_t(int qt, const u8* const* rows, int n, const u8* act,
-                                            u64 astride, int zmax, float* y, bool again = false) {
+__device__ __forceinline__ float dot_rows_t(int qt, const u8* const* rows, int N, int n,
+                                            const u8* act, u64 astride, int zmax, float* y,
+                                            bool again = false) {
     const int RT = R * T, CAP = GEMV_PAIRS / RT;
     float2* sh = gv_pairs;
     // AXON_EXT_TYPES (Kernels::module_ext): the types beyond main's four,
@@ -972,8 +1028,9 @@ __device__ __forceinline__ float dot_rows_t(int qt, const u8* const* rows, int n
     bool kq = qt == QT_Q4_K || qt == QT_Q6_K;
 #endif
     int nb = kq ? n >> 8 : n >> 5;
+    int cb = kchunk_blocks(N, kq ? 256 : 32);
     int i = threadIdx.x;
-    float acc = 0.0f;
+    float acc = 0.0f, tot = 0.0f;
     if (again) __syncthreads();
     for (int base = 0; base < nb; base += CAP) {
         if (base > 0) __syncthreads(); // the last chunk's chains are done
@@ -994,10 +1051,13 @@ __device__ __forceinline__ float dot_rows_t(int qt, const u8* const* rows, int n
         default: blk_q5_0<R, T, CAP>(rows, base, end, act, astride, n, zmax, sh); break; // QT_Q5_0
         }
         __syncthreads();
-        if (i < RT)
-            acc = TW ? gv_chain_tw(sh + i * CAP, end - base, acc)
-                     : gv_chain(sh + i * CAP, end - base, acc);
+        if (i < RT) {
+            if (TW) acc = gv_chain_tw(sh + i * CAP, end - base, acc);
+            else gv_chain(sh + i * CAP, base, end - base, cb, tot, acc);
+        }
     }
+    // (TW: the CPU twin's one chain, no chunks.)
+    if (!TW) acc = kfinish(tot, acc, nb, cb);
     if (T == 1 && y && i < 32) {
 #pragma unroll
         for (int r = 0; r < R; r++) y[r] = __shfl_sync(0xffffffffu, acc, r);
@@ -1008,21 +1068,22 @@ __device__ __forceinline__ float dot_rows_t(int qt, const u8* const* rows, int n
 // The one-token form, activations in a: y[0..R) in warp 0 (thread 0 is what
 // the kernels use).
 template <int R>
-__device__ __forceinline__ void dot_rows(int qt, const u8* const* rows, int n, const u8* act,
-                                         float* y, bool again = false) {
-    dot_rows_t<R, 1>(qt, rows, n, act, 0, 0, y, again);
+__device__ __forceinline__ void dot_rows(int qt, const u8* const* rows, int N, int n,
+                                         const u8* act, float* y, bool again = false) {
+    dot_rows_t<R, 1>(qt, rows, N, n, act, 0, 0, y, again);
 }
 
-// Rows r0 and r1 of one matrix (r1 may equal r0 - then it's computed once).
-__device__ __forceinline__ void dot_pair(int qt, const u8* w, u64 rb, int r0, int r1, int n,
-                                         const u8* act, float* y) {
+// Rows r0 and r1 of one matrix of N rows (r1 may equal r0 - then it's
+// computed once).
+__device__ __forceinline__ void dot_pair(int qt, const u8* w, u64 rb, int r0, int r1, int N,
+                                         int n, const u8* act, float* y) {
     if (r1 == r0) {
         const u8* rows[1] = {w + (u64)r0 * rb};
-        dot_rows<1>(qt, rows, n, act, y);
+        dot_rows<1>(qt, rows, N, n, act, y);
         y[1] = y[0];
     } else {
         const u8* rows[2] = {w + (u64)r0 * rb, w + (u64)r1 * rb};
-        dot_rows<2>(qt, rows, n, act, y);
+        dot_rows<2>(qt, rows, N, n, act, y);
     }
 }
 
@@ -1035,7 +1096,7 @@ gemv(int qt, const u8* __restrict__ w, u64 row_bytes, int rows, int n, const u8*
     prefetch_l2(w + (u64)r0 * row_bytes, (u64)(r1 - r0 + 1) * row_bytes);
     PDL_START();
     float y[2];
-    dot_pair(qt, w, row_bytes, r0, r1, n, act, y);
+    dot_pair(qt, w, row_bytes, r0, r1, rows, n, act, y);
     if (threadIdx.x == 0) {
         for (int i = 0; i < 1 + (r1 != r0); i++) {
             int r = r0 + i;
@@ -1059,7 +1120,7 @@ gemv1(int qt, const u8* __restrict__ w, u64 row_bytes, int rows, int n, const u8
     PDL_START();
     float y[1];
     const u8* rr[1] = {w + (u64)r * row_bytes};
-    dot_rows<1>(qt, rr, n, act, y);
+    dot_rows<1>(qt, rr, rows, n, act, y);
     if (threadIdx.x == 0) {
         float v = y[0];
         if (bias) v = __fadd_rn(v, bias[r]);
@@ -1078,7 +1139,7 @@ gemv_tw(int qt, const u8* __restrict__ w, u64 row_bytes, int rows, int n,
     prefetch_l2(w + (u64)r * row_bytes, row_bytes);
     PDL_START();
     const u8* rr[1] = {w + (u64)r * row_bytes};
-    float y = dot_rows_t<1, 1, true>(qt, rr, n, act, 0, 0, nullptr);
+    float y = dot_rows_t<1, 1, true>(qt, rr, rows, n, act, 0, 0, nullptr);
     if (threadIdx.x == 0) {
         float v = y;
         if (bias) v = __fadd_rn(v, bias[r]);
@@ -1155,7 +1216,7 @@ qkv_rope_t(int qtq, const u8* __restrict__ wq, u64 rbq, int qtk, const u8* __res
     float y[2];
     if (item >= npq + npk) {
         int r0 = 2 * (item - npq - npk);
-        dot_pair(qtv, wv, rbv, r0, r0 + 1, n, act, y);
+        dot_pair(qtv, wv, rbv, r0, r0 + 1, nk, n, act, y);
         if (threadIdx.x == 0) {
             for (int i = 0; i < 2; i++) {
                 float v = bv ? __fadd_rn(y[i], bv[r0 + i]) : y[i];
@@ -1171,7 +1232,7 @@ qkv_rope_t(int qtq, const u8* __restrict__ wq, u64 rbq, int qtk, const u8* __res
     int it = isq ? item : item - npq;
     int r0 = (it / half) * hd + it % half, r1 = r0 + half;
     const float* bias = isq ? bq : bk;
-    dot_pair(isq ? qtq : qtk, isq ? wq : wk, isq ? rbq : rbk, r0, r1, n, act, y);
+    dot_pair(isq ? qtq : qtk, isq ? wq : wk, isq ? rbq : rbk, r0, r1, isq ? nq : nk, n, act, y);
     if (threadIdx.x != 0) return;
     float y0 = y[0], y1 = y[1];
     if (bias) {
@@ -1234,12 +1295,12 @@ gate_up(int qtg, const u8* __restrict__ wg, u64 rbg, int qtu, const u8* __restri
     float y[2];
     if (qtg == qtu) {
         const u8* rr[2] = {wg + (u64)r * rbg, wu + (u64)r * rbu};
-        dot_rows<2>(qtg, rr, n, act, y);
+        dot_rows<2>(qtg, rr, rows, n, act, y);
     } else {
         const u8* r0[1] = {wg + (u64)r * rbg};
         const u8* r1[1] = {wu + (u64)r * rbu};
-        dot_rows<1>(qtg, r0, n, act, y);
-        dot_rows<1>(qtu, r1, n, act, y + 1, true);
+        dot_rows<1>(qtg, r0, rows, n, act, y);
+        dot_rows<1>(qtu, r1, rows, n, act, y + 1, true);
     }
     if (threadIdx.x == 0)
         out[r] = __fmul_rn(__fdiv_rn(y[0], __fadd_rn(1.0f, expf(-y[0]))), y[1]);
@@ -1254,8 +1315,8 @@ gate_up(int qtg, const u8* __restrict__ wg, u64 rbg, int qtu, const u8* __restri
 // row's sums don't depend on its block-mates), the epilogue the same per
 // row: the same bits.
 extern "C" __global__ void __launch_bounds__(GEMV_THREADS, 6)
-gate_up4(int qt, const u8* __restrict__ wg, u64 rbg, const u8* __restrict__ wu, u64 rbu, int n,
-         const u8* __restrict__ act, float* __restrict__ out) {
+gate_up4(int qt, const u8* __restrict__ wg, u64 rbg, const u8* __restrict__ wu, u64 rbu, int rows,
+         int n, const u8* __restrict__ act, float* __restrict__ out) {
     int r = 2 * blockIdx.x;
     prefetch_l2(wg + (u64)r * rbg, 2 * rbg);
     prefetch_l2(wu + (u64)r * rbu, 2 * rbu);
@@ -1263,7 +1324,7 @@ gate_up4(int qt, const u8* __restrict__ wg, u64 rbg, const u8* __restrict__ wu, 
     float y[4];
     const u8* rr[4] = {wg + (u64)r * rbg, wu + (u64)r * rbu, wg + (u64)(r + 1) * rbg,
                        wu + (u64)(r + 1) * rbu};
-    dot_rows<4>(qt, rr, n, act, y);
+    dot_rows<4>(qt, rr, rows, n, act, y);
     if (threadIdx.x == 0) {
         out[r] = __fmul_rn(__fdiv_rn(y[0], __fadd_rn(1.0f, expf(-y[0]))), y[1]);
         out[r + 1] = __fmul_rn(__fdiv_rn(y[2], __fadd_rn(1.0f, expf(-y[2]))), y[3]);

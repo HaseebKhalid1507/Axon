@@ -66,12 +66,12 @@ gate_up_gelu(int qtg, const u8* __restrict__ wg, u64 rbg, int qtu, const u8* __r
     float y[2];
     if (qtg == qtu) {
         const u8* rr[2] = {wg + (u64)r * rbg, wu + (u64)r * rbu};
-        dot_rows<2>(qtg, rr, n, act, y);
+        dot_rows<2>(qtg, rr, rows, n, act, y);
     } else {
         const u8* r0[1] = {wg + (u64)r * rbg};
         const u8* r1[1] = {wu + (u64)r * rbu};
-        dot_rows<1>(qtg, r0, n, act, y);
-        dot_rows<1>(qtu, r1, n, act, y + 1, true);
+        dot_rows<1>(qtg, r0, rows, n, act, y);
+        dot_rows<1>(qtu, r1, rows, n, act, y + 1, true);
     }
     if (threadIdx.x == 0) out[r] = geglu1(y[0], y[1]);
 }

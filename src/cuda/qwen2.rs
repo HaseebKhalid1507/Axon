@@ -2192,6 +2192,7 @@ impl<'g> CudaQwen2<'g> {
                             Arg::U64(gate.rb as u64),
                             w(up),
                             Arg::U64(up.rb as u64),
+                            Arg::I32(self.ffn as i32),
                             Arg::I32(dim as i32),
                             c.act.arg(),
                             c.hid.arg(),

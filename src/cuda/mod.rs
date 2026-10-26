@@ -1544,10 +1544,32 @@ fn cache_dir_from(xdg: Option<OsString>, home: Option<OsString>) -> Option<PathB
 pub fn numerics_tag(gpu: &Gpu) -> Result<String, String> {
     let src = fnv128(&[KERNELS.as_bytes(), KERNEL_OPTS.join("\n").as_bytes()]);
     Ok(format!(
-        "kernels {src:032x} {} hopper {}",
+        "kernels {src:032x} {} hopper {}{}",
         gpu.info()?.arch(),
-        hopper_env()
+        hopper_env(),
+        // A forced product chunk is other bits (AXON_KCHUNK).
+        kchunk_override().map_or(String::new(), |c| format!(" kchunk {c}"))
     ))
+}
+
+/// AXON_KCHUNK: force every GPU product's chunk of K (decode.cu
+/// kchunk_vals), in values: 512, 1024 or 2048 (tests and the H100 kit: the
+/// product rule's alternatives; NUMERICS-changing). Unset, empty or
+/// anything else: the rule. Read once.
+pub(crate) fn kchunk_override() -> Option<usize> {
+    static K: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    *K.get_or_init(|| {
+        std::env::var("AXON_KCHUNK")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .filter(|c| matches!(c, 512 | 1024 | 2048))
+    })
+}
+
+/// decode.cu kchunk_vals: the product chunk of a matrix of `rows` outputs,
+/// in K values (the two-level chain of NUMERICS_VERSION 2).
+pub(crate) fn kchunk_vals(rows: usize) -> usize {
+    kchunk_override().unwrap_or(if rows <= 1024 { 512 } else { 1024 })
 }
 
 /// The driver's CUDA version, "13.0" (kvsave records it, for people).
@@ -1861,6 +1883,16 @@ impl<'g> Module<'g> {
         dir: Option<&Path>,
         target: Target,
     ) -> Result<(Module<'g>, CacheStatus), String> {
+        // AXON_KCHUNK (tests, the H100 kit): every product's chunk forced,
+        // for the sources that have products (decode.cu kchunk_vals).
+        let kc = kchunk_override().map(|c| format!("-DAXON_KCHUNK={c}"));
+        let mut all: Vec<&str> = opts.to_vec();
+        if let Some(d) = kc.as_deref()
+            && src.contains("kchunk_vals")
+        {
+            all.push(d);
+        }
+        let opts = &all[..];
         let (mut m, status) = Self::load_cached(gpu, n, src, opts, dir, target)?;
         let arch = match target {
             Target::Cubin(a) | Target::Ptx(a) => a,

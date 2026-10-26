@@ -860,7 +860,7 @@ __device__ void gemvn_t(int qt, const u8* w, u64 rb, int rows, int n, const u8* 
     const u8* rr[R];
 #pragma unroll
     for (int r = 0; r < R; r++) rr[r] = w + (u64)min(r0 + r, rows - 1) * rb;
-    float y = dot_rows_t<R, T>(qt, rr, n, act + (u64)z0 * astride, astride, nb - 1 - z0, nullptr);
+    float y = dot_rows_t<R, T>(qt, rr, rows, n, act + (u64)z0 * astride, astride, nb - 1 - z0, nullptr);
     int i = threadIdx.x;
     if (i < R * T) {
         int r = r0 + i / T, z = z0 + i % T;
@@ -891,7 +891,13 @@ extern "C" __global__ void gemv_ref(int qt, const u8* __restrict__ w, u64 rb, in
     if (r >= rows || z >= nb) return;
     Act a = act_view(act + (u64)z * astride, n);
     const u8* row = w + (u64)r * rb;
-    float acc = 0.0f;
+    // The two-level chain (decode.cu "Row dot products"): each chunk of cb
+    // blocks folded into tot at its last block.
+    bool kq = qt == QT_Q4_K || qt == QT_Q5_K || qt == QT_Q6_K || qt == QT_Q2_K || qt == QT_Q3_K;
+    int cb = kchunk_blocks(rows, kq ? 256 : 32), nblk = kq ? n / 256 : n / 32;
+    float acc = 0.0f, tot = 0.0f;
+#define KREF_STEP(b)                                                                              \
+    if ((((b) + 1) & (cb - 1)) == 0) kfold(tot, acc, ((b) + 1) / cb - 1)
     if (qt == QT_Q4_K) {
         for (int b = 0; b < n / 256; b++) {
             const u8* blk = row + (u64)b * 144;
@@ -911,6 +917,7 @@ extern "C" __global__ void gemv_ref(int qt, const u8* __restrict__ w, u64 rb, in
             float d = h2f(rd_u16(blk)), dmin = h2f(rd_u16(blk + 2));
             float v = __fsub_rn(__fmul_rn(d, i2f_rn(S)), __fmul_rn(dmin, i2f_rn(M)));
             acc = __fmaf_rn(a.dk[b], v, acc);
+            KREF_STEP(b);
         }
     } else if (qt == QT_Q5_K) {
         for (int b = 0; b < n / 256; b++) {
@@ -932,6 +939,7 @@ extern "C" __global__ void gemv_ref(int qt, const u8* __restrict__ w, u64 rb, in
             float d = h2f(rd_u16(blk)), dmin = h2f(rd_u16(blk + 2));
             float v = __fsub_rn(__fmul_rn(d, i2f_rn(S)), __fmul_rn(dmin, i2f_rn(M)));
             acc = __fmaf_rn(a.dk[b], v, acc);
+            KREF_STEP(b);
         }
     } else if (qt == QT_Q6_K) {
         for (int b = 0; b < n / 256; b++) {
@@ -949,6 +957,7 @@ extern "C" __global__ void gemv_ref(int qt, const u8* __restrict__ w, u64 rb, in
                 S += (int)(signed char)blk[192 + j] * sumi;
             }
             acc = __fmaf_rn(__fmul_rn(a.dk[b], h2f(rd_u16(blk + 208))), i2f_rn(S), acc);
+            KREF_STEP(b);
         }
     } else if (qt == QT_Q2_K || qt == QT_Q3_K) {
         bool q3 = qt == QT_Q3_K;
@@ -980,6 +989,7 @@ extern "C" __global__ void gemv_ref(int qt, const u8* __restrict__ w, u64 rb, in
                 float v = __fsub_rn(__fmul_rn(d, i2f_rn(S)), __fmul_rn(dmin, i2f_rn(M)));
                 acc = __fmaf_rn(a.dk[b], v, acc);
             }
+            KREF_STEP(b);
         }
     } else if (qt == QT_Q4_1 || qt == QT_Q5_1) {
         bool q5 = qt == QT_Q5_1;
@@ -996,6 +1006,7 @@ extern "C" __global__ void gemv_ref(int qt, const u8* __restrict__ w, u64 rb, in
             float v = __fadd_rn(__fmul_rn(h2f(rd_u16(blk)), i2f_rn(s)),
                                 __fmul_rn(h2f(rd_u16(blk + 2)), i2f_rn(bs)));
             acc = __fmaf_rn(a.d0[b], v, acc);
+            KREF_STEP(b);
         }
     } else if (qt == QT_IQ4_NL) {
         for (int b = 0; b < n / 32; b++) {
@@ -1006,6 +1017,7 @@ extern "C" __global__ void gemv_ref(int qt, const u8* __restrict__ w, u64 rb, in
                 s += iq4nl_value(i < 16 ? qs : qs >> 4) * (int)a.q0[b * 32 + i];
             }
             acc = __fmaf_rn(__fmul_rn(h2f(rd_u16(blk)), a.d0[b]), i2f_rn(s), acc);
+            KREF_STEP(b);
         }
     } else {
         bool q8 = qt == QT_Q8_0, q4 = qt == QT_Q4_0;
@@ -1027,9 +1039,27 @@ extern "C" __global__ void gemv_ref(int qt, const u8* __restrict__ w, u64 rb, in
                 s += q * (int)a.q0[b * 32 + i];
             }
             acc = __fmaf_rn(__fmul_rn(h2f(rd_u16(blk)), a.d0[b]), i2f_rn(s), acc);
+            KREF_STEP(b);
         }
     }
+#undef KREF_STEP
+    acc = kfinish(tot, acc, nblk, cb);
     gm_store(acc, bias, mode, out, (u64)z * ostride, r);
+}
+
+// gemm2s split along K (gemm2_t with gridDim.z = the chunks): each output's
+// chunk partials part[c][z][r], c = 0 .. nc - 1, summed in chunk order (the
+// two-level chain's outer sum: decode.cu "Row dot products"), then
+// gm_store's epilogue. Grid (ceil(rows / 128), nb) x 128.
+extern "C" __global__ void gemm_kcombine(const float* __restrict__ part, int nc, int rows, int nb,
+                                         const float* __restrict__ bias, int mode,
+                                         float* __restrict__ out, u64 ostride) {
+    int r = blockIdx.x * blockDim.x + threadIdx.x, z = blockIdx.y;
+    if (r >= rows || z >= nb) return;
+    u64 cs = (u64)nb * rows, o = (u64)z * rows + r;
+    float tot = part[o];
+    for (int c = 1; c < nc; c++) tot = __fadd_rn(tot, part[c * cs + o]);
+    gm_store(tot, bias, mode, out, (u64)z * ostride, r);
 }
 
 // ---------------------------------------------------------------------------
@@ -1991,6 +2021,23 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
         for (int f = 0; f < NT; f++)
 #pragma unroll
             for (int e = 0; e < 4; e++) acc[mi][f][e] = 0.0f;
+    KTOT_DECL(2 * NT * 4, n);
+    // The two-level chain (decode.cu "Row dot products"): stages of 256 K
+    // per chunk (a power of two); each chunk's chains folded into tot after
+    // its last stage. TW (the CPU twin): one chain, no chunks.
+    const int CS = kchunk_vals(rows) / 256;
+    auto fold = [&](int s) {
+        if constexpr (!TW) {
+            if (((s + 1) & (CS - 1)) == 0) {
+#pragma unroll
+                for (int mi = 0; mi < 2; mi++)
+#pragma unroll
+                    for (int f = 0; f < NT; f++)
+#pragma unroll
+                        for (int e = 0; e < 4; e++) kfold(KTOT((mi * NT + f) * 4 + e), acc[mi][f][e], (s + 1) / CS - 1);
+            }
+        }
+    };
     const int NI = L::RAW ? 1 : (G2_BM * GmType<QT>::ITEMS + G2_THREADS - 1) / G2_THREADS;
     u32 reg[NI][G2_WREGS];
     // Stage s's buffers.
@@ -2007,17 +2054,22 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
             g2_copy<QT, BN, ST, GU, BM>(wsl(s), xsl(s), w, rb, rows, r0, act, astride, n, nb, z0,
                                         nblk, s, w2);
     };
+    // Split K (gridDim.z > 1, never with TW or GU: gemm_kcombine sums the
+    // partials): block z of the grid runs chunk z's stages only and writes
+    // its chain as is; else every stage, the chunks folded in order.
+    const bool split = gridDim.z > 1;
+    const int sb = split ? blockIdx.z * CS : 0, se = split ? min(nst, sb + CS) : nst;
     if constexpr (!L::RAW) {
-        g2_load_w<QT>(w, rb, rows, r0, nblk, 0, reg);
-        g2_store_w<QT>(wsl(0), nblk, 0, reg);
-        if (nst > 1) g2_load_w<QT>(w, rb, rows, r0, nblk, 1, reg);
+        g2_load_w<QT>(w, rb, rows, r0, nblk, sb, reg);
+        g2_store_w<QT>(wsl(sb), nblk, sb, reg);
+        if (sb + 1 < se) g2_load_w<QT>(w, rb, rows, r0, nblk, sb + 1, reg);
     }
     if constexpr (ST == 2) {
         // Two stages: copy s + 1 while s is computed; two barriers a stage.
-        copy(0);
+        copy(sb);
         cp_commit();
-        for (int s = 0; s < nst; s++) {
-            if (s + 1 < nst) {
+        for (int s = sb; s < se; s++) {
+            if (s + 1 < se) {
                 copy(s + 1);
                 cp_commit();
                 cp_wait<1>();
@@ -2026,11 +2078,12 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
             }
             __syncthreads();
             g2_compute<QT, NT, ST, BN, TW>(wsl(s), xsl(s), nblk, s, wr, wc, acc);
+            if (!split) fold(s);
             __syncthreads();
             if constexpr (!L::RAW) {
-                if (s + 1 < nst) {
+                if (s + 1 < se) {
                     g2_store_w<QT>(wsl(s + 1), nblk, s + 1, reg);
-                    if (s + 2 < nst) g2_load_w<QT>(w, rb, rows, r0, nblk, s + 2, reg);
+                    if (s + 2 < se) g2_load_w<QT>(w, rb, rows, r0, nblk, s + 2, reg);
                 }
             }
         }
@@ -2040,21 +2093,33 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
         // weight buffer s + 1 shares with it) are refilled.
 #pragma unroll
         for (int p = 0; p < ST - 1; p++) {
-            if (p < nst) copy(p);
+            if (sb + p < se) copy(sb + p);
             cp_commit();
         }
-        for (int s = 0; s < nst; s++) {
+        for (int s = sb; s < se; s++) {
             cp_wait<ST - 2>();
             __syncthreads();
-            if (s + ST - 1 < nst) copy(s + ST - 1);
+            if (s + ST - 1 < se) copy(s + ST - 1);
             cp_commit();
             if constexpr (!L::RAW) {
-                if (s + 1 < nst) {
+                if (s + 1 < se) {
                     g2_store_w<QT>(wsl(s + 1), nblk, s + 1, reg);
-                    if (s + 2 < nst) g2_load_w<QT>(w, rb, rows, r0, nblk, s + 2, reg);
+                    if (s + 2 < se) g2_load_w<QT>(w, rb, rows, r0, nblk, s + 2, reg);
                 }
             }
             g2_compute<QT, NT, ST, BN, TW>(wsl(s), xsl(s), nblk, s, wr, wc, acc);
+            if (!split) fold(s);
+        }
+    }
+    if constexpr (!TW) {
+        if (!split) {
+#pragma unroll
+            for (int mi = 0; mi < 2; mi++)
+#pragma unroll
+                for (int f = 0; f < NT; f++)
+#pragma unroll
+                    for (int e = 0; e < 4; e++)
+                        acc[mi][f][e] = kfinish(KTOT((mi * NT + f) * 4 + e), acc[mi][f][e], nst, CS);
         }
     }
     int lane = threadIdx.x & 31, g = lane >> 2, t = lane & 3;
@@ -2091,6 +2156,22 @@ __device__ __forceinline__ void gemm2_t(const u8* w, u64 rb, int rows, int n, co
                                 __fmul_rn(__fdiv_rn(gv, __fadd_rn(1.0f, expf(-gv))), acc[mi][f][e]);
                     }
         }
+        return;
+    }
+    if (split) {
+        // Chunk blockIdx.z's partials, raw: out is the partial buffer
+        // [chunk][token][row] (rows a row, nb rows a chunk).
+#pragma unroll
+        for (int mi = 0; mi < 2; mi++)
+#pragma unroll
+            for (int f = 0; f < NT; f++)
+#pragma unroll
+                for (int e = 0; e < 4; e++) {
+                    int r = r0 + 32 * wr + 16 * mi + 8 * (e >> 1) + g;
+                    int z = z0 + 8 * NT * wc + 8 * f + 2 * t + (e & 1);
+                    if (r < rows && z < nb)
+                        out[((u64)blockIdx.z * nb + z) * rows + r] = acc[mi][f][e];
+                }
         return;
     }
     // Every load the stores need first (out for mode 1, the gate product
@@ -2375,6 +2456,8 @@ __device__ __forceinline__ void gemvm_t(const u8* w, u64 rb, int rows, int n, co
     float acc[NF];
 #pragma unroll
     for (int k = 0; k < NF; k++) acc[k] = 0.0f;
+    KTOT_DECL(NF, n);
+    const int cb = kchunk_blocks(rows, KQ ? 256 : 32);  // the two-level chain's chunk
     GvW<QT> cur = {}, nxt = {}; // (warps past the last block copy nxt unloaded)
     if (warp < nblk) nxt.load(rws, warp, t);
     for (int base = 0, it = 0; base < nblk; base += CH, it++) {
@@ -2518,6 +2601,8 @@ __device__ __forceinline__ void gemvm_t(const u8* w, u64 rb, int rows, int n, co
                 float sv = vs[buf][sl][rr][zz];
                 if constexpr (K45) acc[k] = __fmaf_rn(ts[buf][sl][zz], sv, acc[k]);
                 else acc[k] = __fmaf_rn(__fmul_rn(ts[buf][sl][zz], rs[buf][sl][rr]), sv, acc[k]);
+                int b1 = base + sl + 1;
+                if ((b1 & (cb - 1)) == 0) kfold(KTOT(k), acc[k], b1 / cb - 1);
             }
         }
         // (No second barrier: the next chunk writes the other buffer, and
@@ -2527,7 +2612,7 @@ __device__ __forceinline__ void gemvm_t(const u8* w, u64 rb, int rows, int n, co
     for (int k = 0; k < NF; k++) {
         int q = threadIdx.x + 128 * k, rr = q / NT, zz = q % NT;
         if (r0 + rr < rows && zz < nb)
-            gm_store(acc[k], bias, mode, out, (u64)zz * ostride, r0 + rr);
+            gm_store(kfinish(KTOT(k), acc[k], nblk, cb), bias, mode, out, (u64)zz * ostride, r0 + rr);
     }
 #else
     __trap();

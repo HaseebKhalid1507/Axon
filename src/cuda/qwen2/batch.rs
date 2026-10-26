@@ -43,6 +43,23 @@ pub(super) fn gemmh_plain(rows: usize, nb: usize, sms: usize) -> bool {
     rows >= 3584 && nb.div_ceil(64) * rows.div_ceil(128) >= sms
 }
 
+/// The largest batch whose narrow products may split K (`ksplit`): the
+/// decode pool's steps and verify passes; prefill passes fill the GPU.
+pub(super) const KSPLIT_NB: usize = 128;
+
+/// Chunks of a product of `rows` outputs over `cols` inputs (the two-level
+/// chain's, `crate::cuda::kchunk_vals`) that gemm2s runs one block each
+/// (then gemm_kcombine) for nb tokens on `sms` SMs: when its 64 x 64 tiles
+/// leave SMs idle (the 7B's q / o / down at nb <= 128 on an H100: 56 tiles
+/// on 132 SMs; k / v everywhere) and there is more than one chunk. The
+/// same bits either way (decode.cu "Row dot products"), so any rule is
+/// exact; this one is for speed.
+pub(super) fn ksplit(rows: usize, cols: usize, nb: usize, sms: usize) -> Option<usize> {
+    let nc = cols.div_ceil(crate::cuda::kchunk_vals(rows));
+    let tiles = nb.div_ceil(64) * rows.div_ceil(G2_BM);
+    (nb <= KSPLIT_NB && nb > SMALL && nc > 1 && tiles < sms).then_some(nc)
+}
+
 /// The device address in a pointer argument.
 fn dev_ptr(a: Arg) -> u64 {
     match a {
@@ -611,6 +628,11 @@ pub(super) struct BatchFns<'m> {
     gemvmx: Option<[[Func<'m>; NTYPES_VM]; 2]>,
     /// AXON_GEMVMX=0: never `bgemm_x` (q, k, v and gate, up one launch each).
     pub(super) gemvmx_on: bool,
+    /// gemm_kcombine (prefill.cu): split-K partials summed (`ksplit`).
+    kcombine: Func<'m>,
+    /// Narrow products may split K (`ksplit`): the tensor-core GEMMs exist,
+    /// and AXON_KSPLIT isn't 0 (the same bits either way).
+    pub(super) gemm_split: bool,
     /// AXON_GEMVM_MAX: 16, gemvm for at most 16 tokens (main's routing);
     /// 32, for up to 32 whatever the product; 0 or unset, by the product's
     /// shape (`CudaQwen2::takes_gemvm`).
@@ -740,6 +762,8 @@ impl<'m> BatchFns<'m> {
         Ok(BatchFns {
             gemvmx,
             gemvmx_on: std::env::var("AXON_GEMVMX").map_or(true, |v| v != "0"),
+            kcombine: module.function("gemm_kcombine")?,
+            gemm_split: module.mma() && std::env::var("AXON_KSPLIT").as_deref() != Ok("0"),
             embed: module.function("embed_b")?,
             rope_table: module.function("rope_table_b")?,
             rmsnorm_quant: module.function("rmsnorm_quant_b")?,
@@ -878,6 +902,9 @@ pub(super) struct BatchBufs<'g> {
     /// `keep_logits`) one row per token of the pass instead.
     pub(super) logits: DevBuf<'g>,
     pub(super) logits_rows: bool,
+    /// Split-K partials of the narrow products (`ksplit`), [chunk][token][row]
+    /// floats: `kpart_bytes` (0: none, no split).
+    pub(super) kpart: DevBuf<'g>,
     pub(super) best: DevBuf<'g>,
     pub(super) host_best: HostBuf<'g>,
 }
@@ -929,7 +956,37 @@ impl<'g> CudaQwen2<'g> {
             } else {
                 0
             };
-        max * per_tok + parts + max.min(HEAD_SUB) * self.vocab * f + 256
+        max * per_tok + parts + max.min(HEAD_SUB) * self.vocab * f + 256 + self.kpart_bytes(max)
+    }
+
+    /// The layer products a pass runs, (rows, cols) each: q, k, v, o, gate,
+    /// up, down (`ksplit` picks the narrow ones).
+    fn product_shapes(&self) -> [(usize, usize); 5] {
+        let kvd = self.kv_dim();
+        [
+            (self.q_dim, self.dim),
+            (kvd, self.dim),
+            (self.dim, self.q_dim),
+            (self.ffn, self.dim),
+            (self.dim, self.ffn),
+        ]
+    }
+
+    /// Bytes of `BatchBufs::kpart` for passes of up to `max` tokens: the
+    /// most any product `ksplit` splits there needs (0: none splits).
+    pub(super) fn kpart_bytes(&self, max: usize) -> usize {
+        if !self.bf.gemm_split {
+            return 0;
+        }
+        let mut most = 0;
+        for (rows, cols) in self.product_shapes() {
+            for nb in 1..=max.min(KSPLIT_NB) {
+                if let Some(nc) = ksplit(rows, cols, nb, self.bf.sms) {
+                    most = most.max(nc * nb * rows * 4);
+                }
+            }
+        }
+        most
     }
 
     pub(super) fn batch_bufs(&self, max: usize, max_ctx: usize) -> Result<BatchBufs<'g>, String> {
@@ -963,6 +1020,7 @@ impl<'g> CudaQwen2<'g> {
             logits_rows: false,
             best: g.alloc(max * 4)?,
             host_best: g.host_alloc(max * 4)?,
+            kpart: g.alloc(self.kpart_bytes(max))?,
         })
     }
 
@@ -971,7 +1029,9 @@ impl<'g> CudaQwen2<'g> {
     /// for mode 2 (bias: the gate product, laid out as out; prefill.cu
     /// gm_store), for tokens z < nb: gemvn for small batches (or without
     /// tensor cores), else the type's GEMM (Q6_K: by its prefill copy if
-    /// made, `Mat::c8`). Same bits either way.
+    /// made, `Mat::c8`), K split across blocks where `ksplit` says (partials
+    /// in `kpart`, a `BatchBufs::kpart`; Ptr(0): never). Same bits either
+    /// way.
     ///
     /// # Safety
     /// act holds nb tokens of mt.cols inputs at astride bytes apart; out has
@@ -990,6 +1050,7 @@ impl<'g> CudaQwen2<'g> {
         mode: i32,
         out: Arg,
         ostride: usize,
+        kpart: Arg,
     ) -> Result<(), String> {
         let bf = &self.bf;
         let ti = type_index(mt.qt);
@@ -1090,6 +1151,44 @@ impl<'g> CudaQwen2<'g> {
                         Some((_, f8)) => (&f8[!big as usize], gemm2_smem(Q6_K, bn, st)),
                         None => (&fs[ti][!big as usize], gemm2_smem(mt.qt, bn, st)),
                     };
+                    // Narrow products, few tokens: one block per (tile, chunk)
+                    // of K, then the chunks summed in order (gemm_kcombine).
+                    if let (false, false, Some(nc)) = (
+                        big,
+                        matches!(kpart, Arg::Ptr(0)),
+                        ksplit(mt.rows, mt.cols, nb, bf.sms),
+                    ) {
+                        let mut ca = common;
+                        ca[8] = Arg::I32(0);
+                        ca[9] = kpart;
+                        self.gpu.launch(
+                            f,
+                            (
+                                nb.div_ceil(bn) as u32,
+                                mt.rows.div_ceil(G2_BM) as u32,
+                                nc as u32,
+                            ),
+                            (256, 1, 1),
+                            smem as u32,
+                            &ca,
+                        )?;
+                        return self.gpu.launch(
+                            &bf.kcombine,
+                            (mt.rows.div_ceil(128) as u32, nb as u32, 1),
+                            (128, 1, 1),
+                            0,
+                            &[
+                                kpart,
+                                Arg::I32(nc as i32),
+                                Arg::I32(mt.rows as i32),
+                                Arg::I32(nb as i32),
+                                bias,
+                                Arg::I32(mode),
+                                out,
+                                Arg::U64(ostride as u64),
+                            ],
+                        );
+                    }
                     self.gpu.launch(
                         f,
                         (nb.div_ceil(bn) as u32, mt.rows.div_ceil(G2_BM) as u32, 1),
@@ -1335,6 +1434,7 @@ impl<'g> CudaQwen2<'g> {
                     0,
                     b.logits.arg(),
                     self.vocab,
+                    b.kpart.arg(),
                 )?;
                 on("head")?;
             } else if head != Head::No {
@@ -1358,6 +1458,7 @@ impl<'g> CudaQwen2<'g> {
                         0,
                         lg,
                         v,
+                        b.kpart.arg(),
                     )?;
                     // Rows z0..za greedy, za..zs sampled, zs.. logits only.
                     let za = ng.clamp(z0, z0 + nz);
@@ -1598,8 +1699,20 @@ impl<'g> CudaQwen2<'g> {
             );
             // q, k and v in one launch where they qualify (bgemm_x), else q
             // and k, else one by one.
-            let one =
-                |m: (&Mat, Arg, Arg)| self.bgemm(wts, m.0, b.act.arg(), ast, nb, m.1, 0, m.2, qkvw);
+            let one = |m: (&Mat, Arg, Arg)| {
+                self.bgemm(
+                    wts,
+                    m.0,
+                    b.act.arg(),
+                    ast,
+                    nb,
+                    m.1,
+                    0,
+                    m.2,
+                    qkvw,
+                    b.kpart.arg(),
+                )
+            };
             if !self.bgemm_x(wts, &[q, k, v], b.act.arg(), ast, nb, qkvw)? {
                 if !self.bgemm_x(wts, &[q, k], b.act.arg(), ast, nb, qkvw)? {
                     one(q)?;
@@ -1972,7 +2085,18 @@ impl<'g> CudaQwen2<'g> {
             };
             match l.post_attn {
                 Some(pa) => {
-                    self.bgemm(wts, &l.o, b.act.arg(), ast, nb, null, 0, b.up.arg(), dim)?;
+                    self.bgemm(
+                        wts,
+                        &l.o,
+                        b.act.arg(),
+                        ast,
+                        nb,
+                        null,
+                        0,
+                        b.up.arg(),
+                        dim,
+                        b.kpart.arg(),
+                    )?;
                     on("wo")?;
                     post_add(pa)?;
                     on("post_norm")?;
@@ -1980,7 +2104,18 @@ impl<'g> CudaQwen2<'g> {
                 None => {
                     // gpt-oss: x += W_o act + b_o.
                     let bo = l.oss.map_or(null, |o| vec(o.bo));
-                    self.bgemm(wts, &l.o, b.act.arg(), ast, nb, bo, 1, b.x.arg(), dim)?;
+                    self.bgemm(
+                        wts,
+                        &l.o,
+                        b.act.arg(),
+                        ast,
+                        nb,
+                        bo,
+                        1,
+                        b.x.arg(),
+                        dim,
+                        b.kpart.arg(),
+                    )?;
                     on("wo")?;
                 }
             }
@@ -2055,7 +2190,18 @@ impl<'g> CudaQwen2<'g> {
                     ffn,
                 )?;
             if !fuse && !gu_x {
-                self.bgemm(wts, gate, b.act.arg(), ast, nb, null, 0, b.gate.arg(), ffn)?;
+                self.bgemm(
+                    wts,
+                    gate,
+                    b.act.arg(),
+                    ast,
+                    nb,
+                    null,
+                    0,
+                    b.gate.arg(),
+                    ffn,
+                    b.kpart.arg(),
+                )?;
             }
             on("gate")?;
             if let (Some(h), true) = (&bf.gemmh, fuse) {
@@ -2165,6 +2311,7 @@ impl<'g> CudaQwen2<'g> {
                     2,
                     b.up.arg(),
                     ffn,
+                    b.kpart.arg(),
                 )?;
                 on("gate_up")?;
                 g.launch(
@@ -2182,7 +2329,18 @@ impl<'g> CudaQwen2<'g> {
                 )?;
             } else {
                 if !gu_x {
-                    self.bgemm(wts, up, b.act.arg(), ast, nb, null, 0, b.up.arg(), ffn)?;
+                    self.bgemm(
+                        wts,
+                        up,
+                        b.act.arg(),
+                        ast,
+                        nb,
+                        null,
+                        0,
+                        b.up.arg(),
+                        ffn,
+                        b.kpart.arg(),
+                    )?;
                 }
                 on("gate_up")?;
                 g.launch(
@@ -2208,14 +2366,36 @@ impl<'g> CudaQwen2<'g> {
             match l.post_ffn {
                 // gemma3: as the post-attention norm (b.up free again).
                 Some(pf) => {
-                    self.bgemm(wts, down, b.act.arg(), ast, nb, null, 0, b.up.arg(), dim)?;
+                    self.bgemm(
+                        wts,
+                        down,
+                        b.act.arg(),
+                        ast,
+                        nb,
+                        null,
+                        0,
+                        b.up.arg(),
+                        dim,
+                        b.kpart.arg(),
+                    )?;
                     on(if down.qt == Q6_K { "down6" } else { "down4" })?;
                     on("down")?;
                     post_add(pf)?;
                     on("post_norm")?;
                 }
                 None => {
-                    self.bgemm(wts, down, b.act.arg(), ast, nb, null, 1, b.x.arg(), dim)?;
+                    self.bgemm(
+                        wts,
+                        down,
+                        b.act.arg(),
+                        ast,
+                        nb,
+                        null,
+                        1,
+                        b.x.arg(),
+                        dim,
+                        b.kpart.arg(),
+                    )?;
                     on(if down.qt == Q6_K { "down6" } else { "down4" })?;
                     on("down")?;
                 }

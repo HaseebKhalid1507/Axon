@@ -737,6 +737,7 @@ impl<'g> CudaQwen2<'g> {
                 mode,
                 out,
                 ostride,
+                Arg::Ptr(0),
             )
         }
     }
@@ -1408,6 +1409,7 @@ impl<'g> CudaQwen2<'g> {
                         0,
                         b.logits.arg(),
                         self.vocab,
+                        Arg::Ptr(0),
                     )?;
                 } else if h == Head::Argmax {
                     self.norm_b(b, &self.vecs, self.output_norm, nb)?;
@@ -1424,6 +1426,7 @@ impl<'g> CudaQwen2<'g> {
                             0,
                             b.logits.arg(),
                             v,
+                            Arg::Ptr(0),
                         )?;
                         g.launch(
                             &bf.argmax,

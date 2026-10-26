@@ -62,7 +62,9 @@ use std::path::Path;
 /// keep every bit (speed, scheduling, a kernel that matches the old one bit
 /// for bit, proven by the md5 gate) don't bump it. A bump changes every
 /// fingerprint, so a client caching on it knows its old outputs are stale.
-pub const NUMERICS_VERSION: u32 = 1;
+/// Version 2 (M6): the GPU products' two-level chain in fixed chunks of K
+/// (decode.cu "Row dot products"); the CPU's bits are unchanged.
+pub const NUMERICS_VERSION: u32 = 2;
 
 /// The tuple's format, the first line of `canonical`.
 const SCHEME: &str = "axon-identity/1";
@@ -717,7 +719,7 @@ mod tests {
         // which needs a NUMERICS_VERSION or SCHEME reason.
         assert_eq!(
             a.canonical(),
-            "axon-identity/1\nnumerics=1\nmodel=aa\ntypes=Q4_K:1\nbackend=cuda\n\
+            "axon-identity/1\nnumerics=2\nmodel=aa\ntypes=Q4_K:1\nbackend=cuda\n\
              gpu=sm_120\nkv=f16\n"
         );
         let g = Some("sm_120");
@@ -736,7 +738,7 @@ mod tests {
             seen.push(f);
         }
         let mut n = base();
-        n.fields[0].1 = "2".into();
+        n.fields[0].1 = "3".into();
         assert_ne!(n.fingerprint(), a.fingerprint(), "numerics version");
         let j = a.json();
         assert_eq!(j["system_fingerprint"], a.fingerprint());

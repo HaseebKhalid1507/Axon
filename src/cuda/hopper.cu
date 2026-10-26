@@ -458,6 +458,16 @@ extern "C" __global__ void __launch_bounds__(384, 1) wg_peak_rs_n256(int iters, 
 }
 
 // ---------------------------------------------------------------------------
+// The two-level chain (decode.cu "Row dot products") in the wgmma GEMMs:
+// after block b, a complete chunk of CB blocks folds acc into tot; at the
+// end the open chunk's chain.
+#define GH_FOLD(b)                                                                                \
+    if ((((b) + 1) & (CB - 1)) == 0) {                                                             \
+        _Pragma("unroll") for (int i_ = 0; i_ < 32; i_++) kfold(KTOT(i_), acc[i_], ((b) + 1) / CB - 1); \
+    }
+#define GH_FINISH()                                                                               \
+    _Pragma("unroll") for (int i_ = 0; i_ < 32; i_++) acc[i_] = kfinish(KTOT(i_), acc[i_], nblk, CB)
+
 // gemmh_q4_k: the Q4_K x Q8_K batched product on wgmma (S2 v1). gemv_ref's
 // canonical order: per output and 256-K block the exact integers S and M,
 // then v = d S - dmin M (d * i2f(S), dmin * i2f(M), fsub) and acc = fma(dk,
@@ -591,6 +601,8 @@ __device__ __forceinline__ void gemmh_q4k_t(const TMap* mw, const TMap* mx, cons
     int dlo[32], dhi[32], M[32];
 #pragma unroll
     for (int i = 0; i < 32; i++) acc[i] = 0.0f, dlo[i] = 0, dhi[i] = 0;
+    KTOT_DECL(32, n);
+    const int CB = kchunk_vals(rows) / 256; // the two-level chain's chunk, in blocks
     // The thread's outputs: e of 4 i + e at row 16 w + l / 4 + 8 (e >> 1),
     // token 8 i + 2 (l & 3) + (e & 1) (within the warpgroup's tile).
     const int rl = 16 * w + l / 4, cl = 2 * (l & 3);
@@ -644,9 +656,11 @@ __device__ __forceinline__ void gemmh_q4k_t(const TMap* mw, const TMap* mx, cons
                     acc[4 * i + e] = __fmaf_rn(xd[8 * i + cl + (e & 1)], v, acc[4 * i + e]);
                 }
         }
+        GH_FOLD(b);
         __syncthreads();
         if (tid == 0 && b + 2 < nblk) issue(b + 2, s);
     }
+    GH_FINISH();
     // Every load the stores need first, then the stores (gemm2's epilogue).
     float pre[32];
 #pragma unroll
@@ -745,6 +759,8 @@ __device__ __forceinline__ void gemmh2_t(const TMap* mw, const TMap* mw2, const 
     int dlo[32], dhi[32], M[32];
 #pragma unroll
     for (int i = 0; i < 32; i++) acc[i] = 0.0f, dlo[i] = 0, dhi[i] = 0;
+    KTOT_DECL(32, n);
+    const int CB = kchunk_vals(rows) / 256; // the two-level chain's chunk, in blocks
     // The thread's rows (within the warpgroup): 16 w + g and + 8; its
     // outputs as gemmh_q4_k's.
     const int rl = 16 * w + g, cl = 2 * q;
@@ -850,9 +866,11 @@ __device__ __forceinline__ void gemmh2_t(const TMap* mw, const TMap* mw2, const 
                                     __fmul_rn(dmr[h], gm_i2f(M[4 * i + e])));
                 acc[4 * i + e] = __fmaf_rn(xd[8 * i + cl + (e & 1)], v, acc[4 * i + e]);
             }
+        GH_FOLD(b);
         wg_bar(1 + wg); // this warpgroup is done with stage s
         if (t == 0) mbar_arrive(&empty[s]);
     }
+    GH_FINISH();
     if constexpr (GU) {
         // The gate sums (warpgroup 0) to the up threads holding the same
         // row and token (warpgroup 1) through the stage buffers (free: every

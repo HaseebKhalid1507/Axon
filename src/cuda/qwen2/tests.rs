@@ -2661,6 +2661,12 @@ fn gpu_batched(
         }
     };
     let bias = epi.bias.as_ref().map(|b| g.upload(b).unwrap());
+    // "<gemm2s kernel>@split": K split across blocks, one per chunk of the
+    // two-level chain (bgemm's `ksplit` launch), then gemm_kcombine.
+    let (kernel, split) = match kernel.strip_suffix("@split") {
+        Some(k) => (k, true),
+        None => (kernel, false),
+    };
     let f = km.function(kernel).unwrap();
     let st = act_stride_t(cols) as u64;
     // The Q6_K prefill copy's kernels take the copy (`q6k8_copy`).
@@ -2681,9 +2687,53 @@ fn gpu_batched(
         out.arg(),
         Arg::U64(rows as u64),
     ];
-    // SAFETY: prefill.cu's signatures; act holds nb tokens of cols inputs,
-    // out rows * nb floats.
-    unsafe { launch_product(g, &f, kernel, qt, rows, nb, &common) };
+    let nc = cols.div_ceil(crate::cuda::kchunk_vals(rows));
+    if split && nc > 1 {
+        let part = g.alloc(nc * nb * rows * 4).unwrap();
+        let mut ca = common;
+        ca[8] = Arg::I32(0);
+        ca[9] = part.arg();
+        let sm = gemm2_smem(qt, 64, 3);
+        f.set_max_shared(sm).unwrap();
+        let fc = km.function("gemm_kcombine").unwrap();
+        // SAFETY: gemm2s's and gemm_kcombine's signatures; part holds nc
+        // chunks of nb x rows floats.
+        unsafe {
+            g.launch(
+                &f,
+                (
+                    nb.div_ceil(64) as u32,
+                    rows.div_ceil(G2_BM) as u32,
+                    nc as u32,
+                ),
+                (256, 1, 1),
+                sm as u32,
+                &ca,
+            )
+            .unwrap();
+            g.launch(
+                &fc,
+                (rows.div_ceil(128) as u32, nb as u32, 1),
+                (128, 1, 1),
+                0,
+                &[
+                    part.arg(),
+                    Arg::I32(nc as i32),
+                    Arg::I32(rows as i32),
+                    Arg::I32(nb as i32),
+                    common[7],
+                    common[8],
+                    out.arg(),
+                    Arg::U64(rows as u64),
+                ],
+            )
+            .unwrap();
+        }
+    } else {
+        // SAFETY: prefill.cu's signatures; act holds nb tokens of cols
+        // inputs, out rows * nb floats.
+        unsafe { launch_product(g, &f, kernel, qt, rows, nb, &common) };
+    }
     g.sync().unwrap();
     out.read().unwrap()
 }
@@ -3029,7 +3079,7 @@ fn gpu_products_match_reference_bits() {
             widths.push(vb * (1 + (rng.next() % (18944 / vb) as u64) as usize));
         }
         for (i, &cols) in widths.iter().enumerate() {
-            let rows = [333, 77, 129, 1001, 65][i % 5];
+            let rows = [333, 77, 1100, 1001, 65][i % 5]; // 1100: a 1024-value chunk
             cases.push((qt, cols, rows));
         }
     }
@@ -3088,6 +3138,8 @@ fn gpu_products_match_reference_bits() {
                     }
                 }
                 kernels.extend(gemm2_names(qt));
+                // gemm2s split along K (bgemm's `ksplit` launch).
+                kernels.push(format!("gemm2s_{tn}@split"));
             }
             for k in &kernels {
                 let got = gpu_batched(&g, &km, k, qt, &w, rows, cols, &act, nb, &epi);
@@ -3096,7 +3148,7 @@ fn gpu_products_match_reference_bits() {
                 }
             }
             if let (Some(w8), true) = (&w8, nb > 16) {
-                for k in ["gemm2_q6k8", "gemm2s_q6k8"] {
+                for k in ["gemm2_q6k8", "gemm2s_q6k8", "gemm2s_q6k8@split"] {
                     let got = gpu_batched(&g, &km, k, qt, w8, rows, cols, &act, nb, &epi);
                     for z in 0..nb {
                         check(k, z, &got[z * rows..(z + 1) * rows]);
@@ -4862,6 +4914,7 @@ fn gpu_products_real_weights_q2k_q3k() {
                 let mut kernels: Vec<String> = vec!["gemvn_2x8".into(), "gemvn_2x16".into()];
                 if km.mma() {
                     kernels.extend(gemm2_names(qt));
+                    kernels.push(format!("gemm2s_{}@split", type_name(qt)));
                 }
                 for k in &kernels {
                     let got =
