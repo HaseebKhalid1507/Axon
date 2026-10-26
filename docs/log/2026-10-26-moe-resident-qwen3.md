@@ -33,7 +33,7 @@ Gates of record, at 111456a, all on bella:
 | resident suite + Moonlight, release | 1026-062648-e18c | PASS 29/0/1 |
 | full release, 2 shards | group 551e | PASS 438/0/22 + 266/0/29 |
 | full debug, 2 shards | group 8dfb | PASS 438/0/22 + 266/0/29 |
-| md5 vs main 680a2c5 | 1026-062650-e264 | pending |
+| md5 vs main 680a2c5 | 1026-062650-e264 | all identical: cpu 99/99, cuda 108/108, cuda q8 108/108 (MoE `auto` rows included) |
 
 Earlier rounds:
 - **b9a4093:**
