@@ -46,15 +46,18 @@ before each run, and per-run taint comes from `nvidia-smi pmon` (axon-run's rule
 
 ## Open, and next
 
-- **Thread-matched head-to-head** (job 1026-011428-edef; table on the board): llama.cpp at `-t 8` (its best) and
-  `-t 24`, interleaved with Axon, N = 0 / 6 / 12, 3 rounds.
-  - Axon still leads decode: 1.65× / 1.60× / 1.43× at N = 0 / 6 / 12.
-  - llama.cpp's prefill is ahead: Axon is at 0.71–0.90×.
+- **Thread-matched head-to-head** (jobs 1026-011428-edef + 1026-052430-6c71; table on the board): llama.cpp at
+  `-t 8` (its best for decode) and `-t 24`, interleaved with Axon, N = 0 / 6 / 12, 3 rounds.
+  - Axon still leads decode, 1.68× / 1.52× / 1.46×; llama.cpp leads prefill (Axon at 0.71–0.84×).
   - `-t 24` collapses llama.cpp's decode to 9–17 tok/s.
-  - The job is TAINTED (Xorg max 53 %). The six runs that overlapped its two FOREIGN_GPU spike windows are
-    excluded. Their rerun 1026-023845-8bc8 was tainted again (mean 14.8 %); the next one is queued as
-    1026-052430-6c71; the rest are clean windows.
-- **Why `auto` trails:** the per-kernel traces (CUPTI) of one Axon decode step and pp512 against llama.cpp's at the
-  same placement are pending. They feed the spec for the resident kernels' round 2, which has to keep the twin
-  contract (bits equal to the CPU path) under `exact`.
-- Qwen3-30B-A3B inherits these kernels. Its step 0 waits on that diagnosis.
+  - edef is TAINTED (Xorg, max 53 %). Its six runs inside the two FOREIGN_GPU spike windows are replaced by their
+    rerun in 6c71, which is CLEAN (max 0 %), and marked ‡ on the board. The first rerun, 8bc8, was tainted again and
+    isn't used.
+- **Re-bench pending.** Every Axon number here is main 39624db, before #145 (680a2c5, MLA decode kernels; its own
+  A/B: tg128 +24.8 %, pp2101 +22.0 %, TAINTED). A re-bench on current main replaces the tables whole. Commits are
+  not mixed within a table.
+- **Why `auto` trails:** CUPTI traces of both engines (jobs edef, 8bc8; kernel durations GPU-side) put the gap in
+  the MLA kernels (`mla_heads_mv`, `mla_attn`), not in the twin experts. Decode: +1.38 of +2.07 ms busy. Prefill:
+  68–82 % of Axon's GPU time. #145 took the decode half; the prefill half is open. Exactness costs about 4 % of a decode step
+  (ESTIMATED) and nothing measurable in prefill.
+- Qwen3-30B-A3B residency is #146; its step 0 went ahead on per-layer records (pruned 30B-A3B).

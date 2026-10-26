@@ -545,6 +545,11 @@ The bench of record for `--gpu-experts` (MoE-resident PR D, roadmap item 3).
 - MEASURED, job `1025-225107-e28c`; raw results, job log and script are in the [gist](https://gist.github.com/HaseebKhalid1507/7c37456c09d035b98d2f2b7d7b21bf51).
   Log: [2026-10-26-moe-resident-bench](log/2026-10-26-moe-resident-bench.md).
 
+**Re-bench on current main: PENDING.** Every Axon number on this board is main `39624db`. That predates #145
+(merged as `680a2c5`), which made the MLA kernels faster. #145's own A/B (TAINTED run, at `auto`): tg128 +24.8 % (115.2 → 143.7, 0.85×
+llama.cpp) and pp2101 +22.0 %. A re-bench on
+current main will replace these tables whole. Rows are never mixed across commits.
+
 **Head-to-head at full residency, up front: llama.cpp is ahead.** At `auto` (25 or 26 of 26 expert layers on the
 GPU), Axon decodes at **0.71×** llama.cpp (121.7 vs 171.0 tok/s). Prefill is **0.45×** at pp512 and **0.34×** at
 pp2100. All of llama.cpp's auto runs are clean.
@@ -576,31 +581,35 @@ Axon's own CPU-expert split. Against llama.cpp at the same placement it doesn't 
 cache in the VRAM free at load, and the desktop's share of the 12 GB varies. llama.cpp ran each round at that
 round's count (`--n-cpu-moe` 1 / 1 / 0).
 
-**Thread-matched rerun (MEASURED, job `1026-011428-edef`, N = 0 / 6 / 12, 3 interleaved rounds).** llama-bench at
-`-t 8` (Axon's decode threads, the P cores) and `-t 24` (Axon's prefill threads), interleaved with Axon. The job is
-TAINTED overall (Xorg, max 53 %). Its FOREIGN_GPU samples put two spikes at 02:26:17–02:26:51 and 02:27:25–02:27:59.
-The six runs that overlapped them are marked * and left out of the medians. Every other run is a clean window. Their first rerun
-(`1026-023845-8bc8`) was tainted again (mean 14.8 %); the next one is queued as `1026-052430-6c71`.
+**Thread-matched rerun (MEASURED, jobs `1026-011428-edef` and `1026-052430-6c71`, N = 0 / 6 / 12, 3 interleaved
+rounds).** llama-bench at `-t 8` (Axon's decode threads, the P cores) and `-t 24` (Axon's prefill threads),
+interleaved with Axon. Both jobs use the same Axon binary (main `39624db`) and the same llama.cpp (`4413a19`).
+- edef is TAINTED overall (Xorg, max 53 %). Its FOREIGN_GPU samples put two spikes at 02:26:17–02:26:51 and
+  02:27:25–02:27:59. Every edef run outside those windows is a clean window and is used as is.
+- The six runs that overlapped the spikes (round 1: llama.cpp N = 0 and 6 at both thread counts, Axon N = 12
+  tg128 and pp512) are replaced by their rerun in job 6c71, marked ‡. 6c71 is CLEAN (foreign GPU max 0 %).
+  The ‡ values ran in a separate job, not interleaved with the other two rounds.
+- An earlier rerun of those six (job 8bc8) was tainted again and isn't used.
 
 | N | metric | axon | llama.cpp `-t 8` | llama.cpp `-t 24` | axon / best llama |
 |---|---|---|---|---|---:|
-| 0 | tg128 | 56.6 (53.4 / 56.6 / 62.5) | 34.3 (35.4* / 33.6 / 35.0) | 9.0 (9.5* / 8.8 / 9.2) | 1.65× |
-| 0 | pp512 | 700.1 (700.1 / 705.5 / 641.5) | 780.4 (812.0* / 719.1 / 841.6) | 749.4 (704.1* / 795.6 / 703.2) | 0.90× |
-| 0 | pp2100 | 611.2 (600.9 / 612.9 / 611.2) | 695.8 (663.5* / 645.5 / 746.0) | 690.1 (647.0* / 699.1 / 681.1) | 0.88× |
-| 6 | tg128 | 68.0 (66.4 / 68.0 / 68.9) | 42.5 (46.6* / 38.4 / 46.5) | 11.7 (11.2* / 11.4 / 12.0) | 1.60× |
-| 6 | pp512 | 836.8 (838.0 / 836.8 / 815.2) | 1054.9 (947.7* / 1064.5 / 1045.2) | 1026.9 (914.1* / 1046.1 / 1007.7) | 0.79× |
-| 6 | pp2100 | 705.3 (706.6 / 696.2 / 705.3) | 932.7 (902.8* / 930.2 / 935.1) | 925.6 (876.8* / 924.1 / 927.0) | 0.76× |
-| 12 | tg128 | 75.2 (78.2* / 76.4 / 74.0) | 52.5 (52.5 / 55.8 / 51.7) | 16.1 (16.1 / 16.0 / 17.5) | 1.43× |
-| 12 | pp512 | 1045.9 (982.3* / 1047.7 / 1044.1) | 1324.0 (1324.0 / 1337.1 / 1304.2) | 1244.3 (1350.3 / 1244.3 / 1079.3) | 0.79× |
+| 0 | tg128 | 56.6 (53.4 / 56.6 / 62.5) | 33.6 (30.5‡ / 33.6 / 35.0) | 9.2 (9.5‡ / 8.8 / 9.2) | 1.68× |
+| 0 | pp512 | 700.1 (700.1 / 705.5 / 641.5) | 834.5 (834.5‡ / 719.1 / 841.6) | 795.6 (825.9‡ / 795.6 / 703.2) | 0.84× |
+| 0 | pp2100 | 611.2 (600.9 / 612.9 / 611.2) | 746.0 (754.1‡ / 645.5 / 746.0) | 699.1 (745.8‡ / 699.1 / 681.1) | 0.82× |
+| 6 | tg128 | 68.0 (66.4 / 68.0 / 68.9) | 44.6 (44.6‡ / 38.4 / 46.5) | 11.8 (11.8‡ / 11.4 / 12.0) | 1.52× |
+| 6 | pp512 | 836.8 (838.0 / 836.8 / 815.2) | 1056.6 (1056.6‡ / 1064.5 / 1045.2) | 1046.1 (1047.9‡ / 1046.1 / 1007.7) | 0.79× |
+| 6 | pp2100 | 705.3 (706.6 / 696.2 / 705.3) | 935.1 (946.9‡ / 930.2 / 935.1) | 924.1 (900.6‡ / 924.1 / 927.0) | 0.75× |
+| 12 | tg128 | 76.4 (79.1‡ / 76.4 / 74.0) | 52.5 (52.5 / 55.8 / 51.7) | 16.1 (16.1 / 16.0 / 17.5) | 1.46× |
+| 12 | pp512 | 1047.7 (1083.7‡ / 1047.7 / 1044.1) | 1324.0 (1324.0 / 1337.1 / 1304.2) | 1244.3 (1350.3 / 1244.3 / 1079.3) | 0.79× |
 | 12 | pp2100 | 849.1 (846.9 / 852.5 / 849.1) | 1179.3 (1179.3 / 1230.8 / 1078.5) | 1200.4 (1201.6 / 1200.4 / 1062.6) | 0.71× |
 
 Matching threads doesn't change the picture.
 - llama.cpp decodes best at `-t 8`. At `-t 24` its decode collapses (9–17 tok/s), presumably because the hybrid CPU's
   E cores stall each step's barrier (not measured).
-- At `-t 8`, Axon still leads decode by 1.43–1.65×. llama.cpp's prefill is ahead by 1.11–1.41× at either thread
-  count.
-- So llama-bench's default `-t 4` understated llama.cpp's decode by up to 9 % at these placements (N = 0: 31.6 vs
-  34.3), not enough to flip any row.
+- At its best thread count, llama.cpp still trails Axon's decode: Axon leads by 1.46–1.68×. llama.cpp's prefill is
+  ahead by 1.19–1.41× (Axon 0.71–0.84×).
+- So llama-bench's default `-t 4` understated llama.cpp at these placements by up to 8 % on decode (N = 6: 41.2 vs
+  44.6) and up to 11 % on prefill (N = 0 pp2100: 674 vs 746). That is not enough to flip any row.
 
 **Method.** One `--timing bella` job (`benchd.sh`, in the gist). Each round runs N = 0, 6, 12, auto; within a
 round, the engine order alternates (odd rounds Axon first). Every run is preceded by a 5 s pause.
