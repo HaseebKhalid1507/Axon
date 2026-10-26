@@ -249,7 +249,14 @@ impl MoeInfo {
     }
 }
 
+/// Bytes a GiB, for the refusals.
+const GIB: f64 = (1u64 << 30) as f64;
+
 /// Headroom `check_ram` wants beyond the CPU model's anonymous memory.
+/// Wider than the dense check's none (`model::check_ram_dense`): this
+/// estimate rounds the dense weights ("roughly", `ram_need`) and counts no
+/// KV cache, norms, routers or scratch, where the dense one is the built
+/// arena exactly plus the KV. Not calibrated against a memory limit yet.
 const RAM_HEADROOM: u64 = 3 << 29;
 
 /// Anonymous memory the CPU model of `i` takes beyond the mapped file, plus
@@ -323,13 +330,13 @@ fn check_ram_keep_with(
     let want = arena + RAM_HEADROOM;
     match avail {
         Some(avail) if avail.bytes < want => Err(format!(
-            "{}: the CPU experts beside {} resident layers need about {:.1} GB of RAM (their \
-             repacked experts {:.1} GB) and only {:.1} GB is available (bound by {avail})",
+            "{}: the CPU experts beside {} resident layers need about {:.2} GiB of RAM (their \
+             repacked experts {:.2} GiB) and only {:.2} GiB is available (bound by {avail})",
             m.arch,
             skip.len(),
-            want as f64 / 1e9,
-            arena as f64 / 1e9,
-            avail.bytes as f64 / 1e9
+            want as f64 / GIB,
+            arena as f64 / GIB,
+            avail.bytes as f64 / GIB
         )),
         _ => Ok(()),
     }
@@ -347,13 +354,13 @@ fn check_ram_with(
     let want = ram_need(&i, repack, dense);
     match avail {
         Some(avail) if avail.bytes < want => Err(format!(
-            "{}: the {} needs about {:.1} GB of RAM (its repacked experts {:.1} GB) and \
-             only {:.1} GB is available (bound by {avail})",
+            "{}: the {} needs about {:.2} GiB of RAM (its repacked experts {:.2} GiB) and \
+             only {:.2} GiB is available (bound by {avail})",
             m.arch,
             if dense { "CPU model" } else { "CPU experts" },
-            want as f64 / 1e9,
-            i.expert_arena as f64 / 1e9,
-            avail.bytes as f64 / 1e9
+            want as f64 / GIB,
+            i.expert_arena as f64 / GIB,
+            avail.bytes as f64 / GIB
         )),
         _ => Ok(()),
     }
@@ -955,7 +962,7 @@ mod tests {
         };
         let e = check_ram_with(&m, true, true, Some(cg)).unwrap_err();
         assert!(
-            e.ends_with("(bound by cgroup /app.slice/job.scope memory.max 1000 MB)"),
+            e.ends_with("(bound by cgroup /app.slice/job.scope memory.max 1000 MiB)"),
             "{e}"
         );
     }

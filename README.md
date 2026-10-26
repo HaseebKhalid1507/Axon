@@ -380,6 +380,13 @@ for thinking mode (temperature 0.6, top-p 0.95, top-k 20), as `chat` does by def
 its own defaults (`--temp 0.8 --top-k 40 --top-p 0.9`); with `--temp 0` (greedy) long
 reasoning can loop.
 
+**Memory limits (CPU).** Before a model is built for the CPU, its repacked weights and the KV cache of the
+first 8192 tokens (or `--ctx`, if shorter) are checked against the RAM available: the host's `MemAvailable`,
+or the room under the tightest cgroup memory limit (a container, a systemd scope). A model that can't fit is
+refused with a message naming the binding limit, instead of being OOM-killed. A longer `--ctx` whose full KV
+cache wouldn't fit only prints a note: that cache is taken as the context fills. Mixture-of-experts models
+have the same check for their experts. The CPU half of a `--gpu-layers` split isn't checked yet.
+
 ### Serving: `axon serve`
 
 ```bash

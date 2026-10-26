@@ -63,13 +63,13 @@ pub(crate) enum Bound {
 
 impl fmt::Display for Avail {
     /// What bound the figure, for messages: "host MemAvailable" or
-    /// "cgroup /a/b memory.max 1000 MB".
+    /// "cgroup /a/b memory.max 1000 MiB".
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self.bound {
             Bound::Host => write!(f, "host MemAvailable"),
             Bound::Cgroup { path, limit, v1 } => write!(
                 f,
-                "cgroup {path} {} {} MB",
+                "cgroup {path} {} {} MiB",
                 if *v1 {
                     "memory.limit_in_bytes"
                 } else {
@@ -418,7 +418,7 @@ mod tests {
         );
         assert_eq!(
             a.to_string(),
-            "cgroup /user.slice/app.slice/job.scope memory.max 1000 MB"
+            "cgroup /user.slice/app.slice/job.scope memory.max 1000 MiB"
         );
         // The scope unlimited: the slice binds (15 GB < host 16 GB).
         r.put(
@@ -515,7 +515,7 @@ mod tests {
         assert_eq!(a.bound, cg("/kube/pod1", 2 * GB, true));
         assert_eq!(
             a.to_string(),
-            "cgroup /kube/pod1 memory.limit_in_bytes 2048 MB"
+            "cgroup /kube/pod1 memory.limit_in_bytes 2048 MiB"
         );
         // Only the cgroup's own stats: those.
         r.put(
@@ -557,7 +557,7 @@ mod tests {
         let a = r.avail().unwrap();
         assert_eq!(a.bytes, GB - 200 * MB);
         assert_eq!(a.bound, cg("/", GB, false));
-        assert_eq!(a.to_string(), "cgroup / memory.max 1024 MB");
+        assert_eq!(a.to_string(), "cgroup / memory.max 1024 MiB");
         r.put("sys/fs/cgroup/memory.max", "max\n");
         assert_eq!(r.avail().unwrap().bound, Bound::Host);
     }

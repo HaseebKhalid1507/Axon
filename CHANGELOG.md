@@ -60,6 +60,11 @@ The first version: everything merged to `main` from the start of the project (20
 - Prefill: Q8_0/Q5_0 GEMM fix, fewer pool joins, batch 128 (#20); decode pool participation on hybrid CPUs (#32).
 - Startup: map instead of copy when repacked, CUDA init at t = 0, read-ahead, faster upload (#21); pinned upload
   ring, faster tokenizer build and GGUF string parse (#41).
+- **Behaviour change (#142):** a dense model whose repacked weights plus the KV cache of its first 8192 tokens (or
+  `--ctx`, if shorter) don't fit in the RAM available (host `MemAvailable` or the tightest cgroup limit, #133) is
+  refused at load with a message naming the limit (exit 2), instead of being OOM-killed. A longer `--ctx` that
+  wouldn't fit whole prints a note. The MoE RAM refusal's figures are now GiB, as the dense one's, and a cgroup
+  limit is printed in MiB.
 
 ### CUDA
 - GPU backend: foundations (#7), decode (#8), batched prefill and speculative verify (#10), an 8-bit KV cache
