@@ -1,0 +1,49 @@
+[axon-run 06:14:37] submitted 1026-061437-37f8 by /home/haseeb/.cache/axon-wt-mlapf: /home/haseeb/.cache/axon-mlapf/axon-test-ad53f43 cuda::qwen2::mla:: --test-threads 1 --nocapture --include-ignored
+[axon-run 06:22:10] scope axon-job-1026-061437-37f8-1793010129.scope in app-axonjobs.slice: MemoryMax 11524 MB, MemoryHigh 10371 MB, no swap, oomd pressure kill 80% (claim 7000 MB): an OOM here kills only this job
+[axon-run 06:22:10] job 1026-061437-37f8 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-061437-37f8-1793010129 --slice=app-axonjobs.slice -p MemoryMax=11524M -p MemoryHigh=10371M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-mlapf/axon-test-ad53f43 cuda::qwen2::mla:: --test-threads 1 --nocapture --include-ignored
+axon-q 06:22:10 waiting: stagger
+axon-q 06:22:18 start slot 16-23: /home/haseeb/.cache/axon-mlapf/axon-test-ad53f43 cuda::qwen2::mla:: --test-threads 1 --nocapture --include-ignored
+
+running 10 tests
+test cuda::qwen2::mla::tests::attn_blocks_cover_the_hpb_rule ... ok
+test cuda::qwen2::mla::tests::mla_attn_b_equals_main ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+mla_attn_b == main: 36249344 outputs
+ok
+test cuda::qwen2::mla::tests::mla_attn_equals_main ... mla_attn == main: 92941824 outputs
+ok
+test cuda::qwen2::mla::tests::mla_attn_matches_reference_and_batch ... ok
+test cuda::qwen2::mla::tests::mla_decode_kernel_bench ... heads_mv k_b: main 21.7 us | rpb 8 13.1 us | rpb 16 7.5 us | rpb 32 7.2 us | rpb 64 6.5 us
+heads k_b nb 8: main 28.7 us | mv 21.3 us | mm 77.6 us
+heads k_b nb 16: main 52.2 us | mv 37.3 us | mm 78.5 us
+heads k_b nb 32: main 102.1 us | mv 70.4 us | mm 82.8 us
+heads k_b nb 512: main 1805.9 us | mv 1043.1 us | mm 633.1 us
+heads k_b nb 2100: main 7848.3 us | mv 4514.4 us | mm 2496.5 us
+heads_mv v_b: main 22.0 us | rpb 8 9.0 us | rpb 16 5.1 us | rpb 32 7.0 us | rpb 64 7.4 us
+heads v_b nb 8: main 25.2 us | mv 17.7 us | mm 88.0 us
+heads v_b nb 16: main 50.0 us | mv 29.6 us | mm 100.6 us
+heads v_b nb 32: main 95.0 us | mv 56.9 us | mm 103.6 us
+heads v_b nb 512: main 1840.5 us | mv 842.8 us | mm 495.0 us
+heads v_b nb 2100: main 9029.0 us | mv 3627.5 us | mm 1964.9 us
+attn pos 8: main 6.0 us | hpb 8 6.3 | hpb 8 dbuf 5.2 | rule 4.0 | rule dbuf 3.1 | hpb 1 4.8 | hpb 1 dbuf 8.6 us
+attn pos 64: main 25.7 us | hpb 8 24.5 | hpb 8 dbuf 21.1 | rule 9.4 | rule dbuf 6.8 | hpb 1 9.9 | hpb 1 dbuf 9.0 us
+attn pos 136: main 48.7 us | hpb 8 42.3 | hpb 8 dbuf 37.2 | rule 15.2 | rule dbuf 10.5 | hpb 1 16.0 | hpb 1 dbuf 12.2 us
+attn pos 300: main 49.0 us | hpb 8 42.7 | hpb 8 dbuf 37.1 | rule 15.2 | rule dbuf 10.6 | hpb 1 15.5 | hpb 1 dbuf 15.2 us
+attn pos 1000: main 48.0 us | hpb 8 42.7 | hpb 8 dbuf 37.4 | rule 23.3 | rule dbuf 28.8 | hpb 1 32.5 | hpb 1 dbuf 32.8 us
+attn pos 4000: main 60.4 us | hpb 8 57.7 | hpb 8 dbuf 76.5 | rule 55.0 | rule dbuf 76.2 | hpb 1 99.6 | hpb 1 dbuf 109.7 us
+attn batch 64 from 0: main 38 us | decode kernel 35 us | attn_b 32 us
+attn batch 512 from 0: main 1370 us | decode kernel 1383 us | attn_b 756 us
+attn batch 2100 from 0: main 23535 us | decode kernel 21880 us | attn_b 12654 us
+ok
+test cuda::qwen2::mla::tests::mla_heads_mm_equals_main ... mla_heads_mm == main: 54407296 outputs
+ok
+test cuda::qwen2::mla::tests::mla_heads_mv_equals_main ... mla_heads_mv == main: 9539028 outputs
+ok
+test cuda::qwen2::mla::tests::mla_heads_mv_matches_dequant ... ok
+test cuda::qwen2::mla::tests::mla_kernels_compile_for_archs ... mla sm_80: 539488 bytes of cubin
+mla sm_90: 560168 bytes of cubin
+ok
+test cuda::qwen2::mla::tests::mla_router_matches_cpu_rule ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 744 filtered out; finished in 53.48s
+
+[axon-run 06:23:11] exit 0 after 61.6s (host bella)
