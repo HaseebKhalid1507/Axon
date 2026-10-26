@@ -307,7 +307,9 @@ Defaults, as `axon --help` gives them:
   fit). Default 0. Same bits as on the CPU (the experts' GPU kernels are twins of the CPU's
   r8 kernels); where that can't hold (`AXON_REPACK=0`, a host whose FMA choice differs from
   the GPU twins', a GPU below sm_80, or a weight type with no twin) it keeps them on the CPU
-  and says why, as it does for gpt-oss (no MXFP4 twin yet).
+  and says why, as it does for gpt-oss (no MXFP4 twin yet). qwen3moe's bits are
+  checked on Qwen3-MOE-4x0.6B and a pruned Qwen3-30B-A3B (the 30B's expert shapes); the full
+  Qwen3-30B-A3B is untested end to end until its pod bench (`auto` vs `0`, text and speed) runs.
   On the CPU and with dense models the flag does nothing. `axon serve` takes it as
   `AXON_GPU_EXPERTS` and serves a MoE model one request at a time.
 - `--gpus L` (gen, chat; `AXON_GPUS=L` for serve too): the CUDA devices to run on. One
