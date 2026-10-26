@@ -994,7 +994,7 @@ struct Loaded {
 /// own thread: the backend never leaves it.
 fn engine(
     o: EngineOpts,
-    ready: mpsc::Sender<Loaded>,
+    ready: mpsc::Sender<Result<Loaded, Refused>>,
     jobs: mpsc::Receiver<Job>,
     stop: Arc<AtomicBool>,
 ) {
@@ -1142,6 +1142,7 @@ fn engine(
         _ => CacheKv::F16,
     };
     // Paged KV (specs r11): a slot is a cap, the pool a page budget.
+    let mut paged_miss: Option<String> = None;
     let paged = match &net.0 {
         Inner::Cuda(n) if paged_serve(device, o.parallel, paged_env) => {
             let slots = if o.parallel_set {
@@ -1149,17 +1150,27 @@ fn engine(
             } else {
                 PAGED_PARALLEL
             };
-            let plan = n
-                .free_bytes()
-                .ok()
-                .and_then(|free| paged_plan(n, kv, want.max(ctx), slots, free as usize, !fit));
-            // Always said (also under --quiet): a pool the request can't
-            // have is a different server (an explicit one is refused below).
-            if plan.is_none() && !fit {
-                eprintln!(
-                    "axon serve: KV pages for one {ctx}-token sequence (--ctx) don't fit beside \
-                     the model: slots reserved at the full context instead"
+            let free = n.free_bytes().ok().map(|f| f as usize);
+            let plan = free.and_then(|free| paged_plan(n, kv, want.max(ctx), slots, free, !fit));
+            // Why not (the refusal below says it too); always said, also
+            // under --quiet: the server then reserves whole slots instead.
+            if plan.is_none() {
+                let why = match fit {
+                    false => format!(
+                        "KV pages for one {ctx}-token sequence (--ctx) don't fit beside the \
+                         model and the scratch of {slots} slots"
+                    ),
+                    true => format!(
+                        "not even 1024 tokens of KV pages fit beside the model and the scratch \
+                         of {slots} slots"
+                    ),
+                };
+                let why = format!(
+                    "{why} ({:.2} GiB of GPU memory free)",
+                    free.unwrap_or(0) as f64 / GIB
                 );
+                eprintln!("axon serve: no paged KV pool: {why}; slots reserved whole instead");
+                paged_miss = Some(why);
             }
             // Tests: fewer pages (the cap within them).
             plan.map(|p| match o.kv_pages {
@@ -1221,7 +1232,7 @@ fn engine(
     let vram = || match &net.0 {
         Inner::Cuda(n) => n.free_bytes().ok().map(|f| {
             (
-                n.serve_bytes_kv(kv, o.parallel, ctx) + POOL_SPARE,
+                n.serve_bytes_kv(kv, o.parallel, plan.ctx) + POOL_SPARE,
                 f as usize,
             )
         }),
@@ -1235,12 +1246,16 @@ fn engine(
         },
         &plan,
         paged.is_some(),
+        paged_miss.as_deref(),
         vram,
     ) {
-        refuse_start(&why);
+        let _ = ready.send(Err(Refused(why)));
+        return;
     }
+    // Said even under --quiet: one request at a time, or the context an
+    // explicit --parallel N got (shorter than asked for: its other axis).
     let one = o.parallel > 1 && plan.slots < 2;
-    if let Some(note) = plan.note.as_ref().filter(|_| o.log || one) {
+    if let Some(note) = (plan.note.as_ref()).filter(|_| o.log || one || o.parallel_set) {
         eprintln!("axon serve: {note}");
     }
     // With a pool, the context served is a slot's (every request fits
@@ -1259,11 +1274,14 @@ fn engine(
             };
             match made {
                 Ok(pool) => Some((pool, n, slot_ctx)),
-                Err(why) if o.parallel_set => refuse_start(&format!(
-                    "--parallel {}: the {n}-slot pool couldn't be made ({why}); fewer \
-                     --parallel, a smaller --ctx or --kv q8",
-                    o.parallel
-                )),
+                Err(why) if o.parallel_set => {
+                    let _ = ready.send(Err(Refused(format!(
+                        "--parallel {}: the {n}-slot pool couldn't be made ({why}); fewer \
+                         --parallel, a smaller --ctx or --kv q8",
+                        o.parallel
+                    ))));
+                    return;
+                }
                 Err(why) => {
                     eprintln!("axon serve: one request at a time ({why})");
                     None
@@ -1274,11 +1292,14 @@ fn engine(
     let solo = pool.as_ref().map(|(p, _, _)| net.slot_cache(p, 0));
     let cache = match solo {
         Some(Ok(c)) => c,
-        Some(Err(why)) if o.parallel_set => refuse_start(&format!(
-            "--parallel {}: the slot pool's request view couldn't be made ({why}); fewer \
-             --parallel, a smaller --ctx or --kv q8",
-            o.parallel
-        )),
+        Some(Err(why)) if o.parallel_set => {
+            let _ = ready.send(Err(Refused(format!(
+                "--parallel {}: the slot pool's request view couldn't be made ({why}); fewer \
+                 --parallel, a smaller --ctx or --kv q8",
+                o.parallel
+            ))));
+            return;
+        }
         Some(Err(why)) => {
             eprintln!("axon serve: one request at a time ({why})");
             pool = None;
@@ -1343,7 +1364,7 @@ fn engine(
     };
     let identity = crate::identity::of(&o.path, &model, &net);
     if ready
-        .send(Loaded {
+        .send(Ok(Loaded {
             tok,
             template,
             ctx: served,
@@ -1362,7 +1383,7 @@ fn engine(
             identity,
             arch: model.arch.clone(),
             params: model.total_params(),
-        })
+        }))
         .is_err()
     {
         return;
@@ -1615,14 +1636,17 @@ struct Asked {
 
 /// Why the server must not start with `plan` (#137): --parallel N given
 /// and fewer than N slots fit, or a paged pool asked for and none fits.
-/// `vram`: the bytes N slots at the plan's context need (with
-/// POOL_SPARE) and the bytes free, for the message (asked only when
-/// refusing). Automatic sizing (--parallel left out) is never refused,
-/// as `moe_parallel_refusal` refuses only an explicit --parallel N.
+/// `paged_miss`: why the paged pool didn't fit, when it was tried (then the
+/// slots are reserved whole, and those didn't fit either). `vram`: the bytes
+/// N reserved slots at the plan's context need (with POOL_SPARE) and the
+/// bytes free (asked only when refusing). Automatic sizing (--parallel left
+/// out) is never refused, as `moe_parallel_refusal` refuses only an
+/// explicit --parallel N.
 fn parallel_refusal(
     a: Asked,
     plan: &SlotPlan,
     paged: bool,
+    paged_miss: Option<&str>,
     vram: impl FnOnce() -> Option<(usize, usize)>,
 ) -> Option<String> {
     let short = a.parallel_set && a.parallel > 1 && plan.slots < a.parallel;
@@ -1633,36 +1657,46 @@ fn parallel_refusal(
         true => format!("--parallel {}", a.parallel),
         false => "a paged KV pool (kv_pages)".into(),
     };
+    let pages = paged_miss.map_or(String::new(), |m| {
+        format!(": the paged KV pool doesn't fit ({m}), and reserved slots don't either")
+    });
     let mem = vram().map_or(String::new(), |(need, free)| {
         format!(
-            ": {} slots of {} tokens need {:.2} GiB of GPU memory beside the model, {:.2} GiB \
-             is free",
+            ": {} reserved slots of {} tokens need {:.2} GiB of GPU memory beside the model, \
+             {:.2} GiB is free",
             a.parallel,
             plan.ctx,
             need as f64 / GIB,
             free as f64 / GIB
         )
     });
-    // The plan's note says what fits and why; without one, say what fits.
-    let fits = match (&plan.note, plan.slots) {
-        (Some(n), _) => n.clone(),
-        (None, 0 | 1) => "one request at a time fits".to_string(),
-        (None, s) => format!("{s} requests at once fit"),
+    let fits = match plan.slots {
+        0 | 1 => "not even 2 fit".to_string(),
+        s => format!("{s} fit"),
     };
     Some(format!(
-        "{asked}{mem}; {fits}. A smaller --ctx, --kv q8 or fewer --parallel, or leave \
+        "{asked}{pages}{mem}; {fits}. A smaller --ctx, --kv q8 or fewer --parallel, or leave \
          --parallel out to size it automatically"
     ))
 }
 
-/// Refuse to start: exit 2 with the message (`crate::fail`). In tests the
-/// server runs in the test process, so the engine thread panics instead
-/// and `start` returns an error.
-fn refuse_start(msg: &str) -> ! {
-    #[cfg(test)]
-    panic!("axon serve: {msg}");
-    #[cfg(not(test))]
-    crate::fail(msg)
+/// A start refused (#137: an explicit --parallel N that doesn't fit). The
+/// engine sends it instead of the loaded model; `start` returns it as an
+/// `InvalidInput` error carrying it, and `run` (the CLI) exits 2 with it.
+#[derive(Debug)]
+pub(crate) struct Refused(pub String);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// Whether `e` is a refused start (`Refused`).
+pub(crate) fn is_refused(e: &io::Error) -> bool {
+    e.get_ref().is_some_and(|i| i.is::<Refused>())
 }
 
 /// Whether serve's pool is paged: the GPU, batching, AXON_PAGED_KV != 0
@@ -2127,9 +2161,16 @@ pub fn start(o: Opts) -> io::Result<Server> {
         #[cfg(test)]
         sh: sh.clone(),
     };
-    let Ok(mut l) = ready_rx.recv() else {
-        server.shutdown();
-        return Err(io::Error::other("the engine failed to start"));
+    let mut l = match ready_rx.recv() {
+        Ok(Ok(l)) => l,
+        Ok(Err(refused)) => {
+            server.shutdown();
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, refused));
+        }
+        Err(_) => {
+            server.shutdown();
+            return Err(io::Error::other("the engine failed to start"));
+        }
     };
     if o.no_think && !l.template.as_ref().is_some_and(Template::thinks) {
         crate::fail(&format!(
@@ -3279,7 +3320,12 @@ pub fn run(args: &[String]) -> io::Result<()> {
             );
         }
     }
-    start(o)?.wait()
+    match start(o) {
+        Ok(s) => s.wait(),
+        // A refused start (#137) is a usage error: exit 2, as `crate::fail`.
+        Err(e) if is_refused(&e) => crate::fail(&e.to_string()),
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]

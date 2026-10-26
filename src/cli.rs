@@ -125,7 +125,7 @@ flags:
               (2 to 8) as fit with the whole context, or with a shorter one down to 32768 (or
               the whole one, if less); if not even 2 fit, one request at a time. With --ctx
               N, the slots that fit with N; with --parallel N alone, N slots of the longest
-              context that fits them
+              context that fits them (a shorter context is said, also under --quiet)
   --prefill-chunk N  serve: at least N prompt tokens per step while requests decode (default
               256; 0: prompts fed whole, the others' streams wait)
   --step-ms MS  serve: a step's target time while requests decode (default 60): the prompt
@@ -1807,6 +1807,7 @@ mod tests {
             format!("up to --parallel ({paged}) requests"),
             format!("(default {paged} with paged KV, the default:"),
             format!("{reserved} with AXON_PAGED_KV=0;"),
+            format!("as many slots (2 to {reserved}) as fit"),
         ] {
             assert!(flat.contains(&want), "--help lacks {want:?}");
         }
