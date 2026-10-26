@@ -1,0 +1,240 @@
+[axon-run 12:48:38] submitted 1026-124838-2f63 by /home/haseeb/.cache/axon-wt-moeres-d: /home/haseeb/.cache/axon-moeres/benchd2.sh /home/haseeb/.cache/axon-moeres/axon-main-8508a75 3
+[axon-run 13:05:55] scope axon-job-1026-124838-2f63-1793034355.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 14000 MB): an OOM here kills only this job
+[axon-run 13:05:55] job 1026-124838-2f63 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-124838-2f63-1793034355 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-moeres/benchd2.sh /home/haseeb/.cache/axon-moeres/axon-main-8508a75 3
+BENCHD out /home/haseeb/.cache/axon-moeres/benchd2-axon-main-8508a75-1026-130555 bin /home/haseeb/.cache/axon-moeres/axon-main-8508a75 sha256 04fae35ff4efd97f llama.cpp "4413a19"
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 615.78.08, [N/A], 3090 MHz, 56
+r1	axon	N=0	res=0	tg128	62.65	ntok=128	rc=0	8 3.7 clean
+r1	axon	N=0	res=0	pp512	759.42	ntok=510	rc=0	10 6.3 TAINTED
+r1	axon	N=0	res=0	pp2100	687.46	ntok=2106	rc=0	33 19.5 TAINTED
+[axon-run 13:06:29] FOREIGN_GPU sample max=43% mean=17.0% n=6 (obs 3043705 26%, Xorg 330017 17%)
+r1	llama-t4	N=0	res=0	pp512	657.54	ntok=512	rc=0	51 25.6 TAINTED	build=4413a19 fa=-1 t=4
+r1	llama-t4	N=0	res=0	pp2100	581.44	ntok=2100	rc=0	51 25.6 TAINTED	build=4413a19 fa=-1 t=4
+r1	llama-t4	N=0	res=0	tg128	30.87	ntok=128	rc=0	51 25.6 TAINTED	build=4413a19 fa=-1 t=4
+r1	llama-t8	N=0	res=0	pp512	647.02	ntok=512	rc=0	53 30.9 TAINTED	build=4413a19 fa=-1 t=8
+r1	llama-t8	N=0	res=0	pp2100	582.19	ntok=2100	rc=0	53 30.9 TAINTED	build=4413a19 fa=-1 t=8
+r1	llama-t8	N=0	res=0	tg128	33.17	ntok=128	rc=0	53 30.9 TAINTED	build=4413a19 fa=-1 t=8
+[axon-run 13:07:03] FOREIGN_GPU sample max=45% mean=28.5% n=6 (obs 3043705 23%, kitty 944847 10%, Xorg 330017 5%)
+r1	llama-t24	N=0	res=0	pp512	655.64	ntok=512	rc=0	61 32.7 TAINTED	build=4413a19 fa=-1 t=24
+r1	llama-t24	N=0	res=0	pp2100	577.59	ntok=2100	rc=0	61 32.7 TAINTED	build=4413a19 fa=-1 t=24
+r1	llama-t24	N=0	res=0	tg128	27.01	ntok=128	rc=0	61 32.7 TAINTED	build=4413a19 fa=-1 t=24
+r1	axon	N=6	res=6	tg128	65.02	ntok=128	rc=0	25 12.0 TAINTED
+r1	axon	N=6	res=6	pp512	705.08	ntok=510	rc=0	35 18.7 TAINTED
+[axon-run 13:07:37] FOREIGN_GPU sample max=52% mean=22.3% n=6 (Xorg 330017 8%, kitty 944847 4%, obs 3043705 3%)
+r1	axon	N=6	res=6	pp2100	657.32	ntok=2106	rc=0	31 24.0 TAINTED
+r1	llama-t4	N=6	res=6	pp512	818.26	ntok=512	rc=0	62 32.6 TAINTED	build=4413a19 fa=-1 t=4
+r1	llama-t4	N=6	res=6	pp2100	731.37	ntok=2100	rc=0	62 32.6 TAINTED	build=4413a19 fa=-1 t=4
+r1	llama-t4	N=6	res=6	tg128	39.55	ntok=128	rc=0	62 32.6 TAINTED	build=4413a19 fa=-1 t=4
+[axon-run 13:08:11] FOREIGN_GPU sample max=46% mean=29.8% n=6 (Xorg 330017 16%, obs 3043705 15%, --gpu- 2849090 15%)
+r1	llama-t8	N=6	res=6	pp512	831.45	ntok=512	rc=0	63 30.3 TAINTED	build=4413a19 fa=-1 t=8
+r1	llama-t8	N=6	res=6	pp2100	726.85	ntok=2100	rc=0	63 30.3 TAINTED	build=4413a19 fa=-1 t=8
+r1	llama-t8	N=6	res=6	tg128	38.36	ntok=128	rc=0	63 30.3 TAINTED	build=4413a19 fa=-1 t=8
+r1	llama-t24	N=6	res=6	pp512	785.52	ntok=512	rc=0	61 26.9 TAINTED	build=4413a19 fa=-1 t=24
+r1	llama-t24	N=6	res=6	pp2100	727.39	ntok=2100	rc=0	61 26.9 TAINTED	build=4413a19 fa=-1 t=24
+r1	llama-t24	N=6	res=6	tg128	27.45	ntok=128	rc=0	61 26.9 TAINTED	build=4413a19 fa=-1 t=24
+r1	axon	N=12	res=12	tg128	77.47	ntok=128	rc=0	26 13.0 TAINTED
+[axon-run 13:08:45] FOREIGN_GPU sample max=40% mean=22.2% n=6 (Xorg 330017 10%, --gpu- 2849090 5%)
+r1	axon	N=12	res=12	pp512	920.12	ntok=510	rc=0	37 17.0 TAINTED
+r1	axon	N=12	res=12	pp2100	845.92	ntok=2106	rc=0	35 21.4 TAINTED
+r1	llama-t4	N=12	res=12	pp512	1076.45	ntok=512	rc=0	51 32.6 TAINTED	build=4413a19 fa=-1 t=4
+r1	llama-t4	N=12	res=12	pp2100	964.28	ntok=2100	rc=0	51 32.6 TAINTED	build=4413a19 fa=-1 t=4
+r1	llama-t4	N=12	res=12	tg128	52.18	ntok=128	rc=0	51 32.6 TAINTED	build=4413a19 fa=-1 t=4
+[axon-run 13:09:18] FOREIGN_GPU sample max=39% mean=23.8% n=6 (obs 3043705 17%, Xorg 330017 9%)
+r1	llama-t8	N=12	res=12	pp512	1102.02	ntok=512	rc=0	47 24.2 TAINTED	build=4413a19 fa=-1 t=8
+r1	llama-t8	N=12	res=12	pp2100	979.56	ntok=2100	rc=0	47 24.2 TAINTED	build=4413a19 fa=-1 t=8
+r1	llama-t8	N=12	res=12	tg128	45.61	ntok=128	rc=0	47 24.2 TAINTED	build=4413a19 fa=-1 t=8
+r1	llama-t24	N=12	res=12	pp512	1081.46	ntok=512	rc=0	52 26.4 TAINTED	build=4413a19 fa=-1 t=24
+r1	llama-t24	N=12	res=12	pp2100	977.63	ntok=2100	rc=0	52 26.4 TAINTED	build=4413a19 fa=-1 t=24
+r1	llama-t24	N=12	res=12	tg128	25.09	ntok=128	rc=0	52 26.4 TAINTED	build=4413a19 fa=-1 t=24
+r1	axon	N=auto	res=24	tg128	128.52	ntok=128	rc=0	28 17.2 TAINTED
+[axon-run 13:09:51] FOREIGN_GPU sample max=50% mean=21.0% n=6 (obs 3043705 10%, --gpu- 2849090 2%, Xorg 330017 1%)
+r1	axon	N=auto	res=24	pp512	2674.26	ntok=510	rc=0	38 17.7 TAINTED
+r1	axon	N=auto	res=24	pp2100	2110.96	ntok=2106	rc=0	38 21.8 TAINTED
+r1	llama-t4	N=auto	res=24	pp512	3722.93	ntok=512	rc=0	36 23.6 TAINTED	build=4413a19 fa=-1 t=4
+r1	llama-t4	N=auto	res=24	pp2100	3303.51	ntok=2100	rc=0	36 23.6 TAINTED	build=4413a19 fa=-1 t=4
+r1	llama-t4	N=auto	res=24	tg128	136.69	ntok=128	rc=0	36 23.6 TAINTED	build=4413a19 fa=-1 t=4
+r1	llama-t8	N=auto	res=24	pp512	3602.32	ntok=512	rc=0	42 25.8 TAINTED	build=4413a19 fa=-1 t=8
+r1	llama-t8	N=auto	res=24	pp2100	3313.45	ntok=2100	rc=0	42 25.8 TAINTED	build=4413a19 fa=-1 t=8
+r1	llama-t8	N=auto	res=24	tg128	126.60	ntok=128	rc=0	42 25.8 TAINTED	build=4413a19 fa=-1 t=8
+[axon-run 13:10:25] FOREIGN_GPU sample max=50% mean=22.8% n=6 (Xorg 330017 7%, obs 3043705 4%, --gpu- 2849090 2%)
+r1	llama-t24	N=auto	res=24	pp512	3652.22	ntok=512	rc=0	56 24.4 TAINTED	build=4413a19 fa=-1 t=24
+r1	llama-t24	N=auto	res=24	pp2100	3190.12	ntok=2100	rc=0	56 24.4 TAINTED	build=4413a19 fa=-1 t=24
+r1	llama-t24	N=auto	res=24	tg128	120.01	ntok=128	rc=0	56 24.4 TAINTED	build=4413a19 fa=-1 t=24
+r2	llama-t24	N=0	res=0	pp512	649.47	ntok=512	rc=0	60 36.2 TAINTED	build=4413a19 fa=-1 t=24
+r2	llama-t24	N=0	res=0	pp2100	568.76	ntok=2100	rc=0	60 36.2 TAINTED	build=4413a19 fa=-1 t=24
+r2	llama-t24	N=0	res=0	tg128	37.14	ntok=128	rc=0	60 36.2 TAINTED	build=4413a19 fa=-1 t=24
+[axon-run 13:10:58] FOREIGN_GPU sample max=59% mean=28.0% n=6 (obs 3043705 36%, Xorg 330017 23%)
+r2	llama-t8	N=0	res=0	pp512	638.22	ntok=512	rc=0	60 39.4 TAINTED	build=4413a19 fa=-1 t=8
+r2	llama-t8	N=0	res=0	pp2100	555.08	ntok=2100	rc=0	60 39.4 TAINTED	build=4413a19 fa=-1 t=8
+r2	llama-t8	N=0	res=0	tg128	39.03	ntok=128	rc=0	60 39.4 TAINTED	build=4413a19 fa=-1 t=8
+r2	llama-t4	N=0	res=0	pp512	629.91	ntok=512	rc=0	60 31.8 TAINTED	build=4413a19 fa=-1 t=4
+r2	llama-t4	N=0	res=0	pp2100	562.71	ntok=2100	rc=0	60 31.8 TAINTED	build=4413a19 fa=-1 t=4
+r2	llama-t4	N=0	res=0	tg128	29.34	ntok=128	rc=0	60 31.8 TAINTED	build=4413a19 fa=-1 t=4
+[axon-run 13:11:32] FOREIGN_GPU sample max=59% mean=31.3% n=6 (obs 3043705 8%, --gpu- 2849090 8%)
+r2	axon	N=0	res=0	tg128	52.12	ntok=128	rc=0	18 12.2 TAINTED
+r2	axon	N=0	res=0	pp512	555.36	ntok=510	rc=0	21 19.2 TAINTED
+r2	axon	N=0	res=0	pp2100	474.97	ntok=2106	rc=0	21 14.8 TAINTED
+[axon-run 13:12:06] FOREIGN_GPU sample max=25% mean=18.3% n=6 (--gpu- 2849090 20%, obs 3043705 5%)
+r2	llama-t24	N=6	res=6	pp512	760.13	ntok=512	rc=0	53 24.4 TAINTED	build=4413a19 fa=-1 t=24
+r2	llama-t24	N=6	res=6	pp2100	727.88	ntok=2100	rc=0	53 24.4 TAINTED	build=4413a19 fa=-1 t=24
+r2	llama-t24	N=6	res=6	tg128	15.03	ntok=128	rc=0	53 24.4 TAINTED	build=4413a19 fa=-1 t=24
+r2	llama-t8	N=6	res=6	pp512	762.85	ntok=512	rc=0	63 37.7 TAINTED	build=4413a19 fa=-1 t=8
+r2	llama-t8	N=6	res=6	pp2100	723.95	ntok=2100	rc=0	63 37.7 TAINTED	build=4413a19 fa=-1 t=8
+r2	llama-t8	N=6	res=6	tg128	42.40	ntok=128	rc=0	63 37.7 TAINTED	build=4413a19 fa=-1 t=8
+[axon-run 13:12:40] FOREIGN_GPU sample max=63% mean=34.7% n=6 (obs 3043705 15%)
+r2	llama-t4	N=6	res=6	pp512	820.34	ntok=512	rc=0	59 31.7 TAINTED	build=4413a19 fa=-1 t=4
+r2	llama-t4	N=6	res=6	pp2100	729.34	ntok=2100	rc=0	59 31.7 TAINTED	build=4413a19 fa=-1 t=4
+r2	llama-t4	N=6	res=6	tg128	37.80	ntok=128	rc=0	59 31.7 TAINTED	build=4413a19 fa=-1 t=4
+r2	axon	N=6	res=6	tg128	65.56	ntok=128	rc=0	35 16.6 TAINTED
+r2	axon	N=6	res=6	pp512	689.19	ntok=510	rc=0	27 14.2 TAINTED
+[axon-run 13:13:13] FOREIGN_GPU sample max=50% mean=26.5% n=6 (obs 3043705 21%)
+r2	axon	N=6	res=6	pp2100	671.24	ntok=2106	rc=0	35 21.3 TAINTED
+r2	llama-t24	N=12	res=12	pp512	1104.01	ntok=512	rc=0	58 27.3 TAINTED	build=4413a19 fa=-1 t=24
+r2	llama-t24	N=12	res=12	pp2100	980.08	ntok=2100	rc=0	58 27.3 TAINTED	build=4413a19 fa=-1 t=24
+r2	llama-t24	N=12	res=12	tg128	18.37	ntok=128	rc=0	58 27.3 TAINTED	build=4413a19 fa=-1 t=24
+[axon-run 13:13:47] FOREIGN_GPU sample max=37% mean=26.3% n=6 (obs 3043705 12%, --gpu- 2849090 11%, Xorg 330017 3%)
+r2	llama-t8	N=12	res=12	pp512	1099.27	ntok=512	rc=0	58 32.3 TAINTED	build=4413a19 fa=-1 t=8
+r2	llama-t8	N=12	res=12	pp2100	981.63	ntok=2100	rc=0	58 32.3 TAINTED	build=4413a19 fa=-1 t=8
+r2	llama-t8	N=12	res=12	tg128	51.10	ntok=128	rc=0	58 32.3 TAINTED	build=4413a19 fa=-1 t=8
+r2	llama-t4	N=12	res=12	pp512	1102.02	ntok=512	rc=0	59 37.1 TAINTED	build=4413a19 fa=-1 t=4
+r2	llama-t4	N=12	res=12	pp2100	980.51	ntok=2100	rc=0	59 37.1 TAINTED	build=4413a19 fa=-1 t=4
+r2	llama-t4	N=12	res=12	tg128	50.87	ntok=128	rc=0	59 37.1 TAINTED	build=4413a19 fa=-1 t=4
+r2	axon	N=12	res=12	tg128	78.64	ntok=128	rc=0	32 18.8 TAINTED
+[axon-run 13:14:20] FOREIGN_GPU sample max=57% mean=30.2% n=6 (obs 3043705 11%, --gpu- 2849090 3%)
+r2	axon	N=12	res=12	pp512	986.75	ntok=510	rc=0	22 12.3 TAINTED
+r2	axon	N=12	res=12	pp2100	877.97	ntok=2106	rc=0	42 28.8 TAINTED
+r2	axon	N=auto	res=24	tg128	125.49	ntok=128	rc=0	34 19.5 TAINTED
+r2	axon	N=auto	res=24	pp512	2712.64	ntok=510	rc=0	28 14.3 TAINTED
+[axon-run 13:14:52] FOREIGN_GPU sample max=41% mean=22.7% n=6 (obs 3043705 9%, Xorg 330017 3%, --gpu- 2849090 3%)
+r2	axon	N=auto	res=24	pp2100	2140.78	ntok=2106	rc=0	45 22.0 TAINTED
+r2	llama-t4	N=auto	res=24	pp512	3687.16	ntok=512	rc=0	42 25.8 TAINTED	build=4413a19 fa=-1 t=4
+r2	llama-t4	N=auto	res=24	pp2100	3276.65	ntok=2100	rc=0	42 25.8 TAINTED	build=4413a19 fa=-1 t=4
+r2	llama-t4	N=auto	res=24	tg128	131.96	ntok=128	rc=0	42 25.8 TAINTED	build=4413a19 fa=-1 t=4
+r2	llama-t8	N=auto	res=24	pp512	3737.84	ntok=512	rc=0	35 18.5 TAINTED	build=4413a19 fa=-1 t=8
+r2	llama-t8	N=auto	res=24	pp2100	3319.64	ntok=2100	rc=0	35 18.5 TAINTED	build=4413a19 fa=-1 t=8
+r2	llama-t8	N=auto	res=24	tg128	129.83	ntok=128	rc=0	35 18.5 TAINTED	build=4413a19 fa=-1 t=8
+r2	llama-t24	N=auto	res=24	pp512	3715.76	ntok=512	rc=0	33 20.2 TAINTED	build=4413a19 fa=-1 t=24
+r2	llama-t24	N=auto	res=24	pp2100	3305.80	ntok=2100	rc=0	33 20.2 TAINTED	build=4413a19 fa=-1 t=24
+r2	llama-t24	N=auto	res=24	tg128	98.39	ntok=128	rc=0	33 20.2 TAINTED	build=4413a19 fa=-1 t=24
+[axon-run 13:15:25] FOREIGN_GPU sample max=25% mean=18.0% n=6 (obs 3043705 14%, Xorg 330017 9%, --gpu- 2849090 2%)
+r3	axon	N=0	res=0	tg128	59.92	ntok=128	rc=0	20 7.9 TAINTED
+r3	axon	N=0	res=0	pp512	552.46	ntok=510	rc=0	18 10.2 TAINTED
+r3	axon	N=0	res=0	pp2100	521.58	ntok=2106	rc=0	26 17.2 TAINTED
+[axon-run 13:15:59] FOREIGN_GPU sample max=23% mean=15.0% n=6 (obs 3043705 15%)
+r3	llama-t4	N=0	res=0	pp512	624.45	ntok=512	rc=0	61 34.6 TAINTED	build=4413a19 fa=-1 t=4
+r3	llama-t4	N=0	res=0	pp2100	585.85	ntok=2100	rc=0	61 34.6 TAINTED	build=4413a19 fa=-1 t=4
+r3	llama-t4	N=0	res=0	tg128	30.28	ntok=128	rc=0	61 34.6 TAINTED	build=4413a19 fa=-1 t=4
+[axon-run 13:16:33] FOREIGN_GPU sample max=55% mean=31.8% n=6 (obs 3043705 18%, kitty 944847 4%, --gpu- 2849090 4%)
+r3	llama-t8	N=0	res=0	pp512	643.54	ntok=512	rc=0	59 38.3 TAINTED	build=4413a19 fa=-1 t=8
+r3	llama-t8	N=0	res=0	pp2100	549.18	ntok=2100	rc=0	59 38.3 TAINTED	build=4413a19 fa=-1 t=8
+r3	llama-t8	N=0	res=0	tg128	36.99	ntok=128	rc=0	59 38.3 TAINTED	build=4413a19 fa=-1 t=8
+r3	llama-t24	N=0	res=0	pp512	620.42	ntok=512	rc=0	58 34.8 TAINTED	build=4413a19 fa=-1 t=24
+r3	llama-t24	N=0	res=0	pp2100	533.26	ntok=2100	rc=0	58 34.8 TAINTED	build=4413a19 fa=-1 t=24
+r3	llama-t24	N=0	res=0	tg128	33.71	ntok=128	rc=0	58 34.8 TAINTED	build=4413a19 fa=-1 t=24
+r3	axon	N=6	res=6	tg128	65.74	ntok=128	rc=0	23 12.8 TAINTED
+[axon-run 13:17:07] FOREIGN_GPU sample max=59% mean=26.7% n=6 (obs 3043705 8%, --gpu- 2849090 7%)
+r3	axon	N=6	res=6	pp512	669.42	ntok=510	rc=0	53 22.5 TAINTED
+r3	axon	N=6	res=6	pp2100	654.27	ntok=2106	rc=0	36 26.7 TAINTED
+r3	llama-t4	N=6	res=6	pp512	780.03	ntok=512	rc=0	62 35.8 TAINTED	build=4413a19 fa=-1 t=4
+r3	llama-t4	N=6	res=6	pp2100	713.07	ntok=2100	rc=0	62 35.8 TAINTED	build=4413a19 fa=-1 t=4
+r3	llama-t4	N=6	res=6	tg128	36.90	ntok=128	rc=0	62 35.8 TAINTED	build=4413a19 fa=-1 t=4
+[axon-run 13:17:41] FOREIGN_GPU sample max=61% mean=30.3% n=6 (obs 3043705 15%, Xorg 330017 3%, --gpu- 2849090 2%)
+r3	llama-t8	N=6	res=6	pp512	781.19	ntok=512	rc=0	61 37.2 TAINTED	build=4413a19 fa=-1 t=8
+r3	llama-t8	N=6	res=6	pp2100	704.21	ntok=2100	rc=0	61 37.2 TAINTED	build=4413a19 fa=-1 t=8
+r3	llama-t8	N=6	res=6	tg128	44.65	ntok=128	rc=0	61 37.2 TAINTED	build=4413a19 fa=-1 t=8
+r3	llama-t24	N=6	res=6	pp512	765.32	ntok=512	rc=0	60 32.5 TAINTED	build=4413a19 fa=-1 t=24
+r3	llama-t24	N=6	res=6	pp2100	693.64	ntok=2100	rc=0	60 32.5 TAINTED	build=4413a19 fa=-1 t=24
+r3	llama-t24	N=6	res=6	tg128	30.88	ntok=128	rc=0	60 32.5 TAINTED	build=4413a19 fa=-1 t=24
+[axon-run 13:18:15] FOREIGN_GPU sample max=52% mean=31.8% n=6 (Xorg 330017 7%, obs 3043705 6%, --gpu- 2849090 6%)
+r3	axon	N=12	res=12	tg128	72.74	ntok=128	rc=0	27 14.0 TAINTED
+r3	axon	N=12	res=12	pp512	876.65	ntok=510	rc=0	32 23.3 TAINTED
+r3	axon	N=12	res=12	pp2100	835.04	ntok=2106	rc=0	29 16.8 TAINTED
+[axon-run 13:18:48] FOREIGN_GPU sample max=44% mean=16.2% n=6 (--gpu- 2849090 17%, obs 3043705 10%, Xorg 330017 9%, kitty 944847 8%)
+r3	llama-t4	N=12	res=12	pp512	1091.32	ntok=512	rc=0	64 32.7 TAINTED	build=4413a19 fa=-1 t=4
+r3	llama-t4	N=12	res=12	pp2100	944.26	ntok=2100	rc=0	64 32.7 TAINTED	build=4413a19 fa=-1 t=4
+r3	llama-t4	N=12	res=12	tg128	50.16	ntok=128	rc=0	64 32.7 TAINTED	build=4413a19 fa=-1 t=4
+r3	llama-t8	N=12	res=12	pp512	1033.70	ntok=512	rc=0	63 35.8 TAINTED	build=4413a19 fa=-1 t=8
+r3	llama-t8	N=12	res=12	pp2100	925.36	ntok=2100	rc=0	63 35.8 TAINTED	build=4413a19 fa=-1 t=8
+r3	llama-t8	N=12	res=12	tg128	50.20	ntok=128	rc=0	63 35.8 TAINTED	build=4413a19 fa=-1 t=8
+[axon-run 13:19:22] FOREIGN_GPU sample max=53% mean=32.0% n=6 (obs 3043705 18%, Xorg 330017 8%)
+r3	llama-t24	N=12	res=12	pp512	1090.74	ntok=512	rc=0	54 28.1 TAINTED	build=4413a19 fa=-1 t=24
+r3	llama-t24	N=12	res=12	pp2100	951.03	ntok=2100	rc=0	54 28.1 TAINTED	build=4413a19 fa=-1 t=24
+r3	llama-t24	N=12	res=12	tg128	22.58	ntok=128	rc=0	54 28.1 TAINTED	build=4413a19 fa=-1 t=24
+r3	axon	N=auto	res=24	tg128	137.24	ntok=128	rc=0	26 14.5 TAINTED
+r3	axon	N=auto	res=24	pp512	2738.57	ntok=510	rc=0	35 13.7 TAINTED
+r3	axon	N=auto	res=24	pp2100	2038.19	ntok=2106	rc=0	32 13.0 TAINTED
+[axon-run 13:19:55] FOREIGN_GPU sample max=26% mean=13.5% n=6 (kitty 944847 6%, Xorg 330017 5%, --gpu- 2849090 1%)
+r3	llama-t4	N=auto	res=24	pp512	3811.57	ntok=512	rc=0	26 10.4 TAINTED	build=4413a19 fa=-1 t=4
+r3	llama-t4	N=auto	res=24	pp2100	3498.87	ntok=2100	rc=0	26 10.4 TAINTED	build=4413a19 fa=-1 t=4
+r3	llama-t4	N=auto	res=24	tg128	144.55	ntok=128	rc=0	26 10.4 TAINTED	build=4413a19 fa=-1 t=4
+r3	llama-t8	N=auto	res=24	pp512	3781.49	ntok=512	rc=0	31 7.6 TAINTED	build=4413a19 fa=-1 t=8
+r3	llama-t8	N=auto	res=24	pp2100	3524.10	ntok=2100	rc=0	31 7.6 TAINTED	build=4413a19 fa=-1 t=8
+r3	llama-t8	N=auto	res=24	tg128	139.41	ntok=128	rc=0	31 7.6 TAINTED	build=4413a19 fa=-1 t=8
+r3	llama-t24	N=auto	res=24	pp512	3801.39	ntok=512	rc=0	24 12.0 TAINTED	build=4413a19 fa=-1 t=24
+r3	llama-t24	N=auto	res=24	pp2100	3484.16	ntok=2100	rc=0	24 12.0 TAINTED	build=4413a19 fa=-1 t=24
+r3	llama-t24	N=auto	res=24	tg128	118.80	ntok=128	rc=0	24 12.0 TAINTED	build=4413a19 fa=-1 t=24
+BENCHD MEDIANS engine N metric median (values) taint
+BENCHD axon N=0 pp2100 521.58 [687.46, 474.97, 521.58] TAINTED
+BENCHD axon N=0 pp512 555.36 [759.42, 555.36, 552.46] TAINTED
+BENCHD axon N=0 tg128 59.92 [62.65, 52.12, 59.92] TAINTED
+BENCHD axon N=12 pp2100 845.92 [845.92, 877.97, 835.04] TAINTED
+BENCHD axon N=12 pp512 920.12 [920.12, 986.75, 876.65] TAINTED
+BENCHD axon N=12 tg128 77.47 [77.47, 78.64, 72.74] TAINTED
+BENCHD axon N=6 pp2100 657.32 [657.32, 671.24, 654.27] TAINTED
+BENCHD axon N=6 pp512 689.19 [705.08, 689.19, 669.42] TAINTED
+BENCHD axon N=6 tg128 65.56 [65.02, 65.56, 65.74] TAINTED
+BENCHD axon N=auto pp2100 2110.96 [2110.96, 2140.78, 2038.19] TAINTED
+BENCHD axon N=auto pp512 2712.64 [2674.26, 2712.64, 2738.57] TAINTED
+BENCHD axon N=auto tg128 128.52 [128.52, 125.49, 137.24] TAINTED
+BENCHD llama-t24 N=0 pp2100 568.76 [577.59, 568.76, 533.26] TAINTED
+BENCHD llama-t24 N=0 pp512 649.47 [655.64, 649.47, 620.42] TAINTED
+BENCHD llama-t24 N=0 tg128 33.71 [27.01, 37.14, 33.71] TAINTED
+BENCHD llama-t24 N=12 pp2100 977.63 [977.63, 980.08, 951.03] TAINTED
+BENCHD llama-t24 N=12 pp512 1090.74 [1081.46, 1104.01, 1090.74] TAINTED
+BENCHD llama-t24 N=12 tg128 22.58 [25.09, 18.37, 22.58] TAINTED
+BENCHD llama-t24 N=6 pp2100 727.39 [727.39, 727.88, 693.64] TAINTED
+BENCHD llama-t24 N=6 pp512 765.32 [785.52, 760.13, 765.32] TAINTED
+BENCHD llama-t24 N=6 tg128 27.45 [27.45, 15.03, 30.88] TAINTED
+BENCHD llama-t24 N=auto pp2100 3305.80 [3190.12, 3305.8, 3484.16] TAINTED
+BENCHD llama-t24 N=auto pp512 3715.76 [3652.22, 3715.76, 3801.39] TAINTED
+BENCHD llama-t24 N=auto tg128 118.80 [120.01, 98.39, 118.8] TAINTED
+BENCHD llama-t4 N=0 pp2100 581.44 [581.44, 562.71, 585.85] TAINTED
+BENCHD llama-t4 N=0 pp512 629.91 [657.54, 629.91, 624.45] TAINTED
+BENCHD llama-t4 N=0 tg128 30.28 [30.87, 29.34, 30.28] TAINTED
+BENCHD llama-t4 N=12 pp2100 964.28 [964.28, 980.51, 944.26] TAINTED
+BENCHD llama-t4 N=12 pp512 1091.32 [1076.45, 1102.02, 1091.32] TAINTED
+BENCHD llama-t4 N=12 tg128 50.87 [52.18, 50.87, 50.16] TAINTED
+BENCHD llama-t4 N=6 pp2100 729.34 [731.37, 729.34, 713.07] TAINTED
+BENCHD llama-t4 N=6 pp512 818.26 [818.26, 820.34, 780.03] TAINTED
+BENCHD llama-t4 N=6 tg128 37.80 [39.55, 37.8, 36.9] TAINTED
+BENCHD llama-t4 N=auto pp2100 3303.51 [3303.51, 3276.65, 3498.87] TAINTED
+BENCHD llama-t4 N=auto pp512 3722.93 [3722.93, 3687.16, 3811.57] TAINTED
+BENCHD llama-t4 N=auto tg128 136.69 [136.69, 131.96, 144.55] TAINTED
+BENCHD llama-t8 N=0 pp2100 555.08 [582.19, 555.08, 549.18] TAINTED
+BENCHD llama-t8 N=0 pp512 643.54 [647.02, 638.22, 643.54] TAINTED
+BENCHD llama-t8 N=0 tg128 36.99 [33.17, 39.03, 36.99] TAINTED
+BENCHD llama-t8 N=12 pp2100 979.56 [979.56, 981.63, 925.36] TAINTED
+BENCHD llama-t8 N=12 pp512 1099.27 [1102.02, 1099.27, 1033.7] TAINTED
+BENCHD llama-t8 N=12 tg128 50.20 [45.61, 51.1, 50.2] TAINTED
+BENCHD llama-t8 N=6 pp2100 723.95 [726.85, 723.95, 704.21] TAINTED
+BENCHD llama-t8 N=6 pp512 781.19 [831.45, 762.85, 781.19] TAINTED
+BENCHD llama-t8 N=6 tg128 42.40 [38.36, 42.4, 44.65] TAINTED
+BENCHD llama-t8 N=auto pp2100 3319.64 [3313.45, 3319.64, 3524.1] TAINTED
+BENCHD llama-t8 N=auto pp512 3737.84 [3602.32, 3737.84, 3781.49] TAINTED
+BENCHD llama-t8 N=auto tg128 129.83 [126.6, 129.83, 139.41] TAINTED
+BENCHD H2H N=0 tg128: axon 59.92 llama t4/t8/t24 30.28/36.99/33.71 axon/best x1.62
+BENCHD H2H N=0 pp512: axon 555.36 llama t4/t8/t24 629.91/643.54/649.47 axon/best x0.86
+BENCHD H2H N=0 pp2100: axon 521.58 llama t4/t8/t24 581.44/555.08/568.76 axon/best x0.90
+BENCHD H2H N=6 tg128: axon 65.56 llama t4/t8/t24 37.80/42.40/27.45 axon/best x1.55
+BENCHD H2H N=6 pp512: axon 689.19 llama t4/t8/t24 818.26/781.19/765.32 axon/best x0.84
+BENCHD H2H N=6 pp2100: axon 657.32 llama t4/t8/t24 729.34/723.95/727.39 axon/best x0.90
+BENCHD H2H N=12 tg128: axon 77.47 llama t4/t8/t24 50.87/50.20/22.58 axon/best x1.52
+BENCHD H2H N=12 pp512: axon 920.12 llama t4/t8/t24 1091.32/1099.27/1090.74 axon/best x0.84
+BENCHD H2H N=12 pp2100: axon 845.92 llama t4/t8/t24 964.28/979.56/977.63 axon/best x0.86
+BENCHD H2H N=auto tg128: axon 128.52 llama t4/t8/t24 136.69/129.83/118.80 axon/best x0.94
+BENCHD H2H N=auto pp512: axon 2712.64 llama t4/t8/t24 3722.93/3737.84/3715.76 axon/best x0.73
+BENCHD H2H N=auto pp2100: axon 2110.96 llama t4/t8/t24 3303.51/3319.64/3305.80 axon/best x0.64
+BENCHD ACCEPT auto vs 0: tg128 x2.14 (need >= 1.5), pp512 x4.88 (need >= 2.0): PASS
+BENCHD DONE rows=144
+[axon-run 13:20:23] exit 0 after 867.2s (host bella)
+[axon-run 13:20:24] EXPECT ok: output matches /BENCHD DONE rows=[0-9]+/
+[axon-run 13:20:24] FOREIGN_GPU max=63% mean=24.5% samples=154 top: obs 3043705 38%, kitty 944847 13%, Xorg 330017 12%  TAINTED (mean > 5% or max > 25%): timing numbers not trustworthy, rerun
