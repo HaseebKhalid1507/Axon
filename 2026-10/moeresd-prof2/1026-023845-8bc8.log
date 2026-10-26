@@ -1,0 +1,47 @@
+[axon-run 02:38:45] submitted 1026-023845-8bc8 by /home/haseeb/.cache/axon-wt-moeres-mainbase: /home/haseeb/.cache/axon-moeres/prof/prof2.sh /home/haseeb/.cache/axon-moeres/axon-main-39624db
+[axon-run 05:15:55] scope axon-job-1026-023845-8bc8-1793006155.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 22229 MB): an OOM here kills only this job
+[axon-run 05:15:55] job 1026-023845-8bc8 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-023845-8bc8-1793006155 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-moeres/prof/prof2.sh /home/haseeb/.cache/axon-moeres/axon-main-39624db
+PROF2 out /home/haseeb/.cache/axon-moeres/prof/run2-1026-051555
+A	r1-0-t8	llama-t8	N=0	pp512	362.41	05:15:55-
+A	r1-0-t8	llama-t8	N=0	pp2100	586.32	05:15:55-
+A	r1-0-t8	llama-t8	N=0	tg128	36.08	05:15:55-
+   ended 05:16:15
+[axon-run 05:16:27] FOREIGN_GPU sample max=38% mean=25.8% n=6 (kitty 99200 20%, kitty 3618535 6%, kitty 1945559 6%, Xorg 1601 6%)
+A	r1-0-t24	llama-t24	N=0	pp512	656.26	05:16:18-
+A	r1-0-t24	llama-t24	N=0	pp2100	560.09	05:16:18-
+A	r1-0-t24	llama-t24	N=0	tg128	14.42	05:16:18-
+   ended 05:16:39
+[axon-run 05:16:59] FOREIGN_GPU sample max=23% mean=9.8% n=6 (Xorg 1601 5%, kitty 3618535 1%, kitty 1945559 1%, kitty 99200 1%)
+A	r1-6-t8	llama-t8	N=6	pp512	739.92	05:16:42-
+A	r1-6-t8	llama-t8	N=6	pp2100	564.49	05:16:42-
+A	r1-6-t8	llama-t8	N=6	tg128	11.39	05:16:42-
+   ended 05:17:06
+[axon-run 05:17:30] FOREIGN_GPU sample max=31% mean=14.2% n=5 (kitty 99200 19%, Xorg 1601 8%, kitty 3618535 4%)
+A	r1-6-t24	llama-t24	N=6	pp512	231.84	05:17:09-
+A	r1-6-t24	llama-t24	N=6	pp2100	256.01	05:17:09-
+A	r1-6-t24	llama-t24	N=6	tg128	19.32	05:17:09-
+   ended 05:17:59
+[axon-run 05:18:04] FOREIGN_GPU sample max=25% mean=18.7% n=6 (Xorg 1601 7%, kitty 1945559 3%, kitty 3618535 2%, kitty 99200 1%)
+A	r1-12-tg128	axon	N=12	tg128	30.30	05:18:02-05:18:18
+A	r1-12-pp512	axon	N=12	pp512	949.12	05:18:21-05:18:31
+[axon-run 05:18:38] FOREIGN_GPU sample max=20% mean=12.0% n=6 (kitty 99200 7%, Xorg 1601 4%, kitty 1945559 3%)
+PROF2 axon auto pp512 1760.17 tok/s under trace; 25 of 26 expert layers resident
+PROF2 axon auto pp2100 1333.78 tok/s under trace; 25 of 26 expert layers resident
+[axon-run 05:19:12] FOREIGN_GPU sample max=16% mean=12.8% n=6 (kitty 3618535 8%)
+PROF2 axon tg 87.39 tok/s under trace
+PROF2 llama pp512 ncmoe 1: "samples_ts": [ 535.756, 3882.58 ]
+[axon-run 05:19:46] FOREIGN_GPU sample max=19% mean=10.8% n=6 (kitty 3618535 3%, Xorg 1601 3%)
+PROF2 llama pp2100 ncmoe 1: "samples_ts": [ 1826.6, 4258.2 ]
+[axon-run 05:20:21] FOREIGN_GPU sample max=22% mean=14.0% n=6 (kitty 259634 8%, kitty 1945559 2%)
+PROF2 llama tg ncmoe 1: "samples_ts": [ 99.1, 154.475 ]
+    3457 /home/haseeb/.cache/axon-moeres/prof/run2-1026-051555/tr-ax-pp2100.txt
+    1446 /home/haseeb/.cache/axon-moeres/prof/run2-1026-051555/tr-ax-pp512.txt
+   86646 /home/haseeb/.cache/axon-moeres/prof/run2-1026-051555/tr-ax-tg.txt
+   13577 /home/haseeb/.cache/axon-moeres/prof/run2-1026-051555/tr-lb-pp2100.txt
+    3053 /home/haseeb/.cache/axon-moeres/prof/run2-1026-051555/tr-lb-pp512.txt
+  249517 /home/haseeb/.cache/axon-moeres/prof/run2-1026-051555/tr-lb-tg.txt
+  357696 total
+PROF2 DONE
+[axon-run 05:20:23] exit 0 after 268.1s (host bella)
+[axon-run 05:20:26] EXPECT ok: output matches /PROF2 DONE/
+[axon-run 05:20:26] FOREIGN_GPU max=38% mean=14.8% samples=47 top: kitty 99200 20%, kitty 3618535 6%, kitty 1945559 6%, Xorg 1601 6%  TAINTED (mean > 5% or max > 25%): timing numbers not trustworthy, rerun
