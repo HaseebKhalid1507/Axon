@@ -1,0 +1,27 @@
+[axon-run 23:09:29] submitted 1025-230929-a81d by /home/haseeb/.cache/axon-memcg: /home/haseeb/.cache/axon-memcg/par/axon-test-dbg-ad27921 serve::tests::parallel_refusal_explicit_only serve::tests::serve_explicit_parallel_refused_when_short serve::tests::moe_parallel_refusal_predicate cli::tests::help_states_the_parallel_defaults serve::tests::serve_paged_pressure
+[axon-run 23:09:46] job 1025-230929-a81d -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 3000 --env AXON_NODE_PACK=1 --src /home/haseeb/.cache/axon-wt-parallel /home/haseeb/.cache/axon-memcg/par/axon-test-dbg-ad27921 serve::tests::parallel_refusal_explicit_only serve::tests::serve_explicit_parallel_refused_when_short serve::tests::moe_parallel_refusal_predicate cli::tests::help_states_the_parallel_defaults serve::tests::serve_paged_pressure
+axon-remote: uploading axon-test-dbg-ad27921 (dbecda79fdd3ca1ac7942117) + source of /home/haseeb/.cache/axon-wt-parallel
+
+sent 1,975,448 bytes  received 5,200 bytes  1,320,432.00 bytes/sec
+total size is 6,953,879  speedup is 3.51
+
+sent 7,382,179 bytes  received 35 bytes  14,764,428.00 bytes/sec
+total size is 23,551,544  speedup is 3.19
+axon-remote: job 20261025-230949-axon-test-dbg-ad27921-3422645 on avante (GPU, 3000 MB)
+[axon-node 23:09:49] GPU slot taken; job wants 3000 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 51
+[axon-node 23:09:49] run axon-test-dbg-ad27921 (dbecda79fdd3ca1ac7942117) as /home/haseeb/.cache/axon-wt-parallel on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 5 tests
+test serve::tests::moe_parallel_refusal_predicate ... ok
+test serve::tests::parallel_refusal_explicit_only ... ok
+test cli::tests::help_states_the_parallel_defaults ... ok
+testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test serve::tests::serve_explicit_parallel_refused_when_short ... ok
+test serve::tests::serve_paged_pressure ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 736 filtered out; finished in 12.06s
+
+[axon-node 23:10:01] exit 0 after 12.2s
+[axon-node 23:10:01] peak RSS 393 MB (job process tree PSS, 2 s samples x6)
+[axon-run 23:10:01] exit 0 after 15.1s (host avante)
+[axon-run 23:10:02] EXPECT ok: output matches /test result: ok/

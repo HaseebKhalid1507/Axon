@@ -1,0 +1,13 @@
+[axon-run 23:09:29] submitted 1025-230929-0a5d by /home/haseeb/.cache/axon-memcg: /home/haseeb/.cache/axon-memcg/par/pardemo.sh /home/haseeb/.cache/axon-main/axon-39624db /home/haseeb/.cache/axon-memcg/par/axon-ad27921
+[axon-run 23:19:18] scope axon-job-1025-230929-0a5d-1792984758.scope in app-axonjobs.slice: MemoryMax 5524 MB, MemoryHigh 4971 MB, no swap, oomd pressure kill 80% (claim 3000 MB): an OOM here kills only this job
+[axon-run 23:19:18] job 1025-230929-0a5d -> bella: systemd-run --user --scope --quiet --unit=axon-job-1025-230929-0a5d-1792984758 --slice=app-axonjobs.slice -p MemoryMax=5524M -p MemoryHigh=4971M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-memcg/par/pardemo.sh /home/haseeb/.cache/axon-main/axon-39624db /home/haseeb/.cache/axon-memcg/par/axon-ad27921
+axon-q 23:19:18 start slot 16-23: /home/haseeb/.cache/axon-memcg/par/pardemo.sh /home/haseeb/.cache/axon-main/axon-39624db /home/haseeb/.cache/axon-memcg/par/axon-ad27921
+== base --parallel 256: serving=yes rc=143 slots=25
+== cand --parallel 256: serving=no rc=2 slots=
+   stderr: axon: --parallel 256: 256 reserved slots of 32768 tokens need 96.71 GiB of GPU memory beside the model, 10.32 GiB is free; 25 fit. A smaller --ctx, --kv q8 or fewer --parallel, or leave --parallel out to size it automatically
+   stderr: try 'axon --help'
+== base (auto): serving=yes rc=143 slots=8
+== cand (auto): serving=yes rc=143 slots=8
+PARDEMO-DONE
+[axon-run 23:19:23] exit 0 after 4.5s (host bella)
+[axon-run 23:19:23] EXPECT ok: output matches /PARDEMO-DONE/
