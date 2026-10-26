@@ -1,0 +1,20 @@
+[axon-run 04:44:17] submitted 1026-044417-c660 by /home/haseeb/.cache/axon-wt-mla: /home/haseeb/.cache/axon-mla/md5serve512.sh /home/haseeb/.cache/axon-mla/axon-base-be13f1f /home/haseeb/.cache/axon-mla/axon-2be8bfe /home/haseeb/.cache/axon-mla/md5serve512-2be8bfe
+[axon-run 04:45:00] scope axon-job-1026-044417-c660-1793004300.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 16000 MB): an OOM here kills only this job
+[axon-run 04:45:00] job 1026-044417-c660 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-044417-c660-1793004300 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-mla/md5serve512.sh /home/haseeb/.cache/axon-mla/axon-base-be13f1f /home/haseeb/.cache/axon-mla/axon-2be8bfe /home/haseeb/.cache/axon-mla/md5serve512-2be8bfe
+axon-q 04:45:00 start slot 16-23: /home/haseeb/.cache/axon-mla/md5serve512.sh /home/haseeb/.cache/axon-mla/axon-base-be13f1f /home/haseeb/.cache/axon-mla/axon-2be8bfe /home/haseeb/.cache/axon-mla/md5serve512-2be8bfe
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 615.78.08
+serve base g0: usage [{'completion_tokens': 128, 'prompt_tokens': 451, 'prompt_tokens_details': {'cached_tokens': 0}, 'total_tokens': 579}, {'completion_tokens': 64, 'prompt_tokens': 5, 'prompt_tokens_details': {'cached_tokens': 0}, 'total_tokens': 69}]
+serve base g0: placement ['moe:         attention + router on the GPU (0.92 GiB, ctx 4096), 64 experts x 26 layers on the CPU (top-6), kv f16']
+serve base gauto: usage [{'completion_tokens': 128, 'prompt_tokens': 451, 'prompt_tokens_details': {'cached_tokens': 0}, 'total_tokens': 579}, {'completion_tokens': 64, 'prompt_tokens': 5, 'prompt_tokens_details': {'cached_tokens': 0}, 'total_tokens': 69}]
+serve base gauto: placement ['moe:         attention + router on the GPU (0.92 GiB, ctx 4096), 64 experts x 2 layers on the CPU (top-6); 24 of 26 expert layers resident on the GPU (8.12 GiB), kv f16']
+serve cand g0: usage [{'completion_tokens': 128, 'prompt_tokens': 451, 'prompt_tokens_details': {'cached_tokens': 0}, 'total_tokens': 579}, {'completion_tokens': 64, 'prompt_tokens': 5, 'prompt_tokens_details': {'cached_tokens': 0}, 'total_tokens': 69}]
+serve cand g0: placement ['moe:         attention + router on the GPU (0.92 GiB, ctx 4096), 64 experts x 26 layers on the CPU (top-6), kv f16']
+serve cand gauto: usage [{'completion_tokens': 128, 'prompt_tokens': 451, 'prompt_tokens_details': {'cached_tokens': 0}, 'total_tokens': 579}, {'completion_tokens': 64, 'prompt_tokens': 5, 'prompt_tokens_details': {'cached_tokens': 0}, 'total_tokens': 69}]
+serve cand gauto: placement ['moe:         attention + router on the GPU (0.92 GiB, ctx 4096), 64 experts x 2 layers on the CPU (top-6); 24 of 26 expert layers resident on the GPU (8.12 GiB), kv f16']
+serve g0 request 0 (crosses 512): identical
+serve g0 request 1 (below 512): identical
+serve gauto request 0 (crosses 512): identical
+serve gauto request 1 (below 512): identical
+SERVE PASS
+MD5SERVE512 PASS
+[axon-run 04:45:35] exit 0 after 34.9s (host bella)

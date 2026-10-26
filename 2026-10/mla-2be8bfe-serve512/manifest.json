@@ -1,0 +1,29 @@
+{
+ "label": "mla-2be8bfe-serve512",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1026-044417-c660",
+   "name": "mla-2be8bfe-serve512",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "2be8bfe",
+   "binary": "md5serve512.sh",
+   "started": 1793004300.4741337,
+   "ended": 1793004337.42295,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "d22daeed04490c74e8286c67e10e768cbc4f8768cccc613ff4594253250a1ce2",
+   "log_bytes": 3229
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-26 04:45:37 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
