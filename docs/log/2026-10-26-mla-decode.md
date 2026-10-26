@@ -73,7 +73,15 @@ Per decode step (CUPTI, same job): `mla_heads_mv` 1.361 → 0.417 ms, `mla_attn`
 8.76 → 7.23 ms. No visible hitch at position 512 (the second graph set's capture): the steps there are within the spread
 (median 7.08 ms, the longest anywhere 7.81 ms at 547).
 
-Kill rule (≥ 0.85 × llama.cpp decode): **borderline, 0.849 in a tainted run.** Clean rerun 1026-054428-1455 pending.
+Per round (TAINTED), short tg128 base / cand / llama: 115.15 / 142.77 / 159.87, 119.05 / 147.16 / 172.87,
+114.97 / 143.74 / 169.30. Long tg128: 114.94 / 138.79 / 163.76, 115.24 / 135.32 / 163.18, 114.32 / 137.40 / 163.81.
+pp2101 base / cand: 1,465.9 / 1,781.5, 1,452.9 / 1,791.8, 1,461.4 / 1,774.0.
+
+Kill rule (≥ 145 tok/s, 0.85 × llama.cpp's 171): **NOT MET on a tainted run.** Median 143.7 < 145, and 2 of 3 rounds are below
+(142.8, 147.2, 143.7). Clean rerun 1026-054428-1455 pending; its result is recorded here whichever way it lands.
+
+Prefill: batched passes run the same rewritten kernels (the staged NT = 8 rows, hpb by work, no double buffering), with the
+same bits (`*_equals_main` at nb > 1; 739c: decode == prefill == verify). pp2101 +22 % (tainted).
 
 ## What didn't work
 - Double buffering at every position: the 2-tile shared memory leaves one block per SM. At 1000 and 4000 that cost
@@ -85,8 +93,12 @@ Kill rule (≥ 0.85 × llama.cpp decode): **borderline, 0.849 in a tainted run.*
 ## How it was verified (2be8bfe)
 | gate | result | job |
 |---|---|---|
-| mla kernel bit tests vs main's kernels | 7/0/1 (sm_89); 2b18a69: 7/0/1 sm_61 | 1026-042321-dd18; 1026-040422-0963 |
+| mla kernel bit tests vs main's kernels | 7/0/1 (sm_89); 2b18a69: 7/0/1 sm_61, 16/0/1 sm_120 (2a4b) | 1026-042321-dd18; 1026-040422-0963 |
 | decode == prefill == verify, resident == CPU (ds2 fixture + Moonlight) | 16/0/1 | 1026-042322-739c |
 | fast tier release / debug | 683/0/51, 701/0/51 | 1026-042323-541b, 1026-042323-6fb7 |
-| Moonlight md5 vs main (0, auto): md5ml 12/12, cross-512 gen 6/6 (incl. `--draft 7`), serve across 512 4/4 | identical | ef23 (gen), 1026-044417-c660 (serve) |
+| Moonlight md5 vs main (0, auto): md5ml 12/12, cross-512 gen 6/6 (prompts of 449–487 tokens, -n 128, incl. `--draft 7`), serve across 512 4/4 | identical | 1026-042322-ef23 (gen), 1026-044417-c660 (serve) |
+
+Harness note: ef23 exited 1 because its serve step called `axon serve --gpu-experts`, which serve doesn't take (placement is
+`AXON_GPU_EXPERTS`). Its gen pairs are 6/6 identical; c660 is the fixed serve rerun. sm_120 bits at 2be8bfe come from those
+Moonlight runs and 739c; the kernel bit tests ran on sm_89 (dd18). The 2b18a69 → 2be8bfe kernel delta is `__align__(16)` only.
 | clippy -D warnings, rustfmt, nvcc 0 spills | clean | local |
