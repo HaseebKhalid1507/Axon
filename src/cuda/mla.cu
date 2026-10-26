@@ -101,118 +101,430 @@ mla_qrope(const float* __restrict__ q, int n_h, int hk, int nope, int rope,
 //   out[z][h * os + r] = sum_c W[h * rph + r][c] * x[z][h * xs + c]
 // for heads h, rows r < rph, c < cols; x rows xt floats apart, out ot.
 // W: type qt, rb bytes per row, n_h * rph rows, dequantized exactly (deq).
-// A warp per matrix row and MLA_MV_T tokens (grid (ceil(n_h * rph / 8),
-// ceil(nb / MLA_MV_T))): lane l takes c = l, l + 32, .. ascending, one
-// fma chain per token, then the fixed xor tree. A token's sums are the same
-// in any batch.
+// A warp per matrix row and MLA_MV_T tokens: lane l takes c = l, l + 32, ..
+// ascending, one fma chain per token, then the fixed xor tree. A token's
+// sums are the same in any batch.
+//
+// Grid (ceil(n_h * rph / rpb), ceil(nb / MLA_MV_T)), mv_smem bytes of
+// dynamic shared memory (mla.rs `mv_smem`). A block stages its rpb
+// consecutive rows' bytes (the widest loads their alignment allows), its
+// tokens' x slices of the heads those rows are in, and the rows' block
+// scales, in shared memory; then warp w computes rows w, w + 8, .. from
+// there (a lone token: 4 rows per warp at a time, interleaved). Each
+// output's float operations and their order are those of main
+// be13f1f's kernel (kept as mla_heads_mv_ref in test builds; mla_tests.rs
+// compares bits): the same chains and tree, the same x floats, and each
+// weight the value deq(qt, row, c) gives, by the same float operations on
+// the same operands. For the common types the per-block factors deq
+// computes for every element (Q5_0 / Q8_0: d; Q4_K: d1 = d * sc and m1 =
+// dmin * m; Q6_K: ds = d * scale) are computed once per block, by the same
+// expressions, into the scale table, and the element is then deq's last
+// step on them: (float)x * d, d1 * (float)nib - m1, ds * (float)q. Other
+// types call deq itself. What changed is only that, where bytes come from,
+// and NT = 1 for a lone token (the decode step), which skips the 7 idle
+// chains and trees.
 #define MLA_MV_T 8
+
+// Scale-table floats per row for qt over cols values (mla.rs mirrors it in
+// `mv_smem`): one per 32 (Q5_0, Q8_0), two per 32 (Q4_K), one per 16 (Q6_K).
+__device__ __forceinline__ int mla_tab_n(int qt, int cols) {
+    switch (qt) {
+    case QT_Q5_0:
+    case QT_Q8_0:
+        return cols / 32;
+    case QT_Q4_K:
+        return cols / 16;
+    case QT_Q6_K:
+        return cols / 16;
+    default:
+        return 0;
+    }
+}
+
+// Entry e of a row's scale table (deq_*'s per-element factors).
+__device__ __forceinline__ float mla_tab_entry(int qt, const u8* row, int e) {
+    switch (qt) {
+    case QT_Q5_0:  // deq_q5_0's d
+        return rd_f16(row + 22 * e);
+    case QT_Q8_0:  // deq_q8_0's rd_f16(b)
+        return rd_f16(row + 34 * e);
+    case QT_Q4_K: {  // deq_q4_k's d1 (even e) and m1 (odd e) of sub-block e / 2
+        int sb = e >> 1, b = sb >> 3, j = sb & 7;
+        const u8* blk = row + 144 * b;
+        u32 sc, m;
+        scale_min_k4(j, blk + 4, &sc, &m);
+        return (e & 1) ? __fmul_rn(rd_f16(blk + 2), (float)m) : __fmul_rn(rd_f16(blk), (float)sc);
+    }
+    default: {  // QT_Q6_K: deq_q6_k's ds of 16-value group e
+        int b = e >> 4, gi = e & 15;  // group gi = 8 half + 2 k + is
+        int half = gi >> 3, k = (gi >> 1) & 3, is = gi & 1;
+        const u8* blk = row + 210 * b;
+        const u8* sc = blk + 192 + 8 * half;
+        return __fmul_rn(rd_f16(blk + 208), (float)(signed char)sc[is + 2 * k]);
+    }
+    }
+}
+
+// The weight deq(QT, row, c) gives, from the row's bytes and scale table.
+template <int QT>
+__device__ __forceinline__ float mla_w(int qt, const u8* row, const float* tab, int c) {
+    if (QT == QT_Q5_0) {  // deq_q5_0
+        const u8* b = row + 22 * (c >> 5);
+        int i = c & 31, j = i & 15;
+        u32 qh = (u32)b[2] | ((u32)b[3] << 8) | ((u32)b[4] << 16) | ((u32)b[5] << 24);
+        int x = i < 16 ? (int)((b[6 + j] & 0x0f) | (((qh >> j) << 4) & 0x10)) - 16
+                       : (int)((b[6 + j] >> 4) | ((qh >> (j + 12)) & 0x10)) - 16;
+        return __fmul_rn((float)x, tab[c >> 5]);
+    } else if (QT == QT_Q8_0) {  // deq_q8_0
+        return __fmul_rn((float)(signed char)row[34 * (c >> 5) + 2 + (c & 31)], tab[c >> 5]);
+    } else if (QT == QT_Q4_K) {  // deq_q4_k
+        const u8* b = row + 144 * (c >> 8);
+        int i = c & 255;
+        int ch = i >> 6, w = i & 63, l = w & 31, hi = w >> 5;
+        u8 q = b[16 + 32 * ch + l];
+        u32 nib = hi ? q >> 4 : q & 0xf;
+        int sb = c >> 5;  // = 8 (c >> 8) + 2 ch + hi
+        return __fsub_rn(__fmul_rn(tab[2 * sb], (float)nib), tab[2 * sb + 1]);
+    } else if (QT == QT_Q6_K) {  // deq_q6_k
+        const u8* b = row + 210 * (c >> 8);
+        int i = c & 255;
+        int half = i >> 7, r = i & 127, k = r >> 5, l = r & 31, is = l >> 4;
+        const u8* ql = b + 64 * half;
+        const u8* qh = b + 128 + 32 * half;
+        u8 qlb = ql[l + 32 * (k & 1)];
+        u32 nib = k < 2 ? qlb & 0xf : qlb >> 4;
+        int q = (int)(nib | (((qh[l] >> (2 * k)) & 3) << 4)) - 32;
+        return __fmul_rn(tab[16 * (c >> 8) + 8 * half + 2 * k + is], (float)q);
+    } else {
+        return deq(QT < 0 ? qt : QT, row, c);
+    }
+}
+
+// One row's outputs for NT tokens (the chain and the tree above).
+template <int QT, int NT>
+__device__ __forceinline__ void mla_mv_row(int qt, const u8* row, const float* tab, int gr,
+                                           int rph, int cols, const float* xz,
+                                           float* __restrict__ out, int os, u64 ot, int z0,
+                                           int nt) {
+    int lane = threadIdx.x & 31;
+    int h = gr / rph, r = gr % rph;
+    float acc[NT];
+#pragma unroll
+    for (int t = 0; t < NT; t++) acc[t] = 0.0f;
+    for (int c = lane; c < cols; c += 32) {
+        float wv = mla_w<QT>(qt, row, tab, c);
+#pragma unroll
+        for (int t = 0; t < NT; t++)
+            if (NT == 1 || t < nt) acc[t] = __fmaf_rn(wv, xz[t * cols + c], acc[t]);
+    }
+#pragma unroll
+    for (int t = 0; t < NT; t++) {
+        if (NT == 1 || t < nt) {  // nt is the block's: uniform
+            float v = acc[t];
+#pragma unroll
+            for (int o = 16; o > 0; o >>= 1) v = __fadd_rn(v, __shfl_xor_sync(0xffffffffu, v, o));
+            if (lane == 0) out[(u64)(z0 + t) * ot + (u64)h * os + r] = v;
+        }
+    }
+}
+
+// A lone token: 4 rows per warp at a time (4g .. 4g + 3, g = w, w + 8, ..),
+// their chains interleaved (each row's still in c order, its own tree), a
+// short last group one row at a time.
+template <int QT>
+__device__ __forceinline__ void mla_mv_rows1(int qt, const u8* sh, u64 rb, const float* tabs,
+                                             int tn, int nrow, int gr0, int rph, int cols,
+                                             const float* xsh, int h_lo,
+                                             float* __restrict__ out, int os, u64 ot, int z0) {
+    int lane = threadIdx.x & 31;
+    for (int g = threadIdx.x >> 5; 4 * g < nrow; g += MLA_THREADS / 32) {
+        int i0 = 4 * g;
+        if (i0 + 3 >= nrow) {
+            for (int i = i0; i < nrow; i++)
+                mla_mv_row<QT, 1>(qt, sh + (u64)i * rb, tabs + i * tn, gr0 + i, rph, cols,
+                                  xsh + ((gr0 + i) / rph - h_lo) * cols, out, os, ot, z0, 1);
+            continue;
+        }
+        float a0 = 0.0f, a1 = 0.0f, a2 = 0.0f, a3 = 0.0f;
+        const u8* r0 = sh + (u64)i0 * rb;
+        const float* t0 = tabs + i0 * tn;
+        const float* x0 = xsh + ((gr0 + i0) / rph - h_lo) * cols;
+        const float* x1 = xsh + ((gr0 + i0 + 1) / rph - h_lo) * cols;
+        const float* x2 = xsh + ((gr0 + i0 + 2) / rph - h_lo) * cols;
+        const float* x3 = xsh + ((gr0 + i0 + 3) / rph - h_lo) * cols;
+        for (int c = lane; c < cols; c += 32) {
+            a0 = __fmaf_rn(mla_w<QT>(qt, r0, t0, c), x0[c], a0);
+            a1 = __fmaf_rn(mla_w<QT>(qt, r0 + rb, t0 + tn, c), x1[c], a1);
+            a2 = __fmaf_rn(mla_w<QT>(qt, r0 + 2 * rb, t0 + 2 * tn, c), x2[c], a2);
+            a3 = __fmaf_rn(mla_w<QT>(qt, r0 + 3 * rb, t0 + 3 * tn, c), x3[c], a3);
+        }
+        // The four rows' xor trees, transposed: every sum is the tree's
+        // (lane i's value plus lane i ^ o's, of the same row), but a lane
+        // carries only the rows its bits 4 and 3 pick, so 6 shuffles for
+        // the 4 trees instead of 20. Row lane >> 3 ends in lanes 8 k ..
+        // 8 k + 7.
+        bool b4 = lane & 16, b3 = lane & 8;
+        float k0 = b4 ? a2 : a0, k1 = b4 ? a3 : a1;
+        float y0 = b4 ? a0 : a2, y1 = b4 ? a1 : a3;  // sent
+        k0 = __fadd_rn(k0, __shfl_xor_sync(0xffffffffu, y0, 16));
+        k1 = __fadd_rn(k1, __shfl_xor_sync(0xffffffffu, y1, 16));
+        float k = b3 ? k1 : k0, y = b3 ? k0 : k1;
+        k = __fadd_rn(k, __shfl_xor_sync(0xffffffffu, y, 8));
+#pragma unroll
+        for (int o = 4; o > 0; o >>= 1) k = __fadd_rn(k, __shfl_xor_sync(0xffffffffu, k, o));
+        if ((lane & 7) == 0) {
+            int gr = gr0 + i0 + (lane >> 3);
+            out[(u64)z0 * ot + (u64)(gr / rph) * os + gr % rph] = k;
+        }
+    }
+}
+
+template <int QT, int NT>
+__device__ __forceinline__ void mla_mv_rows(int qt, const u8* sh, u64 rb, const float* tabs,
+                                            int tn, int nrow, int gr0, int rph, int cols,
+                                            const float* xsh, int h_lo,
+                                            float* __restrict__ out, int os, u64 ot, int z0,
+                                            int nt) {
+    for (int i = threadIdx.x >> 5; i < nrow; i += MLA_THREADS / 32) {
+        int gr = gr0 + i;
+        mla_mv_row<QT, NT>(qt, sh + (u64)i * rb, tabs + i * tn, gr, rph, cols,
+                           xsh + (gr / rph - h_lo) * nt * cols, out, os, ot, z0, nt);
+    }
+}
+
+template <int QT>
+__device__ __forceinline__ void mla_mv_nt(int qt, const u8* sh, u64 rb, const float* tabs,
+                                          int tn, int nrow, int gr0, int rph, int cols,
+                                          const float* xsh, int h_lo, float* out, int os,
+                                          u64 ot, int z0, int nt) {
+    if (nt == 1)
+        mla_mv_rows1<QT>(qt, sh, rb, tabs, tn, nrow, gr0, rph, cols, xsh, h_lo, out, os, ot, z0);
+    else
+        mla_mv_rows<QT, MLA_MV_T>(qt, sh, rb, tabs, tn, nrow, gr0, rph, cols, xsh, h_lo, out,
+                                  os, ot, z0, nt);
+}
+
+// n bytes from src to dst (shared), the widest loads both allow.
+__device__ __forceinline__ void mla_copy(u8* dst, const u8* src, u64 n) {
+    u64 al = (u64)src | (u64)dst | n;
+    if ((al & 15) == 0) {
+        for (u64 i = threadIdx.x; i < n / 16; i += MLA_THREADS)
+            ((uint4*)dst)[i] = ((const uint4*)src)[i];
+    } else if ((al & 3) == 0) {
+        for (u64 i = threadIdx.x; i < n / 4; i += MLA_THREADS) ((u32*)dst)[i] = ((const u32*)src)[i];
+    } else {
+        for (u64 i = threadIdx.x; i < n; i += MLA_THREADS) dst[i] = src[i];
+    }
+}
+
+// Shared memory: the rows' bytes (rpb * rb, rounded up to 16), the scale
+// tables (rpb * mla_tab_n floats), then x[head - h_lo][t][c] for the heads
+// h_lo..h_hi the rows are in.
 extern "C" __global__ void __launch_bounds__(MLA_THREADS)
 mla_heads_mv(int qt, const u8* __restrict__ w, u64 rb, int rph, int cols, int n_h,
              const float* __restrict__ x, int xs, u64 xt, float* __restrict__ out, int os,
-             u64 ot, int nb) {
-    int lane = threadIdx.x & 31;
-    int gr = blockIdx.x * (MLA_THREADS / 32) + (threadIdx.x >> 5);
-    if (gr >= n_h * rph) return;
-    int h = gr / rph, r = gr % rph;
+             u64 ot, int nb, int rpb) {
+    extern __shared__ uint4 mv_sh[];
+    int gr0 = blockIdx.x * rpb;
+    int nrow = min(rpb, n_h * rph - gr0);
+    if (nrow <= 0) return;
+    u8* sh = (u8*)mv_sh;
+    mla_copy(sh, w + (u64)gr0 * rb, (u64)nrow * rb);
     int z0 = blockIdx.y * MLA_MV_T;
     int nt = min(MLA_MV_T, nb - z0);
-    const u8* row = w + (u64)gr * rb;
-    const float* xz = x + (u64)z0 * xt + (u64)h * xs;
-    float acc[MLA_MV_T];
-#pragma unroll
-    for (int t = 0; t < MLA_MV_T; t++) acc[t] = 0.0f;
-    for (int c = lane; c < cols; c += 32) {
-        float wv = deq(qt, row, c);
-#pragma unroll
-        for (int t = 0; t < MLA_MV_T; t++)
-            if (t < nt) acc[t] = __fmaf_rn(wv, xz[(u64)t * xt + c], acc[t]);
+    int h_lo = gr0 / rph, h_hi = (gr0 + nrow - 1) / rph;
+    int tn = mla_tab_n(qt, cols);
+    float* tabs = (float*)(sh + (((u64)rpb * rb + 15) & ~(u64)15));
+    float* xsh = tabs + rpb * tn;
+    int per = nt * cols;
+    for (int i = threadIdx.x; i < (h_hi - h_lo + 1) * per; i += MLA_THREADS) {
+        int hl = i / per, t = (i % per) / cols, c = i % cols;
+        xsh[i] = x[(u64)(z0 + t) * xt + (u64)(h_lo + hl) * xs + c];
     }
-#pragma unroll
-    for (int t = 0; t < MLA_MV_T; t++) {
-        float v = acc[t];
-#pragma unroll
-        for (int o = 16; o > 0; o >>= 1) v = __fadd_rn(v, __shfl_xor_sync(0xffffffffu, v, o));
-        if (lane == 0 && t < nt) out[(u64)(z0 + t) * ot + (u64)h * os + r] = v;
+    __syncthreads();
+    // The scale tables, from the staged bytes.
+    for (int i = threadIdx.x; i < nrow * tn; i += MLA_THREADS)
+        tabs[i] = mla_tab_entry(qt, sh + (u64)(i / tn) * rb, i % tn);
+    __syncthreads();
+#define MLA_MV_CASE(T)                                                                     \
+    case T:                                                                                \
+        mla_mv_nt<T>(qt, sh, rb, tabs, tn, nrow, gr0, rph, cols, xsh, h_lo, out, os, ot, z0, \
+                     nt);                                                                  \
+        break;
+    switch (qt) {
+        MLA_MV_CASE(QT_Q5_0)
+        MLA_MV_CASE(QT_Q8_0)
+        MLA_MV_CASE(QT_Q4_K)
+        MLA_MV_CASE(QT_Q6_K)
+        MLA_MV_CASE(QT_F16)
+        MLA_MV_CASE(QT_F32)
+    default:
+        mla_mv_nt<-1>(qt, sh, rb, tabs, tn, nrow, gr0, rph, cols, xsh, h_lo, out, os, ot, z0, nt);
     }
+#undef MLA_MV_CASE
 }
 
 // The attention of nb tokens' absorbed queries over their cache rows 0..np
 // (np = pos0 + z + 1): o_h = softmax(Q_h . K_t * scale) . K_t[..lat], in
 // splits of `split` rows (a multiple of MLA_TILE) from row 0: split sp of a
 // token covers rows sp * split .. min(np, (sp + 1) * split), so a token has
-// ceil(np / split) of them, whatever its batch.
-// Grid (n_h / hpb, nb, max splits), MLA_THREADS threads; hpb heads per block
-// (a power of two <= 8 dividing n_h); a block past its token's last split
-// does nothing. Rows in tiles of MLA_TILE, the tile's K rows in shared
-// memory (f16), an online softmax per head across the split's tiles in
-// order. Warp w scores head w of the block (lane l: columns 2l, 2l + 1,
-// 2l + 64, ..: one fma chain per row, then the xor tree), keeps the head's
-// max m, sum l and the tile's p_t (= exp(s_t - m_new)); thread t then
-// rescales and accumulates head t / tph's columns 2 (t % tph) + 2 tph j
-// (+1) over the tile's rows in order. Out: the split's (m, l, acc[lat])
-// per head at part[((z * ns + sp) * n_h + h) * (lat + 2)] (mla_attn_cmb
-// combines them). The ops of a (token, head) depend on np only.
+// ceil(np / split) of them, whatever its batch. Rows in tiles of MLA_TILE,
+// the tile's K rows in shared memory (f16), an online softmax per head
+// across the split's tiles in order. Per head and tile: each row's score
+// (lane l: columns 2l, 2l + 1, 2l + 64, ..: one fma chain, then the xor
+// tree, times scale), lane r holding row r's; the tile's max m_new, p_r =
+// exp(s_r - m_new) and their xor-tree sum, the head's m and l; then each
+// column pair rescaled by exp(m_old - m_new) and fma'd over the tile's
+// rows in order. Out: the split's (m, l, acc[lat]) per head at
+// part[((z * ns + sp) * n_h + h) * (lat + 2)] (mla_attn_cmb combines them).
+// The ops of a (token, head) depend on np only.
+//
+// Who computes what doesn't change them (main be13f1f's kernel is kept as
+// mla_attn_ref in test builds; mla_tests.rs compares bits):
+// - Grid (nblk, nb), MLA_THREADS threads. A token's blocks work for hpb
+//   heads each, hpb picked per token by the work: the largest power of two
+//   <= hpb_max (dividing n_h) with at least `busy` busy blocks (n_h / hpb
+//   times the token's splits times nb), else 1. Few splits (short
+//   positions, a lone decode token): more blocks, fewer heads each. Block
+//   b works for split b / (n_h / hpb), heads (b % (n_h / hpb)) * hpb ..
+//   + hpb; past the token's splits it does nothing. nblk covers every
+//   token's (mla.rs `attn_blocks`).
+// - The tile's row scores: warp w takes head h0 + w % hpb, rows w / hpb,
+//   w / hpb + 8 / hpb, .. (all 8 warps busy at any hpb), into shared
+//   memory; warp w < hpb then reads its head's back as lane r = row r.
+// - Thread t accumulates head t / tph's column pairs 2 (t % tph) + 2 tph j
+//   (tph = MLA_THREADS / hpb).
+// - dbuf (sm_80+, krow a multiple of 8, 2 tiles of dynamic shared memory):
+//   the next tile's rows are copied (cp.async) while this one is used.
 #define MLA_TILE 32
 #define MLA_MAXI 9   // krow <= 576: 64-column steps of the score
 #define MLA_MAXC 16  // lat <= 512 at tph 32: column pairs per thread
+
+__device__ __forceinline__ void mla_tile_load(unsigned short* dst, const unsigned short* kv,
+                                              int r0, int nr, int krow, bool dbuf) {
+#if __CUDA_ARCH__ >= 800
+    if (dbuf) {
+        int ch = krow >> 3;  // 16-byte chunks per row
+        const unsigned short* src = kv + (u64)r0 * krow;
+        for (int i = threadIdx.x; i < nr * ch; i += MLA_THREADS) {
+            u32 s = (u32)__cvta_generic_to_shared(dst + 8 * i);
+            asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" ::"r"(s), "l"(src + 8 * i));
+        }
+        asm volatile("cp.async.commit_group;");
+        return;
+    }
+#endif
+    const unsigned* src = (const unsigned*)(kv + (u64)r0 * krow);
+    int kw = krow >> 1;  // u32 words per row
+    for (int i = threadIdx.x; i < nr * kw; i += MLA_THREADS) ((unsigned*)dst)[i] = src[i];
+}
+
+// Wait for all but the newest `pending` (0 or 1) cp.async groups.
+__device__ __forceinline__ void mla_tile_wait(int pending, bool dbuf) {
+#if __CUDA_ARCH__ >= 800
+    if (dbuf) {
+        if (pending) asm volatile("cp.async.wait_group 1;" ::: "memory");
+        else asm volatile("cp.async.wait_group 0;" ::: "memory");
+    }
+#endif
+}
+
+// A cache row's score against a head's query (lane l: columns 2l, 2l + 1,
+// 2l + 64, ..: one fma chain, then the xor tree), unscaled.
+__device__ __forceinline__ float mla_score(const float2* qr, const unsigned short* kr, int krow,
+                                           int lane) {
+    float d = 0.0f;
+#pragma unroll
+    for (int i = 0; i < MLA_MAXI; i++) {
+        int c = 2 * lane + 64 * i;
+        if (c < krow) {
+            unsigned kk = *(const unsigned*)(kr + c);
+            d = __fmaf_rn(qr[i].x, mla_h2f(kk & 0xffff), d);
+            d = __fmaf_rn(qr[i].y, mla_h2f(kk >> 16), d);
+        }
+    }
+#pragma unroll
+    for (int o = 16; o > 0; o >>= 1) d = __fadd_rn(d, __shfl_xor_sync(0xffffffffu, d, o));
+    return d;
+}
+
 extern "C" __global__ void __launch_bounds__(MLA_THREADS)
 mla_attn(const float* __restrict__ qa, const unsigned short* __restrict__ kv, int krow, int lat,
-         int n_h, int hpb, float scale, const u32* __restrict__ P, int start, int split, int ns,
-         float* __restrict__ part) {
-    extern __shared__ unsigned short ks[];  // [MLA_TILE][krow]
+         int n_h, int hpb_max, float scale, const u32* __restrict__ P, int start, int split,
+         int ns, float* __restrict__ part, int busy, int dbuf_on) {
+    extern __shared__ unsigned short ks[];  // [1 or 2][MLA_TILE][krow]
     __shared__ float ps[8][MLA_TILE];
+    __shared__ float ss[8][MLA_TILE];
     __shared__ float ms[8], ls[8], al[8];
     int t = threadIdx.x, lane = t & 31, w = t >> 5;
-    int z = blockIdx.y, h0 = blockIdx.x * hpb, sp = blockIdx.z;
+    int z = blockIdx.y;
     int np = mla_pos0(P, start) + z + 1;
+    int nsp = (np + split - 1) / split;
+    int hpb = hpb_max;
+    while (hpb > 1 && (n_h / hpb) * nsp * (int)gridDim.y < busy) hpb >>= 1;
+    int ng_h = n_h / hpb;  // head groups
+    int sp = blockIdx.x / ng_h;
+    if (sp >= nsp) return;
+    int h0 = (blockIdx.x % ng_h) * hpb;
     int rb = sp * split, re = min(np, rb + split);
-    if (rb >= np) return;
     int tph = MLA_THREADS / hpb;
-    // The score warp's query (head h0 + w, if w < hpb): column pairs.
+    bool dbuf = dbuf_on != 0;
+    // The score warp's head and rows, its query's column pairs.
+    int sh = w % hpb, sg = w / hpb, ng = (MLA_THREADS / 32) / hpb;
     float2 qr[MLA_MAXI];
-    bool scorer = w < hpb;
-    if (scorer) {
-        const float* qh = qa + ((u64)z * n_h + h0 + w) * krow;
+    {
+        const float* qh = qa + ((u64)z * n_h + h0 + sh) * krow;
 #pragma unroll
         for (int i = 0; i < MLA_MAXI; i++) {
             int c = 2 * lane + 64 * i;
             qr[i] = c < krow ? make_float2(qh[c], qh[c + 1]) : make_float2(0.0f, 0.0f);
         }
-        if (lane == 0) {
-            ms[w] = __int_as_float(0xff800000);  // -inf
-            ls[w] = 0.0f;
-        }
+    }
+    if (w < hpb && lane == 0) {
+        ms[w] = __int_as_float(0xff800000);  // -inf
+        ls[w] = 0.0f;
     }
     // The accumulating thread's head and columns.
     int ah = t / tph, ac = 2 * (t % tph);
     float2 acc[MLA_MAXC];
 #pragma unroll
     for (int j = 0; j < MLA_MAXC; j++) acc[j] = make_float2(0.0f, 0.0f);
-    int kw = krow >> 1;  // u32 words per row
+    int tile = MLA_TILE * krow;
+    int buf = 0;
+    if (dbuf) mla_tile_load(ks, kv, rb, min(MLA_TILE, re - rb), krow, true);
     for (int r0 = rb; r0 < re; r0 += MLA_TILE) {
         int nr = min(MLA_TILE, re - r0);
+        // Everyone is done with the tile read last (and, dbuf, with the
+        // buffer the next tile goes into).
         __syncthreads();
-        const unsigned* src = (const unsigned*)(kv + (u64)r0 * krow);
-        for (int i = t; i < nr * kw; i += MLA_THREADS) ((unsigned*)ks)[i] = src[i];
+        unsigned short* kt = ks + buf * tile;
+        if (dbuf) {
+            int n1 = r0 + MLA_TILE;
+            bool more = n1 < re;
+            if (more) mla_tile_load(ks + (buf ^ 1) * tile, kv, n1, min(MLA_TILE, re - n1), krow, true);
+            mla_tile_wait(more ? 1 : 0, true);
+        } else {
+            mla_tile_load(kt, kv, r0, nr, krow, false);
+        }
         __syncthreads();
-        if (scorer) {
-            float s = __int_as_float(0xff800000);
+        // ng == 1 (hpb 8): warp w scores all of head w's rows itself, the
+        // score in lane r's register (main's loop); else warps share a
+        // head's rows, through ss.
+        float s1 = __int_as_float(0xff800000);
+        if (ng == 1) {
             for (int r = 0; r < nr; r++) {
-                const unsigned short* kr = ks + r * krow;
-                float d = 0.0f;
-#pragma unroll
-                for (int i = 0; i < MLA_MAXI; i++) {
-                    int c = 2 * lane + 64 * i;
-                    if (c < krow) {
-                        unsigned kk = *(const unsigned*)(kr + c);
-                        d = __fmaf_rn(qr[i].x, mla_h2f(kk & 0xffff), d);
-                        d = __fmaf_rn(qr[i].y, mla_h2f(kk >> 16), d);
-                    }
-                }
-#pragma unroll
-                for (int o = 16; o > 0; o >>= 1) d = __fadd_rn(d, __shfl_xor_sync(0xffffffffu, d, o));
-                if (lane == r) s = __fmul_rn(d, scale);
+                float d = mla_score(qr, kt + r * krow, krow, lane);
+                if (lane == r) s1 = __fmul_rn(d, scale);
             }
+        } else {
+            for (int r = sg; r < nr; r += ng) {
+                float d = mla_score(qr, kt + r * krow, krow, lane);
+                if (lane == 0) ss[sh][r] = __fmul_rn(d, scale);
+            }
+            __syncthreads();
+        }
+        if (w < hpb) {
+            float s = ng == 1 ? s1 : (lane < nr ? ss[w][lane] : __int_as_float(0xff800000));
             float mx = s;
 #pragma unroll
             for (int o = 16; o > 0; o >>= 1) mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o));
@@ -240,7 +552,7 @@ mla_attn(const float* __restrict__ qa, const unsigned short* __restrict__ kv, in
                 if (c < lat) {
                     float2 v = make_float2(__fmul_rn(acc[j].x, a), __fmul_rn(acc[j].y, a));
                     for (int r = 0; r < nr; r++) {
-                        unsigned kk = *(const unsigned*)(ks + r * krow + c);
+                        unsigned kk = *(const unsigned*)(kt + r * krow + c);
                         float p = ps[ah][r];
                         v.x = __fmaf_rn(p, mla_h2f(kk & 0xffff), v.x);
                         v.y = __fmaf_rn(p, mla_h2f(kk >> 16), v.y);
@@ -249,6 +561,7 @@ mla_attn(const float* __restrict__ qa, const unsigned short* __restrict__ kv, in
                 }
             }
         }
+        if (dbuf) buf ^= 1;
     }
     __syncthreads();
     if (ah < hpb) {

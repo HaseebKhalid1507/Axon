@@ -58,6 +58,94 @@ const MLA_MAX_SPLITS: usize = 2048;
 /// attention in chunks of tokens whose partials fit.
 const MLA_PART_BUDGET: usize = 64 << 20;
 const MLA_MV_T: usize = 8;
+/// Most bytes one mla_heads_mv block stages in shared memory (its
+/// dynamic shared memory: rows and their heads' inputs, `mv_plan`).
+const MLA_MV_SMEM: usize = 48 << 10;
+/// Rows per mla_heads_mv block (fewer if they don't fit): a block copies
+/// its rows' bytes and inputs into shared memory, its 8 warps take
+/// MLA_MV_RW rows at a time. Not part of the bits.
+const MLA_MV_ROWS: usize = 32;
+/// Most row bytes per mla_heads_mv block: measured (mla_decode_kernel_bench,
+/// sm_89 and sm_120) best at Moonlight's k_b (88-byte rows: 32 per block)
+/// and v_b (288: 16).
+const MLA_MV_BYTES: usize = 4608;
+
+/// mla.cu mla_tab_n: scale-table floats per row of qt over cols values.
+fn mv_tab_n(qt: u32, cols: usize) -> usize {
+    use crate::quant::{Q4_K, Q5_0, Q6_K, Q8_0};
+    match qt {
+        Q5_0 | Q8_0 => cols / 32,
+        Q4_K | Q6_K => cols / 16,
+        _ => 0,
+    }
+}
+
+/// mla_heads_mv's dynamic shared memory at rpb rows per block, for a
+/// product of n_h heads of rph rows (type qt, rb bytes) over cols inputs,
+/// nb tokens: the rows' bytes rounded up to 16, their scale tables, then
+/// each head the rows touch (at most (rpb + rph - 2) / rph + 1) times the
+/// block's tokens' inputs.
+fn mv_smem(
+    rpb: usize,
+    (qt, rb): (u32, usize),
+    rph: usize,
+    cols: usize,
+    n_h: usize,
+    nb: usize,
+) -> usize {
+    let heads = ((rpb + rph - 2) / rph + 1).min(n_h);
+    (rpb * rb).next_multiple_of(16)
+        + rpb * mv_tab_n(qt, cols) * 4
+        + heads * nb.min(MLA_MV_T) * cols * 4
+}
+
+/// mla_heads_mv's (rows per block, shared memory): MLA_MV_ROWS, halved
+/// while the rows exceed MLA_MV_BYTES or it all doesn't fit in
+/// MLA_MV_SMEM.
+fn mv_plan(m: (u32, usize), rph: usize, cols: usize, n_h: usize, nb: usize) -> (usize, usize) {
+    let mut rpb = MLA_MV_ROWS;
+    while rpb > 1 && (rpb * m.1 > MLA_MV_BYTES || mv_smem(rpb, m, rph, cols, n_h, nb) > MLA_MV_SMEM)
+    {
+        rpb /= 2;
+    }
+    (rpb, mv_smem(rpb, m, rph, cols, n_h, nb))
+}
+
+/// mla_attn's dynamic shared memory: one tile of MLA_TILE rows of krow
+/// halves, two with `dbuf`.
+fn attn_smem(krow: usize, dbuf: bool) -> usize {
+    MLA_TILE * krow * 2 * if dbuf { 2 } else { 1 }
+}
+
+/// Decode positions below this double-buffer the attention's tiles: at most
+/// 4 splits (MLA_SPLIT rows), where the 2-tile shared memory's one block
+/// per SM costs nothing. Further on, more blocks than SMs want two each.
+/// Measured (mla_decode_kernel_bench, sm_89 and sm_120): faster at 64, 136
+/// and 300, slower at 1000 and 4000. Not part of the bits.
+const MLA_DBUF_BELOW: usize = 4 * MLA_SPLIT;
+
+/// Whether a decode step at `pos` double-buffers its attention tiles.
+fn dbuf_at(pos: usize) -> bool {
+    pos < MLA_DBUF_BELOW
+}
+
+/// mla_attn's grid width for nz tokens of at most ns splits each, n_h
+/// heads, at most hpb_max per block, `busy` (its hpb rule): enough for
+/// any token's n_h / hpb blocks per split. With hpb_max: (n_h / hpb_max)
+/// ns. With a smaller hpb (the next larger one fell short of busy:
+/// n_h / (2 hpb) * nsp * nz < busy): n_h / hpb * nsp < 2 busy / nz. Never
+/// more than n_h ns.
+fn attn_blocks(n_h: usize, hpb_max: usize, ns: usize, nz: usize, busy: usize) -> usize {
+    ((n_h / hpb_max) * ns)
+        .max((2 * busy).div_ceil(nz))
+        .min(n_h * ns)
+}
+
+/// Whether mla_attn double-buffers here: the device can (`MlaFns::dbuf`)
+/// and rows are whole 16-byte chunks (its cp.async).
+fn attn_dbuf(dbuf: bool, krow: usize) -> bool {
+    dbuf && krow.is_multiple_of(8)
+}
 /// mla.cu MLA_MAXI: krow <= 64 * MLA_MAXI.
 const MLA_MAX_KROW: usize = 576;
 
@@ -111,7 +199,8 @@ impl MlaNet {
         self.layers.len() * max_ctx * self.cfg.d.krow() * 2
     }
 
-    /// Heads per attention block (mla.cu mla_attn's hpb).
+    /// Most heads per attention block (mla.cu mla_attn's hpb_max: it
+    /// takes fewer when a token has few splits).
     fn hpb(&self) -> usize {
         self.cfg.d.n_heads.min(8)
     }
@@ -256,6 +345,10 @@ pub(super) fn plan_layers<'m>(
 /// add, `Kernels::mla_module`) and the dense module's batched norm,
 /// quantization and RoPE table.
 pub(crate) struct MlaFns<'m> {
+    /// mla_attn's `busy`: the device's SM count (its hpb rule).
+    sms: usize,
+    /// mla_attn may double-buffer its tiles (cp.async: sm_80+).
+    dbuf: bool,
     kv_store: Func<'m>,
     qrope: Func<'m>,
     heads_mv: Func<'m>,
@@ -272,11 +365,20 @@ pub(crate) struct MlaFns<'m> {
 impl<'m> MlaFns<'m> {
     /// `mla`: `Kernels::mla_module`; `dense`: the model's module.
     pub(crate) fn new(mla: &'m Module<'m>, dense: &'m Module<'m>) -> Result<MlaFns<'m>, String> {
+        let attn = mla.function("mla_attn")?;
+        let heads_mv = mla.function("mla_heads_mv")?;
+        heads_mv.set_max_shared(MLA_MV_SMEM)?;
+        let dbuf = mla.mma();
+        if dbuf {
+            attn.set_max_shared(attn_smem(MLA_MAX_KROW, true))?;
+        }
         Ok(MlaFns {
+            sms: mla.gpu().info()?.sms as usize,
+            dbuf,
             kv_store: mla.function("mla_kv_store")?,
             qrope: mla.function("mla_qrope")?,
-            heads_mv: mla.function("mla_heads_mv")?,
-            attn: mla.function("mla_attn")?,
+            heads_mv,
+            attn,
             attn_cmb: mla.function("mla_attn_cmb")?,
             route: mla.function("moe_router")?,
             logits: mla.function("moe_logits")?,
@@ -317,8 +419,12 @@ pub struct MlaBufs<'g> {
     host_r: HostBuf<'g>,
     host_y: HostBuf<'g>,
     /// Per segment (`n_layers + 1`): its captured decode graph, then per
-    /// layer its shared experts' (`n_layers`).
+    /// layer its shared experts' (`n_layers`), then per segment its graph
+    /// with the attention's tiles double-buffered (`att_dbuf`).
     graphs: Vec<Option<Graph<'g>>>,
+    /// The decode step being enqueued double-buffers its attention tiles
+    /// (`dbuf_at` of its position): which segment graphs it runs.
+    att_dbuf: std::cell::Cell<bool>,
     /// Recorded after the router's copy down (`mla_round_trip`).
     ev: SyncEvent<'g>,
     /// AXON_MOE_PROFILE=1: decode steps' seconds (GPU segments synced,
@@ -443,7 +549,8 @@ impl<'g> CudaQwen2<'g> {
             y: g.alloc(yb)?,
             host_r: g.host_alloc(rb)?,
             host_y: g.host_alloc(yb)?,
-            graphs: (0..=2 * self.n_layers).map(|_| None).collect(),
+            graphs: (0..3 * self.n_layers + 2).map(|_| None).collect(),
+            att_dbuf: std::cell::Cell::new(false),
             graph_gen: 0,
             ev: g.new_event()?,
             prof: profile_on().then_some([0.0; 4]),
@@ -678,15 +785,16 @@ impl<'g> CudaQwen2<'g> {
             )?;
             // The absorbed queries: Wk_b[h] q_nope_h.
             let heads = |mt: &Mat, rph: usize, xin: Arg, xs: usize, out: Arg, os: usize| {
+                let (rpb, smem) = mv_plan((mt.qt, mt.rb), rph, mt.cols, nh, nb);
                 g.launch(
                     &mf.heads_mv,
                     (
-                        (nh * rph).div_ceil(8) as u32,
+                        (nh * rph).div_ceil(rpb) as u32,
                         nb.div_ceil(MLA_MV_T) as u32,
                         1,
                     ),
                     (256, 1, 1),
-                    0,
+                    smem as u32,
                     &[
                         Arg::I32(mt.qt as i32),
                         w(mt),
@@ -701,6 +809,7 @@ impl<'g> CudaQwen2<'g> {
                         Arg::I32(os as i32),
                         Arg::U64((nh * os) as u64),
                         Arg::I32(nb as i32),
+                        Arg::I32(rpb as i32),
                     ],
                 )
             };
@@ -736,11 +845,16 @@ impl<'g> CudaQwen2<'g> {
                 ];
                 args.extend(pos);
                 args.push(mb.part.arg());
+                // A decode step double-buffers its tiles (a batched pass
+                // keeps one tile: two blocks per SM).
+                let dbuf = decode && mb.att_dbuf.get() && attn_dbuf(mf.dbuf, kr);
+                args.push(Arg::I32(mf.sms as i32));
+                args.push(Arg::I32(dbuf as i32));
                 g.launch(
                     &mf.attn,
-                    ((nh / hpb) as u32, nz as u32, ns as u32),
+                    (attn_blocks(nh, hpb, ns, nz, mf.sms) as u32, nz as u32, 1),
                     (256, 1, 1),
-                    (MLA_TILE * kr * 2) as u32,
+                    attn_smem(kr, dbuf) as u32,
                     &args,
                 )?;
                 let mut args = vec![mb.part.arg(), Arg::I32(d.lat as i32), Arg::I32(nh as i32)];
@@ -954,6 +1068,11 @@ impl<'g> CudaQwen2<'g> {
         p[4..8].copy_from_slice(&(pos as u32).to_le_bytes());
         c.host_params.copy_to(&c.params, 0, 8)?;
         let n = self.n_layers;
+        // Double-buffered attention tiles at short positions (`dbuf_at`):
+        // its own set of segment graphs (the bits are the same either way).
+        let dbuf = dbuf_at(pos) && attn_dbuf(mf.dbuf, self.mla.as_deref().unwrap().cfg.d.krow());
+        mb.att_dbuf.set(dbuf);
+        let seg_graph = |seg: usize| if dbuf { 2 * n + 1 + seg } else { seg };
         if mb.graph_gen != c.graph_gen {
             mb.graphs.iter_mut().for_each(|g| *g = None);
             mb.graph_gen = c.graph_gen;
@@ -980,14 +1099,15 @@ impl<'g> CudaQwen2<'g> {
                 Ok(())
             };
             if self.graphs {
-                if mb.graphs[seg].is_none() {
+                let sg = seg_graph(seg);
+                if mb.graphs[sg].is_none() {
                     let g = self.gpu.capture(|| run(mb))?;
-                    mb.graphs[seg] = Some(g);
+                    mb.graphs[sg] = Some(g);
                 }
                 // SAFETY: the graph's buffers are the cache's, the scratch's
                 // and the model's, all borrowed for this call; the scratch
                 // owns the graph and lives with the cache.
-                unsafe { mb.graphs[seg].as_ref().unwrap().launch()? };
+                unsafe { mb.graphs[sg].as_ref().unwrap().launch()? };
             } else {
                 run(mb)?;
             }
