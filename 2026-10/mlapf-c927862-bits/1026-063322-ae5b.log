@@ -1,0 +1,58 @@
+[axon-run 06:33:22] submitted 1026-063322-ae5b by /home/haseeb/.cache/axon-wt-mlapf: /home/haseeb/.cache/axon-mlapf/axon-test-c927862 cuda::qwen2::mla:: --test-threads 1 --nocapture --include-ignored
+[axon-run 06:33:25] job 1026-063322-ae5b -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 2117 --env AXON_NODE_PACK=1 --src /home/haseeb/.cache/axon-wt-mlapf /home/haseeb/.cache/axon-mlapf/axon-test-c927862 cuda::qwen2::mla:: --test-threads 1 --nocapture --include-ignored
+axon-remote: uploading axon-test-c927862 (0b3a55a56580d60267998958) + source of /home/haseeb/.cache/axon-wt-mlapf
+
+sent 2,032,555 bytes  received 5,345 bytes  4,075,800.00 bytes/sec
+total size is 7,359,825  speedup is 3.61
+
+sent 6,955,471 bytes  received 35 bytes  4,637,004.00 bytes/sec
+total size is 21,804,872  speedup is 3.13
+axon-remote: job 20261026-063327-axon-test-c927862-1964442 on avante (GPU, 2117 MB)
+[axon-node 06:33:27] GPU slot taken; job wants 2117 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 50
+[axon-node 06:33:27] run axon-test-c927862 (0b3a55a56580d60267998958) as /home/haseeb/.cache/axon-wt-mlapf on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 10 tests
+test cuda::qwen2::mla::tests::attn_blocks_cover_the_hpb_rule ... ok
+test cuda::qwen2::mla::tests::mla_attn_b_equals_main ... testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+mla_attn_b == main: 36249344 outputs
+ok
+test cuda::qwen2::mla::tests::mla_attn_equals_main ... mla_attn == main: 92941824 outputs
+ok
+test cuda::qwen2::mla::tests::mla_attn_matches_reference_and_batch ... ok
+test cuda::qwen2::mla::tests::mla_decode_kernel_bench ... heads_mv k_b: main 49.0 us | rpb 8 31.7 us | rpb 16 20.7 us | rpb 32 16.7 us | rpb 64 16.9 us
+heads k_b nb 8: main 82.5 us | mv 50.6 us | mm 187.5 us
+heads k_b nb 16: main 157.5 us | mv 81.2 us | mm 162.5 us
+heads k_b nb 32: main 273.7 us | mv 164.0 us | mm 175.5 us
+heads k_b nb 512: main 4631.7 us | mv 2663.6 us | mm 1553.0 us
+heads k_b nb 2100: main 20321.5 us | mv 11508.6 us | mm 6355.1 us
+heads_mv v_b: main 47.3 us | rpb 8 14.4 us | rpb 16 10.8 us | rpb 32 11.1 us | rpb 64 11.9 us
+heads v_b nb 8: main 78.4 us | mv 36.7 us | mm 204.5 us
+heads v_b nb 16: main 147.5 us | mv 65.4 us | mm 213.6 us
+heads v_b nb 32: main 296.6 us | mv 131.5 us | mm 257.9 us
+heads v_b nb 512: main 5174.6 us | mv 2223.3 us | mm 1724.5 us
+heads v_b nb 2100: main 21949.4 us | mv 9524.2 us | mm 7063.8 us
+attn pos 8: main 7.1 us | hpb 8 7.3 | hpb 8 dbuf 5.8 | rule 4.5 | rule dbuf 4.9 | hpb 1 10.8 | hpb 1 dbuf 17.6 us
+attn pos 64: main 29.2 us | hpb 8 29.6 | hpb 8 dbuf 20.0 | rule 10.4 | rule dbuf 8.1 | hpb 1 13.2 | hpb 1 dbuf 20.9 us
+attn pos 136: main 52.7 us | hpb 8 53.0 | hpb 8 dbuf 35.0 | rule 16.0 | rule dbuf 12.1 | hpb 1 16.5 | hpb 1 dbuf 25.0 us
+attn pos 300: main 52.8 us | hpb 8 53.1 | hpb 8 dbuf 35.1 | rule 22.0 | rule dbuf 16.2 | hpb 1 23.3 | hpb 1 dbuf 34.5 us
+attn pos 1000: main 53.0 us | hpb 8 53.3 | hpb 8 dbuf 35.4 | rule 33.9 | rule dbuf 45.1 | hpb 1 55.6 | hpb 1 dbuf 74.5 us
+attn pos 4000: main 105.0 us | hpb 8 112.2 | hpb 8 dbuf 138.3 | rule 119.9 | rule dbuf 159.8 | hpb 1 211.3 | hpb 1 dbuf 262.9 us
+attn batch 64 from 0: main 61 us | decode kernel 62 us | attn_b 72 us
+attn batch 512 from 0: main 3396 us | decode kernel 3383 us | attn_b 2655 us
+attn batch 2100 from 0: main 55540 us | decode kernel 55136 us | attn_b 44965 us
+ok
+test cuda::qwen2::mla::tests::mla_heads_mm_equals_main ... mla_heads_mm == main: 54407296 outputs
+ok
+test cuda::qwen2::mla::tests::mla_heads_mv_equals_main ... mla_heads_mv == main: 9539028 outputs
+ok
+test cuda::qwen2::mla::tests::mla_heads_mv_matches_dequant ... ok
+test cuda::qwen2::mla::tests::mla_kernels_compile_for_archs ... mla sm_80: 572000 bytes of cubin
+mla sm_90: 593832 bytes of cubin
+ok
+test cuda::qwen2::mla::tests::mla_router_matches_cpu_rule ... ok
+
+test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 744 filtered out; finished in 139.11s
+
+[axon-node 06:35:46] exit 0 after 139.2s
+[axon-node 06:35:46] peak RSS 593 MB (job process tree PSS, 2 s samples x69)
+[axon-run 06:35:47] exit 0 after 142.3s (host avante)
