@@ -2,10 +2,8 @@
 
 - Date: 2026-10-24 (updated 10-25). Branch: feat/moe-resident-c, base `main`. PR B (#122) is merged to main as b2068e7;
   main was merged into this branch at c3cce85 (b2068e7) and 3c7ca02 (fb749cc). No rebase.
-  Status: open, draft. Gates 8/8 PASS at 18427b2. Review round 1 fixes at b20c301: 7/7 correctness PASS (one job
-  dropped by the lead). Review round 2 at 93a53b3: 3/3 PASS. Review round 3:
-  9.5/10 APPROVE; its test-only SHOULDs are at 743c5a3. **The kill-rule bench has no clean measurement
-  yet**: the clean run c579 was parked for desktop GPU taint.
+  Status: ready for merge. Final gates at 1d9b4e0 (main 5bd21c3 + #134 + this PR) ALL PASS. Reviews: shady 8/10
+  → 9/10 → 9.5/10 APPROVE. The kill rule PASSES (TAINTED, accepted by the lead): tg ×2.06, pp ×3.40.
 - Pick / design: Fable 10-19 §3 #3; spec `r16-pick4-moe-resident.md` §6 PR C; #121 item 5.
 
 Labels: **MEASURED** (job cited), **CODE**, **ESTIMATED**.
@@ -98,19 +96,44 @@ Review round 3 (shady 9.5/10 APPROVE, no MUSTs, at 93a53b3). Two test-only SHOUL
 - `ds2_resident_untwinnable_layer_stays_on_cpu` uses the fixture with layer 2's experts F32 (no GPU twin). N(2) and
   auto place layer 1 only; the logits are bit-equal to N(0).
 
-Gated as the two tests only, by agreement: release 1025-131034-f2a6 and debug 1025-131035-0587 on bella, pending
-when this was written. #127 gets one full regate once #136 and #134 are on main. The kill-rule bench stays parked.
+Gated as the two tests only, by agreement: release 1025-131034-f2a6 and debug 1025-131035-0587, both PASS 2/0/0.
+
+**Final round of record at 1d9b4e0** = main 5bd21c3 + #134 (3abb6ae) + this PR. ALL PASS (MEASURED, gatewatch
+`moeresc-final`, all on bella, every job with `--expect`):
+
+| check | job | result |
+|---|---|---|
+| experts / twin / ds2 / deepseek2 / testutil / moe unit tests + Moonlight, release | 1025-154854-a94c | PASS 39/0/2 |
+| same, debug assertions | 1025-154709-0f37 | PASS 39/0/2 |
+| same, release (focus) | 1025-154709-6f97 | killed before it ran (rc 130): a duplicate of a94c, superseded; not a failure |
+| full release, 2 shards | group 1025-154854-af0c (316b, d837) | PASS 675/0/48 |
+| full debug assertions, 2 shards | group 1025-154854-da44 (babb, d879) | PASS 675/0/48 |
+| md5 vs 3abb6ae: 33 local GGUFs (all but Qwen2.5-32B) × 3 prompts, cpu / cuda / cuda `--kv q8` | 1025-154910-626c | 99/99, 102/102, 102/102 identical (6 and 24 pairs refused by both builds: F16 weights on CUDA; no GPU q8 KV for gemma3, gpt-oss, deepseek2) |
+
+At 1d9b4e0 the Moonlight test model loads through the default loader, so #134's per-Model strict release guard is on.
+Residency's release and Moonlight 0/6/12/auto pass under it; d1d2 (dropped) had left this gap open. main later moved to
+fcde887 (#134's merge, 0 files changed): no regate.
 
 ## Results: the kill-rule bench
 
 The rule: resident decode must be ≥ 1.5× the CPU-expert decode on bella, or the track stops.
 Moonlight-16B-A3B Q4_K_M, `gen -n 128`, ctx 4096, greedy, `--gpu-experts 0` vs `auto`, 3 interleaved rounds.
 
-- **No clean measurement yet.** The clean run 1025-054130-c579 (18427b2, `--timing bella`) was parked by the lead
-  because of desktop GPU load. It will be rerun at b20c301 when bella is quiet.
-- The only number so far is **TAINTED**: 1024-191040-267a (0685079; foreign GPU mean 9.2 %, max 16 %). Medians:
-  decode 51.97 → 108.95 tok/s (2.10×), prompt eval 308.7 → 862.0 tok/s (2.79×), text identical, auto 24 of 26
-  layers. It shows the effect is large; it is not the rule's verdict.
+**Result of record: PASS, TAINTED.** Job 1025-153024-c92e (93a53b3; product code unchanged after it): foreign GPU
+max 31 %, mean 7.8 % (Xorg). MEASURED, medians:
+
+| arm | tg tok/s (runs) | median | pp tok/s (runs) | median |
+|---|---|---|---|---|
+| `--gpu-experts 0` | 57.84 / 62.56 / 61.84 | 61.84 | 220.4 / 317.2 / 341.2 | 317.2 |
+| `auto` (25 of 26 layers, 8.50 GiB) | 118.18 / 127.68 / 129.01 | 127.68 | 957.8 / 1076.9 / 1092.7 | 1076.9 |
+
+tg ×2.06, pp ×3.40, text identical in all 6 runs. The lead accepted it with the TAINTED label kept, for three
+reasons:
+- the arms alternate run by run, so desktop load hits both;
+- the two tainted runs agree (1024-191040-267a at 0685079: ×2.10 tg, ×2.79 pp), more than 35 % above the threshold;
+- a clean slot never came (c579 was parked).
+
+Don't quote the absolute tok/s as clean. The default stays `--gpu-experts 0`.
 
 ## What didn't work / open
 
