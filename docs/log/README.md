@@ -21,7 +21,7 @@ never edit the same file.
 
 The newest standing is [../results.md](../results.md); the newest board is the H100 serving showdown
 ([2026-10-19-h100-showdown.md](2026-10-19-h100-showdown.md)); what landed and when is
-[../history.md](../history.md) (Phase 19 for 10-18/19). Outside reviews of the project, which feed the roadmap's
+[../history.md](../history.md) (Phase 19 for 10-18/19, Phase 20 for 10-19 to 10-25). Outside reviews of the project, which feed the roadmap's
 order, are in [../reviews/](../reviews/README.md).
 
 ## Template
