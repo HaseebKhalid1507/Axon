@@ -72,11 +72,11 @@ const MLA_MV_ROWS: usize = 32;
 const MLA_MV_BYTES: usize = 4608;
 
 /// mla.cu MLA_AB_Q, MLA_AB_THREADS, MLA_AB_CJ: mla_attn_b's (token, head)
-/// pairs per block, threads, and column pairs per thread and pair (128
+/// pairs per block, threads, and column pairs per thread and pair (64
 /// columns apart).
 const MLA_AB_Q: usize = 32;
-const MLA_AB_THREADS: usize = 512;
-const MLA_AB_CJ: usize = 4;
+const MLA_AB_THREADS: usize = 256;
+const MLA_AB_CJ: usize = 8;
 
 /// mla_attn_b's dynamic shared memory: a tile of K rows in f32.
 fn attn_b_smem(krow: usize) -> usize {
@@ -88,7 +88,7 @@ fn attn_b_smem(krow: usize) -> usize {
 /// threads' columns cover (krow <= MLA_MAX_KROW holds for every model the
 /// MLA path runs).
 fn attn_b_fits(n_h: usize, krow: usize, lat: usize) -> bool {
-    n_h.is_power_of_two() && krow <= MLA_MAX_KROW && lat <= 128 * MLA_AB_CJ
+    n_h.is_power_of_two() && krow <= MLA_MAX_KROW && lat <= 64 * MLA_AB_CJ
 }
 
 /// mla.cu MLA_MM_R, MLA_MM_T, MLA_MM_SC: mla_heads_mm's rows and tokens
