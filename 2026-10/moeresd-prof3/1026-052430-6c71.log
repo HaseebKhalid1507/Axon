@@ -1,0 +1,28 @@
+[axon-run 05:24:30] submitted 1026-052430-6c71 by /home/haseeb/.cache/axon-wt-moeres-mainbase: /home/haseeb/.cache/axon-moeres/prof/prof3.sh /home/haseeb/.cache/axon-moeres/axon-main-39624db
+[axon-run 07:47:17] scope axon-job-1026-052430-6c71-1793015237.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 22229 MB): an OOM here kills only this job
+[axon-run 07:47:17] job 1026-052430-6c71 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-052430-6c71-1793015237 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-moeres/prof/prof3.sh /home/haseeb/.cache/axon-moeres/axon-main-39624db
+PROF3 out /home/haseeb/.cache/axon-moeres/prof/run3-1026-074717
+A	r1-0-t8	llama-t8	N=0	pp512	834.47	07:47:17-
+A	r1-0-t8	llama-t8	N=0	pp2100	754.13	07:47:17-
+A	r1-0-t8	llama-t8	N=0	tg128	30.48	07:47:17-
+   ended 07:47:33
+[axon-run 07:47:50] FOREIGN_GPU sample max=0% mean=0.0% n=6
+A	r1-0-t24	llama-t24	N=0	pp512	825.86	07:47:36-
+A	r1-0-t24	llama-t24	N=0	pp2100	745.77	07:47:36-
+A	r1-0-t24	llama-t24	N=0	tg128	9.50	07:47:36-
+   ended 07:47:58
+A	r1-6-t8	llama-t8	N=6	pp512	1056.61	07:48:01-
+A	r1-6-t8	llama-t8	N=6	pp2100	946.93	07:48:01-
+A	r1-6-t8	llama-t8	N=6	tg128	44.65	07:48:01-
+   ended 07:48:11
+[axon-run 07:48:24] FOREIGN_GPU sample max=0% mean=0.0% n=6
+A	r1-6-t24	llama-t24	N=6	pp512	1047.93	07:48:14-
+A	r1-6-t24	llama-t24	N=6	pp2100	900.61	07:48:14-
+A	r1-6-t24	llama-t24	N=6	tg128	11.77	07:48:14-
+   ended 07:48:31
+A	r1-12-tg128	axon	N=12	tg128	79.14	07:48:34-07:48:37
+A	r1-12-pp512	axon	N=12	pp512	1083.71	07:48:40-07:48:42
+PROF3 DONE
+[axon-run 07:48:45] exit 0 after 88.2s (host bella)
+[axon-run 07:48:47] EXPECT ok: output matches /PROF3 DONE/
+[axon-run 07:48:47] FOREIGN_GPU max=0% mean=0.0% samples=15

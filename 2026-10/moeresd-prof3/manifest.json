@@ -1,0 +1,29 @@
+{
+ "label": "moeresd-prof3",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1026-052430-6c71",
+   "name": "moeresd-39624db-prof3",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "39624db",
+   "binary": "prof3.sh",
+   "started": 1793015237.3364208,
+   "ended": 1793015327.549001,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "f6f085f6b3b4818a0654f9a318ba14385edea8ffd9d279b28fdb7d2e02faa9e4",
+   "log_bytes": 1940
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-26 07:48:48 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
