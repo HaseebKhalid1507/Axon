@@ -1,0 +1,74 @@
+[axon-run 05:35:26] submitted 1026-053526-c848 by /home/haseeb/.cache/axon-wt-moeres-e: /home/haseeb/.cache/axon-moeres/axon-test-f2148c6 moe::q3res_tests:: --test-threads 1 --nocapture
+[axon-run 06:21:37] scope axon-job-1026-053526-c848-1793010097.scope in app-axonjobs.slice: MemoryMax 20485 MB, MemoryHigh 18436 MB, no swap, oomd pressure kill 80% (claim 12974 MB): an OOM here kills only this job
+[axon-run 06:21:37] job 1026-053526-c848 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-053526-c848-1793010097 --slice=app-axonjobs.slice -p MemoryMax=20485M -p MemoryHigh=18436M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-moeres/axon-test-f2148c6 moe::q3res_tests:: --test-threads 1 --nocapture
+axon-q 06:21:37 start slot 16-23: /home/haseeb/.cache/axon-moeres/axon-test-f2148c6 moe::q3res_tests:: --test-threads 1 --nocapture
+
+running 3 tests
+test moe::q3res_tests::q3_resident_fallbacks ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+qwen3moe fallback (AXON_REPACK=0): attention + router on the GPU (0.00 GiB, ctx 64), 4 experts x 2 layers on the CPU (top-2); no experts resident: AXON_REPACK=0: the CPU experts aren't the r8 kernels the GPU twins match
+qwen3moe fallback (fused): attention + router on the GPU (0.00 GiB, ctx 64), 4 experts x 2 layers on the CPU (top-2); no experts resident: the twins' F (true) isn't the host CPU's vmath::fused() (false)
+gpt-oss fallback: attention + router on the GPU (0.00 GiB, ctx 32), 4 experts x 3 layers on the CPU (top-2); no experts resident: resident experts: deepseek2 and qwen3moe only for now (gpt-oss)
+ok
+test moe::q3res_tests::q3_resident_fixture_bits ... qwen3moe fixture N(0): resident [], bits equal
+
+thread 'moe::q3res_tests::q3_resident_fixture_bits' (2780677) panicked at src/gguf.rs:605:13:
+tensor blk.0.ffn_gate_exps.weight was released after repacking; load the model again to read it
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'moe::q3res_tests::q3_resident_fixture_bits' (2780677) panicked at src/gguf.rs:605:13:
+tensor blk.0.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::q3res_tests::q3_resident_fixture_bits' (2780677) panicked at src/gguf.rs:605:13:
+tensor blk.0.ffn_down_exps.weight was released after repacking; load the model again to read it
+qwen3moe fixture N(1): resident [0], bits equal
+
+thread 'moe::q3res_tests::q3_resident_fixture_bits' (2780677) panicked at src/gguf.rs:605:13:
+tensor blk.0.ffn_gate_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::q3res_tests::q3_resident_fixture_bits' (2780677) panicked at src/gguf.rs:605:13:
+tensor blk.0.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::q3res_tests::q3_resident_fixture_bits' (2780677) panicked at src/gguf.rs:605:13:
+tensor blk.0.ffn_down_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::q3res_tests::q3_resident_fixture_bits' (2780677) panicked at src/gguf.rs:605:13:
+tensor blk.1.ffn_gate_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::q3res_tests::q3_resident_fixture_bits' (2780677) panicked at src/gguf.rs:605:13:
+tensor blk.1.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::q3res_tests::q3_resident_fixture_bits' (2780677) panicked at src/gguf.rs:605:13:
+tensor blk.1.ffn_down_exps.weight was released after repacking; load the model again to read it
+qwen3moe fixture N(2): resident [0, 1], bits equal
+
+thread 'moe::q3res_tests::q3_resident_fixture_bits' (2780677) panicked at src/gguf.rs:605:13:
+tensor blk.0.ffn_gate_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::q3res_tests::q3_resident_fixture_bits' (2780677) panicked at src/gguf.rs:605:13:
+tensor blk.0.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::q3res_tests::q3_resident_fixture_bits' (2780677) panicked at src/gguf.rs:605:13:
+tensor blk.0.ffn_down_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::q3res_tests::q3_resident_fixture_bits' (2780677) panicked at src/gguf.rs:605:13:
+tensor blk.1.ffn_gate_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::q3res_tests::q3_resident_fixture_bits' (2780677) panicked at src/gguf.rs:605:13:
+tensor blk.1.ffn_up_exps.weight was released after repacking; load the model again to read it
+
+thread 'moe::q3res_tests::q3_resident_fixture_bits' (2780677) panicked at src/gguf.rs:605:13:
+tensor blk.1.ffn_down_exps.weight was released after repacking; load the model again to read it
+qwen3moe fixture Auto: resident [0, 1], bits equal
+ok
+test moe::q3res_tests::q3_resident_model_bits ... /home/haseeb/.cache/axon-wt-moeres-e/models/Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M.gguf N(0): attention + router on the GPU (0.30 GiB, ctx 512), 4 experts x 28 layers on the CPU (top-2); resident []: bits equal
+/home/haseeb/.cache/axon-wt-moeres-e/models/Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M.gguf N(14): attention + router on the GPU (0.30 GiB, ctx 512), 4 experts x 14 layers on the CPU (top-2); 14 of 28 expert layers resident on the GPU (0.28 GiB); resident [3, 4, 6, 7, 9, 10, 12, 13, 15, 16, 18, 19, 21, 22]: bits equal
+/home/haseeb/.cache/axon-wt-moeres-e/models/Qwen3-MOE-4x0.6B-2.4B-Writing-Thunder-V1.2.Q4_K_M.gguf Auto: attention + router on the GPU (0.30 GiB, ctx 512), 4 experts x 0 layers on the CPU (top-2); 28 of 28 expert layers resident on the GPU (0.60 GiB); resident [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27]: bits equal
+/home/haseeb/.cache/axon-wt-moeres-e/models/Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M.gguf N(0): attention + router on the GPU (0.43 GiB, ctx 512), 128 experts x 3 layers on the CPU (top-8); resident []: bits equal
+/home/haseeb/.cache/axon-wt-moeres-e/models/Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M.gguf N(2): attention + router on the GPU (0.43 GiB, ctx 512), 128 experts x 1 layers on the CPU (top-8); 2 of 3 expert layers resident on the GPU (0.63 GiB); resident [0, 1]: bits equal
+/home/haseeb/.cache/axon-wt-moeres-e/models/Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M.gguf Auto: attention + router on the GPU (0.43 GiB, ctx 512), 128 experts x 0 layers on the CPU (top-8); 3 of 3 expert layers resident on the GPU (1.00 GiB); resident [0, 1, 2]: bits equal
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 748 filtered out; finished in 6.15s
+
+[axon-run 06:21:43] exit 0 after 6.3s (host bella)
+[axon-run 06:21:47] EXPECT ok: output matches /^test result: ok\. [0-9]+ passed; 0 failed/
