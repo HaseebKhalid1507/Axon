@@ -1,0 +1,49 @@
+{
+ "label": "moeresd-39624db",
+ "verdict": "FAIL (2 of 2)",
+ "jobs": [
+  {
+   "job": "1025-222603-40ed",
+   "name": "moeresd-39624db-bench",
+   "rc": 1,
+   "verdict": "FAIL (rc 1)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "39624db",
+   "binary": "benchd.sh",
+   "started": 1792983023.2091477,
+   "ended": 1792983030.858406,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "a76c9f94cf3576521cad1f36ef46f1aa2ffee7454a3ba612d0dcc08107ae89fa",
+   "log_bytes": 1310
+  },
+  {
+   "job": "1025-223028-52c9",
+   "name": "moeresf-39624db-s0q3",
+   "rc": 130,
+   "verdict": "FAIL (rc 130)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "39624db",
+   "binary": "s0q3.sh",
+   "started": null,
+   "ended": 1792990309.306889,
+   "attempts": null,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "6a7293485f142f3f4be47b4c90c6a4d83a3ae351c417ecfcdfd13401b88eb8a3",
+   "log_bytes": 185
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-26 00:51:49 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
