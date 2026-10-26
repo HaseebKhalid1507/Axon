@@ -125,6 +125,9 @@ pub struct Opts {
     /// A paged pool's KV pages (None: as many as fit; tests squeeze the
     /// pool with it).
     pub kv_pages: Option<usize>,
+    /// Paged KV on or off (None: AXON_PAGED_KV; tests force reserved slots
+    /// with Some(false)).
+    pub paged: Option<bool>,
     /// Generated tokens a paged admission reserves pages for (None: the
     /// engine's GROW_TOKENS; tests set 0 to force preemption).
     pub kv_grow: Option<usize>,
@@ -1050,7 +1053,7 @@ fn engine(
     });
     // The Q6_K prefill copy waits for the cache and slots (below).
     // AXON_PAGED_KV, read once for this server.
-    let paged_env = crate::cuda::qwen2::pages::paged_env();
+    let paged_env = o.paged.unwrap_or_else(crate::cuda::qwen2::pages::paged_env);
     let place = crate::lm::Placing {
         split_ctx,
         defer_q6k8: true,
@@ -1938,6 +1941,7 @@ struct EngineOpts {
     parallel_set: bool,
     slot_ctx: Option<usize>,
     kv_pages: Option<usize>,
+    paged: Option<bool>,
     kv_grow: Option<usize>,
     prefill_chunk: usize,
     step_ms: usize,
@@ -2046,6 +2050,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
         parallel_set: o.parallel_set,
         slot_ctx: o.slot_ctx,
         kv_pages: o.kv_pages,
+        paged: o.paged,
         kv_grow: o.kv_grow,
         prefill_chunk: o.prefill_chunk,
         step_ms: o.step_ms,
@@ -3115,6 +3120,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         parallel_set: false,
         slot_ctx: None,
         kv_pages: None,
+        paged: None,
         kv_grow: None,
         prefill_chunk: engine::PREFILL_CHUNK,
         step_ms: engine::STEP_MS,

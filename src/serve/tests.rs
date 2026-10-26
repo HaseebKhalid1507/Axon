@@ -51,6 +51,7 @@ fn test_opts(path: &str, device: Device) -> Opts {
         parallel_set: false,
         slot_ctx: None,
         kv_pages: None,
+        paged: None,
         kv_grow: None,
         prefill_chunk: super::engine::PREFILL_CHUNK,
         step_ms: super::engine::STEP_MS,
@@ -5817,4 +5818,35 @@ fn parallel_refusal_explicit_only() {
     let e = parallel_refusal(pages, &six, false, || None).expect("refused");
     assert!(e.starts_with("a paged KV pool"), "{e}");
     assert!(parallel_refusal(pages, &six, true, || unreachable!()).is_none());
+}
+
+/// #137 end to end: an explicit --parallel N whose reserved slots can't fit
+/// (256 slots of the 0.5B's whole 32768-token context: ~100 GB of KV, more
+/// than any card) doesn't start (the engine refuses: `start` errs); the
+/// same without --parallel starts, with as many slots as fit.
+#[test]
+fn serve_explicit_parallel_refused_when_short() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let opts = |set: bool| {
+        let mut o = test_opts(p.to_str().unwrap(), Device::Cuda);
+        o.ctx = Some(32768);
+        o.parallel = 256;
+        o.parallel_set = set;
+        o.paged = Some(false);
+        o
+    };
+    let e = start(opts(true))
+        .err()
+        .expect("an explicit --parallel 256 started");
+    assert!(e.to_string().contains("engine failed to start"), "{e}");
+    let s = start(opts(false)).expect("the automatic sizing starts");
+    let sl = call(s.addr, "GET", "/slots", "").json();
+    // As many as fit (fewer than asked; one at a time at worst).
+    let n = sl["slots"].as_array().map_or(0, |a| a.len());
+    assert!((1..256).contains(&n), "{sl}");
 }
