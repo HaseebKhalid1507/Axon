@@ -1,0 +1,28 @@
+[axon-run 04:03:58] submitted 1026-040358-2a4b by /home/haseeb/.cache/axon-wt-mla: /home/haseeb/.cache/axon-mla/axon-test-2b18a69 moe::ds2_tests:: cuda::qwen2::mla:: --test-threads 1
+[axon-run 04:08:46] scope axon-job-1026-040358-2a4b-1793002126.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 18035 MB): an OOM here kills only this job
+[axon-run 04:08:46] job 1026-040358-2a4b -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-040358-2a4b-1793002126 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-mla/axon-test-2b18a69 moe::ds2_tests:: cuda::qwen2::mla:: --test-threads 1
+axon-q 04:08:46 start slot 16-23: /home/haseeb/.cache/axon-mla/axon-test-2b18a69 moe::ds2_tests:: cuda::qwen2::mla:: --test-threads 1
+
+running 17 tests
+test cuda::qwen2::mla::tests::attn_blocks_cover_the_hpb_rule ... ok
+test cuda::qwen2::mla::tests::mla_attn_equals_main ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+test cuda::qwen2::mla::tests::mla_attn_matches_reference_and_batch ... ok
+test cuda::qwen2::mla::tests::mla_decode_kernel_bench ... ignored
+test cuda::qwen2::mla::tests::mla_heads_mv_equals_main ... ok
+test cuda::qwen2::mla::tests::mla_heads_mv_matches_dequant ... ok
+test cuda::qwen2::mla::tests::mla_kernels_compile_for_archs ... ok
+test cuda::qwen2::mla::tests::mla_router_matches_cpu_rule ... ok
+test moe::ds2_tests::ds2_fixture_graded_criterion_catches_bugs ... ok
+test moe::ds2_tests::ds2_gpu_fixture_bits ... ok
+test moe::ds2_tests::ds2_gpu_fixture_graded ... ok
+test moe::ds2_tests::ds2_gpu_moonlight_bits ... ok
+test moe::ds2_tests::ds2_resident_fallbacks_build_once ... ok
+test moe::ds2_tests::ds2_resident_fixture_bits ... ok
+test moe::ds2_tests::ds2_resident_moonlight_bits ... ok
+test moe::ds2_tests::ds2_resident_ram_refusal_releases_nothing ... ok
+test moe::ds2_tests::ds2_resident_untwinnable_layer_stays_on_cpu ... ok
+
+test result: ok. 16 passed; 0 failed; 1 ignored; 0 measured; 735 filtered out; finished in 46.27s
+
+[axon-run 04:09:33] exit 0 after 46.5s (host bella)

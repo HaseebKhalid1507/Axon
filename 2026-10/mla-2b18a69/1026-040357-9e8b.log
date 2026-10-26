@@ -1,0 +1,33 @@
+[axon-run 04:03:57] submitted 1026-040357-9e8b by /home/haseeb/.cache/axon-wt-mla: /home/haseeb/.cache/axon-mla/md5ml.sh /home/haseeb/.cache/axon-mla/axon-base-be13f1f /home/haseeb/.cache/axon-mla/axon-2b18a69 /home/haseeb/.cache/axon-mla/md5ml-2b18a69
+[axon-run 04:05:40] scope axon-job-1026-040357-9e8b-1793001940.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 14000 MB): an OOM here kills only this job
+[axon-run 04:05:40] job 1026-040357-9e8b -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-040357-9e8b-1793001940 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-mla/md5ml.sh /home/haseeb/.cache/axon-mla/axon-base-be13f1f /home/haseeb/.cache/axon-mla/axon-2b18a69 /home/haseeb/.cache/axon-mla/md5ml-2b18a69
+axon-q 04:05:40 start slot 16-23: /home/haseeb/.cache/axon-mla/md5ml.sh /home/haseeb/.cache/axon-mla/axon-base-be13f1f /home/haseeb/.cache/axon-mla/axon-2b18a69 /home/haseeb/.cache/axon-mla/md5ml-2b18a69
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 615.78.08
+base	p1	g0	d0086d267616	rc=0
+base	p1	gauto	d0086d267616	rc=0
+cand	p1	g0	d0086d267616	rc=0
+cand	p1	gauto	d0086d267616	rc=0
+base	p2	g0	cfec4b41a4da	rc=0
+base	p2	gauto	cfec4b41a4da	rc=0
+cand	p2	g0	cfec4b41a4da	rc=0
+cand	p2	gauto	cfec4b41a4da	rc=0
+base	p3	g0	28e68d4ee6e3	rc=0
+base	p3	gauto	28e68d4ee6e3	rc=0
+cand	p3	g0	28e68d4ee6e3	rc=0
+cand	p3	gauto	28e68d4ee6e3	rc=0
+base	p4	g0	545dd4eb4460	rc=0
+base	p4	gauto	545dd4eb4460	rc=0
+cand	p4	g0	545dd4eb4460	rc=0
+cand	p4	gauto	545dd4eb4460	rc=0
+base	long320	g0	247be5aa56c9	rc=0
+base	long320	gauto	247be5aa56c9	rc=0
+cand	long320	g0	247be5aa56c9	rc=0
+cand	long320	gauto	247be5aa56c9	rc=0
+base	draft7	g0	9e71fc1502f6	rc=0
+base	draft7	gauto	9e71fc1502f6	rc=0
+cand	draft7	g0	9e71fc1502f6	rc=0
+cand	draft7	gauto	9e71fc1502f6	rc=0
+moe:         attention + router on the GPU (0.92 GiB, ctx 70), 64 experts x 0 layers on the CPU (top-6); 26 of 26 expert layers resident on the GPU (8.87 GiB), kv f16
+12 of 12 base/cand pairs identical; 0 nonzero rc; cand 0 vs auto differ on: none
+MD5ML PASS
+[axon-run 04:08:41] exit 0 after 180.9s (host bella)
