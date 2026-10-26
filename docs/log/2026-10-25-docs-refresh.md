@@ -1,4 +1,4 @@
-# Docs brought up to main 39624db: roadmap, README flags, the #131 serve A/B  (docs only)
+# Docs brought up to main 39624db: roadmap, README flags, the #131 serve A/B, results, history  (docs only)
 
 - Date: 2026-10-25. Branch: docs/refresh-20261025. Base: main 39624db (#131). Status: open.
 - Pick / design: maintainer request after the 10-20 to 10-25 merges (#104 through #131). The last refresh was
@@ -46,6 +46,29 @@
   against other engines, and each serving section has one summary table and links to its log, so this follows that.
   The intro names the section.
 
+Second commit, at the foreman's request (the stale docs this refresh first only reported):
+- `docs/experiments-rejected.md`, the hybrid-step row: "(c)/(d) continue … via #126" now says that they landed in #131.
+  (d) is the default; (c) is opt-in after missing "short TTFT p50 ≤ 0.5× fifo" (0.56×, 0.79×), pending #139.
+- `docs/START-HERE.md`:
+  - the table is brought up to 39624db (Phases 17–20), with line counts at 39624db;
+  - a Library row (#117, #124);
+  - deepseek2 resident experts in Architectures (#127);
+  - the step budget, sjf opt-in and MoE one-at-a-time in Serving (#131);
+  - the "Not on main" line;
+  - **In flight as of 39624db**, every item open work: #125 (draft, rehearsed, pod waiting), #139, the Moonlight
+    bench of record and Qwen3-30B-A3B step 0 (item 3's next steps), the #135 / #137 hardening fixes, the rest of
+    #118, the ADR, batched speculation (gate v2 designed), FP8 stage B.
+- `docs/results.md`:
+  - main = 39624db;
+  - the box's caveat table gains rows for every merge since 764792f, each effect copied from its PR body, with the
+    `merged after` column `c15c90e` (the H100 board's commit) and the exception note adjusted;
+  - #127 in "New models and types", against Axon's own CPU-expert path, TAINTED, ratios only;
+  - known losses and gaps as of 39624db: resident Moonlight not run against llama.cpp; `serve` runs MoE one
+    request at a time; sjf missed its kill rule; #135, #137.
+- `docs/history.md`: **Phase 20** (764792f → 39624db, 18 merges, times from the merge commits in EDT) in Phase 19's
+  table style, plus the closed #119 / #126 and what is open at 39624db. The intro now runs to 39624db.
+  `docs/log/README.md` points to Phase 20.
+
 ## Sources
 - PR bodies and comments: `gh pr view N` for #103, #104, #105, #107, #111, #113, #117, #120, #122, #123, #124, #125
   (draft, with comments), #127 (with the lead's kill-rule comment, 6403248891), #128, #130, #131, #133, #134 and #136;
@@ -55,6 +78,10 @@
   gpt-oss-tools, inflight-gauge, lib-split, moe-resident-a}, 2026-10-24-{moe-resident-b, moe-resident-c,
   opaque-backend}, 2026-10-25-{reject-hybrid-step, testutil-moe-mapped, ram-cgroup, harmony-unheaded, testutil-map,
   sched-budget-main}.
+- For the second commit: `git log --first-parent` merge-commit times (EDT) for Phase 20; `gh pr view 119 / 126`
+  (closed 10-25 00:56 / 01:06 EDT); `gh pr list --state open` (only #125 and this PR); issues #121, #135, #137.
+  The in-flight tracks without a PR (Moonlight bench of record, Qwen3-30B-A3B step 0, #135 / #137 fixes) come from
+  the foreman and are listed as open work, with no claims about them.
 - Code at 39624db, for the flag claims: `src/cli.rs` (USAGE, flags, environment), `src/serve.rs` (`--prefill-ms`
   alias, `PAGED_PARALLEL`, `moe_parallel_refusal`), `src/serve/engine.rs` (`Sched::from_env`, `lanes_for`,
   `two_pass_budget`, `step_prompts`), `src/lm.rs` (`gpu_experts` only on the MoE CUDA path), `src/moe.rs`
@@ -72,7 +99,5 @@
 
 ## Found, not changed here
 - `axon --help` says `--parallel N` defaults to 8 (USAGE and the flag text), but with paged KV (the default) it is
-  16 (`PAGED_PARALLEL`, `serve.rs`). The README already says 16 / 8, so the help text is the stale one. Fixing it is
-  a code change, so it isn't in this PR.
-- `docs/experiments-rejected.md` (hybrid-step row) still says "(c) ... and (d) ... continue in two-pass mode via
-  #126", and `docs/START-HERE.md` still has "In flight as of 764792f". Neither file is in this refresh's scope.
+  16 (`PAGED_PARALLEL`, `serve.rs`). The README already says 16 / 8, so the help text is the stale one. It's a code
+  change, so the foreman has routed it to the #137 fix.

@@ -1,8 +1,8 @@
 # Engineering history
 
 A chronological log of what was built, why, how it was checked and what it measured, from the first
-commit to main `a591e17` (2026-10-16 16:22 EDT), plus the open PRs at that point. Phases 17 to 19 carry it on,
-more briefly, to main `764792f` (2026-10-19 22:05 EDT); their numbers come only from the PR bodies, and each
+commit to main `a591e17` (2026-10-16 16:22 EDT), plus the open PRs at that point. Phases 17 to 20 carry it on,
+more briefly, to main `39624db` (2026-10-25 21:19 EDT); their numbers come only from the PR bodies, and each
 PR's log entry in [log/](log/README.md) has the detail. Sources: the PR
 bodies (`gh pr view`), `git log`, the foreman's log (PROGRESS.md), the round specs, the builders'
 NOTES.md and the scoreboards. None of those except the PRs and git history are in the repo. The method
@@ -454,3 +454,37 @@ scheduler ≈ 25 %, quant ≈ 10 %, its OPINION) and ranked the next five, now t
 
 Development was paused from 10-19 03:13 (Haseeb): from then on only landings, merges of main, gate fixes and review
 fixes, and the measurement above.
+
+## Phase 20: the library, resident MoE experts, and the first scheduler fixes (2026-10-19 23:30 → 10-25 21:19, main 764792f → 39624db)
+
+Eighteen merges: seven on 10-19/20, none from 10-20 17:44 to 10-24 17:37, then eleven on 10-24/25. They cover the
+roadmap's proposed order: item 5 (the library) except the tag, item 3 (one MoE resident) for deepseek2, and item 1
+(c)(d) (the scheduler), after (b) was rejected. Numbers are copied from each PR body, MEASURED there unless marked.
+
+| PR | merged | what | why | numbers (from the PR body) |
+|---|---|---|---|---|
+| #103 | 10-19 23:30 | docs: refresh to 764792f, the H100 serving showdown, the two 10-19 outside reviews (curated), the roadmap's proposed order | the 10-19 train and the first datacenter board | docs only |
+| #104 | 10-20 01:09 | one GPU router kernel (`moe_router`) for qwen3moe, gpt-oss and deepseek2; `MoeKind`; the CPU `Router` enum | #99, the debt from #79's review | bits unchanged on all three families (kernel bit-compare vs main's three kernels, md5 vs 764792f); avante 4x0.6B tg 100.45 → 100.21 (−0.2 %, noise) |
+| #105 | 10-20 02:18 | the graded logit tests build their CPU reference repacked; a zero reference spread fails by name | found in #104's gates: under `AXON_REPACK=0` the reference and its spread model were the same, so the bound could never pass | test only; default env unchanged |
+| #107 | 10-20 05:38 | Gemma 3 test: the in-place window "mismatch" is a reference near-tie; both CPU builds, a margin-aware top-token check, neighbour windows checked | #106 | the failing position's reference margin is 0.348 logits, under the test's own 1.0 bound; test only |
+| #113 | 10-20 08:07 | a request leaves `axon_requests_in_flight` and its slot before its last byte | #112, the `serve_metrics_slots_max_prompt` flake | bytes on the wire unchanged; md5 0 of 20 |
+| #111 | 10-20 10:30 | tool calling for gpt-oss (harmony) on chat completions, Responses and ollama; calls only from special tokens | #108; agent harnesses on gpt-oss | requests without tools and every Qwen / Llama tool request byte-identical (md5 56/56, serve A/B); `required` with several tools is a 400 (#116) |
+| #117 | 10-20 14:03 | Axon as a library (`src/lib.rs`, `examples/embed.rs`) plus a thin binary; the README's "Where it stands" board and "Why not vLLM?"; `CHANGELOG.md`, draft release notes. **Not tagged** | roadmap item 5, the adoption floor | avante, 7 + 15 rounds: speed-neutral (0.5B cuda 0.9999–1.0004× main in both runs); md5 0 of 40; serve A/B 23/23 on 6 models. The round-3 md5 gate caught a real bug (`AXON_KV=f32` ignored by the example) |
+| #120 | 10-20 17:44 | MoE-resident PR A: twin numerics primitives (GPU kernels equal to the CPU's r8 / r8q expert numerics); launched only by tests | roadmap item 3 (spec `r16-pick4-moe-resident.md` §6) | no behaviour change; existing kernels' SASS identical |
+| #123 | 10-24 17:37 | docs: #90's post-mortem corrected (its gate already modelled depth), the spec-gate v2 + stage 2 design; the 10-24 research notes for items 1 (c)(d) and 2 | the wrong lesson was steering Scale item 10 | docs only; causes ESTIMATED from #90's logs |
+| #124 | 10-25 00:45 | opaque `Backend` / `BackendCache`, sealed `Lm`, `#[non_exhaustive]` `Device` / `KvType` / `GenStats`, `BackendOptions`; bad `AXON_SIMD` / `AXON_DECODE_ROWS` / `AXON_PREFETCH` are errors, not panics | #118 items A + B, the v0.1 blockers | 85 md5 pairs identical; serve A/B 138/138; no speed claim |
+| #130 | 10-25 01:09 | docs: the hybrid step (roadmap 1 (b), #119) rejected | both kill rules missed | clean RTX 4090 pod, mix C = 64: aggregate +0.65 % (needed ≥ +15 %), ITL p99 −46 %, TTFT p50 3.6× worse ([rejected](experiments-rejected.md#serving-scheduler)) |
+| #128 | 10-25 01:27 | MoE test models load mapped, as `axon` runs them | #127's false RAM refusal on bella (a copied 10.5 GB file left too little `MemAvailable`) | test only |
+| #122 | 10-25 02:46 | MoE-resident PR B: one MoE layer's experts on the GPU (sort, gather, grouped twin GEMMs, combine), bit-equal to the CPU; test only | roadmap item 3; #121 items 1–4 | Moonlight, one layer at nb 510: 2.283 / 2.126 ms vs the CPU's 22.31 / 22.91 (9.8× / 10.8×; gate ≤ 5 ms PASS; CLEAN) |
+| #133 | 10-25 06:39 | RAM available honours cgroup v1/v2 memory limits; the MoE refusal names what bound it | #129: containers OOM-killed instead of refused | bella, Pruned-2B under `MemoryMax=1000M`: OOM-kill (rc 137) → clean refusal (rc 2); at 4500M it runs; md5 12/12 + 12/12. Dense CPU loads still unguarded (#135) |
+| #136 | 10-25 13:42 | gpt-oss with tools: a reply with no channel header streams as the answer; a role-section recipient counts only right after the role | #114 | serve A/B 23/23 identical on every model; `gen` md5 identical |
+| #134 | 10-25 17:39 | test loaders map as the product does; a test-only `strict_release` guard keeps the read-after-release check on mappings | #132 | test only; md5 identical; peak PSS of the debug fast tier 11,461 → 9,765 MB (indicative: co-tenants differed) |
+| #127 | 10-25 20:19 | MoE-resident PR C: `--gpu-experts N\|auto\|0` (default 0), deepseek2's routed experts resident on the GPU, ctx first, smallest layers first; refusals fall back to the CPU with the reason | roadmap item 3 | Moonlight on bella, `auto` (25 of 26 layers) vs 0: tg ×2.06 (kill rule ≥ 1.5×: PASS), pp ×3.40, text identical; **TAINTED** (foreign GPU max 31 %), accepted with the label kept. md5 all identical (N doesn't change a bit) |
+| #131 | 10-25 21:19 | `serve`: a measured step budget (`--step-ms 60`, the default; `--prefill-ms` an alias) and shortest-first admission (`--admit-order sjf`, opt-in), two-pass | roadmap item 1 (c)(d); supersedes #126 | clean bella cells: (d) passes at 60 (default vs main ITL p99 −3.8 / −0.3 / 0 %, aggregate +0.8 / −0.4 / −1.6 %); (c) **missed** "short TTFT p50 ≤ 0.5× fifo" (0.37× / **0.56×** / **0.79×**), so sjf is opt-in; avante slo_ok 0.64 → 0.94 with sjf. `gen` md5 0 of 20. The H100 cells are #139 |
+
+**Closed, not merged:** #119 the hybrid step (10-25 00:56), by its kill rules (#130 above); #126 (10-25 01:06), (c)(d)
+stacked on #119, superseded by #131.
+
+**Open at 39624db:** #125, the H100 step-anatomy kit (draft; rehearsed on bella, waiting for pod approval), and the
+open issues: #139 (the sjf default on the H100 cells), #135 and #137 (hardening), #118 (the rest of the library API),
+#121 (the MoE-resident md5 aside).
