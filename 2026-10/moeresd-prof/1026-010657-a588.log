@@ -1,0 +1,17 @@
+[axon-run 01:06:57] submitted 1026-010657-a588 by /home/haseeb/.cache/axon-wt-moeres-mainbase: /home/haseeb/.cache/axon-moeres/prof/smoke.sh
+[axon-run 01:52:11] scope axon-job-1026-010657-a588-1792993931.scope in app-axonjobs.slice: MemoryMax 20783 MB, MemoryHigh 18704 MB, no swap, oomd pressure kill 80% (claim 13173 MB): an OOM here kills only this job
+[axon-run 01:52:11] job 1026-010657-a588 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-010657-a588-1792993931 --slice=app-axonjobs.slice -p MemoryMax=20783M -p MemoryHigh=18704M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-moeres/prof/smoke.sh
+axon-q 01:52:11 start slot 16-23: /home/haseeb/.cache/axon-moeres/prof/smoke.sh
+rc 0
+rc 0
+     0 /home/haseeb/.cache/axon-moeres/prof/smoke/tr.txt
+  3002 /home/haseeb/.cache/axon-moeres/prof/smoke/trl.txt
+  3002 total
+    583 _Z13quantize_q8_1PKfPvlllllj5uint3
+    429 _Z13mul_mat_vec_qIL9ggml_type6ELi1ELb1ELb1ELb0EEvPKvS2_PKi31ggml_cuda_mm_fusion_args_devicePfj5uint3jjjS7_jjjS7_jjjj
+    335 memcpy1
+    245 _Z12rms_norm_f32ILi256ELb1ELb0ELb0EEvPKfPfiiilllfS1_lll5uint3S3_S3_S3_S1_lllS3_S3_S3_S3_f
+    154 _Z17quantize_mmq_q8_1IL18mmq_q8_1_ds_layout0ELb0EEvPKfPKiPvllllliii
+SMOKE DONE
+[axon-run 01:52:13] exit 0 after 1.9s (host bella)
+[axon-run 01:52:19] EXPECT ok: output matches /SMOKE DONE/

@@ -1,0 +1,114 @@
+[axon-run 01:14:28] submitted 1026-011428-edef by /home/haseeb/.cache/axon-wt-moeres-mainbase: /home/haseeb/.cache/axon-moeres/prof/prof.sh /home/haseeb/.cache/axon-moeres/axon-main-39624db
+[axon-run 02:25:43] scope axon-job-1026-011428-edef-1792995943.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 21858 MB): an OOM here kills only this job
+[axon-run 02:25:43] job 1026-011428-edef -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-011428-edef-1792995943 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-moeres/prof/prof.sh /home/haseeb/.cache/axon-moeres/axon-main-39624db
+PROF out /home/haseeb/.cache/axon-moeres/prof/run-1026-022543
+A	r1-0-tg128	axon	N=0	tg128	53.41
+A	r1-0-pp512	axon	N=0	pp512	700.11
+A	r1-0-pp2100	axon	N=0	pp2100	600.85
+[axon-run 02:26:17] FOREIGN_GPU sample max=24% mean=4.0% n=6
+A	r1-0-t8	llama-t8	N=0	pp512	811.97
+A	r1-0-t8	llama-t8	N=0	pp2100	663.46
+A	r1-0-t8	llama-t8	N=0	tg128	35.35
+A	r1-0-t24	llama-t24	N=0	pp512	704.10
+A	r1-0-t24	llama-t24	N=0	pp2100	647.02
+A	r1-0-t24	llama-t24	N=0	tg128	9.52
+[axon-run 02:26:51] FOREIGN_GPU sample max=53% mean=8.8% n=6
+A	r1-6-tg128	axon	N=6	tg128	66.36
+A	r1-6-pp512	axon	N=6	pp512	838.01
+A	r1-6-pp2100	axon	N=6	pp2100	706.62
+[axon-run 02:27:25] FOREIGN_GPU sample max=0% mean=0.0% n=6
+A	r1-6-t8	llama-t8	N=6	pp512	947.68
+A	r1-6-t8	llama-t8	N=6	pp2100	902.83
+A	r1-6-t8	llama-t8	N=6	tg128	46.62
+A	r1-6-t24	llama-t24	N=6	pp512	914.08
+A	r1-6-t24	llama-t24	N=6	pp2100	876.80
+A	r1-6-t24	llama-t24	N=6	tg128	11.24
+A	r1-12-tg128	axon	N=12	tg128	78.25
+[axon-run 02:27:59] FOREIGN_GPU sample max=39% mean=6.5% n=6
+A	r1-12-pp512	axon	N=12	pp512	982.31
+A	r1-12-pp2100	axon	N=12	pp2100	846.91
+A	r1-12-t8	llama-t8	N=12	pp512	1323.96
+A	r1-12-t8	llama-t8	N=12	pp2100	1179.35
+A	r1-12-t8	llama-t8	N=12	tg128	52.47
+[axon-run 02:28:33] FOREIGN_GPU sample max=0% mean=0.0% n=6
+A	r1-12-t24	llama-t24	N=12	pp512	1350.26
+A	r1-12-t24	llama-t24	N=12	pp2100	1201.58
+A	r1-12-t24	llama-t24	N=12	tg128	16.13
+A	r2-0-t24	llama-t24	N=0	pp512	795.60
+A	r2-0-t24	llama-t24	N=0	pp2100	699.13
+A	r2-0-t24	llama-t24	N=0	tg128	8.84
+[axon-run 02:29:06] FOREIGN_GPU sample max=0% mean=0.0% n=6
+A	r2-0-t8	llama-t8	N=0	pp512	719.10
+A	r2-0-t8	llama-t8	N=0	pp2100	645.55
+A	r2-0-t8	llama-t8	N=0	tg128	33.62
+A	r2-0-tg128	axon	N=0	tg128	56.60
+A	r2-0-pp512	axon	N=0	pp512	705.46
+[axon-run 02:29:40] FOREIGN_GPU sample max=1% mean=0.2% n=6
+A	r2-0-pp2100	axon	N=0	pp2100	612.88
+[axon-run 02:30:14] FOREIGN_GPU sample max=14% mean=2.3% n=6 (Xorg 1601 14%)
+A	r2-6-t24	llama-t24	N=6	pp512	1046.07
+A	r2-6-t24	llama-t24	N=6	pp2100	924.13
+A	r2-6-t24	llama-t24	N=6	tg128	11.36
+A	r2-6-t8	llama-t8	N=6	pp512	1064.52
+A	r2-6-t8	llama-t8	N=6	pp2100	930.23
+A	r2-6-t8	llama-t8	N=6	tg128	38.42
+[axon-run 02:30:47] FOREIGN_GPU sample max=0% mean=0.0% n=6
+A	r2-6-tg128	axon	N=6	tg128	68.03
+A	r2-6-pp512	axon	N=6	pp512	836.82
+A	r2-6-pp2100	axon	N=6	pp2100	696.17
+[axon-run 02:31:21] FOREIGN_GPU sample max=20% mean=4.0% n=6
+A	r2-12-t24	llama-t24	N=12	pp512	1244.31
+A	r2-12-t24	llama-t24	N=12	pp2100	1200.37
+A	r2-12-t24	llama-t24	N=12	tg128	16.01
+A	r2-12-t8	llama-t8	N=12	pp512	1337.10
+A	r2-12-t8	llama-t8	N=12	pp2100	1230.75
+A	r2-12-t8	llama-t8	N=12	tg128	55.75
+A	r2-12-tg128	axon	N=12	tg128	76.43
+A	r2-12-pp512	axon	N=12	pp512	1047.65
+A	r2-12-pp2100	axon	N=12	pp2100	852.49
+[axon-run 02:31:54] FOREIGN_GPU sample max=6% mean=1.2% n=6
+A	r3-0-tg128	axon	N=0	tg128	62.49
+A	r3-0-pp512	axon	N=0	pp512	641.52
+A	r3-0-pp2100	axon	N=0	pp2100	611.24
+[axon-run 02:32:28] FOREIGN_GPU sample max=3% mean=0.5% n=6
+A	r3-0-t8	llama-t8	N=0	pp512	841.65
+A	r3-0-t8	llama-t8	N=0	pp2100	745.95
+A	r3-0-t8	llama-t8	N=0	tg128	35.00
+[axon-run 02:33:02] FOREIGN_GPU sample max=0% mean=0.0% n=6
+A	r3-0-t24	llama-t24	N=0	pp512	703.23
+A	r3-0-t24	llama-t24	N=0	pp2100	681.12
+A	r3-0-t24	llama-t24	N=0	tg128	9.22
+A	r3-6-tg128	axon	N=6	tg128	68.92
+[axon-run 02:33:35] FOREIGN_GPU sample max=0% mean=0.0% n=6
+A	r3-6-pp512	axon	N=6	pp512	815.23
+A	r3-6-pp2100	axon	N=6	pp2100	705.34
+A	r3-6-t8	llama-t8	N=6	pp512	1045.24
+A	r3-6-t8	llama-t8	N=6	pp2100	935.14
+A	r3-6-t8	llama-t8	N=6	tg128	46.48
+[axon-run 02:34:09] FOREIGN_GPU sample max=14% mean=2.3% n=6
+A	r3-6-t24	llama-t24	N=6	pp512	1007.69
+A	r3-6-t24	llama-t24	N=6	pp2100	927.04
+A	r3-6-t24	llama-t24	N=6	tg128	11.97
+A	r3-12-tg128	axon	N=12	tg128	74.04
+A	r3-12-pp512	axon	N=12	pp512	1044.06
+A	r3-12-pp2100	axon	N=12	pp2100	849.08
+[axon-run 02:34:42] FOREIGN_GPU sample max=24% mean=4.3% n=6
+A	r3-12-t8	llama-t8	N=12	pp512	1304.24
+A	r3-12-t8	llama-t8	N=12	pp2100	1078.51
+A	r3-12-t8	llama-t8	N=12	tg128	51.71
+A	r3-12-t24	llama-t24	N=12	pp512	1079.29
+A	r3-12-t24	llama-t24	N=12	pp2100	1062.60
+A	r3-12-t24	llama-t24	N=12	tg128	17.51
+PROF axon auto resident 25; pp512 2273.43 tok/s under trace
+PROF axon tg 120.64 tok/s under trace (decode:      129 tok)
+[axon-run 02:35:16] FOREIGN_GPU sample max=37% mean=18.7% n=6 (Xorg 1601 24%)
+PROF llama traced: "avg_ts": 2773.858048 "avg_ts": 151.777197 
+       0 /home/haseeb/.cache/axon-moeres/prof/run-1026-022543/tr-ax-pp512.txt
+   68011 /home/haseeb/.cache/axon-moeres/prof/run-1026-022543/tr-ax-tg.txt
+    1741 /home/haseeb/.cache/axon-moeres/prof/run-1026-022543/tr-lb-pp512.txt
+  124973 /home/haseeb/.cache/axon-moeres/prof/run-1026-022543/tr-lb-tg.txt
+  194725 total
+PROF DONE
+[axon-run 02:35:19] exit 0 after 575.2s (host bella)
+[axon-run 02:35:21] EXPECT ok: output matches /PROF DONE/
+[axon-run 02:35:21] FOREIGN_GPU max=53% mean=3.1% samples=102 top: Xorg 1601 53%  TAINTED (mean > 5% or max > 25%): timing numbers not trustworthy, rerun
