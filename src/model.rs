@@ -93,6 +93,17 @@ impl<'a> Weight<'a> {
         w
     }
 
+    /// A matrix the CPU never runs (a routed expert resident on the GPU):
+    /// no bytes, no repack; never reads `t`'s data, which may be released.
+    /// Any use panics (`bytes`: no raw bytes; no `r8`).
+    fn absent(t: &'a Tensor) -> Weight<'a> {
+        Weight {
+            t,
+            data: None,
+            r8: None,
+        }
+    }
+
     /// `load` of the matrix whose bytes are `data` (all of `t`, or one
     /// expert's slice of a 3-D `t`: a dims[1] x dims[0] matrix either way),
     /// releasing nothing.
@@ -142,7 +153,13 @@ impl<'a> Weight<'a> {
 
     /// The tensor's bytes (not repacked).
     fn bytes(&self) -> &'a [u8] {
-        self.data.expect("repacked weight has no raw bytes")
+        self.data.unwrap_or_else(|| match self.r8 {
+            Some(_) => panic!("{}: repacked weight has no raw bytes", self.t.name),
+            None => panic!(
+                "{}: not built on the CPU (an expert resident on the GPU: Weight::absent)",
+                self.t.name
+            ),
+        })
     }
 
     /// Rows r0..r0 + k of a repacked matrix as whole r8 groups, plus the
@@ -449,9 +466,12 @@ mod moe;
 pub(crate) use deepseek2::info_lines as deepseek2_info;
 pub(crate) use deepseek2::{GpuCfg as Ds2GpuCfg, gpu_cfg as deepseek2_gpu_cfg};
 
+/// The routed experts' tensor names (per layer).
+pub(crate) const MOE_EXPS: [&str; 3] = moe::EXPS;
+
 pub(crate) use moe::{
     MoeDims, MoeInfo, Route as MoeRoute, check_ram as moe_check_ram,
-    gpu_refusal as moe_gpu_refusal, is_moe, moe_dims,
+    check_ram_keep as moe_check_ram_keep, gpu_refusal as moe_gpu_refusal, is_moe, moe_dims,
 };
 
 /// Gemma 3's layer layout: local (sliding-window) layers attend to the last
@@ -1096,8 +1116,24 @@ impl<'a> Qwen2<'a> {
         Self::build(m, repack, false, usize::MAX, true)
     }
 
+    /// `new_experts` of a deepseek2 model, every layer's experts repacked but
+    /// those of `skip` (resident on the GPU): those aren't built at all
+    /// (`Weight::absent`), so their bytes are never read and may be released
+    /// (`crate::moe` releases them after the upload).
+    pub(crate) fn new_experts_except(m: &'a Model, skip: &[usize]) -> Qwen2<'a> {
+        if skip.is_empty() {
+            return Self::new_experts(m);
+        }
+        assert_eq!(m.arch, "deepseek2", "new_experts_except: deepseek2 only");
+        let repack = std::env::var("AXON_REPACK").map_or(true, |v| v != "0");
+        let n = crate::model::meta_num(m, "deepseek2.block_count").unwrap_or(0.0) as usize;
+        let keep: Vec<usize> = (0..n).filter(|l| !skip.contains(l)).collect();
+        deepseek2::build_only(m, repack, true, Some(&keep))
+    }
+
     /// `new_experts` of a deepseek2 model with only layers `layers`' experts
-    /// repacked (tests: a few layers' CPU experts without the whole arena).
+    /// built (tests: a few layers' CPU experts without the whole arena; the
+    /// other layers' are absent).
     #[cfg(test)]
     pub(crate) fn new_experts_of(m: &'a Model, layers: &[usize]) -> Qwen2<'a> {
         assert_eq!(m.arch, "deepseek2", "new_experts_of: deepseek2 only");

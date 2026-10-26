@@ -30,10 +30,20 @@
 //! Against the CPU model (absorbed too, f32) it is graded (tests).
 
 use super::batch::{BatchIn, act_stride, passes};
+use super::experts::{CudaExperts, ResBufs, Resident};
 use super::moe::{GATE_SIGMOID, GATE_SOFTMAX, MOE_LG_WARPS, launch_router};
 use super::*;
 use crate::cuda::SyncEvent;
 use crate::model::{Ds2GpuCfg, MoeDims};
+
+/// The resident experts and the cache's scratch for them, if any.
+pub(crate) type Res<'a, 'g> = Option<(&'a Resident<'g>, &'a ResBufs<'g>)>;
+
+/// Layer l's resident experts and the scratch, if l is resident.
+fn resident<'a, 'g>(res: Res<'a, 'g>, l: usize) -> Option<(&'a CudaExperts<'g>, &'a ResBufs<'g>)> {
+    let (r, rb) = res?;
+    Some((r.get(l)?, rb))
+}
 
 /// mla.cu MLA_TILE (rows per attention tile) and MLA_MV_T (tokens per
 /// warp of mla_heads_mv).
@@ -888,9 +898,39 @@ impl<'g> CudaQwen2<'g> {
         mb.host_y.copy_to(&mb.y, 0, nb * dim * 4)
     }
 
+    /// Enqueue a resident layer's routed experts over nb tokens: the
+    /// router's normed states, ids and weights in mb.r (as the round trip
+    /// copies down) to mb.y (as it copies up), on the GPU.
+    ///
+    /// # Safety
+    /// mb.r holds the layer's router output for nb <= mb.max tokens, rb is
+    /// the cache's scratch for at least nb.
+    unsafe fn mla_resident(
+        &self,
+        mb: &MlaBufs,
+        ex: &CudaExperts<'g>,
+        rb: &ResBufs<'g>,
+        nb: usize,
+    ) -> Result<(), String> {
+        let k = self.moe_dims().k;
+        let hb = nb * self.dim * 4;
+        // SAFETY: the caller's.
+        unsafe {
+            ex.enqueue(
+                rb,
+                mb.r.arg(),
+                mb.r.arg_at(hb),
+                mb.r.arg_at(hb + nb * k * 4),
+                nb,
+                mb.y.arg(),
+            )
+        }
+    }
+
     /// One decode step of `token` at `pos` (the logits and argmax into the
     /// cache), the routed experts by `experts`. Waits for every MoE
     /// layer's router; the head is enqueued, not waited for.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn mla_step(
         &self,
         mf: &MlaFns,
@@ -899,6 +939,7 @@ impl<'g> CudaQwen2<'g> {
         token: u32,
         pos: usize,
         experts: &mut super::moe::Experts,
+        res: Res<'_, 'g>,
     ) -> Result<(), String> {
         assert_eq!(c.net, self.id, "a CudaCache used with another CudaQwen2");
         assert!(
@@ -957,9 +998,17 @@ impl<'g> CudaQwen2<'g> {
             }
             if seg < n && self.mla_is_moe(seg) {
                 let gi = n + 1 + seg;
+                let on_gpu = resident(res, self.first + seg);
                 let mut shared = |mb: &mut MlaBufs<'g>| -> Result<(), String> {
-                    // SAFETY: as `run`'s.
-                    let run = |mb: &MlaBufs| unsafe { self.mla_shared(mf, mb, seg, c.x.arg(), 1) };
+                    // SAFETY: as `run`'s; a resident layer's experts read
+                    // the router's output in mb.r and write mb.y, which
+                    // the next segment adds (as the CPU's y).
+                    let run = |mb: &MlaBufs| unsafe {
+                        if let Some((ex, rb)) = on_gpu {
+                            self.mla_resident(mb, ex, rb, 1)?;
+                        }
+                        self.mla_shared(mf, mb, seg, c.x.arg(), 1)
+                    };
                     if !self.graphs {
                         return run(mb);
                     }
@@ -970,7 +1019,10 @@ impl<'g> CudaQwen2<'g> {
                     // SAFETY: as the segment's graph.
                     unsafe { mb.graphs[gi].as_ref().unwrap().launch() }
                 };
-                self.mla_round_trip(mb, seg, 1, &mut shared, experts)?;
+                match on_gpu {
+                    Some(_) => shared(mb)?,
+                    None => self.mla_round_trip(mb, seg, 1, &mut shared, experts)?,
+                }
             }
         }
         if let Some(p) = &mut mb.prof {
@@ -1004,6 +1056,7 @@ impl<'g> CudaQwen2<'g> {
         start: usize,
         head: Head,
         experts: &mut super::moe::Experts,
+        res: Res<'_, 'g>,
     ) -> Result<(Vec<u32>, Vec<f32>), String> {
         assert!(
             matches!(head, Head::No | Head::Argmax | Head::Last),
@@ -1072,7 +1125,14 @@ impl<'g> CudaQwen2<'g> {
                     // SAFETY: as above.
                     let mut shared =
                         |mb: &mut MlaBufs<'g>| unsafe { self.mla_shared(mf, mb, li, x, nb) };
-                    self.mla_round_trip(mb, li, nb, &mut shared, experts)?;
+                    match resident(res, self.first + li) {
+                        // SAFETY: as above (mb.r holds the pass's router output).
+                        Some((ex, rb)) => unsafe {
+                            self.mla_resident(mb, ex, rb, nb)?;
+                            shared(mb)?;
+                        },
+                        None => self.mla_round_trip(mb, li, nb, &mut shared, experts)?,
+                    }
                     // SAFETY: as above.
                     unsafe { self.mla_add(mf, mb, b.x.arg(), nb)? };
                 }

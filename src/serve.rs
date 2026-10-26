@@ -1031,6 +1031,12 @@ fn engine(
         (true, true) => split_ctx,
         (true, false) => want.min(AGENT_CTX),
     };
+    // Before the model is placed (resident experts upload GBs first).
+    if let Some(why) =
+        moe_parallel_refusal(crate::model::is_moe(&model), o.parallel, o.parallel_set)
+    {
+        crate::fail(&why);
+    }
     let tok: &'static Tokenizer = Box::leak(Box::new(Tokenizer::from_gguf(&model)));
     let dm = o.draft_model.as_ref().filter(|_| o.max_draft > 0).map(|p| {
         crate::draft::DraftModel::open(p, crate::copy_for(device), &model, tok)
@@ -1043,6 +1049,7 @@ fn engine(
         split_ctx,
         defer_q6k8: true,
         paged: paged_serve(device, o.parallel, paged_env),
+        gpu_experts: None,
     };
     let (mut net, drafter) = crate::backend_and_drafter(
         &model,
@@ -1433,6 +1440,20 @@ const PAGED_PARALLEL: usize = 16;
 
 /// Positions per KV page (cuda qwen2 pages.rs).
 const PAGE_TOKENS: usize = 64;
+
+/// A mixture-of-experts model serves one request at a time (no slot pool:
+/// its backend isn't `Inner::Cuda`), so its placement, `--gpu-experts auto`
+/// included, budgets one cache. An explicit --parallel N > 1 is refused
+/// before the placement rather than after it (#127 review); the default
+/// --parallel quietly serves one.
+fn moe_parallel_refusal(moe: bool, parallel: usize, parallel_set: bool) -> Option<String> {
+    (moe && parallel > 1 && parallel_set).then(|| {
+        format!(
+            "--parallel {parallel}: a mixture-of-experts model serves one request at a time \
+             (its experts' placement, --gpu-experts included, is for one cache): --parallel 1"
+        )
+    })
+}
 
 /// Whether serve's pool is paged: the GPU, batching, AXON_PAGED_KV != 0
 /// (`paged_env`, read once at serve's start).
