@@ -40,7 +40,7 @@ pub(crate) struct MoeQwen3<'m, 'g> {
     /// asked).
     pub(crate) ctx: usize,
     /// The MoE layers whose experts are resident on the GPU
-    /// (`--gpu-experts`; deepseek2 only for now), and why there are none if
+    /// (`--gpu-experts`; deepseek2 and qwen3moe), and why there are none if
     /// some were asked for.
     res: Option<Resident<'g>>,
     res_note: Option<String>,
@@ -55,9 +55,9 @@ pub(crate) struct MoeCache<'g> {
 }
 
 /// A cache's scratch, by `MoeKind`: deepseek2's MLA layers have their own.
+/// Either kind carries the resident experts' scratch if any are.
 enum Scratch<'g> {
-    Moe(MoeBufs<'g>),
-    /// With the resident experts' scratch if any are.
+    Moe(MoeBufs<'g>, Option<ResBufs<'g>>),
     Mla(Box<MlaBufs<'g>>, Option<ResBufs<'g>>),
 }
 
@@ -73,7 +73,7 @@ impl<'g> MoeCache<'g> {
     /// The GPU cache and the qwen3moe-style scratch.
     pub(crate) fn moe_parts(&mut self) -> (&mut CudaCache<'g>, &mut MoeBufs<'g>) {
         match &mut self.s {
-            Scratch::Moe(mb) => (&mut self.c, mb),
+            Scratch::Moe(mb, _) => (&mut self.c, mb),
             Scratch::Mla(..) => panic!("an MLA cache"),
         }
     }
@@ -223,9 +223,9 @@ fn place_resident<'g>(
     env: TwinEnv,
 ) -> Result<Resident<'g>, String> {
     {
-        if !matches!(kind, MoeKind::Mla(_)) {
+        if matches!(kind, MoeKind::Oai(_)) {
             return Err(format!(
-                "resident experts: deepseek2 only for now ({})",
+                "resident experts: deepseek2 and qwen3moe only for now ({})",
                 m.arch
             ));
         }
@@ -246,12 +246,21 @@ fn place_resident<'g>(
         let d = net.moe.expect("a mixture-of-experts model");
         let dim = net.dim;
         // ctx first: the free memory with one cache of the planned context
-        // (the GPU cache and the MLA scratch, as `new_cache` makes).
+        // (the GPU cache and the kind's scratch, as `new_cache` makes).
         let free = {
             let probe = Lm::new_cache(net, net.ctx);
             let max = CudaQwen2::batch_max(&probe);
-            let _mb = net.mla_bufs(max, net.ctx)?;
-            let f = gpu.info()?.free_bytes as usize;
+            // The scratch is held while free memory is read.
+            let f = match kind {
+                MoeKind::Mla(_) => {
+                    let _mb = net.mla_bufs(max, net.ctx)?;
+                    gpu.info()?.free_bytes
+                }
+                _ => {
+                    let _mb = net.moe_bufs(max)?;
+                    gpu.info()?.free_bytes
+                }
+            } as usize;
             f.saturating_sub(ResBufs::bytes(max, dim, d.ffn, d.k))
         };
         let budget = free.saturating_sub(RESIDENT_HEADROOM);
@@ -364,11 +373,13 @@ impl<'g> MoeQwen3<'_, 'g> {
                 let res = self.res.as_ref().zip(rb.as_ref());
                 g.mla_tokens(xf, &mut c.c, xb, ts, start, head, &mut ex, res)
             }
-            (k, Scratch::Moe(mb), Pass::Step(t, pos)) => {
-                none(g.moe_step(k, &mut c.c, mb, t, pos, Head::Argmax, &mut ex))
+            (k, Scratch::Moe(mb, rb), Pass::Step(t, pos)) => {
+                let res = self.res.as_ref().zip(rb.as_ref());
+                none(g.moe_step(k, &mut c.c, mb, t, pos, Head::Argmax, &mut ex, res))
             }
-            (k, Scratch::Moe(mb), Pass::Tokens(ts, start, head)) => {
-                g.moe_tokens(k, &mut c.c, mb, ts, start, head, &mut ex)
+            (k, Scratch::Moe(mb, rb), Pass::Tokens(ts, start, head)) => {
+                let res = self.res.as_ref().zip(rb.as_ref());
+                g.moe_tokens(k, &mut c.c, mb, ts, start, head, &mut ex, res)
             }
             _ => unreachable!("a cache of another kind"),
         }
@@ -443,15 +454,19 @@ impl<'g> Lm for MoeQwen3<'_, 'g> {
     fn new_cache(&self, max_ctx: usize) -> MoeCache<'g> {
         let c = Lm::new_cache(&self.gpu, max_ctx);
         let max = CudaQwen2::batch_max(&c);
+        let rb = || match self.res.as_ref().and_then(|r| r.dims()) {
+            Some((dim, ffn, k)) => ResBufs::new(self.dev, max, dim, ffn, k).map(Some),
+            None => Ok(None),
+        };
         let s = match self.kind {
-            MoeKind::Mla(_) => self.gpu.mla_bufs(max, max_ctx).and_then(|b| {
-                let rb = match self.res.as_ref().and_then(|r| r.dims()) {
-                    Some((dim, ffn, k)) => Some(ResBufs::new(self.dev, max, dim, ffn, k)?),
-                    None => None,
-                };
-                Ok(Scratch::Mla(Box::new(b), rb))
-            }),
-            _ => self.gpu.moe_bufs(max).map(Scratch::Moe),
+            MoeKind::Mla(_) => self
+                .gpu
+                .mla_bufs(max, max_ctx)
+                .and_then(|b| Ok(Scratch::Mla(Box::new(b), rb()?))),
+            _ => self
+                .gpu
+                .moe_bufs(max)
+                .and_then(|b| Ok(Scratch::Moe(b, rb()?))),
         }
         .unwrap_or_else(|e| Self::die(e));
         MoeCache { s, c }
@@ -492,6 +507,8 @@ impl<'g> Lm for MoeQwen3<'_, 'g> {
 
 #[cfg(test)]
 mod ds2_tests;
+#[cfg(test)]
+mod q3res_tests;
 #[cfg(test)]
 pub(crate) mod tests;
 

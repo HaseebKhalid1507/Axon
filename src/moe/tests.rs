@@ -332,7 +332,8 @@ fn moe_gpu_step_refuses_head_no() {
         |l: usize, h: &[f32], i: &[i32], w: &[f32], y: &mut [f32]| net.experts(l, h, i, w, y);
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let (cc, mb) = c.moe_parts();
-        net.gpu.moe_step(&net.kind, cc, mb, 1, 0, Head::No, &mut ex)
+        net.gpu
+            .moe_step(&net.kind, cc, mb, 1, 0, Head::No, &mut ex, None)
     }));
     let p = r.expect_err("Head::No must panic");
     let msg = p
@@ -473,7 +474,7 @@ fn route_matches_cpu_twin(small: bool, name: &str) {
     };
     let (cc, mb) = c.moe_parts();
     net.gpu
-        .moe_tokens(&net.kind, cc, mb, &ids, 0, Head::No, &mut ex)
+        .moe_tokens(&net.kind, cc, mb, &ids, 0, Head::No, &mut ex, None)
         .unwrap();
     let dim = net.gpu.dim;
     // Per differing set: the CPU's own gap between its k-th and (k+1)-th
