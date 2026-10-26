@@ -5750,3 +5750,71 @@ fn moe_parallel_refusal_predicate() {
     assert!(super::moe_parallel_refusal(true, 1, true).is_none());
     assert!(super::moe_parallel_refusal(false, 4, true).is_none());
 }
+
+/// #137: an explicit --parallel N that doesn't fit is refused, with what was
+/// asked, what fits, the bytes needed and free; the automatic sizing
+/// (--parallel left out) never is, like `moe_parallel_refusal`; a paged pool
+/// asked for (`kv_pages`) and not planned is refused too.
+#[test]
+fn parallel_refusal_explicit_only() {
+    use super::{Asked, SlotPlan, parallel_refusal};
+    let gib = 1usize << 30;
+    let explicit = Asked {
+        parallel: 6,
+        parallel_set: true,
+        paged: false,
+    };
+    let auto = Asked {
+        parallel_set: false,
+        ..explicit
+    };
+    let one = SlotPlan::one(
+        2048,
+        Some("one request at a time: 2 slots don't fit".into()),
+    );
+    let e = parallel_refusal(explicit, &one, false, || Some((5 * gib, 2 * gib))).expect("refused");
+    for want in [
+        "--parallel 6",
+        "6 slots of 2048 tokens need 5.00 GiB",
+        "2.00 GiB is free",
+        "one request at a time fits",
+        "2 slots don't fit",
+        "--kv q8",
+        "leave --parallel out",
+    ] {
+        assert!(e.contains(want), "{want:?} not in {e}");
+    }
+    // Fewer than asked, but more than one: still refused, and says so.
+    let four = SlotPlan {
+        slots: 4,
+        ctx: 2048,
+        note: None,
+    };
+    let e = parallel_refusal(explicit, &four, false, || None).expect("refused");
+    assert!(
+        e.contains("4 requests at once fit") && !e.contains("GiB"),
+        "{e}"
+    );
+    // Met (or more), and the automatic sizing, start.
+    let six = SlotPlan {
+        slots: 6,
+        ctx: 2048,
+        note: None,
+    };
+    assert!(parallel_refusal(explicit, &six, false, || unreachable!()).is_none());
+    assert!(parallel_refusal(auto, &one, false, || unreachable!()).is_none());
+    assert!(parallel_refusal(auto, &four, false, || unreachable!()).is_none());
+    let single = Asked {
+        parallel: 1,
+        ..explicit
+    };
+    assert!(parallel_refusal(single, &one, false, || unreachable!()).is_none());
+    // A paged pool asked for: refused without one, fine with one.
+    let pages = Asked {
+        paged: true,
+        ..explicit
+    };
+    let e = parallel_refusal(pages, &six, false, || None).expect("refused");
+    assert!(e.starts_with("a paged KV pool"), "{e}");
+    assert!(parallel_refusal(pages, &six, true, || unreachable!()).is_none());
+}

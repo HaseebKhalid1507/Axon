@@ -1150,7 +1150,9 @@ fn engine(
                 .free_bytes()
                 .ok()
                 .and_then(|free| paged_plan(n, kv, want.max(ctx), slots, free as usize, !fit));
-            if plan.is_none() && !fit && o.log {
+            // Always said (also under --quiet): a pool the request can't
+            // have is a different server (an explicit one is refused below).
+            if plan.is_none() && !fit {
                 eprintln!(
                     "axon serve: KV pages for one {ctx}-token sequence (--ctx) don't fit beside \
                      the model: slots reserved at the full context instead"
@@ -1209,7 +1211,33 @@ fn engine(
         },
         _ => SlotPlan::one(ctx, None),
     };
-    if let Some(note) = plan.note.as_ref().filter(|_| o.log) {
+    // An explicit --parallel N (or a test's paged pool) that doesn't fit is
+    // refused, not quietly served with fewer slots (#137); --parallel left
+    // out keeps the automatic sizing, and falling back to one request at a
+    // time is said even under --quiet.
+    let vram = || match &net.0 {
+        Inner::Cuda(n) => n.free_bytes().ok().map(|f| {
+            (
+                n.serve_bytes_kv(kv, o.parallel, ctx) + POOL_SPARE,
+                f as usize,
+            )
+        }),
+        _ => None,
+    };
+    if let Some(why) = parallel_refusal(
+        Asked {
+            parallel: o.parallel,
+            parallel_set: o.parallel_set,
+            paged: o.kv_pages.is_some(),
+        },
+        &plan,
+        paged.is_some(),
+        vram,
+    ) {
+        refuse_start(&why);
+    }
+    let one = o.parallel > 1 && plan.slots < 2;
+    if let Some(note) = plan.note.as_ref().filter(|_| o.log || one) {
         eprintln!("axon serve: {note}");
     }
     // With a pool, the context served is a slot's (every request fits
@@ -1228,10 +1256,13 @@ fn engine(
             };
             match made {
                 Ok(pool) => Some((pool, n, slot_ctx)),
+                Err(why) if o.parallel_set => refuse_start(&format!(
+                    "--parallel {}: the {n}-slot pool couldn't be made ({why}); fewer \
+                     --parallel, a smaller --ctx or --kv q8",
+                    o.parallel
+                )),
                 Err(why) => {
-                    if o.log {
-                        eprintln!("axon serve: one request at a time ({why})");
-                    }
+                    eprintln!("axon serve: one request at a time ({why})");
                     None
                 }
             }
@@ -1240,10 +1271,13 @@ fn engine(
     let solo = pool.as_ref().map(|(p, _, _)| net.slot_cache(p, 0));
     let cache = match solo {
         Some(Ok(c)) => c,
+        Some(Err(why)) if o.parallel_set => refuse_start(&format!(
+            "--parallel {}: the slot pool's request view couldn't be made ({why}); fewer \
+             --parallel, a smaller --ctx or --kv q8",
+            o.parallel
+        )),
         Some(Err(why)) => {
-            if o.log {
-                eprintln!("axon serve: one request at a time ({why})");
-            }
+            eprintln!("axon serve: one request at a time ({why})");
             pool = None;
             net.new_cache(ctx)
         }
@@ -1564,6 +1598,70 @@ fn moe_parallel_refusal(moe: bool, parallel: usize, parallel_set: bool) -> Optio
              (its experts' placement, --gpu-experts included, is for one cache): --parallel 1"
         )
     })
+}
+
+/// What the server was asked for (`parallel_refusal`): --parallel and
+/// whether it was given, and a paged pool of a set size (`Opts::kv_pages`,
+/// tests only).
+#[derive(Clone, Copy)]
+struct Asked {
+    parallel: usize,
+    parallel_set: bool,
+    paged: bool,
+}
+
+/// Why the server must not start with `plan` (#137): --parallel N given
+/// and fewer than N slots fit, or a paged pool asked for and none fits.
+/// `vram`: the bytes N slots at the plan's context need (with
+/// POOL_SPARE) and the bytes free, for the message (asked only when
+/// refusing). Automatic sizing (--parallel left out) is never refused,
+/// as `moe_parallel_refusal` refuses only an explicit --parallel N.
+fn parallel_refusal(
+    a: Asked,
+    plan: &SlotPlan,
+    paged: bool,
+    vram: impl FnOnce() -> Option<(usize, usize)>,
+) -> Option<String> {
+    let short = a.parallel_set && a.parallel > 1 && plan.slots < a.parallel;
+    if !short && (paged || !a.paged) {
+        return None;
+    }
+    let asked = match short {
+        true => format!("--parallel {}", a.parallel),
+        false => "a paged KV pool (kv_pages)".into(),
+    };
+    let mem = vram().map_or(String::new(), |(need, free)| {
+        format!(
+            ": {} slots of {} tokens need {:.2} GiB of GPU memory beside the model, {:.2} GiB \
+             is free",
+            a.parallel,
+            plan.ctx,
+            need as f64 / GIB,
+            free as f64 / GIB
+        )
+    });
+    let fits = match plan.slots {
+        0 | 1 => "one request at a time fits".to_string(),
+        s => format!("{s} requests at once fit"),
+    };
+    let why = plan
+        .note
+        .as_ref()
+        .map_or(String::new(), |n| format!(" ({n})"));
+    Some(format!(
+        "{asked}{mem}; {fits}{why}. A smaller --ctx, --kv q8 or fewer --parallel, or leave \
+         --parallel out to size it automatically"
+    ))
+}
+
+/// Refuse to start: exit 2 with the message (`crate::fail`). In tests the
+/// server runs in the test process, so the engine thread panics instead
+/// and `start` returns an error.
+fn refuse_start(msg: &str) -> ! {
+    #[cfg(test)]
+    panic!("axon serve: {msg}");
+    #[cfg(not(test))]
+    crate::fail(msg)
 }
 
 /// Whether serve's pool is paged: the GPU, batching, AXON_PAGED_KV != 0
