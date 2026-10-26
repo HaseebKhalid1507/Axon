@@ -437,7 +437,8 @@ fn heads_mm_run(
 /// lane chains in bit-reversed order folded into the xor tree's shape)
 /// gives main be13f1f's mla_heads_mv bits: every type, Moonlight's shapes
 /// (k_b Q5_0 8192 x 128, v_b Q4_K 2048 x 512) and others (chains of 3, 4,
-/// 8, 16 and 64 columns; stages that split the chains unevenly), batches of
+/// 8, 16 and 32 columns; stages that split the chains unevenly; rows staged
+/// in shared memory or read from global memory (Q4_K x 1024, F32)), batches of
 /// 2 to 2100 tokens (ragged last tiles), from token 0 and from token 7.
 #[test]
 fn mla_heads_mm_equals_main() {
@@ -457,7 +458,8 @@ fn mla_heads_mm_equals_main() {
         (Q8_0, 64, 256, 3, &[5, 32, 100][..]),
         (Q6_K, 128, 256, 2, &[3, 64, 65][..]),
         (F16, 64, 96, 2, &[2, 31, 70][..]),
-        (F32, 192, 2048, 1, &[4, 40][..]),
+        (F32, 192, 1024, 1, &[4, 40][..]),
+        (Q4_K, 64, 1024, 2, &[3, 70][..]),
         (Q4_0, 64, 160, 2, &[9, 48][..]),
     ] {
         let mut r = Rng(0x77 ^ (qt as u64) << 8 ^ cols as u64);
@@ -1244,7 +1246,7 @@ fn mla_kernels_compile_for_archs() {
         ("MLA_MV_T", MLA_MV_T),
         ("MLA_AB_Q", MLA_AB_Q),
         ("MLA_AB_THREADS", MLA_AB_THREADS),
-        ("MLA_AB_MAXC", MLA_AB_MAXC),
+        ("MLA_AB_CJ", MLA_AB_CJ),
         ("MLA_MM_R", MLA_MM_R),
         ("MLA_MM_T", MLA_MM_T),
         ("MLA_MM_SC", MLA_MM_SC),

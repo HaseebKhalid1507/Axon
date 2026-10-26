@@ -378,12 +378,13 @@ mla_heads_mv(int qt, const u8* __restrict__ w, u64 rb, int rph, int cols, int n_
 // by chain), and the weights are deq's values. Cols must be a multiple of
 // 32 (every chain cols / 32 long), and a block's rows one head's.
 // Grid (n_h * rph / MLA_MM_R, ceil(nb / MLA_MM_T)), MLA_THREADS threads,
-// thread (rg, tg) = (t % 16, t / 16): rows 4 rg .. + 4 x tokens 2 tg .. + 2
+// thread (rg, tg) = (t % 16, t / 16): rows 4 rg .. + 4 x tokens 4 tg .. + 4
 // of the block's MLA_MM_R x MLA_MM_T. Shared memory: MLA_MM_SC permuted
 // columns of the rows (dequantized, column-major: [j][r]) and of x ([j][t]).
 #define MLA_MM_R 64
-#define MLA_MM_T 32
-#define MLA_MM_SC 64
+#define MLA_MM_T 64
+#define MLA_MM_SC 32
+#define MLA_MM_BYTES 18432  // 64 rows of 288 bytes (Q4_K x 512)
 
 __device__ __forceinline__ int mla_brev5(int i) { return __brev((unsigned)i) >> 27; }
 
@@ -407,19 +408,48 @@ __device__ __forceinline__ float mla_tree_push(float* st, float v, int i) {
     return v;
 }
 
+// The weight deq(qt, row, c) gives, from the row's staged bytes and scale
+// table (mla_w, its type resolved here).
+__device__ __forceinline__ float mla_mm_w(int qt, const u8* row, const float* tab, int c) {
+    switch (qt) {
+    case QT_Q5_0:
+        return mla_w<QT_Q5_0>(qt, row, tab, c);
+    case QT_Q8_0:
+        return mla_w<QT_Q8_0>(qt, row, tab, c);
+    case QT_Q4_K:
+        return mla_w<QT_Q4_K>(qt, row, tab, c);
+    case QT_Q6_K:
+        return mla_w<QT_Q6_K>(qt, row, tab, c);
+    default:
+        return deq(qt, row, c);
+    }
+}
+
 extern "C" __global__ void __launch_bounds__(MLA_THREADS)
 mla_heads_mm(int qt, const u8* __restrict__ w, u64 rb, int rph, int cols, int n_h,
              const float* __restrict__ x, int xs, u64 xt, float* __restrict__ out, int os,
              u64 ot, int nb) {
     __shared__ __align__(16) float ws[MLA_MM_SC * MLA_MM_R];
     __shared__ __align__(16) float xsh[MLA_MM_SC * MLA_MM_T];
+    __shared__ __align__(16) u8 rows[MLA_MM_BYTES];  // the block's rows, when they fit
+    __shared__ float tabs[MLA_MM_R * 32];             // their scale tables (<= 32 per row)
     int t = threadIdx.x, rg = t % 16, tg = t / 16;
     int gr0 = blockIdx.x * MLA_MM_R, z0 = blockIdx.y * MLA_MM_T;
     int h = gr0 / rph, r0 = gr0 % rph;
     int L = cols / 32;                // chain length
     int per = MLA_MM_SC / L;          // chains per stage (the host: L <= MLA_MM_SC)
-    float st[4][2][5];
-    float res[4][2];
+    // The rows' bytes and scale tables in shared memory when they fit
+    // (Moonlight's k_b and v_b); else deq reads the rows in global memory.
+    int tn = mla_tab_n(qt, cols);
+    bool staged = (u64)MLA_MM_R * rb <= MLA_MM_BYTES && tn <= 32;
+    if (staged) {
+        mla_copy(rows, w + (u64)gr0 * rb, (u64)MLA_MM_R * rb);
+        __syncthreads();
+        for (int i = t; i < MLA_MM_R * tn; i += MLA_THREADS)
+            tabs[i] = mla_tab_entry(qt, rows + (u64)(i / tn) * rb, i % tn);
+    }
+    float st[4][4][5];
+    float res[4][4];
     for (int i = 0; i < 32; i++) {
         int ii = i % per;
         if (ii == 0) {
@@ -429,7 +459,8 @@ mla_heads_mm(int qt, const u8* __restrict__ w, u64 rb, int rph, int cols, int n_
             for (int e = t; e < n * MLA_MM_R; e += MLA_THREADS) {
                 int j = e / MLA_MM_R, r = e % MLA_MM_R;
                 int c = mla_brev5(i + j / L) + 32 * (j % L);
-                ws[j * MLA_MM_R + r] = deq(qt, w + (u64)(gr0 + r) * rb, c);
+                ws[j * MLA_MM_R + r] = staged ? mla_mm_w(qt, rows + (u64)r * rb, tabs + r * tn, c)
+                                              : deq(qt, w + (u64)(gr0 + r) * rb, c);
             }
             for (int e = t; e < n * MLA_MM_T; e += MLA_THREADS) {
                 int j = e / MLA_MM_T, tt = e % MLA_MM_T;
@@ -439,33 +470,33 @@ mla_heads_mm(int qt, const u8* __restrict__ w, u64 rb, int rph, int cols, int n_
             }
             __syncthreads();
         }
-        // Chain brev5(i) of the thread's 4 x 2 outputs, then the tree.
-        float a[4][2];
+        // Chain brev5(i) of the thread's 4 x 4 outputs, then the tree.
+        float a[4][4];
 #pragma unroll
-        for (int q = 0; q < 4; q++) a[q][0] = a[q][1] = 0.0f;
+        for (int q = 0; q < 4; q++)
+#pragma unroll
+            for (int u = 0; u < 4; u++) a[q][u] = 0.0f;
         for (int k = 0; k < L; k++) {
             int jj = ii * L + k;
             float4 w4 = *(const float4*)(ws + jj * MLA_MM_R + 4 * rg);
-            float2 x2 = *(const float2*)(xsh + jj * MLA_MM_T + 2 * tg);
-            a[0][0] = __fmaf_rn(w4.x, x2.x, a[0][0]);
-            a[0][1] = __fmaf_rn(w4.x, x2.y, a[0][1]);
-            a[1][0] = __fmaf_rn(w4.y, x2.x, a[1][0]);
-            a[1][1] = __fmaf_rn(w4.y, x2.y, a[1][1]);
-            a[2][0] = __fmaf_rn(w4.z, x2.x, a[2][0]);
-            a[2][1] = __fmaf_rn(w4.z, x2.y, a[2][1]);
-            a[3][0] = __fmaf_rn(w4.w, x2.x, a[3][0]);
-            a[3][1] = __fmaf_rn(w4.w, x2.y, a[3][1]);
+            float4 x4 = *(const float4*)(xsh + jj * MLA_MM_T + 4 * tg);
+            float wr[4] = {w4.x, w4.y, w4.z, w4.w};
+            float xr[4] = {x4.x, x4.y, x4.z, x4.w};
+#pragma unroll
+            for (int q = 0; q < 4; q++)
+#pragma unroll
+                for (int u = 0; u < 4; u++) a[q][u] = __fmaf_rn(wr[q], xr[u], a[q][u]);
         }
 #pragma unroll
         for (int q = 0; q < 4; q++)
 #pragma unroll
-            for (int u = 0; u < 2; u++) res[q][u] = mla_tree_push(st[q][u], a[q][u], i);
+            for (int u = 0; u < 4; u++) res[q][u] = mla_tree_push(st[q][u], a[q][u], i);
     }
 #pragma unroll
     for (int q = 0; q < 4; q++)
 #pragma unroll
-        for (int u = 0; u < 2; u++) {
-            int z = z0 + 2 * tg + u;
+        for (int u = 0; u < 4; u++) {
+            int z = z0 + 4 * tg + u;
             if (z < nb) out[(u64)z * ot + (u64)h * os + r0 + 4 * rg + q] = res[q][u];
         }
 }
@@ -704,20 +735,21 @@ mla_attn(const float* __restrict__ qa, const unsigned short* __restrict__ kv, in
 // - warp w scores pairs 2w and 2w + 1 together over the tile's rows (the
 //   two xor trees transposed: lanes 0-15 end with pair 2w's sum, 16-31
 //   with 2w + 1's, the same additions);
-// - thread t accumulates pair t / 16's columns 2 (t % 16) + 32 j (+1).
+// - thread t accumulates pairs 4 (t / 64) .. + 3, columns 2 (t % 64) +
+//   128 j (+1), each K value it loads used by its 4 pairs.
 // Grid (splits x n_h / hb, ceil(nb / (MLA_AB_Q / hb))), MLA_AB_THREADS
 // threads, attn_b_smem bytes of dynamic shared memory (sm_80+: over 48 KiB).
 // Out: part as mla_attn's; mla_attn_cmb combines them.
 #define MLA_AB_Q 32
 #define MLA_AB_THREADS 512
-#define MLA_AB_MAXC 16  // lat <= 512: column pairs per thread
+#define MLA_AB_CJ 4  // lat <= 512: column pairs per thread and pair (128 apart)
 extern "C" __global__ void __launch_bounds__(MLA_AB_THREADS, 1)
 mla_attn_b(const float* __restrict__ qa, const unsigned short* __restrict__ kv, int krow,
            int lat, int n_h, float scale, int start, int split, int ns, int nb,
            float* __restrict__ part) {
     extern __shared__ __align__(16) float kf[];  // [MLA_TILE][krow] f32
     __shared__ float ss[MLA_AB_Q][MLA_TILE];
-    __shared__ float ps[MLA_AB_Q][MLA_TILE];
+    __shared__ __align__(16) float pst[MLA_TILE][MLA_AB_Q];  // p, row-major by row
     __shared__ float ms[MLA_AB_Q], ls[MLA_AB_Q], al[MLA_AB_Q];
     int t = threadIdx.x, lane = t & 31, w = t >> 5;
     int hb = n_h < MLA_AB_Q ? n_h : MLA_AB_Q;
@@ -754,12 +786,17 @@ mla_attn_b(const float* __restrict__ qa, const unsigned short* __restrict__ kv, 
         ms[t] = __int_as_float(0xff800000);  // -inf
         ls[t] = 0.0f;
     }
-    // The accumulating thread's pair and columns.
-    int aq = t / 16, ac = 2 * (t % 16);
-    int a_re = pair_end(aq);
-    float2 acc[MLA_AB_MAXC];
+    // The accumulating thread's 4 pairs aq0 .. aq0 + 3 and its column pairs
+    // ac + 128 j (j < 4): each K value it loads feeds 4 pairs.
+    int aq0 = 4 * (t / 64), ac = 2 * (t % 64);
+    int a_re[4];
 #pragma unroll
-    for (int j = 0; j < MLA_AB_MAXC; j++) acc[j] = make_float2(0.0f, 0.0f);
+    for (int u = 0; u < 4; u++) a_re[u] = pair_end(aq0 + u);
+    float2 acc[4][MLA_AB_CJ];
+#pragma unroll
+    for (int u = 0; u < 4; u++)
+#pragma unroll
+        for (int j = 0; j < MLA_AB_CJ; j++) acc[u][j] = make_float2(0.0f, 0.0f);
     int kw = krow >> 1;
     for (int r0 = rb; r0 < re_max; r0 += MLA_TILE) {
         int nr = min(MLA_TILE, re_max - r0);  // the group's rows (a pair's may be fewer)
@@ -808,7 +845,7 @@ mla_attn_b(const float* __restrict__ qa, const unsigned short* __restrict__ kv, 
             float sum = p;
 #pragma unroll
             for (int o = 16; o > 0; o >>= 1) sum = __fadd_rn(sum, __shfl_xor_sync(0xffffffffu, sum, o));
-            ps[q][lane] = p;
+            pst[lane][q] = p;
             __syncwarp();
             if (lane == 0) {
                 float a = expf(__fsub_rn(m_old, m_new));
@@ -818,39 +855,57 @@ mla_attn_b(const float* __restrict__ qa, const unsigned short* __restrict__ kv, 
             }
         }
         __syncthreads();
-        if (r0 < a_re) {
-            int nq = min(MLA_TILE, a_re - r0);
-            float a = al[aq];
+        // Each pair: its rescale, then its rows in order (its own count;
+        // a pair not in this tile, or past its rows, does nothing).
+        int nq[4];
+        float al4[4];
 #pragma unroll
-            for (int j = 0; j < MLA_AB_MAXC; j++) {
-                int c = ac + 32 * j;
+        for (int u = 0; u < 4; u++) {
+            nq[u] = r0 < a_re[u] ? min(MLA_TILE, a_re[u] - r0) : 0;
+            al4[u] = al[aq0 + u];
+        }
+        int nmax = max(max(nq[0], nq[1]), max(nq[2], nq[3]));
+        if (nmax > 0) {
+#pragma unroll
+            for (int j = 0; j < MLA_AB_CJ; j++) {
+                int c = ac + 128 * j;
                 if (c < lat) {
-                    float2 v = make_float2(__fmul_rn(acc[j].x, a), __fmul_rn(acc[j].y, a));
-                    for (int r = 0; r < nq; r++) {
+#pragma unroll
+                    for (int u = 0; u < 4; u++)
+                        if (nq[u] > 0)
+                            acc[u][j] = make_float2(__fmul_rn(acc[u][j].x, al4[u]),
+                                                    __fmul_rn(acc[u][j].y, al4[u]));
+                    for (int r = 0; r < nmax; r++) {
                         float2 k2 = *(const float2*)(kf + r * krow + c);
-                        float p = ps[aq][r];
-                        v.x = __fmaf_rn(p, k2.x, v.x);
-                        v.y = __fmaf_rn(p, k2.y, v.y);
+                        float4 p4 = *(const float4*)(&pst[r][aq0]);
+                        float pr[4] = {p4.x, p4.y, p4.z, p4.w};
+#pragma unroll
+                        for (int u = 0; u < 4; u++)
+                            if (r < nq[u]) {
+                                acc[u][j].x = __fmaf_rn(pr[u], k2.x, acc[u][j].x);
+                                acc[u][j].y = __fmaf_rn(pr[u], k2.y, acc[u][j].y);
+                            }
                     }
-                    acc[j] = v;
                 }
             }
         }
     }
-    __syncthreads();
-    if (a_re > 0) {
-        int z = z0 + aq / hb, h = h0 + aq % hb;
+#pragma unroll
+    for (int u = 0; u < 4; u++) {
+        if (a_re[u] == 0) continue;
+        int q = aq0 + u;
+        int z = z0 + q / hb, h = h0 + q % hb;
         float* o = part + (((u64)z * ns + sp) * n_h + h) * (lat + 2);
-        if (t % 16 == 0) {
-            o[0] = ms[aq];
-            o[1] = ls[aq];
+        if (t % 64 == 0) {
+            o[0] = ms[q];
+            o[1] = ls[q];
         }
 #pragma unroll
-        for (int j = 0; j < MLA_AB_MAXC; j++) {
-            int c = ac + 32 * j;
+        for (int j = 0; j < MLA_AB_CJ; j++) {
+            int c = ac + 128 * j;
             if (c < lat) {
-                o[2 + c] = acc[j].x;
-                o[2 + c + 1] = acc[j].y;
+                o[2 + c] = acc[u][j].x;
+                o[2 + c + 1] = acc[u][j].y;
             }
         }
     }

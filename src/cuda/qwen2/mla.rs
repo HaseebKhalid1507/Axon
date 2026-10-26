@@ -71,11 +71,12 @@ const MLA_MV_ROWS: usize = 32;
 /// and v_b (288: 16).
 const MLA_MV_BYTES: usize = 4608;
 
-/// mla.cu MLA_AB_Q, MLA_AB_THREADS, MLA_AB_MAXC: mla_attn_b's (token,
-/// head) pairs per block, threads, and column pairs per thread.
+/// mla.cu MLA_AB_Q, MLA_AB_THREADS, MLA_AB_CJ: mla_attn_b's (token, head)
+/// pairs per block, threads, and column pairs per thread and pair (128
+/// columns apart).
 const MLA_AB_Q: usize = 32;
 const MLA_AB_THREADS: usize = 512;
-const MLA_AB_MAXC: usize = 16;
+const MLA_AB_CJ: usize = 4;
 
 /// mla_attn_b's dynamic shared memory: a tile of K rows in f32.
 fn attn_b_smem(krow: usize) -> usize {
@@ -87,16 +88,16 @@ fn attn_b_smem(krow: usize) -> usize {
 /// threads' columns cover (krow <= MLA_MAX_KROW holds for every model the
 /// MLA path runs).
 fn attn_b_fits(n_h: usize, krow: usize, lat: usize) -> bool {
-    n_h.is_power_of_two() && krow <= MLA_MAX_KROW && lat <= 32 * MLA_AB_MAXC
+    n_h.is_power_of_two() && krow <= MLA_MAX_KROW && lat <= 128 * MLA_AB_CJ
 }
 
 /// mla.cu MLA_MM_R, MLA_MM_T, MLA_MM_SC: mla_heads_mm's rows and tokens
 /// per block and permuted columns per stage.
 const MLA_MM_R: usize = 64;
-const MLA_MM_T: usize = 32;
-const MLA_MM_SC: usize = 64;
+const MLA_MM_T: usize = 64;
+const MLA_MM_SC: usize = 32;
 /// Batches of at least this many tokens take mla_heads_mm (the same bits
-/// as mla_heads_mv; faster once its 32-token tiles fill). Not part of the
+/// as mla_heads_mv; faster once its 64-token tiles fill). Not part of the
 /// bits.
 const MLA_MM_MIN_NB: usize = 16;
 
