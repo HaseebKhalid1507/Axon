@@ -1121,6 +1121,17 @@ fn mla_decode_kernel_bench() {
     }
 }
 
+/// The dispatch rule (`mm_fits`) at the measured points: k_b from 32 tokens
+/// on, v_b at 64 and from 116, not at 65 .. 115.
+#[test]
+fn heads_mm_dispatch() {
+    let k_b = |nb| mm_fits(nb, 512, 128);
+    let v_b = |nb| mm_fits(nb, 128, 512);
+    assert!(!k_b(31) && k_b(32) && k_b(64) && k_b(96) && k_b(2100));
+    assert!(!v_b(63) && v_b(64) && !v_b(65) && !v_b(96) && !v_b(115));
+    assert!(v_b(116) && v_b(128) && !v_b(130) && v_b(2100));
+}
+
 /// `attn_blocks` covers every token's blocks under mla_attn's hpb rule
 /// (emulated: the largest power of two <= hpb_max with n_h / hpb * nsp *
 /// nz >= busy, else 1), for any token's split count nsp <= ns.
@@ -1211,7 +1222,9 @@ fn mla_prefill_kernel_bench() {
         let rows = rph * n_h;
         let rb = crate::quant::row_bytes(qt, cols);
         let wd = g.upload(&random_blocks(&mut r, qt, rows * cols)).unwrap();
-        for nb in [8usize, 16, 24, 32, 48, 64, 96, 128, 512, 2100] {
+        for nb in [
+            8usize, 16, 24, 32, 48, 64, 80, 96, 112, 120, 128, 192, 512, 2100,
+        ] {
             let x: Vec<f32> = (0..nb * n_h * cols).map(|_| r.f()).collect();
             let xd = g.upload(&x).unwrap();
             let ob = g.alloc(nb * rows * 4).unwrap();
@@ -1258,8 +1271,9 @@ fn mla_prefill_kernel_bench() {
                     .unwrap()
                 }));
             }
+            let pick = if mm_fits(nb, rph, cols) { "mm" } else { "mv" };
             println!(
-                "heads {name} nb {nb}: main {} us | cand mm {} us",
+                "heads {name} nb {nb}: main {} us | cand mm {} us | dispatch: {pick}",
                 med(&mut tm),
                 med(&mut tc)
             );

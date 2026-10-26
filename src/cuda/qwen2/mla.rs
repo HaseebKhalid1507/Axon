@@ -96,16 +96,35 @@ fn attn_b_fits(n_h: usize, krow: usize, lat: usize) -> bool {
 const MLA_MM_R: usize = 64;
 const MLA_MM_T: usize = 64;
 const MLA_MM_SC: usize = 32;
-/// Batches of at least this many tokens take mla_heads_mm (the same bits
-/// as mla_heads_mv; faster once its 64-token tiles fill). Not part of the
-/// bits.
-const MLA_MM_MIN_NB: usize = 16;
+/// mla_heads_mm (the same bits as mla_heads_mv) is the faster kernel when
+/// its 64-token tiles are full enough: its cost goes by tiles, mla_heads_mv's
+/// by tokens. So it runs when the tokens per tile, nb / ceil(nb / MLA_MM_T),
+/// reach `mm_fill(cols)`. Measured (mla_prefill_kernel_bench, sm_89 and
+/// sm_120, 3 interleaved rounds, median):
+/// - k_b (128 columns) crosses at 32 tokens on both: 32.
+/// - v_b (512) costs ~85 µs per tile against ~1.53 µs per token (sm_120;
+///   sm_89: ~188 against ~3.85), so it needs > ~56 (> ~49) tokens per tile:
+///   58. That takes 64, 116 .. 128, 174 .., and keeps mla_heads_mv for 65 ..
+///   115 (sm_120 at 96: 146 µs vs 165).
+/// Not part of the bits.
+fn mm_fill(cols: usize) -> usize {
+    if cols <= MLA_MM_NARROW {
+        MLA_MM_FILL_NARROW
+    } else {
+        MLA_MM_FILL_WIDE
+    }
+}
+/// Rows up to this many columns (Moonlight's k_b: 128).
+const MLA_MM_NARROW: usize = 128;
+const MLA_MM_FILL_NARROW: usize = 32;
+/// Wider rows (v_b: 512).
+const MLA_MM_FILL_WIDE: usize = 58;
 
 /// Whether a product of rph rows per head over cols inputs for nb tokens
-/// runs as mla_heads_mm: a batch, whole 32-column chains that fit a stage,
-/// and blocks of MLA_MM_R rows within a head.
+/// runs as mla_heads_mm: tiles full enough (`mm_fill`), whole 32-column
+/// chains that fit a stage, and blocks of MLA_MM_R rows within a head.
 fn mm_fits(nb: usize, rph: usize, cols: usize) -> bool {
-    nb >= MLA_MM_MIN_NB
+    nb >= mm_fill(cols) * nb.div_ceil(MLA_MM_T)
         && cols.is_multiple_of(32)
         && cols / 32 <= MLA_MM_SC
         && rph.is_multiple_of(MLA_MM_R)
