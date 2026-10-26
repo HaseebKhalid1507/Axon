@@ -1,0 +1,15 @@
+[axon-run 14:25:09] submitted 1026-142509-9e9f by /home/haseeb/.cache/axon-wt-h100-land: /home/haseeb/.cache/axon-budget/trace-smoke.sh /home/haseeb/.cache/axon-budget/trace-smoke-0144fa9 /home/haseeb/.cache/axon-budget/bin/axon-0144fa9 /home/haseeb/Projects/axon/models/qwen2.5-0.5b-q4_k_m.gguf
+[axon-run 14:26:23] scope axon-job-1026-142509-9e9f-1793039183.scope in app-axonjobs.slice: MemoryMax 4996 MB, MemoryHigh 4496 MB, no swap, oomd pressure kill 80% (claim 2180 MB): an OOM here kills only this job
+[axon-run 14:26:23] job 1026-142509-9e9f -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-142509-9e9f-1793039183 --slice=app-axonjobs.slice -p MemoryMax=4996M -p MemoryHigh=4496M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-budget/trace-smoke.sh /home/haseeb/.cache/axon-budget/trace-smoke-0144fa9 /home/haseeb/.cache/axon-budget/bin/axon-0144fa9 /home/haseeb/Projects/axon/models/qwen2.5-0.5b-q4_k_m.gguf
+axon-q 14:26:23 start slot 16-23: /home/haseeb/.cache/axon-budget/trace-smoke.sh /home/haseeb/.cache/axon-budget/trace-smoke-0144fa9 /home/haseeb/.cache/axon-budget/bin/axon-0144fa9 /home/haseeb/Projects/axon/models/qwen2.5-0.5b-q4_k_
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0
+parabellum
+off {"digest": "8e7057ca3c8daff5"}
+on {"digest": "8e7057ca3c8daff5"}
+on-sjf {"digest": "8e7057ca3c8daff5"}
+digests: 1 distinct over off / on / on-sjf
+trace-on.jsonl: 515 steps, 13 with feeds (11689 tokens in 13 passes, most 1 a step), 515 with a decode pass, 13 both; bad keys 0, inconsistent 0
+trace-on-sjf.jsonl: 506 steps, 10 with feeds (11693 tokens in 14 passes, most 3 a step), 506 with a decode pass, 10 both; bad keys 0, inconsistent 0
+trace PASS
+trace-smoke rc=0
+[axon-run 14:26:34] exit 0 after 10.5s (host bella)

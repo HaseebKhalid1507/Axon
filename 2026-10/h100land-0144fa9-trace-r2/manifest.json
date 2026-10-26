@@ -1,0 +1,29 @@
+{
+ "label": "h100land-0144fa9-trace-r2",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1026-142509-9e9f",
+   "name": "h100land-0144fa9-trace-smoke-r2",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "0144fa9",
+   "binary": "trace-smoke.sh",
+   "started": 1793039183.566665,
+   "ended": 1793039193.6668406,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "2bfb97cce774a0fd98a5865fdf4aa343ad08cfdd2f2b7e4159b426adece1373e",
+   "log_bytes": 1853
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-26 14:26:35 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
