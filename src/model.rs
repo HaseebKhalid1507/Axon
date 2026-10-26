@@ -688,10 +688,15 @@ const DENSE_MATS: [&str; 7] = [
     "ffn_down.weight",
 ];
 
-/// Release granularity on the anonymous copy (`gguf`'s RELEASE_ALIGN_HUGE):
-/// a repacked matrix's first and last partial 2 MB blocks wait for their
-/// neighbours.
-const COPY_RELEASE_SLOP: u64 = 4 << 20;
+/// How far below the committed bytes the RAM available may be before a
+/// dense CPU load is refused. The check reads the cgroup's (or host's) use
+/// at one moment, before the load; some of what's in use then is given back
+/// before the load's peak. Measured on bella (docs/log
+/// 2026-10-26-ram-dense.md): at the smallest MemoryMax a 9-token `gen`
+/// survives, the estimate exceeded the figure read by up to ~30 MiB with
+/// AXON_MMAP=0 (and fell short of it by 10-20 MiB mapped). Within this
+/// tolerance a load isn't refused: it may then still be OOM-killed.
+const DENSE_CHECK_TOLERANCE: u64 = 32 << 20;
 
 /// What a dense model on the CPU (`Qwen2::new`) takes in anonymous memory
 /// beyond the file (`check_ram_dense`).
@@ -774,7 +779,7 @@ pub(crate) fn dense_ram_need(m: &Model, repack: bool, kv_elem: u64) -> DenseNeed
 /// refused: the CPU's KV cache is a lazy mapping, its pages taken as the
 /// context fills (a run that never fills it never needs them), so the full
 /// cache not fitting is a warning (returned), not a refusal. No headroom on
-/// top: the weights' part is memory the load touches, so a load that fits
+/// top, and a small tolerance below (`DENSE_CHECK_TOLERANCE`): the weights' part is memory the load touches, so a load that fits
 /// has it free at the check; the forward pass's scratch (tens of MB) isn't
 /// counted, so a limit within that of the weights is still an OOM kill,
 /// not a refusal (measured: docs/log/2026-10-26-ram-dense.md). MoE's check
@@ -804,14 +809,15 @@ pub(crate) fn check_ram_dense(m: &Model, ctx: usize) -> Result<Option<String>, S
 /// its copied bytes (the embedding reads them). So the peak adds what the
 /// repacked forms take beyond the bytes they replace (`growth`), a tied
 /// head, and the larger of an untied head's own repack and the matrices in
-/// flight (each with the release granularity), at most the arena.
+/// flight (a released matrix's partial 2 MB blocks go with its
+/// neighbours'), at most the arena.
 pub(crate) fn dense_load_bytes(need: DenseNeed, copied: bool, threads: u64) -> u64 {
     if !copied || need.arena == 0 {
         return need.arena;
     }
     let tied = if need.tied { need.head } else { 0 };
     let untied = if need.tied { 0 } else { need.head };
-    let flight = threads.max(1) * (need.largest + COPY_RELEASE_SLOP);
+    let flight = threads.max(1) * need.largest;
     need.arena.min(need.growth + tied + untied.max(flight))
 }
 
@@ -832,7 +838,7 @@ fn dense_verdict(
     let floor = ctx.min(crate::DEFAULT_CHAT_CTX);
     let kv = need.kv_per_pos * floor as u64;
     let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
-    if avail.bytes < load + kv {
+    if avail.bytes + DENSE_CHECK_TOLERANCE < load + kv {
         return Err(format!(
             "{arch}: the CPU model needs about {:.2} GiB of RAM ({} {:.2} GiB, the KV cache of \
              {floor} tokens {:.2} GiB) and only {:.2} GiB is available (bound by {avail})",
@@ -5994,8 +6000,20 @@ mod ram_dense_tests {
             Ok(None)
         );
         assert_eq!(dense_verdict("qwen3", need, false, 8, 1000, None), Ok(None));
+        assert_eq!(
+            dense_verdict(
+                "qwen3",
+                need,
+                false,
+                8,
+                1000,
+                host(want - DENSE_CHECK_TOLERANCE)
+            ),
+            Ok(None),
+            "within the tolerance"
+        );
         let cg = Avail {
-            bytes: want - 1,
+            bytes: want - DENSE_CHECK_TOLERANCE - 1,
             bound: Bound::Cgroup {
                 path: "/app.slice/job.scope".into(),
                 limit: 400 << 20,
@@ -6054,19 +6072,19 @@ mod ram_dense_tests {
     /// #142 review MUST 2: a copied model is already in use at the check, and
     /// each repacked matrix's copied bytes go back after its repack: the copy
     /// commits the growth, a tied head, and the larger of an untied head and
-    /// the matrices in flight (a pool thread each, plus 4 MiB), at most the
-    /// arena; the mapping commits the whole arena.
+    /// the matrices in flight (a pool thread each), at most the arena; the
+    /// mapping commits the whole arena.
     #[test]
     fn copied_load_commits_the_matrices_in_flight() {
         assert_eq!(dense_load_bytes(L8, false, 24), 4710 * MIB);
-        assert_eq!(dense_load_bytes(L8, true, 24), (47 + 24 * 60) * MIB);
+        assert_eq!(dense_load_bytes(L8, true, 24), (47 + 24 * 56) * MIB);
         assert_eq!(
             dense_load_bytes(L8, true, 4),
             (47 + 500) * MIB,
             "the head's own repack"
         );
         let tied = DenseNeed { tied: true, ..L8 };
-        assert_eq!(dense_load_bytes(tied, true, 4), (47 + 500 + 4 * 60) * MIB);
+        assert_eq!(dense_load_bytes(tied, true, 4), (47 + 500 + 4 * 56) * MIB);
         assert_eq!(
             dense_load_bytes(L8, true, 1000),
             4710 * MIB,
@@ -6082,7 +6100,7 @@ mod ram_dense_tests {
         assert!(dense_verdict("llama", L8, true, 24, 16, host(2 * GIB)).is_ok());
         assert!(dense_verdict("llama", L8, false, 24, 16, host(2 * GIB)).is_err());
         let e = dense_verdict("llama", L8, true, 24, 16, host(GIB)).unwrap_err();
-        assert!(e.contains("(repacking the copy 1.45 GiB"), "{e}");
+        assert!(e.contains("(repacking the copy 1.36 GiB"), "{e}");
     }
 
     /// The real models' growth and head: the head is the tied embedding
