@@ -1,0 +1,153 @@
+[axon-run 20:26:36] submitted 1025-202636-7818 by /home/haseeb/.cache/axon-wt-budget-main: /home/haseeb/.cache/axon-budget/bin/axon-test-4fbfd5c serve:: --test-threads 1
+[axon-run 20:32:37] job 1025-202636-7818 -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 5867 --env AXON_NODE_PACK=1 --src /home/haseeb/.cache/axon-wt-budget-main /home/haseeb/.cache/axon-budget/bin/axon-test-4fbfd5c serve:: --test-threads 1
+axon-remote: job 20261025-203238-axon-test-4fbfd5c-3396153 on avante (GPU, 5867 MB)
+[axon-node 20:32:38] GPU slot taken; job wants 5867 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 61
+[axon-node 20:32:38] run axon-test-4fbfd5c (98956e7b43563299b532bd1e) as /home/haseeb/.cache/axon-wt-budget-main on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 139 tests
+test serve::api::tests::chat_request ... ok
+test serve::api::tests::completion_request ... ok
+test serve::api::tests::refused_requests ... ok
+test serve::api::tests::sampling_maps_onto_sample_rs ... ok
+test serve::api::tests::sse_framing ... ok
+test serve::api::tests::stop_strings ... ok
+test serve::engine::plan_tests::idle_feeds_the_head_in_whole_passes ... ok
+test serve::engine::plan_tests::idle_misses_count_only_behind_a_younger_prompt_that_finished ... ok
+test serve::engine::plan_tests::idle_round_up_is_capped_and_floor_applies_first ... ok
+test serve::engine::plan_tests::idle_short_prompts_finishing_in_their_step_cant_starve_a_long_one ... ok
+test serve::engine::plan_tests::idle_two_long_prompts_go_one_after_another ... ok
+test serve::engine::plan_tests::idle_unequal_long_prompts_go_one_after_another ... ok
+test serve::engine::plan_tests::idle_younger_shorter_long_prompt_runs_to_its_end ... ok
+test serve::engine::plan_tests::micros_first_gets_the_floor ... ok
+test serve::engine::plan_tests::micros_shares_follow_each_prompts_depth ... ok
+test serve::engine::plan_tests::starved_prompts_go_oldest_first ... ok
+test serve::engine::plan_tests::tokens_shortest_first_and_no_sliver ... ok
+test serve::engine::sched_tests::admit_key_sjf_then_age ... ok
+test serve::engine::sched_tests::can_admit_lanes_and_short_budget ... ok
+test serve::engine::sched_tests::cold_pass_cost_is_the_decode_step ... ok
+test serve::engine::sched_tests::idle_wave_fed_a_step_at_a_time ... ok
+test serve::engine::sched_tests::legacy_alone_is_main_admission ... ok
+test serve::engine::sched_tests::legacy_reproduces_main_decisions ... ok
+test serve::engine::sched_tests::pass_us_outlier_recovers ... ok
+test serve::engine::sched_tests::plan_two_pass_charges_pass_fixed ... ok
+test serve::engine::sched_tests::short_class_stable_across_a_round ... ok
+test serve::engine::sched_tests::step_cost_buckets ... ok
+test serve::engine::slot_tests::best_slot_ignores_a_trivial_prefix ... ok
+test serve::engine::slot_tests::best_slot_prefers_prefix_then_least_recent ... ok
+test serve::engine::victim_tests::grow_rule_makes_progress_without_refeeding_the_old_prompt ... ok
+test serve::engine::victim_tests::older_prefill_keeps_its_rows ... ok
+test serve::http::tests::absolute_form_targets ... ok
+test serve::http::tests::bare_lf_and_leading_blank_lines ... ok
+test serve::http::tests::chunked_bodies ... ok
+test serve::http::tests::dates ... ok
+test serve::http::tests::expect_continue_is_answered_before_the_body ... ok
+test serve::http::tests::head_timeout ... ok
+test serve::http::tests::malformed_requests ... ok
+test serve::http::tests::non_http_bytes_rejected_at_once ... ok
+test serve::http::tests::on_end_before_the_last_write ... ok
+test serve::http::tests::oversized_heads ... ok
+test serve::http::tests::parses_a_post_with_a_body_in_any_read_size ... ok
+test serve::http::tests::pipelined_requests_come_out_in_order ... ok
+test serve::http::tests::responses ... ok
+test serve::ollama::tests::bad_shapes_are_400 ... ok
+test serve::ollama::tests::chat_translates ... ok
+test serve::ollama::tests::generate_translates ... ok
+test serve::ollama::tests::shapes ... ok
+test serve::ops::tests::ct_eq_and_bearer ... ok
+test serve::ops::tests::histogram_is_cumulative ... ok
+test serve::ops::tests::slot_counts ... ok
+test serve::ops::tests::stall_needs_waiting_bytes_and_no_progress ... ok
+test serve::responses::tests::bad_shapes_are_400 ... ok
+test serve::responses::tests::ids_are_unique_per_process ... ok
+test serve::responses::tests::previous_response_id_continues ... ok
+test serve::responses::tests::response_shapes ... ok
+test serve::responses::tests::store_is_bounded ... ok
+test serve::responses::tests::tool_key_order_survives ... ok
+test serve::responses::tests::translates_to_chat ... ok
+test serve::tests::api_key_env_and_empty ... ok
+test serve::tests::api_key_flag_wins_over_bad_env ... ok
+test serve::tests::chat_template_matches_chat ... ok
+test serve::tests::cpu_ctx_mem_available ... ok
+test serve::tests::error_body_shape_follows_the_path ... ok
+test serve::tests::gemma3_template_matches_llama_cpp ... ok
+test serve::tests::harmony_calls_from_channels ... ok
+test serve::tests::http_overhead ... ignored
+test serve::tests::moe_parallel_refusal_predicate ... ok
+test serve::tests::paged_plan_honours_ctx ... ok
+test serve::tests::pages_block_bounds_the_wait ... ok
+test serve::tests::plan_slots_default ... ok
+test serve::tests::plan_slots_explicit ... ok
+test serve::tests::plan_slots_note_names_the_fit ... ok
+test serve::tests::prefill_vs_cache_size ... ignored
+test serve::tests::prom_parse_rejects_bad_text ... ok
+test serve::tests::ram_ctx_fits ... ok
+test serve::tests::serve_api_key ... ok
+test serve::tests::serve_api_key_before_100_continue ... ok
+test serve::tests::serve_api_key_error_after_head ... ok
+test serve::tests::serve_api_key_no_body_without_the_key ... ok
+test serve::tests::serve_apis_match_chat_completions ... ok
+test serve::tests::serve_batched_matches_solo ... testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+test serve::tests::serve_cancel_mid_prefill_reuses_rows ... ok
+test serve::tests::serve_caps_and_slow_reader ... ok
+test serve::tests::serve_chunked_prefill_matches_solo ... ok
+test serve::tests::serve_counts_a_request_before_answering_it ... ok
+test serve::tests::serve_cpu_gemma3_matches_gen ... ok
+test serve::tests::serve_cpu_llama_matches_gen ... ok
+test serve::tests::serve_cpu_matches_gen ... ok
+test serve::tests::serve_cpu_with_draft_model ... ok
+test serve::tests::serve_cuda_apis_match_chat_completions ... ok
+test serve::tests::serve_cuda_gemma3_matches_gen ... ok
+test serve::tests::serve_cuda_llama_matches_gen ... ok
+test serve::tests::serve_cuda_long_prompt_matches_gen ... ok
+test serve::tests::serve_cuda_matches_gen ... ok
+test serve::tests::serve_cuda_slots ... ok
+test serve::tests::serve_cuda_with_draft_model ... ok
+test serve::tests::serve_default_ctx ... ok
+test serve::tests::serve_error_mid_upload_is_not_a_reset ... ok
+test serve::tests::serve_evicts_waiting_connections ... ok
+test serve::tests::serve_gauges_settle_back_to_back ... ok
+test serve::tests::serve_gptoss_tool_calls ... ok
+test serve::tests::serve_http_behaviour ... ok
+test serve::tests::serve_identity ... ok
+test serve::tests::serve_identity_cpu ... ok
+test serve::tests::serve_in_flight_released_before_answering ... ok
+test serve::tests::serve_metrics_slots_max_prompt ... ok
+test serve::tests::serve_ollama_and_responses_routes ... ok
+test serve::tests::serve_ollama_error_shapes ... ok
+test serve::tests::serve_paged_cap_message ... ok
+test serve::tests::serve_paged_pressure ... ok
+test serve::tests::serve_qwen3_reasoning ... ok
+test serve::tests::serve_responses_tool_loop ... ok
+test serve::tests::serve_rollback_flags_reach_the_engine ... ok
+test serve::tests::serve_sched_ab ... ignored
+test serve::tests::serve_sd_ab ... ignored
+test serve::tests::serve_shrunk_pool ... ok
+test serve::tests::serve_sjf_short_ahead_of_long ... ok
+test serve::tests::serve_slot_idle_frees_a_stalled_stream ... ok
+test serve::tests::serve_solo_and_batch_share_slots ... ok
+test serve::tests::serve_tool_calls ... ok
+test serve::tests::serve_whole_response_cancelled_on_disconnect ... ok
+test serve::tests::text_out_reasoning_and_stops ... ok
+test serve::tests::wait_list_take_decides_the_race ... ok
+test serve::tools::tests::api_parse_with_tools ... ok
+test serve::tools::tests::arg_scan ... ok
+test serve::tools::tests::forced_and_ids ... ok
+test serve::tools::tests::harmony_parser ... ok
+test serve::tools::tests::harmony_typescript_tools ... ok
+test serve::tools::tests::hermes_parser ... ok
+test serve::tools::tests::json_keeps_order_and_prints_like_python ... ok
+test serve::tools::tests::json_parser_llama ... ok
+test serve::tools::tests::long_block_bytewise ... ok
+test serve::tools::tests::render_harmony ... ok
+test serve::tools::tests::render_llama31 ... ok
+test serve::tools::tests::render_qwen25 ... ok
+test serve::tools::tests::render_qwen3 ... ok
+test serve::tools::tests::requests ... ok
+test serve::tools::tests::response_json ... ok
+
+test result: ok. 135 passed; 0 failed; 4 ignored; 0 measured; 599 filtered out; finished in 248.75s
+
+[axon-node 20:36:47] exit 0 after 248.9s
+[axon-node 20:36:47] peak RSS 3155 MB (job process tree PSS, 2 s samples x123)
+[axon-run 20:36:48] exit 0 after 250.6s (host avante)
