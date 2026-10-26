@@ -452,7 +452,8 @@ extern "C" __global__ void __launch_bounds__(MLA_THREADS)
 mla_attn(const float* __restrict__ qa, const unsigned short* __restrict__ kv, int krow, int lat,
          int n_h, int hpb_max, float scale, const u32* __restrict__ P, int start, int split,
          int ns, float* __restrict__ part, int busy, int dbuf_on) {
-    extern __shared__ unsigned short ks[];  // [1 or 2][MLA_TILE][krow]
+    // 16-byte aligned: cp.async writes 16-byte chunks.
+    extern __shared__ __align__(16) unsigned short ks[];  // [1 or 2][MLA_TILE][krow]
     __shared__ float ps[8][MLA_TILE];
     __shared__ float ss[8][MLA_TILE];
     __shared__ float ms[8], ls[8], al[8];

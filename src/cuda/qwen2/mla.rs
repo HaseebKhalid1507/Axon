@@ -59,11 +59,12 @@ const MLA_MAX_SPLITS: usize = 2048;
 const MLA_PART_BUDGET: usize = 64 << 20;
 const MLA_MV_T: usize = 8;
 /// Most bytes one mla_heads_mv block stages in shared memory (its
-/// dynamic shared memory: rows and their heads' inputs, `mv_plan`).
+/// dynamic shared memory: rows, scale tables and their heads' inputs,
+/// `mv_plan`): the default per-block limit, so no opt-in.
 const MLA_MV_SMEM: usize = 48 << 10;
 /// Rows per mla_heads_mv block (fewer if they don't fit): a block copies
-/// its rows' bytes and inputs into shared memory, its 8 warps take
-/// MLA_MV_RW rows at a time. Not part of the bits.
+/// its rows' bytes and inputs into shared memory, its 8 warps take them in
+/// turn (a lone token: 4 at a time). Not part of the bits.
 const MLA_MV_ROWS: usize = 32;
 /// Most row bytes per mla_heads_mv block: measured (mla_decode_kernel_bench,
 /// sm_89 and sm_120) best at Moonlight's k_b (88-byte rows: 32 per block)
@@ -200,7 +201,8 @@ impl MlaNet {
     }
 
     /// Most heads per attention block (mla.cu mla_attn's hpb_max: it
-    /// takes fewer when a token has few splits).
+    /// takes fewer when a token has few splits). `dims` refuses a head
+    /// count it doesn't divide or that isn't a power of two below 8.
     fn hpb(&self) -> usize {
         self.cfg.d.n_heads.min(8)
     }
@@ -367,7 +369,6 @@ impl<'m> MlaFns<'m> {
     pub(crate) fn new(mla: &'m Module<'m>, dense: &'m Module<'m>) -> Result<MlaFns<'m>, String> {
         let attn = mla.function("mla_attn")?;
         let heads_mv = mla.function("mla_heads_mv")?;
-        heads_mv.set_max_shared(MLA_MV_SMEM)?;
         let dbuf = mla.mma();
         if dbuf {
             attn.set_max_shared(attn_smem(MLA_MAX_KROW, true))?;
@@ -420,11 +421,8 @@ pub struct MlaBufs<'g> {
     host_y: HostBuf<'g>,
     /// Per segment (`n_layers + 1`): its captured decode graph, then per
     /// layer its shared experts' (`n_layers`), then per segment its graph
-    /// with the attention's tiles double-buffered (`att_dbuf`).
+    /// with the attention's tiles double-buffered (`dbuf_at`).
     graphs: Vec<Option<Graph<'g>>>,
-    /// The decode step being enqueued double-buffers its attention tiles
-    /// (`dbuf_at` of its position): which segment graphs it runs.
-    att_dbuf: std::cell::Cell<bool>,
     /// Recorded after the router's copy down (`mla_round_trip`).
     ev: SyncEvent<'g>,
     /// AXON_MOE_PROFILE=1: decode steps' seconds (GPU segments synced,
@@ -550,7 +548,6 @@ impl<'g> CudaQwen2<'g> {
             host_r: g.host_alloc(rb)?,
             host_y: g.host_alloc(yb)?,
             graphs: (0..3 * self.n_layers + 2).map(|_| None).collect(),
-            att_dbuf: std::cell::Cell::new(false),
             graph_gen: 0,
             ev: g.new_event()?,
             prof: profile_on().then_some([0.0; 4]),
@@ -720,6 +717,7 @@ impl<'g> CudaQwen2<'g> {
         rope: Arg,
         p: Arg,
         start: usize,
+        dbuf: bool,
     ) -> Result<(), String> {
         let ml = self.ml();
         let d = &ml.cfg.d;
@@ -847,7 +845,7 @@ impl<'g> CudaQwen2<'g> {
                 args.push(mb.part.arg());
                 // A decode step double-buffers its tiles (a batched pass
                 // keeps one tile: two blocks per SM).
-                let dbuf = decode && mb.att_dbuf.get() && attn_dbuf(mf.dbuf, kr);
+                assert!(!dbuf || decode, "double-buffered tiles are a decode step's");
                 args.push(Arg::I32(mf.sms as i32));
                 args.push(Arg::I32(dbuf as i32));
                 g.launch(
@@ -1071,7 +1069,6 @@ impl<'g> CudaQwen2<'g> {
         // Double-buffered attention tiles at short positions (`dbuf_at`):
         // its own set of segment graphs (the bits are the same either way).
         let dbuf = dbuf_at(pos) && attn_dbuf(mf.dbuf, self.mla.as_deref().unwrap().cfg.d.krow());
-        mb.att_dbuf.set(dbuf);
         let seg_graph = |seg: usize| if dbuf { 2 * n + 1 + seg } else { seg };
         if mb.graph_gen != c.graph_gen {
             mb.graphs.iter_mut().for_each(|g| *g = None);
@@ -1091,7 +1088,18 @@ impl<'g> CudaQwen2<'g> {
                         self.mla_add(mf, mb, c.x.arg(), 1)?;
                     }
                     if seg < n {
-                        self.mla_layer(mf, c, mb, seg, c.x.arg(), 1, c.rope.arg(), params, 0)?;
+                        self.mla_layer(
+                            mf,
+                            c,
+                            mb,
+                            seg,
+                            c.x.arg(),
+                            1,
+                            c.rope.arg(),
+                            params,
+                            0,
+                            dbuf,
+                        )?;
                     } else {
                         self.enqueue_head(c, Head::Argmax, on)?;
                     }
@@ -1238,7 +1246,7 @@ impl<'g> CudaQwen2<'g> {
                 let b = c.b.as_ref().unwrap();
                 // SAFETY: as above.
                 unsafe {
-                    self.mla_layer(mf, c, mb, li, b.x.arg(), nb, mb.rope.arg(), null, s0)?;
+                    self.mla_layer(mf, c, mb, li, b.x.arg(), nb, mb.rope.arg(), null, s0, false)?;
                 }
                 if self.mla_is_moe(li) {
                     let x = b.x.arg();

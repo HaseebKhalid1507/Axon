@@ -1,4 +1,4 @@
-# cuda/mla: faster MLA decode kernels, same bits (S2.2 + S2.3)  (PR #TBD)
+# cuda/mla: faster MLA decode kernels, same bits (S2.2 + S2.3)  (PR #145)
 
 - Date: 2026-10-26. Branch: perf/mla-decode. Base: main be13f1f. Status: open, gates pending at 2b18a69.
 - Pick / design: spike's round-2 plan (`~/.cache/axon-moeres/spec-res-r2.md`, S2.2 and S2.3, the bit-neutral

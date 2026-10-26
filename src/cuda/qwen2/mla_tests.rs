@@ -344,7 +344,6 @@ fn mla_heads_mv_equals_main() {
         ml.function("mla_heads_mv").unwrap(),
         ml.function("mla_heads_mv_ref").unwrap(),
     );
-    fnew.set_max_shared(MLA_MV_SMEM).unwrap();
     use crate::quant::{F16, F32, Q4_0, Q4_K, Q5_0, Q6_K, Q8_0};
     let mut checked = 0;
     for (qt, rph, cols, n_h) in [
@@ -620,7 +619,6 @@ fn mla_decode_kernel_bench() {
         ml.function("mla_heads_mv").unwrap(),
         ml.function("mla_heads_mv_ref").unwrap(),
     );
-    fnew.set_max_shared(MLA_MV_SMEM).unwrap();
     use crate::quant::{Q4_K, Q5_0};
     for (name, qt, rph, cols) in [("k_b", Q5_0, 512, 128), ("v_b", Q4_K, 128, 512)] {
         let n_h = 16;
