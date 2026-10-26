@@ -395,9 +395,18 @@ default: up to the context), `--cors [ORIGIN]` (answer CORS preflights and allow
 default `*`, to call the server from web pages; off by default, so an arbitrary page can't
 use your local model), `--max-conns N` / `--max-queue N` (defaults 256 / 128),
 `--parallel N` (requests decoded at once on the GPU, default 16 with paged KV, 8 without; 1: one at a time),
-`--prefill-ms MS` / `--prefill-chunk N` (how much prompt a batched step feeds while others
-decode: up to what fits in MS ms beside their decode step, at least N tokens; defaults 60 /
-256; `--prefill-ms 0`: exactly N tokens; `--prefill-chunk 0`: whole prompts), `--quiet`
+`--prefill-chunk N` (at least N prompt tokens a batched step feeds while others decode;
+default 256; `--prefill-chunk 0`: whole prompts), `--step-ms MS` (a step's target time
+while requests decode, default 60: the prompt tokens it feeds beside their decode step are
+what fits at the cost the server measures as steps run, per pass, per prompt token and per
+decode row count; 0: exactly N tokens; `--prefill-ms` is its old name), `--step-tokens N`
+(pin a step's prompt tokens), `--admit-order fifo|sjf` (`fifo`, default: first come first
+served, one per step; `sjf`, opt-in, `AXON_ADMIT=sjf`: shortest prompt first, several per
+step, which cuts short prompts' tail TTFT under load), `--admit-age-ms MS` (sjf: a request
+waiting this long starts before shorter ones, default 3000; 0: never), `--prefill-lanes N`
+(prompts prefilling at once, default 2; with sjf only prompts longer than a step's chunk
+count, default parallel/16 within 2..8, and short ones never wait for a lane). The
+scheduling of before: `AXON_STEP_COST=legacy`. `--quiet`
 (no per-request line on stderr). `GET /health` is 503 until the model is loaded.
 
 - Context (`--ctx N`, per request): by default the model's trained context (32768 for
@@ -415,7 +424,7 @@ decode: up to what fits in MS ms beside their decode step, at least N tokens; de
 - Many requests at once (`--device cuda`, the whole model on the GPU): up to `--parallel`
   requests decode together, one token each per step over the model's weights (continuous
   batching: a request joins as soon as a slot is free, and leaves when done). While others
-  decode, a new prompt is prefilled in chunks, up to `--prefill-ms` / `--prefill-chunk` worth
+  decode, a new prompt is prefilled in chunks, up to `--step-ms` / `--prefill-chunk` worth
   per step in between their steps (shortest remaining prompt first; one passed over 4
   steps in a row goes first), so a long prompt doesn't stop the others' streams while it
   prefills (on a 4090, 7B, a 24k-token prompt: their worst token gap ~70 ms instead of
