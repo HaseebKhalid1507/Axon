@@ -1,0 +1,49 @@
+{
+ "label": "mla-2b18a69-perf",
+ "verdict": "FAIL (1 of 2)",
+ "jobs": [
+  {
+   "job": "1026-040841-523c",
+   "name": "mla-2b18a69-perf",
+   "rc": 130,
+   "verdict": "FAIL (rc 130)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "2b18a69",
+   "binary": "perf.sh",
+   "started": null,
+   "ended": 1793003347.3260188,
+   "attempts": null,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "c492adaeb0f553cb1975beeaf0a809a2aa0a15c9030e1d755412c04693f7928f",
+   "log_bytes": 211
+  },
+  {
+   "job": "1026-040422-0963",
+   "name": "mla-2b18a69-mla-jade",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "jade",
+   "hw": "hw-jade.txt",
+   "gpu": "NVIDIA GeForce GTX 1050",
+   "driver": "580.159.04",
+   "sha": "2b18a69",
+   "binary": "axon-test-2b18a69",
+   "started": 1793001863.099932,
+   "ended": 1793001907.4454427,
+   "attempts": 1,
+   "remote_job": "20261026-040427-axon-test-2b18a69-1746203",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "37a739c5b63a1f2d91a163b351e387ec459137ac25686a51c78b6595ffc65089",
+   "log_bytes": 2206
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-26 04:29:08 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}

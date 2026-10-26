@@ -1,0 +1,31 @@
+[axon-run 04:04:22] submitted 1026-040422-0963 by /home/haseeb/.cache/axon-wt-mla: /home/haseeb/.cache/axon-mla/axon-test-2b18a69 cuda::qwen2::mla:: --test-threads 1
+[axon-run 04:04:23] job 1026-040422-0963 -> jade: /home/haseeb/.local/bin/axon-remote --host jade --vram 1500 --src /home/haseeb/.cache/axon-wt-mla /home/haseeb/.cache/axon-mla/axon-test-2b18a69 cuda::qwen2::mla:: --test-threads 1
+axon-remote: uploading axon-test-2b18a69 (8e9b3a5fb058f5ab8eb00cbe) + source of /home/haseeb/.cache/axon-wt-mla
+
+sent 2,015,255 bytes  received 5,265 bytes  4,041,040.00 bytes/sec
+total size is 7,095,013  speedup is 3.51
+
+sent 6,946,765 bytes  received 35 bytes  4,631,200.00 bytes/sec
+total size is 21,740,952  speedup is 3.13
+axon-remote: job 20261026-040427-axon-test-2b18a69-1746203 on jade (GPU, 1500 MB)
+[axon-node 04:04:27] GPU lock taken; job wants 1500 MB; nvidia-smi used/total/temp: 5 MiB, 3072 MiB, 42
+[axon-node 04:04:27] run axon-test-2b18a69 (8e9b3a5fb058f5ab8eb00cbe) as /home/haseeb/.cache/axon-wt-mla on jade, AXON_THREADS=4 RUST_TEST_THREADS=2
+[axon-node 04:04:27] memory cap (scope MemoryMax) 2821 MB = MemAvailable - 1536 MB; swap off for the job
+[axon-node 04:04:27] MemAvailable 4357 MB, load ['0.77', '0.80', '0.69']; nice -n 19 ionice -c3 taskset -c 0-7
+
+running 8 tests
+test cuda::qwen2::mla::tests::attn_blocks_cover_the_hpb_rule ... ok
+test cuda::qwen2::mla::tests::mla_attn_equals_main ... testutil: GPU has 2.94 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+test cuda::qwen2::mla::tests::mla_attn_matches_reference_and_batch ... ok
+test cuda::qwen2::mla::tests::mla_decode_kernel_bench ... ignored
+test cuda::qwen2::mla::tests::mla_heads_mv_equals_main ... ok
+test cuda::qwen2::mla::tests::mla_heads_mv_matches_dequant ... ok
+test cuda::qwen2::mla::tests::mla_kernels_compile_for_archs ... ok
+test cuda::qwen2::mla::tests::mla_router_matches_cpu_rule ... ok
+
+test result: ok. 7 passed; 0 failed; 1 ignored; 0 measured; 744 filtered out; finished in 37.16s
+
+[axon-node 04:05:06] exit 0 after 38.4s; lowest MemAvailable seen 3617 MB
+[axon-node 04:05:06] peak RSS 393 MB (job process tree PSS, 2 s samples x19)
+[axon-run 04:05:06] exit 0 after 43.3s (host jade)
