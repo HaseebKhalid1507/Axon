@@ -5778,8 +5778,7 @@ fn parallel_refusal_explicit_only() {
         "--parallel 6",
         "6 slots of 2048 tokens need 5.00 GiB",
         "2.00 GiB is free",
-        "one request at a time fits",
-        "2 slots don't fit",
+        "; one request at a time: 2 slots don't fit.",
         "--kv q8",
         "leave --parallel out",
     ] {

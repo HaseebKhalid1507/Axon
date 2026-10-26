@@ -1643,16 +1643,14 @@ fn parallel_refusal(
             free as f64 / GIB
         )
     });
-    let fits = match plan.slots {
-        0 | 1 => "one request at a time fits".to_string(),
-        s => format!("{s} requests at once fit"),
+    // The plan's note says what fits and why; without one, say what fits.
+    let fits = match (&plan.note, plan.slots) {
+        (Some(n), _) => n.clone(),
+        (None, 0 | 1) => "one request at a time fits".to_string(),
+        (None, s) => format!("{s} requests at once fit"),
     };
-    let why = plan
-        .note
-        .as_ref()
-        .map_or(String::new(), |n| format!(" ({n})"));
     Some(format!(
-        "{asked}{mem}; {fits}{why}. A smaller --ctx, --kv q8 or fewer --parallel, or leave \
+        "{asked}{mem}; {fits}. A smaller --ctx, --kv q8 or fewer --parallel, or leave \
          --parallel out to size it automatically"
     ))
 }
