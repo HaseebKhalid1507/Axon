@@ -1,0 +1,32 @@
+[axon-run 06:53:41] submitted 1026-065341-f1dc by /home/haseeb/.cache/axon-wt-mlapf: /home/haseeb/.cache/axon-mlapf/axon-test-a4c3196 cuda::qwen2::mla:: --test-threads 1
+[axon-run 08:56:39] VRAM: claiming the learned 2207 MB instead of --vram 3500 (name:mlapf-*-bits-bella)
+[axon-run 08:56:39] scope axon-job-1026-065341-f1dc-1793019399.scope in app-axonjobs.slice: MemoryMax 2534 MB, MemoryHigh 2280 MB, no swap, oomd pressure kill 80% (claim 1007 MB): an OOM here kills only this job
+[axon-run 08:56:39] job 1026-065341-f1dc -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-065341-f1dc-1793019399 --slice=app-axonjobs.slice -p MemoryMax=2534M -p MemoryHigh=2280M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-mlapf/axon-test-a4c3196 cuda::qwen2::mla:: --test-threads 1
+axon-q 08:56:39 start slot 16-23: /home/haseeb/.cache/axon-mlapf/axon-test-a4c3196 cuda::qwen2::mla:: --test-threads 1
+
+running 10 tests
+test cuda::qwen2::mla::tests::attn_blocks_cover_the_hpb_rule ... ok
+test cuda::qwen2::mla::tests::mla_attn_b_equals_main ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+[axon-run 08:59:44] SCOPE OOM-KILLED: systemd: axon-job-1026-065341-f1dc-1793019399.scope Result=oom-kill; systemd-oomd: Marked /user.slice/user-1000.slice/user@1000.service/app.slice/app-axonjobs.slice/axon-job-1026-065341-f1dc-1793019399.scope for killing due to memory pressure  (MemoryMax 2534 MB)
+[axon-run 08:59:44] exit 137 after 185.3s (host bella)
+[axon-run 08:59:46] VRAM: claiming the learned 2207 MB instead of --vram 3500 (name:mlapf-*-bits-bella)
+[axon-run 08:59:47] scope axon-job-1026-065341-f1dc-1793019586.scope in app-axonjobs.slice: MemoryMax 6577 MB, MemoryHigh 5919 MB, no swap, oomd pressure kill 80% (claim 3702 MB): an OOM here kills only this job
+[axon-run 08:59:47] job 1026-065341-f1dc -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-065341-f1dc-1793019586 --slice=app-axonjobs.slice -p MemoryMax=6577M -p MemoryHigh=5919M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-mlapf/axon-test-a4c3196 cuda::qwen2::mla:: --test-threads 1
+axon-q 08:59:47 start slot 16-23: /home/haseeb/.cache/axon-mlapf/axon-test-a4c3196 cuda::qwen2::mla:: --test-threads 1
+
+running 10 tests
+test cuda::qwen2::mla::tests::attn_blocks_cover_the_hpb_rule ... ok
+test cuda::qwen2::mla::tests::mla_attn_b_equals_main ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+test cuda::qwen2::mla::tests::mla_attn_equals_main ... ok
+test cuda::qwen2::mla::tests::mla_attn_matches_reference_and_batch ... ok
+test cuda::qwen2::mla::tests::mla_decode_kernel_bench ... ignored
+test cuda::qwen2::mla::tests::mla_heads_mm_equals_main ... ok
+test cuda::qwen2::mla::tests::mla_heads_mv_equals_main ... ok
+test cuda::qwen2::mla::tests::mla_heads_mv_matches_dequant ... ok
+test cuda::qwen2::mla::tests::mla_kernels_compile_for_archs ... ok
+test cuda::qwen2::mla::tests::mla_router_matches_cpu_rule ... ok
+
+test result: ok. 9 passed; 0 failed; 1 ignored; 0 measured; 744 filtered out; finished in 10.24s
+
+[axon-run 08:59:57] exit 0 after 10.4s (host bella)
