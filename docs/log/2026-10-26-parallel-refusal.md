@@ -35,7 +35,15 @@ the foreman. It matches how `--parallel` is refused on the CPU/split and for MoE
 an explicit value is refused, never the automatic sizing.
 
 ## How it was verified
-GATES
+| gate | result | job |
+|---|---|---|
+| focused (refusal predicate, end-to-end refusal, MoE predicate, help defaults, `serve_paged_pressure`) @b78c1aa, release | PASS 5 / 0 / 0 | [1025-233655-7409](https://github.com/HaseebKhalid1507/Axon/blob/a20256f50710d009408eca869729a3d618bd8717/2026-10/parallel-b78c1aa/1025-233655-7409.log) (avante sm_89) |
+| same, debug assertions | PASS 5 / 0 / 0 | [1025-233656-033e](https://github.com/HaseebKhalid1507/Axon/blob/a20256f50710d009408eca869729a3d618bd8717/2026-10/parallel-b78c1aa/1025-233656-033e.log) (avante) |
+| fast tier, release @b78c1aa | PASS 673 / 0 / 50 (18 filtered) | [1025-233657-d706](https://github.com/HaseebKhalid1507/Axon/blob/a20256f50710d009408eca869729a3d618bd8717/2026-10/parallel-b78c1aa/1025-233657-d706.log) (bella sm_120) |
+| fast tier, debug assertions (CPU) @b78c1aa | PASS 691 / 0 / 50 | [1025-233657-bbb0](https://github.com/HaseebKhalid1507/Axon/blob/a20256f50710d009408eca869729a3d618bd8717/2026-10/parallel-b78c1aa/1025-233657-bbb0.log) (bella) |
+| md5 of `gen` output vs main 39624db, 4 models × 3 prompts, cpu + cuda f16 @ad27921 | 24 / 24 identical (not rerun at b78c1aa: that diff only moves a stderr line, drops an unknown figure from a message and edits a doc) | 1025-230929-1a0e (bella) |
+| CLI demo, main vs candidate @ad27921 | main serves 25 slots silently for `--parallel 256`; candidate exits 2 with the numbers | 1025-230929-0a5d (bella) |
+| clippy -D warnings (lib, lib tests, bin), rustfmt | clean | local |
 
 ## Results
 CLI demo, MEASURED on bella (job 1025-230929-0a5d, round 1 code ad27921): `axon serve` qwen2.5-0.5b `--device cuda
