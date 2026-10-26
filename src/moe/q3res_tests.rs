@@ -1,7 +1,7 @@
 //! qwen3moe's routed experts resident on the GPU (`--gpu-experts`, PR E):
 //! the same twins as deepseek2's (`cuda::qwen2::experts`), so every
 //! placement gives the CPU experts' bits, decode == batched prefill ==
-//! verify. On the synthetic fixture (Q8_0, in memory: a released tensor
+//! verify (picks). On the synthetic fixture (Q8_0, in memory: a released tensor
 //! panics on read) and the two real test models (Qwen3-MOE-4x0.6B: Q6_K
 //! and Q4_K down; the pruned 30B-A3B: the 30B's shapes, 128 experts top-8).
 
@@ -40,6 +40,15 @@ fn assert_released(m: &Model, r: &[usize], what: &str) {
     }
 }
 
+/// verify (`verify_argmax`: the batched pass with `Head::Argmax`) picks the
+/// argmax of each decode logits row in `tr` (its first ids.len() rows).
+fn check_verify(net: &MoeQwen3, ids: &[u32], tr: &[Vec<f32>], what: &str) {
+    let mut c = net.new_cache(ids.len() + 1);
+    let picks = net.verify_argmax(ids, 0, &mut c);
+    let want: Vec<u32> = tr[..ids.len()].iter().map(|l| crate::argmax(l)).collect();
+    assert_eq!(picks, want, "{what}: verify != decode argmax");
+}
+
 /// The fixture: N(0), N(1), every layer and auto give the same bits, decode
 /// and fed in odd passes, plus a greedy continuation; the resident layers'
 /// host bytes are released and never read.
@@ -76,6 +85,7 @@ fn q3_resident_fixture_bits() {
         assert_released(&m, &r, &format!("{want:?}"));
         let tr = resident_trace(&net, &ids, &[1, 7, 13, 2, 33], 24);
         assert!(tr.iter().flatten().all(|v| v.is_finite()));
+        check_verify(&net, &ids, &tr, &format!("fixture {want:?}"));
         let b = bits(&tr);
         match &base {
             None => base = Some(b),
@@ -105,6 +115,10 @@ fn q3_resident_model_bits() {
     let g = &g;
     for small in [true, false] {
         let Some(path) = crate::testutil::moe_model_path(small) else {
+            eprintln!(
+                "SKIPPED: q3_resident_model_bits: the {} qwen3moe test model is absent",
+                if small { "4x0.6B" } else { "pruned 30B-A3B" }
+            );
             continue;
         };
         let p = path.to_str().unwrap();
@@ -130,6 +144,7 @@ fn q3_resident_model_bits() {
                 GpuExperts::Auto => assert!(!r.is_empty(), "{p} auto: {d}"),
             }
             let tr = resident_trace(&net, &ids, &[1, 7, 13, 2, 33], 24);
+            check_verify(&net, &ids, &tr, &format!("{p} {want:?}"));
             let b = bits(&tr);
             match &base {
                 None => base = Some(b),
