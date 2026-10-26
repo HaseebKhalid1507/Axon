@@ -1,0 +1,158 @@
+[axon-run 05:24:17] submitted 1026-052417-243f by /home/haseeb/.cache/axon-wt-moeres-e: /home/haseeb/.cache/axon-moeres/axon-test-b9a4093 moe::q3res_tests:: cuda::qwen2::experts:: cuda::qwen2::tests::twin:: moe::ds2_tests::ds2_resident moe::ds2_tests::ds2_gpu_fixture_bits moe::tests:: model::moe::tests:: testutil::load_tests --test-threads 1 --nocapture
+[axon-run 05:24:18] job 1026-052417-243f -> jade: /home/haseeb/.local/bin/axon-remote --host jade --vram 1500 --src /home/haseeb/.cache/axon-wt-moeres-e /home/haseeb/.cache/axon-moeres/axon-test-b9a4093 moe::q3res_tests:: cuda::qwen2::experts:: cuda::qwen2::tests::twin:: moe::ds2_tests::ds2_resident moe::ds2_tests::ds2_gpu_fixture_bits moe::tests:: model::moe::tests:: testutil::load_tests --test-threads 1 --nocapture
+axon-remote: uploading axon-test-b9a4093 (81e81c497d280744963d7c87) + source of /home/haseeb/.cache/axon-wt-moeres-e
+
+sent 1,990,765 bytes  received 5,242 bytes  1,330,671.33 bytes/sec
+total size is 7,006,095  speedup is 3.51
+
+sent 6,998,169 bytes  received 35 bytes  13,996,408.00 bytes/sec
+total size is 22,138,616  speedup is 3.16
+axon-remote: job 20261026-052423-axon-test-b9a4093-1785631 on jade (GPU, 1500 MB)
+[axon-node 05:24:23] GPU lock taken; job wants 1500 MB; nvidia-smi used/total/temp: 5 MiB, 3072 MiB, 42
+[axon-node 05:24:23] run axon-test-b9a4093 (81e81c497d280744963d7c87) as /home/haseeb/.cache/axon-wt-moeres-e on jade, AXON_THREADS=4 RUST_TEST_THREADS=2
+[axon-node 05:24:23] memory cap (scope MemoryMax) 2847 MB = MemAvailable - 1536 MB; swap off for the job
+[axon-node 05:24:23] MemAvailable 4383 MB, load ['0.35', '0.49', '0.70']; nice -n 19 ionice -c3 taskset -c 0-7
+
+running 42 tests
+test cuda::qwen2::experts::tests::cuda_experts_fixture_match_cpu ... testutil: GPU has 2.94 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+fixture layer 1 nb 1: 64 outputs equal the CPU
+fixture layer 1 nb 6: 384 outputs equal the CPU
+fixture layer 1 nb 48: 3072 outputs equal the CPU
+fixture layer 1 nb 510: 32640 outputs equal the CPU
+fixture layer 1 nb 1024: 65536 outputs equal the CPU
+fixture layer 1: types gate 8 / down 8, 4 experts, k 2, 0 never routed
+fixture layer 2 nb 1: 64 outputs equal the CPU
+fixture layer 2 nb 6: 384 outputs equal the CPU
+fixture layer 2 nb 48: 3072 outputs equal the CPU
+fixture layer 2 nb 510: 32640 outputs equal the CPU
+fixture layer 2 nb 1024: 65536 outputs equal the CPU
+fixture layer 2: types gate 8 / down 8, 4 experts, k 2, 0 never routed
+ok
+test cuda::qwen2::experts::tests::cuda_experts_moonlight_bench ... ignored
+test cuda::qwen2::experts::tests::cuda_experts_moonlight_match_cpu ... ok
+test cuda::qwen2::experts::tests::cuda_experts_qwen3moe_match_cpu ... qwen3moe-pruned layer 0 nb 1: 2048 outputs equal the CPU
+qwen3moe-pruned layer 0 nb 6: 12288 outputs equal the CPU
+qwen3moe-pruned layer 0 nb 48: 98304 outputs equal the CPU
+qwen3moe-pruned layer 0 nb 510: 1044480 outputs equal the CPU
+qwen3moe-pruned layer 0 nb 1024: 2097152 outputs equal the CPU
+qwen3moe-pruned layer 0: types gate 12 / down 12, 128 experts, k 8, 0 never routed
+qwen3moe-pruned layer 1 nb 1: 2048 outputs equal the CPU
+qwen3moe-pruned layer 1 nb 6: 12288 outputs equal the CPU
+qwen3moe-pruned layer 1 nb 48: 98304 outputs equal the CPU
+qwen3moe-pruned layer 1 nb 510: 1044480 outputs equal the CPU
+qwen3moe-pruned layer 1 nb 1024: 2097152 outputs equal the CPU
+qwen3moe-pruned layer 1: types gate 12 / down 12, 128 experts, k 8, 0 never routed
+qwen3moe-pruned layer 2 nb 1: 2048 outputs equal the CPU
+qwen3moe-pruned layer 2 nb 6: 12288 outputs equal the CPU
+qwen3moe-pruned layer 2 nb 48: 98304 outputs equal the CPU
+qwen3moe-pruned layer 2 nb 510: 1044480 outputs equal the CPU
+qwen3moe-pruned layer 2 nb 1024: 2097152 outputs equal the CPU
+qwen3moe-pruned layer 2: types gate 12 / down 14, 128 experts, k 8, 0 never routed
+qwen3moe-4x0.6b layer 0 nb 1: 1024 outputs equal the CPU
+qwen3moe-4x0.6b layer 0 nb 6: 6144 outputs equal the CPU
+qwen3moe-4x0.6b layer 0 nb 48: 49152 outputs equal the CPU
+qwen3moe-4x0.6b layer 0 nb 510: 522240 outputs equal the CPU
+qwen3moe-4x0.6b layer 0 nb 1024: 1048576 outputs equal the CPU
+qwen3moe-4x0.6b layer 0: types gate 12 / down 14, 4 experts, k 2, 0 never routed
+qwen3moe-4x0.6b layer 3 nb 1: 1024 outputs equal the CPU
+qwen3moe-4x0.6b layer 3 nb 6: 6144 outputs equal the CPU
+qwen3moe-4x0.6b layer 3 nb 48: 49152 outputs equal the CPU
+qwen3moe-4x0.6b layer 3 nb 510: 522240 outputs equal the CPU
+qwen3moe-4x0.6b layer 3 nb 1024: 1048576 outputs equal the CPU
+qwen3moe-4x0.6b layer 3: types gate 12 / down 12, 4 experts, k 2, 0 never routed
+ok
+test cuda::qwen2::experts::tests::expert_biases_refused_before_upload ... ok
+test cuda::qwen2::experts::tests::resident_placement_and_identity ... ok
+test cuda::qwen2::experts::tests::twin_refusals ... ok
+test cuda::qwen2::moe::tests::moe_gpu_dense_pass_is_an_err ... ok
+test cuda::qwen2::moe::tests::moe_gpu_dense_step_is_an_err ... ok
+test cuda::qwen2::tests::twin::gpu_twin_epilogues_match_cpu ... twin epilogues: bias and mode 1 equal the CPU (gemv_tw)
+ok
+test cuda::qwen2::tests::twin::gpu_twin_exp_swiglu_match_cpu ... twin exp/swiglu: 1248266 inputs, F true and false, equal (host fused true)
+ok
+test cuda::qwen2::tests::twin::gpu_twin_gemm2s_matches_cpu_r8 ... SKIPPED (refused, as designed): twin GEMMs need sm_80+ (tensor cores); this GPU is sm_61
+ok
+test cuda::qwen2::tests::twin::gpu_twin_gemv_matches_cpu_r8 ... twin gemv: equal on every shape; plain gemv1 differs on 10529 rows
+ok
+test cuda::qwen2::tests::twin::gpu_twin_quant_matches_cpu ... twin quant: 60 vectors, every view equal
+ok
+test model::moe::tests::chunk_dividing_divides ... ok
+test model::moe::tests::ram_keep_counts_the_kept_layers ... ok
+test model::moe::tests::ram_need_counts_the_arena_only_when_repacking ... ok
+test model::moe::tests::ram_refusal_names_the_bound ... ok
+test moe::ds2_tests::ds2_gpu_fixture_bits ... ok
+test moe::ds2_tests::ds2_resident_fallbacks_build_once ... fallback (AXON_REPACK=0): attention + router on the GPU (0.00 GiB, ctx 32), 4 experts x 2 layers on the CPU (top-2); no experts resident: AXON_REPACK=0: the CPU experts aren't the r8 kernels the GPU twins match
+fallback (fused): attention + router on the GPU (0.00 GiB, ctx 32), 4 experts x 2 layers on the CPU (top-2); no experts resident: the twins' F (true) isn't the host CPU's vmath::fused() (false)
+fallback (sm_80): attention + router on the GPU (0.00 GiB, ctx 32), 4 experts x 2 layers on the CPU (top-2); no experts resident: twin GEMMs need sm_80+ (tensor cores); this GPU is sm_61
+ok
+test moe::ds2_tests::ds2_resident_fixture_bits ... SKIPPED (fell back, as designed): attention + router on the GPU (0.00 GiB, ctx 64), 4 experts x 2 layers on the CPU (top-2); no experts resident: twin GEMMs need sm_80+ (tensor cores); this GPU is sm_61
+ok
+test moe::ds2_tests::ds2_resident_moonlight_bits ... ok
+test moe::ds2_tests::ds2_resident_ram_refusal_releases_nothing ... SKIPPED: resident experts need sm_80+
+ok
+test moe::ds2_tests::ds2_resident_untwinnable_layer_stays_on_cpu ... SKIPPED: resident experts need sm_80+
+ok
+test moe::q3res_tests::q3_resident_fallbacks ... qwen3moe fallback (AXON_REPACK=0): attention + router on the GPU (0.00 GiB, ctx 64), 4 experts x 2 layers on the CPU (top-2); no experts resident: AXON_REPACK=0: the CPU experts aren't the r8 kernels the GPU twins match
+qwen3moe fallback (fused): attention + router on the GPU (0.00 GiB, ctx 64), 4 experts x 2 layers on the CPU (top-2); no experts resident: the twins' F (true) isn't the host CPU's vmath::fused() (false)
+gpt-oss fallback: attention + router on the GPU (0.00 GiB, ctx 32), 4 experts x 3 layers on the CPU (top-2); no experts resident: resident experts: deepseek2 and qwen3moe only for now (gpt-oss)
+ok
+test moe::q3res_tests::q3_resident_fixture_bits ... SKIPPED: resident experts: twin GEMMs need sm_80+ (tensor cores); this GPU is sm_61
+ok
+test moe::q3res_tests::q3_resident_model_bits ... SKIPPED: resident experts: twin GEMMs need sm_80+ (tensor cores); this GPU is sm_61
+ok
+test moe::tests::backend_places_moe ... moe:         attention + router on the GPU (0.30 GiB, ctx 512), 4 experts x 28 layers on the CPU (top-2), kv f16
+ok
+test moe::tests::moe_gpu_feed_batch_matches_feed_pruned ... 
+thread 'moe::tests::moe_gpu_feed_batch_matches_feed_pruned' (1787538) panicked at src/moe/tests.rs:155:65:
+called `Result::unwrap()` on an `Err` value: "qwen3moe: the CPU experts needs about 2.52 GiB of RAM (its repacked experts 1.02 GiB) and only 2.46 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/run-p1785642-i1768495.scope memory.max 2847 MiB)"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test moe::tests::moe_gpu_feed_batch_matches_feed_small ... ok
+test moe::tests::moe_gpu_logits_graded_pruned ... 
+thread 'moe::tests::moe_gpu_logits_graded_pruned' (1787870) panicked at src/moe/tests.rs:155:65:
+called `Result::unwrap()` on an `Err` value: "qwen3moe: the CPU experts needs about 2.52 GiB of RAM (its repacked experts 1.02 GiB) and only 2.46 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/run-p1785642-i1768495.scope memory.max 2847 MiB)"
+FAILED
+test moe::tests::moe_gpu_logits_graded_small ... 4x0.6B moe gpu vs cpu: top-1 564/582 (96.9%), KL mean 6.90e-3 max 2.45e-1 (> 0.5: []), max |dlogit| 3.155, flip margins [0.47366905, 0.24565315, 0.039684296, 0.49144173, 0.03759575, 1.2136898, 0.20728493, 0.019577026, 0.05123329, 0.20588875, 0.33187866, 0.057079315, 0.013799667, 0.049612045, 0.21339226, 0.050798416, 0.45049667, 0.25998116]
+4x0.6B cpu rows vs cpu: top-1 566/582 (97.3%), KL mean 6.56e-3 max 1.29e-1 (> 0.5: []), max |dlogit| 3.846, flip margins [0.29473305, 0.20351028, 0.49144173, 0.03759575, 0.34555435, 0.19452286, 0.019577026, 0.12591743, 0.11870384, 0.0033092499, 0.057079315, 0.21339226, 0.050798416, 0.10025787, 0.129076, 0.61514664]
+ok
+test moe::tests::moe_gpu_paged_and_graph_generation ... ok
+test moe::tests::moe_gpu_route_matches_cpu_twin_pruned ... 
+thread 'moe::tests::moe_gpu_route_matches_cpu_twin_pruned' (1790016) panicked at src/moe/tests.rs:155:65:
+called `Result::unwrap()` on an `Err` value: "qwen3moe: the CPU experts needs about 2.52 GiB of RAM (its repacked experts 1.02 GiB) and only 2.46 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/run-p1785642-i1768495.scope memory.max 2847 MiB)"
+FAILED
+test moe::tests::moe_gpu_route_matches_cpu_twin_small ... 4x0.6B: router GPU vs CPU twin on identical h: 3108 (layer, token) routes, expert sets differ 45 (1.448%), rank order only 0, max |w| diff (same set) 2.72e-5, widest CPU k-th vs (k+1)-th probability gap where the sets differ 0.00e0, most weight on a differing expert 1.61e-38
+ok
+test moe::tests::moe_gpu_step_refuses_head_no ... 
+thread 'moe::tests::moe_gpu_step_refuses_head_no' (1790096) panicked at src/cuda/qwen2/moe.rs:440:9:
+moe_step: No
+ok
+test moe::tests::moe_gpu_verify_matches_forward_pruned ... 
+thread 'moe::tests::moe_gpu_verify_matches_forward_pruned' (1790117) panicked at src/moe/tests.rs:155:65:
+called `Result::unwrap()` on an `Err` value: "qwen3moe: the CPU experts needs about 2.52 GiB of RAM (its repacked experts 1.02 GiB) and only 2.46 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/run-p1785642-i1768495.scope memory.max 2847 MiB)"
+FAILED
+test moe::tests::moe_gpu_verify_matches_forward_small ... ok
+test moe::tests::moe_route_batch_invariant_and_ties ... ok
+test moe::tests::transpose_tiled_transposes ... ok
+test testutil::load_tests::loaders_map_as_the_product_does ... load_with(_, None): 4 GB or less available, not checked
+ok
+test testutil::load_tests::released_tensor_refused_on_a_mapping ... 
+thread 'testutil::load_tests::released_tensor_refused_on_a_mapping' (1790772) panicked at src/gguf.rs:582:13:
+tensor blk.0.ffn_down.weight was released after repacking; load the model again to read it
+
+thread 'testutil::load_tests::released_tensor_refused_on_a_mapping' (1790772) panicked at src/gguf.rs:582:13:
+tensor blk.0.attn_q.weight was released after repacking; load the model again to read it
+ok
+
+failures:
+
+failures:
+    moe::tests::moe_gpu_feed_batch_matches_feed_pruned
+    moe::tests::moe_gpu_logits_graded_pruned
+    moe::tests::moe_gpu_route_matches_cpu_twin_pruned
+    moe::tests::moe_gpu_verify_matches_forward_pruned
+
+test result: FAILED. 37 passed; 4 failed; 1 ignored; 0 measured; 709 filtered out; finished in 481.12s
+
+[axon-node 05:32:54] exit 101 after 510.7s; lowest MemAvailable seen 2506 MB
+[axon-node 05:32:54] peak RSS 2788 MB (job process tree PSS, 2 s samples x252)
+[axon-run 05:32:57] exit 101 after 518.9s (host jade)

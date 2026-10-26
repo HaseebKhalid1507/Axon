@@ -1,0 +1,81 @@
+[axon-run 05:24:19] submitted 1026-052419-63a6 by /home/haseeb/.cache/axon-wt-moeres-e: /home/haseeb/.cache/axon-moeres/abq3.py /home/haseeb/.cache/axon-moeres/axon-main-be13f1f /home/haseeb/.cache/axon-moeres/axon-b9a4093
+[axon-run 06:24:42] scope axon-job-1026-052419-63a6-1793010282.scope in app-axonjobs.slice: MemoryMax 21841 MB, MemoryHigh 19656 MB, no swap, oomd pressure kill 80% (claim 13878 MB): an OOM here kills only this job
+[axon-run 06:24:42] job 1026-052419-63a6 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-052419-63a6-1793010282 --slice=app-axonjobs.slice -p MemoryMax=21841M -p MemoryHigh=19656M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-moeres/abq3.py /home/haseeb/.cache/axon-moeres/axon-main-be13f1f /home/haseeb/.cache/axon-moeres/axon-b9a4093
+ABQ3 out /home/haseeb/.cache/axon-moeres/abq3-1026-062442 main /home/haseeb/.cache/axon-moeres/axon-main-be13f1f cand /home/haseeb/.cache/axon-moeres/axon-b9a4093
+ABQ3 pruned30b main tg512-warm rc=0 614.08 tok/s majflt=3 minflt=49344 memhigh+=0 (warm-up) | attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+ABQ3 pruned30b main pp2100-warm rc=0 8386.92 tok/s majflt=2 minflt=55293 memhigh+=0 (warm-up) | attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+ABQ3 pruned30b cand-0 tg512-warm rc=0 701.51 tok/s majflt=1 minflt=49613 memhigh+=0 (warm-up) | attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+ABQ3 pruned30b cand-0 pp2100-warm rc=0 8332.71 tok/s majflt=0 minflt=74705 memhigh+=0 (warm-up) | attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+ABQ3 pruned30b cand-auto tg512-warm rc=0 989.75 tok/s majflt=0 minflt=52482 memhigh+=0 (warm-up) | attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 0 layers on the CPU (top-8); 3 of 3 exper
+ABQ3 pruned30b cand-auto pp2100-warm rc=0 86067.41 tok/s majflt=0 minflt=53077 memhigh+=0 (warm-up) | attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 0 layers on the CPU (top-8); 3 of 3 exper
+ABQ3 pruned30b main tg512-r1 rc=0 622.71 tok/s majflt=0 minflt=50031 memhigh+=0  | attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+ABQ3 pruned30b main pp2100-r1 rc=0 8039.11 tok/s majflt=0 minflt=53785 memhigh+=0  | attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+[axon-run 06:25:15] FOREIGN_GPU sample max=32% mean=9.7% n=6 (kitty 1945559 1%, kitty 99200 1%, Xorg 1601 1%)
+ABQ3 pruned30b cand-0 tg512-r1 rc=0 610.84 tok/s majflt=0 minflt=49082 memhigh+=0  | attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+ABQ3 pruned30b cand-0 pp2100-r1 rc=0 8171.12 tok/s majflt=0 minflt=54773 memhigh+=0  | attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+ABQ3 pruned30b cand-auto tg512-r1 rc=0 1018.12 tok/s majflt=0 minflt=53664 memhigh+=0  | attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 0 layers on the CPU (top-8); 3 of 3 exper
+ABQ3 pruned30b cand-auto pp2100-r1 rc=0 80222.47 tok/s majflt=0 minflt=53250 memhigh+=0  | attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 0 layers on the CPU (top-8); 3 of 3 exper
+ABQ3 pruned30b cand-0 tg512-r2 rc=0 605.33 tok/s majflt=0 minflt=48328 memhigh+=0  | attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+ABQ3 pruned30b cand-0 pp2100-r2 rc=0 8122.37 tok/s majflt=0 minflt=58257 memhigh+=0  | attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+ABQ3 pruned30b cand-auto tg512-r2 rc=0 1001.97 tok/s majflt=0 minflt=55031 memhigh+=0  | attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 0 layers on the CPU (top-8); 3 of 3 exper
+ABQ3 pruned30b cand-auto pp2100-r2 rc=0 86699.17 tok/s majflt=0 minflt=54428 memhigh+=0  | attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 0 layers on the CPU (top-8); 3 of 3 exper
+[axon-run 06:25:47] FOREIGN_GPU sample max=27% mean=9.5% n=6 (Xorg 1601 2%)
+ABQ3 pruned30b main tg512-r2 rc=0 697.13 tok/s majflt=0 minflt=48164 memhigh+=0  | attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+ABQ3 pruned30b main pp2100-r2 rc=0 8313.99 tok/s majflt=0 minflt=56764 memhigh+=0  | attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+ABQ3 pruned30b cand-auto tg512-r3 rc=0 1069.79 tok/s majflt=0 minflt=53764 memhigh+=0  | attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 0 layers on the CPU (top-8); 3 of 3 exper
+ABQ3 pruned30b cand-auto pp2100-r3 rc=0 83838.41 tok/s majflt=0 minflt=52900 memhigh+=0  | attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 0 layers on the CPU (top-8); 3 of 3 exper
+ABQ3 pruned30b main tg512-r3 rc=0 748.27 tok/s majflt=0 minflt=48668 memhigh+=0  | attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+ABQ3 pruned30b main pp2100-r3 rc=0 8439.25 tok/s majflt=0 minflt=76696 memhigh+=0  | attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+ABQ3 pruned30b cand-0 tg512-r3 rc=0 645.28 tok/s majflt=0 minflt=48328 memhigh+=0  | attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+ABQ3 pruned30b cand-0 pp2100-r3 rc=0 8481.73 tok/s majflt=0 minflt=57724 memhigh+=0  | attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+[axon-run 06:26:19] FOREIGN_GPU sample max=7% mean=5.2% n=6 (Xorg 1601 3%)
+ABQ3 4x0.6b main tg512-warm rc=0 169.64 tok/s majflt=1 minflt=38423 memhigh+=0 (warm-up) | attention + router on the GPU (0.30 GiB, ctx 4096), 4 experts x 28 layers on the CPU (top-2), kv f16
+ABQ3 4x0.6b main pp2100-warm rc=0 2094.64 tok/s majflt=0 minflt=44060 memhigh+=0 (warm-up) | attention + router on the GPU (0.30 GiB, ctx 4096), 4 experts x 28 layers on the CPU (top-2), kv f16
+ABQ3 4x0.6b cand-0 tg512-warm rc=0 165.46 tok/s majflt=0 minflt=38197 memhigh+=0 (warm-up) | attention + router on the GPU (0.30 GiB, ctx 4096), 4 experts x 28 layers on the CPU (top-2), kv f16
+ABQ3 4x0.6b cand-0 pp2100-warm rc=0 2017.71 tok/s majflt=0 minflt=45456 memhigh+=0 (warm-up) | attention + router on the GPU (0.30 GiB, ctx 4096), 4 experts x 28 layers on the CPU (top-2), kv f16
+ABQ3 4x0.6b cand-auto tg512-warm rc=0 367.47 tok/s majflt=0 minflt=40096 memhigh+=0 (warm-up) | attention + router on the GPU (0.30 GiB, ctx 4096), 4 experts x 0 layers on the CPU (top-2); 28 of 28 exper
+ABQ3 4x0.6b cand-auto pp2100-warm rc=0 25795.2 tok/s majflt=0 minflt=40698 memhigh+=0 (warm-up) | attention + router on the GPU (0.30 GiB, ctx 4096), 4 experts x 0 layers on the CPU (top-2); 28 of 28 exper
+[axon-run 06:26:50] FOREIGN_GPU sample max=4% mean=3.5% n=6 (kitty 1945559 2%)
+ABQ3 4x0.6b main tg512-r1 rc=0 162.45 tok/s majflt=0 minflt=38817 memhigh+=0  | attention + router on the GPU (0.30 GiB, ctx 4096), 4 experts x 28 layers on the CPU (top-2), kv f16
+ABQ3 4x0.6b main pp2100-r1 rc=0 2031.75 tok/s majflt=0 minflt=44461 memhigh+=0  | attention + router on the GPU (0.30 GiB, ctx 4096), 4 experts x 28 layers on the CPU (top-2), kv f16
+ABQ3 4x0.6b cand-0 tg512-r1 rc=0 165.78 tok/s majflt=0 minflt=39359 memhigh+=0  | attention + router on the GPU (0.30 GiB, ctx 4096), 4 experts x 28 layers on the CPU (top-2), kv f16
+ABQ3 4x0.6b cand-0 pp2100-r1 rc=0 2007.73 tok/s majflt=0 minflt=45965 memhigh+=0  | attention + router on the GPU (0.30 GiB, ctx 4096), 4 experts x 28 layers on the CPU (top-2), kv f16
+ABQ3 4x0.6b cand-auto tg512-r1 rc=0 367.89 tok/s majflt=0 minflt=41670 memhigh+=0  | attention + router on the GPU (0.30 GiB, ctx 4096), 4 experts x 0 layers on the CPU (top-2); 28 of 28 exper
+ABQ3 4x0.6b cand-auto pp2100-r1 rc=0 26276.93 tok/s majflt=0 minflt=40334 memhigh+=0  | attention + router on the GPU (0.30 GiB, ctx 4096), 4 experts x 0 layers on the CPU (top-2); 28 of 28 exper
+[axon-run 06:27:22] FOREIGN_GPU sample max=5% mean=3.0% n=9 (kitty 1945559 3%)
+ABQ3 4x0.6b cand-0 tg512-r2 rc=0 164.42 tok/s majflt=0 minflt=37842 memhigh+=0  | attention + router on the GPU (0.30 GiB, ctx 4096), 4 experts x 28 layers on the CPU (top-2), kv f16
+ABQ3 4x0.6b cand-0 pp2100-r2 rc=0 1997.99 tok/s majflt=0 minflt=43970 memhigh+=0  | attention + router on the GPU (0.30 GiB, ctx 4096), 4 experts x 28 layers on the CPU (top-2), kv f16
+ABQ3 4x0.6b cand-auto tg512-r2 rc=0 380.49 tok/s majflt=0 minflt=40104 memhigh+=0  | attention + router on the GPU (0.30 GiB, ctx 4096), 4 experts x 0 layers on the CPU (top-2); 28 of 28 exper
+ABQ3 4x0.6b cand-auto pp2100-r2 rc=0 25007.88 tok/s majflt=0 minflt=40684 memhigh+=0  | attention + router on the GPU (0.30 GiB, ctx 4096), 4 experts x 0 layers on the CPU (top-2); 28 of 28 exper
+ABQ3 4x0.6b main tg512-r2 rc=0 168.05 tok/s majflt=0 minflt=37380 memhigh+=0  | attention + router on the GPU (0.30 GiB, ctx 4096), 4 experts x 28 layers on the CPU (top-2), kv f16
+ABQ3 4x0.6b main pp2100-r2 rc=0 2088.88 tok/s majflt=0 minflt=43511 memhigh+=0  | attention + router on the GPU (0.30 GiB, ctx 4096), 4 experts x 28 layers on the CPU (top-2), kv f16
+ABQ3 4x0.6b cand-auto tg512-r3 rc=0 392.85 tok/s majflt=0 minflt=41155 memhigh+=0  | attention + router on the GPU (0.30 GiB, ctx 4096), 4 experts x 0 layers on the CPU (top-2); 28 of 28 exper
+[axon-run 06:27:53] FOREIGN_GPU sample max=13% mean=7.3% n=6 (kitty 99200 11%, Xorg 1601 2%)
+ABQ3 4x0.6b cand-auto pp2100-r3 rc=0 24904.24 tok/s majflt=0 minflt=41681 memhigh+=0  | attention + router on the GPU (0.30 GiB, ctx 4096), 4 experts x 0 layers on the CPU (top-2); 28 of 28 exper
+ABQ3 4x0.6b main tg512-r3 rc=0 168.89 tok/s majflt=0 minflt=37261 memhigh+=0  | attention + router on the GPU (0.30 GiB, ctx 4096), 4 experts x 28 layers on the CPU (top-2), kv f16
+ABQ3 4x0.6b main pp2100-r3 rc=0 2018.08 tok/s majflt=0 minflt=45168 memhigh+=0  | attention + router on the GPU (0.30 GiB, ctx 4096), 4 experts x 28 layers on the CPU (top-2), kv f16
+ABQ3 4x0.6b cand-0 tg512-r3 rc=0 166.52 tok/s majflt=0 minflt=38804 memhigh+=0  | attention + router on the GPU (0.30 GiB, ctx 4096), 4 experts x 28 layers on the CPU (top-2), kv f16
+ABQ3 4x0.6b cand-0 pp2100-r3 rc=0 2070.92 tok/s majflt=0 minflt=45722 memhigh+=0  | attention + router on the GPU (0.30 GiB, ctx 4096), 4 experts x 28 layers on the CPU (top-2), kv f16
+ABQ3 SUMMARY model config metric median spread% (values) max_majflt verdict
+ABQ3 SUMMARY 4x0.6b cand-0 pp2100 2007.73 3.6% [2007.73, 1997.99, 2070.92] 0 RECORD
+ABQ3 SUMMARY 4x0.6b cand-0 tg512 165.78 1.3% [165.78, 164.42, 166.52] 0 RECORD
+ABQ3 SUMMARY 4x0.6b cand-auto pp2100 25007.88 5.5% [26276.93, 25007.88, 24904.24] 0 RECORD
+ABQ3 SUMMARY 4x0.6b cand-auto tg512 380.49 6.6% [367.89, 380.49, 392.85] 0 RECORD
+ABQ3 SUMMARY 4x0.6b main pp2100 2031.75 3.5% [2031.75, 2088.88, 2018.08] 0 RECORD
+ABQ3 SUMMARY 4x0.6b main tg512 168.05 3.8% [162.45, 168.05, 168.89] 0 RECORD
+ABQ3 SUMMARY pruned30b cand-0 pp2100 8171.12 4.4% [8171.12, 8122.37, 8481.73] 0 RECORD
+ABQ3 SUMMARY pruned30b cand-0 tg512 610.84 6.5% [610.84, 605.33, 645.28] 0 RECORD
+ABQ3 SUMMARY pruned30b cand-auto pp2100 83838.41 7.7% [80222.47, 86699.17, 83838.41] 0 RECORD
+ABQ3 SUMMARY pruned30b cand-auto tg512 1018.12 6.7% [1018.12, 1001.97, 1069.79] 0 RECORD
+ABQ3 SUMMARY pruned30b main pp2100 8313.99 4.8% [8039.11, 8313.99, 8439.25] 0 RECORD
+ABQ3 SUMMARY pruned30b main tg512 697.13 18.0% [622.71, 697.13, 748.27] 0 NOT A RECORD
+ABQ3 RATIO pruned30b tg512: cand-0/main x0.876, cand-auto/main x1.460
+ABQ3 RATIO pruned30b pp2100: cand-0/main x0.983, cand-auto/main x10.084
+ABQ3 TEXT pruned30b: identical across main / cand-0 / cand-auto: True [{'3c3139e24ede'}, {'3c3139e24ede'}, {'3c3139e24ede'}]
+ABQ3 RATIO 4x0.6b tg512: cand-0/main x0.986, cand-auto/main x2.264
+ABQ3 RATIO 4x0.6b pp2100: cand-0/main x0.988, cand-auto/main x12.309
+ABQ3 TEXT 4x0.6b: identical across main / cand-0 / cand-auto: True [{'81c20b220e97'}, {'81c20b220e97'}, {'81c20b220e97'}]
+ABQ3 DONE
+[axon-run 06:28:21] exit 0 after 218.6s (host bella)
+[axon-run 06:28:27] EXPECT ok: output matches /ABQ3 DONE/
+[axon-run 06:28:27] FOREIGN_GPU max=32% mean=6.2% samples=44 top: kitty 1945559 23%, Xorg 1601 8%, kitty 99200 1%  TAINTED (mean > 5% or max > 25%): timing numbers not trustworthy, rerun
