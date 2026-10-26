@@ -300,8 +300,8 @@ Each row is the PR's own run against llama.cpp 4413a19 (#63, #67, #78, #89, #98;
 - `serve` runs a MoE model one request at a time (no slot pool for MoE backends).
 - Shortest-first admission (`--admit-order sjf`, #131) missed its kill-rule clause on the laptop cells (short TTFT
   p50 0.56× / 0.79× of fifo where ≤ 0.5× was needed) and is opt-in; the H100 cells it was designed for are #139.
-- A dense model loaded on the CPU under a memory limit is OOM-killed instead of refused (#135; #133 fixed MoE), and
-  an explicit `--parallel N` can come up serving one request at a time without saying why when VRAM is short (#137).
+- A dense model loaded on the CPU under a memory limit is OOM-killed instead of refused (#135; #133 fixed MoE). (An
+  explicit `--parallel N` that doesn't fit in GPU memory is now refused at start: #137, #141.)
 
 - Long-context decode at 32k on 7B / 0.5B vs llama.cpp (above). #50 merged (+3.3–3.5 % on 7B f16, +10–12 % on 0.5B
   f16 in its own runs); nobody has re-boarded it against llama.cpp.

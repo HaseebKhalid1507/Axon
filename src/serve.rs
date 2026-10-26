@@ -1152,8 +1152,8 @@ fn engine(
             };
             let free = n.free_bytes().ok().map(|f| f as usize);
             let plan = free.and_then(|free| paged_plan(n, kv, want.max(ctx), slots, free, !fit));
-            // Why not (the refusal below says it too); always said, also
-            // under --quiet: the server then reserves whole slots instead.
+            // Why not: in the refusal below, or, if the server starts with
+            // reserved slots instead, said then (also under --quiet).
             if plan.is_none() {
                 let why = match fit {
                     false => format!(
@@ -1165,11 +1165,11 @@ fn engine(
                          of {slots} slots"
                     ),
                 };
-                let why = format!(
-                    "{why} ({:.2} GiB of GPU memory free)",
-                    free.unwrap_or(0) as f64 / GIB
-                );
-                eprintln!("axon serve: no paged KV pool: {why}; slots reserved whole instead");
+                // The figure only when it could be read.
+                let why = match free {
+                    Some(f) => format!("{why} ({:.2} GiB of GPU memory free)", f as f64 / GIB),
+                    None => why,
+                };
                 paged_miss = Some(why);
             }
             // Tests: fewer pages (the cap within them).
@@ -1251,6 +1251,9 @@ fn engine(
     ) {
         let _ = ready.send(Err(Refused(why)));
         return;
+    }
+    if let Some(why) = &paged_miss {
+        eprintln!("axon serve: no paged KV pool: {why}; slots reserved whole instead");
     }
     // Said even under --quiet: one request at a time, or the context an
     // explicit --parallel N got (shorter than asked for: its other axis).
