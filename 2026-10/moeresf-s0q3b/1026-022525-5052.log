@@ -1,0 +1,96 @@
+[axon-run 02:25:25] submitted 1026-022525-5052 by /home/haseeb/.cache/axon-wt-moeres-mainbase: /home/haseeb/.cache/axon-moeres/s0q3b.py /home/haseeb/.cache/axon-moeres/axon-main-39624db
+[axon-run 02:25:25] timing job waiting: foreign GPU load 20 % 105 s ago (Xorg 1601 20%), quiet 105 s of the 120 s needed (on bella; > 10 %)
+[axon-run 05:06:47] scope axon-job-1026-022525-5052-1793005606.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 21858 MB): an OOM here kills only this job
+[axon-run 05:06:47] job 1026-022525-5052 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-022525-5052-1793005606 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-moeres/s0q3b.py /home/haseeb/.cache/axon-moeres/axon-main-39624db
+S0Q3B out /home/haseeb/.cache/axon-moeres/s0q3b-1026-050647
+cgroup /sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/app-axonjobs.slice/axon-job-1026-022525-5052-1793005606.scope memory.high 20761804800
+S0Q3B prewarm 30B: resident 0.0 % -> 5.9 % in 7.8 s
+[axon-run 05:07:20] FOREIGN_GPU sample max=5% mean=2.2% n=6 (Xorg 1601 2%, zen-bin 2513371 1%)
+S0Q3B 30b-warm tg512 ctx=4096 rc=0 25.39 tok/s majflt=33482 minflt=868209 memhigh+=0 memmax+=0 30B_resident 5.9->74.2 % peak_card_MiB=2546 (warm-up, discarded) env={'AXON_REPACK': '0'}
+    moe:         attention + router on the GPU (0.95 GiB, ctx 4096), 128 experts x 48 layers on the CPU (top-8), kv f16
+S0Q3B 30b-warm pp2100 ctx=4096 rc=0 270.51 tok/s majflt=7591 minflt=2106127 memhigh+=0 memmax+=0 30B_resident 74.2->95.5 % peak_card_MiB=2544 (warm-up, discarded) env={'AXON_REPACK': '0'}
+    moe:         attention + router on the GPU (0.95 GiB, ctx 4096), 128 experts x 48 layers on the CPU (top-8), kv f16
+S0Q3B pruned-in-place-warm tg512 ctx=4096 rc=0 498.88 tok/s majflt=52 minflt=101918 memhigh+=0 memmax+=0 30B_resident 89.8->88.6 % peak_card_MiB=1578 (warm-up, discarded) env={'AXON_REPACK': '0'}
+    moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3B pruned-in-place-warm pp2100 ctx=4096 rc=0 3584.91 tok/s majflt=16 minflt=712397 memhigh+=0 memmax+=0 30B_resident 81.5->81.5 % peak_card_MiB=1578 (warm-up, discarded) env={'AXON_REPACK': '0'}
+    moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3B pruned-r8-warm tg512 ctx=4096 rc=0 613.37 tok/s majflt=52 minflt=114260 memhigh+=0 memmax+=0 30B_resident 81.5->81.5 % peak_card_MiB=1578 (warm-up, discarded) env={'AXON_REPACK': '1'}
+    moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+[axon-run 05:07:52] FOREIGN_GPU sample max=7% mean=2.8% n=6
+S0Q3B pruned-r8-warm pp2100 ctx=4096 rc=0 4775.24 tok/s majflt=0 minflt=907052 memhigh+=0 memmax+=0 30B_resident 81.5->81.5 % peak_card_MiB=1578 (warm-up, discarded) env={'AXON_REPACK': '1'}
+    moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3B 30b-r1 tg512 ctx=4096 rc=0 28.3 tok/s majflt=16909 minflt=415672 memhigh+=0 memmax+=0 30B_resident 81.5->92.9 % peak_card_MiB=2546  env={'AXON_REPACK': '0'}
+    moe:         attention + router on the GPU (0.95 GiB, ctx 4096), 128 experts x 48 layers on the CPU (top-8), kv f16
+[axon-run 05:08:25] FOREIGN_GPU sample max=6% mean=2.3% n=6 (kitty 3618535 5%)
+S0Q3B 30b-r1 pp2100 ctx=4096 rc=0 241.35 tok/s majflt=14071 minflt=7665112 memhigh+=0 memmax+=0 30B_resident 92.9->93.3 % peak_card_MiB=2544  env={'AXON_REPACK': '0'}
+    moe:         attention + router on the GPU (0.95 GiB, ctx 4096), 128 experts x 48 layers on the CPU (top-8), kv f16
+S0Q3B pruned-in-place-r1 tg512 ctx=4096 rc=0 512.63 tok/s majflt=193 minflt=109422 memhigh+=0 memmax+=0 30B_resident 93.3->88.6 % peak_card_MiB=1578  env={'AXON_REPACK': '0'}
+    moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3B pruned-in-place-r1 pp2100 ctx=4096 rc=0 3930.92 tok/s majflt=92 minflt=761459 memhigh+=0 memmax+=0 30B_resident 71.9->64.1 % peak_card_MiB=1578  env={'AXON_REPACK': '0'}
+    moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3B pruned-r8-r1 tg512 ctx=4096 rc=0 618.13 tok/s majflt=2 minflt=117676 memhigh+=0 memmax+=0 30B_resident 62.9->58.6 % peak_card_MiB=1578  env={'AXON_REPACK': '1'}
+    moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3B pruned-r8-r1 pp2100 ctx=4096 rc=0 4545.25 tok/s majflt=0 minflt=806510 memhigh+=0 memmax+=0 30B_resident 58.6->53.1 % peak_card_MiB=1578  env={'AXON_REPACK': '1'}
+    moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+[axon-run 05:08:57] FOREIGN_GPU sample max=3% mean=1.5% n=6
+S0Q3B 30b-r2 tg512 ctx=4096 rc=0 20.09 tok/s majflt=363903 minflt=654977 memhigh+=0 memmax+=0 30B_resident 53.1->75.6 % peak_card_MiB=2546  env={'AXON_REPACK': '0'}
+    moe:         attention + router on the GPU (0.95 GiB, ctx 4096), 128 experts x 48 layers on the CPU (top-8), kv f16
+[axon-run 05:09:30] FOREIGN_GPU sample max=5% mean=0.8% n=6
+S0Q3B 30b-r2 pp2100 ctx=4096 rc=0 286.57 tok/s majflt=9223 minflt=789646 memhigh+=0 memmax+=0 30B_resident 69.1->98.4 % peak_card_MiB=2400  env={'AXON_REPACK': '0'}
+    moe:         attention + router on the GPU (0.95 GiB, ctx 4096), 128 experts x 48 layers on the CPU (top-8), kv f16
+S0Q3B pruned-in-place-r2 tg512 ctx=4096 rc=0 517.96 tok/s majflt=675 minflt=102486 memhigh+=0 memmax+=0 30B_resident 98.4->94.8 % peak_card_MiB=1436  env={'AXON_REPACK': '0'}
+    moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3B pruned-in-place-r2 pp2100 ctx=4096 rc=0 3880.53 tok/s majflt=4 minflt=758008 memhigh+=0 memmax+=0 30B_resident 93.9->86.6 % peak_card_MiB=1436  env={'AXON_REPACK': '0'}
+    moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3B pruned-r8-r2 tg512 ctx=4096 rc=0 634.8 tok/s majflt=21 minflt=96885 memhigh+=0 memmax+=0 30B_resident 54.9->32.0 % peak_card_MiB=1436  env={'AXON_REPACK': '1'}
+    moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3B pruned-r8-r2 pp2100 ctx=4096 rc=0 4940.21 tok/s majflt=3 minflt=906671 memhigh+=0 memmax+=0 30B_resident 32.0->26.5 % peak_card_MiB=1436  env={'AXON_REPACK': '1'}
+    moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+[axon-run 05:10:02] FOREIGN_GPU sample max=10% mean=2.8% n=6 (kitty 3618535 3%)
+[axon-run 05:10:34] FOREIGN_GPU sample max=0% mean=0.0% n=6
+S0Q3B 30b-r3 tg512 ctx=4096 rc=0 15.68 tok/s majflt=398550 minflt=707830 memhigh+=0 memmax+=0 30B_resident 26.5->77.6 % peak_card_MiB=2572  env={'AXON_REPACK': '0'}
+    moe:         attention + router on the GPU (0.95 GiB, ctx 4096), 128 experts x 48 layers on the CPU (top-8), kv f16
+S0Q3B 30b-r3 pp2100 ctx=4096 rc=0 184.77 tok/s majflt=77701 minflt=9916345 memhigh+=0 memmax+=0 30B_resident 65.6->69.3 % peak_card_MiB=2564  env={'AXON_REPACK': '0'}
+    moe:         attention + router on the GPU (0.95 GiB, ctx 4096), 128 experts x 48 layers on the CPU (top-8), kv f16
+S0Q3B pruned-in-place-r3 tg512 ctx=4096 rc=0 527.99 tok/s majflt=161 minflt=86588 memhigh+=0 memmax+=0 30B_resident 69.2->69.2 % peak_card_MiB=1600  env={'AXON_REPACK': '0'}
+    moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3B pruned-in-place-r3 pp2100 ctx=4096 rc=0 5520.16 tok/s majflt=0 minflt=59638 memhigh+=0 memmax+=0 30B_resident 69.2->69.2 % peak_card_MiB=1600  env={'AXON_REPACK': '0'}
+    moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+[axon-run 05:11:06] FOREIGN_GPU sample max=0% mean=0.0% n=6
+S0Q3B pruned-r8-r3 tg512 ctx=4096 rc=0 660.89 tok/s majflt=0 minflt=92284 memhigh+=0 memmax+=0 30B_resident 69.2->69.2 % peak_card_MiB=1600  env={'AXON_REPACK': '1'}
+    moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3B pruned-r8-r3 pp2100 ctx=4096 rc=0 5025.78 tok/s majflt=0 minflt=911327 memhigh+=0 memmax+=0 30B_resident 69.2->69.2 % peak_card_MiB=1600  env={'AXON_REPACK': '1'}
+    moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+[axon-run 05:11:39] FOREIGN_GPU sample max=0% mean=0.0% n=6
+S0Q3B 30b-ctx8k tg512 ctx=8192 rc=0 16.17 tok/s majflt=279045 minflt=749041 memhigh+=0 memmax+=0 30B_resident 69.2->66.0 % peak_card_MiB=2970 (warm-up, discarded) env={'AXON_REPACK': '0'}
+    moe:         attention + router on the GPU (0.95 GiB, ctx 8192), 128 experts x 48 layers on the CPU (top-8), kv f16
+[axon-run 05:12:12] FOREIGN_GPU sample max=1% mean=0.2% n=6
+S0Q3B 30b-prof tg512 ctx=4096 rc=0 25.78 tok/s majflt=86400 minflt=709926 memhigh+=0 memmax+=0 30B_resident 52.5->93.7 % peak_card_MiB=2568 (warm-up, discarded) env={'AXON_REPACK': '0', 'AXON_MOE_PROFILE': '1'}
+    moe:         attention + router on the GPU (0.95 GiB, ctx 4096), 128 experts x 48 layers on the CPU (top-8), kv f16
+    [moe profile] per step (ms): gpu 8.198, down 0.284, in 0.001, experts 48.272, up 0.160, 48 layers
+    [moe profile] per step (ms): gpu 3.404, down 0.243, in 0.001, experts 37.008, up 0.142, 48 layers
+    [moe profile] per step (ms): gpu 2.982, down 0.241, in 0.001, experts 47.248, up 0.141, 48 layers
+    [moe profile] per step (ms): gpu 2.922, down 0.227, in 0.001, experts 31.103, up 0.109, 48 layers
+    [moe profile] per step (ms): gpu 2.901, down 0.223, in 0.001, experts 30.681, up 0.107, 48 layers
+    [moe profile] per step (ms): gpu 2.875, down 0.217, in 0.001, experts 25.567, up 0.095, 48 layers
+    [moe profile] per step (ms): gpu 2.911, down 0.222, in 0.001, experts 27.747, up 0.104, 48 layers
+S0Q3B pruned-r8-prof tg512 ctx=4096 rc=0 592.86 tok/s majflt=157 minflt=123479 memhigh+=0 memmax+=0 30B_resident 76.4->74.3 % peak_card_MiB=1604 (warm-up, discarded) env={'AXON_REPACK': '1', 'AXON_MOE_PROFILE': '1'}
+    moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+    [moe profile] per step (ms): gpu 0.409, down 0.014, in 0.000, experts 1.061, up 0.008, 3 layers
+    [moe profile] per step (ms): gpu 0.277, down 0.014, in 0.000, experts 0.751, up 0.008, 3 layers
+    [moe profile] per step (ms): gpu 0.145, down 0.014, in 0.000, experts 0.726, up 0.007, 3 layers
+    [moe profile] per step (ms): gpu 0.145, down 0.014, in 0.000, experts 0.712, up 0.006, 3 layers
+    [moe profile] per step (ms): gpu 0.158, down 0.014, in 0.000, experts 0.848, up 0.006, 3 layers
+    [moe profile] per step (ms): gpu 0.248, down 0.015, in 0.000, experts 0.880, up 0.007, 3 layers
+    [moe profile] per step (ms): gpu 0.197, down 0.014, in 0.000, experts 0.971, up 0.006, 3 layers
+S0Q3B SUMMARY config metric median spread% (values) max_majflt verdict
+S0Q3B SUMMARY 30b pp2100 241.35 42.2% [241.35, 286.57, 184.77] 77701 NOT A RECORD
+S0Q3B SUMMARY 30b tg512 20.09 62.8% [28.3, 20.09, 15.68] 398550 NOT A RECORD
+S0Q3B SUMMARY pruned pp2100 4940.21 9.7% [4545.25, 4940.21, 5025.78] 3 RECORD
+S0Q3B SUMMARY pruned tg512 634.80 6.7% [618.13, 634.8, 660.89] 21 RECORD
+S0Q3B SUMMARY pruned-in-place pp2100 3930.92 41.7% [3930.92, 3880.53, 5520.16] 92 NOT A RECORD
+S0Q3B SUMMARY pruned-in-place tg512 517.96 3.0% [512.63, 517.96, 527.99] 675 RECORD
+S0Q3B DONE
+[axon-run 05:12:25] exit 0 after 338.2s (host bella)
+[axon-run 05:12:28] EXPECT ok: output matches /S0Q3B DONE/
+[axon-run 05:12:28] FOREIGN_GPU max=17% mean=1.5% samples=62 top: Xorg 1601 14%, kitty 3618535 3%
