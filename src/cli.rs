@@ -83,10 +83,10 @@ flags:
   --gpus L    gen, chat: the CUDA devices to run on (implies --device cuda): one (\"1\") or a
               pipeline over several (\"0,1\": the layers split across them in order, the first
               runs the embedding, the last the head; same results as one GPU)
-  --gpu-experts N|auto  gen, chat: with --device cuda, a MoE model's (deepseek2) routed experts
-              of N layers (auto: as many as fit after the context's cache; smallest first) resident
-              on the GPU instead of the CPU; same results (the GPU twins of the CPU's kernels);
-              default 0; as AXON_GPU_EXPERTS
+  --gpu-experts N|auto  gen, chat: with --device cuda, a MoE model's (deepseek2, qwen3moe)
+              routed experts of N layers (auto: as many as fit after the context's cache; smallest
+              first) resident on the GPU instead of the CPU; same results (the GPU twins of the
+              CPU's kernels); default 0; as AXON_GPU_EXPERTS
   --kv T      gen, chat: KV cache type, f16 (default) or q8 (cuda only: int8 with a scale per
               position and head, half the memory; slightly different results; on a split, the
               GPU layers' cache, so more layers fit); as AXON_KV

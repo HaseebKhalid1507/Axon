@@ -319,7 +319,7 @@ fn route_twin(net: &MoeQwen3, ids: &[u32], name: &str) {
     };
     let (cc, mb) = c.moe_parts();
     net.gpu
-        .moe_tokens(&net.kind, cc, mb, ids, 0, Head::No, &mut ex)
+        .moe_tokens(&net.kind, cc, mb, ids, 0, Head::No, &mut ex, None)
         .unwrap();
     let dim = net.gpu.dim;
     let (mut n, mut sets, mut wmax, mut gap_max) = (0, 0, 0f32, 0f32);

@@ -23,6 +23,8 @@
 //! bit for bit.
 
 use super::batch::{BatchIn, Place};
+use super::experts::{CudaExperts, ResBufs};
+use super::mla::Res;
 use super::*;
 
 /// moe.cu's kernels (`Kernels::moe_module`).
@@ -158,6 +160,13 @@ fn profile_report(p: &[Prof]) {
 /// profile), the copy down and its wait, the host's unpacking, the CPU
 /// experts, y's packing and copy up; then the steps.
 type Prof = [f64; 6];
+
+/// Layer l's resident experts and the cache's scratch for them, if l is
+/// resident (`--gpu-experts`).
+fn resident<'a, 'g>(res: Res<'a, 'g>, l: usize) -> Option<(&'a CudaExperts<'g>, &'a ResBufs<'g>)> {
+    let (r, rb) = res?;
+    Some((r.get(l)?, rb))
+}
 
 /// moe.cu MOE_THREADS (moe_router) and MOE_LG_WARPS (moe_logits).
 pub(super) const MOE_THREADS: u32 = 128;
@@ -342,6 +351,26 @@ impl<'g> CudaQwen2<'g> {
         }
     }
 
+    /// Enqueue a resident layer's routed experts over nb tokens: the
+    /// router's normed states, ids and weights in mb.r (what the round trip
+    /// copies down) to mb.y (what it copies up), on the GPU. The twins: the
+    /// CPU experts' bits (`cuda::qwen2::experts`).
+    ///
+    /// # Safety
+    /// mb.r holds layer's router output for nb <= mb.max tokens; rb is the
+    /// cache's scratch for at least nb.
+    unsafe fn moe_resident(
+        &self,
+        mb: &MoeBufs,
+        ex: &CudaExperts<'g>,
+        rb: &ResBufs<'g>,
+        nb: usize,
+    ) -> Result<(), String> {
+        let (h, ids, w) = self.route_args(mb, nb);
+        // SAFETY: the caller's.
+        unsafe { ex.enqueue(rb, h, ids, w, nb, mb.y.arg()) }
+    }
+
     /// The host round trip of layer li after its `moe_route` (enqueued):
     /// the router's output down, the CPU experts, y up (enqueued, ordered
     /// before what comes next on the stream).
@@ -390,7 +419,8 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// One decode step of `token` at `pos` (logits and the argmax into the
-    /// cache; `head` must be `Head::Argmax`), the experts by `experts`. Waits for every
+    /// cache; `head` must be `Head::Argmax`), the experts by `experts`, or on
+    /// the GPU for the layers resident in `res`. Waits for every CPU-expert
     /// layer's router; the head is enqueued, not waited for.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn moe_step(
@@ -402,6 +432,7 @@ impl<'g> CudaQwen2<'g> {
         pos: usize,
         head: Head,
         experts: &mut Experts,
+        res: Res<'_, 'g>,
     ) -> Result<(), String> {
         assert_eq!(c.net, self.id, "a CudaCache used with another CudaQwen2");
         // Head::No would only add the last layer's FFN into x, which the
@@ -440,6 +471,11 @@ impl<'g> CudaQwen2<'g> {
                     if seg < n {
                         self.enqueue_attn(c, seg, params, cmb64, on)?;
                         self.moe_route(kind, mb, seg, c.x.arg(), 1)?;
+                        // A resident layer's experts in the same graph: they
+                        // read mb.r and write mb.y, as the round trip would.
+                        if let Some((ex, rb)) = resident(res, self.first + seg) {
+                            self.moe_resident(mb, ex, rb, 1)?;
+                        }
                     } else {
                         self.enqueue_head(c, head, on)?;
                     }
@@ -470,7 +506,9 @@ impl<'g> CudaQwen2<'g> {
                     self.gpu.sync()?;
                     p[seg][0] += ts.elapsed().as_secs_f64();
                 }
-                self.moe_round_trip(mb, seg, 1, experts)?;
+                if resident(res, self.first + seg).is_none() {
+                    self.moe_round_trip(mb, seg, 1, experts)?;
+                }
             }
         }
         Ok(())
@@ -492,7 +530,8 @@ impl<'g> CudaQwen2<'g> {
 
     /// `feed_batch` (head None), `verify_argmax` (Argmax: the picks) or
     /// `prefill_logits` (Last: the logits) of `tokens` at start.., in
-    /// passes of up to the cache's batch max.
+    /// passes of up to the cache's batch max; the layers resident in `res`
+    /// run their experts on the GPU.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn moe_tokens(
         &self,
@@ -503,6 +542,7 @@ impl<'g> CudaQwen2<'g> {
         start: usize,
         head: Head,
         experts: &mut Experts,
+        res: Res<'_, 'g>,
     ) -> Result<(Vec<u32>, Vec<f32>), String> {
         self.check_batch(tokens, start, c);
         let max = c.b.as_ref().expect("batch scratch").max.min(mb.max);
@@ -526,11 +566,17 @@ impl<'g> CudaQwen2<'g> {
             let nb = r.len();
             assert!(nb <= mb.max);
             // The dense pass (embedding, attention, head), each MoE layer's
-            // FFN here: the router, the host round trip, x += y.
+            // FFN here: the router, the experts (resident on the GPU, or
+            // the host round trip), x += y.
             let mut ffn = |li: usize, x: Arg, n: usize| -> Result<(), String> {
                 // SAFETY: x holds the pass's n <= mb.max rows.
                 unsafe { self.moe_route(kind, mb, li, x, n)? };
-                self.moe_round_trip(mb, li, n, experts)?;
+                match resident(res, self.first + li) {
+                    // SAFETY: mb.r holds layer li's router output for n
+                    // rows; rb is the cache's scratch (its max is mb.max's).
+                    Some((ex, rb)) => unsafe { self.moe_resident(mb, ex, rb, n)? },
+                    None => self.moe_round_trip(mb, li, n, experts)?,
+                }
                 // SAFETY: as above.
                 unsafe { self.moe_add(kind.fns(), mb, x, n) }
             };
@@ -615,7 +661,7 @@ mod tests {
         let mut mb = net.moe_bufs(CudaQwen2::batch_max(&c)).unwrap();
         // Zero experts: only the stream's health is under test.
         let mut ex = |_: usize, _: &[f32], _: &[i32], _: &[f32], y: &mut [f32]| y.fill(0.0);
-        net.moe_step(&kind, &mut c, &mut mb, 1, 0, Head::Argmax, &mut ex)
+        net.moe_step(&kind, &mut c, &mut mb, 1, 0, Head::Argmax, &mut ex, None)
             .unwrap();
         assert!((net.moe_pick(&mut c).unwrap() as usize) < net.vocab);
     }
