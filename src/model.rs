@@ -707,6 +707,30 @@ const DENSE_CHECK_TOLERANCE: u64 = 32 << 20;
 /// to a batch per CPU.
 const MEMCG_BATCH: u64 = 64 * 4096;
 
+/// The CPUs this process may run on (its affinity mask: `sched_getaffinity`),
+/// where memory cgroup charge batches can sit. Not `available_parallelism`,
+/// which also follows a cgroup CPU quota: a 2-CPU quota on a 192-core node
+/// still runs on, and charges from, all 192. Else that, else 1.
+fn affinity_cpus() -> u64 {
+    #[cfg(target_os = "linux")]
+    {
+        unsafe extern "C" {
+            fn sched_getaffinity(pid: i32, size: usize, mask: *mut u64) -> i32;
+        }
+        let mut mask = [0u64; 64]; // 4096 CPUs
+        // SAFETY: the mask is a writable buffer of the size passed; pid 0
+        // is this thread.
+        let r = unsafe { sched_getaffinity(0, std::mem::size_of_val(&mask), mask.as_mut_ptr()) };
+        if r == 0 {
+            let n: u32 = mask.iter().map(|w| w.count_ones()).sum();
+            if n > 0 {
+                return n as u64;
+            }
+        }
+    }
+    std::thread::available_parallelism().map_or(1, |n| n.get() as u64)
+}
+
 /// `DENSE_CHECK_TOLERANCE` plus a charge batch for each of the `cpus` the
 /// process may run on (`MEMCG_BATCH`): 6 MiB more on a 24-CPU laptop,
 /// 48 MiB on a 192-CPU host, where the batches alone could eat a fixed 32.
@@ -809,17 +833,21 @@ pub(crate) fn dense_ram_need(m: &Model, repack: bool, kv_elem: u64) -> DenseNeed
 /// keeps its 1.5 GiB headroom: its estimate leaves out parts this one counts
 /// exactly (it rounds the dense weights, and counts no KV or scratch).
 pub(crate) fn check_ram_dense(m: &Model, ctx: usize) -> Result<Option<String>, String> {
+    // A MoE model: `moe_check_ram`'s (its experts are what count; this
+    // estimate sees only the attention matrices).
+    if moe::is_moe(m) {
+        return Ok(None);
+    }
     let repack = std::env::var("AXON_REPACK").map_or(true, |v| v != "0");
     let elem = if crate::kv::use_f32() { 4 } else { 2 };
     let need = dense_ram_need(m, repack, elem);
     let threads = crate::pool::Pool::global().threads() as u64;
-    let cpus = std::thread::available_parallelism().map_or(1, |n| n.get()) as u64;
     dense_verdict(
         &m.arch,
         need,
         !m.file_backed(),
         threads,
-        dense_tolerance(cpus),
+        dense_tolerance(affinity_cpus()),
         ctx,
         crate::gguf::mem::avail(),
     )
@@ -830,10 +858,11 @@ pub(crate) fn check_ram_dense(m: &Model, ctx: usize) -> Result<Option<String>, S
 /// are page cache the kernel reclaims; #128). Copied: the copy is already in
 /// use, and `build` hands each repacked matrix's copied bytes back right
 /// after its repack (`Weight::load`, release). The head goes first, alone,
-/// then the layers: `par_map` gives each pool thread a layer (`per_token`'s
-/// chunk is one layer: k layers over threads x 4 chunks), and a layer's
-/// matrices go one after another, each released after its repack, so at
-/// most min(threads, layers) matrices are in flight. A tied head keeps its
+/// then the layers: `par_map` cuts the k layers into chunks of
+/// ceil(k / (threads x 4)) (one layer each unless k > 4 x threads), a
+/// chunk's layers and a layer's matrices go one after another, each matrix
+/// released after its repack, so at most min(threads, layers) matrices are
+/// in flight. A tied head keeps its
 /// copied bytes (the embedding reads them). So the peak adds what the
 /// repacked forms take beyond the bytes they replace (`growth`, without the
 /// tied head's), a tied head, and the larger of an untied head's own repack
@@ -5962,7 +5991,8 @@ mod ram_dense_tests {
 
     const GIB: u64 = 1 << 30;
     const MIB: u64 = 1 << 20;
-    /// bella's: 32 MiB + 24 CPUs' charge batches.
+    /// 32 MiB + 24 CPUs' charge batches (bella unpinned; the calibration's
+    /// pinned axon-q slot had 8: 34 MiB).
     const TOL: u64 = DENSE_CHECK_TOLERANCE + 24 * MEMCG_BATCH;
 
     /// The estimate's arena is the arena `Qwen2::new` makes (2 MB pages),
@@ -6063,8 +6093,10 @@ mod ram_dense_tests {
         ] {
             assert!(e.contains(s), "{s:?} not in {e}");
         }
+        // A MoE model is left to its own check: no verdict whatever the RAM
+        // (the early return comes before the RAM is read).
         let (moe, _) = tests::dense_fixture("qwen3moe", crate::quant::Q8_0);
-        assert!(check_ram_dense(&moe, 1000).is_ok());
+        assert_eq!(check_ram_dense(&moe, usize::MAX >> 1), Ok(None));
     }
 
     /// llama-3.1-8B-like: a 4.6 GiB arena, an untied 500 MiB head, 56 MiB
@@ -6181,5 +6213,19 @@ mod ram_dense_tests {
         // The tolerance grows with the CPUs (charge batches): 192 CPUs, 80 MiB.
         assert_eq!(dense_tolerance(192), 80 * MIB);
         assert_eq!(dense_tolerance(24), 38 * MIB);
+    }
+
+    /// The CPU count behind the tolerance is the affinity mask's.
+    #[test]
+    fn affinity_cpus_counts_the_mask() {
+        let n = affinity_cpus();
+        assert!(n >= 1);
+        if let Ok(p) = std::thread::available_parallelism() {
+            // The mask is at least what the quota-aware figure allows.
+            assert!(
+                n >= p.get() as u64 || cfg!(not(target_os = "linux")),
+                "{n} < {p}"
+            );
+        }
     }
 }
