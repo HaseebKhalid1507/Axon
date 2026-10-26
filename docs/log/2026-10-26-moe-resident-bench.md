@@ -46,8 +46,13 @@ before each run, and per-run taint comes from `nvidia-smi pmon` (axon-run's rule
 
 ## Open, and next
 
-- **Thread-matched head-to-head** (llama.cpp `-t 8` and `-t 24`, interleaved with Axon, N = 0 / 6 / 12): pending
-  bella job. The result will be added here as an Update line.
+- **Thread-matched head-to-head** (job 1026-011428-edef; table on the board): llama.cpp at `-t 8` (its best) and
+  `-t 24`, interleaved with Axon, N = 0 / 6 / 12, 3 rounds.
+  - Axon still leads decode: 1.65× / 1.60× / 1.43× at N = 0 / 6 / 12.
+  - llama.cpp's prefill is ahead: Axon is at 0.71–0.90×.
+  - `-t 24` collapses llama.cpp's decode to 9–17 tok/s.
+  - The job is TAINTED (Xorg max 53 %). The six runs that overlapped its two FOREIGN_GPU spike windows are
+    excluded and being rerun (1026-023845-8bc8); the rest are clean windows.
 - **Why `auto` trails:** the per-kernel traces (CUPTI) of one Axon decode step and pp512 against llama.cpp's at the
   same placement are pending. They feed the spec for the resident kernels' round 2, which has to keep the twin
   contract (bits equal to the CPU path) under `exact`.
