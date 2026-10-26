@@ -53,7 +53,7 @@ usage:
             [--no-think] [--think-inline] [--quiet] [sampling flags; the repeat penalty defaults to 1 (off)]
                                             an OpenAI-compatible HTTP server (/v1/models,
                                             /v1/chat/completions, /v1/completions; on cuda
-                                            up to --parallel (8) requests decode together,
+                                            up to --parallel (16) requests decode together,
                                             on the CPU or a --gpu-layers split one at a
                                             time; README: axon serve)
   axon -h | --help                          this help
@@ -118,12 +118,14 @@ flags:
               One process per session file: a session in use by another axon process is refused
               (an advisory lock on F.lock beside it, left in place; where the filesystem can't lock,
               a warning and no lock)
-  --parallel N  serve: requests decoded together on the GPU (default 8; 1: one at a time;
-              N slots cost N KV caches). By default the context comes first: as many
-              slots (2 to 8) as fit with the whole context, or with a shorter one down to
-              32768 (or the whole one, if less); if not even 2 fit, one request at a time.
-              With --ctx N, the slots that fit with N; with --parallel N alone, N slots of
-              the longest context that fits them
+  --parallel N  serve: requests decoded together on the GPU (default 16 with paged KV, the
+              default: the slots share the KV pages that fit; 8 with AXON_PAGED_KV=0; 1: one
+              at a time). An explicit N that doesn't fit is refused. Without paged KV, N
+              slots cost N KV caches, and by default the context comes first: as many slots
+              (2 to 8) as fit with the whole context, or with a shorter one down to 32768 (or
+              the whole one, if less); if not even 2 fit, one request at a time. With --ctx
+              N, the slots that fit with N; with --parallel N alone, N slots of the longest
+              context that fits them
   --prefill-chunk N  serve: at least N prompt tokens per step while requests decode (default
               256; 0: prompts fed whole, the others' streams wait)
   --step-ms MS  serve: a step's target time while requests decode (default 60): the prompt
@@ -1792,6 +1794,24 @@ fn human_bytes(b: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// `--help` states serve's real --parallel defaults: the paged pool's
+    /// (the default) and the reserved slots' (AXON_PAGED_KV=0).
+    #[test]
+    fn help_states_the_parallel_defaults() {
+        let (paged, reserved) = (crate::serve::PAGED_PARALLEL, crate::serve::PARALLEL);
+        let flat = super::USAGE
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for want in [
+            format!("up to --parallel ({paged}) requests"),
+            format!("(default {paged} with paged KV, the default:"),
+            format!("{reserved} with AXON_PAGED_KV=0;"),
+        ] {
+            assert!(flat.contains(&want), "--help lacks {want:?}");
+        }
+    }
+
     use super::{gen_budget, placement, utf8_args};
     use crate::generate::{GenOpts, argmax, generate};
 

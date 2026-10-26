@@ -1581,7 +1581,7 @@ const POOL_SPARE: usize = 256 << 20;
 
 /// Most requests at once with paged KV when --parallel isn't given: a
 /// slot costs a table row and its scratch, its KV only what it holds.
-const PAGED_PARALLEL: usize = 16;
+pub(crate) const PAGED_PARALLEL: usize = 16;
 
 /// Positions per KV page (cuda qwen2 pages.rs).
 const PAGE_TOKENS: usize = 64;
