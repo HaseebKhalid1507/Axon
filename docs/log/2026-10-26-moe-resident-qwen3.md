@@ -1,6 +1,7 @@
 # qwen3moe experts resident on the GPU: `--gpu-experts` for Qwen3-30B-A3B and relatives (PR E)
 
-- Date: 2026-10-26. Branch: feat/moe-resident-qwen3, off main be13f1f. Status: draft, gates pending.
+- Date: 2026-10-26. Branch: feat/moe-resident-qwen3, off main be13f1f; main 680a2c5 merged in at 111456a, the
+  merge-ready head. Review: shady 8/10 APPROVE-WHEN-GREEN; SHOULDs done (f2148c6, bf70daa).
 - Track: roadmap item 3 (Qwen3-30B-A3B as the headline). Step 0 notes: the PR body, §1.
 
 Labels: **MEASURED** (job cited), **ESTIMATED**, **CODE**.
@@ -23,8 +24,34 @@ Labels: **MEASURED** (job cited), **ESTIMATED**, **CODE**.
 - The full 30B fits ≈ 25 of 48 expert layers on bella at 4k (ESTIMATED from the GGUF header; 2.5 GB peak card use
   measured with every expert on the CPU).
 
-## How it was verified
-Gates pending: see the PR body (gatewatch `moerese-b9a4093`).
+## How it was verified (MEASURED; the PR body has the job links)
+
+Gates of record, at 111456a, all on bella:
+
+| gate | job | result |
+|---|---|---|
+| resident suite + Moonlight, release | 1026-062648-e18c | PASS 29/0/1 |
+| full release, 2 shards | group 551e | PASS 438/0/22 + 266/0/29 |
+| full debug, 2 shards | group 8dfb | 55e8 PASS 438/0/22; 0b72 pending |
+| md5 vs main 680a2c5 | 1026-062650-e264 | pending |
+
+Earlier rounds:
+- **b9a4093:**
+  - resident suite 41/0/1 on bella (release, debug) and avante;
+  - jade 37/4: the 4 are pre-existing `moe::tests::*_pruned` tests refused by #142's RAM check under jade's 6 GB.
+    They were not run on sm_61 and are covered on sm_89 / sm_120;
+  - fast tier 683/0/50 and 701/0/50;
+  - md5 vs be13f1f all identical (cpu 99/99, cuda 108/108, cuda q8 108/108).
+- **f2148c6:** q3res tests 3/0/0, release and debug.
+
+A/B 1026-052419-63a6 (b9a4093 vs be13f1f, `--timing bella`): **TAINTED** (max 32 %, mean 6.2 %).
+- Text is identical across main / `--gpu-experts 0` / `auto`.
+- `auto` over main:
+  - pruned 30B-A3B: tg512 ×1.46, pp2100 ×10.1;
+  - 4x0.6B: ×2.26, ×12.3.
+- The `0`-row decode ×0.88 on the pruned 30B is not a record: main's own spread there was 18 %.
+- A clean A/B (1026-075028-1c02) is pending. It is not a merge gate: the default path is bit-identical and `auto` is
+  opt-in.
 
 ## What didn't work / open
 - The full Qwen3-30B end-to-end number isn't measurable on bella. The 18.6 GB file doesn't stay in the page cache
