@@ -52,7 +52,8 @@ before each run, and per-run taint comes from `nvidia-smi pmon` (axon-run's rule
   - llama.cpp's prefill is ahead: Axon is at 0.71–0.90×.
   - `-t 24` collapses llama.cpp's decode to 9–17 tok/s.
   - The job is TAINTED (Xorg max 53 %). The six runs that overlapped its two FOREIGN_GPU spike windows are
-    excluded and being rerun (1026-023845-8bc8); the rest are clean windows.
+    excluded. Their rerun 1026-023845-8bc8 was tainted again (mean 14.8 %); the next one is queued as
+    1026-052430-6c71; the rest are clean windows.
 - **Why `auto` trails:** the per-kernel traces (CUPTI) of one Axon decode step and pp512 against llama.cpp's at the
   same placement are pending. They feed the spec for the resident kernels' round 2, which has to keep the twin
   contract (bits equal to the CPU path) under `exact`.

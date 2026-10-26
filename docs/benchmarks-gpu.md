@@ -579,8 +579,8 @@ round's count (`--n-cpu-moe` 1 / 1 / 0).
 **Thread-matched rerun (MEASURED, job `1026-011428-edef`, N = 0 / 6 / 12, 3 interleaved rounds).** llama-bench at
 `-t 8` (Axon's decode threads, the P cores) and `-t 24` (Axon's prefill threads), interleaved with Axon. The job is
 TAINTED overall (Xorg, max 53 %). Its FOREIGN_GPU samples put two spikes at 02:26:17–02:26:51 and 02:27:25–02:27:59.
-The six runs that overlapped them are marked * and left out of the medians. Every other run is a clean window. The
-* runs are being rerun (job `1026-023845-8bc8`).
+The six runs that overlapped them are marked * and left out of the medians. Every other run is a clean window. Their first rerun
+(`1026-023845-8bc8`) was tainted again (mean 14.8 %); the next one is queued as `1026-052430-6c71`.
 
 | N | metric | axon | llama.cpp `-t 8` | llama.cpp `-t 24` | axon / best llama |
 |---|---|---|---|---|---:|
