@@ -16,7 +16,7 @@ use crate::cuda::qwen2::{CacheKv, CudaQwen2};
 use crate::cuda::{DevBuf, Gpu, Kernels, Module};
 use crate::gguf::{Model, Val};
 use crate::kv::KvType;
-use crate::lm::{Backend, Device, Lm};
+use crate::lm::{Backend, Device, Inner, Lm};
 use crate::tokenizer::Tokenizer;
 use std::time::Instant;
 
@@ -398,7 +398,13 @@ impl DraftModel {
         kv: KvType,
     ) -> Result<ModelDrafter<Backend<'static>>, String> {
         let net = match reserve {
-            None => Backend::new(self.model, Device::Cpu, ctx, None, kv, false)?,
+            None => Backend::new(
+                self.model,
+                crate::lm::BackendOptions::default()
+                    .device(Device::Cpu)
+                    .max_ctx(ctx)
+                    .kv(kv),
+            )?,
             Some(r) => {
                 debug_assert_eq!(device, Device::Cuda);
                 let (gpu, module) = (r.gpu, r.module);
@@ -417,7 +423,7 @@ impl DraftModel {
                     false,
                 )
                 .map_err(|e| format!("the draft model: {e}"))?;
-                Backend::Cuda(Box::new(n))
+                Backend(Inner::Cuda(Box::new(n)))
             }
         };
         Ok(ModelDrafter::new(net, ctx, &self.stop))
@@ -459,7 +465,7 @@ pub fn load_pair<'a>(
     // layers' weights, which a verify pass does once for all of its tokens,
     // so drafting pays even though the drafter's VRAM costs the GPU a layer
     // or two (docs/design/spec-split.md).
-    if !matches!(net, Backend::Hybrid(_)) && ctx < want_ctx.min(draft_ctx) {
+    if !matches!(&net.0, Inner::Hybrid(_)) && ctx < want_ctx.min(draft_ctx) {
         eprintln!(
             "axon: warning: with the draft model's memory set aside, the context shrank from \
              {} to {ctx} tokens (--draft 0 for the whole context)",
@@ -690,6 +696,7 @@ mod tests {
         }
     }
 
+    impl crate::lm::Sealed for Toy {}
     impl Lm for Toy {
         type Cache = Vec<u32>;
         fn vocab(&self) -> usize {

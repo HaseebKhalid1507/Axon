@@ -42,7 +42,7 @@ pub mod tools;
 use crate::chat::{self, Framing, special};
 use crate::cuda::qwen2::CacheKv;
 use crate::kv::KvType;
-use crate::lm::{Backend, BackendCache, BatchLm, Device, Lm};
+use crate::lm::{Backend, BackendCache, BatchLm, Device, Inner, Lm};
 use crate::sample::{SampleArgs, SampleCfg, Sampler};
 use crate::spec::PromptLookup;
 use crate::tokenizer::{Tokenizer, Utf8Stream};
@@ -125,6 +125,9 @@ pub struct Opts {
     /// A paged pool's KV pages (None: as many as fit; tests squeeze the
     /// pool with it).
     pub kv_pages: Option<usize>,
+    /// Paged KV on or off (None: AXON_PAGED_KV; tests force reserved slots
+    /// with Some(false)).
+    pub paged: Option<bool>,
     /// Generated tokens a paged admission reserves pages for (None: the
     /// engine's GROW_TOKENS; tests set 0 to force preemption).
     pub kv_grow: Option<usize>,
@@ -132,9 +135,15 @@ pub struct Opts {
     /// (`--prefill-chunk`; 0: prompts fed whole): a long prompt prefills in
     /// chunks between the running requests' steps.
     pub prefill_chunk: usize,
-    /// A batched step's time budget for its chunk and decode, in ms
-    /// (`--prefill-ms`; 0: chunks of exactly `prefill_chunk`).
-    pub prefill_ms: usize,
+    /// A step's target wall time while requests decode, in ms
+    /// (`--step-ms`, alias `--prefill-ms`; 0: `prefill_chunk` tokens): the
+    /// chunk tokens are what fits beside the rows at the measured cost
+    /// (`engine::StepCost`).
+    pub step_ms: usize,
+    /// Admission order, age bound, lanes, pinned step tokens, legacy
+    /// budgets (`--admit-order`, `--admit-age-ms`, `--prefill-lanes`,
+    /// `--step-tokens`, AXON_STEP_COST).
+    pub sched: engine::Sched,
     /// `--rope-scaling yarn` and friends (rope.rs).
     pub rope: crate::rope::RopeArgs,
     /// `--api-key` / AXON_API_KEY: every route but /health (and CORS
@@ -477,6 +486,8 @@ impl TextOut<'_> {
         let mut c = self.call_open(ch);
         let was = ch.call().is_some();
         let part = ch.push(id, &bytes);
+        // The reply's first role section, once it is the answer (no header).
+        let released = ch.take_released();
         let now = ch.call().is_some();
         if was && now && matches!(self.call, CallState::Open(..)) {
             let t = self.utf8.push(&bytes);
@@ -505,13 +516,26 @@ impl TextOut<'_> {
         }
         c.push_str(&self.call_open(ch));
         match part {
-            chat::Part::Hidden => (c, r, false),
+            chat::Part::Hidden => match released {
+                // Cut by `<|end|>` / `<|start|>`: the answer, whole.
+                Some(u) => {
+                    let mut t = self.utf8.push(&u);
+                    t.push_str(&self.utf8.finish());
+                    let (a, hit) = self.stop.push(&t);
+                    c.push_str(&tools::harmony_text(&a));
+                    (c, r, hit)
+                }
+                None => (c, r, false),
+            },
             chat::Part::Reasoning => {
                 r.push_str(&self.utf8.push(&bytes));
                 (c, r, false)
             }
             chat::Part::Answer => {
-                let (a, hit) = self.stop.push(&self.utf8.push(&bytes));
+                // Text held while it might have been a header comes out
+                // with the token that showed it isn't.
+                let b = released.unwrap_or(bytes);
+                let (a, hit) = self.stop.push(&self.utf8.push(&b));
                 if tools {
                     c.push_str(&tools::harmony_text(&a));
                 } else {
@@ -588,7 +612,9 @@ impl TextOut<'_> {
     }
 
     /// The end of the output: what was held back. With tools, a reply that
-    /// never opened a message (no channel header) is the answer, as without.
+    /// never opened a message (no channel header) and was still held (it
+    /// might have been a header: `Channels::take_unheaded`) is the answer,
+    /// as without.
     fn finish(&mut self) -> (String, String) {
         let Some(mut ch) = self.channels.take() else {
             return self.finish_text();
@@ -968,7 +994,7 @@ struct Loaded {
 /// own thread: the backend never leaves it.
 fn engine(
     o: EngineOpts,
-    ready: mpsc::Sender<Loaded>,
+    ready: mpsc::Sender<Result<Loaded, Refused>>,
     jobs: mpsc::Receiver<Job>,
     stop: Arc<AtomicBool>,
 ) {
@@ -1014,6 +1040,12 @@ fn engine(
         (true, true) => split_ctx,
         (true, false) => want.min(AGENT_CTX),
     };
+    // Before the model is placed (resident experts upload GBs first).
+    if let Some(why) =
+        moe_parallel_refusal(crate::model::is_moe(&model), o.parallel, o.parallel_set)
+    {
+        crate::fail(&why);
+    }
     let tok: &'static Tokenizer = Box::leak(Box::new(Tokenizer::from_gguf(&model)));
     let dm = o.draft_model.as_ref().filter(|_| o.max_draft > 0).map(|p| {
         crate::draft::DraftModel::open(p, crate::copy_for(device), &model, tok)
@@ -1021,11 +1053,12 @@ fn engine(
     });
     // The Q6_K prefill copy waits for the cache and slots (below).
     // AXON_PAGED_KV, read once for this server.
-    let paged_env = crate::cuda::qwen2::pages::paged_env();
+    let paged_env = o.paged.unwrap_or_else(crate::cuda::qwen2::pages::paged_env);
     let place = crate::lm::Placing {
         split_ctx,
         defer_q6k8: true,
         paged: paged_serve(device, o.parallel, paged_env),
+        gpu_experts: None,
     };
     let (mut net, drafter) = crate::backend_and_drafter(
         &model,
@@ -1039,10 +1072,10 @@ fn engine(
         draft_ctx,
     );
     let ctx = net.ctx(want);
-    let why = match &net {
+    let why = match &net.0 {
         _ if ctx >= want => None,
-        Backend::Cuda(_) => Some(gpu_fit_note(ctx, want, o.kv, gpu_layers.is_some())),
-        Backend::Pipeline(_) => Some(format!(
+        Inner::Cuda(_) => Some(gpu_fit_note(ctx, want, o.kv, gpu_layers.is_some())),
+        Inner::Pipeline(_) => Some(format!(
             "{ctx} fit on the GPUs beside the weights, of the model's {want} \
              (--ctx N for another{})",
             if o.kv == KvType::Q8 {
@@ -1051,19 +1084,19 @@ fn engine(
                 "; --kv q8 halves the KV cache"
             }
         )),
-        Backend::Hybrid(_) => Some(format!(
+        Inner::Hybrid(_) => Some(format!(
             "the default for a CPU/GPU split (automatic or --gpu-layers): a cache for the \
              model's {want} tokens would take GPU memory from its layers \
              (--ctx N for another)"
         )),
-        Backend::Moe(_) => Some(format!(
+        Inner::Moe(_) => Some(format!(
             "{ctx} fit on the GPU beside the attention weights, of the model's {want} \
              (--ctx N for another)"
         )),
-        Backend::Cpu(_) => None,
+        Inner::Cpu(_) => None,
     };
-    let (ctx, why) = match &net {
-        Backend::Cpu(n) if fit => {
+    let (ctx, why) = match &net.0 {
+        Inner::Cpu(n) if fit => {
             let elem = if crate::kv::use_f32() { 4 } else { 2 };
             let per_pos = (n.n_layers * 2 * n.n_kv_heads * n.head_dim * elem) as u64;
             // A mapped model's pages must stay in memory too.
@@ -1080,12 +1113,12 @@ fn engine(
         eprintln!("axon serve: context {ctx} tokens: {why}");
     }
     let template = Template::new(tok, &model.arch);
-    let kvs = match &net {
-        Backend::Cuda(n) => format!("cuda, kv {}", n.kv_name()),
-        Backend::Hybrid(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
-        Backend::Pipeline(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
-        Backend::Moe(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
-        Backend::Cpu(_) => "cpu".into(),
+    let kvs = match &net.0 {
+        Inner::Cuda(n) => format!("cuda, kv {}", n.kv_name()),
+        Inner::Hybrid(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
+        Inner::Pipeline(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
+        Inner::Moe(n) => format!("{}, kv {}", n.describe(ctx), n.kv_name()),
+        Inner::Cpu(_) => "cpu".into(),
     };
     let drafts = dm.as_ref().map_or(String::new(), |d| {
         format!(", draft model {} K={}", d.name(), o.max_draft)
@@ -1093,7 +1126,7 @@ fn engine(
     // Continuous batching runs on one GPU holding every layer: the CPU, a
     // CPU/GPU split and a multi-GPU pipeline (AXON_GPUS) serve one request
     // at a time, and an explicit --parallel N there is refused.
-    if o.parallel > 1 && o.parallel_set && !matches!(net, Backend::Cuda(_)) {
+    if o.parallel > 1 && o.parallel_set && !matches!(&net.0, Inner::Cuda(_)) {
         crate::fail(&format!(
             "--parallel {}: batching many requests needs the whole model on one GPU \
              (--device cuda; not with --gpu-layers or several AXON_GPUS); this backend \
@@ -1109,22 +1142,35 @@ fn engine(
         _ => CacheKv::F16,
     };
     // Paged KV (specs r11): a slot is a cap, the pool a page budget.
-    let paged = match &net {
-        Backend::Cuda(n) if paged_serve(device, o.parallel, paged_env) => {
+    let mut paged_miss: Option<String> = None;
+    let paged = match &net.0 {
+        Inner::Cuda(n) if paged_serve(device, o.parallel, paged_env) => {
             let slots = if o.parallel_set {
                 o.parallel
             } else {
                 PAGED_PARALLEL
             };
-            let plan = n
-                .free_bytes()
-                .ok()
-                .and_then(|free| paged_plan(n, kv, want.max(ctx), slots, free as usize, !fit));
-            if plan.is_none() && !fit && o.log {
-                eprintln!(
-                    "axon serve: KV pages for one {ctx}-token sequence (--ctx) don't fit beside \
-                     the model: slots reserved at the full context instead"
-                );
+            let free = n.free_bytes().ok().map(|f| f as usize);
+            let plan = free.and_then(|free| paged_plan(n, kv, want.max(ctx), slots, free, !fit));
+            // Why not: in the refusal below, or, if the server starts with
+            // reserved slots instead, said then (also under --quiet).
+            if plan.is_none() {
+                let why = match fit {
+                    false => format!(
+                        "KV pages for one {ctx}-token sequence (--ctx) don't fit beside the \
+                         model and the scratch of {slots} slots"
+                    ),
+                    true => format!(
+                        "not even 1024 tokens of KV pages fit beside the model and the scratch \
+                         of {slots} slots"
+                    ),
+                };
+                // The figure only when it could be read.
+                let why = match free {
+                    Some(f) => format!("{why} ({:.2} GiB of GPU memory free)", f as f64 / GIB),
+                    None => why,
+                };
+                paged_miss = Some(why);
             }
             // Tests: fewer pages (the cap within them).
             plan.map(|p| match o.kv_pages {
@@ -1138,7 +1184,7 @@ fn engine(
         }
         _ => None,
     };
-    let plan = match &net {
+    let plan = match &net.0 {
         _ if paged.is_some() => {
             let p = paged.as_ref().expect("paged");
             SlotPlan {
@@ -1159,7 +1205,7 @@ fn engine(
                 }),
             }
         }
-        Backend::Cuda(n) if o.parallel > 1 => match n.free_bytes() {
+        Inner::Cuda(n) if o.parallel > 1 => match n.free_bytes() {
             Ok(free) => {
                 let free = free as usize;
                 let fits = |kv, s, c| n.serve_bytes_kv(kv, s, c) + POOL_SPARE <= free;
@@ -1179,7 +1225,40 @@ fn engine(
         },
         _ => SlotPlan::one(ctx, None),
     };
-    if let Some(note) = plan.note.as_ref().filter(|_| o.log) {
+    // An explicit --parallel N (or a test's paged pool) that doesn't fit is
+    // refused, not quietly served with fewer slots (#137); --parallel left
+    // out keeps the automatic sizing, and falling back to one request at a
+    // time is said even under --quiet.
+    let vram = || match &net.0 {
+        Inner::Cuda(n) => n.free_bytes().ok().map(|f| {
+            (
+                n.serve_bytes_kv(kv, o.parallel, plan.ctx) + POOL_SPARE,
+                f as usize,
+            )
+        }),
+        _ => None,
+    };
+    if let Some(why) = parallel_refusal(
+        Asked {
+            parallel: o.parallel,
+            parallel_set: o.parallel_set,
+            paged: o.kv_pages.is_some(),
+        },
+        &plan,
+        paged.is_some(),
+        paged_miss.as_deref(),
+        vram,
+    ) {
+        let _ = ready.send(Err(Refused(why)));
+        return;
+    }
+    if let Some(why) = &paged_miss {
+        eprintln!("axon serve: no paged KV pool: {why}; slots reserved whole instead");
+    }
+    // Said even under --quiet: one request at a time, or the context an
+    // explicit --parallel N got (shorter than asked for: its other axis).
+    let one = o.parallel > 1 && plan.slots < 2;
+    if let Some(note) = (plan.note.as_ref()).filter(|_| o.log || one || o.parallel_set) {
         eprintln!("axon serve: {note}");
     }
     // With a pool, the context served is a slot's (every request fits
@@ -1198,10 +1277,16 @@ fn engine(
             };
             match made {
                 Ok(pool) => Some((pool, n, slot_ctx)),
+                Err(why) if o.parallel_set => {
+                    let _ = ready.send(Err(Refused(format!(
+                        "--parallel {}: the {n}-slot pool couldn't be made ({why}); fewer \
+                         --parallel, a smaller --ctx or --kv q8",
+                        o.parallel
+                    ))));
+                    return;
+                }
                 Err(why) => {
-                    if o.log {
-                        eprintln!("axon serve: one request at a time ({why})");
-                    }
+                    eprintln!("axon serve: one request at a time ({why})");
                     None
                 }
             }
@@ -1210,10 +1295,16 @@ fn engine(
     let solo = pool.as_ref().map(|(p, _, _)| net.slot_cache(p, 0));
     let cache = match solo {
         Some(Ok(c)) => c,
+        Some(Err(why)) if o.parallel_set => {
+            let _ = ready.send(Err(Refused(format!(
+                "--parallel {}: the slot pool's request view couldn't be made ({why}); fewer \
+                 --parallel, a smaller --ctx or --kv q8",
+                o.parallel
+            ))));
+            return;
+        }
         Some(Err(why)) => {
-            if o.log {
-                eprintln!("axon serve: one request at a time ({why})");
-            }
+            eprintln!("axon serve: one request at a time ({why})");
             pool = None;
             net.new_cache(ctx)
         }
@@ -1221,7 +1312,7 @@ fn engine(
     };
     // The Q6_K prefill copy only out of what the cache and slots leave
     // (prefill-only: the same products without it, slower).
-    if let Backend::Cuda(n) = &mut net {
+    if let Inner::Cuda(n) = &mut net.0 {
         match n.make_q6k8_spare() {
             Ok(Some(false)) if o.log => eprintln!(
                 "axon serve: no Q6_K prefill copy ({:.2} GiB free beside the caches; it \
@@ -1248,9 +1339,12 @@ fn engine(
     let mut batch = pool.map(|(pool, n, slot_ctx)| {
         let policy = engine::ChunkPolicy {
             floor: o.prefill_chunk,
-            ms: o.prefill_ms,
+            step_ms: o.step_ms,
+            step_tokens: o.sched.step_tokens,
+            legacy: o.sched.legacy,
         };
         let mut b = Batch::new(&net, pool, n, slot_ctx, policy, o.log, e.generated.clone());
+        b.sched = o.sched;
         if let Some(g) = o.kv_grow {
             b.set_grow_tokens(g);
         }
@@ -1273,7 +1367,7 @@ fn engine(
     };
     let identity = crate::identity::of(&o.path, &model, &net);
     if ready
-        .send(Loaded {
+        .send(Ok(Loaded {
             tok,
             template,
             ctx: served,
@@ -1292,7 +1386,7 @@ fn engine(
             identity,
             arch: model.arch.clone(),
             params: model.total_params(),
-        })
+        }))
         .is_err()
     {
         return;
@@ -1315,35 +1409,102 @@ fn engine(
             }
             continue;
         };
-        // Take requests off the channel only as far as slots can start
-        // them (and a few that can't, which wait to run alone): the bounded
-        // channel stays the queue (full: a 503).
         waiting.retain(|j| !j.cancel.load(Ordering::Relaxed));
-        loop {
-            let fit = waiting.iter().filter(|j| fits_slot(j, b.ctx)).count();
-            if fit > b.free() || waiting.len() > b.slots {
-                break;
+        let sched = b.sched;
+        let admitted = match sched.order {
+            engine::AdmitOrder::Fifo => {
+                // Take requests off the channel only as far as slots can
+                // start them (and a few that can't, which wait to run
+                // alone): the bounded channel stays the queue (full: a 503).
+                loop {
+                    let fit = waiting.iter().filter(|j| fits_slot(j, b.ctx)).count();
+                    if fit > b.free() || waiting.len() > b.slots {
+                        break;
+                    }
+                    match jobs.try_recv() {
+                        Ok(job) => waiting.push_back(job),
+                        Err(_) => break,
+                    }
+                }
+                // Admit the first request that fits a slot (its prompt then
+                // fed a chunk per step) if others run or wait; one alone runs
+                // the S1 way, as does one that fits no slot, once the batch
+                // is idle.
+                let first_fit = waiting.iter().position(|j| fits_slot(j, b.ctx));
+                if let Some(i) = first_fit
+                    && b.can_admit(&waiting[i])
+                    && (!b.idle() || waiting.len() > 1)
+                {
+                    let job = waiting.remove(i).unwrap();
+                    let out = text_out(e.tok, &job, &e.metrics);
+                    let tx = job.tx.clone();
+                    if let Err(err) = or_exit("an admission", || b.admit(job, out)) {
+                        fatal(b, &err, Some(tx));
+                    }
+                    1
+                } else {
+                    0
+                }
             }
-            match jobs.try_recv() {
-                Ok(job) => waiting.push_back(job),
-                Err(_) => break,
+            engine::AdmitOrder::Sjf => {
+                // Shortest first needs to see the queue: take requests off
+                // the channel up to max(slots, 16) held here (the channel,
+                // `--max-queue`, still bounds the rest: a 503 past
+                // max_queue + that many).
+                while waiting.len() < b.slots.max(16) {
+                    match jobs.try_recv() {
+                        Ok(job) => waiting.push_back(job),
+                        Err(_) => break,
+                    }
+                }
+                let mut n = 0;
+                // After a refusal for pages only short prompts go on (fed in
+                // a step, they don't hold up the refused one long), until it
+                // has waited twice the age bound: then it ends the round, so
+                // nothing takes the pages it waits for (its wait is bounded).
+                let mut paged_out = false;
+                for id in admit_order(b, &waiting, sched.age_ms) {
+                    let i = waiting.iter().position(|j| j.id == id).expect("waiting");
+                    // One alone (nothing runs, nothing else waits) runs the
+                    // S1 way.
+                    if b.idle() && waiting.len() < 2 {
+                        break;
+                    }
+                    if paged_out && !b.is_short(&waiting[i]) {
+                        continue;
+                    }
+                    match b.admit_check(&waiting[i]) {
+                        engine::Admit::Yes => {}
+                        // Its class (long: lanes; short: two steps' worth)
+                        // is full: the other class may still start.
+                        engine::Admit::Lane => continue,
+                        // No slot: nobody else starts either.
+                        engine::Admit::Slot => break,
+                        engine::Admit::Pages => {
+                            let age = waiting[i].arrived.elapsed().as_millis() as u64;
+                            if pages_block(age, sched.age_ms) {
+                                break;
+                            }
+                            paged_out = true;
+                            continue;
+                        }
+                    }
+                    let job = waiting.remove(i).unwrap();
+                    let out = text_out(e.tok, &job, &e.metrics);
+                    let tx = job.tx.clone();
+                    if let Err(err) = or_exit("an admission", || b.admit(job, out)) {
+                        fatal(b, &err, Some(tx));
+                    }
+                    n += 1;
+                }
+                n
             }
+        };
+        if let Some(m) = &b.metrics {
+            let w = waiting.iter().map(|j| (j.id, j.prompt.len(), j.arrived));
+            m.publish_waiting(w.collect());
         }
-        // Admit the first request that fits a slot (its prompt then fed a
-        // chunk per step) if others run or wait; one alone runs the S1 way,
-        // as does one that fits no slot, once the batch is idle.
-        let first_fit = waiting.iter().position(|j| fits_slot(j, b.ctx));
-        if let Some(i) = first_fit
-            && b.can_admit(&waiting[i])
-            && (!b.idle() || waiting.len() > 1)
-        {
-            let job = waiting.remove(i).unwrap();
-            let out = text_out(e.tok, &job, &e.metrics);
-            let tx = job.tx.clone();
-            if let Err(err) = or_exit("an admission", || b.admit(job, out)) {
-                fatal(b, &err, Some(tx));
-            }
-        } else if b.idle() {
+        if admitted == 0 && b.idle() {
             if let Some(job) = waiting.pop_front() {
                 let ho = Handover {
                     jobs: &jobs,
@@ -1385,6 +1546,41 @@ fn engine(
     }
 }
 
+/// Whether a request refused for pages, waiting `age` ms, ends the
+/// admission round (nobody else starts this iteration): once it has
+/// waited twice the age bound (`bound` > 0). Before that, short prompts
+/// that fit the pages left may still start.
+fn pages_block(age: u64, bound: u64) -> bool {
+    bound > 0 && age >= 2 * bound
+}
+
+/// The ids of the waiting requests that fit a slot, in admission order
+/// (`engine::admit_key`: aged ones first, then the shortest uncached
+/// prompt, then arrival). The uncached length (a walk over every free
+/// slot's prefix, `Batch::uncached`) is taken for the 2 x lanes shortest
+/// prompts only; the rest are keyed on their length (128 waiting x 128
+/// slots of walks per iteration otherwise).
+fn admit_order(b: &Batch, waiting: &VecDeque<Job>, age_ms: u64) -> Vec<u64> {
+    let now = Instant::now();
+    let mut fits: Vec<&Job> = waiting.iter().filter(|j| fits_slot(j, b.ctx)).collect();
+    fits.sort_by_key(|j| (j.prompt.len(), j.id));
+    let probe = 2 * b.lanes();
+    let mut keys: Vec<_> = (fits.iter().enumerate())
+        .map(|(r, j)| {
+            let age = now.saturating_duration_since(j.arrived).as_millis() as u64;
+            let len = j.prompt.len().saturating_sub(1);
+            let aged = age_ms > 0 && age >= age_ms;
+            let un = match r < probe && !aged {
+                true => b.uncached(&j.prompt).unwrap_or(len),
+                false => len,
+            };
+            (engine::admit_key(un, age, age_ms, j.id), j.id)
+        })
+        .collect();
+    keys.sort_unstable();
+    keys.into_iter().map(|(_, id)| id).collect()
+}
+
 /// A device error in the batch: every request in it (and `tx`'s) gets it,
 /// then the process exits (CUDA errors are sticky; see `or_exit`).
 fn fatal(b: &mut Batch, err: &str, tx: Option<mpsc::Sender<Event>>) -> ! {
@@ -1412,10 +1608,99 @@ const POOL_SPARE: usize = 256 << 20;
 
 /// Most requests at once with paged KV when --parallel isn't given: a
 /// slot costs a table row and its scratch, its KV only what it holds.
-const PAGED_PARALLEL: usize = 16;
+pub(crate) const PAGED_PARALLEL: usize = 16;
 
 /// Positions per KV page (cuda qwen2 pages.rs).
 const PAGE_TOKENS: usize = 64;
+
+/// A mixture-of-experts model serves one request at a time (no slot pool:
+/// its backend isn't `Inner::Cuda`), so its placement, `--gpu-experts auto`
+/// included, budgets one cache. An explicit --parallel N > 1 is refused
+/// before the placement rather than after it (#127 review); the default
+/// --parallel quietly serves one.
+fn moe_parallel_refusal(moe: bool, parallel: usize, parallel_set: bool) -> Option<String> {
+    (moe && parallel > 1 && parallel_set).then(|| {
+        format!(
+            "--parallel {parallel}: a mixture-of-experts model serves one request at a time \
+             (its experts' placement, --gpu-experts included, is for one cache): --parallel 1"
+        )
+    })
+}
+
+/// What the server was asked for (`parallel_refusal`): --parallel and
+/// whether it was given, and a paged pool of a set size (`Opts::kv_pages`,
+/// tests only).
+#[derive(Clone, Copy)]
+struct Asked {
+    parallel: usize,
+    parallel_set: bool,
+    paged: bool,
+}
+
+/// Why the server must not start with `plan` (#137): --parallel N given
+/// and fewer than N slots fit, or a paged pool asked for and none fits.
+/// `paged_miss`: why the paged pool didn't fit, when it was tried (then the
+/// slots are reserved whole, and those didn't fit either). `vram`: the bytes
+/// N reserved slots at the plan's context need (with POOL_SPARE) and the
+/// bytes free (asked only when refusing). Automatic sizing (--parallel left
+/// out) is never refused, as `moe_parallel_refusal` refuses only an
+/// explicit --parallel N.
+fn parallel_refusal(
+    a: Asked,
+    plan: &SlotPlan,
+    paged: bool,
+    paged_miss: Option<&str>,
+    vram: impl FnOnce() -> Option<(usize, usize)>,
+) -> Option<String> {
+    let short = a.parallel_set && a.parallel > 1 && plan.slots < a.parallel;
+    if !short && (paged || !a.paged) {
+        return None;
+    }
+    let asked = match short {
+        true => format!("--parallel {}", a.parallel),
+        false => "a paged KV pool (kv_pages)".into(),
+    };
+    let pages = paged_miss.map_or(String::new(), |m| {
+        format!(": the paged KV pool doesn't fit ({m}), and reserved slots don't either")
+    });
+    let mem = vram().map_or(String::new(), |(need, free)| {
+        format!(
+            ": {} reserved slots of {} tokens need {:.2} GiB of GPU memory beside the model, \
+             {:.2} GiB is free",
+            a.parallel,
+            plan.ctx,
+            need as f64 / GIB,
+            free as f64 / GIB
+        )
+    });
+    let fits = match plan.slots {
+        0 | 1 => "not even 2 fit".to_string(),
+        s => format!("{s} fit"),
+    };
+    Some(format!(
+        "{asked}{pages}{mem}; {fits}. A smaller --ctx, --kv q8 or fewer --parallel, or leave \
+         --parallel out to size it automatically"
+    ))
+}
+
+/// A start refused (#137: an explicit --parallel N that doesn't fit). The
+/// engine sends it instead of the loaded model; `start` returns it as an
+/// `InvalidInput` error carrying it, and `run` (the CLI) exits 2 with it.
+#[derive(Debug)]
+pub(crate) struct Refused(pub String);
+
+impl std::fmt::Display for Refused {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Refused {}
+
+/// Whether `e` is a refused start (`Refused`).
+pub(crate) fn is_refused(e: &io::Error) -> bool {
+    e.get_ref().is_some_and(|i| i.is::<Refused>())
+}
 
 /// Whether serve's pool is paged: the GPU, batching, AXON_PAGED_KV != 0
 /// (`paged_env`, read once at serve's start).
@@ -1691,9 +1976,11 @@ struct EngineOpts {
     parallel_set: bool,
     slot_ctx: Option<usize>,
     kv_pages: Option<usize>,
+    paged: Option<bool>,
     kv_grow: Option<usize>,
     prefill_chunk: usize,
-    prefill_ms: usize,
+    step_ms: usize,
+    sched: engine::Sched,
     path: String,
     device: Device,
     gpu_layers: Option<usize>,
@@ -1798,9 +2085,11 @@ pub fn start(o: Opts) -> io::Result<Server> {
         parallel_set: o.parallel_set,
         slot_ctx: o.slot_ctx,
         kv_pages: o.kv_pages,
+        paged: o.paged,
         kv_grow: o.kv_grow,
         prefill_chunk: o.prefill_chunk,
-        prefill_ms: o.prefill_ms,
+        step_ms: o.step_ms,
+        sched: o.sched,
         generated: generated.clone(),
         path: o.path.clone(),
         device: o.device,
@@ -1875,9 +2164,16 @@ pub fn start(o: Opts) -> io::Result<Server> {
         #[cfg(test)]
         sh: sh.clone(),
     };
-    let Ok(mut l) = ready_rx.recv() else {
-        server.shutdown();
-        return Err(io::Error::other("the engine failed to start"));
+    let mut l = match ready_rx.recv() {
+        Ok(Ok(l)) => l,
+        Ok(Err(refused)) => {
+            server.shutdown();
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, refused));
+        }
+        Err(_) => {
+            server.shutdown();
+            return Err(io::Error::other("the engine failed to start"));
+        }
     };
     if o.no_think && !l.template.as_ref().is_some_and(Template::thinks) {
         crate::fail(&format!(
@@ -2866,9 +3162,11 @@ pub fn run(args: &[String]) -> io::Result<()> {
         parallel_set: false,
         slot_ctx: None,
         kv_pages: None,
+        paged: None,
         kv_grow: None,
         prefill_chunk: engine::PREFILL_CHUNK,
-        prefill_ms: engine::PREFILL_MS,
+        step_ms: engine::STEP_MS,
+        sched: engine::Sched::default(),
         rope: Default::default(),
         api_key: None,
         max_prompt_tokens: None,
@@ -2932,6 +3230,11 @@ pub fn run(args: &[String]) -> io::Result<()> {
             | "--parallel"
             | "--prefill-chunk"
             | "--prefill-ms"
+            | "--step-ms"
+            | "--step-tokens"
+            | "--admit-order"
+            | "--admit-age-ms"
+            | "--prefill-lanes"
             | "--api-key"
             | "--max-prompt-tokens"
             | "--slot-idle-ms" => {}
@@ -2964,7 +3267,18 @@ pub fn run(args: &[String]) -> io::Result<()> {
             "--max-conns" => o.max_conns = whole(true),
             "--max-queue" => o.max_queue = whole(true),
             "--prefill-chunk" => o.prefill_chunk = whole(false),
-            "--prefill-ms" => o.prefill_ms = whole(false),
+            // --prefill-ms: the old name of --step-ms (one release).
+            "--step-ms" | "--prefill-ms" => o.step_ms = whole(false),
+            "--step-tokens" => o.sched.step_tokens = whole(false),
+            "--admit-age-ms" => o.sched.age_ms = whole(false) as u64,
+            "--prefill-lanes" => o.sched.lanes = whole(false),
+            "--admit-order" => {
+                o.sched.order = match v.as_str() {
+                    "sjf" => engine::AdmitOrder::Sjf,
+                    "fifo" => engine::AdmitOrder::Fifo,
+                    _ => crate::fail(&format!("--admit-order needs sjf or fifo, got '{v}'")),
+                }
+            }
             "--api-key" if v.trim().is_empty() || v.trim() != v => {
                 crate::fail("--api-key needs a key (no spaces around it)")
             }
@@ -3009,7 +3323,12 @@ pub fn run(args: &[String]) -> io::Result<()> {
             );
         }
     }
-    start(o)?.wait()
+    match start(o) {
+        Ok(s) => s.wait(),
+        // A refused start (#137) is a usage error: exit 2, as `crate::fail`.
+        Err(e) if is_refused(&e) => crate::fail(&e.to_string()),
+        Err(e) => Err(e),
+    }
 }
 
 #[cfg(test)]

@@ -55,8 +55,8 @@ fn no_capture() -> RwLockWriteGuard<'static, ()> {
 /// Why `Gpu::open` fails off Linux.
 pub const LINUX_ONLY: &str = "CUDA support is Linux-only for now";
 
-/// kernels.cu, decode.cu, prefill.cu, stream.cu, sample.cu, hopper.cu, gemma.cu and moe_twin.cu
-/// (then `$extra`), one source.
+/// kernels.cu, decode.cu, prefill.cu, stream.cu, sample.cu, hopper.cu, gemma.cu, moe_twin.cu and
+/// moe_res.cu (then `$extra`), one source.
 macro_rules! kernels_src {
     ($($extra:expr),*) => {
         concat!(
@@ -67,7 +67,8 @@ macro_rules! kernels_src {
             include_str!("sample.cu"),
             include_str!("hopper.cu"),
             include_str!("gemma.cu"),
-            include_str!("moe_twin.cu")
+            include_str!("moe_twin.cu"),
+            include_str!("moe_res.cu")
             $(, $extra)*
         )
     };
@@ -1936,6 +1937,11 @@ impl<'g> Module<'g> {
         self.pdl
     }
 
+    /// The GPU it was loaded on.
+    pub fn gpu(&self) -> &'g Gpu {
+        self.gpu
+    }
+
     /// Whether its code has the int8 tensor-core kernels (built for sm_80+).
     pub fn mma(&self) -> bool {
         self.arch >= 80
@@ -2022,6 +2028,16 @@ const MLA_KERNELS: &str = concat!(
     include_str!("mla.cu")
 );
 
+/// `MLA_KERNELS` plus main be13f1f's `mla_heads_mv` / `mla_attn` as
+/// `*_ref` (mla_ref.cu): the bit-identity tests' reference.
+#[cfg(test)]
+pub(crate) const MLA_REF_KERNELS: &str = concat!(
+    include_str!("kernels.cu"),
+    include_str!("moe.cu"),
+    include_str!("mla.cu"),
+    include_str!("mla_ref.cu")
+);
+
 /// NVRTC options for kernels.cu beyond the architecture. Denormals kept,
 /// as on the CPU (the defaults, spelled out: they are part of the cache key).
 pub(crate) const KERNEL_OPTS: [&str; 2] = ["--std=c++17", "--ftz=false"];
@@ -2077,6 +2093,16 @@ impl<'m> Kernels<'m> {
             opts.push("-DMOE_DEBUG");
         }
         Ok(Module::load(gpu, MLA_KERNELS, &opts)?.0)
+    }
+
+    /// `mla_module` with the reference kernels (`MLA_REF_KERNELS`; tests).
+    #[cfg(test)]
+    pub fn mla_ref_module(gpu: &Gpu) -> Result<Module<'_>, String> {
+        let mut opts = KERNEL_OPTS_EXT.to_vec();
+        if cfg!(debug_assertions) {
+            opts.push("-DMOE_DEBUG");
+        }
+        Ok(Module::load(gpu, MLA_REF_KERNELS, &opts)?.0)
     }
 
     /// The router module MoE model `m` needs (`crate::moe::MoeQwen3`):

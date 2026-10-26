@@ -332,7 +332,8 @@ fn moe_gpu_step_refuses_head_no() {
         |l: usize, h: &[f32], i: &[i32], w: &[f32], y: &mut [f32]| net.experts(l, h, i, w, y);
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let (cc, mb) = c.moe_parts();
-        net.gpu.moe_step(&net.kind, cc, mb, 1, 0, Head::No, &mut ex)
+        net.gpu
+            .moe_step(&net.kind, cc, mb, 1, 0, Head::No, &mut ex, None)
     }));
     let p = r.expect_err("Head::No must panic");
     let msg = p
@@ -353,17 +354,22 @@ fn backend_places_moe() {
     let Some(m) = crate::testutil::moe_model(true) else {
         return;
     };
-    use crate::lm::{Backend, Device};
-    let b = Backend::new(&m, Device::Cuda, 512, None, crate::kv::KvType::F16, false).unwrap();
-    assert!(matches!(b, Backend::Moe(_)));
+    use crate::lm::{Backend, Device, Inner};
+    let b = Backend::new(
+        &m,
+        crate::lm::BackendOptions::default()
+            .device(Device::Cuda)
+            .max_ctx(512),
+    )
+    .unwrap();
+    assert!(matches!(b.0, Inner::Moe(_)));
     assert_eq!(b.ctx(512), 512);
     let e = Backend::new(
         &m,
-        Device::Cuda,
-        512,
-        Some(3),
-        crate::kv::KvType::F16,
-        false,
+        crate::lm::BackendOptions::default()
+            .device(Device::Cuda)
+            .max_ctx(512)
+            .gpu_layers(Some(3)),
     );
     assert!(e.is_err_and(|e| e.contains("doesn't split by layers")));
 }
@@ -468,7 +474,7 @@ fn route_matches_cpu_twin(small: bool, name: &str) {
     };
     let (cc, mb) = c.moe_parts();
     net.gpu
-        .moe_tokens(&net.kind, cc, mb, &ids, 0, Head::No, &mut ex)
+        .moe_tokens(&net.kind, cc, mb, &ids, 0, Head::No, &mut ex, None)
         .unwrap();
     let dim = net.gpu.dim;
     // Per differing set: the CPU's own gap between its k-th and (k+1)-th

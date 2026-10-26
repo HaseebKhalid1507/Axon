@@ -207,7 +207,7 @@ fn q8_0(v: &[f32]) -> Vec<u8> {
 /// The fixture's tensor list and bytes (matrices of type `mt`: F32 or
 /// Q8_0; the router, norms and biases F32).
 #[allow(clippy::type_complexity)]
-fn fixture_tensors(
+pub(crate) fn fixture_tensors(
     o: Opt,
     mt: u32,
 ) -> (

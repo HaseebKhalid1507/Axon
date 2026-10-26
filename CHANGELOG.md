@@ -17,7 +17,7 @@ The first version: everything merged to `main` from the start of the project (20
   The command line moved from `src/main.rs` to `src/cli.rs` (a new file: git doesn't track it as a rename) and the
   decode loop and its tests to `src/generate.rs`; `examples/embed.rs` shows the API. No change for the CLI: same
   greedy bits, same output, same tests (14 renamed: `tests::*` → `cli::tests::*` or `generate::tests::*`).
-- The KV type is an argument: `Backend::new(…, kv, …)` reads no `AXON_KV` (the CLI and `examples/embed.rs` parse it
+- The KV type is an argument: `Backend::new` (its `BackendOptions::kv`) reads no `AXON_KV` (the CLI and `examples/embed.rs` parse it
   with `KvType::parse` and pass it), `KvType::F32` takes effect on the CPU (it used to be silently f16 through the
   library), and a type that conflicts with the process's earlier f16/f32 choice is an error.
 - `Model` is read-only outside the crate: its fields and the methods that hand out or release weight bytes are
@@ -27,6 +27,17 @@ The first version: everything merged to `main` from the start of the project (20
 - `generate` refuses drafting (`max_draft > 0`) on a backend whose decode steps stream (`Lm::decode_streams`:
   `AXON_STREAM_DECODE=1` on a CPU/GPU split), where drafting wouldn't be lossless; the CLI and `serve` already
   refused the pair.
+- `Backend` and `BackendCache` are opaque (#118 A): no variants to match and no fields, so the model types inside
+  (CPU, GPU, split, pipeline, mixture-of-experts) and their geometry can't be reached or written from outside the
+  crate, and a new kind is not a breaking change. `Lm` is sealed (implemented by the crate's models only).
+  `Device`, `KvType` and `GenStats` are `#[non_exhaustive]` (a match outside the crate needs a `_` arm;
+  `GenStats::default` stays).
+- `Backend::new(&model, BackendOptions)`: device, context, GPU layers, KV type and fit are a `#[non_exhaustive]`
+  options struct with `Default` and chainable setters (`BackendOptions::default().device(Device::Cuda).max_ctx(8192)`),
+  not six positional arguments, so new options (#118 item 2) aren't breaking. `Lm::forward_cands` / `verify_cands`
+  are `#[doc(hidden)]` until the sampler is exported (#118 item 8).
+- A bad `AXON_SIMD` (unknown, or a kernel set the CPU lacks), `AXON_DECODE_ROWS` or `AXON_PREFETCH` is an error
+  from `load` and `Backend::new` (the CLI: its usual message, exit 2) instead of a panic inside a later call (#118 B).
 - Not hardened for embedders yet (stderr notes, env-only config, a CUDA leak per `Backend::new`, `serve` exits the
   process): #118.
 
@@ -49,6 +60,11 @@ The first version: everything merged to `main` from the start of the project (20
 - Prefill: Q8_0/Q5_0 GEMM fix, fewer pool joins, batch 128 (#20); decode pool participation on hybrid CPUs (#32).
 - Startup: map instead of copy when repacked, CUDA init at t = 0, read-ahead, faster upload (#21); pinned upload
   ring, faster tokenizer build and GGUF string parse (#41).
+- **Behaviour change (#142):** a dense model whose repacked weights plus the KV cache of its first 8192 tokens (or
+  `--ctx`, if shorter) don't fit in the RAM available (host `MemAvailable` or the tightest cgroup limit, #133) is
+  refused at load with a message naming the limit (exit 2), instead of being OOM-killed. A longer `--ctx` that
+  wouldn't fit whole prints a note. The MoE RAM refusal's figures are now GiB, as the dense one's, and a cgroup
+  limit is printed in MiB.
 
 ### CUDA
 - GPU backend: foundations (#7), decode (#8), batched prefill and speculative verify (#10), an 8-bit KV cache
@@ -81,6 +97,10 @@ The first version: everything merged to `main` from the start of the project (20
   `/v1/responses` and the ollama API (#70); gpt-oss tool calling via harmony (#111).
 - Fixes: metrics counted before the response is written (#93); a request leaves in-flight before its client has
   the response (#113).
+- **Behaviour change (#141):** an explicit `--parallel N` that doesn't fit in GPU memory at start now exits 2 with
+  the numbers (it used to start with fewer slots, one request at a time at worst, said only with logging on). A
+  supervisor that restarts on exit will keep exiting until `--parallel`, `--ctx` or `--kv` changes; leave
+  `--parallel` out for the automatic sizing, which still falls back (and now says so, also under `--quiet`).
 
 ### Hardening, tests and CI
 - Fuzz-found fixes for GGUF, tokenizer, serve and CLI (#37); soak harness and model-zoo sweep (#83).

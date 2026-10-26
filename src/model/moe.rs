@@ -249,7 +249,14 @@ impl MoeInfo {
     }
 }
 
+/// Bytes a GiB, for the refusals.
+const GIB: f64 = (1u64 << 30) as f64;
+
 /// Headroom `check_ram` wants beyond the CPU model's anonymous memory.
+/// Wider than the dense check's none (`model::check_ram_dense`): this
+/// estimate rounds the dense weights ("roughly", `ram_need`) and counts no
+/// KV cache, norms, routers or scratch, where the dense one is the built
+/// arena exactly plus the KV. Not calibrated against a memory limit yet.
 const RAM_HEADROOM: u64 = 3 << 29;
 
 /// Anonymous memory the CPU model of `i` takes beyond the mapped file, plus
@@ -269,28 +276,91 @@ fn ram_need(i: &MoeInfo, repack: bool, dense: bool) -> u64 {
 }
 
 /// The CPU model's RAM beyond the file: refuse a MoE model that wouldn't fit
-/// in `MemAvailable` (`ram_need`) instead of swapping. `repack` as
-/// `Qwen2::new` (AXON_REPACK). `dense` false: `crate::moe`'s split (the
-/// host holds the experts only).
+/// in the RAM available (`ram_need`) instead of swapping or being OOM-killed.
+/// Available: the host's `MemAvailable`, or a tighter cgroup limit's room (a
+/// container, a systemd scope: `gguf::mem`), and the refusal says which.
+/// `repack` as `Qwen2::new` (AXON_REPACK). `dense` false: `crate::moe`'s
+/// split (the host holds the experts only).
 pub(crate) fn check_ram(m: &Model, dense: bool) -> Result<(), String> {
     let repack = std::env::var("AXON_REPACK").map_or(true, |v| v != "0");
-    check_ram_with(m, repack, dense, crate::gguf::mem_available())
+    check_ram_with(m, repack, dense, crate::gguf::mem::avail())
 }
 
-fn check_ram_with(m: &Model, repack: bool, dense: bool, avail: Option<u64>) -> Result<(), String> {
+/// `check_ram` of `crate::moe`'s split with the experts of the MoE layers
+/// in `skip` resident on the GPU (never repacked: no arena on the host).
+/// Sums the kept layers' own arena bytes: placement moves the smallest
+/// layers, so an average over all would under-count the kept ones. Reads
+/// metadata only. `avail`: the RAM available (tests), else the live figure.
+pub(crate) fn check_ram_keep(
+    m: &Model,
+    repack: bool,
+    skip: &[usize],
+    avail: Option<u64>,
+) -> Result<(), String> {
+    let avail = match avail {
+        Some(bytes) => Some(crate::gguf::mem::Avail {
+            bytes,
+            bound: crate::gguf::mem::Bound::Host,
+        }),
+        None => crate::gguf::mem::avail(),
+    };
+    check_ram_keep_with(m, repack, skip, avail)
+}
+
+/// The kept MoE layers' expert arena bytes (`check_ram_keep`).
+pub(crate) fn kept_arena(m: &Model, repack: bool, skip: &[usize]) -> u64 {
+    m.tensors
+        .iter()
+        .filter(|t| EXPS.iter().any(|s| t.name.ends_with(s)) && t.dims.len() >= 3 && t.dims[2] > 0)
+        .filter(|t| usize::try_from(t.layer).map_or(true, |l| !skip.contains(&l)))
+        .map(|t| arena_bytes(t, repack) * t.dims[2])
+        .sum()
+}
+
+fn check_ram_keep_with(
+    m: &Model,
+    repack: bool,
+    skip: &[usize],
+    avail: Option<crate::gguf::mem::Avail>,
+) -> Result<(), String> {
+    if moe_dims(m).is_none() {
+        return Ok(());
+    }
+    let arena = kept_arena(m, repack, skip);
+    let want = arena + RAM_HEADROOM;
+    match avail {
+        Some(avail) if avail.bytes < want => Err(format!(
+            "{}: the CPU experts beside {} resident layers need about {:.2} GiB of RAM (their \
+             repacked experts {:.2} GiB) and only {:.2} GiB is available (bound by {avail})",
+            m.arch,
+            skip.len(),
+            want as f64 / GIB,
+            arena as f64 / GIB,
+            avail.bytes as f64 / GIB
+        )),
+        _ => Ok(()),
+    }
+}
+
+fn check_ram_with(
+    m: &Model,
+    repack: bool,
+    dense: bool,
+    avail: Option<crate::gguf::mem::Avail>,
+) -> Result<(), String> {
     let Some(i) = MoeInfo::of_with(m, repack) else {
         return Ok(());
     };
     let want = ram_need(&i, repack, dense);
     match avail {
-        Some(avail) if avail < want => Err(format!(
-            "{}: the {} needs about {:.1} GB of RAM (its repacked experts {:.1} GB) and \
-             only {:.1} GB is available",
+        Some(avail) if avail.bytes < want => Err(format!(
+            "{}: the {} needs about {:.2} GiB of RAM (its repacked experts {:.2} GiB) and \
+             only {:.2} GiB is available (bound by {avail})",
             m.arch,
             if dense { "CPU model" } else { "CPU experts" },
-            want as f64 / 1e9,
-            i.expert_arena as f64 / 1e9,
-            avail as f64 / 1e9
+            want as f64 / GIB,
+            i.expert_arena as f64 / GIB,
+            avail.bytes as f64 / GIB
         )),
         _ => Ok(()),
     }
@@ -831,6 +901,7 @@ impl<'a> Qwen2<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::gguf::mem::{Avail, Bound};
 
     /// `check_ram`'s need: the r8 arena with the repack, none without it
     /// (AXON_REPACK=0 reads the mapped file in place); the split's, the
@@ -850,15 +921,105 @@ mod tests {
         assert_eq!(on.expert_arena, on.expert_held, "every Q8_0 expert repacks");
         assert_eq!(ram_need(&on, true, false), on.expert_arena + RAM_HEADROOM);
         assert_eq!(ram_need(&off, false, false), RAM_HEADROOM);
+        let host = |bytes| {
+            Some(Avail {
+                bytes,
+                bound: Bound::Host,
+            })
+        };
         // Room for the headroom only: refused with the repack, fine without.
-        let avail = Some(RAM_HEADROOM + 1);
-        assert!(check_ram_with(&m, true, true, avail).is_err());
+        let avail = host(RAM_HEADROOM + 1);
+        assert!(check_ram_with(&m, true, true, avail.clone()).is_err());
         assert!(check_ram_with(&m, false, true, avail).is_ok());
         assert!(check_ram_with(&m, true, true, None).is_ok());
         // Room for the experts but not the dense weights: the split fits.
-        let avail = Some(on.expert_arena + RAM_HEADROOM);
-        assert!(check_ram_with(&m, true, true, avail).is_err());
+        let avail = host(on.expert_arena + RAM_HEADROOM);
+        assert!(check_ram_with(&m, true, true, avail.clone()).is_err());
         assert!(check_ram_with(&m, true, false, avail).is_ok());
+    }
+
+    /// The refusal names what bound the figure: the host's MemAvailable,
+    /// or the cgroup (path and limit) whose room is tighter.
+    #[test]
+    fn ram_refusal_names_the_bound() {
+        let (m, _) = crate::model::tests::dense_fixture("qwen3moe", crate::quant::Q8_0);
+        let host = Avail {
+            bytes: 1,
+            bound: Bound::Host,
+        };
+        let e = check_ram_with(&m, true, true, Some(host)).unwrap_err();
+        assert!(
+            e.ends_with("is available (bound by host MemAvailable)"),
+            "{e}"
+        );
+        let cg = Avail {
+            bytes: 1,
+            bound: Bound::Cgroup {
+                path: "/app.slice/job.scope".into(),
+                limit: 1000 << 20,
+                v1: false,
+            },
+        };
+        let e = check_ram_with(&m, true, true, Some(cg)).unwrap_err();
+        assert!(
+            e.ends_with("(bound by cgroup /app.slice/job.scope memory.max 1000 MiB)"),
+            "{e}"
+        );
+    }
+
+    /// `check_ram_keep` sums the kept layers' own arena bytes, not an
+    /// average (#127 review): on the deepseek2 fixture with layer 2's experts
+    /// F32 (read in place: no arena) and layer 1's Q8_0, keeping layer 1
+    /// needs all of the arena, keeping layer 2 none of it.
+    #[test]
+    fn ram_keep_counts_the_kept_layers() {
+        use crate::model::deepseek2_tests::{Opt, fixture_tensors};
+        let o = Opt {
+            q_lora: false,
+            yarn: false,
+        };
+        let (meta, mut list, mut data) = fixture_tensors(o, crate::quant::Q8_0);
+        let (_, fl, fd) = fixture_tensors(o, crate::quant::F32);
+        for i in 0..list.len() {
+            if list[i].0.starts_with("blk.2.") && EXPS.iter().any(|s| list[i].0.ends_with(s)) {
+                list[i] = fl[i].clone();
+                data[i] = fd[i].clone();
+            }
+        }
+        let l: Vec<(&str, &[u64], u32)> =
+            list.iter().map(|t| (t.0.as_str(), &t.1[..], t.2)).collect();
+        let m = crate::gguf::build_for_test_with(&meta, &l, &data);
+        let all = MoeInfo::of_with(&m, true).unwrap().expert_arena;
+        assert!(all > 0);
+        assert_eq!(kept_arena(&m, true, &[]), all);
+        assert_eq!(
+            kept_arena(&m, true, &[2]),
+            all,
+            "layer 1 holds the whole arena"
+        );
+        assert_eq!(kept_arena(&m, true, &[1]), 0);
+        assert_eq!(
+            kept_arena(&m, false, &[]),
+            0,
+            "AXON_REPACK=0: nothing repacks"
+        );
+        let host = |bytes| {
+            Some(Avail {
+                bytes,
+                bound: Bound::Host,
+            })
+        };
+        // Room for half the arena: the average (all / 2) would pass keeping
+        // layer 1; its real bytes don't.
+        let avail = host(all / 2 + RAM_HEADROOM);
+        let e = check_ram_keep_with(&m, true, &[2], avail.clone()).unwrap_err();
+        assert!(e.contains("beside 1 resident layers"), "{e}");
+        assert!(check_ram_keep_with(&m, true, &[1], avail.clone()).is_ok());
+        // Nothing resident: the same need as `check_ram`'s split.
+        assert_eq!(
+            check_ram_keep_with(&m, true, &[], avail.clone()).is_ok(),
+            check_ram_with(&m, true, false, avail).is_ok()
+        );
     }
 
     #[test]

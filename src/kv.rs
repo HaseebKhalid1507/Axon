@@ -193,8 +193,20 @@ pub enum KvData {
     F32(Layers<f32>),
 }
 
-/// A KV cache element type, as AXON_KV or `--kv` names it.
+/// A KV cache element type, as AXON_KV or `--kv` names it. Non-exhaustive:
+/// more types may come, so a match outside the crate needs a `_` arm.
+///
+/// ```compile_fail,E0004
+/// fn bytes(k: axon::KvType) -> usize {
+///     match k {
+///         axon::KvType::F16 => 2,
+///         axon::KvType::F32 => 4,
+///         axon::KvType::Q8 => 1,
+///     }
+/// }
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum KvType {
     /// The default, on the CPU and the GPU.
     F16,

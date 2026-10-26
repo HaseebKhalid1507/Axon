@@ -6,7 +6,8 @@
 //! deliberately small; everything else stays private to the crate:
 //!
 //! - [`load`]: map (or copy) a GGUF and check that Axon can run it;
-//! - [`Backend::new`]: place it on the CPU or a CUDA GPU, as an [`Lm`];
+//! - [`Backend::new`]: place it on the CPU or a CUDA GPU, as an [`Lm`], as
+//!   [`BackendOptions`] say (device, context, GPU layers, KV type);
 //! - [`Tokenizer`]: the model's own tokenizer, from the same file;
 //! - [`Lm`]: caches, prefill and decode steps;
 //! - [`generate`]: the greedy decode loop behind `axon gen` (sampling stays
@@ -15,13 +16,13 @@
 //! - [`serve`]: the OpenAI-compatible HTTP server behind `axon serve`.
 //!
 //! ```no_run
-//! use axon::{Backend, Device, GenOpts, KvType, Lm, Tokenizer};
+//! use axon::{Backend, BackendOptions, Device, GenOpts, Lm, Tokenizer};
 //!
 //! let model = axon::load("models/qwen2.5-0.5b-instruct-q4_k_m.gguf", Device::Cpu)?;
 //! let tok = Tokenizer::from_gguf(&model);
 //! let ids = tok.encode_prompt("The capital of France is");
 //! let ctx = ids.len() + 16 + 1;
-//! let net = Backend::new(&model, Device::Cpu, ctx, None, KvType::F16, false)?;
+//! let net = Backend::new(&model, BackendOptions::default().device(Device::Cpu).max_ctx(ctx))?;
 //! let mut cache = net.new_cache(ctx);
 //! let logits = net.prefill_logits(&ids, 0, &mut cache);
 //! let stop = tok.eog();
@@ -42,7 +43,13 @@
 //! `Backend::new` (`AXON_MMAP`, `AXON_REPACK`, `AXON_Q6K8`, `AXON_GATE_UP`,
 //! `AXON_CUDA_GRAPHS`, `AXON_PP_CUTS`), so changing them between loads
 //! changes behaviour. `AXON_GPUS` picks the GPU(s): the only way in 0.1
-//! (read at each `Backend::new`). README; #118.
+//! (read at each `Backend::new`). A value the engine can't use for
+//! `AXON_SIMD`, `AXON_DECODE_ROWS` or `AXON_PREFETCH` is an error from
+//! `load` and `Backend::new`. README; #118.
+//!
+//! [`Backend`] and [`BackendCache`] are opaque, [`Lm`] is sealed, and
+//! [`Device`], [`KvType`] and [`GenStats`] are non-exhaustive: a new
+//! backend, device, KV type or statistic is not a breaking change.
 
 #[macro_use]
 mod mv;
@@ -77,7 +84,7 @@ mod vmath;
 pub use generate::{GenOpts, GenStats, generate};
 pub use gguf::Model;
 pub use kv::KvType;
-pub use lm::{Backend, BackendCache, Device, Lm};
+pub use lm::{Backend, BackendCache, BackendOptions, Device, Lm};
 pub use tokenizer::{Tokenizer, Utf8Stream};
 
 // Crate-root paths the modules use (`crate::PREFILL_BATCH`, `crate::fail`,
@@ -91,18 +98,18 @@ pub(crate) use generate::{PREFILL_BATCH, argmax};
 /// Load the GGUF (or safetensors directory) at `path` to run on `device`:
 /// mapped for the GPU; for the CPU, copied into huge pages when the model
 /// reads its weights in place (AXON_MMAP overrides). An error names the
-/// file and says why it can't be read or run.
+/// file and says why it can't be read or run, or names an engine variable
+/// with a value Axon can't use (AXON_SIMD, AXON_DECODE_ROWS,
+/// AXON_PREFETCH: checked before anything is read).
 pub fn load(path: &str, device: Device) -> Result<Model, String> {
+    quant::env_check()?;
     let mut unsupported = None;
     let m = gguf::load_to_run(path, (device == Device::Cuda).then_some(false), |m| {
         if let Err(e) = model::check_supported(m) {
             unsupported = Some(e);
             return gguf::CopyWish::MapOnly;
         }
-        match model::is_moe(m) {
-            true => gguf::CopyWish::MapOnly,
-            false => gguf::CopyWish::Want(model::reads_matrices_in_place(m)),
-        }
+        model::cpu_copy_wish(m)
     })
     .map_err(|e| format!("{path}: {e}"))?;
     match unsupported {
@@ -115,16 +122,19 @@ pub fn load(path: &str, device: Device) -> Result<Model, String> {
 /// command line, `["axon", "serve", "model.gguf", flags...]` (README,
 /// `axon serve --help`). Blocks. It behaves as the CLI does, process exits
 /// included: a usage error (flags, or a bad `AXON_DEVICE` / `AXON_KV` /
-/// `AXON_DRAFT`) prints a message and exits with code 2, and an engine
-/// failure (a panic in the engine thread) exits with code 70. Not yet
-/// safe to call from a process that must outlive the server.
+/// `AXON_DRAFT`) prints a message and exits with code 2, so does a start
+/// the server refuses (an explicit `--parallel N` that doesn't fit in GPU
+/// memory, #137; a mixture-of-experts model with `--parallel N`), and an
+/// engine failure (a panic in the engine thread) exits with code 70. Not
+/// yet safe to call from a process that must outlive the server: a typed,
+/// matchable start error for embedders is tracked in #118.
 pub fn serve(args: &[String]) -> std::io::Result<()> {
     serve::run(args)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Backend, Device, KvType};
+    use super::{Backend, BackendOptions, Device, KvType};
 
     /// The CPU caches' f16/f32 choice is process-wide: once it's f16 (every
     /// test makes f16 caches), asking for f32 is an error, not a silent f16.
@@ -133,13 +143,25 @@ mod tests {
         crate::kv::set_f32(false);
         assert!(!crate::kv::use_f32());
         let m = crate::gguf::build_for_test(&[], &[]);
-        let e = Backend::new(&m, Device::Cpu, 64, None, KvType::F32, false)
-            .err()
-            .expect("f32 after f16");
+        let e = Backend::new(
+            &m,
+            BackendOptions::default()
+                .device(Device::Cpu)
+                .max_ctx(64)
+                .kv(KvType::F32),
+        )
+        .err()
+        .expect("f32 after f16");
         assert!(e.contains("f32 KV cache"), "{e}");
-        let e = Backend::new(&m, Device::Cpu, 64, None, KvType::Q8, false)
-            .err()
-            .expect("q8 on the CPU");
+        let e = Backend::new(
+            &m,
+            BackendOptions::default()
+                .device(Device::Cpu)
+                .max_ctx(64)
+                .kv(KvType::Q8),
+        )
+        .err()
+        .expect("q8 on the CPU");
         assert!(e.contains("cuda-only"), "{e}");
     }
 }

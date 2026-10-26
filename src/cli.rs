@@ -8,7 +8,7 @@ use crate::{
     chat, cuda, draft, gguf, hybrid, identity, kv, kvsave, lineedit, lm, model, pool, rope, sample,
     serve, spec, tokenizer,
 };
-use lm::{Backend, Device, Lm};
+use lm::{Backend, Device, Inner, Lm};
 use std::env;
 
 /// Draft tokens per speculative step unless --draft / AXON_DRAFT say
@@ -47,12 +47,13 @@ usage:
                                             talk to an instruct model (sampled; --temp 0: greedy)
   axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--draft K] [--draft-model PATH]
             [--device D] [--gpu-layers N] [--kv T] [--alias NAME] [--max-tokens N] [--cors [ORIGIN]]
-            [--max-conns N] [--max-queue N] [--parallel N] [--prefill-chunk N] [--prefill-ms MS]
+            [--max-conns N] [--max-queue N] [--parallel N] [--prefill-chunk N] [--step-ms MS]
+            [--step-tokens N] [--admit-order fifo|sjf] [--admit-age-ms MS] [--prefill-lanes N]
             [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS]
             [--no-think] [--think-inline] [--quiet] [sampling flags; the repeat penalty defaults to 1 (off)]
                                             an OpenAI-compatible HTTP server (/v1/models,
                                             /v1/chat/completions, /v1/completions; on cuda
-                                            up to --parallel (8) requests decode together,
+                                            up to --parallel (16) requests decode together,
                                             on the CPU or a --gpu-layers split one at a
                                             time; README: axon serve)
   axon -h | --help                          this help
@@ -82,6 +83,10 @@ flags:
   --gpus L    gen, chat: the CUDA devices to run on (implies --device cuda): one (\"1\") or a
               pipeline over several (\"0,1\": the layers split across them in order, the first
               runs the embedding, the last the head; same results as one GPU)
+  --gpu-experts N|auto  gen, chat: with --device cuda, a MoE model's (deepseek2, qwen3moe)
+              routed experts of N layers (auto: as many as fit after the context's cache; smallest
+              first) resident on the GPU instead of the CPU; same results (the GPU twins of the
+              CPU's kernels); default 0; as AXON_GPU_EXPERTS
   --kv T      gen, chat: KV cache type, f16 (default) or q8 (cuda only: int8 with a scale per
               position and head, half the memory; slightly different results; on a split, the
               GPU layers' cache, so more layers fit); as AXON_KV
@@ -113,16 +118,32 @@ flags:
               One process per session file: a session in use by another axon process is refused
               (an advisory lock on F.lock beside it, left in place; where the filesystem can't lock,
               a warning and no lock)
-  --parallel N  serve: requests decoded together on the GPU (default 8; 1: one at a time;
-              N slots cost N KV caches). By default the context comes first: as many
-              slots (2 to 8) as fit with the whole context, or with a shorter one down to
-              32768 (or the whole one, if less); if not even 2 fit, one request at a time.
-              With --ctx N, the slots that fit with N; with --parallel N alone, N slots of
-              the longest context that fits them
-  --prefill-ms MS  serve: while requests decode, a step feeds new prompts up to what fits in
-              MS ms beside their decode step (default 60; 0: exactly --prefill-chunk tokens)
-  --prefill-chunk N  serve: at least N prompt tokens per such step (default 256; 0: prompts
-              fed whole, the others' streams wait)
+  --parallel N  serve: requests decoded together on the GPU (default 16 with paged KV, the
+              default: the slots share the KV pages that fit; 8 with AXON_PAGED_KV=0; 1: one
+              at a time). An explicit N that doesn't fit is refused. Without paged KV, N
+              slots cost N KV caches, and by default the context comes first: as many slots
+              (2 to 8) as fit with the whole context, or with a shorter one down to 32768 (or
+              the whole one, if less); if not even 2 fit, one request at a time. With --ctx
+              N, the slots that fit with N; with --parallel N alone, N slots of the longest
+              context that fits them (a shorter context is said, also under --quiet)
+  --prefill-chunk N  serve: at least N prompt tokens per step while requests decode (default
+              256; 0: prompts fed whole, the others' streams wait)
+  --step-ms MS  serve: a step's target time while requests decode (default 60): the prompt
+              tokens it feeds beside their decode step are what fits at the cost measured as
+              steps run (0: exactly --prefill-chunk tokens). --prefill-ms is its old name.
+              AXON_STEP_COST=legacy: the budget before (MS less the last decode step)
+  --step-tokens N  serve: pin a step's prompt tokens (default 0: --step-ms; AXON_STEP_COST=legacy
+              ignores it: main's budget; it also lifts the bound on prompts per step, so with
+              sjf a cold wave of short prompts is fed in one step again)
+  --admit-order fifo|sjf  serve: waiting requests start first come first served, one per
+              step (fifo, default), or shortest prompt first, several per step (sjf, opt-in:
+              much lower tail TTFT for short prompts under load, not yet the median it was
+              meant to halve; AXON_ADMIT=sjf sets it too)
+  --admit-age-ms MS  serve, sjf: a request waiting this long starts before shorter ones
+              (default 3000; 0: never)
+  --prefill-lanes N  serve: prompts prefilling at once; with sjf only prompts longer than a
+              step's chunk count (default 0: fifo 2, sjf parallel/16 within 2..8).
+              The scheduling of before: AXON_STEP_COST=legacy (the defaults otherwise)
   --api-key KEY  serve: every route but /health (and CORS preflights) needs
               `Authorization: Bearer KEY` (else 401); AXON_API_KEY sets it too, out of `ps`
               (trimmed; set but blank is an error)
@@ -171,6 +192,7 @@ environment:
                              attention bandwidth; f32 for A/B, CPU only; q8 cuda only)
   AXON_DEVICE=cpu|cuda       same as --device
   AXON_GPU_LAYERS=N          same as --gpu-layers N
+  AXON_GPU_EXPERTS=N|auto    same as --gpu-experts N|auto (serve too)
   AXON_GPUS=L                same as --gpus L (serve too; with --device cuda)
   AXON_PP_CUTS=K[,K2..]      --gpus pipeline: the first layer of each GPU after the first
                              (default: even, else what fits)
@@ -196,7 +218,7 @@ model.safetensors or its shards; BF16/F16/F32 weights, run as the GGUF F16 of th
 /// Whether `net` is split across the CPU and the GPU (some layers on each):
 /// a drafter's default K is then `draft::SPLIT_MODEL_DRAFT`.
 fn is_split(net: &Backend) -> bool {
-    matches!(net, Backend::Hybrid(h) if h.gpu_layers > 0 && h.gpu_layers < h.n_layers)
+    matches!(&net.0, Inner::Hybrid(h) if h.gpu_layers > 0 && h.gpu_layers < h.n_layers)
 }
 
 /// AXON_STREAM_DECODE=1 with drafting: refused (drafting's picks come
@@ -238,6 +260,10 @@ pub(crate) fn open_model_with(
     copy: Option<bool>,
     rope: &rope::RopeArgs,
 ) -> gguf::Model {
+    // The CPU kernels' environment, before anything is read (as `load`).
+    if let Err(e) = crate::quant::env_check() {
+        fail(&e);
+    }
     let mut m = gguf::load_to_run(path, copy, |m| {
         // With rope flags the check waits for them (below).
         if rope.is_empty()
@@ -246,10 +272,7 @@ pub(crate) fn open_model_with(
             fail(&format!("{path}: {e}"));
         }
         // A MoE file is always mapped (`reads_matrices_in_place`'s note).
-        match model::is_moe(m) {
-            true => gguf::CopyWish::MapOnly,
-            false => gguf::CopyWish::Want(model::reads_matrices_in_place(m)),
-        }
+        model::cpu_copy_wish(m)
     })
     .unwrap_or_else(|e| load_failed(path, e));
     if !rope.is_empty() {
@@ -493,6 +516,12 @@ pub(crate) fn backend_and_drafter<'a>(
     })
 }
 
+/// --gpu-experts' value: a count or "auto" (a usage error otherwise).
+fn gpu_experts_flag(v: Option<&String>) -> crate::cuda::qwen2::experts::GpuExperts {
+    let v = v.unwrap_or_else(|| fail("--gpu-experts needs a value (a count or auto)"));
+    crate::cuda::qwen2::experts::GpuExperts::parse(v).unwrap_or_else(|e| fail(&e))
+}
+
 /// KV cache type (kv.rs): checked up front so a typo is a usage error, not a
 /// panic in the first new_cache. --kv overrides it.
 pub(crate) fn kv_env() -> kv::KvType {
@@ -646,6 +675,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     let mut draft_path = None;
     let mut device = device_env();
     let mut gpu_layers = None;
+    let mut gpu_experts = None;
     let mut gen_ctx = None;
     let mut kv = kv_env();
     let mut sargs = sample::SampleArgs::default();
@@ -683,6 +713,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             ("-k", Some(v)) => top_k = v,
             ("--draft", Some(v)) => max_draft = Some(v),
             ("--gpu-layers", Some(v)) => gpu_layers = Some(v),
+            ("--gpu-experts", _) => gpu_experts = Some(gpu_experts_flag(args.get(i + 1))),
             ("--ctx", Some(v)) if cmd == "gen" => gen_ctx = Some(v),
             (f @ ("-n" | "-k" | "--draft" | "--gpu-layers" | "--ctx"), None) => fail(&format!(
                 "{f} needs a whole number, got {}",
@@ -821,7 +852,10 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         gpu_layers,
         kv,
         false,
-        lm::Placing::of(cache_ctx),
+        lm::Placing {
+            gpu_experts,
+            ..lm::Placing::of(cache_ctx)
+        },
         cache_ctx,
     );
     // On a split, sampled drafting pays too (docs/design/spec-split.md).
@@ -962,7 +996,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             0.0
         }
     );
-    if let Backend::Cuda(n) = &net {
+    if let Inner::Cuda(n) = &net.0 {
         eprintln!(
             "device:      cuda, {} of weights in VRAM ({} read per token), KV cache {} {}, \
              CUDA graphs {}",
@@ -979,21 +1013,21 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             );
         }
     }
-    if let Backend::Hybrid(n) = &net {
+    if let Inner::Hybrid(n) = &net.0 {
         eprintln!(
             "device:      cuda + cpu, {}, kv {}",
             n.describe(cache_ctx),
             n.kv_name()
         );
     }
-    if let Backend::Pipeline(n) = &net {
+    if let Inner::Pipeline(n) = &net.0 {
         eprintln!(
             "device:      cuda, {}, kv {}",
             n.describe(cache_ctx),
             n.kv_name()
         );
     }
-    // Backend::Moe: its one banner line is `moe:` at load (lm.rs).
+    // Inner::Moe: its one banner line is `moe:` at load (lm.rs).
     let id = identity::of(path, &model, &net);
     match verbose {
         true => eprint!("identity:    {}\n{}", id.fingerprint(), id.canonical()),
@@ -1054,7 +1088,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             eprintln!("drafter:     {}", draft::describe(&dm.name(), d));
         }
     }
-    if !matches!(net, Backend::Cpu(_)) {
+    if !matches!(&net.0, Inner::Cpu(_)) {
         // Everything's written: skip tearing the CUDA context down (freeing
         // each buffer, the driver's exit handlers: ~0.15-0.2 s); the kernel
         // drops the process's GPU memory with it.
@@ -1124,6 +1158,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     let mut draft_path = None;
     let mut device = device_env();
     let mut gpu_layers = None;
+    let mut gpu_experts = None;
     let mut kv = kv_env();
     let mut sargs = sample::SampleArgs::default();
     let mut session = None;
@@ -1160,6 +1195,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
                 | "--draft-model"
                 | "--device"
                 | "--gpu-layers"
+                | "--gpu-experts"
                 | "--kv"
                 | "--gpus"
                 | "--session"
@@ -1187,6 +1223,8 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
             device = Device::parse(v).unwrap_or_else(|e| fail(&e));
         } else if f == "--kv" {
             kv = kv_flag(Some(v));
+        } else if f == "--gpu-experts" {
+            gpu_experts = Some(gpu_experts_flag(Some(v)));
         } else if f == "--gpus" {
             device = gpus_flag(Some(v));
         } else {
@@ -1263,7 +1301,10 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         gpu_layers,
         kv,
         fit,
-        lm::Placing::of(ctx),
+        lm::Placing {
+            gpu_experts,
+            ..lm::Placing::of(ctx)
+        },
         ctx,
     );
     let split = is_split(&net);
@@ -1315,12 +1356,12 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     let name = std::path::Path::new(path)
         .file_name()
         .map_or(path.as_str().into(), |n| n.to_string_lossy());
-    let kvs = match &net {
-        Backend::Cuda(n) => format!(" | kv {}", n.kv_name()),
-        Backend::Hybrid(n) => format!(" | {} | kv {}", n.describe(ctx), n.kv_name()),
-        Backend::Pipeline(n) => format!(" | {} | kv {}", n.describe(ctx), n.kv_name()),
-        Backend::Moe(n) => format!(" | {} | kv {}", n.describe(ctx), n.kv_name()),
-        Backend::Cpu(_) => String::new(),
+    let kvs = match &net.0 {
+        Inner::Cuda(n) => format!(" | kv {}", n.kv_name()),
+        Inner::Hybrid(n) => format!(" | {} | kv {}", n.describe(ctx), n.kv_name()),
+        Inner::Pipeline(n) => format!(" | {} | kv {}", n.describe(ctx), n.kv_name()),
+        Inner::Moe(n) => format!(" | {} | kv {}", n.describe(ctx), n.kv_name()),
+        Inner::Cpu(_) => String::new(),
     };
     let seed = conv
         .sampler
@@ -1753,6 +1794,25 @@ fn human_bytes(b: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// `--help` states serve's real --parallel defaults: the paged pool's
+    /// (the default) and the reserved slots' (AXON_PAGED_KV=0).
+    #[test]
+    fn help_states_the_parallel_defaults() {
+        let (paged, reserved) = (crate::serve::PAGED_PARALLEL, crate::serve::PARALLEL);
+        let flat = super::USAGE
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        for want in [
+            format!("up to --parallel ({paged}) requests"),
+            format!("(default {paged} with paged KV, the default:"),
+            format!("{reserved} with AXON_PAGED_KV=0;"),
+            format!("as many slots (2 to {reserved}) as fit"),
+        ] {
+            assert!(flat.contains(&want), "--help lacks {want:?}");
+        }
+    }
+
     use super::{gen_budget, placement, utf8_args};
     use crate::generate::{GenOpts, argmax, generate};
 

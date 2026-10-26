@@ -319,3 +319,414 @@ fn ds2_gpu_moonlight_bits() {
         tok.decode(&r2.ids)
     );
 }
+
+/// The logits of `net` over `ids`: decode one by one, then the same
+/// prompt fed in passes of `splits` and its last logits (prefill_logits),
+/// then a greedy continuation of `ngen` tokens from there (decode).
+pub(super) fn resident_trace(
+    net: &MoeQwen3,
+    ids: &[u32],
+    splits: &[usize],
+    ngen: usize,
+) -> Vec<Vec<f32>> {
+    let n = ids.len();
+    let mut out = Vec::new();
+    let mut a = net.new_cache(n + ngen + 1);
+    for (pos, &id) in ids.iter().enumerate() {
+        out.push(net.forward(id, pos, &mut a));
+    }
+    let mut b = net.new_cache(n + ngen + 1);
+    let mut s = 0;
+    for &k in splits.iter().cycle() {
+        if s + 1 >= n {
+            break;
+        }
+        let k = k.min(n - 1 - s);
+        net.feed_batch(&ids[s..s + k], s, &mut b);
+        s += k;
+    }
+    let mut last = net.prefill_logits(&ids[s..], s, &mut b);
+    out.push(last.clone());
+    for i in 0..ngen {
+        let t = crate::argmax(&last);
+        last = net.forward(t, n + i, &mut b);
+        out.push(last.clone());
+    }
+    out
+}
+
+/// PR C's key gate on the fixture: every `--gpu-experts` placement (none,
+/// one MoE layer, both, auto) gives the same bits, decode and batched
+/// (every option set; YaRN's crosses an attention split).
+#[test]
+fn ds2_resident_fixture_bits() {
+    use crate::cuda::qwen2::experts::GpuExperts;
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    if crate::cuda::qwen2::experts::twin_gemm_ok(g.info().unwrap().cc).is_err() {
+        // Residency falls back to none below sm_80 (and says so).
+        let (m, _) = ds2_fixture(OPTS[0], crate::quant::Q8_0);
+        let km = Kernels::module(&g).unwrap();
+        let ml = Kernels::mla_module(&g).unwrap();
+        let net = MoeQwen3::new_with(
+            &g,
+            &km,
+            &ml,
+            &m,
+            64,
+            CacheKv::F16,
+            false,
+            true,
+            GpuExperts::Auto,
+        )
+        .unwrap();
+        assert!(net.resident_layers().is_empty());
+        assert!(net.describe(64).contains("sm_80"), "{}", net.describe(64));
+        eprintln!("SKIPPED (fell back, as designed): {}", net.describe(64));
+        return;
+    }
+    let km = Kernels::module(&g).unwrap();
+    let ml = Kernels::mla_module(&g).unwrap();
+    for o in OPTS {
+        let n = if o.yarn { 150 } else { 60 };
+        let mut base: Option<Vec<Vec<f32>>> = None;
+        for want in [
+            GpuExperts::N(0),
+            GpuExperts::N(1),
+            GpuExperts::N(2),
+            GpuExperts::Auto,
+        ] {
+            let (m, _) = ds2_fixture(o, crate::quant::Q8_0);
+            let net = MoeQwen3::new_with(&g, &km, &ml, &m, n + 40, CacheKv::F16, false, true, want)
+                .unwrap();
+            let r = net.resident_layers();
+            let expect = match want {
+                GpuExperts::N(k) => k,
+                GpuExperts::Auto => 2,
+            };
+            assert_eq!(r.len(), expect, "{o:?} {want:?}: {}", net.describe(n));
+            // The resident layers' host bytes were handed back (the fixture is
+            // anonymous memory: reading them now panics), and nothing below
+            // reads them: the CPU half doesn't build those experts.
+            for t in m.tensors.iter().filter(|t| {
+                crate::model::MOE_EXPS.iter().any(|s| t.name.ends_with(s))
+                    && usize::try_from(t.layer).is_ok_and(|l| r.contains(&l))
+            }) {
+                let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    m.tensor_data(t).len()
+                }));
+                assert!(read.is_err(), "{o:?} {want:?}: {} not released", t.name);
+            }
+            let ids = ids_for(n, net.vocab(), 5);
+            let tr = resident_trace(&net, &ids, &[1, 7, 13, 2, 33], 24);
+            assert!(tr.iter().flatten().all(|v| v.is_finite()));
+            match &base {
+                None => base = Some(tr),
+                Some(b) => {
+                    for (i, (x, y)) in b.iter().zip(&tr).enumerate() {
+                        assert!(
+                            bits(x) == bits(y),
+                            "{o:?} {want:?} (resident {r:?}): logits {i} differ from none resident"
+                        );
+                    }
+                }
+            }
+            eprintln!("fixture {o:?} {want:?}: resident {r:?}, bits equal");
+        }
+    }
+}
+
+/// PR C's key gate on Moonlight (AXON_TEST_DS2=1): `--gpu-experts` 0, 6,
+/// 12 and auto give the same bits on a 400-token prompt (3 attention
+/// splits; fed in passes) and a 64-token greedy continuation, and on the
+/// prompt's first 40 positions decoded one by one.
+#[test]
+fn ds2_resident_moonlight_bits() {
+    use crate::cuda::qwen2::experts::GpuExperts;
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = crate::testutil::ds2_model() else {
+        return;
+    };
+    if crate::cuda::qwen2::experts::twin_gemm_ok(g.info().unwrap().cc).is_err() {
+        eprintln!("SKIPPED: resident experts need sm_80+");
+        return;
+    }
+    let km = Kernels::module_for(&g, &m).unwrap();
+    let ml = Kernels::mla_module(&g).unwrap();
+    let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
+    let text = "Mixture-of-experts models route each token to a few experts. ".repeat(40);
+    let mut ids = tok.encode(&text);
+    ids.truncate(400);
+    type Logits = Vec<Vec<f32>>;
+    let mut base: Option<(Logits, Logits)> = None;
+    for want in [
+        GpuExperts::N(0),
+        GpuExperts::N(6),
+        GpuExperts::N(12),
+        GpuExperts::Auto,
+    ] {
+        // A fresh mapping per placement, as each `axon` process has: a build
+        // releases what it repacked or uploaded (`Model::release`).
+        let mi = crate::testutil::ds2_model().unwrap();
+        let net =
+            MoeQwen3::new_with(&g, &km, &ml, &mi, 512, CacheKv::F16, false, true, want).unwrap();
+        let r = net.resident_layers();
+        eprintln!("moonlight {want:?}: {}", net.describe(512));
+        // Not vacuous (#127 review): every N > 0 places exactly N layers and
+        // auto at least one (12 of Moonlight's take ~4.4 GiB; auto places
+        // 24 or 25 on a 12 GB card), else all four runs would be N(0)'s.
+        match want {
+            GpuExperts::N(k) => assert_eq!(r.len(), k, "{want:?}: {}", net.describe(512)),
+            GpuExperts::Auto => assert!(!r.is_empty(), "auto: {}", net.describe(512)),
+        }
+        // The prompt fed (passes of 100, 37, 263) + the continuation.
+        let fed = {
+            let mut c = net.new_cache(512);
+            net.feed_batch(&ids[..100], 0, &mut c);
+            net.feed_batch(&ids[100..137], 100, &mut c);
+            let mut last = net.prefill_logits(&ids[137..], 137, &mut c);
+            let mut out = vec![last.clone()];
+            for i in 0..64 {
+                let t = crate::argmax(&last);
+                last = net.forward(t, 400 + i, &mut c);
+                out.push(last.clone());
+            }
+            out
+        };
+        let mut c = net.new_cache(64);
+        let dec: Vec<Vec<f32>> = ids[..40]
+            .iter()
+            .enumerate()
+            .map(|(p, &t)| net.forward(t, p, &mut c))
+            .collect();
+        match &base {
+            None => base = Some((fed, dec)),
+            Some((bf, bd)) => {
+                for (i, (x, y)) in bf.iter().zip(&fed).enumerate() {
+                    assert!(
+                        bits(x) == bits(y),
+                        "{want:?} (resident {r:?}): fed logits {i} differ"
+                    );
+                }
+                for (i, (x, y)) in bd.iter().zip(&dec).enumerate() {
+                    assert!(
+                        bits(x) == bits(y),
+                        "{want:?} (resident {r:?}): decode logits {i} differ"
+                    );
+                }
+            }
+        }
+        eprintln!("moonlight {want:?}: resident {r:?}: bits equal");
+    }
+}
+
+/// Every refusal falls back to CPU experts cleanly, on in-memory models
+/// (whose bytes a CPU build releases: #127's jade failure, a second build of
+/// the CPU half after the placement): AXON_REPACK=0, a twin F that isn't the
+/// host's (both forced through `new_inner`, on any GPU), sm < 8.0 (where
+/// the GPU is one). Each
+/// falls back to none resident, says why, and gives the bits of `N(0)`.
+#[test]
+fn ds2_resident_fallbacks_build_once() {
+    use super::TwinEnv;
+    use crate::cuda::qwen2::experts::GpuExperts;
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let ml = Kernels::mla_module(&g).unwrap();
+    let f = crate::vmath::fused();
+    let mma = crate::cuda::qwen2::experts::twin_gemm_ok(g.info().unwrap().cc).is_ok();
+    let ids = ids_for(20, FX_VOCAB, 9);
+    let run = |net: &MoeQwen3| -> Vec<Vec<f32>> {
+        let mut c = net.new_cache(32);
+        ids.iter()
+            .enumerate()
+            .map(|(p, &t)| net.forward(t, p, &mut c))
+            .collect()
+    };
+    let (m0, _) = ds2_fixture(OPTS[0], crate::quant::Q8_0);
+    let base = run(&ds2_net(&g, &km, &ml, &m0, 32));
+    let mut cases = vec![
+        (
+            TwinEnv {
+                repack: false,
+                cpu_fused: f,
+                ram: None,
+            },
+            "AXON_REPACK=0",
+        ),
+        (
+            TwinEnv {
+                repack: true,
+                cpu_fused: !f,
+                ram: None,
+            },
+            "fused",
+        ),
+    ];
+    if !mma {
+        cases.push((
+            TwinEnv {
+                repack: true,
+                cpu_fused: f,
+                ram: None,
+            },
+            "sm_80",
+        ));
+    }
+    for (env, why) in cases {
+        let (m, _) = ds2_fixture(OPTS[0], crate::quant::Q8_0);
+        let net = MoeQwen3::new_inner(
+            &g,
+            &km,
+            &ml,
+            &m,
+            32,
+            CacheKv::F16,
+            false,
+            true,
+            GpuExperts::Auto,
+            env,
+        )
+        .unwrap();
+        let d = net.describe(32);
+        assert!(net.resident_layers().is_empty(), "{why}: {d}");
+        assert!(
+            d.contains("no experts resident") && d.contains(why),
+            "{why}: {d}"
+        );
+        let got = run(&net);
+        for (i, (x, y)) in base.iter().zip(&got).enumerate() {
+            assert!(bits(x) == bits(y), "{why}: logits {i} differ from N(0)");
+        }
+        eprintln!("fallback ({why}): {d}");
+    }
+    // qwen3moe's residency and gpt-oss's refusal: q3res_tests.
+}
+
+/// A RAM refusal after the placement (`--gpu-experts` > 0) leaves the model
+/// whole (#127 review round 2): the kept-layers check runs before the
+/// resident layers' bytes are released, so a caller can retry on the CPU
+/// with the same `Model`. The fixture is anonymous memory: a released
+/// tensor would panic on read.
+#[test]
+fn ds2_resident_ram_refusal_releases_nothing() {
+    use super::TwinEnv;
+    use crate::cuda::qwen2::experts::GpuExperts;
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    if crate::cuda::qwen2::experts::twin_gemm_ok(g.info().unwrap().cc).is_err() {
+        eprintln!("SKIPPED: resident experts need sm_80+");
+        return;
+    }
+    let km = Kernels::module(&g).unwrap();
+    let ml = Kernels::mla_module(&g).unwrap();
+    let (m, _) = ds2_fixture(OPTS[0], crate::quant::Q8_0);
+    // The proof below needs anonymous memory (a released tensor panics).
+    assert!(!m.file_backed());
+    let env = TwinEnv {
+        repack: true,
+        cpu_fused: crate::vmath::fused(),
+        ram: Some(1),
+    };
+    let r = MoeQwen3::new_inner(
+        &g,
+        &km,
+        &ml,
+        &m,
+        32,
+        CacheKv::F16,
+        false,
+        true,
+        GpuExperts::Auto,
+        env,
+    );
+    let e = match r {
+        Ok(_) => panic!("1 byte of RAM: refused"),
+        Err(e) => e,
+    };
+    assert!(
+        e.contains("beside 2 resident layers"),
+        "placed, then refused: {e}"
+    );
+    for t in m
+        .tensors
+        .iter()
+        .filter(|t| crate::model::MOE_EXPS.iter().any(|s| t.name.ends_with(s)))
+    {
+        assert!(!m.tensor_data(t).is_empty(), "{}", t.name);
+    }
+    // The CPU retry builds from intact bytes.
+    let cpu = crate::model::Qwen2::new_experts(&m);
+    drop(cpu);
+}
+
+/// The fixture with layer `l`'s routed experts F32 (no GPU twin: only
+/// Q4_K/Q5_0/Q8_0/Q6_K have one), the rest Q8_0.
+fn fixture_untwinnable(o: Opt, l: usize) -> crate::gguf::Model {
+    use crate::model::deepseek2_tests::fixture_tensors;
+    let (meta, mut list, mut data) = fixture_tensors(o, crate::quant::Q8_0);
+    let (_, fl, fd) = fixture_tensors(o, crate::quant::F32);
+    let pre = format!("blk.{l}.");
+    for i in 0..list.len() {
+        if list[i].0.starts_with(&pre)
+            && crate::model::MOE_EXPS
+                .iter()
+                .any(|s| list[i].0.ends_with(s))
+        {
+            list[i] = fl[i].clone();
+            data[i] = fd[i].clone();
+        }
+    }
+    let v: Vec<(&str, &[u64], u32)> = list.iter().map(|t| (t.0.as_str(), &t.1[..], t.2)).collect();
+    crate::gguf::build_for_test_with(&meta, &v, &data)
+}
+
+/// A layer whose expert type has no GPU twin stays on the CPU while the
+/// others are still placed (#127 review round 3): on the fixture with layer
+/// 2's experts F32, auto and N(2) place layer 1 only, and the logits equal
+/// N(0)'s (all CPU experts) bit for bit.
+#[test]
+fn ds2_resident_untwinnable_layer_stays_on_cpu() {
+    use crate::cuda::qwen2::experts::GpuExperts;
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    if crate::cuda::qwen2::experts::twin_gemm_ok(g.info().unwrap().cc).is_err() {
+        eprintln!("SKIPPED: resident experts need sm_80+");
+        return;
+    }
+    let km = Kernels::module(&g).unwrap();
+    let ml = Kernels::mla_module(&g).unwrap();
+    let o = OPTS[0];
+    let n = 60;
+    let ids = ids_for(n, FX_VOCAB, 5);
+    let mut base: Option<Vec<Vec<f32>>> = None;
+    for want in [GpuExperts::N(0), GpuExperts::N(2), GpuExperts::Auto] {
+        let m = fixture_untwinnable(o, 2);
+        let net =
+            MoeQwen3::new_with(&g, &km, &ml, &m, n + 40, CacheKv::F16, false, true, want).unwrap();
+        let r = net.resident_layers();
+        let want_r: Vec<usize> = match want {
+            GpuExperts::N(0) => vec![],
+            _ => vec![1],
+        };
+        assert_eq!(r, want_r, "{want:?}: {}", net.describe(n));
+        let tr = resident_trace(&net, &ids, &[1, 7, 13, 2, 33], 24);
+        assert!(tr.iter().flatten().all(|v| v.is_finite()));
+        match &base {
+            None => base = Some(tr),
+            Some(b) => {
+                for (i, (x, y)) in b.iter().zip(&tr).enumerate() {
+                    assert!(bits(x) == bits(y), "{want:?}: logits {i} differ from N(0)");
+                }
+            }
+        }
+        eprintln!("untwinnable layer 2, {want:?}: resident {r:?}, bits equal");
+    }
+}

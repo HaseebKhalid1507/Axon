@@ -499,6 +499,20 @@ fn is_expert(t: &Tensor) -> bool {
 /// `crate::moe`'s split); every other matrix stays in the mapping, never
 /// read here.
 pub(super) fn build<'a>(m: &'a Model, repack: bool, experts: bool) -> Qwen2<'a> {
+    build_only(m, repack, experts, None)
+}
+
+/// `build`, repacking only the matrices of layers `only` if given: the
+/// other layers' routed experts aren't built (`Weight::absent`: never read,
+/// so the GPU-resident layers' bytes may be released), their other matrices
+/// stay in the mapping. `crate::moe`'s residency, and tests that run a few
+/// layers' experts on the CPU without the whole model's r8 arena.
+pub(super) fn build_only<'a>(
+    m: &'a Model,
+    repack: bool,
+    experts: bool,
+    only: Option<&[usize]>,
+) -> Qwen2<'a> {
     let num = |k: &str| self::num(m, k);
     let d = check(m).unwrap_or_else(|e| panic!("{e}"));
     let need = |k: &str| num(k).unwrap_or_else(|| panic!("missing metadata deepseek2.{k}"));
@@ -530,7 +544,8 @@ pub(super) fn build<'a>(m: &'a Model, repack: bool, experts: bool) -> Qwen2<'a> 
     let mut plan: Vec<Option<(usize, usize)>> = Vec::new();
     let mut total = 0;
     for t in std::iter::once(out_t).chain(items.iter().flatten().map(|(t, _)| *t)) {
-        let len = if repack && (!experts || is_expert(t)) {
+        let picked = only.is_none_or(|o| usize::try_from(t.layer).is_ok_and(|l| o.contains(&l)));
+        let len = if repack && picked && (!experts || is_expert(t)) {
             repacked_len(t)
         } else {
             None
@@ -583,6 +598,9 @@ pub(super) fn build<'a>(m: &'a Model, repack: bool, experts: bool) -> Qwen2<'a> 
             let dst = dst.next().unwrap();
             match slice {
                 None => Weight::load(m, t, dst, true),
+                Some(_) if only.is_some_and(|o| !o.contains(&i)) && is_expert(t) => {
+                    Weight::absent(t)
+                }
                 Some(e) => {
                     let repacked = dst.is_some();
                     let w = Weight::load_bytes(t, moe::expert_bytes(m, t, e), dst);

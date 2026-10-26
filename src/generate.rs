@@ -11,8 +11,23 @@ use crate::sample;
 /// qwen3 0.6B Q8_0, over 64; activations of 128 tokens still sit in L2).
 pub const PREFILL_BATCH: usize = 128;
 
-/// What `generate` did.
+/// What `generate` did. Non-exhaustive: it may report more. Read its
+/// fields; outside the crate only `generate` (or `GenStats::default`)
+/// makes one.
+///
+/// ```compile_fail,E0639
+/// let st = axon::GenStats {
+///     ids: Vec::new(),
+///     passes: 0,
+///     decided: 0,
+///     drafted: 0,
+///     accepted: 0,
+///     forward: (0, 0.0),
+///     verify: Vec::new(),
+/// };
+/// ```
 #[derive(Default)]
+#[non_exhaustive]
 pub struct GenStats {
     /// The emitted tokens (EOS excluded).
     pub ids: Vec<u32>,
@@ -320,6 +335,7 @@ mod tests {
         }
     }
 
+    impl crate::lm::Sealed for Toy {}
     impl crate::Lm for Toy {
         type Cache = Vec<u32>;
         fn decode_streams(&self) -> bool {

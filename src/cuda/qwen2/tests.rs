@@ -6784,6 +6784,7 @@ fn gpu_q8_store_matches_rule() {
 /// over one upload of the weights).
 struct KvNet<'a, 'g>(&'a CudaQwen2<'g>, CacheKv);
 
+impl<'g> crate::lm::Sealed for KvNet<'_, 'g> {}
 impl<'g> Lm for KvNet<'_, 'g> {
     type Cache = CudaCache<'g>;
     fn vocab(&self) -> usize {

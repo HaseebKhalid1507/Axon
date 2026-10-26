@@ -1,14 +1,14 @@
 # Where Axon stands
 
 The latest measured comparisons against ollama and llama.cpp, per host and model. Every number here is
-MEASURED unless marked otherwise, and comes from a scoreboard or a PR. Main is `764792f` (2026-10-19 22:05 EDT).
+MEASURED unless marked otherwise, and comes from a scoreboard or a PR. Main is `39624db` (2026-10-25 21:19 EDT).
 
 **Newest result: the first datacenter serving board** (H100 SXM, main `c15c90e`, 2026-10-19, [below](#serving-runpod-h100-sxm-main-c15c90e-2026-10-19)).
 Axon is the fastest of five engine/weight rows at one stream and 2.0–3.8× behind vLLM / SGLang at 128 concurrent
 requests.
 
-> **No single-stream board below was run on `764792f`** (nor on `4507c75` or `a591e17`, the mains this page was
-> written for before). The newest single-stream board is RunPod at `7f42c02` (2026-10-18; see the exception at the
+> **No single-stream board below was run on `39624db`** (nor on `764792f`, `4507c75` or `a591e17`, the mains this
+> page was written for before). The newest single-stream board is RunPod at `7f42c02` (2026-10-18; see the exception at the
 > end of this box); the H100 serving board ran on `c15c90e`. The newest full boards are from main `0851798` (bella GPU, 2026-10-15 13:06) and main `f8d8a86`
 > (RunPod, avante, CPU, 2026-10-15/16). Merges since then that can change speed or output on some path (none
 > has been re-boarded). Each effect is copied from that PR's own body: **MEASURED** where the PR measured it
@@ -53,11 +53,21 @@ requests.
 > | 7f42c02 | #102 safetensors stage A | new path only (Hugging Face directories, CPU); GGUF `gen` md5 0/20 |
 > | — | #82, #93 | tests and debug builds (#82: one GPU test at a time on every card, a debug-only launch-size check; release non-test code unchanged) and a serve metrics-ordering fix with no speed claim (#93) |
 > | — | #88, #91, #96, #101 | docs only (#101 is a PROPOSED ADR: nothing built) |
+> | c15c90e | #104 one MoE router kernel | MoE paths only; bits unchanged on qwen3moe, gpt-oss and deepseek2 (md5 vs 764792f). **MEASURED** (avante, Qwen3-MOE-4x0.6B, cuda): tg 100.45 → 100.21 tok/s (−0.2 %, round spread ±2.8 %: noise); gpt-oss and Moonlight **not timed** |
+> | c15c90e | #117 library split | no behaviour change. **MEASURED** (avante, 7 + 15 interleaved rounds): speed-neutral, the 0.5B cuda cells 0.9999–1.0004× main in both runs (the 1.5B cells flip sign between runs, a clock state); md5 0 of 40 pairs differ |
+> | c15c90e | #111 gpt-oss tool calling, #136 headerless replies | `serve` gpt-oss requests with tools only; requests without tools and every Qwen / Llama tool request byte-identical (#111: md5 56/56, serve A/B identical; #136: serve A/B 23/23 on every model). Speed **not measured** |
+> | c15c90e | #127 resident deepseek2 experts | opt-in (`--gpu-experts`, default 0 = main's path). **MEASURED, TAINTED** (bella, Moonlight, `auto` vs 0): tg ×2.06, pp ×3.40 ([below](#new-models-and-types-since-the-boards)). md5 vs main all identical (dense 30/30; Moonlight main = 0 = `auto`; every local GGUF but 32B, cpu / cuda / `--kv q8`) |
+> | c15c90e | #131 measured step budget | `serve` batch only: `--step-ms 60` (default) sizes the prompt chunk from the measured step cost; `--admit-order sjf` opt-in. **MEASURED** (clean bella cells, default vs main's scheduling): ITL p99 −3.8 / −0.3 / 0 %, aggregate +0.8 / −0.4 / −1.6 % (7B C=16, 1.5B C=32, showdown client C=32). Not run on a 4090 or an H100 (#139). `gen` md5 0 of 20 pairs differ; serve digests 1 per model over 12 runs. [Tables](benchmarks-gpu.md#serve-scheduler-ab-laptop-gpus-2026-10-25-131) |
+> | c15c90e | #133 cgroup-aware RAM figure | load decisions (MoE RAM refusal, copy vs map, read-ahead, the CPU serve context) under a memory cgroup limit; nothing changes outside one. Speed **not measured**; md5 12/12 cpu + 12/12 cuda |
+> | — | #113, #124 | `serve` metrics ordering (#113: a request leaves in-flight before its last byte; md5 0 of 20) and the opaque library API with env errors instead of panics (#124: 85 md5 pairs identical, serve A/B 138/138); no speed claim |
+> | — | #105, #107, #120, #122, #128, #134 | tests and test-only kernels; no product path changed (#120 / #122: existing kernels' SASS unchanged; #134: md5 identical) |
+> | — | #103, #123, #130 | docs only |
 >
 > **Exception:** the [RunPod board of 2026-10-18](#gpu-runpod-rtx-4090--rtx-5090--h100-sxm-main-7f42c02-2026-10-18-1411--1508)
-> ran on main `7f42c02`, which contains every row above marked `4507c75` or earlier; only the `7f42c02` rows apply to it
-> (for prefill, mainly #92 and #100). The [H100 serving board](#serving-runpod-h100-sxm-main-c15c90e-2026-10-19) ran on
-> `c15c90e`, which contains every code row in the table.
+> ran on main `7f42c02`, which contains every row above marked `4507c75` or earlier; only the `7f42c02` and `c15c90e` rows
+> apply to it (for prefill, mainly #92 and #100). The [H100 serving board](#serving-runpod-h100-sxm-main-c15c90e-2026-10-19)
+> ran on `c15c90e`, which contains every code row above the `c15c90e` rows; for serving at C ≥ 8, #131's step budget
+> is the one that applies.
 >
 > Treat the tables as "at least this good on the default path", with the caveat that nobody has
 > re-measured that. The exceptions are start-up costs: #51's model digest and #72's one-time kernel compile come
@@ -264,7 +274,7 @@ summary in [benchmarks-gpu.md](benchmarks-gpu.md#jaded-cpu-only-for-context).
 
 ## New models and types since the boards
 
-Each row is the PR's own run against llama.cpp 4413a19 (#63, #67, #78, #89, #98; #72 doesn't state its llama.cpp build). None of these models is on a scoreboard.
+Each row is the PR's own run against llama.cpp 4413a19 (#63, #67, #78, #89, #98; #72 doesn't state its llama.cpp build), except #127's, which is against Axon's own CPU-expert path. None of these models is on a scoreboard.
 
 | path | PR | measured | host and caveats |
 |---|---|---|---|
@@ -272,11 +282,12 @@ Each row is the PR's own run against llama.cpp 4413a19 (#63, #67, #78, #89, #98;
 | `qwen3moe`, attention on the GPU, experts on the CPU | #67 | vs `llama-server --cpu-moe`: tg128 4x0.6B 157 vs 101, Pruned-2B 674 vs 376; **pp512 4x0.6B 2080 vs 5316, Pruned-2B 8613 vs 12621 (llama.cpp ahead)** | bella, best thread count each, 3 rounds. 30B not run |
 | gpt-oss-20b, attention on the GPU, MXFP4 experts on the CPU | #98 | tg128 46.6 vs 23.4 (1.99×, llama.cpp CUDA `-ot exps=CPU`, its best of 8/16/24 threads); **prefill 265 vs 995 (0.27×, llama.cpp ahead)** | bella, 3 rounds; llama.cpp decodes from an empty context, axon after a 486-token prompt. Warm only: a cold first request decoded at 29.5. Experts on the CPU for prefill too (the cause) |
 | deepseek2 (Moonlight-16B-A3B Q4_K_M), MLA on the GPU, routed experts on the CPU | #89 | decode 54.0 tok/s, 1.70× llama.cpp `-ot exps=CPU`; **prefill 0.82×** | bella, 3 interleaved rounds. The only deepseek2 model run; under the spec's 55–70 tok/s ESTIMATE |
+| deepseek2 (Moonlight-16B-A3B Q4_K_M), routed experts resident on the GPU (`--gpu-experts auto`: 25 of 26 layers, 8.50 GiB) | #127 | vs `--gpu-experts 0` (Axon, experts on the CPU): **tg ×2.06, pp ×3.40**; text identical in all 6 runs | bella, gen -n 128, ctx 4096, 3 interleaved rounds; **TAINTED** (foreign GPU max 31 %, mean 7.8 %), accepted with the label kept: quote the ratios, not the absolute tok/s. No llama.cpp in the run (PR D's bench of record vs `--n-cpu-moe` is next) |
 | gpt-oss-20b on the CPU | #78 | pp 130.0 (739-token prompt) vs 104.8 (pp512), 1.24×; tg128 23.5 vs 11.2, 2.10× | bella, exclusive, 24 threads both, neither pinned, llama.cpp's thread count not swept, prompt lengths differ |
 | Q2_K / Q3_K on the GPU | #72 | 7B Q3_K_M pp2100 3787 vs 3467 (+9 %), tg128 96.1 vs 98.9 (**−3 %**); 7B Q2_K pp560 2876 vs 3032 (**−5 %**), pp2100 +3 %, tg128 121.9 vs 111.2 (+10 %) | bella GPU vs `llama-bench -ngl 99`, 3 rounds |
 | Q2_K / Q3_K on the CPU | #72 | 7B Q2_K pp2100 57.2 vs 97.0 (**−41 %**), tg128 22.2 vs 10.4; 7B Q3_K_M pp2100 87.8 vs 112.2 (**−22 %**), tg128 18.8 vs 9.0 | bella CPU, 16 threads, 3 rounds, on a binary with the merged CPU kernels (0cb1e7a); a confirmation run on the final binary was queued, not a gate |
 
-## Known losses and gaps (as of 764792f)
+## Known losses and gaps (as of 39624db)
 
 - **Datacenter serving (H100 SXM, 10-19):** 2.0–3.8× behind vLLM / SGLang on throughput at C = 128 (mix 1,868 vs
   3,770–7,146 tok/s), behind from C = 8 up, TPOT p50 57.9 ms vs 12.7–26.4, 26 % of requests inside the SLO, TTFT p99
@@ -284,7 +295,13 @@ Each row is the PR's own run against llama.cpp 4413a19 (#63, #67, #78, #89, #98;
 - Serving on the RTX 4090 (10-18): 13–24 % behind vLLM-AWQ at C = 8–32 (since then #86 cut the ≤ 16-row step 5–6 %;
   not re-served).
 - MoE prefill with the experts on the CPU: gpt-oss-20b 0.27× and Moonlight 0.82× llama.cpp (#98, #89); see also #67
-  below.
+  below. Moonlight with its experts resident (`--gpu-experts auto`, #127) prefills 3.40× its CPU-expert path
+  (TAINTED), but hasn't been run against llama.cpp.
+- `serve` runs a MoE model one request at a time (no slot pool for MoE backends).
+- Shortest-first admission (`--admit-order sjf`, #131) missed its kill-rule clause on the laptop cells (short TTFT
+  p50 0.56× / 0.79× of fifo where ≤ 0.5× was needed) and is opt-in; the H100 cells it was designed for are #139.
+- A dense model loaded on the CPU under a memory limit is OOM-killed instead of refused (#135; #133 fixed MoE). (An
+  explicit `--parallel N` that doesn't fit in GPU memory is now refused at start: #137, #141.)
 
 - Long-context decode at 32k on 7B / 0.5B vs llama.cpp (above). #50 merged (+3.3–3.5 % on 7B f16, +10–12 % on 0.5B
   f16 in its own runs); nobody has re-boarded it against llama.cpp.

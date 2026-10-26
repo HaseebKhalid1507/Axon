@@ -1,0 +1,149 @@
+# A measured step budget for `axon serve` (shipped), shortest-first admission (opt-in), on main (PR #131)
+
+- Date: 2026-10-25. Branch: feat/sched-budget-main. Base: main 841ef9c (first built on d6b7051; main merged in
+  375ce65 (fcde887) and 4fbfd5c (841ef9c, #127; a test-file conflict resolved by hand)). Code head e76c01f + the merge. Status: open, gates of record (4fbfd5c) green; review shady 9/10 APPROVE.
+- Pick / design: roadmap "Next" item 1 (c) and (d); spec `specs/sched-sjf-token-budget.md` (Okarin, 10-20).
+- Supersedes #126 (the same work stacked on #119's hybrid step; #119 failed its kill rules and was closed: the
+  roadmap's "else revert it and keep (c)/(d)"). Two-pass path only: no fused pass, no `fused_share`, no
+  `AXON_HYBRID`.
+
+## What changed (what ships)
+- **(d), on by default.** `src/serve/engine.rs` `StepCost`: a pass's fixed µs, µs per prompt-token unit and
+  decode-only ms per row-count bucket, learned from the steps that run. `--step-ms` (**default 60**, main's
+  `--prefill-ms`, kept as an alias) sizes each step's chunk beside the modelled decode step at this row count
+  (`two_pass_budget`), charging a pass per prompt fed (`plan_charged`). A step feeds at most the prompts that budget
+  fits (`step_prompts`; 1 before anything is measured). `--step-tokens N` pins a step's prompt tokens and lifts that
+  bound.
+- **Admission: main's, by default.** `--admit-order fifo` (default) runs main's loop verbatim, with 2 prefill lanes
+  at any slot count (main's `MAX_PREFILLING`).
+- **(c), opt-in:** `--admit-order sjf` / `AXON_ADMIT=sjf`. It pulls up to max(slots, 16) waiting requests and
+  admits several per iteration:
+  - `admit_key`: aged past `--admit-age-ms` (3000) first, then the shortest uncached prompt, then arrival;
+  - `admit_gate`: long prompts take one of `--prefill-lanes` lanes (default slots/16 in 2..8); shorts, sized by the
+    step's capacity, never wait for a lane, only for about two steps' worth by tokens and by passes;
+  - after a pages refusal, short prompts still start until the refused request has waited 2× the age bound
+    (`pages_block`).
+- `/metrics`: `axon_step_seconds`, `axon_step_seconds_rows16`, `axon_step_prompt_tokens`, cost gauges,
+  `axon_step_cost_legacy`, lanes, waiting count; `/slots` lists the waiting requests.
+- **Rollback without a revert:** `AXON_STEP_COST=legacy` alone (without `AXON_ADMIT=sjf`) = main's decisions, bit
+  for bit: `legacy_reproduces_main_decisions` (20,000 random states against frozen copies of main's `budget` and
+  `plan`) and `legacy_alone_is_main_admission` (fifo, 2 lanes, 1–256 slots).
+- As first built (a18ff8d, d6b7051): sjf was the default with slots/16 lanes and `--step-ms 50`. The kill rule
+  failed (c) and (d)@50, so 6cb98fc set the defaults above (see Outcome).
+
+## Why
+The spec's reading of the H100 showdown (run h100-1019-2058): the mix C=128 short-prompt TTFT (p50 2.4-2.9 s, max
+14.7 s for 60-token prompts) comes from FIFO, one admission per iteration and 2 prefill lanes, not from kernel
+speed; and main's step lands 8 ms over the 50 ms ITL SLO (`--prefill-ms 60`). See the spec §0-§1.
+
+## How it was verified
+Gates of record, at the merge head 4fbfd5c (base main 841ef9c):
+
+| gate | result | job ID |
+|---|---|---|
+| fast tier, release | 670 passed, 0 failed, 50 ignored | bella 1025-202635-4390 |
+| debug `serve::` + `cuda::qwen2::slots::`, GPU | 145 passed, 0 failed, 7 ignored | bella 1025-202635-da07 |
+| `serve::` release, `AXON_ADMIT=sjf` | 135 passed, 0 failed, 4 ignored | avante 1025-202636-80d5 |
+| `serve::` release, `AXON_STEP_COST=legacy` alone | 135 passed, 0 failed, 4 ignored | avante 1025-202636-7818 |
+| md5 of `gen`, main 841ef9c vs 4fbfd5c, same host | 0 of 20 pairs differ, 0 nonzero rc | bella 1025-202637-1989 |
+| serve digests (main, defaults, legacy, sjf 50, sjf lanes 8 / age 0, step-tokens 64; 0.5B, 1.5B) | qwen2.5-0.5b-q4_k_m: 1 distinct digest over 12 runs; qwen2.5-1.5b-instruct-q4_k_m: 1 distinct digest over 12 runs | bella 1025-202637-b580 |
+| clippy -D warnings (bin + test), rustfmt | clean | local |
+| pure engine tests (incl. `legacy_reproduces_main_decisions`, `legacy_alone_is_main_admission`) | 25 passed | local |
+
+At e76c01f (base fcde887): md5 0 of 20 pairs differ (bella 1025-192401-15dd), digests 1 per model over 12 runs
+(bella 1025-192402-3b4d); its `serve::` jobs were dropped unrun when main moved to 841ef9c. #127 doesn't interact
+with the scheduler: a MoE model has no slot pool (`new_pool` is `Inner::Cuda` only), so serve runs it one request at
+a time and `Batch` / `Sched` / `StepCost` never run for it.
+
+Earlier gates (history):
+
+| gate | result | job ID |
+|---|---|---|
+| fast tier, release (a18ff8d) | 642 passed, 0 failed, 49 ignored | avante 1025-011101-7b35 |
+| debug-assertion suite, CPU (a18ff8d) | 660 passed, 0 failed, 49 ignored | avante 1025-011102-d0a2 |
+| debug `serve::` + `cuda::qwen2::slots::`, GPU (a18ff8d) | 142 passed, 0 failed, 7 ignored | avante 1025-011102-6e5e |
+| `serve::` release, rollback env (a18ff8d) | 131 passed, 1 failed (`serve_sjf_short_ahead_of_long`: test bug, below) | avante 1025-011103-2a37 |
+| `serve::` release, rollback env (38bca6d) | **132 passed, 0 failed, 4 ignored** | avante 1025-024210-ace4 |
+| debug `serve::` + `slots::`, GPU (38bca6d) | PASS | avante 1025-024210-b160 |
+| md5 of `gen`, main d6b7051 vs a18ff8d, same host | 0 of 20 pairs differ | bella 1025-011103-bbeb |
+| serve digests (main, cand, rollback, lanes 8 / age 0, step-tokens 64; 0.5B, 1.5B) | 1 distinct digest over 10 runs, each model | bella 1025-011104-fadf |
+| clippy -D warnings (bin + test), rustfmt | clean | local |
+| pure engine tests (incl. `legacy_reproduces_main_decisions`) | 23 passed (+ `pages_block_bounds_the_wait`) | local |
+
+**The one failure, a test bug.** `serve_sjf_short_ahead_of_long` pins `--step-tokens 256` so the long prompts need ~20 steps, but it never set `legacy`, and `Sched::default()` reads `AXON_STEP_COST` from the environment. Under the rollback env the legacy budget (main's) returns before `--step-tokens` is read, by design. So the long prompts were fed in a few large time-budget chunks, and their last chunk landed in the step that finished the short request. Before the fix, on avante with the roll env, 4 of 5 runs failed (1025-023649-d087, -9908, -8e2c, -6a69; -7753 passed), each with the short request's done time equal to the first long first-token time (221–223 ms). The fix in 38bca6d is test only: `legacy = false` plus an assert that `axon_step_cost_legacy` is 0, 7000-token long prompts (~27 steps against ~5), and no 30 ms sleep. The property is unchanged. After the fix, 8 of 8 pass (roll env 1025-024017-e871, -7a4f, -8563, 1025-024018-2c82, -0c52; default env 1025-024018-cc30, 1025-024019-5eae, -48cb): the short request is done at ~70 ms, the first long first token at ~600–630 ms.
+
+## Results
+MEASURED, avante (RTX 4050 Laptop), clean (foreign GPU 0 %), at a18ff8d. roll = main's scheduling.
+- `serve_sched_ab` mix, C=32, 3 rounds (0.5B 1025-012508-948a, 1.5B 1025-012609-5381). Short TTFT p90: main 226.6 / 1602.8 ms, sjf50 135.5 / 386.4 ms. Aggregate is within ±3 % everywhere (sjf50 vs main: +0.0 % / +2.8 %). slo_ok at 1.5B: 0.55 (main) → 0.92 (sjf50).
+- sd_client mix, 0.5B, 2 rounds (1025-022130-32ae). Short TTFT p99 at C=16 / 32: main 712 / 1462 ms, sjf60 120 / 146 ms. Short p50 32–42 → 56–58 ms. Aggregate within ±2 %.
+- Watch: at 1.5B, `--step-ms 50` has ITL p99 91.7 vs 75.6 ms (main) and step p50 58 ms (+16 % over target). The `--prefill-chunk 256` floor binds there.
+- Kill-rule verdict: see the section below.
+
+## Kill rule (spec §8.2), clean bella cells at a18ff8d
+MEASURED, bella sm_120, `--timing bella`, not TAINTED: 7B C=16 (1025-153024-9a7f), 1.5B C=32 (1025-153021-7de9),
+sdab15 1.5B with the main binary (1025-153024-9998). roll = main's scheduling.
+- Bits: PASS (same_text 1 every round; md5 0/20; digests 1 per model).
+- (d) at 60 (fifo60 vs roll): PASS. ITL p99 −0.6 % / +0.3 %, aggregate +1.2 % / −0.3 %, step p50 (rows ≥ 16) 55.0 /
+  57.3 ms against 60. At 50: 57.5 ms on the 7B (+15 %, the edge; the 256 floor binds) and 49.5 on the 1.5B. The H100
+  sub-clause is pending (pod, not booked).
+- (c): **FAIL** on short TTFT p50 ≤ 0.5× fifo: 7B 273 vs 197 ms (1.39×, also over 3 steps), 1.5B 111 vs 139
+  (0.80×). Long max (0.97× / 0.95×) and aggregate (+0.9 % / +2.2 %) pass. The tails improve: short p90 0.55× /
+  0.46×, max 0.34× / 0.14×; sdab15 short p99 0.15× / 0.10× of fifo60.
+- Diagnosis (requests.jsonl of 9998, split by wave). fifo's wave-1 short TTFTs spread from 8, 16, 24 ms to 0.5–2 s;
+  sjf's cluster at 57–62 ms (C=16) and 144–160 ms (C=32), one request excepted; later waves are equal in every arm.
+  The first wave hits an idle, cold server: a token budget with no pass charge and no bound on prompts, so SJF's whole
+  admitted wave was fed in one step, each short in its own pass, and every first token waited for all of them. Not
+  the short gate holding shorts back, nor the pull depth or lanes. Fixed in 722139a (`step_prompts`: at most what
+  `--step-ms` fits at the measured pass cost, 1 before anything is measured). Re-gating and re-measuring the three
+  bella cells. Pre-registered: if sjf60's short p50 is still above 0.5× fifo60's on either bella harness-1 cell,
+  (c) has failed and `--admit-order fifo` becomes the default (sjf opt-in); (d) ships either way.
+- Raw logs: https://gist.github.com/HaseebKhalid1507/bddc842182269929cde899d29d35daa0 (per-request:
+  https://gist.github.com/HaseebKhalid1507/5de9bd0da4f0b3ac71759d11d68727d0; scripts:
+  https://gist.github.com/HaseebKhalid1507/6f8caa702c433927ff2f205a2abfcd11).
+
+## Outcome (722139a cells; code head 6cb98fc)
+The decisive clean bella cells, after the `step_prompts` fix: 7B C=16 1025-174838-bb0d, 1.5B C=32 1025-180241-7dac,
+sdab15 1025-183047-34df; avante 1.5B 1025-174837-1554, 0.5B sd 1025-174837-bf3d.
+- (c) short TTFT p50 ≤ 0.5× fifo: 7B 0.37× pass, **1.5B 0.56× fail, sdab15 C=32 0.79× fail** (C=16 2.18×). Long max,
+  aggregate and ≤ 3 steps pass. By the rule pre-registered in the PR before these runs, (c) failed:
+  `--admit-order fifo` is the default (with lanes 2, main's), sjf opt-in. It keeps the tail and SLO wins for whoever
+  opts in: short p90 0.24–0.56×, max 0.19–0.59× of fifo; avante 1.5B slo_ok 0.64 → 0.94. #139 re-decides the default
+  on the H100 C=64/128 cells, the spec's design target (pod not booked).
+- (d) at 60: every clause passes (ITL p99 −3.8 % / −0.3 % / 0 %, aggregate +0.8 % / −0.4 % / −1.6 %, step p50 55.0 /
+  56.0 ms). At 50 the 7B step ran at 60.0 ms p50 (+20 %, outside ±15 %; the 256 floor binds) and the avante 1.5B ITL
+  p99 rose 17 % over main, so the default is `--step-ms 60`.
+- The shipped defaults are the measured `fifo60` arm (same code). Rollback: `AXON_STEP_COST=legacy` alone.
+- Watch: sdab15 C=16 aggregate −6 % for fifo60 vs the main binary in both bella runs (round spread ±3–7 %; not one of
+  the spec's cells, which is C=32 at −1.6 %).
+- Raw logs: https://gist.github.com/HaseebKhalid1507/b439d3907e42da8cbb110d762936ffe8, per-request
+  https://gist.github.com/HaseebKhalid1507/d6a48a76f394dd0a8ec59473bf3950d1.
+- sjf's costs, for anyone who opts in: long-prompt TTFT p50 +67 % on the 1.5B H1 cell (738.6 vs 441.4 ms; only the
+  long max is in the clause, 0.96×); the short median at moderate load too (avante 0.5B sd C=32 59.7 vs 41.9 ms, 1.43×).
+- (d) @50 was measured on the sjf50 arm (no fifo50 run); the step histogram has 5 ms buckets, so 60.0 ms is one bucket
+  past the 57.5 limit.
+- The sdab15 C=16 −6 % aggregate is confounded: sd_client salts each cell randomly, so arms ran different prompts and
+  output lengths (fifo60 6,927 vs main 7,783 tokens in one round). For #139, `sdab.sh` (out of repo, gist
+  https://gist.github.com/HaseebKhalid1507/dcf2adeb13686b219d81ab41e13d3d4a) fixes the salt per (round, C), adds a
+  same-binary `roll` arm and a `shipped` arm with no scheduling flags, runs every server under `env -u AXON_ADMIT -u
+  AXON_STEP_COST`, fails loudly if a server doesn't come up, and checks, rather than assumes, that `text_sha` and
+  `completion_tokens` are equal across all six arms per (round, C, request): a `BITS` line, exit 2 if not.
+- Review (shady 8/10 on #131): M1 the defaults test followed no env under the AXON_ADMIT=sjf gate; fixed (whole-`Sched`
+  compare, `Sched::from_env`, `lanes_for`, `legacy_alone_is_main_admission`). Main fcde887 merged (375ce65). Gates of
+  record at e76c01f (PR §6). The 6cb98fc gate jobs were superseded before they ran.
+
+## Review fixes carried over (shady 7/10 on #126)
+- `pass_us` bounded: a sample is at most 4x the estimate and half a step; the estimate is read bounded by twice
+  the fastest decode-only step. `pass_us_outlier_recovers`: a 10x sample, then normal ones; the step's
+  short-prompt count is back within 3 (within 5 when the outlier is the first sample).
+- Short/long class from the step's capacity, not the current plan: `short_class_stable_across_a_round`.
+- Two-pass short gate counts passes; shorts past a pages refusal (bounded by 2x the age bound); cold start charges
+  the fastest decode step per pass (measured, no seed); `serve_rollback_flags_reach_the_engine`.
+
+## What didn't work
+- #119's fused pass (see its PR): the 4090 mix C=64 cell gave +0.65 % against the +15 % its kill rule needed.
+  With it, sjf50 doubled ITL p99 against roll in hybrid mode (0.5B 25.9 -> 56.7 ms, 7B C=16 26.5 -> 53.2 ms: the
+  fused pass sized up to 50 ms against #119's fixed 256 tokens); in two-pass mode the same arms lower it.
+- A 6 ms seed for the pass's fixed part (the spec's): on a 0.5B a 512-token feed is ~15 ms, so the seed would skew
+  the learned per-token cost by ~40 %. Unmeasured, it is the fastest decode step.
+- The spec's "first refusal ends the round": an aged long prompt refused for a lane would then block every short
+  prompt behind it. A refusal by class skips to the next candidate; a slot refusal ends the round.

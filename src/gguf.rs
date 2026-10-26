@@ -8,6 +8,8 @@
 use std::fs::File;
 use std::io::{self, Read};
 
+pub(crate) mod mem;
+
 const GGUF_MAGIC: u32 = 0x46554747;
 /// GGML_MAX_DIMS.
 const MAX_DIMS: u32 = 4;
@@ -490,6 +492,15 @@ pub struct Model {
     /// overlap one.
     released: std::sync::Mutex<Vec<(u16, std::ops::Range<usize>)>>,
     any_released: std::sync::atomic::AtomicBool,
+    /// Tests only: refuse a released tensor on a file mapping too, as on
+    /// the copy (`strict_release`).
+    #[cfg(test)]
+    strict_release: bool,
+    /// Tests only, with `strict_release`: the tensors `release`d since the
+    /// flag was set (after `load`, so not the rewritten q/k whose file pages
+    /// `unpermute_rope` handed back: their side copies are their bytes).
+    #[cfg(test)]
+    strict_released: std::sync::Mutex<Vec<(u16, std::ops::Range<usize>)>>,
     /// Tensors `load` rewrote (llama's reordered q/k rows) when `data` maps
     /// the file: their bytes live here, each in its own anonymous mapping,
     /// and `tensor_data` reads them from it (the mapping stays the file's,
@@ -558,9 +569,22 @@ impl Model {
     }
 
     /// The tensor's bytes. Panics if they were `release`d from anonymous
-    /// memory (they'd read as zeros).
+    /// memory (they'd read as zeros), and from a file mapping too on a test
+    /// model loaded by `load` (`strict_release`).
     pub(crate) fn tensor_data(&self, t: &Tensor) -> &[u8] {
         let r = self.tensor_range(t);
+        // Before the side copy: a rewritten tensor (llama's q/k) released
+        // after repacking is zeros on the copy too.
+        #[cfg(test)]
+        if self.strict_release {
+            let gone = (self.strict_released.lock().unwrap().iter())
+                .any(|(s, x)| *s == t.shard && x.start < r.end && r.start < x.end);
+            assert!(
+                !gone,
+                "tensor {} was released after repacking; load the model again to read it",
+                t.name
+            );
+        }
         if t.shard == 0
             && let Some(s) = self.side_of(&r)
         {
@@ -572,7 +596,9 @@ impl Model {
             "tensor {} was not converted (a header-only load: gguf::load_header)",
             t.name
         );
-        if !file_backed && self.any_released.load(std::sync::atomic::Ordering::Acquire) {
+        if (!file_backed || self.strict_release())
+            && self.any_released.load(std::sync::atomic::Ordering::Acquire)
+        {
             // Unlocked before the panic: a caught one leaves the lock usable.
             let gone = (self.released.lock().unwrap().iter())
                 .any(|(s, x)| *s == t.shard && x.start < r.end && r.start < x.end);
@@ -583,6 +609,20 @@ impl Model {
             );
         }
         &map[r]
+    }
+
+    /// Whether released tensors are refused on a file mapping too: a test
+    /// model loaded by `load`, the tests' default loader, which used to copy
+    /// the file (where a released tensor reads as zeros and is refused). A
+    /// read after `release` stays a failure in those tests now that they map
+    /// the file. Never outside tests; explicit `load_with(_, Some(false))`
+    /// loads, which build several nets from one mapping on purpose (a mapped
+    /// file reads back what's been released), keep the copy-only check.
+    fn strict_release(&self) -> bool {
+        #[cfg(test)]
+        return self.strict_release;
+        #[cfg(not(test))]
+        false
     }
 
     /// The side copy holding bytes `r` of `data`, if any.
@@ -631,6 +671,12 @@ impl Model {
             return;
         }
         let s = t.shard;
+        // Before the duplicate check: a rewritten tensor is in `released`
+        // already (its file pages, from `unpermute_rope`).
+        #[cfg(test)]
+        if self.strict_release {
+            self.strict_released.lock().unwrap().push((s, r.clone()));
+        }
         let mut rel = self.released.lock().unwrap();
         let i = rel.partition_point(|x| (x.0, x.1.start) < (s, r.start));
         if rel.get(i) == Some(&(s, r.clone())) {
@@ -638,7 +684,7 @@ impl Model {
         }
         rel.insert(i, (s, r));
         let (map, file_backed) = self.region(s);
-        if !file_backed {
+        if !file_backed || self.strict_release() {
             self.any_released
                 .store(true, std::sync::atomic::Ordering::Release);
         }
@@ -780,7 +826,8 @@ impl Model {
 ///
 /// The copy is not shared between processes and can't be dropped under memory
 /// pressure the way page cache can, so it's skipped (file mmap instead) when the file
-/// is over 60% of `MemAvailable`. `AXON_MMAP=1` always maps the file, `AXON_MMAP=0`
+/// is over 60% of `MemAvailable` (or of a tighter cgroup limit's room:
+/// `mem_available`). `AXON_MMAP=1` always maps the file, `AXON_MMAP=0`
 /// always copies.
 ///
 /// Assumes Linux >= 6.7 for 2 MB-aligned anonymous mappings; on older kernels the
@@ -820,13 +867,13 @@ fn copy_choice(copy: Option<bool>, len: usize, wanted: bool) -> bool {
         (None, Ok("0")) => true,
         (None, Ok(_)) => false,
         (None, Err(_)) if !wanted => false,
-        (None, Err(_)) => match mem_available() {
-            Some(avail) if len as u64 > avail / 10 * 6 => {
+        (None, Err(_)) => match mem::avail() {
+            Some(avail) if len as u64 > avail.bytes / 10 * 6 => {
                 eprintln!(
-                    "note: model is {} MB, {} MB available; mapping the file instead of \
-                     copying it (AXON_MMAP=0 forces the copy)",
+                    "note: model is {} MB, {} MB available ({avail}); mapping the file instead \
+                     of copying it (AXON_MMAP=0 forces the copy)",
                     len >> 20,
-                    avail >> 20
+                    avail.bytes >> 20
                 );
                 false
             }
@@ -869,17 +916,31 @@ fn page_size() -> usize {
     if p > 0 { p as usize } else { 4096 }
 }
 
-/// `MemAvailable` from /proc/meminfo, in bytes.
+/// RAM available to this process, in bytes: /proc/meminfo's `MemAvailable`,
+/// or less under a tighter cgroup memory limit (`mem::avail`).
 pub(crate) fn mem_available() -> Option<u64> {
-    let s = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let line = s.lines().find(|l| l.starts_with("MemAvailable:"))?;
-    let kb: u64 = line.split_whitespace().nth(1)?.parse().ok()?;
-    Some(kb * 1024)
+    mem::avail().map(|a| a.bytes)
 }
 
+/// Load a model as `axon` loads it for the CPU (`crate::load`,
+/// `load_to_run`): mapped, unless it reads its matrices in place
+/// (`model::reads_matrices_in_place`: AXON_REPACK=0, or types that don't
+/// repack), when the copy into huge pages pays and is taken as `copy_choice`
+/// says (60% of the RAM available, AXON_MMAP); a MoE model is always mapped.
+/// The tests' default loader, so they hold what the product holds: a dense
+/// model that repacks is not copied into anonymous memory beside its r8
+/// arena (Mistral-7B: 4.4 GB more), which in a memory-capped test job is an
+/// OOM kill the product never risks. `load_with(path, Some(true))` (or
+/// None: copy unless over 60%) is the copy path, for the tests that want it.
 #[cfg_attr(not(test), allow(dead_code))]
 pub fn load(path: &str) -> io::Result<Model> {
-    load_with(path, None)
+    #[cfg_attr(not(test), allow(unused_mut))]
+    let mut m = load_to_run(path, None, crate::model::cpu_copy_wish)?;
+    #[cfg(test)]
+    {
+        m.strict_release = true;
+    }
+    Ok(m)
 }
 
 /// A model's header for `axon info`: a GGUF mapped (`load_with`), a
@@ -1093,6 +1154,10 @@ impl Model {
             file_backed,
             released: Default::default(),
             any_released: Default::default(),
+            #[cfg(test)]
+            strict_release: false,
+            #[cfg(test)]
+            strict_released: Default::default(),
             side: Vec::new(),
             file: None,
             ahead: false,
@@ -1497,6 +1562,10 @@ pub fn build_for_test_with(
         file_backed: false,
         released: Default::default(),
         any_released: Default::default(),
+        #[cfg(test)]
+        strict_release: false,
+        #[cfg(test)]
+        strict_released: Default::default(),
         side: Vec::new(),
         file: None,
         ahead: false,

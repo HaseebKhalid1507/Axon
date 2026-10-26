@@ -479,28 +479,28 @@ pub(super) struct SampBufs<'g> {
     params: Option<(u32, usize)>,
 }
 
-pub struct CudaQwen2<'g> {
+pub(crate) struct CudaQwen2<'g> {
     gpu: &'g Gpu,
     /// Unique per model in the process: caches record it (`CudaCache::net`).
     id: u64,
     f: Fns<'g>,
-    pub n_layers: usize,
-    pub dim: usize,
-    pub n_heads: usize,
-    pub n_kv_heads: usize,
-    pub head_dim: usize,
+    pub(crate) n_layers: usize,
+    pub(crate) dim: usize,
+    pub(crate) n_heads: usize,
+    pub(crate) n_kv_heads: usize,
+    pub(crate) head_dim: usize,
     /// n_heads * head_dim: queries and attention output (qwen3: != dim).
-    pub q_dim: usize,
-    pub ffn: usize,
-    pub vocab: usize,
+    pub(crate) q_dim: usize,
+    pub(crate) ffn: usize,
+    pub(crate) vocab: usize,
     eps: f32,
     /// Index of the first layer here: 0, or the first after those another
     /// backend runs (`new_layers`), whose hidden state comes in instead of
     /// a token (`Input::Hidden`).
-    pub first: usize,
+    pub(crate) first: usize,
     /// The output norm and head are here (the model's last layer is): not
     /// on a pipeline's earlier stages (`new_stage`).
-    pub has_head: bool,
+    pub(crate) has_head: bool,
     /// Quantized matrices, embedding included (if first == 0).
     weights: DevBuf<'g>,
     /// The Q6_K layer matrices' prefill copy (`make_q6k8`; `Mat::c8`), or
@@ -546,7 +546,7 @@ pub struct CudaQwen2<'g> {
     /// path when att_mq (`batch::MQ_MAX`; AXON_ATT_MQ_MAX).
     att_mq_max: usize,
     /// Replay a captured graph per token (else launch kernel by kernel).
-    pub graphs: bool,
+    pub(crate) graphs: bool,
     bf: batch::BatchFns<'g>,
     /// Most tokens per batched pass (`Lm::prefill_batch`); caches get
     /// scratch for that many (or their size, if smaller), and `vram_need`
@@ -554,10 +554,10 @@ pub struct CudaQwen2<'g> {
     batch: usize,
     /// How `new_cache` stores keys and values (set by `with_kv`; a test may
     /// change it between caches: each cache keeps its own).
-    pub kv: CacheKv,
+    pub(crate) kv: CacheKv,
     /// The context `with_kv` planned memory for: its max_ctx, or less with
     /// `fit` (what's free then held).
-    pub ctx: usize,
+    pub(crate) ctx: usize,
     /// Batched passes make the FFN's silu(gate) * up in the up product's
     /// epilogue (bgemm mode 2), else by swiglu_quant_b (tests compare them:
     /// the same bits). Off: the silu in a one-CTA-per-SM GEMM tail costs
@@ -585,7 +585,7 @@ pub struct CudaQwen2<'g> {
 
 /// What `CudaQwen2` keeps per sequence: the KV cache, activations, logits,
 /// the per-token parameter buffers, and the step's captured graphs.
-pub struct CudaCache<'g> {
+pub(crate) struct CudaCache<'g> {
     /// The `CudaQwen2::id` of the model that made it: its graphs hold that
     /// model's weight addresses, so it only runs with that model.
     net: u64,
@@ -864,7 +864,7 @@ impl<'g> CudaQwen2<'g> {
     /// supported here or if the weights plus a cache for `max_ctx` positions
     /// don't fit in the free VRAM.
     #[cfg_attr(not(test), allow(dead_code))] // the tests'
-    pub fn new(
+    pub(crate) fn new(
         gpu: &'g Gpu,
         module: &'g Module<'g>,
         m: &Model,
@@ -876,7 +876,7 @@ impl<'g> CudaQwen2<'g> {
     /// `new` with caches of type `kv`. With `fit`, a cache for max_ctx
     /// positions that doesn't fit isn't an error: `ctx` becomes the most
     /// (a multiple of 256) that does, if that's at least 256.
-    pub fn with_kv(
+    pub(crate) fn with_kv(
         gpu: &'g Gpu,
         module: &'g Module<'g>,
         m: &Model,
@@ -890,7 +890,7 @@ impl<'g> CudaQwen2<'g> {
     /// `with_kv`, the Q6_K prefill copy made now (`q6k8`) or left to
     /// `make_q6k8_spare` (`axon serve`: once its caches and slots are made,
     /// out of what they leave).
-    pub fn with_kv_q6k8(
+    pub(crate) fn with_kv_q6k8(
         gpu: &'g Gpu,
         module: &'g Module<'g>,
         m: &Model,
@@ -954,7 +954,7 @@ impl<'g> CudaQwen2<'g> {
     /// `split_batch` tokens (`split_batch`: `SPLIT_BATCH`, or the streaming
     /// pass's to stream).
     #[allow(clippy::too_many_arguments)]
-    pub fn new_layers<'m>(
+    pub(crate) fn new_layers<'m>(
         gpu: &'g Gpu,
         module: &'g Module<'g>,
         m: &'m Model,
@@ -986,7 +986,7 @@ impl<'g> CudaQwen2<'g> {
     /// batch scratch for `batch` tokens (first == 0: `PREFILL_BATCH` if it
     /// fits, as `with_kv`). Err if it doesn't fit in the free VRAM.
     #[allow(clippy::too_many_arguments)]
-    pub fn new_stage(
+    pub(crate) fn new_stage(
         gpu: &'g Gpu,
         module: &'g Module<'g>,
         m: &Model,
@@ -1015,7 +1015,7 @@ impl<'g> CudaQwen2<'g> {
     /// VRAM `new_stage(.., max_ctx, first, last, kv, batch)` checks it has
     /// (the pipeline's placement), without allocating anything.
     #[allow(clippy::too_many_arguments)]
-    pub fn stage_need(
+    pub(crate) fn stage_need(
         gpu: &'g Gpu,
         module: &'g Module<'g>,
         m: &Model,
@@ -1283,7 +1283,7 @@ impl<'g> CudaQwen2<'g> {
     /// the same products either way).
     /// None if it never would be (no int8 tensor cores, no Q6_K
     /// matrices, AXON_Q6K8=0), else whether it is.
-    pub fn make_q6k8_spare(&mut self) -> Result<Option<bool>, String> {
+    pub(crate) fn make_q6k8_spare(&mut self) -> Result<Option<bool>, String> {
         let off = std::env::var("AXON_Q6K8").is_ok_and(|v| v == "0");
         if self.bf.q6k_to_i8.is_none() || self.q6k8_bytes() == 0 || off {
             return Ok(None);
@@ -1295,7 +1295,7 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// VRAM of the Q6_K prefill copy (0 if not made: `make_q6k8`).
-    pub fn q6k8_vram(&self) -> usize {
+    pub(crate) fn q6k8_vram(&self) -> usize {
         self.w8.len()
     }
 
@@ -1314,7 +1314,7 @@ impl<'g> CudaQwen2<'g> {
     /// VRAM `new_layers(.., max_ctx, first, kv, split_batch, _)` checks
     /// it has, without allocating anything: the split's placement
     /// (`hybrid::auto_gpu_layers`).
-    pub fn vram_need(
+    pub(crate) fn vram_need(
         gpu: &'g Gpu,
         module: &'g Module<'g>,
         m: &Model,
@@ -1329,7 +1329,7 @@ impl<'g> CudaQwen2<'g> {
 
     /// `vram_need` of the whole model (first 0) as a function of max_ctx,
     /// planned once: what `Backend::new`'s placement weighs.
-    pub fn vram_curve(
+    pub(crate) fn vram_curve(
         gpu: &'g Gpu,
         module: &'g Module<'g>,
         m: &Model,
@@ -1757,13 +1757,13 @@ impl<'g> CudaQwen2<'g> {
     /// `max_split` when the attention runs without tensor cores (head size
     /// 256, or below sm_80): that path's order depends on it. None on the
     /// tensor-core path, whose order is fixed by the position alone.
-    pub fn split_attention(&self) -> Option<usize> {
+    pub(crate) fn split_attention(&self) -> Option<usize> {
         (!self.tc_attn).then_some(self.max_split)
     }
 
     /// "f16", "q8" (a scale per kv head row) or "q8/32" (per 32 values):
     /// what `new_cache` makes.
-    pub fn kv_name(&self) -> &'static str {
+    pub(crate) fn kv_name(&self) -> &'static str {
         match self.kv {
             CacheKv::F16 => "f16",
             CacheKv::Q8 { group } if group == self.head_dim => "q8",
@@ -1772,7 +1772,7 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// Bytes of the keys and values of a `kv` cache for max_ctx positions.
-    pub fn kv_cache_bytes(&self, kv: CacheKv, max_ctx: usize) -> usize {
+    pub(crate) fn kv_cache_bytes(&self, kv: CacheKv, max_ctx: usize) -> usize {
         if let Some(ml) = &self.mla {
             return ml.kv_bytes(max_ctx);
         }
@@ -1860,12 +1860,12 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// Free VRAM now.
-    pub fn free_bytes(&self) -> Result<u64, String> {
+    pub(crate) fn free_bytes(&self) -> Result<u64, String> {
         Ok(self.gpu.info()?.free_bytes)
     }
 
     /// Most tokens per batched pass of cache `c`.
-    pub fn batch_max(c: &CudaCache) -> usize {
+    pub(crate) fn batch_max(c: &CudaCache) -> usize {
         c.b.as_ref().map_or(1, |b| b.max)
     }
 
@@ -1876,13 +1876,13 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// Weight bytes in VRAM.
-    pub fn weight_bytes(&self) -> usize {
+    pub(crate) fn weight_bytes(&self) -> usize {
         self.weights.len()
     }
 
     /// Bytes of matrices read per token with the output head (`head`) or
     /// without (the embedding row aside).
-    pub fn bytes_per_token(&self, head: bool) -> usize {
+    pub(crate) fn bytes_per_token(&self, head: bool) -> usize {
         let l: usize = self
             .layers
             .iter()
@@ -1897,7 +1897,7 @@ impl<'g> CudaQwen2<'g> {
     /// which live in RAM, not VRAM: a harmless overcount of
     /// (batch + 1) * dim * 4 bytes (~1.3 MB on 32B), kept so `vram_need`
     /// stays one formula.
-    pub fn cache_bytes(&self, max_ctx: usize) -> usize {
+    pub(crate) fn cache_bytes(&self, max_ctx: usize) -> usize {
         self.cache_bytes_kv(self.kv, max_ctx)
     }
 
@@ -1928,12 +1928,16 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// A cache for positions 0..max_ctx, or why there's no room for it.
-    pub fn try_cache(&self, max_ctx: usize) -> Result<CudaCache<'g>, String> {
+    pub(crate) fn try_cache(&self, max_ctx: usize) -> Result<CudaCache<'g>, String> {
         self.try_cache_kv(max_ctx, self.kv)
     }
 
     /// `try_cache` of type `mode` (rather than `kv`'s).
-    pub fn try_cache_kv(&self, max_ctx: usize, mode: CacheKv) -> Result<CudaCache<'g>, String> {
+    pub(crate) fn try_cache_kv(
+        &self,
+        max_ctx: usize,
+        mode: CacheKv,
+    ) -> Result<CudaCache<'g>, String> {
         self.try_cache_at(max_ctx, mode, max_ctx)
     }
 
@@ -3038,20 +3042,20 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// `Lm::forward` from the hidden state after layer first - 1 (first > 0).
-    pub fn forward_hidden(&self, c: &mut CudaCache<'g>, x: &[f32], pos: usize) -> Vec<f32> {
+    pub(crate) fn forward_hidden(&self, c: &mut CudaCache<'g>, x: &[f32], pos: usize) -> Vec<f32> {
         self.logits(c, Input::Hidden(x), pos)
             .unwrap_or_else(|e| Self::die(e))
     }
 
     /// `Lm::forward_argmax` from a hidden state (first > 0).
-    pub fn argmax_hidden(&self, c: &mut CudaCache<'g>, x: &[f32], pos: usize) -> u32 {
+    pub(crate) fn argmax_hidden(&self, c: &mut CudaCache<'g>, x: &[f32], pos: usize) -> u32 {
         self.pick(c, Input::Hidden(x), pos)
             .unwrap_or_else(|e| Self::die(e))
     }
 
     /// `Lm::feed_batch` from hidden states, xs[b * dim..][..dim] at
     /// start + b (first > 0); one state goes through the step's graph.
-    pub fn feed_hidden(&self, c: &mut CudaCache<'g>, xs: &[f32], start: usize) {
+    pub(crate) fn feed_hidden(&self, c: &mut CudaCache<'g>, xs: &[f32], start: usize) {
         let nb = xs.len() / self.dim;
         Self::check_positions(nb, start, c);
         assert_eq!(xs.len(), nb * self.dim, "hidden states: whole rows");
@@ -3065,7 +3069,12 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// `Lm::verify_argmax` from hidden states, laid out as `feed_hidden`'s.
-    pub fn verify_hidden(&self, c: &mut CudaCache<'g>, xs: &[f32], start: usize) -> Vec<u32> {
+    pub(crate) fn verify_hidden(
+        &self,
+        c: &mut CudaCache<'g>,
+        xs: &[f32],
+        start: usize,
+    ) -> Vec<u32> {
         let nb = xs.len() / self.dim;
         Self::check_positions(nb, start, c);
         assert_eq!(xs.len(), nb * self.dim, "hidden states: whole rows");
@@ -3078,7 +3087,7 @@ impl<'g> CudaQwen2<'g> {
     /// from batched passes, as `verify_cands` does for tokens. Past
     /// CAND_MAX: `forward_hidden` row by row and the host's `sample::cands`
     /// (the same logits bit for bit).
-    pub fn verify_cands_hidden(
+    pub(crate) fn verify_cands_hidden(
         &self,
         c: &mut CudaCache<'g>,
         xs: &[f32],
@@ -3123,7 +3132,7 @@ impl<'g> CudaQwen2<'g> {
     /// plus the step's total ms. The events recorded between kernels also
     /// serialize them (no PDL overlap), so this is each kernel alone.
     #[cfg_attr(not(test), allow(dead_code))] // the profiling benchmark
-    pub fn profile(
+    pub(crate) fn profile(
         &self,
         c: &mut CudaCache<'g>,
         token: u32,
@@ -3180,6 +3189,7 @@ pub struct KernelTime {
     pub bytes: usize,
 }
 
+impl<'g> crate::lm::Sealed for CudaQwen2<'g> {}
 impl<'g> Lm for CudaQwen2<'g> {
     type Cache = CudaCache<'g>;
 
@@ -3322,6 +3332,40 @@ impl<'g> Lm for CudaQwen2<'g> {
 }
 
 mod batch;
+pub mod experts;
+
+// The resident experts' refusals (`experts`).
+/// The weight types the twins cover: the TW chains of decode.cu's
+/// `dot_rows_t` and prefill.cu's `g2_compute` are the r8 / r8q kernels' f32
+/// steps for these four only (`gemm2_t<..., TW>` static_asserts it; `gemv_tw`
+/// takes a runtime type, so the host refuses the rest: `twin_type`).
+pub(crate) const TWIN_TYPES: [u32; 4] = [Q4_K, Q5_0, Q8_0, Q6_K];
+
+/// Ok if weight type qt has a GPU twin.
+pub(crate) fn twin_type(qt: u32) -> Result<(), String> {
+    match TWIN_TYPES.contains(&qt) {
+        true => Ok(()),
+        false => Err(format!(
+            "weight type {qt} has no GPU twin (Q4_K, Q5_0, Q8_0, Q6_K only)"
+        )),
+    }
+}
+
+/// Ok if a device of compute capability cc runs the twin GEMMs
+/// (`gemm2s_*_tw`, `moe_gemm_tw_*`): tensor cores, sm_80+. Below, the gemm2
+/// family's body is `__trap()`, which would poison the CUDA context, so the
+/// host refuses them there; the decode GEMV (`gemv_tw`, `moe_gemv_tw`) runs
+/// on every arch.
+pub(crate) fn twin_gemm_ok(cc: (u32, u32)) -> Result<(), String> {
+    match cc.0 >= 8 {
+        true => Ok(()),
+        false => Err(format!(
+            "twin GEMMs need sm_80+ (tensor cores); this GPU is sm_{}{}",
+            cc.0, cc.1
+        )),
+    }
+}
+
 pub(crate) mod kvio;
 pub(crate) mod mla;
 pub(crate) mod moe;
