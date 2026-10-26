@@ -16,7 +16,7 @@ No ggml, no BLAS, no binding crates, no CUDA toolkit at build time: a GGUF reade
 quantized integer dot-product kernels (scalar, AVX2, AVX-VNNI), a spinning worker
 pool and a transformer forward pass on the CPU; on the GPU, CUDA C++ kernels that
 NVRTC compiles at run time, launched through the driver API (both libraries loaded
-with dlopen). About 99k lines of Rust and 8k of CUDA, tests included (738 `#[test]`s in `src/`).
+with dlopen). About 99k lines of Rust and 8.4k of CUDA, tests included (738 `#[test]`s in `src/`).
 
 Every optimized path is **bit-identical** to the plain reference path on its
 device: batched prefill produces exactly the logits that feeding one token at a

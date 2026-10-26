@@ -69,6 +69,16 @@ Second commit, at the foreman's request (the stale docs this refresh first only 
   table style, plus the closed #119 / #126 and what is open at 39624db. The intro now runs to 39624db.
   `docs/log/README.md` points to Phase 20.
 
+Third commit, shady's review (8/10 FIX-THEN-MERGE, https://github.com/HaseebKhalid1507/Axon/pull/140#issuecomment-6406948239):
+- MUST: history.md Phase 20's split was wrong. `git log --first-parent 764792f..39624db` gives 8 merges (#103–#120,
+  10-19 23:30 to 10-20 17:44) and 10 (#123–#131, 10-24 17:37 to 10-25 21:19), not 7 and 11.
+- Roadmap item 1 (a): the pod session is now "≈ $1.20–2.00, ESTIMATED". #125's review gives $1.20 if the stage
+  estimates hold and $2.00 if the stages run to budget.
+- Roadmap item 1: "60.0 ms at 50" keeps #131's caveat (measured on the sjf50 arm; no fifo50 arm was run).
+- `docs/design/determinism-modes.md:411`: the link inside `docs/design/` pointed at `design/determinism-modes.md`, which
+  is broken (it was already broken on main). It now points at `determinism-modes.md`.
+- README: "8.4k of CUDA", as in START-HERE.
+
 ## Sources
 - PR bodies and comments: `gh pr view N` for #103, #104, #105, #107, #111, #113, #117, #120, #122, #123, #124, #125
   (draft, with comments), #127 (with the lead's kill-rule comment, 6403248891), #128, #130, #131, #133, #134 and #136;

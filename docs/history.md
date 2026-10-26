@@ -457,7 +457,8 @@ fixes, and the measurement above.
 
 ## Phase 20: the library, resident MoE experts, and the first scheduler fixes (2026-10-19 23:30 → 10-25 21:19, main 764792f → 39624db)
 
-Eighteen merges: seven on 10-19/20, none from 10-20 17:44 to 10-24 17:37, then eleven on 10-24/25. They cover the
+Eighteen merges: eight from 10-19 23:30 to 10-20 17:44 (#103–#120), none until 10-24 17:37, then ten from 10-24 17:37 to
+10-25 21:19 (#123–#131). They cover the
 roadmap's proposed order: item 5 (the library) except the tag, item 3 (one MoE resident) for deepseek2, and item 1
 (c)(d) (the scheduler), after (b) was rejected. Numbers are copied from each PR body, MEASURED there unless marked.
 
