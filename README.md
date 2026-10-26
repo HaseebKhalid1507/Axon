@@ -107,7 +107,9 @@ Works today, honestly scoped:
   (`--device cpu`, [log](docs/log/2026-10-18-deepseek2-s0.md)) or, with `--device cuda`, as
   qwen3moe does: MLA attention (its own kernels, a 576-wide f16 latent cache), router, shared
   experts and the dense lead layer on the GPU, the routed experts on the CPU (stage 1,
-  [log](docs/log/2026-10-18-deepseek2-s1.md); f16 KV only for now). Both: decode == batched
+  [log](docs/log/2026-10-18-deepseek2-s1.md); f16 KV only for now). `--gpu-experts N|auto`
+  keeps the routed experts of N MoE layers (auto: as many as fit) on the GPU as well, with
+  the same bits ([log](docs/log/2026-10-24-moe-resident-c.md)). Both: decode == batched
   prefill == verify bit for bit; checked on Moonlight-16B-A3B. Legacy non-MLA deepseek2
   GGUFs (an unsplit `attn_kv_b`, e.g. the published DeepSeek-V2-Lite files) are refused with a
   re-convert message.
@@ -295,6 +297,13 @@ Defaults, as `axon --help` gives them:
   GPU, the rest on the CPU (0 = all on the CPU). Default: all of them if they fit with
   256 MiB to spare, else as many as fit with another 640 MiB left for the desktop; an
   explicit N only needs the 256 MiB.
+- `--gpu-experts N|auto` (gen, chat; `AXON_GPU_EXPERTS` for serve too; deepseek2 with
+  `--device cuda`): the routed experts of N MoE layers resident on the GPU instead of the
+  CPU, smallest layers first, as many as fit after the context's cache (`auto`: all that
+  fit). Default 0. Same bits as on the CPU (the experts' GPU kernels are twins of the CPU's
+  r8 kernels); where that can't hold (`AXON_REPACK=0`, a host whose FMA choice differs from
+  the GPU twins', a GPU below sm_80, or a weight type with no twin) it keeps them on the CPU
+  and says why.
 - `--gpus L` (gen, chat; `AXON_GPUS=L` for serve too): the CUDA devices to run on. One
   (`--gpus 1`) runs the model there. Several (`--gpus 0,1`) split its layers across them in
   order (pipeline parallel): the first GPU runs the embedding and first layers, the last one
@@ -676,6 +685,7 @@ OLLAMA_HOST=http://127.0.0.1:8080 ollama run qwen3-8b
 | `AXON_READAHEAD=0` | `gen`/`chat`: don't read a mapped model into the page cache ahead of use on a background thread (on by default unless the file is over half of available memory) |
 | `AXON_PREFETCH=N` | decode: software prefetch distance in bytes (default 8192, 0 = off, max 1 MiB) |
 | `AXON_DECODE_ROWS=1\|2\|4` | decode: rows per kernel call (default 4; K-quants use at most 2) |
+| `AXON_GPU_EXPERTS=N\|auto` | same as `--gpu-experts` (gen, chat, serve; default 0) |
 | `AXON_REPACK=0` | CPU: run every matrix in place from the GGUF's blocks instead of repacking Q4_K/Q6_K/Q5_0/Q8_0 for the faster kernels (for comparisons) |
 | `AXON_DRAFT=K` | same as `--draft K` (gen, chat, serve): prompt-lookup speculative decoding, up to K draft tokens per step (default 0 = off; try 7). Lossless: same output as without it (greedy, or sampled with the same seed) |
 | `AXON_DRAFT_MODEL=PATH` | same as `--draft-model PATH` (gen, chat, serve) |

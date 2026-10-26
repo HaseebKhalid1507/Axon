@@ -335,6 +335,43 @@ fn cuda_experts_moonlight_bench() {
     }
 }
 
+/// `place`: smallest first (ties to the lower layer), as many as asked and
+/// fit, sorted by layer; `GpuExperts::parse`; `twin_identity` (#121 item 5).
+#[test]
+fn resident_placement_and_identity() {
+    let ls = [(1, 400), (2, 334), (3, 334), (4, 400), (5, 334)];
+    assert_eq!(
+        place(&ls, GpuExperts::N(0), usize::MAX),
+        Vec::<usize>::new()
+    );
+    assert_eq!(place(&ls, GpuExperts::N(2), usize::MAX), vec![2, 3]);
+    assert_eq!(place(&ls, GpuExperts::N(4), usize::MAX), vec![1, 2, 3, 5]);
+    assert_eq!(
+        place(&ls, GpuExperts::Auto, usize::MAX),
+        vec![1, 2, 3, 4, 5]
+    );
+    assert_eq!(place(&ls, GpuExperts::Auto, 1100), vec![2, 3, 5]);
+    assert_eq!(place(&ls, GpuExperts::Auto, 1001), vec![2, 3]);
+    assert_eq!(place(&ls, GpuExperts::N(9), 1500), vec![1, 2, 3, 5]);
+    assert_eq!(place(&ls, GpuExperts::Auto, 100), Vec::<usize>::new());
+    assert_eq!(GpuExperts::parse("auto"), Ok(GpuExperts::Auto));
+    assert_eq!(GpuExperts::parse("12"), Ok(GpuExperts::N(12)));
+    assert!(GpuExperts::parse("-1").is_err() && GpuExperts::parse("all").is_err());
+    twin_identity(true, true, true).unwrap();
+    twin_identity(true, false, false).unwrap();
+    assert!(
+        twin_identity(false, true, true)
+            .unwrap_err()
+            .contains("AXON_REPACK=0")
+    );
+    assert!(
+        twin_identity(true, true, false)
+            .unwrap_err()
+            .contains("fused")
+    );
+    assert!(twin_identity(true, false, true).is_err());
+}
+
 /// The fixture with an extra F32 tensor `name` of `dims` (zeros).
 fn fixture_plus(name: &str, dims: &[u64]) -> Model {
     let o = Opt {

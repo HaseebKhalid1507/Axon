@@ -279,6 +279,62 @@ pub(crate) fn check_ram(m: &Model, dense: bool) -> Result<(), String> {
     check_ram_with(m, repack, dense, crate::gguf::mem::avail())
 }
 
+/// `check_ram` of `crate::moe`'s split with the experts of the MoE layers
+/// in `skip` resident on the GPU (never repacked: no arena on the host).
+/// Sums the kept layers' own arena bytes: placement moves the smallest
+/// layers, so an average over all would under-count the kept ones. Reads
+/// metadata only. `avail`: the RAM available (tests), else the live figure.
+pub(crate) fn check_ram_keep(
+    m: &Model,
+    repack: bool,
+    skip: &[usize],
+    avail: Option<u64>,
+) -> Result<(), String> {
+    let avail = match avail {
+        Some(bytes) => Some(crate::gguf::mem::Avail {
+            bytes,
+            bound: crate::gguf::mem::Bound::Host,
+        }),
+        None => crate::gguf::mem::avail(),
+    };
+    check_ram_keep_with(m, repack, skip, avail)
+}
+
+/// The kept MoE layers' expert arena bytes (`check_ram_keep`).
+pub(crate) fn kept_arena(m: &Model, repack: bool, skip: &[usize]) -> u64 {
+    m.tensors
+        .iter()
+        .filter(|t| EXPS.iter().any(|s| t.name.ends_with(s)) && t.dims.len() >= 3 && t.dims[2] > 0)
+        .filter(|t| usize::try_from(t.layer).map_or(true, |l| !skip.contains(&l)))
+        .map(|t| arena_bytes(t, repack) * t.dims[2])
+        .sum()
+}
+
+fn check_ram_keep_with(
+    m: &Model,
+    repack: bool,
+    skip: &[usize],
+    avail: Option<crate::gguf::mem::Avail>,
+) -> Result<(), String> {
+    if moe_dims(m).is_none() {
+        return Ok(());
+    }
+    let arena = kept_arena(m, repack, skip);
+    let want = arena + RAM_HEADROOM;
+    match avail {
+        Some(avail) if avail.bytes < want => Err(format!(
+            "{}: the CPU experts beside {} resident layers need about {:.1} GB of RAM (their \
+             repacked experts {:.1} GB) and only {:.1} GB is available (bound by {avail})",
+            m.arch,
+            skip.len(),
+            want as f64 / 1e9,
+            arena as f64 / 1e9,
+            avail.bytes as f64 / 1e9
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn check_ram_with(
     m: &Model,
     repack: bool,
@@ -901,6 +957,61 @@ mod tests {
         assert!(
             e.ends_with("(bound by cgroup /app.slice/job.scope memory.max 1000 MB)"),
             "{e}"
+        );
+    }
+
+    /// `check_ram_keep` sums the kept layers' own arena bytes, not an
+    /// average (#127 review): on the deepseek2 fixture with layer 2's experts
+    /// F32 (read in place: no arena) and layer 1's Q8_0, keeping layer 1
+    /// needs all of the arena, keeping layer 2 none of it.
+    #[test]
+    fn ram_keep_counts_the_kept_layers() {
+        use crate::model::deepseek2_tests::{Opt, fixture_tensors};
+        let o = Opt {
+            q_lora: false,
+            yarn: false,
+        };
+        let (meta, mut list, mut data) = fixture_tensors(o, crate::quant::Q8_0);
+        let (_, fl, fd) = fixture_tensors(o, crate::quant::F32);
+        for i in 0..list.len() {
+            if list[i].0.starts_with("blk.2.") && EXPS.iter().any(|s| list[i].0.ends_with(s)) {
+                list[i] = fl[i].clone();
+                data[i] = fd[i].clone();
+            }
+        }
+        let l: Vec<(&str, &[u64], u32)> =
+            list.iter().map(|t| (t.0.as_str(), &t.1[..], t.2)).collect();
+        let m = crate::gguf::build_for_test_with(&meta, &l, &data);
+        let all = MoeInfo::of_with(&m, true).unwrap().expert_arena;
+        assert!(all > 0);
+        assert_eq!(kept_arena(&m, true, &[]), all);
+        assert_eq!(
+            kept_arena(&m, true, &[2]),
+            all,
+            "layer 1 holds the whole arena"
+        );
+        assert_eq!(kept_arena(&m, true, &[1]), 0);
+        assert_eq!(
+            kept_arena(&m, false, &[]),
+            0,
+            "AXON_REPACK=0: nothing repacks"
+        );
+        let host = |bytes| {
+            Some(Avail {
+                bytes,
+                bound: Bound::Host,
+            })
+        };
+        // Room for half the arena: the average (all / 2) would pass keeping
+        // layer 1; its real bytes don't.
+        let avail = host(all / 2 + RAM_HEADROOM);
+        let e = check_ram_keep_with(&m, true, &[2], avail.clone()).unwrap_err();
+        assert!(e.contains("beside 1 resident layers"), "{e}");
+        assert!(check_ram_keep_with(&m, true, &[1], avail.clone()).is_ok());
+        // Nothing resident: the same need as `check_ram`'s split.
+        assert_eq!(
+            check_ram_keep_with(&m, true, &[], avail.clone()).is_ok(),
+            check_ram_with(&m, true, false, avail).is_ok()
         );
     }
 

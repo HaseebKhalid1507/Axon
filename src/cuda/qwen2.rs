@@ -3332,20 +3332,16 @@ impl<'g> Lm for CudaQwen2<'g> {
 }
 
 mod batch;
-#[cfg(test)]
-pub(crate) mod experts;
+pub mod experts;
 
-// The resident experts' refusals (`experts`), outside the test-only module
-// so the product's placement (PR C) can't miss them.
+// The resident experts' refusals (`experts`).
 /// The weight types the twins cover: the TW chains of decode.cu's
 /// `dot_rows_t` and prefill.cu's `g2_compute` are the r8 / r8q kernels' f32
 /// steps for these four only (`gemm2_t<..., TW>` static_asserts it; `gemv_tw`
 /// takes a runtime type, so the host refuses the rest: `twin_type`).
-#[cfg_attr(not(test), allow(dead_code))] // PR C's placement calls these
 pub(crate) const TWIN_TYPES: [u32; 4] = [Q4_K, Q5_0, Q8_0, Q6_K];
 
 /// Ok if weight type qt has a GPU twin.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn twin_type(qt: u32) -> Result<(), String> {
     match TWIN_TYPES.contains(&qt) {
         true => Ok(()),
@@ -3360,7 +3356,6 @@ pub(crate) fn twin_type(qt: u32) -> Result<(), String> {
 /// family's body is `__trap()`, which would poison the CUDA context, so the
 /// host refuses them there; the decode GEMV (`gemv_tw`, `moe_gemv_tw`) runs
 /// on every arch.
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn twin_gemm_ok(cc: (u32, u32)) -> Result<(), String> {
     match cc.0 >= 8 {
         true => Ok(()),

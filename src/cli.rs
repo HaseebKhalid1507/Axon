@@ -83,6 +83,10 @@ flags:
   --gpus L    gen, chat: the CUDA devices to run on (implies --device cuda): one (\"1\") or a
               pipeline over several (\"0,1\": the layers split across them in order, the first
               runs the embedding, the last the head; same results as one GPU)
+  --gpu-experts N|auto  gen, chat: with --device cuda, a MoE model's (deepseek2) routed experts
+              of N layers (auto: as many as fit after the context's cache; smallest first) resident
+              on the GPU instead of the CPU; same results (the GPU twins of the CPU's kernels);
+              default 0; as AXON_GPU_EXPERTS
   --kv T      gen, chat: KV cache type, f16 (default) or q8 (cuda only: int8 with a scale per
               position and head, half the memory; slightly different results; on a split, the
               GPU layers' cache, so more layers fit); as AXON_KV
@@ -186,6 +190,7 @@ environment:
                              attention bandwidth; f32 for A/B, CPU only; q8 cuda only)
   AXON_DEVICE=cpu|cuda       same as --device
   AXON_GPU_LAYERS=N          same as --gpu-layers N
+  AXON_GPU_EXPERTS=N|auto    same as --gpu-experts N|auto (serve too)
   AXON_GPUS=L                same as --gpus L (serve too; with --device cuda)
   AXON_PP_CUTS=K[,K2..]      --gpus pipeline: the first layer of each GPU after the first
                              (default: even, else what fits)
@@ -509,6 +514,12 @@ pub(crate) fn backend_and_drafter<'a>(
     })
 }
 
+/// --gpu-experts' value: a count or "auto" (a usage error otherwise).
+fn gpu_experts_flag(v: Option<&String>) -> crate::cuda::qwen2::experts::GpuExperts {
+    let v = v.unwrap_or_else(|| fail("--gpu-experts needs a value (a count or auto)"));
+    crate::cuda::qwen2::experts::GpuExperts::parse(v).unwrap_or_else(|e| fail(&e))
+}
+
 /// KV cache type (kv.rs): checked up front so a typo is a usage error, not a
 /// panic in the first new_cache. --kv overrides it.
 pub(crate) fn kv_env() -> kv::KvType {
@@ -662,6 +673,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
     let mut draft_path = None;
     let mut device = device_env();
     let mut gpu_layers = None;
+    let mut gpu_experts = None;
     let mut gen_ctx = None;
     let mut kv = kv_env();
     let mut sargs = sample::SampleArgs::default();
@@ -699,6 +711,7 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
             ("-k", Some(v)) => top_k = v,
             ("--draft", Some(v)) => max_draft = Some(v),
             ("--gpu-layers", Some(v)) => gpu_layers = Some(v),
+            ("--gpu-experts", _) => gpu_experts = Some(gpu_experts_flag(args.get(i + 1))),
             ("--ctx", Some(v)) if cmd == "gen" => gen_ctx = Some(v),
             (f @ ("-n" | "-k" | "--draft" | "--gpu-layers" | "--ctx"), None) => fail(&format!(
                 "{f} needs a whole number, got {}",
@@ -837,7 +850,10 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         gpu_layers,
         kv,
         false,
-        lm::Placing::of(cache_ctx),
+        lm::Placing {
+            gpu_experts,
+            ..lm::Placing::of(cache_ctx)
+        },
         cache_ctx,
     );
     // On a split, sampled drafting pays too (docs/design/spec-split.md).
@@ -1140,6 +1156,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
     let mut draft_path = None;
     let mut device = device_env();
     let mut gpu_layers = None;
+    let mut gpu_experts = None;
     let mut kv = kv_env();
     let mut sargs = sample::SampleArgs::default();
     let mut session = None;
@@ -1176,6 +1193,7 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
                 | "--draft-model"
                 | "--device"
                 | "--gpu-layers"
+                | "--gpu-experts"
                 | "--kv"
                 | "--gpus"
                 | "--session"
@@ -1203,6 +1221,8 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
             device = Device::parse(v).unwrap_or_else(|e| fail(&e));
         } else if f == "--kv" {
             kv = kv_flag(Some(v));
+        } else if f == "--gpu-experts" {
+            gpu_experts = Some(gpu_experts_flag(Some(v)));
         } else if f == "--gpus" {
             device = gpus_flag(Some(v));
         } else {
@@ -1279,7 +1299,10 @@ fn run_chat(args: &[String]) -> std::io::Result<()> {
         gpu_layers,
         kv,
         fit,
-        lm::Placing::of(ctx),
+        lm::Placing {
+            gpu_experts,
+            ..lm::Placing::of(ctx)
+        },
         ctx,
     );
     let split = is_split(&net);
