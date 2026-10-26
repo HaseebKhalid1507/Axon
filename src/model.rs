@@ -5994,6 +5994,12 @@ mod ram_dense_tests {
             "2 layers x K,V x 128 x f16"
         );
         assert_eq!(dense_ram_need(&m, true, 4).kv_per_pos, 2 * need.kv_per_pos);
+        // The fixture's arena (2 MiB) is under the tolerance: refuse on a
+        // 0.5B-sized one, with the fixture's KV.
+        let need = DenseNeed {
+            arena: 376 * MIB,
+            ..need
+        };
         let want = need.arena + need.kv_per_pos * 1000;
         assert_eq!(
             dense_verdict("qwen3", need, false, 8, 1000, host(want)),
