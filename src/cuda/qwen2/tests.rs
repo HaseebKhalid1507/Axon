@@ -9091,6 +9091,34 @@ fn gemma3_vs_ref(m: &Model, name: &str) {
     assert!(ag.1 < 2.0, "max KL vs reference {}", ag.1);
 }
 
+/// Diagnostic (M6 bisection, no assertion): the GPU, the CPU and the CPU's
+/// rows path against the f64 reference walk on the 1B Q8_0 and Q4_K_M, and
+/// the Q8_0 GPU-vs-CPU agreement, so a numerics change's accuracy shows
+/// against ground truth, not against the CPU. `--ignored --nocapture`.
+#[test]
+#[ignore]
+fn gemma3_accuracy_diag() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    for (name, m) in [
+        ("gemma3 1B Q8_0", gemma3_mapped()),
+        ("gemma3 1B Q4_K_M", model_at(GEMMA3_1B_Q4)),
+    ] {
+        let Some(m) = m else { continue };
+        let km = Kernels::module_for(&g, &m).unwrap();
+        let gpu = CudaQwen2::new(&g, &km, &m, 256).unwrap();
+        let rows = Qwen2::new_with(&m, false);
+        let cpu = Qwen2::new_with(&m, true);
+        let [ag, ac, ar] = gemma3_ref_walk(&m, &gpu, &cpu, &rows, 32);
+        eprintln!(
+            "DIAG {name} vs f64 ref: gpu mean KL {:.5} max {:.4} top-1 {}/{}; cpu {:.5} {:.4} {}; cpu \
+             rows {:.5} {:.4} {}",
+            ag.0, ag.1, ag.2, ag.3, ac.0, ac.1, ac.2, ar.0, ar.1, ar.2
+        );
+    }
+}
+
 /// gemma3 GPU vs CPU (`gemma3_vs_cpu`) on the 1B Q8_0, the 1B Q4_K_M
 /// against the f64 reference (`gemma3_vs_ref`; its narrow gate/up rows go
 /// through the gate/up selection #30's gate_up4 sits in), then past the
