@@ -677,11 +677,12 @@ fn reads_in_place_with(m: &Model, repack: bool) -> bool {
 }
 
 /// Headroom the dense CPU RAM check wants beyond the r8 arena and the KV
-/// cache: the process itself, the forward pass's scratch (a prefill batch's
-/// activations and logits), the tokenizer and the side copies. Calibrated
-/// against the smallest cgroup limit `gen` survives (docs/log
-/// 2026-10-26-ram-dense.md).
-const DENSE_RAM_HEADROOM: u64 = 256 << 20;
+/// cache (the forward pass's scratch, the side copies). Deliberately small:
+/// the check refuses what can't fit, never a load that could. Measured on
+/// bella (docs/log/2026-10-26-ram-dense.md): the smallest cgroup limit a
+/// 9-token `gen` survives is the arena plus 72-118 MB (0.5B to 1B), of
+/// which the process already uses some when this runs.
+const DENSE_RAM_HEADROOM: u64 = 32 << 20;
 
 /// What a dense model on the CPU (`Qwen2::new`) takes in anonymous memory
 /// beyond the file (`check_ram_dense`): the r8 arena (with `repack`: the
@@ -5861,7 +5862,7 @@ mod ram_dense_tests {
                 "{what}: no repack, no arena"
             );
         };
-        for (arch, mt) in [("qwen3", crate::quant::Q8_0), ("llama", crate::quant::Q4_0)] {
+        for (arch, mt) in [("qwen3", crate::quant::Q8_0), ("llama", crate::quant::Q8_0)] {
             real(&tests::dense_fixture(arch, mt).0, arch);
         }
         for (m, what) in [
