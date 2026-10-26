@@ -1,0 +1,16 @@
+[axon-run 02:08:31] submitted 1026-020831-2059 by /home/haseeb/.cache/axon-memcg: /home/haseeb/.cache/axon-memcg/rd/mincap18.sh /home/haseeb/.cache/axon-main/axon-39624db /home/haseeb/.cache/axon-memcg/rd/axon-38d724d
+[axon-run 02:08:31] scope axon-job-1026-020831-2059-1792994911.scope in app-axonjobs.slice: MemoryMax 7024 MB, MemoryHigh 6321 MB, no swap, oomd pressure kill 80% (claim 4000 MB): an OOM here kills only this job
+[axon-run 02:08:31] job 1026-020831-2059 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-020831-2059-1792994911 --slice=app-axonjobs.slice -p MemoryMax=7024M -p MemoryHigh=6321M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-memcg/rd/mincap18.sh /home/haseeb/.cache/axon-main/axon-39624db /home/haseeb/.cache/axon-memcg/rd/axon-38d724d
+axon-q 02:08:31 start slot 16-23: /home/haseeb/.cache/axon-memcg/rd/mincap18.sh /home/haseeb/.cache/axon-main/axon-39624db /home/haseeb/.cache/axon-memcg/rd/axon-38d724d
+affinity of this shell: 16-23; after widening: 0-23
+MINCAP18 qwen2.5-3b-instruct-q4_k_m main 2370 MiB cand 2385 MiB (cand - main: 15 MiB)
+  cand at 2370M: rc=2 needs about 0.34 GiB of RAM (repacking the copy 0.34 GiB, the KV cache of 14 tokens 0.00 GiB) and only 0.29 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/mc18-3247539-12812.scope memory.max 2370 MiB)
+  cand at 2374M: rc=2 needs about 0.34 GiB of RAM (repacking the copy 0.34 GiB, the KV cache of 14 tokens 0.00 GiB) and only 0.30 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/mc18-3247539-3514.scope memory.max 2374 MiB)
+  cand at 2381M: rc=2 needs about 0.34 GiB of RAM (repacking the copy 0.34 GiB, the KV cache of 14 tokens 0.00 GiB) and only 0.30 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/mc18-3247539-16607.scope memory.max 2381 MiB)
+MINCAP18 qwen2.5-0.5b-q4_k_m main 663 MiB cand 663 MiB (cand - main: 0 MiB)
+  cand at 663M: rc=0 
+  cand at 667M: rc=0 
+  cand at 659M: rc=137 
+MINCAP18-DONE
+[axon-run 02:08:54] exit 0 after 22.4s (host bella)
+[axon-run 02:08:55] EXPECT ok: output matches /MINCAP18-DONE/

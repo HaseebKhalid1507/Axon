@@ -1,0 +1,48 @@
+[axon-run 02:08:32] submitted 1026-020832-f63d by /home/haseeb/.cache/axon-memcg: /home/haseeb/.cache/axon-memcg/rd/axon-test-dbg-38d724d model::ram_dense_tests model::moe::tests gguf::mem --nocapture
+[axon-run 02:08:32] job 1026-020832-f63d -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 0 --src /home/haseeb/.cache/axon-wt-ramdense /home/haseeb/.cache/axon-memcg/rd/axon-test-dbg-38d724d model::ram_dense_tests model::moe::tests gguf::mem --nocapture
+axon-remote: uploading axon-test-dbg-38d724d (c90794d72cda9828c6b30431) + source of /home/haseeb/.cache/axon-wt-ramdense
+
+sent 1,987,455 bytes  received 5,219 bytes  3,985,348.00 bytes/sec
+total size is 6,990,616  speedup is 3.51
+
+sent 7,390,807 bytes  received 35 bytes  4,927,228.00 bytes/sec
+total size is 23,533,376  speedup is 3.18
+axon-remote: job 20261026-020834-axon-test-dbg-38d724d-3449275 on avante (CPU-only)
+[axon-node 02:08:34] CPU-only job (GPU hidden, AXON_SKIP_GPU_TESTS=1)
+[axon-node 02:08:34] run axon-test-dbg-38d724d (c90794d72cda9828c6b30431) as /home/haseeb/.cache/axon-wt-ramdense on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 20 tests
+test gguf::mem::tests::mountinfo_escapes ... ok
+mem avail: 14168 MB (host MemAvailable)
+test gguf::mem::tests::host_only_without_cgroupfs ... ok
+test gguf::mem::tests::real_avail_is_found ... ok
+test gguf::mem::tests::v1_memory_controller ... ok
+test gguf::mem::tests::v2_picks_the_mount_above_the_cgroup ... ok
+test gguf::mem::tests::v2_cgroupns_private_root ... ok
+test gguf::mem::tests::v2_saturates_and_tolerates_missing_files ... ok
+test model::moe::tests::chunk_dividing_divides ... ok
+test gguf::mem::tests::v2_mount_root_and_default_mount ... ok
+test gguf::mem::tests::v2_tightest_level_wins ... ok
+test model::ram_dense_tests::affinity_cpus_counts_the_mask ... ok
+test model::ram_dense_tests::copied_load_commits_the_matrices_in_flight ... ok
+test model::ram_dense_tests::copy_estimate_bounded_by_layers ... ok
+test model::moe::tests::ram_keep_counts_the_kept_layers ... ok
+qwen3: r8 arena 2 MiB (head 0 MiB tied, largest layer matrix 0 MiB, growth 0 MiB), KV 1 KiB a position, file 0 MiB
+test model::moe::tests::ram_need_counts_the_arena_only_when_repacking ... ok
+test model::moe::tests::ram_refusal_names_the_bound ... ok
+test model::ram_dense_tests::long_ctx_warns_not_refuses ... ok
+llama: r8 arena 2 MiB (head 0 MiB tied, largest layer matrix 0 MiB, growth 0 MiB), KV 1 KiB a position, file 0 MiB
+test model::ram_dense_tests::dense_need_head_and_growth ... ok
+test model::ram_dense_tests::dense_need_and_refusal_wording ... ok
+qwen2.5-0.5b: r8 arena 376 MiB (head 137 MiB, largest layer matrix 3 MiB, growth 0 MiB), KV 12 KiB a position, file 468 MiB
+qwen3-0.6b: r8 arena 604 MiB (head 157 MiB tied, largest layer matrix 3 MiB, growth 0 MiB), KV 112 KiB a position, file 609 MiB
+llama-3.2-1b: r8 arena 776 MiB (head 205 MiB tied, largest layer matrix 13 MiB, growth 12 MiB), KV 32 KiB a position, file 770 MiB
+gemma3-1b: r8 arena 1014 MiB (head 306 MiB tied, largest layer matrix 8 MiB, growth 0 MiB), KV 26 KiB a position, file 1019 MiB
+test model::ram_dense_tests::dense_arena_matches_the_built_arena ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 728 filtered out; finished in 1.21s
+
+[axon-node 02:08:36] exit 0 after 1.3s
+[axon-node 02:08:36] peak RSS 0 MB (job process tree PSS, 2 s samples x0)
+[axon-run 02:08:36] exit 0 after 4.1s (host avante)
+[axon-run 02:08:38] EXPECT ok: output matches /test result: ok/
