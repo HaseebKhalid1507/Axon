@@ -1,0 +1,16 @@
+[axon-run 02:14:17] submitted 1026-021417-daf4 by /home/haseeb/.cache/axon-memcg: /home/haseeb/.cache/axon-memcg/rd/mincap18.sh /home/haseeb/.cache/axon-main/axon-39624db /home/haseeb/.cache/axon-memcg/rd/axon-e67c6af
+[axon-run 02:14:17] scope axon-job-1026-021417-daf4-1792995257.scope in app-axonjobs.slice: MemoryMax 8785 MB, MemoryHigh 7906 MB, no swap, oomd pressure kill 80% (claim 3173 MB): an OOM here kills only this job
+[axon-run 02:14:17] job 1026-021417-daf4 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-021417-daf4-1792995257 --slice=app-axonjobs.slice -p MemoryMax=8785M -p MemoryHigh=7906M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-memcg/rd/mincap18.sh /home/haseeb/.cache/axon-main/axon-39624db /home/haseeb/.cache/axon-memcg/rd/axon-e67c6af
+axon-q 02:14:17 start slot 16-23: /home/haseeb/.cache/axon-memcg/rd/mincap18.sh /home/haseeb/.cache/axon-main/axon-39624db /home/haseeb/.cache/axon-memcg/rd/axon-e67c6af
+affinity of this shell: 16-23; after widening: 0-23
+MINCAP18 qwen2.5-3b-instruct-q4_k_m main 2354 MiB cand 2362 MiB (cand - main: 8 MiB)
+  cand at 2354M: rc=137 
+  cand at 2358M: rc=137 
+  cand at 2358M: rc=137 
+MINCAP18 qwen2.5-0.5b-q4_k_m main 663 MiB cand 663 MiB (cand - main: 0 MiB)
+  cand at 663M: rc=0 
+  cand at 667M: rc=0 
+  cand at 659M: rc=137 
+MINCAP18-DONE
+[axon-run 02:14:40] exit 0 after 23.0s (host bella)
+[axon-run 02:14:41] EXPECT ok: output matches /MINCAP18-DONE/

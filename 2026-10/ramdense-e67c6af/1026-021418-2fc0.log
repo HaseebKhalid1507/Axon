@@ -1,0 +1,56 @@
+[axon-run 02:14:18] submitted 1026-021418-2fc0 by /home/haseeb/.cache/axon-memcg: /home/haseeb/.cache/axon-memcg/md5.sh /home/haseeb/.cache/axon-main/axon-39624db /home/haseeb/.cache/axon-memcg/rd/axon-e67c6af /home/haseeb/.cache/axon-memcg/rd/md5-e67c6af
+[axon-run 02:15:38] VRAM: claiming the learned 1894 MB instead of --vram 3000 (name:ramdense-*-md5)
+[axon-run 02:15:38] scope axon-job-1026-021418-2fc0-1792995338.scope in app-axonjobs.slice: MemoryMax 6556 MB, MemoryHigh 5900 MB, no swap, oomd pressure kill 80% (claim 2217 MB): an OOM here kills only this job
+[axon-run 02:15:38] job 1026-021418-2fc0 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-021418-2fc0-1792995338 --slice=app-axonjobs.slice -p MemoryMax=6556M -p MemoryHigh=5900M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-memcg/md5.sh /home/haseeb/.cache/axon-main/axon-39624db /home/haseeb/.cache/axon-memcg/rd/axon-e67c6af /home/haseeb/.cache/axon-memcg/rd/md5-e67c6af
+axon-q 02:15:38 start slot 16-23: /home/haseeb/.cache/axon-memcg/md5.sh /home/haseeb/.cache/axon-main/axon-39624db /home/haseeb/.cache/axon-memcg/rd/axon-e67c6af /home/haseeb/.cache/axon-memcg/rd/md5-e67c6af
+base	cpu	qwen2.5-0.5b-q4_k_m	p1	de11b4bf48c9ea3160fbc9adb2875d53	rc=0
+cand	cpu	qwen2.5-0.5b-q4_k_m	p1	de11b4bf48c9ea3160fbc9adb2875d53	rc=0
+base	cpu	qwen2.5-0.5b-q4_k_m	p2	9031d0e99ea751a8de29877587e3345e	rc=0
+cand	cpu	qwen2.5-0.5b-q4_k_m	p2	9031d0e99ea751a8de29877587e3345e	rc=0
+base	cpu	qwen2.5-0.5b-q4_k_m	p3	b922fd60bca164a9ffce72238584c5e2	rc=0
+cand	cpu	qwen2.5-0.5b-q4_k_m	p3	b922fd60bca164a9ffce72238584c5e2	rc=0
+base	cpu	Qwen3-0.6B-Q8_0	p1	54381a7d049c9b9ce1060132d8279566	rc=0
+cand	cpu	Qwen3-0.6B-Q8_0	p1	54381a7d049c9b9ce1060132d8279566	rc=0
+base	cpu	Qwen3-0.6B-Q8_0	p2	5e174cec98632710c902044b62c4b529	rc=0
+cand	cpu	Qwen3-0.6B-Q8_0	p2	5e174cec98632710c902044b62c4b529	rc=0
+base	cpu	Qwen3-0.6B-Q8_0	p3	25037b79fad71da02cba41dc07c98278	rc=0
+cand	cpu	Qwen3-0.6B-Q8_0	p3	25037b79fad71da02cba41dc07c98278	rc=0
+base	cpu	Llama-3.2-1B-Instruct-Q4_K_M	p1	8974646550575a8e92847d04f5e81370	rc=0
+cand	cpu	Llama-3.2-1B-Instruct-Q4_K_M	p1	8974646550575a8e92847d04f5e81370	rc=0
+base	cpu	Llama-3.2-1B-Instruct-Q4_K_M	p2	09ed84e14ff01fd5927994c527ee008c	rc=0
+cand	cpu	Llama-3.2-1B-Instruct-Q4_K_M	p2	09ed84e14ff01fd5927994c527ee008c	rc=0
+base	cpu	Llama-3.2-1B-Instruct-Q4_K_M	p3	a9eba2aea1e79d656d95e37acc94c045	rc=0
+cand	cpu	Llama-3.2-1B-Instruct-Q4_K_M	p3	a9eba2aea1e79d656d95e37acc94c045	rc=0
+base	cpu	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p1	bd684c938d4c010f27709e34b7129f91	rc=0
+cand	cpu	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p1	bd684c938d4c010f27709e34b7129f91	rc=0
+base	cpu	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p2	3a0cd4771796d7bc86a95131e98c3b90	rc=0
+cand	cpu	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p2	3a0cd4771796d7bc86a95131e98c3b90	rc=0
+base	cpu	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p3	8aecaea19e3b7b595aa3d161a7dacbbd	rc=0
+cand	cpu	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p3	8aecaea19e3b7b595aa3d161a7dacbbd	rc=0
+base	cuda	qwen2.5-0.5b-q4_k_m	p1	c0dfbb1ca4f2de10dd082ef40727a7e9	rc=0
+cand	cuda	qwen2.5-0.5b-q4_k_m	p1	c0dfbb1ca4f2de10dd082ef40727a7e9	rc=0
+base	cuda	qwen2.5-0.5b-q4_k_m	p2	9031d0e99ea751a8de29877587e3345e	rc=0
+cand	cuda	qwen2.5-0.5b-q4_k_m	p2	9031d0e99ea751a8de29877587e3345e	rc=0
+base	cuda	qwen2.5-0.5b-q4_k_m	p3	b922fd60bca164a9ffce72238584c5e2	rc=0
+cand	cuda	qwen2.5-0.5b-q4_k_m	p3	b922fd60bca164a9ffce72238584c5e2	rc=0
+base	cuda	Qwen3-0.6B-Q8_0	p1	a21a6d55c9dccce392a07d7d8a0f3e70	rc=0
+cand	cuda	Qwen3-0.6B-Q8_0	p1	a21a6d55c9dccce392a07d7d8a0f3e70	rc=0
+base	cuda	Qwen3-0.6B-Q8_0	p2	b9e8a942d145987eec172206fad170db	rc=0
+cand	cuda	Qwen3-0.6B-Q8_0	p2	b9e8a942d145987eec172206fad170db	rc=0
+base	cuda	Qwen3-0.6B-Q8_0	p3	25037b79fad71da02cba41dc07c98278	rc=0
+cand	cuda	Qwen3-0.6B-Q8_0	p3	25037b79fad71da02cba41dc07c98278	rc=0
+base	cuda	Llama-3.2-1B-Instruct-Q4_K_M	p1	cc9424ad2c9bb34aa8c4bfc5b918fc10	rc=0
+cand	cuda	Llama-3.2-1B-Instruct-Q4_K_M	p1	cc9424ad2c9bb34aa8c4bfc5b918fc10	rc=0
+base	cuda	Llama-3.2-1B-Instruct-Q4_K_M	p2	f08ef94379817c4db59239b77211878d	rc=0
+cand	cuda	Llama-3.2-1B-Instruct-Q4_K_M	p2	f08ef94379817c4db59239b77211878d	rc=0
+base	cuda	Llama-3.2-1B-Instruct-Q4_K_M	p3	a9eba2aea1e79d656d95e37acc94c045	rc=0
+cand	cuda	Llama-3.2-1B-Instruct-Q4_K_M	p3	a9eba2aea1e79d656d95e37acc94c045	rc=0
+base	cuda	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p1	55220a5553432a06a5c906fe7332ca0b	rc=0
+cand	cuda	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p1	55220a5553432a06a5c906fe7332ca0b	rc=0
+base	cuda	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p2	3a0cd4771796d7bc86a95131e98c3b90	rc=0
+cand	cuda	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p2	3a0cd4771796d7bc86a95131e98c3b90	rc=0
+base	cuda	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p3	4f91710a0af4249e57f4ef8c75be3ffc	rc=0
+cand	cuda	Qwen3-30B-A3B-Instruct-Pruned-2B.Q4_K_M	p3	4f91710a0af4249e57f4ef8c75be3ffc	rc=0
+MD5-RESULT identical 24 of 24
+[axon-run 02:16:19] exit 0 after 41.3s (host bella)
+[axon-run 02:16:21] EXPECT ok: output matches /MD5-RESULT/
