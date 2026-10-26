@@ -1,0 +1,3 @@
+[axon-run 13:20:44] submitted 1026-132044-17f0 by /home/haseeb/.cache/axon-wt-h100-land: /home/haseeb/.cache/axon-budget/trace-smoke.sh /home/haseeb/.cache/axon-budget/trace-smoke-0144fa9 /home/haseeb/.cache/axon-budget/bin/axon-0144fa9 /home/haseeb/Projects/axon/models/qwen2.5-0.5b-q4_k_m.gguf
+[axon-run 14:24:49] /home/haseeb/.cache/axon-budget/trace-smoke.sh changed after submit (rebuilt?): refusing to run a different binary than submitted. Resubmit.
+[axon-run 14:24:49] exit 125 after 0.0s (host bella)
