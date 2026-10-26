@@ -1,0 +1,29 @@
+{
+ "label": "moerese-111456a-ab",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1026-075028-1c02",
+   "name": "moerese-111456a-ab",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "111456a",
+   "binary": "abq3.py",
+   "started": 1793017028.1909456,
+   "ended": 1793017256.3278077,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "25c053f265b99051bfb65e99b3d6b645e24a3bbcd52a0d1a2edc5bb4bdcfe7ab",
+   "log_bytes": 12440
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-26 08:20:56 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
