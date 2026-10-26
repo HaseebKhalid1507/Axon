@@ -1,7 +1,7 @@
 # A measured step budget for `axon serve` (shipped), shortest-first admission (opt-in), on main (PR #131)
 
 - Date: 2026-10-25. Branch: feat/sched-budget-main. Base: main 841ef9c (first built on d6b7051; main merged in
-  375ce65 (fcde887) and 4fbfd5c (841ef9c, #127; a test-file conflict resolved by hand)). Code head e76c01f + the merge. Status: open; review shady 9/10 APPROVE conditional on the e76c01f gates.
+  375ce65 (fcde887) and 4fbfd5c (841ef9c, #127; a test-file conflict resolved by hand)). Code head e76c01f + the merge. Status: open, gates of record (4fbfd5c) green; review shady 9/10 APPROVE.
 - Pick / design: roadmap "Next" item 1 (c) and (d); spec `specs/sched-sjf-token-budget.md` (Okarin, 10-20).
 - Supersedes #126 (the same work stacked on #119's hybrid step; #119 failed its kill rules and was closed: the
   roadmap's "else revert it and keep (c)/(d)"). Two-pass path only: no fused pass, no `fused_share`, no
@@ -41,12 +41,12 @@ Gates of record, at the merge head 4fbfd5c (base main 841ef9c):
 
 | gate | result | job ID |
 |---|---|---|
-| fast tier, release | RES_FAST | bella 1025-202635-4390 |
-| debug `serve::` + `cuda::qwen2::slots::`, GPU | RES_DBG | bella 1025-202635-da07 |
-| `serve::` release, `AXON_ADMIT=sjf` | RES_SJF | avante 1025-202636-80d5 |
-| `serve::` release, `AXON_STEP_COST=legacy` alone | RES_ROLL | avante 1025-202636-7818 |
-| md5 of `gen`, main 841ef9c vs 4fbfd5c, same host | RES_MD5 | bella 1025-202637-1989 |
-| serve digests (main, defaults, legacy, sjf 50, sjf lanes 8 / age 0, step-tokens 64; 0.5B, 1.5B) | RES_SERVAB | bella 1025-202637-b580 |
+| fast tier, release | 670 passed, 0 failed, 50 ignored | bella 1025-202635-4390 |
+| debug `serve::` + `cuda::qwen2::slots::`, GPU | 145 passed, 0 failed, 7 ignored | bella 1025-202635-da07 |
+| `serve::` release, `AXON_ADMIT=sjf` | 135 passed, 0 failed, 4 ignored | avante 1025-202636-80d5 |
+| `serve::` release, `AXON_STEP_COST=legacy` alone | 135 passed, 0 failed, 4 ignored | avante 1025-202636-7818 |
+| md5 of `gen`, main 841ef9c vs 4fbfd5c, same host | 0 of 20 pairs differ, 0 nonzero rc | bella 1025-202637-1989 |
+| serve digests (main, defaults, legacy, sjf 50, sjf lanes 8 / age 0, step-tokens 64; 0.5B, 1.5B) | qwen2.5-0.5b-q4_k_m: 1 distinct digest over 12 runs; qwen2.5-1.5b-instruct-q4_k_m: 1 distinct digest over 12 runs | bella 1025-202637-b580 |
 | clippy -D warnings (bin + test), rustfmt | clean | local |
 | pure engine tests (incl. `legacy_reproduces_main_decisions`, `legacy_alone_is_main_admission`) | 25 passed | local |
 
