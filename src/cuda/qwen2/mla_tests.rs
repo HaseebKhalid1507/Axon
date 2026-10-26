@@ -435,7 +435,8 @@ fn heads_mm_run(
 
 /// S2.5's mla_heads_mm (the batched per-head products as a tiled GEMM: the
 /// lane chains in bit-reversed order folded into the xor tree's shape)
-/// gives main be13f1f's mla_heads_mv bits: every type, Moonlight's shapes
+/// gives main's mla_heads_mv bits (`*_ref`: be13f1f's kernels; main
+/// 680a2c5's give the same bits, #145): every type, Moonlight's shapes
 /// (k_b Q5_0 8192 x 128, v_b Q4_K 2048 x 512) and others (chains of 3, 4,
 /// 8, 16 and 32 columns; stages that split the chains unevenly; rows staged
 /// in shared memory or read from global memory (Q4_K x 1024, F32)), batches of
@@ -623,7 +624,8 @@ fn attn_b_run(
 }
 
 /// S2.5's contract: mla_attn_b (a batch: K tiles shared by 32 (token,
-/// head) pairs) gives main be13f1f's bits (mla_attn_ref), partials
+/// head) pairs) gives main's bits (mla_attn_ref: be13f1f's kernel; main
+/// 680a2c5's gives the same bits, #145), partials
 /// included: Moonlight's shape from position 0 (2,100 tokens: 17 splits;
 /// and 700) and from 300 (a pass after a cache prefix), K2's (64 heads), an
 /// 8-head one and the fixture's (2 heads, row 80), and batches of 2 to 33
@@ -1144,6 +1146,256 @@ fn attn_blocks_cover_the_hpb_rule() {
                 }
             }
         }
+    }
+}
+
+/// S2.5's A/B at the kernel level: main 680a2c5's batched kernels (its
+/// `mla_heads_mv` with `mv_plan`, its `mla_attn` with the hpb rule) vs this
+/// branch's `mla_heads_mm` and `mla_attn_b`, on Moonlight's shapes. Each
+/// point: 3 rounds, arms alternating (main, cand, main, cand, ..), each a
+/// mean over back-to-back launches; printed as the median [min-max] µs.
+/// heads: nb 8 .. 2100 (the dispatch crossover); attn: batches of 64, 512
+/// and 2,100 tokens from position 0. Run on its own: --ignored --nocapture.
+/// AXON_MLA_SRC=file: another module source (variants); AXON_MLA_AB_THREADS:
+/// mla_attn_b's block size for such a variant.
+#[test]
+#[ignore]
+fn mla_prefill_kernel_bench() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let ml = match std::env::var("AXON_MLA_SRC") {
+        Ok(f) => {
+            let src = std::fs::read_to_string(&f).unwrap();
+            eprintln!("bench: kernels from {f}");
+            crate::cuda::Module::load(&g, &src, &crate::cuda::KERNEL_OPTS_EXT)
+                .unwrap()
+                .0
+        }
+        Err(_) => Kernels::mla_ref_module(&g).unwrap(),
+    };
+    let ab_threads: u32 = std::env::var("AXON_MLA_AB_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(MLA_AB_THREADS as u32);
+    let info = g.info().unwrap();
+    println!(
+        "bench on {} (sm_{}{}, {} SMs)",
+        info.name, info.cc.0, info.cc.1, info.sms
+    );
+    // Mean µs per launch over n launches (after 3 warm-up launches).
+    let time = |n: usize, f: &mut dyn FnMut()| -> f64 {
+        for _ in 0..3 {
+            f();
+        }
+        g.sync().unwrap();
+        let t = std::time::Instant::now();
+        for _ in 0..n {
+            f();
+        }
+        g.sync().unwrap();
+        t.elapsed().as_secs_f64() * 1e6 / n as f64
+    };
+    let med = |v: &mut Vec<f64>| -> String {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        format!("{:.1} [{:.1}-{:.1}]", v[v.len() / 2], v[0], v[v.len() - 1])
+    };
+    let (fmv, fmm) = (
+        ml.function("mla_heads_mv").unwrap(),
+        ml.function("mla_heads_mm").unwrap(),
+    );
+    use crate::quant::{Q4_K, Q5_0};
+    for (name, qt, rph, cols) in [("k_b", Q5_0, 512usize, 128usize), ("v_b", Q4_K, 128, 512)] {
+        let n_h = 16;
+        let mut r = Rng(3);
+        let rows = rph * n_h;
+        let rb = crate::quant::row_bytes(qt, cols);
+        let wd = g.upload(&random_blocks(&mut r, qt, rows * cols)).unwrap();
+        for nb in [8usize, 16, 24, 32, 48, 64, 96, 128, 512, 2100] {
+            let x: Vec<f32> = (0..nb * n_h * cols).map(|_| r.f()).collect();
+            let xd = g.upload(&x).unwrap();
+            let ob = g.alloc(nb * rows * 4).unwrap();
+            let mut a = vec![
+                Arg::I32(qt as i32),
+                wd.arg(),
+                Arg::U64(rb as u64),
+                Arg::I32(rph as i32),
+                Arg::I32(cols as i32),
+                Arg::I32(n_h as i32),
+                xd.arg(),
+                Arg::I32(cols as i32),
+                Arg::U64((n_h * cols) as u64),
+                ob.arg(),
+                Arg::I32(rph as i32),
+                Arg::U64(rows as u64),
+                Arg::I32(nb as i32),
+            ];
+            let a_mm = a.clone();
+            let (rpb, smem) = mv_plan((qt, rb), rph, cols, n_h, nb);
+            a.push(Arg::I32(rpb as i32));
+            let n = (25_600 / nb).clamp(20, 400);
+            let (mut tm, mut tc) = (Vec::new(), Vec::new());
+            for _ in 0..3 {
+                // SAFETY (each launch): the kernels' signatures, buffers sized above.
+                tm.push(time(n, &mut || unsafe {
+                    g.launch(
+                        &fmv,
+                        (rows.div_ceil(rpb) as u32, nb.div_ceil(MLA_MV_T) as u32, 1),
+                        (256, 1, 1),
+                        smem as u32,
+                        &a,
+                    )
+                    .unwrap()
+                }));
+                tc.push(time(n, &mut || unsafe {
+                    g.launch(
+                        &fmm,
+                        ((rows / MLA_MM_R) as u32, nb.div_ceil(MLA_MM_T) as u32, 1),
+                        (256, 1, 1),
+                        0,
+                        &a_mm,
+                    )
+                    .unwrap()
+                }));
+            }
+            println!(
+                "heads {name} nb {nb}: main {} us | cand mm {} us",
+                med(&mut tm),
+                med(&mut tc)
+            );
+        }
+    }
+    if !ml.mma() {
+        println!("attn: mla_attn_b is sm_80+, skipped");
+        return;
+    }
+    let (fa, fb) = (
+        ml.function("mla_attn").unwrap(),
+        ml.function("mla_attn_b").unwrap(),
+    );
+    fb.set_max_shared(attn_b_smem(MLA_MAX_KROW)).unwrap();
+    let sms = info.sms as usize;
+    let (n_h, krow, lat) = (16usize, 576usize, 512usize);
+    let mut r = Rng(9);
+    for nb in [64usize, 512, 2100] {
+        let nsp = nb.div_ceil(MLA_SPLIT);
+        let k16: Vec<u16> = (0..nb * krow)
+            .map(|_| crate::quant::f32_to_f16(r.f() * 2.0))
+            .collect();
+        let kv = g.upload(&k16).unwrap();
+        let qa: Vec<f32> = (0..nb * n_h * krow).map(|_| r.f()).collect();
+        let qd = g.upload(&qa).unwrap();
+        let pt = g.alloc(nb * nsp * n_h * (lat + 2) * 4).unwrap();
+        let a_main = vec![
+            qd.arg(),
+            kv.arg(),
+            Arg::I32(krow as i32),
+            Arg::I32(lat as i32),
+            Arg::I32(n_h as i32),
+            Arg::I32(8),
+            Arg::F32(0.07),
+            Arg::Ptr(0),
+            Arg::I32(0),
+            Arg::I32(MLA_SPLIT as i32),
+            Arg::I32(nsp as i32),
+            pt.arg(),
+            Arg::I32(sms as i32),
+            Arg::I32(0),
+        ];
+        let a_b = [
+            qd.arg(),
+            kv.arg(),
+            Arg::I32(krow as i32),
+            Arg::I32(lat as i32),
+            Arg::I32(n_h as i32),
+            Arg::F32(0.07),
+            Arg::I32(0),
+            Arg::I32(MLA_SPLIT as i32),
+            Arg::I32(nsp as i32),
+            Arg::I32(nb as i32),
+            pt.arg(),
+        ];
+        let n = (12_800 / nb).clamp(5, 200);
+        let (mut tm, mut tc) = (Vec::new(), Vec::new());
+        for _ in 0..3 {
+            // SAFETY (each launch): the kernels' signatures, buffers sized above.
+            tm.push(time(n, &mut || unsafe {
+                g.launch(
+                    &fa,
+                    (attn_blocks(n_h, 8, nsp, nb, sms) as u32, nb as u32, 1),
+                    (256, 1, 1),
+                    attn_smem(krow, false) as u32,
+                    &a_main,
+                )
+                .unwrap()
+            }));
+            tc.push(time(n, &mut || unsafe {
+                g.launch(
+                    &fb,
+                    (nsp as u32, nb.div_ceil(MLA_AB_Q / n_h) as u32, 1),
+                    (ab_threads, 1, 1),
+                    attn_b_smem(krow) as u32,
+                    &a_b,
+                )
+                .unwrap()
+            }));
+        }
+        println!(
+            "attn batch {nb} from 0: main {} us | cand attn_b ({ab_threads} threads) {} us",
+            med(&mut tm),
+            med(&mut tc)
+        );
+    }
+}
+
+/// `n_h` = 128 (DeepSeek V3's): 4 head groups per split in mla_attn_b.
+#[test]
+fn mla_attn_b_equals_main_128_heads() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let ml = Kernels::mla_ref_module(&g).unwrap();
+    if !ml.mma() {
+        eprintln!("SKIPPED: mla_attn_b is sm_80+");
+        return;
+    }
+    ml.function("mla_attn_b")
+        .unwrap()
+        .set_max_shared(attn_b_smem(MLA_MAX_KROW))
+        .unwrap();
+    let (n_h, krow, lat, np) = (128usize, 576usize, 512usize, 200usize);
+    let mut r = Rng(0x128);
+    let k16: Vec<u16> = (0..np * krow)
+        .map(|_| crate::quant::f32_to_f16(r.f() * 2.0))
+        .collect();
+    let kv = g.upload(&k16).unwrap();
+    let w = n_h * krow;
+    let qa: Vec<f32> = (0..np * w).map(|_| r.f()).collect();
+    for (start, nb) in [(0usize, 200usize), (120, 9)] {
+        let qd = g.upload(&qa[start * w..(start + nb) * w]).unwrap();
+        let ns = (start + nb).div_ceil(MLA_SPLIT);
+        let shape = (krow, lat, n_h);
+        let want = attn_run(
+            &g,
+            &ml,
+            true,
+            (0, false),
+            &qd,
+            &kv,
+            shape,
+            (start, nb, ns, false),
+        );
+        let got = attn_b_run(&g, &ml, &qd, &kv, shape, (start, nb, ns));
+        assert_eq!(
+            bits(&got.0),
+            bits(&want.0),
+            "128 heads, tokens {start}+{nb}"
+        );
+        assert_eq!(
+            bits(&got.1),
+            bits(&want.1),
+            "128 heads, tokens {start}+{nb} partials"
+        );
     }
 }
 
