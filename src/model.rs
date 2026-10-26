@@ -756,8 +756,6 @@ pub(crate) struct DenseNeed {
     /// (a copy hands the replaced bytes back), a tied head's left out (it
     /// is counted whole: its replaced bytes stay).
     pub growth: u64,
-    /// Layers built (the block count): `build` repacks a layer per thread.
-    pub layers: u64,
     /// KV cache bytes a position (K and V rows of every layer).
     pub kv_per_pos: u64,
 }
@@ -780,7 +778,6 @@ pub(crate) fn dense_ram_need(m: &Model, repack: bool, kv_elem: u64) -> DenseNeed
         tied,
         largest: 0,
         growth: 0,
-        layers: layers.max(0) as u64,
         kv_per_pos: (m.tensors.iter())
             .filter(ours)
             .filter(|t| t.name.ends_with(".attn_k.weight") || t.name.ends_with(".attn_v.weight"))
@@ -841,12 +838,10 @@ pub(crate) fn check_ram_dense(m: &Model, ctx: usize) -> Result<Option<String>, S
     let repack = std::env::var("AXON_REPACK").map_or(true, |v| v != "0");
     let elem = if crate::kv::use_f32() { 4 } else { 2 };
     let need = dense_ram_need(m, repack, elem);
-    let threads = crate::pool::Pool::global().threads() as u64;
     dense_verdict(
         &m.arch,
         need,
         !m.file_backed(),
-        threads,
         dense_tolerance(affinity_cpus()),
         ctx,
         crate::gguf::mem::avail(),
@@ -854,28 +849,30 @@ pub(crate) fn check_ram_dense(m: &Model, ctx: usize) -> Result<Option<String>, S
 }
 
 /// The anonymous memory a dense CPU load commits on top of what's in use
-/// when `check_ram_dense` runs. Mapped: the whole arena (the file's pages
-/// are page cache the kernel reclaims; #128). Copied: the copy is already in
-/// use, and `build` hands each repacked matrix's copied bytes back right
-/// after its repack (`Weight::load`, release). The head goes first, alone,
-/// then the layers: `par_map` cuts the k layers into chunks of
-/// ceil(k / (threads x 4)) (one layer each unless k > 4 x threads), a
-/// chunk's layers and a layer's matrices go one after another, each matrix
-/// released after its repack, so at most min(threads, layers) matrices are
-/// in flight. A tied head keeps its
-/// copied bytes (the embedding reads them). So the peak adds what the
-/// repacked forms take beyond the bytes they replace (`growth`, without the
-/// tied head's), a tied head, and the larger of an untied head's own repack
-/// and the matrices in flight (a released matrix's partial 2 MB blocks go
-/// with its neighbours'), at most the arena.
-pub(crate) fn dense_load_bytes(need: DenseNeed, copied: bool, threads: u64) -> u64 {
+/// when `check_ram_dense` runs: what every schedule of the load holds at
+/// once. Mapped: the whole arena (the file's pages are page cache the
+/// kernel reclaims; #128). Copied: the copy is already in use, and `build`
+/// hands each repacked matrix's copied bytes back right after its repack
+/// (`Weight::load`, release). The head goes first, alone; a tied head keeps
+/// its copied bytes (the embedding reads them). Then the layers, over the
+/// pool's threads (`par_map`: chunks of ceil(k / (threads x 4)) layers, a
+/// chunk's matrices one after another). How many matrices are in flight at
+/// the peak depends on the threads' timing, so only one is counted: on
+/// bella with AXON_MMAP=0 the 3B's smallest working cap grew 47 MiB from 6
+/// to 18 threads, 3.9 MiB a thread against 6 MiB a matrix (docs/log
+/// 2026-10-26-ram-dense.md), and counting them all false-refused it. So the
+/// peak counted is the growth (repacked minus replaced bytes, without a
+/// tied head's), a tied head, and the larger of an untied head and one
+/// layer matrix, at most the arena. More threads in flight is the OOM
+/// band's, not the refusal's.
+pub(crate) fn dense_load_bytes(need: DenseNeed, copied: bool) -> u64 {
     if !copied || need.arena == 0 {
         return need.arena;
     }
     let tied = if need.tied { need.head } else { 0 };
     let untied = if need.tied { 0 } else { need.head };
-    let flight = threads.min(need.layers).max(1) * need.largest;
-    need.arena.min(need.growth + tied + untied.max(flight))
+    need.arena
+        .min(need.growth + tied + untied.max(need.largest))
 }
 
 /// `check_ram_dense`'s decision (pure): Err to refuse, Ok(Some(warning))
@@ -884,7 +881,6 @@ fn dense_verdict(
     arch: &str,
     need: DenseNeed,
     copied: bool,
-    threads: u64,
     tolerance: u64,
     ctx: usize,
     avail: Option<crate::gguf::mem::Avail>,
@@ -892,7 +888,7 @@ fn dense_verdict(
     let Some(avail) = avail else {
         return Ok(None);
     };
-    let load = dense_load_bytes(need, copied, threads);
+    let load = dense_load_bytes(need, copied);
     let floor = ctx.min(crate::DEFAULT_CHAT_CTX);
     let kv = need.kv_per_pos * floor as u64;
     let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
@@ -6064,15 +6060,15 @@ mod ram_dense_tests {
         };
         let want = need.arena + need.kv_per_pos * 1000;
         assert_eq!(
-            dense_verdict("qwen3", need, false, 8, TOL, 1000, host(want)),
+            dense_verdict("qwen3", need, false, TOL, 1000, host(want)),
             Ok(None)
         );
         assert_eq!(
-            dense_verdict("qwen3", need, false, 8, TOL, 1000, None),
+            dense_verdict("qwen3", need, false, TOL, 1000, None),
             Ok(None)
         );
         assert_eq!(
-            dense_verdict("qwen3", need, false, 8, TOL, 1000, host(want - TOL)),
+            dense_verdict("qwen3", need, false, TOL, 1000, host(want - TOL)),
             Ok(None),
             "within the tolerance"
         );
@@ -6084,7 +6080,7 @@ mod ram_dense_tests {
                 v1: false,
             },
         };
-        let e = dense_verdict("qwen3", need, false, 8, TOL, 1000, Some(cg)).unwrap_err();
+        let e = dense_verdict("qwen3", need, false, TOL, 1000, Some(cg)).unwrap_err();
         for s in [
             "qwen3: the CPU model needs about",
             "GiB of RAM (its repacked weights",
@@ -6108,7 +6104,6 @@ mod ram_dense_tests {
         tied: false,
         largest: 56 * MIB,
         growth: 47 * MIB,
-        layers: 32,
         kv_per_pos: 128 << 10,
     };
 
@@ -6119,7 +6114,7 @@ mod ram_dense_tests {
     /// not fitting is refused.
     #[test]
     fn long_ctx_warns_not_refuses() {
-        let w = dense_verdict("llama", L8, false, 24, TOL, 131072, host(6 * GIB))
+        let w = dense_verdict("llama", L8, false, TOL, 131072, host(6 * GIB))
             .expect("refused a load whose weights and floor KV fit");
         let w = w.expect("no warning for a 16 GiB cache beside 6 GiB");
         assert!(
@@ -6128,55 +6123,49 @@ mod ram_dense_tests {
         );
         // Short enough to fit whole: no warning.
         assert_eq!(
-            dense_verdict("llama", L8, false, 24, TOL, 4096, host(6 * GIB)),
+            dense_verdict("llama", L8, false, TOL, 4096, host(6 * GIB)),
             Ok(None)
         );
         // The weights and the floor don't fit: refused.
-        let e = dense_verdict("llama", L8, false, 24, TOL, 131072, host(5 * GIB)).unwrap_err();
+        let e = dense_verdict("llama", L8, false, TOL, 131072, host(5 * GIB)).unwrap_err();
         assert!(e.contains("the KV cache of 8192 tokens 1.00 GiB"), "{e}");
     }
 
-    /// #142 review MUST 2: a copied model is already in use at the check, and
-    /// each repacked matrix's copied bytes go back after its repack: the copy
-    /// commits the growth, a tied head, and the larger of an untied head and
-    /// the matrices in flight (a pool thread each), at most the arena; the
-    /// mapping commits the whole arena.
+    /// #142 review MUST 2, round 3: a copied model is already in use at the
+    /// check, and each repacked matrix's copied bytes go back after its
+    /// repack: the copy commits the growth, a tied head, and the larger of an
+    /// untied head and one layer matrix (more in flight depends on the
+    /// threads' timing), at most the arena; the mapping commits the arena.
     #[test]
-    fn copied_load_commits_the_matrices_in_flight() {
-        assert_eq!(dense_load_bytes(L8, false, 24), 4710 * MIB);
-        assert_eq!(dense_load_bytes(L8, true, 24), (47 + 24 * 56) * MIB);
+    fn copied_load_commits_what_every_schedule_holds() {
+        assert_eq!(dense_load_bytes(L8, false), 4710 * MIB);
         assert_eq!(
-            dense_load_bytes(L8, true, 4),
+            dense_load_bytes(L8, true),
             (47 + 500) * MIB,
             "the head's own repack"
         );
         let tied = DenseNeed { tied: true, ..L8 };
-        assert_eq!(dense_load_bytes(tied, true, 4), (47 + 500 + 4 * 56) * MIB);
-        assert_eq!(
-            dense_load_bytes(L8, true, 1000),
-            (47 + 32 * 56) * MIB,
-            "a layer per thread: 32 in flight"
-        );
-        let big = DenseNeed {
-            largest: 160 * MIB,
+        assert_eq!(dense_load_bytes(tied, true), (47 + 500 + 56) * MIB);
+        let small = DenseNeed {
+            arena: 300 * MIB,
             ..L8
         };
         assert_eq!(
-            dense_load_bytes(big, true, 1000),
-            4710 * MIB,
+            dense_load_bytes(small, true),
+            300 * MIB,
             "at most the arena"
         );
         let none = DenseNeed { arena: 0, ..L8 };
         assert_eq!(
-            dense_load_bytes(none, true, 24),
+            dense_load_bytes(none, true),
             0,
             "reads in place: nothing repacked"
         );
         // A copy the arena wouldn't fit beside, but its repack does.
-        assert!(dense_verdict("llama", L8, true, 24, TOL, 16, host(2 * GIB)).is_ok());
-        assert!(dense_verdict("llama", L8, false, 24, TOL, 16, host(2 * GIB)).is_err());
-        let e = dense_verdict("llama", L8, true, 24, TOL, 16, host(GIB)).unwrap_err();
-        assert!(e.contains("(repacking the copy 1.36 GiB"), "{e}");
+        assert!(dense_verdict("llama", L8, true, TOL, 16, host(GIB)).is_ok());
+        assert!(dense_verdict("llama", L8, false, TOL, 16, host(GIB)).is_err());
+        let e = dense_verdict("llama", L8, true, TOL, 16, host(256 * MIB)).unwrap_err();
+        assert!(e.contains("(repacking the copy 0.53 GiB"), "{e}");
     }
 
     /// The real models' growth and head: the head is the tied embedding
@@ -6190,29 +6179,25 @@ mod ram_dense_tests {
         assert_eq!(dense_ram_need(&m, false, 2).head, 0);
     }
 
-    /// #142 round 2: a many-core host doesn't inflate the copy estimate:
-    /// qwen2.5-3B-like (36 layers, a 1.9 GiB arena, a 243 MiB tied head,
-    /// 18 MiB FFN matrices) at 192 pool threads counts 36 layers in flight,
-    /// as at 36 threads; at 6 threads (the calibration's), 6.
+    /// #142 round 2/3: the copy estimate doesn't grow with the pool: a
+    /// qwen2.5-3B-like copy (36 layers, a 243 MiB tied head, 18 MiB FFN
+    /// matrices) commits the head and one matrix at any thread count (192
+    /// threads included).
     #[test]
-    fn copy_estimate_bounded_by_layers() {
+    fn copy_estimate_independent_of_threads() {
         let q3b = DenseNeed {
             arena: 1960 * MIB,
             head: 243 * MIB,
             tied: true,
             largest: 18 * MIB,
             growth: 0,
-            layers: 36,
             kv_per_pos: 36 << 10,
         };
-        let at = |threads| dense_load_bytes(q3b, true, threads);
-        assert_eq!(at(192), (243 + 36 * 18) * MIB);
-        assert_eq!(at(192), at(36));
-        assert_eq!(at(6), (243 + 6 * 18) * MIB);
-        assert!(at(192) < q3b.arena);
+        assert_eq!(dense_load_bytes(q3b, true), (243 + 18) * MIB);
         // The tolerance grows with the CPUs (charge batches): 192 CPUs, 80 MiB.
         assert_eq!(dense_tolerance(192), 80 * MIB);
         assert_eq!(dense_tolerance(24), 38 * MIB);
+        assert_eq!(dense_tolerance(8), 34 * MIB);
     }
 
     /// The CPU count behind the tolerance is the affinity mask's.
