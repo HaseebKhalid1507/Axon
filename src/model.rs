@@ -689,14 +689,30 @@ const DENSE_MATS: [&str; 7] = [
 ];
 
 /// How far below the committed bytes the RAM available may be before a
-/// dense CPU load is refused. The check reads the cgroup's (or host's) use
-/// at one moment, before the load; some of what's in use then is given back
-/// before the load's peak. Measured on bella (docs/log
-/// 2026-10-26-ram-dense.md): at the smallest MemoryMax a 9-token `gen`
-/// survives, the estimate exceeded the figure read by up to ~30 MiB with
-/// AXON_MMAP=0 (and fell short of it by 10-20 MiB mapped). Within this
-/// tolerance a load isn't refused: it may then still be OOM-killed.
+/// dense CPU load is refused, before the per-CPU part (`dense_tolerance`).
+/// The check reads the cgroup's (or host's) use at one moment, before the
+/// load, and some of what's in use then is given back before the load's
+/// peak. Measured on bella (6 pool threads, cgroup v2; docs/log
+/// 2026-10-26-ram-dense.md, job 1025-234700-f438): at the smallest
+/// MemoryMax a 9-token `gen` survives with AXON_MMAP=0, the estimate
+/// exceeded the figure read by up to ~25 MiB (the 3B); mapped, it fell
+/// short of it by 10-20 MiB. Within the tolerance a load isn't refused: it
+/// may then still be OOM-killed.
 const DENSE_CHECK_TOLERANCE: u64 = 32 << 20;
+
+/// A memory cgroup's per-CPU charge batch (the kernel's MEMCG_CHARGE_BATCH,
+/// 64 pages of 4 KiB): every CPU the process runs on can hold this much
+/// charged to the cgroup and not yet used, in `memory.current` (v2) and
+/// `memory.usage_in_bytes` (v1) alike, so the figure read can be off by up
+/// to a batch per CPU.
+const MEMCG_BATCH: u64 = 64 * 4096;
+
+/// `DENSE_CHECK_TOLERANCE` plus a charge batch for each of the `cpus` the
+/// process may run on (`MEMCG_BATCH`): 6 MiB more on a 24-CPU laptop,
+/// 48 MiB on a 192-CPU host, where the batches alone could eat a fixed 32.
+pub(crate) fn dense_tolerance(cpus: u64) -> u64 {
+    DENSE_CHECK_TOLERANCE + cpus * MEMCG_BATCH
+}
 
 /// What a dense model on the CPU (`Qwen2::new`) takes in anonymous memory
 /// beyond the file (`check_ram_dense`).
@@ -713,8 +729,11 @@ pub(crate) struct DenseNeed {
     /// The largest layer matrix's share.
     pub largest: u64,
     /// What the repacked forms take beyond the bytes they replace, summed
-    /// (a copy hands the replaced bytes back).
+    /// (a copy hands the replaced bytes back), a tied head's left out (it
+    /// is counted whole: its replaced bytes stay).
     pub growth: u64,
+    /// Layers built (the block count): `build` repacks a layer per thread.
+    pub layers: u64,
     /// KV cache bytes a position (K and V rows of every layer).
     pub kv_per_pos: u64,
 }
@@ -737,6 +756,7 @@ pub(crate) fn dense_ram_need(m: &Model, repack: bool, kv_elem: u64) -> DenseNeed
         tied,
         largest: 0,
         growth: 0,
+        layers: layers.max(0) as u64,
         kv_per_pos: (m.tensors.iter())
             .filter(ours)
             .filter(|t| t.name.ends_with(".attn_k.weight") || t.name.ends_with(".attn_v.weight"))
@@ -761,7 +781,9 @@ pub(crate) fn dense_ram_need(m: &Model, repack: bool, kv_elem: u64) -> DenseNeed
             true => need.head = len,
             false => need.largest = need.largest.max(len),
         }
-        need.growth += len.saturating_sub(t.n_bytes);
+        if !(head && tied) {
+            need.growth += len.saturating_sub(t.n_bytes);
+        }
     }
     need.arena = need.arena.next_multiple_of(2 << 20);
     need
@@ -779,8 +801,9 @@ pub(crate) fn dense_ram_need(m: &Model, repack: bool, kv_elem: u64) -> DenseNeed
 /// refused: the CPU's KV cache is a lazy mapping, its pages taken as the
 /// context fills (a run that never fills it never needs them), so the full
 /// cache not fitting is a warning (returned), not a refusal. No headroom on
-/// top, and a small tolerance below (`DENSE_CHECK_TOLERANCE`): the weights' part is memory the load touches, so a load that fits
-/// has it free at the check; the forward pass's scratch (tens of MB) isn't
+/// top, and a small tolerance below (`dense_tolerance`): the weights' part
+/// is memory the load touches, so a load that fits has about that much free
+/// at the check; the forward pass's scratch (tens of MB) isn't
 /// counted, so a limit within that of the weights is still an OOM kill,
 /// not a refusal (measured: docs/log/2026-10-26-ram-dense.md). MoE's check
 /// keeps its 1.5 GiB headroom: its estimate leaves out parts this one counts
@@ -790,11 +813,13 @@ pub(crate) fn check_ram_dense(m: &Model, ctx: usize) -> Result<Option<String>, S
     let elem = if crate::kv::use_f32() { 4 } else { 2 };
     let need = dense_ram_need(m, repack, elem);
     let threads = crate::pool::Pool::global().threads() as u64;
+    let cpus = std::thread::available_parallelism().map_or(1, |n| n.get()) as u64;
     dense_verdict(
         &m.arch,
         need,
         !m.file_backed(),
         threads,
+        dense_tolerance(cpus),
         ctx,
         crate::gguf::mem::avail(),
     )
@@ -805,19 +830,22 @@ pub(crate) fn check_ram_dense(m: &Model, ctx: usize) -> Result<Option<String>, S
 /// are page cache the kernel reclaims; #128). Copied: the copy is already in
 /// use, and `build` hands each repacked matrix's copied bytes back right
 /// after its repack (`Weight::load`, release). The head goes first, alone,
-/// then the layers, a matrix per pool thread at a time; a tied head keeps
-/// its copied bytes (the embedding reads them). So the peak adds what the
-/// repacked forms take beyond the bytes they replace (`growth`), a tied
-/// head, and the larger of an untied head's own repack and the matrices in
-/// flight (a released matrix's partial 2 MB blocks go with its
-/// neighbours'), at most the arena.
+/// then the layers: `par_map` gives each pool thread a layer (`per_token`'s
+/// chunk is one layer: k layers over threads x 4 chunks), and a layer's
+/// matrices go one after another, each released after its repack, so at
+/// most min(threads, layers) matrices are in flight. A tied head keeps its
+/// copied bytes (the embedding reads them). So the peak adds what the
+/// repacked forms take beyond the bytes they replace (`growth`, without the
+/// tied head's), a tied head, and the larger of an untied head's own repack
+/// and the matrices in flight (a released matrix's partial 2 MB blocks go
+/// with its neighbours'), at most the arena.
 pub(crate) fn dense_load_bytes(need: DenseNeed, copied: bool, threads: u64) -> u64 {
     if !copied || need.arena == 0 {
         return need.arena;
     }
     let tied = if need.tied { need.head } else { 0 };
     let untied = if need.tied { 0 } else { need.head };
-    let flight = threads.max(1) * need.largest;
+    let flight = threads.min(need.layers).max(1) * need.largest;
     need.arena.min(need.growth + tied + untied.max(flight))
 }
 
@@ -828,6 +856,7 @@ fn dense_verdict(
     need: DenseNeed,
     copied: bool,
     threads: u64,
+    tolerance: u64,
     ctx: usize,
     avail: Option<crate::gguf::mem::Avail>,
 ) -> Result<Option<String>, String> {
@@ -838,7 +867,7 @@ fn dense_verdict(
     let floor = ctx.min(crate::DEFAULT_CHAT_CTX);
     let kv = need.kv_per_pos * floor as u64;
     let gib = |b: u64| b as f64 / (1u64 << 30) as f64;
-    if avail.bytes + DENSE_CHECK_TOLERANCE < load + kv {
+    if avail.bytes + tolerance < load + kv {
         return Err(format!(
             "{arch}: the CPU model needs about {:.2} GiB of RAM ({} {:.2} GiB, the KV cache of \
              {floor} tokens {:.2} GiB) and only {:.2} GiB is available (bound by {avail})",
@@ -854,12 +883,13 @@ fn dense_verdict(
     }
     let full = need.kv_per_pos * ctx as u64;
     Ok((ctx > floor && avail.bytes < load + full).then(|| {
+        // Worded as serve's `ram_note`.
         format!(
-            "note: a full {ctx}-token KV cache takes {:.2} GiB and {:.2} GiB of RAM is free \
-             beside the weights (bound by {avail}): the run is OOM-killed if its context fills \
-             (a smaller --ctx avoids it)",
+            "note: a KV cache of {ctx} tokens takes {:.1} GiB, {:.1} GiB of RAM is free beside \
+             the model (bound by {avail}): the run is OOM-killed if its context fills (--ctx N \
+             for another)",
             gib(full),
-            gib(avail.bytes - load)
+            gib(avail.bytes.saturating_sub(load))
         )
     }))
 }
@@ -5932,6 +5962,8 @@ mod ram_dense_tests {
 
     const GIB: u64 = 1 << 30;
     const MIB: u64 = 1 << 20;
+    /// bella's: 32 MiB + 24 CPUs' charge batches.
+    const TOL: u64 = DENSE_CHECK_TOLERANCE + 24 * MEMCG_BATCH;
 
     /// The estimate's arena is the arena `Qwen2::new` makes (2 MB pages),
     /// on the fixtures and on the test models (0.5B: Q5_0/Q8_0 r8q and Q6_K
@@ -6002,31 +6034,27 @@ mod ram_dense_tests {
         };
         let want = need.arena + need.kv_per_pos * 1000;
         assert_eq!(
-            dense_verdict("qwen3", need, false, 8, 1000, host(want)),
+            dense_verdict("qwen3", need, false, 8, TOL, 1000, host(want)),
             Ok(None)
         );
-        assert_eq!(dense_verdict("qwen3", need, false, 8, 1000, None), Ok(None));
         assert_eq!(
-            dense_verdict(
-                "qwen3",
-                need,
-                false,
-                8,
-                1000,
-                host(want - DENSE_CHECK_TOLERANCE)
-            ),
+            dense_verdict("qwen3", need, false, 8, TOL, 1000, None),
+            Ok(None)
+        );
+        assert_eq!(
+            dense_verdict("qwen3", need, false, 8, TOL, 1000, host(want - TOL)),
             Ok(None),
             "within the tolerance"
         );
         let cg = Avail {
-            bytes: want - DENSE_CHECK_TOLERANCE - 1,
+            bytes: want - TOL - 1,
             bound: Bound::Cgroup {
                 path: "/app.slice/job.scope".into(),
                 limit: 400 << 20,
                 v1: false,
             },
         };
-        let e = dense_verdict("qwen3", need, false, 8, 1000, Some(cg)).unwrap_err();
+        let e = dense_verdict("qwen3", need, false, 8, TOL, 1000, Some(cg)).unwrap_err();
         for s in [
             "qwen3: the CPU model needs about",
             "GiB of RAM (its repacked weights",
@@ -6048,6 +6076,7 @@ mod ram_dense_tests {
         tied: false,
         largest: 56 * MIB,
         growth: 47 * MIB,
+        layers: 32,
         kv_per_pos: 128 << 10,
     };
 
@@ -6058,20 +6087,20 @@ mod ram_dense_tests {
     /// not fitting is refused.
     #[test]
     fn long_ctx_warns_not_refuses() {
-        let w = dense_verdict("llama", L8, false, 24, 131072, host(6 * GIB))
+        let w = dense_verdict("llama", L8, false, 24, TOL, 131072, host(6 * GIB))
             .expect("refused a load whose weights and floor KV fit");
         let w = w.expect("no warning for a 16 GiB cache beside 6 GiB");
         assert!(
-            w.contains("a full 131072-token KV cache takes 16.00 GiB"),
+            w.contains("a KV cache of 131072 tokens takes 16.0 GiB, 1.4 GiB of RAM"),
             "{w}"
         );
         // Short enough to fit whole: no warning.
         assert_eq!(
-            dense_verdict("llama", L8, false, 24, 4096, host(6 * GIB)),
+            dense_verdict("llama", L8, false, 24, TOL, 4096, host(6 * GIB)),
             Ok(None)
         );
         // The weights and the floor don't fit: refused.
-        let e = dense_verdict("llama", L8, false, 24, 131072, host(5 * GIB)).unwrap_err();
+        let e = dense_verdict("llama", L8, false, 24, TOL, 131072, host(5 * GIB)).unwrap_err();
         assert!(e.contains("the KV cache of 8192 tokens 1.00 GiB"), "{e}");
     }
 
@@ -6093,6 +6122,15 @@ mod ram_dense_tests {
         assert_eq!(dense_load_bytes(tied, true, 4), (47 + 500 + 4 * 56) * MIB);
         assert_eq!(
             dense_load_bytes(L8, true, 1000),
+            (47 + 32 * 56) * MIB,
+            "a layer per thread: 32 in flight"
+        );
+        let big = DenseNeed {
+            largest: 160 * MIB,
+            ..L8
+        };
+        assert_eq!(
+            dense_load_bytes(big, true, 1000),
             4710 * MIB,
             "at most the arena"
         );
@@ -6103,9 +6141,9 @@ mod ram_dense_tests {
             "reads in place: nothing repacked"
         );
         // A copy the arena wouldn't fit beside, but its repack does.
-        assert!(dense_verdict("llama", L8, true, 24, 16, host(2 * GIB)).is_ok());
-        assert!(dense_verdict("llama", L8, false, 24, 16, host(2 * GIB)).is_err());
-        let e = dense_verdict("llama", L8, true, 24, 16, host(GIB)).unwrap_err();
+        assert!(dense_verdict("llama", L8, true, 24, TOL, 16, host(2 * GIB)).is_ok());
+        assert!(dense_verdict("llama", L8, false, 24, TOL, 16, host(2 * GIB)).is_err());
+        let e = dense_verdict("llama", L8, true, 24, TOL, 16, host(GIB)).unwrap_err();
         assert!(e.contains("(repacking the copy 1.36 GiB"), "{e}");
     }
 
@@ -6118,5 +6156,30 @@ mod ram_dense_tests {
         assert_eq!(n.tied, find_opt(&m, "output.weight").is_none());
         assert!(n.head > 0 && n.growth <= n.arena && n.largest <= n.arena);
         assert_eq!(dense_ram_need(&m, false, 2).head, 0);
+    }
+
+    /// #142 round 2: a many-core host doesn't inflate the copy estimate:
+    /// qwen2.5-3B-like (36 layers, a 1.9 GiB arena, a 243 MiB tied head,
+    /// 18 MiB FFN matrices) at 192 pool threads counts 36 layers in flight,
+    /// as at 36 threads; at 6 threads (the calibration's), 6.
+    #[test]
+    fn copy_estimate_bounded_by_layers() {
+        let q3b = DenseNeed {
+            arena: 1960 * MIB,
+            head: 243 * MIB,
+            tied: true,
+            largest: 18 * MIB,
+            growth: 0,
+            layers: 36,
+            kv_per_pos: 36 << 10,
+        };
+        let at = |threads| dense_load_bytes(q3b, true, threads);
+        assert_eq!(at(192), (243 + 36 * 18) * MIB);
+        assert_eq!(at(192), at(36));
+        assert_eq!(at(6), (243 + 6 * 18) * MIB);
+        assert!(at(192) < q3b.arena);
+        // The tolerance grows with the CPUs (charge batches): 192 CPUs, 80 MiB.
+        assert_eq!(dense_tolerance(192), 80 * MIB);
+        assert_eq!(dense_tolerance(24), 38 * MIB);
     }
 }
