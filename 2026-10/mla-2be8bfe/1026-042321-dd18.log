@@ -1,0 +1,29 @@
+[axon-run 04:23:21] submitted 1026-042321-dd18 by /home/haseeb/.cache/axon-wt-mla: /home/haseeb/.cache/axon-mla/axon-test-2be8bfe cuda::qwen2::mla:: --test-threads 1
+[axon-run 04:25:50] job 1026-042321-dd18 -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 2500 --env AXON_NODE_PACK=1 --src /home/haseeb/.cache/axon-wt-mla /home/haseeb/.cache/axon-mla/axon-test-2be8bfe cuda::qwen2::mla:: --test-threads 1
+axon-remote: uploading axon-test-2be8bfe (7b800448c9eef44057e7cb6d) + source of /home/haseeb/.cache/axon-wt-mla
+
+sent 2,017,197 bytes  received 5,292 bytes  1,348,326.00 bytes/sec
+total size is 7,100,004  speedup is 3.51
+
+sent 6,949,926 bytes  received 35 bytes  13,899,922.00 bytes/sec
+total size is 21,743,016  speedup is 3.13
+axon-remote: job 20261026-042553-axon-test-2be8bfe-197348 on avante (GPU, 2500 MB)
+[axon-node 04:25:53] GPU slot taken; job wants 2500 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 62
+[axon-node 04:25:53] run axon-test-2be8bfe (7b800448c9eef44057e7cb6d) as /home/haseeb/.cache/axon-wt-mla on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 8 tests
+test cuda::qwen2::mla::tests::attn_blocks_cover_the_hpb_rule ... ok
+test cuda::qwen2::mla::tests::mla_attn_equals_main ... testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+test cuda::qwen2::mla::tests::mla_attn_matches_reference_and_batch ... ok
+test cuda::qwen2::mla::tests::mla_decode_kernel_bench ... ignored
+test cuda::qwen2::mla::tests::mla_heads_mv_equals_main ... ok
+test cuda::qwen2::mla::tests::mla_heads_mv_matches_dequant ... ok
+test cuda::qwen2::mla::tests::mla_kernels_compile_for_archs ... ok
+test cuda::qwen2::mla::tests::mla_router_matches_cpu_rule ... ok
+
+test result: ok. 7 passed; 0 failed; 1 ignored; 0 measured; 744 filtered out; finished in 30.90s
+
+[axon-node 04:26:24] exit 0 after 31.0s
+[axon-node 04:26:24] peak RSS 774 MB (job process tree PSS, 2 s samples x15)
+[axon-run 04:26:24] exit 0 after 34.0s (host avante)

@@ -1,0 +1,25 @@
+[axon-run 04:23:22] submitted 1026-042322-ef23 by /home/haseeb/.cache/axon-wt-mla: /home/haseeb/.cache/axon-mla/md5both.sh 2be8bfe
+[axon-run 04:39:46] scope axon-job-1026-042322-ef23-1793003986.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 16000 MB): an OOM here kills only this job
+[axon-run 04:39:46] job 1026-042322-ef23 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-042322-ef23-1793003986 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-mla/md5both.sh 2be8bfe
+axon-q 04:39:47 start slot 16-23: /home/haseeb/.cache/axon-mla/md5both.sh 2be8bfe
+moe:         attention + router on the GPU (0.92 GiB, ctx 70), 64 experts x 0 layers on the CPU (top-6); 26 of 26 expert layers resident on the GPU (8.87 GiB), kv f16
+12 of 12 base/cand pairs identical; 0 nonzero rc; cand 0 vs auto differ on: none
+MD5ML PASS
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 615.78.08
+base	cross450	g0	fc84f745e78e	rc=0	prompt eval: 451 tok
+base	cross450	gauto	fc84f745e78e	rc=0	prompt eval: 451 tok
+cand	cross450	g0	fc84f745e78e	rc=0	prompt eval: 451 tok
+cand	cross450	gauto	fc84f745e78e	rc=0	prompt eval: 451 tok
+base	cross450-draft7	g0	a33ecbcc7f38	rc=0	prompt eval: 449 tok
+base	cross450-draft7	gauto	a33ecbcc7f38	rc=0	prompt eval: 449 tok
+cand	cross450-draft7	g0	a33ecbcc7f38	rc=0	prompt eval: 449 tok
+cand	cross450-draft7	gauto	a33ecbcc7f38	rc=0	prompt eval: 449 tok
+base	cross480	g0	559b1ba6abed	rc=0	prompt eval: 487 tok
+base	cross480	gauto	559b1ba6abed	rc=0	prompt eval: 487 tok
+cand	cross480	g0	559b1ba6abed	rc=0	prompt eval: 487 tok
+cand	cross480	gauto	559b1ba6abed	rc=0	prompt eval: 487 tok
+serve exited rc 2
+gen: 6 of 6 base/cand pairs identical; 0 nonzero rc
+MD5ML512 FAIL (gen rc 0, serve rc 1)
+md5ml rc=0 md5ml512 rc=1
+[axon-run 04:43:45] exit 1 after 238.8s (host bella)
