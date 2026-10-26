@@ -132,7 +132,13 @@ H100's int8 pipe; MEASURED + ESTIMATED), the nb = 128 decode step 3.3× slower (
 DRAM floor; q/wo/down launch 56 CTAs and k/v 8 CTAs on 132 SMs, CODE), and ~25 % of wall time that is neither kernel
 (two GPU passes per step, a 60 ms chunk budget, two concurrent prefills, FIFO admission; ESTIMATED). Its blame split
 (OPINION): kernel ≈ 65 %, scheduler ≈ 25 %, quant format ≈ 10 % (unmeasured on Hopper). Nothing was profiled on the
-pod, so item 1 starts by measuring.
+pod, so item 1 starts by measuring. **Item 1(a) was measured on 10-26** ([log](log/2026-10-26-h100-anatomy-results.md)). In short:
+- the exactness contract is cleared on Hopper (exact / no drain 0.94–1.00);
+- the no-drain GEMM is 119 TMAC/s < 180, so item 2 starts with the kernel structure, and M6 split-K goes first
+  (the narrow products are 6.3 ms of the nb 128 step);
+- attention is 57 % of the nb 128 step at depth 4,096;
+- serve host work is 1.2 %, not ~25 %: the scheduler cost is inside the passes;
+- #119 as configured halves ITL but costs TTFT and goodput at C = 128.
 
 **The order below is the review's ranking, adopted here as a proposal; Haseeb decides.** Costs and gains are the
 review's ESTIMATES; the kill rules are written before building, as for every round.
