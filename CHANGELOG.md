@@ -97,6 +97,10 @@ The first version: everything merged to `main` from the start of the project (20
   `/v1/responses` and the ollama API (#70); gpt-oss tool calling via harmony (#111).
 - Fixes: metrics counted before the response is written (#93); a request leaves in-flight before its client has
   the response (#113).
+- **Behaviour change (#141):** an explicit `--parallel N` that doesn't fit in GPU memory at start now exits 2 with
+  the numbers (it used to start with fewer slots, one request at a time at worst, said only with logging on). A
+  supervisor that restarts on exit will keep exiting until `--parallel`, `--ctx` or `--kv` changes; leave
+  `--parallel` out for the automatic sizing, which still falls back (and now says so, also under `--quiet`).
 
 ### Hardening, tests and CI
 - Fuzz-found fixes for GGUF, tokenizer, serve and CLI (#37); soak harness and model-zoo sweep (#83).
