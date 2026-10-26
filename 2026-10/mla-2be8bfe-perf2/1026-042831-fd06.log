@@ -1,0 +1,41 @@
+[axon-run 04:28:31] submitted 1026-042831-fd06 by /home/haseeb/.cache/axon-wt-mla: /home/haseeb/.cache/axon-mla/perf2.sh /home/haseeb/.cache/axon-mla/axon-base-be13f1f /home/haseeb/.cache/axon-mla/axon-2be8bfe 3
+[axon-run 05:40:36] scope axon-job-1026-042831-fd06-1793007636.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 16000 MB): an OOM here kills only this job
+[axon-run 05:40:36] job 1026-042831-fd06 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-042831-fd06-1793007636 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-mla/perf2.sh /home/haseeb/.cache/axon-mla/axon-base-be13f1f /home/haseeb/.cache/axon-mla/axon-2be8bfe 3
+PERF out /home/haseeb/.cache/axon-mla/perf2-1026-054036
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 615.78.08, 55
+resident 25 of 26 -> llama.cpp -ncmoe 1
+R	1	axon-base	short	tg128	115.15	prompt	6	26480dfcb01a	05:40:44
+R	1	axon-cand	short	tg128	142.77	prompt	6	26480dfcb01a	05:40:52
+R	1	llama-t8	short	tg128	159.87	depth	0		05:41:00
+[axon-run 05:41:08] FOREIGN_GPU sample max=23% mean=8.8% n=6 (kitty 99200 10%)
+R	1	axon-base	long	tg128	114.94	prompt	2101	12c43b2c73c3	05:41:09
+R	1	axon-cand	long	tg128	138.79	prompt	2101	12c43b2c73c3	05:41:18
+R	1	llama-t8	long	tg128	163.76	depth	2048		05:41:26
+R	2	axon-cand	short	tg128	147.16	prompt	6	26480dfcb01a	05:41:34
+[axon-run 05:41:40] FOREIGN_GPU sample max=18% mean=9.0% n=6 (kitty 1945559 4%, kitty 99200 2%)
+R	2	llama-t8	short	tg128	172.87	depth	0		05:41:41
+R	2	axon-base	short	tg128	119.05	prompt	6	26480dfcb01a	05:41:49
+R	2	axon-cand	long	tg128	135.32	prompt	2101	12c43b2c73c3	05:41:58
+R	2	llama-t8	long	tg128	163.18	depth	2048		05:42:06
+[axon-run 05:42:12] FOREIGN_GPU sample max=23% mean=10.8% n=6 (Xorg 1601 6%, kitty 1945559 3%)
+R	2	axon-base	long	tg128	115.24	prompt	2101	12c43b2c73c3	05:42:16
+R	3	llama-t8	short	tg128	169.30	depth	0		05:42:23
+R	3	axon-base	short	tg128	114.97	prompt	6	26480dfcb01a	05:42:31
+R	3	axon-cand	short	tg128	143.74	prompt	6	26480dfcb01a	05:42:39
+[axon-run 05:42:43] FOREIGN_GPU sample max=28% mean=10.0% n=6 (kitty 1945559 2%, kitty 99200 2%)
+R	3	llama-t8	long	tg128	163.81	depth	2048		05:42:47
+R	3	axon-base	long	tg128	114.32	prompt	2101	12c43b2c73c3	05:42:56
+R	3	axon-cand	long	tg128	137.40	prompt	2101	12c43b2c73c3	05:43:05
+TRACE base decode 113.26 tok/s under trace
+window 1120.786 ms, 84456 kernels, busy 995.315 ms (88.8 %), idle 125.471 ms; steps 128
+per step: span 8.756 ms, busy 7.776 ms, kernels 659.8
+[axon-run 05:43:14] FOREIGN_GPU sample max=32% mean=14.5% n=6 (kitty 1945559 16%, Xorg 1601 2%)
+TRACE cand decode 137.18 tok/s under trace
+window 925.219 ms, 84456 kernels, busy 800.500 ms (86.5 %), idle 124.718 ms; steps 128
+per step: span 7.228 ms, busy 6.254 ms, kernels 659.8
+TRACE cross: prompt 451 tokens, decode 141.35 tok/s under trace
+CROSS steps 126: median 7.079 ms; longest 7.812 ms at step 96 (position 547); steps at positions 510..514: [7.338, 6.858, 7.649, 6.89, 7.335]
+CAPTURE one-time cost at the crossing ~ 0.73 ms; the first decode step (the first set's capture) 6.922 ms
+PERF DONE /home/haseeb/.cache/axon-mla/perf2-1026-054036
+[axon-run 05:43:20] exit 0 after 163.5s (host bella)
+[axon-run 05:43:20] FOREIGN_GPU max=32% mean=10.6% samples=30 top: Xorg 1601 24%, kitty 99200 5%, kitty 1945559 3%  TAINTED (mean > 5% or max > 25%): timing numbers not trustworthy, rerun
