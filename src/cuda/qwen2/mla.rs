@@ -71,6 +71,26 @@ const MLA_MV_ROWS: usize = 32;
 /// and v_b (288: 16).
 const MLA_MV_BYTES: usize = 4608;
 
+/// mla.cu MLA_MM_R, MLA_MM_T, MLA_MM_SC: mla_heads_mm's rows and tokens
+/// per block and permuted columns per stage.
+const MLA_MM_R: usize = 64;
+const MLA_MM_T: usize = 32;
+const MLA_MM_SC: usize = 64;
+/// Batches of at least this many tokens take mla_heads_mm (the same bits
+/// as mla_heads_mv; faster once its 32-token tiles fill). Not part of the
+/// bits.
+const MLA_MM_MIN_NB: usize = 16;
+
+/// Whether a product of rph rows per head over cols inputs for nb tokens
+/// runs as mla_heads_mm: a batch, whole 32-column chains that fit a stage,
+/// and blocks of MLA_MM_R rows within a head.
+fn mm_fits(nb: usize, rph: usize, cols: usize) -> bool {
+    nb >= MLA_MM_MIN_NB
+        && cols.is_multiple_of(32)
+        && cols / 32 <= MLA_MM_SC
+        && rph.is_multiple_of(MLA_MM_R)
+}
+
 /// mla.cu mla_tab_n: scale-table floats per row of qt over cols values.
 fn mv_tab_n(qt: u32, cols: usize) -> usize {
     use crate::quant::{Q4_K, Q5_0, Q6_K, Q8_0};
@@ -354,6 +374,7 @@ pub(crate) struct MlaFns<'m> {
     kv_store: Func<'m>,
     qrope: Func<'m>,
     heads_mv: Func<'m>,
+    heads_mm: Func<'m>,
     attn: Func<'m>,
     attn_cmb: Func<'m>,
     route: Func<'m>,
@@ -379,6 +400,7 @@ impl<'m> MlaFns<'m> {
             kv_store: mla.function("mla_kv_store")?,
             qrope: mla.function("mla_qrope")?,
             heads_mv,
+            heads_mm: mla.function("mla_heads_mm")?,
             attn,
             attn_cmb: mla.function("mla_attn_cmb")?,
             route: mla.function("moe_router")?,
@@ -783,6 +805,33 @@ impl<'g> CudaQwen2<'g> {
             )?;
             // The absorbed queries: Wk_b[h] q_nope_h.
             let heads = |mt: &Mat, rph: usize, xin: Arg, xs: usize, out: Arg, os: usize| {
+                if mm_fits(nb, rph, mt.cols) {
+                    return g.launch(
+                        &mf.heads_mm,
+                        (
+                            (nh * rph / MLA_MM_R) as u32,
+                            nb.div_ceil(MLA_MM_T) as u32,
+                            1,
+                        ),
+                        (256, 1, 1),
+                        0,
+                        &[
+                            Arg::I32(mt.qt as i32),
+                            w(mt),
+                            Arg::U64(mt.rb as u64),
+                            Arg::I32(rph as i32),
+                            Arg::I32(mt.cols as i32),
+                            Arg::I32(nh as i32),
+                            xin,
+                            Arg::I32(xs as i32),
+                            Arg::U64((nh * xs) as u64),
+                            out,
+                            Arg::I32(os as i32),
+                            Arg::U64((nh * os) as u64),
+                            Arg::I32(nb as i32),
+                        ],
+                    );
+                }
                 let (rpb, smem) = mv_plan((mt.qt, mt.rb), rph, mt.cols, nh, nb);
                 g.launch(
                     &mf.heads_mv,

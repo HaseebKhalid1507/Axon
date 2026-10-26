@@ -364,6 +364,112 @@ mla_heads_mv(int qt, const u8* __restrict__ w, u64 rb, int rph, int cols, int n_
 #undef MLA_MV_CASE
 }
 
+// mla_heads_mv's products for a batch (nb > 1), as a register-tiled f32
+// GEMM with the same bits. Per output, mla_heads_mv computes 32 lane chains,
+// chain l = fma over c = l, l + 32, .. ascending from 0, then the xor tree:
+// at offset 16 it adds chains l and l + 16, then 8, .., 1. That tree is a
+// fixed binary tree whose leaves, in order, are the chains l = brev5(i), i
+// = 0..31 (brev5: 5-bit reversal: 0, 16, 8, 24, 4, ..), each internal node
+// the __fadd_rn of its two children. Here a thread computes chain brev5(i)
+// for i = 0, 1, .. in turn (the same fma chain) and folds it into the tree
+// as a binary counter does (mla_tree_push: a 5-deep stack per output):
+// every node is the same __fadd_rn of the same two values, so the output
+// is the same float. The columns are staged permuted, in that order (chain
+// by chain), and the weights are deq's values. Cols must be a multiple of
+// 32 (every chain cols / 32 long), and a block's rows one head's.
+// Grid (n_h * rph / MLA_MM_R, ceil(nb / MLA_MM_T)), MLA_THREADS threads,
+// thread (rg, tg) = (t % 16, t / 16): rows 4 rg .. + 4 x tokens 2 tg .. + 2
+// of the block's MLA_MM_R x MLA_MM_T. Shared memory: MLA_MM_SC permuted
+// columns of the rows (dequantized, column-major: [j][r]) and of x ([j][t]).
+#define MLA_MM_R 64
+#define MLA_MM_T 32
+#define MLA_MM_SC 64
+
+__device__ __forceinline__ int mla_brev5(int i) { return __brev((unsigned)i) >> 27; }
+
+// Fold chain value v, leaf i of 32 (in order), into stack st (5 levels);
+// returns the root at i = 31. Leaf i closes the ancestors whose bits of i
+// are ones (lowest first), then waits as the left child at the next level.
+// The levels are compile-time (registers); i is not.
+__device__ __forceinline__ float mla_tree_push(float* st, float v, int i) {
+    bool open = true;
+#pragma unroll
+    for (int b = 0; b < 5; b++) {
+        if (open) {
+            if ((i >> b) & 1) {
+                v = __fadd_rn(st[b], v);
+            } else {
+                st[b] = v;
+                open = false;
+            }
+        }
+    }
+    return v;
+}
+
+extern "C" __global__ void __launch_bounds__(MLA_THREADS)
+mla_heads_mm(int qt, const u8* __restrict__ w, u64 rb, int rph, int cols, int n_h,
+             const float* __restrict__ x, int xs, u64 xt, float* __restrict__ out, int os,
+             u64 ot, int nb) {
+    __shared__ __align__(16) float ws[MLA_MM_SC * MLA_MM_R];
+    __shared__ __align__(16) float xsh[MLA_MM_SC * MLA_MM_T];
+    int t = threadIdx.x, rg = t % 16, tg = t / 16;
+    int gr0 = blockIdx.x * MLA_MM_R, z0 = blockIdx.y * MLA_MM_T;
+    int h = gr0 / rph, r0 = gr0 % rph;
+    int L = cols / 32;                // chain length
+    int per = MLA_MM_SC / L;          // chains per stage (the host: L <= MLA_MM_SC)
+    float st[4][2][5];
+    float res[4][2];
+    for (int i = 0; i < 32; i++) {
+        int ii = i % per;
+        if (ii == 0) {
+            // The next stage: chains i .. i + n - 1, columns brev5(chain) + 32 k.
+            __syncthreads();
+            int n = min(per, 32 - i) * L;
+            for (int e = t; e < n * MLA_MM_R; e += MLA_THREADS) {
+                int j = e / MLA_MM_R, r = e % MLA_MM_R;
+                int c = mla_brev5(i + j / L) + 32 * (j % L);
+                ws[j * MLA_MM_R + r] = deq(qt, w + (u64)(gr0 + r) * rb, c);
+            }
+            for (int e = t; e < n * MLA_MM_T; e += MLA_THREADS) {
+                int j = e / MLA_MM_T, tt = e % MLA_MM_T;
+                int c = mla_brev5(i + j / L) + 32 * (j % L);
+                xsh[j * MLA_MM_T + tt] =
+                    z0 + tt < nb ? x[(u64)(z0 + tt) * xt + (u64)h * xs + c] : 0.0f;
+            }
+            __syncthreads();
+        }
+        // Chain brev5(i) of the thread's 4 x 2 outputs, then the tree.
+        float a[4][2];
+#pragma unroll
+        for (int q = 0; q < 4; q++) a[q][0] = a[q][1] = 0.0f;
+        for (int k = 0; k < L; k++) {
+            int jj = ii * L + k;
+            float4 w4 = *(const float4*)(ws + jj * MLA_MM_R + 4 * rg);
+            float2 x2 = *(const float2*)(xsh + jj * MLA_MM_T + 2 * tg);
+            a[0][0] = __fmaf_rn(w4.x, x2.x, a[0][0]);
+            a[0][1] = __fmaf_rn(w4.x, x2.y, a[0][1]);
+            a[1][0] = __fmaf_rn(w4.y, x2.x, a[1][0]);
+            a[1][1] = __fmaf_rn(w4.y, x2.y, a[1][1]);
+            a[2][0] = __fmaf_rn(w4.z, x2.x, a[2][0]);
+            a[2][1] = __fmaf_rn(w4.z, x2.y, a[2][1]);
+            a[3][0] = __fmaf_rn(w4.w, x2.x, a[3][0]);
+            a[3][1] = __fmaf_rn(w4.w, x2.y, a[3][1]);
+        }
+#pragma unroll
+        for (int q = 0; q < 4; q++)
+#pragma unroll
+            for (int u = 0; u < 2; u++) res[q][u] = mla_tree_push(st[q][u], a[q][u], i);
+    }
+#pragma unroll
+    for (int q = 0; q < 4; q++)
+#pragma unroll
+        for (int u = 0; u < 2; u++) {
+            int z = z0 + 2 * tg + u;
+            if (z < nb) out[(u64)z * ot + (u64)h * os + r0 + 4 * rg + q] = res[q][u];
+        }
+}
+
 // The attention of nb tokens' absorbed queries over their cache rows 0..np
 // (np = pos0 + z + 1): o_h = softmax(Q_h . K_t * scale) . K_t[..lat], in
 // splits of `split` rows (a multiple of MLA_TILE) from row 0: split sp of a
