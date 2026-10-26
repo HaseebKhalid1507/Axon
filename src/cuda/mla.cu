@@ -426,7 +426,7 @@ struct MlaMm {
 
 // Stage chains i .. i + n - 1 (n = min(per, 32 - i)): their permuted columns
 // brev5(chain) + 32 k of the block's rows (deq's values) and of x.
-__device__ __noinline__ void mla_mm_stage(const MlaMm& m, int i) {
+__device__ __forceinline__ void mla_mm_stage(const MlaMm& m, int i) {
     __syncthreads();
     int n = min(m.per, 32 - i) * m.L;
     for (int e = m.t; e < n * MLA_MM_R; e += MLA_THREADS) {
@@ -783,17 +783,17 @@ mla_attn(const float* __restrict__ qa, const unsigned short* __restrict__ kv, in
 // nothing there (as mla_attn's block). What differs is only who computes:
 // - the tile's K rows converted to f32 in shared memory once (cvt.f32.f16
 //   is exact; mla_attn converts at each use);
-// - warp w scores pairs 4w .. 4w + 3 together over the tile's rows (the
-//   four xor trees transposed: the same additions, pair k's sum in lanes
-//   8k .. 8k + 7);
-// - thread t accumulates pairs 4 (t / 32) .. + 3, columns 2 (t % 32) +
-//   64 j (+1), each K value it loads used by its 4 pairs.
+// - warp w scores pairs 2w and 2w + 1 together over the tile's rows (the
+//   two xor trees transposed: lanes 0-15 end with pair 2w's sum, 16-31
+//   with 2w + 1's, the same additions);
+// - thread t accumulates pairs 4 (t / 64) .. + 3, columns 2 (t % 64) +
+//   128 j (+1), each K value it loads used by its 4 pairs.
 // Grid (splits x n_h / hb, ceil(nb / (MLA_AB_Q / hb))), MLA_AB_THREADS
 // threads, attn_b_smem bytes of dynamic shared memory (sm_80+: over 48 KiB).
 // Out: part as mla_attn's; mla_attn_cmb combines them.
 #define MLA_AB_Q 32
-#define MLA_AB_THREADS 256
-#define MLA_AB_CJ 8  // lat <= 512: column pairs per thread and pair (64 apart)
+#define MLA_AB_THREADS 512
+#define MLA_AB_CJ 4  // lat <= 512: column pairs per thread and pair (128 apart)
 extern "C" __global__ void __launch_bounds__(MLA_AB_THREADS, 1)
 mla_attn_b(const float* __restrict__ qa, const unsigned short* __restrict__ kv, int krow,
            int lat, int n_h, float scale, int start, int split, int ns, int nb,
@@ -819,17 +819,18 @@ mla_attn_b(const float* __restrict__ qa, const unsigned short* __restrict__ kv, 
     int last = min(nb, z0 + qt) - 1;  // the group's longest cache
     if (last < z0 || start + last + 1 <= rb) return;
     int re_max = min(start + last + 1, rb + split);
-    // The score warp's four pairs 4w .. 4w + 3 and their queries' column pairs.
-    float2 qr[4][MLA_MAXI];
-#pragma unroll
-    for (int k = 0; k < 4; k++) {
-        int q = 4 * w + k;
-        int z = min(z0 + q / hb, nb - 1);
-        const float* qp = qa + ((u64)z * n_h + h0 + q % hb) * krow;
+    // The score warp's two pairs and their queries' column pairs.
+    int q0 = 2 * w, q1 = 2 * w + 1;
+    float2 qr0[MLA_MAXI], qr1[MLA_MAXI];
+    {
+        int za = min(z0 + q0 / hb, nb - 1), zb = min(z0 + q1 / hb, nb - 1);
+        const float* qa0 = qa + ((u64)za * n_h + h0 + q0 % hb) * krow;
+        const float* qa1 = qa + ((u64)zb * n_h + h0 + q1 % hb) * krow;
 #pragma unroll
         for (int i = 0; i < MLA_MAXI; i++) {
             int c = 2 * lane + 64 * i;
-            qr[k][i] = c < krow ? make_float2(qp[c], qp[c + 1]) : make_float2(0.0f, 0.0f);
+            qr0[i] = c < krow ? make_float2(qa0[c], qa0[c + 1]) : make_float2(0.0f, 0.0f);
+            qr1[i] = c < krow ? make_float2(qa1[c], qa1[c + 1]) : make_float2(0.0f, 0.0f);
         }
     }
     if (t < MLA_AB_Q) {
@@ -837,8 +838,8 @@ mla_attn_b(const float* __restrict__ qa, const unsigned short* __restrict__ kv, 
         ls[t] = 0.0f;
     }
     // The accumulating thread's 4 pairs aq0 .. aq0 + 3 and its column pairs
-    // ac + 64 j: each K value it loads feeds 4 pairs.
-    int aq0 = 4 * (t / 32), ac = 2 * (t % 32);
+    // ac + 128 j (j < 4): each K value it loads feeds 4 pairs.
+    int aq0 = 4 * (t / 64), ac = 2 * (t % 64);
     int a_re[4];
 #pragma unroll
     for (int u = 0; u < 4; u++) a_re[u] = pair_end(aq0 + u);
@@ -857,34 +858,27 @@ mla_attn_b(const float* __restrict__ qa, const unsigned short* __restrict__ kv, 
             ((float2*)kf)[i] = make_float2(mla_h2f(kk & 0xffff), mla_h2f(kk >> 16));
         }
         __syncthreads();
-        // Scores of the warp's 4 pairs for the tile's rows: 4 chains per lane,
-        // the 4 xor trees transposed (every sum the tree's; 6 shuffles, pair
-        // k's sum ends in lanes 8 k .. 8 k + 7).
+        // Scores of pairs q0, q1 for the tile's rows.
         for (int r = 0; r < nr; r++) {
             const float* kr = kf + r * krow;
-            float d[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            float d0 = 0.0f, d1 = 0.0f;
 #pragma unroll
             for (int i = 0; i < MLA_MAXI; i++) {
                 int c = 2 * lane + 64 * i;
                 if (c < krow) {
                     float2 k2 = *(const float2*)(kr + c);
-#pragma unroll
-                    for (int k = 0; k < 4; k++) {
-                        d[k] = __fmaf_rn(qr[k][i].x, k2.x, d[k]);
-                        d[k] = __fmaf_rn(qr[k][i].y, k2.y, d[k]);
-                    }
+                    d0 = __fmaf_rn(qr0[i].x, k2.x, d0);
+                    d0 = __fmaf_rn(qr0[i].y, k2.y, d0);
+                    d1 = __fmaf_rn(qr1[i].x, k2.x, d1);
+                    d1 = __fmaf_rn(qr1[i].y, k2.y, d1);
                 }
             }
-            bool b4 = lane & 16, b3 = lane & 8;
-            float k0 = b4 ? d[2] : d[0], k1 = b4 ? d[3] : d[1];
-            float y0 = b4 ? d[0] : d[2], y1 = b4 ? d[1] : d[3];
-            k0 = __fadd_rn(k0, __shfl_xor_sync(0xffffffffu, y0, 16));
-            k1 = __fadd_rn(k1, __shfl_xor_sync(0xffffffffu, y1, 16));
-            float kk = b3 ? k1 : k0, yy = b3 ? k0 : k1;
-            kk = __fadd_rn(kk, __shfl_xor_sync(0xffffffffu, yy, 8));
+            bool hi = lane & 16;
+            float k = hi ? d1 : d0, y = hi ? d0 : d1;
+            k = __fadd_rn(k, __shfl_xor_sync(0xffffffffu, y, 16));
 #pragma unroll
-            for (int o = 4; o > 0; o >>= 1) kk = __fadd_rn(kk, __shfl_xor_sync(0xffffffffu, kk, o));
-            if ((lane & 7) == 0) ss[4 * w + (lane >> 3)][r] = __fmul_rn(kk, scale);
+            for (int o = 8; o > 0; o >>= 1) k = __fadd_rn(k, __shfl_xor_sync(0xffffffffu, k, o));
+            if ((lane & 15) == 0) ss[hi ? q1 : q0][r] = __fmul_rn(k, scale);
         }
         __syncthreads();
         // Softmax state per pair: warp w takes pairs w and w + 16.
@@ -925,7 +919,7 @@ mla_attn_b(const float* __restrict__ qa, const unsigned short* __restrict__ kv, 
         if (nmax > 0) {
 #pragma unroll
             for (int j = 0; j < MLA_AB_CJ; j++) {
-                int c = ac + 64 * j;
+                int c = ac + 128 * j;
                 if (c < lat) {
 #pragma unroll
                     for (int u = 0; u < 4; u++)
@@ -953,13 +947,13 @@ mla_attn_b(const float* __restrict__ qa, const unsigned short* __restrict__ kv, 
         int q = aq0 + u;
         int z = z0 + q / hb, h = h0 + q % hb;
         float* o = part + (((u64)z * ns + sp) * n_h + h) * (lat + 2);
-        if (t % 32 == 0) {
+        if (t % 64 == 0) {
             o[0] = ms[q];
             o[1] = ls[q];
         }
 #pragma unroll
         for (int j = 0; j < MLA_AB_CJ; j++) {
-            int c = ac + 64 * j;
+            int c = ac + 128 * j;
             if (c < lat) {
                 o[2 + c] = acc[u][j].x;
                 o[2 + c + 1] = acc[u][j].y;
