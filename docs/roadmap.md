@@ -199,7 +199,15 @@ H100's int8 pipe; MEASURED + ESTIMATED), the nb = 128 decode step 3.3× slower (
 DRAM floor; q/wo/down launch 56 CTAs and k/v 8 CTAs on 132 SMs, CODE), and ~25 % of wall time that is neither kernel
 (two GPU passes per step, a 60 ms chunk budget, two concurrent prefills, FIFO admission; ESTIMATED). Its blame split
 (OPINION): kernel ≈ 65 %, scheduler ≈ 25 %, quant format ≈ 10 % (unmeasured on Hopper). Nothing was profiled on the
-pod, so item 1 starts by measuring.
+pod, so item 1 starts by measuring. **Item 1(a) was measured on 10-26** ([log](log/2026-10-26-h100-anatomy-results.md)). In short:
+- the exactness contract is cleared on Hopper within 10 % for nb ≥ 128 (exact / no drain 0.94–1.00; two cells at
+  0.91 need a rerun; down nb 8 is 0.88; the nb scope was chosen after the data);
+- E0'(b) fired (no-drain 119 TMAC/s < 180), and the owner chose to continue item 2 structure-first, since no-drain
+  equals exact;
+- M6 split-K goes first (the narrow products are 6.3 ms of the nb 128 step);
+- attention is 57 % of the nb 128 step at depth 4,096;
+- the review's ~25 % scheduler term is confirmed (≈ 24 %, inside the passes); host work is 1.2 %;
+- #119 stays closed (NO-GO 10-25), and the C = 128 cell is consistent with that.
 
 **The order below is the review's ranking, adopted here as a proposal; Haseeb decides.** Costs and gains are the
 review's ESTIMATES; the kill rules are written before building, as for every round.

@@ -486,7 +486,9 @@ scheduling of before (`--step-ms` as a fixed budget, less the last decode step):
   context it serves is a slot's (`/v1/models` `meta.n_ctx`; longer prompts get a 400
   `context_length_exceeded`). The Q6_K prefill copy (int8 Q6_K matrices for prefill's tensor
   cores, same results; 1.02 GiB on 7B Q4_K_M) is made after the caches and slots, only from
-  the memory they leave (`AXON_Q6K8=0` never makes it).
+  the memory they leave (`AXON_Q6K8=0` never makes it). `AXON_SERVE_TRACE=FILE` (off by
+  default; no output changes) appends a JSON line per batched step to FILE: its prompt feeds
+  (passes, tokens, ms), its decode pass (rows, mean depth, ms) and its wall time.
   A request running alone takes the single-stream path (CUDA graphs, `--draft`), and
   moves into the batch when a second one arrives (its rows are already in its slot: nothing
   is copied). Every request's output is exactly what it
