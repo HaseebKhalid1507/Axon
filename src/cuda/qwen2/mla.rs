@@ -71,6 +71,25 @@ const MLA_MV_ROWS: usize = 32;
 /// and v_b (288: 16).
 const MLA_MV_BYTES: usize = 4608;
 
+/// mla.cu MLA_AB_Q, MLA_AB_THREADS, MLA_AB_MAXC: mla_attn_b's (token,
+/// head) pairs per block, threads, and column pairs per thread.
+const MLA_AB_Q: usize = 32;
+const MLA_AB_THREADS: usize = 512;
+const MLA_AB_MAXC: usize = 16;
+
+/// mla_attn_b's dynamic shared memory: a tile of K rows in f32.
+fn attn_b_smem(krow: usize) -> usize {
+    MLA_TILE * krow * 4
+}
+
+/// Whether mla_attn_b takes a batch of this shape: a power-of-two head
+/// count (its pairs per block are whole heads x tokens) and a latent its
+/// threads' columns cover (krow <= MLA_MAX_KROW holds for every model the
+/// MLA path runs).
+fn attn_b_fits(n_h: usize, krow: usize, lat: usize) -> bool {
+    n_h.is_power_of_two() && krow <= MLA_MAX_KROW && lat <= 32 * MLA_AB_MAXC
+}
+
 /// mla.cu MLA_MM_R, MLA_MM_T, MLA_MM_SC: mla_heads_mm's rows and tokens
 /// per block and permuted columns per stage.
 const MLA_MM_R: usize = 64;
@@ -375,6 +394,9 @@ pub(crate) struct MlaFns<'m> {
     qrope: Func<'m>,
     heads_mv: Func<'m>,
     heads_mm: Func<'m>,
+    attn_b: Func<'m>,
+    /// mla_attn_b runs here (sm_80+, its shared memory opted in).
+    attn_b_ok: bool,
     attn: Func<'m>,
     attn_cmb: Func<'m>,
     route: Func<'m>,
@@ -394,6 +416,11 @@ impl<'m> MlaFns<'m> {
         if dbuf {
             attn.set_max_shared(attn_smem(MLA_MAX_KROW, true))?;
         }
+        let attn_b = mla.function("mla_attn_b")?;
+        let attn_b_ok = mla.mma();
+        if attn_b_ok {
+            attn_b.set_max_shared(attn_b_smem(MLA_MAX_KROW))?;
+        }
         Ok(MlaFns {
             sms: mla.gpu().info()?.sms as usize,
             dbuf,
@@ -401,6 +428,8 @@ impl<'m> MlaFns<'m> {
             qrope: mla.function("mla_qrope")?,
             heads_mv,
             heads_mm: mla.function("mla_heads_mm")?,
+            attn_b,
+            attn_b_ok,
             attn,
             attn_cmb: mla.function("mla_attn_cmb")?,
             route: mla.function("moe_router")?,
@@ -895,15 +924,43 @@ impl<'g> CudaQwen2<'g> {
                 // A decode step double-buffers its tiles (a batched pass
                 // keeps one tile: two blocks per SM).
                 assert!(!dbuf || decode, "double-buffered tiles are a decode step's");
-                args.push(Arg::I32(mf.sms as i32));
-                args.push(Arg::I32(dbuf as i32));
-                g.launch(
-                    &mf.attn,
-                    (attn_blocks(nh, hpb, ns, nz, mf.sms) as u32, nz as u32, 1),
-                    (256, 1, 1),
-                    attn_smem(kr, dbuf) as u32,
-                    &args,
-                )?;
+                if !decode && nz > 1 && mf.attn_b_ok && attn_b_fits(nh, kr, d.lat) {
+                    // A batch: K tiles shared by MLA_AB_Q (token, head) pairs.
+                    let hb = nh.min(MLA_AB_Q);
+                    g.launch(
+                        &mf.attn_b,
+                        (
+                            (ns * (nh / hb)) as u32,
+                            nz.div_ceil(MLA_AB_Q / hb) as u32,
+                            1,
+                        ),
+                        (MLA_AB_THREADS as u32, 1, 1),
+                        attn_b_smem(kr) as u32,
+                        &[
+                            mb.qa.arg_at(z0 * nh * kr * 4),
+                            kv,
+                            Arg::I32(kr as i32),
+                            Arg::I32(d.lat as i32),
+                            Arg::I32(nh as i32),
+                            Arg::F32(d.kq_scale),
+                            Arg::I32(s0 as i32),
+                            Arg::I32(MLA_SPLIT as i32),
+                            Arg::I32(mb.ns as i32),
+                            Arg::I32(nz as i32),
+                            mb.part.arg(),
+                        ],
+                    )?;
+                } else {
+                    args.push(Arg::I32(mf.sms as i32));
+                    args.push(Arg::I32(dbuf as i32));
+                    g.launch(
+                        &mf.attn,
+                        (attn_blocks(nh, hpb, ns, nz, mf.sms) as u32, nz as u32, 1),
+                        (256, 1, 1),
+                        attn_smem(kr, dbuf) as u32,
+                        &args,
+                    )?;
+                }
                 let mut args = vec![mb.part.arg(), Arg::I32(d.lat as i32), Arg::I32(nh as i32)];
                 args.extend(pos);
                 args.push(mb.att.arg_at(z0 * nh * d.lat * 4));

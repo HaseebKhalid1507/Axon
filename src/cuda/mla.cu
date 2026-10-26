@@ -688,6 +688,174 @@ mla_attn(const float* __restrict__ qa, const unsigned short* __restrict__ kv, in
     }
 }
 
+// mla_attn for a batch (nb > 1), the same bits per (token, head, split):
+// a block takes one split and MLA_AB_Q (token, head) pairs, MLA_AB_Q / hb
+// consecutive tokens x hb heads (hb = min(n_h, MLA_AB_Q), a power of two),
+// so each K tile is read and converted once for all of them. Per (token,
+// head) and tile, everything mla_attn does, in its order: the rows' scores
+// (lane l's chain over columns 2l, 2l + 1, 2l + 64, .., the xor tree, times
+// scale), the tile's max, p_r and their xor-tree sum (lane r = row r), m, l
+// and the rescale, then each column's fma over the tile's rows in order. A
+// token takes part in a tile only below its own end (min(np, split end)),
+// with its own row count; a token whose cache ends before the split does
+// nothing there (as mla_attn's block). What differs is only who computes:
+// - the tile's K rows converted to f32 in shared memory once (cvt.f32.f16
+//   is exact; mla_attn converts at each use);
+// - warp w scores pairs 2w and 2w + 1 together over the tile's rows (the
+//   two xor trees transposed: lanes 0-15 end with pair 2w's sum, 16-31
+//   with 2w + 1's, the same additions);
+// - thread t accumulates pair t / 16's columns 2 (t % 16) + 32 j (+1).
+// Grid (splits x n_h / hb, ceil(nb / (MLA_AB_Q / hb))), MLA_AB_THREADS
+// threads, attn_b_smem bytes of dynamic shared memory (sm_80+: over 48 KiB).
+// Out: part as mla_attn's; mla_attn_cmb combines them.
+#define MLA_AB_Q 32
+#define MLA_AB_THREADS 512
+#define MLA_AB_MAXC 16  // lat <= 512: column pairs per thread
+extern "C" __global__ void __launch_bounds__(MLA_AB_THREADS, 1)
+mla_attn_b(const float* __restrict__ qa, const unsigned short* __restrict__ kv, int krow,
+           int lat, int n_h, float scale, int start, int split, int ns, int nb,
+           float* __restrict__ part) {
+    extern __shared__ __align__(16) float kf[];  // [MLA_TILE][krow] f32
+    __shared__ float ss[MLA_AB_Q][MLA_TILE];
+    __shared__ float ps[MLA_AB_Q][MLA_TILE];
+    __shared__ float ms[MLA_AB_Q], ls[MLA_AB_Q], al[MLA_AB_Q];
+    int t = threadIdx.x, lane = t & 31, w = t >> 5;
+    int hb = n_h < MLA_AB_Q ? n_h : MLA_AB_Q;
+    int qt = MLA_AB_Q / hb;  // tokens per block
+    int hg = n_h / hb;
+    int sp = blockIdx.x / hg, h0 = (blockIdx.x % hg) * hb;
+    int z0 = blockIdx.y * qt;
+    int rb = sp * split;
+    // Pair q = (token z0 + q / hb, head h0 + q % hb); its end re (0: none).
+    auto pair_end = [&](int q) -> int {
+        int z = z0 + q / hb;
+        if (z >= nb) return 0;
+        int np = start + z + 1;
+        return np > rb ? min(np, rb + split) : 0;
+    };
+    int last = min(nb, z0 + qt) - 1;  // the group's longest cache
+    if (last < z0 || start + last + 1 <= rb) return;
+    int re_max = min(start + last + 1, rb + split);
+    // The score warp's two pairs and their queries' column pairs.
+    int q0 = 2 * w, q1 = 2 * w + 1;
+    float2 qr0[MLA_MAXI], qr1[MLA_MAXI];
+    {
+        int za = min(z0 + q0 / hb, nb - 1), zb = min(z0 + q1 / hb, nb - 1);
+        const float* qa0 = qa + ((u64)za * n_h + h0 + q0 % hb) * krow;
+        const float* qa1 = qa + ((u64)zb * n_h + h0 + q1 % hb) * krow;
+#pragma unroll
+        for (int i = 0; i < MLA_MAXI; i++) {
+            int c = 2 * lane + 64 * i;
+            qr0[i] = c < krow ? make_float2(qa0[c], qa0[c + 1]) : make_float2(0.0f, 0.0f);
+            qr1[i] = c < krow ? make_float2(qa1[c], qa1[c + 1]) : make_float2(0.0f, 0.0f);
+        }
+    }
+    if (t < MLA_AB_Q) {
+        ms[t] = __int_as_float(0xff800000);  // -inf
+        ls[t] = 0.0f;
+    }
+    // The accumulating thread's pair and columns.
+    int aq = t / 16, ac = 2 * (t % 16);
+    int a_re = pair_end(aq);
+    float2 acc[MLA_AB_MAXC];
+#pragma unroll
+    for (int j = 0; j < MLA_AB_MAXC; j++) acc[j] = make_float2(0.0f, 0.0f);
+    int kw = krow >> 1;
+    for (int r0 = rb; r0 < re_max; r0 += MLA_TILE) {
+        int nr = min(MLA_TILE, re_max - r0);  // the group's rows (a pair's may be fewer)
+        __syncthreads();
+        const unsigned* src = (const unsigned*)(kv + (u64)r0 * krow);
+        for (int i = t; i < nr * kw; i += MLA_AB_THREADS) {
+            unsigned kk = src[i];
+            ((float2*)kf)[i] = make_float2(mla_h2f(kk & 0xffff), mla_h2f(kk >> 16));
+        }
+        __syncthreads();
+        // Scores of pairs q0, q1 for the tile's rows.
+        for (int r = 0; r < nr; r++) {
+            const float* kr = kf + r * krow;
+            float d0 = 0.0f, d1 = 0.0f;
+#pragma unroll
+            for (int i = 0; i < MLA_MAXI; i++) {
+                int c = 2 * lane + 64 * i;
+                if (c < krow) {
+                    float2 k2 = *(const float2*)(kr + c);
+                    d0 = __fmaf_rn(qr0[i].x, k2.x, d0);
+                    d0 = __fmaf_rn(qr0[i].y, k2.y, d0);
+                    d1 = __fmaf_rn(qr1[i].x, k2.x, d1);
+                    d1 = __fmaf_rn(qr1[i].y, k2.y, d1);
+                }
+            }
+            bool hi = lane & 16;
+            float k = hi ? d1 : d0, y = hi ? d0 : d1;
+            k = __fadd_rn(k, __shfl_xor_sync(0xffffffffu, y, 16));
+#pragma unroll
+            for (int o = 8; o > 0; o >>= 1) k = __fadd_rn(k, __shfl_xor_sync(0xffffffffu, k, o));
+            if ((lane & 15) == 0) ss[hi ? q1 : q0][r] = __fmul_rn(k, scale);
+        }
+        __syncthreads();
+        // Softmax state per pair: warp w takes pairs w and w + 16.
+        for (int q = w; q < MLA_AB_Q; q += MLA_AB_THREADS / 32) {
+            int re = pair_end(q);
+            if (r0 >= re) continue;  // not in this tile: unchanged
+            int nq = min(MLA_TILE, re - r0);
+            float s = lane < nq ? ss[q][lane] : __int_as_float(0xff800000);
+            float mx = s;
+#pragma unroll
+            for (int o = 16; o > 0; o >>= 1) mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, o));
+            float m_old = ms[q];
+            float m_new = fmaxf(m_old, mx);
+            float p = lane < nq ? expf(__fsub_rn(s, m_new)) : 0.0f;
+            float sum = p;
+#pragma unroll
+            for (int o = 16; o > 0; o >>= 1) sum = __fadd_rn(sum, __shfl_xor_sync(0xffffffffu, sum, o));
+            ps[q][lane] = p;
+            __syncwarp();
+            if (lane == 0) {
+                float a = expf(__fsub_rn(m_old, m_new));
+                al[q] = a;
+                ms[q] = m_new;
+                ls[q] = __fadd_rn(__fmul_rn(ls[q], a), sum);
+            }
+        }
+        __syncthreads();
+        if (r0 < a_re) {
+            int nq = min(MLA_TILE, a_re - r0);
+            float a = al[aq];
+#pragma unroll
+            for (int j = 0; j < MLA_AB_MAXC; j++) {
+                int c = ac + 32 * j;
+                if (c < lat) {
+                    float2 v = make_float2(__fmul_rn(acc[j].x, a), __fmul_rn(acc[j].y, a));
+                    for (int r = 0; r < nq; r++) {
+                        float2 k2 = *(const float2*)(kf + r * krow + c);
+                        float p = ps[aq][r];
+                        v.x = __fmaf_rn(p, k2.x, v.x);
+                        v.y = __fmaf_rn(p, k2.y, v.y);
+                    }
+                    acc[j] = v;
+                }
+            }
+        }
+    }
+    __syncthreads();
+    if (a_re > 0) {
+        int z = z0 + aq / hb, h = h0 + aq % hb;
+        float* o = part + (((u64)z * ns + sp) * n_h + h) * (lat + 2);
+        if (t % 16 == 0) {
+            o[0] = ms[aq];
+            o[1] = ls[aq];
+        }
+#pragma unroll
+        for (int j = 0; j < MLA_AB_MAXC; j++) {
+            int c = ac + 32 * j;
+            if (c < lat) {
+                o[2 + c] = acc[j].x;
+                o[2 + c + 1] = acc[j].y;
+            }
+        }
+    }
+}
+
 // mla_attn's splits of each (token, head) combined (grid (n_h, nb),
 // MLA_THREADS): M = max m_sp, w_sp = exp(m_sp - M), L = sum l_sp w_sp and
 // out[c] = (sum acc_sp[c] w_sp) / L, both fma chains over sp ascending. One

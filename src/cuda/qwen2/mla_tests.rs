@@ -559,6 +559,145 @@ fn attn_run(
     (out.read().unwrap(), part.read().unwrap())
 }
 
+/// mla_attn_b + mla_attn_cmb over nb tokens at positions start.. (qa: their
+/// queries): the combined output and the partials (as `attn_run`).
+fn attn_b_run(
+    g: &Gpu,
+    ml: &Module,
+    qa: &DevBuf,
+    kv: &DevBuf,
+    (krow, lat, n_h): (usize, usize, usize),
+    (start, nb, ns): (usize, usize, usize),
+) -> (Vec<f32>, Vec<f32>) {
+    let fa = ml.function("mla_attn_b").unwrap();
+    let fc = ml.function("mla_attn_cmb").unwrap();
+    let part = g.alloc(nb * ns * n_h * (lat + 2) * 4).unwrap();
+    part.zero().unwrap();
+    let out = g.alloc(nb * n_h * lat * 4).unwrap();
+    let hb = n_h.min(MLA_AB_Q);
+    let scale = 1.0 / (192f32).sqrt();
+    let nsp = (start + nb).div_ceil(MLA_SPLIT);
+    // SAFETY: the kernels' signatures; the cache holds start + nb rows,
+    // part nb x ns splits.
+    unsafe {
+        g.launch(
+            &fa,
+            (
+                (nsp * (n_h / hb)) as u32,
+                nb.div_ceil(MLA_AB_Q / hb) as u32,
+                1,
+            ),
+            (MLA_AB_THREADS as u32, 1, 1),
+            attn_b_smem(krow) as u32,
+            &[
+                qa.arg(),
+                kv.arg(),
+                Arg::I32(krow as i32),
+                Arg::I32(lat as i32),
+                Arg::I32(n_h as i32),
+                Arg::F32(scale),
+                Arg::I32(start as i32),
+                Arg::I32(MLA_SPLIT as i32),
+                Arg::I32(ns as i32),
+                Arg::I32(nb as i32),
+                part.arg(),
+            ],
+        )
+        .unwrap();
+        let a = [
+            part.arg(),
+            Arg::I32(lat as i32),
+            Arg::I32(n_h as i32),
+            Arg::Ptr(0),
+            Arg::I32(start as i32),
+            Arg::I32(MLA_SPLIT as i32),
+            Arg::I32(ns as i32),
+            out.arg(),
+        ];
+        g.launch(&fc, (n_h as u32, nb as u32, 1), (256, 1, 1), 0, &a)
+            .unwrap();
+    }
+    (out.read().unwrap(), part.read().unwrap())
+}
+
+/// S2.5's contract: mla_attn_b (a batch: K tiles shared by 32 (token,
+/// head) pairs) gives main be13f1f's bits (mla_attn_ref), partials
+/// included: Moonlight's shape from position 0 (2,100 tokens: 17 splits;
+/// and 700) and from 300 (a pass after a cache prefix), K2's (64 heads), an
+/// 8-head one and the fixture's (2 heads, row 80), and batches of 2 to 33
+/// tokens across a split edge. sm_80+ (its shared memory); skipped below.
+#[test]
+fn mla_attn_b_equals_main() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let ml = Kernels::mla_ref_module(&g).unwrap();
+    if !ml.mma() {
+        eprintln!("SKIPPED: mla_attn_b is sm_80+");
+        return;
+    }
+    ml.function("mla_attn_b")
+        .unwrap()
+        .set_max_shared(attn_b_smem(MLA_MAX_KROW))
+        .unwrap();
+    let mut checked = 0;
+    for (n_h, krow, lat, np, cases) in [
+        (
+            16usize,
+            576usize,
+            512usize,
+            2100usize,
+            &[
+                (0usize, 2100usize),
+                (0, 700),
+                (300, 400),
+                (120, 2),
+                (126, 5),
+                (100, 33),
+            ][..],
+        ),
+        (64, 576, 512, 260, &[(0, 260), (100, 17)][..]),
+        (8, 576, 512, 140, &[(0, 140), (31, 3)][..]),
+        (2, 80, 64, 300, &[(0, 300), (250, 50)][..]),
+    ] {
+        let mut r = Rng(0xa77 ^ (n_h * krow) as u64);
+        let k16: Vec<u16> = (0..np * krow)
+            .map(|_| crate::quant::f32_to_f16(r.f() * 2.0))
+            .collect();
+        let kv = g.upload(&k16).unwrap();
+        let w = n_h * krow;
+        let qa: Vec<f32> = (0..np * w).map(|_| r.f()).collect();
+        for &(start, nb) in cases {
+            let qd = g.upload(&qa[start * w..(start + nb) * w]).unwrap();
+            let ns = (start + nb).div_ceil(MLA_SPLIT);
+            let shape = (krow, lat, n_h);
+            let want = attn_run(
+                &g,
+                &ml,
+                true,
+                (0, false),
+                &qd,
+                &kv,
+                shape,
+                (start, nb, ns, false),
+            );
+            let got = attn_b_run(&g, &ml, &qd, &kv, shape, (start, nb, ns));
+            assert_eq!(
+                bits(&got.0),
+                bits(&want.0),
+                "({n_h}, {krow}) tokens {start}+{nb}"
+            );
+            assert_eq!(
+                bits(&got.1),
+                bits(&want.1),
+                "({n_h}, {krow}) tokens {start}+{nb} partials"
+            );
+            checked += got.0.len();
+        }
+    }
+    eprintln!("mla_attn_b == main: {checked} outputs");
+}
+
 /// S2.3's contract: the rewritten mla_attn (heads per block by the work,
 /// cooperative row scores, double-buffered tiles) gives main be13f1f's
 /// bits (mla_attn_ref), partials included, on Moonlight's shape, K2's (64
@@ -898,6 +1037,84 @@ fn mla_decode_kernel_bench() {
         }
         println!("{line} us");
     }
+    // Batches from position 0 (a prompt's prefill): main's kernel vs mla_attn_b.
+    if can_dbuf {
+        let fb = ml.function("mla_attn_b").unwrap();
+        fb.set_max_shared(attn_b_smem(MLA_MAX_KROW)).unwrap();
+        for nb in [64usize, 512, 2100] {
+            let nsp = nb.div_ceil(MLA_SPLIT);
+            let qa: Vec<f32> = (0..nb * n_h * krow).map(|_| r.f()).collect();
+            let qd = g.upload(&qa).unwrap();
+            let pt = g.alloc(nb * nsp * n_h * (lat + 2) * 4).unwrap();
+            let a_ref = vec![
+                qd.arg(),
+                kv.arg(),
+                Arg::I32(krow as i32),
+                Arg::I32(lat as i32),
+                Arg::I32(n_h as i32),
+                Arg::I32(8),
+                Arg::F32(0.07),
+                Arg::Ptr(0),
+                Arg::I32(0),
+                Arg::I32(MLA_SPLIT as i32),
+                Arg::I32(nsp as i32),
+                pt.arg(),
+            ];
+            let t_ref = time(&mut || unsafe {
+                g.launch(
+                    &fa_ref,
+                    (2, nb as u32, nsp as u32),
+                    (256, 1, 1),
+                    attn_smem(krow, false) as u32,
+                    &a_ref,
+                )
+                .unwrap()
+            });
+            let mut a_new = a_ref.clone();
+            a_new.push(Arg::I32(sms));
+            a_new.push(Arg::I32(0));
+            let t_new = time(&mut || unsafe {
+                g.launch(
+                    &fa,
+                    (
+                        attn_blocks(n_h, 8, nsp, nb, sms as usize) as u32,
+                        nb as u32,
+                        1,
+                    ),
+                    (256, 1, 1),
+                    attn_smem(krow, false) as u32,
+                    &a_new,
+                )
+                .unwrap()
+            });
+            let a_b = [
+                qd.arg(),
+                kv.arg(),
+                Arg::I32(krow as i32),
+                Arg::I32(lat as i32),
+                Arg::I32(n_h as i32),
+                Arg::F32(0.07),
+                Arg::I32(0),
+                Arg::I32(MLA_SPLIT as i32),
+                Arg::I32(nsp as i32),
+                Arg::I32(nb as i32),
+                pt.arg(),
+            ];
+            let t_b = time(&mut || unsafe {
+                g.launch(
+                    &fb,
+                    (nsp as u32, nb.div_ceil(MLA_AB_Q / n_h) as u32, 1),
+                    (MLA_AB_THREADS as u32, 1, 1),
+                    attn_b_smem(krow) as u32,
+                    &a_b,
+                )
+                .unwrap()
+            });
+            println!(
+                "attn batch {nb} from 0: main {t_ref:.0} us | decode kernel {t_new:.0} us | attn_b {t_b:.0} us"
+            );
+        }
+    }
 }
 
 /// `attn_blocks` covers every token's blocks under mla_attn's hpb rule
@@ -1025,6 +1242,9 @@ fn mla_kernels_compile_for_archs() {
     for (name, v) in [
         ("MLA_TILE", MLA_TILE),
         ("MLA_MV_T", MLA_MV_T),
+        ("MLA_AB_Q", MLA_AB_Q),
+        ("MLA_AB_THREADS", MLA_AB_THREADS),
+        ("MLA_AB_MAXC", MLA_AB_MAXC),
         ("MLA_MM_R", MLA_MM_R),
         ("MLA_MM_T", MLA_MM_T),
         ("MLA_MM_SC", MLA_MM_SC),
