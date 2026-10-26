@@ -71,6 +71,66 @@ const MLA_MV_ROWS: usize = 32;
 /// and v_b (288: 16).
 const MLA_MV_BYTES: usize = 4608;
 
+/// mla.cu MLA_AB_Q, MLA_AB_THREADS, MLA_AB_CJ: mla_attn_b's (token, head)
+/// pairs per block, threads, and column pairs per thread and pair (128
+/// columns apart).
+const MLA_AB_Q: usize = 32;
+const MLA_AB_THREADS: usize = 512;
+const MLA_AB_CJ: usize = 4;
+
+/// mla_attn_b's dynamic shared memory: a tile of K rows in f32.
+fn attn_b_smem(krow: usize) -> usize {
+    MLA_TILE * krow * 4
+}
+
+/// Whether mla_attn_b takes a batch of this shape: a power-of-two head
+/// count (its pairs per block are whole heads x tokens) and a latent its
+/// threads' columns cover (krow <= MLA_MAX_KROW holds for every model the
+/// MLA path runs).
+fn attn_b_fits(n_h: usize, krow: usize, lat: usize) -> bool {
+    n_h.is_power_of_two() && krow <= MLA_MAX_KROW && lat <= 128 * MLA_AB_CJ
+}
+
+/// mla.cu MLA_MM_R, MLA_MM_T, MLA_MM_SC: mla_heads_mm's rows and tokens
+/// per block and permuted columns per stage.
+const MLA_MM_R: usize = 64;
+const MLA_MM_T: usize = 64;
+const MLA_MM_SC: usize = 32;
+/// mla_heads_mm (the same bits as mla_heads_mv) is the faster kernel when
+/// its 64-token tiles are full enough: its cost goes by tiles, mla_heads_mv's
+/// by tokens. So it runs when the tokens per tile, nb / ceil(nb / MLA_MM_T),
+/// reach `mm_fill(cols)`. Measured (mla_prefill_kernel_bench, sm_89 and
+/// sm_120, 3 interleaved rounds, median):
+/// - k_b (128 columns) crosses at 32 tokens on both: 32.
+/// - v_b (512) costs ~85 µs per tile against ~1.53 µs per token (sm_120;
+///   sm_89: ~188 against ~3.85), so it needs > ~56 (> ~49) tokens per tile:
+///   58. That takes 58 .. 64, 116 .. 128, 174 .., and keeps mla_heads_mv for 65 ..
+///   115 (sm_120 at 96: 146 µs vs 165).
+///
+/// Not part of the bits.
+fn mm_fill(cols: usize) -> usize {
+    if cols <= MLA_MM_NARROW {
+        MLA_MM_FILL_NARROW
+    } else {
+        MLA_MM_FILL_WIDE
+    }
+}
+/// Rows up to this many columns (Moonlight's k_b: 128).
+const MLA_MM_NARROW: usize = 128;
+const MLA_MM_FILL_NARROW: usize = 32;
+/// Wider rows (v_b: 512).
+const MLA_MM_FILL_WIDE: usize = 58;
+
+/// Whether a product of rph rows per head over cols inputs for nb tokens
+/// runs as mla_heads_mm: tiles full enough (`mm_fill`), whole 32-column
+/// chains that fit a stage, and blocks of MLA_MM_R rows within a head.
+fn mm_fits(nb: usize, rph: usize, cols: usize) -> bool {
+    nb >= mm_fill(cols) * nb.div_ceil(MLA_MM_T)
+        && cols.is_multiple_of(32)
+        && cols / 32 <= MLA_MM_SC
+        && rph.is_multiple_of(MLA_MM_R)
+}
+
 /// mla.cu mla_tab_n: scale-table floats per row of qt over cols values.
 fn mv_tab_n(qt: u32, cols: usize) -> usize {
     use crate::quant::{Q4_K, Q5_0, Q6_K, Q8_0};
@@ -354,6 +414,10 @@ pub(crate) struct MlaFns<'m> {
     kv_store: Func<'m>,
     qrope: Func<'m>,
     heads_mv: Func<'m>,
+    heads_mm: Func<'m>,
+    attn_b: Func<'m>,
+    /// mla_attn_b runs here (sm_80+, its shared memory opted in).
+    attn_b_ok: bool,
     attn: Func<'m>,
     attn_cmb: Func<'m>,
     route: Func<'m>,
@@ -373,12 +437,20 @@ impl<'m> MlaFns<'m> {
         if dbuf {
             attn.set_max_shared(attn_smem(MLA_MAX_KROW, true))?;
         }
+        let attn_b = mla.function("mla_attn_b")?;
+        let attn_b_ok = mla.mma();
+        if attn_b_ok {
+            attn_b.set_max_shared(attn_b_smem(MLA_MAX_KROW))?;
+        }
         Ok(MlaFns {
             sms: mla.gpu().info()?.sms as usize,
             dbuf,
             kv_store: mla.function("mla_kv_store")?,
             qrope: mla.function("mla_qrope")?,
             heads_mv,
+            heads_mm: mla.function("mla_heads_mm")?,
+            attn_b,
+            attn_b_ok,
             attn,
             attn_cmb: mla.function("mla_attn_cmb")?,
             route: mla.function("moe_router")?,
@@ -783,6 +855,33 @@ impl<'g> CudaQwen2<'g> {
             )?;
             // The absorbed queries: Wk_b[h] q_nope_h.
             let heads = |mt: &Mat, rph: usize, xin: Arg, xs: usize, out: Arg, os: usize| {
+                if mm_fits(nb, rph, mt.cols) {
+                    return g.launch(
+                        &mf.heads_mm,
+                        (
+                            (nh * rph / MLA_MM_R) as u32,
+                            nb.div_ceil(MLA_MM_T) as u32,
+                            1,
+                        ),
+                        (256, 1, 1),
+                        0,
+                        &[
+                            Arg::I32(mt.qt as i32),
+                            w(mt),
+                            Arg::U64(mt.rb as u64),
+                            Arg::I32(rph as i32),
+                            Arg::I32(mt.cols as i32),
+                            Arg::I32(nh as i32),
+                            xin,
+                            Arg::I32(xs as i32),
+                            Arg::U64((nh * xs) as u64),
+                            out,
+                            Arg::I32(os as i32),
+                            Arg::U64((nh * os) as u64),
+                            Arg::I32(nb as i32),
+                        ],
+                    );
+                }
                 let (rpb, smem) = mv_plan((mt.qt, mt.rb), rph, mt.cols, nh, nb);
                 g.launch(
                     &mf.heads_mv,
@@ -846,15 +945,43 @@ impl<'g> CudaQwen2<'g> {
                 // A decode step double-buffers its tiles (a batched pass
                 // keeps one tile: two blocks per SM).
                 assert!(!dbuf || decode, "double-buffered tiles are a decode step's");
-                args.push(Arg::I32(mf.sms as i32));
-                args.push(Arg::I32(dbuf as i32));
-                g.launch(
-                    &mf.attn,
-                    (attn_blocks(nh, hpb, ns, nz, mf.sms) as u32, nz as u32, 1),
-                    (256, 1, 1),
-                    attn_smem(kr, dbuf) as u32,
-                    &args,
-                )?;
+                if !decode && nz > 1 && mf.attn_b_ok && attn_b_fits(nh, kr, d.lat) {
+                    // A batch: K tiles shared by MLA_AB_Q (token, head) pairs.
+                    let hb = nh.min(MLA_AB_Q);
+                    g.launch(
+                        &mf.attn_b,
+                        (
+                            (ns * (nh / hb)) as u32,
+                            nz.div_ceil(MLA_AB_Q / hb) as u32,
+                            1,
+                        ),
+                        (MLA_AB_THREADS as u32, 1, 1),
+                        attn_b_smem(kr) as u32,
+                        &[
+                            mb.qa.arg_at(z0 * nh * kr * 4),
+                            kv,
+                            Arg::I32(kr as i32),
+                            Arg::I32(d.lat as i32),
+                            Arg::I32(nh as i32),
+                            Arg::F32(d.kq_scale),
+                            Arg::I32(s0 as i32),
+                            Arg::I32(MLA_SPLIT as i32),
+                            Arg::I32(mb.ns as i32),
+                            Arg::I32(nz as i32),
+                            mb.part.arg(),
+                        ],
+                    )?;
+                } else {
+                    args.push(Arg::I32(mf.sms as i32));
+                    args.push(Arg::I32(dbuf as i32));
+                    g.launch(
+                        &mf.attn,
+                        (attn_blocks(nh, hpb, ns, nz, mf.sms) as u32, nz as u32, 1),
+                        (256, 1, 1),
+                        attn_smem(kr, dbuf) as u32,
+                        &args,
+                    )?;
+                }
                 let mut args = vec![mb.part.arg(), Arg::I32(d.lat as i32), Arg::I32(nh as i32)];
                 args.extend(pos);
                 args.push(mb.att.arg_at(z0 * nh * d.lat * 4));
