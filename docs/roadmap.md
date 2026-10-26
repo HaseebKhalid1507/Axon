@@ -1,7 +1,7 @@
 # Roadmap
 
-Short and opinionated. "On main" means merged at `764792f` (2026-10-19 22:05 EDT). Everything else is planned or in
-flight.
+Short and opinionated. "On main" means merged at `39624db` (#131, 2026-10-25 21:19 EDT). Everything else is planned or
+in flight.
 Estimates come from the design notes and are labeled.
 
 **Mission: make LLM inference cheap and fast, and run the best open models.** Cheap means wasting no
@@ -60,7 +60,9 @@ models, cheaply and fast), so choices made along the way shouldn't close them of
 - **Run Kimi K2** (1T parameters, 32B active per token, the DeepSeek V3 architecture). It is the largest open
   model and the test of whether Axon scales past a 12 GB card. Every piece it needs is useful on its own, and
   each is listed under [Frontier models](#frontier-models-100b-to-1t):
-  - experts on the GPU (MoE stages 2–3, already planned);
+  - experts on the GPU (MoE stages 2–3, already planned). **deepseek2's routed experts can be resident since
+    #127** (`--gpu-experts N|auto`, opt-in; Moonlight on bella tg ×2.06, pp ×3.40, MEASURED, TAINTED;
+    [log](log/2026-10-24-moe-resident-c.md));
   - MLA attention and DeepSeek routing (the `deepseek2` architecture), tried first on a small DeepSeek-architecture
     model that fits Parabellum. **Stage 0 (CPU-only exact reference) is in** (2026-10-18, on Moonlight-16B-A3B,
     K2's routing and tokenizer at 1/60 of its size; [log](log/2026-10-18-deepseek2-s0.md)); **stage 1 (GPU MLA
@@ -75,8 +77,73 @@ models, cheaply and fast), so choices made along the way shouldn't close them of
 
 ## Recently landed
 
-Newest first, as of `764792f`; the numbers are the PRs' own MEASURED headlines. Older entries (as of `69adfa2`)
-follow the first list.
+Newest first, as of `39624db`; the numbers are the PRs' own MEASURED headlines, with the PRs' own labels
+(TAINTED, ESTIMATED) kept. Older entries (as of `764792f`, then `69adfa2`) follow the first list.
+
+- **A measured step budget in `serve`; shortest-first admission opt-in** (#131, roadmap item 1 (c)(d); supersedes
+  #126). `--step-ms 60` is the default (`--prefill-ms` is its old name, kept as an alias): a step's prompt chunk is
+  what fits beside the decode step at the cost the server measures. `--admit-order sjf` (with `--prefill-lanes`,
+  `--admit-age-ms`) stays **opt-in**: (c) missed its kill-rule clause "short TTFT p50 ≤ 0.5× fifo" on the clean bella
+  cells at 722139a: 7B C=16 0.37× (pass), 1.5B C=32 **0.56×**, sdab15 C=32 **0.79×** (MEASURED). The shipped
+  defaults are the measured `fifo60` arm; against main, ITL p99 72.2 vs 75.0 (−3.8 %), 66.2 vs 66.4 (−0.3 %), 63.6
+  vs 63.6 ms (0 %), aggregate +0.8 % / −0.4 % / −1.6 %. For whoever opts in, sjf keeps the tails: avante 1.5B C=32
+  slo_ok 0.64 (fifo60) → 0.94 (sjf60). Re-deciding the default on the H100 C = 64 / 128 cells is #139 (pod not booked)
+  ([log](log/2026-10-25-sched-budget-main.md)).
+- **Resident deepseek2 experts: `--gpu-experts N|auto|0`** (#127, MoE-resident PR C; default 0). Moonlight-16B-A3B
+  Q4_K_M on bella, `auto` (25 of 26 layers resident, 8.50 GiB) vs 0: **tg ×2.06** (kill rule ≥ 1.5×: PASS),
+  **pp ×3.40**, text identical in all 6 runs (MEASURED, **TAINTED**: foreign GPU max 31 %, mean 7.8 %; job
+  1025-153024-c92e). The lead accepted the verdict with the TAINTED label kept; the absolute tok/s aren't clean
+  numbers. N doesn't change a bit ([log](log/2026-10-24-moe-resident-c.md)).
+- **Test loaders map as the product does** (#134, closes #132): test-only, with a `strict_release` guard so mapped
+  test models keep their read-after-release check; md5 of `gen` identical vs main
+  ([log](log/2026-10-25-testutil-map.md)).
+- **gpt-oss with tools: a reply with no channel header streams as the answer** (#136, closes #114): serve A/B main
+  vs candidate, 17 cases + 6 concurrent × 6 models, 23/23 identical on every model (bella)
+  ([log](log/2026-10-25-harmony-unheaded.md)).
+- **RAM available honours cgroup memory limits** (#133, closes #129). MEASURED on bella: Qwen3-30B-A3B-Pruned-2B
+  under `MemoryMax=1000M` was OOM-killed (rc 137) and is now a clean refusal (rc 2) that names the cgroup; at
+  `MemoryMax=4500M` it runs, same md5. Dense CPU loads still have no RAM refusal (#135)
+  ([log](log/2026-10-25-ram-cgroup.md)).
+- **One MoE layer's experts on the GPU, bit-equal to the CPU** (#122, MoE-resident PR B, test only). Moonlight, one
+  layer's routed experts at nb 510: 2.283 / 2.126 ms (Q8_0 / Q5_0 down) vs the CPU's 22.31 / 22.91 ms, 9.8× / 10.8×;
+  spec gate ≤ 5 ms per layer: PASS (MEASURED, CLEAN, bella, job 1025-022441-83db)
+  ([log](log/2026-10-24-moe-resident-b.md)).
+- **MoE test models load mapped** (#128): fixes #127's false RAM refusal on bella; test-only
+  ([log](log/2026-10-25-testutil-moe-mapped.md)).
+- **Hybrid step rejected** (#130, docs; #119 closed, roadmap item 1 (b)): mix C = 64 aggregate +0.65 % (needed
+  ≥ +15 %), ITL p99 −46 %, TTFT p50 3.6× worse (MEASURED, clean RTX 4090 pod)
+  ([log](log/2026-10-25-reject-hybrid-step.md)).
+- **Opaque `Backend`, sealed `Lm`, `#[non_exhaustive]` `Device` / `KvType` / `GenStats`; bad `AXON_SIMD` /
+  `AXON_DECODE_ROWS` / `AXON_PREFETCH` values are errors, not panics** (#124, #118 items A + B, the v0.1
+  blockers). No speed claim; 85 gen / logits / info md5 pairs identical, serve A/B 138/138
+  ([log](log/2026-10-24-opaque-backend.md)).
+- **#90's post-mortem corrected; spec-gate v2 and stage 2 designed** (#123, docs): #90's gate already modelled
+  depth; a win at depth needs K+1 rows per slot to read the KV once ([design](research/spec-gate-v2-20261024.md)).
+  The same merge brought the 10-24 research notes for items 1 (c)(d) and 2
+  ([sched-sjf-token-budget](research/sched-sjf-token-budget-20261024.md),
+  [hopper-exact-w4a8](research/hopper-exact-w4a8-20261024.md)).
+- **Twin numerics primitives** (#120, MoE-resident PR A): GPU kernels equal to the CPU's r8 / r8q expert numerics
+  bit for bit; nothing outside the tests launches them, and the existing kernels' SASS is unchanged
+  ([log](log/2026-10-20-moe-resident-a.md)).
+- **Axon as a library plus a thin binary; the README's honest board; v0.1 prep** (#117, item 5; **not tagged**).
+  Speed-neutral: the 0.5B cuda cells, the most sensitive to host overhead, are 0.9999–1.0004× main in both avante
+  runs (MEASURED, jobs 1020-125243-6c53, 1020-125606-0a53). `CHANGELOG.md` and draft
+  [release notes](release-0.1.md) ([log](log/2026-10-20-lib-split.md)).
+- **Tool calling for gpt-oss (harmony)** (#111, closes #108) on `/v1/chat/completions`, `/v1/responses` and ollama
+  `/api/chat`; requests without tools, and every Qwen / Llama tool request, are byte-identical to main (md5 + serve
+  A/B). `tool_choice: required` with several tools is a 400 (#116) ([log](log/2026-10-20-gpt-oss-tools.md)).
+- **A request leaves `axon_requests_in_flight` and its slot before its last byte** (#113, closes #112)
+  ([log](log/2026-10-20-inflight-gauge.md)).
+- **One MoE router kernel and `MoeKind`** (#104, closes #99): bits unchanged on qwen3moe, gpt-oss and deepseek2
+  ([log](log/2026-10-19-moe-router-unify.md)).
+- Test fixes: graded logit tests build their CPU reference repacked (#105,
+  [log](log/2026-10-20-graded-ref-repack.md)); Gemma 3's in-place window "mismatch" is a reference near-tie (#107,
+  closes #106, [log](log/2026-10-20-gemma3-inplace-window.md)). The 10-19 docs refresh and H100 showdown (#103,
+  [log](log/2026-10-19-docs-refresh.md)).
+- **Not landed:** the hybrid step (#119, rejected above); #126 ((c)(d) stacked on #119, superseded by #131); the H100
+  step-anatomy kit (#125, draft, item 1 (a)).
+
+As of `764792f`:
 
 - **Determinism-modes ADR** (#101): `--numerics exact | fast`, merged as **PROPOSED**
   ([design/determinism-modes.md](design/determinism-modes.md)); the decision is Haseeb's. Nothing built.
@@ -139,11 +206,11 @@ review's ESTIMATES; the kill rules are written before building, as for every rou
 
 | # | item | expected gain (ESTIMATED) | cost | kill rule | unblocks |
 |---|---|---|---|---|---|
-| 1 | **H100 step anatomy + two scheduler fixes (exact mode).** (a) Measure: `pool_step_cost` on an H100 at nb 1–256, depth 600 / 4096, per kernel; `cuda_gemm_bench` on 7B shapes for gemm2s / gemm2t / gemmh2 plus one deliberately inexact gemmh2 without the per-256 drain (the upper bound of what the contract costs on Hopper); one serve step trace at mix C = 128. (b) Decode rows join the prefill chunk's pass (one pass per step; bit-compatible by identity A). **(b) REJECTED 10-25** (#119 closed): mix C = 64 agg +0.65 % (needed ≥ +15 %), ITL p99 −46 %, TTFT p50 3.6× worse, MEASURED on a clean 4090 ([experiments-rejected](experiments-rejected.md#serving-scheduler), [log](log/2026-10-25-reject-hybrid-step.md)); the step stays two passes. (c) Shortest-first admission for short prompts, concurrent prefills scaled with slots. (d) The chunk budget as tokens per step at the measured cost, not a fixed 60 ms. (c) and (d) continue in two-pass mode via #126, restacked onto main. After each fix, re-run only Axon's two C = 128 cells (~2 pod-minutes). | mix C = 128 +25–40 % (+15 % from the merged pass alone); short-prompt TTFT p50 2.5 s → < 0.3 s; slo_ok at C = 64 0.74 → ≥ 0.95. Still ~2.5× behind vLLM-FP8 | 2–3 builder-days; ~$5 of H100 (two 30-min sessions, prebuilt binaries); bits gates on bella / avante | the merged pass must give mix C = 64 aggregate ≥ +15 % on a 4090 with ITL p99 ≤ today's; else revert it and keep (c) / (d) | a per-kernel target for item 2; every later C ≥ 32 number |
+| 1 | **H100 step anatomy + two scheduler fixes (exact mode).** (a) Measure: `pool_step_cost` on an H100 at nb 1–256, depth 600 / 4096, per kernel; `cuda_gemm_bench` on 7B shapes for gemm2s / gemm2t / gemmh2 plus one deliberately inexact gemmh2 without the per-256 drain (the upper bound of what the contract costs on Hopper); one serve step trace at mix C = 128. **(a): the kit is draft #125** (`AXON_SERVE_TRACE`, the gemmh2 no-drain and magic-S variants, `pool_feed_cost`), rehearsed on bella (job 1025-153025-5e47 PASS); no pod has run, the session (≈ $1.20–2.00, ESTIMATED: $1.20 if the stage estimates hold, $2.00 if the stages run to budget, per #125's review) waits for Haseeb's approval. (b) Decode rows join the prefill chunk's pass (one pass per step; bit-compatible by identity A). **(b) REJECTED 10-25** (#119 closed): mix C = 64 agg +0.65 % (needed ≥ +15 %), ITL p99 −46 %, TTFT p50 3.6× worse, MEASURED on a clean 4090 ([experiments-rejected](experiments-rejected.md#serving-scheduler), [log](log/2026-10-25-reject-hybrid-step.md)); the step stays two passes. (c) Shortest-first admission for short prompts, concurrent prefills scaled with slots. (d) The chunk budget as tokens per step at the measured cost, not a fixed 60 ms. **(c) and (d) LANDED 10-25 in two-pass mode** (#131, superseding #126; [log](log/2026-10-25-sched-budget-main.md)): (d) is the default (`--step-ms 60`; at 50 the 7B step p50 ran 60.0 ms, outside its ±15 %, measured on the sjf50 arm: no fifo50 arm was run); (c) is **opt-in** (`--admit-order sjf`), having missed "short TTFT p50 ≤ 0.5× fifo" on the clean bella cells (1.5B C=32 0.56×, sdab15 C=32 0.79×; 7B C=16 0.37× passed). The H100 clauses ((d) at 50 ms, "Together" at C = 128) and the sjf default are **pending #139** (one H100 session, ~$2, not booked). After each fix, re-run only Axon's two C = 128 cells (~2 pod-minutes). | mix C = 128 +25–40 % (+15 % from the merged pass alone); short-prompt TTFT p50 2.5 s → < 0.3 s; slo_ok at C = 64 0.74 → ≥ 0.95. Still ~2.5× behind vLLM-FP8 | 2–3 builder-days; ~$5 of H100 (two 30-min sessions, prebuilt binaries); bits gates on bella / avante | the merged pass must give mix C = 64 aggregate ≥ +15 % on a 4090 with ITL p99 ≤ today's; else revert it and keep (c) / (d) | a per-kernel target for item 2; every later C ≥ 32 number |
 | 2 | **Hopper exact GEMM, round 2:** W4A8 wgmma with register dequant (RS, as Marlin does), an integer superblock reduce, TMA weights; plus the ADR's M6 fixed-chunk split-K for the narrow products (56 → 224+ CTAs for q/wo/down at nb ≤ 128). Exact: the per-256 drain is a fixed order. | ~200 TMAC/s (half of Marlin-class efficiency on the int8 pipe): prefill 13.8k → ~27k tok/s, the nb = 128 GEMM 8.4 → ~4.5 ms; with item 1, classic C = 128 4,485 → ~9–10k (vLLM-AWQ 12,190). M6 alone: −3 ms of the 18.6 ms step | 6–10 builder-days of one kernel builder (not a swarm); ~$40 of H100 in ~10 one-hour sessions; the M6 `NUMERICS_EXACT` bump and re-pinned md5s included | after 5 builder-days, gate 3,584 × 18,944 at nb 1,024 < 180 TMAC/s on the H100 (2× today's 84–93) → stop, record in experiments-rejected.md, go to item 4's fast kernel. M6 separately: H100 7B nb = 128 step −10 % or revert | every datacenter claim; resident-MoE prefill on the same GEMM; 32B / 70B on H100s |
-| 3 | **One MoE resident on the GPU:** Moonlight-16B-A3B now, Qwen3-30B-A3B as the headline (PR A → D of the r16 pick-4 spec; step 0 passed: CPU experts are 76 % of the Moonlight decode step, MEASURED; PR A exists, uncommitted). | Moonlight decode on bella ~6 ms per step → ~160 tok/s (today 54–62); prefill ×3–5; Qwen3-30B-A3B fully resident on a 24 GB card, the first ≥ 30B-class model with a number vs llama.cpp and vLLM | ~5 builder-days; ~$10 (one 32–48 GB pod session for 30B-A3B at 8k) | resident decode < 1.5× the CPU-expert decode on bella → stop at PR B; 30B-A3B pp2100 < llama.cpp `--cpu-moe` on the same pod → not a headline | the Kimi K2 / DeepSeek template (experts resident per layer); gpt-oss-20b on 24 GB; an honest "best models" row |
+| 3 | **One MoE resident on the GPU:** Moonlight-16B-A3B now, Qwen3-30B-A3B as the headline (PR A → D of the r16 pick-4 spec; step 0 passed: CPU experts are 76 % of the Moonlight decode step, MEASURED). **Status 10-25: PRs A–C are on main for deepseek2 / Moonlight** (#120 twins, #122 one layer bit-equal, #127 `--gpu-experts N\|auto\|0`, default 0). Kill rule PASS: Moonlight `auto` vs 0 on bella, tg ×2.06, pp ×3.40, MEASURED, **TAINTED** (foreign GPU max 31 %; [log](log/2026-10-24-moe-resident-c.md)). **Next: Qwen3-30B-A3B** (qwen3moe has no resident path yet: `moe_step` / `moe_tokens`), then PR D's bench of record vs llama.cpp `--n-cpu-moe` and the 4090 at N = 26. | Moonlight decode on bella ~6 ms per step → ~160 tok/s (today 54–62); prefill ×3–5; Qwen3-30B-A3B fully resident on a 24 GB card, the first ≥ 30B-class model with a number vs llama.cpp and vLLM | ~5 builder-days; ~$10 (one 32–48 GB pod session for 30B-A3B at 8k) | resident decode < 1.5× the CPU-expert decode on bella → stop at PR B; 30B-A3B pp2100 < llama.cpp `--cpu-moe` on the same pod → not a headline | the Kimi K2 / DeepSeek template (experts resident per layer); gpt-oss-20b on 24 GB; an honest "best models" row |
 | 4 | **FP8 on Hopper under `--numerics fast`, gated on item 2's verdict.** The ADR's mode scaffolding first (M1 flag + tuple line, M2 `--datacenter`, M3 graded-tolerance gates, M5 cache key + kvsave cross-mode test: under a week, no kernels), then an FP8 W8A8 wgmma GEMM. If item 2 hits its kill rule, this becomes the replacement kernel and moves up. Safetensors stage B on consumer cards (sm_89 / sm_120) is demoted: it serves no mission cell. | parity-class prefill with vLLM-FP8 (30–38k tok/s) if the kernel reaches their ~27 % of peak; DeepSeek V3 / Kimi K2 checkpoints load without a GGUF requant | 8–12 builder-days + ~$40 of H100 | FP8-fast GEMM < 1.5× item 2's exact int8 GEMM on the same shapes → not worth a second numerics for dense models; keep it only for block-scaled checkpoints | DeepSeek V3 / K2 stage 2 at FP8, an FP8 board |
-| 5 | **Adoption floor:** `lib.rs` (a split, not a rewrite), a tagged v0.1, the honest board on the README, one sentence for "why not vLLM". | the first external user; embedding without a subprocess | 3 builder-days, $0 | none (hygiene); outcome to check: one external issue or PR within 30 days | a second human reading the code |
+| 5 | **Adoption floor:** `lib.rs` (a split, not a rewrite), a tagged v0.1, the honest board on the README, one sentence for "why not vLLM". **Status 10-25: done except the tag.** #117 split the crate (`src/lib.rs`, `examples/embed.rs`), put the board ("Where it stands") and "Why not vLLM?" on the README, and wrote `CHANGELOG.md` and draft [release notes](release-0.1.md); #124 closed #118's v0.1 blockers (A opaque `Backend`, B env errors). **v0.1.0 is not tagged**: the tag and date are Haseeb's; the rest of #118 (stderr, env-only config, leaks, `serve`'s exits) stays open. | the first external user; embedding without a subprocess | 3 builder-days, $0 | none (hygiene); outcome to check: one external issue or PR within 30 days | a second human reading the code |
 
 **The ADR, per the review (OPINION; [ADR](design/determinism-modes.md) is PROPOSED, the decision is Haseeb's):** adopt
 the mode scaffolding (M1–M3, M5) now; build no fast kernel until item 2 reports; not M4 (CPU fast prefill). Its one
@@ -226,7 +293,8 @@ token prefix, so a slot saved, restored, paged or chunked continues bit for bit.
 | 10 | **Batched speculative decoding.** Draft rows for every running request in one verify step, on while rows × (K+1) ≤ 16 (the weight-read-once regime), off above. | +30–50 % per stream at ≤ 4 clients with a draft model (ESTIMATED from the MEASURED solo gains), nothing lost at 16. Lossless by the verify contract. 30–50 h. | **first attempt closed by its kill rule** (#90, 10-19; branch `feat/serve-batched-draft` kept). bella, 7B + 0.5B drafter, job 1019-013704-5285: C=4 +24.6 % (d600) and +19.8 % (d4k), C=8 +5.4 % / +1.4 %, but at d16k C=4 −3.2 % with ITL p99 +67.6 %: the goodput gate kept drafting where plain decoding was faster ([rejected](experiments-rejected.md#speculation)). **Second attempt** ([design](research/spec-gate-v2-20261024.md), 10-24): the first gate already modelled depth; v2 adds a latency guard (uniform K per round, per-row ITL ≤ 1.1× plain), persisted round-level calibration, a Beta-posterior α with depth-bucket priors, and switching hysteresis (~4.5 builder-days; ESTIMATED to ship the +20–25 % at ≤ 4k and hold 0 % at 16k). **Stage 2** (the depth win, ESTIMATED +50–70 % at 16k): verify K+1 rows per slot reading the slot's KV once (#84's `attn_blk_mq` routed per slot; 2–3 days). Kill matrix = #90's §5 plus d8k, a mixed-depth batch, a prompt-distribution shift, sampled+greedy mix, C=1 and the restart transient. Below the line in the [proposed order](#next-proposed-order-outside-review-10-19-owner-decides) |
 
 Below the line: shared-prefix pages (copy-on-write over item 5: a swarm's 20k system prompt held once; the swarm's
-real memory win; [Agent-harness workloads](#agent-harness-workloads-later-not-scheduled) item 2), fairness (aging for oversize requests, shortest-first admission), a batched-decode kernel profile
+real memory win; [Agent-harness workloads](#agent-harness-workloads-later-not-scheduled) item 2), fairness (aging for oversize requests; shortest-first admission
+with an age bound is on main as an opt-in, `--admit-order sjf` / `--admit-age-ms`, #131), a batched-decode kernel profile
 (inside item 1's bench), q4 KV (under "Not planned", below).
 
 Detail on items 6 and 8 (now in the table): **serve ops** (#61, #62: `--api-key`, `/metrics`, `/slots`,
@@ -257,7 +325,7 @@ admission no longer stalls the other streams (Scale item 1), and paged KV (#71, 
 | 1 | **Agent-workload benchmark.** N concurrent sessions, a shared ~20k system prompt, tool-call turns, idle gaps. Report TTFT, ITL p50/p99 and aggregate tok/s on 7B, Qwen3-8B, gpt-oss-20b and Qwen3-30B-A3B on bella (12 GB). | Nothing on this workload is measured yet, so this comes first: it sets the baseline the other items are judged against. | later: not scheduled |
 | 2 | **Shared prefix pages across sessions.** A radix/prefix cache over #71's paged pool (like vLLM's automatic prefix caching or SGLang's RadixAttention): the common system prompt is prefilled once and stored once, with copy-on-write at the point where a session diverges. | The biggest expected win for this workload (ESTIMATED): every session after the first skips a ~20k prefill and the pages it would have held. This is the "shared-prefix pages" entry below the line in [Scale](#scale-bigger-models-longer-sessions-multi-user-concurrent-requests). Depends on #71. | later: not scheduled |
 | 3 | **Idle-session KV offload to host RAM.** | This is Scale item 4 (KV save/restore, stage B: `--cache-ram`), not a separate project. The agent motivation: a session idles for minutes while the human reads, and its slot is better spent on a session that is generating. | later: not scheduled (tracked as Scale item 4) |
-| 4 | **Fast first turn for MoE models.** Stream the experts through the GPU for prefill. | Today's prefill with the experts on the CPU is ~265 tok/s on gpt-oss-20b (MEASURED, bella, job 1018-092300-3a16, pp486), so a 20k agent prompt is about a minute to first token (ESTIMATED from that rate). The plan is item 1 of the design note `specs/gptoss-prefill.md`, the same work as MoE stage 3 ([Mixture-of-experts](#mixture-of-experts)). | later: not scheduled (tracked under MoE stage 3) |
+| 4 | **Fast first turn for MoE models.** Stream the experts through the GPU for prefill. | Today's prefill with the experts on the CPU is ~265 tok/s on gpt-oss-20b (MEASURED, bella, job 1018-092300-3a16, pp486), so a 20k agent prompt is about a minute to first token (ESTIMATED from that rate). The plan is item 1 of the design note `specs/gptoss-prefill.md`, the same work as MoE stage 3 ([Mixture-of-experts](#mixture-of-experts)). For deepseek2, experts resident on the GPU already speed prefill up: Moonlight pp ×3.40 with `--gpu-experts auto` (MEASURED, TAINTED, #127). | later: not scheduled (tracked under MoE stage 3) |
 
 Batched speculative decoding for the decode side is Scale item 10 (first attempt #90 closed by its kill rule; a
 second attempt with a depth-aware gate); it isn't repeated here.
@@ -273,7 +341,12 @@ the system prompt separately; item 2 is what changes them.
 given step. Qwen3-30B-A3B runs about 3B parameters per token: 30B-class quality, with a per-token read a 12 GB card
 plus system RAM can handle. Axon runs `qwen3moe` on the CPU (stages 0–1, [log](log/2026-10-17-moe-stage1.md))
 and with attention + routers on the GPU and the experts on the CPU (stage 2, [log](log/2026-10-17-moe-stage2.md));
-streaming the experts through the GPU for prefill (stage 3) is what's left of item 1. llama.cpp's `--cpu-moe` has made
+streaming the experts through the GPU for prefill (stage 3) is what's left of item 1. **Resident experts (status
+2026-10-25):** for `deepseek2` (Moonlight), MoE-resident PRs A–C are on main (#120, #122, #127): `--gpu-experts
+N|auto` keeps N layers' routed experts on the GPU, same bits, default 0. Moonlight on bella, `auto` vs 0: tg ×2.06,
+pp ×3.40 (MEASURED, TAINTED; [log](log/2026-10-24-moe-resident-c.md)). `qwen3moe` and gpt-oss fall back to CPU
+experts and say why; Qwen3-30B-A3B is next ([proposed order](#next-proposed-order-outside-review-10-19-owner-decides)
+item 3). llama.cpp's `--cpu-moe` has made
 "experts on the CPU, attention on the GPU" the usual way to run these models on 8–16 GB cards.
 
 **The plan, in order.**
@@ -289,6 +362,10 @@ streaming the experts through the GPU for prefill (stage 3) is what's left of it
    - Gates: logits vs llama.cpp within llama.cpp's own CPU/CUDA spread on 30B-A3B; `feed_batch == feed` on the MoE
      layers; chat cache reuse == fresh prefill; a bench against `llama-server --cpu-moe` (decode, pp560, pp2100)
      on bella.
+   - **Status (2026-10-25):** stages 0–2 done (#63, #67, #76); the router is one kernel shared with gpt-oss and
+     deepseek2 (#104). Experts streamed for prefill (stage 3): not started. Experts resident: the twins (#120) and
+     the grouped layer kernels (#122) already cover qwen3moe's Q6_K-down experts (tested on the pruned
+     Qwen3-30B-A3B), but `moe_step` has no resident path yet; that is the next MoE-resident PR.
 2. **gpt-oss-20b** (r10 B6), after item 1 and Gemma 3's sliding window. New pieces: the MXFP4 tensor type,
    attention sinks, and an alternating 128-token sliding window. 60–90 builder-hours, medium bits risk (a new quant
    type, and sinks in every attention kernel); gates as item 1. ESTIMATED ~45 tok/s decode with every expert on the
@@ -337,7 +414,7 @@ trigger each step. Nothing here is scheduled.
 | Qwen3-235B-A22B | MoE | ≈ 141 GB | ≈ 13 GB | `qwen3moe`: CPU (#63), or attention on the GPU with the experts on the CPU (#67) | experts streamed / resident on the GPU (MoE stage 3+); a box with ≥ 160 GB RAM |
 | Qwen3-Coder-480B-A35B | MoE | ≈ 288 GB | ≈ 21 GB | `qwen3moe`, as above | as above, ≥ 320 GB RAM |
 | Llama 3.1 405B | dense | ≈ 243 GB | ≈ 243 GB | `llama`; pipeline parallel (#34) should run it on a 4×80 GB pod (untested) | tensor parallel, to make it fast |
-| DeepSeek V3 / R1 (671B, 37B active) | MoE + MLA | ≈ 403 GB | ≈ 22 GB | `deepseek2` on the CPU (#79) and with MLA on the GPU, routed experts on the CPU (#89); run only on Moonlight-16B-A3B. Grouped routing (`expert_group_count > 1`) is refused | experts on the GPU, ≥ 450 GB RAM or a GPU node |
+| DeepSeek V3 / R1 (671B, 37B active) | MoE + MLA | ≈ 403 GB | ≈ 22 GB | `deepseek2` on the CPU (#79) and with MLA on the GPU, routed experts on the CPU (#89) or resident on the GPU as VRAM allows (`--gpu-experts`, #127); run only on Moonlight-16B-A3B. Grouped routing (`expert_group_count > 1`) is refused | experts streamed / cached across GPUs, ≥ 450 GB RAM or a GPU node |
 | Kimi K2 (1T, 32B active) | DeepSeek V3 architecture | ≈ 600 GB | ≈ 19 GB | as DeepSeek V3, plus the `kimi-k2` tokenizer and chat format (#79); Q2_K / Q3_K run (#72) | the hardware: ≥ 650 GB at Q4_K_M, ≈ 250–380 GB at 2–3 bits ([long-term goal](#long-term-goals)) |
 | DeepSeek V4.1 Flash (1017) | MoE + new attention, vision | 444.7 GB (MEASURED: published GGUF shards) | ≈ 9 GB | refused (`deepseek41`) | a new architecture ([below](#deepseek-v41-flash)), experts on the GPU, a ≥ 500 GB node |
 
@@ -345,6 +422,8 @@ trigger each step. Nothing here is scheduled.
 
 1. **Experts on the GPU.** MoE stages 2–3, already planned ([Mixture-of-experts](#mixture-of-experts), above).
    Three of the five rows depend on it, and so do both DeepSeek-architecture rows once item 2 exists.
+   *Status (10-25):* resident experts for deepseek2 are on main (#127, opt-in), so a model whose experts fit in
+   VRAM can keep them there; streaming and caching for models that don't fit are not started.
    *Trigger:* already next in the MoE plan.
 2. **MLA attention and DeepSeek routing** (the `deepseek2` GGUF architecture, which covers V2, V3 and Kimi K2).
    MLA caches one compressed latent per token per layer (576 values at DeepSeek V3's shapes) instead of full K and
@@ -360,8 +439,10 @@ trigger each step. Nothing here is scheduled.
      Kimi and DeepSeek V3 chat formats. **Stage 1 done** ([log](log/2026-10-18-deepseek2-s1.md)): `--device cuda`
      with MLA attention (own kernel module, latent cache, attention in 128-row splits), router, shared experts
      and the dense lead on the GPU, the routed experts on the CPU (the #67 split), one code path for decode and
-     batched passes. Next: `--kv q8` for the latent cache, tensor-core attention for long prefills, then the
-     generic MoE stages (experts streamed through the GPU, experts resident in VRAM).
+     batched passes. **Resident routed experts done** (2026-10-25, #120 / #122 / #127: `--gpu-experts N|auto`,
+     opt-in, same bits; Moonlight `auto` vs 0 tg ×2.06, pp ×3.40, MEASURED, TAINTED;
+     [log](log/2026-10-24-moe-resident-c.md)). Next: `--kv q8` for the latent cache, tensor-core attention for
+     long prefills, experts streamed through the GPU for prefill when they don't fit.
    - **Exactness:** the absorbed and expanded forms round differently, so decode, prefill and verify must pick one
      order and keep it, the same decode == prefill rule as every other kernel.
    - **Dev model that fits Parabellum:** Moonlight-16B-A3B-Instruct (Q4_K_M 10.54 GB): the current absorbed GGUF
@@ -450,8 +531,10 @@ models. Item 3 matters for dense giants. Item 4 only matters past RAM.
   correctness-only round under emulation is possible, but it couldn't make speed claims.
 - **macOS and Windows builds.** CPU-only ports of dlopen, mmap and thread affinity can't be verified
   here, and Metal would be a new backend.
-- **Mixture-of-experts** (Qwen3-30B-A3B, gpt-oss-20b) as a GPU-resident model: they don't fit a 12 GB card.
-  With the experts on the CPU they do: see [Mixture-of-experts](#mixture-of-experts), above.
+- **Mixture-of-experts** (Qwen3-30B-A3B, gpt-oss-20b) as a GPU-resident model *on a 12 GB card*: they don't fit.
+  With the experts on the CPU they do: see [Mixture-of-experts](#mixture-of-experts), above. Resident on a 24 GB
+  card is item 3 of the [proposed order](#next-proposed-order-outside-review-10-19-owner-decides); deepseek2's
+  experts can be resident layer by layer as VRAM allows (#127).
 - **Context shift (llama.cpp's K-shift on overflow).** It re-positions cached keys in place, so the cache is no
   longer what a fresh prefill writes: it breaks "cache reuse == fresh prefill" by design. Agent harnesses compact
   their own history on a 400; `chat` truncates. Save/restore (Scale item 4) is the exact alternative.

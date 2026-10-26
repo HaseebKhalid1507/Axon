@@ -408,7 +408,7 @@ check the work against the words. The section below is proposed for roadmap.md, 
 > Haseeb's words, in order: **"make inference cheap and fast"**, **"run the best models"**, and **"run at datacenters
 > without wasting resources: squeeze every drop."**
 >
-> Two tiers serve those, under two numerics modes ([design/determinism-modes.md](design/determinism-modes.md)):
+> Two tiers serve those, under two numerics modes ([determinism-modes.md](determinism-modes.md)):
 >
 > | tier | hardware | what "cheap and fast" means there | numerics | who it competes with |
 > |---|---|---|---|---|
