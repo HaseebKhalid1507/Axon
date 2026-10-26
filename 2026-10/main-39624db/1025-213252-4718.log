@@ -1,0 +1,66 @@
+[axon-run 21:32:52] submitted 1025-213252-4718 by /home/haseeb/.cache/axon-main: /home/haseeb/.cache/axon-main/md5-main-13e659db.sh /home/haseeb/.cache/axon-main/axon-b2068e7 /home/haseeb/.cache/axon-main/axon-39624db /home/haseeb/.cache/axon-main/md5-b2068e7-vs-39624db
+[axon-run 01:51:06] scope axon-job-1025-213252-4718-1792993866.scope in app-axonjobs.slice: MemoryMax 10111 MB, MemoryHigh 9099 MB, no swap, oomd pressure kill 80% (claim 6058 MB): an OOM here kills only this job
+[axon-run 01:51:06] job 1025-213252-4718 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1025-213252-4718-1792993866 --slice=app-axonjobs.slice -p MemoryMax=10111M -p MemoryHigh=9099M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-main/md5-main-13e659db.sh /home/haseeb/.cache/axon-main/axon-b2068e7 /home/haseeb/.cache/axon-main/axon-39624db /home/haseeb/.cache/axon-main/md5-b2068e7-vs-39624db
+axon-q 01:51:06 start slot 16-23: /home/haseeb/.cache/axon-main/md5-main-13e659db.sh /home/haseeb/.cache/axon-main/axon-b2068e7 /home/haseeb/.cache/axon-main/axon-39624db /home/haseeb/.cache/axon-main/md5-b2068e7-vs-39624db
+base	qwen2.5-0.5b-q4_k_m	p1	c0dfbb1ca4f2	rc=0
+cand	qwen2.5-0.5b-q4_k_m	p1	c0dfbb1ca4f2	rc=0
+base	qwen2.5-0.5b-q4_k_m	p2	acd9c2d5e0aa	rc=0
+cand	qwen2.5-0.5b-q4_k_m	p2	acd9c2d5e0aa	rc=0
+base	qwen2.5-0.5b-q4_k_m	p3	35b4ed5d823a	rc=0
+cand	qwen2.5-0.5b-q4_k_m	p3	35b4ed5d823a	rc=0
+base	qwen2.5-0.5b-q4_k_m	p4	545dd4eb4460	rc=0
+cand	qwen2.5-0.5b-q4_k_m	p4	545dd4eb4460	rc=0
+base	qwen2.5-0.5b-q4_k_m	p5	535a77a61566	rc=0
+cand	qwen2.5-0.5b-q4_k_m	p5	535a77a61566	rc=0
+base	Qwen3-0.6B-Q8_0	p1	a21a6d55c9dc	rc=0
+cand	Qwen3-0.6B-Q8_0	p1	a21a6d55c9dc	rc=0
+base	Qwen3-0.6B-Q8_0	p2	8393d261ef12	rc=0
+cand	Qwen3-0.6B-Q8_0	p2	8393d261ef12	rc=0
+base	Qwen3-0.6B-Q8_0	p3	0b1ad272f80c	rc=0
+cand	Qwen3-0.6B-Q8_0	p3	0b1ad272f80c	rc=0
+base	Qwen3-0.6B-Q8_0	p4	545dd4eb4460	rc=0
+cand	Qwen3-0.6B-Q8_0	p4	545dd4eb4460	rc=0
+base	Qwen3-0.6B-Q8_0	p5	cd71d36978ba	rc=0
+cand	Qwen3-0.6B-Q8_0	p5	cd71d36978ba	rc=0
+base	Llama-3.2-1B-Instruct-Q4_K_M	p1	cc9424ad2c9b	rc=0
+cand	Llama-3.2-1B-Instruct-Q4_K_M	p1	cc9424ad2c9b	rc=0
+base	Llama-3.2-1B-Instruct-Q4_K_M	p2	955f73cf4e74	rc=0
+cand	Llama-3.2-1B-Instruct-Q4_K_M	p2	955f73cf4e74	rc=0
+base	Llama-3.2-1B-Instruct-Q4_K_M	p3	c27131a3ddf5	rc=0
+cand	Llama-3.2-1B-Instruct-Q4_K_M	p3	c27131a3ddf5	rc=0
+base	Llama-3.2-1B-Instruct-Q4_K_M	p4	545dd4eb4460	rc=0
+cand	Llama-3.2-1B-Instruct-Q4_K_M	p4	545dd4eb4460	rc=0
+base	Llama-3.2-1B-Instruct-Q4_K_M	p5	4766f6be572d	rc=0
+cand	Llama-3.2-1B-Instruct-Q4_K_M	p5	4766f6be572d	rc=0
+base	qwen2.5-1.5b-instruct-q4_k_m	p1	5fb3df3110f7	rc=0
+cand	qwen2.5-1.5b-instruct-q4_k_m	p1	5fb3df3110f7	rc=0
+base	qwen2.5-1.5b-instruct-q4_k_m	p2	bd59c0383e20	rc=0
+cand	qwen2.5-1.5b-instruct-q4_k_m	p2	bd59c0383e20	rc=0
+base	qwen2.5-1.5b-instruct-q4_k_m	p3	70f75b03ed48	rc=0
+cand	qwen2.5-1.5b-instruct-q4_k_m	p3	70f75b03ed48	rc=0
+base	qwen2.5-1.5b-instruct-q4_k_m	p4	545dd4eb4460	rc=0
+cand	qwen2.5-1.5b-instruct-q4_k_m	p4	545dd4eb4460	rc=0
+base	qwen2.5-1.5b-instruct-q4_k_m	p5	9ba7dafab87e	rc=0
+cand	qwen2.5-1.5b-instruct-q4_k_m	p5	9ba7dafab87e	rc=0
+base	Qwen2.5-7B-Instruct-Q4_K_M	p1	0db9b9a9d122	rc=0
+cand	Qwen2.5-7B-Instruct-Q4_K_M	p1	0db9b9a9d122	rc=0
+base	Qwen2.5-7B-Instruct-Q4_K_M	p2	e8fa94e8d0bf	rc=0
+cand	Qwen2.5-7B-Instruct-Q4_K_M	p2	e8fa94e8d0bf	rc=0
+base	Qwen2.5-7B-Instruct-Q4_K_M	p3	c3e22f8d32bc	rc=0
+cand	Qwen2.5-7B-Instruct-Q4_K_M	p3	c3e22f8d32bc	rc=0
+base	Qwen2.5-7B-Instruct-Q4_K_M	p4	545dd4eb4460	rc=0
+cand	Qwen2.5-7B-Instruct-Q4_K_M	p4	545dd4eb4460	rc=0
+base	Qwen2.5-7B-Instruct-Q4_K_M	p5	8926c8b9f605	rc=0
+cand	Qwen2.5-7B-Instruct-Q4_K_M	p5	8926c8b9f605	rc=0
+base	Qwen3-8B-Q4_K_M	p1	0a81992aa5b6	rc=0
+cand	Qwen3-8B-Q4_K_M	p1	0a81992aa5b6	rc=0
+base	Qwen3-8B-Q4_K_M	p2	f10bc9852a5c	rc=0
+cand	Qwen3-8B-Q4_K_M	p2	f10bc9852a5c	rc=0
+base	Qwen3-8B-Q4_K_M	p3	ad8764940f3d	rc=0
+cand	Qwen3-8B-Q4_K_M	p3	ad8764940f3d	rc=0
+base	Qwen3-8B-Q4_K_M	p4	545dd4eb4460	rc=0
+cand	Qwen3-8B-Q4_K_M	p4	545dd4eb4460	rc=0
+base	Qwen3-8B-Q4_K_M	p5	cd71d36978ba	rc=0
+cand	Qwen3-8B-Q4_K_M	p5	cd71d36978ba	rc=0
+0 of 30 differ; 0 nonzero rc
+[axon-run 01:52:08] exit 0 after 62.1s (host bella)
