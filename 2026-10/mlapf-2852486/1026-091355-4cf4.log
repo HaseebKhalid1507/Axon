@@ -1,0 +1,33 @@
+[axon-run 09:13:55] submitted 1026-091355-4cf4 by /home/haseeb/.cache/axon-wt-mlapf: /home/haseeb/.cache/axon-mlapf/axon-test-2852486 cuda::qwen2::mla::tests::mla_heads_mm_equals_main cuda::qwen2::mla::tests::mla_heads_mv_equals_main moe::ds2_tests::ds2_gpu_fixture --test-threads 1 --nocapture
+[axon-run 09:13:55] job 1026-091355-4cf4 -> jade: /home/haseeb/.local/bin/axon-remote --host jade --vram 2000 --src /home/haseeb/.cache/axon-wt-mlapf /home/haseeb/.cache/axon-mlapf/axon-test-2852486 cuda::qwen2::mla::tests::mla_heads_mm_equals_main cuda::qwen2::mla::tests::mla_heads_mv_equals_main moe::ds2_tests::ds2_gpu_fixture --test-threads 1 --nocapture
+axon-remote: uploading axon-test-2852486 (9408a273008c025d4fdd2681) + source of /home/haseeb/.cache/axon-wt-mlapf
+
+sent 2,041,987 bytes  received 5,455 bytes  4,094,884.00 bytes/sec
+total size is 7,600,619  speedup is 3.71
+
+sent 7,061,890 bytes  received 35 bytes  4,707,950.00 bytes/sec
+total size is 22,549,528  speedup is 3.19
+axon-remote: job 20261026-091359-axon-test-2852486-1890043 on jade (GPU, 2000 MB)
+[axon-node 09:13:59] GPU lock taken; job wants 2000 MB; nvidia-smi used/total/temp: 5 MiB, 3072 MiB, 46
+[axon-node 09:13:59] run axon-test-2852486 (9408a273008c025d4fdd2681) as /home/haseeb/.cache/axon-wt-mlapf on jade, AXON_THREADS=4 RUST_TEST_THREADS=2
+[axon-node 09:13:59] memory cap (scope MemoryMax) 2702 MB = MemAvailable - 1536 MB; swap off for the job
+[axon-node 09:13:59] MemAvailable 4238 MB, load ['0.80', '0.57', '0.63']; nice -n 19 ionice -c3 taskset -c 0-7
+
+running 4 tests
+test cuda::qwen2::mla::tests::mla_heads_mm_equals_main ... testutil: GPU has 2.94 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+mla_heads_mm == main: 54407296 outputs
+ok
+test cuda::qwen2::mla::tests::mla_heads_mv_equals_main ... mla_heads_mv == main: 9539028 outputs
+ok
+test moe::ds2_tests::ds2_gpu_fixture_bits ... ok
+test moe::ds2_tests::ds2_gpu_fixture_graded ... ds2 fixture Opt { q_lora: false, yarn: false } vs the f64 reference (60 positions): gpu top-1 56, mean |dlogit| 0.0292, max 0.205; cpu top-1 55, mean 0.0470, max 1.083
+ds2 fixture Opt { q_lora: true, yarn: false } vs the f64 reference (60 positions): gpu top-1 56, mean |dlogit| 0.0524, max 1.244; cpu top-1 52, mean 0.0691, max 1.397
+ds2 fixture Opt { q_lora: false, yarn: true } vs the f64 reference (160 positions): gpu top-1 140, mean |dlogit| 0.0707, max 1.890; cpu top-1 139, mean 0.0952, max 3.246
+ds2 fixture Opt { q_lora: true, yarn: true } vs the f64 reference (160 positions): gpu top-1 136, mean |dlogit| 0.0877, max 2.277; cpu top-1 131, mean 0.1130, max 2.549
+ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 756 filtered out; finished in 9.24s
+
+[axon-node 09:14:10] exit 0 after 10.5s; lowest MemAvailable seen 3923 MB
+[axon-node 09:14:10] peak RSS 308 MB (job process tree PSS, 2 s samples x5)
+[axon-run 09:14:10] exit 0 after 15.3s (host jade)

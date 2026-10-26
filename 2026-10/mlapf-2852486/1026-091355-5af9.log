@@ -1,0 +1,22 @@
+[axon-run 09:13:55] submitted 1026-091355-5af9 by /home/haseeb/.cache/axon-wt-mlapf: /home/haseeb/.cache/axon-mlapf/md5all.sh 2852486
+[axon-run 09:25:02] scope axon-job-1026-091355-5af9-1793021102.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 16000 MB): an OOM here kills only this job
+[axon-run 09:25:02] job 1026-091355-5af9 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-091355-5af9-1793021102 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-mlapf/md5all.sh 2852486
+axon-q 09:25:02 start slot 16-23: /home/haseeb/.cache/axon-mlapf/md5all.sh 2852486
+moe:         attention + router on the GPU (0.92 GiB, ctx 70), 64 experts x 0 layers on the CPU (top-6); 26 of 26 expert layers resident on the GPU (8.87 GiB), kv f16
+14 of 14 base/cand pairs identical; 0 nonzero rc; cand 0 vs auto differ on: none
+MD5ML PASS
+serve base gauto: placement ['moe:         attention + router on the GPU (0.92 GiB, ctx 4096), 64 experts x 0 layers on the CPU (top-6); 26 of 26 expert layers resident on the GPU (8.87 GiB), kv f16']
+serve cand g0: usage [{'completion_tokens': 128, 'prompt_tokens': 451, 'prompt_tokens_details': {'cached_tokens': 0}, 'total_tokens': 579}, {'completion_tokens': 64, 'prompt_tokens': 5, 'prompt_tokens_details': {'cached_tokens': 0}, 'total_tokens': 69}]
+serve cand g0: placement ['moe:         attention + router on the GPU (0.92 GiB, ctx 4096), 64 experts x 26 layers on the CPU (top-6), kv f16']
+serve cand gauto: usage [{'completion_tokens': 128, 'prompt_tokens': 451, 'prompt_tokens_details': {'cached_tokens': 0}, 'total_tokens': 579}, {'completion_tokens': 64, 'prompt_tokens': 5, 'prompt_tokens_details': {'cached_tokens': 0}, 'total_tokens': 69}]
+serve cand gauto: placement ['moe:         attention + router on the GPU (0.92 GiB, ctx 4096), 64 experts x 0 layers on the CPU (top-6); 26 of 26 expert layers resident on the GPU (8.87 GiB), kv f16']
+serve g0 request 0 (crosses 512): identical
+serve g0 request 1 (below 512): identical
+serve gauto request 0 (crosses 512): identical
+serve gauto request 1 (below 512): identical
+SERVE PASS
+gen: 6 of 6 base/cand pairs identical; 0 nonzero rc
+MD5ML512 PASS
+md5ml rc=0 md5ml512 rc=0
+MD5ALL identical
+[axon-run 09:29:07] exit 0 after 244.5s (host bella)
