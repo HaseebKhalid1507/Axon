@@ -1,4 +1,4 @@
-# serve: refuse an explicit --parallel N that doesn't fit  (PR #PRNUM)
+# serve: refuse an explicit --parallel N that doesn't fit  (PR #141)
 
 - Date: 2026-10-26. Branch: fix/parallel. Base: main 39624db. Status: open
 - Pick / design: issue #137 (found by okarin while gating #136); the --help default fix was asked by the foreman on
@@ -27,7 +27,7 @@ foreman; it matches how `--parallel` is refused on the CPU/split and for MoE (`m
 an explicit value is refused, never the automatic sizing.
 
 ## How it was verified
-GATES
+See PR #141 §6 (focused release + debug on avante, fast tier release + debug, md5 vs main, CLI demo); results added when the gates finish.
 
 ## Results
 No speed claim: start-up decisions only. Bits: the md5 of `gen` output vs main (serve's numerics are untouched).
