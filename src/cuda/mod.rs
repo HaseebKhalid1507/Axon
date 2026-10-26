@@ -1554,7 +1554,9 @@ pub fn numerics_tag(gpu: &Gpu) -> Result<String, String> {
 
 /// AXON_KCHUNK: force every GPU product's chunk of K (decode.cu
 /// kchunk_vals), in values: 512, 1024 or 2048 (tests and the H100 kit: the
-/// product rule's alternatives; NUMERICS-changing). Unset, empty or
+/// product rule's alternatives), or 65536 (one chunk for every product
+/// Axon runs: NUMERICS_VERSION 1's order, so main's bits: the check that
+/// nothing but the chain changed). NUMERICS-changing. Unset, empty or
 /// anything else: the rule. Read once.
 pub(crate) fn kchunk_override() -> Option<usize> {
     static K: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
@@ -1562,7 +1564,7 @@ pub(crate) fn kchunk_override() -> Option<usize> {
         std::env::var("AXON_KCHUNK")
             .ok()
             .and_then(|v| v.trim().parse().ok())
-            .filter(|c| matches!(c, 512 | 1024 | 2048))
+            .filter(|c| matches!(c, 512 | 1024 | 2048 | 65536))
     })
 }
 
