@@ -1,0 +1,43 @@
+[axon-run 23:17:50] submitted 1025-231750-64ed by /home/haseeb/.cache/axon-memcg: /home/haseeb/.cache/axon-memcg/rd/mincap.sh /home/haseeb/.cache/axon-main/axon-39624db /home/haseeb/.cache/axon-memcg/rd/axon-2b60c46
+[axon-run 23:33:52] scope axon-job-1025-231750-64ed-1792985632.scope in app-axonjobs.slice: MemoryMax 8524 MB, MemoryHigh 7671 MB, no swap, oomd pressure kill 80% (claim 5000 MB): an OOM here kills only this job
+[axon-run 23:33:52] job 1025-231750-64ed -> bella: systemd-run --user --scope --quiet --unit=axon-job-1025-231750-64ed-1792985632 --slice=app-axonjobs.slice -p MemoryMax=8524M -p MemoryHigh=7671M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-memcg/rd/mincap.sh /home/haseeb/.cache/axon-main/axon-39624db /home/haseeb/.cache/axon-memcg/rd/axon-2b60c46
+axon-q 23:33:52 start slot 16-23: /home/haseeb/.cache/axon-memcg/rd/mincap.sh /home/haseeb/.cache/axon-main/axon-39624db /home/haseeb/.cache/axon-memcg/rd/axon-2b60c46
+MINCAP qwen2.5-0.5b-q4_k_m 663 MB (file 468 MB)
+  at 535M: main rc=137 cand rc=2 needs about 0.14 GiB of RAM (repacking the copy 0.14 GiB, the KV cache of 14 tokens 0.00 GiB) and only 0.01 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/mincap-948679-27377.scope memory.max 535 MiB)
+  at 648M: main rc=137 cand rc=2 needs about 0.14 GiB of RAM (repacking the copy 0.14 GiB, the KV cache of 14 tokens 0.00 GiB) and only 0.12 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/mincap-948679-13796.scope memory.max 648 MiB)
+  at 663M: main rc=0 cand rc=2 needs about 0.14 GiB of RAM (repacking the copy 0.14 GiB, the KV cache of 14 tokens 0.00 GiB) and only 0.13 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/mincap-948679-10844.scope memory.max 663 MiB)
+  at 727M: main rc=0 cand rc=0 
+  at 1326M: main rc=0 cand rc=0 
+MINCAP Qwen3-0.6B-Q8_0 894 MB (file 609 MB)
+  at 766M: main rc=137 cand rc=2 needs about 0.21 GiB of RAM (repacking the copy 0.21 GiB, the KV cache of 14 tokens 0.00 GiB) and only 0.10 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/mincap-948679-11496.scope memory.max 766 MiB)
+  at 878M: main rc=137 cand rc=2 needs about 0.21 GiB of RAM (repacking the copy 0.21 GiB, the KV cache of 14 tokens 0.00 GiB) and only 0.21 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/mincap-948679-803.scope memory.max 878 MiB)
+  at 894M: main rc=137 cand rc=0 
+  at 958M: main rc=0 cand rc=0 
+  at 1788M: main rc=0 cand rc=0 
+MINCAP Llama-3.2-1B-Instruct-Q4_K_M 1155 MB (file 770 MB)
+  at 1027M: main rc=137 cand rc=2 needs about 0.35 GiB of RAM (repacking the copy 0.35 GiB, the KV cache of 15 tokens 0.00 GiB) and only 0.19 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/mincap-948679-26143.scope memory.max 1027 MiB)
+  at 1140M: main rc=137 cand rc=2 needs about 0.35 GiB of RAM (repacking the copy 0.35 GiB, the KV cache of 15 tokens 0.00 GiB) and only 0.30 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/mincap-948679-26223.scope memory.max 1140 MiB)
+  at 1155M: main rc=0 cand rc=2 needs about 0.35 GiB of RAM (repacking the copy 0.35 GiB, the KV cache of 15 tokens 0.00 GiB) and only 0.32 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/mincap-948679-30577.scope memory.max 1155 MiB)
+  at 1219M: main rc=0 cand rc=0 
+  at 2310M: main rc=0 cand rc=0 
+MINCAP qwen2.5-1.5b-instruct-q4_k_m 1309 MB (file 1065 MB)
+  at 1181M: main rc=137 cand rc=2 needs about 0.19 GiB of RAM (repacking the copy 0.19 GiB, the KV cache of 14 tokens 0.00 GiB) and only 0.06 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/mincap-948679-30020.scope memory.max 1181 MiB)
+  at 1294M: main rc=137 cand rc=2 needs about 0.19 GiB of RAM (repacking the copy 0.19 GiB, the KV cache of 14 tokens 0.00 GiB) and only 0.17 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/mincap-948679-9908.scope memory.max 1294 MiB)
+  at 1309M: main rc=0 cand rc=2 needs about 0.19 GiB of RAM (repacking the copy 0.19 GiB, the KV cache of 14 tokens 0.00 GiB) and only 0.18 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/mincap-948679-20084.scope memory.max 1309 MiB)
+  at 1373M: main rc=0 cand rc=0 
+  at 2618M: main rc=0 cand rc=0 
+MINCAP qwen2.5-3b-instruct-q4_k_m 2323 MB (file 2007 MB)
+  at 2195M: main rc=137 cand rc=2 needs about 0.27 GiB of RAM (repacking the copy 0.27 GiB, the KV cache of 14 tokens 0.00 GiB) and only 0.12 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/mincap-948679-21154.scope memory.max 2195 MiB)
+  at 2308M: main rc=137 cand rc=2 needs about 0.27 GiB of RAM (repacking the copy 0.27 GiB, the KV cache of 14 tokens 0.00 GiB) and only 0.24 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/mincap-948679-9755.scope memory.max 2308 MiB)
+  at 2323M: main rc=0 cand rc=2 needs about 0.27 GiB of RAM (repacking the copy 0.27 GiB, the KV cache of 14 tokens 0.00 GiB) and only 0.25 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/mincap-948679-1183.scope memory.max 2323 MiB)
+  at 2387M: main rc=0 cand rc=0 
+  at 4646M: main rc=0 cand rc=0 
+MINCAP google_gemma-3-1b-it-Q8_0 1509 MB (file 1019 MB)
+  at 1381M: main rc=137 cand rc=2 needs about 0.39 GiB of RAM (repacking the copy 0.39 GiB, the KV cache of 15 tokens 0.00 GiB) and only 0.29 GiB is available (bound by cgroup /user.slice/user-1000.slice/user@1000.service/app.slice/mincap-948679-19461.scope memory.max 1381 MiB)
+  at 1493M: main rc=0 cand rc=0 
+  at 1509M: main rc=0 cand rc=0 
+  at 1573M: main rc=0 cand rc=0 
+  at 3018M: main rc=0 cand rc=0 
+MINCAP-DONE
+[axon-run 23:34:49] exit 0 after 57.7s (host bella)
+[axon-run 23:34:53] EXPECT ok: output matches /MINCAP-DONE/
