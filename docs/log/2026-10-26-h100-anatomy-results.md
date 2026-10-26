@@ -96,7 +96,9 @@ Step trace of the first row, 1,047 steps, 38.04 s wall:
 | 600 | 5.69 ms | 58.2 µs |
 | 4096 | 7.35 ms | 64.7 µs |
 
-The shortest-first spec estimated t0 at 8–10 ms on an H100.
+The shortest-first spec estimated t0 at 8–10 ms on an H100, derived from the C = 1 short-prompt TTFT, so it is the
+cost of a whole short-prompt pass. Measured, a 64-token pass costs 9.96 ms (depth 0), which is inside that range.
+The spec's ~1 s per 104-short wave in two-pass mode therefore stands, and so does its "on the edge without #119" note.
 
 ## What the numbers decide
 
@@ -111,4 +113,6 @@ In short:
   it sits inside the passes: 524 two-pass steps and 467-token chunks.
 - **#119 as configured doesn't pay at C = 128 on Hopper:** −3 % aggregate, TTFT ×5.5, goodput −70 %, against
   ITL ÷2.
-- **Shortest-first:** t0 is under the spec's estimate, so it doesn't need #119 first.
+- **Shortest-first:** a short pass costs ~10 ms, which confirms the spec's estimate. A wave of shorts in two-pass
+  mode takes ~1 s, and short TTFT p50 ~0.3 s is on the edge. #119 as configured doesn't help at C = 128, so 1(c) goes
+  ahead without waiting for it and is judged by its own A/B.
