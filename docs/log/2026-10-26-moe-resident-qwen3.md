@@ -32,7 +32,7 @@ Gates of record, at 111456a, all on bella:
 |---|---|---|
 | resident suite + Moonlight, release | 1026-062648-e18c | PASS 29/0/1 |
 | full release, 2 shards | group 551e | PASS 438/0/22 + 266/0/29 |
-| full debug, 2 shards | group 8dfb | 55e8 PASS 438/0/22; 0b72 pending |
+| full debug, 2 shards | group 8dfb | PASS 438/0/22 + 266/0/29 |
 | md5 vs main 680a2c5 | 1026-062650-e264 | pending |
 
 Earlier rounds:
@@ -44,14 +44,19 @@ Earlier rounds:
   - md5 vs be13f1f all identical (cpu 99/99, cuda 108/108, cuda q8 108/108).
 - **f2148c6:** q3res tests 3/0/0, release and debug.
 
-A/B 1026-052419-63a6 (b9a4093 vs be13f1f, `--timing bella`): **TAINTED** (max 32 %, mean 6.2 %).
-- Text is identical across main / `--gpu-experts 0` / `auto`.
-- `auto` over main:
-  - pruned 30B-A3B: tg512 ×1.46, pp2100 ×10.1;
-  - 4x0.6B: ×2.26, ×12.3.
-- The `0`-row decode ×0.88 on the pruned 30B is not a record: main's own spread there was 18 %.
-- A clean A/B (1026-075028-1c02) is pending. It is not a merge gate: the default path is bit-identical and `auto` is
-  opt-in.
+A/B of record: 1026-075028-1c02 (111456a vs main 680a2c5, `--timing bella`), **CLEAN** (max 5 %, mean 0.5 %).
+Record rule: spread < 10 %, ≤ 1,000 major faults; every run had 0 major faults. Text is identical across main /
+`--gpu-experts 0` / `auto`.
+
+| model | metric | main | `0` | `auto` | auto / main |
+|---|---|---:|---:|---:|---:|
+| Qwen3-MOE-4x0.6B | tg512 | 171.4 | 173.2 | 427.6 | ×2.49 |
+| Qwen3-MOE-4x0.6B | pp2100 | 1,978 | 2,172 (noise: ranges overlap) | 27,785 | ×14.0 |
+| pruned Qwen3-30B-A3B | tg512 | 760.8 (11 % spread: not a record) | 685.6 (not a record) | 951.8 (0.1 %) | ×1.25, indicative only |
+| pruned Qwen3-30B-A3B | pp2100 | 8,563 | 8,422 (−1.6 %, records) | 90,793 | ×10.6 |
+
+The earlier A/B 63a6 (b9a4093 vs be13f1f) was TAINTED (max 32 %) and is superseded. The full Qwen3-30B-A3B end to
+end waits for a pod bench (`auto` vs `0`, text and speed).
 
 ## What didn't work / open
 - The full Qwen3-30B end-to-end number isn't measurable on bella. The 18.6 GB file doesn't stay in the page cache
