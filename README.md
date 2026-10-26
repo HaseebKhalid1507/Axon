@@ -99,8 +99,8 @@ Works today, honestly scoped:
   layout; stage 2, [log](docs/log/2026-10-17-moe-stage2.md)). Both: decode == batched
   prefill == verify bit for bit, logits within llama.cpp's own CPU/CUDA spread; no layer
   split (`--gpu-layers`), multi-GPU or MoE draft model. `axon info` prints its experts and
-  bytes per token. Keeping its experts on the GPU, as `--gpu-experts` does for `deepseek2`
-  (below), is next ([roadmap](docs/roadmap.md#mixture-of-experts)). `deepseek2` (DeepSeek V2/V3/V3.1, Kimi K2,
+  bytes per token. `--gpu-experts N|auto` keeps the experts of N MoE layers on the GPU too,
+  with the same bits (below; [roadmap](docs/roadmap.md#mixture-of-experts)). `deepseek2` (DeepSeek V2/V3/V3.1, Kimi K2,
   Moonlight: MLA attention in the absorbed form with a K-only 576-wide cache, sigmoid routing
   with `exp_probs_b` and shared experts, YaRN's DeepSeek attention scale; the `kimi-k2` and
   `deepseek-v3` tokenizers and the Kimi and DeepSeek V3 chat formats) runs on the CPU
@@ -206,7 +206,7 @@ Works today, honestly scoped:
 - Rust 1.89 or newer.
 
 Not on main yet: tensor parallel, FP8 weights, saving and restoring `serve` slots, streaming MoE experts through the
-GPU for long prompts (stage 3), keeping `qwen3moe` / gpt-oss experts on the GPU (`deepseek2`'s can be:
+GPU for long prompts (stage 3), keeping gpt-oss's experts on the GPU (`deepseek2`'s and `qwen3moe`'s can be:
 `--gpu-experts`), batched serving of MoE models (they serve one request at a time), batched speculative decoding in
 `serve` (the first attempt, #90, was closed by its kill rule), and fast batched decode on Hopper (see Numbers: serving on an H100). What's in flight and why: [docs/roadmap.md](docs/roadmap.md). How Axon is built and measured, and
 what was tried and dropped: [docs/methodology.md](docs/methodology.md),
@@ -301,13 +301,15 @@ Defaults, as `axon --help` gives them:
   GPU, the rest on the CPU (0 = all on the CPU). Default: all of them if they fit with
   256 MiB to spare, else as many as fit with another 640 MiB left for the desktop; an
   explicit N only needs the 256 MiB.
-- `--gpu-experts N|auto` (gen, chat; `AXON_GPU_EXPERTS` for serve too; deepseek2 with
-  `--device cuda`): the routed experts of N MoE layers resident on the GPU instead of the
+- `--gpu-experts N|auto` (gen, chat; `AXON_GPU_EXPERTS` for serve too; deepseek2 and
+  qwen3moe with `--device cuda`): the routed experts of N MoE layers resident on the GPU instead of the
   CPU, smallest layers first, as many as fit after the context's cache (`auto`: all that
   fit). Default 0. Same bits as on the CPU (the experts' GPU kernels are twins of the CPU's
   r8 kernels); where that can't hold (`AXON_REPACK=0`, a host whose FMA choice differs from
   the GPU twins', a GPU below sm_80, or a weight type with no twin) it keeps them on the CPU
-  and says why, as it does for `qwen3moe` and gpt-oss (deepseek2 only for now).
+  and says why, as it does for gpt-oss (no MXFP4 twin yet). qwen3moe's bits are
+  checked on Qwen3-MOE-4x0.6B and a pruned Qwen3-30B-A3B (the 30B's expert shapes); the full
+  Qwen3-30B-A3B is untested end to end until its pod bench (`auto` vs `0`, text and speed) runs.
   On the CPU and with dense models the flag does nothing. `axon serve` takes it as
   `AXON_GPU_EXPERTS` and serves a MoE model one request at a time.
 - `--gpus L` (gen, chat; `AXON_GPUS=L` for serve too): the CUDA devices to run on. One

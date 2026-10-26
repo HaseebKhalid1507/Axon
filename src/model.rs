@@ -1361,7 +1361,7 @@ impl<'a> Qwen2<'a> {
         Self::build(m, repack, false, usize::MAX, true)
     }
 
-    /// `new_experts` of a deepseek2 model, every layer's experts repacked but
+    /// `new_experts` (deepseek2 or qwen3moe), every layer's experts repacked but
     /// those of `skip` (resident on the GPU): those aren't built at all
     /// (`Weight::absent`), so their bytes are never read and may be released
     /// (`crate::moe` releases them after the upload).
@@ -1369,8 +1369,10 @@ impl<'a> Qwen2<'a> {
         if skip.is_empty() {
             return Self::new_experts(m);
         }
-        assert_eq!(m.arch, "deepseek2", "new_experts_except: deepseek2 only");
         let repack = std::env::var("AXON_REPACK").map_or(true, |v| v != "0");
+        if m.arch != "deepseek2" {
+            return Self::build_skip(m, repack, false, usize::MAX, true, skip);
+        }
         let n = crate::model::meta_num(m, "deepseek2.block_count").unwrap_or(0.0) as usize;
         let keep: Vec<usize> = (0..n).filter(|l| !skip.contains(l)).collect();
         deepseek2::build_only(m, repack, true, Some(&keep))
@@ -1399,6 +1401,19 @@ impl<'a> Qwen2<'a> {
     /// layers 0..keep only, the output head only if that's all of them.
     /// `experts`: `new_experts`'s model (no head, attention in place).
     fn build(m: &'a Model, repack: bool, tie: bool, keep: usize, experts: bool) -> Qwen2<'a> {
+        Self::build_skip(m, repack, tie, keep, experts, &[])
+    }
+
+    /// `build`, the routed experts of the MoE layers in `skip` not built at
+    /// all (`Weight::absent`: resident on the GPU, their bytes never read).
+    fn build_skip(
+        m: &'a Model,
+        repack: bool,
+        tie: bool,
+        keep: usize,
+        experts: bool,
+        skip: &[usize],
+    ) -> Qwen2<'a> {
         if let Err(e) = check_supported(m) {
             panic!("{e}");
         }
@@ -1465,12 +1480,14 @@ impl<'a> Qwen2<'a> {
         let mut plan: Vec<Option<(usize, usize)>> = Vec::new();
         let mut total = 0;
         let out_ts = head.then_some(out_t);
-        // `experts`: a layer's first 4 (attention) stay in the mapping.
+        // `experts`: a layer's first 4 (attention) stay in the mapping; a
+        // skipped layer's experts get no arena either.
         let held = |i: usize| {
+            let gone = skip.contains(&i);
             layer_mats(i)
                 .into_iter()
                 .enumerate()
-                .map(move |(j, t)| (t, !(experts && j < 4)))
+                .map(move |(j, t)| (t, if j < 4 { !experts } else { !gone }))
         };
         for (t, hold) in out_ts
             .map(|t| (t, true))
@@ -1540,8 +1557,18 @@ impl<'a> Qwen2<'a> {
                 Some(d) => {
                     // Each expert's slice of the 3-D tensor, repacked on its
                     // own; the tensor's pages go back once all are.
+                    let gone = skip.contains(&i);
                     let [gate, up, down] = moe::EXPS.map(|s| {
                         let t = t(s);
+                        if gone {
+                            return (0..d.n_expert)
+                                .map(|_| {
+                                    let dst = dst.next().unwrap();
+                                    debug_assert!(dst.is_none(), "a skipped layer has no arena");
+                                    Weight::absent(t)
+                                })
+                                .collect();
+                        }
                         // Read in place (MXFP4: no repack): the page tables
                         // filled now, not by a fault per 4 KB on the first
                         // tokens (file mapping only; no extra memory).
