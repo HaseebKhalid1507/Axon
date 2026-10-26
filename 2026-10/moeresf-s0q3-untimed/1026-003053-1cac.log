@@ -1,0 +1,52 @@
+[axon-run 00:30:53] submitted 1026-003053-1cac by /home/haseeb/.cache/axon-wt-moeres-mainbase: /home/haseeb/.cache/axon-moeres/s0q3.sh /home/haseeb/.cache/axon-moeres/axon-main-39624db
+[axon-run 00:43:01] scope axon-job-1026-003053-1cac-1792989781.scope in app-axonjobs.slice: MemoryMax 7024 MB, MemoryHigh 6321 MB, no swap, oomd pressure kill 80% (claim 4000 MB): an OOM here kills only this job
+[axon-run 00:43:01] job 1026-003053-1cac -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-003053-1cac-1792989781 --slice=app-axonjobs.slice -p MemoryMax=7024M -p MemoryHigh=6321M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-moeres/s0q3.sh /home/haseeb/.cache/axon-moeres/axon-main-39624db
+axon-q 00:43:01 start slot 16-23: /home/haseeb/.cache/axon-moeres/s0q3.sh /home/haseeb/.cache/axon-moeres/axon-main-39624db
+12227 MiB, 665 MiB
+S0Q3 30b-r1 tg128 ctx=4096 rc=0 2.20 tok/s peak_card_MiB=2532 env=AXON_REPACK=0
+moe:         attention + router on the GPU (0.95 GiB, ctx 4096), 128 experts x 48 layers on the CPU (top-8), kv f16
+S0Q3 30b-r1 pp512 ctx=4096 rc=0 60.62 tok/s peak_card_MiB=2468 env=AXON_REPACK=0
+moe:         attention + router on the GPU (0.95 GiB, ctx 4096), 128 experts x 48 layers on the CPU (top-8), kv f16
+S0Q3 pruned-in-place-r1 tg128 ctx=4096 rc=0 531.49 tok/s peak_card_MiB=1492 env=AXON_REPACK=0
+moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3 pruned-r8-r1 tg128 ctx=4096 rc=0 425.15 tok/s peak_card_MiB=1492 env=AXON_REPACK=1
+moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3 pruned-in-place-r1 pp512 ctx=4096 rc=0 2361.50 tok/s peak_card_MiB=1492 env=AXON_REPACK=0
+moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3 pruned-r8-r1 pp512 ctx=4096 rc=0 3652.65 tok/s peak_card_MiB=1504 env=AXON_REPACK=1
+moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3 30b-r2 tg128 ctx=4096 rc=0 1.11 tok/s peak_card_MiB=2495 env=AXON_REPACK=0
+moe:         attention + router on the GPU (0.95 GiB, ctx 4096), 128 experts x 48 layers on the CPU (top-8), kv f16
+S0Q3 30b-r2 pp512 ctx=4096 rc=0 58.91 tok/s peak_card_MiB=2464 env=AXON_REPACK=0
+moe:         attention + router on the GPU (0.95 GiB, ctx 4096), 128 experts x 48 layers on the CPU (top-8), kv f16
+S0Q3 pruned-in-place-r2 tg128 ctx=4096 rc=0 372.13 tok/s peak_card_MiB=1500 env=AXON_REPACK=0
+moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3 pruned-r8-r2 tg128 ctx=4096 rc=0 413.44 tok/s peak_card_MiB=1500 env=AXON_REPACK=1
+moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3 pruned-in-place-r2 pp512 ctx=4096 rc=0 1910.37 tok/s peak_card_MiB=1500 env=AXON_REPACK=0
+moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3 pruned-r8-r2 pp512 ctx=4096 rc=0 2838.50 tok/s peak_card_MiB=1500 env=AXON_REPACK=1
+moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3 30b-r3 tg128 ctx=4096 rc=0 0.69 tok/s peak_card_MiB=2468 env=AXON_REPACK=0
+moe:         attention + router on the GPU (0.95 GiB, ctx 4096), 128 experts x 48 layers on the CPU (top-8), kv f16
+S0Q3 30b-r3 pp512 ctx=4096 rc=0 58.34 tok/s peak_card_MiB=2409 env=AXON_REPACK=0
+moe:         attention + router on the GPU (0.95 GiB, ctx 4096), 128 experts x 48 layers on the CPU (top-8), kv f16
+S0Q3 pruned-in-place-r3 tg128 ctx=4096 rc=0 465.62 tok/s peak_card_MiB=1445 env=AXON_REPACK=0
+moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3 pruned-r8-r3 tg128 ctx=4096 rc=0 483.87 tok/s peak_card_MiB=1445 env=AXON_REPACK=1
+moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3 pruned-in-place-r3 pp512 ctx=4096 rc=0 2419.46 tok/s peak_card_MiB=1445 env=AXON_REPACK=0
+moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3 pruned-r8-r3 pp512 ctx=4096 rc=0 3879.92 tok/s peak_card_MiB=1445 env=AXON_REPACK=1
+moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3 30b-ctx8k tg128 ctx=8192 rc=0 1.36 tok/s peak_card_MiB=2815 env=AXON_REPACK=0
+moe:         attention + router on the GPU (0.95 GiB, ctx 8192), 128 experts x 48 layers on the CPU (top-8), kv f16
+S0Q3 30b-prof tg128 ctx=4096 rc=0 2.06 tok/s peak_card_MiB=2413 env=AXON_REPACK=0 AXON_MOE_PROFILE=1
+moe:         attention + router on the GPU (0.95 GiB, ctx 4096), 128 experts x 48 layers on the CPU (top-8), kv f16
+S0Q3 pruned-in-place-prof tg128 ctx=4096 rc=0 279.34 tok/s peak_card_MiB=1445 env=AXON_REPACK=0 AXON_MOE_PROFILE=1
+moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3 pruned-r8-prof tg128 ctx=4096 rc=0 471.82 tok/s peak_card_MiB=1445 env=AXON_REPACK=1 AXON_MOE_PROFILE=1
+moe:         attention + router on the GPU (0.43 GiB, ctx 4096), 128 experts x 3 layers on the CPU (top-8), kv f16
+S0Q3 DONE out /home/haseeb/.cache/axon-moeres/s0q3-1026-004301
+[axon-run 00:54:25] exit 0 after 684.0s (host bella)
+[axon-run 00:54:28] EXPECT ok: output matches /S0Q3 DONE/

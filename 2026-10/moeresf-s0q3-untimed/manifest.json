@@ -1,0 +1,29 @@
+{
+ "label": "moeresf-s0q3-untimed",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1026-003053-1cac",
+   "name": "moeresf-39624db-s0q3-untimed",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "39624db",
+   "binary": "s0q3.sh",
+   "started": 1792989781.1531088,
+   "ended": 1792990465.503744,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "b078176d0d8443066328e55a6454d2ac72ab4531d809a7994ed10557e4db5603",
+   "log_bytes": 5655
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-26 00:54:29 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
