@@ -721,6 +721,16 @@ impl<'a> Backend<'a> {
                 return Err("the q8 KV cache is cuda-only (--device cuda)".into());
             }
             crate::model::moe_check_ram(m, true)?;
+            // The KV floor is what's refused; a full cache that wouldn't
+            // fit is a warning (`check_ram_dense`). With the context left
+            // to fit (serve: `cpu_ctx` sizes it to the RAM) no warning.
+            let ctx = match fit {
+                true => max_ctx.min(crate::DEFAULT_CHAT_CTX),
+                false => max_ctx,
+            };
+            if let Some(warn) = crate::model::check_ram_dense(m, ctx)? {
+                eprintln!("axon: {warn}");
+            }
             return Ok(Backend(Inner::Cpu(Qwen2::new(m))));
         }
         if gpu_layers == Some(0) {
