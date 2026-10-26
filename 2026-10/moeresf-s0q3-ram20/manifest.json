@@ -1,0 +1,29 @@
+{
+ "label": "moeresf-s0q3-ram20",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1026-005149-3291",
+   "name": "moeresf-39624db-s0q3-ram20",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "39624db",
+   "binary": "s0q3.sh",
+   "started": 1792995584.438825,
+   "ended": 1792995780.84637,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "96ac0dda0004759a109c1602c20fadde24fbdfc62f2e82ce4beff003c62b7e1e",
+   "log_bytes": 6044
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-26 02:23:01 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
