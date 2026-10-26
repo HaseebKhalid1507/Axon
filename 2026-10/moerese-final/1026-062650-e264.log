@@ -1,0 +1,43 @@
+[axon-run 06:26:50] submitted 1026-062650-e264 by /home/haseeb/.cache/axon-wt-moeres-e: /home/haseeb/.cache/axon-moeres/md5all3-e.sh /home/haseeb/.cache/axon-moeres/axon-main-680a2c5 /home/haseeb/.cache/axon-moeres/axon-111456a /home/haseeb/.cache/axon-moeres/md5e-680a2c5-vs-111456a
+[axon-run 08:20:56] scope axon-job-1026-062650-e264-1793017256.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 13878 MB): an OOM here kills only this job
+[axon-run 08:20:56] job 1026-062650-e264 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-062650-e264-1793017256 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-moeres/md5all3-e.sh /home/haseeb/.cache/axon-moeres/axon-main-680a2c5 /home/haseeb/.cache/axon-moeres/axon-111456a /home/haseeb/.cache/axon-moeres/md5e-680a2c5-vs-111456a
+axon-q 08:20:56 start slot 16-23: /home/haseeb/.cache/axon-moeres/md5all3-e.sh /home/haseeb/.cache/axon-moeres/axon-main-680a2c5 /home/haseeb/.cache/axon-moeres/axon-111456a /home/haseeb/.cache/axon-moeres/md5e-680a2c5-vs-111456a
+MD5 /home/haseeb/.cache/axon-moeres/md5e-680a2c5-vs-111456a-cpu/md5.tsv: 99 of 99 pairs identical (0 both refused), 0 differ
+mode cpu rc 0
+both refused Llama-3.2-1B-Instruct-F16.gguf p1 rc=2
+both refused Llama-3.2-1B-Instruct-F16.gguf p2 rc=2
+both refused Llama-3.2-1B-Instruct-F16.gguf p3 rc=2
+both refused Qwen2.5-0.5B-Instruct-F16.gguf p1 rc=2
+both refused Qwen2.5-0.5B-Instruct-F16.gguf p2 rc=2
+both refused Qwen2.5-0.5B-Instruct-F16.gguf p3 rc=2
+MD5 /home/haseeb/.cache/axon-moeres/md5e-680a2c5-vs-111456a-cuda/md5.tsv: 108 of 108 pairs identical (6 both refused), 0 differ
+mode cuda rc 0
+both refused google_gemma-3-1b-it-Q4_K_M.gguf p1 rc=2
+both refused google_gemma-3-1b-it-Q4_K_M.gguf p2 rc=2
+both refused google_gemma-3-1b-it-Q4_K_M.gguf p3 rc=2
+both refused google_gemma-3-1b-it-Q8_0.gguf p1 rc=2
+both refused google_gemma-3-1b-it-Q8_0.gguf p2 rc=2
+both refused google_gemma-3-1b-it-Q8_0.gguf p3 rc=2
+both refused google_gemma-3-4b-it-Q4_K_M.gguf p1 rc=2
+both refused google_gemma-3-4b-it-Q4_K_M.gguf p2 rc=2
+both refused google_gemma-3-4b-it-Q4_K_M.gguf p3 rc=2
+both refused gpt-oss-20b-MXFP4.gguf p1 rc=2
+both refused gpt-oss-20b-MXFP4.gguf p2 rc=2
+both refused gpt-oss-20b-MXFP4.gguf p3 rc=2
+both refused Llama-3.2-1B-Instruct-F16.gguf p1 rc=2
+both refused Llama-3.2-1B-Instruct-F16.gguf p2 rc=2
+both refused Llama-3.2-1B-Instruct-F16.gguf p3 rc=2
+both refused Moonlight-16B-A3B-Instruct-Q4_K_M.gguf p1 rc=2
+both refused Moonlight-16B-A3B-Instruct-Q4_K_M.gguf@auto p1 rc=2
+both refused Moonlight-16B-A3B-Instruct-Q4_K_M.gguf p2 rc=2
+both refused Moonlight-16B-A3B-Instruct-Q4_K_M.gguf@auto p2 rc=2
+both refused Moonlight-16B-A3B-Instruct-Q4_K_M.gguf p3 rc=2
+both refused Moonlight-16B-A3B-Instruct-Q4_K_M.gguf@auto p3 rc=2
+both refused Qwen2.5-0.5B-Instruct-F16.gguf p1 rc=2
+both refused Qwen2.5-0.5B-Instruct-F16.gguf p2 rc=2
+both refused Qwen2.5-0.5B-Instruct-F16.gguf p3 rc=2
+MD5 /home/haseeb/.cache/axon-moeres/md5e-680a2c5-vs-111456a-cuda-q8/md5.tsv: 108 of 108 pairs identical (24 both refused), 0 differ
+mode cuda-q8 rc 0
+MD5GATE3 ALL IDENTICAL (cpu, cuda, cuda-q8)
+[axon-run 08:56:38] exit 0 after 2141.9s (host bella)
+[axon-run 08:56:39] EXPECT ok: output matches /MD5GATE3 ALL IDENTICAL/
