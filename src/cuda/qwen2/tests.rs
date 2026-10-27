@@ -10273,7 +10273,8 @@ fn nvrtc_w4a8_compiles_sm90a() {
     }
 }
 
-/// Launch a w4a8 entry point (w4a8_q4_k / w4a8_q6 / w4a8_q4_k_gu) on `w`
+/// Launch a w4a8 entry point (w4a8_q4_k / w4a8_q6 / w4a8_q4_k_gu) on `w` with
+/// at most `sms` persistent CTAs
 /// (Q4_K rows, or the Q6K8 copy for w4a8_q6; gu: gate `w`, up `w2`), nb
 /// tokens of act (stride st), bias / mode / out (stride rows) as gemm2's.
 ///
@@ -10283,6 +10284,7 @@ fn nvrtc_w4a8_compiles_sm90a() {
 unsafe fn launch_w4a8_k(
     g: &Gpu,
     km: &Module,
+    sms: usize,
     kernel: &str,
     w: &DevBuf,
     w2: Option<&DevBuf>,
@@ -10295,7 +10297,9 @@ unsafe fn launch_w4a8_k(
     mode: i32,
     out: &DevBuf,
 ) {
-    let sms = g.info().unwrap().sms as usize;
+    // `sms` comes from the caller: no driver query in a timed launch (P1's
+    // per-launch g.info() cost 0.89 ms in the bench's context: job
+    // 1027-154351-fd3a; P1 void).
     let q6 = kernel == "w4a8_q6";
     let gu = kernel == "w4a8_q4_k_gu";
     let rb = (cols / 256 * if q6 { Q6K8_BYTES } else { 144 }) as u64;
@@ -10378,6 +10382,7 @@ fn gpu_w4a8_matches_reference_bits() {
         return;
     };
     let km = Kernels::module(&g).unwrap();
+    let sms = g.info().unwrap().sms as usize;
     if !km.hopper() {
         eprintln!("skipping: needs an sm_90a module (compute capability 9.0)");
         return;
@@ -10432,6 +10437,7 @@ fn gpu_w4a8_matches_reference_bits() {
                     launch_w4a8_k(
                         &g,
                         &km,
+                        sms,
                         kernel,
                         wk.as_ref().unwrap_or(&w),
                         None,
@@ -10513,6 +10519,7 @@ fn gpu_w4a8_matches_reference_bits() {
                 launch_w4a8_k(
                     &g,
                     &km,
+                    sms,
                     "w4a8_q4_k_gu",
                     &wg,
                     Some(&wu),
@@ -10572,6 +10579,7 @@ fn gpu_w4a8_tiny() {
         return;
     };
     let km = Kernels::module(&g).unwrap();
+    let sms = g.info().unwrap().sms as usize;
     if !km.hopper() {
         eprintln!("skipping: not sm_90a");
         return;
@@ -10604,6 +10612,7 @@ fn gpu_w4a8_tiny() {
             launch_w4a8_k(
                 &g,
                 &km,
+                sms,
                 k,
                 c8.as_ref().unwrap_or(&w),
                 None,
@@ -10631,6 +10640,7 @@ fn gpu_w4a8_tiny() {
         launch_w4a8_k(
             &g,
             &km,
+            sms,
             "w4a8_q4_k_gu",
             &wg,
             Some(&wu),
@@ -10689,6 +10699,119 @@ fn w4a8_today_q6(rows: usize, nb: usize, sms: usize) -> &'static str {
     }
 }
 
+/// The Checkpoint 1 bench's timing: arms 0 and 1 interleaved over `rounds`
+/// (the order rotated per round), per arm-round one warm-up launch and 3
+/// timed launches between two events, the ms per launch. `run(i)` enqueues
+/// one launch of arm i and must not query the driver (P1 void: job
+/// 1027-154351-fd3a).
+fn w8_time_pair(g: &Gpu, rounds: usize, run: &dyn Fn(usize)) -> [Vec<f64>; 2] {
+    let mut ms = [Vec::new(), Vec::new()];
+    for rd in 0..rounds {
+        for o in 0..2 {
+            let i = (o + rd) % 2;
+            run(i);
+            let e0 = g.record().unwrap();
+            for _ in 0..3 {
+                run(i);
+            }
+            let e1 = g.record().unwrap();
+            ms[i].push(e0.ms_to(&e1).unwrap() as f64 / 3.0);
+        }
+    }
+    g.sync().unwrap();
+    ms
+}
+
+/// P1R's pre-registered validity check (design note, "Checkpoint 1, P1 void
+/// and one rerun"): every W4A8 cell's round-to-round spread (max / min - 1)
+/// < 5 %, and its time scales with work, t(gate_up, nb 1024) / t(q/wo, nb 64)
+/// >= 10 (medians). Returns (valid, the report).
+fn w8_validity(rounds: &std::collections::HashMap<(&str, usize), Vec<f64>>) -> (bool, String) {
+    let med = |v: &Vec<f64>| {
+        let mut v = v.clone();
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        v[v.len() / 2]
+    };
+    let mut worst = (0.0f64, String::new());
+    for ((p, nb), v) in rounds {
+        let mx = v.iter().cloned().fold(f64::MIN, f64::max);
+        let mn = v.iter().cloned().fold(f64::MAX, f64::min);
+        let sp = mx / mn - 1.0;
+        if sp > worst.0 {
+            worst = (sp, format!("{p} nb {nb}"));
+        }
+    }
+    let scale = match (rounds.get(&("gate_up", 1024)), rounds.get(&("q/wo", 64))) {
+        (Some(a), Some(b)) => Some(med(a) / med(b)),
+        _ => None,
+    };
+    let ok_sp = !rounds.is_empty() && worst.0 < 0.05;
+    let ok_sc = scale.is_some_and(|x| x >= 10.0);
+    (
+        ok_sp && ok_sc,
+        format!(
+            "max W4A8 spread {:.2} % ({}; bar < 5 %), t(gate_up 1024) / t(q/wo 64) {} (bar >= 10)",
+            worst.0 * 100.0,
+            if worst.1.is_empty() {
+                "no cells"
+            } else {
+                &worst.1
+            },
+            scale.map_or("missing".to_string(), |x| format!("{x:.2}"))
+        ),
+    )
+}
+
+/// The bella rehearsal of the fixed harness (AXON_W4A8_REHEARSE=1 off
+/// sm_90a): w8_time_pair and w8_validity on a stand-in kernel (gemm2s_q4_k
+/// in both arms) at the validity check's two cells, q/wo nb 64 and
+/// gate_up-shaped (2 x 18944 rows) nb 1024. The W4A8 kernels can't run here.
+fn w8_rehearse_harness(g: &Gpu, km: &Module, sms: usize) {
+    let mut rng = Rng(0x0e4e_a45e);
+    let k = "gemm2s_q4_k";
+    let f = km.function(k).unwrap();
+    let mut rounds = std::collections::HashMap::new();
+    for (p, rows, nb) in [("q/wo", 3584usize, 64usize), ("gate_up", 2 * 18944, 1024)] {
+        let cols = 3584usize;
+        let w = g.upload(&synth_matrix(&mut rng, Q4_K, rows, cols)).unwrap();
+        let xs: Vec<Vec<f32>> = (0..nb).map(|_| rng.vec(cols, 1.0)).collect();
+        let act = quantize_batch(g, km, &xs, cols);
+        let st = act_stride_t(cols);
+        let outs = [
+            g.alloc(rows * nb * 4).unwrap(),
+            g.alloc(rows * nb * 4).unwrap(),
+        ];
+        let run = |i: usize| {
+            let common = [
+                w.arg(),
+                Arg::U64(quant::row_bytes(Q4_K, cols) as u64),
+                Arg::I32(rows as i32),
+                Arg::I32(cols as i32),
+                act.arg(),
+                Arg::U64(st as u64),
+                Arg::I32(nb as i32),
+                Arg::Ptr(0),
+                Arg::I32(0),
+                outs[i].arg(),
+                Arg::U64(rows as u64),
+            ];
+            // SAFETY: gemm2s's signature; w rows x cols Q4_K, act nb tokens, out rows * nb.
+            unsafe { launch_product(g, &f, k, Q4_K, rows, nb, &common) };
+        };
+        let ms = w8_time_pair(g, 7, &run);
+        eprintln!(
+            "W4A8 REHEARSAL {p} nb {nb} (stand-in {k}, {sms} SMs): arm 1 rounds {:?}",
+            ms[1].iter().map(|x| format!("{x:.4}")).collect::<Vec<_>>()
+        );
+        rounds.insert((p, nb), ms[1].clone());
+    }
+    let (valid, why) = w8_validity(&rounds);
+    eprintln!(
+        "W4A8 REHEARSAL VALIDITY (stand-in kernel): {why}: {}",
+        if valid { "VALID" } else { "VOID" }
+    );
+}
+
 /// Checkpoint 1 (docs/design/w4a8-prefill.md section 4), on an H100: the
 /// production W4A8 kernels vs today's kernel per product (gate_up: gemmh2_q4_k_gu;
 /// down4 and q/wo: bgemm's Q4_K pick at that nb, mode 1 as in the serve;
@@ -10726,8 +10849,22 @@ fn cuda_w4a8_checkpoint1() {
         info.cc.1,
         km.hopper()
     );
+    let kfp = crate::cuda::KERNELS
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+            (h ^ b as u64).wrapping_mul(0x0100_0000_01b3)
+        });
+    eprintln!(
+        "W4A8 KERNELS fnv1a64 {kfp:016x} ({} bytes; w4a8.cu {} bytes)",
+        crate::cuda::KERNELS.len(),
+        include_str!("../w4a8.cu").len()
+    );
     if !km.hopper() {
-        eprintln!("W4A8 BENCH skipped (no sm_90a module)");
+        if std::env::var("AXON_W4A8_REHEARSE").is_ok_and(|v| v == "1") {
+            w8_rehearse_harness(&g, &km, sms);
+        } else {
+            eprintln!("W4A8 BENCH skipped (no sm_90a module)");
+        }
         eprintln!("W4A8 BENCH END ok");
         return;
     }
@@ -10755,6 +10892,7 @@ fn cuda_w4a8_checkpoint1() {
     ];
     let mut s_of: std::collections::HashMap<(&str, usize), f64> = Default::default();
     let mut w8_ms: std::collections::HashMap<(&str, usize), f64> = Default::default();
+    let mut w8_rounds: std::collections::HashMap<(&str, usize), Vec<f64>> = Default::default();
     let mut bits_fail = 0;
     for &(p, cols, rows) in &prods {
         let qt = if p == "down6" { Q6_K } else { Q4_K };
@@ -10790,6 +10928,7 @@ fn cuda_w4a8_checkpoint1() {
                         launch_w4a8_k(
                             &g,
                             &km,
+                            sms,
                             k,
                             wb,
                             w2.as_ref(),
@@ -10860,20 +10999,8 @@ fn cuda_w4a8_checkpoint1() {
             // Timing on scratch outputs (mode 1 accumulates; values unused).
             let ks = [base, kern];
             let outs = [fresh(), fresh()];
-            let mut ms = [Vec::new(), Vec::new()];
-            for rd in 0..rounds {
-                for o in 0..2 {
-                    let i = (o + rd) % 2;
-                    run(ks[i], &outs[i]);
-                    let e0 = g.record().unwrap();
-                    for _ in 0..3 {
-                        run(ks[i], &outs[i]);
-                    }
-                    let e1 = g.record().unwrap();
-                    ms[i].push(e0.ms_to(&e1).unwrap() as f64 / 3.0);
-                }
-            }
-            g.sync().unwrap();
+            let mut ms = w8_time_pair(&g, rounds, &|i| run(ks[i], &outs[i]));
+            w8_rounds.insert((p, nb), ms[1].clone());
             let med = |v: &mut Vec<f64>| -> (f64, f64, f64) {
                 v.sort_by(|a, b| a.partial_cmp(b).unwrap());
                 (v[v.len() / 2], v[0], v[v.len() - 1])
@@ -10960,9 +11087,18 @@ fn cuda_w4a8_checkpoint1() {
             }
         );
     }
+    // The pre-registered validity check (design note: P1 void, one rerun):
+    // printed before the verdict; a failure voids the run.
+    let (valid, why) = w8_validity(&w8_rounds);
+    eprintln!(
+        "W4A8 VALIDITY: {why}: {}",
+        if valid { "VALID" } else { "VOID" }
+    );
     eprintln!(
         "W4A8 CHECKPOINT1 VERDICT: {}",
-        if bits_fail > 0 {
+        if !valid {
+            "VOID (validity check failed: the line stops, no third run)"
+        } else if bits_fail > 0 {
             "BITS-FAIL (section 4: M12's rule)"
         } else if pass {
             "PASS"

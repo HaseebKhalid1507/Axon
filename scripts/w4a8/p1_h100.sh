@@ -29,6 +29,9 @@ CD=${XDG_CACHE_HOME:-$HOME/.cache}/axon/cuda; mkdir -p "$CD"
 n0=$(ls "$CD" | wc -l); cp -n kcache-sm90a/*.cubin "$CD/" 2>/dev/null; log "kernel cache: $n0 -> $(ls "$CD" | wc -l) entries ($CD)"
 nvidia-smi --query-gpu=name,compute_cap,driver_version,memory.total,clocks.max.sm --format=csv,noheader
 sha256sum axon-test axon-main sd/* passhist.py | sed 's|  .*/|  |'; grep '^src ' SHA256SUMS
+# The cubins this kit ships (P1R: must equal P1's SHA256SUMS entries: byte-identical kernels).
+sha256sum kcache-sm90a/*.cubin | sed 's|kcache-sm90a/|W4A8 CUBIN kit |'
+touch "$O/.t0"
 log "model $M ($(sha256sum "$M" 2>/dev/null | cut -c1-16)); serve --parallel $PAR --ctx $CTX, cells C=$C"
 rc=0
 if [[ " $SKIP " != *" session "* ]]; then
@@ -36,6 +39,11 @@ if [[ " $SKIP " != *" session "* ]]; then
   env ${SAN:+AXON_PROBE_SANITIZER=$SAN} timeout -k 10 780 ./axon-test cuda::qwen2::tests::cuda_w4a8_p1_session \
     --exact --ignored --nocapture --test-threads 1 || rc=1
   log "session rc $rc"
+  # Any kernel-cache entry created during the run would mean a module was compiled on the pod, not loaded from the
+  # kit's cubins: list them (P1R's byte-identity condition).
+  new=$(find "$CD" -maxdepth 1 -name '*.cubin' -newer "$O/.t0" 2>/dev/null)
+  if [ -z "$new" ]; then echo "W4A8 CUBIN new cache entries during the run: none (the kit's cubins were loaded)"
+  else echo "W4A8 CUBIN new cache entries during the run:"; for x in $new; do sha256sum "$x"; done; fi
 fi
 serve_cell() {  # serve_cell ARM FLAGS: one main server (r11.sh's flags + the arm's), r11's warm-ups, one C=128 cell,
   # checked (every request sent and ok), then its trace -> passhist lines. rc 0 only if all of that held.
