@@ -2163,8 +2163,9 @@ mod tests {
 
     /// A wide pool on a 128-wide-head model (qwen3 0.6B; Llama 3.2 1B
     /// too, hd 64): 40 slots of 1152 positions, prompts up to 1100 tokens,
-    /// 40 rows per step (at least ATT_NB_MIN, so the attention is
-    /// attn_blk_nb's, and more than HEAD_SUB, so the head's slices split
+    /// 40 rows per step (at least ATT_NB_MIN, and 40 x 8 kv heads cover
+    /// every GPU's SMs, so the attention is attn_blk_nb's; more than
+    /// HEAD_SUB, so the head's slices split
     /// the greedy and the sampled rows, one selected on the host), on the
     /// f16 cache and the q8 one (groups of 32): every request's results and
     /// tokens == running it alone, and the slots' KV bytes == the solo

@@ -6008,7 +6008,10 @@ fn cuda_attn_pool_bench() {
                 };
                 // batch.rs's attn_blk_nb path (nb_split), y into its own
                 // buffer (q stays the input).
-                let sl = batch::nb_split(nb, nkv, gi.sms as usize);
+                // None (batch.rs keeps attn_blk_b): time S = 1 anyway, the
+                // kernel's own number, and say so.
+                let picked = batch::nb_split(nb, nkv, gi.sms as usize, batch::nb_force_env());
+                let sl = picked.unwrap_or(1);
                 let step_nb = || {
                     let launch = |z0: usize, nz: usize, s: usize, y: Arg| {
                         let mut a = vec![q.arg()];
@@ -6060,12 +6063,7 @@ fn cuda_attn_pool_bench() {
                     } else {
                         for z0 in (0..nb).step_by(per) {
                             let nz = (nb - z0).min(per);
-                            launch(
-                                z0,
-                                nz,
-                                batch::nb_split(nz, nkv, gi.sms as usize).max(2),
-                                Arg::Ptr(0),
-                            );
+                            launch(z0, nz, sl, Arg::Ptr(0));
                             // SAFETY: prefill.cu attn_cmb_b's signature.
                             unsafe {
                                 g.launch(
@@ -6123,8 +6121,13 @@ fn cuda_attn_pool_bench() {
                 eprintln!(
                     "POOL kv {kv} depth {depth} nb {nb} launches {} attn {a:.1} ({ab:.1}) \
                      cmb {c:.1} ({cb:.1}) both {s:.1} ({sb:.1}) us/layer KV {gbs:.0} GB/s | \
-                     nb S {sl} {n:.1} ({nbest:.1}) us KV {gbn:.0} GB/s speedup {:.2}x",
+                     nb S {sl}{} {n:.1} ({nbest:.1}) us KV {gbn:.0} GB/s speedup {:.2}x",
                     2 * nb.div_ceil(per),
+                    if picked.is_none() {
+                        " (batch.rs keeps attn_blk_b here)"
+                    } else {
+                        ""
+                    },
                     s / n
                 );
             }
@@ -6156,8 +6159,15 @@ fn cuda_attn_nb_exact() {
         seed ^= seed << 17;
         seed
     };
-    let depths = [1usize, 63, 64, 65, 128, 129, 600, 1000, 1023, 1500];
-    for (nh, nkv, hd) in [(28usize, 4usize, 128usize), (14, 2, 64)] {
+    let depths = [0usize, 1, 63, 64, 65, 128, 129, 600, 1000, 1023, 1500];
+    // GQA groups 7 (7B, 0.5B), 8 (every row of the m16 tile's top half
+    // live: Qwen2.5-3B, Qwen3-30B) and 6 (1.5B).
+    for (nh, nkv, hd) in [
+        (28usize, 4usize, 128usize),
+        (14, 2, 64),
+        (16, 2, 128),
+        (12, 2, 128),
+    ] {
         let nb = 40;
         let dim = nh * hd;
         let kvd = nkv * hd;
@@ -6235,7 +6245,7 @@ fn cuda_attn_nb_exact() {
                         i8s.arg(),
                         i8s.arg_at(rows * kvd),
                         scs.arg(),
-                        scs.arg_at(rows * kvd / kg * 4),
+                        scs.arg_at(rows * kvd / kg.max(1) * 4),
                     ]
                 };
                 let sfx = if kg == 0 {
