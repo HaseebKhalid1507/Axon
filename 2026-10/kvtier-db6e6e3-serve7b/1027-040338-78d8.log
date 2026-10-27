@@ -1,0 +1,32 @@
+[axon-run 04:03:38] submitted 1027-040338-78d8 by /home/haseeb/.cache/axon-kvtier: /usr/bin/bash md5serve7b.sh ./axon-0c23a87 ./axon-db6e6e3 md5out ./serve_md5.py
+[axon-run 04:03:38] job 1027-040338-78d8 -> pod1 (pod szm5eqn2moe7ck): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 9000 --src /home/haseeb/.cache/axon-podjob/md5serve7b-a294c2caf57d /usr/bin/bash md5serve7b.sh ./axon-0c23a87 ./axon-db6e6e3 md5out ./serve_md5.py
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (a01d065a5ad642109a22ab37) + source of /home/haseeb/.cache/axon-podjob/md5serve7b-a294c2caf57d (delta vs 1 earlier upload(s) there)
+
+sent 2,003 bytes  received 137 bytes  856.00 bytes/sec
+total size is 23,206,991  speedup is 10,844.39
+
+sent 58 bytes  received 19 bytes  51.33 bytes/sec
+total size is 89  speedup is 1.16
+axon-remote: job 20261027-080351-bash-4783 on pod1 (GPU, 9000 MB)
+[axon-node 08:03:51] GPU slot taken; job wants 9000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 2, budget 23064 MB, vCPU 10.2)
+[axon-node 08:03:51] run bash (a01d065a5ad642109a22ab37) as /home/haseeb/.cache/axon-podjob/md5serve7b-a294c2caf57d on 4ec5cfcdb5eb, AXON_THREADS=5 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+NVIDIA GeForce RTX 4090, 8.9, 595.91.07
+base: ready after 102.3 s
+SERVE base: cached 0, restored None, digest 735e69f8bfdf
+cand0: ready after 1.0 s
+SERVE cand0: cached 0, restored None, digest 735e69f8bfdf
+cand1: ready after 1.0 s
+SERVE cand1: cached 13888, restored 13888.0, digest 735e69f8bfdf
+SERVE MD5 cuda f16 Qwen2.5-7B-Instruct-Q4_K_M.gguf: 42/42 same
+base: ready after 1.0 s
+SERVE base: cached 0, restored None, digest 7f6eeea7e133
+cand0: ready after 1.0 s
+SERVE cand0: cached 0, restored None, digest 7f6eeea7e133
+cand1: ready after 1.0 s
+SERVE cand1: cached 13888, restored 13888.0, digest 7f6eeea7e133
+SERVE MD5 cuda q8 Qwen2.5-7B-Instruct-Q4_K_M.gguf: 42/42 same
+RC 0
+[axon-node 08:06:02] exit 0 after 131.1s
+[axon-node 08:06:02] peak RSS 751 MB (job process tree PSS, 2 s samples x64)
+[axon-run 04:06:04] exit 0 after 145.6s (host pod1)

@@ -1,0 +1,7 @@
+# pod1 = pod szm5eqn2moe7ck (NVIDIA GeForce RTX 4090, secure, image runpod/base:1.4.0-ubuntu2404); captured 2026-10-27 03:56:17 EDT at pod setup by axon-pods
+name, driver_version, vbios_version, memory.total [MiB], power.limit [W], clocks.max.sm [MHz], clocks.max.memory [MHz], pcie.link.gen.max, pcie.link.width.max
+NVIDIA GeForce RTX 4090, 595.91.07, 95.02.3C.80.9A, 24564 MiB, 450.00 W, 3105 MHz, 10501 MHz, 4, 16
+| NVIDIA-SMI 595.91.07              Driver Version: 595.91.07      CUDA Version: 13.2     |
+cpu: AMD EPYC 7532 32-Core Processor x 64
+kernel: 6.8.0-138-generic
+nvrtc: nvrtc-13.2
