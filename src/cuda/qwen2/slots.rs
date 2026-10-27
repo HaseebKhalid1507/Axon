@@ -2668,4 +2668,198 @@ mod tests {
             );
         }
     }
+
+    /// Anatomy of a prompt feed pass (MEASURE, `--ignored --nocapture`;
+    /// the H100 prefill-anatomy session, spec pick-20261026-fable §(d)): a
+    /// chunk of n tokens fed into one slot of a paged pool at position
+    /// `depth` (as serve's `feed` does: `feed_slot`, one pass for n <= the
+    /// pool's pass), per (depth, n), medians of AXON_FEED_REPS (9) after 2
+    /// warm-ups:
+    /// - `wall`: `feed_slot` + sync (what serve's step pays);
+    /// - `enq`: host time to enqueue the pass (load_input + `pass_at`, no
+    ///   sync), and `wait` the sync after it;
+    /// - `graph`: the same pass captured in a CUDA graph (input loaded
+    ///   outside it) and replayed + sync: the kernels without host launches,
+    ///   the floor a graph-captured feed could reach (a bucketed scheme
+    ///   would also have to pass the position through a buffer); `wall -
+    ///   graph` = the launch + gap share;
+    /// - the per-kernel profile: one pass without graphs, an event after
+    ///   each segment (`pass_at`'s hook), summed by class: GEMM (q, k, qkv,
+    ///   wo, gate, gate_up, down), attention (rope_kv, attn, combine), other
+    ///   (embed, rope, norms, swiglu, ...): `ev` is their total (event
+    ///   timeline, includes in-segment gaps).
+    ///
+    /// `AXON_STEP_MODEL` (the 0.5B by default), `AXON_FEED_N`
+    /// ("16,64,128,256,384,512,768"), `AXON_FEED_DEPTHS`
+    /// ("0,1000,2000,4000,6000"). Lines start with `ANAT` (one table row
+    /// per (depth, n)) and `ANATSEG` (every segment's ms).
+    #[test]
+    #[ignore]
+    fn pool_feed_anatomy() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let m = match std::env::var("AXON_STEP_MODEL") {
+            Ok(p) => crate::gguf::load_with(&p, Some(false)).unwrap(),
+            Err(_) => match crate::testutil::model() {
+                Some(m) => m,
+                None => return,
+            },
+        };
+        let list = |var: &str, def: &str| -> Vec<usize> {
+            std::env::var(var)
+                .unwrap_or(def.into())
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.trim().parse().unwrap())
+                .collect()
+        };
+        let ns = list("AXON_FEED_N", "16,64,128,256,384,512,768");
+        let depths = list("AXON_FEED_DEPTHS", "0,1000,2000,4000,6000");
+        let reps = list("AXON_FEED_REPS", "9")[0];
+        let km = Kernels::module(&g).unwrap();
+        let nmax = *ns.iter().max().unwrap();
+        let ctx = (depths.iter().max().unwrap() + nmax + 64).next_multiple_of(64);
+        let mut net = CudaQwen2::new(&g, &km, &m, ctx).unwrap();
+        net.graphs = true;
+        let mut p = net.pool(1, ctx).unwrap();
+        let pass = p.pass_max();
+        let gi = g.info().unwrap();
+        eprintln!(
+            "feed anatomy: {} ({}), {} ({} SMs), pass max {pass}, paged {}",
+            std::env::var("AXON_STEP_MODEL").unwrap_or("default 0.5B".into()),
+            m.arch,
+            gi.name,
+            gi.sms,
+            p.c.tab.is_some()
+        );
+        let class = |seg: &str| match seg {
+            "q" | "k" | "qkv" | "wo" | "gate" | "gate_up" | "down" => 0,
+            "rope_kv" | "attn" | "combine" => 1,
+            _ => 2,
+        };
+        let med = |mut v: Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let toks: Vec<u32> = (0..ctx).map(|i| 1000 + (i * 7919 % 20000) as u32).collect();
+        eprintln!(
+            "ANAT | depth | n | wall ms | enq ms | wait ms | graph ms | ev ms | gemm ms | attn ms | \
+             other ms | launch+gaps ms (wall - graph) |"
+        );
+        for &depth in &depths {
+            if depth > 0 {
+                net.feed_slot(&mut p, 0, &toks[..depth], 0).unwrap();
+            }
+            for &n in ns.iter().filter(|&&n| n <= pass) {
+                let chunk = &toks[depth..depth + n];
+                // Pages for depth + n (and the rows the passes below rewrite).
+                net.feed_slot(&mut p, 0, chunk, depth).unwrap();
+                let base = p.base(0);
+                let place = Place::Seq { start: depth, base };
+                let wall: Vec<f64> = (0..reps + 2)
+                    .map(|_| {
+                        let t = std::time::Instant::now();
+                        net.feed_slot(&mut p, 0, chunk, depth).unwrap();
+                        t.elapsed().as_secs_f64() * 1e3
+                    })
+                    .skip(2)
+                    .collect();
+                let (mut enq, mut wait) = (Vec::new(), Vec::new());
+                for i in 0..reps + 2 {
+                    let t = std::time::Instant::now();
+                    let b = p.c.b.as_mut().unwrap();
+                    net.load_input(b, BatchIn::Tokens(chunk)).unwrap();
+                    net.pass_at(
+                        &mut p.c,
+                        BatchIn::Loaded(n),
+                        place,
+                        Head::No,
+                        None,
+                        0,
+                        &mut |_| Ok(()),
+                    )
+                    .unwrap();
+                    let e = t.elapsed().as_secs_f64() * 1e3;
+                    g.sync().unwrap();
+                    if i >= 2 {
+                        enq.push(e);
+                        wait.push(t.elapsed().as_secs_f64() * 1e3 - e);
+                    }
+                }
+                let b = p.c.b.as_mut().unwrap();
+                net.load_input(b, BatchIn::Tokens(chunk)).unwrap();
+                g.sync().unwrap();
+                let c = &mut p.c;
+                let gr = g
+                    .capture(|| {
+                        net.pass_at(c, BatchIn::Loaded(n), place, Head::No, None, 0, &mut |_| {
+                            Ok(())
+                        })
+                    })
+                    .unwrap();
+                let graph: Vec<f64> = (0..reps + 2)
+                    .map(|_| {
+                        let t = std::time::Instant::now();
+                        // SAFETY: the graph's buffers are the pool's and the
+                        // model's, alive and unmoved for its whole life here.
+                        unsafe { gr.launch().unwrap() };
+                        g.sync().unwrap();
+                        t.elapsed().as_secs_f64() * 1e3
+                    })
+                    .skip(2)
+                    .collect();
+                drop(gr);
+                let mut agg: Vec<(&str, f64)> = Vec::new();
+                for round in 0..3 {
+                    let b = p.c.b.as_mut().unwrap();
+                    net.load_input(b, BatchIn::Tokens(chunk)).unwrap();
+                    g.sync().unwrap();
+                    let mut evs = vec![("start", g.record().unwrap())];
+                    net.pass_at(
+                        &mut p.c,
+                        BatchIn::Loaded(n),
+                        place,
+                        Head::No,
+                        None,
+                        0,
+                        &mut |s| {
+                            evs.push((s, g.record()?));
+                            Ok(())
+                        },
+                    )
+                    .unwrap();
+                    g.sync().unwrap();
+                    if round < 2 {
+                        continue;
+                    }
+                    for i in 1..evs.len() {
+                        let ms = evs[i - 1].1.ms_to(&evs[i].1).unwrap() as f64;
+                        match agg.iter_mut().find(|a| a.0 == evs[i].0) {
+                            Some(a) => a.1 += ms,
+                            None => agg.push((evs[i].0, ms)),
+                        }
+                    }
+                }
+                let mut cls = [0.0f64; 3];
+                for (seg, ms) in &agg {
+                    cls[class(seg)] += ms;
+                }
+                let ev: f64 = cls.iter().sum();
+                let (w, gm) = (med(wall), med(graph));
+                eprintln!(
+                    "ANAT | {depth} | {n} | {w:.3} | {:.3} | {:.3} | {gm:.3} | {ev:.3} | {:.3} | \
+                     {:.3} | {:.3} | {:.3} |",
+                    med(enq),
+                    med(wait),
+                    cls[0],
+                    cls[1],
+                    cls[2],
+                    w - gm
+                );
+                let segs: Vec<String> = agg.iter().map(|(s, ms)| format!("{s} {ms:.3}")).collect();
+                eprintln!("ANATSEG depth {depth} n {n}: {}", segs.join(", "));
+            }
+        }
+    }
 }
