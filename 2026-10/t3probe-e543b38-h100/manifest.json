@@ -1,0 +1,29 @@
+{
+ "label": "t3probe-e543b38-h100",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1026-222543-3f73",
+   "name": "t3probe-e543b38-h100",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod2",
+   "hw": "hw-pod2-10-26_22:27.txt",
+   "gpu": "NVIDIA H100 80GB HBM3",
+   "driver": "595.91.07",
+   "sha": "e543b38",
+   "binary": "axon-test-e543b38",
+   "started": 1793068051.8056412,
+   "ended": 1793068071.4751256,
+   "attempts": 1,
+   "remote_job": "20261027-022739-axon-test-e543b38-1769",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "9f41ef04f90904afa72466c6fc3fa3a1dab7406ac098fcee140ea25cb1127850",
+   "log_bytes": 8510
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-26 22:29:03 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}

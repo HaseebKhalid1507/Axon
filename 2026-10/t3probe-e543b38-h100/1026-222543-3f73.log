@@ -1,0 +1,124 @@
+[axon-run 22:25:43] submitted 1026-222543-3f73 by /home/haseeb/.cache/axon-t3-w4a8probe: /home/haseeb/.cache/axon-t3-w4a8probe/axon-test-e543b38 cuda::qwen2::tests::cuda_probe_w4a8_session --exact --ignored --nocapture --test-threads 1
+[axon-run 22:27:31] job 1026-222543-3f73 -> pod2 (pod ccq8x01pqjs6o5): /home/haseeb/.local/bin/axon-remote --host pod2 --vram 6000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-wt-t3-w4a8probe /home/haseeb/.cache/axon-t3-w4a8probe/axon-test-e543b38 cuda::qwen2::tests::cuda_probe_w4a8_session --exact --ignored --nocapture --test-threads 1
+axon-remote: uploading axon-test-e543b38 (23bbfc11ee65aa2fc11c7de3) + source of /home/haseeb/.cache/axon-wt-t3-w4a8probe (delta vs 1 earlier upload(s) there)
+
+sent 11,583 bytes  received 55 bytes  4,655.20 bytes/sec
+total size is 7,214,085  speedup is 619.87
+
+sent 70 bytes  received 16 bytes  57.33 bytes/sec
+total size is 23,065,376  speedup is 268,202.05
+axon-remote: job 20261027-022739-axon-test-e543b38-1769 on pod2 (GPU, 6000 MB)
+[axon-node 02:27:39] GPU EXCLUSIVE taken; job wants 6000 MB; nvidia-smi used/total 0/81559 MB; sharing with nobody (slots 5, budget 80059 MB, vCPU 22.1)
+[axon-node 02:27:39] run axon-test-e543b38 (23bbfc11ee65aa2fc11c7de3) as /home/haseeb/.cache/axon-wt-t3-w4a8probe on f95fc370f096, AXON_THREADS=8 RUST_TEST_THREADS=4; free 81081 MB of 81559 (used 0); GPU processes pid:MB none
+
+running 1 test
+test cuda::qwen2::tests::cuda_probe_w4a8_session ... probe sm_90a: 23752 bytes of cubin
+probe sm_90: 1728 bytes of cubin
+PROBE STAGE compile: ok
+PROBE STAGE cuda_probe_w4a8_peak: start (/root/axon-node/store/23bbfc11ee65aa2fc11c7de3/bin cuda::qwen2::tests::cuda_probe_w4a8_peak --exact --nocapture --test-threads 1 --ignored)
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+PROBE PEAK wg_peak_rs_n64 2 WG/SM: median 959.7 TMAC/s raw (min 929.5 max 960.5)
+PROBE PEAK wg_peak_rs_n64 3 WG/SM: median 964.8 TMAC/s raw (min 959.2 max 965.2)
+PROBE PEAK END ok
+test cuda::qwen2::tests::cuda_probe_w4a8_peak ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 774 filtered out; finished in 0.41s
+
+PROBE STAGE cuda_probe_w4a8_peak: rc 0 after 0.6 s
+PROBE STAGE gpu_rmsnorm_matches_cpu: start (/root/t3san/compute-sanitizer --tool memcheck --error-exitcode 9 --print-limit 20 /root/axon-node/store/23bbfc11ee65aa2fc11c7de3/bin cuda::qwen2::tests::gpu_rmsnorm_matches_cpu --exact --nocapture --test-threads 1)
+========= COMPUTE-SANITIZER
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test cuda::qwen2::tests::gpu_rmsnorm_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 774 filtered out; finished in 0.69s
+
+========= ERROR SUMMARY: 0 errors
+PROBE STAGE gpu_rmsnorm_matches_cpu: rc 0 after 0.8 s
+PROBE STAGE sanitizer-selfcheck: ok (memcheck instrumented gpu_rmsnorm_matches_cpu, 0 errors)
+PROBE STAGE gpu_probe_w4a8_tiny: start (/root/t3san/compute-sanitizer --tool memcheck --error-exitcode 9 --print-limit 20 /root/axon-node/store/23bbfc11ee65aa2fc11c7de3/bin cuda::qwen2::tests::gpu_probe_w4a8_tiny --exact --nocapture --test-threads 1)
+========= COMPUTE-SANITIZER
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+PROBE BITS 128x256 nb 64 ctas 1: 8192 outputs, 0 mismatches
+test cuda::qwen2::tests::gpu_probe_w4a8_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 774 filtered out; finished in 0.44s
+
+========= ERROR SUMMARY: 0 errors
+PROBE STAGE gpu_probe_w4a8_tiny: rc 0 after 0.6 s
+PROBE STAGE sanitizer tiny: ok, 0 errors
+PROBE STAGE gpu_probe_w4a8_tiny: start (/root/axon-node/store/23bbfc11ee65aa2fc11c7de3/bin cuda::qwen2::tests::gpu_probe_w4a8_tiny --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+PROBE BITS 128x256 nb 64 ctas 1: 8192 outputs, 0 mismatches
+test cuda::qwen2::tests::gpu_probe_w4a8_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 774 filtered out; finished in 0.48s
+
+PROBE STAGE gpu_probe_w4a8_tiny: rc 0 after 0.6 s
+PROBE STAGE gpu_probe_w4a8_int_bits: start (/root/axon-node/store/23bbfc11ee65aa2fc11c7de3/bin cuda::qwen2::tests::gpu_probe_w4a8_int_bits --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+PROBE BITS 128x256 nb 64 ctas 1: 8192 outputs, 0 mismatches
+PROBE BITS 200x768 nb 100 ctas 3: 20000 outputs, 0 mismatches
+PROBE BITS 384x1280 nb 129 ctas 2: 49536 outputs, 0 mismatches
+PROBE BITS 128x4352 nb 64 ctas 1: 8192 outputs, 0 mismatches
+PROBE BITS 512x3584 nb 200 ctas 7: 102400 outputs, 0 mismatches
+test cuda::qwen2::tests::gpu_probe_w4a8_int_bits ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 774 filtered out; finished in 0.50s
+
+PROBE STAGE gpu_probe_w4a8_int_bits: rc 0 after 0.6 s
+PROBE STAGE cuda_probe_w4a8_bench: start (/root/axon-node/store/23bbfc11ee65aa2fc11c7de3/bin cuda::qwen2::tests::cuda_probe_w4a8_bench --exact --nocapture --test-threads 1 --ignored)
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+PROBE device NVIDIA H100 80GB HBM3 sm_90 132 SMs, hopper module true, probe module true
+PROBE CELL gate 3584x18944 nb 128 gemm2t_q4_k: median 85.7 TMAC/s (min 85.1 max 86.3; 9 rounds)
+PROBE CELL gate 3584x18944 nb 128 gemmh2_q4_k: median 78.5 TMAC/s (min 78.1 max 78.8; 9 rounds)
+PROBE CELL gate 3584x18944 nb 128 probe_w4a8_n64: median 157.9 TMAC/s (min 156.8 max 159.6; 9 rounds) bits PASS
+PROBE CELL gate 3584x18944 nb 1024 gemm2t_q4_k: median 118.5 TMAC/s (min 118.4 max 118.6; 9 rounds)
+PROBE CELL gate 3584x18944 nb 1024 gemmh2_q4_k: median 116.5 TMAC/s (min 116.5 max 116.8; 9 rounds)
+PROBE CELL gate 3584x18944 nb 1024 probe_w4a8_n64: median 224.8 TMAC/s (min 224.3 max 224.9; 9 rounds) bits PASS
+PROBE CELL q/wo 3584x3584 nb 128 gemm2t_q4_k: median 44.3 TMAC/s (min 44.2 max 44.4; 9 rounds)
+PROBE CELL q/wo 3584x3584 nb 128 gemmh2_q4_k: median 45.8 TMAC/s (min 44.7 max 46.3; 9 rounds)
+PROBE CELL q/wo 3584x3584 nb 128 probe_w4a8_n64: median 82.6 TMAC/s (min 81.8 max 82.8; 9 rounds) bits PASS
+PROBE CELL q/wo 3584x3584 nb 1024 gemm2t_q4_k: median 97.5 TMAC/s (min 97.4 max 98.7; 9 rounds)
+PROBE CELL q/wo 3584x3584 nb 1024 gemmh2_q4_k: median 95.1 TMAC/s (min 94.8 max 95.5; 9 rounds)
+PROBE CELL q/wo 3584x3584 nb 1024 probe_w4a8_n64: median 183.0 TMAC/s (min 181.6 max 183.6; 9 rounds) bits PASS
+PROBE CELL down 18944x3584 nb 128 gemm2t_q4_k: median 52.5 TMAC/s (min 51.6 max 52.6; 9 rounds)
+PROBE CELL down 18944x3584 nb 128 gemmh2_q4_k: median 49.9 TMAC/s (min 49.5 max 50.2; 9 rounds)
+PROBE CELL down 18944x3584 nb 128 probe_w4a8_n64: median 101.6 TMAC/s (min 101.3 max 102.1; 9 rounds) bits PASS
+PROBE CELL down 18944x3584 nb 1024 gemm2t_q4_k: median 108.0 TMAC/s (min 107.3 max 108.9; 9 rounds)
+PROBE CELL down 18944x3584 nb 1024 gemmh2_q4_k: median 105.1 TMAC/s (min 104.5 max 105.7; 9 rounds)
+PROBE CELL down 18944x3584 nb 1024 probe_w4a8_n64: median 202.3 TMAC/s (min 201.6 max 203.2; 9 rounds) bits PASS
+PROBE CELL kv 3584x512 nb 128 gemm2t_q4_k: median 6.4 TMAC/s (min 6.4 max 6.4; 9 rounds)
+PROBE CELL kv 3584x512 nb 128 gemmh2_q4_k: median 6.7 TMAC/s (min 6.6 max 6.8; 9 rounds)
+PROBE CELL kv 3584x512 nb 128 probe_w4a8_n64: median 12.6 TMAC/s (min 12.5 max 12.6; 9 rounds) bits PASS
+PROBE CELL kv 3584x512 nb 1024 gemm2t_q4_k: median 50.9 TMAC/s (min 50.7 max 51.2; 9 rounds)
+PROBE CELL kv 3584x512 nb 1024 gemmh2_q4_k: median 47.5 TMAC/s (min 46.8 max 48.2; 9 rounds)
+PROBE CELL kv 3584x512 nb 1024 probe_w4a8_n64: median 90.7 TMAC/s (min 90.0 max 91.1; 9 rounds) bits PASS
+PROBE GATE gate 3584x18944 nb 1024 probe_w4a8_n64 median 224.8 TMAC/s vs 240: KILL (shelve round 2)
+PROBE BENCH END ok
+test cuda::qwen2::tests::cuda_probe_w4a8_bench ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 774 filtered out; finished in 1.70s
+
+PROBE STAGE cuda_probe_w4a8_bench: rc 0 after 1.8 s
+PROBE END ok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 774 filtered out; finished in 5.60s
+
+[axon-node 02:27:45] exit 0 after 5.6s
+[axon-node 02:27:45] peak RSS 101 MB (job process tree PSS, 2 s samples x2)
+[axon-run 22:27:46] exit 0 after 14.4s (host pod2)
+[axon-run 22:27:51] EXPECT ok: output matches /PROBE END/
+[axon-run 22:27:51] FOREIGN_GPU max=0% mean=0.0% samples=1
