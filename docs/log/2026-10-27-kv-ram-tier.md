@@ -194,3 +194,20 @@ The zeroing is ~7–8 % of the cost; the pinning is the rest.
   - TTFT-resume 0.148 s.
   - The replay's md5 and aggregate / ITL clauses pass.
   - The bella TTFT cell of record (1027-143150-e608) is pending, a MUST before merge.
+
+## Update 2026-10-27 (late): review fixes (shady 7/10 APPROVE-WHEN-GREEN), 92cb99a
+- **Errors.** A tier error on the pool path turns the tier off with a log line, as on the single-cache path, instead
+  of failing the engine.
+- **Arena.**
+  - Slabs pinned but never adopted are freed at drop (the thread and the engine share a closable state, not a
+    channel).
+  - A failed copy-out gives its slot back.
+- **Compile-time check:** `PAGE == kvsave::PAGE`.
+- **Polling.** The engine polls the pinning every iteration, so an idle server finishes adopting its slabs and shows
+  them in /metrics.
+- **Tests.** The thread-mode serve tests wait for the full pin before sending traffic.
+- **Docs.** README, help and code comments now say the whole size is pinned (unswappable) from start: `auto` pins up
+  to 8 GiB.
+- **Known limit:** the idle flush burst, issue #170.
+- **PR C:** #164 was told about the copy-on-write precondition for partial-page restores.
+- **Before any default flip:** the heavy-eviction replay is required.
