@@ -2290,6 +2290,11 @@ mod tests {
                     m.arch
                 );
             }
+            // With --nocapture a gate can count the cases run and skipped.
+            eprintln!(
+                "pool_wide_long_steps_match_solo case {} {mode:?}: ran, {slots} x {ctx}",
+                m.arch
+            );
         }
     }
 
