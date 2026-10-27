@@ -1,0 +1,29 @@
+{
+ "label": "poolwide-bfcf8f3-bella-r3",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1027-151223-e720",
+   "name": "poolwide-bfcf8f3-bella-r3",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "bfcf8f3",
+   "binary": "axon-test-bfcf8f3",
+   "started": 1793128343.5055392,
+   "ended": 1793128489.7400877,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "4af9e3b8d7dfbf49e67fd4398c3f41e2a2ce69b66539e3c16c9415bd1a6d6011",
+   "log_bytes": 1520
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-27 15:14:52 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
