@@ -3302,6 +3302,14 @@ pub fn run(args: &[String]) -> io::Result<()> {
         }
         i += 2;
     }
+    // Shortest-first without an age bound (`--admit-age-ms 0`): a long prompt
+    // can wait behind shorter ones for as long as they keep coming.
+    if o.sched.order == engine::AdmitOrder::Sjf && o.sched.age_ms == 0 {
+        eprintln!(
+            "axon serve: --admit-age-ms 0 with --admit-order sjf (the default) removes the \
+             starvation bound: a long prompt can wait as long as shorter ones keep arriving"
+        );
+    }
     // AXON_API_KEY keeps the key out of `ps`; --api-key wins over it (the
     // variable isn't even read then). A secret file's trailing newline is
     // trimmed; set but blank, or not UTF-8, is an error (auth was asked for).

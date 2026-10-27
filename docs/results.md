@@ -299,7 +299,9 @@ Each row is the PR's own run against llama.cpp 4413a19 (#63, #67, #78, #89, #98;
   (TAINTED), but hasn't been run against llama.cpp.
 - `serve` runs a MoE model one request at a time (no slot pool for MoE backends).
 - Shortest-first admission (`--admit-order sjf`, #131) missed its kill-rule clause on the laptop cells (short TTFT
-  p50 0.56× / 0.79× of fifo where ≤ 0.5× was needed) and is opt-in; the H100 cells it was designed for are #139.
+  p50 0.56× / 0.79× of fifo where ≤ 0.5× was needed). On the H100 cells it was designed for, `--admit-order sjf
+  --step-ms 80` passed #165's rule S (mix C=128 +7.6 % aggregate, +60.5 % goodput) and is the default since #167.
+  On small GPUs at low concurrency the 80 ms step is checked by a bella C=1/4 no-regression cell (#167 §5).
 - A dense model loaded on the CPU under a memory limit is OOM-killed instead of refused (#135; #133 fixed MoE). (An
   explicit `--parallel N` that doesn't fit in GPU memory is now refused at start: #137, #141.)
 

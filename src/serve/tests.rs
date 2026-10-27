@@ -2462,11 +2462,11 @@ fn pages_block_bounds_the_wait() {
 /// --prefill-lanes 2 --step-ms 60` with AXON_STEP_COST=legacy (the A/B's
 /// `roll` arm) shows lanes 2 and the legacy budgets on /metrics; sjf at
 /// 32 slots lanes 2, at 128 slots 8, the model's budgets. The shipped
-/// defaults (no flags, no environment) are the A/B's measured `fifo60`
-/// arm, the whole `Sched` and the step: fifo, lanes 2 at any slot count,
-/// `--step-ms 60`, the cost model. The live "default" row follows the
-/// job's environment (AXON_ADMIT=sjf: 8 lanes at 128 slots; legacy if
-/// AXON_STEP_COST=legacy).
+/// defaults (no flags, no environment) are the H100 session's measured
+/// `sjf80` arm (#165's rule S), the whole `Sched` and the step:
+/// shortest-first, lanes slots/16 within 2..8, `--step-ms 80`, the cost
+/// model. The live "default" row follows the job's environment
+/// (AXON_ADMIT=fifo: 2 lanes at 128 slots; legacy if AXON_STEP_COST=legacy).
 #[test]
 fn serve_rollback_flags_reach_the_engine() {
     let Some(_) = crate::testutil::gpu() else {
@@ -2479,22 +2479,22 @@ fn serve_rollback_flags_reach_the_engine() {
         ("roll", 32, 2.0, 1.0),
         ("sjf50", 32, 2.0, 0.0),
         ("sjf50", 128, 8.0, 0.0),
-        ("default", 128, 2.0, -1.0),
+        ("default", 128, 8.0, -1.0),
     ] {
         // The job's environment decides the "default" row (axon-run passes
         // AXON_*: the sjf and rollback gates run this test too).
-        let fifo = std::env::var("AXON_ADMIT").map_or(true, |v| v != "sjf");
+        let fifo = std::env::var("AXON_ADMIT").is_ok_and(|v| v.trim().eq_ignore_ascii_case("fifo"));
         if arm == "default" {
-            // With no environment, the defaults are the measured fifo60 arm,
-            // whole (shady M1/S1 on #131).
-            let none = super::engine::Sched::from_env(None, None);
-            assert_eq!((none, super::engine::STEP_MS), arm_sched("fifo60"));
+            // With no environment, the defaults are the measured sjf80 arm,
+            // whole (#165's rule S).
+            let none = super::engine::Sched::from_env(None, None).unwrap();
+            assert_eq!((none, super::engine::STEP_MS), arm_sched("sjf80"));
             let o = test_opts("x", Device::Cuda);
-            assert_eq!(o.step_ms, 60, "the default step");
+            assert_eq!(o.step_ms, 80, "the default step");
             assert_eq!(o.sched.order == super::engine::AdmitOrder::Fifo, fifo);
         }
         let lanes = match (arm, fifo) {
-            ("default", false) => 8.0,
+            ("default", true) => 2.0,
             _ => lanes,
         };
         let legacy = match legacy < 0.0 {
@@ -2520,7 +2520,96 @@ fn serve_rollback_flags_reach_the_engine() {
     }
 }
 
-/// Shortest-first admission (`--admit-order sjf`, opt-in): with 4
+/// Shortest-first can't starve a long prompt (shady on #167): 2 slots,
+/// sjf, `--admit-age-ms 1000`, four clients keeping both slots busy with
+/// short requests the whole time; one long prompt sent into that traffic
+/// must leave the engine's waiting list (GET /slots `waiting`, each with its
+/// `age_ms`) within 2 x the age bound (`pages_block`'s: past it nothing
+/// overtakes it, so it gets the next free slot), and its reply == the same
+/// request alone. Without the bound it could wait as long as shorts keep
+/// coming (a shorter prompt always sorts first).
+#[test]
+fn serve_sjf_long_prompt_admitted_within_age_bound() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let age = 1000u64;
+    let opts = |o: &mut Opts| {
+        o.ctx = Some(4096);
+        o.parallel = 2;
+        o.parallel_set = true;
+        o.sched.order = super::engine::AdmitOrder::Sjf;
+        o.sched.age_ms = age;
+    };
+    let long_text: String = (0..120)
+        .map(|i| format!("Line {i}: the river runs past mill {}. ", i * 7))
+        .collect();
+    let long = json!({"prompt": format!("{long_text}Summary:"), "max_tokens": 4, "temperature": 0});
+    let refs = server_with(p.to_str().unwrap(), Device::Cuda, opts);
+    let solo =
+        post(refs.addr, "/v1/completions", long.clone()).json()["choices"][0]["text"].clone();
+    drop(refs);
+    let s = server_with(p.to_str().unwrap(), Device::Cuda, opts);
+    let a = s.addr;
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let (waited, text) = std::thread::scope(|sc| {
+        for t in 0..4 {
+            let stop = &stop;
+            sc.spawn(move || {
+                let mut i = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    let b = json!({"prompt": format!("{t}.{i} Name a colour:"), "max_tokens": 12,
+                                   "temperature": 0});
+                    assert_eq!(post(a, "/v1/completions", b).status, 200);
+                    i += 1;
+                }
+            });
+        }
+        // Both slots busy with shorts, more queued.
+        std::thread::sleep(Duration::from_millis(500));
+        let h =
+            sc.spawn(move || post(a, "/v1/completions", long).json()["choices"][0]["text"].clone());
+        // The long one's last age seen in the waiting list (the longest
+        // prompt there), until it leaves it.
+        let (mut seen, mut last) = (false, 0u64);
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(60) {
+            let sl = call(a, "GET", "/slots", "").json();
+            let w = sl["waiting"].as_array().cloned().unwrap_or_default();
+            let mine = w
+                .iter()
+                .find(|x| x["prompt_tokens"].as_u64().unwrap_or(0) > 800);
+            match mine {
+                Some(x) => {
+                    seen = true;
+                    last = x["age_ms"].as_u64().unwrap_or(0);
+                }
+                None if seen => break,
+                None => {}
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let text = h.join().unwrap();
+        stop.store(true, Ordering::Relaxed);
+        assert!(seen, "the long prompt never showed in the waiting list");
+        (last, text)
+    });
+    eprintln!(
+        "long prompt admitted after waiting ~{waited} ms under short traffic (bound {} ms)",
+        2 * age
+    );
+    // Poll granularity and one engine iteration on top of the bound.
+    assert!(
+        waited <= 2 * age + 500,
+        "the long prompt waited {waited} ms: past 2 x {age} ms"
+    );
+    assert_eq!(text, solo, "the long prompt's reply == alone");
+}
+
+/// Shortest-first admission (`--admit-order sjf`, the default): with 4
 /// requests decoding and two long prompts prefilling (both lanes of a
 /// paged pool of 8 slots), a short prompt sent next starts at once and is
 /// done before either long prompt's first token; with `--admit-order fifo`
@@ -5487,10 +5576,10 @@ fn hist_p50(m: &std::collections::BTreeMap<String, f64>, fam: &str) -> f64 {
 /// environment). roll = `--admit-order fifo --prefill-lanes 2 --step-ms
 /// 60` with AXON_STEP_COST=legacy, main's scheduling exactly
 /// (`legacy_reproduces_main_decisions`); fifo60 = the step cost model with
-/// fifo admission, **the shipped defaults** (`serve_rollback_flags_reach_
-/// the_engine`); fifo50 = the same at 50 ms (never run); sjf60 / sjf50 =
-/// shortest-first (opt-in) with the cost model; sjf50age0: no age bound.
-/// (Until 6cb98fc sjf50 was the default.)
+/// fifo admission (the defaults from #131 to #165's rule S); fifo50 = the
+/// same at 50 ms; sjf60 / sjf50 / sjf80 = shortest-first with the cost
+/// model; **sjf80 = the shipped defaults** since #165's rule S
+/// (`serve_rollback_flags_reach_the_engine`); sjf50age0: no age bound.
 fn arm_sched(arm: &str) -> (super::engine::Sched, usize) {
     use super::engine::AdmitOrder::{Fifo, Sjf};
     let (order, lanes, step_ms, legacy, age_ms) = match arm {
@@ -5499,6 +5588,7 @@ fn arm_sched(arm: &str) -> (super::engine::Sched, usize) {
         "fifo50" => (Fifo, 0, 50, false, 3000),
         "sjf60" => (Sjf, 0, 60, false, 3000),
         "sjf50" => (Sjf, 0, 50, false, 3000),
+        "sjf80" => (Sjf, 0, 80, false, 3000),
         "sjf50age0" => (Sjf, 0, 50, false, 0),
         _ => panic!("unknown A/B arm {arm}"),
     };
@@ -5560,10 +5650,14 @@ fn serve_sd_ab() {
         "serve_sd_ab: {path}, --parallel {par} --ctx {ctx}, C {cs:?}, {rounds} rounds, arms \
          {arms:?}"
     );
-    let py = |args: &[&str]| {
+    // A fixed salt per (round, C) for every arm (a client that honours
+    // SD_SALT; devstack's ignores it): the arms run the same prompts, so with
+    // the same bits they do the same work (checked below).
+    let py = |args: &[&str], salt: &str| {
         let o = std::process::Command::new("python3")
             .arg(&client)
             .args(args)
+            .env("SD_SALT", salt)
             .output()
             .expect("python3");
         (
@@ -5572,8 +5666,11 @@ fn serve_sd_ab() {
             String::from_utf8_lossy(&o.stderr).into_owned(),
         )
     };
+    let out = format!("{dir}/res");
+    let _ = std::fs::remove_dir_all(&out);
     for r in 1..=rounds {
         for &c in &cs {
+            let salt = format!("r{r} c{c} fixed");
             for k in 0..arms.len() {
                 let arm = &arms[(k + r) % arms.len()];
                 let s = server_with(&path, Device::Cuda, |o| {
@@ -5585,26 +5682,28 @@ fn serve_sd_ab() {
                 });
                 let url = format!("http://{}", s.addr);
                 let (cs_, ct) = (c.to_string(), ctx.to_string());
-                let (ok, _, err) = py(&["warm", &url, "--c", "4", "--n", "8", "--ctx", &ct]);
+                let (ok, _, err) = py(&["warm", &url, "--c", "4", "--n", "8", "--ctx", &ct], "");
                 assert!(ok, "warm: {err}");
                 let rs = r.to_string();
-                let out = format!("{dir}/res");
-                let (ok, so, err) = py(&[
-                    "cell",
-                    &url,
-                    "--workload",
-                    "mix",
-                    "--c",
-                    &cs_,
-                    "--round",
-                    &rs,
-                    "--tag",
-                    arm,
-                    "--out",
-                    &out,
-                    "--ctx",
-                    &ct,
-                ]);
+                let (ok, so, err) = py(
+                    &[
+                        "cell",
+                        &url,
+                        "--workload",
+                        "mix",
+                        "--c",
+                        &cs_,
+                        "--round",
+                        &rs,
+                        "--tag",
+                        arm,
+                        "--out",
+                        &out,
+                        "--ctx",
+                        &ct,
+                    ],
+                    &salt,
+                );
                 assert!(ok, "cell: {err}");
                 let line = so
                     .lines()
@@ -5624,6 +5723,34 @@ fn serve_sd_ab() {
             }
         }
     }
+    // BITS: every request's text and length equal across the arms, per
+    // (round, salt, g).
+    // (round, salt, g) -> each arm's (tag, text_sha, completion_tokens)
+    type Key = (i64, String, i64);
+    let mut by: std::collections::BTreeMap<Key, Vec<(String, String, i64)>> = Default::default();
+    let reqs = std::fs::read_to_string(format!("{out}/requests.jsonl")).unwrap_or_default();
+    for l in reqs.lines() {
+        let v: Value = serde_json::from_str(l).unwrap();
+        let k = (
+            v["round"].as_i64().unwrap_or(0),
+            v["salt"].as_str().unwrap_or("").to_string(),
+            v["g"].as_i64().unwrap_or(0),
+        );
+        let e = (
+            v["tag"].as_str().unwrap_or("").to_string(),
+            v["text_sha"].as_str().unwrap_or("").to_string(),
+            v["completion_tokens"].as_i64().unwrap_or(-1),
+        );
+        by.entry(k).or_default().push(e);
+    }
+    let same = (by.values())
+        .filter(|v| v.len() == arms.len() && v.iter().all(|e| (&e.1, e.2) == (&v[0].1, v[0].2)))
+        .count();
+    eprintln!(
+        "BITS: {same} of {} requests identical (text_sha, completion_tokens) across {} arms",
+        by.len(),
+        arms.len()
+    );
 }
 
 /// One arm of `serve_sched_ab` (`arm_opts`): a fresh
