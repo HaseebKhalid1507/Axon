@@ -9520,3 +9520,501 @@ fn gpu_concurrency_matrix_hunt() {
     }
     eprintln!("HUNT TABLE\n{}", table.join("\n"));
 }
+
+// ---------------------------------------------------------------------------
+// T3 (2026-10-26): the Hopper W4A8 round-2 upper-bound probe (probe_w4a8.cu).
+// TEST-ONLY: its source is never part of KERNELS; it is built here from
+// hopper.cu's helper prefix + decode.cu's activation view + probe_w4a8.cu,
+// as a module of its own (own cache key). Its results are integers (S, M
+// over all of K), not the GEMM: it bounds speed, it is never a product.
+
+/// probe_w4a8.cu's PROBE_W4A8_SMEM(64): 4 stages of 16 KiB activations +
+/// 8 KiB bsum pieces + 128 raw Q4_K rows, 8 barriers, 1 KiB alignment slack.
+const PROBE_W4A8_SMEM: usize = 4 * (64 * 256 + 64 * 128 + 128 * 144) + 2 * 4 * 8 + 1024;
+
+/// The probe module's source: kernels.cu's typedefs, decode.cu's `Act` /
+/// `act_view`, hopper.cu's helpers (TMap .. the RS wgmma wrappers, up to
+/// HOPPER_CHECK_SMEM), probe_w4a8.cu. Panics if a marker moved.
+fn probe_w4a8_src() -> String {
+    let k = crate::cuda::KERNELS;
+    let cut = |from: &str, to: &str| -> String {
+        let a = k.find(from).unwrap_or_else(|| panic!("KERNELS: {from}"));
+        let b = a + k[a..].find(to).unwrap_or_else(|| panic!("KERNELS: {to}"));
+        assert_eq!(k.matches(from).count(), 1, "KERNELS: {from}");
+        k[a..b].to_string()
+    };
+    format!(
+        "// AXON TEST-ONLY: the W4A8 probe module (tests.rs probe_w4a8_src)\n\
+         typedef unsigned char u8;\ntypedef unsigned int u32;\ntypedef unsigned long long u64;\n\
+         {}{}\n#endif // the helpers' __CUDA_ARCH_FEAT_SM90_ALL\n{}",
+        cut("struct Act {", "// One warp quantizes 256-block"),
+        cut(
+            "// Hopper (sm_90a: H100/H200/H20/GH200) only",
+            "// Test (gpu_hopper_tma_wgmma)"
+        ),
+        include_str!("../probe_w4a8.cu")
+    )
+}
+
+/// The probe source compiles for sm_90a through NVRTC (no GPU needed):
+/// the kernel is in the cubin, no wgmma serialization / C751x notes, and
+/// for plain sm_90 it compiles to nothing. AXON_VARIANT_SRC_DIR=DIR writes
+/// it there as probe-w4a8.cu (the pod's kernel cache is prewarmed from it).
+#[test]
+fn nvrtc_probe_w4a8_compiles_sm90a() {
+    let src = probe_w4a8_src();
+    if let Some(d) = std::env::var_os("AXON_VARIANT_SRC_DIR") {
+        std::fs::write(std::path::Path::new(&d).join("probe-w4a8.cu"), &src).unwrap();
+    }
+    let n = match crate::cuda::ffi::nvrtc() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("skipping: {e}");
+            return;
+        }
+    };
+    if !crate::cuda::ffi::nvrtc_archs(n).unwrap().contains(&90)
+        || crate::cuda::ffi::nvrtc_version(n).unwrap().0 < 12
+    {
+        eprintln!("skipping: NVRTC has no sm_90a");
+        return;
+    }
+    for t in [
+        crate::cuda::Target::Cubin90a,
+        crate::cuda::Target::Cubin(90),
+    ] {
+        let mut opts = vec![format!("--gpu-architecture={t}")];
+        opts.extend(crate::cuda::KERNEL_OPTS_EXT.iter().map(|s| s.to_string()));
+        let (image, log) = crate::cuda::compile_logged(n, &src, &opts, t)
+            .unwrap_or_else(|e| panic!("probe {t}: {e}"));
+        eprintln!("probe {t}: {} bytes of cubin", image.len());
+        assert!(
+            !log.contains("wgmma") && !log.contains("serialized") && !log.contains("C751"),
+            "probe {t}: wgmma notes in the NVRTC log:\n{log}"
+        );
+        let has = image.windows(14).any(|w| w == b"probe_w4a8_n64");
+        assert_eq!(has, t == crate::cuda::Target::Cubin90a, "probe {t}");
+    }
+}
+
+/// The probe's module (sm_90a devices only: None elsewhere).
+fn probe_w4a8_module(g: &Gpu) -> Option<Module<'_>> {
+    let m = Module::load(g, &probe_w4a8_src(), &crate::cuda::KERNEL_OPTS_EXT)
+        .unwrap()
+        .0;
+    m.hopper().then_some(m)
+}
+
+/// Launch probe_w4a8_n64 on Q4_K `w` (rows x cols) and nb tokens of `act`
+/// (stride st): `ctas` persistent CTAs, outS / outM rows * nb i32 each.
+///
+/// # Safety
+/// As launch_gemmh; outS / outM hold rows * nb i32.
+#[allow(clippy::too_many_arguments)]
+unsafe fn launch_probe_w4a8(
+    g: &Gpu,
+    pm: &Module,
+    w: &DevBuf,
+    rows: usize,
+    cols: usize,
+    act: &DevBuf,
+    st: usize,
+    nb: usize,
+    ctas: usize,
+    out_s: &DevBuf,
+    out_m: &DevBuf,
+) {
+    let rb = (cols / 256 * 144) as u64;
+    let mw = g
+        .tensor_map_2d(dev_addr(w), (rb, rows as u64), rb, (144, 128), false)
+        .unwrap();
+    let mx = g
+        .tensor_map_2d(
+            dev_addr(act),
+            (cols as u64, nb as u64),
+            st as u64,
+            (128, 64),
+            true,
+        )
+        .unwrap();
+    let f = pm.function("probe_w4a8_n64").unwrap();
+    f.set_max_shared(PROBE_W4A8_SMEM).unwrap();
+    // SAFETY: probe_w4a8_n64's signature; the caller's buffers.
+    unsafe {
+        g.launch(
+            &f,
+            (ctas as u32, 1, 1),
+            (384, 1, 1),
+            PROBE_W4A8_SMEM as u32,
+            &[
+                Arg::Blob128(mw),
+                Arg::Blob128(mx),
+                act.arg(),
+                Arg::U64(st as u64),
+                Arg::I32(rows as i32),
+                Arg::I32(cols as i32),
+                Arg::I32(nb as i32),
+                out_s.arg(),
+                out_m.arg(),
+            ],
+        )
+        .unwrap();
+    }
+}
+
+/// The probe's integers for output (token z, row r), on the CPU (wrapping
+/// i32, as the int32 accumulators): S = sum_b sum_j sc_bj sum_k q x and
+/// M = sum_b sum_j m_bj b32_bj, from the raw Q4_K row and the activation
+/// buffer's Q8_K values and 32-sums (decode.cu act_view layout).
+fn probe_w4a8_ref(w: &[u8], cols: usize, act: &[u8], st: usize, z: usize, r: usize) -> (i32, i32) {
+    let rb = cols / 256 * 144;
+    let np = cols.next_multiple_of(256);
+    let a = &act[z * st..];
+    let (mut s, mut m) = (0i32, 0i32);
+    for b in 0..cols / 256 {
+        let blk = &w[r * rb + b * 144..][..144];
+        let sc = &blk[4..16];
+        let qs = &blk[16..];
+        for j in 0..8 {
+            let (scj, mj) = if j < 4 {
+                (sc[j] & 63, sc[j + 4] & 63)
+            } else {
+                (
+                    (sc[j + 4] & 15) | ((sc[j - 4] >> 6) << 4),
+                    (sc[j + 4] >> 4) | ((sc[j] >> 6) << 4),
+                )
+            };
+            let (p, o) = (j / 2, j % 2);
+            let mut sumi = 0i32;
+            for i in 0..32 {
+                let q = (qs[32 * p + i] >> (4 * o)) & 15;
+                let x = a[256 * b + 32 * j + i] as i8;
+                sumi += q as i32 * x as i32;
+            }
+            let o32 = 2 * np + np / 64 + 4 * (8 * b + j);
+            let b32 = i32::from_le_bytes(a[o32..o32 + 4].try_into().unwrap());
+            s = s.wrapping_add((scj as i32).wrapping_mul(sumi));
+            m = m.wrapping_add((mj as i32).wrapping_mul(b32));
+        }
+    }
+    (s, m)
+}
+
+/// Compare the probe's outputs with probe_w4a8_ref at `pairs` (z, r);
+/// returns the mismatch count (prints the first few).
+#[allow(clippy::too_many_arguments)]
+fn probe_w4a8_check(
+    what: &str,
+    w: &[u8],
+    rows: usize,
+    cols: usize,
+    act: &[u8],
+    st: usize,
+    out_s: &[i32],
+    out_m: &[i32],
+    pairs: &[(usize, usize)],
+) -> usize {
+    let mut bad = 0;
+    for &(z, r) in pairs {
+        let want = probe_w4a8_ref(w, cols, act, st, z, r);
+        let got = (out_s[z * rows + r], out_m[z * rows + r]);
+        if got != want {
+            if bad < 5 {
+                eprintln!("PROBE BITS {what}: z {z} r {r}: got {got:?} want {want:?}");
+            }
+            bad += 1;
+        }
+    }
+    bad
+}
+
+/// probe_w4a8_n64's integers == the CPU's, every output, on ragged shapes:
+/// rows / tokens off the 128 x 64 tile, 1 to 17 blocks, few CTAs (several
+/// tiles each: the persistent loop, the stage ring wrapping across tiles).
+/// Hopper (sm_90a) only; skips elsewhere.
+#[test]
+fn gpu_probe_w4a8_int_bits() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let Some(pm) = probe_w4a8_module(&g) else {
+        eprintln!("skipping: not sm_90a");
+        return;
+    };
+    let mut rng = Rng(31);
+    for (rows, cols, nb, ctas) in [
+        (128usize, 256usize, 64usize, 1usize),
+        (200, 768, 100, 3),
+        (384, 1280, 129, 2),
+        (128, 4352, 64, 1),
+        (512, 3584, 200, 7),
+    ] {
+        let wh = synth_matrix(&mut rng, Q4_K, rows, cols);
+        let w = g.upload(&wh).unwrap();
+        let xs: Vec<Vec<f32>> = (0..nb).map(|_| rng.vec(cols, 1.0)).collect();
+        let act = quantize_batch(&g, &km, &xs, cols);
+        let st = act_stride_t(cols);
+        let (os, om) = (
+            g.alloc(rows * nb * 4).unwrap(),
+            g.alloc(rows * nb * 4).unwrap(),
+        );
+        // SAFETY: buffers sized as launch_probe_w4a8 requires.
+        unsafe { launch_probe_w4a8(&g, &pm, &w, rows, cols, &act, st, nb, ctas, &os, &om) };
+        g.sync().unwrap();
+        let (ah, sh, mh) = (
+            act.read::<u8>().unwrap(),
+            os.read::<i32>().unwrap(),
+            om.read::<i32>().unwrap(),
+        );
+        let pairs: Vec<(usize, usize)> = (0..nb)
+            .flat_map(|z| (0..rows).map(move |r| (z, r)))
+            .collect();
+        let what = format!("{rows}x{cols} nb {nb} ctas {ctas}");
+        let bad = probe_w4a8_check(&what, &wh, rows, cols, &ah, st, &sh, &mh, &pairs);
+        eprintln!(
+            "PROBE BITS {what}: {} outputs, {bad} mismatches",
+            pairs.len()
+        );
+        assert_eq!(bad, 0, "{what}");
+    }
+}
+
+/// T3's ONE H100 job: the probe's speed (pre-registered kill rule: gate
+/// 3584 x 18944 at nb 1024 < 240 TMAC/s -> shelve round 2) against the
+/// in-session baselines gemmh2_q4_k (main's exact wgmma kernel) and
+/// gemm2t_q4_k (mma.sync), interleaved in the same rounds, plus the
+/// measured wgmma ceiling (wg_peak_rs_n64 at 2 and 3 warpgroups per SM).
+/// Every probe cell is bit-checked (S, M vs the CPU at 4096 sampled
+/// outputs + the tiles' corners) on its last timed run; a mismatch fails
+/// the test and the cell's number does not count. Off Hopper the sm_90a
+/// cells are skipped (the probe is compile-checked instead) and gemm2t
+/// still runs, so the script path is rehearsed. AXON_PROBE_NB (default
+/// "128,1024"), AXON_PROBE_ROUNDS (default 9), AXON_PROBE_SHAPE (substring).
+/// Run with --ignored --nocapture.
+#[test]
+#[ignore]
+fn cuda_probe_w4a8_session() {
+    // A wedged probe (an mbarrier parity bug hangs the GPU) must not eat
+    // the pod: exit after AXON_PROBE_TIMEOUT_S (default 900) whatever runs.
+    let lim: u64 = std::env::var("AXON_PROBE_TIMEOUT_S")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(900);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(lim));
+        eprintln!("PROBE TIMEOUT after {lim} s: exiting");
+        std::process::exit(124);
+    });
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let info = g.info().unwrap();
+    let km = Kernels::module_ext(&g).unwrap();
+    let pm = probe_w4a8_module(&g);
+    eprintln!(
+        "PROBE device {} sm_{}{} {} SMs, hopper module {}, probe module {}",
+        info.name,
+        info.cc.0,
+        info.cc.1,
+        info.sms,
+        km.hopper(),
+        pm.is_some()
+    );
+    let nbs: Vec<usize> = std::env::var("AXON_PROBE_NB")
+        .map(|v| v.split(',').map(|x| x.trim().parse().unwrap()).collect())
+        .unwrap_or(vec![128, 1024]);
+    let rounds: usize = std::env::var("AXON_PROBE_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(9);
+    let shape_ok = |s: &str| std::env::var("AXON_PROBE_SHAPE").map_or(true, |f| s.contains(&f));
+    let stats = |v: &mut Vec<f64>| -> (f64, f64, f64) {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        (v[v.len() / 2], v[0], v[v.len() - 1])
+    };
+    // The wgmma ceiling (wg_peak_rs_n64: RS m64n64k32 from one register
+    // fragment, 1 block per SM x wgs warpgroups), raw MACs.
+    if km.hopper() {
+        let f = km.function("wg_peak_rs_n64").unwrap();
+        let o = g.alloc(4 * 4096).unwrap();
+        let iters = 4096usize;
+        for wgs in [2usize, 3] {
+            let blocks = info.sms as usize;
+            let mut v = Vec::new();
+            for _ in 0..rounds {
+                let e0 = g.record().unwrap();
+                // SAFETY: (int iters, int* out); o has a slot per block.
+                unsafe {
+                    g.launch(
+                        &f,
+                        (blocks as u32, 1, 1),
+                        (128 * wgs as u32, 1, 1),
+                        0,
+                        &[Arg::I32(iters as i32), o.arg()],
+                    )
+                    .unwrap();
+                }
+                let e1 = g.record().unwrap();
+                let ms = e0.ms_to(&e1).unwrap() as f64;
+                v.push((blocks * wgs * iters * 4 * 64 * 64 * 32) as f64 / (ms * 1e-3) / 1e12);
+            }
+            let (med, lo, hi) = stats(&mut v);
+            eprintln!(
+                "PROBE PEAK wg_peak_rs_n64 {wgs} WG/SM: median {med:.1} TMAC/s raw (min {lo:.1} max {hi:.1})"
+            );
+        }
+    } else {
+        eprintln!("PROBE SKIP wg_peak_rs_n64 (no sm_90a module)");
+    }
+    if pm.is_none() {
+        eprintln!("PROBE SKIP sm_90a cells (no sm_90a device): compile-checking the probe instead");
+        nvrtc_probe_w4a8_compiles_sm90a();
+    } else {
+        gpu_probe_w4a8_int_bits();
+        eprintln!("PROBE BITS ragged: PASS");
+    }
+    let mut rng = Rng(7);
+    let mut gate = None;
+    let mut bad_total = 0;
+    for (what, cols, rows) in [
+        ("gate", 3584usize, 18944usize),
+        ("q/wo", 3584, 3584),
+        ("down", 18944, 3584),
+        ("kv", 3584, 512),
+    ] {
+        if !shape_ok(what) {
+            continue;
+        }
+        let wh = synth_matrix(&mut rng, Q4_K, rows, cols);
+        let w = g.upload(&wh).unwrap();
+        for &nb in &nbs {
+            let xs: Vec<Vec<f32>> = (0..nb).map(|_| rng.vec(cols, 1.0)).collect();
+            let act = quantize_batch(&g, &km, &xs, cols);
+            let st = act_stride_t(cols);
+            let out = g.alloc(rows * nb * 4).unwrap();
+            let (os, om) = (
+                g.alloc(rows * nb * 4).unwrap(),
+                g.alloc(rows * nb * 4).unwrap(),
+            );
+            let mut kernels = vec!["gemm2t_q4_k"];
+            if km.hopper() {
+                kernels.push("gemmh2_q4_k");
+            }
+            if pm.is_some() {
+                kernels.push("probe_w4a8_n64");
+            }
+            let mut ms: Vec<Vec<f64>> = vec![Vec::new(); kernels.len()];
+            for _ in 0..rounds {
+                for (ki, k) in kernels.iter().enumerate() {
+                    let run = || {
+                        if *k == "probe_w4a8_n64" {
+                            // SAFETY: buffers sized as launch_probe_w4a8 requires.
+                            unsafe {
+                                launch_probe_w4a8(
+                                    &g,
+                                    pm.as_ref().unwrap(),
+                                    &w,
+                                    rows,
+                                    cols,
+                                    &act,
+                                    st,
+                                    nb,
+                                    info.sms as usize,
+                                    &os,
+                                    &om,
+                                )
+                            };
+                        } else if k.starts_with("gemmh") {
+                            // SAFETY: as in gpu_gemmh_matches_reference_bits.
+                            unsafe {
+                                launch_gemmh(
+                                    &g,
+                                    &km,
+                                    k,
+                                    &w,
+                                    rows,
+                                    cols,
+                                    &act,
+                                    st,
+                                    nb,
+                                    Arg::Ptr(0),
+                                    0,
+                                    &out,
+                                )
+                            };
+                        } else {
+                            let f = km.function(k).unwrap();
+                            let common = [
+                                w.arg(),
+                                Arg::U64(quant::row_bytes(Q4_K, cols) as u64),
+                                Arg::I32(rows as i32),
+                                Arg::I32(cols as i32),
+                                act.arg(),
+                                Arg::U64(st as u64),
+                                Arg::I32(nb as i32),
+                                Arg::Ptr(0),
+                                Arg::I32(0),
+                                out.arg(),
+                                Arg::U64(rows as u64),
+                            ];
+                            // SAFETY: prefill.cu's gemm2 signature; buffers as above.
+                            unsafe { launch_product(&g, &f, k, Q4_K, rows, nb, &common) };
+                        }
+                    };
+                    run(); // warm (and the smem attribute)
+                    let e0 = g.record().unwrap();
+                    for _ in 0..3 {
+                        run();
+                    }
+                    let e1 = g.record().unwrap();
+                    ms[ki].push(e0.ms_to(&e1).unwrap() as f64 / 3.0);
+                }
+            }
+            let macs = (rows * cols * nb) as f64;
+            for (ki, k) in kernels.iter().enumerate() {
+                let mut v: Vec<f64> = ms[ki].iter().map(|x| macs / (x * 1e-3) / 1e12).collect();
+                let (med, lo, hi) = stats(&mut v);
+                let mut tag = String::new();
+                if *k == "probe_w4a8_n64" {
+                    g.sync().unwrap();
+                    let (ah, sh, mh) = (
+                        act.read::<u8>().unwrap(),
+                        os.read::<i32>().unwrap(),
+                        om.read::<i32>().unwrap(),
+                    );
+                    let mut pairs: Vec<(usize, usize)> = (0..4096)
+                        .map(|_| ((rng.next() as usize) % nb, (rng.next() as usize) % rows))
+                        .collect();
+                    for z in [0, 63.min(nb - 1), nb - 1] {
+                        for r in [0, 127.min(rows - 1), rows - 1] {
+                            pairs.push((z, r));
+                        }
+                    }
+                    let bad = probe_w4a8_check(what, &wh, rows, cols, &ah, st, &sh, &mh, &pairs);
+                    bad_total += bad;
+                    tag = format!(" bits {}", if bad == 0 { "PASS" } else { "FAIL" });
+                    if what == "gate" && nb == 1024 && bad == 0 {
+                        gate = Some(med);
+                    }
+                }
+                eprintln!(
+                    "PROBE CELL {what} {cols}x{rows} nb {nb} {k}: median {med:.1} TMAC/s (min {lo:.1} max {hi:.1}; {rounds} rounds){tag}"
+                );
+            }
+        }
+    }
+    match gate {
+        Some(v) => eprintln!(
+            "PROBE GATE gate 3584x18944 nb 1024 probe_w4a8_n64 median {v:.1} TMAC/s vs 240: {}",
+            if v >= 240.0 {
+                "PASS (report and stop)"
+            } else {
+                "KILL (shelve round 2)"
+            }
+        ),
+        None => eprintln!("PROBE GATE not measured on this device"),
+    }
+    assert_eq!(bad_total, 0, "probe bit mismatches");
+    eprintln!("PROBE END ok");
+}
