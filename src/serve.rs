@@ -37,6 +37,7 @@ pub mod http;
 mod ollama;
 pub mod ops;
 mod responses;
+mod tier;
 pub mod tools;
 
 use crate::chat::{self, Framing, special};
@@ -157,6 +158,9 @@ pub struct Opts {
     /// is cancelled (its slot freed), as if it had disconnected. The CLI
     /// refuses less than `MIN_SLOT_IDLE_MS` (tests use less).
     pub slot_idle_ms: Option<u64>,
+    /// `--cache-ram`: the KV RAM tier's size (serve/tier.rs; 0: off, the
+    /// default).
+    pub cache_ram: tier::CacheRam,
 }
 
 /// The chat framing `axon chat` uses (chat.rs: ChatML, or Llama 3's
@@ -678,6 +682,9 @@ struct Engine<'a> {
     metrics: Arc<ops::Metrics>,
     /// The slot its cache is (with a pool: `Batch::lend_solo`'s; else 0).
     slot: usize,
+    /// The KV RAM tier of its one cache (no pool; with one, `Batch` has
+    /// it). None: off.
+    tier: Option<tier::CacheTier>,
 }
 
 /// Run `f`; a panic in it (CUDA errors panic, and are sticky: every later
@@ -777,6 +784,16 @@ impl<'a> Engine<'a> {
             },
         );
         let r = or_exit(&format!("request #{id}"), || self.job(job, ho));
+        // The tier stores the cache's new whole pages (no pool: nothing
+        // else runs, and the next request may take the cache).
+        if let Some(t) = self.tier.as_mut()
+            && let Err(e) = or_exit("the KV RAM tier", || {
+                t.write(self.net, &self.cache, &self.hist)
+            })
+        {
+            eprintln!("axon serve: --cache-ram: {e}; off from here");
+            self.tier = None;
+        }
         self.publish_free();
         r
     }
@@ -811,7 +828,7 @@ impl<'a> Engine<'a> {
             );
         }
         // Reuse the cached prefix; the last prompt token is always fed (its logits).
-        let reuse = self
+        let mut reuse = self
             .hist
             .iter()
             .zip(p)
@@ -819,6 +836,20 @@ impl<'a> Engine<'a> {
             .count()
             .min(last);
         self.hist.truncate(reuse);
+        // The KV RAM tier's longest stored prefix of it, copied in.
+        if let Some(t) = self.tier.as_mut() {
+            match t.restore(self.net, &mut self.cache, &p[..last], reuse) {
+                Ok(n) => {
+                    self.hist.extend_from_slice(&p[reuse..n]);
+                    reuse = n;
+                }
+                Err(e) => {
+                    // The cache's rows past `reuse` are unknown now: forget them.
+                    eprintln!("axon serve: --cache-ram: {e}; off from here");
+                    self.tier = None;
+                }
+            }
+        }
         // The backend's cancellable pieces (each at most prefill_batch;
         // on the GPU its passes, sized to the GEMM waves).
         for r in self.net.prompt_chunks(last - reuse, reuse, &self.cache) {
@@ -1335,6 +1366,7 @@ fn engine(
         generated: o.generated,
         metrics: o.metrics.clone(),
         slot: 0,
+        tier: None,
     };
     let mut batch = pool.map(|(pool, n, slot_ctx)| {
         let policy = engine::ChunkPolicy {
@@ -1351,6 +1383,43 @@ fn engine(
         b.metrics = Some(o.metrics.clone());
         b
     });
+    // The KV RAM tier (`--cache-ram`): sized against the RAM available now
+    // (the model loaded); its host memory is taken only as pages are
+    // stored.
+    let ram = match o.cache_ram.bytes(crate::gguf::mem_available()) {
+        Ok(n) => n,
+        Err(why) => {
+            let _ = ready.send(Err(Refused(why)));
+            return;
+        }
+    };
+    let tier_note = match ram {
+        0 if o.cache_ram == tier::CacheRam::Auto => {
+            Some(", KV RAM tier off (--cache-ram auto: RAM available unknown)".to_string())
+        }
+        0 => None,
+        n => {
+            let on = match batch.as_mut() {
+                Some(b) => b.set_cache_ram(n),
+                None => {
+                    e.tier = tier::CacheTier::new(&net, &e.cache, n, Some(o.metrics.clone()));
+                    e.tier.as_ref().map(|t| t.t.store.cap())
+                }
+            };
+            Some(match on {
+                Some(cap) => format!(
+                    ", KV RAM tier {}{}",
+                    tier::gib(cap as u64),
+                    if o.cache_ram == tier::CacheRam::Auto {
+                        " (--cache-ram auto)"
+                    } else {
+                        ""
+                    }
+                ),
+                None => ", KV RAM tier off (no KV page image on this backend)".to_string(),
+            })
+        }
+    };
     let served = batch.as_ref().map_or(ctx, |b| b.ctx.min(ctx));
     let banner = match (&batch, &paged) {
         (Some(b), Some(p)) => format!(
@@ -1365,6 +1434,7 @@ fn engine(
         (Some(b), None) => format!("{kvs}, ctx {served}{drafts}, {} requests at once", b.slots),
         (None, _) => format!("{kvs}, ctx {ctx}{drafts}, one request at a time"),
     };
+    let banner = banner + tier_note.as_deref().unwrap_or("");
     let identity = crate::identity::of(&o.path, &model, &net);
     if ready
         .send(Ok(Loaded {
@@ -1992,6 +2062,7 @@ struct EngineOpts {
     generated: Arc<AtomicU64>,
     rope: crate::rope::RopeArgs,
     metrics: Arc<ops::Metrics>,
+    cache_ram: tier::CacheRam,
 }
 
 /// A running server. Dropping it (or `shutdown`) stops it: the acceptor
@@ -2100,6 +2171,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
         draft_model: o.draft_model.clone(),
         log: o.log,
         rope: o.rope.clone(),
+        cache_ram: o.cache_ram,
     };
     let stop2 = stop.clone();
     let engine = std::thread::Builder::new()
@@ -3104,8 +3176,8 @@ fn stream(
 const SERVE_USAGE: &str = "usage: axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--device D] \
      [--gpu-layers N] [--kv T] [--draft K] [--draft-model PATH] [--alias NAME] [--max-tokens N] \
      [--cors [ORIGIN]] [--max-conns N] [--max-queue N] [--parallel N] [--prefill-chunk N] \
-     [--prefill-ms MS] [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS] [--no-think] \
-     [--think-inline] [--quiet] [sampling flags]";
+     [--prefill-ms MS] [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS] [--cache-ram BYTES|auto] \
+     [--no-think] [--think-inline] [--quiet] [sampling flags]";
 
 /// AXON_API_KEY's key: trimmed (a secret file's trailing newline); set but
 /// blank, or not UTF-8, is an error, not a server without auth.
@@ -3171,6 +3243,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         api_key: None,
         max_prompt_tokens: None,
         slot_idle_ms: None,
+        cache_ram: tier::CacheRam::Bytes(0),
     };
     let mut k = None;
     let key_from;
@@ -3237,6 +3310,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
             | "--prefill-lanes"
             | "--api-key"
             | "--max-prompt-tokens"
+            | "--cache-ram"
             | "--slot-idle-ms" => {}
             _ => crate::fail(&format!("unknown argument '{f}' for serve")),
         }
@@ -3284,6 +3358,9 @@ pub fn run(args: &[String]) -> io::Result<()> {
             }
             "--api-key" => o.api_key = Some(v.clone()),
             "--max-prompt-tokens" => o.max_prompt_tokens = Some(whole(true)),
+            "--cache-ram" => {
+                o.cache_ram = tier::CacheRam::parse(v).unwrap_or_else(|e| crate::fail(&e))
+            }
             "--slot-idle-ms" => {
                 let n = whole(true) as u64;
                 if n < MIN_SLOT_IDLE_MS {

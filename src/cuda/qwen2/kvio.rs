@@ -38,7 +38,7 @@ impl Rows<'_, '_> {
 
     /// Enqueue the copies of positions lo..hi (inside one page) between the
     /// device and `host` at `at`, in image order; `to_dev`: host to device.
-    fn page(
+    pub(crate) fn page(
         &self,
         host: &mut HostBuf,
         at: usize,
@@ -133,7 +133,7 @@ impl Rows<'_, '_> {
         Ok(())
     }
 
-    fn check(&self, lo: usize, hi: usize) -> io::Result<()> {
+    pub(crate) fn check(&self, lo: usize, hi: usize) -> io::Result<()> {
         let rows_ok = match &self.tab {
             None => self.base + hi <= self.max_ctx,
             Some(t) => {

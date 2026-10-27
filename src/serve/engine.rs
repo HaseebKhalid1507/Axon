@@ -32,7 +32,9 @@
 //! rules), so a request's tokens are the same whatever else runs with it.
 
 use super::api::Usage;
+use super::tier::PoolTier;
 use super::{Event, Job, TextOut};
+use crate::kvsave::PAGE;
 use crate::lm::{Backend, BatchLm, PoolPages, RowHead, RowOut, SeqRow, StepError};
 use crate::sample::Sampler;
 use std::sync::Arc;
@@ -510,6 +512,9 @@ pub(super) struct Batch<'a, 't> {
     /// AXON_SERVE_TRACE's per-step log (`StepTrace`; None: off, the
     /// default, and then nothing below is measured).
     trace: Option<StepTrace>,
+    /// The KV RAM tier (`--cache-ram`, tier.rs; None: off, the default,
+    /// and then nothing of it runs).
+    tier: Option<PoolTier>,
 }
 
 /// AXON_SERVE_TRACE=FILE: one JSON line per engine step appended to FILE
@@ -669,7 +674,79 @@ impl<'a, 't> Batch<'a, 't> {
             grow_tokens: GROW_TOKENS,
             metrics: None,
             trace: StepTrace::from_env(),
+            tier: None,
         }
+    }
+
+    /// Turn the KV RAM tier on with `cap` bytes (`--cache-ram`): the host
+    /// memory it may take, or None if it stays off (no page image on this
+    /// backend, or less than a page).
+    pub fn set_cache_ram(&mut self, cap: u64) -> Option<usize> {
+        self.tier = PoolTier::new(self.net, &self.pool, self.slots, cap, self.metrics.clone());
+        self.tier.as_ref().map(|t| t.t.store.cap())
+    }
+
+    /// Slot `s` is about to give up its rows past `keep`: the tier stores
+    /// its whole pages first (all of them: those below `keep` stay, the
+    /// rest are its conversation's, and go to RAM instead of away), and
+    /// forgets the stored pages past `keep`.
+    fn spill(&mut self, s: usize, keep: usize) -> Result<(), String> {
+        let Some(t) = self.tier.as_mut() else {
+            return Ok(());
+        };
+        t.write(self.net, &self.pool, s, &self.held[s], usize::MAX)?;
+        t.t.truncate(s, keep / PAGE);
+        Ok(())
+    }
+
+    /// The tier's write-behind: `bytes` of copies of the slots' unstored
+    /// pages (usize::MAX: all of them).
+    pub fn write_behind(&mut self, bytes: usize) -> Result<(), String> {
+        match self.tier.as_mut() {
+            Some(t) => t.write_some(self.net, &self.pool, &self.held, bytes),
+            None => Ok(()),
+        }
+    }
+
+    /// Positions of `prompt` (but its last token) that admission counts as
+    /// cached: the free slot's `common`, or the tier's stored prefix if
+    /// longer.
+    fn cached_len(&self, prompt: &[u32], common: usize) -> usize {
+        let last = prompt.len() - 1;
+        let stored = match &self.tier {
+            Some(t) if last > common => t.t.peek(&prompt[..last]),
+            _ => 0,
+        };
+        common.max(stored).min(last)
+    }
+
+    /// Slot `slot` holds the first `have` positions of `prompt` (below its
+    /// last token): copy in the rest of the longest prefix of it the tier
+    /// stores (as far as the slot gets pages for it; idle prefixes give
+    /// theirs up, as for a feed). The positions it holds after; `held`
+    /// says so.
+    fn restore(&mut self, slot: usize, prompt: &[u32], have: usize) -> Result<usize, String> {
+        let Some(t) = self.tier.as_mut() else {
+            return Ok(have);
+        };
+        let last = prompt.len() - 1;
+        let pages = t.lookup(&prompt[..last]);
+        let mut to = pages.len();
+        if to * PAGE > have {
+            // Pages for them (the looked-up pages are held: a slot spilled
+            // to make room can't evict them).
+            let short = self.make_room(slot, to * PAGE)?;
+            if short > 0 {
+                to = self.pages().map_or(0, |p| p.held[slot]).min(to);
+            }
+        }
+        let t = self.tier.as_mut().expect("on");
+        t.restore(self.net, &self.pool, slot, &pages, have, to)?;
+        if to * PAGE <= have {
+            return Ok(have);
+        }
+        self.held[slot] = prompt[..to * PAGE].to_vec();
+        Ok(to * PAGE)
     }
 
     /// Show the slots' state in `metrics`: every engine step, and before a
@@ -750,7 +827,7 @@ impl<'a, 't> Batch<'a, 't> {
             short,
             passes,
             &rem,
-            last - common.min(last),
+            last - self.cached_len(prompt, common),
         ) {
             return Admit::Lane;
         }
@@ -815,7 +892,8 @@ impl<'a, 't> Batch<'a, 't> {
     /// the free slot it would get holds), None without a free slot.
     pub fn uncached(&self, prompt: &[u32]) -> Option<usize> {
         let last = prompt.len().checked_sub(1)?;
-        self.free_slot(prompt).map(|(_, c)| last - c.min(last))
+        self.free_slot(prompt)
+            .map(|(_, c)| last - self.cached_len(prompt, c))
     }
 
     /// The pool's pages (None: plain).
@@ -856,6 +934,15 @@ impl<'a, 't> Batch<'a, 't> {
         let last = p.len() - 1;
         let (slot, common) = self.free_slot(p).expect("admit: a free slot");
         let reuse = common.min(last);
+        self.busy[slot] = true;
+        self.touch(slot);
+        // The tier keeps the slot's pages past the prefix (its last
+        // conversation's).
+        self.spill(slot, reuse)?;
+        self.held[slot].truncate(reuse);
+        // The rest of the slot's pages are free (a paged pool).
+        self.net.release(&mut self.pool, slot, reuse)?;
+        let reuse = self.restore(slot, p, reuse)?;
         if super::debug() {
             eprintln!(
                 "axon serve: #{} prefill: chunked, slot {slot}, {} tok ({reuse} cached), {} decoding",
@@ -864,11 +951,6 @@ impl<'a, 't> Batch<'a, 't> {
                 self.seqs.len()
             );
         }
-        self.busy[slot] = true;
-        self.touch(slot);
-        self.held[slot].truncate(reuse);
-        // The rest of the slot's pages are free (a paged pool).
-        self.net.release(&mut self.pool, slot, reuse)?;
         let sampler = job.sample.map(Sampler::new);
         let now = Instant::now();
         self.pre.push(Prefill {
@@ -1023,15 +1105,25 @@ impl<'a, 't> Batch<'a, 't> {
         cache: &mut <Backend<'a> as crate::lm::Lm>::Cache,
     ) -> Result<Vec<u32>, String> {
         assert!(self.idle(), "lend_solo: the batch is running");
-        let (slot, _) = self.free_slot(prompt).expect("lend_solo: a free slot");
+        let (slot, common) = self.free_slot(prompt).expect("lend_solo: a free slot");
         self.net.move_slot_cache(&self.pool, cache, slot)?;
         self.solo = slot;
         self.touch(slot);
+        // The request writes over the slot's rows past the prefix it
+        // shares: the tier keeps them first.
+        let have = common.min(prompt.len() - 1);
+        if self.tier.is_some() {
+            self.spill(slot, have)?;
+            self.held[slot].truncate(have);
+        }
         let want = prompt.len().saturating_add(n_gen).min(self.ctx);
         let short = self.make_room(slot, want)?;
         if short > 0 {
             return Err(format!("{short} KV pages short for a request alone"));
         }
+        // Its pages are there: the stored prefix of its prompt is copied
+        // in, the view prefills the rest.
+        self.restore(slot, prompt, have)?;
         // Its batched passes run on the pool's scratch (a paged pool's view
         // has none of its own), back at `end_solo` / `adopt`.
         self.net.lend_scratch(&mut self.pool, cache)?;
@@ -1061,6 +1153,8 @@ impl<'a, 't> Batch<'a, 't> {
         let Some(s) = victim else {
             return Ok(false);
         };
+        // Its prefix goes to RAM (the tier on), not away.
+        self.spill(s, 0)?;
         self.held[s].clear();
         self.net.release(&mut self.pool, s, 0)?;
         Ok(true)
@@ -1082,7 +1176,8 @@ impl<'a, 't> Batch<'a, 't> {
         // Pages past its rows (reserved for what it didn't generate) free.
         self.net.release(&mut self.pool, self.solo, hist.len())?;
         self.held[self.solo] = hist;
-        Ok(())
+        // The batch is idle: the tier takes the request's pages now.
+        self.spill(self.solo, usize::MAX)
     }
 
     /// Take over a request `generate` was running on `cache` (the S1 path,
@@ -1133,6 +1228,17 @@ impl<'a, 't> Batch<'a, 't> {
     /// running request and each one's next token. With a `StepTrace`, a
     /// line about it once it did any work.
     pub fn step(&mut self) -> Result<(), String> {
+        self.step_traced()?;
+        // The tier's write-behind: a budget while requests run, the rest
+        // once none do.
+        let bytes = match self.idle() {
+            true => usize::MAX,
+            false => super::tier::STEP_BYTES,
+        };
+        self.write_behind(bytes)
+    }
+
+    fn step_traced(&mut self) -> Result<(), String> {
         if self.trace.is_none() {
             return self.step_inner();
         }
@@ -1300,8 +1406,9 @@ impl<'a, 't> Batch<'a, 't> {
 
     /// Prefill `j` gives its rows up: fed from 0 again later.
     fn unfeed(&mut self, j: usize) -> Result<(), String> {
+        let s = self.pre[j].seq.slot;
+        self.spill(s, 0)?;
         let f = &mut self.pre[j];
-        let s = f.seq.slot;
         f.fed = 0;
         f.seq.cached = 0;
         self.held[s].clear();
@@ -1326,6 +1433,7 @@ impl<'a, 't> Batch<'a, 't> {
                 seq.ids.len()
             );
         }
+        self.spill(s, 0)?;
         self.held[s].clear();
         self.net.release(&mut self.pool, s, 0)?;
         let at = self.pre.partition_point(|f| f.seq.job.id < seq.job.id);

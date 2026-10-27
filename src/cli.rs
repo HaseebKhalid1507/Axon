@@ -49,7 +49,7 @@ usage:
             [--device D] [--gpu-layers N] [--kv T] [--alias NAME] [--max-tokens N] [--cors [ORIGIN]]
             [--max-conns N] [--max-queue N] [--parallel N] [--prefill-chunk N] [--step-ms MS]
             [--step-tokens N] [--admit-order fifo|sjf] [--admit-age-ms MS] [--prefill-lanes N]
-            [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS]
+            [--api-key KEY] [--max-prompt-tokens N] [--slot-idle-ms MS] [--cache-ram BYTES|auto]
             [--no-think] [--think-inline] [--quiet] [sampling flags; the repeat penalty defaults to 1 (off)]
                                             an OpenAI-compatible HTTP server (/v1/models,
                                             /v1/chat/completions, /v1/completions; on cuda
@@ -152,6 +152,9 @@ flags:
   --slot-idle-ms MS  serve: a stream whose client stops reading for MS ms is cancelled
               and its slot freed, as if it had disconnected (default: off; at least 1000).
               The clock starts once the client's receive buffer is full (README)
+  --cache-ram BYTES|auto  serve: keep conversations' KV pages in host RAM (BYTES with K/M/G,
+              or auto: half the RAM available, at most 8G) when their slot is reused, and copy
+              them back on the next turn instead of prefilling again (same bits; default 0: off)
   --rope-scaling yarn --rope-scale F [--yarn-orig-ctx N]
               gen, logits, chat, serve: YaRN RoPE scaling (llama.cpp's flags), off by default:
               the model's context becomes N x F (N: default the model's trained context), e.g.
