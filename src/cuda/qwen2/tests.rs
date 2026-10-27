@@ -10562,3 +10562,760 @@ fn gpu_w4a8_matches_reference_bits() {
         );
     }
 }
+
+/// The smallest launch of each w4a8 entry point (one tile, one block), bit
+/// for bit vs gemv_ref: what the P1 session runs under compute-sanitizer
+/// memcheck first. Hopper only.
+#[test]
+fn gpu_w4a8_tiny() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    if !km.hopper() {
+        eprintln!("skipping: not sm_90a");
+        return;
+    }
+    let (rows, cols, nb) = (128usize, 256usize, 64usize);
+    let mut rng = Rng(9);
+    let xs: Vec<Vec<f32>> = (0..nb).map(|_| rng.vec(cols, 1.0)).collect();
+    let act = quantize_batch(&g, &km, &xs, cols);
+    let st = act_stride_t(cols);
+    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<u32>>();
+    for qt in [Q4_K, Q6_K] {
+        let w = g.upload(&synth_matrix(&mut rng, qt, rows, cols)).unwrap();
+        let want = gpu_batched(
+            &g,
+            &km,
+            "gemv_ref",
+            qt,
+            &w,
+            rows,
+            cols,
+            &act,
+            nb,
+            &Epi::default(),
+        );
+        let c8 = (qt == Q6_K).then(|| q6k8_copy(&g, &km, &w, rows, cols));
+        let k = if qt == Q4_K { "w4a8_q4_k" } else { "w4a8_q6" };
+        let out = g.alloc(rows * nb * 4).unwrap();
+        // SAFETY: rows x cols weights (or their copy), nb tokens, out rows * nb.
+        unsafe {
+            launch_w4a8_k(
+                &g,
+                &km,
+                k,
+                c8.as_ref().unwrap_or(&w),
+                None,
+                rows,
+                cols,
+                &act,
+                st,
+                nb,
+                Arg::Ptr(0),
+                0,
+                &out,
+            )
+        };
+        g.sync().unwrap();
+        assert_eq!(bits(&out.read::<f32>().unwrap()), bits(&want), "{k} tiny");
+        eprintln!("W4A8 TINY {k}: ok");
+    }
+    let (wg, wu) = (
+        g.upload(&synth_matrix(&mut rng, Q4_K, 64, cols)).unwrap(),
+        g.upload(&synth_matrix(&mut rng, Q4_K, 64, cols)).unwrap(),
+    );
+    let (o1, o2) = (g.alloc(64 * nb * 4).unwrap(), g.alloc(64 * nb * 4).unwrap());
+    // SAFETY: as above, 64 rows each.
+    unsafe {
+        launch_w4a8_k(
+            &g,
+            &km,
+            "w4a8_q4_k_gu",
+            &wg,
+            Some(&wu),
+            64,
+            cols,
+            &act,
+            st,
+            nb,
+            Arg::Ptr(0),
+            0,
+            &o1,
+        );
+        launch_gemmh_gu(
+            &g,
+            &km,
+            "gemmh2_q4_k_gu",
+            &wg,
+            &wu,
+            64,
+            cols,
+            &act,
+            st,
+            nb,
+            &o2,
+        );
+    }
+    g.sync().unwrap();
+    assert_eq!(
+        bits(&o1.read::<f32>().unwrap()),
+        bits(&o2.read::<f32>().unwrap()),
+        "gu tiny"
+    );
+    eprintln!("W4A8 TINY w4a8_q4_k_gu: ok");
+}
+
+/// Today's kernel for a Q4_K product of `rows` at nb on `sms` SMs on an
+/// sm_90a module (batch.rs bgemm: gemmh2 where `gemmh_plain`, else 128 x 64
+/// gemm2t where `tile_t`, else gemm2s).
+fn w4a8_today_q4k(rows: usize, nb: usize, sms: usize) -> &'static str {
+    if batch::gemmh_plain(rows, nb, sms) {
+        "gemmh2_q4_k"
+    } else if batch::tile_t(rows, G2_BM, nb, sms) {
+        "gemm2t_q4_k"
+    } else {
+        "gemm2s_q4_k"
+    }
+}
+
+/// Today's Q6K8 kernel (batch.rs bgemm: 64 x 128 gemm2 where 2 ctas >= 3 sms).
+fn w4a8_today_q6(rows: usize, nb: usize, sms: usize) -> &'static str {
+    let ctas = nb.div_ceil(128) * rows.div_ceil(G2_BM);
+    if 2 * ctas >= 3 * sms && nb > 64 {
+        "gemm2_q6k8"
+    } else {
+        "gemm2s_q6k8"
+    }
+}
+
+/// Checkpoint 1 (docs/design/w4a8-prefill.md section 4), on an H100: the
+/// production W4A8 kernels vs today's kernel per product (gate_up: gemmh2_q4_k_gu;
+/// down4 and q/wo: bgemm's Q4_K pick at that nb, mode 1 as in the serve;
+/// down6: bgemm's Q6K8 pick, mode 1), the 7B's shapes, at AXON_W4A8_NB (the
+/// sweep, default 64..1024) x AXON_W4A8_ROUNDS (7) interleaved rounds (order
+/// rotated), 3 timed launches after a warm-up. Every cell is bit-checked on
+/// every output (W4A8 vs today's kernel, both from the same init). Prints
+/// the pre-registered lines `W4A8 S <p> nb <nb> <S>` (bit-clean cells),
+/// `W4A8 BITS FAIL <p> nb <nb>`, `W4A8 T <p> <T|none>` (the smallest swept nb
+/// from which S >= 1.05 at every larger swept nb), the Checkpoint 1 S_weighted
+/// at nb 384 and 512 (#165's shares, a product unrouted at that nb at 1)
+/// against 1.40 and its verdict, and the section 3.3 (B)-vs-(A) line.
+#[test]
+#[ignore]
+fn cuda_w4a8_checkpoint1() {
+    let lim: u64 = std::env::var("AXON_W4A8_TIMEOUT_S")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(600);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(lim));
+        eprintln!("W4A8 BENCH killed by its own limit after {lim} s");
+        std::process::exit(124);
+    });
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let info = g.info().unwrap();
+    let km = Kernels::module(&g).unwrap();
+    let sms = info.sms as usize;
+    eprintln!(
+        "W4A8 device {} sm_{}{} {sms} SMs, hopper module {}",
+        info.name,
+        info.cc.0,
+        info.cc.1,
+        km.hopper()
+    );
+    if !km.hopper() {
+        eprintln!("W4A8 BENCH skipped (no sm_90a module)");
+        eprintln!("W4A8 BENCH END ok");
+        return;
+    }
+    let nbs: Vec<usize> = std::env::var("AXON_W4A8_NB")
+        .map(|v| v.split(',').map(|x| x.trim().parse().unwrap()).collect())
+        .unwrap_or(vec![64, 96, 128, 192, 256, 320, 384, 448, 512, 768, 1024]);
+    let rounds: usize = std::env::var("AXON_W4A8_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(7);
+    let nbmax = *nbs.iter().max().unwrap();
+    let mut rng = Rng(0x0c41_2026_1027);
+    let mut acts = std::collections::HashMap::new();
+    for cols in [3584usize, 18944] {
+        let xs: Vec<Vec<f32>> = (0..nbmax).map(|_| rng.vec(cols, 1.0)).collect();
+        acts.insert(cols, quantize_batch(&g, &km, &xs, cols));
+    }
+    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<u32>>();
+    // (product, cols, rows): gate_up's rows are each of gate and up.
+    let prods = [
+        ("gate_up", 3584usize, 18944usize),
+        ("down4", 18944, 3584),
+        ("down6", 18944, 3584),
+        ("q/wo", 3584, 3584),
+    ];
+    let mut s_of: std::collections::HashMap<(&str, usize), f64> = Default::default();
+    let mut w8_ms: std::collections::HashMap<(&str, usize), f64> = Default::default();
+    let mut bits_fail = 0;
+    for &(p, cols, rows) in &prods {
+        let qt = if p == "down6" { Q6_K } else { Q4_K };
+        let w = g.upload(&synth_matrix(&mut rng, qt, rows, cols)).unwrap();
+        let w2 =
+            (p == "gate_up").then(|| g.upload(&synth_matrix(&mut rng, Q4_K, rows, cols)).unwrap());
+        let c8 = (qt == Q6_K).then(|| q6k8_copy(&g, &km, &w, rows, cols));
+        let init = rng.vec(rows, 5.0);
+        let act = &acts[&cols];
+        let st = act_stride_t(cols);
+        for &nb in &nbs {
+            let base = match p {
+                "gate_up" => "gemmh2_q4_k_gu",
+                "down6" => w4a8_today_q6(rows, nb, sms),
+                _ => w4a8_today_q4k(rows, nb, sms),
+            };
+            let kern = match p {
+                "gate_up" => "w4a8_q4_k_gu",
+                "down6" => "w4a8_q6",
+                _ => "w4a8_q4_k",
+            };
+            let mode = if p == "gate_up" { 0 } else { 1 };
+            let rb = if qt == Q6_K {
+                cols / 256 * Q6K8_BYTES
+            } else {
+                quant::row_bytes(Q4_K, cols)
+            };
+            let wb = c8.as_ref().unwrap_or(&w);
+            let run = |k: &str, out: &DevBuf| {
+                // SAFETY: rows x cols weights (Q6: the copy), nb tokens, out rows * nb.
+                unsafe {
+                    if k.starts_with("w4a8") {
+                        launch_w4a8_k(
+                            &g,
+                            &km,
+                            k,
+                            wb,
+                            w2.as_ref(),
+                            rows,
+                            cols,
+                            act,
+                            st,
+                            nb,
+                            Arg::Ptr(0),
+                            mode,
+                            out,
+                        );
+                    } else if k == "gemmh2_q4_k_gu" {
+                        launch_gemmh_gu(
+                            &g,
+                            &km,
+                            k,
+                            &w,
+                            w2.as_ref().unwrap(),
+                            rows,
+                            cols,
+                            act,
+                            st,
+                            nb,
+                            out,
+                        );
+                    } else if k.starts_with("gemmh") {
+                        launch_gemmh(
+                            &g,
+                            &km,
+                            k,
+                            &w,
+                            rows,
+                            cols,
+                            act,
+                            st,
+                            nb,
+                            Arg::Ptr(0),
+                            mode,
+                            out,
+                        );
+                    } else {
+                        let f = km.function(k).unwrap();
+                        let common = [
+                            wb.arg(),
+                            Arg::U64(rb as u64),
+                            Arg::I32(rows as i32),
+                            Arg::I32(cols as i32),
+                            act.arg(),
+                            Arg::U64(st as u64),
+                            Arg::I32(nb as i32),
+                            Arg::Ptr(0),
+                            Arg::I32(mode),
+                            out.arg(),
+                            Arg::U64(rows as u64),
+                        ];
+                        launch_product(&g, &f, k, qt, rows, nb, &common);
+                    }
+                }
+            };
+            // Bits: both from the same init (mode 1: the residual rows).
+            let fresh = || g.upload(&init.repeat(nb)).unwrap();
+            let (oa, ob) = (fresh(), fresh());
+            run(kern, &oa);
+            run(base, &ob);
+            g.sync().unwrap();
+            let ok = bits(&oa.read::<f32>().unwrap()) == bits(&ob.read::<f32>().unwrap());
+            // Timing on scratch outputs (mode 1 accumulates; values unused).
+            let ks = [base, kern];
+            let outs = [fresh(), fresh()];
+            let mut ms = [Vec::new(), Vec::new()];
+            for rd in 0..rounds {
+                for o in 0..2 {
+                    let i = (o + rd) % 2;
+                    run(ks[i], &outs[i]);
+                    let e0 = g.record().unwrap();
+                    for _ in 0..3 {
+                        run(ks[i], &outs[i]);
+                    }
+                    let e1 = g.record().unwrap();
+                    ms[i].push(e0.ms_to(&e1).unwrap() as f64 / 3.0);
+                }
+            }
+            g.sync().unwrap();
+            let med = |v: &mut Vec<f64>| -> (f64, f64, f64) {
+                v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                (v[v.len() / 2], v[0], v[v.len() - 1])
+            };
+            let (mb, bl, bh) = med(&mut ms[0]);
+            let (mw, wl, wh) = med(&mut ms[1]);
+            let s = mb / mw;
+            eprintln!(
+                "W4A8 CELL {p} {cols}x{rows} nb {nb}: base {base} {mb:.4} ms ({bl:.4}..{bh:.4}), {kern} {mw:.4} ms ({wl:.4}..{wh:.4}), S {s:.3}, {rounds} rounds, bits {}",
+                if ok { "PASS" } else { "FAIL" }
+            );
+            if ok {
+                eprintln!("W4A8 S {p} nb {nb} {s:.4}");
+                s_of.insert((p, nb), s);
+                w8_ms.insert((p, nb), mw);
+            } else {
+                eprintln!("W4A8 BITS FAIL {p} nb {nb}");
+                bits_fail += 1;
+            }
+        }
+    }
+    // T per product: the smallest swept nb from which every swept nb >= it
+    // is bit-clean with S >= 1.05; none if there is no such nb.
+    let mut t_of: std::collections::HashMap<&str, Option<usize>> = Default::default();
+    for &(p, _, _) in &prods {
+        let mut sorted = nbs.clone();
+        sorted.sort();
+        let mut t = None;
+        for (i, &nb) in sorted.iter().enumerate() {
+            if sorted[i..]
+                .iter()
+                .all(|&x| s_of.get(&(p, x)).is_some_and(|&s| s >= 1.05))
+            {
+                t = Some(nb);
+                break;
+            }
+        }
+        eprintln!(
+            "W4A8 T {p} {}",
+            t.map_or("none".to_string(), |t| t.to_string())
+        );
+        t_of.insert(p, t);
+    }
+    // Checkpoint 1: S_weighted with #165's shares (k / v and misc at 1); a
+    // product counts at 1 where it isn't routed (T none or above nb).
+    let shares = [
+        ("gate_up", 0.52),
+        ("down4", 0.14),
+        ("down6", 0.15),
+        ("q/wo", 0.13),
+    ];
+    let mut pass = bits_fail == 0;
+    for nb in [384usize, 512, 768, 1024] {
+        if !nbs.contains(&nb) {
+            continue;
+        }
+        let mut d = 0.05;
+        let mut parts = Vec::new();
+        for (p, sh) in shares {
+            let routed = t_of[p].is_some_and(|t| t <= nb);
+            let s = if routed {
+                s_of.get(&(p, nb)).copied().unwrap_or(f64::NAN)
+            } else {
+                1.0
+            };
+            parts.push(format!(
+                "{p} {s:.3}{}",
+                if routed { "" } else { " (unrouted)" }
+            ));
+            d += sh / s;
+        }
+        let sw = 1.0 / d;
+        let gated = nb == 384 || nb == 512;
+        if gated {
+            pass &= sw >= 1.40;
+        }
+        eprintln!(
+            "W4A8 CHECKPOINT1 nb {nb}: {} -> S_weighted {sw:.4}{}",
+            parts.join(", "),
+            if gated {
+                format!(" vs 1.40: {}", if sw >= 1.40 { "pass" } else { "FAIL" })
+            } else {
+                " (INFO, feeds the post-P1 re-run)".into()
+            }
+        );
+    }
+    eprintln!(
+        "W4A8 CHECKPOINT1 VERDICT: {}",
+        if bits_fail > 0 {
+            "BITS-FAIL (section 4: M12's rule)"
+        } else if pass {
+            "PASS"
+        } else {
+            "KILL"
+        }
+    );
+    // Section 3.3: option (B) (digits in the producer) vs the probe's PW6
+    // copy (job 1027-084257-71f3: exact down6 0.2941 / 0.2904 ms): keep (B)
+    // if within 3 % at both nb, else build (A).
+    let mut keep_b = Some(true);
+    for (nb, probe) in [(384usize, 0.2941f64), (512, 0.2904)] {
+        match w8_ms.get(&("down6", nb)) {
+            Some(&ms) => {
+                let within = ms <= probe * 1.03;
+                eprintln!(
+                    "W4A8 Q6 COPY nb {nb}: (B) {ms:.4} ms vs the probe's PW6 {probe:.4} ms ({:+.1} %): {}",
+                    (ms / probe - 1.0) * 100.0,
+                    if within { "within 3 %" } else { "OVER 3 %" }
+                );
+                if !within {
+                    keep_b = keep_b.map(|_| false);
+                }
+            }
+            None => keep_b = None,
+        }
+    }
+    eprintln!(
+        "W4A8 Q6 COPY: {}",
+        match keep_b {
+            Some(true) => "keep (B)",
+            Some(false) => "build (A)",
+            None => "no decision (down6 nb 384 / 512 not measured or not bit-clean)",
+        }
+    );
+    assert_eq!(bits_fail, 0, "W4A8 bit mismatches");
+    eprintln!("W4A8 BENCH END ok");
+}
+
+/// Qwen2.5-7B-Instruct-Q4_K_M: the anatomy's and the serve's model, the
+/// design note's pinned 7B case (section 2's hit table).
+const W4A8_7B: &str = "models/Qwen2.5-7B-Instruct-Q4_K_M.gguf";
+
+/// On the 7B with the W4A8 path on (AXON_W4A8=1 AXON_W4A8_T=33 in the
+/// process, an sm_90a GPU): a 600-token feed_batch == the same tokens fed one
+/// at a time (KV rows and last logits bit for bit), every entry point ran
+/// during the feed (gu, q4_k, q6: the Q6 copy made), and none during the
+/// per-token decode steps. Run alone (the counters are process-wide).
+#[test]
+#[ignore]
+fn gpu_w4a8_feed_batch_matches_feed_7b() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = model_at(W4A8_7B) else {
+        return;
+    };
+    let km = Kernels::module_for(&g, &m).unwrap();
+    if !km.hopper() {
+        eprintln!("skipping: not sm_90a");
+        return;
+    }
+    let ids = long_ids(&m, 600);
+    let net = CudaQwen2::new(&g, &km, &m, ids.len() + 1).unwrap();
+    let Some((_, t)) = &net.bf.w4a8 else {
+        eprintln!("skipping: AXON_W4A8=1 unset");
+        return;
+    };
+    assert!(
+        t.iter().all(|x| x.is_some_and(|t| t <= 128)),
+        "run with AXON_W4A8_T=33 (thresholds {t:?})"
+    );
+    assert!(
+        net.q6k8_vram() > 0,
+        "the Q6 copy wasn't made: w4a8_q6 can't run"
+    );
+    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<u32>>();
+    let h0 = batch::w4a8_hits();
+    let (kv_a, l_a) = prefill_with(&net, &ids, &[600]);
+    let h1 = batch::w4a8_hits();
+    let (kv_b, l_b) = prefill_with(&net, &ids, &[0]);
+    let h2 = batch::w4a8_hits();
+    for (i, k) in ["gu", "q4_k", "q6"].iter().enumerate() {
+        assert!(
+            h1[i] > h0[i],
+            "w4a8 {k} never ran on the feed: {h0:?} -> {h1:?}"
+        );
+    }
+    assert_eq!(h2, h1, "decode steps took W4A8: {h1:?} -> {h2:?}");
+    assert_eq!(kv_a, kv_b, "KV rows: feed_batch vs feed");
+    assert_eq!(bits(&l_a), bits(&l_b), "last logits: feed_batch vs feed");
+    let d: Vec<u64> = (0..3).map(|i| h1[i] - h0[i]).collect();
+    eprintln!(
+        "W4A8 7B FEED hits gu {} q4_k {} q6 {}; decode 0; feed_batch == feed bit for bit",
+        d[0], d[1], d[2]
+    );
+}
+
+/// On the 7B with the W4A8 path on (as above): a pool of 64 slots, each fed
+/// a 100-token prompt (Place::Seq feed passes: every entry point hits), then
+/// two decode steps of 64 rows (Place::Rows: past the gemvm limit, where
+/// main's gu fuse reaches gemmh2_q4_k_gu) with 0 W4A8 hits (design note
+/// section 1's routing rule). Run alone (the counters are process-wide).
+#[test]
+#[ignore]
+fn gpu_w4a8_pool_routing_7b() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(m) = model_at(W4A8_7B) else {
+        return;
+    };
+    let km = Kernels::module_for(&g, &m).unwrap();
+    if !km.hopper() {
+        eprintln!("skipping: not sm_90a");
+        return;
+    }
+    let (slots, ctx) = (64usize, 160usize);
+    let net = CudaQwen2::new(&g, &km, &m, ctx).unwrap();
+    let Some((_, t)) = &net.bf.w4a8 else {
+        eprintln!("skipping: AXON_W4A8=1 unset");
+        return;
+    };
+    assert!(
+        t.iter().all(|x| x.is_some_and(|t| t <= 100)),
+        "run with AXON_W4A8_T=33 (thresholds {t:?})"
+    );
+    let ids = long_ids(&m, 100);
+    let mut p = net.pool(slots, ctx).unwrap();
+    let h0 = batch::w4a8_hits();
+    for s in 0..slots {
+        net.feed_slot(&mut p, s, &ids, 0).unwrap();
+    }
+    let h1 = batch::w4a8_hits();
+    for (i, k) in ["gu", "q4_k"].iter().enumerate() {
+        assert!(
+            h1[i] > h0[i],
+            "w4a8 {k} never ran on the feed passes: {h0:?} -> {h1:?}"
+        );
+    }
+    for step in 0..2 {
+        let rows: Vec<crate::lm::SeqRow> = (0..slots)
+            .map(|s| crate::lm::SeqRow {
+                token: ids[(s + step) % ids.len()],
+                pos: ids.len() + step,
+                slot: s,
+                head: crate::lm::RowHead::Argmax,
+            })
+            .collect();
+        let before = batch::w4a8_hits();
+        net.step_rows(&mut p, &rows).unwrap();
+        assert_eq!(
+            batch::w4a8_hits(),
+            before,
+            "decode step {step} ({slots} rows, Place::Rows) took W4A8"
+        );
+    }
+    eprintln!(
+        "W4A8 7B POOL feed hits gu {} q4_k {} q6 {}; {slots}-row decode steps 0",
+        h1[0] - h0[0],
+        h1[1] - h0[1],
+        h1[2] - h0[2]
+    );
+}
+
+/// Run this test binary's `test` in a child process (its own CUDA context),
+/// optionally under `wrap` (compute-sanitizer), output inherited; killed
+/// after `limit_s`. Returns (rc, seconds); rc -1 = killed on timeout.
+fn probe_child(
+    wrap: &[String],
+    test: &str,
+    ignored: bool,
+    env: &[(&str, &str)],
+    limit_s: u64,
+) -> (i32, f64, String) {
+    let exe = std::env::current_exe().unwrap();
+    let mut args: Vec<String> = wrap.to_vec();
+    args.push(exe.display().to_string());
+    args.extend(
+        [
+            format!("cuda::qwen2::tests::{test}"),
+            "--exact".into(),
+            "--nocapture".into(),
+        ]
+        .into_iter()
+        .chain(["--test-threads".into(), "1".into()]),
+    );
+    if ignored {
+        args.push("--ignored".into());
+    }
+    eprintln!("PROBE STAGE {test}: start ({})", args.join(" "));
+    let t = std::time::Instant::now();
+    let mut c = std::process::Command::new(&args[0]);
+    c.args(&args[1..])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    let mut child = match c.spawn() {
+        Ok(ch) => ch,
+        Err(e) => {
+            eprintln!("PROBE STAGE {test}: spawn failed: {e}");
+            return (-2, 0.0, String::new());
+        }
+    };
+    // Tee both streams: live into this log, and kept for the caller.
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let tee = |r: Box<dyn std::io::Read + Send>| {
+        let seen = seen.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for l in std::io::BufReader::new(r).lines().map_while(Result::ok) {
+                eprintln!("{l}");
+                let mut s = seen.lock().unwrap();
+                s.push_str(&l);
+                s.push('\n');
+            }
+        })
+    };
+    let t1 = tee(Box::new(child.stdout.take().unwrap()));
+    let t2 = tee(Box::new(child.stderr.take().unwrap()));
+    let rc = loop {
+        if let Some(st) = child.try_wait().unwrap() {
+            break st.code().unwrap_or(-3);
+        }
+        if t.elapsed().as_secs() >= limit_s {
+            let _ = child.kill();
+            let _ = child.wait();
+            break -1;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
+    let _ = (t1.join(), t2.join());
+    let s = t.elapsed().as_secs_f64();
+    eprintln!(
+        "PROBE STAGE {test}: rc {rc} after {s:.1} s{}",
+        if rc == -1 { " (TIMEOUT, killed)" } else { "" }
+    );
+    let out = seen.lock().unwrap().clone();
+    (rc, s, out)
+}
+
+/// Session P1 (docs/design/w4a8-prefill.md section 6), ONE job on an H100
+/// (and its bella rehearsal, where the sm_90a stages skip): each stage a child
+/// process (its own CUDA context) under a time limit, inside
+/// AXON_W4A8_BUDGET_S (default 720 s): NVRTC sm_90a compile + ptxas; the
+/// four kernels' tiny launches under compute-sanitizer memcheck
+/// (AXON_PROBE_SANITIZER, self-checked first); gpu_w4a8_tiny;
+/// gpu_w4a8_matches_reference_bits; cuda_w4a8_checkpoint1 (the sweep, the
+/// Checkpoint 1 cells and verdict, the pre-registered W4A8 S / T lines). The
+/// kit's script then runs the two serve cells (PASSHIST / PASSMULTI /
+/// FEEDSHARE) on main's binary.
+#[test]
+#[ignore]
+fn cuda_w4a8_p1_session() {
+    let t0 = std::time::Instant::now();
+    let budget: u64 = std::env::var("AXON_W4A8_BUDGET_S")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(720);
+    let fit = |name: &str, limit: u64, min: u64| -> Option<u64> {
+        let left = budget.saturating_sub(t0.elapsed().as_secs());
+        if left < min {
+            eprintln!("PROBE STAGE {name}: SKIPPED ({left} s of budget left, needs {min})");
+            None
+        } else {
+            Some(limit.min(left))
+        }
+    };
+    nvrtc_w4a8_compiles_sm90a();
+    eprintln!("PROBE STAGE compile: ok");
+    let mut fails: Vec<String> = Vec::new();
+    let mut note = |name: &str, rc: i32| {
+        if rc != 0 {
+            fails.push(format!("{name} rc {rc}"));
+        }
+    };
+    if let Some(san) = std::env::var_os("AXON_PROBE_SANITIZER") {
+        let san = san.to_string_lossy().to_string();
+        let wrap: Vec<String> = [
+            san.as_str(),
+            "--tool",
+            "memcheck",
+            "--error-exitcode",
+            "9",
+            "--print-limit",
+            "20",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let usable = std::path::Path::new(&san).is_file()
+            && fit("sanitizer-selfcheck", 90, 60).is_some_and(|l| {
+                let (rc, _, out) = probe_child(&wrap, "gpu_rmsnorm_matches_cpu", false, &[], l);
+                rc == 0
+                    && out.contains("ERROR SUMMARY: 0 errors")
+                    && !out.contains("terminated before first instrumented")
+                    && out.contains("1 passed")
+            });
+        if !usable {
+            eprintln!("PROBE STAGE sanitizer-selfcheck: UNUSABLE ({san}): sanitizer stage dropped");
+        } else if let Some(l) = fit("sanitizer tiny", 180, 90) {
+            eprintln!("PROBE STAGE sanitizer-selfcheck: ok");
+            let (rc, _, out) = probe_child(&wrap, "gpu_w4a8_tiny", false, &[], l);
+            if out.contains("skipping: not sm_90a") {
+                eprintln!("PROBE STAGE sanitizer tiny: skipped (no sm_90a)");
+            } else {
+                note("sanitizer tiny", rc);
+                eprintln!(
+                    "PROBE STAGE sanitizer tiny: {}",
+                    if rc == 0 {
+                        "ok, 0 errors"
+                    } else {
+                        "FAILED (see the memcheck report above)"
+                    }
+                );
+            }
+        }
+    } else {
+        eprintln!("PROBE STAGE sanitizer: AXON_PROBE_SANITIZER unset, skipped");
+    }
+    let mut bits_ok = false;
+    if let Some(l) = fit("tiny", 90, 30) {
+        let (rc, _, _) = probe_child(&[], "gpu_w4a8_tiny", false, &[], l);
+        note("tiny", rc);
+        if rc == 0
+            && let Some(l) = fit("bits", 300, 60)
+        {
+            let (rc, _, _) = probe_child(&[], "gpu_w4a8_matches_reference_bits", false, &[], l);
+            note("bits", rc);
+            bits_ok = rc == 0;
+        }
+    }
+    if bits_ok {
+        if let Some(l) = fit("checkpoint1", 420, 120) {
+            let (rc, _, _) = probe_child(&[], "cuda_w4a8_checkpoint1", true, &[], l);
+            note("checkpoint1", rc);
+        }
+    } else {
+        eprintln!(
+            "PROBE STAGE checkpoint1: not run (bring-up / bits failed: section 4's rerun rule)"
+        );
+    }
+    eprintln!(
+        "PROBE SESSION {:.0} s of {budget} s budget",
+        t0.elapsed().as_secs_f64()
+    );
+    if fails.is_empty() {
+        eprintln!("PROBE END ok");
+    } else {
+        eprintln!("PROBE END FAILED: {}", fails.join(", "));
+        panic!("P1 stages failed: {}", fails.join(", "));
+    }
+}
