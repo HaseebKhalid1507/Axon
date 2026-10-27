@@ -491,16 +491,21 @@ impl<'g> CudaQwen2<'g> {
                 unsafe {
                     if seg == 0 {
                         self.enqueue_input(c, params, on)?;
-                    } else {
+                    } else if resident(res, self.first + seg - 1).is_none() {
+                        // (a resident layer added its y into x itself)
                         self.moe_add(mf, mb, c.x.arg(), 1)?;
                     }
                     if seg < n {
                         self.enqueue_attn(c, seg, params, cmb64, on)?;
                         self.moe_route(kind, mb, seg, c.x.arg(), 1)?;
                         // A resident layer's experts in the same graph: they
-                        // read mb.r and write mb.y, as the round trip would.
+                        // read mb.r and add their y into x (moe_sum_add:
+                        // moe_sum's then moe_add's ops, in order), where the
+                        // round trip's y would be added by the next segment's
+                        // moe_add. Nothing reads x in between.
                         if let Some((ex, rb)) = resident(res, self.first + seg) {
-                            self.moe_resident(mb, ex, rb, 1)?;
+                            let (h, ids, w) = self.route_args(mb, 1);
+                            ex.enqueue_add(rb, h, ids, w, c.x.arg())?;
                         }
                     } else {
                         self.enqueue_head(c, head, on)?;
