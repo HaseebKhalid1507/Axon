@@ -9756,7 +9756,12 @@ fn lm_chunk_ranges() {
 /// by): `prompt_passes`, contiguous, none over the batch max; and serve's
 /// way of feeding (all but the last token by those chunks, then `forward`)
 /// and chat's (the last chunk by `prefill_logits`), from 0 and after a
-/// prefix, give the bits of the prompt's per-token decode.
+/// prefix, give the bits of the prompt's per-token decode. Whether the
+/// planner's cut differs from the old fixed prefill_batch cut depends on
+/// the GPU's SMs at 2099 and 1799 tokens (`planner_cut_differs`: a NOTE
+/// when it doesn't); at 1200 (from 899) it differs on every GPU, asserted:
+/// two passes whose last is under `wave_floor` (288 at max 1152) are no
+/// planner choice (`passes`: equal; `wave_passes`: last >= wave_floor).
 #[test]
 fn gpu_prompt_chunks_bits() {
     let Some(g) = crate::testutil::gpu() else {
@@ -9775,16 +9780,24 @@ fn gpu_prompt_chunks_bits() {
         net.feed(&mut d, t, p).unwrap();
     }
     let dec = net.forward(ids[n - 1], n - 1, &mut d);
-    for from in [0, 300] {
+    let sms = g.info().unwrap().sms;
+    for from in [0, 300, n - 1 - 1200] {
         let mut c = net.new_cache(n + 1);
         if from > 0 {
             net.feed_batch(&ids[..from], 0, &mut c);
         }
         let rs = net.prompt_chunks(n - 1 - from, from, &c);
-        // Multi-pass and not the old fixed prefill_batch cut (equal or
-        // wave-sized passes: either differs from 1152 + the rest here).
+        // Multi-pass, and not the old fixed prefill_batch cut where no
+        // planner choice can be (n - 1 - from == 1200; elsewhere a NOTE).
         assert!(rs.len() >= 2);
-        assert_ne!(rs, crate::lm::chunk_ranges(n - 1 - from, max));
+        let k = n - 1 - from;
+        let old = crate::lm::chunk_ranges(k, max);
+        let what = format!("{k} tokens from {from}");
+        let differs = crate::testutil::planner_cut_differs(&rs, &old, sms, &what);
+        assert!(
+            differs || k - max >= max / 4,
+            "{what}: the old prefill_batch cut {rs:?}"
+        );
         assert_eq!((rs[0].start, rs.last().unwrap().end), (0, n - 1 - from));
         assert!(rs.windows(2).all(|w| w[0].end == w[1].start));
         assert!(rs.iter().all(|r| !r.is_empty() && r.len() <= max));

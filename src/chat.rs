@@ -1919,13 +1919,95 @@ mod tests {
         }
     }
 
-    /// A turn of ~1500 tokens then a short follow-up through the real
-    /// `Chat::reply` on the GPU: the long turn is fed in several passes cut
-    /// by `Lm::prompt_chunks` (asserted: more than one, and not the old fixed
-    /// prefill_batch cut), the follow-up after prefix reuse. Each reply ==
-    /// a fresh prefill's (`fresh`: prefill_batch chunks + forward), and the
-    /// cache image (`kv_save`, positions 0..fed) and the next logits ==
+    /// An `Lm` that runs `M` and logs the positions each `feed_batch` and
+    /// `prefill_logits` call fed: the cuts a caller (`Chat::reply`) made.
+    struct Cuts<'a, M: crate::lm::Lm>(&'a M, std::cell::RefCell<Vec<std::ops::Range<usize>>>);
+
+    impl<M: crate::lm::Lm> Cuts<'_, M> {
+        fn log(&self, start: usize, n: usize) {
+            self.1.borrow_mut().push(start..start + n);
+        }
+    }
+
+    impl<M: crate::lm::Lm> crate::lm::Sealed for Cuts<'_, M> {}
+    impl<M: crate::lm::Lm> crate::lm::Lm for Cuts<'_, M> {
+        type Cache = M::Cache;
+        fn vocab(&self) -> usize {
+            self.0.vocab()
+        }
+        fn new_cache(&self, max_ctx: usize) -> M::Cache {
+            self.0.new_cache(max_ctx)
+        }
+        fn forward(&self, token: u32, pos: usize, c: &mut M::Cache) -> Vec<f32> {
+            self.0.forward(token, pos, c)
+        }
+        fn forward_argmax(&self, token: u32, pos: usize, c: &mut M::Cache) -> u32 {
+            self.0.forward_argmax(token, pos, c)
+        }
+        fn feed_batch(&self, tokens: &[u32], start: usize, c: &mut M::Cache) {
+            self.log(start, tokens.len());
+            self.0.feed_batch(tokens, start, c)
+        }
+        fn decode_streams(&self) -> bool {
+            self.0.decode_streams()
+        }
+        fn verify_argmax(&self, tokens: &[u32], start: usize, c: &mut M::Cache) -> Vec<u32> {
+            self.0.verify_argmax(tokens, start, c)
+        }
+        fn prefill_batch(&self) -> usize {
+            self.0.prefill_batch()
+        }
+        fn prompt_chunks(
+            &self,
+            n: usize,
+            start: usize,
+            c: &M::Cache,
+        ) -> Vec<std::ops::Range<usize>> {
+            self.0.prompt_chunks(n, start, c)
+        }
+        fn prefill_logits(&self, tokens: &[u32], start: usize, c: &mut M::Cache) -> Vec<f32> {
+            self.log(start, tokens.len());
+            self.0.prefill_logits(tokens, start, c)
+        }
+        fn forward_cands(
+            &self,
+            token: u32,
+            pos: usize,
+            c: &mut M::Cache,
+            spec: &crate::sample::CandSpec,
+            recent: &[u32],
+        ) -> Vec<crate::sample::Cand> {
+            self.0.forward_cands(token, pos, c, spec, recent)
+        }
+        fn verify_cands(
+            &self,
+            tokens: &[u32],
+            start: usize,
+            c: &mut M::Cache,
+            spec: &crate::sample::CandSpec,
+            recent: &[u32],
+        ) -> Vec<Vec<crate::sample::Cand>> {
+            self.0.verify_cands(tokens, start, c, spec, recent)
+        }
+    }
+
+    /// A turn of ~1200 tokens then a short follow-up through the real
+    /// `Chat::reply` on the GPU, the net wrapped in `Cuts`: each turn is fed
+    /// in exactly the passes `Lm::prompt_chunks` (the cache's planner) gives
+    /// for it, the long one in more than one and not the old fixed
+    /// prefill_batch cut, and the follow-up after prefix reuse. Each reply
+    /// == a fresh prefill's (`fresh`: prefill_batch chunks + forward), and
+    /// the cache image (`kv_save`, positions 0..fed) and the next logits ==
     /// per-token decode of the same history.
+    ///
+    /// The length: the planner's cut depends on the GPU (the wave split
+    /// weighs GEMM waves on its SMs), and a 1532-token turn came out as
+    /// 1152 + 380, the old cut, on an RTX 4090 (job 1027-021156-1252). A
+    /// turn of max + 1 ..= max + wave_floor(max) - 1 tokens (1153..=1439
+    /// at the batch max 1152, 1025..=1279 at 1024) can't be: its two
+    /// passes are equal (`passes`, ~n / 2 each) or wave-sized with the last
+    /// pass >= wave_floor (max / 4), and the old cut's last pass is n - max,
+    /// under that (asserted). ~1230 tokens sits in both ranges on every SM count.
     #[test]
     fn long_turn_matches_fresh_prefill_cuda() {
         use crate::cuda::qwen2::CudaQwen2;
@@ -1940,10 +2022,12 @@ mod tests {
         let km = crate::cuda::Kernels::module(&g).unwrap();
         let tok = Tokenizer::from_gguf(&m);
         let ctx = 4096;
+        let sms = g.info().unwrap().sms;
         let net = CudaQwen2::new(&g, &km, &m, ctx).unwrap();
+        let rec = Cuts(&net, Default::default());
         let mut long = String::from("Summarize these notes in one sentence.\n");
         let mut i = 0;
-        while tok.encode(&long).len() < 1500 {
+        while tok.encode(&long).len() < 1190 {
             long.push_str(&format!(
                 "Note {i}: the {} river flows past {} hills toward the sea.\n",
                 ["green", "slow", "cold", "wide"][i % 4],
@@ -1951,26 +2035,44 @@ mod tests {
             ));
             i += 1;
         }
-        let mut chat = Chat::new(&net, &tok, Some(DEFAULT_SYSTEM), ctx).unwrap();
+        let mut chat = Chat::new(&rec, &tok, Some(DEFAULT_SYSTEM), ctx).unwrap();
         chat.max_reply = 16;
         for (t, msg) in [long.as_str(), "And in three words?"]
             .into_iter()
             .enumerate()
         {
             let before = chat.fed;
+            rec.1.borrow_mut().clear();
             let r = chat.reply(msg, &|| false, &mut |_| Ok(())).unwrap();
+            let cuts: Vec<_> = rec
+                .1
+                .take()
+                .iter()
+                .map(|c| c.start - before..c.end - before)
+                .collect();
             assert!(!r.interrupted && r.dropped == 0);
             let end = chat.hist.len() - r.ids.len() - 2;
             let prompt = &chat.hist[..end];
-            let want = fresh(chat.net, prompt, chat.max_reply, &chat.fr.stop);
+            let want = fresh(&net, prompt, chat.max_reply, &chat.fr.stop);
             assert_eq!(r.ids, want, "turn {t}");
             let n = end - before;
-            let rs = chat.net.prompt_chunks(n, before, &chat.cache);
-            eprintln!("turn {t}: {n} tokens fed from {before} in {rs:?}");
+            let plan = net.prompt_chunks(n, before, &chat.cache);
+            eprintln!("turn {t}: {n} tokens fed from {before} in {cuts:?} ({sms} SMs)");
+            assert_eq!(cuts, plan, "turn {t}: chat's cuts are the planner's");
             if t == 0 {
-                assert!(rs.len() >= 2, "turn 0: one pass ({rs:?})");
-                let old = crate::lm::chunk_ranges(n, chat.net.prefill_batch());
-                assert_ne!(rs, old, "turn 0: the old prefill_batch cut");
+                assert!(plan.len() >= 2, "turn 0: one pass ({plan:?})");
+                let max = net.prefill_batch();
+                assert!(
+                    n > max && n - max < max / 4,
+                    "turn 0: {n} tokens, not in {}..{} (batch max {max}): see the doc",
+                    max + 1,
+                    max + max / 4
+                );
+                let old = crate::lm::chunk_ranges(n, max);
+                assert!(
+                    crate::testutil::planner_cut_differs(&plan, &old, sms, "turn 0"),
+                    "turn 0: the old prefill_batch cut, at a length no planner choice gives it"
+                );
             }
         }
         // The cache: per-token decode of the whole history.
@@ -1981,7 +2083,9 @@ mod tests {
         }
         let mut want = Vec::new();
         net.kv_save(&d, 0, fed, &mut want).unwrap();
-        assert!(cache_image(&chat) == want, "KV after the turns");
+        let mut got = Vec::new();
+        net.kv_save(&chat.cache, 0, fed, &mut got).unwrap();
+        assert!(got == want, "KV after the turns");
         let probe = chat.hist[fed - 1];
         let a = net.forward(probe, fed, &mut d);
         let b = net.forward(probe, fed, &mut chat.cache);

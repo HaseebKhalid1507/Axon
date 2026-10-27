@@ -509,11 +509,14 @@ fn serve_cuda_matches_gen() {
 /// A ~2000-token greedy completion served one request at a time
 /// (`--parallel 1`: the real `Engine::job`, its prompt fed by
 /// `Lm::prompt_chunks`) == `axon gen`'s (one `prefill_logits`). The cut is
-/// asserted multi-pass and not the old fixed prefill_batch one on the
-/// reference net (same model and context as the server's).
+/// asserted multi-pass on the reference net (same model and context as the
+/// server's); whether it differs from the old fixed prefill_batch cut
+/// depends on the GPU's SMs here (`planner_cut_differs`: a NOTE when not;
+/// chat's `long_turn_matches_fresh_prefill_cuda` asserts it at a length
+/// where it can't depend on them).
 #[test]
 fn serve_cuda_long_prompt_matches_gen() {
-    let Some(_) = crate::testutil::gpu() else {
+    let Some(sms) = crate::testutil::gpu().map(|g| g.info().unwrap().sms) else {
         return;
     };
     let Some(p) = crate::testutil::model_path() else {
@@ -547,7 +550,8 @@ fn serve_cuda_long_prompt_matches_gen() {
         let rs = net.prompt_chunks(n - 1, 0, &cache);
         eprintln!("{n} tokens: job feeds {rs:?}");
         assert!(rs.len() >= 2, "one pass: {rs:?}");
-        assert_ne!(rs, crate::lm::chunk_ranges(n - 1, net.prefill_batch()));
+        let old = crate::lm::chunk_ranges(n - 1, net.prefill_batch());
+        crate::testutil::planner_cut_differs(&rs, &old, sms, &format!("{} tokens", n - 1));
         gen_text(&net, &tok, &prompt, 24)
     };
     drop(m);
