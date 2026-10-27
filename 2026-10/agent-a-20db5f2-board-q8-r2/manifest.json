@@ -1,0 +1,29 @@
+{
+ "label": "agent-a-20db5f2-board-q8-r2",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1027-081924-51c9",
+   "name": "agent-a-20db5f2-board-q8",
+   "rc": 130,
+   "verdict": "FAIL (rc 130)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "20db5f2",
+   "binary": "board.sh",
+   "started": null,
+   "ended": 1793104367.6424294,
+   "attempts": null,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "8d9b775181df89534ff556240baa322a4e316154d904a3faebfda50842e4ad5d",
+   "log_bytes": 125
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-27 08:32:48 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
