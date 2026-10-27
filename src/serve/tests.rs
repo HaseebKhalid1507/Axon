@@ -506,14 +506,19 @@ fn serve_cuda_matches_gen() {
     serve_matches_gen_and_chat(p.to_str().unwrap(), Device::Cuda);
 }
 
-/// A ~2000-token greedy completion served one request at a time
+/// A ~1200-token greedy completion served one request at a time
 /// (`--parallel 1`: the real `Engine::job`, its prompt fed by
 /// `Lm::prompt_chunks`) == `axon gen`'s (one `prefill_logits`). The cut is
-/// asserted multi-pass and not the old fixed prefill_batch one on the
-/// reference net (same model and context as the server's).
+/// asserted on the reference net (same model and context as the server's):
+/// multi-pass, and not the old fixed prefill_batch cut. The prompt's
+/// length (asserted) is in max + 1 ..= max + max / 4 - 1 (1153..=1439 at
+/// the batch max 1152, 1025..=1279 at 1024), where no planner choice is
+/// the old cut on any GPU (the argument is on chat's
+/// `long_turn_matches_fresh_prefill_cuda`). It was ~2000 tokens, where the
+/// cut depends on the GPU's SMs.
 #[test]
 fn serve_cuda_long_prompt_matches_gen() {
-    let Some(_) = crate::testutil::gpu() else {
+    let Some(sms) = crate::testutil::gpu().map(|g| g.info().unwrap().sms) else {
         return;
     };
     let Some(p) = crate::testutil::model_path() else {
@@ -525,7 +530,7 @@ fn serve_cuda_long_prompt_matches_gen() {
     let tok = Tokenizer::from_gguf(&m);
     let mut prompt = String::from("A log of river readings.\n");
     let mut i = 0;
-    while tok.encode_prompt(&prompt).len() < 2000 {
+    while tok.encode_prompt(&prompt).len() < 1190 {
         prompt.push_str(&format!(
             "Day {i}: level {} cm, {} water, {} birds counted.\n",
             100 + i % 37,
@@ -547,7 +552,18 @@ fn serve_cuda_long_prompt_matches_gen() {
         let rs = net.prompt_chunks(n - 1, 0, &cache);
         eprintln!("{n} tokens: job feeds {rs:?}");
         assert!(rs.len() >= 2, "one pass: {rs:?}");
-        assert_ne!(rs, crate::lm::chunk_ranges(n - 1, net.prefill_batch()));
+        let (k, max) = (n - 1, net.prefill_batch());
+        assert!(
+            k > max && k - max < max / 4,
+            "{k} tokens, not in {}..{} (batch max {max}): see the doc",
+            max + 1,
+            max + max / 4
+        );
+        let old = crate::lm::chunk_ranges(k, max);
+        assert!(
+            crate::testutil::planner_cut_differs(&rs, &old, sms, &format!("{k} tokens")),
+            "the old prefill_batch cut, at a length no planner choice gives it"
+        );
         gen_text(&net, &tok, &prompt, 24)
     };
     drop(m);

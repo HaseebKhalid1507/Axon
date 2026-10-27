@@ -110,6 +110,15 @@ fn check_layer(g: &Gpu, ex: &CudaExperts, cpu: &Qwen2, l: usize, what: &str) {
             "{what} layer {l} nb {nb}: {n} of {} outputs differ from the CPU, e.g. {first:?}",
             nb * dim
         );
+        if nb == 1 {
+            // T2b: the decode step's fused residual add (enqueue_add:
+            // moe_sum_add) == x + y, y the CPU's (one f32 add each).
+            let x: Vec<f32> = (0..dim).map(|_| rng.f() * 4.0).collect();
+            let want: Vec<f32> = x.iter().zip(&cpu_t).map(|(a, b)| a + b).collect();
+            let got = ex.layer_add(&h, &ids, &ws, &x).unwrap();
+            let (n, first) = diffs(&got, &want);
+            assert_eq!(n, 0, "{what} layer {l}: enqueue_add != x + y: {first:?}");
+        }
         if nb == 1 && mma {
             // `layer` sends nb 1 to the decode GEMV: the grouped kernels
             // (moe_sort, moe_gemm_tw_*, moe_sum) at one token, forced.

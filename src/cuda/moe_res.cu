@@ -152,3 +152,69 @@ moe_gemv_tw(int qt, const u8* __restrict__ w, u64 estride, u64 row_bytes, int ro
     float y = dot_rows_t<1, 1, true>(qt, rr, n, act + (u64)i * aslot, 0, 0, nullptr);
     if (threadIdx.x == 0) out[(u64)i * ostride + r] = y;
 }
+
+// T2b (decode): gate and up of slot i together, two rows of each per block
+// (gate r, up r, gate r + 1, up r + 1): the gate_up4 pattern over the resident
+// experts. Each output's chain is dot_rows_t's twin chain for its row alone
+// (a row's sums don't depend on its block-mates, as gate_up4), so gout /
+// uout equal moe_gemv_tw's over the same rows, bit for bit; one launch
+// instead of two, and four rows' bytes in flight per block. Grid (rows / 2,
+// k); rows even, gate and up of one type (the host checks).
+extern "C" __global__ void __launch_bounds__(GEMV_THREADS, 6)
+moe_gu_tw(int qt, const u8* __restrict__ wg, const u8* __restrict__ wu, u64 estride, u64 row_bytes,
+          int rows, int n, const int* __restrict__ ids, const u8* __restrict__ act,
+          float* __restrict__ gout, float* __restrict__ uout) {
+    PDL_START();
+    int r = 2 * blockIdx.x, i = blockIdx.y;
+    u64 eo = (u64)ids[i] * estride, ro = (u64)r * row_bytes;
+    const u8* g = wg + eo + ro;
+    const u8* u = wu + eo + ro;
+    prefetch_l2(g, 2 * row_bytes);
+    prefetch_l2(u, 2 * row_bytes);
+    const u8* rr[4] = {g, u, g + row_bytes, u + row_bytes};
+    float y[4];
+    dot_rows_t<4, 1, true>(qt, rr, n, act, 0, 0, y);
+    if (threadIdx.x == 0) {
+        u64 o = (u64)i * rows + r;
+        gout[o] = y[0];
+        uout[o] = y[1];
+        gout[o + 1] = y[2];
+        uout[o + 1] = y[3];
+    }
+}
+
+// T2b (decode): moe_gemv_tw with two rows per block (rows r, r + 1 of slot
+// i's expert). Same chains per row: the same bits. Grid (rows / 2, k).
+extern "C" __global__ void __launch_bounds__(GEMV_THREADS, GEMV_MIN_BLOCKS)
+moe_gemv2_tw(int qt, const u8* __restrict__ w, u64 estride, u64 row_bytes, int rows, int n,
+             const int* __restrict__ ids, const u8* __restrict__ act, u64 aslot,
+             float* __restrict__ out, u64 ostride) {
+    PDL_START();
+    int r = 2 * blockIdx.x, i = blockIdx.y;
+    const u8* we = w + (u64)ids[i] * estride + (u64)r * row_bytes;
+    prefetch_l2(we, 2 * row_bytes);
+    const u8* rr[2] = {we, we + row_bytes};
+    float y[2];
+    dot_rows_t<2, 1, true>(qt, rr, n, act + (u64)i * aslot, 0, 0, y);
+    if (threadIdx.x == 0) {
+        out[(u64)i * ostride + r] = y[0];
+        out[(u64)i * ostride + r + 1] = y[1];
+    }
+}
+
+// T2b (decode, one token): moe_sum then moe.cu's moe_add in one launch:
+// acc = w0 d0, then acc + wi di in slot order (moe_sum's __fmul_rn /
+// __fadd_rn), then x[r] = x[r] + acc (moe_add's __fadd_rn). The same ops on
+// the same values in the same order: the same bits as the two launches.
+extern "C" __global__ void moe_sum_add(const float* __restrict__ d, const int* __restrict__ pos_of,
+                                       const float* __restrict__ w, int k, int dim,
+                                       float* __restrict__ x) {
+    int r = blockIdx.x * blockDim.x + threadIdx.x;
+    if (r >= dim) return;
+    float acc = 0.0f;
+    for (int i = 0; i < k; i++) {
+        float v = __fmul_rn(w[i], d[(u64)pos_of[i] * dim + r]);
+        acc = i == 0 ? v : __fadd_rn(acc, v);
+    }
+    x[r] = __fadd_rn(x[r], acc);
+}

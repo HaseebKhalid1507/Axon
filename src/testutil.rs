@@ -13,6 +13,29 @@ pub const LLAMA_MODEL: &str = "models/Llama-3.2-1B-Instruct-Q4_K_M.gguf";
 pub const MISTRAL_MODEL: &str = "models/Mistral-7B-Instruct-v0.3-Q4_K_M.gguf";
 pub const GEMMA3_MODEL: &str = "models/google_gemma-3-1b-it-Q8_0.gguf";
 
+/// Whether the GPU's prompt planner (`Lm::prompt_chunks`) cut n tokens
+/// differently from the old fixed cut (`chunk_ranges(n, prefill_batch)`).
+/// The planner's wave split depends on the SM count, so for some lengths
+/// it picks prefill_batch + the rest on one GPU and not on another (the
+/// 1532-token chat turn on an RTX 4090, 128 SMs, job 1027-021156-1252).
+/// When the cuts are equal, a NOTE on stderr says a test's planner-vs-old
+/// check proves nothing on this GPU, instead of a host-dependent failure.
+pub fn planner_cut_differs(
+    plan: &[std::ops::Range<usize>],
+    old: &[std::ops::Range<usize>],
+    sms: u32,
+    what: &str,
+) -> bool {
+    let differs = plan != old;
+    if !differs {
+        eprintln!(
+            "NOTE: {what}: planner cut == prefill_batch cut on this GPU ({sms} SMs), {plan:?}; \
+             the planner-vs-old check is vacuous here"
+        );
+    }
+    differs
+}
+
 /// Reference data made by `scripts/oracle/make_fixtures.py`, committed to the repo.
 pub fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")

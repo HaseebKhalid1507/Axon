@@ -150,6 +150,14 @@ moe_router(const float* __restrict__ logits, int n_e, int k, int gate,
         sel[e] = s;
     }
     __syncthreads();
+    // k rounds of argmax over the untaken scores. moe_beats is a total
+    // order (higher value, then lower index), so its maximum is one expert
+    // however the candidates are paired: each warp folds its lanes by a
+    // shuffle tree, thread 0 folds the warps' winners. The selected experts
+    // and their weights are the same as any fixed tree's (T2b: 2 barriers a
+    // round instead of a block tree's 8; no float op on the scores).
+    const int NW = MOE_THREADS / 32;
+    int lane = t & 31, wid = t >> 5;
     for (int r = 0; r < k; r++) {
         float bv = ninf;
         int bi = 0x7fffffff;
@@ -159,17 +167,26 @@ moe_router(const float* __restrict__ logits, int n_e, int k, int gate,
                 bv = sel[e];
                 bi = e;
             }
-        red[t] = bv;
-        rid[t] = bi;
-        __syncthreads();
-        for (int s = MOE_THREADS / 2; s > 0; s >>= 1) {
-            if (t < s && moe_beats(red[t + s], rid[t + s], red[t], rid[t])) {
-                red[t] = red[t + s];
-                rid[t] = rid[t + s];
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) {
+            float ov = __shfl_xor_sync(0xffffffffu, bv, o);
+            int oi = __shfl_xor_sync(0xffffffffu, bi, o);
+            if (moe_beats(ov, oi, bv, bi)) {
+                bv = ov;
+                bi = oi;
             }
-            __syncthreads();
         }
+        if (lane == 0) {
+            red[wid] = bv;
+            rid[wid] = bi;
+        }
+        __syncthreads();
         if (t == 0) {
+            for (int j = 1; j < NW; j++)
+                if (moe_beats(red[j], rid[j], red[0], rid[0])) {
+                    red[0] = red[j];
+                    rid[0] = rid[j];
+                }
 #ifdef MOE_DEBUG
             if (rid[0] == 0x7fffffff) __trap();
 #endif
