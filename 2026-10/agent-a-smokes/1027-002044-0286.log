@@ -1,0 +1,36 @@
+[axon-run 00:20:44] submitted 1027-002044-0286 by /home/haseeb/.cache/axon-agent: /home/haseeb/.cache/axon-agent/smoke-cpu.sh
+[axon-run 01:40:34] scope axon-job-1027-002044-0286-1793079634.scope in app-axonjobs.slice: MemoryMax 10024 MB, MemoryHigh 9021 MB, no swap, oomd pressure kill 80% (claim 6000 MB): an OOM here kills only this job
+[axon-run 01:40:34] job 1027-002044-0286 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1027-002044-0286-1793079634 --slice=app-axonjobs.slice -p MemoryMax=10024M -p MemoryHigh=9021M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-agent/smoke-cpu.sh
+axon-q 01:40:34 waiting: stagger
+axon-q 01:40:50 start slot 16-23: /home/haseeb/.cache/axon-agent/smoke-cpu.sh
+cell speed 4.0: {'scale': 0.01, 'clip': 4096, 'window_s': 60.0, 'speed': 4.0, 'seed': 1234, 'trace_start_ms': 381812908, 'n_requests': 58, 'n_sessions': 10, 'n_primes': 10, 'prime_tokens': 5959, 'prompt_p50': 567}
+start axon kv f16: /home/haseeb/.cache/axon-agent/bin/axon-d8a296c serve /home/haseeb/Projects/axon/models/qwen2.5-0.5b-q4_k_m.gguf --device cpu --port 18601 --ctx 4096 --parallel 16 --kv f16
+RUN axon kv f16 round 0: FAILED engine exited 2; log /home/haseeb/.cache/axon-agent/smoke-cpu-1027-014050/axon-f16-18601.log
+start llama kv f16: /home/haseeb/Projects/llama.cpp/build/bin/llama-server -m /home/haseeb/Projects/axon/models/qwen2.5-0.5b-q4_k_m.gguf -ngl 0 -fa on -c 16384 -np 8 -kvu --cache-reuse 256 -ctk f16 -ctv f16 --port 18602 --host 127.0.0.1 --metrics
+RUN llama kv f16 speed 4 round 0: requests=58 errors=0 wall_s=14.8 prime_s=26.7 ttft_new_p50=None ttft_resume_p50=0.03 ttft_turn_p50=0.136 goodput_tok_s=10.59 itl_p99_ms=523.02 warm_per_gb=44.703 reprefill_share=0.0014 out_tokens_short=0 tainted=True (43 s)
+start ollama kv f16: ollama serve
+RUN ollama kv f16 speed 4 round 0: requests=58 errors=0 wall_s=14.8 prime_s=25.1 ttft_new_p50=None ttft_resume_p50=0.08 ttft_turn_p50=0.228 goodput_tok_s=8.32 itl_p99_ms=339.37 warm_per_gb=44.703 reprefill_share=None out_tokens_short=4 tainted=True (41 s)
+
+**speed 4** (median of rounds; [min–max])
+
+| metric | llama f16 (n=1) | ollama f16 (n=1) |
+|---|---|---|
+| TTFT-new p50 s | n/a | n/a |
+| TTFT-new p99 s | n/a | n/a |
+| TTFT-resume p50 s | 0.03 | 0.08 |
+| TTFT-resume p99 s | 0.069 | 0.205 |
+| resume 30s-2m p50 | 0.03 | 0.08 |
+| resume 2-10m p50 | n/a | n/a |
+| resume >10m p50 | n/a | n/a |
+| TTFT-turn p50 s | 0.136 | 0.228 |
+| goodput tok/s | 10.6 | 8.32 |
+| ITL p99 ms | 523 | 339 |
+| warm/GB | 44.7 | 44.7 |
+| re-prefill share | 0.0014 | n/a |
+| errors | 0 | 0 |
+| tainted runs | 1 | 1 |
+| reply md5 stable over rounds | yes | yes |
+BOARD END
+SMOKE END /home/haseeb/.cache/axon-agent/smoke-cpu-1027-014050
+[axon-run 01:42:24] exit 0 after 110.1s (host bella)
+[axon-run 01:42:29] EXPECT ok: output matches /BOARD END/
