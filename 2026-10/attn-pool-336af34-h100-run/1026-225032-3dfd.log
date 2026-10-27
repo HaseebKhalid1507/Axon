@@ -1,0 +1,130 @@
+[axon-run 22:50:32] submitted 1026-225032-3dfd by /home/haseeb/.cache/axon-attn-pool: /usr/bin/bash t1_h100.sh
+[axon-run 22:55:29] job 1026-225032-3dfd -> pod1 (pod 4swkqsu8zgt3w1): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 5000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-attn-pool/h100 /usr/bin/bash t1_h100.sh
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (6e60976e82cd1a2f04d30a00) + source of /home/haseeb/.cache/axon-attn-pool/h100
+
+sent 15,810,141 bytes  received 259 bytes  1,860,047.06 bytes/sec
+total size is 58,372,382  speedup is 3.69
+
+sent 169 bytes  received 35 bytes  45.33 bytes/sec
+total size is 89  speedup is 0.44
+axon-remote: job 20261027-025601-bash-1135 on pod1 (GPU, 5000 MB)
+[axon-node 02:56:01] GPU EXCLUSIVE taken; job wants 5000 MB; nvidia-smi used/total 0/81559 MB; sharing with nobody (slots 5, budget 80059 MB, vCPU 23.8)
+[axon-node 02:56:01] run bash (6e60976e82cd1a2f04d30a00) as /home/haseeb/.cache/axon-attn-pool/h100 on df3ccc431ca4, AXON_THREADS=8 RUST_TEST_THREADS=4; free 81081 MB of 81559 (used 0); GPU processes pid:MB none
+[t1 +0s] kernel cache: 1 -> 4 entries (/root/axon-node/cache/axon/cuda)
+NVIDIA H100 80GB HBM3, 9.0, 595.91.07, 81559 MiB, 1980 MHz, 2619 MHz
+4680252b47026ab4994499ce3c527b29455dd8275c7cdcbea21ac4575131b53e  axon-test
+01ba546bd17ea3b6ca3c6abd1dc2200264be88ec2c84221dec1441698c9ddf31  axon
+[t1 +4s] model /root/axon-node/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf: 65b8fcd92af6b4fe (also pulls it into the page cache)
+[t1 +4s] step NB=0
+[axon-run 22:56:13] FOREIGN_GPU sample max=0% mean=0.0% n=2
+[axon-run 22:56:45] FOREIGN_GPU sample max=0% mean=0.0% n=1
+STEP NB=0 C curve: /root/axon-node/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA H100 80GB HBM3 (132 SMs)
+STEP NB=0 depth 600: decode step (forward_argmax) 3.223 ms; pool 128 x 704
+STEP NB=0 | 600 | 32 | 0 x1 | 9.595 | 2.98 | 3335 |
+STEP NB=0 | 600 | 64 | 0 x1 | 11.533 | 3.58 | 5549 |
+STEP NB=0 | 600 | 128 | 0 x1 | 15.712 | 4.88 | 8147 |
+STEP NB=0 depth 4096: decode step (forward_argmax) 3.332 ms; pool 128 x 4160
+STEP NB=0 | 4096 | 32 | 0 x1 | 13.184 | 3.96 | 2427 |
+STEP NB=0 | 4096 | 64 | 0 x1 | 18.494 | 5.55 | 3461 |
+STEP NB=0 | 4096 | 128 | 0 x1 | 29.247 | 8.78 | 4377 |
+[t1 +69s] step NB=1
+[axon-run 22:57:18] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:57:51] FOREIGN_GPU sample max=0% mean=0.0% n=1
+STEP NB=1 C curve: /root/axon-node/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA H100 80GB HBM3 (132 SMs)
+STEP NB=1 depth 600: decode step (forward_argmax) 3.224 ms; pool 128 x 704
+STEP NB=1 | 600 | 32 | 0 x1 | 9.692 | 3.01 | 3302 |
+STEP NB=1 | 600 | 64 | 0 x1 | 11.093 | 3.44 | 5770 |
+STEP NB=1 | 600 | 128 | 0 x1 | 14.551 | 4.51 | 8797 |
+STEP NB=1 depth 4096: decode step (forward_argmax) 3.329 ms; pool 128 x 4160
+STEP NB=1 | 4096 | 32 | 0 x1 | 13.287 | 3.99 | 2408 |
+STEP NB=1 | 4096 | 64 | 0 x1 | 15.296 | 4.59 | 4184 |
+STEP NB=1 | 4096 | 128 | 0 x1 | 24.489 | 7.36 | 5227 |
+[t1 +132s] step NB=0
+[axon-run 22:58:23] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:58:55] FOREIGN_GPU sample max=0% mean=0.0% n=1
+STEP NB=0 C curve: /root/axon-node/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA H100 80GB HBM3 (132 SMs)
+STEP NB=0 depth 600: decode step (forward_argmax) 3.225 ms; pool 128 x 704
+STEP NB=0 | 600 | 32 | 0 x1 | 9.655 | 2.99 | 3314 |
+STEP NB=0 | 600 | 64 | 0 x1 | 11.594 | 3.60 | 5520 |
+STEP NB=0 | 600 | 128 | 0 x1 | 15.794 | 4.90 | 8104 |
+STEP NB=0 depth 4096: decode step (forward_argmax) 3.331 ms; pool 128 x 4160
+STEP NB=0 | 4096 | 32 | 0 x1 | 13.187 | 3.96 | 2427 |
+STEP NB=0 | 4096 | 64 | 0 x1 | 18.497 | 5.55 | 3460 |
+STEP NB=0 | 4096 | 128 | 0 x1 | 29.305 | 8.80 | 4368 |
+[t1 +197s] step NB=1
+[axon-run 22:59:27] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:59:59] FOREIGN_GPU sample max=0% mean=0.0% n=1
+STEP NB=1 C curve: /root/axon-node/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA H100 80GB HBM3 (132 SMs)
+STEP NB=1 depth 600: decode step (forward_argmax) 3.230 ms; pool 128 x 704
+STEP NB=1 | 600 | 32 | 0 x1 | 9.682 | 3.00 | 3305 |
+STEP NB=1 | 600 | 64 | 0 x1 | 11.087 | 3.43 | 5773 |
+STEP NB=1 | 600 | 128 | 0 x1 | 14.544 | 4.50 | 8801 |
+STEP NB=1 depth 4096: decode step (forward_argmax) 3.333 ms; pool 128 x 4160
+STEP NB=1 | 4096 | 32 | 0 x1 | 13.282 | 3.99 | 2409 |
+STEP NB=1 | 4096 | 64 | 0 x1 | 15.292 | 4.59 | 4185 |
+STEP NB=1 | 4096 | 128 | 0 x1 | 24.492 | 7.35 | 5226 |
+[t1 +262s] serve nb0-r1 up after 3s
+[axon-run 23:00:31] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 23:01:02] FOREIGN_GPU sample max=0% mean=0.0% n=1
+SERVE nb0-r1 {"tag": "nb0-r1", "workload": "mix", "round": 1, "url": "http://127.0.0.1:18161", "salt": "r1 c128 m87d247", "set": "prompts-mix-v2.jsonl", "ts": 1793070068.924, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 39.397, "completion_tokens": 71023, "prompt_tokens": 251396, "agg_tok_s": 1802.8, "in_tok_s": 6381.1, "ttft_ms_p50": 3150.3, "ttft_ms_p99": 15317.0, "ttft_short_ms_p50": 2965.1, "ttft_short_ms_p99": 15252.6, "ttft_long_ms_p50": 3772.6, "ttft_long_ms_p99": 16098.3, "itl_ms_p50": 56.86, "itl_ms_p99": 74.75, "tpot_ms_p50": 57.35, "tpot_ms_p99": 60.42, "goodput_tok_s": 329.2, "slo_ok": 0.188, "slo": {"itl_ms": 50.0, "ttft_ms": 2000.0, "ttft_ms_per_ktok": 250.0}, "tok_per_chunk": 1.0, "completion_tokens_mean": 277.4, "completion_tokens_min": 19, "finish": {"stop": 118, "length": 138}}
+[t1 +310s] serve nb1-r1 up after 3s
+[axon-run 23:01:35] FOREIGN_GPU sample max=0% mean=0.0% n=1
+SERVE nb1-r1 {"tag": "nb1-r1", "workload": "mix", "round": 1, "url": "http://127.0.0.1:18171", "salt": "r1 c128 ma27f55", "set": "prompts-mix-v2.jsonl", "ts": 1793070116.206, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 38.921, "completion_tokens": 70802, "prompt_tokens": 251140, "agg_tok_s": 1819.1, "in_tok_s": 6452.5, "ttft_ms_p50": 3241.1, "ttft_ms_p99": 14328.5, "ttft_short_ms_p50": 3042.5, "ttft_short_ms_p99": 13358.5, "ttft_long_ms_p50": 3882.3, "ttft_long_ms_p99": 16145.1, "itl_ms_p50": 56.64, "itl_ms_p99": 76.74, "tpot_ms_p50": 57.75, "tpot_ms_p99": 60.14, "goodput_tok_s": 225.9, "slo_ok": 0.133, "slo": {"itl_ms": 50.0, "ttft_ms": 2000.0, "ttft_ms_per_ktok": 250.0}, "tok_per_chunk": 1.0, "completion_tokens_mean": 276.6, "completion_tokens_min": 19, "finish": {"stop": 122, "length": 134}}
+[t1 +357s] serve nb1-r2 up after 3s
+[axon-run 23:02:07] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 23:02:39] FOREIGN_GPU sample max=0% mean=0.0% n=1
+SERVE nb1-r2 {"tag": "nb1-r2", "workload": "mix", "round": 2, "url": "http://127.0.0.1:18172", "salt": "r2 c128 mf35f4b", "set": "prompts-mix-v2.jsonl", "ts": 1793070163.661, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 39.079, "completion_tokens": 71821, "prompt_tokens": 251140, "agg_tok_s": 1837.9, "in_tok_s": 6426.5, "ttft_ms_p50": 3063.5, "ttft_ms_p99": 14961.3, "ttft_short_ms_p50": 2821.5, "ttft_short_ms_p99": 14834.0, "ttft_long_ms_p50": 4122.3, "ttft_long_ms_p99": 16179.5, "itl_ms_p50": 56.75, "itl_ms_p99": 74.35, "tpot_ms_p50": 56.79, "tpot_ms_p99": 60.41, "goodput_tok_s": 253.8, "slo_ok": 0.133, "slo": {"itl_ms": 50.0, "ttft_ms": 2000.0, "ttft_ms_per_ktok": 250.0}, "tok_per_chunk": 1.0, "completion_tokens_mean": 280.6, "completion_tokens_min": 19, "finish": {"stop": 118, "length": 138}}
+[t1 +404s] serve nb0-r2 up after 3s
+[axon-run 23:03:12] FOREIGN_GPU sample max=0% mean=0.0% n=1
+SERVE nb0-r2 {"tag": "nb0-r2", "workload": "mix", "round": 2, "url": "http://127.0.0.1:18162", "salt": "r2 c128 m0b95be", "set": "prompts-mix-v2.jsonl", "ts": 1793070211.269, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 39.243, "completion_tokens": 71433, "prompt_tokens": 251140, "agg_tok_s": 1820.3, "in_tok_s": 6399.7, "ttft_ms_p50": 3044.1, "ttft_ms_p99": 13874.2, "ttft_short_ms_p50": 2818.4, "ttft_short_ms_p99": 13008.3, "ttft_long_ms_p50": 4183.9, "ttft_long_ms_p99": 15877.3, "itl_ms_p50": 57.2, "itl_ms_p99": 74.09, "tpot_ms_p50": 58.22, "tpot_ms_p99": 60.71, "goodput_tok_s": 148.9, "slo_ok": 0.086, "slo": {"itl_ms": 50.0, "ttft_ms": 2000.0, "ttft_ms_per_ktok": 250.0}, "tok_per_chunk": 1.0, "completion_tokens_mean": 279.0, "completion_tokens_min": 19, "finish": {"stop": 116, "length": 140}}
+[t1 +450s] ssweep (nb 32: 128 CTAs on NVIDIA H100 80GB HBM3)
+SSWEEP S=1 POOL kv f16 depth 600 nb 32 launches 4 attn 23.6 (22.2) cmb 14.0 (13.5) both 35.3 (34.4) us/layer KV 1116 GB/s | nb S 1 25.2 (24.6) us KV 1564 GB/s speedup 1.40x
+SSWEEP S=1 POOL kv q8 depth 600 nb 32 launches 4 attn 30.4 (29.8) cmb 14.0 (13.7) both 41.0 (40.0) us/layer KV 495 GB/s | nb S 1 37.3 (37.1) us KV 544 GB/s speedup 1.10x
+SSWEEP S=1 POOL kv f16 depth 4096 nb 32 launches 4 attn 115.6 (114.3) cmb 37.0 (36.3) both 157.4 (157.4) us/layer KV 1705 GB/s | nb S 1 110.2 (108.8) us KV 2437 GB/s speedup 1.43x
+SSWEEP S=1 POOL kv q8 depth 4096 nb 32 launches 4 attn 132.2 (131.9) cmb 36.5 (35.9) both 175.6 (174.8) us/layer KV 789 GB/s | nb S 1 186.8 (185.5) us KV 741 GB/s speedup 0.94x
+SSWEEP S=2 POOL kv f16 depth 600 nb 32 launches 4 attn 24.1 (23.6) cmb 14.2 (13.8) both 35.6 (35.1) us/layer KV 1106 GB/s | nb S 2 38.7 (38.2) us KV 1018 GB/s speedup 0.92x
+SSWEEP S=2 POOL kv q8 depth 600 nb 32 launches 4 attn 30.1 (28.9) cmb 13.6 (13.2) both 40.1 (39.8) us/layer KV 506 GB/s | nb S 2 48.3 (48.0) us KV 421 GB/s speedup 0.83x
+SSWEEP S=2 POOL kv f16 depth 4096 nb 32 launches 4 attn 116.5 (115.2) cmb 36.4 (36.2) both 158.1 (157.2) us/layer KV 1698 GB/s | nb S 2 159.4 (157.6) us KV 1685 GB/s speedup 0.99x
+SSWEEP S=2 POOL kv q8 depth 4096 nb 32 launches 4 attn 134.6 (133.2) cmb 36.9 (35.9) both 175.8 (174.1) us/layer KV 787 GB/s | nb S 2 232.8 (232.1) us KV 595 GB/s speedup 0.76x
+SSWEEP S=3 POOL kv f16 depth 600 nb 32 launches 4 attn 22.8 (22.6) cmb 13.5 (13.2) both 34.9 (34.1) us/layer KV 1129 GB/s | nb S 3 37.8 (37.3) us KV 1043 GB/s speedup 0.92x
+SSWEEP S=3 POOL kv q8 depth 600 nb 32 launches 4 attn 29.7 (29.2) cmb 13.2 (13.0) both 40.1 (39.5) us/layer KV 507 GB/s | nb S 3 47.2 (46.7) us KV 431 GB/s speedup 0.85x
+SSWEEP S=3 POOL kv f16 depth 4096 nb 32 launches 4 attn 117.2 (115.2) cmb 36.5 (35.9) both 157.8 (156.6) us/layer KV 1702 GB/s | nb S 3 158.7 (158.2) us KV 1692 GB/s speedup 0.99x
+SSWEEP S=3 POOL kv q8 depth 4096 nb 32 launches 4 attn 134.0 (132.8) cmb 36.9 (35.8) both 175.2 (174.9) us/layer KV 790 GB/s | nb S 3 192.1 (190.8) us KV 721 GB/s speedup 0.91x
+SSWEEP S=5 POOL kv f16 depth 600 nb 32 launches 4 attn 24.4 (23.2) cmb 14.4 (13.9) both 35.7 (34.9) us/layer KV 1102 GB/s | nb S 5 36.4 (35.6) us KV 1083 GB/s speedup 0.98x
+SSWEEP S=5 POOL kv q8 depth 600 nb 32 launches 4 attn 29.8 (29.1) cmb 13.5 (13.3) both 40.3 (39.8) us/layer KV 504 GB/s | nb S 5 38.7 (37.9) us KV 525 GB/s speedup 1.04x
+SSWEEP S=5 POOL kv f16 depth 4096 nb 32 launches 4 attn 118.1 (116.0) cmb 37.0 (36.3) both 159.8 (158.1) us/layer KV 1680 GB/s | nb S 5 164.2 (160.9) us KV 1635 GB/s speedup 0.97x
+SSWEEP S=5 POOL kv q8 depth 4096 nb 32 launches 4 attn 133.8 (133.2) cmb 36.7 (35.9) both 175.7 (175.2) us/layer KV 788 GB/s | nb S 5 152.3 (151.6) us KV 909 GB/s speedup 1.15x
+[t1 +457s] step NB=1,S=1
+[axon-run 23:03:44] FOREIGN_GPU sample max=0% mean=0.0% n=1
+STEP NB=1,S=1 C curve: /root/axon-node/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA H100 80GB HBM3 (132 SMs)
+STEP NB=1,S=1 depth 600: decode step (forward_argmax) 3.229 ms; pool 32 x 704
+STEP NB=1,S=1 | 600 | 32 | 0 x1 | 9.366 | 2.90 | 3417 |
+STEP NB=1,S=1 depth 4096: decode step (forward_argmax) 3.331 ms; pool 32 x 4160
+STEP NB=1,S=1 | 4096 | 32 | 0 x1 | 11.908 | 3.58 | 2687 |
+[t1 +475s] bench (default grid)
+POOL bench NVIDIA H100 80GB HBM3 (132 SMs), 28/4x128
+POOL kv f16 depth 600 nb 32 launches 4 attn 23.6 (23.1) cmb 13.5 (13.1) both 34.6 (33.9) us/layer KV 1139 GB/s | nb S 3 35.9 (35.0) us KV 1097 GB/s speedup 0.96x
+POOL kv f16 depth 600 nb 64 launches 8 attn 50.5 (49.4) cmb 23.8 (23.0) both 73.8 (73.4) us/layer KV 1067 GB/s | nb S 1 38.2 (37.7) us KV 2063 GB/s speedup 1.93x
+POOL kv f16 depth 600 nb 128 launches 16 attn 102.8 (102.1) cmb 43.8 (42.3) both 145.5 (144.7) us/layer KV 1083 GB/s | nb S 1 75.5 (74.4) us KV 2088 GB/s speedup 1.93x
+POOL kv q8 depth 600 nb 32 launches 4 attn 29.6 (29.2) cmb 13.1 (12.9) both 39.9 (39.6) us/layer KV 509 GB/s | nb S 3 38.1 (37.9) us KV 533 GB/s speedup 1.05x
+POOL kv q8 depth 600 nb 64 launches 8 attn 60.6 (60.1) cmb 23.1 (22.4) both 83.0 (82.5) us/layer KV 490 GB/s | nb S 1 43.5 (42.8) us KV 934 GB/s speedup 1.91x
+POOL kv q8 depth 600 nb 128 launches 16 attn 127.8 (127.0) cmb 42.0 (41.5) both 171.3 (170.5) us/layer KV 474 GB/s | nb S 1 76.8 (75.9) us KV 1057 GB/s speedup 2.23x
+POOL kv f16 depth 4096 nb 32 launches 4 attn 117.7 (116.7) cmb 37.0 (36.0) both 159.3 (157.4) us/layer KV 1686 GB/s | nb S 3 163.2 (162.4) us KV 1645 GB/s speedup 0.98x
+POOL kv f16 depth 4096 nb 64 launches 8 attn 230.9 (228.2) cmb 59.5 (58.4) both 315.2 (313.4) us/layer KV 1704 GB/s | nb S 1 192.7 (191.7) us KV 2786 GB/s speedup 1.64x
+POOL kv f16 depth 4096 nb 128 launches 16 attn 460.9 (459.8) cmb 102.3 (101.3) both 631.0 (626.8) us/layer KV 1702 GB/s | nb S 1 445.2 (444.5) us KV 2413 GB/s speedup 1.42x
+POOL kv q8 depth 4096 nb 32 launches 4 attn 133.7 (132.6) cmb 37.2 (36.4) both 175.9 (175.0) us/layer KV 787 GB/s | nb S 3 150.9 (149.5) us KV 917 GB/s speedup 1.17x
+POOL kv q8 depth 4096 nb 64 launches 8 attn 262.6 (261.9) cmb 58.6 (57.7) both 348.5 (346.7) us/layer KV 795 GB/s | nb S 1 215.9 (214.8) us KV 1282 GB/s speedup 1.61x
+POOL kv q8 depth 4096 nb 128 launches 16 attn 522.4 (520.3) cmb 103.4 (102.6) both 696.0 (694.8) us/layer KV 796 GB/s | nb S 1 412.0 (402.9) us KV 1344 GB/s speedup 1.69x
+[t1 +480s] kernel cache now 4 entries (was 1 + kit; more = compiled on this host)
+SERVE CELL nb0-r1 agg 1802.8 goodput 329.2 itl_p50 None ttft_p50 None
+SERVE CELL nb0-r2 agg 1820.3 goodput 148.9 itl_p50 None ttft_p50 None
+SERVE CELL nb1-r1 agg 1819.1 goodput 225.9 itl_p50 None ttft_p50 None
+SERVE CELL nb1-r2 agg 1837.9 goodput 253.8 itl_p50 None ttft_p50 None
+SERVE agg median nb0 1811.55 nb1 1828.5 ratio 1.009 (criterion >= 1.10)
+[t1 +480s] T1 H100 DONE rc 0
+[axon-node 03:04:01] exit 0 after 480.2s
+[axon-node 03:04:01] peak RSS 516 MB (job process tree PSS, 2 s samples x239)
+[axon-run 23:04:04] exit 0 after 515.6s (host pod1)
+[axon-run 23:04:05] EXPECT ok: output matches /T1 H100 DONE/
+[axon-run 23:04:05] FOREIGN_GPU max=0% mean=0.0% samples=16

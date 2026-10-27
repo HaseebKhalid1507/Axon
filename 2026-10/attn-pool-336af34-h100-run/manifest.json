@@ -1,0 +1,29 @@
+{
+ "label": "attn-pool-336af34-h100-run",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1026-225032-3dfd",
+   "name": "attn-pool-336af34-h100",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod1",
+   "hw": "hw-pod1-10-26_22:55.txt",
+   "gpu": "NVIDIA H100 80GB HBM3",
+   "driver": "595.91.07",
+   "sha": "336af34",
+   "binary": "bash",
+   "started": 1793069729.1112957,
+   "ended": 1793070245.0284657,
+   "attempts": 1,
+   "remote_job": "20261027-025601-bash-1135",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "96d2f016927e390fb1076aa15032c9a2ae90d08b47ce0fd2bdd8c94b48c65f26",
+   "log_bytes": 14535
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-26 23:04:05 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
