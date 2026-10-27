@@ -412,8 +412,10 @@ fn check_range(lo: usize, hi: usize, max_ctx: usize) -> io::Result<()> {
 impl<'g> KvIo for CudaQwen2<'g> {
     fn kv_ident(&self, c: &CudaCache<'g>) -> Option<Value> {
         // A split model's GPU half has no image of its own (the CPU half's
-        // rows are elsewhere).
-        if self.first > 0 {
+        // rows are elsewhere); deepseek2's K-only MLA cache has no image
+        // format yet (as the CPU's `Qwen2`): a saved session is prefilled
+        // again (#159).
+        if self.first > 0 || self.mla.is_some() {
             return None;
         }
         let (layers, kvd, hd) = self.kv_shape();
