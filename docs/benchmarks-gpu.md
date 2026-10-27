@@ -1,6 +1,8 @@
 # GPU benchmarks
 
-Single-stream throughput of Axon against llama.cpp and ollama on the same GGUF files, two serving
+Single-stream throughput of Axon against llama.cpp and ollama on the same GGUF files, a
+[mixture-of-experts board](#mixture-of-experts-on-an-rtx-4090-moonlight-16b-a3b-and-qwen3-30b-a3b-vs-llamacpp-2026-10-26-bench-of-record)
+(resident experts: Moonlight and Qwen3-30B-A3B on an RTX 4090), two serving
 (concurrency) sections against vLLM and SGLang: [RTX 4090](#concurrency-rtx-4090-qwen25-7b-2026-10-18) and
 [H100 SXM](#concurrency-h100-sxm-qwen25-7b-2026-10-19), and Axon's own serve-scheduler A/B on two laptop GPUs
 ([#131](#serve-scheduler-ab-laptop-gpus-2026-10-25-131)). Every number on
@@ -532,6 +534,197 @@ Axon was 0.76× vLLM-AWQ; here it is 0.43×: vLLM gained 1.9× from the H100, Ax
 | SGLang-AWQ | 512 | 512 | 512 | 512 | 512 |
 | vLLM-FP8 | 512 | 512 | 512 | 512 | 512 |
 | SGLang-FP8 | 512 | 512 | 512 | 512 | 512 |
+
+## Mixture of experts on an RTX 4090: Moonlight-16B-A3B and Qwen3-30B-A3B vs llama.cpp (2026-10-26, bench of record)
+
+This is the bench of record for `--gpu-experts` (roadmap item 3).
+- Axon main `8508a75` (#145, #146, #147) vs llama.cpp `4413a19`, on one RunPod RTX 4090.
+- 3 interleaved rounds; medians with [min–max]; MEASURED.
+- Job `1026-215154-40d7` (`--timing 4090`): **CLEAN** (foreign GPU max 0 %). Raw results, job log and scripts are in
+  the [gist](https://gist.github.com/HaseebKhalid1507/bf2abed2de5b1cc0a1a68510ef46f399).
+- It supersedes the Parabellum boards below. Those are main `39624db`, or TAINTED re-benches of `8508a75`.
+
+**Up front: what wins and what loses.**
+- **Qwen3-30B-A3B, everything on the GPU:**
+  - Axon leads prefill: **×1.32** at pp512 and **×1.31** at pp2100.
+  - Axon **trails decode at ×0.87** (219.7 vs 252.5 tok/s).
+  - Roadmap item 3's kill rule reads "30B-A3B pp2100 < llama.cpp `--cpu-moe` on the same pod → not a headline". This board didn't run `--cpu-moe` (every expert on the CPU); it compared against llama.cpp's **best** placement (`--n-cpu-moe 0`: everything on the GPU), which is stricter. The rule still passes: 12,212 vs 9,289. So it's a headline, with the decode loss stated next to it.
+- **Moonlight-16B-A3B, everything on the GPU:** Axon trails on all three metrics: tg128 **×0.96**, pp512 **×0.81**,
+  pp2100 **×0.57**. Not a headline.
+- **Experts partly on the CPU:** Axon's CPU-expert path is slower than llama.cpp's on this EPYC 75F3 pod (16 threads).
+  On Parabellum (Core Ultra 9 275HX, main `39624db`, before #145 / #147; the thread-matched rerun edef + 6c71, clean windows), Axon led partial-offload decode 1.46–1.68× but trailed prefill 0.71–0.84×: the decode gap is host-dependent; prefill trailed on both hosts.
+  At the same placement on Moonlight:
+  - N = 12 vs `--n-cpu-moe 14`: tg128 79.2 vs 96.0, pp2100 673 vs 1,330;
+  - N = 0 vs `--n-cpu-moe 26`: pp2100 348 vs 659 (decode 45.4 vs 39.4 is a near-tie, with wide ranges).
+  - The 30B's best partial llama.cpp row (`--n-cpu-moe 8`: 128.9 / 2,118) has no Axon run at the same N.
+- **Text:** the generated text (tg128, greedy) is identical across every Axon placement on both models (md5
+  `26480dfcb01a` Moonlight, `38978183d80a` 30B). Residency doesn't change the greedy text.
+
+### Qwen3-30B-A3B Instruct 2507 Q4_K_M (48 MoE layers; 128 experts, top-8)
+
+| engine | placement | tg128 | pp512 | pp2100 |
+|---|---|---:|---:|---:|
+| **Axon** | `--gpu-experts auto` (48 of 48 resident) | **219.7** [219.4–220.7] | **11,022** [10,645–11,030] | **12,212** [12,203–12,231] |
+| llama.cpp | `--n-cpu-moe 0` (all on the GPU) | **252.5** [249.7–253.8] | 8,372 [8,321–8,393] | 9,289 [9,189–9,326] |
+| llama.cpp | `--n-cpu-moe 8` | 128.9 [128.1–138.6] | 2,277 [2,174–2,360] | 2,118 [1,953–2,147] |
+| llama.cpp | `--n-cpu-moe 16` | 90.5 [87.5–101.0] | 1,127 [1,045–1,489] | 1,333 [1,271–1,374] |
+| Axon | `--gpu-experts 0` (all experts on the CPU) | 32.6 [32.2–36.7] | 109.2 [107.6–118.1] | 109.3 [95.6–111.2] |
+| **Axon `auto` / llama.cpp best** | | **×0.87** | **×1.32** | **×1.31** |
+
+### Moonlight-16B-A3B Instruct Q4_K_M (26 MoE layers; 64 experts, top-6, 2 shared)
+
+| N on the GPU | Axon `--gpu-experts N` tg128 / pp512 / pp2100 | llama.cpp `--n-cpu-moe 26−N` tg128 / pp512 / pp2100 | Axon / llama |
+|---|---|---|---|
+| 0 | 45.4 [39.0–57.8] / 339 [279–345] / 348 [311–371] | 39.4 [31.9–41.5] / 749 [702–787] / 659 [648–704] | ×1.15 / ×0.45 / ×0.53 |
+| 6 | 82.2 [48.6–95.7] / 471 [417–472] / 473 [449–474] | 82.9 [42.9–84.8] / 1,194 [996–1,336] / 1,006 [840–1,142] | ×0.99 / ×0.39 / ×0.47 |
+| 12 | 79.2 [54.4–105.1] / 656 [592–714] / 673 [614–756] | 96.0 [75.1–105.4] / 1,717 [1,045–1,739] / 1,330 [1,217–1,578] | ×0.82 / ×0.38 / ×0.51 |
+| 26 (Axon `auto`) | **272.9** [270.2–274.6] / **9,035** [7,449–9,047] / **7,004** [6,967–7,164] | **285.5** [284.1–292.7] / **11,176** [11,125–11,229] / **12,272** [12,161–12,412] | **×0.96 / ×0.81 / ×0.57** |
+
+**Partial-offload rows are noisy.** The CPU-expert runs on this shared EPYC host spread widely, both engines (e.g.
+Moonlight N = 12 tg128 54–105). Read them as "llama.cpp's CPU path is faster on this pod", not as precise ratios.
+**All-resident rows:** decode and pp2100 vary ≤ 3 % (min–max over median), and the 30B's pp512 3.5 %. Moonlight's
+pp512 varies **18 %** (one low round: 7,449 against 9,035–9,047).
+
+**Method.** One `--timing 4090` job; the script is `podbench/run.sh` (gist).
+- **Rounds:** the config order rotates every round. Each Axon config gets one discarded warm-up (NVRTC kernel cache).
+- **Axon:** `axon gen <model> "<prompt>" -n 128|1 --device cuda --ctx 4096 --gpu-experts N`, `AXON_THREADS=16`.
+  tg128 runs after an 8-token prompt; pp512 / pp2100 use salted copies of `bench.py`'s sentence (510 / 2,106
+  tokens).
+- **llama.cpp:** `llama-bench -m <model> -ngl 99 -ncmoe K -t 16 -p 512,2100 -n 128 -r 1 -o jsonl`, flash attention
+  `auto` (its default).
+  - Built from the `4413a19` tarball inside `runpod/base:1.4.0-cuda1281-ubuntu2404` (CUDA 12.8.1, sm_89,
+    `GGML_NATIVE=OFF`, AVX2 / FMA, static ggml).
+  - The pod image had no CUDA 12 runtime, so the script fetched NVIDIA's PyPI wheels next to the binary:
+    `nvidia-cuda-runtime-cu12==12.8.90`, `nvidia-cublas-cu12==12.8.4.1`, `nvidia-nccl-cu12==2.25.1`.
+  - A preflight checks that llama-bench starts. Any engine row with rc ≠ 0 fails the job.
+- **Models:** both downloaded on the pod from Hugging Face, then sha256-checked.
+  - Moonlight `gabriellarson/Moonlight-16B-A3B-Instruct-GGUF`: `2b113655999f11730a6dc31b7ba93463e6523a323f46074b01c55d96101df360`.
+  - Qwen3-30B `bartowski/Qwen_Qwen3-30B-A3B-Instruct-2507-GGUF`: `382b4f5a164d200f93790ee0e339fae12852896d23485cfb203ce868fea33a95`.
+- **Placements:**
+  - Moonlight: llama.cpp at the same N as Axon.
+  - 30B: Axon `auto` placed all 48 layers (24 GB card), so it runs against llama.cpp's sweep (`--n-cpu-moe 0 / 8 / 16`).
+  - The roadmap's "N = 26" is Moonlight's all-resident point; the 30B's is N = 48.
+- **Hardware:** RunPod secure RTX 4090 24 GB, driver 595.91.07, 450 W, max SM 3105 MHz; host AMD EPYC 75F3 (128 vCPU,
+  503 GB RAM).
+- **Not used:** the first pod run (`1026-211155-a0f6`) is superseded. Every llama.cpp row exited 127 (its CUDA 12
+  libraries were missing on the pod), and the harness still passed; the fix is above. Its Axon numbers are in the gist only.
+
+## Superseded: Moonlight-16B-A3B, resident experts vs llama.cpp (Parabellum, 2026-10-26)
+
+Superseded by the RTX 4090 board above; kept as history. This was the first Parabellum board for `--gpu-experts`
+(MoE-resident PR D).
+- Axon main `39624db` runs at `--gpu-experts 0 / 6 / 12 / auto`. llama.cpp CUDA `4413a19` runs at the same
+  placement (`--n-cpu-moe 26 − N`).
+- Moonlight-16B-A3B-Instruct Q4_K_M, ctx 4096.
+- Medians of 3 interleaved rounds. A † marks a run that is **TAINTED** (foreign GPU load during that run: mean
+  > 5 % or max > 25 %). The job as a whole is TAINTED (max 46 %, mean 3.1 %), with 17 of 72 runs tainted.
+- MEASURED, job `1025-225107-e28c`; raw results, job log and script are in the [gist](https://gist.github.com/HaseebKhalid1507/7c37456c09d035b98d2f2b7d7b21bf51).
+  Log: [2026-10-26-moe-resident-bench](log/2026-10-26-moe-resident-bench.md).
+
+**Re-bench on current main (8508a75, #145 + #146 + #147): three runs, all TAINTED, none a record.** Jobs
+`1026-102643-eeb9`, `1026-124838-2f63` and `1026-205041-3204` ran the whole board on main `8508a75`. Each came back
+TAINTED from the owner's desktop load: foreign GPU max 61 / 63 / 58 %, mean 14.4 / 24.5 / 14.6 %, from Xorg, kitty
+and obs. Their accept-rule ratios agree with each other: `auto` vs N = 0 tg128 ×2.20 / ×2.14 / ×2.37 and pp512
+×3.73 / ×4.88 / ×3.77. They are not quoted here as numbers. The clean board is the RTX 4090 pod run (Qwen3-30B-A3B
+and Moonlight), and one more bella rerun is queued for a quiet night. The tables below are main `39624db`, before
+#145 / #147: they are **superseded** and kept as history.
+
+**Head-to-head at full residency, up front: llama.cpp is ahead.** At `auto` (25 or 26 of 26 expert layers on the
+GPU), Axon decodes at **0.71×** llama.cpp (121.7 vs 171.0 tok/s). Prefill is **0.45×** at pp512 and **0.34×** at
+pp2100. All of llama.cpp's auto runs are clean.
+
+Axon leads decode only while most experts are on the CPU: 1.72× at N = 0, 1.62× at N = 6, 1.44× at N = 12. Those
+rows are biased in Axon's favour by thread count. llama-bench ran at its default `-t 4`; Axon uses 8 threads for
+decode and 24 for prefill. See the caveats.
+
+**Accept rule (spec): PASS.** It asks for `auto` vs N = 0 of at least +50 % on decode and at least +100 % on pp512.
+Axon gets tg128 ×2.23 (54.5 → 121.7) and pp512 ×4.02 (594 → 2,386). Residency does what it promised against
+Axon's own CPU-expert split. Against llama.cpp at the same placement it doesn't win.
+
+| N (resident) | metric | axon median (r1 / r2 / r3) | llama.cpp median (r1 / r2 / r3) | axon / llama | tainted rows (axon, llama) |
+|---|---|---|---|---:|---|
+| 0 | tg128 | **54.5** (50.4 / 54.5 / 54.9) | **31.6** (33.6† / 27.5† / 31.6) | 1.72× | 0, 2 |
+| 0 | pp512 | **594.1** (641.7 / 412.6 / 594.1) | **795.6** (727.3† / 795.6† / 827.5) | 0.75× | 0, 2 |
+| 0 | pp2100 | **589.7** (589.7† / 583.1 / 595.7†) | **674.1** (639.7† / 674.1† / 687.5) | 0.87× | 2, 2 |
+| 6 | tg128 | **66.6** (66.6 / 63.3 / 67.6) | **41.2** (41.2 / 41.2 / 40.9†) | 1.62× | 0, 1 |
+| 6 | pp512 | **703.1** (703.1 / 625.3 / 715.8) | **997.3** (1061.2 / 997.3 / 996.9†) | 0.70× | 0, 1 |
+| 6 | pp2100 | **699.2** (699.2 / 703.0 / 696.2†) | **891.9** (891.9 / 889.1 / 906.5†) | 0.78× | 1, 1 |
+| 12 | tg128 | **74.0** (74.5 / 74.0 / 73.9) | **51.4** (51.4 / 49.8 / 52.7) | 1.44× | 0, 0 |
+| 12 | pp512 | **1014.1** (1028.3 / 1014.1 / 930.6†) | **1382.0** (1382.0 / 1240.0 / 1415.4) | 0.73× | 1, 0 |
+| 12 | pp2100 | **838.9** (840.5 / 834.0 / 838.9†) | **1203.3** (1201.8 / 1203.3 / 1260.5) | 0.70× | 1, 0 |
+| auto (25/25/26) | tg128 | **121.7** (121.0 / 121.7 / 127.5) | **171.0** (170.6 / 177.8 / 171.0) | 0.71× | 0, 0 |
+| auto (25/25/26) | pp512 | **2386.1** (2356.5 / 2386.1† / 2652.6†) | **5321.1** (5333.8 / 5260.3 / 5321.1) | 0.45× | 2, 0 |
+| auto (25/25/26) | pp2100 | **1588.0** (1580.5† / 1588.0 / 1696.4) | **4680.5** (4680.5 / 4695.6 / 4670.6) | 0.34× | 1, 0 |
+
+"auto (25/25/26)": the resident count in rounds 1 / 2 / 3. `auto` places as many layers as fit after a ctx-4096
+cache in the VRAM free at load, and the desktop's share of the 12 GB varies. llama.cpp ran each round at that
+round's count (`--n-cpu-moe` 1 / 1 / 0).
+
+**Thread-matched rerun (MEASURED, jobs `1026-011428-edef` and `1026-052430-6c71`, N = 0 / 6 / 12, 3 interleaved
+rounds).** llama-bench at `-t 8` (Axon's decode threads, the P cores) and `-t 24` (Axon's prefill threads),
+interleaved with Axon. Both jobs use the same Axon binary (main `39624db`) and the same llama.cpp (`4413a19`).
+- edef is TAINTED overall (Xorg, max 53 %). Its FOREIGN_GPU samples put two spikes at 02:26:17–02:26:51 and
+  02:27:25–02:27:59. Every edef run outside those windows is a clean window and is used as is.
+- The six runs that overlapped the spikes (round 1: llama.cpp N = 0 and 6 at both thread counts, Axon N = 12
+  tg128 and pp512) are replaced by their rerun in job 6c71, marked ‡. 6c71 is CLEAN (foreign GPU max 0 %).
+  The ‡ values ran in a separate job, not interleaved with the other two rounds.
+- An earlier rerun of those six (job 8bc8) was tainted again and isn't used.
+
+| N | metric | axon | llama.cpp `-t 8` | llama.cpp `-t 24` | axon / best llama |
+|---|---|---|---|---|---:|
+| 0 | tg128 | 56.6 (53.4 / 56.6 / 62.5) | 33.6 (30.5‡ / 33.6 / 35.0) | 9.2 (9.5‡ / 8.8 / 9.2) | 1.68× |
+| 0 | pp512 | 700.1 (700.1 / 705.5 / 641.5) | 834.5 (834.5‡ / 719.1 / 841.6) | 795.6 (825.9‡ / 795.6 / 703.2) | 0.84× |
+| 0 | pp2100 | 611.2 (600.9 / 612.9 / 611.2) | 746.0 (754.1‡ / 645.5 / 746.0) | 699.1 (745.8‡ / 699.1 / 681.1) | 0.82× |
+| 6 | tg128 | 68.0 (66.4 / 68.0 / 68.9) | 44.6 (44.6‡ / 38.4 / 46.5) | 11.8 (11.8‡ / 11.4 / 12.0) | 1.52× |
+| 6 | pp512 | 836.8 (838.0 / 836.8 / 815.2) | 1056.6 (1056.6‡ / 1064.5 / 1045.2) | 1046.1 (1047.9‡ / 1046.1 / 1007.7) | 0.79× |
+| 6 | pp2100 | 705.3 (706.6 / 696.2 / 705.3) | 935.1 (946.9‡ / 930.2 / 935.1) | 924.1 (900.6‡ / 924.1 / 927.0) | 0.75× |
+| 12 | tg128 | 76.4 (79.1‡ / 76.4 / 74.0) | 52.5 (52.5 / 55.8 / 51.7) | 16.1 (16.1 / 16.0 / 17.5) | 1.46× |
+| 12 | pp512 | 1047.7 (1083.7‡ / 1047.7 / 1044.1) | 1324.0 (1324.0 / 1337.1 / 1304.2) | 1244.3 (1350.3 / 1244.3 / 1079.3) | 0.79× |
+| 12 | pp2100 | 849.1 (846.9 / 852.5 / 849.1) | 1179.3 (1179.3 / 1230.8 / 1078.5) | 1200.4 (1201.6 / 1200.4 / 1062.6) | 0.71× |
+
+Matching threads doesn't change the picture.
+- llama.cpp decodes best at `-t 8`. At `-t 24` its decode collapses (9–17 tok/s), presumably because the hybrid CPU's
+  E cores stall each step's barrier (not measured).
+- At its best thread count, llama.cpp still trails Axon's decode: Axon leads by 1.46–1.68×. llama.cpp's prefill is
+  ahead by 1.19–1.41× (Axon 0.71–0.84×).
+- So llama-bench's default `-t 4` understated llama.cpp at these placements by up to 8 % on decode (N = 6: 41.2 vs
+  44.6) and up to 11 % on prefill (N = 0 pp2100: 674 vs 746). That is not enough to flip any row.
+
+**Method.** One `--timing bella` job (`benchd.sh`, in the gist). Each round runs N = 0, 6, 12, auto; within a
+round, the engine order alternates (odd rounds Axon first). Every run is preceded by a 5 s pause.
+- **Axon:** `axon gen <model> "<prompt>" --device cuda --ctx 4096 --gpu-experts N`, with default threads (decode
+  on the 8 P cores, prefill on all 24).
+  - tg128: 128 tokens after an 8-token prompt.
+  - pp512 / pp2100: salted copies of `scripts/bench.py`'s sentence, 510 and 2,106 tokens, `-n 1`.
+  - The rates are `gen`'s own `prompt eval` / `decode` lines.
+- **llama.cpp:** `llama-bench -m <model> -ngl 99 -ncmoe (26−N) -p 512,2100 -n 128 -r 1 -o jsonl`, at its
+  defaults otherwise: `-t 4`, flash attention `auto` (`fa=-1` in its output), warm-up on. Build: master
+  `4413a19`, Release, `GGML_CUDA=ON`, `CMAKE_CUDA_ARCHITECTURES=120`.
+- **Taint:** `nvidia-smi pmon` every second during each run; any process other than axon or llama-bench counts as
+  foreign.
+
+**Hardware.** Parabellum (bella): Intel Core Ultra 9 275HX (8 P + 16 E), 30 GB DDR5, RTX 5070 Ti Laptop
+(sm_120, 12 GB) shared with the desktop. Driver 615.78.08, CUDA / NVRTC 13, CachyOS (Linux 7.2.11).
+
+**Model.** `Moonlight-16B-A3B-Instruct-Q4_K_M.gguf`, sha256
+`2b113655999f11730a6dc31b7ba93463e6523a323f46074b01c55d96101df360`.
+- 26 MoE layers of 64 experts, top-6, plus 2 shared experts.
+- gate/up Q4_K; down Q8_0 in 12 layers and Q5_0 in 14.
+
+**Caveats.**
+- **Threads.** llama-bench's default is `-t 4`, against Axon's 8 decode / 24 prefill threads. At N < 26
+  llama.cpp's CPU expert layers run on 4 threads, so its N = 0 / 6 / 12 rows are understated and Axon's decode
+  lead there is partly thread count. The `auto` rows hardly depend on it: one layer on the CPU in rounds 1–2,
+  none in round 3. The thread-matched rerun above settles it: llama.cpp's best is `-t 8`, and Axon still
+  leads decode at N = 0 / 6 / 12.
+- **Attention.** llama.cpp chooses flash attention itself (`auto`); Axon runs its own MLA kernels. Both are each
+  engine's default.
+- **Prompts.** Axon's prompts are real text: 510 / 2,106 tokens, and its tg128 starts after an 8-token prompt.
+  llama-bench uses synthetic prompts of exactly 512 / 2,100 tokens, and its tg128 starts from an empty context.
+  The pp figures are rates, so a 2-token difference doesn't matter.
+- **Bits.** Axon's resident experts are bit-identical to its CPU experts (the twin kernels; PR #127's gates).
+  llama.cpp's GPU and CPU expert paths are not bit-identical to each other. The speed gap is the subject of the
+  diagnosis in the log entry.
 
 ## Serve scheduler A/B: laptop GPUs (2026-10-25, #131)
 
