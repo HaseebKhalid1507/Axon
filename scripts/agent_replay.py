@@ -523,6 +523,17 @@ def wait_http(port, path, proc, secs, log):
 
 
 def start_engine(kind, a, kv, port, logdir, axon_tokens):
+    """_start_engine, and no engine outlives a failed start."""
+    before = list(ENGINES)
+    try:
+        return _start_engine(kind, a, kv, port, logdir, axon_tokens)
+    except BaseException:
+        for p in [x for x in ENGINES if x not in before]:
+            stop_engine(p, 10)
+        raise
+
+
+def _start_engine(kind, a, kv, port, logdir, axon_tokens):
     """Start one engine; return (proc, Engine, kv_tokens, config string)."""
     log = os.path.join(logdir, f'{kind}-{kv}-{port}.log')
     lf = open(log, 'w')
@@ -550,7 +561,10 @@ def start_engine(kind, a, kv, port, logdir, axon_tokens):
     else:
         raise SystemExit(f'unknown engine {kind}')
     print(f'start {kind} kv {kv}: {" ".join(cmd)}', flush=True)
-    proc = subprocess.Popen(cmd, stdout=lf, stderr=subprocess.STDOUT, env=env, start_new_session=True)
+    marker = f'OLLAMA_HOST=127.0.0.1:{port}' if kind == 'ollama' else None
+    kill_leftover(port, cmd, marker)
+    proc = launch(cmd, stdout=lf, stderr=subprocess.STDOUT, env=env)
+    record_engine(logdir, proc, kind, port, 'started')
     if kind == 'axon':
         wait_http(port, '/health', proc, 600, log)
         sl = json.loads(wait_http(port, '/slots', proc, 60, log))
@@ -576,11 +590,13 @@ def start_engine(kind, a, kv, port, logdir, axon_tokens):
         except (KeyError, IndexError, ValueError):
             pass
     eng = Engine(f'http://127.0.0.1:{port}', model, kind)
+    record_engine(logdir, proc, kind, port, 'up')
     # load / warm the model with a tiny request (not measured)
     r = eng.complete(' hello', 2, 1)
     if 'error' in r:
         stop_engine(proc)
         raise RuntimeError(f'{kind}: warm-up request failed: {r["error"]}; log {log}')
+    record_engine(logdir, proc, kind, port, 'ready')
     return proc, eng, tokens, cfg
 
 
@@ -594,17 +610,163 @@ def ollama_offload(logdir, port):
     return f'; offloaded {m[-1][0]}/{m[-1][1]} layers to GPU' if m else '; offload: not in log'
 
 
-def stop_engine(proc):
+# Engine lifetime (10-27: a llama-server started in its own session survived axon-run's killpg of the board
+# job and held 10 GB of bella's VRAM for 37 min). Engines now (1) stay in the board's process group, so the
+# job's killpg reaches them; (2) get PR_SET_PDEATHSIG = SIGKILL, so they die with this process even if it is
+# SIGKILLed; (3) are stopped, with their whole process tree (ollama's runner), by SIGTERM / SIGINT / SIGHUP
+# handlers and atexit. At start, a leftover engine from a crashed run on the same port is killed only if it is
+# ours (same uid) with exactly the command line we are about to run (ollama: and our OLLAMA_HOST); a foreign
+# listener makes the start fail instead.
+ENGINES = []   # live Popen objects this process launched
+_LIBC = None
+
+
+def _pdeathsig():
     try:
-        os.killpg(proc.pid, signal.SIGTERM)
+        import ctypes
+        ctypes.CDLL('libc.so.6', use_errno=True).prctl(1, signal.SIGKILL)   # PR_SET_PDEATHSIG
     except OSError:
         pass
+
+
+def launch(cmd, **kw):
+    proc = subprocess.Popen(cmd, preexec_fn=_pdeathsig, **kw)
+    ENGINES.append(proc)
+    return proc
+
+
+def _children():
+    kids = {}
+    for p in os.listdir('/proc'):
+        if p.isdigit():
+            try:
+                with open(f'/proc/{p}/stat') as f:
+                    pp = int(f.read().rsplit(')', 1)[1].split()[1])
+                kids.setdefault(pp, []).append(int(p))
+            except (OSError, ValueError, IndexError):
+                pass
+    return kids
+
+
+def _tree(pid):
+    kids, out, st = _children(), [], [pid]
+    while st:
+        p = st.pop()
+        out.append(p)
+        st.extend(kids.get(p, []))
+    return out
+
+
+def _alive(pid):
     try:
-        proc.wait(60)
+        with open(f'/proc/{pid}/stat') as f:
+            return f.read().rsplit(')', 1)[1].split()[0] != 'Z'
+    except OSError:
+        return False
+
+
+def kill_tree(pid, grace=30.0):
+    """SIGTERM pid and every descendant, wait up to `grace` s, then SIGKILL whatever is left."""
+    pids = _tree(pid)
+    for p in pids:
+        try:
+            os.kill(p, signal.SIGTERM)
+        except OSError:
+            pass
+    t0 = time.time()
+    while time.time() - t0 < grace and any(_alive(p) for p in pids):
+        for p in pids:   # reap our own child
+            try:
+                os.waitpid(p, os.WNOHANG)
+            except OSError:
+                pass
+        time.sleep(0.2)
+    for p in pids + _tree(pid):
+        if _alive(p):
+            try:
+                os.kill(p, signal.SIGKILL)
+            except OSError:
+                pass
+
+
+def stop_engine(proc, grace=30.0):
+    kill_tree(proc.pid, grace)
+    try:
+        proc.wait(10)
     except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
-        proc.wait()
+        pass
+    if proc in ENGINES:
+        ENGINES.remove(proc)
     time.sleep(3)
+
+
+def stop_all(grace=10.0):
+    for proc in list(ENGINES):
+        kill_tree(proc.pid, grace)
+        if proc in ENGINES:
+            ENGINES.remove(proc)
+
+
+def _on_signal(sig, _frame):
+    print(f'agent_replay: signal {sig}: stopping {len(ENGINES)} engine(s)', flush=True)
+    stop_all()
+    os._exit(128 + sig)
+
+
+def install_guards():
+    import atexit
+    atexit.register(stop_all)
+    for sg in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sg, _on_signal)
+
+
+def listeners(port):
+    """PIDs with a TCP socket listening on `port` (IPv4/IPv6), from /proc."""
+    inodes = set()
+    for f in ('/proc/net/tcp', '/proc/net/tcp6'):
+        try:
+            for l in open(f).readlines()[1:]:
+                x = l.split()
+                if x[3] == '0A' and int(x[1].rsplit(':', 1)[1], 16) == port:
+                    inodes.add(x[9])
+        except OSError:
+            pass
+    out = set()
+    if not inodes:
+        return out
+    for p in os.listdir('/proc'):
+        if not p.isdigit():
+            continue
+        try:
+            for fd in os.listdir(f'/proc/{p}/fd'):
+                t = os.readlink(f'/proc/{p}/fd/{fd}')
+                if t.startswith('socket:[') and t[8:-1] in inodes:
+                    out.add(int(p))
+                    break
+        except OSError:
+            pass
+    return out
+
+
+def kill_leftover(port, cmd, env_marker=None):
+    for pid in listeners(port):
+        try:
+            mine = os.stat(f'/proc/{pid}').st_uid == os.getuid()
+            argv = open(f'/proc/{pid}/cmdline', 'rb').read().split(b'\0')[:-1]
+            env = open(f'/proc/{pid}/environ', 'rb').read().split(b'\0') if mine else []
+        except OSError:
+            continue
+        same = mine and [x.decode(errors='replace') for x in argv] == cmd and \
+            (env_marker is None or env_marker.encode() in env)
+        if not same:
+            raise RuntimeError(f'port {port} is held by pid {pid}, not a leftover of this command: not touching it')
+        print(f'killing leftover engine pid {pid} on port {port} (our uid, same command line)', flush=True)
+        kill_tree(pid, 15)
+
+
+def record_engine(logdir, proc, kind, port, state):
+    with open(os.path.join(logdir, 'engines.jsonl'), 'a') as f:
+        f.write(json.dumps({'pid': proc.pid, 'kind': kind, 'port': port, 'state': state, 't': time.time()}) + '\n')
 
 
 # --------------------------------------------------------------------------------------------- fan-out cell
@@ -745,6 +907,7 @@ def brief(s):
 
 
 def cmd_board(a):
+    install_guards()
     trace = json.load(open(a.trace))
     words = word_list(a.model)
     a.nwords = len(words)
