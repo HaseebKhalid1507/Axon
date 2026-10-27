@@ -42,9 +42,6 @@ pub(crate) struct Agree {
     last_kl: f64,
     pub(crate) sum_kl: f64,
     max_abs: f32,
-    /// Positions whose max |dlogit| reaches 6 (`assert_graded_gemma`):
-    /// (position index, max |dlogit| there).
-    over_six: Vec<(usize, f32)>,
     /// Reference logit margin of each top-1 disagreement.
     flips: Vec<f32>,
 }
@@ -69,14 +66,6 @@ pub(crate) struct Trace {
     steps: usize,
     /// (token fed at position rest.len() + s, the reference's logits there).
     at: Vec<(u32, Vec<f32>)>,
-}
-
-impl Trace {
-    /// The reference's greedy picks: the tokens fed after the prompt's last
-    /// (`steps` of them).
-    pub(crate) fn picks(&self) -> Vec<u32> {
-        self.at[1..].iter().map(|(t, _)| *t).collect()
-    }
 }
 
 pub(crate) fn trace<R: Lm>(r: &R, ids: &[u32], steps: usize) -> Trace {
@@ -158,13 +147,8 @@ impl Agree {
         }
         self.last_kl = k;
         self.sum_kl += k;
-        let pa = lr
-            .iter()
-            .zip(lo)
-            .fold(0f32, |m, (x, y)| m.max((x - y).abs()));
-        self.max_abs = self.max_abs.max(pa);
-        if pa >= 6.0 {
-            self.over_six.push((self.positions, pa));
+        for (x, y) in lr.iter().zip(lo) {
+            self.max_abs = self.max_abs.max((x - y).abs());
         }
         if ar != ao {
             // How close a call it was, in the reference's logits.
@@ -8744,99 +8728,36 @@ fn gpu_gemma3_prefill_and_verify_bits() {
     }
 }
 
-/// `assert_graded` for gemma3, whose CPU disagrees with itself more than
-/// Qwen's does (1B Q8_0, sm_120 and sm_89: CPU per-row vs repacked max
-/// |dlogit| 7.3, a top-1 flip at margin 1.6): the same top-1, flip-margin
-/// (all below max(0.5, the CPU's own spread), at most max(2, 1%) at 0.5 or
-/// more), mean-KL, max-KL and |dlogit| bounds. A position with KL above 0.5
-/// passes if the reference's top-2 margin there is below that tie bound (a
-/// near-tie either side may resolve), or else if `ref_ok(index)` holds: the
-/// independent f64 `gemma3_ref` on that prefix is at least as close to the
-/// GPU as (twice) to the CPU (`gemma3_ref_closer`).
-///
-/// Top-1 flips (GPU vs CPU) are judged the same way, by the reference:
-/// a flip where `flip_ok(index)` holds (`gemma3_ref_dist`: KL(ref || gpu)
-/// <= KL(ref || cpu), no slack: the reference is at least as close to the
-/// GPU as to the CPU there) is the CPU's error as much as the GPU's and
-/// counts as agreement; the remaining (unjustified) flips get the bars
-/// above unchanged: top-1 and flip margins. Why (M6, NUMERICS_VERSION 2):
-/// the chunked chain moves the 1B Q8_0's GPU closer to the f64 reference
-/// (mean KL 0.0093 -> 0.0054, max 0.63 -> 0.14, top-1 194 -> 195 / 198;
-/// the CPU 0.0103, 195) and further from the CPU's own rounding (top-1
-/// vs CPU 195 -> 192): a GPU-vs-CPU bar alone then fails the more
-/// accurate GPU. Positions with max |dlogit| 6 or more (`Agree::over_six`)
-/// pass below the CPU's own spread (`ac.max_abs`) or by `flip_ok`.
-fn assert_graded_gemma(
-    ag: &Agree,
-    ac: &Agree,
-    ref_ok: &dyn Fn(usize) -> bool,
-    flip_ok: &dyn Fn(usize) -> bool,
-) {
+/// GPU vs CPU sanity for gemma3 (loose: the accuracy grading is against
+/// the f64 reference, `gemma3_vs_ref`; the CPU is itself ~0.01 mean KL
+/// from it, and its two kernel sets disagree by up to 7.3 logits on the 1B
+/// Q8_0 walk). These only catch a wild bug: top-1 agreement at least 94%,
+/// every flip below the tie max(0.5, the CPU's own spread `ac.max_abs`),
+/// mean KL at most twice the CPU's own, max KL below 2, max |dlogit| below
+/// 2 max(3, the CPU's own spread).
+fn assert_sane_gemma(ag: &Agree, ac: &Agree) {
     assert_ref_spread(ac);
     let n = ag.positions;
-    // (margin, index) of the flips the reference doesn't justify.
-    let unjust: Vec<(f32, usize)> = ag
-        .flips
-        .iter()
-        .zip(&ag.flip_at)
-        .filter(|&(_, &i)| !flip_ok(i))
-        .map(|(&d, &i)| (d, i))
-        .collect();
-    let top1 = n - unjust.len();
-    eprintln!(
-        "top-1 flips vs cpu: {} total, {} reference-justified, {} unjustified (graded top-1 \
-         {top1}/{n}, raw {}; cpu vs itself {})",
-        ag.flips.len(),
-        ag.flips.len() - unjust.len(),
-        unjust.len(),
-        ag.top1,
-        ac.top1
-    );
     assert!(
-        top1 * 100 + 2 * n >= ac.top1 * 100 && top1 * 100 >= 94 * n,
-        "top-1 agreement {top1}/{n} after reference-justified flips (raw {}; cpu vs itself {})",
+        ag.top1 * 100 >= 94 * n,
+        "top-1 agreement {}/{n} (cpu vs itself {})",
         ag.top1,
         ac.top1
     );
     let tie = ac.max_abs.max(0.5);
-    let wide = unjust.iter().filter(|&&(d, _)| d >= 0.5).count();
     assert!(
-        unjust.iter().all(|&(d, _)| d < tie) && wide <= (n / 100).max(2),
-        "an unjustified top-1 flip with margin >= {tie} or {wide} >= 0.5: {unjust:?}"
+        ag.flips.iter().all(|&d| d < tie),
+        "a top-1 flip with margin >= {tie}: {:?}",
+        ag.flips
     );
     assert!(ag.sum_kl <= 2.0 * ac.sum_kl, "mean KL");
     assert!(ag.max_kl < 2.0, "max KL {}", ag.max_kl);
-    for &(i, k, mg, _) in &ag.over_half {
-        assert!(
-            mg < tie || ref_ok(i),
-            "KL {k} at position {i} (reference margin {mg} >= {tie}), and the f64 reference \
-             isn't as close to the GPU as to the CPU there"
-        );
-    }
-    // Max |dlogit| (the bar 6.0, as `assert_graded`): a position at 6 or
-    // more passes if it is still below the CPU's own spread on this walk
-    // (`ac.max_abs`: CPU per-row vs repacked kernels, the same quantized
-    // math in other orders: the reference spread the flip tie above uses
-    // too), or else where the f64 reference is at least as close to the
-    // GPU as to the CPU (`flip_ok`, no slack). Why (M6, NUMERICS_VERSION
-    // 2): the 1B Q8_0's largest GPU-vs-CPU gap went 3.9 -> 6.8 at one
-    // position (51 tokens) that the reference does NOT justify (KL(ref ||
-    // gpu) 0.077, KL(ref || cpu) 0.0005; both far below the 0.5 KL bar),
-    // while the CPU's own two kernel sets differ by 7.3 on the same walk.
-    for &(i, d) in &ag.over_six {
-        let by_ref = flip_ok(i);
-        eprintln!(
-            "max |dlogit| {d:.3} at position {i}: cpu's own spread {:.3}, reference-justified \
-             {by_ref}",
-            ac.max_abs
-        );
-        assert!(
-            d < ac.max_abs || by_ref,
-            "max |dlogit| {d} at position {i}: not below the cpu's own spread {} and the f64 \
-             reference isn't at least as close to the GPU as to the CPU there",
-            ac.max_abs
-        );
-    }
+    let dl = 2.0 * ac.max_abs.max(3.0);
+    assert!(
+        ag.max_abs < dl,
+        "max logit difference {} >= {dl}",
+        ag.max_abs
+    );
 }
 
 /// KL(p || q) of f64 logits p and f32 logits q.
@@ -8850,32 +8771,6 @@ fn kl64(p: &[f64], q: &[f32]) -> f64 {
     let lp = lse(&mut p.iter().copied());
     let lq = lse(&mut q.iter().map(|&x| x as f64));
     lp.iter().zip(&lq).map(|(a, b)| a.exp() * (a - b)).sum()
-}
-
-/// At `prefix` (the last token included), whether the f64 `gemma3_ref`
-/// next-token distribution is as close to the GPU's as to the CPU's:
-/// KL(ref || gpu) <= max(0.5, 2 KL(ref || cpu)). Fresh caches (both
-/// backends' batched prefill equals their decode bit for bit).
-fn gemma3_ref_closer(m: &Model, cpu: &Qwen2, gpu: &CudaQwen2, prefix: &[u32]) -> bool {
-    let (kg, kc) = gemma3_ref_dist(m, cpu, gpu, prefix);
-    kg <= (2.0 * kc).max(0.5)
-}
-
-/// At `prefix` (the last token included): (KL(ref || gpu), KL(ref || cpu))
-/// of the f64 `gemma3_ref` next-token distribution, printed. Fresh caches
-/// (both backends' batched prefill equals their decode bit for bit).
-fn gemma3_ref_dist(m: &Model, cpu: &Qwen2, gpu: &CudaQwen2, prefix: &[u32]) -> (f64, f64) {
-    let n = prefix.len();
-    let r = &crate::model::gemma3_tests::gemma3_ref(m, prefix, &[n - 1])[0];
-    let mut cc = cpu.new_cache(n);
-    cpu.feed_batch(&prefix[..n - 1], 0, &mut cc);
-    let lc = cpu.forward(prefix[n - 1], n - 1, &mut cc);
-    let mut gc = gpu.new_cache(n);
-    gpu.feed_batch(&prefix[..n - 1], 0, &mut gc);
-    let lg = gpu.forward(prefix[n - 1], n - 1, &mut gc);
-    let (kg, kc) = (kl64(r, &lg), kl64(r, &lc));
-    eprintln!("gemma3 ref at {n} tokens: KL(ref||gpu) {kg:.4}, KL(ref||cpu) {kc:.4}");
-    (kg, kc)
 }
 
 /// `continuations_with`'s walk, returning every divergence's reference
@@ -8904,11 +8799,11 @@ fn continuation_margins<R: Lm, O: Lm>(
     (same, matched, margins)
 }
 
-/// One gemma3 file: GPU vs CPU logits graded (`assert_graded_gemma`, with
-/// the f64 reference judging positions of KL above 0.5 that aren't
-/// near-ties), and greedy continuations whose divergences all have a
-/// reference margin below max(0.5, the largest the CPU's own kernel sets
-/// diverge at).
+/// One gemma3 file, GPU vs CPU sanity (`assert_sane_gemma`) over PROMPTS
+/// and 32 greedy steps, and greedy continuations: every divergence's
+/// reference margin below twice max(0.5, the largest the CPU's own kernel
+/// sets diverge at), identical continuations and matched tokens near the
+/// CPU's own. Loose on purpose: accuracy is `gemma3_vs_ref`'s.
 fn gemma3_vs_cpu(m: &Model, name: &str) {
     let g = crate::testutil::gpu().unwrap();
     let km = Kernels::module_for(&g, m).unwrap();
@@ -8918,32 +8813,15 @@ fn gemma3_vs_cpu(m: &Model, name: &str) {
     let cpu = Qwen2::new_with(m, true);
     const STEPS: usize = 32;
     let (mut ag, mut ac) = (Agree::default(), Agree::default());
-    let mut seqs = Vec::new();
     for p in PROMPTS {
         let ids = tok.encode(p);
         let t = trace(&cpu, &ids, STEPS);
         compare_trace(&t, &gpu, &mut ag);
         compare_trace(&t, &rows, &mut ac);
-        // compare's position s of this prompt follows ids + the CPU's
-        // first s greedy picks (the tokens the trace fed).
-        seqs.push((ids, t.picks()));
     }
     report(&format!("{name} gpu vs cpu"), &ag);
     report(&format!("{name} cpu rows vs cpu"), &ac);
-    let ref_ok = |i: usize| {
-        let (k, s) = ((i - 1) / (STEPS + 1), (i - 1) % (STEPS + 1));
-        let (ids, picks) = &seqs[k];
-        let prefix: Vec<u32> = ids.iter().chain(&picks[..s]).copied().collect();
-        gemma3_ref_closer(m, &cpu, &gpu, &prefix)
-    };
-    let flip_ok = |i: usize| {
-        let (k, s) = ((i - 1) / (STEPS + 1), (i - 1) % (STEPS + 1));
-        let (ids, picks) = &seqs[k];
-        let prefix: Vec<u32> = ids.iter().chain(&picks[..s]).copied().collect();
-        let (kg, kc) = gemma3_ref_dist(m, &cpu, &gpu, &prefix);
-        kg <= kc
-    };
-    assert_graded_gemma(&ag, &ac, &ref_ok, &flip_ok);
+    assert_sane_gemma(&ag, &ac);
     let (cs, cm, cmar) = continuation_margins(&cpu, &rows, &tok);
     let (gs, gm, gmar) = continuation_margins(&cpu, &gpu, &tok);
     let tie = cmar.iter().cloned().fold(0.5f32, f32::max);
@@ -8953,8 +8831,8 @@ fn gemma3_vs_cpu(m: &Model, name: &str) {
         PROMPTS.len()
     );
     assert!(
-        gmar.iter().all(|&d| d < tie),
-        "not a near-tie: {gmar:?} (tie {tie})"
+        gmar.iter().all(|&d| d < 2.0 * tie),
+        "a divergence at margin >= 2 x {tie}: {gmar:?}"
     );
     assert!(
         gs + 2 >= cs,
@@ -9130,46 +9008,60 @@ fn gemma3_cpu_probe() {
     }
 }
 
-/// A gemma3 file graded against the independent f64 `gemma3_ref` instead
-/// of the CPU (`gemma3_ref_walk`): the GPU's top-1 agrees with the
-/// reference within 2% of positions of the CPU's own agreement, its mean
-/// KL(ref || gpu) is at most twice the CPU's, and no position is above 2.
-/// For the 1B Q4_K_M, whose Q4_K / Q6_K products take Q8_K activations (one
-/// scale per 256 values; Gemma's residual stream has large outliers), the
-/// CPU itself is far from the reference at some positions (KL up to 0.53;
-/// per-row vs repacked CPU kernels 0.47), so GPU vs CPU flips there say
-/// little. Measured (sm_61 jade, same numbers as sm_89): top-1 vs ref gpu
-/// 191/198, cpu 191, cpu rows 192; mean KL 0.0201 / 0.0151 / 0.0124; max
-/// 0.86 / 0.53 / 0.47. (The 1B Q8_0, same walk: 194 / 195 / 193, mean
-/// 0.0093 / 0.0103 / 0.0138.) A decode-only SiLU on these narrow rows
-/// (#30's gate_up4) is caught by gpu_gemma3_prefill_and_verify_bits on
-/// this file: the batched FFN has no gate_up4.
-fn gemma3_vs_ref(m: &Model, name: &str) {
+/// The GPU before NUMERICS_VERSION 2 (main ae1e26b: version 1's product
+/// order) on `gemma3_ref_walk` (6 PROMPTS x 33 positions, the CPU's greedy
+/// picks): (mean KL(ref || gpu), max KL, top-1 agreements of 198), as
+/// ae1e26b's own `gemma3_ref_walk_probe` printed them (10-26, sm_89; the
+/// GPU's bits are the same on every arch). Written down before M6's
+/// numbers were graded against the bars they set (`gemma3_vs_ref`).
+const GEMMA3_V1_Q8_0: (f64, f64, usize) = (0.0093, 0.6326, 194);
+const GEMMA3_V1_Q4_K_M: (f64, f64, usize) = (0.0201, 0.8627, 191);
+
+/// A gemma3 file graded against the independent f64 `gemma3_ref`
+/// (`gemma3_ref_walk`), not against the CPU: the CPU is itself an
+/// approximation (1B Q8_0: mean KL 0.010 from the reference; Q4_K_M
+/// 0.015), so GPU-vs-CPU disagreement can't say which side moved away from
+/// the truth. Three yardsticks per file: the CPU (c) and the CPU's per-row
+/// kernels (w), measured here, and the GPU's previous numerics `v1`
+/// (pinned, `GEMMA3_V1_*`). The CPU's two kernel sets are the same
+/// quantized math summed in other orders, so their difference is the noise
+/// an order change makes. The bars, set from main's numbers:
+/// - top-1 vs ref >= min(v1, c, w) - max(2, |c - w|) (2 = 1% of positions);
+/// - mean KL <= max(v1, c, w) x max(c, w) / min(c, w);
+/// - max KL <= max(v1, c, w) x the same ratio of the max KLs.
+///
+/// Main ae1e26b (v1 itself), measured on avante (sm_89, its CPU): 1B Q8_0
+/// top-1 194 >= 191, mean 0.0093 <= 0.0184, max 0.633 <= 0.678; 1B
+/// Q4_K_M 191 >= 189, 0.0201 <= 0.0244, 0.863 <= 0.971. (#30's
+/// decode-only SiLU on the Q4_K_M's narrow gate/up rows is caught by
+/// gpu_gemma3_prefill_and_verify_bits: the batched FFN has no gate_up4.)
+fn gemma3_vs_ref(m: &Model, name: &str, v1: (f64, f64, usize)) {
     let g = crate::testutil::gpu().unwrap();
     let km = Kernels::module_for(&g, m).unwrap();
     let gpu = CudaQwen2::new(&g, &km, m, 256).unwrap();
     let rows = Qwen2::new_with(m, false);
     let cpu = Qwen2::new_with(m, true);
-    let [ag, ac, ar] = gemma3_ref_walk(m, &gpu, &cpu, &rows, 32);
+    let [ag, c, w] = gemma3_ref_walk(m, &gpu, &cpu, &rows, 32);
+    let ratio = |a: f64, b: f64| a.max(b) / a.min(b);
+    let top =
+        v1.2.min(c.2)
+            .min(w.2)
+            .saturating_sub(c.2.abs_diff(w.2).max(2));
+    let mean = v1.0.max(c.0).max(w.0) * ratio(c.0, w.0);
+    let max = v1.1.max(c.1).max(w.1) * ratio(c.1, w.1);
     eprintln!(
-        "{name} vs f64 ref: gpu mean KL {:.4} max {:.4} top-1 {}/{}; cpu {:.4} {:.4} {}; cpu rows \
-         {:.4} {:.4} {}",
-        ag.0, ag.1, ag.2, ag.3, ac.0, ac.1, ac.2, ar.0, ar.1, ar.2
+        "{name} vs f64 ref: gpu mean KL {:.5} max {:.4} top-1 {}/{}; cpu {:.5} {:.4} {}; cpu rows \
+         {:.5} {:.4} {}; v1 gpu {:.4} {:.4} {}; bars: top-1 >= {top}, mean <= {mean:.5}, max <= \
+         {max:.4}",
+        ag.0, ag.1, ag.2, ag.3, c.0, c.1, c.2, w.0, w.1, w.2, v1.0, v1.1, v1.2
     );
-    let n = ag.3;
+    assert!(ag.2 >= top, "{name}: top-1 vs reference {} < {top}", ag.2);
     assert!(
-        ag.2 * 100 + 2 * n >= ac.2 * 100,
-        "top-1 vs reference: gpu {} cpu {}",
-        ag.2,
-        ac.2
+        ag.0 <= mean,
+        "{name}: mean KL vs reference {} > {mean}",
+        ag.0
     );
-    assert!(
-        ag.0 <= 2.0 * ac.0,
-        "mean KL vs reference: gpu {} cpu {}",
-        ag.0,
-        ac.0
-    );
-    assert!(ag.1 < 2.0, "max KL vs reference {}", ag.1);
+    assert!(ag.1 <= max, "{name}: max KL vs reference {} > {max}", ag.1);
 }
 
 /// Diagnostic (M6 bisection, no assertion): the GPU, the CPU and the CPU's
@@ -9200,11 +9092,11 @@ fn gemma3_accuracy_diag() {
     }
 }
 
-/// gemma3 GPU vs CPU (`gemma3_vs_cpu`) on the 1B Q8_0, the 1B Q4_K_M
-/// against the f64 reference (`gemma3_vs_ref`; its narrow gate/up rows go
-/// through the gate/up selection #30's gate_up4 sits in), then past the
-/// 1B's 512 window (an 1100-token prompt, as
-/// gpu_logits_match_cpu_long_context).
+/// gemma3 on the GPU: the 1B Q8_0 and Q4_K_M graded against the f64
+/// reference (`gemma3_vs_ref`; the Q4_K_M's narrow gate/up rows go through
+/// the gate/up selection #30's gate_up4 sits in), GPU vs CPU sanity on the
+/// Q8_0 (`gemma3_vs_cpu`), then past the 1B's 512 window (an 1100-token
+/// prompt, as gpu_logits_match_cpu_long_context; sanity only).
 #[test]
 fn gpu_gemma3_logits_match_cpu() {
     let Some(g) = crate::testutil::gpu() else {
@@ -9214,8 +9106,9 @@ fn gpu_gemma3_logits_match_cpu() {
         return;
     };
     gemma3_vs_cpu(&m, "gemma3 1B Q8_0");
+    gemma3_vs_ref(&m, "gemma3 1B Q8_0", GEMMA3_V1_Q8_0);
     if let Some(mq) = model_at(GEMMA3_1B_Q4) {
-        gemma3_vs_ref(&mq, "gemma3 1B Q4_K_M");
+        gemma3_vs_ref(&mq, "gemma3 1B Q4_K_M", GEMMA3_V1_Q4_K_M);
     }
     let km = Kernels::module(&g).unwrap();
     let tok = crate::tokenizer::Tokenizer::from_gguf(&m);
@@ -9235,9 +9128,8 @@ fn gpu_gemma3_logits_match_cpu() {
     }
     report("gemma3 1B long gpu vs cpu", &ag);
     report("gemma3 1B long cpu rows vs cpu", &ac);
-    // (A reference pass over 1100 tokens is too slow: positions above 0.5
-    // here must be near-ties.)
-    assert_graded_gemma(&ag, &ac, &|_| false, &|_| false);
+    // (A reference pass over 1100 tokens is too slow: sanity only.)
+    assert_sane_gemma(&ag, &ac);
 }
 
 /// The GPU's gemma3 (decode with and without graphs, batched prefill)
