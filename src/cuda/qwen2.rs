@@ -488,6 +488,8 @@ pub(crate) struct CudaQwen2<'g> {
     gpu: &'g Gpu,
     /// Unique per model in the process: caches record it (`CudaCache::net`).
     id: u64,
+    /// True during feed passes (`batch::W8Feed`): the W4A8 path's pass kind.
+    w4a8_feed: std::sync::atomic::AtomicBool,
     f: Fns<'g>,
     pub(crate) n_layers: usize,
     pub(crate) dim: usize,
@@ -1637,6 +1639,7 @@ impl<'g> CudaQwen2<'g> {
         let mut net = CudaQwen2 {
             gpu,
             id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            w4a8_feed: std::sync::atomic::AtomicBool::new(false),
             f: Fns {
                 rmsnorm_quant: module.function("rmsnorm_quant")?,
                 rmsnorm_quant_v2: module.function("rmsnorm_quant_v2")?,

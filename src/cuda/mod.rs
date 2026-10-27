@@ -66,6 +66,7 @@ macro_rules! kernels_src {
             include_str!("stream.cu"),
             include_str!("sample.cu"),
             include_str!("hopper.cu"),
+            include_str!("w4a8.cu"),
             include_str!("gemma.cu"),
             include_str!("moe_twin.cu"),
             include_str!("moe_res.cu")

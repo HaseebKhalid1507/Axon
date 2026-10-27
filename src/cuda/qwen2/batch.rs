@@ -641,6 +641,125 @@ fn type_index(qt: u32) -> usize {
     }
 }
 
+/// w4a8.cu's dynamic shared memory (W4A8_SMEM(QK, GU)): 4 stages (Q4_K:
+/// activations 16 KiB, the bsum tile 8 KiB, 128 raw rows; Q6: activations,
+/// two halves of 128 Q6K8 rows, 128 rows of scale digits), 4 x 512 B of
+/// per-token dk / sums, gu's 16 KiB exchange, the barriers, 1 KiB slack.
+pub(super) const W4A8_SMEM_Q4: usize = 4 * (16384 + 8192 + 128 * 144) + 4 * 512 + 2 * 4 * 8 + 1024;
+pub(super) const W4A8_SMEM_GU: usize = W4A8_SMEM_Q4 + 32 * 128 * 4;
+pub(super) const W4A8_SMEM_Q6: usize =
+    4 * (16384 + 2 * 128 * 144 + 128 * 24) + 4 * 512 + 2 * 4 * 8 + 1024;
+
+/// The W4A8 products (docs/design/w4a8-prefill.md section 1), the index of
+/// their thresholds and hit counters.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum W8Prod {
+    /// The fused gate + up (w4a8_q4_k_gu).
+    GateUp = 0,
+    /// A Q4_K down (w4a8_q4_k, K = the FFN size).
+    Down4 = 1,
+    /// A Q6_K down by its Q6K8 copy (w4a8_q6).
+    Down6 = 2,
+    /// q / wo (w4a8_q4_k, K = dim).
+    QWo = 3,
+}
+
+/// The default thresholds (tokens per feed pass) per W8Prod, until session
+/// P1's sweep sets them (design note section 3.4): Checkpoint 1's lowest
+/// gated nb. None: not routed (`W4A8 T <p> none`).
+pub(super) const W4A8_T_DEFAULT: [Option<usize>; 4] = [Some(384); 4];
+/// The lowest threshold: the batches above the gemvm limit (`VM_MAX`).
+pub(super) const W4A8_T_MIN: usize = VM_MAX + 1;
+/// The fewest output rows a product needs to take the path (`gemmh_plain`'s
+/// row rule; the 7B's smallest covered product is 3584 rows).
+pub(super) const W4A8_ROWS_MIN: usize = 3584;
+
+/// W4A8 kernel launches per entry point (w4a8_q4_k_gu, w4a8_q4_k, w4a8_q6),
+/// process-wide: the gates check the path ran (design note section 2, M1).
+pub(crate) static W4A8_HITS: [std::sync::atomic::AtomicU64; 3] = [
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+    std::sync::atomic::AtomicU64::new(0),
+];
+
+/// The launch counters (gu, q4_k, q6).
+pub(crate) fn w4a8_hits() -> [u64; 3] {
+    let r = |i: usize| W4A8_HITS[i].load(std::sync::atomic::Ordering::Relaxed);
+    [r(0), r(1), r(2)]
+}
+
+fn w4a8_hit(i: usize) {
+    W4A8_HITS[i].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The thresholds of a run: AXON_W4A8_T=n (n >= W4A8_T_MIN, every product;
+/// the H100 test tier forces 33) or the defaults.
+pub(super) fn w4a8_thresholds(env: Option<&str>) -> [Option<usize>; 4] {
+    match env.and_then(|v| v.trim().parse::<usize>().ok()) {
+        Some(t) => [Some(t.max(W4A8_T_MIN)); 4],
+        None => W4A8_T_DEFAULT,
+    }
+}
+
+/// Which W4A8 product (if any) a batched product takes (design note sections
+/// 1 and 3.2): `on` (AXON_W4A8=1 on an sm_90a module), a feed pass (`feed`:
+/// never a decode step or a verify pass, whatever nb), at least
+/// W4A8_ROWS_MIN rows, nb at or above the product's threshold. `gu`: the
+/// fused gate + up; else qt Q4_K (down if cols == ffn, else q / wo) or Q6_K
+/// down with its Q6K8 copy (`c8`). Same bits on every route (identity C), so this
+/// decides speed only.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn w4a8_route(
+    on: bool,
+    feed: bool,
+    t: &[Option<usize>; 4],
+    gu: bool,
+    qt: u32,
+    rows: usize,
+    cols: usize,
+    ffn: usize,
+    nb: usize,
+    c8: bool,
+) -> Option<W8Prod> {
+    if !on || !feed || rows < W4A8_ROWS_MIN {
+        return None;
+    }
+    let p = match (gu, qt) {
+        (true, _) => W8Prod::GateUp,
+        (false, Q4_K) if cols == ffn => W8Prod::Down4,
+        (false, Q4_K) => W8Prod::QWo,
+        (false, Q6_K) if c8 && cols == ffn => W8Prod::Down6,
+        _ => return None,
+    };
+    match t[p as usize] {
+        Some(tp) if nb >= tp.max(W4A8_T_MIN) => Some(p),
+        _ => None,
+    }
+}
+
+/// While alive, the net's passes are feed passes (`CudaQwen2::w4a8_feed`):
+/// set by the feed callers only (feed_tokens, prefill_tokens, a pool's
+/// chunk feed), so decode steps and verify passes never take W4A8.
+pub(super) struct W8Feed<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for W8Feed<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// AXON_W4A8_STATS=1: the W4A8 launch counters on stderr when a module's
+/// batched kernels go (`W4A8 HITS gu <n> q4_k <n> q6 <n>`, process-wide
+/// counts), for the gates that check the path ran.
+impl Drop for BatchFns<'_> {
+    fn drop(&mut self) {
+        if self.w4a8.is_some() && std::env::var("AXON_W4A8_STATS").as_deref() == Ok("1") {
+            let [gu, q4, q6] = w4a8_hits();
+            eprintln!("W4A8 HITS gu {gu} q4_k {q4} q6 {q6}");
+        }
+    }
+}
+
 /// The batched kernels of a module.
 pub(super) struct BatchFns<'m> {
     pub(super) embed: Func<'m>,
@@ -715,6 +834,10 @@ pub(super) struct BatchFns<'m> {
     /// AXON_GEMMH=1: every Q4_K product of a batch through gemmh2_q4_k,
     /// whatever its shape (else only those `gemmh_plain` picks).
     gemmh_all: bool,
+    /// w4a8.cu's w4a8_q4_k_gu, w4a8_q4_k, w4a8_q6 and the thresholds per
+    /// W8Prod (`w4a8_route`): sm_90a modules with AXON_W4A8=1 only (off by
+    /// default until the design note's Checkpoint 2 says GO).
+    pub(super) w4a8: Option<([Func<'m>; 3], [Option<usize>; 4])>,
     /// SMs of the GPU (the GEMM tile choice).
     pub(super) sms: usize,
     /// stream.cu: r8/r8q blocks back to GGUF rows.
@@ -911,6 +1034,20 @@ impl<'m> BatchFns<'m> {
                 None
             },
             gemmh_all: std::env::var("AXON_GEMMH").as_deref() == Ok("1"),
+            w4a8: if module.hopper() && std::env::var("AXON_W4A8").as_deref() == Ok("1") {
+                let fs = [
+                    module.function("w4a8_q4_k_gu")?,
+                    module.function("w4a8_q4_k")?,
+                    module.function("w4a8_q6")?,
+                ];
+                fs[0].set_max_shared(W4A8_SMEM_GU)?;
+                fs[1].set_max_shared(W4A8_SMEM_Q4)?;
+                fs[2].set_max_shared(W4A8_SMEM_Q6)?;
+                let t = w4a8_thresholds(std::env::var("AXON_W4A8_T").ok().as_deref());
+                Some((fs, t))
+            } else {
+                None
+            },
             q6k_to_i8: if module.mma() {
                 Some(module.function("q6k_to_i8")?)
             } else {
@@ -1061,6 +1198,82 @@ impl<'g> CudaQwen2<'g> {
     /// room for nb rows of ostride floats (mt.rows <= ostride); bias is null
     /// or has mt.rows floats (mode 2: nb rows of ostride floats); the matrix
     /// is whole in `wts`.
+    /// A plain W4A8 product (w4a8_q4_k, or w4a8_q6 by the Q6K8 copy at
+    /// `c8` in `w8`), bgemm's arguments: persistent, min(tiles, SMs) CTAs.
+    ///
+    /// # Safety
+    /// bgemm's contract; for Down6 the copy is whole in `w8` at c8.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn launch_w4a8(
+        &self,
+        fs: &[Func<'g>; 3],
+        p: W8Prod,
+        wts: &DevBuf,
+        mt: &Mat,
+        c8: Option<usize>,
+        act: Arg,
+        astride: usize,
+        nb: usize,
+        bias: Arg,
+        mode: i32,
+        out: Arg,
+        ostride: usize,
+    ) -> Result<(), String> {
+        let q6 = p == W8Prod::Down6;
+        let (f, smem, base, rb, hit) = if q6 {
+            let c8 = c8.expect("Down6: the Q6K8 copy");
+            (
+                &fs[2],
+                W4A8_SMEM_Q6,
+                dev_ptr(self.w8.arg_at(c8)),
+                mt.cols / 256 * Q6K8_BYTES,
+                2,
+            )
+        } else {
+            (&fs[1], W4A8_SMEM_Q4, dev_ptr(wts.arg_at(mt.off)), mt.rb, 1)
+        };
+        // Raw rows in boxes of 144 B x 128 (a Q4_K block; half a Q6K8 block),
+        // the activations' Q8_K values in 128 x 64 SW128 boxes.
+        let mw = self.gpu.tensor_map_2d(
+            base,
+            (rb as u64, mt.rows as u64),
+            rb as u64,
+            (144, 128),
+            false,
+        )?;
+        let mx = self.gpu.tensor_map_2d(
+            dev_ptr(act),
+            (mt.cols as u64, nb as u64),
+            astride as u64,
+            (128, 64),
+            true,
+        )?;
+        let grid = (mt.rows.div_ceil(128) * nb.div_ceil(64)).min(self.bf.sms);
+        let mut args = vec![
+            Arg::Blob128(mw),
+            Arg::Blob128(mx),
+            act,
+            Arg::U64(astride as u64),
+            Arg::I32(mt.rows as i32),
+            Arg::I32(mt.cols as i32),
+            Arg::I32(nb as i32),
+            bias,
+            Arg::I32(mode),
+            out,
+            Arg::U64(ostride as u64),
+        ];
+        if q6 {
+            args.push(Arg::Ptr(base));
+            args.push(Arg::U64(rb as u64));
+        }
+        w4a8_hit(hit);
+        // SAFETY: w4a8.cu's signatures; the caller's buffers.
+        unsafe {
+            self.gpu
+                .launch(f, (grid as u32, 1, 1), (384, 1, 1), smem as u32, &args)
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(super) unsafe fn bgemm(
         &self,
@@ -1101,6 +1314,31 @@ impl<'g> CudaQwen2<'g> {
             out,
             Arg::U64(ostride as u64),
         ];
+        // W4A8 (w4a8.cu) on a feed pass: ahead of gemmh2, the same bits.
+        if let Some((fs, t)) = &bf.w4a8 {
+            let feed = self.w4a8_feed.load(std::sync::atomic::Ordering::Relaxed);
+            let c8 = q8c.map(|(c8, _)| c8);
+            let route = w4a8_route(
+                true,
+                feed,
+                t,
+                false,
+                mt.qt,
+                mt.rows,
+                mt.cols,
+                self.ffn,
+                nb,
+                c8.is_some(),
+            );
+            if let Some(p) = route {
+                // SAFETY: the caller's contract (bgemm's).
+                return unsafe {
+                    self.launch_w4a8(
+                        fs, p, wts, mt, c8, act, astride, nb, bias, mode, out, ostride,
+                    )
+                };
+            }
+        }
         let plain = bf.gemmh_all || gemmh_plain(mt.rows, nb, bf.sms);
         if let (Some(h), Q4_K, true, true) = (&bf.gemmh, mt.qt, !small, plain) {
             // TMA descriptors of the weights (rows of rb bytes, boxes of
@@ -2230,7 +2468,14 @@ impl<'g> CudaQwen2<'g> {
                 self.bgemm(wts, gate, b.act.arg(), ast, nb, null, 0, b.gate.arg(), ffn)?;
             }
             on("gate")?;
-            if let (Some(h), true) = (&bf.gemmh, fuse) {
+            // W4A8 (w4a8_q4_k_gu) on a feed pass, else gemmh2_q4_k_gu: the same
+            // maps and arguments, the same bits.
+            let w8gu = fuse
+                && bf.w4a8.as_ref().is_some_and(|(_, t)| {
+                    let feed = self.w4a8_feed.load(std::sync::atomic::Ordering::Relaxed);
+                    w4a8_route(true, feed, t, true, Q4_K, ffn, dim, ffn, nb, false).is_some()
+                });
+            if fuse && (w8gu || bf.gemmh.is_some()) {
                 // gemmh2_q4_k_gu: as gemm2s_q4_k_gu below, on wgmma.
                 let rb = gate.rb as u64;
                 let map = |off: usize| {
@@ -2250,24 +2495,39 @@ impl<'g> CudaQwen2<'g> {
                     (128, 64),
                     true,
                 )?;
-                g.launch(
-                    &h[1],
-                    (nb.div_ceil(64) as u32, ffn.div_ceil(64) as u32, 1),
-                    (256, 1, 1),
-                    GEMMH2_SMEM as u32,
-                    &[
-                        Arg::Blob128(mg),
-                        Arg::Blob128(mu),
-                        Arg::Blob128(mx),
-                        b.act.arg(),
-                        Arg::U64(ast as u64),
-                        Arg::I32(ffn as i32),
-                        Arg::I32(dim as i32),
-                        Arg::I32(nb as i32),
-                        b.up.arg(),
-                        Arg::U64(ffn as u64),
-                    ],
-                )?;
+                let args = &[
+                    Arg::Blob128(mg),
+                    Arg::Blob128(mu),
+                    Arg::Blob128(mx),
+                    b.act.arg(),
+                    Arg::U64(ast as u64),
+                    Arg::I32(ffn as i32),
+                    Arg::I32(dim as i32),
+                    Arg::I32(nb as i32),
+                    b.up.arg(),
+                    Arg::U64(ffn as u64),
+                ];
+                if w8gu {
+                    let (fs, _) = bf.w4a8.as_ref().expect("w8gu: the W4A8 functions");
+                    w4a8_hit(0);
+                    let grid = (ffn.div_ceil(64) * nb.div_ceil(64)).min(bf.sms);
+                    g.launch(
+                        &fs[0],
+                        (grid as u32, 1, 1),
+                        (384, 1, 1),
+                        W4A8_SMEM_GU as u32,
+                        args,
+                    )?;
+                } else {
+                    let h = bf.gemmh.as_ref().expect("gemmh2: an sm_90a module");
+                    g.launch(
+                        &h[1],
+                        (nb.div_ceil(64) as u32, ffn.div_ceil(64) as u32, 1),
+                        (256, 1, 1),
+                        GEMMH2_SMEM as u32,
+                        args,
+                    )?;
+                }
                 on("gate_up")?;
                 g.launch(
                     &bf.quantize,
@@ -2591,6 +2851,14 @@ impl<'g> CudaQwen2<'g> {
         v
     }
 
+    /// Marks the net's passes as feed passes until the guard drops
+    /// (`w4a8_route`: only feed passes take W4A8).
+    pub(super) fn w4a8_feed_pass(&self) -> W8Feed<'_> {
+        self.w4a8_feed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        W8Feed(&self.w4a8_feed)
+    }
+
     /// `feed_batch`: passes of up to the cache's batch max (`prompt_passes`),
     /// then a wait (so a device fault surfaces here, as with `feed`).
     pub(super) fn feed_tokens(
@@ -2599,6 +2867,7 @@ impl<'g> CudaQwen2<'g> {
         input: BatchIn,
         start: usize,
     ) -> Result<(), String> {
+        let _feed = self.w4a8_feed_pass();
         for r in self.prompt_passes(c, input.len(self.dim), start) {
             let ch = input.range(r.clone(), self.dim);
             self.pass(c, ch, start + r.start, false, &mut |_| Ok(()))?;
@@ -2615,6 +2884,7 @@ impl<'g> CudaQwen2<'g> {
         start: usize,
     ) -> Result<Vec<f32>, String> {
         let ps = self.prompt_passes(c, tokens.len(), start);
+        let _feed = self.w4a8_feed_pass();
         for (i, r) in ps.iter().enumerate() {
             let head = if i + 1 == ps.len() {
                 Head::Last

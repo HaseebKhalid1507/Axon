@@ -368,6 +368,7 @@ impl<'g> CudaQwen2<'g> {
         p.debug_tab();
         let max = p.pass_max();
         let base = p.base(slot);
+        let _feed = self.w4a8_feed_pass();
         for r in passes(tokens.len(), max) {
             let input = BatchIn::Tokens(&tokens[r.clone()]);
             let place = Place::Seq {

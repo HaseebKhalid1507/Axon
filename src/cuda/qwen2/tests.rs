@@ -10099,3 +10099,466 @@ fn gpu_concurrency_matrix_hunt() {
     }
     eprintln!("HUNT TABLE\n{}", table.join("\n"));
 }
+
+// ---------------------------------------------------------------------------
+// W4A8 (w4a8.cu; docs/design/w4a8-prefill.md): the exact W4A8 prefill GEMMs
+// on sm_90a, routed by batch::w4a8_route (AXON_W4A8=1, feed passes, nb >= T).
+
+/// w4a8.cu's shared-memory defines and batch.rs's sizes agree, and fit the
+/// 227 KiB opt-in limit (no GPU).
+#[test]
+fn w4a8_layout_pinned() {
+    let src = include_str!("../w4a8.cu");
+    for k in [
+        "#define W8_ST 4",
+        "#define W8_ACT (64 * 256)",
+        "#define W8_BS (64 * 128)",
+        "#define W8_RAW (128 * 144)",
+        "#define W8_DIG (128 * 24)",
+        "#define W8_META 512",
+        "#define W8_XCH (32 * 128 * 4)",
+        "#define W8_Q6K8 288",
+        "#define W4A8_SMEM(QK, GU) (W8_OFF_BAR(QK, GU) + 2 * W8_ST * 8 + 1024)",
+    ] {
+        assert!(src.contains(k), "w4a8.cu and tests.rs disagree: {k}");
+    }
+    let (act, bs, raw, dig, meta) = (64 * 256, 64 * 128, 128 * 144, 128 * 24, 512);
+    let q4 = 4 * (act + bs + raw) + 4 * meta + 64 + 1024;
+    let q6 = 4 * (act + 2 * raw + dig) + 4 * meta + 64 + 1024;
+    assert_eq!(batch::W4A8_SMEM_Q4, q4);
+    assert_eq!(batch::W4A8_SMEM_GU, q4 + 32 * 128 * 4);
+    assert_eq!(batch::W4A8_SMEM_Q6, q6);
+    // SW128 activation boxes and wgmma descriptors: 1024-aligned stages.
+    assert!((act + bs + raw) % 1024 == 0 && (act + 2 * raw + dig) % 1024 == 0);
+    for s in [
+        batch::W4A8_SMEM_Q4,
+        batch::W4A8_SMEM_GU,
+        batch::W4A8_SMEM_Q6,
+    ] {
+        assert!(s <= 232448, "{s} > 227 KiB");
+    }
+    assert_eq!(Q6K8_BYTES, 288);
+    // No vector loads through the 4-byte-aligned b32 pointer.
+    assert!(!src.contains("(const int4*)b32") && !src.contains("(const int2*)b32"));
+}
+
+/// batch::w4a8_route: feed passes only, the row floor, the per-product
+/// thresholds (None: not routed), the Q6 copy, the gemvm floor (no GPU).
+#[test]
+fn w4a8_routing() {
+    use batch::{W8Prod, w4a8_route, w4a8_thresholds};
+    let t = [Some(128), Some(192), None, Some(128)];
+    let (dim, ffn) = (3584, 18944);
+    let r = |on, feed, gu, qt, rows, cols, nb, c8| {
+        w4a8_route(on, feed, &t, gu, qt, rows, cols, ffn, nb, c8)
+    };
+    // gate + up, q / wo, down Q4_K at and above their thresholds.
+    assert_eq!(
+        r(true, true, true, Q4_K, ffn, dim, 128, false),
+        Some(W8Prod::GateUp)
+    );
+    assert_eq!(
+        r(true, true, false, Q4_K, dim, dim, 128, false),
+        Some(W8Prod::QWo)
+    );
+    assert_eq!(
+        r(true, true, false, Q4_K, dim, ffn, 192, false),
+        Some(W8Prod::Down4)
+    );
+    assert_eq!(r(true, true, false, Q4_K, dim, ffn, 191, false), None);
+    assert_eq!(r(true, true, true, Q4_K, ffn, dim, 127, false), None);
+    // Decode steps and verify passes (not feed) never, whatever nb (M2).
+    for nb in [33, 128, 1024] {
+        assert_eq!(r(true, false, true, Q4_K, ffn, dim, nb, false), None);
+        assert_eq!(r(true, false, false, Q4_K, dim, dim, nb, false), None);
+    }
+    // Off, too few rows (k / v), Q6 without its copy, Q6 at T none (M11).
+    assert_eq!(r(false, true, true, Q4_K, ffn, dim, 512, false), None);
+    assert_eq!(r(true, true, false, Q4_K, 512, dim, 512, false), None);
+    assert_eq!(r(true, true, false, Q6_K, dim, ffn, 512, false), None);
+    assert_eq!(r(true, true, false, Q6_K, dim, ffn, 512, true), None);
+    let t6 = [Some(128); 4];
+    assert_eq!(
+        w4a8_route(true, true, &t6, false, Q6_K, dim, ffn, ffn, 512, true),
+        Some(W8Prod::Down6)
+    );
+    // Other types never.
+    assert_eq!(
+        w4a8_route(true, true, &t6, false, Q8_0, dim, ffn, ffn, 512, true),
+        None
+    );
+    // AXON_W4A8_T: clamped above the gemvm limit; unset or junk: the defaults.
+    assert_eq!(w4a8_thresholds(Some("33")), [Some(33); 4]);
+    assert_eq!(w4a8_thresholds(Some("8")), [Some(batch::W4A8_T_MIN); 4]);
+    assert_eq!(w4a8_thresholds(None), batch::W4A8_T_DEFAULT);
+    assert_eq!(w4a8_thresholds(Some("x")), batch::W4A8_T_DEFAULT);
+    // A threshold below the floor still needs nb > VM_MAX.
+    let t0 = [Some(1); 4];
+    assert_eq!(
+        w4a8_route(true, true, &t0, true, Q4_K, ffn, dim, ffn, 32, false),
+        None
+    );
+}
+
+/// KERNELS compiles for sm_90a through NVRTC with the w4a8 kernels in the
+/// cubin, no wgmma serialization notes and no register spills (ptxas -v,
+/// printed), and to no w4a8 kernels for plain sm_90 (no GPU needed). The
+/// source gets a unique symbol: NVRTC returns an empty log for a source it
+/// compiled before, which would make the spill check vacuous.
+#[test]
+fn nvrtc_w4a8_compiles_sm90a() {
+    let n = match crate::cuda::ffi::nvrtc() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("skipping: {e}");
+            return;
+        }
+    };
+    if !crate::cuda::ffi::nvrtc_archs(n).unwrap().contains(&90)
+        || crate::cuda::ffi::nvrtc_version(n).unwrap().0 < 12
+    {
+        eprintln!("skipping: NVRTC has no sm_90a");
+        return;
+    }
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let src = format!(
+        "{}\n__device__ int w8_ptxas_check_{nonce};\n",
+        crate::cuda::KERNELS
+    );
+    let names = ["w4a8_q4_k", "w4a8_q4_k_gu", "w4a8_q6"];
+    for t in [
+        crate::cuda::Target::Cubin90a,
+        crate::cuda::Target::Cubin(90),
+    ] {
+        let mut opts = vec![format!("--gpu-architecture={t}")];
+        opts.extend(crate::cuda::KERNEL_OPTS.iter().map(|s| s.to_string()));
+        opts.push("--ptxas-options=-v".into());
+        let (image, log) = crate::cuda::compile_logged(n, &src, &opts, t)
+            .unwrap_or_else(|e| panic!("KERNELS {t}: {e}"));
+        let mut cur = String::new();
+        let mut seen = std::collections::HashSet::new();
+        for l in log.lines() {
+            if let Some(a) = l.find("entry function '") {
+                cur = l[a + 16..].split('\'').next().unwrap_or("").to_string();
+            }
+            if cur.starts_with("w4a8_") && (l.contains("spill") || l.contains("registers")) {
+                eprintln!("W4A8 PTXAS {cur}: {}", l.trim());
+                if l.contains("spill") {
+                    seen.insert(cur.clone());
+                    assert!(
+                        l.contains("0 bytes spill stores") && l.contains("0 bytes spill loads"),
+                        "{cur} spills: {l}"
+                    );
+                }
+            }
+            if cur.starts_with("w4a8_") {
+                assert!(
+                    !l.contains("wgmma") && !l.contains("serialized") && !l.contains("C751"),
+                    "{cur}: wgmma notes: {l}"
+                );
+            }
+        }
+        for k in names {
+            let has = image
+                .windows(k.len() + 1)
+                .any(|w| &w[..k.len()] == k.as_bytes() && w[k.len()] == 0);
+            assert_eq!(has, t == crate::cuda::Target::Cubin90a, "{t} {k}");
+            if t == crate::cuda::Target::Cubin90a {
+                assert!(seen.contains(k), "{k}: no ptxas spill line in the log");
+            }
+        }
+    }
+}
+
+/// Launch a w4a8 entry point (w4a8_q4_k / w4a8_q6 / w4a8_q4_k_gu) on `w`
+/// (Q4_K rows, or the Q6K8 copy for w4a8_q6; gu: gate `w`, up `w2`), nb
+/// tokens of act (stride st), bias / mode / out (stride rows) as gemm2's.
+///
+/// # Safety
+/// The buffers hold what the kernel reads and writes (rows x nb outputs).
+#[allow(clippy::too_many_arguments)]
+unsafe fn launch_w4a8_k(
+    g: &Gpu,
+    km: &Module,
+    kernel: &str,
+    w: &DevBuf,
+    w2: Option<&DevBuf>,
+    rows: usize,
+    cols: usize,
+    act: &DevBuf,
+    st: usize,
+    nb: usize,
+    bias: Arg,
+    mode: i32,
+    out: &DevBuf,
+) {
+    let sms = g.info().unwrap().sms as usize;
+    let q6 = kernel == "w4a8_q6";
+    let gu = kernel == "w4a8_q4_k_gu";
+    let rb = (cols / 256 * if q6 { Q6K8_BYTES } else { 144 }) as u64;
+    let box_rows = if gu { 64 } else { 128 };
+    let map = |b: &DevBuf| {
+        g.tensor_map_2d(dev_addr(b), (rb, rows as u64), rb, (144, box_rows), false)
+            .unwrap()
+    };
+    let mx = g
+        .tensor_map_2d(
+            dev_addr(act),
+            (cols as u64, nb as u64),
+            st as u64,
+            (128, 64),
+            true,
+        )
+        .unwrap();
+    let (smem, rt) = match kernel {
+        "w4a8_q4_k" => (batch::W4A8_SMEM_Q4, 128),
+        "w4a8_q6" => (batch::W4A8_SMEM_Q6, 128),
+        _ => (batch::W4A8_SMEM_GU, 64),
+    };
+    let f = km.function(kernel).unwrap();
+    f.set_max_shared(smem).unwrap();
+    let grid = (rows.div_ceil(rt) * nb.div_ceil(64)).min(sms);
+    let mut args = vec![Arg::Blob128(map(w))];
+    if gu {
+        args.push(Arg::Blob128(map(w2.unwrap())));
+    }
+    args.extend([
+        Arg::Blob128(mx),
+        act.arg(),
+        Arg::U64(st as u64),
+        Arg::I32(rows as i32),
+        Arg::I32(cols as i32),
+        Arg::I32(nb as i32),
+    ]);
+    if !gu {
+        args.extend([bias, Arg::I32(mode)]);
+    }
+    args.extend([out.arg(), Arg::U64(rows as u64)]);
+    if q6 {
+        args.extend([w.arg(), Arg::U64(rb)]);
+    }
+    // SAFETY: w4a8.cu's signatures; the caller's buffers.
+    unsafe {
+        g.launch(&f, (grid as u32, 1, 1), (384, 1, 1), smem as u32, &args)
+            .unwrap();
+    }
+}
+
+/// The output buffer of a product with epilogue `epi` (init: the residual
+/// rows for every token) and its bias / mode arguments.
+fn w4a8_out<'g>(
+    g: &'g Gpu,
+    epi: &Epi,
+    rows: usize,
+    nb: usize,
+) -> (DevBuf<'g>, Option<DevBuf<'g>>, i32) {
+    let out = match &epi.init {
+        Some(v) => g.upload(&v.repeat(nb)).unwrap(),
+        None => {
+            let o = g.alloc(rows * nb * 4).unwrap();
+            o.zero().unwrap();
+            o
+        }
+    };
+    let bias = epi.bias.as_ref().map(|b| g.upload(b).unwrap());
+    (out, bias, epi.init.is_some() as i32)
+}
+
+/// Every w4a8 entry point == gemv_ref (and == today's kernel: gemmh2_q4_k,
+/// gemm2s_q6k8, gemmh2_q4_k_gu) bit for bit, on every output: rows off the
+/// tile, 1 to 74 blocks, nb from just over the gemvm limit to several
+/// token tiles, modes 0 / 1 with and without bias (gu: silu(gate) * up).
+/// Hopper (sm_90a) only; skips elsewhere.
+#[test]
+fn gpu_w4a8_matches_reference_bits() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    if !km.hopper() {
+        eprintln!("skipping: needs an sm_90a module (compute capability 9.0)");
+        return;
+    }
+    let mut rng = Rng(0x000a_80a8_2026_1027);
+    let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<u32>>();
+    for (cols, rows) in [
+        (256usize, 333usize),
+        (1536, 129),
+        (3584, 1000),
+        (3584, 3584),
+        (18944, 200),
+    ] {
+        for (i, &nb) in [33usize, 64, 100, 129, 512].iter().enumerate() {
+            let xs: Vec<Vec<f32>> = (0..nb)
+                .map(|i| rng.vec(cols, [1.0f32, 1e-3, 40.0][i % 3]))
+                .collect();
+            let act = quantize_batch(&g, &km, &xs, cols);
+            let st = act_stride_t(cols);
+            let epi = match i % 4 {
+                0 => Epi::default(),
+                1 => Epi {
+                    bias: Some(rng.vec(rows, 3.0)),
+                    init: None,
+                },
+                2 => Epi {
+                    bias: None,
+                    init: Some(rng.vec(rows, 5.0)),
+                },
+                _ => Epi {
+                    bias: Some(rng.vec(rows, 3.0)),
+                    init: Some(rng.vec(rows, 5.0)),
+                },
+            };
+            for qt in [Q4_K, Q6_K] {
+                let wd = synth_matrix(&mut rng, qt, rows, cols);
+                let w = g.upload(&wd).unwrap();
+                let want = gpu_batched(&g, &km, "gemv_ref", qt, &w, rows, cols, &act, nb, &epi);
+                let (wk, kernel, base) = if qt == Q4_K {
+                    (None, "w4a8_q4_k", "gemmh2_q4_k")
+                } else {
+                    (
+                        Some(q6k8_copy(&g, &km, &w, rows, cols)),
+                        "w4a8_q6",
+                        "gemm2s_q6k8",
+                    )
+                };
+                let (out, bias, mode) = w4a8_out(&g, &epi, rows, nb);
+                let ba = bias.as_ref().map_or(Arg::Ptr(0), |b| b.arg());
+                // SAFETY: w (or its copy) rows x cols, act nb tokens, out rows * nb.
+                unsafe {
+                    launch_w4a8_k(
+                        &g,
+                        &km,
+                        kernel,
+                        wk.as_ref().unwrap_or(&w),
+                        None,
+                        rows,
+                        cols,
+                        &act,
+                        st,
+                        nb,
+                        ba,
+                        mode,
+                        &out,
+                    )
+                };
+                g.sync().unwrap();
+                let got: Vec<f32> = out.read().unwrap();
+                let what = format!(
+                    "{kernel} {cols}x{rows} nb {nb} mode {mode} bias {}",
+                    epi.bias.is_some()
+                );
+                assert_eq!(bits(&got), bits(&want), "{what} vs gemv_ref");
+                let today = match &wk {
+                    None => {
+                        let (o, b2, m2) = w4a8_out(&g, &epi, rows, nb);
+                        // SAFETY: as above.
+                        unsafe {
+                            launch_gemmh(
+                                &g,
+                                &km,
+                                base,
+                                &w,
+                                rows,
+                                cols,
+                                &act,
+                                st,
+                                nb,
+                                b2.as_ref().map_or(Arg::Ptr(0), |b| b.arg()),
+                                m2,
+                                &o,
+                            )
+                        };
+                        g.sync().unwrap();
+                        o.read::<f32>().unwrap()
+                    }
+                    Some(c8) => gpu_batched(&g, &km, base, Q6_K, c8, rows, cols, &act, nb, &epi),
+                };
+                assert_eq!(bits(&got), bits(&today), "{what} vs {base}");
+            }
+            // gu: gate and up, silu(gate) * up (gemv_ref mode 2 on gemv_ref's gate).
+            let gd = synth_matrix(&mut rng, Q4_K, rows, cols);
+            let ud = synth_matrix(&mut rng, Q4_K, rows, cols);
+            let (wg, wu) = (g.upload(&gd).unwrap(), g.upload(&ud).unwrap());
+            let reference = |w: &DevBuf, bias: Arg, mode: i32| -> DevBuf {
+                let out = g.alloc(rows * nb * 4).unwrap();
+                out.zero().unwrap();
+                let f = km.function("gemv_ref").unwrap();
+                let common = [
+                    w.arg(),
+                    Arg::U64(quant::row_bytes(Q4_K, cols) as u64),
+                    Arg::I32(rows as i32),
+                    Arg::I32(cols as i32),
+                    act.arg(),
+                    Arg::U64(st as u64),
+                    Arg::I32(nb as i32),
+                    bias,
+                    Arg::I32(mode),
+                    out.arg(),
+                    Arg::U64(rows as u64),
+                ];
+                // SAFETY: gemv_ref's signature; act nb tokens, out rows * nb.
+                unsafe { launch_product(&g, &f, "gemv_ref", Q4_K, rows, nb, &common) };
+                g.sync().unwrap();
+                out
+            };
+            let gate = reference(&wg, Arg::Ptr(0), 0);
+            let want: Vec<f32> = reference(&wu, gate.arg(), 2).read().unwrap();
+            let out = g.alloc(rows * nb * 4).unwrap();
+            // SAFETY: gate / up rows x cols Q4_K, act nb tokens, out rows * nb.
+            unsafe {
+                launch_w4a8_k(
+                    &g,
+                    &km,
+                    "w4a8_q4_k_gu",
+                    &wg,
+                    Some(&wu),
+                    rows,
+                    cols,
+                    &act,
+                    st,
+                    nb,
+                    Arg::Ptr(0),
+                    0,
+                    &out,
+                )
+            };
+            g.sync().unwrap();
+            let got: Vec<f32> = out.read().unwrap();
+            assert_eq!(
+                bits(&got),
+                bits(&want),
+                "w4a8_q4_k_gu {cols}x{rows} nb {nb}"
+            );
+            let o2 = g.alloc(rows * nb * 4).unwrap();
+            // SAFETY: as above.
+            unsafe {
+                launch_gemmh_gu(
+                    &g,
+                    &km,
+                    "gemmh2_q4_k_gu",
+                    &wg,
+                    &wu,
+                    rows,
+                    cols,
+                    &act,
+                    st,
+                    nb,
+                    &o2,
+                )
+            };
+            g.sync().unwrap();
+            assert_eq!(
+                bits(&got),
+                bits(&o2.read::<f32>().unwrap()),
+                "w4a8_q4_k_gu vs gemmh2_q4_k_gu {cols}x{rows} nb {nb}"
+            );
+        }
+        eprintln!(
+            "W4A8 BITS {cols} x {rows}: w4a8_q4_k, w4a8_q6, w4a8_q4_k_gu == gemv_ref and today's kernels"
+        );
+    }
+}
