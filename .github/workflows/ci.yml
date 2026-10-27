@@ -28,6 +28,9 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      # The repo is public: a committed agent trace must be synthetic and numbers-only (scripts/agent_trace.py).
+      - name: committed agent traces are synthetic and numbers-only
+        run: python3 scripts/agent_trace.py --check-committed
       - run: cargo fmt --check
       - run: cargo clippy --all-targets
       # The lib's unit tests and doc tests; also builds the binary and examples/embed.rs.
