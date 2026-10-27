@@ -121,7 +121,7 @@ Not before stage C exists: on main the result is known in shape (Axon has no cro
 
 ### 2.1 Is reuse exact by construction?
 
-Yes, with four conditions, and the code already states the invariant: cache bytes at position t are a function of
+Yes, with three conditions plus a scope note (2), and the code already states the invariant: cache bytes at position t are a function of
 the identity and tokens[0..=t] only (`kvsave.rs` header; [docs/determinism.md](../determinism.md): "the order of every float
 operation depends on the model's shapes and the token's position, never on the batch"; tests
 `gpu_prefill_batchings_bit_identical_*`, `turns_match_fresh_prefill*`, `serve_batched_matches_solo`,
@@ -137,7 +137,7 @@ that. The conditions:
    runs (#64/#71: one digest `393d877192f2e4d7` across plain, paged, shuffled, C=1 and C=8).
 2. **One identity per pool.** Page sharing (§2.2) needs no identity in the key *today*: one `serve` process runs
    one model with one identity, and there is no `PageMap` on a split at all (`pool_with`: "no pool on a split
-   model's GPU half"), nor for a MoE model (serve runs it one request at a time, #127). Identity matters for the
+   model's GPU half"), nor for a MoE model (serve runs it one request at a time: `serve.rs` `moe_parallel_refusal`). Identity matters for the
    **RAM and disk tiers** (§3), which outlive a process: see "Identity" there.
 3. **No write to a shared page.** A slot writes K/V only at positions ≥ its fed length, and admission always
    re-feeds the prompt's last token (`admit`: `reuse = common.min(p.len() - 1)`), which writes position `len − 1`.
@@ -204,7 +204,7 @@ session is 157 pages per extra session; at 8 sessions that is 1,100 pages, 71 % 
   FP8 mode (§5) must add it: `ROOT = H(identity)` (fingerprint + `kvsave::NUMERICS` + `cuda::numerics_tag`), or an
   identity check per file as AXKV sessions do. And there is no image to store where `kv_ident` is `None`: every
   CPU/GPU split's GPU half (`first > 0`; on a split that streams prefill the same prefix has two byte-images,
-  CPU-decoded vs GPU-prefilled, [determinism.md](../determinism.md)) and deepseek2's MLA cache (84e5307). The tiers
+  CPU-decoded vs GPU-prefilled, [determinism.md](../determinism.md)) and deepseek2's MLA cache (the CPU refuses, 84e5307; the CUDA `kv_ident` lacks that check, a gap tracked in #159). The tiers
   are off there until those have images.
 - Restore on admit: longest chain across tiers; disk → RAM → GPU in page order, pipelined with the prefill of the
   remainder (the first chunk waits for the pages below it only).
@@ -225,7 +225,8 @@ session is 157 pages per extra session; at 8 sessions that is 1,100 pages, 71 % 
 | 24 GB card (4090; ~17 GiB of pages ESTIMATED) | 320k ≈ 12 | 600k ≈ 24 | 124k ≈ 5 | ~75k (18.6 GB weights) ≈ 3 |
 | 80 GB H100 (72 GiB of pages) | ≈ 1.35M ESTIMATED (72 GiB / 56 KiB) ≈ 54; the 10-19 showdown ran a 1.05M *configured* pool (128 × 8k slots), not the card's capacity | ≈ 2.5M ≈ 101 | 520k ≈ 20 | 630k ≈ 25 |
 
-Sessions at 25k tokens each, no sharing; with a shared 10k prefix each session costs 15k, ×1.67 the counts
+Sessions at 25k tokens each, no sharing. The Qwen3-30B-A3B column's counts also need 2B to wire the tiers into
+the one-request MoE path (`moe_parallel_refusal`: no slot pool for MoE), not only into the pool; with a shared 10k prefix each session costs 15k, ×1.67 the counts
 (ESTIMATED). The **warm/GB** metric at 7B f16 is 0.73 sessions/GB (q8 1.4; with 10k shared 1.2 / 2.3), which is
 what the stage-A table verifies against the ideal.
 - RAM tier interactions: pinned RAM is taken from what the CPU-expert MoE path and the mmap'd weights need; the

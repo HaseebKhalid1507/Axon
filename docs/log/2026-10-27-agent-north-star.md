@@ -71,3 +71,9 @@
 - **Privacy.** The repo is public. Raw traces never go in the repo; only the scripts and a small synthetic example
   are committed; any shared trace drops its dates and shifts each day to start at t = 0.
 
+
+## Review round 2 (shady 9/10 APPROVE; the lead confirmed the attribution as written)
+- deepseek2: only the CPU refuses a saved-cache image (84e5307); the CUDA `kv_ident` has no MLA check, issue #159.
+- "MoE serves one request at a time" now cites `serve.rs` `moe_parallel_refusal`, not #127.
+- The Qwen3-30B-A3B capacity column needs 2B to wire the tiers into the one-request MoE path too.
+- §2.1: "three conditions plus a scope note (2)", not "four conditions".
