@@ -1,0 +1,29 @@
+{
+ "label": "kvtier-dec1ac4-rel-r3",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1027-190021-8356",
+   "name": "kvtier-slots-rel-t1",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "dec1ac4",
+   "binary": "axon-test-dec1ac4",
+   "started": 1793143110.043745,
+   "ended": 1793143232.8051636,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "c072a61c8e19d7810abc1f22006756d3fe92659bcc41c0d669785365887741e9",
+   "log_bytes": 2795
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-27 19:20:33 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}

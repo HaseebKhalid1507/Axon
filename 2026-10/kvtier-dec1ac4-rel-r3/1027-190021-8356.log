@@ -1,0 +1,33 @@
+[axon-run 19:00:21] submitted 1027-190021-8356 by /home/haseeb/.cache/axon-kvtier: /home/haseeb/.cache/axon-kvtier/axon-test-dec1ac4 cuda::qwen2::slots:: serve::tests::serve_cpu_cache_ram serve::tests::serve_cuda_cache_ram serve::tier:: --test-threads 1
+[axon-run 19:18:32] scope axon-job-1027-190021-8356-1793143112.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 16000 MB): an OOM here kills only this job
+[axon-run 19:18:32] job 1027-190021-8356 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1027-190021-8356-1793143112 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-kvtier/axon-test-dec1ac4 cuda::qwen2::slots:: serve::tests::serve_cpu_cache_ram serve::tests::serve_cuda_cache_ram serve::tier:: --test-threads 1
+axon-q 19:18:32 start slot 16-23: /home/haseeb/.cache/axon-kvtier/axon-test-dec1ac4 cuda::qwen2::slots:: serve::tests::serve_cpu_cache_ram serve::tests::serve_cuda_cache_ram serve::tier:: --test-threads 1
+
+running 21 tests
+test cuda::qwen2::slots::tests::bare_view_borrows_the_pool_scratch ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+test cuda::qwen2::slots::tests::graph_oom_falls_back_to_kernels ... ok
+test cuda::qwen2::slots::tests::graph_oom_fill_vram ... ignored
+test cuda::qwen2::slots::tests::paged_kvsave_round_trip ... ok
+test cuda::qwen2::slots::tests::paged_release_refeed_four_families ... ok
+test cuda::qwen2::slots::tests::paged_views_refused ... ok
+test cuda::qwen2::slots::tests::pool_feed_cost ... ignored
+test cuda::qwen2::slots::tests::pool_graph_bytes ... ignored
+test cuda::qwen2::slots::tests::pool_pages_restore_exactly ... ok
+test cuda::qwen2::slots::tests::pool_rows_of_one_slot_match_verify ... ok
+test cuda::qwen2::slots::tests::pool_step_cost ... ignored
+test cuda::qwen2::slots::tests::pool_steps_match_solo_in_any_order ... ok
+test cuda::qwen2::slots::tests::pool_steps_past_gemvm16_match_solo ... ok
+test cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo ... ok
+test cuda::qwen2::slots::tests::slot_view_matches_a_cache ... ok
+test serve::tests::serve_cpu_cache_ram ... ok
+test serve::tests::serve_cuda_cache_ram ... ok
+test serve::tier::tests::cache_ram_parses ... ok
+test serve::tier::tests::cache_ram_sizes ... ok
+test serve::tier::tests::keys_hold_the_leaf ... ok
+test serve::tier::tests::pages_read_in_order ... ok
+
+test result: ok. 17 passed; 0 failed; 4 ignored; 0 measured; 760 filtered out; finished in 118.81s
+
+[axon-run 19:20:31] exit 0 after 119.0s (host bella)
+[axon-run 19:20:32] EXPECT ok: output matches /test result: ok/
