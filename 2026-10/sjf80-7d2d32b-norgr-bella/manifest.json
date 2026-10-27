@@ -1,0 +1,29 @@
+{
+ "label": "sjf80-7d2d32b-norgr-bella",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1027-133651-9b53",
+   "name": "sjf80-7d2d32b-norgr-bella",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "7d2d32b",
+   "binary": "axon-test-7d2d32b",
+   "started": 1793137903.9362667,
+   "ended": 1793138380.9333715,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "6f2576632d6bd1391a276ec5e7c9b8f032199424592a35431437ee00b889e658",
+   "log_bytes": 12793
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-27 17:59:42 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
