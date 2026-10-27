@@ -1,8 +1,18 @@
 # attn_blk_nb: batched decode attention for the serve pool (nb ≥ 32), exact (T1, PR #151)
 
 **Verdict: KILL RULE MISSED. The 4090 clause failed (×1.23 against ≥ ×1.5), and so did all three H100 clauses
-(below).** The kernel is exact (all bit gates pass) and has no measured regression. PR #151 stays a draft until the
-lead decides.
+(below). Ruling (Fable, read-only referee, relayed by the lead): MERGE, default on, with the miss recorded.** The
+principle: "a kill rule bounds spend; the contract bounds merge". The kernel keeps the bit-identity contract (every
+bit gate passes) and has no measured regression.
+
+Recorded as the ruling asks:
+1. The 4090 clause (×1.23) missed its "else stop", and the H100 session was booked anyway. That was the lead's
+   override of the pick's "don't book an H100 before a 4090/bella proxy has passed its kill rule", and it cost
+   ~$0.93.
+2. The mix C = 128 "+10 %" bar was a spec error: the mix is prefill-bound (ITL p50 ≈ 57 ms vs a ~15 ms decode step,
+   finding 2 below), so a decode-attention change couldn't move it by 10 %. Future rules should gate on the term
+   the change actually affects.
+3. No T1 follow-ups (narrow-product tiles, q8 re-measure, the `nb_split` fix from finding 1) without a fresh pick.
 
 ## What changed
 
