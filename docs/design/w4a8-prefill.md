@@ -231,6 +231,31 @@ mode 0/1 + bias, Q6 under the §3.3 choice) on the H100, in a probe-style bench 
   - P2 runs once. A second failure for any reason is a KILL.
   - A P1 that has a valid table but misses on speed gets no P2.
 
+**Checkpoint 1, P1 void and one rerun (lead's ruling, 10-27, after P1's data; pre-registered before the rerun is
+submitted).**
+- **P1 (job 1027-151227-e203) is VOID, not a KILL.** Its W4A8 timings didn't measure what the rule names ("measured
+  directly on the production kernels"):
+  - the W4A8 arm's test launcher (`launch_w4a8_k`, tests.rs @ 441ebee) called `g.info()` inside every timed launch;
+    the baseline arm's launchers didn't;
+  - in the bench's memory context that call costs **0.89 ms median** (p90 0.99, max 4.0) on bella;
+  - routed through the same per-launch call, a baseline kernel goes from 0.036 to 0.405 ms at nb 64, flat and jittery
+    like P1's W4A8 arm (job 1027-154351-fd3a, `cuda_w4a8_harness_infocost`).
+  - Bits were clean and stand.
+- **One rerun is authorized** (P1R), on these terms:
+  - **Kernel code byte-identical to P1:** `src/cuda/*.cu` and the KERNELS list unchanged since 441ebee. The job prints
+    the KERNELS source sha256 and the loaded cubin's sha256; the kit's cubins must have P1's SHA256SUMS entries. Only
+    the test harness changes.
+  - **Same cells, same 7 rounds, same 1.40 bar at nb 384 / 512, same bits checks.** The session stage only. P1's serve
+    cells ran main's binary through other launchers, so its `PASSHIST` / `PASSMULTI` / `FEEDSHARE` lines are reused
+    for the post-P1 re-run.
+  - **Validity check first, printed before the verdict:**
+    - every W4A8 cell's round-to-round spread (max / min − 1 over the 7 rounds) must be < 5 %;
+    - W4A8 time must scale with work: t(gate_up, nb 1024) / t(q/wo, nb 64) ≥ 10.
+    - If either fails, P1R is VOID again and the line stops, with no third run.
+  - **Whatever S comes out is final.** PASS proceeds to the post-P1 re-run. A miss is a KILL, with no further rerun
+    for any reason (M12's bits rule still applies to a bits failure; nothing else).
+  - **Cap $2:** `--hours 0.5`. Booked only after a bella rehearsal of the fixed harness passes.
+
 **Checkpoint 2: end to end, the build's GO / KILL.** The rule is fixed now, with its ESTIMATE:
 
 - **Setup (pinned now, M4):**
