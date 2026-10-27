@@ -1,0 +1,384 @@
+[axon-run 01:46:29] submitted 1027-014629-7829 by /home/haseeb/.cache/axon-agent: /home/haseeb/.cache/axon-agent/board.sh f16
+[axon-run 05:03:16] scope axon-job-1027-014629-7829-1793091796.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 14000 MB): an OOM here kills only this job
+[axon-run 05:03:16] job 1027-014629-7829 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1027-014629-7829-1793091796 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q gpu /home/haseeb/.cache/axon-agent/board.sh f16
+cell speed 1.0: {'scale': 0.15, 'clip': 32768, 'window_s': 600.0, 'speed': 1.0, 'seed': 1234, 'trace_start_ms': 688153449, 'n_requests': 174, 'n_sessions': 20, 'n_primes': 7, 'prime_tokens': 133347, 'prompt_p50': 17205}
+cell speed 4.0: {'scale': 0.15, 'clip': 32768, 'window_s': 600.0, 'speed': 4.0, 'seed': 1234, 'trace_start_ms': 688153449, 'n_requests': 174, 'n_sessions': 20, 'n_primes': 7, 'prime_tokens': 133347, 'prompt_p50': 17205}
+start axon kv f16: /home/haseeb/.cache/axon-agent/bin/axon-d8a296c serve /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf --device cuda --port 18601 --ctx 32768 --parallel 16 --kv f16
+[axon-run 05:03:50] FOREIGN_GPU sample max=16% mean=4.5% n=6 (kitty 845823 16%)
+[axon-run 05:04:24] FOREIGN_GPU sample max=8% mean=2.7% n=6
+[axon-run 05:04:58] FOREIGN_GPU sample max=6% mean=1.0% n=6
+[axon-run 05:05:32] FOREIGN_GPU sample max=1% mean=0.3% n=6 (Xorg 330017 1%)
+[axon-run 05:06:06] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:06:39] FOREIGN_GPU sample max=3% mean=0.5% n=6
+[axon-run 05:07:10] FOREIGN_GPU sample max=10% mean=4.2% n=5 (kitty 845823 2%, Xorg 330017 2%)
+[axon-run 05:07:44] FOREIGN_GPU sample max=3% mean=0.5% n=6
+[axon-run 05:08:18] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:08:52] FOREIGN_GPU sample max=1% mean=0.3% n=6
+[axon-run 05:09:26] FOREIGN_GPU sample max=2% mean=0.3% n=6
+[axon-run 05:10:00] FOREIGN_GPU sample max=6% mean=1.0% n=6
+[axon-run 05:10:34] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:11:08] FOREIGN_GPU sample max=3% mean=0.5% n=6
+[axon-run 05:11:42] FOREIGN_GPU sample max=9% mean=1.5% n=6
+[axon-run 05:12:16] FOREIGN_GPU sample max=7% mean=1.2% n=6
+[axon-run 05:12:49] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:13:23] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:13:57] FOREIGN_GPU sample max=0% mean=0.0% n=6
+RUN axon kv f16 speed 1 round 0: requests=174 errors=0 first_error=None wall_s=604.2 prime_s=37.2 ttft_new_p50=4.277 ttft_resume_p50=0.26 ttft_turn_p50=0.118 goodput_tok_s=17.45 itl_p99_ms=121.95 warm_per_gb=2.371 reprefill_share=0.1189 out_tokens_short=0 tainted=True (642 s)
+[axon-run 05:14:31] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:15:05] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:15:39] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:16:13] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:16:47] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:17:21] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:17:55] FOREIGN_GPU sample max=12% mean=2.0% n=6 (Xorg 330017 12%)
+[axon-run 05:18:29] FOREIGN_GPU sample max=14% mean=4.2% n=6 (Xorg 330017 14%)
+[axon-run 05:19:03] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:19:37] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:20:11] FOREIGN_GPU sample max=12% mean=2.0% n=6
+[axon-run 05:20:45] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:21:18] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:21:52] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:22:26] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:23:00] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:23:34] FOREIGN_GPU sample max=0% mean=0.0% n=6
+RUN axon kv f16 speed 4 round 0: requests=174 errors=0 first_error=None wall_s=568.3 prime_s=31.9 ttft_new_p50=29.514 ttft_resume_p50=15.917 ttft_turn_p50=12.464 goodput_tok_s=6.03 itl_p99_ms=139.86 warm_per_gb=0.677 reprefill_share=0.4429 out_tokens_short=0 tainted=False (601 s)
+start llama kv f16: /home/haseeb/Projects/llama.cpp/build-cuda/bin/llama-server -m /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf -ngl 99 -fa on -c 98304 -np 3 -kvu --cache-reuse 256 -ctk f16 -ctv f16 --port 18602 --host 127.0.0.1 --metrics
+[axon-run 05:24:08] FOREIGN_GPU sample max=12% mean=3.8% n=6
+[axon-run 05:24:42] FOREIGN_GPU sample max=9% mean=1.5% n=6
+[axon-run 05:25:16] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:25:50] FOREIGN_GPU sample max=16% mean=3.5% n=6
+[axon-run 05:26:24] FOREIGN_GPU sample max=12% mean=2.0% n=6
+[axon-run 05:26:58] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:27:32] FOREIGN_GPU sample max=4% mean=0.7% n=6 (Xorg 330017 4%)
+[axon-run 05:28:06] FOREIGN_GPU sample max=3% mean=0.7% n=6
+[axon-run 05:28:40] FOREIGN_GPU sample max=13% mean=3.8% n=6 (kitty 944847 6%)
+[axon-run 05:29:14] FOREIGN_GPU sample max=6% mean=1.3% n=6 (Xorg 330017 2%)
+[axon-run 05:29:48] FOREIGN_GPU sample max=1% mean=0.2% n=6
+[axon-run 05:30:22] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:30:56] FOREIGN_GPU sample max=1% mean=0.2% n=6 (Xorg 330017 1%)
+[axon-run 05:31:30] FOREIGN_GPU sample max=4% mean=0.8% n=5
+[axon-run 05:32:04] FOREIGN_GPU sample max=8% mean=1.7% n=6
+[axon-run 05:32:38] FOREIGN_GPU sample max=12% mean=2.0% n=6
+[axon-run 05:33:13] FOREIGN_GPU sample max=7% mean=3.0% n=6
+[axon-run 05:33:47] FOREIGN_GPU sample max=11% mean=4.7% n=6 (Xorg 330017 11%)
+[axon-run 05:34:21] FOREIGN_GPU sample max=7% mean=1.2% n=6
+[axon-run 05:34:55] FOREIGN_GPU sample max=12% mean=4.2% n=6 (Xorg 330017 12%)
+RUN llama kv f16 speed 1 round 0: requests=174 errors=0 first_error=None wall_s=615.5 prime_s=41.1 ttft_new_p50=5.98 ttft_resume_p50=0.905 ttft_turn_p50=0.749 goodput_tok_s=13.35 itl_p99_ms=611.46 warm_per_gb=0.887 reprefill_share=0.019 out_tokens_short=0 tainted=True (658 s)
+[axon-run 05:35:29] FOREIGN_GPU sample max=19% mean=3.3% n=6
+[axon-run 05:36:03] FOREIGN_GPU sample max=1% mean=0.2% n=6
+[axon-run 05:36:37] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:37:11] FOREIGN_GPU sample max=8% mean=1.5% n=6
+[axon-run 05:37:46] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:38:20] FOREIGN_GPU sample max=33% mean=5.5% n=6
+[axon-run 05:38:54] FOREIGN_GPU sample max=3% mean=0.5% n=6
+[axon-run 05:39:28] FOREIGN_GPU sample max=14% mean=2.3% n=6
+[axon-run 05:40:02] FOREIGN_GPU sample max=3% mean=0.5% n=6
+[axon-run 05:40:36] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:41:10] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:41:44] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:42:18] FOREIGN_GPU sample max=14% mean=3.3% n=6
+[axon-run 05:42:52] FOREIGN_GPU sample max=24% mean=6.2% n=6 (Xorg 330017 12%)
+[axon-run 05:43:26] FOREIGN_GPU sample max=23% mean=4.8% n=6
+[axon-run 05:44:00] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:44:34] FOREIGN_GPU sample max=9% mean=1.5% n=6
+[axon-run 05:45:08] FOREIGN_GPU sample max=14% mean=4.0% n=6
+[axon-run 05:45:42] FOREIGN_GPU sample max=20% mean=3.3% n=6
+[axon-run 05:46:17] FOREIGN_GPU sample max=9% mean=1.5% n=6 (kitty 944847 9%)
+[axon-run 05:46:51] FOREIGN_GPU sample max=14% mean=4.3% n=6 (Xorg 330017 10%)
+[axon-run 05:47:25] FOREIGN_GPU sample max=14% mean=2.3% n=6
+[axon-run 05:47:59] FOREIGN_GPU sample max=28% mean=11.7% n=6 (Xorg 330017 19%)
+[axon-run 05:48:33] FOREIGN_GPU sample max=16% mean=6.0% n=6 (Xorg 330017 16%)
+[axon-run 05:49:07] FOREIGN_GPU sample max=33% mean=5.5% n=6
+[axon-run 05:49:41] FOREIGN_GPU sample max=13% mean=2.7% n=6 (Xorg 330017 13%)
+[axon-run 05:50:15] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:50:49] FOREIGN_GPU sample max=14% mean=3.8% n=6 (Xorg 330017 14%)
+[axon-run 05:51:23] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:51:57] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:52:31] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:53:05] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:53:39] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:54:13] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:54:47] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:55:21] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 05:55:55] FOREIGN_GPU sample max=2% mean=0.3% n=6
+[axon-run 05:56:29] FOREIGN_GPU sample max=1% mean=0.2% n=6
+[axon-run 05:57:04] FOREIGN_GPU sample max=1% mean=0.2% n=6
+[axon-run 05:57:38] FOREIGN_GPU sample max=3% mean=0.5% n=6
+[axon-run 05:58:12] FOREIGN_GPU sample max=2% mean=0.7% n=6
+[axon-run 05:58:46] FOREIGN_GPU sample max=6% mean=3.0% n=6 (Xorg 330017 5%)
+[axon-run 05:59:20] FOREIGN_GPU sample max=12% mean=5.5% n=6 (Xorg 330017 7%)
+[axon-run 05:59:54] FOREIGN_GPU sample max=9% mean=1.5% n=6
+RUN llama kv f16 speed 4 round 0: requests=174 errors=0 first_error=None wall_s=1482.3 prime_s=32.1 ttft_new_p50=45.299 ttft_resume_p50=12.123 ttft_turn_p50=25.496 goodput_tok_s=2.12 itl_p99_ms=2306.13 warm_per_gb=0.177 reprefill_share=0.3448 out_tokens_short=0 tainted=True (1515 s)
+start ollama kv f16: ollama serve
+[axon-run 06:00:28] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:01:02] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:01:36] FOREIGN_GPU sample max=3% mean=1.2% n=6 (Xorg 330017 2%)
+[axon-run 06:02:10] FOREIGN_GPU sample max=3% mean=0.5% n=6 (Xorg 330017 3%)
+[axon-run 06:02:44] FOREIGN_GPU sample max=1% mean=0.2% n=6
+[axon-run 06:03:18] FOREIGN_GPU sample max=4% mean=0.7% n=6 (Xorg 330017 4%)
+[axon-run 06:03:52] FOREIGN_GPU sample max=2% mean=0.3% n=6
+[axon-run 06:04:26] FOREIGN_GPU sample max=25% mean=6.0% n=6 (Xorg 330017 25%)
+[axon-run 06:05:00] FOREIGN_GPU sample max=1% mean=0.2% n=6 (Xorg 330017 1%)
+[axon-run 06:05:34] FOREIGN_GPU sample max=9% mean=2.7% n=6
+[axon-run 06:06:08] FOREIGN_GPU sample max=4% mean=0.8% n=6
+[axon-run 06:06:42] FOREIGN_GPU sample max=8% mean=2.2% n=6
+[axon-run 06:07:16] FOREIGN_GPU sample max=9% mean=4.3% n=6 (Xorg 330017 5%)
+[axon-run 06:07:50] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:08:24] FOREIGN_GPU sample max=1% mean=0.2% n=6
+[axon-run 06:08:59] FOREIGN_GPU sample max=7% mean=1.3% n=6
+[axon-run 06:09:33] FOREIGN_GPU sample max=19% mean=6.7% n=6
+[axon-run 06:10:04] FOREIGN_GPU sample max=36% mean=13.0% n=7 (kitty 845823 7%)
+[axon-run 06:10:38] FOREIGN_GPU sample max=8% mean=2.2% n=6
+[axon-run 06:11:12] FOREIGN_GPU sample max=1% mean=0.2% n=6
+RUN ollama kv f16 speed 1 round 0: requests=174 errors=0 first_error=None wall_s=600.3 prime_s=41.1 ttft_new_p50=4.895 ttft_resume_p50=1.008 ttft_turn_p50=0.458 goodput_tok_s=9.04 itl_p99_ms=235.06 warm_per_gb=1.419 reprefill_share=None out_tokens_short=72 tainted=False (642 s)
+[axon-run 06:11:46] FOREIGN_GPU sample max=4% mean=0.7% n=6
+[axon-run 06:12:21] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:12:55] FOREIGN_GPU sample max=16% mean=3.3% n=6
+[axon-run 06:13:29] FOREIGN_GPU sample max=12% mean=2.0% n=6 (Xorg 330017 12%)
+[axon-run 06:14:03] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:14:37] FOREIGN_GPU sample max=16% mean=2.7% n=6 (Xorg 330017 16%)
+[axon-run 06:15:11] FOREIGN_GPU sample max=13% mean=2.2% n=6
+RUN ollama kv f16 speed 4 round 0: requests=174 errors=0 first_error=None wall_s=222.7 prime_s=38.2 ttft_new_p50=7.806 ttft_resume_p50=15.716 ttft_turn_p50=3.25 goodput_tok_s=5.79 itl_p99_ms=365.96 warm_per_gb=0.355 reprefill_share=None out_tokens_short=69 tainted=False (262 s)
+start axon kv f16: /home/haseeb/.cache/axon-agent/bin/axon-d8a296c serve /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf --device cuda --port 18604 --ctx 32768 --parallel 16 --kv f16
+[axon-run 06:15:45] FOREIGN_GPU sample max=2% mean=0.5% n=6
+[axon-run 06:16:19] FOREIGN_GPU sample max=6% mean=1.0% n=6 (Xorg 330017 6%)
+[axon-run 06:16:53] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:17:27] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:18:01] FOREIGN_GPU sample max=6% mean=1.0% n=6
+[axon-run 06:18:35] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:19:09] FOREIGN_GPU sample max=3% mean=0.5% n=6
+[axon-run 06:19:43] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:20:17] FOREIGN_GPU sample max=1% mean=0.2% n=6
+[axon-run 06:20:51] FOREIGN_GPU sample max=6% mean=1.2% n=6
+[axon-run 06:21:25] FOREIGN_GPU sample max=10% mean=1.8% n=6
+[axon-run 06:21:59] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:22:33] FOREIGN_GPU sample max=4% mean=0.8% n=6
+[axon-run 06:23:07] FOREIGN_GPU sample max=8% mean=1.3% n=6
+[axon-run 06:23:41] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:24:15] FOREIGN_GPU sample max=1% mean=0.2% n=6
+[axon-run 06:24:49] FOREIGN_GPU sample max=12% mean=3.2% n=6
+[axon-run 06:25:23] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:25:58] FOREIGN_GPU sample max=10% mean=2.3% n=6 (Xorg 330017 4%)
+RUN axon kv f16 speed 1 round 1: requests=174 errors=0 first_error=None wall_s=604.0 prime_s=35.3 ttft_new_p50=4.046 ttft_resume_p50=0.281 ttft_turn_p50=0.122 goodput_tok_s=17.38 itl_p99_ms=118.99 warm_per_gb=2.542 reprefill_share=0.1031 out_tokens_short=0 tainted=False (640 s)
+[axon-run 06:26:32] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:27:06] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:27:40] FOREIGN_GPU sample max=16% mean=2.7% n=6
+[axon-run 06:28:14] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:28:48] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:29:22] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:29:55] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:30:30] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:31:04] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:31:37] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:32:12] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:32:45] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:33:19] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:33:53] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:34:27] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:35:02] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:35:36] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:36:09] FOREIGN_GPU sample max=11% mean=1.8% n=6
+[axon-run 06:36:44] FOREIGN_GPU sample max=0% mean=0.0% n=6
+RUN axon kv f16 speed 4 round 1: requests=174 errors=0 first_error=None wall_s=597.0 prime_s=31.7 ttft_new_p50=30.089 ttft_resume_p50=25.128 ttft_turn_p50=17.036 goodput_tok_s=5.49 itl_p99_ms=137.02 warm_per_gb=0.678 reprefill_share=0.4775 out_tokens_short=0 tainted=False (630 s)
+start llama kv f16: /home/haseeb/Projects/llama.cpp/build-cuda/bin/llama-server -m /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf -ngl 99 -fa on -c 98304 -np 3 -kvu --cache-reuse 256 -ctk f16 -ctv f16 --port 18605 --host 127.0.0.1 --metrics
+[axon-run 06:37:17] FOREIGN_GPU sample max=2% mean=0.3% n=6
+[axon-run 06:37:51] FOREIGN_GPU sample max=2% mean=0.3% n=6
+[axon-run 06:38:25] FOREIGN_GPU sample max=8% mean=2.0% n=6 (Xorg 330017 8%)
+[axon-run 06:38:59] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:39:33] FOREIGN_GPU sample max=1% mean=0.2% n=6
+[axon-run 06:40:07] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:40:41] FOREIGN_GPU sample max=1% mean=0.2% n=6
+[axon-run 06:41:15] FOREIGN_GPU sample max=3% mean=0.5% n=6
+[axon-run 06:41:50] FOREIGN_GPU sample max=11% mean=3.0% n=6 (Xorg 330017 11%)
+[axon-run 06:42:24] FOREIGN_GPU sample max=4% mean=0.7% n=6
+[axon-run 06:42:58] FOREIGN_GPU sample max=5% mean=0.8% n=6
+[axon-run 06:43:32] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:44:06] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:44:40] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:45:14] FOREIGN_GPU sample max=16% mean=3.5% n=6 (Xorg 330017 3%)
+[axon-run 06:45:48] FOREIGN_GPU sample max=4% mean=1.2% n=6
+[axon-run 06:46:22] FOREIGN_GPU sample max=4% mean=0.7% n=6
+[axon-run 06:46:56] FOREIGN_GPU sample max=3% mean=1.2% n=6
+[axon-run 06:47:30] FOREIGN_GPU sample max=1% mean=0.2% n=6 (Xorg 330017 1%)
+RUN llama kv f16 speed 1 round 1: requests=174 errors=0 first_error=None wall_s=615.5 prime_s=40.0 ttft_new_p50=5.99 ttft_resume_p50=0.951 ttft_turn_p50=1.068 goodput_tok_s=13.0 itl_p99_ms=632.74 warm_per_gb=0.71 reprefill_share=0.0186 out_tokens_short=0 tainted=False (657 s)
+[axon-run 06:48:04] FOREIGN_GPU sample max=5% mean=1.2% n=6
+[axon-run 06:48:38] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:49:13] FOREIGN_GPU sample max=13% mean=2.2% n=6
+[axon-run 06:49:47] FOREIGN_GPU sample max=2% mean=0.3% n=6
+[axon-run 06:50:21] FOREIGN_GPU sample max=2% mean=0.3% n=6
+[axon-run 06:50:55] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:51:29] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:52:03] FOREIGN_GPU sample max=2% mean=0.3% n=6
+[axon-run 06:52:37] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:53:11] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:53:45] FOREIGN_GPU sample max=2% mean=0.3% n=6
+[axon-run 06:54:17] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:54:51] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:55:25] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:55:59] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:56:34] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:57:07] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:57:41] FOREIGN_GPU sample max=4% mean=0.7% n=6 (Xorg 330017 4%)
+[axon-run 06:58:16] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:58:50] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 06:59:24] FOREIGN_GPU sample max=2% mean=0.3% n=6
+[axon-run 06:59:58] FOREIGN_GPU sample max=10% mean=1.7% n=6
+[axon-run 07:00:32] FOREIGN_GPU sample max=2% mean=0.7% n=6 (Xorg 330017 2%)
+[axon-run 07:01:06] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:01:40] FOREIGN_GPU sample max=2% mean=0.3% n=6 (Xorg 330017 2%)
+[axon-run 07:02:14] FOREIGN_GPU sample max=10% mean=1.7% n=6
+[axon-run 07:02:48] FOREIGN_GPU sample max=11% mean=1.8% n=6
+[axon-run 07:03:22] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:03:56] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:04:30] FOREIGN_GPU sample max=5% mean=0.8% n=6
+[axon-run 07:05:05] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:05:39] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:06:13] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:06:47] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:07:21] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:07:55] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:08:29] FOREIGN_GPU sample max=1% mean=0.2% n=6
+[axon-run 07:09:03] FOREIGN_GPU sample max=2% mean=0.3% n=6
+[axon-run 07:09:37] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:10:11] FOREIGN_GPU sample max=4% mean=0.8% n=6 (Xorg 330017 4%)
+[axon-run 07:10:45] FOREIGN_GPU sample max=4% mean=1.5% n=6 (Xorg 330017 3%)
+[axon-run 07:11:19] FOREIGN_GPU sample max=17% mean=5.7% n=6 (Xorg 330017 4%)
+[axon-run 07:11:53] FOREIGN_GPU sample max=13% mean=2.8% n=6
+RUN llama kv f16 speed 4 round 1: requests=174 errors=0 first_error=None wall_s=1427.4 prime_s=31.4 ttft_new_p50=44.589 ttft_resume_p50=12.121 ttft_turn_p50=25.52 goodput_tok_s=2.18 itl_p99_ms=2271.79 warm_per_gb=0.355 reprefill_share=0.3438 out_tokens_short=0 tainted=False (1460 s)
+start ollama kv f16: ollama serve
+[axon-run 07:12:27] FOREIGN_GPU sample max=35% mean=5.8% n=6
+[axon-run 07:13:01] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:13:35] FOREIGN_GPU sample max=11% mean=5.0% n=6 (Xorg 330017 11%)
+[axon-run 07:14:09] FOREIGN_GPU sample max=24% mean=4.0% n=6
+[axon-run 07:14:43] FOREIGN_GPU sample max=6% mean=1.0% n=6 (Xorg 330017 6%)
+[axon-run 07:15:17] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:15:51] FOREIGN_GPU sample max=2% mean=0.7% n=6
+[axon-run 07:16:25] FOREIGN_GPU sample max=1% mean=0.2% n=6 (Xorg 330017 1%)
+[axon-run 07:16:59] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:17:33] FOREIGN_GPU sample max=6% mean=1.3% n=6
+[axon-run 07:18:07] FOREIGN_GPU sample max=11% mean=2.7% n=6 (Xorg 330017 5%)
+[axon-run 07:18:42] FOREIGN_GPU sample max=3% mean=0.8% n=6 (kitty 845823 2%)
+[axon-run 07:19:16] FOREIGN_GPU sample max=9% mean=3.7% n=6 (Xorg 330017 2%, kitty 845823 1%)
+[axon-run 07:19:50] FOREIGN_GPU sample max=17% mean=4.7% n=6 (Xorg 330017 17%)
+[axon-run 07:20:24] FOREIGN_GPU sample max=16% mean=4.0% n=6 (Xorg 330017 2%, kitty 845823 1%)
+[axon-run 07:20:58] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:21:32] FOREIGN_GPU sample max=9% mean=2.2% n=6
+[axon-run 07:22:06] FOREIGN_GPU sample max=10% mean=2.5% n=6
+[axon-run 07:22:40] FOREIGN_GPU sample max=0% mean=0.0% n=6
+RUN ollama kv f16 speed 1 round 1: requests=174 errors=0 first_error=None wall_s=599.6 prime_s=41.1 ttft_new_p50=4.906 ttft_resume_p50=1.061 ttft_turn_p50=0.42 goodput_tok_s=8.97 itl_p99_ms=228.31 warm_per_gb=1.597 reprefill_share=None out_tokens_short=70 tainted=True (642 s)
+[axon-run 07:23:14] FOREIGN_GPU sample max=2% mean=0.3% n=6
+[axon-run 07:23:48] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:24:23] FOREIGN_GPU sample max=16% mean=5.5% n=6
+[axon-run 07:24:57] FOREIGN_GPU sample max=13% mean=3.5% n=6 (Xorg 330017 8%)
+[axon-run 07:25:31] FOREIGN_GPU sample max=15% mean=3.5% n=6
+[axon-run 07:26:05] FOREIGN_GPU sample max=9% mean=1.8% n=6
+[axon-run 07:26:39] FOREIGN_GPU sample max=8% mean=2.3% n=6 (Xorg 330017 6%)
+[axon-run 07:27:14] FOREIGN_GPU sample max=12% mean=5.3% n=6
+RUN ollama kv f16 speed 4 round 1: requests=174 errors=0 first_error=None wall_s=226.0 prime_s=38.3 ttft_new_p50=8.003 ttft_resume_p50=13.85 ttft_turn_p50=3.606 goodput_tok_s=6.16 itl_p99_ms=351.63 warm_per_gb=0.177 reprefill_share=None out_tokens_short=70 tainted=False (265 s)
+start axon kv f16: /home/haseeb/.cache/axon-agent/bin/axon-d8a296c serve /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf --device cuda --port 18607 --ctx 32768 --parallel 16 --kv f16
+[axon-run 07:27:48] FOREIGN_GPU sample max=4% mean=1.0% n=6
+[axon-run 07:28:22] FOREIGN_GPU sample max=2% mean=0.3% n=6
+[axon-run 07:28:56] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:29:30] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:30:04] FOREIGN_GPU sample max=8% mean=1.5% n=6
+[axon-run 07:30:38] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:31:12] FOREIGN_GPU sample max=11% mean=2.0% n=6
+[axon-run 07:31:46] FOREIGN_GPU sample max=8% mean=1.3% n=6
+[axon-run 07:32:20] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:32:54] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:33:28] FOREIGN_GPU sample max=9% mean=1.7% n=6
+[axon-run 07:34:02] FOREIGN_GPU sample max=10% mean=1.7% n=6
+[axon-run 07:34:36] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:35:10] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:35:44] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:36:18] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:36:52] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:37:26] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:38:00] FOREIGN_GPU sample max=0% mean=0.0% n=6
+RUN axon kv f16 speed 1 round 2: requests=174 errors=0 first_error=None wall_s=603.6 prime_s=35.3 ttft_new_p50=4.125 ttft_resume_p50=0.276 ttft_turn_p50=0.123 goodput_tok_s=17.74 itl_p99_ms=119.34 warm_per_gb=2.54 reprefill_share=0.1031 out_tokens_short=0 tainted=False (640 s)
+[axon-run 07:38:34] FOREIGN_GPU sample max=1% mean=0.2% n=6
+[axon-run 07:39:08] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:39:42] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:40:16] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:40:50] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:41:24] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:41:58] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:42:32] FOREIGN_GPU sample max=12% mean=2.0% n=6
+[axon-run 07:43:06] FOREIGN_GPU sample max=14% mean=2.3% n=6 (kitty 944847 14%)
+[axon-run 07:43:40] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:44:14] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:44:48] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:45:22] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:45:56] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:46:30] FOREIGN_GPU sample max=9% mean=1.5% n=6
+[axon-run 07:47:04] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:47:38] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:48:12] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:48:46] FOREIGN_GPU sample max=0% mean=0.0% n=6
+RUN axon kv f16 speed 4 round 2: requests=174 errors=0 first_error=None wall_s=601.3 prime_s=31.6 ttft_new_p50=30.528 ttft_resume_p50=15.539 ttft_turn_p50=20.488 goodput_tok_s=5.21 itl_p99_ms=137.32 warm_per_gb=0.677 reprefill_share=0.4754 out_tokens_short=0 tainted=False (634 s)
+start llama kv f16: /home/haseeb/Projects/llama.cpp/build-cuda/bin/llama-server -m /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf -ngl 99 -fa on -c 98304 -np 3 -kvu --cache-reuse 256 -ctk f16 -ctv f16 --port 18608 --host 127.0.0.1 --metrics
+[axon-run 07:49:20] FOREIGN_GPU sample max=12% mean=2.0% n=6
+[axon-run 07:49:54] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:50:28] FOREIGN_GPU sample max=7% mean=1.7% n=6
+[axon-run 07:51:02] FOREIGN_GPU sample max=1% mean=0.2% n=6
+[axon-run 07:51:36] FOREIGN_GPU sample max=7% mean=2.0% n=6
+[axon-run 07:52:10] FOREIGN_GPU sample max=4% mean=1.2% n=6 (Xorg 330017 3%)
+[axon-run 07:52:44] FOREIGN_GPU sample max=2% mean=0.3% n=6
+[axon-run 07:53:18] FOREIGN_GPU sample max=7% mean=1.2% n=6
+[axon-run 07:53:52] FOREIGN_GPU sample max=8% mean=1.7% n=6
+[axon-run 07:54:26] FOREIGN_GPU sample max=9% mean=2.0% n=6 (Xorg 330017 9%)
+[axon-run 07:55:00] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 07:55:34] FOREIGN_GPU sample max=6% mean=1.0% n=6
+[axon-run 07:56:08] FOREIGN_GPU sample max=2% mean=0.3% n=6 (Xorg 330017 2%)
+[axon-run 07:56:42] FOREIGN_GPU sample max=2% mean=0.3% n=6 (Xorg 330017 2%)
+[axon-run 07:57:16] FOREIGN_GPU sample max=4% mean=0.8% n=6
+[axon-run 07:57:50] FOREIGN_GPU sample max=15% mean=2.5% n=6
+[axon-run 07:58:24] FOREIGN_GPU sample max=5% mean=1.3% n=6 (Xorg 330017 5%)
+[axon-run 07:58:58] FOREIGN_GPU sample max=8% mean=1.8% n=6
+[axon-run 07:59:32] FOREIGN_GPU sample max=4% mean=1.2% n=6
+RUN llama kv f16 speed 1 round 2: requests=174 errors=0 first_error=None wall_s=610.0 prime_s=40.1 ttft_new_p50=6.104 ttft_resume_p50=1.028 ttft_turn_p50=1.056 goodput_tok_s=12.63 itl_p99_ms=607.06 warm_per_gb=0.887 reprefill_share=0.0194 out_tokens_short=0 tainted=False (651 s)
+[axon-run 08:00:06] FOREIGN_GPU sample max=13% mean=5.2% n=6 (kitty 944847 11%)
+[axon-run 08:00:40] FOREIGN_GPU sample max=6% mean=1.0% n=6
+[axon-run 08:01:14] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 08:01:49] FOREIGN_GPU sample max=3% mean=0.8% n=6
+[axon-run 08:02:23] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 08:02:57] FOREIGN_GPU sample max=1% mean=0.2% n=6
+[axon-run 08:03:31] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 08:04:05] FOREIGN_GPU sample max=2% mean=0.3% n=6
+[axon-run 08:04:39] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 08:05:13] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 08:05:47] FOREIGN_GPU sample max=4% mean=1.2% n=6
+[axon-run 08:06:21] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 08:06:55] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 08:07:29] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 08:08:03] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 08:08:37] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 08:09:11] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 08:09:45] FOREIGN_GPU sample max=4% mean=0.7% n=6
+[axon-run 08:10:19] FOREIGN_GPU sample max=3% mean=0.5% n=6
+[axon-run 08:10:53] FOREIGN_GPU sample max=2% mean=0.3% n=6
+[axon-run 08:11:27] FOREIGN_GPU sample max=28% mean=6.5% n=6
+[axon-run 08:12:01] FOREIGN_GPU sample max=10% mean=1.7% n=6
+[axon-run 08:12:35] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 08:13:09] FOREIGN_GPU sample max=9% mean=1.8% n=6
+[axon-run 08:13:43] FOREIGN_GPU sample max=9% mean=2.0% n=6
+[axon-run 08:14:18] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 08:14:51] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 08:15:26] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 08:16:00] FOREIGN_GPU sample max=4% mean=0.7% n=6
+[axon-run 08:16:34] FOREIGN_GPU sample max=4% mean=0.7% n=6
+[axon-run 08:17:08] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 08:17:42] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 08:18:16] FOREIGN_GPU sample max=36% mean=6.7% n=6 (kitty 845823 24%, Xorg 330017 12%)
+[axon-run 08:18:50] FOREIGN_GPU sample max=13% mean=2.3% n=6
+[axon-run 08:19:24] FOREIGN_GPU sample max=13% mean=4.3% n=6 (kitty 845823 13%)
+[axon-run 08:19:58] FOREIGN_GPU sample max=12% mean=3.3% n=7
+[axon-run 08:20:32] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 08:21:06] FOREIGN_GPU sample max=0% mean=0.0% n=6
+[axon-run 08:21:40] FOREIGN_GPU sample max=4% mean=0.7% n=6
+[axon-run 08:22:14] FOREIGN_GPU sample max=8% mean=2.8% n=6 (Xorg 330017 2%)
+[axon-run 08:22:48] FOREIGN_GPU sample max=3% mean=1.2% n=6 (Xorg 330017 3%)
+[axon-run 08:23:16] MAX DURATION 200 min (--max-min) reached: stopping the job
+[axon-run 08:23:16] signal 15: stopping the job
+[axon-run 08:23:16] exit 143 after 12000.1s (host bella)
+[axon-run 08:23:17] FOREIGN_GPU max=36% mean=1.1% samples=2116 top: kitty 845823 23%, Xorg 330017 13%  TAINTED (mean > 5% or max > 25%): timing numbers not trustworthy, rerun
