@@ -1,0 +1,38 @@
+[axon-run 01:50:41] submitted 1027-015041-3291 by /home/haseeb/.cache/axon-wt-attn-pool: /home/haseeb/.cache/axon-attn-pool/axon-test-f41f2ec cuda::qwen2::tests::cuda_attn_pool_bench --exact --ignored --nocapture
+[axon-run 02:00:01] job 1027-015041-3291 -> pod1 (pod 8tgzcdqdh9vv0j): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 5000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-wt-attn-pool /home/haseeb/.cache/axon-attn-pool/axon-test-f41f2ec cuda::qwen2::tests::cuda_attn_pool_bench --exact --ignored --nocapture
+axon-remote: job 20261027-060006-axon-test-f41f2ec-10676 on pod1 (GPU, 5000 MB)
+[axon-node 06:00:06] GPU EXCLUSIVE taken; job wants 5000 MB; nvidia-smi used/total 396/24564 MB; sharing with nobody (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 06:00:08] run axon-test-f41f2ec (73e7cb5c27ce7ef9c8ac145a) as /home/haseeb/.cache/axon-wt-attn-pool on c6b0dea89b70, AXON_THREADS=8 RUST_TEST_THREADS=4; free 23688 MB of 24564 (used 396); GPU processes pid:MB none
+
+running 1 test
+testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+POOL bench NVIDIA GeForce RTX 4090 (128 SMs), 28/4x128
+POOL kv f16 depth 600 nb 33 launches 6 attn 32.8 (30.7) cmb 11.3 (10.2) both 42.0 (39.9) us/layer KV 967 GB/s | nb S 1 36.8 (32.5) us KV 1103 GB/s speedup 1.14x
+POOL kv f16 depth 600 nb 40 launches 6 attn 37.9 (35.8) cmb 17.4 (16.4) both 48.1 (47.1) us/layer KV 1023 GB/s | nb S 1 38.9 (37.9) us KV 1265 GB/s speedup 1.24x
+POOL kv f16 depth 600 nb 48 launches 6 attn 39.9 (37.9) cmb 14.3 (12.3) both 49.2 (49.2) us/layer KV 1202 GB/s | nb S 1 36.9 (33.8) us KV 1603 GB/s speedup 1.33x
+POOL kv f16 depth 600 nb 64 launches 8 attn 67.6 (66.3) cmb 14.3 (14.3) both 101.4 (100.4) us/layer KV 777 GB/s | nb S 1 48.1 (47.8) us KV 1637 GB/s speedup 2.11x
+POOL kv f16 depth 600 nb 65 launches 10 attn 79.9 (75.8) cmb 21.5 (18.2) both 117.8 (114.7) us/layer KV 679 GB/s | nb S 1 65.5 (64.5) us KV 1221 GB/s speedup 1.80x
+POOL kv q8 depth 600 nb 33 launches 6 attn 62.5 (57.4) cmb 15.4 (11.0) both 69.6 (69.6) us/layer KV 301 GB/s | nb S 1 55.3 (52.2) us KV 379 GB/s speedup 1.26x
+POOL kv q8 depth 600 nb 40 launches 6 attn 68.6 (67.6) cmb 15.4 (14.3) both 78.8 (76.8) us/layer KV 322 GB/s | nb S 1 54.3 (53.2) us KV 468 GB/s speedup 1.45x
+POOL kv q8 depth 600 nb 48 launches 6 attn 76.8 (75.8) cmb 15.4 (14.3) both 86.0 (85.0) us/layer KV 354 GB/s | nb S 1 53.2 (52.2) us KV 572 GB/s speedup 1.62x
+POOL kv q8 depth 600 nb 64 launches 8 attn 99.3 (98.3) cmb 18.4 (17.4) both 111.6 (110.6) us/layer KV 364 GB/s | nb S 1 54.3 (53.2) us KV 748 GB/s speedup 2.06x
+POOL kv q8 depth 600 nb 65 launches 10 attn 108.5 (107.5) cmb 22.5 (20.5) both 123.9 (123.9) us/layer KV 333 GB/s | nb S 1 76.8 (74.8) us KV 537 GB/s speedup 1.61x
+POOL kv f16 depth 4096 nb 33 launches 6 attn 337.9 (334.8) cmb 29.7 (27.6) both 377.9 (372.7) us/layer KV 733 GB/s | nb S 1 361.5 (357.4) us KV 766 GB/s speedup 1.05x
+POOL kv f16 depth 4096 nb 40 launches 6 attn 418.8 (417.8) cmb 31.7 (30.7) both 441.3 (437.2) us/layer KV 760 GB/s | nb S 1 396.3 (394.2) us KV 847 GB/s speedup 1.11x
+POOL kv f16 depth 4096 nb 48 launches 6 attn 499.7 (498.7) cmb 30.7 (29.7) both 539.6 (536.6) us/layer KV 746 GB/s | nb S 1 455.7 (451.6) us KV 884 GB/s speedup 1.18x
+POOL kv f16 depth 4096 nb 64 launches 8 attn 665.6 (660.5) cmb 41.0 (38.9) both 713.7 (709.6) us/layer KV 752 GB/s | nb S 1 587.8 (587.8) us KV 914 GB/s speedup 1.21x
+POOL kv f16 depth 4096 nb 65 launches 10 attn 684.0 (678.9) cmb 44.0 (43.0) both 732.2 (730.1) us/layer KV 745 GB/s | nb S 1 625.7 (618.5) us KV 872 GB/s speedup 1.17x
+POOL kv q8 depth 4096 nb 33 launches 6 attn 282.6 (277.5) cmb 22.5 (20.5) both 300.0 (297.5) us/layer KV 476 GB/s | nb S 1 280.6 (279.6) us KV 509 GB/s speedup 1.07x
+POOL kv q8 depth 4096 nb 40 launches 6 attn 330.8 (326.6) cmb 22.5 (20.5) both 352.3 (349.2) us/layer KV 491 GB/s | nb S 1 291.8 (290.5) us KV 593 GB/s speedup 1.21x
+POOL kv q8 depth 4096 nb 48 launches 6 attn 394.2 (388.1) cmb 26.6 (22.4) both 421.9 (412.7) us/layer KV 492 GB/s | nb S 1 302.1 (293.9) us KV 687 GB/s speedup 1.40x
+POOL kv q8 depth 4096 nb 64 launches 8 attn 538.6 (528.4) cmb 43.0 (34.8) both 565.2 (564.2) us/layer KV 490 GB/s | nb S 1 332.8 (330.8) us KV 832 GB/s speedup 1.70x
+POOL kv q8 depth 4096 nb 65 launches 10 attn 553.0 (542.7) cmb 38.9 (35.8) both 585.7 (571.4) us/layer KV 480 GB/s | nb S 1 441.3 (438.3) us KV 637 GB/s speedup 1.33x
+test cuda::qwen2::tests::cuda_attn_pool_bench ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 768 filtered out; finished in 2.92s
+
+[axon-node 06:00:10] exit 0 after 2.9s
+[axon-node 06:00:10] peak RSS 289 MB (job process tree PSS, 2 s samples x1)
+[axon-run 02:00:13] exit 0 after 12.3s (host pod1)
+[axon-run 02:00:16] EXPECT ok: output matches /POOL kv q8 depth 4096 nb 65/
+[axon-run 02:00:16] FOREIGN_GPU max=?% mean=?% samples=0 (not sampled: ran before the guard, or pmon unavailable)
