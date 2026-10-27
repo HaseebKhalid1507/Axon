@@ -1,0 +1,10 @@
+[axon-run 01:54:32] submitted 1027-015432-5e0f by /home/haseeb/.cache/axon-wt-moeprof: /usr/bin/bash profsmoke.sh ./axon-14f2729
+[axon-run 01:54:32] scope axon-job-1027-015432-5e0f-1793080472.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 15180 MB): an OOM here kills only this job
+[axon-run 01:54:32] job 1027-015432-5e0f -> bella: systemd-run --user --scope --quiet --unit=axon-job-1027-015432-5e0f-1793080472 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash profsmoke.sh ./axon-14f2729
+axon-q 01:54:32 start slot 16-23: /usr/bin/bash profsmoke.sh ./axon-14f2729
+ge=14: [moe profile] per step (ms): gpu 1.784, down 0.075, in 0.000, experts 4.919, up 0.034, 28 layers
+ge=auto: [moe profile] per step (ms): gpu 2.355, down 0.000, in 0.000, experts 0.000, up 0.000, 28 layers
+ge=0: [moe profile] per step (ms): gpu 1.182, down 0.149, in 0.000, experts 7.228, up 0.065, 28 layers
+PROFSMOKE OK
+[axon-run 01:54:36] exit 0 after 4.4s (host bella)
+[axon-run 01:54:37] EXPECT ok: output matches /PROFSMOKE OK/

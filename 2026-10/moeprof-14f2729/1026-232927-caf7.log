@@ -1,0 +1,23 @@
+[axon-run 23:29:27] submitted 1026-232927-caf7 by /home/haseeb/.cache/axon-wt-moeprof: /home/haseeb/.cache/axon-moeres/axon-test-dbg-14f2729 cuda::qwen2::moe::tests::moe_profile --nocapture
+[axon-run 00:20:44] job 1026-232927-caf7 -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 0 --src /home/haseeb/.cache/axon-wt-moeprof /home/haseeb/.cache/axon-moeres/axon-test-dbg-14f2729 cuda::qwen2::moe::tests::moe_profile --nocapture
+axon-remote: uploading axon-test-dbg-14f2729 (914e0c0683c0cdb2d77c94f0) + source of /home/haseeb/.cache/axon-wt-moeprof
+
+sent 2,043,330 bytes  received 5,390 bytes  4,097,440.00 bytes/sec
+total size is 7,182,079  speedup is 3.51
+
+sent 7,497,661 bytes  received 35 bytes  4,998,464.00 bytes/sec
+total size is 24,388,736  speedup is 3.25
+axon-remote: job 20261027-002046-axon-test-dbg-14f2729-4091035 on avante (CPU-only)
+[axon-node 00:20:47] CPU-only job (GPU hidden, AXON_SKIP_GPU_TESTS=1)
+[axon-node 00:20:47] run axon-test-dbg-14f2729 (914e0c0683c0cdb2d77c94f0) as /home/haseeb/.cache/axon-wt-moeprof on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 2 tests
+test cuda::qwen2::moe::tests::moe_profile_lines_sum ... ok
+test cuda::qwen2::moe::tests::moe_profile_counts_every_layer ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 767 filtered out; finished in 0.00s
+
+[axon-node 00:20:47] exit 0 after 0.0s
+[axon-node 00:20:47] peak RSS 0 MB (job process tree PSS, 2 s samples x0)
+[axon-run 00:20:47] exit 0 after 3.1s (host avante)
+[axon-run 00:20:49] EXPECT ok: output matches /^test result: ok\. [0-9]+ passed; 0 failed/

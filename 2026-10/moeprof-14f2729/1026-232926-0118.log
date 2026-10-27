@@ -1,0 +1,14 @@
+[axon-run 23:29:26] submitted 1026-232926-0118 by /home/haseeb/.cache/axon-wt-moeprof: /home/haseeb/.cache/axon-moeres/axon-test-14f2729 cuda::qwen2::moe::tests::moe_profile --nocapture
+[axon-run 01:40:29] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 01:40:29] scope axon-job-1026-232926-0118-1793079629.scope in app-axonjobs.slice: MemoryMax 4024 MB, MemoryHigh 3621 MB, no swap, oomd pressure kill 80% (claim 2000 MB): an OOM here kills only this job
+[axon-run 01:40:29] job 1026-232926-0118 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-232926-0118-1793079629 --slice=app-axonjobs.slice -p MemoryMax=4024M -p MemoryHigh=3621M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-moeres/axon-test-14f2729 cuda::qwen2::moe::tests::moe_profile --nocapture --test-threads 6
+axon-q 01:40:29 start slot 16-23: /home/haseeb/.cache/axon-moeres/axon-test-14f2729 cuda::qwen2::moe::tests::moe_profile --nocapture --test-threads 6
+
+running 2 tests
+test cuda::qwen2::moe::tests::moe_profile_lines_sum ... ok
+test cuda::qwen2::moe::tests::moe_profile_counts_every_layer ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 767 filtered out; finished in 0.00s
+
+[axon-run 01:40:29] exit 0 after 0.1s (host bella)
+[axon-run 01:40:34] EXPECT ok: output matches /^test result: ok\. [0-9]+ passed; 0 failed/
