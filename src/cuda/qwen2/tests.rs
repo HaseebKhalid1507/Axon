@@ -9570,45 +9570,54 @@ fn probe_w4a8_layout(
     let rb = cols / 256 * 144;
     let checks: [(bool, String); 14] = [
         (
-            cols % 256 == 0 && cols > 0,
+            cols.is_multiple_of(256) && cols > 0,
             format!("K {cols} not a multiple of 256"),
         ),
-        (w % 16 == 0, format!("weights at {w:#x}: TMA needs 16 B")),
         (
-            rb % 16 == 0,
+            w.is_multiple_of(16),
+            format!("weights at {w:#x}: TMA needs 16 B"),
+        ),
+        (
+            rb.is_multiple_of(16),
             format!("weight row stride {rb}: TMA needs 16 B"),
         ),
         (
-            act % 16 == 0,
+            act.is_multiple_of(16),
             format!("activations at {act:#x}: TMA needs 16 B"),
         ),
         (
-            st % 16 == 0,
+            st.is_multiple_of(16),
             format!("activation stride {st}: TMA needs 16 B"),
         ),
         (
-            (act as usize + 2 * np + np / 64) % 4 == 0 && st % 4 == 0,
+            (act as usize + 2 * np + np / 64).is_multiple_of(4) && st.is_multiple_of(4),
             "b32 sums not 4-byte aligned".into(),
         ),
         (
-            out_s % 4 == 0 && out_m % 4 == 0,
+            out_s.is_multiple_of(4) && out_m.is_multiple_of(4),
             "outS / outM not 4-byte aligned".into(),
         ),
         (
-            PW_STAGE % 1024 == 0,
+            PW_STAGE.is_multiple_of(1024),
             format!("stage size {PW_STAGE} % 1024"),
         ),
-        ((PW_ACT / 2) % 1024 == 0, "activation half % 1024".into()),
-        (PW_ACT % 1024 == 0, "bsum tile offset % 1024".into()),
         (
-            (PW_ACT + PW_BS) % 128 == 0,
+            (PW_ACT / 2).is_multiple_of(1024),
+            "activation half % 1024".into(),
+        ),
+        (
+            PW_ACT.is_multiple_of(1024),
+            "bsum tile offset % 1024".into(),
+        ),
+        (
+            (PW_ACT + PW_BS).is_multiple_of(128),
             "raw TMA destination % 128".into(),
         ),
         (
-            144 % 16 == 0 && (PW_ACT + PW_BS) % 16 == 0,
+            (PW_RAW / 128).is_multiple_of(16) && (PW_ACT + PW_BS).is_multiple_of(16),
             "raw row headers % 16".into(),
         ),
-        ((PW_ST * PW_STAGE) % 8 == 0, "mbarriers % 8".into()),
+        ((PW_ST * PW_STAGE).is_multiple_of(8), "mbarriers % 8".into()),
         (
             PROBE_W4A8_SMEM == PW_ST * PW_STAGE + 2 * PW_ST * 8 + 1024 && PROBE_W4A8_SMEM <= 232448,
             format!("smem {PROBE_W4A8_SMEM} > 227 KiB or out of sync"),
@@ -10295,6 +10304,7 @@ fn probe_child(
 ///    interleaved); bits failed or that bench failed: the bench again with
 ///    AXON_PROBE_KERNELS=baselines, so the in-session baselines are reported
 ///    anyway. Off Hopper every sm_90a part skips (the bella rehearsal).
+///
 /// Fails (after everything has run) if any probe stage failed.
 /// Run with --ignored --nocapture.
 #[test]
