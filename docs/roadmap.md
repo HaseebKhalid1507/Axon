@@ -11,6 +11,14 @@ open models, not only the ones that fit a laptop. Every item below serves one of
 
 ## Mission and positioning
 
+**North star (10-26): run Synaps on Axon.** Many concurrent agent sessions, each spawning subagents, with every
+session's prefix staying warm, first for one power user on one box, then for many users. The workload is
+MEASURED from Synaps' own logs (8 days, 22.8k requests): 97.6 % of prompt tokens are a prefix the previous
+request already had, turns arrive 4.5 s apart (p50) with 1k new tokens and 350 output tokens, subagents fan out
+2 (p50) to 24 (p90) at a time, and sessions idle for minutes. So the product is warmth and exact resume, not
+peak prefill: shared, refcounted prefix pages over #71's pool, a GPU → pinned RAM → disk KV tier that evicts
+instead of dropping, and priority classes in the scheduler. Track spec: [design/agent-workload.md](design/agent-workload.md).
+
 Haseeb's words, in order: **"make inference cheap and fast"**, **"run the best models"**, and **"run at datacenters
 without wasting resources: squeeze every drop."**
 
@@ -218,12 +226,20 @@ needs Haseeb's decision on the determinism-modes ADR, and nothing has been start
 **The order below is the review's ranking, adopted here as a proposal; Haseeb decides.** Costs and gains are the
 review's ESTIMATES; the kill rules are written before building, as for every round.
 
+**Owner set 10-26: the agent track takes shelved item 2's slot** ([north star](#mission-and-positioning),
+[design](design/agent-workload.md) §6, §8). **2A** (trace, replay, baseline board) now; then **2B** (tiered KV) and **2C**
+(shared-prefix pages) as two tracks, ahead of item 4, which stays blocked on the ADR decision. Item 3 continues in
+parallel (different files, different builder). Unchanged: item 3's kill rules, #139, and the ADR decision itself.
+The agent rows' gains, costs and rules are the design's ESTIMATES and pre-registered rules.
+
 | # | item | expected gain (ESTIMATED) | cost | kill rule | unblocks |
 |---|---|---|---|---|---|
 | 1 | **H100 step anatomy + two scheduler fixes (exact mode).** (a) Measure: `pool_step_cost` on an H100 at nb 1–256, depth 600 / 4096, per kernel; `cuda_gemm_bench` on 7B shapes for gemm2s / gemm2t / gemmh2 plus one deliberately inexact gemmh2 without the per-256 drain (the upper bound of what the contract costs on Hopper); one serve step trace at mix C = 128. **(a): the kit is draft #125** (`AXON_SERVE_TRACE`, the gemmh2 no-drain and magic-S variants, `pool_feed_cost`), rehearsed on bella (job 1025-153025-5e47 PASS); no pod has run, the session (≈ $1.20–2.00, ESTIMATED: $1.20 if the stage estimates hold, $2.00 if the stages run to budget, per #125's review) waits for Haseeb's approval. (b) Decode rows join the prefill chunk's pass (one pass per step; bit-compatible by identity A). **(b) REJECTED 10-25** (#119 closed): mix C = 64 agg +0.65 % (needed ≥ +15 %), ITL p99 −46 %, TTFT p50 3.6× worse, MEASURED on a clean 4090 ([experiments-rejected](experiments-rejected.md#serving-scheduler), [log](log/2026-10-25-reject-hybrid-step.md)); the step stays two passes. (c) Shortest-first admission for short prompts, concurrent prefills scaled with slots. (d) The chunk budget as tokens per step at the measured cost, not a fixed 60 ms. **(c) and (d) LANDED 10-25 in two-pass mode** (#131, superseding #126; [log](log/2026-10-25-sched-budget-main.md)): (d) is the default (`--step-ms 60`; at 50 the 7B step p50 ran 60.0 ms, outside its ±15 %, measured on the sjf50 arm: no fifo50 arm was run); (c) is **opt-in** (`--admit-order sjf`), having missed "short TTFT p50 ≤ 0.5× fifo" on the clean bella cells (1.5B C=32 0.56×, sdab15 C=32 0.79×; 7B C=16 0.37× passed). The H100 clauses ((d) at 50 ms, "Together" at C = 128) and the sjf default are **pending #139** (one H100 session, ~$2, not booked). After each fix, re-run only Axon's two C = 128 cells (~2 pod-minutes). | mix C = 128 +25–40 % (+15 % from the merged pass alone); short-prompt TTFT p50 2.5 s → < 0.3 s; slo_ok at C = 64 0.74 → ≥ 0.95. Still ~2.5× behind vLLM-FP8 | 2–3 builder-days; ~$5 of H100 (two 30-min sessions, prebuilt binaries); bits gates on bella / avante | the merged pass must give mix C = 64 aggregate ≥ +15 % on a 4090 with ITL p99 ≤ today's; else revert it and keep (c) / (d) | a per-kernel target for item 2; every later C ≥ 32 number |
 | 2 | **SHELVED 10-26** ([log](log/2026-10-26-w4a8-probe.md): probe 224.8 < 240). **Hopper exact GEMM, round 2:** W4A8 wgmma with register dequant (RS, as Marlin does), an integer superblock reduce, TMA weights; plus the ADR's M6 fixed-chunk split-K for the narrow products (56 → 224+ CTAs for q/wo/down at nb ≤ 128). Exact: the per-256 drain is a fixed order. | ~200 TMAC/s (half of Marlin-class efficiency on the int8 pipe): prefill 13.8k → ~27k tok/s, the nb = 128 GEMM 8.4 → ~4.5 ms; with item 1, classic C = 128 4,485 → ~9–10k (vLLM-AWQ 12,190). M6 alone: −3 ms of the 18.6 ms step | 6–10 builder-days of one kernel builder (not a swarm); ~$40 of H100 in ~10 one-hour sessions; the M6 `NUMERICS_EXACT` bump and re-pinned md5s included | after 5 builder-days, gate 3,584 × 18,944 at nb 1,024 < 180 TMAC/s on the H100 (2× today's 84–93) → stop, record in experiments-rejected.md, go to item 4's fast kernel. M6 separately: H100 7B nb = 128 step −10 % or revert | every datacenter claim; resident-MoE prefill on the same GEMM; 32B / 70B on H100s |
+| 2A | **Agent workload, PR A: trace + replay harness, baseline board** (owner set 10-26, in item 2's slot). `scripts/agent_trace.py` (numbers only from Synaps' logs: no message text), `scripts/agent_replay.py` (open-loop OpenAI-API replay, md5 of every reply), agent-32k at speed 1 and 4, 7B f16 + q8 on bella vs llama-server and ollama. **No engine changes.** | the first measured number for the mission's agent-swarm tier: TTFT-new / -resume / -turn, goodput, ITL p99, warm/GB, re-prefill tokens | 2 builder-days, $0 (the H100 vLLM / SGLang cells wait for 2C) | ships regardless (it is the ruler). If TTFT-resume p50 on main ≤ 1.0 s *and* re-prefill < 10 % of prompt tokens, 2B / 2C drop below item 3; if the measured cross-session shared prefix < 2k tokens, 2C becomes dedupe-only | 2B, 2C, then D–F of the design (scheduling, disk tier, multi-tenant) |
 | 3 | **One MoE resident on the GPU:** Moonlight-16B-A3B now, Qwen3-30B-A3B as the headline (PR A → D of the r16 pick-4 spec. PRs A–C are merged (#120, #122, #127; `--gpu-experts`, default 0). Qwen3-30B-A3B residency is #146. Kill rule PASS: Moonlight `auto` vs 0 on bella, tg ×2.06, pp ×3.40, MEASURED, TAINTED ([log](log/2026-10-24-moe-resident-c.md)). Bench of record (RTX 4090, main 8508a75, 2026-10-26, [board](benchmarks-gpu.md#mixture-of-experts-on-an-rtx-4090-moonlight-16b-a3b-and-qwen3-30b-a3b-vs-llamacpp-2026-10-26-bench-of-record)): Qwen3-30B-A3B all-resident: prefill ×1.31–1.32 llama.cpp's best placement (the rule names `--cpu-moe`, not run; best is stricter, 12,212 vs 9,289: passes), but decode ×0.87. Moonlight all-resident: ×0.96 tg / ×0.81 pp512 / ×0.57 pp2100. Axon's CPU-expert path trails llama.cpp's at partial offload on the EPYC 75F3 pod; on Parabellum (main 39624db) it led partial-offload decode 1.46–1.68× but trailed prefill 0.71–0.84×: the decode gap is host-dependent, prefill trails on both hosts. The run used a 24 GB 4090 at ctx 4096, not the budgeted 32–48 GB pod at 8k. Next: the 30B decode diagnosis). | Moonlight decode on bella ~6 ms per step → ~160 tok/s (today 54–62); prefill ×3–5; Qwen3-30B-A3B fully resident on a 24 GB card, the first ≥ 30B-class model with a number vs llama.cpp and vLLM | ~5 builder-days; ~$10 (one 32–48 GB pod session for 30B-A3B at 8k) | resident decode < 1.5× the CPU-expert decode on bella → stop at PR B; 30B-A3B pp2100 < llama.cpp `--cpu-moe` on the same pod → not a headline | the Kimi K2 / DeepSeek template (experts resident per layer); gpt-oss-20b on 24 GB; an honest "best models" row |
-| 4 | **FP8 on Hopper under `--numerics fast`, gated on item 2's verdict.** The ADR's mode scaffolding first (M1 flag + tuple line, M2 `--datacenter`, M3 graded-tolerance gates, M5 cache key + kvsave cross-mode test: under a week, no kernels), then an FP8 W8A8 wgmma GEMM. If item 2 hits its kill rule, this becomes the replacement kernel and moves up. Safetensors stage B on consumer cards (sm_89 / sm_120) is demoted: it serves no mission cell. | parity-class prefill with vLLM-FP8 (30–38k tok/s) if the kernel reaches their ~27 % of peak; DeepSeek V3 / Kimi K2 checkpoints load without a GGUF requant | 8–12 builder-days + ~$40 of H100 | FP8-fast GEMM < 1.5× item 2's exact int8 GEMM on the same shapes → not worth a second numerics for dense models; keep it only for block-scaled checkpoints | DeepSeek V3 / K2 stage 2 at FP8, an FP8 board |
+| 2B, 2C | **Agent workload, PRs B and C: two tracks after 2A** (owner set 10-26, ahead of item 4). **2B** tiered KV: `--cache-ram` (kvstore's pinned RAM tier), evict to RAM instead of dropping on reclaim, restore on admit, `/slots` save/restore, restart survival. **2C** shared-prefix pages: refcounted `PageMap`, token-chain index, copy-on-write tail page, prefill once / join many, `AXON_SHARE_KV=0` off. Exact by construction (design §2.1): the replay md5 equals main's | 2B: TTFT-resume (2–10 min gap, 25k) 5–10 s → ≤ 0.3 s on bella 7B; 2C: a fan-out burst's siblings prefill once, and warm sessions per GB ≥ 1.4× | 2B 3–4 builder-days, $0; 2C 4–6 builder-days, $0, + $4–6 of H100 for the vLLM / SGLang cells | 2B: TTFT-resume p50 ≤ 0.3 s *and* md5 == main *and* aggregate / ITL p99 within 2 % at speed 4, else stays behind `--cache-ram 0`. 2C: siblings 2–8 TTFT p50 ≤ 0.25× main *and* warm/GB ≥ 1.4× *and* md5 == main under `AXON_PAGE_SHUFFLE`, C=1 decode within 2 %, else dedupe-only | agent scheduling (D), the disk tier (E), multi-tenant (F); on the H100 board, more warm sessions and lower TTFT (ESTIMATED) |
+| 4 | **FP8 on Hopper under `--numerics fast`, gated on item 2's verdict.** *Owner set 10-26: behind 2B / 2C; blocked on the ADR decision.* The ADR's mode scaffolding first (M1 flag + tuple line, M2 `--datacenter`, M3 graded-tolerance gates, M5 cache key + kvsave cross-mode test: under a week, no kernels), then an FP8 W8A8 wgmma GEMM. If item 2 hits its kill rule, this becomes the replacement kernel and moves up. Safetensors stage B on consumer cards (sm_89 / sm_120) is demoted: it serves no mission cell. | parity-class prefill with vLLM-FP8 (30–38k tok/s) if the kernel reaches their ~27 % of peak; DeepSeek V3 / Kimi K2 checkpoints load without a GGUF requant | 8–12 builder-days + ~$40 of H100 | FP8-fast GEMM < 1.5× item 2's exact int8 GEMM on the same shapes → not worth a second numerics for dense models; keep it only for block-scaled checkpoints | DeepSeek V3 / K2 stage 2 at FP8, an FP8 board |
 | 5 | **Adoption floor:** `lib.rs` (a split, not a rewrite), a tagged v0.1, the honest board on the README, one sentence for "why not vLLM". **Status 10-25: done except the tag.** #117 split the crate (`src/lib.rs`, `examples/embed.rs`), put the board ("Where it stands") and "Why not vLLM?" on the README, and wrote `CHANGELOG.md` and draft [release notes](release-0.1.md); #124 closed #118's v0.1 blockers (A opaque `Backend`, B env errors). **v0.1.0 is not tagged**: the tag and date are Haseeb's; the rest of #118 (stderr, env-only config, leaks, `serve`'s exits) stays open. | the first external user; embedding without a subprocess | 3 builder-days, $0 | none (hygiene); outcome to check: one external issue or PR within 30 days | a second human reading the code |
 
 **The ADR, per the review (OPINION; [ADR](design/determinism-modes.md) is PROPOSED, the decision is Haseeb's):** adopt
@@ -238,8 +254,8 @@ item 1's inexact-gemmh2 bound exists.
 
 **Below the line, deliberately** (the review's list; any of them can jump the queue the day a named user asks):
 - batched speculative decoding, second attempt with a depth-aware gate (Scale item 10; #90 closed by its kill rule);
-- KV save/restore stage B (`--cache-ram`, Scale item 4) and shared-prefix pages (the agent workload is unmeasured, so
-  their payoff is too; [Agent-harness workloads](#agent-harness-workloads-later-not-scheduled));
+- ~~KV save/restore stage B (`--cache-ram`, Scale item 4) and shared-prefix pages~~: **above the line since 10-26**, as
+  2B and 2C ([Agent-harness workloads](#agent-harness-workloads));
 - big-model offload on the laptop; Gemma 3 27B, sm_61 and CPU fast prefill (the ADR's M4); other platforms.
 
 Process changes the review ties to this order (OPINION, [§5](reviews/2026-10-19-outside-review-next-steps.md#5-process-where-time-and-money-leak)):
@@ -306,10 +322,10 @@ token prefix, so a slot saved, restored, paged or chunked continues bit for bit.
 | 9 | **Multi-GPU stage 1b**: the pool over a pipeline, two step batches in flight; and a measured 70B on 2×24 GB. | 32B serve on 2×4090 ≈ 2× one GPU's aggregate (ESTIMATED, [design](design/multi-gpu.md) §3.1); 70B Q4_K_M already runs under PP (ESTIMATED ~21 tok/s on 2×4090, 12k f16 / 24k q8 of KV) but no one has measured it: a $5 pod. 40–60 h + 8. | design done |
 | 10 | **Batched speculative decoding.** Draft rows for every running request in one verify step, on while rows × (K+1) ≤ 16 (the weight-read-once regime), off above. | +30–50 % per stream at ≤ 4 clients with a draft model (ESTIMATED from the MEASURED solo gains), nothing lost at 16. Lossless by the verify contract. 30–50 h. | **first attempt closed by its kill rule** (#90, 10-19; branch `feat/serve-batched-draft` kept). bella, 7B + 0.5B drafter, job 1019-013704-5285: C=4 +24.6 % (d600) and +19.8 % (d4k), C=8 +5.4 % / +1.4 %, but at d16k C=4 −3.2 % with ITL p99 +67.6 %: the goodput gate kept drafting where plain decoding was faster ([rejected](experiments-rejected.md#speculation)). **Second attempt** ([design](research/spec-gate-v2-20261024.md), 10-24): the first gate already modelled depth; v2 adds a latency guard (uniform K per round, per-row ITL ≤ 1.1× plain), persisted round-level calibration, a Beta-posterior α with depth-bucket priors, and switching hysteresis (~4.5 builder-days; ESTIMATED to ship the +20–25 % at ≤ 4k and hold 0 % at 16k). **Stage 2** (the depth win, ESTIMATED +50–70 % at 16k): verify K+1 rows per slot reading the slot's KV once (#84's `attn_blk_mq` routed per slot; 2–3 days). Kill matrix = #90's §5 plus d8k, a mixed-depth batch, a prompt-distribution shift, sampled+greedy mix, C=1 and the restart transient. Below the line in the [proposed order](#next-proposed-order-outside-review-10-19-owner-decides) |
 
-Below the line: shared-prefix pages (copy-on-write over item 5: a swarm's 20k system prompt held once; the swarm's
-real memory win; [Agent-harness workloads](#agent-harness-workloads-later-not-scheduled) item 2), fairness (aging for oversize requests; shortest-first admission
+Below the line: fairness (aging for oversize requests; shortest-first admission
 with an age bound is on main as an opt-in, `--admit-order sjf` / `--admit-age-ms`, #131), a batched-decode kernel profile
-(inside item 1's bench), q4 KV (under "Not planned", below).
+(inside item 1's bench), q4 KV (under "Not planned", below). Shared-prefix pages (copy-on-write over item 5) and
+item 4's stage B are scheduled since 10-26 as the agent track's 2C and 2B ([Agent-harness workloads](#agent-harness-workloads)).
 
 Detail on items 6 and 8 (now in the table): **serve ops** (#61, #62: `--api-key`, `/metrics`, `/slots`,
 `--max-prompt-tokens`, `--slot-idle-ms`; [log](log/2026-10-17-serve-ops.md),
@@ -322,32 +338,37 @@ it; cache == fresh prefill of what's kept; [log](log/2026-10-18-chat-halves.md))
 Dependencies: 1 (done) → {4 stage B, 10}; 2 (done) → 5 (stages 0–3 done) → shared-prefix pages; 3 (done) and 4
 → the rest of 8; stage 1 (done) → 9; the streamer (done) → 7.
 
-## Agent-harness workloads (later: not scheduled)
+## Agent-harness workloads
 
-On the roadmap, not prioritised, and below the line in the [proposed order](#next-proposed-order-outside-review-10-19-owner-decides): nothing here jumps the queue above. Agent harnesses (Synaps, and others such as
-opencode, pi and codex) talk to `serve` through its OpenAI- or ollama-compatible API, and their load doesn't look
-like a chat benchmark. **Why:** several concurrent agent sessions on one consumer GPU, each with a ~15–20k-token
-system prompt plus tool definitions that the sessions share, long multi-turn histories, tool-call turns, and long
-idle gaps while the human reads. Everything below is ESTIMATED or unmeasured; no number in this section is MEASURED
-on this workload.
+**Scheduled since 10-26: this is the [north star](#mission-and-positioning)'s track** (owner set 10-26; in the
+[proposed order](#next-proposed-order-outside-review-10-19-owner-decides) as 2A, then 2B / 2C). Agent harnesses
+(Synaps, and others such as opencode, pi and codex) talk to `serve` through its OpenAI- or ollama-compatible API,
+and their load doesn't look like a chat benchmark. **Why**, MEASURED from Synaps' logs (8 days, structure only;
+[design](design/agent-workload.md) §0): prompts p50 165k tokens, 97.6 % of them a prefix the previous request
+already had, about 1k new tokens per turn, turns 4.5 s apart (p50), subagent bursts of 2 (p50) to 24 (p90), and
+idle gaps of minutes. The design's capacity and speed figures are ESTIMATED until 2A measures them on this workload.
 
 What works today: OpenAI `tool_calls` (streamed), per-slot prefix reuse, continuous batching (#38), a long prompt's
-admission no longer stalls the other streams (Scale item 1), and paged KV (#71, merged 10-19).
+admission no longer stalls the other streams (Scale item 1), and paged KV (#71, merged 10-19). What doesn't:
+nothing is shared across slots, idle prefixes are dropped on reclaim, and nothing in `serve` survives a restart.
 
 | # | item | why | status |
 |---|---|---|---|
-| 1 | **Agent-workload benchmark.** N concurrent sessions, a shared ~20k system prompt, tool-call turns, idle gaps. Report TTFT, ITL p50/p99 and aggregate tok/s on 7B, Qwen3-8B, gpt-oss-20b and Qwen3-30B-A3B on bella (12 GB). | Nothing on this workload is measured yet, so this comes first: it sets the baseline the other items are judged against. | later: not scheduled |
-| 2 | **Shared prefix pages across sessions.** A radix/prefix cache over #71's paged pool (like vLLM's automatic prefix caching or SGLang's RadixAttention): the common system prompt is prefilled once and stored once, with copy-on-write at the point where a session diverges. | The biggest expected win for this workload (ESTIMATED): every session after the first skips a ~20k prefill and the pages it would have held. This is the "shared-prefix pages" entry below the line in [Scale](#scale-bigger-models-longer-sessions-multi-user-concurrent-requests). Depends on #71. | later: not scheduled |
-| 3 | **Idle-session KV offload to host RAM.** | This is Scale item 4 (KV save/restore, stage B: `--cache-ram`), not a separate project. The agent motivation: a session idles for minutes while the human reads, and its slot is better spent on a session that is generating. | later: not scheduled (tracked as Scale item 4) |
-| 4 | **Fast first turn for MoE models.** Stream the experts through the GPU for prefill. | Today's prefill with the experts on the CPU is ~265 tok/s on gpt-oss-20b (MEASURED, bella, job 1018-092300-3a16, pp486), so a 20k agent prompt is about a minute to first token (ESTIMATED from that rate). The plan is item 1 of the design note `specs/gptoss-prefill.md`, the same work as MoE stage 3 ([Mixture-of-experts](#mixture-of-experts)). For deepseek2, experts resident on the GPU already speed prefill up: Moonlight pp ×3.40 with `--gpu-experts auto` (MEASURED, TAINTED, #127). | later: not scheduled (tracked under MoE stage 3) |
+| 1 | **Agent trace + replay harness; baseline board** (PR A) | the ruler for the track; no engine change; defines TTFT-new, TTFT-resume, goodput, ITL p99, warm/GB | **scheduled first** |
+| 2 | **Shared-prefix pages** (PR C: refcounts, chain index, COW tail, prefill-once-join-many) | fan-out bursts and the swarm's memory; exact by construction ([design](design/agent-workload.md) §2.1) | after A |
+| 3 | **Tiered KV** (PR B/E: `--cache-ram`, `--cache-dir`, evict to a tier, restore on admit, restart survival) | TTFT-resume 5–10 s → ≤ 0.3 s (ESTIMATED from #48's MEASURED 67 ms / 0.45 s restores) | after A, parallel with 2 |
+| 4 | **Agent scheduling** (PR D: priority classes, fairness, prefix-aware admission) | the main session stays interactive under a background swarm | after 2 |
+| 5 | **Multi-tenant** (PR F: per-tenant salts, quotas, keyring; H100 agent board) | stage 2; composes with FP8 / TP as separate key spaces | after 4 |
+| 6 | Fast first turn for MoE models | unchanged (MoE stage 3): today's prefill with the experts on the CPU is ~265 tok/s on gpt-oss-20b (MEASURED, bella, job 1018-092300-3a16, pp486); Moonlight pp ×3.40 with `--gpu-experts auto` (MEASURED, TAINTED, #127) | tracked under MoE |
 
 Batched speculative decoding for the decode side is Scale item 10 (first attempt #90 closed by its kill rule; a
 second attempt with a depth-aware gate); it isn't repeated here.
 
 **Capacity on bella at ~25k context per session** (ESTIMATED: arithmetic from KV bytes per token, paged and
 `--kv q8`, against the VRAM left after the weights; not measured): a 14B ≈ 1 session, Qwen3-8B ≈ 3, Qwen2.5-7B ≈ 8,
-an MoE with the experts in RAM ≈ 6, with the slow first turn of item 4. These counts store each session's copy of
-the system prompt separately; item 2 is what changes them.
+an MoE with the experts in RAM ≈ 6, with the slow first turn of item 6. These counts store each session's copy of
+the system prompt separately; item 2 is what changes them. The design's §3 has the per-tier figures (GPU, pinned
+RAM, disk; f16 and q8; 7B, Qwen3-8B, Qwen3-30B-A3B), also ESTIMATED except the #71 page counts.
 
 ## Mixture-of-experts
 
