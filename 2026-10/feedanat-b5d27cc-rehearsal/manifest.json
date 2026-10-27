@@ -1,0 +1,29 @@
+{
+ "label": "feedanat-b5d27cc-rehearsal",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1026-232230-4945",
+   "name": "feedanat-b5d27cc-rehearsal",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "b5d27cc",
+   "binary": "bash",
+   "started": 1793078709.2963393,
+   "ended": 1793079629.5923712,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "cef01e7f89cc97049ca66bd016da1c71fd36ce83ccd25b987238eb237cc68c28",
+   "log_bytes": 22241
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-27 01:40:30 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
