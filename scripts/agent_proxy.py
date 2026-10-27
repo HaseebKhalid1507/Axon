@@ -22,13 +22,20 @@ PRIVACY (the #160 rule, docs/log/2026-10-27-agent-replay.md; this file adds no e
   `agent_trace.py --check`.
 - The capture file must be outside any git tree (refused otherwise). Default directory: ~/.cache/axon-agent/raw/.
 """
-import argparse, hashlib, hmac, http.client, http.server, json, os, secrets, socketserver, subprocess, sys, threading, time, urllib.parse
+import argparse, hashlib, hmac, http.client, http.server, json, os, re, secrets, socketserver, subprocess, sys, threading, time, urllib.parse
 
 ROUTES = {
     "/v1/chat/completions": "chat", "/v1/completions": "compl", "/v1/responses": "resp",
     "/api/chat": "ochat", "/api/generate": "ogen",
 }
 HARNESSES = ("opencode", "pi", "codex", "crush", "other")
+TASKS = ("bugfix", "feature", "explain", "resume", "compact", "subagent", "other")
+# Tool-result text is matched in memory to COUNT errors; nothing of it is kept. "harness" errors are the harness
+# rejecting a call (unknown tool, bad arguments); "any" also counts ordinary command failures (tests failing etc.).
+ERR_HARNESS = re.compile(r"(?i)(unknown tool|no such tool|tool .{0,40}not found|invalid (tool|argument|input|param)|"
+                         r"failed to parse|could not parse|missing required|validation error|schema)")
+ERR_ANY = re.compile(r"(Traceback|Error\b|error:|FAILED|command not found|No such file|exit code [1-9])")
+TEXT_TC = re.compile(r'(<tool_call>|"name"\s*:\s*"[A-Za-z_]+"\s*,\s*"(arguments|parameters)")')
 HOP = {"connection", "keep-alive", "proxy-connection", "transfer-encoding", "te", "trailer", "upgrade", "content-length",
        "host"}
 
@@ -49,6 +56,12 @@ class Capture:
         self.f = open(out, "a")
         self.harness = harness if harness in HARNESSES else "other"
         self.conns = {}
+        self.seq = 0
+
+    def next_seq(self):
+        with self.lock:
+            self.seq += 1
+            return self.seq
 
     def dig(self, *parts):
         m = hmac.new(self.key, digestmod=hashlib.sha256)
@@ -74,7 +87,8 @@ def canon(o):
 def shape(cap, route, body):
     """Counts and digests of a request body (no text kept)."""
     r = dict(n_msgs=0, roles=dict(system=0, user=0, assistant=0, tool=0, other=0), n_tools=0, n_tool_calls_req=0,
-             max_tokens=None, has_prev=False, store=None, keep_alive_s=None, h=[], b=[], prev=None, stream=False)
+             max_tokens=None, has_prev=False, store=None, keep_alive_s=None, h=[], b=[], prev=None, stream=False,
+             n_tool_res=0, n_tool_err_harness=0, n_tool_err_any=0)
     if not isinstance(body, dict):
         return r
     r["stream"] = bool(body.get("stream", route in ("ochat", "ogen")))  # Ollama streams by default
@@ -118,6 +132,22 @@ def shape(cap, route, body):
         c = canon(m)
         r["h"].append(cap.dig("msg", c))
         r["b"].append(len(c))
+    # New tool results only: those after the last assistant turn (the history re-sends older ones every request,
+    # which must not be counted again).
+    tail = []
+    for m in items:
+        if not isinstance(m, dict):
+            continue
+        if m.get("role") == "assistant" or m.get("type") in ("function_call", "message"):
+            tail = []
+        elif m.get("role") == "tool" or m.get("type") == "function_call_output":
+            tail.append(m)
+    for m in tail:
+        txt = m.get("content", m.get("output", ""))
+        txt = txt if isinstance(txt, str) else canon(txt).decode("utf-8", "replace")
+        r["n_tool_res"] += 1
+        r["n_tool_err_harness"] += bool(ERR_HARNESS.search(txt))
+        r["n_tool_err_any"] += bool(ERR_ANY.search(txt))
     r["n_msgs"] = len(r["h"])
     return r
 
@@ -137,7 +167,14 @@ def usage_of(route, o, rec):
             rec["resp"] = rec["_cap"].dig("rid", resp["id"])
         for it in resp.get("output") or []:
             if isinstance(it, dict) and it.get("type") == "function_call":
-                rec["_tc"].add(it.get("call_id") or len(rec["_tc"]))
+                k = it.get("call_id") or len(rec["_tc"])
+                rec["_tc"].add(k)
+                if isinstance(it.get("arguments"), str):
+                    rec["_args"][k] = it["arguments"]
+            elif isinstance(it, dict) and it.get("type") == "message":
+                for c in it.get("content") or []:
+                    if isinstance(c, dict) and isinstance(c.get("text"), str):
+                        rec["_text"].append(c["text"])
         return
     if route in ("ochat", "ogen"):
         if o.get("done"):
@@ -154,8 +191,14 @@ def usage_of(route, o, rec):
         rec["cached_tokens"] = (u.get("prompt_tokens_details") or {}).get("cached_tokens")
     for ch in o.get("choices") or []:
         msg = ch.get("message") or ch.get("delta") or {}
+        if isinstance(msg.get("content"), str):
+            rec["_text"].append(msg["content"])
         for tc in msg.get("tool_calls") or []:
-            rec["_tc"].add(tc.get("index", tc.get("id", len(rec["_tc"]))))
+            k = tc.get("index", tc.get("id", len(rec["_tc"])))
+            rec["_tc"].add(k)
+            a = (tc.get("function") or {}).get("arguments")
+            if isinstance(a, str):
+                rec["_args"][k] = rec["_args"].get(k, "") + a
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -182,6 +225,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def _proxy(self):
         t_arr = time.time()
         path = self.path.split("?")[0]
+        if path == "/_mark":
+            # The capture script's task boundaries: /_mark?task=<enum>&round=<int> (enums only).
+            q = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            task = (q.get("task") or ["other"])[0]
+            rnd = int((q.get("round") or ["0"])[0])
+            self.cap.write(dict(mark=task if task in TASKS else "other", round=rnd,
+                                t_ms=int((t_arr - self.cap.t0) * 1000), seq=self.cap.next_seq()))
+            self._body()
+            self.send_response(204)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         route = ROUTES.get(path)
         raw = self._body()
         body = None
@@ -193,9 +248,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 body = None
         rec = None
         if route:
-            rec = dict(t_ms=int((t_arr - self.cap.t0) * 1000), route=route, conn=self.cap.conn_id(self.client_address),
+            rec = dict(t_ms=int((t_arr - self.cap.t0) * 1000), seq=self.cap.next_seq(), route=route, conn=self.cap.conn_id(self.client_address),
                        harness=self.cap.harness, prompt_tokens=None, completion_tokens=None, cached_tokens=None,
-                       resp=None, _cap=self.cap, _tc=set())
+                       resp=None, _cap=self.cap, _tc=set(), _args={}, _text=[])
             rec.update(shape(self.cap, route, body))
             if route == "chat" and isinstance(body, dict) and body.get("stream") and \
                     not (body.get("stream_options") or {}).get("include_usage"):
@@ -255,6 +310,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             except ValueError:
                 pass
         t_end = time.time()
+        args, text = rec.pop("_args"), "".join(rec.pop("_text"))
+        bad = 0
+        for a in args.values():
+            try:
+                json.loads(a or "{}")
+            except ValueError:
+                bad += 1
+        ntc = len(rec["_tc"])
+        rec.update(tc_badjson=bad, tc_text=int(ntc == 0 and bool(TEXT_TC.search(text))))
         rec.update(status=r.status, inj=inj, n_tool_calls_resp=len(rec.pop("_tc")),
                    ttft_ms=None if t_first is None else int((t_first - t_arr) * 1000),
                    total_ms=int((t_end - t_arr) * 1000))

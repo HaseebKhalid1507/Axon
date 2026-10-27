@@ -97,7 +97,8 @@ def convert(recs):
         out.append(dict(t_ms=t, session=sid, parent=parent, depth=depth, prompt=p, shared=shared,
                         new=max(0, p - sum(x["tokens"] for x in shared)), output=r.get("completion_tokens") or 0,
                         gap_prev_ms=None if prev_t is None else t - prev_t, fanout=0, fork=fork, kind=kind,
-                        harness=r.get("harness", "other"), lat_ms=r.get("total_ms")))
+                        harness=r.get("harness", "other"), lat_ms=r.get("total_ms"),
+                        task=r.get("_task", "other"), round=r.get("_round", 0)))
     # Fan-out: children of one parent starting within BURST_MS of each other.
     first = {}
     for x in out:
@@ -115,6 +116,35 @@ def convert(recs):
     return out
 
 
+def stats(recs, reqs):
+    """Numbers for the harness comparison (spec section 7): prefix reuse, tool calls and their failures."""
+    ok = [r for r in recs if r.get("status") == 200]
+    pr = sum(r.get("prompt_tokens") or 0 for r in ok)
+    ca = sum(r.get("cached_tokens") or 0 for r in ok)
+    tc = sum(r.get("n_tool_calls_resp", 0) for r in ok)
+    res = sum(r.get("n_tool_res", 0) for r in ok)
+    return dict(prompt_tokens=pr, cached_tokens=ca, reuse_pct=round(100 * ca / pr, 1) if pr else None,
+                mean_prompt=round(pr / len(ok)) if ok else None,
+                tool_calls=tc, tc_badjson=sum(r.get("tc_badjson", 0) for r in ok),
+                tc_as_text=sum(r.get("tc_text", 0) for r in ok), tool_results=res,
+                tool_err_harness=sum(r.get("n_tool_err_harness", 0) for r in ok),
+                tool_err_any=sum(r.get("n_tool_err_any", 0) for r in ok),
+                side_req=sum(1 for x in reqs if x["kind"] == "side"),
+                compact_events=sum(1 for x in reqs if x["kind"] == "compact"))
+
+
+def per_task(recs, reqs):
+    out = {}
+    for t in sorted({r["_task"] for r in recs}):
+        rr = [r for r in recs if r["_task"] == t]
+        qq = [x for x in reqs if x["task"] == t]
+        rounds = len({r["_round"] for r in rr}) or 1
+        d = stats(rr, qq)
+        d.update(requests=len(rr), rounds=rounds, req_per_round=round(len(rr) / rounds, 1))
+        out[t] = d
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("capture")
@@ -122,7 +152,16 @@ def main():
     ap.add_argument("--anonymize-time", action="store_true")
     ap.add_argument("--keep-raw", action="store_true")
     a = ap.parse_args()
-    recs = [json.loads(l) for l in open(a.capture) if l.strip()]
+    lines = [json.loads(l) for l in open(a.capture) if l.strip()]
+    # Task marks (agent_proxy's /_mark): each request belongs to the latest mark before it.
+    task, rnd, recs = "other", 0, []
+    # Arrival order: the proxy's sequence number (ms timestamps tie on fast servers).
+    for l in sorted(lines, key=lambda x: (x.get("seq", 0), x["t_ms"])):
+        if "mark" in l:
+            task, rnd = l["mark"], l.get("round", 0)
+        else:
+            l["_task"], l["_round"] = task, rnd
+            recs.append(l)
     reqs = convert(recs)
     if a.anonymize_time and reqs:
         t0 = reqs[0]["t_ms"]
@@ -134,7 +173,8 @@ def main():
                               subagent_sessions=len({x["session"] for x in reqs if x["depth"] >= 1}), **kinds,
                               dropped_non200=sum(1 for r in recs if r.get("route") and r.get("status") != 200),
                               injected_usage=sum(1 for r in recs if r.get("inj")),
-                              missing_usage=sum(1 for r in recs if r.get("route") and r.get("prompt_tokens") is None)),
+                              missing_usage=sum(1 for r in recs if r.get("route") and r.get("prompt_tokens") is None),
+                              **stats(recs, reqs), tasks=per_task(recs, reqs)),
                  requests=reqs)
     out = a.out or os.path.expanduser(
         f"~/.cache/axon-agent/traces/harness-{os.path.splitext(os.path.basename(a.capture))[0]}.json")
