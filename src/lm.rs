@@ -276,6 +276,35 @@ pub trait BatchLm: Lm {
     /// The pool's pages (None: plain, every slot its ctx rows).
     fn pages(&self, pool: &Self::Pool) -> Option<PoolPages>;
 
+    /// Slot `slot`'s page ids, in position order (plain: none). Shared
+    /// prefixes index them; a RAM tier copies them out.
+    #[allow(dead_code)] // the engine takes it with shared prefixes (specs/shared-prefix-pages.md C3)
+    fn slot_pages(&self, pool: &Self::Pool, slot: usize) -> Vec<u32>;
+
+    /// Shared prefixes (specs/shared-prefix-pages.md): append `pages`, live
+    /// pages of the same prefix tokens (another slot's, or the prefix
+    /// index's), to slot `slot`'s, as its next positions: they hold the
+    /// bytes it would write there (the bit-identity contract), and are read
+    /// only to it. Err for a plain pool, a page that isn't live, or past
+    /// the slot's cap (nothing changed).
+    #[allow(dead_code)] // the engine takes it with shared prefixes (specs/shared-prefix-pages.md C3)
+    fn map_pages(&self, pool: &mut Self::Pool, slot: usize, pages: &[u32]) -> Result<(), String>;
+
+    /// The prefix index holds `page` (a slot's): kept, immutable, after the
+    /// last slot releases it, until `unpin_page`.
+    #[allow(dead_code)] // the engine takes it with shared prefixes (specs/shared-prefix-pages.md C3)
+    fn pin_page(&self, pool: &mut Self::Pool, page: u32) -> Result<(), String>;
+
+    /// `pin_page` undone: the page frees once no slot holds it.
+    #[allow(dead_code)] // the engine takes it with shared prefixes (specs/shared-prefix-pages.md C3)
+    fn unpin_page(&self, pool: &mut Self::Pool, page: u32) -> Result<(), String>;
+
+    /// Tests and debug builds: whether pages `a` and `b` hold the same bytes
+    /// (two writers of one prefix block: they must).
+    #[cfg(any(test, debug_assertions))]
+    #[allow(dead_code)] // the engine takes it with shared prefixes (specs/shared-prefix-pages.md C3)
+    fn same_page_bytes(&self, pool: &Self::Pool, a: u32, b: u32) -> Result<bool, String>;
+
     /// Lend the pool's batch scratch to `cache` (its `slot_cache`, which
     /// may have none of its own) for the `Lm` calls on it; the pool's
     /// `feed_slot` / `step` wait for `return_scratch`.
@@ -292,8 +321,12 @@ pub struct PoolPages {
     pub size: usize,
     pub free: usize,
     pub total: usize,
-    /// Pages each slot holds.
+    /// Pages each slot holds (its own and shared ones).
     pub held: Vec<usize>,
+    /// Pages only the prefix index holds (no slot): cached, evictable.
+    pub warm: usize,
+    /// Pages each slot alone holds (releasing it gives them up).
+    pub excl: Vec<usize>,
 }
 
 impl Sealed for Qwen2<'_> {}
@@ -1153,6 +1186,39 @@ impl BatchLm for Backend<'_> {
 
     fn pages(&self, pool: &Self::Pool) -> Option<PoolPages> {
         pool.page_info()
+    }
+
+    fn slot_pages(&self, pool: &Self::Pool, slot: usize) -> Vec<u32> {
+        pool.slot_pages(slot)
+    }
+
+    fn map_pages(&self, pool: &mut Self::Pool, slot: usize, pages: &[u32]) -> Result<(), String> {
+        match &self.0 {
+            Inner::Cuda(n) => n.map_pages(pool, slot, pages),
+            _ => unreachable!("a pool is the GPU model's"),
+        }
+    }
+
+    fn pin_page(&self, pool: &mut Self::Pool, page: u32) -> Result<(), String> {
+        match &self.0 {
+            Inner::Cuda(n) => n.pin_page(pool, page),
+            _ => unreachable!("a pool is the GPU model's"),
+        }
+    }
+
+    fn unpin_page(&self, pool: &mut Self::Pool, page: u32) -> Result<(), String> {
+        match &self.0 {
+            Inner::Cuda(n) => n.unpin_page(pool, page),
+            _ => unreachable!("a pool is the GPU model's"),
+        }
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    fn same_page_bytes(&self, pool: &Self::Pool, a: u32, b: u32) -> Result<bool, String> {
+        match &self.0 {
+            Inner::Cuda(n) => n.same_page_bytes(pool, a, b),
+            _ => unreachable!("a pool is the GPU model's"),
+        }
     }
 
     fn lend_scratch(&self, pool: &mut Self::Pool, cache: &mut BackendCache) -> Result<(), String> {

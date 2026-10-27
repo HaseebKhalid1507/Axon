@@ -365,7 +365,12 @@ impl<'g> CudaQwen2<'g> {
             ));
         }
         #[cfg(debug_assertions)]
-        p.debug_tab();
+        {
+            p.debug_tab();
+            if let Some(m) = &p.pm {
+                m.assert_writable(slot, start, start + tokens.len());
+            }
+        }
         let max = p.pass_max();
         let base = p.base(slot);
         for r in passes(tokens.len(), max) {
@@ -432,7 +437,14 @@ impl<'g> CudaQwen2<'g> {
             }
         }
         #[cfg(debug_assertions)]
-        p.debug_tab();
+        {
+            p.debug_tab();
+            if let Some(m) = &p.pm {
+                for r in rows {
+                    m.assert_writable(r.slot, r.pos, r.pos + 1);
+                }
+            }
+        }
         self.step_checked(p, rows).map_err(StepError::Device)
     }
 
@@ -473,8 +485,9 @@ impl<'g> CudaQwen2<'g> {
     }
 
     /// Slot `slot` keeps the pages of positions 0..lo (a paged pool; plain:
-    /// nothing changes): the others are free once no work in flight can
-    /// read them, and their table entries point at the sink.
+    /// nothing changes): the others leave it, their table entries point at
+    /// the sink, and each is free once no work in flight can read it and no
+    /// other slot holds it or the prefix index pins it.
     pub(crate) fn release(
         &self,
         p: &mut CudaPool<'g>,
@@ -498,6 +511,112 @@ impl<'g> CudaQwen2<'g> {
         tab.write_at((slot * m.cap() + keep) * 4, &sink)?;
         m.flush();
         Ok(())
+    }
+
+    /// Shared prefixes (specs/shared-prefix-pages.md): append `pages`
+    /// (live: another slot's, or warm in the prefix index) to slot `slot`'s
+    /// pages, its positions from its held pages' end on; read only to it
+    /// (`PageMap::writable`). Their table entries are written now (one
+    /// synchronous copy, as `reserve`'s).
+    pub(crate) fn map_pages(
+        &self,
+        p: &mut CudaPool<'g>,
+        slot: usize,
+        pages: &[u32],
+    ) -> Result<(), String> {
+        let Some(m) = p.pm.as_mut() else {
+            return Err("map_pages: a plain pool has no pages to share".into());
+        };
+        if slot >= p.slots {
+            return Err(format!("map_pages: slot {slot} of {}", p.slots));
+        }
+        let held = m.pages(slot).len();
+        if held + pages.len() > m.cap() {
+            return Err(format!(
+                "map_pages: slot {slot} holds {held} pages, {} more is past its cap {}",
+                pages.len(),
+                m.cap()
+            ));
+        }
+        for (i, &pg) in pages.iter().enumerate() {
+            if pg as usize >= m.total() || (m.refs(pg) == 0 && !m.pinned(pg)) {
+                return Err(format!("map_pages: page {pg} isn't live"));
+            }
+            if m.pages(slot).contains(&pg) || pages[..i].contains(&pg) {
+                return Err(format!("map_pages: slot {slot} would hold page {pg} twice"));
+            }
+        }
+        if pages.is_empty() {
+            return Ok(());
+        }
+        let r = m.map(slot, pages);
+        let tab = p.c.tab.as_ref().expect("a paged pool's table");
+        tab.write_at((slot * m.cap() + r.start) * 4, &m.pages(slot)[r])
+    }
+
+    /// The prefix index holds page `pg` (one a slot holds): kept with its
+    /// bytes after the last slot releases it, and immutable meanwhile.
+    pub(crate) fn pin_page(&self, p: &mut CudaPool<'g>, pg: u32) -> Result<(), String> {
+        let Some(m) = p.pm.as_mut() else {
+            return Err("pin_page: a plain pool".into());
+        };
+        if pg as usize >= m.total() || m.refs(pg) == 0 || m.pinned(pg) {
+            return Err(format!("pin_page: page {pg} isn't a held, unpinned page"));
+        }
+        m.pin(pg);
+        Ok(())
+    }
+
+    /// The index lets page `pg` go: free once no slot holds it (after the
+    /// work in flight, as `release`).
+    pub(crate) fn unpin_page(&self, p: &mut CudaPool<'g>, pg: u32) -> Result<(), String> {
+        let Some(m) = p.pm.as_mut() else {
+            return Err("unpin_page: a plain pool".into());
+        };
+        if pg as usize >= m.total() || !m.pinned(pg) {
+            return Err(format!("unpin_page: page {pg} isn't pinned"));
+        }
+        m.unpin(pg);
+        Ok(())
+    }
+
+    /// Whether pages `a` and `b` hold the same bytes, every layer, K, V
+    /// and q8 scales (tests and debug builds: two writers of one prefix
+    /// block wrote the same bytes, specs/shared-prefix-pages.md §2).
+    #[cfg(any(test, debug_assertions))]
+    pub(crate) fn same_page_bytes(&self, p: &CudaPool<'g>, a: u32, b: u32) -> Result<bool, String> {
+        let Some(m) = &p.pm else {
+            return Err("same_page_bytes: a plain pool".into());
+        };
+        if a as usize >= m.total() || b as usize >= m.total() {
+            return Err(format!("same_page_bytes: pages {a}, {b} of {}", m.total()));
+        }
+        Ok(self.page_image(p, a)? == self.page_image(p, b)?)
+    }
+
+    /// Page `pg`'s rows of every per-layer array (`slot_bytes`' layout for
+    /// one page), read back.
+    #[cfg(any(test, debug_assertions))]
+    fn page_image(&self, p: &CudaPool<'g>, pg: u32) -> Result<Vec<u8>, String> {
+        let kvd = self.kv_dim();
+        let rows: Vec<usize> = match p.c.mode {
+            CacheKv::F16 => vec![kvd * 2],
+            CacheKv::Q8 { group } => vec![kvd, kvd / group * 4],
+        };
+        let nl = self.layers.len();
+        let total: usize = rows.iter().map(|r| 2 * nl * PAGE * r).sum();
+        let out = self.gpu.alloc(total)?;
+        let (np, r0) = (p.c.rows, pg as usize * PAGE);
+        let (mut src_at, mut dst) = (0, 0);
+        for row in rows {
+            for a in 0..2 * nl {
+                p.c.kv
+                    .copy_into(src_at + (a * np + r0) * row, &out, dst, PAGE * row)?;
+                dst += PAGE * row;
+            }
+            src_at += 2 * nl * np * row;
+        }
+        out.read()
     }
 
     /// `step_rows` after its checks.
@@ -781,6 +900,8 @@ impl<'g> CudaQwen2<'g> {
                     return Err(format!("adopt: {short} KV pages short"));
                 }
                 let m = p.pm.as_ref().expect("paged");
+                #[cfg(debug_assertions)]
+                m.assert_writable(slot, 0, n);
                 (0..n)
                     .step_by(PAGE)
                     .map(|t| (t, m.pages(slot)[t / PAGE] as usize * PAGE, PAGE.min(n - t)))
@@ -886,6 +1007,27 @@ impl<'g> BatchLm for CudaQwen2<'g> {
     fn pages(&self, pool: &CudaPool<'g>) -> Option<PoolPages> {
         pool.page_info()
     }
+
+    fn slot_pages(&self, pool: &CudaPool<'g>, slot: usize) -> Vec<u32> {
+        pool.slot_pages(slot)
+    }
+
+    fn map_pages(&self, pool: &mut CudaPool<'g>, slot: usize, pages: &[u32]) -> Result<(), String> {
+        CudaQwen2::map_pages(self, pool, slot, pages)
+    }
+
+    fn pin_page(&self, pool: &mut CudaPool<'g>, page: u32) -> Result<(), String> {
+        CudaQwen2::pin_page(self, pool, page)
+    }
+
+    fn unpin_page(&self, pool: &mut CudaPool<'g>, page: u32) -> Result<(), String> {
+        CudaQwen2::unpin_page(self, pool, page)
+    }
+
+    #[cfg(any(test, debug_assertions))]
+    fn same_page_bytes(&self, pool: &CudaPool<'g>, a: u32, b: u32) -> Result<bool, String> {
+        CudaQwen2::same_page_bytes(self, pool, a, b)
+    }
 }
 
 impl CudaPool<'_> {
@@ -925,7 +1067,18 @@ impl CudaPool<'_> {
             free: m.free(),
             total: m.total(),
             held: (0..self.slots).map(|s| m.pages(s).len()).collect(),
+            warm: m.warm(),
+            excl: (0..self.slots).map(|s| m.excl(s)).collect(),
         })
+    }
+
+    /// `BatchLm::slot_pages`: slot `slot`'s page ids in position order
+    /// (plain, or a slot past the pool's: none).
+    pub fn slot_pages(&self, slot: usize) -> Vec<u32> {
+        match &self.pm {
+            Some(m) if slot < self.slots => m.pages(slot).to_vec(),
+            _ => Vec::new(),
+        }
     }
 
     /// `BatchLm::pass_max`: the batch scratch's tokens (PREFILL_BATCH, or
@@ -1674,6 +1827,235 @@ mod tests {
                 assert_eq!(p.page_info().unwrap(), before, "{what}");
             }
         }
+    }
+
+    /// Steps of greedy rows for `(slot, hist)` pairs, `steps` times, each
+    /// result checked against its solo reference; the tokens grow `hist`.
+    fn steps_vs_solo<'g>(
+        net: &CudaQwen2<'g>,
+        p: &mut CudaPool<'g>,
+        reqs: &mut [(usize, Vec<u32>)],
+        refs: &[&(Vec<RowOut>, Vec<u32>, Vec<u8>)],
+        steps: usize,
+        what: &str,
+    ) {
+        for step in 0..steps {
+            let rows: Vec<SeqRow> = reqs
+                .iter()
+                .map(|(slot, h)| SeqRow {
+                    token: h[h.len() - 1],
+                    pos: h.len() - 1,
+                    slot: *slot,
+                    head: RowHead::Argmax,
+                })
+                .collect();
+            let outs = net.step_rows(p, &rows).unwrap();
+            for (i, o) in outs.into_iter().enumerate() {
+                assert_eq!(o, refs[i].0[step], "{what}: request {i} step {step}");
+                let RowOut::Pick(t) = o else { unreachable!() };
+                reqs[i].1.push(t);
+            }
+        }
+        for (i, (_, h)) in reqs.iter().enumerate() {
+            assert_eq!(*h, refs[i].1, "{what}: request {i}'s tokens");
+        }
+    }
+
+    /// Shared prefix pages (specs/shared-prefix-pages.md §5.2), four model
+    /// families (gemma3: the shared prefix is longer than its 512-position
+    /// window, so the window spans shared and private pages), f16 and q8,
+    /// over shuffled pages: A is fed in uneven chunks and its whole pages
+    /// below B's divergence (600, mid-page) are pinned and mapped into B's
+    /// slot; B feeds only its own positions from that page on. Then steps
+    /// of both: results, tokens and KV bytes == each alone, and the shared
+    /// pages' bytes never change (immutable). Both released: the pinned
+    /// pages stay (warm), a third prompt maps them and == alone too.
+    /// Everything given back: every page free.
+    #[test]
+    fn shared_pages_match_solo_four_families() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let km = Kernels::module(&g).unwrap();
+        let ms: Vec<Model> = [
+            crate::testutil::model(),
+            crate::testutil::qwen3_model(),
+            crate::testutil::llama_model(),
+            crate::testutil::gemma3_model(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        let (ctx, steps, common) = (1024usize, 6usize, 600usize);
+        for m in ms {
+            let kvs: &[CacheKv] = match m.arch.as_str() {
+                "qwen2" => &[CacheKv::F16, CacheKv::Q8 { group: 0 }],
+                _ => &[CacheKv::F16],
+            };
+            for &kv in kvs {
+                let net = CudaQwen2::with_kv(&g, &km, &m, ctx, kv, false).unwrap();
+                let v = net.vocab;
+                let what = format!("{} {kv:?}", m.arch);
+                let a = ids(700, 31, v);
+                let mut b = a[..common].to_vec();
+                b.extend(ids(200, 32, v));
+                let mut c = a[..640].to_vec();
+                c.extend(ids(100, 33, v));
+                let (ref_a, ref_b, ref_c) = (
+                    solo(&net, ctx, &a, Kind::Greedy, steps),
+                    solo(&net, ctx, &b, Kind::Greedy, steps),
+                    solo(&net, ctx, &c, Kind::Greedy, steps),
+                );
+                let total = 3 * ctx.div_ceil(PAGE);
+                let mut p = net.pool_with(3, ctx, Some(total), Some(0x5a7e)).unwrap();
+                feed_chunks(&net, &mut p, 0, &a[..a.len() - 1], 0, 37);
+                // Whole pages below min(common, len_b - 1): 9 (576 positions).
+                let k = common / PAGE;
+                let shared: Vec<u32> = p.pm.as_ref().unwrap().pages(0)[..k].to_vec();
+                for &pg in &shared {
+                    net.pin_page(&mut p, pg).unwrap();
+                }
+                let before: Vec<Vec<u8>> = shared
+                    .iter()
+                    .map(|&pg| net.page_image(&p, pg).unwrap())
+                    .collect();
+                net.map_pages(&mut p, 1, &shared).unwrap();
+                let pg = p.page_info().unwrap();
+                assert_eq!(
+                    (pg.held[1], pg.excl[1], pg.excl[0]),
+                    (k, 0, a.len().div_ceil(PAGE) - k),
+                    "{what}"
+                );
+                feed_chunks(&net, &mut p, 1, &b[k * PAGE..b.len() - 1], k * PAGE, 50);
+                let mut reqs = [(0usize, a.clone()), (1, b.clone())];
+                steps_vs_solo(&net, &mut p, &mut reqs, &[&ref_a, &ref_b], steps, &what);
+                assert!(
+                    pool_bytes(&net, &p, 0, a.len() - 1 + steps) == ref_a.2,
+                    "{what}: A's KV"
+                );
+                assert!(
+                    pool_bytes(&net, &p, 1, b.len() - 1 + steps) == ref_b.2,
+                    "{what}: B's KV"
+                );
+                for (i, &pg) in shared.iter().enumerate() {
+                    assert!(
+                        net.page_image(&p, pg).unwrap() == before[i],
+                        "{what}: shared page {i} changed"
+                    );
+                }
+                // Both gone: the pinned pages stay, warm; C maps them.
+                net.release(&mut p, 0, 0).unwrap();
+                net.release(&mut p, 1, 0).unwrap();
+                let pg = p.page_info().unwrap();
+                assert_eq!((pg.warm, pg.free), (k, total - k), "{what}");
+                net.map_pages(&mut p, 2, &shared).unwrap();
+                feed_chunks(&net, &mut p, 2, &c[k * PAGE..c.len() - 1], k * PAGE, 64);
+                let mut reqs = [(2usize, c.clone())];
+                steps_vs_solo(&net, &mut p, &mut reqs, &[&ref_c], steps, &what);
+                assert!(
+                    pool_bytes(&net, &p, 2, c.len() - 1 + steps) == ref_c.2,
+                    "{what}: C's KV"
+                );
+                for &pg in &shared {
+                    net.unpin_page(&mut p, pg).unwrap();
+                }
+                net.release(&mut p, 2, 0).unwrap();
+                let pg = p.page_info().unwrap();
+                assert_eq!((pg.free, pg.warm), (total, 0), "{what}: every page back");
+                p.pm.as_ref().unwrap().check();
+            }
+        }
+    }
+
+    /// Two writers of one prefix write the same bytes (the property sharing
+    /// rests on, as the engine checks it at run time in debug builds): one
+    /// prompt fed into two slots of a shuffled pool in different chunks,
+    /// every whole page byte-identical to its twin; a page of another
+    /// prompt differs (the comparison isn't vacuous). f16 and q8.
+    #[test]
+    fn duplicate_pages_byte_equal() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let km = Kernels::module(&g).unwrap();
+        for m in models() {
+            for kv in [CacheKv::F16, CacheKv::Q8 { group: 0 }] {
+                let ctx = 512;
+                let net = CudaQwen2::with_kv(&g, &km, &m, ctx, kv, false).unwrap();
+                let what = format!("{} {kv:?}", m.arch);
+                let a = ids(400, 41, net.vocab);
+                let o = ids(400, 42, net.vocab);
+                let mut p = net.pool_with(3, ctx, Some(24), Some(0xd0d0)).unwrap();
+                feed_chunks(&net, &mut p, 0, &a, 0, 37);
+                feed_chunks(&net, &mut p, 1, &a, 0, 129);
+                feed_chunks(&net, &mut p, 2, &o, 0, 64);
+                let (p0, p1, p2) = (p.slot_pages(0), p.slot_pages(1), p.slot_pages(2));
+                for i in 0..a.len() / PAGE {
+                    assert_ne!(p0[i], p1[i]);
+                    assert!(
+                        net.same_page_bytes(&p, p0[i], p1[i]).unwrap(),
+                        "{what}: page {i}"
+                    );
+                }
+                assert!(
+                    !net.same_page_bytes(&p, p0[0], p2[0]).unwrap(),
+                    "{what}: another prompt"
+                );
+            }
+        }
+    }
+
+    /// `map_pages` / `pin_page` / `unpin_page` refuse what would break the
+    /// allocator (nothing changes): a plain pool, a free page, a page twice,
+    /// past the cap; pinning a page no slot holds or one pinned already;
+    /// unpinning one that isn't.
+    #[test]
+    fn share_calls_refuse_bad_pages() {
+        let Some(g) = crate::testutil::gpu() else {
+            return;
+        };
+        let Some(m) = crate::testutil::model() else {
+            return;
+        };
+        let km = Kernels::module(&g).unwrap();
+        let ctx = 256;
+        let net = CudaQwen2::with_kv(&g, &km, &m, ctx, CacheKv::F16, false).unwrap();
+        let mut plain = net.pool_with(2, ctx, None, None).unwrap();
+        assert!(net.map_pages(&mut plain, 1, &[0]).is_err());
+        assert!(net.pin_page(&mut plain, 0).is_err());
+        assert!(plain.slot_pages(0).is_empty());
+        let mut p = net.pool_with(3, ctx, Some(12), None).unwrap();
+        net.feed_slot(&mut p, 0, &ids(200, 5, net.vocab), 0)
+            .unwrap();
+        let a = p.slot_pages(0);
+        assert_eq!(a.len(), 4);
+        let before = p.page_info().unwrap();
+        let free_page = (0..12u32).find(|q| !a.contains(q)).unwrap();
+        assert!(
+            net.map_pages(&mut p, 1, &[free_page]).is_err(),
+            "a free page"
+        );
+        assert!(
+            net.map_pages(&mut p, 1, &[a[0], a[0]]).is_err(),
+            "a page twice"
+        );
+        assert!(net.map_pages(&mut p, 0, &[a[0]]).is_err(), "its own page");
+        assert!(
+            net.map_pages(&mut p, 1, &[a[0], a[1], a[2], a[3], a[0]])
+                .is_err(),
+            "past the cap"
+        );
+        assert!(
+            net.pin_page(&mut p, free_page).is_err(),
+            "pin: no slot holds it"
+        );
+        assert!(net.unpin_page(&mut p, a[0]).is_err(), "unpin: not pinned");
+        assert_eq!(p.page_info().unwrap(), before, "nothing changed");
+        net.pin_page(&mut p, a[0]).unwrap();
+        assert!(net.pin_page(&mut p, a[0]).is_err(), "pinned twice");
+        net.map_pages(&mut p, 1, &a[..2]).unwrap();
+        assert_eq!(p.slot_pages(1), a[..2]);
+        p.pm.as_ref().unwrap().check();
     }
 
     /// kvsave over pages (spec §3.1.5): a paged slot's image is a plain
