@@ -1,0 +1,88 @@
+[axon-run 10:09:25] submitted 1027-100925-fbcb by /home/haseeb/.cache/axon-kvtier: /usr/bin/bash timing4090.sh ./axon-test-d5a2899 ./axon-base-0c23a87 ./axon-d5a2899 ./kv_resume_bench.py
+[axon-run 13:18:35] job 1027-100925-fbcb -> pod1 [RTX 4090 sm_89 secure] (pod fnkel9l2utr063): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 20000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-podjob/timing4090-afa54229669a /usr/bin/bash timing4090.sh ./axon-test-d5a2899 ./axon-base-0c23a87 ./axon-d5a2899 ./kv_resume_bench.py
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (e4a2bbff543697436a0e872b) + source of /home/haseeb/.cache/axon-podjob/timing4090-afa54229669a (delta vs 2 earlier upload(s) there)
+
+sent 14,442,101 bytes  received 144 bytes  3,209,387.78 bytes/sec
+total size is 46,242,002  speedup is 3.20
+
+sent 186 bytes  received 28,812 bytes  11,599.20 bytes/sec
+total size is 89  speedup is 0.00
+axon-remote: job 20261027-171850-bash-21473 on pod1 (GPU, 20000 MB)
+[axon-node 17:18:50] GPU EXCLUSIVE taken; job wants 20000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 3, budget 23064 MB, vCPU 12.75)
+[axon-node 17:18:50] run bash (e4a2bbff543697436a0e872b) as /home/haseeb/.cache/axon-podjob/timing4090-afa54229669a on a10230f9331e, AXON_THREADS=8 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+== bandwidth
+NVIDIA GeForce RTX 4090, 595.91.07, 37, 1, 16
+               total        used        free      shared  buff/cache   available
+Mem:             694          77         192           0         428         617
+device NVIDIA GeForce RTX 4090 (sm_89), slot 25600 positions = 1.367 GiB
+BW D2H contiguous                        55.68 ms   26.36 GB/s
+BW H2D contiguous                        55.78 ms   26.32 GB/s
+BW D2H one 2D copy                       55.68 ms   26.37 GB/s
+BW H2D one 2D copy                       55.78 ms   26.32 GB/s
+BW D2H 2D per 16-pos page                58.62 ms   25.04 GB/s
+BW H2D 2D per 16-pos page                58.46 ms   25.11 GB/s
+BW D2H 2D per 64-pos page                56.40 ms   26.03 GB/s
+BW H2D 2D per 64-pos page                56.47 ms   25.99 GB/s
+BW D2H 2D per 256-pos page               55.93 ms   26.25 GB/s
+BW H2D 2D per 256-pos page               56.40 ms   26.03 GB/s
+BW host_alloc   64 MiB (+ free)             61.76 ms
+BW host_alloc  256 MiB (+ free)            252.03 ms
+BW D2H one 64-pos page (3.50 MiB)          0.187 ms   19.62 GB/s
+BW H2D one 64-pos page                     0.146 ms   25.19 GB/s
+BW save() to RAM (staged)               407.99 ms    3.60 GB/s
+BW load() from RAM (staged)             197.30 ms    7.44 GB/s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 780 filtered out; finished in 12.11s
+== TTFT-resume micro-bench
+## base: ./axon-base-0c23a87 serve models/Qwen2.5-7B-Instruct-Q4_K_M.gguf --device cuda --ctx 32768 --port 18571 --parallel 3
+[axon-run 13:19:10] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 13:20:08] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 13:20:45] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 13:21:15] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 13:21:29] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 13:22:16] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 13:22:32] FOREIGN_GPU sample max=0% mean=0.0% n=1
+RESULT {"bin": "base", "a1_s": 2.999634812003933, "a_tokens": 26481, "ttft_resume": 2.6484420070191845, "resume_prompt": 26692, "resume_cached": 0, "itl_p50_ms": 6.414419040083885, "itl_p99_ms": 70.77425008174032, "itl_n": 510, "restored_tokens": null, "pinned_bytes": null, "md5": "6948a467dd0138a2d699ba114b9ebb9e"}
+## cand: ./axon-d5a2899 serve models/Qwen2.5-7B-Instruct-Q4_K_M.gguf --device cuda --ctx 32768 --port 18571 --parallel 3 --cache-ram 6G
+[axon-run 13:23:02] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 13:23:37] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 13:24:12] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 13:24:42] FOREIGN_GPU sample max=0% mean=0.0% n=1
+RESULT {"bin": "cand", "a1_s": 3.1236405479721725, "a_tokens": 26481, "ttft_resume": 0.1476103130262345, "resume_prompt": 26692, "resume_cached": 26496, "itl_p50_ms": 6.416229531168938, "itl_p99_ms": 83.44113698694855, "itl_n": 510, "restored_tokens": 26496.0, "pinned_bytes": 6440878080.0, "md5": "6948a467dd0138a2d699ba114b9ebb9e"}
+## cand: ./axon-d5a2899 serve models/Qwen2.5-7B-Instruct-Q4_K_M.gguf --device cuda --ctx 32768 --port 18571 --parallel 3 --cache-ram 6G
+[axon-run 13:25:12] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 13:25:47] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 13:26:23] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 13:26:52] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 13:27:23] FOREIGN_GPU sample max=0% mean=0.0% n=1
+RESULT {"bin": "cand", "a1_s": 3.1198437169659883, "a_tokens": 26481, "ttft_resume": 0.14947217202279717, "resume_prompt": 26692, "resume_cached": 26496, "itl_p50_ms": 6.423779996111989, "itl_p99_ms": 77.21832499373704, "itl_n": 510, "restored_tokens": 26496.0, "pinned_bytes": 6440878080.0, "md5": "6948a467dd0138a2d699ba114b9ebb9e"}
+## base: ./axon-base-0c23a87 serve models/Qwen2.5-7B-Instruct-Q4_K_M.gguf --device cuda --ctx 32768 --port 18571 --parallel 3
+[axon-run 13:27:53] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 13:28:22] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 13:28:57] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 13:29:33] FOREIGN_GPU sample max=0% mean=0.0% n=1
+RESULT {"bin": "base", "a1_s": 3.0093882950022817, "a_tokens": 26481, "ttft_resume": 2.646643047919497, "resume_prompt": 26692, "resume_cached": 0, "itl_p50_ms": 6.3984745647758245, "itl_p99_ms": 68.67351895198226, "itl_n": 510, "restored_tokens": null, "pinned_bytes": null, "md5": "6948a467dd0138a2d699ba114b9ebb9e"}
+## base: ./axon-base-0c23a87 serve models/Qwen2.5-7B-Instruct-Q4_K_M.gguf --device cuda --ctx 32768 --port 18571 --parallel 3
+[axon-run 13:30:03] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 13:30:33] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 13:31:03] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 13:31:33] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 13:32:04] FOREIGN_GPU sample max=0% mean=0.0% n=1
+RESULT {"bin": "base", "a1_s": 3.009159232955426, "a_tokens": 26481, "ttft_resume": 2.646071393042803, "resume_prompt": 26692, "resume_cached": 0, "itl_p50_ms": 6.424019520636648, "itl_p99_ms": 67.84919404890388, "itl_n": 510, "restored_tokens": null, "pinned_bytes": null, "md5": "6948a467dd0138a2d699ba114b9ebb9e"}
+## cand: ./axon-d5a2899 serve models/Qwen2.5-7B-Instruct-Q4_K_M.gguf --device cuda --ctx 32768 --port 18571 --parallel 3 --cache-ram 6G
+[axon-run 13:32:34] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 13:33:04] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 13:33:34] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 13:34:04] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 13:34:35] FOREIGN_GPU sample max=0% mean=0.0% n=1
+RESULT {"bin": "cand", "a1_s": 3.118984292028472, "a_tokens": 26481, "ttft_resume": 0.14932533900719136, "resume_prompt": 26692, "resume_cached": 26496, "itl_p50_ms": 6.429409550037235, "itl_p99_ms": 83.76677799969912, "itl_n": 510, "restored_tokens": 26496.0, "pinned_bytes": 6440878080.0, "md5": "6948a467dd0138a2d699ba114b9ebb9e"}
+
+## summary (medians over rounds)
+SUMMARY base: ttft_resume p50 2.647 s (raw [2.648, 2.647, 2.646]), cached [0, 0, 0] of [26692, 26692, 26692], itl p50 6.41 ms p99 68.67 ms (raw p99 [70.77, 68.67, 67.85]), md5 ['6948a467dd0138a2d699ba114b9ebb9e']
+SUMMARY cand: ttft_resume p50 0.149 s (raw [0.148, 0.149, 0.149]), cached [26496, 26496, 26496] of [26692, 26692, 26692], itl p50 6.42 ms p99 83.44 ms (raw p99 [83.44, 77.22, 83.77]), md5 ['6948a467dd0138a2d699ba114b9ebb9e']
+MD5 SAME
+[axon-node 17:34:42] exit 0 after 951.4s
+[axon-node 17:34:42] peak RSS 6378 MB (job process tree PSS, 2 s samples x465)
+[axon-run 13:34:43] exit 0 after 968.1s (host pod1)
+[axon-run 13:34:45] EXPECT ok: output matches /SUMMARY cand/
+[axon-run 13:34:45] FOREIGN_GPU max=0% mean=0.0% samples=30
