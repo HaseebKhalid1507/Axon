@@ -1,0 +1,103 @@
+[axon-run 22:01:34] submitted 1026-220134-e435 by /home/haseeb/.cache/axon-t3-w4a8probe: /home/haseeb/.cache/axon-t3-w4a8probe/axon-test-ace8106 cuda::qwen2::tests::cuda_probe_w4a8_session --exact --ignored --nocapture --test-threads 1
+[axon-run 22:11:57] scope axon-job-1026-220134-e435-1793067117.scope in app-axonjobs.slice: MemoryMax 7024 MB, MemoryHigh 6321 MB, no swap, oomd pressure kill 80% (claim 4000 MB): an OOM here kills only this job
+[axon-run 22:11:57] job 1026-220134-e435 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-220134-e435-1793067117 --slice=app-axonjobs.slice -p MemoryMax=7024M -p MemoryHigh=6321M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-t3-w4a8probe/axon-test-ace8106 cuda::qwen2::tests::cuda_probe_w4a8_session --exact --ignored --nocapture --test-threads 1
+axon-q 22:11:57 start slot 16-23: /home/haseeb/.cache/axon-t3-w4a8probe/axon-test-ace8106 cuda::qwen2::tests::cuda_probe_w4a8_session --exact --ignored --nocapture --test-threads 1
+
+running 1 test
+test cuda::qwen2::tests::cuda_probe_w4a8_session ... probe sm_90a: 23368 bytes of cubin
+probe sm_90: 1736 bytes of cubin
+PROBE STAGE compile: ok
+PROBE STAGE cuda_probe_w4a8_peak: start (/home/haseeb/.cache/axon-t3-w4a8probe/axon-test-ace8106 cuda::qwen2::tests::cuda_probe_w4a8_peak --exact --nocapture --test-threads 1 --ignored)
+
+running 1 test
+test cuda::qwen2::tests::cuda_probe_w4a8_peak ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+PROBE SKIP wg_peak_rs_n64 (no sm_90a module)
+PROBE PEAK END ok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 774 filtered out; finished in 0.27s
+
+PROBE STAGE cuda_probe_w4a8_peak: rc 0 after 0.4 s
+PROBE STAGE gpu_probe_w4a8_tiny: start (/home/haseeb/.cache/axon-t3-w4a8probe/san/w132/nvidia/cu13/bin/compute-sanitizer --tool memcheck --error-exitcode 9 --print-limit 20 /home/haseeb/.cache/axon-t3-w4a8probe/axon-test-ace8106 cuda::qwen2::tests::gpu_probe_w4a8_tiny --exact --nocapture --test-threads 1)
+========= COMPUTE-SANITIZER
+========= Error: Target application terminated before first instrumented API call
+========= Error: couldn't find exit code.
+PROBE STAGE gpu_probe_w4a8_tiny: rc 255 after 1.2 s
+PROBE STAGE gpu_probe_w4a8_tiny: start (/home/haseeb/.cache/axon-t3-w4a8probe/axon-test-ace8106 cuda::qwen2::tests::gpu_probe_w4a8_tiny --exact --nocapture --test-threads 1)
+
+running 1 test
+test cuda::qwen2::tests::gpu_probe_w4a8_tiny ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+skipping: not sm_90a
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 774 filtered out; finished in 0.29s
+
+PROBE STAGE gpu_probe_w4a8_tiny: rc 0 after 0.4 s
+PROBE STAGE gpu_probe_w4a8_int_bits: start (/home/haseeb/.cache/axon-t3-w4a8probe/axon-test-ace8106 cuda::qwen2::tests::gpu_probe_w4a8_int_bits --exact --nocapture --test-threads 1)
+
+running 1 test
+test cuda::qwen2::tests::gpu_probe_w4a8_int_bits ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+skipping: not sm_90a
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 774 filtered out; finished in 0.27s
+
+PROBE STAGE gpu_probe_w4a8_int_bits: rc 0 after 0.4 s
+PROBE STAGE cuda_probe_w4a8_bench: start (/home/haseeb/.cache/axon-t3-w4a8probe/axon-test-ace8106 cuda::qwen2::tests::cuda_probe_w4a8_bench --exact --nocapture --test-threads 1 --ignored)
+
+running 1 test
+test cuda::qwen2::tests::cuda_probe_w4a8_bench ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+PROBE device NVIDIA GeForce RTX 5070 Ti Laptop GPU sm_120 46 SMs, hopper module false, probe module false
+PROBE SKIP probe cells (no sm_90a device)
+PROBE CELL gate 3584x18944 nb 128 gemm2t_q4_k: median 44.5 TMAC/s (min 44.0 max 44.9; 9 rounds)
+PROBE CELL gate 3584x18944 nb 1024 gemm2t_q4_k: median 47.2 TMAC/s (min 41.5 max 50.5; 9 rounds)
+PROBE CELL q/wo 3584x3584 nb 128 gemm2t_q4_k: median 27.4 TMAC/s (min 27.4 max 27.7; 9 rounds)
+PROBE CELL q/wo 3584x3584 nb 1024 gemm2t_q4_k: median 49.3 TMAC/s (min 49.1 max 49.4; 9 rounds)
+PROBE CELL down 18944x3584 nb 128 gemm2t_q4_k: median 31.4 TMAC/s (min 31.2 max 31.4; 9 rounds)
+PROBE CELL down 18944x3584 nb 1024 gemm2t_q4_k: median 47.3 TMAC/s (min 35.7 max 50.3; 9 rounds)
+PROBE CELL kv 3584x512 nb 128 gemm2t_q4_k: median 8.0 TMAC/s (min 8.0 max 8.0; 9 rounds)
+PROBE CELL kv 3584x512 nb 1024 gemm2t_q4_k: median 33.2 TMAC/s (min 32.8 max 33.2; 9 rounds)
+PROBE GATE not measured in this run (no sm_90a device or bits failed)
+PROBE BENCH END ok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 774 filtered out; finished in 0.90s
+
+PROBE STAGE cuda_probe_w4a8_bench: rc 0 after 1.0 s
+PROBE STAGE fallback: baselines only (the probe failed or was skipped)
+PROBE STAGE cuda_probe_w4a8_bench: start (/home/haseeb/.cache/axon-t3-w4a8probe/axon-test-ace8106 cuda::qwen2::tests::cuda_probe_w4a8_bench --exact --nocapture --test-threads 1 --ignored)
+
+running 1 test
+test cuda::qwen2::tests::cuda_probe_w4a8_bench ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+PROBE device NVIDIA GeForce RTX 5070 Ti Laptop GPU sm_120 46 SMs, hopper module false, probe module false
+PROBE SKIP probe cells (no sm_90a device)
+PROBE CELL gate 3584x18944 nb 128 gemm2t_q4_k: median 44.7 TMAC/s (min 43.8 max 44.8; 9 rounds)
+PROBE CELL gate 3584x18944 nb 1024 gemm2t_q4_k: median 45.9 TMAC/s (min 39.7 max 50.1; 9 rounds)
+PROBE CELL q/wo 3584x3584 nb 128 gemm2t_q4_k: median 27.7 TMAC/s (min 27.7 max 28.0; 9 rounds)
+PROBE CELL q/wo 3584x3584 nb 1024 gemm2t_q4_k: median 49.3 TMAC/s (min 48.2 max 49.4; 9 rounds)
+PROBE CELL down 18944x3584 nb 128 gemm2t_q4_k: median 31.4 TMAC/s (min 31.0 max 31.5; 9 rounds)
+PROBE CELL down 18944x3584 nb 1024 gemm2t_q4_k: median 47.7 TMAC/s (min 43.9 max 52.3; 9 rounds)
+PROBE CELL kv 3584x512 nb 128 gemm2t_q4_k: median 8.0 TMAC/s (min 7.8 max 8.0; 9 rounds)
+PROBE CELL kv 3584x512 nb 1024 gemm2t_q4_k: median 33.6 TMAC/s (min 32.0 max 33.6; 9 rounds)
+PROBE GATE not measured in this run (baselines only)
+PROBE BENCH END ok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 774 filtered out; finished in 0.91s
+
+PROBE STAGE cuda_probe_w4a8_bench: rc 0 after 1.0 s
+PROBE END FAILED: sanitizer tiny rc 255
+
+thread 'cuda::qwen2::tests::cuda_probe_w4a8_session' (2739267) panicked at src/cuda/qwen2/tests.rs:10378:9:
+probe stages failed: sanitizer tiny rc 255
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    cuda::qwen2::tests::cuda_probe_w4a8_session
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 774 filtered out; finished in 4.83s
+
+[axon-run 22:12:02] exit 101 after 5.0s (host bella)

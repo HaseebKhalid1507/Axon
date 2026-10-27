@@ -1,0 +1,29 @@
+{
+ "label": "t3probe-ace8106-rehearsal-FAILED",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1026-220134-e435",
+   "name": "t3probe-ace8106-rehearse",
+   "rc": 101,
+   "verdict": "FAIL (rc 101)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "ace8106",
+   "binary": "axon-test-ace8106",
+   "started": 1793067113.8726869,
+   "ended": 1793067127.8538132,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "8a8bd0a921a685370b455c9641fa9d6c2f09554a075f69a88099176034890386",
+   "log_bytes": 6876
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-26 22:12:08 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
