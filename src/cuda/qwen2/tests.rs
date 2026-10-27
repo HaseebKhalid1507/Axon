@@ -9700,6 +9700,39 @@ fn probe_w4a8_ref(w: &[u8], cols: usize, act: &[u8], st: usize, z: usize, r: usi
     (s, m)
 }
 
+/// probe_w4a8_ref against quant::dequant (no GPU): rows with d = dmin =
+/// 1.0 (f16 0x3C00) and integer activations make sum_k w_k x_k = S - M
+/// exactly in f64, so the probe's CPU reference reads the scales, mins,
+/// nibbles and 32-sums the way the format means them.
+#[test]
+fn probe_w4a8_ref_matches_dequant() {
+    let mut rng = Rng(5);
+    let cols = 1024usize;
+    let np = cols;
+    for _ in 0..8 {
+        let mut w = synth_matrix(&mut rng, Q4_K, 1, cols);
+        for b in 0..cols / 256 {
+            w[b * 144..b * 144 + 4].copy_from_slice(&[0x00, 0x3c, 0x00, 0x3c]);
+        }
+        let x: Vec<i8> = (0..cols).map(|_| rng.next() as i8).collect();
+        let st = 2 * np + np / 64 + np / 8 + np / 8;
+        let mut act = vec![0u8; st];
+        for (i, &v) in x.iter().enumerate() {
+            act[i] = v as u8;
+        }
+        for k in 0..cols / 32 {
+            let s: i32 = x[32 * k..32 * k + 32].iter().map(|&v| v as i32).sum();
+            let o = 2 * np + np / 64 + 4 * k;
+            act[o..o + 4].copy_from_slice(&s.to_le_bytes());
+        }
+        let mut wf = vec![0f32; cols];
+        quant::dequant(Q4_K, &w, &mut wf);
+        let want: f64 = wf.iter().zip(&x).map(|(&a, &b)| a as f64 * b as f64).sum();
+        let (s, m) = probe_w4a8_ref(&w, cols, &act, st, 0, 0);
+        assert_eq!((s - m) as f64, want, "S {s} M {m}");
+    }
+}
+
 /// Compare the probe's outputs with probe_w4a8_ref at `pairs` (z, r);
 /// returns the mismatch count (prints the first few).
 #[allow(clippy::too_many_arguments)]
@@ -9737,7 +9770,7 @@ fn gpu_probe_w4a8_int_bits() {
     let Some(g) = crate::testutil::gpu() else {
         return;
     };
-    let km = Kernels::module(&g).unwrap();
+    let km = Kernels::module_ext(&g).unwrap();
     let Some(pm) = probe_w4a8_module(&g) else {
         eprintln!("skipping: not sm_90a");
         return;
