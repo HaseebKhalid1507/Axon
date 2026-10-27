@@ -1921,6 +1921,8 @@ mod tests {
 
     /// An `Lm` that runs `M` and logs the positions each `feed_batch` and
     /// `prefill_logits` call fed: the cuts a caller (`Chat::reply`) made.
+    /// Forwards every `Lm` method: add new ones here, or `Cuts` runs a
+    /// trait default where the GPU model has an override.
     struct Cuts<'a, M: crate::lm::Lm>(&'a M, std::cell::RefCell<Vec<std::ops::Range<usize>>>);
 
     impl<M: crate::lm::Lm> Cuts<'_, M> {
@@ -2004,10 +2006,11 @@ mod tests {
     /// weighs GEMM waves on its SMs), and a 1532-token turn came out as
     /// 1152 + 380, the old cut, on an RTX 4090 (job 1027-021156-1252). A
     /// turn of max + 1 ..= max + wave_floor(max) - 1 tokens (1153..=1439
-    /// at the batch max 1152, 1025..=1279 at 1024) can't be: its two
-    /// passes are equal (`passes`, ~n / 2 each) or wave-sized with the last
-    /// pass >= wave_floor (max / 4), and the old cut's last pass is n - max,
-    /// under that. No SM count enters those bounds. The turn (~1230 tokens,
+    /// at the batch max 1152, 1025..=1279 at 1024) can't be: the old cut is
+    /// max + a last pass of n - max, under wave_floor (max / 4), and the
+    /// planner's passes are equal (`passes`, two of ~n / 2), or wave-sized
+    /// two with the last >= wave_floor (`wave_passes`, start + n < FA_LONG),
+    /// or from FA_LONG on equal again (`fa_passes`: `passes_n`, 2 or 3). No SM count enters those bounds. The turn (~1230 tokens,
     /// in both ranges) is asserted to be in the range.
     #[test]
     fn long_turn_matches_fresh_prefill_cuda() {

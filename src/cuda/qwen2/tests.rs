@@ -9758,10 +9758,11 @@ fn lm_chunk_ranges() {
 /// and chat's (the last chunk by `prefill_logits`), from 0 and after a
 /// prefix, give the bits of the prompt's per-token decode. Whether the
 /// planner's cut differs from the old fixed prefill_batch cut depends on
-/// the GPU's SMs at 2099 and 1799 tokens (`planner_cut_differs`: a NOTE
-/// when it doesn't); at 1200 (from 899) it differs on every GPU, asserted:
-/// two passes whose last is under `wave_floor` (288 at max 1152) are no
-/// planner choice (`passes`: equal; `wave_passes`: last >= wave_floor).
+/// the GPU's SMs at 2099/2100 and 1799/1800 tokens (`planner_cut_differs`:
+/// a NOTE when it doesn't); at 1200/1201 (from 899) it differs on every
+/// GPU, asserted: max + a last pass under `wave_floor` (288 at max 1152) is
+/// no planner choice (`passes`: equal; `wave_passes`: last >= wave_floor;
+/// `fa_passes`: `passes`, or from FA_LONG on equal passes too).
 #[test]
 fn gpu_prompt_chunks_bits() {
     let Some(g) = crate::testutil::gpu() else {
@@ -9815,6 +9816,14 @@ fn gpu_prompt_chunks_bits() {
             net.feed_batch(&ids[..from], 0, &mut c);
         }
         let rs = net.prompt_chunks(n - from, from, &c);
+        let k = n - from;
+        let what = format!("{k} tokens from {from}");
+        let old = crate::lm::chunk_ranges(k, max);
+        let differs = crate::testutil::planner_cut_differs(&rs, &old, sms, &what);
+        assert!(
+            differs || k - max >= max / 4,
+            "{what}: the old prefill_batch cut {rs:?}"
+        );
         let mut l = Vec::new();
         for (i, r) in rs.iter().enumerate() {
             let b = &ids[from + r.start..from + r.end];
