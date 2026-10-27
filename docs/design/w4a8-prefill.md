@@ -212,7 +212,8 @@ mode 0/1 + bias, Q6 under the §3.3 choice) on the H100, in a probe-style bench 
 
 - **Setup (pinned now, M4):**
   - H100 SXM, Qwen2.5-7B-Instruct-Q4_K_M, the #165 serve kit: `sd_client.py` sha256 a82b55c178a2fa9b…,
-    `prompts-mix-v2.jsonl` c3ff5fb849cd7dc9… (feat/feed-anatomy). C = 64 and C = 128, 2 rounds.
+    `prompts-mix-v2.jsonl` c3ff5fb849cd7dc9… (feat/feed-anatomy). C = 64 and C = 128, **3 rounds** per arm
+    (the TTFT clause needs ≥ 3; every other clause reads rounds 1–2, exactly as registered).
   - **Two scheduler configs, both run, each with explicit flags in every cell, whatever main's default is that day:**
     `--admit-order fifo --step-ms 60` and `--admit-order sjf --step-ms 80`.
   - In each config: main (merge base) vs the candidate (`AXON_W4A8=1`, `AXON_W4A8_STATS=1`). Arms are interleaved and
@@ -223,7 +224,7 @@ mode 0/1 + bias, Q6 under the §3.3 choice) on the H100, in a probe-style bench 
   - **short-prompt TTFT p50** = `ttft_short_ms_p50`, over kinds `short` and `classic` (the set's shorts are 36–48
     prompt tokens);
   - **ITL p99** = `itl_ms` p99, all streams pooled.
-- **Primary:** aggregate tok/s at C = 128, the median of the 2 rounds. **Each clause must hold in both configs**
+- **Primary:** aggregate tok/s at C = 128, the median of rounds 1 and 2. **Each clause must hold in both configs**
   (the lower config decides, as in M9).
 - **ESTIMATE: +13.5 % (fifo60) / +13.3 % (sjf80). Range: +8.7 % (an ESTIMATED bound, below) to +18.2 %.**
   Derivation:
@@ -319,7 +320,12 @@ mode 0/1 + bias, Q6 under the §3.3 choice) on the H100, in a probe-style bench 
 - **GO (merge; default on for sm_90a at nb ≥ T)** requires all of:
   - C = 128 aggregate ≥ **+8 %**;
   - C = 64 aggregate ≥ **+3 %**;
-  - C = 128 ITL p99 ≤ main × 1.05, and short-prompt TTFT p50 ≤ main × 1.05;
+  - C = 128 ITL p99 ≤ main × 1.05 (rounds 1–2, as registered);
+  - **C = 128 short-prompt TTFT p50 (lead's ruling, 10-27, before any data):**
+    - main and the candidate run interleaved in the same session, alternating rounds, ≥ 3 rounds per arm;
+    - the candidate's median over its rounds ≤ main's median × **max(1.05, 1 + main's round-to-round spread)**;
+    - spread = max / min − 1 of main's own per-round short TTFT p50, in that session, config and C, from main's
+      rounds only;
   - every clause in both scheduler configs;
   - the candidate arm's W4A8 hit counters > 0 in every cell (a cell with 0 hits is void);
   - **bits:** text_sha and completion_tokens equal for every request across the arms; plus the md5 gate (on / off /
@@ -342,13 +348,10 @@ mode 0/1 + bias, Q6 under the §3.3 choice) on the H100, in a probe-style bench 
   #165's own estimates undershot the measurement, so the bar is not tightened either. The bar is not lowered after
   the data.
 - **Expected noise (S3; MEASURED, main's binaries, C = 128):**
-  - **aggregate:** within-session spread over 2 rounds is ±0–3 % (jobs 1027-030631-09ae and 1027-084258-1ce4);
-  - **across those two sessions:** fifo60 aggregate 1,845.5 vs 1,843.2; ITL p99 80.0 vs 77.5 ms (−3 %) at fifo60
-    and 100.1 vs 99.9 at sjf80; short TTFT p50 2,320 vs 2,287 ms (−1 %) at fifo60 and **173 vs 188 ms (+8 %) at
-    sjf80**.
-  - So the 1.05× TTFT clause is within noise at sjf80. W4A8 should lower TTFT (faster feeds), but a noise KILL is
-    possible.
-  - The clause stays as registered. P4 prints per-round values for every clause, so a borderline result is visible.
+  - **aggregate:** within-session spread over 2 rounds is ±0–3 % (jobs 1027-030631-09ae and 1027-084258-1ce4).
+  - **Short TTFT:** the TTFT clause carries its own in-session noise allowance (main's spread, above). A
+    cross-session comparison of the same binaries is not used for it.
+  - P4 prints per-round values for every clause, so a borderline result is visible.
 - **Reported, not gating** (methodology: both pp and tg):
   - `gen` pp2100 and pp560 on the H100 with the flag on vs off (OPINION, not derived: +15–25 % pp2100; attention's share
     of a deep pass on the H100 is unmeasured for this cell);
@@ -425,7 +428,7 @@ H100 SXM secure, $3.99/h. Each session follows the builder rules:
 | (A) session (only if §3.3 picks (A)) | (A)'s bring-up, bits and down6 timing | ~12 + 4 | 1.10 | the window after P1 / P2 |
 | — | **post-P1 re-run** (local, $0) → PROCEED / STOP | — | 0 | — |
 | P3 (day 4–5) | integration: H100 GPU `full` tier (`AXON_W4A8=1 AXON_W4A8_T=33`, `AXON_TEST_GPU_SERIAL=1`, hit counters asserted), md5 on / off / main with stats | ~25 + 4 | 1.95 | W3 |
-| P4 | **Checkpoint 2:** 2 configs × 2 arms × 2 rounds × C 64 / 128, plus the pp / tg board and per-pass histograms | ~16 + 4 | 1.35 | W4, or W3 if window-left ≥ $4.49 after P3 is down |
+| P4 | **Checkpoint 2:** 2 configs × 2 arms × 3 rounds × C 64 / 128, plus the pp / tg board and per-pass histograms | ~20 + 4 | 1.60 | W4, or W3 if window-left ≥ $4.49 after P3 is down |
 | P5 | review-round re-gate (P3's suite on the merge-ready head) | ~25 + 4 | 1.95 | W5 |
 
 W1–W5 are successive windows that meet the booking condition, not fixed dates. Each gets at most one session of
@@ -435,10 +438,10 @@ this line, except W3 for P3 + P4 as stated.
 
 | path | sessions | ESTIMATED spend |
 |---|---|---|
-| clean | P1, P3, P4, P5 | **$6.60** |
-| + P2 rerun | + P2 | $7.95 |
-| + (A) fallback | + (A) session | $9.05 |
-| + Checkpoint 2 bits rerun | + P3, P4 again | $12.35: **past the cap, needs the lead's go in writing** before the rerun is booked |
+| clean | P1, P3, P4, P5 | **$6.85** |
+| + P2 rerun | + P2 | $8.20 |
+| + (A) fallback | + (A) session | $9.30 |
+| + Checkpoint 2 bits rerun | + P3, P4 again | $12.85: **past the cap, needs the lead's go in writing** before the rerun is booked |
 
 - **Spend stops at the first failed checkpoint:**
   - a Checkpoint 1 KILL ends the line at $1.35, or $2.70 with P2;
