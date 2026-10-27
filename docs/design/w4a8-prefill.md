@@ -93,12 +93,21 @@ Labels: **MEASURED** (job cited), **ESTIMATED** (arithmetic shown), **CODE** (fi
 - **Every gate must show the path ran (M1).** A green gate that never launched a W4A8 kernel proves nothing.
   - **Hit counter:** a process-global launch counter per entry point (`w4a8_q4_k`, `w4a8_q4_k_gu`, `w4a8_q6`).
     `AXON_W4A8_STATS=1` prints it at exit (`W4A8 HITS q4_k <n> gu <n> q6 <n>`).
-  - **The md5 gate's on-arm** runs with stats on. Each cell's prompt set includes the ~600-token prompt, which is
-    ≥ T. The gate fails if any entry point the model uses shows 0 hits.
+  - **Which entry points must hit, per test (Shady S8).** The pinned 7B case is Qwen2.5-7B-Instruct-Q4_K_M, the
+    anatomy's and the serve's model. Its products are gate_up Q4_K (`w4a8_q4_k_gu`); q, wo and the Q4_K down layers
+    (`w4a8_q4_k`); and the Q6_K down layers (`w4a8_q6`, given the Q6 copy, made at load on an 80 GB card).
+
+    | test / gate | model | must hit (> 0) | must be 0 |
+    |---|---|---|---|
+    | md5 gate, on-arm (`gen`, the md5 prompt set incl. the ~600-token prompt, `AXON_W4A8_STATS=1`) | Qwen2.5-7B-Instruct-Q4_K_M | gu, q4_k, q6 | — |
+    | md5 gate, on-arm, the set's small models (0.5B / 1.5B / Llama-1B) | each | none required (bits only) | — |
+    | new `gpu_w4a8_feed_batch_matches_feed_7b` (H100, `AXON_W4A8_T=33`): `feed_batch` of a 600-token prompt vs `feed` per token, logits + KV bit-equal | Qwen2.5-7B-Instruct-Q4_K_M | gu, q4_k, q6 (counted around the `feed_batch` call) | 0 during the per-token `feed` calls |
+    | new `gpu_w4a8_pool_routing_7b` (H100, `AXON_W4A8_T=33`): pool C = 128, one 600-token prompt fed in chunks while 127 slots decode | Qwen2.5-7B-Instruct-Q4_K_M | gu, q4_k, q6 on `Place::Seq` (feed) passes | **0 on every `Place::Rows` (decode) pass** (per-pass counter deltas) |
+    | `gpu_prefill_batchings_bit_identical_*`, `pool_steps_match_solo_in_any_order`, `serve_batched_matches_solo` (H100 `full` tier, `AXON_W4A8_T=33`) | their existing small models | bits only, no hit requirement (their shapes are mostly below the routing rows; decode-dominated) | — |
+    | Checkpoint 2 candidate arm, every cell | Qwen2.5-7B-Instruct-Q4_K_M | gu, q4_k, q6 (a cell with 0 on any of them is void) | — |
+
   - **The H100 `full` tier** runs with `AXON_W4A8=1 AXON_W4A8_T=33`, a forced threshold just above the gemvm limit,
-    so every eligible feed pass takes the path. Its batched-prefill tests (`gpu_prefill_batchings_bit_identical_*`,
-    `pool_steps_match_solo_in_any_order`, `serve_batched_matches_solo`) assert the counter rose.
-  - **Checkpoint 2's candidate arm** prints the counters per cell. A cell with 0 hits voids the cell.
+    so every eligible feed pass takes the path.
 - **Any difference is a bug.** It is fixed, never toleranced away. If the contract can't be kept, the change doesn't
   merge.
 
@@ -175,6 +184,12 @@ Why it holds:
    - Session P1 sweeps nb ∈ {64, 96, 128, 192, 256, 320, 384, 448, 512, 768, 1024} on all four products.
    - T is the smallest nb at and above which the exact W4A8 kernel is ≥ 1.05× today's kernel at *every* swept nb,
      per product (per-product T allowed).
+   - **A product that never qualifies (M11).** If a product has no swept nb from which it stays ≥ 1.05× up to
+     1024, P1 prints `W4A8 T <product> none`.
+     - That product is **not routed**: it keeps today's kernel, and counts at S = 1 in Checkpoint 1's S_weighted and
+       in the post-P1 re-run.
+     - This is a valid table, not a missing input and not a rerun reason. Checkpoint 1's bar applies to what ships.
+     - Down6 (1.11× / 1.21× in the probe) is the likely case.
    - Every swept cell is bit-checked against its base kernel on every output, not only timed. The ragged tests stop
      at nb 200 and 17 blocks; the sweep covers 64–1024 on the 7B shapes.
    - Per-product T goes into the post-P1 re-run per product (§4). The pre-P1 LP bound uses one T for all GEMM time,
@@ -198,11 +213,19 @@ mode 0/1 + bias, Q6 under the §3.3 choice) on the H100, in a probe-style bench 
 - **Speed:** S_weighted with #165's shares (k/v at 1) ≥ **1.40** at both nb, measured directly on the production
   kernels (no factor). The probe measured 1.503 / 1.543; 1.40 lets the production epilogues cost up to ~7 % of that.
 - **Either fails → stop.** Record it in `experiments-rejected.md`. No integration and no e2e spend.
-- **One attempt (M3).** The attempt is P1's first run that completes the Checkpoint 1 cells with every bit check
-  green. Its speed numbers are final: a speed miss is a KILL, with no fix round.
+- **One attempt (M3, M12).** The attempt is P1's first run.
+  - If it completes the Checkpoint 1 cells with every bit check green, its speed numbers are final: a speed miss is
+    a KILL, with no fix round.
+  - **A bits failure follows Checkpoint 2's rule (M12; lead, 10-27):**
+    - run 1's speed table is **published**;
+    - after the fix, P2 reruns the cells;
+    - **the speed bar must hold in both runs.** Run 1's table counts as measured, including any product whose bits
+      failed. A run 1 that missed on speed is a KILL whatever P2 shows, so a fix can't buy a fresh speed draw.
   - **The only rerun (session P2)** is for a P1 that produced no valid Checkpoint 1 table, for one of these written
     reasons:
-    - (i) bring-up: a launch fault, a sanitizer error, a bits mismatch, or a missing `W4A8 S` / `PASSHIST` line;
+    - (i) bring-up: a launch fault, a sanitizer error, a bits mismatch (under M12's rule above), or a missing
+      `W4A8 S` / `PASSHIST` line (`W4A8 T <p> none` is not missing, M11). If run 1 produced no speed table at all
+      (a fault before the cells), there is nothing from run 1 to hold;
     - (ii) infrastructure: the pod was lost, the job was killed by the host, FOREIGN_GPU > 0 % (TAINTED), or the
       kit failed before the first cell.
   - P2 runs once. A second failure for any reason is a KILL.
@@ -274,6 +297,11 @@ mode 0/1 + bias, Q6 under the §3.3 choice) on the H100, in a probe-style bench 
          - Down6 at nb > 512 was never run.
          - **This assumption decides the low end** (table below). P1 measures it.
       5. The pass mix is main 0c23a87's, one T for all GEMM time, and decode excluded (§1's routing rule).
+      6. **Optimistic at small nb (Shady S12).** One S_w per pass treats the uncovered k / v / qkv at the nb 512
+         share (~5 %). In the pinned ANATSEG that share is 15.1 % of GEMM time at n 128, 5.8 % at 384 and 2.7 % at
+         1024, so the bound flatters passes just above T. `p1` mode is per product (uncovered classes at S = 1), so
+         the real stop is unaffected. The `gate`, `down` and `qkv` classes read ~0.087 ms at every n ≥ 64: marker
+         events, not GEMMs (under 1 %); `gate` is counted in gate_up's numerator.
     - **Bound at the registered assumptions** (slack 10, S 1.35 everywhere). The lower arm is read (M9):
 
     | T | fifo60 r ≥ | fifo60 low end | sjf80 r ≥ | sjf80 low end | lower arm |
@@ -301,7 +329,7 @@ mode 0/1 + bias, Q6 under the §3.3 choice) on the H100, in a probe-style bench 
     - **Inputs from P1's log,** in the format the script's `p1` mode parses:
       - `W4A8 S <product> nb <nb> <S>`: production W4A8 vs today's kernel, median of 7 interleaved rounds,
         bit-checked, at every Checkpoint-1 nb (384, 512, 768, 1024) and every swept nb;
-      - `W4A8 T <product> <T>`: per product;
+      - `W4A8 T <product> <T>|none`: per product; `none` means not routed, S = 1 (M11);
       - `PASSHIST` / `PASSMULTI` / `FEEDSHARE` for one fifo60 and one sjf80 C = 128 serve cell on main, with
         explicit flags.
     - **The computation:**
@@ -323,7 +351,10 @@ mode 0/1 + bias, Q6 under the §3.3 choice) on the H100, in a probe-style bench 
   - C = 128 ITL p99 ≤ main × 1.05 (rounds 1–2, as registered);
   - **C = 128 short-prompt TTFT p50 (lead's ruling, 10-27, before any data):**
     - main and the candidate run interleaved in the same session, alternating rounds, ≥ 3 rounds per arm;
-    - the candidate's median over its rounds ≤ main's median × **max(1.05, 1 + main's round-to-round spread)**;
+    - the candidate's median over its rounds ≤ main's median × **min(max(1.05, 1 + main's round-to-round spread),
+      1.15)**. The 1.15 ceiling is the lead's (10-27, before any data), after Shady's S11: with 3 rounds the spread
+      tracks one outlier;
+    - main's spread and the resulting bar are **published next to the verdict**, per config;
     - spread = max / min − 1 of main's own per-round short TTFT p50, in that session, config and C, from main's
       rounds only;
   - every clause in both scheduler configs;
@@ -420,6 +451,8 @@ H100 SXM secure, $3.99/h. Each session follows the builder rules:
   Haseeb told in advance, and `--piggy` is never passed.
 - **Booking condition.** A session is booked only when `axon-pods budget` shows window-left ≥ $3.99 + $0.50 at
   booking time. If not, it waits for a later window; it is never squeezed in.
+- **Clean 4090 timing lanes go first** (the policy's order; Shady S10). If an `axon-run --timing 4090` job is queued
+  for the window, this line's session defers until that job has run, or until a later window.
 
 | session | content | ESTIMATED pod time | ESTIMATED spend | window |
 |---|---|---|---|---|
@@ -441,7 +474,11 @@ this line, except W3 for P3 + P4 as stated.
 | clean | P1, P3, P4, P5 | **$6.85** |
 | + P2 rerun | + P2 | $8.20 |
 | + (A) fallback | + (A) session | $9.30 |
-| + Checkpoint 2 bits rerun | + P3, P4 again | $12.85: **past the cap, needs the lead's go in writing** before the rerun is booked |
+| + Checkpoint 2 infrastructure rerun | + P4 again | clean + $1.60 = $8.45; with P2 and (A): **$10.90** |
+| + Checkpoint 2 bits rerun | + P3, P4 again | $12.85 |
+
+- **Any path whose spend would pass $10 needs the lead's go in writing before the session that crosses it is
+  booked.** That covers P2 + (A) + an infrastructure rerun ($10.90) and every bits-rerun path ($12.85).
 
 - **Spend stops at the first failed checkpoint:**
   - a Checkpoint 1 KILL ends the line at $1.35, or $2.70 with P2;

@@ -40,7 +40,9 @@ MODE p1 (the unconditional post-P1 re-run, pre-registered in section 4). It read
   W4A8 S <product> nb <nb> <S>       per product in {gate_up, down4, down6, q/wo}, at every Checkpoint-1-quality nb
                                      (at least 384, 512, 768, 1024) and every swept nb (bits-checked; S = today's
                                      kernel ms / production W4A8 ms, median over 7 interleaved rounds)
-  W4A8 T <product> <T>               the threshold P1's sweep picked, per product
+  W4A8 T <product> <T>|none          the threshold P1's sweep picked, per product; "none" = the product never stays
+                                     >= 1.05x from some nb up, so it is not routed and counts at S = 1 (a valid
+                                     input, not a missing one; M11)
   PASSHIST <arm> <fed>x<count> ...   single-feed-pass steps of the arm's C=128 serve cell (arm in {fifo60, sjf80})
   PASSMULTI <arm> <fed>/<feeds> ...  steps with >= 2 feed passes (fed tokens over feeds passes)
   FEEDSHARE <arm> <feed_ms> <wall_ms>
@@ -182,9 +184,9 @@ def cmd_p1(a, text):
         m = re.match(r"W4A8 S (\S+) nb (\d+) ([\d.]+)", l)
         if m:
             S.setdefault(m[1], {})[int(m[2])] = float(m[3])
-        m = re.match(r"W4A8 T (\S+) (\d+)", l)
+        m = re.match(r"W4A8 T (\S+) (\d+|none)\b", l)
         if m:
-            T[m[1]] = int(m[2])
+            T[m[1]] = None if m[2] == "none" else int(m[2])
         m = re.match(r"PASSHIST (\w+) (.*)", l)
         if m:
             for f, c in re.findall(r"(\d+)x(\d+)", m[2]):
@@ -195,14 +197,16 @@ def cmd_p1(a, text):
         m = re.match(r"FEEDSHARE (\w+) ([\d.]+) ([\d.]+)", l)
         if m:
             fsh[m[1]] = float(m[2]) / float(m[3])
-    need = [p for p in PRODUCTS if p not in S or p not in T or not {384, 512, 768, 1024} <= set(S.get(p, {}))]
+    # Every product needs its T line (a number or "none"); routed products need S at the Checkpoint-1 nb.
+    need = [p for p in PRODUCTS if p not in T
+            or (T[p] is not None and not {384, 512, 768, 1024} <= set(S.get(p, {})))]
     arms = [x for x in ("fifo60", "sjf80") if x in hist and x in fsh]
     if need or len(arms) < 2:
         print(f"W4A8 P1 STOP RULE: STOP (inputs missing: products {need}, arms {arms})")
         return 1
 
     def Sp(p, n):
-        if n < T[p]:
+        if T[p] is None or n < T[p]:
             return 1.0
         xs = sorted(S[p])
         if n >= xs[-1]:
@@ -213,7 +217,9 @@ def cmd_p1(a, text):
             if lo <= n <= hi:
                 return S[p][lo] + (S[p][hi] - S[p][lo]) * (n - lo) / (hi - lo)
 
-    tmin = min(T.values())
+    routed = [t for t in T.values() if t is not None]
+    print("W4A8 P1 T:", {p: ("none" if t is None else t) for p, t in T.items()})
+    tmin = min(routed) if routed else SMAX + 1
     lows = {}
     for arm in arms:
         passes = list(hist[arm])
