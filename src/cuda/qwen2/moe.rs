@@ -129,7 +129,6 @@ pub(crate) unsafe fn launch_router(
 /// AXON_MOE_PROFILE's report interval, in decode steps.
 const PROFILE_EVERY: f64 = 64.0;
 
-/// AXON_MOE_PROFILE's report: per layer and the sum.
 /// One decode step of layer `seg` (of n) into AXON_MOE_PROFILE's sums:
 /// its synced GPU segment time, its host round trip's four times (None: a
 /// resident layer, no round trip, CPU columns stay 0), and the step. Every
@@ -147,6 +146,7 @@ fn prof_step(p: &mut [Prof], seg: usize, n: usize, gpu_s: f64, cpu: Option<[f64;
     seg + 1 == n && p[seg][5] >= PROFILE_EVERY
 }
 
+/// AXON_MOE_PROFILE's report: per layer and the sum.
 fn profile_report(p: &[Prof]) {
     for l in profile_lines(p) {
         eprintln!("{l}");

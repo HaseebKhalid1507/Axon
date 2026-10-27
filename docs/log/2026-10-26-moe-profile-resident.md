@@ -3,10 +3,13 @@
 - Date: 2026-10-26. Branch: fix/moe-profile-resident. Track: roadmap item 3 (T2b's diagnosis needed it).
 
 ## What changed
-`cuda/qwen2/moe.rs`:
-- `moe_step` counts every MoE layer's decode step, resident layers included. A resident layer's experts are inside
-  its GPU segment, so its CPU columns stay 0.
-- The report's lines come from `profile_lines`, which skips a layer with no step counted.
+`cuda/qwen2/moe.rs`, profiling only (`AXON_MOE_PROFILE=1`):
+- **`prof_step`** is the profiler's single write point. Per MoE layer and decode step it adds the synced GPU
+  segment time, the host round trip's four CPU times (none for a resident layer, whose CPU columns stay 0), and
+  the step count. It returns "report now" on the last layer's `PROFILE_EVERY`-th step. Only `moe_step` calls it.
+- **`moe_round_trip`** returns its four times instead of adding them. So a 1-token batched pass (`moe_tokens`: a
+  1-token prompt, verify or suffix) no longer adds CPU time to the profile without a step (review round 1).
+- **`profile_lines`:** the report as lines; the footer counts the layers it shows.
 - Nothing changes without `AXON_MOE_PROFILE=1`.
 
 ## Why
@@ -16,6 +19,10 @@ The step count only grew in the host round trip, which a resident layer (`--gpu-
 the last layer's round trip triggered it.
 
 ## How it was verified
-- `moe_profile_report_resident_layer`: finite numbers, the empty layer skipped, the sum equal to the parts.
-- A GPU smoke run: `--gpu-experts` partial and `auto` with `AXON_MOE_PROFILE=1`, the report finite and printed.
+- **`moe_profile_counts_every_layer`:** runs `prof_step` over `PROFILE_EVERY` decode steps of 3 layers, for
+  resident-only, offloaded-only and mixed placements. Every layer counts every step, the report fires once on the
+  last layer's last step, and its lines are finite with resident layers' CPU columns 0.
+- **`moe_profile_lines_sum`:** the report's arithmetic.
+- **GPU smoke:** `AXON_MOE_PROFILE=1`, 4x0.6B, `--gpu-experts 14 / auto / 0`. The report prints in all three
+  placements (`profsmoke.sh` shows the last report of each run) with no `inf` / `NaN`.
 - The fast tier and the md5 gate; job ids are in the PR.
