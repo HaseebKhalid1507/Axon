@@ -1,0 +1,155 @@
+[axon-run 01:45:19] submitted 1027-014519-e6bd by /home/haseeb/.cache/axon-feedanat: /usr/bin/bash /home/haseeb/.cache/axon-feedanat/h100/sess_h100.sh
+[axon-run 01:45:20] scope axon-job-1027-014519-e6bd-1793079920.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 14000 MB): an OOM here kills only this job
+[axon-run 01:45:20] job 1027-014519-e6bd -> bella: systemd-run --user --scope --quiet --unit=axon-job-1027-014519-e6bd-1793079920 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash /home/haseeb/.cache/axon-feedanat/h100/sess_h100.sh
+axon-q 01:45:20 start slot 16-23: /usr/bin/bash /home/haseeb/.cache/axon-feedanat/h100/sess_h100.sh
+[sess +0s] kernel cache: 283 -> 283 entries (/home/haseeb/.cache/axon/cuda)
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 615.78.08, 12227 MiB, 3090 MHz, 14001 MHz
+52ec69f2e8cc95be1f370fb0def6e165d1703c7a1e371eb5f6d6737e87b8e027  axon-test
+2fdc2f366d29885e602e95e166a4e654104f42e7338e039aae959cd76f6c7a75  axon
+c3ff5fb849cd7dc9958de23fd41b6ddbaf13a0c99b2df9f5d51dbd403dd86cbb  prompts-mix-v2.jsonl
+a82b55c178a2fa9bf2c50031390210214111b447d3e9737d5d9e70b44b4ff7c8  sd_client.py
+f20651a3133840a3fef24ea15b89dc08844a2c635d04dcac4fd23b24da4146d5  anat.py
+[sess +2s] model /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf: 65b8fcd92af6b4fe (also pulls it into the page cache)
+[sess +2s] arms fifo60,sjf60,fifo50,sjf50,fifo80,sjf80 rounds 2 C 64,128 scale 3
+[sess +2s] anat
+feed anatomy: /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA GeForce RTX 5070 Ti Laptop GPU (46 SMs), pass max 1152, paged true
+ANAT | depth | n | wall ms | enq ms | wait ms | graph ms | ev ms | gemm ms | attn ms | other ms | launch+gaps ms (wall - graph) |
+ANAT | 0 | 16 | 15.662 | 0.447 | 16.037 | 15.302 | 16.824 | 15.627 | 0.584 | 0.613 | 0.360 |
+ANATSEG depth 0 n 16: embed 0.006, rope 0.005, rmsnorm 0.412, k 0.462, v6 0.242, qkv 0.575, rope_kv 0.125, attn 0.289, combine 0.169, wo 0.895, gate 7.736, gate_up 0.033, swiglu 0.191, down6 2.686, down 0.015, down4 2.982
+ANAT | 0 | 64 | 21.834 | 0.494 | 20.824 | 21.092 | 21.536 | 19.686 | 1.059 | 0.791 | 0.742 |
+ANATSEG depth 0 n 64: embed 0.017, rope 0.004, rmsnorm 0.470, q 1.508, k 0.824, v6 0.386, qkv 0.021, rope_kv 0.649, attn 0.277, combine 0.133, wo 1.131, gate 0.033, gate_up 7.875, swiglu 0.300, down6 4.181, down 0.011, v4 0.765, down4 2.952
+ANAT | 0 | 128 | 31.892 | 0.541 | 30.285 | 31.298 | 32.419 | 30.051 | 1.289 | 1.080 | 0.594 |
+ANATSEG depth 0 n 128: embed 0.023, rope 0.006, rmsnorm 0.594, q 1.770, k 0.650, v6 0.731, qkv 0.030, rope_kv 0.300, attn 0.800, combine 0.188, wo 1.717, gate 0.043, gate_up 13.518, swiglu 0.457, down6 6.944, down 0.033, v4 0.304, down4 4.312
+ANAT | 0 | 256 | 52.392 | 0.474 | 50.964 | 51.815 | 51.784 | 48.888 | 1.313 | 1.583 | 0.577 |
+ANATSEG depth 0 n 256: embed 0.032, rope 0.006, rmsnorm 0.728, q 2.847, k 0.689, v6 0.629, qkv 0.012, rope_kv 0.386, attn 0.707, combine 0.220, wo 2.644, gate 0.025, gate_up 24.985, swiglu 0.816, down6 9.764, down 0.010, v4 0.335, down4 6.948
+ANAT | 0 | 384 | 75.271 | 0.494 | 73.515 | 74.448 | 75.450 | 70.682 | 2.092 | 2.675 | 0.824 |
+ANATSEG depth 0 n 384: embed 0.045, rope 0.008, rmsnorm 1.050, q 3.864, k 1.174, v6 0.742, qkv 0.028, rope_kv 0.552, attn 1.237, combine 0.303, wo 4.294, gate 0.042, gate_up 39.106, swiglu 1.572, down6 12.184, down 0.010, v4 0.513, down4 8.724
+ANAT | 0 | 512 | 97.231 | 0.496 | 96.880 | 97.353 | 97.131 | 90.692 | 2.790 | 3.649 | -0.122 |
+ANATSEG depth 0 n 512: embed 0.061, rope 0.025, rmsnorm 1.284, q 5.074, k 1.036, v6 0.810, qkv 0.021, rope_kv 0.673, attn 1.764, combine 0.353, wo 4.865, gate 0.027, gate_up 51.067, swiglu 2.278, down6 16.151, down 0.011, v4 0.512, down4 11.118
+ANAT | 0 | 768 | 148.428 | 0.502 | 148.436 | 148.627 | 150.468 | 139.197 | 5.265 | 6.005 | -0.199 |
+ANATSEG depth 0 n 768: embed 0.067, rope 0.013, rmsnorm 1.768, q 7.260, k 2.244, v6 1.129, qkv 0.012, rope_kv 0.909, attn 3.918, combine 0.438, wo 7.801, gate 0.033, gate_up 75.510, swiglu 4.158, down6 26.570, down 0.030, v4 0.926, down4 17.682
+ANAT | 0 | 1024 | 194.698 | 0.498 | 194.325 | 194.662 | 196.474 | 180.689 | 7.933 | 7.852 | 0.036 |
+ANATSEG depth 0 n 1024: embed 0.095, rope 0.016, rmsnorm 2.485, q 9.881, k 1.896, v6 1.153, qkv 0.010, rope_kv 1.229, attn 6.156, combine 0.548, wo 9.921, gate 0.024, gate_up 102.267, swiglu 5.256, down6 32.075, down 0.011, v4 0.950, down4 22.500
+ANAT | 1000 | 16 | 15.601 | 0.443 | 14.799 | 15.024 | 15.236 | 13.739 | 0.855 | 0.642 | 0.577 |
+ANATSEG depth 1000 n 16: embed 0.005, rope 0.004, rmsnorm 0.429, k 0.474, v6 0.257, qkv 0.598, rope_kv 0.133, attn 0.525, combine 0.196, wo 0.929, gate 6.585, gate_up 0.049, swiglu 0.203, down6 2.774, down 0.019, down4 2.055
+ANAT | 1000 | 64 | 20.460 | 0.476 | 20.164 | 20.195 | 21.801 | 19.127 | 1.889 | 0.785 | 0.265 |
+ANATSEG depth 1000 n 64: embed 0.014, rope 0.006, rmsnorm 0.478, q 1.228, k 0.645, v6 0.412, qkv 0.021, rope_kv 0.229, attn 1.545, combine 0.115, wo 1.154, gate 0.022, gate_up 7.609, swiglu 0.287, down6 4.939, down 0.025, v4 0.315, down4 2.758
+ANAT | 1000 | 128 | 31.748 | 0.495 | 30.975 | 30.757 | 33.141 | 29.496 | 2.631 | 1.014 | 0.991 |
+ANATSEG depth 1000 n 128: embed 0.024, rope 0.007, rmsnorm 0.532, q 1.846, k 0.640, v6 0.398, qkv 0.011, rope_kv 0.256, attn 2.213, combine 0.162, wo 1.783, gate 0.024, gate_up 13.764, swiglu 0.452, down6 6.158, down 0.018, v4 0.315, down4 4.540
+ANAT | 1000 | 256 | 55.141 | 0.499 | 54.743 | 55.093 | 55.783 | 49.137 | 5.032 | 1.614 | 0.048 |
+ANATSEG depth 1000 n 256: embed 0.034, rope 0.006, rmsnorm 0.733, q 2.771, k 0.671, v6 0.623, qkv 0.012, rope_kv 0.380, attn 4.434, combine 0.219, wo 3.239, gate 0.021, gate_up 24.979, swiglu 0.840, down6 9.758, down 0.025, v4 0.330, down4 6.709
+ANAT | 1000 | 384 | 85.473 | 0.503 | 84.608 | 85.343 | 85.704 | 76.589 | 6.688 | 2.428 | 0.130 |
+ANATSEG depth 1000 n 384: embed 0.040, rope 0.008, rmsnorm 1.036, q 3.614, k 0.970, v6 0.752, qkv 0.011, rope_kv 0.852, attn 5.559, combine 0.277, wo 4.546, gate 0.024, gate_up 41.583, swiglu 1.343, down6 13.875, down 0.042, v4 0.488, down4 10.683
+ANAT | 1000 | 512 | 104.765 | 0.502 | 103.248 | 104.189 | 102.354 | 89.875 | 8.026 | 4.454 | 0.576 |
+ANATSEG depth 1000 n 512: embed 0.038, rope 0.010, rmsnorm 2.362, q 4.612, k 0.994, v6 0.786, qkv 0.011, rope_kv 0.625, attn 7.064, combine 0.337, wo 4.645, gate 0.031, gate_up 50.592, swiglu 2.042, down6 15.585, down 0.021, v4 0.499, down4 12.099
+ANAT | 1000 | 768 | 156.689 | 0.504 | 156.039 | 156.228 | 156.476 | 137.925 | 12.731 | 5.820 | 0.461 |
+ANATSEG depth 1000 n 768: embed 0.070, rope 0.013, rmsnorm 1.973, q 7.840, k 1.860, v6 1.136, qkv 0.023, rope_kv 0.924, attn 11.377, combine 0.430, wo 8.223, gate 0.032, gate_up 74.175, swiglu 3.764, down6 24.837, down 0.046, v4 0.944, down4 18.808
+ANAT | 1000 | 1024 | 221.252 | 0.483 | 213.379 | 214.134 | 215.063 | 188.032 | 18.886 | 8.145 | 7.118 |
+ANATSEG depth 1000 n 1024: embed 0.083, rope 0.015, rmsnorm 2.236, q 11.012, k 1.872, v6 1.159, qkv 0.017, rope_kv 1.609, attn 16.515, combine 0.762, wo 11.239, gate 0.024, gate_up 103.435, swiglu 5.811, down6 33.515, down 0.041, v4 1.266, down4 24.452
+ANAT | 2000 | 16 | 16.772 | 0.437 | 16.168 | 16.930 | 17.019 | 15.014 | 1.348 | 0.656 | -0.158 |
+ANATSEG depth 2000 n 16: embed 0.014, rope 0.004, rmsnorm 0.430, k 0.479, v6 0.253, qkv 0.596, rope_kv 0.132, attn 0.970, combine 0.246, wo 0.952, gate 7.407, gate_up 0.044, swiglu 0.208, down6 2.781, down 0.016, down4 2.486
+ANAT | 2000 | 64 | 22.542 | 0.500 | 22.031 | 22.156 | 26.538 | 21.337 | 4.465 | 0.736 | 0.386 |
+ANATSEG depth 2000 n 64: embed 0.010, rope 0.006, rmsnorm 0.463, q 1.963, k 0.613, v6 0.386, qkv 0.021, rope_kv 0.204, attn 4.138, combine 0.124, wo 2.066, gate 0.022, gate_up 9.153, swiglu 0.257, down6 4.317, down 0.023, v4 0.301, down4 2.471
+ANAT | 2000 | 128 | 39.500 | 0.496 | 37.198 | 39.577 | 48.681 | 43.556 | 4.112 | 1.013 | -0.077 |
+ANATSEG depth 2000 n 128: embed 0.014, rope 0.004, rmsnorm 0.511, q 1.732, k 0.609, v6 1.728, qkv 0.012, rope_kv 0.253, attn 3.698, combine 0.161, wo 5.103, gate 0.021, gate_up 20.886, swiglu 0.483, down6 8.049, down 0.020, v4 0.300, down4 5.096
+ANAT | 2000 | 256 | 62.870 | 0.500 | 61.940 | 61.565 | 58.624 | 49.262 | 7.730 | 1.631 | 1.305 |
+ANATSEG depth 2000 n 256: embed 0.033, rope 0.008, rmsnorm 0.733, q 3.375, k 0.695, v6 0.431, qkv 0.011, rope_kv 0.379, attn 7.117, combine 0.234, wo 2.761, gate 0.022, gate_up 25.321, swiglu 0.857, down6 9.533, down 0.026, v4 0.335, down4 6.753
+ANAT | 2000 | 384 | 82.389 | 0.502 | 80.718 | 82.631 | 91.588 | 78.420 | 10.739 | 2.429 | -0.242 |
+ANATSEG depth 2000 n 384: embed 0.044, rope 0.008, rmsnorm 1.016, q 5.143, k 0.964, v6 0.747, qkv 0.012, rope_kv 0.502, attn 9.949, combine 0.287, wo 6.080, gate 0.022, gate_up 40.055, swiglu 1.361, down6 14.351, down 0.023, v4 0.487, down4 10.535
+ANAT | 2000 | 512 | 116.694 | 0.503 | 118.403 | 119.431 | 117.169 | 98.944 | 13.306 | 4.919 | -2.737 |
+ANATSEG depth 2000 n 512: embed 0.068, rope 0.022, rmsnorm 2.140, q 7.419, k 1.014, v6 0.787, qkv 0.035, rope_kv 0.647, attn 12.309, combine 0.349, wo 6.329, gate 0.025, gate_up 52.977, swiglu 2.689, down6 17.394, down 0.048, v4 0.509, down4 12.407
+ANAT | 2000 | 768 | 166.066 | 0.489 | 165.858 | 165.104 | 165.198 | 138.256 | 21.023 | 5.919 | 0.962 |
+ANATSEG depth 2000 n 768: embed 0.082, rope 0.033, rmsnorm 1.748, q 7.071, k 1.854, v6 1.135, qkv 0.011, rope_kv 0.911, attn 19.664, combine 0.448, wo 7.323, gate 0.024, gate_up 75.958, swiglu 4.055, down6 24.557, down 0.030, v4 0.933, down4 19.359
+ANAT | 2000 | 1024 | 214.216 | 0.497 | 216.971 | 222.969 | 244.070 | 208.175 | 28.513 | 7.382 | -8.753 |
+ANATSEG depth 2000 n 1024: embed 0.078, rope 0.015, rmsnorm 2.221, q 15.006, k 1.795, v6 1.114, qkv 0.014, rope_kv 2.523, attn 25.272, combine 0.718, wo 10.597, gate 0.057, gate_up 114.879, swiglu 5.068, down6 34.766, down 0.057, v4 0.907, down4 28.983
+ANAT | 4000 | 16 | 18.487 | 0.445 | 16.186 | 16.015 | 18.820 | 16.432 | 1.738 | 0.650 | 2.471 |
+ANATSEG depth 4000 n 16: embed 0.010, rope 0.004, rmsnorm 0.424, k 0.490, v6 0.252, qkv 0.600, rope_kv 0.122, attn 1.272, combine 0.344, wo 1.118, gate 8.101, gate_up 0.046, swiglu 0.212, down6 2.828, down 0.016, down4 2.980
+ANAT | 4000 | 64 | 26.357 | 0.491 | 26.688 | 26.811 | 29.306 | 22.910 | 5.618 | 0.777 | -0.454 |
+ANATSEG depth 4000 n 64: embed 0.016, rope 0.004, rmsnorm 0.465, q 1.174, k 0.614, v6 0.381, qkv 0.022, rope_kv 0.218, attn 5.292, combine 0.108, wo 1.101, gate 0.021, gate_up 10.726, swiglu 0.293, down6 4.214, down 0.028, v4 1.334, down4 3.295
+ANAT | 4000 | 128 | 40.372 | 0.500 | 39.534 | 40.457 | 39.796 | 28.602 | 10.161 | 1.033 | -0.086 |
+ANATSEG depth 4000 n 128: embed 0.014, rope 0.006, rmsnorm 0.563, q 1.835, k 0.642, v6 0.399, qkv 0.012, rope_kv 0.269, attn 9.714, combine 0.178, wo 1.813, gate 0.033, gate_up 13.032, swiglu 0.450, down6 5.168, down 0.013, v4 0.314, down4 5.342
+ANAT | 4000 | 256 | 64.667 | 0.522 | 65.289 | 67.820 | 64.289 | 50.126 | 12.357 | 1.806 | -3.153 |
+ANATSEG depth 4000 n 256: embed 0.035, rope 0.006, rmsnorm 0.733, q 2.774, k 0.671, v6 0.424, qkv 0.011, rope_kv 0.380, attn 11.756, combine 0.221, wo 2.763, gate 0.023, gate_up 24.643, swiglu 1.033, down6 9.861, down 0.029, v4 0.337, down4 8.591
+ANAT | 4000 | 384 | 90.992 | 0.498 | 91.188 | 91.041 | 95.205 | 74.227 | 18.532 | 2.446 | -0.049 |
+ANATSEG depth 4000 n 384: embed 0.042, rope 0.008, rmsnorm 1.026, q 5.095, k 1.090, v6 0.752, qkv 0.015, rope_kv 0.499, attn 17.176, combine 0.857, wo 3.890, gate 0.035, gate_up 40.042, swiglu 1.369, down6 12.668, down 0.031, v4 0.482, down4 10.126
+ANAT | 4000 | 512 | 129.980 | 0.505 | 130.057 | 129.202 | 131.943 | 102.464 | 25.412 | 4.068 | 0.778 |
+ANATSEG depth 4000 n 512: embed 0.038, rope 0.010, rmsnorm 1.214, q 5.860, k 1.785, v6 0.768, qkv 0.015, rope_kv 0.634, attn 24.429, combine 0.348, wo 5.507, gate 0.023, gate_up 58.943, swiglu 2.806, down6 16.803, down 0.039, v4 0.492, down4 12.227
+ANAT | 4000 | 768 | 186.915 | 0.510 | 185.542 | 186.878 | 187.237 | 144.426 | 36.734 | 6.076 | 0.037 |
+ANATSEG depth 4000 n 768: embed 0.067, rope 0.013, rmsnorm 1.702, q 7.423, k 1.828, v6 1.611, qkv 0.037, rope_kv 0.939, attn 35.356, combine 0.439, wo 8.210, gate 0.023, gate_up 77.478, swiglu 4.294, down6 25.615, down 0.055, v4 2.039, down4 20.107
+ANAT | 4000 | 1024 | 242.427 | 0.507 | 241.956 | 241.977 | 242.106 | 185.358 | 48.774 | 7.973 | 0.450 |
+ANATSEG depth 4000 n 1024: embed 0.082, rope 0.015, rmsnorm 2.214, q 10.480, k 2.117, v6 2.423, qkv 0.025, rope_kv 1.246, attn 46.955, combine 0.573, wo 9.730, gate 0.024, gate_up 103.599, swiglu 5.662, down6 32.289, down 0.039, v4 0.931, down4 23.701
+ANAT | 6000 | 16 | 18.680 | 0.459 | 18.682 | 18.384 | 18.364 | 15.490 | 2.246 | 0.629 | 0.296 |
+ANATSEG depth 6000 n 16: embed 0.005, rope 0.004, rmsnorm 0.412, k 0.674, v6 0.244, qkv 0.599, rope_kv 0.130, attn 1.680, combine 0.436, wo 1.518, gate 7.194, gate_up 0.017, swiglu 0.208, down6 2.776, down 0.021, down4 2.447
+ANAT | 6000 | 64 | 27.376 | 0.494 | 27.456 | 27.721 | 27.955 | 18.091 | 9.100 | 0.764 | -0.345 |
+ANATSEG depth 6000 n 64: embed 0.019, rope 0.004, rmsnorm 0.469, q 1.167, k 0.614, v6 0.381, qkv 0.011, rope_kv 0.211, attn 8.776, combine 0.114, wo 1.257, gate 0.024, gate_up 7.600, swiglu 0.272, down6 3.875, down 0.015, v4 0.308, down4 2.837
+ANAT | 6000 | 128 | 42.204 | 0.511 | 41.390 | 41.989 | 42.051 | 28.073 | 12.924 | 1.055 | 0.215 |
+ANATSEG depth 6000 n 128: embed 0.019, rope 0.006, rmsnorm 0.551, q 1.793, k 0.630, v6 0.390, qkv 0.012, rope_kv 0.262, attn 12.498, combine 0.164, wo 2.257, gate 0.030, gate_up 12.470, swiglu 0.479, down6 5.515, down 0.025, v4 0.312, down4 4.639
+ANAT | 6000 | 256 | 72.749 | 0.504 | 71.541 | 71.543 | 72.884 | 51.072 | 19.956 | 1.856 | 1.207 |
+ANATSEG depth 6000 n 256: embed 0.023, rope 0.006, rmsnorm 0.759, q 2.771, k 0.696, v6 0.454, qkv 0.034, rope_kv 0.426, attn 19.312, combine 0.218, wo 3.476, gate 0.023, gate_up 25.635, swiglu 1.068, down6 9.675, down 0.043, v4 0.331, down4 7.934
+ANAT | 6000 | 384 | 101.036 | 0.495 | 100.982 | 101.214 | 108.761 | 77.547 | 28.361 | 2.852 | -0.178 |
+ANATSEG depth 6000 n 384: embed 0.046, rope 0.008, rmsnorm 0.984, q 4.215, k 0.943, v6 1.624, qkv 0.013, rope_kv 0.500, attn 27.579, combine 0.282, wo 3.914, gate 0.022, gate_up 43.321, swiglu 1.815, down6 13.521, down 0.035, v4 0.657, down4 9.281
+ANAT | 6000 | 512 | 140.731 | 0.511 | 140.144 | 139.718 | 132.722 | 97.906 | 31.478 | 3.339 | 1.013 |
+ANATSEG depth 6000 n 512: embed 0.051, rope 0.010, rmsnorm 1.255, q 5.958, k 1.198, v6 1.344, qkv 0.017, rope_kv 1.206, attn 29.937, combine 0.335, wo 4.636, gate 0.025, gate_up 56.078, swiglu 2.023, down6 16.684, down 0.044, v4 0.494, down4 11.427
+ANAT | 6000 | 768 | 201.121 | 0.494 | 200.836 | 201.155 | 203.067 | 141.491 | 55.461 | 6.115 | -0.034 |
+ANATSEG depth 6000 n 768: embed 0.068, rope 0.013, rmsnorm 1.678, q 7.254, k 1.819, v6 1.127, qkv 0.024, rope_kv 0.917, attn 54.070, combine 0.473, wo 7.475, gate 0.023, gate_up 75.571, swiglu 4.356, down6 26.751, down 0.047, v4 0.913, down4 20.486
+ANAT | 6000 | 1024 | 261.073 | 0.508 | 259.086 | 260.899 | 252.757 | 177.682 | 67.173 | 7.901 | 0.174 |
+ANATSEG depth 6000 n 1024: embed 0.085, rope 0.015, rmsnorm 2.220, q 9.293, k 1.874, v6 1.566, qkv 0.015, rope_kv 1.237, attn 64.829, combine 1.107, wo 8.837, gate 0.025, gate_up 99.325, swiglu 5.581, down6 32.486, down 0.049, v4 1.321, down4 22.893
+[sess +144s] anal
+
+## Feed pass anatomy (pool_feed_anatomy; ms; shares of wall: kernels = graph replay split by event class)
+| depth | n | wall | enqueue | graph | GEMM % | attention % | other % | launch+gaps % |
+|---|---|---|---|---|---|---|---|---|
+| 0 | 16 | 15.66 | 0.45 | 15.30 | 91 | 3 | 4 | 2 |
+| 0 | 64 | 21.83 | 0.49 | 21.09 | 88 | 5 | 4 | 3 |
+| 0 | 128 | 31.89 | 0.54 | 31.30 | 91 | 4 | 3 | 2 |
+| 0 | 256 | 52.39 | 0.47 | 51.81 | 93 | 3 | 3 | 1 |
+| 0 | 384 | 75.27 | 0.49 | 74.45 | 93 | 3 | 4 | 1 |
+| 0 | 512 | 97.23 | 0.50 | 97.35 | 93 | 3 | 4 | -0 |
+| 0 | 768 | 148.43 | 0.50 | 148.63 | 93 | 4 | 4 | -0 |
+| 0 | 1024 | 194.70 | 0.50 | 194.66 | 92 | 4 | 4 | 0 |
+| 1000 | 16 | 15.60 | 0.44 | 15.02 | 87 | 5 | 4 | 4 |
+| 1000 | 64 | 20.46 | 0.48 | 20.20 | 87 | 9 | 4 | 1 |
+| 1000 | 128 | 31.75 | 0.49 | 30.76 | 86 | 8 | 3 | 3 |
+| 1000 | 256 | 55.14 | 0.50 | 55.09 | 88 | 9 | 3 | 0 |
+| 1000 | 384 | 85.47 | 0.50 | 85.34 | 89 | 8 | 3 | 0 |
+| 1000 | 512 | 104.77 | 0.50 | 104.19 | 87 | 8 | 4 | 1 |
+| 1000 | 768 | 156.69 | 0.50 | 156.23 | 88 | 8 | 4 | 0 |
+| 1000 | 1024 | 221.25 | 0.48 | 214.13 | 85 | 8 | 4 | 3 |
+| 2000 | 16 | 16.77 | 0.44 | 16.93 | 89 | 8 | 4 | -1 |
+| 2000 | 64 | 22.54 | 0.50 | 22.16 | 79 | 17 | 3 | 2 |
+| 2000 | 128 | 39.50 | 0.50 | 39.58 | 90 | 8 | 2 | -0 |
+| 2000 | 256 | 62.87 | 0.50 | 61.56 | 82 | 13 | 3 | 2 |
+| 2000 | 384 | 82.39 | 0.50 | 82.63 | 86 | 12 | 3 | -0 |
+| 2000 | 512 | 116.69 | 0.50 | 119.43 | 86 | 12 | 4 | -2 |
+| 2000 | 768 | 166.07 | 0.49 | 165.10 | 83 | 13 | 4 | 1 |
+| 2000 | 1024 | 214.22 | 0.50 | 222.97 | 89 | 12 | 3 | -4 |
+| 4000 | 16 | 18.49 | 0.45 | 16.02 | 76 | 8 | 3 | 13 |
+| 4000 | 64 | 26.36 | 0.49 | 26.81 | 80 | 20 | 3 | -2 |
+| 4000 | 128 | 40.37 | 0.50 | 40.46 | 72 | 26 | 3 | -0 |
+| 4000 | 256 | 64.67 | 0.52 | 67.82 | 82 | 20 | 3 | -5 |
+| 4000 | 384 | 90.99 | 0.50 | 91.04 | 78 | 19 | 3 | -0 |
+| 4000 | 512 | 129.98 | 0.51 | 129.20 | 77 | 19 | 3 | 1 |
+| 4000 | 768 | 186.91 | 0.51 | 186.88 | 77 | 20 | 3 | 0 |
+| 4000 | 1024 | 242.43 | 0.51 | 241.98 | 76 | 20 | 3 | 0 |
+| 6000 | 16 | 18.68 | 0.46 | 18.38 | 83 | 12 | 3 | 2 |
+| 6000 | 64 | 27.38 | 0.49 | 27.72 | 66 | 33 | 3 | -1 |
+| 6000 | 128 | 42.20 | 0.51 | 41.99 | 66 | 31 | 2 | 1 |
+| 6000 | 256 | 72.75 | 0.50 | 71.54 | 69 | 27 | 3 | 2 |
+| 6000 | 384 | 101.04 | 0.49 | 101.21 | 71 | 26 | 3 | -0 |
+| 6000 | 512 | 140.73 | 0.51 | 139.72 | 73 | 24 | 2 | 1 |
+| 6000 | 768 | 201.12 | 0.49 | 201.16 | 70 | 27 | 3 | -0 |
+| 6000 | 1024 | 261.07 | 0.51 | 260.90 | 70 | 27 | 3 | 0 |
+ANAL: no cells.jsonl
+
+## #139 cells (medians over rounds; agg spread = max/min - 1)
+| C | arm | rounds | agg tok/s (spread) | short TTFT p50 | p99 | long TTFT p99 | long max | ITL p50 | ITL p99 | TPOT p50 | slo_ok | goodput |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+
+BITS: 0 of 0 requests identical (text_sha, completion_tokens) across 0 arms []
+
+RULE VERDICT (anatomy): n/a (no grid or no fifo60 C=128 trace)
+
+ANAL INCOMPLETE
+[sess +144s] kernel cache now 283 entries (was 283 + kit; more = compiled on this host)
+[sess +144s] SESS H100 DONE rc 1
+[axon-run 01:47:44] exit 1 after 144.3s (host bella)

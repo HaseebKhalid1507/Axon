@@ -1,0 +1,29 @@
+{
+ "label": "feedanat-ff6f1c3-anatcheck",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1027-014519-e6bd",
+   "name": "feedanat-ff6f1c3-anatcheck",
+   "rc": 1,
+   "verdict": "FAIL (rc 1)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "ff6f1c3",
+   "binary": "bash",
+   "started": 1793079920.265586,
+   "ended": 1793080066.631269,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "8438d14455adb73e883cd905bce3830e7040c1e95771297b7d76776dd84d2438",
+   "log_bytes": 18762
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-27 01:47:47 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
