@@ -1,11 +1,16 @@
 # Design note (Checkpoint 0): a production W4A8 prefill path on Hopper
 
-**Status: proposed. Nothing is built, nothing is booked.** Written 2026-10-27 on `feat/r11-w4a8-gate` (dd1e7fa, base
+**Status: proposed; pre-flight passed (10-27). Nothing is built, nothing is booked; Shady reviews before the build.** Written 2026-10-27 on `feat/r11-w4a8-gate` (dd1e7fa, base
 main 0c23a87), after rule P (#165) came back GO. Input: [../log/2026-10-27-w4a8-rule-p.md](../log/2026-10-27-w4a8-rule-p.md).
 Labels: **MEASURED** (job cited), **ESTIMATED** (arithmetic shown), **CODE** (file on the branch or main), **OPINION**.
 
-Ranking is not this note's call. Roadmap item 2 is SHELVED, and the agent track holds its slot (lead, 10-27). This
-note is what a restart would build and what would stop it. Whether to restart is for the lead and the owner.
+**Lead's decisions (Jawz, 10-27), recorded here:**
+- **Restart item 2: yes, conditionally** on a free local check of how much feed GEMM time falls in passes ≥ T.
+  Done: §4, "Pre-flight". Every T ∈ {128, 160, 192} keeps the ESTIMATE's low end above the +8 % bar, so the build
+  may proceed. Shady reviews this note first.
+- **No new numerics tier: accepted** as the contract (§2).
+- **Q6 copy option (A): acceptable** if the bits stay identical, the VRAM is accounted for, and it sits behind the
+  same flag (§3.3).
 
 ---
 
@@ -21,7 +26,8 @@ note is what a restart would build and what would stop it. Whether to restart is
   - the md5 gate is the correctness proof.
 - **Rollout:** behind `AXON_W4A8=1` (off by default) until a pre-registered end-to-end serve A/B on an H100 says GO;
   after that, on by default for sm_90a.
-- **ESTIMATED effect:** about +13 % aggregate at mix C = 128 (range +10 to +17 %). Kill bar +8 %.
+- **ESTIMATED effect:** about +13.5 % aggregate at mix C = 128. The low end is **+8.7 to +10.4 %**, re-derived
+  from the measured bound on pass sizes (§4); the high end is +18 %. Kill bar +8 %.
 - **Cost:** 3–5 builder-days and ≤ $10 of H100 (cap).
 
 ## 1. Scope: which products, which types, which hardware
@@ -52,6 +58,21 @@ note is what a restart would build and what would stop it. Whether to restart is
 - **MoE expert GEMMs:** different grids (#154 track).
 
 ## 2. Exactness: the contract stays the default one
+
+**The contract (accepted by the lead, 10-27):**
+- The W4A8 path is a **faster route to the same bits**, under the default (exact) contract.
+- Every output equals today's kernel's output for the same product: `gemmh2_q4_k_gu`, `gemmh2_q4_k` (modes 0 / 1,
+  with or without bias) and `gemm2(s)_q6k8`. Hence it also equals `gemv_ref`'s order (identity C).
+- There is no new `--numerics` tier, no `NUMERICS_VERSION` bump and no identity field. Routing (`AXON_W4A8`, the
+  threshold T, the GPU) can't change bits.
+- **Held in place, every round:**
+  - the bits tests on the H100 on every output (ragged shapes plus the 7B shapes);
+  - the md5 gate on the H100, `AXON_W4A8=1` vs `=0` vs main, n/N identical;
+  - at Checkpoint 2, text_sha and completion_tokens equal for every request.
+- **Any difference is a bug.** It is fixed, never toleranced away. If the contract can't be kept, the change doesn't
+  merge.
+
+Why it holds:
 
 - **What the contract requires (CODE, `docs/determinism.md`; identity C in `docs/design/determinism-modes.md`):**
   every product kernel equals `gemv_ref`'s order. That is: an exact integer block sum, then one fixed float chain
@@ -108,6 +129,13 @@ note is what a restart would build and what would stop it. Whether to restart is
        already the weak shape.
    - **Pre-registered pick:** time (B) in session P1. **Keep (B) if its exact down6 is within 3 % of the probe's
      PW6 numbers (0.2941 / 0.2904 ms) at nb 384 / 512; else build (A).**
+   - **(A)'s conditions (lead, 10-27).** All three must hold, checked in P3:
+     - **bits:** `gemm2s_q6k8` / `gemm2_q6k8` read the 304-B copy and give the same bits as with the 288-B copy (md5
+       on / off / main, plus the product bits tests);
+     - **VRAM accounted:** `make_q6k8`'s size check uses 304 B a block (`q6k8_fits`), and the load banner's "Q6_K
+       int8 copy" line reports the new size;
+     - **behind the same flag:** the 304-B layout is made only with `AXON_W4A8=1` on an sm_90a module. Otherwise
+       the 288-B Q6K8 copy is unchanged.
 4. **Threshold T.**
    - Session P1 sweeps nb ∈ {64, 96, 128, 192, 256, 320, 384, 448, 512, 768, 1024} on all four products.
    - T is the smallest nb at and above which the exact W4A8 kernel is ≥ 1.05× today's kernel at *every* swept nb,
@@ -139,22 +167,54 @@ nb 384 and 512.
   - Arms interleaved and order-reversed per round, fixed salt per (round, C).
   - Main (merge base) vs the candidate with `AXON_W4A8=1`, both at main's scheduler defaults of that day.
 - **Primary:** aggregate tok/s at C = 128, the median of the 2 rounds.
-- **ESTIMATE: +13.5 % (range +9.6 to +17.2 %).** Derivation:
+- **ESTIMATE: +13.5 %. Range: +8.7 to +18.2 %, with the low end re-derived from a measured bound (below).**
+  Derivation:
   - **MEASURED inputs:**
     - GEMM is 78.4 % of feed time (#157);
-    - feeds are 22.4 s of the cell's 38.9 s wall (57.6 %), fifo60 C = 128, 10-27;
+    - feeds are 57.5 % of wall (fifo60 C = 128, 44.77 s of 77.83 s over 2 rounds) and 56.8 % at sjf80;
     - the exact kernels' S_weighted is 1.50–1.54 (#165, INFO lines).
   - **ESTIMATED inputs:**
-    - production keeps 95 % of it, giving S ≈ 1.45;
-    - passes ≥ T carry ≈ 85 % of the feed GEMM time (the trace's p50 pass is 390 tokens; short prompts' 40–100-token
-      passes are many but small).
-  - **Arithmetic:**
-    - feed time saved = 0.784 × 0.85 × (1 − 1/1.45) = 0.207;
-    - wall saved = 0.576 × 0.207 = 0.119;
-    - aggregate = 1/(1 − 0.119) − 1 = **+13.5 %**.
-  - **Range:** coverage 0.75–0.95 and S 1.35–1.52 give +9.6 % to +17.2 %.
-  - **Pre-flight (local, $0, before the build):** measure the coverage from the 10-27 serve trace's pass-size
-    histogram × the anatomy's per-nb GEMM ms. If it comes out < 0.75, re-state this estimate before building.
+    - production keeps 95 % of the kernel speedup, giving S ≈ 1.45 (low end 1.35, high end 1.52);
+    - coverage c, the share of feed GEMM time in passes ≥ T: 0.85 for the point estimate. That lies inside the
+      measured bound below.
+  - **Arithmetic:** aggregate = 1/(1 − feed_share × 0.784 × c × (1 − 1/S)) − 1.
+    - point: 1/(1 − 0.576 × 0.784 × 0.85 × 0.310) − 1 = **+13.5 %**;
+    - high: c 1.0, S 1.52 → +18.2 %;
+    - low: S 1.35 at the bound's minimum c (table).
+  - **Pre-flight (done 10-27, local, $0): the measured bound on c.**
+    - **The data that exists.** The H100 serve traces' per-pass sizes were not kept: they lived on pods 2 and 3,
+      and only logs reached `gate-logs`. So c can't be read off a histogram. What the H100 job logs do give, per
+      cell (job 1027-030631-09ae):
+      - feed passes N, prompt tokens and the p50 pass size: fifo60 C = 128 743 / 744 passes, 242,688 / 244,340
+        tokens, p50 392 / 390; sjf80 C = 128 530 / 532 passes, 241,669 / 241,869 tokens, p50 707 / 695;
+      - the per-n GEMM ms grid (ANATSEG, n 16–1024);
+      - for fifo60, the grid's GEMM total over the cell's real passes: 0.784 × 41.32 s / 2 = 16.20 s.
+    - **The bound.** A linear program over the pass-size histogram (sizes 1–1152) finds the minimum and maximum c
+      that every histogram consistent with those numbers allows. It allows 10 passes of slack on the p50 split:
+      anat.py takes the p50 over steps, and 0.1–0.4 % of steps run two feed passes. The worst case piles half the
+      passes just under T.
+    - Script: `coverage_lp.py` in the builder's scratch dir. Bella's traces were not used: the step budget sizes
+      passes from the host's measured cost, so bella's passes are smaller.
+
+    | T | fifo60 C = 128: c ≥ | low end (S 1.35) | sjf80 C = 128: c ≥ | low end (S 1.35) |
+    |---|---|---|---|---|
+    | 128 | 0.759 | **+9.74 %** | 0.817 | **+10.42 %** |
+    | 160 | 0.720 | **+9.20 %** | 0.787 | **+9.99 %** |
+    | 192 | 0.681 | **+8.66 %** | 0.756 | **+9.57 %** |
+    | 256 (for reference) | 0.612 | +7.71 % | 0.717 | +9.02 % |
+    | 320 (for reference) | 0.580 | +7.28 % | 0.696 | +8.74 % |
+
+    - The maximum c is 0.97–1.0 at every T. sjf80's bound omits the GEMM-total constraint (none was published for
+      it), so it is the looser of the two.
+    - **Reading:** at every T the lead asked about (128, 160, 192), even the worst-case distribution keeps the low end
+      above +8 %, on both arms. Rule S passed (#165), so sjf80 is likely main's default by Checkpoint 2. **Pre-flight
+      passes: proceed.**
+    - **Added after the bound, stricter, not a change to Checkpoint 2.** If P1's sweep sets T > 192 for any product,
+      re-run the bound at that T on main's default arm before P3. If the low end falls under +8 %, stop before any
+      integration spend and report.
+    - **Closing the gap.** P1 and P4 print a per-pass size histogram into the job log (the serve trace's `fed` per
+      feed pass), so it lands in `gate-logs`. That turns this bound into a measurement before Checkpoint 2 is read.
+  - **As first written** (kept for the record): coverage 0.85 assumed, range +9.6 to +17.2 %.
 - **GO (merge; default on for sm_90a at nb ≥ T)** requires all of:
   - C = 128 aggregate ≥ **+8 %**;
   - C = 64 aggregate ≥ **+3 %**;
@@ -165,7 +225,8 @@ nb 384 and 512.
   - The code is not merged. Record it in `experiments-rejected.md`.
   - "Hopper exact int8 GEMM" is closed. Item 4's FP8 rule then measures against today's gemmh2.
   - **A bits failure is a bug, not a KILL:** fix it and rerun once; a second bits failure is a KILL.
-- **Why +8 %:** it sits under the estimate's low end (+9.6 %) because every Hopper estimate before #165 overshot.
+- **Why +8 %:** it sits under the estimate's low end (+9.6 % as first written; +8.66 % at the bound's worst case,
+  fifo60 T = 192) because every Hopper estimate before #165 overshot.
   #165's own estimates undershot the measurement, so the bar is not tightened either. The bar is not lowered after
   the data.
 - **Reported, not gating** (methodology: both pp and tg):
@@ -223,10 +284,10 @@ H100 SXM secure, $3.99/h. Each session follows the builder rules:
 
 | session | content | ESTIMATED pod time | ESTIMATED $ |
 |---|---|---|---|
-| P1 (day 2–3) | bring-up: memcheck tiny, bits on all entry points (modes 0/1, bias, gu), the nb sweep for T, the §3.3 (B)-vs-(A) timing, **Checkpoint 1** | ~12 min + ~4 boot | 1.10 |
+| P1 (day 2–3) | bring-up: memcheck tiny, bits on all entry points (modes 0/1, bias, gu), the nb sweep for T, the §3.3 (B)-vs-(A) timing, **Checkpoint 1**; one fifo60 + one sjf80 C = 128 serve cell on main with the per-pass histogram printed to the log (+~2 min) | ~12 min + ~4 boot | 1.10 |
 | P2 (contingency) | one fix round of P1 | ~12 + 4 | 1.10 |
 | P3 (day 4–5) | integration: H100 GPU test tier `full` with `AXON_W4A8=1` (`AXON_TEST_GPU_SERIAL=1`), md5 on / off / main | ~25 + 4 | 1.95 |
-| P4 | **Checkpoint 2** e2e A/B (2 rounds × C 64 / 128 × 2 arms) + pp / tg board | ~15 + 4 | 1.25 |
+| P4 | **Checkpoint 2** e2e A/B (2 rounds × C 64 / 128 × 2 arms) + pp / tg board; per-pass histograms in the log | ~15 + 4 | 1.25 |
 | P5 | review-round re-gate (P3's suite on the merge-ready head) | ~25 + 4 | 1.95 |
 | **total** | | | **≈ 7.35** |
 
@@ -239,10 +300,11 @@ H100 SXM secure, $3.99/h. Each session follows the builder rules:
   - days 4–5: integration, P3 / P4, the PR.
 - That is less than item 2's 6–10 days because the exact kernel already exists, already measured and bit-identical.
 
-## 7. Open questions for the lead
+## 7. Decisions (lead, 10-27) and what's open
 
-1. Restart item 2 at all, given the agent track holds its slot? (§0)
-2. Is "no new numerics tier" (§2) accepted? It hangs on one MEASURED fact (0 mismatches on every output) and stays
-   gated by the md5 gate in every round.
-3. Q6 copy (§3.3): (B) first, with (A) as the pre-registered fallback. Is a Q6K8 layout change (A) acceptable if (B)
-   misses?
+1. **Restart item 2:** yes, conditional on the pre-flight. The pre-flight passed (§4): the low end is +8.66 % to
+   +10.42 % at T ≤ 192.
+2. **No new numerics tier:** accepted as the contract (§2).
+3. **Q6 copy:** (B) first, with the pre-registered switch to (A). (A) is acceptable under §3.3's three conditions.
+4. **Open:** Shady's review of this note before any build. T itself, from P1's sweep; T > 192 triggers the §4
+   re-check.
