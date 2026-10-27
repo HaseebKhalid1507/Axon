@@ -53,9 +53,11 @@ before each run, and per-run taint comes from `nvidia-smi pmon` (axon-run's rule
   - edef is TAINTED (Xorg, max 53 %). Its six runs inside the two FOREIGN_GPU spike windows are replaced by their
     rerun in 6c71, which is CLEAN (max 0 %), and marked ‡ on the board. The first rerun, 8bc8, was tainted again and
     isn't used.
-- **Re-bench pending.** Every Axon number here is main 39624db, before #145 (680a2c5, MLA decode kernels; its own
-  A/B: tg128 +24.8 %, pp2101 +22.0 %, TAINTED). A re-bench on current main replaces the tables whole. Commits are
-  not mixed within a table.
+- **Re-bench on main 8508a75: three runs, all TAINTED** (1026-102643-eeb9, 1026-124838-2f63, 1026-205041-3204;
+  desktop load: Xorg, kitty, obs; foreign mean 14–25 %).
+  - Their accept ratios agree: tg128 ×2.14–2.37, pp512 ×3.73–4.88. None is a record.
+  - The 39624db tables are superseded.
+  - The clean record is the 4090 pod board; a quiet-night bella rerun is queued by the foreman.
 - **Why `auto` trails:** CUPTI traces of both engines (jobs edef, 8bc8; kernel durations GPU-side) put the gap in
   the MLA kernels (`mla_heads_mv`, `mla_attn`), not in the twin experts. Decode: +1.38 of +2.07 ms busy. Prefill:
   68–82 % of Axon's GPU time. #145 took the decode half; the prefill half is open. Exactness costs about 4 % of a decode step

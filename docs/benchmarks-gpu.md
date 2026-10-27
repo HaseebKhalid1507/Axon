@@ -545,10 +545,13 @@ The bench of record for `--gpu-experts` (MoE-resident PR D, roadmap item 3).
 - MEASURED, job `1025-225107-e28c`; raw results, job log and script are in the [gist](https://gist.github.com/HaseebKhalid1507/7c37456c09d035b98d2f2b7d7b21bf51).
   Log: [2026-10-26-moe-resident-bench](log/2026-10-26-moe-resident-bench.md).
 
-**Re-bench on current main: PENDING.** Every Axon number on this board is main `39624db`. That predates #145
-(merged as `680a2c5`), which made the MLA kernels faster. #145's own A/B (TAINTED run, at `auto`): tg128 +24.8 % (115.2 → 143.7, 0.85×
-llama.cpp) and pp2101 +22.0 %. A re-bench on
-current main will replace these tables whole. Rows are never mixed across commits.
+**Re-bench on current main (8508a75, #145 + #146 + #147): three runs, all TAINTED, none a record.** Jobs
+`1026-102643-eeb9`, `1026-124838-2f63` and `1026-205041-3204` ran the whole board on main `8508a75`. Each came back
+TAINTED from the owner's desktop load: foreign GPU max 61 / 63 / 58 %, mean 14.4 / 24.5 / 14.6 %, from Xorg, kitty
+and obs. Their accept-rule ratios agree with each other: `auto` vs N = 0 tg128 ×2.20 / ×2.14 / ×2.37 and pp512
+×3.73 / ×4.88 / ×3.77. They are not quoted here as numbers. The clean board is the RTX 4090 pod run (Qwen3-30B-A3B
+and Moonlight), and one more bella rerun is queued for a quiet night. The tables below are main `39624db`, before
+#145 / #147: they are **superseded** and kept as history.
 
 **Head-to-head at full residency, up front: llama.cpp is ahead.** At `auto` (25 or 26 of 26 expert layers on the
 GPU), Axon decodes at **0.71×** llama.cpp (121.7 vs 171.0 tok/s). Prefill is **0.45×** at pp512 and **0.34×** at
