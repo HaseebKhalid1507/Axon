@@ -1,0 +1,49 @@
+{
+ "label": "sjf80-poolwide-ab",
+ "verdict": "FAIL (2 of 2)",
+ "jobs": [
+  {
+   "job": "1027-095951-0faf",
+   "name": "sjf80-poolwide-main-6f06544",
+   "rc": 101,
+   "verdict": "FAIL (rc 101)",
+   "host": "avante",
+   "hw": "hw-avante.txt",
+   "gpu": "NVIDIA GeForce RTX 4050 Laptop GPU",
+   "driver": "610.43.02",
+   "sha": "6f06544",
+   "binary": "axon-test-main-6f06544",
+   "started": 1793109774.7531936,
+   "ended": 1793109788.3759892,
+   "attempts": 1,
+   "remote_job": "20261027-100300-axon-test-main-6f06544-873665",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "328619e68346b3f9b2c41fd140de3b84d11b38ffb2924ca4c072fbe1077577e9",
+   "log_bytes": 2313
+  },
+  {
+   "job": "1027-095952-3cf2",
+   "name": "sjf80-poolwide-7d2d32b",
+   "rc": 101,
+   "verdict": "FAIL (rc 101)",
+   "host": "avante",
+   "hw": "hw-avante.txt",
+   "gpu": "NVIDIA GeForce RTX 4050 Laptop GPU",
+   "driver": "610.43.02",
+   "sha": "7d2d32b",
+   "binary": "axon-test-7d2d32b",
+   "started": 1793109788.3759892,
+   "ended": 1793109798.6396732,
+   "attempts": 1,
+   "remote_job": "20261027-100309-axon-test-7d2d32b-873774",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "58225e7b80e5c7ea608737f4a07b2c382c3657331224577826da46caa3962916",
+   "log_bytes": 1942
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-27 10:03:19 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}

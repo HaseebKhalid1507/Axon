@@ -1,0 +1,25 @@
+[axon-run 09:59:52] submitted 1027-095952-3cf2 by /home/haseeb/.cache/axon-wt-sjf80: /home/haseeb/.cache/axon-sjf80/bin/axon-test-7d2d32b cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo --exact --nocapture --test-threads 1
+[axon-run 10:03:08] job 1027-095952-3cf2 -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 5500 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-wt-sjf80 /home/haseeb/.cache/axon-sjf80/bin/axon-test-7d2d32b cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo --exact --nocapture --test-threads 1
+axon-remote: job 20261027-100309-axon-test-7d2d32b-873774 on avante (GPU, 5500 MB)
+[axon-node 10:03:09] GPU lock taken; job wants 5500 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 57
+[axon-node 10:03:09] run axon-test-7d2d32b (f67affc61f976a6e0e6f04a1) as /home/haseeb/.cache/axon-wt-sjf80 on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo ... testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+
+thread 'cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo' (873786) panicked at src/cuda/qwen2/slots.rs:2213:46:
+called `Result::unwrap()` on an `Err` value: "a 46144-token cache needs 5.07 GiB of GPU memory (KV cache and scratch), 4.98 GiB is free; try a smaller --ctx (or -n), --kv q8 or the CPU"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 771 filtered out; finished in 4.20s
+
+[axon-node 10:03:14] exit 101 after 4.3s
+[axon-node 10:03:14] peak RSS 2979 MB (job process tree PSS, 2 s samples x2)
+[axon-run 10:03:14] exit 101 after 5.9s (host avante)
+[axon-run 10:03:18] FOREIGN_GPU max=?% mean=?% samples=0 (not sampled: ran before the guard, or pmon unavailable)
