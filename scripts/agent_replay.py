@@ -294,8 +294,12 @@ class Engine:
             except ValueError:
                 continue
             if j.get('error'):
+                # A mid-stream abort (e.g. ollama's "token repeat limit reached"): an engine-side failure. Keep
+                # its timing so its TTFT / ITL still count; it never counts toward goodput.
                 c.close()
-                return dict(error=f'ollama: {j["error"]}'[:300], t_send=t_send)
+                return dict(error=f'ollama: {j["error"]}'[:300], aborted=True, t_send=t_send,
+                            t_first=times[0] if times else None, t_done=time.perf_counter(), chunk_t=times,
+                            md5=hashlib.md5(''.join(parts).encode()).hexdigest(), usage=None, timings=None)
             t = j.get('response') or ''
             if t:
                 times.append(time.perf_counter())
@@ -477,11 +481,18 @@ def pct(v, p):
 
 def summarize(results, wall, prime_s, kv_gb, kind, foreign):
     ok = [x for x in results if 'error' not in x and x.get('t_first')]
+    # Requests the engine aborted after streaming started: their latency counts (dropping them would flatter the
+    # engine), their tokens don't count toward goodput.
+    aborted = [x for x in results if x.get('aborted') and x.get('t_first')]
+    lat = ok + aborted
     ttft = lambda xs: [x['t_first'] - x['t_send'] for x in xs]
-    new = [x for x in ok if x['new']]
-    resume = [x for x in ok if not x['new'] and x['gap'] is not None and x['gap'] > 30]
-    turn = [x for x in ok if not x['new'] and (x['gap'] is None or x['gap'] <= 30)]
+    new = [x for x in lat if x['new']]
+    resume = [x for x in lat if not x['new'] and x['gap'] is not None and x['gap'] > 30]
+    turn = [x for x in lat if not x['new'] and (x['gap'] is None or x['gap'] <= 30)]
     itl_all, good_tok = [], 0
+    for x in aborted:
+        itl_all += [b - a_ for a_, b in zip(x['chunk_t'], x['chunk_t'][1:])]
+        x['n_out'] = len(x['chunk_t'])
     for x in ok:
         it = [b - a_ for a_, b in zip(x['chunk_t'], x['chunk_t'][1:])]
         itl_all += it
@@ -505,7 +516,8 @@ def summarize(results, wall, prime_s, kv_gb, kind, foreign):
     mismatch = sum(1 for e, p, c in eng_p if (e is not None and e != p) or (e is None and c is not None and c > p))
     errs = [x.get('error') for x in results if 'error' in x]
     s = {
-        'requests': len(results), 'errors': len(results) - len(ok), 'wall_s': round(wall, 1),
+        'requests': len(results), 'errors': len(results) - len(ok), 'aborted': len(aborted),
+        'errors_without_first_token': len(results) - len(ok) - len(aborted), 'wall_s': round(wall, 1),
         'first_error': errs[0][:200] if errs else None,
         'prime_s': round(prime_s, 1),
         'ttft_new_p50': pct(ttft(new), 50), 'ttft_new_p99': pct(ttft(new), 99), 'n_new': len(new),
@@ -541,7 +553,7 @@ def summarize(results, wall, prime_s, kv_gb, kind, foreign):
                              n_out=x.get('n_out'), late_ms=x.get('late_ms'), md5=x.get('md5'),
                              ttft=round(x['t_first'] - x['t_send'], 4) if x.get('t_first') else None,
                              dur=round(x['t_done'] - x['t_send'], 3) if x.get('t_done') else None,
-                             err=x.get('error'))
+                             err=x.get('error'), aborted=bool(x.get('aborted')))
                         for x in sorted(results, key=lambda x: x['k'])]
     return s
 
@@ -1029,7 +1041,7 @@ def cmd_board(a):
                 started=time.strftime('%Y-%m-%d %H:%M:%S'), gpu=gpu_name())
     axon_tokens = a.kv_tokens
     port = a.port
-    for rnd in range(a.rounds):
+    for rnd in range(a.round_offset, a.round_offset + a.rounds):
         for kind in engines:
             port += 1
             proc = None
@@ -1103,7 +1115,8 @@ METRICS = [('TTFT-new p50 s', 'ttft_new_p50'), ('TTFT-new p99 s (max when n < 10
            ('re-prefill share (net)', 'reprefill_net_share'), ('preempted (axon /slots)', 'preempted'),
            ('output tok/s', 'output_tok_s'), ('replies short of max_tokens', 'out_tokens_short'),
            ('prompt-count mismatches', 'prompt_mismatch'),
-           ('wall s', 'wall_s'), ('errors', 'errors'),
+           ('wall s', 'wall_s'), ('errors (all kinds)', 'errors'),
+           ('  engine aborts mid-stream (latency counted, no goodput)', 'aborted'),
            ('tainted runs', 'tainted')]
 
 
@@ -1112,12 +1125,15 @@ def comparable(group):
     return not any(r['engine'] == 'ollama' and 'prompt_checked' not in r for r in group)
 
 
-def table(dirs):
+def table(dirs, clean_only=False):
     runs = []
     for d in dirs:
         for f in sorted(os.listdir(d)):
             if f.startswith('run-') and f.endswith('.json'):
-                runs.append(json.load(open(os.path.join(d, f))))
+                r = json.load(open(os.path.join(d, f)))
+                if clean_only and r.get('tainted'):
+                    continue   # the methodology's taint rule: a tainted run is a missing round
+                runs.append(r)
     groups = {}
     for r in runs:
         groups.setdefault((r['speed'], r['kv'], r['engine']), []).append(r)
@@ -1175,6 +1191,7 @@ def main():
             p.add_argument('--engines', default='axon,llama,ollama')
             p.add_argument('--kv', default='f16', choices=['f16', 'q8'])
             p.add_argument('--rounds', type=int, default=3)
+            p.add_argument('--round-offset', type=int, default=0, help='number rounds from here (targeted reruns)')
             p.add_argument('--speeds', default='1,4')
             p.add_argument('--axon')
             p.add_argument('--axon-parallel', type=int, default=16)
@@ -1206,6 +1223,7 @@ def main():
     p.add_argument('--out', required=True)
     p = sub.add_parser('table')
     p.add_argument('dirs', nargs='+')
+    p.add_argument('--clean-only', action='store_true', help='drop tainted runs (they count as missing rounds)')
     a = ap.parse_args()
     if a.cmd == 'run':
         cmd_run(a)
@@ -1214,7 +1232,7 @@ def main():
     elif a.cmd == 'fanout':
         cmd_fanout(a)
     else:
-        print(table(a.dirs))
+        print(table(a.dirs, a.clean_only))
 
 
 if __name__ == '__main__':
