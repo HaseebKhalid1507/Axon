@@ -1,0 +1,65 @@
+[axon-run 01:42:31] submitted 1027-014231-37d1 by /home/haseeb/.cache/axon-wt-attn-pool: /usr/bin/bash md5job.sh ./axon-base-ae1e26b ./axon-f41f2ec /home/haseeb/.cache/axon-attn-pool/md5-f41f2ec ./md5lib.sh ./serve_md5.py
+[axon-run 01:42:32] job 1027-014231-37d1 -> pod1 (pod 8tgzcdqdh9vv0j): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 12122 --src /home/haseeb/.cache/axon-podjob/md5job-8ddf3d52d6fb /usr/bin/bash md5job.sh ./axon-base-ae1e26b ./axon-f41f2ec /home/haseeb/.cache/axon-attn-pool/md5-f41f2ec ./md5lib.sh ./serve_md5.py
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (415bdab03c5d2b3cddc4bbd5) + source of /home/haseeb/.cache/axon-podjob/md5job-8ddf3d52d6fb
+
+sent 7,332,734 bytes  received 144 bytes  1,629,528.44 bytes/sec
+total size is 23,211,448  speedup is 3.17
+
+sent 168 bytes  received 35 bytes  81.20 bytes/sec
+total size is 89  speedup is 0.44
+axon-remote: job 20261027-054246-bash-1145 on pod1 (GPU, 12122 MB)
+[axon-node 05:42:46] GPU slot taken; job wants 12122 MB; nvidia-smi used/total 787/24564 MB; sharing with 20261027-054239-axon-test-f41f2ec-997, 20261027-054241-axon-test-dbg-f41f2ec-1053 (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 05:42:47] run bash (415bdab03c5d2b3cddc4bbd5) as /home/haseeb/.cache/axon-podjob/md5job-8ddf3d52d6fb on c6b0dea89b70, AXON_THREADS=4 RUST_TEST_THREADS=4; free 23297 MB of 24564 (used 787); GPU processes pid:MB 1010:386,1068:386
+NVIDIA GeForce RTX 4090, 8.9, 595.91.07
+base	qwen2.5-0.5b-q4_k_m	f16	p1	22703eeab624	rc=0	316B	50s
+cand	qwen2.5-0.5b-q4_k_m	f16	p1	22703eeab624	rc=0	316B	53s
+base	qwen2.5-0.5b-q4_k_m	f16	p2	73e02ab67347	rc=0	378B	0s
+cand	qwen2.5-0.5b-q4_k_m	f16	p2	73e02ab67347	rc=0	378B	1s
+base	qwen2.5-0.5b-q4_k_m	f16	p3	8498bfeb33d0	rc=0	9065B	0s
+cand	qwen2.5-0.5b-q4_k_m	f16	p3	8498bfeb33d0	rc=0	9065B	1s
+base	qwen2.5-0.5b-q4_k_m	q8	p1	cb9ea06a4c75	rc=0	311B	0s
+cand	qwen2.5-0.5b-q4_k_m	q8	p1	cb9ea06a4c75	rc=0	311B	1s
+base	qwen2.5-0.5b-q4_k_m	q8	p2	91013838d08b	rc=0	363B	0s
+cand	qwen2.5-0.5b-q4_k_m	q8	p2	91013838d08b	rc=0	363B	1s
+base	qwen2.5-0.5b-q4_k_m	q8	p3	018598999a72	rc=0	9065B	0s
+cand	qwen2.5-0.5b-q4_k_m	q8	p3	018598999a72	rc=0	9065B	1s
+base	Qwen2.5-7B-Instruct-Q4_K_M	f16	p1	02b667ba5ddc	rc=0	320B	1s
+cand	Qwen2.5-7B-Instruct-Q4_K_M	f16	p1	02b667ba5ddc	rc=0	320B	2s
+base	Qwen2.5-7B-Instruct-Q4_K_M	f16	p2	a0a829819411	rc=0	367B	2s
+cand	Qwen2.5-7B-Instruct-Q4_K_M	f16	p2	a0a829819411	rc=0	367B	1s
+base	Qwen2.5-7B-Instruct-Q4_K_M	f16	p3	f5b34062fe17	rc=0	9065B	3s
+cand	Qwen2.5-7B-Instruct-Q4_K_M	f16	p3	f5b34062fe17	rc=0	9065B	2s
+base	Qwen2.5-7B-Instruct-Q4_K_M	q8	p1	15395ccf5c86	rc=0	306B	2s
+cand	Qwen2.5-7B-Instruct-Q4_K_M	q8	p1	15395ccf5c86	rc=0	306B	1s
+base	Qwen2.5-7B-Instruct-Q4_K_M	q8	p2	c3e22f8d32bc	rc=0	368B	2s
+cand	Qwen2.5-7B-Instruct-Q4_K_M	q8	p2	c3e22f8d32bc	rc=0	368B	2s
+base	Qwen2.5-7B-Instruct-Q4_K_M	q8	p3	c11f266b2ca8	rc=0	9065B	2s
+cand	Qwen2.5-7B-Instruct-Q4_K_M	q8	p3	c11f266b2ca8	rc=0	9065B	2s
+base	Qwen3-8B-Q4_K_M	f16	p1	bf96565ab618	rc=0	339B	2s
+cand	Qwen3-8B-Q4_K_M	f16	p1	bf96565ab618	rc=0	339B	2s
+base	Qwen3-8B-Q4_K_M	f16	p2	6dd3b9fc024a	rc=0	385B	1s
+cand	Qwen3-8B-Q4_K_M	f16	p2	6dd3b9fc024a	rc=0	385B	2s
+base	Qwen3-8B-Q4_K_M	f16	p3	c2d7a2f2a69a	rc=0	9065B	3s
+cand	Qwen3-8B-Q4_K_M	f16	p3	c2d7a2f2a69a	rc=0	9065B	3s
+base	Qwen3-8B-Q4_K_M	q8	p1	0a81992aa5b6	rc=0	319B	2s
+cand	Qwen3-8B-Q4_K_M	q8	p1	0a81992aa5b6	rc=0	319B	2s
+base	Qwen3-8B-Q4_K_M	q8	p2	09b3a5bbc832	rc=0	375B	1s
+cand	Qwen3-8B-Q4_K_M	q8	p2	09b3a5bbc832	rc=0	375B	2s
+base	Qwen3-8B-Q4_K_M	q8	p3	be3042f598db	rc=0	9065B	3s
+cand	Qwen3-8B-Q4_K_M	q8	p3	be3042f598db	rc=0	9065B	2s
+--- cuda pairs differing:
+0 of 18 differ
+GEN MD5 rc=0
+MD5 qwen2.5-0.5b-q4_k_m kv f16: 48 requests, 1920 tokens, base/cand/cand-nb0 differ in 0
+MD5 qwen2.5-0.5b-q4_k_m kv q8: 48 requests, 1920 tokens, base/cand/cand-nb0 differ in 0
+MD5 Qwen3-0.6B-Q8_0 kv f16: 48 requests, 1920 tokens, base/cand/cand-nb0 differ in 0
+MD5 Qwen3-0.6B-Q8_0 kv q8: 48 requests, 1920 tokens, base/cand/cand-nb0 differ in 0
+MD5 Qwen2.5-7B-Instruct-Q4_K_M kv f16: 48 requests, 1920 tokens, base/cand/cand-nb0 differ in 0
+MD5 Qwen2.5-7B-Instruct-Q4_K_M kv q8: 48 requests, 1920 tokens, base/cand/cand-nb0 differ in 0
+MD5 RESULT PASS (0 differing)
+RC 0
+[axon-node 05:46:13] exit 0 after 206.7s
+[axon-node 05:46:13] peak RSS 666 MB (job process tree PSS, 2 s samples x102)
+[axon-run 01:46:15] exit 0 after 223.3s (host pod1)
+[axon-run 01:46:19] EXPECT ok: output matches /MD5 RESULT PASS/

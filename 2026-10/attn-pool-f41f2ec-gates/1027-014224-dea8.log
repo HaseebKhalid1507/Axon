@@ -1,0 +1,30 @@
+[axon-run 01:42:24] submitted 1027-014224-dea8 by /home/haseeb/.cache/axon-wt-attn-pool: /home/haseeb/.cache/axon-attn-pool/axon-test-dbg-f41f2ec cuda_attn_nb_exact pool_wide_long_steps_match_solo pool_steps_past_gemvm16_match_solo --nocapture
+[axon-run 01:42:24] job 1027-014224-dea8 -> pod1 (pod 8tgzcdqdh9vv0j): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 5000 --src /home/haseeb/.cache/axon-wt-attn-pool /home/haseeb/.cache/axon-attn-pool/axon-test-dbg-f41f2ec cuda_attn_nb_exact pool_wide_long_steps_match_solo pool_steps_past_gemvm16_match_solo --nocapture
+axon-remote: uploading axon-test-dbg-f41f2ec (650ebea148f954a202ce6169) + source of /home/haseeb/.cache/axon-wt-attn-pool
+
+sent 2,050,601 bytes  received 5,375 bytes  373,813.82 bytes/sec
+total size is 7,220,341  speedup is 3.51
+
+sent 7,553,169 bytes  received 35 bytes  2,158,058.29 bytes/sec
+total size is 24,068,232  speedup is 3.19
+axon-remote: job 20261027-054241-axon-test-dbg-f41f2ec-1053 on pod1 (GPU, 5000 MB)
+[axon-node 05:42:42] GPU slot taken; job wants 5000 MB; nvidia-smi used/total 396/24564 MB; sharing with 20261027-054239-axon-test-f41f2ec-997 (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 05:42:42] run axon-test-dbg-f41f2ec (650ebea148f954a202ce6169) as /home/haseeb/.cache/axon-wt-attn-pool on c6b0dea89b70, AXON_THREADS=4 RUST_TEST_THREADS=4; free 23688 MB of 24564 (used 396); GPU processes pid:MB 1010:386
+
+running 3 tests
+testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test cuda::qwen2::slots::tests::pool_steps_past_gemvm16_match_solo ... ok
+attn_blk_nb 28/4x128: f16 / q8 / q8g32, plain and paged, S 1/2/3/7 = attn_blk_b
+attn_blk_nb 14/2x64: f16 / q8 / q8g32, plain and paged, S 1/2/3/7 = attn_blk_b
+attn_blk_nb 16/2x128: f16 / q8 / q8g32, plain and paged, S 1/2/3/7 = attn_blk_b
+attn_blk_nb 12/2x128: f16 / q8 / q8g32, plain and paged, S 1/2/3/7 = attn_blk_b
+test cuda::qwen2::tests::cuda_attn_nb_exact ... ok
+test cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo has been running for over 60 seconds
+test cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 766 filtered out; finished in 291.56s
+
+[axon-node 05:47:33] exit 0 after 291.6s
+[axon-node 05:47:33] peak RSS 8557 MB (job process tree PSS, 2 s samples x142)
+[axon-run 01:47:35] exit 0 after 311.4s (host pod1)
+[axon-run 01:47:36] EXPECT ok: output matches /test result: ok. 3 passed/
