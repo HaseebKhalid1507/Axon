@@ -1,0 +1,10 @@
+[axon-run 10:06:19] submitted 1027-100619-0582 by /home/haseeb/.cache/axon-wt-poolwide: /home/haseeb/.cache/axon-poolwide/bin/axon-test-bfcf8f3 cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo --exact --nocapture --test-threads 1
+[axon-run 14:54:29] scope axon-job-1027-100619-0582-1793127269.scope in app-axonjobs.slice: MemoryMax 6932 MB, MemoryHigh 6238 MB, no swap, oomd pressure kill 80% (claim 3939 MB): an OOM here kills only this job
+[axon-run 14:54:29] job 1027-100619-0582 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1027-100619-0582-1793127269 --slice=app-axonjobs.slice -p MemoryMax=6932M -p MemoryHigh=6238M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-poolwide/bin/axon-test-bfcf8f3 cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo --exact --nocapture --test-threads 1
+axon-q 14:54:29 start slot 16-23: /home/haseeb/.cache/axon-poolwide/bin/axon-test-bfcf8f3 cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo --exact --nocapture --test-threads 1
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+[axon-run 15:04:29] MAX DURATION 10 min (--max-min) reached: stopping the job
+[axon-run 15:04:29] signal 15: stopping the job
+[axon-run 15:04:29] exit 143 after 600.5s (host bella)

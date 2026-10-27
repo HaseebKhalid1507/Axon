@@ -1,0 +1,24 @@
+[axon-run 10:06:15] submitted 1027-100615-d22a by /home/haseeb/.cache/axon-wt-poolwide: /home/haseeb/.cache/axon-poolwide/bin/axon-test-bfcf8f3 cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo --exact --nocapture --test-threads 1
+[axon-run 12:34:15] job 1027-100615-d22a -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 5500 --env AXON_NODE_PACK=1 --src /home/haseeb/.cache/axon-wt-poolwide /home/haseeb/.cache/axon-poolwide/bin/axon-test-bfcf8f3 cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo --exact --nocapture --test-threads 1
+axon-remote: uploading axon-test-bfcf8f3 (e1f8fa682640903771a69a89) + source of /home/haseeb/.cache/axon-wt-poolwide
+
+sent 2,098,233 bytes  received 5,542 bytes  4,207,550.00 bytes/sec
+total size is 7,344,708  speedup is 3.49
+
+sent 7,076,771 bytes  received 35 bytes  4,717,870.67 bytes/sec
+total size is 22,997,160  speedup is 3.25
+axon-remote: job 20261027-123417-axon-test-bfcf8f3-2545435 on avante (GPU, 5500 MB)
+[axon-node 12:34:17] GPU slot taken; job wants 5500 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 60
+[axon-node 12:34:17] run axon-test-bfcf8f3 (e1f8fa682640903771a69a89) as /home/haseeb/.cache/axon-wt-poolwide on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo ... testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+skipping pool_wide_long_steps_match_solo on this GPU: a 46144-token cache needs 5.07 GiB of GPU memory (KV cache and scratch), 4.98 GiB is free; try a smaller --ctx (or -n), --kv q8 or the CPU
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 771 filtered out; finished in 4.39s
+
+[axon-node 12:34:22] exit 0 after 4.5s
+[axon-node 12:34:22] peak RSS 2856 MB (job process tree PSS, 2 s samples x2)
+[axon-run 12:34:22] exit 0 after 7.6s (host avante)
+[axon-run 12:34:25] EXPECT ok: output matches /skipping pool_wide_long_steps_match_solo on this GPU/
