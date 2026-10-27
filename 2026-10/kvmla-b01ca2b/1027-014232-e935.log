@@ -1,0 +1,10 @@
+[axon-run 01:42:32] submitted 1027-014232-e935 by /home/haseeb/.cache/axon-wt-moeres-mainbase: /usr/bin/bash expectfail.sh ./axon-test-kvmla-050287f moe::ds2_tests::ds2_cuda_session_image_refused 'must refuse a session image'
+[axon-run 01:44:30] scope axon-job-1027-014232-e935-1793079870.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 22229 MB): an OOM here kills only this job
+[axon-run 01:44:30] job 1027-014232-e935 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1027-014232-e935-1793079870 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash expectfail.sh ./axon-test-kvmla-050287f moe::ds2_tests::ds2_cuda_session_image_refused 'must refuse a session image'
+axon-q 01:44:30 start slot 16-23: /usr/bin/bash expectfail.sh ./axon-test-kvmla-050287f moe::ds2_tests::ds2_cuda_session_image_refused must refuse a session image
+thread 'moe::ds2_tests::ds2_cuda_session_image_refused' (296977) panicked at src/moe/ds2_tests.rs:751:5:
+the deepseek2 GPU net must refuse a session image
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 767 filtered out; finished in 0.49s
+EXPECTED-FAIL OK (rc 101)
+[axon-run 01:44:30] exit 0 after 0.6s (host bella)
+[axon-run 01:44:34] EXPECT ok: output matches /EXPECTED-FAIL OK/
