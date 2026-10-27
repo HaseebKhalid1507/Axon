@@ -1385,6 +1385,12 @@ fn engine(
         b.metrics = Some(o.metrics.clone());
         b
     });
+    // What decides the output bits, before the KV RAM tier's allocator
+    // thread starts pinning: it is the last driver and file work before the
+    // server says ready, and with the thread pinning beside it start-up took
+    // 2-6 s instead of 2 (MEASURED 1027-134559-a975, 20G; the suspect, not
+    // proven). The identity doesn't depend on the tier.
+    let identity = crate::identity::of(&o.path, &model, &net);
     // The KV RAM tier (`--cache-ram`): sized against the RAM available now
     // (the model loaded); its host memory is taken only as pages are
     // stored.
@@ -1446,7 +1452,6 @@ fn engine(
         (None, _) => format!("{kvs}, ctx {ctx}{drafts}, one request at a time"),
     };
     let banner = banner + tier_note.as_deref().unwrap_or("");
-    let identity = crate::identity::of(&o.path, &model, &net);
     if ready
         .send(Ok(Loaded {
             tok,

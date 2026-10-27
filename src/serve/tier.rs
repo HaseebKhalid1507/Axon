@@ -187,12 +187,15 @@ impl<P> Tier<P> {
     }
 }
 
-/// How the arena's page-locked memory is taken (`AXON_KV_RAM_ALLOC`): all
-/// of it, at the size asked for, before the server starts (`Start`), or by
-/// a thread from server start on, the tier growing as slabs arrive
-/// (`Thread`). Never inside an engine step: a slab's `cuMemHostAlloc` took
-/// 61.8 ms per 64 MiB on a 4090 pod (MEASURED, 1027-100925-fbcb), and grown
-/// lazily in steps it cost +21.5 % ITL p99 there.
+/// How the arena's page-locked memory is taken (`AXON_KV_RAM_ALLOC`): by a
+/// thread from server start on, the tier growing as slabs arrive (`Thread`,
+/// the default), or all of it, at the size asked for, before the server
+/// starts (`Start`). Never inside an engine step: a slab's `cuMemHostAlloc`
+/// took 61.8 ms per 64 MiB on a 4090 pod (MEASURED, 1027-100925-fbcb), and
+/// grown lazily in steps it cost +21.5 % ITL p99 there. Thread vs start
+/// (4090, 1027-134559-a975): no inter-step gap over 0.3 ms either way, ITL
+/// p99 +1.4 % vs +1.9 % over main at 6G, start-up at 20G 5.1 s vs 16.4 s
+/// (main 2.0 s).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Alloc {
     Start,
@@ -200,11 +203,11 @@ pub enum Alloc {
 }
 
 impl Alloc {
-    /// AXON_KV_RAM_ALLOC=start|thread (default: start).
+    /// AXON_KV_RAM_ALLOC=thread|start (default: thread).
     pub fn from_env() -> Alloc {
         match std::env::var("AXON_KV_RAM_ALLOC").as_deref() {
-            Ok("thread") => Alloc::Thread,
-            _ => Alloc::Start,
+            Ok("start") => Alloc::Start,
+            _ => Alloc::Thread,
         }
     }
 }

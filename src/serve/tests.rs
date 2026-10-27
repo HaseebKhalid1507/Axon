@@ -61,7 +61,7 @@ fn test_opts(path: &str, device: Device) -> Opts {
         max_prompt_tokens: None,
         slot_idle_ms: None,
         cache_ram: super::tier::CacheRam::Bytes(0),
-        cache_ram_alloc: super::tier::Alloc::Start,
+        cache_ram_alloc: super::tier::Alloc::Thread,
     }
 }
 
@@ -5981,11 +5981,11 @@ fn serve_cuda_cache_ram() {
         o.parallel_set = true;
         o.kv_pages = Some(12);
     });
-    cache_ram_case(Device::Cuda, "cuda paged f16, pinned by a thread", |o| {
+    cache_ram_case(Device::Cuda, "cuda paged f16, pinned at start", |o| {
         o.parallel = 2;
         o.parallel_set = true;
         o.kv_pages = Some(12);
-        o.cache_ram_alloc = super::tier::Alloc::Thread;
+        o.cache_ram_alloc = super::tier::Alloc::Start;
     });
     cache_ram_case(Device::Cuda, "cuda paged q8", |o| {
         o.parallel = 2;
