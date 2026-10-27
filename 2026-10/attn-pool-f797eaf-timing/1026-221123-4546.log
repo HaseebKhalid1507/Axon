@@ -1,0 +1,176 @@
+[axon-run 22:11:23] submitted 1026-221123-4546 by /home/haseeb/.cache/axon-attn-pool: /usr/bin/bash timing4090.sh ./axon-test ./axon-base ./axon-cand
+[axon-run 22:23:15] job 1026-221123-4546 -> pod1 (pod 38vejm0rnhh9hx): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 5000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-attn-pool/ab-f797eaf /usr/bin/bash timing4090.sh ./axon-test ./axon-base ./axon-cand
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (e155f518331e2ec11beacf54) + source of /home/haseeb/.cache/axon-attn-pool/ab-f797eaf (delta vs 1 earlier upload(s) there)
+
+sent 14,395,906 bytes  received 125 bytes  2,617,460.18 bytes/sec
+total size is 45,695,811  speedup is 3.17
+
+sent 186 bytes  received 28,530 bytes  19,144.00 bytes/sec
+total size is 89  speedup is 0.00
+axon-remote: job 20261027-022326-bash-7636 on pod1 (GPU, 5000 MB)
+[axon-node 02:23:26] GPU EXCLUSIVE taken; job wants 5000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 02:23:26] run bash (e155f518331e2ec11beacf54) as /home/haseeb/.cache/axon-attn-pool/ab-f797eaf on 0084a24d509b, AXON_THREADS=8 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+NVIDIA GeForce RTX 4090, 8.9, 595.91.07, 3105 MHz
+== 1 pool attention bench
+[axon-run 22:23:49] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:24:23] FOREIGN_GPU sample max=0% mean=0.0% n=1
+POOL bench NVIDIA GeForce RTX 4090 (128 SMs), 28/4x128
+POOL kv f16 depth 600 nb 32 launches 4 attn 25.6 (24.6) cmb 8.2 (8.1) both 32.8 (31.4) us/layer KV 1202 GB/s | nb S 1 19.5 (19.2) us KV 2024 GB/s speedup 1.68x
+POOL kv f16 depth 600 nb 64 launches 8 attn 70.7 (69.6) cmb 14.3 (14.3) both 101.4 (101.1) us/layer KV 777 GB/s | nb S 1 52.2 (51.2) us KV 1508 GB/s speedup 1.94x
+POOL kv f16 depth 600 nb 128 launches 16 attn 214.1 (213.0) cmb 28.3 (27.6) both 238.6 (237.6) us/layer KV 660 GB/s | nb S 1 184.4 (184.1) us KV 854 GB/s speedup 1.29x
+POOL kv q8 depth 600 nb 32 launches 4 attn 49.1 (48.1) cmb 8.2 (7.8) both 55.3 (55.0) us/layer KV 367 GB/s | nb S 1 27.6 (27.5) us KV 735 GB/s speedup 2.00x
+POOL kv q8 depth 600 nb 64 launches 8 attn 95.6 (95.3) cmb 14.3 (14.1) both 108.5 (108.3) us/layer KV 374 GB/s | nb S 1 50.2 (50.0) us KV 810 GB/s speedup 2.16x
+POOL kv q8 depth 600 nb 128 launches 16 attn 228.4 (228.0) cmb 27.6 (27.6) both 260.1 (260.0) us/layer KV 312 GB/s | nb S 1 100.4 (99.3) us KV 810 GB/s speedup 2.59x
+POOL kv f16 depth 4096 nb 32 launches 4 attn 315.4 (314.4) cmb 20.5 (20.5) both 354.3 (353.3) us/layer KV 758 GB/s | nb S 1 292.1 (291.8) us KV 919 GB/s speedup 1.21x
+POOL kv f16 depth 4096 nb 64 launches 8 attn 657.7 (656.7) cmb 35.5 (34.8) both 708.3 (707.6) us/layer KV 758 GB/s | nb S 1 583.8 (583.7) us KV 920 GB/s speedup 1.21x
+POOL kv f16 depth 4096 nb 128 launches 16 attn 1323.0 (1322.1) cmb 65.4 (63.5) both 1415.2 (1413.3) us/layer KV 759 GB/s | nb S 1 1153.0 (1150.0) us KV 931 GB/s speedup 1.23x
+POOL kv q8 depth 4096 nb 32 launches 4 attn 284.7 (279.6) cmb 20.5 (19.5) both 303.1 (302.1) us/layer KV 457 GB/s | nb S 1 170.8 (169.9) us KV 811 GB/s speedup 1.77x
+POOL kv q8 depth 4096 nb 64 launches 8 attn 569.3 (563.2) cmb 31.7 (31.6) both 601.1 (599.7) us/layer KV 461 GB/s | nb S 1 326.7 (324.6) us KV 848 GB/s speedup 1.84x
+POOL kv q8 depth 4096 nb 128 launches 16 attn 1139.7 (1131.5) cmb 61.4 (60.2) both 1205.5 (1200.1) us/layer KV 459 GB/s | nb S 1 626.7 (622.6) us KV 884 GB/s speedup 1.92x
+== 2 pool_step_cost AXON_ATT_NB=0
+[axon-run 22:24:57] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:25:31] FOREIGN_GPU sample max=0% mean=0.0% n=1
+testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+C curve: /root/axon-node/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA GeForce RTX 4090 (128 SMs)
+kernels: plain
+depth 600: decode step (forward_argmax) 5.454 ms; pool 128 x 704
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 600 | 32 | 0 x1 | 9.658 | 1.77 | 3313 |
+| 600 | 64 | 0 x1 | 11.980 | 2.20 | 5342 |
+| 600 | 128 | 0 x1 | 17.285 | 3.17 | 7405 |
+kernels: plain
+  pool of 128 x 4160: a 532544-token cache needs 28.79 GiB of GPU memory (KV cache and scratch), 17.74 GiB is free; try a smaller --ctx (or -n), --kv q8 or the CPU
+depth 4096: decode step (forward_argmax) 5.694 ms; pool 64 x 4160
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 4096 | 32 | 0 x1 | 17.863 | 3.14 | 1791 |
+| 4096 | 64 | 0 x1 | 28.428 | 4.99 | 2251 |
+== 2 pool_step_cost AXON_ATT_NB=1
+[axon-run 22:26:02] FOREIGN_GPU sample max=0% mean=0.0% n=1
+testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+C curve: /root/axon-node/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA GeForce RTX 4090 (128 SMs)
+kernels: plain
+depth 600: decode step (forward_argmax) 5.404 ms; pool 128 x 704
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 600 | 32 | 0 x1 | 9.387 | 1.74 | 3409 |
+| 600 | 64 | 0 x1 | 11.439 | 2.12 | 5595 |
+| 600 | 128 | 0 x1 | 16.018 | 2.96 | 7991 |
+kernels: plain
+  pool of 128 x 4160: a 532544-token cache needs 28.79 GiB of GPU memory (KV cache and scratch), 17.74 GiB is free; try a smaller --ctx (or -n), --kv q8 or the CPU
+depth 4096: decode step (forward_argmax) 5.699 ms; pool 64 x 4160
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 4096 | 32 | 0 x1 | 16.241 | 2.85 | 1970 |
+| 4096 | 64 | 0 x1 | 25.082 | 4.40 | 2552 |
+== 2 pool_step_cost AXON_ATT_NB=0
+[axon-run 22:26:36] FOREIGN_GPU sample max=0% mean=0.0% n=1
+testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+C curve: /root/axon-node/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA GeForce RTX 4090 (128 SMs)
+kernels: plain
+depth 600: decode step (forward_argmax) 5.411 ms; pool 128 x 704
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 600 | 32 | 0 x1 | 9.693 | 1.79 | 3301 |
+| 600 | 64 | 0 x1 | 12.033 | 2.22 | 5319 |
+| 600 | 128 | 0 x1 | 17.348 | 3.21 | 7378 |
+kernels: plain
+  pool of 128 x 4160: a 532544-token cache needs 28.79 GiB of GPU memory (KV cache and scratch), 17.74 GiB is free; try a smaller --ctx (or -n), --kv q8 or the CPU
+depth 4096: decode step (forward_argmax) 5.700 ms; pool 64 x 4160
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 4096 | 32 | 0 x1 | 17.838 | 3.13 | 1794 |
+| 4096 | 64 | 0 x1 | 28.438 | 4.99 | 2250 |
+== 2 pool_step_cost AXON_ATT_NB=1
+[axon-run 22:27:10] FOREIGN_GPU sample max=0% mean=0.0% n=1
+testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+C curve: /root/axon-node/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA GeForce RTX 4090 (128 SMs)
+kernels: plain
+depth 600: decode step (forward_argmax) 5.473 ms; pool 128 x 704
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 600 | 32 | 0 x1 | 9.416 | 1.72 | 3399 |
+| 600 | 64 | 0 x1 | 11.465 | 2.09 | 5582 |
+| 600 | 128 | 0 x1 | 16.063 | 2.94 | 7968 |
+kernels: plain
+  pool of 128 x 4160: a 532544-token cache needs 28.79 GiB of GPU memory (KV cache and scratch), 17.74 GiB is free; try a smaller --ctx (or -n), --kv q8 or the CPU
+depth 4096: decode step (forward_argmax) 5.725 ms; pool 64 x 4160
+| depth | nb | gemvm max | ms/step | x solo | rows/s |
+| 4096 | 32 | 0 x1 | 16.258 | 2.84 | 1968 |
+| 4096 | 64 | 0 x1 | 25.114 | 4.39 | 2548 |
+== 3 perf_ab
+NVIDIA GeForce RTX 4090, 8.9, 595.91.07
+R	qwen2.5-0.5b-q4_k_m	tg128	base	1039.80	0a8057359a14
+[axon-run 22:27:45] FOREIGN_GPU sample max=0% mean=0.0% n=1
+R	qwen2.5-0.5b-q4_k_m	tg128	cand	1012.12	0a8057359a14
+R	qwen2.5-0.5b-q4_k_m	tg128	cand	1013.15	0a8057359a14
+R	qwen2.5-0.5b-q4_k_m	tg128	base	1015.05	0a8057359a14
+R	qwen2.5-0.5b-q4_k_m	tg128	base	1020.41	0a8057359a14
+R	qwen2.5-0.5b-q4_k_m	tg128	cand	1018.00	0a8057359a14
+R	qwen2.5-0.5b-q4_k_m	tg128	cand	1042.31	0a8057359a14
+R	qwen2.5-0.5b-q4_k_m	tg128	base	1009.64	0a8057359a14
+R	qwen2.5-0.5b-q4_k_m	tg128	base	1036.47	0a8057359a14
+R	qwen2.5-0.5b-q4_k_m	tg128	cand	1018.62	0a8057359a14
+R	qwen2.5-0.5b-q4_k_m	pp512	base	88456.67	f8a615e066e2
+R	qwen2.5-0.5b-q4_k_m	pp512	cand	88886.23	f8a615e066e2
+R	qwen2.5-0.5b-q4_k_m	pp512	cand	89242.64	f8a615e066e2
+R	qwen2.5-0.5b-q4_k_m	pp512	base	88283.47	f8a615e066e2
+[axon-run 22:28:21] FOREIGN_GPU sample max=0% mean=0.0% n=1
+R	qwen2.5-0.5b-q4_k_m	pp512	base	87781.65	f8a615e066e2
+R	qwen2.5-0.5b-q4_k_m	pp512	cand	89322.98	f8a615e066e2
+R	qwen2.5-0.5b-q4_k_m	pp512	cand	88797.30	f8a615e066e2
+R	qwen2.5-0.5b-q4_k_m	pp512	base	88387.31	f8a615e066e2
+R	qwen2.5-0.5b-q4_k_m	pp512	base	88817.29	f8a615e066e2
+R	qwen2.5-0.5b-q4_k_m	pp512	cand	89186.55	f8a615e066e2
+R	qwen2.5-0.5b-q4_k_m	pp2100	base	106812.34	53c2ebb783d4
+R	qwen2.5-0.5b-q4_k_m	pp2100	cand	106410.55	53c2ebb783d4
+R	qwen2.5-0.5b-q4_k_m	pp2100	cand	106912.51	53c2ebb783d4
+R	qwen2.5-0.5b-q4_k_m	pp2100	base	105774.21	53c2ebb783d4
+R	qwen2.5-0.5b-q4_k_m	pp2100	base	107068.89	53c2ebb783d4
+R	qwen2.5-0.5b-q4_k_m	pp2100	cand	104153.31	53c2ebb783d4
+R	qwen2.5-0.5b-q4_k_m	pp2100	cand	96425.73	53c2ebb783d4
+R	qwen2.5-0.5b-q4_k_m	pp2100	base	106405.59	53c2ebb783d4
+[axon-run 22:28:55] FOREIGN_GPU sample max=0% mean=0.0% n=1
+R	qwen2.5-0.5b-q4_k_m	pp2100	base	106536.06	53c2ebb783d4
+R	qwen2.5-0.5b-q4_k_m	pp2100	cand	105743.82	53c2ebb783d4
+R	Qwen2.5-7B-Instruct-Q4_K_M	tg128	base	185.16	23db902f570b
+R	Qwen2.5-7B-Instruct-Q4_K_M	tg128	cand	184.72	23db902f570b
+R	Qwen2.5-7B-Instruct-Q4_K_M	tg128	cand	185.03	23db902f570b
+R	Qwen2.5-7B-Instruct-Q4_K_M	tg128	base	184.04	23db902f570b
+R	Qwen2.5-7B-Instruct-Q4_K_M	tg128	base	183.76	23db902f570b
+R	Qwen2.5-7B-Instruct-Q4_K_M	tg128	cand	183.56	23db902f570b
+R	Qwen2.5-7B-Instruct-Q4_K_M	tg128	cand	183.45	23db902f570b
+R	Qwen2.5-7B-Instruct-Q4_K_M	tg128	base	184.47	23db902f570b
+[axon-run 22:29:28] FOREIGN_GPU sample max=0% mean=0.0% n=1
+R	Qwen2.5-7B-Instruct-Q4_K_M	tg128	base	183.79	23db902f570b
+R	Qwen2.5-7B-Instruct-Q4_K_M	tg128	cand	185.52	23db902f570b
+R	Qwen2.5-7B-Instruct-Q4_K_M	pp512	base	16010.03	04823d302a40
+R	Qwen2.5-7B-Instruct-Q4_K_M	pp512	cand	16141.05	04823d302a40
+R	Qwen2.5-7B-Instruct-Q4_K_M	pp512	cand	16227.60	04823d302a40
+R	Qwen2.5-7B-Instruct-Q4_K_M	pp512	base	16238.29	04823d302a40
+R	Qwen2.5-7B-Instruct-Q4_K_M	pp512	base	16204.74	04823d302a40
+R	Qwen2.5-7B-Instruct-Q4_K_M	pp512	cand	16122.05	04823d302a40
+R	Qwen2.5-7B-Instruct-Q4_K_M	pp512	cand	16130.54	04823d302a40
+R	Qwen2.5-7B-Instruct-Q4_K_M	pp512	base	16288.16	04823d302a40
+[axon-run 22:30:03] FOREIGN_GPU sample max=0% mean=0.0% n=1
+R	Qwen2.5-7B-Instruct-Q4_K_M	pp512	base	16180.51	04823d302a40
+R	Qwen2.5-7B-Instruct-Q4_K_M	pp512	cand	16265.61	04823d302a40
+R	Qwen2.5-7B-Instruct-Q4_K_M	pp2100	base	16235.17	53c2ebb783d4
+R	Qwen2.5-7B-Instruct-Q4_K_M	pp2100	cand	16237.86	53c2ebb783d4
+R	Qwen2.5-7B-Instruct-Q4_K_M	pp2100	cand	16170.62	53c2ebb783d4
+R	Qwen2.5-7B-Instruct-Q4_K_M	pp2100	base	16254.35	53c2ebb783d4
+R	Qwen2.5-7B-Instruct-Q4_K_M	pp2100	base	16270.49	53c2ebb783d4
+R	Qwen2.5-7B-Instruct-Q4_K_M	pp2100	cand	16280.82	53c2ebb783d4
+R	Qwen2.5-7B-Instruct-Q4_K_M	pp2100	cand	16358.53	53c2ebb783d4
+R	Qwen2.5-7B-Instruct-Q4_K_M	pp2100	base	16200.95	53c2ebb783d4
+R	Qwen2.5-7B-Instruct-Q4_K_M	pp2100	base	16272.20	53c2ebb783d4
+R	Qwen2.5-7B-Instruct-Q4_K_M	pp2100	cand	16143.26	53c2ebb783d4
+| model | metric | base median [min-max] | cand median [min-max] | cand/base |
+|---|---|---|---|---|
+| Qwen2.5-7B-Instruct-Q4_K_M | pp2100 | 16254.4 [16201.0-16272.2] | 16237.9 [16143.3-16358.5] | x0.999 |
+| Qwen2.5-7B-Instruct-Q4_K_M | pp512 | 16204.7 [16010.0-16288.2] | 16141.0 [16122.0-16265.6] | x0.996 |
+| Qwen2.5-7B-Instruct-Q4_K_M | tg128 | 184.0 [183.8-185.2] | 184.7 [183.4-185.5] | x1.004 |
+| qwen2.5-0.5b-q4_k_m | pp2100 | 106536.1 [105774.2-107068.9] | 105743.8 [96425.7-106912.5] | x0.993 |
+| qwen2.5-0.5b-q4_k_m | pp512 | 88387.3 [87781.6-88817.3] | 89186.6 [88797.3-89323.0] | x1.009 |
+| qwen2.5-0.5b-q4_k_m | tg128 | 1020.4 [1009.6-1039.8] | 1018.0 [1012.1-1042.3] | x0.998 |
+TIMING DONE
+[axon-node 02:30:39] exit 0 after 432.7s
+[axon-node 02:30:39] peak RSS 814 MB (job process tree PSS, 2 s samples x215)
+[axon-run 22:30:40] exit 0 after 444.6s (host pod1)
+[axon-run 22:30:42] EXPECT ok: output matches /TIMING DONE/
+[axon-run 22:30:42] FOREIGN_GPU max=0% mean=0.0% samples=12
