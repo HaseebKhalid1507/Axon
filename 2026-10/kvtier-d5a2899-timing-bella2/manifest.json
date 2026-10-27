@@ -1,0 +1,29 @@
+{
+ "label": "kvtier-d5a2899-timing-bella2",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1027-122443-5258",
+   "name": "kvtier-d5a2899-timing-bella2",
+   "rc": 130,
+   "verdict": "FAIL (rc 130)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "d5a2899",
+   "binary": "timing.sh",
+   "started": null,
+   "ended": 1793122694.5071619,
+   "attempts": null,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "2fc192f41d1076228c7d358ea710d543f8c287c948a16f7c1fb0bffca17427b2",
+   "log_bytes": 180
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-27 13:38:14 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
