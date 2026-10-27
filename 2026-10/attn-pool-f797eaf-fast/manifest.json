@@ -1,0 +1,49 @@
+{
+ "label": "attn-pool-f797eaf-fast",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1026-212457-209b",
+   "name": "attn-pool-f797eaf-fast-rel",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "f797eaf",
+   "binary": "axon-test-f797eaf",
+   "started": 1793064297.3171062,
+   "ended": 1793066862.045767,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "30218102dfa1e63e452216c27eca550535c6beb0291555f9f11744f0b6fb2457",
+   "log_bytes": 53154
+  },
+  {
+   "job": "1026-212457-95ab",
+   "name": "attn-pool-f797eaf-fast-dbg-cpu",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod2",
+   "hw": "hw-pod2-10-26_21:26.txt",
+   "gpu": "CPU only (pod2; GPU hidden)",
+   "driver": "595.91.07",
+   "sha": "f797eaf",
+   "binary": "axon-test-dbg-f797eaf",
+   "started": 1793064419.8937206,
+   "ended": 1793064956.2573478,
+   "attempts": 1,
+   "remote_job": "20261027-012744-axon-test-dbg-f797eaf-1565",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "c0e238c1ca8582a11e0fbc19b6fab163979081d05254e12a66d2a5210db09a96",
+   "log_bytes": 47929
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-26 22:07:42 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
