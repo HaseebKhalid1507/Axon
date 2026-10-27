@@ -1991,7 +1991,7 @@ mod tests {
         }
     }
 
-    /// A turn of ~1200 tokens then a short follow-up through the real
+    /// A turn of ~1230 tokens then a short follow-up through the real
     /// `Chat::reply` on the GPU, the net wrapped in `Cuts`: each turn is fed
     /// in exactly the passes `Lm::prompt_chunks` (the cache's planner) gives
     /// for it, the long one in more than one and not the old fixed
@@ -2007,7 +2007,8 @@ mod tests {
     /// at the batch max 1152, 1025..=1279 at 1024) can't be: its two
     /// passes are equal (`passes`, ~n / 2 each) or wave-sized with the last
     /// pass >= wave_floor (max / 4), and the old cut's last pass is n - max,
-    /// under that (asserted). ~1230 tokens sits in both ranges on every SM count.
+    /// under that. No SM count enters those bounds. The turn (~1230 tokens,
+    /// in both ranges) is asserted to be in the range.
     #[test]
     fn long_turn_matches_fresh_prefill_cuda() {
         use crate::cuda::qwen2::CudaQwen2;
