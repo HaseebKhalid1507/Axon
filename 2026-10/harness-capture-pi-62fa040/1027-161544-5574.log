@@ -1,0 +1,14 @@
+[axon-run 16:15:44] submitted 1027-161544-5574 by /home/haseeb/.cache/axon-harness: /usr/bin/bash /home/haseeb/.cache/axon-harness/capture_pi.sh
+[axon-run 16:36:03] scope axon-job-1027-161544-5574-1793133363.scope in app-axonjobs.slice: MemoryMax 14524 MB, MemoryHigh 13071 MB, no swap, oomd pressure kill 80% (claim 9000 MB): an OOM here kills only this job
+[axon-run 16:36:03] job 1027-161544-5574 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1027-161544-5574-1793133363 --slice=app-axonjobs.slice -p MemoryMax=14524M -p MemoryHigh=13071M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash /home/haseeb/.cache/axon-harness/capture_pi.sh
+axon-q 16:36:03 start slot 16-23: /usr/bin/bash /home/haseeb/.cache/axon-harness/capture_pi.sh
+[cap +3 s] serve :19306, proxy :19606, capture /home/haseeb/.cache/axon-agent/raw/pi-1027-163603.jsonl
+[cap +6 s] pi turn 1 rc 0 (170 bytes of output); tests now: OK
+[cap +12 s] pi turn 2 (pi -c) rc 0; tests now: OK
+[cap +12 s] capture: 6 requests
+privacy check /home/haseeb/.cache/axon-agent/traces/harness-pi-1027-163603.json.tmp: PASS (0 findings)
+agent_trace_proxy: /home/haseeb/.cache/axon-agent/traces/harness-pi-1027-163603.json: {"requests": 6, "sessions": 1, "subagent_sessions": 0, "main": 6, "side": 0, "compact": 0, "dropped_non200": 0, "injected_usage": 0, "missing_usage": 0}
+privacy check /home/haseeb/.cache/axon-agent/traces/harness-pi-1027-163603.json: PASS (0 findings)
+[cap +12 s] CAPTURE PI DONE rc 0 (pi 0/0)
+[axon-run 16:36:15] exit 0 after 12.5s (host bella)
+[axon-run 16:36:20] EXPECT ok: output matches /CAPTURE PI DONE rc 0/

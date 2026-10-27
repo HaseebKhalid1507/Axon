@@ -1,0 +1,29 @@
+{
+ "label": "harness-capture-pi-62fa040",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1027-161544-5574",
+   "name": "harness-capture-pi",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": null,
+   "binary": "bash",
+   "started": 1793133363.0801113,
+   "ended": 1793133378.5413594,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "32dbe1fa1bc904b293f053e5c504e54cc87a98c2ac9661f157ceb07f45bf380e",
+   "log_bytes": 1693
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-27 16:36:21 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
