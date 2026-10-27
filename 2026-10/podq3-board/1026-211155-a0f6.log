@@ -1,0 +1,173 @@
+[axon-run 21:11:55] submitted 1026-211155-a0f6 by /home/haseeb/.cache/axon-wt-podq3: /home/haseeb/.cache/axon-podq3/axon-test-podq3-8508a75 podbench::podbench_run --nocapture --test-threads 1
+[axon-run 21:19:39] job 1026-211155-a0f6 -> pod1 (pod u3es1hdd3mvnuk): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 22000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-wt-podq3 /home/haseeb/.cache/axon-podq3/axon-test-podq3-8508a75 podbench::podbench_run --nocapture --test-threads 1
+axon-remote: uploading axon-test-podq3-8508a75 (9d485862ab2c26f936c8f606) + source of /home/haseeb/.cache/axon-wt-podq3
+
+sent 48,325,759 bytes  received 5,824 bytes  10,740,351.78 bytes/sec
+total size is 92,550,694  speedup is 1.91
+
+sent 7,060,439 bytes  received 35 bytes  4,706,982.67 bytes/sec
+total size is 22,528,256  speedup is 3.19
+axon-remote: job 20261027-011947-axon-test-podq3-8508a75-1028 on pod1 (GPU, 22000 MB)
+[axon-node 01:19:47] GPU EXCLUSIVE taken; job wants 22000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 01:19:47] run axon-test-podq3-8508a75 (9d485862ab2c26f936c8f606) as /home/haseeb/.cache/axon-wt-podq3 on 48f0f249786a, AXON_THREADS=8 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+
+running 1 test
+test podbench::podbench_run ... PB out /home/haseeb/.cache/axon-wt-podq3/podbench/out-1027-011947
+PB host 48f0f249786a NVIDIA GeForce RTX 4090, 595.91.07, 24564 MiB, 450.00 W, 3105 MHz
+PB cpu AMD EPYC 75F3 32-Core Processor nproc 128 mem 503 GB, avail 410 GB
+PB disk overlay          50G   24G   27G  48% /
+PB threads axon AXON_THREADS=16 llama -t 16; axon sha256 04fae35ff4efd97f; llama-bench /home/haseeb/.cache/axon-wt-podq3/podbench/llama-bench-4413a19-sm89
+PB model moonlight Moonlight-16B-A3B-Instruct-Q4_K_M.gguf
+[axon-run 21:20:25] FOREIGN_GPU sample max=0% mean=0.0% n=2
+[axon-run 21:20:58] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PB fetched Moonlight-16B-A3B-Instruct-Q4_K_M.gguf in 79 s
+PB sha256 OK 2b113655999f11730a6dc31b7ba93463e6523a323f46074b01c55d96101df360
+[axon-run 21:21:30] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 21:22:03] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 21:22:36] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PB	warm	axon	0	tg128	43.74	res=0	rc=0	md5=26480dfcb01a	
+PB	warm	axon	6	tg128	48.88	res=6	rc=0	md5=26480dfcb01a	
+[axon-run 21:23:09] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PB	warm	axon	12	tg128	107.72	res=12	rc=0	md5=26480dfcb01a	
+PB	warm	axon	auto	tg128	267.01	res=26	rc=0	md5=26480dfcb01a	
+PB configs moonlight: axon --gpu-experts 0 6 12 auto (auto placed 26 of 26 in the warm-up); llama.cpp --n-cpu-moe 26 20 14 0
+PB	r1	axon	0	tg128	56.53	res=0	rc=0	md5=26480dfcb01a	
+PB	r1	axon	0	pp512	368.42	res=0	rc=0	md5=81ba74f190b6	
+[axon-run 21:23:43] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PB	r1	axon	0	pp2100	356.54	res=0	rc=0	md5=e991a6c0009c	
+PB	r1	axon	6	tg128	40.21	res=6	rc=0	md5=26480dfcb01a	
+PB	r1	axon	6	pp512	435.45	res=6	rc=0	md5=f95bb16aad92	
+[axon-run 21:24:16] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PB	r1	axon	6	pp2100	430.90	res=6	rc=0	md5=a4609f9da609	
+PB	r1	axon	12	tg128	101.53	res=12	rc=0	md5=26480dfcb01a	
+PB	r1	axon	12	pp512	690.02	res=12	rc=0	md5=ba7719cd5d7c	
+PB	r1	axon	12	pp2100	644.41	res=12	rc=0	md5=effdde35d18f	
+PB	r1	axon	auto	tg128	268.53	res=26	rc=0	md5=26480dfcb01a	
+[axon-run 21:24:50] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PB	r1	axon	auto	pp512	9506.37	res=26	rc=0	md5=0dc599d92b93	
+PB	r1	axon	auto	pp2100	6880.75	res=26	rc=0	md5=4800174a92b9	
+PB	r1	llama	ncmoe=26	all	NA		rc=127
+PB	r1	llama	ncmoe=20	all	NA		rc=127
+PB	r1	llama	ncmoe=14	all	NA		rc=127
+PB	r1	llama	ncmoe=0	all	NA		rc=127
+PB	r2	axon	6	tg128	56.11	res=6	rc=0	md5=26480dfcb01a	
+[axon-run 21:25:21] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PB	r2	axon	6	pp512	476.09	res=6	rc=0	md5=2e45bd110239	
+PB	r2	axon	6	pp2100	439.11	res=6	rc=0	md5=beb518f76a52	
+PB	r2	axon	12	tg128	98.08	res=12	rc=0	md5=26480dfcb01a	
+PB	r2	axon	12	pp512	748.40	res=12	rc=0	md5=9e916521c339	
+PB	r2	axon	12	pp2100	716.28	res=12	rc=0	md5=bd066abb281a	
+[axon-run 21:25:55] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PB	r2	axon	auto	tg128	272.90	res=26	rc=0	md5=26480dfcb01a	
+PB	r2	axon	auto	pp512	9586.28	res=26	rc=0	md5=f442e7bc075b	
+PB	r2	axon	auto	pp2100	7160.14	res=26	rc=0	md5=4455ad6be0e0	
+PB	r2	llama	ncmoe=26	all	NA		rc=127
+PB	r2	llama	ncmoe=20	all	NA		rc=127
+PB	r2	llama	ncmoe=14	all	NA		rc=127
+PB	r2	llama	ncmoe=0	all	NA		rc=127
+PB	r2	axon	0	tg128	35.69	res=0	rc=0	md5=26480dfcb01a	
+[axon-run 21:26:29] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PB	r2	axon	0	pp512	343.58	res=0	rc=0	md5=533af0a10467	
+PB	r2	axon	0	pp2100	355.54	res=0	rc=0	md5=bb5559cd2312	
+PB	r3	axon	12	tg128	113.05	res=12	rc=0	md5=26480dfcb01a	
+PB	r3	axon	12	pp512	754.14	res=12	rc=0	md5=e891d33604c0	
+PB	r3	axon	12	pp2100	759.78	res=12	rc=0	md5=0d8306fa4725	
+[axon-run 21:27:04] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PB	r3	axon	auto	tg128	271.17	res=26	rc=0	md5=26480dfcb01a	
+PB	r3	axon	auto	pp512	8963.86	res=26	rc=0	md5=b5ecfb840b86	
+PB	r3	axon	auto	pp2100	7066.87	res=26	rc=0	md5=916fce751184	
+PB	r3	llama	ncmoe=26	all	NA		rc=127
+PB	r3	llama	ncmoe=20	all	NA		rc=127
+PB	r3	llama	ncmoe=14	all	NA		rc=127
+PB	r3	llama	ncmoe=0	all	NA		rc=127
+PB	r3	axon	0	tg128	38.59	res=0	rc=0	md5=26480dfcb01a	
+PB	r3	axon	0	pp512	356.64	res=0	rc=0	md5=a6fc5b19de09	
+[axon-run 21:27:38] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PB	r3	axon	0	pp2100	353.60	res=0	rc=0	md5=490679a08f39	
+PB	r3	axon	6	tg128	48.31	res=6	rc=0	md5=26480dfcb01a	
+PB	r3	axon	6	pp512	431.16	res=6	rc=0	md5=97f5e0c180a1	
+PB	r3	axon	6	pp2100	436.77	res=6	rc=0	md5=5a74ebeecccb	
+PB SUMMARY [moonlight] engine config metric median [min-max] (values)
+PB SUMMARY [moonlight] axon 0 pp2100 355.54 [353.60-356.54] [356.54, 355.54, 353.6] ['res=0']
+PB SUMMARY [moonlight] axon 0 pp512 356.64 [343.58-368.42] [368.42, 343.58, 356.64] ['res=0']
+PB SUMMARY [moonlight] axon 0 tg128 38.59 [35.69-56.53] [56.53, 35.69, 38.59] ['res=0']
+PB SUMMARY [moonlight] axon 12 pp2100 716.28 [644.41-759.78] [644.41, 716.28, 759.78] ['res=12']
+PB SUMMARY [moonlight] axon 12 pp512 748.40 [690.02-754.14] [690.02, 748.4, 754.14] ['res=12']
+PB SUMMARY [moonlight] axon 12 tg128 101.53 [98.08-113.05] [101.53, 98.08, 113.05] ['res=12']
+PB SUMMARY [moonlight] axon 6 pp2100 436.77 [430.90-439.11] [430.9, 439.11, 436.77] ['res=6']
+PB SUMMARY [moonlight] axon 6 pp512 435.45 [431.16-476.09] [435.45, 476.09, 431.16] ['res=6']
+PB SUMMARY [moonlight] axon 6 tg128 48.31 [40.21-56.11] [40.21, 56.11, 48.31] ['res=6']
+PB SUMMARY [moonlight] axon auto pp2100 7066.87 [6880.75-7160.14] [6880.75, 7160.14, 7066.87] ['res=26']
+PB SUMMARY [moonlight] axon auto pp512 9506.37 [8963.86-9586.28] [9506.37, 9586.28, 8963.86] ['res=26']
+PB SUMMARY [moonlight] axon auto tg128 271.17 [268.53-272.90] [268.53, 272.9, 271.17] ['res=26']
+PB TEXT [moonlight] tg128 identical across axon configs: True {'0': {'md5=26480dfcb01a'}, '6': {'md5=26480dfcb01a'}, '12': {'md5=26480dfcb01a'}, 'auto': {'md5=26480dfcb01a'}}
+PB removed the fetched Moonlight-16B-A3B-Instruct-Q4_K_M.gguf (disk)
+PB model big Qwen_Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf
+[axon-run 21:28:14] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 21:28:43] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 21:29:13] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 21:29:48] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PB fetched Qwen_Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf in 122 s
+[axon-run 21:30:23] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PB sha256 OK 382b4f5a164d200f93790ee0e339fae12852896d23485cfb203ce868fea33a95
+[axon-run 21:30:58] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 21:31:31] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PB	warm	axon	0	tg128	32.74	res=0	rc=0	md5=38978183d80a	
+[axon-run 21:32:06] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PB	warm	axon	auto	tg128	217.28	res=48	rc=0	md5=38978183d80a	
+PB configs big: axon --gpu-experts 0 auto (auto placed 48 of 48 in the warm-up); llama.cpp --n-cpu-moe0 8 16
+PB	r1	axon	0	tg128	33.48	res=0	rc=0	md5=38978183d80a	
+[axon-run 21:32:41] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PB	r1	axon	0	pp512	99.55	res=0	rc=0	md5=7eec0686811c	
+[axon-run 21:33:16] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PB	r1	axon	0	pp2100	97.39	res=0	rc=0	md5=43398bc2c4fe	
+PB	r1	axon	auto	tg128	217.49	res=48	rc=0	md5=38978183d80a	
+PB	r1	axon	auto	pp512	10676.18	res=48	rc=0	md5=315b04457903	
+[axon-run 21:33:46] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PB	r1	axon	auto	pp2100	12297.14	res=48	rc=0	md5=771af7c744d7	
+PB	r1	llama	ncmoe=0	all	NA		rc=127
+PB	r1	llama	ncmoe=8	all	NA		rc=127
+PB	r1	llama	ncmoe=16	all	NA		rc=127
+PB	r2	axon	auto	tg128	217.98	res=48	rc=0	md5=38978183d80a	
+PB	r2	axon	auto	pp512	11086.46	res=48	rc=0	md5=09b53d2fde25	
+PB	r2	axon	auto	pp2100	12238.27	res=48	rc=0	md5=2bae5fc6430a	
+PB	r2	llama	ncmoe=0	all	NA		rc=127
+[axon-run 21:34:21] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PB	r2	llama	ncmoe=8	all	NA		rc=127
+PB	r2	llama	ncmoe=16	all	NA		rc=127
+PB	r2	axon	0	tg128	35.13	res=0	rc=0	md5=38978183d80a	
+[axon-run 21:34:56] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PB	r2	axon	0	pp512	101.76	res=0	rc=0	md5=6c7a47678b23	
+[axon-run 21:35:30] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PB	r2	axon	0	pp2100	104.88	res=0	rc=0	md5=65bf135c1a6e	
+PB	r3	llama	ncmoe=0	all	NA		rc=127
+PB	r3	llama	ncmoe=8	all	NA		rc=127
+PB	r3	llama	ncmoe=16	all	NA		rc=127
+PB	r3	axon	0	tg128	36.31	res=0	rc=0	md5=38978183d80a	
+[axon-run 21:36:05] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PB	r3	axon	0	pp512	105.64	res=0	rc=0	md5=dcd4cfac897c	
+[axon-run 21:36:40] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PB	r3	axon	0	pp2100	101.56	res=0	rc=0	md5=ee7a27c24cac	
+PB	r3	axon	auto	tg128	220.35	res=48	rc=0	md5=38978183d80a	
+PB	r3	axon	auto	pp512	10686.97	res=48	rc=0	md5=2cb001cf12d8	
+[axon-run 21:37:15] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PB	r3	axon	auto	pp2100	12230.64	res=48	rc=0	md5=b1e785bd0466	
+PB SUMMARY [big] engine config metric median [min-max] (values)
+PB SUMMARY [big] axon 0 pp2100 101.56 [97.39-104.88] [97.39, 104.88, 101.56] ['res=0']
+PB SUMMARY [big] axon 0 pp512 101.76 [99.55-105.64] [99.55, 101.76, 105.64] ['res=0']
+PB SUMMARY [big] axon 0 tg128 35.13 [33.48-36.31] [33.48, 35.13, 36.31] ['res=0']
+PB SUMMARY [big] axon auto pp2100 12238.27 [12230.64-12297.14] [12297.14, 12238.27, 12230.64] ['res=48']
+PB SUMMARY [big] axon auto pp512 10686.97 [10676.18-11086.46] [10676.18, 11086.46, 10686.97] ['res=48']
+PB SUMMARY [big] axon auto tg128 217.98 [217.49-220.35] [217.49, 217.98, 220.35] ['res=48']
+PB TEXT [big] tg128 identical across axon configs: True {'0': {'md5=38978183d80a'}, 'auto': {'md5=38978183d80a'}}
+PB removed the fetched Qwen_Qwen3-30B-A3B-Instruct-2507-Q4_K_M.gguf (disk)
+PB DONE
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 760 filtered out; finished in 1056.08s
+
+[axon-node 01:37:23] exit 0 after 1056.1s
+[axon-node 01:37:23] peak RSS 18002 MB (job process tree PSS, 2 s samples x517)
+[axon-run 21:37:24] exit 0 after 1065.1s (host pod1)
+[axon-run 21:37:25] EXPECT ok: output matches /PB DONE/
+[axon-run 21:37:25] FOREIGN_GPU max=0% mean=0.0% samples=32
