@@ -547,11 +547,11 @@ This is the bench of record for `--gpu-experts` (roadmap item 3).
 - **Qwen3-30B-A3B, everything on the GPU:**
   - Axon leads prefill: **×1.32** at pp512 and **×1.31** at pp2100.
   - Axon **trails decode at ×0.87** (219.7 vs 252.5 tok/s).
-  - Roadmap item 3's rule asks for Axon pp2100 ≥ llama.cpp's best on the same pod. It passes, so this is a headline,
-    with the decode loss stated next to it.
+  - Roadmap item 3's kill rule reads "30B-A3B pp2100 < llama.cpp `--cpu-moe` on the same pod → not a headline". This board didn't run `--cpu-moe` (every expert on the CPU); it compared against llama.cpp's **best** placement (`--n-cpu-moe 0`: everything on the GPU), which is stricter. The rule still passes: 12,212 vs 9,289. So it's a headline, with the decode loss stated next to it.
 - **Moonlight-16B-A3B, everything on the GPU:** Axon trails on all three metrics: tg128 **×0.96**, pp512 **×0.81**,
   pp2100 **×0.57**. Not a headline.
-- **Experts partly on the CPU:** Axon's CPU-expert path is slower than llama.cpp's on this host (EPYC, 16 threads).
+- **Experts partly on the CPU:** Axon's CPU-expert path is slower than llama.cpp's on this EPYC 75F3 pod (16 threads).
+  On Parabellum (Core Ultra 9 275HX), Axon led partial-offload decode 1.46–1.68× at llama.cpp's best thread count (TAINTED boards, but consistent across runs), so this gap is not general.
   At the same placement on Moonlight:
   - N = 12 vs `--n-cpu-moe 14`: tg128 79.2 vs 96.0, pp2100 673 vs 1,330;
   - N = 0 vs `--n-cpu-moe 26`: pp2100 348 vs 659 (decode 45.4 vs 39.4 is a near-tie, with wide ranges).
@@ -580,7 +580,9 @@ This is the bench of record for `--gpu-experts` (roadmap item 3).
 | 26 (Axon `auto`) | **272.9** [270.2–274.6] / **9,035** [7,449–9,047] / **7,004** [6,967–7,164] | **285.5** [284.1–292.7] / **11,176** [11,125–11,229] / **12,272** [12,161–12,412] | **×0.96 / ×0.81 / ×0.57** |
 
 **Partial-offload rows are noisy.** The CPU-expert runs on this shared EPYC host spread widely, both engines (e.g.
-Moonlight N = 12 tg128 54–105). Read them as "llama.cpp's CPU path is faster here", not as precise ratios.
+Moonlight N = 12 tg128 54–105). Read them as "llama.cpp's CPU path is faster on this pod", not as precise ratios.
+**All-resident rows:** decode and pp2100 vary ≤ 3 % (min–max over median), and the 30B's pp512 3.5 %. Moonlight's
+pp512 varies **18 %** (one low round: 7,449 against 9,035–9,047).
 
 **Method.** One `--timing 4090` job; the script is `podbench/run.sh` (gist).
 - **Rounds:** the config order rotates every round. Each Axon config gets one discarded warm-up (NVRTC kernel cache).
@@ -608,7 +610,8 @@ Moonlight N = 12 tg128 54–105). Read them as "llama.cpp's CPU path is faster h
 
 ## Superseded: Moonlight-16B-A3B, resident experts vs llama.cpp (Parabellum, 2026-10-26)
 
-The bench of record for `--gpu-experts` (MoE-resident PR D, roadmap item 3).
+Superseded by the RTX 4090 board above; kept as history. This was the first Parabellum board for `--gpu-experts`
+(MoE-resident PR D).
 - Axon main `39624db` runs at `--gpu-experts 0 / 6 / 12 / auto`. llama.cpp CUDA `4413a19` runs at the same
   placement (`--n-cpu-moe 26 − N`).
 - Moonlight-16B-A3B-Instruct Q4_K_M, ctx 4096.
