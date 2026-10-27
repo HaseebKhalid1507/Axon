@@ -2,9 +2,10 @@
 
 Single-stream throughput of Axon against llama.cpp and ollama on the same GGUF files, a
 [mixture-of-experts board](#mixture-of-experts-on-an-rtx-4090-moonlight-16b-a3b-and-qwen3-30b-a3b-vs-llamacpp-2026-10-26-bench-of-record)
-(resident experts: Moonlight and Qwen3-30B-A3B on an RTX 4090), and two serving
+(resident experts: Moonlight and Qwen3-30B-A3B on an RTX 4090), two serving
 (concurrency) sections against vLLM and SGLang: [RTX 4090](#concurrency-rtx-4090-qwen25-7b-2026-10-18) and
-[H100 SXM](#concurrency-h100-sxm-qwen25-7b-2026-10-19). Every number on
+[H100 SXM](#concurrency-h100-sxm-qwen25-7b-2026-10-19), and Axon's own serve-scheduler A/B on two laptop GPUs
+([#131](#serve-scheduler-ab-laptop-gpus-2026-10-25-131)). Every number on
 this page is MEASURED unless labelled ESTIMATED. Single-stream boards: tok/s, median of 3 interleaved rounds; the
 concurrency sections state their own rounds. These numbers come from a scoreboard
 script that isn't in the repo. For the CPU numbers, the `scripts/bench.py` method, and the full GPU
@@ -724,6 +725,55 @@ round, the engine order alternates (odd rounds Axon first). Every run is precede
 - **Bits.** Axon's resident experts are bit-identical to its CPU experts (the twin kernels; PR #127's gates).
   llama.cpp's GPU and CPU expert paths are not bit-identical to each other. The speed gap is the subject of the
   diagnosis in the log entry.
+
+## Serve scheduler A/B: laptop GPUs (2026-10-25, #131)
+
+Axon against itself, no other engine: main's scheduling vs the measured step budget (`--step-ms 60`, now the
+default) and shortest-first admission (`--admit-order sjf`, opt-in). The full tables (every arm, sjf50 included,
+and the earlier a18ff8d run) are in [PR #131](https://github.com/HaseebKhalid1507/Axon/pull/131) §5; the verdict
+and diagnosis in [the log](log/2026-10-25-sched-budget-main.md). Raw logs:
+[gist](https://gist.github.com/HaseebKhalid1507/b439d3907e42da8cbb110d762936ffe8).
+
+Candidate 722139a (6cb98fc's code with the old defaults); main d6b7051. Arms: **main** = main's scheduling (the
+in-binary `roll` arm, `AXON_STEP_COST=legacy`, proven decision-equal to main; on the sdab15 rows, the main binary
+itself), **fifo60** = the shipped defaults, **sjf60** = `--admit-order sjf --step-ms 60`. Closed loop, greedy, a fresh
+server per arm, arm order rotated per round, medians; `same_text` = 1 in every round of every cell. All MEASURED,
+none TAINTED (`axon-run --timing`; foreign GPU load on bella at most 14 %, mean ≤ 1.5 %; avante 0 %). Q4_K_M weights,
+`--ctx 8192`. Times in ms.
+
+**Mix workload** (`serve_sched_ab`: ~40-token questions plus 2k/4k/6k-token documents, 3 rounds):
+
+| host, model, C (job) | arm | agg tok/s | short TTFT p50 | short p90 | long TTFT p50 | ITL p99 | slo_ok |
+|---|---|---:|---:|---:|---:|---:|---:|
+| bella (RTX 5070 Ti Laptop), 7B, C=16, 2k longs (1025-174838-bb0d) | main | 549.9 | 272.7 | 580.1 | 1383.7 | 75.04 | 1.00 |
+| | **fifo60 (default)** | 554.2 | 299.1 | 547.2 | 1274.5 | 72.16 | 1.00 |
+| | sjf60 | 558.4 | 109.6 | 304.1 | 1333.6 | 71.66 | 1.00 |
+| bella, 1.5B, C=32 (1025-180241-7dac) | main | 1772.5 | 146.9 | 569.3 | 380.9 | 66.42 | 1.00 |
+| | **fifo60 (default)** | 1765.7 | 141.1 | 561.3 | 441.4 | 66.24 | 1.00 |
+| | sjf60 | 1784.4 | 78.8 | 136.4 | 738.6 | 65.35 | 1.00 |
+| avante (RTX 4050 Laptop), 1.5B, C=32 (1025-174837-1554) | main | 589.9 | 543.2 | 1472.5 | 3150.9 | 75.64 | 0.66 |
+| | **fifo60 (default)** | 598.3 | 304.4 | 1665.7 | 2965.2 | 76.40 | 0.64 |
+| | sjf60 | 599.9 | 140.2 | 379.8 | 2806.3 | 77.60 | 0.94 |
+
+**The showdown's client** (sdab15: `sd_client.py cell --workload mix`, 1.5B, `--parallel 32`, bella, 2 rounds,
+1025-183047-34df):
+
+| C | arm | agg tok/s (round spread) | short TTFT p50 | short p99 | long TTFT p50 | ITL p99 | slo_ok |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 16 | main (binary) | 1494.4 (±6 %) | 24.1 | 626.9 | 486.6 | 64.2 | 1 |
+| 16 | **fifo60 (default)** | 1405.3 (±3 %) | 19.8 | 541.0 | 517.6 | 63.3 | 1 |
+| 16 | sjf60 | 1485.0 (±3 %) | 43.2 | 111.6 | 521.6 | 63.8 | 1 |
+| 32 | main (binary) | 1863.3 (±12 %) | 119.3 | 1643.5 | 517.1 | 63.6 | 0.976 |
+| 32 | **fifo60 (default)** | 1834.3 (±8 %) | 78.1 | 1595.2 | 521.0 | 63.6 | 0.984 |
+| 32 | sjf60 | 1821.0 (±7 %) | 61.6 | 159.9 | 514.3 | 64.6 | 0.984 |
+
+Reading, from the PR: the default (fifo60) is within ±4 % of main on ITL p99 everywhere and its aggregate is
++0.8 % / −0.4 % / −1.6 % on the kill-rule cells (7B, 1.5B, sdab15 C=32). sjf60 cuts short-prompt tails (p90 0.24–0.56×,
+sdab15 p99 0.21× / 0.10× of fifo60) and lifts avante's slo_ok 0.64 → 0.94, but its short p50 was 0.56× and 0.79× of
+fifo60's on two of the three kill-rule cells (the clause needs ≤ 0.5×), it is 2.18× fifo60's at sdab15 C=16, and the
+1.5B long-prompt TTFT p50 rose 67 %. So sjf is opt-in until the H100 C = 64 / 128 cells decide it (#139). The sdab15
+C=16 aggregate (fifo60 −6 % vs the main binary) is confounded: sd_client salts each cell randomly, so the arms ran
+different prompts and output lengths.
 
 ## Laptops
 

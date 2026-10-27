@@ -122,9 +122,12 @@ pub fn load(path: &str, device: Device) -> Result<Model, String> {
 /// command line, `["axon", "serve", "model.gguf", flags...]` (README,
 /// `axon serve --help`). Blocks. It behaves as the CLI does, process exits
 /// included: a usage error (flags, or a bad `AXON_DEVICE` / `AXON_KV` /
-/// `AXON_DRAFT`) prints a message and exits with code 2, and an engine
-/// failure (a panic in the engine thread) exits with code 70. Not yet
-/// safe to call from a process that must outlive the server.
+/// `AXON_DRAFT`) prints a message and exits with code 2, so does a start
+/// the server refuses (an explicit `--parallel N` that doesn't fit in GPU
+/// memory, #137; a mixture-of-experts model with `--parallel N`), and an
+/// engine failure (a panic in the engine thread) exits with code 70. Not
+/// yet safe to call from a process that must outlive the server: a typed,
+/// matchable start error for embedders is tracked in #118.
 pub fn serve(args: &[String]) -> std::io::Result<()> {
     serve::run(args)
 }

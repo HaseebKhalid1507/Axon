@@ -7683,10 +7683,556 @@ fn gpu_gemmh_matches_reference_bits() {
     }
 }
 
+/// The test-only gemmh2 variants (`gemmh2_variant_src`); never built by a
+/// product path.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum G2Var {
+    /// DELIBERATELY INEXACT: no per-256 drain (the contract's upper bound).
+    NoDrain,
+    /// Exact by construction (to be proven by the bits test on sm_90a): S
+    /// converted with the magic-number form instead of I2F.
+    Magic,
+}
+
+impl G2Var {
+    const ALL: [G2Var; 2] = [G2Var::NoDrain, G2Var::Magic];
+    /// Kernel name infix: gemmh2<tag>_q4_k, gemmh2<tag>_q4_k_gu.
+    fn tag(self) -> &'static str {
+        match self {
+            G2Var::NoDrain => "nd",
+            G2Var::Magic => "mg",
+        }
+    }
+    fn name(self) -> &'static str {
+        match self {
+            G2Var::NoDrain => "nodrain",
+            G2Var::Magic => "magic",
+        }
+    }
+    /// The variant a kernel name belongs to (None: the real kernels).
+    fn of(kernel: &str) -> Option<G2Var> {
+        G2Var::ALL
+            .into_iter()
+            .find(|v| kernel.starts_with(&format!("gemmh2{}_", v.tag())))
+    }
+}
+
+/// TEST-ONLY kernel sources: KERNELS with hopper.cu's `gemmh2_t` patched,
+/// its two kernels renamed gemmh2<tag>_q4_k / gemmh2<tag>_q4_k_gu (so a
+/// profiler can tell them apart). They live only here (`#[cfg(test)]`): no
+/// product path builds them, and the kernel cache is keyed by the source,
+/// so their cubins can never be loaded for the real kernels. Panics if
+/// hopper.cu no longer has the patched lines exactly once
+/// (`gemmh2_variant_patches_apply` catches that on any machine).
+///
+/// - `NoDrain`, DELIBERATELY INEXACT: the S (dlo / dhi) wgmma chains
+///   accumulate over the whole K in int32 (scale-d 0 only on block 0's first
+///   k32), M by dp4a likewise, and the float epilogue (d S - dmin M, the fma
+///   into acc) runs once, on the last block's scales. Its results are wrong
+///   by design; its speed is the upper bound of what the per-256 drain (the
+///   bit-identity contract's only Hopper-specific cost, outside review 10-19
+///   §2.3) costs. It still waits for each block's wgmmas (the A fragments'
+///   registers are refilled for the next block), so it bounds the drain's
+///   arithmetic, not the wait.
+/// - `Magic` (research hopper-exact-w4a8 §3.3, E0' (a)): the sub-block
+///   scale split 3 + 3 instead of 4 + 2 (sc = lo3 + 8 hi3: pre-scaled quants
+///   q lo3, q hi3 <= 105, so |Dlo|, |Dhi| <= 8 * 7 * 32 * 15 * 127 =
+///   3,413,760 < 2^22), S = 8 Dhi + Dlo the same integer as before, and
+///   rn(S) as fadd(fsub(bits(0x4CC00000 + Dhi), 1.5 * 2^26), fsub(bits(
+///   0x4B400000 + Dlo), 1.5 * 2^23)): both terms are exact floats (8 Dhi and
+///   Dlo), so the one rounding fadd is rn(S) = cvt.rn.f32.s32(S), with no
+///   I2F (the conversion pipe's 16 results per clock per SM). (The research
+///   note's 0x4D400000 is 1.5 * 2^27, ulp 16: wrong; `magic_i2f_is_cvt_rn`.)
+///   Its bits must equal the real kernel's: `gpu_gemmh2_magic_matches_reference_bits`.
+fn gemmh2_variant_src(v: G2Var) -> String {
+    let src = crate::cuda::KERNELS;
+    let a = src
+        .find("__device__ __forceinline__ void gemmh2_t(")
+        .expect("hopper.cu: gemmh2_t");
+    let b = a + src[a..]
+        .find("gemmh2_q4_k(const __grid_constant__")
+        .expect("hopper.cu: gemmh2_q4_k");
+    let mut body = src[a..b].to_string();
+    let edits: &[(&str, &str)] = match v {
+        G2Var::NoDrain => &[
+            (
+                "wg_mma_rs_n64_u8(dlo, alo[j], wg_desc(b0 + (j >> 2) * 8192) + 2 * (j & 3), j);",
+                "wg_mma_rs_n64_u8(dlo, alo[j], wg_desc(b0 + (j >> 2) * 8192) + 2 * (j & 3), (b | j) != 0);",
+            ),
+            (
+                "wg_mma_rs_n64_u8(dhi, ahi[j], wg_desc(b0 + (j >> 2) * 8192) + 2 * (j & 3), j);",
+                "wg_mma_rs_n64_u8(dhi, ahi[j], wg_desc(b0 + (j >> 2) * 8192) + 2 * (j & 3), (b | j) != 0);",
+            ),
+            (
+                "acc[i] = 0.0f, dlo[i] = 0, dhi[i] = 0;",
+                "acc[i] = 0.0f, dlo[i] = 0, dhi[i] = 0, M[i] = 0;",
+            ),
+            (
+                "M[4 * i + e] = ml + 64 * mh;",
+                "M[4 * i + e] += ml + 64 * mh;",
+            ),
+            (
+                "int h = e >> 1;\n                int S = 16 * dhi",
+                "if (b != nblk - 1) continue; // NODRAIN: one epilogue\n                int h = e >> 1;\n                int S = 16 * dhi",
+            ),
+        ],
+        G2Var::Magic => &[
+            (
+                "alo[j][h] = v0 * (scj & 15);",
+                "alo[j][h] = v0 * (scj & 7);",
+            ),
+            (
+                "alo[j][2 + h] = v1 * (scj & 15);",
+                "alo[j][2 + h] = v1 * (scj & 7);",
+            ),
+            (
+                "ahi[j][h] = v0 * (scj >> 4);",
+                "ahi[j][h] = v0 * (scj >> 3);",
+            ),
+            (
+                "ahi[j][2 + h] = v1 * (scj >> 4);",
+                "ahi[j][2 + h] = v1 * (scj >> 3);",
+            ),
+            (
+                "int S = 16 * dhi[4 * i + e] + dlo[4 * i + e];\n                float v = __fsub_rn(__fmul_rn(dr[h], i2f_rn(S)),",
+                "float fS = __fadd_rn(\n                    __fsub_rn(__int_as_float(0x4CC00000 + dhi[4 * i + e]), 100663296.0f),\n                    __fsub_rn(__int_as_float(0x4B400000 + dlo[4 * i + e]), 12582912.0f));\n                float v = __fsub_rn(__fmul_rn(dr[h], fS),",
+            ),
+        ],
+    };
+    for (from, to) in edits {
+        assert_eq!(body.matches(from).count(), 1, "hopper.cu gemmh2_t: {from}");
+        body = body.replacen(from, to, 1);
+    }
+    let mut tail = src[b..].to_string();
+    for k in [
+        "gemmh2_q4_k(const __grid_constant__",
+        "gemmh2_q4_k_gu(const __grid_constant__",
+    ] {
+        assert_eq!(tail.matches(k).count(), 1, "hopper.cu: {k}");
+        tail = tail.replacen(
+            k,
+            &k.replacen("gemmh2_", &format!("gemmh2{}_", v.tag()), 1),
+            1,
+        );
+    }
+    format!(
+        "{}// AXON TEST-ONLY: gemmh2_t variant {} (tests.rs gemmh2_variant_src)\n{body}{tail}",
+        &src[..a],
+        v.name()
+    )
+}
+
+/// `gemmh2_variant_src(v)` compiled as module_ext is (sm_90a only).
+fn gemmh2_variant_module(g: &Gpu, v: G2Var) -> Module<'_> {
+    let src = gemmh2_variant_src(v);
+    let m = Module::load(g, &src, &crate::cuda::KERNEL_OPTS_EXT)
+        .unwrap()
+        .0;
+    assert!(m.hopper(), "the {} module isn't sm_90a", v.name());
+    m
+}
+
+/// The variant patches still apply to hopper.cu (no GPU needed) and change
+/// only gemmh2_t and the two kernels' names. AXON_VARIANT_SRC_DIR=DIR
+/// writes them there as gemmh2-<name>.cu (the H100 kit compiles them
+/// offline into the pod's kernel cache).
+#[test]
+fn gemmh2_variant_patches_apply() {
+    let a = crate::cuda::KERNELS
+        .find("__device__ __forceinline__ void gemmh2_t(")
+        .unwrap();
+    for v in G2Var::ALL {
+        let p = gemmh2_variant_src(v);
+        if let Some(d) = std::env::var_os("AXON_VARIANT_SRC_DIR") {
+            let f = std::path::Path::new(&d).join(format!("gemmh2-{}.cu", v.name()));
+            std::fs::write(f, &p).unwrap();
+        }
+        assert_eq!(&p[..a], &crate::cuda::KERNELS[..a]);
+        let k = format!("gemmh2{}_q4_k(const", v.tag());
+        assert_eq!(p.matches(&k).count(), 1, "{v:?}");
+        assert!(!p.contains("\ngemmh2_q4_k(const"), "{v:?}");
+        match v {
+            G2Var::NoDrain => assert_eq!(p.matches("(b | j) != 0").count(), 2),
+            G2Var::Magic => assert_eq!(p.matches("0x4CC00000 + dhi").count(), 1),
+        }
+    }
+}
+
+/// `G2Var::Magic`'s conversion, emulated on the host (IEEE f32, round to
+/// nearest even, no contraction): rn(8 hi + lo) for |hi|, |lo| < 2^22.
+fn magic_s(hi: i32, lo: i32) -> f32 {
+    let fh = f32::from_bits((0x4CC0_0000i32 + hi) as u32) - 100_663_296.0;
+    let fl = f32::from_bits((0x4B40_0000i32 + lo) as u32) - 12_582_912.0;
+    fh + fl
+}
+
+/// The magic-number conversion equals `as f32` (= cvt.rn.f32.s32) for
+/// every Dhi with Dlo at its edges and a few others, and every Dlo with Dhi
+/// likewise, over the whole |x| < 2^22 range (Q4_K's 3 + 3 split needs
+/// 3,413,760), including |S| >= 2^24 where the conversion rounds. No GPU.
+#[test]
+fn magic_i2f_is_cvt_rn() {
+    const R: i32 = (1 << 22) - 1;
+    let edge = [
+        -R,
+        -R + 1,
+        -3_413_760,
+        -12_345,
+        -1,
+        0,
+        1,
+        7,
+        3_413_760,
+        R - 1,
+        R,
+    ];
+    let mut rng = Rng(0x3a61c);
+    let mut picks: Vec<i32> = edge.to_vec();
+    picks.extend((0..5).map(|_| (rng.next() % (2 * R as u64 + 1)) as i32 - R));
+    let mut n = 0u64;
+    for x in -R..=R {
+        for &y in &picks {
+            for (hi, lo) in [(x, y), (y, x)] {
+                let want = (8 * hi + lo) as f32;
+                assert_eq!(magic_s(hi, lo).to_bits(), want.to_bits(), "hi {hi} lo {lo}");
+                n += 1;
+            }
+        }
+    }
+    // The research note's constant (0x4D400000 = 1.5 * 2^27, ulp 16) is not it.
+    let doc = f32::from_bits((0x4D40_0000i32 + 1) as u32) - 100_663_296.0;
+    assert_ne!(doc, 8.0);
+    eprintln!("magic I2F == cvt.rn on {n} pairs");
+}
+
+/// The magic conversion and I2F on the device, and an I2F / magic
+/// throughput probe (`cuda_i2f_bench`).
+const MAGIC_SRC: &str = r#"
+__device__ __forceinline__ float magic_s(int hi, int lo) {
+    return __fadd_rn(__fsub_rn(__int_as_float(0x4CC00000 + hi), 100663296.0f),
+                     __fsub_rn(__int_as_float(0x4B400000 + lo), 12582912.0f));
+}
+// Thread t: hi from a stride walk over [-R, R], lo over 16 values (edges and
+// a walk); mismatches counted, the first one kept.
+extern "C" __global__ void magic_check(int n, unsigned* bad, int* first) {
+    const int R = (1 << 22) - 1;
+    int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= n) return;
+    int hi = (int)(((long long)t * 2 * R) / (n - 1)) - R;
+    const int edge[8] = {-R, -3413760, -1, 0, 1, 7, 3413760, R};
+    for (int k = 0; k < 16; k++) {
+        int lo = k < 8 ? edge[k] : (int)(((unsigned)t * 2654435761u + k * 40503u) % (2u * R + 1)) - R;
+        for (int s = 0; s < 2; s++) {
+            int a = s ? lo : hi, b = s ? hi : lo;
+            float w = __int2float_rn(8 * a + b), m = magic_s(a, b);
+            if (__float_as_uint(w) != __float_as_uint(m) && atomicAdd(bad, 1u) == 0) {
+                first[0] = a;
+                first[1] = b;
+            }
+        }
+    }
+}
+// One block per SM: iters x 8 conversions per thread (8 independent
+// chains), I2F (mode 0) or the magic form (1); the block's clock64 span.
+extern "C" __global__ void i2f_tp(int iters, int mode, float* out, long long* clk) {
+    int x[8];
+    float acc[8];
+    for (int k = 0; k < 8; k++) x[k] = threadIdx.x * 8 + k, acc[k] = 0.0f;
+    __syncthreads();
+    long long t0 = clock64();
+    if (mode == 0) {
+        for (int i = 0; i < iters; i++)
+#pragma unroll
+            for (int k = 0; k < 8; k++) acc[k] = __fadd_rn(acc[k], __int2float_rn(x[k] += 3));
+    } else {
+        for (int i = 0; i < iters; i++)
+#pragma unroll
+            for (int k = 0; k < 8; k++)
+                acc[k] = __fadd_rn(acc[k], __fsub_rn(__int_as_float(0x4B400000 + (x[k] += 3)), 12582912.0f));
+    }
+    __syncthreads();
+    long long t1 = clock64();
+    float s = 0.0f;
+    for (int k = 0; k < 8; k++) s += acc[k];
+    out[blockIdx.x * blockDim.x + threadIdx.x] = s;
+    if (threadIdx.x == 0) clk[blockIdx.x] = t1 - t0;
+}
+"#;
+
+/// `magic_i2f_is_cvt_rn` on the device (any GPU: the ops are plain IEEE
+/// f32): 2^22 values of Dhi x 16 of Dlo, both ways round, bit for bit
+/// against __int2float_rn.
+#[test]
+fn gpu_magic_i2f_is_cvt_rn() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let m = Module::load(&g, MAGIC_SRC, &crate::cuda::KERNEL_OPTS)
+        .unwrap()
+        .0;
+    let f = m.function("magic_check").unwrap();
+    let n = 1usize << 22;
+    let bad = g.alloc(4).unwrap();
+    bad.zero().unwrap();
+    let first = g.alloc(8).unwrap();
+    first.zero().unwrap();
+    // SAFETY: magic_check's signature; bad 1 u32, first 2 i32.
+    unsafe {
+        g.launch(
+            &f,
+            (n.div_ceil(256) as u32, 1, 1),
+            (256, 1, 1),
+            0,
+            &[Arg::I32(n as i32), bad.arg(), first.arg()],
+        )
+        .unwrap();
+    }
+    g.sync().unwrap();
+    let b: Vec<u32> = bad.read().unwrap();
+    let fi: Vec<i32> = first.read().unwrap();
+    assert_eq!(
+        b[0], 0,
+        "magic != cvt.rn, first at hi {} lo {}",
+        fi[0], fi[1]
+    );
+    eprintln!("magic I2F == __int2float_rn on {} pairs (device)", n * 32);
+}
+
+/// I2F vs the magic form, results per clock per SM (one block of 1024
+/// threads per SM, 8 chains each, clock64 per block; median of 5). The
+/// research note cites 16 I2F per clock per SM on cc 8.x / 9.0; FADD-class
+/// is 128. Run with --ignored.
+#[test]
+#[ignore]
+fn cuda_i2f_bench() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let m = Module::load(&g, MAGIC_SRC, &crate::cuda::KERNEL_OPTS)
+        .unwrap()
+        .0;
+    let f = m.function("i2f_tp").unwrap();
+    let info = g.info().unwrap();
+    let (blocks, threads, iters) = (info.sms as usize, 1024usize, 4096usize);
+    let out = g.alloc(blocks * threads * 4).unwrap();
+    let clk = g.alloc(blocks * 8).unwrap();
+    for (mode, what) in [(0, "I2F"), (1, "magic")] {
+        let mut v: Vec<f64> = (0..5)
+            .map(|_| {
+                // SAFETY: i2f_tp's signature; out blocks x threads floats, clk blocks i64.
+                unsafe {
+                    g.launch(
+                        &f,
+                        (blocks as u32, 1, 1),
+                        (threads as u32, 1, 1),
+                        0,
+                        &[Arg::I32(iters as i32), Arg::I32(mode), out.arg(), clk.arg()],
+                    )
+                    .unwrap();
+                }
+                g.sync().unwrap();
+                let c: Vec<u64> = clk.read().unwrap();
+                let mean = c.iter().sum::<u64>() as f64 / c.len() as f64;
+                (threads * iters * 8) as f64 / mean
+            })
+            .collect();
+        v.sort_by(f64::total_cmp);
+        eprintln!(
+            "I2FBENCH {} sm_{}{} {what}: {:.1} results/clk/SM (median of 5; + 1 FADD and 1 IADD each)",
+            info.name, info.cc.0, info.cc.1, v[2]
+        );
+    }
+}
+
+/// gemmh2_q4_k and gemmh2_q4_k_gu in `G2Var::Magic` against gemv_ref bit
+/// for bit (the real kernels' test cases, trimmed), plus an adversarial
+/// fixture at the bounds the proof uses: every scale and min 63, every
+/// quant 15, activations +-127 (|S| up to 30.7M > 2^24, where the
+/// conversion rounds). Hopper (sm_90a) only.
+#[test]
+fn gpu_gemmh2_magic_matches_reference_bits() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module_ext(&g).unwrap();
+    if !km.hopper() {
+        eprintln!("skipping: needs an sm_90a module (compute capability 9.0)");
+        return;
+    }
+    let kv = gemmh2_variant_module(&g, G2Var::Magic);
+    let mut rng = Rng(0x3a61_c0de_0090);
+    // Q4_K, every byte of scales and quants 0xff (sc = m = 63, q = 15), d =
+    // dmin = 1.0 (f16 0x3c00).
+    let adversarial = |rows: usize, cols: usize| -> Vec<u8> {
+        let blk: Vec<u8> = [0x00u8, 0x3c, 0x00, 0x3c]
+            .into_iter()
+            .chain([0xffu8; 140])
+            .collect();
+        blk.repeat(rows * cols / 256)
+    };
+    let cases: [(usize, usize, &[usize], bool); 7] = [
+        (64, 256, &[1, 17, 65], false),
+        (333, 1536, &[17, 129], false),
+        (3584, 3584, &[64], false),
+        (18944, 3584, &[129], false),
+        (3584, 18944, &[65], false),
+        (192, 3584, &[66], true),
+        (128, 18944, &[64], true),
+    ];
+    for (rows, cols, nbs, adv) in cases {
+        let wd = match adv {
+            true => adversarial(rows, cols),
+            false => synth_matrix(&mut rng, Q4_K, rows, cols),
+        };
+        let w = g.upload(&wd).unwrap();
+        for &nb in nbs {
+            let xs: Vec<Vec<f32>> = (0..nb)
+                .map(|i| match adv {
+                    // all +1 / all -1 (q = +-127), then alternating signs
+                    true => match i % 3 {
+                        0 => vec![1.0; cols],
+                        1 => vec![-1.0; cols],
+                        _ => (0..cols).map(|c| [1.0f32, -1.0][c % 2]).collect(),
+                    },
+                    false => rng.vec(cols, [1.0f32, 1e-3, 40.0][i % 3]),
+                })
+                .collect();
+            let epi = match nb % 2 {
+                0 => Epi::default(),
+                _ => Epi {
+                    bias: Some(rng.vec(rows, 3.0)),
+                    init: None,
+                },
+            };
+            let act = quantize_batch(&g, &km, &xs, cols);
+            let want = gpu_batched(&g, &km, "gemv_ref", Q4_K, &w, rows, cols, &act, nb, &epi);
+            let out = g.alloc(rows * nb * 4).unwrap();
+            out.zero().unwrap();
+            let bias = epi.bias.as_ref().map(|b| g.upload(b).unwrap());
+            // SAFETY: w rows x cols Q4_K, act nb tokens, out rows * nb.
+            unsafe {
+                launch_gemmh(
+                    &g,
+                    &kv,
+                    "gemmh2mg_q4_k",
+                    &w,
+                    rows,
+                    cols,
+                    &act,
+                    act_stride_t(cols),
+                    nb,
+                    bias.as_ref().map_or(Arg::Ptr(0), |b| b.arg()),
+                    0,
+                    &out,
+                )
+            };
+            g.sync().unwrap();
+            let got: Vec<f32> = out.read().unwrap();
+            if let Some(i) = (0..rows * nb).find(|&i| got[i].to_bits() != want[i].to_bits()) {
+                panic!(
+                    "gemmh2mg_q4_k {cols}x{rows} nb {nb} adv {adv} token {} row {}: {} vs ref {}",
+                    i / rows,
+                    i % rows,
+                    got[i],
+                    want[i]
+                );
+            }
+            eprintln!("MAGICBITS Q4_K {cols}x{rows} nb {nb} adversarial {adv}: bit-identical");
+        }
+    }
+    // The fused gate + up: silu(gate) * up against gemv_ref's mode 2.
+    for (cols, rows, adv) in [(3584usize, 1000usize, false), (3584, 256, true)] {
+        let mk = |rng: &mut Rng| match adv {
+            true => adversarial(rows, cols),
+            false => synth_matrix(rng, Q4_K, rows, cols),
+        };
+        let (gd, ud) = (mk(&mut rng), mk(&mut rng));
+        let (wg, wu) = (g.upload(&gd).unwrap(), g.upload(&ud).unwrap());
+        let nb = 100;
+        let xs: Vec<Vec<f32>> = (0..nb)
+            .map(|i| match adv {
+                true => vec![[1.0f32, -1.0][i % 2]; cols],
+                false => rng.vec(cols, [1.0f32, 1e-2, 4.0][i % 3]),
+            })
+            .collect();
+        let act = quantize_batch(&g, &km, &xs, cols);
+        let gate = gpu_batched(
+            &g,
+            &km,
+            "gemv_ref",
+            Q4_K,
+            &wg,
+            rows,
+            cols,
+            &act,
+            nb,
+            &Epi::default(),
+        );
+        let gate_b = g.upload(&gate).unwrap();
+        let want = {
+            let out = g.alloc(rows * nb * 4).unwrap();
+            out.zero().unwrap();
+            let f = km.function("gemv_ref").unwrap();
+            let common = [
+                wu.arg(),
+                Arg::U64(quant::row_bytes(Q4_K, cols) as u64),
+                Arg::I32(rows as i32),
+                Arg::I32(cols as i32),
+                act.arg(),
+                Arg::U64(act_stride_t(cols) as u64),
+                Arg::I32(nb as i32),
+                gate_b.arg(),
+                Arg::I32(2),
+                out.arg(),
+                Arg::U64(rows as u64),
+            ];
+            // SAFETY: gemv_ref's signature; act nb tokens, out and gate rows * nb.
+            unsafe { launch_product(&g, &f, "gemv_ref", Q4_K, rows, nb, &common) };
+            g.sync().unwrap();
+            out.read::<f32>().unwrap()
+        };
+        let out = g.alloc(rows * nb * 4).unwrap();
+        // SAFETY: wg, wu rows x cols Q4_K, act nb tokens, out rows * nb.
+        unsafe {
+            launch_gemmh_gu(
+                &g,
+                &kv,
+                "gemmh2mg_q4_k_gu",
+                &wg,
+                &wu,
+                rows,
+                cols,
+                &act,
+                act_stride_t(cols),
+                nb,
+                &out,
+            )
+        };
+        g.sync().unwrap();
+        let got: Vec<f32> = out.read().unwrap();
+        if let Some(i) = (0..rows * nb).find(|&i| got[i].to_bits() != want[i].to_bits()) {
+            panic!(
+                "gemmh2mg_q4_k_gu {cols}x{rows} adv {adv} token {} row {}: {} vs ref {}",
+                i / rows,
+                i % rows,
+                got[i],
+                want[i]
+            );
+        }
+        eprintln!("MAGICBITS gate+up {cols}x{rows} nb {nb} adversarial {adv}: bit-identical");
+    }
+}
+
 /// gemmh vs gemm2 on the 7B's Q4_K shapes: interleaved rounds (clocks
 /// drift), each kernel's median / min / max TMAC/s of real MACs (rows x
 /// cols x nb). AXON_BENCH_NB (default 1050), AXON_BENCH_ROUNDS (default 7).
-/// Hopper only for gemmh; run with --ignored.
+/// gemm2s, gemm2, gemm2t everywhere; on Hopper (sm_90a) the gemmh kernels
+/// too and the `G2Var` variants: gemmh2nd_q4_k[_gu] (no drain, the INEXACT
+/// upper bound) and gemmh2mg_q4_k[_gu] (the magic-number S conversion).
+/// AXON_BENCH_VARIANTS (default "nodrain,magic"; "" none),
+/// AXON_BENCH_SHAPE (a substring of the shapes' names, e.g. "gate"; the
+/// fused gate + up is "gate+up"), AXON_BENCH_KERNELS (kernel name prefix,
+/// e.g. "gemmh2": what ncu profiles). Run with --ignored.
 #[test]
 #[ignore]
 fn cuda_gemmh_bench() {
@@ -7703,6 +8249,30 @@ fn cuda_gemmh_bench() {
         info.sms,
         km.hopper()
     );
+    // The variants' modules (Hopper only): the same options as module_ext.
+    let want_v = std::env::var("AXON_BENCH_VARIANTS").unwrap_or("nodrain,magic".into());
+    let vars: Vec<(G2Var, Module)> = (G2Var::ALL.into_iter())
+        .filter(|v| km.hopper() && want_v.split(',').any(|w| w.trim() == v.name()))
+        .map(|v| {
+            eprintln!(
+                "variant module {}: gemmh2{}_q4_k[_gu]{}",
+                v.name(),
+                v.tag(),
+                match v {
+                    G2Var::NoDrain => " without the per-256 drain (INEXACT, bench only)",
+                    G2Var::Magic =>
+                        " with the magic-number S conversion (exact if MAGICBITS passed)",
+                }
+            );
+            (v, gemmh2_variant_module(&g, v))
+        })
+        .collect();
+    let module_of = |k: &str| match G2Var::of(k) {
+        Some(v) => &vars.iter().find(|x| x.0 == v).unwrap().1,
+        None => &km,
+    };
+    let shape_ok = |s: &str| std::env::var("AXON_BENCH_SHAPE").map_or(true, |f| s.contains(&f));
+    let kpre = std::env::var("AXON_BENCH_KERNELS").unwrap_or_default();
     let nbs: Vec<usize> = std::env::var("AXON_BENCH_NB")
         .map(|v| v.split(',').map(|x| x.parse().unwrap()).collect())
         .unwrap_or(vec![1050]);
@@ -7717,16 +8287,23 @@ fn cuda_gemmh_bench() {
         ("down  Q4_K", 18944, 3584),
         ("kv    Q4_K", 3584, 512),
     ] {
+        if !shape_ok(what) || what.contains("gate+up") {
+            continue;
+        }
         let w = g.upload(&synth_matrix(&mut rng, Q4_K, rows, cols)).unwrap();
         for &nb in &nbs {
             let xs: Vec<Vec<f32>> = (0..nb).map(|_| rng.vec(cols, 1.0)).collect();
             let act = quantize_batch(&g, &km, &xs, cols);
             let st = act_stride_t(cols);
             let out = g.alloc(rows * nb * 4).unwrap();
-            let mut kernels = vec!["gemm2s_q4_k", "gemm2_q4_k"];
+            let mut kernels: Vec<String> = ["gemm2s_q4_k", "gemm2_q4_k", "gemm2t_q4_k"]
+                .map(String::from)
+                .to_vec();
             if km.hopper() {
-                kernels.extend(["gemmh_q4_k", "gemmh1_q4_k", "gemmh2_q4_k"]);
+                kernels.extend(["gemmh_q4_k", "gemmh1_q4_k", "gemmh2_q4_k"].map(String::from));
             }
+            kernels.extend(vars.iter().map(|v| format!("gemmh2{}_q4_k", v.0.tag())));
+            kernels.retain(|k| k.starts_with(&kpre));
             let mut ms: Vec<Vec<f64>> = vec![Vec::new(); kernels.len()];
             for _ in 0..rounds {
                 for (ki, k) in kernels.iter().enumerate() {
@@ -7736,7 +8313,7 @@ fn cuda_gemmh_bench() {
                             unsafe {
                                 launch_gemmh(
                                     &g,
-                                    &km,
+                                    module_of(k),
                                     k,
                                     &w,
                                     rows,
@@ -7793,6 +8370,9 @@ fn cuda_gemmh_bench() {
         }
     }
     // The fused gate + up (7B: 2 x 18944 x 3584): gemm2s_q4_k_gu vs gemmh2_q4_k_gu.
+    if !shape_ok("gate+up") {
+        return;
+    }
     let (cols, rows) = (3584usize, 18944usize);
     let wg = g.upload(&synth_matrix(&mut rng, Q4_K, rows, cols)).unwrap();
     let wu = g.upload(&synth_matrix(&mut rng, Q4_K, rows, cols)).unwrap();
@@ -7801,10 +8381,12 @@ fn cuda_gemmh_bench() {
         let act = quantize_batch(&g, &km, &xs, cols);
         let st = act_stride_t(cols);
         let out = g.alloc(rows * nb * 4).unwrap();
-        let mut kernels = vec!["gemm2s_q4_k_gu"];
+        let mut kernels: Vec<String> = vec!["gemm2s_q4_k_gu".into()];
         if km.hopper() {
-            kernels.push("gemmh2_q4_k_gu");
+            kernels.push("gemmh2_q4_k_gu".into());
         }
+        kernels.extend(vars.iter().map(|v| format!("gemmh2{}_q4_k_gu", v.0.tag())));
+        kernels.retain(|k| k.starts_with(&kpre));
         let f2 = km.function("gemm2s_q4_k_gu").unwrap();
         f2.set_max_shared(gemm2_smem(Q4_K, 64, 3)).unwrap();
         let mut ms: Vec<Vec<f64>> = vec![Vec::new(); kernels.len()];
@@ -7814,7 +8396,19 @@ fn cuda_gemmh_bench() {
                     if k.starts_with("gemmh") {
                         // SAFETY: as in gpu_gemmh_gate_up_match_reference.
                         unsafe {
-                            launch_gemmh_gu(&g, &km, &wg, &wu, rows, cols, &act, st, nb, &out)
+                            launch_gemmh_gu(
+                                &g,
+                                module_of(k),
+                                k,
+                                &wg,
+                                &wu,
+                                rows,
+                                cols,
+                                &act,
+                                st,
+                                nb,
+                                &out,
+                            )
                         };
                     } else {
                         // SAFETY: gemm2s_q4_k_gu's signature; buffers as above.
@@ -7950,7 +8544,21 @@ fn gpu_gemmh_gate_up_match_reference() {
             }
             let out = g.alloc(rows * nb * 4).unwrap();
             // SAFETY: gate / up rows x cols Q4_K, act nb tokens, out rows * nb.
-            unsafe { launch_gemmh_gu(&g, &km, &wg, &wu, rows, cols, &act, st, nb, &out) };
+            unsafe {
+                launch_gemmh_gu(
+                    &g,
+                    &km,
+                    "gemmh2_q4_k_gu",
+                    &wg,
+                    &wu,
+                    rows,
+                    cols,
+                    &act,
+                    st,
+                    nb,
+                    &out,
+                )
+            };
             g.sync().unwrap();
             let got: Vec<f32> = out.read().unwrap();
             assert_eq!(
@@ -7971,6 +8579,7 @@ fn gpu_gemmh_gate_up_match_reference() {
 unsafe fn launch_gemmh_gu(
     g: &Gpu,
     km: &Module,
+    kernel: &str,
     wg: &DevBuf,
     wu: &DevBuf,
     rows: usize,
@@ -7995,7 +8604,7 @@ unsafe fn launch_gemmh_gu(
             true,
         )
         .unwrap();
-    let f = km.function("gemmh2_q4_k_gu").unwrap();
+    let f = km.function(kernel).unwrap();
     f.set_max_shared(GEMMH2_SMEM).unwrap();
     // SAFETY: gemmh2_q4_k_gu's signature; the caller's buffers.
     unsafe {

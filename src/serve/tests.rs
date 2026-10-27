@@ -51,6 +51,7 @@ fn test_opts(path: &str, device: Device) -> Opts {
         parallel_set: false,
         slot_ctx: None,
         kv_pages: None,
+        paged: None,
         kv_grow: None,
         prefill_chunk: super::engine::PREFILL_CHUNK,
         step_ms: super::engine::STEP_MS,
@@ -5749,4 +5750,118 @@ fn moe_parallel_refusal_predicate() {
     assert!(super::moe_parallel_refusal(true, super::PARALLEL, false).is_none());
     assert!(super::moe_parallel_refusal(true, 1, true).is_none());
     assert!(super::moe_parallel_refusal(false, 4, true).is_none());
+}
+
+/// #137: an explicit --parallel N that doesn't fit is refused, with what was
+/// asked, what fits, the bytes needed and free, and why a paged pool didn't
+/// fit when one was tried; the automatic sizing (--parallel left out) never
+/// is, like `moe_parallel_refusal`; a paged pool asked for (`kv_pages`) and
+/// not planned is refused too.
+#[test]
+fn parallel_refusal_explicit_only() {
+    use super::{Asked, SlotPlan, parallel_refusal};
+    let gib = 1usize << 30;
+    let explicit = Asked {
+        parallel: 6,
+        parallel_set: true,
+        paged: false,
+    };
+    let auto = Asked {
+        parallel_set: false,
+        ..explicit
+    };
+    let plan = |slots| SlotPlan {
+        slots,
+        ctx: 2048,
+        note: Some("one request at a time: 2 slots don't fit".into()),
+    };
+    let e = parallel_refusal(explicit, &plan(1), false, None, || Some((5 * gib, 2 * gib)))
+        .expect("refused");
+    for want in [
+        "--parallel 6: 6 reserved slots of 2048 tokens need 5.00 GiB",
+        "2.00 GiB is free; not even 2 fit.",
+        "--kv q8",
+        "leave --parallel out",
+    ] {
+        assert!(e.contains(want), "{want:?} not in {e}");
+    }
+    // The plan's note (it reads as if the server were starting) isn't
+    // repeated.
+    assert!(!e.contains("one request at a time"), "{e}");
+    // The paged pool tried first: why it didn't fit, then the reserved cost.
+    let e = parallel_refusal(
+        explicit,
+        &plan(1),
+        false,
+        Some("KV pages for one 2048-token sequence (--ctx) don't fit"),
+        || None,
+    )
+    .expect("refused");
+    assert!(
+        e.starts_with(
+            "--parallel 6: the paged KV pool doesn't fit (KV pages for one 2048-token sequence \
+             (--ctx) don't fit), and reserved slots don't either; not even 2 fit."
+        ),
+        "{e}"
+    );
+    // Fewer than asked, but more than one: still refused.
+    let e = parallel_refusal(explicit, &plan(4), false, None, || None).expect("refused");
+    assert!(e.contains("; 4 fit.") && !e.contains("GiB"), "{e}");
+    // Met (or more), and the automatic sizing, start.
+    assert!(parallel_refusal(explicit, &plan(6), false, None, || unreachable!()).is_none());
+    assert!(parallel_refusal(auto, &plan(1), false, None, || unreachable!()).is_none());
+    assert!(parallel_refusal(auto, &plan(4), false, None, || unreachable!()).is_none());
+    let single = Asked {
+        parallel: 1,
+        ..explicit
+    };
+    assert!(parallel_refusal(single, &plan(1), false, None, || unreachable!()).is_none());
+    // A paged pool asked for: refused without one, fine with one.
+    let pages = Asked {
+        paged: true,
+        ..explicit
+    };
+    let e = parallel_refusal(pages, &plan(6), false, None, || None).expect("refused");
+    assert!(e.starts_with("a paged KV pool"), "{e}");
+    assert!(parallel_refusal(pages, &plan(6), true, None, || unreachable!()).is_none());
+}
+
+/// #137 end to end: an explicit --parallel N whose reserved slots can't fit
+/// (256 slots of the 0.5B's whole 32768-token context: ~100 GB of KV, more
+/// than any card) doesn't start (`start` returns the refusal); the
+/// same without --parallel starts, with as many slots as fit.
+#[test]
+fn serve_explicit_parallel_refused_when_short() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let opts = |set: bool| {
+        let mut o = test_opts(p.to_str().unwrap(), Device::Cuda);
+        o.ctx = Some(32768);
+        o.parallel = 256;
+        o.parallel_set = set;
+        o.paged = Some(false);
+        o
+    };
+    // The production path: `start` returns the refusal (`run` exits 2 on
+    // it), the engine thread ends cleanly.
+    let e = start(opts(true))
+        .err()
+        .expect("an explicit --parallel 256 started");
+    assert!(super::is_refused(&e), "{e}");
+    assert_eq!(e.kind(), std::io::ErrorKind::InvalidInput);
+    let m = e.to_string();
+    assert!(
+        m.starts_with("--parallel 256: 256 reserved slots of 32768 tokens need")
+            && m.contains("GiB is free"),
+        "{m}"
+    );
+    let s = start(opts(false)).expect("the automatic sizing starts");
+    let sl = call(s.addr, "GET", "/slots", "").json();
+    // As many as fit (fewer than asked; one at a time at worst).
+    let n = sl["slots"].as_array().map_or(0, |a| a.len());
+    assert!((1..256).contains(&n), "{sl}");
 }

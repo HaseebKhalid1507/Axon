@@ -323,7 +323,12 @@ fn ds2_gpu_moonlight_bits() {
 /// The logits of `net` over `ids`: decode one by one, then the same
 /// prompt fed in passes of `splits` and its last logits (prefill_logits),
 /// then a greedy continuation of `ngen` tokens from there (decode).
-fn resident_trace(net: &MoeQwen3, ids: &[u32], splits: &[usize], ngen: usize) -> Vec<Vec<f32>> {
+pub(super) fn resident_trace(
+    net: &MoeQwen3,
+    ids: &[u32],
+    splits: &[usize],
+    ngen: usize,
+) -> Vec<Vec<f32>> {
     let n = ids.len();
     let mut out = Vec::new();
     let mut a = net.new_cache(n + ngen + 1);
@@ -522,7 +527,7 @@ fn ds2_resident_moonlight_bits() {
 /// (whose bytes a CPU build releases: #127's jade failure, a second build of
 /// the CPU half after the placement): AXON_REPACK=0, a twin F that isn't the
 /// host's (both forced through `new_inner`, on any GPU), sm < 8.0 (where
-/// the GPU is one), and a non-deepseek2 model (qwen3moe fixture). Each
+/// the GPU is one). Each
 /// falls back to none resident, says why, and gives the bits of `N(0)`.
 #[test]
 fn ds2_resident_fallbacks_build_once() {
@@ -600,30 +605,7 @@ fn ds2_resident_fallbacks_build_once() {
         }
         eprintln!("fallback ({why}): {d}");
     }
-    // qwen3moe: residency is deepseek2-only for now.
-    let (q, _) = crate::model::tests::dense_fixture("qwen3moe", crate::quant::Q8_0);
-    let qk = Kernels::module_for(&g, &q).unwrap();
-    let qm = Kernels::moe_module_for(&g, &q).unwrap();
-    let net = MoeQwen3::new_with(
-        &g,
-        &qk,
-        &qm,
-        &q,
-        32,
-        CacheKv::F16,
-        false,
-        true,
-        GpuExperts::Auto,
-    )
-    .unwrap();
-    let d = net.describe(32);
-    assert!(
-        net.resident_layers().is_empty() && d.contains("deepseek2 only"),
-        "{d}"
-    );
-    let mut c = net.new_cache(32);
-    assert!(net.forward(1, 0, &mut c).iter().all(|v| v.is_finite()));
-    eprintln!("fallback (qwen3moe): {d}");
+    // qwen3moe's residency and gpt-oss's refusal: q3res_tests.
 }
 
 /// A RAM refusal after the placement (`--gpu-experts` > 0) leaves the model
