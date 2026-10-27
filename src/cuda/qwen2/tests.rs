@@ -5837,6 +5837,190 @@ fn attn_bench(
     best
 }
 
+
+/// The serve pool's decode attention (batch.rs `rows`, tensor cores): nb
+/// rows, each its own sequence at position `depth` in its own slot (rp),
+/// the path the pool step takes today: att_per_query (16 at 128-wide heads)
+/// queries per launch, attn_blk_b (or attn_blk_b_q8) then attn_cmb_b.
+/// nblk_max as pool_step_cost's pool: ceil((depth + 64) / 64) rounded up.
+/// AXON_POOL_NB (32,64,128), AXON_POOL_DEPTH (600,4096), AXON_POOL_KV
+/// (f16,q8), AXON_ATT_SHAPE (28,4,128). Per point a `POOL` line: the
+/// median and best of 7 timed steps (each one pass over all nb rows) of
+/// attn alone, combine alone, and both interleaved as batch.rs runs them,
+/// and the KV bytes read / (attn + cmb) in GB/s. MEASURE, not a check.
+#[test]
+#[ignore]
+fn cuda_attn_pool_bench() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let list = |k: &str, d: &str| -> Vec<String> {
+        std::env::var(k)
+            .unwrap_or(d.into())
+            .split(',')
+            .map(|v| v.trim().to_string())
+            .collect()
+    };
+    let num = |v: &[String]| -> Vec<usize> { v.iter().map(|s| s.parse().unwrap()).collect() };
+    let nbs = num(&list("AXON_POOL_NB", "32,64,128"));
+    let depths = num(&list("AXON_POOL_DEPTH", "600,4096"));
+    let kvs = list("AXON_POOL_KV", "f16,q8");
+    let sh = num(&list("AXON_ATT_SHAPE", "28,4,128"));
+    let (nh, nkv, hd) = (sh[0], sh[1], sh[2]);
+    let gi = g.info().unwrap();
+    eprintln!("POOL bench {} ({} SMs), {nh}/{nkv}x{hd}", gi.name, gi.sms);
+    let nb_max = *nbs.iter().max().unwrap();
+    let dim = nh * hd;
+    let kvd = nkv * hd;
+    let per = batch::att_per_query(hd);
+    let max_split = (8 * gi.sms as usize / nkv).clamp(1, MAX_SPLIT);
+    let pre = Arg::F32(att_pre(hd));
+    let ast = act_stride_t(dim);
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let q = g
+        .upload(
+            &(0..nb_max * dim)
+                .map(|_| (next() >> 40) as f32 / (1u64 << 23) as f32 - 1.0)
+                .collect::<Vec<f32>>(),
+        )
+        .unwrap();
+    let act = g.alloc(nb_max * ast).unwrap();
+    for &depth in &depths {
+        let ctx = (depth + 64).next_multiple_of(64);
+        let nblk_max = ctx.div_ceil(64);
+        let gy = max_split.min(nblk_max) as u32;
+        let rows = nb_max * ctx;
+        let po = g.alloc(per * nh * nblk_max * hd * 4).unwrap();
+        let pm = g.alloc(per * nh * nblk_max * 2 * 4).unwrap();
+        for kv in &kvs {
+            let q8 = kv == "q8";
+            // f16: |x| in [2^-6, 2^-1) with random sign and mantissa; q8:
+            // random int8 with scales ~ 0.5 / 127 (KG = head_dim).
+            let mut f16buf = || {
+                g.upload(
+                    &(0..rows * kvd)
+                        .map(|_| {
+                            let r = next();
+                            ((r & 0x83ff) | ((9 + (r >> 16) % 5) << 10)) as u16
+                        })
+                        .collect::<Vec<u16>>(),
+                )
+                .unwrap()
+            };
+            let bufs: Vec<_> = if q8 {
+                let mut i8buf = || {
+                    g.upload(&(0..rows * kvd).map(|_| next() as u8).collect::<Vec<u8>>())
+                        .unwrap()
+                };
+                let (a, b) = (i8buf(), i8buf());
+                let sc = g.upload(&vec![0.5f32 / 127.0; rows * nkv]).unwrap();
+                let sc2 = g.upload(&vec![0.4f32 / 127.0; rows * nkv]).unwrap();
+                vec![a, b, sc, sc2]
+            } else {
+                vec![f16buf(), f16buf()]
+            };
+            let fa = km
+                .function(&if q8 {
+                    format!("attn_blk_b_q8_{hd}")
+                } else {
+                    format!("attn_blk_b_{hd}")
+                })
+                .unwrap();
+            let fc = km.function("attn_cmb_b").unwrap();
+            for &nb in &nbs {
+                let rp: Vec<u32> = (0..nb)
+                    .flat_map(|z| [depth as u32, (z * ctx + depth) as u32])
+                    .collect();
+                let rp = g.upload(&rp).unwrap();
+                // which: 0 attn only, 1 combine only, 2 both (batch.rs order).
+                let step = |which: u32| {
+                    for z0 in (0..nb).step_by(per) {
+                        let nz = (nb - z0).min(per) as u32;
+                        if which != 1 {
+                            let mut a = vec![q.arg()];
+                            a.extend(bufs.iter().map(|b| b.arg()));
+                            a.extend([
+                                Arg::I32(0),
+                                Arg::I32(z0 as i32),
+                                Arg::I32(nh as i32),
+                                Arg::I32(nkv as i32),
+                                pre,
+                                Arg::I32(nblk_max as i32),
+                                po.arg(),
+                                pm.arg(),
+                                rp.arg(),
+                                Arg::Ptr(0), // no page table
+                            ]);
+                            // SAFETY: prefill.cu attn_blk_b(_q8)'s signature;
+                            // the cache holds nb_max slots of ctx rows, part_*
+                            // `per` queries of nblk_max blocks.
+                            unsafe { g.launch(&fa, (nkv as u32, gy, nz), (32, 1, 1), 0, &a) }
+                                .unwrap();
+                        }
+                        if which != 0 {
+                            // SAFETY: prefill.cu attn_cmb_b's signature.
+                            unsafe {
+                                g.launch(
+                                    &fc,
+                                    (dim.div_ceil(256) as u32, nz, 1),
+                                    (256, 1, 1),
+                                    0,
+                                    &[
+                                        po.arg(),
+                                        pm.arg(),
+                                        Arg::I32(0),
+                                        Arg::I32(z0 as i32),
+                                        Arg::I32(dim as i32),
+                                        Arg::I32(hd as i32),
+                                        Arg::I32(nblk_max as i32),
+                                        Arg::I32(0),
+                                        act.arg(),
+                                        Arg::U64(ast as u64),
+                                        rp.arg(),
+                                    ],
+                                )
+                            }
+                            .unwrap();
+                        }
+                    }
+                };
+                let mut t = [vec![], vec![], vec![]];
+                step(2);
+                for _ in 0..7 {
+                    for w in 0..3u32 {
+                        let e0 = g.record().unwrap();
+                        step(w);
+                        let e1 = g.record().unwrap();
+                        t[w as usize].push(e0.ms_to(&e1).unwrap() as f64);
+                    }
+                }
+                let md = |v: &mut Vec<f64>| {
+                    v.sort_by(f64::total_cmp);
+                    (v[v.len() / 2] * 1e3, v[0] * 1e3)
+                };
+                let (a, ab) = md(&mut t[0]);
+                let (c, cb) = md(&mut t[1]);
+                let (s, sb) = md(&mut t[2]);
+                // KV bytes the step must read: nb rows x (depth + 1)
+                // positions x K and V.
+                let per_pos = if q8 { 2 * (kvd + nkv * 4) } else { 2 * kvd * 2 };
+                let gbs = (nb * (depth + 1) * per_pos) as f64 / (s * 1e-6) / 1e9;
+                eprintln!(
+                    "POOL kv {kv} depth {depth} nb {nb} launches {} attn {a:.1} ({ab:.1}) \
+                     cmb {c:.1} ({cb:.1}) both {s:.1} ({sb:.1}) us/layer KV {gbs:.0} GB/s",
+                    2 * nb.div_ceil(per)
+                );
+            }
+        }
+    }
+}
 /// The flash attention kernels side by side, sustained (AXON_FA_LOOP
 /// launches between two events), interleaved over AXON_FA_ROUNDS rounds:
 /// AXON_FA_KERNELS (attn_fa_b,attn_fa_bs,attn_fa_k: batch::Fa; `_{hd}`
