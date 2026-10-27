@@ -351,6 +351,8 @@ struct Q8Fns<'m> {
     attn_blk_b: Func<'m>,
     /// attn_blk_b's partials, 16 queries per block (`batch::mq_smem`).
     attn_blk_mq: Func<'m>,
+    /// The pool's rows (`batch::ATT_NB_MIN`): attn_blk_nb (`batch::nb_smem`).
+    attn_blk_nb: Func<'m>,
     attn_fa: [Func<'m>; 2],
     /// Without tensor cores: the split attention, decode and per query.
     attn_split: Func<'m>,
@@ -366,8 +368,10 @@ impl<'m> Q8Fns<'m> {
         let f = |s: &str| module.function(&format!("{s}_{q}_{head_dim}"));
         let fa = [f("attn_fa_b")?, f("attn_fa_bs")?];
         let mq = f("attn_blk_mq")?;
+        let nb = f("attn_blk_nb")?;
         if module.mma() {
             mq.set_max_shared(batch::mq_smem(head_dim, group))?;
+            nb.set_max_shared(batch::nb_smem(head_dim, group))?;
             for (v, fa) in [batch::Fa::Full, batch::Fa::Small].into_iter().zip(&fa) {
                 fa.set_max_shared(batch::fa_shape(head_dim, v, group).2)?;
             }
@@ -376,6 +380,7 @@ impl<'m> Q8Fns<'m> {
             attn_blk: f("attn_blk")?,
             attn_blk_b: f("attn_blk_b")?,
             attn_blk_mq: mq,
+            attn_blk_nb: nb,
             attn_fa: fa,
             attn_split: f("attn_split")?,
             attn_split_b: f("attn_split_b")?,
