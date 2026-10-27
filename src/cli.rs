@@ -154,7 +154,8 @@ flags:
               The clock starts once the client's receive buffer is full (README)
   --cache-ram BYTES|auto  serve: keep conversations' KV pages in host RAM (BYTES with K/M/G,
               or auto: half the RAM available, at most 8G) when their slot is reused, and copy
-              them back on the next turn instead of prefilling again (same bits; default 0: off)
+              them back on the next turn instead of prefilling again (same bits; default 0: off).
+              On the GPU the whole size is pinned (unswappable) RAM from start
   --rope-scaling yarn --rope-scale F [--yarn-orig-ctx N]
               gen, logits, chat, serve: YaRN RoPE scaling (llama.cpp's flags), off by default:
               the model's context becomes N x F (N: default the model's trained context), e.g.

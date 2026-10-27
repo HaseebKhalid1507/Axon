@@ -585,8 +585,12 @@ scheduling of before (`--step-ms` as a fixed budget, less the last decode step):
   longest stored prefix back and prefills only the rest. Same bits: the rows are moved, not
   recomputed (a tail under 64 positions is prefilled again). BYTES takes K/M/G suffixes;
   `auto` is half the RAM available after the model, at most 8 GiB; the banner says the size.
-  On the GPU the pages are page-locked memory, taken as pages are stored (never more than
-  the size), and can't be swapped out: size it to what you keep warm. Off where the cache has
+  On the GPU the **whole size is page-locked (unswappable) RAM from server start**, used or
+  not: a thread pins it in 64 MiB pieces while the server already runs (or, with
+  `AXON_KV_RAM_ALLOC=start`, all of it before it answers). `auto` therefore pins up to 8 GiB
+  at start. Size it to what you keep warm, and leave the rest of the machine room: under a
+  cgroup memory limit, pinned memory can't be reclaimed (the CPU path's pages are ordinary
+  memory, taken as they are stored). Off where the cache has
   no page image (a CPU/GPU split, several GPUs, MoE, deepseek2). It lives as long as the
   process (surviving a restart is a later stage). `/metrics` adds `axon_kv_ram_*`.
 - A request's `priority` field is accepted and ignored (requests start in arrival order, or

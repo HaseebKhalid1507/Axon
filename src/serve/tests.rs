@@ -5906,12 +5906,29 @@ fn cache_ram_case(device: Device, what: &str, f: impl Fn(&mut Opts)) {
     };
     let (a, b, c) = (words("Lamp"), words("Stone"), words("Reed"));
     let run = |ram: u64| {
+        let pool = std::cell::Cell::new(false);
         let s = server_with(p.to_str().unwrap(), device, |o| {
             f(o);
             o.cache_ram = super::tier::CacheRam::Bytes(ram);
+            pool.set(matches!(device, Device::Cuda) && o.parallel > 1);
         });
         let addr = s.addr;
         let g = &s.generated;
+        // A pool's arena pinned by a thread (the default) is pinned from
+        // start on: wait until all of it is in, so the turns below are
+        // stored whatever the host's pinning speed (the tier stores nothing
+        // into slabs that aren't pinned yet).
+        if ram > 0 && pool.get() {
+            let m = |name: &str| -> Option<u64> {
+                let body = call(addr, "GET", "/metrics", "").body;
+                body.lines()
+                    .find_map(|l| l.strip_prefix(name)?.strip_prefix(' ')?.parse().ok())
+            };
+            wait_for("the KV RAM tier pinned", || {
+                let cap = m("axon_kv_ram_capacity_bytes");
+                cap.is_some() && m("axon_kv_ram_pinned_bytes") == cap
+            });
+        }
         let text = |r: &(Value, u64, u64, u64)| r.0.as_str().unwrap().to_string();
         let a1 = completion_usage(addr, &a, 16);
         let a2p = format!("{a}{} And then", text(&a1));

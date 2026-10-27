@@ -703,22 +703,43 @@ impl<'a, 't> Batch<'a, 't> {
     /// Slot `s` is about to give up its rows past `keep`: the tier stores
     /// its whole pages first (all of them: those below `keep` stay, the
     /// rest are its conversation's, and go to RAM instead of away), and
-    /// forgets the stored pages past `keep`.
-    fn spill(&mut self, s: usize, keep: usize) -> Result<(), String> {
+    /// forgets the stored pages past `keep`. A tier error turns the tier
+    /// off (`tier_failed`), never the server.
+    fn spill(&mut self, s: usize, keep: usize) {
         let Some(t) = self.tier.as_mut() else {
-            return Ok(());
+            return;
         };
-        t.write(self.net, &self.pool, s, &self.held[s], usize::MAX)?;
-        t.t.truncate(s, keep / PAGE);
-        Ok(())
+        match t.write(self.net, &self.pool, s, &self.held[s], usize::MAX) {
+            Ok(_) => t.t.truncate(s, keep / PAGE),
+            Err(e) => self.tier_failed(&e),
+        }
+    }
+
+    /// The tier failed (`e`): it is off from here, as the no-pool path's;
+    /// the slots' rows are untouched (what it copied in is only trusted
+    /// once a restore succeeded), so serving goes on as with
+    /// `--cache-ram 0`.
+    fn tier_failed(&mut self, e: &str) {
+        eprintln!("axon serve: --cache-ram: {e}; the KV RAM tier is off from here");
+        self.tier = None;
     }
 
     /// The tier's write-behind: `bytes` of copies of the slots' unstored
     /// pages (usize::MAX: all of them).
-    pub fn write_behind(&mut self, bytes: usize) -> Result<(), String> {
-        match self.tier.as_mut() {
-            Some(t) => t.write_some(self.net, &self.pool, &self.held, bytes),
-            None => Ok(()),
+    pub fn write_behind(&mut self, bytes: usize) {
+        let Some(t) = self.tier.as_mut() else {
+            return;
+        };
+        if let Err(e) = t.write_some(self.net, &self.pool, &self.held, bytes) {
+            self.tier_failed(&e);
+        }
+    }
+
+    /// The engine loop's tick: the tier adopts the slabs its allocator
+    /// thread has pinned (and shows them in /metrics).
+    pub fn poll_tier(&mut self) {
+        if let Some(t) = self.tier.as_mut() {
+            t.poll(self.net);
         }
     }
 
@@ -755,7 +776,11 @@ impl<'a, 't> Batch<'a, 't> {
             }
         }
         let t = self.tier.as_mut().expect("on");
-        t.restore(self.net, &self.pool, slot, &pages, have, to)?;
+        if let Err(e) = t.restore(self.net, &self.pool, slot, &pages, have, to) {
+            // The slot keeps `have` (its rows past it are fed again).
+            self.tier_failed(&e);
+            return Ok(have);
+        }
         if to * PAGE <= have {
             return Ok(have);
         }
@@ -952,7 +977,7 @@ impl<'a, 't> Batch<'a, 't> {
         self.touch(slot);
         // The tier keeps the slot's pages past the prefix (its last
         // conversation's).
-        self.spill(slot, reuse)?;
+        self.spill(slot, reuse);
         self.held[slot].truncate(reuse);
         // The rest of the slot's pages are free (a paged pool).
         self.net.release(&mut self.pool, slot, reuse)?;
@@ -1127,7 +1152,7 @@ impl<'a, 't> Batch<'a, 't> {
         // shares: the tier keeps them first.
         let have = common.min(prompt.len() - 1);
         if self.tier.is_some() {
-            self.spill(slot, have)?;
+            self.spill(slot, have);
             self.held[slot].truncate(have);
         }
         let want = prompt.len().saturating_add(n_gen).min(self.ctx);
@@ -1168,7 +1193,7 @@ impl<'a, 't> Batch<'a, 't> {
             return Ok(false);
         };
         // Its prefix goes to RAM (the tier on), not away.
-        self.spill(s, 0)?;
+        self.spill(s, 0);
         self.held[s].clear();
         self.net.release(&mut self.pool, s, 0)?;
         Ok(true)
@@ -1191,7 +1216,8 @@ impl<'a, 't> Batch<'a, 't> {
         self.net.release(&mut self.pool, self.solo, hist.len())?;
         self.held[self.solo] = hist;
         // The batch is idle: the tier takes the request's pages now.
-        self.spill(self.solo, usize::MAX)
+        self.spill(self.solo, usize::MAX);
+        Ok(())
     }
 
     /// Take over a request `generate` was running on `cache` (the S1 path,
@@ -1249,7 +1275,8 @@ impl<'a, 't> Batch<'a, 't> {
             true => usize::MAX,
             false => super::tier::STEP_BYTES,
         };
-        self.write_behind(bytes)
+        self.write_behind(bytes);
+        Ok(())
     }
 
     fn step_traced(&mut self) -> Result<(), String> {
@@ -1421,7 +1448,7 @@ impl<'a, 't> Batch<'a, 't> {
     /// Prefill `j` gives its rows up: fed from 0 again later.
     fn unfeed(&mut self, j: usize) -> Result<(), String> {
         let s = self.pre[j].seq.slot;
-        self.spill(s, 0)?;
+        self.spill(s, 0);
         let f = &mut self.pre[j];
         f.fed = 0;
         f.seq.cached = 0;
@@ -1447,7 +1474,7 @@ impl<'a, 't> Batch<'a, 't> {
                 seq.ids.len()
             );
         }
-        self.spill(s, 0)?;
+        self.spill(s, 0);
         self.held[s].clear();
         self.net.release(&mut self.pool, s, 0)?;
         let at = self.pre.partition_point(|f| f.seq.job.id < seq.job.id);

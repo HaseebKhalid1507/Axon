@@ -888,6 +888,11 @@ impl<'g> BatchLm for CudaQwen2<'g> {
     }
 }
 
+// A pool page (`pages::PAGE`, the attention block) and the RAM tier's /
+// kvsave's page are the same positions: `Batch::restore` counts the pool's
+// pages and the tier's as one unit, and `pool_page_io` moves one as the other.
+const _: () = assert!(PAGE == crate::kvsave::PAGE);
+
 impl<'g> CudaQwen2<'g> {
     /// Image bytes of one page of `p`'s slots (`PAGE` positions, every
     /// layer, kvsave's image layout: the RAM tier's page, `serve::tier`);

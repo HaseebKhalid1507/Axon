@@ -18,21 +18,22 @@
 //! restore stops at the whole pages below it (agent-workload.md §2.1).
 
 use super::ops::Metrics;
-use crate::cuda::HostBuf;
+use crate::cuda::{HostAllocator, HostBuf};
 use crate::kvsave::{KvIo, PAGE};
 use crate::kvstore::{Key, PageStore, ROOT};
 use crate::lm::{Backend, BackendCache, BatchLm};
 use std::io::{self, Read};
-use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// `--cache-ram auto`'s ceiling: half the RAM available after the model,
-/// at most this. Host memory is only taken as pages are stored.
+/// at most this. On the GPU the whole size is page-locked (unswappable)
+/// from server start, used or not (`Alloc`).
 pub const AUTO_CEIL: u64 = 8 << 30;
 
-/// Pinned host memory is allocated this many bytes at a time (at least a
-/// page), as the store fills.
+/// The arena is page-locked this many bytes at a time (at least a page),
+/// all of it from server start (`Alloc`).
 const SLAB_BYTES: usize = 64 << 20;
 
 /// Bytes the write-behind copies per engine step while requests decode
@@ -212,9 +213,17 @@ impl Alloc {
     }
 }
 
-/// A slab pinned by the allocator thread: (index, address), or why it
-/// stopped.
-type SlabMsg = Result<(usize, usize), String>;
+/// What the allocator thread and the engine share: slabs pinned and not
+/// adopted yet, (index, address); why it stopped early; whether it's done;
+/// and whether the arena is gone (then the thread frees what it pins, and
+/// the arena's drop frees what it left here: nothing leaks either way).
+#[derive(Default)]
+struct Pinning {
+    ready: Vec<(usize, usize)>,
+    err: Option<String>,
+    done: bool,
+    closed: bool,
+}
 
 /// Page-locked host memory in fixed-size page slots: `most` pages in slabs
 /// of `per`, and a free list of slots. Copies go straight between a slot's
@@ -230,10 +239,9 @@ pub(super) struct Arena {
     page: usize,
     per: usize,
     most: usize,
-    /// Slabs the allocator thread pins, as each is ready (dropped with
-    /// slabs in it only at shutdown: those few are left to the process's
-    /// exit).
-    rx: Option<std::sync::mpsc::Receiver<SlabMsg>>,
+    /// The allocator thread's slabs (`Alloc::Thread`, until all are in),
+    /// and an allocator to free the ones nobody adopted at drop.
+    pinning: Option<(Arc<Mutex<Pinning>>, HostAllocator)>,
     /// Slabs in `slabs` so far.
     ready: usize,
     t0: Instant,
@@ -263,7 +271,7 @@ impl Arena {
             page,
             per,
             most,
-            rx: None,
+            pinning: None,
             ready: 0,
             t0: Instant::now(),
             done_s: None,
@@ -281,30 +289,35 @@ impl Arena {
                 let al = net
                     .host_allocator()
                     .ok_or("no page-locked memory on this backend")?;
+                let back = net.host_allocator().expect("as above");
                 let sizes: Vec<usize> = (0..n).map(|k| a.slab_pages(k) * page).collect();
-                let (tx, rx) = std::sync::mpsc::channel::<SlabMsg>();
+                let sh = Arc::new(Mutex::new(Pinning::default()));
+                let sh2 = sh.clone();
                 std::thread::Builder::new()
                     .name("axon-kv-ram".into())
                     .spawn(move || {
                         for (k, &len) in sizes.iter().enumerate() {
                             let r = al.alloc(len);
-                            let stop = r.is_err();
-                            if let Err(std::sync::mpsc::SendError(Ok((_, addr)))) =
-                                tx.send(r.map(|addr| (k, addr)))
-                            {
-                                // Nobody takes it any more (the server is
-                                // stopping): give it back.
+                            let mut p = sh2.lock().unwrap_or_else(|e| e.into_inner());
+                            match r {
+                                // The arena is gone: give it back.
                                 // SAFETY: ours, never adopted, no copy.
-                                unsafe { al.free(addr) };
-                                return;
-                            }
-                            if stop {
-                                return;
+                                Ok(addr) if p.closed => {
+                                    unsafe { al.free(addr) };
+                                    return;
+                                }
+                                Ok(addr) => p.ready.push((k, addr)),
+                                Err(e) => {
+                                    p.err = Some(e);
+                                    p.done = true;
+                                    return;
+                                }
                             }
                         }
+                        sh2.lock().unwrap_or_else(|e| e.into_inner()).done = true;
                     })
                     .map_err(|e| format!("the KV RAM tier's allocator thread: {e}"))?;
-                a.rx = Some(rx);
+                a.pinning = Some((sh, back));
             }
         }
         Ok(a)
@@ -320,51 +333,39 @@ impl Arena {
     }
 
     /// Take the slabs the allocator thread has pinned since the last call.
-    fn poll(&mut self, net: &Backend) {
-        let Some(rx) = &self.rx else {
+    pub fn poll(&mut self, net: &Backend) {
+        let Some((sh, _)) = &self.pinning else {
             return;
         };
-        let mut got = Vec::new();
-        let mut end = None;
-        loop {
-            match rx.try_recv() {
-                Ok(Ok(s)) => got.push(s),
-                Ok(Err(e)) => {
-                    end = Some(Some(e));
-                    break;
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    end = Some(None);
-                    break;
-                }
-            }
-        }
+        let (got, err, done) = {
+            let mut p = sh.lock().unwrap_or_else(|e| e.into_inner());
+            (std::mem::take(&mut p.ready), p.err.take(), p.done)
+        };
         for (k, addr) in got {
             let len = self.slab_pages(k) * self.page;
             // SAFETY: a live `host_allocator` allocation of `len` bytes,
-            // sent once, owned by nobody else; page slots are written
-            // before they are read.
+            // handed over once, owned by nobody else; page slots are
+            // written before they are read.
             let b = unsafe { net.host_adopt(addr, len) };
             self.adopt(k, b);
         }
         if self.ready == self.slabs.len() && self.done_s.is_none() {
             let s = self.t0.elapsed().as_secs_f64();
             self.done_s = Some(s);
-            self.rx = None;
+            self.pinning = None;
             if self.log {
                 eprintln!(
                     "axon serve: KV RAM tier: {} pinned in {s:.1} s (a thread, from start)",
                     gib(self.bytes() as u64)
                 );
             }
-        } else if let Some(e) = end {
-            self.rx = None;
+        } else if done {
+            self.pinning = None;
             eprintln!(
                 "axon serve: KV RAM tier: pinned {} of {} ({}); it stays that size",
                 gib(self.bytes() as u64),
                 gib((self.most * self.page) as u64),
-                e.unwrap_or_else(|| "its thread ended".into())
+                err.unwrap_or_else(|| "its thread ended".into())
             );
         }
     }
@@ -388,6 +389,21 @@ impl Arena {
             .filter(|&k| self.slabs[k].is_some())
             .map(|k| self.slab_pages(k) * self.page)
             .sum()
+    }
+}
+
+impl Drop for Arena {
+    /// The allocator thread stops (it frees what it pins from now on), and
+    /// the slabs it pinned that were never adopted are freed here.
+    fn drop(&mut self) {
+        if let Some((sh, al)) = self.pinning.take() {
+            let mut p = sh.lock().unwrap_or_else(|e| e.into_inner());
+            p.closed = true;
+            for (_, addr) in p.ready.drain(..) {
+                // SAFETY: pinned by our thread, never adopted, no copy.
+                unsafe { al.free(addr) };
+            }
+        }
     }
 }
 
@@ -438,6 +454,16 @@ impl PoolTier {
         }
     }
 
+    /// Adopt the slabs the allocator thread has pinned (`Alloc::Thread`)
+    /// and show them in /metrics: the engine calls it every iteration, so
+    /// pinning shows (and finishes) on an idle server too.
+    pub fn poll(&mut self, net: &Backend) {
+        if self.arena.pinning.is_some() {
+            self.arena.poll(net);
+            self.publish_pinned();
+        }
+    }
+
     fn publish_pinned(&self) {
         if let Some(m) = &self.t.metrics {
             m.kv_ram_pinned.store(self.arena.bytes() as u64, Relaxed);
@@ -475,7 +501,10 @@ impl PoolTier {
                 break;
             };
             let (buf, at) = self.arena.at(a);
-            net.page_out(pool, s, i, buf, at)?;
+            if let Err(e) = net.page_out(pool, s, i, buf, at) {
+                self.arena.free.push(a);
+                return Err(e);
+            }
             match self.t.store.insert(parent, toks, a, self.t.page) {
                 Some(k) => self.t.push(s, k),
                 // A hash collision with another prefix: keep what's there.
@@ -522,7 +551,10 @@ impl PoolTier {
             return Ok(false);
         };
         let (buf, at) = self.arena.at(a);
-        net.page_out_id(pool, page, buf, at)?;
+        if let Err(e) = net.page_out_id(pool, page, buf, at) {
+            self.arena.free.push(a);
+            return Err(e);
+        }
         match self.t.store.insert(parent, tokens, a, self.t.page) {
             Some(_) => {
                 self.t.publish(1, 0);

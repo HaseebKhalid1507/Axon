@@ -1392,8 +1392,10 @@ fn engine(
     // proven). The identity doesn't depend on the tier.
     let identity = crate::identity::of(&o.path, &model, &net);
     // The KV RAM tier (`--cache-ram`): sized against the RAM available now
-    // (the model loaded); its host memory is taken only as pages are
-    // stored.
+    // (the model loaded). On the GPU the whole size is page-locked from
+    // here on, by a thread (or before the server answers, with
+    // AXON_KV_RAM_ALLOC=start), used or not; a CPU's pages are ordinary
+    // memory, taken as pages are stored.
     let ram = match o.cache_ram.bytes(crate::gguf::mem_available()) {
         Ok(n) => n,
         Err(why) => {
@@ -1479,7 +1481,8 @@ fn engine(
     }
     let mut waiting: VecDeque<Job> = VecDeque::new();
     loop {
-        if let Some(b) = &batch {
+        if let Some(b) = batch.as_mut() {
+            b.poll_tier();
             b.publish();
         }
         if batch.as_ref().is_none_or(Batch::idle) && waiting.is_empty() {
