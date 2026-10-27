@@ -221,6 +221,8 @@ class Engine:
         self.host, self.port, self.model, self.kind = u.hostname, u.port, model, kind
 
     def complete(self, text, max_tokens, seed):
+        if self.kind == 'ollama':
+            return self.complete_ollama(text, max_tokens, seed)
         body = {'model': self.model, 'prompt': text, 'max_tokens': max_tokens, 'temperature': 0, 'seed': seed,
                 'stream': True, 'stream_options': {'include_usage': True}}
         if self.kind == 'llama':
@@ -268,6 +270,60 @@ class Engine:
                     md5=hashlib.md5(text_out.encode()).hexdigest(), usage=usage, timings=timings)
 
 
+    def complete_ollama(self, text, max_tokens, seed):
+        """ollama's own /api/generate with raw: true: the prompt goes to the model exactly as sent. (Its
+        /v1/completions applies the model's chat template: +29 tokens on a 24.5k prompt, and the model then
+        answers a chat turn and stops at <|im_end|>; shady's #160 review, MUST 1.)"""
+        body = {'model': self.model, 'prompt': text, 'raw': True, 'stream': True, 'keep_alive': -1,
+                'options': {'num_predict': max_tokens, 'temperature': 0, 'seed': seed}}
+        c = http.client.HTTPConnection(self.host, self.port, timeout=1800)
+        t_send = time.perf_counter()
+        c.request('POST', '/api/generate', json.dumps(body).encode(), {'Content-Type': 'application/json'})
+        r = c.getresponse()
+        if r.status != 200:
+            msg = r.read()[:300]
+            c.close()
+            return dict(error=f'HTTP {r.status}: {msg!r}', t_send=t_send)
+        times, parts, usage = [], [], None
+        while True:
+            line = r.readline()
+            if not line:
+                break
+            try:
+                j = json.loads(line)
+            except ValueError:
+                continue
+            if j.get('error'):
+                c.close()
+                return dict(error=f'ollama: {j["error"]}'[:300], t_send=t_send)
+            t = j.get('response') or ''
+            if t:
+                times.append(time.perf_counter())
+                parts.append(t)
+            if j.get('done'):
+                usage = {'prompt_eval_count': j.get('prompt_eval_count', 0),
+                         'completion_tokens': j.get('eval_count'), 'done_reason': j.get('done_reason')}
+                break
+        t_done = time.perf_counter()
+        c.close()
+        text_out = ''.join(parts)
+        return dict(t_send=t_send, t_first=times[0] if times else None, t_done=t_done, chunk_t=times,
+                    md5=hashlib.md5(text_out.encode()).hexdigest(), usage=usage, timings=None)
+
+
+def engine_prompt_tokens(kind, res):
+    """The prompt length the engine says it got (None if it doesn't say: ollama reports only what it evaluated)."""
+    u, tm = res.get('usage') or {}, res.get('timings') or {}
+    if kind == 'axon' and 'prompt_tokens' in u:
+        return u['prompt_tokens']
+    if kind == 'llama':
+        if 'prompt_n' in tm and 'cache_n' in tm:
+            return tm['prompt_n'] + tm['cache_n']
+        if 'prompt_tokens' in u:
+            return u['prompt_tokens']
+    return None
+
+
 def computed_tokens(kind, res):
     u, tm = res.get('usage') or {}, res.get('timings') or {}
     if kind == 'axon' and u:
@@ -276,6 +332,8 @@ def computed_tokens(kind, res):
             return u['prompt_tokens'] - d['cached_tokens']
     if kind == 'llama' and 'prompt_n' in tm:
         return tm['prompt_n']
+    if kind == 'ollama' and 'prompt_eval_count' in u:
+        return u['prompt_eval_count']
     return None
 
 
@@ -337,7 +395,30 @@ def tree_pids():
     return out
 
 
+def slots_counters(eng):
+    """Axon's cumulative /slots counters (preempted requests, prefills that gave their rows up); None elsewhere."""
+    if eng.kind != 'axon':
+        return None
+    try:
+        c = http.client.HTTPConnection(eng.host, eng.port, timeout=30)
+        c.request('GET', '/slots')
+        j = json.loads(c.getresponse().read())
+        c.close()
+        return j.get('preempted', 0), j.get('prefills_unfed', 0)
+    except (OSError, ValueError):
+        return None
+
+
 def run_cell(eng, words, cell, a, kv_gb):
+    c0 = slots_counters(eng)
+    s = _run_cell(eng, words, cell, a, kv_gb)
+    c1 = slots_counters(eng)
+    if c0 and c1:
+        s['preempted'], s['prefills_unfed'] = c1[0] - c0[0], c1[1] - c0[1]
+    return s
+
+
+def _run_cell(eng, words, cell, a, kv_gb):
     P = cell['prompt']
     to_text = lambda toks: ''.join(' ' + words[i] for i in toks)
     pre = Prefixes()
@@ -365,13 +446,13 @@ def run_cell(eng, words, cell, a, kv_gb):
     def session(reqs):
         for r in reqs:
             toks = P(r['chain'], r['epoch'], r['length'])
-            with lock:
-                hit = pre.hit_and_add(toks)
             text = to_text(toks)
             wait = T0 + r['at'] - time.perf_counter()
             late = max(0.0, -wait)
             if wait > 0:
                 time.sleep(wait)
+            with lock:   # the ideal cache sees prompts in send order
+                hit = pre.hit_and_add(toks)
             res = eng.complete(text, r['max_tokens'], a.seed)
             res.update(k=r['k'], chain=r['chain'], new=r['new'], gap=r['gap'], prompt=len(toks),
                        ideal=len(toks) - hit, max_tokens=r['max_tokens'], late_ms=round(late * 1000))
@@ -415,7 +496,13 @@ def summarize(results, wall, prime_s, kv_gb, kind, foreign):
     warm = sum(1 for v in per_chain.values() if statistics.median(v) <= 0.5)
     comp = [(computed_tokens(kind, x), x['ideal'], x['prompt']) for x in ok]
     have = [c for c in comp if c[0] is not None]
-    reprefill = sum(max(0, c - i) for c, i, _ in have) if have and len(have) == len(comp) else None
+    full = bool(have) and len(have) == len(comp)
+    reprefill = sum(max(0, c - i) for c, i, _ in have) if full else None
+    reprefill_net = sum(c - i for c, i, _ in have) if full else None
+    # The engine must have seen exactly our prompt (axon, llama: their own count; ollama: what it evaluated can't
+    # exceed the prompt).
+    eng_p = [(engine_prompt_tokens(kind, x), x['prompt'], computed_tokens(kind, x)) for x in ok]
+    mismatch = sum(1 for e, p, c in eng_p if (e is not None and e != p) or (e is None and c is not None and c > p))
     errs = [x.get('error') for x in results if 'error' in x]
     s = {
         'requests': len(results), 'errors': len(results) - len(ok), 'wall_s': round(wall, 1),
@@ -429,7 +516,10 @@ def summarize(results, wall, prime_s, kv_gb, kind, foreign):
         'itl_p99_ms': round(pct(itl_all, 99) * 1000, 2) if itl_all else None,
         'warm_sessions': warm, 'kv_gb': kv_gb, 'warm_per_gb': round(warm / kv_gb, 3) if kv_gb else None,
         'prompt_tokens': sum(x['prompt'] for x in ok), 'ideal_tokens': sum(x['ideal'] for x in ok),
-        'reprefill_tokens': reprefill,
+        'reprefill_tokens': reprefill, 'reprefill_net_tokens': reprefill_net,
+        'reprefill_net_share': round(reprefill_net / max(1, sum(x['prompt'] for x in ok)), 4) if full else None,
+        'prompt_mismatch': mismatch,
+        'prompt_checked': sum(1 for e, _, _ in eng_p if e is not None),
         'reprefill_share': round(reprefill / max(1, sum(x['prompt'] for x in ok)), 4) if reprefill is not None else None,
         'late_p50_ms': pct([x['late_ms'] for x in ok], 50), 'late_max_ms': max([x['late_ms'] for x in ok], default=None),
         'md5': hashlib.md5(''.join(x['md5'] for x in sorted(ok, key=lambda x: x['k'])).encode()).hexdigest(),
@@ -447,6 +537,7 @@ def summarize(results, wall, prime_s, kv_gb, kind, foreign):
             s[k] = round(v, 3)
     s['per_request'] = [dict(k=x['k'], chain=x['chain'], new=x['new'], gap=x['gap'], prompt=x['prompt'],
                              ideal=x.get('ideal'), computed=computed_tokens(kind, x), max_tokens=x.get('max_tokens'),
+                             engine_prompt=engine_prompt_tokens(kind, x),
                              n_out=x.get('n_out'), late_ms=x.get('late_ms'), md5=x.get('md5'),
                              ttft=round(x['t_first'] - x['t_send'], 4) if x.get('t_first') else None,
                              dur=round(x['t_done'] - x['t_send'], 3) if x.get('t_done') else None,
@@ -596,6 +687,17 @@ def _start_engine(kind, a, kv, port, logdir, axon_tokens):
     if 'error' in r:
         stop_engine(proc)
         raise RuntimeError(f'{kind}: warm-up request failed: {r["error"]}; log {log}')
+    # Tokenization check: a fresh (never sent) prompt of N filler words must be exactly N tokens to the engine.
+    n = 512
+    probe = Texts(len(a.words), a.seed).get(('tokcheck', kind, port, time.time()), n)
+    r = eng.complete(''.join(' ' + a.words[i] for i in probe), 1, a.seed)
+    got = engine_prompt_tokens(kind, r)
+    if got is None:
+        got = computed_tokens(kind, r)   # ollama: a cold prompt is evaluated whole
+    if 'error' in r or got != n:
+        raise RuntimeError(f'{kind}: tokenization check failed: {n} filler words -> {got} prompt tokens '
+                           f'({r.get("error")}); log {log}')
+    cfg += f'; tokenization check {n} words = {got} tokens'
     record_engine(logdir, proc, kind, port, 'ready')
     return proc, eng, tokens, cfg
 
@@ -902,14 +1004,15 @@ def cell_desc(a, cell):
 
 def brief(s):
     keys = ['requests', 'errors', 'first_error', 'wall_s', 'prime_s', 'ttft_new_p50', 'ttft_resume_p50', 'ttft_turn_p50',
-            'goodput_tok_s', 'itl_p99_ms', 'warm_per_gb', 'reprefill_share', 'out_tokens_short', 'tainted']
+            'goodput_tok_s', 'itl_p99_ms', 'warm_per_gb', 'reprefill_share', 'reprefill_net_share', 'out_tokens_short',
+            'prompt_mismatch', 'prompt_checked', 'preempted', 'prefills_unfed', 'tainted']
     return ' '.join(f'{k}={s.get(k)}' for k in keys)
 
 
 def cmd_board(a):
     install_guards()
     trace = json.load(open(a.trace))
-    words = word_list(a.model)
+    words = a.words = word_list(a.model)
     a.nwords = len(words)
     os.makedirs(a.out, exist_ok=True)
     bpt = kv_bytes_per_token(a.model)
@@ -953,6 +1056,9 @@ def cmd_board(a):
                     t = time.time()
                     s = run_cell(eng, words, cells[sp], a, kv_gb)
                     s.update(engine=kind, kv=a.kv, round=rnd, speed=sp, config=cfg, kv_tokens=tokens)
+                    if s.get('prompt_mismatch'):
+                        meta.setdefault('failures', []).append(
+                            f'{kind} speed {sp:g} round {rnd}: {s["prompt_mismatch"]} prompts the engine counted differently')
                     f = os.path.join(a.out, f'run-{kind}-{a.kv}-s{sp:g}-r{rnd}.json')
                     json.dump(s, open(f, 'w'), indent=1)
                     print(f'RUN {kind} kv {a.kv} speed {sp:g} round {rnd}: {brief(s)} ({time.time() - t:.0f} s)',
@@ -983,14 +1089,26 @@ def gpu_name():
         return None
 
 
-METRICS = [('TTFT-new p50 s', 'ttft_new_p50'), ('TTFT-new p99 s', 'ttft_new_p99'),
-           ('TTFT-resume p50 s', 'ttft_resume_p50'), ('TTFT-resume p99 s', 'ttft_resume_p99'),
-           ('resume 30s-2m p50', 'ttft_resume_30s-2m_p50'), ('resume 2-10m p50', 'ttft_resume_2-10m_p50'),
-           ('resume >10m p50', 'ttft_resume_>10m_p50'),
-           ('TTFT-turn p50 s', 'ttft_turn_p50'), ('goodput tok/s', 'goodput_tok_s'), ('ITL p99 ms', 'itl_p99_ms'),
-           ('warm/GB', 'warm_per_gb'), ('re-prefill share', 'reprefill_share'), ('output tok/s', 'output_tok_s'),
+METRICS = [('TTFT-new p50 s', 'ttft_new_p50'), ('TTFT-new p99 s (max when n < 100)', 'ttft_new_p99'),
+           ('  n new', 'n_new'),
+           ('TTFT-resume p50 s', 'ttft_resume_p50'), ('TTFT-resume p99 s (max when n < 100)', 'ttft_resume_p99'),
+           ('  n resume', 'n_resume'),
+           ('resume 30s-2m p50', 'ttft_resume_30s-2m_p50'), ('  n 30s-2m', 'n_resume_30s-2m'),
+           ('resume 2-10m p50', 'ttft_resume_2-10m_p50'), ('  n 2-10m', 'n_resume_2-10m'),
+           ('resume >10m p50', 'ttft_resume_>10m_p50'), ('  n >10m', 'n_resume_>10m'),
+           ('TTFT-turn p50 s', 'ttft_turn_p50'), ('  n turn', 'n_turn'),
+           ('goodput tok/s', 'goodput_tok_s'), ('ITL p99 ms', 'itl_p99_ms'),
+           ('warm/GB (GPU KV budget)', 'warm_per_gb'), ('re-prefill share (clamped)', 'reprefill_share'),
+           ('re-prefill share (net)', 'reprefill_net_share'), ('preempted (axon /slots)', 'preempted'),
+           ('output tok/s', 'output_tok_s'), ('replies short of max_tokens', 'out_tokens_short'),
+           ('prompt-count mismatches', 'prompt_mismatch'),
            ('wall s', 'wall_s'), ('errors', 'errors'),
            ('tainted runs', 'tainted')]
+
+
+def comparable(group):
+    """Runs from before the raw-prompt fix (no prompt_checked field) sent ollama through its chat template."""
+    return not any(r['engine'] == 'ollama' and 'prompt_checked' not in r for r in group)
 
 
 def table(dirs):
@@ -1008,7 +1126,7 @@ def table(dirs):
         lines.append(f'\n**speed {sp:g}** (median of rounds; [min–max])\n')
         lines.append('| metric | ' + ' | '.join(
             f"{k[2]} {k[1]} (n={len(groups[k])}: r{','.join(str(r['round']) for r in sorted(groups[k], key=lambda r: r['round']))})"
-            for k in cols) + ' |')
+            + ('' if comparable(groups[k]) else ' NON-COMPARABLE: chat template') for k in cols) + ' |')
         lines.append('|---|' + '---|' * len(cols))
         for name, key in METRICS:
             row = []

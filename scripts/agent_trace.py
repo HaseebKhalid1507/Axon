@@ -360,12 +360,38 @@ def synthetic(n_sessions=6, seed=7):
 
 
 def inside_git(path):
-    d = os.path.dirname(os.path.abspath(path))
+    d = os.path.dirname(os.path.realpath(path))   # realpath: a symlink into a checkout doesn't get around it
     while d != os.path.dirname(d):
         if os.path.exists(os.path.join(d, '.git')):
             return d
         d = os.path.dirname(d)
     return None
+
+
+def check_committed(root='.'):
+    """CI: every committed JSON that looks like a trace (a top-level "requests" list of records with "t_ms") must
+    be marked "synthetic": true and pass `check`. A trace from real logs never belongs in this public repo."""
+    import subprocess
+    files = subprocess.run(['git', '-C', root, 'ls-files', '*.json'], capture_output=True, text=True,
+                           check=True).stdout.split()
+    ok, n = True, 0
+    for f in files:
+        try:
+            with open(os.path.join(root, f)) as fh:
+                d = json.load(fh)
+        except (OSError, ValueError):
+            continue
+        r = d.get('requests') if isinstance(d, dict) else None
+        if not (isinstance(r, list) and r and isinstance(r[0], dict) and 't_ms' in r[0]):
+            continue
+        n += 1
+        if d.get('synthetic') is not True:
+            print(f'TRACE CHECK FAIL {f}: a committed trace that is not marked "synthetic": true')
+            ok = False
+        if not check(os.path.join(root, f)):
+            ok = False
+    print(f'committed traces: {n}, {"PASS" if ok else "FAIL"}')
+    return ok
 
 
 def main():
@@ -376,12 +402,16 @@ def main():
     ap.add_argument('--out')
     ap.add_argument('--summary', action='store_true', help='print the structure summary (numbers only)')
     ap.add_argument('--check', metavar='FILE')
+    ap.add_argument('--check-committed', action='store_true',
+                    help='CI: every committed trace is synthetic and passes --check')
     ap.add_argument('--anonymize-time', action='store_true',
                     help='strip dates and times of day: each day starts at t = 0 (for anything shared)')
     ap.add_argument('--synthetic', metavar='FILE', help='write a small SYNTHETIC example trace (reads no logs)')
     a = ap.parse_args()
     if a.check:
         sys.exit(0 if check(a.check) else 1)
+    if a.check_committed:
+        sys.exit(0 if check_committed() else 1)
     if a.synthetic:
         with open(a.synthetic, 'w') as f:
             json.dump(synthetic(), f, indent=0, separators=(',', ':'))
