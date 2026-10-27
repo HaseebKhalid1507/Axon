@@ -1,4 +1,4 @@
-# H100 prefill anatomy of the mix C=128 cell, and #139's config cells (PR #TBD)
+# H100 prefill anatomy of the mix C=128 cell, and #139's config cells (PR #157)
 
 - Date: 2026-10-26. Branch: feat/feed-anatomy. Base: main d8a296c (rebuilt on main after #151 before booking).
   Status: open (draft). Session NOT booked: the rule below is written first.
