@@ -1,0 +1,149 @@
+[axon-run 03:48:36] submitted 1027-034836-d86a by /home/haseeb/.cache/axon-kvtier: /usr/bin/bash md5.sh ./axon-0c23a87 ./axon-db6e6e3 md5out ./serve_md5.py
+[axon-run 03:56:27] job 1027-034836-d86a -> pod1 (pod szm5eqn2moe7ck): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 9000 --src /home/haseeb/.cache/axon-podjob/md5-50b27a84e4b4 /usr/bin/bash md5.sh ./axon-0c23a87 ./axon-db6e6e3 md5out ./serve_md5.py
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (3bc24975b082ed135a626fdb) + source of /home/haseeb/.cache/axon-podjob/md5-50b27a84e4b4
+
+sent 7,337,037 bytes  received 125 bytes  2,096,332.00 bytes/sec
+total size is 23,208,284  speedup is 3.16
+
+sent 169 bytes  received 35 bytes  81.60 bytes/sec
+total size is 89  speedup is 0.44
+axon-remote: job 20261027-075642-bash-618 on pod1 (GPU, 9000 MB)
+[axon-node 07:56:42] GPU slot taken; job wants 9000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 2, budget 23064 MB, vCPU 10.2)
+[axon-node 07:56:42] run bash (3bc24975b082ed135a626fdb) as /home/haseeb/.cache/axon-podjob/md5-50b27a84e4b4 on 4ec5cfcdb5eb, AXON_THREADS=5 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+NVIDIA GeForce RTX 4090, 8.9, 595.91.07
+GEN	base	qwen2.5-0.5b-q4_k_m	cuda-f16	p1	22703eeab624	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cuda-f16	p1	22703eeab624	rc=0
+GEN	base	qwen2.5-0.5b-q4_k_m	cuda-f16	p2	73e02ab67347	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cuda-f16	p2	73e02ab67347	rc=0
+GEN	base	qwen2.5-0.5b-q4_k_m	cuda-f16	p3	d5f48b82b239	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cuda-f16	p3	d5f48b82b239	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cuda-f16	p1	a21a6d55c9dc	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cuda-f16	p1	a21a6d55c9dc	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cuda-f16	p2	2ddddfdcb068	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cuda-f16	p2	2ddddfdcb068	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cuda-f16	p3	bca874a4b888	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cuda-f16	p3	bca874a4b888	rc=0
+GEN	base	google_gemma-3-1b-it-Q4_K_M	cuda-f16	p1	9959475a1edd	rc=0
+GEN	cand	google_gemma-3-1b-it-Q4_K_M	cuda-f16	p1	9959475a1edd	rc=0
+GEN	base	google_gemma-3-1b-it-Q4_K_M	cuda-f16	p2	425335695714	rc=0
+GEN	cand	google_gemma-3-1b-it-Q4_K_M	cuda-f16	p2	425335695714	rc=0
+GEN	base	google_gemma-3-1b-it-Q4_K_M	cuda-f16	p3	bb992c6e8b17	rc=0
+GEN	cand	google_gemma-3-1b-it-Q4_K_M	cuda-f16	p3	bb992c6e8b17	rc=0
+GEN	base	Qwen2.5-7B-Instruct-Q4_K_M	cuda-f16	p1	02b667ba5ddc	rc=0
+GEN	cand	Qwen2.5-7B-Instruct-Q4_K_M	cuda-f16	p1	02b667ba5ddc	rc=0
+GEN	base	Qwen2.5-7B-Instruct-Q4_K_M	cuda-f16	p2	a0a829819411	rc=0
+GEN	cand	Qwen2.5-7B-Instruct-Q4_K_M	cuda-f16	p2	a0a829819411	rc=0
+GEN	base	Qwen2.5-7B-Instruct-Q4_K_M	cuda-f16	p3	ff493ed15da7	rc=0
+GEN	cand	Qwen2.5-7B-Instruct-Q4_K_M	cuda-f16	p3	ff493ed15da7	rc=0
+GEN	base	qwen2.5-0.5b-q4_k_m	cuda-q8	p1	cb9ea06a4c75	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cuda-q8	p1	cb9ea06a4c75	rc=0
+GEN	base	qwen2.5-0.5b-q4_k_m	cuda-q8	p2	91013838d08b	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cuda-q8	p2	91013838d08b	rc=0
+GEN	base	qwen2.5-0.5b-q4_k_m	cuda-q8	p3	d5f48b82b239	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cuda-q8	p3	d5f48b82b239	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cuda-q8	p1	9416fbd66603	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cuda-q8	p1	9416fbd66603	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cuda-q8	p2	6fab94b325fe	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cuda-q8	p2	6fab94b325fe	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cuda-q8	p3	c3efc22c4b2f	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cuda-q8	p3	c3efc22c4b2f	rc=0
+GEN	base	Qwen2.5-7B-Instruct-Q4_K_M	cuda-q8	p1	15395ccf5c86	rc=0
+GEN	cand	Qwen2.5-7B-Instruct-Q4_K_M	cuda-q8	p1	15395ccf5c86	rc=0
+GEN	base	Qwen2.5-7B-Instruct-Q4_K_M	cuda-q8	p2	c3e22f8d32bc	rc=0
+GEN	cand	Qwen2.5-7B-Instruct-Q4_K_M	cuda-q8	p2	c3e22f8d32bc	rc=0
+GEN	base	Qwen2.5-7B-Instruct-Q4_K_M	cuda-q8	p3	89486fda9149	rc=0
+GEN	cand	Qwen2.5-7B-Instruct-Q4_K_M	cuda-q8	p3	89486fda9149	rc=0
+GEN	base	qwen2.5-0.5b-q4_k_m	cpu-f16	p1	de11b4bf48c9	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cpu-f16	p1	de11b4bf48c9	rc=0
+GEN	base	qwen2.5-0.5b-q4_k_m	cpu-f16	p2	1d02b95ac7c0	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cpu-f16	p2	1d02b95ac7c0	rc=0
+GEN	base	qwen2.5-0.5b-q4_k_m	cpu-f16	p3	d5f48b82b239	rc=0
+GEN	cand	qwen2.5-0.5b-q4_k_m	cpu-f16	p3	d5f48b82b239	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cpu-f16	p1	54381a7d049c	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cpu-f16	p1	54381a7d049c	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cpu-f16	p2	0b1ad272f80c	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cpu-f16	p2	0b1ad272f80c	rc=0
+GEN	base	Qwen3-0.6B-Q8_0	cpu-f16	p3	bca874a4b888	rc=0
+GEN	cand	Qwen3-0.6B-Q8_0	cpu-f16	p3	bca874a4b888	rc=0
+GEN	base	google_gemma-3-1b-it-Q4_K_M	cpu-f16	p1	cf46be5fb096	rc=0
+GEN	cand	google_gemma-3-1b-it-Q4_K_M	cpu-f16	p1	cf46be5fb096	rc=0
+GEN	base	google_gemma-3-1b-it-Q4_K_M	cpu-f16	p2	659d7e4238fe	rc=0
+GEN	cand	google_gemma-3-1b-it-Q4_K_M	cpu-f16	p2	659d7e4238fe	rc=0
+GEN	base	google_gemma-3-1b-it-Q4_K_M	cpu-f16	p3	b4625e6fca73	rc=0
+GEN	cand	google_gemma-3-1b-it-Q4_K_M	cpu-f16	p3	b4625e6fca73	rc=0
+GEN MD5 differing: 0 of 30
+Traceback (most recent call last):
+  File "/root/axon-node/store/3bc24975b082ed135a626fdb/tree/./serve_md5.py", line 123, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/root/axon-node/store/3bc24975b082ed135a626fdb/tree/./serve_md5.py", line 108, in main
+    res[name] = run(name, path, [x for x in args.split(",") if x], a, a.port)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/axon-node/store/3bc24975b082ed135a626fdb/tree/./serve_md5.py", line 77, in run
+    for s, (t, u) in ex.map(one, range(sessions)):
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 619, in result_iterator
+    yield _result_or_cancel(fs.pop())
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 317, in _result_or_cancel
+    return fut.result(timeout)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/axon-node/store/3bc24975b082ed135a626fdb/tree/./serve_md5.py", line 75, in one
+    return s, complete(port, body)
+              ^^^^^^^^^^^^^^^^^^^^
+  File "/root/axon-node/store/3bc24975b082ed135a626fdb/tree/./serve_md5.py", line 35, in complete
+    raise RuntimeError(f"HTTP {r.status}: {v}")
+RuntimeError: HTTP 503: {'error': {'code': None, 'message': 'the model is loading; try again shortly', 'param': None, 'type': 'server_error'}}
+Traceback (most recent call last):
+  File "/root/axon-node/store/3bc24975b082ed135a626fdb/tree/./serve_md5.py", line 123, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "/root/axon-node/store/3bc24975b082ed135a626fdb/tree/./serve_md5.py", line 108, in main
+    res[name] = run(name, path, [x for x in args.split(",") if x], a, a.port)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/axon-node/store/3bc24975b082ed135a626fdb/tree/./serve_md5.py", line 77, in run
+    for s, (t, u) in ex.map(one, range(sessions)):
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 619, in result_iterator
+    yield _result_or_cancel(fs.pop())
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 317, in _result_or_cancel
+    return fut.result(timeout)
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 456, in result
+    return self.__get_result()
+           ^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+    raise self._exception
+  File "/usr/lib/python3.12/concurrent/futures/thread.py", line 58, in run
+    result = self.fn(*self.args, **self.kwargs)
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/root/axon-node/store/3bc24975b082ed135a626fdb/tree/./serve_md5.py", line 75, in one
+    return s, complete(port, body)
+              ^^^^^^^^^^^^^^^^^^^^
+  File "/root/axon-node/store/3bc24975b082ed135a626fdb/tree/./serve_md5.py", line 35, in complete
+    raise RuntimeError(f"HTTP {r.status}: {v}")
+RuntimeError: HTTP 503: {'error': {'code': None, 'message': 'the model is loading; try again shortly', 'param': None, 'type': 'server_error'}}
+SERVE base: cached 17, restored None, digest 36474ce1926a
+SERVE cand0: cached 17, restored None, digest 36474ce1926a
+SERVE cand1: cached 13635, restored 13618.0, digest 36474ce1926a
+SERVE MD5 cuda f16 google_gemma-3-1b-it-Q4_K_M.gguf: 42/42 same
+SERVE base: cached 0, restored None, digest b0ccc5e07637
+SERVE cand0: cached 0, restored None, digest b0ccc5e07637
+SERVE cand1: cached 13888, restored 13888.0, digest b0ccc5e07637
+SERVE MD5 cuda q8 Qwen3-0.6B-Q8_0.gguf: 42/42 same
+SERVE base: cached 6, restored None, digest 376ef9c9f1c6
+SERVE cand0: cached 6, restored None, digest 376ef9c9f1c6
+SERVE cand1: cached 13890, restored 13886.0, digest 376ef9c9f1c6
+SERVE MD5 cpu f16 qwen2.5-0.5b-q4_k_m.gguf: 42/42 same
+RC 1
+[axon-node 08:02:54] exit 1 after 371.8s
+[axon-node 08:02:54] peak RSS 1170 MB (job process tree PSS, 2 s samples x184)
+[axon-run 04:02:55] exit 1 after 388.0s (host pod1)
