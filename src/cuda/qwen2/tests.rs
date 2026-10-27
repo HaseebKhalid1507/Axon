@@ -10305,6 +10305,8 @@ fn probe_child(
 ///    AXON_PROBE_KERNELS=baselines, so the in-session baselines are reported
 ///    anyway. Off Hopper every sm_90a part skips (the bella rehearsal).
 ///
+/// Child limits sum to 1610 s (27 min): submit with --max-min 28.
+///
 /// Fails (after everything has run) if any probe stage failed.
 /// Run with --ignored --nocapture.
 #[test]
@@ -10318,7 +10320,7 @@ fn cuda_probe_w4a8_session() {
             fails.push(format!("{name} rc {rc}"));
         }
     };
-    let (rc, _) = probe_child(&[], "cuda_probe_w4a8_peak", true, &[], 180);
+    let (rc, _) = probe_child(&[], "cuda_probe_w4a8_peak", true, &[], 120);
     note("peak", rc);
     if let Some(san) = std::env::var_os("AXON_PROBE_SANITIZER") {
         let san = san.to_string_lossy().to_string();
@@ -10335,7 +10337,7 @@ fn cuda_probe_w4a8_session() {
             .iter()
             .map(|s| s.to_string())
             .collect();
-            let (rc, _) = probe_child(&wrap, "gpu_probe_w4a8_tiny", false, &[], 420);
+            let (rc, _) = probe_child(&wrap, "gpu_probe_w4a8_tiny", false, &[], 300);
             note("sanitizer tiny", rc);
         } else {
             eprintln!("PROBE STAGE sanitizer: {san} not found, skipped");
@@ -10344,16 +10346,16 @@ fn cuda_probe_w4a8_session() {
     } else {
         eprintln!("PROBE STAGE sanitizer: AXON_PROBE_SANITIZER unset, skipped");
     }
-    let (rc_tiny, _) = probe_child(&[], "gpu_probe_w4a8_tiny", false, &[], 120);
+    let (rc_tiny, _) = probe_child(&[], "gpu_probe_w4a8_tiny", false, &[], 90);
     note("tiny", rc_tiny);
     let bits_ok = rc_tiny == 0 && {
-        let (rc, _) = probe_child(&[], "gpu_probe_w4a8_int_bits", false, &[], 300);
+        let (rc, _) = probe_child(&[], "gpu_probe_w4a8_int_bits", false, &[], 200);
         note("bits", rc);
         rc == 0
     };
     let mut bench_ok = false;
     if bits_ok {
-        let (rc, _) = probe_child(&[], "cuda_probe_w4a8_bench", true, &[], 1000);
+        let (rc, _) = probe_child(&[], "cuda_probe_w4a8_bench", true, &[], 600);
         note("bench", rc);
         bench_ok = rc == 0;
     }
@@ -10365,7 +10367,7 @@ fn cuda_probe_w4a8_session() {
             "cuda_probe_w4a8_bench",
             true,
             &[("AXON_PROBE_KERNELS", "baselines")],
-            700,
+            300,
         );
         note("baselines", rc);
     }
