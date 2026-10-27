@@ -4,6 +4,7 @@
     agent_replay.py run   --url http://127.0.0.1:PORT --model GGUF --trace FILE [cell options] --out FILE.json
     agent_replay.py board --engines axon,llama,ollama --kv f16 --model GGUF --rounds 3 --speeds 1,4
                           --axon BIN --llama-server BIN [--ollama-model NAME] --trace FILE --out DIR
+    agent_replay.py fanout --url URL --model GGUF [--busy 4] --out FILE.json   (row C's fan-out cell)
     agent_replay.py table DIR...       (markdown board from board result dirs)
 
 Cell options (defaults = the canonical agent-32k cell, docs/log/2026-10-27-agent-replay.md):
@@ -604,6 +605,114 @@ def stop_engine(proc):
     time.sleep(3)
 
 
+# --------------------------------------------------------------------------------------------- fan-out cell
+
+
+def bg_stream(eng, text, max_tokens, seed, first, stop):
+    """A background decoding session: stream until `stop`, then drop the connection."""
+    body = json.dumps({'model': eng.model, 'prompt': text, 'max_tokens': max_tokens, 'temperature': 0,
+                       'seed': seed, 'stream': True}).encode()
+    c = http.client.HTTPConnection(eng.host, eng.port, timeout=1800)
+    try:
+        c.request('POST', '/v1/completions', body, {'Content-Type': 'application/json'})
+        r = c.getresponse()
+        while not stop.is_set():
+            line = r.readline()
+            if not line:
+                break
+            if line.startswith(b'data:') and b'"text"' in line:
+                first.set()
+    except OSError:
+        pass
+    finally:
+        first.set()
+        c.close()
+
+
+def run_fanout(eng, words, a, rnd):
+    """One fan-out burst (row C's cell, re-registered 10-27): `siblings` requests sent `spread_ms` apart in
+    total, each = the SAME shared span (S tokens) + its own private delta (d tokens), `reply` tokens each.
+    busy > 0: the burst arrives while that many unrelated sessions are decoding (so the siblings are admitted
+    into a running batch and in-flight dedupe can fire). Every round uses fresh text, so the server holds none
+    of it when the burst starts."""
+    tx = Texts(len(words), a.seed)
+    to_text = lambda toks: ''.join(' ' + words[i] for i in toks)
+    shared = tx.get(('fan-shared', rnd), a.shared)
+    prompts = [shared + tx.get(('fan-delta', rnd, i), a.delta) for i in range(a.siblings)]
+    stop, bg = threading.Event(), []
+    for j in range(a.busy):
+        first = threading.Event()
+        t = threading.Thread(target=bg_stream, daemon=True,
+                             args=(eng, to_text(tx.get(('fan-bg', rnd, j), a.busy_prompt)), a.busy_reply,
+                                   a.seed, first, stop))
+        t.start()
+        bg.append((t, first))
+    for t, first in bg:
+        first.wait(600)
+    if bg:
+        time.sleep(2.0)   # all background sessions are decoding
+    res = [None] * a.siblings
+    T0 = time.perf_counter() + 0.2
+    step = a.spread_ms / 1000 / max(1, a.siblings - 1)
+
+    def one(i):
+        w = T0 + i * step - time.perf_counter()
+        if w > 0:
+            time.sleep(w)
+        res[i] = eng.complete(to_text(prompts[i]), a.reply, a.seed)
+    th = [threading.Thread(target=one, args=(i,)) for i in range(a.siblings)]
+    for t in th:
+        t.start()
+    for t in th:
+        t.join()
+    stop.set()
+    errs = [r.get('error') for r in res if 'error' in r]
+    if errs:
+        return dict(round=rnd, busy=a.busy, errors=len(errs), first_error=errs[0][:200])
+    ttft = [r['t_first'] - r['t_send'] for r in res]
+    # the leader is sibling 1 (sent first); each sibling's increment over it, both from their own send
+    inc = [ttft[i] - ttft[0] for i in range(1, a.siblings)]
+    comp = [computed_tokens(eng.kind, r) for r in res]
+    shared_prefilled = [None if c is None else max(0, c - a.delta) for c in comp[1:]]
+    return dict(round=rnd, busy=a.busy, errors=0, shared=a.shared, delta=a.delta, siblings=a.siblings,
+                leader_ttft=round(ttft[0], 4), ttft=[round(x, 4) for x in ttft],
+                sib_ttft_p50=round(statistics.median(ttft[1:]), 4),
+                sib_inc_ttft_p50=round(statistics.median(inc), 4),
+                computed=comp, sib_shared_prefilled=shared_prefilled,
+                md5=hashlib.md5(''.join(r['md5'] for r in res).encode()).hexdigest())
+
+
+def cmd_fanout(a):
+    words = word_list(a.model)
+    eng = Engine(a.url, a.engine_model, a.kind)
+    if a.kind in ('axon', 'llama'):
+        try:
+            u = urllib.parse.urlparse(a.url)
+            c = http.client.HTTPConnection(u.hostname, u.port, timeout=30)
+            c.request('GET', '/v1/models')
+            eng.model = json.loads(c.getresponse().read())['data'][0]['id']
+        except (OSError, KeyError, IndexError, ValueError):
+            pass
+    out = []
+    for rnd in range(a.rounds):
+        r = run_fanout(eng, words, a, rnd)
+        out.append(r)
+        print(f'FANOUT busy {a.busy} round {rnd}: ' + ' '.join(f'{k}={r.get(k)}' for k in
+              ('errors', 'leader_ttft', 'sib_ttft_p50', 'sib_inc_ttft_p50', 'sib_shared_prefilled', 'md5')), flush=True)
+        time.sleep(a.cool_s)
+    ok = [r for r in out if not r['errors']]
+    summ = dict(variant='busy' if a.busy else 'idle', busy=a.busy, shared=a.shared, delta=a.delta,
+                siblings=a.siblings, reply=a.reply, spread_ms=a.spread_ms, rounds=a.rounds,
+                sib_inc_ttft_p50=statistics.median([r['sib_inc_ttft_p50'] for r in ok]) if ok else None,
+                sib_ttft_p50=statistics.median([r['sib_ttft_p50'] for r in ok]) if ok else None,
+                leader_ttft_p50=statistics.median([r['leader_ttft'] for r in ok]) if ok else None,
+                md5s=sorted({r['md5'] for r in ok}), runs=out)
+    json.dump(summ, open(a.out, 'w'), indent=1)
+    print('FANOUT ' + ' '.join(f'{k}={summ[k]}' for k in ('variant', 'sib_inc_ttft_p50', 'sib_ttft_p50',
+                                                          'leader_ttft_p50', 'md5s')))
+    print('FANOUT END')
+
+
 # --------------------------------------------------------------------------------------------- commands
 
 
@@ -789,6 +898,23 @@ def main():
             p.add_argument('--port', type=int, default=18600)
             p.add_argument('--cpu', action='store_true', help='smoke only: engines on the CPU')
             p.add_argument('--out', required=True)
+    p = sub.add_parser('fanout', help="row C's fan-out cell (idle and busy variants), against a running server")
+    p.add_argument('--url', required=True)
+    p.add_argument('--kind', default='axon', choices=['axon', 'llama', 'ollama'])
+    p.add_argument('--engine-model', default='axon')
+    p.add_argument('--model', required=True, help='the GGUF (its vocabulary builds the filler)')
+    p.add_argument('--siblings', type=int, default=8)
+    p.add_argument('--shared', type=int, default=6006, help="shared span S (A's measured p50, unscaled)")
+    p.add_argument('--delta', type=int, default=1110, help="private delta d (A's measured p50 new, unscaled)")
+    p.add_argument('--reply', type=int, default=600)
+    p.add_argument('--spread-ms', type=float, default=100)
+    p.add_argument('--busy', type=int, default=0, help='background decoding sessions (0 = the idle variant)')
+    p.add_argument('--busy-prompt', type=int, default=2048)
+    p.add_argument('--busy-reply', type=int, default=4000)
+    p.add_argument('--rounds', type=int, default=5)
+    p.add_argument('--cool-s', type=float, default=3)
+    p.add_argument('--seed', type=int, default=1234)
+    p.add_argument('--out', required=True)
     p = sub.add_parser('table')
     p.add_argument('dirs', nargs='+')
     a = ap.parse_args()
@@ -796,6 +922,8 @@ def main():
         cmd_run(a)
     elif a.cmd == 'board':
         cmd_board(a)
+    elif a.cmd == 'fanout':
+        cmd_fanout(a)
     else:
         print(table(a.dirs))
 
