@@ -88,7 +88,7 @@ models, cheaply and fast), so choices made along the way shouldn't close them of
 Newest first, as of `39624db`; the numbers are the PRs' own MEASURED headlines, with the PRs' own labels
 (TAINTED, ESTIMATED) kept. Older entries (as of `764792f`, then `69adfa2`) follow the first list.
 
-- **Shortest-first admission and `--step-ms 80` are the `serve` defaults** (PR_NUM; #165's rule S, pre-registered,
+- **Shortest-first admission and `--step-ms 80` are the `serve` defaults** (#167; #165's rule S, pre-registered,
   decided on an H100 SXM, job 1027-084258-1ce4). sjf80 against fifo60 (the defaults before) at mix C=128, 2 rounds:
   aggregate 1,983.5 vs 1,843.2 tok/s (+7.6 %), goodput 809.2 vs 504.3 (+60.5 %), ITL p99 99.9 ms (≤ 105), short TTFT
   p50 187.5 vs 2,286.8 ms; C=64 aggregate +4.6 %; 768/768 requests identical (MEASURED). `--admit-order fifo
