@@ -1,0 +1,281 @@
+[axon-run 02:11:56] submitted 1027-021156-1252 by /home/haseeb/.cache/axon-main: shard 1/3 of 1027-021156-28e5, 220 tests: /home/haseeb/.cache/axon-main/axon-test-0c23a87 hybrid:: cuda::tests:: model:: cuda::qwen2::tests::gpu_verify_matches_forward_argmax_q8_1_5b cuda::qwen2::tests::gpu_verify_matches_forward_argmax_qwen3 cuda::qwen2::tests::gpu_verify_matches_forward_argmax_qwen3_4b cuda::qwen2::tests::gpu_yarn_matches_reference_and_keeps_bits cuda::qwen2::tests::lm_chunk_ranges cuda::qwen2::tests::magic_i2f_is_cvt_r
+[axon-run 02:25:05] job 1027-021156-1252 -> pod1 (pod 8tgzcdqdh9vv0j): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 4904 --src /home/haseeb/.cache/axon-main/wt /home/haseeb/.cache/axon-main/axon-test-0c23a87 hybrid:: cuda::tests:: model:: cuda::qwen2::tests::gpu_verify_matches_forward_argmax_q8_1_5b cuda::qwen2::tests::gpu_verify_matches_forward_argmax_qwen3 cuda::qwen2::tests::gpu_verify_matches_forward_argmax_qwen3_4b cuda::qwen2::tests::gpu_yarn_matches_reference_and_keeps_bits cuda::qwen2::tests::lm_chunk_ranges cuda::qwen2::tests::magic_i2f_is_cvt_rn cuda::qwen2::tests::q6k8_never_costs_context cuda::qwen2::tests::ref_spread_zero_fails_by_name cuda::qwen2::tests::teacher_forced_dump cuda::qwen2::tests::tile_t_picks cuda::qwen2::tests::wave_passes_shapes cuda::qwen2::paged_tests:: chat:: cuda::qwen2::tests::twin:: cuda::qwen2::moe:: moe::tests::backend_places_moe moe::tests::moe_gpu_feed_batch_matches_feed_pruned moe::tests::moe_gpu_feed_batch_matches_feed_small moe::tests::moe_gpu_logits_graded_pruned moe::tests::moe_gpu_logits_graded_small moe::tests::moe_gpu_paged_and_graph_generation moe::tests::moe_gpu_route_matches_cpu_twin_pruned moe::tests::moe_gpu_route_matches_cpu_twin_small moe::tests::moe_gpu_step_refuses_head_no moe::tests::moe_gpu_verify_matches_forward_pruned moe::tests::moe_gpu_verify_matches_forward_small moe::tests::moe_route_batch_invariant_and_ties moe::tests::transpose_tiled_transposes cuda::qwen2::kvio:: cuda::qwen2::yarn_eval:: moe::oss_tests:: generate:: lm:: kv:: tests::kv_f32_after_f16_is_an_error
+axon-remote: uploading axon-test-0c23a87 (66689a997a0c865ae2739764) + source of /home/haseeb/.cache/axon-main/wt (delta vs 5 earlier upload(s) there)
+
+sent 64,667 bytes  received 3,671 bytes  19,525.14 bytes/sec
+total size is 7,316,891  speedup is 107.07
+
+sent 6,275,024 bytes  received 28,530 bytes  1,801,015.43 bytes/sec
+total size is 22,944,960  speedup is 3.64
+axon-remote: job 20261027-062522-axon-test-0c23a87-15258 on pod1 (GPU, 4904 MB)
+[axon-node 06:25:22] GPU slot taken; job wants 4904 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 06:25:22] run axon-test-0c23a87 (66689a997a0c865ae2739764) as /home/haseeb/.cache/axon-main/wt on c6b0dea89b70, AXON_THREADS=4 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+
+running 220 tests
+test chat::tests::forget_bench ... ignored
+test chat::tests::forget_bench_7b ... ignored
+test chat::tests::framing_matches_template ... ok
+testutil: GPU has 23.52 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test chat::tests::cancel_and_message_too_long ... ok
+test chat::tests::gemma3_framing_and_replies ... ok
+test chat::tests::harmony_framing_and_channels ... ok
+test chat::tests::emit_error_keeps_the_exchange_exact ... ok
+test chat::tests::full_context_drops_oldest_cuda ... ok
+test chat::tests::mistral_framing_and_replies ... ok
+test chat::tests::moe_gpu_turns_match_fresh_prefill ... ok
+test chat::tests::moe_turns_match_fresh_prefill ... ok
+test chat::tests::long_turn_matches_fresh_prefill_cuda ... FAILED
+test chat::tests::llama3_framing_and_replies ... ok
+test chat::tests::session_after_forgetting ... ok
+test chat::tests::session_continues_cuda_f16_q8 ... ok
+test chat::tests::session_cpu_file_on_cuda ... ok
+test chat::tests::session_hostile_state ... ok
+test chat::tests::session_continues_cpu ... ok
+test chat::tests::set_system_reuses_the_shared_prefix ... ok
+test chat::tests::turns_match_fresh_prefill_cuda ... ok
+test chat::tests::turns_match_fresh_prefill_hybrid ... ok
+test chat::tests::full_context_drops_oldest has been running for over 60 seconds
+test chat::tests::qwen3_thinking_turns has been running for over 60 seconds
+test chat::tests::qwen3_thinking_turns ... ok
+test chat::tests::user_text_cannot_forge_turns ... ok
+test cuda::qwen2::kvio::tests::bandwidth ... ignored
+test chat::tests::turns_match_fresh_prefill ... ok
+test chat::tests::turns_stream_graded_vs_fresh_prefill has been running for over 60 seconds
+test cuda::qwen2::kvio::tests::rows_round_trip_multi_round has been running for over 60 seconds
+test chat::tests::turns_stream_graded_vs_fresh_prefill ... ok
+test cuda::qwen2::moe::tests::moe_gpu_dense_step_is_an_err ... ok
+test cuda::qwen2::moe::tests::moe_profile_counts_every_layer ... ok
+test cuda::qwen2::moe::tests::moe_profile_lines_sum ... ok
+test cuda::qwen2::moe::tests::moe_gpu_dense_pass_is_an_err has been running for over 60 seconds
+test cuda::qwen2::paged_tests::gpu_paged_attention_bits ... ok
+test cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_gemma3 ... ok
+test cuda::qwen2::moe::tests::moe_gpu_dense_pass_is_an_err ... ok
+test cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_qwen25 ... ok
+test cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_qwen3 ... ok
+test cuda::qwen2::paged_tests::gpu_paged_cache_matches_plain_llama ... ok
+test chat::tests::full_context_drops_oldest ... ok
+test cuda::qwen2::paged_tests::gpu_paged_split_and_batched_bits ... ok
+test cuda::qwen2::paged_tests::gpu_paged_store_bits ... ok
+test cuda::qwen2::paged_tests::gpu_paged_gemma_window_bits has been running for over 60 seconds
+test cuda::qwen2::paged_tests::gpu_paged_gemma_window_bits ... ok
+test cuda::qwen2::tests::gpu_verify_matches_forward_argmax_qwen3_4b ... ok
+test cuda::qwen2::tests::gpu_verify_matches_forward_argmax_q8_1_5b has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_verify_matches_forward_argmax_qwen3 has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_yarn_matches_reference_and_keeps_bits has been running for over 60 seconds
+test cuda::qwen2::tests::gpu_yarn_matches_reference_and_keeps_bits ... ok
+test cuda::qwen2::tests::lm_chunk_ranges ... ok
+test cuda::qwen2::tests::magic_i2f_is_cvt_rn ... ok
+test cuda::qwen2::tests::q6k8_never_costs_context ... ok
+test cuda::qwen2::tests::ref_spread_zero_fails_by_name ... ok
+test cuda::qwen2::tests::teacher_forced_dump ... ignored
+test cuda::qwen2::tests::tile_t_picks ... ok
+test cuda::qwen2::tests::gpu_verify_matches_forward_argmax_qwen3 ... ok
+test cuda::qwen2::tests::twin::gpu_twin_exp_swiglu_match_cpu ... ok
+test cuda::qwen2::tests::twin::gpu_twin_gemm2s_matches_cpu_r8 ... ok
+test cuda::qwen2::tests::twin::gpu_twin_gemv_matches_cpu_r8 ... ok
+test cuda::qwen2::tests::twin::gpu_twin_quant_matches_cpu ... ok
+test cuda::qwen2::tests::wave_passes_shapes ... ok
+test cuda::qwen2::yarn_eval::yarn_needle ... ignored
+test cuda::qwen2::yarn_eval::yarn_short_ctx ... ignored
+test cuda::tests::cuda_hopper_bench ... ignored
+test cuda::qwen2::tests::gpu_verify_matches_forward_argmax_q8_1_5b ... ok
+test cuda::tests::gpu_cache_dir_follows_xdg ... ok
+test cuda::tests::gpu_cache_store_hygiene ... ok
+test cuda::qwen2::kvio::tests::rows_round_trip_multi_round ... ok
+test cuda::tests::gpu_capture_unwinds_cleanly ... ok
+test cuda::tests::gpu_compile_error_shows_log ... ok
+test cuda::tests::gpu_capture_survives_pinning_elsewhere ... ok
+test cuda::qwen2::tests::twin::gpu_twin_epilogues_match_cpu has been running for over 60 seconds
+test cuda::tests::gpu_buffers_round_trip has been running for over 60 seconds
+test cuda::tests::gpu_dequant_bitwise_every_tensor has been running for over 60 seconds
+test cuda::tests::gpu_dequant_bitwise_every_tensor_1_5b has been running for over 60 seconds
+test cuda::tests::gpu_dequant_bitwise_every_tensor_1_5b ... ok
+test cuda::tests::gpu_dequant_bitwise_every_tensor_q5k_q4_0 ... ok
+test cuda::tests::gpu_dequant_bitwise_synthetic ... ok
+test cuda::tests::gpu_dequant_rejects_bad_requests ... ok
+test cuda::tests::gpu_hopper_tma_wgmma ... ok
+test cuda::tests::gpu_info_is_sane ... ok
+test cuda::tests::gpu_kernel_cache_hit_miss_corrupt ... ok
+test cuda::tests::gpu_launch_checks_owner_and_drop_unbinds ... ok
+test cuda::tests::gpu_only_loadable_code_is_cached ... ok
+test cuda::tests::gpu_open_errors_are_graceful ... ok
+test cuda::tests::gpu_pdl_gating ... ok
+test cuda::tests::gpu_target_choice ... ok
+test cuda::tests::h2d_bandwidth ... ignored
+test cuda::tests::h2d_bench ... ignored, benchmark: cargo test --release h2d_bench -- --ignored --nocapture
+test cuda::tests::gpu_dequant_bitwise_every_tensor ... ok
+test cuda::qwen2::tests::twin::gpu_twin_epilogues_match_cpu ... ok
+test cuda::tests::ring_upload_matches_write_at ... ok
+test generate::tests::argmax_matches_max_by_including_ties ... ok
+test generate::tests::argmax_multiversion_identical ... ok
+test generate::tests::argmax_speed ... ignored, timing, run with --ignored --nocapture
+test generate::tests::best_matches_argmax ... ok
+test generate::tests::generate_refuses_drafting_when_decode_streams ... ok
+test generate::tests::generate_uses_the_lm_seam ... ok
+test cuda::tests::gpu_buffers_round_trip ... ok
+test hybrid::tests::all_gpu_layers_is_the_cuda_backend ... ok
+test hybrid::tests::hybrid_auto_split_q8_fits_more_layers ... ok
+test hybrid::tests::hybrid_bad_drafter_output_unchanged ... ok
+test hybrid::tests::hybrid_ends_are_the_backends_bits ... ok
+test hybrid::tests::hybrid_auto_split_is_the_most_that_fit ... ok
+test hybrid::tests::hybrid_logits_match_cpu_0_5b ... ok
+test cuda::tests::nvrtc_kernels_compile_for_old_archs has been running for over 60 seconds
+test cuda::tests::nvrtc_kernels_compile_for_sm90a has been running for over 60 seconds
+test hybrid::tests::hybrid_logits_match_cpu_1_5b ... ok
+test hybrid::tests::hybrid_halves_own_their_weights has been running for over 60 seconds
+test hybrid::tests::hybrid_logits_match_cpu_llama ... ok
+test cuda::tests::nvrtc_kernels_compile_for_old_archs ... ok
+test hybrid::tests::hybrid_logits_match_cpu_qwen3 ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_1_5b ... ok
+test hybrid::tests::hybrid_halves_own_their_weights ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_0_5b has been running for over 60 seconds
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_0_5b ... ok
+test cuda::tests::nvrtc_kernels_compile_for_sm90a ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_q8_1_5b ... ok
+test hybrid::tests::hybrid_q8_all_on_gpu_is_the_q8_model ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_llama has been running for over 60 seconds
+test hybrid::tests::hybrid_q8_close_to_f16_0_5b ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_q8_0_5b has been running for over 60 seconds
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_qwen3 has been running for over 60 seconds
+test hybrid::tests::hybrid_q8_close_to_f16_1_5b ... ok
+test hybrid::tests::hybrid_real_model_sampling has been running for over 60 seconds
+test hybrid::tests::hybrid_real_model_sampling ... ok
+test hybrid::tests::hybrid_verify_cands_matches_forward_cands ... ok
+test hybrid::tests::hybrid_verify_matches_forward_argmax ... ok
+test hybrid::tests::hybrid_verify_matches_forward_argmax_q8 ... ok
+test hybrid::tests::placement_full_ctx_fits_whole_gpu ... ok
+test hybrid::tests::placement_long_enough_ctx_stays_on_gpu ... ok
+test hybrid::tests::placement_q8_changes_the_decision ... ok
+test hybrid::tests::placement_split_counts_streaming ... ok
+test hybrid::tests::placement_stream_changes_the_decision ... ok
+test hybrid::tests::placement_tiny_ctx_splits_at_full_ctx ... ok
+test hybrid::tests::placement_weights_dont_fit_splits ... ok
+test hybrid::tests::stream_logits_match_cpu_0_5b ... ok
+test hybrid::tests::stream_logits_match_cpu_1_5b ... ok
+test hybrid::tests::stream_logits_match_cpu_llama ... ok
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_qwen3 ... ok
+test hybrid::tests::stream_prefill_is_gpu_bits_0_5b ... ok
+test hybrid::tests::stream_logits_match_cpu_qwen3 has been running for over 60 seconds
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_q8_0_5b ... ok
+test hybrid::tests::stream_prefill_is_gpu_bits_llama ... ok
+test hybrid::tests::stream_prefill_is_gpu_bits_1_5b has been running for over 60 seconds
+test hybrid::tests::hybrid_prefill_batchings_bit_identical_llama ... ok
+test hybrid::tests::stream_q8_prefill_bits_0_5b ... ok
+test hybrid::tests::stream_q8_prefill_bits_1_5b ... ok
+test hybrid::tests::stream_verify_matches_forward_argmax ... ok
+test kv::tests::half_store_matches_scalar ... ok
+test kv::tests::kvbuf_aligned_zeroed ... ok
+test lm::paged_place_tests::paged_placement_14b ... ok
+test lm::paged_place_tests::paged_placement_all_gpu_kept ... ok
+test lm::paged_place_tests::paged_placement_matches_main_with_ctx ... ok
+test lm::paged_place_tests::paged_placement_squeezed_splits_rather_than_shrinks ... ok
+test model::deepseek2_tests::deepseek2_batch_matches_decode_bits ... ok
+test model::deepseek2_tests::deepseek2_cache_is_k_only ... ok
+test model::deepseek2_tests::deepseek2_check_supported ... ok
+test model::deepseek2_tests::deepseek2_fixture_vocab_is_whole ... ok
+test model::deepseek2_tests::deepseek2_long_batch_matches_decode_bits ... ok
+test model::deepseek2_tests::deepseek2_matches_expanded_reference ... ok
+test model::deepseek2_tests::deepseek2_moonlight_bits ... ok
+test model::deepseek2_tests::deepseek2_router_rule ... ok
+test model::deepseek2_tests::deepseek2_write_fixture ... ignored, writes a file; run with AXON_DS2_FIXTURE_OUT=path
+test model::deepseek2_tests::deepseek3_tokenizer_matches_hf ... ok
+test model::deepseek2_tests::kimi_tokenizer_matches_hf ... ok
+test model::gemma3_tests::gemma3_matches_reference_forward ... ok
+test model::gemma3_tests::gemma3_ref_probe ... ignored
+test model::gptoss_tests::check_supported_gpt_oss ... ok
+test model::gptoss_tests::gpt_oss_decode_batch_verify_bits ... ok
+test model::gptoss_tests::gpt_oss_matches_reference_forward ... ok
+test model::gptoss_tests::gpt_oss_model_bits ... ok
+test model::moe::tests::chunk_dividing_divides ... ok
+test model::moe::tests::ram_keep_counts_the_kept_layers ... ok
+test model::moe::tests::ram_need_counts_the_arena_only_when_repacking ... ok
+test model::moe::tests::ram_refusal_names_the_bound ... ok
+test model::moe_tests::check_supported_qwen3moe ... ok
+test model::moe_tests::moe_feed_batch_matches_feed_fixture ... ok
+test model::moe_tests::moe_feed_batch_matches_feed_pruned ... ok
+test model::moe_tests::moe_feed_batch_matches_feed_small ... ok
+test model::moe_tests::moe_info_counts ... ok
+test model::moe_tests::moe_layout ... ok
+test model::moe_tests::moe_matches_reference_forward ... ok
+test model::moe_tests::moe_repack_logit_deltas ... ok
+test model::moe_tests::moe_verify_matches_forward_pruned ... ok
+test model::moe_tests::moe_verify_matches_forward_small ... ok
+test model::moe_tests::route_top_k_ties_and_renorm ... ok
+test model::ram_dense_tests::affinity_cpus_counts_the_mask ... ok
+test model::ram_dense_tests::copied_load_commits_what_every_schedule_holds ... ok
+test model::ram_dense_tests::copy_estimate_independent_of_threads ... ok
+test hybrid::tests::stream_prefill_is_gpu_bits_qwen3 has been running for over 60 seconds
+test model::ram_dense_tests::dense_arena_matches_the_built_arena ... ok
+test model::ram_dense_tests::dense_need_and_refusal_wording ... ok
+test model::ram_dense_tests::dense_need_head_and_growth ... ok
+test model::ram_dense_tests::long_ctx_warns_not_refuses ... ok
+test hybrid::tests::stream_prefill_is_gpu_bits_qwen3 ... ok
+test model::tests::check_supported_accepts_tiny_model ... ok
+test model::tests::check_supported_llama ... ok
+test model::tests::check_supported_qwen3 ... ok
+test model::tests::check_supported_rejects_bad_models ... ok
+test model::tests::dot_group_matches_dot ... ok
+test model::tests::attend_matches_per_head ... ok
+test model::tests::feed_batch_matches_feed_fixture ... ok
+test model::tests::feed_batch_matches_feed ... ok
+test model::tests::feed_batch_matches_feed_llama ... ok
+test model::tests::llama_load_paths_agree ... ok
+test model::tests::llama_matches_reference_forward ... ok
+test hybrid::tests::stream_logits_match_cpu_qwen3 ... ok
+test model::tests::multiversion_bit_identical ... ok
+test model::tests::path_hashes ... ok
+test model::tests::qwen3_matches_reference_forward ... ok
+test model::tests::reads_in_place_when_a_matrix_isnt_repacked ... ok
+test model::tests::matches_ollama ... ok
+test model::tests::repack_logit_deltas ... ok
+test model::tests::release_keeps_embedding_on_copy_and_mmap ... ok
+test model::tests::tied_full_precision_embedding_runs ... ok
+test model::tests::unfused_attention_paths ... ok
+test model::tests::vsum_matches_per_head ... ok
+test model::tests::yarn_matches_reference_forward ... ok
+test model::tests::repack_rows_match_exact_on_model ... ok
+test hybrid::tests::stream_prefill_is_gpu_bits_1_5b ... ok
+test moe::oss_tests::oss_gpu_contract_model ... ok
+test moe::oss_tests::oss_gpu_logits_graded_model ... ok
+test moe::oss_tests::oss_gpu_matches_cpu_fixture ... ok
+test moe::oss_tests::oss_gpu_route_matches_cpu_twin ... ok
+test moe::oss_tests::oss_topk_batch_invariant_and_ties ... ok
+test moe::tests::backend_places_moe ... ok
+test moe::tests::moe_gpu_feed_batch_matches_feed_pruned ... ok
+test moe::tests::moe_gpu_feed_batch_matches_feed_small ... ok
+test moe::tests::moe_gpu_logits_graded_pruned ... ok
+test moe::tests::moe_gpu_logits_graded_small ... ok
+test moe::tests::moe_gpu_paged_and_graph_generation ... ok
+test moe::tests::moe_gpu_route_matches_cpu_twin_pruned ... ok
+test moe::tests::moe_gpu_route_matches_cpu_twin_small ... ok
+test moe::tests::moe_gpu_step_refuses_head_no ... ok
+test moe::tests::moe_gpu_verify_matches_forward_pruned ... ok
+test moe::tests::moe_gpu_verify_matches_forward_small ... ok
+test moe::tests::moe_route_batch_invariant_and_ties ... ok
+test moe::tests::transpose_tiled_transposes ... ok
+test tests::kv_f32_after_f16_is_an_error ... ok
+test moe::oss_tests::backend_places_gpt_oss ... ok
+test moe::oss_tests::oss_gpu_contract_fixture ... ok
+test model::tests::feed_batch_matches_feed_qwen3 ... ok
+
+failures:
+
+---- chat::tests::long_turn_matches_fresh_prefill_cuda stdout ----
+turn 0: 1532 tokens fed from 0 in [0..1152, 1152..1532]
+
+thread 'chat::tests::long_turn_matches_fresh_prefill_cuda' (15394) panicked at src/chat.rs:1973:17:
+assertion `left != right` failed: turn 0: the old prefill_batch cut
+  left: [0..1152, 1152..1532]
+ right: [0..1152, 1152..1532]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    chat::tests::long_turn_matches_fresh_prefill_cuda
+
+test result: FAILED. 207 passed; 1 failed; 12 ignored; 0 measured; 552 filtered out; finished in 1190.96s
+
+[axon-node 06:45:13] exit 101 after 1191.2s
+[axon-node 06:45:13] peak RSS 5398 MB (job process tree PSS, 2 s samples x577)
+[axon-node 06:45:13] failures not retried (not all shared-GPU sensitive / OOM): chat::tests::long_turn_matches_fresh_prefill_cuda
+[axon-run 02:45:15] exit 101 after 1209.6s (host pod1)
