@@ -1,0 +1,29 @@
+{
+ "label": "moeresd-board-r3",
+ "verdict": "ALL PASS; TAINTED timing",
+ "jobs": [
+  {
+   "job": "1026-205041-3204",
+   "name": "moeresd-8508a75-board-r3",
+   "rc": 0,
+   "verdict": "PASS TAINTED (FOREIGN_GPU max=58% mean=14.6%)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "8508a75",
+   "binary": "benchd2.sh",
+   "started": 1793062361.0364363,
+   "ended": 1793063270.3610258,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": "FOREIGN_GPU max=58% mean=14.6%",
+   "redactions": {},
+   "log_sha256": "879d773a2db9d585591e8232a619c2c560c8b895051d8fbcdc00ad0545b59e00",
+   "log_bytes": 20291
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-26 21:07:53 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
