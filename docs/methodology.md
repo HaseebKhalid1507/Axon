@@ -58,10 +58,11 @@ benchmark ──▶ pick ──▶ design ──▶ build ──▶ critic revie
    no measured cell beyond the pre-registered noise bar (2 % unless the PR set another). Such code can
    merge default-on with the miss written into the PR, the log and the roadmap, and the line closes
    (no follow-ups without a fresh pick). So a missed kill rule lowers the bar to step 7's, not to
-   nothing. Code that regresses any cell past the noise bar is still rejected (M6, #148: ×0.725–×0.965
-   against a 2 % bar). A change that wins some measured cells and loses others lands opt-in (#131 (c)),
-   or default-on only where it wins, with its dispatch restricted to those cells. Work built after the
-   rule said stop does not count as "already built": it is a foreman override. Two corollaries from the
+   nothing. Code whose default path regresses any cell past the noise bar does not merge default-on, and
+   code that wins no cell is rejected (M6, #148: ×0.725–×0.965 against a 2 % bar). A change that wins
+   some measured cells and loses others lands opt-in (#131 (c)), or default-on only where it wins, with
+   its dispatch restricted to those cells. Work built after the rule said stop does not count as
+   "already built": it is a foreman override, recorded in the PR body and `docs/log/`. Two corollaries from the
    same case: gate a rule on the term the change touches (the decode step), not on an aggregate
    dominated by another term (the mix C = 128 cell was prefill-bound); and booking hardware past a
    missed proxy gate is an override the foreman owns and records in the PR body and `docs/log/`
