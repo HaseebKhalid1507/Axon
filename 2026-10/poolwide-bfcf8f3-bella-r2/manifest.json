@@ -1,0 +1,29 @@
+{
+ "label": "poolwide-bfcf8f3-bella-r2",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1027-150636-7719",
+   "name": "poolwide-bfcf8f3-bella-r2",
+   "rc": 103,
+   "verdict": "FAIL (rc 103 expected output missing: /cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo \\.\\.\\. ok/)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "bfcf8f3",
+   "binary": "axon-test-bfcf8f3",
+   "started": 1793128156.271313,
+   "ended": 1793128311.8898659,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "f3a6e9658318da6add7a2db8c1ed433182fa0fdff21f7188c2df599c24a44ccb",
+   "log_bytes": 1611
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-27 15:11:52 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
