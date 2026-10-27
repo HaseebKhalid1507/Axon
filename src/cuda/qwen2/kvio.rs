@@ -418,6 +418,36 @@ mod tests {
             });
             report(&format!("H2D 2D per {page}-pos page"), s);
         }
+        // The RAM tier's costs (serve --cache-ram): a pinned slab's
+        // allocation (cuMemHostAlloc + zeroing), and one page's D2H / H2D
+        // alone (the write-behind's unit), each a median of n.
+        for mib in [64usize, 256] {
+            let t = time(&g, n, || drop(g.host_alloc(mib << 20).unwrap()));
+            eprintln!(
+                "BW host_alloc {mib:>4} MiB (+ free)          {:8.2} ms",
+                t * 1e3
+            );
+        }
+        let page = 64 * row * arrays;
+        let s = time(&g, 31, || {
+            host.copy_2d_from(0, 64 * row, &dev, 0, ctx * row, (64 * row, arrays))
+                .unwrap()
+        });
+        eprintln!(
+            "BW D2H one 64-pos page ({:.2} MiB)       {:8.3} ms {:7.2} GB/s",
+            page as f64 / (1u64 << 20) as f64,
+            s * 1e3,
+            page as f64 / s / 1e9
+        );
+        let s = time(&g, 31, || {
+            host.copy_2d_to(0, 64 * row, &dev, 0, ctx * row, (64 * row, arrays))
+                .unwrap()
+        });
+        eprintln!(
+            "BW H2D one 64-pos page                  {:8.3} ms {:7.2} GB/s",
+            s * 1e3,
+            page as f64 / s / 1e9
+        );
         // The file path's staging, to and from RAM (pre-touched: no page
         // faults) and, with AXON_BW_FILE, a file.
         let mut img = vec![1u8; bytes];

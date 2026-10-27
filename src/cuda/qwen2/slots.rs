@@ -2736,8 +2736,8 @@ mod tests {
     /// ordered before), the pages copied into another slot (other physical
     /// pages) and the rest of the prompt fed there: that slot's KV bytes and
     /// greedy tokens == the request run alone, uninterrupted. f16 and q8;
-    /// plain, paged and shuffled pools; qwen2.5, qwen3 and gemma3 (its
-    /// sliding-window layers keep every position too).
+    /// plain, paged and shuffled pools; qwen2.5, qwen3 and gemma3 (f16: it
+    /// has no q8 GPU cache; its sliding-window layers keep every position).
     #[test]
     fn pool_pages_restore_exactly() {
         let Some(g) = crate::testutil::gpu() else {
@@ -2753,7 +2753,15 @@ mod tests {
         for m in ms {
             for kv in [CacheKv::F16, CacheKv::Q8 { group: 0 }] {
                 let ctx = 320;
-                let net = CudaQwen2::with_kv(&g, &km, &m, ctx, kv, false).unwrap();
+                let net = match CudaQwen2::with_kv(&g, &km, &m, ctx, kv, false) {
+                    Ok(n) => n,
+                    // gemma3 has no q8 cache on the GPU (refused at load).
+                    Err(e) if m.arch == "gemma3" && kv != CacheKv::F16 => {
+                        assert!(e.contains("no q8 KV cache"), "{e}");
+                        continue;
+                    }
+                    Err(e) => panic!("{} {kv:?}: {e}", m.arch),
+                };
                 let v = net.vocab;
                 // 3 whole pages and 11 positions below the last token.
                 let prompt = ids(3 * PAGE + 12, 77, v);
