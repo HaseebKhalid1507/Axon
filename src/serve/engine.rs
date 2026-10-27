@@ -721,7 +721,11 @@ impl<'a, 't> Batch<'a, 't> {
     /// `--cache-ram 0`.
     fn tier_failed(&mut self, e: &str) {
         eprintln!("axon serve: --cache-ram: {e}; the KV RAM tier is off from here");
+        // Dropped first: its arena is freed, then /metrics says so.
         self.tier = None;
+        if let Some(m) = &self.metrics {
+            m.kv_ram_off();
+        }
     }
 
     /// The tier's write-behind: `bytes` of copies of the slots' unstored

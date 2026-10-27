@@ -795,6 +795,7 @@ impl<'a> Engine<'a> {
         {
             eprintln!("axon serve: --cache-ram: {e}; off from here");
             self.tier = None;
+            self.metrics.kv_ram_off();
         }
         self.publish_free();
         r
@@ -849,6 +850,7 @@ impl<'a> Engine<'a> {
                     // The cache's rows past `reuse` are unknown now: forget them.
                     eprintln!("axon serve: --cache-ram: {e}; off from here");
                     self.tier = None;
+                    self.metrics.kv_ram_off();
                 }
             }
         }

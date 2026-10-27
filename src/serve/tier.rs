@@ -619,6 +619,9 @@ impl PoolTier {
         let mut res = Ok(());
         for (i, &(_, a)) in pages.iter().enumerate().take(to).skip(from) {
             let (buf, at) = self.arena.at(a);
+            // The whole page goes back, rows below `have` too (the same
+            // bytes): #164's copy-on-write precondition, page `i` must be
+            // this slot's alone (a shared partial page is copied first).
             res = net.page_in(pool, s, i, buf, at);
             if res.is_err() {
                 break;

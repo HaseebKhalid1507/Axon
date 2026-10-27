@@ -260,6 +260,21 @@ pub struct Metrics {
     pub kv_ram_pinned: AtomicU64,
 }
 
+impl Metrics {
+    /// The KV RAM tier turned off (an error): its gauges go to 0 (nothing
+    /// is stored or pinned any more), its counters stay.
+    pub fn kv_ram_off(&self) {
+        for g in [
+            &self.kv_ram_cap,
+            &self.kv_ram_bytes,
+            &self.kv_ram_pages,
+            &self.kv_ram_pinned,
+        ] {
+            g.store(0, Ordering::Relaxed);
+        }
+    }
+}
+
 impl Default for Metrics {
     fn default() -> Metrics {
         Metrics {
@@ -436,7 +451,11 @@ impl Metrics {
             "gpt-oss tool calls begun but not finished as a JSON object (returned as reasoning).",
             self.tool_calls_dropped.load(Ordering::Relaxed),
         );
-        if self.kv_ram_cap.load(Ordering::Relaxed) > 0 {
+        // The tier's lines: while it's on, and after it turned off (its
+        // gauges 0, its counters kept).
+        if self.kv_ram_cap.load(Ordering::Relaxed) > 0
+            || self.kv_ram_written.load(Ordering::Relaxed) > 0
+        {
             let g = |o: &mut String, name: &str, help: &str, v: &AtomicU64| {
                 let v = v.load(Ordering::Relaxed);
                 let _ = writeln!(o, "# HELP {name} {help}\n# TYPE {name} gauge\n{name} {v}");
