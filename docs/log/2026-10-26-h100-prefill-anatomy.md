@@ -53,7 +53,19 @@ other cells are reported.
   skips arm-rounds rather than overrun.
 - `axon-pods up h100 --models sd --hours 0.6`: the dead-man ends it at 36 min, ≤ $2.39 at $3.99/h.
 - Cap $2.50. ESTIMATED ≈ 20 min paid, ≈ $1.35: anatomy ~2 min, 12 arm-rounds × ~70 s, ~3 min of pod setup.
-- Bella rehearsal (2 arms × 2 rounds, timeouts ×3): job 1026-232230-4945.
+- Bella rehearsal (2 arms × 2 rounds, timeouts ×3): job 1026-232230-4945, rc 0.
+  - Every stage ran; BITS held on 768 of 768 requests.
+  - The grid predicted the traced feed time to 1.00× (141.4 vs 141.9 s).
+  - Projected to the H100 (bella's C=128 cells are ~3.3× the H100's 38 s): ≈ 14–15 min of stages, inside the 24-min
+    budget and `--max-min 28`.
+- **Fixed after the rehearsal (ff6f1c3):**
+  - The harness classed the Q4_K / Q6_K v and down products (segments `v4`, `v6`, `down4`, `down6`) as "other". That
+    made the weighted GEMM share 46 % instead of 78 %, and gave the wrong branch of the rule. Every segment is now
+    mapped explicitly: an unknown one panics in the test and stops `anat.py`, which recomputes the classes itself.
+  - Wall, graph replay and enqueue were timed in separate blocks, and drift landed on wall − graph (−14 to +12 %);
+    they are now timed in turn every repetition. Checked on bella: 1027-014519-e6bd, 40 grid rows; launch + gaps
+    0–2 % at most points (13 % at one).
+  - The grid now goes to n = 1024: H100 passes are ~470 tokens at p50 under 60 ms, more at 80.
 
 ## Results
 Pending (the session is not booked).
