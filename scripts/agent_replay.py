@@ -698,6 +698,7 @@ def _start_engine(kind, a, kv, port, logdir, axon_tokens):
         raise RuntimeError(f'{kind}: tokenization check failed: {n} filler words -> {got} prompt tokens '
                            f'({r.get("error")}); log {log}')
     cfg += f'; tokenization check {n} words = {got} tokens'
+    print(f'{kind} ready: {cfg}', flush=True)
     record_engine(logdir, proc, kind, port, 'ready')
     return proc, eng, tokens, cfg
 
