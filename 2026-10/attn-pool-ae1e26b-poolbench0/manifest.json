@@ -1,0 +1,29 @@
+{
+ "label": "attn-pool-ae1e26b-poolbench0",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1026-211017-82d0",
+   "name": "attn-pool-ae1e26b-poolbench0",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "avante",
+   "hw": "hw-avante.txt",
+   "gpu": "NVIDIA GeForce RTX 4050 Laptop GPU",
+   "driver": "610.43.02",
+   "sha": "ae1e26b",
+   "binary": "axon-test-bench0",
+   "started": 1793063525.803872,
+   "ended": 1793063536.984752,
+   "attempts": 1,
+   "remote_job": "20261026-211209-axon-test-bench0-4064400",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "ce99227a20f4e9de9f76eb0cd3f6b7f04d56f124c8a13a76aa57f1ffb5551d30",
+   "log_bytes": 3232
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-26 21:12:17 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
