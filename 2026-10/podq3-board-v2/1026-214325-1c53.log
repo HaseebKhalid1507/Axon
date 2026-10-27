@@ -1,0 +1,53 @@
+[axon-run 21:43:25] submitted 1026-214325-1c53 by /home/haseeb/.cache/axon-wt-podq3: /home/haseeb/.cache/axon-podq3/axon-test-podq3-v2 podbench::podbench_run --nocapture --test-threads 1
+[axon-run 21:45:28] job 1026-214325-1c53 -> pod1 (pod u3es1hdd3mvnuk): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 22000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-wt-podq3 /home/haseeb/.cache/axon-podq3/axon-test-podq3-v2 podbench::podbench_run --nocapture --test-threads 1
+axon-remote: uploading axon-test-podq3-v2 (9fda097e48acb784e25959a7) + source of /home/haseeb/.cache/axon-wt-podq3 (delta vs 2 earlier upload(s) there)
+
+sent 15,183 bytes  received 186 bytes  10,246.00 bytes/sec
+total size is 92,552,684  speedup is 6,022.04
+
+sent 5,596,622 bytes  received 28,530 bytes  2,250,060.80 bytes/sec
+total size is 22,528,824  speedup is 4.01
+axon-remote: job 20261027-014533-axon-test-podq3-v2-7445 on pod1 (GPU, 22000 MB)
+[axon-node 01:45:33] GPU EXCLUSIVE taken; job wants 22000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 01:45:33] run axon-test-podq3-v2 (9fda097e48acb784e25959a7) as /home/haseeb/.cache/axon-wt-podq3 on 48f0f249786a, AXON_THREADS=8 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+
+running 1 test
+test podbench::podbench_run ... podbench carrier v2 (llama-bench preflight; rc != 0 fails)
+PB out /home/haseeb/.cache/axon-wt-podq3/podbench/out-1027-014533
+PB host 48f0f249786a NVIDIA GeForce RTX 4090, 595.91.07, 24564 MiB, 450.00 W, 3105 MHz
+PB cpu AMD EPYC 75F3 32-Core Processor nproc 128 mem 503 GB, avail 418 GB
+PB disk overlay          50G   25G   26G  49% /
+PB threads axon AXON_THREADS=16 llama -t 16; axon sha256 04fae35ff4efd97f; llama-bench /home/haseeb/.cache/axon-wt-podq3/podbench/llama-bench-4413a19-sm89
+PB missing: 	libcudart.so.12 => not found
+PB missing: 	libcublas.so.12 => not found
+PB missing: 	libnccl.so.2 => not found
+PB lib: total 849272
+PB lib: drwxr-xr-x 2 root   root         120 Oct 27 01:45 .
+PB lib: drwxr-xr-x 6 ubuntu ubuntu       167 Oct 27 01:45 ..
+PB lib: -rw-r--r-- 1 root   root   116388640 Oct 27 01:45 libcublas.so.12
+PB lib: -rw-r--r-- 1 root   root   751771728 Oct 27 01:45 libcublasLt.so.12
+PB lib: -rw-r--r-- 1 root   root      728800 Oct 27 01:45 libcudart.so.12
+PB lib: -rw-r--r-- 1 root   root      753824 Oct 27 01:45 libnvblas.so.12
+PB ldd: 	libcudart.so.12 => /home/haseeb/.cache/axon-wt-podq3/podbench/lib/libcudart.so.12 (0x00007ad3d4a00000)
+PB ldd: 	libcublas.so.12 => /home/haseeb/.cache/axon-wt-podq3/podbench/lib/libcublas.so.12 (0x00007ad3cd800000)
+PB ldd: 	libnccl.so.2 => not found
+PB ldd: 	libcublasLt.so.12 => /home/haseeb/.cache/axon-wt-podq3/podbench/lib/libcublasLt.so.12 (0x00007ad395800000)
+PB FAIL: llama-bench does not start (rc 127)
+/home/haseeb/.cache/axon-wt-podq3/podbench/llama-bench-4413a19-sm89: error while loading shared libraries: libnccl.so.2: cannot open shared object file: No such file or directory
+
+thread 'podbench::podbench_run' (7459) panicked at src/podbench.rs:18:5:
+podbench/run.sh: exit status: 1
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    podbench::podbench_run
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 760 filtered out; finished in 11.48s
+
+[axon-node 01:45:45] exit 101 after 11.5s
+[axon-node 01:45:45] peak RSS 911 MB (job process tree PSS, 2 s samples x5)
+[axon-run 21:45:45] exit 101 after 17.8s (host pod1)
+[axon-run 21:45:47] FOREIGN_GPU max=0% mean=0.0% samples=1
