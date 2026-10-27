@@ -1,0 +1,15 @@
+[axon-run 18:01:36] submitted 1026-180136-babf by /home/haseeb/.cache/axon-wt-h100narrow: /home/haseeb/.cache/axon-m6/axon-test-3cb97e4 cuda::qwen2::tests::gpu_products_match_reference_bits cuda::qwen2::tests::gpu_products_swiglu --test-threads 1
+[axon-run 18:03:11] job 1026-180136-babf -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 3500 --env AXON_NODE_PACK=1 --src /home/haseeb/.cache/axon-wt-h100narrow /home/haseeb/.cache/axon-m6/axon-test-3cb97e4 cuda::qwen2::tests::gpu_products_match_reference_bits cuda::qwen2::tests::gpu_products_swiglu --test-threads 1
+axon-remote: job 20261026-180312-axon-test-3cb97e4-3080596 on avante (GPU, 3500 MB)
+[axon-node 18:03:12] GPU slot taken; job wants 3500 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 47
+[axon-node 18:03:12] run axon-test-3cb97e4 (3da6ae1252d5947757a73bfc) as /home/haseeb/.cache/axon-wt-h100narrow on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 1 test
+test cuda::qwen2::tests::gpu_products_match_reference_bits ... testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 766 filtered out; finished in 83.82s
+
+[axon-node 18:04:36] exit 0 after 83.9s
+[axon-node 18:04:36] peak RSS 809 MB (job process tree PSS, 2 s samples x41)
+[axon-run 18:04:36] exit 0 after 85.5s (host avante)
