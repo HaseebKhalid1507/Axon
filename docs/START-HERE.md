@@ -6,7 +6,7 @@ main `a591e17` from the merged PRs (#33, #34, #35, #38, #42), and the table was 
 (2026-10-25) from the PRs merged since (listed in [history.md](history.md), Phases 17–20). Anything that isn't on
 main yet is marked **planned** or **in flight**.
 
-**North star (owner set 10-26): run Synaps on Axon**, many warm agent sessions and subagents on one box, then many
+**North star (owner, 10-26): run Synaps on Axon**, many warm agent sessions and subagents on one box, then many
 users: [roadmap](roadmap.md#mission-and-positioning), [design/agent-workload.md](design/agent-workload.md).
 
 How Axon is developed, what was tried (including what failed) and where it stands:
