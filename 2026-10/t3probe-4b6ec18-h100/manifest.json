@@ -1,0 +1,29 @@
+{
+ "label": "t3probe-4b6ec18-h100",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1026-213102-2581",
+   "name": "t3probe-4b6ec18-h100",
+   "rc": 101,
+   "verdict": "FAIL (rc 101)",
+   "host": "pod2",
+   "hw": "hw-pod2-10-26_21:44.txt",
+   "gpu": "NVIDIA H100 80GB HBM3",
+   "driver": "595.91.07",
+   "sha": "4b6ec18",
+   "binary": "axon-test-4b6ec18",
+   "started": 1793065465.7198403,
+   "ended": 1793065503.5592105,
+   "attempts": 1,
+   "remote_job": "20261027-014453-axon-test-4b6ec18-6217",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "a763e5abf4205c38b795018356da709c6c27c98c640fb371cd810e660f384e6f",
+   "log_bytes": 2519
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-26 21:45:07 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}

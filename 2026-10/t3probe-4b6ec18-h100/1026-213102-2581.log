@@ -1,0 +1,35 @@
+[axon-run 21:31:02] submitted 1026-213102-2581 by /home/haseeb/.cache/axon-t3-w4a8probe: /home/haseeb/.cache/axon-t3-w4a8probe/axon-test-4b6ec18 cuda::qwen2::tests::cuda_probe_w4a8_session --exact --ignored --nocapture --test-threads 1
+[axon-run 21:44:25] job 1026-213102-2581 -> pod2 (pod px619wk0up8usq): /home/haseeb/.local/bin/axon-remote --host pod2 --vram 6000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-wt-t3-w4a8probe /home/haseeb/.cache/axon-t3-w4a8probe/axon-test-4b6ec18 cuda::qwen2::tests::cuda_probe_w4a8_session --exact --ignored --nocapture --test-threads 1
+axon-remote: uploading axon-test-4b6ec18 (0eeee74f8bf3775e378e0c21) + source of /home/haseeb/.cache/axon-wt-t3-w4a8probe (delta vs 2 earlier upload(s) there)
+
+sent 11,576 bytes  received 55 bytes  2,114.73 bytes/sec
+total size is 7,199,782  speedup is 619.02
+
+sent 70 bytes  received 16 bytes  15.64 bytes/sec
+total size is 23,040,648  speedup is 267,914.51
+axon-remote: job 20261027-014453-axon-test-4b6ec18-6217 on pod2 (GPU, 6000 MB)
+[axon-node 01:44:53] GPU EXCLUSIVE taken; job wants 6000 MB; nvidia-smi used/total 0/81559 MB; sharing with nobody (slots 5, budget 80059 MB, vCPU 23.8)
+[axon-node 01:44:53] run axon-test-4b6ec18 (0eeee74f8bf3775e378e0c21) as /home/haseeb/.cache/axon-wt-t3-w4a8probe on 9fdae6705378, AXON_THREADS=8 RUST_TEST_THREADS=4; free 81081 MB of 81559 (used 0); GPU processes pid:MB none
+
+running 1 test
+test cuda::qwen2::tests::cuda_probe_w4a8_session ... testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+PROBE device NVIDIA H100 80GB HBM3 sm_90 132 SMs, hopper module true, probe module true
+PROBE PEAK wg_peak_rs_n64 2 WG/SM: median 954.8 TMAC/s raw (min 922.4 max 956.7)
+PROBE PEAK wg_peak_rs_n64 3 WG/SM: median 966.8 TMAC/s raw (min 957.9 max 967.5)
+
+thread 'cuda::qwen2::tests::cuda_probe_w4a8_session' (6229) panicked at src/cuda/qwen2/tests.rs:9797:18:
+called `Result::unwrap()` on an `Err` value: "cuStreamSynchronize: CUDA_ERROR_MISALIGNED_ADDRESS: misaligned address"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    cuda::qwen2::tests::cuda_probe_w4a8_session
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 770 filtered out; finished in 1.32s
+
+[axon-node 01:44:55] exit 101 after 1.4s
+[axon-node 01:44:55] peak RSS 0 MB (job process tree PSS, 2 s samples x0)
+[axon-run 21:45:01] exit 101 after 35.3s (host pod2)
+[axon-run 21:45:07] FOREIGN_GPU max=0% mean=0.0% samples=1
