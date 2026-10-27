@@ -1,8 +1,10 @@
 # Agent workload PR A: trace extractor, replay client, baseline board (2026-10-27)
 
 Spec: [design/agent-workload.md](../design/agent-workload.md) §1 and §6, row A. No engine changes. PR #160.
-**Status: board PENDING** (bella `--timing bella` jobs `1027-014629-7829` f16 and `1027-014630-9cb7` q8). This entry
-gets the board table and the §6 B/C verdict when they finish.
+**Status:**
+- **f16 board: done with gaps** (job `1027-014629-7829`, 15 of 18 runs; table below).
+- **Rule A verdict: B/C are NOT deprioritised.**
+- **q8 board: pending** (job `1027-081924-51c9`).
 
 ## What landed
 - **`scripts/agent_trace.py`**: Synaps logs → a numbers-only trace.
@@ -45,3 +47,104 @@ gets the board table and the §6 B/C verdict when they finish.
   C=1 decode within 2 %.
 - **Harness:** `agent_replay.py fanout --url … --model GGUF [--busy 4]`, 5 rounds of fresh text, medians. It runs when
   C benches, not in this PR's board.
+
+## Baseline board, f16 (MEASURED, bella RTX 5070 Ti Laptop 12 GB, driver 615.78; job `1027-014629-7829`)
+
+### Setup and gaps
+- **Model and cell:** Qwen2.5-7B-Instruct Q4_K_M, agent-32k. 174 requests, 20 sessions, prompt p50 17.2k tokens. Speed
+  1 is a 600 s window, speed 4 the same window in 150 s.
+- **Rounds:** interleaved axon → llama-server → ollama.
+- **KV budget:**
+  - Axon d8a296c's paged pool is 102,976 tokens (5.9 GB).
+  - llama-server 4413a19: `-c 98304 -np 3 -kvu --cache-reuse 256 -fa on`, `--cache-ram` 8192 MiB default,
+    `--cache-idle-slots` on.
+  - ollama 0.40.6: `NUM_PARALLEL=3`, `CONTEXT_LENGTH=32768`, FA on; 29/29 layers on the GPU.
+- **The job was killed by its own `--max-min 200` cap at 08:23 (rc 143), not by a failure.** Every completed run had
+  0 request errors. A full board takes ~220–240 min; `scripts/agent_board.sh` now says so and asks for
+  `--max-min ≥ 270`.
+- **What completed:**
+  - Axon: all 3 rounds × both speeds.
+  - llama-server: speed 1 all 3 rounds, speed 4 rounds 0–1 (**n = 2**).
+  - ollama: rounds 0–1 at both speeds (**n = 2**).
+- **Taint:** axon-run marked the whole job TAINTED (FOREIGN_GPU max 36 %, mean 1.1 %: kitty 23 %, Xorg 13 %). The
+  per-run labels below come from each run's own `nvidia-smi pmon` sample (TAINTED = mean > 5 % or max > 25 %). The
+  tainted runs fall inside the clean runs' ranges.
+
+**speed 1** (median of rounds; [min–max])
+
+| metric | axon f16 (n=3: r0,1,2) | llama f16 (n=3: r0,1,2) | ollama f16 (n=2: r0,1) |
+|---|---|---|---|
+| TTFT-new p50 s | 4.12 [4.05–4.28] | 5.99 [5.98–6.1] | 4.9 [4.89–4.91] |
+| TTFT-new p99 s | 8.65 [8.62–13.1] | 32.5 [29.3–33.1] | 10.3 [8.28–12.3] |
+| TTFT-resume p50 s | 0.276 [0.26–0.281] | 0.951 [0.905–1.03] | 1.03 [1.01–1.06] |
+| TTFT-resume p99 s | 15.2 [15.2–15.2] | 22.5 [22.3–24.2] | 16.5 [16.5–16.5] |
+| resume 30s-2m p50 | 0.224 [0.205–0.255] | 0.884 [0.877–1.01] | 0.86 [0.84–0.88] |
+| resume 2-10m p50 | 4.72 [4.7–4.72] | 10.9 [10.8–11.5] | 5.23 [5.18–5.28] |
+| resume >10m p50 | 7.08 [7.04–7.57] | 20.5 [20.4–20.6] | 7.06 [6.98–7.15] |
+| TTFT-turn p50 s | 0.122 [0.118–0.123] | 1.06 [0.749–1.07] | 0.439 [0.42–0.458] |
+| goodput tok/s | 17.4 [17.4–17.7] | 13 [12.6–13.3] | 9 [8.97–9.04] |
+| ITL p99 ms | 119 [119–122] | 611 [607–633] | 232 [228–235] |
+| warm/GB | 2.54 [2.37–2.54] | 0.887 [0.71–0.887] | 1.51 [1.42–1.6] |
+| re-prefill share | 0.103 [0.103–0.119] | 0.019 [0.0186–0.0194] | n/a |
+| output tok/s | 33 [33–33] | 32.4 [32.4–32.7] | 17.6 [17.5–17.7] |
+| wall s | 604 [604–604] | 616 [610–616] | 600 [600–600] |
+| errors | 0 [0–0] | 0 [0–0] | 0 [0–0] |
+| tainted runs | 1/3 (r0) | 1/3 (r0) | 1/2 (r1) |
+| reply md5 stable over rounds | yes | no (3) | no (2) |
+
+**speed 4** (median of rounds; [min–max])
+
+| metric | axon f16 (n=3: r0,1,2) | llama f16 (n=2: r0,1) | ollama f16 (n=2: r0,1) |
+|---|---|---|---|
+| TTFT-new p50 s | 30.1 [29.5–30.5] | 44.9 [44.6–45.3] | 7.9 [7.81–8] |
+| TTFT-new p99 s | 62.7 [56.4–63.5] | 217 [216–219] | 26 [25.8–26.2] |
+| TTFT-resume p50 s | 15.9 [15.5–25.1] | 12.1 [12.1–12.1] | 14.8 [13.8–15.7] |
+| TTFT-resume p99 s | 52.3 [42.9–52.7] | 191 [190–192] | 22.1 [21.7–22.4] |
+| resume 30s-2m p50 | 7.27 [6.94–25.1] | 12.1 [12.1–12.1] | 9.94 [9.77–10.1] |
+| resume 2-10m p50 | 15.5 [15.5–15.9] | 8.88 [8.86–8.9] | 14.8 [13.8–15.7] |
+| resume >10m p50 | n/a | n/a | n/a |
+| TTFT-turn p50 s | 17 [12.5–20.5] | 25.5 [25.5–25.5] | 3.43 [3.25–3.61] |
+| goodput tok/s | 5.49 [5.21–6.03] | 2.15 [2.12–2.18] | 5.97 [5.79–6.16] |
+| ITL p99 ms | 137 [137–140] | 2.29e+03 [2.27e+03–2.31e+03] | 359 [352–366] |
+| warm/GB | 0.677 [0.677–0.678] | 0.266 [0.177–0.355] | 0.266 [0.177–0.355] |
+| re-prefill share | 0.475 [0.443–0.477] | 0.344 [0.344–0.345] | n/a |
+| output tok/s | 33.4 [33.1–35.1] | 13.7 [13.4–14] | 47 [46.5–47.4] |
+| wall s | 597 [568–601] | 1.45e+03 [1.43e+03–1.48e+03] | 224 [223–226] |
+| errors | 0 [0–0] | 0 [0–0] | 0 [0–0] |
+| tainted runs | 0/3 | 1/2 (r0) | 0/2 |
+| reply md5 stable over rounds | yes | no (2) | no (2) |
+
+### Reading the table
+- **ollama stops early.** It ended ~40 % of replies before `max_tokens` (`out_tokens_short` 69–72 of 174; EOS on
+  filler; Axon and llama-server: 0). Its output tok/s, goodput and speed-4 wall time are therefore not comparable to
+  the other two.
+- **Reply md5 is stable across rounds only on Axon.** llama-server and ollama vary run to run at temperature 0.
+- **Speed 4 overloads every engine.** The 150-s window takes 568–601 s on Axon, 1,427–1,482 s on llama-server and
+  ~224 s on ollama (shorter replies). That cell measures queueing.
+- **Axon's output rate is the same ~33 tok/s at speed 1 and speed 4,** with 47 % re-prefill at speed 4: prefill, not
+  decode, is the bound there. (Observation, not part of rule A.)
+- **llama-server re-prefills 1.9 % at speed 1 against Axon's 10.3 %.** Its default host-RAM prompt cache
+  (`--cache-ram` / `--cache-idle-slots`) restores idle prefixes, which is what B would add to Axon. Axon still has the
+  lower TTFT-resume and TTFT-turn at speed 1.
+
+## Rule A (§6 row A) on Axon main: B/C are NOT deprioritised
+The rule: if TTFT-resume p50 ≤ 1.0 s **and** re-prefill < 10 % of prompt tokens, B/C drop below item 3.
+
+| Axon main, f16 | TTFT-resume p50 | re-prefill share | rule |
+|---|---|---|---|
+| speed 1 (n = 3) | 0.276 s [0.260–0.281] ✓ | **10.3 % [10.3–11.9 %]** ✗ (every round > 10 %) | fails |
+| speed 4 (n = 3) | **15.9 s [15.5–25.1]** ✗ | **47.5 % [44.3–47.7 %]** ✗ | fails |
+
+- **Verdict:** both clauses must hold, so B/C stay where they are.
+  - At speed 4 the rule fails on both clauses by far.
+  - At speed 1 it fails on re-prefill by a narrow margin: 0.3 pp at the median, and the lowest round is 10.31 %.
+- **Robust to the killed runs:** the rule reads only Axon main, which has all 3 rounds at both speeds.
+- **The second rule (C becomes dedupe-only if the shared prefix < 2k):** a new subagent's shared prefix is p50 6,006
+  tokens, so C stays a cross-session index.
+
+## Does the f16 board need a rerun?
+**Recommendation: no full rerun for A.** Ship A with the baseline cells labelled n = 2 where they are.
+- The B/C verdict depends only on Axon's n = 3 cells.
+- The n = 2 baseline cells are context, not gates.
+- Rerun f16 (≈ 4 h of exclusive bella) only if a later B/C gate compares against a baseline cell.
+- The q8 board (`1027-081924-51c9`, `--max-min 270`) should give n = 3 everywhere for q8.

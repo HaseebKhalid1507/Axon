@@ -4,6 +4,8 @@
     agent_replay.py run   --url http://127.0.0.1:PORT --model GGUF --trace FILE [cell options] --out FILE.json
     agent_replay.py board --engines axon,llama,ollama --kv f16 --model GGUF --rounds 3 --speeds 1,4
                           --axon BIN --llama-server BIN [--ollama-model NAME] --trace FILE --out DIR
+                          (bella, 7B, 3 rounds x speeds 1,4 x 3 engines: ~220-240 min MEASURED; --max-min >= 270;
+                          scripts/agent_board.sh wraps it)
     agent_replay.py fanout --url URL --model GGUF [--busy 4] --out FILE.json   (row C's fan-out cell)
     agent_replay.py table DIR...       (markdown board from board result dirs)
 
@@ -823,7 +825,8 @@ METRICS = [('TTFT-new p50 s', 'ttft_new_p50'), ('TTFT-new p99 s', 'ttft_new_p99'
            ('resume 30s-2m p50', 'ttft_resume_30s-2m_p50'), ('resume 2-10m p50', 'ttft_resume_2-10m_p50'),
            ('resume >10m p50', 'ttft_resume_>10m_p50'),
            ('TTFT-turn p50 s', 'ttft_turn_p50'), ('goodput tok/s', 'goodput_tok_s'), ('ITL p99 ms', 'itl_p99_ms'),
-           ('warm/GB', 'warm_per_gb'), ('re-prefill share', 'reprefill_share'), ('errors', 'errors'),
+           ('warm/GB', 'warm_per_gb'), ('re-prefill share', 'reprefill_share'), ('output tok/s', 'output_tok_s'),
+           ('wall s', 'wall_s'), ('errors', 'errors'),
            ('tainted runs', 'tainted')]
 
 
@@ -840,14 +843,18 @@ def table(dirs):
     for sp in sorted({k[0] for k in groups}):
         cols = sorted([k for k in groups if k[0] == sp], key=lambda k: (k[1], ['axon', 'llama', 'ollama'].index(k[2])))
         lines.append(f'\n**speed {sp:g}** (median of rounds; [min–max])\n')
-        lines.append('| metric | ' + ' | '.join(f'{k[2]} {k[1]} (n={len(groups[k])})' for k in cols) + ' |')
+        lines.append('| metric | ' + ' | '.join(
+            f"{k[2]} {k[1]} (n={len(groups[k])}: r{','.join(str(r['round']) for r in sorted(groups[k], key=lambda r: r['round']))})"
+            for k in cols) + ' |')
         lines.append('|---|' + '---|' * len(cols))
         for name, key in METRICS:
             row = []
             for k in cols:
                 v = [r.get(key) for r in groups[k]]
                 if key == 'tainted':
-                    row.append(str(sum(1 for x in v if x)))
+                    rs = sorted(groups[k], key=lambda r: r['round'])
+                    bad = [f"r{r['round']}" for r in rs if r.get('tainted')]
+                    row.append(f"{len(bad)}/{len(rs)}" + (f" ({', '.join(bad)})" if bad else ''))
                     continue
                 v = [x for x in v if x is not None]
                 if not v:
