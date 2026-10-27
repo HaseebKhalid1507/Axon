@@ -51,6 +51,11 @@ Timing (MEASURED, RTX 4090 pod, CLEAN, 3 interleaved rounds; candidate 19931aa v
 | | pp512 | 9,746 | 9,728 | ×1.002 | 11,696 | ×0.83 |
 | | pp2100 | 7,486 | 7,473 | ×1.002 | 12,220 | ×0.61 |
 
+Merge re-gate at d99e400 (code a016e0c = 19931aa + main 0c23a87), MEASURED, bella, all rc 0
+([gate logs](https://github.com/HaseebKhalid1507/Axon/tree/5c7bb3917328aeb500027db7ab14798d1b589e80/2026-10/t2b-d99e400-subset)):
+- `cuda:: kv pool:: moe::` + Moonlight: release 1027-023104-dddc and debug 1027-023104-465b, both 249/0/39.
+- md5 vs main 0c23a87, 1027-023052-3dbb: cpu 99/99, cuda 117/117, cuda `--kv q8` 117/117 identical.
+
 ## Verdict
 - **Kill rule MISSED:** 241.6 < 252.5. The no-regression half passes (Moonlight ×1.002–1.004; dense kernels untouched, md5
   identical).
