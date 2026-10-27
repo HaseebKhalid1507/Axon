@@ -2,9 +2,27 @@
 
 - Date: 2026-10-26. Branch: docs/moe-resident-bench (docs only). Track: roadmap item 3, r16 pick-4 spec PR D.
 - Code under test: main `39624db` (`--gpu-experts`, PRs #120 / #122 / #127). Board:
-  [benchmarks-gpu.md](../benchmarks-gpu.md#mixture-of-experts-moonlight-16b-a3b-resident-experts-vs-llamacpp-parabellum-2026-10-26).
+  [benchmarks-gpu.md](../benchmarks-gpu.md#mixture-of-experts-on-an-rtx-4090-moonlight-16b-a3b-and-qwen3-30b-a3b-vs-llamacpp-2026-10-26-bench-of-record).
 
 Labels: **MEASURED** (job cited), **ESTIMATED**, **CODE**.
+
+## Bench of record: RTX 4090 pod, main 8508a75 (MEASURED, job 1026-215154-40d7, CLEAN)
+
+Qwen3-30B-A3B and Moonlight-16B-A3B, Axon `--gpu-experts` vs llama.cpp `4413a19` `--n-cpu-moe`, 3 interleaved
+rounds. Tables and method are on the board; raw data in
+[this gist](https://gist.github.com/HaseebKhalid1507/bf2abed2de5b1cc0a1a68510ef46f399).
+
+- **Qwen3-30B-A3B, all on the GPU:** tg128 219.7 vs 252.5 (**×0.87, behind**); pp512 11,022 vs 8,372 (×1.32);
+  pp2100 12,212 vs 9,289 (×1.31). The roadmap's pp2100 headline rule passes.
+- **Moonlight, all on the GPU:** 272.9 vs 285.5 (×0.96), 9,035 vs 11,176 (×0.81), 7,004 vs 12,272 (×0.57). Behind
+  on all three.
+- **Partial offload:** Axon's CPU-expert path is slower than llama.cpp's (Moonlight N = 12 vs `-ncmoe 14`: tg 79 vs
+  96, pp2100 673 vs 1,330).
+- **Text:** identical across all Axon placements on both models.
+- **Superseded run:** 1026-211155-a0f6 had every llama.cpp row at rc 127 (no CUDA 12 libraries on the pod image) and
+  still passed. The harness now preflights llama-bench and fails on any rc ≠ 0.
+- Everything below this point is the earlier Parabellum work (main 39624db, then TAINTED 8508a75 re-benches),
+  kept as history.
 
 ## What was measured, and why
 
