@@ -2296,7 +2296,22 @@ mod tests {
             let refs: Vec<_> = (0..slots)
                 .map(|i| solo(&net, ctx, &prompts[i], kinds[i], steps))
                 .collect();
-            let mut p = net.pool(slots, ctx).unwrap();
+            // The case needs >= ATT_NB_MIN slots of `ctx`: a (model, cache)
+            // case whose pool the card can't hold (a 6 GB one: Qwen3-0.6B f16
+            // needs 5.07 GiB for 40 x 1152, avante job 1027-090606-5804) is
+            // skipped, said on stderr (seen with --nocapture only); the other
+            // cases still run. It can't shrink the case.
+            let mut p = match net.pool(slots, ctx) {
+                Ok(p) => p,
+                Err(e) if e.contains("of GPU memory") => {
+                    eprintln!(
+                        "skipping pool_wide_long_steps_match_solo case {} {mode:?} on this GPU: {e}",
+                        m.arch
+                    );
+                    continue;
+                }
+                Err(e) => panic!("{e}"),
+            };
             // Slot of request i: reversed.
             let slot_of = |i: usize| slots - 1 - i;
             for (i, pr) in prompts.iter().enumerate() {
@@ -2361,6 +2376,11 @@ mod tests {
                     m.arch
                 );
             }
+            // With --nocapture a gate can count the cases run and skipped.
+            eprintln!(
+                "pool_wide_long_steps_match_solo case {} {mode:?}: ran, {slots} x {ctx}",
+                m.arch
+            );
         }
     }
 
