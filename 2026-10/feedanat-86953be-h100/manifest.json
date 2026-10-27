@@ -1,0 +1,29 @@
+{
+ "label": "feedanat-86953be-h100",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1027-030631-09ae",
+   "name": "feedanat-86953be-h100",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod2",
+   "hw": "hw-pod2-10-27_03:11.txt",
+   "gpu": "NVIDIA H100 80GB HBM3",
+   "driver": "595.91.07",
+   "sha": "86953be",
+   "binary": "bash",
+   "started": 1793085108.71229,
+   "ended": 1793086018.1877518,
+   "attempts": 1,
+   "remote_job": "20261027-071210-bash-813",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "55efde1e43d84ba2dce36a40d05af6a481e157efe769cd7809f98d5e745ae303",
+   "log_bytes": 36894
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-27 03:26:59 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}

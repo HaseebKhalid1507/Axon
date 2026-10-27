@@ -1,0 +1,285 @@
+[axon-run 03:06:31] submitted 1027-030631-09ae by /home/haseeb/.cache/axon-feedanat: /usr/bin/bash sess_h100.sh
+[axon-run 03:11:53] job 1027-030631-09ae -> pod2 (pod 14ecluywk32f4a): /home/haseeb/.local/bin/axon-remote --host pod2 --vram 5000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-feedanat/h100 /usr/bin/bash sess_h100.sh
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (3f34d1ac5b845c4021177f79) + source of /home/haseeb/.cache/axon-feedanat/h100
+
+sent 16,566,901 bytes  received 755 bytes  3,681,701.33 bytes/sec
+total size is 63,469,623  speedup is 3.83
+
+sent 169 bytes  received 35 bytes  81.60 bytes/sec
+total size is 89  speedup is 0.44
+axon-remote: job 20261027-071210-bash-813 on pod2 (GPU, 5000 MB)
+[axon-node 07:12:10] GPU EXCLUSIVE taken; job wants 5000 MB; nvidia-smi used/total 0/81559 MB; sharing with nobody (slots 4, budget 80059 MB, vCPU 17)
+[axon-node 07:12:10] run bash (3f34d1ac5b845c4021177f79) as /home/haseeb/.cache/axon-feedanat/h100 on 850284d8abb2, AXON_THREADS=8 RUST_TEST_THREADS=4; free 81081 MB of 81559 (used 0); GPU processes pid:MB none
+[sess +0s] kernel cache: 1 -> 4 entries (/root/axon-node/cache/axon/cuda)
+NVIDIA H100 80GB HBM3, 9.0, 595.91.07, 81559 MiB, 1980 MHz, 2619 MHz
+7f6a32ef24378addc89abbfaed0b9c8cede4d83dee86356352fcdb8c6c881ed4  axon-test
+c10d426b7123c589c9974ca11e30d2531e88b2041c9a244ebc9a0dd15b097481  axon
+c3ff5fb849cd7dc9958de23fd41b6ddbaf13a0c99b2df9f5d51dbd403dd86cbb  prompts-mix-v2.jsonl
+a82b55c178a2fa9bf2c50031390210214111b447d3e9737d5d9e70b44b4ff7c8  sd_client.py
+f20651a3133840a3fef24ea15b89dc08844a2c635d04dcac4fd23b24da4146d5  anat.py
+[sess +4s] model /root/axon-node/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf: 65b8fcd92af6b4fe (also pulls it into the page cache)
+[sess +4s] arms fifo60,sjf60,fifo50,sjf50,fifo80,sjf80 rounds 2 C 64,128 scale 1
+[sess +4s] anat
+[axon-run 03:12:24] FOREIGN_GPU sample max=0% mean=0.0% n=1
+feed anatomy: /root/axon-node/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (qwen2), NVIDIA H100 80GB HBM3 (132 SMs), pass max 1152, paged true
+ANAT | depth | n | wall ms | enq ms | wait ms | graph ms | ev ms | gemm ms | attn ms | other ms | launch+gaps ms (wall - graph) |
+ANAT | 0 | 16 | 6.930 | 0.881 | 6.048 | 6.432 | 7.765 | 6.308 | 0.710 | 0.747 | 0.499 |
+ANATSEG depth 0 n 16: embed 0.010, rope 0.005, rmsnorm 0.524, k 0.264, v6 0.298, qkv 0.339, rope_kv 0.169, attn 0.335, combine 0.206, wo 0.496, gate 2.606, gate_up 0.086, swiglu 0.208, down6 1.287, down 0.086, down4 0.844
+ANAT | 0 | 64 | 10.276 | 0.731 | 9.544 | 9.683 | 11.332 | 9.842 | 0.693 | 0.798 | 0.593 |
+ANATSEG depth 0 n 64: embed 0.008, rope 0.005, rmsnorm 0.543, q 0.765, k 0.787, v6 0.392, qkv 0.087, rope_kv 0.184, attn 0.333, combine 0.175, wo 0.754, gate 0.088, gate_up 3.331, swiglu 0.241, down6 1.590, down 0.087, v4 0.395, down4 1.564
+ANAT | 0 | 128 | 12.323 | 0.751 | 11.552 | 11.732 | 13.408 | 11.728 | 0.795 | 0.885 | 0.591 |
+ANATSEG depth 0 n 128: embed 0.010, rope 0.006, rmsnorm 0.549, q 0.757, k 0.801, v6 0.391, qkv 0.087, rope_kv 0.207, attn 0.394, combine 0.194, wo 0.763, gate 0.088, gate_up 5.181, swiglu 0.321, down6 1.594, down 0.087, v4 0.404, down4 1.574
+ANAT | 0 | 256 | 19.141 | 0.737 | 18.413 | 18.525 | 20.229 | 18.134 | 0.975 | 1.119 | 0.616 |
+ANATSEG depth 0 n 256: embed 0.014, rope 0.006, rmsnorm 0.621, q 1.075, k 0.740, v6 0.380, qkv 0.087, rope_kv 0.248, attn 0.505, combine 0.222, wo 1.079, gate 0.087, gate_up 8.851, swiglu 0.479, down6 3.011, down 0.088, v4 0.371, down4 2.365
+ANAT | 0 | 384 | 30.130 | 0.781 | 29.376 | 29.496 | 32.128 | 29.491 | 1.256 | 1.381 | 0.634 |
+ANATSEG depth 0 n 384: embed 0.016, rope 0.006, rmsnorm 0.717, q 2.158, k 0.758, v6 0.393, qkv 0.087, rope_kv 0.296, attn 0.702, combine 0.258, wo 2.241, gate 0.088, gate_up 13.831, swiglu 0.642, down6 4.664, down 0.087, v4 0.380, down4 4.804
+ANAT | 0 | 512 | 34.708 | 0.781 | 33.937 | 34.081 | 35.752 | 32.699 | 1.450 | 1.603 | 0.627 |
+ANATSEG depth 0 n 512: embed 0.017, rope 0.006, rmsnorm 0.780, q 2.141, k 0.725, v6 0.382, qkv 0.088, rope_kv 0.335, attn 0.827, combine 0.288, wo 2.207, gate 0.088, gate_up 17.137, swiglu 0.799, down6 4.862, down 0.088, v4 0.363, down4 4.619
+ANAT | 0 | 768 | 50.481 | 0.777 | 49.723 | 49.883 | 51.515 | 47.472 | 1.953 | 2.090 | 0.598 |
+ANATSEG depth 0 n 768: embed 0.022, rope 0.006, rmsnorm 0.943, q 3.041, k 0.739, v6 0.383, qkv 0.087, rope_kv 0.430, attn 1.179, combine 0.344, wo 3.159, gate 0.088, gate_up 25.581, swiglu 1.119, down6 7.131, down 0.088, v4 0.369, down4 6.806
+ANAT | 0 | 1024 | 66.124 | 0.777 | 65.339 | 65.481 | 67.184 | 61.978 | 2.459 | 2.748 | 0.643 |
+ANATSEG depth 0 n 1024: embed 0.026, rope 0.006, rmsnorm 1.277, q 3.904, k 0.749, v6 0.385, qkv 0.087, rope_kv 0.527, attn 1.529, combine 0.403, wo 4.037, gate 0.088, gate_up 33.792, swiglu 1.439, down6 9.357, down 0.087, v4 0.372, down4 9.120
+ANAT | 1000 | 16 | 6.917 | 0.648 | 6.273 | 6.405 | 7.842 | 6.316 | 0.778 | 0.748 | 0.512 |
+ANATSEG depth 1000 n 16: embed 0.010, rope 0.006, rmsnorm 0.525, k 0.265, v6 0.300, qkv 0.338, rope_kv 0.166, attn 0.352, combine 0.260, wo 0.494, gate 2.618, gate_up 0.086, swiglu 0.207, down6 1.284, down 0.086, down4 0.844
+ANAT | 1000 | 64 | 11.374 | 0.736 | 10.645 | 10.784 | 12.439 | 9.816 | 1.821 | 0.802 | 0.591 |
+ANATSEG depth 1000 n 64: embed 0.009, rope 0.005, rmsnorm 0.539, q 0.775, k 0.788, v6 0.388, qkv 0.081, rope_kv 0.189, attn 1.452, combine 0.180, wo 0.741, gate 0.087, gate_up 3.340, swiglu 0.249, down6 1.585, down 0.081, v4 0.391, down4 1.559
+ANAT | 1000 | 128 | 13.524 | 0.733 | 12.780 | 12.918 | 14.281 | 11.515 | 1.886 | 0.880 | 0.606 |
+ANATSEG depth 1000 n 128: embed 0.010, rope 0.006, rmsnorm 0.539, q 0.755, k 0.787, v6 0.381, qkv 0.083, rope_kv 0.208, attn 1.481, combine 0.198, wo 0.736, gate 0.089, gate_up 5.111, swiglu 0.326, down6 1.564, down 0.082, v4 0.392, down4 1.535
+ANAT | 1000 | 256 | 20.252 | 0.740 | 19.518 | 19.631 | 21.310 | 18.123 | 2.066 | 1.121 | 0.620 |
+ANATSEG depth 1000 n 256: embed 0.012, rope 0.005, rmsnorm 0.618, q 1.087, k 0.746, v6 0.379, qkv 0.082, rope_kv 0.251, attn 1.587, combine 0.228, wo 1.068, gate 0.087, gate_up 8.856, swiglu 0.486, down6 3.009, down 0.081, v4 0.368, down4 2.359
+ANAT | 1000 | 384 | 31.112 | 0.771 | 30.350 | 30.491 | 32.564 | 28.763 | 2.432 | 1.369 | 0.622 |
+ANATSEG depth 1000 n 384: embed 0.016, rope 0.006, rmsnorm 0.698, q 2.104, k 0.745, v6 0.381, qkv 0.081, rope_kv 0.299, attn 1.873, combine 0.260, wo 2.181, gate 0.088, gate_up 13.487, swiglu 0.649, down6 4.555, down 0.082, v4 0.364, down4 4.695
+ANAT | 1000 | 512 | 35.937 | 0.774 | 35.159 | 35.310 | 36.982 | 32.735 | 2.644 | 1.603 | 0.627 |
+ANATSEG depth 1000 n 512: embed 0.017, rope 0.005, rmsnorm 0.774, q 2.153, k 0.730, v6 0.377, qkv 0.083, rope_kv 0.341, attn 2.015, combine 0.288, wo 2.199, gate 0.087, gate_up 17.167, swiglu 0.807, down6 4.874, down 0.082, v4 0.359, down4 4.624
+ANAT | 1000 | 768 | 52.486 | 0.778 | 51.701 | 51.865 | 53.517 | 47.487 | 3.938 | 2.091 | 0.621 |
+ANATSEG depth 1000 n 768: embed 0.023, rope 0.005, rmsnorm 0.938, q 3.042, k 0.740, v6 0.379, qkv 0.082, rope_kv 0.430, attn 3.159, combine 0.349, wo 3.149, gate 0.087, gate_up 25.607, swiglu 1.126, down6 7.136, down 0.082, v4 0.366, down4 6.817
+ANAT | 1000 | 1024 | 68.340 | 0.774 | 67.577 | 67.698 | 69.412 | 61.999 | 4.663 | 2.750 | 0.642 |
+ANATSEG depth 1000 n 1024: embed 0.027, rope 0.006, rmsnorm 1.272, q 3.912, k 0.750, v6 0.382, qkv 0.083, rope_kv 0.528, attn 3.726, combine 0.409, wo 4.027, gate 0.087, gate_up 33.841, swiglu 1.445, down6 9.355, down 0.082, v4 0.369, down4 9.113
+ANAT | 2000 | 16 | 7.111 | 0.643 | 6.465 | 6.597 | 8.039 | 6.356 | 0.936 | 0.746 | 0.515 |
+ANATSEG depth 2000 n 16: embed 0.007, rope 0.006, rmsnorm 0.524, k 0.265, v6 0.298, qkv 0.339, rope_kv 0.167, attn 0.464, combine 0.305, wo 0.505, gate 2.639, gate_up 0.086, swiglu 0.209, down6 1.296, down 0.087, down4 0.842
+ANAT | 2000 | 64 | 12.520 | 0.733 | 11.785 | 11.920 | 13.613 | 9.866 | 2.942 | 0.806 | 0.600 |
+ANATSEG depth 2000 n 64: embed 0.012, rope 0.005, rmsnorm 0.541, q 0.776, k 0.792, v6 0.388, qkv 0.081, rope_kv 0.186, attn 2.574, combine 0.182, wo 0.746, gate 0.088, gate_up 3.360, swiglu 0.247, down6 1.593, down 0.081, v4 0.392, down4 1.567
+ANAT | 2000 | 128 | 14.625 | 0.730 | 13.477 | 13.577 | 15.742 | 11.811 | 3.047 | 0.884 | 1.047 |
+ANATSEG depth 2000 n 128: embed 0.010, rope 0.005, rmsnorm 0.543, q 0.773, k 0.809, v6 0.388, qkv 0.083, rope_kv 0.209, attn 2.641, combine 0.197, wo 0.758, gate 0.087, gate_up 5.242, swiglu 0.327, down6 1.604, down 0.082, v4 0.401, down4 1.583
+ANAT | 2000 | 256 | 21.347 | 0.736 | 20.610 | 20.707 | 22.362 | 18.097 | 3.147 | 1.117 | 0.641 |
+ANATSEG depth 2000 n 256: embed 0.012, rope 0.005, rmsnorm 0.615, q 1.083, k 0.744, v6 0.375, qkv 0.081, rope_kv 0.252, attn 2.667, combine 0.228, wo 1.071, gate 0.088, gate_up 8.858, swiglu 0.485, down6 3.009, down 0.081, v4 0.369, down4 2.340
+ANAT | 2000 | 384 | 32.285 | 0.765 | 31.539 | 31.659 | 33.320 | 28.380 | 3.576 | 1.364 | 0.627 |
+ANATSEG depth 2000 n 384: embed 0.014, rope 0.005, rmsnorm 0.695, q 2.090, k 0.738, v6 0.376, qkv 0.083, rope_kv 0.301, attn 3.017, combine 0.259, wo 2.164, gate 0.087, gate_up 13.315, swiglu 0.650, down6 4.474, down 0.081, v4 0.361, down4 4.611
+ANAT | 2000 | 512 | 37.191 | 0.780 | 36.442 | 36.571 | 38.276 | 32.770 | 3.899 | 1.607 | 0.620 |
+ANATSEG depth 2000 n 512: embed 0.018, rope 0.005, rmsnorm 0.775, q 2.148, k 0.732, v6 0.377, qkv 0.081, rope_kv 0.341, attn 3.270, combine 0.288, wo 2.203, gate 0.087, gate_up 17.189, swiglu 0.809, down6 4.868, down 0.082, v4 0.362, down4 4.640
+ANAT | 2000 | 768 | 54.725 | 0.782 | 53.905 | 54.063 | 55.786 | 47.549 | 6.141 | 2.095 | 0.663 |
+ANATSEG depth 2000 n 768: embed 0.023, rope 0.006, rmsnorm 0.940, q 3.056, k 0.741, v6 0.379, qkv 0.081, rope_kv 0.432, attn 5.359, combine 0.350, wo 3.140, gate 0.087, gate_up 25.633, swiglu 1.126, down6 7.174, down 0.082, v4 0.365, down4 6.810
+ANAT | 2000 | 1024 | 70.562 | 0.771 | 69.787 | 69.926 | 71.638 | 62.023 | 6.859 | 2.756 | 0.636 |
+ANATSEG depth 2000 n 1024: embed 0.028, rope 0.006, rmsnorm 1.273, q 3.906, k 0.748[axon-run 03:12:55] FOREIGN_GPU sample max=0% mean=0.0% n=1
+, v6 0.381, qkv 0.082, rope_kv 0.529, attn 5.919, combine 0.411, wo 4.037, gate 0.088, gate_up 33.836, swiglu 1.449, down6 9.371, down 0.083, v4 0.368, down4 9.124
+ANAT | 4000 | 16 | 7.352 | 0.637 | 6.715 | 6.840 | 8.278 | 6.402 | 1.128 | 0.748 | 0.511 |
+ANATSEG depth 4000 n 16: embed 0.008, rope 0.006, rmsnorm 0.527, k 0.266, v6 0.299, qkv 0.339, rope_kv 0.168, attn 0.517, combine 0.444, wo 0.528, gate 2.670, gate_up 0.086, swiglu 0.208, down6 1.289, down 0.085, down4 0.841
+ANAT | 4000 | 64 | 14.686 | 0.745 | 13.957 | 14.080 | 15.762 | 9.840 | 5.118 | 0.804 | 0.607 |
+ANATSEG depth 4000 n 64: embed 0.009, rope 0.005, rmsnorm 0.542, q 0.774, k 0.795, v6 0.388, qkv 0.082, rope_kv 0.187, attn 4.749, combine 0.182, wo 0.746, gate 0.087, gate_up 3.347, swiglu 0.247, down6 1.587, down 0.082, v4 0.391, down4 1.561
+ANAT | 4000 | 128 | 16.843 | 0.743 | 15.791 | 16.229 | 17.559 | 11.551 | 5.129 | 0.879 | 0.614 |
+ANATSEG depth 4000 n 128: embed 0.010, rope 0.005, rmsnorm 0.537, q 0.754, k 0.792, v6 0.381, qkv 0.082, rope_kv 0.207, attn 4.723, combine 0.199, wo 0.741, gate 0.088, gate_up 5.129, swiglu 0.326, down6 1.564, down 0.081, v4 0.392, down4 1.546
+ANAT | 4000 | 256 | 23.445 | 0.744 | 22.719 | 22.829 | 24.495 | 18.126 | 5.251 | 1.117 | 0.615 |
+ANATSEG depth 4000 n 256: embed 0.012, rope 0.005, rmsnorm 0.616, q 1.078, k 0.746, v6 0.376, qkv 0.082, rope_kv 0.250, attn 4.773, combine 0.228, wo 1.071, gate 0.087, gate_up 8.869, swiglu 0.483, down6 3.012, down 0.081, v4 0.368, down4 2.355
+ANAT | 4000 | 384 | 34.582 | 0.768 | 33.813 | 33.952 | 36.698 | 29.293 | 6.015 | 1.390 | 0.629 |
+ANATSEG depth 4000 n 384: embed 0.020, rope 0.006, rmsnorm 0.717, q 2.167, k 0.762, v6 0.386, qkv 0.082, rope_kv 0.299, attn 5.455, combine 0.261, wo 2.218, gate 0.088, gate_up 13.747, swiglu 0.648, down6 4.622, down 0.081, v4 0.373, down4 4.768
+ANAT | 4000 | 512 | 39.630 | 0.773 | 38.872 | 39.010 | 40.668 | 32.749 | 6.309 | 1.610 | 0.620 |
+ANATSEG depth 4000 n 512: embed 0.018, rope 0.005, rmsnorm 0.781, q 2.152, k 0.734, v6 0.378, qkv 0.081, rope_kv 0.338, attn 5.683, combine 0.288, wo 2.208, gate 0.087, gate_up 17.187, swiglu 0.806, down6 4.870, down 0.081, v4 0.360, down4 4.613
+ANAT | 4000 | 768 | 59.111 | 0.775 | 58.298 | 58.420 | 60.110 | 47.526 | 10.496 | 2.088 | 0.691 |
+ANATSEG depth 4000 n 768: embed 0.024, rope 0.006, rmsnorm 0.932, q 3.042, k 0.742, v6 0.379, qkv 0.084, rope_kv 0.430, attn 9.717, combine 0.348, wo 3.147, gate 0.088, gate_up 25.644, swiglu 1.126, down6 7.143, down 0.083, v4 0.365, down4 6.808
+ANAT | 4000 | 1024 | 74.926 | 0.774 | 74.151 | 74.267 | 75.988 | 61.991 | 11.247 | 2.751 | 0.659 |
+ANATSEG depth 4000 n 1024: embed 0.027, rope 0.006, rmsnorm 1.271, q 3.907, k 0.748, v6 0.381, qkv 0.083, rope_kv 0.531, attn 10.306, combine 0.410, wo 4.021, gate 0.088, gate_up 33.856, swiglu 1.448, down6 9.361, down 0.081, v4 0.370, down4 9.095
+ANAT | 6000 | 16 | 7.852 | 0.657 | 7.194 | 7.335 | 8.776 | 6.426 | 1.600 | 0.750 | 0.517 |
+ANATSEG depth 6000 n 16: embed 0.009, rope 0.005, rmsnorm 0.527, k 0.264, v6 0.297, qkv 0.340, rope_kv 0.168, attn 0.825, combine 0.608, wo 0.537, gate 2.682, gate_up 0.087, swiglu 0.208, down6 1.291, down 0.086, down4 0.842
+ANAT | 6000 | 64 | 16.781 | 0.748 | 16.061 | 16.178 | 17.897 | 9.815 | 7.280 | 0.802 | 0.603 |
+ANATSEG depth 6000 n 64: embed 0.009, rope 0.005, rmsnorm 0.542, q 0.774, k 0.790, v6 0.388, qkv 0.082, rope_kv 0.186, attn 6.913, combine 0.181, wo 0.746, gate 0.088, gate_up 3.333, swiglu 0.247, down6 1.581, down 0.081, v4 0.395, down4 1.558
+ANAT | 6000 | 128 | 18.789 | 0.745 | 17.926 | 18.184 | 19.643 | 11.523 | 7.236 | 0.884 | 0.605 |
+ANATSEG depth 6000 n 128: embed 0.011, rope 0.005, rmsnorm 0.540, q 0.755, k 0.788, v6 0.381, qkv 0.083, rope_kv 0.208, attn 6.830, combine 0.198, wo 0.739, gate 0.088, gate_up 5.113, swiglu 0.328, down6 1.564, down 0.083, v4 0.391, down4 1.536
+ANAT | 6000 | 256 | 25.577 | 0.763 | 24.826 | 24.949 | 26.634 | 18.148 | 7.364 | 1.122 | 0.628 |
+ANATSEG depth 6000 n 256: embed 0.013, rope 0.005, rmsnorm 0.618, q 1.082, k 0.746, v6 0.376, qkv 0.082, rope_kv 0.251, attn 6.885, combine 0.228, wo 1.075, gate 0.088, gate_up 8.873, swiglu 0.486, down6 3.013, down 0.082, v4 0.369, down4 2.362
+ANAT | 6000 | 384 | 36.953 | 0.770 | 36.193 | 36.317 | 38.796 | 29.031 | 8.387 | 1.378 | 0.636 |
+ANATSEG depth 6000 n 384: embed 0.015, rope 0.006, rmsnorm 0.711, q 2.133, k 0.753, v6 0.384, qkv 0.082, rope_kv 0.296, attn 7.826, combine 0.265, wo 2.192, gate 0.088, gate_up 13.619, swiglu 0.647, down6 4.572, down 0.081, v4 0.369, down4 4.761
+ANAT | 6000 | 512 | 42.061 | 0.776 | 41.323 | 41.429 | 43.085 | 32.715 | 8.758 | 1.611 | 0.632 |
+ANATSEG depth 6000 n 512: embed 0.020, rope 0.006, rmsnorm 0.779, q 2.150, k 0.734, v6 0.377, qkv 0.081, rope_kv 0.337, attn 8.132, combine 0.289, wo 2.199, gate 0.088, gate_up 17.193, swiglu 0.806, down6 4.847, down 0.082, v4 0.359, down4 4.606
+ANAT | 6000 | 768 | 63.456 | 0.772 | 62.614 | 62.785 | 64.513 | 47.570 | 14.851 | 2.091 | 0.671 |
+ANATSEG depth 6000 n 768: embed 0.023, rope 0.006, rmsnorm 0.934, q 3.051, k 0.738, v6 0.380, qkv 0.085, rope_kv 0.431, attn 14.070, combine 0.350, wo 3.133, gate 0.088, gate_up 25.664, swiglu 1.129, down6 7.169, down 0.081, v4 0.365, down4 6.816
+ANAT | 6000 | 1024 | 79.730 | 0.774 | 78.962 | 79.098 | 80.771 | 62.326 | 15.692 | 2.753 | 0.631 |
+ANATSEG depth 6000 n 1024: embed 0.027, rope 0.006, rmsnorm 1.273, q 3.918, k 0.747, v6 0.383, qkv 0.082, rope_kv 0.530, attn 14.752, combine 0.410, wo 4.040, gate 0.088, gate_up 34.037, swiglu 1.448, down6 9.429, down 0.081, v4 0.370, down4 9.151
+[sess +55s] serve fifo60-r1 up after 2s (--admit-order fifo --step-ms 60)
+[axon-run 03:13:25] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL fifo60-r1 c64 {"tag": "fifo60", "workload": "mix", "round": 1, "url": "http://127.0.0.1:18786", "salt": "r1 c64 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793085213.485, "c": 64, "requests": 128, "ok": 128, "errors": 0, "error_sample": [], "wall_s": 22.065, "completion_tokens": 35739, "prompt_tokens": 124747, "agg_tok_s": 1619.7, "in_tok_s": 5653.7, "ttft_ms_p50": 569.8, "ttft_ms_p99": 5950.7, "ttft_short_ms
+[axon-run 03:13:56] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL fifo60-r1 c128 {"tag": "fifo60", "workload": "mix", "round": 1, "url": "http://127.0.0.1:18786", "salt": "r1 c128 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793085252.419, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 38.784, "completion_tokens": 71929, "prompt_tokens": 249860, "agg_tok_s": 1854.6, "in_tok_s": 6442.4, "ttft_ms_p50": 2306.7, "ttft_ms_p99": 14310.3, "ttft_shor
+[sess +123s] serve sjf60-r1 up after 2s (--admit-order sjf --step-ms 60)
+[axon-run 03:14:26] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL sjf60-r1 c64 {"tag": "sjf60", "workload": "mix", "round": 1, "url": "http://127.0.0.1:18787", "salt": "r1 c64 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793085281.258, "c": 64, "requests": 128, "ok": 128, "errors": 0, "error_sample": [], "wall_s": 21.953, "completion_tokens": 35739, "prompt_tokens": 124747, "agg_tok_s": 1628.0, "in_tok_s": 5682.5, "ttft_ms_p50": 190.8, "ttft_ms_p99": 5991.6, "ttft_short_ms_
+[axon-run 03:14:57] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL sjf60-r1 c128 {"tag": "sjf60", "workload": "mix", "round": 1, "url": "http://127.0.0.1:18787", "salt": "r1 c128 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793085319.555, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 38.15, "completion_tokens": 71929, "prompt_tokens": 249860, "agg_tok_s": 1885.4, "in_tok_s": 6549.4, "ttft_ms_p50": 2107.3, "ttft_ms_p99": 15604.6, "ttft_short_
+[sess +191s] serve fifo50-r1 up after 3s (--admit-order fifo --step-ms 50)
+[axon-run 03:15:27] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL fifo50-r1 c64 {"tag": "fifo50", "workload": "mix", "round": 1, "url": "http://127.0.0.1:18788", "salt": "r1 c64 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793085351.906, "c": 64, "requests": 128, "ok": 128, "errors": 0, "error_sample": [], "wall_s": 23.983, "completion_tokens": 35739, "prompt_tokens": 124747, "agg_tok_s": 1490.2, "in_tok_s": 5201.5, "ttft_ms_p50": 799.1, "ttft_ms_p99": 7147.8, "ttft_short_ms
+[axon-run 03:15:58] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 03:16:28] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL fifo50-r1 c128 {"tag": "fifo50", "workload": "mix", "round": 1, "url": "http://127.0.0.1:18788", "salt": "r1 c128 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793085397.402, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 45.349, "completion_tokens": 71929, "prompt_tokens": 249860, "agg_tok_s": 1586.1, "in_tok_s": 5509.7, "ttft_ms_p50": 8967.1, "ttft_ms_p99": 18109.6, "ttft_shor
+[sess +268s] serve sjf50-r1 up after 2s (--admit-order sjf --step-ms 50)
+[axon-run 03:16:59] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL sjf50-r1 c64 {"tag": "sjf50", "workload": "mix", "round": 1, "url": "http://127.0.0.1:18789", "salt": "r1 c64 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793085427.657, "c": 64, "requests": 128, "ok": 128, "errors": 0, "error_sample": [], "wall_s": 23.323, "completion_tokens": 35739, "prompt_tokens": 124747, "agg_tok_s": 1532.4, "in_tok_s": 5348.8, "ttft_ms_p50": 201.7, "ttft_ms_p99": 6332.6, "ttft_short_ms_
+[axon-run 03:17:29] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL sjf50-r1 c128 {"tag": "sjf50", "workload": "mix", "round": 1, "url": "http://127.0.0.1:18789", "salt": "r1 c128 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793085470.701, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 42.921, "completion_tokens": 71929, "prompt_tokens": 249860, "agg_tok_s": 1675.8, "in_tok_s": 5821.4, "ttft_ms_p50": 4522.6, "ttft_ms_p99": 22469.7, "ttft_short
+[sess +341s] serve fifo80-r1 up after 2s (--admit-order fifo --step-ms 80)
+[axon-run 03:18:00] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL fifo80-r1 c64 {"tag": "fifo80", "workload": "mix", "round": 1, "url": "http://127.0.0.1:18790", "salt": "r1 c64 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793085499.457, "c": 64, "requests": 128, "ok": 128, "errors": 0, "error_sample": [], "wall_s": 21.528, "completion_tokens": 35739, "prompt_tokens": 124747, "agg_tok_s": 1660.1, "in_tok_s": 5794.6, "ttft_ms_p50": 466.2, "ttft_ms_p99": 5405.5, "ttft_short_ms
+[axon-run 03:18:30] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL fifo80-r1 c128 {"tag": "fifo80", "workload": "mix", "round": 1, "url": "http://127.0.0.1:18790", "salt": "r1 c128 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793085535.909, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 36.302, "completion_tokens": 71929, "prompt_tokens": 249860, "agg_tok_s": 1981.4, "in_tok_s": 6882.8, "ttft_ms_p50": 1033.4, "ttft_ms_p99": 12441.1, "ttft_shor
+[sess +407s] serve sjf80-r1 up after 2s (--admit-order sjf --step-ms 80)
+[axon-run 03:19:01] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL sjf80-r1 c64 {"tag": "sjf80", "workload": "mix", "round": 1, "url": "http://127.0.0.1:18791", "salt": "r1 c64 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793085563.81, "c": 64, "requests": 128, "ok": 128, "errors": 0, "error_sample": [], "wall_s": 21.234, "completion_tokens": 35739, "prompt_tokens": 124747, "agg_tok_s": 1683.1, "in_tok_s": 5874.9, "ttft_ms_p50": 204.8, "ttft_ms_p99": 5342.1, "ttft_short_ms_p
+[axon-run 03:19:32] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL sjf80-r1 c128 {"tag": "sjf80", "workload": "mix", "round": 1, "url": "http://127.0.0.1:18791", "salt": "r1 c128 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793085599.612, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 35.653, "completion_tokens": 71929, "prompt_tokens": 249860, "agg_tok_s": 2017.5, "in_tok_s": 7008.1, "ttft_ms_p50": 643.9, "ttft_ms_p99": 13026.7, "ttft_short_
+[sess +470s] serve fifo60-r2 up after 2s (--admit-order fifo --step-ms 60)
+[axon-run 03:20:03] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 03:20:35] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL fifo60-r2 c128 {"tag": "fifo60", "workload": "mix", "round": 2, "url": "http://127.0.0.1:18806", "salt": "r2 c128 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793085646.194, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 39.094, "completion_tokens": 71796, "prompt_tokens": 249860, "agg_tok_s": 1836.5, "in_tok_s": 6391.2, "ttft_ms_p50": 2767.3, "ttft_ms_p99": 14433.5, "ttft_shor
+[axon-run 03:21:06] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL fifo60-r2 c64 {"tag": "fifo60", "workload": "mix", "round": 2, "url": "http://127.0.0.1:18806", "salt": "r2 c64 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793085667.892, "c": 64, "requests": 128, "ok": 128, "errors": 0, "error_sample": [], "wall_s": 21.574, "completion_tokens": 35609, "prompt_tokens": 124747, "agg_tok_s": 1650.5, "in_tok_s": 5782.2, "ttft_ms_p50": 534.9, "ttft_ms_p99": 5964.1, "ttft_short_ms
+[sess +539s] serve sjf80-r2 up after 2s (--admit-order sjf --step-ms 80)
+[axon-run 03:21:36] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL sjf80-r2 c128 {"tag": "sjf80", "workload": "mix", "round": 2, "url": "http://127.0.0.1:18807", "salt": "r2 c128 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793085710.182, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 35.732, "completion_tokens": 71796, "prompt_tokens": 249860, "agg_tok_s": 2009.3, "in_tok_s": 6992.6, "ttft_ms_p50": 437.5, "ttft_ms_p99": 12683.4, "ttft_short_
+[axon-run 03:22:07] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL sjf80-r2 c64 {"tag": "sjf80", "workload": "mix", "round": 2, "url": "http://127.0.0.1:18807", "salt": "r2 c64 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793085731.108, "c": 64, "requests": 128, "ok": 128, "errors": 0, "error_sample": [], "wall_s": 20.806, "completion_tokens": 35609, "prompt_tokens": 124747, "agg_tok_s": 1711.5, "in_tok_s": 5995.8, "ttft_ms_p50": 162.8, "ttft_ms_p99": 5293.3, "ttft_short_ms_
+[sess +602s] serve fifo80-r2 up after 2s (--admit-order fifo --step-ms 80)
+[axon-run 03:22:38] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL fifo80-r2 c128 {"tag": "fifo80", "workload": "mix", "round": 2, "url": "http://127.0.0.1:18808", "salt": "r2 c128 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793085774.551, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 36.113, "completion_tokens": 71796, "prompt_tokens": 249860, "agg_tok_s": 1988.1, "in_tok_s": 6918.8, "ttft_ms_p50": 1248.2, "ttft_ms_p99": 12278.1, "ttft_shor
+[axon-run 03:23:09] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL fifo80-r2 c64 {"tag": "fifo80", "workload": "mix", "round": 2, "url": "http://127.0.0.1:18808", "salt": "r2 c64 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793085795.879, "c": 64, "requests": 128, "ok": 128, "errors": 0, "error_sample": [], "wall_s": 21.205, "completion_tokens": 35609, "prompt_tokens": 124747, "agg_tok_s": 1679.3, "in_tok_s": 5882.9, "ttft_ms_p50": 547.7, "ttft_ms_p99": 5471.9, "ttft_short_ms
+[sess +668s] serve sjf50-r2 up after 3s (--admit-order sjf --step-ms 50)
+[axon-run 03:23:39] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL sjf50-r2 c128 {"tag": "sjf50", "workload": "mix", "round": 2, "url": "http://127.0.0.1:18809", "salt": "r2 c128 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793085846.436, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 42.693, "completion_tokens": 71796, "prompt_tokens": 249860, "agg_tok_s": 1681.7, "in_tok_s": 5852.5, "ttft_ms_p50": 5295.2, "ttft_ms_p99": 22924.6, "ttft_short
+[axon-run 03:24:10] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL sjf50-r2 c64 {"tag": "sjf50", "workload": "mix", "round": 2, "url": "http://127.0.0.1:18809", "salt": "r2 c64 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793085869.935, "c": 64, "requests": 128, "ok": 128, "errors": 0, "error_sample": [], "wall_s": 23.378, "completion_tokens": 35609, "prompt_tokens": 124747, "agg_tok_s": 1523.2, "in_tok_s": 5336.1, "ttft_ms_p50": 441.1, "ttft_ms_p99": 7045.3, "ttft_short_ms_
+[sess +741s] serve fifo50-r2 up after 2s (--admit-order fifo --step-ms 50)
+[axon-run 03:24:40] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 03:25:11] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL fifo50-r2 c128 {"tag": "fifo50", "workload": "mix", "round": 2, "url": "http://127.0.0.1:18810", "salt": "r2 c128 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793085923.557, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 46.204, "completion_tokens": 71796, "prompt_tokens": 249860, "agg_tok_s": 1553.9, "in_tok_s": 5407.8, "ttft_ms_p50": 9025.2, "ttft_ms_p99": 17918.0, "ttft_shor
+[axon-run 03:25:42] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL fifo50-r2 c64 {"tag": "fifo50", "workload": "mix", "round": 2, "url": "http://127.0.0.1:18810", "salt": "r2 c64 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793085947.347, "c": 64, "requests": 128, "ok": 128, "errors": 0, "error_sample": [], "wall_s": 23.667, "completion_tokens": 35609, "prompt_tokens": 124747, "agg_tok_s": 1504.6, "in_tok_s": 5270.9, "ttft_ms_p50": 1060.2, "ttft_ms_p99": 7031.1, "ttft_short_m
+[sess +819s] serve sjf60-r2 up after 3s (--admit-order sjf --step-ms 60)
+[axon-run 03:26:12] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL sjf60-r2 c128 {"tag": "sjf60", "workload": "mix", "round": 2, "url": "http://127.0.0.1:18811", "salt": "r2 c128 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793085993.291, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 38.099, "completion_tokens": 71796, "prompt_tokens": 249860, "agg_tok_s": 1884.5, "in_tok_s": 6558.2, "ttft_ms_p50": 1390.4, "ttft_ms_p99": 15614.8, "ttft_short
+[axon-run 03:26:42] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL sjf60-r2 c64 {"tag": "sjf60", "workload": "mix", "round": 2, "url": "http://127.0.0.1:18811", "salt": "r2 c64 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793086015.349, "c": 64, "requests": 128, "ok": 128, "errors": 0, "error_sample": [], "wall_s": 21.931, "completion_tokens": 35609, "prompt_tokens": 124747, "agg_tok_s": 1623.7, "in_tok_s": 5688.3, "ttft_ms_p50": 199.7, "ttft_ms_p99": 6003.9, "ttft_short_ms_
+[sess +885s] anal
+
+## Feed pass anatomy (pool_feed_anatomy; ms; shares of wall: kernels = graph replay split by event class)
+| depth | n | wall | enqueue | graph | GEMM % | attention % | other % | launch+gaps % |
+|---|---|---|---|---|---|---|---|---|
+| 0 | 16 | 6.93 | 0.88 | 6.43 | 75 | 8 | 9 | 7 |
+| 0 | 64 | 10.28 | 0.73 | 9.68 | 82 | 6 | 7 | 6 |
+| 0 | 128 | 12.32 | 0.75 | 11.73 | 83 | 6 | 6 | 5 |
+| 0 | 256 | 19.14 | 0.74 | 18.52 | 87 | 5 | 5 | 3 |
+| 0 | 384 | 30.13 | 0.78 | 29.50 | 90 | 4 | 4 | 2 |
+| 0 | 512 | 34.71 | 0.78 | 34.08 | 90 | 4 | 4 | 2 |
+| 0 | 768 | 50.48 | 0.78 | 49.88 | 91 | 4 | 4 | 1 |
+| 0 | 1024 | 66.12 | 0.78 | 65.48 | 91 | 4 | 4 | 1 |
+| 1000 | 16 | 6.92 | 0.65 | 6.41 | 75 | 9 | 9 | 7 |
+| 1000 | 64 | 11.37 | 0.74 | 10.78 | 75 | 14 | 6 | 5 |
+| 1000 | 128 | 13.52 | 0.73 | 12.92 | 77 | 13 | 6 | 4 |
+| 1000 | 256 | 20.25 | 0.74 | 19.63 | 82 | 9 | 5 | 3 |
+| 1000 | 384 | 31.11 | 0.77 | 30.49 | 87 | 7 | 4 | 2 |
+| 1000 | 512 | 35.94 | 0.77 | 35.31 | 87 | 7 | 4 | 2 |
+| 1000 | 768 | 52.49 | 0.78 | 51.87 | 88 | 7 | 4 | 1 |
+| 1000 | 1024 | 68.34 | 0.77 | 67.70 | 88 | 7 | 4 | 1 |
+| 2000 | 16 | 7.11 | 0.64 | 6.60 | 73 | 11 | 9 | 7 |
+| 2000 | 64 | 12.52 | 0.73 | 11.92 | 69 | 21 | 6 | 5 |
+| 2000 | 128 | 14.62 | 0.73 | 13.58 | 70 | 18 | 5 | 7 |
+| 2000 | 256 | 21.35 | 0.74 | 20.71 | 79 | 14 | 5 | 3 |
+| 2000 | 384 | 32.28 | 0.77 | 31.66 | 84 | 11 | 4 | 2 |
+| 2000 | 512 | 37.19 | 0.78 | 36.57 | 84 | 10 | 4 | 2 |
+| 2000 | 768 | 54.73 | 0.78 | 54.06 | 84 | 11 | 4 | 1 |
+| 2000 | 1024 | 70.56 | 0.77 | 69.93 | 86 | 9 | 4 | 1 |
+| 4000 | 16 | 7.35 | 0.64 | 6.84 | 72 | 13 | 8 | 7 |
+| 4000 | 64 | 14.69 | 0.74 | 14.08 | 60 | 31 | 5 | 4 |
+| 4000 | 128 | 16.84 | 0.74 | 16.23 | 63 | 28 | 5 | 4 |
+| 4000 | 256 | 23.45 | 0.74 | 22.83 | 72 | 21 | 4 | 3 |
+| 4000 | 384 | 34.58 | 0.77 | 33.95 | 78 | 16 | 4 | 2 |
+| 4000 | 512 | 39.63 | 0.77 | 39.01 | 79 | 15 | 4 | 2 |
+| 4000 | 768 | 59.11 | 0.78 | 58.42 | 78 | 17 | 3 | 1 |
+| 4000 | 1024 | 74.93 | 0.77 | 74.27 | 81 | 15 | 4 | 1 |
+| 6000 | 16 | 7.85 | 0.66 | 7.33 | 68 | 17 | 8 | 7 |
+| 6000 | 64 | 16.78 | 0.75 | 16.18 | 53 | 39 | 4 | 4 |
+| 6000 | 128 | 18.79 | 0.74 | 18.18 | 57 | 36 | 4 | 3 |
+| 6000 | 256 | 25.58 | 0.76 | 24.95 | 66 | 27 | 4 | 2 |
+| 6000 | 384 | 36.95 | 0.77 | 36.32 | 74 | 21 | 3 | 2 |
+| 6000 | 512 | 42.06 | 0.78 | 41.43 | 75 | 20 | 4 | 2 |
+| 6000 | 768 | 63.46 | 0.77 | 62.78 | 73 | 23 | 3 | 1 |
+| 6000 | 1024 | 79.73 | 0.77 | 79.10 | 77 | 19 | 3 | 1 |
+
+## #139 cells (medians over rounds; agg spread = max/min - 1)
+| C | arm | rounds | agg tok/s (spread) | short TTFT p50 | p99 | long TTFT p99 | long max | ITL p50 | ITL p99 | TPOT p50 | slo_ok | goodput |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 64 | fifo60 | 2 | 1,635.1 (±2 %) | 269.8 | 5,532.1 | 6,614.7 | 6,614.7 | 19.4 | 73.2 | 33.5 | 0.688 | 1,170.1 |
+| 64 | sjf60 | 2 | 1,625.8 (±0 %) | 118.9 | 5,712.5 | 6,394.5 | 6,394.5 | 19.0 | 72.2 | 31.3 | 0.684 | 1,161.2 |
+| 64 | fifo50 | 2 | 1,497.4 (±1 %) | 490.5 | 6,499.4 | 8,154.5 | 8,154.4 | 28.0 | 61.2 | 37.2 | 0.676 | 1,036.2 |
+| 64 | sjf50 | 2 | 1,527.8 (±1 %) | 106.8 | 6,136.9 | 7,163.4 | 7,163.4 | 22.9 | 60.5 | 35.0 | 0.664 | 1,031.3 |
+| 64 | fifo80 | 2 | 1,669.7 (±1 %) | 253.2 | 5,041.1 | 6,002.5 | 6,002.5 | 17.9 | 98.4 | 32.7 | 0.715 | 1,242.8 |
+| 64 | sjf80 | 2 | 1,697.3 (±2 %) | 151.2 | 4,715.1 | 5,760.4 | 5,760.4 | 17.5 | 96.6 | 32.6 | 0.742 | 1,336.4 |
+| 128 | fifo60 | 2 | 1,845.5 (±1 %) | 2,320.3 | 14,063.1 | 15,618.2 | 15,618.2 | 55.9 | 80.0 | 58.0 | 0.279 | 551.7 |
+| 128 | sjf60 | 2 | 1,885.0 (±0 %) | 953.5 | 15,609.7 | 14,773.4 | 14,773.4 | 53.1 | 78.2 | 50.5 | 0.358 | 746.2 |
+| 128 | fifo50 | 2 | 1,570.0 (±2 %) | 8,860.5 | 17,589.5 | 19,637.8 | 19,637.8 | 47.0 | 62.8 | 46.0 | 0.102 | 163.3 |
+| 128 | sjf50 | 2 | 1,678.8 (±0 %) | 5,624.6 | 22,697.2 | 16,987.8 | 16,987.8 | 47.0 | 69.5 | 47.2 | 0.293 | 500.0 |
+| 128 | fifo80 | 2 | 1,984.8 (±0 %) | 861.7 | 12,040.6 | 13,514.8 | 13,514.8 | 31.0 | 101.1 | 53.2 | 0.367 | 792.5 |
+| 128 | sjf80 | 2 | 2,013.4 (±0 %) | 173.0 | 12,736.0 | 13,578.5 | 13,578.5 | 29.8 | 100.1 | 51.2 | 0.369 | 812.3 |
+
+BITS: 768 of 768 requests identical (text_sha, completion_tokens) across 6 arms ['fifo50', 'fifo60', 'fifo80', 'sjf50', 'sjf60', 'sjf80']
+
+## Step traces (AXON_SERVE_TRACE; s)
+| arm | round | C | steps | wall | feed passes | prompt tokens | feeds | decode | host | 2-pass steps | tokens per pass p50 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| fifo50 | 1 | 64 | 924 | 23.98 | 436 | 122,385 | 12.23 | 11.40 | 0.32 | 400 | 313 |
+| fifo50 | 1 | 128 | 1367 | 45.33 | 921 | 242,643 | 25.09 | 19.41 | 0.75 | 876 | 291 |
+| fifo50 | 2 | 128 | 1350 | 46.19 | 933 | 243,950 | 25.32 | 19.99 | 0.79 | 891 | 286 |
+| fifo50 | 2 | 64 | 904 | 23.65 | 428 | 120,988 | 11.99 | 11.26 | 0.36 | 383 | 321 |
+| fifo60 | 1 | 64 | 902 | 22.05 | 336 | 122,365 | 10.59 | 11.10 | 0.33 | 267 | 477 |
+| fifo60 | 1 | 128 | 1057 | 38.76 | 743 | 242,688 | 22.35 | 15.54 | 0.82 | 550 | 392 |
+| fifo60 | 2 | 128 | 1056 | 39.07 | 744 | 244,340 | 22.42 | 15.78 | 0.82 | 560 | 390 |
+| fifo60 | 2 | 64 | 862 | 21.55 | 330 | 120,677 | 10.46 | 10.74 | 0.32 | 268 | 495 |
+| fifo80 | 1 | 64 | 898 | 21.52 | 262 | 122,385 | 10.12 | 11.02 | 0.35 | 202 | 422 |
+| fifo80 | 1 | 128 | 1019 | 36.28 | 541 | 242,684 | 20.49 | 14.91 | 0.83 | 401 | 400 |
+| fifo80 | 2 | 128 | 979 | 36.10 | 548 | 244,367 | 20.60 | 14.67 | 0.79 | 395 | 400 |
+| fifo80 | 2 | 64 | 847 | 21.18 | 261 | 120,677 | 10.06 | 10.71 | 0.38 | 195 | 428 |
+| sjf50 | 1 | 64 | 901 | 23.30 | 413 | 121,629 | 11.84 | 11.11 | 0.32 | 353 | 350 |
+| sjf50 | 1 | 128 | 1240 | 42.90 | 880 | 241,623 | 24.25 | 17.74 | 0.76 | 765 | 321 |
+| sjf50 | 2 | 128 | 1222 | 42.67 | 871 | 242,584 | 24.22 | 17.54 | 0.76 | 758 | 328 |
+| sjf50 | 2 | 64 | 895 | 23.36 | 409 | 120,677 | 11.76 | 11.18 | 0.37 | 355 | 358 |
+| sjf60 | 1 | 64 | 901 | 21.95 | 323 | 121,186 | 10.54 | 11.03 | 0.34 | 252 | 517 |
+| sjf60 | 1 | 128 | 1094 | 38.13 | 683 | 241,643 | 21.56 | 15.74 | 0.73 | 529 | 477 |
+| sjf60 | 2 | 128 | 1040 | 38.08 | 690 | 241,876 | 21.77 | 15.37 | 0.83 | 528 | 475 |
+| sjf60 | 2 | 64 | 869 | 21.91 | 324 | 120,677 | 10.51 | 10.96 | 0.39 | 255 | 513 |
+| sjf80 | 1 | 64 | 871 | 21.22 | 257 | 120,902 | 10.02 | 10.82 | 0.34 | 177 | 761 |
+| sjf80 | 1 | 128 | 999 | 35.65 | 530 | 241,669 | 20.26 | 14.53 | 0.79 | 356 | 707 |
+| sjf80 | 2 | 128 | 984 | 35.72 | 532 | 241,869 | 20.28 | 14.60 | 0.77 | 361 | 695 |
+| sjf80 | 2 | 64 | 834 | 20.78 | 249 | 120,674 | 9.87 | 10.55 | 0.32 | 179 | 773 |
+
+## Weighted feed anatomy, fifo60 C=128 (2 cells; ESTIMATED weights: pass sizes MEASURED from the trace, depths from the prompt set)
+| GEMM % | attention % | other % | launch+gaps % |
+|---|---|---|---|
+| 78.4 | 15.0 | 4.3 | 2.3 |
+calibration: the grid predicts 41.32 s of feeds for these cells' passes; the trace measured 44.78 s (ratio 1.08)
+RULE VERDICT (anatomy): 1: GEMM >= 65 % -> a new prefill-GEMM proposal with a measured upper-bound gate  [GEMM 78.4 %, launch+gaps 2.3 %]
+#139 (c) C=128 step 60: sjf/fifo short p50 0.41x, long max 0.95x, agg +2.1 % -> PASS; Together (short p50 <= 500, agg >= 1812): FAIL <- DECIDES the sjf default
+#139 (c) C=128 step 50: sjf/fifo short p50 0.63x, long max 0.87x, agg +6.9 % -> FAIL; Together (short p50 <= 500, agg >= 1812): FAIL (reported)
+#139 (c) C=128 step 80: sjf/fifo short p50 0.20x, long max 1.00x, agg +1.4 % -> PASS; Together (short p50 <= 500, agg >= 1812): PASS (reported)
+#139 (c) C=64 step 60: sjf/fifo short p50 0.44x, long max 0.97x, agg -0.6 % -> PASS; Together (short p50 <= 500, agg >= 1812): FAIL (reported)
+#139 (c) C=64 step 50: sjf/fifo short p50 0.22x, long max 0.88x, agg +2.0 % -> PASS; Together (short p50 <= 500, agg >= 1812): FAIL (reported)
+#139 (c) C=64 step 80: sjf/fifo short p50 0.60x, long max 0.96x, agg +1.7 % -> FAIL; Together (short p50 <= 500, agg >= 1812): FAIL (reported)
+#139 (d) C=128 --step-ms 50 vs 60 (fifo): ITL p50 47.0 ms, slo_ok 0.102, agg -14.9 % -> FAIL: 60 stays
+#139 --step-ms 80 vs 60 (fifo, C=128, reported only): agg +7.5 %, ITL p99 101.1 vs 80.0 ms, slo_ok 0.367 vs 0.279
+
+ANAL ok
+[sess +885s] kernel cache now 4 entries (was 1 + kit; more = compiled on this host)
+[sess +885s] SESS H100 DONE rc 0
+[axon-node 07:26:55] exit 0 after 885.4s
+[axon-node 07:26:55] peak RSS 410 MB (job process tree PSS, 2 s samples x440)
+[axon-run 03:26:57] exit 0 after 904.2s (host pod2)
+[axon-run 03:26:58] EXPECT ok: output matches /SESS H100 DONE/
+[axon-run 03:26:58] FOREIGN_GPU max=0% mean=0.0% samples=29
