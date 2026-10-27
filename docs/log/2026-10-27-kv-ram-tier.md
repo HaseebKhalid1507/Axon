@@ -211,3 +211,19 @@ The zeroing is ~7–8 % of the cost; the pinning is the rest.
 - **Known limit:** the idle flush burst, issue #170.
 - **PR C:** #164 was told about the copy-on-write precondition for partial-page restores.
 - **Before any default flip:** the heavy-eviction replay is required.
+
+## Update 2026-10-27: info only, the replay under pool pressure (1027-155046-1ed0)
+Added after rule B was applied, at the foreman's request. It is information, not a rule verdict.
+- **Setup:** 3f0e's speed-4 replay with the pool capped at bella's 98,304 tokens (`--parallel 3`), main 6f06544 vs
+  `--cache-ram 20G` (thread). 2 rounds interleaved, RTX 4090, 0 % foreign GPU.
+- **Binaries:** 181d0d7. 92cb99a only touches error and shutdown handling, plus the pinning poll.
+- **Results**, MEASURED, medians of 2:
+  - md5 same in all 4 runs.
+  - Output 57.4 → 129.5 tok/s.
+  - Goodput 9.6 → 118.6 tok/s.
+  - TTFT-resume p50 13.5 → 0.11 s (2–10 min bucket: 0.077 s).
+  - TTFT-turn p50 11.2 → 0.14 s.
+  - Re-prefill 73.8 % → 0.1 % (2.16M → 2.8k tokens), with 1.6M tokens restored from RAM per run.
+  - ITL p99 68.2 → 63.8 ms (−6.5 %).
+- **What it is:** the first evidence, on the 4090, for the heavy-eviction case required before any default flip. It
+  is not that gate, which needs `AXON_SERVE_TRACE` and bella.
