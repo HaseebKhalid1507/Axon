@@ -1,0 +1,80 @@
+[axon-run 03:39:19] submitted 1027-033919-4bbe by /home/haseeb/.cache/axon-wt-chatcut: /home/haseeb/.cache/axon-chatcut/axon-test-dbg-e55daec chat::tests::long_turn_matches_fresh_prefill_cuda cuda::qwen2::tests::gpu_prompt_chunks_bits serve::tests::serve_cuda_long_prompt_matches_gen --nocapture --test-threads 1
+[axon-run 08:26:51] GPU test run without --vram: claiming 11000 MB (the whole card) on bella; pass --vram to override
+[axon-run 08:26:51] scope axon-job-1027-033919-4bbe-1793104011.scope in app-axonjobs.slice: MemoryMax 2320 MB, MemoryHigh 2088 MB, no swap, oomd pressure kill 80% (claim 864 MB): an OOM here kills only this job
+[axon-run 08:26:51] job 1027-033919-4bbe -> bella: systemd-run --user --scope --quiet --unit=axon-job-1027-033919-4bbe-1793104011 --slice=app-axonjobs.slice -p MemoryMax=2320M -p MemoryHigh=2088M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-chatcut/axon-test-dbg-e55daec chat::tests::long_turn_matches_fresh_prefill_cuda cuda::qwen2::tests::gpu_prompt_chunks_bits serve::tests::serve_cuda_long_prompt_matches_gen --nocapture --test-threads 1
+axon-q 08:26:51 waiting: stagger
+axon-q 08:27:03 start slot 16-23: /home/haseeb/.cache/axon-chatcut/axon-test-dbg-e55daec chat::tests::long_turn_matches_fresh_prefill_cuda cuda::qwen2::tests::gpu_prompt_chunks_bits serve::tests::serve_cuda_long_prompt_matches_gen --n
+
+running 3 tests
+test chat::tests::long_turn_matches_fresh_prefill_cuda ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+passes: 1228 tokens at 0, max 1152, 46 SMs, wave split true: [614, 614]
+passes: 614 tokens at 0, max 1152, 46 SMs, wave split true: [614]
+passes: 614 tokens at 614, max 1152, 46 SMs, wave split true: [614]
+passes: 128 tokens at 0, max 1152, 46 SMs, wave split true: [128]
+passes: 128 tokens at 128, max 1152, 46 SMs, wave split true: [128]
+passes: 128 tokens at 256, max 1152, 46 SMs, wave split true: [128]
+passes: 128 tokens at 384, max 1152, 46 SMs, wave split true: [128]
+passes: 128 tokens at 512, max 1152, 46 SMs, wave split true: [128]
+passes: 128 tokens at 640, max 1152, 46 SMs, wave split true: [128]
+passes: 128 tokens at 768, max 1152, 46 SMs, wave split true: [128]
+passes: 128 tokens at 896, max 1152, 46 SMs, wave split true: [128]
+passes: 128 tokens at 1024, max 1152, 46 SMs, wave split true: [128]
+passes: 75 tokens at 1152, max 1152, 46 SMs, wave split true: [75]
+passes: 1228 tokens at 0, max 1152, 46 SMs, wave split true: [614, 614]
+turn 0: 1228 tokens fed from 0 in [0..614, 614..1228] (46 SMs)
+passes: 16 tokens at 1243, max 1152, 46 SMs, wave split true: [16]
+passes: 16 tokens at 1243, max 1152, 46 SMs, wave split true: [16]
+passes: 128 tokens at 0, max 1152, 46 SMs, wave split true: [128]
+passes: 128 tokens at 128, max 1152, 46 SMs, wave split true: [128]
+passes: 128 tokens at 256, max 1152, 46 SMs, wave split true: [128]
+passes: 128 tokens at 384, max 1152, 46 SMs, wave split true: [128]
+passes: 128 tokens at 512, max 1152, 46 SMs, wave split true: [128]
+passes: 128 tokens at 640, max 1152, 46 SMs, wave split true: [128]
+passes: 128 tokens at 768, max 1152, 46 SMs, wave split true: [128]
+passes: 128 tokens at 896, max 1152, 46 SMs, wave split true: [128]
+passes: 128 tokens at 1024, max 1152, 46 SMs, wave split true: [128]
+passes: 106 tokens at 1152, max 1152, 46 SMs, wave split true: [106]
+passes: 16 tokens at 1243, max 1152, 46 SMs, wave split true: [16]
+turn 1: 16 tokens fed from 1243 in [0..16] (46 SMs)
+ok
+test cuda::qwen2::tests::gpu_prompt_chunks_bits ... passes: 2099 tokens at 0, max 1152, 46 SMs, wave split true: [1088, 1011]
+passes: 1088 tokens at 0, max 1152, 46 SMs, wave split true: [1088]
+passes: 1011 tokens at 1088, max 1152, 46 SMs, wave split true: [1011]
+passes: 2100 tokens at 0, max 1152, 46 SMs, wave split true: [1088, 1012]
+passes: 1088 tokens at 0, max 1152, 46 SMs, wave split true: [1088]
+passes: 1012 tokens at 1088, max 1152, 46 SMs, wave split true: [1012]
+prompt_chunks from 0: [1088, 1012] == per-token decode
+passes: 300 tokens at 0, max 1152, 46 SMs, wave split true: [300]
+passes: 1799 tokens at 300, max 1152, 46 SMs, wave split true: [1088, 711]
+passes: 1088 tokens at 300, max 1152, 46 SMs, wave split true: [1088]
+passes: 711 tokens at 1388, max 1152, 46 SMs, wave split true: [711]
+passes: 300 tokens at 0, max 1152, 46 SMs, wave split true: [300]
+passes: 1800 tokens at 300, max 1152, 46 SMs, wave split true: [1088, 712]
+passes: 1088 tokens at 300, max 1152, 46 SMs, wave split true: [1088]
+passes: 712 tokens at 1388, max 1152, 46 SMs, wave split true: [712]
+prompt_chunks from 300: [1088, 712] == per-token decode
+passes: 899 tokens at 0, max 1152, 46 SMs, wave split true: [899]
+passes: 1200 tokens at 899, max 1152, 46 SMs, wave split true: [768, 432]
+passes: 768 tokens at 899, max 1152, 46 SMs, wave split true: [768]
+passes: 432 tokens at 1667, max 1152, 46 SMs, wave split true: [432]
+passes: 899 tokens at 0, max 1152, 46 SMs, wave split true: [899]
+passes: 1201 tokens at 899, max 1152, 46 SMs, wave split true: [768, 433]
+passes: 768 tokens at 899, max 1152, 46 SMs, wave split true: [768]
+passes: 433 tokens at 1667, max 1152, 46 SMs, wave split true: [433]
+prompt_chunks from 899: [768, 433] == per-token decode
+passes: 1152 tokens at 0, max 1152, 46 SMs, wave split true: [1152]
+passes: 1152 tokens at 0, max 1152, 46 SMs, wave split true: [1152]
+passes: 1151 tokens at 0, max 1152, 46 SMs, wave split true: [1151]
+passes: 1151 tokens at 0, max 1152, 46 SMs, wave split true: [1151]
+ok
+test serve::tests::serve_cuda_long_prompt_matches_gen ... passes: 1200 tokens at 0, max 1152, 46 SMs, wave split true: [768, 432]
+1201 tokens: job feeds [0..768, 768..1200]
+passes: 1201 tokens at 0, max 1152, 46 SMs, wave split true: [768, 433]
+passes: 1200 tokens at 0, max 1152, 46 SMs, wave split true: [768, 432]
+passes: 768 tokens at 0, max 1152, 46 SMs, wave split true: [768]
+passes: 432 tokens at 768, max 1152, 46 SMs, wave split true: [432]
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 769 filtered out; finished in 6.23s
+
+[axon-run 08:27:09] exit 0 after 18.5s (host bella)
