@@ -11319,3 +11319,107 @@ fn cuda_w4a8_p1_session() {
         panic!("P1 stages failed: {}", fails.join(", "));
     }
 }
+
+/// Diagnostic for P1 (1027-151227-e203; design note section 4's ruling): the W4A8 arm's launcher
+/// (`launch_w4a8_k`) called `g.info()` inside every timed launch, and the baseline arm's didn't. This times a
+/// baseline kernel (gemm2s_q4_k, q/wo 3584 x 3584, mode 1) both ways in the P1 bench's memory context (its
+/// matrices, activations and outputs allocated), interleaved, 7 rounds x 3 launches, at nb 64..1024, plus
+/// `g.info()` alone. Any GPU with int8 tensor cores (bella).
+#[test]
+#[ignore]
+fn cuda_w4a8_harness_infocost() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    if !km.mma() {
+        eprintln!("skipping: no int8 tensor cores");
+        return;
+    }
+    let mut rng = Rng(0x1f0c_0577);
+    // The P1 bench's allocations: the four products' matrices, both K's activations (1024 tokens), outputs.
+    let mut keep = Vec::new();
+    for &(qt, rows, cols) in &[
+        (Q4_K, 18944usize, 3584usize),
+        (Q4_K, 18944, 3584),
+        (Q4_K, 3584, 18944),
+        (Q6_K, 3584, 18944),
+        (Q4_K, 3584, 3584),
+    ] {
+        keep.push(g.upload(&synth_matrix(&mut rng, qt, rows, cols)).unwrap());
+    }
+    let mut acts = std::collections::HashMap::new();
+    for cols in [3584usize, 18944] {
+        let xs: Vec<Vec<f32>> = (0..1024).map(|_| rng.vec(cols, 1.0)).collect();
+        acts.insert(cols, quantize_batch(&g, &km, &xs, cols));
+    }
+    let (rows, cols) = (3584usize, 3584usize);
+    let w = &keep[4];
+    let act = &acts[&cols];
+    let st = act_stride_t(cols);
+    let outs: Vec<DevBuf> = (0..4).map(|_| g.alloc(18944 * 1024 * 4).unwrap()).collect();
+    let k = "gemm2s_q4_k";
+    let f = km.function(k).unwrap();
+    // A: as the baseline arm (launch_product); B: the same plus g.info() per launch, as launch_w4a8_k did.
+    let run = |nb: usize, with_info: bool| {
+        if with_info {
+            let _ = g.info().unwrap().sms;
+        }
+        let common = [
+            w.arg(),
+            Arg::U64(quant::row_bytes(Q4_K, cols) as u64),
+            Arg::I32(rows as i32),
+            Arg::I32(cols as i32),
+            act.arg(),
+            Arg::U64(st as u64),
+            Arg::I32(nb as i32),
+            Arg::Ptr(0),
+            Arg::I32(1),
+            outs[with_info as usize].arg(),
+            Arg::U64(rows as u64),
+        ];
+        // SAFETY: gemm2s's signature; w rows x cols Q4_K, act >= nb tokens, out rows * nb floats.
+        unsafe { launch_product(&g, &f, k, Q4_K, rows, nb, &common) };
+    };
+    for nb in [64usize, 256, 512, 1024] {
+        let mut ms = [Vec::new(), Vec::new()];
+        for rd in 0..7 {
+            for o in 0..2 {
+                let i = (o + rd) % 2;
+                run(nb, i == 1);
+                let e0 = g.record().unwrap();
+                for _ in 0..3 {
+                    run(nb, i == 1);
+                }
+                let e1 = g.record().unwrap();
+                ms[i].push(e0.ms_to(&e1).unwrap() as f64 / 3.0);
+            }
+        }
+        g.sync().unwrap();
+        let st = |v: &mut Vec<f64>| {
+            v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            (v[3], v[0], v[6])
+        };
+        let (a, al, ah) = st(&mut ms[0]);
+        let (b, bl, bh) = st(&mut ms[1]);
+        eprintln!(
+            "W4A8 HARNESS q/wo {k} nb {nb}: plain {a:.4} ms ({al:.4}..{ah:.4}), +g.info() {b:.4} ms ({bl:.4}..{bh:.4}), delta {:+.4} ms",
+            b - a
+        );
+    }
+    let mut v = Vec::new();
+    for _ in 0..200 {
+        let t = std::time::Instant::now();
+        let _ = g.info().unwrap();
+        v.push(t.elapsed().as_secs_f64() * 1e3);
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    eprintln!(
+        "W4A8 HARNESS g.info() alone in this context: median {:.4} ms, p90 {:.4}, max {:.4} ({} buffers live)",
+        v[100],
+        v[180],
+        v[199],
+        keep.len() + acts.len() + outs.len()
+    );
+    eprintln!("W4A8 HARNESS END ok");
+}
