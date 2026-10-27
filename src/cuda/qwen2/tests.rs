@@ -5837,7 +5837,6 @@ fn attn_bench(
     best
 }
 
-
 /// The serve pool's decode attention (batch.rs `rows`, tensor cores): nb
 /// rows, each its own sequence at position `depth` in its own slot (rp),
 /// the path the pool step takes today: att_per_query (16 at 128-wide heads)
@@ -5847,7 +5846,11 @@ fn attn_bench(
 /// (f16,q8), AXON_ATT_SHAPE (28,4,128). Per point a `POOL` line: the
 /// median and best of 7 timed steps (each one pass over all nb rows) of
 /// attn alone, combine alone, and both interleaved as batch.rs runs them,
-/// and the KV bytes read / (attn + cmb) in GB/s. MEASURE, not a check.
+/// and the KV bytes read / (attn + cmb) in GB/s; then batch.rs's
+/// attn_blk_nb path (nb_split slices, AXON_ATT_NB_S forces it) on the same
+/// rows and its speedup over "both". "cmb" alone rereads one launch's
+/// partials, L2-hot; in "both" the KV stream has evicted them. MEASURE,
+/// not a check.
 #[test]
 #[ignore]
 fn cuda_attn_pool_bench() {
@@ -5934,6 +5937,18 @@ fn cuda_attn_pool_bench() {
                 })
                 .unwrap();
             let fc = km.function("attn_cmb_b").unwrap();
+            let kg = if q8 { hd } else { 0 };
+            let fnb = km
+                .function(&if q8 {
+                    format!("attn_blk_nb_q8_{hd}")
+                } else {
+                    format!("attn_blk_nb_{hd}")
+                })
+                .unwrap();
+            let nsm = batch::nb_smem(hd, kg);
+            fnb.set_max_shared(nsm).unwrap();
+            let fq = km.function("quantize_b").unwrap();
+            let yq = g.alloc(nb_max * dim * 4).unwrap();
             for &nb in &nbs {
                 let rp: Vec<u32> = (0..nb)
                     .flat_map(|z| [depth as u32, (z * ctx + depth) as u32])
@@ -5991,12 +6006,103 @@ fn cuda_attn_pool_bench() {
                         }
                     }
                 };
-                let mut t = [vec![], vec![], vec![]];
+                // batch.rs's attn_blk_nb path (nb_split), y into its own
+                // buffer (q stays the input).
+                let sl = batch::nb_split(nb, nkv, gi.sms as usize);
+                let step_nb = || {
+                    let launch = |z0: usize, nz: usize, s: usize, y: Arg| {
+                        let mut a = vec![q.arg()];
+                        a.extend(bufs.iter().map(|b| b.arg()));
+                        a.extend([
+                            Arg::I32(0),
+                            Arg::I32(z0 as i32),
+                            Arg::I32(nh as i32),
+                            Arg::I32(nkv as i32),
+                            pre,
+                            Arg::I32(nblk_max as i32),
+                            po.arg(),
+                            pm.arg(),
+                            rp.arg(),
+                            Arg::Ptr(0),
+                            y,
+                        ]);
+                        // SAFETY: prefill.cu attn_blk_nb's signature; as above.
+                        unsafe {
+                            g.launch(
+                                &fnb,
+                                (nkv as u32, s as u32, nz as u32),
+                                (128, 1, 1),
+                                nsm as u32,
+                                &a,
+                            )
+                        }
+                        .unwrap();
+                    };
+                    if sl == 1 {
+                        launch(0, nb, 1, yq.arg());
+                        // SAFETY: prefill.cu quantize_b's signature.
+                        unsafe {
+                            g.launch(
+                                &fq,
+                                (dim.div_ceil(256) as u32, nb as u32, 1),
+                                (32, 1, 1),
+                                0,
+                                &[
+                                    yq.arg(),
+                                    Arg::I32(dim as i32),
+                                    Arg::I32(0),
+                                    act.arg(),
+                                    Arg::U64(ast as u64),
+                                ],
+                            )
+                        }
+                        .unwrap();
+                    } else {
+                        for z0 in (0..nb).step_by(per) {
+                            let nz = (nb - z0).min(per);
+                            launch(
+                                z0,
+                                nz,
+                                batch::nb_split(nz, nkv, gi.sms as usize).max(2),
+                                Arg::Ptr(0),
+                            );
+                            // SAFETY: prefill.cu attn_cmb_b's signature.
+                            unsafe {
+                                g.launch(
+                                    &fc,
+                                    (dim.div_ceil(256) as u32, nz as u32, 1),
+                                    (256, 1, 1),
+                                    0,
+                                    &[
+                                        po.arg(),
+                                        pm.arg(),
+                                        Arg::I32(0),
+                                        Arg::I32(z0 as i32),
+                                        Arg::I32(dim as i32),
+                                        Arg::I32(hd as i32),
+                                        Arg::I32(nblk_max as i32),
+                                        Arg::I32(0),
+                                        act.arg(),
+                                        Arg::U64(ast as u64),
+                                        rp.arg(),
+                                    ],
+                                )
+                            }
+                            .unwrap();
+                        }
+                    }
+                };
+                let mut t = [vec![], vec![], vec![], vec![]];
                 step(2);
+                step_nb();
                 for _ in 0..7 {
-                    for w in 0..3u32 {
+                    for w in 0..4u32 {
                         let e0 = g.record().unwrap();
-                        step(w);
+                        if w == 3 {
+                            step_nb();
+                        } else {
+                            step(w);
+                        }
                         let e1 = g.record().unwrap();
                         t[w as usize].push(e0.ms_to(&e1).unwrap() as f64);
                     }
@@ -6008,17 +6114,274 @@ fn cuda_attn_pool_bench() {
                 let (a, ab) = md(&mut t[0]);
                 let (c, cb) = md(&mut t[1]);
                 let (s, sb) = md(&mut t[2]);
+                let (n, nbest) = md(&mut t[3]);
                 // KV bytes the step must read: nb rows x (depth + 1)
                 // positions x K and V.
                 let per_pos = if q8 { 2 * (kvd + nkv * 4) } else { 2 * kvd * 2 };
                 let gbs = (nb * (depth + 1) * per_pos) as f64 / (s * 1e-6) / 1e9;
+                let gbn = (nb * (depth + 1) * per_pos) as f64 / (n * 1e-6) / 1e9;
                 eprintln!(
                     "POOL kv {kv} depth {depth} nb {nb} launches {} attn {a:.1} ({ab:.1}) \
-                     cmb {c:.1} ({cb:.1}) both {s:.1} ({sb:.1}) us/layer KV {gbs:.0} GB/s",
-                    2 * nb.div_ceil(per)
+                     cmb {c:.1} ({cb:.1}) both {s:.1} ({sb:.1}) us/layer KV {gbs:.0} GB/s | \
+                     nb S {sl} {n:.1} ({nbest:.1}) us KV {gbn:.0} GB/s speedup {:.2}x",
+                    2 * nb.div_ceil(per),
+                    s / n
                 );
             }
         }
+    }
+}
+
+/// attn_blk_nb (prefill.cu) against attn_blk_b + attn_cmb_b, the pool path
+/// it replaces: act bit for bit, the fold in the block (S = 1, then
+/// quantize_b) and slices into partials (S = 2, 3, 7, then attn_cmb_b),
+/// f16 / q8 / q8g32, 128- and 64-wide heads, plain rows (rp) and paged
+/// (a table per row, pages shuffled), ragged depths (1, 63, 64, 65, ..),
+/// want_k off and on.
+#[test]
+fn cuda_attn_nb_exact() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    if !km.mma() {
+        eprintln!("skipping: no tensor cores");
+        return;
+    }
+    let sms = g.info().unwrap().sms as usize;
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+    let depths = [1usize, 63, 64, 65, 128, 129, 600, 1000, 1023, 1500];
+    for (nh, nkv, hd) in [(28usize, 4usize, 128usize), (14, 2, 64)] {
+        let nb = 40;
+        let dim = nh * hd;
+        let kvd = nkv * hd;
+        let per = batch::att_per_query(hd);
+        let pos: Vec<usize> = (0..nb)
+            .map(|z| {
+                if z < depths.len() {
+                    depths[z]
+                } else {
+                    (next() % 1600) as usize
+                }
+            })
+            .collect();
+        let ctx = (pos.iter().max().unwrap() + 1).next_multiple_of(64);
+        let nblk_max = ctx / 64;
+        let rows = nb * ctx;
+        let qh: Vec<f32> = (0..nb * dim)
+            .map(|_| (next() >> 40) as f32 / (1u64 << 22) as f32 - 2.0)
+            .collect();
+        let q = g.upload(&qh).unwrap();
+        let po = g.alloc(per * nh * nblk_max * hd * 4).unwrap();
+        let pm = g.alloc(per * nh * nblk_max * 2 * 4).unwrap();
+        let ast = act_stride_t(dim);
+        let act_ref = g.alloc(nb * ast).unwrap();
+        let act = g.alloc(nb * ast).unwrap();
+        let f16 = g
+            .upload(
+                &(0..2 * rows * kvd)
+                    .map(|_| {
+                        let r = next();
+                        ((r & 0x83ff) | ((11 + (r >> 16) % 5) << 10)) as u16
+                    })
+                    .collect::<Vec<u16>>(),
+            )
+            .unwrap();
+        let i8s = g
+            .upload(
+                &(0..2 * rows * kvd)
+                    .map(|_| next() as u8)
+                    .collect::<Vec<u8>>(),
+            )
+            .unwrap();
+        let scs = g
+            .upload(
+                &(0..2 * rows * kvd / 32)
+                    .map(|_| (1 + next() % 64) as f32 / 2048.0)
+                    .collect::<Vec<f32>>(),
+            )
+            .unwrap();
+        // Paged: row z's table at z * nblk_max, its pages a shuffle of the
+        // slot's (any page of the cache would do).
+        let mut tabv: Vec<u32> = (0..(nb * nblk_max) as u32).collect();
+        for i in (1..tabv.len()).rev() {
+            tabv.swap(i, (next() % (i as u64 + 1)) as usize);
+        }
+        let tab = g.upload(&tabv).unwrap();
+        for paged in [false, true] {
+            let rpv: Vec<u32> = (0..nb)
+                .flat_map(|z| {
+                    let second = if paged {
+                        z * nblk_max
+                    } else {
+                        z * ctx + pos[z]
+                    };
+                    [pos[z] as u32, second as u32]
+                })
+                .collect();
+            let rp = g.upload(&rpv).unwrap();
+            let tabarg = if paged { tab.arg() } else { Arg::Ptr(0) };
+            for (mode, kg) in [("f16", 0usize), ("q8", hd), ("q8g32", 32)] {
+                let kvargs: Vec<Arg> = if kg == 0 {
+                    vec![f16.arg(), f16.arg_at(rows * kvd * 2)]
+                } else {
+                    vec![
+                        i8s.arg(),
+                        i8s.arg_at(rows * kvd),
+                        scs.arg(),
+                        scs.arg_at(rows * kvd / kg * 4),
+                    ]
+                };
+                let sfx = if kg == 0 {
+                    format!("{hd}")
+                } else {
+                    format!("{mode}_{hd}")
+                };
+                let fb = km.function(&format!("attn_blk_b_{sfx}")).unwrap();
+                let fnb = km.function(&format!("attn_blk_nb_{sfx}")).unwrap();
+                let smem = batch::nb_smem(hd, kg);
+                fnb.set_max_shared(smem).unwrap();
+                let fc = km.function("attn_cmb_b").unwrap();
+                let fq = km.function("quantize_b").unwrap();
+                let pre = Arg::F32(att_pre(hd));
+                let gy = ((8 * sms / nkv).clamp(1, MAX_SPLIT)).min(nblk_max) as u32;
+                for want_k in [0, 1] {
+                    let cmb = |z0: usize, nz: usize, out: &DevBuf| {
+                        // SAFETY: prefill.cu attn_cmb_b's signature.
+                        unsafe {
+                            g.launch(
+                                &fc,
+                                (dim.div_ceil(256) as u32, nz as u32, 1),
+                                (256, 1, 1),
+                                0,
+                                &[
+                                    po.arg(),
+                                    pm.arg(),
+                                    Arg::I32(0),
+                                    Arg::I32(z0 as i32),
+                                    Arg::I32(dim as i32),
+                                    Arg::I32(hd as i32),
+                                    Arg::I32(nblk_max as i32),
+                                    Arg::I32(want_k),
+                                    out.arg(),
+                                    Arg::U64(ast as u64),
+                                    rp.arg(),
+                                ],
+                            )
+                        }
+                        .unwrap();
+                    };
+                    let head = |z0: usize, qa: Arg| {
+                        let mut a = vec![qa];
+                        a.extend_from_slice(&kvargs);
+                        a.extend([
+                            Arg::I32(0),
+                            Arg::I32(z0 as i32),
+                            Arg::I32(nh as i32),
+                            Arg::I32(nkv as i32),
+                            pre,
+                            Arg::I32(nblk_max as i32),
+                            po.arg(),
+                            pm.arg(),
+                            rp.arg(),
+                            tabarg,
+                        ]);
+                        a
+                    };
+                    act_ref.zero().unwrap();
+                    for z0 in (0..nb).step_by(per) {
+                        let nz = (nb - z0).min(per);
+                        // SAFETY: attn_blk_b(_q8)'s signature; buffers as sized above.
+                        unsafe {
+                            g.launch(
+                                &fb,
+                                (nkv as u32, gy, nz as u32),
+                                (32, 1, 1),
+                                0,
+                                &head(z0, q.arg()),
+                            )
+                        }
+                        .unwrap();
+                        cmb(z0, nz, &act_ref);
+                    }
+                    let want = act_ref.read::<u8>().unwrap();
+                    for s in [1usize, 2, 3, 7] {
+                        act.zero().unwrap();
+                        if s == 1 {
+                            // y in place of q: on a copy, q stays the input.
+                            let qcopy = g.upload(&qh).unwrap();
+                            let mut a = head(0, qcopy.arg());
+                            a.push(qcopy.arg());
+                            // SAFETY: attn_blk_nb's signature; smem nb_smem.
+                            unsafe {
+                                g.launch(
+                                    &fnb,
+                                    (nkv as u32, 1, nb as u32),
+                                    (128, 1, 1),
+                                    smem as u32,
+                                    &a,
+                                )
+                            }
+                            .unwrap();
+                            // SAFETY: prefill.cu quantize_b's signature.
+                            unsafe {
+                                g.launch(
+                                    &fq,
+                                    (dim.div_ceil(256) as u32, nb as u32, 1),
+                                    (32, 1, 1),
+                                    0,
+                                    &[
+                                        qcopy.arg(),
+                                        Arg::I32(dim as i32),
+                                        Arg::I32(want_k),
+                                        act.arg(),
+                                        Arg::U64(ast as u64),
+                                    ],
+                                )
+                            }
+                            .unwrap();
+                        } else {
+                            for z0 in (0..nb).step_by(per) {
+                                let nz = (nb - z0).min(per);
+                                let mut a = head(z0, q.arg());
+                                a.push(Arg::Ptr(0));
+                                // SAFETY: as above.
+                                unsafe {
+                                    g.launch(
+                                        &fnb,
+                                        (nkv as u32, s as u32, nz as u32),
+                                        (128, 1, 1),
+                                        smem as u32,
+                                        &a,
+                                    )
+                                }
+                                .unwrap();
+                                cmb(z0, nz, &act);
+                            }
+                        }
+                        let got = act.read::<u8>().unwrap();
+                        let bad = (0..nb)
+                            .find(|&z| got[z * ast..z * ast + ast] != want[z * ast..z * ast + ast]);
+                        assert!(
+                            bad.is_none(),
+                            "{nh}/{nkv}x{hd} {mode} paged {paged} want_k {want_k} S {s}: row {:?} \
+                             (position {:?}) differs from attn_blk_b + attn_cmb_b",
+                            bad,
+                            bad.map(|z| pos[z])
+                        );
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "attn_blk_nb {nh}/{nkv}x{hd}: f16 / q8 / q8g32, plain and paged, S 1/2/3/7 = attn_blk_b"
+        );
     }
 }
 /// The flash attention kernels side by side, sustained (AXON_FA_LOOP

@@ -62,6 +62,49 @@ pub(super) const ATT_SUB: usize = 64;
 pub(super) fn att_per_query(head_dim: usize) -> usize {
     if head_dim == 64 { 48 } else { SMALL }
 }
+/// The serve pool's steps (`rows`) of at least this many rows on the tensor
+/// cores take prefill.cu attn_blk_nb (a CTA of 4 warps per row and kv head
+/// streaming its blocks) instead of attn_blk_b per `att_per_query` rows:
+/// the same bits (its comment). Fewer rows keep attn_blk_b.
+pub(super) const ATT_NB_MIN: usize = 32;
+/// attn_blk_nb's cp.async stages (prefill.cu ATTN_BLK_NB*'s ST).
+pub(super) const ATT_NB_ST: usize = 2;
+
+/// attn_blk_nb's dynamic shared memory (prefill.cu NbSmem): per stage the
+/// K and V tiles (f16) or their raw rows and scales (q8, group kg; 0 = hd),
+/// q8's two converted tiles, ps and mx.
+pub(super) fn nb_smem(hd: usize, kg: usize) -> usize {
+    let kgs = if kg == 0 { hd } else { kg };
+    let tile = 64 * hd * 2;
+    let q8 = kg != 0;
+    let stage = if q8 {
+        2 * 64 * hd + 2 * 64 * (hd / kgs) * 4
+    } else {
+        2 * tile
+    };
+    (if q8 { 2 * tile } else { 0 }) + ATT_NB_ST * stage + 8 * 32 * 4 * 4 + 5 * 64 * 4
+}
+
+/// attn_blk_nb's slices per (row, kv head) for a launch of `rows` rows:
+/// 1 (the block folds the row itself, no partials, quantize_b after) once
+/// rows x n_kv blocks fill the GPU (one per SM), else enough slices of each
+/// row's blocks for two blocks per SM (partials + attn_cmb_b; slices past a
+/// row's blocks exit at once). AXON_ATT_NB_S forces it (the H100 sweep).
+/// Any value gives the same bits.
+pub(super) fn nb_split(rows: usize, n_kv: usize, sms: usize) -> usize {
+    if let Some(s) = std::env::var("AXON_ATT_NB_S")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+    {
+        return s.max(1);
+    }
+    let ctas = rows * n_kv;
+    if ctas >= sms {
+        1
+    } else {
+        (2 * sms).div_ceil(ctas.max(1))
+    }
+}
 /// Tokens per output-head launch in `verify_argmax` (sizes the logits).
 pub(super) const HEAD_SUB: usize = 16;
 
@@ -591,6 +634,11 @@ pub(super) struct BatchFns<'m> {
     /// fold: batches of at most att_per_query tokens.
     attn_blk: Func<'m>,
     attn_cmb: Func<'m>,
+    /// The pool's rows (>= ATT_NB_MIN) on the tensor cores: attn_blk_nb
+    /// (`nb_smem`, `nb_split`); `attn_nb_on` false (AXON_ATT_NB=0) keeps
+    /// attn_blk_b for them (A/B in one binary).
+    attn_nb: Func<'m>,
+    pub(super) attn_nb_on: bool,
     /// The same partials 16 queries of one sequence at a time (decode.cu
     /// attn_mq_t): `mq_smem`.
     attn_mq: Func<'m>,
@@ -758,6 +806,14 @@ impl<'m> BatchFns<'m> {
                 "attn_blk_b_128"
             })?,
             attn_cmb: module.function("attn_cmb_b")?,
+            attn_nb: {
+                let f = module.function(&format!("attn_blk_nb_{head_dim}"))?;
+                if module.mma() {
+                    f.set_max_shared(nb_smem(head_dim, 0))?;
+                }
+                f
+            },
+            attn_nb_on: std::env::var("AXON_ATT_NB").map_or(true, |v| v != "0"),
             attn_mq: {
                 let f = module.function(&format!("attn_blk_mq_{head_dim}"))?;
                 if module.mma() {
@@ -1780,6 +1836,92 @@ impl<'g> CudaQwen2<'g> {
                     ],
                 )?;
                 on("combine")?;
+            } else if rows
+                && nb >= ATT_NB_MIN
+                && self.tc_attn
+                && bf.attn_nb_on
+                && self.gemma.is_none()
+                && l.oss.is_none()
+            {
+                // The pool's step, many rows (prefill.cu attn_blk_nb): every
+                // row in one launch, folded in the block and quantize_b after
+                // (nb_split 1), or slices of the rows' blocks into
+                // attn_blk_b's partials and attn_cmb_b, att_per_query rows
+                // at a time. attn_blk_b + attn_cmb_b's bits either way.
+                let f = match q8 {
+                    false => &bf.attn_nb,
+                    true => &self.q8_fns(mode).attn_blk_nb,
+                };
+                let smem = nb_smem(hd, kg) as u32;
+                let launch = |z0: usize, nz: usize, sl: usize| {
+                    let mut args = vec![b.q.arg()];
+                    args.extend_from_slice(kv);
+                    args.extend_from_slice(&[
+                        Arg::I32(start as i32),
+                        Arg::I32(z0 as i32),
+                        Arg::I32(self.n_heads as i32),
+                        Arg::I32(self.n_kv_heads as i32),
+                        pre,
+                        Arg::I32(b.nblk_max as i32),
+                        b.part_o.arg(),
+                        b.part_ml.arg(),
+                        rp,
+                        tab,
+                        b.q.arg(),
+                    ]);
+                    g.launch(
+                        f,
+                        (self.n_kv_heads as u32, sl as u32, nz as u32),
+                        (128, 1, 1),
+                        smem,
+                        &args,
+                    )
+                };
+                if nb_split(nb, self.n_kv_heads, bf.sms) == 1 {
+                    launch(0, nb, 1)?;
+                    on("attn")?;
+                    g.launch(
+                        &bf.quantize,
+                        (qd.div_ceil(256) as u32, nbu, 1),
+                        (32, 1, 1),
+                        0,
+                        &[
+                            b.q.arg(),
+                            Arg::I32(qd as i32),
+                            want_k(qd),
+                            b.act.arg(),
+                            Arg::U64(ast as u64),
+                        ],
+                    )?;
+                    on("combine")?;
+                } else {
+                    let per = att_per_query(hd);
+                    for z0 in (0..nb).step_by(per) {
+                        let nz = (nb - z0).min(per);
+                        launch(z0, nz, nb_split(nz, self.n_kv_heads, bf.sms).max(2))?;
+                        on("attn")?;
+                        g.launch(
+                            &bf.attn_cmb,
+                            (qd.div_ceil(256) as u32, nz as u32, 1),
+                            (256, 1, 1),
+                            0,
+                            &[
+                                b.part_o.arg(),
+                                b.part_ml.arg(),
+                                Arg::I32(start as i32),
+                                Arg::I32(z0 as i32),
+                                Arg::I32(qd as i32),
+                                Arg::I32(hd as i32),
+                                Arg::I32(b.nblk_max as i32),
+                                want_k(qd),
+                                b.act.arg(),
+                                Arg::U64(ast as u64),
+                                rp,
+                            ],
+                        )?;
+                        on("combine")?;
+                    }
+                }
             } else {
                 // A few queries (the verify pass), or no tensor cores: the
                 // decode kernels per query (the same code), attn_blk_t, or

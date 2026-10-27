@@ -385,6 +385,220 @@ extern "C" __global__ void attn_cmb_b(const float* __restrict__ part_o,
                  nullptr);
 }
 
+
+// ---------------------------------------------------------------------------
+// The serve pool's decode attention for many rows (batch.rs `rows`, nb >=
+// ATT_NB_MIN): attn_blk_b's per-block steps 1-8 and attn_cmb_b's fold, with
+// a CTA of 4 warps per (row, kv head) streaming its blocks through ST
+// cp.async stages instead of a warp per (row, kv head, block).
+// Block (kv head blockIdx.x, slice blockIdx.y of gridDim.y = S, row z = z0
+// + blockIdx.z) takes the row's blocks b in [s k, min((s + 1) k, nblk)), k =
+// ceil(nblk / S), in ascending order. Per block, steps 1-8 are attn_blk_t's
+// NW = 4 code (att_qfrag, att_load / att_load_q8 + att_cvt_q8,
+// att_scores_n2, att_blk_l, att_pv), so a block's (o_b, m_b, l_b) are
+// attn_blk_b's bits (attn_blk_t: the same for any NW); which stage a tile
+// sits in changes no arithmetic.
+// S > 1: those partials are stored in attn_blk_b's layout (part_* per row
+// of the launch, stride nblk_max) and attn_cmb_b folds them, unchanged.
+// S = 1: the block holds all of the row's blocks in order, so it runs
+// attn_cmb_dev's fold itself on the values it would have stored (part_o is
+// f32: the store and reload were exact): per block att_fold_w(M, m_b) ->
+// (M, alpha, w) with M the running fmaxf (attn_cmb_dev's prefix scan:
+// fmaxf is exact and order-free), O[d] = att_fold_o(O[d], o_b[d], alpha,
+// w), L = att_fold_o(L, l_b, alpha, w), blocks 0 .. nblk - 1; then y[d] =
+// __fdiv_rn(O[d], L) in place of q (the block's own rows, read before any
+// is written) and quantize_b makes act: quant_warp on the same 8
+// consecutive outputs per lane as attn_cmb_dev. So act has attn_blk_b +
+// attn_cmb_b's bits either way. Grid (n_kv, S, nz) x 128, nb_smem<HD, KG,
+// ST> bytes of dynamic shared memory (batch.rs nb_smem).
+#define ATT_NB_NW 4
+template <int HD, int KG, int ST>
+struct NbSmem {
+    static constexpr bool Q8 = KG > 0;
+    static constexpr int KGs = Q8 ? KG : 1;
+    static constexpr int TILE = ATT_BLK * HD * 2;                       // one f16 tile, bytes
+    static constexpr int RAW = 2 * ATT_BLK * HD + 2 * ATT_BLK * (HD / KGs) * 4; // q8 K + V raw
+    static constexpr int STAGE = Q8 ? RAW : 2 * TILE;
+    static constexpr int PS = 8 * 32 * 4 * 4, MX = (ATT_NB_NW + 1) * 64 * 4;
+    // q8: K and V converted into two f16 tiles in one pass per block.
+    static constexpr int BYTES = (Q8 ? 2 * TILE : 0) + ST * STAGE + PS + MX;
+};
+
+#if __CUDA_ARCH__ >= 800
+// Step 8 for warp W's dims, folded into (O) by the S = 1 rule above.
+template <int HD, int W>
+__device__ __forceinline__ void nb_pv_fold(const u32 (*pa)[4], unsigned short* vt,
+                                           float (*O)[2], float alpha, float w) {
+    constexpr int ND = HD / ATT_NB_NW, D0 = W * ND;
+    float o[ND / 8][4];
+    att_pv<HD, D0, ND>(o, pa, vt);
+#pragma unroll
+    for (int n = 0; n < ND / 8; n++) {
+        O[n][0] = att_fold_o(O[n][0], o[n][0], alpha, w);
+        O[n][1] = att_fold_o(O[n][1], o[n][1], alpha, w);
+    }
+}
+#endif
+
+template <int HD, int KG, int ST>
+__device__ __forceinline__ void attn_blk_nbt(const float* q, const unsigned short* kc0,
+                                             const unsigned short* vc0, int start, int z0,
+                                             int n_heads, int n_kv, float pre, int nblk_max,
+                                             float* part_o, float* part_ml, const u32* rp,
+                                             const u32* tab0, Q8Kv q80, float* y) {
+#if __CUDA_ARCH__ >= 800
+    constexpr int NW = ATT_NB_NW, NT = 32 * NW;
+    using L_ = NbSmem<HD, KG, ST>;
+    constexpr bool Q8 = L_::Q8;
+    constexpr int KGs = L_::KGs;
+    static_assert(ST >= 2, "two stages at least");
+    extern __shared__ __align__(16) unsigned char nb_sm[];
+    // q8: the f16 K and V tiles first, then the stages of raw rows.
+    unsigned short* cvt = (unsigned short*)nb_sm;
+    unsigned char* stg0 = nb_sm + (Q8 ? 2 * L_::TILE : 0);
+    float* ps = (float*)(stg0 + ST * L_::STAGE);
+    float* mx = ps + 8 * 32 * 4;
+    int zl = blockIdx.z, z = z0 + zl, kvh = blockIdx.x;
+    int tid = threadIdx.x, lane = tid & 31, wi = tid >> 5, group = n_heads / n_kv;
+    int kv_dim = n_kv * HD, g0 = lane >> 2;
+    u64 nh = n_heads, e = rp_base(rp, z, tab0) * (u64)kv_dim;
+    const unsigned short* kc = kv_at(kc0, e);
+    const unsigned short* vc = kv_at(vc0, e);
+    Q8Kv q8 = q8_at<KG>(q80, e);
+    const u32* tab = rp_tab(rp, z, tab0);
+    int np = rp_pos(rp, start, z) + 1;
+    int nblk = (np + ATT_BLK - 1) / ATT_BLK, S = gridDim.y;
+    int k = (nblk + S - 1) / S, b0 = blockIdx.y * k, b1 = min(b0 + k, nblk);
+    if (b0 >= b1) return;
+    bool fuse = S == 1;
+    float* qz = (float*)q + (u64)z * nh * HD;
+    const float* qrow = qz + kvh * group * HD;
+    u32 qa[HD / 16][4];
+    att_qfrag<HD>(qa, g0 < group ? qrow + g0 * HD : nullptr, nullptr, pre);
+    auto issue = [&](int b, int st) {
+        int t0 = b * ATT_BLK;
+        u32 rb = att_rb(tab, t0);
+        unsigned char* s = stg0 + st * L_::STAGE;
+        if constexpr (Q8) {
+            signed char* r8 = (signed char*)s;
+            float* rs = (float*)(s + 2 * ATT_BLK * HD);
+            att_load_q8<HD, KGs>(r8, rs, q8.k, q8.ks, t0, np, kv_dim, kvh, tid, NT, rb);
+            att_load_q8<HD, KGs>(r8 + ATT_BLK * HD, rs + ATT_BLK * HD / KGs, q8.v, q8.vs, t0, np,
+                                 kv_dim, kvh, tid, NT, rb);
+        } else {
+            unsigned short* t = (unsigned short*)s;
+            att_load<HD>(t, kc, t0, np, kv_dim, kvh, tid, NT, rb);
+            att_load<HD>(t + ATT_BLK * HD, vc, t0, np, kv_dim, kvh, tid, NT, rb);
+        }
+    };
+    // Prologue: blocks b0 .. b0 + ST - 2, one commit group each (empty
+    // groups past b1 keep the count uniform).
+#pragma unroll
+    for (int i = 0; i < ST - 1; i++) {
+        if (b0 + i < b1) issue(b0 + i, i);
+        att_commit();
+    }
+    constexpr int ND = HD / NW;
+    float O[ND / 8][2], M = -INFINITY, Lsum = 0.0f;
+#pragma unroll
+    for (int n = 0; n < ND / 8; n++) O[n][0] = O[n][1] = 0.0f;
+    for (int b = b0, it = 0; b < b1; b++, it++) {
+        int st = it % ST;
+        // The stage block b + ST - 1 goes to was last read in iteration it
+        // - 1, which ended with a barrier.
+        if (b + ST - 1 < b1) issue(b + ST - 1, (it + ST - 1) % ST);
+        att_commit();
+        att_wait<ST - 1>();
+        __syncthreads();
+        unsigned char* s = stg0 + st * L_::STAGE;
+        unsigned short *kt, *vt;
+        if constexpr (Q8) {
+            signed char* r8 = (signed char*)s;
+            float* rs = (float*)(s + 2 * ATT_BLK * HD);
+            // K and V in one pass, one barrier (attn_blk_t converts V
+            // after the scores: the same values, so the same tiles).
+            att_cvt_q8<HD, KGs>(cvt, r8, rs, tid, NT);
+            att_cvt_q8<HD, KGs>(cvt + ATT_BLK * HD, r8 + ATT_BLK * HD, rs + ATT_BLK * HD / KGs,
+                                tid, NT);
+            __syncthreads();
+            kt = cvt;
+            vt = cvt + ATT_BLK * HD;
+        } else {
+            kt = (unsigned short*)s;
+            vt = kt + ATT_BLK * HD;
+        }
+        int t0 = b * ATT_BLK;
+        att_scores_n2<HD, NW>(qa, kt, wi, t0, np, mx, ps);
+        __syncthreads();
+        float l[2];
+        u32 pa[4][4];
+        att_blk_l(ps, l, pa);
+        float mb = mx[NW * 64 + lane * 2];
+        if (fuse) {
+            float mn, alpha, w;
+            att_fold_w(M, mb, &mn, &alpha, &w);
+            M = mn;
+            Lsum = att_fold_o(Lsum, l[0], alpha, w);
+            switch (wi) {
+            case 0: nb_pv_fold<HD, 0>(pa, vt, O, alpha, w); break;
+            case 1: nb_pv_fold<HD, 1>(pa, vt, O, alpha, w); break;
+            case 2: nb_pv_fold<HD, 2>(pa, vt, O, alpha, w); break;
+            default: nb_pv_fold<HD, 3>(pa, vt, O, alpha, w); break;
+            }
+        } else {
+            u64 hb = (u64)(kvh * group + g0) * nblk_max + b;
+            float* po = part_o + (u64)zl * nh * nblk_max * HD + hb * HD + 2 * (lane & 3);
+            bool stp = g0 < group;
+            switch (wi) {
+            case 0: att_pv_store<HD, NW, 0>(pa, vt, po, stp); break;
+            case 1: att_pv_store<HD, NW, 1>(pa, vt, po, stp); break;
+            case 2: att_pv_store<HD, NW, 2>(pa, vt, po, stp); break;
+            default: att_pv_store<HD, NW, 3>(pa, vt, po, stp); break;
+            }
+            if (stp && wi == 0 && (lane & 3) == 0)
+                *(float2*)(part_ml + (u64)zl * nh * nblk_max * 2 + hb * 2) =
+                    make_float2(mb, l[0]);
+        }
+        __syncthreads();
+    }
+    att_wait<0>();
+    if (fuse && g0 < group) {
+        float* yr = y + (u64)z * nh * HD + (u64)(kvh * group + g0) * HD + wi * ND +
+                    2 * (lane & 3);
+#pragma unroll
+        for (int n = 0; n < ND / 8; n++)
+            *(float2*)(yr + 8 * n) =
+                make_float2(__fdiv_rn(O[n][0], Lsum), __fdiv_rn(O[n][1], Lsum));
+    }
+#endif
+}
+
+#define ATTN_BLK_NB(NAME, HD, ST)                                                                  \
+    extern "C" __global__ void __launch_bounds__(32 * ATT_NB_NW)                                   \
+        NAME(const float* q, const unsigned short* __restrict__ kc,                                \
+             const unsigned short* __restrict__ vc, int start, int z0, int n_heads, int n_kv,      \
+             float pre, int nblk_max, float* __restrict__ part_o, float* __restrict__ part_ml,     \
+             const u32* __restrict__ rp, const u32* __restrict__ tab, float* y) {                  \
+        attn_blk_nbt<HD, 0, ST>(q, kc, vc, start, z0, n_heads, n_kv, pre, nblk_max, part_o,        \
+                                part_ml, rp, tab, Q8Kv{}, y);                                      \
+    }
+ATTN_BLK_NB(attn_blk_nb_64, 64, 2)
+ATTN_BLK_NB(attn_blk_nb_128, 128, 2)
+#define ATTN_BLK_NB_Q8(NAME, HD, KG, ST)                                                           \
+    extern "C" __global__ void __launch_bounds__(32 * ATT_NB_NW)                                   \
+        NAME(const float* q, const signed char* __restrict__ kq,                                   \
+             const signed char* __restrict__ vq, const float* __restrict__ ks,                     \
+             const float* __restrict__ vs, int start, int z0, int n_heads, int n_kv, float pre,    \
+             int nblk_max, float* __restrict__ part_o, float* __restrict__ part_ml,                \
+             const u32* __restrict__ rp, const u32* __restrict__ tab, float* y) {                  \
+        attn_blk_nbt<HD, KG, ST>(q, nullptr, nullptr, start, z0, n_heads, n_kv, pre, nblk_max,     \
+                                 part_o, part_ml, rp, tab,                                         \
+                                 Q8Kv{kq, vq, ks, vs, nullptr, nullptr}, y);                       \
+    }
+ATTN_BLK_NB_Q8(attn_blk_nb_q8_64, 64, 64, 2)
+ATTN_BLK_NB_Q8(attn_blk_nb_q8_128, 128, 128, 2)
+ATTN_BLK_NB_Q8(attn_blk_nb_q8g32_64, 64, 32, 2)
+ATTN_BLK_NB_Q8(attn_blk_nb_q8g32_128, 128, 32, 2)
 // The prefill attention on the tensor cores (decode.cu "Tensor-core
 // attention", steps 1-10 in one block): rows r = zl * group + g (query zl <
 // nb at position start + zl, head kvh * group + g) of kv head blockIdx.x,
