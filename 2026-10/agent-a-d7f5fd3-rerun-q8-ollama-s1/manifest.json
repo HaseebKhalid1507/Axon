@@ -1,0 +1,29 @@
+{
+ "label": "agent-a-d7f5fd3-rerun-q8-ollama-s1",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1027-145644-71fd",
+   "name": "agent-a-d7f5fd3-rerun-q8-ollama-s1",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "d7f5fd3",
+   "binary": "rerun-q8-ollama-s1.sh",
+   "started": 1793138380.9333715,
+   "ended": 1793140351.9529774,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "1ee172ec2c2152cdf3f0f65e631da9333454c7462308500169c8259a41e38a7b",
+   "log_bytes": 7962
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-27 18:32:32 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
