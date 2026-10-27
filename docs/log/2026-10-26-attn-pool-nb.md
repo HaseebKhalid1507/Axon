@@ -171,3 +171,23 @@ Kernel level on the H100 (`cuda_attn_pool_bench` default grid, same job; old att
 - The "2 CTAs per SM" comment is corrected: at 69–75 KB the kernel fits one CTA per SM on sm_86/89/120.
 - `cuda_attn_nb_exact` adds GQA groups 8 and 6 and position 0.
 - The clippy `manual_checked_ops` warning in that test is fixed.
+
+## Wave-tail check (review round 2), MEASURED
+
+- **What it tests.** On a 4090 (128 SMs, one CTA of attn_blk_nb per SM), 7B at nb 33–65 runs 1.03–2.03 waves. Review round 2 estimated ×0.63 vs main at nb 33 (f16, d4096) from a wave-quantization model.
+- **Job:** 1027-015041-3291 (`--timing 4090`, pod1, f41f2ec). Same `cuda_attn_pool_bench` as the earlier A/B: attn_blk_b + attn_cmb_b vs attn_blk_nb (S = 1) in one binary, 7B geometry, us per layer.
+
+| kv | depth | nb 33 (1.03 waves) | nb 40 (1.25) | nb 48 (1.5) | nb 64 (2.0) | nb 65 (2.03) |
+|---|---|---|---|---|---|---|
+| f16 | 600 | 42.0 → 36.8 ×1.14 | 48.1 → 38.9 ×1.24 | 49.2 → 36.9 ×1.33 | 101.4 → 48.1 ×2.11 | 117.8 → 65.5 ×1.80 |
+| q8 | 600 | 69.6 → 55.3 ×1.26 | 78.8 → 54.3 ×1.45 | 86.0 → 53.2 ×1.62 | 111.6 → 54.3 ×2.06 | 123.9 → 76.8 ×1.61 |
+| f16 | 4096 | 377.9 → 361.5 ×1.05 | 441.3 → 396.3 ×1.11 | 539.6 → 455.7 ×1.18 | 713.7 → 587.8 ×1.21 | 732.2 → 625.7 ×1.17 |
+| q8 | 4096 | 300.0 → 280.6 ×1.07 | 352.3 → 291.8 ×1.21 | 421.9 → 302.1 ×1.40 | 565.2 → 332.8 ×1.70 | 585.7 → 441.3 ×1.33 |
+
+- **Result.** All 20 cells win. The worst is nb 33 f16 d4096 at ×1.05. Partial waves (nb 40 / 48 / 65) still win at ×1.11–1.80.
+- **The ×0.63 estimate was refuted by measurement**, and the dispatch is unchanged.
+- **H100.**
+  - The one measured attn_blk_nb loss is q8 d4096 at S = 1, ×0.94. It was at nb 32 = 128 CTAs < 132 SMs, which the S = 1 dispatch excludes (`nb_split` → attn_blk_b).
+  - The partial-wave regime there (7B nb 33–64, 132–256 CTAs) is **unmeasured on H100**.
+  - A regression there is unlikely (ESTIMATED): the 4090's tail waves win in every cell, including q8 d4096, from ×1.07 at 1.03 waves upward. The H100 also holds up to 3 of these CTAs per SM (228 KB of smem), so its tails are shallower than the 4090's one-per-SM.
+  - The post-merge H100 anatomy session exercises C = 128.
