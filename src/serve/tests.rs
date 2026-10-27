@@ -2483,11 +2483,11 @@ fn serve_rollback_flags_reach_the_engine() {
     ] {
         // The job's environment decides the "default" row (axon-run passes
         // AXON_*: the sjf and rollback gates run this test too).
-        let fifo = std::env::var("AXON_ADMIT").is_ok_and(|v| v == "fifo");
+        let fifo = std::env::var("AXON_ADMIT").is_ok_and(|v| v.trim().eq_ignore_ascii_case("fifo"));
         if arm == "default" {
             // With no environment, the defaults are the measured sjf80 arm,
             // whole (#165's rule S).
-            let none = super::engine::Sched::from_env(None, None);
+            let none = super::engine::Sched::from_env(None, None).unwrap();
             assert_eq!((none, super::engine::STEP_MS), arm_sched("sjf80"));
             let o = test_opts("x", Device::Cuda);
             assert_eq!(o.step_ms, 80, "the default step");
@@ -2518,6 +2518,95 @@ fn serve_rollback_flags_reach_the_engine() {
         assert_eq!(g["axon_prefill_lanes"], lanes, "{arm} {par}");
         assert_eq!(g["axon_step_cost_legacy"], legacy, "{arm} {par}");
     }
+}
+
+/// Shortest-first can't starve a long prompt (shady on #167): 2 slots,
+/// sjf, `--admit-age-ms 1000`, four clients keeping both slots busy with
+/// short requests the whole time; one long prompt sent into that traffic
+/// must leave the engine's waiting list (GET /slots `waiting`, each with its
+/// `age_ms`) within 2 x the age bound (`pages_block`'s: past it nothing
+/// overtakes it, so it gets the next free slot), and its reply == the same
+/// request alone. Without the bound it could wait as long as shorts keep
+/// coming (a shorter prompt always sorts first).
+#[test]
+fn serve_sjf_long_prompt_admitted_within_age_bound() {
+    let Some(_) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(p) = crate::testutil::model_path() else {
+        return;
+    };
+    let age = 1000u64;
+    let opts = |o: &mut Opts| {
+        o.ctx = Some(4096);
+        o.parallel = 2;
+        o.parallel_set = true;
+        o.sched.order = super::engine::AdmitOrder::Sjf;
+        o.sched.age_ms = age;
+    };
+    let long_text: String = (0..120)
+        .map(|i| format!("Line {i}: the river runs past mill {}. ", i * 7))
+        .collect();
+    let long = json!({"prompt": format!("{long_text}Summary:"), "max_tokens": 4, "temperature": 0});
+    let refs = server_with(p.to_str().unwrap(), Device::Cuda, opts);
+    let solo =
+        post(refs.addr, "/v1/completions", long.clone()).json()["choices"][0]["text"].clone();
+    drop(refs);
+    let s = server_with(p.to_str().unwrap(), Device::Cuda, opts);
+    let a = s.addr;
+    let stop = std::sync::atomic::AtomicBool::new(false);
+    let (waited, text) = std::thread::scope(|sc| {
+        for t in 0..4 {
+            let stop = &stop;
+            sc.spawn(move || {
+                let mut i = 0;
+                while !stop.load(Ordering::Relaxed) {
+                    let b = json!({"prompt": format!("{t}.{i} Name a colour:"), "max_tokens": 12,
+                                   "temperature": 0});
+                    assert_eq!(post(a, "/v1/completions", b).status, 200);
+                    i += 1;
+                }
+            });
+        }
+        // Both slots busy with shorts, more queued.
+        std::thread::sleep(Duration::from_millis(500));
+        let h =
+            sc.spawn(move || post(a, "/v1/completions", long).json()["choices"][0]["text"].clone());
+        // The long one's last age seen in the waiting list (the longest
+        // prompt there), until it leaves it.
+        let (mut seen, mut last) = (false, 0u64);
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(60) {
+            let sl = call(a, "GET", "/slots", "").json();
+            let w = sl["waiting"].as_array().cloned().unwrap_or_default();
+            let mine = w
+                .iter()
+                .find(|x| x["prompt_tokens"].as_u64().unwrap_or(0) > 800);
+            match mine {
+                Some(x) => {
+                    seen = true;
+                    last = x["age_ms"].as_u64().unwrap_or(0);
+                }
+                None if seen => break,
+                None => {}
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let text = h.join().unwrap();
+        stop.store(true, Ordering::Relaxed);
+        assert!(seen, "the long prompt never showed in the waiting list");
+        (last, text)
+    });
+    eprintln!(
+        "long prompt admitted after waiting ~{waited} ms under short traffic (bound {} ms)",
+        2 * age
+    );
+    // Poll granularity and one engine iteration on top of the bound.
+    assert!(
+        waited <= 2 * age + 500,
+        "the long prompt waited {waited} ms: past 2 x {age} ms"
+    );
+    assert_eq!(text, solo, "the long prompt's reply == alone");
 }
 
 /// Shortest-first admission (`--admit-order sjf`, the default): with 4

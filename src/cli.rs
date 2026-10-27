@@ -137,9 +137,10 @@ flags:
               sjf a cold wave of short prompts is fed in one step again)
   --admit-order sjf|fifo  serve: waiting requests start shortest prompt first, several per
               step (sjf, default), or first come first served, one per step (fifo;
-              AXON_ADMIT=fifo sets it too)
+              AXON_ADMIT=fifo|sjf sets it too, any case; another value refuses to start)
   --admit-age-ms MS  serve, sjf: a request waiting this long starts before shorter ones
-              (default 3000; 0: never)
+              (default 3000; 0 removes the starvation bound: a long prompt can wait as long as
+              shorter ones keep arriving, said at startup)
   --prefill-lanes N  serve: prompts prefilling at once; with sjf only prompts longer than a
               step's chunk count (default 0: fifo 2, sjf parallel/16 within 2..8).
               The scheduling of before: --admit-order fifo --step-ms 60 (and, before the

@@ -171,14 +171,28 @@ pub struct Sched {
 pub const ADMIT_AGE_MS: u64 = 3000;
 
 impl Default for Sched {
-    /// Shortest-first unless AXON_ADMIT=fifo (issue #165's rule S made
-    /// `--admit-order sjf --step-ms 80` the default on the H100 cells; #131
-    /// had kept it opt-in after the laptop cells); the cost model unless
-    /// AXON_STEP_COST=legacy.
+    /// `Sched::from_env` on AXON_ADMIT and AXON_STEP_COST. An AXON_ADMIT
+    /// that is neither fifo nor sjf refuses to start (it is a rollback
+    /// switch: a typo must not silently mean the new default).
     fn default() -> Sched {
         let admit = std::env::var("AXON_ADMIT").ok();
         let cost = std::env::var("AXON_STEP_COST").ok();
-        Sched::from_env(admit.as_deref(), cost.as_deref())
+        Sched::from_env(admit.as_deref(), cost.as_deref()).unwrap_or_else(|e| crate::fail(&e))
+    }
+}
+
+/// AXON_ADMIT's admission order: `fifo` or `sjf`, any case, spaces around
+/// ignored; unset or empty: shortest-first (the default since issue #165's
+/// rule S; #131 had kept it opt-in after the laptop cells). Anything else
+/// is an error naming the valid values.
+pub fn admit_order_env(v: Option<&str>) -> Result<AdmitOrder, String> {
+    match v.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        None | Some("") | Some("sjf") => Ok(AdmitOrder::Sjf),
+        Some("fifo") => Ok(AdmitOrder::Fifo),
+        Some(_) => Err(format!(
+            "AXON_ADMIT={:?}: expected fifo or sjf (or unset: sjf)",
+            v.unwrap_or_default()
+        )),
     }
 }
 
@@ -186,19 +200,15 @@ impl Sched {
     /// The defaults for AXON_ADMIT = `admit` and AXON_STEP_COST = `cost`
     /// (`Default` reads them; tests pass them). AXON_ADMIT=fifo is the
     /// admission of before (with `--step-ms 60` and AXON_STEP_COST=legacy:
-    /// the scheduling before #131); any other value (AXON_ADMIT=sjf from
-    /// older configs too) is shortest-first.
-    pub fn from_env(admit: Option<&str>, cost: Option<&str>) -> Sched {
-        Sched {
-            order: match admit == Some("fifo") {
-                true => AdmitOrder::Fifo,
-                false => AdmitOrder::Sjf,
-            },
+    /// the scheduling before #131); see `admit_order_env`.
+    pub fn from_env(admit: Option<&str>, cost: Option<&str>) -> Result<Sched, String> {
+        Ok(Sched {
+            order: admit_order_env(admit)?,
             age_ms: ADMIT_AGE_MS,
             lanes: 0,
             step_tokens: 0,
             legacy: cost == Some("legacy"),
-        }
+        })
     }
 }
 
@@ -2105,24 +2115,31 @@ mod sched_tests {
     /// AXON_ADMIT=sjf breaks the "alone" (sjf's lanes scale with slots).
     #[test]
     fn legacy_alone_is_main_admission() {
-        // AXON_ADMIT=fifo + AXON_STEP_COST=legacy: fifo, 2 lanes at any slot
-        // count (with `--step-ms 60`: the scheduling before #131).
-        let s = Sched::from_env(Some("fifo"), Some("legacy"));
-        assert!(s.legacy && s.order == AdmitOrder::Fifo);
-        for slots in [1, 8, 16, 32, 64, 128, 256] {
-            assert_eq!(lanes_for(&s, slots), 2, "{slots}");
+        // AXON_ADMIT=fifo (any case) + AXON_STEP_COST=legacy: fifo, 2 lanes at
+        // any slot count (with `--step-ms 60`: the scheduling before #131).
+        for admit in ["fifo", "FIFO", " Fifo "] {
+            let s = Sched::from_env(Some(admit), Some("legacy")).unwrap();
+            assert!(s.legacy && s.order == AdmitOrder::Fifo, "{admit:?}");
+            for slots in [1, 8, 16, 32, 64, 128, 256] {
+                assert_eq!(lanes_for(&s, slots), 2, "{slots}");
+            }
         }
-        // Anything else is shortest-first (the default since #165's rule S),
-        // its lanes scaled with the slots; AXON_ADMIT=sjf from older configs
-        // too.
-        for admit in [None, Some("sjf"), Some("anything")] {
-            let sjf = Sched::from_env(admit, Some("legacy"));
+        // sjf (any case), unset or empty: shortest-first (the default since
+        // #165's rule S), its lanes scaled with the slots.
+        for admit in [None, Some(""), Some("sjf"), Some("SJF")] {
+            let sjf = Sched::from_env(admit, Some("legacy")).unwrap();
             assert_eq!(sjf.order, AdmitOrder::Sjf, "{admit:?}");
             let l: Vec<usize> = [16, 32, 64, 128, 256].map(|n| lanes_for(&sjf, n)).to_vec();
             assert_eq!(l, [2, 2, 4, 8, 8]);
         }
+        // Anything else is an error naming the valid values (shady on #167:
+        // a rollback switch must not turn a typo into the new default).
+        for admit in ["anything", "off", "0", "fifo60", "first"] {
+            let e = Sched::from_env(Some(admit), None).unwrap_err();
+            assert!(e.contains("fifo or sjf") && e.contains(admit), "{e}");
+        }
         // No env at all: the model's budgets, shortest-first.
-        let d = Sched::from_env(None, None);
+        let d = Sched::from_env(None, None).unwrap();
         assert!(!d.legacy && d.order == AdmitOrder::Sjf && lanes_for(&d, 128) == 8);
     }
 

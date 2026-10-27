@@ -423,7 +423,8 @@ tokens; `--prefill-ms` is its old name, still accepted), `--step-tokens N`
 passed a pre-registered rule on an H100 SXM, mix C=128 against fifo at 60 ms: aggregate
 +7.6 %, goodput +60.5 %, ITL p99 99.9 ms, C=64 aggregate +4.6 %, identical outputs
 ([#165](https://github.com/HaseebKhalid1507/Axon/issues/165)). `--admit-age-ms MS` (sjf: a
-request waiting this long starts before shorter ones, default 3000; 0: never),
+request waiting this long starts before shorter ones, default 3000; 0 removes the starvation
+bound, a long prompt can then wait as long as shorter ones keep arriving, and `serve` says so),
 `--prefill-lanes N` (prompts prefilling at once: with sjf, prompts longer than a step's chunk,
 default parallel/16 within 2..8, and short ones never wait for a lane; with fifo, all of them,
 default 2). The scheduling of before: `--admit-order fifo --step-ms 60`, and for the fixed
@@ -735,7 +736,7 @@ OLLAMA_HOST=http://127.0.0.1:8080 ollama run qwen3-8b
 | `AXON_GEMM_TILE=64` | cuda, sm_80+: keep every batched Q4_K / Q5_K product (and the fused gate+up) on the 64 × 64 `gemm2s` tile. Default (unset or any other value): the 128 × 64 `gemm2t` tile where its waves cost less (`tile_t`: the big products at > 64 tokens; not batches of ≤ 64 tokens, nor, e.g., a 512-row k / v on a 128-SM GPU). Same bits either way |
 | `AXON_GEMMH=0\|1` | cuda, sm_90a: `0` keeps every batched Q4_K product on the mma.sync GEMMs; `1` sends every one of them to the wgmma kernel. Default: the fused gate+up and the large Q4_K products (>= 3584 rows, at least one full wave of blocks) use wgmma (same bits either way) |
 | `AXON_Q6K8=0\|1` | cuda: `0` never makes the int8 copy of Q6_K matrices that speeds up prefill (sm_80+); `1` makes it whenever it fits beside the cache. Default: only if 768 MiB stay free beside it and the cache, and never on a split (same bits either way) |
-| `AXON_ADMIT=fifo` | `serve`: same as `--admit-order fifo` (default sjf) |
+| `AXON_ADMIT=fifo\|sjf` | `serve`: same as `--admit-order` (any case; default sjf); any other value refuses to start |
 | `AXON_STEP_COST=legacy` | `serve`: the step budget before the measured cost model (`--step-ms` less the last decode step); with `AXON_ADMIT=fifo` and `--step-ms 60`, the scheduling before #131, decision for decision |
 | `AXON_SKIP_MODEL_TESTS=1` | tests: skip the ones that need the real model |
 
