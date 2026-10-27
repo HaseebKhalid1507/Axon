@@ -1,0 +1,7 @@
+[axon-run 09:48:29] submitted 1027-094829-ca07 by /home/haseeb/.cache/axon-w4a8: /usr/bin/bash md5w8.sh ./axon-base-6f06544 ./axon-441ebee /tmp/w4a8-md5-441ebee
+[axon-run 11:15:55] scope axon-job-1027-094829-ca07-1793114155.scope in app-axonjobs.slice: MemoryMax 7024 MB, MemoryHigh 6321 MB, no swap, oomd pressure kill 80% (claim 4000 MB): an OOM here kills only this job
+[axon-run 11:15:55] job 1027-094829-ca07 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1027-094829-ca07-1793114155 --slice=app-axonjobs.slice -p MemoryMax=7024M -p MemoryHigh=6321M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash md5w8.sh ./axon-base-6f06544 ./axon-441ebee /tmp/w4a8-md5-441ebee
+axon-q 11:15:55 start slot 8-15: /usr/bin/bash md5w8.sh ./axon-base-6f06544 ./axon-441ebee /tmp/w4a8-md5-441ebee
+MD5: 66 of 66 identical (off and on vs base); 0 nonzero rc
+[axon-run 11:20:10] exit 0 after 255.0s (host bella)
+[axon-run 11:20:14] EXPECT ok: output matches /MD5:/

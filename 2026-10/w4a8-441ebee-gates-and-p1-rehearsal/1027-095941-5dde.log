@@ -1,0 +1,96 @@
+[axon-run 09:59:41] submitted 1027-095941-5dde by /home/haseeb/.cache/axon-w4a8: /usr/bin/bash p1_h100.sh
+[axon-run 12:20:45] scope axon-job-1027-095941-5dde-1793118045.scope in app-axonjobs.slice: MemoryMax 10024 MB, MemoryHigh 9021 MB, no swap, oomd pressure kill 80% (claim 6000 MB): an OOM here kills only this job
+[axon-run 12:20:45] job 1027-095941-5dde -> bella: systemd-run --user --scope --quiet --unit=axon-job-1027-095941-5dde-1793118045 --slice=app-axonjobs.slice -p MemoryMax=10024M -p MemoryHigh=9021M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash p1_h100.sh
+axon-q 12:20:45 start slot 16-23: /usr/bin/bash p1_h100.sh
+[p1 +0s] kernel cache: 295 -> 304 entries (/home/haseeb/.cache/axon/cuda)
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 615.78.08, 12227 MiB, 3090 MHz
+4727b54ed0ebbfe970323bef1e2ca017565cb153098f597d9e5be413ed7d0782  axon-test
+2c9069b050810711e0f876456a5d3fad0b890a0d92b3a154821ab1ebee217f82  axon-main
+c3ff5fb849cd7dc9958de23fd41b6ddbaf13a0c99b2df9f5d51dbd403dd86cbb  prompts-mix-v2.jsonl
+a82b55c178a2fa9bf2c50031390210214111b447d3e9737d5d9e70b44b4ff7c8  sd_client.py
+f67f042094f6b8902f52ce5366397178c3869a3395dcba1c38ad466e380a644a  passhist.py
+src 441ebeeb3a1febf9425cf8fdf9e46a205416880b main 6f06544be4fe43a78a50007d29586d248b994d8a
+[p1 +1s] model /home/haseeb/Projects/axon/models/qwen2.5-0.5b-q4_k_m.gguf (74a4da8c9fdbcd15); serve --parallel 32 --ctx 4096, cells C=32
+
+running 1 test
+test cuda::qwen2::tests::cuda_w4a8_p1_session ... W4A8 PTXAS w4a8_q6: ptxas         .     0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+W4A8 PTXAS w4a8_q6: ptxas info    : Used 168 registers, used 1 barriers
+W4A8 PTXAS w4a8_q4_k_gu: ptxas         .     0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+W4A8 PTXAS w4a8_q4_k_gu: ptxas info    : Used 168 registers, used 3 barriers
+W4A8 PTXAS w4a8_q4_k: ptxas         .     0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+W4A8 PTXAS w4a8_q4_k: ptxas info    : Used 168 registers, used 1 barriers
+PROBE STAGE compile: ok
+PROBE STAGE gpu_rmsnorm_matches_cpu: start (/home/haseeb/.cache/axon-w4a8/kit/san/compute-sanitizer --tool memcheck --error-exitcode 9 --print-limit 20 /home/haseeb/.cache/axon-w4a8/kit/axon-test cuda::qwen2::tests::gpu_rmsnorm_matches_cpu --exact --nocapture --test-threads 1)
+========= COMPUTE-SANITIZER
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test cuda::qwen2::tests::gpu_rmsnorm_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 780 filtered out; finished in 55.32s
+
+========= ERROR SUMMARY: 0 errors
+PROBE STAGE gpu_rmsnorm_matches_cpu: rc 0 after 55.6 s
+PROBE STAGE sanitizer-selfcheck: ok
+PROBE STAGE gpu_w4a8_tiny: start (/home/haseeb/.cache/axon-w4a8/kit/san/compute-sanitizer --tool memcheck --error-exitcode 9 --print-limit 20 /home/haseeb/.cache/axon-w4a8/kit/axon-test cuda::qwen2::tests::gpu_w4a8_tiny --exact --nocapture --test-threads 1)
+========= COMPUTE-SANITIZER
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+skipping: not sm_90a
+test cuda::qwen2::tests::gpu_w4a8_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 780 filtered out; finished in 0.58s
+
+========= ERROR SUMMARY: 0 errors
+PROBE STAGE gpu_w4a8_tiny: rc 0 after 0.8 s
+PROBE STAGE sanitizer tiny: skipped (no sm_90a)
+PROBE STAGE gpu_w4a8_tiny: start (/home/haseeb/.cache/axon-w4a8/kit/axon-test cuda::qwen2::tests::gpu_w4a8_tiny --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+skipping: not sm_90a
+test cuda::qwen2::tests::gpu_w4a8_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 780 filtered out; finished in 0.37s
+
+PROBE STAGE gpu_w4a8_tiny: rc 0 after 0.4 s
+PROBE STAGE gpu_w4a8_matches_reference_bits: start (/home/haseeb/.cache/axon-w4a8/kit/axon-test cuda::qwen2::tests::gpu_w4a8_matches_reference_bits --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+skipping: needs an sm_90a module (compute capability 9.0)
+test cuda::qwen2::tests::gpu_w4a8_matches_reference_bits ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 780 filtered out; finished in 0.36s
+
+PROBE STAGE gpu_w4a8_matches_reference_bits: rc 0 after 0.4 s
+PROBE STAGE cuda_w4a8_checkpoint1: start (/home/haseeb/.cache/axon-w4a8/kit/axon-test cuda::qwen2::tests::cuda_w4a8_checkpoint1 --exact --nocapture --test-threads 1 --ignored)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+W4A8 device NVIDIA GeForce RTX 5070 Ti Laptop GPU sm_120 46 SMs, hopper module false
+W4A8 BENCH skipped (no sm_90a module)
+W4A8 BENCH END ok
+test cuda::qwen2::tests::cuda_w4a8_checkpoint1 ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 780 filtered out; finished in 0.36s
+
+PROBE STAGE cuda_w4a8_checkpoint1: rc 0 after 0.4 s
+PROBE SESSION 169 s of 720 s budget
+PROBE END ok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 780 filtered out; finished in 169.22s
+
+[p1 +170s] session rc 0
+[p1 +171s] serve fifo60 up after 2s (--admit-order fifo --step-ms 60)
+sd_client: 10 requests would overflow ctx 4096 (ids [6, 9, 81, 82, 91, 93, 97, 102]): refusing the cell before sending anything
+passhist: no steps of the C=32 cell in /home/haseeb/.cache/axon-w4a8/kit/out-1027-122045/trace/fifo60.jsonl
+[p1 +172s] serve fifo60 failed
+[p1 +173s] serve sjf80 up after 2s (--admit-order sjf --step-ms 80)
+sd_client: 10 requests would overflow ctx 4096 (ids [6, 9, 81, 82, 91, 93, 97, 102]): refusing the cell before sending anything
+passhist: no steps of the C=32 cell in /home/haseeb/.cache/axon-w4a8/kit/out-1027-122045/trace/sjf80.jsonl
+[p1 +174s] serve sjf80 failed
+[p1 +174s] P1 H100 DONE rc 1
+[axon-run 12:23:39] exit 1 after 173.6s (host bella)
