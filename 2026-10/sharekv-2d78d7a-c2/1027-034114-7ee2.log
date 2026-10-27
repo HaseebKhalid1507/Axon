@@ -1,0 +1,83 @@
+[axon-run 03:41:14] submitted 1027-034114-7ee2 by /home/haseeb/.cache/axon-sharekv: /usr/bin/bash md5.sh ./axon-base-0c23a87 ./axon-2d78d7a md5out
+[axon-run 05:23:53] job 1027-034114-7ee2 -> pod1 [RTX 4090 sm_89 secure] (pod 4o0jxjcuos3l25): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 3000 --src /home/haseeb/.cache/axon-podjob/md5-1d7e999a7f40 /usr/bin/bash md5.sh ./axon-base-0c23a87 ./axon-2d78d7a md5out
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (a2355197015ffadaf9b647d3) + source of /home/haseeb/.cache/axon-podjob/md5-1d7e999a7f40
+
+sent 7,309,380 bytes  received 106 bytes  1,624,330.22 bytes/sec
+total size is 23,141,251  speedup is 3.17
+
+sent 169 bytes  received 35 bytes  81.60 bytes/sec
+total size is 89  speedup is 0.44
+axon-remote: job 20261027-092409-bash-614 on pod1 (GPU, 3000 MB)
+[axon-node 09:24:09] GPU slot taken; job wants 3000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 1, budget 23064 MB, vCPU 6.8)
+[axon-node 09:24:09] run bash (a2355197015ffadaf9b647d3) as /home/haseeb/.cache/axon-podjob/md5-1d7e999a7f40 on a48afaf42b4b, AXON_THREADS=8 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+base	qwen2.5-0.5b-q4_k_m	cpu	p1	de11b4bf48c9	rc=0
+cand	qwen2.5-0.5b-q4_k_m	cpu	p1	de11b4bf48c9	rc=0
+base	qwen2.5-0.5b-q4_k_m	cpu	p2	9031d0e99ea7	rc=0
+cand	qwen2.5-0.5b-q4_k_m	cpu	p2	9031d0e99ea7	rc=0
+base	qwen2.5-0.5b-q4_k_m	cpu	p3	f6979b93fb55	rc=0
+cand	qwen2.5-0.5b-q4_k_m	cpu	p3	f6979b93fb55	rc=0
+base	qwen2.5-0.5b-q4_k_m	cuda	p1	22703eeab624	rc=0
+cand	qwen2.5-0.5b-q4_k_m	cuda	p1	22703eeab624	rc=0
+base	qwen2.5-0.5b-q4_k_m	cuda	p2	2a3b332ee2d1	rc=0
+cand	qwen2.5-0.5b-q4_k_m	cuda	p2	2a3b332ee2d1	rc=0
+base	qwen2.5-0.5b-q4_k_m	cuda	p3	35123f404b49	rc=0
+cand	qwen2.5-0.5b-q4_k_m	cuda	p3	35123f404b49	rc=0
+base	qwen2.5-0.5b-q4_k_m	cuda-q8	p1	cb9ea06a4c75	rc=0
+cand	qwen2.5-0.5b-q4_k_m	cuda-q8	p1	cb9ea06a4c75	rc=0
+base	qwen2.5-0.5b-q4_k_m	cuda-q8	p2	c1990c1987df	rc=0
+cand	qwen2.5-0.5b-q4_k_m	cuda-q8	p2	c1990c1987df	rc=0
+base	qwen2.5-0.5b-q4_k_m	cuda-q8	p3	f6979b93fb55	rc=0
+cand	qwen2.5-0.5b-q4_k_m	cuda-q8	p3	f6979b93fb55	rc=0
+base	Qwen3-0.6B-Q8_0	cpu	p1	54381a7d049c	rc=0
+cand	Qwen3-0.6B-Q8_0	cpu	p1	54381a7d049c	rc=0
+base	Qwen3-0.6B-Q8_0	cpu	p2	5e174cec9863	rc=0
+cand	Qwen3-0.6B-Q8_0	cpu	p2	5e174cec9863	rc=0
+base	Qwen3-0.6B-Q8_0	cpu	p3	d2c5d72da64a	rc=0
+cand	Qwen3-0.6B-Q8_0	cpu	p3	d2c5d72da64a	rc=0
+base	Qwen3-0.6B-Q8_0	cuda	p1	a21a6d55c9dc	rc=0
+cand	Qwen3-0.6B-Q8_0	cuda	p1	a21a6d55c9dc	rc=0
+base	Qwen3-0.6B-Q8_0	cuda	p2	b9e8a942d145	rc=0
+cand	Qwen3-0.6B-Q8_0	cuda	p2	b9e8a942d145	rc=0
+base	Qwen3-0.6B-Q8_0	cuda	p3	d2c5d72da64a	rc=0
+cand	Qwen3-0.6B-Q8_0	cuda	p3	d2c5d72da64a	rc=0
+base	Qwen3-0.6B-Q8_0	cuda-q8	p1	9416fbd66603	rc=0
+cand	Qwen3-0.6B-Q8_0	cuda-q8	p1	9416fbd66603	rc=0
+base	Qwen3-0.6B-Q8_0	cuda-q8	p2	3880b60f8104	rc=0
+cand	Qwen3-0.6B-Q8_0	cuda-q8	p2	3880b60f8104	rc=0
+base	Qwen3-0.6B-Q8_0	cuda-q8	p3	d2c5d72da64a	rc=0
+cand	Qwen3-0.6B-Q8_0	cuda-q8	p3	d2c5d72da64a	rc=0
+base	Llama-3.2-1B-Instruct-Q4_K_M	cpu	p1	897464655057	rc=0
+cand	Llama-3.2-1B-Instruct-Q4_K_M	cpu	p1	897464655057	rc=0
+base	Llama-3.2-1B-Instruct-Q4_K_M	cpu	p2	09ed84e14ff0	rc=0
+cand	Llama-3.2-1B-Instruct-Q4_K_M	cpu	p2	09ed84e14ff0	rc=0
+base	Llama-3.2-1B-Instruct-Q4_K_M	cpu	p3	a1f895adbb59	rc=0
+cand	Llama-3.2-1B-Instruct-Q4_K_M	cpu	p3	a1f895adbb59	rc=0
+base	Llama-3.2-1B-Instruct-Q4_K_M	cuda	p1	1f9e534d7f0d	rc=0
+cand	Llama-3.2-1B-Instruct-Q4_K_M	cuda	p1	1f9e534d7f0d	rc=0
+base	Llama-3.2-1B-Instruct-Q4_K_M	cuda	p2	09ed84e14ff0	rc=0
+cand	Llama-3.2-1B-Instruct-Q4_K_M	cuda	p2	09ed84e14ff0	rc=0
+base	Llama-3.2-1B-Instruct-Q4_K_M	cuda	p3	a1f895adbb59	rc=0
+cand	Llama-3.2-1B-Instruct-Q4_K_M	cuda	p3	a1f895adbb59	rc=0
+base	Llama-3.2-1B-Instruct-Q4_K_M	cuda-q8	p1	0445fbf32ec4	rc=0
+cand	Llama-3.2-1B-Instruct-Q4_K_M	cuda-q8	p1	0445fbf32ec4	rc=0
+base	Llama-3.2-1B-Instruct-Q4_K_M	cuda-q8	p2	09ed84e14ff0	rc=0
+cand	Llama-3.2-1B-Instruct-Q4_K_M	cuda-q8	p2	09ed84e14ff0	rc=0
+base	Llama-3.2-1B-Instruct-Q4_K_M	cuda-q8	p3	a1f895adbb59	rc=0
+cand	Llama-3.2-1B-Instruct-Q4_K_M	cuda-q8	p3	a1f895adbb59	rc=0
+base	google_gemma-3-1b-it-Q4_K_M	cpu	p1	cf46be5fb096	rc=0
+cand	google_gemma-3-1b-it-Q4_K_M	cpu	p1	cf46be5fb096	rc=0
+base	google_gemma-3-1b-it-Q4_K_M	cpu	p2	3a62d44e170f	rc=0
+cand	google_gemma-3-1b-it-Q4_K_M	cpu	p2	3a62d44e170f	rc=0
+base	google_gemma-3-1b-it-Q4_K_M	cpu	p3	9550d71f3d45	rc=0
+cand	google_gemma-3-1b-it-Q4_K_M	cpu	p3	9550d71f3d45	rc=0
+base	google_gemma-3-1b-it-Q4_K_M	cuda	p1	9959475a1edd	rc=0
+cand	google_gemma-3-1b-it-Q4_K_M	cuda	p1	9959475a1edd	rc=0
+base	google_gemma-3-1b-it-Q4_K_M	cuda	p2	e7b089fdcdc6	rc=0
+cand	google_gemma-3-1b-it-Q4_K_M	cuda	p2	e7b089fdcdc6	rc=0
+base	google_gemma-3-1b-it-Q4_K_M	cuda	p3	9550d71f3d45	rc=0
+cand	google_gemma-3-1b-it-Q4_K_M	cuda	p3	9550d71f3d45	rc=0
+MD5: 33 of 33 identical; 0 nonzero rc
+[axon-node 09:25:56] exit 0 after 106.5s
+[axon-node 09:25:56] peak RSS 1173 MB (job process tree PSS, 2 s samples x53)
+[axon-run 05:25:58] exit 0 after 125.1s (host pod1)
