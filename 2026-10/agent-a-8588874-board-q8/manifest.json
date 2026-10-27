@@ -1,0 +1,29 @@
+{
+ "label": "agent-a-8588874-board-q8",
+ "verdict": "ALL PASS; TAINTED timing",
+ "jobs": [
+  {
+   "job": "1027-083752-1e62",
+   "name": "agent-a-8588874-board-q8",
+   "rc": 0,
+   "verdict": "PASS TAINTED (FOREIGN_GPU max=49% mean=1.2%)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": null,
+   "binary": "agent_board.sh",
+   "started": 1793118223.6247678,
+   "ended": 1793127264.9636002,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": "FOREIGN_GPU max=49% mean=1.2%",
+   "redactions": {},
+   "log_sha256": "be950260d9a79494e21475b433958c3805a89247697deeccffe575f190b5b629",
+   "log_bytes": 34098
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-27 14:54:27 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
