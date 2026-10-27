@@ -81,11 +81,13 @@ pub const PREFILL_CHUNK: usize = 256;
 /// A step's target wall time while requests decode, in ms (default,
 /// `--step-ms`, alias `--prefill-ms`; 0: no time budget, exactly
 /// `--prefill-chunk` tokens): the time between a running request's tokens
-/// the server aims at. 60, main's `--prefill-ms`: at 50 the bella 7B C=16
-/// mix step ran at 60.0 ms p50 (+20 %, outside the spec's ±15 %: the 256
-/// floor binds) and the avante 1.5B ITL p99 rose 17 % over main (jobs
-/// 1025-174838-bb0d, 1025-174837-1554); 50 is `--step-ms 50`.
-pub const STEP_MS: usize = 60;
+/// the server aims at. 80, with shortest-first admission (`Sched`'s
+/// default): issue #165's rule S, pre-registered, passed on the H100 SXM
+/// mix cells (job 1027-084258-1ce4; sjf80 vs fifo60 at C=128: aggregate
+/// +7.6 %, goodput +60.5 %, ITL p99 99.9 ms <= 105, C=64 aggregate +4.6 %,
+/// bits identical). The scheduling of before is `--admit-order fifo
+/// --step-ms 60`. 50 failed its own clause (#131: the 256 floor binds).
+pub const STEP_MS: usize = 80;
 /// The first chunk with a time budget, before a chunk's cost is known.
 const SEED_CHUNK: usize = 512;
 /// The prefill cost model: a token at depth d costs cost * (d + DEPTH_K)
@@ -130,9 +132,9 @@ pub struct ChunkPolicy {
     pub step_tokens: usize,
     /// AXON_STEP_COST=legacy: the budget before `StepCost` (`step_ms`
     /// less the last decode step, at a cost per token with the pass's
-    /// fixed part in it). With the default fifo admission (2 lanes at any
-    /// slot count) main's scheduling exactly: the rollback, AXON_STEP_COST=
-    /// legacy alone (without AXON_ADMIT=sjf).
+    /// fixed part in it). With fifo admission (2 lanes at any slot count,
+    /// AXON_ADMIT=fifo) and `--step-ms 60`, the scheduling before #131
+    /// exactly: the rollback.
     pub legacy: bool,
 }
 
@@ -169,10 +171,10 @@ pub struct Sched {
 pub const ADMIT_AGE_MS: u64 = 3000;
 
 impl Default for Sched {
-    /// FIFO unless AXON_ADMIT=sjf (shortest-first missed its kill-rule
-    /// clause on the bella cells: short TTFT p50 0.56x fifo's at 1.5B C=32,
-    /// 0.79x on the showdown client, against <= 0.5x; it stays opt-in until
-    /// the H100 cells decide it); the cost model unless AXON_STEP_COST=legacy.
+    /// Shortest-first unless AXON_ADMIT=fifo (issue #165's rule S made
+    /// `--admit-order sjf --step-ms 80` the default on the H100 cells; #131
+    /// had kept it opt-in after the laptop cells); the cost model unless
+    /// AXON_STEP_COST=legacy.
     fn default() -> Sched {
         let admit = std::env::var("AXON_ADMIT").ok();
         let cost = std::env::var("AXON_STEP_COST").ok();
@@ -182,13 +184,15 @@ impl Default for Sched {
 
 impl Sched {
     /// The defaults for AXON_ADMIT = `admit` and AXON_STEP_COST = `cost`
-    /// (`Default` reads them; tests pass them). Note: "AXON_STEP_COST=legacy
-    /// alone is main's scheduling" holds only without AXON_ADMIT=sjf.
+    /// (`Default` reads them; tests pass them). AXON_ADMIT=fifo is the
+    /// admission of before (with `--step-ms 60` and AXON_STEP_COST=legacy:
+    /// the scheduling before #131); any other value (AXON_ADMIT=sjf from
+    /// older configs too) is shortest-first.
     pub fn from_env(admit: Option<&str>, cost: Option<&str>) -> Sched {
         Sched {
-            order: match admit == Some("sjf") {
-                true => AdmitOrder::Sjf,
-                false => AdmitOrder::Fifo,
+            order: match admit == Some("fifo") {
+                true => AdmitOrder::Fifo,
+                false => AdmitOrder::Sjf,
             },
             age_ms: ADMIT_AGE_MS,
             lanes: 0,
@@ -200,8 +204,8 @@ impl Sched {
 
 /// Prompts prefilling at once at most for `sched` with `slots` slots
 /// (`Batch::lanes`): `sched.lanes`, else sjf `slots / 16` within 2..=8 (2
-/// at up to 32 slots, 8 at 128), fifo 2 (main's `MAX_PREFILLING`: the
-/// lane scaling is part of shortest-first, opt-in with it).
+/// at up to 32 slots, 8 at 128), fifo 2 (the `MAX_PREFILLING` of before:
+/// the lane scaling is part of shortest-first).
 pub(super) fn lanes_for(sched: &Sched, slots: usize) -> usize {
     match (sched.lanes, sched.order) {
         (0, AdmitOrder::Sjf) => (slots / 16).clamp(2, 8),
@@ -2101,20 +2105,25 @@ mod sched_tests {
     /// AXON_ADMIT=sjf breaks the "alone" (sjf's lanes scale with slots).
     #[test]
     fn legacy_alone_is_main_admission() {
-        for admit in [None, Some("fifo"), Some("anything")] {
-            let s = Sched::from_env(admit, Some("legacy"));
-            assert!(s.legacy && s.order == AdmitOrder::Fifo, "{admit:?}");
-            for slots in [1, 8, 16, 32, 64, 128, 256] {
-                assert_eq!(lanes_for(&s, slots), 2, "{admit:?} {slots}");
-            }
+        // AXON_ADMIT=fifo + AXON_STEP_COST=legacy: fifo, 2 lanes at any slot
+        // count (with `--step-ms 60`: the scheduling before #131).
+        let s = Sched::from_env(Some("fifo"), Some("legacy"));
+        assert!(s.legacy && s.order == AdmitOrder::Fifo);
+        for slots in [1, 8, 16, 32, 64, 128, 256] {
+            assert_eq!(lanes_for(&s, slots), 2, "{slots}");
         }
-        let sjf = Sched::from_env(Some("sjf"), Some("legacy"));
-        assert_eq!(sjf.order, AdmitOrder::Sjf);
-        let l: Vec<usize> = [16, 32, 64, 128, 256].map(|n| lanes_for(&sjf, n)).to_vec();
-        assert_eq!(l, [2, 2, 4, 8, 8]);
-        // No env at all: the model's budgets, fifo, 2 lanes.
+        // Anything else is shortest-first (the default since #165's rule S),
+        // its lanes scaled with the slots; AXON_ADMIT=sjf from older configs
+        // too.
+        for admit in [None, Some("sjf"), Some("anything")] {
+            let sjf = Sched::from_env(admit, Some("legacy"));
+            assert_eq!(sjf.order, AdmitOrder::Sjf, "{admit:?}");
+            let l: Vec<usize> = [16, 32, 64, 128, 256].map(|n| lanes_for(&sjf, n)).to_vec();
+            assert_eq!(l, [2, 2, 4, 8, 8]);
+        }
+        // No env at all: the model's budgets, shortest-first.
         let d = Sched::from_env(None, None);
-        assert!(!d.legacy && d.order == AdmitOrder::Fifo && lanes_for(&d, 128) == 2);
+        assert!(!d.legacy && d.order == AdmitOrder::Sjf && lanes_for(&d, 128) == 8);
     }
 
     const PASS: usize = 1152;
@@ -2553,8 +2562,8 @@ mod sched_tests {
         }
     }
 
-    /// The rollback: with AXON_STEP_COST=legacy (and the default fifo
-    /// admission, `admit_gate`'s fifo arm with 2 lanes at any slot count:
+    /// The rollback: with AXON_STEP_COST=legacy (and fifo admission,
+    /// AXON_ADMIT=fifo, `admit_gate`'s fifo arm with 2 lanes at any slot count:
     /// `legacy_alone_is_main_admission`) every scheduling decision is
     /// main's (d6b7051, unchanged at fcde887), bit for bit,
     /// over 20,000 random states: the budget (the same timings fed through

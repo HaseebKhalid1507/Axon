@@ -280,7 +280,7 @@ sampling (gen, chat): --temp T --top-k K --top-p P --min-p P
           --repeat-penalty P --repeat-last-n N --seed S   (axon --help)
 axon serve <model.gguf> [--host H] [--port P] [--ctx N] [--draft K] [--draft-model PATH]
           [--device D] [--gpu-layers N] [--kv T] [--parallel N] [--step-ms MS]
-          [--admit-order fifo|sjf] [...]
+          [--admit-order sjf|fifo] [...]
                                           OpenAI-compatible HTTP server (below)
 axon --help | --version
 ```
@@ -413,21 +413,22 @@ use your local model), `--max-conns N` / `--max-queue N` (defaults 256 / 128),
 an explicit N that doesn't fit in GPU memory at start is refused, the automatic sizing falls back and says so),
 `--prefill-chunk N` (at least N prompt tokens a batched step feeds while others decode;
 default 256; `--prefill-chunk 0`: whole prompts), `--step-ms MS` (a step's target time
-while requests decode, default 60: the prompt tokens it feeds beside their decode step are
+while requests decode, default 80: the prompt tokens it feeds beside their decode step are
 what fits at the cost the server measures as steps run, per pass, per prompt token and per
 decode row count, and a step feeds at most the prompts that fit; 0: exactly `--prefill-chunk`
 tokens; `--prefill-ms` is its old name, still accepted), `--step-tokens N`
 (pin a step's prompt tokens; this also lifts the bound on prompts per step),
-`--admit-order fifo|sjf` (`fifo`, default: first come first
-served, one per step; `sjf`, opt-in, `AXON_ADMIT=sjf`: shortest prompt first, several per
-step, which cuts short prompts' tail TTFT under load but not yet their median: it missed its
-kill rule on a laptop GPU and stays opt-in until an H100 run decides,
-[#139](https://github.com/HaseebKhalid1507/Axon/issues/139)), `--admit-age-ms MS` (sjf: a request
-waiting this long starts before shorter ones, default 3000; 0: never), `--prefill-lanes N`
-(prompts prefilling at once, default 2; with sjf only prompts longer than a step's chunk
-count, default parallel/16 within 2..8, and short ones never wait for a lane). The
-scheduling of before (`--step-ms` as a fixed budget, less the last decode step):
-`AXON_STEP_COST=legacy` with the default fifo. `--quiet`
+`--admit-order sjf|fifo` (`sjf`, default: shortest prompt first, several per step; `fifo`,
+`AXON_ADMIT=fifo`: first come first served, one per step). With `--step-ms 80` this default
+passed a pre-registered rule on an H100 SXM, mix C=128 against fifo at 60 ms: aggregate
++7.6 %, goodput +60.5 %, ITL p99 99.9 ms, C=64 aggregate +4.6 %, identical outputs
+([#165](https://github.com/HaseebKhalid1507/Axon/issues/165)). `--admit-age-ms MS` (sjf: a
+request waiting this long starts before shorter ones, default 3000; 0: never),
+`--prefill-lanes N` (prompts prefilling at once: with sjf, prompts longer than a step's chunk,
+default parallel/16 within 2..8, and short ones never wait for a lane; with fifo, all of them,
+default 2). The scheduling of before: `--admit-order fifo --step-ms 60`, and for the fixed
+budget of before #131 (`--step-ms` less the last decode step) add `AXON_STEP_COST=legacy`.
+`--quiet`
 (no per-request line on stderr). `GET /health` is 503 until the model is loaded.
 
 - Context (`--ctx N`, per request): by default the model's trained context (32768 for
@@ -580,7 +581,7 @@ scheduling of before (`--step-ms` as a fixed budget, less the last decode step):
   60 s write timeout) is detected, after the server's send buffer fills too, and stderr says
   so at startup.
 - A request's `priority` field is accepted and ignored (requests start in arrival order, or
-  shortest prompt first with `--admit-order sjf`).
+  shortest prompt first by default; `--admit-order fifo` for arrival order).
 
 #### Tool calling
 
@@ -734,8 +735,8 @@ OLLAMA_HOST=http://127.0.0.1:8080 ollama run qwen3-8b
 | `AXON_GEMM_TILE=64` | cuda, sm_80+: keep every batched Q4_K / Q5_K product (and the fused gate+up) on the 64 × 64 `gemm2s` tile. Default (unset or any other value): the 128 × 64 `gemm2t` tile where its waves cost less (`tile_t`: the big products at > 64 tokens; not batches of ≤ 64 tokens, nor, e.g., a 512-row k / v on a 128-SM GPU). Same bits either way |
 | `AXON_GEMMH=0\|1` | cuda, sm_90a: `0` keeps every batched Q4_K product on the mma.sync GEMMs; `1` sends every one of them to the wgmma kernel. Default: the fused gate+up and the large Q4_K products (>= 3584 rows, at least one full wave of blocks) use wgmma (same bits either way) |
 | `AXON_Q6K8=0\|1` | cuda: `0` never makes the int8 copy of Q6_K matrices that speeds up prefill (sm_80+); `1` makes it whenever it fits beside the cache. Default: only if 768 MiB stay free beside it and the cache, and never on a split (same bits either way) |
-| `AXON_ADMIT=sjf` | `serve`: same as `--admit-order sjf` (opt-in; default fifo) |
-| `AXON_STEP_COST=legacy` | `serve`: the step budget before the measured cost model (`--step-ms` less the last decode step); with the default fifo admission, the scheduling of before, decision for decision |
+| `AXON_ADMIT=fifo` | `serve`: same as `--admit-order fifo` (default sjf) |
+| `AXON_STEP_COST=legacy` | `serve`: the step budget before the measured cost model (`--step-ms` less the last decode step); with `AXON_ADMIT=fifo` and `--step-ms 60`, the scheduling before #131, decision for decision |
 | `AXON_SKIP_MODEL_TESTS=1` | tests: skip the ones that need the real model |
 
 ## Numbers

@@ -164,9 +164,9 @@ As of main `39624db` (2026-10-25). None of these is on main; each is open work:
   [roadmap](roadmap.md#next-proposed-order-outside-review-10-19-owner-decides), [reviews/](reviews/README.md)):
   - **H100 step anatomy** (item 1 (a)): the kit is draft PR #125 (`AXON_SERVE_TRACE`, gemmh2 variants,
     `pool_feed_cost`), rehearsed on bella; the pod session waits for approval.
-  - **The shortest-first default on the H100** (#139): #131 shipped the measured step budget and kept
-    `--admit-order sjf` opt-in after it missed its kill rule on the laptop cells; one H100 session at mix C = 64 /
-    128 decides whether it becomes the default. Not booked.
+  - **The shortest-first default on the H100** (#139, #165): decided. `--admit-order sjf --step-ms 80` passed
+    #165's pre-registered rule S on an H100 SXM (mix C=128: +7.6 % aggregate, +60.5 % goodput, ITL p99 99.9 ms) and
+    is the default (PR_NUM).
   - Later in the order: an exact Hopper GEMM (item 2), FP8 under `fast` if that GEMM misses (item 4).
 - **One MoE resident on the GPU, next steps** (item 3; PRs A–C are on main for deepseek2):
   - the **Moonlight bench of record** against llama.cpp (`--n-cpu-moe`), since #127's ×2.06 / ×3.40 was against
