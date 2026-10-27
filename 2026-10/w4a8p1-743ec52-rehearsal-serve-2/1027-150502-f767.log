@@ -1,0 +1,28 @@
+[axon-run 15:05:02] submitted 1027-150502-f767 by /home/haseeb/.cache/axon-w4a8: /usr/bin/bash /home/haseeb/.cache/axon-w4a8/kit/p1_h100.sh
+[axon-run 15:05:02] scope axon-job-1027-150502-f767-1793127902.scope in app-axonjobs.slice: MemoryMax 14524 MB, MemoryHigh 13071 MB, no swap, oomd pressure kill 80% (claim 9000 MB): an OOM here kills only this job
+[axon-run 15:05:02] job 1027-150502-f767 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1027-150502-f767-1793127902 --slice=app-axonjobs.slice -p MemoryMax=14524M -p MemoryHigh=13071M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash /home/haseeb/.cache/axon-w4a8/kit/p1_h100.sh
+axon-q 15:05:02 start slot 16-23: /usr/bin/bash /home/haseeb/.cache/axon-w4a8/kit/p1_h100.sh
+[p1 +0s] kernel cache: 305 -> 305 entries (/home/haseeb/.cache/axon/cuda)
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 615.78.08, 12227 MiB, 3090 MHz
+4727b54ed0ebbfe970323bef1e2ca017565cb153098f597d9e5be413ed7d0782  axon-test
+2c9069b050810711e0f876456a5d3fad0b890a0d92b3a154821ab1ebee217f82  axon-main
+c3ff5fb849cd7dc9958de23fd41b6ddbaf13a0c99b2df9f5d51dbd403dd86cbb  prompts-mix-v2.jsonl
+a82b55c178a2fa9bf2c50031390210214111b447d3e9737d5d9e70b44b4ff7c8  sd_client.py
+1389cd0fc7086fb3a0c8565e900b12f88c3c9b3e5affe7a88719f52a8085653e  passhist.py
+src axon-test=441ebeeb3a1febf9425cf8fdf9e46a205416880b scripts=743ec52949b9fbc54dfb3dc1286cfe68dbd770eb axon-main=6f06544be4fe43a78a50007d29586d248b994d8a
+[p1 +2s] model /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (65b8fcd92af6b4fe); serve --parallel 128 --ctx 8192, cells C=128
+[p1 +3s] serve fifo60 up after 2s (--admit-order fifo --step-ms 60)
+CELL fifo60 c128 {"tag": "fifo60", "workload": "mix", "round": 1, "url": "http://127.0.0.1:19797", "salt": "p1 c128 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793128026.791, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 106.561, "completion_tokens": 72619, "prompt_tokens": 24986
+PASSHIST fifo60 12x1 13x2 14x10 15x14 16x15 17x17 18x26 19x25 20x13 21x9 22x9 23x8 24x7 25x2 26x4 27x2 51x4 52x11 53x8 54x10 55x3 56x3 59x2 60x2 208x1 209x1 213x1 214x1 218x2 219x5 220x1 223x4 224x1 227x2 228x1 229x1 231x1 232x1 233x3 234x1 238x1 239x1 240x1 241x1 247x2 248x1 249x3 251x1 253x1 254x2 255x1 256x887 261x1 262x1 264x2 265x2 280x1
+PASSMULTI fifo60 
+FEEDSHARE fifo60 60779.331 106490.983
+PASSSTAT fifo60 C=128: 1632 steps, 1143 with one feed pass, 0 with two or more (0.00 % of feed steps), feeds 60.78 s of 106.49 s
+[p1 +125s] serve sjf80 up after 2s (--admit-order sjf --step-ms 80)
+CELL sjf80 c128 {"tag": "sjf80", "workload": "mix", "round": 1, "url": "http://127.0.0.1:19797", "salt": "p1 c128 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793128152.178, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 110.036, "completion_tokens": 72619, "prompt_tokens": 249860
+PASSHIST sjf80 14x4 15x12 16x13 17x9 18x20 19x20 20x13 21x9 22x5 23x3 25x2 26x3 27x2 51x1 52x5 53x1 54x3 55x1 56x1 130x1 140x1 147x1 154x1 160x1 164x1 182x1 184x1 185x1 195x1 197x2 202x1 205x1 209x1 214x1 219x3 220x1 223x2 224x1 227x1 228x1 229x1 232x1 233x1 234x1 239x1 241x1 247x1 249x1 251x1 254x1 255x1 256x766 257x6 258x4 259x4 260x2 261x4 262x5 263x5 264x3 265x5 266x7 267x5 268x1 269x3 270x3 271x4 272x2 273x4 274x3 275x1 276x1 277x1 278x1 279x4 280x3 281x2 282x1 283x4 284x1 286x2 287x2 288x1 289x1 290x1 292x2 293x1 294x1 295x3 296x1 297x1 300x3 301x1 302x1 304x2 309x1 322x1 323x1 327x1 329x1 331x1 333x1 340x1 345x1 356x1 357x1 361x1 370x1
+PASSMULTI sjf80 43/2 44/2 44/2 44/2 46/2 46/2 76/2 106/2 71/2 109/2 42/2 38/2 38/2 30/2 34/2 35/2 34/2 31/2 35/2 38/2 32/2 35/2 71/2 66/2 101/2 106/2 107/2 111/2 112/2 113/2 103/2 114/2 34/2 67/2 104/2 105/2 36/2 105/2 32/2 35/2
+FEEDSHARE sjf80 61734.796 109903.010
+PASSSTAT sjf80 C=128: 1617 steps, 1054 with one feed pass, 40 with two or more (3.66 % of feed steps), feeds 61.73 s of 109.90 s
+[p1 +250s] P1 H100 DONE rc 0 cells fifo60,sjf80 ok
+[axon-run 15:09:12] exit 0 after 249.8s (host bella)
+[axon-run 15:09:18] EXPECT ok: output matches /P1 H100 DONE rc 0 cells fifo60,sjf80 ok/
