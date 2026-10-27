@@ -1,0 +1,102 @@
+[axon-run 15:50:48] submitted 1027-155048-6cc0 by /home/haseeb/.cache/axon-w4a8: /usr/bin/bash p1_h100.sh
+[axon-run 15:50:48] scope axon-job-1027-155048-6cc0-1793130648.scope in app-axonjobs.slice: MemoryMax 13024 MB, MemoryHigh 11721 MB, no swap, oomd pressure kill 80% (claim 8000 MB): an OOM here kills only this job
+[axon-run 15:50:48] job 1027-155048-6cc0 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1027-155048-6cc0-1793130648 --slice=app-axonjobs.slice -p MemoryMax=13024M -p MemoryHigh=11721M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash p1_h100.sh
+axon-q 15:50:48 start slot 16-23: /usr/bin/bash p1_h100.sh
+[p1 +0s] kernel cache: 305 -> 305 entries (/home/haseeb/.cache/axon/cuda)
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 615.78.08, 12227 MiB, 3090 MHz
+6874e5058f0bfec34b5697126766fc7b57d77a8c6bbb9636285c3995d71cbded  axon-test
+2c9069b050810711e0f876456a5d3fad0b890a0d92b3a154821ab1ebee217f82  axon-main
+c3ff5fb849cd7dc9958de23fd41b6ddbaf13a0c99b2df9f5d51dbd403dd86cbb  prompts-mix-v2.jsonl
+a82b55c178a2fa9bf2c50031390210214111b447d3e9737d5d9e70b44b4ff7c8  sd_client.py
+1389cd0fc7086fb3a0c8565e900b12f88c3c9b3e5affe7a88719f52a8085653e  passhist.py
+src axon-test=98f52b0bad0a6bc284f9e02a84ecba50554e2a99 (kernels = 441ebee's) scripts=98f52b0bad0a6bc284f9e02a84ecba50554e2a99 axon-main=6f06544be4fe43a78a50007d29586d248b994d8a
+9d488132b3baf8086692f7f2ae9209f990d872a7980e2c1d347c8a0010897f71  W4A8 CUBIN kit 03efcecdeec9b7e99a60351621f956b9.cubin
+b32701f761eac0f8c3a281a0ab8bdd8dc94e7fc25b9d18e0a644902eafa6da13  W4A8 CUBIN kit 03efcecdefc9b7e99a60351621f957f4.cubin
+117b10d5fc43edfab1e0f0517f9f4af18f35b4582103a8d2d38add9f37898e42  W4A8 CUBIN kit 03efcecdf0c9b7e99a60351621f9592f.cubin
+2b273ebdf971b3f91a08eed35ae08c76f13fbb5afe12c7e742c3422a41ffce5e  W4A8 CUBIN kit 222bdb67fbc9a05f17c956bdbd927eb0.cubin
+a5428b25fdda5859ec466f92bb54d5a17bcec1d51860c5729026b670f44e28b1  W4A8 CUBIN kit 222bdb67fcc9a05f17c956bdbd927feb.cubin
+7fdf9130f373799c99238ab8df16e7d836300b96458b61f84d8dcc7bea5ff8e1  W4A8 CUBIN kit 222bdb6802c9a05f17c956bdbd92874d.cubin
+2508e3864ca20d006fda10225d89d1ada142a9295ec95b48c38dc99ce67340d8  W4A8 CUBIN kit 7fdb9194b471b3a442d9e3e58b63eaa6.cubin
+740f84cc88ed73436d328ab313510f9a4a3edbfec5b2b9913cfdfeab3900b016  W4A8 CUBIN kit 7fdb9194b671b3a442d9e3e58b63ed1c.cubin
+da3ecfbbd5ce344fe4402a1d7d32f26d435ea63e27348ed4183a3787963ee217  W4A8 CUBIN kit 7fdb9194b771b3a442d9e3e58b63ee57.cubin
+[p1 +2s] model /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf (65b8fcd92af6b4fe); serve --parallel 128 --ctx 8192, cells C=128
+
+running 1 test
+test cuda::qwen2::tests::cuda_w4a8_p1_session ... W4A8 PTXAS w4a8_q6: ptxas         .     0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+W4A8 PTXAS w4a8_q6: ptxas info    : Used 168 registers, used 1 barriers
+W4A8 PTXAS w4a8_q4_k_gu: ptxas         .     0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+W4A8 PTXAS w4a8_q4_k_gu: ptxas info    : Used 168 registers, used 3 barriers
+W4A8 PTXAS w4a8_q4_k: ptxas         .     0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+W4A8 PTXAS w4a8_q4_k: ptxas info    : Used 168 registers, used 1 barriers
+PROBE STAGE compile: ok
+PROBE STAGE gpu_rmsnorm_matches_cpu: start (/home/haseeb/.cache/axon-w4a8/kit/san/compute-sanitizer --tool memcheck --error-exitcode 9 --print-limit 20 /home/haseeb/.cache/axon-w4a8/kit/axon-test cuda::qwen2::tests::gpu_rmsnorm_matches_cpu --exact --nocapture --test-threads 1)
+========= COMPUTE-SANITIZER
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test cuda::qwen2::tests::gpu_rmsnorm_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 781 filtered out; finished in 0.49s
+
+========= ERROR SUMMARY: 0 errors
+PROBE STAGE gpu_rmsnorm_matches_cpu: rc 0 after 0.8 s
+PROBE STAGE sanitizer-selfcheck: ok
+PROBE STAGE gpu_w4a8_tiny: start (/home/haseeb/.cache/axon-w4a8/kit/san/compute-sanitizer --tool memcheck --error-exitcode 9 --print-limit 20 /home/haseeb/.cache/axon-w4a8/kit/axon-test cuda::qwen2::tests::gpu_w4a8_tiny --exact --nocapture --test-threads 1)
+========= COMPUTE-SANITIZER
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+skipping: not sm_90a
+test cuda::qwen2::tests::gpu_w4a8_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 781 filtered out; finished in 0.45s
+
+========= ERROR SUMMARY: 0 errors
+PROBE STAGE gpu_w4a8_tiny: rc 0 after 0.6 s
+PROBE STAGE sanitizer tiny: skipped (no sm_90a)
+PROBE STAGE gpu_w4a8_tiny: start (/home/haseeb/.cache/axon-w4a8/kit/axon-test cuda::qwen2::tests::gpu_w4a8_tiny --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+skipping: not sm_90a
+test cuda::qwen2::tests::gpu_w4a8_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 781 filtered out; finished in 0.29s
+
+PROBE STAGE gpu_w4a8_tiny: rc 0 after 0.4 s
+PROBE STAGE gpu_w4a8_matches_reference_bits: start (/home/haseeb/.cache/axon-w4a8/kit/axon-test cuda::qwen2::tests::gpu_w4a8_matches_reference_bits --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+skipping: needs an sm_90a module (compute capability 9.0)
+test cuda::qwen2::tests::gpu_w4a8_matches_reference_bits ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 781 filtered out; finished in 0.30s
+
+PROBE STAGE gpu_w4a8_matches_reference_bits: rc 0 after 0.4 s
+PROBE STAGE cuda_w4a8_checkpoint1: start (/home/haseeb/.cache/axon-w4a8/kit/axon-test cuda::qwen2::tests::cuda_w4a8_checkpoint1 --exact --nocapture --test-threads 1 --ignored)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+W4A8 device NVIDIA GeForce RTX 5070 Ti Laptop GPU sm_120 46 SMs, hopper module false
+W4A8 KERNELS fnv1a64 27292780fa045708 (402653 bytes; w4a8.cu 21967 bytes)
+W4A8 REHEARSAL q/wo nb 64 (stand-in gemm2s_q4_k, 46 SMs): arm 1 rounds ["0.0353", "0.0355", "0.0355", "0.0355", "0.0355", "0.0355", "0.0353"]
+W4A8 REHEARSAL gate_up nb 1024 (stand-in gemm2s_q4_k, 46 SMs): arm 1 rounds ["4.0745", "3.8188", "4.4943", "4.9067", "4.2373", "3.9752", "4.4896"]
+W4A8 REHEARSAL VALIDITY (stand-in kernel): max W4A8 spread 28.49 % (gate_up nb 1024; bar < 5 %), t(gate_up 1024) / t(q/wo 64) 119.37 (bar >= 10): VOID
+W4A8 BENCH END ok
+test cuda::qwen2::tests::cuda_w4a8_checkpoint1 ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 781 filtered out; finished in 0.84s
+
+PROBE STAGE cuda_w4a8_checkpoint1: rc 0 after 1.0 s
+PROBE SESSION 123 s of 720 s budget
+PROBE END ok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 781 filtered out; finished in 123.23s
+
+[p1 +126s] session rc 0
+W4A8 CUBIN new cache entries during the run: none (the kit's cubins were loaded)
+[p1 +126s] P1 H100 DONE rc 0 cells skipped ok
+[axon-run 15:52:54] exit 0 after 125.6s (host bella)
+[axon-run 15:52:56] EXPECT ok: output matches /P1 H100 DONE rc 0 cells skipped ok/
