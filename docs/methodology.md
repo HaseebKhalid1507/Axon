@@ -53,14 +53,19 @@ benchmark ──▶ pick ──▶ design ──▶ build ──▶ critic revie
    (`feat/r8-gemm-pipeline`, `AXON_GEMM2M`, for example).
 9. **Kill rules bound spend; the exactness contract bounds merge** (ruling 2026-10-26, PR #151). A
    pre-registered kill rule decides whether a line gets more builder-days and pod-hours. It is not a
-   veto on code that is already built, passes the exactness contract (md5 + bits gates) and regresses
-   no measured cell: such code can merge default-on with the miss written into the PR, the log and
-   the roadmap, and the line closes (no follow-ups without a fresh pick). Code that **regresses** any
-   cell is still rejected (M6, #148). A benefit that only holds for some workloads lands opt-in (#131
-   (c)). Two corollaries from the same case: gate a rule on the term the change touches (the decode
-   step), not on an aggregate dominated by another term (the mix C = 128 cell was prefill-bound); and
-   booking hardware past a missed proxy gate is an override the foreman owns and records (#151's H100
-   session after the 4090 miss, ~$0.93).
+   veto on code that was built within the spend the rule allowed, passes the exactness contract
+   (md5 + bits gates), still passes step 7 on the term it targets (it is faster there), and regresses
+   no measured cell beyond the pre-registered noise bar (2 % unless the PR set another). Such code can
+   merge default-on with the miss written into the PR, the log and the roadmap, and the line closes
+   (no follow-ups without a fresh pick). So a missed kill rule lowers the bar to step 7's, not to
+   nothing. Code that regresses any cell past the noise bar is still rejected (M6, #148: ×0.725–×0.965
+   against a 2 % bar). A change that wins some measured cells and loses others lands opt-in (#131 (c)),
+   or default-on only where it wins, with its dispatch restricted to those cells. Work built after the
+   rule said stop does not count as "already built": it is a foreman override. Two corollaries from the
+   same case: gate a rule on the term the change touches (the decode step), not on an aggregate
+   dominated by another term (the mix C = 128 cell was prefill-bound); and booking hardware past a
+   missed proxy gate is an override the foreman owns and records in the PR body and `docs/log/`
+   (#151's H100 session after the 4090 miss, ~$0.93).
 
 **Who decides.** Fable (`fable-5-1`) does picks, designs, critiques and research. Opus (`opus-5-5`)
 builders write the code. The foreman (Jawz) assigns tracks, runs gates and benchmarks, integrates
