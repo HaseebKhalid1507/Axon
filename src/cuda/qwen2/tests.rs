@@ -9532,6 +9532,120 @@ fn gpu_concurrency_matrix_hunt() {
 /// 8 KiB bsum pieces + 128 raw Q4_K rows, 8 barriers, 1 KiB alignment slack.
 const PROBE_W4A8_SMEM: usize = 4 * (64 * 256 + 64 * 128 + 128 * 144) + 2 * 4 * 8 + 1024;
 
+/// probe_w4a8.cu's shared-memory carve-up (PW_* macros), byte offsets from
+/// the 1024-aligned base: per stage s at s * PW_STAGE, activations (2 x
+/// 8 KiB SW128 boxes), the bsum-piece tile (8 KiB SW128), raw Q4_K rows;
+/// then the full / empty mbarriers.
+const PW_ST: usize = 4;
+const PW_ACT: usize = 64 * 256;
+const PW_BS: usize = 64 * 128;
+const PW_RAW: usize = 128 * 144;
+const PW_STAGE: usize = PW_ACT + PW_BS + PW_RAW;
+
+/// Every alignment the probe relies on, checked on the host so a bad
+/// configuration fails here with a message instead of faulting on the GPU:
+/// - global (TMA, cuTensorMapEncodeTiled): base addresses and row strides
+///   multiples of 16 B; the weights box's inner extent (144 B) a multiple
+///   of 16; K a multiple of 256 (whole superblocks);
+/// - global (thread loads): the activation's b32 sums (decode.cu act_view:
+///   2 np + np / 64 bytes in) are only 4-byte aligned, which is why the
+///   producer loads them as scalar ints (an int4 load there was the 10-26
+///   CUDA_ERROR_MISALIGNED_ADDRESS); outS / outM 4-byte;
+/// - smem: SW128 TMA destinations and wgmma descriptor bases (activation
+///   halves, the bsum tile) 1024-aligned; the no-swizzle raw TMA
+///   destination 128-aligned, and its 144-byte rows keep the per-row uint4
+///   header loads 16-aligned; mbarriers 8-aligned; the total (+ 1024 B of
+///   base-alignment slack) within the 227 KiB opt-in limit;
+/// - wgmma descriptors: start address >> 4 (16 B units), SBO 1024 B (8 rows
+///   of 128 B), SWIZZLE_128B, + 32 B per k32 step inside a 128-B row.
+fn probe_w4a8_layout(
+    w: u64,
+    act: u64,
+    st: usize,
+    cols: usize,
+    out_s: u64,
+    out_m: u64,
+) -> Result<(), String> {
+    let np = cols.next_multiple_of(256);
+    let rb = cols / 256 * 144;
+    let checks: [(bool, String); 14] = [
+        (
+            cols % 256 == 0 && cols > 0,
+            format!("K {cols} not a multiple of 256"),
+        ),
+        (w % 16 == 0, format!("weights at {w:#x}: TMA needs 16 B")),
+        (
+            rb % 16 == 0,
+            format!("weight row stride {rb}: TMA needs 16 B"),
+        ),
+        (
+            act % 16 == 0,
+            format!("activations at {act:#x}: TMA needs 16 B"),
+        ),
+        (
+            st % 16 == 0,
+            format!("activation stride {st}: TMA needs 16 B"),
+        ),
+        (
+            (act as usize + 2 * np + np / 64) % 4 == 0 && st % 4 == 0,
+            "b32 sums not 4-byte aligned".into(),
+        ),
+        (
+            out_s % 4 == 0 && out_m % 4 == 0,
+            "outS / outM not 4-byte aligned".into(),
+        ),
+        (
+            PW_STAGE % 1024 == 0,
+            format!("stage size {PW_STAGE} % 1024"),
+        ),
+        ((PW_ACT / 2) % 1024 == 0, "activation half % 1024".into()),
+        (PW_ACT % 1024 == 0, "bsum tile offset % 1024".into()),
+        (
+            (PW_ACT + PW_BS) % 128 == 0,
+            "raw TMA destination % 128".into(),
+        ),
+        (
+            144 % 16 == 0 && (PW_ACT + PW_BS) % 16 == 0,
+            "raw row headers % 16".into(),
+        ),
+        ((PW_ST * PW_STAGE) % 8 == 0, "mbarriers % 8".into()),
+        (
+            PROBE_W4A8_SMEM == PW_ST * PW_STAGE + 2 * PW_ST * 8 + 1024 && PROBE_W4A8_SMEM <= 232448,
+            format!("smem {PROBE_W4A8_SMEM} > 227 KiB or out of sync"),
+        ),
+    ];
+    match checks.iter().find(|c| !c.0) {
+        Some((_, m)) => Err(format!("probe_w4a8 layout: {m}")),
+        None => Ok(()),
+    }
+}
+
+/// The layout invariants hold for every shape the probe runs (no GPU).
+#[test]
+fn probe_w4a8_layout_holds() {
+    for cols in [256usize, 768, 1280, 3584, 4352, 18944] {
+        let st = act_stride_t(cols);
+        probe_w4a8_layout(0x7f00_0000_0000, 0x7f10_0000_0000, st, cols, 0x1000, 0x2000).unwrap();
+    }
+    // It does catch what it claims to.
+    assert!(probe_w4a8_layout(8, 0, 256, 256, 0, 0).is_err());
+    assert!(probe_w4a8_layout(0, 0, 264, 256, 0, 0).is_err());
+    let src = include_str!("../probe_w4a8.cu");
+    for (k, v) in [
+        ("#define PW_ACT(N) ((N) * 256)", PW_ACT == 64 * 256),
+        ("#define PW_BS(N) ((N) * 128)", PW_BS == 64 * 128),
+        ("#define PW_RAW (128 * 144)", PW_RAW == 128 * 144),
+        ("#define PW_ST(N) ((N) == 64 ? 4 : 3)", PW_ST == 4),
+    ] {
+        assert!(
+            src.contains(k) && v,
+            "probe_w4a8.cu and tests.rs disagree: {k}"
+        );
+    }
+    // No vector loads through the 4-byte-aligned b32 pointer.
+    assert!(!src.contains("(const int4*)b32") && !src.contains("(const int2*)b32"));
+}
+
 /// The probe module's source: kernels.cu's typedefs, decode.cu's `Act` /
 /// `act_view`, hopper.cu's helpers (TMap .. the RS wgmma wrappers, up to
 /// HOPPER_CHECK_SMEM), probe_w4a8.cu. Panics if a marker moved.
@@ -9624,6 +9738,15 @@ unsafe fn launch_probe_w4a8(
     out_s: &DevBuf,
     out_m: &DevBuf,
 ) {
+    probe_w4a8_layout(
+        dev_addr(w),
+        dev_addr(act),
+        st,
+        cols,
+        dev_addr(out_s),
+        dev_addr(out_m),
+    )
+    .unwrap();
     let rb = (cols / 256 * 144) as u64;
     let mw = g
         .tensor_map_2d(dev_addr(w), (rb, rows as u64), rb, (144, 128), false)
@@ -9775,25 +9898,51 @@ fn gpu_probe_w4a8_int_bits() {
         eprintln!("skipping: not sm_90a");
         return;
     };
+    probe_w4a8_bits(
+        &g,
+        &km,
+        &pm,
+        &[
+            (128, 256, 64, 1),
+            (200, 768, 100, 3),
+            (384, 1280, 129, 2),
+            (128, 4352, 64, 1),
+            (512, 3584, 200, 7),
+        ],
+    );
+}
+
+/// The smallest probe launch (one tile, one block, one CTA), bit-checked:
+/// what the session runs under compute-sanitizer memcheck first. Hopper only.
+#[test]
+fn gpu_probe_w4a8_tiny() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module_ext(&g).unwrap();
+    let Some(pm) = probe_w4a8_module(&g) else {
+        eprintln!("skipping: not sm_90a");
+        return;
+    };
+    probe_w4a8_bits(&g, &km, &pm, &[(128, 256, 64, 1)]);
+}
+
+/// probe_w4a8_n64 vs probe_w4a8_ref at every output of each (rows, cols,
+/// nb, ctas); panics on a mismatch.
+fn probe_w4a8_bits(g: &Gpu, km: &Module, pm: &Module, cases: &[(usize, usize, usize, usize)]) {
     let mut rng = Rng(31);
-    for (rows, cols, nb, ctas) in [
-        (128usize, 256usize, 64usize, 1usize),
-        (200, 768, 100, 3),
-        (384, 1280, 129, 2),
-        (128, 4352, 64, 1),
-        (512, 3584, 200, 7),
-    ] {
+    for &(rows, cols, nb, ctas) in cases {
         let wh = synth_matrix(&mut rng, Q4_K, rows, cols);
         let w = g.upload(&wh).unwrap();
         let xs: Vec<Vec<f32>> = (0..nb).map(|_| rng.vec(cols, 1.0)).collect();
-        let act = quantize_batch(&g, &km, &xs, cols);
+        let act = quantize_batch(g, km, &xs, cols);
         let st = act_stride_t(cols);
         let (os, om) = (
             g.alloc(rows * nb * 4).unwrap(),
             g.alloc(rows * nb * 4).unwrap(),
         );
         // SAFETY: buffers sized as launch_probe_w4a8 requires.
-        unsafe { launch_probe_w4a8(&g, &pm, &w, rows, cols, &act, st, nb, ctas, &os, &om) };
+        unsafe { launch_probe_w4a8(g, pm, &w, rows, cols, &act, st, nb, ctas, &os, &om) };
         g.sync().unwrap();
         let (ah, sh, mh) = (
             act.read::<u8>().unwrap(),
@@ -9813,55 +9962,20 @@ fn gpu_probe_w4a8_int_bits() {
     }
 }
 
-/// T3's ONE H100 job: the probe's speed (pre-registered kill rule: gate
-/// 3584 x 18944 at nb 1024 < 240 TMAC/s -> shelve round 2) against the
-/// in-session baselines gemmh2_q4_k (main's exact wgmma kernel) and
-/// gemm2t_q4_k (mma.sync), interleaved in the same rounds, plus the
-/// measured wgmma ceiling (wg_peak_rs_n64 at 2 and 3 warpgroups per SM).
-/// Every probe cell is bit-checked (S, M vs the CPU at 4096 sampled
-/// outputs + the tiles' corners) on its last timed run; a mismatch fails
-/// the test and the cell's number does not count. Off Hopper the sm_90a
-/// cells are skipped (the probe is compile-checked instead) and gemm2t
-/// still runs, so the script path is rehearsed. AXON_PROBE_NB (default
-/// "128,1024"), AXON_PROBE_ROUNDS (default 9), AXON_PROBE_SHAPE (substring).
-/// Run with --ignored --nocapture.
+/// One child of cuda_probe_w4a8_session: the measured wgmma ceiling,
+/// wg_peak_rs_n64 at 2 and 3 warpgroups per SM (raw MACs). Hopper only.
 #[test]
 #[ignore]
-fn cuda_probe_w4a8_session() {
-    // A wedged probe (an mbarrier parity bug hangs the GPU) must not eat
-    // the pod: exit after AXON_PROBE_TIMEOUT_S (default 900) whatever runs.
-    let lim: u64 = std::env::var("AXON_PROBE_TIMEOUT_S")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(900);
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(lim));
-        eprintln!("PROBE TIMEOUT after {lim} s: exiting");
-        std::process::exit(124);
-    });
+fn cuda_probe_w4a8_peak() {
     let Some(g) = crate::testutil::gpu() else {
         return;
     };
     let info = g.info().unwrap();
     let km = Kernels::module_ext(&g).unwrap();
-    let pm = probe_w4a8_module(&g);
-    eprintln!(
-        "PROBE device {} sm_{}{} {} SMs, hopper module {}, probe module {}",
-        info.name,
-        info.cc.0,
-        info.cc.1,
-        info.sms,
-        km.hopper(),
-        pm.is_some()
-    );
-    let nbs: Vec<usize> = std::env::var("AXON_PROBE_NB")
-        .map(|v| v.split(',').map(|x| x.trim().parse().unwrap()).collect())
-        .unwrap_or(vec![128, 1024]);
     let rounds: usize = std::env::var("AXON_PROBE_ROUNDS")
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(9);
-    let shape_ok = |s: &str| std::env::var("AXON_PROBE_SHAPE").map_or(true, |f| s.contains(&f));
     let stats = |v: &mut Vec<f64>| -> (f64, f64, f64) {
         v.sort_by(|a, b| a.partial_cmp(b).unwrap());
         (v[v.len() / 2], v[0], v[v.len() - 1])
@@ -9900,13 +10014,65 @@ fn cuda_probe_w4a8_session() {
     } else {
         eprintln!("PROBE SKIP wg_peak_rs_n64 (no sm_90a module)");
     }
+    eprintln!("PROBE PEAK END ok");
+}
+
+/// One bench child of cuda_probe_w4a8_session: the probe vs gemmh2_q4_k
+/// (main's exact wgmma kernel) and gemm2t_q4_k (mma.sync), interleaved in
+/// the same rounds, on gate / q/wo / down / kv x AXON_PROBE_NB (default
+/// "128,1024"), AXON_PROBE_ROUNDS (default 9), AXON_PROBE_SHAPE
+/// (substring), AXON_PROBE_KERNELS=baselines (no probe). Every probe cell
+/// is bit-checked (S, M vs the CPU at 4096 sampled outputs + the tiles'
+/// corners) on its last timed run; a mismatch fails the test and the cell's
+/// number does not count. The PROBE GATE line applies the pre-registered
+/// rule (gate 3584 x 18944 nb 1024 < 240 TMAC/s -> shelve round 2).
+#[test]
+#[ignore]
+fn cuda_probe_w4a8_bench() {
+    // A wedged probe (an mbarrier parity bug hangs the GPU) must not eat
+    // the pod: exit after AXON_PROBE_TIMEOUT_S (default 900) whatever runs.
+    let lim: u64 = std::env::var("AXON_PROBE_TIMEOUT_S")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(900);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(lim));
+        eprintln!("PROBE TIMEOUT after {lim} s: exiting");
+        std::process::exit(124);
+    });
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let info = g.info().unwrap();
+    let km = Kernels::module_ext(&g).unwrap();
+    let pm = probe_w4a8_module(&g);
+    eprintln!(
+        "PROBE device {} sm_{}{} {} SMs, hopper module {}, probe module {}",
+        info.name,
+        info.cc.0,
+        info.cc.1,
+        info.sms,
+        km.hopper(),
+        pm.is_some()
+    );
+    // AXON_PROBE_KERNELS=baselines: gemmh2 / gemm2t only (the session's
+    // fallback when the probe faulted: a fresh process, a fresh context).
+    let baselines_only = std::env::var("AXON_PROBE_KERNELS").is_ok_and(|v| v == "baselines");
     if pm.is_none() {
-        eprintln!("PROBE SKIP sm_90a cells (no sm_90a device): compile-checking the probe instead");
-        nvrtc_probe_w4a8_compiles_sm90a();
-    } else {
-        gpu_probe_w4a8_int_bits();
-        eprintln!("PROBE BITS ragged: PASS");
+        eprintln!("PROBE SKIP probe cells (no sm_90a device)");
     }
+    let nbs: Vec<usize> = std::env::var("AXON_PROBE_NB")
+        .map(|v| v.split(',').map(|x| x.trim().parse().unwrap()).collect())
+        .unwrap_or(vec![128, 1024]);
+    let rounds: usize = std::env::var("AXON_PROBE_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(9);
+    let shape_ok = |s: &str| std::env::var("AXON_PROBE_SHAPE").map_or(true, |f| s.contains(&f));
+    let stats = |v: &mut Vec<f64>| -> (f64, f64, f64) {
+        v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        (v[v.len() / 2], v[0], v[v.len() - 1])
+    };
     let mut rng = Rng(7);
     let mut gate = None;
     let mut bad_total = 0;
@@ -9934,7 +10100,7 @@ fn cuda_probe_w4a8_session() {
             if km.hopper() {
                 kernels.push("gemmh2_q4_k");
             }
-            if pm.is_some() {
+            if pm.is_some() && !baselines_only {
                 kernels.push("probe_w4a8_n64");
             }
             let mut ms: Vec<Vec<f64>> = vec![Vec::new(); kernels.len()];
@@ -10046,8 +10212,157 @@ fn cuda_probe_w4a8_session() {
                 "KILL (shelve round 2)"
             }
         ),
-        None => eprintln!("PROBE GATE not measured on this device"),
+        None => eprintln!(
+            "PROBE GATE not measured in this run ({})",
+            if baselines_only {
+                "baselines only"
+            } else {
+                "no sm_90a device or bits failed"
+            }
+        ),
     }
     assert_eq!(bad_total, 0, "probe bit mismatches");
-    eprintln!("PROBE END ok");
+    eprintln!("PROBE BENCH END ok");
+}
+
+/// Run this test binary's `test` in a child process (its own CUDA context),
+/// optionally under `wrap` (compute-sanitizer), output inherited; killed
+/// after `limit_s`. Returns (rc, seconds); rc -1 = killed on timeout.
+fn probe_child(
+    wrap: &[String],
+    test: &str,
+    ignored: bool,
+    env: &[(&str, &str)],
+    limit_s: u64,
+) -> (i32, f64) {
+    let exe = std::env::current_exe().unwrap();
+    let mut args: Vec<String> = wrap.to_vec();
+    args.push(exe.display().to_string());
+    args.extend(
+        [
+            format!("cuda::qwen2::tests::{test}"),
+            "--exact".into(),
+            "--nocapture".into(),
+        ]
+        .into_iter()
+        .chain(["--test-threads".into(), "1".into()]),
+    );
+    if ignored {
+        args.push("--ignored".into());
+    }
+    eprintln!("PROBE STAGE {test}: start ({})", args.join(" "));
+    let t = std::time::Instant::now();
+    let mut c = std::process::Command::new(&args[0]);
+    c.args(&args[1..]).stdin(std::process::Stdio::null());
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    let mut child = match c.spawn() {
+        Ok(ch) => ch,
+        Err(e) => {
+            eprintln!("PROBE STAGE {test}: spawn failed: {e}");
+            return (-2, 0.0);
+        }
+    };
+    let rc = loop {
+        if let Some(st) = child.try_wait().unwrap() {
+            break st.code().unwrap_or(-3);
+        }
+        if t.elapsed().as_secs() >= limit_s {
+            let _ = child.kill();
+            let _ = child.wait();
+            break -1;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
+    let s = t.elapsed().as_secs_f64();
+    eprintln!(
+        "PROBE STAGE {test}: rc {rc} after {s:.1} s{}",
+        if rc == -1 { " (TIMEOUT, killed)" } else { "" }
+    );
+    (rc, s)
+}
+
+/// T3's ONE H100 job, as stages in separate processes so one faulting cell
+/// can't take the rest down (each child has its own CUDA context):
+/// 0. the probe's sm_90a NVRTC compile check (in process, no GPU);
+/// 1. cuda_probe_w4a8_peak: the measured wgmma ceiling;
+/// 2. with AXON_PROBE_SANITIZER=<compute-sanitizer>: gpu_probe_w4a8_tiny under
+///    `--tool memcheck` (a fault names the instruction and address);
+/// 3. gpu_probe_w4a8_tiny, then gpu_probe_w4a8_int_bits (ragged shapes, all
+///    outputs);
+/// 4. bits passed: cuda_probe_w4a8_bench (probe + gemmh2 + gemm2t
+///    interleaved); bits failed or that bench failed: the bench again with
+///    AXON_PROBE_KERNELS=baselines, so the in-session baselines are reported
+///    anyway. Off Hopper every sm_90a part skips (the bella rehearsal).
+/// Fails (after everything has run) if any probe stage failed.
+/// Run with --ignored --nocapture.
+#[test]
+#[ignore]
+fn cuda_probe_w4a8_session() {
+    nvrtc_probe_w4a8_compiles_sm90a();
+    eprintln!("PROBE STAGE compile: ok");
+    let mut fails: Vec<String> = Vec::new();
+    let mut note = |name: &str, rc: i32| {
+        if rc != 0 {
+            fails.push(format!("{name} rc {rc}"));
+        }
+    };
+    let (rc, _) = probe_child(&[], "cuda_probe_w4a8_peak", true, &[], 180);
+    note("peak", rc);
+    if let Some(san) = std::env::var_os("AXON_PROBE_SANITIZER") {
+        let san = san.to_string_lossy().to_string();
+        if std::path::Path::new(&san).is_file() {
+            let wrap: Vec<String> = [
+                &san,
+                "--tool",
+                "memcheck",
+                "--error-exitcode",
+                "9",
+                "--print-limit",
+                "20",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+            let (rc, _) = probe_child(&wrap, "gpu_probe_w4a8_tiny", false, &[], 420);
+            note("sanitizer tiny", rc);
+        } else {
+            eprintln!("PROBE STAGE sanitizer: {san} not found, skipped");
+            note("sanitizer missing", 1);
+        }
+    } else {
+        eprintln!("PROBE STAGE sanitizer: AXON_PROBE_SANITIZER unset, skipped");
+    }
+    let (rc_tiny, _) = probe_child(&[], "gpu_probe_w4a8_tiny", false, &[], 120);
+    note("tiny", rc_tiny);
+    let bits_ok = rc_tiny == 0 && {
+        let (rc, _) = probe_child(&[], "gpu_probe_w4a8_int_bits", false, &[], 300);
+        note("bits", rc);
+        rc == 0
+    };
+    let mut bench_ok = false;
+    if bits_ok {
+        let (rc, _) = probe_child(&[], "cuda_probe_w4a8_bench", true, &[], 1000);
+        note("bench", rc);
+        bench_ok = rc == 0;
+    }
+    // AXON_PROBE_REHEARSE_FALLBACK=1: take the fallback path anyway (bella rehearsal).
+    if !bench_ok || std::env::var("AXON_PROBE_REHEARSE_FALLBACK").is_ok_and(|v| v == "1") {
+        eprintln!("PROBE STAGE fallback: baselines only (the probe failed or was skipped)");
+        let (rc, _) = probe_child(
+            &[],
+            "cuda_probe_w4a8_bench",
+            true,
+            &[("AXON_PROBE_KERNELS", "baselines")],
+            700,
+        );
+        note("baselines", rc);
+    }
+    if fails.is_empty() {
+        eprintln!("PROBE END ok");
+    } else {
+        eprintln!("PROBE END FAILED: {}", fails.join(", "));
+        panic!("probe stages failed: {}", fails.join(", "));
+    }
 }

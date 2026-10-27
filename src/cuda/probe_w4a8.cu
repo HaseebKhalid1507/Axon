@@ -108,13 +108,16 @@ __device__ __forceinline__ void probe_w4a8_t(const TMap* mw, const TMap* mx, con
                         const int z = z0 + zz;
                         u32 lo[2] = {0, 0}, hi[2] = {0, 0};
                         if (z < nb) {
+                            // Scalar loads: b32 sits at 2 np + np / 64 bytes into the
+                            // activation (decode.cu act_view), only 4-byte aligned
+                            // (np 3584: +7224). An int4 load here was the 10-26 H100
+                            // run's CUDA_ERROR_MISALIGNED_ADDRESS.
                             const int* b32 = act_view(act + (u64)z * astride, n).b32 + b * 8;
-                            int4 x0 = *(const int4*)b32, x1 = *(const int4*)(b32 + 4);
-                            int xs[8] = {x0.x, x0.y, x0.z, x0.w, x1.x, x1.y, x1.z, x1.w};
 #pragma unroll
                             for (int j = 0; j < 8; j++) {
-                                lo[j >> 2] |= (u32)(xs[j] & 63) << (8 * (j & 3));
-                                hi[j >> 2] |= (u32)((xs[j] >> 6) & 255) << (8 * (j & 3));
+                                const int x = b32[j];
+                                lo[j >> 2] |= (u32)(x & 63) << (8 * (j & 3));
+                                hi[j >> 2] |= (u32)((x >> 6) & 255) << (8 * (j & 3));
                             }
                         }
                         // Bytes 0..15 and 32..47 of the row (k32 steps 0 and 1);
