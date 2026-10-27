@@ -51,6 +51,16 @@ benchmark ──▶ pick ──▶ design ──▶ build ──▶ critic revie
    logged with its numbers (in PROGRESS.md, the builder's NOTES.md and, from now on,
    `docs/log/`). The branch is either deleted or kept with the code behind an opt-in flag
    (`feat/r8-gemm-pipeline`, `AXON_GEMM2M`, for example).
+9. **Kill rules bound spend; the exactness contract bounds merge** (ruling 2026-10-26, PR #151). A
+   pre-registered kill rule decides whether a line gets more builder-days and pod-hours. It is not a
+   veto on code that is already built, passes the exactness contract (md5 + bits gates) and regresses
+   no measured cell: such code can merge default-on with the miss written into the PR, the log and
+   the roadmap, and the line closes (no follow-ups without a fresh pick). Code that **regresses** any
+   cell is still rejected (M6, #148). A benefit that only holds for some workloads lands opt-in (#131
+   (c)). Two corollaries from the same case: gate a rule on the term the change touches (the decode
+   step), not on an aggregate dominated by another term (the mix C = 128 cell was prefill-bound); and
+   booking hardware past a missed proxy gate is an override the foreman owns and records (#151's H100
+   session after the 4090 miss, ~$0.93).
 
 **Who decides.** Fable (`fable-5-1`) does picks, designs, critiques and research. Opus (`opus-5-5`)
 builders write the code. The foreman (Jawz) assigns tracks, runs gates and benchmarks, integrates
