@@ -1,0 +1,49 @@
+{
+ "label": "kvtier-dec1ac4",
+ "verdict": "FAIL (1 of 2)",
+ "jobs": [
+  {
+   "job": "1027-171117-49a4",
+   "name": "kvtier-dec1ac4-slots-rel",
+   "rc": 137,
+   "verdict": "FAIL (rc 137)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "dec1ac4",
+   "binary": "axon-test-dec1ac4",
+   "started": 1793137674.0258012,
+   "ended": 1793137695.8518338,
+   "attempts": 2,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "9936f12acb0f813e5fe9a6ae994982d6e3625d99a60933e551e39a677767f4b3",
+   "log_bytes": 4623
+  },
+  {
+   "job": "1027-171117-1a19",
+   "name": "kvtier-dec1ac4-slots-dbg",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "avante",
+   "hw": "hw-avante.txt",
+   "gpu": "NVIDIA GeForce RTX 4050 Laptop GPU",
+   "driver": "610.43.02",
+   "sha": "dec1ac4",
+   "binary": "axon-test-dbg-dec1ac4",
+   "started": 1793135478.1111827,
+   "ended": 1793135601.7470775,
+   "attempts": 1,
+   "remote_job": "20261027-171121-axon-test-dbg-dec1ac4-3414514",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "a883372902a657db14cb59ea84124c5caa7abb623f1e34d7f13a8d6fac8ca076",
+   "log_bytes": 3240
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-27 17:48:16 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}

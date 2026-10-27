@@ -1,0 +1,45 @@
+[axon-run 17:11:17] submitted 1027-171117-1a19 by /home/haseeb/.cache/axon-kvtier: /home/haseeb/.cache/axon-kvtier/axon-test-dbg-dec1ac4 cuda::qwen2::slots:: serve::tests::serve_cpu_cache_ram serve::tests::serve_cuda_cache_ram serve::tier::
+[axon-run 17:11:18] job 1027-171117-1a19 -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 5000 --env AXON_NODE_PACK=1 --src /home/haseeb/.cache/axon-wt-kvtier /home/haseeb/.cache/axon-kvtier/axon-test-dbg-dec1ac4 cuda::qwen2::slots:: serve::tests::serve_cpu_cache_ram serve::tests::serve_cuda_cache_ram serve::tier::
+axon-remote: uploading axon-test-dbg-dec1ac4 (8bff206df58c9f948385c1ef) + source of /home/haseeb/.cache/axon-wt-kvtier
+
+sent 2,142,293 bytes  received 5,687 bytes  1,431,986.67 bytes/sec
+total size is 7,479,263  speedup is 3.48
+
+sent 7,646,369 bytes  received 35 bytes  15,292,808.00 bytes/sec
+total size is 24,438,200  speedup is 3.20
+axon-remote: job 20261027-171121-axon-test-dbg-dec1ac4-3414514 on avante (GPU, 5000 MB)
+[axon-node 17:11:22] GPU slot taken; job wants 5000 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 47
+[axon-node 17:11:22] run axon-test-dbg-dec1ac4 (8bff206df58c9f948385c1ef) as /home/haseeb/.cache/axon-wt-kvtier on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 21 tests
+test cuda::qwen2::slots::tests::graph_oom_fill_vram ... ignored
+testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test cuda::qwen2::slots::tests::bare_view_borrows_the_pool_scratch ... ok
+test cuda::qwen2::slots::tests::paged_views_refused ... ok
+test cuda::qwen2::slots::tests::pool_feed_cost ... ignored
+test cuda::qwen2::slots::tests::pool_graph_bytes ... ignored
+test cuda::qwen2::slots::tests::pool_pages_restore_exactly ... ok
+test cuda::qwen2::slots::tests::pool_rows_of_one_slot_match_verify ... ok
+test cuda::qwen2::slots::tests::pool_step_cost ... ignored
+test cuda::qwen2::slots::tests::pool_steps_match_solo_in_any_order ... ok
+test cuda::qwen2::slots::tests::pool_steps_past_gemvm16_match_solo ... ok
+test cuda::qwen2::slots::tests::graph_oom_falls_back_to_kernels has been running for over 60 seconds
+test cuda::qwen2::slots::tests::paged_kvsave_round_trip has been running for over 60 seconds
+test cuda::qwen2::slots::tests::paged_release_refeed_four_families has been running for over 60 seconds
+test cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo ... ok
+test cuda::qwen2::slots::tests::slot_view_matches_a_cache ... ok
+test cuda::qwen2::slots::tests::paged_kvsave_round_trip ... ok
+test serve::tests::serve_cpu_cache_ram ... ok
+test serve::tier::tests::cache_ram_parses ... ok
+test serve::tier::tests::cache_ram_sizes ... ok
+test serve::tier::tests::keys_hold_the_leaf ... ok
+test serve::tier::tests::pages_read_in_order ... ok
+test serve::tests::serve_cuda_cache_ram ... ok
+test cuda::qwen2::slots::tests::paged_release_refeed_four_families ... ok
+test cuda::qwen2::slots::tests::graph_oom_falls_back_to_kernels ... ok
+
+test result: ok. 17 passed; 0 failed; 4 ignored; 0 measured; 760 filtered out; finished in 117.53s
+
+[axon-node 17:13:20] exit 0 after 117.7s
+[axon-node 17:13:20] peak RSS 4062 MB (job process tree PSS, 2 s samples x58)
+[axon-run 17:13:21] exit 0 after 122.8s (host avante)

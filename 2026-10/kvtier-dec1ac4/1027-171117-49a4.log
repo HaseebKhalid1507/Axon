@@ -1,0 +1,37 @@
+[axon-run 17:11:17] submitted 1027-171117-49a4 by /home/haseeb/.cache/axon-kvtier: /home/haseeb/.cache/axon-kvtier/axon-test-dec1ac4 cuda::qwen2::slots:: serve::tests::serve_cpu_cache_ram serve::tests::serve_cuda_cache_ram serve::tier::
+[axon-run 17:47:27] GPU test run without --vram: claiming 11000 MB (the whole card) on bella; pass --vram to override
+[axon-run 17:47:27] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 17:47:27] scope axon-job-1027-171117-49a4-1793137647.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 14496 MB): an OOM here kills only this job
+[axon-run 17:47:27] job 1027-171117-49a4 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1027-171117-49a4-1793137647 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-kvtier/axon-test-dec1ac4 cuda::qwen2::slots:: serve::tests::serve_cpu_cache_ram serve::tests::serve_cuda_cache_ram serve::tier:: --test-threads 6
+axon-q 17:47:27 start slot 16-23: /home/haseeb/.cache/axon-kvtier/axon-test-dec1ac4 cuda::qwen2::slots:: serve::tests::serve_cpu_cache_ram serve::tests::serve_cuda_cache_ram serve::tier:: --test-threads 6
+
+running 21 tests
+test cuda::qwen2::slots::tests::graph_oom_fill_vram ... ignored
+test cuda::qwen2::slots::tests::pool_feed_cost ... ignored
+test cuda::qwen2::slots::tests::pool_graph_bytes ... ignored
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test cuda::qwen2::slots::tests::paged_views_refused ... ok
+test cuda::qwen2::slots::tests::pool_rows_of_one_slot_match_verify ... ok
+test cuda::qwen2::slots::tests::pool_step_cost ... ignored
+test cuda::qwen2::slots::tests::pool_steps_match_solo_in_any_order ... ok
+test cuda::qwen2::slots::tests::pool_steps_past_gemvm16_match_solo ... ok
+[axon-run 17:47:53] SCOPE OOM-KILLED: systemd: axon-job-1027-171117-49a4-1793137647.scope Result=oom-kill; kernel: oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),cpuset=/,mems_allowed=0,global_oom,task_memcg=/user.slice/user-1000.slice/user@1000.service/app.slice/app-ax (MemoryMax 22000 MB)
+[axon-run 17:47:53] exit 137 after 25.7s (host bella)
+[axon-run 17:47:54] GPU test run without --vram: claiming 11000 MB (the whole card) on bella; pass --vram to override
+[axon-run 17:47:54] libtest without --test-threads: running it with --test-threads 6 on bella (RAM scales with threads; pass --test-threads or RUST_TEST_THREADS to choose)
+[axon-run 17:47:54] scope axon-job-1027-171117-49a4-1793137674.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 21744 MB): an OOM here kills only this job
+[axon-run 17:47:54] job 1027-171117-49a4 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1027-171117-49a4-1793137674 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-kvtier/axon-test-dec1ac4 cuda::qwen2::slots:: serve::tests::serve_cpu_cache_ram serve::tests::serve_cuda_cache_ram serve::tier:: --test-threads 6
+axon-q 17:47:54 start slot 16-23: /home/haseeb/.cache/axon-kvtier/axon-test-dec1ac4 cuda::qwen2::slots:: serve::tests::serve_cpu_cache_ram serve::tests::serve_cuda_cache_ram serve::tier:: --test-threads 6
+
+running 21 tests
+test cuda::qwen2::slots::tests::graph_oom_fill_vram ... ignored
+test cuda::qwen2::slots::tests::pool_feed_cost ... ignored
+test cuda::qwen2::slots::tests::pool_graph_bytes ... ignored
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test cuda::qwen2::slots::tests::graph_oom_falls_back_to_kernels ... ok
+test cuda::qwen2::slots::tests::pool_rows_of_one_slot_match_verify ... ok
+test cuda::qwen2::slots::tests::pool_step_cost ... ignored
+test cuda::qwen2::slots::tests::pool_steps_match_solo_in_any_order ... ok
+test cuda::qwen2::slots::tests::pool_steps_past_gemvm16_match_solo ... ok
+[axon-run 17:48:15] SCOPE OOM-KILLED: systemd: axon-job-1027-171117-49a4-1793137674.scope Result=oom-kill; kernel: oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),cpuset=/,mems_allowed=0,global_oom,task_memcg=/user.slice/user-1000.slice/user@1000.service/app.slice/app-ax (MemoryMax 22000 MB)
+[axon-run 17:48:15] exit 137 after 21.6s (host bella)
