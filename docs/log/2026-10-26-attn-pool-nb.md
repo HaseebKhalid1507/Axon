@@ -159,3 +159,15 @@ Kernel level on the H100 (`cuda_attn_pool_bench` default grid, same job; old att
 - H100: $0.933 (job 3dfd, ~14 min booked, 8 min of stages).
 - Kit prewarmed on bella (NVRTC 13.2 / 13.3 / 13.4 sm_90a, no on-pod compile: "kernel cache 1 -> 4", nothing compiled).
 - bella rehearsal before booking: 1026-223829-01f2.
+
+## Review round (shady 8/10), f41f2ec
+
+- **MUST.** At the H100's nb 32 (128 CTAs < 132 SMs), the default S = 3 split was ×0.96 / ×0.98 of attn_blk_b + cmb, and the step was +0.6 / +0.8 %.
+  - `nb_split` now returns None below rows × kv heads = SMs, and the step keeps main's attn_blk_b there.
+  - attn_blk_nb runs only at S = 1, where every measured cell is a win.
+  - `AXON_ATT_NB_S` still forces a split, for experiments only.
+  - The fix is argued from the dispatch, not re-timed on an H100.
+- `AXON_ATT_NB` now also accepts off / false / no. Both env switches are read once per module.
+- The "2 CTAs per SM" comment is corrected: at 69–75 KB the kernel fits one CTA per SM on sm_86/89/120.
+- `cuda_attn_nb_exact` adds GQA groups 8 and 6 and position 0.
+- The clippy `manual_checked_ops` warning in that test is fixed.
