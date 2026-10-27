@@ -1,0 +1,50 @@
+[axon-run 08:37:52] submitted 1027-083752-a498 by /home/haseeb/.cache/axon-agent: /home/haseeb/.cache/axon-agent/smoke.sh
+[axon-run 08:41:05] scope axon-job-1027-083752-a498-1793104865.scope in app-axonjobs.slice: MemoryMax 12209 MB, MemoryHigh 10988 MB, no swap, oomd pressure kill 80% (claim 6758 MB): an OOM here kills only this job
+[axon-run 08:41:05] job 1027-083752-a498 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1027-083752-a498-1793104865 --slice=app-axonjobs.slice -p MemoryMax=12209M -p MemoryHigh=10988M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-agent/smoke.sh
+axon-q 08:41:05 start slot 8-15: /home/haseeb/.cache/axon-agent/smoke.sh
+cell speed 4.0: {'scale': 0.05, 'clip': 32768, 'window_s': 120.0, 'speed': 4.0, 'seed': 1234, 'trace_start_ms': 494477925, 'n_requests': 52, 'n_sessions': 13, 'n_primes': 5, 'prime_tokens': 68038, 'prompt_p50': 11541}
+start axon kv f16: /home/haseeb/.cache/axon-agent/bin/axon-d8a296c serve /home/haseeb/Projects/axon/models/qwen2.5-1.5b-instruct-q4_k_m.gguf --device cuda --port 18601 --ctx 32768 --parallel 16 --kv f16
+axon ready: --ctx 32768 --parallel 16 --kv f16; paged pool 338240 tokens; tokenization check 512 words = 512 tokens
+RUN axon kv f16 speed 4 round 0: requests=52 errors=0 first_error=None wall_s=29.6 prime_s=5.1 ttft_new_p50=0.546 ttft_resume_p50=0.697 ttft_turn_p50=0.029 goodput_tok_s=36.04 itl_p99_ms=64.07 warm_per_gb=0.928 reprefill_share=0.0249 reprefill_net_share=0.0244 out_tokens_short=0 prompt_mismatch=0 prompt_checked=52 preempted=0 prefills_unfed=0 tainted=True (36 s)
+start llama kv f16: /home/haseeb/Projects/llama.cpp/build-cuda/bin/llama-server -m /home/haseeb/Projects/axon/models/qwen2.5-1.5b-instruct-q4_k_m.gguf -ngl 99 -fa on -c 65536 -np 2 -kvu --cache-reuse 256 -ctk f16 -ctv f16 --port 18602 --host 127.0.0.1 --metrics
+llama ready: -c 65536 -np 2 -kvu --cache-reuse 256 -ctk/-ctv f16 -fa on (--cache-ram default 8192 MiB, --cache-idle-slots default on, cache_prompt true); tokenization check 512 words = 512 tokens
+RUN llama kv f16 speed 4 round 0: requests=52 errors=0 first_error=None wall_s=31.7 prime_s=6.1 ttft_new_p50=0.942 ttft_resume_p50=1.972 ttft_turn_p50=0.293 goodput_tok_s=17.75 itl_p99_ms=294.39 warm_per_gb=3.725 reprefill_share=0.0249 reprefill_net_share=0.0244 out_tokens_short=0 prompt_mismatch=0 prompt_checked=52 preempted=None prefills_unfed=None tainted=True (39 s)
+start ollama kv f16: ollama serve
+ollama ready: OLLAMA_NUM_PARALLEL=2 OLLAMA_CONTEXT_LENGTH=32768 KV f16 flash attention, keep_alive -1 (65536 tokens); tokenization check 512 words = 512 tokens
+RUN ollama kv f16 speed 4 round 0: requests=52 errors=0 first_error=None wall_s=30.0 prime_s=6.4 ttft_new_p50=0.907 ttft_resume_p50=0.908 ttft_turn_p50=0.234 goodput_tok_s=27.85 itl_p99_ms=146.51 warm_per_gb=4.257 reprefill_share=0.9303 reprefill_net_share=0.9303 out_tokens_short=0 prompt_mismatch=0 prompt_checked=0 preempted=None prefills_unfed=None tainted=True (37 s)
+
+**speed 4** (median of rounds; [min–max])
+
+| metric | axon f16 (n=1: r0) | llama f16 (n=1: r0) | ollama f16 (n=1: r0) |
+|---|---|---|---|
+| TTFT-new p50 s | 0.546 | 0.942 | 0.907 |
+| TTFT-new p99 s (max when n < 100) | 1.46 | 3.13 | 1.92 |
+|   n new | 8 | 8 | 8 |
+| TTFT-resume p50 s | 0.697 | 1.97 | 0.908 |
+| TTFT-resume p99 s (max when n < 100) | 0.754 | 2.11 | 1.83 |
+|   n resume | 3 | 3 | 3 |
+| resume 30s-2m p50 | 0.031 | 0.567 | 0.553 |
+|   n 30s-2m | 2 | 2 | 2 |
+| resume 2-10m p50 | n/a | n/a | n/a |
+|   n 2-10m | 0 | 0 | 0 |
+| resume >10m p50 | 0.754 | 2.11 | 0.908 |
+|   n >10m | 1 | 1 | 1 |
+| TTFT-turn p50 s | 0.029 | 0.293 | 0.234 |
+|   n turn | 41 | 41 | 41 |
+| goodput tok/s | 36 | 17.8 | 27.9 |
+| ITL p99 ms | 64.1 | 294 | 147 |
+| warm/GB (GPU KV budget) | 0.928 | 3.73 | 4.26 |
+| re-prefill share (clamped) | 0.0249 | 0.0249 | 0.93 |
+| re-prefill share (net) | 0.0244 | 0.0244 | 0.93 |
+| preempted (axon /slots) | 0 | n/a | n/a |
+| output tok/s | 36 | 33.7 | 35.6 |
+| replies short of max_tokens | 0 | 0 | 0 |
+| prompt-count mismatches | 0 | 0 | 0 |
+| wall s | 29.6 | 31.7 | 30 |
+| errors | 0 | 0 | 0 |
+| tainted runs | 1/1 (r0) | 1/1 (r0) | 1/1 (r0) |
+| reply md5 stable over rounds | yes | yes | yes |
+BOARD END ok (0 request errors)
+SMOKE END /home/haseeb/.cache/axon-agent/smoke-1027-084105
+[axon-run 08:43:13] exit 0 after 128.5s (host bella)
+[axon-run 08:43:16] EXPECT ok: output matches /BOARD END ok/
