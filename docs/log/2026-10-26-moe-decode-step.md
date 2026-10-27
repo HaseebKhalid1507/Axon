@@ -1,7 +1,7 @@
 # T2b: the MoE decode step: fewer, wider expert launches, sum + residual fused, router top-k by shuffles
 
-- Date: 2026-10-26. Branch: feat/moe-decode-step, off main 1e01712. Status: draft, gates and the kill-rule bench
-  pending.
+- Date: 2026-10-26. Branch: feat/moe-decode-step, off main 1e01712 (main 0c23a87 merged in at a016e0c).
+  Status: **kill rule MISSED; merges default-on per methodology step 9 (#155); the line closes.**
 - Design note: `specs/t2b-moe-decode-step.md` (foreman workspace). Diagnosis: job 1026-222632-d7c1 (CUPTI decode
   traces on an RTX 4090).
 
@@ -39,4 +39,29 @@ Bits (MEASURED, code 19931aa vs main 1e01712): ALL PASS.
 - md5 1026-224705-6959: cpu 99/99, cuda 117/117, cuda `--kv q8` 117/117 identical. That includes Moonlight,
   4x0.6B and the pruned 30B at `--gpu-experts auto` and at a partial N, each equal to main at N = 0.
 
-Timing: the 4090 board job 1027-012527-1ea0 is pending. The kill rule is applied as written when it lands.
+Timing (MEASURED, RTX 4090 pod, CLEAN, 3 interleaved rounds; candidate 19931aa vs base main 1e01712 vs llama.cpp
+4413a19; raw logs in [this gist](https://gist.github.com/HaseebKhalid1507/658a01e192cc7dbb616028becb9f80d4)):
+
+| model, all resident | metric | candidate | base | cand / base | llama.cpp | cand / llama |
+|---|---|---:|---:|---:|---:|---:|
+| Qwen3-30B-A3B (6db3) | tg128 | 241.6 | 222.1 | ×1.088 | 254.6 | **×0.95** |
+| | pp512 | 11,329 | 11,291 | ×1.003 | 8,851 | ×1.28 |
+| | pp2100 | 13,016 | 13,000 | ×1.001 | 9,041 | ×1.44 |
+| Moonlight (1ea0) | tg128 | 272.0 | 270.9 | ×1.004 | 289.8 | ×0.94 |
+| | pp512 | 9,746 | 9,728 | ×1.002 | 11,696 | ×0.83 |
+| | pp2100 | 7,486 | 7,473 | ×1.002 | 12,220 | ×0.61 |
+
+## Verdict
+- **Kill rule MISSED:** 241.6 < 252.5. The no-regression half passes (Moonlight ×1.002–1.004; dense kernels untouched, md5
+  identical).
+- **Methodology step 9 (#155):** the code is exact (md5 and bits gates, text identical across configs), +8.8 % on the
+  decode step it targets, and regresses no cell past 2 %. So it merges default-on, with the miss recorded here, in the PR
+  and in roadmap item 3. The line closes: no follow-ups without a fresh pick.
+- **Remaining decode gap to llama.cpp on the 30B: ~5 % (×0.95, ≈ 0.2 ms per step).** By d7c1's breakdown (ESTIMATED):
+  - the expert GEMVs, still below llama.cpp's bandwidth;
+  - the router (logits and top-k are separate launches);
+  - `qkv_rope` at ~61 % of bandwidth.
+
+## What didn't work
+The target. Wider expert GEMVs, the fused sum + residual and the shuffle top-k bought +8.8 %, where the estimate was
++25–30 %. The router fusion and the `qkv_rope` loads weren't attempted within the line's spend.
