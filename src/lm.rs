@@ -309,6 +309,18 @@ pub trait BatchLm: Lm {
         Err("no page images on this backend".into())
     }
 
+    /// `page_out` of the physical page `page` of a paged pool, whichever
+    /// slot holds it (page-level eviction); a plain pool: an error.
+    fn page_out_id(
+        &self,
+        _pool: &Self::Pool,
+        _page: u32,
+        _host: &mut crate::cuda::HostBuf<'static>,
+        _at: usize,
+    ) -> Result<(), String> {
+        Err("no page images on this backend".into())
+    }
+
     /// `page_out` the other way: the page's image at `at` in `host` into
     /// slot `slot`'s page `page` (which it holds: `reserve`).
     fn page_in(
@@ -1235,6 +1247,19 @@ impl BatchLm for Backend<'_> {
     ) -> Result<(), String> {
         match &self.0 {
             Inner::Cuda(n) => n.pool_page_io(pool, slot, page, host, at, false),
+            _ => unreachable!("a pool is the GPU model's"),
+        }
+    }
+
+    fn page_out_id(
+        &self,
+        pool: &Self::Pool,
+        page: u32,
+        host: &mut crate::cuda::HostBuf<'static>,
+        at: usize,
+    ) -> Result<(), String> {
+        match &self.0 {
+            Inner::Cuda(n) => n.pool_page_id_io(pool, page, host, at, false),
             _ => unreachable!("a pool is the GPU model's"),
         }
     }

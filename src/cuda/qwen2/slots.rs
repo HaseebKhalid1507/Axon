@@ -937,6 +937,36 @@ impl<'g> CudaQwen2<'g> {
         rows.check(0, PAGE).map_err(|e| e.to_string())?;
         rows.page(host, at, 0, PAGE, to_dev)
     }
+
+    /// `pool_page_io` of the physical page `id` of a paged pool, whichever
+    /// slot holds it (a page evicted page by page: PR C's eviction hands
+    /// the RAM tier page ids, not slot positions). Plain pools have none.
+    pub(crate) fn pool_page_id_io(
+        &self,
+        p: &CudaPool<'g>,
+        id: u32,
+        host: &mut HostBuf,
+        at: usize,
+        to_dev: bool,
+    ) -> Result<(), String> {
+        let Some(m) = &p.pm else {
+            return Err("page ids: a plain pool has none".into());
+        };
+        if id as usize >= m.total() {
+            return Err(format!("page {id} of {}", m.total()));
+        }
+        let rows = super::kvio::Rows {
+            kv: &p.c.kv,
+            max_ctx: p.c.rows,
+            base: 0,
+            len: PAGE,
+            tab: Some(vec![id]),
+            regions: self.kv_regions(p.c.mode),
+            arrays: 2 * self.layers.len(),
+        };
+        rows.check(0, PAGE).map_err(|e| e.to_string())?;
+        rows.page(host, at, 0, PAGE, to_dev)
+    }
 }
 
 impl CudaPool<'_> {
@@ -2777,8 +2807,23 @@ mod tests {
                     assert_eq!(pb, PAGE * net.cache_row_bytes(&p.c));
                     let mut host = g.host_alloc(k * pb).unwrap();
                     for i in 0..k {
-                        net.pool_page_io(&p, 0, i, &mut host, i * pb, false)
-                            .unwrap();
+                        match &p.pm {
+                            // Odd pages by their physical id (PR C's
+                            // page-level eviction), even ones by position.
+                            Some(m) if i % 2 == 1 => {
+                                let id = m.pages(0)[i];
+                                net.pool_page_id_io(&p, id, &mut host, i * pb, false)
+                            }
+                            _ => net.pool_page_io(&p, 0, i, &mut host, i * pb, false),
+                        }
+                        .unwrap();
+                    }
+                    match &p.pm {
+                        Some(m) => assert!(
+                            net.pool_page_id_io(&p, m.total() as u32, &mut host, 0, false)
+                                .is_err()
+                        ),
+                        None => assert!(net.pool_page_id_io(&p, 0, &mut host, 0, false).is_err()),
                     }
                     // Past what the slot holds: refused (paged), or past ctx.
                     if p.pm.is_some() {

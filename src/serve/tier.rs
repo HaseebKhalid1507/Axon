@@ -322,6 +322,48 @@ impl PoolTier {
         Ok(copied)
     }
 
+    /// The page-level eviction hook (PR C's `PrefixIndex::pop_lru_leaf`,
+    /// agreed on the r10 thread): the GPU page `page`, the block `tokens`
+    /// after the prefix `parent`, is about to be reused. Already stored
+    /// (the usual case: pages are written behind as they fill): touched,
+    /// no copy. Else, if its parent is stored (or it is a first page),
+    /// copied (D2H, ordered before any later reuse of the page) and
+    /// stored; else dropped (an orphan; its prefix is prefilled again).
+    /// Whether the store has it after.
+    #[allow(dead_code)] // PR C3 calls it (its page-level eviction); the seam agreed on the r10 thread
+    pub fn spill_page(
+        &mut self,
+        net: &Backend,
+        pool: &<Backend<'_> as BatchLm>::Pool,
+        parent: Key,
+        tokens: &[u32],
+        page: u32,
+    ) -> Result<bool, String> {
+        if self.t.store.child(parent, tokens).is_some() {
+            return Ok(true);
+        }
+        let room = self.t.store.room(parent, self.t.page);
+        self.arena.free.extend(self.t.store.take_evicted());
+        if !room {
+            return Ok(false);
+        }
+        let Some(a) = self.arena.take(net)? else {
+            return Ok(false);
+        };
+        let (buf, at) = self.arena.at(a);
+        net.page_out_id(pool, page, buf, at)?;
+        match self.t.store.insert(parent, tokens, a, self.t.page) {
+            Some(_) => {
+                self.t.publish(1, 0);
+                Ok(true)
+            }
+            None => {
+                self.arena.free.push(a);
+                Ok(false)
+            }
+        }
+    }
+
     /// The write-behind of an engine step: up to `bytes` of copies over
     /// every slot's unstored pages, round robin from where the last one
     /// stopped. `held`: each slot's tokens.

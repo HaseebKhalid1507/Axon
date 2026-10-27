@@ -579,6 +579,16 @@ scheduling of before (`--step-ms` as a fixed budget, less the last decode step):
   than that just finishes into the buffers. Elsewhere only a write blocked for MS ms (at most the
   60 s write timeout) is detected, after the server's send buffer fills too, and stderr says
   so at startup.
+- `--cache-ram BYTES|auto` (default 0: off): a KV RAM tier. A conversation's KV pages (64
+  positions, every layer) are copied to host memory as they fill, so when its slot goes to
+  another conversation they are kept there instead of dropped; its next turn copies the
+  longest stored prefix back and prefills only the rest. Same bits: the rows are moved, not
+  recomputed (a tail under 64 positions is prefilled again). BYTES takes K/M/G suffixes;
+  `auto` is half the RAM available after the model, at most 8 GiB; the banner says the size.
+  On the GPU the pages are page-locked memory, taken as pages are stored (never more than
+  the size), and can't be swapped out: size it to what you keep warm. Off where the cache has
+  no page image (a CPU/GPU split, several GPUs, MoE, deepseek2). It lives as long as the
+  process (surviving a restart is a later stage). `/metrics` adds `axon_kv_ram_*`.
 - A request's `priority` field is accepted and ignored (requests start in arrival order, or
   shortest prompt first with `--admit-order sjf`).
 
