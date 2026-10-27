@@ -125,3 +125,56 @@ when a restore lands while other slots decode, which this cell doesn't exercise.
 - **The first md5 job's serve harness** sent traffic to a loading server (503). Fixed (wait for `/health` and
   `/v1/models` 200) and rerun.
 - **Lazy pinned growth inside steps:** the ITL p99 cost above.
+
+## Update 2026-10-27 (afternoon): the arena is pinned off the engine steps (e33dab4, 181d0d7)
+- **The fix.** The arena's page-locked memory is never allocated inside an engine step.
+  - **Default, `AXON_KV_RAM_ALLOC=thread`:** a `HostAllocator` thread pins 64 MiB slabs from server start, and the
+    engine adopts them as they arrive.
+  - **`=start`:** the whole arena (the size asked for) is pinned before the server answers.
+  - Arena memory is not zeroed: a page slot is only copied from after a copy into it, and the host never reads it.
+  - 181d0d7 also computes the identity before the allocator thread starts.
+- **Cancelled before the fix:** the replay 1027-122430-5f88 and the bella cell 1027-122443-5258.
+
+**Traced micro-bench, RTX 4090 (pod2), 1027-134559-a975, FOREIGN_GPU 0 %.**
+- 7B f16, `--parallel 3` (98,304-token pool), `--cache-ram 6G`, 3 rounds interleaved, medians [raw].
+- `AXON_SERVE_TRACE` gives the host time between consecutive steps while requests run: write-behind, allocation,
+  admission. All MEASURED:
+
+| arm | ITL p99 ms | vs main | ITL p50 ms | TTFT-resume s | inter-step gaps > 20 ms / round | max gap ms | md5 |
+|---|---|---|---|---|---|---|---|
+| main 6f06544 | 69.15 [69.15, 70.92, 68.27] | — | 6.45 | 2.680 | 0 | 0.08 | a5ccaaa6… |
+| old d5a2899 (lazy arena) | 72.46 [72.46, 75.52, 70.94] | +4.8 % | 6.48 | 0.146 | **3, 3, 3** | **51.5** [49.1, 70.8, 51.5] | same |
+| new, pinned at start | 70.44 [70.44, 72.46, 69.55] | +1.9 % | 6.47 | 0.145 | 0 | 0.28 | same |
+| new, pinned by a thread | 70.10 [68.97, 70.10, 72.49] | +1.4 % | 6.49 | 0.148 | 0 | 0.12 | same |
+
+**Start-up at `--cache-ram 20G`** (same job; startup-only, 3 rounds; the start-up clock has 1 s resolution, from a
+1 s readiness poll), and an ITL cell of 2 streams right after start, while the thread still pins:
+
+| arm | start-up s | ITL p99 right after start, ms | inter-step gaps > 20 ms |
+|---|---|---|---|
+| main | 2.0 [2.0, 2.0, 2.0] | 6.79 | 0 |
+| pinned at start | 16.4 [15.4, 22.9, 16.4] | 7.09 | 0 |
+| pinned by a thread | 5.1 [5.1, 2.0, 6.1] | 6.89 | 0 |
+
+**Pinned allocation, same pod (MEASURED, median of 7):**
+
+| size | zeroed (`host_alloc`) | not zeroed | from the thread |
+|---|---|---|---|
+| 64 MiB | 81.3 ms | 75.9 ms | 76.0 ms |
+| 256 MiB | 367 ms | 337 ms | 316 ms |
+
+The zeroing is ~7–8 % of the cost; the pinning is the rest.
+
+**Reading:**
+- The cause is confirmed on the old binary: 3 steps per round stalled by 49–71 ms, the slabs grown inside the ITL
+  cell.
+- Both fixed arms have no gap over 0.3 ms, and no stall while the thread pins 20G beside decoding.
+- Default: **thread**, for the lower start-up and no stalls.
+- The thread arm's +1.4 % ITL p99 is one 3-round cell, close to the 2 % bar. Row B's registered ITL clause is the
+  speed-4 replay, so this micro-bench alone doesn't pass it.
+
+**Next gates, in the foreman's order:**
+1. The replay (speed 4, 20G, thread), 1027-143123-3f0e, which also opens with a 20G start-up cell to check the
+   identity reorder.
+2. The bella cell, 1027-143150-e608 (`--timing bella --low`).
+3. Unit tiers at 181d0d7: release 1027-143153-9b84, debug 1027-143153-a9ba. md5 vs main 6f06544: 1027-143159-5b19.
