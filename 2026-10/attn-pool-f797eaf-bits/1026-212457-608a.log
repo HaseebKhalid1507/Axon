@@ -1,0 +1,54 @@
+[axon-run 21:24:57] submitted 1026-212457-608a by /home/haseeb/.cache/axon-wt-attn-pool: /home/haseeb/.cache/axon-attn-pool/md5job.sh /home/haseeb/.cache/axon-attn-pool/axon-base-ae1e26b /home/haseeb/.cache/axon-attn-pool/axon-f797eaf /home/haseeb/.cache/axon-attn-pool/md5-f797eaf
+[axon-run 22:07:42] scope axon-job-1026-212457-608a-1793066862.scope in app-axonjobs.slice: MemoryMax 19024 MB, MemoryHigh 17121 MB, no swap, oomd pressure kill 80% (claim 12000 MB): an OOM here kills only this job
+[axon-run 22:07:42] job 1026-212457-608a -> bella: systemd-run --user --scope --quiet --unit=axon-job-1026-212457-608a-1793066862 --slice=app-axonjobs.slice -p MemoryMax=19024M -p MemoryHigh=17121M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-attn-pool/md5job.sh /home/haseeb/.cache/axon-attn-pool/axon-base-ae1e26b /home/haseeb/.cache/axon-attn-pool/axon-f797eaf /home/haseeb/.cache/axon-attn-pool/md5-f797eaf
+axon-q 22:07:42 start slot 16-23: /home/haseeb/.cache/axon-attn-pool/md5job.sh /home/haseeb/.cache/axon-attn-pool/axon-base-ae1e26b /home/haseeb/.cache/axon-attn-pool/axon-f797eaf /home/haseeb/.cache/axon-attn-pool/md5-f797eaf
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 615.78.08
+base	qwen2.5-0.5b-q4_k_m	f16	p1	c0dfbb1ca4f2	rc=0	299B	55s
+cand	qwen2.5-0.5b-q4_k_m	f16	p1	c0dfbb1ca4f2	rc=0	299B	1s
+base	qwen2.5-0.5b-q4_k_m	f16	p2	35b4ed5d823a	rc=0	373B	0s
+cand	qwen2.5-0.5b-q4_k_m	f16	p2	35b4ed5d823a	rc=0	373B	1s
+base	qwen2.5-0.5b-q4_k_m	f16	p3	d2e0c00889ca	rc=0	9065B	1s
+cand	qwen2.5-0.5b-q4_k_m	f16	p3	d2e0c00889ca	rc=0	9065B	1s
+base	qwen2.5-0.5b-q4_k_m	q8	p1	1c3ca55ba717	rc=0	312B	0s
+cand	qwen2.5-0.5b-q4_k_m	q8	p1	1c3ca55ba717	rc=0	312B	1s
+base	qwen2.5-0.5b-q4_k_m	q8	p2	f65ecf98f629	rc=0	361B	1s
+cand	qwen2.5-0.5b-q4_k_m	q8	p2	f65ecf98f629	rc=0	361B	0s
+base	qwen2.5-0.5b-q4_k_m	q8	p3	ad125d6a140e	rc=0	9065B	1s
+cand	qwen2.5-0.5b-q4_k_m	q8	p3	ad125d6a140e	rc=0	9065B	1s
+base	Qwen2.5-7B-Instruct-Q4_K_M	f16	p1	0db9b9a9d122	rc=0	314B	2s
+cand	Qwen2.5-7B-Instruct-Q4_K_M	f16	p1	0db9b9a9d122	rc=0	314B	2s
+base	Qwen2.5-7B-Instruct-Q4_K_M	f16	p2	c3e22f8d32bc	rc=0	368B	1s
+cand	Qwen2.5-7B-Instruct-Q4_K_M	f16	p2	c3e22f8d32bc	rc=0	368B	1s
+base	Qwen2.5-7B-Instruct-Q4_K_M	f16	p3	59f823e68dc7	rc=0	9065B	4s
+cand	Qwen2.5-7B-Instruct-Q4_K_M	f16	p3	59f823e68dc7	rc=0	9065B	4s
+base	Qwen2.5-7B-Instruct-Q4_K_M	q8	p1	42cf756d6808	rc=0	320B	1s
+cand	Qwen2.5-7B-Instruct-Q4_K_M	q8	p1	42cf756d6808	rc=0	320B	2s
+base	Qwen2.5-7B-Instruct-Q4_K_M	q8	p2	a0a829819411	rc=0	367B	1s
+cand	Qwen2.5-7B-Instruct-Q4_K_M	q8	p2	a0a829819411	rc=0	367B	1s
+base	Qwen2.5-7B-Instruct-Q4_K_M	q8	p3	4d2346a7c78d	rc=0	9065B	4s
+cand	Qwen2.5-7B-Instruct-Q4_K_M	q8	p3	4d2346a7c78d	rc=0	9065B	3s
+base	Qwen3-8B-Q4_K_M	f16	p1	0a81992aa5b6	rc=0	319B	4s
+cand	Qwen3-8B-Q4_K_M	f16	p1	0a81992aa5b6	rc=0	319B	1s
+base	Qwen3-8B-Q4_K_M	f16	p2	ad8764940f3d	rc=0	348B	1s
+cand	Qwen3-8B-Q4_K_M	f16	p2	ad8764940f3d	rc=0	348B	2s
+base	Qwen3-8B-Q4_K_M	f16	p3	636c32f9553f	rc=0	9065B	4s
+cand	Qwen3-8B-Q4_K_M	f16	p3	636c32f9553f	rc=0	9065B	4s
+base	Qwen3-8B-Q4_K_M	q8	p1	0a81992aa5b6	rc=0	319B	2s
+cand	Qwen3-8B-Q4_K_M	q8	p1	0a81992aa5b6	rc=0	319B	1s
+base	Qwen3-8B-Q4_K_M	q8	p2	d1adae24b80c	rc=0	346B	1s
+cand	Qwen3-8B-Q4_K_M	q8	p2	d1adae24b80c	rc=0	346B	2s
+base	Qwen3-8B-Q4_K_M	q8	p3	67da11d7fe10	rc=0	9065B	4s
+cand	Qwen3-8B-Q4_K_M	q8	p3	67da11d7fe10	rc=0	9065B	4s
+--- cuda pairs differing:
+0 of 18 differ
+GEN MD5 rc=0
+MD5 qwen2.5-0.5b-q4_k_m kv f16: 48 requests, 1920 tokens, base/cand/cand-nb0 differ in 0
+MD5 qwen2.5-0.5b-q4_k_m kv q8: 48 requests, 1920 tokens, base/cand/cand-nb0 differ in 0
+MD5 Qwen3-0.6B-Q8_0 kv f16: 48 requests, 1920 tokens, base/cand/cand-nb0 differ in 0
+MD5 Qwen3-0.6B-Q8_0 kv q8: 48 requests, 1920 tokens, base/cand/cand-nb0 differ in 0
+MD5 Qwen2.5-7B-Instruct-Q4_K_M kv f16: 48 requests, 1920 tokens, base/cand/cand-nb0 differ in 0
+MD5 Qwen2.5-7B-Instruct-Q4_K_M kv q8: 48 requests, 1920 tokens, base/cand/cand-nb0 differ in 0
+MD5 RESULT PASS (0 differing)
+RC 0
+[axon-run 22:11:22] exit 0 after 220.1s (host bella)
+[axon-run 22:11:22] EXPECT ok: output matches /MD5 RESULT PASS/
