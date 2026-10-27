@@ -6,7 +6,9 @@ Spec: [design/agent-workload.md](../design/agent-workload.md) §1 and §6, row A
 - **f16 board: done with gaps.** Job `1027-014629-7829` ran 15 of 18 runs. Its ollama column is **non-comparable**
   (the chat-template bug, below).
 - **Rule A, f16: fails, so B/C stay.** q8 cannot change that under the combination pre-registered below.
-- **q8 board:** pending, on the fixed harness.
+- **q8 board: done** (job `1027-083752-1e62`). Rule A passes on q8, but the pre-registered combination needs both KV
+  types, so the **combined verdict is: B/C are NOT deprioritised.** ollama q8 speed 1 is rerunning (all 3 rounds
+  were tainted).
 
 ## What landed
 - **`scripts/agent_trace.py`**: Synaps logs → a numbers-only trace.
@@ -198,3 +200,154 @@ Spec: [design/agent-workload.md](../design/agent-workload.md) §1 and §6, row A
   - Checked by `agent_board_kill_smoke.sh`.
 - **ollama's chat template** (above).
 - **The ideal-cache hit** is now assigned at send time, not at thread start (≤ 0.04 pp on f16).
+
+
+## Baseline board, q8 (MEASURED; job `1027-083752-1e62`, fixed harness 8588874 + 1ba07d9)
+**Host and setup:** bella, as for f16, at `--kv q8`. Axon's pool was 190,336 / 193,408 / 192,832 tokens across the
+rounds. llama-server ran `-c 163840 -np 5`; ollama `NUM_PARALLEL=5`.
+
+**Prompt checks:**
+- Every engine passed the 512-word tokenization check.
+- 0 prompt-count mismatches on all 18 runs.
+- ollama's `prompt_eval_count` equals the sent prompt on every request (1,018 of 1,018), so the raw path sends
+  exactly our prompts.
+
+**The job:** rc 0, `BOARD END ok`. axon-run labelled the whole job TAINTED (FOREIGN_GPU max 49 %, mean 1.2 % over
+287 samples).
+
+### Taint: axon-run's over-threshold samples mapped to cells
+The methodology's taint rule is the **harness's per-run flag**: `nvidia-smi pmon` every ~5 s over the run, TAINTED
+if the run's mean > 5 % or any sample > 25 %. Applied as written:
+
+| cell (engine, speed, round) | harness per-run flag | axon-run samples over threshold in the cell |
+|---|---|---|
+| llama s1 r0 | **TAINTED** (max 27) | 12:47:47–12:49:49: 4 windows with mean > 5 % |
+| llama s4 r0 | **TAINTED** (max 27) | 12:50:49–12:54:53: 5 windows with mean > 5 % |
+| ollama s1 r0 | **TAINTED** (max 98) | 13:02:58: max 49 % (zen-bin), mean 9.8 % |
+| ollama s1 r1 | **TAINTED** (max 44) | 13:54:05: max 26 % (Xorg 17 %, zen-bin 9 %) |
+| ollama s1 r2 | **TAINTED** (max 28) | 14:40:02: mean 5.4 % (zen-bin) |
+| llama s1 r1 | clean (mean 0.7, max 15) | 13:37:10: one 30-s window, mean 7.7 %, max 24 % |
+| llama s4 r2 | clean (mean 1.0, max 11) | 14:36:24: one 30-s window, mean 5.6 % |
+
+- **Clean throughout** (no over-threshold sample by either sampler): Axon all 6 cells; llama s1 r2 and s4 r1; ollama
+  s4 r0, r1, r2.
+- **Under the written rule:**
+  - Tainted cells are **missing rounds**, not averaged in.
+  - Axon is n = 3 at both speeds; llama-server is n = 2 at both (r1, r2); ollama s4 is n = 3.
+  - **ollama s1 has no clean round.** A targeted rerun of only that cell (3 rounds) is queued.
+- **A stricter reading** (any axon-run window over threshold taints the cell) would leave llama s1 with r2 only and
+  s4 with r1 only (n = 1). It is not the written rule; it is stated so the reader can see the difference. Rule A
+  reads only Axon, which is clean under both.
+
+### ollama's engine-side aborts
+- **ollama aborts 3–5 requests per cell mid-stream** with "prediction aborted, token repeat limit reached". This is
+  ollama's own repetition guard firing on filler-conditioned output: the same requests (k 22419, 22425, 22491…) abort
+  in every round. **It is not a harness bug.** Axon and llama-server have no such guard and decode to `max_tokens`.
+- **How they are counted:**
+  - They are errors and contribute 0 to goodput.
+  - In this board's runs the summary dropped them from the TTFT / ITL samples, which can flatter ollama. Bounds from
+    the per-request records, putting each aborted request at 0 or at +∞:
+    - TTFT-turn p50 moves by ≤ 0.03 s at speed 1 and ≤ 0.25 s at speed 4;
+    - TTFT-new p50 at speed 4 could be up to +1.5 s worse (1 aborted new request);
+    - TTFT-resume: no aborted requests.
+  - From d7f5fd3 on, an aborted request keeps its TTFT and ITL in the latency stats, counts as an error, and never
+    counts toward goodput. The rerun uses that.
+- **Re-prefill correction:** ollama's `prompt_eval_count` is the whole prompt even when it is cached. MEASURED: it
+  equals the sent prompt on all 1,018 requests while TTFT-turn stays ~0.4 s. So it can't measure re-prefill;
+  ollama's re-prefill is n/a. The harness first read it as recomputed tokens (0.93 share, wrong); that is fixed.
+- **llama-server's net re-prefill is negative at speed 4** (−4 %): `--cache-reuse 256` reuses KV chunks outside the
+  common prefix by shifting them (not bit-reproducible, per its README), so it computes less than the prefix ideal.
+  The clamped share is 0.73 %.
+
+### Board q8, clean rounds only (`agent_replay.py table --clean-only`)
+
+**speed 1** (median of rounds; [min–max])
+
+| metric | axon q8 (n=3: r0,1,2) | llama q8 (n=2: r1,2) |
+|---|---|---|
+| TTFT-new p50 s | 4.14 [4.13–4.23] | 9.51 [8.52–10.5] |
+| TTFT-new p99 s (max when n < 100) | 7.38 [7.38–7.4] | 52.8 [49.2–56.4] |
+|   n new | 13 [13–13] | 13 [13–13] |
+| TTFT-resume p50 s | 0.14 [0.136–0.142] | 0.798 [0.768–0.829] |
+| TTFT-resume p99 s (max when n < 100) | 5.57 [5.38–5.59] | 21.3 [16.3–26.3] |
+|   n resume | 34 [34–34] | 34 [34–34] |
+| resume 30s-2m p50 | 0.182 [0.18–0.194] | 0.82 [0.81–0.829] |
+|   n 30s-2m | 29 [29–29] | 29 [29–29] |
+| resume 2-10m p50 | 0.076 [0.076–0.081] | 0.8 [0.768–0.833] |
+|   n 2-10m | 4 [4–4] | 4 [4–4] |
+| resume >10m p50 | 0.04 [0.038–0.04] | 0.226 [0.174–0.277] |
+|   n >10m | 1 [1–1] | 1 [1–1] |
+| TTFT-turn p50 s | 0.109 [0.107–0.115] | 0.647 [0.637–0.657] |
+|   n turn | 127 [127–127] | 127 [127–127] |
+| goodput tok/s | 20.7 [20.4–20.8] | 10.9 [9.98–11.8] |
+| ITL p99 ms | 119 [117–119] | 916 [858–974] |
+| warm/GB (GPU KV budget) | 2.55 [2.55–2.59] | 1.1 [1–1.2] |
+| re-prefill share (clamped) | 0.0127 [0.0127–0.0127] | 0.0075 [0.0075–0.0075] |
+| re-prefill share (net) | 0.0123 [0.0123–0.0123] | 0.0072 [0.0072–0.0072] |
+| preempted (axon /slots) | 0 [0–0] | n/a |
+| output tok/s | 33 [33–33] | 29.8 [29.7–30] |
+| replies short of max_tokens | 0 [0–0] | 0 [0–0] |
+| prompt-count mismatches | 0 [0–0] | 0 [0–0] |
+| wall s | 604 [604–604] | 668 [664–672] |
+| errors (all kinds) | 0 [0–0] | 0 [0–0] |
+|   engine aborts mid-stream (latency counted, no goodput) | n/a | n/a |
+| tainted runs | 0/3 | 0/2 |
+| reply md5 stable over rounds | yes | no (2) |
+
+**speed 4** (median of rounds; [min–max])
+
+| metric | axon q8 (n=3: r0,1,2) | llama q8 (n=2: r1,2) | ollama q8 (n=3: r0,1,2) |
+|---|---|---|---|
+| TTFT-new p50 s | 6.5 [6.48–6.64] | 9.27 [6.64–11.9] | 6.53 [6.11–6.71] |
+| TTFT-new p99 s (max when n < 100) | 14 [14–14] | 31.2 [25–37.4] | 19.1 [18.1–20.1] |
+|   n new | 13 [13–13] | 13 [13–13] | 12 [12–12] |
+| TTFT-resume p50 s | 0.102 [0.098–0.159] | 5.51 [4.53–6.49] | 4.37 [3.48–5.14] |
+| TTFT-resume p99 s (max when n < 100) | 11.7 [1.77–11.7] | 27.6 [20.4–34.9] | 6.41 [5.98–7.82] |
+|   n resume | 5 [5–5] | 5 [5–5] | 5 [5–5] |
+| resume 30s-2m p50 | 0.098 [0.097–0.102] | 1.12 [0.644–1.59] | 4.37 [3.48–5.14] |
+|   n 30s-2m | 4 [4–4] | 4 [4–4] | 4 [4–4] |
+| resume 2-10m p50 | 0.052 [0.046–0.159] | 5.51 [4.53–6.49] | 0.513 [0.234–0.658] |
+|   n 2-10m | 1 [1–1] | 1 [1–1] | 1 [1–1] |
+| resume >10m p50 | n/a | n/a | n/a |
+|   n >10m | 0 [0–0] | 0 [0–0] | 0 [0–0] |
+| TTFT-turn p50 s | 0.159 [0.158–0.163] | 7.24 [5.61–8.88] | 1.74 [1.57–1.82] |
+|   n turn | 156 [156–156] | 156 [156–156] | 152 [152–153] |
+| goodput tok/s | 26.1 [25.7–29.1] | 7.97 [7.68–8.27] | 13.4 [13.3–14.2] |
+| ITL p99 ms | 150 [150–152] | 1.2e+03 [1.09e+03–1.3e+03] | 373 [371–382] |
+| warm/GB (GPU KV budget) | 3.06 [3.06–3.1] | 0.3 [0.2–0.401] | 1.2 [1.2–1.4] |
+| re-prefill share (clamped) | 0.0127 [0.0075–0.0127] | 0.0073 [0.0052–0.0094] | n/a |
+| re-prefill share (net) | 0.0123 [0.0072–0.0123] | -0.0403 [-0.0424–-0.0383] | n/a |
+| preempted (axon /slots) | 0 [0–0] | n/a | n/a |
+| output tok/s | 101 [101–104] | 45.1 [44.1–46.1] | 70 [68.3–70.3] |
+| replies short of max_tokens | 0 [0–0] | 0.5 [0–1] | 0 [0–1] |
+| prompt-count mismatches | 0 [0–0] | 0 [0–0] | 0 [0–0] |
+| wall s | 197 [192–197] | 441 [431–451] | 265 [264–277] |
+| errors (all kinds) | 0 [0–0] | 0 [0–0] | 5 [4–5] |
+|   engine aborts mid-stream (latency counted, no goodput) | n/a | n/a | n/a |
+| tainted runs | 0/3 | 0/2 | 0/3 |
+| reply md5 stable over rounds | yes | no (2) | no (3) |
+
+## Rule A on f16 + q8 (pre-registered reading: speed 1, clean rounds, both KV types must pass)
+| Axon main, speed 1, clean rounds | TTFT-resume p50 (≤ 1.0 s) | re-prefill (< 10 %) | rule |
+|---|---|---|---|
+| f16 (r1, r2) | 0.281 / 0.276 s ✓ | **10.31 % / 10.27 %** (clamped / net) ✗ | fails |
+| q8 (r0, r1, r2) | 0.140 [0.136–0.142] s ✓ | 1.27 % / 1.23 % ✓ | passes |
+| **combined** | | | **fails: B/C are NOT deprioritised** |
+
+- **q8 passes clearly:** 1.86× the pages for the same 20 sessions.
+- **f16 fails narrowly,** and under the pre-registered combination f16 decides.
+- **What this means:**
+  - At Axon's default f16 KV, ~10 % of prompt tokens are recomputed because whole slots are reclaimed. q8's larger
+    pool hides the loss.
+  - B (evict to RAM) attacks exactly that loss, and so does C's page-level retention.
+- **Other #160 rules:**
+  - The shared prefix is p50 6,006 ≥ 2k, so C stays a cross-session index.
+  - Row A "ships regardless" (it is the ruler).
+  - Row C's fan-out gate is re-registered and is not exercised here.
+
+## Next steps
+- **q8 ollama speed 1:** targeted rerun `1027-145644-71fd` (3 rounds, numbered r3–r5, `--timing bella --low
+  --max-min 55`).
+- **f16, deferred:** the ollama column is non-comparable (chat template) and llama s4 is n = 1 clean. A targeted
+  rerun (ollama s1 + s4 ×3 on the raw path, llama s4 ×2; ≈ 2 h) is needed only if a B/C gate compares against a
+  baseline. Rule A doesn't.

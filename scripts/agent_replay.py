@@ -39,7 +39,8 @@ Metrics (per run; the board takes medians over rounds):
   ITL p99       over all streamed chunks (one token per chunk on all three engines)
   warm/GB       sessions whose turns have median TTFT-turn <= 0.5 s, per GB of KV the engine holds (its config)
   re-prefill    prompt tokens the engine computed beyond the ideal (the tokens not in any prefix sent before):
-                Axon usage.prompt_tokens_details.cached_tokens, llama-server timings.prompt_n; ollama: n/a
+                Axon usage.prompt_tokens_details.cached_tokens, llama-server timings.prompt_n; ollama: n/a (its
+                prompt_eval_count is the whole prompt, cached or not: used as the prompt-count check instead)
 """
 import argparse, hashlib, http.client, json, math, os, random, re, signal, statistics, struct, subprocess, sys
 import threading, time, urllib.parse
@@ -316,7 +317,7 @@ class Engine:
 
 
 def engine_prompt_tokens(kind, res):
-    """The prompt length the engine says it got (None if it doesn't say: ollama reports only what it evaluated)."""
+    """The prompt length the engine says it got."""
     u, tm = res.get('usage') or {}, res.get('timings') or {}
     if kind == 'axon' and 'prompt_tokens' in u:
         return u['prompt_tokens']
@@ -325,6 +326,10 @@ def engine_prompt_tokens(kind, res):
             return tm['prompt_n'] + tm['cache_n']
         if 'prompt_tokens' in u:
             return u['prompt_tokens']
+    if kind == 'ollama' and 'prompt_eval_count' in u:
+        # MEASURED (q8 board): prompt_eval_count == the whole prompt on every request, cached or not, so it checks
+        # the prompt but says nothing about what was recomputed.
+        return u['prompt_eval_count']
     return None
 
 
@@ -336,9 +341,7 @@ def computed_tokens(kind, res):
             return u['prompt_tokens'] - d['cached_tokens']
     if kind == 'llama' and 'prompt_n' in tm:
         return tm['prompt_n']
-    if kind == 'ollama' and 'prompt_eval_count' in u:
-        return u['prompt_eval_count']
-    return None
+    return None   # ollama: not reported (prompt_eval_count counts cached tokens too)
 
 
 class Prefixes:
@@ -704,8 +707,6 @@ def _start_engine(kind, a, kv, port, logdir, axon_tokens):
     probe = Texts(len(a.words), a.seed).get(('tokcheck', kind, port, time.time()), n)
     r = eng.complete(''.join(' ' + a.words[i] for i in probe), 1, a.seed)
     got = engine_prompt_tokens(kind, r)
-    if got is None:
-        got = computed_tokens(kind, r)   # ollama: a cold prompt is evaluated whole
     if 'error' in r or got != n:
         raise RuntimeError(f'{kind}: tokenization check failed: {n} filler words -> {got} prompt tokens '
                            f'({r.get("error")}); log {log}')
@@ -1131,6 +1132,9 @@ def table(dirs, clean_only=False):
         for f in sorted(os.listdir(d)):
             if f.startswith('run-') and f.endswith('.json'):
                 r = json.load(open(os.path.join(d, f)))
+                if r['engine'] == 'ollama':
+                    # runs before d7f5fd3+1 took prompt_eval_count as recomputed tokens; it is the whole prompt
+                    r['reprefill_share'] = r['reprefill_net_share'] = None
                 if clean_only and r.get('tainted'):
                     continue   # the methodology's taint rule: a tainted run is a missing round
                 runs.append(r)
