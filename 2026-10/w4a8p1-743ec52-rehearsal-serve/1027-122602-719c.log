@@ -1,0 +1,6 @@
+[axon-run 12:26:02] submitted 1027-122602-719c by /home/haseeb: /usr/bin/bash p1_h100.sh
+[axon-run 15:04:34] scope axon-job-1027-122602-719c-1793127874.scope in app-axonjobs.slice: MemoryMax 14524 MB, MemoryHigh 13071 MB, no swap, oomd pressure kill 80% (claim 9000 MB): an OOM here kills only this job
+[axon-run 15:04:34] job 1027-122602-719c -> bella: systemd-run --user --scope --quiet --unit=axon-job-1027-122602-719c-1793127874 --slice=app-axonjobs.slice -p MemoryMax=14524M -p MemoryHigh=13071M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash p1_h100.sh
+axon-q 15:04:34 start slot 16-23: /usr/bin/bash p1_h100.sh
+/usr/bin/bash: p1_h100.sh: No such file or directory
+[axon-run 15:04:34] exit 127 after 0.1s (host bella)
