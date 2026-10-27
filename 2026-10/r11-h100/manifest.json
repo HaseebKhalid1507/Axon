@@ -1,0 +1,49 @@
+{
+ "label": "r11-h100",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1027-084257-71f3",
+   "name": "r11p-dd1e7fa-h100",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod3",
+   "hw": "hw-pod3-10-27_08:50.txt",
+   "gpu": "NVIDIA H100 80GB HBM3",
+   "driver": "595.91.07",
+   "sha": "dd1e7fa",
+   "binary": "bash",
+   "started": 1793105409.8291287,
+   "ended": 1793105550.2372375,
+   "attempts": 1,
+   "remote_job": "20261027-125215-bash-3636",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "2220fec7266decdee66ef4eb63521bef76359e51fde33bd37318eb5967f5a35e",
+   "log_bytes": 15202
+  },
+  {
+   "job": "1027-084258-1ce4",
+   "name": "r11st-h100",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod3",
+   "hw": "hw-pod3-10-27_08:52.txt",
+   "gpu": "NVIDIA H100 80GB HBM3",
+   "driver": "595.91.07",
+   "sha": null,
+   "binary": "bash",
+   "started": 1793105550.2372375,
+   "ended": 1793105852.575884,
+   "attempts": 1,
+   "remote_job": "20261027-125247-bash-3897",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "2d52cf8505bcbc3bc3d924662119da34f4e8cf3fc63b37794e171fc8948d759f",
+   "log_bytes": 9822
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-27 08:57:33 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}

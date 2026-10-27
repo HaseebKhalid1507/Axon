@@ -1,0 +1,103 @@
+[axon-run 08:42:58] submitted 1027-084258-1ce4 by /home/haseeb/.cache/axon-feedanat: /usr/bin/bash r11.sh
+[axon-run 08:52:30] job 1027-084258-1ce4 -> pod3 [H100 80GB HBM3 sm_90 secure] (pod lkf9xi4t36tetq): /home/haseeb/.local/bin/axon-remote --host pod3 --vram 5000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-feedanat/r11 /usr/bin/bash r11.sh
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (f4158ec516fd36b734b42dbd) + source of /home/haseeb/.cache/axon-feedanat/r11 (delta vs 3 earlier upload(s) there)
+
+sent 10,374,836 bytes  received 29,529 bytes  1,891,702.73 bytes/sec
+total size is 61,049,919  speedup is 5.87
+
+sent 58 bytes  received 19 bytes  30.80 bytes/sec
+total size is 89  speedup is 1.16
+axon-remote: job 20261027-125247-bash-3897 on pod3 (GPU, 5000 MB)
+[axon-node 12:52:47] GPU EXCLUSIVE taken; job wants 5000 MB; nvidia-smi used/total 0/81559 MB; sharing with nobody (slots 4, budget 80059 MB, vCPU 17)
+[axon-node 12:52:47] run bash (f4158ec516fd36b734b42dbd) as /home/haseeb/.cache/axon-feedanat/r11 on 18b27c213b20, AXON_THREADS=8 RUST_TEST_THREADS=4; free 81081 MB of 81559 (used 0); GPU processes pid:MB none
+[r11 +0s] kernel cache: 15 -> 15 entries (/root/axon-node/cache/axon/cuda)
+NVIDIA H100 80GB HBM3, 9.0, 595.91.07, 81559 MiB, 1980 MHz, 2619 MHz
+7f6a32ef24378addc89abbfaed0b9c8cede4d83dee86356352fcdb8c6c881ed4  axon-test
+c10d426b7123c589c9974ca11e30d2531e88b2041c9a244ebc9a0dd15b097481  axon
+c3ff5fb849cd7dc9958de23fd41b6ddbaf13a0c99b2df9f5d51dbd403dd86cbb  prompts-mix-v2.jsonl
+a82b55c178a2fa9bf2c50031390210214111b447d3e9737d5d9e70b44b4ff7c8  sd_client.py
+ff667e58202215663e6eee8f42d1a3179e7fec38ab46323738b9f752048b6972  r11.py
+[r11 +6s] model /root/axon-node/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf: 65b8fcd92af6b4fe (also pulls it into the page cache)
+[r11 +6s] rounds 2 C 64,128 scale 1 budget 600s
+[r11 +6s] S: fifo60 vs sjf80
+[r11 +8s] serve fifo60-r1 up after 3s (--admit-order fifo --step-ms 60)
+[axon-run 08:53:21] FOREIGN_GPU sample max=0% mean=0.0% n=2
+CELL fifo60-r1 c64 {"tag": "fifo60", "workload": "mix", "round": 1, "url": "http://127.0.0.1:19337", "salt": "r1 c64 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793105603.847, "c": 64, "requests": 128, "ok": 128, "errors": 0, "error_sample": [], "wall_s": 22.254, "completion_tokens": 35739, "prompt_tokens": 124747, "agg_tok_s": 1606.0, "in_tok_s": 5605.6, "ttft_ms_p50": 494.8, "ttft_ms_p99": 6047.8, "ttft_short_ms
+[axon-run 08:53:52] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL fifo60-r1 c128 {"tag": "fifo60", "workload": "mix", "round": 1, "url": "http://127.0.0.1:19337", "salt": "r1 c128 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793105642.791, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 38.796, "completion_tokens": 71929, "prompt_tokens": 249860, "agg_tok_s": 1854.0, "in_tok_s": 6440.3, "ttft_ms_p50": 2254.7, "ttft_ms_p99": 14440.9, "ttft_shor
+[r11 +78s] serve sjf80-r1 up after 3s (--admit-order sjf --step-ms 80)
+[axon-run 08:54:23] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL sjf80-r1 c64 {"tag": "sjf80", "workload": "mix", "round": 1, "url": "http://127.0.0.1:19338", "salt": "r1 c64 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793105671.501, "c": 64, "requests": 128, "ok": 128, "errors": 0, "error_sample": [], "wall_s": 21.081, "completion_tokens": 35739, "prompt_tokens": 124747, "agg_tok_s": 1695.3, "in_tok_s": 5917.6, "ttft_ms_p50": 203.4, "ttft_ms_p99": 5230.4, "ttft_short_ms_
+[axon-run 08:54:53] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL sjf80-r1 c128 {"tag": "sjf80", "workload": "mix", "round": 1, "url": "http://127.0.0.1:19338", "salt": "r1 c128 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793105707.447, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 35.799, "completion_tokens": 71929, "prompt_tokens": 249860, "agg_tok_s": 2009.3, "in_tok_s": 6979.6, "ttft_ms_p50": 773.6, "ttft_ms_p99": 12665.0, "ttft_short_
+[r11 +142s] serve sjf80-r2 up after 3s (--admit-order sjf --step-ms 80)
+[axon-run 08:55:24] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL sjf80-r2 c128 {"tag": "sjf80", "workload": "mix", "round": 2, "url": "http://127.0.0.1:19357", "salt": "r2 c128 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793105751.881, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 36.672, "completion_tokens": 71796, "prompt_tokens": 249860, "agg_tok_s": 1957.8, "in_tok_s": 6813.4, "ttft_ms_p50": 358.2, "ttft_ms_p99": 14001.5, "ttft_short_
+[axon-run 08:55:55] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL sjf80-r2 c64 {"tag": "sjf80", "workload": "mix", "round": 2, "url": "http://127.0.0.1:19357", "salt": "r2 c64 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793105772.922, "c": 64, "requests": 128, "ok": 128, "errors": 0, "error_sample": [], "wall_s": 20.917, "completion_tokens": 35609, "prompt_tokens": 124747, "agg_tok_s": 1702.4, "in_tok_s": 5964.0, "ttft_ms_p50": 164.7, "ttft_ms_p99": 5386.5, "ttft_short_ms_
+[r11 +207s] serve fifo60-r2 up after 2s (--admit-order fifo --step-ms 60)
+[axon-run 08:56:26] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 08:56:56] FOREIGN_GPU sample max=0% mean=0.0% n=1
+CELL fifo60-r2 c128 {"tag": "fifo60", "workload": "mix", "round": 2, "url": "http://127.0.0.1:19358", "salt": "r2 c128 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793105819.495, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 39.182, "completion_tokens": 71796, "prompt_tokens": 249860, "agg_tok_s": 1832.4, "in_tok_s": 6376.9, "ttft_ms_p50": 3045.8, "ttft_ms_p99": 15151.0, "ttft_shor
+CELL fifo60-r2 c64 {"tag": "fifo60", "workload": "mix", "round": 2, "url": "http://127.0.0.1:19358", "salt": "r2 c64 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793105841.313, "c": 64, "requests": 128, "ok": 128, "errors": 0, "error_sample": [], "wall_s": 21.702, "completion_tokens": 35609, "prompt_tokens": 124747, "agg_tok_s": 1640.8, "in_tok_s": 5748.2, "ttft_ms_p50": 600.0, "ttft_ms_p99": 6127.8, "ttft_short_ms
+[r11 +274s] T: gemmh2 down
+NVIDIA H100 80GB HBM3 sm_90 132 SMs, hopper module true
+down  Q4_K 18944x3584 nb 256 gemmh2_q4_k: median 97.9 TMAC/s (min 97.1 max 98.7; 0.177 ms)
+down  Q4_K 18944x3584 nb 320 gemmh2_q4_k: median 61.9 TMAC/s (min 61.4 max 62.4; 0.351 ms)
+down  Q4_K 18944x3584 nb 384 gemmh2_q4_k: median 77.2 TMAC/s (min 76.5 max 77.5; 0.338 ms)
+down  Q4_K 18944x3584 nb 448 gemmh2_q4_k: median 91.0 TMAC/s (min 90.7 max 91.9; 0.334 ms)
+down  Q4_K 18944x3584 nb 512 gemmh2_q4_k: median 103.7 TMAC/s (min 103.4 max 104.3; 0.335 ms)
+[r11 +275s] T: gemmh2 q/wo
+NVIDIA H100 80GB HBM3 sm_90 132 SMs, hopper module true
+q/wo  Q4_K 3584x3584 nb 256 gemmh2_q4_k: median 81.5 TMAC/s (min 80.7 max 82.1; 0.040 ms)
+q/wo  Q4_K 3584x3584 nb 320 gemmh2_q4_k: median 58.1 TMAC/s (min 57.7 max 58.7; 0.071 ms)
+q/wo  Q4_K 3584x3584 nb 384 gemmh2_q4_k: median 69.0 TMAC/s (min 68.8 max 69.3; 0.072 ms)
+q/wo  Q4_K 3584x3584 nb 448 gemmh2_q4_k: median 79.7 TMAC/s (min 78.7 max 80.2; 0.072 ms)
+q/wo  Q4_K 3584x3584 nb 512 gemmh2_q4_k: median 88.9 TMAC/s (min 88.7 max 90.1; 0.074 ms)
+[r11 +276s] anal
+
+## Rule S cells (medians over rounds; agg spread = max/min - 1)
+| C | arm | rounds | agg tok/s (spread) | goodput | slo_ok | short TTFT p50 | p99 | long TTFT p99 | ITL p50 | ITL p99 | TPOT p50 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 64 | fifo60 | 2 | 1,623.4 (±2 %) | 1,166.8 | 0.692 | 230.2 | 5,547.0 | 6,720.1 | 19.1 | 72.9 | 34.0 |
+| 64 | sjf80 | 2 | 1,698.8 (±0 %) | 1,345.1 | 0.742 | 151.3 | 4,704.4 | 5,747.5 | 17.2 | 100.2 | 32.4 |
+| 128 | fifo60 | 2 | 1,843.2 (±1 %) | 504.3 | 0.260 | 2,286.8 | 14,705.6 | 15,851.3 | 56.1 | 77.5 | 57.2 |
+| 128 | sjf80 | 2 | 1,983.5 (±3 %) | 809.2 | 0.373 | 187.5 | 13,319.8 | 13,848.8 | 29.0 | 99.9 | 51.5 |
+(10-27 reference, fifo60 C=128: agg 1845.5, goodput 551.7, slo_ok 0.279, ITL p99 80.0, short p50 2320.3)
+
+BITS: 768 of 768 requests identical (text_sha, completion_tokens) across fifo60 and sjf80
+
+## Rule S (issue #165, as registered)
+- C=128 agg >= +5 %: +7.6% -> pass
+- C=128 goodput >= +20 %: +60.5% -> pass
+- C=128 ITL p99 <= 105 ms (sjf80): 99.9 ms -> pass
+- C=64 agg >= -2 %: +4.6% -> pass
+- bits identical to fifo60: 0 differing -> pass
+RULE S VERDICT: PASS: make --admit-order sjf --step-ms 80 the default
+
+## Cell T: gemmh2 per layer (cuda_gemmh_bench, 7 interleaved rounds, medians); waves = ceil(28 * ceil(n/64) / 132)
+| shape | nb | TMAC/s | ms | CTAs | waves | ms per wave |
+|---|---|---|---|---|---|---|
+| down 18944x3584 | 256 | 97.9 | 0.177 | 112 | 1 | 0.177 |
+| down 18944x3584 | 320 | 61.9 | 0.351 | 140 | 2 | 0.175 |
+| down 18944x3584 | 384 | 77.2 | 0.338 | 168 | 2 | 0.169 |
+| down 18944x3584 | 448 | 91.0 | 0.334 | 196 | 2 | 0.167 |
+| down 18944x3584 | 512 | 103.7 | 0.335 | 224 | 2 | 0.168 |
+| q/wo 3584x3584 | 256 | 81.5 | 0.040 | 112 | 1 | 0.040 |
+| q/wo 3584x3584 | 320 | 58.1 | 0.071 | 140 | 2 | 0.035 |
+| q/wo 3584x3584 | 384 | 69.0 | 0.072 | 168 | 2 | 0.036 |
+| q/wo 3584x3584 | 448 | 79.7 | 0.072 | 196 | 2 | 0.036 |
+| q/wo 3584x3584 | 512 | 88.9 | 0.074 | 224 | 2 | 0.037 |
+CELL T down: ms(384) / ms(512) = 1.01 (the tail-wave model predicts about 1; diagnostic, no decision)
+CELL T q/wo: ms(384) / ms(512) = 0.97 (the tail-wave model predicts about 1; diagnostic, no decision)
+
+R11 ANAL ok
+[r11 +276s] kernel cache now 15 entries (was 15 + kit; more = compiled on this host)
+[r11 +276s] R11 ST DONE rc 0
+[axon-node 12:57:23] exit 0 after 276.3s
+[axon-node 12:57:23] peak RSS 407 MB (job process tree PSS, 2 s samples x137)
+[axon-run 08:57:26] exit 0 after 295.7s (host pod3)
+[axon-run 08:57:27] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 08:57:32] EXPECT ok: output matches /R11 ST DONE/
+[axon-run 08:57:32] FOREIGN_GPU max=0% mean=0.0% samples=10

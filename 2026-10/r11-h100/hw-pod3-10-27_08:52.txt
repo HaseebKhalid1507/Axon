@@ -1,0 +1,7 @@
+# pod3 = pod lkf9xi4t36tetq (NVIDIA H100 80GB HBM3, secure, image runpod/base:1.4.0-ubuntu2404); captured 2026-10-27 08:45:48 EDT at pod setup by axon-pods
+name, driver_version, vbios_version, memory.total [MiB], power.limit [W], clocks.max.sm [MHz], clocks.max.memory [MHz], pcie.link.gen.max, pcie.link.width.max
+NVIDIA H100 80GB HBM3, 595.91.07, 96.00.A5.00.01, 81559 MiB, 700.00 W, 1980 MHz, 2619 MHz, 5, 16
+| NVIDIA-SMI 595.91.07              Driver Version: 595.91.07      CUDA Version: 13.2     |
+cpu: Intel(R) Xeon(R) Platinum 8468 x 160
+kernel: 6.8.0-147-generic
+nvrtc: nvrtc-13.2
