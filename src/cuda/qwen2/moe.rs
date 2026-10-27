@@ -129,31 +129,65 @@ pub(crate) unsafe fn launch_router(
 /// AXON_MOE_PROFILE's report interval, in decode steps.
 const PROFILE_EVERY: f64 = 64.0;
 
+/// One decode step of layer `seg` (of n) into AXON_MOE_PROFILE's sums:
+/// its synced GPU segment time, its host round trip's four times (None: a
+/// resident layer, no round trip, CPU columns stay 0), and the step. Every
+/// MoE layer counts every step, resident or not (counting only in the round
+/// trip left resident layers at 0 steps: the report's inf / NaN). True: the
+/// last layer has `PROFILE_EVERY` steps, report now.
+fn prof_step(p: &mut [Prof], seg: usize, n: usize, gpu_s: f64, cpu: Option<[f64; 4]>) -> bool {
+    p[seg][0] += gpu_s;
+    if let Some(c) = cpu {
+        for (i, v) in c.iter().enumerate() {
+            p[seg][1 + i] += v;
+        }
+    }
+    p[seg][5] += 1.0;
+    seg + 1 == n && p[seg][5] >= PROFILE_EVERY
+}
+
 /// AXON_MOE_PROFILE's report: per layer and the sum.
 fn profile_report(p: &[Prof]) {
+    for l in profile_lines(p) {
+        eprintln!("{l}");
+    }
+}
+
+/// `profile_report`'s lines: per layer, then the per-step sum. A layer with
+/// no step counted is skipped (no 0 / 0); a resident layer counts its steps
+/// with its CPU columns 0 (`moe_step`).
+fn profile_lines(p: &[Prof]) -> Vec<String> {
     const NAMES: [&str; 5] = ["gpu", "down", "in", "experts", "up"];
     let mut sum = [0.0; 5];
+    let mut out = Vec::new();
+    let mut shown = 0;
     for (l, x) in p.iter().enumerate() {
         let n = x[5];
+        // (moe_step counts every layer: a layer without steps is a bug)
+        debug_assert!(n > 0.0, "AXON_MOE_PROFILE: layer {l} has no step");
+        if n == 0.0 {
+            continue;
+        }
+        shown += 1;
         let cols: Vec<String> = (0..5)
             .map(|i| {
                 sum[i] += x[i] / n;
                 format!("{} {:.1}", NAMES[i], x[i] / n * 1e6)
             })
             .collect();
-        eprintln!(
+        out.push(format!(
             "[moe profile] layer {l} (us): {} ({n} steps)",
             cols.join(", ")
-        );
+        ));
     }
     let cols: Vec<String> = (0..5)
         .map(|i| format!("{} {:.3}", NAMES[i], sum[i] * 1e3))
         .collect();
-    eprintln!(
-        "[moe profile] per step (ms): {}, {} layers",
-        cols.join(", "),
-        p.len()
-    );
+    out.push(format!(
+        "[moe profile] per step (ms): {}, {shown} layers",
+        cols.join(", ")
+    ));
+    out
 }
 
 /// AXON_MOE_PROFILE's seconds per layer: the GPU segment (synced for the
@@ -380,7 +414,7 @@ impl<'g> CudaQwen2<'g> {
         li: usize,
         nb: usize,
         experts: &mut Experts,
-    ) -> Result<(), String> {
+    ) -> Result<[f64; 4], String> {
         let (_, k) = self.moe_k();
         let dim = self.dim;
         let n = nb * (dim + 2 * k) * 4;
@@ -404,18 +438,10 @@ impl<'g> CudaQwen2<'g> {
         experts(self.first + li, h, ids, w, y);
         let t3 = std::time::Instant::now();
         mb.host_y.copy_to(&mb.y, 0, nb * dim * 4)?;
-        if let (Some(p), 1) = (&mut mb.prof, nb) {
-            let t4 = std::time::Instant::now();
-            for (i, d) in [t1 - t0, t2 - t1, t3 - t2, t4 - t3].iter().enumerate() {
-                p[li][1 + i] += d.as_secs_f64();
-            }
-            p[li][5] += 1.0;
-            if li + 1 == p.len() && p[li][5] >= PROFILE_EVERY {
-                profile_report(p);
-                p.iter_mut().for_each(|x| *x = [0.0; 6]);
-            }
-        }
-        Ok(())
+        let t4 = std::time::Instant::now();
+        // AXON_MOE_PROFILE's CPU columns: the caller (`moe_step` only, a
+        // decode step) adds them with the step (`prof_step`).
+        Ok([t1 - t0, t2 - t1, t3 - t2, t4 - t3].map(|d| d.as_secs_f64()))
     }
 
     /// One decode step of `token` at `pos` (logits and the argmax into the
@@ -502,12 +528,22 @@ impl<'g> CudaQwen2<'g> {
                 run(mb)?;
             }
             if seg < n {
-                if let Some(p) = &mut mb.prof {
-                    self.gpu.sync()?;
-                    p[seg][0] += ts.elapsed().as_secs_f64();
-                }
-                if resident(res, self.first + seg).is_none() {
-                    self.moe_round_trip(mb, seg, 1, experts)?;
+                let gpu_s = match mb.prof.is_some() {
+                    true => {
+                        self.gpu.sync()?;
+                        ts.elapsed().as_secs_f64()
+                    }
+                    false => 0.0,
+                };
+                let cpu = match resident(res, self.first + seg) {
+                    None => Some(self.moe_round_trip(mb, seg, 1, experts)?),
+                    Some(_) => None,
+                };
+                if let Some(p) = &mut mb.prof
+                    && prof_step(p, seg, n, gpu_s, cpu)
+                {
+                    profile_report(p);
+                    p.iter_mut().for_each(|x| *x = [0.0; 6]);
                 }
             }
         }
@@ -575,7 +611,10 @@ impl<'g> CudaQwen2<'g> {
                     // SAFETY: mb.r holds layer li's router output for n
                     // rows; rb is the cache's scratch (its max is mb.max's).
                     Some((ex, rb)) => unsafe { self.moe_resident(mb, ex, rb, n)? },
-                    None => self.moe_round_trip(mb, li, n, experts)?,
+                    None => {
+                        // (profiled only in decode steps: `moe_step`)
+                        self.moe_round_trip(mb, li, n, experts)?;
+                    }
                 }
                 // SAFETY: as above.
                 unsafe { self.moe_add(kind.fns(), mb, x, n) }
@@ -611,6 +650,78 @@ impl<'g> CudaQwen2<'g> {
 mod tests {
     use super::*;
     use crate::cuda::Kernels;
+
+    /// AXON_MOE_PROFILE's step counting (`prof_step`, what `moe_step` runs
+    /// per MoE layer and step): resident-only, offloaded-only and mixed
+    /// placements over PROFILE_EVERY decode steps of 3 layers. Every layer
+    /// counts every step (the bug: resident layers counted none, so the report
+    /// divided by 0), the report fires once, on the last layer's last step,
+    /// and its lines are finite with the CPU columns of resident layers 0.
+    #[test]
+    fn moe_profile_counts_every_layer() {
+        let steps = PROFILE_EVERY as usize;
+        let cpu = Some([1e-5, 2e-5, 3e-4, 1e-5]);
+        for (what, resident) in [
+            ("resident only", [true, true, true]),
+            ("offloaded only", [false, false, false]),
+            ("mixed", [false, true, false]),
+        ] {
+            let mut p: Vec<Prof> = vec![[0.0; 6]; 3];
+            let mut fired = Vec::new();
+            for step in 0..steps {
+                for (seg, &res) in resident.iter().enumerate() {
+                    let c = if res { None } else { cpu };
+                    if prof_step(&mut p, seg, 3, 1e-4, c) {
+                        fired.push((step, seg));
+                    }
+                }
+            }
+            assert_eq!(
+                fired,
+                vec![(steps - 1, 2)],
+                "{what}: fires once, on the last step"
+            );
+            for (seg, x) in p.iter().enumerate() {
+                assert_eq!(x[5], PROFILE_EVERY, "{what}: layer {seg} counts every step");
+                let cpu_sum: f64 = x[1..5].iter().sum();
+                assert_eq!(
+                    cpu_sum == 0.0,
+                    resident[seg],
+                    "{what}: layer {seg} CPU columns"
+                );
+            }
+            let l = profile_lines(&p);
+            assert_eq!(l.len(), 4, "{what}: {l:?}");
+            assert!(
+                l.iter().all(|x| !x.contains("NaN") && !x.contains("inf")),
+                "{what}: {l:?}"
+            );
+            assert!(
+                l[3].contains("gpu 0.300") && l[3].ends_with(", 3 layers"),
+                "{what}: {l:?}"
+            );
+        }
+    }
+
+    /// `profile_lines`' arithmetic: per-layer means and the per-step sum.
+    #[test]
+    fn moe_profile_lines_sum() {
+        let p: Vec<Prof> = vec![
+            [2e-4, 1e-5, 0.0, 3e-4, 1e-5, 2.0],
+            [1e-4, 0.0, 0.0, 0.0, 0.0, 1.0],
+        ];
+        let l = profile_lines(&p);
+        assert_eq!(l.len(), 3, "{l:?}");
+        assert!(
+            l[1].starts_with("[moe profile] layer 1 (us): gpu 100.0, down 0.0"),
+            "{l:?}"
+        );
+        // gpu 2e-4/2 + 1e-4 = 0.2 ms; experts 3e-4/2 = 0.15 ms.
+        assert!(
+            l[2].contains("gpu 0.200") && l[2].contains("experts 0.150"),
+            "{l:?}"
+        );
+    }
 
     /// A dense batched pass (`pass_at`: no MoE hook, as a branch that
     /// forgets `moe_tokens` would call it) on a MoE model is an Err, not
