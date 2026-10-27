@@ -36,6 +36,7 @@ mod engine;
 pub mod http;
 mod ollama;
 pub mod ops;
+mod prefix;
 mod responses;
 pub mod tools;
 
