@@ -18,7 +18,7 @@ rounds. Tables and method are on the board; raw data in
 - **Moonlight, all on the GPU:** 272.9 vs 285.5 (×0.96), 9,035 vs 11,176 (×0.81), 7,004 vs 12,272 (×0.57). Behind
   on all three.
 - **Partial offload, on this EPYC 75F3 pod:** Axon's CPU-expert path is slower than llama.cpp's (Moonlight N = 12 vs
-  `-ncmoe 14`: tg 79 vs 96, pp2100 673 vs 1,330). On Parabellum (Core Ultra 9 275HX), Axon led partial-offload decode 1.46–1.68× at llama.cpp's best thread count (TAINTED boards, but consistent across runs), so this gap is not general.
+  `-ncmoe 14`: tg 79 vs 96, pp2100 673 vs 1,330). On Parabellum (Core Ultra 9 275HX, main `39624db`, before #145 / #147; the thread-matched rerun edef + 6c71, clean windows), Axon led partial-offload decode 1.46–1.68× but trailed prefill 0.71–0.84×: the decode gap is host-dependent; prefill trailed on both hosts.
 - **Text:** identical across all Axon placements on both models.
 - **Superseded run:** 1026-211155-a0f6 had every llama.cpp row at rc 127 (no CUDA 12 libraries on the pod image) and
   still passed. The harness now preflights llama-bench and fails on any rc ≠ 0.

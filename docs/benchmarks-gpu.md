@@ -551,13 +551,13 @@ This is the bench of record for `--gpu-experts` (roadmap item 3).
 - **Moonlight-16B-A3B, everything on the GPU:** Axon trails on all three metrics: tg128 **×0.96**, pp512 **×0.81**,
   pp2100 **×0.57**. Not a headline.
 - **Experts partly on the CPU:** Axon's CPU-expert path is slower than llama.cpp's on this EPYC 75F3 pod (16 threads).
-  On Parabellum (Core Ultra 9 275HX), Axon led partial-offload decode 1.46–1.68× at llama.cpp's best thread count (TAINTED boards, but consistent across runs), so this gap is not general.
+  On Parabellum (Core Ultra 9 275HX, main `39624db`, before #145 / #147; the thread-matched rerun edef + 6c71, clean windows), Axon led partial-offload decode 1.46–1.68× but trailed prefill 0.71–0.84×: the decode gap is host-dependent; prefill trailed on both hosts.
   At the same placement on Moonlight:
   - N = 12 vs `--n-cpu-moe 14`: tg128 79.2 vs 96.0, pp2100 673 vs 1,330;
   - N = 0 vs `--n-cpu-moe 26`: pp2100 348 vs 659 (decode 45.4 vs 39.4 is a near-tie, with wide ranges).
   - The 30B's best partial llama.cpp row (`--n-cpu-moe 8`: 128.9 / 2,118) has no Axon run at the same N.
 - **Text:** the generated text (tg128, greedy) is identical across every Axon placement on both models (md5
-  `26480dfcb01a` Moonlight, `38978183d80a` 30B). Residency doesn't move a bit.
+  `26480dfcb01a` Moonlight, `38978183d80a` 30B). Residency doesn't change the greedy text.
 
 ### Qwen3-30B-A3B Instruct 2507 Q4_K_M (48 MoE layers; 128 experts, top-8)
 
