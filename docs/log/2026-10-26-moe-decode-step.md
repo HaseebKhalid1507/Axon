@@ -32,4 +32,11 @@ d7c1, Qwen3-30B-A3B all-resident decode on the 4090: Axon 4.57 ms GPU busy per s
 - Router: 0.47 vs 0.25.
 
 ## How it was verified / results
-Pending: see the PR.
+Bits (MEASURED, code 19931aa vs main 1e01712): ALL PASS.
+- Expert / twin / q3res / ds2 / moe / oss tests, 49/0/1 each: bella release 1026-224704-d556 (with Moonlight), bella
+  debug 1026-224705-d585, avante sm_89 1026-224705-503d. They cover the CPU vs GPU check at nb 1 through the new
+  kernels, and `enqueue_add` == x + y.
+- md5 1026-224705-6959: cpu 99/99, cuda 117/117, cuda `--kv q8` 117/117 identical. That includes Moonlight,
+  4x0.6B and the pruned 30B at `--gpu-experts auto` and at a partial N, each equal to main at N = 0.
+
+Timing: the 4090 board job 1027-012527-1ea0 is pending. The kill rule is applied as written when it lands.
