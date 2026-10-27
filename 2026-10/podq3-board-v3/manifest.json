@@ -1,0 +1,29 @@
+{
+ "label": "podq3-board-v3",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1026-215154-40d7",
+   "name": "podq3-8508a75-board-v3",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod1",
+   "hw": "hw-pod1-10-26_21:59.txt",
+   "gpu": "NVIDIA GeForce RTX 4090",
+   "driver": "595.91.07",
+   "sha": "8508a75",
+   "binary": "axon-test-podq3-v3",
+   "started": 1793066362.4472284,
+   "ended": 1793067781.4470966,
+   "attempts": 1,
+   "remote_job": "20261027-015932-axon-test-podq3-v3-1032",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "5b2b10fd7c8fc3609780956c5adbb672021e7e24da1ef12bd8a87f4861c8a487",
+   "log_bytes": 19304
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-26 22:23:01 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
