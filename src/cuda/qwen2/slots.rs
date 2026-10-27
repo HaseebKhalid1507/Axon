@@ -2674,7 +2674,7 @@ mod tests {
     /// chunk of n tokens fed into one slot of a paged pool at position
     /// `depth` (as serve's `feed` does: `feed_slot`, one pass for n <= the
     /// pool's pass), per (depth, n), medians of AXON_FEED_REPS (9) after 2
-    /// warm-ups:
+    /// warm-ups, wall / graph / enqueue timed in turn every repetition:
     /// - `wall`: `feed_slot` + sync (what serve's step pays);
     /// - `enq`: host time to enqueue the pass (load_input + `pass_at`, no
     ///   sync), and `wait` the sync after it;
@@ -2684,10 +2684,11 @@ mod tests {
     ///   would also have to pass the position through a buffer); `wall -
     ///   graph` = the launch + gap share;
     /// - the per-kernel profile: one pass without graphs, an event after
-    ///   each segment (`pass_at`'s hook), summed by class: GEMM (q, k, qkv,
-    ///   wo, gate, gate_up, down), attention (rope_kv, attn, combine), other
-    ///   (embed, rope, norms, swiglu, ...): `ev` is their total (event
-    ///   timeline, includes in-segment gaps).
+    ///   each segment (`pass_at`'s hook), summed by class: GEMM (q, k,
+    ///   v4/v6, qkv, wo, gate, gate_up, down, down4/down6), attention
+    ///   (rope_kv, attn, combine), other (embed, rope, rmsnorm, post_norm,
+    ///   swiglu, head); an unknown segment panics. `ev` is their total
+    ///   (event timeline, includes in-segment gaps).
     ///
     /// `AXON_STEP_MODEL` (the 0.5B by default), `AXON_FEED_N`
     /// ("16,64,128,256,384,512,768"), `AXON_FEED_DEPTHS`
@@ -2733,10 +2734,16 @@ mod tests {
             gi.sms,
             p.c.tab.is_some()
         );
+        // Every segment `pass_at` names on a dense pass (batch.rs `on(..)`),
+        // mapped explicitly: an unknown name panics rather than landing in
+        // "other" (v6/v4, down6/down4: the Q6_K / Q4_K products, the first
+        // rehearsal's misclassification).
         let class = |seg: &str| match seg {
-            "q" | "k" | "qkv" | "wo" | "gate" | "gate_up" | "down" => 0,
+            "q" | "k" | "v4" | "v6" | "qkv" | "wo" | "gate" | "gate_up" | "down" | "down4"
+            | "down6" => 0,
             "rope_kv" | "attn" | "combine" => 1,
-            _ => 2,
+            "embed" | "rope" | "rmsnorm" | "post_norm" | "swiglu" | "head" => 2,
+            s => panic!("pool_feed_anatomy: unclassified segment {s:?}"),
         };
         let med = |mut v: Vec<f64>| {
             v.sort_by(f64::total_cmp);
@@ -2757,16 +2764,34 @@ mod tests {
                 net.feed_slot(&mut p, 0, chunk, depth).unwrap();
                 let base = p.base(0);
                 let place = Place::Seq { start: depth, base };
-                let wall: Vec<f64> = (0..reps + 2)
-                    .map(|_| {
-                        let t = std::time::Instant::now();
-                        net.feed_slot(&mut p, 0, chunk, depth).unwrap();
-                        t.elapsed().as_secs_f64() * 1e3
+                // The graph first: then wall, graph replay and enqueue are
+                // timed in turn every repetition (drift hits all three alike;
+                // wall - graph decides the launch share).
+                let b = p.c.b.as_mut().unwrap();
+                net.load_input(b, BatchIn::Tokens(chunk)).unwrap();
+                g.sync().unwrap();
+                let c = &mut p.c;
+                let gr = g
+                    .capture(|| {
+                        net.pass_at(c, BatchIn::Loaded(n), place, Head::No, None, 0, &mut |_| {
+                            Ok(())
+                        })
                     })
-                    .skip(2)
-                    .collect();
+                    .unwrap();
+                let (mut wall, mut graph) = (Vec::new(), Vec::new());
                 let (mut enq, mut wait) = (Vec::new(), Vec::new());
                 for i in 0..reps + 2 {
+                    let t = std::time::Instant::now();
+                    net.feed_slot(&mut p, 0, chunk, depth).unwrap();
+                    let w = t.elapsed().as_secs_f64() * 1e3;
+                    // The replay reads b.tokens: the chunk's, loaded above and
+                    // rewritten with the same tokens by every feed.
+                    let t = std::time::Instant::now();
+                    // SAFETY: the graph's buffers are the pool's and the
+                    // model's, alive and unmoved for its whole life here.
+                    unsafe { gr.launch().unwrap() };
+                    g.sync().unwrap();
+                    let gm = t.elapsed().as_secs_f64() * 1e3;
                     let t = std::time::Instant::now();
                     let b = p.c.b.as_mut().unwrap();
                     net.load_input(b, BatchIn::Tokens(chunk)).unwrap();
@@ -2783,32 +2808,12 @@ mod tests {
                     let e = t.elapsed().as_secs_f64() * 1e3;
                     g.sync().unwrap();
                     if i >= 2 {
+                        wall.push(w);
+                        graph.push(gm);
                         enq.push(e);
                         wait.push(t.elapsed().as_secs_f64() * 1e3 - e);
                     }
                 }
-                let b = p.c.b.as_mut().unwrap();
-                net.load_input(b, BatchIn::Tokens(chunk)).unwrap();
-                g.sync().unwrap();
-                let c = &mut p.c;
-                let gr = g
-                    .capture(|| {
-                        net.pass_at(c, BatchIn::Loaded(n), place, Head::No, None, 0, &mut |_| {
-                            Ok(())
-                        })
-                    })
-                    .unwrap();
-                let graph: Vec<f64> = (0..reps + 2)
-                    .map(|_| {
-                        let t = std::time::Instant::now();
-                        // SAFETY: the graph's buffers are the pool's and the
-                        // model's, alive and unmoved for its whole life here.
-                        unsafe { gr.launch().unwrap() };
-                        g.sync().unwrap();
-                        t.elapsed().as_secs_f64() * 1e3
-                    })
-                    .skip(2)
-                    .collect();
                 drop(gr);
                 let mut agg: Vec<(&str, f64)> = Vec::new();
                 for round in 0..3 {
