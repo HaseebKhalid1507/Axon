@@ -2210,7 +2210,17 @@ mod tests {
             let refs: Vec<_> = (0..slots)
                 .map(|i| solo(&net, ctx, &prompts[i], kinds[i], steps))
                 .collect();
-            let mut p = net.pool(slots, ctx).unwrap();
+            // The case needs >= ATT_NB_MIN slots of `ctx`: a card that can't
+            // hold the pool (a 6 GB one: 5.07 GiB for 40 x 1152, avante job
+            // 1027-090606-5804) skips, said on stderr; it can't shrink the case.
+            let mut p = match net.pool(slots, ctx) {
+                Ok(p) => p,
+                Err(e) if e.contains("of GPU memory") => {
+                    eprintln!("skipping pool_wide_long_steps_match_solo on this GPU: {e}");
+                    return;
+                }
+                Err(e) => panic!("{e}"),
+            };
             // Slot of request i: reversed.
             let slot_of = |i: usize| slots - 1 - i;
             for (i, pr) in prompts.iter().enumerate() {
