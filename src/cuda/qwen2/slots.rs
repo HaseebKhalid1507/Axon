@@ -2162,12 +2162,14 @@ mod tests {
     }
 
     /// A wide pool on a 128-wide-head model (qwen3 0.6B; Llama 3.2 1B
-    /// too, hd 64): 20 slots of 1152 positions, prompts up to 1100 tokens,
-    /// 20 rows per step (more than att_per_query, so the per-query
-    /// attention runs in several launches, and more than HEAD_SUB, so the
-    /// head's slices split the greedy and the sampled rows, one selected on
-    /// the host): every request's results and tokens == running it alone,
-    /// and the slots' KV bytes == the solo caches'.
+    /// too, hd 64): 40 slots of 1152 positions, prompts up to 1100 tokens,
+    /// 40 rows per step (at least ATT_NB_MIN, and 40 x 8 kv heads cover
+    /// every GPU's SMs, so the attention is attn_blk_nb's; more than
+    /// HEAD_SUB, so the head's slices split
+    /// the greedy and the sampled rows, one selected on the host), on the
+    /// f16 cache and the q8 one (groups of 32): every request's results and
+    /// tokens == running it alone, and the slots' KV bytes == the solo
+    /// caches'.
     #[test]
     fn pool_wide_long_steps_match_solo() {
         let Some(g) = crate::testutil::gpu() else {
@@ -2184,13 +2186,14 @@ mod tests {
         .into_iter()
         .flatten()
         .collect();
-        let (slots, ctx, steps) = (20usize, 1152usize, 3usize);
-        for m in ms {
-            let net = CudaQwen2::with_kv(&g, &km, &m, ctx, CacheKv::F16, false).unwrap();
+        let (slots, ctx, steps) = (40usize, 1152usize, 3usize);
+        assert!(slots >= super::super::batch::ATT_NB_MIN);
+        for (m, mode) in ms
+            .iter()
+            .flat_map(|m| [(m, CacheKv::F16), (m, CacheKv::Q8 { group: 32 })])
+        {
+            let net = CudaQwen2::with_kv(&g, &km, m, ctx, mode, false).unwrap();
             let v = net.vocab;
-            if net.head_dim == 128 {
-                assert!(slots > super::super::batch::att_per_query(128));
-            }
             assert!(slots > HEAD_SUB);
             let kinds: Vec<Kind> = (0..slots)
                 .map(|i| match i % 4 {
@@ -2246,7 +2249,10 @@ mod tests {
                     .collect();
                 let outs = net.step_rows(&mut p, &rows).unwrap();
                 for (i, o) in outs.into_iter().enumerate() {
-                    let what = format!("{} request {i} (len {}) step {step}", m.arch, lens[i]);
+                    let what = format!(
+                        "{} {mode:?} request {i} (len {}) step {step}",
+                        m.arch, lens[i]
+                    );
                     assert_eq!(o, refs[i].0[step], "{what}");
                     let next = match (&o, sms[i].as_mut()) {
                         (RowOut::Pick(t), None) => *t,
@@ -2257,11 +2263,15 @@ mod tests {
                 }
             }
             for i in 0..slots {
-                assert_eq!(hist[i], refs[i].1, "{} request {i}: tokens", m.arch);
+                assert_eq!(
+                    hist[i], refs[i].1,
+                    "{} {mode:?} request {i}: tokens",
+                    m.arch
+                );
                 let n = hist[i].len() - 1;
                 assert!(
                     pool_bytes(&net, &p, slot_of(i), n) == refs[i].2,
-                    "{} request {i}: KV bytes",
+                    "{} {mode:?} request {i}: KV bytes",
                     m.arch
                 );
             }

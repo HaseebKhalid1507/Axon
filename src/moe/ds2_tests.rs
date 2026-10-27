@@ -730,3 +730,39 @@ fn ds2_resident_untwinnable_layer_stays_on_cpu() {
         eprintln!("untwinnable layer 2, {want:?}: resident {r:?}, bits equal");
     }
 }
+
+/// #159: deepseek2's K-only MLA cache has no session image format, so no
+/// CUDA path may claim one. The CPU model refuses (`deepseek2_cache_is_k_only`);
+/// so must the GPU half (`CudaQwen2`'s `kv_ident`, which only refused split
+/// models: its save would write no rows under a valid header, and a restore
+/// would decode from a cache it never wrote) and the product backend
+/// (`Backend`: deepseek2 on CUDA is `Inner::Moe`). A refused identity makes
+/// `chat --session` prefill the saved tokens again (`Chat::load_session`).
+#[test]
+fn ds2_cuda_session_image_refused() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let km = Kernels::module(&g).unwrap();
+    let ml = Kernels::mla_module(&g).unwrap();
+    let (m, _) = ds2_fixture(OPTS[0], crate::quant::Q8_0);
+    let net = ds2_net(&g, &km, &ml, &m, 64);
+    let c = net.new_cache(64);
+    assert!(
+        crate::kvsave::KvIo::kv_ident(net.gpu_net(), &c.c).is_none(),
+        "the deepseek2 GPU net must refuse a session image"
+    );
+    drop((c, net));
+    use crate::lm::{Backend, Device, Inner};
+    let (m, _) = ds2_fixture(OPTS[0], crate::quant::Q8_0);
+    let b = Backend::new(
+        &m,
+        crate::lm::BackendOptions::default()
+            .device(Device::Cuda)
+            .max_ctx(64),
+    )
+    .unwrap();
+    assert!(matches!(b.0, Inner::Moe(_)));
+    let bc = b.new_cache(64);
+    assert!(crate::kvsave::KvIo::kv_ident(&b, &bc).is_none());
+}
