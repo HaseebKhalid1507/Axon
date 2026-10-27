@@ -1,0 +1,29 @@
+{
+ "label": "kvtier-181d0d7-replay4090",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1027-143123-3f0e",
+   "name": "kvtier-181d0d7-replay4090",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod2",
+   "hw": "hw-pod2-10-27_14:39.txt",
+   "gpu": "NVIDIA GeForce RTX 4090",
+   "driver": "595.91.07",
+   "sha": "181d0d7",
+   "binary": "bash",
+   "started": 1793126347.0865536,
+   "ended": 1793127541.3726873,
+   "attempts": 1,
+   "remote_job": "20261027-183924-bash-12509",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "bf8613bdf11087571e333bc8793f8ef164982904c37fee8b0e327bb6325345f3",
+   "log_bytes": 13826
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-27 14:59:02 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
