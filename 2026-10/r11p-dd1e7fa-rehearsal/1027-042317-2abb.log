@@ -1,0 +1,184 @@
+[axon-run 04:23:17] submitted 1027-042317-2abb by /home/haseeb/.cache/axon-r11-w4a8gate: /usr/bin/bash p_h100.sh
+[axon-run 08:39:24] scope axon-job-1027-042317-2abb-1793104764.scope in app-axonjobs.slice: MemoryMax 7024 MB, MemoryHigh 6321 MB, no swap, oomd pressure kill 80% (claim 4000 MB): an OOM here kills only this job
+[axon-run 08:39:24] job 1027-042317-2abb -> bella: systemd-run --user --scope --quiet --unit=axon-job-1027-042317-2abb-1793104764 --slice=app-axonjobs.slice -p MemoryMax=7024M -p MemoryHigh=6321M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash p_h100.sh
+axon-q 08:39:24 start slot 16-23: /usr/bin/bash p_h100.sh
+[p +0s] kernel cache: 288 -> 294 entries (/home/haseeb/.cache/axon/cuda)
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 615.78.08, 12227 MiB, 3090 MHz
+29594c4e4f84cf7c8d073bd8a7a23656ced486094000ca8019e63ff32ec312fd  axon-test
+src dd1e7faa6b6c310dcf9593c21f42a2d16fac5988
+
+running 1 test
+test cuda::qwen2::tests::cuda_probe_w4a8_session ... probe sm_90a: 107472 bytes of cubin, 1245 bytes of NVRTC log
+PROBE PTXAS probe_w6a8x_n64: ptxas         .     0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+PROBE PTXAS probe_w6a8x_n64: ptxas info    : Used 168 registers, used 1 barriers
+PROBE PTXAS probe_w6a8_n64: ptxas         .     0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+PROBE PTXAS probe_w6a8_n64: ptxas info    : Used 168 registers, used 1 barriers
+PROBE PTXAS probe_w4a8x_n64: ptxas         .     0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+PROBE PTXAS probe_w4a8x_n64: ptxas info    : Used 168 registers, used 1 barriers
+PROBE PTXAS probe_w4a8_n64: ptxas         .     0 bytes stack frame, 0 bytes spill stores, 0 bytes spill loads
+PROBE PTXAS probe_w4a8_n64: ptxas info    : Used 168 registers, used 1 barriers
+probe sm_90: 2272 bytes of cubin, 30 bytes of NVRTC log
+PROBE STAGE compile: ok
+PROBE STAGE rule_p_selftest: start (/home/haseeb/.cache/axon-r11-w4a8gate/kit/axon-test cuda::qwen2::tests::rule_p_selftest --exact --nocapture --test-threads 1)
+
+running 1 test
+RULE P epilogue factor f = skel / exact on gate_up nb 512 = 0.8000 (exact_ms = skel_ms / f)
+RULE P nb 384: S_gate_up 1.600 (base 0.4929 ms, skel 0.2464 ms), S_down4 1.600 (base 0.1691 ms, skel 0.0846 ms), S_down6 1.600 (base 0.1691 ms, skel 0.0846 ms), S_q/wo 1.600 (base 0.1571 ms, skel 0.0786 ms)
+RULE P nb 384: S_weighted 1.5686 vs 1.34: pass
+RULE P nb 512: S_gate_up 1.600 (base 0.6107 ms, skel 0.3054 ms), S_down4 1.600 (base 0.1693 ms, skel 0.0846 ms), S_down6 1.600 (base 0.1693 ms, skel 0.0846 ms), S_q/wo 1.600 (base 0.1554 ms, skel 0.0777 ms)
+RULE P nb 512: S_weighted 1.5686 vs 1.34: pass
+RULE P VERDICT: GO
+PROBE RULE SELFTEST ok
+test cuda::qwen2::tests::rule_p_selftest ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 781 filtered out; finished in 0.00s
+
+PROBE STAGE rule_p_selftest: rc 0 after 0.2 s
+PROBE STAGE cuda_probe_w4a8_peak: start (/home/haseeb/.cache/axon-r11-w4a8gate/kit/axon-test cuda::qwen2::tests::cuda_probe_w4a8_peak --exact --nocapture --test-threads 1 --ignored)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+PROBE SKIP wg_peak_rs_n64 (no sm_90a module)
+PROBE PEAK END ok
+test cuda::qwen2::tests::cuda_probe_w4a8_peak ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 781 filtered out; finished in 0.27s
+
+PROBE STAGE cuda_probe_w4a8_peak: rc 0 after 0.4 s
+PROBE STAGE gpu_rmsnorm_matches_cpu: start (/home/haseeb/.cache/axon-r11-w4a8gate/kit/san/compute-sanitizer --tool memcheck --error-exitcode 9 --print-limit 20 /home/haseeb/.cache/axon-r11-w4a8gate/kit/axon-test cuda::qwen2::tests::gpu_rmsnorm_matches_cpu --exact --nocapture --test-threads 1)
+========= COMPUTE-SANITIZER
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test cuda::qwen2::tests::gpu_rmsnorm_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 781 filtered out; finished in 0.41s
+
+========= ERROR SUMMARY: 0 errors
+PROBE STAGE gpu_rmsnorm_matches_cpu: rc 0 after 0.6 s
+PROBE STAGE sanitizer-selfcheck: ok (memcheck instrumented gpu_rmsnorm_matches_cpu, 0 errors)
+PROBE STAGE gpu_probe_w4a8_tiny: start (/home/haseeb/.cache/axon-r11-w4a8gate/kit/san/compute-sanitizer --tool memcheck --error-exitcode 9 --print-limit 20 /home/haseeb/.cache/axon-r11-w4a8gate/kit/axon-test cuda::qwen2::tests::gpu_probe_w4a8_tiny --exact --nocapture --test-threads 1)
+========= COMPUTE-SANITIZER
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test cuda::qwen2::tests::gpu_probe_w4a8_tiny ... ========= CUDA API Warning: Selective device code recompilation in progress.
+=========     Saved host backtrace up to driver entry point at error
+=========         Host Frame: cuModuleLoadData [0x3915d9] in libcuda.so.1
+=========         Host Frame: axon::cuda::Module::load_cached::_$u7b$$u7b$closure$u7d$$u7d$::h4a4f3ec6863609cf [0x7174ff] in axon-test
+=========         Host Frame: axon::cuda::Module::load_for::h27bb424ea0d320d3 [0x7185f7] in axon-test
+=========         Host Frame: axon::cuda::Module::load_in::h0a2ed0b981bb7216 [0x717af6] in axon-test
+=========         Host Frame: axon::cuda::Module::load::hcfbb80fec221634e [0x717841] in axon-test
+=========         Host Frame: axon::cuda::qwen2::tests::probe_w4a8_module::h708b9bc79bbe4c1f [0x907704] in axon-test
+=========         Host Frame: axon::cuda::qwen2::tests::gpu_probe_w4a8_tiny::hdebffe3a86c1edec [0x91f751] in axon-test
+=========         Host Frame: core::ops::function::FnOnce::call_once::had3c329bb46b174a [0xcbbf48] in axon-test
+=========         Host Frame: _RINvCs3mSbOeLENLV_4test28___rust_begin_short_backtraceINtNtCsgEmfK2I1SDS_4core6result6ResultuNtNtCslNYArtu3iFV_5alloc6string6StringEFEBQ_EB2_ in lib.rs:663 [0xd0016a] in axon-test
+=========         Host Frame: _RNCNvCs3mSbOeLENLV_4test8run_test0B3_ in lib.rs:607 [0xd0cb5a] in axon-test
+=========         Host Frame: _RINvNtNtCsjrHSEGnQ3l9_3std3sys9backtrace28___rust_begin_short_backtraceNCNvCs3mSbOeLENLV_4test8run_tests_0uEB1b_ in backtrace.rs:166 [0xd08273] in axon-test
+=========         Host Frame: _RNSNvYNCINvNtNtCsjrHSEGnQ3l9_3std6thread9lifecycle15spawn_uncheckedNCNvCs3mSbOeLENLV_4test8run_tests_0uEs_0INtNtNtCsgEmfK2I1SDS_4core3ops8function6FnOnceuE9call_once6vtableB17_ in function.rs:250 [0xd0f761] in axon-test
+=========         Host Frame: _RNvNvMs0_NtNtNtCsjrHSEGnQ3l9_3std3sys6thread4unixNtB7_6Thread3new12thread_start in unix.rs:118 [0xd7b11e] in axon-test
+=========         Host Frame:  [0xac93e] in libc.so.6
+=========         Host Frame:  [0x14eeeb] in libc.so.6
+========= 
+skipping: not sm_90a
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 781 filtered out; finished in 0.47s
+
+========= ERROR SUMMARY: 1 error
+PROBE STAGE gpu_probe_w4a8_tiny: rc 9 after 0.6 s
+PROBE STAGE sanitizer tiny: skipped (no sm_90a)
+PROBE STAGE gpu_probe_w4a8_int_bits: start (/home/haseeb/.cache/axon-r11-w4a8gate/kit/axon-test cuda::qwen2::tests::gpu_probe_w4a8_int_bits --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+skipping: not sm_90a
+test cuda::qwen2::tests::gpu_probe_w4a8_int_bits ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 781 filtered out; finished in 0.26s
+
+PROBE STAGE gpu_probe_w4a8_int_bits: rc 0 after 0.4 s
+PROBE STAGE bits probe_w4a8_n64: skipped (no sm_90a)
+PROBE STAGE gpu_probe_w4a8_int_bits: start (/home/haseeb/.cache/axon-r11-w4a8gate/kit/axon-test cuda::qwen2::tests::gpu_probe_w4a8_int_bits --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+skipping: not sm_90a
+test cuda::qwen2::tests::gpu_probe_w4a8_int_bits ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 781 filtered out; finished in 0.27s
+
+PROBE STAGE gpu_probe_w4a8_int_bits: rc 0 after 0.4 s
+PROBE STAGE bits probe_w4a8x_n64: skipped (no sm_90a)
+PROBE STAGE gpu_probe_w4a8_int_bits: start (/home/haseeb/.cache/axon-r11-w4a8gate/kit/axon-test cuda::qwen2::tests::gpu_probe_w4a8_int_bits --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+skipping: not sm_90a
+test cuda::qwen2::tests::gpu_probe_w4a8_int_bits ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 781 filtered out; finished in 0.28s
+
+PROBE STAGE gpu_probe_w4a8_int_bits: rc 0 after 0.4 s
+PROBE STAGE bits probe_w6a8_n64: skipped (no sm_90a)
+PROBE STAGE gpu_probe_w4a8_int_bits: start (/home/haseeb/.cache/axon-r11-w4a8gate/kit/axon-test cuda::qwen2::tests::gpu_probe_w4a8_int_bits --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+skipping: not sm_90a
+test cuda::qwen2::tests::gpu_probe_w4a8_int_bits ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 781 filtered out; finished in 0.26s
+
+PROBE STAGE gpu_probe_w4a8_int_bits: rc 0 after 0.4 s
+PROBE STAGE bits probe_w6a8x_n64: skipped (no sm_90a)
+PROBE STAGE cuda_probe_w4a8_bench: start (/home/haseeb/.cache/axon-r11-w4a8gate/kit/axon-test cuda::qwen2::tests::cuda_probe_w4a8_bench --exact --nocapture --test-threads 1 --ignored)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+PROBE device NVIDIA GeForce RTX 5070 Ti Laptop GPU sm_120 46 SMs, hopper module false, probe kernels []
+PROBE SETUP b32 == sum of the int8 values: ok
+PROBE SETUP gate_up 3584x37888: 0.1 s
+PROBE SETUP down4 18944x3584: 0.1 s
+PROBE SETUP down6 18944x3584: 0.1 s
+PROBE CELL down6 18944x3584 nb 384 base gemm2_q6k8: median 0.8489 ms, 30.7 TMAC/s (min 0.7796 max 0.9079 ms; 7 rounds)
+PROBE CELL down6 18944x3584 nb 512 base gemm2_q6k8: median 1.0766 ms, 32.3 TMAC/s (min 0.9895 max 1.1216 ms; 7 rounds)
+PROBE SETUP q/wo 3584x3584: 0.0 s
+RULE P epilogue factor: missing (gate_up nb 512 skeleton or exact not measured / bits failed)
+RULE P VERDICT: NO-DATA (no epilogue factor)
+PROBE BENCH END ok
+test cuda::qwen2::tests::cuda_probe_w4a8_bench ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 781 filtered out; finished in 0.76s
+
+PROBE STAGE cuda_probe_w4a8_bench: rc 0 after 0.8 s
+PROBE STAGE fallback: baselines only (the bench failed or rehearsal)
+PROBE STAGE cuda_probe_w4a8_bench: start (/home/haseeb/.cache/axon-r11-w4a8gate/kit/axon-test cuda::qwen2::tests::cuda_probe_w4a8_bench --exact --nocapture --test-threads 1 --ignored)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+PROBE device NVIDIA GeForce RTX 5070 Ti Laptop GPU sm_120 46 SMs, hopper module false, probe kernels []
+PROBE SETUP b32 == sum of the int8 values: ok
+PROBE SETUP gate_up 3584x37888: 0.1 s
+PROBE SETUP down4 18944x3584: 0.1 s
+PROBE SETUP down6 18944x3584: 0.1 s
+PROBE CELL down6 18944x3584 nb 384 base gemm2_q6k8: median 0.8037 ms, 32.4 TMAC/s (min 0.8018 max 0.9810 ms; 7 rounds)
+PROBE CELL down6 18944x3584 nb 512 base gemm2_q6k8: median 1.1288 ms, 30.8 TMAC/s (min 1.0008 max 1.3275 ms; 7 rounds)
+PROBE SETUP q/wo 3584x3584: 0.0 s
+RULE P epilogue factor: missing (gate_up nb 512 skeleton or exact not measured / bits failed)
+RULE P VERDICT: NO-DATA (no epilogue factor)
+PROBE BENCH END ok
+test cuda::qwen2::tests::cuda_probe_w4a8_bench ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 781 filtered out; finished in 0.77s
+
+PROBE STAGE cuda_probe_w4a8_bench: rc 0 after 0.8 s
+PROBE SESSION 6 s of 660 s budget
+PROBE END ok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 781 filtered out; finished in 6.26s
+
+[p +6s] P H100 DONE rc 0
+[axon-run 08:39:30] exit 0 after 6.4s (host bella)
+[axon-run 08:39:34] EXPECT ok: output matches /P H100 DONE/

@@ -1,0 +1,29 @@
+{
+ "label": "r11p-dd1e7fa-rehearsal",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1027-042317-2abb",
+   "name": "r11p-dd1e7fa-rehearsal",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "dd1e7fa",
+   "binary": "bash",
+   "started": 1793104764.2874086,
+   "ended": 1793104774.5442882,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "c218aa78837f4272470a88fdf4cc106792eaf78d1bbca8a4d09b241c4e7c5880",
+   "log_bytes": 12021
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-27 08:39:35 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
