@@ -1,0 +1,27 @@
+[axon-run 15:54:34] submitted 1027-155434-e197 by /home/haseeb/.cache/axon-wt-poolwide: /home/haseeb/.cache/axon-poolwide/bin/axon-test-761a8f9 cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo --exact --nocapture --test-threads 1
+[axon-run 15:54:38] job 1027-155434-e197 -> avante: /home/haseeb/.local/bin/axon-remote --host avante --vram 5500 --env AXON_NODE_PACK=1 --src /home/haseeb/.cache/axon-wt-poolwide /home/haseeb/.cache/axon-poolwide/bin/axon-test-761a8f9 cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo --exact --nocapture --test-threads 1
+axon-remote: uploading axon-test-761a8f9 (3c0d152be72ebb73163cf11d) + source of /home/haseeb/.cache/axon-wt-poolwide
+
+sent 2,099,014 bytes  received 5,565 bytes  4,209,158.00 bytes/sec
+total size is 7,346,450  speedup is 3.49
+
+sent 7,085,406 bytes  received 35 bytes  14,170,882.00 bytes/sec
+total size is 23,009,760  speedup is 3.25
+axon-remote: job 20261027-155441-axon-test-761a8f9-2574333 on avante (GPU, 5500 MB)
+[axon-node 15:54:41] GPU slot taken; job wants 5500 MB; nvidia-smi used/total/temp: 2 MiB, 6141 MiB, 47
+[axon-node 15:54:41] run axon-test-761a8f9 (3c0d152be72ebb73163cf11d) as /home/haseeb/.cache/axon-wt-poolwide on avante, AXON_THREADS=3 RUST_TEST_THREADS=4
+
+running 1 test
+test cuda::qwen2::slots::tests::pool_wide_long_steps_match_solo ... testutil: GPU has 5.66 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+skipping pool_wide_long_steps_match_solo case qwen3 F16 on this GPU: a 46144-token cache needs 5.07 GiB of GPU memory (KV cache and scratch), 4.98 GiB is free; try a smaller --ctx (or -n), --kv q8 or the CPU
+pool_wide_long_steps_match_solo case qwen3 Q8 { group: 32 }: ran, 40 x 1152
+pool_wide_long_steps_match_solo case llama F16: ran, 40 x 1152
+pool_wide_long_steps_match_solo case llama Q8 { group: 32 }: ran, 40 x 1152
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 771 filtered out; finished in 59.52s
+
+[axon-node 15:55:41] exit 0 after 59.6s
+[axon-node 15:55:41] peak RSS 4331 MB (job process tree PSS, 2 s samples x29)
+[axon-run 15:55:41] exit 0 after 62.6s (host avante)
+[axon-run 15:55:42] EXPECT ok: output matches /skipping pool_wide_long_steps_match_solo case qwen3 F16/

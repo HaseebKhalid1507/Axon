@@ -1,0 +1,49 @@
+{
+ "label": "poolwide-761a8f9-gates",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1027-155434-e197",
+   "name": "poolwide-761a8f9-avante",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "avante",
+   "hw": "hw-avante.txt",
+   "gpu": "NVIDIA GeForce RTX 4050 Laptop GPU",
+   "driver": "610.43.02",
+   "sha": "761a8f9",
+   "binary": "axon-test-761a8f9",
+   "started": 1793130874.8133585,
+   "ended": 1793130940.8166814,
+   "attempts": 1,
+   "remote_job": "20261027-155441-axon-test-761a8f9-2574333",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "a511590d3f7278e7b825499d6fd748b92045c6b65eb83e2e47e10e3392d3815e",
+   "log_bytes": 2220
+  },
+  {
+   "job": "1027-155439-ee70",
+   "name": "poolwide-761a8f9-bella",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "761a8f9",
+   "binary": "axon-test-761a8f9",
+   "started": 1793130880.5281112,
+   "ended": 1793131052.129022,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "ad1b6774351358975d70ba6a5951e8fd9f7087c2db58e740d2e32f258f6ca2bc",
+   "log_bytes": 1798
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-27 15:57:33 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
