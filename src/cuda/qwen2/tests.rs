@@ -10243,7 +10243,7 @@ fn probe_child(
     ignored: bool,
     env: &[(&str, &str)],
     limit_s: u64,
-) -> (i32, f64) {
+) -> (i32, f64, String) {
     let exe = std::env::current_exe().unwrap();
     let mut args: Vec<String> = wrap.to_vec();
     args.push(exe.display().to_string());
@@ -10262,7 +10262,10 @@ fn probe_child(
     eprintln!("PROBE STAGE {test}: start ({})", args.join(" "));
     let t = std::time::Instant::now();
     let mut c = std::process::Command::new(&args[0]);
-    c.args(&args[1..]).stdin(std::process::Stdio::null());
+    c.args(&args[1..])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     for (k, v) in env {
         c.env(k, v);
     }
@@ -10270,9 +10273,25 @@ fn probe_child(
         Ok(ch) => ch,
         Err(e) => {
             eprintln!("PROBE STAGE {test}: spawn failed: {e}");
-            return (-2, 0.0);
+            return (-2, 0.0, String::new());
         }
     };
+    // Tee both streams: live into this log, and kept for the caller.
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let tee = |r: Box<dyn std::io::Read + Send>| {
+        let seen = seen.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for l in std::io::BufReader::new(r).lines().map_while(Result::ok) {
+                eprintln!("{l}");
+                let mut s = seen.lock().unwrap();
+                s.push_str(&l);
+                s.push('\n');
+            }
+        })
+    };
+    let t1 = tee(Box::new(child.stdout.take().unwrap()));
+    let t2 = tee(Box::new(child.stderr.take().unwrap()));
     let rc = loop {
         if let Some(st) = child.try_wait().unwrap() {
             break st.code().unwrap_or(-3);
@@ -10284,20 +10303,24 @@ fn probe_child(
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
     };
+    let _ = (t1.join(), t2.join());
     let s = t.elapsed().as_secs_f64();
     eprintln!(
         "PROBE STAGE {test}: rc {rc} after {s:.1} s{}",
         if rc == -1 { " (TIMEOUT, killed)" } else { "" }
     );
-    (rc, s)
+    let out = seen.lock().unwrap().clone();
+    (rc, s, out)
 }
 
 /// T3's ONE H100 job, as stages in separate processes so one faulting cell
 /// can't take the rest down (each child has its own CUDA context):
 /// 0. the probe's sm_90a NVRTC compile check (in process, no GPU);
 /// 1. cuda_probe_w4a8_peak: the measured wgmma ceiling;
-/// 2. with AXON_PROBE_SANITIZER=<compute-sanitizer>: gpu_probe_w4a8_tiny under
-///    `--tool memcheck` (a fault names the instruction and address);
+/// 2. with AXON_PROBE_SANITIZER=<compute-sanitizer>: a self-check (memcheck
+///    over gpu_rmsnorm_matches_cpu; unusable -> stage dropped), then
+///    gpu_probe_w4a8_tiny under `--tool memcheck` (a fault names the
+///    instruction and address);
 /// 3. gpu_probe_w4a8_tiny, then gpu_probe_w4a8_int_bits (ragged shapes, all
 ///    outputs);
 /// 4. bits passed: cuda_probe_w4a8_bench (probe + gemmh2 + gemm2t
@@ -10305,7 +10328,7 @@ fn probe_child(
 ///    AXON_PROBE_KERNELS=baselines, so the in-session baselines are reported
 ///    anyway. Off Hopper every sm_90a part skips (the bella rehearsal).
 ///
-/// Child limits sum to 1610 s (27 min): submit with --max-min 28.
+/// Child limits sum to 1670 s (28 min): submit with --max-min 29.
 ///
 /// Fails (after everything has run) if any probe stage failed.
 /// Run with --ignored --nocapture.
@@ -10320,49 +10343,77 @@ fn cuda_probe_w4a8_session() {
             fails.push(format!("{name} rc {rc}"));
         }
     };
-    let (rc, _) = probe_child(&[], "cuda_probe_w4a8_peak", true, &[], 120);
+    let (rc, _, _) = probe_child(&[], "cuda_probe_w4a8_peak", true, &[], 120);
     note("peak", rc);
+    // The sanitizer (AXON_PROBE_SANITIZER = a compute-sanitizer binary in a
+    // complete standalone dir: the PyPI wheel lacks TreeLauncherSubreaper and
+    // can't start a target). Self-check first on a test that really launches
+    // kernels on any GPU: usable = rc 0, "ERROR SUMMARY: 0 errors", and the
+    // API was instrumented. Unusable -> the stage is dropped, not failed.
+    // Then the probe's tiny shape under it; off sm_90a that test only skips,
+    // so the stage reports "skipped (no sm_90a)".
     if let Some(san) = std::env::var_os("AXON_PROBE_SANITIZER") {
         let san = san.to_string_lossy().to_string();
-        if std::path::Path::new(&san).is_file() {
-            let wrap: Vec<String> = [
-                &san,
-                "--tool",
-                "memcheck",
-                "--error-exitcode",
-                "9",
-                "--print-limit",
-                "20",
-            ]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-            let (rc, _) = probe_child(&wrap, "gpu_probe_w4a8_tiny", false, &[], 300);
-            note("sanitizer tiny", rc);
+        let wrap: Vec<String> = [
+            san.as_str(),
+            "--tool",
+            "memcheck",
+            "--error-exitcode",
+            "9",
+            "--print-limit",
+            "20",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let usable = std::path::Path::new(&san).is_file() && {
+            let (rc, _, out) = probe_child(&wrap, "gpu_rmsnorm_matches_cpu", false, &[], 120);
+            rc == 0
+                && out.contains("ERROR SUMMARY: 0 errors")
+                && !out.contains("terminated before first instrumented")
+                && out.contains("1 passed")
+        };
+        if !usable {
+            eprintln!("PROBE STAGE sanitizer-selfcheck: UNUSABLE ({san}): sanitizer stage dropped");
         } else {
-            eprintln!("PROBE STAGE sanitizer: {san} not found, skipped");
-            note("sanitizer missing", 1);
+            eprintln!(
+                "PROBE STAGE sanitizer-selfcheck: ok (memcheck instrumented gpu_rmsnorm_matches_cpu, 0 errors)"
+            );
+            let (rc, _, out) = probe_child(&wrap, "gpu_probe_w4a8_tiny", false, &[], 240);
+            if out.contains("skipping: not sm_90a") {
+                eprintln!("PROBE STAGE sanitizer tiny: skipped (no sm_90a)");
+            } else {
+                note("sanitizer tiny", rc);
+                eprintln!(
+                    "PROBE STAGE sanitizer tiny: {}",
+                    if rc == 0 {
+                        "ok, 0 errors"
+                    } else {
+                        "FAILED (see the memcheck report above)"
+                    }
+                );
+            }
         }
     } else {
         eprintln!("PROBE STAGE sanitizer: AXON_PROBE_SANITIZER unset, skipped");
     }
-    let (rc_tiny, _) = probe_child(&[], "gpu_probe_w4a8_tiny", false, &[], 90);
+    let (rc_tiny, _, _) = probe_child(&[], "gpu_probe_w4a8_tiny", false, &[], 90);
     note("tiny", rc_tiny);
     let bits_ok = rc_tiny == 0 && {
-        let (rc, _) = probe_child(&[], "gpu_probe_w4a8_int_bits", false, &[], 200);
+        let (rc, _, _) = probe_child(&[], "gpu_probe_w4a8_int_bits", false, &[], 200);
         note("bits", rc);
         rc == 0
     };
     let mut bench_ok = false;
     if bits_ok {
-        let (rc, _) = probe_child(&[], "cuda_probe_w4a8_bench", true, &[], 600);
+        let (rc, _, _) = probe_child(&[], "cuda_probe_w4a8_bench", true, &[], 600);
         note("bench", rc);
         bench_ok = rc == 0;
     }
     // AXON_PROBE_REHEARSE_FALLBACK=1: take the fallback path anyway (bella rehearsal).
     if !bench_ok || std::env::var("AXON_PROBE_REHEARSE_FALLBACK").is_ok_and(|v| v == "1") {
         eprintln!("PROBE STAGE fallback: baselines only (the probe failed or was skipped)");
-        let (rc, _) = probe_child(
+        let (rc, _, _) = probe_child(
             &[],
             "cuda_probe_w4a8_bench",
             true,
