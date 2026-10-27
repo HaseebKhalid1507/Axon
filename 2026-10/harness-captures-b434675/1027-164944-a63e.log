@@ -1,0 +1,36 @@
+[axon-run 16:49:44] submitted 1027-164944-a63e by /home/haseeb/.cache/axon-wt-harness: /usr/bin/bash /home/haseeb/.cache/axon-wt-harness/scripts/agent_capture.sh opencode
+[axon-run 17:03:38] scope axon-job-1027-164944-a63e-1793135018.scope in app-axonjobs.slice: MemoryMax 16024 MB, MemoryHigh 14421 MB, no swap, oomd pressure kill 80% (claim 10000 MB): an OOM here kills only this job
+[axon-run 17:03:38] job 1027-164944-a63e -> bella: systemd-run --user --scope --quiet --unit=axon-job-1027-164944-a63e-1793135018 --slice=app-axonjobs.slice -p MemoryMax=16024M -p MemoryHigh=14421M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash /home/haseeb/.cache/axon-wt-harness/scripts/agent_capture.sh opencode
+axon-q 17:03:38 start slot 16-23: /usr/bin/bash /home/haseeb/.cache/axon-wt-harness/scripts/agent_capture.sh opencode
+[cap opencode +3s] serve :19382, proxy :19782, capture /home/haseeb/.cache/axon-agent/raw/opencode-1027-170338.jsonl, rounds 3
+TASK opencode bugfix r1 rc 0 150s tests OK
+TASK opencode feature r1 rc 0 20s tests FAIL
+TASK opencode resume r1 rc 0 23s tests FAIL
+TASK opencode explain r1 rc 0 10s tests -
+TASK opencode compact r1 rc 0 72s tests -
+TASK opencode subagent r1 rc 0 30s tests -
+TASK opencode bugfix r2 rc 0 11s tests FAIL
+TASK opencode feature r2 rc 0 10s tests FAIL
+TASK opencode resume r2 rc 0 11s tests FAIL
+TASK opencode explain r2 rc 0 15s tests -
+TASK opencode compact r2 rc 0 7s tests -
+TASK opencode subagent r2 rc 0 29s tests -
+TASK opencode bugfix r3 rc 0 111s tests FAIL
+TASK opencode feature r3 rc 0 337s tests FAIL
+TASK opencode resume r3 rc 0 11s tests FAIL
+TASK opencode explain r3 rc 0 15s tests -
+TASK opencode compact r3 rc 0 5s tests -
+TASK opencode subagent r3 rc 0 31s tests -
+[cap opencode +903s] capture: 246 requests
+privacy check /home/haseeb/.cache/axon-agent/traces/harness-opencode-1027-170338.json.tmp: PASS (0 findings)
+agent_trace_proxy: /home/haseeb/.cache/axon-agent/traces/harness-opencode-1027-170338.json: {"requests": 246, "sessions": 40, "subagent_sessions": 24, "main": 243, "side": 1, "compact": 2, "dropped_non200": 0, "injected_usage": 0, "missing_usage": 0, "prompt_tokens": 2477630, "cached_tokens": 2360445, "reuse_pct": 95.3, "mean_prompt": 10072, "tool_calls": 224, "tc_badjson": 0, "tc_as_text": 13, "tool_results": 224, "tool_err_harness": 2, "tool_err_any": 41, "side_req": 1, "compact_events": 2, "tasks": {"bugfix": {"prompt_tokens": 764036, "cached_tokens": 740114, "reuse_pct": 96.9, "mean_prompt": 10325, "tool_calls": 69, "tc_badjson": 0, "tc_as_text": 2, "tool_results": 69, "tool_err_harness": 0, "tool_err_any": 16, "side_req": 1, "compact_events": 0, "requests": 74, "rounds": 3, "req_per_round": 24.7}, "compact": {"prompt_tokens": 124135, "cached_tokens": 111001, "reuse_pct": 89.4, "mean_prompt": 6896, "tool_calls": 11, "tc_badjson": 0, "tc_as_text": 3, "tool_results": 11, "tool_err_harness": 0, "tool_err_any": 0, "side_req": 0, "compact_events": 0, "requests": 18, "rounds": 3, "req_per_round": 6.0}, "explain": {"prompt_tokens": 39868, "cached_tokens": 22759, "reuse_pct": 57.1, "mean_prompt": 4984, "tool_calls": 3, "tc_badjson": 0, "tc_as_text": 1, "tool_results": 3, "tool_err_harness": 1, "tool_err_any": 1, "side_req": 0, "compact_events": 0, "requests": 8, "rounds": 3, "req_per_round": 2.7}, "feature": {"prompt_tokens": 1312812, "cached_tokens": 1287667, "reuse_pct": 98.1, "mean_prompt": 11827, "tool_calls": 102, "tc_badjson": 0, "tc_as_text": 3, "tool_results": 102, "tool_err_harness": 1, "tool_err_any": 18, "side_req": 0, "compact_events": 2, "requests": 111, "rounds": 3, "req_per_round": 37.0}, "resume": {"prompt_tokens": 23265, "cached_tokens": 21318, "reuse_pct": 91.6, "mean_prompt": 7755, "tool_calls": 0, "tc_badjson": 0, "tc_as_text": 3, "tool_results": 0, "tool_err_harness": 0, "tool_err_any": 0, "side_req": 0, "compact_events": 0, "requests": 3, "rounds": 3, "req_per_round": 1.0}, "subagent": {"prompt_tokens": 213514, "cached_tokens": 177586, "reuse_pct": 83.2, "mean_prompt": 6672, "tool_calls": 39, "tc_badjson": 0, "tc_as_text": 1, "tool_results": 39, "tool_err_harness": 0, "tool_err_any": 6, "side_req": 0, "compact_events": 0, "requests": 32, "rounds": 3, "req_per_round": 10.7}}}
+SUMMARY {"requests": 246, "sessions": 40, "subagent_sessions": 24, "main": 243, "side": 1, "compact": 2, "dropped_non200": 0, "injected_usage": 0, "missing_usage": 0, "prompt_tokens": 2477630, "cached_tokens": 2360445, "reuse_pct": 95.3, "mean_prompt": 10072, "tool_calls": 224, "tc_badjson": 0, "tc_as_text": 13, "tool_results": 224, "tool_err_harness": 2, "tool_err_any": 41, "side_req": 1, "compact_events": 2}
+SUMMARY-TASK bugfix {"prompt_tokens": 764036, "cached_tokens": 740114, "reuse_pct": 96.9, "mean_prompt": 10325, "tool_calls": 69, "tc_badjson": 0, "tc_as_text": 2, "tool_results": 69, "tool_err_harness": 0, "tool_err_any": 16, "side_req": 1, "compact_events": 0, "requests": 74, "rounds": 3, "req_per_round": 24.7}
+SUMMARY-TASK compact {"prompt_tokens": 124135, "cached_tokens": 111001, "reuse_pct": 89.4, "mean_prompt": 6896, "tool_calls": 11, "tc_badjson": 0, "tc_as_text": 3, "tool_results": 11, "tool_err_harness": 0, "tool_err_any": 0, "side_req": 0, "compact_events": 0, "requests": 18, "rounds": 3, "req_per_round": 6.0}
+SUMMARY-TASK explain {"prompt_tokens": 39868, "cached_tokens": 22759, "reuse_pct": 57.1, "mean_prompt": 4984, "tool_calls": 3, "tc_badjson": 0, "tc_as_text": 1, "tool_results": 3, "tool_err_harness": 1, "tool_err_any": 1, "side_req": 0, "compact_events": 0, "requests": 8, "rounds": 3, "req_per_round": 2.7}
+SUMMARY-TASK feature {"prompt_tokens": 1312812, "cached_tokens": 1287667, "reuse_pct": 98.1, "mean_prompt": 11827, "tool_calls": 102, "tc_badjson": 0, "tc_as_text": 3, "tool_results": 102, "tool_err_harness": 1, "tool_err_any": 18, "side_req": 0, "compact_events": 2, "requests": 111, "rounds": 3, "req_per_round": 37.0}
+SUMMARY-TASK resume {"prompt_tokens": 23265, "cached_tokens": 21318, "reuse_pct": 91.6, "mean_prompt": 7755, "tool_calls": 0, "tc_badjson": 0, "tc_as_text": 3, "tool_results": 0, "tool_err_harness": 0, "tool_err_any": 0, "side_req": 0, "compact_events": 0, "requests": 3, "rounds": 3, "req_per_round": 1.0}
+SUMMARY-TASK subagent {"prompt_tokens": 213514, "cached_tokens": 177586, "reuse_pct": 83.2, "mean_prompt": 6672, "tool_calls": 39, "tc_badjson": 0, "tc_as_text": 1, "tool_results": 39, "tool_err_harness": 0, "tool_err_any": 6, "side_req": 0, "compact_events": 0, "requests": 32, "rounds": 3, "req_per_round": 10.7}
+CAPTURE opencode DONE rc 0
+[axon-run 17:18:41] exit 0 after 903.4s (host bella)
+[axon-run 17:18:42] EXPECT ok: output matches /CAPTURE opencode DONE rc 0/

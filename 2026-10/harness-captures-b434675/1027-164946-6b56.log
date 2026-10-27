@@ -1,0 +1,36 @@
+[axon-run 16:49:46] submitted 1027-164946-6b56 by /home/haseeb/.cache/axon-wt-harness: /usr/bin/bash /home/haseeb/.cache/axon-wt-harness/scripts/agent_capture.sh crush
+[axon-run 17:22:17] scope axon-job-1027-164946-6b56-1793136137.scope in app-axonjobs.slice: MemoryMax 16024 MB, MemoryHigh 14421 MB, no swap, oomd pressure kill 80% (claim 10000 MB): an OOM here kills only this job
+[axon-run 17:22:17] job 1027-164946-6b56 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1027-164946-6b56-1793136137 --slice=app-axonjobs.slice -p MemoryMax=16024M -p MemoryHigh=14421M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash /home/haseeb/.cache/axon-wt-harness/scripts/agent_capture.sh crush
+axon-q 17:22:17 start slot 16-23: /usr/bin/bash /home/haseeb/.cache/axon-wt-harness/scripts/agent_capture.sh crush
+[cap crush +2s] serve :19365, proxy :19765, capture /home/haseeb/.cache/axon-agent/raw/crush-1027-172217.jsonl, rounds 3
+TASK crush bugfix r1 rc 0 14s tests OK
+TASK crush feature r1 rc 0 95s tests FAIL
+TASK crush resume r1 rc 0 57s tests FAIL
+TASK crush explain r1 rc 0 7s tests -
+TASK crush compact r1 rc 0 35s tests -
+TASK crush subagent r1 rc 0 18s tests -
+TASK crush bugfix r2 rc 0 53s tests OK
+TASK crush feature r2 rc 0 113s tests FAIL
+TASK crush resume r2 rc 0 136s tests FAIL
+TASK crush explain r2 rc 0 11s tests -
+TASK crush compact r2 rc 124 600s tests -
+TASK crush subagent r2 rc 0 10s tests -
+TASK crush bugfix r3 rc 0 50s tests OK
+TASK crush feature r3 rc 0 12s tests FAIL
+TASK crush resume r3 rc 0 13s tests FAIL
+TASK crush explain r3 rc 0 7s tests -
+TASK crush compact r3 rc 0 251s tests -
+TASK crush subagent r3 rc 0 22s tests -
+[cap crush +1507s] capture: 474 requests
+privacy check /home/haseeb/.cache/axon-agent/traces/harness-crush-1027-172217.json.tmp: PASS (0 findings)
+agent_trace_proxy: /home/haseeb/.cache/axon-agent/traces/harness-crush-1027-172217.json: {"requests": 474, "sessions": 291, "subagent_sessions": 267, "main": 453, "side": 0, "compact": 21, "dropped_non200": 0, "injected_usage": 0, "missing_usage": 0, "prompt_tokens": 4013147, "cached_tokens": 3496922, "reuse_pct": 87.1, "mean_prompt": 8467, "tool_calls": 367, "tc_badjson": 0, "tc_as_text": 2, "tool_results": 363, "tool_err_harness": 11, "tool_err_any": 46, "side_req": 0, "compact_events": 21, "tasks": {"bugfix": {"prompt_tokens": 785987, "cached_tokens": 741313, "reuse_pct": 94.3, "mean_prompt": 14035, "tool_calls": 51, "tc_badjson": 0, "tc_as_text": 0, "tool_results": 50, "tool_err_harness": 2, "tool_err_any": 6, "side_req": 0, "compact_events": 0, "requests": 56, "rounds": 3, "req_per_round": 18.7}, "compact": {"prompt_tokens": 1808426, "cached_tokens": 1549591, "reuse_pct": 85.7, "mean_prompt": 6649, "tool_calls": 159, "tc_badjson": 0, "tc_as_text": 0, "tool_results": 157, "tool_err_harness": 9, "tool_err_any": 4, "side_req": 0, "compact_events": 19, "requests": 272, "rounds": 3, "req_per_round": 90.7}, "explain": {"prompt_tokens": 33606, "cached_tokens": 8846, "reuse_pct": 26.3, "mean_prompt": 5601, "tool_calls": 0, "tc_badjson": 0, "tc_as_text": 0, "tool_results": 0, "tool_err_harness": 0, "tool_err_any": 0, "side_req": 0, "compact_events": 0, "requests": 6, "rounds": 3, "req_per_round": 2.0}, "feature": {"prompt_tokens": 623975, "cached_tokens": 561569, "reuse_pct": 90.0, "mean_prompt": 15999, "tool_calls": 45, "tc_badjson": 0, "tc_as_text": 1, "tool_results": 44, "tool_err_harness": 0, "tool_err_any": 15, "side_req": 0, "compact_events": 0, "requests": 39, "rounds": 3, "req_per_round": 13.0}, "resume": {"prompt_tokens": 517731, "cached_tokens": 466942, "reuse_pct": 90.2, "mean_prompt": 17258, "tool_calls": 55, "tc_badjson": 0, "tc_as_text": 0, "tool_results": 55, "tool_err_harness": 0, "tool_err_any": 16, "side_req": 0, "compact_events": 1, "requests": 30, "rounds": 3, "req_per_round": 10.0}, "subagent": {"prompt_tokens": 243422, "cached_tokens": 168661, "reuse_pct": 69.3, "mean_prompt": 3428, "tool_calls": 57, "tc_badjson": 0, "tc_as_text": 1, "tool_results": 57, "tool_err_harness": 0, "tool_err_any": 5, "side_req": 0, "compact_events": 1, "requests": 71, "rounds": 3, "req_per_round": 23.7}}}
+SUMMARY {"requests": 474, "sessions": 291, "subagent_sessions": 267, "main": 453, "side": 0, "compact": 21, "dropped_non200": 0, "injected_usage": 0, "missing_usage": 0, "prompt_tokens": 4013147, "cached_tokens": 3496922, "reuse_pct": 87.1, "mean_prompt": 8467, "tool_calls": 367, "tc_badjson": 0, "tc_as_text": 2, "tool_results": 363, "tool_err_harness": 11, "tool_err_any": 46, "side_req": 0, "compact_events": 21}
+SUMMARY-TASK bugfix {"prompt_tokens": 785987, "cached_tokens": 741313, "reuse_pct": 94.3, "mean_prompt": 14035, "tool_calls": 51, "tc_badjson": 0, "tc_as_text": 0, "tool_results": 50, "tool_err_harness": 2, "tool_err_any": 6, "side_req": 0, "compact_events": 0, "requests": 56, "rounds": 3, "req_per_round": 18.7}
+SUMMARY-TASK compact {"prompt_tokens": 1808426, "cached_tokens": 1549591, "reuse_pct": 85.7, "mean_prompt": 6649, "tool_calls": 159, "tc_badjson": 0, "tc_as_text": 0, "tool_results": 157, "tool_err_harness": 9, "tool_err_any": 4, "side_req": 0, "compact_events": 19, "requests": 272, "rounds": 3, "req_per_round": 90.7}
+SUMMARY-TASK explain {"prompt_tokens": 33606, "cached_tokens": 8846, "reuse_pct": 26.3, "mean_prompt": 5601, "tool_calls": 0, "tc_badjson": 0, "tc_as_text": 0, "tool_results": 0, "tool_err_harness": 0, "tool_err_any": 0, "side_req": 0, "compact_events": 0, "requests": 6, "rounds": 3, "req_per_round": 2.0}
+SUMMARY-TASK feature {"prompt_tokens": 623975, "cached_tokens": 561569, "reuse_pct": 90.0, "mean_prompt": 15999, "tool_calls": 45, "tc_badjson": 0, "tc_as_text": 1, "tool_results": 44, "tool_err_harness": 0, "tool_err_any": 15, "side_req": 0, "compact_events": 0, "requests": 39, "rounds": 3, "req_per_round": 13.0}
+SUMMARY-TASK resume {"prompt_tokens": 517731, "cached_tokens": 466942, "reuse_pct": 90.2, "mean_prompt": 17258, "tool_calls": 55, "tc_badjson": 0, "tc_as_text": 0, "tool_results": 55, "tool_err_harness": 0, "tool_err_any": 16, "side_req": 0, "compact_events": 1, "requests": 30, "rounds": 3, "req_per_round": 10.0}
+SUMMARY-TASK subagent {"prompt_tokens": 243422, "cached_tokens": 168661, "reuse_pct": 69.3, "mean_prompt": 3428, "tool_calls": 57, "tc_badjson": 0, "tc_as_text": 1, "tool_results": 57, "tool_err_harness": 0, "tool_err_any": 5, "side_req": 0, "compact_events": 1, "requests": 71, "rounds": 3, "req_per_round": 23.7}
+CAPTURE crush DONE rc 0
+[axon-run 17:47:24] exit 0 after 1507.3s (host bella)
+[axon-run 17:47:27] EXPECT ok: output matches /CAPTURE crush DONE rc 0/
