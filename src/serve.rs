@@ -161,6 +161,8 @@ pub struct Opts {
     /// `--cache-ram`: the KV RAM tier's size (serve/tier.rs; 0: off, the
     /// default).
     pub cache_ram: tier::CacheRam,
+    /// How its page-locked memory is taken (AXON_KV_RAM_ALLOC).
+    pub cache_ram_alloc: tier::Alloc,
 }
 
 /// The chat framing `axon chat` uses (chat.rs: ChatML, or Llama 3's
@@ -1400,15 +1402,24 @@ fn engine(
         0 => None,
         n => {
             let on = match batch.as_mut() {
-                Some(b) => b.set_cache_ram(n),
+                Some(b) => match b.set_cache_ram(n, o.cache_ram_alloc) {
+                    Ok(on) => on,
+                    Err(why) => {
+                        let _ = ready
+                            .send(Err(Refused(format!("--cache-ram {}: {why}", tier::gib(n)))));
+                        return;
+                    }
+                },
                 None => {
                     e.tier = tier::CacheTier::new(&net, &e.cache, n, Some(o.metrics.clone()));
-                    e.tier.as_ref().map(|t| t.t.store.cap())
+                    e.tier
+                        .as_ref()
+                        .map(|t| (t.t.store.cap(), "host memory".into()))
                 }
             };
             Some(match on {
-                Some(cap) => format!(
-                    ", KV RAM tier {}{}",
+                Some((cap, how)) => format!(
+                    ", KV RAM tier {}{} ({how})",
                     tier::gib(cap as u64),
                     if o.cache_ram == tier::CacheRam::Auto {
                         " (--cache-ram auto)"
@@ -2063,6 +2074,7 @@ struct EngineOpts {
     rope: crate::rope::RopeArgs,
     metrics: Arc<ops::Metrics>,
     cache_ram: tier::CacheRam,
+    cache_ram_alloc: tier::Alloc,
 }
 
 /// A running server. Dropping it (or `shutdown`) stops it: the acceptor
@@ -2172,6 +2184,7 @@ pub fn start(o: Opts) -> io::Result<Server> {
         log: o.log,
         rope: o.rope.clone(),
         cache_ram: o.cache_ram,
+        cache_ram_alloc: o.cache_ram_alloc,
     };
     let stop2 = stop.clone();
     let engine = std::thread::Builder::new()
@@ -3244,6 +3257,7 @@ pub fn run(args: &[String]) -> io::Result<()> {
         max_prompt_tokens: None,
         slot_idle_ms: None,
         cache_ram: tier::CacheRam::Bytes(0),
+        cache_ram_alloc: tier::Alloc::from_env(),
     };
     let mut k = None;
     let key_from;

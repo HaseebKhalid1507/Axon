@@ -290,9 +290,25 @@ pub trait BatchLm: Lm {
         None
     }
 
-    /// Page-locked host memory for pages (`page_out` / `page_in`).
+    /// Page-locked host memory for pages (`page_out` / `page_in`), not
+    /// zeroed: a page slot is only ever copied from after a copy into it.
     fn host_alloc(&self, _bytes: usize) -> Result<crate::cuda::HostBuf<'static>, String> {
         Err("no host pages on this backend".into())
+    }
+
+    /// `host_alloc` from another thread: an allocator to move there, and
+    /// its allocations adopted back here (`host_adopt`). None: no pages.
+    fn host_allocator(&self) -> Option<crate::cuda::HostAllocator> {
+        None
+    }
+
+    /// A `host_allocator` allocation of `bytes` at `addr`, as page memory.
+    ///
+    /// # Safety
+    /// As `Gpu::adopt_host`: a live, unowned allocation of this backend's
+    /// context, never read before it is written.
+    unsafe fn host_adopt(&self, _addr: usize, _bytes: usize) -> crate::cuda::HostBuf<'static> {
+        unreachable!("no host pages on this backend")
     }
 
     /// Enqueue the copy of page `page` of slot `slot` (which holds it) to
@@ -1232,8 +1248,25 @@ impl BatchLm for Backend<'_> {
 
     fn host_alloc(&self, bytes: usize) -> Result<crate::cuda::HostBuf<'static>, String> {
         match &self.0 {
-            Inner::Cuda(n) => n.gpu().host_alloc(bytes),
+            // SAFETY: page memory: the tier copies into a slot before it
+            // copies out of it (the trait's contract).
+            Inner::Cuda(n) => unsafe { n.gpu().host_alloc_uninit(bytes) },
             _ => Err("no host pages on this backend".into()),
+        }
+    }
+
+    fn host_allocator(&self) -> Option<crate::cuda::HostAllocator> {
+        match &self.0 {
+            Inner::Cuda(n) => Some(n.gpu().host_allocator()),
+            _ => None,
+        }
+    }
+
+    unsafe fn host_adopt(&self, addr: usize, bytes: usize) -> crate::cuda::HostBuf<'static> {
+        match &self.0 {
+            // SAFETY: the caller's (the trait's contract).
+            Inner::Cuda(n) => unsafe { n.gpu().adopt_host(addr, bytes) },
+            _ => unreachable!("no host pages on this backend"),
         }
     }
 

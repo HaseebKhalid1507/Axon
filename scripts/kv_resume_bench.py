@@ -23,6 +23,7 @@ import argparse
 import hashlib
 import http.client
 import json
+import os
 import random
 import statistics
 import subprocess
@@ -135,54 +136,108 @@ def metric(port, name):
     return None
 
 
-def one_round(name, path, extra, a, port):
+def itl_cell(port, streams, seed0, during=None):
+    """`streams` short requests decode 256 tokens each (while `during()`
+    runs, if given, started a second in): their inter-token gaps in ms,
+    sorted, and their texts."""
+    itl, outs = [], [None] * streams
+    lock = threading.Lock()
+
+    def short(i):
+        _, ts, txt, _ = stream(port, text(seed0 + i, 40), 256)
+        outs[i] = txt
+        with lock:
+            itl.extend((y - x) * 1e3 for x, y in zip(ts, ts[1:]))
+
+    ths = [threading.Thread(target=short, args=(i,)) for i in range(streams)]
+    for th in ths:
+        th.start()
+    extra = None
+    if during:
+        time.sleep(1.0)
+        extra = during()
+    for th in ths:
+        th.join()
+    itl.sort()
+    return itl, outs, extra
+
+
+def pct(xs, q):
+    return xs[int(q * (len(xs) - 1))] if xs else None
+
+
+def trace_stats(path):
+    """AXON_SERVE_TRACE lines: the host time between consecutive steps while
+    requests run (a step with requests running, then the next step: what the
+    engine did outside the step's own passes: write-behind, allocation,
+    admission), and the steps' own times."""
+    try:
+        lines = [json.loads(x) for x in open(path) if x.strip()]
+    except OSError:
+        return {}
+    gaps, steps = [], []
+    for x, y in zip(lines, lines[1:]):
+        steps.append(x["ms"])
+        if x.get("running", 0) > 0 and y.get("running", 0) > 0:
+            gaps.append(y["t_ms"] - x["t_ms"] - x["ms"])
+    gaps.sort()
+    steps.sort()
+    return {"trace_steps": len(lines), "trace_gap_max_ms": round(gaps[-1], 2) if gaps else None,
+            "trace_gaps_over_20ms": sum(g > 20 for g in gaps),
+            "trace_gap_top5_ms": [round(g, 1) for g in gaps[-5:]],
+            "trace_step_p99_ms": round(pct(steps, 0.99), 2) if steps else None,
+            "trace_step_max_ms": round(steps[-1], 2) if steps else None}
+
+
+def one_round(name, path, extra, env, a, port, rnd):
     cmd = [path, "serve", a.model, "--device", "cuda", "--ctx", str(a.ctx), "--port", str(port)] + extra
-    print(f"## {name}: {' '.join(cmd)}", flush=True)
-    log = open(f"{a.out}.{name}.server.log", "a")
-    proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
+    print(f"## {name}: {' '.join(cmd)} {env}", flush=True)
+    logp = f"{a.out}.{name}.r{rnd}.server.log"
+    tr = f"{a.out}.{name}.r{rnd}.trace.jsonl"
+    log = open(logp, "w")
+    e = dict(os.environ)
+    e.update(env)
+    if a.trace:
+        e["AXON_SERVE_TRACE"] = tr
+    t0 = time.perf_counter()
+    proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT, env=e)
     res = {"bin": name}
     try:
         wait_up(port, proc)
-        nw = calibrate(port, a.tokens)
-        sessions = [text(100 + i, nw) for i in range(a.others + 1)]
+        res["startup_s"] = round(time.perf_counter() - t0, 3)
         md5 = hashlib.md5()
-        t = time.perf_counter()
-        a1, ua = complete(port, sessions[0], 64)
-        res["a1_s"] = time.perf_counter() - t
-        res["a_tokens"] = ua["prompt_tokens"]
-        md5.update(a1.encode())
-        for s in sessions[1:]:
-            r, _ = complete(port, s, 64)
-            md5.update(r.encode())
-        time.sleep(a.gap)
-        new = text(7, int(nw * a.new / a.tokens) + 1)
-        ttft, times, a2, u2 = stream(port, sessions[0] + a1 + "\n" + new, 64)
-        md5.update(a2.encode())
-        res.update(ttft_resume=ttft, resume_prompt=u2 and u2["prompt_tokens"],
-                   resume_cached=u2 and u2.get("prompt_tokens_details", {}).get("cached_tokens"))
-        # The write-behind's cost: short streams decode while a fresh long
-        # prompt prefills (its pages written behind with the tier on).
-        itl, outs = [], [None] * a.itl_streams
-
-        def short(i):
-            _, ts, txt, _ = stream(port, text(500 + i, 40), 256)
-            outs[i] = txt
-            itl.extend((y - x) * 1e3 for x, y in zip(ts, ts[1:]))
-
-        ths = [threading.Thread(target=short, args=(i,)) for i in range(a.itl_streams)]
-        for th in ths:
-            th.start()
-        time.sleep(1.0)
-        fresh, _ = complete(port, text(900, nw), 16)
-        for th in ths:
-            th.join()
-        for o in outs:
+        # Right after start: decode while a tier pinned by a thread may
+        # still be pinning (Alloc::Thread).
+        itl0, outs0, _ = itl_cell(port, a.itl_streams, 300)
+        res["itl0_p50_ms"], res["itl0_p99_ms"], res["itl0_max_ms"] = pct(itl0, 0.5), pct(itl0, 0.99), itl0[-1] if itl0 else None
+        for o in outs0:
             md5.update((o or "").encode())
-        md5.update(fresh.encode())
-        itl.sort()
-        res["itl_p50_ms"] = statistics.median(itl) if itl else None
-        res["itl_p99_ms"] = itl[int(0.99 * (len(itl) - 1))] if itl else None
-        res["itl_n"] = len(itl)
+        if not a.startup_only:
+            nw = calibrate(port, a.tokens)
+            sessions = [text(100 + i, nw) for i in range(a.others + 1)]
+            t = time.perf_counter()
+            a1, ua = complete(port, sessions[0], 64)
+            res["a1_s"] = time.perf_counter() - t
+            res["a_tokens"] = ua["prompt_tokens"]
+            md5.update(a1.encode())
+            for s_ in sessions[1:]:
+                r, _ = complete(port, s_, 64)
+                md5.update(r.encode())
+            time.sleep(a.gap)
+            new = text(7, int(nw * a.new / a.tokens) + 1)
+            ttft, times, a2, u2 = stream(port, sessions[0] + a1 + "\n" + new, 64)
+            md5.update(a2.encode())
+            res.update(ttft_resume=ttft, resume_prompt=u2 and u2["prompt_tokens"],
+                       resume_cached=u2 and u2.get("prompt_tokens_details", {}).get("cached_tokens"))
+            # The write-behind's cost: short streams decode while a fresh long
+            # prompt prefills (its pages written behind with the tier on).
+            itl, outs, fresh = itl_cell(port, a.itl_streams, 500,
+                                        during=lambda: complete(port, text(900, nw), 16)[0])
+            for o in outs:
+                md5.update((o or "").encode())
+            md5.update(fresh.encode())
+            res["itl_p50_ms"], res["itl_p99_ms"], res["itl_n"] = pct(itl, 0.5), pct(itl, 0.99), len(itl)
+            res["itl_top8_ms"] = [round(x, 1) for x in itl[-8:]]
         res["restored_tokens"] = metric(port, "axon_kv_ram_restored_tokens_total")
         res["pinned_bytes"] = metric(port, "axon_kv_ram_pinned_bytes")
         res["md5"] = md5.hexdigest()
@@ -192,6 +247,10 @@ def one_round(name, path, extra, a, port):
             proc.wait(30)
         except subprocess.TimeoutExpired:
             proc.kill()
+        log.close()
+    if a.trace:
+        res.update(trace_stats(tr))
+    res["tier_lines"] = [x.strip() for x in open(logp) if "KV RAM tier" in x][:3]
     print("RESULT " + json.dumps(res), flush=True)
     return res
 
@@ -209,28 +268,38 @@ def main():
     p.add_argument("--itl-streams", type=int, default=4)
     p.add_argument("--port", type=int, default=18571)
     p.add_argument("--out", default="kv_resume")
+    p.add_argument("--trace", action="store_true", help="AXON_SERVE_TRACE per server: inter-step gaps")
+    p.add_argument("--startup-only", action="store_true", help="only the start-up time and the ITL cell after it")
     a = p.parse_args()
     bins = []
     for b in a.bin:
-        name, rest = b.split("=", 1)
+        # NAME=PATH[:ARG,ARG...][|ENV=V;ENV=V]
+        spec, _, envs = b.partition("|")
+        name, rest = spec.split("=", 1)
         path, _, args = rest.partition(":")
-        bins.append((name, path, [x for x in args.split(",") if x]))
+        env = dict(x.split("=", 1) for x in envs.split(";") if x)
+        bins.append((name, path, [x for x in args.split(",") if x], env))
     rows = []
     for r in range(a.rounds):
         order = bins if r % 2 == 0 else bins[::-1]
-        for name, path, extra in order:
-            row = one_round(name, path, extra, a, a.port)
+        for name, path, extra, env in order:
+            row = one_round(name, path, extra, env, a, a.port, r)
             row["round"] = r
             rows.append(row)
-    print("\n## summary (medians over rounds)")
-    for name, _, _ in bins:
+    print("\n## summary (medians over rounds, raw per round)")
+    keys = ["startup_s", "itl0_p50_ms", "itl0_p99_ms", "itl0_max_ms", "ttft_resume", "resume_cached",
+            "itl_p50_ms", "itl_p99_ms", "trace_gap_max_ms", "trace_gaps_over_20ms", "trace_step_p99_ms",
+            "pinned_bytes"]
+    for name, _, _, _ in bins:
         rs = [x for x in rows if x["bin"] == name]
-        med = lambda k: statistics.median(x[k] for x in rs if x.get(k) is not None)
-        print(f"SUMMARY {name}: ttft_resume p50 {med('ttft_resume'):.3f} s "
-              f"(raw {[round(x['ttft_resume'], 3) for x in rs]}), cached {[x['resume_cached'] for x in rs]} "
-              f"of {[x['resume_prompt'] for x in rs]}, itl p50 {med('itl_p50_ms'):.2f} ms "
-              f"p99 {med('itl_p99_ms'):.2f} ms (raw p99 {[round(x['itl_p99_ms'], 2) for x in rs]}), "
-              f"md5 {sorted(set(x['md5'] for x in rs))}")
+        parts = []
+        for k in keys:
+            vals = [x.get(k) for x in rs]
+            got = [v for v in vals if v is not None]
+            if got:
+                r = lambda v: round(v, 3) if isinstance(v, float) else v
+                parts.append(f"{k} {r(statistics.median(got))} {[r(v) for v in vals]}")
+        print(f"SUMMARY {name}: " + "; ".join(parts) + f"; md5 {sorted(set(x['md5'] for x in rs))}")
     with open(a.out + ".json", "w") as f:
         json.dump(rows, f, indent=1)
     md5s = {x["md5"] for x in rows}

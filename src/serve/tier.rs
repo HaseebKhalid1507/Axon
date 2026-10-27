@@ -25,6 +25,7 @@ use crate::lm::{Backend, BackendCache, BatchLm};
 use std::io::{self, Read};
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
+use std::time::Instant;
 
 /// `--cache-ram auto`'s ceiling: half the RAM available after the model,
 /// at most this. Host memory is only taken as pages are stored.
@@ -186,60 +187,204 @@ impl<P> Tier<P> {
     }
 }
 
-/// Page-locked host memory in fixed-size page slots: slabs of `per` pages
-/// allocated as the store fills, never more than `most` pages, a free list
-/// of slots. Copies go straight between a slot's device rows and a page
-/// slot, on the stream: the host never touches the bytes, so stream order
-/// is all the synchronisation there is (a slot freed by an eviction and
-/// written again is written after every copy enqueued before).
+/// How the arena's page-locked memory is taken (`AXON_KV_RAM_ALLOC`): all
+/// of it, at the size asked for, before the server starts (`Start`), or by
+/// a thread from server start on, the tier growing as slabs arrive
+/// (`Thread`). Never inside an engine step: a slab's `cuMemHostAlloc` took
+/// 61.8 ms per 64 MiB on a 4090 pod (MEASURED, 1027-100925-fbcb), and grown
+/// lazily in steps it cost +21.5 % ITL p99 there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Alloc {
+    Start,
+    Thread,
+}
+
+impl Alloc {
+    /// AXON_KV_RAM_ALLOC=start|thread (default: start).
+    pub fn from_env() -> Alloc {
+        match std::env::var("AXON_KV_RAM_ALLOC").as_deref() {
+            Ok("thread") => Alloc::Thread,
+            _ => Alloc::Start,
+        }
+    }
+}
+
+/// A slab pinned by the allocator thread: (index, address), or why it
+/// stopped.
+type SlabMsg = Result<(usize, usize), String>;
+
+/// Page-locked host memory in fixed-size page slots: `most` pages in slabs
+/// of `per`, and a free list of slots. Copies go straight between a slot's
+/// device rows and a page slot, on the stream: the host never touches the
+/// bytes, so stream order is all the synchronisation there is (a slot freed
+/// by an eviction and written again is written after every copy enqueued
+/// before), and the bytes are never zeroed (a slot is copied from only
+/// after a copy into it).
 pub(super) struct Arena {
-    slabs: Vec<HostBuf<'static>>,
+    /// By slab index; None until pinned (`Alloc::Thread`).
+    slabs: Vec<Option<HostBuf<'static>>>,
     free: Vec<u32>,
     page: usize,
     per: usize,
     most: usize,
-    made: usize,
+    /// Slabs the allocator thread pins, as each is ready (dropped with
+    /// slabs in it only at shutdown: those few are left to the process's
+    /// exit).
+    rx: Option<std::sync::mpsc::Receiver<SlabMsg>>,
+    /// Slabs in `slabs` so far.
+    ready: usize,
+    t0: Instant,
+    /// Seconds from start until every slab was pinned.
+    pub done_s: Option<f64>,
+    log: bool,
 }
 
 impl Arena {
-    fn new(page: usize, most: usize) -> Arena {
-        Arena {
-            slabs: Vec::new(),
+    /// Pages of slab `k`.
+    fn slab_pages(&self, k: usize) -> usize {
+        self.per.min(self.most - k * self.per)
+    }
+
+    fn new(
+        net: &Backend,
+        page: usize,
+        most: usize,
+        how: Alloc,
+        log: bool,
+    ) -> Result<Arena, String> {
+        let per = (SLAB_BYTES / page).max(1);
+        let n = most.div_ceil(per);
+        let mut a = Arena {
+            slabs: (0..n).map(|_| None).collect(),
             free: Vec::new(),
             page,
-            per: (SLAB_BYTES / page).max(1),
+            per,
             most,
-            made: 0,
+            rx: None,
+            ready: 0,
+            t0: Instant::now(),
+            done_s: None,
+            log,
+        };
+        match how {
+            Alloc::Start => {
+                for k in 0..n {
+                    let b = net.host_alloc(a.slab_pages(k) * page)?;
+                    a.adopt(k, b);
+                }
+                a.done_s = Some(a.t0.elapsed().as_secs_f64());
+            }
+            Alloc::Thread => {
+                let al = net
+                    .host_allocator()
+                    .ok_or("no page-locked memory on this backend")?;
+                let sizes: Vec<usize> = (0..n).map(|k| a.slab_pages(k) * page).collect();
+                let (tx, rx) = std::sync::mpsc::channel::<SlabMsg>();
+                std::thread::Builder::new()
+                    .name("axon-kv-ram".into())
+                    .spawn(move || {
+                        for (k, &len) in sizes.iter().enumerate() {
+                            let r = al.alloc(len);
+                            let stop = r.is_err();
+                            if let Err(std::sync::mpsc::SendError(Ok((_, addr)))) =
+                                tx.send(r.map(|addr| (k, addr)))
+                            {
+                                // Nobody takes it any more (the server is
+                                // stopping): give it back.
+                                // SAFETY: ours, never adopted, no copy.
+                                unsafe { al.free(addr) };
+                                return;
+                            }
+                            if stop {
+                                return;
+                            }
+                        }
+                    })
+                    .map_err(|e| format!("the KV RAM tier's allocator thread: {e}"))?;
+                a.rx = Some(rx);
+            }
+        }
+        Ok(a)
+    }
+
+    /// Slab `k`'s memory is `b`: its slots are free.
+    fn adopt(&mut self, k: usize, b: HostBuf<'static>) {
+        let base = k * self.per;
+        let n = self.slab_pages(k);
+        self.slabs[k] = Some(b);
+        self.free.extend((base..base + n).rev().map(|i| i as u32));
+        self.ready += 1;
+    }
+
+    /// Take the slabs the allocator thread has pinned since the last call.
+    fn poll(&mut self, net: &Backend) {
+        let Some(rx) = &self.rx else {
+            return;
+        };
+        let mut got = Vec::new();
+        let mut end = None;
+        loop {
+            match rx.try_recv() {
+                Ok(Ok(s)) => got.push(s),
+                Ok(Err(e)) => {
+                    end = Some(Some(e));
+                    break;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    end = Some(None);
+                    break;
+                }
+            }
+        }
+        for (k, addr) in got {
+            let len = self.slab_pages(k) * self.page;
+            // SAFETY: a live `host_allocator` allocation of `len` bytes,
+            // sent once, owned by nobody else; page slots are written
+            // before they are read.
+            let b = unsafe { net.host_adopt(addr, len) };
+            self.adopt(k, b);
+        }
+        if self.ready == self.slabs.len() && self.done_s.is_none() {
+            let s = self.t0.elapsed().as_secs_f64();
+            self.done_s = Some(s);
+            self.rx = None;
+            if self.log {
+                eprintln!(
+                    "axon serve: KV RAM tier: {} pinned in {s:.1} s (a thread, from start)",
+                    gib(self.bytes() as u64)
+                );
+            }
+        } else if let Some(e) = end {
+            self.rx = None;
+            eprintln!(
+                "axon serve: KV RAM tier: pinned {} of {} ({}); it stays that size",
+                gib(self.bytes() as u64),
+                gib((self.most * self.page) as u64),
+                e.unwrap_or_else(|| "its thread ended".into())
+            );
         }
     }
 
-    /// A free page slot, allocating a slab if none is free and there's room
-    /// for one; None: every slot in use.
-    fn take(&mut self, net: &Backend) -> Result<Option<u32>, String> {
-        if let Some(i) = self.free.pop() {
-            return Ok(Some(i));
-        }
-        if self.made >= self.most {
-            return Ok(None);
-        }
-        let n = self.per.min(self.most - self.made);
-        self.slabs.push(net.host_alloc(n * self.page)?);
-        let base = self.made;
-        self.made += n;
-        self.free
-            .extend((base + 1..base + n).rev().map(|i| i as u32));
-        Ok(Some(base as u32))
+    /// A free page slot (None: every pinned one in use).
+    fn take(&mut self, net: &Backend) -> Option<u32> {
+        self.poll(net);
+        self.free.pop()
     }
 
     /// Slot `i`'s slab and byte offset.
     fn at(&mut self, i: u32) -> (&mut HostBuf<'static>, usize) {
         let (s, k) = (i as usize / self.per, i as usize % self.per);
-        (&mut self.slabs[s], k * self.page)
+        let b = self.slabs[s].as_mut().expect("a slot of a pinned slab");
+        (b, k * self.page)
     }
 
-    /// Bytes allocated.
+    /// Bytes pinned so far.
     pub fn bytes(&self) -> usize {
-        self.made * self.page
+        (0..self.slabs.len())
+            .filter(|&k| self.slabs[k].is_some())
+            .map(|k| self.slab_pages(k) * self.page)
+            .sum()
     }
 }
 
@@ -252,23 +397,48 @@ pub(super) struct PoolTier {
 }
 
 impl PoolTier {
-    /// A tier of `cap` bytes for `slots` slots of `pool`, or None: no
-    /// pages (`cap` under a page) or no page image on this backend.
+    /// A tier of `cap` bytes for `slots` slots of `pool`, or None: no pages
+    /// (`cap` under a page), or no page image on this backend; `how`: how
+    /// its page-locked memory is taken (all of it, now or by a thread from
+    /// now on); Err: it couldn't be.
     pub fn new(
         net: &Backend,
         pool: &<Backend<'_> as BatchLm>::Pool,
         slots: usize,
         cap: u64,
+        how: Alloc,
+        log: bool,
         metrics: Option<Arc<Metrics>>,
-    ) -> Option<PoolTier> {
-        let page = net.page_bytes(pool)?;
-        let t = Tier::new(usize::try_from(cap).ok()?, page, slots, metrics);
+    ) -> Result<Option<PoolTier>, String> {
+        let Some(page) = net.page_bytes(pool) else {
+            return Ok(None);
+        };
+        let Ok(cap) = usize::try_from(cap) else {
+            return Ok(None);
+        };
+        let t = Tier::new(cap, page, slots, metrics);
         let most = t.store.cap() / page;
-        (most > 0).then(|| PoolTier {
-            t,
-            arena: Arena::new(page, most),
-            next: 0,
-        })
+        if most == 0 {
+            return Ok(None);
+        }
+        let arena = Arena::new(net, page, most, how, log)?;
+        let p = PoolTier { t, arena, next: 0 };
+        p.publish_pinned();
+        Ok(Some(p))
+    }
+
+    /// How the memory was taken, for the banner.
+    pub fn how(&self) -> String {
+        match self.arena.done_s {
+            Some(s) => format!("pinned at start in {s:.1} s"),
+            None => "pinned by a thread from start".into(),
+        }
+    }
+
+    fn publish_pinned(&self) {
+        if let Some(m) = &self.t.metrics {
+            m.kv_ram_pinned.store(self.arena.bytes() as u64, Relaxed);
+        }
     }
 
     /// Store up to `most` of slot `s`'s pages not yet stored (whole pages
@@ -298,7 +468,7 @@ impl PoolTier {
             if !room {
                 break;
             }
-            let Some(a) = self.arena.take(net)? else {
+            let Some(a) = self.arena.take(net) else {
                 break;
             };
             let (buf, at) = self.arena.at(a);
@@ -315,10 +485,8 @@ impl PoolTier {
         }
         if copied > 0 {
             self.t.publish(copied, 0);
-            if let Some(m) = &self.t.metrics {
-                m.kv_ram_pinned.store(self.arena.bytes() as u64, Relaxed);
-            }
         }
+        self.publish_pinned();
         Ok(copied)
     }
 
@@ -347,7 +515,7 @@ impl PoolTier {
         if !room {
             return Ok(false);
         }
-        let Some(a) = self.arena.take(net)? else {
+        let Some(a) = self.arena.take(net) else {
             return Ok(false);
         };
         let (buf, at) = self.arena.at(a);

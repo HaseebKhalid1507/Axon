@@ -427,6 +427,24 @@ mod tests {
                 "BW host_alloc {mib:>4} MiB (+ free)          {:8.2} ms",
                 t * 1e3
             );
+            // SAFETY: never read: allocated and freed.
+            let t = time(&g, n, || {
+                drop(unsafe { g.host_alloc_uninit(mib << 20) }.unwrap())
+            });
+            eprintln!(
+                "BW host_alloc_uninit {mib:>4} MiB (+ free)   {:8.2} ms",
+                t * 1e3
+            );
+            let al = g.host_allocator();
+            let t = time(&g, n, || {
+                let a = al.alloc(mib << 20).unwrap();
+                // SAFETY: ours, never adopted, no copy.
+                unsafe { al.free(a) };
+            });
+            eprintln!(
+                "BW HostAllocator {mib:>4} MiB (+ free)      {:8.2} ms",
+                t * 1e3
+            );
         }
         let page = 64 * row * arrays;
         let s = time(&g, 31, || {

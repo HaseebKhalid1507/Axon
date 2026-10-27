@@ -678,12 +678,26 @@ impl<'a, 't> Batch<'a, 't> {
         }
     }
 
-    /// Turn the KV RAM tier on with `cap` bytes (`--cache-ram`): the host
-    /// memory it may take, or None if it stays off (no page image on this
-    /// backend, or less than a page).
-    pub fn set_cache_ram(&mut self, cap: u64) -> Option<usize> {
-        self.tier = PoolTier::new(self.net, &self.pool, self.slots, cap, self.metrics.clone());
-        self.tier.as_ref().map(|t| t.t.store.cap())
+    /// Turn the KV RAM tier on with `cap` bytes (`--cache-ram`), its
+    /// page-locked memory taken as `how` says: its size and how it was
+    /// taken, or None if it stays off (no page image on this backend, or
+    /// less than a page); Err: the memory couldn't be had.
+    pub fn set_cache_ram(
+        &mut self,
+        cap: u64,
+        how: super::tier::Alloc,
+    ) -> Result<Option<(usize, String)>, String> {
+        let t = PoolTier::new(
+            self.net,
+            &self.pool,
+            self.slots,
+            cap,
+            how,
+            self.log,
+            self.metrics.clone(),
+        )?;
+        self.tier = t;
+        Ok(self.tier.as_ref().map(|t| (t.t.store.cap(), t.how())))
     }
 
     /// Slot `s` is about to give up its rows past `keep`: the tier stores
