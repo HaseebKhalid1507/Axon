@@ -413,8 +413,10 @@ def summarize(results, wall, prime_s, kv_gb, kind, foreign):
     comp = [(computed_tokens(kind, x), x['ideal'], x['prompt']) for x in ok]
     have = [c for c in comp if c[0] is not None]
     reprefill = sum(max(0, c - i) for c, i, _ in have) if have and len(have) == len(comp) else None
+    errs = [x.get('error') for x in results if 'error' in x]
     s = {
         'requests': len(results), 'errors': len(results) - len(ok), 'wall_s': round(wall, 1),
+        'first_error': errs[0][:200] if errs else None,
         'prime_s': round(prime_s, 1),
         'ttft_new_p50': pct(ttft(new), 50), 'ttft_new_p99': pct(ttft(new), 99), 'n_new': len(new),
         'ttft_resume_p50': pct(ttft(resume), 50), 'ttft_resume_p99': pct(ttft(resume), 99), 'n_resume': len(resume),
@@ -441,8 +443,8 @@ def summarize(results, wall, prime_s, kv_gb, kind, foreign):
         if isinstance(v, float) and k.startswith('ttft'):
             s[k] = round(v, 3)
     s['per_request'] = [dict(k=x['k'], chain=x['chain'], new=x['new'], gap=x['gap'], prompt=x['prompt'],
-                             ideal=x['ideal'], computed=computed_tokens(kind, x), max_tokens=x['max_tokens'],
-                             n_out=x.get('n_out'), late_ms=x['late_ms'], md5=x['md5'],
+                             ideal=x.get('ideal'), computed=computed_tokens(kind, x), max_tokens=x.get('max_tokens'),
+                             n_out=x.get('n_out'), late_ms=x.get('late_ms'), md5=x.get('md5'),
                              ttft=round(x['t_first'] - x['t_send'], 4) if x.get('t_first') else None,
                              dur=round(x['t_done'] - x['t_send'], 3) if x.get('t_done') else None,
                              err=x.get('error'))
@@ -524,11 +526,16 @@ def start_engine(kind, a, kv, port, logdir, axon_tokens):
     env = dict(os.environ)
     if kind == 'axon':
         cmd = [a.axon, 'serve', a.model, '--device', 'cpu' if a.cpu else 'cuda', '--port', str(port), '--ctx', str(a.clip),
-               '--parallel', str(a.axon_parallel), '--kv', kv]
+               '--parallel', str(1 if a.cpu else a.axon_parallel), '--kv', kv]
     elif kind == 'llama':
         t = {'f16': 'f16', 'q8': 'q8_0'}[kv]
-        cmd = [a.llama_server, '-m', a.model, '-ngl', '0' if a.cpu else '99', '-fa', 'on', '-c', str(axon_tokens),
-               '-np', str(a.llama_parallel), '-kvu', '--cache-reuse', '256', '-ctk', t, '-ctv', t,
+        # slots = budget // clip, the pool = slots x clip (<= the budget): with -np 8 on the same budget the
+        # unified pool overflowed under concurrent long prompts ("Context size has been exceeded", smoke
+        # 1027-002031-baea), so no more slots than full-context sequences fit.
+        npl = a.llama_parallel or max(1, axon_tokens // a.clip)
+        ctx = npl * a.clip if not a.llama_parallel else axon_tokens
+        cmd = [a.llama_server, '-m', a.model, '-ngl', '0' if a.cpu else '99', '-fa', 'on', '-c', str(ctx),
+               '-np', str(npl), '-kvu', '--cache-reuse', '256', '-ctk', t, '-ctv', t,
                '--port', str(port), '--host', '127.0.0.1', '--metrics']
     elif kind == 'ollama':
         npar = max(1, axon_tokens // a.clip)
@@ -549,9 +556,9 @@ def start_engine(kind, a, kv, port, logdir, axon_tokens):
         model = 'axon'
     elif kind == 'llama':
         wait_http(port, '/health', proc, 600, log)
-        tokens = axon_tokens
-        cfg = (f'-c {axon_tokens} -np {a.llama_parallel} -kvu --cache-reuse 256 -ctk/-ctv {t} -fa on '
-               f'(--cache-ram default 8192 MiB, cache_prompt true)')
+        tokens = ctx
+        cfg = (f'-c {ctx} -np {npl} -kvu --cache-reuse 256 -ctk/-ctv {t} -fa on '
+               f'(--cache-ram default 8192 MiB, --cache-idle-slots default on, cache_prompt true)')
         model = 'llama'
     else:
         wait_http(port, '/api/version', proc, 120, log)
@@ -559,6 +566,12 @@ def start_engine(kind, a, kv, port, logdir, axon_tokens):
         cfg = (f'OLLAMA_NUM_PARALLEL={npar} OLLAMA_CONTEXT_LENGTH={a.clip} KV {kv} flash attention, keep_alive -1 '
                f'({tokens} tokens)')
         model = a.ollama_model
+    if kind in ('axon', 'llama'):
+        # the server's own model id (axon serve refuses any other name)
+        try:
+            model = json.loads(wait_http(port, '/v1/models', proc, 60, log))['data'][0]['id']
+        except (KeyError, IndexError, ValueError):
+            pass
     eng = Engine(f'http://127.0.0.1:{port}', model, kind)
     # load / warm the model with a tiny request (not measured)
     r = eng.complete(' hello', 2, 1)
@@ -615,7 +628,7 @@ def cell_desc(a, cell):
 
 
 def brief(s):
-    keys = ['requests', 'errors', 'wall_s', 'prime_s', 'ttft_new_p50', 'ttft_resume_p50', 'ttft_turn_p50',
+    keys = ['requests', 'errors', 'first_error', 'wall_s', 'prime_s', 'ttft_new_p50', 'ttft_resume_p50', 'ttft_turn_p50',
             'goodput_tok_s', 'itl_p99_ms', 'warm_per_gb', 'reprefill_share', 'out_tokens_short', 'tainted']
     return ' '.join(f'{k}={s.get(k)}' for k in keys)
 
@@ -681,7 +694,11 @@ def cmd_board(a):
     meta['ended'] = time.strftime('%Y-%m-%d %H:%M:%S')
     json.dump(meta, open(os.path.join(a.out, 'meta.json'), 'w'), indent=1)
     print(table([a.out]))
-    print('BOARD END')
+    errs = sum(json.load(open(os.path.join(a.out, f)))['errors'] for f in os.listdir(a.out) if f.startswith('run-'))
+    if meta.get('failures'):
+        print(f'BOARD END WITH FAILURES: {meta["failures"]}')
+    else:
+        print(f'BOARD END ok ({errs} request errors)')
 
 
 def gpu_name():
@@ -764,7 +781,7 @@ def main():
             p.add_argument('--axon')
             p.add_argument('--axon-parallel', type=int, default=16)
             p.add_argument('--llama-server')
-            p.add_argument('--llama-parallel', type=int, default=8)
+            p.add_argument('--llama-parallel', type=int, default=0, help='default: KV budget // clip')
             p.add_argument('--ollama', default='ollama')
             p.add_argument('--ollama-model', default='axon-q7')
             p.add_argument('--ollama-models', default='/var/lib/ollama')
