@@ -1,0 +1,51 @@
+[axon-run 03:47:34] submitted 1027-034734-6d8d by /home/haseeb/.cache/axon-feedanat: /usr/bin/bash r11.sh
+[axon-run 08:27:14] scope axon-job-1027-034734-6d8d-1793104034.scope in app-axonjobs.slice: MemoryMax 22000 MB, MemoryHigh 19800 MB, no swap, oomd pressure kill 80% (claim 14000 MB): an OOM here kills only this job
+[axon-run 08:27:14] job 1027-034734-6d8d -> bella: systemd-run --user --scope --quiet --unit=axon-job-1027-034734-6d8d-1793104034 --slice=app-axonjobs.slice -p MemoryMax=22000M -p MemoryHigh=19800M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash r11.sh
+axon-q 08:27:14 waiting: stagger
+axon-q 08:27:24 start slot 16-23: /usr/bin/bash r11.sh
+[r11 +0s] kernel cache: 288 -> 288 entries (/home/haseeb/.cache/axon/cuda)
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 615.78.08, 12227 MiB, 3090 MHz, 14001 MHz
+7f6a32ef24378addc89abbfaed0b9c8cede4d83dee86356352fcdb8c6c881ed4  axon-test
+c10d426b7123c589c9974ca11e30d2531e88b2041c9a244ebc9a0dd15b097481  axon
+c3ff5fb849cd7dc9958de23fd41b6ddbaf13a0c99b2df9f5d51dbd403dd86cbb  prompts-mix-v2.jsonl
+a82b55c178a2fa9bf2c50031390210214111b447d3e9737d5d9e70b44b4ff7c8  sd_client.py
+9f6561a2ef330a70cac770773ce14d193534b52075c8558a9cb494bbb7ae4695  r11.py
+[r11 +2s] model /home/haseeb/Projects/axon/models/Qwen2.5-7B-Instruct-Q4_K_M.gguf: 65b8fcd92af6b4fe (also pulls it into the page cache)
+[r11 +2s] rounds 2 C 64,128 scale 3 budget 1800s
+[r11 +2s] S: fifo60 vs sjf80
+[r11 +3s] serve fifo60-r1 up after 2s (--admit-order fifo --step-ms 60)
+CELL fifo60-r1 c64 {"tag": "fifo60", "workload": "mix", "round": 1, "url": "http://127.0.0.1:19435", "salt": "r1 c64 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793104117.843, "c": 64, "requests": 128, "ok": 128, "errors": 0, "error_sample": [], "wall_s": 55.416, "completion_tokens": 35739, "prompt_tokens": 124747, "agg_tok_s": 644.9, "in_tok_s": 2251.1, "ttft_ms_p50": 4939.0, "ttft_ms_p99": 19024.2, "ttft_short_m
+CELL fifo60-r1 c128 {"tag": "fifo60", "workload": "mix", "round": 1, "url": "http://127.0.0.1:19435", "salt": "r1 c128 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793104224.696, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 106.792, "completion_tokens": 71929, "prompt_tokens": 249860, "agg_tok_s": 673.5, "in_tok_s": 2339.7, "ttft_ms_p50": 27301.1, "ttft_ms_p99": 45272.6, "ttft_sho
+[r11 +181s] serve sjf80-r1 up after 2s (--admit-order sjf --step-ms 80)
+CELL sjf80-r1 c64 {"tag": "sjf80", "workload": "mix", "round": 1, "url": "http://127.0.0.1:19436", "salt": "r1 c64 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793104295.505, "c": 64, "requests": 128, "ok": 128, "errors": 0, "error_sample": [], "wall_s": 55.641, "completion_tokens": 35739, "prompt_tokens": 124747, "agg_tok_s": 642.3, "in_tok_s": 2242.0, "ttft_ms_p50": 2824.6, "ttft_ms_p99": 19031.7, "ttft_short_ms
+CELL sjf80-r1 c128 {"tag": "sjf80", "workload": "mix", "round": 1, "url": "http://127.0.0.1:19436", "salt": "r1 c128 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793104404.42, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 108.852, "completion_tokens": 71929, "prompt_tokens": 249860, "agg_tok_s": 660.8, "in_tok_s": 2295.4, "ttft_ms_p50": 18589.7, "ttft_ms_p99": 60405.9, "ttft_short
+[r11 +361s] serve sjf80-r2 up after 2s (--admit-order sjf --step-ms 80)
+CELL sjf80-r2 c128 {"tag": "sjf80", "workload": "mix", "round": 2, "url": "http://127.0.0.1:19455", "salt": "r2 c128 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793104527.282, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 107.729, "completion_tokens": 71796, "prompt_tokens": 249860, "agg_tok_s": 666.4, "in_tok_s": 2319.3, "ttft_ms_p50": 21886.2, "ttft_ms_p99": 57295.0, "ttft_shor
+CELL sjf80-r2 c64 {"tag": "sjf80", "workload": "mix", "round": 2, "url": "http://127.0.0.1:19455", "salt": "r2 c64 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793104583.072, "c": 64, "requests": 128, "ok": 128, "errors": 0, "error_sample": [], "wall_s": 55.739, "completion_tokens": 35609, "prompt_tokens": 124747, "agg_tok_s": 638.9, "in_tok_s": 2238.1, "ttft_ms_p50": 3560.2, "ttft_ms_p99": 19772.8, "ttft_short_ms
+[r11 +540s] serve fifo60-r2 up after 2s (--admit-order fifo --step-ms 60)
+CELL fifo60-r2 c128 {"tag": "fifo60", "workload": "mix", "round": 2, "url": "http://127.0.0.1:19456", "salt": "r2 c128 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793104705.643, "c": 128, "requests": 256, "ok": 256, "errors": 0, "error_sample": [], "wall_s": 106.591, "completion_tokens": 71796, "prompt_tokens": 249860, "agg_tok_s": 673.6, "in_tok_s": 2344.1, "ttft_ms_p50": 27273.7, "ttft_ms_p99": 44896.9, "ttft_sho
+CELL fifo60-r2 c64 {"tag": "fifo60", "workload": "mix", "round": 2, "url": "http://127.0.0.1:19456", "salt": "r2 c64 fixed", "set": "prompts-mix-v2.jsonl", "ts": 1793104761.077, "c": 64, "requests": 128, "ok": 128, "errors": 0, "error_sample": [], "wall_s": 55.382, "completion_tokens": 35609, "prompt_tokens": 124747, "agg_tok_s": 643.0, "in_tok_s": 2252.5, "ttft_ms_p50": 4028.8, "ttft_ms_p99": 20045.2, "ttft_short_m
+[r11 +717s] T: gemmh2 down
+NVIDIA GeForce RTX 5070 Ti Laptop GPU sm_120 46 SMs, hopper module false
+[r11 +717s] T: gemmh2 q/wo
+NVIDIA GeForce RTX 5070 Ti Laptop GPU sm_120 46 SMs, hopper module false
+[r11 +718s] anal
+
+## Rule S cells (medians over rounds; agg spread = max/min - 1)
+| C | arm | rounds | agg tok/s (spread) | goodput | slo_ok | short TTFT p50 | p99 | long TTFT p99 | ITL p50 | ITL p99 | TPOT p50 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 64 | fifo60 | 2 | 644.0 (±0 %) | 42.4 | 0.047 | 3,947.0 | 17,297.3 | 22,097.2 | 84.7 | 102.1 | 79.7 |
+| 64 | sjf80 | 2 | 640.6 (±1 %) | 91.8 | 0.102 | 1,022.2 | 18,845.2 | 20,824.7 | 83.2 | 104.2 | 72.4 |
+| 128 | fifo60 | 2 | 673.5 (±0 %) | 0.0 | 0.000 | 26,623.7 | 44,130.6 | 49,113.7 | 90.1 | 111.9 | 84.0 |
+| 128 | sjf80 | 2 | 663.6 (±1 %) | 0.0 | 0.000 | 28,345.8 | 58,850.4 | 47,288.3 | 94.1 | 117.3 | 86.7 |
+(10-27 reference, fifo60 C=128: agg 1845.5, goodput 551.7, slo_ok 0.279, ITL p99 80.0, short p50 2320.3)
+
+BITS: 768 of 768 requests identical (text_sha, completion_tokens) across fifo60 and sjf80
+Traceback (most recent call last):
+  File "/home/haseeb/.cache/axon-feedanat/r11/r11.py", line 69, in <module>
+    ("C=128 goodput >= +20 %", s["good"] / f["good"] - 1, s["good"] / f["good"] - 1 >= 0.20, "{:+.1%}"),
+                               ~~~~~~~~~~^~~~~~~~~~~
+ZeroDivisionError: division by zero
+[r11 +718s] kernel cache now 288 entries (was 288 + kit; more = compiled on this host)
+[r11 +718s] R11 ST DONE rc 1
+[axon-run 08:39:22] exit 1 after 728.1s (host bella)
