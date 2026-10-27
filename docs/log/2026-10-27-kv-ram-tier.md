@@ -178,3 +178,19 @@ The zeroing is ~7–8 % of the cost; the pinning is the rest.
    identity reorder.
 2. The bella cell, 1027-143150-e608 (`--timing bella --low`).
 3. Unit tiers at 181d0d7: release 1027-143153-9b84, debug 1027-143153-a9ba. md5 vs main 6f06544: 1027-143159-5b19.
+
+## Update 2026-10-27 (evening): 181d0d7 gates
+- **Release and debug suites, 3 shards each (RTX 4090):** 726 passed / 0 failed / 55 ignored each (1027-143153-*).
+- **md5 vs main 6f06544:** gen 30/30; serve 42/42 in all 5 cells (1027-143159-5b19).
+- **Replay, speed 4 (1027-143123-3f0e, RTX 4090, 0 % foreign GPU).** #160's `agent_replay.py run` at 1ba07d9,
+  agent-32k, 3 rounds interleaved; main vs `--cache-ram 20G` pinned by a thread. All MEASURED:
+  - md5 equal in all 6 runs (2aee881b…).
+  - Output 129.96 vs 129.98 tok/s (−0.02 %).
+  - ITL p99 62.95 vs 62.65 ms (+0.48 %).
+- **Caveat on the replay:** at `--parallel 16` the 4090's pool is far larger than bella's, so it evicted little.
+  Main re-prefilled 0.68 % of prompt tokens (bella's board: 47.5 %), and the tier restored 20,126 tokens per run.
+- **Start-up at 20G with the thread, identity first:** 2.03 s vs main 2.0 s. The 2–6 s seen at e33dab4 is gone.
+- **Row B on the 4090:**
+  - TTFT-resume 0.148 s.
+  - The replay's md5 and aggregate / ITL clauses pass.
+  - The bella TTFT cell of record (1027-143150-e608) is pending, a MUST before merge.
