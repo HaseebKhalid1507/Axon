@@ -92,20 +92,30 @@ def stream(port, prompt, n):
     return ttft, times, "".join(parts), usage
 
 
-def wait_up(port, proc, limit=600):
+def wait_up(port, proc, limit=900):
+    """Until /health and /v1/models both answer 200 (a loading server
+    answers 503), a poll a second."""
     t0 = time.time()
+    last = None
     while time.time() - t0 < limit:
         if proc.poll() is not None:
             raise RuntimeError(f"server exited {proc.returncode}")
         try:
-            c = http.client.HTTPConnection("127.0.0.1", port, timeout=2)
-            c.request("GET", "/health")
-            if c.getresponse().status == 200:
+            ok = True
+            for path in ("/health", "/v1/models"):
+                c = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+                c.request("GET", path)
+                r = c.getresponse()
+                r.read()
+                c.close()
+                last = f"{path} {r.status}"
+                ok = ok and r.status == 200
+            if ok:
                 return
-        except OSError:
-            pass
+        except OSError as e:
+            last = str(e)
         time.sleep(1)
-    raise RuntimeError("server did not come up")
+    raise RuntimeError(f"server not ready after {limit} s (last: {last})")
 
 
 def calibrate(port, tokens):
