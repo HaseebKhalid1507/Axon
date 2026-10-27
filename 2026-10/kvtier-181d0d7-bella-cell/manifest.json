@@ -1,0 +1,29 @@
+{
+ "label": "kvtier-181d0d7-bella-cell",
+ "verdict": "FAIL (1 of 1)",
+ "jobs": [
+  {
+   "job": "1027-143150-e608",
+   "name": "kvtier-181d0d7-bella-cell",
+   "rc": 130,
+   "verdict": "FAIL (rc 130)",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "181d0d7",
+   "binary": "timing-bella2.sh",
+   "started": null,
+   "ended": 1793131365.4743922,
+   "attempts": null,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "e2097ee2f97c5d4c148e9b3ffe2dfb02d4e14d67c47d577134f73cb92b97b618",
+   "log_bytes": 197
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-27 16:02:46 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
