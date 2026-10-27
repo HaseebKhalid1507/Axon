@@ -1,0 +1,158 @@
+[axon-run 22:26:32] submitted 1026-222632-d7c1 by /home/haseeb/.cache/axon-wt-podq3: /home/haseeb/.cache/axon-podq3/axon-test-podq3-v4 podbench::podbench_run --nocapture --test-threads 1
+[axon-run 22:31:11] job 1026-222632-d7c1 -> pod1 (pod 38vejm0rnhh9hx): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 22000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-wt-podq3 /home/haseeb/.cache/axon-podq3/axon-test-podq3-v4 podbench::podbench_run --nocapture --test-threads 1
+axon-remote: uploading axon-test-podq3-v4 (5e6b196037e22d8cc45d71ec) + source of /home/haseeb/.cache/axon-wt-podq3 (delta vs 2 earlier upload(s) there)
+
+sent 2,219,407 bytes  received 313 bytes  634,205.71 bytes/sec
+total size is 100,174,502  speedup is 45.13
+
+sent 1,647,154 bytes  received 28,530 bytes  478,766.86 bytes/sec
+total size is 22,528,400  speedup is 13.44
+axon-remote: job 20261027-023122-axon-test-podq3-v4-11231 on pod1 (GPU, 22000 MB)
+[axon-node 02:31:22] GPU EXCLUSIVE taken; job wants 22000 MB; nvidia-smi used/total 1/24564 MB; sharing with nobody (slots 3, budget 23064 MB, vCPU 13.6)
+[axon-node 02:31:22] run axon-test-podq3-v4 (5e6b196037e22d8cc45d71ec) as /home/haseeb/.cache/axon-wt-podq3 on 0084a24d509b, AXON_THREADS=8 RUST_TEST_THREADS=4; free 24082 MB of 24564 (used 1); GPU processes pid:MB none
+
+running 1 test
+test podbench::podbench_run ... podbench carrier v4 (+ trace.sh: AXON_PODBENCH_TRACE=1)
+PT out /home/haseeb/.cache/axon-wt-podq3/podbench/trace-1027-023122
+PT host NVIDIA GeForce RTX 4090, 595.91.07; cpu AMD EPYC 75F3 32-Core Processor nproc 128
+PT missing: 	libcudart.so.12 => not found
+PT missing: 	libcublas.so.12 => not found
+PT missing: 	libnccl.so.2 => not found
+PT lib: total 1114792
+PT lib: drwxr-xr-x 2 root   root         144 Oct 27 02:31 .
+PT lib: drwxr-xr-x 7 ubuntu ubuntu      4096 Oct 27 02:31 ..
+PT lib: -rw-r--r-- 1 root   root   116388640 Oct 27 02:31 libcublas.so.12
+PT lib: -rw-r--r-- 1 root   root   751771728 Oct 27 02:31 libcublasLt.so.12
+PT lib: -rw-r--r-- 1 root   root      728800 Oct 27 02:31 libcudart.so.12
+PT lib: -rw-r--r-- 1 root   root   271887104 Oct 27 02:31 libnccl.so.2
+PT lib: -rw-r--r-- 1 root   root      753824 Oct 27 02:31 libnvblas.so.12
+PT ldd: 	libcudart.so.12 => /home/haseeb/.cache/axon-wt-podq3/podbench/lib/libcudart.so.12 (0x00007a5d5ba00000)
+PT ldd: 	libcublas.so.12 => /home/haseeb/.cache/axon-wt-podq3/podbench/lib/libcublas.so.12 (0x00007a5d54800000)
+PT ldd: 	libcublasLt.so.12 => /home/haseeb/.cache/axon-wt-podq3/podbench/lib/libcublasLt.so.12 (0x00007a5d0d000000)
+PT llama-bench starts OK
+[axon-run 22:31:45] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:32:19] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:32:53] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:33:27] FOREIGN_GPU sample max=0% mean=0.0% n=1
+[axon-run 22:34:01] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PT sha256 OK
+PT axon warm-all (--gpu-experts auto AXON_THREADS=16) rc=0: decode:      129 tok, 128 passes in 0.58s (220.52 tok/s) | 48 of 48 expert layers resident
+[axon-run 22:34:35] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PT axon all (--gpu-experts auto AXON_THREADS=16) rc=0: decode:      129 tok, 128 passes in 0.61s (209.39 tok/s) | 48 of 48 expert layers resident
+PT axon warm-part (--gpu-experts 25 AXON_THREADS=16) rc=0: decode:      129 tok, 128 passes in 2.04s (62.85 tok/s) | 25 of 48 expert layers resident
+PT axon part (--gpu-experts 25 AXON_THREADS=16) rc=0: decode:      129 tok, 128 passes in 2.58s (49.58 tok/s) | 25 of 48 expert layers resident
+PT axon prof-part-t16 (--gpu-experts 25 AXON_THREADS=16 AXON_MOE_PROFILE=1) rc=0: decode:      129 tok, 128 passes in 1.76s (72.61 tok/s) | 25 of 48 expert layers resident
+PT   [moe profile] per step (ms): gpu inf, down NaN, in NaN, experts NaN, up NaN, 48 layers
+PT   [moe profile] per step (ms): gpu inf, down NaN, in NaN, experts NaN, up NaN, 48 layers
+PT axon prof-part-t8 (--gpu-experts 25 AXON_THREADS=8 AXON_MOE_PROFILE=1) rc=0: decode:      129 tok, 128 passes in 2.21s (58.01 tok/s) | 25 of 48 expert layers resident
+PT   [moe profile] per step (ms): gpu inf, down NaN, in NaN, experts NaN, up NaN, 48 layers
+PT   [moe profile] per step (ms): gpu inf, down NaN, in NaN, experts NaN, up NaN, 48 layers
+PT llama warm-all (--n-cpu-moe 0) rc=0: "avg_ts": 254.814136
+[axon-run 22:35:09] FOREIGN_GPU sample max=0% mean=0.0% n=1
+PT llama all (--n-cpu-moe 0) rc=0: "avg_ts": 177.444213
+PT llama warm-part (--n-cpu-moe 23) rc=0: "avg_ts": 74.883919
+PT llama part (--n-cpu-moe 23) rc=0: "avg_ts": 62.400697
+PT === trace ax-all (decode window, steps = argmax launches)
+PT window 609.897 ms, 86641 kernels, busy 580.270 ms (95.1 %), idle 29.627 ms; steps 127
+PT per step: span 4.802 ms, busy 4.569 ms, kernels 682.2
+PT   memcpy1: 1.0 copies/step, 0.000 ms/step, 0.0 KB/step
+PT   memcpy2: 1.0 copies/step, 0.001 ms/step, 0.0 KB/step
+PT kernel                                                                    n/step  ms/step  %busy  us each
+PT moe_gemv_tw                                                                145.1    1.807   39.5     12.5
+PT gemv                                                                        49.4    1.014   22.2     20.5
+PT qkv_rope                                                                    48.4    0.492   10.8     10.2
+PT moe_router                                                                  48.4    0.277    6.1      5.7
+PT attn_blk_128                                                                48.4    0.212    4.6      4.4
+PT moe_logits                                                                  48.4    0.195    4.3      4.0
+PT rmsnorm_quant_v2                                                            49.4    0.139    3.0      2.8
+PT swiglu_quant_tw                                                             48.4    0.114    2.5      2.3
+PT attn_cmb256                                                                 48.4    0.103    2.2      2.1
+PT moe_sum                                                                     48.4    0.081    1.8      1.7
+PT quantize                                                                    48.4    0.069    1.5      1.4
+PT moe_add                                                                     48.4    0.054    1.2      1.1
+PT argmax                                                                       1.0    0.009    0.2      9.2
+PT embed                                                                        1.0    0.002    0.0      2.0
+PT rope_table                                                                   1.0    0.002    0.0      1.5
+PT === trace ax-part (decode window, steps = argmax launches)
+PT window 2576.423 ms, 68921 kernels, busy 472.116 ms (18.3 %), idle 2104.308 ms; steps 127
+PT per step: span 20.287 ms, busy 3.717 ms, kernels 542.7
+PT   memcpy1: 24.1 copies/step, 0.015 ms/step, 189.5 KB/step
+PT   memcpy2: 24.1 copies/step, 0.027 ms/step, 190.9 KB/step
+PT kernel                                                                    n/step  ms/step  %busy  us each
+PT gemv                                                                        49.3    1.061   28.5     21.5
+PT moe_gemv_tw                                                                 75.6    0.961   25.9     12.7
+PT qkv_rope                                                                    48.3    0.500   13.4     10.3
+PT moe_router                                                                  48.3    0.295    7.9      6.1
+PT attn_blk_128                                                                48.3    0.223    6.0      4.6
+PT moe_logits                                                                  48.3    0.202    5.4      4.2
+PT rmsnorm_quant_v2                                                            49.3    0.148    4.0      3.0
+PT attn_cmb256                                                                 48.3    0.108    2.9      2.2
+PT swiglu_quant_tw                                                             25.2    0.063    1.7      2.5
+PT moe_add                                                                     48.3    0.058    1.6      1.2
+PT moe_sum                                                                     25.2    0.045    1.2      1.8
+PT quantize                                                                    25.2    0.038    1.0      1.5
+PT argmax                                                                       1.0    0.010    0.3      9.7
+PT embed                                                                        1.0    0.002    0.1      2.1
+PT rope_table                                                                   1.0    0.002    0.0      1.6
+PT === trace lb-all (128 steps)
+PT window 716.007 ms, 142080 kernels, busy 486.788 ms (68.0 %), idle 229.220 ms; steps 128
+PT per step: span 5.594 ms, busy 3.803 ms, kernels 1110.0
+PT   memcpy1: 8.9 copies/step, 0.004 ms/step, 24.9 KB/step
+PT   memcpy2: 1.0 copies/step, 0.024 ms/step, 603.0 KB/step
+PT kernel                                                                    n/step  ms/step  %busy  us each
+PT _Z13mul_mat_vec_qIL9ggml_type12ELi1ELb1ELb0ELb0EEv                          48.0    0.794   20.9     16.5
+PT _Z13mul_mat_vec_qIL9ggml_type13ELi1ELb1ELb0ELb0EEv                          47.0    0.357    9.4      7.6
+PT _Z13mul_mat_vec_qIL9ggml_type12ELi1ELb0ELb0ELb0EEv                          72.0    0.352    9.3      4.9
+PT _Z13mul_mat_vec_qIL9ggml_type14ELi1ELb0ELb0ELb0EEv                          25.0    0.327    8.6     13.1
+PT _Z13mul_mat_vec_qIL9ggml_type14ELi1ELb0ELb1ELb0EEv                          24.0    0.297    7.8     12.4
+PT _Z13quantize_q8_1                                                          289.0    0.293    7.7      1.0
+PT _Z12rms_norm_f32ILi1024ELb1ELb0ELb0EEv                                      97.0    0.228    6.0      2.4
+PT _Z13mul_mat_vec_qIL9ggml_type12ELi1ELb0ELb1ELb0EEv                          24.0    0.214    5.6      8.9
+PT _Z18flash_attn_ext_vecILi128ELi1EL9ggml_type1ELS0_1ELb0EEv                  48.0    0.164    4.3      3.4
+PT _Z13mul_mat_vec_fIffLi1ELi256ELb0ELb0EEv                                    48.0    0.128    3.4      2.7
+PT _Z13mul_mat_vec_qIL9ggml_type8ELi1ELb0ELb0ELb0EEv                           48.0    0.122    3.2      2.5
+PT _Z13topk_moe_cudaILi128ELb0EEv                                              48.0    0.119    3.1      2.5
+PT _Z21rms_norm_mul_rope_f32ILi256ELb0E6__halfEv                               48.0    0.082    2.2      1.7
+PT _Z21rms_norm_mul_rope_f32ILi256ELb0EfEv                                     48.0    0.080    2.1      1.7
+PT _Z26moe_weighted_reduction_f32                                              48.0    0.076    2.0      1.6
+PT _Z26flash_attn_combine_resultsILi128EEv                                     48.0    0.060    1.6      1.2
+PT _Z11k_bin_bcastIXadL_ZN42_INTERNAL_48c10e8a_11_binbcast_cu_6840010b6op      49.0    0.054    1.4      1.1
+PT _Z10k_set_rowsIfl6__halfEv                                                  48.0    0.048    1.3      1.0
+PT _Z13mul_mat_vec_qIL9ggml_type13ELi1ELb0ELb0ELb0EEv                           1.0    0.007    0.2      7.5
+PT _Z16k_get_rows_floatIffEv                                                    2.0    0.002    0.1      1.2
+PT === trace lb-part (128 steps)
+PT window 2047.922 ms, 130304 kernels, busy 407.576 ms (19.9 %), idle 1640.347 ms; steps 128
+PT per step: span 15.999 ms, busy 3.184 ms, kernels 1018.0
+PT   memcpy1: 31.9 copies/step, 0.106 ms/step, 1532.3 KB/step
+PT   memcpy2: 47.0 copies/step, 0.089 ms/step, 792.1 KB/step
+PT kernel                                                                    n/step  ms/step  %busy  us each
+PT _Z13mul_mat_vec_qIL9ggml_type12ELi1ELb1ELb0ELb0EEv                          25.0    0.415   13.0     16.6
+PT _Z13mul_mat_vec_qIL9ggml_type13ELi1ELb1ELb0ELb0EEv                          47.0    0.359   11.3      7.6
+PT _Z13mul_mat_vec_qIL9ggml_type12ELi1ELb0ELb0ELb0EEv                          72.0    0.356   11.2      4.9
+PT _Z13mul_mat_vec_qIL9ggml_type14ELi1ELb0ELb0ELb0EEv                          25.0    0.327   10.3     13.1
+PT _Z13quantize_q8_1                                                          243.0    0.256    8.0      1.1
+PT _Z12rms_norm_f32ILi1024ELb1ELb0ELb0EEv                                      97.0    0.235    7.4      2.4
+PT _Z18flash_attn_ext_vecILi128ELi1EL9ggml_type1ELS0_1ELb0EEv                  48.0    0.167    5.2      3.5
+PT _Z13mul_mat_vec_qIL9ggml_type14ELi1ELb0ELb1ELb0EEv                          13.0    0.161    5.1     12.4
+PT _Z13mul_mat_vec_fIffLi1ELi256ELb0ELb0EEv                                    48.0    0.129    4.0      2.7
+PT _Z13mul_mat_vec_qIL9ggml_type8ELi1ELb0ELb0ELb0EEv                           48.0    0.124    3.9      2.6
+PT _Z13topk_moe_cudaILi128ELb0EEv                                              48.0    0.122    3.8      2.5
+PT _Z13mul_mat_vec_qIL9ggml_type12ELi1ELb0ELb1ELb0EEv                          12.0    0.108    3.4      9.0
+PT _Z26moe_weighted_reduction_f32                                              48.0    0.083    2.6      1.7
+PT _Z21rms_norm_mul_rope_f32ILi256ELb0E6__halfEv                               48.0    0.083    2.6      1.7
+PT _Z21rms_norm_mul_rope_f32ILi256ELb0EfEv                                     48.0    0.082    2.6      1.7
+PT _Z26flash_attn_combine_resultsILi128EEv                                     48.0    0.062    1.9      1.3
+PT _Z11k_bin_bcastIXadL_ZN42_INTERNAL_48c10e8a_11_binbcast_cu_6840010b6op      49.0    0.057    1.8      1.2
+PT _Z10k_set_rowsIfl6__halfEv                                                  48.0    0.049    1.5      1.0
+PT _Z13mul_mat_vec_qIL9ggml_type13ELi1ELb0ELb0ELb0EEv                           1.0    0.007    0.2      7.5
+PT _Z16k_get_rows_floatIffEv                                                    2.0    0.003    0.1      1.3
+PT DONE
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 760 filtered out; finished in 242.83s
+
+[axon-node 02:35:25] exit 0 after 242.8s
+[axon-node 02:35:25] peak RSS 18097 MB (job process tree PSS, 2 s samples x119)
+[axon-run 22:35:25] exit 0 after 254.1s (host pod1)
+[axon-run 22:35:29] EXPECT ok: output matches /PT DONE/
+[axon-run 22:35:29] FOREIGN_GPU max=0% mean=0.0% samples=7
