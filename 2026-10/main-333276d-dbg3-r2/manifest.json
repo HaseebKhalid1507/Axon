@@ -1,0 +1,29 @@
+{
+ "label": "main-333276d-dbg3-r2",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1027-221450-e474",
+   "name": "main-333276d-dbg [shard 3/3]",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "bella",
+   "hw": "hw-bella.txt",
+   "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+   "driver": "615.78.08",
+   "sha": "333276d",
+   "binary": "axon-test-dbg-333276d",
+   "started": 1793153690.3398383,
+   "ended": 1793155105.620644,
+   "attempts": 1,
+   "remote_job": null,
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "8caa1f5d77d41c4a5b42e93401cce1c7588c2bc1dd3474389dde64b733aa3620",
+   "log_bytes": 25307
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-27 22:38:26 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
