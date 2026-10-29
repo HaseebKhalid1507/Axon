@@ -3,7 +3,7 @@
 //! checkpoint end to end: exact mode's Q8_0 form keeps the contract's bits,
 //! fast mode's native kernels are graded against the CPU's fp8-ref.
 
-use super::numerics::{Arm, Floor, assert_graded_vs_exact, grade};
+use super::numerics::{Arm, Floor, Sizes, assert_graded_vs_exact_with, grade_sized};
 use super::*;
 use crate::cuda::Kernels;
 use crate::kv::KvType;
@@ -153,9 +153,19 @@ fn check_sample(what: &str, got: &[f32], sample: &[(usize, (f64, f64))], slack: 
 /// twin, bit for bit: every e4m3 code's value, the midpoints between codes
 /// and their neighbours, 10^6 random floats; then whole rows (K 896, half a
 /// 256-block at the end; 4864; a zero row; a row of subnormal codes).
+/// The test GPU if it has e4m3 tensor cores (sm_89 and later).
+fn f8_gpu() -> Option<crate::cuda::Gpu> {
+    let g = crate::testutil::gpu()?;
+    if !crate::cuda::f8_native_cc(&g).unwrap() {
+        eprintln!("skipping: no e4m3 tensor cores (sm_89 and later) on this GPU");
+        return None;
+    }
+    Some(g)
+}
+
 #[test]
 fn gpu_fp8_quantizer_matches_twin() {
-    let Some(g) = crate::testutil::gpu() else {
+    let Some(g) = f8_gpu() else {
         return;
     };
     let km = Kernels::module_f8(&g).unwrap();
@@ -262,7 +272,7 @@ fn gpu_fp8_quantizer_matches_twin() {
 /// at the design's shapes (§3).
 #[test]
 fn gpu_fp8_gemv_bits_and_anchor() {
-    let Some(g) = crate::testutil::gpu() else {
+    let Some(g) = f8_gpu() else {
         return;
     };
     let km = Kernels::module_f8(&g).unwrap();
@@ -301,7 +311,7 @@ fn gpu_fp8_gemv_bits_and_anchor() {
 /// tolerance of each other.
 #[test]
 fn gpu_fp8_gemm_bits_and_anchor() {
-    let Some(g) = crate::testutil::gpu() else {
+    let Some(g) = f8_gpu() else {
         return;
     };
     let km = Kernels::module_f8(&g).unwrap();
@@ -398,7 +408,7 @@ fn gpu_fp8_exact_is_q8_and_bit_identical() {
 /// past the GEMV's 16 rows).
 #[test]
 fn gpu_fp8_graded_vs_fp8_ref() {
-    if crate::testutil::gpu().is_none() {
+    if f8_gpu().is_none() {
         return;
     }
     let Some(p) = crate::testutil::fp8_model_path() else {
@@ -425,12 +435,16 @@ fn gpu_fp8_graded_vs_fp8_ref() {
             "prefix {n}"
         );
     }
-    let g = grade(&r, &f, &o, &mr, Floor::Fp8Emu, Device::Cuda);
+    let g = grade_sized(&r, &f, &o, &mr, Floor::Fp8Emu, Device::Cuda, &Sizes::FP8);
     let arms: Vec<_> = g.arms.iter().map(|a| a.arm).collect();
     assert_eq!(arms, [Arm::Decode, Arm::Batched, Arm::Cached, Arm::Load]);
     for a in &g.arms {
         assert!(a.launches > 0, "[{}]: no FP8 kernel ran", a.arm.name());
     }
-    assert_graded_vs_exact("0.5B FP8 cuda fast vs fp8-ref", &g, false);
+    for a in &g.arms {
+        assert!(a.mode.positions >= 1000, "[{}]: {} positions", a.arm.name(), a.mode.positions);
+    }
+    let what = "0.5B FP8 cuda fast vs fp8-ref";
+    assert_graded_vs_exact_with(what, &g, false, Top1::Binomial);
     let _ = fp8::F8S;
 }

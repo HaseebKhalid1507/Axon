@@ -424,12 +424,13 @@ mod tests {
         f8_to_f8s(&raw, &sc, k, &mut f8s);
         let mut y = vec![0f32; rows * k];
         super::super::dequant(F8S, &f8s, &mut y);
+        // e4m3 (4 significant bits) x an f32 scale (24) needs up to 28:
+        // the dequant is the product rounded once to f32 (as torch's f32
+        // `code.to(f32) * scale`), which is the exact f64 product's
+        // rounding to f32.
         for (i, &v) in y.iter().enumerate() {
-            assert_eq!(
-                v as f64,
-                value(raw[i]) * sc[i / k] as f64,
-                "exact dequant {i}"
-            );
+            let exact = value(raw[i]) * sc[i / k] as f64;
+            assert_eq!(v, exact as f32, "dequant {i}");
         }
         let mut q8 = vec![0u8; rows * super::super::row_bytes(Q8_0, k)];
         f8_rows_to_q8_0(&raw, &sc, k, &mut q8);

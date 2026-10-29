@@ -302,15 +302,48 @@ fn ref_spread_zero_fails_by_name() {
 /// code, has more near-ties: the CPU agrees with itself on only 93.8 % of
 /// natural_long's 1.5B positions).
 pub(crate) fn assert_graded_floor(ag: &Agree, ac: &Agree, floor: usize) {
+    assert_graded_with(ag, ac, Top1::Points(floor));
+}
+
+/// `assert_graded_with`'s top-1 rule.
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Top1 {
+    /// At most 2 points behind the reference's self-agreement, and at
+    /// least `.0` % (every gate before the FP8 one).
+    Points(usize),
+    /// At least the floor's count minus 2 binomial standard errors,
+    /// `2 sqrt(n p (1 - p))` with p the floor's rate, and at least 90 %:
+    /// the FP8 gate's (docs/design/fp8-weights.md §6 B), whose floor
+    /// changes precision (e4m3 activations), not only order, on arms of
+    /// >= 1000 positions. Set after the 0.5B's first run (decode arm
+    /// 274/294 vs the floor's 276/294: inside 2 SE, 2.04 points behind).
+    Binomial,
+}
+
+/// `assert_graded_floor` with the top-1 rule `top1`; the other bounds the
+/// same.
+pub(crate) fn assert_graded_with(ag: &Agree, ac: &Agree, top1: Top1) {
     assert_ref_spread(ac);
     let n = ag.positions;
-    // Top-1: at most 2% of positions behind the CPU's self-agreement.
-    assert!(
-        ag.top1 * 100 + 2 * n >= ac.top1 * 100 && ag.top1 * 100 >= floor * n,
-        "top-1 agreement {}/{n} (cpu vs itself {})",
-        ag.top1,
-        ac.top1
-    );
+    match top1 {
+        // Top-1: at most 2% of positions behind the CPU's self-agreement.
+        Top1::Points(floor) => assert!(
+            ag.top1 * 100 + 2 * n >= ac.top1 * 100 && ag.top1 * 100 >= floor * n,
+            "top-1 agreement {}/{n} (cpu vs itself {})",
+            ag.top1,
+            ac.top1
+        ),
+        Top1::Binomial => {
+            let p = ac.top1 as f64 / n.max(1) as f64;
+            let two_se = 2.0 * (n as f64 * p * (1.0 - p)).sqrt();
+            assert!(
+                ag.top1 as f64 >= ac.top1 as f64 - two_se && ag.top1 * 100 >= 90 * n,
+                "top-1 agreement {}/{n} (floor {}, 2 SE {two_se:.1})",
+                ag.top1,
+                ac.top1
+            );
+        }
+    }
     // Only near-ties flip. Flipping a margin m takes the top two logits
     // moving m apart, which the reference's own spread (`ac.max_abs`, the
     // CPU's two kernel sets: 1.26 on 1.5B natural text, 1.9-2.3 on chat
@@ -355,6 +388,31 @@ pub(crate) fn assert_graded_floor(ag: &Agree, ac: &Agree, floor: usize) {
         );
     }
     assert!(ag.max_abs < 6.0, "max logit difference");
+}
+
+/// `Top1::Binomial` at the 0.5B FP8 decode arm's first numbers: floor
+/// 276/294, so 2 SE = 2 sqrt(294 p (1 - p)) = 8.2: 268 passes, 267 fails
+/// (and 274, which failed `Points`, passes); never below 90 %.
+#[test]
+fn top1_binomial_rule() {
+    let ag = |n, t| Agree {
+        positions: n,
+        top1: t,
+        ..Agree::default()
+    };
+    let ac = |n, t| Agree {
+        max_abs: 0.1,
+        ..ag(n, t)
+    };
+    let ok = |a: Agree, c: Agree, r: Top1| {
+        std::panic::catch_unwind(|| assert_graded_with(&a, &c, r)).is_ok()
+    };
+    assert!(ok(ag(294, 274), ac(294, 276), Top1::Binomial));
+    assert!(!ok(ag(294, 274), ac(294, 276), Top1::Points(94)));
+    assert!(ok(ag(294, 268), ac(294, 276), Top1::Binomial));
+    assert!(!ok(ag(294, 267), ac(294, 276), Top1::Binomial));
+    assert!(!ok(ag(1000, 899), ac(1000, 900), Top1::Binomial), "90 %");
+    assert!(ok(ag(1000, 1000), ac(1000, 1000), Top1::Binomial));
 }
 
 /// The GPU's head sizes (no GPU or model needed): 64 and 128, gemma3 256

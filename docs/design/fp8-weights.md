@@ -67,8 +67,8 @@ slack. A narrower in-mma accumulator (Hopper's ~14 bits) fails it at K ≥ 896: 
 | `gemv_f8` (`fp8.cu`), nb 1..16, D6 | decode `gemv` seam, `bgemm` small | Rust `quant::gemv_f8_ref` (D6's order, `mul_add`) | nb {1,2,3,8,16} × rows {64,128,576,896,4864} × K {128,896,4864} |
 | `gemm_f8<BN 64/128>` (`fp8.cu`), nb > 16, D5: K stage 256 B ×3 cp.async, raw rows (stride `cols` B), half stage for odd 128-block counts (K 896 = 7) | `bgemm`, unfused gate/up + `swiglu_quant_b` | `gemm_ref_f8`: one warp per 16×8 tile straight from global, fragment loads **written separately** from `gemm_f8`'s (no shared helper) | nb {17,24,64,65,128,160,520,1024} × rows {64,128,576,1024} × K {128,896,4864}; each token alone and in every n position |
 | FP8→Q8_0, F16→Q8_0 converter (`quant.rs`, Rust, in the upload ring workers) | D1 fallback, D3 head | `quantize_q8_0` of the exact f32 dequant; GPU arena read back == CPU bytes | — |
-Plus `gemv_f8` at nb 16 vs `gemm_f8` at nb 17 (the same 16 tokens + 1), within 2× the tolerance. Weight-scale stride
-args `(rsh, rstride, kmask)`, per channel `(0,1,0)`, so Stage C changes arguments only. Hopper seam: `bgemm`'s F8 branch
+Plus `gemv_f8` at nb 16 vs `gemm_f8` at nb 17 (the same 16 tokens + 1), within 2× the tolerance. (Per-channel only:
+block-scaled weights, Stage C, need a per-128 promotion variant, not just other arguments.) Hopper seam: `bgemm`'s F8 branch
 is `match f8_route(nb, module) { Gemv, MmaSync, Wgmma }`, `Wgmma` → `MmaSync` until WP-A3 (sm_90 runs `mma.sync`).
 Every FP8 launch calls `fast_launched()`; decode graphs count at capture (§6 B says where).
 
@@ -152,3 +152,31 @@ If fp8-ref passes its 1e-4 validation, the 7B fp8-ref on bella's CPU is the 7B r
 ## 9. Rollback
 Everything sits behind `qt == F8_E4M3` or an FP8-only module. Reverting the PR brings back today's refusal
 (`safetensors.rs:519`). No GGUF kernel, buffer or fingerprint changes except fast's counter (one constant).
+
+## 10. As built (CP1, 55eeb14)
+- Quantizer: in the F8 module `quant_warp` stores its f32 values at `act_f8_off(n)` of each act row (no call site
+  changed); `quant_f8_tok` runs before each FP8 product (q/k/v and gate/up re-quantize the same rows: cheap, fusable).
+  `qa [nb][K]` and `das [nb]` live in the cache's `BatchBufs::f8` (contiguous, token-major: the A3 layout).
+- `gemm_f8`: 64×64 tiles, K stages of 128 bytes (not 256), two cp.async stages, rows padded to 144 B; whole-K mma
+  chain. It met the f64 anchor on sm_120 at every §3 shape, so `AXON_F8_PROMOTE` was not built.
+- FP8-native nets run no decode-step kernels: a single token is a one-row batched pass (no decode graphs; CP2 times
+  tg). Pipelines, CPU/GPU splits, MoE and MLA refuse the F8 module (exact mode runs them as Q8_0).
+- Conversions (head, embedding; exact mode's matrices) run on the host per matrix, 16 threads, written after the raw
+  upload: no Q8_0 arena in host RAM. CPU `F8S` = 128 e4m3 bytes + the row's f32 scale per block, in the r8 arena.
+
+
+## 11. CP1 results (0.5B, bella) and the rulings on them (lead, 2026-10-29)
+**A.** fp8-ref vs HF F32: KL 4.5e-5, top-1 99.93 % → validated (≤ 1e-4): it stands in for HF on the 7B
+(`hf_logits.py vs`, which on the 0.5B reproduces the HF-F32 scores to ±0.1e-3 KL / ±0.1 point). fp8-native (fast) vs HF
+F32: decode KL 8.6e-3, top-1 94.4 %; batched 7.9e-3 / 94.9 %. vs BF16 (decode) 1.13e-2 / 93.6 %. Its CPU emulation
+(e4m3-tok) vs F32: 7.9e-3 / 94.6 % (BF16 1.06e-2 / 93.5 %): the GPU is its emulation, so the loss is the W8A8
+format's, not the kernels'. Per-128 activations: 5.2e-3 / 95.5 %: also below 97 %, so D2 stays per-token (the
+pre-registered rule). fp8-q8 (exact): 2.5e-3 / 96.7 %. Q4_K_M: 6.0e-2 / 85.8 %. Stop line (KL > 0.02) not hit.
+**Verdict (ruling 1): KL PASS, top-1 FAIL, by the W8A8 format, not the kernels; the bar is not moved.** The binding call
+is the 7B's, same bars, vs fp8-ref. If the 7B fails top-1 ≥ 97 % while matching its emulation: stop and report.
+**B, changed after its first run (ruling 3; disclosed).** First run (55eeb14's tree, arms of 294/204/68/160 positions):
+decode top-1 274/294 vs the floor's 276/294 failed `assert_graded`'s "≤ 2 points behind and ≥ 94 %"; every other
+bound passed in every arm (KL mean 1.28e-2 vs floor 1.65e-2 decode; launches in all four arms). Now: every arm
+≥ 1000 positions (`Sizes::FP8`: 1014 / 1029 / 1029 / 1000) and top-1 ≥ floor − 2 binomial SE (√(n p (1−p)), p the
+floor's rate) and ≥ 90 % (`Top1::Binomial`). KL mean ≤ 2× floor and the per-position bounds are unchanged (note: "at
+most one position with KL > 0.5" doesn't scale with n). Every other gate keeps `Top1::Points(94)` and `Sizes::BASE`.

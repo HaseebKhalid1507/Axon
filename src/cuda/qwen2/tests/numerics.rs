@@ -69,7 +69,8 @@
 //! activations, W4A16), and their reference bound is still to be decided.
 
 use super::{
-    Agree, PROMPTS, assert_graded, compare_trace, log_softmax, natural_ids, report, trace,
+    Agree, PROMPTS, Top1, assert_graded_with, compare_trace, log_softmax, natural_ids, report,
+    trace,
 };
 use crate::cuda::Gpu;
 use crate::gguf::Model;
@@ -98,6 +99,50 @@ const LOAD_STEPS: usize = 4;
 const LOAD_PREFIX_MAX: usize = 63;
 /// The nets' context.
 pub(crate) const CTX: usize = 640;
+
+/// How many positions each arm grades (`grade_sized`).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Sizes {
+    /// The decode arm's windows of `WINDOW` tokens.
+    pub(crate) decode_windows: usize,
+    /// The batched arm's windows; `verify_argmax` on the first
+    /// `verify_windows` of them.
+    pub(crate) batch_windows: usize,
+    pub(crate) verify_windows: usize,
+    /// The cached arm's windows: None, the batched arm's (the same text);
+    /// Some(k), k of its own.
+    pub(crate) cached_windows: Option<usize>,
+    /// Positions decoded after each batched pass.
+    pub(crate) after: usize,
+    /// The load arm's sequences, and steps.
+    pub(crate) load: usize,
+    pub(crate) load_steps: usize,
+}
+
+impl Sizes {
+    /// The constants above: every gate's before the FP8 one.
+    pub(crate) const BASE: Sizes = Sizes {
+        decode_windows: DECODE_WINDOWS,
+        batch_windows: BATCH_WINDOWS,
+        verify_windows: BATCH_WINDOWS,
+        cached_windows: None,
+        after: AFTER,
+        load: LOAD,
+        load_steps: LOAD_STEPS,
+    };
+    /// At least 1000 positions in every arm on the GPU (the FP8 gate,
+    /// docs/design/fp8-weights.md §6 B): decode 6 x 17 + 19 x 48 = 1014,
+    /// batched 7 x 3 x 49 = 1029, cached 21 x 49 = 1029, load 40 x 25.
+    pub(crate) const FP8: Sizes = Sizes {
+        decode_windows: 19,
+        batch_windows: 7,
+        verify_windows: BATCH_WINDOWS,
+        cached_windows: Some(21),
+        after: 48,
+        load: LOAD,
+        load_steps: 25,
+    };
+}
 
 /// The batched arm's prefix lengths on `device` (module doc). The CPU
 /// prefills in 128-token batches (`PREFILL_BATCH`): 520 is no new shape
@@ -265,8 +310,9 @@ fn nll(l: &[f32], next: u32) -> f64 {
     -log_softmax(l)[next as usize]
 }
 
-/// `AFTER` positions from `p` on, teacher-forced, a token per step, on
+/// `after` positions from `p` on, teacher-forced, a token per step, on
 /// caches that hold positions 0..p: graded into `a` (window `w`).
+#[allow(clippy::too_many_arguments)]
 fn decode_after<R: Lm, F: Lm, O: Lm>(
     a: &mut ArmGrade,
     (r, rc): (&R, &mut R::Cache),
@@ -275,8 +321,9 @@ fn decode_after<R: Lm, F: Lm, O: Lm>(
     seq: &[u32],
     p: usize,
     w: usize,
+    after: usize,
 ) {
-    for pos in p..p + AFTER {
+    for pos in p..p + after {
         let t = seq[pos];
         let lr = r.forward(t, pos, rc);
         let lf = f.forward(t, pos, fc);
@@ -296,16 +343,36 @@ pub(crate) fn grade<F: Lm>(
     floor: Floor,
     device: Device,
 ) -> Graded {
+    grade_sized(r, f, o, m, floor, device, &Sizes::BASE)
+}
+
+/// `grade` with the arms' sizes `s`.
+pub(crate) fn grade_sized<F: Lm>(
+    r: &Backend,
+    f: &F,
+    o: &Backend,
+    m: &Model,
+    floor: Floor,
+    device: Device,
+    sz: &Sizes,
+) -> Graded {
     let tok = crate::tokenizer::Tokenizer::from_gguf(m);
     let pre = prefixes(device);
-    let span = (*pre.iter().max().unwrap()).max(CACHED.0 + CACHED.1) + AFTER + 1;
-    let load_len = LOAD_PREFIX_MAX + LOAD_STEPS + 1;
+    let (c0, c1) = CACHED;
+    let longest = *pre.iter().max().unwrap();
+    let (span, cspan) = match sz.cached_windows {
+        None => ((longest.max(c0 + c1)) + sz.after + 1, 0),
+        Some(_) => (longest + sz.after + 1, c0 + c1 + sz.after + 1),
+    };
+    let cwins = sz.cached_windows.unwrap_or(0);
+    let load_len = LOAD_PREFIX_MAX + sz.load_steps + 1;
     let ids = natural_ids(
         m,
-        DECODE_WINDOWS * WINDOW + BATCH_WINDOWS * span + LOAD * load_len,
+        sz.decode_windows * WINDOW + sz.batch_windows * span + cwins * cspan + sz.load * load_len,
     );
-    let (dec, rest) = ids.split_at(DECODE_WINDOWS * WINDOW);
-    let (bat, load) = rest.split_at(BATCH_WINDOWS * span);
+    let (dec, rest) = ids.split_at(sz.decode_windows * WINDOW);
+    let (bat, rest) = rest.split_at(sz.batch_windows * span);
+    let (cac, load) = rest.split_at(cwins * cspan);
     let caches = || (r.new_cache(CTX), f.new_cache(CTX), o.new_cache(CTX));
     let mut arms = Vec::new();
 
@@ -335,8 +402,8 @@ pub(crate) fn grade<F: Lm>(
     let mut a = ArmGrade::new(Arm::Batched);
     let mut rows = (0, 0, 0);
     let l0 = o.fast_launches();
-    for (w, seq) in bat.chunks(span).enumerate() {
-        let w = DECODE_WINDOWS + w;
+    for (i, seq) in bat.chunks(span).enumerate() {
+        let w = sz.decode_windows + i;
         for &p in pre {
             let (mut rc, mut fc, mut oc) = caches();
             a.start();
@@ -344,7 +411,11 @@ pub(crate) fn grade<F: Lm>(
             let lf = f.prefill_logits(&seq[..p], 0, &mut fc);
             let lo = o.prefill_logits(&seq[..p], 0, &mut oc);
             a.tally(&lr, &lf, &lo, Some((w, seq[p])));
-            decode_after(&mut a, (r, &mut rc), (f, &mut fc), (o, &mut oc), seq, p, w);
+            let (rr, ff, oo) = ((r, &mut rc), (f, &mut fc), (o, &mut oc));
+            decode_after(&mut a, rr, ff, oo, seq, p, w, sz.after);
+            if i >= sz.verify_windows {
+                continue;
+            }
             let (mut rc, mut fc, mut oc) = caches();
             let pr = r.verify_argmax(&seq[..p], 0, &mut rc);
             let pf = f.verify_argmax(&seq[..p], 0, &mut fc);
@@ -358,10 +429,13 @@ pub(crate) fn grade<F: Lm>(
 
     // Cached: a prefix in the cache, the rest in a second batched pass.
     let mut a = ArmGrade::new(Arm::Cached);
-    let (c0, c1) = CACHED;
     let l0 = o.fast_launches();
-    for (w, seq) in bat.chunks(span).enumerate() {
-        let w = DECODE_WINDOWS + w;
+    let (cwin, w0) = match sz.cached_windows {
+        None => (bat.chunks(span), sz.decode_windows),
+        Some(_) => (cac.chunks(cspan), sz.decode_windows + sz.batch_windows),
+    };
+    for (w, seq) in cwin.enumerate() {
+        let w = w0 + w;
         let (mut rc, mut fc, mut oc) = caches();
         a.start();
         r.feed_batch(&seq[..c0], 0, &mut rc);
@@ -379,6 +453,7 @@ pub(crate) fn grade<F: Lm>(
             seq,
             c0 + c1,
             w,
+            sz.after,
         );
     }
     a.launches = o.fast_launches() - l0;
@@ -390,14 +465,15 @@ pub(crate) fn grade<F: Lm>(
         let mut a = ArmGrade::new(Arm::Load);
         let l0 = o.fast_launches();
         let seqs: Vec<&[u32]> = load.chunks(load_len).collect();
-        let mut pool = o.new_pool(LOAD, CTX).unwrap();
-        let mut alone = Vec::with_capacity(LOAD);
+        let lw = sz.decode_windows + sz.batch_windows + cwins;
+        let mut pool = o.new_pool(sz.load, CTX).unwrap();
+        let mut alone = Vec::with_capacity(sz.load);
         for (s, seq) in seqs.iter().enumerate() {
             let p = load_prefix(s);
             let (mut rc, mut fc) = (r.new_cache(CTX), f.new_cache(CTX));
             r.feed_batch(&seq[..p], 0, &mut rc);
             f.feed_batch(&seq[..p], 0, &mut fc);
-            let at: Vec<_> = (p..p + LOAD_STEPS)
+            let at: Vec<_> = (p..p + sz.load_steps)
                 .map(|pos| {
                     let lr = r.forward(seq[pos], pos, &mut rc);
                     (lr, f.forward(seq[pos], pos, &mut fc))
@@ -413,7 +489,7 @@ pub(crate) fn grade<F: Lm>(
             penalty: 1.0,
             last_n: 0,
         };
-        for k in 0..LOAD_STEPS {
+        for k in 0..sz.load_steps {
             let step: Vec<SeqRow> = (seqs.iter().enumerate())
                 .map(|(s, seq)| {
                     let pos = load_prefix(s) + k;
@@ -445,7 +521,7 @@ pub(crate) fn grade<F: Lm>(
                     &lr,
                     &lf,
                     &lo,
-                    Some((DECODE_WINDOWS + BATCH_WINDOWS + s, next)),
+                    Some((lw + s, next)),
                 );
             }
         }
@@ -469,8 +545,8 @@ fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
 }
 
 /// `assert_graded` on one arm, its failure naming the arm.
-fn assert_arm(what: &str, a: &ArmGrade) -> Result<(), String> {
-    catch_unwind(AssertUnwindSafe(|| assert_graded(&a.mode, &a.floor)))
+fn assert_arm(what: &str, a: &ArmGrade, top1: Top1) -> Result<(), String> {
+    catch_unwind(AssertUnwindSafe(|| assert_graded_with(&a.mode, &a.floor, top1)))
         .map_err(|p| format!("{what} [{}]: {}", a.arm.name(), panic_text(&*p)))
 }
 
@@ -510,6 +586,11 @@ pub(crate) fn report_graded(what: &str, g: &Graded) {
 /// nothing at all to grade: every logit equal in every arm, ΔNLL 0, every
 /// row's pick the reference's.
 pub(crate) fn assert_graded_vs_exact(what: &str, g: &Graded, bits: bool) {
+    assert_graded_vs_exact_with(what, g, bits, Top1::Points(94));
+}
+
+/// `assert_graded_vs_exact` with the top-1 rule `top1` (`assert_graded_with`).
+pub(crate) fn assert_graded_vs_exact_with(what: &str, g: &Graded, bits: bool, top1: Top1) {
     report_graded(what, g);
     let launched = g.launches();
     if g.fast_kernels {
@@ -543,7 +624,7 @@ pub(crate) fn assert_graded_vs_exact(what: &str, g: &Graded, bits: bool) {
             "{what} [{}]: nothing graded",
             a.arm.name()
         );
-        if let Err(e) = assert_arm(what, a) {
+        if let Err(e) = assert_arm(what, a, top1) {
             panic!("{e}");
         }
     }
@@ -689,7 +770,7 @@ fn graded_catches_another_model() {
     report_graded("0.5B Q4_0 vs Q4_K_M exact", &g);
     assert_eq!(g.arms.len(), 4);
     for a in &g.arms {
-        let e = assert_arm("Q4_0", a).expect_err("another model passed an arm of the gate");
+        let e = assert_arm("Q4_0", a, Top1::Points(94)).expect_err("another model passed an arm of the gate");
         eprintln!("as it must: {e}");
         assert!(!e.contains("reference spread"), "{e}");
     }

@@ -4,6 +4,7 @@
     hf_logits.py prep  --model DIR [--texts F] [--windows 32] [--chars 900] --out W.json
     hf_logits.py axon  --axon BIN --model M --windows W.json --arm decode|batched [-k 64] --out A.json [-- flags]
     hf_logits.py score --model DIR --windows W.json --dtype f32|bf16 [--json OUT] A.json [B.json ...]
+    hf_logits.py vs    --ref R.json --windows W.json [--first N] [--json OUT] A.json [B.json ...]
 
 prep: windows of natural text (numerics_dnll.py's windowing), tokenized by the checkpoint's tokenizer.json (no
 special tokens); every side is given these ids (axon via AXON_LOGITS_IDS), so no side tokenizes.
@@ -12,13 +13,19 @@ axon: one `axon logits` run over all windows (';'-separated sequences), top-k pe
 (AXON_LOGITS_PREFIX=1: every position one decode step) and batched (AXON_LOGITS_PREFIX=17 + AXON_LOGITS_EACH=1:
 every position from 16 on the last row of its own batched pass of >= 17 rows, the tensor-core GEMM).
 
-score: HF transformers on the checkpoint's weights dequantized exactly in f32 (w = e4m3 * weight_scale), as
+score: HF transformers on the checkpoint's weights dequantized in f32 (w = e4m3 * weight_scale, one f32 rounding), as
 --dtype f32, or that cast to bf16 (= compressed-tensors' decompress to bf16), one forward per window. Per
 position p (the logits after token p): KL(P_hf || P_axon) on the partition {axon's top-k, the rest} (a lower bound
 of the full KL; both distributions' rest masses reported), top-1 agreement (raw: near ties are counted, and the
 positions where HF's top-2 margin < 0.1 nats are listed), d = nll_axon - nll_hf of token p+1. Means with SE
 clustered by window (CR1, numerics_dnll.py's). Bars (pre-registered, §6 A): KL mean <= 0.01, top-1 >= 97 %;
 KL mean > 0.02 is the stop line.
+
+vs: the same against an axon dump R instead of HF (the 7B: Axon's CPU fp8-ref, validated against HF F32 on the
+0.5B, stands in for HF; R at -k 64, the others at a larger -k). KL(P_r || P_a) on the partition {R's top-k, the
+rest}, P_a of a token missing from A's top-k bounded by A's k-th (counted: `missing`); top-1 vs R's; near ties by
+R's top-2 margin; d = nll_a - nll_r where both list token p+1. --first N: the first N windows only (a dump of a
+subset, or the rest restricted to it).
 """
 import argparse, json, math, os, re, subprocess, sys
 
@@ -184,28 +191,82 @@ def cmd_score(a):
                         r["dnll"].append((wi, -ax[nxt] + hp[nxt].item()))
                     r["rest_hf"].append(rh)
                     r["rest_ax"].append(ra)
+    summarize(a, a.dumps, dumps, acc, f"hf-{a.dtype}")
+
+
+def summarize(a, files, dumps, acc, ref):
     res = []
-    for f, d, r in zip(a.dumps, dumps, acc):
+    for f, d, r in zip(files, dumps, acc):
         kl, kse = clustered(r["kl"])
         t1, tse = clustered(r["top1"])
         dn, dse = clustered(r["dnll"])
         n = len(r["kl"])
-        e = {"dump": f, "arm": d["arm"], "flags": d["flags"], "model": d["model"], "ref": f"hf-{a.dtype}",
+        e = {"dump": f, "arm": d["arm"], "flags": d["flags"], "model": d["model"], "ref": ref,
              "positions": n, "windows": len({c for c, _ in r["kl"]}), "kl_mean": kl, "kl_se": kse,
              "kl_max": max((x for _, x in r["kl"]), default=0.0), "top1": t1, "top1_se": tse,
-             "dnll": dn, "dnll_se": dse, "dnll_n": len(r["dnll"]),
+             "dnll": dn, "dnll_se": dse, "dnll_n": len(r["dnll"]), "missing": r.get("missing", 0),
              "rest_hf_mean": sum(r["rest_hf"]) / max(n, 1), "rest_ax_mean": sum(r["rest_ax"]) / max(n, 1),
              "near_ties": len(r["ties"]), "flips": len(r["flips"]),
              "flips_at_near_ties": sum(1 for x in r["flips"] if x["hf_margin"] < TIE),
              "pass": kl <= 0.01 and t1 >= 0.97, "stop": kl > 0.02, "flip_list": r["flips"][:50]}
         res.append(e)
-        print(f"{os.path.basename(f):40s} {d['arm']:8s} vs hf-{a.dtype}: n {n} ({e['windows']} windows)  "
+        print(f"{os.path.basename(f):40s} {d['arm']:8s} vs {ref}: n {n} ({e['windows']} windows)  "
               f"KL {kl:.3e} ±{kse:.1e} (max {e['kl_max']:.3f})  top-1 {100 * t1:.2f}% ±{100 * tse:.2f}  "
-              f"dNLL {dn:+.4f} ±{dse:.4f}  flips {e['flips']} ({e['flips_at_near_ties']} at HF margin < {TIE})  "
-              f"rest {e['rest_hf_mean']:.1e}/{e['rest_ax_mean']:.1e}  {'PASS' if e['pass'] else 'FAIL'}"
-              f"{'  STOP' if e['stop'] else ''}")
+              f"dNLL {dn:+.4f} ±{dse:.4f}  flips {e['flips']} ({e['flips_at_near_ties']} at ref margin < {TIE})  "
+              f"rest {e['rest_hf_mean']:.1e}/{e['rest_ax_mean']:.1e}  missing {e['missing']}  "
+              f"{'PASS' if e['pass'] else 'FAIL'}{'  STOP' if e['stop'] else ''}")
     if a.json:
         json.dump(res, open(a.json, "w"), indent=1)
+
+
+def cmd_vs(a):
+    ws = json.load(open(a.windows))["windows"]
+    ref = json.load(open(a.ref))
+    dumps = [json.load(open(f)) for f in a.dumps]
+    nw = min([len(ref["windows"])] + [len(d["windows"]) for d in dumps])
+    if a.first:
+        nw = min(nw, a.first)
+    acc = [{"kl": [], "top1": [], "dnll": [], "rest_hf": [], "rest_ax": [], "ties": [], "flips": [], "missing": 0}
+           for _ in dumps]
+    for wi in range(nw):
+        ids = ws[wi]["ids"]
+        for ps, rtop in ref["windows"][wi].items():
+            p = int(ps)
+            if p + 1 >= len(ids):
+                continue
+            rl = dict(rtop)
+            pr = {t: math.exp(v) for t, v in rtop}
+            rr = max(1.0 - sum(pr.values()), 0.0)
+            margin = rtop[0][1] - rtop[1][1]
+            for d, r in zip(dumps, acc):
+                top = d["windows"][wi].get(ps)
+                if top is None:
+                    continue
+                al = dict(top)
+                floor = top[-1][1]
+                kl, pa_sum = 0.0, 0.0
+                for t, v in rtop:
+                    if t not in al:
+                        r["missing"] += 1
+                    la = al.get(t, floor)
+                    kl += pr[t] * (v - la)
+                    pa_sum += math.exp(la)
+                ra = max(1.0 - pa_sum, 0.0)
+                if rr > 0:
+                    kl += rr * (math.log(rr) - math.log(max(ra, 1e-300)))
+                r["kl"].append((wi, kl))
+                r["top1"].append((wi, 1.0 if top[0][0] == rtop[0][0] else 0.0))
+                if margin < TIE:
+                    r["ties"].append((wi, p))
+                if top[0][0] != rtop[0][0]:
+                    r["flips"].append({"window": wi, "pos": p, "hf": rtop[0][0], "axon": top[0][0],
+                                       "hf_margin": margin})
+                nxt = ids[p + 1]
+                if nxt in al and nxt in rl:
+                    r["dnll"].append((wi, -al[nxt] + rl[nxt]))
+                r["rest_hf"].append(rr)
+                r["rest_ax"].append(ra)
+    summarize(a, a.dumps, dumps, acc, "axon:" + os.path.basename(a.ref))
 
 
 def main():
@@ -234,8 +295,14 @@ def main():
     p.add_argument("--json")
     p.add_argument("--last", action="store_true", help="each window's last position only (--prompts)")
     p.add_argument("dumps", nargs="+")
+    p = sub.add_parser("vs")
+    p.add_argument("--ref", required=True)
+    p.add_argument("--windows", required=True)
+    p.add_argument("--first", type=int)
+    p.add_argument("--json")
+    p.add_argument("dumps", nargs="+")
     a = ap.parse_args()
-    {"prep": cmd_prep, "axon": cmd_axon, "score": cmd_score}[a.cmd](a)
+    {"prep": cmd_prep, "axon": cmd_axon, "score": cmd_score, "vs": cmd_vs}[a.cmd](a)
 
 
 if __name__ == "__main__":
