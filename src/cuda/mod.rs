@@ -83,6 +83,15 @@ const KERNELS: &str = kernels_src!();
 /// models' source, cache key and cubin stay as they are.
 const KERNELS_OSS: &str = kernels_src!(include_str!("oss.cu"));
 
+/// KERNELS + fp8.cu (FP8 checkpoints' fast-mode kernels, docs/design/fp8-weights.md D4): its own
+/// module, compiled with `F8_DEFINE`, only for an FP8 checkpoint in fast mode on sm >= 89; every
+/// other model and mode loads KERNELS, its source, options, cache key and cubin unchanged.
+const KERNELS_F8: &str = kernels_src!(include_str!("fp8.cu"));
+
+/// The define of the FP8 module (`KERNELS_F8`): decode.cu's `quant_warp` also stores its f32
+/// values for `quant_f8_tok`.
+pub(crate) const F8_DEFINE: &str = "-DAXON_F8";
+
 /// A CUDA device: its retained primary context and a stream to run on.
 /// Dropping it destroys the stream and releases the context; `DevBuf`s and
 /// `Module`s borrow it, so they're gone first.
@@ -1506,6 +1515,8 @@ pub struct Module<'g> {
     hopper: bool,
     /// Compiled with `FAST_DEFINE` (the fast numerics mode's module).
     fast: bool,
+    /// Compiled with `F8_DEFINE` (`KERNELS_F8`: FP8 checkpoints' native kernels).
+    f8: bool,
 }
 
 /// Whether programmatic dependent launch is safe and works for code
@@ -1874,6 +1885,7 @@ impl<'g> Module<'g> {
         };
         m.hopper = target == Target::Cubin90a && ffi::tensor_map_encoder().is_some();
         m.fast = opts.contains(&FAST_DEFINE);
+        m.f8 = opts.contains(&F8_DEFINE);
         let cc = gpu.info()?.cc;
         let env = std::env::var("AXON_CUDA_PDL").ok();
         m.arch = arch;
@@ -1960,6 +1972,12 @@ impl<'g> Module<'g> {
         self.hopper
     }
 
+    /// Whether it has fp8.cu's kernels (`KERNELS_F8`): an FP8 checkpoint's
+    /// matrices run natively on it.
+    pub fn f8(&self) -> bool {
+        self.f8
+    }
+
     /// Whether the decode kernels run the extra types (`Kernels::module_ext`).
     pub fn ext(&self) -> bool {
         self.ext
@@ -1993,6 +2011,7 @@ impl<'g> Module<'g> {
             arch: 0,
             ext: false,
             hopper: false,
+            f8: false,
             fast: false,
         })
     }
@@ -2077,6 +2096,12 @@ fn mode_opts<'a>(opts: &[&'a str], n: Numerics) -> Vec<&'a str> {
     v
 }
 
+/// Whether `gpu` has e4m3 tensor cores (sm_89 and later, `mma.sync` e4m3).
+fn f8_native_cc(gpu: &Gpu) -> Result<bool, String> {
+    let cc = gpu.info()?.cc;
+    Ok(cc.0 * 10 + cc.1 >= 89 && std::env::var("AXON_FP8_NATIVE").as_deref() != Ok("0"))
+}
+
 /// `Numerics::Fast` if `fast`, else `Numerics::Exact`.
 fn fast_mode(fast: bool) -> Numerics {
     if fast {
@@ -2110,6 +2135,16 @@ impl<'m> Kernels<'m> {
     #[cfg_attr(not(test), allow(dead_code))] // tests (the product loads `module_for_mode`)
     pub fn module(gpu: &Gpu) -> Result<Module<'_>, String> {
         Ok(Module::load(gpu, KERNELS, &KERNEL_OPTS)?.0)
+    }
+
+    /// The FP8 module (`KERNELS_F8`, fast, `F8_DEFINE`): fp8.cu's kernels.
+    #[cfg(test)]
+    pub fn module_f8(gpu: &Gpu) -> Result<Module<'_>, String> {
+        let mut o = mode_opts(&KERNEL_OPTS, Numerics::Fast);
+        o.push(F8_DEFINE);
+        let mut m = Module::load(gpu, KERNELS_F8, &o)?.0;
+        m.f8 = true;
+        Ok(m)
     }
 
     /// `module` with every supported quant type in the decode kernels
@@ -2183,13 +2218,22 @@ impl<'m> Kernels<'m> {
         n: Numerics,
     ) -> Result<Module<'g>, String> {
         let ext = needs_ext(m);
+        // FP8 natively only in fast mode on sm >= 89 (e4m3 mma.sync); else
+        // the plain module, which runs the Q8_0 form (D1, ruling 4).
+        let f8 = crate::safetensors::is_fp8(m) && n == Numerics::Fast && f8_native_cc(gpu)?;
         let src = if m.arch == "gpt-oss" {
             KERNELS_OSS
+        } else if f8 {
+            KERNELS_F8
         } else {
             KERNELS
         };
         let opts: &[&str] = if ext { &KERNEL_OPTS_EXT } else { &KERNEL_OPTS };
-        let mut md = Module::load(gpu, src, &mode_opts(opts, n))?.0;
+        let mut o = mode_opts(opts, n);
+        if f8 {
+            o.push(F8_DEFINE);
+        }
+        let mut md = Module::load(gpu, src, &o)?.0;
         md.ext = ext;
         Ok(md)
     }

@@ -81,7 +81,8 @@ pub const NUMERICS_VERSION_EXACT: u32 = 1;
 /// kernel today: fast mode has no kernel of its own yet; the request-to-text
 /// parts) bumps `NUMERICS_VERSION_EXACT`, which moves fast's tag as well,
 /// so it doesn't bump this one. The first fast kernel is a bump.
-pub const NUMERICS_VERSION_FAST: u32 = 1;
+/// 2: FP8 checkpoints' native kernels (fp8.cu, docs/design/fp8-weights.md).
+pub const NUMERICS_VERSION_FAST: u32 = 2;
 
 /// The tuple's format, the first line of `canonical`.
 const SCHEME: &str = "axon-identity/1";
@@ -146,6 +147,16 @@ impl Identity {
     pub fn with_rope(mut self, rope: Option<String>) -> Identity {
         if let Some(r) = rope {
             self.fields.push(("rope", r));
+        }
+        self
+    }
+
+    /// The tuple with an FP8 checkpoint's `weights`, `act` and `head`
+    /// fields (`fp8_fields`); no fields for any other model.
+    pub fn with_fp8(mut self, f: Option<[&'static str; 3]>) -> Identity {
+        if let Some([w, a, h]) = f {
+            self.fields
+                .extend([("weights", w.into()), ("act", a.into()), ("head", h.into())]);
         }
         self
     }
@@ -243,7 +254,10 @@ pub fn of(path: &str, m: &Model, net: &Backend) -> Identity {
             Identity::new(&d, &types, &b, Some(&gs.join("; ")), None, n.kv_name())
         }
     };
-    let mut id = id.with_rope(rope_field(m)).with_numerics(net.numerics());
+    let mut id = id
+        .with_rope(rope_field(m))
+        .with_fp8(fp8_fields(m, net))
+        .with_numerics(net.numerics());
     if digest.is_err() {
         id = id.unreadable("model");
     }
@@ -251,6 +265,27 @@ pub fn of(path: &str, m: &Model, net: &Backend) -> Identity {
         id = id.unreadable("gpu");
     }
     id
+}
+
+/// An FP8 checkpoint's numerics (docs/design/fp8-weights.md §4): weights
+/// `fp8-native` (fp8.cu, the fast set), `fp8-q8` (Q8_0 at load: exact mode,
+/// or a GPU below sm_89) or `fp8-ref` (the CPU: exact dequant); the
+/// activations its matrices read; the head's type. None for other models.
+fn fp8_fields(m: &Model, net: &Backend) -> Option<[&'static str; 3]> {
+    if !crate::safetensors::is_fp8(m) {
+        return None;
+    }
+    let cpu_act = match crate::model::fp8_cpu_qt() {
+        crate::quant::fp8::F8S_TOK => "e4m3-tok-emu",
+        crate::quant::fp8::F8S_G128 => "e4m3-128-emu",
+        _ => "f32",
+    };
+    Some(match &net.0 {
+        Inner::Cpu(_) => ["fp8-ref", cpu_act, "f16"],
+        Inner::Cuda(n) if n.f8_native() => ["fp8-native", "e4m3-tok", "q8"],
+        Inner::Cuda(_) | Inner::Pipeline(_) => ["fp8-q8", "q8", "q8"],
+        Inner::Hybrid(_) | Inner::Moe(_) => ["fp8-q8 (cpu layers fp8-ref)", "q8", "q8"],
+    })
 }
 
 /// The `rope` field: the model's effective RoPE scaling, read from its
@@ -784,14 +819,14 @@ mod tests {
         let f = base().with_numerics(Numerics::Fast);
         assert_eq!(
             f.canonical(),
-            "axon-identity/1\nnumerics=fast/1.1\nmodel=aa\ntypes=Q4_K:1\nbackend=cuda\n\
+            "axon-identity/1\nnumerics=fast/1.2\nmodel=aa\ntypes=Q4_K:1\nbackend=cuda\n\
              gpu=sm_120\nkv=f16\n"
         );
         assert_eq!(f.fingerprint(), "fp_bea740cf61d9d767", "golden (hashlib)");
         assert_ne!(f.fingerprint(), e.fingerprint());
         assert_eq!(f.fields[1..], e.fields[1..], "only the numerics field");
-        assert_eq!(f.json()["numerics"], "fast/1.1");
-        assert!(f.line().contains("numerics fast/1.1"), "{}", f.line());
+        assert_eq!(f.json()["numerics"], "fast/1.2");
+        assert!(f.line().contains("numerics fast/1.2"), "{}", f.line());
         // Back to exact: the same tuple as never fast.
         assert_eq!(f.with_numerics(Numerics::Exact), e);
         // The counters are tied (NUMERICS_VERSION_EXACT's rule): exact's

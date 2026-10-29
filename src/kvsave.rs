@@ -463,7 +463,7 @@ impl<'g> KvIo for CudaQwen2<'g> {
 
 impl KvIo for Backend<'_> {
     /// The model's (`Qwen2`'s, `CudaQwen2`'s) and, in the fast numerics
-    /// mode, `numerics_mode` ("fast/1.1"): a session saved in one mode is
+    /// mode, `numerics_mode` ("fast/1.2"): a session saved in one mode is
     /// restored into the other as tokens (prefilled again), never as bytes.
     /// Exact mode adds nothing, so files saved before the modes still load.
     fn kv_ident(&self, cache: &BackendCache) -> Option<Value> {

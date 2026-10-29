@@ -95,8 +95,9 @@ flags:
   --numerics M  gen, logits, chat, serve: exact (default) or fast. exact: decode == batched prefill ==
               verify, bit for bit, the same reply alone or batched (docs/determinism.md). fast: kernels
               that change the float order are allowed (results graded against exact, not equal) and
-              the identity (fingerprint, session files) says fast; no backend has a fast kernel yet,
-              so today fast runs the exact kernels and says so once
+              the identity (fingerprint, session files) says fast. The fast kernels today: an FP8
+              checkpoint's native e4m3 products on sm_89+ (docs/design/fp8-weights.md; exact runs
+              its Q8_0 form); elsewhere fast runs the exact kernels and says so once
               (docs/design/determinism-modes.md)
   --datacenter  serve: the datacenter bundle; today only --numerics fast (an explicit --numerics
               wins). Later it grows to what a datacenter deployment wants (tensor parallel, FP8)
@@ -940,6 +941,11 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|_| cmd == "logits");
     let nll_out = env::var_os("AXON_LOGITS_NLL").is_some_and(|v| v == "1");
+    // AXON_LOGITS_EACH=1 (with AXON_LOGITS_PREFIX=N): every position from
+    // N - 1 on is the last row of its own batched pass over the prefix up
+    // to it, on a fresh cache (scripts/oracle/hf_logits.py: a batched
+    // kernel graded at every position, not only at N - 1).
+    let each = env::var_os("AXON_LOGITS_EACH").is_some_and(|v| v == "1") && prefix.is_some();
     let t0 = Instant::now();
     let logits = if all > 0 || prefix.is_some() {
         if seqs.is_empty() {
@@ -966,7 +972,10 @@ fn run_lm(args: &[String]) -> std::io::Result<()> {
                 net.feed_batch(&ids[..first], 0, &mut cache);
             }
             for (p, &t) in ids.iter().enumerate().skip(first) {
-                if !batched || p > first {
+                if each && p > first {
+                    cache = net.new_cache(cache_ctx);
+                    last = net.prefill_logits(&ids[..=p], 0, &mut cache);
+                } else if !batched || p > first {
                     last = net.forward(t, p, &mut cache);
                 }
                 println!("position {p}:");

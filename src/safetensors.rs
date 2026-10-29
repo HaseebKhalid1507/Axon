@@ -503,6 +503,104 @@ fn rope_params(cfg: &Value) -> Map<String, Value> {
     p
 }
 
+/// The metadata key an FP8 checkpoint carries (`axon.fp8 = channel`): its
+/// matrices are F8_E4M3 with a per-row `scale` (docs/design/fp8-weights.md).
+pub const FP8_KEY: &str = "axon.fp8";
+
+/// Whether `m` is an FP8 checkpoint (`FP8_KEY`).
+pub fn is_fp8(m: &Model) -> bool {
+    m.metadata.iter().any(|(k, _)| k == FP8_KEY)
+}
+
+/// The FP8 scheme of a `quantization_config` Axon runs, or why not: exactly
+/// compressed-tensors' per-channel FP8 weights with dynamic per-token FP8
+/// activations, every Linear but lm_head (RedHatAI's "FP8-dynamic").
+fn fp8_scheme(q: &Value) -> Result<&'static str, String> {
+    let method = q.get("quant_method").and_then(Value::as_str).unwrap_or("?");
+    let no = |what: String| {
+        Err(format!(
+            "quantized checkpoint (quantization_config.quant_method {method}): {what}; Axon runs \
+             compressed-tensors FP8 with per-channel weights and dynamic per-token activations \
+             (\"FP8-dynamic\"), or a GGUF"
+        ))
+    };
+    if method != "compressed-tensors" {
+        return no("not supported".into());
+    }
+    let s = |v: Option<&Value>| v.and_then(Value::as_str).map(str::to_string);
+    let format = s(q.get("format")).unwrap_or_default();
+    if !matches!(format.as_str(), "float-quantized" | "naive-quantized") {
+        return no(format!("format {format:?} is not supported"));
+    }
+    if q.get("kv_cache_scheme").is_some_and(|v| !v.is_null()) {
+        return no("a kv_cache_scheme is not supported".into());
+    }
+    let ignore: Vec<String> = q
+        .get("ignore")
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    if ignore != ["lm_head"] {
+        return no(format!(
+            "ignore {ignore:?} is not supported (only [\"lm_head\"])"
+        ));
+    }
+    let groups = q.get("config_groups").and_then(Value::as_object);
+    let Some((name, g)) = groups
+        .filter(|g| g.len() == 1)
+        .and_then(|g| g.iter().next())
+    else {
+        return no("config_groups must hold exactly one group".into());
+    };
+    let targets = g.get("targets").and_then(Value::as_array);
+    if targets.is_none_or(|t| t.len() != 1 || t[0].as_str() != Some("Linear")) {
+        return no(format!("config_groups.{name}.targets must be [\"Linear\"]"));
+    }
+    if g.get("output_activations").is_some_and(|v| !v.is_null()) {
+        return no(format!(
+            "config_groups.{name}.output_activations is not supported"
+        ));
+    }
+    // Each of weights / input_activations: (strategy, dynamic) wanted.
+    for (part, strategy, dynamic) in [
+        ("weights", "channel", false),
+        ("input_activations", "token", true),
+    ] {
+        let Some(p) = g.get(part).filter(|p| p.is_object()) else {
+            return no(format!("config_groups.{name}.{part} is missing"));
+        };
+        let field = |k: &str| p.get(k).cloned().unwrap_or(Value::Null);
+        let want = [
+            ("num_bits", Value::from(8)),
+            ("type", Value::from("float")),
+            ("strategy", Value::from(strategy)),
+            ("symmetric", Value::from(true)),
+            ("dynamic", Value::from(dynamic)),
+        ];
+        for (k, v) in want {
+            if field(k) != v {
+                return no(format!(
+                    "config_groups.{name}.{part}.{k} {} (want {v})",
+                    field(k)
+                ));
+            }
+        }
+        for k in ["group_size", "block_structure", "actorder"] {
+            if !field(k).is_null() {
+                return no(format!(
+                    "config_groups.{name}.{part}.{k} {} is not supported",
+                    field(k)
+                ));
+            }
+        }
+    }
+    Ok("channel")
+}
+
 /// What `config.json` (`cfg`) says, as the GGUF keys convert_hf_to_gguf.py
 /// writes for it (the ones Axon reads: model.rs, rope.rs), plus the
 /// `rope_freqs.weight` values a Llama 3 RoPE needs. Optional keys missing
@@ -513,13 +611,10 @@ pub fn metadata(cfg: &Value, name: &str) -> Result<Meta, String> {
         return Err("config.json is not a JSON object".into());
     }
     let a = arch_of(cfg)?;
-    if let Some(q) = cfg.get("quantization_config").filter(|q| !q.is_null()) {
-        let m = q.get("quant_method").and_then(Value::as_str).unwrap_or("?");
-        return Err(format!(
-            "quantized checkpoint (quantization_config.quant_method {m}): not supported yet \
-             (FP8 lands in stages B-C of the FP8 plan); use a GGUF"
-        ));
-    }
+    let fp8 = match cfg.get("quantization_config").filter(|q| !q.is_null()) {
+        Some(q) => Some(fp8_scheme(q)?),
+        None => None,
+    };
     if let Some(act) = cfg.get("hidden_act").and_then(Value::as_str)
         && act != "silu"
     {
@@ -532,6 +627,9 @@ pub fn metadata(cfg: &Value, name: &str) -> Result<Meta, String> {
         ("general.architecture".into(), Val::Str(a.into())),
         ("general.name".into(), Val::Str(name.into())),
     ];
+    if let Some(s) = fp8 {
+        m.push((FP8_KEY.into(), Val::Str(s.into())));
+    }
     let k = |s: &str| format!("{a}.{s}");
     let u32s = [
         ("block_count", "num_hidden_layers"),
@@ -1043,6 +1141,15 @@ pub fn gguf_name(hf: &str) -> Option<String> {
         "model.norm.weight" => return Some("output_norm.weight".into()),
         _ => {}
     }
+    // An FP8 matrix's per-row scale: `blk.N.attn_q.scale` beside its
+    // `blk.N.attn_q.weight`.
+    if let Some(w) = hf
+        .strip_suffix("_scale")
+        .filter(|w| w.ends_with("proj.weight"))
+    {
+        let g = gguf_name(w)?;
+        return Some(format!("{}.scale", g.strip_suffix(".weight")?));
+    }
     let rest = hf.strip_prefix("model.layers.")?;
     let (n, rest) = rest.split_once('.')?;
     // Canonical decimal only: "007" and "+7" would alias layer 7.
@@ -1075,8 +1182,10 @@ pub fn gguf_name(hf: &str) -> Option<String> {
 /// stay F32 here: lossless, and the CPU runs them). None: left as it is.
 fn target(gguf: &str, t: &StTensor) -> Option<u32> {
     use crate::quant::{F16, F32};
-    let vector =
-        t.shape.len() <= 1 || gguf.ends_with("_norm.weight") || gguf.contains(".ffn_gate_inp.");
+    let vector = t.shape.len() <= 1
+        || gguf.ends_with("_norm.weight")
+        || gguf.contains(".ffn_gate_inp.")
+        || gguf.ends_with(".scale");
     match t.dtype.name {
         "BF16" | "F16" if vector => Some(F32),
         "BF16" | "F16" => Some(F16),
@@ -1381,6 +1490,8 @@ pub fn load(
             "lm_head.weight is missing and tie_word_embeddings is false",
         ));
     }
+    let fp8 = metadata.iter().any(|(k, _)| k == FP8_KEY);
+    check_fp8_tensors(fp8, &tensors).map_err(bad)?;
     if let Some(f) = &rope_freqs {
         tensors.push(Tensor {
             name: "rope_freqs.weight".into(),
@@ -1435,16 +1546,144 @@ pub fn load(
         drop(files);
         m.set_aux(aux.make_read_only()?);
     }
+    if fp8 && fill {
+        check_fp8_values(&m).map_err(bad)?;
+    }
     Ok(m)
+}
+
+/// The linear layers of a dense block (the matrices an FP8 checkpoint
+/// stores as F8_E4M3 with a scale).
+const FP8_LINEARS: [&str; 7] = [
+    "attn_q",
+    "attn_k",
+    "attn_v",
+    "attn_output",
+    "ffn_gate",
+    "ffn_up",
+    "ffn_down",
+];
+
+/// An FP8 checkpoint's tensors, by shape (no bytes read): every layer
+/// linear F8_E4M3 with a row count of scales and whole 128-blocks per row;
+/// nothing else F8, no scale without its matrix. Without the config: no F8
+/// tensor at all.
+fn check_fp8_tensors(fp8: bool, ts: &[Tensor]) -> Result<(), String> {
+    use crate::quant::fp8::F8_E4M3;
+    let find = |n: &str| ts.iter().find(|t| t.name == n);
+    for t in ts {
+        let f8 = t.qtype.id == F8_E4M3;
+        if !fp8 && (f8 || t.name.ends_with(".scale")) {
+            return Err(format!(
+                "tensor {}: FP8 without a quantization_config saying how it is scaled",
+                t.name
+            ));
+        }
+        if let Some(w) = t.name.strip_suffix(".scale") {
+            if find(&format!("{w}.weight")).is_none_or(|m| m.qtype.id != F8_E4M3) {
+                return Err(format!(
+                    "tensor {}: a scale without its F8_E4M3 matrix",
+                    t.name
+                ));
+            }
+            continue;
+        }
+        let linear = t.layer >= 0 && FP8_LINEARS.iter().any(|k| t.kind == format!("{k}.weight"));
+        if !fp8 {
+            continue;
+        }
+        if linear != f8 {
+            return Err(format!(
+                "tensor {}: {} in an FP8 checkpoint (every layer linear is F8_E4M3, nothing else)",
+                t.name, t.qtype.name
+            ));
+        }
+        if !f8 {
+            continue;
+        }
+        let (k, rows) = (t.dims[0], t.dims.get(1).copied().unwrap_or(0));
+        if t.dims.len() != 2 || !k.is_multiple_of(128) || k == 0 || rows == 0 {
+            return Err(format!(
+                "tensor {}: F8_E4M3 shape {:?}: rows of whole 128-value blocks wanted",
+                t.name, t.dims
+            ));
+        }
+        let sn = format!(
+            "{}.scale",
+            t.name.strip_suffix(".weight").unwrap_or(&t.name)
+        );
+        match find(&sn) {
+            Some(sc)
+                if sc.n_elements == rows && sc.dims.iter().filter(|&&d| d != 1).count() <= 1 => {}
+            Some(sc) => {
+                return Err(format!(
+                    "tensor {sn}: shape {:?}, want one scale per row ({rows}): only per-channel \
+                     FP8 is supported",
+                    sc.dims
+                ));
+            }
+            None => {
+                return Err(format!(
+                    "tensor {}: F8_E4M3 without its weight_scale",
+                    t.name
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// An FP8 checkpoint's values (after the conversions): no NaN e4m3 code
+/// (0x7f, 0xff: a broken file, never a weight) and every scale finite and
+/// not negative.
+fn check_fp8_values(m: &Model) -> Result<(), String> {
+    use crate::quant::fp8::F8_E4M3;
+    let mats: Vec<&Tensor> = m.tensors.iter().filter(|t| t.qtype.id == F8_E4M3).collect();
+    let bad_code = std::thread::scope(|sc| {
+        let threads = std::thread::available_parallelism()
+            .map_or(4, |n| n.get())
+            .min(16);
+        let per = mats.len().div_ceil(threads).max(1);
+        let hs: Vec<_> = mats
+            .chunks(per)
+            .map(|c| {
+                sc.spawn(move || {
+                    c.iter()
+                        .find(|t| m.tensor_data(t).iter().any(|&b| b & 0x7f == 0x7f))
+                        .map(|t| t.name.clone())
+                })
+            })
+            .collect();
+        hs.into_iter()
+            .find_map(|h| h.join().unwrap_or(Some("?".into())))
+    });
+    if let Some(n) = bad_code {
+        return Err(format!(
+            "tensor {n}: holds the e4m3 NaN code (0x7f/0xff): a broken file"
+        ));
+    }
+    for t in m.tensors.iter().filter(|t| t.name.ends_with(".scale")) {
+        let b = m.tensor_data(t);
+        if let Some(v) = b
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .find(|v| !(v.is_finite() && *v >= 0.0))
+        {
+            return Err(format!(
+                "tensor {}: scale {v} (finite and >= 0 wanted)",
+                t.name
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Why `m` can't run on the GPU, if it can't: a safetensors checkpoint's
 /// converted F16 matrices have no GPU kernels.
 pub fn gpu_refusal(m: &Model) -> Option<String> {
-    matches!(m.source, Source::Safetensors { .. }).then(|| {
+    (matches!(m.source, Source::Safetensors { .. }) && !is_fp8(m)).then(|| {
         "a safetensors checkpoint runs on the CPU only for now (--device cpu): its BF16/F16 \
-         matrices have no GPU kernels; GPU support for safetensors weights comes with the FP8 \
-         stage B"
+         matrices have no GPU kernels (FP8 checkpoints run on the GPU)"
             .to_string()
     })
 }

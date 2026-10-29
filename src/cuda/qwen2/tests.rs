@@ -3,6 +3,7 @@ use crate::cuda::Kernels;
 use crate::model::Qwen2;
 use std::path::PathBuf;
 
+mod fp8;
 mod numerics;
 mod twin;
 

@@ -97,12 +97,12 @@ const LOAD_STEPS: usize = 4;
 /// The load arm's longest prefix (`load_prefix`).
 const LOAD_PREFIX_MAX: usize = 63;
 /// The nets' context.
-const CTX: usize = 640;
+pub(crate) const CTX: usize = 640;
 
 /// The batched arm's prefix lengths on `device` (module doc). The CPU
 /// prefills in 128-token batches (`PREFILL_BATCH`): 520 is no new shape
 /// there, only time.
-fn prefixes(device: Device) -> &'static [usize] {
+pub(crate) fn prefixes(device: Device) -> &'static [usize] {
     match device {
         Device::Cpu => &[24, 160],
         _ => &[24, 160, 520],
@@ -227,6 +227,9 @@ pub(crate) enum Floor {
     KvQ8,
     /// Exact on the CPU's per-row kernels (AXON_REPACK=0's).
     CpuRows,
+    /// FP8 (tests/fp8.rs): the CPU's fp8-ref with the fast path's e4m3
+    /// activations, against fp8-ref (docs/design/fp8-weights.md §6 B).
+    Fp8Emu,
 }
 
 impl Floor {
@@ -235,6 +238,7 @@ impl Floor {
             Floor::CrossArch => "exact on another GPU architecture",
             Floor::KvQ8 => "exact with the q8 KV cache",
             Floor::CpuRows => "exact on the CPU's per-row kernels",
+            Floor::Fp8Emu => "the CPU's fp8-ref with e4m3 per-token activations",
         }
     }
 }

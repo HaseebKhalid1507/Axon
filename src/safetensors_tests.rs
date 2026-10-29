@@ -1296,3 +1296,382 @@ fn llama3_rope_on_a_checkpoint_is_readable_before_conversion() {
     let e = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| h.tensor_data(t).len()));
     assert!(e.is_err());
 }
+
+// ---------------------------------------------------------------------------
+// FP8 checkpoints (docs/design/fp8-weights.md §2, §5): compressed-tensors
+// per-channel e4m3 with dynamic per-token activations.
+
+/// RedHatAI's FP8-dynamic quantization_config (VERIFIED on the 0.5B / 7B).
+fn fp8_qcfg() -> Value {
+    let q = |strategy: &str, dynamic: bool| {
+        json!({"actorder": null, "block_structure": null, "dynamic": dynamic, "group_size": null,
+               "num_bits": 8, "observer": null, "observer_kwargs": {}, "strategy": strategy,
+               "symmetric": true, "type": "float"})
+    };
+    json!({"config_groups": {"group_0": {"input_activations": q("token", true), "output_activations": null,
+            "targets": ["Linear"], "weights": q("channel", false)}},
+           "format": "float-quantized", "ignore": ["lm_head"], "kv_cache_scheme": null,
+           "quant_method": "compressed-tensors", "quantization_status": "compressed"})
+}
+
+/// The tiny FP8 model's tensors: hidden 128 (whole 128-blocks per row),
+/// ffn 256, every linear F8_E4M3 (random finite codes) with BF16 scales
+/// [rows, 1], the rest BF16. (name, dtype, shape, bytes).
+fn tiny_fp8_weights() -> Vec<(String, &'static str, Vec<u64>, Vec<u8>)> {
+    let mut seed = 99u64;
+    let mut s = 0x2468_ace0u32;
+    let mut bf = |n: usize, scale: f32, bias: f32| -> Vec<u8> {
+        (0..n)
+            .flat_map(|_| {
+                s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let x = ((s >> 8) as f32 / (1 << 24) as f32 - 0.5) * scale + bias;
+                ((x.to_bits() >> 16) as u16).to_le_bytes()
+            })
+            .collect()
+    };
+    let mut v = vec![(
+        "model.embed_tokens.weight".to_string(),
+        "BF16",
+        vec![264u64, 128],
+        bf(264 * 128, 2.0, 0.0),
+    )];
+    for l in 0..2 {
+        let p = |s: &str| format!("model.layers.{l}.{s}");
+        v.push((
+            p("input_layernorm.weight"),
+            "BF16",
+            vec![128],
+            bf(128, 0.5, 1.0),
+        ));
+        v.push((
+            p("post_attention_layernorm.weight"),
+            "BF16",
+            vec![128],
+            bf(128, 0.5, 1.0),
+        ));
+        for (b, n) in [
+            ("self_attn.q_proj", 128),
+            ("self_attn.k_proj", 64),
+            ("self_attn.v_proj", 64),
+        ] {
+            v.push((
+                p(&format!("{b}.bias")),
+                "BF16",
+                vec![n],
+                bf(n as usize, 0.2, 0.0),
+            ));
+        }
+        for (b, rows, k) in [
+            ("self_attn.q_proj", 128u64, 128u64),
+            ("self_attn.k_proj", 64, 128),
+            ("self_attn.v_proj", 64, 128),
+            ("self_attn.o_proj", 128, 128),
+            ("mlp.gate_proj", 256, 128),
+            ("mlp.up_proj", 256, 128),
+            ("mlp.down_proj", 128, 256),
+        ] {
+            v.push((
+                p(&format!("{b}.weight")),
+                "F8_E4M3",
+                vec![rows, k],
+                crate::quant::fp8::test_codes((rows * k) as usize, &mut seed),
+            ));
+            v.push((
+                p(&format!("{b}.weight_scale")),
+                "BF16",
+                vec![rows, 1],
+                bf(rows as usize, 0.004, 0.006),
+            ));
+        }
+    }
+    v.push((
+        "model.norm.weight".into(),
+        "BF16",
+        vec![128],
+        bf(128, 0.5, 1.0),
+    ));
+    v
+}
+
+/// The tiny FP8 checkpoint in `d`, `edit` applied to its tensors first.
+fn write_tiny_fp8(d: &Dir, edit: impl FnOnce(&mut Vec<(String, &'static str, Vec<u64>, Vec<u8>)>)) {
+    let mut c = tiny_config();
+    let o = c.as_object_mut().unwrap();
+    o.insert("hidden_size".into(), json!(128));
+    o.insert("intermediate_size".into(), json!(256));
+    o.insert("quantization_config".into(), fp8_qcfg());
+    d.json("config.json", &c);
+    d.json("tokenizer.json", &tiny_tokenizer());
+    d.json(
+        "tokenizer_config.json",
+        &json!({"add_bos_token": false, "bos_token": null, "eos_token": "<|endoftext|>",
+                "chat_template": "{{ messages }}"}),
+    );
+    let mut w = tiny_fp8_weights();
+    edit(&mut w);
+    let ts: Vec<(&str, &str, Vec<u64>, Vec<u8>)> = w
+        .iter()
+        .map(|(n, t, s, b)| (n.as_str(), *t, s.clone(), b.clone()))
+        .collect();
+    d.put(
+        "model.safetensors",
+        &st_bytes(&ts, Some(json!({"format": "pt"}))),
+    );
+}
+
+/// The tiny FP8 checkpoint on the CPU (fp8-ref) gives the logits of the GGUF
+/// whose matrices are F32 holding e4m3 * scale (the exact dequant: HF F32's
+/// weights), bit for bit; its matrices are F8_E4M3 read in place with an
+/// F32 scale per row; it runs on the GPU (no refusal).
+#[test]
+fn tiny_fp8_checkpoint_is_its_exact_dequant() {
+    use crate::quant::fp8::e4m3_to_f32;
+    let d = Dir::new("fp8");
+    write_tiny_fp8(&d, |_| {});
+    let m = load_dir(&d.0).unwrap();
+    crate::model::check_supported(&m).unwrap();
+    assert!(is_fp8(&m) && gpu_refusal(&m).is_none());
+    let q = m
+        .tensors
+        .iter()
+        .find(|t| t.name == "blk.0.attn_q.weight")
+        .unwrap();
+    assert_eq!((q.qtype.id, q.shard), (QT_F8_E4M3, 0));
+    let sc = m
+        .tensors
+        .iter()
+        .find(|t| t.name == "blk.0.attn_q.scale")
+        .unwrap();
+    assert_eq!((sc.qtype.id, sc.n_elements), (F32, 128));
+    // The GGUF of the dequantized weights.
+    let w = tiny_fp8_weights();
+    let bf = |b: &[u8]| -> Vec<f32> {
+        b.chunks_exact(2)
+            .map(|c| f32::from_bits((u16::from_le_bytes([c[0], c[1]]) as u32) << 16))
+            .collect()
+    };
+    let mut list: Vec<(String, Vec<u64>, u32)> = Vec::new();
+    let mut data: Vec<Vec<u8>> = Vec::new();
+    for (n, dt, shape, b) in &w {
+        if n.ends_with("_scale") {
+            continue;
+        }
+        let g = gguf_name(n).unwrap();
+        let dims: Vec<u64> = shape.iter().rev().copied().collect();
+        if *dt == "F8_E4M3" {
+            let s = bf(&w.iter().find(|x| x.0 == format!("{n}_scale")).unwrap().3);
+            let k = shape[1] as usize;
+            let v: Vec<u8> = b
+                .iter()
+                .enumerate()
+                .flat_map(|(i, &c)| (e4m3_to_f32(c) * s[i / k]).to_le_bytes())
+                .collect();
+            data.push(v);
+            list.push((g, dims, F32));
+        } else if shape.len() == 1 {
+            data.push(bf(b).iter().flat_map(|f| f.to_le_bytes()).collect());
+            list.push((g, dims, F32));
+        } else {
+            data.push(
+                bf(b)
+                    .iter()
+                    .flat_map(|&f| crate::quant::f32_to_f16(f).to_le_bytes())
+                    .collect(),
+            );
+            list.push((g, dims, F16));
+        }
+    }
+    let meta: Vec<(&str, Val)> = m
+        .metadata
+        .iter()
+        .filter(|(k, _)| k != FP8_KEY)
+        .map(|(k, v)| (k.as_str(), v.clone()))
+        .collect();
+    let l: Vec<(&str, &[u64], u32)> = list.iter().map(|t| (t.0.as_str(), &t.1[..], t.2)).collect();
+    let g = gguf::build_for_test_with(&meta, &l, &data);
+    let ids = [256u32, 10, 72, 101, 108, 108, 111, 263];
+    let run = |m: &Model| -> Vec<Vec<u32>> {
+        let net = crate::model::Qwen2::new(m);
+        let mut c = crate::Lm::new_cache(&net, 16);
+        let mut v: Vec<Vec<u32>> = (ids.iter().enumerate())
+            .map(|(p, &t)| {
+                crate::Lm::forward(&net, t, p, &mut c)
+                    .iter()
+                    .map(|f| f.to_bits())
+                    .collect()
+            })
+            .collect();
+        let mut c2 = crate::Lm::new_cache(&net, 16);
+        v.push(
+            crate::Lm::prefill_logits(&net, &ids, 0, &mut c2)
+                .iter()
+                .map(|f| f.to_bits())
+                .collect(),
+        );
+        v
+    };
+    assert_eq!(run(&m), run(&g));
+}
+
+/// FP8 checkpoints Axon doesn't run, refused by name.
+#[test]
+fn fp8_checkpoints_refused_cleanly() {
+    let qcfg = |f: fn(&mut Value)| {
+        move |d: &Dir| {
+            let mut c = read_json(&d.0.join("config.json")).unwrap();
+            f(&mut c["quantization_config"]);
+            d.json("config.json", &c);
+        }
+    };
+    type Case<'a> = (&'a str, Box<dyn Fn(&Dir)>, &'a str);
+    let cases: Vec<Case> = vec![
+        (
+            "static",
+            Box::new(qcfg(|q| {
+                q["config_groups"]["group_0"]["input_activations"]["dynamic"] = json!(false)
+            })),
+            "dynamic",
+        ),
+        (
+            "tensor",
+            Box::new(qcfg(|q| {
+                q["config_groups"]["group_0"]["weights"]["strategy"] = json!("tensor")
+            })),
+            "strategy",
+        ),
+        (
+            "group",
+            Box::new(qcfg(|q| {
+                q["config_groups"]["group_0"]["weights"]["group_size"] = json!(128)
+            })),
+            "group_size",
+        ),
+        (
+            "block",
+            Box::new(qcfg(|q| {
+                q["config_groups"]["group_0"]["weights"]["block_structure"] = json!([128, 128])
+            })),
+            "block_structure",
+        ),
+        (
+            "int",
+            Box::new(qcfg(|q| {
+                q["config_groups"]["group_0"]["weights"]["type"] = json!("int")
+            })),
+            "type",
+        ),
+        (
+            "kv",
+            Box::new(qcfg(|q| q["kv_cache_scheme"] = json!({"num_bits": 8}))),
+            "kv_cache_scheme",
+        ),
+        (
+            "ignore",
+            Box::new(qcfg(|q| {
+                q["ignore"] = json!(["lm_head", "model.layers.0.mlp.down_proj"])
+            })),
+            "ignore",
+        ),
+        (
+            "method",
+            Box::new(qcfg(|q| q["quant_method"] = json!("fp8"))),
+            "quant_method fp8",
+        ),
+        (
+            "format",
+            Box::new(qcfg(|q| q["format"] = json!("pack-quantized"))),
+            "format",
+        ),
+    ];
+    for (tag, edit, want) in cases {
+        let d = Dir::new(&format!("fp8{tag}"));
+        write_tiny_fp8(&d, |_| {});
+        edit(&d);
+        match load_dir(&d.0) {
+            Ok(_) => panic!("{tag}: loaded"),
+            Err(e) => assert!(e.to_string().contains(want), "{tag}: {e}"),
+        }
+    }
+    type Edit = fn(&mut Vec<(String, &'static str, Vec<u64>, Vec<u8>)>);
+    let tensor_cases: [(&str, Edit, &str); 6] = [
+        (
+            "noscale",
+            |w| w.retain(|t| t.0 != "model.layers.1.mlp.up_proj.weight_scale"),
+            "without its weight_scale",
+        ),
+        (
+            "shape",
+            |w| {
+                let t = w
+                    .iter_mut()
+                    .find(|t| t.0 == "model.layers.0.self_attn.q_proj.weight_scale")
+                    .unwrap();
+                t.2 = vec![1, 128];
+                t.3.truncate(2);
+            },
+            "one scale per row",
+        ),
+        (
+            "nan",
+            |w| {
+                w.iter_mut()
+                    .find(|t| t.0 == "model.layers.0.mlp.down_proj.weight")
+                    .unwrap()
+                    .3[17] = 0x7f
+            },
+            "NaN code",
+        ),
+        (
+            "negscale",
+            |w| {
+                let t = w
+                    .iter_mut()
+                    .find(|t| t.0 == "model.layers.0.mlp.gate_proj.weight_scale")
+                    .unwrap();
+                t.3[1] |= 0x80;
+            },
+            "finite and >= 0",
+        ),
+        (
+            "bf16linear",
+            |w| {
+                let t = w
+                    .iter_mut()
+                    .find(|t| t.0 == "model.layers.1.self_attn.o_proj.weight")
+                    .unwrap();
+                t.1 = "BF16";
+                t.3 = t.3.iter().flat_map(|_| [0u8, 0x3c]).collect();
+                w.retain(|t| t.0 != "model.layers.1.self_attn.o_proj.weight_scale");
+            },
+            "every layer linear is F8_E4M3",
+        ),
+        (
+            "orphan",
+            |w| {
+                w.push((
+                    "model.layers.0.input_layernorm.weight_scale".into(),
+                    "BF16",
+                    vec![1],
+                    vec![0, 0x3c],
+                ))
+            },
+            "not a qwen2 tensor",
+        ),
+    ];
+    for (tag, edit, want) in tensor_cases {
+        let d = Dir::new(&format!("fp8t{tag}"));
+        write_tiny_fp8(&d, edit);
+        match load_dir(&d.0) {
+            Ok(_) => panic!("{tag}: loaded"),
+            Err(e) => assert!(e.to_string().contains(want), "{tag}: {e}"),
+        }
+    }
+    // FP8 tensors without a quantization_config.
+    let d = Dir::new("fp8nocfg");
+    write_tiny_fp8(&d, |_| {});
+    let mut c = read_json(&d.0.join("config.json")).unwrap();
+    c.as_object_mut().unwrap().remove("quantization_config");
+    d.json("config.json", &c);
+    let e = load_dir(&d.0).err().expect("loaded").to_string();
+    assert!(e.contains("without a quantization_config"), "{e}");
+}

@@ -540,6 +540,39 @@ pub(super) fn act_stride(n: usize) -> usize {
     act_bytes(n).next_multiple_of(256)
 }
 
+/// fp8.cu's kernels (an FP8 module's, `Module::f8`).
+pub(super) struct F8Fns<'m> {
+    quant: Func<'m>,
+    gemv: Func<'m>,
+    gemm: Func<'m>,
+}
+
+/// gemv_f8's shared memory for nb tokens (fp8.cu F8V_T values a token).
+fn gemv_f8_smem(nb: usize) -> usize {
+    nb * 512 * 4
+}
+
+/// gemm_f8's shared memory: two stages of 64 rows and 64 tokens of 144 bytes.
+const GEMM_F8_SMEM: usize = 2 * 2 * 64 * 144;
+
+/// Where an FP8 product runs (docs/design/fp8-weights.md §3): `Gemv` for
+/// nb <= 16, `MmaSync` (gemm_f8) past it; `Wgmma` is WP-A3's Hopper kernel,
+/// not built yet: it runs as `MmaSync`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum F8Route {
+    Gemv,
+    MmaSync,
+    Wgmma,
+}
+
+pub(super) fn f8_route(nb: usize, hopper: bool) -> F8Route {
+    match (nb <= SMALL, hopper) {
+        (true, _) => F8Route::Gemv,
+        (false, true) => F8Route::Wgmma,
+        (false, false) => F8Route::MmaSync,
+    }
+}
+
 /// What a batched pass starts from: tokens (first == 0), or nb hidden
 /// states of dim floats each, token-major (first > 0; see `Input`).
 #[derive(Clone, Copy)]
@@ -643,6 +676,8 @@ fn type_index(qt: u32) -> usize {
 
 /// The batched kernels of a module.
 pub(super) struct BatchFns<'m> {
+    /// fp8.cu's (FP8 modules only).
+    pub(super) f8: Option<F8Fns<'m>>,
     pub(super) embed: Func<'m>,
     rope_table: Func<'m>,
     rmsnorm_quant: Func<'m>,
@@ -877,6 +912,19 @@ impl<'m> BatchFns<'m> {
                 ),
             gemm,
             gemm_q6k8,
+            f8: if module.f8() {
+                let gemm = module.function("gemm_f8")?;
+                gemm.set_max_shared(GEMM_F8_SMEM)?;
+                let gemv = module.function("gemv_f8")?;
+                gemv.set_max_shared(gemv_f8_smem(SMALL))?;
+                Some(F8Fns {
+                    quant: module.function("quant_f8_tok")?,
+                    gemv,
+                    gemm,
+                })
+            } else {
+                None
+            },
             gemm_gu: if module.mma() {
                 let f = module.function("gemm2s_q4_k_gu")?;
                 f.set_max_shared(gemm2_smem(Q4_K, 64, 3))?;
@@ -952,6 +1000,9 @@ pub(super) struct BatchBufs<'g> {
     up: DevBuf<'g>,
     /// Quantized activations, [max][act_stride(act_len())].
     pub(super) act: DevBuf<'g>,
+    /// An FP8 net's (fp8.cu): its products' activation codes [max][cols]
+    /// and scales [max] (contiguous, token-major: the A3 seam's layout).
+    pub(super) f8: Option<DevBuf<'g>>,
     rope: DevBuf<'g>,
     /// gemma3's local layers' table (empty otherwise).
     rope_swa: DevBuf<'g>,
@@ -1004,7 +1055,8 @@ impl<'g> CudaQwen2<'g> {
         let (f, kvd) = (4, self.kv_dim());
         let parts = self.n_heads * self.batch_parts(max, max_ctx) * (self.head_dim + 2) * f;
         let per_tok = (self.dim + 2 * self.q_dim + 2 * kvd + 2 * self.ffn + self.head_dim) * f
-            + act_stride(self.act_len())
+            + self.ast()
+            + if self.f8 { self.f8_cols() + 4 } else { 0 }
             + 8
             + if self.first > 0 { self.dim * f } else { 0 }
             + if self.freq_swa.len() > 0 {
@@ -1033,7 +1085,11 @@ impl<'g> CudaQwen2<'g> {
             q: g.alloc(max * self.q_dim * f)?,
             gate: g.alloc(max * self.ffn * f)?,
             up: g.alloc(max * self.ffn * f)?,
-            act: g.alloc(max * act_stride(self.act_len()))?,
+            act: g.alloc(max * self.ast())?,
+            f8: match self.f8 {
+                true => Some(g.alloc((max * self.f8_cols()).next_multiple_of(256) + max * 4)?),
+                false => None,
+            },
             rope: g.alloc(max * self.head_dim / 2 * 8)?,
             rope_swa: g.alloc(if self.freq_swa.len() > 0 {
                 max * self.head_dim / 2 * 8
@@ -1075,6 +1131,10 @@ impl<'g> CudaQwen2<'g> {
         ostride: usize,
     ) -> Result<(), String> {
         let bf = &self.bf;
+        if mt.qt == F8_E4M3 {
+            // SAFETY: the caller's contract.
+            return unsafe { self.bgemm_f8(wts, mt, act, astride, nb, bias, mode, out, ostride) };
+        }
         let ti = type_index(mt.qt);
         // gemvm (weight-read-once) for up to vm_max tokens of its types.
         let vm = bf.gemvm.is_some() && ti < NTYPES_VM && self.takes_gemvm(mt.rows, nb);
@@ -1208,6 +1268,110 @@ impl<'g> CudaQwen2<'g> {
         }
     }
 
+    /// `bgemm` of an F8_E4M3 matrix (fp8.cu, fast set): the nb tokens' f32
+    /// values (act rows, `act_f8_off`) to e4m3 codes per token in the
+    /// scratch (`f8_scratch`), then `gemv_f8` or `gemm_f8` (`f8_route`).
+    ///
+    /// # Safety
+    /// As `bgemm`'s; the act rows were written by an FP8 module's kernels.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn bgemm_f8(
+        &self,
+        wts: &DevBuf,
+        mt: &Mat,
+        act: Arg,
+        astride: usize,
+        nb: usize,
+        bias: Arg,
+        mode: i32,
+        out: Arg,
+        ostride: usize,
+    ) -> Result<(), String> {
+        let f = self
+            .bf
+            .f8
+            .as_ref()
+            .ok_or("an F8_E4M3 matrix without an FP8 module")?;
+        let ws = mt.ws.ok_or("an F8_E4M3 matrix without its scales")?;
+        let (qa, das) = self.f8_scratch(nb, mt.cols)?;
+        // SAFETY (both launches): quant_f8_tok's and gemv_f8's / gemm_f8's
+        // signatures; qa holds nb x cols bytes and das nb floats.
+        unsafe {
+            self.gpu.launch(
+                &f.quant,
+                (nb as u32, 1, 1),
+                (256, 1, 1),
+                0,
+                &[
+                    act,
+                    Arg::U64(astride as u64),
+                    Arg::I32(mt.cols as i32),
+                    qa,
+                    das,
+                ],
+            )?;
+            self.fast_launched();
+            let args = [
+                wts.arg_at(mt.off),
+                Arg::I32(mt.rows as i32),
+                Arg::I32(mt.cols as i32),
+                qa,
+                das,
+                Arg::I32(nb as i32),
+                self.vecs.arg_at(ws as usize * 4),
+                bias,
+                Arg::I32(mode),
+                out,
+                Arg::U64(ostride as u64),
+            ];
+            match f8_route(nb, false) {
+                F8Route::Gemv => self.gpu.launch(
+                    &f.gemv,
+                    (mt.rows.div_ceil(8) as u32, 1, 1),
+                    (256, 1, 1),
+                    gemv_f8_smem(nb) as u32,
+                    &args,
+                )?,
+                F8Route::MmaSync | F8Route::Wgmma => self.gpu.launch(
+                    &f.gemm,
+                    (nb.div_ceil(64) as u32, mt.rows.div_ceil(64) as u32, 1),
+                    (256, 1, 1),
+                    GEMM_F8_SMEM as u32,
+                    &args,
+                )?,
+            }
+        }
+        self.fast_launched();
+        Ok(())
+    }
+
+    /// fp8.cu's scratch of the running pass (`layer` sets it from its
+    /// cache's `BatchBufs::f8`): codes [nb][cols], scales [nb].
+    fn f8_scratch(&self, nb: usize, cols: usize) -> Result<(Arg, Arg), String> {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (qa, das) = (self.f8scr[0].load(Relaxed), self.f8scr[1].load(Relaxed));
+        if qa == 0 || nb * cols > (das - qa) as usize {
+            return Err(format!(
+                "FP8: no scratch for {nb} x {cols} (a product outside `layer`?)"
+            ));
+        }
+        Ok((Arg::Ptr(qa), Arg::Ptr(das)))
+    }
+
+    /// The widest input of an FP8 net's matrices (fp8.cu's scratch rows).
+    fn f8_cols(&self) -> usize {
+        self.dim.max(self.q_dim).max(self.ffn)
+    }
+
+    /// The act stride of this net's batched passes (`act_stride`; an FP8
+    /// module's rows also hold the f32 values, `act_bytes_f8`).
+    pub(super) fn ast(&self) -> usize {
+        match self.f8 {
+            true => super::act_bytes_f8(self.act_len()).next_multiple_of(256),
+            false => act_stride(self.act_len()),
+        }
+    }
+
     /// Tokens at positions start.. (nb <= the cache's batch max) through
     /// every layer, their K/V into the cache; with `head`, each one's greedy
     /// pick into b.best. Enqueued, not waited for.
@@ -1319,7 +1483,7 @@ impl<'g> CudaQwen2<'g> {
         let (g, bf) = (self.gpu, &self.bf);
         let w = |mt: &Mat| self.weights.arg_at(mt.off);
         let null = Arg::Ptr(0);
-        let ast = act_stride(self.act_len());
+        let ast = self.ast();
         // SAFETY (every launch): arguments match prefill.cu's signatures;
         // the batch buffers hold b.max >= nb tokens of what each kernel
         // reads and writes (sizes in batch_bufs); positions start..start + nb
@@ -1592,7 +1756,7 @@ impl<'g> CudaQwen2<'g> {
                     Arg::I32(dim as i32),
                     want_k(dim),
                     b.act.arg(),
-                    Arg::U64(act_stride(self.act_len()) as u64),
+                    Arg::U64(self.ast() as u64),
                 ],
             )
         }
@@ -1629,6 +1793,14 @@ impl<'g> CudaQwen2<'g> {
         tab: Arg,
         on: &mut dyn FnMut(&'static str) -> Result<(), String>,
     ) -> Result<(), String> {
+        if let Some(s) = &b.f8 {
+            use std::sync::atomic::Ordering::Relaxed;
+            self.f8scr[0].store(dev_ptr(s.arg()), Relaxed);
+            self.f8scr[1].store(
+                dev_ptr(s.arg_at((b.max * self.f8_cols()).next_multiple_of(256))),
+                Relaxed,
+            );
+        }
         // SAFETY: the caller's contract (`attn_half`'s and `ffn_half`'s).
         unsafe {
             self.attn_half(b, l, wts, vecs, kv, mode, nb, start, rp, tab, on)?;
@@ -1664,7 +1836,7 @@ impl<'g> CudaQwen2<'g> {
         let vec = |off: usize| vecs.arg_at(off * 4);
         let null = Arg::Ptr(0);
         let want_k = |n: usize| Arg::I32(n.is_multiple_of(256) as i32);
-        let ast = act_stride(self.act_len());
+        let ast = self.ast();
         let nbu = nb as u32;
         let qkvw = qd + 2 * kvd;
         // SAFETY (every launch): as `pass`, with the caller's contract for
@@ -2179,7 +2351,7 @@ impl<'g> CudaQwen2<'g> {
         let vec = |off: usize| vecs.arg_at(off * 4);
         let null = Arg::Ptr(0);
         let want_k = |n: usize| Arg::I32(n.is_multiple_of(256) as i32);
-        let ast = act_stride(self.act_len());
+        let ast = self.ast();
         let nbu = nb as u32;
         let (gate, up, down) = l.dense();
         // SAFETY (every launch): as `pass`, with the caller's contract for
@@ -2422,6 +2594,9 @@ impl<'g> CudaQwen2<'g> {
             return Ok(false);
         }
         let m0 = ms[0].0;
+        if m0.qt == F8_E4M3 {
+            return Ok(false);
+        }
         let ti = type_index(m0.qt);
         if ti >= NTYPES_VM
             || ms
