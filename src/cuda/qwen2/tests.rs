@@ -314,8 +314,8 @@ pub(crate) enum Top1 {
     /// At least the floor's count minus 2 binomial standard errors,
     /// `2 sqrt(n p (1 - p))` with p the floor's rate, and at least 90 %:
     /// the FP8 gate's (docs/design/fp8-weights.md §6 B), whose floor
-    /// changes precision (e4m3 activations), not only order, on arms of
-    /// >= 1000 positions. Set after the 0.5B's first run (decode arm
+    /// changes precision (e4m3 activations), not only order, on arms of at
+    /// least 1000 positions. Set after the 0.5B's first run (decode arm
     /// 274/294 vs the floor's 276/294: inside 2 SE, 2.04 points behind).
     Binomial,
 }

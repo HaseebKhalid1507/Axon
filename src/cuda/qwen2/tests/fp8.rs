@@ -442,7 +442,12 @@ fn gpu_fp8_graded_vs_fp8_ref() {
         assert!(a.launches > 0, "[{}]: no FP8 kernel ran", a.arm.name());
     }
     for a in &g.arms {
-        assert!(a.mode.positions >= 1000, "[{}]: {} positions", a.arm.name(), a.mode.positions);
+        assert!(
+            a.mode.positions >= 1000,
+            "[{}]: {} positions",
+            a.arm.name(),
+            a.mode.positions
+        );
     }
     let what = "0.5B FP8 cuda fast vs fp8-ref";
     assert_graded_vs_exact_with(what, &g, false, Top1::Binomial);

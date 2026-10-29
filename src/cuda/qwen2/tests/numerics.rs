@@ -517,12 +517,7 @@ pub(crate) fn grade_sized<F: Lm>(
                 let (lr, lf) = alone[s].next().unwrap();
                 let next = seqs[s][step[s].pos + 1];
                 a.start();
-                a.tally(
-                    &lr,
-                    &lf,
-                    &lo,
-                    Some((lw + s, next)),
-                );
+                a.tally(&lr, &lf, &lo, Some((lw + s, next)));
             }
         }
         a.launches = o.fast_launches() - l0;
@@ -546,8 +541,10 @@ fn panic_text(p: &(dyn std::any::Any + Send)) -> String {
 
 /// `assert_graded` on one arm, its failure naming the arm.
 fn assert_arm(what: &str, a: &ArmGrade, top1: Top1) -> Result<(), String> {
-    catch_unwind(AssertUnwindSafe(|| assert_graded_with(&a.mode, &a.floor, top1)))
-        .map_err(|p| format!("{what} [{}]: {}", a.arm.name(), panic_text(&*p)))
+    catch_unwind(AssertUnwindSafe(|| {
+        assert_graded_with(&a.mode, &a.floor, top1)
+    }))
+    .map_err(|p| format!("{what} [{}]: {}", a.arm.name(), panic_text(&*p)))
 }
 
 /// Print `g`, every arm.
@@ -770,7 +767,8 @@ fn graded_catches_another_model() {
     report_graded("0.5B Q4_0 vs Q4_K_M exact", &g);
     assert_eq!(g.arms.len(), 4);
     for a in &g.arms {
-        let e = assert_arm("Q4_0", a, Top1::Points(94)).expect_err("another model passed an arm of the gate");
+        let e = assert_arm("Q4_0", a, Top1::Points(94))
+            .expect_err("another model passed an arm of the gate");
         eprintln!("as it must: {e}");
         assert!(!e.contains("reference spread"), "{e}");
     }
