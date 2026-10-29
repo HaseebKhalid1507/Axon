@@ -69,8 +69,8 @@ def run(binary, model, prompt, flags, prefix):
         m = re.match(r"\s*(\d+)\s+\S+\s+\S+\s+\"", line)
         if m and pos is not None and pos not in top1:
             top1[pos] = int(m.group(1))
-    if ids is None or not nll:
-        sys.exit(f"{binary}: no positions in the output (AXON_LOGITS_NLL unsupported? an older binary)")
+    if ids is None:
+        sys.exit(f"{binary}: no prompt ids in the output")
     return ids, nll, top1, r.stderr
 
 
@@ -126,6 +126,9 @@ def main():
                 sys.exit(f"window {w}: the two sides tokenized differently ({len(ib)} vs {len(ic)} ids)")
             if n > 0 and len(ib) <= n:
                 sys.exit(f"window {w}: {len(ib)} tokens, not past --prefix {n}: raise --chars")
+            if not lb:
+                sys.exit(f"{a.base}: no positions in the output (AXON_LOGITS_NLL / AXON_LOGITS_PREFIX unsupported? "
+                         "an older binary)")
             for p in sorted(lb):
                 if p not in lc:
                     sys.exit(f"window {w}: position {p} missing on the candidate side")
