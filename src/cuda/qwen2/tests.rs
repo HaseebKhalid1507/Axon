@@ -10529,10 +10529,27 @@ fn nvrtc_probe_fast_compiles_sm90a() {
 }
 
 /// The probe's module (sm_90a devices only: None elsewhere).
+///
+/// Prints `A1 MODULE probe-fast: cache <Hit|Miss|Corrupt|Off>, NVRTC x.y,
+/// target t`: how Module::load got the code (Hit: the kernel cache, i.e. on
+/// the H100 the kit's cubin; anything else: compiled in this process) and
+/// the NVRTC Module::load picks (nvrtc_for, the same choice). a1_verdict.py
+/// V5 reads it: a module compiled here needs a passing compile check of the
+/// same NVRTC.
 fn probe_fast_module(g: &Gpu) -> Option<Module<'_>> {
-    let m = Module::load(g, &probe_fast_src(), &crate::cuda::KERNEL_OPTS_EXT)
-        .unwrap()
-        .0;
+    let (m, status) = Module::load(g, &probe_fast_src(), &crate::cuda::KERNEL_OPTS_EXT).unwrap();
+    let cc = g.info().unwrap().cc;
+    let picked = crate::cuda::ffi::driver_version(g.d)
+        .and_then(|d| {
+            crate::cuda::nvrtc_for((cc.0 * 10 + cc.1) as i32, d, crate::cuda::hopper_env())
+        })
+        .and_then(|(n, t)| Ok((crate::cuda::ffi::nvrtc_version(n)?, t)));
+    match picked {
+        Ok(((a, b), t)) => {
+            eprintln!("A1 MODULE probe-fast: cache {status:?}, NVRTC {a}.{b}, target {t}")
+        }
+        Err(e) => eprintln!("A1 MODULE probe-fast: cache {status:?}, NVRTC unknown ({e})"),
+    }
     m.hopper().then_some(m)
 }
 
@@ -11376,12 +11393,15 @@ fn a1_check(
 
 /// The tiny cases (what the session runs under compute-sanitizer memcheck
 /// first): one tile, one CTA; split-K over 2 CTAs; stream-K over 3 CTAs on
-/// 2 tiles; stream-K with more CTAs than K-blocks.
-const A1_TINY: [(usize, usize, usize, usize, usize); 4] = [
+/// 2 tiles; stream-K with more CTAs than K-blocks; nb 136 on ragged rows
+/// (200): the 128-token tiles' second half (fp8n128's d[32..63] stores) in
+/// range, then a tail of 8 tokens, so memcheck sees those stores too.
+const A1_TINY: [(usize, usize, usize, usize, usize); 5] = [
     (128, 256, 64, 1, 1),
     (128, 512, 64, 2, 2),
     (256, 768, 64, 3, 0),
     (128, 256, 64, 4, 0),
+    (200, 512, 136, 2, 1),
 ];
 
 /// The ragged cases, every output checked: rows / tokens off the 128 x 64
@@ -11477,8 +11497,10 @@ fn gpu_a1_w4a16_256x64_ragged() {
 
 /// The bench's result line for one cell (a1_verdict.py's CELL pattern; the
 /// format is pinned by a1_cell_line_pinned and scripts/a1/a1_battery.py):
-/// medians to 2 decimals (a 349.995 must not print as 350.0), the median
-/// time per fire in ms, then the tolerance text for a candidate.
+/// medians to 2 decimals for reading, the median time per fire in ms, the
+/// raw median to 6 decimals (what a1_verdict.py compares with a bar: 349.996
+/// prints as 350.00 but is below 350), then the tolerance text for a
+/// candidate.
 #[allow(clippy::too_many_arguments)]
 fn a1_cell_line(
     what: &str,
@@ -11490,7 +11512,7 @@ fn a1_cell_line(
     tol: &str,
 ) -> String {
     format!(
-        "A1 CELL {what} {cols}x{rows} nb {nb} {name}: median {med:.2} TMAC/s (min {lo:.2} max {hi:.2}; {rounds} rounds; {tmed_ms:.4} ms){tol}"
+        "A1 CELL {what} {cols}x{rows} nb {nb} {name}: median {med:.2} TMAC/s (min {lo:.2} max {hi:.2}; {rounds} rounds; {tmed_ms:.4} ms; raw median {med:.6}){tol}"
     )
 }
 
@@ -11510,12 +11532,12 @@ fn a1_cell_line_pinned() {
             0.18291,
             &format!(" {tol}")
         ),
-        "A1 CELL gate 3584x18944 nb 1024 fp8n128_128x128: median 380.00 TMAC/s (min 377.50 max 383.25; 9 rounds; 0.1829 ms) tol PASS rel-rms 1.23e-2 rel-max 5.00e-2 (bounds 0.1 / 0.5)"
+        "A1 CELL gate 3584x18944 nb 1024 fp8n128_128x128: median 380.00 TMAC/s (min 377.50 max 383.25; 9 rounds; 0.1829 ms; raw median 380.004000) tol PASS rel-rms 1.23e-2 rel-max 5.00e-2 (bounds 0.1 / 0.5)"
     );
     let battery = include_str!("../../../scripts/a1/a1_battery.py");
     assert!(
         battery.contains(
-            "A1 CELL gate 3584x18944 nb 1024 fp8n128_128x128: median 380.00 TMAC/s (min 377.50 max 383.25; 9 rounds; 0.1829 ms) tol PASS rel-rms 1.23e-2 rel-max 5.00e-2 (bounds 0.1 / 0.5)"
+            "A1 CELL gate 3584x18944 nb 1024 fp8n128_128x128: median 380.00 TMAC/s (min 377.50 max 383.25; 9 rounds; 0.1829 ms; raw median 380.004000) tol PASS rel-rms 1.23e-2 rel-max 5.00e-2 (bounds 0.1 / 0.5)"
         ),
         "scripts/a1/a1_battery.py's FORMAT line is not a1_cell_line's"
     );
@@ -11874,12 +11896,16 @@ fn a1_child(
     (rc, s, out)
 }
 
-/// How a candidate's stage ended: "ok", "skipped (no sm_90a)", "tolerance"
+/// How a candidate's stage ended: "ok", "skipped (no sm_90a)",
+/// "skipped (budget)" (never started: cuda_a1_session's reserve), "tolerance"
 /// (ran, no fault, out of tolerance: its bench still runs, its cells carry
 /// their own tol) or "FAULT" (CUDA error, trap, sanitizer error, timeout,
 /// anything else: the candidate is left out of the bench).
 fn a1_outcome(rc: i32, out: &str) -> &'static str {
-    if out.contains("skipping: not sm_90a") && rc == 0 {
+    if rc == -4 {
+        // cuda_a1_session's run(): not started, the bench's time is reserved.
+        "skipped (budget)"
+    } else if out.contains("skipping: not sm_90a") && rc == 0 {
         "skipped (no sm_90a)"
     } else if rc == 0 {
         "ok"
@@ -11898,8 +11924,11 @@ fn a1_outcome(rc: i32, out: &str) -> &'static str {
 /// WP-A1's ONE H100 job, stages in separate processes so a faulting kernel
 /// can't take the rest down (each child has its own CUDA context), cheapest
 /// and most likely to break first:
-/// 0. the probe's sm_90a NVRTC compile check (no GPU; a failure is recorded
-///    and the session goes on: the kernels come from the kit's cubin);
+/// 0. the probe's sm_90a NVRTC compile check (no GPU). A failure is recorded
+///    and the session goes on; it is binding (a1_verdict.py V5: VOID) if the
+///    job compiles a module itself instead of loading the kit's cubins (an
+///    NVRTC other than the kit's 13.2 / 13.3 / 13.4), which the
+///    `A1 MODULE probe-fast` lines and a1_h100.sh's `A1 CUBIN` line record;
 /// 1. with AXON_A1_SANITIZER=<compute-sanitizer>: a self-check (memcheck
 ///    over gpu_rmsnorm_matches_cpu: unusable -> stage dropped, not failed),
 ///    then each candidate variant's tiny shapes under memcheck;
@@ -11911,8 +11940,9 @@ fn a1_outcome(rc: i32, out: &str) -> &'static str {
 ///
 /// A fault leaves its variant out of the bench; a tolerance miss doesn't
 /// (its cells report their own tolerance). Every stage has a time limit and
-/// the whole session AXON_A1_BUDGET_S (2400 s = 40 min): a stage that would
-/// overrun it is cut to what's left (or skipped under 30 s). Off sm_90a
+/// the whole session AXON_A1_BUDGET_S (2400 s = 40 min). Stages before the
+/// bench keep 1140 s of it for the bench (cut to fit, or skipped under 30 s:
+/// "skipped (budget)", listed as a failure, never a FAULT). Off sm_90a
 /// every candidate stage skips. Fails (after everything has run) if a stage
 /// failed. Run with --ignored --nocapture.
 #[test]
@@ -11923,8 +11953,16 @@ fn cuda_a1_session() {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(2400);
-    let left = |want: u64| -> Option<u64> {
-        let rest = budget.saturating_sub(t0.elapsed().as_secs());
+    // The bench's time is reserved: a stage before it starts only if it can
+    // end with RESERVE s still left (cut to fit, skipped under 30 s). RESERVE
+    // = the main bench's limit + one fallback rerun's (720 + 420 s), at most
+    // half the budget. The worst-case sum of the pre-bench limits (~2900 s)
+    // is over the 2400 s budget; real stages take far less.
+    let reserve = (720 + 420).min(budget / 2);
+    let left = |want: u64, keep: u64| -> Option<u64> {
+        let rest = budget
+            .saturating_sub(t0.elapsed().as_secs())
+            .saturating_sub(keep);
         (rest >= 30).then(|| want.min(rest))
     };
     let mut fails: Vec<String> = Vec::new();
@@ -11933,30 +11971,47 @@ fn cuda_a1_session() {
                test: &str,
                ignored: bool,
                env: &[(&str, &str)],
-               want: u64|
+               want: u64,
+               keep: u64|
      -> (i32, String) {
-        match left(want) {
+        match left(want, keep) {
             Some(l) => {
                 let (rc, _, out) = a1_child(wrap, test, ignored, env, l);
                 (rc, out)
             }
             None => {
-                eprintln!("A1 STAGE {test}: SKIPPED (session budget {budget} s spent)");
+                eprintln!(
+                    "A1 STAGE {test}: SKIPPED (budget: {} s of {budget} s left, {keep} s reserved for the bench)",
+                    budget.saturating_sub(t0.elapsed().as_secs())
+                );
                 (-4, String::new())
             }
         }
     };
-    let (rc, _) = run(&[], "nvrtc_probe_fast_compiles_sm90a", false, &[], 180);
-    eprintln!(
-        "A1 STAGE compile: {}",
-        if rc == 0 {
-            "ok"
-        } else {
-            "FAILED (recorded; the kit's cubin is what runs)"
-        }
+    // Stage 0 is "ok" only if the check ran: it skips (rc 0) when there's no
+    // NVRTC with sm_90a, and then it checked nothing.
+    let (rc, out) = run(
+        &[],
+        "nvrtc_probe_fast_compiles_sm90a",
+        false,
+        &[],
+        180,
+        reserve,
     );
-    if rc != 0 {
-        fails.push(format!("compile check rc {rc}"));
+    let ran = out.matches("A1 COMPILE probe_").count() >= A1_VARS.len();
+    if rc == 0 && ran {
+        eprintln!("A1 STAGE compile: ok (every probe kernel: no C75xx note, no spill, no stack)");
+    } else {
+        // Binding only if a module is compiled in this job (not taken from
+        // the kit's cubins): a1_verdict.py V5 reads A1 MODULE / A1 CUBIN.
+        eprintln!(
+            "A1 STAGE compile: {} (rc {rc}): binding only if this job compiles a module itself (V5)",
+            if rc == 0 { "NOT CHECKED" } else { "FAILED" }
+        );
+        fails.push(format!(
+            "compile check rc {rc}{}",
+            if ran { "" } else { " (did not run)" }
+        ));
     }
     if let Some(san) = std::env::var_os("AXON_A1_SANITIZER") {
         let san = san.to_string_lossy().to_string();
@@ -11973,7 +12028,7 @@ fn cuda_a1_session() {
         .map(|s| s.to_string())
         .collect();
         let usable = std::path::Path::new(&san).is_file() && {
-            let (rc, out) = run(&wrap, "gpu_rmsnorm_matches_cpu", false, &[], 120);
+            let (rc, out) = run(&wrap, "gpu_rmsnorm_matches_cpu", false, &[], 120, reserve);
             rc == 0
                 && out.contains("ERROR SUMMARY: 0 errors")
                 && !out.contains("terminated before first instrumented")
@@ -11986,7 +12041,7 @@ fn cuda_a1_session() {
                 "A1 STAGE sanitizer-selfcheck: ok (memcheck instrumented gpu_rmsnorm_matches_cpu, 0 errors)"
             );
             for c in A1_VARS.map(|v| v.name) {
-                let (rc, out) = run(&wrap, &format!("gpu_a1_{c}_tiny"), false, &[], 150);
+                let (rc, out) = run(&wrap, &format!("gpu_a1_{c}_tiny"), false, &[], 150, reserve);
                 let o = a1_outcome(rc, &out);
                 let o = if o == "ok" && !out.contains("ERROR SUMMARY: 0 errors") {
                     "FAULT"
@@ -11997,7 +12052,7 @@ fn cuda_a1_session() {
                 if o == "FAULT" {
                     fault.insert(c);
                 }
-                if o == "FAULT" || o == "tolerance" {
+                if o == "FAULT" || o == "tolerance" || o == "skipped (budget)" {
                     fails.push(format!("sanitizer {c} tiny {o} (rc {rc})"));
                 }
             }
@@ -12011,18 +12066,25 @@ fn cuda_a1_session() {
                 eprintln!("A1 STAGE {c} {part}: not run ({c} faulted before)");
                 continue;
             }
-            let (rc, out) = run(&[], &format!("gpu_a1_{c}_{part}"), false, &[], want);
+            let (rc, out) = run(
+                &[],
+                &format!("gpu_a1_{c}_{part}"),
+                false,
+                &[],
+                want,
+                reserve,
+            );
             let o = a1_outcome(rc, &out);
             eprintln!("A1 STAGE {c} {part}: {o}");
             if o == "FAULT" {
                 fault.insert(c);
             }
-            if o == "FAULT" || o == "tolerance" {
+            if o == "FAULT" || o == "tolerance" || o == "skipped (budget)" {
                 fails.push(format!("{c} {part} {o} (rc {rc})"));
             }
         }
     }
-    let (rc, _) = run(&[], "cuda_a1_peak", true, &[], 120);
+    let (rc, _) = run(&[], "cuda_a1_peak", true, &[], 120, reserve);
     if rc != 0 {
         fails.push(format!("peak rc {rc}"));
     }
@@ -12043,6 +12105,7 @@ fn cuda_a1_session() {
         true,
         &[("AXON_A1_KERNELS", &kset)],
         720,
+        0,
     );
     let rehearse = std::env::var("AXON_A1_REHEARSE_FALLBACK").is_ok_and(|v| v == "1");
     if rc != 0 || rehearse {
@@ -12058,7 +12121,14 @@ fn cuda_a1_session() {
             }
         );
         for c in &healthy {
-            let (rc, _) = run(&[], "cuda_a1_bench", true, &[("AXON_A1_KERNELS", *c)], 420);
+            let (rc, _) = run(
+                &[],
+                "cuda_a1_bench",
+                true,
+                &[("AXON_A1_KERNELS", *c)],
+                420,
+                0,
+            );
             if rc != 0 {
                 fails.push(format!("fallback bench {c} rc {rc}"));
             }
@@ -12069,6 +12139,7 @@ fn cuda_a1_session() {
             true,
             &[("AXON_A1_KERNELS", "none")],
             300,
+            0,
         );
         if rc != 0 {
             fails.push(format!("fallback baselines rc {rc}"));

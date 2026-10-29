@@ -3,27 +3,31 @@
 # src/cuda/probe_fast.cu). Rules pre-registered in the GitHub issue "A1: fast GEMM probe, pre-registered rules".
 # Submitted in the staged --src form (axon-podjob), so bella or a pod can run it:
 #   axon-podjob --detach --timing h100 --models none --vram 8000 --ram 8000 --max-min 45 \
-#     --name a1probe-<sha7>-h100 --expect 'A1 H100 DONE rc 0' \
+#     --name a1probe-<sha7>-h100 --expect 'A1 H100 DONE rc 0 VALID' \
 #     -- scripts/a1/a1_h100.sh ~/.cache/axon-a1probe/axon-test-<sha7> scripts/a1/a1_verdict.py \
 #        ~/.cache/axon-a1probe/a1-kit-<sha7>.tar
 # Args (staged as ./name): the release test binary, the analysis script, the kit tarball:
 #   san/            compute-sanitizer 13.2.76 (NVIDIA redist; the PyPI wheel can't start a target)
 #   kcache-sm90a/   NVRTC 13.2 / 13.3 / 13.4 sm_90a cubins of the binary's KERNELS (plain, ext) and probe module,
-#                   installed into the kernel cache on a cc 9.0 device only (the pod never compiles them)
+#                   installed into the kernel cache on a cc 9.0 device only. A hit only if the NVRTC the binary picks
+#                   is one of those three; any other compiles the module in the job, which the session's
+#                   `A1 MODULE probe-fast` lines and the `A1 CUBIN` line below record (a1_verdict.py V5: then the
+#                   compile check must have passed on that NVRTC, else VOID)
 #   BUILT_FOR       the binary the kit was built for (name, sha256, commit): another binary stops the job
 #   SHA256SUMS      of everything in the kit (checked first)
 # Stages: cuda_a1_session (compile check, sanitizer self-check, memcheck on each candidate's tiny shapes, tiny,
 # ragged, peaks, the bench, the fallbacks; tests.rs; every stage a child process), then a1_verdict.py on its log
 # and the nvidia-smi trace (table, clocks, validity, rule lines). An nvidia-smi trace (SM / memory clock, power,
 # temperature, clock-event reasons every 500 ms) runs over the whole session; the verdict summarises the bench
-# window(s). The device line (name, power limits) is appended to the session log as `A1 SMI` (V1 reads it).
+# window(s). Appended to the session log after the session: the device line (name, power limits) as `A1 SMI` (V1
+# reads it) and the kernel-cache entries the job wrote as `A1 CUBIN` (V5 reads it).
 # Env (axon-run forwards AXON_* only): AXON_A1_BUDGET_S (the session's budget, default 2400 s),
 # AXON_A1_REHEARSE_FALLBACK=1 (take the fallback path anyway: the bella rehearsal).
 # Output: stdout / stderr only (results stay on the pod). THE RESULT IS THE `A1 VERDICT` LINE. The last line is
-# `A1 H100 DONE rc 0 (verdict printed; stage failures: none | <list>)` whenever a1_verdict.py printed a verdict
-# (any verdict, VOID included: stage failures, e.g. a candidate's tolerance miss, are listed, not fatal), or
-# `A1 H100 DONE rc 1 FAILED (no verdict: ...)` when there is none (kit or binary mismatch, no bench data,
-# the analysis crashed). --expect 'A1 H100 DONE rc 0' = a verdict exists.
+# `A1 H100 DONE rc 0 VALID|VOID (verdict printed; stage failures: none | <list>)` whenever a1_verdict.py printed a
+# verdict (VALID: `A1 VALIDITY: VALID`; stage failures, e.g. a candidate's tolerance miss, are listed, not fatal),
+# or `A1 H100 DONE rc 1 FAILED (no verdict: ...)` when there is none (kit or binary mismatch, no bench data, the
+# analysis crashed). --expect 'A1 H100 DONE rc 0 VALID' = a valid verdict exists: a VOID run is not a success.
 set -u
 T=${1:?test binary}; V=${2:?a1_verdict.py}; KIT=${3:?kit tarball}
 T0=$(date +%s); log() { echo "[a1 +$(( $(date +%s) - T0 ))s] $*"; }
@@ -33,8 +37,9 @@ O=$PWD/a1-out-$(date +%m%d-%H%M%S)-$$; mkdir -p "$O"
 trap 'rm -rf "$O/kit"; [ -n "${smipid:-}" ] && kill "$smipid" 2>/dev/null' EXIT
 fail=""      # no verdict possible: rc 1
 stagefail="" # the session's own failures: listed, the verdict still stands
+validity=VOID
 done_line() {
-  if [ -z "$fail" ]; then log "A1 H100 DONE rc 0 (verdict printed; stage failures: ${stagefail:-none})"; exit 0; fi
+  if [ -z "$fail" ]; then log "A1 H100 DONE rc 0 $validity (verdict printed; stage failures: ${stagefail:-none})"; exit 0; fi
   log "A1 H100 DONE rc 1 FAILED (no verdict: $fail${stagefail:+; stage failures: $stagefail})"; exit 1
 }
 log "kit $KIT, binary $T, out $O"
@@ -73,13 +78,17 @@ log "session rc $rc; nvidia-smi trace $(($(wc -l < "$O/smi-trace.csv") - 1)) sam
 echo "$SMI" >> "$O/session.log"
 [ $rc = 0 ] || stagefail="session rc $rc"
 grep -q '^A1 END ok' "$O/session.log" || stagefail="${stagefail:+$stagefail, }$(grep -m1 '^A1 END' "$O/session.log" || echo "no 'A1 END' line")"
-new=$(find "$CD" -maxdepth 1 -name '*.cubin' -newer "$O/.t0" 2>/dev/null)
-if [ -z "$new" ]; then echo "A1 CUBIN new cache entries during the run: none"
-else echo "A1 CUBIN new cache entries during the run (compiled here, not from the kit):"; for x in $new; do ls -l "$x"; done; fi
+# Kernel-cache entries written during the session = modules this job compiled itself (not the kit's cubins). One
+# line, into session.log (V5 reads it) as well as stdout.
+new=$(find "$CD" -maxdepth 1 -name '*.cubin' -newer "$O/.t0" 2>/dev/null | sort)
+if [ -z "$new" ]; then CUBIN="A1 CUBIN new cache entries during the run: none (every module from the kit / the cache)"
+else CUBIN="A1 CUBIN new cache entries during the run: $(echo "$new" | wc -l) (compiled in this job, not from the kit): $(echo "$new" | xargs -n1 basename | tr '\n' ' ')"; fi
+echo "$CUBIN"; echo "$CUBIN" >> "$O/session.log"
 log "analysis: $V"
 python3 "$V" "$O/session.log" "$O/smi-trace.csv" > "$O/verdict.txt" 2>&1; vrc=$?
 cat "$O/verdict.txt"
 [ $vrc = 0 ] || fail="a1_verdict.py rc $vrc"
 grep -q '^A1 VERDICT: ' "$O/verdict.txt" || fail="${fail:+$fail, }no 'A1 VERDICT' line"
 grep '^A1 VERDICT: ' "$O/verdict.txt" | sed 's/^/[a1] RESULT: /'
+grep -qx 'A1 VALIDITY: VALID' "$O/verdict.txt" && ! grep -q '^A1 VERDICT: VOID' "$O/verdict.txt" && validity=VALID
 done_line

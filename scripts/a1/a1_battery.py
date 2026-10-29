@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
-"""a1_battery.py [VERDICT]: a1_verdict.py on synthetic cuda_a1_session logs, each with its expected lines.
+"""a1_battery.py [VERDICT] [-v]: a verdict script on synthetic cuda_a1_session logs, each with its expected lines.
 
-    python3 scripts/a1/a1_battery.py            # uses scripts/a1/a1_verdict.py next to this file
-    python3 scripts/a1/a1_battery.py -v         # also print every case's full verdict output
+    python3 scripts/a1/a1_battery.py                     # scripts/a1/a1_verdict.py next to this file
+    python3 scripts/a1/a1_battery.py /tmp/old_verdict.py # another verdict script (e.g. an older commit's)
+    python3 scripts/a1/a1_battery.py -v                  # also print every case's full verdict output
 
 No GPU. The bella rehearsal only reaches the baseline paths of the verdict (sm_120: no candidate cell), so the
 candidate paths (validity V1-V4, the rule lines, the fallback merge) are proven here, before any H100 data exists.
@@ -25,7 +26,7 @@ import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-VERDICT = os.path.join(HERE, "a1_verdict.py")
+FP8_WIDE = "fp8n128_128x128"
 FAMS = {"fp8": ["fp8_128x64", "fp8_128x128", "fp8n128_128x128"], "w4a16": ["w4a16_128x64", "w4a16_256x64"]}
 VARS = FAMS["fp8"] + FAMS["w4a16"]
 TILE = {"fp8_128x64": (128, 64), "fp8_128x128": (128, 128), "fp8n128_128x128": (128, 128),
@@ -34,7 +35,7 @@ CELLS = [("gate", 3584, 18944, [128, 512, 1024]), ("down", 18944, 3584, [128, 51
          ("q/wo", 3584, 3584, [128, 1024]), ("kv", 3584, 512, [128, 1024])]
 SXM = "NVIDIA H100 80GB HBM3"
 # a1_cell_line's output for fixed inputs (tests.rs a1_cell_line_pinned asserts this file has it verbatim).
-FORMAT_LINE = "A1 CELL gate 3584x18944 nb 1024 fp8n128_128x128: median 380.00 TMAC/s (min 377.50 max 383.25; 9 rounds; 0.1829 ms) tol PASS rel-rms 1.23e-2 rel-max 5.00e-2 (bounds 0.1 / 0.5)"  # noqa: E501 (one literal: grepped)
+FORMAT_LINE = "A1 CELL gate 3584x18944 nb 1024 fp8n128_128x128: median 380.00 TMAC/s (min 377.50 max 383.25; 9 rounds; 0.1829 ms; raw median 380.004000) tol PASS rel-rms 1.23e-2 rel-max 5.00e-2 (bounds 0.1 / 0.5)"  # noqa: E501 (one literal: grepped)
 # Healthy gate nb 1024 TMAC/s per variant (shady's case: fp8_128x128 380, w4a16_256x64 240).
 HEALTHY = {"fp8_128x64": 300.0, "fp8_128x128": 380.0, "fp8n128_128x128": 420.0,
            "w4a16_128x64": 200.0, "w4a16_256x64": 240.0}
@@ -67,7 +68,7 @@ def tol(fp8, ok=True):
 def line(shape, cols, rows, nb, name, med, ms, tl="", spread=0.02):
     lo, hi = med * (1 - spread / 2), med * (1 + spread / 2)
     return (f"A1 CELL {shape} {cols}x{rows} nb {nb} {name}: median {med:.2f} TMAC/s (min {lo:.2f} max {hi:.2f}; "
-            f"9 rounds; {ms:.4f} ms){tl}")
+            f"9 rounds; {ms:.4f} ms; raw median {med:.6f}){tl}")
 
 
 def cell(shape, cols, rows, nb, name, med, tl="", spread=0.02):
@@ -76,10 +77,12 @@ def cell(shape, cols, rows, nb, name, med, tl="", spread=0.02):
 
 
 def bench(dev="NVIDIA H100 80GB HBM3", sms=132, cand=VARS, rates=None, frac_t3=0.87, host_floor_ms=0.0,
-          bad=(), shapes=None, rule3=None, base=None, spread=0.02, cc="90"):
+          bad=(), shapes=None, rule3=None, base=None, spread=0.02, cc="90", mod=None):
     """One cuda_a1_bench run's lines. rates: gate nb 1024 TMAC/s per variant; bad: variants whose every cell is
     tol FAIL (a layout bug: also noisy and flat); rule3: down nb 128 split-K TMAC/s per family; host_floor_ms:
-    every time is at least this (a host-bound harness)."""
+    every time is at least this (a host-bound harness); mod(variant, shape, nb, kernel) -> {"ok": tol PASS?,
+    "spread": (max - min) / median, "msx": time multiplier} for single cells (shady's counterexamples)."""
+    mod = mod or (lambda *a: {})
     rates = dict(HEALTHY, **(rates or {}))
     base = dict(BASE, **(base or {}))
     out = [f"A1 BENCH device {dev} sm_{cc} {sms} SMs; hopper module {cc == '90'}, probe module {cc == '90'}; "
@@ -108,9 +111,11 @@ def bench(dev="NVIDIA H100 80GB HBM3", sms=132, cand=VARS, rates=None, frac_t3=0
                 ms = max(ms, host_floor_ms)
                 if v in bad:   # layout bug: flat, noisy, wrong
                     ms = max(ms, 0.25)
+                m = mod(v, shape, nb, v)
+                ms *= m.get("msx", 1.0)
                 med = macs / (ms * 1e-3) / 1e12
-                sp = 0.30 if v in bad else spread
-                out.append(line(shape, cols, rows, nb, v, med, ms, tol(fp8, v not in bad), sp))
+                sp = m.get("spread", 0.30 if v in bad else spread)
+                out.append(line(shape, cols, rows, nb, v, med, ms, tol(fp8, m.get("ok", v not in bad)), sp))
                 if nb == 128:
                     ks = ([split(v, rows, cols, nb, sms)] if shape != "gate" else []) + [0]
                     for k in ks:
@@ -120,15 +125,40 @@ def bench(dev="NVIDIA H100 80GB HBM3", sms=132, cand=VARS, rates=None, frac_t3=0
                         if k == 0 and shape == "down":
                             r *= 0.97
                         mk = max(macs / (r * 1e12) * 1e3, host_floor_ms)
+                        m = mod(v, shape, nb, nm)
+                        mk *= m.get("msx", 1.0)
                         out.append(line(shape, cols, rows, nb, nm, macs / (mk * 1e-3) / 1e12, mk,
-                                        tol(fp8, v not in bad), 0.30 if v in bad else spread))
+                                        tol(fp8, m.get("ok", v not in bad)),
+                                        m.get("spread", 0.30 if v in bad else spread)))
     return out
 
 
-def session(benches, smi="NVIDIA H100 80GB HBM3, 700.00 W, 700.00 W, 1980 MHz", t0=None, stages=True):
-    """A session log: stage lines around each bench run (unix windows), then the job's A1 SMI line."""
+def session(benches, smi="NVIDIA H100 80GB HBM3, 700.00 W, 700.00 W, 1980 MHz", t0=None, stages=True, over=None,
+            compile_="ok (every probe kernel: no C75xx note, no spill, no stack)", compile_nv="13.4",
+            module="Hit, NVRTC 13.4", cubin="none", end="ok", target="sm_90a"):
+    """A session log as cuda_a1_session + a1_h100.sh write it: the compile check (A1 COMPILE, A1 STAGE compile),
+    each variant's memcheck / tiny / ragged outcome (over: {(kind, variant, part): outcome}, kind "sanitizer" or
+    "plain"), an A1 MODULE line per stage, the peaks, stage lines around each bench run (unix windows), A1 END,
+    then the job's A1 SMI and A1 CUBIN lines (None: the line is missing)."""
     t0 = t0 or time.time() - 3600
-    out = ["A1 STAGE compile: ok", "A1 PEAK a1_peak_fp8_ss_n64 2 WG/SM: median 610.00 TMAC/s raw (min 600.00 max 612.00; 9 rounds)",
+    out = []
+    if compile_nv:
+        out.append(f"test cuda::qwen2::tests::nvrtc_probe_fast_compiles_sm90a ... A1 COMPILE sm_90a: 242856 bytes "
+                   f"of cubin (NVRTC {compile_nv})")
+    if compile_ is not None:
+        out.append(f"A1 STAGE compile: {compile_}")
+    st = {}
+    for v in VARS:
+        st[("sanitizer", v, "tiny")] = "ok"
+        st[("plain", v, "tiny")] = "ok"
+        st[("plain", v, "ragged")] = "ok"
+    st.update(over or {})
+    for (kind, v, part), o in st.items():
+        if module:
+            out.append(f"test cuda::qwen2::tests::gpu_a1_{v}_{part} ... A1 MODULE probe-fast: cache {module}, "
+                       f"target {target}")
+        out.append(f"A1 STAGE {'sanitizer ' if kind == 'sanitizer' else ''}{v} {part}: {o}")
+    out += ["A1 PEAK a1_peak_fp8_ss_n64 2 WG/SM: median 610.00 TMAC/s raw (min 600.00 max 612.00; 9 rounds)",
            "A1 PEAK a1_peak_fp8_ss_n128 2 WG/SM: median 640.00 TMAC/s raw (min 630.00 max 641.00; 9 rounds)",
            "A1 PEAK a1_peak_f16_rs_n64 2 WG/SM: median 330.00 TMAC/s raw (min 329.00 max 331.00; 9 rounds)"]
     t = t0
@@ -140,9 +170,11 @@ def session(benches, smi="NVIDIA H100 80GB HBM3, 700.00 W, 700.00 W, 1980 MHz", 
         if stages:
             out.append(f"A1 STAGE cuda_a1_bench: rc {0 if i == len(benches) - 1 else 101} after 60.0 s at unix {t:.1f}")
         t += 5
-    out.append("A1 END ok")
+    out.append(f"A1 END {end}")
     if smi is not None:
         out.append(f"A1 SMI {smi}")
+    if cubin is not None:
+        out.append(f"A1 CUBIN new cache entries during the run: {cubin}")
     return out, t0
 
 
@@ -156,15 +188,22 @@ def trace(t0, n=400, step=0.5):
     return rows
 
 
+KILL_RATES = {"fp8_128x64": 250.0, "fp8_128x128": 300.0, "fp8n128_128x128": 330.0}   # every FP8 tile < 350
+LOW_R3 = {"fp8": 160.0, "w4a16": 150.0}
+NOT_CLOSED = ["Track A CLOSED", "vs 350: KILL (FP8 cannot carry", "A1 VALIDITY: VOID"]
+FAILED_C = "FAILED (rc 101): binding only if this job compiles a module itself (V5)"
+
+
 def cases():
     c = []
     # FORMAT: the pinned Rust line parses (a minimal log around it).
     c.append(("FORMAT (a1_cell_line's pinned line parses)",
               session([[f"A1 BENCH device {SXM} sm_90 132 SMs; hopper module true, probe module true; "
                         f"candidates [fp8n128_128x128]; 9 rounds", FORMAT_LINE]])[0], None,
-              ["A1 TOL gate nb 1024 fp8n128_128x128: PASS rel-rms 1.23e-2 rel-max 5.00e-2",
-               "| 380.00 |", "A1 RULE 1 FP8 gate 3584x18944 nb 1024 (best counting tile: fp8n128_128x128): "
-               "median 380.00 TMAC/s (tol PASS) vs 350: PASS"], [], 0))
+              ["A1 TOL gate nb 1024 fp8n128_128x128: PASS rel-rms 1.23e-2 rel-max 5.00e-2", "| 380.00 |",
+               "A1 SCALING fp8n128_128x128: not checked (gate nb 1024 tol PASS, q/wo nb 128 missing)",
+               "A1 RULE 1 FP8 gate 3584x18944 nb 1024: UNRESOLVED (fp8n128_128x128 380.00 (scaling unchecked) >= 350"],
+              ["Traceback"], 0))
     # HEALTHY: T3-like scaling (0.87 x waves) at shady's numbers: VALID (the old bar of 10 voided this).
     log, t0 = session([bench()])
     c.append(("HEALTHY (T3-like scaling, shady's 380 / 240 case)", log, trace(t0),
@@ -174,37 +213,120 @@ def cases():
                r"re:A1 SCALING fp8_128x64: .* = 15\.6\d, waves ratio 18, bar >= 9\.00: ok",
                r"re:A1 SCALING w4a16_128x64: .* = 15\.6\d, waves ratio 18, bar >= 9\.00: ok",
                "A1 V1 device NVIDIA H100 80GB HBM3, 132 SMs, power.limit 700 W: ok", "A1 VALIDITY: VALID",
+               "A1 V5 compile check ok (NVRTC 13.4); compiled in this job: nothing", "A1 WIDE-N fp8n128_128x128: CLEAN",
                "A1 CLOCKS over 1 bench window(s)",
-               "A1 RULE 1 FP8 gate 3584x18944 nb 1024 (best counting tile: fp8n128_128x128): median 420.00",
-               "A1 RULE 2 W4A16 gate 3584x18944 nb 1024 (best counting tile: w4a16_256x64): median 240.00",
+               "A1 RULE 1 FP8 gate 3584x18944 nb 1024 (best readable tile: fp8n128_128x128): median 420.00",
+               "A1 RULE 2 W4A16 gate 3584x18944 nb 1024 (best readable tile: w4a16_256x64): median 240.00",
                "A1 VERDICT: Track A OPEN (FP8 passed: WP-A2 next); W4A16 KEEP; classic M1 IN"],
               ["VOID"], 0))
-    # HOST-BOUND: every time floored at 0.3 ms (P1's defect class): flat, VOID by V3.
+    # HOST-BOUND: every time floored at 0.3 ms (P1's defect class): flat; every checked variant fails V3: VOID.
     c.append(("HOST-BOUND (every launch >= 0.3 ms: P1's defect class)",
               session([bench(host_floor_ms=0.3)])[0], None,
-              ["V3 scaling fp8_128x128", "V3 scaling fp8_128x64", "A1 VALIDITY: VOID", "A1 VERDICT: VOID"],
+              ["A1 SCALING fp8_128x128: t(gate nb 1024) / t(q/wo nb 128) = 1.00", "V3 every checked variant fails",
+               "A1 VALIDITY: VOID", "A1 VERDICT: VOID"],
               ["A1 VALIDITY: VALID"], 0))
     # TOL-FAIL in one family: W4A16 layout bug (all its cells tol FAIL, flat and noisy): FP8's verdict stands.
     c.append(("TOL-FAIL W4A16 (layout bug: flat, 30 % spread, tol FAIL)",
               session([bench(bad=FAMS["w4a16"])])[0], None,
               ["A1 SCALING w4a16_256x64: not checked", "A1 VALIDITY: VALID",
-               "A1 RULE 2 W4A16 gate 3584x18944 nb 1024 (best counting tile: None): NOT MEASURED (w4a16_",
-               "A1 RULE 1 FP8 gate 3584x18944 nb 1024 (best counting tile: fp8n128_128x128): median 420.00",
+               "A1 RULE 2 W4A16 gate 3584x18944 nb 1024: NOT MEASURED (not counting: w4a16_",
+               "A1 RULE 1 FP8 gate 3584x18944 nb 1024 (best readable tile: fp8n128_128x128): median 420.00",
                "A1 VERDICT: Track A OPEN (FP8 passed: WP-A2 next); W4A16 UNDECIDED; classic M1 IN"],
-              ["V2 spread w4a16", "V3 scaling w4a16", "A1 VALIDITY: VOID"], 0))
-    # FP8 KILL with n128 counted: Track A closed; the rest moot.
-    c.append(("FP8 KILL (all three FP8 tiles < 350, n128 counted)",
-              session([bench(rates={"fp8_128x64": 250.0, "fp8_128x128": 300.0, "fp8n128_128x128": 330.0},
-                             rule3={"fp8": 160.0, "w4a16": 150.0})])[0], None,
-              ["A1 VALIDITY: VALID", "vs 350: KILL (FP8 cannot carry M1': Track A closed",
+              ["V2 spread w4a16", "V3", "A1 VALIDITY: VOID"], 0))
+    # CLOSED: every FP8 tile < 350 and n128 fully clean: the one way to close Track A.
+    c.append(("FP8 KILL, n128 fully clean (CLOSED)",
+              session([bench(rates=KILL_RATES, rule3=LOW_R3)])[0], None,
+              ["A1 VALIDITY: VALID", "A1 WIDE-N fp8n128_128x128: CLEAN",
+               "(best readable tile: fp8n128_128x128): median 330.00 TMAC/s (raw 330.0000, tol PASS) vs 350: KILL "
+               "(FP8 cannot carry M1': Track A closed",
                "A1 VERDICT: Track A CLOSED (FP8 < 350 at n64 and n128); W4A16 KEEP (recorded; moot: Track A closed); "
-               "classic M1 OUT (recorded; moot: Track A closed)"], [], 0))
-    # FP8 n64 KILL with n128 tol FAIL: the KILL is scoped to n64, Track A stays open.
-    c.append(("FP8 n64 KILL, n128 tol FAIL (KILL scoped to the n64 instruction)",
-              session([bench(rates={"fp8_128x64": 250.0, "fp8_128x128": 300.0}, bad=["fp8n128_128x128"])])[0], None,
-              ["A1 VALIDITY: VALID", "KILL AT n64 ONLY (FP8 on m64n64k32 < 350; fp8n128_128x128 did not count",
-               "A1 VERDICT: Track A OPEN PENDING WIDER-N (FP8 < 350 at n64; fp8n128_128x128 not measured); W4A16 KEEP"],
-              ["Track A CLOSED", "A1 VALIDITY: VOID"], 0))
+               "classic M1 OUT (recorded; moot: Track A closed)"], ["NOT CLEAN"], 0))
+    # FP8 n64 KILL with n128 tol FAIL everywhere: the KILL is scoped to n64, Track A stays open.
+    c.append(("FP8 n64 KILL, n128 tol FAIL everywhere (KILL scoped to the n64 instruction)",
+              session([bench(rates={"fp8_128x64": 250.0, "fp8_128x128": 300.0}, bad=[FP8_WIDE])],
+                      over={("plain", FP8_WIDE, "tiny"): "tolerance", ("plain", FP8_WIDE, "ragged"): "tolerance"},
+                      end="FAILED: fp8n128_128x128 tiny tolerance (rc 101), fp8n128_128x128 ragged tolerance (rc 101)")[0],
+              None, ["A1 VALIDITY: VALID", "A1 WIDE-N fp8n128_128x128: NOT CLEAN (gate nb 1024 tol FAIL",
+                     "KILL AT n64 ONLY (FP8 < 350 on the readable tiles; fp8n128_128x128 not clean",
+                     "A1 VERDICT: Track A OPEN PENDING WIDER-N (FP8 < 350 at n64; fp8n128_128x128 not clean; next step "
+                     "pre-registered in #174 Amendment 2"], NOT_CLOSED, 0))
+    # M1 / shady E5: n128 PASSes at gate nb 1024 only, every other n128 cell and both its stages miss tolerance.
+    e5 = bench(rates=KILL_RATES, rule3=LOW_R3,
+               mod=lambda v, sh, nb, k: {"ok": False} if v == FP8_WIDE and (k, sh, nb) != (v, "gate", 1024) else {})
+    c.append(("E5 n128 tol PASS at gate nb 1024 only, every other cell and its stages miss (shady M1)",
+              session([e5], over={("plain", FP8_WIDE, "tiny"): "tolerance", ("plain", FP8_WIDE, "ragged"): "tolerance"},
+                      end="FAILED: fp8n128_128x128 tiny tolerance (rc 101), fp8n128_128x128 ragged tolerance (rc 101)")[0],
+              None, ["A1 SCALING fp8n128_128x128: not checked (gate nb 1024 tol PASS, q/wo nb 128 tol FAIL)",
+                     "A1 WIDE-N fp8n128_128x128: NOT CLEAN (scaling check unchecked; ",
+                     "tiny stage tolerance; ragged stage tolerance", "A1 VALIDITY: VALID",
+                     "(best readable tile: fp8_128x128): median 300.00", "KILL AT n64 ONLY",
+                     "A1 VERDICT: Track A OPEN PENDING WIDER-N"], NOT_CLOSED, 0))
+    # M1: n128's cells all PASS and V3 is ok, but its ragged stage missed tolerance: no licence.
+    c.append(("E5b n128 every cell PASS, ragged stage tolerance (stage evidence alone blocks CLOSE)",
+              session([bench(rates=KILL_RATES, rule3=LOW_R3)], over={("plain", FP8_WIDE, "ragged"): "tolerance"},
+                      end="FAILED: fp8n128_128x128 ragged tolerance (rc 101)")[0],
+              None, ["A1 WIDE-N fp8n128_128x128: NOT CLEAN (ragged stage tolerance)", "A1 VALIDITY: VALID",
+                     "KILL AT n64 ONLY", "A1 VERDICT: Track A OPEN PENDING WIDER-N"], NOT_CLOSED, 0))
+    # M1 / shady E2: every FP8 tile < 350, n128 isn't the best tile and its gate nb 1024 has a 60 % spread.
+    e2 = bench(rates={"fp8_128x64": 250.0, "fp8_128x128": 320.0, "fp8n128_128x128": 300.0}, rule3=LOW_R3,
+               mod=lambda v, sh, nb, k: {"spread": 0.60} if (k, sh, nb) == (FP8_WIDE, "gate", 1024) else {})
+    c.append(("E2 n128 gate nb 1024 spread 60 %, not the best tile (shady M1)", session([e2])[0], None,
+              ["A1 SPREAD fp8_128x128 gate nb 1024: 2.00 %",
+               "A1 WIDE-N fp8n128_128x128: NOT CLEAN (gate nb 1024 spread 60.00 % >= 5 %)", "A1 VALIDITY: VALID",
+               "(best readable tile: fp8_128x128): median 320.00", "KILL AT n64 ONLY",
+               "A1 VERDICT: Track A OPEN PENDING WIDER-N"], NOT_CLOSED, 0))
+    # S4: n128's ragged stage never ran (the bench's time was reserved): no licence either.
+    c.append(("BUDGET n128 ragged skipped (budget): no CLOSE licence",
+              session([bench(rates=KILL_RATES, rule3=LOW_R3)], over={("plain", FP8_WIDE, "ragged"): "skipped (budget)"},
+                      end="FAILED: fp8n128_128x128 ragged skipped (budget) (rc -4)")[0],
+              None, ["A1 WIDE-N fp8n128_128x128: NOT CLEAN (ragged stage skipped (budget))", "KILL AT n64 ONLY",
+                     "A1 VERDICT: Track A OPEN PENDING WIDER-N"], NOT_CLOSED, 0))
+    # Raw median: 349.996 prints as 350.00 but is below the bar (the old script PASSed it on the print).
+    c.append(("RAW n128 at 349.996 (prints 350.00): KILL on the raw value",
+              session([bench(rates={"fp8_128x64": 250.0, "fp8_128x128": 300.0, "fp8n128_128x128": 349.996},
+                             rule3=LOW_R3)])[0], None,
+              ["median 350.00 TMAC/s (raw 349.9960, tol PASS) vs 350: KILL (FP8 cannot carry M1'",
+               "A1 VERDICT: Track A CLOSED"], ["vs 350: PASS"], 0))
+    # S1 / shady E1: n128 at 420 but its q/wo nb 128 is tol FAIL (its V3 can't run): rule 1 reads 128x128's 380.
+    e1 = lambda v, sh, nb, k: {"ok": False} if (k, sh, nb) == (FP8_WIDE, "q/wo", 128) else {}
+    c.append(("E1 n128 at 420, its V3 not run: rule 1 reads the readable 128x128 (380)",
+              session([bench(mod=e1)])[0], None,
+              ["A1 SCALING fp8n128_128x128: not checked", "A1 VALIDITY: VALID",
+               "A1 RULE 1 FP8 gate 3584x18944 nb 1024 (best readable tile: fp8_128x128): median 380.00",
+               "A1 VERDICT: Track A OPEN (FP8 passed: WP-A2 next)"], ["best readable tile: fp8n128", "VOID"], 0))
+    # S1 / E1b: the readable FP8 tiles < 350, n128 at 420 unreadable: no KILL past it, no PASS on it.
+    c.append(("E1b n64 tiles < 350, n128 at 420 unreadable: UNRESOLVED, not a KILL",
+              session([bench(rates={"fp8_128x64": 250.0, "fp8_128x128": 300.0}, mod=e1)])[0], None,
+              ["A1 RULE 1 FP8 gate 3584x18944 nb 1024: UNRESOLVED (fp8n128_128x128 420.00 (scaling unchecked) >= 350",
+               "A1 VERDICT: Track A UNDECIDED"], NOT_CLOSED + ["KILL AT n64", "vs 350: PASS"], 0))
+    # S1 / shady E3: one W4A16 variant fails V3 (5.22 < 9): it drops out alone; FP8's rule 1 stands.
+    e3 = lambda v, sh, nb, k: {"msx": 3.0} if (k, sh, nb) == ("w4a16_128x64", "q/wo", 128) else {}
+    c.append(("E3 w4a16_128x64 fails V3 (5.22 < 9): no veto of FP8's rule",
+              session([bench(mod=e3)])[0], None,
+              ["A1 SCALING w4a16_128x64: t(gate nb 1024) / t(q/wo nb 128) = 5.22, waves ratio 18, bar >= 9.00: FAIL",
+               "A1 VALIDITY: VALID", "A1 RULE 1 FP8 gate 3584x18944 nb 1024 (best readable tile: fp8n128_128x128)",
+               "A1 RULE 2 W4A16 gate 3584x18944 nb 1024 (best readable tile: w4a16_256x64): median 240.00",
+               "A1 VERDICT: Track A OPEN (FP8 passed: WP-A2 next); W4A16 KEEP; classic M1 IN"], ["VOID"], 0))
+    # M2 / V5: the pod compiled the probe itself (NVRTC 12.8: no kit cubin) and the compile check failed: VOID.
+    c.append(("V5 pod compiled (NVRTC 12.8), compile check FAILED: VOID (shady M2)",
+              session([bench()], compile_=FAILED_C, compile_nv="12.8", module="Miss, NVRTC 12.8", cubin="3")[0], None,
+              ["V5 kernels were (or may have been) compiled in this job (the probe module was compiled here",
+               "3 new kernel-cache entries", "compile check: FAILED", "A1 VERDICT: VOID"], ["A1 VALIDITY: VALID"], 0))
+    c.append(("V5 compile check FAILED, every module a kit hit: recorded, not binding",
+              session([bench()], compile_=FAILED_C)[0], None,
+              ["but every module came from the kit's cubins", "recorded, not binding", "A1 VALIDITY: VALID",
+               "A1 VERDICT: Track A OPEN"], ["V5 kernels"], 0))
+    c.append(("V5 compile check FAILED, no A1 CUBIN line: unknown counts as compiled",
+              session([bench()], compile_=FAILED_C, cubin=None)[0], None,
+              ["no `A1 CUBIN` line", "A1 VERDICT: VOID"], ["A1 VALIDITY: VALID"], 0))
+    c.append(("V5 compile check skipped (NOT CHECKED), probe compiled here: VOID",
+              session([bench()], compile_="NOT CHECKED (rc 0): binding only if this job compiles a module itself (V5)",
+                      compile_nv=None, module="Miss, NVRTC 13.4", cubin="9")[0], None,
+              ["V5 kernels were", "compile check: NOT CHECKED", "A1 VERDICT: VOID"], ["A1 VALIDITY: VALID"], 0))
+    c.append(("V5 compile check ok on NVRTC 13.4, probe compiled with NVRTC 12.9: VOID",
+              session([bench()], module="Miss, NVRTC 12.9", cubin="3")[0], None,
+              ["V5 the probe module was compiled here with NVRTC 12.9 but the compile check ran NVRTC 13.4",
+               "A1 VERDICT: VOID"], ["A1 VALIDITY: VALID"], 0))
     # FALLBACK: the main bench died after its gate cells; per-candidate fallbacks + baselines-only run.
     main = bench(shapes=["gate"])
     fb = [bench(cand=[v]) for v in VARS] + [bench(cand=[])]
@@ -224,11 +346,17 @@ def cases():
               ["V1 power.limit 500 W < 690 W", "A1 VERDICT: VOID"], [], 0))
     c.append(("V1 no SMI line, SXM5 name (accepted by name)", session([bench()], smi=None)[0], None,
               ["power.limit unreadable (name is the SXM5 part's): ok", "A1 VALIDITY: VALID"], [], 0))
-    # REHEARSAL-like: bella sm_120, baselines only (no gemmh2, no candidates).
+    # REHEARSAL-like: bella sm_120, baselines only (no gemmh2, no candidates), probe stages skipped.
+    sk = {(k, v, p): "skipped (no sm_90a)" for v in VARS for k, p in [("sanitizer", "tiny"), ("plain", "tiny"),
+                                                                       ("plain", "ragged")]}
     c.append(("REHEARSAL-like (sm_120, gemm2s only)",
-              session([bench(dev="NVIDIA GeForce RTX 5070", sms=48, cand=[], cc="120")], smi="NVIDIA GeForce RTX 5070, 250.00 W, 250.00 W, 3090 MHz")[0],
-              None, ["A1 VALIDITY: VOID (V1", "V4 no in-session gemmh2_q4_k", "A1 RULE 1 FP8 gate 3584x18944 nb 1024 (best counting tile: None): NOT MEASURED",
-                     "A1 VERDICT: VOID"], ["Traceback"], 0))
+              session([bench(dev="NVIDIA GeForce RTX 5070", sms=48, cand=[], cc="120")], over=sk,
+                      smi="NVIDIA GeForce RTX 5070, 250.00 W, 250.00 W, 3090 MHz", module="Miss, NVRTC 13.4",
+                      target="sm_120")[0],
+              None, ["A1 VALIDITY: VOID (V1", "V4 no in-session gemmh2_q4_k",
+                     "A1 V5 compile check ok (NVRTC 13.4); compiled in this job: the probe module was compiled here",
+                     "A1 RULE 1 FP8 gate 3584x18944 nb 1024: NOT MEASURED", "A1 VERDICT: VOID"],
+              ["Traceback", "V5 kernels", "V3"], 0))
     # GARBAGE: no bench line at all (NO DATA, rc 2); a bench line with mangled cells (no crash).
     c.append(("GARBAGE (binary noise, no bench line)",
               ["\x00\x01garbage", "A1 CELL gate nb ???", "Segmentation fault (core dumped)", "A1 BENCH devic"], None,
@@ -245,13 +373,22 @@ def cases():
 
 
 def main():
-    verbose = "-v" in sys.argv[1:]
+    args = sys.argv[1:]
+    verbose = "-v" in args
+    paths = [a for a in args if a != "-v"]
+    if len(paths) > 1 or any(a.startswith("-") for a in paths):
+        sys.exit(__doc__)
+    verdict = os.path.abspath(paths[0]) if paths else os.path.join(HERE, "a1_verdict.py")
+    if not os.path.isfile(verdict):
+        sys.exit(f"a1_battery.py: no verdict script {verdict}")
+    print(f"A1 BATTERY verdict script: {verdict}")
     bad = 0
+    cs = cases()
     with tempfile.TemporaryDirectory() as td:
-        for i, (name, log, tr, must, mustnt, rc_want) in enumerate(cases()):
+        for i, (name, log, tr, must, mustnt, rc_want) in enumerate(cs):
             lp = os.path.join(td, f"case{i}.log")
             open(lp, "w").write("\n".join(log) + "\n")
-            args = [sys.executable, VERDICT, lp]
+            args = [sys.executable, verdict, lp]
             if tr is not None:
                 tp = os.path.join(td, f"case{i}.csv")
                 open(tp, "w").write("\n".join(tr) + "\n")
@@ -265,8 +402,8 @@ def main():
             ok = not miss and not extra and p.returncode == rc_want
             bad += not ok
             print(f"=== BATTERY {'PASS' if ok else 'FAIL'} {name} (rc {p.returncode}, want {rc_want})")
-            keys = ("A1 V1", "A1 SCALING", "A1 SPREAD", "A1 VALIDITY", "A1 RULE", "A1 VERDICT", "A1 CLOCKS", "A1 RUNS",
-                    "Traceback", "Error")
+            keys = ("A1 V1", "A1 V5", "A1 SCALING", "A1 SPREAD", "A1 WIDE-N", "A1 VALIDITY", "A1 RULE", "A1 VERDICT",
+                    "A1 CLOCKS", "A1 RUNS", "Traceback", "Error")
             for ln in out.splitlines():
                 if verbose or ln.startswith(keys) or "Error" in ln:
                     print("    " + ln)
@@ -274,7 +411,7 @@ def main():
                 print(f"    MISSING: {m}")
             for m in extra:
                 print(f"    UNEXPECTED: {m}")
-    print(f"A1 BATTERY {'ok' if bad == 0 else 'FAILED'}: {len(cases()) - bad}/{len(cases())} cases as expected")
+    print(f"A1 BATTERY {'ok' if bad == 0 else 'FAILED'}: {len(cs) - bad}/{len(cs)} cases as expected ({verdict})")
     return 1 if bad else 0
 
 
