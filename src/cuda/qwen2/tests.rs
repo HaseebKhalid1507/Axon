@@ -10428,6 +10428,14 @@ fn nvrtc_probe_fast_compiles_sm90a() {
         let mut opts = vec![format!("--gpu-architecture={t}")];
         opts.extend(crate::cuda::KERNEL_OPTS_EXT.iter().map(|s| s.to_string()));
         opts.push("--ptxas-options=-v".into());
+        // NVRTC 13.x has its own compile cache: a hit returns the cubin with
+        // an EMPTY log, which would pass the C75xx check vacuously. A unique
+        // define makes every check compile a miss.
+        let t_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        opts.push(format!("-DAXON_A1_NOCACHE={t_ns}"));
         let (image, log) = crate::cuda::compile_logged(n, &src, &opts, t)
             .unwrap_or_else(|e| panic!("probe_fast {t}: {e}"));
         eprintln!(
@@ -10453,6 +10461,10 @@ fn nvrtc_probe_fast_compiles_sm90a() {
         if t != crate::cuda::Target::Cubin90a {
             continue;
         }
+        assert!(
+            log.contains("Compiling entry function"),
+            "probe_fast {t}: no ptxas -v output (a cache hit?):\n{log}"
+        );
         // ptxas -v: "Function properties for K" / "N bytes stack frame, S bytes
         // spill stores, ..." / "Used R registers, ...".
         let lines: Vec<&str> = log.lines().collect();
