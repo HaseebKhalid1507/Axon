@@ -10158,40 +10158,55 @@ const fn a1h_smem(r: usize) -> usize {
     a1h_st(r) * a1h_stage(r) + 2 * a1h_st(r) * 8 + 1024
 }
 
-/// A candidate kernel, probe_<name>: its family and CTA tile (rows x tokens).
+/// A candidate kernel, probe_<name>: its family, CTA tile (rows x tokens) and
+/// the N of its wgmma instruction.
 #[derive(Clone, Copy, PartialEq, Debug)]
 struct A1Var {
     name: &'static str,
     fp8: bool,
     rows: usize,
     toks: usize,
+    ni: usize,
 }
 
-/// The four candidate kernels.
-const A1_VARS: [A1Var; 4] = [
+/// The five candidate kernels: FP8 on m64n64k32 at two tiles and on
+/// m64n128k32 at the bigger one (a rule-1 KILL at n64 alone could measure
+/// the instruction, not FP8), W4A16 on m64n64k16 at two tiles.
+const A1_VARS: [A1Var; 5] = [
     A1Var {
         name: "fp8_128x64",
         fp8: true,
         rows: 128,
         toks: 64,
+        ni: 64,
     },
     A1Var {
         name: "fp8_128x128",
         fp8: true,
         rows: 128,
         toks: 128,
+        ni: 64,
+    },
+    A1Var {
+        name: "fp8n128_128x128",
+        fp8: true,
+        rows: 128,
+        toks: 128,
+        ni: 128,
     },
     A1Var {
         name: "w4a16_128x64",
         fp8: false,
         rows: 128,
         toks: 64,
+        ni: 64,
     },
     A1Var {
         name: "w4a16_256x64",
         fp8: false,
         rows: 256,
         toks: 64,
+        ni: 64,
     },
 ];
 
@@ -10212,13 +10227,15 @@ impl A1Var {
 }
 
 /// The probe module's kernels.
-const A1_KERNELS: [&str; 7] = [
+const A1_KERNELS: [&str; 9] = [
     "probe_fp8_128x64",
     "probe_fp8_128x128",
+    "probe_fp8n128_128x128",
     "probe_w4a16_128x64",
     "probe_w4a16_256x64",
     "a1_zero_f32",
     "a1_peak_fp8_ss_n64",
+    "a1_peak_fp8_ss_n128",
     "a1_peak_f16_rs_n64",
 ];
 
@@ -10358,8 +10375,9 @@ fn a1_layout_pinned() {
         ),
         ("mbar_expect(&full[s], A1F_STAGE(T));", true),
         ("mbar_expect(&full[s], A1H_STAGE(R));", true),
-        ("probe_fp8_t<64>(", true),
-        ("probe_fp8_t<128>(", true),
+        ("probe_fp8_t<64, 64>(", true),
+        ("probe_fp8_t<128, 64>(", true),
+        ("probe_fp8_t<128, 128>(", true),
         ("probe_w4a16_t<128>(", true),
         ("probe_w4a16_t<256>(", true),
     ] {
@@ -10370,6 +10388,19 @@ fn a1_layout_pinned() {
     }
     for k in A1_KERNELS {
         assert!(src.contains(&format!("{k}(")), "probe_fast.cu has no {k}");
+    }
+    for v in A1_VARS {
+        let body = &src[src.find(&format!("{}(", v.kernel())).unwrap()..];
+        let call = if v.fp8 {
+            format!("probe_fp8_t<{}, {}>(", v.toks, v.ni)
+        } else {
+            format!("probe_w4a16_t<{}>(", v.rows)
+        };
+        assert!(
+            body[..body.find('}').unwrap()].contains(&call) && (v.fp8 || v.ni == 64),
+            "{}: A1_VARS and probe_fast.cu disagree ({call})",
+            v.name
+        );
     }
     // No printf call (a call inside the wgmma pipeline serializes every wgmma).
     assert!(!src.contains("printf("));
@@ -10851,9 +10882,12 @@ struct A1Plan<'m> {
 }
 
 impl A1Plan<'_> {
-    /// cuLaunchKernel per launch and nothing else: every tensor map, function
-    /// lookup and smem attribute was done when the plan was built (P1 was
-    /// voided by a driver call, `g.info()`, inside its timed launcher).
+    /// Per launch, `Gpu::launch` and nothing else: cuCtxSetCurrent (a
+    /// thread-local context swap, no sync), the kernel-parameter pointer Vec
+    /// and cuLaunchKernelEx, the path the baselines and production take.
+    /// Every tensor map, function lookup and smem attribute was done when the
+    /// plan was built (P1 was voided by a driver query, `g.info()`, inside
+    /// its timed launcher). No sync, no allocation on the device, no query.
     ///
     /// # Safety
     /// The plan's arguments match its kernels and its buffers are live.
@@ -11393,6 +11427,12 @@ fn gpu_a1_fp8_128x128_tiny() {
     a1_gpu_check("fp8_128x128", &A1_TINY);
 }
 
+/// probe_fp8n128_128x128 (m64n128k32), tiny shapes.
+#[test]
+fn gpu_a1_fp8n128_128x128_tiny() {
+    a1_gpu_check("fp8n128_128x128", &A1_TINY);
+}
+
 /// probe_w4a16_128x64, tiny shapes.
 #[test]
 fn gpu_a1_w4a16_128x64_tiny() {
@@ -11417,6 +11457,12 @@ fn gpu_a1_fp8_128x128_ragged() {
     a1_gpu_check("fp8_128x128", &A1_RAGGED);
 }
 
+/// probe_fp8n128_128x128, the ragged shapes.
+#[test]
+fn gpu_a1_fp8n128_128x128_ragged() {
+    a1_gpu_check("fp8n128_128x128", &A1_RAGGED);
+}
+
 /// probe_w4a16_128x64, the ragged shapes.
 #[test]
 fn gpu_a1_w4a16_128x64_ragged() {
@@ -11429,16 +11475,63 @@ fn gpu_a1_w4a16_256x64_ragged() {
     a1_gpu_check("w4a16_256x64", &A1_RAGGED);
 }
 
+/// The bench's result line for one cell (a1_verdict.py's CELL pattern; the
+/// format is pinned by a1_cell_line_pinned and scripts/a1/a1_battery.py):
+/// medians to 2 decimals (a 349.995 must not print as 350.0), the median
+/// time per fire in ms, then the tolerance text for a candidate.
+#[allow(clippy::too_many_arguments)]
+fn a1_cell_line(
+    what: &str,
+    (cols, rows, nb): (usize, usize, usize),
+    name: &str,
+    (med, lo, hi): (f64, f64, f64),
+    rounds: usize,
+    tmed_ms: f64,
+    tol: &str,
+) -> String {
+    format!(
+        "A1 CELL {what} {cols}x{rows} nb {nb} {name}: median {med:.2} TMAC/s (min {lo:.2} max {hi:.2}; {rounds} rounds; {tmed_ms:.4} ms){tol}"
+    )
+}
+
+/// a1_cell_line's format, as scripts/a1/a1_battery.py's FORMAT case has it
+/// verbatim (the battery checks a1_verdict.py parses it): no GPU.
+#[test]
+fn a1_cell_line_pinned() {
+    let (ok, tol) = a1_tol_text((1.234e-2, 5.0e-2), A1_TOL_FP8);
+    assert!(ok);
+    assert_eq!(
+        a1_cell_line(
+            "gate",
+            (3584, 18944, 1024),
+            "fp8n128_128x128",
+            (380.004, 377.5, 383.25),
+            9,
+            0.18291,
+            &format!(" {tol}")
+        ),
+        "A1 CELL gate 3584x18944 nb 1024 fp8n128_128x128: median 380.00 TMAC/s (min 377.50 max 383.25; 9 rounds; 0.1829 ms) tol PASS rel-rms 1.23e-2 rel-max 5.00e-2 (bounds 0.1 / 0.5)"
+    );
+    let battery = include_str!("../../../scripts/a1/a1_battery.py");
+    assert!(
+        battery.contains(
+            "A1 CELL gate 3584x18944 nb 1024 fp8n128_128x128: median 380.00 TMAC/s (min 377.50 max 383.25; 9 rounds; 0.1829 ms) tol PASS rel-rms 1.23e-2 rel-max 5.00e-2 (bounds 0.1 / 0.5)"
+        ),
+        "scripts/a1/a1_battery.py's FORMAT line is not a1_cell_line's"
+    );
+}
+
 /// (median, min, max) of v (sorted in place).
 fn a1_stats(v: &mut [f64]) -> (f64, f64, f64) {
     v.sort_by(|a, b| a.partial_cmp(b).unwrap());
     (v[v.len() / 2], v[0], v[v.len() - 1])
 }
 
-/// One child of cuda_a1_session: the ceilings of the probe's two wgmma
+/// One child of cuda_a1_session: the ceilings of the probe's three wgmma
 /// forms at 2 warpgroups per SM (the probe's consumer count), raw MACs:
-/// a1_peak_fp8_ss_n64 (SS m64n64k32 e4m3) and a1_peak_f16_rs_n64 (RS
-/// m64n64k16 f16). sm_90a only.
+/// a1_peak_fp8_ss_n64 (SS m64n64k32 e4m3), a1_peak_fp8_ss_n128 (SS
+/// m64n128k32 e4m3) and a1_peak_f16_rs_n64 (RS m64n64k16 f16). Recorded, not
+/// a rule input. sm_90a only.
 #[test]
 #[ignore]
 fn cuda_a1_peak() {
@@ -11459,6 +11552,7 @@ fn cuda_a1_peak() {
     let o = g.alloc(4 * 4096).unwrap();
     for (k, kmac) in [
         ("a1_peak_fp8_ss_n64", 64 * 64 * 32usize),
+        ("a1_peak_fp8_ss_n128", 64 * 128 * 32),
         ("a1_peak_f16_rs_n64", 64 * 64 * 16),
     ] {
         let f = pm.function(k).unwrap();
@@ -11608,7 +11702,10 @@ fn cuda_a1_bench() {
                     ks.push(0);
                 }
                 for k in ks {
-                    outs.push((v, di, k, g.alloc(rows * nb * 4).unwrap()));
+                    // NaN first: an output no launch writes reads as NaN
+                    // (rel-rms inf: tol FAIL), never as a recycled allocation's
+                    // stale right answer.
+                    outs.push((v, di, k, g.upload(&vec![f32::NAN; rows * nb]).unwrap()));
                 }
             }
             let mut plans = vec![a1_plan_gemm2s(&km, &w, shape, &act, st, &base_out)];
@@ -11666,8 +11763,16 @@ fn cuda_a1_bench() {
                     tag = format!(" {txt}");
                 }
                 eprintln!(
-                    "A1 CELL {what} {cols}x{rows} nb {nb} {}: median {med:.1} TMAC/s (min {lo:.1} max {hi:.1}; {rounds} rounds; {tmed:.4} ms){tag}",
-                    p.name
+                    "{}",
+                    a1_cell_line(
+                        what,
+                        (cols, rows, nb),
+                        &p.name,
+                        (med, lo, hi),
+                        rounds,
+                        tmed,
+                        &tag
+                    )
                 );
             }
         }
@@ -11706,8 +11811,14 @@ fn a1_child(
     if ignored {
         args.push("--ignored".into());
     }
+    let unix = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0.0, |d| d.as_secs_f64())
+    };
     eprintln!(
-        "A1 STAGE {test}: start, limit {limit_s} s ({})",
+        "A1 STAGE {test}: start at unix {:.1}, limit {limit_s} s ({})",
+        unix(),
         args.join(" ")
     );
     let t = std::time::Instant::now();
@@ -11755,7 +11866,8 @@ fn a1_child(
     let _ = (t1.join(), t2.join());
     let s = t.elapsed().as_secs_f64();
     eprintln!(
-        "A1 STAGE {test}: rc {rc} after {s:.1} s{}",
+        "A1 STAGE {test}: rc {rc} after {s:.1} s at unix {:.1}{}",
+        unix(),
         if rc == -1 { " (TIMEOUT, killed)" } else { "" }
     );
     let out = seen.lock().unwrap().clone();
@@ -11786,7 +11898,8 @@ fn a1_outcome(rc: i32, out: &str) -> &'static str {
 /// WP-A1's ONE H100 job, stages in separate processes so a faulting kernel
 /// can't take the rest down (each child has its own CUDA context), cheapest
 /// and most likely to break first:
-/// 0. the probe's sm_90a NVRTC compile check (in process, no GPU);
+/// 0. the probe's sm_90a NVRTC compile check (no GPU; a failure is recorded
+///    and the session goes on: the kernels come from the kit's cubin);
 /// 1. with AXON_A1_SANITIZER=<compute-sanitizer>: a self-check (memcheck
 ///    over gpu_rmsnorm_matches_cpu: unusable -> stage dropped, not failed),
 ///    then each candidate variant's tiny shapes under memcheck;
@@ -11814,8 +11927,6 @@ fn cuda_a1_session() {
         let rest = budget.saturating_sub(t0.elapsed().as_secs());
         (rest >= 30).then(|| want.min(rest))
     };
-    nvrtc_probe_fast_compiles_sm90a();
-    eprintln!("A1 STAGE compile: ok");
     let mut fails: Vec<String> = Vec::new();
     let mut fault = std::collections::BTreeSet::new();
     let run = |wrap: &[String],
@@ -11835,6 +11946,18 @@ fn cuda_a1_session() {
             }
         }
     };
+    let (rc, _) = run(&[], "nvrtc_probe_fast_compiles_sm90a", false, &[], 180);
+    eprintln!(
+        "A1 STAGE compile: {}",
+        if rc == 0 {
+            "ok"
+        } else {
+            "FAILED (recorded; the kit's cubin is what runs)"
+        }
+    );
+    if rc != 0 {
+        fails.push(format!("compile check rc {rc}"));
+    }
     if let Some(san) = std::env::var_os("AXON_A1_SANITIZER") {
         let san = san.to_string_lossy().to_string();
         let wrap: Vec<String> = [

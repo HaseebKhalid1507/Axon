@@ -18,7 +18,8 @@
 // Two tile shapes per candidate, the same instructions: T3's 128 x 64 and a
 // bigger one that halves an operand's L2 -> SM bytes per MAC (bw / T + bx / R:
 // FP8 128 x 64 needs 8.2 TB/s at 350 TMAC/s, 128 x 128 5.5; W4A16 128 x 64
-// 5.8 TB/s at 230, 256 x 64 4.0).
+// 5.8 TB/s at 230, 256 x 64 4.0). FP8 has a third: the 128 x 128 tile on the
+// wider m64n128k32 (production FP8 GEMMs use N >= 128).
 // Work schedule (a1_next, the same in producer and consumers), `ksplit`:
 // - 1: data-parallel tiles (t = blockIdx.x + i gridDim.x), plain stores;
 // - S >= 2: split-K, units (tile, part) with part fastest, K-blocks
@@ -30,9 +31,10 @@
 // the host zeroes `out` first (a1_zero_f32, inside the timed region).
 //
 // (a) probe_fp8_128x64 / probe_fp8_128x128: SS wgmma.m64n64k32.f32.e4m3.e4m3,
-//     T / 64 per k32 step per warpgroup. Stage = activations 2 x {128 B, T
-//     tokens} + weights 2 x {128 B, 128 rows}, all SW128. Epilogue out = acc
-//     * ws[row] * xs[token].
+//     T / 64 per k32 step per warpgroup; probe_fp8n128_128x128: the 128 x 128
+//     tile with one SS wgmma.m64n128k32.f32.e4m3.e4m3 per k32 step instead.
+//     Stage = activations 2 x {128 B, T tokens} + weights 2 x {128 B, 128
+//     rows}, all SW128. Epilogue out = acc * ws[row] * xs[token].
 // (b) probe_w4a16_128x64 / probe_w4a16_256x64: RS wgmma.m64n64k16.f32.f16.f16,
 //     R / 128 m64 row blocks per warpgroup. Weights are Q4_K repacked at upload
 //     (tests.rs a1_q4f_pack): nibbles in the consumer threads' fragment order
@@ -140,6 +142,18 @@ __device__ __forceinline__ void a1_mma_e4m3_n64(float* d, u64 a, u64 b, int acc)
         : "l"(a), "l"(b), "r"(acc));
 }
 
+// D (64 x 128 f32, wgmma fragment order: registers 0..31 are tokens 0..63 in
+// the n64 order, 32..63 tokens 64..127) += A (e4m3, desc a) B^T (e4m3, desc
+// b: 128 token rows, SBO 1024 B); D = A B^T instead if !acc.
+__device__ __forceinline__ void a1_mma_e4m3_n128(float* d, u64 a, u64 b, int acc) {
+    asm volatile(
+        "{\n.reg .pred p;\nsetp.ne.b32 p, %66, 0;\n"
+        "wgmma.mma_async.sync.aligned.m64n128k32.f32.e4m3.e4m3 "
+        "{%0, %1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, %16, %17, %18, %19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, %31, %32, %33, %34, %35, %36, %37, %38, %39, %40, %41, %42, %43, %44, %45, %46, %47, %48, %49, %50, %51, %52, %53, %54, %55, %56, %57, %58, %59, %60, %61, %62, %63}, %64, %65, p, 1, 1;\n}\n"
+        : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]), "+f"(d[32]), "+f"(d[33]), "+f"(d[34]), "+f"(d[35]), "+f"(d[36]), "+f"(d[37]), "+f"(d[38]), "+f"(d[39]), "+f"(d[40]), "+f"(d[41]), "+f"(d[42]), "+f"(d[43]), "+f"(d[44]), "+f"(d[45]), "+f"(d[46]), "+f"(d[47]), "+f"(d[48]), "+f"(d[49]), "+f"(d[50]), "+f"(d[51]), "+f"(d[52]), "+f"(d[53]), "+f"(d[54]), "+f"(d[55]), "+f"(d[56]), "+f"(d[57]), "+f"(d[58]), "+f"(d[59]), "+f"(d[60]), "+f"(d[61]), "+f"(d[62]), "+f"(d[63])
+        : "l"(a), "l"(b), "r"(acc));
+}
+
 // D (64 x 64 f32) += A (f16, registers a[4]: rows 16 w + g (+8), K 2q, 2q+1
 // and 2q+8, 2q+9, the m16n8k16 A fragment) B^T (f16, desc b, K-major: trans-b
 // 0); D = A B^T instead if !acc.
@@ -164,13 +178,17 @@ __device__ __forceinline__ void a1_put(float* out, u64 i, float v, int ksplit) {
     else atomicAdd(out + i, v);
 }
 
-// (a) T tokens per tile: each consumer warpgroup 64 rows x T tokens, T / 64
-// accumulators (token sub-tile h at + h 8 KiB in each activation box).
-template <int T>
+// (a) T tokens per tile: each consumer warpgroup 64 rows x T tokens in f32
+// accumulators d[T / 2] (token sub-tile h of 64: d + 32 h, at + h 8 KiB in
+// each activation box). NI = the wgmma's N: 64 (T / 64 instructions per k32
+// step, the same A each time) or 128 (one m64n128k32 per step at T 128: A is
+// read from smem once, 0.023 B / MAC of smem instead of 0.031).
+template <int T, int NI>
 __device__ __forceinline__ void probe_fp8_t(const TMap* mw, const TMap* mx, const float* ws,
                                             const float* xs, int rows, int n, int nb, int ksplit,
                                             float* out) {
     constexpr int ST = A1F_ST(T), H = T / 64;
+    static_assert(NI == 64 || (NI == 128 && T == 128), "probe_fp8_t: NI 64, or 128 at T 128");
     extern __shared__ u8 a1_dsm[];
     u32 dsz;
     asm("mov.u32 %0, %%dynamic_smem_size;" : "=r"(dsz));
@@ -216,11 +234,9 @@ __device__ __forceinline__ void probe_fp8_t(const TMap* mw, const TMap* mx, cons
     // ---------------- consumers ----------------
     a1_setmaxnreg_inc232();
     const int cw = wg - 1, g = l >> 2, q = l & 3;
-    float d[H][32];
+    float d[32 * H];
 #pragma unroll
-    for (int h = 0; h < H; h++)
-#pragma unroll
-        for (int i = 0; i < 32; i++) d[h][i] = 0.f;
+    for (int i = 0; i < 32 * H; i++) d[i] = 0.f;
     int it = 0;
     while (a1_next(sc, tile, kb0, kb1)) {
         const int z0 = (tile % ttiles) * T, r0 = (tile / ttiles) * 128;
@@ -229,24 +245,28 @@ __device__ __forceinline__ void probe_fp8_t(const TMap* mw, const TMap* mx, cons
             const u32 sx = smem_addr(sm + s * A1F_STAGE(T)), sw = sx + A1F_X(T) + cw * 8192;
             a1_wait(&full[s], (it / ST) & 1);
 #pragma unroll
-            for (int h = 0; h < H; h++) a1_pin(d[h]);
+            for (int h = 0; h < H; h++) a1_pin(d + 32 * h);
             wg_fence();
 #pragma unroll
             for (int j = 0; j < 8; j++) {
                 const u64 da = wg_desc(sw + (j >> 2) * (A1F_W / 2)) + 2 * (j & 3);
                 const u64 db = wg_desc(sx + (j >> 2) * (A1F_X(T) / 2)) + 2 * (j & 3);
+                if (NI == 128)
+                    a1_mma_e4m3_n128(d, da, db, kb > kb0 || j > 0);
+                else
 #pragma unroll
-                for (int h = 0; h < H; h++) a1_mma_e4m3_n64(d[h], da, db + 512 * h, kb > kb0 || j > 0);
+                    for (int h = 0; h < H; h++)
+                        a1_mma_e4m3_n64(d + 32 * h, da, db + 512 * h, kb > kb0 || j > 0);
             }
             wg_commit();
             wg_wait<1>(); // the previous block's group retired: its stage is free
 #pragma unroll
-            for (int h = 0; h < H; h++) a1_pin(d[h]);
+            for (int h = 0; h < H; h++) a1_pin(d + 32 * h);
             if (kb > kb0 && l == 0) mbar_arrive(&empty[(it + ST - 1) % ST]);
         }
         wg_wait<0>();
 #pragma unroll
-        for (int h = 0; h < H; h++) a1_pin(d[h]);
+        for (int h = 0; h < H; h++) a1_pin(d + 32 * h);
         if (l == 0) mbar_arrive(&empty[(it + ST - 1) % ST]);
         const int rb = r0 + 64 * cw + 16 * w + g;
         const float w0 = rb < rows ? ws[rb] : 0.f, w1 = rb + 8 < rows ? ws[rb + 8] : 0.f;
@@ -258,7 +278,7 @@ __device__ __forceinline__ void probe_fp8_t(const TMap* mw, const TMap* mx, cons
                 for (int e = 0; e < 4; e++) {
                     const int r = rb + 8 * (e >> 1), z = z0 + 64 * h + 8 * i + 2 * q + (e & 1);
                     if (r < rows && z < nb)
-                        a1_put(out, (u64)z * rows + r, d[h][4 * i + e] * ((e >> 1) ? w1 : w0) * xs[z],
+                        a1_put(out, (u64)z * rows + r, d[32 * h + 4 * i + e] * ((e >> 1) ? w1 : w0) * xs[z],
                                ksplit);
                 }
     }
@@ -268,13 +288,21 @@ extern "C" __global__ void __launch_bounds__(384, 1)
 probe_fp8_128x64(const __grid_constant__ TMap mw, const __grid_constant__ TMap mx,
                  const float* __restrict__ ws, const float* __restrict__ xs, int rows, int n, int nb,
                  int ksplit, float* __restrict__ out) {
-    probe_fp8_t<64>(&mw, &mx, ws, xs, rows, n, nb, ksplit, out);
+    probe_fp8_t<64, 64>(&mw, &mx, ws, xs, rows, n, nb, ksplit, out);
 }
 extern "C" __global__ void __launch_bounds__(384, 1)
 probe_fp8_128x128(const __grid_constant__ TMap mw, const __grid_constant__ TMap mx,
                   const float* __restrict__ ws, const float* __restrict__ xs, int rows, int n, int nb,
                   int ksplit, float* __restrict__ out) {
-    probe_fp8_t<128>(&mw, &mx, ws, xs, rows, n, nb, ksplit, out);
+    probe_fp8_t<128, 64>(&mw, &mx, ws, xs, rows, n, nb, ksplit, out);
+}
+// The same tile and pipeline as probe_fp8_128x128, one m64n128k32 per k32 step
+// instead of two m64n64k32 (a KILL at n64 alone could measure the instruction).
+extern "C" __global__ void __launch_bounds__(384, 1)
+probe_fp8n128_128x128(const __grid_constant__ TMap mw, const __grid_constant__ TMap mx,
+                      const float* __restrict__ ws, const float* __restrict__ xs, int rows, int n,
+                      int nb, int ksplit, float* __restrict__ out) {
+    probe_fp8_t<128, 128>(&mw, &mx, ws, xs, rows, n, nb, ksplit, out);
 }
 
 // (a & mask) | magic, one LOP3.
@@ -474,8 +502,9 @@ extern "C" __global__ void a1_zero_f32(float* __restrict__ out, u64 n) {
 
 // Ceilings (as hopper.cu wg_peak_t / wg_peak_rs_t): each warpgroup chains
 // iters x 4 wgmmas over a 128-byte K tile in static smem into f32
-// accumulators. a1_peak_fp8_ss_n64: SS m64n64k32 e4m3 (the probe_fp8_n64
-// instruction); a1_peak_f16_rs_n64: RS m64n64k16 f16 (probe_w4a16_n64's).
+// accumulators. a1_peak_fp8_ss_n64: SS m64n64k32 e4m3 (probe_fp8_128x*'s
+// instruction); a1_peak_fp8_ss_n128: SS m64n128k32 e4m3 (probe_fp8n128's);
+// a1_peak_f16_rs_n64: RS m64n64k16 f16 (probe_w4a16_*'s).
 // Operand bytes are masked so no value is NaN / inf. out keeps d live.
 extern "C" __global__ void __launch_bounds__(384, 1) a1_peak_fp8_ss_n64(int iters, int* out) {
     __shared__ __align__(1024) u8 sa[64 * 128];
@@ -503,6 +532,34 @@ extern "C" __global__ void __launch_bounds__(384, 1) a1_peak_fp8_ss_n64(int iter
     float s = 0.f;
 #pragma unroll
     for (int i = 0; i < 32; i++) s += d[i];
+    if (s == 1234.5f) out[blockIdx.x] = 1;
+}
+extern "C" __global__ void __launch_bounds__(384, 1) a1_peak_fp8_ss_n128(int iters, int* out) {
+    __shared__ __align__(1024) u8 sa[64 * 128];
+    __shared__ __align__(1024) u8 sb[128 * 128];
+    for (int i = threadIdx.x; i < 64 * 128; i += blockDim.x) sa[i] = (u8)(i * 2654435761u >> 13) & 0xb7;
+    for (int i = threadIdx.x; i < 128 * 128; i += blockDim.x) sb[i] = (u8)(i * 2246822519u >> 11) & 0xb7;
+    fence_proxy_async();
+    __syncthreads();
+    float d[64];
+#pragma unroll
+    for (int i = 0; i < 64; i++) d[i] = 0.f;
+    const u64 da = wg_desc(smem_addr(sa)), db = wg_desc(smem_addr(sb));
+    for (int it = 0; it < iters; it++) {
+        a1_pin(d);
+        a1_pin(d + 32);
+        wg_fence();
+#pragma unroll
+        for (int k = 0; k < 4; k++) a1_mma_e4m3_n128(d, da + 2 * k, db + 2 * k, 1);
+        wg_commit();
+        wg_wait<1>();
+    }
+    wg_wait<0>();
+    a1_pin(d);
+    a1_pin(d + 32);
+    float s = 0.f;
+#pragma unroll
+    for (int i = 0; i < 64; i++) s += d[i];
     if (s == 1234.5f) out[blockIdx.x] = 1;
 }
 extern "C" __global__ void __launch_bounds__(384, 1) a1_peak_f16_rs_n64(int iters, int* out) {
