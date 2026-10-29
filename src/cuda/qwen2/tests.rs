@@ -11921,6 +11921,79 @@ fn a1_outcome(rc: i32, out: &str) -> &'static str {
     }
 }
 
+/// compute-sanitizer's record for a module it re-JITs at load
+/// (cuModuleLoadData): a "CUDA API Warning" that it counts as an error and
+/// so exits with --error-exitcode. Seen on bella (1029-145526-7b39) when
+/// the probe module was compiled in the sanitized process (cache Miss).
+const A1_SAN_RECOMPILE: &str = "CUDA API Warning: Selective device code recompilation in progress";
+
+/// `a1_outcome` for a stage under memcheck (--error-exitcode 9): "ok" needs
+/// "ERROR SUMMARY: 0 errors". One exception, narrow: if every error the
+/// summary counts is an A1_SAN_RECOMPILE record (no memcheck error, no
+/// other API error) and the test itself reported "test result: ok", the
+/// stage is read as the test's own rc 0 (the warning is load plumbing,
+/// not a kernel fault). Any other error keeps it a FAULT.
+fn a1_sanitized_outcome(rc: i32, out: &str) -> &'static str {
+    let errors: Option<usize> = out.lines().find_map(|l| {
+        let t = l.split("ERROR SUMMARY:").nth(1)?;
+        t.split_whitespace().next()?.parse().ok()
+    });
+    let benign = out.matches(A1_SAN_RECOMPILE).count();
+    let only_recompile = rc == 9
+        && benign > 0
+        && errors == Some(benign)
+        && out.contains("test result: ok.")
+        && !out.contains("CUDA_ERROR");
+    let o = a1_outcome(if only_recompile { 0 } else { rc }, out);
+    if o == "ok" && errors != Some(0) && !only_recompile {
+        "FAULT"
+    } else {
+        o
+    }
+}
+
+/// Loads the probe module once, outside any sanitizer (cuda_a1_session runs
+/// it before the memcheck stages), so a module compile and its load land
+/// in the kernel cache first and every memcheck stage loads a cache Hit.
+#[test]
+fn gpu_a1_warm_module() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let hopper = probe_fast_module(&g).is_some();
+    eprintln!("A1 WARM probe-fast loaded (sm_90a: {hopper})");
+}
+
+/// a1_sanitized_outcome: the recompilation warning alone isn't a FAULT; a
+/// memcheck error (with or without it), a failed test or a missing summary
+/// is (no GPU).
+#[test]
+fn a1_sanitized_outcome_classifies() {
+    let w = format!("========= {A1_SAN_RECOMPILE}.\n");
+    let skip = "skipping: not sm_90a\ntest result: ok. 1 passed\n";
+    let ok = "test result: ok. 1 passed\n";
+    let bad = "========= Invalid __global__ read of size 4 bytes\n";
+    let sum = |n: usize| {
+        format!(
+            "========= ERROR SUMMARY: {n} error{}\n",
+            if n == 1 { "" } else { "s" }
+        )
+    };
+    let c = |rc: i32, s: String| a1_sanitized_outcome(rc, &s);
+    assert_eq!(c(0, format!("{ok}{}", sum(0))), "ok");
+    assert_eq!(c(0, format!("{skip}{}", sum(0))), "skipped (no sm_90a)");
+    assert_eq!(c(9, format!("{w}{skip}{}", sum(1))), "skipped (no sm_90a)");
+    assert_eq!(c(9, format!("{w}{ok}{}", sum(1))), "ok");
+    assert_eq!(c(9, format!("{w}{bad}{ok}{}", sum(2))), "FAULT");
+    assert_eq!(c(9, format!("{bad}{ok}{}", sum(1))), "FAULT");
+    assert_eq!(
+        c(9, format!("{w}test result: FAILED. 0 passed\n{}", sum(1))),
+        "FAULT"
+    );
+    assert_eq!(c(9, format!("{w}{ok}")), "FAULT");
+    assert_eq!(c(0, ok.to_string()), "FAULT");
+}
+
 /// WP-A1's ONE H100 job, stages in separate processes so a faulting kernel
 /// can't take the rest down (each child has its own CUDA context), cheapest
 /// and most likely to break first:
@@ -12029,8 +12102,7 @@ fn cuda_a1_session() {
         .collect();
         let usable = std::path::Path::new(&san).is_file() && {
             let (rc, out) = run(&wrap, "gpu_rmsnorm_matches_cpu", false, &[], 120, reserve);
-            rc == 0
-                && out.contains("ERROR SUMMARY: 0 errors")
+            a1_sanitized_outcome(rc, &out) == "ok"
                 && !out.contains("terminated before first instrumented")
                 && out.contains("1 passed")
         };
@@ -12040,14 +12112,21 @@ fn cuda_a1_session() {
             eprintln!(
                 "A1 STAGE sanitizer-selfcheck: ok (memcheck instrumented gpu_rmsnorm_matches_cpu, 0 errors)"
             );
+            // The probe module's compile and first load happen outside the
+            // sanitizer (a cache Miss under memcheck drew a recompilation
+            // warning: a1_sanitized_outcome).
+            let (rc, out) = run(&[], "gpu_a1_warm_module", false, &[], 120, reserve);
+            eprintln!(
+                "A1 STAGE warm: {}",
+                if rc == 0 && out.contains("A1 WARM") {
+                    "ok"
+                } else {
+                    "FAILED (memcheck stages may compile)"
+                }
+            );
             for c in A1_VARS.map(|v| v.name) {
                 let (rc, out) = run(&wrap, &format!("gpu_a1_{c}_tiny"), false, &[], 150, reserve);
-                let o = a1_outcome(rc, &out);
-                let o = if o == "ok" && !out.contains("ERROR SUMMARY: 0 errors") {
-                    "FAULT"
-                } else {
-                    o
-                };
+                let o = a1_sanitized_outcome(rc, &out);
                 eprintln!("A1 STAGE sanitizer {c} tiny: {o}");
                 if o == "FAULT" {
                     fault.insert(c);
