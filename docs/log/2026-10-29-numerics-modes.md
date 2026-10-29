@@ -1,4 +1,4 @@
-# Numerics modes: the scaffolding (`--numerics exact|fast`, `serve --datacenter`), no kernels (PR #PRNUM)
+# Numerics modes: the scaffolding (`--numerics exact|fast`, `serve --datacenter`), no kernels (PR #173)
 
 - Date: 2026-10-29. Branch: feat/numerics-mode. Base: main 333276d. Track WP-A0 of the beat-vLLM scope
   (`specs/beat-vllm-scope.md` §6), steps M1, M2, M3, M5 and M8 of [the ADR](../design/determinism-modes.md).

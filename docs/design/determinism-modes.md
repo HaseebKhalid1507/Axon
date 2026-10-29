@@ -1,7 +1,7 @@
 # ADR: what bit-identity costs, and making it a mode
 
 **Status: accepted** (2026-10-29, Haseeb: "lets try fast"). §7 records the answers to its four questions. Built: M1,
-M2, M3, M5 and M8 (the mode scaffolding, no kernels; PR #PRNUM, [log](../log/2026-10-29-numerics-modes.md), "As built"
+M2, M3, M5 and M8 (the mode scaffolding, no kernels; PR #173, [log](../log/2026-10-29-numerics-modes.md), "As built"
 under §4.7). Deferred: M4 (CPU fast prefill) and M6 (exact split-K; its 4090 attempt, #148, was killed on its kill rule:
 [experiments-rejected.md](../experiments-rejected.md)). M7 waits on a measured gap (§4.6). Written against `origin/main`
 `05fb70c` (2026-10-19). Answers the outside review's questions "Is bit-identity a product or a dev tool? If it's a dev tool, why
@@ -395,7 +395,7 @@ M1–M3 and M5 are the whole mode and cost under a week with no kernel work. M4 
 exists on a branch. M6 is exact-mode work that removes the strongest single argument for a GPU fast set. M7 is gated on
 measurement by rule.
 
-**As built (2026-10-29, PR #PRNUM; [log](../log/2026-10-29-numerics-modes.md)).** Where the build differs from the plan
+**As built (2026-10-29, PR #173; [log](../log/2026-10-29-numerics-modes.md)).** Where the build differs from the plan
 above, and why:
 
 - **M1: `fast` is accepted, not refused.** With no fast kernel on a backend, `--numerics fast` runs the exact kernels,

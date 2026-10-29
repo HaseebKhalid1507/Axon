@@ -177,7 +177,7 @@ As of main `39624db` (2026-10-25). None of these is on main; each is open work:
 - **Library API for embedders:** the rest of #118 (stderr from library code, env-only config, leaks, `serve`'s
   exits). The v0.1.0 tag is Haseeb's call.
 - **Determinism modes** (`--numerics exact | fast`): the ADR is accepted (2026-10-29,
-  [design/determinism-modes.md](design/determinism-modes.md)); its scaffolding is built (#PRNUM: the flag, the
+  [design/determinism-modes.md](design/determinism-modes.md)); its scaffolding is built (#173: the flag, the
   identity line, `serve --datacenter`, the graded test harness, the cache keys). No fast kernel exists yet: `fast`
   runs the exact kernels under its own identity.
 - **Batched speculative decoding in `serve`:** the first attempt (#90) is closed; a second (latency-guarded gate v2,

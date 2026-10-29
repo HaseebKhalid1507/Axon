@@ -6,7 +6,7 @@ measurements behind them.
 
 ## Unreleased (after 0.1.0's draft)
 
-### Release note: every fingerprint changes once (numerics modes, #PRNUM)
+### Release note: every fingerprint changes once (numerics modes, #173)
 - **Every `system_fingerprint` changes, once; no output does.** The identity tuple's first line was `numerics=1`; it is
   now `numerics=exact/1` (the numerics mode and its own version), so every fingerprint (`axon gen`'s `identity:`,
   `axon serve`'s responses, `GET /identity`, `axon info`) has a new value. The kernels, the sampler and every output
