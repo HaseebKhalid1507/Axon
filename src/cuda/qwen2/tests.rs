@@ -10116,7 +10116,7 @@ fn gpu_concurrency_matrix_hunt() {
 //   added with atomics after a zeroing launch (inside the timed region).
 // Two tiles per candidate, the same instructions: T3's 128 x 64, and one that
 // cuts the L2 -> SM bytes per MAC (FP8 128 x 64 would need 8.2 TB/s at 350
-// TMAC/s; 128 x 128 5.4. W4A16 128 x 64 5.8 TB/s at 230; 256 x 64 4.0).
+// TMAC/s; 128 x 128 5.5. W4A16 128 x 64 5.8 TB/s at 230; 256 x 64 4.0).
 // Fast mode: the results are checked against a CPU f64 reference within a
 // tolerance (A1_TOL_*), not bit for bit.
 
@@ -10371,8 +10371,8 @@ fn a1_layout_pinned() {
     for k in A1_KERNELS {
         assert!(src.contains(&format!("{k}(")), "probe_fast.cu has no {k}");
     }
-    // No printf (a call inside the wgmma pipeline serializes every wgmma).
-    assert!(!src.contains("printf"));
+    // No printf call (a call inside the wgmma pipeline serializes every wgmma).
+    assert!(!src.contains("printf("));
 }
 
 /// The probe module's source: kernels.cu's typedefs, hopper.cu's helpers
@@ -11758,6 +11758,7 @@ fn a1_outcome(rc: i32, out: &str) -> &'static str {
     } else if rc == 101
         && out.contains("A1 TOL FAIL")
         && !out.contains("CUDA_ERROR")
+        && !out.contains("CUresult ")
         && (!out.contains("ERROR SUMMARY:") || out.contains("ERROR SUMMARY: 0 errors"))
     {
         "tolerance"

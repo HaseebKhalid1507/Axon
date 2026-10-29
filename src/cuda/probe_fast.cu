@@ -17,7 +17,7 @@
 //   epilogue per range.
 // Two tile shapes per candidate, the same instructions: T3's 128 x 64 and a
 // bigger one that halves an operand's L2 -> SM bytes per MAC (bw / T + bx / R:
-// FP8 128 x 64 needs 8.2 TB/s at 350 TMAC/s, 128 x 128 5.4; W4A16 128 x 64
+// FP8 128 x 64 needs 8.2 TB/s at 350 TMAC/s, 128 x 128 5.5; W4A16 128 x 64
 // 5.8 TB/s at 230, 256 x 64 4.0).
 // Work schedule (a1_next, the same in producer and consumers), `ksplit`:
 // - 1: data-parallel tiles (t = blockIdx.x + i gridDim.x), plain stores;
