@@ -10099,3 +10099,1849 @@ fn gpu_concurrency_matrix_hunt() {
     }
     eprintln!("HUNT TABLE\n{}", table.join("\n"));
 }
+
+// ---------------------------------------------------------------------------
+// WP-A1 (2026-10-29): the H100 probe of two `--numerics fast` GEMM candidates
+// on the T3 skeleton (probe_fast.cu; the plan's WP-A1, pre-registered rules in
+// the GitHub issue "A1: fast GEMM probe, pre-registered rules"). TEST-ONLY:
+// probe_fast.cu is never part of KERNELS; it is built here from hopper.cu's
+// helper prefix + probe_fast.cu as a module of its own (its own cache key), so
+// no product path can load it.
+// - (a) probe_fp8_128x64 / _128x128 (CTA tile rows x tokens): e4m3 x e4m3 SS
+//   wgmma.m64n64k32, f32 over the whole K, one epilogue (per-row weight scale
+//   x per-token activation scale);
+// - (b) probe_w4a16_128x64 / _256x64: Q4_K nibbles -> fp16 in registers, RS
+//   wgmma.m64n64k16 f16;
+// - (c) each with split-K (ksplit S) or stream-K (ksplit 0), the partials
+//   added with atomics after a zeroing launch (inside the timed region).
+// Two tiles per candidate, the same instructions: T3's 128 x 64, and one that
+// cuts the L2 -> SM bytes per MAC (FP8 128 x 64 would need 8.2 TB/s at 350
+// TMAC/s; 128 x 128 5.4. W4A16 128 x 64 5.8 TB/s at 230; 256 x 64 4.0).
+// Fast mode: the results are checked against a CPU f64 reference within a
+// tolerance (A1_TOL_*), not bit for bit.
+
+/// probe_fast.cu's shared-memory carve-up (A1* macros), byte offsets from the
+/// 1024-aligned base: the stages, then the full / empty mbarriers.
+/// FP8, T tokens per tile: activations 2 x {128 B, T tokens} SW128 (token
+/// sub-tile h at + h 8 KiB), then weights 2 x {128 B, 128 rows} SW128
+/// (consumer warpgroup cw's rows at + cw 8 KiB); 4 stages at T 64, 3 at 128.
+const fn a1f_st(t: usize) -> usize {
+    if t == 64 { 4 } else { 3 }
+}
+const fn a1f_x(t: usize) -> usize {
+    t * 256
+}
+const A1F_W: usize = 128 * 256;
+const fn a1f_stage(t: usize) -> usize {
+    a1f_x(t) + A1F_W
+}
+const fn a1f_smem(t: usize) -> usize {
+    a1f_st(t) * a1f_stage(t) + 2 * a1f_st(t) * 8 + 1024
+}
+/// W4A16, R rows per tile: activations 4 x {128 B = 64 halves, 64 tokens}
+/// SW128, the tile's repacked nibbles (R lines of 128 B, no swizzle), its
+/// scales (R rows x 8 half2 (s, -z), no swizzle); 4 stages at R 128, 3 at 256.
+const fn a1h_st(r: usize) -> usize {
+    if r == 128 { 4 } else { 3 }
+}
+const A1H_X: usize = 64 * 512;
+const fn a1h_n(r: usize) -> usize {
+    r * 128
+}
+const fn a1h_s(r: usize) -> usize {
+    r * 32
+}
+const fn a1h_stage(r: usize) -> usize {
+    A1H_X + a1h_n(r) + a1h_s(r)
+}
+const fn a1h_smem(r: usize) -> usize {
+    a1h_st(r) * a1h_stage(r) + 2 * a1h_st(r) * 8 + 1024
+}
+
+/// A candidate kernel, probe_<name>: its family and CTA tile (rows x tokens).
+#[derive(Clone, Copy, PartialEq, Debug)]
+struct A1Var {
+    name: &'static str,
+    fp8: bool,
+    rows: usize,
+    toks: usize,
+}
+
+/// The four candidate kernels.
+const A1_VARS: [A1Var; 4] = [
+    A1Var {
+        name: "fp8_128x64",
+        fp8: true,
+        rows: 128,
+        toks: 64,
+    },
+    A1Var {
+        name: "fp8_128x128",
+        fp8: true,
+        rows: 128,
+        toks: 128,
+    },
+    A1Var {
+        name: "w4a16_128x64",
+        fp8: false,
+        rows: 128,
+        toks: 64,
+    },
+    A1Var {
+        name: "w4a16_256x64",
+        fp8: false,
+        rows: 256,
+        toks: 64,
+    },
+];
+
+impl A1Var {
+    fn kernel(&self) -> String {
+        format!("probe_{}", self.name)
+    }
+    fn smem(&self) -> usize {
+        if self.fp8 {
+            a1f_smem(self.toks)
+        } else {
+            a1h_smem(self.rows)
+        }
+    }
+    fn tiles(&self, rows: usize, nb: usize) -> usize {
+        rows.div_ceil(self.rows) * nb.div_ceil(self.toks)
+    }
+}
+
+/// The probe module's kernels.
+const A1_KERNELS: [&str; 7] = [
+    "probe_fp8_128x64",
+    "probe_fp8_128x128",
+    "probe_w4a16_128x64",
+    "probe_w4a16_256x64",
+    "a1_zero_f32",
+    "a1_peak_fp8_ss_n64",
+    "a1_peak_f16_rs_n64",
+];
+
+/// (rel-rms, rel-max) bounds on |GPU - CPU f64 reference|, relative to the
+/// rms of the reference over the checked outputs. Structural, not a quality
+/// bar: a wrong descriptor, K order, tile or scale gives errors of order 1.
+/// - FP8: the products are exact (e4m3 x e4m3), but Hopper's FP8 tensor-core
+///   accumulation keeps only ~14 bits (DeepSeek-V3 report, section 3.3.2), so
+///   over K 18944 (592 k32 steps) the error can reach a few percent: loose.
+/// - W4A16: s = d sc and z = dmin m rounded to fp16, one rounding for q s - z
+///   (2^-11 relative per weight), f32 accumulation: tight.
+const A1_TOL_FP8: (f64, f64) = (0.1, 0.5);
+const A1_TOL_W4A16: (f64, f64) = (0.005, 0.03);
+
+/// Every alignment and size the probe kernels rely on, checked on the host
+/// before each plan is built (the T3 lesson: its first H100 launch died on a
+/// misaligned load), so a bad configuration fails here with a message:
+/// - global (cuTensorMapEncodeTiled): base addresses and row strides
+///   multiples of 16 B; K a multiple of 256 (whole stages);
+/// - smem: SW128 TMA destinations and wgmma descriptor bases 1024-aligned
+///   (each stage, the activation boxes, the FP8 weight boxes and their
+///   64-row warpgroup halves); the no-swizzle TMA destinations (nibbles,
+///   scales) 128-aligned; mbarriers 8-aligned; the totals (+ 1024 B of base
+///   alignment slack) within the 227 KiB opt-in limit;
+/// - expect-tx: each stage's size is exactly the bytes its TMA boxes bring
+///   (FP8 2 x T x 128 B + 2 x 16 KiB; W4A16 4 x 8 KiB + R x 128 B + R x 32 B).
+fn a1_layout(bases: &[(&str, u64)], strides: &[(&str, usize)], cols: usize) -> Result<(), String> {
+    let mut checks: Vec<(bool, String)> = vec![(
+        cols.is_multiple_of(256) && cols > 0,
+        format!("K {cols} not a multiple of 256"),
+    )];
+    for &(n, b) in bases {
+        checks.push((
+            b.is_multiple_of(16),
+            format!("{n} at {b:#x}: TMA needs 16 B"),
+        ));
+    }
+    for &(n, s) in strides {
+        checks.push((
+            s.is_multiple_of(16) && s > 0,
+            format!("{n} stride {s}: TMA needs 16 B"),
+        ));
+    }
+    for t in [64, 128] {
+        checks.extend([
+            (
+                a1f_stage(t).is_multiple_of(1024)
+                    && (a1f_x(t) / 2).is_multiple_of(1024)
+                    && (A1F_W / 2).is_multiple_of(1024)
+                    && A1F_W / 2 == 2 * 64 * 128,
+                format!("fp8 T {t}: SW128 boxes or warpgroup halves % 1024"),
+            ),
+            (
+                a1f_stage(t) == 2 * t * 128 + 2 * 128 * 128,
+                format!("fp8 T {t}: expect-tx != the stage's TMA boxes"),
+            ),
+            (
+                (a1f_st(t) * a1f_stage(t)).is_multiple_of(8) && a1f_smem(t) <= 232448,
+                format!("fp8 T {t}: smem {} > 227 KiB or barriers % 8", a1f_smem(t)),
+            ),
+        ]);
+    }
+    for r in [128, 256] {
+        checks.extend([
+            (
+                a1h_stage(r).is_multiple_of(1024) && (A1H_X / 4).is_multiple_of(1024),
+                format!("w4a16 R {r}: SW128 boxes % 1024"),
+            ),
+            (
+                A1H_X.is_multiple_of(128) && (A1H_X + a1h_n(r)).is_multiple_of(128) && r <= 256,
+                format!("w4a16 R {r}: nibble / scale destinations % 128 or box rows > 256"),
+            ),
+            (
+                a1h_stage(r) == 4 * 64 * 128 + r * 128 + r * 32,
+                format!("w4a16 R {r}: expect-tx != the stage's TMA boxes"),
+            ),
+            (
+                (a1h_st(r) * a1h_stage(r)).is_multiple_of(8) && a1h_smem(r) <= 232448,
+                format!(
+                    "w4a16 R {r}: smem {} > 227 KiB or barriers % 8",
+                    a1h_smem(r)
+                ),
+            ),
+        ]);
+    }
+    match checks.iter().find(|c| !c.0) {
+        Some((_, m)) => Err(format!("probe_fast layout: {m}")),
+        None => Ok(()),
+    }
+}
+
+/// The layout invariants hold, catch what they claim to, and probe_fast.cu
+/// agrees with the constants above (no GPU).
+#[test]
+fn a1_layout_pinned() {
+    for cols in [256usize, 768, 1280, 3584, 4352, 18944] {
+        a1_layout(
+            &[("w", 0x7f00_0000_0000), ("x", 0x7f10_0000_0100)],
+            &[("w", cols), ("x", 2 * cols), ("nib", 128), ("scl", 32)],
+            cols,
+        )
+        .unwrap();
+    }
+    assert!(a1_layout(&[("w", 8)], &[], 256).is_err());
+    assert!(a1_layout(&[], &[("x", 264)], 256).is_err());
+    assert!(a1_layout(&[], &[], 300).is_err());
+    let src = include_str!("../probe_fast.cu");
+    for (k, v) in [
+        (
+            "#define A1F_ST(T) ((T) == 64 ? 4 : 3)",
+            a1f_st(64) == 4 && a1f_st(128) == 3,
+        ),
+        ("#define A1F_X(T) ((T) * 256)", a1f_x(64) == 64 * 256),
+        ("#define A1F_W (128 * 256)", A1F_W == 128 * 256),
+        (
+            "#define A1F_STAGE(T) (A1F_X(T) + A1F_W)",
+            a1f_stage(128) == a1f_x(128) + A1F_W,
+        ),
+        (
+            "#define A1F_SMEM(T) (A1F_ST(T) * A1F_STAGE(T) + 2 * A1F_ST(T) * 8 + 1024)",
+            a1f_smem(64) == 4 * a1f_stage(64) + 64 + 1024,
+        ),
+        (
+            "#define A1H_ST(R) ((R) == 128 ? 4 : 3)",
+            a1h_st(128) == 4 && a1h_st(256) == 3,
+        ),
+        ("#define A1H_X (64 * 512)", A1H_X == 64 * 512),
+        ("#define A1H_N(R) ((R) * 128)", a1h_n(256) == 256 * 128),
+        ("#define A1H_S(R) ((R) * 32)", a1h_s(256) == 256 * 32),
+        (
+            "#define A1H_STAGE(R) (A1H_X + A1H_N(R) + A1H_S(R))",
+            a1h_stage(128) == A1H_X + a1h_n(128) + a1h_s(128),
+        ),
+        (
+            "#define A1H_SMEM(R) (A1H_ST(R) * A1H_STAGE(R) + 2 * A1H_ST(R) * 8 + 1024)",
+            a1h_smem(256) == 3 * a1h_stage(256) + 48 + 1024,
+        ),
+        ("mbar_expect(&full[s], A1F_STAGE(T));", true),
+        ("mbar_expect(&full[s], A1H_STAGE(R));", true),
+        ("probe_fp8_t<64>(", true),
+        ("probe_fp8_t<128>(", true),
+        ("probe_w4a16_t<128>(", true),
+        ("probe_w4a16_t<256>(", true),
+    ] {
+        assert!(
+            src.contains(k) && v,
+            "probe_fast.cu and tests.rs disagree: {k}"
+        );
+    }
+    for k in A1_KERNELS {
+        assert!(src.contains(&format!("{k}(")), "probe_fast.cu has no {k}");
+    }
+    // No printf (a call inside the wgmma pipeline serializes every wgmma).
+    assert!(!src.contains("printf"));
+}
+
+/// The probe module's source: kernels.cu's typedefs, hopper.cu's helpers
+/// (TMap .. the RS wgmma wrappers, up to HOPPER_CHECK_SMEM), probe_fast.cu.
+/// Panics if a marker moved.
+fn probe_fast_src() -> String {
+    let k = crate::cuda::KERNELS;
+    let (from, to) = (
+        "// Hopper (sm_90a: H100/H200/H20/GH200) only",
+        "// Test (gpu_hopper_tma_wgmma)",
+    );
+    assert_eq!(k.matches(from).count(), 1, "KERNELS: {from}");
+    let a = k.find(from).unwrap();
+    let b = a + k[a..].find(to).unwrap_or_else(|| panic!("KERNELS: {to}"));
+    format!(
+        "// AXON TEST-ONLY: the WP-A1 fast-GEMM probe module (tests.rs probe_fast_src)\n\
+         typedef unsigned char u8;\ntypedef unsigned int u32;\ntypedef unsigned long long u64;\n\
+         {}\n#endif // the helpers' __CUDA_ARCH_FEAT_SM90_ALL\n{}",
+        &k[a..b],
+        include_str!("../probe_fast.cu")
+    )
+}
+
+/// The probe source compiles for sm_90a through NVRTC (no GPU needed): every
+/// kernel is in the cubin, the two GEMMs with no spills and no stack frame,
+/// the log has no "Potential Performance Loss" note (C7510: wgmma
+/// serialized, C7507: setmaxnreg ignored); for plain sm_90 it compiles to
+/// nothing. Prints `A1 COMPILE` lines (ptxas -v). AXON_A1_SRC_DIR=DIR writes
+/// the source there as probe-fast.cu (the kit's kernel cache is prewarmed
+/// from it).
+#[test]
+fn nvrtc_probe_fast_compiles_sm90a() {
+    let src = probe_fast_src();
+    if let Some(d) = std::env::var_os("AXON_A1_SRC_DIR") {
+        std::fs::write(std::path::Path::new(&d).join("probe-fast.cu"), &src).unwrap();
+    }
+    let n = match crate::cuda::ffi::nvrtc() {
+        Ok(n) => n,
+        Err(e) => {
+            eprintln!("skipping: {e}");
+            return;
+        }
+    };
+    let ver = crate::cuda::ffi::nvrtc_version(n).unwrap();
+    if !crate::cuda::ffi::nvrtc_archs(n).unwrap().contains(&90) || ver.0 < 12 {
+        eprintln!("skipping: NVRTC has no sm_90a");
+        return;
+    }
+    for t in [
+        crate::cuda::Target::Cubin90a,
+        crate::cuda::Target::Cubin(90),
+    ] {
+        let mut opts = vec![format!("--gpu-architecture={t}")];
+        opts.extend(crate::cuda::KERNEL_OPTS_EXT.iter().map(|s| s.to_string()));
+        opts.push("--ptxas-options=-v".into());
+        let (image, log) = crate::cuda::compile_logged(n, &src, &opts, t)
+            .unwrap_or_else(|e| panic!("probe_fast {t}: {e}"));
+        eprintln!(
+            "A1 COMPILE {t}: {} bytes of cubin (NVRTC {}.{})",
+            image.len(),
+            ver.0,
+            ver.1
+        );
+        assert!(
+            !log.contains("Performance Loss")
+                && !log.contains("serialized")
+                && !log.contains("C75"),
+            "probe_fast {t}: performance notes in the NVRTC log:\n{log}"
+        );
+        for k in A1_KERNELS {
+            let has = image.windows(k.len()).any(|w| w == k.as_bytes());
+            assert_eq!(
+                has,
+                t == crate::cuda::Target::Cubin90a,
+                "probe_fast {t}: {k}"
+            );
+        }
+        if t != crate::cuda::Target::Cubin90a {
+            continue;
+        }
+        // ptxas -v: "Function properties for K" / "N bytes stack frame, S bytes
+        // spill stores, ..." / "Used R registers, ...".
+        let lines: Vec<&str> = log.lines().collect();
+        for v in A1_VARS {
+            let k = format!("probe_{}", v.name);
+            let i = lines
+                .iter()
+                .position(|l| l.ends_with(&format!("Function properties for {k}")))
+                .unwrap_or_else(|| panic!("no ptxas -v block for {k}:\n{log}"));
+            let num = |l: &str, unit: &str| -> i64 {
+                let p = l
+                    .find(unit)
+                    .unwrap_or_else(|| panic!("{k}: no '{unit}' in {l}"));
+                l[..p].split_whitespace().last().unwrap().parse().unwrap()
+            };
+            let (stack, spill) = (
+                num(lines[i + 1], " bytes stack frame"),
+                num(lines[i + 1], " bytes spill stores"),
+            );
+            let regs = num(lines[i + 2], " registers");
+            eprintln!(
+                "A1 COMPILE {k}: {regs} registers, {spill} bytes spill stores, {stack} bytes stack frame"
+            );
+            assert!(spill == 0 && stack == 0, "{k}: spills / stack");
+        }
+    }
+}
+
+/// The probe's module (sm_90a devices only: None elsewhere).
+fn probe_fast_module(g: &Gpu) -> Option<Module<'_>> {
+    let m = Module::load(g, &probe_fast_src(), &crate::cuda::KERNEL_OPTS_EXT)
+        .unwrap()
+        .0;
+    m.hopper().then_some(m)
+}
+
+/// OCP FP8 E4M3 (e4m3fn) -> f32: bias 7, 3 mantissa bits, subnormals
+/// m 2^-9, no infinities, S.1111.111 NaN.
+fn e4m3_f32(c: u8) -> f32 {
+    let s = if c & 0x80 != 0 { -1.0 } else { 1.0 };
+    let (e, m) = (((c >> 3) & 15) as i32, (c & 7) as f32);
+    if e == 15 && m == 7.0 {
+        f32::NAN
+    } else if e == 0 {
+        s * m * (2f32).powi(-9)
+    } else {
+        s * (1.0 + m / 8.0) * (2f32).powi(e - 7)
+    }
+}
+
+/// n random e4m3 codes, never NaN: any sign and mantissa, exponent field
+/// 3..=12 (|v| from 2^-4 to 1.875 x 2^5).
+fn a1_e4m3_codes(rng: &mut Rng, n: usize) -> Vec<u8> {
+    let mut v = Vec::with_capacity(n);
+    while v.len() < n {
+        let r = rng.next();
+        for i in 0..4 {
+            if v.len() < n {
+                let x = (r >> (16 * i)) as u16;
+                v.push((x & 0x80) as u8 | ((3 + (x >> 8) % 10) as u8) << 3 | (x & 7) as u8);
+            }
+        }
+    }
+    v
+}
+
+/// Known e4m3 values; the generator never makes a NaN (no GPU).
+#[test]
+fn a1_e4m3_decode() {
+    for (c, v) in [
+        (0x7eu8, 448.0f32),
+        (0x38, 1.0),
+        (0xb8, -1.0),
+        (0x08, 1.0 / 64.0),
+        (0x01, 1.0 / 512.0),
+        (0x00, 0.0),
+        (0x3c, 1.5),
+        (0x62, 40.0),
+    ] {
+        assert_eq!(e4m3_f32(c), v, "{c:#x}");
+    }
+    assert!(e4m3_f32(0x7f).is_nan() && e4m3_f32(0xff).is_nan());
+    let mut rng = Rng(3);
+    let v = a1_e4m3_codes(&mut rng, 100_003);
+    assert_eq!(v.len(), 100_003);
+    assert!(v.iter().all(|&c| {
+        let x = e4m3_f32(c).abs();
+        (1.0 / 16.0..=60.0).contains(&x)
+    }));
+}
+
+/// Per-row (or per-token) scales in [0.5, 1.5) x 2^-6.
+fn a1_scales(rng: &mut Rng, n: usize) -> Vec<f32> {
+    (0..n).map(|_| (1.0 + 0.5 * rng.f()) / 64.0).collect()
+}
+
+/// Q4_K sub-block j's 6-bit (scale, min) (llama.cpp get_scale_min_k4).
+fn q4k_scale_min(j: usize, sc: &[u8]) -> (u8, u8) {
+    if j < 4 {
+        (sc[j] & 63, sc[j + 4] & 63)
+    } else {
+        (
+            (sc[j + 4] & 15) | ((sc[j - 4] >> 6) << 4),
+            (sc[j + 4] >> 4) | ((sc[j] >> 6) << 4),
+        )
+    }
+}
+
+/// K offsets (from 32 j + 2 q) of the 8 nibbles of a W4A16 u32 (n0 = bits
+/// 0..3 .. n7 = bits 28..31): a1_dq4 makes half2 (n0, n4), (n1, n5), (n2, n6),
+/// (n3, n7) = the A fragment's (K 2q, 2q+1), (2q+8, 2q+9) of k16 step 2 j,
+/// then the same of step 2 j + 1 (+16).
+const A1_NIB_K: [usize; 8] = [0, 8, 16, 24, 1, 9, 17, 25];
+
+/// Q4_K weights repacked for probe_w4a16_* (rows padded to rows_p, a multiple
+/// of 256 (both tile heights), with zeros):
+/// - nib: per K-block kb and row r, 128-byte lines at kb rows_p + r; the
+///   16-row group of r (2 KiB) holds, for lane t = 4 g + q (g = r % 8) and
+///   h = 2 rr + u (rr = (r % 16) / 8, u = sub-blocks 4 u ..), the uint4 at
+///   (32 h + t) 16 whose u32 jj is sub-block j = 4 u + jj's nibbles at the
+///   K offsets A1_NIB_K from 32 j + 2 q;
+/// - scl: per (kb, r), 8 u32 = half2 (s, -z) per sub-block, s = fp16(d sc),
+///   z = fp16(dmin m) (each rounded once from the exact f32 product).
+struct A1Q4f {
+    nib: Vec<u8>,
+    scl: Vec<u32>,
+    rows_p: usize,
+}
+
+fn a1_q4f_pack(w: &[u8], rows: usize, cols: usize) -> A1Q4f {
+    let (nblk, rb) = (cols / 256, cols / 256 * 144);
+    let rows_p = rows.next_multiple_of(256);
+    let mut nib = vec![0u8; nblk * rows_p * 128];
+    let mut scl = vec![0u32; nblk * rows_p * 8];
+    for r in 0..rows {
+        let (g, rr) = (r % 8, (r % 16) / 8);
+        for b in 0..nblk {
+            let blk = &w[r * rb + b * 144..][..144];
+            let d = quant::f16_to_f32(u16::from_le_bytes([blk[0], blk[1]]));
+            let dmin = quant::f16_to_f32(u16::from_le_bytes([blk[2], blk[3]]));
+            let (sc, qs) = (&blk[4..16], &blk[16..]);
+            let q = |k: usize| -> u32 {
+                let j = k / 32;
+                ((qs[32 * (j / 2) + k % 32] >> (4 * (j % 2))) & 15) as u32
+            };
+            for j in 0..8 {
+                let (s, m) = q4k_scale_min(j, sc);
+                let hs = quant::f32_to_f16(d * s as f32) as u32;
+                let hz = quant::f32_to_f16(-(dmin * m as f32)) as u32;
+                scl[(b * rows_p + r) * 8 + j] = hs | hz << 16;
+                for qq in 0..4 {
+                    let mut v = 0u32;
+                    for (i, &o) in A1_NIB_K.iter().enumerate() {
+                        v |= q(32 * j + 2 * qq + o) << (4 * i);
+                    }
+                    let (u, jj, t) = (j / 4, j % 4, 4 * g + qq);
+                    let off =
+                        (b * rows_p + 16 * (r / 16)) * 128 + ((2 * rr + u) * 32 + t) * 16 + 4 * jj;
+                    nib[off..off + 4].copy_from_slice(&v.to_le_bytes());
+                }
+            }
+        }
+    }
+    A1Q4f { nib, scl, rows_p }
+}
+
+/// half -> f32 -> the nearest half (one rounding: every operation emulated
+/// here is exact in f64 before it).
+fn a1_h(x: f64) -> u16 {
+    quant::f32_to_f16(x as f32)
+}
+
+/// probe_w4a16_*'s register path on the CPU (no GPU), both tile heights: for
+/// every consumer thread of every tile and K-block, read its uint4s and scales
+/// where the kernel reads them (A1H_* offsets, nib[32 h + lane]), run a1_dq4's ops
+/// (LOP3 magic, HSUB2 / HFMA2, the final HFMA2) in emulated fp16, and place
+/// each half where the wgmma m64nNk16 A fragment says it goes (rows g, g + 8
+/// of the warp's 16; K 2q, 2q+1, 2q+8, 2q+9 of each k16 step). Every weight
+/// must be produced exactly once, within fp16 rounding of quant::dequant.
+#[test]
+fn a1_w4a16_fragments_match_dequant() {
+    let mut rng = Rng(11);
+    let (rows, cols) = (200usize, 768usize);
+    let w = synth_matrix(&mut rng, Q4_K, rows, cols);
+    let p = a1_q4f_pack(&w, rows, cols);
+    let rb = cols / 256 * 144;
+    let mut want = vec![0f32; rows * cols];
+    for r in 0..rows {
+        quant::dequant(Q4_K, &w[r * rb..][..rb], &mut want[r * cols..][..cols]);
+    }
+    let mut seen = vec![0u8; rows * cols];
+    let hf = |h: u16| quant::f16_to_f32(h) as f64;
+    let dq = |v: u32, sz: u32| -> [u32; 4] {
+        // a1_dq4: per half lane (lo, hi).
+        let (s, nz) = (hf(sz as u16), hf((sz >> 16) as u16));
+        let lop = |a: u32, mask: u32| (a & mask) | 0x6400_6400;
+        let lanes = |x: u32| [x as u16, (x >> 16) as u16];
+        let mut out = [0u32; 4];
+        for (i, (x, hi)) in [
+            (lop(v, 0x000f_000f), false),
+            (lop(v, 0x00f0_00f0), true),
+            (lop(v >> 8, 0x000f_000f), false),
+            (lop(v >> 8, 0x00f0_00f0), true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut r = 0u32;
+            for (k, &h) in lanes(x).iter().enumerate() {
+                // HSUB2(x, 1024) or HFMA2(x, 1/16, -64): the exact nibble.
+                let q = if hi {
+                    hf(a1_h(hf(h) * hf(0x2c00) + hf(0xd400)))
+                } else {
+                    hf(a1_h(hf(h) - 1024.0))
+                };
+                assert!((0.0..16.0).contains(&q) && q.fract() == 0.0, "magic");
+                r |= (a1_h(q * s + nz) as u32) << (16 * k);
+            }
+            out[i] = r;
+        }
+        out
+    };
+    for rt in [128usize, 256] {
+        seen.iter_mut().for_each(|c| *c = 0);
+        for kb in 0..cols / 256 {
+            for r0 in (0..p.rows_p).step_by(rt) {
+                for cw in 0..2 {
+                    for (m, wp) in (0..rt / 128).flat_map(|m| (0..4).map(move |w| (m, w))) {
+                        // probe_w4a16_t: grp = (R / 32) cw + 4 m + w.
+                        let grp = rt / 32 * cw + 4 * m + wp;
+                        for l in 0..32 {
+                            let (g, q) = (l / 4, l % 4);
+                            for j in 0..8 {
+                                for rr in 0..2 {
+                                    let h = 2 * rr + j / 4;
+                                    let off = (kb * p.rows_p + r0) * 128
+                                        + grp * 2048
+                                        + (32 * h + l) * 16
+                                        + 4 * (j % 4);
+                                    let v =
+                                        u32::from_le_bytes(p.nib[off..off + 4].try_into().unwrap());
+                                    // The scales at (16 grp + g) * 8 + 64 rr + j; the
+                                    // epilogue's row r0 + R / 2 cw + 64 m + 16 w + g + 8 rr.
+                                    let row_t = 16 * grp + g + 8 * rr;
+                                    assert_eq!(row_t, rt / 2 * cw + 64 * m + 16 * wp + g + 8 * rr);
+                                    let sz = p.scl[(kb * p.rows_p + r0 + row_t) * 8 + j];
+                                    let hv = dq(v, sz);
+                                    let r = r0 + row_t;
+                                    // hv[0]: step 2j K 2q, 2q+1; hv[1]: 2q+8, +9;
+                                    // hv[2], hv[3]: the same of step 2j+1 (+16).
+                                    for (i, x) in hv.iter().enumerate() {
+                                        for lane in 0..2 {
+                                            let k = 256 * kb
+                                                + 32 * j
+                                                + 16 * (i / 2)
+                                                + 2 * q
+                                                + 8 * (i % 2)
+                                                + lane;
+                                            let got = hf((x >> (16 * lane)) as u16);
+                                            if r >= rows {
+                                                assert_eq!(got, 0.0, "pad row {r}");
+                                                continue;
+                                            }
+                                            let e = want[r * cols + k] as f64;
+                                            seen[r * cols + k] += 1;
+                                            let tol = 3.0 * (e.abs() + 0.5) / 2048.0 + 1e-6;
+                                            assert!(
+                                                (got - e).abs() <= tol,
+                                                "r {r} k {k}: got {got} want {e}"
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            seen.iter().all(|&c| c == 1),
+            "R {rt}: a weight not produced exactly once"
+        );
+    }
+}
+
+/// a1_next on the CPU: for tiles (1), split-K and stream-K (0), every
+/// (tile, K-block) is covered exactly once over the grid, never by an empty
+/// range (no GPU).
+#[test]
+fn a1_sched_covers() {
+    // a1_sched + a1_next of probe_fast.cu, for CTA c of grid G.
+    fn ranges(
+        ksplit: usize,
+        nblk: usize,
+        ntiles: usize,
+        c: usize,
+        gn: usize,
+    ) -> Vec<(usize, usize, usize)> {
+        let mut v = Vec::new();
+        if ksplit == 0 {
+            let tot = ntiles * nblk;
+            let (mut pos, end) = (tot * c / gn, tot * (c + 1) / gn);
+            while pos < end {
+                let (t, kb0) = (pos / nblk, pos % nblk);
+                let kb1 = if end - pos < nblk - kb0 {
+                    kb0 + (end - pos)
+                } else {
+                    nblk
+                };
+                v.push((t, kb0, kb1));
+                pos += kb1 - kb0;
+            }
+        } else {
+            let mut u = c;
+            while u < ntiles * ksplit {
+                let (t, p) = (u / ksplit, u % ksplit);
+                let (kb0, kb1) = (p * nblk / ksplit, (p + 1) * nblk / ksplit);
+                if kb1 > kb0 {
+                    v.push((t, kb0, kb1));
+                }
+                u += gn;
+            }
+        }
+        v
+    }
+    for (nblk, ntiles) in [
+        (1usize, 1usize),
+        (14, 8),
+        (74, 56),
+        (14, 296),
+        (3, 5),
+        (17, 2),
+    ] {
+        for ksplit in [1usize, 2, 3, 7, 14, 0] {
+            for gn in [1usize, 3, 7, 132] {
+                let mut seen = vec![0u32; ntiles * nblk];
+                for c in 0..gn {
+                    for (t, kb0, kb1) in ranges(ksplit, nblk, ntiles, c, gn) {
+                        assert!(kb1 > kb0 && kb1 <= nblk && t < ntiles);
+                        for kb in kb0..kb1 {
+                            seen[t * nblk + kb] += 1;
+                        }
+                    }
+                }
+                assert!(
+                    seen.iter().all(|&s| s == 1),
+                    "nblk {nblk} ntiles {ntiles} ksplit {ksplit} grid {gn}"
+                );
+            }
+        }
+    }
+    let src = include_str!("../probe_fast.cu");
+    for k in [
+        "s.pos = tot * blockIdx.x / gridDim.x;",
+        "s.end = tot * (blockIdx.x + 1) / gridDim.x;",
+        "kb1 = left < (long long)(s.nblk - kb0) ? kb0 + (int)left : s.nblk;",
+        "kb0 = p * s.nblk / s.ksplit;",
+        "kb1 = (p + 1) * s.nblk / s.ksplit;",
+        "if (kb1 > kb0) return true;",
+    ] {
+        assert!(src.contains(k), "probe_fast.cu a1_next changed: {k}");
+    }
+}
+
+/// One prepared kernel launch: function, geometry and arguments, all built
+/// before any timing.
+struct A1Launch<'m> {
+    f: Func<'m>,
+    grid: (u32, u32, u32),
+    block: (u32, u32, u32),
+    smem: u32,
+    args: Vec<Arg>,
+}
+
+/// A timed unit: its launches in order (the zeroing launch, then the GEMM).
+struct A1Plan<'m> {
+    name: String,
+    ls: Vec<A1Launch<'m>>,
+}
+
+impl A1Plan<'_> {
+    /// cuLaunchKernel per launch and nothing else: every tensor map, function
+    /// lookup and smem attribute was done when the plan was built (P1 was
+    /// voided by a driver call, `g.info()`, inside its timed launcher).
+    ///
+    /// # Safety
+    /// The plan's arguments match its kernels and its buffers are live.
+    unsafe fn fire(&self, g: &Gpu) {
+        for l in &self.ls {
+            // SAFETY: the caller's.
+            unsafe { g.launch(&l.f, l.grid, l.block, l.smem, &l.args).unwrap() };
+        }
+    }
+}
+
+/// The plan name of a variant's schedule: "fp8_128x64" (tiles),
+/// "fp8_128x64_splitk2", "fp8_128x64_streamk".
+fn a1_name(cand: &str, ksplit: usize) -> String {
+    match ksplit {
+        1 => cand.to_string(),
+        0 => format!("{cand}_streamk"),
+        s => format!("{cand}_splitk{s}"),
+    }
+}
+
+/// The zeroing launch before a split-K / stream-K GEMM (none for tiles).
+fn a1_zero<'m>(pm: &'m Module, out: &DevBuf, n: usize, ksplit: usize) -> Vec<A1Launch<'m>> {
+    if ksplit == 1 {
+        return Vec::new();
+    }
+    vec![A1Launch {
+        f: pm.function("a1_zero_f32").unwrap(),
+        grid: ((n / 4).div_ceil(256).clamp(1, 1024) as u32, 1, 1),
+        block: (256, 1, 1),
+        smem: 0,
+        args: vec![out.arg(), Arg::U64(n as u64)],
+    }]
+}
+
+/// probe_fp8_128x<T> (v) on e4m3 weights `w` (rows x cols, scales ws) and nb
+/// tokens of e4m3 activations `x` (stride cols, scales xs), ctas persistent
+/// CTAs, into out (rows * nb f32, stride rows).
+#[allow(clippy::too_many_arguments)]
+fn a1_plan_fp8<'m>(
+    g: &Gpu,
+    pm: &'m Module,
+    v: A1Var,
+    w: &DevBuf,
+    ws: &DevBuf,
+    x: &DevBuf,
+    xs: &DevBuf,
+    (rows, cols, nb): (usize, usize, usize),
+    ksplit: usize,
+    ctas: usize,
+    out: &DevBuf,
+) -> A1Plan<'m> {
+    a1_layout(
+        &[
+            ("fp8 weights", dev_addr(w)),
+            ("fp8 activations", dev_addr(x)),
+        ],
+        &[("fp8 weights", cols), ("fp8 activations", cols)],
+        cols,
+    )
+    .unwrap();
+    let mw = g
+        .tensor_map_2d(
+            dev_addr(w),
+            (cols as u64, rows as u64),
+            cols as u64,
+            (128, 128),
+            true,
+        )
+        .unwrap();
+    let mx = g
+        .tensor_map_2d(
+            dev_addr(x),
+            (cols as u64, nb as u64),
+            cols as u64,
+            (128, v.toks as u32),
+            true,
+        )
+        .unwrap();
+    let f = pm.function(&v.kernel()).unwrap();
+    f.set_max_shared(v.smem()).unwrap();
+    let mut ls = a1_zero(pm, out, rows * nb, ksplit);
+    ls.push(A1Launch {
+        f,
+        grid: (ctas as u32, 1, 1),
+        block: (384, 1, 1),
+        smem: v.smem() as u32,
+        args: vec![
+            Arg::Blob128(mw),
+            Arg::Blob128(mx),
+            ws.arg(),
+            xs.arg(),
+            Arg::I32(rows as i32),
+            Arg::I32(cols as i32),
+            Arg::I32(nb as i32),
+            Arg::I32(ksplit as i32),
+            out.arg(),
+        ],
+    });
+    A1Plan {
+        name: a1_name(v.name, ksplit),
+        ls,
+    }
+}
+
+/// probe_w4a16_<R>x64 (v) on repacked weights (nib, scl: a1_q4f_pack of rows
+/// x cols, padded to rows_p) and nb tokens of fp16 activations `x` (stride 2
+/// cols).
+#[allow(clippy::too_many_arguments)]
+fn a1_plan_w4a16<'m>(
+    g: &Gpu,
+    pm: &'m Module,
+    v: A1Var,
+    nib: &DevBuf,
+    scl: &DevBuf,
+    x: &DevBuf,
+    (rows, rows_p, cols, nb): (usize, usize, usize, usize),
+    ksplit: usize,
+    ctas: usize,
+    out: &DevBuf,
+) -> A1Plan<'m> {
+    a1_layout(
+        &[
+            ("w4a16 nibbles", dev_addr(nib)),
+            ("w4a16 scales", dev_addr(scl)),
+            ("fp16 activations", dev_addr(x)),
+        ],
+        &[
+            ("nibbles", 128),
+            ("scales", 32),
+            ("fp16 activations", 2 * cols),
+        ],
+        cols,
+    )
+    .unwrap();
+    assert!(rows_p.is_multiple_of(v.rows) && rows_p >= rows);
+    let (lines, rt) = ((cols / 256 * rows_p) as u64, v.rows as u32);
+    let mn = g
+        .tensor_map_2d(dev_addr(nib), (128, lines), 128, (128, rt), false)
+        .unwrap();
+    let msc = g
+        .tensor_map_2d(dev_addr(scl), (32, lines), 32, (32, rt), false)
+        .unwrap();
+    let mx = g
+        .tensor_map_2d(
+            dev_addr(x),
+            (2 * cols as u64, nb as u64),
+            2 * cols as u64,
+            (128, 64),
+            true,
+        )
+        .unwrap();
+    let f = pm.function(&v.kernel()).unwrap();
+    f.set_max_shared(v.smem()).unwrap();
+    let mut ls = a1_zero(pm, out, rows * nb, ksplit);
+    ls.push(A1Launch {
+        f,
+        grid: (ctas as u32, 1, 1),
+        block: (384, 1, 1),
+        smem: v.smem() as u32,
+        args: vec![
+            Arg::Blob128(mn),
+            Arg::Blob128(msc),
+            Arg::Blob128(mx),
+            Arg::I32(rows as i32),
+            Arg::I32(rows_p as i32),
+            Arg::I32(cols as i32),
+            Arg::I32(nb as i32),
+            Arg::I32(ksplit as i32),
+            out.arg(),
+        ],
+    });
+    A1Plan {
+        name: a1_name(v.name, ksplit),
+        ls,
+    }
+}
+
+/// Baseline gemm2s_q4_k (main's mma.sync Q4_K x Q8_K product), as
+/// launch_product launches it.
+#[allow(clippy::too_many_arguments)]
+fn a1_plan_gemm2s<'m>(
+    km: &'m Module,
+    w: &DevBuf,
+    (rows, cols, nb): (usize, usize, usize),
+    act: &DevBuf,
+    st: usize,
+    out: &DevBuf,
+) -> A1Plan<'m> {
+    let f = km.function("gemm2s_q4_k").unwrap();
+    let sm = gemm2_smem(Q4_K, 64, 3);
+    f.set_max_shared(sm).unwrap();
+    A1Plan {
+        name: "gemm2s_q4_k".into(),
+        ls: vec![A1Launch {
+            f,
+            grid: (nb.div_ceil(64) as u32, rows.div_ceil(G2_BM) as u32, 1),
+            block: (256, 1, 1),
+            smem: sm as u32,
+            args: vec![
+                w.arg(),
+                Arg::U64(quant::row_bytes(Q4_K, cols) as u64),
+                Arg::I32(rows as i32),
+                Arg::I32(cols as i32),
+                act.arg(),
+                Arg::U64(st as u64),
+                Arg::I32(nb as i32),
+                Arg::Ptr(0),
+                Arg::I32(0),
+                out.arg(),
+                Arg::U64(rows as u64),
+            ],
+        }],
+    }
+}
+
+/// Baseline gemmh2_q4_k (main's exact wgmma kernel), as launch_gemmh
+/// launches it.
+fn a1_plan_gemmh2<'m>(
+    g: &Gpu,
+    km: &'m Module,
+    w: &DevBuf,
+    (rows, cols, nb): (usize, usize, usize),
+    act: &DevBuf,
+    st: usize,
+    out: &DevBuf,
+) -> A1Plan<'m> {
+    let rb = (cols / 256 * 144) as u64;
+    let mw = g
+        .tensor_map_2d(dev_addr(w), (rb, rows as u64), rb, (144, 128), false)
+        .unwrap();
+    let mx = g
+        .tensor_map_2d(
+            dev_addr(act),
+            (cols as u64, nb as u64),
+            st as u64,
+            (128, 64),
+            true,
+        )
+        .unwrap();
+    let f = km.function("gemmh2_q4_k").unwrap();
+    f.set_max_shared(GEMMH2_SMEM).unwrap();
+    A1Plan {
+        name: "gemmh2_q4_k".into(),
+        ls: vec![A1Launch {
+            f,
+            grid: (nb.div_ceil(64) as u32, rows.div_ceil(128) as u32, 1),
+            block: (256, 1, 1),
+            smem: GEMMH2_SMEM as u32,
+            args: vec![
+                Arg::Blob128(mw),
+                Arg::Blob128(mx),
+                act.arg(),
+                Arg::U64(st as u64),
+                Arg::I32(rows as i32),
+                Arg::I32(cols as i32),
+                Arg::I32(nb as i32),
+                Arg::Ptr(0),
+                Arg::I32(0),
+                out.arg(),
+                Arg::U64(rows as u64),
+            ],
+        }],
+    }
+}
+
+/// A candidate's inputs on host and device for one (shape, nb).
+enum A1Data<'g> {
+    /// e4m3 weights / activations and their f32 scales.
+    Fp8 {
+        w: Vec<u8>,
+        ws: Vec<f32>,
+        x: Vec<u8>,
+        xs: Vec<f32>,
+        dev: [DevBuf<'g>; 4],
+    },
+    /// Q4_K weights (host, for the reference), their repacked device copy
+    /// (nibbles, scales), fp16 activations.
+    W4a16 {
+        w: Vec<u8>,
+        x: Vec<u16>,
+        rows_p: usize,
+        dev: [DevBuf<'g>; 3],
+    },
+}
+
+/// FP8 inputs: random codes (a1_e4m3_codes), scales in [0.5, 1.5) 2^-6.
+fn a1_fp8_data<'g>(g: &'g Gpu, rng: &mut Rng, rows: usize, cols: usize, nb: usize) -> A1Data<'g> {
+    let (w, ws) = (a1_e4m3_codes(rng, rows * cols), a1_scales(rng, rows));
+    let (x, xs) = (a1_e4m3_codes(rng, nb * cols), a1_scales(rng, nb));
+    let dev = [
+        g.upload(&w).unwrap(),
+        g.upload(&ws).unwrap(),
+        g.upload(&x).unwrap(),
+        g.upload(&xs).unwrap(),
+    ];
+    A1Data::Fp8 { w, ws, x, xs, dev }
+}
+
+/// W4A16 inputs: Q4_K `w` repacked, activations `xf` (nb x cols) to fp16.
+fn a1_w4a16_data<'g>(
+    g: &'g Gpu,
+    w: &[u8],
+    rows: usize,
+    cols: usize,
+    xf: &[Vec<f32>],
+) -> A1Data<'g> {
+    let p = a1_q4f_pack(w, rows, cols);
+    let x: Vec<u16> = xf.iter().flatten().map(|&v| quant::f32_to_f16(v)).collect();
+    let dev = [
+        g.upload(&p.nib).unwrap(),
+        g.upload(&p.scl).unwrap(),
+        g.upload(&x).unwrap(),
+    ];
+    A1Data::W4a16 {
+        w: w.to_vec(),
+        x,
+        rows_p: p.rows_p,
+        dev,
+    }
+}
+
+impl A1Data<'_> {
+    fn tol(&self) -> (f64, f64) {
+        match self {
+            A1Data::Fp8 { .. } => A1_TOL_FP8,
+            A1Data::W4a16 { .. } => A1_TOL_W4A16,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn plan<'m>(
+        &self,
+        g: &Gpu,
+        pm: &'m Module,
+        v: A1Var,
+        (rows, cols, nb): (usize, usize, usize),
+        ksplit: usize,
+        ctas: usize,
+        out: &DevBuf,
+    ) -> A1Plan<'m> {
+        match self {
+            A1Data::Fp8 { dev, .. } => {
+                assert!(v.fp8);
+                a1_plan_fp8(
+                    g,
+                    pm,
+                    v,
+                    &dev[0],
+                    &dev[1],
+                    &dev[2],
+                    &dev[3],
+                    (rows, cols, nb),
+                    ksplit,
+                    ctas,
+                    out,
+                )
+            }
+            A1Data::W4a16 { dev, rows_p, .. } => {
+                assert!(!v.fp8);
+                a1_plan_w4a16(
+                    g,
+                    pm,
+                    v,
+                    &dev[0],
+                    &dev[1],
+                    &dev[2],
+                    (rows, *rows_p, cols, nb),
+                    ksplit,
+                    ctas,
+                    out,
+                )
+            }
+        }
+    }
+
+    /// The CPU f64 reference at the (token z, row r) pairs, as (z, r, value).
+    fn reference(&self, cols: usize, pairs: &[(usize, usize)]) -> Vec<(usize, usize, f64)> {
+        let mut ps = pairs.to_vec();
+        ps.sort_by_key(|&(z, r)| (r, z));
+        let mut out = Vec::with_capacity(ps.len());
+        match self {
+            A1Data::Fp8 { w, ws, x, xs, .. } => {
+                let lut: Vec<f64> = (0..=255u8).map(|c| e4m3_f32(c) as f64).collect();
+                for (z, r) in ps {
+                    let s: f64 = w[r * cols..][..cols]
+                        .iter()
+                        .zip(&x[z * cols..][..cols])
+                        .map(|(&a, &b)| lut[a as usize] * lut[b as usize])
+                        .sum();
+                    out.push((z, r, s * ws[r] as f64 * xs[z] as f64));
+                }
+            }
+            A1Data::W4a16 { w, x, .. } => {
+                let rb = cols / 256 * 144;
+                let mut row = vec![0f32; cols];
+                let mut cur = usize::MAX;
+                for (z, r) in ps {
+                    if r != cur {
+                        quant::dequant(Q4_K, &w[r * rb..][..rb], &mut row);
+                        cur = r;
+                    }
+                    let s: f64 = row
+                        .iter()
+                        .zip(&x[z * cols..][..cols])
+                        .map(|(&a, &b)| a as f64 * quant::f16_to_f32(b) as f64)
+                        .sum();
+                    out.push((z, r, s));
+                }
+            }
+        }
+        out
+    }
+}
+
+/// (rel-rms, rel-max) of |got - want| over the reference points, relative to
+/// the reference's rms; a NaN counts as infinite.
+fn a1_err(got: &[f32], rows: usize, want: &[(usize, usize, f64)]) -> (f64, f64) {
+    let (mut se, mut sw, mut mx) = (0f64, 0f64, 0f64);
+    for &(z, r, v) in want {
+        let e = (got[z * rows + r] as f64 - v).abs();
+        let e = if e.is_nan() { f64::INFINITY } else { e };
+        se += e * e;
+        sw += v * v;
+        mx = mx.max(e);
+    }
+    let rms = (sw / want.len() as f64).sqrt().max(f64::MIN_POSITIVE);
+    ((se / want.len() as f64).sqrt() / rms, mx / rms)
+}
+
+/// The tolerance verdict text: "tol PASS rel-rms .. rel-max .." (or FAIL).
+fn a1_tol_text((rr, rm): (f64, f64), (tr, tm): (f64, f64)) -> (bool, String) {
+    let ok = rr <= tr && rm <= tm;
+    (
+        ok,
+        format!(
+            "tol {} rel-rms {rr:.2e} rel-max {rm:.2e} (bounds {tr} / {tm})",
+            if ok { "PASS" } else { "FAIL" }
+        ),
+    )
+}
+
+/// Run each (rows, cols, nb, ctas, ksplit) case of variant `v` once,
+/// every output against the CPU reference; prints `A1 RAGGED` lines (and
+/// `A1 TOL FAIL` on a miss). Returns the number of failed cases.
+fn a1_check(
+    g: &Gpu,
+    pm: &Module,
+    v: A1Var,
+    cases: &[(usize, usize, usize, usize, usize)],
+) -> usize {
+    let mut rng = Rng(0xa1c);
+    let mut bad = 0;
+    for &(rows, cols, nb, ctas, ksplit) in cases {
+        let data = if v.fp8 {
+            a1_fp8_data(g, &mut rng, rows, cols, nb)
+        } else {
+            let w = synth_matrix(&mut rng, Q4_K, rows, cols);
+            let xf: Vec<Vec<f32>> = (0..nb).map(|_| rng.vec(cols, 1.0)).collect();
+            a1_w4a16_data(g, &w, rows, cols, &xf)
+        };
+        // NaN first: a missed output can't read as a stale right answer.
+        let out = g.upload(&vec![f32::NAN; rows * nb]).unwrap();
+        let plan = data.plan(g, pm, v, (rows, cols, nb), ksplit, ctas, &out);
+        // SAFETY: the plan's buffers (data, out) live until the sync below.
+        unsafe { plan.fire(g) };
+        g.sync().unwrap();
+        let got = out.read::<f32>().unwrap();
+        let pairs: Vec<(usize, usize)> = (0..nb)
+            .flat_map(|z| (0..rows).map(move |r| (z, r)))
+            .collect();
+        let want = data.reference(cols, &pairs);
+        let (ok, txt) = a1_tol_text(a1_err(&got, rows, &want), data.tol());
+        let what = format!(
+            "{} {rows}x{cols} nb {nb} ctas {ctas} ksplit {ksplit}",
+            plan.name
+        );
+        eprintln!("A1 RAGGED {what}: {} outputs, {txt}", pairs.len());
+        if !ok {
+            eprintln!("A1 TOL FAIL {what}");
+            bad += 1;
+        }
+    }
+    bad
+}
+
+/// The tiny cases (what the session runs under compute-sanitizer memcheck
+/// first): one tile, one CTA; split-K over 2 CTAs; stream-K over 3 CTAs on
+/// 2 tiles; stream-K with more CTAs than K-blocks.
+const A1_TINY: [(usize, usize, usize, usize, usize); 4] = [
+    (128, 256, 64, 1, 1),
+    (128, 512, 64, 2, 2),
+    (256, 768, 64, 3, 0),
+    (128, 256, 64, 4, 0),
+];
+
+/// The ragged cases, every output checked: rows / tokens off the 128 x 64
+/// tile, 1 to 74 K-blocks, few CTAs (several tiles each: the persistent loop,
+/// the ring wrapping across tiles and ranges), split-K 2 / 3 / 14, stream-K
+/// with ranges cut inside tiles.
+const A1_RAGGED: [(usize, usize, usize, usize, usize); 10] = [
+    (128, 256, 64, 1, 1),
+    (200, 768, 100, 3, 1),
+    (384, 1280, 129, 2, 1),
+    (128, 4352, 64, 1, 1),
+    (512, 3584, 200, 7, 1),
+    (200, 3584, 100, 5, 2),
+    (384, 4352, 129, 7, 3),
+    (136, 3584, 72, 11, 14),
+    (512, 3584, 200, 11, 0),
+    (256, 18944, 64, 13, 0),
+];
+
+/// Variant `name`'s test over `cases`, skipping off sm_90a.
+fn a1_gpu_check(name: &str, cases: &[(usize, usize, usize, usize, usize)]) {
+    let v = *A1_VARS.iter().find(|v| v.name == name).unwrap();
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let Some(pm) = probe_fast_module(&g) else {
+        eprintln!("skipping: not sm_90a");
+        return;
+    };
+    let bad = a1_check(&g, &pm, v, cases);
+    assert_eq!(bad, 0, "a1 {name}: tolerance failures");
+}
+
+/// probe_fp8_128x64, tiny shapes (sm_90a only; skips elsewhere).
+#[test]
+fn gpu_a1_fp8_128x64_tiny() {
+    a1_gpu_check("fp8_128x64", &A1_TINY);
+}
+
+/// probe_fp8_128x128, tiny shapes.
+#[test]
+fn gpu_a1_fp8_128x128_tiny() {
+    a1_gpu_check("fp8_128x128", &A1_TINY);
+}
+
+/// probe_w4a16_128x64, tiny shapes.
+#[test]
+fn gpu_a1_w4a16_128x64_tiny() {
+    a1_gpu_check("w4a16_128x64", &A1_TINY);
+}
+
+/// probe_w4a16_256x64, tiny shapes.
+#[test]
+fn gpu_a1_w4a16_256x64_tiny() {
+    a1_gpu_check("w4a16_256x64", &A1_TINY);
+}
+
+/// probe_fp8_128x64 against the CPU at every output of the ragged shapes.
+#[test]
+fn gpu_a1_fp8_128x64_ragged() {
+    a1_gpu_check("fp8_128x64", &A1_RAGGED);
+}
+
+/// probe_fp8_128x128, the ragged shapes.
+#[test]
+fn gpu_a1_fp8_128x128_ragged() {
+    a1_gpu_check("fp8_128x128", &A1_RAGGED);
+}
+
+/// probe_w4a16_128x64, the ragged shapes.
+#[test]
+fn gpu_a1_w4a16_128x64_ragged() {
+    a1_gpu_check("w4a16_128x64", &A1_RAGGED);
+}
+
+/// probe_w4a16_256x64, the ragged shapes.
+#[test]
+fn gpu_a1_w4a16_256x64_ragged() {
+    a1_gpu_check("w4a16_256x64", &A1_RAGGED);
+}
+
+/// (median, min, max) of v (sorted in place).
+fn a1_stats(v: &mut [f64]) -> (f64, f64, f64) {
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    (v[v.len() / 2], v[0], v[v.len() - 1])
+}
+
+/// One child of cuda_a1_session: the ceilings of the probe's two wgmma
+/// forms at 2 warpgroups per SM (the probe's consumer count), raw MACs:
+/// a1_peak_fp8_ss_n64 (SS m64n64k32 e4m3) and a1_peak_f16_rs_n64 (RS
+/// m64n64k16 f16). sm_90a only.
+#[test]
+#[ignore]
+fn cuda_a1_peak() {
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let info = g.info().unwrap();
+    let Some(pm) = probe_fast_module(&g) else {
+        eprintln!("A1 SKIP peaks (no sm_90a device)");
+        eprintln!("A1 PEAK END ok");
+        return;
+    };
+    let rounds: usize = std::env::var("AXON_A1_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(9);
+    let (iters, wgs, blocks) = (4096usize, 2usize, info.sms as usize);
+    let o = g.alloc(4 * 4096).unwrap();
+    for (k, kmac) in [
+        ("a1_peak_fp8_ss_n64", 64 * 64 * 32usize),
+        ("a1_peak_f16_rs_n64", 64 * 64 * 16),
+    ] {
+        let f = pm.function(k).unwrap();
+        let mut v = Vec::new();
+        for _ in 0..rounds + 1 {
+            let e0 = g.record().unwrap();
+            // SAFETY: (int iters, int* out); o has a slot per block.
+            unsafe {
+                g.launch(
+                    &f,
+                    (blocks as u32, 1, 1),
+                    (128 * wgs as u32, 1, 1),
+                    0,
+                    &[Arg::I32(iters as i32), o.arg()],
+                )
+                .unwrap();
+            }
+            let e1 = g.record().unwrap();
+            let ms = e0.ms_to(&e1).unwrap() as f64;
+            v.push((blocks * wgs * iters * 4 * kmac) as f64 / (ms * 1e-3) / 1e12);
+        }
+        v.remove(0); // the first launch warms up
+        let (med, lo, hi) = a1_stats(&mut v);
+        eprintln!(
+            "A1 PEAK {k} {wgs} WG/SM: median {med:.1} TMAC/s raw (min {lo:.1} max {hi:.1}; {rounds} rounds)"
+        );
+    }
+    eprintln!("A1 PEAK END ok");
+}
+
+/// The bench cells: (name, K, rows, nbs). nb 128 also runs the (c)
+/// variants: split-K and stream-K on down, q/wo and kv; stream-K on gate
+/// (information).
+const A1_CELLS: [(&str, usize, usize, &[usize]); 4] = [
+    ("gate", 3584, 18944, &[128, 512, 1024]),
+    ("down", 18944, 3584, &[128, 512, 1024]),
+    ("q/wo", 3584, 3584, &[128, 1024]),
+    ("kv", 3584, 512, &[128, 1024]),
+];
+
+/// The split-K factor variant v's (c) cells use: enough units to fill one
+/// wave of CTAs, at least 2, at most one K-block each.
+fn a1_split(v: A1Var, rows: usize, cols: usize, nb: usize, sms: usize) -> usize {
+    (sms / v.tiles(rows, nb)).clamp(2, cols / 256)
+}
+
+/// One child of cuda_a1_session: the candidates against the baselines, the
+/// same rounds interleaved, every cell of A1_CELLS. Per round each plan runs
+/// once to warm, then 3 times between two events; median of
+/// AXON_A1_ROUNDS (9) rounds, TMAC/s of real MACs (rows K nb / time). The
+/// candidate variants (AXON_A1_KERNELS, default all of A1_VARS; "none" =
+/// baselines only) are checked against the CPU at 4096 sampled outputs + corners
+/// after the last round (`tol PASS` / `FAIL`; a FAIL cell doesn't count for
+/// the rules). Baselines: gemm2s_q4_k (any GPU) and gemmh2_q4_k (sm_90a),
+/// on the same Q4_K weights and the same activations (Q8_K) as W4A16's.
+/// AXON_A1_SHAPE: only cells whose name contains it. Off sm_90a the
+/// candidates are skipped (`A1 SKIP`): the rehearsal. Exits 124 after
+/// AXON_A1_TIMEOUT_S (900) whatever runs.
+#[test]
+#[ignore]
+fn cuda_a1_bench() {
+    let lim: u64 = std::env::var("AXON_A1_TIMEOUT_S")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(900);
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(lim));
+        eprintln!("A1 TIMEOUT after {lim} s: exiting");
+        std::process::exit(124);
+    });
+    let Some(g) = crate::testutil::gpu() else {
+        return;
+    };
+    let info = g.info().unwrap();
+    let km = Kernels::module_ext(&g).unwrap();
+    let pm = probe_fast_module(&g);
+    let all: Vec<&str> = A1_VARS.iter().map(|v| v.name).collect();
+    let kset = std::env::var("AXON_A1_KERNELS").unwrap_or(all.join(","));
+    let on = |c: &str| pm.is_some() && kset.split(',').any(|k| k.trim() == c);
+    let vars: Vec<A1Var> = A1_VARS.iter().copied().filter(|v| on(v.name)).collect();
+    let rounds: usize = std::env::var("AXON_A1_ROUNDS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(9);
+    let shape_ok = |s: &str| std::env::var("AXON_A1_SHAPE").map_or(true, |f| s.contains(&f));
+    let sms = info.sms as usize;
+    eprintln!(
+        "A1 BENCH device {} sm_{}{} {} SMs; hopper module {}, probe module {}; candidates [{}]; {rounds} rounds",
+        info.name,
+        info.cc.0,
+        info.cc.1,
+        sms,
+        km.hopper(),
+        pm.is_some(),
+        vars.iter().map(|v| v.name).collect::<Vec<_>>().join(",")
+    );
+    for c in all {
+        if !on(c) {
+            eprintln!(
+                "A1 SKIP {c} cells ({})",
+                if pm.is_none() {
+                    "no sm_90a device"
+                } else {
+                    "not in AXON_A1_KERNELS"
+                }
+            );
+        }
+    }
+    if !km.hopper() {
+        eprintln!("A1 SKIP gemmh2_q4_k cells (no sm_90a module)");
+    }
+    let mut rng = Rng(0xa1);
+    let mut tol_bad = 0;
+    for &(what, cols, rows, nbs) in &A1_CELLS {
+        if !shape_ok(what) {
+            continue;
+        }
+        let wq = synth_matrix(&mut rng, Q4_K, rows, cols);
+        let w = g.upload(&wq).unwrap();
+        for &nb in nbs {
+            let shape = (rows, cols, nb);
+            let xf: Vec<Vec<f32>> = (0..nb).map(|_| rng.vec(cols, 1.0)).collect();
+            let act = quantize_batch(&g, &km, &xf, cols);
+            let st = act_stride_t(cols);
+            let base_out = g.alloc(rows * nb * 4).unwrap();
+            // One data set per family (both tiles of a family share it).
+            let mut data = Vec::new();
+            let mut fam = [None, None]; // data index of fp8, w4a16
+            if vars.iter().any(|v| v.fp8) {
+                fam[0] = Some(data.len());
+                data.push(a1_fp8_data(&g, &mut rng, rows, cols, nb));
+            }
+            if vars.iter().any(|v| !v.fp8) {
+                fam[1] = Some(data.len());
+                data.push(a1_w4a16_data(&g, &wq, rows, cols, &xf));
+            }
+            // Each variant: tiles everywhere; at nb 128 split-K and stream-K
+            // (down, q/wo, kv) or stream-K only (gate).
+            let mut outs = Vec::new(); // (variant, data index, ksplit, out buffer)
+            for &v in &vars {
+                let di = fam[usize::from(!v.fp8)].unwrap();
+                let mut ks = vec![1usize];
+                if nb == 128 {
+                    if what != "gate" {
+                        ks.push(a1_split(v, rows, cols, nb, sms));
+                    }
+                    ks.push(0);
+                }
+                for k in ks {
+                    outs.push((v, di, k, g.alloc(rows * nb * 4).unwrap()));
+                }
+            }
+            let mut plans = vec![a1_plan_gemm2s(&km, &w, shape, &act, st, &base_out)];
+            if km.hopper() {
+                plans.push(a1_plan_gemmh2(&g, &km, &w, shape, &act, st, &base_out));
+            }
+            let nbase = plans.len();
+            if let Some(pm) = pm.as_ref() {
+                for (v, di, k, out) in &outs {
+                    plans.push(data[*di].plan(&g, pm, *v, shape, *k, sms, out));
+                }
+            }
+            let mut ms: Vec<Vec<f64>> = vec![Vec::new(); plans.len()];
+            for _ in 0..rounds {
+                for (pi, p) in plans.iter().enumerate() {
+                    // SAFETY: every plan's buffers (w, act, data, outs) live to the end of the cell.
+                    unsafe { p.fire(&g) };
+                    let e0 = g.record().unwrap();
+                    for _ in 0..3 {
+                        // SAFETY: as above.
+                        unsafe { p.fire(&g) };
+                    }
+                    let e1 = g.record().unwrap();
+                    ms[pi].push(e0.ms_to(&e1).unwrap() as f64 / 3.0);
+                }
+            }
+            g.sync().unwrap();
+            // The tolerance checks: 4096 sampled outputs + the tile corners,
+            // one reference per candidate for all its variants.
+            let mut srng = Rng(0x5eed ^ (rows * 31 + nb) as u64);
+            let mut pairs: Vec<(usize, usize)> = (0..4096)
+                .map(|_| ((srng.next() as usize) % nb, (srng.next() as usize) % rows))
+                .collect();
+            for z in [0, 63.min(nb - 1), nb - 1] {
+                for r in [0, 127.min(rows - 1), rows - 1] {
+                    pairs.push((z, r));
+                }
+            }
+            let refs: Vec<Vec<(usize, usize, f64)>> =
+                data.iter().map(|d| d.reference(cols, &pairs)).collect();
+            let macs = (rows * cols * nb) as f64;
+            for (pi, p) in plans.iter().enumerate() {
+                let mut v: Vec<f64> = ms[pi].iter().map(|x| macs / (x * 1e-3) / 1e12).collect();
+                let (med, lo, hi) = a1_stats(&mut v);
+                let mut mt = ms[pi].clone();
+                let (tmed, _, _) = a1_stats(&mut mt);
+                let mut tag = String::new();
+                if pi >= nbase {
+                    let (_, di, _, out) = &outs[pi - nbase];
+                    let got = out.read::<f32>().unwrap();
+                    let (ok, txt) = a1_tol_text(a1_err(&got, rows, &refs[*di]), data[*di].tol());
+                    if !ok {
+                        tol_bad += 1;
+                    }
+                    tag = format!(" {txt}");
+                }
+                eprintln!(
+                    "A1 CELL {what} {cols}x{rows} nb {nb} {}: median {med:.1} TMAC/s (min {lo:.1} max {hi:.1}; {rounds} rounds; {tmed:.4} ms){tag}",
+                    p.name
+                );
+            }
+        }
+    }
+    eprintln!(
+        "A1 BENCH END {}",
+        if tol_bad == 0 {
+            "ok".to_string()
+        } else {
+            format!("ok, {tol_bad} cells out of tolerance (they don't count)")
+        }
+    );
+}
+
+/// Run this test binary's `test` in a child process (its own CUDA context),
+/// optionally under `wrap` (compute-sanitizer), output teed into this log and
+/// kept; killed after `limit_s`. Returns (rc, seconds, output); rc -1 = killed
+/// on timeout. (T3's probe_child.)
+fn a1_child(
+    wrap: &[String],
+    test: &str,
+    ignored: bool,
+    env: &[(&str, &str)],
+    limit_s: u64,
+) -> (i32, f64, String) {
+    let exe = std::env::current_exe().unwrap();
+    let mut args: Vec<String> = wrap.to_vec();
+    args.push(exe.display().to_string());
+    args.extend([
+        format!("cuda::qwen2::tests::{test}"),
+        "--exact".into(),
+        "--nocapture".into(),
+        "--test-threads".into(),
+        "1".into(),
+    ]);
+    if ignored {
+        args.push("--ignored".into());
+    }
+    eprintln!(
+        "A1 STAGE {test}: start, limit {limit_s} s ({})",
+        args.join(" ")
+    );
+    let t = std::time::Instant::now();
+    let mut c = std::process::Command::new(&args[0]);
+    c.args(&args[1..])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    let mut child = match c.spawn() {
+        Ok(ch) => ch,
+        Err(e) => {
+            eprintln!("A1 STAGE {test}: spawn failed: {e}");
+            return (-2, 0.0, String::new());
+        }
+    };
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let tee = |r: Box<dyn std::io::Read + Send>| {
+        let seen = seen.clone();
+        std::thread::spawn(move || {
+            use std::io::BufRead;
+            for l in std::io::BufReader::new(r).lines().map_while(Result::ok) {
+                eprintln!("{l}");
+                let mut s = seen.lock().unwrap();
+                s.push_str(&l);
+                s.push('\n');
+            }
+        })
+    };
+    let t1 = tee(Box::new(child.stdout.take().unwrap()));
+    let t2 = tee(Box::new(child.stderr.take().unwrap()));
+    let rc = loop {
+        if let Some(st) = child.try_wait().unwrap() {
+            break st.code().unwrap_or(-3);
+        }
+        if t.elapsed().as_secs() >= limit_s {
+            let _ = child.kill();
+            let _ = child.wait();
+            break -1;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    };
+    let _ = (t1.join(), t2.join());
+    let s = t.elapsed().as_secs_f64();
+    eprintln!(
+        "A1 STAGE {test}: rc {rc} after {s:.1} s{}",
+        if rc == -1 { " (TIMEOUT, killed)" } else { "" }
+    );
+    let out = seen.lock().unwrap().clone();
+    (rc, s, out)
+}
+
+/// How a candidate's stage ended: "ok", "skipped (no sm_90a)", "tolerance"
+/// (ran, no fault, out of tolerance: its bench still runs, its cells carry
+/// their own tol) or "FAULT" (CUDA error, trap, sanitizer error, timeout,
+/// anything else: the candidate is left out of the bench).
+fn a1_outcome(rc: i32, out: &str) -> &'static str {
+    if out.contains("skipping: not sm_90a") && rc == 0 {
+        "skipped (no sm_90a)"
+    } else if rc == 0 {
+        "ok"
+    } else if rc == 101
+        && out.contains("A1 TOL FAIL")
+        && !out.contains("CUDA_ERROR")
+        && (!out.contains("ERROR SUMMARY:") || out.contains("ERROR SUMMARY: 0 errors"))
+    {
+        "tolerance"
+    } else {
+        "FAULT"
+    }
+}
+
+/// WP-A1's ONE H100 job, stages in separate processes so a faulting kernel
+/// can't take the rest down (each child has its own CUDA context), cheapest
+/// and most likely to break first:
+/// 0. the probe's sm_90a NVRTC compile check (in process, no GPU);
+/// 1. with AXON_A1_SANITIZER=<compute-sanitizer>: a self-check (memcheck
+///    over gpu_rmsnorm_matches_cpu: unusable -> stage dropped, not failed),
+///    then each candidate variant's tiny shapes under memcheck;
+/// 2. each variant's tiny shapes, then its ragged shapes (every output);
+/// 3. cuda_a1_peak (the two wgmma forms' ceilings);
+/// 4. cuda_a1_bench with the variants that didn't fault; if it fails, once
+///    per remaining variant, then baselines only (AXON_A1_REHEARSE_FALLBACK
+///    =1 takes that path anyway: the rehearsal).
+///
+/// A fault leaves its variant out of the bench; a tolerance miss doesn't
+/// (its cells report their own tolerance). Every stage has a time limit and
+/// the whole session AXON_A1_BUDGET_S (2400 s = 40 min): a stage that would
+/// overrun it is cut to what's left (or skipped under 30 s). Off sm_90a
+/// every candidate stage skips. Fails (after everything has run) if a stage
+/// failed. Run with --ignored --nocapture.
+#[test]
+#[ignore]
+fn cuda_a1_session() {
+    let t0 = std::time::Instant::now();
+    let budget: u64 = std::env::var("AXON_A1_BUDGET_S")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2400);
+    let left = |want: u64| -> Option<u64> {
+        let rest = budget.saturating_sub(t0.elapsed().as_secs());
+        (rest >= 30).then(|| want.min(rest))
+    };
+    nvrtc_probe_fast_compiles_sm90a();
+    eprintln!("A1 STAGE compile: ok");
+    let mut fails: Vec<String> = Vec::new();
+    let mut fault = std::collections::BTreeSet::new();
+    let run = |wrap: &[String],
+               test: &str,
+               ignored: bool,
+               env: &[(&str, &str)],
+               want: u64|
+     -> (i32, String) {
+        match left(want) {
+            Some(l) => {
+                let (rc, _, out) = a1_child(wrap, test, ignored, env, l);
+                (rc, out)
+            }
+            None => {
+                eprintln!("A1 STAGE {test}: SKIPPED (session budget {budget} s spent)");
+                (-4, String::new())
+            }
+        }
+    };
+    if let Some(san) = std::env::var_os("AXON_A1_SANITIZER") {
+        let san = san.to_string_lossy().to_string();
+        let wrap: Vec<String> = [
+            san.as_str(),
+            "--tool",
+            "memcheck",
+            "--error-exitcode",
+            "9",
+            "--print-limit",
+            "20",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let usable = std::path::Path::new(&san).is_file() && {
+            let (rc, out) = run(&wrap, "gpu_rmsnorm_matches_cpu", false, &[], 120);
+            rc == 0
+                && out.contains("ERROR SUMMARY: 0 errors")
+                && !out.contains("terminated before first instrumented")
+                && out.contains("1 passed")
+        };
+        if !usable {
+            eprintln!("A1 STAGE sanitizer-selfcheck: UNUSABLE ({san}): sanitizer stages dropped");
+        } else {
+            eprintln!(
+                "A1 STAGE sanitizer-selfcheck: ok (memcheck instrumented gpu_rmsnorm_matches_cpu, 0 errors)"
+            );
+            for c in A1_VARS.map(|v| v.name) {
+                let (rc, out) = run(&wrap, &format!("gpu_a1_{c}_tiny"), false, &[], 150);
+                let o = a1_outcome(rc, &out);
+                let o = if o == "ok" && !out.contains("ERROR SUMMARY: 0 errors") {
+                    "FAULT"
+                } else {
+                    o
+                };
+                eprintln!("A1 STAGE sanitizer {c} tiny: {o}");
+                if o == "FAULT" {
+                    fault.insert(c);
+                }
+                if o == "FAULT" || o == "tolerance" {
+                    fails.push(format!("sanitizer {c} tiny {o} (rc {rc})"));
+                }
+            }
+        }
+    } else {
+        eprintln!("A1 STAGE sanitizer: AXON_A1_SANITIZER unset, skipped");
+    }
+    for c in A1_VARS.map(|v| v.name) {
+        for (part, want) in [("tiny", 90u64), ("ragged", 240)] {
+            if fault.contains(c) {
+                eprintln!("A1 STAGE {c} {part}: not run ({c} faulted before)");
+                continue;
+            }
+            let (rc, out) = run(&[], &format!("gpu_a1_{c}_{part}"), false, &[], want);
+            let o = a1_outcome(rc, &out);
+            eprintln!("A1 STAGE {c} {part}: {o}");
+            if o == "FAULT" {
+                fault.insert(c);
+            }
+            if o == "FAULT" || o == "tolerance" {
+                fails.push(format!("{c} {part} {o} (rc {rc})"));
+            }
+        }
+    }
+    let (rc, _) = run(&[], "cuda_a1_peak", true, &[], 120);
+    if rc != 0 {
+        fails.push(format!("peak rc {rc}"));
+    }
+    let healthy: Vec<&str> = A1_VARS
+        .map(|v| v.name)
+        .into_iter()
+        .filter(|c| !fault.contains(c))
+        .collect();
+    let kset = if healthy.is_empty() {
+        "none".to_string()
+    } else {
+        healthy.join(",")
+    };
+    eprintln!("A1 STAGE bench: candidates {kset}");
+    let (rc, _) = run(
+        &[],
+        "cuda_a1_bench",
+        true,
+        &[("AXON_A1_KERNELS", &kset)],
+        720,
+    );
+    let rehearse = std::env::var("AXON_A1_REHEARSE_FALLBACK").is_ok_and(|v| v == "1");
+    if rc != 0 || rehearse {
+        if rc != 0 {
+            fails.push(format!("bench ({kset}) rc {rc}"));
+        }
+        eprintln!(
+            "A1 STAGE fallback: the bench {}: once per candidate, then baselines only",
+            if rc != 0 {
+                "failed"
+            } else {
+                "passed (forced: AXON_A1_REHEARSE_FALLBACK=1)"
+            }
+        );
+        for c in &healthy {
+            let (rc, _) = run(&[], "cuda_a1_bench", true, &[("AXON_A1_KERNELS", *c)], 420);
+            if rc != 0 {
+                fails.push(format!("fallback bench {c} rc {rc}"));
+            }
+        }
+        let (rc, _) = run(
+            &[],
+            "cuda_a1_bench",
+            true,
+            &[("AXON_A1_KERNELS", "none")],
+            300,
+        );
+        if rc != 0 {
+            fails.push(format!("fallback baselines rc {rc}"));
+        }
+    }
+    eprintln!(
+        "A1 SESSION {:.0} s of budget {budget} s",
+        t0.elapsed().as_secs_f64()
+    );
+    if fails.is_empty() {
+        eprintln!("A1 END ok");
+    } else {
+        eprintln!("A1 END FAILED: {}", fails.join(", "));
+        panic!("a1 stages failed: {}", fails.join(", "));
+    }
+}
