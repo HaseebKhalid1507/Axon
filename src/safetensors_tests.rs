@@ -1593,7 +1593,7 @@ fn fp8_checkpoints_refused_cleanly() {
         }
     }
     type Edit = fn(&mut Vec<(String, &'static str, Vec<u64>, Vec<u8>)>);
-    let tensor_cases: [(&str, Edit, &str); 6] = [
+    let tensor_cases: [(&str, Edit, &str); 8] = [
         (
             "noscale",
             |w| w.retain(|t| t.0 != "model.layers.1.mlp.up_proj.weight_scale"),
@@ -1606,10 +1606,35 @@ fn fp8_checkpoints_refused_cleanly() {
                     .iter_mut()
                     .find(|t| t.0 == "model.layers.0.self_attn.q_proj.weight_scale")
                     .unwrap();
+                // 128 scales (of 1.0) for q_proj's 64 rows, well-formed bytes.
                 t.2 = vec![1, 128];
+                t.3 = [0x80u8, 0x3f].repeat(128);
+            },
+            "blk.0.attn_q.scale: shape [128, 1], want one scale per row (64)",
+        ),
+        (
+            "grid",
+            |w| {
+                // 64 scales, but as a grid: not one per row.
+                let t = w
+                    .iter_mut()
+                    .find(|t| t.0 == "model.layers.0.self_attn.q_proj.weight_scale")
+                    .unwrap();
+                t.2 = vec![8, 8];
+            },
+            "blk.0.attn_q.scale: shape [8, 8], want one scale per row (64)",
+        ),
+        (
+            "bytes",
+            |w| {
+                // The header's shape and the data disagree.
+                let t = w
+                    .iter_mut()
+                    .find(|t| t.0 == "model.layers.0.self_attn.q_proj.weight_scale")
+                    .unwrap();
                 t.3.truncate(2);
             },
-            "one scale per row",
+            "q_proj.weight_scale: 2 bytes for shape",
         ),
         (
             "nan",

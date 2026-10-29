@@ -615,6 +615,9 @@ pub(crate) fn assert_graded_vs_exact_with(what: &str, g: &Graded, bits: bool, to
         }
         assert_eq!(same, n, "{what}: verify rows");
     }
+    // Every arm graded before failing, so one run names every bound that
+    // trips.
+    let mut errs = Vec::new();
     for a in &g.arms {
         assert!(
             a.mode.positions > 0,
@@ -622,9 +625,10 @@ pub(crate) fn assert_graded_vs_exact_with(what: &str, g: &Graded, bits: bool, to
             a.arm.name()
         );
         if let Err(e) = assert_arm(what, a, top1) {
-            panic!("{e}");
+            errs.push(e);
         }
     }
+    assert!(errs.is_empty(), "{}", errs.join("\n"));
     assert!(
         same * 100 + 2 * n >= fsame * 100 && same * 100 >= 90 * n,
         "{what}: verify rows {same}/{n} the reference's picks (floor {fsame}/{n})"
