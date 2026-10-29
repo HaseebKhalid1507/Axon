@@ -1,0 +1,497 @@
+[axon-run 15:57:44] submitted 1029-155744-7494 by /home/haseeb/.cache/axon-wt-a1probe: /usr/bin/bash a1_h100.sh ./axon-test-1360c3b ./a1_verdict.py ./a1-kit-1360c3b.tar
+[axon-run 16:01:01] VRAM: claiming the learned 857 MB instead of --vram 3000 (name:a1probe-*-rehearse)
+[axon-run 16:01:01] scope axon-job-1029-155744-7494-1793304061.scope in app-axonjobs.slice: MemoryMax 2329 MB, MemoryHigh 2096 MB, no swap, oomd pressure kill 80% (claim 870 MB): an OOM here kills only this job
+[axon-run 16:01:01] job 1029-155744-7494 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1029-155744-7494-1793304061 --slice=app-axonjobs.slice -p MemoryMax=2329M -p MemoryHigh=2096M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash a1_h100.sh ./axon-test-1360c3b ./a1_verdict.py ./a1-kit-1360c3b.tar
+axon-q 16:01:01 start slot 8-15: /usr/bin/bash a1_h100.sh ./axon-test-1360c3b ./a1_verdict.py ./a1-kit-1360c3b.tar
+[a1 +0s] kit ./a1-kit-1360c3b.tar, binary ./axon-test-1360c3b, out /home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/a1-out-1029-160101-3247664
+[a1 +0s] binary sha256 034850563130eea7eaeff6672d4bd9383f232636f90b9fabcf2efa3281c1d13e = the kit's BUILT_FOR: axon-test-1360c3b 034850563130eea7eaeff6672d4bd9383f232636f90b9fabcf2efa3281c1d13e commit 1360c3b7c9bafdc9c180471702ba4def51f7273d scripts-at 1360c3b7c9bafdc9c180471702ba4def51f7273d
+name, compute_cap, driver_version, memory.total [MiB], clocks.max.sm [MHz], clocks.max.memory [MHz], power.limit [W], power.max_limit [W]
+NVIDIA GeForce RTX 5070 Ti Laptop GPU, 12.0, 615.78.08, 12227 MiB, 3090 MHz, 14001 MHz, [N/A], 140.00 W
+A1 SMI NVIDIA GeForce RTX 5070 Ti Laptop GPU, [N/A], 140.00 W, 3090 MHz
+[a1 +0s] compute capability 12.0: not sm_90a, the kit's cubins are not installed (rehearsal: the sm_90a stages skip)
+[a1 +0s] session: budget 2400 s (nvidia-smi trace pid 3247714: timestamp,clocks.sm,clocks.mem,power.draw,temperature.gpu,clocks_event_reasons.active)
+
+running 1 test
+test cuda::qwen2::tests::cuda_a1_session ... A1 STAGE nvrtc_probe_fast_compiles_sm90a: start at unix 1793304061.6, limit 180 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::nvrtc_probe_fast_compiles_sm90a --exact --nocapture --test-threads 1)
+
+running 1 test
+A1 COMPILE sm_90a: 242856 bytes of cubin (NVRTC 13.4)
+A1 COMPILE probe_fp8_128x64: 168 registers, 0 bytes spill stores, 0 bytes stack frame
+A1 COMPILE probe_fp8_128x128: 168 registers, 0 bytes spill stores, 0 bytes stack frame
+A1 COMPILE probe_fp8n128_128x128: 168 registers, 0 bytes spill stores, 0 bytes stack frame
+A1 COMPILE probe_w4a16_128x64: 168 registers, 0 bytes spill stores, 0 bytes stack frame
+A1 COMPILE probe_w4a16_256x64: 168 registers, 0 bytes spill stores, 0 bytes stack frame
+A1 COMPILE sm_90: 3952 bytes of cubin (NVRTC 13.4)
+test cuda::qwen2::tests::nvrtc_probe_fast_compiles_sm90a ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 1.74s
+
+A1 STAGE nvrtc_probe_fast_compiles_sm90a: rc 0 after 2.0 s at unix 1793304063.6
+A1 STAGE compile: ok (every probe kernel: no C75xx note, no spill, no stack)
+A1 STAGE gpu_rmsnorm_matches_cpu: start at unix 1793304063.6, limit 120 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/a1-out-1029-160101-3247664/kit/san/compute-sanitizer --tool memcheck --error-exitcode 9 --print-limit 20 /home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::gpu_rmsnorm_matches_cpu --exact --nocapture --test-threads 1)
+========= COMPUTE-SANITIZER
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test cuda::qwen2::tests::gpu_rmsnorm_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.54s
+
+========= ERROR SUMMARY: 0 errors
+A1 STAGE gpu_rmsnorm_matches_cpu: rc 0 after 0.8 s at unix 1793304064.4
+A1 STAGE sanitizer-selfcheck: ok (memcheck instrumented gpu_rmsnorm_matches_cpu, 0 errors)
+A1 STAGE gpu_a1_warm_module: start at unix 1793304064.4, limit 120 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_warm_module --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Miss, NVRTC 13.4, target sm_120
+A1 WARM probe-fast loaded (sm_90a: false)
+test cuda::qwen2::tests::gpu_a1_warm_module ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.38s
+
+A1 STAGE gpu_a1_warm_module: rc 0 after 0.6 s at unix 1793304065.0
+A1 STAGE warm: ok
+A1 STAGE gpu_a1_fp8_128x64_tiny: start at unix 1793304065.0, limit 150 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/a1-out-1029-160101-3247664/kit/san/compute-sanitizer --tool memcheck --error-exitcode 9 --print-limit 20 /home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_fp8_128x64_tiny --exact --nocapture --test-threads 1)
+========= COMPUTE-SANITIZER
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.4, target sm_120
+skipping: not sm_90a
+test cuda::qwen2::tests::gpu_a1_fp8_128x64_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.46s
+
+========= ERROR SUMMARY: 0 errors
+A1 STAGE gpu_a1_fp8_128x64_tiny: rc 0 after 0.8 s at unix 1793304065.8
+A1 STAGE sanitizer fp8_128x64 tiny: skipped (no sm_90a)
+A1 STAGE gpu_a1_fp8_128x128_tiny: start at unix 1793304065.8, limit 150 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/a1-out-1029-160101-3247664/kit/san/compute-sanitizer --tool memcheck --error-exitcode 9 --print-limit 20 /home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_fp8_128x128_tiny --exact --nocapture --test-threads 1)
+========= COMPUTE-SANITIZER
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.4, target sm_120
+skipping: not sm_90a
+test cuda::qwen2::tests::gpu_a1_fp8_128x128_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.34s
+
+========= ERROR SUMMARY: 0 errors
+A1 STAGE gpu_a1_fp8_128x128_tiny: rc 0 after 0.6 s at unix 1793304066.4
+A1 STAGE sanitizer fp8_128x128 tiny: skipped (no sm_90a)
+A1 STAGE gpu_a1_fp8n128_128x128_tiny: start at unix 1793304066.4, limit 150 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/a1-out-1029-160101-3247664/kit/san/compute-sanitizer --tool memcheck --error-exitcode 9 --print-limit 20 /home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_fp8n128_128x128_tiny --exact --nocapture --test-threads 1)
+========= COMPUTE-SANITIZER
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.4, target sm_120
+skipping: not sm_90a
+test cuda::qwen2::tests::gpu_a1_fp8n128_128x128_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.37s
+
+========= ERROR SUMMARY: 0 errors
+A1 STAGE gpu_a1_fp8n128_128x128_tiny: rc 0 after 0.6 s at unix 1793304067.0
+A1 STAGE sanitizer fp8n128_128x128 tiny: skipped (no sm_90a)
+A1 STAGE gpu_a1_w4a16_128x64_tiny: start at unix 1793304067.0, limit 150 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/a1-out-1029-160101-3247664/kit/san/compute-sanitizer --tool memcheck --error-exitcode 9 --print-limit 20 /home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_w4a16_128x64_tiny --exact --nocapture --test-threads 1)
+========= COMPUTE-SANITIZER
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.4, target sm_120
+skipping: not sm_90a
+test cuda::qwen2::tests::gpu_a1_w4a16_128x64_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.37s
+
+========= ERROR SUMMARY: 0 errors
+A1 STAGE gpu_a1_w4a16_128x64_tiny: rc 0 after 0.6 s at unix 1793304067.6
+A1 STAGE sanitizer w4a16_128x64 tiny: skipped (no sm_90a)
+A1 STAGE gpu_a1_w4a16_256x64_tiny: start at unix 1793304067.6, limit 150 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/a1-out-1029-160101-3247664/kit/san/compute-sanitizer --tool memcheck --error-exitcode 9 --print-limit 20 /home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_w4a16_256x64_tiny --exact --nocapture --test-threads 1)
+========= COMPUTE-SANITIZER
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.4, target sm_120
+skipping: not sm_90a
+test cuda::qwen2::tests::gpu_a1_w4a16_256x64_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.48s
+
+========= ERROR SUMMARY: 0 errors
+A1 STAGE gpu_a1_w4a16_256x64_tiny: rc 0 after 0.8 s at unix 1793304068.4
+A1 STAGE sanitizer w4a16_256x64 tiny: skipped (no sm_90a)
+A1 STAGE gpu_a1_fp8_128x64_tiny: start at unix 1793304068.4, limit 90 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_fp8_128x64_tiny --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.4, target sm_120
+skipping: not sm_90a
+test cuda::qwen2::tests::gpu_a1_fp8_128x64_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.34s
+
+A1 STAGE gpu_a1_fp8_128x64_tiny: rc 0 after 0.4 s at unix 1793304068.8
+A1 STAGE fp8_128x64 tiny: skipped (no sm_90a)
+A1 STAGE gpu_a1_fp8_128x64_ragged: start at unix 1793304068.8, limit 240 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_fp8_128x64_ragged --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.4, target sm_120
+skipping: not sm_90a
+test cuda::qwen2::tests::gpu_a1_fp8_128x64_ragged ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.32s
+
+A1 STAGE gpu_a1_fp8_128x64_ragged: rc 0 after 0.6 s at unix 1793304069.4
+A1 STAGE fp8_128x64 ragged: skipped (no sm_90a)
+A1 STAGE gpu_a1_fp8_128x128_tiny: start at unix 1793304069.4, limit 90 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_fp8_128x128_tiny --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.4, target sm_120
+skipping: not sm_90a
+test cuda::qwen2::tests::gpu_a1_fp8_128x128_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.34s
+
+A1 STAGE gpu_a1_fp8_128x128_tiny: rc 0 after 0.6 s at unix 1793304070.0
+A1 STAGE fp8_128x128 tiny: skipped (no sm_90a)
+A1 STAGE gpu_a1_fp8_128x128_ragged: start at unix 1793304070.0, limit 240 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_fp8_128x128_ragged --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.4, target sm_120
+skipping: not sm_90a
+test cuda::qwen2::tests::gpu_a1_fp8_128x128_ragged ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.32s
+
+A1 STAGE gpu_a1_fp8_128x128_ragged: rc 0 after 0.4 s at unix 1793304070.4
+A1 STAGE fp8_128x128 ragged: skipped (no sm_90a)
+A1 STAGE gpu_a1_fp8n128_128x128_tiny: start at unix 1793304070.4, limit 90 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_fp8n128_128x128_tiny --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.4, target sm_120
+skipping: not sm_90a
+test cuda::qwen2::tests::gpu_a1_fp8n128_128x128_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.33s
+
+A1 STAGE gpu_a1_fp8n128_128x128_tiny: rc 0 after 0.6 s at unix 1793304071.0
+A1 STAGE fp8n128_128x128 tiny: skipped (no sm_90a)
+A1 STAGE gpu_a1_fp8n128_128x128_ragged: start at unix 1793304071.0, limit 240 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_fp8n128_128x128_ragged --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.4, target sm_120
+skipping: not sm_90a
+test cuda::qwen2::tests::gpu_a1_fp8n128_128x128_ragged ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.33s
+
+A1 STAGE gpu_a1_fp8n128_128x128_ragged: rc 0 after 0.6 s at unix 1793304071.6
+A1 STAGE fp8n128_128x128 ragged: skipped (no sm_90a)
+A1 STAGE gpu_a1_w4a16_128x64_tiny: start at unix 1793304071.6, limit 90 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_w4a16_128x64_tiny --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.4, target sm_120
+skipping: not sm_90a
+test cuda::qwen2::tests::gpu_a1_w4a16_128x64_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.34s
+
+A1 STAGE gpu_a1_w4a16_128x64_tiny: rc 0 after 0.6 s at unix 1793304072.2
+A1 STAGE w4a16_128x64 tiny: skipped (no sm_90a)
+A1 STAGE gpu_a1_w4a16_128x64_ragged: start at unix 1793304072.2, limit 240 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_w4a16_128x64_ragged --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.4, target sm_120
+skipping: not sm_90a
+test cuda::qwen2::tests::gpu_a1_w4a16_128x64_ragged ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.35s
+
+A1 STAGE gpu_a1_w4a16_128x64_ragged: rc 0 after 0.6 s at unix 1793304072.8
+A1 STAGE w4a16_128x64 ragged: skipped (no sm_90a)
+A1 STAGE gpu_a1_w4a16_256x64_tiny: start at unix 1793304072.8, limit 90 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_w4a16_256x64_tiny --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.4, target sm_120
+skipping: not sm_90a
+test cuda::qwen2::tests::gpu_a1_w4a16_256x64_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.34s
+
+A1 STAGE gpu_a1_w4a16_256x64_tiny: rc 0 after 0.6 s at unix 1793304073.4
+A1 STAGE w4a16_256x64 tiny: skipped (no sm_90a)
+A1 STAGE gpu_a1_w4a16_256x64_ragged: start at unix 1793304073.4, limit 240 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_w4a16_256x64_ragged --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.4, target sm_120
+skipping: not sm_90a
+test cuda::qwen2::tests::gpu_a1_w4a16_256x64_ragged ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.35s
+
+A1 STAGE gpu_a1_w4a16_256x64_ragged: rc 0 after 0.6 s at unix 1793304074.0
+A1 STAGE w4a16_256x64 ragged: skipped (no sm_90a)
+A1 STAGE cuda_a1_peak: start at unix 1793304074.0, limit 120 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::cuda_a1_peak --exact --nocapture --test-threads 1 --ignored)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.4, target sm_120
+A1 SKIP peaks (no sm_90a device)
+A1 PEAK END ok
+test cuda::qwen2::tests::cuda_a1_peak ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.35s
+
+A1 STAGE cuda_a1_peak: rc 0 after 0.6 s at unix 1793304074.6
+A1 STAGE bench: candidates fp8_128x64,fp8_128x128,fp8n128_128x128,w4a16_128x64,w4a16_256x64
+A1 STAGE cuda_a1_bench: start at unix 1793304074.6, limit 720 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::cuda_a1_bench --exact --nocapture --test-threads 1 --ignored)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.4, target sm_120
+A1 BENCH device NVIDIA GeForce RTX 5070 Ti Laptop GPU sm_120 46 SMs; hopper module false, probe module false; candidates []; 9 rounds
+A1 SKIP fp8_128x64 cells (no sm_90a device)
+A1 SKIP fp8_128x128 cells (no sm_90a device)
+A1 SKIP fp8n128_128x128 cells (no sm_90a device)
+A1 SKIP w4a16_128x64 cells (no sm_90a device)
+A1 SKIP w4a16_256x64 cells (no sm_90a device)
+A1 SKIP gemmh2_q4_k cells (no sm_90a module)
+A1 CELL gate 3584x18944 nb 128 gemm2s_q4_k: median 38.11 TMAC/s (min 37.64 max 38.46; 9 rounds; 0.2280 ms; raw median 38.114873)
+A1 CELL gate 3584x18944 nb 512 gemm2s_q4_k: median 34.23 TMAC/s (min 29.01 max 36.53; 9 rounds; 1.0155 ms; raw median 34.232922)
+A1 CELL gate 3584x18944 nb 1024 gemm2s_q4_k: median 30.52 TMAC/s (min 25.54 max 32.72; 9 rounds; 2.2777 ms; raw median 30.523744)
+A1 CELL down 18944x3584 nb 128 gemm2s_q4_k: median 33.33 TMAC/s (min 33.02 max 33.41; 9 rounds; 0.2608 ms; raw median 33.325571)
+A1 CELL down 18944x3584 nb 512 gemm2s_q4_k: median 35.56 TMAC/s (min 27.87 max 41.55; 9 rounds; 0.9776 ms; raw median 35.559688)
+A1 CELL down 18944x3584 nb 1024 gemm2s_q4_k: median 30.08 TMAC/s (min 25.81 max 36.61; 9 rounds; 2.3115 ms; raw median 30.077657)
+A1 CELL q/wo 3584x3584 nb 128 gemm2s_q4_k: median 28.33 TMAC/s (min 26.50 max 28.67; 9 rounds; 0.0580 ms; raw median 28.334682)
+A1 CELL q/wo 3584x3584 nb 1024 gemm2s_q4_k: median 39.40 TMAC/s (min 38.96 max 39.40; 9 rounds; 0.3338 ms; raw median 39.402012)
+A1 CELL kv 3584x512 nb 128 gemm2s_q4_k: median 11.30 TMAC/s (min 10.32 max 12.74; 9 rounds; 0.0208 ms; raw median 11.298151)
+A1 CELL kv 3584x512 nb 1024 gemm2s_q4_k: median 35.75 TMAC/s (min 32.16 max 35.98; 9 rounds; 0.0526 ms; raw median 35.746911)
+A1 BENCH END ok
+test cuda::qwen2::tests::cuda_a1_bench ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 1.36s
+
+A1 STAGE cuda_a1_bench: rc 0 after 1.6 s at unix 1793304076.2
+A1 STAGE fallback: the bench passed (forced: AXON_A1_REHEARSE_FALLBACK=1): once per candidate, then baselines only
+A1 STAGE cuda_a1_bench: start at unix 1793304076.2, limit 420 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::cuda_a1_bench --exact --nocapture --test-threads 1 --ignored)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.4, target sm_120
+A1 BENCH device NVIDIA GeForce RTX 5070 Ti Laptop GPU sm_120 46 SMs; hopper module false, probe module false; candidates []; 9 rounds
+A1 SKIP fp8_128x64 cells (no sm_90a device)
+A1 SKIP fp8_128x128 cells (no sm_90a device)
+A1 SKIP fp8n128_128x128 cells (no sm_90a device)
+A1 SKIP w4a16_128x64 cells (no sm_90a device)
+A1 SKIP w4a16_256x64 cells (no sm_90a device)
+A1 SKIP gemmh2_q4_k cells (no sm_90a module)
+A1 CELL gate 3584x18944 nb 128 gemm2s_q4_k: median 38.34 TMAC/s (min 37.61 max 38.40; 9 rounds; 0.2266 ms; raw median 38.344482)
+A1 CELL gate 3584x18944 nb 512 gemm2s_q4_k: median 31.56 TMAC/s (min 27.20 max 35.33; 9 rounds; 1.1015 ms; raw median 31.559637)
+A1 CELL gate 3584x18944 nb 1024 gemm2s_q4_k: median 26.73 TMAC/s (min 25.80 max 33.94; 9 rounds; 2.6013 ms; raw median 26.726924)
+A1 CELL down 18944x3584 nb 128 gemm2s_q4_k: median 33.33 TMAC/s (min 32.94 max 33.41; 9 rounds; 0.2608 ms; raw median 33.325571)
+A1 CELL down 18944x3584 nb 512 gemm2s_q4_k: median 33.97 TMAC/s (min 30.26 max 37.61; 9 rounds; 1.0233 ms; raw median 33.970295)
+A1 CELL down 18944x3584 nb 1024 gemm2s_q4_k: median 28.81 TMAC/s (min 26.09 max 32.74; 9 rounds; 2.4129 ms; raw median 28.813833)
+A1 CELL q/wo 3584x3584 nb 128 gemm2s_q4_k: median 28.33 TMAC/s (min 28.01 max 28.33; 9 rounds; 0.0580 ms; raw median 28.334682)
+A1 CELL q/wo 3584x3584 nb 1024 gemm2s_q4_k: median 39.40 TMAC/s (min 39.04 max 39.48; 9 rounds; 0.3338 ms; raw median 39.402012)
+A1 CELL kv 3584x512 nb 128 gemm2s_q4_k: median 12.51 TMAC/s (min 12.29 max 12.74; 9 rounds; 0.0188 ms; raw median 12.511418)
+A1 CELL kv 3584x512 nb 1024 gemm2s_q4_k: median 35.29 TMAC/s (min 34.84 max 35.86; 9 rounds; 0.0532 ms; raw median 35.288617)
+A1 BENCH END ok
+test cuda::qwen2::tests::cuda_a1_bench ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 1.41s
+
+A1 STAGE cuda_a1_bench: rc 0 after 1.6 s at unix 1793304077.8
+A1 STAGE cuda_a1_bench: start at unix 1793304077.8, limit 420 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::cuda_a1_bench --exact --nocapture --test-threads 1 --ignored)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.4, target sm_120
+A1 BENCH device NVIDIA GeForce RTX 5070 Ti Laptop GPU sm_120 46 SMs; hopper module false, probe module false; candidates []; 9 rounds
+A1 SKIP fp8_128x64 cells (no sm_90a device)
+A1 SKIP fp8_128x128 cells (no sm_90a device)
+A1 SKIP fp8n128_128x128 cells (no sm_90a device)
+A1 SKIP w4a16_128x64 cells (no sm_90a device)
+A1 SKIP w4a16_256x64 cells (no sm_90a device)
+A1 SKIP gemmh2_q4_k cells (no sm_90a module)
+A1 CELL gate 3584x18944 nb 128 gemm2s_q4_k: median 38.11 TMAC/s (min 37.60 max 38.46; 9 rounds; 0.2280 ms; raw median 38.114873)
+A1 CELL gate 3584x18944 nb 512 gemm2s_q4_k: median 31.86 TMAC/s (min 28.22 max 36.27; 9 rounds; 1.0913 ms; raw median 31.855473)
+A1 CELL gate 3584x18944 nb 1024 gemm2s_q4_k: median 29.40 TMAC/s (min 27.97 max 32.38; 9 rounds; 2.3648 ms; raw median 29.400387)
+A1 CELL down 18944x3584 nb 128 gemm2s_q4_k: median 33.33 TMAC/s (min 33.01 max 33.41; 9 rounds; 0.2608 ms; raw median 33.325571)
+A1 CELL down 18944x3584 nb 512 gemm2s_q4_k: median 34.95 TMAC/s (min 31.22 max 37.59; 9 rounds; 0.9946 ms; raw median 34.949534)
+A1 CELL down 18944x3584 nb 1024 gemm2s_q4_k: median 29.97 TMAC/s (min 25.62 max 35.82; 9 rounds; 2.3197 ms; raw median 29.971437)
+A1 CELL q/wo 3584x3584 nb 128 gemm2s_q4_k: median 27.68 TMAC/s (min 27.37 max 27.77; 9 rounds; 0.0594 ms; raw median 27.683310)
+A1 CELL q/wo 3584x3584 nb 1024 gemm2s_q4_k: median 39.32 TMAC/s (min 39.32 max 39.48; 9 rounds; 0.3345 ms; raw median 39.321600)
+A1 CELL kv 3584x512 nb 128 gemm2s_q4_k: median 13.23 TMAC/s (min 12.74 max 13.49; 9 rounds; 0.0177 ms; raw median 13.233231)
+A1 CELL kv 3584x512 nb 1024 gemm2s_q4_k: median 35.75 TMAC/s (min 34.70 max 35.98; 9 rounds; 0.0526 ms; raw median 35.746911)
+A1 BENCH END ok
+test cuda::qwen2::tests::cuda_a1_bench ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 1.36s
+
+A1 STAGE cuda_a1_bench: rc 0 after 1.6 s at unix 1793304079.4
+A1 STAGE cuda_a1_bench: start at unix 1793304079.4, limit 420 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::cuda_a1_bench --exact --nocapture --test-threads 1 --ignored)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.4, target sm_120
+A1 BENCH device NVIDIA GeForce RTX 5070 Ti Laptop GPU sm_120 46 SMs; hopper module false, probe module false; candidates []; 9 rounds
+A1 SKIP fp8_128x64 cells (no sm_90a device)
+A1 SKIP fp8_128x128 cells (no sm_90a device)
+A1 SKIP fp8n128_128x128 cells (no sm_90a device)
+A1 SKIP w4a16_128x64 cells (no sm_90a device)
+A1 SKIP w4a16_256x64 cells (no sm_90a device)
+A1 SKIP gemmh2_q4_k cells (no sm_90a module)
+A1 CELL gate 3584x18944 nb 128 gemm2s_q4_k: median 38.23 TMAC/s (min 38.00 max 38.34; 9 rounds; 0.2273 ms; raw median 38.229333)
+A1 CELL gate 3584x18944 nb 512 gemm2s_q4_k: median 31.32 TMAC/s (min 26.05 max 38.65; 9 rounds; 1.1100 ms; raw median 31.317018)
+A1 CELL gate 3584x18944 nb 1024 gemm2s_q4_k: median 28.61 TMAC/s (min 26.62 max 36.78; 9 rounds; 2.4297 ms; raw median 28.614979)
+A1 CELL down 18944x3584 nb 128 gemm2s_q4_k: median 33.15 TMAC/s (min 32.80 max 33.33; 9 rounds; 0.2621 ms; raw median 33.151999)
+A1 CELL down 18944x3584 nb 512 gemm2s_q4_k: median 35.53 TMAC/s (min 28.94 max 37.66; 9 rounds; 0.9783 ms; raw median 35.534873)
+A1 CELL down 18944x3584 nb 1024 gemm2s_q4_k: median 30.60 TMAC/s (min 26.55 max 34.40; 9 rounds; 2.2723 ms; raw median 30.597248)
+A1 CELL q/wo 3584x3584 nb 128 gemm2s_q4_k: median 29.12 TMAC/s (min 29.02 max 29.38; 9 rounds; 0.0565 ms; raw median 29.121608)
+A1 CELL q/wo 3584x3584 nb 1024 gemm2s_q4_k: median 39.40 TMAC/s (min 39.32 max 39.48; 9 rounds; 0.3338 ms; raw median 39.402012)
+A1 CELL kv 3584x512 nb 128 gemm2s_q4_k: median 12.29 TMAC/s (min 11.86 max 12.29; 9 rounds; 0.0191 ms; raw median 12.288000)
+A1 CELL kv 3584x512 nb 1024 gemm2s_q4_k: median 35.42 TMAC/s (min 34.41 max 35.98; 9 rounds; 0.0531 ms; raw median 35.416317)
+A1 BENCH END ok
+test cuda::qwen2::tests::cuda_a1_bench ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 1.39s
+
+A1 STAGE cuda_a1_bench: rc 0 after 1.6 s at unix 1793304081.0
+A1 STAGE cuda_a1_bench: start at unix 1793304081.0, limit 420 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::cuda_a1_bench --exact --nocapture --test-threads 1 --ignored)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.4, target sm_120
+A1 BENCH device NVIDIA GeForce RTX 5070 Ti Laptop GPU sm_120 46 SMs; hopper module false, probe module false; candidates []; 9 rounds
+A1 SKIP fp8_128x64 cells (no sm_90a device)
+A1 SKIP fp8_128x128 cells (no sm_90a device)
+A1 SKIP fp8n128_128x128 cells (no sm_90a device)
+A1 SKIP w4a16_128x64 cells (no sm_90a device)
+A1 SKIP w4a16_256x64 cells (no sm_90a device)
+A1 SKIP gemmh2_q4_k cells (no sm_90a module)
+A1 CELL gate 3584x18944 nb 128 gemm2s_q4_k: median 38.11 TMAC/s (min 37.49 max 38.46; 9 rounds; 0.2280 ms; raw median 38.114873)
+A1 CELL gate 3584x18944 nb 512 gemm2s_q4_k: median 35.08 TMAC/s (min 30.39 max 36.36; 9 rounds; 0.9909 ms; raw median 35.081965)
+A1 CELL gate 3584x18944 nb 1024 gemm2s_q4_k: median 28.70 TMAC/s (min 26.19 max 35.16; 9 rounds; 2.4221 ms; raw median 28.704325)
+A1 CELL down 18944x3584 nb 128 gemm2s_q4_k: median 33.33 TMAC/s (min 32.93 max 33.41; 9 rounds; 0.2608 ms; raw median 33.325571)
+A1 CELL down 18944x3584 nb 512 gemm2s_q4_k: median 26.34 TMAC/s (min 16.68 max 40.25; 9 rounds; 1.3199 ms; raw median 26.336421)
+A1 CELL down 18944x3584 nb 1024 gemm2s_q4_k: median 29.90 TMAC/s (min 27.71 max 33.06; 9 rounds; 2.3255 ms; raw median 29.896515)
+A1 CELL q/wo 3584x3584 nb 128 gemm2s_q4_k: median 26.47 TMAC/s (min 25.97 max 30.11; 9 rounds; 0.0621 ms; raw median 26.466461)
+A1 CELL q/wo 3584x3584 nb 1024 gemm2s_q4_k: median 39.39 TMAC/s (min 39.02 max 39.40; 9 rounds; 0.3339 ms; raw median 39.388167)
+A1 CELL kv 3584x512 nb 128 gemm2s_q4_k: median 13.23 TMAC/s (min 13.23 max 13.35; 9 rounds; 0.0177 ms; raw median 13.233231)
+A1 CELL kv 3584x512 nb 1024 gemm2s_q4_k: median 33.57 TMAC/s (min 33.16 max 33.98; 9 rounds; 0.0560 ms; raw median 33.567220)
+A1 BENCH END ok
+test cuda::qwen2::tests::cuda_a1_bench ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 1.41s
+
+A1 STAGE cuda_a1_bench: rc 0 after 1.6 s at unix 1793304082.6
+A1 STAGE cuda_a1_bench: start at unix 1793304082.6, limit 420 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::cuda_a1_bench --exact --nocapture --test-threads 1 --ignored)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.4, target sm_120
+A1 BENCH device NVIDIA GeForce RTX 5070 Ti Laptop GPU sm_120 46 SMs; hopper module false, probe module false; candidates []; 9 rounds
+A1 SKIP fp8_128x64 cells (no sm_90a device)
+A1 SKIP fp8_128x128 cells (no sm_90a device)
+A1 SKIP fp8n128_128x128 cells (no sm_90a device)
+A1 SKIP w4a16_128x64 cells (no sm_90a device)
+A1 SKIP w4a16_256x64 cells (no sm_90a device)
+A1 SKIP gemmh2_q4_k cells (no sm_90a module)
+A1 CELL gate 3584x18944 nb 128 gemm2s_q4_k: median 38.34 TMAC/s (min 37.72 max 38.46; 9 rounds; 0.2266 ms; raw median 38.344482)
+A1 CELL gate 3584x18944 nb 512 gemm2s_q4_k: median 32.51 TMAC/s (min 28.80 max 35.68; 9 rounds; 1.0694 ms; raw median 32.506524)
+A1 CELL gate 3584x18944 nb 1024 gemm2s_q4_k: median 15.80 TMAC/s (min 14.86 max 33.77; 9 rounds; 4.4005 ms; raw median 15.799364)
+A1 CELL down 18944x3584 nb 128 gemm2s_q4_k: median 32.07 TMAC/s (min 31.61 max 32.15; 9 rounds; 0.2710 ms; raw median 32.066418)
+A1 CELL down 18944x3584 nb 512 gemm2s_q4_k: median 35.57 TMAC/s (min 29.89 max 41.55; 9 rounds; 0.9772 ms; raw median 35.572109)
+A1 CELL down 18944x3584 nb 1024 gemm2s_q4_k: median 29.65 TMAC/s (min 26.80 max 33.44; 9 rounds; 2.3450 ms; raw median 29.648600)
+A1 CELL q/wo 3584x3584 nb 128 gemm2s_q4_k: median 26.47 TMAC/s (min 26.18 max 26.56; 9 rounds; 0.0621 ms; raw median 26.466461)
+A1 CELL q/wo 3584x3584 nb 1024 gemm2s_q4_k: median 39.40 TMAC/s (min 39.11 max 39.48; 9 rounds; 0.3338 ms; raw median 39.402012)
+A1 CELL kv 3584x512 nb 128 gemm2s_q4_k: median 13.23 TMAC/s (min 12.29 max 13.23; 9 rounds; 0.0177 ms; raw median 13.233231)
+A1 CELL kv 3584x512 nb 1024 gemm2s_q4_k: median 35.29 TMAC/s (min 32.36 max 35.90; 9 rounds; 0.0532 ms; raw median 35.288617)
+A1 BENCH END ok
+test cuda::qwen2::tests::cuda_a1_bench ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 1.44s
+
+A1 STAGE cuda_a1_bench: rc 0 after 1.6 s at unix 1793304084.2
+A1 STAGE cuda_a1_bench: start at unix 1793304084.2, limit 300 s (/home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e/axon-test-1360c3b cuda::qwen2::tests::cuda_a1_bench --exact --nocapture --test-threads 1 --ignored)
+
+running 1 test
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.4, target sm_120
+A1 BENCH device NVIDIA GeForce RTX 5070 Ti Laptop GPU sm_120 46 SMs; hopper module false, probe module false; candidates []; 9 rounds
+A1 SKIP fp8_128x64 cells (no sm_90a device)
+A1 SKIP fp8_128x128 cells (no sm_90a device)
+A1 SKIP fp8n128_128x128 cells (no sm_90a device)
+A1 SKIP w4a16_128x64 cells (no sm_90a device)
+A1 SKIP w4a16_256x64 cells (no sm_90a device)
+A1 SKIP gemmh2_q4_k cells (no sm_90a module)
+A1 CELL gate 3584x18944 nb 128 gemm2s_q4_k: median 38.23 TMAC/s (min 37.56 max 38.46; 9 rounds; 0.2273 ms; raw median 38.229333)
+A1 CELL gate 3584x18944 nb 512 gemm2s_q4_k: median 33.91 TMAC/s (min 29.02 max 36.33; 9 rounds; 1.0250 ms; raw median 33.913734)
+A1 CELL gate 3584x18944 nb 1024 gemm2s_q4_k: median 29.21 TMAC/s (min 25.35 max 34.05; 9 rounds; 2.3798 ms; raw median 29.214843)
+A1 CELL down 18944x3584 nb 128 gemm2s_q4_k: median 33.24 TMAC/s (min 32.85 max 33.37; 9 rounds; 0.2615 ms; raw median 33.238558)
+A1 CELL down 18944x3584 nb 512 gemm2s_q4_k: median 36.75 TMAC/s (min 28.20 max 41.52; 9 rounds; 0.9458 ms; raw median 36.753139)
+A1 CELL down 18944x3584 nb 1024 gemm2s_q4_k: median 30.29 TMAC/s (min 27.82 max 39.45; 9 rounds; 2.2951 ms; raw median 30.292369)
+A1 CELL q/wo 3584x3584 nb 128 gemm2s_q4_k: median 25.90 TMAC/s (min 25.62 max 26.03; 9 rounds; 0.0635 ms; raw median 25.901642)
+A1 CELL q/wo 3584x3584 nb 1024 gemm2s_q4_k: median 39.40 TMAC/s (min 38.94 max 39.48; 9 rounds; 0.3338 ms; raw median 39.402012)
+A1 CELL kv 3584x512 nb 128 gemm2s_q4_k: median 13.23 TMAC/s (min 12.42 max 13.39; 9 rounds; 0.0177 ms; raw median 13.233231)
+A1 CELL kv 3584x512 nb 1024 gemm2s_q4_k: median 35.75 TMAC/s (min 34.53 max 35.75; 9 rounds; 0.0526 ms; raw median 35.746911)
+A1 BENCH END ok
+test cuda::qwen2::tests::cuda_a1_bench ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 1.39s
+
+A1 STAGE cuda_a1_bench: rc 0 after 1.6 s at unix 1793304085.8
+A1 SESSION 24 s of budget 2400 s
+A1 END ok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 24.22s
+
+[a1 +26s] session rc 0; nvidia-smi trace 51 samples
+A1 CUBIN new cache entries during the run: 1 (compiled in this job, not from the kit): d7c6953cb868ffd805380c80564578e8.cubin 
+[a1 +26s] analysis: ./a1_verdict.py
+A1 RUNS 7 bench run(s); device NVIDIA GeForce RTX 5070 Ti Laptop GPU sm_120 46 SMs
+A1 SMI NVIDIA GeForce RTX 5070 Ti Laptop GPU, [N/A], 140.00 W, 3090 MHz
+A1 CLOCKS over 7 bench window(s), 23 samples: power.draw min 44 median 68 max 88 W; temperature.gpu min 80 median 83 max 90 C; event reasons 0x0000000000000004/0x0000000000000400 (recorded, not a rule input)
+A1 TABLE median TMAC/s of real MACs (rows K nb / time), interleaved rounds; (x) = / gemmh2 of the same run; tol FAIL = doesn't count; ~ = host-launch-sensitive (< 10 us per launch, or kv nb 128)
+| shape (K x rows) | nb | gemm2s | gemmh2 | fp8_128x64 | fp8_128x128 | fp8n128_128x128 | w4a16_128x64 | w4a16_256x64 |
+|---|---|---|---|---|---|---|---|---|
+| gate 3584x18944 | 128 | 38.11 | – | – | – | – | – | – |
+| gate 3584x18944 | 512 | 34.23 | – | – | – | – | – | – |
+| gate 3584x18944 | 1024 | 30.52 | – | – | – | – | – | – |
+| down 18944x3584 | 128 | 33.33 | – | – | – | – | – | – |
+| down 18944x3584 | 512 | 35.56 | – | – | – | – | – | – |
+| down 18944x3584 | 1024 | 30.08 | – | – | – | – | – | – |
+| q/wo 3584x3584 | 128 | 28.33 | – | – | – | – | – | – |
+| q/wo 3584x3584 | 1024 | 39.40 | – | – | – | – | – | – |
+| kv 3584x512 | 128 | 11.30 ~ | – | – | – | – | – | – |
+| kv 3584x512 | 1024 | 35.75 | – | – | – | – | – | – |
+A1 TABLE (c) nb 128: split-K [S] / stream-K per variant, TMAC/s; (x) = / gemmh2 of the same run
+| shape (K x rows) | fp8_128x64 split-K | fp8_128x64 stream-K | fp8_128x128 split-K | fp8_128x128 stream-K | fp8n128_128x128 split-K | fp8n128_128x128 stream-K | w4a16_128x64 split-K | w4a16_128x64 stream-K | w4a16_256x64 split-K | w4a16_256x64 stream-K |
+|---|---|---|---|---|---|---|---|---|---|---|
+| gate 3584x18944 | – | – | – | – | – | – | – | – | – | – |
+| down 18944x3584 | – | – | – | – | – | – | – | – | – | – |
+| q/wo 3584x3584 | – | – | – | – | – | – | – | – | – | – |
+| kv 3584x512 | – | – | – | – | – | – | – | – | – | – |
+A1 V5 compile check ok (NVRTC 13.4); compiled in this job: the probe module was compiled here 1x (cache Miss, NVRTC 13.4); 1 new kernel-cache entries during the run
+A1 WIDE-N fp8n128_128x128: NOT CLEAN (gate nb 1024 missing; scaling check absent; tiny stage skipped (no sm_90a); ragged stage skipped (no sm_90a)): a rule-1 KILL is n64 only
+A1 VALIDITY: VOID (V1 device NVIDIA GeForce RTX 5070 Ti Laptop GPU with 46 SMs is not an H100 SXM (132 SMs, not NVL / PCIe); V4 no in-session gemmh2_q4_k at gate nb 1024)
+A1 RULE 1 FP8 gate 3584x18944 nb 1024: NOT MEASURED [VOID run: no verdict]
+A1 RULE 2 W4A16 gate 3584x18944 nb 1024: NOT MEASURED [VOID run: no verdict]
+A1 RULE 3 down 18944x3584 nb 128 with split-K: fp8 not measured, w4a16 not measured: NOT MEASURED [VOID run: no verdict]
+A1 VERDICT: VOID (V1 device NVIDIA GeForce RTX 5070 Ti Laptop GPU with 46 SMs is not an H100 SXM (132 SMs, not NVL / PCIe); V4 no in-session gemmh2_q4_k at gate nb 1024): no verdict; a rerun needs the lead's ruling
+[a1] RESULT: A1 VERDICT: VOID (V1 device NVIDIA GeForce RTX 5070 Ti Laptop GPU with 46 SMs is not an H100 SXM (132 SMs, not NVL / PCIe); V4 no in-session gemmh2_q4_k at gate nb 1024): no verdict; a rerun needs the lead's ruling
+[a1 +26s] A1 H100 DONE rc 0 VOID (verdict printed; stage failures: none)
+[axon-run 16:01:27] exit 0 after 26.0s (host bella)
+[axon-run 16:01:32] EXPECT ok: output matches /A1 H100 DONE rc 0 VOID/
