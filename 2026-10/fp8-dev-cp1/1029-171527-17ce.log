@@ -1,0 +1,43 @@
+[axon-run 17:15:27] submitted 1029-171527-17ce by /home/haseeb/.cache/axon-fp8: /home/haseeb/.cache/axon-fp8/acc_gpu.sh bin/axon-wip2 /home/haseeb/.cache/axon-fp8/acc2 /home/haseeb/.cache/axon-fp8/acc1
+[axon-run 17:53:00] scope axon-job-1029-171527-17ce-1793310780.scope in app-axonjobs.slice: MemoryMax 11524 MB, MemoryHigh 10371 MB, no swap, oomd pressure kill 80% (claim 7000 MB): an OOM here kills only this job
+[axon-run 17:53:00] job 1029-171527-17ce -> bella: systemd-run --user --scope --quiet --unit=axon-job-1029-171527-17ce-1793310780 --slice=app-axonjobs.slice -p MemoryMax=11524M -p MemoryHigh=10371M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-fp8/acc_gpu.sh bin/axon-wip2 /home/haseeb/.cache/axon-fp8/acc2 /home/haseeb/.cache/axon-fp8/acc1
+axon-q 17:53:00 start slot 16-23: /home/haseeb/.cache/axon-fp8/acc_gpu.sh bin/axon-wip2 /home/haseeb/.cache/axon-fp8/acc2 /home/haseeb/.cache/axon-fp8/acc1
+50 windows, 405 tokens (3..21 each)
+/home/haseeb/.cache/axon-fp8/acc2/f8-fast-decode.json: 8034 positions
+/home/haseeb/.cache/axon-fp8/acc2/f8-exact-decode.json: 8034 positions
+/home/haseeb/.cache/axon-fp8/acc2/q4km-decode.json: 8034 positions
+/home/haseeb/.cache/axon-fp8/acc2/f8-fast-batched.json: 7522 positions
+/home/haseeb/.cache/axon-fp8/acc2/f8-exact-batched.json: 7522 positions
+/home/haseeb/.cache/axon-fp8/acc2/q4km-batched.json: 7522 positions
+/home/haseeb/.cache/axon-fp8/acc2/p50-f8-fast.json: 405 positions
+/home/haseeb/.cache/axon-fp8/acc2/p50-q4km.json: 405 positions
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+f8-fast-decode.json                      decode   vs hf-f32: n 8002 (32 windows)  KL 8.601e-03 ±2.4e-04 (max 0.343)  top-1 94.44% ±0.31  dNLL +0.0022 ±0.0020  flips 445 (228 at HF margin < 0.1)  rest 1.1e-01/1.1e-01  FAIL
+f8-fast-batched.json                     batched  vs hf-f32: n 7490 (32 windows)  KL 7.866e-03 ±2.0e-04 (max 0.349)  top-1 94.91% ±0.30  dNLL +0.0045 ±0.0015  flips 381 (179 at HF margin < 0.1)  rest 1.0e-01/1.0e-01  FAIL
+f8-exact-decode.json                     decode   vs hf-f32: n 8002 (32 windows)  KL 2.518e-03 ±7.4e-05 (max 0.370)  top-1 96.65% ±0.27  dNLL +0.0024 ±0.0010  flips 268 (187 at HF margin < 0.1)  rest 1.1e-01/1.1e-01  FAIL
+f8-exact-batched.json                    batched  vs hf-f32: n 7490 (32 windows)  KL 2.149e-03 ±5.7e-05 (max 0.123)  top-1 96.80% ±0.26  dNLL +0.0017 ±0.0010  flips 240 (175 at HF margin < 0.1)  rest 1.0e-01/1.0e-01  FAIL
+q4km-decode.json                         decode   vs hf-f32: n 8002 (32 windows)  KL 5.947e-02 ±1.8e-03 (max 2.041)  top-1 86.03% ±0.49  dNLL +0.0324 ±0.0047  flips 1118 (301 at HF margin < 0.1)  rest 1.2e-01/1.0e-01  FAIL  STOP
+q4km-batched.json                        batched  vs hf-f32: n 7490 (32 windows)  KL 5.832e-02 ±1.9e-03 (max 1.878)  top-1 86.61% ±0.52  dNLL +0.0314 ±0.0050  flips 1003 (270 at HF margin < 0.1)  rest 1.1e-01/9.4e-02  FAIL  STOP
+cpu-f32.json                             decode   vs hf-f32: n 8002 (32 windows)  KL 4.490e-05 ±7.8e-06 (max 0.020)  top-1 99.93% ±0.03  dNLL -0.0003 ±0.0000  flips 6 (6 at HF margin < 0.1)  rest 1.1e-01/1.1e-01  PASS
+cpu-e4m3-tok.json                        decode   vs hf-f32: n 8002 (32 windows)  KL 7.880e-03 ±2.3e-04 (max 0.603)  top-1 94.58% ±0.34  dNLL +0.0053 ±0.0023  flips 434 (230 at HF margin < 0.1)  rest 1.1e-01/1.1e-01  FAIL
+cpu-e4m3-128.json                        decode   vs hf-f32: n 8002 (32 windows)  KL 5.210e-03 ±2.0e-04 (max 0.455)  top-1 95.51% ±0.31  dNLL +0.0040 ±0.0017  flips 359 (212 at HF margin < 0.1)  rest 1.1e-01/1.1e-01  FAIL
+q4km-cpu.json                            decode   vs hf-f32: n 8002 (32 windows)  KL 5.972e-02 ±1.9e-03 (max 2.381)  top-1 85.77% ±0.44  dNLL +0.0330 ±0.0045  flips 1139 (303 at HF margin < 0.1)  rest 1.2e-01/1.0e-01  FAIL  STOP
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+p50-f8-fast.json                         decode   vs hf-f32: n 50 (50 windows)  KL 1.131e-02 ±1.9e-03 (max 0.068)  top-1 98.00% ±2.00  dNLL +0.0000 ±0.0000  flips 1 (0 at HF margin < 0.1)  rest 6.7e-02/6.5e-02  FAIL
+p50-q4km.json                            decode   vs hf-f32: n 50 (50 windows)  KL 6.466e-02 ±1.0e-02 (max 0.309)  top-1 80.00% ±5.71  dNLL +0.0000 ±0.0000  flips 10 (1 at HF margin < 0.1)  rest 7.0e-02/6.5e-02  FAIL  STOP
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+f8-fast-decode.json                      decode   vs hf-bf16: n 8002 (32 windows)  KL 1.126e-02 ±3.4e-04 (max 1.007)  top-1 93.58% ±0.36  dNLL -0.0014 ±0.0024  flips 514 (200 at HF margin < 0.1)  rest 1.1e-01/1.1e-01  FAIL
+f8-fast-batched.json                     batched  vs hf-bf16: n 7490 (32 windows)  KL 9.846e-03 ±3.2e-04 (max 0.555)  top-1 93.86% ±0.36  dNLL +0.0007 ±0.0017  flips 460 (178 at HF margin < 0.1)  rest 1.0e-01/1.0e-01  FAIL
+f8-exact-decode.json                     decode   vs hf-bf16: n 8002 (32 windows)  KL 4.680e-03 ±2.1e-04 (max 0.279)  top-1 95.33% ±0.34  dNLL -0.0011 ±0.0011  flips 374 (186 at HF margin < 0.1)  rest 1.1e-01/1.1e-01  FAIL
+f8-exact-batched.json                    batched  vs hf-bf16: n 7490 (32 windows)  KL 4.137e-03 ±1.6e-04 (max 0.273)  top-1 95.54% ±0.32  dNLL -0.0020 ±0.0012  flips 334 (168 at HF margin < 0.1)  rest 1.0e-01/1.0e-01  FAIL
+q4km-decode.json                         decode   vs hf-bf16: n 8002 (32 windows)  KL 6.092e-02 ±1.9e-03 (max 2.325)  top-1 85.53% ±0.57  dNLL +0.0292 ±0.0049  flips 1158 (260 at HF margin < 0.1)  rest 1.2e-01/1.0e-01  FAIL  STOP
+q4km-batched.json                        batched  vs hf-bf16: n 7490 (32 windows)  KL 5.954e-02 ±2.0e-03 (max 2.325)  top-1 86.11% ±0.61  dNLL +0.0281 ±0.0051  flips 1040 (235 at HF margin < 0.1)  rest 1.1e-01/9.4e-02  FAIL  STOP
+cpu-f32.json                             decode   vs hf-bf16: n 8002 (32 windows)  KL 2.686e-03 ±2.0e-04 (max 0.567)  top-1 96.59% ±0.29  dNLL -0.0039 ±0.0010  flips 273 (180 at HF margin < 0.1)  rest 1.1e-01/1.1e-01  FAIL
+cpu-e4m3-tok.json                        decode   vs hf-bf16: n 8002 (32 windows)  KL 1.064e-02 ±3.3e-04 (max 1.061)  top-1 93.53% ±0.37  dNLL +0.0016 ±0.0027  flips 518 (206 at HF margin < 0.1)  rest 1.1e-01/1.1e-01  FAIL
+cpu-e4m3-128.json                        decode   vs hf-bf16: n 8002 (32 windows)  KL 7.884e-03 ±3.6e-04 (max 1.173)  top-1 94.25% ±0.35  dNLL +0.0005 ±0.0022  flips 460 (222 at HF margin < 0.1)  rest 1.1e-01/1.1e-01  FAIL
+q4km-cpu.json                            decode   vs hf-bf16: n 8002 (32 windows)  KL 6.113e-02 ±2.0e-03 (max 2.216)  top-1 85.43% ±0.54  dNLL +0.0299 ±0.0047  flips 1166 (256 at HF margin < 0.1)  rest 1.2e-01/1.0e-01  FAIL  STOP
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+p50-f8-fast.json                         decode   vs hf-bf16: n 50 (50 windows)  KL 1.537e-02 ±2.8e-03 (max 0.121)  top-1 96.00% ±2.80  dNLL +0.0000 ±0.0000  flips 2 (0 at HF margin < 0.1)  rest 6.7e-02/6.5e-02  FAIL
+p50-q4km.json                            decode   vs hf-bf16: n 50 (50 windows)  KL 6.820e-02 ±1.1e-02 (max 0.353)  top-1 78.00% ±5.92  dNLL +0.0000 ±0.0000  flips 11 (2 at HF margin < 0.1)  rest 7.0e-02/6.5e-02  FAIL  STOP
+ACC_GPU DONE
+[axon-run 18:06:06] exit 0 after 785.8s (host bella)

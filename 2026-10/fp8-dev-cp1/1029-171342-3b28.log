@@ -1,0 +1,58 @@
+[axon-run 17:13:42] submitted 1029-171342-3b28 by /home/haseeb/.cache/axon-fp8: /home/haseeb/.cache/axon-fp8/bin/axon-test-wip1 fp8 --test-threads 1
+[axon-run 17:17:13] scope axon-job-1029-171342-3b28-1793308633.scope in app-axonjobs.slice: MemoryMax 13024 MB, MemoryHigh 11721 MB, no swap, oomd pressure kill 80% (claim 8000 MB): an OOM here kills only this job
+[axon-run 17:17:13] job 1029-171342-3b28 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1029-171342-3b28-1793308633 --slice=app-axonjobs.slice -p MemoryMax=13024M -p MemoryHigh=11721M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-fp8/bin/axon-test-wip1 fp8 --test-threads 1
+axon-q 17:17:13 start slot 8-15: /home/haseeb/.cache/axon-fp8/bin/axon-test-wip1 fp8 --test-threads 1
+
+running 11 tests
+test cuda::qwen2::tests::fp8::gpu_fp8_exact_is_q8_and_bit_identical ... testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+ok
+test cuda::qwen2::tests::fp8::gpu_fp8_gemm_bits_and_anchor ... ok
+test cuda::qwen2::tests::fp8::gpu_fp8_gemv_bits_and_anchor ... ok
+test cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref ... FAILED
+test cuda::qwen2::tests::fp8::gpu_fp8_quantizer_matches_twin ... ok
+test quant::fp8::tests::act_quantizers ... ok
+test quant::fp8::tests::anchor_has_teeth ... ok
+test quant::fp8::tests::converters ... FAILED
+test quant::fp8::tests::e4m3_codes_round_trip ... ok
+test quant::fp8::tests::e4m3_rounding_ties_and_saturation ... ok
+test quant::fp8::tests::gemv_ref_within_anchor ... ok
+
+failures:
+
+---- cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref stdout ----
+0.5B FP8 cuda fast vs fp8-ref [decode] vs exact: top-1 274/294 (93.2%), KL mean 1.28e-2 max 5.94e-1 (> 0.5: [(199, 0.5936945309176688, 0.9756603, 0.0)]), max |dlogit| 5.025, flip margins [0.060121536, 0.022907257, 0.01235199, 0.07218361, 0.2049427, 0.15407181, 0.01020813, 0.08348465, 0.10305023, 2.9169168, 0.11036396, 0.13833237, 0.15907097, 0.021486282, 0.18834114, 0.018083572, 0.002122879, 0.11653328, 0.36631393, 0.0266819]
+0.5B FP8 cuda fast vs fp8-ref [decode]: floor, the CPU's fp8-ref with e4m3 per-token activations vs exact: top-1 276/294 (93.9%), KL mean 1.65e-2 max 6.22e-1 (> 0.5: [(199, 0.6223312936966218, 0.9756603, 0.0)]), max |dlogit| 5.277, flip margins [0.15996742, 0.037984848, 0.046535492, 0.7651081, 1.1905766, 0.52973557, 0.01235199, 0.119600296, 0.16781425, 0.19072437, 0.2049427, 0.01020813, 0.06299877, 2.9169168, 0.11036396, 0.021486282, 0.17407036, 0.002122879]
+0.5B FP8 cuda fast vs fp8-ref [decode]: ΔNLL vs exact +2.15e-2 ± 1.9e-2 (floor +2.86e-2 ± 3.3e-2), 188 teacher-forced positions; fast-set launches 100800
+0.5B FP8 cuda fast vs fp8-ref [batched prefill] vs exact: top-1 190/204 (93.1%), KL mean 9.81e-3 max 5.54e-2 (> 0.5: []), max |dlogit| 2.748, flip margins [0.0037651062, 0.05454445, 0.0375185, 0.3169222, 0.014332771, 0.0015544891, 0.4795189, 0.52606773, 0.056510925, 0.46257782, 0.01755333, 0.12101078, 0.022024155, 0.1441288]
+0.5B FP8 cuda fast vs fp8-ref [batched prefill]: floor, the CPU's fp8-ref with e4m3 per-token activations vs exact: top-1 189/204 (92.6%), KL mean 8.53e-3 max 8.64e-2 (> 0.5: []), max |dlogit| 1.439, flip margins [0.0015544891, 0.0673275, 0.040540695, 0.032728195, 0.47734547, 0.09983063, 0.12101078, 0.08018875, 0.022024155, 0.056158066, 0.1620388, 0.3193283, 0.024037361, 0.061229706, 0.3890648]
+0.5B FP8 cuda fast vs fp8-ref [batched prefill]: ΔNLL vs exact +1.25e-2 ± 3.0e-3 (floor +9.53e-3 ± 5.8e-3), 204 teacher-forced positions; fast-set launches 72576
+0.5B FP8 cuda fast vs fp8-ref [cached prefix + batched rest] vs exact: top-1 66/68 (97.1%), KL mean 8.96e-3 max 4.27e-2 (> 0.5: []), max |dlogit| 2.748, flip margins [0.014332771, 0.0015544891]
+0.5B FP8 cuda fast vs fp8-ref [cached prefix + batched rest]: floor, the CPU's fp8-ref with e4m3 per-token activations vs exact: top-1 61/68 (89.7%), KL mean 9.30e-3 max 8.64e-2 (> 0.5: []), max |dlogit| 1.327, flip margins [0.0015544891, 0.032728195, 0.47734547, 0.09983063, 0.08018875, 0.3193283, 0.024037361]
+0.5B FP8 cuda fast vs fp8-ref [cached prefix + batched rest]: ΔNLL vs exact +1.60e-2 ± 1.3e-2 (floor +1.38e-2 ± 9.3e-3), 68 teacher-forced positions; fast-set launches 24192
+0.5B FP8 cuda fast vs fp8-ref [under load (pool steps)] vs exact: top-1 150/160 (93.8%), KL mean 1.02e-2 max 6.59e-2 (> 0.5: []), max |dlogit| 2.199, flip margins [0.21732235, 0.12982178, 0.14312553, 0.29841805, 0.015277863, 0.20794868, 0.16965199, 0.1005249, 0.259243, 0.04399872]
+0.5B FP8 cuda fast vs fp8-ref [under load (pool steps)]: floor, the CPU's fp8-ref with e4m3 per-token activations vs exact: top-1 154/160 (96.2%), KL mean 8.38e-3 max 4.69e-2 (> 0.5: []), max |dlogit| 2.016, flip margins [0.13247776, 0.25165272, 0.06870079, 0.24743176, 0.22099876, 0.14528847]
+0.5B FP8 cuda fast vs fp8-ref [under load (pool steps)]: ΔNLL vs exact -2.37e-3 ± 1.2e-2 (floor +6.20e-4 ± 1.2e-2), 160 teacher-forced positions; fast-set launches 13776
+0.5B FP8 cuda fast vs fp8-ref: ΔNLL vs exact, every arm +1.18e-2 ± 6.4e-3 (floor +1.35e-2 ± 9.8e-3; a smoke check, scripts/numerics_dnll.py for a table); verify rows 2650/2816 the reference's picks (floor 2633/2816); fast kernels true, launches 211344
+
+thread 'cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref' (3846999) panicked at src/cuda/qwen2/tests.rs:308:5:
+top-1 agreement 274/294 (cpu vs itself 276)
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref' (3846999) panicked at src/cuda/qwen2/tests/numerics.rs:547:13:
+0.5B FP8 cuda fast vs fp8-ref [decode]: top-1 agreement 274/294 (cpu vs itself 276)
+
+---- quant::fp8::tests::converters stdout ----
+
+thread 'quant::fp8::tests::converters' (4044797) panicked at src/quant/fp8.rs:408:13:
+assertion `left == right` failed: exact dequant 256
+  left: 4.6666669845581055
+ right: 4.666666805744171
+
+
+failures:
+    cuda::qwen2::tests::fp8::gpu_fp8_graded_vs_fp8_ref
+    quant::fp8::tests::converters
+
+test result: FAILED. 9 passed; 2 failed; 0 ignored; 0 measured; 789 filtered out; finished in 1627.33s
+
+[axon-run 17:44:20] exit 101 after 1627.7s (host bella)

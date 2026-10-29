@@ -1,0 +1,24 @@
+[axon-run 17:03:02] submitted 1029-170302-cd38 by /home/haseeb/.cache/axon-fp8: /home/haseeb/.cache/axon-fp8/acc_cpu.sh bin/axon-cpu-400ef48w /home/haseeb/.cache/axon-fp8/acc1
+[axon-run 17:03:03] scope axon-job-1029-170302-cd38-1793307783.scope in app-axonjobs.slice: MemoryMax 10024 MB, MemoryHigh 9021 MB, no swap, oomd pressure kill 80% (claim 6000 MB): an OOM here kills only this job
+[axon-run 17:03:03] job 1029-170302-cd38 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1029-170302-cd38-1793307783 --slice=app-axonjobs.slice -p MemoryMax=10024M -p MemoryHigh=9021M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-fp8/acc_cpu.sh bin/axon-cpu-400ef48w /home/haseeb/.cache/axon-fp8/acc1
+axon-q 17:03:03 start slot 16-23: /home/haseeb/.cache/axon-fp8/acc_cpu.sh bin/axon-cpu-400ef48w /home/haseeb/.cache/axon-fp8/acc1
+32 windows, 8034 tokens (201..326 each)
+/home/haseeb/.cache/axon-fp8/acc1/cpu-f32.json: 8034 positions
+cpu f32 done 726s
+/home/haseeb/.cache/axon-fp8/acc1/cpu-e4m3-tok.json: 8034 positions
+cpu e4m3-tok done 1601s
+/home/haseeb/.cache/axon-fp8/acc1/cpu-e4m3-128.json: 8034 positions
+cpu e4m3-128 done 2507s
+/home/haseeb/.cache/axon-fp8/acc1/q4km-cpu.json: 8034 positions
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+cpu-f32.json                             decode   vs hf-f32: n 8002 (32 windows)  KL 4.490e-05 ±7.8e-06 (max 0.020)  top-1 99.93% ±0.03  dNLL -0.0003 ±0.0000  flips 6 (6 at HF margin < 0.1)  rest 1.1e-01/1.1e-01  PASS
+cpu-e4m3-tok.json                        decode   vs hf-f32: n 8002 (32 windows)  KL 7.880e-03 ±2.3e-04 (max 0.603)  top-1 94.58% ±0.34  dNLL +0.0053 ±0.0023  flips 434 (230 at HF margin < 0.1)  rest 1.1e-01/1.1e-01  FAIL
+cpu-e4m3-128.json                        decode   vs hf-f32: n 8002 (32 windows)  KL 5.210e-03 ±2.0e-04 (max 0.455)  top-1 95.51% ±0.31  dNLL +0.0040 ±0.0017  flips 359 (212 at HF margin < 0.1)  rest 1.1e-01/1.1e-01  FAIL
+q4km-cpu.json                            decode   vs hf-f32: n 8002 (32 windows)  KL 5.972e-02 ±1.9e-03 (max 2.381)  top-1 85.77% ±0.44  dNLL +0.0330 ±0.0045  flips 1139 (303 at HF margin < 0.1)  rest 1.2e-01/1.0e-01  FAIL  STOP
+[transformers] `torch_dtype` is deprecated! Use `dtype` instead!
+cpu-f32.json                             decode   vs hf-bf16: n 8002 (32 windows)  KL 2.686e-03 ±2.0e-04 (max 0.567)  top-1 96.59% ±0.29  dNLL -0.0039 ±0.0010  flips 273 (180 at HF margin < 0.1)  rest 1.1e-01/1.1e-01  FAIL
+cpu-e4m3-tok.json                        decode   vs hf-bf16: n 8002 (32 windows)  KL 1.064e-02 ±3.3e-04 (max 1.061)  top-1 93.53% ±0.37  dNLL +0.0016 ±0.0027  flips 518 (206 at HF margin < 0.1)  rest 1.1e-01/1.1e-01  FAIL
+cpu-e4m3-128.json                        decode   vs hf-bf16: n 8002 (32 windows)  KL 7.884e-03 ±3.6e-04 (max 1.173)  top-1 94.25% ±0.35  dNLL +0.0005 ±0.0022  flips 460 (222 at HF margin < 0.1)  rest 1.1e-01/1.1e-01  FAIL
+q4km-cpu.json                            decode   vs hf-bf16: n 8002 (32 windows)  KL 6.113e-02 ±2.0e-03 (max 2.216)  top-1 85.43% ±0.54  dNLL +0.0299 ±0.0047  flips 1166 (256 at HF margin < 0.1)  rest 1.2e-01/1.0e-01  FAIL  STOP
+ACC_CPU DONE
+[axon-run 17:49:45] exit 0 after 2802.6s (host bella)
