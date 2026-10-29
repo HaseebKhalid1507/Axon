@@ -132,7 +132,10 @@ All four kernels: **168 registers, 0 spill, 0 stack**, and no `Potential Perform
   2 slots keep the same in-flight depth: 0 spill.
 - **NVRTC 13.4's own compile cache blinds compile-log checks.** A cache hit returns the cubin with an *empty* log.
   - Measured on bella: the same source twice gives 5, then 0 `ptxas info` lines; with `CUDA_CACHE_DISABLE=1`, 5.
-  - The probe's check compile now carries a unique `-D` and requires the ptxas blocks.
+  - The cache is keyed on the module's PTX, so a unique `-D` the source never reads still hits (ec121ac tried it;
+    0.11 s, empty log).
+  - The probe's check compile now appends a uniquely named empty kernel (the PTX changes, so it always misses) and
+    requires the ptxas blocks (5dbb56c). With the dumped module: 4 of 4 probe blocks, and 0 on an identical re-run.
   - **main's Hopper compile check (`src/cuda/tests.rs` ≈ L486, "wgmma serialized") has the same blind spot.** It
     compiles identical KERNELS + opts every run. This is not fixed here (out of scope); it was posted to the project
     forum.
