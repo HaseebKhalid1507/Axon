@@ -17,9 +17,10 @@ the identity text and a second mode that today runs the same kernels under its o
   `BackendOptions::numerics`, `Backend::numerics`. The mode is a `Backend`'s (its second field) and reaches the
   placement code through `lm::Placing::numerics`; the CLI sets it per process.
 - **M1, identity (`src/identity.rs`):** two counters, `NUMERICS_VERSION_EXACT` and `NUMERICS_VERSION_FAST` (each
-  with its bump rule), and the tuple's first line is `numerics=exact/1` or `numerics=fast/1` (was `numerics=1`).
-  Every fingerprint changes once (CHANGELOG.md's release note); the golden canonical text and both fingerprints are
-  pinned (`fp_1e9019e52a04cc54` exact, `fp_380702fdbbb38616` fast for the test tuple; hashlib agrees). `GET
+  with its bump rule), and the tuple's first line is `numerics=exact/1` or `numerics=fast/1.1` (was `numerics=1`;
+  fast's tag is exact's counter and its own, below). Every fingerprint changes once (CHANGELOG.md's release note);
+  the golden canonical text and both fingerprints are pinned (`fp_1e9019e52a04cc54` exact, `fp_bea740cf61d9d767`
+  fast for the test tuple; hashlib agrees). `GET
   /identity`'s `numerics` is the string `"exact/1"` (was the number 1). `axon info` prints each placement's
   fingerprint in both modes.
 - **M1, the flag:** `--numerics exact|fast` on `gen`, `logits`, `chat` and `serve` (default exact). With no fast
@@ -41,7 +42,7 @@ the identity text and a second mode that today runs the same kernels under its o
 - **M5, cache keys:** every NVRTC module of a fast backend compiles with `-DAXON_FAST` (`cuda::FAST_DEFINE`, last
   in its options), so it is its own kernel-cache entry and `Module::fast` says so; exact's options are main's, byte
   for byte. kvsave: `cuda::numerics_tag(gpu, fast)` hashes the define in, and a fast `Backend` adds
-  `numerics_mode: "fast/1"` to its session identity. `session_across_numerics_modes` (CPU, and CUDA where there is a
+  `numerics_mode: "fast/1.1"` to its session identity. `session_across_numerics_modes` (CPU, and CUDA where there is a
   GPU): a session saved in exact mode restores into a fast chat as tokens, `numerics_mode` named as why, and the
   other way round; within a mode it restores as bytes; the conversation continues as a fresh prefill would.
 - **M8, docs:** the roadmap's "Not planned" bullet says split-KV / NCCL / atomics are not in *exact* mode and
@@ -61,6 +62,37 @@ the identity text and a second mode that today runs the same kernels under its o
    exact's, so identity F holds bit for bit by the same code; the χ² belongs to the first fast kernel's PR.
 5. **The cross-arch floor is written but unexercised:** no Axon host has two GPU architectures in one box.
 
+## Review round 1 (shady 7/10 CHANGES on 8a273d0): what changed
+
+- **The graded gate never ran a batched pass** (MUST 1). Every graded position was a decode position: PROMPTS fed
+  their few tokens and decoded, the teacher-forced windows were one token per step, and `numerics_dnll.py` set
+  `AXON_LOGITS_ALL` to every position, so `axon logits` never called `feed_batch`. WP-A1's first fast kernels are
+  prefill GEMMs (nb > 16), so a fast GEMM would have passed this gate without running once. Now the harness grades
+  four arms, each on its own: *decode* (as before, 4 windows); *batched prefill* (24, 160 and, on the GPU, 520
+  tokens in one `prefill_logits`: a gemvm pass, a GEMM pass ≥ 128 rows, a long pass ≥ 512; the last row, 16
+  positions decoded after it on the cache it wrote, and `verify_argmax`'s pick on every row); *cached prefix* (64
+  tokens cached, 96 more in a second pass); *under load* (GPU: 40 sequences stepped together in one pool, every
+  row's full logits against the sequence alone). `axon logits` takes `AXON_LOGITS_PREFIX=N` (the first N tokens in
+  batched passes, position N−1 from the last pass's last row), and `numerics_dnll.py --prefix N,...` (default
+  0,24,160) reports ΔNLL per prefix.
+- **A fast kernel must be seen running.** `CudaQwen2` counts fast-set launches (`fast_launched`, to be called at
+  every fast launch site; debug builds assert it's a fast module), `Backend::fast_launches` sums them, each arm
+  records its own, and the gate requires the count to move when `Backend::fast_kernels()` (now public) is true and
+  to stay 0 when it's false (`fast_launch_count_is_read` checks both failures by message).
+- **The fast contract promised bits** (MUST 2). determinism.md's fast row said a fixed (identity, request) still
+  gets a fixed reply on a fixed placement; the ADR's §4.2 makes batching, cache reuse and drafting tolerance in
+  fast mode, so the row now says no bits on any path, and that the fingerprint names the kernel set, not the bits.
+  `identity_checks` takes `bits`: with a fast kernel on the backend, *every* path equality (cached, streamed, under
+  load, fast == exact) is off and graded by the harness arms instead, not just fast == exact as the old comment said.
+- **The counters were tied by a comment** (MUST 3). Fast's tag now carries exact's counter: `fast/1.1`
+  (`fast/<exact>.<fast>`), so a change to code both modes run bumps `NUMERICS_VERSION_EXACT` once and both modes'
+  fingerprints move; `NUMERICS_VERSION_FAST` counts fast-only changes. Free now: no client holds a fast fingerprint.
+- **One source of truth for the mode** (SHOULD 4): `Backend::of` builds every `Backend` and, in debug builds,
+  asserts each of its GPU models runs its mode's module (`Module::fast`), so a fast module never sits under an exact
+  fingerprint.
+- **The floor question goes to WP-A1** (SHOULD 1), written into the ADR's §7 as an open item: the floor is a
+  reordering floor, and FP8 / W4A16 change precision; what they are graded against is not decided here.
+
 ## How it was verified
 
 The gates (release and debug-assertion suites, md5 of `gen` 20 cells × {main, cand, cand `--numerics exact`, cand
@@ -72,5 +104,8 @@ mode's bits did not move).
 
 - M4 (CPU fast prefill) and M6 (exact split-K) are deferred by decision. M7 (the first fast kernel) waits on a
   measured gap and a kill rule (ADR §4.6).
+- Pod pre-warm (`axon-pods warm`) loads exact modules only, so the first `--datacenter` job on a pod pays its fast
+  modules' NVRTC compiles (about a minute each) inside its own warm-ups until the warm path also runs
+  `--numerics fast` (a devstack change, not in this PR; see the PR body).
 - `tests/public_api.rs` gets `Numerics` in its surface; like the rest of that file it runs under cargo (CI), not in
   the rustc-built suites.
