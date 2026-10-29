@@ -1,0 +1,114 @@
+[axon-run 14:10:42] submitted 1029-141042-fbd8 by /home/haseeb/.cache/axon-wt-numerics: /usr/bin/bash md5.sh ./axon-main-333276d ./axon-e749834 md5-e749834 ./numerics_dnll.py ./natural_text.txt
+[axon-run 15:58:55] VRAM: claiming the learned 1397 MB instead of --vram 3000 (name:numerics-*-md5)
+[axon-run 15:58:55] scope axon-job-1029-141042-fbd8-1793303935.scope in app-axonjobs.slice: MemoryMax 4645 MB, MemoryHigh 4180 MB, no swap, oomd pressure kill 80% (claim 1952 MB): an OOM here kills only this job
+[axon-run 15:58:55] job 1029-141042-fbd8 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1029-141042-fbd8-1793303935 --slice=app-axonjobs.slice -p MemoryMax=4645M -p MemoryHigh=4180M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /usr/bin/bash md5.sh ./axon-main-333276d ./axon-e749834 md5-e749834 ./numerics_dnll.py ./natural_text.txt
+axon-q 15:58:55 start slot 16-23: /usr/bin/bash md5.sh ./axon-main-333276d ./axon-e749834 md5-e749834 ./numerics_dnll.py ./natural_text.txt
+base	qwen2.5-0.5b-q4_k_m-cpu-p1	de11b4bf48c9	rc=0	fp_ad474182db32610c
+cand	qwen2.5-0.5b-q4_k_m-cpu-p1	de11b4bf48c9	rc=0	fp_d44d20d119beefbc
+exact	qwen2.5-0.5b-q4_k_m-cpu-p1	de11b4bf48c9	rc=0	fp_d44d20d119beefbc
+fast	qwen2.5-0.5b-q4_k_m-cpu-p1	de11b4bf48c9	rc=0	fp_6f8524206f442648
+base	qwen2.5-0.5b-q4_k_m-cpu-p2	f6979b93fb55	rc=0	fp_ad474182db32610c
+cand	qwen2.5-0.5b-q4_k_m-cpu-p2	f6979b93fb55	rc=0	fp_d44d20d119beefbc
+exact	qwen2.5-0.5b-q4_k_m-cpu-p2	f6979b93fb55	rc=0	fp_d44d20d119beefbc
+fast	qwen2.5-0.5b-q4_k_m-cpu-p2	f6979b93fb55	rc=0	fp_6f8524206f442648
+base	qwen2.5-0.5b-q4_k_m-cuda-p1	c0dfbb1ca4f2	rc=0	fp_8b9214b47eacb25b
+cand	qwen2.5-0.5b-q4_k_m-cuda-p1	c0dfbb1ca4f2	rc=0	fp_9a080eff145acd98
+exact	qwen2.5-0.5b-q4_k_m-cuda-p1	c0dfbb1ca4f2	rc=0	fp_9a080eff145acd98
+fast	qwen2.5-0.5b-q4_k_m-cuda-p1	c0dfbb1ca4f2	rc=0	fp_94d234a2a8b5c891
+base	qwen2.5-0.5b-q4_k_m-cuda-p2	f6979b93fb55	rc=0	fp_8b9214b47eacb25b
+cand	qwen2.5-0.5b-q4_k_m-cuda-p2	f6979b93fb55	rc=0	fp_9a080eff145acd98
+exact	qwen2.5-0.5b-q4_k_m-cuda-p2	f6979b93fb55	rc=0	fp_9a080eff145acd98
+fast	qwen2.5-0.5b-q4_k_m-cuda-p2	f6979b93fb55	rc=0	fp_94d234a2a8b5c891
+base	qwen2.5-0.5b-q4_k_m-cuda-q8-p1	1c3ca55ba717	rc=0	fp_cfca7c254c5e64f6
+cand	qwen2.5-0.5b-q4_k_m-cuda-q8-p1	1c3ca55ba717	rc=0	fp_671a6a69ab88c075
+exact	qwen2.5-0.5b-q4_k_m-cuda-q8-p1	1c3ca55ba717	rc=0	fp_671a6a69ab88c075
+fast	qwen2.5-0.5b-q4_k_m-cuda-q8-p1	1c3ca55ba717	rc=0	fp_130a6e0032a96c4b
+base	qwen2.5-0.5b-q4_k_m-cuda-q8-p2	f6979b93fb55	rc=0	fp_cfca7c254c5e64f6
+cand	qwen2.5-0.5b-q4_k_m-cuda-q8-p2	f6979b93fb55	rc=0	fp_671a6a69ab88c075
+exact	qwen2.5-0.5b-q4_k_m-cuda-q8-p2	f6979b93fb55	rc=0	fp_671a6a69ab88c075
+fast	qwen2.5-0.5b-q4_k_m-cuda-q8-p2	f6979b93fb55	rc=0	fp_130a6e0032a96c4b
+base	Qwen3-0.6B-Q8_0-cpu-p1	54381a7d049c	rc=0	fp_0478e7baa5f482ca
+cand	Qwen3-0.6B-Q8_0-cpu-p1	54381a7d049c	rc=0	fp_f01d7b68c8643661
+exact	Qwen3-0.6B-Q8_0-cpu-p1	54381a7d049c	rc=0	fp_f01d7b68c8643661
+fast	Qwen3-0.6B-Q8_0-cpu-p1	54381a7d049c	rc=0	fp_b621efd0f2448f2b
+base	Qwen3-0.6B-Q8_0-cpu-p2	d2c5d72da64a	rc=0	fp_0478e7baa5f482ca
+cand	Qwen3-0.6B-Q8_0-cpu-p2	d2c5d72da64a	rc=0	fp_f01d7b68c8643661
+exact	Qwen3-0.6B-Q8_0-cpu-p2	d2c5d72da64a	rc=0	fp_f01d7b68c8643661
+fast	Qwen3-0.6B-Q8_0-cpu-p2	d2c5d72da64a	rc=0	fp_b621efd0f2448f2b
+base	Qwen3-0.6B-Q8_0-cuda-p1	a21a6d55c9dc	rc=0	fp_d9e7308e0f94fbab
+cand	Qwen3-0.6B-Q8_0-cuda-p1	a21a6d55c9dc	rc=0	fp_b4d0362ce60b924a
+exact	Qwen3-0.6B-Q8_0-cuda-p1	a21a6d55c9dc	rc=0	fp_b4d0362ce60b924a
+fast	Qwen3-0.6B-Q8_0-cuda-p1	a21a6d55c9dc	rc=0	fp_4598f7eb1a3b4570
+base	Qwen3-0.6B-Q8_0-cuda-p2	d2c5d72da64a	rc=0	fp_d9e7308e0f94fbab
+cand	Qwen3-0.6B-Q8_0-cuda-p2	d2c5d72da64a	rc=0	fp_b4d0362ce60b924a
+exact	Qwen3-0.6B-Q8_0-cuda-p2	d2c5d72da64a	rc=0	fp_b4d0362ce60b924a
+fast	Qwen3-0.6B-Q8_0-cuda-p2	d2c5d72da64a	rc=0	fp_4598f7eb1a3b4570
+base	Qwen3-0.6B-Q8_0-cuda-q8-p1	9416fbd66603	rc=0	fp_bba9105ed9504aa5
+cand	Qwen3-0.6B-Q8_0-cuda-q8-p1	9416fbd66603	rc=0	fp_321eb2862b10e8b2
+exact	Qwen3-0.6B-Q8_0-cuda-q8-p1	9416fbd66603	rc=0	fp_321eb2862b10e8b2
+fast	Qwen3-0.6B-Q8_0-cuda-q8-p1	9416fbd66603	rc=0	fp_97d14912814e0379
+base	Qwen3-0.6B-Q8_0-cuda-q8-p2	d2c5d72da64a	rc=0	fp_bba9105ed9504aa5
+cand	Qwen3-0.6B-Q8_0-cuda-q8-p2	d2c5d72da64a	rc=0	fp_321eb2862b10e8b2
+exact	Qwen3-0.6B-Q8_0-cuda-q8-p2	d2c5d72da64a	rc=0	fp_321eb2862b10e8b2
+fast	Qwen3-0.6B-Q8_0-cuda-q8-p2	d2c5d72da64a	rc=0	fp_97d14912814e0379
+base	Llama-3.2-1B-Instruct-Q4_K_M-cpu-p1	897464655057	rc=0	fp_3f472566a00b5227
+cand	Llama-3.2-1B-Instruct-Q4_K_M-cpu-p1	897464655057	rc=0	fp_ec3e6cb0f7927b16
+exact	Llama-3.2-1B-Instruct-Q4_K_M-cpu-p1	897464655057	rc=0	fp_ec3e6cb0f7927b16
+fast	Llama-3.2-1B-Instruct-Q4_K_M-cpu-p1	897464655057	rc=0	fp_8b0f20fd2ae9a1af
+base	Llama-3.2-1B-Instruct-Q4_K_M-cpu-p2	a1f895adbb59	rc=0	fp_3f472566a00b5227
+cand	Llama-3.2-1B-Instruct-Q4_K_M-cpu-p2	a1f895adbb59	rc=0	fp_ec3e6cb0f7927b16
+exact	Llama-3.2-1B-Instruct-Q4_K_M-cpu-p2	a1f895adbb59	rc=0	fp_ec3e6cb0f7927b16
+fast	Llama-3.2-1B-Instruct-Q4_K_M-cpu-p2	a1f895adbb59	rc=0	fp_8b0f20fd2ae9a1af
+base	Llama-3.2-1B-Instruct-Q4_K_M-cuda-p1	cc9424ad2c9b	rc=0	fp_2b9914c36b037b52
+cand	Llama-3.2-1B-Instruct-Q4_K_M-cuda-p1	cc9424ad2c9b	rc=0	fp_19ec6e5407f2e88c
+exact	Llama-3.2-1B-Instruct-Q4_K_M-cuda-p1	cc9424ad2c9b	rc=0	fp_19ec6e5407f2e88c
+fast	Llama-3.2-1B-Instruct-Q4_K_M-cuda-p1	cc9424ad2c9b	rc=0	fp_0900767e126beb87
+base	Llama-3.2-1B-Instruct-Q4_K_M-cuda-p2	a1f895adbb59	rc=0	fp_2b9914c36b037b52
+cand	Llama-3.2-1B-Instruct-Q4_K_M-cuda-p2	a1f895adbb59	rc=0	fp_19ec6e5407f2e88c
+exact	Llama-3.2-1B-Instruct-Q4_K_M-cuda-p2	a1f895adbb59	rc=0	fp_19ec6e5407f2e88c
+fast	Llama-3.2-1B-Instruct-Q4_K_M-cuda-p2	a1f895adbb59	rc=0	fp_0900767e126beb87
+base	google_gemma-3-1b-it-Q4_K_M-cpu-p1	cf46be5fb096	rc=0	fp_e726c88796288791
+cand	google_gemma-3-1b-it-Q4_K_M-cpu-p1	cf46be5fb096	rc=0	fp_690314a5708d09e1
+exact	google_gemma-3-1b-it-Q4_K_M-cpu-p1	cf46be5fb096	rc=0	fp_690314a5708d09e1
+fast	google_gemma-3-1b-it-Q4_K_M-cpu-p1	cf46be5fb096	rc=0	fp_127f8f8e9c6ca145
+base	google_gemma-3-1b-it-Q4_K_M-cpu-p2	9550d71f3d45	rc=0	fp_e726c88796288791
+cand	google_gemma-3-1b-it-Q4_K_M-cpu-p2	9550d71f3d45	rc=0	fp_690314a5708d09e1
+exact	google_gemma-3-1b-it-Q4_K_M-cpu-p2	9550d71f3d45	rc=0	fp_690314a5708d09e1
+fast	google_gemma-3-1b-it-Q4_K_M-cpu-p2	9550d71f3d45	rc=0	fp_127f8f8e9c6ca145
+base	google_gemma-3-1b-it-Q4_K_M-cuda-p1	9959475a1edd	rc=0	fp_aa3950cc429d9bbf
+cand	google_gemma-3-1b-it-Q4_K_M-cuda-p1	9959475a1edd	rc=0	fp_f3e7332e9292a480
+exact	google_gemma-3-1b-it-Q4_K_M-cuda-p1	9959475a1edd	rc=0	fp_f3e7332e9292a480
+fast	google_gemma-3-1b-it-Q4_K_M-cuda-p1	9959475a1edd	rc=0	fp_3efccccafcb24bf4
+base	google_gemma-3-1b-it-Q4_K_M-cuda-p2	9550d71f3d45	rc=0	fp_aa3950cc429d9bbf
+cand	google_gemma-3-1b-it-Q4_K_M-cuda-p2	9550d71f3d45	rc=0	fp_f3e7332e9292a480
+exact	google_gemma-3-1b-it-Q4_K_M-cuda-p2	9550d71f3d45	rc=0	fp_f3e7332e9292a480
+fast	google_gemma-3-1b-it-Q4_K_M-cuda-p2	9550d71f3d45	rc=0	fp_3efccccafcb24bf4
+== md5
+MD5: 20 of 20 cells identical across base / cand / cand --numerics exact / cand --numerics fast
+IDENTITY: 20 of 20 cells: cand == exact, fast != exact; main vs cand fingerprint changed in 20 of 20 (expected: all)
+== axon info (cand)
+model digest: 0f8f7f173905f532997e568e2c602e014d8e36ab882aeb7d0c77e2429570a9b5 (sampled SHA-256, identity numerics exact/1 | fast/1.1)
+fingerprint cpu: fp_d44d20d119beefbc (numerics exact/1, model 0f8f7f173905f532, types F32:121 Q5_0:133 Q8_0:13 Q4_K:12 Q6_K:12, backend cpu, cpu x86_64 fma, r8, kv f16)
+fingerprint cpu --numerics fast: fp_6f8524206f442648 (numerics fast/1.1; no fast kernels on this backend yet; running exact kernels; identity says fast)
+fingerprint cuda --kv f16: fp_9a080eff145acd98 (numerics exact/1, model 0f8f7f173905f532, types F32:121 Q5_0:133 Q8_0:13 Q4_K:12 Q6_K:12, backend cuda, gpu sm_120, kv f16)
+fingerprint cuda --kv f16 --numerics fast: fp_94d234a2a8b5c891 (numerics fast/1.1; no fast kernels on this backend yet; running exact kernels; identity says fast)
+fingerprint cuda --kv q8: fp_671a6a69ab88c075 (numerics exact/1, model 0f8f7f173905f532, types F32:121 Q5_0:133 Q8_0:13 Q4_K:12 Q6_K:12, backend cuda, gpu sm_120, kv q8)
+fingerprint cuda --kv q8 --numerics fast: fp_130a6e0032a96c4b (numerics fast/1.1; no fast kernels on this backend yet; running exact kernels; identity says fast)
+info: 3 exact lines, 3 fast lines
+== serve --datacenter (cpu)
+dc: axon serve: --datacenter: --numerics fast | /identity numerics=fast/1.1
+dc-exact: axon serve: --datacenter: --numerics exact (given explicitly) | /identity numerics=exact/1
+plain:  | /identity numerics=exact/1
+== ΔNLL hook, cand exact vs fast (--expect-zero), prefixes 0,24,160 (decode, a gemvm pass, a GEMM pass)
+ΔNLL (cand - base) +0.000e+00 ± 0.0e+00 nats/position (SE clustered by window, 4 windows, 2818 positions); NLL base 2.6226, cand 2.6226; top-1 2818/2818; positions differing at all: 0
+  prefix 0 (decode only): ΔNLL +0.000e+00 ± 0.0e+00 over 1182 positions
+  prefix 24 (first 24 tokens batched): ΔNLL +0.000e+00 ± 0.0e+00 over 1090 positions
+  prefix 160 (first 160 tokens batched): ΔNLL +0.000e+00 ± 0.0e+00 over 546 positions
+ΔNLL (cand - base) +0.000e+00 ± 0.0e+00 nats/position (SE clustered by window, 4 windows, 2818 positions); NLL base 2.6228, cand 2.6228; top-1 2818/2818; positions differing at all: 0
+  prefix 0 (decode only): ΔNLL +0.000e+00 ± 0.0e+00 over 1182 positions
+  prefix 24 (first 24 tokens batched): ΔNLL +0.000e+00 ± 0.0e+00 over 1090 positions
+  prefix 160 (first 160 tokens batched): ΔNLL +0.000e+00 ± 0.0e+00 over 546 positions
+== AXON_LOGITS_PREFIX: the batched row is the decode row (exact: prefill_logits == feed_batch + forward)
+prefix 160: 40 positions from 159; decode-only from 159: 40
+GATE: PASS
+[axon-run 16:02:57] exit 0 after 242.1s (host bella)

@@ -1,0 +1,69 @@
+[axon-run 14:10:29] submitted 1029-141029-1bc6 by /home/haseeb/.cache/axon-wt-numerics: /home/haseeb/.cache/axon-numerics/bin/axon-test-e749834 identity:: numerics:: serve::tests::serve_identity serve::tests::datacenter chat::tests::session kvsave:: draft::tests lm:: cuda::tests::gpu_fast_module cuda::tests::fast_define cuda::tests::gpu_kernel_cache --test-threads 2
+[axon-run 15:48:55] VRAM: claiming the learned 2499 MB instead of --vram 5000 (name:numerics-*-targeted)
+[axon-run 15:48:55] scope axon-job-1029-141029-1bc6-1793303335.scope in app-axonjobs.slice: MemoryMax 7207 MB, MemoryHigh 6486 MB, no swap, oomd pressure kill 80% (claim 3964 MB): an OOM here kills only this job
+[axon-run 15:48:55] job 1029-141029-1bc6 -> bella: systemd-run --user --scope --quiet --unit=axon-job-1029-141029-1bc6-1793303335 --slice=app-axonjobs.slice -p MemoryMax=7207M -p MemoryHigh=6486M -p MemorySwapMax=0 -p ManagedOOMMemoryPressure=kill -p ManagedOOMMemoryPressureLimit=80% -- /home/haseeb/.local/bin/axon-q test /home/haseeb/.cache/axon-numerics/bin/axon-test-e749834 identity:: numerics:: serve::tests::serve_identity serve::tests::datacenter chat::tests::session kvsave:: draft::tests lm:: cuda::tests::gpu_fast_module cuda::tests::fast_define cuda::tests::gpu_kernel_cache --test-threads 2
+axon-q 15:48:55 start slot 16-23: /home/haseeb/.cache/axon-numerics/bin/axon-test-e749834 identity:: numerics:: serve::tests::serve_identity serve::tests::datacenter chat::tests::session kvsave:: draft::tests lm:: cuda::tests::gpu_fas
+
+running 56 tests
+testutil: GPU has 11.59 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test chat::tests::session_across_numerics_modes ... ok
+test chat::tests::session_after_forgetting ... ok
+test chat::tests::session_continues_cuda_f16_q8 ... ok
+test chat::tests::session_cpu_file_on_cuda ... ok
+test chat::tests::session_continues_cpu ... ok
+test cuda::qwen2::tests::numerics::clustered_mean_by_hand ... ok
+test cuda::qwen2::tests::numerics::fast_launch_count_is_read ... ok
+test chat::tests::session_hostile_state ... ok
+test cuda::qwen2::tests::numerics::graded_catches_another_model ... ok
+test cuda::qwen2::tests::numerics::graded_exact_vs_exact ... ok
+test cuda::qwen2::tests::numerics::graded_fast_vs_exact ... ok
+test cuda::qwen2::tests::numerics::graded_exact_vs_exact_cpu ... ok
+test cuda::tests::fast_define_in_the_options ... ok
+test cuda::tests::gpu_fast_module_own_cache_entry ... ok
+test cuda::tests::gpu_kernel_cache_hit_miss_corrupt ... ok
+test draft::tests::chat_with_draft_model_unchanged ... ok
+test draft::tests::draft_k_defaults ... ok
+test cuda::qwen2::tests::numerics::graded_fast_vs_exact_cpu ... ok
+test draft::tests::draft_model_output_unchanged_cuda ... ok
+test draft::tests::draft_model_output_unchanged_cuda_big ... ignored
+test draft::tests::drafter_follows_edited_histories ... ok
+test draft::tests::drafter_stops_before_eog ... ok
+test draft::tests::split_k_defaults ... ok
+test draft::tests::vocab_mismatch_is_refused ... ok
+test identity::tests::fields ... ok
+test identity::tests::fingerprint_stable_and_sensitive ... ok
+test identity::tests::model_digest_golden ... ok
+test identity::tests::model_digest_sees_the_file ... ok
+test identity::tests::numerics_mode_in_the_fingerprint ... ok
+test identity::tests::of_split_and_pipeline ... ok
+test identity::tests::of_split_attention_gemma3 ... ok
+test identity::tests::rope_scaling_in_the_fingerprint ... ok
+test identity::tests::sha256_vectors ... ok
+test kvsave::tests::canonical_names_one_session ... ok
+test kvsave::tests::file_appends_rewrites_and_checks ... ok
+test kvsave::tests::hasher_streams ... ok
+test kvsave::tests::hostile_headers ... ok
+test kvsave::tests::lock_refuses_a_second_holder ... ok
+test kvsave::tests::not_a_session_file ... ok
+test kvsave::tests::orphan_records_never_load ... ok
+test kvsave::tests::same_length_foreign_rewrite_never_restores_wrong_state ... ok
+test kvsave::tests::second_writer_then_save_rewrites ... ok
+test kvsave::tests::segments_split_at_pages ... ok
+test kvsave::tests::torn_tail_then_new_process_saves_on ... ok
+test lm::paged_place_tests::paged_placement_14b ... ok
+test lm::paged_place_tests::paged_placement_all_gpu_kept ... ok
+test lm::paged_place_tests::paged_placement_matches_main_with_ctx ... ok
+test lm::paged_place_tests::paged_placement_squeezed_splits_rather_than_shrinks ... ok
+test numerics::tests::fast_note_on_a_fixture ... ok
+test numerics::tests::parse_and_tags ... ok
+test serve::tests::datacenter_bundle ... ok
+test serve::tests::serve_identity ... ok
+test draft::tests::draft_model_output_unchanged_cpu has been running for over 60 seconds
+test serve::tests::serve_identity_cpu ... ok
+test serve::tests::serve_identity_fast ... ok
+test draft::tests::draft_model_output_unchanged_cpu ... ok
+test serve::tests::serve_identity_fast_cpu ... ok
+
+test result: ok. 55 passed; 0 failed; 1 ignored; 0 measured; 733 filtered out; finished in 186.58s
+
+[axon-run 15:52:02] exit 0 after 186.9s (host bella)
