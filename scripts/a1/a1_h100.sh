@@ -22,6 +22,9 @@ set -u
 T=${1:?test binary}; V=${2:?a1_verdict.py}; KIT=${3:?kit tarball}
 T0=$(date +%s); log() { echo "[a1 +$(( $(date +%s) - T0 ))s] $*"; }
 O=$PWD/a1-out-$(date +%m%d-%H%M%S)-$$; mkdir -p "$O"
+# The staged dir (cwd) is content-addressed on the script and files, not on axon-run's options: a later submit of
+# the same kit reuses it and ships whatever is left here. Keep only the logs: drop the extracted kit on any exit.
+trap 'rm -rf "$O/kit"' EXIT
 fail=""
 done_line() {
   if [ -z "$fail" ]; then log "A1 H100 DONE rc 0 ($*)"; exit 0; fi
