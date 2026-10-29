@@ -1,0 +1,616 @@
+[axon-run 16:02:04] submitted 1029-160204-d540 by /home/haseeb/.cache/axon-wt-a1probe: /usr/bin/bash a1_h100.sh ./axon-test-1360c3b ./a1_verdict.py ./a1-kit-1360c3b.tar
+[axon-run 16:08:45] job 1029-160204-d540 -> pod1 [H100 80GB HBM3 sm_90 secure] (pod kevejgl5a8oxid): /home/haseeb/.local/bin/axon-remote --host pod1 --vram 8000 --env AXON_NODE_EXCLUSIVE=1 --src /home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e /usr/bin/bash a1_h100.sh ./axon-test-1360c3b ./a1_verdict.py ./a1-kit-1360c3b.tar
+axon-remote: /usr/bin/bash is a system program: the node runs its own bash (not uploaded)
+axon-remote: uploading bin (3feb0713e9765fd162cb74cd) + source of /home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e
+
+sent 33,623,925 bytes  received 213 bytes  1,494,406.13 bytes/sec
+total size is 126,422,392  speedup is 3.76
+
+sent 169 bytes  received 35 bytes  136.00 bytes/sec
+total size is 89  speedup is 0.44
+axon-remote: job 20261029-200913-bash-1114 on pod1 (GPU, 8000 MB)
+[axon-node 20:09:13] GPU EXCLUSIVE taken; job wants 8000 MB; nvidia-smi used/total 0/81559 MB; sharing with nobody (slots 5, budget 80059 MB, vCPU 22.1)
+[axon-node 20:09:13] run bash (3feb0713e9765fd162cb74cd) as /home/haseeb/.cache/axon-podjob/a1_h100-0a00095c825e on 0d39b8ac6728, AXON_THREADS=8 RUST_TEST_THREADS=4; free 81081 MB of 81559 (used 0); GPU processes pid:MB none
+[a1 +0s] kit ./a1-kit-1360c3b.tar, binary ./axon-test-1360c3b, out /root/axon-node/store/3feb0713e9765fd162cb74cd/tree/a1-out-1029-200913-1125
+[a1 +0s] binary sha256 034850563130eea7eaeff6672d4bd9383f232636f90b9fabcf2efa3281c1d13e = the kit's BUILT_FOR: axon-test-1360c3b 034850563130eea7eaeff6672d4bd9383f232636f90b9fabcf2efa3281c1d13e commit 1360c3b7c9bafdc9c180471702ba4def51f7273d scripts-at 1360c3b7c9bafdc9c180471702ba4def51f7273d
+name, compute_cap, driver_version, memory.total [MiB], clocks.max.sm [MHz], clocks.max.memory [MHz], power.limit [W], power.max_limit [W]
+NVIDIA H100 80GB HBM3, 9.0, 595.91.07, 81559 MiB, 1980 MHz, 2619 MHz, 700.00 W, 700.00 W
+A1 SMI NVIDIA H100 80GB HBM3, 700.00 W, 700.00 W, 1980 MHz
+[a1 +0s] kernel cache: 1 -> 10 entries (/root/axon-node/cache/axon/cuda; the kit's sm_90a cubins installed)
+[a1 +1s] session: budget 2400 s (nvidia-smi trace pid 1163: timestamp,clocks.sm,clocks.mem,power.draw,temperature.gpu,clocks_event_reasons.active)
+
+running 1 test
+test cuda::qwen2::tests::cuda_a1_session ... A1 STAGE nvrtc_probe_fast_compiles_sm90a: start at unix 1793304554.0, limit 180 s (/root/axon-node/store/3feb0713e9765fd162cb74cd/tree/axon-test-1360c3b cuda::qwen2::tests::nvrtc_probe_fast_compiles_sm90a --exact --nocapture --test-threads 1)
+
+running 1 test
+A1 COMPILE sm_90a: 240808 bytes of cubin (NVRTC 13.2)
+A1 COMPILE probe_fp8_128x64: 168 registers, 0 bytes spill stores, 0 bytes stack frame
+A1 COMPILE probe_fp8_128x128: 168 registers, 0 bytes spill stores, 0 bytes stack frame
+A1 COMPILE probe_fp8n128_128x128: 168 registers, 0 bytes spill stores, 0 bytes stack frame
+A1 COMPILE probe_w4a16_128x64: 168 registers, 0 bytes spill stores, 0 bytes stack frame
+A1 COMPILE probe_w4a16_256x64: 168 registers, 0 bytes spill stores, 0 bytes stack frame
+A1 COMPILE sm_90: 3952 bytes of cubin (NVRTC 13.2)
+test cuda::qwen2::tests::nvrtc_probe_fast_compiles_sm90a ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 2.27s
+
+A1 STAGE nvrtc_probe_fast_compiles_sm90a: rc 0 after 2.4 s at unix 1793304556.4
+A1 STAGE compile: ok (every probe kernel: no C75xx note, no spill, no stack)
+A1 STAGE gpu_rmsnorm_matches_cpu: start at unix 1793304556.4, limit 120 s (/root/axon-node/store/3feb0713e9765fd162cb74cd/tree/a1-out-1029-200913-1125/kit/san/compute-sanitizer --tool memcheck --error-exitcode 9 --print-limit 20 /root/axon-node/store/3feb0713e9765fd162cb74cd/tree/axon-test-1360c3b cuda::qwen2::tests::gpu_rmsnorm_matches_cpu --exact --nocapture --test-threads 1)
+========= COMPUTE-SANITIZER
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+test cuda::qwen2::tests::gpu_rmsnorm_matches_cpu ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 1.04s
+
+========= ERROR SUMMARY: 0 errors
+A1 STAGE gpu_rmsnorm_matches_cpu: rc 0 after 1.2 s at unix 1793304557.6
+A1 STAGE sanitizer-selfcheck: ok (memcheck instrumented gpu_rmsnorm_matches_cpu, 0 errors)
+A1 STAGE gpu_a1_warm_module: start at unix 1793304557.6, limit 120 s (/root/axon-node/store/3feb0713e9765fd162cb74cd/tree/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_warm_module --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.2, target sm_90a
+A1 WARM probe-fast loaded (sm_90a: true)
+test cuda::qwen2::tests::gpu_a1_warm_module ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.57s
+
+A1 STAGE gpu_a1_warm_module: rc 0 after 0.8 s at unix 1793304558.4
+A1 STAGE warm: ok
+A1 STAGE gpu_a1_fp8_128x64_tiny: start at unix 1793304558.4, limit 150 s (/root/axon-node/store/3feb0713e9765fd162cb74cd/tree/a1-out-1029-200913-1125/kit/san/compute-sanitizer --tool memcheck --error-exitcode 9 --print-limit 20 /root/axon-node/store/3feb0713e9765fd162cb74cd/tree/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_fp8_128x64_tiny --exact --nocapture --test-threads 1)
+========= COMPUTE-SANITIZER
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.2, target sm_90a
+A1 RAGGED fp8_128x64 128x256 nb 64 ctas 1 ksplit 1: 8192 outputs, tol PASS rel-rms 3.89e-4 rel-max 4.73e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x64_splitk2 128x512 nb 64 ctas 2 ksplit 2: 8192 outputs, tol PASS rel-rms 3.78e-4 rel-max 2.54e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x64_streamk 256x768 nb 64 ctas 3 ksplit 0: 16384 outputs, tol PASS rel-rms 5.02e-4 rel-max 5.06e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x64_streamk 128x256 nb 64 ctas 4 ksplit 0: 8192 outputs, tol PASS rel-rms 3.80e-4 rel-max 4.24e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x64 200x512 nb 136 ctas 2 ksplit 1: 27200 outputs, tol PASS rel-rms 5.63e-4 rel-max 8.09e-3 (bounds 0.1 / 0.5)
+test cuda::qwen2::tests::gpu_a1_fp8_128x64_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.72s
+
+========= ERROR SUMMARY: 0 errors
+A1 STAGE gpu_a1_fp8_128x64_tiny: rc 0 after 1.0 s at unix 1793304559.4
+A1 STAGE sanitizer fp8_128x64 tiny: ok
+A1 STAGE gpu_a1_fp8_128x128_tiny: start at unix 1793304559.4, limit 150 s (/root/axon-node/store/3feb0713e9765fd162cb74cd/tree/a1-out-1029-200913-1125/kit/san/compute-sanitizer --tool memcheck --error-exitcode 9 --print-limit 20 /root/axon-node/store/3feb0713e9765fd162cb74cd/tree/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_fp8_128x128_tiny --exact --nocapture --test-threads 1)
+========= COMPUTE-SANITIZER
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.2, target sm_90a
+A1 RAGGED fp8_128x128 128x256 nb 64 ctas 1 ksplit 1: 8192 outputs, tol PASS rel-rms 3.89e-4 rel-max 4.73e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x128_splitk2 128x512 nb 64 ctas 2 ksplit 2: 8192 outputs, tol PASS rel-rms 3.78e-4 rel-max 2.54e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x128_streamk 256x768 nb 64 ctas 3 ksplit 0: 16384 outputs, tol PASS rel-rms 5.02e-4 rel-max 5.06e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x128_streamk 128x256 nb 64 ctas 4 ksplit 0: 8192 outputs, tol PASS rel-rms 3.80e-4 rel-max 4.24e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x128 200x512 nb 136 ctas 2 ksplit 1: 27200 outputs, tol PASS rel-rms 5.63e-4 rel-max 8.09e-3 (bounds 0.1 / 0.5)
+test cuda::qwen2::tests::gpu_a1_fp8_128x128_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.72s
+
+========= ERROR SUMMARY: 0 errors
+A1 STAGE gpu_a1_fp8_128x128_tiny: rc 0 after 1.0 s at unix 1793304560.4
+A1 STAGE sanitizer fp8_128x128 tiny: ok
+A1 STAGE gpu_a1_fp8n128_128x128_tiny: start at unix 1793304560.4, limit 150 s (/root/axon-node/store/3feb0713e9765fd162cb74cd/tree/a1-out-1029-200913-1125/kit/san/compute-sanitizer --tool memcheck --error-exitcode 9 --print-limit 20 /root/axon-node/store/3feb0713e9765fd162cb74cd/tree/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_fp8n128_128x128_tiny --exact --nocapture --test-threads 1)
+========= COMPUTE-SANITIZER
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.2, target sm_90a
+A1 RAGGED fp8n128_128x128 128x256 nb 64 ctas 1 ksplit 1: 8192 outputs, tol PASS rel-rms 3.89e-4 rel-max 4.73e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8n128_128x128_splitk2 128x512 nb 64 ctas 2 ksplit 2: 8192 outputs, tol PASS rel-rms 3.78e-4 rel-max 2.54e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8n128_128x128_streamk 256x768 nb 64 ctas 3 ksplit 0: 16384 outputs, tol PASS rel-rms 5.02e-4 rel-max 5.06e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8n128_128x128_streamk 128x256 nb 64 ctas 4 ksplit 0: 8192 outputs, tol PASS rel-rms 3.80e-4 rel-max 4.24e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8n128_128x128 200x512 nb 136 ctas 2 ksplit 1: 27200 outputs, tol PASS rel-rms 5.63e-4 rel-max 8.09e-3 (bounds 0.1 / 0.5)
+test cuda::qwen2::tests::gpu_a1_fp8n128_128x128_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.71s
+
+========= ERROR SUMMARY: 0 errors
+A1 STAGE gpu_a1_fp8n128_128x128_tiny: rc 0 after 1.0 s at unix 1793304561.4
+A1 STAGE sanitizer fp8n128_128x128 tiny: ok
+A1 STAGE gpu_a1_w4a16_128x64_tiny: start at unix 1793304561.4, limit 150 s (/root/axon-node/store/3feb0713e9765fd162cb74cd/tree/a1-out-1029-200913-1125/kit/san/compute-sanitizer --tool memcheck --error-exitcode 9 --print-limit 20 /root/axon-node/store/3feb0713e9765fd162cb74cd/tree/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_w4a16_128x64_tiny --exact --nocapture --test-threads 1)
+========= COMPUTE-SANITIZER
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.2, target sm_90a
+A1 RAGGED w4a16_128x64 128x256 nb 64 ctas 1 ksplit 1: 8192 outputs, tol PASS rel-rms 2.67e-4 rel-max 1.91e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_128x64_splitk2 128x512 nb 64 ctas 2 ksplit 2: 8192 outputs, tol PASS rel-rms 2.92e-4 rel-max 1.45e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_128x64_streamk 256x768 nb 64 ctas 3 ksplit 0: 16384 outputs, tol PASS rel-rms 2.94e-4 rel-max 1.58e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_128x64_streamk 128x256 nb 64 ctas 4 ksplit 0: 8192 outputs, tol PASS rel-rms 3.03e-4 rel-max 1.79e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_128x64 200x512 nb 136 ctas 2 ksplit 1: 27200 outputs, tol PASS rel-rms 2.94e-4 rel-max 1.63e-3 (bounds 0.005 / 0.03)
+test cuda::qwen2::tests::gpu_a1_w4a16_128x64_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.69s
+
+========= ERROR SUMMARY: 0 errors
+A1 STAGE gpu_a1_w4a16_128x64_tiny: rc 0 after 1.0 s at unix 1793304562.4
+A1 STAGE sanitizer w4a16_128x64 tiny: ok
+A1 STAGE gpu_a1_w4a16_256x64_tiny: start at unix 1793304562.4, limit 150 s (/root/axon-node/store/3feb0713e9765fd162cb74cd/tree/a1-out-1029-200913-1125/kit/san/compute-sanitizer --tool memcheck --error-exitcode 9 --print-limit 20 /root/axon-node/store/3feb0713e9765fd162cb74cd/tree/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_w4a16_256x64_tiny --exact --nocapture --test-threads 1)
+========= COMPUTE-SANITIZER
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.2, target sm_90a
+A1 RAGGED w4a16_256x64 128x256 nb 64 ctas 1 ksplit 1: 8192 outputs, tol PASS rel-rms 2.67e-4 rel-max 1.91e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_256x64_splitk2 128x512 nb 64 ctas 2 ksplit 2: 8192 outputs, tol PASS rel-rms 2.92e-4 rel-max 1.45e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_256x64_streamk 256x768 nb 64 ctas 3 ksplit 0: 16384 outputs, tol PASS rel-rms 2.94e-4 rel-max 1.58e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_256x64_streamk 128x256 nb 64 ctas 4 ksplit 0: 8192 outputs, tol PASS rel-rms 3.03e-4 rel-max 1.79e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_256x64 200x512 nb 136 ctas 2 ksplit 1: 27200 outputs, tol PASS rel-rms 2.94e-4 rel-max 1.63e-3 (bounds 0.005 / 0.03)
+test cuda::qwen2::tests::gpu_a1_w4a16_256x64_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.67s
+
+========= ERROR SUMMARY: 0 errors
+A1 STAGE gpu_a1_w4a16_256x64_tiny: rc 0 after 1.0 s at unix 1793304563.4
+A1 STAGE sanitizer w4a16_256x64 tiny: ok
+A1 STAGE gpu_a1_fp8_128x64_tiny: start at unix 1793304563.4, limit 90 s (/root/axon-node/store/3feb0713e9765fd162cb74cd/tree/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_fp8_128x64_tiny --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.2, target sm_90a
+A1 RAGGED fp8_128x64 128x256 nb 64 ctas 1 ksplit 1: 8192 outputs, tol PASS rel-rms 3.89e-4 rel-max 4.73e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x64_splitk2 128x512 nb 64 ctas 2 ksplit 2: 8192 outputs, tol PASS rel-rms 3.78e-4 rel-max 2.54e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x64_streamk 256x768 nb 64 ctas 3 ksplit 0: 16384 outputs, tol PASS rel-rms 5.02e-4 rel-max 5.06e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x64_streamk 128x256 nb 64 ctas 4 ksplit 0: 8192 outputs, tol PASS rel-rms 3.80e-4 rel-max 4.24e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x64 200x512 nb 136 ctas 2 ksplit 1: 27200 outputs, tol PASS rel-rms 5.63e-4 rel-max 8.09e-3 (bounds 0.1 / 0.5)
+test cuda::qwen2::tests::gpu_a1_fp8_128x64_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.60s
+
+A1 STAGE gpu_a1_fp8_128x64_tiny: rc 0 after 0.8 s at unix 1793304564.2
+A1 STAGE fp8_128x64 tiny: ok
+A1 STAGE gpu_a1_fp8_128x64_ragged: start at unix 1793304564.2, limit 240 s (/root/axon-node/store/3feb0713e9765fd162cb74cd/tree/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_fp8_128x64_ragged --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.2, target sm_90a
+A1 RAGGED fp8_128x64 128x256 nb 64 ctas 1 ksplit 1: 8192 outputs, tol PASS rel-rms 3.89e-4 rel-max 4.73e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x64 200x768 nb 100 ctas 3 ksplit 1: 20000 outputs, tol PASS rel-rms 6.89e-4 rel-max 8.27e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x64 384x1280 nb 129 ctas 2 ksplit 1: 49536 outputs, tol PASS rel-rms 9.05e-4 rel-max 1.41e-2 (bounds 0.1 / 0.5)
+[axon-run 16:09:25] FOREIGN_GPU sample max=0% mean=0.0% n=2
+A1 RAGGED fp8_128x64 128x4352 nb 64 ctas 1 ksplit 1: 8192 outputs, tol PASS rel-rms 1.70e-3 rel-max 1.64e-2 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x64 512x3584 nb 200 ctas 7 ksplit 1: 102400 outputs, tol PASS rel-rms 1.54e-3 rel-max 2.31e-2 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x64_splitk2 200x3584 nb 100 ctas 5 ksplit 2: 20000 outputs, tol PASS rel-rms 1.06e-3 rel-max 9.14e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x64_splitk3 384x4352 nb 129 ctas 7 ksplit 3: 49536 outputs, tol PASS rel-rms 9.76e-4 rel-max 1.01e-2 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x64_splitk14 136x3584 nb 72 ctas 11 ksplit 14: 9792 outputs, tol PASS rel-rms 3.73e-4 rel-max 2.11e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x64_streamk 512x3584 nb 200 ctas 11 ksplit 0: 102400 outputs, tol PASS rel-rms 1.35e-3 rel-max 1.88e-2 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x64_streamk 256x18944 nb 64 ctas 13 ksplit 0: 16384 outputs, tol PASS rel-rms 1.35e-3 rel-max 7.77e-3 (bounds 0.1 / 0.5)
+test cuda::qwen2::tests::gpu_a1_fp8_128x64_ragged ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 6.42s
+
+A1 STAGE gpu_a1_fp8_128x64_ragged: rc 0 after 6.6 s at unix 1793304570.8
+A1 STAGE fp8_128x64 ragged: ok
+A1 STAGE gpu_a1_fp8_128x128_tiny: start at unix 1793304570.8, limit 90 s (/root/axon-node/store/3feb0713e9765fd162cb74cd/tree/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_fp8_128x128_tiny --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.2, target sm_90a
+A1 RAGGED fp8_128x128 128x256 nb 64 ctas 1 ksplit 1: 8192 outputs, tol PASS rel-rms 3.89e-4 rel-max 4.73e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x128_splitk2 128x512 nb 64 ctas 2 ksplit 2: 8192 outputs, tol PASS rel-rms 3.78e-4 rel-max 2.54e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x128_streamk 256x768 nb 64 ctas 3 ksplit 0: 16384 outputs, tol PASS rel-rms 5.02e-4 rel-max 5.06e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x128_streamk 128x256 nb 64 ctas 4 ksplit 0: 8192 outputs, tol PASS rel-rms 3.80e-4 rel-max 4.24e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x128 200x512 nb 136 ctas 2 ksplit 1: 27200 outputs, tol PASS rel-rms 5.63e-4 rel-max 8.09e-3 (bounds 0.1 / 0.5)
+test cuda::qwen2::tests::gpu_a1_fp8_128x128_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.62s
+
+A1 STAGE gpu_a1_fp8_128x128_tiny: rc 0 after 0.8 s at unix 1793304571.6
+A1 STAGE fp8_128x128 tiny: ok
+A1 STAGE gpu_a1_fp8_128x128_ragged: start at unix 1793304571.6, limit 240 s (/root/axon-node/store/3feb0713e9765fd162cb74cd/tree/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_fp8_128x128_ragged --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.2, target sm_90a
+A1 RAGGED fp8_128x128 128x256 nb 64 ctas 1 ksplit 1: 8192 outputs, tol PASS rel-rms 3.89e-4 rel-max 4.73e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x128 200x768 nb 100 ctas 3 ksplit 1: 20000 outputs, tol PASS rel-rms 6.89e-4 rel-max 8.27e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x128 384x1280 nb 129 ctas 2 ksplit 1: 49536 outputs, tol PASS rel-rms 9.05e-4 rel-max 1.41e-2 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x128 128x4352 nb 64 ctas 1 ksplit 1: 8192 outputs, tol PASS rel-rms 1.70e-3 rel-max 1.64e-2 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x128 512x3584 nb 200 ctas 7 ksplit 1: 102400 outputs, tol PASS rel-rms 1.54e-3 rel-max 2.31e-2 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x128_splitk2 200x3584 nb 100 ctas 5 ksplit 2: 20000 outputs, tol PASS rel-rms 1.06e-3 rel-max 9.14e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x128_splitk3 384x4352 nb 129 ctas 7 ksplit 3: 49536 outputs, tol PASS rel-rms 9.76e-4 rel-max 1.01e-2 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x128_splitk14 136x3584 nb 72 ctas 11 ksplit 14: 9792 outputs, tol PASS rel-rms 3.73e-4 rel-max 2.11e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x128_streamk 512x3584 nb 200 ctas 11 ksplit 0: 102400 outputs, tol PASS rel-rms 1.14e-3 rel-max 1.91e-2 (bounds 0.1 / 0.5)
+A1 RAGGED fp8_128x128_streamk 256x18944 nb 64 ctas 13 ksplit 0: 16384 outputs, tol PASS rel-rms 1.35e-3 rel-max 7.77e-3 (bounds 0.1 / 0.5)
+test cuda::qwen2::tests::gpu_a1_fp8_128x128_ragged ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 6.43s
+
+A1 STAGE gpu_a1_fp8_128x128_ragged: rc 0 after 6.6 s at unix 1793304578.2
+A1 STAGE fp8_128x128 ragged: ok
+A1 STAGE gpu_a1_fp8n128_128x128_tiny: start at unix 1793304578.2, limit 90 s (/root/axon-node/store/3feb0713e9765fd162cb74cd/tree/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_fp8n128_128x128_tiny --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.2, target sm_90a
+A1 RAGGED fp8n128_128x128 128x256 nb 64 ctas 1 ksplit 1: 8192 outputs, tol PASS rel-rms 3.89e-4 rel-max 4.73e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8n128_128x128_splitk2 128x512 nb 64 ctas 2 ksplit 2: 8192 outputs, tol PASS rel-rms 3.78e-4 rel-max 2.54e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8n128_128x128_streamk 256x768 nb 64 ctas 3 ksplit 0: 16384 outputs, tol PASS rel-rms 5.02e-4 rel-max 5.06e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8n128_128x128_streamk 128x256 nb 64 ctas 4 ksplit 0: 8192 outputs, tol PASS rel-rms 3.80e-4 rel-max 4.24e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8n128_128x128 200x512 nb 136 ctas 2 ksplit 1: 27200 outputs, tol PASS rel-rms 5.63e-4 rel-max 8.09e-3 (bounds 0.1 / 0.5)
+test cuda::qwen2::tests::gpu_a1_fp8n128_128x128_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.66s
+
+A1 STAGE gpu_a1_fp8n128_128x128_tiny: rc 0 after 0.8 s at unix 1793304579.0
+A1 STAGE fp8n128_128x128 tiny: ok
+A1 STAGE gpu_a1_fp8n128_128x128_ragged: start at unix 1793304579.0, limit 240 s (/root/axon-node/store/3feb0713e9765fd162cb74cd/tree/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_fp8n128_128x128_ragged --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.2, target sm_90a
+A1 RAGGED fp8n128_128x128 128x256 nb 64 ctas 1 ksplit 1: 8192 outputs, tol PASS rel-rms 3.89e-4 rel-max 4.73e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8n128_128x128 200x768 nb 100 ctas 3 ksplit 1: 20000 outputs, tol PASS rel-rms 6.89e-4 rel-max 8.27e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8n128_128x128 384x1280 nb 129 ctas 2 ksplit 1: 49536 outputs, tol PASS rel-rms 9.05e-4 rel-max 1.41e-2 (bounds 0.1 / 0.5)
+A1 RAGGED fp8n128_128x128 128x4352 nb 64 ctas 1 ksplit 1: 8192 outputs, tol PASS rel-rms 1.70e-3 rel-max 1.64e-2 (bounds 0.1 / 0.5)
+A1 RAGGED fp8n128_128x128 512x3584 nb 200 ctas 7 ksplit 1: 102400 outputs, tol PASS rel-rms 1.54e-3 rel-max 2.31e-2 (bounds 0.1 / 0.5)
+A1 RAGGED fp8n128_128x128_splitk2 200x3584 nb 100 ctas 5 ksplit 2: 20000 outputs, tol PASS rel-rms 1.06e-3 rel-max 9.14e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8n128_128x128_splitk3 384x4352 nb 129 ctas 7 ksplit 3: 49536 outputs, tol PASS rel-rms 9.76e-4 rel-max 1.01e-2 (bounds 0.1 / 0.5)
+A1 RAGGED fp8n128_128x128_splitk14 136x3584 nb 72 ctas 11 ksplit 14: 9792 outputs, tol PASS rel-rms 3.73e-4 rel-max 2.11e-3 (bounds 0.1 / 0.5)
+A1 RAGGED fp8n128_128x128_streamk 512x3584 nb 200 ctas 11 ksplit 0: 102400 outputs, tol PASS rel-rms 1.14e-3 rel-max 1.91e-2 (bounds 0.1 / 0.5)
+A1 RAGGED fp8n128_128x128_streamk 256x18944 nb 64 ctas 13 ksplit 0: 16384 outputs, tol PASS rel-rms 1.35e-3 rel-max 7.77e-3 (bounds 0.1 / 0.5)
+test cuda::qwen2::tests::gpu_a1_fp8n128_128x128_ragged ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 6.43s
+
+A1 STAGE gpu_a1_fp8n128_128x128_ragged: rc 0 after 6.6 s at unix 1793304585.6
+A1 STAGE fp8n128_128x128 ragged: ok
+A1 STAGE gpu_a1_w4a16_128x64_tiny: start at unix 1793304585.6, limit 90 s (/root/axon-node/store/3feb0713e9765fd162cb74cd/tree/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_w4a16_128x64_tiny --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.2, target sm_90a
+A1 RAGGED w4a16_128x64 128x256 nb 64 ctas 1 ksplit 1: 8192 outputs, tol PASS rel-rms 2.67e-4 rel-max 1.91e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_128x64_splitk2 128x512 nb 64 ctas 2 ksplit 2: 8192 outputs, tol PASS rel-rms 2.92e-4 rel-max 1.45e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_128x64_streamk 256x768 nb 64 ctas 3 ksplit 0: 16384 outputs, tol PASS rel-rms 2.94e-4 rel-max 1.58e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_128x64_streamk 128x256 nb 64 ctas 4 ksplit 0: 8192 outputs, tol PASS rel-rms 3.03e-4 rel-max 1.79e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_128x64 200x512 nb 136 ctas 2 ksplit 1: 27200 outputs, tol PASS rel-rms 2.94e-4 rel-max 1.63e-3 (bounds 0.005 / 0.03)
+test cuda::qwen2::tests::gpu_a1_w4a16_128x64_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.59s
+
+A1 STAGE gpu_a1_w4a16_128x64_tiny: rc 0 after 0.8 s at unix 1793304586.4
+A1 STAGE w4a16_128x64 tiny: ok
+A1 STAGE gpu_a1_w4a16_128x64_ragged: start at unix 1793304586.4, limit 240 s (/root/axon-node/store/3feb0713e9765fd162cb74cd/tree/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_w4a16_128x64_ragged --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.2, target sm_90a
+A1 RAGGED w4a16_128x64 128x256 nb 64 ctas 1 ksplit 1: 8192 outputs, tol PASS rel-rms 2.67e-4 rel-max 1.91e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_128x64 200x768 nb 100 ctas 3 ksplit 1: 20000 outputs, tol PASS rel-rms 2.98e-4 rel-max 1.73e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_128x64 384x1280 nb 129 ctas 2 ksplit 1: 49536 outputs, tol PASS rel-rms 2.94e-4 rel-max 1.38e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_128x64 128x4352 nb 64 ctas 1 ksplit 1: 8192 outputs, tol PASS rel-rms 2.94e-4 rel-max 1.28e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_128x64 512x3584 nb 200 ctas 7 ksplit 1: 102400 outputs, tol PASS rel-rms 2.85e-4 rel-max 1.34e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_128x64_splitk2 200x3584 nb 100 ctas 5 ksplit 2: 20000 outputs, tol PASS rel-rms 2.95e-4 rel-max 1.22e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_128x64_splitk3 384x4352 nb 129 ctas 7 ksplit 3: 49536 outputs, tol PASS rel-rms 2.95e-4 rel-max 1.34e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_128x64_splitk14 136x3584 nb 72 ctas 11 ksplit 14: 9792 outputs, tol PASS rel-rms 2.89e-4 rel-max 1.33e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_128x64_streamk 512x3584 nb 200 ctas 11 ksplit 0: 102400 outputs, tol PASS rel-rms 2.94e-4 rel-max 1.45e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_128x64_streamk 256x18944 nb 64 ctas 13 ksplit 0: 16384 outputs, tol PASS rel-rms 2.86e-4 rel-max 1.11e-3 (bounds 0.005 / 0.03)
+test cuda::qwen2::tests::gpu_a1_w4a16_128x64_ragged ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 3.73s
+
+A1 STAGE gpu_a1_w4a16_128x64_ragged: rc 0 after 3.8 s at unix 1793304590.3
+A1 STAGE w4a16_128x64 ragged: ok
+A1 STAGE gpu_a1_w4a16_256x64_tiny: start at unix 1793304590.3, limit 90 s (/root/axon-node/store/3feb0713e9765fd162cb74cd/tree/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_w4a16_256x64_tiny --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.2, target sm_90a
+A1 RAGGED w4a16_256x64 128x256 nb 64 ctas 1 ksplit 1: 8192 outputs, tol PASS rel-rms 2.67e-4 rel-max 1.91e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_256x64_splitk2 128x512 nb 64 ctas 2 ksplit 2: 8192 outputs, tol PASS rel-rms 2.92e-4 rel-max 1.45e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_256x64_streamk 256x768 nb 64 ctas 3 ksplit 0: 16384 outputs, tol PASS rel-rms 2.94e-4 rel-max 1.58e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_256x64_streamk 128x256 nb 64 ctas 4 ksplit 0: 8192 outputs, tol PASS rel-rms 3.03e-4 rel-max 1.79e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_256x64 200x512 nb 136 ctas 2 ksplit 1: 27200 outputs, tol PASS rel-rms 2.94e-4 rel-max 1.63e-3 (bounds 0.005 / 0.03)
+test cuda::qwen2::tests::gpu_a1_w4a16_256x64_tiny ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.56s
+
+A1 STAGE gpu_a1_w4a16_256x64_tiny: rc 0 after 0.6 s at unix 1793304590.9
+A1 STAGE w4a16_256x64 tiny: ok
+A1 STAGE gpu_a1_w4a16_256x64_ragged: start at unix 1793304590.9, limit 240 s (/root/axon-node/store/3feb0713e9765fd162cb74cd/tree/axon-test-1360c3b cuda::qwen2::tests::gpu_a1_w4a16_256x64_ragged --exact --nocapture --test-threads 1)
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.2, target sm_90a
+A1 RAGGED w4a16_256x64 128x256 nb 64 ctas 1 ksplit 1: 8192 outputs, tol PASS rel-rms 2.67e-4 rel-max 1.91e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_256x64 200x768 nb 100 ctas 3 ksplit 1: 20000 outputs, tol PASS rel-rms 2.98e-4 rel-max 1.73e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_256x64 384x1280 nb 129 ctas 2 ksplit 1: 49536 outputs, tol PASS rel-rms 2.94e-4 rel-max 1.38e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_256x64 128x4352 nb 64 ctas 1 ksplit 1: 8192 outputs, tol PASS rel-rms 2.94e-4 rel-max 1.28e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_256x64 512x3584 nb 200 ctas 7 ksplit 1: 102400 outputs, tol PASS rel-rms 2.85e-4 rel-max 1.34e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_256x64_splitk2 200x3584 nb 100 ctas 5 ksplit 2: 20000 outputs, tol PASS rel-rms 2.95e-4 rel-max 1.22e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_256x64_splitk3 384x4352 nb 129 ctas 7 ksplit 3: 49536 outputs, tol PASS rel-rms 2.95e-4 rel-max 1.34e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_256x64_splitk14 136x3584 nb 72 ctas 11 ksplit 14: 9792 outputs, tol PASS rel-rms 2.89e-4 rel-max 1.33e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_256x64_streamk 512x3584 nb 200 ctas 11 ksplit 0: 102400 outputs, tol PASS rel-rms 2.94e-4 rel-max 1.45e-3 (bounds 0.005 / 0.03)
+A1 RAGGED w4a16_256x64_streamk 256x18944 nb 64 ctas 13 ksplit 0: 16384 outputs, tol PASS rel-rms 2.86e-4 rel-max 1.11e-3 (bounds 0.005 / 0.03)
+test cuda::qwen2::tests::gpu_a1_w4a16_256x64_ragged ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 3.83s
+
+A1 STAGE gpu_a1_w4a16_256x64_ragged: rc 0 after 4.0 s at unix 1793304594.9
+A1 STAGE w4a16_256x64 ragged: ok
+A1 STAGE cuda_a1_peak: start at unix 1793304594.9, limit 120 s (/root/axon-node/store/3feb0713e9765fd162cb74cd/tree/axon-test-1360c3b cuda::qwen2::tests::cuda_a1_peak --exact --nocapture --test-threads 1 --ignored)
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.2, target sm_90a
+A1 PEAK a1_peak_fp8_ss_n64 2 WG/SM: median 902.6 TMAC/s raw (min 901.5 max 904.4; 9 rounds)
+A1 PEAK a1_peak_fp8_ss_n128 2 WG/SM: median 914.2 TMAC/s raw (min 913.3 max 914.8; 9 rounds)
+A1 PEAK a1_peak_f16_rs_n64 2 WG/SM: median 454.1 TMAC/s raw (min 453.7 max 454.8; 9 rounds)
+A1 PEAK END ok
+test cuda::qwen2::tests::cuda_a1_peak ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 0.52s
+
+A1 STAGE cuda_a1_peak: rc 0 after 0.6 s at unix 1793304595.5
+A1 STAGE bench: candidates fp8_128x64,fp8_128x128,fp8n128_128x128,w4a16_128x64,w4a16_256x64
+A1 STAGE cuda_a1_bench: start at unix 1793304595.5, limit 720 s (/root/axon-node/store/3feb0713e9765fd162cb74cd/tree/axon-test-1360c3b cuda::qwen2::tests::cuda_a1_bench --exact --nocapture --test-threads 1 --ignored)
+
+running 1 test
+testutil: GPU has 79.18 GiB: serializing GPU tests (AXON_TEST_GPU_SERIAL=0 to disable)
+A1 MODULE probe-fast: cache Hit, NVRTC 13.2, target sm_90a
+A1 BENCH device NVIDIA H100 80GB HBM3 sm_90 132 SMs; hopper module true, probe module true; candidates [fp8_128x64,fp8_128x128,fp8n128_128x128,w4a16_128x64,w4a16_256x64]; 9 rounds
+A1 CELL gate 3584x18944 nb 128 gemm2s_q4_k: median 80.27 TMAC/s (min 79.98 max 80.88; 9 rounds; 0.1083 ms; raw median 80.270297)
+A1 CELL gate 3584x18944 nb 128 gemmh2_q4_k: median 78.34 TMAC/s (min 78.06 max 79.29; 9 rounds; 0.1109 ms; raw median 78.340726)
+A1 CELL gate 3584x18944 nb 128 fp8_128x64: median 218.25 TMAC/s (min 214.97 max 220.50; 9 rounds; 0.0398 ms; raw median 218.254366) tol PASS rel-rms 1.57e-3 rel-max 1.21e-2 (bounds 0.1 / 0.5)
+A1 CELL gate 3584x18944 nb 128 fp8_128x64_streamk: median 131.81 TMAC/s (min 130.38 max 132.16; 9 rounds; 0.0659 ms; raw median 131.814201) tol PASS rel-rms 1.46e-3 rel-max 1.21e-2 (bounds 0.1 / 0.5)
+A1 CELL gate 3584x18944 nb 128 fp8_128x128: median 185.68 TMAC/s (min 183.54 max 186.27; 9 rounds; 0.0468 ms; raw median 185.675381) tol PASS rel-rms 1.57e-3 rel-max 1.21e-2 (bounds 0.1 / 0.5)
+A1 CELL gate 3584x18944 nb 128 fp8_128x128_streamk: median 184.41 TMAC/s (min 182.23 max 186.48; 9 rounds; 0.0471 ms; raw median 184.414561) tol PASS rel-rms 1.38e-3 rel-max 1.62e-2 (bounds 0.1 / 0.5)
+A1 CELL gate 3584x18944 nb 128 fp8n128_128x128: median 190.76 TMAC/s (min 190.18 max 192.93; 9 rounds; 0.0456 ms; raw median 190.761771) tol PASS rel-rms 1.57e-3 rel-max 1.21e-2 (bounds 0.1 / 0.5)
+A1 CELL gate 3584x18944 nb 128 fp8n128_128x128_streamk: median 184.96 TMAC/s (min 182.68 max 187.90; 9 rounds; 0.0470 ms; raw median 184.958818) tol PASS rel-rms 1.38e-3 rel-max 1.62e-2 (bounds 0.1 / 0.5)
+A1 CELL gate 3584x18944 nb 128 w4a16_128x64: median 154.25 TMAC/s (min 153.49 max 155.31; 9 rounds; 0.0563 ms; raw median 154.249058) tol PASS rel-rms 2.93e-4 rel-max 1.20e-3 (bounds 0.005 / 0.03)
+A1 CELL gate 3584x18944 nb 128 w4a16_128x64_streamk: median 159.88 TMAC/s (min 158.97 max 162.46; 9 rounds; 0.0544 ms; raw median 159.879028) tol PASS rel-rms 2.93e-4 rel-max 1.20e-3 (bounds 0.005 / 0.03)
+A1 CELL gate 3584x18944 nb 128 w4a16_256x64: median 130.03 TMAC/s (min 129.74 max 131.14; 9 rounds; 0.0668 ms; raw median 130.026097) tol PASS rel-rms 2.93e-4 rel-max 1.20e-3 (bounds 0.005 / 0.03)
+A1 CELL gate 3584x18944 nb 128 w4a16_256x64_streamk: median 166.51 TMAC/s (min 163.60 max 168.27; 9 rounds; 0.0522 ms; raw median 166.512076) tol PASS rel-rms 2.93e-4 rel-max 1.20e-3 (bounds 0.005 / 0.03)
+A1 CELL gate 3584x18944 nb 512 gemm2s_q4_k: median 91.93 TMAC/s (min 89.97 max 92.31; 9 rounds; 0.3782 ms; raw median 91.926383)
+A1 CELL gate 3584x18944 nb 512 gemmh2_q4_k: median 112.00 TMAC/s (min 111.57 max 112.29; 9 rounds; 0.3104 ms; raw median 112.003787)
+A1 CELL gate 3584x18944 nb 512 fp8_128x64: median 391.61 TMAC/s (min 385.95 max 396.71; 9 rounds; 0.0888 ms; raw median 391.609514) tol PASS rel-rms 1.53e-3 rel-max 1.27e-2 (bounds 0.1 / 0.5)
+A1 CELL gate 3584x18944 nb 512 fp8_128x128: median 401.55 TMAC/s (min 395.36 max 407.27; 9 rounds; 0.0866 ms; raw median 401.549295) tol PASS rel-rms 1.53e-3 rel-max 1.27e-2 (bounds 0.1 / 0.5)
+A1 CELL gate 3584x18944 nb 512 fp8n128_128x128: median 422.37 TMAC/s (min 413.89 max 423.85; 9 rounds; 0.0823 ms; raw median 422.365756) tol PASS rel-rms 1.53e-3 rel-max 1.27e-2 (bounds 0.1 / 0.5)
+A1 CELL gate 3584x18944 nb 512 w4a16_128x64: median 219.61 TMAC/s (min 219.11 max 220.66; 9 rounds; 0.1583 ms; raw median 219.607422) tol PASS rel-rms 2.83e-4 rel-max 1.01e-3 (bounds 0.005 / 0.03)
+[axon-run 16:09:58] FOREIGN_GPU sample max=0% mean=0.0% n=1
+A1 CELL gate 3584x18944 nb 512 w4a16_256x64: median 218.06 TMAC/s (min 217.34 max 218.64; 9 rounds; 0.1594 ms; raw median 218.064511) tol PASS rel-rms 2.83e-4 rel-max 1.01e-3 (bounds 0.005 / 0.03)
+A1 CELL gate 3584x18944 nb 1024 gemm2s_q4_k: median 92.52 TMAC/s (min 91.69 max 92.77; 9 rounds; 0.7515 ms; raw median 92.520096)
+A1 CELL gate 3584x18944 nb 1024 gemmh2_q4_k: median 115.68 TMAC/s (min 114.77 max 115.88; 9 rounds; 0.6010 ms; raw median 115.679267)
+A1 CELL gate 3584x18944 nb 1024 fp8_128x64: median 400.73 TMAC/s (min 395.79 max 404.21; 9 rounds; 0.1735 ms; raw median 400.734627) tol PASS rel-rms 1.50e-3 rel-max 1.34e-2 (bounds 0.1 / 0.5)
+A1 CELL gate 3584x18944 nb 1024 fp8_128x128: median 460.73 TMAC/s (min 457.37 max 462.53; 9 rounds; 0.1509 ms; raw median 460.730066) tol PASS rel-rms 1.50e-3 rel-max 1.34e-2 (bounds 0.1 / 0.5)
+A1 CELL gate 3584x18944 nb 1024 fp8n128_128x128: median 482.17 TMAC/s (min 476.53 max 486.81; 9 rounds; 0.1442 ms; raw median 482.168102) tol PASS rel-rms 1.50e-3 rel-max 1.34e-2 (bounds 0.1 / 0.5)
+A1 CELL gate 3584x18944 nb 1024 w4a16_128x64: median 224.38 TMAC/s (min 221.66 max 225.09; 9 rounds; 0.3099 ms; raw median 224.377723) tol PASS rel-rms 2.96e-4 rel-max 1.02e-3 (bounds 0.005 / 0.03)
+A1 CELL gate 3584x18944 nb 1024 w4a16_256x64: median 248.61 TMAC/s (min 246.87 max 249.51; 9 rounds; 0.2797 ms; raw median 248.605852) tol PASS rel-rms 2.96e-4 rel-max 1.02e-3 (bounds 0.005 / 0.03)
+A1 CELL down 18944x3584 nb 128 gemm2s_q4_k: median 80.14 TMAC/s (min 79.87 max 80.84; 9 rounds; 0.1084 ms; raw median 80.136084)
+A1 CELL down 18944x3584 nb 128 gemmh2_q4_k: median 49.63 TMAC/s (min 48.81 max 50.67; 9 rounds; 0.1751 ms; raw median 49.634088)
+A1 CELL down 18944x3584 nb 128 fp8_128x64: median 195.76 TMAC/s (min 194.36 max 196.37; 9 rounds; 0.0444 ms; raw median 195.757700) tol PASS rel-rms 3.49e-3 rel-max 3.34e-2 (bounds 0.1 / 0.5)
+A1 CELL down 18944x3584 nb 128 fp8_128x64_splitk2: median 240.55 TMAC/s (min 239.77 max 241.55; 9 rounds; 0.0361 ms; raw median 240.550211) tol PASS rel-rms 2.45e-3 rel-max 1.64e-2 (bounds 0.1 / 0.5)
+A1 CELL down 18944x3584 nb 128 fp8_128x64_streamk: median 152.15 TMAC/s (min 151.24 max 153.64; 9 rounds; 0.0571 ms; raw median 152.146321) tol PASS rel-rms 2.09e-3 rel-max 1.71e-2 (bounds 0.1 / 0.5)
+A1 CELL down 18944x3584 nb 128 fp8_128x128: median 111.41 TMAC/s (min 110.13 max 112.33; 9 rounds; 0.0780 ms; raw median 111.410303) tol PASS rel-rms 3.49e-3 rel-max 3.34e-2 (bounds 0.1 / 0.5)
+A1 CELL down 18944x3584 nb 128 fp8_128x128_splitk4: median 222.91 TMAC/s (min 220.92 max 224.88; 9 rounds; 0.0390 ms; raw median 222.912059) tol PASS rel-rms 1.78e-3 rel-max 1.45e-2 (bounds 0.1 / 0.5)
+A1 CELL down 18944x3584 nb 128 fp8_128x128_streamk: median 213.68 TMAC/s (min 212.34 max 216.00; 9 rounds; 0.0407 ms; raw median 213.675208) tol PASS rel-rms 1.52e-3 rel-max 1.02e-2 (bounds 0.1 / 0.5)
+A1 CELL down 18944x3584 nb 128 fp8n128_128x128: median 115.35 TMAC/s (min 113.78 max 116.43; 9 rounds; 0.0753 ms; raw median 115.353752) tol PASS rel-rms 3.49e-3 rel-max 3.34e-2 (bounds 0.1 / 0.5)
+A1 CELL down 18944x3584 nb 128 fp8n128_128x128_splitk4: median 220.02 TMAC/s (min 219.19 max 221.70; 9 rounds; 0.0395 ms; raw median 220.022562) tol PASS rel-rms 1.78e-3 rel-max 1.45e-2 (bounds 0.1 / 0.5)
+A1 CELL down 18944x3584 nb 128 fp8n128_128x128_streamk: median 213.62 TMAC/s (min 211.51 max 216.51; 9 rounds; 0.0407 ms; raw median 213.619183) tol PASS rel-rms 1.52e-3 rel-max 1.02e-2 (bounds 0.1 / 0.5)
+A1 CELL down 18944x3584 nb 128 w4a16_128x64: median 97.52 TMAC/s (min 97.38 max 98.30; 9 rounds; 0.0891 ms; raw median 97.515685) tol PASS rel-rms 2.87e-4 rel-max 1.22e-3 (bounds 0.005 / 0.03)
+A1 CELL down 18944x3584 nb 128 w4a16_128x64_splitk2: median 168.23 TMAC/s (min 167.75 max 169.17; 9 rounds; 0.0517 ms; raw median 168.231174) tol PASS rel-rms 2.86e-4 rel-max 1.20e-3 (bounds 0.005 / 0.03)
+A1 CELL down 18944x3584 nb 128 w4a16_128x64_streamk: median 179.38 TMAC/s (min 178.55 max 180.69; 9 rounds; 0.0484 ms; raw median 179.379905) tol PASS rel-rms 2.86e-4 rel-max 1.19e-3 (bounds 0.005 / 0.03)
+A1 CELL down 18944x3584 nb 128 w4a16_256x64: median 55.56 TMAC/s (min 55.43 max 55.91; 9 rounds; 0.1564 ms; raw median 55.557009) tol PASS rel-rms 2.87e-4 rel-max 1.22e-3 (bounds 0.005 / 0.03)
+A1 CELL down 18944x3584 nb 128 w4a16_256x64_splitk4: median 169.67 TMAC/s (min 168.61 max 171.02; 9 rounds; 0.0512 ms; raw median 169.667553) tol PASS rel-rms 2.85e-4 rel-max 1.20e-3 (bounds 0.005 / 0.03)
+A1 CELL down 18944x3584 nb 128 w4a16_256x64_streamk: median 182.97 TMAC/s (min 182.51 max 184.21; 9 rounds; 0.0475 ms; raw median 182.965085) tol PASS rel-rms 2.85e-4 rel-max 1.20e-3 (bounds 0.005 / 0.03)
+A1 CELL down 18944x3584 nb 512 gemm2s_q4_k: median 82.69 TMAC/s (min 81.88 max 83.31; 9 rounds; 0.4204 ms; raw median 82.687796)
+A1 CELL down 18944x3584 nb 512 gemmh2_q4_k: median 102.27 TMAC/s (min 101.82 max 103.12; 9 rounds; 0.3399 ms; raw median 102.274412)
+A1 CELL down 18944x3584 nb 512 fp8_128x64: median 432.63 TMAC/s (min 430.51 max 438.86; 9 rounds; 0.0804 ms; raw median 432.626347) tol PASS rel-rms 3.55e-3 rel-max 3.41e-2 (bounds 0.1 / 0.5)
+A1 CELL down 18944x3584 nb 512 fp8_128x128: median 475.76 TMAC/s (min 470.41 max 478.28; 9 rounds; 0.0731 ms; raw median 475.762658) tol PASS rel-rms 3.55e-3 rel-max 3.41e-2 (bounds 0.1 / 0.5)
+A1 CELL down 18944x3584 nb 512 fp8n128_128x128: median 501.46 TMAC/s (min 495.21 max 507.87; 9 rounds; 0.0693 ms; raw median 501.457803) tol PASS rel-rms 3.55e-3 rel-max 3.41e-2 (bounds 0.1 / 0.5)
+A1 CELL down 18944x3584 nb 512 w4a16_128x64: median 197.18 TMAC/s (min 196.12 max 197.60; 9 rounds; 0.1763 ms; raw median 197.178991) tol PASS rel-rms 3.05e-4 rel-max 1.20e-3 (bounds 0.005 / 0.03)
+A1 CELL down 18944x3584 nb 512 w4a16_256x64: median 217.70 TMAC/s (min 216.77 max 218.78; 9 rounds; 0.1597 ms; raw median 217.700349) tol PASS rel-rms 3.05e-4 rel-max 1.20e-3 (bounds 0.005 / 0.03)
+A1 CELL down 18944x3584 nb 1024 gemm2s_q4_k: median 94.54 TMAC/s (min 93.61 max 95.81; 9 rounds; 0.7354 ms; raw median 94.538380)
+A1 CELL down 18944x3584 nb 1024 gemmh2_q4_k: median 104.56 TMAC/s (min 103.97 max 105.05; 9 rounds; 0.6649 ms; raw median 104.558192)
+A1 CELL down 18944x3584 nb 1024 fp8_128x64: median 443.28 TMAC/s (min 436.86 max 446.59; 9 rounds; 0.1568 ms; raw median 443.277226) tol PASS rel-rms 3.57e-3 rel-max 2.65e-2 (bounds 0.1 / 0.5)
+A1 CELL down 18944x3584 nb 1024 fp8_128x128: median 490.74 TMAC/s (min 485.94 max 495.77; 9 rounds; 0.1417 ms; raw median 490.735460) tol PASS rel-rms 3.57e-3 rel-max 2.65e-2 (bounds 0.1 / 0.5)
+A1 CELL down 18944x3584 nb 1024 fp8n128_128x128: median 513.55 TMAC/s (min 510.05 max 521.23; 9 rounds; 0.1354 ms; raw median 513.547788) tol PASS rel-rms 3.57e-3 rel-max 2.65e-2 (bounds 0.1 / 0.5)
+A1 CELL down 18944x3584 nb 1024 w4a16_128x64: median 198.64 TMAC/s (min 198.14 max 199.19; 9 rounds; 0.3500 ms; raw median 198.639202) tol PASS rel-rms 2.92e-4 rel-max 1.04e-3 (bounds 0.005 / 0.03)
+A1 CELL down 18944x3584 nb 1024 w4a16_256x64: median 220.20 TMAC/s (min 218.97 max 220.57; 9 rounds; 0.3157 ms; raw median 220.200960) tol PASS rel-rms 2.92e-4 rel-max 1.04e-3 (bounds 0.005 / 0.03)
+A1 CELL q/wo 3584x3584 nb 128 gemm2s_q4_k: median 67.90 TMAC/s (min 67.55 max 68.11; 9 rounds; 0.0242 ms; raw median 67.903378)
+A1 CELL q/wo 3584x3584 nb 128 gemmh2_q4_k: median 44.61 TMAC/s (min 43.88 max 44.86; 9 rounds; 0.0369 ms; raw median 44.613798)
+A1 CELL q/wo 3584x3584 nb 128 fp8_128x64: median 132.88 TMAC/s (min 131.74 max 133.80; 9 rounds; 0.0124 ms; raw median 132.879891) tol PASS rel-rms 1.50e-3 rel-max 1.26e-2 (bounds 0.1 / 0.5)
+A1 CELL q/wo 3584x3584 nb 128 fp8_128x64_splitk2: median 126.66 TMAC/s (min 125.22 max 126.86; 9 rounds; 0.0130 ms; raw median 126.656268) tol PASS rel-rms 1.06e-3 rel-max 6.78e-3 (bounds 0.1 / 0.5)
+A1 CELL q/wo 3584x3584 nb 128 fp8_128x64_streamk: median 88.54 TMAC/s (min 87.93 max 89.00; 9 rounds; 0.0186 ms; raw median 88.535711) tol PASS rel-rms 8.97e-4 rel-max 6.54e-3 (bounds 0.1 / 0.5)
+A1 CELL q/wo 3584x3584 nb 128 fp8_128x128: median 87.38 TMAC/s (min 87.13 max 87.78; 9 rounds; 0.0188 ms; raw median 87.381331) tol PASS rel-rms 1.50e-3 rel-max 1.26e-2 (bounds 0.1 / 0.5)
+A1 CELL q/wo 3584x3584 nb 128 fp8_128x128_splitk4: median 102.56 TMAC/s (min 101.74 max 103.04; 9 rounds; 0.0160 ms; raw median 102.555335) tol PASS rel-rms 7.48e-4 rel-max 4.99e-3 (bounds 0.1 / 0.5)
+A1 CELL q/wo 3584x3584 nb 128 fp8_128x128_streamk: median 82.78 TMAC/s (min 81.95 max 83.41; 9 rounds; 0.0199 ms; raw median 82.782317) tol PASS rel-rms 6.77e-4 rel-max 5.15e-3 (bounds 0.1 / 0.5)
+A1 CELL q/wo 3584x3584 nb 128 fp8n128_128x128: median 91.05 TMAC/s (min 90.88 max 91.70; 9 rounds; 0.0181 ms; raw median 91.045880) tol PASS rel-rms 1.50e-3 rel-max 1.26e-2 (bounds 0.1 / 0.5)
+A1 CELL q/wo 3584x3584 nb 128 fp8n128_128x128_splitk4: median 102.97 TMAC/s (min 102.42 max 103.24; 9 rounds; 0.0160 ms; raw median 102.966381) tol PASS rel-rms 7.48e-4 rel-max 4.99e-3 (bounds 0.1 / 0.5)
+A1 CELL q/wo 3584x3584 nb 128 fp8n128_128x128_streamk: median 82.03 TMAC/s (min 81.86 max 82.21; 9 rounds; 0.0200 ms; raw median 82.033354) tol PASS rel-rms 6.77e-4 rel-max 5.15e-3 (bounds 0.1 / 0.5)
+A1 CELL q/wo 3584x3584 nb 128 w4a16_128x64: median 77.26 TMAC/s (min 77.11 max 77.61; 9 rounds; 0.0213 ms; raw median 77.263493) tol PASS rel-rms 2.94e-4 rel-max 1.12e-3 (bounds 0.005 / 0.03)
+A1 CELL q/wo 3584x3584 nb 128 w4a16_128x64_splitk2: median 96.76 TMAC/s (min 96.46 max 97.00; 9 rounds; 0.0170 ms; raw median 96.761249) tol PASS rel-rms 2.94e-4 rel-max 1.12e-3 (bounds 0.005 / 0.03)
+A1 CELL q/wo 3584x3584 nb 128 w4a16_128x64_streamk: median 92.74 TMAC/s (min 91.86 max 92.91; 9 rounds; 0.0177 ms; raw median 92.744089) tol PASS rel-rms 2.94e-4 rel-max 1.12e-3 (bounds 0.005 / 0.03)
+A1 CELL q/wo 3584x3584 nb 128 w4a16_256x64: median 47.20 TMAC/s (min 47.15 max 47.34; 9 rounds; 0.0348 ms; raw median 47.195552) tol PASS rel-rms 2.94e-4 rel-max 1.12e-3 (bounds 0.005 / 0.03)
+A1 CELL q/wo 3584x3584 nb 128 w4a16_256x64_splitk4: median 89.10 TMAC/s (min 88.33 max 89.41; 9 rounds; 0.0185 ms; raw median 89.098653) tol PASS rel-rms 2.94e-4 rel-max 1.12e-3 (bounds 0.005 / 0.03)
+A1 CELL q/wo 3584x3584 nb 128 w4a16_256x64_streamk: median 79.01 TMAC/s (min 77.65 max 80.03; 9 rounds; 0.0208 ms; raw median 79.005984) tol PASS rel-rms 2.94e-4 rel-max 1.12e-3 (bounds 0.005 / 0.03)
+A1 CELL q/wo 3584x3584 nb 1024 gemm2s_q4_k: median 88.38 TMAC/s (min 87.77 max 88.63; 9 rounds; 0.1488 ms; raw median 88.377077)
+A1 CELL q/wo 3584x3584 nb 1024 gemmh2_q4_k: median 95.55 TMAC/s (min 94.57 max 96.20; 9 rounds; 0.1377 ms; raw median 95.554080)
+A1 CELL q/wo 3584x3584 nb 1024 fp8_128x64: median 326.57 TMAC/s (min 322.98 max 332.74; 9 rounds; 0.0403 ms; raw median 326.569210) tol PASS rel-rms 1.55e-3 rel-max 1.22e-2 (bounds 0.1 / 0.5)
+A1 CELL q/wo 3584x3584 nb 1024 fp8_128x128: median 374.81 TMAC/s (min 370.75 max 376.53; 9 rounds; 0.0351 ms; raw median 374.810155) tol PASS rel-rms 1.55e-3 rel-max 1.22e-2 (bounds 0.1 / 0.5)
+A1 CELL q/wo 3584x3584 nb 1024 fp8n128_128x128: median 390.23 TMAC/s (min 386.56 max 393.34; 9 rounds; 0.0337 ms; raw median 390.229539) tol PASS rel-rms 1.55e-3 rel-max 1.22e-2 (bounds 0.1 / 0.5)
+A1 CELL q/wo 3584x3584 nb 1024 w4a16_128x64: median 179.16 TMAC/s (min 177.10 max 179.60; 9 rounds; 0.0734 ms; raw median 179.155219) tol PASS rel-rms 3.01e-4 rel-max 1.14e-3 (bounds 0.005 / 0.03)
+A1 CELL q/wo 3584x3584 nb 1024 w4a16_256x64: median 197.62 TMAC/s (min 196.45 max 198.99; 9 rounds; 0.0666 ms; raw median 197.616246) tol PASS rel-rms 3.01e-4 rel-max 1.14e-3 (bounds 0.005 / 0.03)
+A1 CELL kv 3584x512 nb 128 gemm2s_q4_k: median 9.06 TMAC/s (min 9.03 max 9.08; 9 rounds; 0.0259 ms; raw median 9.061767)
+A1 CELL kv 3584x512 nb 128 gemmh2_q4_k: median 6.68 TMAC/s (min 6.59 max 6.70; 9 rounds; 0.0352 ms; raw median 6.678828)
+A1 CELL kv 3584x512 nb 128 fp8_128x64: median 20.15 TMAC/s (min 19.96 max 20.26; 9 rounds; 0.0117 ms; raw median 20.146473) tol PASS rel-rms 1.52e-3 rel-max 1.33e-2 (bounds 0.1 / 0.5)
+A1 CELL kv 3584x512 nb 128 fp8_128x64_splitk14: median 21.85 TMAC/s (min 21.78 max 22.06; 9 rounds; 0.0108 ms; raw median 21.845334) tol PASS rel-rms 3.71e-4 rel-max 2.38e-3 (bounds 0.1 / 0.5)
+A1 CELL kv 3584x512 nb 128 fp8_128x64_streamk: median 22.70 TMAC/s (min 22.58 max 22.91; 9 rounds; 0.0103 ms; raw median 22.701130) tol PASS rel-rms 3.71e-4 rel-max 2.38e-3 (bounds 0.1 / 0.5)
+A1 CELL kv 3584x512 nb 128 fp8_128x128: median 13.89 TMAC/s (min 13.86 max 13.97; 9 rounds; 0.0169 ms; raw median 13.892805) tol PASS rel-rms 1.52e-3 rel-max 1.33e-2 (bounds 0.1 / 0.5)
+A1 CELL kv 3584x512 nb 128 fp8_128x128_splitk14: median 17.64 TMAC/s (min 17.48 max 17.79; 9 rounds; 0.0133 ms; raw median 17.644308) tol PASS rel-rms 3.71e-4 rel-max 2.38e-3 (bounds 0.1 / 0.5)
+A1 CELL kv 3584x512 nb 128 fp8_128x128_streamk: median 18.17 TMAC/s (min 18.06 max 18.40; 9 rounds; 0.0129 ms; raw median 18.168396) tol PASS rel-rms 3.71e-4 rel-max 2.38e-3 (bounds 0.1 / 0.5)
+A1 CELL kv 3584x512 nb 128 fp8n128_128x128: median 14.54 TMAC/s (min 14.49 max 14.60; 9 rounds; 0.0161 ms; raw median 14.544317) tol PASS rel-rms 1.52e-3 rel-max 1.33e-2 (bounds 0.1 / 0.5)
+A1 CELL kv 3584x512 nb 128 fp8n128_128x128_splitk14: median 17.30 TMAC/s (min 17.19 max 17.41; 9 rounds; 0.0136 ms; raw median 17.297797) tol PASS rel-rms 3.71e-4 rel-max 2.38e-3 (bounds 0.1 / 0.5)
+A1 CELL kv 3584x512 nb 128 fp8n128_128x128_streamk: median 18.30 TMAC/s (min 18.14 max 18.33; 9 rounds; 0.0128 ms; raw median 18.304320) tol PASS rel-rms 3.71e-4 rel-max 2.38e-3 (bounds 0.1 / 0.5)
+A1 CELL kv 3584x512 nb 128 w4a16_128x64: median 11.33 TMAC/s (min 11.29 max 11.34; 9 rounds; 0.0207 ms; raw median 11.327210) tol PASS rel-rms 2.89e-4 rel-max 1.27e-3 (bounds 0.005 / 0.03)
+A1 CELL kv 3584x512 nb 128 w4a16_128x64_splitk14: median 21.69 TMAC/s (min 21.53 max 21.82; 9 rounds; 0.0108 ms; raw median 21.694675) tol PASS rel-rms 2.89e-4 rel-max 1.27e-3 (bounds 0.005 / 0.03)
+A1 CELL kv 3584x512 nb 128 w4a16_128x64_streamk: median 22.15 TMAC/s (min 22.02 max 22.36; 9 rounds; 0.0106 ms; raw median 22.153014) tol PASS rel-rms 2.89e-4 rel-max 1.27e-3 (bounds 0.005 / 0.03)
+A1 CELL kv 3584x512 nb 128 w4a16_256x64: median 6.92 TMAC/s (min 6.90 max 7.00; 9 rounds; 0.0339 ms; raw median 6.924558) tol PASS rel-rms 2.89e-4 rel-max 1.27e-3 (bounds 0.005 / 0.03)
+A1 CELL kv 3584x512 nb 128 w4a16_256x64_splitk14: median 15.74 TMAC/s (min 15.65 max 15.95; 9 rounds; 0.0149 ms; raw median 15.739883) tol PASS rel-rms 2.89e-4 rel-max 1.27e-3 (bounds 0.005 / 0.03)
+A1 CELL kv 3584x512 nb 128 w4a16_256x64_streamk: median 19.37 TMAC/s (min 19.21 max 19.44; 9 rounds; 0.0121 ms; raw median 19.366838) tol PASS rel-rms 2.89e-4 rel-max 1.27e-3 (bounds 0.005 / 0.03)
+A1 CELL kv 3584x512 nb 1024 gemm2s_q4_k: median 78.47 TMAC/s (min 77.16 max 79.21; 9 rounds; 0.0239 ms; raw median 78.468045)
+A1 CELL kv 3584x512 nb 1024 gemmh2_q4_k: median 47.77 TMAC/s (min 46.68 max 48.04; 9 rounds; 0.0393 ms; raw median 47.765936)
+A1 CELL kv 3584x512 nb 1024 fp8_128x64: median 152.92 TMAC/s (min 151.60 max 153.72; 9 rounds; 0.0123 ms; raw median 152.917328) tol PASS rel-rms 1.43e-3 rel-max 1.11e-2 (bounds 0.1 / 0.5)
+A1 CELL kv 3584x512 nb 1024 fp8_128x128: median 102.90 TMAC/s (min 102.30 max 103.32; 9 rounds; 0.0183 ms; raw median 102.897645) tol PASS rel-rms 1.43e-3 rel-max 1.11e-2 (bounds 0.1 / 0.5)
+A1 CELL kv 3584x512 nb 1024 fp8n128_128x128: median 107.42 TMAC/s (min 106.96 max 109.28; 9 rounds; 0.0175 ms; raw median 107.415100) tol PASS rel-rms 1.43e-3 rel-max 1.11e-2 (bounds 0.1 / 0.5)
+A1 CELL kv 3584x512 nb 1024 w4a16_128x64: median 85.89 TMAC/s (min 85.76 max 86.40; 9 rounds; 0.0219 ms; raw median 85.890184) tol PASS rel-rms 3.01e-4 rel-max 1.12e-3 (bounds 0.005 / 0.03)
+A1 CELL kv 3584x512 nb 1024 w4a16_256x64: median 53.69 TMAC/s (min 53.53 max 53.86; 9 rounds; 0.0350 ms; raw median 53.691181) tol PASS rel-rms 3.01e-4 rel-max 1.12e-3 (bounds 0.005 / 0.03)
+A1 BENCH END ok
+test cuda::qwen2::tests::cuda_a1_bench ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 6.68s
+
+A1 STAGE cuda_a1_bench: rc 0 after 6.8 s at unix 1793304602.3
+A1 SESSION 48 s of budget 2400 s
+A1 END ok
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 793 filtered out; finished in 48.25s
+
+[a1 +50s] session rc 0; nvidia-smi trace 98 samples
+A1 CUBIN new cache entries during the run: none (every module from the kit / the cache)
+[a1 +50s] analysis: ./a1_verdict.py
+A1 RUNS 1 bench run(s); device NVIDIA H100 80GB HBM3 sm_90 132 SMs
+A1 SMI NVIDIA H100 80GB HBM3, 700.00 W, 700.00 W, 1980 MHz
+A1 PEAK a1_peak_fp8_ss_n64: 902.60 TMAC/s raw
+A1 PEAK a1_peak_fp8_ss_n128: 914.20 TMAC/s raw
+A1 PEAK a1_peak_f16_rs_n64: 454.10 TMAC/s raw
+A1 CLOCKS over 1 bench window(s), 14 samples: power.draw min 122 median 141 max 185 W; temperature.gpu min 28 median 29 max 29 C; event reasons 0x0000000000000000/0x0000000000000004 (recorded, not a rule input)
+A1 TABLE median TMAC/s of real MACs (rows K nb / time), interleaved rounds; (x) = / gemmh2 of the same run; tol FAIL = doesn't count; ~ = host-launch-sensitive (< 10 us per launch, or kv nb 128)
+| shape (K x rows) | nb | gemm2s | gemmh2 | fp8_128x64 | fp8_128x128 | fp8n128_128x128 | w4a16_128x64 | w4a16_256x64 |
+|---|---|---|---|---|---|---|---|---|
+| gate 3584x18944 | 128 | 80.27 | 78.34 | 218.25 (2.79x) | 185.68 (2.37x) | 190.76 (2.44x) | 154.25 (1.97x) | 130.03 (1.66x) |
+| gate 3584x18944 | 512 | 91.93 | 112.00 | 391.61 (3.50x) | 401.55 (3.59x) | 422.37 (3.77x) | 219.61 (1.96x) | 218.06 (1.95x) |
+| gate 3584x18944 | 1024 | 92.52 | 115.68 | 400.73 (3.46x) | 460.73 (3.98x) | 482.17 (4.17x) | 224.38 (1.94x) | 248.61 (2.15x) |
+| down 18944x3584 | 128 | 80.14 | 49.63 | 195.76 (3.94x) | 111.41 (2.24x) | 115.35 (2.32x) | 97.52 (1.96x) | 55.56 (1.12x) |
+| down 18944x3584 | 512 | 82.69 | 102.27 | 432.63 (4.23x) | 475.76 (4.65x) | 501.46 (4.90x) | 197.18 (1.93x) | 217.70 (2.13x) |
+| down 18944x3584 | 1024 | 94.54 | 104.56 | 443.28 (4.24x) | 490.74 (4.69x) | 513.55 (4.91x) | 198.64 (1.90x) | 220.20 (2.11x) |
+| q/wo 3584x3584 | 128 | 67.90 | 44.61 | 132.88 (2.98x) | 87.38 (1.96x) | 91.05 (2.04x) | 77.26 (1.73x) | 47.20 (1.06x) |
+| q/wo 3584x3584 | 1024 | 88.38 | 95.55 | 326.57 (3.42x) | 374.81 (3.92x) | 390.23 (4.08x) | 179.16 (1.88x) | 197.62 (2.07x) |
+| kv 3584x512 | 128 | 9.06 ~ | 6.68 ~ | 20.15 (3.02x) ~ | 13.89 (2.08x) ~ | 14.54 (2.18x) ~ | 11.33 (1.70x) ~ | 6.92 (1.04x) ~ |
+| kv 3584x512 | 1024 | 78.47 | 47.77 | 152.92 (3.20x) | 102.90 (2.15x) | 107.42 (2.25x) | 85.89 (1.80x) | 53.69 (1.12x) |
+A1 TABLE (c) nb 128: split-K [S] / stream-K per variant, TMAC/s; (x) = / gemmh2 of the same run
+| shape (K x rows) | fp8_128x64 split-K | fp8_128x64 stream-K | fp8_128x128 split-K | fp8_128x128 stream-K | fp8n128_128x128 split-K | fp8n128_128x128 stream-K | w4a16_128x64 split-K | w4a16_128x64 stream-K | w4a16_256x64 split-K | w4a16_256x64 stream-K |
+|---|---|---|---|---|---|---|---|---|---|---|
+| gate 3584x18944 | – | 131.81 (1.68x) | – | 184.41 (2.35x) | – | 184.96 (2.36x) | – | 159.88 (2.04x) | – | 166.51 (2.13x) |
+| down 18944x3584 | 240.55 (4.85x) [splitk2] | 152.15 (3.07x) | 222.91 (4.49x) [splitk4] | 213.68 (4.31x) | 220.02 (4.43x) [splitk4] | 213.62 (4.30x) | 168.23 (3.39x) [splitk2] | 179.38 (3.61x) | 169.67 (3.42x) [splitk4] | 182.97 (3.69x) |
+| q/wo 3584x3584 | 126.66 (2.84x) ~ [splitk2] | 88.54 (1.98x) ~ | 102.56 (2.30x) ~ [splitk4] | 82.78 (1.86x) ~ | 102.97 (2.31x) ~ [splitk4] | 82.03 (1.84x) | 96.76 (2.17x) ~ [splitk2] | 92.74 (2.08x) ~ | 89.10 (2.00x) ~ [splitk4] | 79.01 (1.77x) |
+| kv 3584x512 | 21.85 (3.27x) ~ [splitk14] | 22.70 (3.40x) ~ | 17.64 (2.64x) ~ [splitk14] | 18.17 (2.72x) ~ | 17.30 (2.59x) ~ [splitk14] | 18.30 (2.74x) ~ | 21.69 (3.25x) ~ [splitk14] | 22.15 (3.32x) ~ | 15.74 (2.36x) ~ [splitk14] | 19.37 (2.90x) ~ |
+A1 TOL gate nb 128 fp8_128x64: PASS rel-rms 1.57e-3 rel-max 1.21e-2
+A1 TOL gate nb 128 fp8_128x64_streamk: PASS rel-rms 1.46e-3 rel-max 1.21e-2
+A1 TOL gate nb 128 fp8_128x128: PASS rel-rms 1.57e-3 rel-max 1.21e-2
+A1 TOL gate nb 128 fp8_128x128_streamk: PASS rel-rms 1.38e-3 rel-max 1.62e-2
+A1 TOL gate nb 128 fp8n128_128x128: PASS rel-rms 1.57e-3 rel-max 1.21e-2
+A1 TOL gate nb 128 fp8n128_128x128_streamk: PASS rel-rms 1.38e-3 rel-max 1.62e-2
+A1 TOL gate nb 128 w4a16_128x64: PASS rel-rms 2.93e-4 rel-max 1.20e-3
+A1 TOL gate nb 128 w4a16_128x64_streamk: PASS rel-rms 2.93e-4 rel-max 1.20e-3
+A1 TOL gate nb 128 w4a16_256x64: PASS rel-rms 2.93e-4 rel-max 1.20e-3
+A1 TOL gate nb 128 w4a16_256x64_streamk: PASS rel-rms 2.93e-4 rel-max 1.20e-3
+A1 TOL gate nb 512 fp8_128x64: PASS rel-rms 1.53e-3 rel-max 1.27e-2
+A1 TOL gate nb 512 fp8_128x128: PASS rel-rms 1.53e-3 rel-max 1.27e-2
+A1 TOL gate nb 512 fp8n128_128x128: PASS rel-rms 1.53e-3 rel-max 1.27e-2
+A1 TOL gate nb 512 w4a16_128x64: PASS rel-rms 2.83e-4 rel-max 1.01e-3
+A1 TOL gate nb 512 w4a16_256x64: PASS rel-rms 2.83e-4 rel-max 1.01e-3
+A1 TOL gate nb 1024 fp8_128x64: PASS rel-rms 1.50e-3 rel-max 1.34e-2
+A1 TOL gate nb 1024 fp8_128x128: PASS rel-rms 1.50e-3 rel-max 1.34e-2
+A1 TOL gate nb 1024 fp8n128_128x128: PASS rel-rms 1.50e-3 rel-max 1.34e-2
+A1 TOL gate nb 1024 w4a16_128x64: PASS rel-rms 2.96e-4 rel-max 1.02e-3
+A1 TOL gate nb 1024 w4a16_256x64: PASS rel-rms 2.96e-4 rel-max 1.02e-3
+A1 TOL down nb 128 fp8_128x64: PASS rel-rms 3.49e-3 rel-max 3.34e-2
+A1 TOL down nb 128 fp8_128x64_splitk2: PASS rel-rms 2.45e-3 rel-max 1.64e-2
+A1 TOL down nb 128 fp8_128x64_streamk: PASS rel-rms 2.09e-3 rel-max 1.71e-2
+A1 TOL down nb 128 fp8_128x128: PASS rel-rms 3.49e-3 rel-max 3.34e-2
+A1 TOL down nb 128 fp8_128x128_splitk4: PASS rel-rms 1.78e-3 rel-max 1.45e-2
+A1 TOL down nb 128 fp8_128x128_streamk: PASS rel-rms 1.52e-3 rel-max 1.02e-2
+A1 TOL down nb 128 fp8n128_128x128: PASS rel-rms 3.49e-3 rel-max 3.34e-2
+A1 TOL down nb 128 fp8n128_128x128_splitk4: PASS rel-rms 1.78e-3 rel-max 1.45e-2
+A1 TOL down nb 128 fp8n128_128x128_streamk: PASS rel-rms 1.52e-3 rel-max 1.02e-2
+A1 TOL down nb 128 w4a16_128x64: PASS rel-rms 2.87e-4 rel-max 1.22e-3
+A1 TOL down nb 128 w4a16_128x64_splitk2: PASS rel-rms 2.86e-4 rel-max 1.20e-3
+A1 TOL down nb 128 w4a16_128x64_streamk: PASS rel-rms 2.86e-4 rel-max 1.19e-3
+A1 TOL down nb 128 w4a16_256x64: PASS rel-rms 2.87e-4 rel-max 1.22e-3
+A1 TOL down nb 128 w4a16_256x64_splitk4: PASS rel-rms 2.85e-4 rel-max 1.20e-3
+A1 TOL down nb 128 w4a16_256x64_streamk: PASS rel-rms 2.85e-4 rel-max 1.20e-3
+A1 TOL down nb 512 fp8_128x64: PASS rel-rms 3.55e-3 rel-max 3.41e-2
+A1 TOL down nb 512 fp8_128x128: PASS rel-rms 3.55e-3 rel-max 3.41e-2
+A1 TOL down nb 512 fp8n128_128x128: PASS rel-rms 3.55e-3 rel-max 3.41e-2
+A1 TOL down nb 512 w4a16_128x64: PASS rel-rms 3.05e-4 rel-max 1.20e-3
+A1 TOL down nb 512 w4a16_256x64: PASS rel-rms 3.05e-4 rel-max 1.20e-3
+A1 TOL down nb 1024 fp8_128x64: PASS rel-rms 3.57e-3 rel-max 2.65e-2
+A1 TOL down nb 1024 fp8_128x128: PASS rel-rms 3.57e-3 rel-max 2.65e-2
+A1 TOL down nb 1024 fp8n128_128x128: PASS rel-rms 3.57e-3 rel-max 2.65e-2
+A1 TOL down nb 1024 w4a16_128x64: PASS rel-rms 2.92e-4 rel-max 1.04e-3
+A1 TOL down nb 1024 w4a16_256x64: PASS rel-rms 2.92e-4 rel-max 1.04e-3
+A1 TOL q/wo nb 128 fp8_128x64: PASS rel-rms 1.50e-3 rel-max 1.26e-2
+A1 TOL q/wo nb 128 fp8_128x64_splitk2: PASS rel-rms 1.06e-3 rel-max 6.78e-3
+A1 TOL q/wo nb 128 fp8_128x64_streamk: PASS rel-rms 8.97e-4 rel-max 6.54e-3
+A1 TOL q/wo nb 128 fp8_128x128: PASS rel-rms 1.50e-3 rel-max 1.26e-2
+A1 TOL q/wo nb 128 fp8_128x128_splitk4: PASS rel-rms 7.48e-4 rel-max 4.99e-3
+A1 TOL q/wo nb 128 fp8_128x128_streamk: PASS rel-rms 6.77e-4 rel-max 5.15e-3
+A1 TOL q/wo nb 128 fp8n128_128x128: PASS rel-rms 1.50e-3 rel-max 1.26e-2
+A1 TOL q/wo nb 128 fp8n128_128x128_splitk4: PASS rel-rms 7.48e-4 rel-max 4.99e-3
+A1 TOL q/wo nb 128 fp8n128_128x128_streamk: PASS rel-rms 6.77e-4 rel-max 5.15e-3
+A1 TOL q/wo nb 128 w4a16_128x64: PASS rel-rms 2.94e-4 rel-max 1.12e-3
+A1 TOL q/wo nb 128 w4a16_128x64_splitk2: PASS rel-rms 2.94e-4 rel-max 1.12e-3
+A1 TOL q/wo nb 128 w4a16_128x64_streamk: PASS rel-rms 2.94e-4 rel-max 1.12e-3
+A1 TOL q/wo nb 128 w4a16_256x64: PASS rel-rms 2.94e-4 rel-max 1.12e-3
+A1 TOL q/wo nb 128 w4a16_256x64_splitk4: PASS rel-rms 2.94e-4 rel-max 1.12e-3
+A1 TOL q/wo nb 128 w4a16_256x64_streamk: PASS rel-rms 2.94e-4 rel-max 1.12e-3
+A1 TOL q/wo nb 1024 fp8_128x64: PASS rel-rms 1.55e-3 rel-max 1.22e-2
+A1 TOL q/wo nb 1024 fp8_128x128: PASS rel-rms 1.55e-3 rel-max 1.22e-2
+A1 TOL q/wo nb 1024 fp8n128_128x128: PASS rel-rms 1.55e-3 rel-max 1.22e-2
+A1 TOL q/wo nb 1024 w4a16_128x64: PASS rel-rms 3.01e-4 rel-max 1.14e-3
+A1 TOL q/wo nb 1024 w4a16_256x64: PASS rel-rms 3.01e-4 rel-max 1.14e-3
+A1 TOL kv nb 128 fp8_128x64: PASS rel-rms 1.52e-3 rel-max 1.33e-2
+A1 TOL kv nb 128 fp8_128x64_splitk14: PASS rel-rms 3.71e-4 rel-max 2.38e-3
+A1 TOL kv nb 128 fp8_128x64_streamk: PASS rel-rms 3.71e-4 rel-max 2.38e-3
+A1 TOL kv nb 128 fp8_128x128: PASS rel-rms 1.52e-3 rel-max 1.33e-2
+A1 TOL kv nb 128 fp8_128x128_splitk14: PASS rel-rms 3.71e-4 rel-max 2.38e-3
+A1 TOL kv nb 128 fp8_128x128_streamk: PASS rel-rms 3.71e-4 rel-max 2.38e-3
+A1 TOL kv nb 128 fp8n128_128x128: PASS rel-rms 1.52e-3 rel-max 1.33e-2
+A1 TOL kv nb 128 fp8n128_128x128_splitk14: PASS rel-rms 3.71e-4 rel-max 2.38e-3
+A1 TOL kv nb 128 fp8n128_128x128_streamk: PASS rel-rms 3.71e-4 rel-max 2.38e-3
+A1 TOL kv nb 128 w4a16_128x64: PASS rel-rms 2.89e-4 rel-max 1.27e-3
+A1 TOL kv nb 128 w4a16_128x64_splitk14: PASS rel-rms 2.89e-4 rel-max 1.27e-3
+A1 TOL kv nb 128 w4a16_128x64_streamk: PASS rel-rms 2.89e-4 rel-max 1.27e-3
+A1 TOL kv nb 128 w4a16_256x64: PASS rel-rms 2.89e-4 rel-max 1.27e-3
+A1 TOL kv nb 128 w4a16_256x64_splitk14: PASS rel-rms 2.89e-4 rel-max 1.27e-3
+A1 TOL kv nb 128 w4a16_256x64_streamk: PASS rel-rms 2.89e-4 rel-max 1.27e-3
+A1 TOL kv nb 1024 fp8_128x64: PASS rel-rms 1.43e-3 rel-max 1.11e-2
+A1 TOL kv nb 1024 fp8_128x128: PASS rel-rms 1.43e-3 rel-max 1.11e-2
+A1 TOL kv nb 1024 fp8n128_128x128: PASS rel-rms 1.43e-3 rel-max 1.11e-2
+A1 TOL kv nb 1024 w4a16_128x64: PASS rel-rms 3.01e-4 rel-max 1.12e-3
+A1 TOL kv nb 1024 w4a16_256x64: PASS rel-rms 3.01e-4 rel-max 1.12e-3
+A1 V1 device NVIDIA H100 80GB HBM3, 132 SMs, power.limit 700 W: ok
+A1 SCALING fp8_128x64: t(gate nb 1024) / t(q/wo nb 128) = 13.99, waves ratio 18, bar >= 9.00: ok
+A1 SCALING fp8_128x128: t(gate nb 1024) / t(q/wo nb 128) = 8.03, waves ratio 9, bar >= 4.50: ok
+A1 SCALING fp8n128_128x128: t(gate nb 1024) / t(q/wo nb 128) = 7.97, waves ratio 9, bar >= 4.50: ok
+A1 SCALING w4a16_128x64: t(gate nb 1024) / t(q/wo nb 128) = 14.55, waves ratio 18, bar >= 9.00: ok
+A1 SCALING w4a16_256x64: t(gate nb 1024) / t(q/wo nb 128) = 8.04, waves ratio 9, bar >= 4.50: ok
+A1 SPREAD fp8n128_128x128 gate nb 1024: 2.13 %
+A1 SPREAD w4a16_256x64 gate nb 1024: 1.06 %
+A1 SPREAD fp8 down nb 128 fp8_128x64_splitk2: 0.74 %
+A1 SPREAD w4a16 down nb 128 w4a16_256x64_streamk: 0.93 %
+A1 BASELINE gemmh2_q4_k gate nb 1024: 115.68 TMAC/s, -0.7 % vs T3's 116.5
+A1 V5 compile check ok (NVRTC 13.2); compiled in this job: nothing (every module from the kit's cubins / the cache)
+A1 WIDE-N fp8n128_128x128: CLEAN (gate nb 1024 counts, spread < 5 %, scaling ok, every cell tol PASS, tiny and ragged ok): a rule-1 KILL may close Track A
+A1 VALIDITY: VALID
+A1 RULE 1 FP8 gate 3584x18944 nb 1024 (best readable tile: fp8n128_128x128): median 482.17 TMAC/s (raw 482.1681, tol PASS) vs 350: PASS (FP8 can carry M1'; WP-A2 next)
+A1 RULE 2 W4A16 gate 3584x18944 nb 1024 (best readable tile: w4a16_256x64): median 248.61 TMAC/s (raw 248.6059, tol PASS) vs 230: PASS (Marlin-parity class: keep (b))
+A1 RULE 3 down 18944x3584 nb 128 with split-K: fp8 240.55 (fp8_128x64_splitk2), w4a16 182.97 (w4a16_256x64_streamk) vs 180: PASS (at least one candidate >= 180)
+A1 VERDICT: Track A OPEN (FP8 passed: WP-A2 next); W4A16 KEEP; classic M1 IN
+[a1] RESULT: A1 VERDICT: Track A OPEN (FP8 passed: WP-A2 next); W4A16 KEEP; classic M1 IN
+[a1 +50s] A1 H100 DONE rc 0 VALID (verdict printed; stage failures: none)
+[axon-node 20:10:03] exit 0 after 49.5s
+[axon-node 20:10:03] peak RSS 373 MB (job process tree PSS, 2 s samples x24)
+[axon-run 16:10:04] exit 0 after 78.1s (host pod1)
+[axon-run 16:10:08] EXPECT ok: output matches /A1 H100 DONE rc 0 VALID/
+[axon-run 16:10:08] FOREIGN_GPU max=0% mean=0.0% samples=3

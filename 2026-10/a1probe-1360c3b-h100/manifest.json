@@ -1,0 +1,29 @@
+{
+ "label": "a1probe-1360c3b-h100",
+ "verdict": "ALL PASS",
+ "jobs": [
+  {
+   "job": "1029-160204-d540",
+   "name": "a1probe-1360c3b-h100",
+   "rc": 0,
+   "verdict": "PASS",
+   "host": "pod1",
+   "hw": "hw-pod1-10-29_16:08.txt",
+   "gpu": "NVIDIA H100 80GB HBM3",
+   "driver": "595.91.07",
+   "sha": "1360c3b",
+   "binary": "bash",
+   "started": 1793304525.8319752,
+   "ended": 1793304608.274061,
+   "attempts": 1,
+   "remote_job": "20261029-200913-bash-1114",
+   "tainted": null,
+   "redactions": {},
+   "log_sha256": "cdadb45750bdfb1324483bf65ce53fe0fe871e99ed9c2187b2ecc4632d5f72d6",
+   "log_bytes": 62662
+  }
+ ],
+ "redactions": {},
+ "published": "2026-10-29 16:10:08 EDT",
+ "by": "axon-gatelogs (axon-devstack)"
+}
