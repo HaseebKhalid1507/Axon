@@ -31,9 +31,23 @@ Verbatim from the plan:
   only if that tile counted; otherwise it reads "KILL at n64 only" and Track A stays open.
 - The fallback merge rule is written down.
 
+**Amendment 2 (#174, 2026-10-29, before any data; after shady's round-2 review, 7.5/10 FIX-THEN-BOOK):**
+- **The n128 licence:** a rule-1 KILL closes Track A only if n128 is CLEAN. That means its gate nb 1024 cell counts
+  with spread < 5 %, its own V3 ran and passed, every n128 cell is tol PASS, its tiny and ragged stages read `ok`, and
+  memcheck didn't fault. Otherwise the result is "KILL AT n64 ONLY", i.e. OPEN PENDING WIDER-N.
+- **V5:** if the job compiled a module itself (or that can't be established), the compile check must have passed, and
+  on the same NVRTC. Otherwise the run is VOID.
+- **Readable variants:** a variant is readable only if its own V3 check ran and passed. A failing variant drops out
+  alone, so there is no cross-family veto. The run is VOID only if every checked variant fails V3. A counting but
+  unreadable variant at or above the bar makes the rule UNRESOLVED, not a KILL.
+- Bars are compared on the raw median, not the 2-decimal print.
+- The next step for OPEN PENDING WIDER-N is pre-registered: no spend until the cause is found on bella, then one
+  FP8-only rerun of at most $1.
+- The bench's 1140 s is reserved, and the DONE line says VALID / VOID.
+
 The thresholds and derivations are unchanged.
 
-`scripts/a1/a1_verdict.py` applies all of it to the job's log; `scripts/a1/a1_battery.py` proves it on 14 synthetic logs.
+`scripts/a1/a1_verdict.py` applies all of it to the job's log; `scripts/a1/a1_battery.py` proves it on 27 synthetic logs.
 
 ## What was built (CODE)
 
@@ -135,8 +149,10 @@ All five kernels: **168 registers, 0 spill, 0 stack**, and no `Potential Perform
     W4A16's gate (≈ 42 MB) and Q4_K's (38 MB) fit H100's 50 MB L2; FP8's 68 MB doesn't.
 - **Job** (`scripts/a1/a1_h100.sh`): an nvidia-smi trace (clocks, power, temperature, clock-event reasons, every 500 ms)
   runs over the session, and the verdict summarises it over the bench windows (`A1 CLOCKS`, recorded). The device line
-  (name, power limits) goes into the log as `A1 SMI`, which V1 reads. **The result is the `A1 VERDICT` line.**
-  `A1 H100 DONE rc 0` means a verdict was printed, with any stage failures listed; rc 1 means there is no verdict.
+  (name, power limits) goes into the log as `A1 SMI`, which V1 reads; the kernel-cache entries the job wrote go in as
+  `A1 CUBIN`, which V5 reads. **The result is the `A1 VERDICT` line.** `A1 H100 DONE rc 0 VALID|VOID` means a
+  verdict was printed, with any stage failures listed; rc 1 means there is no verdict. The H100 job's `--expect` is
+  `'A1 H100 DONE rc 0 VALID'`.
   - Tolerance check: CPU f64 reference at 4096 sampled outputs plus the corners. The bounds are FP8 rel-rms 0.1 /
     rel-max 0.5 (loose: Hopper FP8 accumulation keeps ~14 bits) and W4A16 0.005 / 0.03.
 
@@ -145,7 +161,7 @@ All five kernels: **168 registers, 0 spill, 0 stack**, and no `Potential Perform
 | check | result | where |
 |---|---|---|
 | NVRTC 13.4 sm_90a compile (`nvrtc_probe_fast_compiles_sm90a`, ptxas -v) | PASS: 5 × 168 regs, 0 spill, no C75xx | bella, no GPU |
-| `scripts/a1/a1_battery.py`: a1_verdict.py on 14 synthetic logs (healthy at T3-like scaling, host-bound, tol-fail in one family, both KILL scopes, fallback, NVL / PCIe / capped SXM, rehearsal-like, garbage) | PASS: 14 / 14 as expected | bella, no GPU |
+| `scripts/a1/a1_battery.py`: a1_verdict.py on 27 synthetic logs (healthy at T3-like scaling, host-bound, tol-fail in one family, the n128 licence: clean CLOSE, E5, E5b, E2, budget skip; raw median; E1, E1b, E3; four V5 cases; fallback, NVL / PCIe / capped SXM, rehearsal-like, garbage) | PASS: 27 / 27 as expected, also under Python 3.8 | bella, no GPU |
 | `a1_cell_line_pinned`: the bench's cell line format = the battery's FORMAT line | PASS | bella, no GPU |
 | `a1_w4a16_fragments_match_dequant`: the kernel's W4A16 register path emulated on the CPU (its smem addresses, LOP3 / HSUB2 / HFMA2 in fp16, the wgmma A-fragment map) for R 128 and 256 vs `quant::dequant` | PASS: every weight produced exactly once, within fp16 rounding | bella, no GPU |
 | `a1_sched_covers`: tiles / split-K / stream-K cover every (tile, block) once, never empty | PASS | bella, no GPU |
@@ -168,6 +184,32 @@ All five kernels: **168 registers, 0 spill, 0 stack**, and no `Potential Perform
 - **The rehearsal can't reach the candidate paths of the verdict (M3).** That's why the battery exists, with its
   format tied to the Rust formatter.
 - **What a rule 1 KILL closes** (the review's SHOULD 8 and the lead's call): the n128 tile, above.
+
+## Round-2 review (shady, 7.5/10 FIX-THEN-BOOK) and what it changed
+
+Both MUSTs could produce a **false CLOSE**. MEASURED by feeding the battery's logs through the ac424fb verdict, with
+the new `raw median` field stripped so it parses the same cells (`old-vs-new-r2.txt` in the scratch directory):
+
+| case | ac424fb | now |
+|---|---|---|
+| E5: n128 PASSes at gate nb 1024 only; everything else, and its stages, miss | **CLOSED** | OPEN PENDING WIDER-N |
+| E5b: n128's cells all PASS, but its ragged stage misses tolerance | **CLOSED** | OPEN PENDING WIDER-N |
+| E2: n128's gate spread is 60 % (it isn't the best tile, so V2 never saw it) | **CLOSED** | OPEN PENDING WIDER-N |
+| n128's ragged stage skipped for budget | **CLOSED** | OPEN PENDING WIDER-N |
+| n128 at 349.996, printed as 350.00 | **PASS** | CLOSED (raw < 350) |
+| E1b: readable tiles < 350, n128 at 420 but its V3 never ran | **PASS** | UNDECIDED |
+| E3: one W4A16 variant fails V3 | **VOID** (vetoes FP8) | VALID, FP8 stands |
+| four V5 cases (the job compiled, and the check failed / was missing / ran on another NVRTC) | **VALID** | VOID |
+
+Caught while doing it:
+- **A budget skip read as a FAULT.** `a1_outcome(-4, "")` fell through to "FAULT", which drops the variant from the
+  bench. It's now "skipped (budget)".
+- **Stage 0 passed vacuously.** The compile test exits 0 with "skipping" when no NVRTC has sm_90a, so the session
+  printed `compile: ok` for a check that never ran. It's now `ok` only if every probe kernel's ptxas block was
+  printed.
+- **The compile check and the modules can use different NVRTCs.** The compile check takes `ffi::nvrtc()`; modules
+  take `nvrtc_for`'s pick, the newest NVRTC the driver accepts. The `A1 MODULE` line reports the second, and V5
+  compares the two.
 
 ## Caught locally on the way (no GPU needed)
 
